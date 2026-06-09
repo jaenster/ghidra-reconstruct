@@ -5,3 +5,8 @@ dist/
 output/
 .ghidra-token.json
 .DS_Store
+output-winonly-ts/
+project/
+run-d2gs.ts
+d2moo-filemap.json
+module-mismatches.tsv
