@@ -1,0 +1,15 @@
+{
+  "name": "always_run",
+  "reason": "dead if(true) branch",
+  "address": "00401200",
+  "input": "\nvoid always_run(void)\n\n{\n  if (true) {\n    do_work();\n  }\n  return;\n}\n",
+  "preprocessed": "\nvoid always_run(void)\n\n{\n  if (true) {\n    do_work();\n  }\n  return;\n}\n",
+  "output_quick": "void always_run(void) {\n  if (true) {\n    do_work();\n  }\n  return;\n}\n",
+  "output_full": "void always_run(void) {\n  do_work();\n}\n",
+  "success": true,
+  "warnings": [],
+  "identifiers": [
+    "always_run",
+    "do_work"
+  ]
+}

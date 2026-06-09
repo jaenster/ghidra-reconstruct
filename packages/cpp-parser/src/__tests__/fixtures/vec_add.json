@@ -1,0 +1,17 @@
+{
+  "name": "vec_add",
+  "reason": "process buffer field writes",
+  "address": "00401280",
+  "input": "\nvoid vec_add(int *dst, int *a, int *b)\n\n{\n  *(int *)((int)dst + 0) = *(int *)((int)a + 0) + *(int *)((int)b + 0);\n  *(int *)((int)dst + 4) = *(int *)((int)a + 4) + *(int *)((int)b + 4);\n  *(int *)((int)dst + 8) = *(int *)((int)a + 8) + *(int *)((int)b + 8);\n  return;\n}\n",
+  "preprocessed": "\nvoid vec_add(int *dst, int *a, int *b)\n\n{\n  *(int *)((int)dst + 0) = *(int *)((int)a + 0) + *(int *)((int)b + 0);\n  *(int *)((int)dst + 4) = *(int *)((int)a + 4) + *(int *)((int)b + 4);\n  *(int *)((int)dst + 8) = *(int *)((int)a + 8) + *(int *)((int)b + 8);\n  return;\n}\n",
+  "output_quick": "void vec_add(int* dst, int* a, int* b) {\n  ((int*)(int)dst)[0] = ((int*)(int)a)[0] + ((int*)(int)b)[0];\n  ((int*)(int)dst)[4] = ((int*)(int)a)[4] + ((int*)(int)b)[4];\n  ((int*)(int)dst)[8] = ((int*)(int)a)[8] + ((int*)(int)b)[8];\n  return;\n}\n",
+  "output_full": "void vec_add(int* dst, int* a, int* b) {\n  ((int*)(int)dst)[0] = ((int*)(int)a)[0] + ((int*)(int)b)[0];\n  ((int*)(int)dst)[4] = ((int*)(int)a)[4] + ((int*)(int)b)[4];\n  ((int*)(int)dst)[8] = ((int*)(int)a)[8] + ((int*)(int)b)[8];\n}\n",
+  "success": true,
+  "warnings": [],
+  "identifiers": [
+    "a",
+    "b",
+    "dst",
+    "vec_add"
+  ]
+}

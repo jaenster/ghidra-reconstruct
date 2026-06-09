@@ -1,0 +1,17 @@
+{
+  "name": "concat_pack",
+  "reason": "CONCAT macro expansion",
+  "address": "00401000",
+  "input": "\nlonglong concat_pack(int hi, int lo)\n\n{\n  return CONCAT44(hi, lo);\n}\n",
+  "preprocessed": "\nlonglong concat_pack(int hi, int lo)\n\n{\n  return CONCAT44(hi, lo);\n}\n",
+  "output_quick": "int64_t concat_pack(int hi, int lo) {\n  return CONCAT44(hi, lo);\n}\n",
+  "output_full": "int64_t concat_pack(int hi, int lo) {\n  return hi << 32 | lo;\n}\n",
+  "success": true,
+  "warnings": [],
+  "identifiers": [
+    "CONCAT44",
+    "concat_pack",
+    "hi",
+    "lo"
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "name": "hash_update",
+  "reason": "trailing void return",
+  "address": "00401240",
+  "input": "\nvoid hash_update(uint *state, uint value)\n\n{\n  *state = (*state ^ value) * 0x1000193;\n  return;\n}\n",
+  "preprocessed": "\nvoid hash_update(uint *state, uint value)\n\n{\n  *state = (*state ^ value) * 0x1000193;\n  return;\n}\n",
+  "output_quick": "void hash_update(uint32_t* state, uint32_t value) {\n  *state = (*state ^ value) * 0x1000193;\n  return;\n}\n",
+  "output_full": "void hash_update(uint32_t* state, uint32_t value) {\n  *state = (*state ^ value) * 0x1000193;\n}\n",
+  "success": true,
+  "warnings": [],
+  "identifiers": [
+    "hash_update",
+    "state",
+    "value"
+  ]
+}

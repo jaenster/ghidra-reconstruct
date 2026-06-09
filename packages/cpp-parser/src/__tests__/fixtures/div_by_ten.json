@@ -1,0 +1,15 @@
+{
+  "name": "div_by_ten",
+  "reason": "reciprocal-multiply division",
+  "address": "00401040",
+  "input": "\nuint div_by_ten(uint x)\n\n{\n  return (uint)((ulonglong)x * 0xcccccccd >> 0x23);\n}\n",
+  "preprocessed": "\nuint div_by_ten(uint x)\n\n{\n  return (uint)((ulonglong)x * 0xcccccccd >> 0x23);\n}\n",
+  "output_quick": "uint32_t div_by_ten(uint32_t x) {\n  return (uint32_t)((uint64_t)x / 10);\n}\n",
+  "output_full": "uint32_t div_by_ten(uint32_t x) {\n  return (uint32_t)((uint64_t)x / 10);\n}\n",
+  "success": true,
+  "warnings": [],
+  "identifiers": [
+    "div_by_ten",
+    "x"
+  ]
+}

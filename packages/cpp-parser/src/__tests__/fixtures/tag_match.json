@@ -1,0 +1,15 @@
+{
+  "name": "tag_match",
+  "reason": "fourcc literal",
+  "address": "00401140",
+  "input": "\nint tag_match(uint tag)\n\n{\n  if (tag == 0x636c6163) {\n    return 1;\n  }\n  return 0;\n}\n",
+  "preprocessed": "\nint tag_match(uint tag)\n\n{\n  if (tag == 0x636c6163) {\n    return 1;\n  }\n  return 0;\n}\n",
+  "output_quick": "int tag_match(uint32_t tag) {\n  if (tag == 0x636c6163) {\n    return 1;\n  }\n  return 0;\n}\n",
+  "output_full": "int tag_match(uint32_t tag) {\n  if (tag == 0x636c6163) {\n    return 1;\n  }\n  return 0;\n}\n",
+  "success": true,
+  "warnings": [],
+  "identifiers": [
+    "tag",
+    "tag_match"
+  ]
+}

@@ -1,0 +1,222 @@
+{
+  "version": 1,
+  "name": "MSVC C Runtime Library",
+  "functions": {
+    "memcpy": {
+      "heuristics": {
+        "paramCount": 3,
+        "paramTypes": ["void *", "void *", "size_t"],
+        "returnType": "void *",
+        "bodyPatterns": ["param_3", "while", "++"],
+        "sizeRange": [20, 300]
+      },
+      "header": "<cstring>",
+      "category": "crt"
+    },
+    "memset": {
+      "heuristics": {
+        "paramCount": 3,
+        "paramTypes": ["void *", "int", "size_t"],
+        "returnType": "void *",
+        "bodyPatterns": ["param_3", "while", "param_2"],
+        "sizeRange": [15, 200]
+      },
+      "header": "<cstring>",
+      "category": "crt"
+    },
+    "memmove": {
+      "heuristics": {
+        "paramCount": 3,
+        "paramTypes": ["void *", "void *", "size_t"],
+        "returnType": "void *",
+        "bodyPatterns": ["param_3", "if", "while"],
+        "sizeRange": [30, 400]
+      },
+      "header": "<cstring>",
+      "category": "crt"
+    },
+    "memcmp": {
+      "heuristics": {
+        "paramCount": 3,
+        "paramTypes": ["void *", "void *", "size_t"],
+        "returnType": "int",
+        "bodyPatterns": ["param_3", "while", "return"],
+        "sizeRange": [20, 200]
+      },
+      "header": "<cstring>",
+      "category": "crt"
+    },
+    "strlen": {
+      "heuristics": {
+        "paramCount": 1,
+        "paramTypes": ["char *"],
+        "returnType": "size_t",
+        "bodyPatterns": ["while", "\\0", "return"],
+        "sizeRange": [10, 100]
+      },
+      "header": "<cstring>",
+      "category": "crt"
+    },
+    "strcmp": {
+      "heuristics": {
+        "paramCount": 2,
+        "paramTypes": ["char *", "char *"],
+        "returnType": "int",
+        "bodyPatterns": ["while", "\\0", "return"],
+        "sizeRange": [15, 150]
+      },
+      "header": "<cstring>",
+      "category": "crt"
+    },
+    "strncmp": {
+      "heuristics": {
+        "paramCount": 3,
+        "paramTypes": ["char *", "char *", "size_t"],
+        "returnType": "int",
+        "bodyPatterns": ["while", "param_3", "return"],
+        "sizeRange": [20, 200]
+      },
+      "header": "<cstring>",
+      "category": "crt"
+    },
+    "strcpy": {
+      "heuristics": {
+        "paramCount": 2,
+        "paramTypes": ["char *", "char *"],
+        "returnType": "char *",
+        "bodyPatterns": ["while", "\\0"],
+        "sizeRange": [10, 100]
+      },
+      "header": "<cstring>",
+      "category": "crt"
+    },
+    "strncpy": {
+      "heuristics": {
+        "paramCount": 3,
+        "paramTypes": ["char *", "char *", "size_t"],
+        "returnType": "char *",
+        "bodyPatterns": ["while", "param_3"],
+        "sizeRange": [15, 150]
+      },
+      "header": "<cstring>",
+      "category": "crt"
+    },
+    "strcat": {
+      "heuristics": {
+        "paramCount": 2,
+        "paramTypes": ["char *", "char *"],
+        "returnType": "char *",
+        "bodyPatterns": ["while", "\\0"],
+        "sizeRange": [15, 150]
+      },
+      "header": "<cstring>",
+      "category": "crt"
+    },
+    "malloc": {
+      "heuristics": {
+        "paramCount": 1,
+        "paramTypes": ["size_t"],
+        "returnType": "void *",
+        "bodyPatterns": ["HeapAlloc", "heap"],
+        "sizeRange": [10, 500]
+      },
+      "header": "<cstdlib>",
+      "category": "crt"
+    },
+    "calloc": {
+      "heuristics": {
+        "paramCount": 2,
+        "paramTypes": ["size_t", "size_t"],
+        "returnType": "void *",
+        "bodyPatterns": ["HeapAlloc", "heap", "memset"],
+        "sizeRange": [20, 500]
+      },
+      "header": "<cstdlib>",
+      "category": "crt"
+    },
+    "realloc": {
+      "heuristics": {
+        "paramCount": 2,
+        "paramTypes": ["void *", "size_t"],
+        "returnType": "void *",
+        "bodyPatterns": ["HeapReAlloc", "heap"],
+        "sizeRange": [20, 500]
+      },
+      "header": "<cstdlib>",
+      "category": "crt"
+    },
+    "free": {
+      "heuristics": {
+        "paramCount": 1,
+        "paramTypes": ["void *"],
+        "returnType": "void",
+        "bodyPatterns": ["HeapFree", "heap"],
+        "sizeRange": [10, 300]
+      },
+      "header": "<cstdlib>",
+      "category": "crt"
+    },
+    "atoi": {
+      "heuristics": {
+        "paramCount": 1,
+        "paramTypes": ["char *"],
+        "returnType": "int",
+        "bodyPatterns": ["0x30", "0x39", "while"],
+        "sizeRange": [20, 200]
+      },
+      "header": "<cstdlib>",
+      "category": "crt"
+    },
+    "sprintf": {
+      "heuristics": {
+        "paramCount": 3,
+        "returnType": "int",
+        "bodyPatterns": ["%", "format"],
+        "sizeRange": [50, 2000]
+      },
+      "header": "<cstdio>",
+      "category": "crt"
+    },
+    "printf": {
+      "heuristics": {
+        "paramCount": 1,
+        "returnType": "int",
+        "bodyPatterns": ["%", "format", "stdout"],
+        "sizeRange": [50, 2000]
+      },
+      "header": "<cstdio>",
+      "category": "crt"
+    },
+    "abs": {
+      "heuristics": {
+        "paramCount": 1,
+        "paramTypes": ["int"],
+        "returnType": "int",
+        "bodyPatterns": ["if", "return", "- param"],
+        "sizeRange": [5, 50]
+      },
+      "header": "<cstdlib>",
+      "category": "crt"
+    },
+    "qsort": {
+      "heuristics": {
+        "paramCount": 4,
+        "returnType": "void",
+        "bodyPatterns": ["pivot", "swap", "compare"],
+        "sizeRange": [100, 2000]
+      },
+      "header": "<cstdlib>",
+      "category": "crt"
+    },
+    "bsearch": {
+      "heuristics": {
+        "paramCount": 5,
+        "returnType": "void *",
+        "bodyPatterns": ["while", "mid", "compare"],
+        "sizeRange": [40, 500]
+      },
+      "header": "<cstdlib>",
+      "category": "crt"
+    }
+  }
+}

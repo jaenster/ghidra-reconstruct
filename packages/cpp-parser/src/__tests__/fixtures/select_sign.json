@@ -1,0 +1,16 @@
+{
+  "name": "select_sign",
+  "reason": "phi-node ternary",
+  "address": "004011c0",
+  "input": "\nint select_sign(int x)\n\n{\n  int result;\n  if (x > 0) {\n    result = 1;\n  }\n  else {\n    result = -1;\n  }\n  return result;\n}\n",
+  "preprocessed": "\nint select_sign(int x)\n\n{\n  int result;\n  if (x > 0) {\n    result = 1;\n  }\n  else {\n    result = -1;\n  }\n  return result;\n}\n",
+  "output_quick": "int select_sign(int x) {\n  int result;\n  if (x > 0) {\n    result = 1;\n  } else {\n    result = -1;\n  }\n  return result;\n}\n",
+  "output_full": "int select_sign(int x) {\n  int result = x > 0 ? 1 : -1;\n  return result;\n}\n",
+  "success": true,
+  "warnings": [],
+  "identifiers": [
+    "result",
+    "select_sign",
+    "x"
+  ]
+}

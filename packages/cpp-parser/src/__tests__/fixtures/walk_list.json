@@ -1,0 +1,16 @@
+{
+  "name": "walk_list",
+  "reason": "rotated do/while loop",
+  "address": "004010c0",
+  "input": "\nvoid walk_list(int *p)\n\n{\n  if (p != (int *)0x0) {\n    do {\n      process(p);\n      p = *(int **)((int)p + 4);\n    } while (p != (int *)0x0);\n  }\n  return;\n}\n",
+  "preprocessed": "\nvoid walk_list(int *p)\n\n{\n  if (p != (int *)0x0) {\n    do {\n      process(p);\n      p = *(int **)((int)p + 4);\n    } while (p != (int *)0x0);\n  }\n  return;\n}\n",
+  "output_quick": "void walk_list(int* p) {\n  if (p) {\n    do {\n      process(p);\n      p = ((int**)(int)p)[4];\n    } while (p);\n  }\n  return;\n}\n",
+  "output_full": "void walk_list(int* p) {\n  while (p) {\n    process(p);\n    p = ((int**)(int)p)[4];\n  }\n}\n",
+  "success": true,
+  "warnings": [],
+  "identifiers": [
+    "p",
+    "process",
+    "walk_list"
+  ]
+}

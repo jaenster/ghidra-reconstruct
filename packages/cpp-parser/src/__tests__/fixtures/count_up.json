@@ -1,0 +1,16 @@
+{
+  "name": "count_up",
+  "reason": "x = x + 1 increment",
+  "address": "00401080",
+  "input": "\nvoid count_up(void)\n\n{\n  int i;\n  i = 0;\n  i = i + 1;\n  use(i);\n  return;\n}\n",
+  "preprocessed": "\nvoid count_up(void)\n\n{\n  int i;\n  i = 0;\n  i = i + 1;\n  use(i);\n  return;\n}\n",
+  "output_quick": "void count_up(void) {\n  int i;\n  i = 0;\n  i++;\n  use(i);\n  return;\n}\n",
+  "output_full": "void count_up(void) {\n  int i = 0;\n  i++;\n  use(i);\n}\n",
+  "success": true,
+  "warnings": [],
+  "identifiers": [
+    "count_up",
+    "i",
+    "use"
+  ]
+}

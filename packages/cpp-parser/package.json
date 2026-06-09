@@ -1,0 +1,34 @@
+{
+  "name": "@ghidra-mcp/cpp-parser",
+  "version": "1.0.0",
+  "description": "C++ recursive descent parser with AST transformation support",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./*": {
+      "types": "./dist/*.d.ts",
+      "default": "./dist/*.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist *.tsbuildinfo",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/**/*.test.ts test/**/*.test.ts",
+    "test:lexer": "tsx --test src/lexer/**/*.test.ts",
+    "test:ast": "tsx --test src/ast/**/*.test.ts",
+    "test:parser": "tsx --test src/parser/**/*.test.ts",
+    "test:emit": "tsx --test src/emit/**/*.test.ts",
+    "test:transform": "tsx --test src/transform/**/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.3",
+    "tsx": "^4.7.0"
+  }
+}

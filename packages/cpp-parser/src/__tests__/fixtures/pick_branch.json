@@ -1,0 +1,16 @@
+{
+  "name": "pick_branch",
+  "reason": "jump-table switch",
+  "address": "00401100",
+  "input": "\nint pick_branch(int type)\n\n{\n  int r;\n  switch(type) {\n  case 0:\n    r = 10;\n    break;\n  case 1:\n    r = 20;\n    break;\n  case 2:\n  case 3:\n    r = 30;\n    break;\n  default:\n    r = -1;\n  }\n  return r;\n}\n",
+  "preprocessed": "\nint pick_branch(int type)\n\n{\n  int r;\n  switch(type) {\n  case 0:\n    r = 10;\n    break;\n  case 1:\n    r = 20;\n    break;\n  case 2:\n  case 3:\n    r = 30;\n    break;\n  default:\n    r = -1;\n  }\n  return r;\n}\n",
+  "output_quick": "int pick_branch(int type) {\n  int r;\n  switch (type) {\n    case 0:\n      r = 10;\n    break;\n    case 1:\n      r = 20;\n    break;\n    case 2:\n      \n    case 3:\n      r = 30;\n    break;\n    default:\n      r = -1;\n  }\n  return r;\n}\n",
+  "output_full": "int pick_branch(int type) {\n  int r;\n  switch (type) {\n    case 0:\n      r = 10;\n    break;\n    case 1:\n      r = 20;\n    break;\n    case 2:\n      \n    case 3:\n      r = 30;\n    break;\n    default:\n      r = -1;\n  }\n  return r;\n}\n",
+  "success": true,
+  "warnings": [],
+  "identifiers": [
+    "pick_branch",
+    "r",
+    "type"
+  ]
+}
