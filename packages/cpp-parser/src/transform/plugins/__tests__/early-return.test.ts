@@ -35,15 +35,27 @@ describe('earlyReturnPlugin', () => {
     assert.ok(out.includes('else'), out);
   });
 
-  it('does not transform when there is no trailing return', () => {
-    const out = tx(`void f(int a) { if (a) { g(); } }`);
-    assert.ok(out.includes('if (a)'), out);
-    assert.ok(!out.includes('return'), out);
+  it('does not transform a non-void block with no trailing return (unsafe)', () => {
+    // bare block (not a void function body) → no terminal to anchor case A
+    const out = tx(`int f(int a) { while (a) { if (a) { g(); } } return 0; }`);
+    assert.ok(/while \(a\)\s*\{[\s\S]*if \(a\)/.test(out), out); // inner if untouched
   });
 
   it('flips relational operators rather than wrapping in !', () => {
     const out = tx(`int f(int n) { if (n == 2) { side(); } return 0; }`);
     assert.ok(/if \(n != 2\)\s*return 0;/.test(out), out);
     assert.ok(out.includes('side();'), out);
+  });
+
+  it('void function ending in a guard → if (!C) return; body (no trailing return)', () => {
+    const out = tx(`void f(int a) { setup(); if (a) { big1(); big2(); } }`);
+    assert.ok(/if \(!a\)\s*return;/.test(out), out);
+    assert.ok(out.includes('big1();') && out.includes('big2();'), out);
+    assert.ok(!/if \(a\)\s*\{/.test(out), out);
+  });
+
+  it('does NOT synthesize a void return for a value-returning fn ending in a guard', () => {
+    const out = tx(`int f(int a) { if (a) { big(); } }`);
+    assert.ok(!out.includes('return'), out); // unsafe (unknown fall-through value) → left alone
   });
 });

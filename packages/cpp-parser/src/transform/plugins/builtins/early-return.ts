@@ -36,8 +36,12 @@ import type {
   BinaryExpr,
   UnaryExpr,
   ParenExpr,
+  FunctionDecl,
+  MethodDecl,
+  BuiltinType,
+  TypeNode,
 } from '../../../ast/nodes.js';
-import { createTransformer, cloneNode, type Transformer } from '../../transformer.js';
+import { createTransformer, cloneNode, updateNode, type Transformer } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 
 const FLIP: Record<string, BinaryExpr['operator']> = {
@@ -75,53 +79,101 @@ function isTerminator(s: Statement): boolean {
   return s.kind === NodeKind.ReturnStmt || s.kind === NodeKind.BreakStmt || s.kind === NodeKind.ContinueStmt;
 }
 
-/** Flatten one trailing `if (C) { BODY } return X;` into a guard + spliced body. */
-function flattenOnce(block: CompoundStmt): CompoundStmt | null {
-  const s = block.statements;
-  const n = s.length;
-  if (n < 2) return null;
-  const last = s[n - 1];
-  const prev = s[n - 2];
-  if (last.kind !== NodeKind.ReturnStmt) return null;
-  if (prev.kind !== NodeKind.IfStmt) return null;
-  const ifs = prev as IfStmt;
+/** Match a no-`else` `if (C) { BODY }` with a non-empty block body. */
+function matchGuardIf(s: Statement): { ifs: IfStmt; cond: Expression; body: Statement[] } | null {
+  if (s.kind !== NodeKind.IfStmt) return null;
+  const ifs = s as IfStmt;
   if (ifs.elseBranch !== null || ifs.init) return null;
   if (ifs.thenBranch.kind !== NodeKind.CompoundStmt) return null;
   const body = (ifs.thenBranch as CompoundStmt).statements;
   if (body.length === 0) return null;
-  const ret = last as ReturnStmt;
+  return { ifs, cond: ifs.condition, body };
+}
 
-  const guard: IfStmt = {
+function makeGuard(srcIf: IfStmt, cond: Expression, ret: ReturnStmt): IfStmt {
+  return {
     kind: NodeKind.IfStmt,
-    condition: invert(ifs.condition),
+    condition: invert(cond),
     thenBranch: cloneNode(ret),
     elseBranch: null,
     isConstexpr: false,
-    location: ifs.location,
-    leadingTrivia: ifs.leadingTrivia || [],
+    location: srcIf.location,
+    leadingTrivia: srcIf.leadingTrivia || [],
     trailingTrivia: [],
   };
+}
 
-  // Re-add the terminal return only if BODY can fall through to it.
-  const bodyFallsThrough = !isTerminator(body[body.length - 1]);
-  const tail: Statement[] = bodyFallsThrough ? [cloneNode(ret)] : [];
+/**
+ * Flatten one trailing guard:
+ *   A) `... if (C) { BODY } return X;`          → `... if (!C) return X; BODY [return X]`
+ *   B) `... if (C) { BODY }`  (voidContext)     → `... if (!C) return; BODY`   (implicit void end)
+ */
+function flattenOnce(block: CompoundStmt, voidContext: boolean): CompoundStmt | null {
+  const s = block.statements;
+  const n = s.length;
+  if (n < 1) return null;
+  const last = s[n - 1];
 
-  return { ...block, statements: [...s.slice(0, n - 2), guard, ...body, ...tail] };
+  // Case A: explicit trailing return after the guard
+  if (n >= 2 && last.kind === NodeKind.ReturnStmt) {
+    const g = matchGuardIf(s[n - 2]);
+    if (g) {
+      const ret = last as ReturnStmt;
+      const guard = makeGuard(g.ifs, g.cond, ret);
+      const bodyFallsThrough = !isTerminator(g.body[g.body.length - 1]);
+      const tail: Statement[] = bodyFallsThrough ? [cloneNode(ret)] : [];
+      return { ...block, statements: [...s.slice(0, n - 2), guard, ...g.body, ...tail] };
+    }
+  }
+
+  // Case B: void function ends with the guard (implicit `return;`)
+  if (voidContext) {
+    const g = matchGuardIf(last);
+    if (g) {
+      const voidRet: ReturnStmt = {
+        kind: NodeKind.ReturnStmt, value: null, location: last.location, leadingTrivia: [], trailingTrivia: [],
+      };
+      const guard = makeGuard(g.ifs, g.cond, voidRet);
+      // no terminal return appended — the function falls off its (void) end
+      return { ...block, statements: [...s.slice(0, n - 1), guard, ...g.body] };
+    }
+  }
+
+  return null;
+}
+
+function flattenBody(block: CompoundStmt, voidContext: boolean): CompoundStmt | null {
+  let cur = block;
+  let changed = false;
+  for (let i = 0; i < 256; i++) {
+    const next = flattenOnce(cur, voidContext);
+    if (!next) break;
+    cur = next;
+    changed = true;
+  }
+  return changed ? cur : null;
+}
+
+function isVoidReturn(t: TypeNode): boolean {
+  return t.kind === NodeKind.BuiltinType && (t as BuiltinType).name === 'void';
 }
 
 function createEarlyReturnTransformer(): Transformer {
   return createTransformer({
     visitNode(node: ASTNode): ASTNode | undefined {
-      if (node.kind !== NodeKind.CompoundStmt) return undefined;
-      let block = node as CompoundStmt;
-      let changed = false;
-      for (let i = 0; i < 128; i++) {
-        const next = flattenOnce(block);
-        if (!next) break;
-        block = next;
-        changed = true;
+      // Any block: flatten explicit-trailing-return guards (Case A).
+      if (node.kind === NodeKind.CompoundStmt) {
+        return flattenBody(node as CompoundStmt, false) ?? undefined;
       }
-      return changed ? block : undefined;
+      // Function/method bodies: if void-returning, also flatten the implicit-end guard (Case B).
+      if (node.kind === NodeKind.FunctionDecl || node.kind === NodeKind.MethodDecl) {
+        const fn = node as FunctionDecl | MethodDecl;
+        if (fn.body && isVoidReturn(fn.returnType)) {
+          const nb = flattenBody(fn.body, true);
+          if (nb) return updateNode(fn, { body: nb });
+        }
+      }
+      return undefined;
     },
   });
 }
