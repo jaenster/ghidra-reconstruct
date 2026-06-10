@@ -306,20 +306,25 @@ export async function reconstruct(
     // win extraction. If a configured source can't be opened, abort early
     // instead of wasting the full extraction and silently emitting win-only
     // output with no cross-platform (mac:) anchors.
+    // Hold every required additional source (e.g. the mac binary) OPEN for the
+    // whole run: (a) fail fast HERE, before the expensive primary extraction, if
+    // a source can't be opened; (b) keep the session warm so the later merge
+    // REUSES it instead of re-creating+re-analyzing the binary from scratch —
+    // re-analysis while the primary program is loaded OOM-crashes the shared
+    // Ghidra worker and loses every session. (Do NOT closeConnection here — that
+    // drops the session and reintroduces the crash.)
+    const preflightConns: GhidraConnection[] = [];
     const requiredSources = options.projectConfig?.additionalSources;
     if (requiredSources && requiredSources.length > 0) {
       for (const src of requiredSources) {
-        let probe: GhidraConnection | null = null;
         try {
-          probe = await createConnection(src.ghidra, daemonUrl, src.programPath);
+          preflightConns.push(await createConnection(src.ghidra, daemonUrl, src.programPath));
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           throw new Error(
             `Additional source ${src.platform} (${src.programPath ?? src.ghidra}) is not available: ${msg}. ` +
             `Aborting before extraction — open the ${src.platform} program in ghidra-mcp first so cross-platform anchors are emitted.`
           );
-        } finally {
-          if (probe) await closeConnection(probe);
         }
       }
     }
@@ -352,6 +357,9 @@ export async function reconstruct(
         warnings
       );
     }
+
+    // Additional sources merged — now release the warm preflight connections.
+    for (const c of preflightConns) { try { await closeConnection(c); } catch { /* best-effort */ } }
 
     // Filter excluded data types (CRT/MSVC structs etc.) using same patterns as functions
     let dataTypes = extraction.dataTypes;
