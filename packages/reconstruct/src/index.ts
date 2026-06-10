@@ -302,6 +302,28 @@ export async function reconstruct(
     connection = await createConnection(projectPath, daemonUrl, programPath);
     onProgress?.('connecting', 1, 1);
 
+    // Preflight additional sources (e.g. the mac binary) BEFORE the expensive
+    // win extraction. If a configured source can't be opened, abort early
+    // instead of wasting the full extraction and silently emitting win-only
+    // output with no cross-platform (mac:) anchors.
+    const requiredSources = options.projectConfig?.additionalSources;
+    if (requiredSources && requiredSources.length > 0) {
+      for (const src of requiredSources) {
+        let probe: GhidraConnection | null = null;
+        try {
+          probe = await createConnection(src.ghidra, daemonUrl, src.programPath);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          throw new Error(
+            `Additional source ${src.platform} (${src.programPath ?? src.ghidra}) is not available: ${msg}. ` +
+            `Aborting before extraction — open the ${src.platform} program in ghidra-mcp first so cross-platform anchors are emitted.`
+          );
+        } finally {
+          if (probe) await closeConnection(probe);
+        }
+      }
+    }
+
     // Extract data from Ghidra
     onProgress?.('extraction', 0, 1);
     const extraction = await extractAll(connection, {
@@ -681,7 +703,13 @@ async function mergeAdditionalSources(
       opts.onProgress?.('additional-source', 1, 1);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      warnings.push(`Failed to extract from ${source.ghidra}: ${msg}`);
+      // Hard-fail: a configured additional source (e.g. mac) failing mid-extract
+      // must abort the whole run, not silently produce output without its
+      // cross-platform anchors.
+      throw new Error(
+        `Failed to extract additional source ${source.platform} (${source.ghidra}): ${msg}. ` +
+        `Aborting to avoid emitting output without ${source.platform} cross-platform anchors.`
+      );
     } finally {
       if (secondaryConn) {
         await closeConnection(secondaryConn);
