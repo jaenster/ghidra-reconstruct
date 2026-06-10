@@ -103,6 +103,8 @@ function createCastDeref(address: number, original: ASTNode): UnaryExpr {
   const addrLiteral: IntegerLiteralExpr = {
     kind: NodeKind.IntegerLiteral,
     value: BigInt(address),
+    suffix: '',
+    base: 16,
     raw: '0x' + address.toString(16),
     location: original.location,
     leadingTrivia: [],

@@ -302,6 +302,33 @@ export async function reconstruct(
     connection = await createConnection(projectPath, daemonUrl, programPath);
     onProgress?.('connecting', 1, 1);
 
+    // Preflight additional sources (e.g. the mac binary) BEFORE the expensive
+    // win extraction. If a configured source can't be opened, abort early
+    // instead of wasting the full extraction and silently emitting win-only
+    // output with no cross-platform (mac:) anchors.
+    // Hold every required additional source (e.g. the mac binary) OPEN for the
+    // whole run: (a) fail fast HERE, before the expensive primary extraction, if
+    // a source can't be opened; (b) keep the session warm so the later merge
+    // REUSES it instead of re-creating+re-analyzing the binary from scratch —
+    // re-analysis while the primary program is loaded OOM-crashes the shared
+    // Ghidra worker and loses every session. (Do NOT closeConnection here — that
+    // drops the session and reintroduces the crash.)
+    const preflightConns: GhidraConnection[] = [];
+    const requiredSources = options.projectConfig?.additionalSources;
+    if (requiredSources && requiredSources.length > 0) {
+      for (const src of requiredSources) {
+        try {
+          preflightConns.push(await createConnection(src.ghidra, daemonUrl, src.programPath));
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          throw new Error(
+            `Additional source ${src.platform} (${src.programPath ?? src.ghidra}) is not available: ${msg}. ` +
+            `Aborting before extraction — open the ${src.platform} program in ghidra-mcp first so cross-platform anchors are emitted.`
+          );
+        }
+      }
+    }
+
     // Extract data from Ghidra
     onProgress?.('extraction', 0, 1);
     const extraction = await extractAll(connection, {
@@ -330,6 +357,9 @@ export async function reconstruct(
         warnings
       );
     }
+
+    // Additional sources merged — now release the warm preflight connections.
+    for (const c of preflightConns) { try { await closeConnection(c); } catch { /* best-effort */ } }
 
     // Filter excluded data types (CRT/MSVC structs etc.) using same patterns as functions
     let dataTypes = extraction.dataTypes;
@@ -681,7 +711,13 @@ async function mergeAdditionalSources(
       opts.onProgress?.('additional-source', 1, 1);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      warnings.push(`Failed to extract from ${source.ghidra}: ${msg}`);
+      // Hard-fail: a configured additional source (e.g. mac) failing mid-extract
+      // must abort the whole run, not silently produce output without its
+      // cross-platform anchors.
+      throw new Error(
+        `Failed to extract additional source ${source.platform} (${source.ghidra}): ${msg}. ` +
+        `Aborting to avoid emitting output without ${source.platform} cross-platform anchors.`
+      );
     } finally {
       if (secondaryConn) {
         await closeConnection(secondaryConn);

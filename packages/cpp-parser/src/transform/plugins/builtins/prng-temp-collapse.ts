@@ -19,7 +19,7 @@ import type {
   CompoundStmt,
   DeclStmt,
   Expression,
-  ExpressionStmt,
+  ExprStmt,
   Identifier,
   VariableDecl,
 } from '../../../ast/nodes.js';
@@ -54,7 +54,7 @@ function matchDeclStmt(stmt: ASTNode): TempPattern | null {
 
 function matchAssignStmt(stmt: ASTNode): TempPattern | null {
   if (stmt.kind !== NodeKind.ExprStmt) return null;
-  const exprStmt = stmt as ExpressionStmt;
+  const exprStmt = stmt as ExprStmt;
   if (exprStmt.expression.kind !== NodeKind.AssignExpr) return null;
   const assign = exprStmt.expression as AssignExpr;
   if (assign.operator !== '=') return null;
@@ -65,7 +65,7 @@ function matchAssignStmt(stmt: ASTNode): TempPattern | null {
 
 function matchWriteback(stmt: ASTNode, tempName: string): AssignExpr | null {
   if (stmt.kind !== NodeKind.ExprStmt) return null;
-  const exprStmt = stmt as ExpressionStmt;
+  const exprStmt = stmt as ExprStmt;
   if (exprStmt.expression.kind !== NodeKind.AssignExpr) return null;
   const assign = exprStmt.expression as AssignExpr;
   if (assign.operator !== '=') return null;
@@ -101,7 +101,7 @@ function createPrngTempCollapseTransformer(_options: PluginOptions = {}): Transf
           trailingTrivia: [],
         };
 
-        const mergedStmt: ExpressionStmt = {
+        const mergedStmt: ExprStmt = {
           kind: NodeKind.ExprStmt,
           expression: mergedAssign,
           location: stmts[i].location,
