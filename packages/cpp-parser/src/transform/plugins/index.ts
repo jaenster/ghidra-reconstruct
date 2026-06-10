@@ -299,6 +299,11 @@ export {
   type EarlyReturnOptions,
 } from './builtins/early-return.js';
 
+export {
+  commaExpandPlugin,
+  type CommaExpandOptions,
+} from './builtins/comma-expand.js';
+
 // ============================================
 // BUILT-IN PLUGINS: DECLARATION-INITIALIZATION MERGE
 // ============================================
@@ -424,6 +429,7 @@ import { redundantNegationPlugin } from './builtins/redundant-negation.js';
 import { sbbBranchlessPlugin } from './builtins/sbb-branchless.js';
 import { branchlessSelectPlugin } from './builtins/branchless-select.js';
 import { earlyReturnPlugin } from './builtins/early-return.js';
+import { commaExpandPlugin } from './builtins/comma-expand.js';
 import { funcPtrLiteralPlugin } from './builtins/func-ptr-literal.js';
 import { prngTransformPlugin } from './builtins/prng-transform.js';
 import { prngTempCollapsePlugin } from './builtins/prng-temp-collapse.js';
@@ -464,6 +470,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   sbbBranchlessPlugin,        // Cleanup: -(uint32_t)(cond) & addr → cond ? addr : nullptr (priority 42)
   branchlessSelectPlugin,     // Cleanup: (cond - 1 & mask) + off → cond ? off : off+mask (priority 43)
   earlyReturnPlugin,          // Readability: flatten nested if(C){...}return X; → if(!C)return X; ... (priority 60)
+  commaExpandPlugin,          // Readability: lower comma/short-circuit side effects into statements + guards (priority 13)
   gotoCleanupPlugin,          // Cleanup: if (cond) goto L; ... L: stmt; → if (!cond) { ... } stmt;
   redundantParenCleanupPlugin, // Cleanup: if((x)) → if(x) (priority 56)
   loopRotationUndoPlugin,     // Cleanup: if(C){do{...}while(C)} → while(C){...} (priority 56)
