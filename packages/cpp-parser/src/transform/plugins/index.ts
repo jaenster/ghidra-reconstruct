@@ -289,6 +289,11 @@ export {
   type SbbBranchlessOptions,
 } from './builtins/sbb-branchless.js';
 
+export {
+  branchlessSelectPlugin,
+  type BranchlessSelectOptions,
+} from './builtins/branchless-select.js';
+
 // ============================================
 // BUILT-IN PLUGINS: DECLARATION-INITIALIZATION MERGE
 // ============================================
@@ -412,6 +417,7 @@ import { typeNormalizePlugin } from './builtins/type-normalize.js';
 import { concatTransformPlugin } from './builtins/concat-transform.js';
 import { redundantNegationPlugin } from './builtins/redundant-negation.js';
 import { sbbBranchlessPlugin } from './builtins/sbb-branchless.js';
+import { branchlessSelectPlugin } from './builtins/branchless-select.js';
 import { funcPtrLiteralPlugin } from './builtins/func-ptr-literal.js';
 import { prngTransformPlugin } from './builtins/prng-transform.js';
 import { prngTempCollapsePlugin } from './builtins/prng-temp-collapse.js';
@@ -450,6 +456,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   redundantNegationPlugin,    // Cleanup: x + -y → x - y (priority 40)
   bitfieldAccessPlugin,       // Cleanup: field_0xNN & MASK → bitfieldName (priority 45)
   sbbBranchlessPlugin,        // Cleanup: -(uint32_t)(cond) & addr → cond ? addr : nullptr (priority 42)
+  branchlessSelectPlugin,     // Cleanup: (cond - 1 & mask) + off → cond ? off : off+mask (priority 43)
   gotoCleanupPlugin,          // Cleanup: if (cond) goto L; ... L: stmt; → if (!cond) { ... } stmt;
   redundantParenCleanupPlugin, // Cleanup: if((x)) → if(x) (priority 56)
   loopRotationUndoPlugin,     // Cleanup: if(C){do{...}while(C)} → while(C){...} (priority 56)
