@@ -60,6 +60,14 @@ export interface EmitStyle {
   /** Always use braces for single-statement if/for/while bodies */
   alwaysUseBraces: boolean;
 
+  /**
+   * Insert a blank line around control-flow blocks (for/while/do/switch and if)
+   * within a statement sequence, so loops/blocks stand apart from surrounding
+   * code. Adjacent `if` statements are kept tight (guard-clause ladders).
+   * Optional; defaults to off.
+   */
+  blankLineAroundControlFlow?: boolean;
+
   /** Line ending style */
   lineEnding: '\n' | '\r\n';
 }

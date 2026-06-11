@@ -3,6 +3,7 @@ import assert from 'node:assert';
 import { CppEmitter, emit, DEFAULT_STYLE, GOOGLE_STYLE, createStyle } from '../index.js';
 import { Type, Expr, Stmt, Decl } from '../../ast/factory.js';
 import { NodeKind } from '../../ast/kinds.js';
+import { parse } from '../../parser/index.js';
 
 describe('CppEmitter', () => {
   describe('Literals', () => {
@@ -831,6 +832,33 @@ describe('CppEmitter', () => {
 
       assert.strictEqual(expr1, '42');
       assert.strictEqual(expr2, '"hello"');
+    });
+  });
+
+  describe('Control-flow blank lines + braces', () => {
+    const src = `int f(int* p, int n) {
+  int s = 0;
+  if (!p) return -1;
+  if (n <= 0) return 0;
+  for (int i = 0; i < n; i++) { s += p[i]; }
+  done();
+  return s;
+}`;
+
+    it('braces single-statement bodies, spaces blocks, keeps guard ifs tight', () => {
+      const out = emit(parse(src) as any, {
+        alwaysUseBraces: true,
+        blankLineAroundControlFlow: true,
+      }).trim();
+      assert.ok(/if \(!p\) \{/.test(out), out);            // single-stmt body braced
+      assert.ok(/return -1;\n  \}\n  if \(n <= 0\)/.test(out), out); // adjacent guards stay tight
+      assert.ok(/\n\n  for \(/.test(out), out);            // blank line before the loop
+      assert.ok(/\}\n\n  done\(\);/.test(out), out);       // blank line after the loop
+    });
+
+    it('is off by default (no extra blank lines)', () => {
+      const out = emit(parse(src) as any).trim();
+      assert.ok(!/\n\n/.test(out), out);
     });
   });
 });

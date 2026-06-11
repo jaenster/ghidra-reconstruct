@@ -1142,7 +1142,8 @@ function transformDecompiledCode(
       usePluginRegistry: true,  // Enable all registered plugins including fourcc
       pluginOptions: pluginOptions as any,
       // Always brace single-statement control-flow bodies (no `if (c) return;`)
-      emitOptions: { alwaysUseBraces: true },
+      // and space loops/blocks apart with blank lines for readability.
+      emitOptions: { alwaysUseBraces: true, blankLineAroundControlFlow: true },
     });
 
     if (result.success) {
