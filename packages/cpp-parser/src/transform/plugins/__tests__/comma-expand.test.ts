@@ -119,6 +119,28 @@ describe('commaExpandPlugin', () => {
     );
   });
 
+  it('2b: negated OR-guard with comma → nested comma-free guards (IMAGE_ReturnImageExtension case)', () => {
+    expectSource(
+      `char* f(int nParam) {
+  char* psz;
+  if (!(!nParam || (psz = pCompressed, !bUseCompressedData)))
+    return psz;
+  psz = pUncompressed;
+  return psz;
+}`,
+      `char* f(int nParam) {
+  char* psz;
+  if (nParam) {
+    psz = pCompressed;
+    if (bUseCompressedData)
+      return psz;
+  }
+  psz = pUncompressed;
+  return psz;
+}`,
+    );
+  });
+
   it('2: leaves a plain OR-guard (no comma side effects) untouched', () => {
     expectSource(
       `int f(int a, int b) { if (a || b) return 1; return 0; }`,

@@ -170,6 +170,45 @@ function asEarlyExit(s: Statement): Statement | null {
 }
 
 /**
+ * Pattern 2b: negated OR-guard `if (!(A || B || ...)) <early-exit>;`.
+ * The exit fires only when EVERY operand is false, so it expands to a nested
+ * chain (one level per operand) rather than a flat list — hoisting each
+ * operand's comma side effects where they actually execute:
+ *   if (!(A || (v = X, B))) E;   ->   if (!A) { v = X; if (!B) E; }
+ * invert() collapses the !-of-!, so `!(!nParam)` renders as `nParam`.
+ */
+function buildNegatedGuard(
+  ops: Expression[],
+  exit: Statement,
+  leadingTrivia: ASTNode['leadingTrivia'],
+): Statement[] {
+  const { assigns, cond } = splitComma(ops[0]);
+  const head: Statement[] = assigns.map(makeExprStmt);
+  if (ops.length === 1) {
+    head.push(makeGuard(invert(cond), exit, leadingTrivia));
+    return head;
+  }
+  const innerBlock: CompoundStmt = {
+    kind: NodeKind.CompoundStmt,
+    statements: buildNegatedGuard(ops.slice(1), exit, []),
+    location: exit.location,
+    leadingTrivia: [],
+    trailingTrivia: [],
+  };
+  head.push({
+    kind: NodeKind.IfStmt,
+    condition: invert(cond),
+    thenBranch: innerBlock,
+    elseBranch: null,
+    isConstexpr: false,
+    location: exit.location,
+    leadingTrivia: leadingTrivia || [],
+    trailingTrivia: [],
+  } as IfStmt);
+  return head;
+}
+
+/**
  * Pattern 1 + 2 at statement level. Returns a replacement statement list, or
  * null if the statement is not a comma/short-circuit pattern.
  */
@@ -190,6 +229,14 @@ function expandStatement(s: Statement): Statement[] | null {
             out.push(guard);
           });
           return out;
+        }
+        // Pattern 2b: negated OR-guard  if (!(A || B || ...)) E;
+        const neg = unwrap(ifs.condition);
+        if (neg.kind === NodeKind.UnaryExpr && (neg as UnaryExpr).operator === '!') {
+          const negOps = flattenChain((neg as UnaryExpr).operand, '||');
+          if (negOps.length >= 2 && hasCommaOperand(negOps)) {
+            return buildNegatedGuard(negOps, exit, ifs.leadingTrivia);
+          }
         }
       }
     }
