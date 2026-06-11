@@ -1153,7 +1153,7 @@ function transformDecompiledCode(
       const transformedMatch = result.code.match(/\{([\s\S]*)\}/);
       if (transformedMatch) {
         return {
-          code: stripCrtNamespacePrefixes(indentCode(transformedMatch[1].trim(), 4)),
+          code: stripCrtNamespacePrefixes(indentCode(transformedMatch[1], 4)),
           preamble: result.preamble,
           identifiers: result.identifiers,
         };
@@ -1171,7 +1171,7 @@ function transformDecompiledCode(
     );
 
     // Fall back to original body if transformation fails
-    return { code: stripCrtNamespacePrefixes(indentCode(body.trim(), 4)) };
+    return { code: stripCrtNamespacePrefixes(indentCode(body, 4)) };
   } catch (err) {
     // Stack overflow: do minimal work to avoid overflowing again in the handler
     if (err instanceof RangeError && /call stack|stack size/i.test(err.message)) {
@@ -1195,6 +1195,12 @@ function transformDecompiledCode(
  */
 function indentCode(code: string, baseSpaces: number): string {
   const lines = code.split('\n');
+
+  // Strip blank lines at the top/bottom WITHOUT touching interior indentation.
+  // (Callers must not .trim() the input: trimming dedents the first line, which
+  // would collapse minIndent to 0 and under-indent that line vs the rest.)
+  while (lines.length && lines[0].trim().length === 0) lines.shift();
+  while (lines.length && lines[lines.length - 1].trim().length === 0) lines.pop();
 
   // Find minimum indentation (ignoring empty lines)
   let minIndent = Infinity;
