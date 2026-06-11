@@ -170,38 +170,41 @@ function asEarlyExit(s: Statement): Statement | null {
 }
 
 /**
- * Pattern 2b: negated OR-guard `if (!(A || B || ...)) <early-exit>;`.
- * The exit fires only when EVERY operand is false, so it expands to a nested
- * chain (one level per operand) rather than a flat list — hoisting each
- * operand's comma side effects where they actually execute:
- *   if (!(A || (v = X, B))) E;   ->   if (!A) { v = X; if (!B) E; }
- * invert() collapses the !-of-!, so `!(!nParam)` renders as `nParam`.
+ * Build a nested guard chain from a short-circuit operand list, hoisting each
+ * operand's comma side effects at the point they actually execute. One level of
+ * nesting per operand (no else → no branch duplication). Used for:
+ *   - negated OR-guard `if (!(A || B)) E;` (negate=true, body = early-exit):
+ *       if (!A) { <B assigns> if (!B) E; }
+ *   - AND-chain        `if (A && B) BODY;` (negate=false, body = then-branch):
+ *       if (A) { <B assigns> if (B) BODY }
+ * invert() collapses the !-of-! so `!(!nParam)` renders as `nParam`.
  */
-function buildNegatedGuard(
+function buildNestedChain(
   ops: Expression[],
-  exit: Statement,
+  body: Statement,
   leadingTrivia: ASTNode['leadingTrivia'],
+  negate: boolean,
 ): Statement[] {
   const { assigns, cond } = splitComma(ops[0]);
+  const guardCond = negate ? invert(cond) : cond;
   const head: Statement[] = assigns.map(makeExprStmt);
-  if (ops.length === 1) {
-    head.push(makeGuard(invert(cond), exit, leadingTrivia));
-    return head;
-  }
-  const innerBlock: CompoundStmt = {
-    kind: NodeKind.CompoundStmt,
-    statements: buildNegatedGuard(ops.slice(1), exit, []),
-    location: exit.location,
-    leadingTrivia: [],
-    trailingTrivia: [],
-  };
+  const thenBranch: Statement =
+    ops.length === 1
+      ? cloneNode(body)
+      : ({
+          kind: NodeKind.CompoundStmt,
+          statements: buildNestedChain(ops.slice(1), body, [], negate),
+          location: body.location,
+          leadingTrivia: [],
+          trailingTrivia: [],
+        } as CompoundStmt);
   head.push({
     kind: NodeKind.IfStmt,
-    condition: invert(cond),
-    thenBranch: innerBlock,
+    condition: guardCond,
+    thenBranch,
     elseBranch: null,
     isConstexpr: false,
-    location: exit.location,
+    location: body.location,
     leadingTrivia: leadingTrivia || [],
     trailingTrivia: [],
   } as IfStmt);
@@ -235,9 +238,15 @@ function expandStatement(s: Statement): Statement[] | null {
         if (neg.kind === NodeKind.UnaryExpr && (neg as UnaryExpr).operator === '!') {
           const negOps = flattenChain((neg as UnaryExpr).operand, '||');
           if (negOps.length >= 2 && hasCommaOperand(negOps)) {
-            return buildNegatedGuard(negOps, exit, ifs.leadingTrivia);
+            return buildNestedChain(negOps, exit, ifs.leadingTrivia, true);
           }
         }
+      }
+      // Pattern 2c: AND-chain with a comma side effect  if (A && (v=X, B)) BODY;
+      // (any then-branch; no else, so nesting can't duplicate a branch)
+      const andOps = flattenChain(ifs.condition, '&&');
+      if (andOps.length >= 2 && hasCommaOperand(andOps)) {
+        return buildNestedChain(andOps, ifs.thenBranch, ifs.leadingTrivia, false);
       }
     }
     // Pattern 1d: if ((a, b, c)) — whole condition is a comma (unconditional)
@@ -329,17 +338,36 @@ function expandWhile(w: WhileStmt): WhileStmt | null {
 }
 
 function createCommaExpandTransformer(): Transformer {
-  return createTransformer({
-    visitNode(node: ASTNode): ASTNode | undefined {
-      if (node.kind === NodeKind.CompoundStmt) {
-        return expandBlock(node as CompoundStmt) ?? undefined;
-      }
-      if (node.kind === NodeKind.WhileStmt) {
-        return expandWhile(node as WhileStmt) ?? undefined;
-      }
-      return undefined;
-    },
-  });
+  // A single bottom-up pass. `onChange` fires whenever a node is rewritten so
+  // the caller can iterate to a fixpoint.
+  const onePass = (root: ASTNode, onChange: () => void): ASTNode =>
+    createTransformer({
+      visitNode(node: ASTNode): ASTNode | undefined {
+        if (node.kind === NodeKind.CompoundStmt) {
+          const r = expandBlock(node as CompoundStmt);
+          if (r) { onChange(); return r; }
+          return undefined;
+        }
+        if (node.kind === NodeKind.WhileStmt) {
+          const r = expandWhile(node as WhileStmt);
+          if (r) { onChange(); return r; }
+          return undefined;
+        }
+        return undefined;
+      },
+    })(root);
+
+  // Re-run until a pass finds no more comma/short-circuit messes to lower, so
+  // cases revealed by an earlier expansion are also caught. Bounded for safety.
+  return (root: ASTNode): ASTNode => {
+    let cur = root;
+    for (let pass = 0; pass < 16; pass++) {
+      let changed = false;
+      cur = onePass(cur, () => { changed = true; });
+      if (!changed) break;
+    }
+    return cur;
+  };
 }
 
 export interface CommaExpandOptions extends PluginOptions {

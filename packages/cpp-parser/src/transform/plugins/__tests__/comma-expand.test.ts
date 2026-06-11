@@ -141,6 +141,62 @@ describe('commaExpandPlugin', () => {
     );
   });
 
+  it('2c: AND-chain with comma + block body → nested comma-free ifs', () => {
+    expectSource(
+      `void f(M* pGame) {
+  if (pGame->ok && (pMon = pGame->mon, pMon != nullptr)) {
+    use(pMon);
+  }
+}`,
+      `void f(M* pGame) {
+  if (pGame->ok) {
+    pMon = pGame->mon;
+    if (pMon != nullptr) {
+      use(pMon);
+    }
+  }
+}`,
+    );
+  });
+
+  it('2c: AND-chain with comma + early-exit then-branch', () => {
+    expectSource(
+      `void f() { if (a && (v = g(), v)) return; rest(); }`,
+      `void f() {
+  if (a) {
+    v = g();
+    if (v)
+      return;
+  }
+  rest();
+}`,
+    );
+  });
+
+  it('fixpoint: two sequential comma-ifs both lowered in one run', () => {
+    expectSource(
+      `void f() {
+  if (a && (x = p(), x)) { u(); }
+  if (!b || (y = q(), !y)) return;
+  done();
+}`,
+      `void f() {
+  if (a) {
+    x = p();
+    if (x) {
+      u();
+    }
+  }
+  if (!b)
+    return;
+  y = q();
+  if (!y)
+    return;
+  done();
+}`,
+    );
+  });
+
   it('2: leaves a plain OR-guard (no comma side effects) untouched', () => {
     expectSource(
       `int f(int a, int b) { if (a || b) return 1; return 0; }`,
