@@ -852,7 +852,6 @@ describe('CppEmitter', () => {
       }).trim();
       assert.strictEqual(out, `int f(int* p, int n) {
   int s = 0;
-
   if (!p) {
     return -1;
   }

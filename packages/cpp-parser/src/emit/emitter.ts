@@ -1666,14 +1666,18 @@ export class CppEmitter {
   }
 
   /**
-   * Whether to insert a blank line between two consecutive statements. Spaces
-   * control-flow blocks apart from surrounding code, but keeps adjacent `if`
-   * statements tight so guard-clause ladders don't get blown apart.
+   * Whether to insert a blank line between two consecutive statements. A blank
+   * line is emitted only AFTER a control-flow block, never before one: a
+   * statement that sets up a condition (e.g. `int x = f();`) stays tight to the
+   * `if` that consumes it. Adjacent `if`s stay tight too, so guard-clause
+   * ladders don't get blown apart — the blank lands after the last guard,
+   * before the main body.
    */
   private blankLineBetween(a: Statement, b: Statement): boolean {
     if (!this.style.blankLineAroundControlFlow) return false;
+    if (!this.isControlFlowBlock(a)) return false;
     if (a.kind === NodeKind.IfStmt && b.kind === NodeKind.IfStmt) return false;
-    return this.isControlFlowBlock(a) || this.isControlFlowBlock(b);
+    return true;
   }
 
   private needsSemicolon(stmt: Statement): boolean {
