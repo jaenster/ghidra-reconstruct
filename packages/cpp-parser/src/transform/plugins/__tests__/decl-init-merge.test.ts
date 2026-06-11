@@ -83,6 +83,17 @@ describe('declInitMergePlugin', () => {
     assert.ok(output.includes('x = x + 1;'), 'should keep self-referencing assignment');
   });
 
+  it('merges when the RHS field name matches the variable (FindMonsterAiCmd case)', () => {
+    // pAiGeneral = u->pAiGeneral and pNext = pAi->pNext: the member name equals
+    // the variable name but is NOT a self-reference — both must still merge+sink.
+    const output = transformCode('void f(U* u) { N* pNext; G* pAi; pAi = u->pAi; pNext = pAi->pNext; sink(pNext); }');
+    assert.strictEqual(output, `void f(U* u) {
+  G* pAi = u->pAi;
+  N* pNext = pAi->pNext;
+  sink(pNext);
+}`);
+  });
+
   it('should merge multiple declarations in one pass (real-world pattern)', () => {
     const input = `void DRLG_MapWorldToScreenCoords(int32_t* pX, int32_t* pY) {
   int x;

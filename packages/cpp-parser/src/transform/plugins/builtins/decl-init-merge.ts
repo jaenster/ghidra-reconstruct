@@ -15,13 +15,46 @@
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, CompoundStmt, DeclStmt, VariableDecl,
-  ExprStmt, AssignExpr, Identifier,
+  ExprStmt, AssignExpr, Identifier, MemberExpr,
 } from '../../../ast/nodes.js';
-import { findIdentifiers } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 
 export interface DeclInitMergeOptions extends PluginOptions {}
+
+/**
+ * Does `varName` appear as a VALUE in `node` — as an operand or as the OBJECT of
+ * a member access — but NOT merely as a `.member` / `->member` field selector?
+ *
+ * Decompiled code routinely names a variable after the field it holds
+ * (`pNext = pCurrent->pNext;`, `pAiGeneral = unit->...->pAiGeneral;`). The member
+ * identifier `->pNext` must not be mistaken for a use of the variable `pNext`,
+ * or the merge is wrongly aborted as a self-reference / intermediate use.
+ */
+function referencesVar(node: ASTNode, varName: string): boolean {
+  let found = false;
+  const visit = (n: unknown): void => {
+    if (found || !n || typeof n !== 'object') return;
+    const cur = n as ASTNode;
+    if (!('kind' in cur)) return;
+    if (cur.kind === NodeKind.Identifier) {
+      if ((cur as Identifier).name === varName) found = true;
+      return;
+    }
+    if (cur.kind === NodeKind.MemberExpr) {
+      visit((cur as MemberExpr).object); // object position counts; member name does not
+      return;
+    }
+    for (const key in cur) {
+      if (key === 'kind' || key === 'location' || key === 'leadingTrivia' || key === 'trailingTrivia') continue;
+      const v = (cur as unknown as Record<string, unknown>)[key];
+      if (Array.isArray(v)) { for (const c of v) visit(c); }
+      else if (v && typeof v === 'object') visit(v);
+    }
+  };
+  visit(node);
+  return found;
+}
 
 /**
  * Try to find a merge candidate for a single bare declaration.
@@ -44,15 +77,15 @@ function findMergeTarget(
 
         if (assign.left.kind === NodeKind.Identifier
           && (assign.left as Identifier).name === varName) {
-          // No self-reference in RHS
-          if (findIdentifiers(assign.right, varName).length > 0) return -1;
+          // No self-reference in RHS (member names that match are not self-refs)
+          if (referencesVar(assign.right, varName)) return -1;
           return j;
         }
       }
     }
 
     // If intermediate statement references the variable, abort
-    if (findIdentifiers(candidate, varName).length > 0) return -1;
+    if (referencesVar(candidate, varName)) return -1;
   }
   return -1;
 }
