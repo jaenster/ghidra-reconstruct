@@ -242,3 +242,81 @@ console.log('\nTop 30 PROVABLY WRONG (slice past field size):');
 for (const c of oobFields.slice(0, 30)) console.log(`  ${String(c.count).padStart(3)}  ${c.field}  [${c.type}=${c.dsz}b reach=${c.reach}]  ${c.owners.join(',')||'?'}  ${c.slices.join(' ')}`);
 console.log('\nTop 10 array-as-fields:');
 for (const c of arrayFields.slice(0, 10)) console.log(`  ${String(c.count).padStart(3)}  ${c.field}  [${c.type}]  ${c.owners.join(',')||'?'}  ${c.slices.join(' ')}`);
+
+// ---- cast-hell scan ------------------------------------------------------
+// A scalar var that the code keeps casting to a pointer and indexing
+//   ((D2UnitStrc**)nParam2)[4]   <- nParam2 is really a struct ptr; [4] is a field
+//   ((int32_t*)pAnimState)[0x98] <- pAnimState typed too narrow
+// is a variable whose Ghidra type is wrong. The fix is to retype the VAR (in
+// Ghidra), after which the cast disappears and [N] becomes a named field access.
+// We group by (function, var) so each row is one retype action, and we rank
+// named-struct/enum targets (TIER 1, near-certain) above primitive ones.
+
+// What counts as a "named" cast target (vs a bare primitive that may be legit):
+const NAMED_TYPE = /(Strc|Txt|^e?D2|^[eu][A-Z]|Manager|Context|List|Node|Info|Data|Cache|Buffer|Path|Room|Unit|Game|Skills?|Stat)/;
+const PRIMITIVE = /^(u?int(8|16|32|64)?_t|u?int|u?short|u?char|byte|short|char|int|long|void|undefined[0-9]?|BYTE|WORD|DWORD|BOOL|float|double)$/;
+// a cast applied to a plain identifier, optionally followed by [index]
+const castRe = /\(\(\s*([A-Za-z_][\w:]*?)\s*(\*+)\s*\)([A-Za-z_]\w*)\)(?:\[(0x[0-9a-fA-F]+|\d+)\])?/g;
+// recognise the start of a function body so we can attribute each cast
+const fnDefRe = /^[A-Za-z_][\w:<>\* ,&]*\b([A-Za-z_]\w*)\s*\([^;]*\)\s*\{?\s*$/;
+
+const castGroups = new Map(); // key=`${file}::${fn}::${var}` -> {fn,var,file,types:Map(type->count),offs:Set,count}
+for (const f of sources) {
+  const rel = relative(ROOT, f);
+  const lines = readFileSync(f, 'utf8').split('\n');
+  let fn = '(file scope)';
+  for (const line of lines) {
+    const fd = line.match(fnDefRe);
+    if (fd && !/\b(if|for|while|switch|return|else)\b/.test(line)) fn = fd[1];
+    let m;
+    while ((m = castRe.exec(line))) {
+      const [, base, stars, varName, idx] = m;
+      const type = base + stars; // e.g. "D2UnitStrc**"
+      if (PRIMITIVE.test(base) && stars.length === 1 && idx === undefined) continue; // bare (int*)x deref — too noisy
+      const key = `${rel}::${fn}::${varName}`;
+      if (!castGroups.has(key)) castGroups.set(key, { fn, var: varName, file: rel, types: new Map(), offs: new Set(), count: 0 });
+      const g = castGroups.get(key);
+      g.count++;
+      g.types.set(type, (g.types.get(type) || 0) + 1);
+      if (idx !== undefined) g.offs.add(idx);
+    }
+  }
+}
+const castRows = [...castGroups.values()].map((g) => {
+  const types = [...g.types.entries()].sort((a, b) => b[1] - a[1]);
+  const named = types.some(([t]) => NAMED_TYPE.test(t));
+  return { ...g, types, named };
+});
+const tier1 = castRows.filter((r) => r.named).sort((a, b) => b.count - a.count);
+const tier2 = castRows.filter((r) => !r.named).sort((a, b) => b.count - a.count);
+
+{
+  const C = [];
+  C.push('# Cast-hell worklist — variables retyped on every use');
+  C.push('');
+  C.push('Each row is a `(function, var)` the code keeps casting+indexing. Retype the **variable in Ghidra** to the cast-to type; the cast then vanishes and `[N]` becomes a named field. TIER 1 = cast target is a named struct/enum (near-certain). TIER 2 = primitive widen/narrow (likelier-legit, lower priority).');
+  C.push('');
+  C.push('## TIER 1 — cast to a named struct/enum type');
+  C.push('|count|function|var|cast-to (×n)|offsets|file|');
+  C.push('|-|-|-|-|-|-|');
+  for (const r of tier1.slice(0, 120)) {
+    const t = r.types.filter(([ty]) => NAMED_TYPE.test(ty)).map(([ty, n]) => `\`${ty}\`×${n}`).join(' ');
+    C.push(`|${r.count}|${r.fn}|\`${r.var}\`|${t}|${[...r.offs].sort().join(' ') || '—'}|${r.file}|`);
+  }
+  C.push('');
+  C.push('## TIER 2 — cast to a primitive pointer (pointer-named vars first)');
+  C.push('|count|function|var|cast-to (×n)|offsets|file|');
+  C.push('|-|-|-|-|-|-|');
+  const t2 = tier2.sort((a, b) => (/^p/.test(b.var) - /^p/.test(a.var)) || (b.count - a.count));
+  for (const r of t2.slice(0, 80)) {
+    const t = r.types.map(([ty, n]) => `\`${ty}\`×${n}`).join(' ');
+    C.push(`|${r.count}|${r.fn}|\`${r.var}\`|${t}|${[...r.offs].sort().join(' ') || '—'}|${r.file}|`);
+  }
+  writeFileSync(join(import.meta.dirname, 'cast-hell-worklist.md'), C.join('\n'));
+}
+console.log(`\ncast-hell: TIER1(named)=${tier1.length} groups, TIER2(primitive)=${tier2.length} groups -> cast-hell-worklist.md`);
+console.log('Top 20 TIER-1 cast-hell targets:');
+for (const r of tier1.slice(0, 20)) {
+  const t = r.types.filter(([ty]) => NAMED_TYPE.test(ty)).map(([ty, n]) => `${ty}×${n}`).join(',');
+  console.log(`  ${String(r.count).padStart(3)}  ${r.fn}(${r.var})  ${t}  [${[...r.offs].sort().join(' ')}]  ${r.file}`);
+}
