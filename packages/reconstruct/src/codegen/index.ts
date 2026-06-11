@@ -1444,5 +1444,28 @@ export async function writeProject(
   await fs.writeFile(readmePath, readmeContent, 'utf-8');
   writtenFiles.push(readmePath);
 
+  // Prune stale generated files: remove .cpp/.h/.map/CMakeLists left over from a
+  // previous run that this run did not (re)write — e.g. a namespace that moved
+  // modules, or a module that became excluded. Keeps the output tree in sync
+  // with the current generation instead of accumulating leftovers.
+  try {
+    const keep = new Set(writtenFiles.map(p => path.resolve(p)));
+    const PRUNE = /(\.(cpp|cc|c|h|hpp)$|\.map$|(^|[\\/])CMakeLists\.txt$)/;
+    const entries = await fs.readdir(outputDir, { recursive: true, withFileTypes: true });
+    for (const e of entries) {
+      if (!e.isFile()) continue;
+      const abs = path.resolve((e as { parentPath?: string; path?: string }).parentPath ?? e.path ?? outputDir, e.name);
+      const rel = path.relative(outputDir, abs);
+      if (!PRUNE.test(rel)) continue;
+      if (!keep.has(abs)) await fs.unlink(abs).catch(() => {});
+    }
+    // Remove directories left empty by the prune (deepest first).
+    const dirs = (await fs.readdir(outputDir, { recursive: true, withFileTypes: true }))
+      .filter(e => e.isDirectory())
+      .map(e => path.resolve((e as { parentPath?: string; path?: string }).parentPath ?? e.path ?? outputDir, e.name))
+      .sort((a, b) => b.length - a.length);
+    for (const d of dirs) await fs.rmdir(d).catch(() => {});
+  } catch { /* best-effort prune */ }
+
   return writtenFiles;
 }

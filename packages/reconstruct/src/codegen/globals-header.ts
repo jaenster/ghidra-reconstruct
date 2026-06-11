@@ -488,9 +488,10 @@ export function emitDataValue(dv: DataValue, indent = 0): string {
       if (!dv.value || dv.value === '0x0' || dv.value === '0x00000000' || dv.value === 'DAT_00000000') {
         return 'nullptr';
       }
-      // If it looks like a symbol name (not hex), emit as address-of
+      // If it looks like a symbol name (not hex), emit as address-of.
+      // Drop the CRT-helper namespace prefixes (compiler/VisualStudio are not emitted).
       if (/^[A-Za-z_]/.test(dv.value)) {
-        return `&${dv.value}`;
+        return `&${dv.value.replace(/\b(?:compiler|VisualStudio)::/g, '')}`;
       }
       // Raw hex pointer — normalize value (add 0x prefix if needed)
       return `(void*)${normalizeDataValue(dv.value)}`;
