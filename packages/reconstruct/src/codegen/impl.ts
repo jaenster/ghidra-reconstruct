@@ -899,6 +899,8 @@ function stripRedundantNamespaceQualifiers(code: string, namespace: string): str
  */
 function stripCrtNamespacePrefixes(code: string): string {
   let result = code.replace(/\bVisualStudio::/g, '');
+  // CRT/compiler-helper namespace: drop the prefix (the compiler module is not emitted)
+  result = result.replace(/\bcompiler::/g, '');
   // Replace Ghidra stack variable artifacts: stack0xNNNNNNNN → 0 (stack cookie pattern)
   result = result.replace(/&?stack0x[0-9a-fA-F]+/g, '0');
   // Fix Ghidra's `type[N]*` syntax → `type*` (array-pointer type in local declarations)
