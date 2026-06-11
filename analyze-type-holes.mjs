@@ -308,7 +308,7 @@ const tier2 = castRows.filter((r) => !r.named).sort((a, b) => b.count - a.count)
   C.push('|count|function|var|cast-to (×n)|offsets|file|');
   C.push('|-|-|-|-|-|-|');
   const t2 = tier2.sort((a, b) => (/^p/.test(b.var) - /^p/.test(a.var)) || (b.count - a.count));
-  for (const r of t2.slice(0, 80)) {
+  for (const r of t2.slice(0, 400)) {
     const t = r.types.map(([ty, n]) => `\`${ty}\`×${n}`).join(' ');
     C.push(`|${r.count}|${r.fn}|\`${r.var}\`|${t}|${[...r.offs].sort().join(' ') || '—'}|${r.file}|`);
   }
