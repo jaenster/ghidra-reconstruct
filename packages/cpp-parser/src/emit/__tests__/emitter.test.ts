@@ -850,15 +850,39 @@ describe('CppEmitter', () => {
         alwaysUseBraces: true,
         blankLineAroundControlFlow: true,
       }).trim();
-      assert.ok(/if \(!p\) \{/.test(out), out);            // single-stmt body braced
-      assert.ok(/return -1;\n  \}\n  if \(n <= 0\)/.test(out), out); // adjacent guards stay tight
-      assert.ok(/\n\n  for \(/.test(out), out);            // blank line before the loop
-      assert.ok(/\}\n\n  done\(\);/.test(out), out);       // blank line after the loop
+      assert.strictEqual(out, `int f(int* p, int n) {
+  int s = 0;
+
+  if (!p) {
+    return -1;
+  }
+  if (n <= 0) {
+    return 0;
+  }
+
+  for (int i = 0; i < n; i++) {
+    s += p[i];
+  }
+
+  done();
+  return s;
+}`);
     });
 
-    it('is off by default (no extra blank lines)', () => {
+    it('is off by default (no forced braces, no blank lines)', () => {
       const out = emit(parse(src) as any).trim();
-      assert.ok(!/\n\n/.test(out), out);
+      assert.strictEqual(out, `int f(int* p, int n) {
+  int s = 0;
+  if (!p)
+    return -1;
+  if (n <= 0)
+    return 0;
+  for (int i = 0; i < n; i++) {
+    s += p[i];
+  }
+  done();
+  return s;
+}`);
     });
   });
 });
