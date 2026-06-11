@@ -5,7 +5,11 @@
  * occur between the declaration and first assignment.
  *
  * Ghidra's decompiler outputs C89-style code with all declarations at
- * function top, separated from first assignment. This plugin merges them.
+ * function top, separated from first assignment. This plugin merges them by
+ * SINKING the declaration down to the assignment site (first use). It must not
+ * hoist the initializer up to the original top declaration: intervening guard
+ * clauses / early returns mean the assignment was conditional, and the RHS may
+ * dereference pointers those guards validate — moving it up is a use-before-check.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -85,25 +89,32 @@ function createDeclInitMergeTransformer(_options: DeclInitMergeOptions = {}): Tr
 
       if (merges.length === 0) return undefined;
 
-      // Build new statement list
-      const removeIndices = new Set(merges.map(([, j]) => j));
-      const mergeMap = new Map(merges); // declIndex -> assignIndex
+      // Build new statement list. CRITICAL: emit the merged `Type var = expr;` at
+      // the ASSIGNMENT's position (sink the declaration down to first use), and
+      // drop the bare top declaration. Never pull the initializer UP to the
+      // declaration site — doing so would hoist the RHS above any intervening
+      // statements (guard clauses / early returns), evaluating it earlier than
+      // the source did and dereferencing pointers before their null checks.
+      const removeDeclIndices = new Set(merges.map(([i]) => i));
+      const assignToDecl = new Map(merges.map(([i, j]) => [j, i])); // assignIndex -> declIndex
 
       const newStmts: ASTNode[] = [];
       for (let i = 0; i < stmts.length; i++) {
-        if (removeIndices.has(i)) continue; // skip merged assignment
+        if (removeDeclIndices.has(i)) continue; // drop the bare declaration
 
-        if (mergeMap.has(i)) {
-          const assignIdx = mergeMap.get(i)!;
-          const declStmt = stmts[i] as DeclStmt;
+        if (assignToDecl.has(i)) {
+          const declIdx = assignToDecl.get(i)!;
+          const declStmt = stmts[declIdx] as DeclStmt;
           const varDecl = declStmt.declarations[0] as VariableDecl;
-          const assign = (stmts[assignIdx] as ExprStmt).expression as AssignExpr;
+          const assign = (stmts[i] as ExprStmt).expression as AssignExpr;
 
           const newVarDecl = updateNode(varDecl, {
             initializer: assign.right,
           } as Partial<VariableDecl>);
+          // keep the declaration's trivia, but anchor at the assignment's location
           const newDeclStmt = updateNode(declStmt, {
             declarations: [newVarDecl],
+            location: stmts[i].location,
           } as Partial<DeclStmt>);
           newStmts.push(newDeclStmt);
         } else {
