@@ -29,6 +29,10 @@ import { processNestedTailInlining } from './nested-inline.js';
 export function processCompound(
   stmts: Statement[],
   options: RequiredGotoCleanupOptions,
+  // True only when this compound is the function body. False for loop/switch bodies,
+  // where a cleanup-fallthrough label's fallthrough continues the loop / next case
+  // rather than reaching the function's implicit return — so no return may be fabricated.
+  fallthroughMeansReturn = true,
 ): Statement[] | null {
   const labels = analyzeLabels(stmts, options);
   const gotoCounts = countGotosInStatements(stmts);
@@ -132,13 +136,13 @@ export function processCompound(
     if (modified) return current;
 
     // Cleanup tail inlining: handles gotos at any nesting depth to top-level labels
-    const inlineResult = processCleanupTailInlining(stmts, labels, gotoCounts, options);
+    const inlineResult = processCleanupTailInlining(stmts, labels, gotoCounts, options, fallthroughMeansReturn);
     if (inlineResult) { recordStat('cleanupTailInline'); return inlineResult; }
   }
 
   // Nested label tail inlining: cross-scope labels in if/else/loop/switch
   // Runs even when no top-level labels exist — discovers labels inside nested scopes
-  const nestedResult = processNestedTailInlining(stmts, labels, gotoCounts, options);
+  const nestedResult = processNestedTailInlining(stmts, labels, gotoCounts, options, fallthroughMeansReturn);
   if (nestedResult) { recordStat('nestedTailInline'); return nestedResult; }
 
   return null;

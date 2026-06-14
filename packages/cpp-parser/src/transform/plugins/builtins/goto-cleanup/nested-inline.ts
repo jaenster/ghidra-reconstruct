@@ -27,7 +27,7 @@ import type { LabelInfo, RequiredGotoCleanupOptions } from './types.js';
 import { MAX_INLINE_TAIL_SIZE } from './types.js';
 import { discoverNestedLabels, countGotosInStatements } from './analysis.js';
 import { deepCloneStatements } from './helpers.js';
-import { inlineGotoInNestedStmt, createReturnStmt } from './tail-inline.js';
+import { inlineGotoInNestedStmt, createReturnStmt, canFallThrough } from './tail-inline.js';
 
 // ============================================
 // Global goto counts — set once per function body by the visitor,
@@ -46,6 +46,37 @@ export function getGlobalGotoCounts(): Map<string, number> | null {
 
 export function clearGlobalGotoCounts(): void {
   delete (globalThis as any)[GLOBAL_GOTO_KEY];
+}
+
+// ============================================
+// Loop/switch body marker.
+//
+// A `cleanup-fallthrough` label only "falls through to the function's implicit
+// return" when its enclosing compound is the FUNCTION BODY. When the label lives
+// in a loop body, fallthrough means "continue the loop", so fabricating a return
+// is always wrong. Switch bodies are likewise not the function body (fallthrough
+// there means "next case" / "after the switch"), so they are not return contexts.
+//
+// The bottom-up transformer gives no parent context to visitCompoundStmt, so we
+// mark every loop/switch *body* compound with an enumerable symbol property on the
+// ORIGINAL AST before transforming. Object spread ({...node}) and updateNode both
+// copy enumerable own symbol properties, so the mark survives the child-first
+// rebuild and is still present when visitCompoundStmt fires on the body.
+// ============================================
+
+export const LOOP_OR_SWITCH_BODY_MARK = Symbol.for('ghidra-mcp:goto-cleanup-loop-body');
+
+export function markCompoundAsLoopOrSwitchBody(compound: object): void {
+  Object.defineProperty(compound, LOOP_OR_SWITCH_BODY_MARK, {
+    value: true,
+    enumerable: true,
+    configurable: true,
+    writable: true,
+  });
+}
+
+export function isLoopOrSwitchBodyCompound(compound: object): boolean {
+  return (compound as { [k: symbol]: unknown })[LOOP_OR_SWITCH_BODY_MARK] === true;
 }
 
 /**
@@ -152,6 +183,8 @@ export function processNestedTailInlining(
   topLevelLabels: Map<string, LabelInfo>,
   gotoCounts: Map<string, number>,
   options: RequiredGotoCleanupOptions,
+  // True only when this compound is the function body (see processCompound).
+  fallthroughMeansReturn = true,
 ): Statement[] | null {
   const nestedLabels = discoverNestedLabels(stmts, topLevelLabels, options);
   if (nestedLabels.size === 0) return null;
@@ -179,9 +212,20 @@ export function processNestedTailInlining(
     if (info.kind !== 'exit-return' && info.kind !== 'cleanup-return'
         && info.kind !== 'exit-noreturn' && info.kind !== 'cleanup-fallthrough') continue;
 
-    // For cleanup-fallthrough, build tail with explicit return appended
-    // (the goto would have jumped to code that falls off the function end)
-    const effectiveTail = info.kind === 'cleanup-fallthrough'
+    // A cleanup-fallthrough label only reaches the function's implicit return when it
+    // lives in the function body. Inside a loop/switch body, fallthrough continues the
+    // loop / next case, so a fabricated return is wrong.
+    //  - If the tail self-terminates (break/return/continue/goto), inline it AS-IS.
+    //  - Otherwise it can fall through (loop-continue code): inlining loses the
+    //    loop-continue and duplicates the real label body. Preserve the goto.
+    const inLoopOrSwitchBody = info.kind === 'cleanup-fallthrough' && !fallthroughMeansReturn;
+    if (inLoopOrSwitchBody && canFallThrough(tail[tail.length - 1])) continue;
+
+    // For cleanup-fallthrough at function-body level, build tail with an explicit return
+    // appended (the goto would have jumped to code that falls off the function end). In a
+    // loop/switch body the tail already self-terminates — inline it unchanged.
+    const fabricateReturn = info.kind === 'cleanup-fallthrough' && !inLoopOrSwitchBody;
+    const effectiveTail = fabricateReturn
       ? [...tail, createReturnStmt(tail[tail.length - 1])]
       : tail;
 
@@ -201,7 +245,7 @@ export function processNestedTailInlining(
     // When the return is fabricated for a cleanup-fallthrough label, pass the flag so
     // loop bodies are not entered: inlining a fabricated return inside a loop would
     // exit the function early instead of continuing the loop.
-    const tailReturnIsFabricated = info.kind === 'cleanup-fallthrough';
+    const tailReturnIsFabricated = fabricateReturn;
     let inlined = false;
     const newStmts: Statement[] = [];
     for (const stmt of stmts) {

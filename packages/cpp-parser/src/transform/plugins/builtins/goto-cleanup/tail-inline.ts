@@ -32,7 +32,7 @@ import { countGotosInStatements } from './analysis.js';
  * Check if a statement can fall through to the next one
  * (i.e., does NOT always terminate via return/break/continue/goto).
  */
-function canFallThrough(stmt: Statement): boolean {
+export function canFallThrough(stmt: Statement): boolean {
   switch (stmt.kind) {
     case NodeKind.ReturnStmt:
     case NodeKind.BreakStmt:
@@ -77,6 +77,8 @@ export function processCleanupTailInlining(
   labels: Map<string, LabelInfo>,
   gotoCounts: Map<string, number>,
   options: RequiredGotoCleanupOptions,
+  // True only when this compound is the function body (see processCompound).
+  fallthroughMeansReturn = true,
 ): Statement[] | null {
   // Process labels from last to first (so removal doesn't shift earlier indices)
   const labelEntries = [...labels.values()].sort((a, b) => b.index - a.index);
@@ -92,6 +94,17 @@ export function processCleanupTailInlining(
     if (labelInfo.kind !== 'exit-return' && labelInfo.kind !== 'cleanup-return'
         && labelInfo.kind !== 'exit-noreturn' && labelInfo.kind !== 'cleanup-fallthrough') continue;
 
+    // A cleanup-fallthrough label only reaches the function's implicit return when it
+    // lives in the function body. Inside a loop/switch body, fallthrough continues the
+    // loop / next case, so a fabricated return is wrong.
+    //  - If the tail self-terminates (ends in break/return/continue/goto, e.g. a switch
+    //    case ending in `break`), inline it AS-IS without fabricating a return.
+    //  - Otherwise the tail can fall through (e.g. a loop-continue increment): inlining it
+    //    would both lose the loop-continue and duplicate the real label's code. Preserve
+    //    the goto un-inlined — the safe default.
+    const inLoopOrSwitchBody = labelInfo.kind === 'cleanup-fallthrough' && !fallthroughMeansReturn;
+    if (inLoopOrSwitchBody && canFallThrough(tail[tail.length - 1])) continue;
+
     // Check tail doesn't contain gotos/labels that escape the tail.
     // Self-contained tails (all gotos target labels within the tail) are allowed.
     const tailLabels = new Set<string>();
@@ -106,7 +119,7 @@ export function processCleanupTailInlining(
     if (hasEscapingGoto) continue;
 
     // Try to inline all gotos to this label
-    const result = inlineAllGotosToLabel(stmts, labelInfo.name, tail, labelInfo.index, labelInfo.kind);
+    const result = inlineAllGotosToLabel(stmts, labelInfo.name, tail, labelInfo.index, labelInfo.kind, inLoopOrSwitchBody);
     if (result) return result;
   }
 
@@ -123,10 +136,15 @@ function inlineAllGotosToLabel(
   tail: Statement[],
   labelIndex: number,
   kind: LabelKind,
+  // True when this is a cleanup-fallthrough label inside a loop/switch body whose tail
+  // self-terminates: inline the tail AS-IS, never fabricate a function-level return.
+  suppressFabricatedReturn = false,
 ): Statement[] | null {
   // For cleanup-fallthrough, build a tail with explicit return appended
-  // for use in nested contexts (where fallthrough doesn't mean "end of function")
-  const tailWithReturn = kind === 'cleanup-fallthrough'
+  // for use in nested contexts (where fallthrough doesn't mean "end of function").
+  // In a loop/switch body the tail already self-terminates (break/return) — appending
+  // a return would be wrong, so inline it unchanged.
+  const tailWithReturn = (kind === 'cleanup-fallthrough' && !suppressFabricatedReturn)
     ? [...tail, createReturnStmt(tail[tail.length - 1])]
     : tail;
   const newStmts: Statement[] = [];
@@ -156,7 +174,7 @@ function inlineAllGotosToLabel(
     // Pass tailReturnIsFabricated=true so loop bodies are not entered when the
     // return is fabricated for cleanup-fallthrough (inlining into a loop body
     // would exit the function early instead of continuing the loop).
-    const replaced = inlineGotoInNestedStmt(stmt, labelName, tailWithReturn, kind === 'cleanup-fallthrough');
+    const replaced = inlineGotoInNestedStmt(stmt, labelName, tailWithReturn, kind === 'cleanup-fallthrough' && !suppressFabricatedReturn);
     if (replaced !== stmt) {
       newStmts.push(replaced);
       modified = true;

@@ -302,6 +302,25 @@ export function discoverNestedLabels(
           const kind = classifyLabelTail(tail, options);
           result.set(name, { name, tailStatements: tail, kind });
         }
+      } else if (stmt.kind === NodeKind.CaseStmt || stmt.kind === NodeKind.DefaultStmt) {
+        // A label as the FIRST statement of a case/default (e.g. `case N: LBL: ...`)
+        // — its tail extends through the following sibling statements in this same
+        // compound (up to the next case/default), not just the label's inner statement.
+        const inner = (stmt as CaseStmt | DefaultStmt).statement;
+        if (inner.kind === NodeKind.LabelStmt) {
+          const labelStmt = inner as LabelStmt;
+          const name = labelStmt.label.name;
+          if (isSimpleLabelName(name) && !topLevelLabels.has(name) && !result.has(name)) {
+            const siblings: Statement[] = [];
+            for (let j = i + 1; j < compound.length; j++) {
+              if (compound[j].kind === NodeKind.CaseStmt || compound[j].kind === NodeKind.DefaultStmt) break;
+              siblings.push(compound[j]);
+            }
+            const tail: Statement[] = [labelStmt.statement, ...siblings];
+            const kind = classifyLabelTail(tail, options);
+            result.set(name, { name, tailStatements: tail, kind });
+          }
+        }
       }
       // Recurse into the statement regardless (it may contain deeper labels)
       walkStmt(compound[i]);
@@ -340,10 +359,10 @@ export function discoverNestedLabels(
     }
   }
 
-  // Walk into each top-level statement's nested scopes
-  for (const stmt of stmts) {
-    walkStmt(stmt);
-  }
+  // Walk the top-level statements via walkCompound so labels wrapped directly in a
+  // case/default at this level (e.g. `case N: LBL: ...`) get a sibling-aware tail.
+  // Direct LabelStmt children are still filtered out by the topLevelLabels check.
+  walkCompound(stmts);
 
   return result;
 }

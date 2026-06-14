@@ -1925,6 +1925,38 @@ LAB_00625096:
     assert.ok(!loopReturnMatch, `Must not have return inside do-while. Got:\n${output}`);
   });
 
+  it('should NOT fabricate a return when a cleanup-fallthrough label LIVES IN a do-while body and the goto is inside a plain if in that same body (PLAYER_GetUnidentifiedItemsCount pattern)', () => {
+    // LAB_X (nCount++) lives directly in the do-while body. Its fallthrough continues
+    // the loop, so appending a fabricated `return` is always wrong — even though the
+    // goto sits inside a plain `if` (not a nested loop). The function should keep
+    // counting all matching items, not return after the first match.
+    const input = `
+int foo(void) {
+  int nCount = 0;
+  void *pCurItem = FirstItem();
+  do {
+    if (IsItem(pCurItem)) {
+      if (!IsIdentified(pCurItem)) goto LAB_X;
+      other();
+    }
+    misc();
+LAB_X:
+    nCount = nCount + 1;
+    pCurItem = NextItem();
+  } while (pCurItem);
+  return nCount;
+}
+`;
+    const output = transformCode(input);
+    // The fabricated return must NOT appear inside the loop body.
+    assert.ok(!output.match(/nCount = nCount \+ 1;\s*\n?\s*return;/),
+      `Must not fabricate a return after the loop-continue increment. Got:\n${output}`);
+    const loopReturnMatch = output.match(/do \{[\s\S]*?return;[\s\S]*?\} while/);
+    assert.ok(!loopReturnMatch, `Must not have a fabricated return inside do-while. Got:\n${output}`);
+    // The genuine return nCount; (after the loop) must survive.
+    assert.ok(output.includes('return nCount;'), `Expected return nCount; in:\n${output}`);
+  });
+
   // ======================================
   // returnFunctionAgain label support
   // ======================================

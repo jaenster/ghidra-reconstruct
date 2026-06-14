@@ -20,7 +20,17 @@
  */
 
 import { NodeKind } from '../../../../ast/kinds.js';
-import type { ASTNode, CompoundStmt, FunctionDecl, GotoStmt, LabelStmt } from '../../../../ast/nodes.js';
+import type {
+  ASTNode,
+  CompoundStmt,
+  DoWhileStmt,
+  ForStmt,
+  FunctionDecl,
+  GotoStmt,
+  LabelStmt,
+  SwitchStmt,
+  WhileStmt,
+} from '../../../../ast/nodes.js';
 import { updateNode } from '../../../transformer.js';
 import { createTransformer } from '../../../transformer.js';
 import { traverseAST } from '../../../../ast/visitor.js';
@@ -29,7 +39,12 @@ import type { GotoCleanupOptions } from './types.js';
 import { DEFAULT_MAX_NESTING, MAX_FIXPOINT_PASSES } from './types.js';
 import { processCompound } from './process.js';
 import { countGotosInStatements } from './analysis.js';
-import { setGlobalGotoCounts, clearGlobalGotoCounts } from './nested-inline.js';
+import {
+  setGlobalGotoCounts,
+  clearGlobalGotoCounts,
+  markCompoundAsLoopOrSwitchBody,
+  isLoopOrSwitchBodyCompound,
+} from './nested-inline.js';
 
 // Re-export public API
 export type { GotoCleanupStats } from './types.js';
@@ -61,6 +76,20 @@ function preComputeGlobalGotoCounts(root: ASTNode): void {
         }
       }
     }
+
+    // Mark loop/switch body compounds. A cleanup-fallthrough label inside such a
+    // body must NOT get a fabricated return — fallthrough there means continue the
+    // loop / fall to the next case, not the function's implicit return.
+    let body: ASTNode | undefined;
+    switch (node.kind) {
+      case NodeKind.ForStmt: body = (node as ForStmt).body; break;
+      case NodeKind.WhileStmt: body = (node as WhileStmt).body; break;
+      case NodeKind.DoWhileStmt: body = (node as DoWhileStmt).body; break;
+      case NodeKind.SwitchStmt: body = (node as SwitchStmt).body; break;
+    }
+    if (body && body.kind === NodeKind.CompoundStmt) {
+      markCompoundAsLoopOrSwitchBody(body as CompoundStmt);
+    }
   }
 
   setGlobalGotoCounts(allCounts);
@@ -79,12 +108,17 @@ function createGotoCleanupTransformer(pluginOptions?: Record<string, unknown>) {
       const stmts = compound.statements;
       if (stmts.length < 2) return undefined;
 
+      // A cleanup-fallthrough label's tail falls through to the function's implicit
+      // return ONLY when this compound is the function body. In a loop/switch body,
+      // fallthrough continues the loop / next case, so fabricating a return is wrong.
+      const fallthroughMeansReturn = !isLoopOrSwitchBodyCompound(compound);
+
       let current = stmts;
       let modified = false;
 
       // Fixpoint iteration: keep processing until no more changes
       for (let pass = 0; pass < MAX_FIXPOINT_PASSES; pass++) {
-        const result = processCompound(current, options);
+        const result = processCompound(current, options, fallthroughMeansReturn);
         if (!result) break;
         current = result;
         modified = true;
