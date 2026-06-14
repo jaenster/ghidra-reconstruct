@@ -1176,7 +1176,8 @@ function generateFilesForFunctions(
       includedTypeNames,
       headerPath,
       undefined,  // no funcIncludes
-      functions   // allFunctions for cross-module method lookup
+      functions,  // allFunctions for cross-module method lookup
+      classes     // allClasses so cross-namespace method structs get method declarations
     );
 
     files.set(headerPath, {
@@ -1329,7 +1330,8 @@ function generateFilesForFunctions(
       includedTypeNames,
       headerPath,
       undefined,  // no funcIncludes
-      functions   // allFunctions for cross-module method lookup
+      functions,  // allFunctions for cross-module method lookup
+      classes     // allClasses so cross-namespace method structs get method declarations
     );
 
     files.set(headerPath, {

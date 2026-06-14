@@ -84,7 +84,8 @@ export function generateHeader(
   includedTypes?: Set<string>,
   headerPath?: string,
   funcIncludes?: string[],
-  allFunctions?: ExtractedFunction[]
+  allFunctions?: ExtractedFunction[],
+  allClasses?: DetectedClass[]
 ): string {
   const lines: string[] = [];
 
@@ -198,6 +199,21 @@ export function generateHeader(
         lines.push('');
         classEmittedInTopoSort = true;
         continue;
+      }
+      // If this struct type matches a method-converted class (not already handled above),
+      // emit it as a class declaration so that method declarations are included.
+      // This handles the case where functions are namespaced to a different unit than
+      // the struct they extend (e.g., Fog::BitBuffer functions → D2BitBufferStrc methods).
+      if (type.kind === 'STRUCTURE' && allClasses && type.name !== classInfo?.name) {
+        const matchingClass = allClasses.find(c => c.name === type.name && c.methods.length > 0);
+        if (matchingClass) {
+          if ((!matchingClass.fields || matchingClass.fields.length === 0) && 'fields' in type) {
+            matchingClass.fields = (type as ExtractedStruct).fields;
+          }
+          lines.push(generateClassDeclaration(matchingClass, functions, options, methodConversions, true, allFunctions));
+          lines.push('');
+          continue;
+        }
       }
       let decl = generateDataTypeDeclaration(type, options);
       // Deduplicate constexpr names across enum types
