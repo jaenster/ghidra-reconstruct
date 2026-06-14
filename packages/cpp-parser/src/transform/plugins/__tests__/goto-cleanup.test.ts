@@ -1887,6 +1887,45 @@ int foo(int x, int y) {
   });
 
   // ======================================
+  // Correctness: cleanup-fallthrough must NOT fabricate return inside a loop
+  // ======================================
+
+  it('should NOT fabricate a return when goto targets a cleanup-fallthrough label at function level but the goto is inside a nested loop (STATLIST_CalcFullStatFromChildren pattern)', () => {
+    // LAB_00625096 is a cleanup-fallthrough label at the function-body level.
+    // The goto is inside a deeply nested do-while inside a for-loop inside an if.
+    // Fallthrough for LAB_00625096 means "reach finish()" at the end of the function —
+    // but the fabricated `return` gets injected INSIDE the loop, causing an early return
+    // that exits after the first iteration instead of running all iterations.
+    const input = `
+void foo(int nGems) {
+  int nTotalValue = 0;
+  if (nGems > 0) {
+    for (int i = 0; i < nGems; i = i + 1) {
+      do {
+        int nCount = GetCount(i);
+        if (nCount == 0) goto LAB_00625096;
+        nTotalValue += nCount;
+      } while (0);
+    }
+  }
+LAB_00625096:
+  finish(nTotalValue);
+}
+`;
+    const output = transformCode(input);
+    // The critical invariant: the fabricated return must NOT appear inside the nested loop.
+    // Previously the transform produced `finish(nTotalValue); return;` inside the do-while,
+    // exiting the function after the first nCount==0 instead of completing the loop.
+    assert.ok(!output.match(/finish\(nTotalValue\);\s*\n?\s*return;[\s\S]*while/),
+      `Must not fabricate a return inside the loop body. Got:\n${output}`);
+    // The finish() call must still appear (at function level, not inside the loop)
+    assert.ok(output.includes('finish(nTotalValue)'), `Expected finish(nTotalValue) in: ${output}`);
+    // No bogus early return inside the loop
+    const loopReturnMatch = output.match(/do \{[\s\S]*?return;[\s\S]*?\} while/);
+    assert.ok(!loopReturnMatch, `Must not have return inside do-while. Got:\n${output}`);
+  });
+
+  // ======================================
   // returnFunctionAgain label support
   // ======================================
 

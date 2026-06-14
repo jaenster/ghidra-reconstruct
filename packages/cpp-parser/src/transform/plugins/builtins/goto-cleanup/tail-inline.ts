@@ -152,8 +152,11 @@ function inlineAllGotosToLabel(
       continue;
     }
 
-    // Recursively process nested statements (use tailWithReturn for nested scopes)
-    const replaced = inlineGotoInNestedStmt(stmt, labelName, tailWithReturn);
+    // Recursively process nested statements (use tailWithReturn for nested scopes).
+    // Pass tailReturnIsFabricated=true so loop bodies are not entered when the
+    // return is fabricated for cleanup-fallthrough (inlining into a loop body
+    // would exit the function early instead of continuing the loop).
+    const replaced = inlineGotoInNestedStmt(stmt, labelName, tailWithReturn, kind === 'cleanup-fallthrough');
     if (replaced !== stmt) {
       newStmts.push(replaced);
       modified = true;
@@ -176,8 +179,19 @@ function inlineAllGotosToLabel(
  * Recursively replace `goto L` with inline tail in nested statements.
  * For gotos that are a direct child (not in a compound), wraps tail in a CompoundStmt.
  * For gotos inside compounds, expands inline.
+ *
+ * `tailReturnIsFabricated` — true when the tail ends with a fabricated `return` appended
+ * for a cleanup-fallthrough label (fallthrough == end-of-function, not inside a loop).
+ * In that case we must NOT recurse into loop bodies: the fabricated return would exit the
+ * function early instead of continuing the loop.  Genuine return/noreturn tails are always
+ * safe to inline into loops.
  */
-export function inlineGotoInNestedStmt(stmt: Statement, labelName: string, tail: Statement[]): Statement {
+export function inlineGotoInNestedStmt(
+  stmt: Statement,
+  labelName: string,
+  tail: Statement[],
+  tailReturnIsFabricated = false,
+): Statement {
   // Direct goto → wrap tail in compound (since we're replacing one statement)
   if (stmt.kind === NodeKind.GotoStmt && (stmt as GotoStmt).label.name === labelName) {
     if (tail.length === 1) return deepCloneStatement(tail[0]);
@@ -200,7 +214,7 @@ export function inlineGotoInNestedStmt(stmt: Statement, labelName: string, tail:
         newBody.push(...deepCloneStatements(tail));
         changed = true;
       } else {
-        const r = inlineGotoInNestedStmt(s, labelName, tail);
+        const r = inlineGotoInNestedStmt(s, labelName, tail, tailReturnIsFabricated);
         if (r !== s) changed = true;
         newBody.push(r !== s ? r : s);
       }
@@ -212,30 +226,37 @@ export function inlineGotoInNestedStmt(stmt: Statement, labelName: string, tail:
   // IfStmt: process both branches
   if (stmt.kind === NodeKind.IfStmt) {
     const ifStmt = stmt as IfStmt;
-    const newThen = inlineGotoInNestedStmt(ifStmt.thenBranch, labelName, tail);
-    const newElse = ifStmt.elseBranch ? inlineGotoInNestedStmt(ifStmt.elseBranch, labelName, tail) : null;
+    const newThen = inlineGotoInNestedStmt(ifStmt.thenBranch, labelName, tail, tailReturnIsFabricated);
+    const newElse = ifStmt.elseBranch ? inlineGotoInNestedStmt(ifStmt.elseBranch, labelName, tail, tailReturnIsFabricated) : null;
     if (newThen === ifStmt.thenBranch && newElse === ifStmt.elseBranch) return stmt;
     const updates: Record<string, unknown> = { thenBranch: newThen };
     if (newElse !== ifStmt.elseBranch) updates.elseBranch = newElse;
     return updateNode(ifStmt, updates);
   }
 
-  // Loop bodies
+  // Loop bodies — skip recursion when the tail contains a fabricated return.
+  // Inlining a fabricated return inside a loop would exit the function where the
+  // original code would have continued the loop (silently wrong control flow).
+  // Genuine return/noreturn tails are always safe because a real return/exit exits
+  // the loop anyway.
   if (stmt.kind === NodeKind.DoWhileStmt) {
+    if (tailReturnIsFabricated) return stmt;
     const dw = stmt as DoWhileStmt;
-    const newBody = inlineGotoInNestedStmt(dw.body, labelName, tail);
+    const newBody = inlineGotoInNestedStmt(dw.body, labelName, tail, tailReturnIsFabricated);
     if (newBody === dw.body) return stmt;
     return updateNode(dw, { body: newBody });
   }
   if (stmt.kind === NodeKind.WhileStmt) {
+    if (tailReturnIsFabricated) return stmt;
     const ws = stmt as WhileStmt;
-    const newBody = inlineGotoInNestedStmt(ws.body, labelName, tail);
+    const newBody = inlineGotoInNestedStmt(ws.body, labelName, tail, tailReturnIsFabricated);
     if (newBody === ws.body) return stmt;
     return updateNode(ws, { body: newBody });
   }
   if (stmt.kind === NodeKind.ForStmt) {
+    if (tailReturnIsFabricated) return stmt;
     const fs = stmt as ForStmt;
-    const newBody = inlineGotoInNestedStmt(fs.body, labelName, tail);
+    const newBody = inlineGotoInNestedStmt(fs.body, labelName, tail, tailReturnIsFabricated);
     if (newBody === fs.body) return stmt;
     return updateNode(fs, { body: newBody });
   }
@@ -243,7 +264,7 @@ export function inlineGotoInNestedStmt(stmt: Statement, labelName: string, tail:
   // LabelStmt: recurse into the inner statement
   if (stmt.kind === NodeKind.LabelStmt) {
     const ls = stmt as LabelStmt;
-    const newInner = inlineGotoInNestedStmt(ls.statement, labelName, tail);
+    const newInner = inlineGotoInNestedStmt(ls.statement, labelName, tail, tailReturnIsFabricated);
     if (newInner === ls.statement) return stmt;
     return updateNode(ls, { statement: newInner });
   }
@@ -251,19 +272,19 @@ export function inlineGotoInNestedStmt(stmt: Statement, labelName: string, tail:
   // Switch and cases
   if (stmt.kind === NodeKind.SwitchStmt) {
     const sw = stmt as SwitchStmt;
-    const newBody = inlineGotoInNestedStmt(sw.body, labelName, tail);
+    const newBody = inlineGotoInNestedStmt(sw.body, labelName, tail, tailReturnIsFabricated);
     if (newBody === sw.body) return stmt;
     return updateNode(sw, { body: newBody });
   }
   if (stmt.kind === NodeKind.CaseStmt) {
     const cs = stmt as CaseStmt;
-    const newInner = inlineGotoInNestedStmt(cs.statement, labelName, tail);
+    const newInner = inlineGotoInNestedStmt(cs.statement, labelName, tail, tailReturnIsFabricated);
     if (newInner === cs.statement) return stmt;
     return updateNode(cs, { statement: newInner });
   }
   if (stmt.kind === NodeKind.DefaultStmt) {
     const ds = stmt as DefaultStmt;
-    const newInner = inlineGotoInNestedStmt(ds.statement, labelName, tail);
+    const newInner = inlineGotoInNestedStmt(ds.statement, labelName, tail, tailReturnIsFabricated);
     if (newInner === ds.statement) return stmt;
     return updateNode(ds, { statement: newInner });
   }

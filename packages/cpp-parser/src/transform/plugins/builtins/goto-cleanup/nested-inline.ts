@@ -197,7 +197,11 @@ export function processNestedTailInlining(
     const hasEscapingGoto = [...tailGotos].some(g => !tailLabels.has(g));
     if (hasEscapingGoto) continue;
 
-    // Inline all gotos to this label across all scopes
+    // Inline all gotos to this label across all scopes.
+    // When the return is fabricated for a cleanup-fallthrough label, pass the flag so
+    // loop bodies are not entered: inlining a fabricated return inside a loop would
+    // exit the function early instead of continuing the loop.
+    const tailReturnIsFabricated = info.kind === 'cleanup-fallthrough';
     let inlined = false;
     const newStmts: Statement[] = [];
     for (const stmt of stmts) {
@@ -207,7 +211,7 @@ export function processNestedTailInlining(
         inlined = true;
         continue;
       }
-      const replaced = inlineGotoInNestedStmt(stmt, name, effectiveTail);
+      const replaced = inlineGotoInNestedStmt(stmt, name, effectiveTail, tailReturnIsFabricated);
       if (replaced !== stmt) {
         newStmts.push(replaced);
         inlined = true;
