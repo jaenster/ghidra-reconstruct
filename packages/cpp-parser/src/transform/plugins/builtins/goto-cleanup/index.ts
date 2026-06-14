@@ -80,6 +80,14 @@ function preComputeGlobalGotoCounts(root: ASTNode): void {
     // Mark loop/switch body compounds. A cleanup-fallthrough label inside such a
     // body must NOT get a fabricated return — fallthrough there means continue the
     // loop / fall to the next case, not the function's implicit return.
+    //
+    // The mark must apply TRANSITIVELY: a label nested any number of if/else/switch
+    // (or inner-loop) levels deep inside a loop/switch body still continues the loop
+    // on fallthrough. The bottom-up transformer inlines at whichever compound can see
+    // both the goto and the label — that compound may be a deep descendant of the body.
+    // So mark the body AND every descendant CompoundStmt within it. traverseAST visits
+    // the whole subtree (including nested loops), so every compound anywhere inside a
+    // loop/switch gets marked and reads fallthroughMeansReturn=false.
     let body: ASTNode | undefined;
     switch (node.kind) {
       case NodeKind.ForStmt: body = (node as ForStmt).body; break;
@@ -88,7 +96,11 @@ function preComputeGlobalGotoCounts(root: ASTNode): void {
       case NodeKind.SwitchStmt: body = (node as SwitchStmt).body; break;
     }
     if (body && body.kind === NodeKind.CompoundStmt) {
-      markCompoundAsLoopOrSwitchBody(body as CompoundStmt);
+      for (const inner of traverseAST(body)) {
+        if (inner.kind === NodeKind.CompoundStmt) {
+          markCompoundAsLoopOrSwitchBody(inner as CompoundStmt);
+        }
+      }
     }
   }
 

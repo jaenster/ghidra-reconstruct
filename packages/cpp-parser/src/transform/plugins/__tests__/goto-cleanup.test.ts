@@ -1957,6 +1957,72 @@ LAB_X:
     assert.ok(output.includes('return nCount;'), `Expected return nCount; in:\n${output}`);
   });
 
+  it('should NOT fabricate a return when a cleanup-fallthrough label lives 2-3 if-levels deep in a do-while (PLAYER_GetUnidentifiedItemsCount real-depth pattern)', () => {
+    // The real Ghidra shape: LAB_X (nCount++) lives in an `else`-branch that is several
+    // `if` levels deep inside a do-while body, with the goto coming from a SIBLING nested
+    // if. The compound that can see both the goto and the label is the deep `if (g==...)`
+    // body — NOT the loop's immediate body compound. Only the immediate body was marked
+    // before, so that deep compound wrongly had fallthroughMeansReturn=true and the
+    // transform produced `nCount = nCount + 1; return;`, returning after the first match
+    // instead of counting all unidentified items. The mark must propagate transitively.
+    const input = `
+int foo(void) {
+  int nCount = 0;
+  void *pCurItem = FirstItem();
+  do {
+    if (IsItem(pCurItem)) {
+      prep();
+      if (g == INVENTORY) {
+        if (a) {
+          if (b == INVENTORY) goto LAB_X;
+          misc();
+        } else {
+LAB_X:
+          nCount = nCount + 1;
+        }
+      }
+    }
+    pCurItem = NextItem();
+  } while (pCurItem);
+  return nCount;
+}
+`;
+    const output = transformCode(input);
+    // No fabricated return anywhere inside the do-while body.
+    const loopReturnMatch = output.match(/do \{[\s\S]*?return;[\s\S]*?\} while/);
+    assert.ok(!loopReturnMatch, `Must not fabricate a return inside the do-while. Got:\n${output}`);
+    assert.ok(!output.match(/nCount = nCount \+ 1;\s*\n?\s*return;/),
+      `Must not fabricate a return after the loop-continue increment. Got:\n${output}`);
+    // The increment (loop-continue body) must survive exactly once at its site.
+    assert.ok(output.includes('nCount = nCount + 1;'), `Expected the increment to survive in:\n${output}`);
+    // The genuine return nCount; (after the loop) must survive.
+    assert.ok(output.includes('return nCount;'), `Expected return nCount; in:\n${output}`);
+  });
+
+  it('SHOULD fabricate a return for a cleanup-fallthrough label in a top-level if at function-body level (not in any loop — must not over-correct)', () => {
+    // No enclosing loop/switch: fallthrough off LAB_X reaches the function's implicit
+    // return, so fabricating an explicit `return` when inlining the goto is correct.
+    // The transitive loop-marking must NOT suppress this genuine case.
+    const input = `
+void foo(int x) {
+  prep();
+  if (x) {
+    if (y) goto LAB_X;
+    other();
+  } else {
+LAB_X:
+    cleanup();
+  }
+  more();
+}
+`;
+    const output = transformCode(input);
+    // The inlined goto site must carry a fabricated return (cleanup then return).
+    assert.ok(/cleanup\(\);\s*\n?\s*return;/.test(output),
+      `Expected a fabricated return at the inlined cleanup site in:\n${output}`);
+    assert.ok(output.includes('more();'), `Expected more() to survive in:\n${output}`);
+  });
+
   // ======================================
   // returnFunctionAgain label support
   // ======================================
