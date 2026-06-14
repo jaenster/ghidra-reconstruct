@@ -62,11 +62,18 @@ export function generateCMakeLists(
   lines.push('endif()');
   lines.push('');
 
-  // Collect source files
+  // Collect source files.
+  // Build targets the Windows binary, so exclude the Mac-only modules
+  // (their functions have no win: address). Shared Win/Mac functions live in
+  // the normal Windows modules and are kept.
+  const MAC_ONLY_PREFIXES = ['MacSpecific/', 'StormMac/'];
+  const isMacOnly = (path: string) => MAC_ONLY_PREFIXES.some((p) => path.startsWith(p));
+
   const sourceFiles: string[] = [];
   const headerFiles: string[] = [];
 
   for (const [path, file] of project.files) {
+    if (isMacOnly(path)) continue;
     if (file.type === 'implementation') {
       sourceFiles.push(path);
     } else if (file.type === 'header') {
