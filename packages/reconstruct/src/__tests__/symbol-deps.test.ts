@@ -467,7 +467,7 @@ describe('Sibling-namespace qualification', () => {
     organization: 'namespace',
     generateCMake: false,
     generateSourceMaps: false,
-    transformPreset: 'none',
+    transformPreset: 'quick',
     includeAddressComments: false,
     promoteStaticGlobals: false,
   };
