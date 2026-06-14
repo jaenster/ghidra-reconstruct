@@ -308,7 +308,7 @@ const tier2 = castRows.filter((r) => !r.named).sort((a, b) => b.count - a.count)
   C.push('|count|function|var|cast-to (×n)|offsets|file|');
   C.push('|-|-|-|-|-|-|');
   const t2 = tier2.sort((a, b) => (/^p/.test(b.var) - /^p/.test(a.var)) || (b.count - a.count));
-  for (const r of t2.slice(0, 400)) {
+  for (const r of t2.slice(0, 2000)) {
     const t = r.types.map(([ty, n]) => `\`${ty}\`×${n}`).join(' ');
     C.push(`|${r.count}|${r.fn}|\`${r.var}\`|${t}|${[...r.offs].sort().join(' ') || '—'}|${r.file}|`);
   }
@@ -320,3 +320,45 @@ for (const r of tier1.slice(0, 20)) {
   const t = r.types.filter(([ty]) => NAMED_TYPE.test(ty)).map(([ty, n]) => `${ty}×${n}`).join(',');
   console.log(`  ${String(r.count).padStart(3)}  ${r.fn}(${r.var})  ${t}  [${[...r.offs].sort().join(' ')}]  ${r.file}`);
 }
+
+// ---- enum-value-cast scan -------------------------------------------------
+// A var the code keeps casting to a named enum value: `(eD2UnitType)var`.
+// The var should BE that enum. Single-paren, no '*', no index — distinct from
+// the pointer cast-hell above. Retyping makes `(eEnum)n == CONST` read as
+// `eX == CONST`. Recurring casts only (a one-off cast is often legit).
+const enumCastRe = /\(\s*(eD2[A-Za-z]\w*)\s*\)\s*([A-Za-z_]\w*)/g;
+const enumGroups = new Map(); // key=file::fn::var -> {fn,var,file,enums:Map,count}
+for (const f of sources) {
+  const rel = relative(ROOT, f);
+  const lines = readFileSync(f, 'utf8').split('\n');
+  let fn = '(file scope)';
+  for (const line of lines) {
+    const fd = line.match(fnDefRe);
+    if (fd && !/\b(if|for|while|switch|return|else)\b/.test(line)) fn = fd[1];
+    let m;
+    while ((m = enumCastRe.exec(line))) {
+      const [full, en, varName] = m;
+      if (line[m.index + full.length] === '(') continue; // cast of a call result, not a var
+      const key = `${rel}::${fn}::${varName}`;
+      if (!enumGroups.has(key)) enumGroups.set(key, { fn, var: varName, file: rel, enums: new Map(), count: 0 });
+      const g = enumGroups.get(key);
+      g.count++;
+      g.enums.set(en, (g.enums.get(en) || 0) + 1);
+    }
+  }
+}
+const enumRows = [...enumGroups.values()]
+  .map((g) => ({ ...g, enums: [...g.enums.entries()].sort((a, b) => b[1] - a[1]) }))
+  .filter((r) => r.count >= 2)
+  .sort((a, b) => b.count - a.count);
+{
+  const E = ['# Enum-recovery worklist — variables cast to an enum on every use', '',
+    'Each row is a `(function, var)` cast to a named `eD2*` enum value (not a pointer). Retype the **variable in Ghidra** to that enum; the `(eEnum)` casts vanish and comparisons read as `eX == CONST`. Single-instance casts excluded (often legit).', '',
+    '|count|function|var|enum (×n)|file|', '|-|-|-|-|-|'];
+  for (const r of enumRows.slice(0, 800)) {
+    const t = r.enums.map(([e, n]) => `\`${e}\`×${n}`).join(' ');
+    E.push(`|${r.count}|${r.fn}|\`${r.var}\`|${t}|${r.file}|`);
+  }
+  writeFileSync(join(import.meta.dirname, 'enum-recovery-worklist.md'), E.join('\n'));
+}
+console.log(`enum-recovery: ${enumRows.length} groups (count>=2) -> enum-recovery-worklist.md`);
