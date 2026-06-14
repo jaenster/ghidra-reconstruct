@@ -201,6 +201,13 @@ function stripCollidingNamespaceComponents(ns: string, typeNames: Set<string>): 
  * Build a regex and replacement map for rewriting qualified references
  * that include type-name namespace components.
  * e.g. "Forms::D2WinImage::FuncName" → "Forms::FuncName"
+ *
+ * Only strips the type-name when it is the PENULTIMATE component (directly
+ * before the function/member name), never when it is a true intermediate
+ * namespace with further sub-components.  Without this guard, a path like
+ * "D2Common::Item::ItemMods::Fn" (where Item is both a struct name and a
+ * real namespace) would have ::Item:: stripped, leaving the sibling-scope
+ * "D2Common::ItemMods::Fn" which is unreachable from a file in D2Common::Items.
  */
 function buildNamespaceCollisionRewriter(typeNames: Set<string>): (body: string) => string {
   if (!typeNames || typeNames.size === 0) return (body) => body;
@@ -209,8 +216,9 @@ function buildNamespaceCollisionRewriter(typeNames: Set<string>): (body: string)
   // but strips mid-path namespace uses like "Forms::D2WinImage::Func()" → "Forms::Func()"
   const escaped = [...typeNames].filter(n => /^[A-Za-z_]\w*$/.test(n)).map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
   if (escaped.length === 0) return (body) => body;
-  // Only match ::TypeName:: (mid-path), never \bTypeName:: (first qualifier)
-  const pattern = new RegExp(`(::)(${escaped.join('|')})::`, 'g');
+  // Only match ::TypeName:: (mid-path) when NOT followed by another identifier::
+  // (i.e. TypeName must be the penultimate qualifier, not an intermediate namespace)
+  const pattern = new RegExp(`(::)(${escaped.join('|')})::(?![A-Za-z_]\\w*::)`, 'g');
   return (body: string) => body.replace(pattern, (match, prefix) => prefix);
 }
 
