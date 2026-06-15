@@ -881,16 +881,42 @@ function computeFileLocalGlobals(
  * Build a bitfield catalog from struct metadata.
  * Scans all structs for bitfield fields (dataType matches `:N$`) and builds
  * a global map: "field_0xNN:mask" → bitfieldName.
- * If two structs both define the same field_0xNN with different bitfield layouts,
- * that entry is removed (ambiguous).
+ *
+ * The catalog is keyed only by (byte offset, mask) — NOT by struct — because the
+ * bitfield-access transform runs on parsed function bodies where the base
+ * expression (`pSkillTxt->field_0x5`) carries no resolved struct type, so the
+ * transform cannot know which struct a `field_0xNN` access belongs to.
+ *
+ * To prevent cross-struct contamination (e.g. rewriting `D2SkillsTxt->field_0x5
+ * & 0x10` to `->soft` when `soft` is a bitfield of an UNRELATED struct and
+ * `D2SkillsTxt` merely has a plain/undefined byte at offset 0x5), a key is
+ * emitted only when it is unambiguously safe across the whole program:
+ *  - dropped if two structs map the same key to different names (collision), and
+ *  - dropped if ANY struct has a NON-bitfield field occupying that byte offset
+ *    (because the accessor `field_0xNN` would also be emitted there, and the
+ *    rewrite would be wrong for that struct).
  */
-function buildBitfieldCatalog(dataTypes: ExtractedDataType[]): Map<string, string> {
+export function buildBitfieldCatalog(dataTypes: ExtractedDataType[]): Map<string, string> {
   const catalog = new Map<string, string>();
   const conflicts = new Set<string>();
+
+  // Byte offsets that some struct occupies with a NON-bitfield field. Applying a
+  // `field_0xNN & mask` rewrite at such an offset would be wrong for that struct.
+  const nonBitfieldByteOffsets = new Set<number>();
 
   for (const dt of dataTypes) {
     if (dt.kind !== 'STRUCTURE') continue;
     const struct = dt as ExtractedStruct;
+
+    // First pass: record every byte covered by a non-bitfield field in this struct.
+    for (const f of struct.fields) {
+      const isBitfield = (f.dataType ?? '').trim().match(/^(.+?):(\d+)$/) !== null;
+      if (isBitfield) continue;
+      const span = f.size > 0 ? f.size : 1;
+      for (let b = 0; b < span; b++) {
+        nonBitfieldByteOffsets.add(f.offset + b);
+      }
+    }
 
     let i = 0;
     while (i < struct.fields.length) {
@@ -943,6 +969,22 @@ function buildBitfieldCatalog(dataTypes: ExtractedDataType[]): Map<string, strin
         bitPosition += bitWidth;
       }
     }
+  }
+
+  // Drop any key whose byte offset is occupied by a non-bitfield field in some
+  // struct — the rewrite would contaminate that struct's plain-byte access.
+  let ambiguityDrops = 0;
+  for (const key of [...catalog.keys()]) {
+    const offMatch = key.match(/^field_0x([0-9a-fA-F]+):/);
+    if (!offMatch) continue;
+    const byteOffset = parseInt(offMatch[1], 16);
+    if (nonBitfieldByteOffsets.has(byteOffset)) {
+      catalog.delete(key);
+      ambiguityDrops++;
+    }
+  }
+  if (ambiguityDrops > 0) {
+    console.log(`Bitfield catalog: dropped ${ambiguityDrops} entr${ambiguityDrops === 1 ? 'y' : 'ies'} whose byte offset collides with a non-bitfield field in another struct (anti-contamination)`);
   }
 
   return catalog;
