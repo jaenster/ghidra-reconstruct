@@ -383,6 +383,14 @@ export {
 } from './builtins/bitfield-access.js';
 
 // ============================================
+// BUILT-IN PLUGINS: SUBPIECE ACCESS
+// ============================================
+
+export {
+  subpieceAccessPlugin,
+} from './builtins/subpiece-access.js';
+
+// ============================================
 // BUILT-IN PLUGINS: INDIRECT CALL CLEANUP
 // ============================================
 
@@ -440,6 +448,7 @@ import { funcPtrLiteralPlugin } from './builtins/func-ptr-literal.js';
 import { prngTransformPlugin } from './builtins/prng-transform.js';
 import { prngTempCollapsePlugin } from './builtins/prng-temp-collapse.js';
 import { bitfieldAccessPlugin } from './builtins/bitfield-access.js';
+import { subpieceAccessPlugin } from './builtins/subpiece-access.js';
 import { indirectCallCleanupPlugin } from './builtins/indirect-call-cleanup.js';
 import { methodCallRewritePlugin } from './builtins/method-call-rewrite.js';
 import { pointerCastNormalizePlugin } from './builtins/pointer-cast-normalize.js';
@@ -473,6 +482,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   incrementSimplifyPlugin,    // Cleanup: x = x + 1 → x++ (priority 35)
   redundantNegationPlugin,    // Cleanup: x + -y → x - y (priority 40)
   bitfieldAccessPlugin,       // Cleanup: field_0xNN & MASK → bitfieldName (priority 45)
+  subpieceAccessPlugin,       // Cleanup: expr._N_M_ → *(T *)((char *)expr + N) (priority 46)
   sbbBranchlessPlugin,        // Cleanup: -(uint32_t)(cond) & addr → cond ? addr : nullptr (priority 42)
   branchlessSelectPlugin,     // Cleanup: (cond - 1 & mask) + off → cond ? off : off+mask (priority 43)
   earlyReturnPlugin,          // Readability: flatten nested if(C){...}return X; → if(!C)return X; ... (priority 60)
