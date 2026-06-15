@@ -110,6 +110,49 @@ export function generateProject(
     }
   }
 
+  // Drop excluded namespaces/modules ENTIRELY (functions + classes + datatypes
+  // + globals + namespace records) so no per-namespace header/impl file is ever
+  // generated for them and they never reach the CMake source list (which is
+  // derived purely from project.files). This is what keeps reconstructed
+  // C/MSVC-runtime modules — compiler/*, VisualStudio/* — out of the build.
+  //
+  // Function-level excludePatterns only filter PRIMARY-binary functions during
+  // extraction; (a) whole runtime namespaces with no matching pattern, and
+  // (b) mac-merged functions from a secondary source (which is extracted
+  // WITHOUT excludePatterns), still arrive here. Filtering by namespace at the
+  // single codegen choke point closes both gaps.
+  const excludeNs = options.excludeNamespaces ?? [];
+  if (excludeNs.length > 0) {
+    const nsMatches = (ns: string | undefined | null): boolean => {
+      if (!ns) return false;
+      for (const pattern of excludeNs) {
+        if (typeof pattern === 'string') {
+          if (ns === pattern) return true;
+        } else if (pattern.test(ns)) {
+          return true;
+        }
+      }
+      return false;
+    };
+    const catMatches = (category: string | undefined | null): boolean => {
+      if (!category) return false;
+      return category.split('/').filter(Boolean).some(seg => nsMatches(seg));
+    };
+
+    const fnBefore = functions.length;
+    functions = functions.filter(f => !nsMatches(f.namespace));
+    classes = classes.filter(c => !nsMatches(c.namespace) && !nsMatches(c.name));
+    dataTypes = dataTypes.filter(dt => !catMatches(dt.category) && !nsMatches(dt.name));
+    globals = (globals as Array<{ namespace?: string }>).filter(
+      g => !nsMatches(g.namespace)
+    ) as typeof globals;
+    namespaces = namespaces.filter(ns => !nsMatches(ns.name) && !nsMatches(ns.fullPath));
+    const dropped = fnBefore - functions.length;
+    if (dropped > 0) {
+      console.log(`Excluded ${dropped} function(s) in excluded namespaces (no file emitted for them)`);
+    }
+  }
+
   // Initialize namespace collapsing with module names from project config
   const modules = options.projectConfig?.modules ?? {};
   setModuleNames(Object.keys(modules));

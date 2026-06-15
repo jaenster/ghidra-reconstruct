@@ -86,6 +86,7 @@ async function main() {
       decompileTimeout: 60,
       excludeLibraryCode: false,
       excludePatterns: [
+        /^compiler$/,
         /^VisualStudio$/,
         /^CRT$/,
         /^_Wrappers$/,
