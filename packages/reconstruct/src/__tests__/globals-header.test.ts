@@ -282,3 +282,19 @@ describe('array-suffix global names ("gFoo[91]")', () => {
     assert.strictEqual(generateExternDeclaration(g('gnSomething', 'int')), 'extern int gnSomething;');
   });
 });
+
+describe('CRT/EH-runtime metadata globals are excluded', () => {
+  const sym = (name: string, type: string): AnalyzedDataSymbol =>
+    ({ name, dataType: type, suggestedName: name, suggestedType: type, scope: 'global' } as unknown as AnalyzedDataSymbol);
+  const opts = { outputDir: '/tmp', projectName: 'X' } as unknown as ReconstructOptions & { projectName?: string };
+
+  it('drops a global whose type is an MSVC-EH internal (UnwindMapEntry) but keeps game globals', () => {
+    const dts = [{ name: 'UnwindMapEntry', category: '/', kind: 'TYPEDEF', size: 8 }] as unknown as ExtractedDataType[];
+    const header = generateGlobalsHeader(
+      [sym('gEhTable', 'UnwindMapEntry'), sym('gRealGlobal', 'int')],
+      opts, dts, new Map(),
+    );
+    assert.ok(!/UnwindMapEntry/.test(header), `EH metadata global leaked: ${header}`);
+    assert.ok(/\bgRealGlobal\b/.test(header), `Game global wrongly dropped: ${header}`);
+  });
+});

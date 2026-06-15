@@ -6,7 +6,7 @@
  */
 
 import type { AnalyzedDataSymbol, ReconstructOptions, DataValue, ExtractedDataType, ExtractedStruct, ExtractedEnum, ExtractedUnion, ExtractedFunctionDefinition } from '../types.js';
-import { isPlatformOrBuiltinType, isLibraryType, isStructType, castPointerInitializer, normalizeDataValue } from './platform-types.js';
+import { isPlatformOrBuiltinType, isLibraryType, isStructType, castPointerInitializer, normalizeDataValue, isMsvcEhInternal } from './platform-types.js';
 import { generateStructDeclaration, generateEnumDeclaration, generateUnionDeclaration, generateFunctionDefinitionDeclaration } from './header.js';
 
 /**
@@ -85,6 +85,18 @@ export function generateGlobalsHeader(
   // an error ("using typedef-name 'X' after 'struct'"). Recognised either by the
   // type's Ghidra category (a system-header path) or by a conservative Win32 name set.
   const isSkippableLibraryType = makeLibraryTypeSkipPredicate(dataTypes);
+
+  // Drop globals whose TYPE is an MSVC-EH internal (C++ exception-handling
+  // metadata: __ehfuncinfo$ etc. typed as FuncInfo / UnwindMapEntry /
+  // HandlerType / TryBlockMapEntry). No real header declares those types, so
+  // emitting these globals yields "X does not name a type" across every TU.
+  // NOTE: only EH internals — NOT Win32 SDK types (RGBQUAD, SYSTEMTIME, ...),
+  // which the real <windows.h> provides, so game globals typed as those stay.
+  globals = globals.filter(g => {
+    const base = (g.suggestedType || g.dataType || '')
+      .replace(/[*&]/g, '').replace(/\bconst\b/g, '').replace(/\[[^\]]*\]/g, '').trim();
+    return !isMsvcEhInternal(base);
+  });
 
   // Header comment
   lines.push('/**');

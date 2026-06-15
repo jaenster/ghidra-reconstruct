@@ -142,6 +142,16 @@ const EH_INTERNAL_TYPES = new Set<string>([
 const SYSTEM_HEADER_CATEGORY_RE = /^\/[A-Za-z0-9_]+\.h$/;
 
 /**
+ * MSVC C++ exception-handling internal type (FuncInfo, UnwindMapEntry, ...).
+ * Unlike Win32 SDK types (RGBQUAD, SYSTEMTIME), these are NOT declared by any
+ * real header (windows.h/CRT) — so anything typed as one cannot compile and
+ * must be dropped, not merely left to the SDK.
+ */
+export function isMsvcEhInternal(name: string): boolean {
+  return EH_INTERNAL_TYPES.has(name);
+}
+
+/**
  * Decide whether a data type is a "library type" — i.e. provided by the real
  * Win32 SDK / C runtime on Windows, NOT by us.
  *
