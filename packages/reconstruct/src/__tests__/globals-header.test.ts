@@ -5,8 +5,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 
-import { isSwitchTableSymbol, isJumpTableArtifact, generateGlobalsHeader } from '../codegen/globals-header.js';
-import type { AnalyzedDataSymbol, ReconstructOptions } from '../types.js';
+import { isSwitchTableSymbol, isJumpTableArtifact, generateGlobalsHeader, generateExternDeclaration } from '../codegen/globals-header.js';
+import type { AnalyzedDataSymbol, ReconstructOptions, ExtractedDataType } from '../types.js';
 
 const defaultOptions: ReconstructOptions & { projectName?: string; binaryName?: string } = {
   outputDir: '/tmp/test',
@@ -154,5 +154,131 @@ describe('isJumpTableArtifact', () => {
     const header = generateGlobalsHeader(globals, defaultOptions);
     assert.ok(!header.includes('gaExcelFieldTypeDefaultWriters'), `Jump table artifact leaked into header: ${header}`);
     assert.ok(header.includes('gnRealGlobal'), `Real global missing from header: ${header}`);
+  });
+});
+
+describe('Win32 library type forward declarations', () => {
+  it('should NOT forward-declare a library type resolved via dataTypes category', () => {
+    const globals: AnalyzedDataSymbol[] = [
+      makeSymbol({
+        name: 'gpWsaData',
+        suggestedName: 'gpWsaData',
+        dataType: 'LPWSADATA',
+        suggestedType: 'LPWSADATA',
+        size: 4,
+        scope: 'global',
+        referencingFunctions: ['NET_Init', 'NET_Shutdown'],
+      }),
+    ];
+    const dataTypes: ExtractedDataType[] = [
+      // category is a system-header path → isLibraryType() true
+      { name: 'LPWSADATA', category: '/winsock.h', kind: 'TYPEDEF' } as unknown as ExtractedDataType,
+    ];
+
+    const header = generateGlobalsHeader(globals, defaultOptions, dataTypes);
+    assert.ok(!/\bstruct\s+LPWSADATA;/.test(header), `Library typedef forward-declared: ${header}`);
+    assert.ok(header.includes('gpWsaData'), `Global missing: ${header}`);
+  });
+
+  it('should NOT forward-declare a known Win32 typedef even without a dataTypes entry', () => {
+    const globals: AnalyzedDataSymbol[] = [
+      makeSymbol({
+        name: 'gpRgb',
+        suggestedName: 'gpRgb',
+        dataType: 'RGBQUAD *',
+        suggestedType: 'RGBQUAD *',
+        size: 4,
+        scope: 'global',
+        referencingFunctions: ['GFX_Blit', 'GFX_Palette'],
+      }),
+      makeSymbol({
+        name: 'gpNtHeaders',
+        suggestedName: 'gpNtHeaders',
+        dataType: 'IMAGE_NT_HEADERS32 *',
+        suggestedType: 'IMAGE_NT_HEADERS32 *',
+        size: 4,
+        scope: 'global',
+        referencingFunctions: ['PE_Parse', 'PE_Load'],
+      }),
+    ];
+
+    // No dataTypes passed — relies on isKnownWin32Typedef fallback
+    const header = generateGlobalsHeader(globals, defaultOptions);
+    assert.ok(!/\bstruct\s+RGBQUAD;/.test(header), `RGBQUAD forward-declared: ${header}`);
+    assert.ok(!/\bstruct\s+IMAGE_NT_HEADERS32;/.test(header), `IMAGE_* forward-declared: ${header}`);
+  });
+
+  it('should still forward-declare a normal D2 game type (not a library type)', () => {
+    const globals: AnalyzedDataSymbol[] = [
+      makeSymbol({
+        name: 'gpUnit',
+        suggestedName: 'gpUnit',
+        dataType: 'D2UnitStrc *',
+        suggestedType: 'D2UnitStrc *',
+        size: 4,
+        scope: 'global',
+        referencingFunctions: ['UNIT_Init', 'UNIT_Free'],
+      }),
+    ];
+    const header = generateGlobalsHeader(globals, defaultOptions);
+    assert.ok(/\bstruct\s+D2UnitStrc;/.test(header), `D2 game type not forward-declared: ${header}`);
+  });
+});
+
+describe('namespace-vs-global collision (IsRecording)', () => {
+  it('should not emit a namespace named after a global variable', () => {
+    const globals: AnalyzedDataSymbol[] = [
+      // The BOOL global itself, living under the parent namespace.
+      makeSymbol({
+        name: 'IsRecording',
+        suggestedName: 'IsRecording',
+        dataType: 'BOOL',
+        suggestedType: 'BOOL',
+        size: 4,
+        scope: 'global',
+        namespace: 'D2Game::Game::Record',
+        referencingFunctions: ['REC_Start', 'REC_Stop'],
+      }),
+      // A symbol whose Ghidra namespace appends the global's own name —
+      // would otherwise emit `namespace IsRecording { ... }` and collide.
+      makeSymbol({
+        name: 'gFrameCounter',
+        suggestedName: 'gFrameCounter',
+        dataType: 'int',
+        suggestedType: 'int',
+        size: 4,
+        scope: 'global',
+        namespace: 'D2Game::Game::Record::IsRecording',
+        referencingFunctions: ['REC_Tick'],
+      }),
+    ];
+
+    const header = generateGlobalsHeader(globals, defaultOptions);
+    assert.ok(!/namespace\s+IsRecording\b/.test(header), `Namespace collides with global: ${header}`);
+    assert.ok(/extern\s+BOOL\s+IsRecording;/.test(header), `BOOL global declaration missing: ${header}`);
+    assert.ok(header.includes('gFrameCounter'), `Inner symbol dropped: ${header}`);
+  });
+});
+
+describe('array-suffix global names ("gFoo[91]")', () => {
+  const g = (name: string, type: string): AnalyzedDataSymbol =>
+    ({ name, dataType: type, suggestedName: name, suggestedType: type } as unknown as AnalyzedDataSymbol);
+
+  it('emits a real array declaration instead of dropping it as invalid', () => {
+    assert.strictEqual(
+      generateExternDeclaration(g('gdwFogMemoryAllocFlags[91]', 'uint32_t')),
+      'extern uint32_t gdwFogMemoryAllocFlags[91];'
+    );
+  });
+
+  it('still skips genuinely invalid (RTTI/template) names', () => {
+    assert.match(
+      generateExternDeclaration(g('class_TSHashTable<struct_X>_RTTI', 'int')),
+      /^\/\/ skipped:/
+    );
+  });
+
+  it('leaves a plain global unchanged', () => {
+    assert.strictEqual(generateExternDeclaration(g('gnSomething', 'int')), 'extern int gnSomething;');
   });
 });
