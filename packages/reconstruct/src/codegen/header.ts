@@ -21,7 +21,7 @@ import type {
 import type { MethodConversionRegistry } from '../methods/index.js';
 import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js';
 import { isGhidraGeneratedName, suggestBetterName } from '@ghidra-mcp/cpp-parser';
-import { isPlatformOrBuiltinType, normalizeSignatureType, WINDOWS_STRUCTS } from './platform-types.js';
+import { isPlatformOrBuiltinType, isLibraryType, normalizeSignatureType, WINDOWS_STRUCTS } from './platform-types.js';
 import { generateExternDeclaration } from './globals-header.js';
 
 /**
@@ -175,10 +175,63 @@ export function generateHeader(
   // Track emitted constexpr names to avoid duplicates across enum types
   const emittedConstexprNames = new Set<string>();
 
+  // Emit a single type's full definition into `out` (handles class/struct/enum
+  // special-casing). Returns true if the emitted type was the class struct.
+  const emitTypeDefinition = (type: ExtractedDataType, out: string[]): boolean => {
+    // If this is the class type, emit it as a class declaration (with methods)
+    if (classInfo && type.name === classInfo.name) {
+      if ((!classInfo.fields || classInfo.fields.length === 0) && 'fields' in type) {
+        classInfo.fields = (type as ExtractedStruct).fields;
+      }
+      out.push(generateClassDeclaration(classInfo, functions, options, methodConversions, true, allFunctions));
+      out.push('');
+      return true;
+    }
+    // If this struct type matches a method-converted class (not already handled above),
+    // emit it as a class declaration so that method declarations are included.
+    // This handles the case where functions are namespaced to a different unit than
+    // the struct they extend (e.g., Fog::BitBuffer functions → D2BitBufferStrc methods).
+    if (type.kind === 'STRUCTURE' && allClasses && type.name !== classInfo?.name) {
+      const matchingClass = allClasses.find(c => c.name === type.name && c.methods.length > 0);
+      if (matchingClass) {
+        if ((!matchingClass.fields || matchingClass.fields.length === 0) && 'fields' in type) {
+          matchingClass.fields = (type as ExtractedStruct).fields;
+        }
+        out.push(generateClassDeclaration(matchingClass, functions, options, methodConversions, true, allFunctions));
+        out.push('');
+        return false;
+      }
+    }
+    let decl = generateDataTypeDeclaration(type, options);
+    // Deduplicate constexpr names across enum types
+    if (type.kind === 'ENUM') {
+      decl = decl.split('\n').filter(line => {
+        const m = line.match(/^constexpr\s+\S+\s+(\w+)/);
+        if (m) {
+          if (emittedConstexprNames.has(m[1])) return false;
+          emittedConstexprNames.add(m[1]);
+        }
+        return true;
+      }).join('\n');
+    }
+    out.push(decl);
+    out.push('');
+    return false;
+  };
+
   if (typesToEmit.length > 0) {
     lines.push('// Data types');
+    // Partition into normal vs library types. Library types (CRT / Win32 / MSVC-EH
+    // internals Ghidra pulled in from the statically-linked CRT) get their full
+    // DEFINITIONS guarded behind #ifndef _WIN32, because the real SDK / CRT that
+    // d2_platform.h includes provides them on Windows — re-emitting collides.
+    // Topological ordering is preserved within each partition (stable filter of
+    // the already-sorted list); forward declarations above stay unguarded.
+    const normalTypes = typesToEmit.filter(t => !isLibraryType(t.name, t.category));
+    const libraryTypes = typesToEmit.filter(t => isLibraryType(t.name, t.category));
+
     let currentIfdef: string | undefined;
-    for (const type of typesToEmit) {
+    for (const type of normalTypes) {
       // Wrap platform-specific types in #ifdef guards
       if (type.ifdef !== currentIfdef) {
         if (currentIfdef) {
@@ -190,48 +243,20 @@ export function generateHeader(
         }
         currentIfdef = type.ifdef;
       }
-      // If this is the class type, emit it as a class declaration (with methods)
-      if (classInfo && type.name === classInfo.name) {
-        if ((!classInfo.fields || classInfo.fields.length === 0) && 'fields' in type) {
-          classInfo.fields = (type as ExtractedStruct).fields;
-        }
-        lines.push(generateClassDeclaration(classInfo, functions, options, methodConversions, true, allFunctions));
-        lines.push('');
-        classEmittedInTopoSort = true;
-        continue;
-      }
-      // If this struct type matches a method-converted class (not already handled above),
-      // emit it as a class declaration so that method declarations are included.
-      // This handles the case where functions are namespaced to a different unit than
-      // the struct they extend (e.g., Fog::BitBuffer functions → D2BitBufferStrc methods).
-      if (type.kind === 'STRUCTURE' && allClasses && type.name !== classInfo?.name) {
-        const matchingClass = allClasses.find(c => c.name === type.name && c.methods.length > 0);
-        if (matchingClass) {
-          if ((!matchingClass.fields || matchingClass.fields.length === 0) && 'fields' in type) {
-            matchingClass.fields = (type as ExtractedStruct).fields;
-          }
-          lines.push(generateClassDeclaration(matchingClass, functions, options, methodConversions, true, allFunctions));
-          lines.push('');
-          continue;
-        }
-      }
-      let decl = generateDataTypeDeclaration(type, options);
-      // Deduplicate constexpr names across enum types
-      if (type.kind === 'ENUM') {
-        decl = decl.split('\n').filter(line => {
-          const m = line.match(/^constexpr\s+\S+\s+(\w+)/);
-          if (m) {
-            if (emittedConstexprNames.has(m[1])) return false;
-            emittedConstexprNames.add(m[1]);
-          }
-          return true;
-        }).join('\n');
-      }
-      lines.push(decl);
-      lines.push('');
+      if (emitTypeDefinition(type, lines)) classEmittedInTopoSort = true;
     }
     if (currentIfdef) {
       lines.push(`#endif // ${currentIfdef}`);
+      lines.push('');
+    }
+
+    if (libraryTypes.length > 0) {
+      lines.push('#ifndef _WIN32  // provided by the Win32 SDK / CRT on Windows');
+      lines.push('');
+      for (const type of libraryTypes) {
+        if (emitTypeDefinition(type, lines)) classEmittedInTopoSort = true;
+      }
+      lines.push('#endif // _WIN32');
       lines.push('');
     }
   }

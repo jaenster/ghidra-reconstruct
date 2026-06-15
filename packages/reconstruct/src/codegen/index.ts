@@ -233,20 +233,39 @@ export function generateProject(
     // Values go in a per-enum namespace with `using namespace` to avoid name collisions
     // between enums that share value names (e.g. Death in both player and monster anim modes).
     const emittedNames = new Set<string>();
+    // Win32/CRT/compiler constants that Ghidra swept into enums collide with the
+    // real <windows.h>/<winnt.h> macros. Under _WIN32 the platform headers own
+    // them; emit our copies only when building without the SDK (non-_WIN32).
+    //   - `define_*` enums are recovered preprocessor #defines
+    //     (TRUE, WINVER, _M_IX86, _MSC_VER, the SAL annotation switches...)
+    //   - IMAGE_* values are PE-format section/header constants from <winnt.h>
+    const isPlatformEnumValue = (enumName: string, valueName: string): boolean =>
+      /^define_/.test(enumName) || /^IMAGE_[A-Z]/.test(valueName);
     for (const e of enumTypes) {
       if (isPlatformOrBuiltinType(e.name)) continue;
       if (/[^a-zA-Z0-9_]/.test(e.name)) continue;
       enumLines.push(`typedef int ${e.name};`);
       if (e.values.length > 0) {
-        enumLines.push(`namespace ${e.name}_ns {`);
+        const normalLines: string[] = [];
+        const platformLines: string[] = [];
         for (const v of e.values) {
           if (emittedNames.has(v.name)) continue;
           emittedNames.add(v.name);
           const comment = v.comment ? ` // ${v.comment.replace(/\\n/g, ' ')}` : '';
-          enumLines.push(`constexpr ${e.name} ${v.name} = ${v.value};${comment}`);
+          const line = `constexpr ${e.name} ${v.name} = ${v.value};${comment}`;
+          (isPlatformEnumValue(e.name, v.name) ? platformLines : normalLines).push(line);
         }
-        enumLines.push('}');
-        enumLines.push(`using namespace ${e.name}_ns;`);
+        if (normalLines.length > 0 || platformLines.length > 0) {
+          enumLines.push(`namespace ${e.name}_ns {`);
+          enumLines.push(...normalLines);
+          if (platformLines.length > 0) {
+            enumLines.push('#ifndef _WIN32  // provided by <windows.h>/<winnt.h> on Windows');
+            enumLines.push(...platformLines);
+            enumLines.push('#endif');
+          }
+          enumLines.push('}');
+          enumLines.push(`using namespace ${e.name}_ns;`);
+        }
       }
       enumLines.push('');
     }
