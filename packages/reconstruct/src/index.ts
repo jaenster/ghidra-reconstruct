@@ -461,7 +461,10 @@ export async function reconstruct(
       buildInfo: project.buildInfo,
     };
   } catch (error) {
-    errors.push(error instanceof Error ? error.message : String(error));
+    // Capture the full stack (not just the message) so codegen crashes are
+    // diagnosable from the result alone — the live regen is long and blind,
+    // and a bare message rarely points at the failing pass.
+    errors.push(error instanceof Error ? (error.stack ?? error.message) : String(error));
 
     return {
       success: false,

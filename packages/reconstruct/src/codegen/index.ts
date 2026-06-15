@@ -93,6 +93,23 @@ export function generateProject(
   const files = new Map<string, SourceFile>();
   const sourceMaps = new Map<string, SourceMap>();
 
+  // Defensive: a datatype can reach codegen with its detail array undefined —
+  // a type whose detail fetch was skipped/failed leaves the shallow listing
+  // entry (no fields/values/parameters). Normalize every kind's array once here
+  // so every downstream consumer may assume the array exists.
+  for (const dt of dataTypes) {
+    if (dt.kind === 'STRUCTURE' || dt.kind === 'UNION') {
+      const s = dt as ExtractedStruct;
+      if (!Array.isArray(s.fields)) s.fields = [];
+    } else if (dt.kind === 'ENUM') {
+      const e = dt as import('../types.js').ExtractedEnum;
+      if (!Array.isArray(e.values)) e.values = [];
+    } else if (dt.kind === 'FUNCTION_DEFINITION') {
+      const f = dt as import('../types.js').ExtractedFunctionDefinition;
+      if (!Array.isArray(f.parameters)) f.parameters = [];
+    }
+  }
+
   // Initialize namespace collapsing with module names from project config
   const modules = options.projectConfig?.modules ?? {};
   setModuleNames(Object.keys(modules));
@@ -907,6 +924,7 @@ export function buildBitfieldCatalog(dataTypes: ExtractedDataType[]): Map<string
   for (const dt of dataTypes) {
     if (dt.kind !== 'STRUCTURE') continue;
     const struct = dt as ExtractedStruct;
+    if (!Array.isArray(struct.fields)) continue;
 
     // First pass: record every byte covered by a non-bitfield field in this struct.
     for (const f of struct.fields) {

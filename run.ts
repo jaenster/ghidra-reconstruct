@@ -132,7 +132,10 @@ async function main() {
     }
     if (result.warnings.length) console.log(`  Warnings: ${result.warnings.length}`);
   } else {
+    // `result.errors` carries full stacks (see reconstruct's catch); print them
+    // so a crash in this long regen is diagnosable without a re-run.
     console.error('Reconstruction FAILED:', result.error ?? '(no error field)');
+    if (result.errors?.length) console.error('errors:\n' + result.errors.join('\n---\n'));
     process.exit(1);
   }
 }
