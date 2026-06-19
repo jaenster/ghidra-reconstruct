@@ -298,3 +298,56 @@ describe('CRT/EH-runtime metadata globals are excluded', () => {
     assert.ok(/\bgRealGlobal\b/.test(header), `Game global wrongly dropped: ${header}`);
   });
 });
+
+describe('referenced-but-undeclared globals safety net', () => {
+  it('emits an extern for a static-local symbol named in >1 function body', () => {
+    const globals: AnalyzedDataSymbol[] = [
+      makeSymbol({
+        name: 'gdwUnitItemPropertyByIndex',
+        suggestedName: 'gdwUnitItemPropertyByIndex',
+        suggestedType: 'uint32_t',
+        scope: 'static-local',
+        ownerFunction: 'OwnerFn',
+      }),
+    ];
+    const counts = new Map<string, number>([['gdwUnitItemPropertyByIndex', 3]]);
+    const header = generateGlobalsHeader(globals, defaultOptions, undefined, undefined, undefined, counts);
+    assert.ok(/Globals recovered from multi-function body references/.test(header),
+      'recovered section header missing');
+    assert.ok(/extern\s+uint32_t\s+gdwUnitItemPropertyByIndex;/.test(header),
+      `recovered extern missing: ${header}`);
+  });
+
+  it('does NOT emit an extern for a static-local named in only 1 body', () => {
+    const globals: AnalyzedDataSymbol[] = [
+      makeSymbol({
+        name: 'gdwSingleBodyLocal',
+        suggestedName: 'gdwSingleBodyLocal',
+        suggestedType: 'uint32_t',
+        scope: 'static-local',
+        ownerFunction: 'OwnerFn',
+      }),
+    ];
+    const counts = new Map<string, number>([['gdwSingleBodyLocal', 1]]);
+    const header = generateGlobalsHeader(globals, defaultOptions, undefined, undefined, undefined, counts);
+    assert.ok(!/gdwSingleBodyLocal/.test(header),
+      `single-body static-local should not be declared: ${header}`);
+  });
+
+  it('does NOT double-emit a symbol already emitted as a global extern', () => {
+    const globals: AnalyzedDataSymbol[] = [
+      makeSymbol({
+        name: 'gAlreadyGlobal',
+        suggestedName: 'gAlreadyGlobal',
+        suggestedType: 'int',
+        scope: 'global',
+      }),
+    ];
+    const counts = new Map<string, number>([['gAlreadyGlobal', 5]]);
+    const header = generateGlobalsHeader(globals, defaultOptions, undefined, undefined, undefined, counts);
+    const occurrences = (header.match(/extern\s+int\s+gAlreadyGlobal;/g) || []).length;
+    assert.equal(occurrences, 1, `expected single extern, got ${occurrences}: ${header}`);
+    assert.ok(!/Globals recovered from multi-function body references/.test(header),
+      'recovered section should be absent when nothing to recover');
+  });
+});

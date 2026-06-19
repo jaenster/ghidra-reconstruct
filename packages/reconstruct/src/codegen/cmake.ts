@@ -55,10 +55,14 @@ export function generateCMakeLists(
 
   // Compiler flags for decompiled code
   lines.push('# Flags for Ghidra-decompiled code (32-bit Win32 binary)');
+  lines.push('# -fpermissive: the decompiler drops the explicit casts the original C++');
+  lines.push('# had, so implicit conversions (void* allocator returns -> typed pointers,');
+  lines.push('# integer<->pointer) read as hard errors under strict C++. Downgrade them to');
+  lines.push('# warnings (then silenced by -w) so genuine type-holes remain the signal.');
   lines.push('if(MSVC)');
   lines.push('    add_compile_options(/W0)');
   lines.push('else()');
-  lines.push('    add_compile_options(-w -fms-extensions)');
+  lines.push('    add_compile_options(-w -fms-extensions -fpermissive)');
   lines.push('endif()');
   lines.push('');
 
@@ -267,10 +271,12 @@ export function generateTopLevelCMake(
   lines.push('');
 
   lines.push('# Flags for Ghidra-decompiled code (32-bit Win32 binary)');
+  lines.push('# -fpermissive: decompiler-dropped casts make implicit void*/integer<->pointer');
+  lines.push('# conversions read as errors under strict C++; downgrade to (silenced) warnings.');
   lines.push('if(MSVC)');
   lines.push('    add_compile_options(/W0)');
   lines.push('else()');
-  lines.push('    add_compile_options(-w -fms-extensions)');
+  lines.push('    add_compile_options(-w -fms-extensions -fpermissive)');
   lines.push('endif()');
   lines.push('');
 

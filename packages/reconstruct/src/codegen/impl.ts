@@ -51,6 +51,77 @@ import type { LibraryRegistry } from '../library/index.js';
 import type { MethodConversionRegistry, MethodCallMapping } from '../methods/index.js';
 import { applyPatches } from '../overrides/patches.js';
 
+/**
+ * Synthesize declarations for `_<base>` storage-slot locals Ghidra references
+ * but never declares.
+ *
+ * Ghidra's decompiler sometimes reuses a parameter/local's STORAGE SLOT as a
+ * fresh local after the original value is dead, naming it `_<base>` (one leading
+ * underscore over the original `<base>`). It emits no declaration for it, so the
+ * copied-verbatim body USES `_<base>` but never DECLARES it → a compile error
+ * ("'_foo' was not declared in this scope; did you mean 'foo'?").
+ *
+ * For every `_<base>` that is (a) used in the body, (b) not already declared
+ * (not a param, not a body-declared local), and (c) whose `<base>` resolves to a
+ * known parameter or local, we prepend `<baseType> _<base>;` to the body, reusing
+ * the base's type (falling back to `int` when it can't be resolved).
+ *
+ * Deliberately skips `_DAT_*` / `_LAB_*` and any `_<base>` whose base is unknown
+ * — those are globals/labels handled by globals.h / the safety net, not slot reuse.
+ */
+function declareUnderscoreSlotLocals(
+  body: string,
+  func: ExtractedFunction
+): string {
+  // Type by name for params and decompiler-declared locals.
+  const typeByName = new Map<string, string>();
+  for (const p of func.parameters ?? []) {
+    const n = cleanParamName(p.name);
+    if (n && p.dataType) typeByName.set(n, p.dataType);
+  }
+  for (const v of func.localVariables ?? []) {
+    if (v.name && v.dataType && !typeByName.has(v.name)) typeByName.set(v.name, v.dataType);
+  }
+
+  // Names declared inline in the body text (`  type name;` / `type name [= ...];`).
+  // Also feeds the type map for locals not present in func.localVariables.
+  const declaredInBody = new Set<string>();
+  const declRe = /^[ \t]*([A-Za-z_][\w:<>,* ]*?[ *])([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?\s*(?:=|;)/gm;
+  let dm: RegExpExecArray | null;
+  while ((dm = declRe.exec(body)) !== null) {
+    const declType = dm[1].trim();
+    const declName = dm[2];
+    // Filter out control-flow / call statements masquerading as declarations.
+    if (/^(if|for|while|switch|return|do|else|case|goto|sizeof)$/.test(declName)) continue;
+    declaredInBody.add(declName);
+    if (!typeByName.has(declName)) typeByName.set(declName, declType);
+  }
+
+  const declared = new Set<string>([...typeByName.keys(), ...declaredInBody]);
+
+  // Collect `_<base>` identifiers actually referenced in the body.
+  const synth = new Map<string, string>(); // name → type
+  const useRe = /\b(_[A-Za-z_]\w*)\b/g;
+  let um: RegExpExecArray | null;
+  while ((um = useRe.exec(body)) !== null) {
+    const name = um[1];
+    if (declared.has(name) || synth.has(name)) continue;
+    const base = name.slice(1); // strip ONE leading underscore
+    // Skip globals/labels: _DAT_*, _LAB_*, and bases that aren't known params/locals.
+    if (base.startsWith('DAT_') || base.startsWith('LAB_')) continue;
+    if (!declared.has(base)) continue;
+    const baseType = typeByName.get(base) ?? 'int';
+    synth.set(name, baseType);
+  }
+
+  if (synth.size === 0) return body;
+
+  const decls = [...synth.entries()]
+    .map(([name, type]) => `    ${type} ${name};`)
+    .join('\n');
+  return `${decls}\n${body}`;
+}
+
 // ── Parse error logging ─────────────────────────────────────────────────────
 
 let parseErrorLogPath: string | null = null;
@@ -239,6 +310,14 @@ export interface ImplGenContext {
   _preambles?: Set<string>;
   /** Enum type names moved to shared d2_enums.h — skip in per-file headers */
   _sharedEnumTypes?: Set<string>;
+  /**
+   * Full set of namespace paths that exist in the project (e.g.
+   * "D2Common::Unit::Path", "D2Common::Path::DynamicPath"). Used to make
+   * redundant-qualifier stripping collision-aware: a prefix is only stripped
+   * if the remaining leading segment can't be captured by a sibling namespace
+   * reachable from a deeper enclosing scope.
+   */
+  knownNamespaces?: Set<string>;
   /** Map from function address (bigint) to function name for pointer literal resolution */
   functionAddressMap?: Map<bigint, string>;
   /** Map from function name to its header path — for adding includes when func-ptr-literal resolves references */
@@ -251,6 +330,13 @@ export interface ImplGenContext {
   _buildInfo?: import('../modules/buildinfo.js').BuildInfo;
   /** Internal: accumulated identifiers from all function bodies in the current file */
   _fileIdentifiers?: Set<string>;
+  /**
+   * Internal: for each body identifier, how many distinct function bodies (across
+   * ALL files) reference it. Drives the globals.h "referenced-but-undeclared"
+   * safety net — a static-local symbol named in >1 body needs an extern so those
+   * other bodies compile. Unlike `_fileIdentifiers`, this is NOT reset per file.
+   */
+  bodyIdentifierFnCounts?: Map<string, number>;
 }
 
 /**
@@ -565,7 +651,7 @@ export function generateImplementation(
 
   // Strip redundant namespace qualifiers from function bodies
   if (useNamespace && namespace) {
-    output = stripRedundantNamespaceQualifiers(output, namespace);
+    output = stripRedundantNamespaceQualifiers(output, namespace, context?.knownNamespaces);
   }
 
   // Prepend any accumulated preambles (deduplicated inline helpers, etc.)
@@ -749,6 +835,10 @@ export function generateFunctionImplementation(
     body = body.replace(/\breturn\s+nullptr\b/g, 'return 0');
   }
 
+  // Synthesize declarations for `_<base>` storage-slot locals Ghidra references
+  // but never declares (else the body uses an undeclared identifier → compile error).
+  body = declareUnderscoreSlotLocals(body, func);
+
   // Add function body
   lines.push(body);
   lines.push('}');
@@ -757,6 +847,12 @@ export function generateFunctionImplementation(
   if (bodyIdentifiers && context) {
     if (!context._fileIdentifiers) context._fileIdentifiers = new Set();
     for (const id of bodyIdentifiers) context._fileIdentifiers.add(id);
+    // Cross-file tally: count how many distinct function bodies name each
+    // identifier. `bodyIdentifiers` is one set per function, so a single bump
+    // per id here equals one referencing function body.
+    if (!context.bodyIdentifierFnCounts) context.bodyIdentifierFnCounts = new Map();
+    const counts = context.bodyIdentifierFnCounts;
+    for (const id of bodyIdentifiers) counts.set(id, (counts.get(id) ?? 0) + 1);
   }
 
   let result = lines.join('\n');
@@ -883,21 +979,54 @@ function collapseConsecutiveDuplicateQualifiers(code: string): string {
 /**
  * Strip namespace prefixes that are redundant inside the enclosing namespace block.
  * Inside `namespace A::B::C`, `A::B::C::Foo()` → `Foo()`, `A::B::X()` → `X()`, etc.
+ *
+ * Stripping is collision-aware: removing a prefix is only safe if the segment that
+ * becomes the new leading qualifier cannot be intercepted by a sibling namespace
+ * reachable from a deeper enclosing scope. For example, inside
+ * `D2Common::Unit::Monster`, the reference `D2Common::Path::DynamicPath::GetYPos`
+ * must NOT be shortened to `Path::DynamicPath::...` when `D2Common::Unit::Path`
+ * exists, because C++ would resolve `Path` to `D2Common::Unit::Path` (which has no
+ * `DynamicPath`) instead of `D2Common::Path`. In that case the longest safely
+ * strippable prefix is `D2Common::Unit::` → but that doesn't match here, so the
+ * reference is left fully qualified.
  */
-function stripRedundantNamespaceQualifiers(code: string, namespace: string): string {
+function stripRedundantNamespaceQualifiers(
+  code: string,
+  namespace: string,
+  knownNamespaces?: Set<string>,
+): string {
   const parts = namespace.split('::');
-  // Build prefix list from longest to shortest: ["A::B::C::", "A::B::", "A::"]
-  const prefixes: string[] = [];
+  // Candidate prefixes from longest to shortest: ["A::B::C::", "A::B::", "A::"]
+  const prefixCandidates: string[] = [];
   for (let i = parts.length; i > 0; i--) {
-    prefixes.push(parts.slice(0, i).join('::') + '::');
+    prefixCandidates.push(parts.slice(0, i).join('::') + '::');
   }
-  // Escape for regex and build alternation (longest first for greedy match)
-  const escaped = prefixes.map(p => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-  const pattern = new RegExp(`\\b(${escaped.join('|')})`, 'g');
-  // Only strip inside function bodies, not on namespace/comment lines
+  const escaped = prefixCandidates.map(p => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  // Capture the prefix AND the next segment so we can verify the shortened name
+  // still resolves to the same namespace.
+  const pattern = new RegExp(`\\b(${escaped.join('|')})([A-Za-z_]\\w*)`, 'g');
+
+  /**
+   * Is it safe to strip `prefix` (= parts[0..k]::) leaving `nextSeg` as the new
+   * leading qualifier? Unsafe when a deeper enclosing scope (parts[0..j], j>k)
+   * has a child namespace also named `nextSeg` — C++ would bind to that first.
+   */
+  const canStrip = (prefix: string, nextSeg: string): boolean => {
+    if (!knownNamespaces) return true;
+    // k = number of leading parts the prefix covers
+    const k = prefix.slice(0, -2).split('::').length;
+    for (let j = k + 1; j <= parts.length; j++) {
+      const sibling = parts.slice(0, j).join('::') + '::' + nextSeg;
+      if (knownNamespaces.has(sibling)) return false;
+    }
+    return true;
+  };
+
   return code.split('\n').map(line => {
     if (line.startsWith('namespace ') || line.startsWith('} // namespace')) return line;
-    return line.replace(pattern, '');
+    return line.replace(pattern, (match, prefix: string, nextSeg: string) =>
+      canStrip(prefix, nextSeg) ? nextSeg : match,
+    );
   }).join('\n');
 }
 

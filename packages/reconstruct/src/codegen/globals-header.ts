@@ -75,9 +75,20 @@ export function generateGlobalsHeader(
   globals: AnalyzedDataSymbol[],
   options: ReconstructOptions & { projectName?: string; binaryName?: string },
   dataTypes?: ExtractedDataType[],
-  typeOwnerMap?: Map<string, string>
+  typeOwnerMap?: Map<string, string>,
+  functionQualifiedNames?: Set<string>,
+  bodyIdentifierFnCounts?: Map<string, number>
 ): string {
   const lines: string[] = [];
+
+  // Qualified function names (namespace::name) emitted elsewhere as their own
+  // declarations. A data symbol can share its name with a function in the same
+  // namespace (e.g. D2Game::Game::Record::IsRecording is BOTH a function getter
+  // at 0x451980 and a backing-flag data label at 0x7a2784). Emitting an
+  // `extern BOOL IsRecording;` in that namespace redeclares the function
+  // ("redeclared as different kind of entity"), so the function wins and we
+  // suppress the colliding global.
+  const fnNames = functionQualifiedNames ?? new Set<string>();
 
   // Predicate: should we SKIP emitting a `struct X;` forward decl for this type?
   // True when the type is provided by the real Win32 SDK / CRT (pulled in by
@@ -303,6 +314,12 @@ export function generateGlobalsHeader(
         // Skip duplicate extern declarations (same name, different namespace scope already emitted)
         const qualifiedName = namespace ? `${namespace}::${global.suggestedName || global.name}` : (global.suggestedName || global.name);
         if (emittedGlobalNames.has(qualifiedName)) continue;
+        // Skip globals that collide with a same-named function in the same scope
+        // (the function declaration owns the name — see fnNames above).
+        if (fnNames.has(qualifiedName)) {
+          lines.push(`// skipped: ${qualifiedName} (collides with a function of the same name)`);
+          continue;
+        }
         emittedGlobalNames.add(qualifiedName);
         // Group consecutive globals with the same ifdef under one guard
         if (global.ifdef !== currentIfdef) {
@@ -326,6 +343,80 @@ export function generateGlobalsHeader(
         lines.push(`} // namespace ${namespace}`);
       }
       lines.push('');
+    }
+  }
+
+  // =============================================================================
+  // Safety net: globals referenced in multiple function bodies but NOT emitted
+  // above as a `scope==='global'` extern (e.g. classified `static-local` because
+  // Ghidra under-reported xrefs to a single owner, yet the decompiler still names
+  // the symbol in other bodies). Without a declaration those other TUs fail with
+  // "X was not declared in this scope". Emit a fallback extern for any analyzed
+  // symbol whose name is a valid identifier and appears in >1 function body.
+  // =============================================================================
+  if (bodyIdentifierFnCounts && bodyIdentifierFnCounts.size > 0) {
+    const recovered: AnalyzedDataSymbol[] = [];
+    const seen = new Set<string>();
+    for (const g of globals) {
+      if (g.scope === 'global') continue; // already handled above
+      if (isSwitchTableSymbol(g.suggestedName || g.name)) continue;
+      if (isJumpTableArtifact(g)) continue;
+      if (isArrayElementSymbol(g.suggestedName || g.name, allGlobalNames)) continue;
+
+      const rawName = g.suggestedName || g.name;
+      // Must be a valid C identifier (generateExternDeclaration would otherwise
+      // drop it; an invalid-name extern can't resolve a body reference anyway).
+      if (!/^[A-Za-z_]\w*$/.test(rawName)) continue;
+
+      // Skip self-redeclarations: a symbol whose type base equals its own name
+      // (e.g. an enum-typed global `eD2ApplicationMode eD2ApplicationMode`)
+      // would emit `extern eD2ApplicationMode eD2ApplicationMode;`, which
+      // redeclares the typedef as a variable ("redeclared as different kind of
+      // entity"). The original extern section never reaches these (they're not
+      // scope==='global'); don't resurrect them here.
+      const baseType = (g.suggestedType || g.dataType || '')
+        .replace(/[*&]/g, '').replace(/\bconst\b/g, '').replace(/\[[^\]]*\]/g, '')
+        .replace(/\s+\d+$/, '').trim();
+      if (baseType === rawName) continue;
+
+      // Bodies reference the symbol by its sanitized identifier (same rule the
+      // static-local injector uses). A valid identifier sanitizes to itself.
+      const count = bodyIdentifierFnCounts.get(rawName) ?? 0;
+      if (count <= 1) continue;
+
+      const qualifiedName = g.namespace ? `${g.namespace}::${rawName}` : rawName;
+      // Don't double-emit: already an extern above, or collides with a function.
+      if (emittedGlobalNames.has(qualifiedName)) continue;
+      if (fnNames.has(qualifiedName)) continue;
+      if (seen.has(qualifiedName)) continue;
+      seen.add(qualifiedName);
+      recovered.push(g);
+    }
+
+    if (recovered.length > 0) {
+      lines.push('// =============================================================================');
+      lines.push('// Globals recovered from multi-function body references');
+      lines.push('// (classified static-local by xref count, but named in other bodies too)');
+      lines.push('// =============================================================================');
+      lines.push('');
+
+      const recoveredByNamespace = groupByNamespace(recovered);
+      for (const [namespace, nsGlobals] of recoveredByNamespace) {
+        if (nsGlobals.length === 0) continue;
+        if (namespace && /[<>,*]/.test(namespace)) continue;
+        if (namespace) {
+          lines.push(`namespace ${namespace} {`);
+          lines.push('');
+        }
+        for (const global of nsGlobals) {
+          lines.push(generateExternDeclaration(global, options.includeAddressComments));
+        }
+        if (namespace) {
+          lines.push('');
+          lines.push(`} // namespace ${namespace}`);
+        }
+        lines.push('');
+      }
     }
   }
 

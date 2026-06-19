@@ -348,6 +348,14 @@ export function generateProject(
   // Wire analyzed globals into context for static-local injection
   context.analyzedGlobals = analyzedGlobals;
 
+  // Qualified names (namespace::name) of every emitted function. A data symbol
+  // can share its name with a function in the same namespace (getter + backing
+  // flag both named e.g. IsRecording); globals.h must not redeclare those.
+  const functionQualifiedNames = new Set<string>();
+  for (const f of functions) {
+    functionQualifiedNames.add(f.namespace ? `${f.namespace}::${f.name}` : f.name);
+  }
+
   // Check if we have target configuration
   const targetConfigs = options.projectConfig?.targets;
   const hasTargets = targetConfigs && Object.keys(targetConfigs).length > 0;
@@ -426,7 +434,7 @@ export function generateProject(
           ...options,
           projectName: name,
           binaryName: programInfo?.name,
-        }, dataTypes, mergedTypeOwnerMap);
+        }, dataTypes, mergedTypeOwnerMap, functionQualifiedNames, context.bodyIdentifierFnCounts);
 
         files.set(globalsPath!, {
           path: globalsPath!,
@@ -485,7 +493,7 @@ export function generateProject(
           ...options,
           projectName: name,
           binaryName: programInfo?.name,
-        }, dataTypes, flatTypeOwnerMap);
+        }, dataTypes, flatTypeOwnerMap, functionQualifiedNames, context.bodyIdentifierFnCounts);
 
         files.set('globals.h', {
           path: 'globals.h',
@@ -1219,6 +1227,21 @@ function generateFilesForFunctions(
   if (context.functionAddressMap) {
     context.functionNameToHeader = funcNameToHeaderPath;
   }
+
+  // Build the set of all namespace paths so body-qualifier stripping can avoid
+  // creating ambiguous references (e.g. shortening D2Common::Path::DynamicPath::Fn
+  // to Path::DynamicPath::Fn when a sibling D2Common::Unit::Path also exists).
+  const knownNamespaces = new Set<string>();
+  const registerNamespacePath = (full: string | undefined) => {
+    if (!full) return;
+    const segs = full.split('::').filter(Boolean);
+    for (let i = 1; i <= segs.length; i++) {
+      knownNamespaces.add(segs.slice(0, i).join('::'));
+    }
+  };
+  for (const ns of namespaces) registerNamespacePath(ns.fullPath ?? ns.name);
+  for (const func of functions) registerNamespacePath(func.namespace);
+  context.knownNamespaces = knownNamespaces;
 
   // ── Build module graph for include resolution ────────────────────────
   const moduleGraph = buildModuleGraph({

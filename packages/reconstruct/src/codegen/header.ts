@@ -123,7 +123,7 @@ export function generateHeader(
   // Forward declarations — skip types already fully defined via #includes (includedTypes).
   // Don't skip ownedTypes: they might not be emitted due to filtering, and need forward decl.
   const alreadyDefined = new Set<string>([...(includedTypes ?? [])]);
-  const forwardDecls = collectForwardDeclarations(functions, classInfo, dataTypes, classNames, alreadyDefined, ownedTypes);
+  const forwardDecls = collectForwardDeclarations(functions, classInfo, dataTypes, classNames, alreadyDefined, ownedTypes, allClasses, allFunctions);
   if (forwardDecls.length > 0) {
     lines.push('// Forward declarations');
     for (const decl of forwardDecls) {
@@ -767,9 +767,11 @@ function generateDataTypeDeclaration(
  *
  * - Adds `/* 0xNN *​/` offset prefix to each field
  * - Collapses consecutive unnamed `undefined` (1-byte) fields into `uint8_t _pad_0xNN[count]`
- * - Gives unnamed fields a `_pad_0xNN` name based on their offset
+ *   (genuine decompiler filler that bodies never reference)
+ * - Gives other unnamed members Ghidra's decompiler default name so body
+ *   references resolve: `field<i>` for unions, `field<i>_0x<off>` for structs
  */
-function emitFieldLines(fields: StructField[], lines: string[]): void {
+function emitFieldLines(fields: StructField[], lines: string[], isUnion = false): void {
   // Determine hex width from the largest offset (minimum 2 digits)
   const maxOffset = fields.length > 0 ? Math.max(...fields.map(f => f.offset)) : 0;
   const hexWidth = Math.max(2, maxOffset.toString(16).length);
@@ -836,9 +838,17 @@ function emitFieldLines(fields: StructField[], lines: string[]): void {
       rawFieldName = fieldNameArrayMatch[1];
       fieldNameArraySuffix = fieldNameArrayMatch[2];
     }
+    // Fallback name for an unnamed member must MATCH Ghidra's decompiler
+    // auto-name, because function bodies reference these members by that name:
+    //   - union member at ordinal i      → `field<i>`        (e.g. field0, field1)
+    //   - struct member at ordinal i/off → `field<i>_0x<off>` (e.g. field2_0x1f44)
+    // Ghidra uses lowercase, unpadded hex (Integer.toHexString) for the offset.
+    const ghidraDefaultName = isUnion
+      ? `field${i}`
+      : `field${i}_0x${field.offset.toString(16)}`;
     // Sanitize field names: replace spaces/invalid chars with underscores
-    let rawName = rawFieldName ? rawFieldName.replace(/[^a-zA-Z0-9_]/g, '_') : `_pad_${offsetHex}_${i}`;
-    if (!rawName) rawName = `_pad_${offsetHex}_${i}`;
+    let rawName = rawFieldName ? rawFieldName.replace(/[^a-zA-Z0-9_]/g, '_') : ghidraDefaultName;
+    if (!rawName) rawName = ghidraDefaultName;
     // Prefix names starting with a digit (e.g., "0x1B" → "field_0x1B") — invalid C++ identifiers
     if (/^\d/.test(rawName)) rawName = `field_${rawName}`;
     const type = normalizeUndefinedType(field.dataType, field.size);
@@ -1061,7 +1071,7 @@ export function generateUnionDeclaration(type: ExtractedUnion): string {
 
   lines.push(`union ${type.name} {`);
 
-  emitFieldLines(type.fields, lines);
+  emitFieldLines(type.fields, lines, /* isUnion */ true);
 
   lines.push('};');
 
@@ -1205,7 +1215,9 @@ function collectForwardDeclarations(
   dataTypes?: ExtractedDataType[],
   classNames?: Set<string>,
   alreadyDefined?: Set<string>,
-  ownedTypes?: Set<string>
+  ownedTypes?: Set<string>,
+  allClasses?: DetectedClass[],
+  allFunctions?: ExtractedFunction[]
 ): string[] {
   const declarations = new Set<string>();
 
@@ -1297,6 +1309,38 @@ function collectForwardDeclarations(
     }
   }
 
+  // Also scan methods emitted INTO a struct body. When functions are method-converted
+  // onto a struct (allClasses, e.g. D2QuestDataStrc.QUEST_SetStateAndBroadcast),
+  // generateClassDeclaration emits the method signature into the struct — so its
+  // parameter/return types (e.g. an fpExecuteOnUnitFunction* function-pointer param)
+  // need forward declarations / guarded typedefs too. The primary classInfo is handled
+  // above; this covers the secondary structs reached via allClasses.
+  if (allClasses) {
+    const fnByAddr = new Map<string, ExtractedFunction>();
+    for (const f of (allFunctions ?? functions)) {
+      if (f.address) fnByAddr.set(f.address, f);
+    }
+    for (const cls of allClasses) {
+      if (cls.name === classInfo?.name) continue; // already handled
+      if (!cls.methods || cls.methods.length === 0) continue;
+      for (const method of cls.methods) {
+        const func = fnByAddr.get(method.address);
+        if (!func) continue;
+        for (const param of func.parameters) {
+          for (const type of extractAllTypeRefs(param.dataType)) {
+            if (type !== cls.name) {
+              addForwardDeclaration(declarations, type, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes);
+            }
+          }
+        }
+        const returnType = extractClassName(func.returnType);
+        if (returnType && returnType !== cls.name) {
+          addForwardDeclaration(declarations, returnType, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes);
+        }
+      }
+    }
+  }
+
   return Array.from(declarations).sort();
 }
 
@@ -1337,11 +1381,17 @@ function addForwardDeclaration(
     declarations.add(`struct ${type};`);
   } else if (/^fn[A-Z]/.test(type) || /^fp[A-Z]/.test(type) || funcDefNames.has(type)) {
     const funcDef = funcDefMap.get(type);
-    if (funcDef) {
-      declarations.add(generateFunctionDefinitionDeclaration(funcDef));
-    }
-    // No fallback — function pointer typedefs can't be forward-declared generically
-    // without causing "typedef redefinition with different types" errors
+    // Guard the typedef with a per-name macro so the real signature (here) and
+    // an opaque fallback (in a header that lacks the FUNCTION_DEFINITION) can't
+    // both expand in one translation unit — first include wins, the rest skip.
+    // Without this, a function-pointer type used as a struct field/param but
+    // whose FUNCTION_DEFINITION isn't in this header's type set was emitted
+    // nowhere ("'fpExecuteOnUnitFunction' has not been declared").
+    const guard = `RECON_FPTD_${type}`;
+    const body = funcDef
+      ? generateFunctionDefinitionDeclaration(funcDef)
+      : `typedef void (*${type})();`;
+    declarations.add(`#ifndef ${guard}\n#define ${guard}\n${body}\n#endif`);
   } else {
     declarations.add(`struct ${type};`);
   }
