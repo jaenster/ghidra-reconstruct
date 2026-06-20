@@ -804,7 +804,9 @@ export function isFuncDefTypedefName(name: string): boolean {
     || /^fp[A-Z]/.test(name)
     || /^AI_/.test(name)
     || /^D2NET_/.test(name)
-    || /(?:Func|Callback|Handler)$/.test(name)
+    || /(?:Func|Callback|Handler|Action)$/.test(name)
+    || /_fn$/.test(name)
+    || /[a-z]Fn$/.test(name)
     || /Proc[A-Z]?$/.test(name);
 }
 
