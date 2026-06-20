@@ -762,6 +762,7 @@ export function isJumpTableArtifact(symbol: AnalyzedDataSymbol): boolean {
  * "int[10]"  + "counts"       → "int counts[10]"
  */
 export function normalizeArrayDeclaration(type: string, name: string): string {
+  type = stripFuncDefIndirection(type);
   // "TYPE[N] *" → pointer to array: "TYPE (*name)[N]"
   const ptrToArrayMatch = type.match(/^(.+?)((?:\[\d+\])+)\s*\*$/);
   if (ptrToArrayMatch) {
@@ -780,6 +781,31 @@ export function normalizeArrayDeclaration(type: string, name: string): string {
   const ptrArrayMatch = type.match(/^(.+?\*)\s*(\[.+\])$/);
   if (ptrArrayMatch) return `${ptrArrayMatch[1]} ${name}${ptrArrayMatch[2]}`;
   return `${type} ${name}`;
+}
+
+/**
+ * Function-pointer typedefs are emitted pointer-style (`typedef T (*Name)(...)`),
+ * so the C++ name already carries one level of indirection. Ghidra models a
+ * function pointer as `Name *`, which would render `T (**)(...)` — one pointer
+ * too many. Collapse that redundant level (incl. array forms `Name *[N]`) so a
+ * funcptr global/field matches initializers like `&Func`.
+ */
+export function stripFuncDefIndirection(type: string): string {
+  const m = type.match(/^(\w+)\s*\*\s*((?:\[\d+\])*)$/);
+  if (m && isFuncDefTypedefName(m[1])) {
+    return `${m[1]}${m[2]}`;
+  }
+  return type;
+}
+
+/** Name conventions for FunctionDefinition typedefs emitted by the codegen. */
+export function isFuncDefTypedefName(name: string): boolean {
+  return /^fn[A-Z]/.test(name)
+    || /^fp[A-Z]/.test(name)
+    || /^AI_/.test(name)
+    || /^D2NET_/.test(name)
+    || /(?:Func|Callback|Handler)$/.test(name)
+    || /Proc[A-Z]?$/.test(name);
 }
 
 /**

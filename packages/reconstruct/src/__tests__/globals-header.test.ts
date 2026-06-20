@@ -283,6 +283,35 @@ describe('array-suffix global names ("gFoo[91]")', () => {
   });
 });
 
+describe('function-pointer typedef globals collapse Ghidra double-indirection', () => {
+  const g = (name: string, type: string): AnalyzedDataSymbol =>
+    ({ name, dataType: type, suggestedName: name, suggestedType: type } as unknown as AnalyzedDataSymbol);
+
+  it('emits a single-pointer array of funcdef typedefs (assignable from &Func)', () => {
+    // Ghidra type is "D2SkillSrvStFunc *[91]" — array of function pointers. The
+    // C++ typedef is pointer-style, so the name already carries one indirection;
+    // the redundant "*" must be dropped or every "&Func" element mismatches.
+    assert.strictEqual(
+      generateExternDeclaration(g('SKILLSRVSTFUNCS', 'D2SkillSrvStFunc *[91]')),
+      'extern D2SkillSrvStFunc SKILLSRVSTFUNCS[91];'
+    );
+  });
+
+  it('collapses a scalar funcdef pointer global', () => {
+    assert.strictEqual(
+      generateExternDeclaration(g('pCurrentHandler', 'fpFlagOperations *')),
+      'extern fpFlagOperations pCurrentHandler;'
+    );
+  });
+
+  it('leaves a genuine pointer-to-struct array untouched', () => {
+    assert.strictEqual(
+      generateExternDeclaration(g('UNITS', 'D2UnitStrc *[91]')),
+      'extern D2UnitStrc * UNITS[91];'
+    );
+  });
+});
+
 describe('CRT/EH-runtime metadata globals are excluded', () => {
   const sym = (name: string, type: string): AnalyzedDataSymbol =>
     ({ name, dataType: type, suggestedName: name, suggestedType: type, scope: 'global' } as unknown as AnalyzedDataSymbol);

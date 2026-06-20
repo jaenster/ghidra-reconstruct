@@ -22,7 +22,7 @@ import type { MethodConversionRegistry } from '../methods/index.js';
 import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js';
 import { isGhidraGeneratedName, suggestBetterName } from '@ghidra-mcp/cpp-parser';
 import { isPlatformOrBuiltinType, isLibraryType, normalizeSignatureType, WINDOWS_STRUCTS } from './platform-types.js';
-import { generateExternDeclaration } from './globals-header.js';
+import { generateExternDeclaration, isFuncDefTypedefName } from './globals-header.js';
 
 /**
  * Clean a parameter name: apply the same renaming the body transform does
@@ -948,8 +948,8 @@ function normalizeFieldDeclaration(fieldType: string, fieldName: string, fieldSi
 
   // Fix function pointer typedef double-indirection: "fnFoo *" → "fnFoo"
   // Ghidra stores function pointer fields as "fnFoo *" but fnFoo is already a pointer typedef
-  const funcPtrMatch = type.match(/^(fn[A-Z]\w*|fp[A-Z]\w*|D2\w+Func|D2\w+Callback|D2\w+Handler|AI_\w+|D2NET_\w+|D2\w+DoFunc|D2\w+StFunc|D2\w+HitFunc|D2\w+DmgFunc|GrProc)\s*\*$/);
-  if (funcPtrMatch) {
+  const funcPtrMatch = type.match(/^(\w+)\s*\*$/);
+  if (funcPtrMatch && isFuncDefTypedefName(funcPtrMatch[1])) {
     type = funcPtrMatch[1];
   }
 
