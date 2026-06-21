@@ -1081,7 +1081,26 @@ export function generateEnumDeclaration(enumType: ExtractedEnum): string {
 /**
  * Generate typedef declaration
  */
+// FunctionDefinition datatypes by name, registered before emission so a typedef
+// whose target is a pointer to one can be inlined (see generateTypedefDeclaration).
+const knownFuncDefs = new Map<string, ExtractedFunctionDefinition>();
+
+export function setKnownFuncDefs(defs: Iterable<ExtractedFunctionDefinition>): void {
+  knownFuncDefs.clear();
+  for (const d of defs) knownFuncDefs.set(d.name, d);
+}
+
 function generateTypedefDeclaration(type: ExtractedTypedef): string {
+  // A typedef whose target is `<FunctionDefinition> *` (e.g. QUESTCALLBACKFN =
+  // `QUESTCALLBACK *`, where QUESTCALLBACK is a Ghidra function-signature type)
+  // must be emitted as a self-contained function-pointer typedef: the bare
+  // FunctionDefinition name has no standalone C definition, so referencing it
+  // leaves the typedef — and every TU that includes it — undefined.
+  const m = type.underlyingType.trim().match(/^(\w+)\s*\*$/);
+  if (m) {
+    const fd = knownFuncDefs.get(m[1]);
+    if (fd) return generateFunctionDefinitionDeclaration({ ...fd, name: type.name });
+  }
   return `typedef ${type.underlyingType} ${type.name};`;
 }
 

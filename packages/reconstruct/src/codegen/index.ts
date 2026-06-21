@@ -48,7 +48,7 @@ import type {
 } from '../types.js';
 import { resolveOverridePlaceholders } from './impl.js';
 
-import { generateHeader } from './header.js';
+import { generateHeader, setKnownFuncDefs } from './header.js';
 import { generateImplementation, type ImplGenContext } from './impl.js';
 import { generateCMakeLists, generateTopLevelCMake, generateTargetCMake, generateUnsortedCMake } from './cmake.js';
 import { generateSourceMap } from './sourcemap.js';
@@ -114,9 +114,13 @@ export function generateProject(
   // so stripFuncDefIndirection / struct-field stripping recognise all-caps and
   // irregular fnptr typedefs (QUESTCALLBACK, ...), not just naming conventions.
   // Must run before any header/globals/impl emission below.
-  setKnownFuncDefTypedefs(
-    dataTypes.filter(dt => dt.kind === 'FUNCTION_DEFINITION').map(dt => dt.name)
-  );
+  const funcDefDataTypes = dataTypes.filter(
+    dt => dt.kind === 'FUNCTION_DEFINITION'
+  ) as import('../types.js').ExtractedFunctionDefinition[];
+  setKnownFuncDefTypedefs(funcDefDataTypes.map(dt => dt.name));
+  // Same set, by name, so a typedef targeting `<FunctionDefinition> *` can be
+  // inlined into a self-contained function-pointer typedef.
+  setKnownFuncDefs(funcDefDataTypes);
 
   // Drop excluded namespaces/modules ENTIRELY (functions + classes + datatypes
   // + globals + namespace records) so no per-namespace header/impl file is ever
