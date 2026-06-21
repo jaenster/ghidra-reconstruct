@@ -21,8 +21,14 @@ import type {
 import type { MethodConversionRegistry } from '../methods/index.js';
 import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js';
 import { isGhidraGeneratedName, suggestBetterName } from '@ghidra-mcp/cpp-parser';
-import { isPlatformOrBuiltinType, isLibraryType, normalizeSignatureType, WINDOWS_STRUCTS } from './platform-types.js';
+import { isPlatformOrBuiltinType, isLibraryType, normalizeSignatureType, collapseFuncPtrTypedef, WINDOWS_STRUCTS } from './platform-types.js';
 import { generateExternDeclaration, isFuncDefTypedefName } from './globals-header.js';
+
+/** normalizeSignatureType + fn-ptr-typedef double-indirection collapse, for
+ *  emitting function parameter and return types ("fpFoo *" → "fpFoo"). */
+function sigType(type: string): string {
+  return collapseFuncPtrTypedef(normalizeSignatureType(type), isFuncDefTypedefName);
+}
 
 /**
  * Clean a parameter name: apply the same renaming the body transform does
@@ -400,9 +406,16 @@ export function generateHeader(
       let currentIfdef: string | undefined;
       const emittedFuncNames = new Set<string>();
       for (const func of declaredFunctions) {
-        // Deduplicate by function name (avoids overloaded-return-type errors)
-        if (emittedFuncNames.has(func.name)) continue;
-        emittedFuncNames.add(func.name);
+        // Deduplicate by name + parameter signature, NOT name alone. Same-name
+        // functions with DIFFERENT parameters are valid C++ overloads and must
+        // all be declared — dropping them made callers bind to the one surviving
+        // overload (e.g. 7 SpawnMonster overloads, STATLIST_GetItemStatBonusValues),
+        // causing "cannot convert" errors. Same name AND same params (a return-type-
+        // only difference, which C++ can't overload) still collapses to the first.
+        const sigKey = func.name + '(' +
+          (func.parameters ?? []).map(p => p.dataType).join(',') + ')';
+        if (emittedFuncNames.has(sigKey)) continue;
+        emittedFuncNames.add(sigKey);
         // Group consecutive functions with the same ifdef under one guard
         if (func.ifdef !== currentIfdef) {
           if (currentIfdef) {
@@ -668,7 +681,7 @@ export function generateFunctionDeclaration(
   }
   const params = renumberParams(func.parameters)
     .map(p => {
-      const type = normalizeSignatureType(p.dataType);
+      const type = sigType(p.dataType);
       let name = p.name;
       // Avoid param name shadowing its own type (e.g., "eD2ItemFlag eD2ItemFlag")
       const baseType = type.replace(/\s*[*&]+\s*$/, '').replace(/^(struct|class|union|enum)\s+/, '').trim();
@@ -695,12 +708,12 @@ export function generateFunctionDeclaration(
   // Sanitize function names: strip trailing parens, replace invalid chars (hyphens, dots, etc.)
   let cleanName = func.name.replace(/[()]+$/, '').replace(/[^A-Za-z0-9_]/g, '_');
   // Detect constructor pattern: function name matches return type (e.g., D2WinButton * D2WinButton(...))
-  const returnType = normalizeSignatureType(func.returnType);
+  const returnType = sigType(func.returnType);
   if (returnType.startsWith(cleanName + ' ') || returnType === cleanName) {
     cleanName = `Create_${cleanName}`;
   }
 
-  return `${commentBlock}${normalizeSignatureType(func.returnType)} ${cleanName}(${params});${addressComment}`;
+  return `${commentBlock}${sigType(func.returnType)} ${cleanName}(${params});${addressComment}`;
 }
 
 /**
@@ -718,10 +731,10 @@ function generateMethodDeclaration(
   const filtered = func.parameters
     .filter((p, i) => p.name === 'this' || i === thisParamIndex ? false : true);
   const params = renumberParams(filtered)
-    .map(p => `${normalizeSignatureType(p.dataType)} ${p.name}`)
+    .map(p => `${sigType(p.dataType)} ${p.name}`)
     .join(', ');
 
-  return `${normalizeSignatureType(func.returnType)} ${func.name}(${params})`;
+  return `${sigType(func.returnType)} ${func.name}(${params})`;
 }
 
 /**
@@ -735,7 +748,7 @@ function generateConstructorDeclaration(
   const filtered = func.parameters
     .filter((p, i) => p.name === 'this' || i === thisParamIndex ? false : true);
   const params = renumberParams(filtered)
-    .map(p => `${normalizeSignatureType(p.dataType)} ${p.name}`)
+    .map(p => `${sigType(p.dataType)} ${p.name}`)
     .join(', ');
 
   return `${className}(${params})`;
@@ -1095,7 +1108,7 @@ export function generateFunctionDefinitionDeclaration(type: ExtractedFunctionDef
   const params = type.parameters
     .map(p => {
       const name = p.name && p.name !== '' ? ` ${p.name}` : '';
-      return `${normalizeSignatureType(p.dataType)}${name}`;
+      return `${sigType(p.dataType)}${name}`;
     })
     .join(', ');
 

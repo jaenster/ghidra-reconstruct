@@ -19,8 +19,14 @@ import { isPlatformOrBuiltinType, isStructType, castPointerInitializer } from '.
 import { transformGhidraCode, preprocessGhidraCode, isGhidraGeneratedName, suggestBetterName, type TransformResult } from '@ghidra-mcp/cpp-parser';
 import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js';
 import { cleanFunctionComment } from './header.js';
-import { normalizeSignatureType } from './platform-types.js';
-import { generateStaticLocalsBlock, emitDataValue, inferArrayDeclaration, normalizeArrayDeclaration } from './globals-header.js';
+import { normalizeSignatureType, collapseFuncPtrTypedef } from './platform-types.js';
+import { generateStaticLocalsBlock, emitDataValue, inferArrayDeclaration, normalizeArrayDeclaration, isFuncDefTypedefName } from './globals-header.js';
+
+/** normalizeSignatureType + fn-ptr-typedef double-indirection collapse, for
+ *  emitting function parameter and return types ("fpFoo *" → "fpFoo"). */
+function sigType(type: string): string {
+  return collapseFuncPtrTypedef(normalizeSignatureType(type), isFuncDefTypedefName);
+}
 
 /**
  * Clean a parameter name: apply the same renaming the body transform does
@@ -909,7 +915,7 @@ export async function resolveOverridePlaceholders(
 function generateFunctionSignature(func: ExtractedFunction): string {
   const params = renumberParams(func.parameters)
     .map(p => {
-      const type = normalizeSignatureType(p.dataType);
+      const type = sigType(p.dataType);
       let name = p.name;
       // Avoid param name shadowing its own type
       const baseType = type.replace(/\s*[*&]+\s*$/, '').replace(/^(struct|class|union|enum)\s+/, '').trim();
@@ -921,11 +927,11 @@ function generateFunctionSignature(func: ExtractedFunction): string {
   // Strip trailing parens/invalid chars from function names (Ghidra artifacts)
   let cleanName = func.name.replace(/[()]+$/, '').replace(/[^A-Za-z0-9_]/g, '_');
   // Detect constructor pattern: function name matches return type (e.g., D2WinButton * D2WinButton(...))
-  const returnType = normalizeSignatureType(func.returnType);
+  const returnType = sigType(func.returnType);
   if (returnType.startsWith(cleanName + ' ') || returnType === cleanName) {
     cleanName = `Create_${cleanName}`;
   }
-  return `${normalizeSignatureType(func.returnType)} ${cleanName}(${params})`;
+  return `${sigType(func.returnType)} ${cleanName}(${params})`;
 }
 
 /**
@@ -944,7 +950,7 @@ function generateMethodSignature(
   const filtered = func.parameters
     .filter((p, i) => p.name === 'this' || i === thisParamIndex ? false : true);
   const params = renumberParams(filtered)
-    .map(p => `${normalizeSignatureType(p.dataType)} ${p.name}`)
+    .map(p => `${sigType(p.dataType)} ${p.name}`)
     .join(', ');
 
   // Check if this is a constructor or destructor
@@ -954,7 +960,7 @@ function generateMethodSignature(
     return `${className}::~${className}()`;
   }
 
-  return `${normalizeSignatureType(func.returnType)} ${className}::${func.name}(${params})`;
+  return `${sigType(func.returnType)} ${className}::${func.name}(${params})`;
 }
 
 /**

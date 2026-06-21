@@ -323,6 +323,25 @@ export function normalizeSignatureType(type: string): string {
   return type;
 }
 
+/**
+ * Collapse function-pointer-typedef double-indirection in a signature type:
+ * "fpFoo *" → "fpFoo". Ghidra stores a function-pointer parameter/return as
+ * "fpFoo *", but fpFoo is itself emitted as a pointer typedef
+ * (typedef BOOL (*fpFoo)(...)), so the extra star yields BOOL (**) and a
+ * decayed-function argument fails to convert. The struct field renderer already
+ * does this; this lets signatures (params + return types) do the same.
+ *
+ * @param isFuncDefTypedef predicate identifying emitted fn-ptr typedef names
+ *   (passed in to avoid a circular import on globals-header).
+ */
+export function collapseFuncPtrTypedef(
+  type: string,
+  isFuncDefTypedef: (name: string) => boolean
+): string {
+  const m = type.trim().match(/^(\w+)\s*\*$/);
+  return m && isFuncDefTypedef(m[1]) ? m[1] : type;
+}
+
 // =============================================================================
 // Platform Header Generation
 // =============================================================================
