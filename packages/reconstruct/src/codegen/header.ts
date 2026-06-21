@@ -958,6 +958,15 @@ function normalizeFieldDeclaration(fieldType: string, fieldName: string, fieldSi
   if (ptrArrayMatch) {
     type = ptrArrayMatch[1] + ptrArrayMatch[3];
     arraySuffix = `[${ptrArrayMatch[2]}]${arraySuffix}`;
+    // Re-apply the fnptr-typedef strip: an array of fnptr-typedef pointers
+    // ("QUESTCALLBACK *[15]") reduces to "QUESTCALLBACK *" here, but the typedef
+    // already encodes the pointer, so collapse to "QUESTCALLBACK" (→ QUESTCALLBACK
+    // NAME[15], whose elements accept &func). The scalar strip above ran before
+    // this split and so missed the array form.
+    const arrFnPtr = type.match(/^(\w+)\s*\*$/);
+    if (arrFnPtr && isFuncDefTypedefName(arrFnPtr[1])) {
+      type = arrFnPtr[1];
+    }
   }
 
   // Fix array-pointer field types: "Type[N] *" → "Type *" (Ghidra artifact, array decays to pointer)
