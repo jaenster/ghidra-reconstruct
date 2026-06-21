@@ -408,6 +408,16 @@ export function generatePlatformHeader(): string {
   lines.push('#  endif');
   lines.push('#  include <windows.h>');
   lines.push('#  include <winsock2.h>');
+  // D2 declares its own functions whose names collide with <windows.h> A/W macros
+  // (e.g. a renderer CreateWindow(HWND,int)). The macro expands the declaration to
+  // an 11-arg CreateWindowExA call → "macro requires 11 arguments". Undef the macro
+  // forms so D2's own functions of these names compile; the real Win32 entry points
+  // remain reachable via their explicit ...ExA/...ExW / ...A / ...W names.
+  for (const m of ['CreateWindow', 'CreateWindowA', 'CreateWindowW']) {
+    lines.push(`#  ifdef ${m}`);
+    lines.push(`#    undef ${m}`);
+    lines.push(`#  endif`);
+  }
   lines.push('#else');
   lines.push('');
 
