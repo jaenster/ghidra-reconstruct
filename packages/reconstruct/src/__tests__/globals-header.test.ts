@@ -5,7 +5,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 
-import { isSwitchTableSymbol, isJumpTableArtifact, generateGlobalsHeader, generateExternDeclaration } from '../codegen/globals-header.js';
+import { isSwitchTableSymbol, isJumpTableArtifact, generateGlobalsHeader, generateExternDeclaration, setKnownFuncDefTypedefs } from '../codegen/globals-header.js';
 import type { AnalyzedDataSymbol, ReconstructOptions, ExtractedDataType } from '../types.js';
 
 const defaultOptions: ReconstructOptions & { projectName?: string; binaryName?: string } = {
@@ -309,6 +309,22 @@ describe('function-pointer typedef globals collapse Ghidra double-indirection', 
       generateExternDeclaration(g('UNITS', 'D2UnitStrc *[91]')),
       'extern D2UnitStrc * UNITS[91];'
     );
+  });
+
+  it('collapses an all-caps fnptr typedef registered via the funcdef registry', () => {
+    // QUESTCALLBACK matches none of the name-convention regexes (all-caps, no
+    // Func/Callback-case suffix), so only the registry can recognise it. Once
+    // registered, "QUESTCALLBACK *[210]" must drop the redundant indirection so
+    // each "&Q01_Callback_XX" element is assignable.
+    setKnownFuncDefTypedefs(['QUESTCALLBACK', 'QUESTINIT']);
+    try {
+      assert.strictEqual(
+        generateExternDeclaration(g('QUESTCALLBACKS', 'QUESTCALLBACK *[210]')),
+        'extern QUESTCALLBACK QUESTCALLBACKS[210];'
+      );
+    } finally {
+      setKnownFuncDefTypedefs([]);
+    }
   });
 });
 

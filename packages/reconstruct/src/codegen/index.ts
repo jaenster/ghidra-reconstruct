@@ -54,7 +54,7 @@ import { generateCMakeLists, generateTopLevelCMake, generateTargetCMake, generat
 import { generateSourceMap } from './sourcemap.js';
 import { generateReadme } from './readme.js';
 import { organizeByNamespace, getFilePath, setModuleNames } from './namespace.js';
-import { generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl } from './globals-header.js';
+import { generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs } from './globals-header.js';
 import { isPlatformOrBuiltinType, generatePlatformHeader } from './platform-types.js';
 import { createOverrideRegistry } from '../overrides/index.js';
 import { createLibraryRegistry } from '../library/index.js';
@@ -109,6 +109,14 @@ export function generateProject(
       if (!Array.isArray(f.parameters)) f.parameters = [];
     }
   }
+
+  // Register every function-pointer typedef name (FUNCTION_DEFINITION datatypes)
+  // so stripFuncDefIndirection / struct-field stripping recognise all-caps and
+  // irregular fnptr typedefs (QUESTCALLBACK, ...), not just naming conventions.
+  // Must run before any header/globals/impl emission below.
+  setKnownFuncDefTypedefs(
+    dataTypes.filter(dt => dt.kind === 'FUNCTION_DEFINITION').map(dt => dt.name)
+  );
 
   // Drop excluded namespaces/modules ENTIRELY (functions + classes + datatypes
   // + globals + namespace records) so no per-namespace header/impl file is ever

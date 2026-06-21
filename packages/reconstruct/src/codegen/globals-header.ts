@@ -798,13 +798,29 @@ export function stripFuncDefIndirection(type: string): string {
   return type;
 }
 
+/**
+ * Registry of ACTUAL function-pointer typedef names emitted by the codegen,
+ * populated from the Ghidra FUNCTION_DEFINITION datatypes before any module is
+ * emitted. The name conventions below are case-sensitive and miss all-caps /
+ * irregular names (QUESTCALLBACK, QUESTINIT, ...), so the registry is the
+ * authoritative source; the regexes stay as a fallback for safety.
+ */
+const knownFuncDefTypedefs = new Set<string>();
+
+/** Populate the function-pointer typedef registry. Must run before emission. */
+export function setKnownFuncDefTypedefs(names: Iterable<string>): void {
+  knownFuncDefTypedefs.clear();
+  for (const n of names) knownFuncDefTypedefs.add(n);
+}
+
 /** Name conventions for FunctionDefinition typedefs emitted by the codegen. */
 export function isFuncDefTypedefName(name: string): boolean {
-  return /^fn[A-Z]/.test(name)
+  return knownFuncDefTypedefs.has(name)
+    || /^fn[A-Z]/.test(name)
     || /^fp[A-Z]/.test(name)
     || /^AI_/.test(name)
     || /^D2NET_/.test(name)
-    || /(?:Func|Callback|Handler|Action)$/.test(name)
+    || /(?:Func|Callback|Handler|Action)$/i.test(name)
     || /_fn$/.test(name)
     || /[a-z]Fn$/.test(name)
     || /Proc[A-Z]?$/.test(name);
