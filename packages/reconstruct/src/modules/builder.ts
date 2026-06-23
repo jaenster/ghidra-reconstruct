@@ -209,6 +209,18 @@ export function buildModuleGraph(input: BuildModuleGraphInput): ModuleGraph {
     for (const func of unitFunctions) {
       noteType(func.returnType);
       for (const p of func.parameters) noteType(p.dataType);
+      // Local-variable struct types are not a dependency source anywhere else, so
+      // a by-value local (e.g. `D2GSPacketSrv0x22_0x23 packet;`) leaves its type
+      // undeclared in the impl — failing the declaration and cascading to every
+      // `packet.field` use. Impl-include the local's own struct type, and feed it
+      // into the pointer-field closure below.
+      for (const lv of func.localVariables ?? []) {
+        const ln = stripTypeName(lv.dataType);
+        if (ln && structByName.has(ln) && !ownedTypeNames.has(ln)) {
+          graph.addDependency(headerPath, ln, 'by-pointer');
+        }
+        noteType(lv.dataType);
+      }
       const body = func.decompiled;
       if (body) {
         for (const id of body.match(/[A-Za-z_]\w*/g) ?? []) {
