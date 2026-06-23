@@ -66,6 +66,27 @@ void FUN_00401000(int param_1) {
       );
     });
 
+    it('should not let struct-field undo a SUBPIECE byte access', () => {
+      // Ghidra emits `x._3_1_` (byte 3, size 1, of scalar x). The subpiece plugin
+      // rewrites it to `*(uint8_t *)((char *)&x + 3)`. struct-field must NOT then
+      // re-match that and emit the invalid `((char *)&x)->field_3` (char has no
+      // members). Regression for the cast-hell bucket.
+      const code = `
+int getByte(int x) {
+  return (int)x._3_1_;
+}
+`;
+      const result = transform(code, 'full');
+      assert.ok(
+        !/->field_3/.test(result),
+        `SUBPIECE access must not become ((char*)&x)->field_3: ${result}`
+      );
+      assert.ok(
+        /\(char\s*\*\)\s*&/.test(result) && /\+\s*3/.test(result),
+        `Expected valid byte-range form *(T*)((char*)&x + 3): ${result}`
+      );
+    });
+
     it('should handle pointer arithmetic', () => {
       const code = `
 void f(int *arr, int i) {

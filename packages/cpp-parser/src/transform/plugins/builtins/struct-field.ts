@@ -217,6 +217,26 @@ function createStructFieldTransformer(layouts?: Map<string, StructLayout>): Tran
     // Don't transform offset 0 (that's just a cast)
     if (offsetValue === 0) return undefined;
 
+    // Don't re-transform SUBPIECE output. The subpiece plugin rewrites Ghidra's
+    // `x._N_M_` into `*(<T> *)((char *)&x + N)` — a valid byte-range access of a
+    // scalar local's storage. That inner expression looks like `*(T*)(base + off)`
+    // with base = `(char *)&x`, so this transform would re-match it and emit
+    // `((char *)&x)->field_N`, which is invalid (char has no members) and exactly
+    // the cast-hell we see. Skip when the base is the address of something cast to
+    // char* — that is never a struct-pointer deref, and the raw form already compiles.
+    const baseUnwrapped = unwrapParens(base);
+    if (baseUnwrapped.kind === NodeKind.CStyleCastExpr) {
+      const bc = baseUnwrapped as CStyleCastExpr;
+      const pointeeIsChar =
+        bc.type.kind === NodeKind.PointerType &&
+        (bc.type as PointerType).pointee.kind === NodeKind.BuiltinType &&
+        ((bc.type as PointerType).pointee as BuiltinType).name.toLowerCase() === 'char';
+      const inner = unwrapParens(bc.expression);
+      const innerIsAddressOf =
+        inner.kind === NodeKind.UnaryExpr && (inner as UnaryExpr).operator === '&';
+      if (pointeeIsChar && innerIsAddressOf) return undefined;
+    }
+
     // Determine field name
     let fieldName: string;
 
