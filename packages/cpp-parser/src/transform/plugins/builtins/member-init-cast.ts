@@ -69,7 +69,11 @@ export const memberInitCastPlugin: TransformPlugin = createPlugin(
   'Cast a pointer-to-struct var initialized from a chained member access (offset-0 union deref) to its declared type',
   () => createMemberInitCastTransformer(),
   {
-    priority: 60, // late cleanup, after struct-field (50) / subpiece (46)
+    // Must run AFTER decl-init-merge (60), decl-order-fix (61), decl-scope-sink
+    // (62) and phi-node-ternary (63): the decompiler emits `T* var;` + a separate
+    // `var = expr;` that those passes merge into the `T* var = expr;` init form
+    // this plugin matches.
+    priority: 64,
     defaultEnabled: true,
     tags: ['cleanup', 'ghidra'],
     version: '1.0.0',
