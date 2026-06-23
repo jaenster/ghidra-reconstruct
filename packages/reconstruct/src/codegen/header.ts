@@ -1071,6 +1071,21 @@ export function generateStructDeclaration(struct: ExtractedStruct): string {
     lines.push(`    ${struct.name}() = default;`);
     lines.push(`    ${struct.name}(${intConversionType} v) { *reinterpret_cast<${intConversionType}*>(this) = v; }`);
     lines.push(`    operator ${intConversionType}() const { return *reinterpret_cast<const ${intConversionType}*>(this); }`);
+    // The conversion ctor/operator make the struct non-aggregate, which breaks
+    // brace-init of multi-field int structs (`{0, 0}` arrays). Add a field-wise
+    // constructor so `{a, b, ...}` matches it.
+    const realFields = struct.fields.filter(f => f.name && !f.name.startsWith('_pad_'));
+    if (realFields.length >= 2) {
+      const sani = (n: string) => {
+        let r = n.replace(/[^a-zA-Z0-9_]/g, '_');
+        if (/^\d/.test(r)) r = `field_${r}`;
+        if (CPP_KEYWORDS.has(r)) r = `${r}_`;
+        return r;
+      };
+      const params = realFields.map((f, i) => `${f.dataType} a${i}`).join(', ');
+      const inits = realFields.map((f, i) => `${sani(f.name!)}(a${i})`).join(', ');
+      lines.push(`    ${struct.name}(${params}) : ${inits} {}`);
+    }
     lines.push('');
   }
 
