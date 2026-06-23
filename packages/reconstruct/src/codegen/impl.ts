@@ -222,28 +222,31 @@ const QUEST_PREFIX_TO_UNION_MEMBER: Record<string, string> = {
  * 3. A#Q# in source file path: D2Game/Quests/A1Q4.cpp
  */
 function rewriteQuestUnionMembers(code: string, funcName: string, sourceFile?: string): string {
-  // Try QNN_ prefix first (most common)
+  // 1. Function-quest heuristic: Ghidra picks an arbitrary union member (usually
+  //    pA1Q1); rewrite to the member for the quest this function belongs to.
+  let member: string | null = null;
   const prefixMatch = funcName.match(/\b(Q\d+)_/);
-  if (prefixMatch) {
-    const correctMember = QUEST_PREFIX_TO_UNION_MEMBER[prefixMatch[1] + '_'];
-    if (correctMember) {
-      return code.replace(/\.p(A[1-5]Q\d+)\b/g, `.${correctMember}`);
-    }
+  if (prefixMatch) member = QUEST_PREFIX_TO_UNION_MEMBER[prefixMatch[1] + '_'] ?? null;
+  if (!member) {
+    const aqMatch = funcName.match(/\b(A[1-5]Q\d+)\b/); // OBJOP_A1Q4_, QUEST_A3Q5_
+    if (aqMatch) member = `p${aqMatch[1]}`;
   }
-  // Try A#Q# pattern in function name (e.g. OBJOP_A1Q4_, QUEST_A3Q5_)
-  const aqMatch = funcName.match(/\b(A[1-5]Q\d+)\b/);
-  if (aqMatch) {
-    const member = `p${aqMatch[1]}`;
-    return code.replace(/\.p(A[1-5]Q\d+)\b/g, `.${member}`);
+  if (!member && sourceFile) {
+    const fileMatch = sourceFile.match(/\b(A[1-5]Q\d+)\b/); // D2Game/Quests/A1Q4
+    if (fileMatch) member = `p${fileMatch[1]}`;
   }
-  // Fall back to source file path (e.g. D2Game/Quests/A1Q4)
-  if (sourceFile) {
-    const fileMatch = sourceFile.match(/\b(A[1-5]Q\d+)\b/);
-    if (fileMatch) {
-      const member = `p${fileMatch[1]}`;
-      return code.replace(/\.p(A[1-5]Q\d+)\b/g, `.${member}`);
-    }
-  }
+  if (member) code = code.replace(/\.p(A[1-5]Q\d+)\b/g, `.${member}`);
+
+  // 2. Type-driven correction: a local declared `D2QuestDataA#Q#Strc* x = …pA?Q?`
+  //    must read its OWN union member regardless of the enclosing function's quest
+  //    — cross-quest functions (e.g. an A1Q5 function with a D2QuestDataA1Q4Strc*
+  //    local) otherwise keep the wrong member and fail with an unrelated-pointer
+  //    conversion (not downgraded by -fpermissive). The union members are all
+  //    offset-0 pointers, so matching the declared type is correct.
+  code = code.replace(
+    /(D2QuestData(A[1-5]Q\d+)Strc\s*\*\s*\w+\s*=\s*[^;]*?\.p)A[1-5]Q\d+\b/g,
+    '$1$2',
+  );
   return code;
 }
 
