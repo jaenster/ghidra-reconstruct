@@ -691,6 +691,14 @@ export function generatePlatformHeader(): string {
   lines.push('#define _abs abs');
   lines.push('');
 
+  // Ghidra placeholder constants for immediates it could not resolve (an
+  // "unknown" float / id). They are decompiler artifacts with no real value;
+  // define them so the bodies compile (placeholder zero).
+  lines.push('// Ghidra unresolved-immediate placeholders');
+  lines.push('#define FLOAT_UNKNOWN 0.0f');
+  lines.push('#define GL_ID_UNKNOWN 0');
+  lines.push('');
+
   // Ghidra builtin_ prefixed functions
   lines.push('// Ghidra builtin_ prefixed functions');
   lines.push('#define builtin_strncpy strncpy');
