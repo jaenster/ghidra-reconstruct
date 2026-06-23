@@ -151,6 +151,47 @@ function declareUnderscoreSlotLocals(
   return `${decls}\n${body}`;
 }
 
+/**
+ * Ghidra's control-flow recovery sometimes emits the SAME address-labeled block
+ * twice in one function (identical code, each region with its own gotos to it),
+ * producing duplicate `LAB_xxxx:` definitions — a C++ error, and `goto` targets
+ * become ambiguous. Uniquify the 2nd+ definition of each duplicated label and
+ * retarget each `goto` to the most-recent PRECEDING definition (these blocks use
+ * backward gotos). Safe for compilability: every goto still resolves to an
+ * existing label; at worst a forward goto picks an earlier copy (control flow was
+ * already approximate). Only touches Ghidra label names (LAB_/switchD_/…).
+ */
+function uniquifyDuplicateLabels(body: string): string {
+  const isGhidraLabel = (n: string) => /^(LAB|switchD|caseD|joined|code|UNRECOVERED)_/.test(n);
+  const labelDef = /^(\s*)([A-Za-z_]\w*):(\s*(?:\/\/.*)?)$/;
+  const lines = body.split('\n');
+
+  const totalDefs = new Map<string, number>();
+  for (const line of lines) {
+    const m = labelDef.exec(line);
+    if (m && isGhidraLabel(m[2])) totalDefs.set(m[2], (totalDefs.get(m[2]) ?? 0) + 1);
+  }
+  const dup = new Set([...totalDefs].filter(([, c]) => c >= 2).map(([n]) => n));
+  if (dup.size === 0) return body;
+
+  const seen = new Map<string, number>(); // definitions of each dup label seen so far
+  const out = lines.map(line => {
+    const dm = labelDef.exec(line);
+    if (dm && dup.has(dm[2])) {
+      const n = (seen.get(dm[2]) ?? 0) + 1;
+      seen.set(dm[2], n);
+      const name = n === 1 ? dm[2] : `${dm[2]}__dup${n}`;
+      return `${dm[1]}${name}:${dm[3]}`;
+    }
+    return line.replace(/\bgoto\s+([A-Za-z_]\w*)\s*;/g, (g, lbl) => {
+      if (!dup.has(lbl)) return g;
+      const n = seen.get(lbl) ?? 0; // most recent PRECEDING definition
+      return n <= 1 ? `goto ${lbl};` : `goto ${lbl}__dup${n};`;
+    });
+  });
+  return out.join('\n');
+}
+
 // ── Parse error logging ─────────────────────────────────────────────────────
 
 let parseErrorLogPath: string | null = null;
@@ -866,6 +907,8 @@ export function generateFunctionImplementation(
   if (func.returnType && !func.returnType.includes('*') && /\breturn\s+nullptr\b/.test(body)) {
     body = body.replace(/\breturn\s+nullptr\b/g, 'return 0');
   }
+
+  body = uniquifyDuplicateLabels(body);
 
   // Synthesize declarations for `_<base>` storage-slot locals Ghidra references
   // but never declares (else the body uses an undeclared identifier → compile error).
