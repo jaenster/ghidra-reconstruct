@@ -449,6 +449,7 @@ import { prngTransformPlugin } from './builtins/prng-transform.js';
 import { prngTempCollapsePlugin } from './builtins/prng-temp-collapse.js';
 import { bitfieldAccessPlugin } from './builtins/bitfield-access.js';
 import { subpieceAccessPlugin } from './builtins/subpiece-access.js';
+import { memberInitCastPlugin } from './builtins/member-init-cast.js';
 import { indirectCallCleanupPlugin } from './builtins/indirect-call-cleanup.js';
 import { methodCallRewritePlugin } from './builtins/method-call-rewrite.js';
 import { pointerCastNormalizePlugin } from './builtins/pointer-cast-normalize.js';
@@ -483,6 +484,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   redundantNegationPlugin,    // Cleanup: x + -y → x - y (priority 40)
   bitfieldAccessPlugin,       // Cleanup: field_0xNN & MASK → bitfieldName (priority 45)
   subpieceAccessPlugin,       // Cleanup: expr._N_M_ → *(T *)((char *)expr + N) (priority 46)
+  memberInitCastPlugin,       // Cleanup: T* x = a->b.c → T* x = (T*)a->b.c (offset-0 union deref) (priority 60)
   sbbBranchlessPlugin,        // Cleanup: -(uint32_t)(cond) & addr → cond ? addr : nullptr (priority 42)
   branchlessSelectPlugin,     // Cleanup: (cond - 1 & mask) + off → cond ? off : off+mask (priority 43)
   earlyReturnPlugin,          // Readability: flatten nested if(C){...}return X; → if(!C)return X; ... (priority 60)
