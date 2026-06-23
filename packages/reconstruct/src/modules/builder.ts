@@ -71,6 +71,17 @@ export function buildModuleGraph(input: BuildModuleGraphInput): ModuleGraph {
 
   const implExt = options.format === 'c' ? '.c' : '.cpp';
 
+  // Indexes for the incomplete-type impl-include closure (see the closure block
+  // in the per-module loop below).
+  const structByName = new Map<string, ExtractedStruct>();
+  for (const dt of dataTypes) {
+    if (dt.kind === 'STRUCTURE' || dt.kind === 'UNION') {
+      structByName.set(dt.name, dt as ExtractedStruct);
+    }
+  }
+  const globalTypeByName = new Map<string, string>();
+  for (const g of globals) globalTypeByName.set(g.name, g.dataType);
+
   // Register implicit modules
   if (sharedEnumTypes && sharedEnumTypes.size > 0) {
     graph.createModule({ id: 'd2_enums.h', implPath: '', unitName: '_enums' });
@@ -178,6 +189,48 @@ export function buildModuleGraph(input: BuildModuleGraphInput): ModuleGraph {
           graph.addDependency(headerPath, stripped, strength);
         }
         mod.globals.push(g);
+      }
+    }
+
+    // Incomplete-type impl-include closure. A function body routinely dereferences
+    // a struct's POINTER field and accesses the pointee by value (e.g.
+    // `gDataTables->pMonStats[i].field`), but that pointee type gets no dependency
+    // edge of its own — leaving it forward-declared and the impl failing with
+    // "invalid use of incomplete type". Collect the struct types this module's
+    // bodies actually reach (referenced globals scanned from the decompiled body,
+    // plus params/returns/owned fields) and add an impl-level (by-pointer) dep on
+    // each of THEIR pointer-field types so the impl full-includes them. One level
+    // only; impl-only, so it can never create a header cycle.
+    const reachedStructs = new Set<string>();
+    const noteType = (typeStr: string) => {
+      const n = stripTypeName(typeStr);
+      if (n && !isPlatformOrBuiltinType(n) && !ownedTypeNames.has(n)) reachedStructs.add(n);
+    };
+    for (const func of unitFunctions) {
+      noteType(func.returnType);
+      for (const p of func.parameters) noteType(p.dataType);
+      const body = func.decompiled;
+      if (body) {
+        for (const id of body.match(/[A-Za-z_]\w*/g) ?? []) {
+          const gt = globalTypeByName.get(id);
+          if (gt) noteType(gt);
+        }
+      }
+    }
+    for (const dt of mod.ownedTypes) {
+      if ((dt.kind === 'STRUCTURE' || dt.kind === 'UNION') && (dt as ExtractedStruct).fields) {
+        for (const f of (dt as ExtractedStruct).fields!) noteType(f.dataType);
+      }
+    }
+    for (const name of reachedStructs) {
+      const s = structByName.get(name);
+      if (!s?.fields) continue;
+      for (const f of s.fields) {
+        if (!(f.dataType.includes('*') || f.dataType.includes('&'))) continue;
+        const pn = stripTypeName(f.dataType);
+        if (pn && structByName.has(pn) && !ownedTypeNames.has(pn)) {
+          graph.addDependency(headerPath, pn, 'by-pointer');
+        }
       }
     }
 
