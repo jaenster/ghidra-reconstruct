@@ -792,6 +792,17 @@ function emitFieldLines(fields: StructField[], lines: string[], isUnion = false)
   // Track seen field names to deduplicate (Ghidra sometimes has duplicate names at different offsets)
   const seenNames = new Set<string>();
 
+  // Count how many fields use each base type name. A field whose name equals its
+  // own type only shadows that type for SUBSEQUENT same-typed fields, so a
+  // single-use field can keep its name — which matters because the decompiled
+  // body accesses it by that name. Renaming a single-use field (n-prefix) without
+  // rewriting bodies produced "has no member named 'eD2LevelId'".
+  const typeUseCount = new Map<string, number>();
+  for (const f of fields) {
+    const bt = extractBaseTypeName(normalizeUndefinedType(f.dataType, f.size));
+    if (bt) typeUseCount.set(bt, (typeUseCount.get(bt) ?? 0) + 1);
+  }
+
   let i = 0;
   while (i < fields.length) {
     const field = fields[i];
@@ -868,7 +879,7 @@ function emitFieldLines(fields: StructField[], lines: string[], isUnion = false)
     // If field name exactly matches its type name, prefix to avoid C++ name hiding
     // (a field shadows the type within the struct, breaking subsequent fields of the same type)
     const baseTypeName = extractBaseTypeName(type);
-    if (baseTypeName && rawName === baseTypeName) {
+    if (baseTypeName && rawName === baseTypeName && (typeUseCount.get(baseTypeName) ?? 0) >= 2) {
       rawName = `n${rawName}`;
     }
     // Deduplicate field names (Ghidra can have same name at different offsets)
