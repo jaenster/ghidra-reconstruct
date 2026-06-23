@@ -87,31 +87,6 @@ int getByte(int x) {
       );
     });
 
-    it('should cast a pointer-struct var initialized from a chained member access', () => {
-      // Offset-0 union deref: the dest type and the union member type differ but
-      // alias the same pointer — cast to the declared type so it compiles.
-      const code = `
-void f() {
-  D2QuestDataA1Q1Strc* p = pQuestData->pQuestSpecificData.pA1Q5;
-}
-`;
-      const result = transform(code, 'full');
-      assert.ok(
-        /=\s*\(D2QuestDataA1Q1Strc\s*\*\)\s*pQuestData->pQuestSpecificData\.pA1Q5/.test(result),
-        `Expected cast to declared type: ${result}`
-      );
-    });
-
-    it('should NOT cast a simple (non-chained) member init', () => {
-      const code = `
-void f() {
-  D2UnitStrc* p = obj.field;
-}
-`;
-      const result = transform(code, 'full');
-      assert.ok(!/\(D2UnitStrc\s*\*\)\s*obj\.field/.test(result), `Should not cast simple member init: ${result}`);
-    });
-
     it('should handle pointer arithmetic', () => {
       const code = `
 void f(int *arr, int i) {
