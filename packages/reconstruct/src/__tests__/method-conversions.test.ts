@@ -428,6 +428,94 @@ describe('generateProject integration', () => {
   });
 });
 
+describe('cross-namespace method declaration', () => {
+  it('struct header emits method declarations when functions live in a different namespace', async () => {
+    // Reproduces the D2BitBufferStrc / Fog::BitBuffer bug:
+    // ReadUnsigned has parentClass='D2BitBufferStrc' but namespace='Fog::BitBuffer'.
+    // organizeByNamespace puts it in the Fog::BitBuffer unit (not D2BitBufferStrc).
+    // The D2BitBufferStrc struct definition must still emit method declarations
+    // so that `pBuf->ReadUnsigned(10)` resolves in clang.
+    const { generateProject } = await import('../codegen/index.js');
+
+    const config: ProjectConfig = {
+      version: 1,
+      project: 'test',
+      methodConversions: [
+        { address: '0x00501000', className: 'D2BitBufferStrc', methodName: 'ReadUnsigned' },
+        { address: '0x00501100', className: 'D2BitBufferStrc', methodName: 'WriteValue' },
+      ],
+    };
+
+    // Functions belong to namespace 'Fog::BitBuffer' — NOT to D2BitBufferStrc
+    const funcReadUnsigned = makeFunc('BITBUFFER_ReadUnsigned', '0x00501000', [
+      makeParam('pBuf', 'D2BitBufferStrc*', 0),
+      makeParam('nSize', 'int32_t', 1),
+    ]);
+    funcReadUnsigned.namespace = 'Fog::BitBuffer';
+
+    const funcWriteValue = makeFunc('BITBUFFER_WriteValue', '0x00501100', [
+      makeParam('pBuf', 'D2BitBufferStrc*', 0),
+      makeParam('nValue', 'uint32_t', 1),
+      makeParam('nBits', 'int32_t', 2),
+    ]);
+    funcWriteValue.namespace = 'Fog::BitBuffer';
+
+    // The struct is declared as a data type (owns the struct definition)
+    const bitBufferStruct = {
+      kind: 'STRUCTURE' as const,
+      name: 'D2BitBufferStrc',
+      category: '/structs',
+      fields: [
+        { name: 'pBuffer', dataType: 'uint8_t*', offset: 0, size: 4 },
+        { name: 'nBitOffset', dataType: 'int32_t', offset: 4, size: 4 },
+      ],
+      packed: false,
+      size: 8,
+    };
+
+    const options: ReconstructOptions = {
+      ...defaultOptions,
+      projectConfig: config,
+    };
+
+    const project = generateProject(
+      'test',
+      [funcReadUnsigned, funcWriteValue],
+      [],
+      [bitBufferStruct],
+      [],
+      [],
+      options
+    );
+
+    // The struct definition must appear somewhere — find the header that owns it
+    const allHeaders = [...project.files.values()].filter(f => f.type === 'header');
+    const structHeader = allHeaders.find(f => f.content.includes('D2BitBufferStrc'));
+
+    assert.ok(
+      structHeader,
+      `D2BitBufferStrc must appear in at least one header. Files: ${[...project.files.keys()].join(', ')}`
+    );
+
+    // The header with D2BitBufferStrc MUST include method declarations — not just field defs.
+    // Before the fix this emitted a plain struct{} without ReadUnsigned/WriteValue.
+    assert.ok(
+      structHeader.content.includes('ReadUnsigned(int32_t nSize)'),
+      `Struct header must declare ReadUnsigned method.\nHeader content:\n${structHeader.content}`
+    );
+    assert.ok(
+      structHeader.content.includes('WriteValue(uint32_t nValue, int32_t nBits)'),
+      `Struct header must declare WriteValue method.\nHeader content:\n${structHeader.content}`
+    );
+
+    // The struct keyword must still be present (emitted as 'struct D2BitBufferStrc {')
+    assert.ok(
+      structHeader.content.includes('struct D2BitBufferStrc {'),
+      `Struct header must contain struct D2BitBufferStrc { .\nHeader content:\n${structHeader.content}`
+    );
+  });
+});
+
 describe('auto-load project.json from disk', () => {
   it('should load methodConversions from project.json in projectDir', async () => {
     const { generateProject } = await import('../codegen/index.js');

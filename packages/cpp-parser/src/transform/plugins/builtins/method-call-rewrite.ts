@@ -214,39 +214,19 @@ function createMethodCallRewriteTransformer(options?: MethodCallRewriteOptions):
       const thisArg = args[thisArgIdx];
       const remainingArgs = args.filter((_, i) => i !== thisArgIdx);
 
-      // Rule 4: null this-arg → static call ClassName::Method(remaining_args)
-      if (isNullLike(thisArg)) {
-        const classId: Identifier = {
-          kind: NodeKind.Identifier,
-          name: mapping.className,
-          location: call.location,
-          leadingTrivia: [],
-          trailingTrivia: [],
-        };
-        const methodId: Identifier = {
-          kind: NodeKind.Identifier,
-          name: mapping.methodName,
-          location: call.location,
-          leadingTrivia: [],
-          trailingTrivia: [],
-        };
-        const qualifiedCall: QualifiedId = {
-          kind: NodeKind.QualifiedId,
-          qualifier: [classId],
-          name: methodId,
-          isGlobal: false,
-          location: call.location,
-          leadingTrivia: call.callee.leadingTrivia ?? [],
-          trailingTrivia: [],
-        };
-        return updateNode(call, {
-          callee: qualifiedCall,
-          arguments: remainingArgs,
-        });
-      }
-
       // Rule 3: same-class → use `this` as the object
       const isOwnClass = currentFn && mapping.className === currentFn.className;
+
+      // When the receiver is not a valid object expression (null-like, e.g.
+      // nullptr / NULL / 0 / (Type*)0x0), we cannot emit a member call.
+      // Emitting ClassName::Method(...) would be a static-style call, which is
+      // invalid for a non-static member ("cannot call member function without
+      // object"). The original free function is still declared, so leave the
+      // call untouched and let it bind to the free-function overload.
+      if (!isOwnClass && isNullLike(thisArg)) {
+        return undefined;
+      }
+
       const objectInfo = isOwnClass
         ? {
           object: {

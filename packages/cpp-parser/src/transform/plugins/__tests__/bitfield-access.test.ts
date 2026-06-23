@@ -132,6 +132,30 @@ describe('bitfieldAccessPlugin', () => {
     });
   });
 
+  describe('cross-struct contamination guard', () => {
+    // A bitfield named in struct A (offset 0x5, mask 0x10 → "soft") must NOT be
+    // applied to struct B's same-offset access when B has no such bitfield. The
+    // catalog builder drops the ambiguous key, so the transform receives a catalog
+    // WITHOUT field_0x5:16 and leaves D2SkillsTxt->field_0x5 untouched.
+    const dropped = buildCatalog([
+      // field_0x5:16 intentionally absent (dropped as ambiguous by the builder)
+      ['field_0xc', 1, 'isSpawn'],
+    ]);
+
+    it('does NOT rename field_0x5 & 0x10 when the key was dropped (no bleed)', () => {
+      const input = `void f() { if (pSkillTxt->field_0x5 & 0x10) {} }`;
+      const output = transformCode(input, dropped);
+      assert.ok(output.includes('field_0x5'), `Should keep field_0x5: ${output}`);
+      assert.ok(!output.includes('soft'), `Should not invent soft: ${output}`);
+    });
+
+    it('still renames a present same-struct key alongside the dropped one', () => {
+      const input = `void f() { if (pMonStats->field_0xc & 1) {} }`;
+      const output = transformCode(input, dropped);
+      assert.ok(output.includes('pMonStats->isSpawn'), `Expected isSpawn: ${output}`);
+    });
+  });
+
   describe('dot access', () => {
     it('works with dot access too', () => {
       const input = `void f() { if (monStats.field_0xd & 2) {} }`;

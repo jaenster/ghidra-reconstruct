@@ -166,15 +166,37 @@ export async function extractEnums(
 
 /**
  * Map Ghidra data type info to our type
+ *
+ * `list_data_types` returns shallow listing entries (no fields/values). The
+ * detailed shape is normally backfilled later by `extractDataType`, but that
+ * fetch can return null (e.g. a transient daemon error), leaving the shallow
+ * entry in place. So a STRUCTURE/UNION listing entry must already carry an
+ * empty `fields` array — downstream codegen assumes `fields` is always an
+ * array (buildBitfieldCatalog, computeTypeOwnership) and crashes otherwise.
  */
 function mapDataTypeInfo(info: GhidraDataTypeInfo): ExtractedDataType {
-  return {
+  const base: ExtractedDataType = {
     name: info.name,
     category: info.category,
     size: info.length,
     kind: mapDataTypeKind(info.type),
     description: info.description,
   };
+
+  // A shallow listing entry carries no detail arrays. Seed empty ones per kind
+  // so a type whose detail fetch is later skipped/fails never reaches codegen
+  // with an undefined fields/values/parameters array.
+  if (base.kind === 'STRUCTURE' || base.kind === 'UNION') {
+    return { ...base, fields: [] } as ExtractedStruct | ExtractedUnion;
+  }
+  if (base.kind === 'ENUM') {
+    return { ...base, values: [] } as ExtractedEnum;
+  }
+  if (base.kind === 'FUNCTION_DEFINITION') {
+    return { ...base, returnType: 'void', parameters: [] } as ExtractedFunctionDefinition;
+  }
+
+  return base;
 }
 
 /**

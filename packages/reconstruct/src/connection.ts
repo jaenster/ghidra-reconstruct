@@ -16,13 +16,75 @@ function authHeaders(): Record<string, string> {
 }
 
 /**
- * Send a JSON-RPC call to the daemon's /mcp/rpc endpoint
+ * Is this a transient network error worth retrying?
+ *
+ * A `kubectl port-forward` tunnel (especially over a tailscale exit node)
+ * periodically drops its long-lived stream under sustained extraction
+ * traffic while the API server stays healthy. Those manifest as `fetch
+ * failed` / ECONNRESET / connection-refused and recover within ~1-2s once
+ * the port-forward re-establishes (or a self-healing loop restarts it).
+ * 5xx from the daemon is also transient (worker restart). We must NOT retry
+ * genuine application errors (json.error, "Error:" text, HTTP 4xx).
+ */
+function isTransient(err: unknown): boolean {
+  if (err instanceof Error) {
+    const msg = err.message.toLowerCase();
+    const cause = (err as { cause?: { code?: string } }).cause?.code?.toLowerCase() ?? '';
+    return (
+      err.name === 'TimeoutError' ||
+      msg.includes('fetch failed') ||
+      msg.includes('network') ||
+      msg.includes('econnreset') ||
+      msg.includes('econnrefused') ||
+      msg.includes('socket hang up') ||
+      msg.includes('terminated') ||
+      msg.startsWith('daemon returned http 5') ||
+      cause.includes('econnreset') ||
+      cause.includes('econnrefused') ||
+      cause.includes('und_err')
+    );
+  }
+  return false;
+}
+
+const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
+
+/**
+ * Send a JSON-RPC call to the daemon's /mcp/rpc endpoint.
+ *
+ * Retries transient network failures (port-forward tunnel drops, worker
+ * 5xx) with exponential backoff so a brief tunnel blip doesn't abort a
+ * multi-thousand-call extraction run.
  */
 async function rpcCall<T>(
   daemonUrl: string,
   toolName: string,
   args: Record<string, unknown>,
-  timeoutMs = 30000
+  timeoutMs = 30000,
+  maxRetries = 6
+): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await rpcCallOnce<T>(daemonUrl, toolName, args, timeoutMs);
+    } catch (err) {
+      lastErr = err;
+      if (attempt >= maxRetries || !isTransient(err)) throw err;
+      const delay = Math.min(500 * 2 ** attempt, 8000);
+      console.warn(
+        `[rpc] transient failure on ${toolName} (attempt ${attempt + 1}/${maxRetries + 1}): ${(err as Error).message} — retrying in ${delay}ms`
+      );
+      await sleep(delay);
+    }
+  }
+  throw lastErr;
+}
+
+async function rpcCallOnce<T>(
+  daemonUrl: string,
+  toolName: string,
+  args: Record<string, unknown>,
+  timeoutMs: number
 ): Promise<T> {
   const resp = await fetch(`${daemonUrl}/mcp/rpc`, {
     method: 'POST',

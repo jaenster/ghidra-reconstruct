@@ -112,6 +112,69 @@ export const WINDOWS_STRUCTS = new Set([
 ]);
 
 // =============================================================================
+// Library type detection (SDK/CRT-provided types)
+// =============================================================================
+
+/**
+ * MSVC C++ exception-handling internal types.
+ *
+ * Ghidra recovers these from the statically-linked CRT into the root category
+ * `/` — the SAME category game types live under — so a category check can't
+ * distinguish them; we need an explicit name-set. They are referenced ONLY by
+ * compiler-runtime files (compiler/*, globals.*), never by game bodies, so it's
+ * safe to guard their definitions out under _WIN32 (the real C++ SDK / CRT
+ * `<vcruntime.h>`/`<ehdata.h>` provides them, and re-emitting our own copies
+ * collides with those).
+ */
+const EH_INTERNAL_TYPES = new Set<string>([
+  'FuncInfo', '_s_FuncInfo',
+  'UnwindMapEntry', '_s_UnwindMapEntry',
+  'TryBlockMapEntry', '_s_TryBlockMapEntry',
+  'HandlerType', '_s_HandlerType',
+  'ESTypeList', '_s_ESTypeList',
+  'ThrowInfo', '_s_ThrowInfo',
+  'CatchableType', '_s_CatchableType',
+  'CatchableTypeArray', '_s_CatchableTypeArray',
+  'PMD', '_PMD',
+]);
+
+/** System-header category path, e.g. `/winsock.h`, `/inaddr.h`, `/WinDef.h` */
+const SYSTEM_HEADER_CATEGORY_RE = /^\/[A-Za-z0-9_]+\.h$/;
+
+/**
+ * MSVC C++ exception-handling internal type (FuncInfo, UnwindMapEntry, ...).
+ * Unlike Win32 SDK types (RGBQUAD, SYSTEMTIME), these are NOT declared by any
+ * real header (windows.h/CRT) — so anything typed as one cannot compile and
+ * must be dropped, not merely left to the SDK.
+ */
+export function isMsvcEhInternal(name: string): boolean {
+  return EH_INTERNAL_TYPES.has(name);
+}
+
+/**
+ * Decide whether a data type is a "library type" — i.e. provided by the real
+ * Win32 SDK / C runtime on Windows, NOT by us.
+ *
+ * Ghidra pulled C-runtime / Win32 / MSVC-EH internal types INTO the type
+ * database because the binary statically linked the CRT. Re-emitting our own
+ * struct/typedef definitions for these collides with the real headers that
+ * d2_platform.h pulls in (`<windows.h>`/`<winsock2.h>`/CRT) under _WIN32
+ * ("redefinition of struct X"). So these definitions must be guarded behind
+ * `#ifndef _WIN32` and only emitted for the no-SDK build.
+ *
+ * A type is a library type iff EITHER:
+ *   1. its Ghidra category is a system-header path (`/<header>.h`) — game types
+ *      live under `/` or `/Diablo2/...` and NEVER under such a path; OR
+ *   2. its name is a known MSVC C++ exception-handling internal (these sit at
+ *      root category `/`, shared with game types, so they need a name-set).
+ */
+export function isLibraryType(name: string, category: string): boolean {
+  if (SYSTEM_HEADER_CATEGORY_RE.test(category)) return true;
+  if (EH_INTERNAL_TYPES.has(name)) return true;
+  return false;
+}
+
+// =============================================================================
 // Type Checking
 // =============================================================================
 
@@ -260,6 +323,25 @@ export function normalizeSignatureType(type: string): string {
   return type;
 }
 
+/**
+ * Collapse function-pointer-typedef double-indirection in a signature type:
+ * "fpFoo *" → "fpFoo". Ghidra stores a function-pointer parameter/return as
+ * "fpFoo *", but fpFoo is itself emitted as a pointer typedef
+ * (typedef BOOL (*fpFoo)(...)), so the extra star yields BOOL (**) and a
+ * decayed-function argument fails to convert. The struct field renderer already
+ * does this; this lets signatures (params + return types) do the same.
+ *
+ * @param isFuncDefTypedef predicate identifying emitted fn-ptr typedef names
+ *   (passed in to avoid a circular import on globals-header).
+ */
+export function collapseFuncPtrTypedef(
+  type: string,
+  isFuncDefTypedef: (name: string) => boolean
+): string {
+  const m = type.trim().match(/^(\w+)\s*\*$/);
+  return m && isFuncDefTypedef(m[1]) ? m[1] : type;
+}
+
 // =============================================================================
 // Platform Header Generation
 // =============================================================================
@@ -345,6 +427,16 @@ export function generatePlatformHeader(): string {
   lines.push('#  endif');
   lines.push('#  include <windows.h>');
   lines.push('#  include <winsock2.h>');
+  // D2 declares its own functions whose names collide with <windows.h> A/W macros
+  // (e.g. a renderer CreateWindow(HWND,int)). The macro expands the declaration to
+  // an 11-arg CreateWindowExA call → "macro requires 11 arguments". Undef the macro
+  // forms so D2's own functions of these names compile; the real Win32 entry points
+  // remain reachable via their explicit ...ExA/...ExW / ...A / ...W names.
+  for (const m of ['CreateWindow', 'CreateWindowA', 'CreateWindowW']) {
+    lines.push(`#  ifdef ${m}`);
+    lines.push(`#    undef ${m}`);
+    lines.push(`#  endif`);
+  }
   lines.push('#else');
   lines.push('');
 
@@ -465,46 +557,9 @@ export function generatePlatformHeader(): string {
   lines.push('typedef unsigned long u_long;');
   lines.push('');
 
-  // 3dfx Glide types (used by Diablo 2's Glide renderer)
-  lines.push('// 3dfx Glide API types');
-  lines.push('typedef float FxFloat;');
-  lines.push('typedef int FxI32;');
-  lines.push('typedef unsigned int FxU32;');
-  lines.push('typedef short FxI16;');
-  lines.push('typedef unsigned short FxU16;');
-  lines.push('typedef int FxBool;');
-  lines.push('typedef unsigned int GrAlphaBlendFnc_t;');
-  lines.push('typedef unsigned int GrAlpha_t;');
-  lines.push('typedef unsigned int GrAspectRatio_t;');
-  lines.push('typedef unsigned int GrBuffer_t;');
-  lines.push('typedef unsigned int GrChipID_t;');
-  lines.push('typedef unsigned int GrChromakeyMode_t;');
-  lines.push('typedef unsigned int GrCmpFnc_t;');
-  lines.push('typedef unsigned int GrColorFormat_t;');
-  lines.push('typedef unsigned int GrColor_t;');
-  lines.push('typedef unsigned int GrCombineFactor_t;');
-  lines.push('typedef unsigned int GrCombineFunction_t;');
-  lines.push('typedef unsigned int GrCombineLocal_t;');
-  lines.push('typedef unsigned int GrCombineOther_t;');
-  lines.push('typedef unsigned int GrContext_t;');
-  lines.push('typedef unsigned int GrCoordinateSpaceMode_t;');
-  lines.push('typedef unsigned int GrDepthBufferMode_t;');
-  lines.push('typedef unsigned int GrDitherMode_t;');
-  lines.push('typedef unsigned int GrEnableMode_t;');
-  lines.push('typedef unsigned int GrLOD_t;');
-  lines.push('typedef unsigned int GrLfbWriteMode_t;');
-  lines.push('typedef unsigned int GrLock_t;');
-  lines.push('typedef unsigned int GrMipMapMode_t;');
-  lines.push('typedef unsigned int GrOriginLocation_t;');
-  lines.push('typedef unsigned int GrScreenRefresh_t;');
-  lines.push('typedef unsigned int GrScreenResolution_t;');
-  lines.push('typedef unsigned int GrTexTable_t;');
-  lines.push('typedef unsigned int GrTextureFilterMode_t;');
-  lines.push('typedef unsigned int GrTextureFormat_t;');
-  lines.push('struct GrLfbInfo_t { int size; void* lfbPtr; uint32_t strideInBytes; };');
-  lines.push('struct GrTexInfo { GrLOD_t smallLodLog2; GrLOD_t largeLodLog2; GrAspectRatio_t aspectRatioLog2; GrTextureFormat_t format; void* data; };');
-  lines.push('typedef void (*GrProc)();');
-  lines.push('');
+  // (3dfx Glide types moved out of the !_WIN32 branch — see below. They are a
+  //  third-party renderer API, not part of the Win32 SDK, so they must always
+  //  be defined regardless of platform.)
 
   // Thread context
   lines.push('// Thread context (minimal stub)');
@@ -567,6 +622,48 @@ export function generatePlatformHeader(): string {
   lines.push('');
 
   lines.push('#endif // _WIN32');
+  lines.push('');
+
+  // 3dfx Glide types (used by Diablo 2's Glide renderer) — a third-party API,
+  // NOT part of the Win32 SDK, so always defined on every platform.
+  lines.push('// 3dfx Glide API types');
+  lines.push('typedef float FxFloat;');
+  lines.push('typedef int FxI32;');
+  lines.push('typedef unsigned int FxU32;');
+  lines.push('typedef short FxI16;');
+  lines.push('typedef unsigned short FxU16;');
+  lines.push('typedef int FxBool;');
+  lines.push('typedef unsigned int GrAlphaBlendFnc_t;');
+  lines.push('typedef unsigned int GrAlpha_t;');
+  lines.push('typedef unsigned int GrAspectRatio_t;');
+  lines.push('typedef unsigned int GrBuffer_t;');
+  lines.push('typedef unsigned int GrChipID_t;');
+  lines.push('typedef unsigned int GrChromakeyMode_t;');
+  lines.push('typedef unsigned int GrCmpFnc_t;');
+  lines.push('typedef unsigned int GrColorFormat_t;');
+  lines.push('typedef unsigned int GrColor_t;');
+  lines.push('typedef unsigned int GrCombineFactor_t;');
+  lines.push('typedef unsigned int GrCombineFunction_t;');
+  lines.push('typedef unsigned int GrCombineLocal_t;');
+  lines.push('typedef unsigned int GrCombineOther_t;');
+  lines.push('typedef unsigned int GrContext_t;');
+  lines.push('typedef unsigned int GrCoordinateSpaceMode_t;');
+  lines.push('typedef unsigned int GrDepthBufferMode_t;');
+  lines.push('typedef unsigned int GrDitherMode_t;');
+  lines.push('typedef unsigned int GrEnableMode_t;');
+  lines.push('typedef unsigned int GrLOD_t;');
+  lines.push('typedef unsigned int GrLfbWriteMode_t;');
+  lines.push('typedef unsigned int GrLock_t;');
+  lines.push('typedef unsigned int GrMipMapMode_t;');
+  lines.push('typedef unsigned int GrOriginLocation_t;');
+  lines.push('typedef unsigned int GrScreenRefresh_t;');
+  lines.push('typedef unsigned int GrScreenResolution_t;');
+  lines.push('typedef unsigned int GrTexTable_t;');
+  lines.push('typedef unsigned int GrTextureFilterMode_t;');
+  lines.push('typedef unsigned int GrTextureFormat_t;');
+  lines.push('struct GrLfbInfo_t { int size; void* lfbPtr; uint32_t strideInBytes; };');
+  lines.push('struct GrTexInfo { GrLOD_t smallLodLog2; GrLOD_t largeLodLog2; GrAspectRatio_t aspectRatioLog2; GrTextureFormat_t format; void* data; };');
+  lines.push('typedef void (*GrProc)();');
   lines.push('');
 
   // MSVC underscore-prefixed CRT aliases
@@ -746,8 +843,9 @@ export function generatePlatformHeader(): string {
   lines.push('#endif');
   lines.push('');
 
-  // Exception type
-  lines.push('// MSVC exception class');
+  // Win32 PE/IMM/shell types — the real <windows.h> provides these, so only
+  // stub them when building without the platform SDK (non-_WIN32).
+  lines.push('#ifndef _WIN32');
   lines.push('typedef void* PRTL_CRITICAL_SECTION_DEBUG;');
   lines.push('struct HIMC__ { int unused; };');
   lines.push('struct WIN32_FIND_DATA { char cFileName[260]; };');
@@ -757,6 +855,9 @@ export function generatePlatformHeader(): string {
   lines.push('struct tagWINDOWPLACEMENT { UINT length; UINT flags; UINT showCmd; POINT ptMinPosition; POINT ptMaxPosition; RECT rcNormalPosition; };');
   lines.push('typedef tagWINDOWPLACEMENT WINDOWPLACEMENT;');
   lines.push('typedef GUID IID;');
+  lines.push('#endif // _WIN32');
+  lines.push('');
+  // Itanium/GCC unwind ABI types — not provided by <windows.h>; always defined.
   lines.push('typedef int _Unwind_Reason_Code;');
   lines.push('struct _Unwind_Exception { uint64_t exception_class; void (*exception_cleanup)(_Unwind_Reason_Code, struct _Unwind_Exception *); uint64_t private_1; uint64_t private_2; };');
   lines.push('');

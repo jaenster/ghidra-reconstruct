@@ -1630,18 +1630,54 @@ export class CppEmitter {
     if (node.statements.length > 0) {
       this.newline();
       this.indentLevel++;
+      let prev: Statement | null = null;
       for (const stmt of node.statements) {
+        if (prev && this.blankLineBetween(prev, stmt)) {
+          this.newline();
+        }
         this.write(this.indent());
         this.emitNode(stmt);
         if (this.needsSemicolon(stmt)) {
           this.write(';');
         }
         this.newline();
+        prev = stmt;
       }
       this.indentLevel--;
       this.write(this.indent());
     }
     this.write('}');
+  }
+
+  /** A statement that emits a braced control-flow block. */
+  private isControlFlowBlock(stmt: Statement): boolean {
+    switch (stmt.kind) {
+      case NodeKind.IfStmt:
+      case NodeKind.ForStmt:
+      case NodeKind.ForRangeStmt:
+      case NodeKind.WhileStmt:
+      case NodeKind.DoWhileStmt:
+      case NodeKind.SwitchStmt:
+      case NodeKind.TryStmt:
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  /**
+   * Whether to insert a blank line between two consecutive statements. A blank
+   * line is emitted only AFTER a control-flow block, never before one: a
+   * statement that sets up a condition (e.g. `int x = f();`) stays tight to the
+   * `if` that consumes it. Adjacent `if`s stay tight too, so guard-clause
+   * ladders don't get blown apart — the blank lands after the last guard,
+   * before the main body.
+   */
+  private blankLineBetween(a: Statement, b: Statement): boolean {
+    if (!this.style.blankLineAroundControlFlow) return false;
+    if (!this.isControlFlowBlock(a)) return false;
+    if (a.kind === NodeKind.IfStmt && b.kind === NodeKind.IfStmt) return false;
+    return true;
   }
 
   private needsSemicolon(stmt: Statement): boolean {

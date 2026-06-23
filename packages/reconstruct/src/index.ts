@@ -420,9 +420,20 @@ export async function reconstruct(
       }
     }
 
-    // Generate project in memory
+    // Generate project in memory.
+    //
+    // Promote the connection-level excludePatterns to codegen-level
+    // excludeNamespaces so the SAME pattern list that drops library functions
+    // during extraction ALSO drops every per-namespace file (compiler/*,
+    // VisualStudio/*) and its CMake entry. Extraction-time excludePatterns only
+    // filter primary-binary functions; mac-merged functions (secondary source)
+    // and whole runtime namespaces with no pattern slip through and produce
+    // files. Filtering by namespace at codegen closes both gaps in one place.
     onProgress?.('generation', 0, 1);
     const projectName = options.projectName || extractProjectName(projectPath);
+    if (excludePatterns && excludePatterns.length > 0 && !options.excludeNamespaces) {
+      options.excludeNamespaces = excludePatterns;
+    }
     const project = generateProject(
       projectName,
       extraction.functions,
@@ -461,7 +472,10 @@ export async function reconstruct(
       buildInfo: project.buildInfo,
     };
   } catch (error) {
-    errors.push(error instanceof Error ? error.message : String(error));
+    // Capture the full stack (not just the message) so codegen crashes are
+    // diagnosable from the result alone — the live regen is long and blind,
+    // and a bare message rarely points at the failing pass.
+    errors.push(error instanceof Error ? (error.stack ?? error.message) : String(error));
 
     return {
       success: false,

@@ -20,7 +20,17 @@
  */
 
 import { NodeKind } from '../../../../ast/kinds.js';
-import type { ASTNode, CompoundStmt, FunctionDecl, GotoStmt, LabelStmt } from '../../../../ast/nodes.js';
+import type {
+  ASTNode,
+  CompoundStmt,
+  DoWhileStmt,
+  ForStmt,
+  FunctionDecl,
+  GotoStmt,
+  LabelStmt,
+  SwitchStmt,
+  WhileStmt,
+} from '../../../../ast/nodes.js';
 import { updateNode } from '../../../transformer.js';
 import { createTransformer } from '../../../transformer.js';
 import { traverseAST } from '../../../../ast/visitor.js';
@@ -29,7 +39,12 @@ import type { GotoCleanupOptions } from './types.js';
 import { DEFAULT_MAX_NESTING, MAX_FIXPOINT_PASSES } from './types.js';
 import { processCompound } from './process.js';
 import { countGotosInStatements } from './analysis.js';
-import { setGlobalGotoCounts, clearGlobalGotoCounts } from './nested-inline.js';
+import {
+  setGlobalGotoCounts,
+  clearGlobalGotoCounts,
+  markCompoundAsLoopOrSwitchBody,
+  isLoopOrSwitchBodyCompound,
+} from './nested-inline.js';
 
 // Re-export public API
 export type { GotoCleanupStats } from './types.js';
@@ -61,6 +76,32 @@ function preComputeGlobalGotoCounts(root: ASTNode): void {
         }
       }
     }
+
+    // Mark loop/switch body compounds. A cleanup-fallthrough label inside such a
+    // body must NOT get a fabricated return — fallthrough there means continue the
+    // loop / fall to the next case, not the function's implicit return.
+    //
+    // The mark must apply TRANSITIVELY: a label nested any number of if/else/switch
+    // (or inner-loop) levels deep inside a loop/switch body still continues the loop
+    // on fallthrough. The bottom-up transformer inlines at whichever compound can see
+    // both the goto and the label — that compound may be a deep descendant of the body.
+    // So mark the body AND every descendant CompoundStmt within it. traverseAST visits
+    // the whole subtree (including nested loops), so every compound anywhere inside a
+    // loop/switch gets marked and reads fallthroughMeansReturn=false.
+    let body: ASTNode | undefined;
+    switch (node.kind) {
+      case NodeKind.ForStmt: body = (node as ForStmt).body; break;
+      case NodeKind.WhileStmt: body = (node as WhileStmt).body; break;
+      case NodeKind.DoWhileStmt: body = (node as DoWhileStmt).body; break;
+      case NodeKind.SwitchStmt: body = (node as SwitchStmt).body; break;
+    }
+    if (body && body.kind === NodeKind.CompoundStmt) {
+      for (const inner of traverseAST(body)) {
+        if (inner.kind === NodeKind.CompoundStmt) {
+          markCompoundAsLoopOrSwitchBody(inner as CompoundStmt);
+        }
+      }
+    }
   }
 
   setGlobalGotoCounts(allCounts);
@@ -79,12 +120,17 @@ function createGotoCleanupTransformer(pluginOptions?: Record<string, unknown>) {
       const stmts = compound.statements;
       if (stmts.length < 2) return undefined;
 
+      // A cleanup-fallthrough label's tail falls through to the function's implicit
+      // return ONLY when this compound is the function body. In a loop/switch body,
+      // fallthrough continues the loop / next case, so fabricating a return is wrong.
+      const fallthroughMeansReturn = !isLoopOrSwitchBodyCompound(compound);
+
       let current = stmts;
       let modified = false;
 
       // Fixpoint iteration: keep processing until no more changes
       for (let pass = 0; pass < MAX_FIXPOINT_PASSES; pass++) {
-        const result = processCompound(current, options);
+        const result = processCompound(current, options, fallthroughMeansReturn);
         if (!result) break;
         current = result;
         modified = true;

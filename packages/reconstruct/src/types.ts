@@ -431,6 +431,22 @@ export interface ReconstructOptions {
 
   /** Project config loaded from project.json */
   projectConfig?: ProjectConfig;
+
+  /**
+   * Namespace/module names (or patterns) to drop entirely from codegen.
+   *
+   * Unlike function-level excludePatterns (which only filter individual
+   * functions during extraction), this drops every function, class, datatype,
+   * global and namespace OWNED by a matching namespace so NO per-namespace
+   * header/impl file is generated for it and it never lands in the CMake source
+   * list. This is the choke point that keeps reconstructed C/MSVC-runtime
+   * modules (compiler/*, VisualStudio/*) out of the build — including
+   * mac-merged functions that bypass the extraction-time exclude.
+   *
+   * Populated by `reconstruct()` from the connection-level `excludePatterns`,
+   * so run.ts's existing pattern list is the single source of truth.
+   */
+  excludeNamespaces?: (string | RegExp)[];
 }
 
 export const defaultOptions: ReconstructOptions = {

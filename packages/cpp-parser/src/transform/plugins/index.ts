@@ -299,6 +299,16 @@ export {
   type EarlyReturnOptions,
 } from './builtins/early-return.js';
 
+export {
+  commaExpandPlugin,
+  type CommaExpandOptions,
+} from './builtins/comma-expand.js';
+
+export {
+  arrayFillCollapsePlugin,
+  type ArrayFillCollapseOptions,
+} from './builtins/array-fill-collapse.js';
+
 // ============================================
 // BUILT-IN PLUGINS: DECLARATION-INITIALIZATION MERGE
 // ============================================
@@ -373,6 +383,14 @@ export {
 } from './builtins/bitfield-access.js';
 
 // ============================================
+// BUILT-IN PLUGINS: SUBPIECE ACCESS
+// ============================================
+
+export {
+  subpieceAccessPlugin,
+} from './builtins/subpiece-access.js';
+
+// ============================================
 // BUILT-IN PLUGINS: INDIRECT CALL CLEANUP
 // ============================================
 
@@ -424,10 +442,13 @@ import { redundantNegationPlugin } from './builtins/redundant-negation.js';
 import { sbbBranchlessPlugin } from './builtins/sbb-branchless.js';
 import { branchlessSelectPlugin } from './builtins/branchless-select.js';
 import { earlyReturnPlugin } from './builtins/early-return.js';
+import { commaExpandPlugin } from './builtins/comma-expand.js';
+import { arrayFillCollapsePlugin } from './builtins/array-fill-collapse.js';
 import { funcPtrLiteralPlugin } from './builtins/func-ptr-literal.js';
 import { prngTransformPlugin } from './builtins/prng-transform.js';
 import { prngTempCollapsePlugin } from './builtins/prng-temp-collapse.js';
 import { bitfieldAccessPlugin } from './builtins/bitfield-access.js';
+import { subpieceAccessPlugin } from './builtins/subpiece-access.js';
 import { indirectCallCleanupPlugin } from './builtins/indirect-call-cleanup.js';
 import { methodCallRewritePlugin } from './builtins/method-call-rewrite.js';
 import { pointerCastNormalizePlugin } from './builtins/pointer-cast-normalize.js';
@@ -461,9 +482,12 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   incrementSimplifyPlugin,    // Cleanup: x = x + 1 → x++ (priority 35)
   redundantNegationPlugin,    // Cleanup: x + -y → x - y (priority 40)
   bitfieldAccessPlugin,       // Cleanup: field_0xNN & MASK → bitfieldName (priority 45)
+  subpieceAccessPlugin,       // Cleanup: expr._N_M_ → *(T *)((char *)expr + N) (priority 46)
   sbbBranchlessPlugin,        // Cleanup: -(uint32_t)(cond) & addr → cond ? addr : nullptr (priority 42)
   branchlessSelectPlugin,     // Cleanup: (cond - 1 & mask) + off → cond ? off : off+mask (priority 43)
   earlyReturnPlugin,          // Readability: flatten nested if(C){...}return X; → if(!C)return X; ... (priority 60)
+  commaExpandPlugin,          // Readability: lower comma/short-circuit side effects into statements + guards (priority 13)
+  arrayFillCollapsePlugin,    // Cleanup: collapse arr[i]=0 runs into memset (priority 50)
   gotoCleanupPlugin,          // Cleanup: if (cond) goto L; ... L: stmt; → if (!cond) { ... } stmt;
   redundantParenCleanupPlugin, // Cleanup: if((x)) → if(x) (priority 56)
   loopRotationUndoPlugin,     // Cleanup: if(C){do{...}while(C)} → while(C){...} (priority 56)

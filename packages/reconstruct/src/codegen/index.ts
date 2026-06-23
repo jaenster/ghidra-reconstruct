@@ -48,13 +48,13 @@ import type {
 } from '../types.js';
 import { resolveOverridePlaceholders } from './impl.js';
 
-import { generateHeader } from './header.js';
+import { generateHeader, setKnownFuncDefs } from './header.js';
 import { generateImplementation, type ImplGenContext } from './impl.js';
 import { generateCMakeLists, generateTopLevelCMake, generateTargetCMake, generateUnsortedCMake } from './cmake.js';
 import { generateSourceMap } from './sourcemap.js';
 import { generateReadme } from './readme.js';
 import { organizeByNamespace, getFilePath, setModuleNames } from './namespace.js';
-import { generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl } from './globals-header.js';
+import { generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs } from './globals-header.js';
 import { isPlatformOrBuiltinType, generatePlatformHeader } from './platform-types.js';
 import { createOverrideRegistry } from '../overrides/index.js';
 import { createLibraryRegistry } from '../library/index.js';
@@ -92,6 +92,78 @@ export function generateProject(
 ): ReconstructedProject {
   const files = new Map<string, SourceFile>();
   const sourceMaps = new Map<string, SourceMap>();
+
+  // Defensive: a datatype can reach codegen with its detail array undefined —
+  // a type whose detail fetch was skipped/failed leaves the shallow listing
+  // entry (no fields/values/parameters). Normalize every kind's array once here
+  // so every downstream consumer may assume the array exists.
+  for (const dt of dataTypes) {
+    if (dt.kind === 'STRUCTURE' || dt.kind === 'UNION') {
+      const s = dt as ExtractedStruct;
+      if (!Array.isArray(s.fields)) s.fields = [];
+    } else if (dt.kind === 'ENUM') {
+      const e = dt as import('../types.js').ExtractedEnum;
+      if (!Array.isArray(e.values)) e.values = [];
+    } else if (dt.kind === 'FUNCTION_DEFINITION') {
+      const f = dt as import('../types.js').ExtractedFunctionDefinition;
+      if (!Array.isArray(f.parameters)) f.parameters = [];
+    }
+  }
+
+  // Register every function-pointer typedef name (FUNCTION_DEFINITION datatypes)
+  // so stripFuncDefIndirection / struct-field stripping recognise all-caps and
+  // irregular fnptr typedefs (QUESTCALLBACK, ...), not just naming conventions.
+  // Must run before any header/globals/impl emission below.
+  const funcDefDataTypes = dataTypes.filter(
+    dt => dt.kind === 'FUNCTION_DEFINITION'
+  ) as import('../types.js').ExtractedFunctionDefinition[];
+  setKnownFuncDefTypedefs(funcDefDataTypes.map(dt => dt.name));
+  // Same set, by name, so a typedef targeting `<FunctionDefinition> *` can be
+  // inlined into a self-contained function-pointer typedef.
+  setKnownFuncDefs(funcDefDataTypes);
+
+  // Drop excluded namespaces/modules ENTIRELY (functions + classes + datatypes
+  // + globals + namespace records) so no per-namespace header/impl file is ever
+  // generated for them and they never reach the CMake source list (which is
+  // derived purely from project.files). This is what keeps reconstructed
+  // C/MSVC-runtime modules — compiler/*, VisualStudio/* — out of the build.
+  //
+  // Function-level excludePatterns only filter PRIMARY-binary functions during
+  // extraction; (a) whole runtime namespaces with no matching pattern, and
+  // (b) mac-merged functions from a secondary source (which is extracted
+  // WITHOUT excludePatterns), still arrive here. Filtering by namespace at the
+  // single codegen choke point closes both gaps.
+  const excludeNs = options.excludeNamespaces ?? [];
+  if (excludeNs.length > 0) {
+    const nsMatches = (ns: string | undefined | null): boolean => {
+      if (!ns) return false;
+      for (const pattern of excludeNs) {
+        if (typeof pattern === 'string') {
+          if (ns === pattern) return true;
+        } else if (pattern.test(ns)) {
+          return true;
+        }
+      }
+      return false;
+    };
+    const catMatches = (category: string | undefined | null): boolean => {
+      if (!category) return false;
+      return category.split('/').filter(Boolean).some(seg => nsMatches(seg));
+    };
+
+    const fnBefore = functions.length;
+    functions = functions.filter(f => !nsMatches(f.namespace));
+    classes = classes.filter(c => !nsMatches(c.namespace) && !nsMatches(c.name));
+    dataTypes = dataTypes.filter(dt => !catMatches(dt.category) && !nsMatches(dt.name));
+    globals = (globals as Array<{ namespace?: string }>).filter(
+      g => !nsMatches(g.namespace)
+    ) as typeof globals;
+    namespaces = namespaces.filter(ns => !nsMatches(ns.name) && !nsMatches(ns.fullPath));
+    const dropped = fnBefore - functions.length;
+    if (dropped > 0) {
+      console.log(`Excluded ${dropped} function(s) in excluded namespaces (no file emitted for them)`);
+    }
+  }
 
   // Initialize namespace collapsing with module names from project config
   const modules = options.projectConfig?.modules ?? {};
@@ -233,20 +305,39 @@ export function generateProject(
     // Values go in a per-enum namespace with `using namespace` to avoid name collisions
     // between enums that share value names (e.g. Death in both player and monster anim modes).
     const emittedNames = new Set<string>();
+    // Win32/CRT/compiler constants that Ghidra swept into enums collide with the
+    // real <windows.h>/<winnt.h> macros. Under _WIN32 the platform headers own
+    // them; emit our copies only when building without the SDK (non-_WIN32).
+    //   - `define_*` enums are recovered preprocessor #defines
+    //     (TRUE, WINVER, _M_IX86, _MSC_VER, the SAL annotation switches...)
+    //   - IMAGE_* values are PE-format section/header constants from <winnt.h>
+    const isPlatformEnumValue = (enumName: string, valueName: string): boolean =>
+      /^define_/.test(enumName) || /^IMAGE_[A-Z]/.test(valueName);
     for (const e of enumTypes) {
       if (isPlatformOrBuiltinType(e.name)) continue;
       if (/[^a-zA-Z0-9_]/.test(e.name)) continue;
       enumLines.push(`typedef int ${e.name};`);
       if (e.values.length > 0) {
-        enumLines.push(`namespace ${e.name}_ns {`);
+        const normalLines: string[] = [];
+        const platformLines: string[] = [];
         for (const v of e.values) {
           if (emittedNames.has(v.name)) continue;
           emittedNames.add(v.name);
           const comment = v.comment ? ` // ${v.comment.replace(/\\n/g, ' ')}` : '';
-          enumLines.push(`constexpr ${e.name} ${v.name} = ${v.value};${comment}`);
+          const line = `constexpr ${e.name} ${v.name} = ${v.value};${comment}`;
+          (isPlatformEnumValue(e.name, v.name) ? platformLines : normalLines).push(line);
         }
-        enumLines.push('}');
-        enumLines.push(`using namespace ${e.name}_ns;`);
+        if (normalLines.length > 0 || platformLines.length > 0) {
+          enumLines.push(`namespace ${e.name}_ns {`);
+          enumLines.push(...normalLines);
+          if (platformLines.length > 0) {
+            enumLines.push('#ifndef _WIN32  // provided by <windows.h>/<winnt.h> on Windows');
+            enumLines.push(...platformLines);
+            enumLines.push('#endif');
+          }
+          enumLines.push('}');
+          enumLines.push(`using namespace ${e.name}_ns;`);
+        }
       }
       enumLines.push('');
     }
@@ -268,6 +359,14 @@ export function generateProject(
 
   // Wire analyzed globals into context for static-local injection
   context.analyzedGlobals = analyzedGlobals;
+
+  // Qualified names (namespace::name) of every emitted function. A data symbol
+  // can share its name with a function in the same namespace (getter + backing
+  // flag both named e.g. IsRecording); globals.h must not redeclare those.
+  const functionQualifiedNames = new Set<string>();
+  for (const f of functions) {
+    functionQualifiedNames.add(f.namespace ? `${f.namespace}::${f.name}` : f.name);
+  }
 
   // Check if we have target configuration
   const targetConfigs = options.projectConfig?.targets;
@@ -347,7 +446,7 @@ export function generateProject(
           ...options,
           projectName: name,
           binaryName: programInfo?.name,
-        }, dataTypes, mergedTypeOwnerMap);
+        }, dataTypes, mergedTypeOwnerMap, functionQualifiedNames, context.bodyIdentifierFnCounts);
 
         files.set(globalsPath!, {
           path: globalsPath!,
@@ -406,7 +505,7 @@ export function generateProject(
           ...options,
           projectName: name,
           binaryName: programInfo?.name,
-        }, dataTypes, flatTypeOwnerMap);
+        }, dataTypes, flatTypeOwnerMap, functionQualifiedNames, context.bodyIdentifierFnCounts);
 
         files.set('globals.h', {
           path: 'globals.h',
@@ -862,16 +961,43 @@ function computeFileLocalGlobals(
  * Build a bitfield catalog from struct metadata.
  * Scans all structs for bitfield fields (dataType matches `:N$`) and builds
  * a global map: "field_0xNN:mask" → bitfieldName.
- * If two structs both define the same field_0xNN with different bitfield layouts,
- * that entry is removed (ambiguous).
+ *
+ * The catalog is keyed only by (byte offset, mask) — NOT by struct — because the
+ * bitfield-access transform runs on parsed function bodies where the base
+ * expression (`pSkillTxt->field_0x5`) carries no resolved struct type, so the
+ * transform cannot know which struct a `field_0xNN` access belongs to.
+ *
+ * To prevent cross-struct contamination (e.g. rewriting `D2SkillsTxt->field_0x5
+ * & 0x10` to `->soft` when `soft` is a bitfield of an UNRELATED struct and
+ * `D2SkillsTxt` merely has a plain/undefined byte at offset 0x5), a key is
+ * emitted only when it is unambiguously safe across the whole program:
+ *  - dropped if two structs map the same key to different names (collision), and
+ *  - dropped if ANY struct has a NON-bitfield field occupying that byte offset
+ *    (because the accessor `field_0xNN` would also be emitted there, and the
+ *    rewrite would be wrong for that struct).
  */
-function buildBitfieldCatalog(dataTypes: ExtractedDataType[]): Map<string, string> {
+export function buildBitfieldCatalog(dataTypes: ExtractedDataType[]): Map<string, string> {
   const catalog = new Map<string, string>();
   const conflicts = new Set<string>();
+
+  // Byte offsets that some struct occupies with a NON-bitfield field. Applying a
+  // `field_0xNN & mask` rewrite at such an offset would be wrong for that struct.
+  const nonBitfieldByteOffsets = new Set<number>();
 
   for (const dt of dataTypes) {
     if (dt.kind !== 'STRUCTURE') continue;
     const struct = dt as ExtractedStruct;
+    if (!Array.isArray(struct.fields)) continue;
+
+    // First pass: record every byte covered by a non-bitfield field in this struct.
+    for (const f of struct.fields) {
+      const isBitfield = (f.dataType ?? '').trim().match(/^(.+?):(\d+)$/) !== null;
+      if (isBitfield) continue;
+      const span = f.size > 0 ? f.size : 1;
+      for (let b = 0; b < span; b++) {
+        nonBitfieldByteOffsets.add(f.offset + b);
+      }
+    }
 
     let i = 0;
     while (i < struct.fields.length) {
@@ -924,6 +1050,22 @@ function buildBitfieldCatalog(dataTypes: ExtractedDataType[]): Map<string, strin
         bitPosition += bitWidth;
       }
     }
+  }
+
+  // Drop any key whose byte offset is occupied by a non-bitfield field in some
+  // struct — the rewrite would contaminate that struct's plain-byte access.
+  let ambiguityDrops = 0;
+  for (const key of [...catalog.keys()]) {
+    const offMatch = key.match(/^field_0x([0-9a-fA-F]+):/);
+    if (!offMatch) continue;
+    const byteOffset = parseInt(offMatch[1], 16);
+    if (nonBitfieldByteOffsets.has(byteOffset)) {
+      catalog.delete(key);
+      ambiguityDrops++;
+    }
+  }
+  if (ambiguityDrops > 0) {
+    console.log(`Bitfield catalog: dropped ${ambiguityDrops} entr${ambiguityDrops === 1 ? 'y' : 'ies'} whose byte offset collides with a non-bitfield field in another struct (anti-contamination)`);
   }
 
   return catalog;
@@ -1098,6 +1240,21 @@ function generateFilesForFunctions(
     context.functionNameToHeader = funcNameToHeaderPath;
   }
 
+  // Build the set of all namespace paths so body-qualifier stripping can avoid
+  // creating ambiguous references (e.g. shortening D2Common::Path::DynamicPath::Fn
+  // to Path::DynamicPath::Fn when a sibling D2Common::Unit::Path also exists).
+  const knownNamespaces = new Set<string>();
+  const registerNamespacePath = (full: string | undefined) => {
+    if (!full) return;
+    const segs = full.split('::').filter(Boolean);
+    for (let i = 1; i <= segs.length; i++) {
+      knownNamespaces.add(segs.slice(0, i).join('::'));
+    }
+  };
+  for (const ns of namespaces) registerNamespacePath(ns.fullPath ?? ns.name);
+  for (const func of functions) registerNamespacePath(func.namespace);
+  context.knownNamespaces = knownNamespaces;
+
   // ── Build module graph for include resolution ────────────────────────
   const moduleGraph = buildModuleGraph({
     organized,
@@ -1176,7 +1333,8 @@ function generateFilesForFunctions(
       includedTypeNames,
       headerPath,
       undefined,  // no funcIncludes
-      functions   // allFunctions for cross-module method lookup
+      functions,  // allFunctions for cross-module method lookup
+      classes     // allClasses so cross-namespace method structs get method declarations
     );
 
     files.set(headerPath, {
@@ -1329,7 +1487,8 @@ function generateFilesForFunctions(
       includedTypeNames,
       headerPath,
       undefined,  // no funcIncludes
-      functions   // allFunctions for cross-module method lookup
+      functions,  // allFunctions for cross-module method lookup
+      classes     // allClasses so cross-namespace method structs get method declarations
     );
 
     files.set(headerPath, {
@@ -1443,6 +1602,29 @@ export async function writeProject(
   const readmeContent = generateReadme(project, options);
   await fs.writeFile(readmePath, readmeContent, 'utf-8');
   writtenFiles.push(readmePath);
+
+  // Prune stale generated files: remove .cpp/.h/.map/CMakeLists left over from a
+  // previous run that this run did not (re)write — e.g. a namespace that moved
+  // modules, or a module that became excluded. Keeps the output tree in sync
+  // with the current generation instead of accumulating leftovers.
+  try {
+    const keep = new Set(writtenFiles.map(p => path.resolve(p)));
+    const PRUNE = /(\.(cpp|cc|c|h|hpp)$|\.map$|(^|[\\/])CMakeLists\.txt$)/;
+    const entries = await fs.readdir(outputDir, { recursive: true, withFileTypes: true });
+    for (const e of entries) {
+      if (!e.isFile()) continue;
+      const abs = path.resolve((e as { parentPath?: string; path?: string }).parentPath ?? e.path ?? outputDir, e.name);
+      const rel = path.relative(outputDir, abs);
+      if (!PRUNE.test(rel)) continue;
+      if (!keep.has(abs)) await fs.unlink(abs).catch(() => {});
+    }
+    // Remove directories left empty by the prune (deepest first).
+    const dirs = (await fs.readdir(outputDir, { recursive: true, withFileTypes: true }))
+      .filter(e => e.isDirectory())
+      .map(e => path.resolve((e as { parentPath?: string; path?: string }).parentPath ?? e.path ?? outputDir, e.name))
+      .sort((a, b) => b.length - a.length);
+    for (const d of dirs) await fs.rmdir(d).catch(() => {});
+  } catch { /* best-effort prune */ }
 
   return writtenFiles;
 }

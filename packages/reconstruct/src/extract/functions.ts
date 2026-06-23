@@ -315,37 +315,64 @@ export async function extractAllFunctions(
       const batch = needsDecompile.slice(i, i + BATCH_SIZE);
       const addresses = batch.map(b => b.address);
 
-      try {
-        const result = await connection.sendCommand<BatchDecompileResult>(
-          'batch_decompile',
-          {
-            addresses,
-            limit: addresses.length,
-            decompileTimeout,
-            _commandTimeout: Math.max(300000, (decompileTimeout + 5) * addresses.length * 1000),
-          }
-        );
+      // Retry the batch on transient failures (e.g. "Worker exited" — the daemon
+      // respawns the worker, so a retry succeeds). Without this, a single mid-run
+      // worker crash silently drops a whole batch (~50 function bodies → "// TODO:
+      // Decompilation not available"). On persistent failure, fall back to
+      // per-function decompile so one bad function can't sink the batch.
+      const MAX_BATCH_RETRIES = 4;
+      let batchOk = false;
+      for (let attempt = 0; attempt <= MAX_BATCH_RETRIES; attempt++) {
+        try {
+          const result = await connection.sendCommand<BatchDecompileResult>(
+            'batch_decompile',
+            {
+              addresses,
+              limit: addresses.length,
+              decompileTimeout,
+              _commandTimeout: Math.max(300000, (decompileTimeout + 5) * addresses.length * 1000),
+            }
+          );
 
-        // Map results back by address
-        const resultByAddr = new Map(result.results.map(r => [r.address, r]));
-        for (const { idx, address } of batch) {
-          const decomp = resultByAddr.get(address);
-          if (decomp) {
-            allFunctions[idx].decompiled = decomp.pseudocode;
-            if (cache) await cache.setByAddress(address, decomp.pseudocode);
-            decompiled++;
-          }
-        }
-
-        if (result.failed.length > 0) {
-          console.log(`  Batch ${Math.floor(i / BATCH_SIZE) + 1}: ${result.failed.length} failures`);
-        }
-      } catch (err) {
-        console.error(`  Batch decompile failed for addresses ${i}-${i + batch.length}: ${err}`);
-        // Fall back to cached results if available
-        if (cache) {
+          // Map results back by address
+          const resultByAddr = new Map(result.results.map(r => [r.address, r]));
           for (const { idx, address } of batch) {
-            const cached = await cache.getByAddress(address);
+            const decomp = resultByAddr.get(address);
+            if (decomp) {
+              allFunctions[idx].decompiled = decomp.pseudocode;
+              if (cache) await cache.setByAddress(address, decomp.pseudocode);
+              decompiled++;
+            }
+          }
+
+          if (result.failed.length > 0) {
+            console.log(`  Batch ${Math.floor(i / BATCH_SIZE) + 1}: ${result.failed.length} failures`);
+          }
+          batchOk = true;
+          break;
+        } catch (err) {
+          if (attempt < MAX_BATCH_RETRIES) {
+            const delay = Math.min(1000 * 2 ** attempt, 8000);
+            console.warn(`  Batch decompile (addresses ${i}-${i + batch.length}) failed (attempt ${attempt + 1}/${MAX_BATCH_RETRIES + 1}): ${err} — retrying in ${delay}ms`);
+            await new Promise(r => setTimeout(r, delay));
+          } else {
+            console.error(`  Batch decompile exhausted retries for addresses ${i}-${i + batch.length}: ${err} — falling back to per-function decompile`);
+          }
+        }
+      }
+
+      // Per-function fallback for a batch that never succeeded as a unit.
+      if (!batchOk) {
+        for (const { idx, address } of batch) {
+          try {
+            const code = await decompileFunction(connection, address, decompileTimeout);
+            if (code) {
+              allFunctions[idx].decompiled = code;
+              if (cache) await cache.setByAddress(address, code);
+              decompiled++;
+            }
+          } catch {
+            const cached = cache ? await cache.getByAddress(address) : null;
             if (cached) allFunctions[idx].decompiled = cached;
           }
         }

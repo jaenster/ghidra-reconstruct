@@ -21,8 +21,14 @@ import type {
 import type { MethodConversionRegistry } from '../methods/index.js';
 import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js';
 import { isGhidraGeneratedName, suggestBetterName } from '@ghidra-mcp/cpp-parser';
-import { isPlatformOrBuiltinType, normalizeSignatureType, WINDOWS_STRUCTS } from './platform-types.js';
-import { generateExternDeclaration } from './globals-header.js';
+import { isPlatformOrBuiltinType, isLibraryType, normalizeSignatureType, collapseFuncPtrTypedef, WINDOWS_STRUCTS } from './platform-types.js';
+import { generateExternDeclaration, isFuncDefTypedefName } from './globals-header.js';
+
+/** normalizeSignatureType + fn-ptr-typedef double-indirection collapse, for
+ *  emitting function parameter and return types ("fpFoo *" → "fpFoo"). */
+function sigType(type: string): string {
+  return collapseFuncPtrTypedef(normalizeSignatureType(type), isFuncDefTypedefName);
+}
 
 /**
  * Clean a parameter name: apply the same renaming the body transform does
@@ -84,7 +90,8 @@ export function generateHeader(
   includedTypes?: Set<string>,
   headerPath?: string,
   funcIncludes?: string[],
-  allFunctions?: ExtractedFunction[]
+  allFunctions?: ExtractedFunction[],
+  allClasses?: DetectedClass[]
 ): string {
   const lines: string[] = [];
 
@@ -122,7 +129,7 @@ export function generateHeader(
   // Forward declarations — skip types already fully defined via #includes (includedTypes).
   // Don't skip ownedTypes: they might not be emitted due to filtering, and need forward decl.
   const alreadyDefined = new Set<string>([...(includedTypes ?? [])]);
-  const forwardDecls = collectForwardDeclarations(functions, classInfo, dataTypes, classNames, alreadyDefined, ownedTypes);
+  const forwardDecls = collectForwardDeclarations(functions, classInfo, dataTypes, classNames, alreadyDefined, ownedTypes, allClasses, allFunctions);
   if (forwardDecls.length > 0) {
     lines.push('// Forward declarations');
     for (const decl of forwardDecls) {
@@ -174,10 +181,63 @@ export function generateHeader(
   // Track emitted constexpr names to avoid duplicates across enum types
   const emittedConstexprNames = new Set<string>();
 
+  // Emit a single type's full definition into `out` (handles class/struct/enum
+  // special-casing). Returns true if the emitted type was the class struct.
+  const emitTypeDefinition = (type: ExtractedDataType, out: string[]): boolean => {
+    // If this is the class type, emit it as a class declaration (with methods)
+    if (classInfo && type.name === classInfo.name) {
+      if ((!classInfo.fields || classInfo.fields.length === 0) && 'fields' in type) {
+        classInfo.fields = (type as ExtractedStruct).fields;
+      }
+      out.push(generateClassDeclaration(classInfo, functions, options, methodConversions, true, allFunctions));
+      out.push('');
+      return true;
+    }
+    // If this struct type matches a method-converted class (not already handled above),
+    // emit it as a class declaration so that method declarations are included.
+    // This handles the case where functions are namespaced to a different unit than
+    // the struct they extend (e.g., Fog::BitBuffer functions → D2BitBufferStrc methods).
+    if (type.kind === 'STRUCTURE' && allClasses && type.name !== classInfo?.name) {
+      const matchingClass = allClasses.find(c => c.name === type.name && c.methods.length > 0);
+      if (matchingClass) {
+        if ((!matchingClass.fields || matchingClass.fields.length === 0) && 'fields' in type) {
+          matchingClass.fields = (type as ExtractedStruct).fields;
+        }
+        out.push(generateClassDeclaration(matchingClass, functions, options, methodConversions, true, allFunctions));
+        out.push('');
+        return false;
+      }
+    }
+    let decl = generateDataTypeDeclaration(type, options);
+    // Deduplicate constexpr names across enum types
+    if (type.kind === 'ENUM') {
+      decl = decl.split('\n').filter(line => {
+        const m = line.match(/^constexpr\s+\S+\s+(\w+)/);
+        if (m) {
+          if (emittedConstexprNames.has(m[1])) return false;
+          emittedConstexprNames.add(m[1]);
+        }
+        return true;
+      }).join('\n');
+    }
+    out.push(decl);
+    out.push('');
+    return false;
+  };
+
   if (typesToEmit.length > 0) {
     lines.push('// Data types');
+    // Partition into normal vs library types. Library types (CRT / Win32 / MSVC-EH
+    // internals Ghidra pulled in from the statically-linked CRT) get their full
+    // DEFINITIONS guarded behind #ifndef _WIN32, because the real SDK / CRT that
+    // d2_platform.h includes provides them on Windows — re-emitting collides.
+    // Topological ordering is preserved within each partition (stable filter of
+    // the already-sorted list); forward declarations above stay unguarded.
+    const normalTypes = typesToEmit.filter(t => !isLibraryType(t.name, t.category));
+    const libraryTypes = typesToEmit.filter(t => isLibraryType(t.name, t.category));
+
     let currentIfdef: string | undefined;
-    for (const type of typesToEmit) {
+    for (const type of normalTypes) {
       // Wrap platform-specific types in #ifdef guards
       if (type.ifdef !== currentIfdef) {
         if (currentIfdef) {
@@ -189,33 +249,20 @@ export function generateHeader(
         }
         currentIfdef = type.ifdef;
       }
-      // If this is the class type, emit it as a class declaration (with methods)
-      if (classInfo && type.name === classInfo.name) {
-        if ((!classInfo.fields || classInfo.fields.length === 0) && 'fields' in type) {
-          classInfo.fields = (type as ExtractedStruct).fields;
-        }
-        lines.push(generateClassDeclaration(classInfo, functions, options, methodConversions, true, allFunctions));
-        lines.push('');
-        classEmittedInTopoSort = true;
-        continue;
-      }
-      let decl = generateDataTypeDeclaration(type, options);
-      // Deduplicate constexpr names across enum types
-      if (type.kind === 'ENUM') {
-        decl = decl.split('\n').filter(line => {
-          const m = line.match(/^constexpr\s+\S+\s+(\w+)/);
-          if (m) {
-            if (emittedConstexprNames.has(m[1])) return false;
-            emittedConstexprNames.add(m[1]);
-          }
-          return true;
-        }).join('\n');
-      }
-      lines.push(decl);
-      lines.push('');
+      if (emitTypeDefinition(type, lines)) classEmittedInTopoSort = true;
     }
     if (currentIfdef) {
       lines.push(`#endif // ${currentIfdef}`);
+      lines.push('');
+    }
+
+    if (libraryTypes.length > 0) {
+      lines.push('#ifndef _WIN32  // provided by the Win32 SDK / CRT on Windows');
+      lines.push('');
+      for (const type of libraryTypes) {
+        if (emitTypeDefinition(type, lines)) classEmittedInTopoSort = true;
+      }
+      lines.push('#endif // _WIN32');
       lines.push('');
     }
   }
@@ -359,9 +406,16 @@ export function generateHeader(
       let currentIfdef: string | undefined;
       const emittedFuncNames = new Set<string>();
       for (const func of declaredFunctions) {
-        // Deduplicate by function name (avoids overloaded-return-type errors)
-        if (emittedFuncNames.has(func.name)) continue;
-        emittedFuncNames.add(func.name);
+        // Deduplicate by name + parameter signature, NOT name alone. Same-name
+        // functions with DIFFERENT parameters are valid C++ overloads and must
+        // all be declared — dropping them made callers bind to the one surviving
+        // overload (e.g. 7 SpawnMonster overloads, STATLIST_GetItemStatBonusValues),
+        // causing "cannot convert" errors. Same name AND same params (a return-type-
+        // only difference, which C++ can't overload) still collapses to the first.
+        const sigKey = func.name + '(' +
+          (func.parameters ?? []).map(p => p.dataType).join(',') + ')';
+        if (emittedFuncNames.has(sigKey)) continue;
+        emittedFuncNames.add(sigKey);
         // Group consecutive functions with the same ifdef under one guard
         if (func.ifdef !== currentIfdef) {
           if (currentIfdef) {
@@ -627,7 +681,7 @@ export function generateFunctionDeclaration(
   }
   const params = renumberParams(func.parameters)
     .map(p => {
-      const type = normalizeSignatureType(p.dataType);
+      const type = sigType(p.dataType);
       let name = p.name;
       // Avoid param name shadowing its own type (e.g., "eD2ItemFlag eD2ItemFlag")
       const baseType = type.replace(/\s*[*&]+\s*$/, '').replace(/^(struct|class|union|enum)\s+/, '').trim();
@@ -654,12 +708,12 @@ export function generateFunctionDeclaration(
   // Sanitize function names: strip trailing parens, replace invalid chars (hyphens, dots, etc.)
   let cleanName = func.name.replace(/[()]+$/, '').replace(/[^A-Za-z0-9_]/g, '_');
   // Detect constructor pattern: function name matches return type (e.g., D2WinButton * D2WinButton(...))
-  const returnType = normalizeSignatureType(func.returnType);
+  const returnType = sigType(func.returnType);
   if (returnType.startsWith(cleanName + ' ') || returnType === cleanName) {
     cleanName = `Create_${cleanName}`;
   }
 
-  return `${commentBlock}${normalizeSignatureType(func.returnType)} ${cleanName}(${params});${addressComment}`;
+  return `${commentBlock}${sigType(func.returnType)} ${cleanName}(${params});${addressComment}`;
 }
 
 /**
@@ -677,10 +731,10 @@ function generateMethodDeclaration(
   const filtered = func.parameters
     .filter((p, i) => p.name === 'this' || i === thisParamIndex ? false : true);
   const params = renumberParams(filtered)
-    .map(p => `${normalizeSignatureType(p.dataType)} ${p.name}`)
+    .map(p => `${sigType(p.dataType)} ${p.name}`)
     .join(', ');
 
-  return `${normalizeSignatureType(func.returnType)} ${func.name}(${params})`;
+  return `${sigType(func.returnType)} ${func.name}(${params})`;
 }
 
 /**
@@ -694,7 +748,7 @@ function generateConstructorDeclaration(
   const filtered = func.parameters
     .filter((p, i) => p.name === 'this' || i === thisParamIndex ? false : true);
   const params = renumberParams(filtered)
-    .map(p => `${normalizeSignatureType(p.dataType)} ${p.name}`)
+    .map(p => `${sigType(p.dataType)} ${p.name}`)
     .join(', ');
 
   return `${className}(${params})`;
@@ -726,9 +780,11 @@ function generateDataTypeDeclaration(
  *
  * - Adds `/* 0xNN *​/` offset prefix to each field
  * - Collapses consecutive unnamed `undefined` (1-byte) fields into `uint8_t _pad_0xNN[count]`
- * - Gives unnamed fields a `_pad_0xNN` name based on their offset
+ *   (genuine decompiler filler that bodies never reference)
+ * - Gives other unnamed members Ghidra's decompiler default name so body
+ *   references resolve: `field<i>` for unions, `field<i>_0x<off>` for structs
  */
-function emitFieldLines(fields: StructField[], lines: string[]): void {
+function emitFieldLines(fields: StructField[], lines: string[], isUnion = false): void {
   // Determine hex width from the largest offset (minimum 2 digits)
   const maxOffset = fields.length > 0 ? Math.max(...fields.map(f => f.offset)) : 0;
   const hexWidth = Math.max(2, maxOffset.toString(16).length);
@@ -795,9 +851,17 @@ function emitFieldLines(fields: StructField[], lines: string[]): void {
       rawFieldName = fieldNameArrayMatch[1];
       fieldNameArraySuffix = fieldNameArrayMatch[2];
     }
+    // Fallback name for an unnamed member must MATCH Ghidra's decompiler
+    // auto-name, because function bodies reference these members by that name:
+    //   - union member at ordinal i      → `field<i>`        (e.g. field0, field1)
+    //   - struct member at ordinal i/off → `field<i>_0x<off>` (e.g. field2_0x1f44)
+    // Ghidra uses lowercase, unpadded hex (Integer.toHexString) for the offset.
+    const ghidraDefaultName = isUnion
+      ? `field${i}`
+      : `field${i}_0x${field.offset.toString(16)}`;
     // Sanitize field names: replace spaces/invalid chars with underscores
-    let rawName = rawFieldName ? rawFieldName.replace(/[^a-zA-Z0-9_]/g, '_') : `_pad_${offsetHex}_${i}`;
-    if (!rawName) rawName = `_pad_${offsetHex}_${i}`;
+    let rawName = rawFieldName ? rawFieldName.replace(/[^a-zA-Z0-9_]/g, '_') : ghidraDefaultName;
+    if (!rawName) rawName = ghidraDefaultName;
     // Prefix names starting with a digit (e.g., "0x1B" → "field_0x1B") — invalid C++ identifiers
     if (/^\d/.test(rawName)) rawName = `field_${rawName}`;
     const type = normalizeUndefinedType(field.dataType, field.size);
@@ -897,8 +961,8 @@ function normalizeFieldDeclaration(fieldType: string, fieldName: string, fieldSi
 
   // Fix function pointer typedef double-indirection: "fnFoo *" → "fnFoo"
   // Ghidra stores function pointer fields as "fnFoo *" but fnFoo is already a pointer typedef
-  const funcPtrMatch = type.match(/^(fn[A-Z]\w*|fp[A-Z]\w*|D2\w+Func|D2\w+Callback|D2\w+Handler|AI_\w+|D2NET_\w+|D2\w+DoFunc|D2\w+StFunc|D2\w+HitFunc|D2\w+DmgFunc|GrProc)\s*\*$/);
-  if (funcPtrMatch) {
+  const funcPtrMatch = type.match(/^(\w+)\s*\*$/);
+  if (funcPtrMatch && isFuncDefTypedefName(funcPtrMatch[1])) {
     type = funcPtrMatch[1];
   }
 
@@ -907,6 +971,15 @@ function normalizeFieldDeclaration(fieldType: string, fieldName: string, fieldSi
   if (ptrArrayMatch) {
     type = ptrArrayMatch[1] + ptrArrayMatch[3];
     arraySuffix = `[${ptrArrayMatch[2]}]${arraySuffix}`;
+    // Re-apply the fnptr-typedef strip: an array of fnptr-typedef pointers
+    // ("QUESTCALLBACK *[15]") reduces to "QUESTCALLBACK *" here, but the typedef
+    // already encodes the pointer, so collapse to "QUESTCALLBACK" (→ QUESTCALLBACK
+    // NAME[15], whose elements accept &func). The scalar strip above ran before
+    // this split and so missed the array form.
+    const arrFnPtr = type.match(/^(\w+)\s*\*$/);
+    if (arrFnPtr && isFuncDefTypedefName(arrFnPtr[1])) {
+      type = arrFnPtr[1];
+    }
   }
 
   // Fix array-pointer field types: "Type[N] *" → "Type *" (Ghidra artifact, array decays to pointer)
@@ -1008,7 +1081,26 @@ export function generateEnumDeclaration(enumType: ExtractedEnum): string {
 /**
  * Generate typedef declaration
  */
+// FunctionDefinition datatypes by name, registered before emission so a typedef
+// whose target is a pointer to one can be inlined (see generateTypedefDeclaration).
+const knownFuncDefs = new Map<string, ExtractedFunctionDefinition>();
+
+export function setKnownFuncDefs(defs: Iterable<ExtractedFunctionDefinition>): void {
+  knownFuncDefs.clear();
+  for (const d of defs) knownFuncDefs.set(d.name, d);
+}
+
 function generateTypedefDeclaration(type: ExtractedTypedef): string {
+  // A typedef whose target is `<FunctionDefinition> *` (e.g. QUESTCALLBACKFN =
+  // `QUESTCALLBACK *`, where QUESTCALLBACK is a Ghidra function-signature type)
+  // must be emitted as a self-contained function-pointer typedef: the bare
+  // FunctionDefinition name has no standalone C definition, so referencing it
+  // leaves the typedef — and every TU that includes it — undefined.
+  const m = type.underlyingType.trim().match(/^(\w+)\s*\*$/);
+  if (m) {
+    const fd = knownFuncDefs.get(m[1]);
+    if (fd) return generateFunctionDefinitionDeclaration({ ...fd, name: type.name });
+  }
   return `typedef ${type.underlyingType} ${type.name};`;
 }
 
@@ -1020,7 +1112,7 @@ export function generateUnionDeclaration(type: ExtractedUnion): string {
 
   lines.push(`union ${type.name} {`);
 
-  emitFieldLines(type.fields, lines);
+  emitFieldLines(type.fields, lines, /* isUnion */ true);
 
   lines.push('};');
 
@@ -1035,7 +1127,7 @@ export function generateFunctionDefinitionDeclaration(type: ExtractedFunctionDef
   const params = type.parameters
     .map(p => {
       const name = p.name && p.name !== '' ? ` ${p.name}` : '';
-      return `${normalizeSignatureType(p.dataType)}${name}`;
+      return `${sigType(p.dataType)}${name}`;
     })
     .join(', ');
 
@@ -1164,7 +1256,9 @@ function collectForwardDeclarations(
   dataTypes?: ExtractedDataType[],
   classNames?: Set<string>,
   alreadyDefined?: Set<string>,
-  ownedTypes?: Set<string>
+  ownedTypes?: Set<string>,
+  allClasses?: DetectedClass[],
+  allFunctions?: ExtractedFunction[]
 ): string[] {
   const declarations = new Set<string>();
 
@@ -1256,6 +1350,38 @@ function collectForwardDeclarations(
     }
   }
 
+  // Also scan methods emitted INTO a struct body. When functions are method-converted
+  // onto a struct (allClasses, e.g. D2QuestDataStrc.QUEST_SetStateAndBroadcast),
+  // generateClassDeclaration emits the method signature into the struct — so its
+  // parameter/return types (e.g. an fpExecuteOnUnitFunction* function-pointer param)
+  // need forward declarations / guarded typedefs too. The primary classInfo is handled
+  // above; this covers the secondary structs reached via allClasses.
+  if (allClasses) {
+    const fnByAddr = new Map<string, ExtractedFunction>();
+    for (const f of (allFunctions ?? functions)) {
+      if (f.address) fnByAddr.set(f.address, f);
+    }
+    for (const cls of allClasses) {
+      if (cls.name === classInfo?.name) continue; // already handled
+      if (!cls.methods || cls.methods.length === 0) continue;
+      for (const method of cls.methods) {
+        const func = fnByAddr.get(method.address);
+        if (!func) continue;
+        for (const param of func.parameters) {
+          for (const type of extractAllTypeRefs(param.dataType)) {
+            if (type !== cls.name) {
+              addForwardDeclaration(declarations, type, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes);
+            }
+          }
+        }
+        const returnType = extractClassName(func.returnType);
+        if (returnType && returnType !== cls.name) {
+          addForwardDeclaration(declarations, returnType, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes);
+        }
+      }
+    }
+  }
+
   return Array.from(declarations).sort();
 }
 
@@ -1296,11 +1422,17 @@ function addForwardDeclaration(
     declarations.add(`struct ${type};`);
   } else if (/^fn[A-Z]/.test(type) || /^fp[A-Z]/.test(type) || funcDefNames.has(type)) {
     const funcDef = funcDefMap.get(type);
-    if (funcDef) {
-      declarations.add(generateFunctionDefinitionDeclaration(funcDef));
-    }
-    // No fallback — function pointer typedefs can't be forward-declared generically
-    // without causing "typedef redefinition with different types" errors
+    // Guard the typedef with a per-name macro so the real signature (here) and
+    // an opaque fallback (in a header that lacks the FUNCTION_DEFINITION) can't
+    // both expand in one translation unit — first include wins, the rest skip.
+    // Without this, a function-pointer type used as a struct field/param but
+    // whose FUNCTION_DEFINITION isn't in this header's type set was emitted
+    // nowhere ("'fpExecuteOnUnitFunction' has not been declared").
+    const guard = `RECON_FPTD_${type}`;
+    const body = funcDef
+      ? generateFunctionDefinitionDeclaration(funcDef)
+      : `typedef void (*${type})();`;
+    declarations.add(`#ifndef ${guard}\n#define ${guard}\n${body}\n#endif`);
   } else {
     declarations.add(`struct ${type};`);
   }

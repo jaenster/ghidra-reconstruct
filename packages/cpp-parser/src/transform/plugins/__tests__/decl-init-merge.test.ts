@@ -18,9 +18,35 @@ describe('declInitMergePlugin', () => {
     assert.strictEqual(output, 'void f() {\n  int x = 5;\n  use(x);\n}');
   });
 
-  it('should merge across non-referencing intermediate statements', () => {
+  it('should sink the declaration to the assignment site (not hoist the init up)', () => {
+    // The merged decl lands where the assignment was, AFTER the intermediate
+    // statement — never hoisted above it.
     const output = transformCode('void f() { int x; y = 1; x = 5; }');
-    assert.strictEqual(output, 'void f() {\n  int x = 5;\n  y = 1;\n}');
+    assert.strictEqual(output, 'void f() {\n  y = 1;\n  int x = 5;\n}');
+  });
+
+  it('must not hoist an initializer above guard clauses (use-before-check bug)', () => {
+    const output = transformCode(`X* f(U* pGame) {
+  M* pMon;
+  C* pCur;
+  if (!pGame) return nullptr;
+  pMon = pGame->data;
+  if (!pMon) return nullptr;
+  pCur = pMon->list;
+  if (!pCur) return nullptr;
+  return pCur;
+}`);
+    assert.strictEqual(output, `X* f(U* pGame) {
+  if (!pGame)
+    return nullptr;
+  M* pMon = pGame->data;
+  if (!pMon)
+    return nullptr;
+  C* pCur = pMon->list;
+  if (!pCur)
+    return nullptr;
+  return pCur;
+}`);
   });
 
   it('should not merge when variable is read before assignment', () => {
@@ -55,6 +81,17 @@ describe('declInitMergePlugin', () => {
     const output = transformCode('void f() { int x; x = x + 1; }');
     assert.ok(output.includes('int x;'), 'should keep bare declaration');
     assert.ok(output.includes('x = x + 1;'), 'should keep self-referencing assignment');
+  });
+
+  it('merges when the RHS field name matches the variable (FindMonsterAiCmd case)', () => {
+    // pAiGeneral = u->pAiGeneral and pNext = pAi->pNext: the member name equals
+    // the variable name but is NOT a self-reference — both must still merge+sink.
+    const output = transformCode('void f(U* u) { N* pNext; G* pAi; pAi = u->pAi; pNext = pAi->pNext; sink(pNext); }');
+    assert.strictEqual(output, `void f(U* u) {
+  G* pAi = u->pAi;
+  N* pNext = pAi->pNext;
+  sink(pNext);
+}`);
   });
 
   it('should merge multiple declarations in one pass (real-world pattern)', () => {

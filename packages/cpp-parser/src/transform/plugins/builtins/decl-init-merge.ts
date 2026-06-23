@@ -5,19 +5,56 @@
  * occur between the declaration and first assignment.
  *
  * Ghidra's decompiler outputs C89-style code with all declarations at
- * function top, separated from first assignment. This plugin merges them.
+ * function top, separated from first assignment. This plugin merges them by
+ * SINKING the declaration down to the assignment site (first use). It must not
+ * hoist the initializer up to the original top declaration: intervening guard
+ * clauses / early returns mean the assignment was conditional, and the RHS may
+ * dereference pointers those guards validate — moving it up is a use-before-check.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, CompoundStmt, DeclStmt, VariableDecl,
-  ExprStmt, AssignExpr, Identifier,
+  ExprStmt, AssignExpr, Identifier, MemberExpr,
 } from '../../../ast/nodes.js';
-import { findIdentifiers } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 
 export interface DeclInitMergeOptions extends PluginOptions {}
+
+/**
+ * Does `varName` appear as a VALUE in `node` — as an operand or as the OBJECT of
+ * a member access — but NOT merely as a `.member` / `->member` field selector?
+ *
+ * Decompiled code routinely names a variable after the field it holds
+ * (`pNext = pCurrent->pNext;`, `pAiGeneral = unit->...->pAiGeneral;`). The member
+ * identifier `->pNext` must not be mistaken for a use of the variable `pNext`,
+ * or the merge is wrongly aborted as a self-reference / intermediate use.
+ */
+function referencesVar(node: ASTNode, varName: string): boolean {
+  let found = false;
+  const visit = (n: unknown): void => {
+    if (found || !n || typeof n !== 'object') return;
+    const cur = n as ASTNode;
+    if (!('kind' in cur)) return;
+    if (cur.kind === NodeKind.Identifier) {
+      if ((cur as Identifier).name === varName) found = true;
+      return;
+    }
+    if (cur.kind === NodeKind.MemberExpr) {
+      visit((cur as MemberExpr).object); // object position counts; member name does not
+      return;
+    }
+    for (const key in cur) {
+      if (key === 'kind' || key === 'location' || key === 'leadingTrivia' || key === 'trailingTrivia') continue;
+      const v = (cur as unknown as Record<string, unknown>)[key];
+      if (Array.isArray(v)) { for (const c of v) visit(c); }
+      else if (v && typeof v === 'object') visit(v);
+    }
+  };
+  visit(node);
+  return found;
+}
 
 /**
  * Try to find a merge candidate for a single bare declaration.
@@ -40,15 +77,15 @@ function findMergeTarget(
 
         if (assign.left.kind === NodeKind.Identifier
           && (assign.left as Identifier).name === varName) {
-          // No self-reference in RHS
-          if (findIdentifiers(assign.right, varName).length > 0) return -1;
+          // No self-reference in RHS (member names that match are not self-refs)
+          if (referencesVar(assign.right, varName)) return -1;
           return j;
         }
       }
     }
 
     // If intermediate statement references the variable, abort
-    if (findIdentifiers(candidate, varName).length > 0) return -1;
+    if (referencesVar(candidate, varName)) return -1;
   }
   return -1;
 }
@@ -85,25 +122,32 @@ function createDeclInitMergeTransformer(_options: DeclInitMergeOptions = {}): Tr
 
       if (merges.length === 0) return undefined;
 
-      // Build new statement list
-      const removeIndices = new Set(merges.map(([, j]) => j));
-      const mergeMap = new Map(merges); // declIndex -> assignIndex
+      // Build new statement list. CRITICAL: emit the merged `Type var = expr;` at
+      // the ASSIGNMENT's position (sink the declaration down to first use), and
+      // drop the bare top declaration. Never pull the initializer UP to the
+      // declaration site — doing so would hoist the RHS above any intervening
+      // statements (guard clauses / early returns), evaluating it earlier than
+      // the source did and dereferencing pointers before their null checks.
+      const removeDeclIndices = new Set(merges.map(([i]) => i));
+      const assignToDecl = new Map(merges.map(([i, j]) => [j, i])); // assignIndex -> declIndex
 
       const newStmts: ASTNode[] = [];
       for (let i = 0; i < stmts.length; i++) {
-        if (removeIndices.has(i)) continue; // skip merged assignment
+        if (removeDeclIndices.has(i)) continue; // drop the bare declaration
 
-        if (mergeMap.has(i)) {
-          const assignIdx = mergeMap.get(i)!;
-          const declStmt = stmts[i] as DeclStmt;
+        if (assignToDecl.has(i)) {
+          const declIdx = assignToDecl.get(i)!;
+          const declStmt = stmts[declIdx] as DeclStmt;
           const varDecl = declStmt.declarations[0] as VariableDecl;
-          const assign = (stmts[assignIdx] as ExprStmt).expression as AssignExpr;
+          const assign = (stmts[i] as ExprStmt).expression as AssignExpr;
 
           const newVarDecl = updateNode(varDecl, {
             initializer: assign.right,
           } as Partial<VariableDecl>);
+          // keep the declaration's trivia, but anchor at the assignment's location
           const newDeclStmt = updateNode(declStmt, {
             declarations: [newVarDecl],
+            location: stmts[i].location,
           } as Partial<DeclStmt>);
           newStmts.push(newDeclStmt);
         } else {

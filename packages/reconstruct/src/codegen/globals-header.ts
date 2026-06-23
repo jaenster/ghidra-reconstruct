@@ -6,8 +6,63 @@
  */
 
 import type { AnalyzedDataSymbol, ReconstructOptions, DataValue, ExtractedDataType, ExtractedStruct, ExtractedEnum, ExtractedUnion, ExtractedFunctionDefinition } from '../types.js';
-import { isPlatformOrBuiltinType, isStructType, castPointerInitializer, normalizeDataValue } from './platform-types.js';
+import { isPlatformOrBuiltinType, isLibraryType, isStructType, castPointerInitializer, normalizeDataValue, isMsvcEhInternal } from './platform-types.js';
 import { generateStructDeclaration, generateEnumDeclaration, generateUnionDeclaration, generateFunctionDefinitionDeclaration } from './header.js';
+
+/**
+ * Exact Win32 SDK typedef names (not `LP`/`IMAGE_` prefixed) seen as
+ * `struct X;` forward decls that clash with `<windows.h>`/`<winsock2.h>` typedefs.
+ */
+const KNOWN_WIN32_TYPEDEFS = new Set<string>([
+  'RGBQUAD', 'COLORREF', 'WSADATA', 'SYSTEM_INFO',
+  'OSVERSIONINFOA', 'TIME_ZONE_INFORMATION', 'CANDIDATELIST',
+]);
+
+/** `LP`-prefixed Win32 pointer typedefs whose base type we must not forward-declare. */
+const KNOWN_WIN32_LP_BASES = new Set<string>([
+  'WSADATA', 'OSVERSIONINFO', 'OSVERSIONINFOA', 'SYSTEM_INFO',
+  'TIME_ZONE_INFORMATION', 'CANDIDATELIST',
+]);
+
+/**
+ * Conservatively recognise a Win32 SDK typedef by name alone, for the case where
+ * the type has no `dataTypes` entry (so its Ghidra category is unknown) yet is
+ * clearly Win32. The real SDK header (pulled in by d2_platform.h under _WIN32)
+ * already provides these as TYPEDEFs, so `struct X;` after the typedef is an error.
+ * Only Win32 families are matched — nothing that could be a D2 game type.
+ */
+function isKnownWin32Typedef(name: string): boolean {
+  if (KNOWN_WIN32_TYPEDEFS.has(name)) return true;
+  // IMAGE_* PE/COFF structures (IMAGE_FILE_HEADER, IMAGE_NT_HEADERS32, ...)
+  if (name.startsWith('IMAGE_')) return true;
+  // LP<base> pointer typedefs for the known Win32 set (LPWSADATA, LPSYSTEM_INFO, ...)
+  if (name.startsWith('LP') && KNOWN_WIN32_LP_BASES.has(name.slice(2))) return true;
+  return false;
+}
+
+/**
+ * Build a predicate that decides whether a bare type name is a library type that
+ * the real SDK header already provides — so we must NOT emit a `struct X;`
+ * forward declaration for it. Resolves the name to its Ghidra category via the
+ * available `dataTypes` and defers to `isLibraryType`; falls back to a
+ * conservative Win32-name check when the type has no `dataTypes` entry.
+ */
+function makeLibraryTypeSkipPredicate(
+  dataTypes?: ExtractedDataType[]
+): (name: string) => boolean {
+  const categoryByName = new Map<string, string>();
+  if (dataTypes) {
+    for (const dt of dataTypes) {
+      if (!categoryByName.has(dt.name)) categoryByName.set(dt.name, dt.category);
+    }
+  }
+  return (name: string): boolean => {
+    const category = categoryByName.get(name);
+    if (category !== undefined && isLibraryType(name, category)) return true;
+    if (isKnownWin32Typedef(name)) return true;
+    return false;
+  };
+}
 
 /**
  * Generate globals.h content
@@ -20,9 +75,39 @@ export function generateGlobalsHeader(
   globals: AnalyzedDataSymbol[],
   options: ReconstructOptions & { projectName?: string; binaryName?: string },
   dataTypes?: ExtractedDataType[],
-  typeOwnerMap?: Map<string, string>
+  typeOwnerMap?: Map<string, string>,
+  functionQualifiedNames?: Set<string>,
+  bodyIdentifierFnCounts?: Map<string, number>
 ): string {
   const lines: string[] = [];
+
+  // Qualified function names (namespace::name) emitted elsewhere as their own
+  // declarations. A data symbol can share its name with a function in the same
+  // namespace (e.g. D2Game::Game::Record::IsRecording is BOTH a function getter
+  // at 0x451980 and a backing-flag data label at 0x7a2784). Emitting an
+  // `extern BOOL IsRecording;` in that namespace redeclares the function
+  // ("redeclared as different kind of entity"), so the function wins and we
+  // suppress the colliding global.
+  const fnNames = functionQualifiedNames ?? new Set<string>();
+
+  // Predicate: should we SKIP emitting a `struct X;` forward decl for this type?
+  // True when the type is provided by the real Win32 SDK / CRT (pulled in by
+  // d2_platform.h under _WIN32) — emitting `struct X;` after the SDK typedef X is
+  // an error ("using typedef-name 'X' after 'struct'"). Recognised either by the
+  // type's Ghidra category (a system-header path) or by a conservative Win32 name set.
+  const isSkippableLibraryType = makeLibraryTypeSkipPredicate(dataTypes);
+
+  // Drop globals whose TYPE is an MSVC-EH internal (C++ exception-handling
+  // metadata: __ehfuncinfo$ etc. typed as FuncInfo / UnwindMapEntry /
+  // HandlerType / TryBlockMapEntry). No real header declares those types, so
+  // emitting these globals yields "X does not name a type" across every TU.
+  // NOTE: only EH internals — NOT Win32 SDK types (RGBQUAD, SYSTEMTIME, ...),
+  // which the real <windows.h> provides, so game globals typed as those stay.
+  globals = globals.filter(g => {
+    const base = (g.suggestedType || g.dataType || '')
+      .replace(/[*&]/g, '').replace(/\bconst\b/g, '').replace(/\[[^\]]*\]/g, '').trim();
+    return !isMsvcEhInternal(base);
+  });
 
   // Header comment
   lines.push('/**');
@@ -79,6 +164,7 @@ export function generateGlobalsHeader(
   for (const g of globals) {
     const type = (g.suggestedType || g.dataType).replace(/\*/g, '').replace(/&/g, '').replace(/const\s*/g, '').replace(/\[[^\]]*\]/g, '').trim();
     if (!type || declaredNames.has(type) || isPlatformOrBuiltinType(type)) continue;
+    if (isSkippableLibraryType(type)) continue;
     if (!/^[A-Za-z_]\w*$/.test(type)) continue;
     // Skip enum types (eXxx convention) — they're typedef int, not structs
     if (/^e[A-Z]/.test(type)) continue;
@@ -107,21 +193,33 @@ export function generateGlobalsHeader(
     }
   }
 
-  // Collect forward-declared struct/class names to detect namespace collisions
-  const forwardDeclaredNames = new Set<string>();
+  // Collect names that must NOT appear as a namespace component, because they
+  // are already emitted at an outer scope as a different kind of entity:
+  //   - forward-declared struct/class names; AND
+  //   - global variable names (a BOOL global `IsRecording` collides with a
+  //     same-named `namespace IsRecording { ... }` — "redeclared as different
+  //     kind of entity"). The variable declaration must win; strip the colliding
+  //     namespace component so the inner symbols fold into the parent scope.
+  const collidingNamespaceParts = new Set<string>();
   for (const decl of forwardDecls) {
     const m = decl.match(/^(?:struct|class)\s+(\w+);$/);
-    if (m) forwardDeclaredNames.add(m[1]);
+    if (m) collidingNamespaceParts.add(m[1]);
+  }
+  for (const g of globals) {
+    if (g.scope !== 'global') continue;
+    const gName = g.suggestedName || g.name;
+    if (/^[A-Za-z_]\w*$/.test(gName)) collidingNamespaceParts.add(gName);
   }
 
-  // Group globals by namespace, stripping components that collide with struct names
+  // Group globals by namespace, stripping components that collide with struct
+  // names or global variable names
   const rawByNamespace = groupByNamespace(globals);
   const byNamespace = new Map<string | undefined, typeof globals>();
   for (const [ns, nsGlobals] of rawByNamespace) {
     let cleanNs = ns;
-    if (cleanNs && forwardDeclaredNames.size > 0) {
+    if (cleanNs && collidingNamespaceParts.size > 0) {
       const parts = cleanNs.split('::');
-      const filtered = parts.filter(p => !forwardDeclaredNames.has(p));
+      const filtered = parts.filter(p => !collidingNamespaceParts.has(p));
       cleanNs = filtered.length > 0 ? filtered.join('::') : undefined;
     }
     const existing = byNamespace.get(cleanNs);
@@ -216,6 +314,12 @@ export function generateGlobalsHeader(
         // Skip duplicate extern declarations (same name, different namespace scope already emitted)
         const qualifiedName = namespace ? `${namespace}::${global.suggestedName || global.name}` : (global.suggestedName || global.name);
         if (emittedGlobalNames.has(qualifiedName)) continue;
+        // Skip globals that collide with a same-named function in the same scope
+        // (the function declaration owns the name — see fnNames above).
+        if (fnNames.has(qualifiedName)) {
+          lines.push(`// skipped: ${qualifiedName} (collides with a function of the same name)`);
+          continue;
+        }
         emittedGlobalNames.add(qualifiedName);
         // Group consecutive globals with the same ifdef under one guard
         if (global.ifdef !== currentIfdef) {
@@ -242,6 +346,80 @@ export function generateGlobalsHeader(
     }
   }
 
+  // =============================================================================
+  // Safety net: globals referenced in multiple function bodies but NOT emitted
+  // above as a `scope==='global'` extern (e.g. classified `static-local` because
+  // Ghidra under-reported xrefs to a single owner, yet the decompiler still names
+  // the symbol in other bodies). Without a declaration those other TUs fail with
+  // "X was not declared in this scope". Emit a fallback extern for any analyzed
+  // symbol whose name is a valid identifier and appears in >1 function body.
+  // =============================================================================
+  if (bodyIdentifierFnCounts && bodyIdentifierFnCounts.size > 0) {
+    const recovered: AnalyzedDataSymbol[] = [];
+    const seen = new Set<string>();
+    for (const g of globals) {
+      if (g.scope === 'global') continue; // already handled above
+      if (isSwitchTableSymbol(g.suggestedName || g.name)) continue;
+      if (isJumpTableArtifact(g)) continue;
+      if (isArrayElementSymbol(g.suggestedName || g.name, allGlobalNames)) continue;
+
+      const rawName = g.suggestedName || g.name;
+      // Must be a valid C identifier (generateExternDeclaration would otherwise
+      // drop it; an invalid-name extern can't resolve a body reference anyway).
+      if (!/^[A-Za-z_]\w*$/.test(rawName)) continue;
+
+      // Skip self-redeclarations: a symbol whose type base equals its own name
+      // (e.g. an enum-typed global `eD2ApplicationMode eD2ApplicationMode`)
+      // would emit `extern eD2ApplicationMode eD2ApplicationMode;`, which
+      // redeclares the typedef as a variable ("redeclared as different kind of
+      // entity"). The original extern section never reaches these (they're not
+      // scope==='global'); don't resurrect them here.
+      const baseType = (g.suggestedType || g.dataType || '')
+        .replace(/[*&]/g, '').replace(/\bconst\b/g, '').replace(/\[[^\]]*\]/g, '')
+        .replace(/\s+\d+$/, '').trim();
+      if (baseType === rawName) continue;
+
+      // Bodies reference the symbol by its sanitized identifier (same rule the
+      // static-local injector uses). A valid identifier sanitizes to itself.
+      const count = bodyIdentifierFnCounts.get(rawName) ?? 0;
+      if (count <= 1) continue;
+
+      const qualifiedName = g.namespace ? `${g.namespace}::${rawName}` : rawName;
+      // Don't double-emit: already an extern above, or collides with a function.
+      if (emittedGlobalNames.has(qualifiedName)) continue;
+      if (fnNames.has(qualifiedName)) continue;
+      if (seen.has(qualifiedName)) continue;
+      seen.add(qualifiedName);
+      recovered.push(g);
+    }
+
+    if (recovered.length > 0) {
+      lines.push('// =============================================================================');
+      lines.push('// Globals recovered from multi-function body references');
+      lines.push('// (classified static-local by xref count, but named in other bodies too)');
+      lines.push('// =============================================================================');
+      lines.push('');
+
+      const recoveredByNamespace = groupByNamespace(recovered);
+      for (const [namespace, nsGlobals] of recoveredByNamespace) {
+        if (nsGlobals.length === 0) continue;
+        if (namespace && /[<>,*]/.test(namespace)) continue;
+        if (namespace) {
+          lines.push(`namespace ${namespace} {`);
+          lines.push('');
+        }
+        for (const global of nsGlobals) {
+          lines.push(generateExternDeclaration(global, options.includeAddressComments));
+        }
+        if (namespace) {
+          lines.push('');
+          lines.push(`} // namespace ${namespace}`);
+        }
+        lines.push('');
+      }
+    }
+  }
+
   return lines.join('\n');
 }
 
@@ -253,7 +431,17 @@ export function generateExternDeclaration(
   includeAddressComment = false
 ): string {
   let type = global.suggestedType || global.dataType;
-  const name = global.suggestedName || global.name;
+  let name = global.suggestedName || global.name;
+
+  // Ghidra sometimes carries the array dimension in the NAME ("gdwFoo[91]")
+  // rather than the type. Move it to the type so the base name is a valid
+  // identifier and normalizeArrayDeclaration emits a proper array declaration
+  // (otherwise the whole global is dropped as an "invalid identifier").
+  const nameArr = name.match(/^(.+?)((?:\[\d+\])+)$/);
+  if (nameArr && !/(?:\[\d+\])+\s*\*?$/.test(type)) {
+    name = nameArr[1];
+    type = type + nameArr[2];
+  }
 
   // Skip globals with invalid C++ identifier names (digits, special chars)
   if (/[^A-Za-z0-9_]/.test(name) || /^\d/.test(name)) return `// skipped: ${name} (invalid identifier)`;
@@ -488,9 +676,10 @@ export function emitDataValue(dv: DataValue, indent = 0): string {
       if (!dv.value || dv.value === '0x0' || dv.value === '0x00000000' || dv.value === 'DAT_00000000') {
         return 'nullptr';
       }
-      // If it looks like a symbol name (not hex), emit as address-of
+      // If it looks like a symbol name (not hex), emit as address-of.
+      // Drop the CRT-helper namespace prefixes (compiler/VisualStudio are not emitted).
       if (/^[A-Za-z_]/.test(dv.value)) {
-        return `&${dv.value}`;
+        return `&${dv.value.replace(/\b(?:compiler|VisualStudio)::/g, '')}`;
       }
       // Raw hex pointer — normalize value (add 0x prefix if needed)
       return `(void*)${normalizeDataValue(dv.value)}`;
@@ -573,6 +762,7 @@ export function isJumpTableArtifact(symbol: AnalyzedDataSymbol): boolean {
  * "int[10]"  + "counts"       → "int counts[10]"
  */
 export function normalizeArrayDeclaration(type: string, name: string): string {
+  type = stripFuncDefIndirection(type);
   // "TYPE[N] *" → pointer to array: "TYPE (*name)[N]"
   const ptrToArrayMatch = type.match(/^(.+?)((?:\[\d+\])+)\s*\*$/);
   if (ptrToArrayMatch) {
@@ -591,6 +781,49 @@ export function normalizeArrayDeclaration(type: string, name: string): string {
   const ptrArrayMatch = type.match(/^(.+?\*)\s*(\[.+\])$/);
   if (ptrArrayMatch) return `${ptrArrayMatch[1]} ${name}${ptrArrayMatch[2]}`;
   return `${type} ${name}`;
+}
+
+/**
+ * Function-pointer typedefs are emitted pointer-style (`typedef T (*Name)(...)`),
+ * so the C++ name already carries one level of indirection. Ghidra models a
+ * function pointer as `Name *`, which would render `T (**)(...)` — one pointer
+ * too many. Collapse that redundant level (incl. array forms `Name *[N]`) so a
+ * funcptr global/field matches initializers like `&Func`.
+ */
+export function stripFuncDefIndirection(type: string): string {
+  const m = type.match(/^(\w+)\s*\*\s*((?:\[\d+\])*)$/);
+  if (m && isFuncDefTypedefName(m[1])) {
+    return `${m[1]}${m[2]}`;
+  }
+  return type;
+}
+
+/**
+ * Registry of ACTUAL function-pointer typedef names emitted by the codegen,
+ * populated from the Ghidra FUNCTION_DEFINITION datatypes before any module is
+ * emitted. The name conventions below are case-sensitive and miss all-caps /
+ * irregular names (QUESTCALLBACK, QUESTINIT, ...), so the registry is the
+ * authoritative source; the regexes stay as a fallback for safety.
+ */
+const knownFuncDefTypedefs = new Set<string>();
+
+/** Populate the function-pointer typedef registry. Must run before emission. */
+export function setKnownFuncDefTypedefs(names: Iterable<string>): void {
+  knownFuncDefTypedefs.clear();
+  for (const n of names) knownFuncDefTypedefs.add(n);
+}
+
+/** Name conventions for FunctionDefinition typedefs emitted by the codegen. */
+export function isFuncDefTypedefName(name: string): boolean {
+  return knownFuncDefTypedefs.has(name)
+    || /^fn[A-Z]/.test(name)
+    || /^fp[A-Z]/.test(name)
+    || /^AI_/.test(name)
+    || /^D2NET_/.test(name)
+    || /(?:Func|Callback|Handler|Action)$/i.test(name)
+    || /_fn$/.test(name)
+    || /[a-z]Fn$/.test(name)
+    || /Proc[A-Z]?$/.test(name);
 }
 
 /**
@@ -817,6 +1050,10 @@ function collectGlobalForwardDeclarations(
   dataTypes?: ExtractedDataType[],
   typeOwnerMap?: Map<string, string>
 ): { forwardDecls: string[]; fullDefs: string[]; extraIncludes: string[] } {
+  // Library types (Win32 SDK / CRT) are provided by the real headers under
+  // _WIN32 — never emit our own forward decl/definition for them.
+  const isSkippableLibraryType = makeLibraryTypeSkipPredicate(dataTypes);
+
   // Collect type names referenced by globals and track which are used by value
   const typeInfo = new Map<string, { byValue: boolean }>();
   for (const g of globals) {
@@ -832,7 +1069,7 @@ function collectGlobalForwardDeclarations(
       .trim()
       .replace(/\s+\d+$/, '');
 
-    if (stripped && !isPlatformOrBuiltinType(stripped) && /^[A-Za-z_]/.test(stripped) && !/[{}:<>,\s]/.test(stripped)) {
+    if (stripped && !isPlatformOrBuiltinType(stripped) && !isSkippableLibraryType(stripped) && /^[A-Za-z_]/.test(stripped) && !/[{}:<>,\s]/.test(stripped)) {
       const existing = typeInfo.get(stripped);
       if (existing) {
         if (!isPointer) existing.byValue = true;
@@ -1003,6 +1240,9 @@ function collectGlobalForwardDeclarations(
   // Emit forward declarations for pointer-only / unavailable types
   for (const name of [...typeInfo.keys()].sort()) {
     if (fullDefTypes.has(name)) continue;
+    // Library types (Win32 SDK / CRT) are provided by the real headers — never
+    // emit a `struct X;` forward decl that would clash with the SDK typedef.
+    if (isSkippableLibraryType(name)) continue;
     // Check if this type is a FUNCTION_DEFINITION in the dataTypeMap
     // (it might be owned by another header and not in fullDefTypes)
     const dt = dataTypeMap.get(name);

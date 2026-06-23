@@ -149,35 +149,46 @@ describe('methodCallRewritePlugin', () => {
     });
   });
 
-  describe('Rule 4: Null this-arg → static call', () => {
-    it('should emit static call for nullptr this-arg', () => {
+  describe('Rule 4: Null this-arg → keep free-function call', () => {
+    // A null-like receiver is not a valid object expression. Emitting
+    // ClassName::Method(...) would be a static-style call, which is invalid
+    // for a non-static member ("cannot call member function without object").
+    // The original free function is still declared, so the call must be left
+    // unchanged so it binds to the free-function overload.
+    it('should keep the free call for nullptr this-arg', () => {
       const input = `void foo() { DRLG_Init(nullptr, nAct); }`;
       const output = transformCode(input, { methodMappings: baseMappings });
-      assert.ok(output.includes('D2DrlgStrc::Init(nAct)'), `Expected D2DrlgStrc::Init(nAct) in: ${output}`);
+      assert.strictEqual(output, `void foo() {\n  DRLG_Init(nullptr, nAct);\n}`);
     });
 
-    it('should emit static call for NULL this-arg', () => {
+    it('should keep the free call for NULL this-arg', () => {
       const input = `void foo() { DRLG_Init(NULL, nAct); }`;
       const output = transformCode(input, { methodMappings: baseMappings });
-      assert.ok(output.includes('D2DrlgStrc::Init(nAct)'), `Expected D2DrlgStrc::Init(nAct) in: ${output}`);
+      assert.strictEqual(output, `void foo() {\n  DRLG_Init(NULL, nAct);\n}`);
     });
 
-    it('should emit static call for 0 this-arg', () => {
+    it('should keep the free call for 0 this-arg', () => {
       const input = `void foo() { DRLG_Init(0, nAct); }`;
       const output = transformCode(input, { methodMappings: baseMappings });
-      assert.ok(output.includes('D2DrlgStrc::Init(nAct)'), `Expected D2DrlgStrc::Init(nAct) in: ${output}`);
+      assert.strictEqual(output, `void foo() {\n  DRLG_Init(0, nAct);\n}`);
     });
 
-    it('should emit static call for cast-to-pointer null: (D2RoomExStrc*)0x0', () => {
+    it('should keep the free call for cast-to-pointer null: (D2DrlgStrc*)0x0', () => {
       const input = `void foo() { DRLG_Init((D2DrlgStrc*)0x0, nAct); }`;
       const output = transformCode(input, { methodMappings: baseMappings });
-      assert.ok(output.includes('D2DrlgStrc::Init(nAct)'), `Expected D2DrlgStrc::Init(nAct) in: ${output}`);
+      assert.strictEqual(output, `void foo() {\n  DRLG_Init((D2DrlgStrc*)0x0, nAct);\n}`);
     });
 
-    it('should emit static call for cast-to-pointer null with 0', () => {
+    it('should keep the free call for cast-to-pointer null with 0', () => {
       const input = `void foo() { DRLG_Init((D2DrlgStrc*)0, nAct); }`;
       const output = transformCode(input, { methodMappings: baseMappings });
-      assert.ok(output.includes('D2DrlgStrc::Init(nAct)'), `Expected D2DrlgStrc::Init(nAct) in: ${output}`);
+      assert.strictEqual(output, `void foo() {\n  DRLG_Init((D2DrlgStrc*)0, nAct);\n}`);
+    });
+
+    it('should never emit a Type::Method static-style call for a non-static member', () => {
+      const input = `void foo() { DRLG_Init(nullptr, nAct); }`;
+      const output = transformCode(input, { methodMappings: baseMappings });
+      assert.ok(!output.includes('D2DrlgStrc::Init'), `Should not emit static-style call in: ${output}`);
     });
 
     it('should still rewrite non-null this-args normally', () => {

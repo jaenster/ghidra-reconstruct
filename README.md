@@ -84,7 +84,7 @@ and `full` (everything).
 | `type-normalize` | `uint` → `uint32_t`, `undefined4` → `auto`/`uint32_t` |
 | `pointer-cast-normalize` | `(int)&expr` → `(uintptr_t)&expr` |
 | `concat-transform` | `CONCAT31(a,b)` → `(a << 8) \| b` |
-| `fourcc-literal` | `(char[4])L'\x...'` → `"abcd"` |
+| `fourcc-literal` | `(char[4])L'\x...'` → `'abcd'` |
 | `method-call-rewrite` | flat fn call → C++ method call (off by default) |
 | `nullptr-cleanup` | `(Type*)0x0` → `nullptr` |
 | `signed-literal` | `0xffffffff` → `-1` |

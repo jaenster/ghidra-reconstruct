@@ -451,3 +451,97 @@ describe('DependencyGraph enhancements', () => {
     );
   });
 });
+
+// ── Sibling-namespace qualification ──────────────────────────────────
+//
+// When a type name (e.g. "Item") collides with a real intermediate namespace
+// component (e.g. A::B::C references A::Item::Sub::Fn), the collision rewriter
+// must NOT strip the intermediate "Item::" and produce the unreachable "Sub::Fn".
+// Instead the output must retain enough qualification to be reachable from the
+// emitting scope via C++ unqualified lookup through common ancestors.
+
+describe('Sibling-namespace qualification', () => {
+  const nsOptions: ReconstructOptions = {
+    outputDir: '/tmp/test',
+    format: 'cpp',
+    organization: 'namespace',
+    generateCMake: false,
+    generateSourceMaps: false,
+    transformPreset: 'quick',
+    includeAddressComments: false,
+    promoteStaticGlobals: false,
+  };
+
+  it('A::B::C sym referenced from A::Bx emits B::C::sym (reachable via common ancestor A)', () => {
+    // Function lives in A::Bx (sibling of A::B::C).
+    // Its body references A::B::C::sym — after stripping common prefix A:: the
+    // qualified name is B::C::sym, which IS reachable from A::Bx.
+    const body = 'void Caller() {\n    A::B::C::sym();\n}';
+    const func = makeFunc('Caller', '0x001000', [], body, { namespace: 'A::Bx' });
+
+    const impl = generateImplementation(
+      'A::Bx',
+      [func],
+      undefined,
+      'A/Bx/Bx.h',
+      nsOptions,
+      undefined,
+      undefined,
+      new Set<string>(),
+      undefined,
+      // dataTypeNames: "B" is both a struct name and a real namespace component
+      new Set(['B'])
+    );
+
+    // The call must NOT collapse to bare C::sym (only valid from inside A::B or children)
+    // Note: check that C::sym is NOT the first identifier (not preceded by B::)
+    assert.ok(!impl.match(/(?<!B::)C::sym\(\)/), `Must not emit over-collapsed C::sym():\n${impl}`);
+    // It must include at least B::C::sym (the correct relative form from A::Bx)
+    assert.ok(impl.includes('B::C::sym()'), `Must emit reachable B::C::sym():\n${impl}`);
+  });
+
+  it('A::B::C sym referenced from A::B::C collapses to sym', () => {
+    const body = 'void Self() {\n    A::B::C::sym();\n}';
+    const func = makeFunc('Self', '0x002000', [], body, { namespace: 'A::B::C' });
+
+    const impl = generateImplementation(
+      'A::B::C',
+      [func],
+      undefined,
+      'A/B/C/C.h',
+      nsOptions,
+      undefined,
+      undefined,
+      new Set<string>(),
+      undefined,
+      new Set(['B'])
+    );
+
+    // From inside A::B::C, the same-scope reference collapses to just sym
+    assert.ok(impl.includes('sym()'), `Must emit sym():\n${impl}`);
+    // Must NOT emit the over-qualified A::B::C::sym or B::C::sym
+    assert.ok(!impl.includes('A::B::C::sym()'), `Must not emit fully qualified form:\n${impl}`);
+  });
+
+  it('A::B::C sym referenced from A::B emits C::sym', () => {
+    const body = 'void Parent() {\n    A::B::C::sym();\n}';
+    const func = makeFunc('Parent', '0x003000', [], body, { namespace: 'A::B' });
+
+    const impl = generateImplementation(
+      'A::B',
+      [func],
+      undefined,
+      'A/B/B.h',
+      nsOptions,
+      undefined,
+      undefined,
+      new Set<string>(),
+      undefined,
+      new Set(['B'])
+    );
+
+    // From A::B, A::B::C::sym collapses to C::sym
+    assert.ok(impl.includes('C::sym()'), `Must emit C::sym():\n${impl}`);
+    assert.ok(!impl.includes('A::B::C::sym()'), `Must not emit fully qualified:\n${impl}`);
+  });
+});
