@@ -31,6 +31,21 @@ function sigType(type: string): string {
 }
 
 /**
+ * C++ keywords that Ghidra can auto-pick as a struct field / variable name
+ * (`int default;`, `char class;`). Using one as an identifier is a syntax error;
+ * such names are suffixed with `_`. Excludes keywords that are also type names
+ * (int/char/…) since those don't arise as bare field names. Shared with impl.ts
+ * so body member accesses get the same rename.
+ */
+export const CPP_KEYWORDS = new Set<string>([
+  'default', 'class', 'new', 'delete', 'operator', 'template', 'namespace',
+  'this', 'friend', 'public', 'private', 'protected', 'virtual', 'register',
+  'export', 'goto', 'throw', 'try', 'catch', 'typename', 'typeid', 'switch',
+  'case', 'return', 'while', 'for', 'do', 'if', 'else', 'break', 'continue',
+  'and', 'or', 'not', 'xor', 'bitand', 'bitor', 'compl', 'typedef', 'sizeof',
+]);
+
+/**
  * Clean a parameter name: apply the same renaming the body transform does
  */
 function cleanParamName(name: string): string {
@@ -875,6 +890,9 @@ function emitFieldLines(fields: StructField[], lines: string[], isUnion = false)
     if (!rawName) rawName = ghidraDefaultName;
     // Prefix names starting with a digit (e.g., "0x1B" → "field_0x1B") — invalid C++ identifiers
     if (/^\d/.test(rawName)) rawName = `field_${rawName}`;
+    // A field auto-named after a C++ keyword (Ghidra: `char class;`, `int default;`)
+    // is a syntax error. Append `_`; body accesses are rewritten to match (impl.ts).
+    if (CPP_KEYWORDS.has(rawName)) rawName = `${rawName}_`;
     const type = normalizeUndefinedType(field.dataType, field.size);
     // If field name exactly matches its type name, prefix to avoid C++ name hiding
     // (a field shadows the type within the struct, breaking subsequent fields of the same type)

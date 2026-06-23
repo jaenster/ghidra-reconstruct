@@ -15,6 +15,7 @@ import type {
 } from '../types.js';
 import { isPlatformOrBuiltinType, isStructType, castPointerInitializer } from './platform-types.js';
 import { resolveCrtInclude } from './crt-mapping.js';
+import { CPP_KEYWORDS } from './header.js';
 
 // Import cpp-parser for code transformation
 import { transformGhidraCode, preprocessGhidraCode, isGhidraGeneratedName, suggestBetterName, type TransformResult } from '@ghidra-mcp/cpp-parser';
@@ -872,6 +873,14 @@ export function generateFunctionImplementation(
     ? new Set(context.analyzedGlobals.map(g => g.name))
     : undefined;
   body = declareUnderscoreSlotLocals(body, func, globalNames);
+
+  // A struct field auto-named after a C++ keyword is emitted with a `_` suffix
+  // (header.ts); rewrite member accesses `.default`/`->class` to match. Only the
+  // member-access forms — never `default:`/`case X:` switch labels.
+  body = body.replace(
+    /(\.|->)\s*([A-Za-z_]\w*)\b/g,
+    (m, op, name) => (CPP_KEYWORDS.has(name) ? `${op}${name}_` : m),
+  );
 
   // Add function body
   lines.push(body);
