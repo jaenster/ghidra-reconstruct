@@ -147,6 +147,8 @@ import type {
   DetectedClass,
   ScopingAnalysis,
   ExtractedFunction,
+  ExtractedEnum,
+  ExtractedDataType,
 } from './types.js';
 import { defaultOptions } from './types.js';
 
@@ -386,18 +388,37 @@ export async function reconstruct(
     }
 
     // Deduplicate data types by name (Ghidra may have the same type in multiple
-    // categories, e.g. eD2UnitType in "/" and "/Diablo2/UNIT" — emit only one)
+    // categories, e.g. eD2UnitType in "/" and "/Diablo2/UNIT" — emit only one).
+    // For ENUMS, MERGE the values of same-named entries rather than dropping the
+    // rest: D2 ships two `eCollisionFlags` enums — /Diablo2/COLLISION (17 COLLIDE_*
+    // primitives) and /_Source/Collision (34 values, adding the composite masks
+    // COLLISION_LOS=0x805, MONSTER_COLLISION_DEFAULT, SPAWN_UNIT_COLLISION, ...).
+    // Bodies use the composites, so dropping the richer one left them undeclared.
     {
-      const seen = new Set<string>();
+      const kept = new Map<string, ExtractedDataType>();
       const beforeCount = dataTypes.length;
-      dataTypes = dataTypes.filter(dt => {
-        if (seen.has(dt.name)) return false;
-        seen.add(dt.name);
-        return true;
-      });
+      const result: ExtractedDataType[] = [];
+      let mergedValues = 0;
+      for (const dt of dataTypes) {
+        const existing = kept.get(dt.name);
+        if (!existing) {
+          kept.set(dt.name, dt);
+          result.push(dt);
+          continue;
+        }
+        if (dt.kind === 'ENUM' && existing.kind === 'ENUM') {
+          const e = existing as ExtractedEnum;
+          const have = new Set(e.values.map(v => v.name.trim()));
+          for (const v of (dt as ExtractedEnum).values) {
+            if (!have.has(v.name.trim())) { e.values.push(v); have.add(v.name.trim()); mergedValues++; }
+          }
+        }
+        // non-enum duplicate (or enum already merged): drop.
+      }
+      dataTypes = result;
       const dedupCount = beforeCount - dataTypes.length;
       if (dedupCount > 0) {
-        warnings.push(`Deduplicated ${dedupCount} data types with identical names across categories`);
+        warnings.push(`Deduplicated ${dedupCount} data types with identical names across categories (merged ${mergedValues} enum values)`);
       }
     }
 
