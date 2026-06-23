@@ -14,6 +14,7 @@ import type {
   AnalyzedDataSymbol,
 } from '../types.js';
 import { isPlatformOrBuiltinType, isStructType, castPointerInitializer } from './platform-types.js';
+import { resolveCrtInclude } from './crt-mapping.js';
 
 // Import cpp-parser for code transformation
 import { transformGhidraCode, preprocessGhidraCode, isGhidraGeneratedName, suggestBetterName, type TransformResult } from '@ghidra-mcp/cpp-parser';
@@ -77,7 +78,8 @@ import { applyPatches } from '../overrides/patches.js';
  */
 function declareUnderscoreSlotLocals(
   body: string,
-  func: ExtractedFunction
+  func: ExtractedFunction,
+  globalNames?: Set<string>
 ): string {
   // Type by name for params and decompiler-declared locals.
   const typeByName = new Map<string, string>();
@@ -104,6 +106,26 @@ function declareUnderscoreSlotLocals(
   }
 
   const declared = new Set<string>([...typeByName.keys(), ...declaredInBody]);
+
+  // MSVC-decorated CRT calls: Ghidra emits `_memmove(...)`, `_isspace(...)` etc.
+  // for the standard CRT functions. The leading underscore is MS decoration; the
+  // include resolver already strips it to pick the header, but the call site stays
+  // `_memmove(` and is undeclared. Rewrite undeclared `_<base>(` to `<base>(` when
+  // <base> resolves to a CRT function so it binds to the included header.
+  body = body.replace(/\b_([a-z]\w*)\s*\(/g, (m, base) => {
+    if (declared.has('_' + base)) return m;
+    return resolveCrtInclude(base) ? `${base}(` : m;
+  });
+
+  // `_<global>` storage aliases: Ghidra references a global's reused slot as
+  // `_<global>` (one leading underscore) without declaring it. When <global> is a
+  // known program global, the underscore form is the same storage — rewrite it to
+  // the real global so it binds to the emitted declaration.
+  if (globalNames && globalNames.size > 0) {
+    body = body.replace(/\b_([A-Za-z]\w*)\b/g, (m, base) =>
+      !declared.has('_' + base) && globalNames.has(base) ? base : m,
+    );
+  }
 
   // Collect `_<base>` identifiers actually referenced in the body.
   const synth = new Map<string, string>(); // name → type
@@ -846,7 +868,10 @@ export function generateFunctionImplementation(
 
   // Synthesize declarations for `_<base>` storage-slot locals Ghidra references
   // but never declares (else the body uses an undeclared identifier → compile error).
-  body = declareUnderscoreSlotLocals(body, func);
+  const globalNames = context?.analyzedGlobals
+    ? new Set(context.analyzedGlobals.map(g => g.name))
+    : undefined;
+  body = declareUnderscoreSlotLocals(body, func, globalNames);
 
   // Add function body
   lines.push(body);
