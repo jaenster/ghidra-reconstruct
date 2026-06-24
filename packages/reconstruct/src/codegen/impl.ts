@@ -933,6 +933,24 @@ export function generateFunctionImplementation(
     }
   }
 
+  // Mirror the signature's param-shadows-type rename in the body. The signature
+  // renames a param whose name equals its own (base) type to `n<name>` (e.g. a
+  // `fpLevelDataFn1 fpLevelDataFn1` param → `nfpLevelDataFn1`). Without rewriting
+  // the body, body references stay `fpLevelDataFn1` — which now resolves to the
+  // TYPE, so `(int)fpLevelDataFn1` is a cast-of-a-type → syntax errors.
+  for (const p of renumberParams(func.parameters)) {
+    const baseType = sigType(p.dataType)
+      .replace(/\s*[*&]+\s*$/, '')
+      .replace(/^(struct|class|union|enum)\s+/, '')
+      .trim();
+    if (p.name === baseType) {
+      body = body.replace(
+        new RegExp(`\\b${p.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g'),
+        `n${p.name}`,
+      );
+    }
+  }
+
   // Generate function signature
   const isMethod = classInfo && classInfo.methods.some(m => m.address === func.address);
 

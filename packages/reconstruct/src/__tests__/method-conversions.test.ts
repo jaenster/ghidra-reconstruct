@@ -663,6 +663,19 @@ describe('config validation', () => {
   });
 });
 
+describe('generateFunctionImplementation — param-shadows-type body rewrite', () => {
+  it('renames a body reference to a param whose name equals its type', () => {
+    const fn = makeFunc('DoLevel', '0x00677180', [
+      makeParam('pLevel', 'D2DrlgLevelStrc*', 0),
+      makeParam('fpLevelDataFn1', 'fpLevelDataFn1', 1),
+    ], 'void DoLevel(D2DrlgLevelStrc *pLevel, fpLevelDataFn1 fpLevelDataFn1)\n{\n  int idx = (int)fpLevelDataFn1;\n  return;\n}');
+    const out = generateFunctionImplementation(fn, undefined, defaultOptions);
+    // signature + body both use the disambiguated name; no bare type-as-value left
+    assert.ok(out.includes('nfpLevelDataFn1'), 'expected renamed identifier in output');
+    assert.ok(!/\(int\)\s*fpLevelDataFn1\b/.test(out), 'body still casts the bare type name');
+  });
+});
+
 describe('detectMethodConversionsFromTags — double-pointer receiver guard', () => {
   it('converts a method whose receiver is a single pointer (T*)', () => {
     const fn = makeFunc('DRLG_Init', '0x00661000', [
