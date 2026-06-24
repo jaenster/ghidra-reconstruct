@@ -8,6 +8,7 @@
 import type { AnalyzedDataSymbol, ReconstructOptions, DataValue, ExtractedDataType, ExtractedStruct, ExtractedEnum, ExtractedUnion, ExtractedFunctionDefinition } from '../types.js';
 import { isPlatformOrBuiltinType, isLibraryType, isStructType, castPointerInitializer, normalizeDataValue, isMsvcEhInternal } from './platform-types.js';
 import { generateStructDeclaration, generateEnumDeclaration, generateUnionDeclaration, generateFunctionDefinitionDeclaration } from './header.js';
+import { collapseConsecutiveDuplicates } from './namespace.js';
 
 /**
  * Exact Win32 SDK typedef names (not `LP`/`IMAGE_` prefixed) seen as
@@ -222,6 +223,11 @@ export function generateGlobalsHeader(
       const filtered = parts.filter(p => !collidingNamespaceParts.has(p));
       cleanNs = filtered.length > 0 ? filtered.join('::') : undefined;
     }
+    // Collapse consecutive duplicate segments (e.g. Monsters::Monsters::Umod →
+    // Monsters::Umod) so the global's emitted namespace matches the collapsed
+    // form function bodies use to reference it — otherwise the qualified body
+    // reference fails to resolve ("not a member of ...::Umod").
+    if (cleanNs) cleanNs = collapseConsecutiveDuplicates(cleanNs) || undefined;
     const existing = byNamespace.get(cleanNs);
     if (existing) {
       existing.push(...nsGlobals);
