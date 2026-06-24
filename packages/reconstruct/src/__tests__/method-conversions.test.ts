@@ -663,6 +663,25 @@ describe('config validation', () => {
   });
 });
 
+describe('generateFunctionImplementation — variadic functions emit "..."', () => {
+  it('appends ", ..." to a variadic function signature', () => {
+    const fn = makeFunc('SRVLog', '0x0052be20', [
+      makeParam('nParam', 'int32_t', 0),
+      makeParam('szText', 'char*', 1),
+    ], 'void SRVLog(int32_t nParam, char *szText)\n{\n  return;\n}');
+    fn.hasVarArgs = true;
+    const out = generateFunctionImplementation(fn, undefined, defaultOptions);
+    assert.ok(/SRVLog\(int32_t nParam, char\s*\*\s*szText, \.\.\.\)/.test(out), `expected variadic signature, got:\n${out.split('\n').find(l => l.includes('SRVLog'))}`);
+  });
+
+  it('emits "..." for a variadic function with no fixed params', () => {
+    const fn = makeFunc('vlog', '0x00410610', []);
+    fn.hasVarArgs = true;
+    const out = generateFunctionImplementation(fn, undefined, defaultOptions);
+    assert.ok(/vlog\(\.\.\.\)/.test(out), `expected vlog(...), got:\n${out.split('\n').find(l => l.includes('vlog'))}`);
+  });
+});
+
 describe('generateFunctionImplementation — param-shadows-type body rewrite', () => {
   it('renames a body reference to a param whose name equals its type', () => {
     const fn = makeFunc('DoLevel', '0x00677180', [

@@ -694,7 +694,7 @@ export function generateFunctionDeclaration(
       commentBlock = cleaned.split('\n').map(l => `// ${l}`).join('\n') + '\n';
     }
   }
-  const params = renumberParams(func.parameters)
+  let params = renumberParams(func.parameters)
     .map(p => {
       const type = sigType(p.dataType);
       let name = p.name;
@@ -704,6 +704,7 @@ export function generateFunctionDeclaration(
       return `${type} ${name}`;
     })
     .join(', ');
+  if (func.hasVarArgs) params = params ? `${params}, ...` : '...';
 
   const stripAddr = (a: string) => a.includes(':') ? a.slice(a.lastIndexOf(':') + 1) : a;
   let addressComment = '';

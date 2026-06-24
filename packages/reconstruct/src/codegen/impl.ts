@@ -1104,7 +1104,7 @@ export async function resolveOverridePlaceholders(
  * Generate function signature for standalone function
  */
 function generateFunctionSignature(func: ExtractedFunction): string {
-  const params = renumberParams(func.parameters)
+  let params = renumberParams(func.parameters)
     .map(p => {
       const type = sigType(p.dataType);
       let name = p.name;
@@ -1114,6 +1114,7 @@ function generateFunctionSignature(func: ExtractedFunction): string {
       return `${type} ${name}`;
     })
     .join(', ');
+  if (func.hasVarArgs) params = params ? `${params}, ...` : '...';
 
   // Strip trailing parens/invalid chars from function names (Ghidra artifacts)
   let cleanName = func.name.replace(/[()]+$/, '').replace(/[^A-Za-z0-9_]/g, '_');
@@ -1140,9 +1141,10 @@ function generateMethodSignature(
   // Filter out 'this' parameter for methods
   const filtered = func.parameters
     .filter((p, i) => p.name === 'this' || i === thisParamIndex ? false : true);
-  const params = renumberParams(filtered)
+  let params = renumberParams(filtered)
     .map(p => `${sigType(p.dataType)} ${p.name}`)
     .join(', ');
+  if (func.hasVarArgs) params = params ? `${params}, ...` : '...';
 
   // Check if this is a constructor or destructor
   if (func.name === className || func.name.includes('constructor')) {
