@@ -651,7 +651,6 @@ export function generateImplementation(
   // Now that all function bodies have been generated and _fileIdentifiers accumulated,
   // emit file-local globals filtered by actual usage, spliced at the deferred position.
   if (context?.fileLocalGlobals && context.fileLocalGlobals.length > 0) {
-    const fileIds = context._fileIdentifiers;
     const fileLocalLines: string[] = [];
     for (const global of context.fileLocalGlobals) {
       let type = global.suggestedType || global.dataType;
@@ -662,8 +661,13 @@ export function generateImplementation(
       if (/^\d/.test(name)) name = '_' + name;
       if (!name || name === '_') name = `_global_${global.address}`;
 
-      // Skip globals not referenced in any function body
-      if (fileIds && !fileIds.has(name)) continue;
+      // NOTE: do NOT skip on `_fileIdentifiers` membership here. These globals are
+      // file-local precisely because computeFileLocalGlobals saw all their
+      // referencing functions in THIS file — they're used by construction. The
+      // identifier set is built from transform output and misses bare lowercase
+      // global-variable refs (e.g. `gbNetworkPacketSyncFlag++`), so the old skip
+      // dropped genuinely-used globals → "'x' was not declared". An emitted-but-
+      // unused static is at worst a warning, never an error.
 
       if (type === 'auto') type = 'int';
 
