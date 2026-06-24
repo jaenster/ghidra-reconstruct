@@ -862,6 +862,21 @@ function emitFieldLines(fields: StructField[], lines: string[], isUnion = false)
         count++;
       }
       if (count > 1) {
+        // Name the run's FIRST byte using Ghidra's unnamed-field convention
+        // (`field_0x<unpadded-hex>`) so decompiled bodies that read the run start
+        // as a scalar flag byte (`pTxt->field_0x8 & 0x10`) resolve — a bare `_pad`
+        // array can't ("struct has no member named 'field_0x8'"). Collapse the rest.
+        const ghName = `field_0x${field.offset.toString(16)}`;
+        if (!seenNames.has(ghName)) {
+          seenNames.add(ghName);
+          lines.push(`    /* ${offsetHex} */ uint8_t ${ghName};`);
+          if (count > 1) {
+            const restOffsetHex = `0x${(field.offset + 1).toString(16).toUpperCase().padStart(hexWidth, '0')}`;
+            lines.push(`    /* ${restOffsetHex} */ uint8_t _pad_${restOffsetHex}[${count - 1}];`);
+          }
+          i += count;
+          continue;
+        }
         lines.push(`    /* ${offsetHex} */ uint8_t _pad_${offsetHex}[${count}];`);
         i += count;
         continue;
