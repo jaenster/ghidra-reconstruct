@@ -988,6 +988,11 @@ export function generateFunctionImplementation(
     body = body.replace(/\breturn\s+nullptr\b/g, 'return 0');
   }
 
+  // `x = nullptr` where x is a non-pointer (int) fails ("cannot convert nullptr_t
+  // to uint32_t"). `0` is a valid initializer for BOTH pointers and integers, so
+  // rewriting the assignment form is universally safe.
+  body = body.replace(/=\s*nullptr\b/g, '= 0');
+
   // `&<name>_ARRAY_<hex>` is a spurious address-of on a Ghidra-named array global:
   // the array name already decays to a pointer-to-element (the target type), while
   // `&name` is pointer-to-ARRAY (`T(*)[N]`) and won't convert. Drop the `&` (but
