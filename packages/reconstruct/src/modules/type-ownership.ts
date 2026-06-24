@@ -419,6 +419,21 @@ export function computeTypeOwnership(input: TypeOwnershipInput): TypeOwnershipRe
             }
           }
         }
+        // Outgoing D2GS packet structs (D2GSPacketClt0xNN) are used ONLY as by-value
+        // locals in NET_D2GS_CLIENT_Send_* (`D2GSPacketClt0x67 packet;`), so no other
+        // strategy places them and the local fails ("'packet' not declared"). Assign
+        // each to the unit of a function that declares it as a local. SCOPED to these
+        // packet structs deliberately: a broad local-only-orphan rescue regresses
+        // (+43) because other orphans' by-value usage surfaces masked field-holes once
+        // declared; these wire structs are pure write-targets and emit cleanly (−12).
+        if (!typeOwnerMap.has(typeName) && /^D2GSPacketClt0x[0-9A-Fa-f]+$/.test(typeName)) {
+          for (const [unitName, unitFunctions] of organized) {
+            if (unitFunctions.some(f => (f.localVariables ?? []).some(lv => stripTypeName(lv.dataType) === typeName))) {
+              typeOwnerMap.set(typeName, unitHeaderPaths.get(unitName)!);
+              break;
+            }
+          }
+        }
       }
     }
   }
