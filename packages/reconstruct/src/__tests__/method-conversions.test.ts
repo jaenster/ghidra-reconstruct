@@ -11,6 +11,7 @@ import {
   MethodConversionRegistry,
   createMethodConversionRegistry,
   applyMethodConversions,
+  detectMethodConversionsFromTags,
 } from '../methods/index.js';
 import { normalizeAddress } from '../config/loader.js';
 import { generateHeader } from '../codegen/header.js';
@@ -659,5 +660,38 @@ describe('config validation', () => {
       unlink(badPath2).catch(() => {}),
       unlink(badPath3).catch(() => {}),
     ]);
+  });
+});
+
+describe('detectMethodConversionsFromTags — double-pointer receiver guard', () => {
+  it('converts a method whose receiver is a single pointer (T*)', () => {
+    const fn = makeFunc('DRLG_Init', '0x00661000', [
+      makeParam('pDrlg', 'D2DrlgStrc*', 0),
+      makeParam('nAct', 'int32_t', 1),
+    ]);
+    fn.tags = [{ type: 'method', data: 'D2DrlgStrc' }];
+    const entries = detectMethodConversionsFromTags([fn]);
+    assert.strictEqual(entries.length, 1);
+    assert.strictEqual(entries[0].className, 'D2DrlgStrc');
+  });
+
+  it('does NOT convert when the receiver is a double pointer (T**)', () => {
+    const fn = makeFunc('ReturnMonsterRegionEntryForLevel', '0x00547bb0', [
+      makeParam('ppMonsterRegion', 'D2MonsterRegionStrc**', 0),
+      makeParam('eLevel', 'eD2LevelId', 1),
+    ]);
+    fn.tags = [{ type: 'method', data: 'D2MonsterRegionStrc' }];
+    const entries = detectMethodConversionsFromTags([fn]);
+    assert.strictEqual(entries.length, 0);
+  });
+
+  it('still converts a STATIC method even with a double-pointer first param', () => {
+    const fn = makeFunc('AllocFromSlot', '0x00547cc0', [
+      makeParam('ppSlot', 'D2DrlgFileStrc**', 0),
+    ]);
+    fn.tags = [{ type: 'method', data: 'D2DrlgFileStrc,static' }];
+    const entries = detectMethodConversionsFromTags([fn]);
+    assert.strictEqual(entries.length, 1);
+    assert.strictEqual(entries[0].thisParam, -1);
   });
 });
