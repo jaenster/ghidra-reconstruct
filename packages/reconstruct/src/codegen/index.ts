@@ -321,11 +321,16 @@ export function generateProject(
         const normalLines: string[] = [];
         const platformLines: string[] = [];
         for (const v of e.values) {
-          if (emittedNames.has(v.name)) continue;
-          emittedNames.add(v.name);
+          // Trim: Ghidra value names sometimes carry a trailing space
+          // ("UNITEVENTCALLBACK_MODECHANGE "), which made this cross-enum dedup
+          // treat the same constant in two enums as distinct → both emitted →
+          // "reference is ambiguous" (C++ ignores the trailing space).
+          const vname = v.name.trim();
+          if (emittedNames.has(vname)) continue;
+          emittedNames.add(vname);
           const comment = v.comment ? ` // ${v.comment.replace(/\\n/g, ' ')}` : '';
-          const line = `constexpr ${e.name} ${v.name} = ${v.value};${comment}`;
-          (isPlatformEnumValue(e.name, v.name) ? platformLines : normalLines).push(line);
+          const line = `constexpr ${e.name} ${vname} = ${v.value};${comment}`;
+          (isPlatformEnumValue(e.name, vname) ? platformLines : normalLines).push(line);
         }
         if (normalLines.length > 0 || platformLines.length > 0) {
           enumLines.push(`namespace ${e.name}_ns {`);
