@@ -958,7 +958,9 @@ export function generateFunctionImplementation(
     const block = generateStaticLocalsBlock(
       context.analyzedGlobals, func.name, options.includeAddressComments, bodyIdentifiers
     );
-    if (block) lines.push(block);
+    // Drop spurious `&` on Ghidra array globals (`&X_ARRAY_<hex>` is `T(*)[N]`, but
+    // the array name alone decays to the `T*` the pointer-array element expects).
+    if (block) lines.push(block.replace(/&\s*(\w+_ARRAY_[0-9a-fA-F]+)\b(?!\s*\[)/g, '$1'));
   }
 
   // If a parameter was renamed from `this` to `pThis`, apply the same rename in the body
@@ -985,6 +987,12 @@ export function generateFunctionImplementation(
   if (func.returnType && !func.returnType.includes('*') && /\breturn\s+nullptr\b/.test(body)) {
     body = body.replace(/\breturn\s+nullptr\b/g, 'return 0');
   }
+
+  // `&<name>_ARRAY_<hex>` is a spurious address-of on a Ghidra-named array global:
+  // the array name already decays to a pointer-to-element (the target type), while
+  // `&name` is pointer-to-ARRAY (`T(*)[N]`) and won't convert. Drop the `&` (but
+  // not `&name[i]`, a valid element address).
+  body = body.replace(/&\s*(\w+_ARRAY_[0-9a-fA-F]+)\b(?!\s*\[)/g, '$1');
 
   body = uniquifyDuplicateLabels(body);
   body = hoistSwitchPreCaseDecls(body);
