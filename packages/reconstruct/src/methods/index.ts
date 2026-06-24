@@ -199,6 +199,15 @@ export function detectMethodConversionsFromTags(
       const isStatic = isStaticMethodTag(tag);
       if (!isStatic && isDoublePointerType(func.parameters?.[0]?.dataType)) break;
 
+      // Quest state-machine handlers are tagged `method, D2QuestDataStrc` but are
+      // NOT methods — they're stored in fn-ptr tables (fpQuestStateHandler[],
+      // init-data, filters) and referenced by their namespace-qualified name
+      // (D2Game::Quests::A2Q0::Q08_Callback_11). Method-converting them makes a
+      // quest unit "all-methods", which DROPS its namespace wrapper, so those
+      // qualified fn-ptr references then fail ("not a member of ...::A2Q0").
+      // Leave them as free namespaced functions.
+      if (className === 'D2QuestDataStrc') break;
+
       entries.push({
         address: func.address,
         className,

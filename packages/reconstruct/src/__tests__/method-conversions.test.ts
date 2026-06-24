@@ -707,6 +707,16 @@ describe('detectMethodConversionsFromTags — double-pointer receiver guard', ()
     assert.strictEqual(entries[0].className, 'D2DrlgStrc');
   });
 
+  it('does NOT convert a D2QuestDataStrc-tagged quest handler (fn-ptr table entry)', () => {
+    const fn = makeFunc('Q08_Callback_11', '0x00598640', [
+      makeParam('pQuestData', 'D2QuestDataStrc *', 0),
+      makeParam('pQuestArgs', 'D2QuestArgStrc *', 1),
+    ]);
+    fn.tags = [{ type: 'method', data: 'D2QuestDataStrc' }];
+    const entries = detectMethodConversionsFromTags([fn]);
+    assert.strictEqual(entries.length, 0);
+  });
+
   it('does NOT convert when the receiver is a double pointer (T**)', () => {
     const fn = makeFunc('ReturnMonsterRegionEntryForLevel', '0x00547bb0', [
       makeParam('ppMonsterRegion', 'D2MonsterRegionStrc**', 0),
