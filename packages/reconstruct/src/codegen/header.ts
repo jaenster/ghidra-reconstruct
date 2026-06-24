@@ -908,6 +908,21 @@ function emitFieldLines(fields: StructField[], lines: string[], isUnion = false)
     seenNames.add(rawName);
     // Reconstruct name with array suffix for normalizeFieldDeclaration
     const name = rawName + fieldNameArraySuffix;
+
+    // A field typed `<FuncDef> *` (pointer to a Ghidra function-signature type)
+    // must be emitted as an INLINE function pointer: the bare FuncDef name has no
+    // standalone C definition, so normalizeFieldDeclaration falls back to `void*`
+    // and the field becomes uncallable ("expression cannot be used as a function").
+    const fdMatch = !fieldNameArraySuffix && type.trim().match(/^(\w+)\s*\*(?:32|64)?$/);
+    const fd = fdMatch ? knownFuncDefs.get(fdMatch[1]) : undefined;
+    if (fd) {
+      const fdParams = fd.parameters.map(p => sigType(p.dataType)).join(', ');
+      const fdVarArgs = fd.hasVarArgs ? (fdParams ? ', ...' : '...') : '';
+      lines.push(`    /* ${offsetHex} */ ${normalizeSignatureType(fd.returnType)} (*${name})(${fdParams}${fdVarArgs});${comment}`);
+      i++;
+      continue;
+    }
+
     const decl = normalizeFieldDeclaration(type, name, field.size);
 
     lines.push(`    /* ${offsetHex} */ ${decl};${comment}`);
