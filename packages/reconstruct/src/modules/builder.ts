@@ -236,7 +236,13 @@ export function buildModuleGraph(input: BuildModuleGraphInput): ModuleGraph {
     }
     for (const name of reachedStructs) {
       const s = structByName.get(name);
-      if (!s?.fields) continue;
+      if (!s) continue;
+      // The reached struct ITSELF may be deref'd by-value: a body that does
+      // `gBattleNet->field` (gBattleNet is a global D2BattleNetEventCallbackTable*)
+      // needs the pointee complete, but the global gives only a by-pointer edge
+      // (forward-decl). Impl-include the reached struct so it is fully defined.
+      if (!ownedTypeNames.has(name)) graph.addDependency(headerPath, name, 'by-pointer');
+      if (!s.fields) continue;
       for (const f of s.fields) {
         if (!(f.dataType.includes('*') || f.dataType.includes('&'))) continue;
         const pn = stripTypeName(f.dataType);
