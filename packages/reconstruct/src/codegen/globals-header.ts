@@ -256,10 +256,15 @@ export function generateGlobalsHeader(
 
     // Group constants by namespace (same as globals)
     const constantsByNamespace = groupByNamespace(constants);
-    for (const [namespace, nsConstants] of constantsByNamespace) {
+    for (const [rawNamespace, nsConstants] of constantsByNamespace) {
       if (nsConstants.length === 0) continue;
       // Skip template instantiation namespaces (contain < > , *)
-      if (namespace && /[<>,*]/.test(namespace)) continue;
+      if (rawNamespace && /[<>,*]/.test(rawNamespace)) continue;
+
+      // Collapse consecutive duplicate segments (Quests::Quests → Quests) so the
+      // emitted namespace matches the collapsed form bodies use to reference these
+      // constants — otherwise the qualified reference fails ("not a member of").
+      const namespace = rawNamespace ? (collapseConsecutiveDuplicates(rawNamespace) || undefined) : rawNamespace;
 
       if (namespace) {
         lines.push(`namespace ${namespace} {`);
@@ -407,9 +412,12 @@ export function generateGlobalsHeader(
       lines.push('');
 
       const recoveredByNamespace = groupByNamespace(recovered);
-      for (const [namespace, nsGlobals] of recoveredByNamespace) {
+      for (const [rawNamespace, nsGlobals] of recoveredByNamespace) {
         if (nsGlobals.length === 0) continue;
-        if (namespace && /[<>,*]/.test(namespace)) continue;
+        if (rawNamespace && /[<>,*]/.test(rawNamespace)) continue;
+        // Collapse consecutive duplicate segments (Quests::Quests → Quests) to
+        // match the collapsed form bodies use to reference these recovered globals.
+        const namespace = rawNamespace ? (collapseConsecutiveDuplicates(rawNamespace) || undefined) : rawNamespace;
         if (namespace) {
           lines.push(`namespace ${namespace} {`);
           lines.push('');
