@@ -426,7 +426,7 @@ export function computeTypeOwnership(input: TypeOwnershipInput): TypeOwnershipRe
         // packet structs deliberately: a broad local-only-orphan rescue regresses
         // (+43) because other orphans' by-value usage surfaces masked field-holes once
         // declared; these wire structs are pure write-targets and emit cleanly (−12).
-        if (!typeOwnerMap.has(typeName) && /^D2GSPacketClt0x[0-9A-Fa-f]+$/.test(typeName)) {
+        if (!typeOwnerMap.has(typeName) && /^D2GSPacketClt(0x[0-9A-Fa-f]+|_CMD)/.test(typeName)) {
           for (const [unitName, unitFunctions] of organized) {
             if (unitFunctions.some(f => (f.localVariables ?? []).some(lv => stripTypeName(lv.dataType) === typeName))) {
               typeOwnerMap.set(typeName, unitHeaderPaths.get(unitName)!);
