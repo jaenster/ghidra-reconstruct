@@ -19,10 +19,22 @@ import { createKindTransformer, type Transformer } from '../../transformer.js';
 import type { TransformPlugin } from '../types.js';
 import { createPlugin } from '../registry.js';
 
+/** A cast to ANY type containing an array dimension is invalid C++. Ghidra emits
+ *  both `(char[4])x` (direct array) and `(D2UnitStrc*[5]*)x` (the malformed
+ *  pointer-to-array-of-pointers — valid would be `T*(*)[N]`). Detect an ArrayType
+ *  anywhere in the cast type so both are stripped. */
+function typeHasArray(t: any): boolean {
+  if (!t || typeof t !== 'object') return false;
+  if (t.kind === NodeKind.ArrayType) return true;
+  if (t.kind === NodeKind.PointerType) return typeHasArray(t.pointee);
+  if (t.kind === NodeKind.QualifiedType) return typeHasArray(t.type ?? t.inner);
+  return false;
+}
+
 function createArrayCastStripTransformer(): Transformer {
   return createKindTransformer(NodeKind.CStyleCastExpr, (node) => {
     const cast = node as CStyleCastExpr;
-    if (cast.type.kind !== NodeKind.ArrayType) return undefined;
+    if (!typeHasArray(cast.type)) return undefined;
     const inner = cast.expression as Expression & ASTNode;
     return {
       ...inner,
