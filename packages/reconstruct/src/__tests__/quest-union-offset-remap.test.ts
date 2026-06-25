@@ -103,6 +103,29 @@ describe('quest-union field offset-remap', () => {
     assert.ok(!impl.includes('->bRewardPending'), `stale foreign field bRewardPending in:\n${impl}`);
   });
 
+  it('keeps the decompiler member for structured continuation accesses (->FIELD.sub / [i])', () => {
+    // An A3Q6 function whose body reads `.pA1Q1->sQuestGUID.aPlayerGUID[5]`. A3Q6
+    // has no sQuestGUID; the decompiler picked pA1Q1 (which does) so the chain is
+    // valid. Switching the member to pA3Q6 would deref a scalar → must be KEPT.
+    setQuestStructLayouts([
+      A5Q5, A1Q3, A2Q1,
+      { name: 'D2QuestDataA1Q1Strc', fields: [field('sQuestGUID', 0, 'D2QuestGUIDStrc', 24)] },
+      { name: 'D2QuestDataA3Q6Strc', fields: [field('bQuestTimerActive', 0, 'bool', 1)] },
+    ]);
+    const func = makeFunc(
+      'Q23_NotifyGuardianStateToPlayers',
+      'void Q23_NotifyGuardianStateToPlayers(D2GameStrc *pGame) {\n' +
+      '  D2QuestDataStrc *pQuestData;\n' +
+      '  int x = ((pQuestData->pQuestSpecificData).pA1Q1)->sQuestGUID.aPlayerGUID[5];\n' +
+      '}'
+    );
+    const impl = generateImplementation('A3Q6', [func], undefined, 'A3Q6.h', options, { sourceFileName: 'D2Game/Quests/A3Q6.cpp' });
+    assert.ok(impl.includes('.pA1Q1->sQuestGUID.aPlayerGUID'), `continuation access should keep pA1Q1 member in:\n${impl}`);
+    assert.ok(!impl.includes('.pA3Q6->bQuestTimerActive.aPlayerGUID'), `must NOT switch member for structured access in:\n${impl}`);
+    // restore the minimal layouts for other tests
+    setQuestStructLayouts([A5Q5, A1Q3, A2Q1]);
+  });
+
   it('leaves the access untouched when the target quest has no field at that offset', () => {
     // offset 12 has no A5Q5 mapping if we feed an unknown offset (field_0x40 = 64).
     const func = makeFunc(

@@ -425,9 +425,17 @@ function rewriteQuestUnionMembers(code: string, funcName: string, sourceFile?: s
     //     FIELD pointing at the wrong name → "has no member". Remap FIELD by its
     //     byte offset to pTGT's field at the same offset. (The decompiler picks
     //     the member by offset-fit, so the offset is the stable invariant.)
+    //
+    //     EXCEPT when the access CONTINUES into a subfield/array/arrow
+    //     (`->FIELD.x`, `->FIELD[i]`, `->FIELD->`): the decompiler only emits such
+    //     a chain when the member it picked genuinely HAS FIELD as a struct/array
+    //     at that offset (e.g. `->sQuestGUID.aPlayerGUID`), so its member choice is
+    //     VALID — switching it would deref a scalar ("non-class type 'bool'").
+    //     Leave those untouched.
     code = code.replace(
-      /\.p(A[1-5]Q\d+)(\s*\)?\s*->\s*)([A-Za-z_]\w*)/g,
-      (full, srcTag: string, mid: string, field: string) => {
+      /\.p(A[1-5]Q\d+)(\s*\)?\s*->\s*)([A-Za-z_]\w*)([.[]|->)?/g,
+      (full, srcTag: string, mid: string, field: string, cont: string | undefined) => {
+        if (cont === '.' || cont === '[' || cont === '->') return full; // valid structured access — keep member
         let remapped = field;
         if (tgtLayout) {
           const off = questFieldOffset(srcTag, field);
@@ -440,8 +448,9 @@ function rewriteQuestUnionMembers(code: string, funcName: string, sourceFile?: s
       },
     );
     // 1b. BARE member uses (no `->`, e.g. passed as a pointer value or assigned to
-    //     a typed local): plain member rewrite, no field involved.
-    code = code.replace(/\.p(A[1-5]Q\d+)\b/g, `.${member}`);
+    //     a typed local): plain member rewrite, no field involved. Skip members
+    //     followed by `->` — those are field accesses handled/kept by 1a.
+    code = code.replace(/\.p(A[1-5]Q\d+)\b(?!\s*\)?\s*->)/g, `.${member}`);
   }
 
   // 2. Type-driven correction: a local declared `D2QuestDataA#Q#Strc* x = …pA?Q?`
