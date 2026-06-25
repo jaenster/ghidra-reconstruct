@@ -49,7 +49,7 @@ import type {
 import { resolveOverridePlaceholders } from './impl.js';
 
 import { generateHeader, setKnownFuncDefs } from './header.js';
-import { generateImplementation, type ImplGenContext } from './impl.js';
+import { generateImplementation, setQuestStructLayouts, type ImplGenContext } from './impl.js';
 import { generateCMakeLists, generateTopLevelCMake, generateTargetCMake, generateUnsortedCMake } from './cmake.js';
 import { generateSourceMap } from './sourcemap.js';
 import { generateReadme } from './readme.js';
@@ -121,6 +121,14 @@ export function generateProject(
   // Same set, by name, so a typedef targeting `<FunctionDefinition> *` can be
   // inlined into a self-contained function-pointer typedef.
   setKnownFuncDefs(funcDefDataTypes);
+
+  // Register per-quest struct layouts so the union-member rewrite (impl.ts) can
+  // remap a field by byte offset when it switches union members. Ghidra resolves
+  // D2QuestDataStrc.pQuestSpecificData (32-member union) to an arbitrary member,
+  // so the field name belongs to the WRONG quest struct until offset-remapped.
+  setQuestStructLayouts(
+    dataTypes.filter(dt => dt.kind === 'STRUCTURE') as import('../types.js').ExtractedStruct[],
+  );
 
   // Drop excluded namespaces/modules ENTIRELY (functions + classes + datatypes
   // + globals + namespace records) so no per-namespace header/impl file is ever

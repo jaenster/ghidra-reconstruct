@@ -12,6 +12,7 @@ import type {
   DetectedClass,
   ReconstructOptions,
   AnalyzedDataSymbol,
+  StructField,
 } from '../types.js';
 import { isPlatformOrBuiltinType, isStructType, castPointerInitializer } from './platform-types.js';
 import { resolveCrtInclude } from './crt-mapping.js';
@@ -355,6 +356,44 @@ const QUEST_PREFIX_TO_UNION_MEMBER: Record<string, string> = {
 };
 
 /**
+ * Per-quest struct field layout: offset↔name maps for each D2QuestDataA#Q#Strc,
+ * keyed by the quest tag (e.g. "A5Q5"). Populated from the extracted structs so
+ * the union-member rewrite can remap a field by its BYTE OFFSET when it switches
+ * union members (Ghidra emits the field name of the arbitrary member it picked).
+ */
+interface QuestStructLayout {
+  byOffset: Map<number, string>;
+  byName: Map<string, number>;
+}
+const questStructLayouts = new Map<string, QuestStructLayout>();
+
+export function setQuestStructLayouts(
+  structs: Iterable<{ name: string; fields: StructField[] }>,
+): void {
+  questStructLayouts.clear();
+  for (const dt of structs) {
+    const m = dt.name.match(/^D2QuestData(A[1-5]Q\d+)Strc$/);
+    if (!m) continue;
+    const byOffset = new Map<number, string>();
+    const byName = new Map<string, number>();
+    for (const f of dt.fields ?? []) {
+      byOffset.set(f.offset, f.name);
+      byName.set(f.name, f.offset);
+    }
+    questStructLayouts.set(m[1], { byOffset, byName });
+  }
+}
+
+/** Resolve the byte offset a quest-struct field name refers to: `field_0xNN`
+ *  encodes the offset directly; a named field is looked up in its own struct's
+ *  layout. Returns undefined when unknown (caller leaves the access untouched). */
+function questFieldOffset(srcTag: string, field: string): number | undefined {
+  const fm = field.match(/^field_0x([0-9A-Fa-f]+)$/);
+  if (fm) return parseInt(fm[1], 16);
+  return questStructLayouts.get(srcTag)?.byName.get(field);
+}
+
+/**
  * Rewrite wrong quest union member accesses based on function name or source file.
  * e.g. in Q04_xxx: `.pA1Q1->` → `.pA1Q4->`
  *
@@ -377,7 +416,33 @@ function rewriteQuestUnionMembers(code: string, funcName: string, sourceFile?: s
     const fileMatch = sourceFile.match(/\b(A[1-5]Q\d+)\b/); // D2Game/Quests/A1Q4
     if (fileMatch) member = `p${fileMatch[1]}`;
   }
-  if (member) code = code.replace(/\.p(A[1-5]Q\d+)\b/g, `.${member}`);
+  if (member) {
+    const tgtTag = member.slice(1); // "pA5Q5" → "A5Q5"
+    const tgtLayout = questStructLayouts.get(tgtTag);
+    // 1a. INLINE field access `.pSRC)->FIELD`: Ghidra resolved the union to an
+    //     arbitrary member (pSRC) so FIELD is that member's name at the touched
+    //     offset. Switching the member to the function's own quest (pTGT) leaves
+    //     FIELD pointing at the wrong name → "has no member". Remap FIELD by its
+    //     byte offset to pTGT's field at the same offset. (The decompiler picks
+    //     the member by offset-fit, so the offset is the stable invariant.)
+    code = code.replace(
+      /\.p(A[1-5]Q\d+)(\s*\)?\s*->\s*)([A-Za-z_]\w*)/g,
+      (full, srcTag: string, mid: string, field: string) => {
+        let remapped = field;
+        if (tgtLayout) {
+          const off = questFieldOffset(srcTag, field);
+          if (off !== undefined) {
+            const tf = tgtLayout.byOffset.get(off);
+            if (tf) remapped = tf;
+          }
+        }
+        return `.${member}${mid}${remapped}`;
+      },
+    );
+    // 1b. BARE member uses (no `->`, e.g. passed as a pointer value or assigned to
+    //     a typed local): plain member rewrite, no field involved.
+    code = code.replace(/\.p(A[1-5]Q\d+)\b/g, `.${member}`);
+  }
 
   // 2. Type-driven correction: a local declared `D2QuestDataA#Q#Strc* x = …pA?Q?`
   //    must read its OWN union member regardless of the enclosing function's quest
