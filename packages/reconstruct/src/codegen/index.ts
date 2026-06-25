@@ -54,7 +54,7 @@ import { generateCMakeLists, generateTopLevelCMake, generateTargetCMake, generat
 import { generateSourceMap } from './sourcemap.js';
 import { generateReadme } from './readme.js';
 import { organizeByNamespace, getFilePath, setModuleNames } from './namespace.js';
-import { generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs } from './globals-header.js';
+import { generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setMultidimArrayGlobals } from './globals-header.js';
 import { isPlatformOrBuiltinType, generatePlatformHeader } from './platform-types.js';
 import { createOverrideRegistry } from '../overrides/index.js';
 import { createLibraryRegistry } from '../library/index.js';
@@ -129,6 +129,11 @@ export function generateProject(
   setQuestStructLayouts(
     dataTypes.filter(dt => dt.kind === 'STRUCTURE') as import('../types.js').ExtractedStruct[],
   );
+
+  // Register multidimensional-array globals so their `&name` initializers get a
+  // cast to the pointer field type (`(T*)&name`) — a 2-D+ array address is
+  // `T(*)[N][M]`, incompatible with the `T*` field even after array decay.
+  setMultidimArrayGlobals(globals as Array<{ name: string; dataType?: string }>);
 
   // Drop excluded namespaces/modules ENTIRELY (functions + classes + datatypes
   // + globals + namespace records) so no per-namespace header/impl file is ever

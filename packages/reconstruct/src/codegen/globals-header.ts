@@ -693,7 +693,11 @@ export function emitDataValue(dv: DataValue, indent = 0): string {
       // If it looks like a symbol name (not hex), emit as address-of.
       // Drop the CRT-helper namespace prefixes (compiler/VisualStudio are not emitted).
       if (/^[A-Za-z_]/.test(dv.value)) {
-        return `&${dv.value.replace(/\b(?:compiler|VisualStudio)::/g, '')}`;
+        const sym = dv.value.replace(/\b(?:compiler|VisualStudio)::/g, '');
+        // `&<multidim-array-global>` is `T(*)[N][M]`; the pointer field wants `T*`.
+        // Cast it (a 1-D array would just decay, but a 2-D+ one needs the cast).
+        const elem = multidimArrayGlobals.get(sym);
+        return elem ? `(${elem}*)&${sym}` : `&${sym}`;
       }
       // Raw hex pointer — normalize value (add 0x prefix if needed)
       return `(void*)${normalizeDataValue(dv.value)}`;
@@ -825,6 +829,27 @@ const knownFuncDefTypedefs = new Set<string>();
 export function setKnownFuncDefTypedefs(names: Iterable<string>): void {
   knownFuncDefTypedefs.clear();
   for (const n of names) knownFuncDefTypedefs.add(n);
+}
+
+/**
+ * Globals declared as MULTIDIMENSIONAL arrays (`T[N][M]…`), mapped to their
+ * element base type. Taking the address of such a global (`&name`) yields
+ * `T(*)[N][M]`, but the pointer field it initializes wants `T*` — and unlike a
+ * 1-D array, dropping the `&` still leaves `T(*)[M]` (not `T*`). So a CAST is
+ * required: `(T*)&name`. Populated from the extracted globals before emission.
+ */
+const multidimArrayGlobals = new Map<string, string>();
+
+export function setMultidimArrayGlobals(
+  globals: Iterable<{ name: string; dataType?: string }>,
+): void {
+  multidimArrayGlobals.clear();
+  for (const g of globals) {
+    if (!g.dataType) continue;
+    // `char[5][4]`, `undefined1 [3][2]`, `D2Foo[8][8]` → 2+ dimensions.
+    const m = g.dataType.match(/^([\w:]+(?:\s*\*)*)\s*(?:\[\d+\]\s*){2,}$/);
+    if (m) multidimArrayGlobals.set(g.name, m[1].trim());
+  }
 }
 
 /** Name conventions for FunctionDefinition typedefs emitted by the codegen. */
