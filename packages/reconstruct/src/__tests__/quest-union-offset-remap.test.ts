@@ -126,6 +126,31 @@ describe('quest-union field offset-remap', () => {
     setQuestStructLayouts([A5Q5, A1Q3, A2Q1]);
   });
 
+  it('corrects a bare assignment to a cross-quest-typed local to that local\'s own member', () => {
+    setQuestStructLayouts([A5Q5, A1Q3, A2Q1]);
+    // A1Q5 function with a local typed D2QuestDataA1Q4Strc* assigned from the union.
+    // step 1b forces the function quest (.pA1Q5) → "cannot convert A1Q5Strc* to
+    // A1Q4Strc*"; step 3 must rewrite the member to pA1Q4 (the local's own quest).
+    const func: ExtractedFunction = {
+      name: 'Q05_CrossQuest',
+      address: '0x00500000',
+      signature: 'void Q05_CrossQuest(D2GameStrc * pGame)',
+      returnType: 'void',
+      parameters: [{ name: 'pGame', dataType: 'D2GameStrc *', size: 4, ordinal: 0, storage: 'register' }],
+      localVariables: [{ name: 'pCross', dataType: 'D2QuestDataA1Q4Strc *', size: 4 } as any],
+      callingConvention: '__fastcall', size: 64, isThunk: false, isExternal: false, hasVarArgs: false,
+      decompiled:
+        'void Q05_CrossQuest(D2GameStrc *pGame) {\n' +
+        '  D2QuestDataStrc *pQuestData;\n' +
+        '  D2QuestDataA1Q4Strc *pCross;\n' +
+        '  pCross = (pQuestData->pQuestSpecificData).pA1Q1;\n' +
+        '}',
+    };
+    const impl = generateImplementation('A1Q5', [func], undefined, 'A1Q5.h', options, { sourceFileName: 'D2Game/Quests/A1Q5.cpp' });
+    assert.ok(impl.includes('pCross = ') && impl.includes('.pA1Q4'), `assignment should use pA1Q4 (local's quest) in:\n${impl}`);
+    assert.ok(!/pCross = [^;]*\.pA1Q5/.test(impl), `must not force function quest pA1Q5 in:\n${impl}`);
+  });
+
   it('leaves the access untouched when the target quest has no field at that offset', () => {
     // offset 12 has no A5Q5 mapping if we feed an unknown offset (field_0x40 = 64).
     const func = makeFunc(

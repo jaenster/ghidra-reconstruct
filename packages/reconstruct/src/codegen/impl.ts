@@ -402,7 +402,12 @@ function questFieldOffset(srcTag: string, field: string): number | undefined {
  * 2. A#Q# in function name (object/operation naming): OBJOP_A1Q4_ActivateInifussTree
  * 3. A#Q# in source file path: D2Game/Quests/A1Q4.cpp
  */
-function rewriteQuestUnionMembers(code: string, funcName: string, sourceFile?: string): string {
+function rewriteQuestUnionMembers(
+  code: string,
+  funcName: string,
+  sourceFile?: string,
+  locals?: ReadonlyArray<{ name: string; dataType: string }>,
+): string {
   // 1. Function-quest heuristic: Ghidra picks an arbitrary union member (usually
   //    pA1Q1); rewrite to the member for the quest this function belongs to.
   let member: string | null = null;
@@ -463,6 +468,32 @@ function rewriteQuestUnionMembers(code: string, funcName: string, sourceFile?: s
     /(D2QuestData(A[1-5]Q\d+)Strc\s*\*\s*\w+\s*=\s*[^;]*?\.p)A[1-5]Q\d+\b/g,
     '$1$2',
   );
+
+  // 3. Bare-assignment type-driven correction: `pX = …pA?Q?;` where pX is a local
+  //    declared `D2QuestDataA#Q#Strc*` (declared on its own line, so step 2's
+  //    in-statement-type rule misses it). step 1b forced the function's quest
+  //    member, breaking the assignment ("cannot convert A1Q5Strc* to A1Q4Strc*").
+  //    Rewrite the member to match pX's OWN declared quest. (All members are
+  //    offset-0 pointers, so this is the same address read as the correct type.)
+  //    The var→quest map is built from the BODY's declarations (Ghidra body-local
+  //    decls are not in func.localVariables) plus any passed locals/params.
+  const localMember = new Map<string, string>();
+  for (const v of locals ?? []) {
+    const m = v.dataType.match(/^D2QuestData(A[1-5]Q\d+)Strc\s*\*/);
+    if (m) localMember.set(v.name, m[1]);
+  }
+  for (const m of code.matchAll(/\bD2QuestData(A[1-5]Q\d+)Strc\s*\*\s*(\w+)\b/g)) {
+    localMember.set(m[2], m[1]); // body decl wins (it's the actual emitted type)
+  }
+  if (localMember.size > 0) {
+    code = code.replace(
+      /(^|[\s{};])(\w+)(\s*=\s*[^;=]*?\.p)A[1-5]Q\d+\b/gm,
+      (full, lead: string, varName: string, mid: string) => {
+        const tag = localMember.get(varName);
+        return tag ? `${lead}${varName}${mid}${tag}` : full;
+      },
+    );
+  }
   return code;
 }
 
@@ -971,7 +1002,7 @@ export function generateFunctionImplementation(
     // Start with decompiled code or placeholder
     if (func.decompiled) {
       const transformed = transformDecompiledCode(func.decompiled, options, func.name, func.address, context);
-      body = func.name ? rewriteQuestUnionMembers(transformed.code, func.name, context?.sourceFileName) : transformed.code;
+      body = func.name ? rewriteQuestUnionMembers(transformed.code, func.name, context?.sourceFileName, [...(func.parameters ?? []), ...(func.localVariables ?? [])]) : transformed.code;
       bodyIdentifiers = transformed.identifiers;
       if (transformed.preamble) {
         // Store preamble on the context for accumulation by generateImplementation
