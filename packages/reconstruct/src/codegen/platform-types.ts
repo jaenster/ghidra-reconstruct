@@ -725,6 +725,8 @@ export function generatePlatformHeader(): string {
   lines.push('double CRT_Ceil(...);');
   lines.push('char* CRT_Strchr(...);');
   lines.push('unsigned int CRT_ClearFP(...);');
+  lines.push('char* _strrev(char*);');
+  lines.push('char* __strrev(char*);');
   lines.push('}');
   lines.push('');
 
