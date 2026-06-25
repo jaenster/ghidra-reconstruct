@@ -102,7 +102,14 @@ function declareUnderscoreSlotLocals(
     const declType = dm[1].trim();
     const declName = dm[2];
     // Filter out control-flow / call statements masquerading as declarations.
+    // The keyword can appear as either the "name" (`int return;`) or, more
+    // commonly, the "type" — e.g. `return _bResult;` parses as type=`return`,
+    // name=`_bResult`, which would wrongly mark `_bResult` as declared and
+    // suppress its synthesized slot decl. Reject when the leading word of either
+    // group is a control-flow keyword.
+    const declTypeHead = declType.split(/[\s*]/)[0];
     if (/^(if|for|while|switch|return|do|else|case|goto|sizeof)$/.test(declName)) continue;
+    if (/^(if|for|while|switch|return|do|else|case|goto|sizeof)$/.test(declTypeHead)) continue;
     declaredInBody.add(declName);
     if (!typeByName.has(declName)) typeByName.set(declName, declType);
   }
@@ -441,6 +448,14 @@ function rewriteQuestUnionMembers(
       /\.p(A[1-5]Q\d+)(\s*\)?\s*->\s*)([A-Za-z_]\w*)([.[]|->)?/g,
       (full, srcTag: string, mid: string, field: string, cont: string | undefined) => {
         if (cont === '.' || cont === '[' || cont === '->') return full; // valid structured access — keep member
+        // The union members all alias offset 0, so `.pSRC->FIELD` already COMPILES
+        // whenever FIELD is a real named member of pSRC — and reads the same bytes
+        // any other member would. The decompiler only emits such a real-named access
+        // when it deliberately picked pSRC (e.g. a genuine cross-quest read of
+        // another quest's state). Leave those untouched; only `field_0xNN` (or a
+        // stale name not present on pSRC) signals an arbitrary offset-fit member
+        // that must be remapped to the function's own quest to resolve.
+        if (questStructLayouts.get(srcTag)?.byName.has(field)) return full;
         let remapped = field;
         if (tgtLayout) {
           const off = questFieldOffset(srcTag, field);

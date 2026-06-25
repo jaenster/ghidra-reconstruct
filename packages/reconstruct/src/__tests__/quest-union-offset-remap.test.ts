@@ -70,7 +70,11 @@ function makeFunc(name: string, decompiled: string): ExtractedFunction {
 describe('quest-union field offset-remap', () => {
   before(() => setQuestStructLayouts([A5Q5, A1Q3, A2Q1]));
 
-  it('remaps field_0xNN and foreign field names to the function-quest struct field at the same offset', () => {
+  it('remaps a field ABSENT on the decompiler member; keeps fields it actually has', () => {
+    // The union members all alias offset 0, so `.pSRC->FIELD` already compiles and
+    // reads the same bytes whenever FIELD is a real member of pSRC. Only an access
+    // whose FIELD is ABSENT on the decompiler's member fails to compile and needs
+    // remapping to the function's own quest struct.
     const func = makeFunc(
       'Q35_OnPlayerDeath',
       'void Q35_OnPlayerDeath(D2GameStrc *pGame) {\n' +
@@ -78,29 +82,36 @@ describe('quest-union field offset-remap', () => {
       '  if (((pQuestData->pQuestSpecificData).pA1Q3)->field_0x00 == 0) {\n' +
       '    ((pQuestData->pQuestSpecificData).pA1Q3)->field_0x0c = 1;\n' +
       '    ((pQuestData->pQuestSpecificData).pA2Q1)->field_0x11 = 0;\n' +
-      '    ((pQuestData->pQuestSpecificData).pA2Q1)->bRewardPending = 0;\n' +
       '  }\n' +
       '}'
     );
     const context: ImplGenContext = { sourceFileName: 'D2Game/Quests/A5Q5.cpp' };
     const impl = generateImplementation('A5Q5', [func], undefined, 'A5Q5.h', options, context);
 
-    // The cpp-parser transform strips the grouping parens before the rewrite, so
-    // the resolved access reads `.pA5Q5->field` (no closing paren).
-    // field_0x00 (offset 0) → bAncientsDefeated; the member is the function's quest.
-    assert.ok(impl.includes('.pA5Q5->bAncientsDefeated'), `offset 0 remap missing in:\n${impl}`);
-    // field_0x0c (offset 12) → nResurrectionCount.
-    assert.ok(impl.includes('.pA5Q5->nResurrectionCount'), `offset 12 remap missing in:\n${impl}`);
-    // field_0x11 (offset 17) → bAncientsFightStarted.
-    assert.ok(impl.includes('.pA5Q5->bAncientsFightStarted'), `offset 17 remap missing in:\n${impl}`);
-    // Foreign NAMED field bRewardPending (offset 84 in A2Q1) → A5Q5 field at 84.
-    assert.ok(impl.includes('.pA5Q5->nPlayersOnSummit'), `offset 84 named-field remap missing in:\n${impl}`);
+    // field_0x00 / field_0x0c ARE members of A1Q3 (offsets 0 / 12) → the access
+    // already compiles, so the decompiler member is kept (no clobber).
+    assert.ok(impl.includes('.pA1Q3->field_0x00'), `present field_0x00 should be kept in:\n${impl}`);
+    assert.ok(impl.includes('.pA1Q3->field_0x0c'), `present field_0x0c should be kept in:\n${impl}`);
+    // field_0x11 (offset 17) is ABSENT on A2Q1 (only has bRewardPending@84) → must
+    // remap to the function quest's field at offset 17 = bAncientsFightStarted.
+    assert.ok(impl.includes('.pA5Q5->bAncientsFightStarted'), `absent-field remap missing in:\n${impl}`);
+    assert.ok(!/\.pA2Q1->field_0x11\b/.test(impl), `stale absent field_0x11 in:\n${impl}`);
+  });
 
-    // No stale wrong-member or wrong-field names survive.
-    assert.ok(!impl.includes('.pA1Q3'), `stale .pA1Q3 member in:\n${impl}`);
-    assert.ok(!impl.includes('.pA2Q1'), `stale .pA2Q1 member in:\n${impl}`);
-    assert.ok(!/->field_0x00\b/.test(impl), `stale field_0x00 in:\n${impl}`);
-    assert.ok(!impl.includes('->bRewardPending'), `stale foreign field bRewardPending in:\n${impl}`);
+  it('keeps a genuine cross-quest read of another quest\'s NAMED field', () => {
+    // An A2Q1 function that reads A5Q5's bAncientsDefeated via the union. The
+    // decompiler deliberately resolved pA5Q5 (the field is real there); forcing the
+    // file quest pA2Q1 would invent "A2Q1 has no member bAncientsDefeated".
+    const func = makeFunc(
+      'Q08_CheckAncients',
+      'void Q08_CheckAncients(D2GameStrc *pGame) {\n' +
+      '  D2QuestDataStrc *pQuestData;\n' +
+      '  ((pQuestData->pQuestSpecificData).pA5Q5)->bAncientsDefeated = 1;\n' +
+      '}'
+    );
+    const impl = generateImplementation('A2Q1', [func], undefined, 'A2Q1.h', options, { sourceFileName: 'D2Game/Quests/A2Q1.cpp' });
+    assert.ok(impl.includes('.pA5Q5->bAncientsDefeated'), `cross-quest named read should be kept in:\n${impl}`);
+    assert.ok(!impl.includes('.pA2Q1->bAncientsDefeated'), `must not force file quest in:\n${impl}`);
   });
 
   it('keeps the decompiler member for structured continuation accesses (->FIELD.sub / [i])', () => {

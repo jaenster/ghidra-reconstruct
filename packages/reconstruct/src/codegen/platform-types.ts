@@ -709,6 +709,25 @@ export function generatePlatformHeader(): string {
   lines.push('#define builtin_strcpy strcpy');
   lines.push('');
 
+  // Ghidra ROUND intrinsic: rounds a floating-point value to the nearest integer
+  // value (kept as floating-point). Maps to <cmath> round().
+  lines.push('// Ghidra ROUND intrinsic (round-to-nearest, result stays floating-point)');
+  lines.push('#define ROUND(x) round(x)');
+  lines.push('');
+
+  // Statically-linked CRT functions Ghidra named with a `CRT_` prefix that the
+  // reconstruction does NOT rebuild (we don't reconstruct the C runtime). Their
+  // call sites survive (often with mangled x87/FP argument lists), so declare them
+  // as variadic externs — enough to compile; they resolve to the real CRT at link.
+  lines.push('// External statically-linked CRT functions (Ghidra `CRT_`-prefixed, not reconstructed)');
+  lines.push('extern "C" {');
+  lines.push('double CRT_Floor(...);');
+  lines.push('double CRT_Ceil(...);');
+  lines.push('char* CRT_Strchr(...);');
+  lines.push('unsigned int CRT_ClearFP(...);');
+  lines.push('}');
+  lines.push('');
+
   lines.push('');
 
 
