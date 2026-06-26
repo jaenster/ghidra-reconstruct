@@ -169,7 +169,10 @@ export async function createConnection(
       daemonUrl,
       'create_session',
       createArgs,
-      120000 // 2 min timeout for worker startup
+      // Worker startup. A fresh checkout downloads the whole program DB from the
+      // remote Ghidra server, which can far exceed 2 min; reused checkouts are
+      // near-instant. Configurable so a cold first checkout doesn't get aborted.
+      Number(process.env.GHIDRA_CREATE_SESSION_TIMEOUT_MS) || 120000
     );
     sessionId = session.id;
     console.log(`Session created: ${sessionId}`);
