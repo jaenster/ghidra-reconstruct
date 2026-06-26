@@ -469,6 +469,8 @@ import { underscoreSlotLocalPlugin } from './builtins/underscore-slot-local.js';
 export { underscoreSlotLocalPlugin } from './builtins/underscore-slot-local.js';
 import { funcdefCastCollapsePlugin } from './builtins/funcdef-cast-collapse.js';
 export { funcdefCastCollapsePlugin } from './builtins/funcdef-cast-collapse.js';
+import { charArrayDwordAssignPlugin } from './builtins/char-array-dword-assign.js';
+export { charArrayDwordAssignPlugin } from './builtins/char-array-dword-assign.js';
 export { getGotoCleanupStats, resetGotoCleanupStats } from './builtins/goto-cleanup/index.js';
 export type { GotoCleanupStats } from './builtins/goto-cleanup/index.js';
 import type { TransformPlugin } from './types.js';
@@ -521,6 +523,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   undefinedGotoLabelPlugin,   // Control-flow: define dropped Ghidra goto targets (priority 95)
   underscoreSlotLocalPlugin,  // Declaration: synthesize Ghidra `_<base>` slot-locals (priority 95)
   funcdefCastCollapsePlugin,  // Type: collapse (Funcdef*) casts to (Funcdef) (priority 70)
+  charArrayDwordAssignPlugin, // Type: charArray = scalar -> *(uint32_t*)charArray = scalar (priority 75)
   memoryPatternsPlugin,       // Pattern detection (late)
 ];
 
