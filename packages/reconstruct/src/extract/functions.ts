@@ -116,8 +116,16 @@ export function shouldExcludeFunction(
   func: { name: string; namespace?: string; isExternal?: boolean; isThunk?: boolean },
   patterns: (string | RegExp)[]
 ): boolean {
-  // Always exclude external and thunk functions
-  if (func.isExternal || func.isThunk) {
+  // Always exclude external functions.
+  if (func.isExternal) {
+    return true;
+  }
+  // Thunks (isThunk) are forwarding stubs with no game body. Import/CRT/mangled
+  // thunks stay excluded, but GAME thunks (e.g. PLRSKILLS_DrawChargeTrailIfPrimary,
+  // NET_*) are referenced by their callers — keeping them lets the header DECLARE
+  // them (the impl + decompile paths skip thunk bodies, so they're declaration-only)
+  // so cross-module callers compile instead of erroring "not declared in this scope".
+  if (func.isThunk && /^(thunk|_|Ordinal_|@|std::|`|\?\?|FUN_)/i.test(func.name)) {
     return true;
   }
 
