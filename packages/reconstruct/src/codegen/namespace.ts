@@ -147,6 +147,33 @@ export function collapseConsecutiveDuplicates(name: string): string {
 }
 
 /**
+ * Global struct/union/enum type names, registered once per reconstruct run, used
+ * to strip a namespace component that collides with a type. The HEADER decl, the
+ * IMPL definition, and the call-site rewriter must all strip the SAME component or
+ * a function's decl/def/calls land in different namespaces.
+ */
+let namespaceCollisionTypes: Set<string> = new Set();
+export function setNamespaceCollisionTypes(typeNames: Set<string>): void {
+  namespaceCollisionTypes = typeNames;
+}
+
+/**
+ * Strip ONLY the LAST namespace component if it collides with a type name —
+ * matching the call-site rewriter, which strips a type-name qualifier only when
+ * it is PENULTIMATE (directly before the symbol). e.g. `D2Common::Item` → (Item
+ * is a struct) → `D2Common`, but `D2Common::Skills::SkillsServer` is left intact
+ * (SkillsServer is the last component; an intermediate `Skills` collision is NOT
+ * stripped — that would move the def to an unreachable sibling scope).
+ */
+export function stripLastCollidingNamespaceComponent(ns: string): string | undefined {
+  const parts = ns.split('::');
+  if (parts.length > 1 && namespaceCollisionTypes.has(parts[parts.length - 1])) {
+    parts.pop();
+  }
+  return parts.length > 0 ? parts.join('::') : undefined;
+}
+
+/**
  * Extract the "leaf" from a module name by stripping a common library prefix.
  * The default prefix is configurable via setModulePrefix(); e.g. with "Lib"
  * LibGame → Game, LibSound → Sound, and prefix-less names pass through.

@@ -20,7 +20,7 @@ import { CPP_KEYWORDS } from './header.js';
 
 // Import cpp-parser for code transformation
 import { transformGhidraCode, preprocessGhidraCode, isGhidraGeneratedName, suggestBetterName, type TransformResult } from '@ghidra-mcp/cpp-parser';
-import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js';
+import { parseTemplateName, collapseConsecutiveDuplicates, stripLastCollidingNamespaceComponent } from './namespace.js';
 import { cleanFunctionComment } from './header.js';
 import { normalizeSignatureType, collapseFuncPtrTypedef } from './platform-types.js';
 import { generateStaticLocalsBlock, emitDataValue, inferArrayDeclaration, normalizeArrayDeclaration, isFuncDefTypedefName, getKnownFuncDefTypedefs } from './globals-header.js';
@@ -684,9 +684,12 @@ export function generateImplementation(
     namespace = collapseConsecutiveDuplicates(namespace);
   }
 
-  // Strip namespace components that collide with struct/union/enum type names
-  if (namespace && dataTypeNames && dataTypeNames.size > 0) {
-    namespace = stripCollidingNamespaceComponents(namespace, dataTypeNames);
+  // Strip the LAST namespace component if it collides with a type — same rule as
+  // the header decl and the call-site rewriter (penultimate-only), so decl/def/
+  // calls stay in one namespace. (Was: strip ALL colliding components, which
+  // moved intermediate-collision defs to unreachable sibling scopes.)
+  if (namespace) {
+    namespace = stripLastCollidingNamespaceComponent(namespace);
   }
 
   // Only emit namespace block if it's a valid C++ namespace (not a template instantiation)

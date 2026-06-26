@@ -53,7 +53,7 @@ import { generateImplementation, setQuestStructLayouts, type ImplGenContext } fr
 import { generateCMakeLists, generateTopLevelCMake, generateTargetCMake, generateUnsortedCMake } from './cmake.js';
 import { generateSourceMap } from './sourcemap.js';
 import { generateReadme } from './readme.js';
-import { organizeByNamespace, getFilePath, setModuleNames } from './namespace.js';
+import { organizeByNamespace, getFilePath, setModuleNames, setNamespaceCollisionTypes } from './namespace.js';
 import { generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setMultidimArrayGlobals } from './globals-header.js';
 import { isPlatformOrBuiltinType, generatePlatformHeader } from './platform-types.js';
 import { createOverrideRegistry } from '../overrides/index.js';
@@ -1252,6 +1252,9 @@ function generateFilesForFunctions(
       structUnionEnumNames.add(dt.name);
     }
   }
+  // Header decl + impl def + call-site rewriter must strip the SAME colliding
+  // namespace component; register the global type set they all consult.
+  setNamespaceCollisionTypes(structUnionEnumNames);
 
   // struct/union name → { fieldName → field's struct/union type name }, used to
   // resolve deref chains (`a->b->c`) so the headers of the INTERMEDIATE struct

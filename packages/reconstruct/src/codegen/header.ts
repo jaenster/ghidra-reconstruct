@@ -19,7 +19,7 @@ import type {
   AnalyzedDataSymbol,
 } from '../types.js';
 import type { MethodConversionRegistry } from '../methods/index.js';
-import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js';
+import { parseTemplateName, collapseConsecutiveDuplicates, stripLastCollidingNamespaceComponent } from './namespace.js';
 import { isGhidraGeneratedName, suggestBetterName } from '@ghidra-mcp/cpp-parser';
 import { isPlatformOrBuiltinType, isLibraryType, normalizeSignatureType, collapseFuncPtrTypedef, WINDOWS_STRUCTS } from './platform-types.js';
 import { generateExternDeclaration, isFuncDefTypedefName } from './globals-header.js';
@@ -348,21 +348,13 @@ export function generateHeader(
     namespace = collapseConsecutiveDuplicates(namespace);
   }
 
-  // Strip namespace components that collide with type names USED IN THIS FILE.
+  // Strip the LAST namespace component if it collides with a (global) type — the
+  // SAME rule the impl definition and the call-site rewriter use, so a function's
+  // decl, def, and calls all land in one namespace. (Was: strip components
+  // colliding with types used IN THIS FILE — which kept `D2Common::Item` here
+  // while the impl stripped it to `D2Common`, splitting decl and def.)
   if (namespace) {
-    const parts = namespace.split('::');
-    const localTypeNames = new Set<string>();
-    if (ownedTypes) for (const t of ownedTypes) localTypeNames.add(t);
-    for (const decl of forwardDecls) {
-      const m = decl.match(/^(?:struct|class|union)\s+(\w+);$/);
-      if (m) localTypeNames.add(m[1]);
-      const tm = decl.match(/^typedef\s+\w+\s+(?:\(\*)?(\w+)/);
-      if (tm) localTypeNames.add(tm[1]);
-    }
-    if (localTypeNames.size > 0) {
-      const filtered = parts.filter(p => !localTypeNames.has(p));
-      namespace = filtered.length > 0 ? filtered.join('::') : undefined;
-    }
+    namespace = stripLastCollidingNamespaceComponent(namespace);
   }
 
   // Only emit namespace block if it's a valid C++ namespace (not a template instantiation)
