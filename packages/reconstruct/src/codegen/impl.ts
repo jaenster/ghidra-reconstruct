@@ -23,7 +23,7 @@ import { transformGhidraCode, preprocessGhidraCode, isGhidraGeneratedName, sugge
 import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js';
 import { cleanFunctionComment } from './header.js';
 import { normalizeSignatureType, collapseFuncPtrTypedef } from './platform-types.js';
-import { generateStaticLocalsBlock, emitDataValue, inferArrayDeclaration, normalizeArrayDeclaration, isFuncDefTypedefName } from './globals-header.js';
+import { generateStaticLocalsBlock, emitDataValue, inferArrayDeclaration, normalizeArrayDeclaration, isFuncDefTypedefName, getKnownFuncDefTypedefs } from './globals-header.js';
 
 /** normalizeSignatureType + fn-ptr-typedef double-indirection collapse, for
  *  emitting function parameter and return types ("fpFoo *" → "fpFoo"). */
@@ -1590,6 +1590,11 @@ function transformDecompiledCode(
 
     if (varTypes && Object.keys(varTypes).length > 0) {
       perPluginOptions['underscore-slot-local'] = { varTypes };
+    }
+
+    const funcdefTypedefs = getKnownFuncDefTypedefs();
+    if (funcdefTypedefs.length > 0) {
+      perPluginOptions['funcdef-cast-collapse'] = { funcdefTypedefs };
     }
 
     if (enablePlugins.length > 0 || Object.keys(perPluginOptions).length > 0) {

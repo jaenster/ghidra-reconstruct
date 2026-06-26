@@ -831,6 +831,11 @@ export function setKnownFuncDefTypedefs(names: Iterable<string>): void {
   for (const n of names) knownFuncDefTypedefs.add(n);
 }
 
+/** The registered function-pointer typedef names (for the funcdef-cast-collapse plugin). */
+export function getKnownFuncDefTypedefs(): string[] {
+  return [...knownFuncDefTypedefs];
+}
+
 /**
  * Globals declared as MULTIDIMENSIONAL arrays (`T[N][M]…`), mapped to their
  * element base type. Taking the address of such a global (`&name`) yields
