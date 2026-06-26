@@ -50,6 +50,7 @@ import type {
   BreakStmt,
   ContinueStmt,
   NullStmt,
+  LabelStmt,
 
   // Expressions
   Expression,
@@ -568,6 +569,14 @@ export const Stmt = {
     return withDefaults({
       kind: NodeKind.NullStmt,
     }) as NullStmt;
+  },
+
+  label(name: string | Identifier, statement: Statement = Stmt.null_()): LabelStmt {
+    return withDefaults({
+      kind: NodeKind.LabelStmt,
+      label: typeof name === 'string' ? Expr.identifier(name) : name,
+      statement,
+    }) as LabelStmt;
   },
 
   block(statements: Statement[]): CompoundStmt {

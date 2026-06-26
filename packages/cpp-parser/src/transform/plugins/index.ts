@@ -463,6 +463,8 @@ import { declOrderFixPlugin } from './builtins/decl-order-fix.js';
 import { declScopeSinkPlugin } from './builtins/decl-scope-sink.js';
 import { phiNodeTernaryPlugin } from './builtins/phi-node-ternary.js';
 import { voidReturnCleanupPlugin } from './builtins/void-return-cleanup.js';
+import { undefinedGotoLabelPlugin } from './builtins/undefined-goto-label.js';
+export { undefinedGotoLabelPlugin } from './builtins/undefined-goto-label.js';
 export { getGotoCleanupStats, resetGotoCleanupStats } from './builtins/goto-cleanup/index.js';
 export type { GotoCleanupStats } from './builtins/goto-cleanup/index.js';
 import type { TransformPlugin } from './types.js';
@@ -512,6 +514,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   prngTransformPlugin,        // Pattern detection: PRNG (priority 80)
   prngTempCollapsePlugin,     // Cleanup: collapse PRNG temp variables (priority 85)
   voidReturnCleanupPlugin,    // Cleanup: trailing return; in void functions (priority 90)
+  undefinedGotoLabelPlugin,   // Control-flow: define dropped Ghidra goto targets (priority 95)
   memoryPatternsPlugin,       // Pattern detection (late)
 ];
 

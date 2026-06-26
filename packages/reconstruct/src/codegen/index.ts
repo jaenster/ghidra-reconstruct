@@ -1253,6 +1253,23 @@ function generateFilesForFunctions(
     }
   }
 
+  // struct/union name → { fieldName → field's struct/union type name }, used to
+  // resolve deref chains (`a->b->c`) so the headers of the INTERMEDIATE struct
+  // types get included. Struct headers only forward-declare pointer-field types,
+  // so a body that walks `pRoomEx->pLevel->pDrlg->pMemoryPool` needs D2DrlgStrc's
+  // full definition even though "D2DrlgStrc" never appears as a token → otherwise
+  // "invalid use of incomplete type". Field type names are stripped of */[]/const.
+  const structFieldTypes = new Map<string, Map<string, string>>();
+  for (const dt of dataTypes) {
+    if ((dt.kind !== 'STRUCTURE' && dt.kind !== 'UNION') || !('fields' in dt)) continue;
+    const fm = new Map<string, string>();
+    for (const f of (dt as import('../types.js').ExtractedStruct).fields) {
+      const base = f.dataType.replace(/\bconst\b/g, '').replace(/[*&]/g, '').replace(/\[[^\]]*\]/g, '').trim();
+      if (structUnionEnumNames.has(base)) fm.set(f.name, base);
+    }
+    if (fm.size > 0) structFieldTypes.set(dt.name, fm);
+  }
+
   // Pass func name → header map into context for func-ptr-literal include resolution
   if (context.functionAddressMap) {
     context.functionNameToHeader = funcNameToHeaderPath;
@@ -1428,6 +1445,41 @@ function generateFilesForFunctions(
           if (re.test(implContent)) {
             existingIncludes.add(ownerPath);
             newIncludes.push(ownerPath);
+          }
+        }
+      }
+
+      // Deref-chain closure: a body that walks `var->f1->f2->f3` accesses the
+      // INTERMEDIATE struct types (f1's type, f2's type, …) by value, but those
+      // type NAMES never appear as tokens — struct headers only forward-declare
+      // pointer-field types. Resolve each chain's types and include their headers,
+      // else "invalid use of incomplete type". Bounded by the chain depth itself.
+      {
+        const varType = new Map<string, string>();
+        const addVar = (name: string, dt: string) => {
+          const base = dt.replace(/\bconst\b/g, '').replace(/[*&]/g, '').replace(/\[[^\]]*\]/g, '').trim();
+          if (base && !varType.has(name)) varType.set(name, base);
+        };
+        for (const fn of unitFunctions) {
+          for (const p of fn.parameters ?? []) addVar(p.name, p.dataType);
+          for (const v of fn.localVariables ?? []) addVar(v.name, v.dataType);
+        }
+        // body-declared locals: `TYPE name;` / `TYPE* name = …`
+        for (const m of implContent.matchAll(/\b([A-Za-z_]\w*)\s*\*?\s*([A-Za-z_]\w*)\s*[=;]/g)) {
+          if (structFieldTypes.has(m[1]) || structUnionEnumNames.has(m[1])) addVar(m[2], m[1]);
+        }
+        for (const cm of implContent.matchAll(/\b([A-Za-z_]\w*)((?:\s*->\s*[A-Za-z_]\w*)+)/g)) {
+          let curType = varType.get(cm[1]);
+          if (!curType) continue;
+          for (const fm of cm[2].matchAll(/->\s*([A-Za-z_]\w*)/g)) {
+            const owner = typeOwnerMap.get(curType);
+            if (owner && !existingIncludes.has(owner) && owner !== headerPath) {
+              existingIncludes.add(owner);
+              newIncludes.push(owner);
+            }
+            const next = structFieldTypes.get(curType)?.get(fm[1]);
+            if (!next) break;
+            curType = next;
           }
         }
       }
