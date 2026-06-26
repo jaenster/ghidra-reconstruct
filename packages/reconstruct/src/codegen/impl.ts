@@ -201,6 +201,38 @@ function uniquifyDuplicateLabels(body: string): string {
 }
 
 /**
+ * Ghidra's control-flow recovery sometimes emits a `goto LAB_xxxx;` / `goto
+ * switchD_..._caseD_N;` whose target label is NEVER defined in the function — the
+ * label sits at an address in a block the decompiler dropped (often an
+ * unrecovered error/fault exit, e.g. `nLine = 0x63e; goto LAB_00677aa7;`). C++
+ * rejects this ("label used but not defined"). Define each such missing label as
+ * an empty statement at the very end of the body, so the goto jumps to
+ * function-end (≈ return) — a sound approximation for these dead-end exits and
+ * enough to compile. Only Ghidra-generated label names are touched.
+ */
+function defineUndefinedGotoLabels(body: string): string {
+  const isGhidraLabel = (n: string) => /^(LAB|switchD|caseD|joined|code|UNRECOVERED)_/.test(n);
+  // A label definition is `NAME:` at line start, whether standalone or followed by
+  // a statement on the same line (`LAB_x: return;`). Exclude `::` (scope) — and we
+  // only track Ghidra-style names, which never collide with case/default/ternary.
+  const labelDef = /^[ \t]*([A-Za-z_]\w*)\s*:(?!:)/gm;
+  const defined = new Set<string>();
+  let dm: RegExpExecArray | null;
+  while ((dm = labelDef.exec(body)) !== null) {
+    if (isGhidraLabel(dm[1])) defined.add(dm[1]);
+  }
+
+  const missing = new Set<string>();
+  for (const m of body.matchAll(/\bgoto\s+([A-Za-z_]\w*)\s*;/g)) {
+    if (isGhidraLabel(m[1]) && !defined.has(m[1])) missing.add(m[1]);
+  }
+  if (missing.size === 0) return body;
+
+  const stubs = [...missing].map(n => `    ${n}: ;  // synthesized: Ghidra dropped this goto target`).join('\n');
+  return `${body}\n${stubs}`;
+}
+
+/**
  * Ghidra emits a declaration-with-initializer between `switch (x) {` and the
  * first `case` — unreachable code that the case labels jump over, so C++ rejects
  * it ("jump to case label crosses initialization of 'T x'"). Hoist such
@@ -1142,6 +1174,7 @@ export function generateFunctionImplementation(
   body = body.replace(/&\s*(\w+_ARRAY_[0-9a-fA-F]+)\b(?!\s*\[)/g, '$1');
 
   body = uniquifyDuplicateLabels(body);
+  body = defineUndefinedGotoLabels(body);
   body = hoistSwitchPreCaseDecls(body);
   body = dedupSwitchCases(body);
 
