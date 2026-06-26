@@ -136,27 +136,12 @@ function declareUnderscoreSlotLocals(
     );
   }
 
-  // Collect `_<base>` identifiers actually referenced in the body.
-  const synth = new Map<string, string>(); // name → type
-  const useRe = /\b(_[A-Za-z_]\w*)\b/g;
-  let um: RegExpExecArray | null;
-  while ((um = useRe.exec(body)) !== null) {
-    const name = um[1];
-    if (declared.has(name) || synth.has(name)) continue;
-    const base = name.slice(1); // strip ONE leading underscore
-    // Skip globals/labels: _DAT_*, _LAB_*, and bases that aren't known params/locals.
-    if (base.startsWith('DAT_') || base.startsWith('LAB_')) continue;
-    if (!declared.has(base)) continue;
-    const baseType = typeByName.get(base) ?? 'int';
-    synth.set(name, baseType);
-  }
-
-  if (synth.size === 0) return body;
-
-  const decls = [...synth.entries()]
-    .map(([name, type]) => `    ${type} ${name};`)
-    .join('\n');
-  return `${decls}\n${body}`;
+  // NOTE: synthesizing declarations for `_<base>` storage-slot locals is now done
+  // structurally by the `underscore-slot-local` AST plugin (cpp-parser), where
+  // `return _bResult;` is unambiguously a ReturnStmt — the text-level pass here
+  // used to misparse it as a declaration. Only the CRT/global `_`-alias rewrites
+  // above remain text-level.
+  return body;
 }
 
 /**
@@ -1016,7 +1001,15 @@ export function generateFunctionImplementation(
   } else {
     // Start with decompiled code or placeholder
     if (func.decompiled) {
-      const transformed = transformDecompiledCode(func.decompiled, options, func.name, func.address, context);
+      const slotVarTypes: Record<string, string> = {};
+      for (const p of func.parameters ?? []) {
+        const n = cleanParamName(p.name);
+        if (n && p.dataType) slotVarTypes[n] = p.dataType;
+      }
+      for (const v of func.localVariables ?? []) {
+        if (v.name && v.dataType && !(v.name in slotVarTypes)) slotVarTypes[v.name] = v.dataType;
+      }
+      const transformed = transformDecompiledCode(func.decompiled, options, func.name, func.address, context, slotVarTypes);
       body = func.name ? rewriteQuestUnionMembers(transformed.code, func.name, context?.sourceFileName, [...(func.parameters ?? []), ...(func.localVariables ?? [])]) : transformed.code;
       bodyIdentifiers = transformed.identifiers;
       if (transformed.preamble) {
@@ -1518,7 +1511,11 @@ function transformDecompiledCode(
   options: ReconstructOptions,
   funcName?: string,
   funcAddress?: string,
-  context?: ImplGenContext
+  context?: ImplGenContext,
+  // name → Ghidra type string for this function's params + locals. The transform
+  // wraps the body as `void dummy() {...}` (no signature), so the underscore-slot
+  // plugin can't see param types from the AST — pass them in.
+  varTypes?: Record<string, string>,
 ): TransformDecompiledResult {
   try {
     // Extract just the function body (remove signature and braces)
@@ -1589,6 +1586,10 @@ function transformDecompiledCode(
 
     if (context?.bitfieldCatalog && context.bitfieldCatalog.size > 0) {
       perPluginOptions['bitfield-access'] = { bitfieldCatalog: context.bitfieldCatalog };
+    }
+
+    if (varTypes && Object.keys(varTypes).length > 0) {
+      perPluginOptions['underscore-slot-local'] = { varTypes };
     }
 
     if (enablePlugins.length > 0 || Object.keys(perPluginOptions).length > 0) {

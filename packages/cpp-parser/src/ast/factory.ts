@@ -51,6 +51,7 @@ import type {
   ContinueStmt,
   NullStmt,
   LabelStmt,
+  DeclStmt,
 
   // Expressions
   Expression,
@@ -577,6 +578,13 @@ export const Stmt = {
       label: typeof name === 'string' ? Expr.identifier(name) : name,
       statement,
     }) as LabelStmt;
+  },
+
+  declStmt(declarations: Declaration[]): DeclStmt {
+    return withDefaults({
+      kind: NodeKind.DeclStmt,
+      declarations,
+    }) as DeclStmt;
   },
 
   block(statements: Statement[]): CompoundStmt {

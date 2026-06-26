@@ -465,6 +465,8 @@ import { phiNodeTernaryPlugin } from './builtins/phi-node-ternary.js';
 import { voidReturnCleanupPlugin } from './builtins/void-return-cleanup.js';
 import { undefinedGotoLabelPlugin } from './builtins/undefined-goto-label.js';
 export { undefinedGotoLabelPlugin } from './builtins/undefined-goto-label.js';
+import { underscoreSlotLocalPlugin } from './builtins/underscore-slot-local.js';
+export { underscoreSlotLocalPlugin } from './builtins/underscore-slot-local.js';
 export { getGotoCleanupStats, resetGotoCleanupStats } from './builtins/goto-cleanup/index.js';
 export type { GotoCleanupStats } from './builtins/goto-cleanup/index.js';
 import type { TransformPlugin } from './types.js';
@@ -515,6 +517,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   prngTempCollapsePlugin,     // Cleanup: collapse PRNG temp variables (priority 85)
   voidReturnCleanupPlugin,    // Cleanup: trailing return; in void functions (priority 90)
   undefinedGotoLabelPlugin,   // Control-flow: define dropped Ghidra goto targets (priority 95)
+  underscoreSlotLocalPlugin,  // Declaration: synthesize Ghidra `_<base>` slot-locals (priority 95)
   memoryPatternsPlugin,       // Pattern detection (late)
 ];
 
