@@ -758,6 +758,37 @@ export class CppEmitter {
     return { elementType: current, arraySizes };
   }
 
+  /**
+   * Emit a pointer-to-array declarator `T (*name)[N]…` when the type is a pointer
+   * (possibly multi-level) whose pointee is an array. Returns false (emit nothing)
+   * for any other type, so the caller falls back to the normal declarator path.
+   */
+  /** True when a type is a (multi-level) pointer whose pointee is an array. */
+  private isPointerToArray(type: TypeNode): boolean {
+    let cur: TypeNode = type;
+    let levels = 0;
+    while (cur.kind === NodeKind.PointerType) { levels++; cur = (cur as PointerType).pointee; }
+    return levels > 0 && cur.kind === NodeKind.ArrayType;
+  }
+
+  private emitPointerToArrayDecl(type: TypeNode, name: import('../ast/nodes.js').Identifier): boolean {
+    let levels = 0;
+    let cur: TypeNode = type;
+    while (cur.kind === NodeKind.PointerType) {
+      levels++;
+      cur = (cur as PointerType).pointee;
+    }
+    if (levels === 0 || cur.kind !== NodeKind.ArrayType) return false;
+    const { elementType, arraySizes } = this.unwrapArrayType(cur);
+    this.emitTypeNode(elementType);
+    this.write(' (');
+    this.write('*'.repeat(levels));
+    this.emitIdentifier(name);
+    this.write(')');
+    this.emitArrayDimensions(arraySizes);
+    return true;
+  }
+
   /** Emit array dimension brackets: [40], [3][4], etc. */
   private emitArrayDimensions(sizes: (Expression | null)[]): void {
     for (const size of sizes) {
@@ -988,12 +1019,18 @@ export class CppEmitter {
       this.write(node.specifiers.join(' ') + ' ');
     }
 
-    // Unwrap array type — C/C++ requires brackets after the declarator name
-    const { elementType, arraySizes } = this.unwrapArrayType(node.type);
-    this.emitTypeNode(elementType);
-    this.write(' ');
-    this.emitIdentifier(node.name);
-    this.emitArrayDimensions(arraySizes);
+    // Pointer-to-array (`T (*name)[N]`): a pointer whose pointee is an array needs
+    // the C declarator syntax, NOT `T[N]* name` (invalid C++). Without this,
+    // Ghidra's `D2UnitStrc*(*)[5]` locals emit as `D2UnitStrc*[5]* name` and the
+    // declaration — plus every use of the name — fails to compile.
+    if (!this.emitPointerToArrayDecl(node.type, node.name)) {
+      // Unwrap array type — C/C++ requires brackets after the declarator name
+      const { elementType, arraySizes } = this.unwrapArrayType(node.type);
+      this.emitTypeNode(elementType);
+      this.write(' ');
+      this.emitIdentifier(node.name);
+      this.emitArrayDimensions(arraySizes);
+    }
 
     if (node.initializer) {
       if (node.initializer.kind === NodeKind.InitListExpr) {
@@ -1714,6 +1751,22 @@ export class CppEmitter {
       if (decl.kind === NodeKind.VariableDecl) {
         // For DeclStmt, emit inline (without indent and trailing semicolon)
         const v = decl as VariableDecl;
+        // Pointer-to-array (`T (*name)[N]`) needs the C declarator syntax. Handle
+        // the (common) single-declarator case here so body locals like
+        // `D2UnitStrc*(*)[5] ppUnitTable` don't emit as invalid `T[N]* name`.
+        if (i === 0 && node.declarations.length === 1 && this.isPointerToArray(v.type)) {
+          if (v.specifiers.length > 0) this.write(v.specifiers.join(' ') + ' ');
+          this.emitPointerToArrayDecl(v.type, v.name);
+          if (v.initializer) {
+            if ((v.initializer as ASTNode).kind === NodeKind.InitListExpr) {
+              this.emitInitListExpr(v.initializer as InitListExpr);
+            } else {
+              this.write(this.style.spaceAroundOperators ? ' = ' : '=');
+              this.emitNode(v.initializer);
+            }
+          }
+          continue;
+        }
         // Unwrap array type — C/C++ requires brackets after the declarator name
         const { elementType, arraySizes } = this.unwrapArrayType(v.type);
         if (i === 0) {
