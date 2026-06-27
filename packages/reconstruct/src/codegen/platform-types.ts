@@ -437,6 +437,8 @@ export function generatePlatformHeader(): string {
     lines.push(`#    undef ${m}`);
     lines.push(`#  endif`);
   }
+  // winmm: not pulled in by <windows.h>; D2 uses it for frame timing
+  lines.push('extern "C" DWORD timeGetTime(void);');
   lines.push('#else');
   lines.push('');
 
