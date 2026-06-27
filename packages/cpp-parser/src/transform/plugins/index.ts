@@ -467,6 +467,8 @@ import { undefinedGotoLabelPlugin } from './builtins/undefined-goto-label.js';
 export { undefinedGotoLabelPlugin } from './builtins/undefined-goto-label.js';
 import { underscoreSlotLocalPlugin } from './builtins/underscore-slot-local.js';
 export { underscoreSlotLocalPlugin } from './builtins/underscore-slot-local.js';
+import { phantomLocalSynthesisPlugin } from './builtins/phantom-local-synthesis.js';
+export { phantomLocalSynthesisPlugin } from './builtins/phantom-local-synthesis.js';
 import { funcdefCastCollapsePlugin } from './builtins/funcdef-cast-collapse.js';
 export { funcdefCastCollapsePlugin } from './builtins/funcdef-cast-collapse.js';
 import { charArrayDwordAssignPlugin } from './builtins/char-array-dword-assign.js';
@@ -522,6 +524,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   voidReturnCleanupPlugin,    // Cleanup: trailing return; in void functions (priority 90)
   undefinedGotoLabelPlugin,   // Control-flow: define dropped Ghidra goto targets (priority 95)
   underscoreSlotLocalPlugin,  // Declaration: synthesize Ghidra `_<base>` slot-locals (priority 95)
+  phantomLocalSynthesisPlugin, // Declaration: synthesize Ghidra auto-name phantoms uVar3/unique0x… (priority 601)
   funcdefCastCollapsePlugin,  // Type: collapse (Funcdef*) casts to (Funcdef) (priority 70)
   charArrayDwordAssignPlugin, // Type: charArray = scalar -> *(uint32_t*)charArray = scalar (priority 75)
   memoryPatternsPlugin,       // Pattern detection (late)

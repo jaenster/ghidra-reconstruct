@@ -125,7 +125,7 @@ export function shouldExcludeFunction(
   // NET_*) are referenced by their callers — keeping them lets the header DECLARE
   // them (the impl + decompile paths skip thunk bodies, so they're declaration-only)
   // so cross-module callers compile instead of erroring "not declared in this scope".
-  if (func.isThunk && /^(thunk|_|Ordinal_|@|std::|`|\?\?|FUN_)/i.test(func.name)) {
+  if (func.isThunk && /^(_|Ordinal_|@|std::|`|\?\?|FUN_)/i.test(func.name)) {
     return true;
   }
 
