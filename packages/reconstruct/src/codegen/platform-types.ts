@@ -443,6 +443,12 @@ export function generatePlatformHeader(): string {
   // i686). Add int32_t* overloads forwarding to the real LONG* intrinsics.
   lines.push('static inline LONG InterlockedIncrement(int32_t volatile* p) { return InterlockedIncrement((LONG volatile*)p); }');
   lines.push('static inline LONG InterlockedDecrement(int32_t volatile* p) { return InterlockedDecrement((LONG volatile*)p); }');
+  // CriticalSection fns take LPCRITICAL_SECTION; D2 calls them with uint32_t*
+  // (Ghidra typed the lock as a generic dword). Add forwarding overloads.
+  lines.push('static inline void EnterCriticalSection(uint32_t* p) { EnterCriticalSection((LPCRITICAL_SECTION)p); }');
+  lines.push('static inline void LeaveCriticalSection(uint32_t* p) { LeaveCriticalSection((LPCRITICAL_SECTION)p); }');
+  lines.push('static inline void InitializeCriticalSection(uint32_t* p) { InitializeCriticalSection((LPCRITICAL_SECTION)p); }');
+  lines.push('static inline void DeleteCriticalSection(uint32_t* p) { DeleteCriticalSection((LPCRITICAL_SECTION)p); }');
   lines.push('#else');
   lines.push('');
 
