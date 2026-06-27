@@ -439,6 +439,10 @@ export function generatePlatformHeader(): string {
   }
   // winmm: not pulled in by <windows.h>; D2 uses it for frame timing
   lines.push('extern "C" DWORD timeGetTime(void);');
+  // Win32 Interlocked* take LONG*; D2 calls them with int32_t* (a distinct type on
+  // i686). Add int32_t* overloads forwarding to the real LONG* intrinsics.
+  lines.push('static inline LONG InterlockedIncrement(int32_t volatile* p) { return InterlockedIncrement((LONG volatile*)p); }');
+  lines.push('static inline LONG InterlockedDecrement(int32_t volatile* p) { return InterlockedDecrement((LONG volatile*)p); }');
   lines.push('#else');
   lines.push('');
 
