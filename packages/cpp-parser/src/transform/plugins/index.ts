@@ -469,6 +469,10 @@ import { underscoreSlotLocalPlugin } from './builtins/underscore-slot-local.js';
 export { underscoreSlotLocalPlugin } from './builtins/underscore-slot-local.js';
 import { phantomLocalSynthesisPlugin } from './builtins/phantom-local-synthesis.js';
 export { phantomLocalSynthesisPlugin } from './builtins/phantom-local-synthesis.js';
+import { switchPointerNormalizePlugin } from './builtins/switch-pointer-normalize.js';
+export { switchPointerNormalizePlugin } from './builtins/switch-pointer-normalize.js';
+import { labelMacroCollisionPlugin } from './builtins/label-macro-collision.js';
+export { labelMacroCollisionPlugin } from './builtins/label-macro-collision.js';
 import { funcdefCastCollapsePlugin } from './builtins/funcdef-cast-collapse.js';
 export { funcdefCastCollapsePlugin } from './builtins/funcdef-cast-collapse.js';
 import { charArrayDwordAssignPlugin } from './builtins/char-array-dword-assign.js';
@@ -525,6 +529,8 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   undefinedGotoLabelPlugin,   // Control-flow: define dropped Ghidra goto targets (priority 95)
   underscoreSlotLocalPlugin,  // Declaration: synthesize Ghidra `_<base>` slot-locals (priority 95)
   phantomLocalSynthesisPlugin, // Declaration: synthesize Ghidra auto-name phantoms uVar3/unique0x… (priority 601)
+  switchPointerNormalizePlugin, // Cleanup: strip pointer casts from pointer-typed switch condition + case labels (priority 40)
+  labelMacroCollisionPlugin, // Cleanup: rename goto labels colliding with Win32/CRT macros — ERROR/DELETE/… (priority 41)
   funcdefCastCollapsePlugin,  // Type: collapse (Funcdef*) casts to (Funcdef) (priority 70)
   charArrayDwordAssignPlugin, // Type: charArray = scalar -> *(uint32_t*)charArray = scalar (priority 75)
   memoryPatternsPlugin,       // Pattern detection (late)
