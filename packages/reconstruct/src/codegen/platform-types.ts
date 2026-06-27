@@ -802,7 +802,9 @@ export function generatePlatformHeader(): string {
   lines.push('static inline int64_t __allshr(int64_t a, int n) { return a >> n; }');
   lines.push('static inline int64_t __allshl(int64_t a, int n) { return a << n; }');
   lines.push('static inline uint64_t __aulldiv(uint64_t a, uint64_t b) { return a / b; }');
+  lines.push('static inline uint64_t __aulldiv(uint32_t lo1, uint32_t hi1, uint32_t lo2, uint32_t hi2) { return (lo1 | ((uint64_t)hi1 << 32)) / (lo2 | ((uint64_t)hi2 << 32)); }');
   lines.push('static inline uint64_t __aullrem(uint64_t a, uint64_t b) { return a % b; }');
+  lines.push('static inline uint64_t __aullrem(uint32_t lo1, uint32_t hi1, uint32_t lo2, uint32_t hi2) { return (lo1 | ((uint64_t)hi1 << 32)) % (lo2 | ((uint64_t)hi2 << 32)); }');
   lines.push('static inline uint64_t __aullshr(uint64_t a, unsigned int n) { return a >> n; }');
   lines.push('');
 
