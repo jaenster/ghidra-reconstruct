@@ -15,7 +15,7 @@
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
-import type { ASTNode, CStyleCastExpr, PointerType, TypedefType, Identifier } from '../../../ast/nodes.js';
+import type { ASTNode, CStyleCastExpr, PointerType, TypedefType, Identifier, VariableDecl } from '../../../ast/nodes.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 
@@ -29,6 +29,20 @@ function createFuncdefCastCollapseTransformer(options: FuncdefCastCollapseOption
   if (funcdefTypedefs.size === 0) return (n: ASTNode) => n; // nothing to do
   return createTransformer({
     visitNode(node) {
+      // A variable declared `Funcdef* var` has one indirection too many — the
+      // funcdef typedef already IS the pointer, so it renders `void(**)(…)` and
+      // fails to take a `void(*)(…)` value. Strip the redundant `*`.
+      if (node.kind === NodeKind.VariableDecl) {
+        const vd = node as VariableDecl;
+        if (vd.type.kind === NodeKind.PointerType) {
+          const pointee = (vd.type as PointerType).pointee;
+          if (pointee.kind === NodeKind.TypedefType
+              && funcdefTypedefs.has(((pointee as TypedefType).name as Identifier).name)) {
+            return updateNode(vd, { type: pointee } as Partial<VariableDecl>);
+          }
+        }
+        return undefined;
+      }
       if (node.kind !== NodeKind.CStyleCastExpr) return undefined;
       const cast = node as CStyleCastExpr;
       if (cast.type.kind !== NodeKind.PointerType) return undefined;
