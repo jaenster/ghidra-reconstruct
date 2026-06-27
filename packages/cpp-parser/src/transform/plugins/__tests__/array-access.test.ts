@@ -40,11 +40,30 @@ describe('arrayAccessPlugin', () => {
   });
 
   describe('cast pointer arithmetic', () => {
-    it('should transform *(int*)(param_1 + i) to subscript', () => {
-      const code = `void f(void *param_1, int i) { int x = *(int *)(param_1 + i); }`;
+    // *(T*)(base + N) is a BYTE offset in Ghidra output. Rewriting it to
+    // ((T*)base)[N] re-scales N by sizeof(T) and reads the wrong address, so the
+    // faithful default is to PRESERVE the deref.
+    it('should NOT subscript *(int*)(param_1 + N) by default (byte-offset faithful)', () => {
+      const code = `void f(void *param_1) { int x = *(int *)(param_1 + 0x14); }`;
       const result = transform(code);
-      // Should have subscript notation
-      assert.ok(result.includes('[i]'), `Expected [i] in: ${result}`);
+      assert.ok(
+        !result.includes('[0x14]') && !result.includes('[20]'),
+        `byte offset must not become an element subscript: ${result}`,
+      );
+      assert.ok(
+        result.includes('*(int *)(param_1 + 0x14)') || result.includes('+ 0x14'),
+        `Expected the byte-offset deref to be preserved in: ${result}`,
+      );
+    });
+
+    it('should subscript only when explicitly opted in (element-scaled)', () => {
+      const transformerOptIn = arrayAccessPlugin.createTransformer({
+        castPointerArithmetic: true,
+      });
+      const code = `void f(void *param_1, int i) { int x = *(int *)(param_1 + i); }`;
+      const ast = parse(code);
+      const result = emit(transformerOptIn(ast) as AnyNode).trim();
+      assert.ok(result.includes('[i]'), `Expected [i] when opted in, in: ${result}`);
     });
   });
 

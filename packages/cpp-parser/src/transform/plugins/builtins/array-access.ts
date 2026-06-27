@@ -152,6 +152,12 @@ function createPointerToSubscriptTransformer(): Transformer {
 /**
  * Transform *(cast)(ptr + i) to ((cast)ptr)[i]
  * Handles patterns like: *(int *)(param_1 + i)
+ *
+ * UNSOUND — kept only behind an explicit opt-in. In Ghidra output the form
+ * `*(T*)(base + N)` is a BYTE offset (N is in bytes, computed before the cast),
+ * so rewriting it to `((T*)base)[N]` re-scales N by sizeof(T) and reads the
+ * WRONG address. The faithful emission is to leave it as a deref, so this is
+ * OFF by default (see castPointerArithmetic).
  */
 function createCastPointerToSubscriptTransformer(): Transformer {
   return createKindTransformer(NodeKind.UnaryExpr, (node) => {
@@ -239,7 +245,8 @@ export interface ArrayAccessOptions extends PluginOptions {
   /** Transform *(ptr + i) to ptr[i] (default: true) */
   pointerArithmetic?: boolean;
 
-  /** Transform *(cast)(ptr + i) to ((cast)ptr)[i] (default: true) */
+  /** Transform *(cast)(ptr + i) to ((cast)ptr)[i] (default: false — UNSOUND,
+   * re-scales byte offsets; only enable when the offset is element-scaled) */
   castPointerArithmetic?: boolean;
 
   /** Transform ptr[0] to *ptr (default: false) */
@@ -271,8 +278,10 @@ export const arrayAccessPlugin: TransformPlugin = {
       transforms.push(createPointerToSubscriptTransformer());
     }
 
-    // Cast pointer arithmetic is on by default
-    if (opts.castPointerArithmetic !== false) {
+    // Cast pointer arithmetic is OFF by default — it re-scales byte offsets
+    // (`*(T*)(base+N)` -> `((T*)base)[N]`) and corrupts the address. Opt in only
+    // when the offset is known to be element-scaled.
+    if (opts.castPointerArithmetic === true) {
       transforms.push(createCastPointerToSubscriptTransformer());
     }
 

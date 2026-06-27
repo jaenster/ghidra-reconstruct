@@ -292,6 +292,42 @@ describe('generateImplementation with method conversions', () => {
     assert.ok(!impl.includes('D2DrlgStrc* pDrlg'), `Should not have pDrlg param in:\n${impl}`);
   });
 
+  it('C mode (format:c) emits FREE functions even when a conversion is configured', () => {
+    const func = makeFunc('Init', '0x00661000', [
+      makeParam('pDrlg', 'D2DrlgStrc*', 0),
+      makeParam('nAct', 'int', 1),
+    ], 'void Init(D2DrlgStrc* pDrlg, int nAct) {\n    pDrlg->nAct = nAct;\n}');
+    func.parentClass = 'D2DrlgStrc';
+
+    const cls: DetectedClass = {
+      name: 'D2DrlgStrc',
+      namespace: '',
+      methods: [{
+        name: 'Init', address: '0x00661000', isVirtual: false, isStatic: false,
+        isConstructor: false, isDestructor: false, visibility: 'public',
+      }],
+      fields: [],
+      baseClasses: [],
+    };
+    const registry = new MethodConversionRegistry([
+      { address: '0x00661000', className: 'D2DrlgStrc', methodName: 'Init' },
+    ]);
+    registry.indexByName('0x00661000', 'DRLG_Init', [
+      makeParam('pDrlg', 'D2DrlgStrc*', 0),
+      makeParam('nAct', 'int', 1),
+    ]);
+    const context: ImplGenContext = { methodConversions: registry };
+
+    const cOptions: ReconstructOptions = { ...defaultOptions, format: 'c' };
+    const impl = generateImplementation('D2DrlgStrc', [func], cls, 'D2DrlgStrc.h', cOptions, context);
+
+    // C mode: a free function with the receiver kept — never a thiscall member,
+    // so call sites (also free in C mode) link against it.
+    assert.ok(!impl.includes('D2DrlgStrc::Init'), `C mode must not emit a member def:\n${impl}`);
+    assert.ok(impl.includes('pDrlg'), `C mode must keep the explicit receiver param:\n${impl}`);
+    assert.ok(impl.includes('pDrlg->nAct'), `C mode must keep the free-function body (no this->):\n${impl}`);
+  });
+
   it('should rewrite body: pDrlg → this inside converted method', () => {
     const func = makeFunc('Init', '0x00661000', [
       makeParam('pDrlg', 'D2DrlgStrc*', 0),

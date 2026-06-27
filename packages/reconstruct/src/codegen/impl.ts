@@ -1071,8 +1071,13 @@ export function generateFunctionImplementation(
     }
   }
 
-  // Generate function signature
-  const isMethod = classInfo && classInfo.methods.some(m => m.address === func.address);
+  // Generate function signature.
+  // In C mode every function is a free function (with its receiver as an
+  // explicit first param) — emitting a `Class::method` definition there would
+  // mangle as a thiscall member and fail to link against the free-function
+  // call sites (which C mode also keeps free). Keep both sides consistent.
+  const isMethod = options.format !== 'c'
+    && classInfo && classInfo.methods.some(m => m.address === func.address);
 
   if (isMethod) {
     // Method implementation with class prefix
@@ -1578,7 +1583,11 @@ function transformDecompiledCode(
     const enablePlugins: string[] = [];
     const perPluginOptions: Record<string, unknown> = {};
 
-    if ((mappings && Object.keys(mappings).length > 0) || currentFunction) {
+    // C mode keeps call sites as free functions (receiver passed explicitly), so
+    // method-call-rewrite must stay OFF — otherwise calls mangle as thiscall
+    // members and won't link against the free definitions.
+    if (options.format !== 'c'
+        && ((mappings && Object.keys(mappings).length > 0) || currentFunction)) {
       enablePlugins.push('method-call-rewrite');
       perPluginOptions['method-call-rewrite'] = { methodMappings: mappings ?? {}, currentFunction };
     }
