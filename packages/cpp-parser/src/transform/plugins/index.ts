@@ -475,6 +475,8 @@ import { labelMacroCollisionPlugin } from './builtins/label-macro-collision.js';
 export { labelMacroCollisionPlugin } from './builtins/label-macro-collision.js';
 import { funcdefCastCollapsePlugin } from './builtins/funcdef-cast-collapse.js';
 export { funcdefCastCollapsePlugin } from './builtins/funcdef-cast-collapse.js';
+import { pointerAssignCastPlugin } from './builtins/pointer-assign-cast.js';
+export { pointerAssignCastPlugin } from './builtins/pointer-assign-cast.js';
 import { charArrayDwordAssignPlugin } from './builtins/char-array-dword-assign.js';
 export { charArrayDwordAssignPlugin } from './builtins/char-array-dword-assign.js';
 export { getGotoCleanupStats, resetGotoCleanupStats } from './builtins/goto-cleanup/index.js';
@@ -532,6 +534,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   switchPointerNormalizePlugin, // Cleanup: strip pointer casts from pointer-typed switch condition + case labels (priority 40)
   labelMacroCollisionPlugin, // Cleanup: rename goto labels colliding with Win32/CRT macros — ERROR/DELETE/… (priority 41)
   funcdefCastCollapsePlugin,  // Type: collapse (Funcdef*) casts to (Funcdef) (priority 70)
+  pointerAssignCastPlugin,    // Type: insert reinterpret cast on pointer-to-pointer assignments (priority 600)
   charArrayDwordAssignPlugin, // Type: charArray = scalar -> *(uint32_t*)charArray = scalar (priority 75)
   memoryPatternsPlugin,       // Pattern detection (late)
 ];
