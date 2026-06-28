@@ -22,6 +22,7 @@ import type {
   PointerType,
   TypeNode,
   BuiltinType,
+  TypedefType,
 } from '../../../ast/nodes.js';
 import {
   createTransformer,
@@ -138,6 +139,25 @@ function getTypeSize(type: TypeNode): number | null {
   return null;
 }
 
+/** Scalar / Ghidra-primitive typedef names (a pointer to one has no members). */
+const SCALAR_TYPEDEF_RE =
+  /^(u?int(8|16|32|64)?(_t)?|s?byte|s?word|s?dword|s?qword|undefined[1-8]?|bool[18]?|float\d*|double\d*|u?char|u?short|u?long|u?longlong|wchar(_t)?|code|void|size_t|ssize_t|ptrdiff_t|u?intptr_t)$/i;
+
+/**
+ * Is this pointee a scalar/enum (so `((T*)x)->field_N` cannot compile)?
+ * BuiltinType (int/char/short/…) and scalar/enum typedefs (uint16_t, byte,
+ * eD2Skills) yes; a struct/union (ElaboratedType, or a struct typedef) no.
+ */
+function isScalarPointee(t: TypeNode): boolean {
+  if (t.kind === NodeKind.BuiltinType) return true;
+  if (t.kind === NodeKind.TypedefType) {
+    const nm = (t as TypedefType).name as { name?: string };
+    const n = typeof nm?.name === 'string' ? nm.name : '';
+    return SCALAR_TYPEDEF_RE.test(n) || /^e[A-Z]/.test(n);
+  }
+  return false;
+}
+
 /**
  * Generate a field name from offset
  */
@@ -217,25 +237,31 @@ function createStructFieldTransformer(layouts?: Map<string, StructLayout>): Tran
     // Don't transform offset 0 (that's just a cast)
     if (offsetValue === 0) return undefined;
 
-    // Don't re-transform SUBPIECE output. The subpiece plugin rewrites Ghidra's
-    // `x._N_M_` into `*(<T> *)((char *)&x + N)` — a valid byte-range access of a
-    // scalar local's storage. That inner expression looks like `*(T*)(base + off)`
-    // with base = `(char *)&x`, so this transform would re-match it and emit
-    // `((char *)&x)->field_N`, which is invalid (char has no members) and exactly
-    // the cast-hell we see. Skip when the base is the address of something cast to
-    // char* — that is never a struct-pointer deref, and the raw form already compiles.
+    // `castBase->field_N` compiles only when castBase is a pointer to a struct/
+    // union. castBase's pointer type is the base's OWN cast (when base is already
+    // a cast) or the deref's `cast.type` (when we wrap a bare base). Skip when:
+    //   - the base is raw pointer arithmetic `(int)p + n` (BinaryExpr) — a
+    //     computed address, never a struct lvalue; or
+    //   - the effective pointer points to a scalar/enum (`((int *)x)->f`,
+    //     `((uint16_t *)x)->f`, `((char *)((int)p+n))->str_c` never compile); or
+    //   - the effective "pointer" is not a pointer at all (`(int)p` base →
+    //     "base operand is not a pointer").
+    // The faithful `*(T*)(base + off)` deref already compiles and is what the
+    // decompiler meant. A genuine struct base (Identifier/MemberExpr cast to a
+    // struct pointer) is preserved as `ptr->field_N`. (Subsumes the old SUBPIECE
+    // `(char *)&x` guard.)
     const baseUnwrapped = unwrapParens(base);
-    if (baseUnwrapped.kind === NodeKind.CStyleCastExpr) {
-      const bc = baseUnwrapped as CStyleCastExpr;
-      const pointeeIsChar =
-        bc.type.kind === NodeKind.PointerType &&
-        (bc.type as PointerType).pointee.kind === NodeKind.BuiltinType &&
-        ((bc.type as PointerType).pointee as BuiltinType).name.toLowerCase() === 'char';
-      const inner = unwrapParens(bc.expression);
-      const innerIsAddressOf =
-        inner.kind === NodeKind.UnaryExpr && (inner as UnaryExpr).operator === '&';
-      if (pointeeIsChar && innerIsAddressOf) return undefined;
-    }
+    if (baseUnwrapped.kind === NodeKind.BinaryExpr) return undefined;
+    const effectiveType = baseUnwrapped.kind === NodeKind.CStyleCastExpr
+      ? (baseUnwrapped as CStyleCastExpr).type
+      : cast.type;
+    if (effectiveType.kind !== NodeKind.PointerType) return undefined;
+    const effPointee = (effectiveType as PointerType).pointee;
+    // A pointer-to-pointer (`(T **)x`) memberized gives `((T **)x)->field`, whose
+    // `->` yields `T *` — still a pointer, so `.field_N` on it is "request for
+    // member … in pointer type (maybe you meant ->)". Leave the faithful deref.
+    if (effPointee.kind === NodeKind.PointerType) return undefined;
+    if (isScalarPointee(effPointee)) return undefined;
 
     // Determine field name
     let fieldName: string;

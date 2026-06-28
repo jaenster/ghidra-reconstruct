@@ -2206,7 +2206,12 @@ export class CppEmitter {
   }
 
   private emitPostfixExpr(node: PostfixExpr): void {
-    this.emitNode(node.operand);
+    // Parenthesize a lower-precedence operand so `++`/`--` binds to it, not to a
+    // sub-expression: a deref operand `*(short *)(p)` (prec 3) must emit
+    // `(*(short *)(p))++`, else `*(short *)(p)++` increments the cast (an rvalue)
+    // → "lvalue required as increment operand".
+    const precedence = OPERATOR_PRECEDENCE[node.operator + '_post'] ?? 2;
+    this.emitExprWithPrecedence(node.operand, precedence);
     this.write(node.operator);
   }
 

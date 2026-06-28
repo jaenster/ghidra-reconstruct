@@ -125,6 +125,14 @@ describe('CppEmitter', () => {
       assert.strictEqual(emit(Expr.postfix(i, '++')), 'i++');
       assert.strictEqual(emit(Expr.postfix(i, '--')), 'i--');
     });
+
+    it('parenthesizes a deref operand of postfix ++/--', () => {
+      // (*(short *)p)++  — not  *(short *)p++  (which increments the cast/rvalue
+      // → "lvalue required as increment operand").
+      const deref = Expr.unary('*', Expr.cast(Type.pointer(Type.builtin('short')), Expr.identifier('p')));
+      assert.strictEqual(emit(Expr.postfix(deref, '++')), '(*(short*)p)++');
+      assert.strictEqual(emit(Expr.postfix(deref, '--')), '(*(short*)p)--');
+    });
   });
 
   describe('Member Access', () => {
