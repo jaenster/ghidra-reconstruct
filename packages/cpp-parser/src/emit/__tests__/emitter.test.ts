@@ -892,4 +892,24 @@ describe('CppEmitter', () => {
 }`);
     });
   });
+
+  describe('Pointer-to-array types', () => {
+    const round = (s: string) => emit(parse(s)).replace(/\s+/g, ' ').trim();
+
+    it('flattens a pointer-to-array PARAMETER to a plain pointer (type[N]* -> type *)', () => {
+      assert.strictEqual(round('void f(D2UnitStrc[3]* p) { }'), 'void f(D2UnitStrc * p) {}');
+    });
+
+    it('flattens a pointer-to-array CAST', () => {
+      assert.ok(round('void f(void* x) { p = (int[5]*)x; }').includes('(int *)x'));
+    });
+
+    it('keeps a NAMED local as a faithful pointer-to-array declarator', () => {
+      assert.strictEqual(round('void f() { undefined1[16]* puVar1; }'), 'void f() { undefined1 (*puVar1)[16]; }');
+    });
+
+    it('never touches a subscript-multiply expression', () => {
+      assert.ok(round('void f(int* a) { return a[2] * 6; }').includes('a[2] * 6'));
+    });
+  });
 });

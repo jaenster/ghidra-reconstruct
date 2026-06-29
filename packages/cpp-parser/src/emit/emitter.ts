@@ -688,6 +688,21 @@ export class CppEmitter {
   }
 
   private emitPointerType(node: PointerType): void {
+    // Pointer-to-array in a NON-declarator position (parameter / cast / abstract
+    // type): Ghidra's `type[N]*` denotes a plain pointer, and `elem[N]*` is
+    // ill-formed C++. Emit the flat `elem *` and drop the dimension. Named
+    // declarators keep the faithful `T (*name)[N]` form via emitPointerToArrayDecl,
+    // which bypasses this method — so 2D-array locals are untouched.
+    // (This replaces a fragile text regex that also clobbered subscript-multiplies.)
+    let ptrLevels = 0;
+    let cur: TypeNode = node;
+    while (cur.kind === NodeKind.PointerType) { ptrLevels++; cur = (cur as PointerType).pointee; }
+    if (cur.kind === NodeKind.ArrayType) {
+      const { elementType } = this.unwrapArrayType(cur);
+      this.emitTypeNode(elementType);
+      this.write(' ' + '*'.repeat(ptrLevels));
+      return;
+    }
     this.emitTypeNode(node.pointee);
     const qualStr = node.qualifiers.length > 0 ? ' ' + node.qualifiers.join(' ') : '';
     switch (this.style.pointerAlignment) {
