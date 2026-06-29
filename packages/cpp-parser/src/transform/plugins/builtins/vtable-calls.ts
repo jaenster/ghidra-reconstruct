@@ -33,6 +33,7 @@ import {
   updateNode,
   type Transformer,
 } from '../../transformer.js';
+import { Expr, Type } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 
 // ============================================
@@ -51,6 +52,10 @@ export interface VTableInfo {
 
   /** Whether 'this' was passed as first arg */
   hasThisArg: boolean;
+
+  /** True when the base was a dereference (`*this + off` — a real object vtable);
+   *  false when the base is the table itself (`arr + off` — a function-pointer table). */
+  baseWasDeref: boolean;
 }
 
 // ============================================
@@ -180,6 +185,7 @@ function detectVTableCall(call: CallExpr): VTableInfo | null {
   // Now look for (base + offset) or *(base) + offset or subscript ((int**)base)[index]
   let baseExpr: Expression | null = null;
   let vtableOffset = 0;
+  let baseWasDeref = false;
 
   // Direct addition: (*this + offset)
   const addInfo = isPtrAdd(innerExpr);
@@ -188,6 +194,7 @@ function detectVTableCall(call: CallExpr): VTableInfo | null {
     const baseDeref = isDeref(addInfo.base);
     if (baseDeref) {
       baseExpr = baseDeref.operand;
+      baseWasDeref = true;
     } else {
       baseExpr = addInfo.base;
     }
@@ -203,6 +210,7 @@ function detectVTableCall(call: CallExpr): VTableInfo | null {
       const baseDeref = isDeref(arrayBase);
       if (baseDeref) {
         baseExpr = baseDeref.operand;
+        baseWasDeref = true;
       } else {
         baseExpr = arrayBase;
       }
@@ -215,6 +223,7 @@ function detectVTableCall(call: CallExpr): VTableInfo | null {
     const baseDeref = isDeref(innerExpr);
     if (baseDeref) {
       baseExpr = baseDeref.operand;
+      baseWasDeref = true;
       vtableOffset = 0;
     }
   }
@@ -237,6 +246,7 @@ function detectVTableCall(call: CallExpr): VTableInfo | null {
     vtableOffset,
     args: hasThisArg ? args.slice(1) : args,
     hasThisArg,
+    baseWasDeref,
   };
 }
 
@@ -262,10 +272,23 @@ function createVTableCallTransformer(pointerSize = 4): Transformer {
 
       if (!vtableInfo) return undefined;
 
-      // Generate method name
-      const methodName = generateMethodName(vtableInfo.vtableOffset, pointerSize);
+      // Function-POINTER TABLE (`arr + off`, base not dereferenced): there is no
+      // object whose class carries `vmethod_N`, so `base->vmethod_N` is ill-formed.
+      // Emit the faithful byte-offset indirect call instead — `(char*)` keeps the
+      // arithmetic byte-wise (not scaled by the element size) and `code**`
+      // double-deref reproduces the table read exactly. Keep the ORIGINAL args.
+      if (!vtableInfo.baseWasDeref) {
+        const codePtrPtr = Type.pointer(Type.pointer(Type.builtin('code')));
+        const charCast = Expr.cast(Type.pointer(Type.builtin('char')), vtableInfo.object);
+        const slotAddr = vtableInfo.vtableOffset === 0
+          ? charCast
+          : Expr.paren(Expr.add(charCast, Expr.intLiteral(vtableInfo.vtableOffset)));
+        const fn = Expr.unary('*', Expr.unary('*', Expr.cast(codePtrPtr, slotAddr)));
+        return updateNode(call, { callee: Expr.paren(fn), arguments: call.arguments });
+      }
 
-      // Create member identifier
+      // Real object vtable (`*this + off`): keep the readable method-call form.
+      const methodName = generateMethodName(vtableInfo.vtableOffset, pointerSize);
       const methodId: Identifier = {
         kind: NodeKind.Identifier,
         name: methodName,
@@ -273,8 +296,6 @@ function createVTableCallTransformer(pointerSize = 4): Transformer {
         leadingTrivia: [],
         trailingTrivia: [],
       };
-
-      // Create member expression: object->method
       const memberExpr: MemberExpr = {
         kind: NodeKind.MemberExpr,
         object: vtableInfo.object,
@@ -284,8 +305,6 @@ function createVTableCallTransformer(pointerSize = 4): Transformer {
         leadingTrivia: [],
         trailingTrivia: [],
       };
-
-      // Create new call expression
       return updateNode(call, {
         callee: memberExpr,
         arguments: vtableInfo.args,
