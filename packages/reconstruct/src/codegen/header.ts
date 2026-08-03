@@ -645,7 +645,15 @@ export function cleanFunctionComment(
   functionAddressMap?: Map<bigint, string>,
 ): string {
   // Convert literal \n sequences to actual newlines
-  const lines = comment.replace(/\\n/g, '\n').split('\n');
+  const rawLines = comment.replace(/\\n/g, '\n').split('\n');
+  // Ghidra's batch_rename rewrites plate comments into an @function/@address/@date/
+  // @calling/@description template and buries the original text inside @description.
+  // That text is the source-file attribution, so unwrap it rather than dropping it
+  // with the tag.
+  const lines = rawLines.map(line => {
+    const described = line.match(/^\s*@description\s+(.*)$/i);
+    return described ? described[1] : line;
+  });
   const cleaned = lines.filter(line => {
     const trimmed = line.trim();
     if (!trimmed) return false;
@@ -654,7 +662,9 @@ export function cleanFunctionComment(
     // Custom register warning
     if (trimmed === 'Function uses custom registers for function arguments!') return false;
     // Plate comment metadata tags (case-insensitive, with or without colon)
-    if (/^@(date|author|function|address|description|params)\b/i.test(trimmed)) return false;
+    // (@description is unwrapped above, so a bare tag with no payload falls through here.)
+    // @calling is redundant — the emitted signature already carries the convention.
+    if (/^@(date|author|function|address|description|params|calling)\b/i.test(trimmed)) return false;
     // Param lines inside @params block (e.g. "  param_1: ECX:4 (int32_t)")
     if (/^\s*param_\d+\s*:/.test(trimmed)) return false;
     // Bare URLs
