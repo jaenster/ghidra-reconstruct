@@ -43,16 +43,37 @@ rm -f "$PUB"/winlib/*
   fi
 done
 
+# The engine's unnamespaced unit is emitted under winlib/ but is not winlib code —
+# it is everything with no namespace at all. It is published at the tree root and
+# in _unattributed/; leaving a copy here would file ~700 unplaced functions under a
+# library they have no evidence of belonging to.
+rm -f "$PUB/winlib/_unnamespaced.h" "$PUB/winlib/_unnamespaced.cpp" "$PUB/winlib/_unnamespaced.cpp.map"
+
 # Root singletons: the engine's copies are canonical.
-cp "$GAME/globals.h"        "$PUB/globals.h"
-cp "$GAME/_unnamespaced.h"  "$PUB/_unnamespaced.h"
-cp "$GAME/d2_enums.h"       "$PUB/enums.h"
-cp "$GAME/d2_platform.h"    "$PUB/platform.h"
+# The engine's unnamespaced unit is emitted once, under winlib/, and older
+# generator versions also duplicated it at the tree root. Take whichever exists —
+# they are byte-identical when both do.
+game_unnamespaced() {
+  local ext="$1"
+  if [ -f "$GAME/_unnamespaced$ext" ]; then
+    printf '%s' "$GAME/_unnamespaced$ext"
+  elif [ -f "$GAME/winlib/_unnamespaced$ext" ]; then
+    printf '%s' "$GAME/winlib/_unnamespaced$ext"
+  else
+    echo "publish: no engine _unnamespaced$ext in $GAME" >&2
+    exit 1
+  fi
+}
+
+cp "$GAME/globals.h"          "$PUB/globals.h"
+cp "$(game_unnamespaced .h)"  "$PUB/_unnamespaced.h"
+cp "$GAME/d2_enums.h"         "$PUB/enums.h"
+cp "$GAME/d2_platform.h"      "$PUB/platform.h"
 
 # Unplaceable translation units, prefixed by which binary they came from.
 mkdir -p "$PUB/_unattributed"
 cp "$GAME/globals.cpp"        "$PUB/_unattributed/engine_globals.cpp"
-cp "$GAME/_unnamespaced.cpp"  "$PUB/_unattributed/engine_unattributed.cpp"
+cp "$(game_unnamespaced .cpp)" "$PUB/_unattributed/engine_unattributed.cpp"
 cp "$MENU/globals.h"          "$PUB/_unattributed/menu_globals.h"
 cp "$MENU/globals.cpp"        "$PUB/_unattributed/menu_globals.cpp"
 cp "$MENU/_unnamespaced.h"    "$PUB/_unattributed/menu__unnamespaced.h"
@@ -65,6 +86,7 @@ find "$PUB" -type f \( -name '*.cpp' -o -name '*.h' -o -name '*.map' \) -not -pa
       s/\bd2_platform\.h\b/platform.h/g;
       s/\bd2_enums\.h\b/enums.h/g;
       s{//\s*1\.14d:}{// addr:}g;
+      s{"winlib/_unnamespaced\.h"}{"_unnamespaced.h"}g;
     '
 
 for pattern in '1\.14d' 'd2_platform' 'd2_enums' 'Diablo' 'D2_SEED' 'D2[A-Z][A-Za-z]*Strc'; do
