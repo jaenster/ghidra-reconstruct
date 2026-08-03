@@ -160,6 +160,8 @@ export interface ExtractedGlobal {
   platform?: string;
   /** #ifdef macro guard (e.g. "D2_PLATFORM_MAC") — wraps this global in codegen */
   ifdef?: string;
+  /** PLATE comment on the data symbol — how the name/type was established */
+  comment?: string;
 }
 
 /**

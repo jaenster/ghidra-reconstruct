@@ -488,7 +488,18 @@ export function generateExternDeclaration(
     || type === 'IMAGE_DIRECTORY_ENTRY_EXPORT' || type === 'IMAGE_RESOURCE_DIRECTORY'
     || type === 'VS_VERSION_INFO' || type === 'IMAGE_NT_HEADERS' || type === 'IMAGE_SECTION_HEADER') type = 'uint8_t';
 
-  let declaration = `extern ${normalizeArrayDeclaration(type, name)};`;
+  // Evidence comment, same convention as functions: how the name was established.
+  let evidence = '';
+  if (global.comment) {
+    const lines = global.comment
+      .replace(/\\n/g, '\n')
+      .split('\n')
+      .map(l => l.trim())
+      .filter(l => l.length > 0 && !/^@(date|author|function|address|description|params|calling)\b/i.test(l));
+    if (lines.length > 0) evidence = lines.map(l => `// ${l}`).join('\n') + '\n';
+  }
+
+  let declaration = `${evidence}extern ${normalizeArrayDeclaration(type, name)};`;
 
   if (includeAddressComment) {
     declaration += ` // @${global.address}`;

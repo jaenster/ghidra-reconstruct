@@ -106,6 +106,42 @@ export async function extractGlobals(
 }
 
 /**
+ * Fetch PLATE comments keyed by address.
+ *
+ * list_data_symbols does not return comments, so data-symbol evidence has to be
+ * pulled separately and joined on address.
+ */
+async function extractPlateComments(
+  connection: GhidraConnection
+): Promise<Map<string, string>> {
+  const byAddress = new Map<string, string>();
+  const pageSize = 500;
+  let offset = 0;
+  let total = 0;
+
+  do {
+    const result = await connection.sendCommand<{
+      comments: Array<{ address: string; comment: string }>;
+      total: number;
+    }>('list_comments', { type: 'PLATE', limit: pageSize, offset, _commandTimeout: 300000 });
+
+    for (const c of result.comments ?? []) {
+      if (c.address && c.comment) byAddress.set(normalizeAddress(c.address), c.comment);
+    }
+    total = result.total ?? 0;
+    offset += pageSize;
+  } while (offset < total);
+
+  return byAddress;
+}
+
+/** Ghidra addresses come back both bare ("0043ff00") and qualified ("menu.dat.ram:0043ff00"). */
+function normalizeAddress(address: string): string {
+  const bare = address.includes(':') ? address.slice(address.lastIndexOf(':') + 1) : address;
+  return bare.replace(/^0x/i, '').toLowerCase();
+}
+
+/**
  * Extract all global variables (handles pagination)
  */
 export async function extractAllGlobals(
@@ -133,6 +169,20 @@ export async function extractAllGlobals(
       onProgress(Math.min(offset, total), total);
     }
   } while (offset < total);
+
+  // Join evidence comments on address. A failure here must not lose the globals
+  // themselves — the comments are documentation, the declarations are the output.
+  try {
+    const comments = await extractPlateComments(connection);
+    if (comments.size > 0) {
+      for (const g of allGlobals) {
+        const comment = comments.get(normalizeAddress(g.address));
+        if (comment) g.comment = comment;
+      }
+    }
+  } catch {
+    // leave globals uncommented
+  }
 
   return allGlobals;
 }
