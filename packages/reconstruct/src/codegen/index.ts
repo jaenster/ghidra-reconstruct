@@ -189,14 +189,15 @@ export function generateProject(
   const libraries = createLibraryRegistry(options.projectConfig);
   let methodConversions = createMethodConversionRegistry(options.projectConfig);
 
-  // Detect method conversions from structured tags
-  const tagEntries = detectMethodConversionsFromTags(functions);
-  if (tagEntries.length > 0) {
-    methodConversions = getOrCreateRegistry(methodConversions, tagEntries);
-    console.log(`Detected ${tagEntries.length} methods from structured tags`);
-  }
+  // Tag-based method detection is intentionally skipped: the reconstruction is
+  // emitted as FREE functions (the receiver stays an explicit first param), keeping
+  // namespaces. Ghidra method tags would otherwise turn calls into obj->m() — which
+  // mangle as thiscall members and won't link against the free definitions; the
+  // C/Zig boundary is a small extern "C" shim instead. Explicit project.json
+  // methodConversions are still honored (so the feature remains available).
+  void detectMethodConversionsFromTags; void getOrCreateRegistry; // tag path disabled
 
-  // Apply method conversions (from tags + explicit methodConversions in project.json)
+  // Apply method conversions (only explicit project.json entries, if any)
   if (methodConversions) {
     applyMethodConversions(functions, classes, methodConversions);
   }
@@ -293,7 +294,7 @@ export function generateProject(
   // Emit platform types header
   files.set('d2_platform.h', {
     path: 'd2_platform.h',
-    content: generatePlatformHeader(),
+    content: generatePlatformHeader({ seedType: dataTypes.some(dt => dt.name === 'D2SeedStrc') }),
     type: 'header',
     functions: [],
     includes: [],

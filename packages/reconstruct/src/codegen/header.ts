@@ -135,8 +135,12 @@ export function generateHeader(
 
   // Type includes: needed for by-value struct fields (before type definitions)
   if (extraIncludes && extraIncludes.length > 0) {
+    const seen = new Set<string>();
     for (const inc of [...extraIncludes].sort()) {
-      lines.push(`#include "${inc}"`);
+      const normalized = inc.replace(/\\/g, '/');
+      if (seen.has(normalized)) continue;
+      seen.add(normalized);
+      lines.push(`#include "${normalized}"`);
     }
   }
   lines.push('');
@@ -303,7 +307,10 @@ export function generateHeader(
           if (global.ifdef) lines.push(`#ifdef ${global.ifdef}`);
           currentIfdef = global.ifdef;
         }
-        lines.push(generateExternDeclaration(global, options.includeAddressComments));
+        {
+          const decl = generateExternDeclaration(global, options.includeAddressComments);
+          if (decl) lines.push(decl);
+        }
       }
       if (currentIfdef) lines.push(`#endif // ${currentIfdef}`);
       lines.push('');

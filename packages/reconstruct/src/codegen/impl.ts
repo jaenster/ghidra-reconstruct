@@ -625,10 +625,15 @@ export function generateImplementation(
   const headerInclude = headerPath.replace(/\\/g, '/');
   lines.push(`#include "${headerInclude}"`);
 
-  // Cross-file includes
+  // Cross-file includes — deduped; the globals header and a type-owner header can
+  // resolve to the same file, and the own header is already emitted above.
   if (extraIncludes && extraIncludes.length > 0) {
+    const seen = new Set([headerInclude]);
     for (const inc of [...extraIncludes].sort()) {
-      lines.push(`#include "${inc}"`);
+      const normalized = inc.replace(/\\/g, '/');
+      if (seen.has(normalized)) continue;
+      seen.add(normalized);
+      lines.push(`#include "${normalized}"`);
     }
   }
   lines.push('');
@@ -1071,13 +1076,8 @@ export function generateFunctionImplementation(
     }
   }
 
-  // Generate function signature.
-  // In C mode every function is a free function (with its receiver as an
-  // explicit first param) — emitting a `Class::method` definition there would
-  // mangle as a thiscall member and fail to link against the free-function
-  // call sites (which C mode also keeps free). Keep both sides consistent.
-  const isMethod = options.format !== 'c'
-    && classInfo && classInfo.methods.some(m => m.address === func.address);
+  // Generate function signature
+  const isMethod = classInfo && classInfo.methods.some(m => m.address === func.address);
 
   if (isMethod) {
     // Method implementation with class prefix
@@ -1364,8 +1364,9 @@ function stripCrtNamespacePrefixes(code: string): string {
   result = result.replace(/\bcompiler::/g, '');
   // Replace Ghidra stack variable artifacts: stack0xNNNNNNNN → 0 (stack cookie pattern)
   result = result.replace(/&?stack0x[0-9a-fA-F]+/g, '0');
-  // Fix Ghidra's `type[N]*` syntax → `type*` (array-pointer type in local declarations)
-  result = result.replace(/(\b\w+)\[(\d+)\]\s*\*/g, '$1 *');
+  // (Ghidra's `type[N]*` pointer-to-array is now flattened to `type*` on the AST
+  //  by the `pointer-array-flatten` plugin — NOT with a text regex here. The old
+  //  regex over-matched subscript-multiplies like `pLevelArray[2] * 6`.)
   // Strip Ghidra's _exref suffix from external references (import thunks)
   result = result.replace(/(\w+)_exref\b/g, '$1');
   // Fix Ghidra double-negative on INT_MIN: --2147483648 → (-2147483648)
@@ -1583,11 +1584,9 @@ function transformDecompiledCode(
     const enablePlugins: string[] = [];
     const perPluginOptions: Record<string, unknown> = {};
 
-    // C mode keeps call sites as free functions (receiver passed explicitly), so
-    // method-call-rewrite must stay OFF — otherwise calls mangle as thiscall
-    // members and won't link against the free definitions.
-    if (options.format !== 'c'
-        && ((mappings && Object.keys(mappings).length > 0) || currentFunction)) {
+    // Method-conversion is dropped (free functions only), so mappings/currentFunction
+    // are normally empty; keep the original guard so any stray mapping still no-ops.
+    if ((mappings && Object.keys(mappings).length > 0) || currentFunction) {
       enablePlugins.push('method-call-rewrite');
       perPluginOptions['method-call-rewrite'] = { methodMappings: mappings ?? {}, currentFunction };
     }
@@ -1603,6 +1602,7 @@ function transformDecompiledCode(
     if (varTypes && Object.keys(varTypes).length > 0) {
       perPluginOptions['underscore-slot-local'] = { varTypes };
     }
+
 
     const funcdefTypedefs = getKnownFuncDefTypedefs();
     if (funcdefTypedefs.length > 0) {

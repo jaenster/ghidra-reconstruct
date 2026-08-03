@@ -342,7 +342,10 @@ export function generateGlobalsHeader(
           }
           currentIfdef = global.ifdef;
         }
-        lines.push(generateExternDeclaration(global, options.includeAddressComments));
+        {
+          const decl = generateExternDeclaration(global, options.includeAddressComments);
+          if (decl) lines.push(decl);
+        }
       }
       // Close any open ifdef
       if (currentIfdef) {
@@ -423,7 +426,10 @@ export function generateGlobalsHeader(
           lines.push('');
         }
         for (const global of nsGlobals) {
-          lines.push(generateExternDeclaration(global, options.includeAddressComments));
+          {
+            const decl = generateExternDeclaration(global, options.includeAddressComments);
+            if (decl) lines.push(decl);
+          }
         }
         if (namespace) {
           lines.push('');
@@ -435,6 +441,18 @@ export function generateGlobalsHeader(
   }
 
   return lines.join('\n');
+}
+
+/**
+ * `g_chunks.capacity`, `slots[0].highscores[0].score`, `DAT_0043e7e0+1` — labels
+ * Ghidra puts on the interior of a global: struct field paths once a type is
+ * applied, or a byte offset into an untyped blob. The containing global is already
+ * declared, so these are noise rather than something we failed to translate.
+ */
+export function isInteriorLabel(name: string): boolean {
+  const segment = String.raw`[A-Za-z_]\w*(?:\[\d+\])*`;
+  return new RegExp(`^${segment}(?:\\.${segment})+$`).test(name)
+    || /^[A-Za-z_]\w*\+\d+$/.test(name);
 }
 
 /**
@@ -458,6 +476,7 @@ export function generateExternDeclaration(
   }
 
   // Skip globals with invalid C++ identifier names (digits, special chars)
+  if (isInteriorLabel(name)) return '';
   if (/[^A-Za-z0-9_]/.test(name) || /^\d/.test(name)) return `// skipped: ${name} (invalid identifier)`;
 
   // 'auto' is not valid for extern declarations
@@ -1065,6 +1084,7 @@ function emitGlobalDefsWithIfdef(
   for (const global of globals) {
     // Skip globals with invalid C++ identifier names (dots, digits, special chars)
     const gName = global.suggestedName || global.name;
+    if (isInteriorLabel(gName)) continue;
     if (/[^A-Za-z0-9_]/.test(gName) || /^\d/.test(gName)) {
       lines.push(`// skipped: ${gName} (invalid identifier)`);
       continue;
