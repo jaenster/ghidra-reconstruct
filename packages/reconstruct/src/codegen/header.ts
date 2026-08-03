@@ -674,7 +674,21 @@ export function cleanFunctionComment(
     return true;
   });
 
-  let result = cleaned.join('\n');
+  // Evidence lines quote debug strings verbatim, and those strings often embed a
+  // newline — which would otherwise split the quote across two comment lines
+  // mid-sentence. Fold continuations back into the `name:`/`name?:` line they belong to.
+  const folded: string[] = [];
+  for (const line of cleaned) {
+    const isTagged = /^\s*(src\??:|name\??:|logged locals:)/.test(line);
+    const prev = folded[folded.length - 1];
+    if (!isTagged && prev !== undefined && /^\s*name\??:/.test(prev)) {
+      folded[folded.length - 1] = `${prev.trimEnd()} ${line.trim()}`;
+    } else {
+      folded.push(line);
+    }
+  }
+
+  let result = folded.join('\n');
 
   // Resolve inline FUN_ references to their actual names
   if (functionAddressMap && result.includes('FUN_')) {
