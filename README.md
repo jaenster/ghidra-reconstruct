@@ -17,6 +17,8 @@ addresses).
 It was written against a 32-bit MSVC binary (Diablo II `Game.exe`) but the engine is
 binary-agnostic.
 
+If it's useful to you, you can [sponsor the work](https://github.com/sponsors/jaenster).
+
 ---
 
 ## How it works
