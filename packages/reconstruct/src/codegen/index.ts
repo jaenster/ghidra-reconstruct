@@ -67,6 +67,7 @@ import { resolveTargets, getTargetDirectory, type ResolvedTarget } from '../targ
 import { generateStubsHeader } from '../targets/stubs.js';
 import { collectCrtHeaders, EXCLUDED_SYMBOL_DECLS } from './crt-mapping.js';
 import { flattenTemplateNames } from './template-names.js';
+import { retypeVtableLocals, vtableMembersByType } from '../modules/vtable-types.js';
 import { NeedleIndex } from './needle-index.js';
 import {
   computeTypeOwnership,
@@ -118,6 +119,17 @@ export function generateProject(
   // class_HASHKEY_NONE>`) across the WHOLE model before anything is emitted, so
   // the declaration side and every reference side share one identifier.
   flattenTemplateNames(dataTypes, functions, globals as Array<{ name?: string; dataType?: string; suggestedType?: string; suggestedName?: string; namespace?: string | null }>);
+
+  // Ghidra types a body's vtable LOCALS with the bare `vtable *`, which can only
+  // be rendered `void *` — so `pListHead->FUN_004503f0` is a member access on
+  // void. The per-class vtable STRUCTUREs have already been named after their
+  // owner; the member a body indexes says which of them the local holds.
+  {
+    const retyped = retypeVtableLocals(functions, vtableMembersByType(dataTypes));
+    if (retyped > 0) {
+      console.log(`Pointed ${retyped} vtable locals/parameters at the vtable they index`);
+    }
+  }
 
   // A function's return type comes from the raw database field, but its BODY
   // comes from the decompiler's own resolved prototype. When nobody has curated
@@ -323,11 +335,13 @@ export function generateProject(
   }
 
   // Emit platform types header
+  const inAddrClaim = buildWinsockInAddrClaim(dataTypes);
   files.set('d2_platform.h', {
     path: 'd2_platform.h',
     content: generatePlatformHeader({
       seedType: dataTypes.some(dt => dt.name === 'D2SeedStrc'),
-      anonymousAggregates: buildAnonymousAggregateDefs(dataTypes, functions),
+      anonymousAggregates: buildAnonymousAggregateDefs(dataTypes, functions, inAddrClaim.claimed),
+      winsockInAddr: inAddrClaim.lines,
     }),
     type: 'header',
     functions: [],
@@ -2053,6 +2067,142 @@ function indexBothSpellings<T>(
 /** Ghidra's placeholder name for an anonymous aggregate inside another type. */
 const ANONYMOUS_AGGREGATE_RE = /^_(struct|union)_\d+$/;
 
+/** Win32 integer spellings the winsock claim must not depend on <windows.h> for. */
+const WINSOCK_SCALARS: Record<string, string> = {
+  UCHAR: 'unsigned char',
+  BYTE: 'unsigned char',
+  UINT8: 'unsigned char',
+  USHORT: 'unsigned short',
+  WORD: 'unsigned short',
+  UINT16: 'unsigned short',
+  ULONG: 'unsigned long',
+  DWORD: 'unsigned long',
+  UINT32: 'unsigned long',
+  u_char: 'unsigned char',
+  u_short: 'unsigned short',
+  u_long: 'unsigned long',
+};
+
+/**
+ * `in_addr`, spelled the way Ghidra models it, claimed before <winsock2.h>.
+ *
+ * Ghidra names the anonymous union inside `in_addr` (`_union_1226`) and the two
+ * anonymous structs inside that union (`_struct_1227`, `_struct_1228`), and
+ * decompiled bodies cast through those names. mingw's `inaddr.h` declares the
+ * very same layout with all three left unnamed, so the names never meet:
+ * `(in_addr)pDVar1->ipAddress.S_un.S_un_b` is a conversion between two spellings
+ * of one 4-byte object that the compiler sees as unrelated types.
+ *
+ * `inaddr.h` guards its whole body on `#ifndef s_addr`, so emitting the same
+ * struct first — with Ghidra's names on the nested aggregates — and defining
+ * that guard makes the vendor header a no-op and the two spellings one type.
+ * The layout is unchanged (union of a 4-byte struct, a 2-short struct and a
+ * 32-bit integer, all at offset 0), so nothing about the object moves; only the
+ * nested types gain the names Ghidra already uses for them.
+ *
+ * The constructors are the Ghidra decompiler's `(in_addr)dword` and
+ * `(in_addr)S_un_b` renderings, which are reinterpretations of one 4-byte value,
+ * written as the member store they stand for. Each one is total and lossless;
+ * none of them can hide a wrong type, because every alternative is the same four
+ * bytes.
+ *
+ * Emitted ONLY when Ghidra's model matches winsock's shape exactly — the member
+ * names below are baked into the `s_host`/`s_net`/... macros the vendor header
+ * would otherwise supply. Any other shape falls back to the generic anonymous
+ * aggregate path.
+ */
+export function buildWinsockInAddrClaim(
+  dataTypes: ExtractedDataType[],
+): { lines: string[]; claimed: Set<string> } {
+  const empty = { lines: [] as string[], claimed: new Set<string>() };
+  const byName = new Map<string, ExtractedDataType>();
+  for (const dt of dataTypes) byName.set(dt.name, dt);
+
+  const fieldsOf = (dt: ExtractedDataType | undefined) =>
+    (dt as import('../types.js').ExtractedStruct | undefined)?.fields ?? [];
+
+  const inAddr = byName.get('in_addr');
+  if (!inAddr || inAddr.kind !== 'STRUCTURE') return empty;
+  const outer = fieldsOf(inAddr);
+  if (outer.length !== 1 || outer[0].name !== 'S_un') return empty;
+
+  const unionName = outer[0].dataType;
+  if (!ANONYMOUS_AGGREGATE_RE.test(unionName)) return empty;
+  const un = byName.get(unionName);
+  if (!un || un.kind !== 'UNION') return empty;
+
+  const unFields = fieldsOf(un);
+  const byMember = new Map(unFields.map(f => [f.name, f]));
+  const bytes = byMember.get('S_un_b');
+  const words = byMember.get('S_un_w');
+  const addr = byMember.get('S_addr');
+  if (unFields.length !== 3 || !bytes || !words || !addr) return empty;
+  if (unFields.some(f => f.offset !== 0)) return empty;
+
+  const byteStruct = byName.get(bytes.dataType);
+  const wordStruct = byName.get(words.dataType);
+  if (!byteStruct || byteStruct.kind !== 'STRUCTURE') return empty;
+  if (!wordStruct || wordStruct.kind !== 'STRUCTURE') return empty;
+  if (!ANONYMOUS_AGGREGATE_RE.test(byteStruct.name)) return empty;
+  if (!ANONYMOUS_AGGREGATE_RE.test(wordStruct.name)) return empty;
+
+  const byteFields = fieldsOf(byteStruct);
+  const wordFields = fieldsOf(wordStruct);
+  const expectNames = (fs: typeof byteFields, names: string[]) =>
+    fs.length === names.length && fs.every((f, i) => f.name === names[i]);
+  if (!expectNames(byteFields, ['s_b1', 's_b2', 's_b3', 's_b4'])) return empty;
+  if (!expectNames(wordFields, ['s_w1', 's_w2'])) return empty;
+
+  const scalar = (t: string): string | undefined => WINSOCK_SCALARS[t.trim()];
+  const byteType = scalar(byteFields[0].dataType);
+  const wordType = scalar(wordFields[0].dataType);
+  const addrType = scalar(addr.dataType);
+  if (!byteType || !wordType || !addrType) return empty;
+  if (byteFields.some(f => scalar(f.dataType) !== byteType)) return empty;
+  if (wordFields.some(f => scalar(f.dataType) !== wordType)) return empty;
+
+  const B = byteStruct.name;
+  const W = wordStruct.name;
+  const U = un.name;
+
+  const lines = [
+    "// in_addr, with Ghidra's names on the nested anonymous aggregates. Claimed",
+    '// before <winsock2.h>, whose inaddr.h is guarded on `s_addr` and so becomes',
+    '// a no-op. Same layout, same members, same offsets — the union spellings',
+    "// decompiled bodies cast through are simply no longer a separate type.",
+    '#  ifndef s_addr',
+    `struct ${B} { ${byteFields.map(f => `${byteType} ${f.name};`).join(' ')} };`,
+    `struct ${W} { ${wordFields.map(f => `${wordType} ${f.name};`).join(' ')} };`,
+    `union ${U} {`,
+    `    ${B} S_un_b;`,
+    `    ${W} S_un_w;`,
+    `    ${addrType} S_addr;`,
+    `    ${U}() : S_addr(0) {}`,
+    `    ${U}(${addrType} a) : S_addr(a) {}`,
+    `    ${U}(${B} b) : S_un_b(b) {}`,
+    `    ${U}(${W} w) : S_un_w(w) {}`,
+    `    operator ${addrType}() const { return S_addr; }`,
+    '};',
+    'typedef struct in_addr {',
+    `    ${U} S_un;`,
+    '    in_addr() {}',
+    `    in_addr(${U} u) : S_un(u) {}`,
+    `    in_addr(${addrType} a) : S_un(a) {}`,
+    `    in_addr(${B} b) : S_un(b) {}`,
+    `    in_addr(${W} w) : S_un(w) {}`,
+    '} IN_ADDR, *PIN_ADDR, *LPIN_ADDR;',
+    '#    define s_addr  S_un.S_addr',
+    '#    define s_host  S_un.S_un_b.s_b2',
+    '#    define s_net   S_un.S_un_b.s_b1',
+    '#    define s_imp   S_un.S_un_w.s_w2',
+    '#    define s_impno S_un.S_un_b.s_b4',
+    '#    define s_lh    S_un.S_un_b.s_b3',
+    '#  endif  // s_addr',
+  ];
+
+  return { lines, claimed: new Set([B, W, U]) };
+}
+
 /**
  * Definitions for the anonymous struct/union members of system types, in
  * dependency order (`_union_1226` holds a `_struct_1227`). They are declared by
@@ -2062,10 +2212,13 @@ const ANONYMOUS_AGGREGATE_RE = /^_(struct|union)_\d+$/;
 function buildAnonymousAggregateDefs(
   dataTypes: ExtractedDataType[],
   functions: ExtractedFunction[],
+  alreadyClaimed: ReadonlySet<string> = new Set(),
 ): string[] {
   const anon = new Map<string, ExtractedDataType>();
   for (const dt of dataTypes) {
     if (!ANONYMOUS_AGGREGATE_RE.test(dt.name)) continue;
+    // Emitted earlier, next to the system struct they are members of.
+    if (alreadyClaimed.has(dt.name)) continue;
     const fields = (dt as import('../types.js').ExtractedStruct).fields ?? [];
     // Ghidra spells an UNNAMED member `null`, and two of them in one aggregate
     // cannot both be declared. Such a type cannot be emitted faithfully, so it

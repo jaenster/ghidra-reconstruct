@@ -72,13 +72,24 @@ describe('disambiguateVtableTypes', () => {
     assert.equal(result.byMember.has('shared'), false);
   });
 
-  it('leaves a vtable whose category cannot name a C++ type alone', () => {
+  it('names a template instantiation\'s vtable too, under the flattened spelling', () => {
+    // The tree already carries these classes flattened, and their bodies index
+    // the vtable by member — leaving them all called `vtable` collapsed thirty-odd
+    // distinct layouts onto one and stranded every member.
     const types: ExtractedDataType[] = [
-      vtable('/TSHashTable<struct_CELLIST,class_HASHKEY_NONE>', [['vmethod_0', 'void *']]),
+      vtable('/TSHashTable<struct_CELLIST,class_HASHKEY_NONE>', [['FUN_006036d0', 'void *']]),
+      owner('TSHashTable<struct_CELLIST,class_HASHKEY_NONE>', 'vtable *'),
     ];
     const result = disambiguateVtableTypes(types);
-    assert.equal(result.renamed, 0);
-    assert.equal(types[0].name, 'vtable');
+
+    assert.equal(result.renamed, 1);
+    assert.equal(types[0].name, 'TSHashTable_struct_CELLIST_class_HASHKEY_NONE_Vtable');
+    assert.equal(
+      (types[1] as ExtractedStruct).fields![0].dataType,
+      'TSHashTable_struct_CELLIST_class_HASHKEY_NONE_Vtable *',
+    );
+    assert.equal(result.byMember.get('FUN_006036d0'),
+      'TSHashTable_struct_CELLIST_class_HASHKEY_NONE_Vtable');
   });
 
   it('keeps Ghidra pointer entries apart too', () => {

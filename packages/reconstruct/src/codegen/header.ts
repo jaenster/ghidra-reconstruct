@@ -924,6 +924,21 @@ function emitFieldLines(fields: StructField[], lines: string[], isUnion = false)
       while (i + count < fields.length && isUnnamedUndefined1(fields[i + count])) {
         count++;
       }
+      if (count === 1) {
+        // A LONE undefined byte is still undefined space, and the decompiler names
+        // a read of it `field_0x<off>` exactly as it does inside a longer run —
+        // the component's ordinal never appears. Emitting the ordinal-bearing
+        // `field<i>_0x<off>` here gave the one member Ghidra's own body text never
+        // spells ("has no member named 'field_0x44'"). Same offset, same byte.
+        const loneName = `field_0x${field.offset.toString(16)}`;
+        if (!seenNames.has(loneName)) {
+          seenNames.add(loneName);
+          const loneComment = field.comment ? ` // ${cleanInlineComment(field.comment)}` : '';
+          lines.push(`    /* ${offsetHex} */ uint8_t ${loneName};${loneComment}`);
+          i += 1;
+          continue;
+        }
+      }
       if (count > 1) {
         // Ghidra's decompiler names an access into undefined filler
         // `field_0x<unpadded-lowercase-hex>` at the offset it touches — so a body
@@ -988,8 +1003,13 @@ function emitFieldLines(fields: StructField[], lines: string[], isUnion = false)
     // Sanitize field names: replace spaces/invalid chars with underscores
     let rawName = rawFieldName ? rawFieldName.replace(/[^a-zA-Z0-9_]/g, '_') : ghidraDefaultName;
     if (!rawName) rawName = ghidraDefaultName;
-    // Prefix names starting with a digit (e.g., "0x1B" → "field_0x1B") — invalid C++ identifiers
-    if (/^\d/.test(rawName)) rawName = `field_${rawName}`;
+    // A leading digit is not a valid identifier start, and Ghidra's decompiler
+    // repairs it the same way it repairs every other illegal character in a field
+    // name: by REPLACING that character with `_`. `D2UIFlagStrc` really does have
+    // members named `0x1D`/`0x1E`/`0x20`, and bodies spell them `_x1D`/`_x1E`/
+    // `_x20` (just as `Day Event` is spelled `Day_Event`). Prefixing instead —
+    // `field_0x1D` — declared a member under a name no body ever uses.
+    if (/^[0-9]/.test(rawName)) rawName = `_${rawName.slice(1)}`;
     // A field auto-named after a C++ keyword (Ghidra: `char class;`, `int default;`)
     // is a syntax error. Append `_`; body accesses are rewritten to match (impl.ts).
     if (CPP_KEYWORDS.has(rawName)) rawName = `${rawName}_`;

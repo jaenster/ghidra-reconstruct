@@ -630,8 +630,53 @@ export function platformDeclaredFunctionNames(): Set<string> {
   return names;
 }
 
+/**
+ * The MSVC CRT `FILE` layout, claimed before any libc header can define it.
+ *
+ * Ghidra models the CRT stream object the way MSVC 6/7 declared it — `struct
+ * _iobuf { char *_ptr; int _cnt; char *_base; int _flag; int _file; int
+ * _charbuf; int _bufsiz; char *_tmpfname; }` — and D2 reaches into those
+ * members directly (`FILETOOLS_ResetOffsets` writes a vftable through `_ptr`).
+ * A UCRT toolchain declares the same struct as a single opaque `void
+ * *_Placeholder`, so every one of those member reads fails to compile against
+ * a type that is nominally the same.
+ *
+ * Both mingw-w64's `stdio.h` and its `mbstring.h` gate the declaration on
+ * `_FILE_DEFINED`, so defining the struct first and claiming that guard makes
+ * `FILE` resolve to the layout the binary was actually built against. Nothing
+ * is masked: the members are the real ones, at their real offsets, and every
+ * `<cstdio>` entry point still takes `FILE *` — the same `struct _iobuf *`.
+ */
+function msvcFileStructLines(): string[] {
+  return [
+    '// MSVC CRT stream layout (what Ghidra models and what D2 indexes into).',
+    '// Claimed before <cstdio> so a UCRT toolchain cannot substitute its opaque',
+    '// one-member _iobuf; FILE stays `struct _iobuf`, so the CRT calls still fit.',
+    '#ifndef _FILE_DEFINED',
+    '#define _FILE_DEFINED',
+    'struct _iobuf {',
+    '    char* _ptr;',
+    '    int _cnt;',
+    '    char* _base;',
+    '    int _flag;',
+    '    int _file;',
+    '    int _charbuf;',
+    '    int _bufsiz;',
+    '    char* _tmpfname;',
+    '};',
+    'typedef struct _iobuf FILE;',
+    '#endif',
+    '',
+  ];
+}
+
 export function generatePlatformHeader(
-  options: { seedType?: boolean; anonymousAggregates?: string[] } = {},
+  options: {
+    seedType?: boolean;
+    anonymousAggregates?: string[];
+    /** `in_addr` under Ghidra's names, claimed ahead of <winsock2.h>. */
+    winsockInAddr?: string[];
+  } = {},
 ): string {
   const lines: string[] = [];
 
@@ -652,6 +697,7 @@ export function generatePlatformHeader(
   lines.push('');
   lines.push('#include <cstdint>');
   lines.push('#include <cstddef>');
+  lines.push(...msvcFileStructLines());
   lines.push('#include <cstdio>');
   lines.push('#include <cstdarg>');
   lines.push('#include <cstring>');
@@ -750,6 +796,10 @@ export function generatePlatformHeader(
   lines.push('#  ifndef WIN32_LEAN_AND_MEAN');
   lines.push('#    define WIN32_LEAN_AND_MEAN');
   lines.push('#  endif');
+  if (options.winsockInAddr && options.winsockInAddr.length > 0) {
+    lines.push(...options.winsockInAddr);
+    lines.push('');
+  }
   lines.push('#  include <windows.h>');
   lines.push('#  include <winsock2.h>');
   // Imports the reconstruction calls that <windows.h> alone does not declare.
