@@ -216,6 +216,57 @@ void foo(int x) {
     });
   });
 
+  describe('case labels must be constant expressions', () => {
+    function transformWithEnums(code: string, enumConstants: string[]): string {
+      const ast = parse(code);
+      const transformer = switchReconstructPlugin.createTransformer({ minCases: 3, enumConstants });
+      return emit(transformer(ast) as AnyNode).trim();
+    }
+
+    it('leaves a chain comparing against pointer-typed globals as if/else', () => {
+      const input = `
+void foo(D2ControlStrc *p) {
+  if (p == gpAnimImgCharCreateAmazon) {
+    a();
+  } else if (p == gpAnimImgCharCreateSorceress) {
+    b();
+  } else if (p == gpAnimImgCharCreateDruid) {
+    c();
+  }
+}
+`;
+      const output = transformWithEnums(input, ['UNIT_PLAYER', 'UNIT_MONSTER']);
+      assert.ok(!output.includes('switch'), `globals are not constant expressions: ${output}`);
+    });
+
+    it('still converts a chain over real enumerators', () => {
+      const input = `
+void foo(int eType) {
+  if (eType == UNIT_PLAYER) {
+    a();
+  } else if (eType == UNIT_MONSTER) {
+    b();
+  } else if (eType == UNIT_OBJECT) {
+    c();
+  }
+}
+`;
+      const output = transformWithEnums(input, ['UNIT_PLAYER', 'UNIT_MONSTER', 'UNIT_OBJECT']);
+      assert.ok(output.includes('switch (eType)'), `Expected switch in: ${output}`);
+      assert.ok(output.includes('case UNIT_MONSTER:'), `Expected enumerator case in: ${output}`);
+    });
+
+    it('accepts integer literals with no enumerator set at all', () => {
+      const input = `
+void foo(int x) {
+  if (x == 1) { a(); } else if (x == 2) { b(); } else if (x == 3) { c(); }
+}
+`;
+      const output = transformWithEnums(input, []);
+      assert.ok(output.includes('switch (x)'), `Expected switch in: ${output}`);
+    });
+  });
+
   describe('plugin metadata', () => {
     it('should have correct metadata', () => {
       assert.strictEqual(switchReconstructPlugin.id, 'switch-reconstruct');

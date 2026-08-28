@@ -71,6 +71,12 @@ export function countTypeReferences(
     for (const param of func.parameters) {
       if (stripTypeName(param.dataType) === typeName) count++;
     }
+    // A type can be reached ONLY through a body's locals — `inflate_state` is
+    // declared nowhere in a Storm signature, so without this it scores zero,
+    // gets no owner, and is neither defined nor forward-declared anywhere.
+    for (const local of func.localVariables ?? []) {
+      if (stripTypeName(local.dataType) === typeName) count++;
+    }
     if (stripTypeName(func.returnType) === typeName) count++;
   }
   if (classInfo) {
@@ -100,6 +106,13 @@ export function collectReferencedTypeNames(
   for (const func of unitFunctions) {
     for (const param of func.parameters) {
       const stripped = stripTypeName(param.dataType);
+      if (stripped) refs.add(stripped);
+    }
+    // Ghidra's own local-variable list, not the body text: the body regex below
+    // only recognises capitalised `T *` casts, so a lower-case struct used only
+    // as a local (`inflate_state`) was invisible to ownership scoring.
+    for (const local of func.localVariables ?? []) {
+      const stripped = stripTypeName(local.dataType);
       if (stripped) refs.add(stripped);
     }
     const ret = stripTypeName(func.returnType);

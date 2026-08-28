@@ -57,7 +57,7 @@ import { generateSourceMap } from './sourcemap.js';
 import { generateReadme } from './readme.js';
 import { organizeByNamespace, getFilePath, setModuleNames, setNamespaceCollisionTypes, normalizeQualifiedReference } from './namespace.js';
 import { buildNamespaceResolution, namespaceResolution, renderNamespace } from './namespace-resolution.js';
-import { isUnreferenceableArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, setKnownNamespaces, isFuncDefTypedefName, setInitializerSignatureTables, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType } from './globals-header.js';
+import { isUnreferenceableArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, setKnownNamespaces, isFuncDefTypedefName, setInitializerSignatureTables, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType } from './globals-header.js';
 import { isPlatformOrBuiltinType, generatePlatformHeader, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
 import { createOverrideRegistry } from '../overrides/index.js';
 import { createLibraryRegistry } from '../library/index.js';
@@ -67,6 +67,7 @@ import { normalizeAddress } from '../config/loader.js';
 import { resolveTargets, getTargetDirectory, type ResolvedTarget } from '../targets/index.js';
 import { generateStubsHeader } from '../targets/stubs.js';
 import { collectCrtHeaders, EXCLUDED_SYMBOL_DECLS } from './crt-mapping.js';
+import { normalizePointerSizeSpellings } from './pointer-size-spelling.js';
 import { flattenTemplateNames } from './template-names.js';
 import { retypeVtableLocals, vtableMembersByType } from '../modules/vtable-types.js';
 import { NeedleIndex } from './needle-index.js';
@@ -116,6 +117,21 @@ export function generateProject(
     }
   }
 
+  // Ghidra's explicit pointer-size spelling (`D2DataArrayStrc *32`) is understood
+  // by nothing downstream — it defeats type-name stripping, so the type is never
+  // included and never declared. Normalize it to `*` across the WHOLE model
+  // before anything is emitted.
+  {
+    const rewritten = normalizePointerSizeSpellings(
+      dataTypes,
+      functions,
+      globals as Array<{ dataType?: string; suggestedType?: string }>,
+    );
+    if (rewritten > 0) {
+      console.log(`Normalized ${rewritten} Ghidra pointer-size type spellings (T *32 -> T *)`);
+    }
+  }
+
   // Flatten Ghidra's demangled template spellings (`TSHashTable<struct_CELLIST,
   // class_HASHKEY_NONE>`) across the WHOLE model before anything is emitted, so
   // the declaration side and every reference side share one identifier.
@@ -149,6 +165,15 @@ export function generateProject(
     dt => dt.kind === 'FUNCTION_DEFINITION'
   ) as import('../types.js').ExtractedFunctionDefinition[];
   setKnownFuncDefTypedefs(funcDefDataTypes.map(dt => dt.name));
+  // A `case` label must be a constant expression. `switch-reconstruct` treated
+  // any bare identifier as one ("could be an enum constant"), which turned an
+  // if/else chain over D2ControlStrc* globals into `switch (p) { case gGlobal: }`.
+  // Give it the enumerator names so the guess becomes a lookup.
+  setKnownEnumConstants(
+    (dataTypes.filter(dt => dt.kind === 'ENUM') as import('../types.js').ExtractedEnum[])
+      .flatMap(e => e.values.map(v => v.name.trim()))
+      .filter(Boolean)
+  );
   // Same set, by name, so a typedef targeting `<FunctionDefinition> *` can be
   // inlined into a self-contained function-pointer typedef.
   setKnownFuncDefs(funcDefDataTypes);
@@ -2618,13 +2643,18 @@ function buildFuncPtrArgCastTables(
   // all. Read off the raw Ghidra spelling instead, which names the funcdef.
   const structFieldFuncdefs: Record<string, Record<string, string>> = {};
   const fieldFuncdefSpellings = new Map<string, Set<string>>();
+  // Field names some aggregate declares with a type that is NOT a funcdef. That
+  // is the real disagreement — not the mere presence of the name in
+  // `fieldDeclSpellings`, which now records funcdef fields too (they render as
+  // the bare typedef once the redundant pointer is peeled).
+  const fieldNonFuncdefNames = new Set<string>();
   for (const dt of dataTypes) {
     if (dt.kind !== 'STRUCTURE' && dt.kind !== 'UNION') continue;
     if (!('fields' in dt)) continue;
     for (const f of (dt as import('../types.js').ExtractedStruct).fields ?? []) {
       if (!f.name || !f.dataType) continue;
       const fd = funcdefBaseName(f.dataType, funcdefDecls);
-      if (!fd) continue;
+      if (!fd) { fieldNonFuncdefNames.add(f.name); continue; }
       if (dt.name) (structFieldFuncdefs[dt.name] ??= {})[f.name] = fd;
       let seen = fieldFuncdefSpellings.get(f.name);
       if (!seen) { seen = new Set(); fieldFuncdefSpellings.set(f.name, seen); }
@@ -2639,7 +2669,7 @@ function buildFuncPtrArgCastTables(
   const fieldFuncdefs: Record<string, string> = {};
   for (const [name, spellings] of fieldFuncdefSpellings) {
     if (spellings.size !== 1) continue;
-    if (fieldDeclSpellings.has(name)) continue;
+    if (fieldNonFuncdefNames.has(name)) continue;
     fieldFuncdefs[name] = [...spellings][0];
   }
 

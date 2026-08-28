@@ -81,20 +81,27 @@ interface SwitchChain {
 // ============================================
 
 /**
- * Check if an expression is a constant value suitable for a case label
+ * Check if an expression is a constant value suitable for a case label.
+ *
+ * An identifier only qualifies when it NAMES AN ENUMERATOR. The earlier rule
+ * ("could be an enum constant - allow it") accepted any identifier, so a chain
+ * of `if (pClickedAnim == gpAnimImgCharCreateAmazon)` over `D2ControlStrc*`
+ * globals became `switch (pClickedAnim) { case gpAnimImgCharCreateAmazon: }` —
+ * ill-formed C++ at any type, and a construct Ghidra never emitted. The caller
+ * supplies the enumerator names, so the guess becomes a lookup; with no set
+ * supplied nothing is knowably constant and only literals qualify.
  */
-function isConstantValue(expr: Expression): boolean {
+function isConstantValue(expr: Expression, enumConstants: ReadonlySet<string>): boolean {
   switch (expr.kind) {
     case NodeKind.IntegerLiteral:
     case NodeKind.CharLiteral:
       return true;
     case NodeKind.Identifier:
-      // Could be an enum constant - allow it
-      return true;
+      return enumConstants.has((expr as Identifier).name);
     case NodeKind.UnaryExpr:
       // Allow negated constants like -1
       const unary = expr as any;
-      return unary.operator === '-' && isConstantValue(unary.operand);
+      return unary.operator === '-' && isConstantValue(unary.operand, enumConstants);
     default:
       return false;
   }
@@ -137,7 +144,8 @@ function isSwitchableExpression(expr: Expression): boolean {
  * Returns { variable, constant } if condition is `variable == constant` or `constant == variable`
  */
 function extractEqualityComparison(
-  condition: Expression
+  condition: Expression,
+  enumConstants: ReadonlySet<string>
 ): { variable: Expression; constant: Expression } | null {
   // Unwrap parentheses
   while (condition.kind === NodeKind.ParenExpr) {
@@ -159,12 +167,12 @@ function extractEqualityComparison(
   const right = binary.right;
 
   // Case: variable == constant
-  if (isSwitchableExpression(left) && isConstantValue(right)) {
+  if (isSwitchableExpression(left) && isConstantValue(right, enumConstants)) {
     return { variable: left, constant: right };
   }
 
   // Case: constant == variable
-  if (isConstantValue(left) && isSwitchableExpression(right)) {
+  if (isConstantValue(left, enumConstants) && isSwitchableExpression(right)) {
     return { variable: right, constant: left };
   }
 
@@ -174,14 +182,14 @@ function extractEqualityComparison(
 /**
  * Extract all cases from an if-else-if chain
  */
-function extractSwitchChain(ifStmt: IfStmt): SwitchChain | null {
+function extractSwitchChain(ifStmt: IfStmt, enumConstants: ReadonlySet<string>): SwitchChain | null {
   const cases: SwitchCase[] = [];
   let switchExpr: Expression | null = null;
   let currentIf: IfStmt | null = ifStmt;
   let defaultBody: Statement | null = null;
 
   while (currentIf) {
-    const comparison = extractEqualityComparison(currentIf.condition);
+    const comparison = extractEqualityComparison(currentIf.condition, enumConstants);
 
     if (!comparison) {
       // Non-equality condition breaks the chain
@@ -351,11 +359,12 @@ function createSwitchFromChain(chain: SwitchChain): SwitchStmt {
  */
 function createSwitchReconstructor(options: SwitchReconstructOptions): Transformer {
   const minCases = options.minCases ?? 3;
+  const enumConstants = new Set(options.enumConstants ?? []);
 
   return createTransformer({
     visitIfStmt(ifStmt) {
       // Try to extract a switch chain from this if statement
-      const chain = extractSwitchChain(ifStmt);
+      const chain = extractSwitchChain(ifStmt, enumConstants);
 
       if (!chain) {
         return undefined;
@@ -379,6 +388,12 @@ function createSwitchReconstructor(options: SwitchReconstructOptions): Transform
 export interface SwitchReconstructOptions extends PluginOptions {
   /** Minimum number of cases to convert to switch (default: 3) */
   minCases?: number;
+  /**
+   * Names of enumerators (Ghidra ENUM datatype values). Only an identifier in
+   * this set is accepted as a case label; every other identifier names an
+   * object, which is not a constant expression.
+   */
+  enumConstants?: string[];
 }
 
 /**

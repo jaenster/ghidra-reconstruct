@@ -24,7 +24,7 @@ import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js
 import { namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 import { cleanFunctionComment, guardedFuncDefTypedef } from './header.js';
 import { normalizeSignatureType, collapseFuncPtrTypedef, rootQualifyShadowedType } from './platform-types.js';
-import { generateStaticLocalsBlock, emitDataValue, inferArrayDeclaration, normalizeArrayDeclaration, braceArrayInitializer, isFuncDefTypedefName, getKnownFuncDefTypedefs, setInitializerNamespace } from './globals-header.js';
+import { generateStaticLocalsBlock, emitDataValue, inferArrayDeclaration, normalizeArrayDeclaration, braceArrayInitializer, isFuncDefTypedefName, getKnownFuncDefTypedefs, getKnownEnumConstants, setInitializerNamespace } from './globals-header.js';
 
 /** normalizeSignatureType + fn-ptr-typedef double-indirection collapse, for
  *  emitting function parameter and return types ("fpFoo *" → "fpFoo"). */
@@ -741,6 +741,31 @@ export interface ImplGenContext {
   funcPtrArgCasts?: FuncPtrArgCastTables;
 }
 
+/**
+ * Per-enclosing-scope views of the shared `funcptr-arg-cast` tables. The plugin
+ * caches its transformer on the options OBJECT, so a fresh object per function
+ * would rebuild it every time; one object per distinct scope keeps that cache
+ * useful while still letting the plugin resolve unqualified names the way C++
+ * does.
+ */
+const funcPtrArgCastScopeViews = new WeakMap<object, Map<string, FuncPtrArgCastTables>>();
+
+function funcPtrArgCastsForScope(
+  tables: FuncPtrArgCastTables,
+  segments: readonly string[] | undefined,
+): FuncPtrArgCastTables {
+  if (!segments || segments.length === 0) return tables;
+  const key = segments.join('::');
+  let views = funcPtrArgCastScopeViews.get(tables);
+  if (!views) { views = new Map(); funcPtrArgCastScopeViews.set(tables, views); }
+  let view = views.get(key);
+  if (!view) {
+    view = { ...tables, enclosingSegments: [...segments] } as FuncPtrArgCastTables;
+    views.set(key, view);
+  }
+  return view;
+}
+
 /** @see ImplGenContext.funcPtrArgCasts */
 export interface FuncPtrArgCastTables {
   /** Callable name (bare AND qualified) → param index → funcdef typedef name */
@@ -788,6 +813,8 @@ export interface FuncPtrArgCastTables {
   structFieldFuncdefs?: Record<string, Record<string, string>>;
   /** Field name → funcdef, where every aggregate declaring that name agrees */
   fieldFuncdefs?: Record<string, string>;
+  /** Enclosing namespace segments for the body being transformed, outermost first */
+  enclosingSegments?: string[];
 }
 
 /** @see FuncPtrArgCastTables.funcdefDecls */
@@ -1389,6 +1416,13 @@ export function generateFunctionImplementation(
           signature: wrapperSignature(func),
           renames: bodyRenames,
           namespaceSegments: enclosingNamespace?.segments,
+          // Ghidra's own path for this scope, taken from the resolution — NOT
+          // the emitted one: `D2Client::Forms::D2WinList::Draw` is emitted as a
+          // bare `Draw` inside `namespace D2Client::Forms`, because the unit
+          // segment would shadow the same-named struct. The signature tables are
+          // keyed by the Ghidra path, so that is what an unqualified name has to
+          // be resolved against.
+          ghidraNamespaceSegments: enclosingNamespace?.ghidraSegments,
         },
       );
       body = func.name ? rewriteQuestUnionMembers(transformed.code, func.name, context?.sourceFileName, [...(func.parameters ?? []), ...(func.localVariables ?? [])]) : transformed.code;
@@ -1890,6 +1924,8 @@ function transformDecompiledCode(
     signature?: { returnType: string; params: string };
     /** Segments of the enclosing namespace block, from the resolution. */
     namespaceSegments?: readonly string[];
+    /** @see the call site — the function's own Ghidra namespace path. */
+    ghidraNamespaceSegments?: readonly string[];
     /** Only read when no `signature` is available - see the goto-cleanup option. */
     returnsVoid?: boolean;
     renames?: Record<string, string>;
@@ -1999,7 +2035,15 @@ function transformDecompiledCode(
     }
 
     if (context?.funcPtrArgCasts) {
-      perPluginOptions['funcptr-arg-cast'] = context.funcPtrArgCasts;
+      // The tables are shared, but the enclosing scope is not: a bare `Draw`
+      // resolves to a different function in each `D2Client::Forms::*` unit. Hand
+      // the plugin the scope it must look the name up in — memoized per scope so
+      // the plugin's own transformer cache (keyed on the options object) still
+      // hits.
+      perPluginOptions['funcptr-arg-cast'] = funcPtrArgCastsForScope(
+        context.funcPtrArgCasts,
+        enclosing?.ghidraNamespaceSegments ?? enclosing?.namespaceSegments,
+      );
       perPluginOptions['pointer-assign-cast'] = {
         voidPointerFunctions: context.funcPtrArgCasts.voidPointerFunctions,
       };
@@ -2092,6 +2136,14 @@ function transformDecompiledCode(
     const funcdefTypedefs = getKnownFuncDefTypedefs();
     if (funcdefTypedefs.length > 0) {
       perPluginOptions['funcdef-cast-collapse'] = { funcdefTypedefs };
+    }
+
+    // A case label must be a constant expression; only an enumerator identifier
+    // is one. Without this set switch-reconstruct treats every identifier as a
+    // constant and manufactures a switch over pointer-typed globals.
+    const enumConstants = getKnownEnumConstants();
+    if (enumConstants.length > 0) {
+      perPluginOptions['switch-reconstruct'] = { enumConstants };
     }
 
     if (enablePlugins.length > 0 || Object.keys(perPluginOptions).length > 0) {

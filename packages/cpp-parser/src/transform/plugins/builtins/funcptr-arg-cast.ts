@@ -72,6 +72,25 @@ export interface FuncPtrArgCastOptions extends PluginOptions {
    * excluded.
    */
   voidPointerFields?: string[];
+  /**
+   * Struct/union FIELD name → the funcdef its declared type names, where every
+   * aggregate declaring that name agrees. `pList->sControl.fpDraw = Draw;`
+   * stores a `BOOL(D2WinList*)` into a slot the funcdef declares as
+   * `BOOL(D2ControlStrc*)`. Both sides are right: `sControl` is the first member
+   * of every form struct, so the derived callback genuinely receives the same
+   * address — retyping either side would assert something false. Function
+   * pointer types are invariant in C++, so the original source carried the cast
+   * and writing it back is transcription, exactly as for the argument case.
+   */
+  fieldFuncdefs?: Record<string, string>;
+  /**
+   * The namespace segments enclosing the body being transformed, outermost
+   * first. A body writes `fpDraw = Draw;` with the bare name, and twelve
+   * `Draw`s exist across `D2Client::Forms::*` — so the bare name is ambiguous
+   * and the signature tables drop it. C++ resolves it by enclosing scope, from
+   * the innermost outwards, and so does this.
+   */
+  enclosingSegments?: string[];
 }
 
 /** Slot marker for a parameter/field declared plain `void*` rather than a funcdef. */
@@ -166,14 +185,52 @@ function buildTransformer(options: FuncPtrArgCastOptions): Transformer {
   const variableNames = new Set(options.variableNames ?? []);
   const rootQualified = new Set(options.rootQualifiedTypedefs ?? []);
   const voidPointerFields = new Set(options.voidPointerFields ?? []);
+  const fieldFuncdefs = options.fieldFuncdefs ?? {};
+
+  const castTo = (typedefName: string, value: Expression): Expression => {
+    usedTypedefs.add(typedefName);
+    const castType = rootQualified.has(typedefName)
+      ? Type.typedefAt(typedefName, true)
+      : Type.typedef(typedefName);
+    return Expr.cast(castType, value) as Expression;
+  };
 
   const slotsFor = (callee: string): Record<number, string> | undefined =>
     paramFuncdefs[callee] ?? paramFuncdefs[bareOf(callee)];
 
+  const enclosingSegments = options.enclosingSegments ?? [];
+
   const signatureFor = (fn: string): string | undefined => {
     // A name that also denotes data is not proof of a function.
     if (variableNames.has(bareOf(fn))) return undefined;
-    return functionSignatures[fn] ?? functionSignatures[bareOf(fn)];
+    const direct = functionSignatures[fn];
+    if (direct !== undefined) return direct;
+    // Enclosing-scope lookup, innermost first — what C++ does with a name the
+    // enclosing scope supplies, and the only thing that disambiguates `Draw`
+    // (twelve functions carry that bare name across `D2Client::Forms::*`).
+    //
+    // A name that arrives already qualified is walked too, but only DEEPER than
+    // its own qualifier: `D2Client::Forms::Draw` inside
+    // `D2Client::Forms::D2WinList` is the outer spelling of this unit's own
+    // `Draw` (the emitter drops the unit segment, so that is exactly what the
+    // emitted call binds to). A qualifier that is not a prefix of the enclosing
+    // path names something else entirely and is left alone.
+    const bare = bareOf(fn);
+    const cut = fn.lastIndexOf('::');
+    const qualifier = cut === -1 ? '' : fn.slice(0, cut);
+    const qualifierDepth = qualifier === '' ? 0 : qualifier.split('::').length;
+    const enclosingPath = enclosingSegments.join('::');
+    const walkable = qualifier === ''
+      || enclosingPath === qualifier
+      || enclosingPath.startsWith(`${qualifier}::`);
+    if (walkable) {
+      for (let i = enclosingSegments.length; i > qualifierDepth; i--) {
+        const qualified = `${enclosingSegments.slice(0, i).join('::')}::${bare}`;
+        const found = functionSignatures[qualified];
+        if (found !== undefined) return found;
+      }
+    }
+    return functionSignatures[bare];
   };
 
   return createTransformer({
@@ -181,17 +238,38 @@ function buildTransformer(options: FuncPtrArgCastOptions): Transformer {
       // `pTable[i].fpLinker = DATATBLS_LookupStringId;` — a function address
       // stored into a `void*` field. Same invariance rule as the argument case.
       if (n.kind === NodeKind.AssignExpr) {
-        if (voidPointerFields.size === 0) return undefined;
         const assign = n as AssignExpr;
         if (assign.operator !== '=') return undefined;
         if (assign.left.kind !== NodeKind.MemberExpr) return undefined;
         const member = (assign.left as MemberExpr).member;
         if (member.kind !== NodeKind.Identifier) return undefined;
-        if (!voidPointerFields.has((member as Identifier).name)) return undefined;
+        const fieldName = (member as Identifier).name;
+
+        if (voidPointerFields.has(fieldName)) {
+          const fnName = functionArgName(assign.right);
+          if (!fnName || signatureFor(fnName) === undefined) return undefined;
+          return updateNode(assign, {
+            right: Expr.cast(Type.pointer(Type.void()), assign.right) as Expression,
+          } as Partial<AssignExpr>);
+        }
+
+        // `pList->sControl.fpDraw = Draw;` — a funcdef-typed slot taking a
+        // function whose own prototype differs. Same invariance rule as the
+        // argument case, and the same refusal to cast across an arity change.
+        const typedefName = fieldFuncdefs[fieldName];
+        if (!typedefName) return undefined;
+        const target = funcdefSignatures[typedefName];
+        if (target === undefined) return undefined;
         const fnName = functionArgName(assign.right);
-        if (!fnName || signatureFor(fnName) === undefined) return undefined;
+        if (!fnName) return undefined;
+        const actual = signatureFor(fnName);
+        if (actual === undefined || actual === target) return undefined;
+        if (arityOf(actual) !== arityOf(target)) {
+          arityMismatches++;
+          return undefined;
+        }
         return updateNode(assign, {
-          right: Expr.cast(Type.pointer(Type.void()), assign.right) as Expression,
+          right: castTo(typedefName, assign.right),
         } as Partial<AssignExpr>);
       }
 
@@ -235,11 +313,7 @@ function buildTransformer(options: FuncPtrArgCastOptions): Transformer {
         }
 
         changed = true;
-        usedTypedefs.add(typedefName);
-        const castType = rootQualified.has(typedefName)
-          ? Type.typedefAt(typedefName, true)
-          : Type.typedef(typedefName);
-        return Expr.cast(castType, arg) as Expression;
+        return castTo(typedefName, arg);
       });
 
       if (!changed) return undefined;

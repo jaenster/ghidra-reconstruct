@@ -1405,6 +1405,27 @@ export function getKnownFuncDefTypedefs(): string[] {
 }
 
 /**
+ * Every enumerator name Ghidra's ENUM datatypes define. A `case` label must be a
+ * constant expression, and an identifier is only knowably one when it names an
+ * enumerator — a global variable's identifier is not. Populated from the ENUM
+ * datatypes before emission; consumed by `switch-reconstruct`, which otherwise
+ * accepted any identifier as a case label and manufactured
+ * `switch (pClickedAnim) { case gpAnimImgCharCreateAmazon: }`.
+ */
+const knownEnumConstants = new Set<string>();
+
+/** Populate the enumerator registry. Must run before emission. */
+export function setKnownEnumConstants(names: Iterable<string>): void {
+  knownEnumConstants.clear();
+  for (const n of names) knownEnumConstants.add(n);
+}
+
+/** The registered enumerator names (for the switch-reconstruct plugin). */
+export function getKnownEnumConstants(): string[] {
+  return [...knownEnumConstants];
+}
+
+/**
  * Globals declared as MULTIDIMENSIONAL arrays (`T[N][M]…`), mapped to their
  * element base type. Taking the address of such a global (`&name`) yields
  * `T(*)[N][M]`, but the pointer field it initializes wants `T*` — and unlike a

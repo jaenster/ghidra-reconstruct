@@ -208,9 +208,25 @@ export function isMsvcEhInternal(name: string): boolean {
  *   2. its name is a known MSVC C++ exception-handling internal (these sit at
  *      root category `/`, shared with game types, so they need a name-set).
  */
+/**
+ * Winsock types Ghidra filed under the ROOT category instead of `/winsock.h`,
+ * so the category test cannot see them. Their siblings — `sockaddr`, `hostent`,
+ * `fd_set`, `timeval`, `WSAData` — all carry `/winsock.h` and are guarded
+ * correctly; `sockaddr_in` alone lost its attribution, and emitting an
+ * unguarded definition of it collides with `<winsock2.h>` in every translation
+ * unit that reaches it (178 diagnostics when it first became reachable).
+ *
+ * The authoritative fix is in Ghidra — move the type to `/winsock.h` — at which
+ * point this entry becomes redundant but stays harmless.
+ */
+const ROOT_CATEGORY_WINSOCK_TYPES = new Set<string>([
+  'sockaddr_in',
+]);
+
 export function isLibraryType(name: string, category: string): boolean {
   if (SYSTEM_HEADER_CATEGORY_RE.test(category)) return true;
   if (EH_INTERNAL_TYPES.has(name)) return true;
+  if (ROOT_CATEGORY_WINSOCK_TYPES.has(name)) return true;
   return false;
 }
 
