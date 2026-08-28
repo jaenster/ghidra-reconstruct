@@ -19,7 +19,7 @@ import { resolveCrtInclude } from './crt-mapping.js';
 import { CPP_KEYWORDS } from './header.js';
 
 // Import cpp-parser for code transformation
-import { transformGhidraCode, preprocessGhidraCode, isGhidraGeneratedName, suggestBetterName, takeFuncPtrArgCastTypedefs, type TransformResult } from '@ghidra-mcp/cpp-parser';
+import { transformGhidraCode, preprocessGhidraCode, isGhidraGeneratedName, suggestBetterName, takeFuncPtrArgCastTypedefs, type TransformResult, type FuncPtrTarget } from '@ghidra-mcp/cpp-parser';
 import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js';
 import { namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 import { cleanFunctionComment, guardedFuncDefTypedef } from './header.js';
@@ -693,8 +693,13 @@ export interface ImplGenContext {
    * the shadowing namespace must be spelled `::ButtonWrapper`.
    */
   shadowedTypeNames?: Set<string>;
-  /** Map from function address (bigint) to function name for pointer literal resolution */
-  functionAddressMap?: Map<bigint, string>;
+  /**
+   * Map from function address (bigint) to the function defined there, carrying
+   * the namespace a reference to it has to name. Built once, from the run's
+   * namespace resolution, so a func-ptr literal is spelled the way the
+   * definition is.
+   */
+  functionAddressMap?: Map<bigint, FuncPtrTarget>;
   /** Map from function name to its header path — for adding includes when func-ptr-literal resolves references */
   functionNameToHeader?: Map<string, string>;
   /**

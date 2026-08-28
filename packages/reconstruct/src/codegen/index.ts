@@ -48,7 +48,7 @@ import type {
   DataValue,
 } from '../types.js';
 import { resolveOverridePlaceholders } from './impl.js';
-import { VOID_POINTER_SLOT } from '@ghidra-mcp/cpp-parser';
+import { VOID_POINTER_SLOT, type FuncPtrTarget } from '@ghidra-mcp/cpp-parser';
 
 import { emittedFieldType, generateHeader, generateFunctionDeclaration, setKnownFuncDefs, sigType } from './header.js';
 import { generateImplementation, setQuestStructLayouts, setStructFieldRenames, decompiledReturnType, decompiledFunctionName, type ImplGenContext, type FuncPtrArgCastTables } from './impl.js';
@@ -336,22 +336,6 @@ export function generateProject(
     console.log(`Method call mappings: ${Object.keys(mergedMappings).length} entries`);
   }
 
-  // Build function address map for func-ptr-literal resolution
-  // Address format is "Game.exe.ram:005011f0" — extract hex after last colon
-  const functionAddressMap = new Map<bigint, string>();
-  for (const func of functions) {
-    if (func.name.startsWith('FUN_')) continue;
-    const hexPart = func.address.includes(':')
-      ? func.address.slice(func.address.lastIndexOf(':') + 1)
-      : func.address;
-    try {
-      const addr = BigInt('0x' + hexPart);
-      functionAddressMap.set(addr, func.name);
-    } catch {
-      // Skip addresses that can't be parsed
-    }
-  }
-
   // Build bitfield catalog from struct metadata
   const bitfieldCatalog = buildBitfieldCatalog(dataTypes);
 
@@ -360,7 +344,6 @@ export function generateProject(
     libraries,
     methodConversions,
     methodMappings: Object.keys(mergedMappings).length > 0 ? mergedMappings : undefined,
-    functionAddressMap: functionAddressMap.size > 0 ? functionAddressMap : undefined,
     bitfieldCatalog: bitfieldCatalog.size > 0 ? bitfieldCatalog : undefined,
   };
 
@@ -490,6 +473,52 @@ export function generateProject(
   // no scope declares. Promote them back before anything is emitted, so the
   // declaration and the reference come from one place.
   promoteInitializerReferencedStaticLocals(analyzedGlobals);
+
+  // Resolve every symbol's namespace ONCE, for the whole run, and bind it to
+  // that symbol's address. Function definition, header declaration, globals.h
+  // extern, globals.cpp definition, struct-header co-located extern and every
+  // qualified reference all render from this one entity. It is built here, over
+  // the WHOLE model, rather than inside the per-target file generator: that ran
+  // once per target and each run replaced the previous one's address claims.
+  {
+    const structUnionEnumNames = new Set<string>();
+    for (const dt of dataTypes) {
+      if (dt.kind === 'STRUCTURE' || dt.kind === 'UNION' || dt.kind === 'ENUM') {
+        structUnionEnumNames.add(dt.name);
+      }
+    }
+    buildNamespaceResolution(structUnionEnumNames, [...functions, ...analyzedGlobals]);
+  }
+
+  // Build the function address map for func-ptr-literal resolution.
+  // Address format is "Game.exe.ram:005011f0" — extract hex after last colon.
+  //
+  // A function's address is taken from anywhere: a dispatch table in one module
+  // names a handler defined in another. So the entry carries the namespace the
+  // DEFINITION is emitted in, taken from the resolution above, and the reference
+  // is spelled with it. Three kinds of function keep the bare name because that
+  // is where their definition actually is: a method is emitted as `Class::name`
+  // at root scope, a library function is declared by a real header at root
+  // scope, and an external one has no definition here at all.
+  const functionAddressMap = new Map<bigint, FuncPtrTarget>();
+  for (const func of functions) {
+    if (func.name.startsWith('FUN_')) continue;
+    const hexPart = func.address.includes(':')
+      ? func.address.slice(func.address.lastIndexOf(':') + 1)
+      : func.address;
+    let addr: bigint;
+    try {
+      addr = BigInt('0x' + hexPart);
+    } catch {
+      continue; // Skip addresses that can't be parsed
+    }
+    const rootScoped = Boolean(func.parentClass || func.isLibrary || func.isExternal);
+    functionAddressMap.set(addr, {
+      name: func.name,
+      namespaceSegments: rootScoped ? [] : namespaceResolution().of(func).segments,
+    });
+  }
+  if (functionAddressMap.size > 0) context.functionAddressMap = functionAddressMap;
 
   // Qualified names (namespace::name) of every emitted function. A data symbol
   // can share its name with a function in the same namespace (getter + backing
@@ -1667,20 +1696,8 @@ function generateFilesForFunctions(
   const analyzedGlobals = (globals as AnalyzedDataSymbol[]).filter(g => 'scope' in g);
   const allAnalyzedGlobalNames = new Set(analyzedGlobals.map(g => g.suggestedName || g.name));
 
-  // Resolve every symbol's namespace ONCE, before anything is emitted, and bind
-  // it to that symbol's address. Function definition, header declaration,
-  // globals.h extern, globals.cpp definition, struct-header co-located extern
-  // and every qualified reference all render from this one entity — they used to
-  // derive it five times, three different ways.
-  {
-    const structUnionEnumNames = new Set<string>();
-    for (const dt of dataTypes) {
-      if (dt.kind === 'STRUCTURE' || dt.kind === 'UNION' || dt.kind === 'ENUM') {
-        structUnionEnumNames.add(dt.name);
-      }
-    }
-    buildNamespaceResolution(structUnionEnumNames, [...functions, ...analyzedGlobals]);
-  }
+  // The run's namespace resolution is built once, over the whole model, in
+  // generateProject — before any target is generated.
   const { typeOwnerMap, structsWithOwnUnit, extraHeaderTypes } = computeTypeOwnership({
     organized,
     classes,
@@ -2012,7 +2029,7 @@ function generateFilesForFunctions(
   // One index over every name the per-file include feedback below asks about,
   // so each generated .cpp is scanned once instead of ~20,000 times.
   const dependencyNeedles = new NeedleIndex([
-    ...(context.functionAddressMap ? context.functionAddressMap.values() : []),
+    ...(context.functionAddressMap ? [...context.functionAddressMap.values()].map(t => t.name) : []),
     ...typeOwnerMap.keys(),
   ]);
 
@@ -2159,7 +2176,8 @@ function generateFilesForFunctions(
       // is already part of implContent).
       if (context.functionAddressMap) {
         const ambiguous: string[] = [];
-        for (const [, funcName] of context.functionAddressMap) {
+        for (const [, target] of context.functionAddressMap) {
+          const funcName = target.name;
           if (!mentioned.has(funcName)) continue;
           const candidates = funcNameCandidates.get(funcName);
           if (!candidates || candidates.length === 0) continue;

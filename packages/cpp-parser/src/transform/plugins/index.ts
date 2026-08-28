@@ -352,6 +352,7 @@ export {
 export {
   funcPtrLiteralPlugin,
   type FuncPtrLiteralOptions,
+  type FuncPtrTarget,
 } from './builtins/func-ptr-literal.js';
 
 // ============================================

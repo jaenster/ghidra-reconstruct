@@ -21,7 +21,7 @@ import type {
 import type { MethodConversionRegistry } from '../methods/index.js';
 import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js';
 import { namespaceResolution, renderNamespace } from './namespace-resolution.js';
-import { isGhidraGeneratedName, suggestBetterName } from '@ghidra-mcp/cpp-parser';
+import { isGhidraGeneratedName, suggestBetterName, type FuncPtrTarget } from '@ghidra-mcp/cpp-parser';
 import { isPlatformOrBuiltinType, isLibraryType, normalizeSignatureType, normalizeWideCharType, collapseFuncPtrTypedef, rootQualifyShadowedType, emittedParameterName, WINDOWS_STRUCTS, platformDeclaredFunctionNames } from './platform-types.js';
 import { generateExternDeclaration, isFuncDefTypedefName } from './globals-header.js';
 
@@ -120,10 +120,10 @@ export function generateHeader(
   const lines: string[] = [];
 
   // Build address→name map for resolving FUN_ references in comments
-  const fnAddrMap = new Map<bigint, string>();
+  const fnAddrMap = new Map<bigint, FuncPtrTarget>();
   for (const f of functions) {
     if (f.address && !f.name.startsWith('FUN_')) {
-      try { fnAddrMap.set(BigInt(f.address), f.name); } catch { /* skip invalid */ }
+      try { fnAddrMap.set(BigInt(f.address), { name: f.name }); } catch { /* skip invalid */ }
     }
   }
 
@@ -694,7 +694,7 @@ function cleanInlineComment(comment: string): string {
  */
 export function cleanFunctionComment(
   comment: string,
-  functionAddressMap?: Map<bigint, string>,
+  functionAddressMap?: Map<bigint, FuncPtrTarget>,
 ): string {
   // Convert literal \n sequences to actual newlines
   const rawLines = comment.replace(/\\n/g, '\n').split('\n');
@@ -746,8 +746,8 @@ export function cleanFunctionComment(
   if (functionAddressMap && result.includes('FUN_')) {
     result = result.replace(/FUN_([0-9a-fA-F]{6,8})/g, (_match, hex: string) => {
       const addr = BigInt('0x' + hex);
-      const name = functionAddressMap.get(addr);
-      return name ?? _match;
+      const target = functionAddressMap.get(addr);
+      return target?.name ?? _match;
     });
   }
 
@@ -760,7 +760,7 @@ export function cleanFunctionComment(
 export function generateFunctionDeclaration(
   func: ExtractedFunction,
   options: ReconstructOptions,
-  functionAddressMap?: Map<bigint, string>,
+  functionAddressMap?: Map<bigint, FuncPtrTarget>,
 ): string {
   let commentBlock = '';
   if (func.comment) {
