@@ -1702,6 +1702,30 @@ function generateFilesForFunctions(
   for (const typeName of typeOwnerMap.keys()) {
     if (namespaceComponents.has(typeName)) shadowedTypeNames.add(typeName);
   }
+  // A FUNCTION shadows a same-named type in exactly the same way a namespace
+  // does, and Ghidra produces the collision wholesale: 53 functions carry the
+  // name of the funcdef that describes them — `Push`, `Draw`, `Key`, `Release`,
+  // `fpDrawGroundTile`. The typedef is emitted at ROOT scope and the function
+  // inside its own namespace, so inside that namespace the FUNCTION wins
+  // unqualified lookup and the type stops being a type:
+  //
+  //     namespace D2Win::Src {
+  //       Push pPVar2 = pButton->sControl.fpPush;   // error: expected ';' before 'pPVar2'
+  //       pTail = *(Push*)(pTail + 0x220);          // error: expected primary-expression
+  //     }
+  //
+  // Same evidence, same remedy: spell the type `::Push`. Restricted to
+  // FUNCTION_DEFINITIONs because those are the ones Ghidra names after the
+  // function; a struct sharing a constructor's name is handled by the `struct`
+  // keyword the header emitter already inserts.
+  {
+    const funcDefNames = new Set(
+      dataTypes.filter(dt => dt.kind === 'FUNCTION_DEFINITION').map(dt => dt.name)
+    );
+    for (const func of functions) {
+      if (funcDefNames.has(func.name)) shadowedTypeNames.add(func.name);
+    }
+  }
   context.shadowedTypeNames = shadowedTypeNames;
   setShadowedTypeNames(shadowedTypeNames);
 

@@ -23,7 +23,7 @@ import { transformGhidraCode, preprocessGhidraCode, isGhidraGeneratedName, sugge
 import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js';
 import { namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 import { cleanFunctionComment, guardedFuncDefTypedef } from './header.js';
-import { normalizeSignatureType, collapseFuncPtrTypedef, rootQualifyShadowedType } from './platform-types.js';
+import { normalizeSignatureType, collapseFuncPtrTypedef, rootQualifyShadowedType, emittedParameterName } from './platform-types.js';
 import { generateStaticLocalsBlock, emitDataValue, inferArrayDeclaration, normalizeArrayDeclaration, braceArrayInitializer, isFuncDefTypedefName, getKnownFuncDefTypedefs, getKnownEnumConstants, setInitializerNamespace } from './globals-header.js';
 
 /** normalizeSignatureType + fn-ptr-typedef double-indirection collapse, for
@@ -1378,12 +1378,8 @@ export function generateFunctionImplementation(
     }
 
     for (const p of renumberParams(func.parameters ?? [])) {
-      const baseType = sigType(p.dataType)
-        .replace(/\s*[*&]+\s*$/, '')
-        .replace(/^(struct|class|union|enum)\s+/, '')
-        .replace(/^::/, '')
-        .trim();
-      if (p.name === baseType) bodyRenames[p.name] = `n${p.name}`;
+      const emitted = emittedParameterName(p.name, sigType(p.dataType));
+      if (emitted !== p.name) bodyRenames[p.name] = emitted;
     }
   }
 
@@ -1586,11 +1582,8 @@ function signatureParameterList(func: ExtractedFunction): string {
   let params = renumberParams(func.parameters)
     .map(p => {
       const type = sigType(p.dataType);
-      let name = p.name;
       // Avoid param name shadowing its own type
-      const baseType = type.replace(/\s*[*&]+\s*$/, '').replace(/^(struct|class|union|enum)\s+/, '').trim();
-      if (name === baseType) name = `n${name}`;
-      return `${type} ${name}`;
+      return `${type} ${emittedParameterName(p.name, type)}`;
     })
     .join(', ');
   if (func.hasVarArgs) params = params ? `${params}, ...` : '...';

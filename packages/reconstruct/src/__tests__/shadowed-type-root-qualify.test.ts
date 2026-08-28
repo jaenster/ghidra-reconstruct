@@ -7,7 +7,7 @@
  */
 import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert';
-import { setShadowedTypeNames, rootQualifyShadowedType, isVoidPointerSpelling } from '../codegen/platform-types.js';
+import { setShadowedTypeNames, rootQualifyShadowedType, isVoidPointerSpelling, emittedParameterName } from '../codegen/platform-types.js';
 
 describe('rootQualifyShadowedType', () => {
   afterEach(() => setShadowedTypeNames(undefined));
@@ -46,5 +46,55 @@ describe('isVoidPointerSpelling', () => {
     for (const t of ['D2UnitStrc *', 'Mouse', 'void**', undefined]) {
       assert.ok(!isVoidPointerSpelling(t), String(t));
     }
+  });
+});
+
+/**
+ * A FUNCTION shadows a same-named type exactly the way a namespace does, and
+ * Ghidra makes the collision wholesale: 53 functions carry the name of the
+ * funcdef that describes them (`Push`, `Draw`, `Key`, `Release`,
+ * `fpDrawGroundTile`). The typedef is emitted at ROOT scope, the function inside
+ * its own namespace, so inside that namespace the FUNCTION wins unqualified
+ * lookup and `Push pPush;` stops parsing.
+ */
+describe('a function shadowing its own funcdef', () => {
+  afterEach(() => setShadowedTypeNames(undefined));
+
+  it('is respelled root-qualified like any other shadowed type', () => {
+    setShadowedTypeNames(new Set(['Push', 'fpDrawGroundTile']));
+    assert.equal(rootQualifyShadowedType('Push'), '::Push');
+    assert.equal(rootQualifyShadowedType('Push *'), '::Push *');
+    assert.equal(rootQualifyShadowedType('fpDrawGroundTile'), '::fpDrawGroundTile');
+  });
+});
+
+/**
+ * The parameter-name rule and its one implementation.
+ *
+ * `eD2ItemFlag eD2ItemFlag` hides its own type, so such a parameter is emitted
+ * as `n<name>`. The rule lived in three places and only the BODY-rename copy
+ * stripped a leading `::`. The moment a parameter's type became root-qualified
+ * — which is exactly what the shadowing above does — the body renamed the
+ * parameter and the two signature emitters did not: the declaration read
+ * `::fpRequiredUserAction fpRequiredUserAction` while the body still said
+ * `nfpRequiredUserAction`, undeclared. Measured at +6 errors across three files.
+ */
+describe('emittedParameterName', () => {
+  it('renames a parameter that hides its own type', () => {
+    assert.equal(emittedParameterName('eD2ItemFlag', 'eD2ItemFlag'), 'neD2ItemFlag');
+    assert.equal(emittedParameterName('Item', 'struct Item *'), 'nItem');
+  });
+
+  it('sees through a root qualifier, so all three emitters agree', () => {
+    assert.equal(
+      emittedParameterName('fpRequiredUserAction', '::fpRequiredUserAction'),
+      'nfpRequiredUserAction'
+    );
+    assert.equal(emittedParameterName('Item', 'struct ::Item *'), 'nItem');
+  });
+
+  it('leaves a parameter whose name differs from its type alone', () => {
+    assert.equal(emittedParameterName('pUnit', 'D2UnitStrc *'), 'pUnit');
+    assert.equal(emittedParameterName('nCount', '::Push'), 'nCount');
   });
 });

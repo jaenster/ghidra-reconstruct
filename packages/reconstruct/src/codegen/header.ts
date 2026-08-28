@@ -22,7 +22,7 @@ import type { MethodConversionRegistry } from '../methods/index.js';
 import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js';
 import { namespaceResolution, renderNamespace } from './namespace-resolution.js';
 import { isGhidraGeneratedName, suggestBetterName } from '@ghidra-mcp/cpp-parser';
-import { isPlatformOrBuiltinType, isLibraryType, normalizeSignatureType, normalizeWideCharType, collapseFuncPtrTypedef, rootQualifyShadowedType, WINDOWS_STRUCTS, platformDeclaredFunctionNames } from './platform-types.js';
+import { isPlatformOrBuiltinType, isLibraryType, normalizeSignatureType, normalizeWideCharType, collapseFuncPtrTypedef, rootQualifyShadowedType, emittedParameterName, WINDOWS_STRUCTS, platformDeclaredFunctionNames } from './platform-types.js';
 import { generateExternDeclaration, isFuncDefTypedefName } from './globals-header.js';
 
 /** normalizeSignatureType + fn-ptr-typedef double-indirection collapse, for
@@ -415,6 +415,16 @@ export function generateHeader(
   if (!classInfo) {
     // Global/file-level function declarations
     // Build set of known type names for filtering constructor/destructor artifacts
+    // A function whose name is a data type's name is NOT declared here. For the
+    // 53 functions Ghidra names after their own funcdef (`Push`, `Draw`,
+    // `Release`, `fpDrawGroundTile`) that is a real loss — every other TU calling
+    // `D2Win::Src::Push` gets "is not a member of" — and letting them through is
+    // legal C++, because the typedef is at ROOT scope and the function is inside
+    // its namespace. It was tried and measured: +25 errors, because the
+    // declaration then lets the compiler compare each function against the
+    // funcdef slot it is stored in, and they disagree — which is the SAME
+    // wrong-signature bug `disambiguateCategoryDuplicates` repairs upstream. Redo
+    // this after a regen has carried that fix into the model, not before.
     const knownTypeNames = new Set<string>();
     if (dataTypes) for (const dt of dataTypes) knownTypeNames.add(dt.name);
     for (const ws of WINDOWS_STRUCTS) knownTypeNames.add(ws);
@@ -762,11 +772,8 @@ export function generateFunctionDeclaration(
   let params = renumberParams(func.parameters)
     .map(p => {
       const type = sigType(p.dataType);
-      let name = p.name;
       // Avoid param name shadowing its own type (e.g., "eD2ItemFlag eD2ItemFlag")
-      const baseType = type.replace(/\s*[*&]+\s*$/, '').replace(/^(struct|class|union|enum)\s+/, '').trim();
-      if (name === baseType) name = `n${name}`;
-      return `${type} ${name}`;
+      return `${type} ${emittedParameterName(p.name, type)}`;
     })
     .join(', ');
   if (func.hasVarArgs) params = params ? `${params}, ...` : '...';

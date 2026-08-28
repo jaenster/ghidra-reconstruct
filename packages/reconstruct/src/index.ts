@@ -165,6 +165,7 @@ import type {
 } from './types.js';
 import { defaultOptions } from './types.js';
 import { disambiguateVtableTypes } from './modules/vtable-types.js';
+import { disambiguateCategoryDuplicates } from './modules/category-duplicate-types.js';
 import { lintAutoProtoConventions, describeAutoProtoLint } from './modules/auto-proto-lint.js';
 
 import { extractAll, type ExtractionResult } from './extract/index.js';
@@ -786,6 +787,27 @@ export async function reconstruct(
         warnings.push(
           `Named ${vt.renamed} per-class vtable structures after their owning class ` +
           `(${vt.fieldsRepointed} struct fields repointed)`
+        );
+      }
+    }
+
+    // The same collision, one level more general: any two DIFFERENT types that
+    // share a bare name across categories. `fpDrawGroundTile` is a four-int stub
+    // under /D2GfxHelperStrc and the renderer's real 9-parameter entry point
+    // under /D2RenderCallbackStrc; the dedup below kept the stub and
+    // `D2RendererFunctionsStrc.nfpDrawGroundTile` silently took its signature.
+    {
+      const cd = disambiguateCategoryDuplicates(dataTypes);
+      if (cd.renamed > 0) {
+        warnings.push(
+          `Named ${cd.renamed} data types after the struct that owns their category, ` +
+          `so a bare-name dedup cannot drop them (${cd.fieldsRepointed} struct fields repointed)`
+        );
+      }
+      if (cd.unresolved.length > 0) {
+        warnings.push(
+          `${cd.unresolved.length} same-named data types have no identifiable owner and are ` +
+          `still dropped by dedup: ${cd.unresolved.slice(0, 10).join(', ')}`
         );
       }
     }

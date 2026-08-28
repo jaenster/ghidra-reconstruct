@@ -1363,3 +1363,25 @@ export function isVoidPointerSpelling(type: string | undefined): boolean {
   const t = type.replace(/\bconst\b/g, '').replace(/\s+/g, '').trim();
   return VOID_POINTER_SPELLINGS.has(t);
 }
+
+/**
+ * The name a parameter is emitted under, given its already-rendered type.
+ *
+ * `eD2ItemFlag eD2ItemFlag` is not a declaration a body can then name — the
+ * parameter hides its own type — so such a parameter is emitted as `n<name>`.
+ *
+ * The comparison has to ignore a leading `::`. The rule lived in three places
+ * and only ONE of them stripped it, so as soon as a parameter's type became
+ * root-qualified (`::fpRequiredUserAction`, once a same-named function shadowed
+ * it) the body renamed the parameter and the two signature emitters did not:
+ * the declaration said `fpRequiredUserAction` and the body said
+ * `nfpRequiredUserAction`. One rule, one implementation.
+ */
+export function emittedParameterName(name: string, renderedType: string): string {
+  const baseType = renderedType
+    .replace(/\s*[*&]+\s*$/, '')
+    .replace(/^(struct|class|union|enum)\s+/, '')
+    .replace(/^::/, '')
+    .trim();
+  return name === baseType ? `n${name}` : name;
+}
