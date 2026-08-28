@@ -22,3 +22,7 @@ output-d2server/
 run-d2server.ts
 .idea/
 *.tsbuildinfo
+
+# generated reconstruction output (lives in its own repo)
+repo-game/
+repo-menu/

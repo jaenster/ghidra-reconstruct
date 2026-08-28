@@ -60,7 +60,7 @@ describe('unnamed struct/union members use Ghidra decompiler auto-names', () => 
     assert.doesNotMatch(out, /_pad_/);
   });
 
-  it('still collapses genuine undefined1 filler into _pad_ arrays', () => {
+  it('names every byte of an undefined1 filler run, not just the first', () => {
     const struct: ExtractedStruct = {
       kind: 'STRUCTURE',
       name: 'FillerStrc',
@@ -77,8 +77,13 @@ describe('unnamed struct/union members use Ghidra decompiler auto-names', () => 
 
     const out = generateStructDeclaration(struct);
 
-    // Consecutive unnamed undefined1 bytes are real filler the decompiler
-    // never references — they must stay collapsed as a _pad_ array.
-    assert.match(out, /uint8_t _pad_0x04\[4\];/);
+    // Filler bytes are NOT unreferenced: Ghidra's decompiler names an access into
+    // undefined space `field_0x<offset>` at the offset it touches, so every byte
+    // of the run needs a member or a mid-run access has nothing to bind to.
+    assert.match(out, /uint8_t field_0x4;/);
+    assert.match(out, /uint8_t field_0x5;/);
+    assert.match(out, /uint8_t field_0x6;/);
+    assert.match(out, /uint8_t field_0x7;/);
+    assert.doesNotMatch(out, /_pad_/);
   });
 });

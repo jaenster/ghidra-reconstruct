@@ -121,10 +121,7 @@ export function generateReadme(
   lines.push('The source maps (`.cpp.map` files) contain address mappings back to the original binary.');
   lines.push('');
 
-  // Generation timestamp
   lines.push('---');
-  lines.push('');
-  lines.push(`*Generated: ${new Date().toISOString()}*`);
 
   return lines.join('\n');
 }

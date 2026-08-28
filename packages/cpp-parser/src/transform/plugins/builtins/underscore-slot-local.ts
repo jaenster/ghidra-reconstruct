@@ -52,7 +52,11 @@ function createUnderscoreSlotLocalTransformer(options: UnderscoreSlotLocalOption
       // passed param/local types (the wrapped body has no signature, so param types
       // arrive via options, built lazily from their Ghidra type string).
       const typeByName = new Map<string, TypeNode>();
-      for (const p of node.parameters) typeByName.set(p.name.name, (p as ParameterDecl).type);
+      // `name` is null for unnamed parameters (`void f(void)`, `int f(int)`) - skip those.
+      for (const p of node.parameters) {
+        const pd = p as ParameterDecl;
+        if (pd.name) typeByName.set(pd.name.name, pd.type);
+      }
       for (const d of findNodesByKind(node.body, NodeKind.VariableDecl)) {
         const v = d as VariableDecl;
         if (!typeByName.has(v.name.name)) typeByName.set(v.name.name, v.type);

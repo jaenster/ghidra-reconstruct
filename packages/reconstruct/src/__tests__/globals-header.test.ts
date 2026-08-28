@@ -271,10 +271,13 @@ describe('array-suffix global names ("gFoo[91]")', () => {
     );
   });
 
-  it('still skips genuinely invalid (RTTI/template) names', () => {
-    assert.match(
+  it('declares an RTTI/template name under its sanitized spelling', () => {
+    // Refusing to declare it does not remove the REFERENCES to it (globals.cpp
+    // initializers and function bodies both name these symbols), so the answer
+    // is one sanitizer applied on both sides, not a skip on one of them.
+    assert.strictEqual(
       generateExternDeclaration(g('class_TSHashTable<struct_X>_RTTI', 'int')),
-      /^\/\/ skipped:/
+      'extern int class_TSHashTable_struct_X__RTTI;'
     );
   });
 

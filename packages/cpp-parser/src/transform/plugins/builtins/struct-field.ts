@@ -9,6 +9,7 @@
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
+import { typeNodeName } from './call-arg-cast.js';
 import type {
   ASTNode,
   Expression,
@@ -151,8 +152,7 @@ const SCALAR_TYPEDEF_RE =
 function isScalarPointee(t: TypeNode): boolean {
   if (t.kind === NodeKind.BuiltinType) return true;
   if (t.kind === NodeKind.TypedefType) {
-    const nm = (t as TypedefType).name as { name?: string };
-    const n = typeof nm?.name === 'string' ? nm.name : '';
+    const n = typeNodeName((t as TypedefType).name) ?? '';
     return SCALAR_TYPEDEF_RE.test(n) || /^e[A-Z]/.test(n);
   }
   return false;

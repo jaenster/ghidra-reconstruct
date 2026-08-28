@@ -178,7 +178,18 @@ describe('ModuleGraph', () => {
       assert.deepStrictEqual(a.implIncludes, []);
     });
 
-    it('by-pointer deps go to headerIncludes', () => {
+    /**
+     * CHANGED: this used to assert `by-pointer` -> headerIncludes. It does not,
+     * and must not: a `TypeB *` field or parameter needs only `struct TypeB;`,
+     * which the header emitter emits itself (collectForwardDeclarations,
+     * header.ts:157 - every generated header carries a `// Forward declarations`
+     * block). Promoting by-pointer deps to full header includes was measured on
+     * the real tree via `run.ts --codegen-only`: 20051 -> 28563 mingw
+     * -fsyntax-only errors over the same 400 .cpp, because the extra includes
+     * drag in transitively conflicting definitions. So by-pointer belongs in
+     * implIncludes and the expectation, not the code, was wrong.
+     */
+    it('by-pointer deps go to implIncludes, not headerIncludes', () => {
       const g = createTestGraph();
       makeModule(g, 'A.h', 'A');
       makeModule(g, 'B.h', 'B');
@@ -187,8 +198,8 @@ describe('ModuleGraph', () => {
 
       const resolved = g.resolve();
       const a = resolved.get('A.h')!;
-      assert.deepStrictEqual(a.headerIncludes, ['B.h']);
-      assert.deepStrictEqual(a.implIncludes, []);
+      assert.deepStrictEqual(a.headerIncludes, []);
+      assert.deepStrictEqual(a.implIncludes, ['B.h']);
     });
 
     it('call deps go to implIncludes', () => {
@@ -305,7 +316,16 @@ describe('ModuleGraph', () => {
       assert.ok(totalHeaderIncludes < 2, 'Expected cycle to be broken — should have < 2 mutual header includes');
     });
 
-    it('mutual pointer deps create a cycle that resolve() breaks', () => {
+    /**
+     * CHANGED: this used to assert that mutual by-pointer deps form a cycle
+     * resolve() has to break. They do not - that only followed from the
+     * (wrong, see above) premise that by-pointer deps are header-level. Because
+     * pointer deps stay out of the header, mutual pointer references need no
+     * cycle-breaking at all: each header forward-declares the other's type and
+     * includes it only from the .cpp. Asserting a cycle here was asserting that
+     * the graph manufactures a problem it then has to undo.
+     */
+    it('mutual pointer deps form no header cycle to break', () => {
       const g = createTestGraph();
       makeModule(g, 'A.h', 'A');
       makeModule(g, 'B.h', 'B');
@@ -314,17 +334,18 @@ describe('ModuleGraph', () => {
       g.addDependency('A.h', 'TypeB', 'by-pointer');
       g.addDependency('B.h', 'TypeA', 'by-pointer');
 
-      // by-pointer deps are now header-level, so mutual deps form a cycle
-      const cycles = g.findCycles();
-      assert.strictEqual(cycles.length, 1);
+      assert.deepStrictEqual(g.findCycles(), []);
 
-      // resolve() breaks the cycle: one edge becomes a forward decl
       const resolved = g.resolve();
       const a = resolved.get('A.h')!;
       const b = resolved.get('B.h')!;
-      // One side includes the other, the other side uses a forward decl
-      const totalFwdDecls = a.forwardDecls.length + b.forwardDecls.length;
-      assert.ok(totalFwdDecls > 0, 'Expected at least one forward decl to break cycle');
+      assert.deepStrictEqual(a.headerIncludes, []);
+      assert.deepStrictEqual(b.headerIncludes, []);
+      assert.deepStrictEqual(a.implIncludes, ['B.h']);
+      assert.deepStrictEqual(b.implIncludes, ['A.h']);
+      // Nothing to break, so nothing is broken.
+      assert.deepStrictEqual(a.forwardDecls, []);
+      assert.deepStrictEqual(b.forwardDecls, []);
     });
   });
 

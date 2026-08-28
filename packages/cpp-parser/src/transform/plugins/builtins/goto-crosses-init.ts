@@ -47,6 +47,15 @@ function isConst(vd: VariableDecl): boolean {
   return !!t.isConst || (Array.isArray(t.qualifiers) && t.qualifiers.includes('const'));
 }
 
+/** True when `stmt` is, or contains anywhere below it, a label some goto targets. */
+function containsGotoTarget(stmt: Statement, gotoTargets: Set<string>): boolean {
+  if (stmt.kind === NodeKind.LabelStmt && gotoTargets.has((stmt as LabelStmt).label.name)) return true;
+  for (const l of findNodesByKind(stmt as ASTNode, NodeKind.LabelStmt)) {
+    if (gotoTargets.has((l as LabelStmt).label.name)) return true;
+  }
+  return false;
+}
+
 function createGotoCrossesInitTransformer(): Transformer {
   return createTransformer({
     visitFunctionDecl(node: FunctionDecl): ASTNode | undefined {
@@ -62,14 +71,13 @@ function createGotoCrossesInitTransformer(): Transformer {
       const inner = createTransformer({
         visitCompoundStmt(block: CompoundStmt): ASTNode | undefined {
           const stmts = block.statements;
-          // Last goto-targeted label in this block: any initialized decl before
-          // it may be jumped over.
+          // Last statement of this block that IS, or CONTAINS, a goto-targeted label.
+          // A label nested in an inner scope (an if/else branch, a loop body) is still
+          // jumped to from this block, so an initialized decl before it is crossed just
+          // the same — searching only direct children misses those.
           let lastTargetIdx = -1;
           for (let i = 0; i < stmts.length; i++) {
-            const s = stmts[i];
-            if (s.kind === NodeKind.LabelStmt && gotoTargets.has((s as LabelStmt).label.name)) {
-              lastTargetIdx = i;
-            }
+            if (containsGotoTarget(stmts[i], gotoTargets)) lastTargetIdx = i;
           }
           if (lastTargetIdx < 0) return undefined;
 

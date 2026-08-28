@@ -74,7 +74,11 @@ function createPhantomLocalSynthesisTransformer(_options: PhantomLocalSynthesisO
       if (!node.body) return undefined;
 
       const declared = new Set<string>();
-      for (const p of node.parameters) declared.add((p as ParameterDecl).name.name);
+      // `name` is null for unnamed parameters (`void f(void)`, `int f(int)`) - skip those.
+      for (const p of node.parameters) {
+        const pd = p as ParameterDecl;
+        if (pd.name) declared.add(pd.name.name);
+      }
       for (const d of findNodesByKind(node.body, NodeKind.VariableDecl)) {
         declared.add((d as VariableDecl).name.name);
       }

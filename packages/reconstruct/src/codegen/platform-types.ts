@@ -10,6 +10,11 @@
 // =============================================================================
 
 /** Standard C/C++ types from <cstdint>, <cstddef>, and language primitives */
+import {
+  generateExcludedSymbolDecls, EXTRA_WIN32_SDK_HEADERS,
+  EXCLUDED_SYMBOL_DECLS, CRT_DECLARED_FUNCTION_NAMES,
+} from './crt-mapping.js';
+
 export const STANDARD_C_TYPES = new Set([
   // Language primitives
   'void', 'bool', 'char', 'short', 'int', 'long', 'float', 'double',
@@ -136,6 +141,17 @@ const EH_INTERNAL_TYPES = new Set<string>([
   'CatchableType', '_s_CatchableType',
   'CatchableTypeArray', '_s_CatchableTypeArray',
   'PMD', '_PMD',
+  // MSVC RTTI metadata (the `??_R*` object-locator chain the compiler emits for
+  // every polymorphic class). Ghidra recovers these from the statically-linked
+  // CRT into root category `/`, exactly like the EH internals above, and no real
+  // header declares them either — the C++ compiler regenerates the whole chain
+  // from the class definitions, so re-emitting Ghidra's copies is both
+  // uncompilable and redundant.
+  'RTTICompleteObjectLocator', '_s__RTTICompleteObjectLocator',
+  'RTTIClassHierarchyDescriptor', '_s__RTTIClassHierarchyDescriptor',
+  'RTTIBaseClassDescriptor', '_s__RTTIBaseClassDescriptor',
+  'RTTIBaseClassArray', '_s__RTTIBaseClassArray',
+  'TypeDescriptor', '_TypeDescriptor',
 ]);
 
 /** System-header category path, e.g. `/winsock.h`, `/inaddr.h`, `/WinDef.h` */
@@ -147,6 +163,30 @@ const SYSTEM_HEADER_CATEGORY_RE = /^\/[A-Za-z0-9_]+\.h$/;
  * real header (windows.h/CRT) — so anything typed as one cannot compile and
  * must be dropped, not merely left to the SDK.
  */
+/**
+ * Ghidra's CPUID pseudo-operations, one per leaf. These are decompiler output,
+ * not symbols in the binary, so nothing but the platform header can declare them.
+ */
+const GHIDRA_CPUID_PSEUDO_OPS = [
+  'cpuid',
+  'cpuid_basic_info',
+  'cpuid_Version_info',
+  'cpuid_cache_tlb_info',
+  'cpuid_serial_info',
+  'cpuid_Deterministic_Cache_Parameters_info',
+  'cpuid_MONITOR_MWAIT_Features_info',
+  'cpuid_Thermal_Power_Management_info',
+  'cpuid_Extended_Feature_Enumeration_info',
+  'cpuid_Direct_Cache_Access_info',
+  'cpuid_Architectural_Performance_Monitoring_info',
+  'cpuid_Extended_Topology_info',
+  'cpuid_Processor_Extended_States_info',
+  'cpuid_Quality_of_Service_info',
+  'cpuid_brand_part1_info',
+  'cpuid_brand_part2_info',
+  'cpuid_brand_part3_info',
+] as const;
+
 export function isMsvcEhInternal(name: string): boolean {
   return EH_INTERNAL_TYPES.has(name);
 }
@@ -179,6 +219,28 @@ export function isLibraryType(name: string, category: string): boolean {
 // =============================================================================
 
 /**
+ * Types the platform headers DEFINE, not merely name — the type-level counterpart
+ * of `platformDeclaredFunctionNames()`. Emitting our own definition of one of
+ * these is a redefinition, not a fallback, because `d2_platform.h` has already
+ * pulled the real one in.
+ *
+ * `IUnknown` is the proven case: mingw's `unknwnbase.h:75` defines it as a C++
+ * interface class whenever `CINTERFACE` is not set, which is every translation
+ * unit here, and Ghidra's own `IUnknown` (the C shape, `{ IUnknownVtbl* lpVtbl; }`)
+ * collided with it in 12 files. Nothing in the tree reads a field through an
+ * `IUnknown`, so the platform's is a drop-in.
+ *
+ * Deliberately NOT extended to the DirectDraw/DirectSound/Direct3D interfaces or
+ * to `IUnknownVtbl`: the C++ branch of those headers defines only the interface
+ * classes, so `IUnknownVtbl` and the `IDirect*Vtbl` shapes have no platform
+ * definition at all and ours is the only one. Add a name here only after seeing
+ * it collide.
+ */
+const PLATFORM_DEFINED_TYPES = new Set<string>([
+  'IUnknown',
+]);
+
+/**
  * Check if a type name is a platform, standard, or Ghidra artifact type
  * that should never be emitted as a typedef/struct or need a forward declaration.
  */
@@ -187,6 +249,7 @@ export function isPlatformOrBuiltinType(name: string): boolean {
     || WINDOWS_TYPES.has(name)
     || GHIDRA_ARTIFACT_TYPES.has(name)
     || GLIDE_TYPES.has(name)
+    || PLATFORM_DEFINED_TYPES.has(name)
     // Ghidra internal anonymous types: _struct_NNNN, _union_NNNN
     || /^_(struct|union)_\d+$/.test(name);
 }
@@ -217,11 +280,22 @@ export function castPointerInitializer(type: string, value: string): string {
   if (value === '0' || value === '0x0' || value === 'nullptr') return value;
   // Non-zero integer literal needs cast
   if (/^0x[0-9a-fA-F]+$/.test(value) || /^[0-9]+$/.test(value)) {
-    // Use the base pointer type for the cast
-    const castType = type.replace(/\s+/g, ' ').trim();
+    // Use the base pointer type for the cast. The initializer may land inside a
+    // namespace block whose own name shadows the type, so spell it root-qualified.
+    const castType = rootQualifyShadowedType(type.replace(/\s+/g, ' ').trim());
     return `(${castType})${value}`;
   }
   return value;
+}
+
+/**
+ * A single-character scalar, whose Ghidra `value` is the CHARACTER, not a number.
+ * `CHAR_A_006ed5ac` is declared `char` and valued `A`; read as a number that is
+ * the hex digit 0xA, and the emitted byte becomes 10 where the binary holds 65.
+ */
+export function isCharacterValueType(type: string): boolean {
+  const t = type.replace(/\b(const|volatile|unsigned|signed)\b/g, '').replace(/\s+/g, ' ').trim();
+  return t === 'char' || t === 'CHAR' || t === 'int8_t' || t === 'uint8_t' || t === 'byte';
 }
 
 /**
@@ -241,6 +315,13 @@ export function normalizeDataValue(value: string): string {
   // (Ghidra reports addresses and data values without 0x prefix)
   if (/^[0-9a-fA-F]{4,}$/.test(value) && (/[a-fA-F]/.test(value) || /^0[0-9]/.test(value))) {
     return `0x${value}`;
+  }
+  // Ghidra RENDERS some data rather than valuing it: `<Icon-Image>` for an icon
+  // resource, `align(1)` for section padding. That is listing text, not a C
+  // expression — emitted verbatim it parses as undeclared identifiers
+  // ('Icon' / 'Image' / 'align' was not declared in this scope).
+  if (/^<.*>$/.test(value) || /^align\(\d+\)$/.test(value)) {
+    return '0';
   }
   return value;
 }
@@ -263,6 +344,34 @@ const UNDEFINED_TYPE_MAP: Record<string, string> = {
 };
 
 /**
+ * Ghidra spellings of Diablo II's own 16-bit character.
+ *
+ * The game is Unicode internally: its strings are 16-bit code units. Ghidra
+ * carries that as `ushort` in decompiled bodies but as `WCHAR`, `wchar_t`,
+ * `wchar16` or `unicode` in the prototypes and struct layouts that were typed
+ * by hand. `ushort` normalizes to `uint16_t` (type-normalize, on bodies), so a
+ * prototype spelled `WCHAR *` and a body spelled `uint16_t *` are two distinct
+ * C++ types at every call — even though on i686 they are the same 16 bits.
+ *
+ * D2's own APIs therefore converge on `uint16_t`, the one spelling the bodies
+ * can produce. `WCHAR`/`wchar_t` stay untouched for the real Win32 and CRT
+ * declarations (windows.h, wcslen, MessageBoxW), which need the true wchar_t.
+ */
+const D2_WIDE_CHAR_TYPES = ['WCHAR', 'wchar_t', 'wchar16', 'unicode'] as const;
+const D2_WIDE_CHAR_RE = new RegExp(`\\b(?:${D2_WIDE_CHAR_TYPES.join('|')})\\b`, 'g');
+
+/**
+ * Rewrite every Ghidra spelling of D2's 16-bit character to `uint16_t`.
+ *
+ * Applies to the base type inside any pointer/array/const decoration:
+ * `WCHAR *` → `uint16_t *`, `wchar_t * *` → `uint16_t * *`, `WCHAR[16]` →
+ * `uint16_t[16]`.
+ */
+export function normalizeWideCharType(type: string): string {
+  return type.replace(D2_WIDE_CHAR_RE, 'uint16_t');
+}
+
+/**
  * Normalize Ghidra `undefined[N]` types in function signatures to C equivalents.
  *
  * Handles both bare types and pointer variants:
@@ -270,9 +379,16 @@ const UNDEFINED_TYPE_MAP: Record<string, string> = {
  * - `undefined4 *` → `uint32_t *`
  * - `undefined` → `uint8_t`
  *
+ * Also unifies D2's wide-character spellings on `uint16_t`
+ * (see {@link normalizeWideCharType}).
+ *
  * Returns the input unchanged for known/normal types.
  */
 export function normalizeSignatureType(type: string): string {
+  return normalizeWideCharType(normalizeSignatureTypeInner(type));
+}
+
+function normalizeSignatureTypeInner(type: string): string {
   // Strip leading/trailing unbalanced parentheses (Ghidra decompiler artifacts)
   let trimmed = type.trim();
   if (trimmed.startsWith('(') && !trimmed.includes(')')) {
@@ -349,7 +465,174 @@ export function collapseFuncPtrTypedef(
 /**
  * Generate d2_platform.h content with cross-platform type definitions
  */
-export function generatePlatformHeader(options: { seedType?: boolean } = {}): string {
+
+// =============================================================================
+// The declaration registry — what THIS emitter declares, versus what Ghidra did
+// =============================================================================
+
+/**
+ * One function `d2_platform.h` declares itself.
+ *
+ * The emitter has to be able to answer "did I write this callee's declaration,
+ * or did it come out of the database?", because the two answers demand opposite
+ * treatment. A callee reconstructed from Ghidra carries the prototype Ghidra
+ * recovered, and a call into it can be cast to that prototype. A callee declared
+ * HERE — or by `<windows.h>` in the `_WIN32` build, where these same names come
+ * from the vendor instead — carries the platform's prototype, and Ghidra's
+ * record of it is frequently wrong: `wsprintfA` is `(LPSTR, LPCSTR, ...)` in
+ * `winuser.h` and `void wsprintfA(undefined4, undefined4, undefined4,
+ * undefined4)` in the database. Casting an argument to Ghidra's answer there
+ * writes a conversion the real declaration rejects.
+ *
+ * `name` is the identifier a call site writes. It is a field rather than
+ * something recovered from `decl`, for the same reason `ExcludedSymbolDecl`
+ * spells `emitted` out: the registry has to be readable without parsing C++.
+ */
+export interface PlatformFunctionDecl {
+  /** Identifier as written at the call site. */
+  readonly name: string;
+  /** The declaration line, verbatim. */
+  readonly decl: string;
+}
+
+const WIN32_CORE_STUBS: readonly PlatformFunctionDecl[] = [
+  { name: "GetTickCount", decl: "DWORD GetTickCount();" },
+  { name: "Sleep", decl: "void Sleep(DWORD dwMilliseconds);" },
+  { name: "QueryPerformanceCounter", decl: "BOOL QueryPerformanceCounter(LARGE_INTEGER* lpPerformanceCount);" },
+  { name: "QueryPerformanceFrequency", decl: "BOOL QueryPerformanceFrequency(LARGE_INTEGER* lpFrequency);" },
+  { name: "wsprintfA", decl: "int wsprintfA(LPSTR lpOut, LPCSTR lpFmt, ...);" },
+  { name: "wsprintfW", decl: "int wsprintfW(LPWSTR lpOut, LPCWSTR lpFmt, ...);" },
+  { name: "GetLastError", decl: "DWORD GetLastError();" },
+  { name: "SetLastError", decl: "void SetLastError(DWORD dwErrCode);" },
+  { name: "GetCurrentThreadId", decl: "DWORD GetCurrentThreadId();" },
+  { name: "GetCurrentProcessId", decl: "DWORD GetCurrentProcessId();" },
+  { name: "OutputDebugStringA", decl: "void OutputDebugStringA(LPCSTR lpOutputString);" },
+  { name: "GetModuleHandleA", decl: "HMODULE GetModuleHandleA(LPCSTR lpModuleName);" },
+  { name: "GetProcAddress", decl: "FARPROC GetProcAddress(HMODULE hModule, LPCSTR lpProcName);" },
+  { name: "LoadLibraryA", decl: "HMODULE LoadLibraryA(LPCSTR lpLibFileName);" },
+  { name: "FreeLibrary", decl: "BOOL FreeLibrary(HMODULE hLibModule);" },
+  { name: "GetProcessHeap", decl: "HANDLE GetProcessHeap();" },
+  { name: "HeapAlloc", decl: "LPVOID HeapAlloc(HANDLE hHeap, DWORD dwFlags, SIZE_T dwBytes);" },
+  { name: "HeapFree", decl: "BOOL HeapFree(HANDLE hHeap, DWORD dwFlags, LPVOID lpMem);" },
+  { name: "InitializeCriticalSection", decl: "void InitializeCriticalSection(LPCRITICAL_SECTION lpCriticalSection);" },
+  { name: "EnterCriticalSection", decl: "void EnterCriticalSection(LPCRITICAL_SECTION lpCriticalSection);" },
+  { name: "LeaveCriticalSection", decl: "void LeaveCriticalSection(LPCRITICAL_SECTION lpCriticalSection);" },
+  { name: "DeleteCriticalSection", decl: "void DeleteCriticalSection(LPCRITICAL_SECTION lpCriticalSection);" },
+  { name: "CreateThread", decl: "HANDLE CreateThread(LPSECURITY_ATTRIBUTES lpThreadAttributes, SIZE_T dwStackSize, LPTHREAD_START_ROUTINE lpStartAddress, LPVOID lpParameter, DWORD dwCreationFlags, LPDWORD lpThreadId);" },
+  { name: "WaitForSingleObject", decl: "DWORD WaitForSingleObject(HANDLE hHandle, DWORD dwMilliseconds);" },
+  { name: "CloseHandle", decl: "BOOL CloseHandle(HANDLE hObject);" },
+  { name: "ExitProcess", decl: "void ExitProcess(UINT uExitCode);" },
+  { name: "MessageBoxA", decl: "int MessageBoxA(HWND hWnd, LPCSTR lpText, LPCSTR lpCaption, UINT uType);" },
+  { name: "VirtualAlloc", decl: "LPVOID VirtualAlloc(LPVOID lpAddress, SIZE_T dwSize, DWORD flAllocationType, DWORD flProtect);" },
+  { name: "VirtualFree", decl: "BOOL VirtualFree(LPVOID lpAddress, SIZE_T dwSize, DWORD dwFreeType);" },
+];
+const WIN32_UI_STUBS: readonly PlatformFunctionDecl[] = [
+  { name: "IsBadCodePtr", decl: "BOOL IsBadCodePtr(FARPROC lpfn);" },
+  { name: "IsBadReadPtr", decl: "BOOL IsBadReadPtr(const void* lp, UINT ucb);" },
+  { name: "IsBadWritePtr", decl: "BOOL IsBadWritePtr(LPVOID lp, UINT ucb);" },
+  { name: "CreateEventA", decl: "HANDLE CreateEventA(LPSECURITY_ATTRIBUTES lpEventAttributes, BOOL bManualReset, BOOL bInitialState, LPCSTR lpName);" },
+  { name: "SetEvent", decl: "BOOL SetEvent(HANDLE hEvent);" },
+  { name: "ResetEvent", decl: "BOOL ResetEvent(HANDLE hEvent);" },
+  { name: "PostQuitMessage", decl: "void PostQuitMessage(int nExitCode);" },
+  { name: "PostMessageA", decl: "BOOL PostMessageA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam);" },
+  { name: "GetSystemMetrics", decl: "int GetSystemMetrics(int nIndex);" },
+  { name: "SetWindowPos", decl: "BOOL SetWindowPos(HWND hWnd, HWND hWndInsertAfter, int X, int Y, int cx, int cy, UINT uFlags);" },
+  { name: "ShowWindow", decl: "BOOL ShowWindow(HWND hWnd, int nCmdShow);" },
+  { name: "DestroyWindow", decl: "BOOL DestroyWindow(HWND hWnd);" },
+  { name: "CreateWindowExA", decl: "HWND CreateWindowExA(DWORD dwExStyle, LPCSTR lpClassName, LPCSTR lpWindowName, DWORD dwStyle, int X, int Y, int nWidth, int nHeight, HWND hWndParent, HMENU hMenu, HINSTANCE hInstance, LPVOID lpParam);" },
+  { name: "GetClientRect", decl: "BOOL GetClientRect(HWND hWnd, LPRECT lpRect);" },
+  { name: "GetDC", decl: "HDC GetDC(HWND hWnd);" },
+  { name: "ReleaseDC", decl: "int ReleaseDC(HWND hWnd, HDC hDC);" },
+];
+const CRT_EXTERN_STUBS: readonly PlatformFunctionDecl[] = [
+  { name: "CRT_Floor", decl: "double CRT_Floor(...);" },
+  { name: "CRT_Ceil", decl: "double CRT_Ceil(...);" },
+  { name: "CRT_Strchr", decl: "char* CRT_Strchr(...);" },
+  { name: "CRT_ClearFP", decl: "unsigned int CRT_ClearFP(...);" },
+  { name: "_strrev", decl: "char* _strrev(char*);" },
+  { name: "__strrev", decl: "char* __strrev(char*);" },
+];
+const WIN32_SYNC_FALLBACK_STUBS: readonly PlatformFunctionDecl[] = [
+  { name: "CreateEventW", decl: "HANDLE CreateEventW(LPSECURITY_ATTRIBUTES lpEventAttributes, BOOL bManualReset, BOOL bInitialState, LPCWSTR lpName);" },
+  { name: "WaitForMultipleObjects", decl: "DWORD WaitForMultipleObjects(DWORD nCount, const HANDLE* lpHandles, BOOL bWaitAll, DWORD dwMilliseconds);" },
+  { name: "SendMessageA", decl: "LRESULT SendMessageA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam);" },
+];
+const WIN32_FILE_FALLBACK_STUBS: readonly PlatformFunctionDecl[] = [
+  { name: "WriteFile", decl: "BOOL WriteFile(HANDLE hFile, LPCVOID lpBuffer, DWORD nBytes, LPDWORD lpBytesWritten, LPOVERLAPPED lpOverlapped);" },
+  { name: "ReadFile", decl: "BOOL ReadFile(HANDLE hFile, LPVOID lpBuffer, DWORD nBytes, LPDWORD lpBytesRead, LPOVERLAPPED lpOverlapped);" },
+  { name: "CreateFileA", decl: "HANDLE CreateFileA(LPCSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode, LPSECURITY_ATTRIBUTES lpSec, DWORD dwCreationDisposition, DWORD dwFlagsAndAttributes, HANDLE hTemplate);" },
+  { name: "SetFilePointer", decl: "DWORD SetFilePointer(HANDLE hFile, LONG lDistanceToMove, PLONG lpDistanceToMoveHigh, DWORD dwMoveMethod);" },
+  { name: "GetFileSize", decl: "DWORD GetFileSize(HANDLE hFile, LPDWORD lpFileSizeHigh);" },
+  { name: "GetFileAttributesA", decl: "DWORD GetFileAttributesA(LPCSTR lpFileName);" },
+  { name: "GetModuleFileNameA", decl: "DWORD GetModuleFileNameA(HMODULE hModule, LPSTR lpFilename, DWORD nSize);" },
+  { name: "GetLocalTime", decl: "void GetLocalTime(LPSYSTEMTIME lpSystemTime);" },
+  { name: "GetCurrentProcess", decl: "HANDLE GetCurrentProcess();" },
+  { name: "GetKeyState", decl: "SHORT GetKeyState(int nVirtKey);" },
+  { name: "SetRect", decl: "void SetRect(LPRECT lprc, int left, int top, int right, int bottom);" },
+  { name: "WSAGetLastError", decl: "int WSAGetLastError();" },
+  { name: "timeGetTime", decl: "DWORD timeGetTime(void);" },
+];
+
+/**
+ * Functions the platform header DEFINES rather than declares — the `static
+ * inline` forwarders and the extra overloads that adapt Ghidra's spelling of an
+ * argument to the vendor's (`int32_t*` to `LONG*`, `uint32_t*` to
+ * `LPCRITICAL_SECTION`, `uint16_t*` to `wchar_t*`). Their bodies are written
+ * inline above rather than as a table because each one carries a conversion, not
+ * just a signature; only the names belong in the registry.
+ */
+const PLATFORM_INLINE_FORWARDERS: readonly string[] = [
+  'InterlockedIncrement', 'InterlockedDecrement', 'InterlockedExchange',
+  'InterlockedCompareExchange',
+  'MultiByteToWideChar', 'WideCharToMultiByte',
+  'FloatToLong', 'LongToFloat',
+  '__alldiv', '__allmul', '__allrem', '__alldvrm', '__allshr', '__allshl',
+  '__aulldiv', '__aullrem', '__aullshr',
+];
+
+/**
+ * CRT entry points the header maps to the real one with an object-like macro
+ * (`#define _fclose fclose`). The call site writes the left-hand name and the
+ * preprocessor hands the compiler the right-hand one, so the prototype that
+ * actually binds is the C library's — never Ghidra's.
+ */
+const PLATFORM_MACRO_ALIASES: readonly string[] = [
+  '_sprintf', '_memcpy', '_memset', '_memcmp', '_strlen', '_strcpy', '_strncpy',
+  '_strcmp', '_strncmp', '_strcat', '_strncat', '_atoi', '_atol', '_sscanf',
+  '_fprintf', '_printf', '_malloc', '_free', '_calloc', '_realloc', '_abs',
+  'builtin_strncpy', 'builtin_memcpy', 'builtin_memset', 'builtin_strcmp',
+  'builtin_strlen', 'builtin_strcpy',
+  '__snprintf_s', '__snprintf', '_snprintf', '_vsnprintf', '_strncpy_s',
+  '__stricmp', '_stricmp', '_strnicmp', '_strrchr', '_strtok', '_strcspn',
+  '_fopen', '_fclose', '_fread', '_fwrite', '_ftell', '_fseek', '_fflush',
+  '_fgets', '_fputs', '_time64', '_difftime64',
+];
+
+/**
+ * Every callee whose declaration this emitter owns — the stub tables above, the
+ * inline forwarders, the macro aliases, the excluded-namespace declarations in
+ * `crt-mapping`, and the CRT/Win32 names a system header declares. Ghidra's
+ * prototype for any of these is not the one the compiler will see, so nothing
+ * may be cast to it.
+ */
+export function platformDeclaredFunctionNames(): Set<string> {
+  const names = new Set<string>();
+  for (const group of [
+    WIN32_CORE_STUBS, WIN32_UI_STUBS, CRT_EXTERN_STUBS,
+    WIN32_SYNC_FALLBACK_STUBS, WIN32_FILE_FALLBACK_STUBS,
+  ]) {
+    for (const d of group) names.add(d.name);
+  }
+  for (const n of PLATFORM_INLINE_FORWARDERS) names.add(n);
+  for (const n of PLATFORM_MACRO_ALIASES) names.add(n);
+  for (const d of EXCLUDED_SYMBOL_DECLS) names.add(d.emitted);
+  for (const n of CRT_DECLARED_FUNCTION_NAMES) names.add(n);
+  return names;
+}
+
+export function generatePlatformHeader(
+  options: { seedType?: boolean; anonymousAggregates?: string[] } = {},
+): string {
   const lines: string[] = [];
 
   lines.push('// Auto-generated by ghidra-mcp — DO NOT EDIT');
@@ -374,6 +657,8 @@ export function generatePlatformHeader(options: { seedType?: boolean } = {}): st
   lines.push('#include <cstring>');
   lines.push('#include <cstdlib>');
   lines.push('#include <cmath>');
+  lines.push('#include <ctime>');
+  lines.push('#include <cwchar>');
   lines.push('');
   lines.push('// MSVC _locale_t stub (not available on all platforms)');
   lines.push('#ifndef _WIN32');
@@ -403,7 +688,12 @@ export function generatePlatformHeader(options: { seedType?: boolean } = {}): st
   lines.push('typedef uint8_t undefined1;');
   lines.push('typedef uint16_t undefined2;');
   lines.push('typedef uint8_t undefined3;  // 3 bytes — no exact C type');
-  lines.push('typedef void* vtable;');
+  // Ghidra's `vtable` is the (opaque) virtual function table STRUCT, so `vtable *`
+  // is a single pointer. `typedef void* vtable` made `vtable *` a DOUBLE pointer
+  // and disagreed with the struct-field mapping in header.ts, which renders the
+  // same Ghidra type `vtable *` as `void *` — every field read into a `vtable *`
+  // local was then "invalid conversion from 'void*' to 'void**'".
+  lines.push('typedef void vtable;   // opaque virtual function table; `vtable *` == `void *`');
   lines.push('// Ghidra non-standard integer sizes (approximate to nearest C type)');
   lines.push('typedef int32_t int3;   // 3 bytes — Ghidra artifact, use int32_t');
   lines.push('typedef uint32_t uint3;  // 3 bytes — Ghidra artifact, use uint32_t');
@@ -416,6 +706,41 @@ export function generatePlatformHeader(options: { seedType?: boolean } = {}): st
   lines.push('typedef uint8_t unkbool1;');
   lines.push('typedef int code(...);  // Ghidra executable code type — code* = callable function pointer');
   lines.push('');
+  // Decompiler pseudo-operations. Ghidra prints these where the instruction has
+  // no C spelling; they are not symbols in the binary, so nothing else declares
+  // them and every body that names one fails to compile. `NAN` arrives renamed
+  // to `D2_IsNaN` — the Ghidra spelling collides with <cmath>'s object-like NAN
+  // macro, which turns `NAN(x)` into a float constant applied to an argument.
+  lines.push('// Ghidra decompiler pseudo-operations (no instruction-level C spelling)');
+  lines.push('static inline bool D2_IsNaN(double x) { return x != x; }');
+  lines.push('static inline void LOCK() {}    // x86 LOCK prefix — marks the atomic region');
+  lines.push('static inline void UNLOCK() {}  // end of the region LOCK opened');
+  lines.push('');
+  // CPUID: Ghidra models the instruction as a pseudo-op per leaf, each returning
+  // a POINTER to the four result registers — every body reads them back as
+  // `*(uint32_t*)(r + 0|4|8|0xc)` == eax|ebx|ecx|edx. Reproduce that contract
+  // rather than stub it: a stub returning zeroes would make CPU detection report
+  // a vendorless CPU and every caller would silently take the wrong branch.
+  lines.push('// Ghidra models CPUID as one pseudo-op per leaf, each returning a pointer to');
+  lines.push('// the four result registers, read back as *(uint32_t*)(r + 0|4|8|0xc).');
+  lines.push('#if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))');
+  lines.push('#  include <cpuid.h>');
+  lines.push('#endif');
+  lines.push('static inline int D2_Cpuid(uint32_t nLeaf) {');
+  lines.push('  static uint32_t aRegs[4];');
+  lines.push('#if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))');
+  lines.push('  __get_cpuid(nLeaf, &aRegs[0], &aRegs[1], &aRegs[2], &aRegs[3]);');
+  lines.push('#elif defined(_MSC_VER)');
+  lines.push('  __cpuid((int*)aRegs, (int)nLeaf);');
+  lines.push('#else');
+  lines.push('  aRegs[0] = aRegs[1] = aRegs[2] = aRegs[3] = 0;');
+  lines.push('#endif');
+  lines.push('  return (int)(uintptr_t)aRegs;');
+  lines.push('}');
+  for (const op of GHIDRA_CPUID_PSEUDO_OPS) {
+    lines.push(`static inline int ${op}(uint32_t nLeaf) { return D2_Cpuid(nLeaf); }`);
+  }
+  lines.push('');
   lines.push('// __debugbreak stub for non-Windows (INT 3 debug breakpoint)');
   lines.push('#ifndef _WIN32');
   lines.push('#define __debugbreak() ((void)0)');
@@ -427,6 +752,12 @@ export function generatePlatformHeader(options: { seedType?: boolean } = {}): st
   lines.push('#  endif');
   lines.push('#  include <windows.h>');
   lines.push('#  include <winsock2.h>');
+  // Imports the reconstruction calls that <windows.h> alone does not declare.
+  // The real SDK header is preferred over a hand-written prototype so the
+  // signature and its dependent types come from the vendor, not from us.
+  for (const h of EXTRA_WIN32_SDK_HEADERS) {
+    lines.push(`#  include ${h}`);
+  }
   // D2 declares its own functions whose names collide with <windows.h> A/W macros
   // (e.g. a renderer CreateWindow(HWND,int)). The macro expands the declaration to
   // an 11-arg CreateWindowExA call → "macro requires 11 arguments". Undef the macro
@@ -437,8 +768,6 @@ export function generatePlatformHeader(options: { seedType?: boolean } = {}): st
     lines.push(`#    undef ${m}`);
     lines.push(`#  endif`);
   }
-  // winmm: not pulled in by <windows.h>; D2 uses it for frame timing
-  lines.push('extern "C" DWORD timeGetTime(void);');
   // Win32 Interlocked* take LONG*; D2 calls them with int32_t* (a distinct type on
   // i686). Add int32_t* overloads forwarding to the real LONG* intrinsics.
   lines.push('static inline LONG InterlockedIncrement(int32_t volatile* p) { return InterlockedIncrement((LONG volatile*)p); }');
@@ -449,6 +778,18 @@ export function generatePlatformHeader(options: { seedType?: boolean } = {}): st
   lines.push('static inline void LeaveCriticalSection(uint32_t* p) { LeaveCriticalSection((LPCRITICAL_SECTION)p); }');
   lines.push('static inline void InitializeCriticalSection(uint32_t* p) { InitializeCriticalSection((LPCRITICAL_SECTION)p); }');
   lines.push('static inline void DeleteCriticalSection(uint32_t* p) { DeleteCriticalSection((LPCRITICAL_SECTION)p); }');
+  // D2's own wide strings are uint16_t* (Ghidra's ushort, the one spelling the
+  // decompiled bodies produce). The Win32 code-page converters take the true
+  // wchar_t*. On i686 the two are the same 16 bits but distinct C++ types, so
+  // give the converters uint16_t* overloads that forward to the real ones —
+  // same pattern as the Interlocked*/CriticalSection overloads above. The real
+  // wchar_t* declarations from windows.h stay intact.
+  lines.push('static inline int MultiByteToWideChar(UINT cp, DWORD flags, LPCCH src, int srcLen, uint16_t* dst, int dstLen) {');
+  lines.push('  return MultiByteToWideChar(cp, flags, src, srcLen, (LPWSTR)dst, dstLen);');
+  lines.push('}');
+  lines.push('static inline int WideCharToMultiByte(UINT cp, DWORD flags, const uint16_t* src, int srcLen, LPSTR dst, int dstLen, LPCCH dflt, LPBOOL usedDflt) {');
+  lines.push('  return WideCharToMultiByte(cp, flags, (LPCWCH)src, srcLen, dst, dstLen, dflt, usedDflt);');
+  lines.push('}');
   lines.push('#else');
   lines.push('');
 
@@ -582,55 +923,12 @@ export function generatePlatformHeader(options: { seedType?: boolean } = {}): st
   // Common Win32 API function declarations
   lines.push('// Common Win32 API function stubs');
   lines.push('extern "C" {');
-  lines.push('DWORD GetTickCount();');
-  lines.push('void Sleep(DWORD dwMilliseconds);');
-  lines.push('BOOL QueryPerformanceCounter(LARGE_INTEGER* lpPerformanceCount);');
-  lines.push('BOOL QueryPerformanceFrequency(LARGE_INTEGER* lpFrequency);');
-  lines.push('int wsprintfA(LPSTR lpOut, LPCSTR lpFmt, ...);');
-  lines.push('int wsprintfW(LPWSTR lpOut, LPCWSTR lpFmt, ...);');
-  lines.push('DWORD GetLastError();');
-  lines.push('void SetLastError(DWORD dwErrCode);');
-  lines.push('DWORD GetCurrentThreadId();');
-  lines.push('DWORD GetCurrentProcessId();');
-  lines.push('void OutputDebugStringA(LPCSTR lpOutputString);');
-  lines.push('HMODULE GetModuleHandleA(LPCSTR lpModuleName);');
-  lines.push('FARPROC GetProcAddress(HMODULE hModule, LPCSTR lpProcName);');
-  lines.push('HMODULE LoadLibraryA(LPCSTR lpLibFileName);');
-  lines.push('BOOL FreeLibrary(HMODULE hLibModule);');
-  lines.push('HANDLE GetProcessHeap();');
-  lines.push('LPVOID HeapAlloc(HANDLE hHeap, DWORD dwFlags, SIZE_T dwBytes);');
-  lines.push('BOOL HeapFree(HANDLE hHeap, DWORD dwFlags, LPVOID lpMem);');
-  lines.push('void InitializeCriticalSection(LPCRITICAL_SECTION lpCriticalSection);');
-  lines.push('void EnterCriticalSection(LPCRITICAL_SECTION lpCriticalSection);');
-  lines.push('void LeaveCriticalSection(LPCRITICAL_SECTION lpCriticalSection);');
-  lines.push('void DeleteCriticalSection(LPCRITICAL_SECTION lpCriticalSection);');
-  lines.push('HANDLE CreateThread(LPSECURITY_ATTRIBUTES lpThreadAttributes, SIZE_T dwStackSize, LPTHREAD_START_ROUTINE lpStartAddress, LPVOID lpParameter, DWORD dwCreationFlags, LPDWORD lpThreadId);');
-  lines.push('DWORD WaitForSingleObject(HANDLE hHandle, DWORD dwMilliseconds);');
-  lines.push('BOOL CloseHandle(HANDLE hObject);');
-  lines.push('void ExitProcess(UINT uExitCode);');
-  lines.push('int MessageBoxA(HWND hWnd, LPCSTR lpText, LPCSTR lpCaption, UINT uType);');
-  lines.push('LPVOID VirtualAlloc(LPVOID lpAddress, SIZE_T dwSize, DWORD flAllocationType, DWORD flProtect);');
-  lines.push('BOOL VirtualFree(LPVOID lpAddress, SIZE_T dwSize, DWORD dwFreeType);');
+  for (const d of WIN32_CORE_STUBS) lines.push(d.decl);
   lines.push('}');
   lines.push('');
 
   // Additional Win32 APIs
-  lines.push('BOOL IsBadCodePtr(FARPROC lpfn);');
-  lines.push('BOOL IsBadReadPtr(const void* lp, UINT ucb);');
-  lines.push('BOOL IsBadWritePtr(LPVOID lp, UINT ucb);');
-  lines.push('HANDLE CreateEventA(LPSECURITY_ATTRIBUTES lpEventAttributes, BOOL bManualReset, BOOL bInitialState, LPCSTR lpName);');
-  lines.push('BOOL SetEvent(HANDLE hEvent);');
-  lines.push('BOOL ResetEvent(HANDLE hEvent);');
-  lines.push('void PostQuitMessage(int nExitCode);');
-  lines.push('BOOL PostMessageA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam);');
-  lines.push('int GetSystemMetrics(int nIndex);');
-  lines.push('BOOL SetWindowPos(HWND hWnd, HWND hWndInsertAfter, int X, int Y, int cx, int cy, UINT uFlags);');
-  lines.push('BOOL ShowWindow(HWND hWnd, int nCmdShow);');
-  lines.push('BOOL DestroyWindow(HWND hWnd);');
-  lines.push('HWND CreateWindowExA(DWORD dwExStyle, LPCSTR lpClassName, LPCSTR lpWindowName, DWORD dwStyle, int X, int Y, int nWidth, int nHeight, HWND hWndParent, HMENU hMenu, HINSTANCE hInstance, LPVOID lpParam);');
-  lines.push('BOOL GetClientRect(HWND hWnd, LPRECT lpRect);');
-  lines.push('HDC GetDC(HWND hWnd);');
-  lines.push('int ReleaseDC(HWND hWnd, HDC hDC);');
+  for (const d of WIN32_UI_STUBS) lines.push(d.decl);
   lines.push('');
 
   lines.push('#endif // _WIN32');
@@ -733,12 +1031,7 @@ export function generatePlatformHeader(options: { seedType?: boolean } = {}): st
   // as variadic externs — enough to compile; they resolve to the real CRT at link.
   lines.push('// External statically-linked CRT functions (Ghidra `CRT_`-prefixed, not reconstructed)');
   lines.push('extern "C" {');
-  lines.push('double CRT_Floor(...);');
-  lines.push('double CRT_Ceil(...);');
-  lines.push('char* CRT_Strchr(...);');
-  lines.push('unsigned int CRT_ClearFP(...);');
-  lines.push('char* _strrev(char*);');
-  lines.push('char* __strrev(char*);');
+  for (const d of CRT_EXTERN_STUBS) lines.push(d.decl);
   lines.push('}');
   lines.push('');
 
@@ -832,9 +1125,7 @@ export function generatePlatformHeader(options: { seedType?: boolean } = {}): st
   lines.push('// Overloads for int32_t* (Ghidra decompiler uses int32_t instead of LONG)');
   lines.push('static inline int32_t InterlockedIncrement(volatile int32_t* p) { return ++(*p); }');
   lines.push('static inline int32_t InterlockedDecrement(volatile int32_t* p) { return --(*p); }');
-  lines.push('HANDLE CreateEventW(LPSECURITY_ATTRIBUTES lpEventAttributes, BOOL bManualReset, BOOL bInitialState, LPCWSTR lpName);');
-  lines.push('DWORD WaitForMultipleObjects(DWORD nCount, const HANDLE* lpHandles, BOOL bWaitAll, DWORD dwMilliseconds);');
-  lines.push('LRESULT SendMessageA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam);');
+  for (const d of WIN32_SYNC_FALLBACK_STUBS) lines.push(d.decl);
   lines.push('#endif');
   lines.push('');
 
@@ -874,18 +1165,7 @@ export function generatePlatformHeader(options: { seedType?: boolean } = {}): st
 
   // More Win32 file/system APIs
   lines.push('#ifndef _WIN32');
-  lines.push('BOOL WriteFile(HANDLE hFile, LPCVOID lpBuffer, DWORD nBytes, LPDWORD lpBytesWritten, LPOVERLAPPED lpOverlapped);');
-  lines.push('BOOL ReadFile(HANDLE hFile, LPVOID lpBuffer, DWORD nBytes, LPDWORD lpBytesRead, LPOVERLAPPED lpOverlapped);');
-  lines.push('HANDLE CreateFileA(LPCSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode, LPSECURITY_ATTRIBUTES lpSec, DWORD dwCreationDisposition, DWORD dwFlagsAndAttributes, HANDLE hTemplate);');
-  lines.push('DWORD SetFilePointer(HANDLE hFile, LONG lDistanceToMove, PLONG lpDistanceToMoveHigh, DWORD dwMoveMethod);');
-  lines.push('DWORD GetFileSize(HANDLE hFile, LPDWORD lpFileSizeHigh);');
-  lines.push('DWORD GetFileAttributesA(LPCSTR lpFileName);');
-  lines.push('DWORD GetModuleFileNameA(HMODULE hModule, LPSTR lpFilename, DWORD nSize);');
-  lines.push('void GetLocalTime(LPSYSTEMTIME lpSystemTime);');
-  lines.push('HANDLE GetCurrentProcess();');
-  lines.push('SHORT GetKeyState(int nVirtKey);');
-  lines.push('void SetRect(LPRECT lprc, int left, int top, int right, int bottom);');
-  lines.push('int WSAGetLastError();');
+  for (const d of WIN32_FILE_FALLBACK_STUBS) lines.push(d.decl);
   lines.push('#endif');
   lines.push('');
 
@@ -908,10 +1188,112 @@ export function generatePlatformHeader(options: { seedType?: boolean } = {}): st
   lines.push('struct _Unwind_Exception { uint64_t exception_class; void (*exception_cleanup)(_Unwind_Reason_Code, struct _Unwind_Exception *); uint64_t private_1; uint64_t private_2; };');
   lines.push('');
 
+  // MSVC C++ exception-handling frame types. Not declared by any real header;
+  // they appear only as parameter types of the EH personality routine below.
+  lines.push('// MSVC C++ EH frame types (opaque — only ever used through a pointer)');
+  lines.push('struct EHExceptionRecord;');
+  lines.push('struct EHRegistrationNode;');
+  lines.push('');
+
+  // Declarations for the Ghidra namespaces run.ts excludes from emission.
+  lines.push(...generateExcludedSymbolDecls());
+
+  // Ghidra's placeholder names for the ANONYMOUS aggregates inside a system
+  // struct (`in_addr`'s unnamed union is `_union_1226`). No real header ever
+  // declares those names, yet decompiled bodies cast through them and read their
+  // fields — so this is the only place they can come from.
+  if (options.anonymousAggregates && options.anonymousAggregates.length > 0) {
+    lines.push('// Anonymous aggregates of system structs, under the names Ghidra gave them');
+    for (const def of options.anonymousAggregates) {
+      lines.push(def);
+      lines.push('');
+    }
+  }
+
   // Include shared enum definitions (all Ghidra enum types collected into one file)
   lines.push('// Shared enum constants (SOUND_NONE, UNIT_PLAYER, SKILL_Attack, etc.)');
   lines.push('#include "d2_enums.h"');
   lines.push('');
 
   return lines.join('\n');
+}
+
+/**
+ * Project type names that are ALSO emitted as a namespace component.
+ *
+ * Ghidra hangs a class's vtable data and its member functions under a namespace
+ * named after the class (`D2Client::ButtonWrapper`, `D2Client::Draw`), and the
+ * generator emits that namespace. The struct/typedef of the same name is emitted
+ * at ROOT scope. Inside `namespace D2Client { ... }` unqualified lookup for
+ * `ButtonWrapper` then finds the NAMESPACE first and stops:
+ *
+ *     namespace D2Client {
+ *       void F(ButtonWrapper * pThis) { ... }   // error: 'ButtonWrapper' is not a type
+ *       pwszCursor = (Draw**)...;               // error: expected primary-expression
+ *     }
+ *
+ * The type must be spelled root-qualified (`::ButtonWrapper`) at every use site.
+ * Only names that really are both a namespace component and a root-scope type
+ * are listed, so nothing else is touched.
+ */
+let shadowedTypeNames: Set<string> | undefined;
+
+export function setShadowedTypeNames(names: Set<string> | undefined): void {
+  shadowedTypeNames = names && names.size > 0 ? names : undefined;
+}
+
+export function getShadowedTypeNames(): Set<string> | undefined {
+  return shadowedTypeNames;
+}
+
+/**
+ * Root-qualify the base name of a Ghidra type string when it is shadowed by a
+ * same-named namespace. `ButtonWrapper *` → `::ButtonWrapper *`,
+ * `struct Item *` → `struct ::Item *`. Already-qualified names, names with no
+ * base identifier, and unshadowed names come back unchanged.
+ */
+export function rootQualifyShadowedType(type: string): string {
+  if (!shadowedTypeNames || !type) return type;
+  if (type.includes('::')) return type;
+  const m = type.match(
+    /^(\s*(?:(?:const|volatile)\s+)*(?:(?:struct|class|union|enum)\s+)?)([A-Za-z_]\w*)\b([\s\S]*)$/
+  );
+  if (!m) return type;
+  if (!shadowedTypeNames.has(m[2])) return type;
+  return `${m[1]}::${m[2]}${m[3]}`;
+}
+
+
+/**
+ * Ghidra's spellings for a `void`-pointer slot. `pointer` is its own alias
+ * (`typedef void* pointer`), and the Win32 SDK ones reach the emitter unexpanded.
+ * A function address stored in any of them needs the same explicit `(void*)`.
+ */
+const VOID_POINTER_SPELLINGS = new Set<string>([
+  'void*', 'pointer', 'LPVOID', 'PVOID', 'LPCVOID',
+]);
+
+/**
+ * Typedefs `d2_platform.h` writes ITSELF, whose target is a pointer, mapped to
+ * what the emitted line actually says.
+ *
+ * Ghidra records `pointer` as a POINTER data type, not as a TYPEDEF, so it never
+ * reaches the typedef map the cast passes read — and every one of them then
+ * treats a `pointer` slot as a star-less integer, which is exactly the shape
+ * that needs no cast. A funcdef declaring seven `pointer` parameters therefore
+ * types nothing at all, however well the funcdef itself is resolved.
+ *
+ * Only pointer-valued aliases belong here: an alias for an integer (`pointer32`
+ * really is `uint32_t`) is already reduced correctly by name.
+ */
+export const EMITTER_POINTER_TYPEDEFS: Record<string, string> = {
+  pointer: 'void *',
+  _locale_t: 'void *',
+};
+
+/** Does this Ghidra type string denote a plain `void`-pointer slot? */
+export function isVoidPointerSpelling(type: string | undefined): boolean {
+  if (!type) return false;
+  const t = type.replace(/\bconst\b/g, '').replace(/\s+/g, '').trim();
+  return VOID_POINTER_SPELLINGS.has(t);
 }

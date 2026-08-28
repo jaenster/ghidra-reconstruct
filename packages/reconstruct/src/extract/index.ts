@@ -43,6 +43,7 @@ import { extractAllGlobals, analyzeDataSymbols, fetchInitializedData } from './g
 import { extractAllStrings } from './strings.js';
 import { extractAllNamespaces } from './namespaces.js';
 import type { AnalyzedDataSymbol } from '../types.js';
+import { timePhase } from '../timing.js';
 
 /**
  * Complete extraction result from Ghidra
@@ -98,6 +99,16 @@ export interface ExtractionOptions {
 
   /** Additional patterns to exclude from functions */
   excludePatterns?: (string | RegExp)[];
+
+  /** Prefix for the recorded phase names, e.g. "mac" -> "mac/extract/decompile". */
+  phaseLabel?: string;
+
+  /**
+   * Narrow WHICH functions get a body. Everything is still listed; only the
+   * decompilation is restricted. Used for the cross-check binary, where most
+   * bodies are discarded by the merge and only the address survives.
+   */
+  decompileFilter?: (func: ExtractedFunction) => boolean;
 }
 
 /**
@@ -118,16 +129,23 @@ export async function extractAll(
     excludePatterns,
   } = options;
 
+  const label = options.phaseLabel ? `${options.phaseLabel}/` : '';
+
   // Get program info first
   const programInfo = await connection.sendCommand<ProgramInfo>('get_program_info');
 
   // Extract in parallel where possible
-  const [namespaces, dataTypesList, analyzedGlobals, strings] = await Promise.all([
-    extractAllNamespaces(connection, { filter: namespaceFilter }),
-    extractDataTypes(connection, { limit: 10000 }),
-    analyzeDataSymbols(connection), // Returns AnalyzedDataSymbol[] with scope info
-    extractAllStrings(connection, { minLength: minStringLength }),
-  ]);
+  const [namespaces, dataTypesList, analyzedGlobals, strings] = await timePhase(
+    `${label}extract/metadata`,
+    () => Promise.all([
+      extractAllNamespaces(connection, { filter: namespaceFilter }),
+      extractDataTypes(connection, { limit: 10000 }),
+      analyzeDataSymbols(connection), // Returns AnalyzedDataSymbol[] with scope info
+      extractAllStrings(connection, { minLength: minStringLength }),
+    ]),
+    ([ns, dts, gl, st]) =>
+      `${ns.length} namespaces, ${dts.length} types, ${gl.length} globals, ${st.length} strings`
+  );
 
   // Fetch detailed info (fields, values) for STRUCTURE/ENUM/UNION types
   const detailKinds = new Set(['STRUCTURE', 'ENUM', 'UNION', 'TYPEDEF', 'FUNCTION_DEFINITION']);
@@ -136,26 +154,44 @@ export async function extractAll(
 
   // Batch fetch details in groups of 20 for performance
   const BATCH_SIZE = 20;
-  for (let i = 0; i < typesNeedingDetail.length; i += BATCH_SIZE) {
-    const batch = typesNeedingDetail.slice(i, i + BATCH_SIZE);
-    const details = await Promise.all(
-      batch.map(t => extractDataType(connection, t.name, t.category))
-    );
-    for (let j = 0; j < details.length; j++) {
-      if (details[j]) {
-        // Replace the listing entry with the detailed version
-        const idx = dataTypes.findIndex(t => t.name === batch[j].name && t.category === batch[j].category);
-        if (idx !== -1) {
-          dataTypes[idx] = details[j]!;
+  // Index by name+category ONCE — the previous findIndex per detail was a linear
+  // scan of every type for every detailed type (O(n^2) over ~5k types).
+  const dataTypeIndex = new Map<string, number>();
+  for (let i = 0; i < dataTypes.length; i++) {
+    dataTypeIndex.set(`${dataTypes[i].name}\u0000${dataTypes[i].category}`, i);
+  }
+  await timePhase(
+    `${label}extract/type-details`,
+    async () => {
+      for (let i = 0; i < typesNeedingDetail.length; i += BATCH_SIZE) {
+        const batch = typesNeedingDetail.slice(i, i + BATCH_SIZE);
+        const details = await Promise.all(
+          batch.map(t => extractDataType(connection, t.name, t.category))
+        );
+        for (let j = 0; j < details.length; j++) {
+          if (details[j]) {
+            // Replace the listing entry with the detailed version
+            const idx = dataTypeIndex.get(`${batch[j].name}\u0000${batch[j].category}`);
+            if (idx !== undefined) {
+              dataTypes[idx] = details[j]!;
+            }
+          }
         }
       }
-    }
-  }
+    },
+    () => `${typesNeedingDetail.length} types in ${Math.ceil(typesNeedingDetail.length / BATCH_SIZE)} batches`
+  );
 
   // Fetch initialized data values for non-trivial globals (arrays, structs, tables)
-  await fetchInitializedData(connection, analyzedGlobals, (fetched, total) => {
-    onProgress?.('initialized-data', fetched, total);
-  });
+  let initializedDataCount = 0;
+  await timePhase(
+    `${label}extract/initialized-data`,
+    () => fetchInitializedData(connection, analyzedGlobals, (fetched, total) => {
+      initializedDataCount = total;
+      onProgress?.('initialized-data', fetched, total);
+    }),
+    () => `${initializedDataCount} items`
+  );
 
   onProgress?.('extraction', 1, 5);
 
@@ -167,6 +203,8 @@ export async function extractAll(
     excludeLibraryCode,
     excludePatterns,
     namespace: namespaceFilter,
+    phaseLabel: options.phaseLabel,
+    decompileFilter: options.decompileFilter,
     onProgress: (current, total) => {
       onProgress?.('functions', current, total);
     },

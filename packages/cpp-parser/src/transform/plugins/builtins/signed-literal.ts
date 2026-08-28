@@ -9,6 +9,10 @@
  * - 0xffffffffffffffff  →  -1  (64-bit)
  * - 0x80000000  →  -2147483648 or INT32_MIN
  *
+ * It also undoes Ghidra's double negative on an already-negative constant
+ * (`--2147483648`, `--0x80000000` → `(-2147483648)`), which as written is a
+ * pre-decrement of a literal and does not compile.
+ *
  * This makes the code more readable when the original source used negative values.
  */
 
@@ -16,6 +20,7 @@ import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode,
   IntegerLiteralExpr,
+  ParenExpr,
   UnaryExpr,
 } from '../../../ast/nodes.js';
 import { createTransformer, type Transformer } from '../../transformer.js';
@@ -129,6 +134,49 @@ function createNegativeLiteral(
 // ============================================
 
 /**
+ * Magnitude of a literal operand, seeing through a leading '-' this pass may
+ * itself have introduced (0x80000000 → -2147483648).
+ */
+function literalMagnitude(node: ASTNode): bigint | null {
+  if (node.kind === NodeKind.IntegerLiteral) {
+    return (node as IntegerLiteralExpr).value;
+  }
+  if (node.kind === NodeKind.UnaryExpr) {
+    const u = node as UnaryExpr;
+    if (u.operator === '-') return literalMagnitude(u.operand);
+  }
+  if (node.kind === NodeKind.ParenExpr) {
+    return literalMagnitude((node as ParenExpr).expression);
+  }
+  return null;
+}
+
+/**
+ * Ghidra prints a negated constant with the sign glued to the minus of the
+ * expression, so INT_MIN comes out as `--2147483648` / `--0x80000000`. As C++
+ * that is a pre-decrement of a literal, which does not compile. The value meant
+ * is the single negation of the printed magnitude.
+ */
+function undoDoubleNegative(node: ASTNode): ASTNode | undefined {
+  if (node.kind !== NodeKind.UnaryExpr) return undefined;
+  const u = node as UnaryExpr;
+  if (u.operator !== '--') return undefined;
+
+  const magnitude = literalMagnitude(u.operand);
+  if (magnitude === null) return undefined;
+
+  const negation = createNegativeLiteral(-magnitude, u);
+  const paren: ParenExpr = {
+    kind: NodeKind.ParenExpr,
+    expression: negation,
+    location: u.location,
+    leadingTrivia: u.leadingTrivia || [],
+    trailingTrivia: u.trailingTrivia || [],
+  };
+  return paren;
+}
+
+/**
  * Create the signed literal cleanup transformer
  */
 function createSignedLiteralCleanup(options: SignedLiteralOptions): Transformer {
@@ -137,6 +185,11 @@ function createSignedLiteralCleanup(options: SignedLiteralOptions): Transformer 
 
   return createTransformer({
     visitNode(node) {
+      const doubleNegative = undoDoubleNegative(node);
+      if (doubleNegative) {
+        return doubleNegative;
+      }
+
       // Only handle integer literals
       if (node.kind !== NodeKind.IntegerLiteral) {
         return undefined;

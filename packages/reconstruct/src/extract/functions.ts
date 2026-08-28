@@ -9,6 +9,7 @@ import type {
   ExtractedVariable,
 } from '../types.js';
 import { FunctionCache, type CacheOptions } from '../cache.js';
+import { timePhase } from '../timing.js';
 
 /**
  * Options for function extraction
@@ -43,11 +44,32 @@ export interface FunctionExtractionOptions {
 
   /** Use default exclusions for C runtime and Visual Studio code */
   excludeLibraryCode?: boolean;
+
+  /** Prefix for recorded phase names, e.g. "mac" -> "mac/extract/list-functions". */
+  phaseLabel?: string;
+
+  /**
+   * Decompile only the functions this returns true for. Listing still covers
+   * everything; only the BODIES are narrowed.
+   *
+   * The cross-check binary is the reason this exists: of its 11,379 bodies,
+   * 8,221 were decompiled and then thrown away because the merge keeps only the
+   * function's ADDRESS for anything the primary binary already has. The caller
+   * knows which those are before a single body is fetched, so it says so.
+   */
+  decompileFilter?: (func: ExtractedFunction) => boolean;
 }
 
 /**
  * Default patterns to exclude common C runtime and Visual Studio library functions
  */
+/**
+ * How many function bodies one `batch_decompile` round-trip asks for. The Java
+ * side fans the batch out over its DecompilerPool, so this trades round-trip
+ * latency against pool ramp-down at each batch boundary.
+ */
+const DECOMPILE_BATCH_SIZE = Number(process.env.GHIDRA_DECOMPILE_BATCH_SIZE) || 50;
+
 export const DEFAULT_LIBRARY_EXCLUSION_PATTERNS: RegExp[] = [
   // C runtime library
   /^_?_CRT/,           // CRT initialization
@@ -243,7 +265,11 @@ export async function extractAllFunctions(
     cache: cacheOption,
     excludePatterns,
     excludeLibraryCode = false,
+    phaseLabel,
+    decompileFilter,
   } = options;
+
+  const label = phaseLabel ? `${phaseLabel}/` : '';
 
   // Build exclusion patterns list
   const patterns: (string | RegExp)[] = [];
@@ -258,25 +284,36 @@ export async function extractAllFunctions(
   const cache = resolveCache(cacheOption);
 
   let allFunctions: ExtractedFunction[] = [];
+  let decompiledCount = 0;
+  let needsDecompileCount = 0;
+  let decompileBatches = 0;
   const pageSize = 100;
   let offset = 0;
   let total = 0;
 
   // First pass: get all function info
-  do {
-    const result = await extractFunctions(connection, {
-      filter,
-      namespace,
-      limit: pageSize,
-      offset,
-    });
+  let listPages = 0;
+  await timePhase(
+    `${label}extract/list-functions`,
+    async () => {
+      do {
+        const result = await extractFunctions(connection, {
+          filter,
+          namespace,
+          limit: pageSize,
+          offset,
+        });
 
-    allFunctions.push(...result.functions);
-    total = result.total;
-    offset += pageSize;
+        allFunctions.push(...result.functions);
+        total = result.total;
+        offset += pageSize;
+        listPages++;
 
-    onProgress?.(Math.min(offset, total), total);
-  } while (offset < total);
+        onProgress?.(Math.min(offset, total), total);
+      } while (offset < total);
+    },
+    () => `${total} functions in ${listPages} pages of ${pageSize}`
+  );
 
   // Filter out excluded functions
   if (patterns.length > 0) {
@@ -290,6 +327,20 @@ export async function extractAllFunctions(
 
   // Second pass: decompile if requested — use batch_decompile for speed
   if (decompile) {
+    await timePhase(
+      `${label}extract/decompile`,
+      () => decompileAll(),
+      () => `${decompiledCount}/${needsDecompileCount} bodies in ${decompileBatches} batches of ${DECOMPILE_BATCH_SIZE}`
+    );
+  }
+
+  return allFunctions;
+
+  // ---------------------------------------------------------------------------
+  // Decompilation, kept as a closure so the timing wrapper above reads as one
+  // phase while the counters below stay in scope for its detail line.
+  // ---------------------------------------------------------------------------
+  async function decompileAll(): Promise<void> {
     let cacheHits = 0;
 
     // Collect addresses that need decompilation
@@ -298,6 +349,7 @@ export async function extractAllFunctions(
     for (let i = 0; i < allFunctions.length; i++) {
       const func = allFunctions[i];
       if (func.isExternal || func.isThunk) continue;
+      if (decompileFilter && !decompileFilter(func)) continue;
 
       // Check cache first
       if (cache) {
@@ -316,10 +368,12 @@ export async function extractAllFunctions(
     }
 
     // Batch decompile in chunks (Java uses DecompilerPool for parallel decompilation)
-    const BATCH_SIZE = 50;
+    const BATCH_SIZE = DECOMPILE_BATCH_SIZE;
     let decompiled = 0;
+    needsDecompileCount = needsDecompile.length;
 
     for (let i = 0; i < needsDecompile.length; i += BATCH_SIZE) {
+      decompileBatches++;
       const batch = needsDecompile.slice(i, i + BATCH_SIZE);
       const addresses = batch.map(b => b.address);
 
@@ -389,10 +443,9 @@ export async function extractAllFunctions(
       onProgress?.(Math.min(i + BATCH_SIZE, needsDecompile.length), needsDecompile.length);
     }
 
+    decompiledCount = decompiled;
     console.log(`  Decompiled: ${decompiled}/${needsDecompile.length}`);
   }
-
-  return allFunctions;
 }
 
 /**
@@ -525,4 +578,49 @@ function mapVariable(variable: NonNullable<GhidraFunctionInfo['localVariables']>
     stackOffset: variable.stackOffset,
     register: variable.register,
   };
+}
+
+/**
+ * A Ghidra data-type spelling with the decompiler's resolution folded in.
+ *
+ * The daemon can hand back `undefined4 /* resolvedType: int * *\/` — the raw
+ * database field, plus the type the DECOMPILER resolved for that storage. Passed
+ * through untouched it becomes a C++ parameter whose type is half comment; it
+ * still compiles, but every type table downstream is keyed on the spelling, so
+ * `undefined4 /* … *\/` matches nothing and the whole cast machinery goes blind
+ * on exactly the slots the annotation was there to explain.
+ *
+ * The annotation only ever accompanies an `undefined` placeholder — a field
+ * nobody curated — so the decompiler's answer is the better one and is taken.
+ * (The same rule `decompiledReturnType` already applies to return types.) Where
+ * the base is a real type the comment is dropped and the declaration stands.
+ */
+export function resolveAnnotatedType(dataType: string | undefined): string | undefined {
+  if (!dataType || !dataType.includes('/*')) return dataType;
+  const m = dataType.match(/^\s*(.*?)\s*\/\*\s*resolvedType:\s*(.*?)\s*\*\/\s*$/);
+  if (!m) return dataType.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\s+/g, ' ').trim();
+  const [, base, resolved] = m;
+  return /^undefined\d*(\[\d+\])?$/.test(base) && resolved !== '' ? resolved : base;
+}
+
+/**
+ * Fold `resolvedType` annotations into every parameter and local of every
+ * function, once, on the model both the live extraction and the snapshot replay
+ * hand to codegen — so declaration and type table read the same spelling.
+ */
+export function applyResolvedTypes(functions: ExtractedFunction[]): number {
+  let changed = 0;
+  for (const fn of functions) {
+    for (const p of fn.parameters ?? []) {
+      const t = resolveAnnotatedType(p.dataType);
+      if (t !== undefined && t !== p.dataType) { p.dataType = t; changed++; }
+    }
+    for (const v of fn.localVariables ?? []) {
+      const t = resolveAnnotatedType(v.dataType);
+      if (t !== undefined && t !== v.dataType) { v.dataType = t; changed++; }
+    }
+    const rt = resolveAnnotatedType(fn.returnType);
+    if (rt !== undefined && rt !== fn.returnType) { fn.returnType = rt; changed++; }
+  }
+  return changed;
 }

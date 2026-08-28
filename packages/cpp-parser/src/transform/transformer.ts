@@ -39,6 +39,18 @@ export interface TransformOptions {
 
   /** Optional filter to only transform certain node kinds */
   filterKinds?: NodeKind[];
+
+  /**
+   * Compute `changesCount` by walking the tree before and after. Default: true.
+   *
+   * This costs TWO extra full traversals plus an identity Set of every node,
+   * per step. `transformChildren` shallow-copies every node unconditionally, so
+   * the number it produces is the node count of the result, not a count of
+   * anything that actually changed — it is only ever useful as a "did the
+   * transformer run" signal. Callers that never read `changesCount` should turn
+   * it off; the transformed AST is bit-for-bit the same either way.
+   */
+  trackChanges?: boolean;
 }
 
 /**
@@ -99,6 +111,12 @@ export function transformWithTracking<N extends ASTNode>(
 ): TransformResult<N> {
   const changeMap = new Map<ASTNode, ASTNode>();
   let changesCount = 0;
+
+  // The two traversals below are pure bookkeeping — skip them when the caller
+  // does not read the count.
+  if (options.trackChanges === false) {
+    return { ast: transformer(node), changesCount: 0, changeMap };
+  }
 
   // Collect original nodes for comparison
   const originalNodes = new Set<ASTNode>();

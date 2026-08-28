@@ -47,4 +47,29 @@ describe('pointerAssignCastPlugin', () => {
     assert.ok(!twice.includes('(char*)(char*)'), twice);
     assert.ok(once.includes('(char*)y'), once);
   });
+  it('widens a pointer through uintptr_t before a narrowing cast', () => {
+    const out = transform(`void f() { char* pEnd; short n; n = (short)pEnd; }`);
+    assert.ok(out.includes('(uintptr_t)pEnd'), out);
+  });
+
+  it('widens the pointer side of pointer arithmetic too', () => {
+    const out = transform(`void f() { char* pEnd; short n; n = (short)(pEnd + 1); }`);
+    assert.ok(out.includes('(uintptr_t)(pEnd + 1)'), out);
+  });
+
+  it('leaves a WORD-width cast of a pointer alone (no precision lost)', () => {
+    const out = transform(`void f() { char* p; int n; n = (int)p; }`);
+    assert.ok(!out.includes('uintptr_t'), out);
+  });
+
+  it('leaves a narrowing cast of a non-pointer alone', () => {
+    const out = transform(`void f() { int v; short n; n = (short)v; }`);
+    assert.ok(!out.includes('uintptr_t'), out);
+  });
+
+  it('does not double-widen on a re-run', () => {
+    const once = transform(`void f() { char* pEnd; short n; n = (short)pEnd; }`);
+    const twice = emit(transformer(parse(once)) as AnyNode).replace(/\s+/g, ' ').trim();
+    assert.ok(!twice.includes('(uintptr_t)(uintptr_t)'), twice);
+  });
 });

@@ -1646,7 +1646,9 @@ void foo(int x, int y) {
 `);
   });
 
-  it('nested inline:nested label with cleanup-fallthrough tail', () => {
+  it('nested inline:nested label with cleanup-fallthrough tail keeps the goto', () => {
+    // Falling off label_00401234 leaves the `if (x)` block and runs work(). Inlining the
+    // tail with a fabricated `return` would silently drop work(), so the goto stays.
     expectTransform(`
 void foo(int x) {
   if (x) {
@@ -1659,12 +1661,11 @@ void foo(int x) {
 `, `
 void foo(int x) {
   if (x) {
+    label_00401234:
     cleanup();
   }
-  if (!x) {
-    cleanup();
-    return;
-  }
+  if (!x)
+    goto label_00401234;
   work();
 }
 `);
@@ -1999,10 +2000,10 @@ LAB_X:
     assert.ok(output.includes('return nCount;'), `Expected return nCount; in:\n${output}`);
   });
 
-  it('SHOULD fabricate a return for a cleanup-fallthrough label in a top-level if at function-body level (not in any loop — must not over-correct)', () => {
-    // No enclosing loop/switch: fallthrough off LAB_X reaches the function's implicit
-    // return, so fabricating an explicit `return` when inlining the goto is correct.
-    // The transitive loop-marking must NOT suppress this genuine case.
+  it('must NOT fabricate a return for a cleanup-fallthrough label at the end of an if-branch', () => {
+    // LAB_X sits at the end of the else branch, and more() runs after the if/else.
+    // Fallthrough off LAB_X therefore reaches more(), NOT the function's implicit
+    // return — fabricating a `return` here would silently drop more().
     const input = `
 void foo(int x) {
   prep();
@@ -2017,10 +2018,12 @@ LAB_X:
 }
 `;
     const output = transformCode(input);
-    // The inlined goto site must carry a fabricated return (cleanup then return).
-    assert.ok(/cleanup\(\);\s*\n?\s*return;/.test(output),
-      `Expected a fabricated return at the inlined cleanup site in:\n${output}`);
+    assert.ok(!/\breturn\s*;/.test(output),
+      `Must not fabricate a return that skips more() in:\n${output}`);
     assert.ok(output.includes('more();'), `Expected more() to survive in:\n${output}`);
+    // Only one cleanup() call: the goto is preserved rather than the tail duplicated.
+    assert.strictEqual((output.match(/cleanup\(\);/g) ?? []).length, 1,
+      `Expected the goto to be preserved, not the tail inlined, in:\n${output}`);
   });
 
   // ======================================

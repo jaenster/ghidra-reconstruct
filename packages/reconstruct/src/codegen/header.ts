@@ -21,21 +21,26 @@ import type {
 import type { MethodConversionRegistry } from '../methods/index.js';
 import { parseTemplateName, collapseConsecutiveDuplicates, stripLastCollidingNamespaceComponent } from './namespace.js';
 import { isGhidraGeneratedName, suggestBetterName } from '@ghidra-mcp/cpp-parser';
-import { isPlatformOrBuiltinType, isLibraryType, normalizeSignatureType, collapseFuncPtrTypedef, WINDOWS_STRUCTS } from './platform-types.js';
+import { isPlatformOrBuiltinType, isLibraryType, normalizeSignatureType, normalizeWideCharType, collapseFuncPtrTypedef, rootQualifyShadowedType, WINDOWS_STRUCTS, platformDeclaredFunctionNames } from './platform-types.js';
 import { generateExternDeclaration, isFuncDefTypedefName } from './globals-header.js';
 
 /** normalizeSignatureType + fn-ptr-typedef double-indirection collapse, for
  *  emitting function parameter and return types ("fpFoo *" → "fpFoo"). */
-function sigType(type: string): string {
-  return collapseFuncPtrTypedef(normalizeSignatureType(type), isFuncDefTypedefName);
+export function sigType(type: string): string {
+  return rootQualifyShadowedType(
+    collapseFuncPtrTypedef(normalizeSignatureType(type), isFuncDefTypedefName)
+  );
 }
 
 /**
  * C++ keywords that Ghidra can auto-pick as a struct field / variable name
  * (`int default;`, `char class;`). Using one as an identifier is a syntax error;
- * such names are suffixed with `_`. Excludes keywords that are also type names
- * (int/char/…) since those don't arise as bare field names. Shared with impl.ts
- * so body member accesses get the same rename.
+ * such names are suffixed with `_`. Shared with impl.ts so body member accesses
+ * get the same rename.
+ *
+ * Type keywords belong here too: Ghidra names the data-table structs after the
+ * .txt column headers, and CharTemplate.txt has a column called `int`, so
+ * D2CharTemplateTxt really does carry a field named `int`.
  */
 export const CPP_KEYWORDS = new Set<string>([
   'default', 'class', 'new', 'delete', 'operator', 'template', 'namespace',
@@ -43,6 +48,9 @@ export const CPP_KEYWORDS = new Set<string>([
   'export', 'goto', 'throw', 'try', 'catch', 'typename', 'typeid', 'switch',
   'case', 'return', 'while', 'for', 'do', 'if', 'else', 'break', 'continue',
   'and', 'or', 'not', 'xor', 'bitand', 'bitor', 'compl', 'typedef', 'sizeof',
+  'int', 'char', 'float', 'double', 'short', 'long', 'bool', 'void',
+  'signed', 'unsigned', 'auto', 'const', 'static', 'struct', 'union', 'enum',
+  'inline', 'extern', 'volatile',
 ]);
 
 /**
@@ -148,10 +156,28 @@ export function generateHeader(
   // Forward declarations — skip types already fully defined via #includes (includedTypes).
   // Don't skip ownedTypes: they might not be emitted due to filtering, and need forward decl.
   const alreadyDefined = new Set<string>([...(includedTypes ?? [])]);
-  const forwardDecls = collectForwardDeclarations(functions, classInfo, dataTypes, classNames, alreadyDefined, ownedTypes, allClasses, allFunctions);
+  const funcDefReferencedTypes = new Set<string>();
+  const forwardDecls = collectForwardDeclarations(functions, classInfo, dataTypes, classNames, alreadyDefined, ownedTypes, allClasses, allFunctions, funcDefReferencedTypes);
   if (forwardDecls.length > 0) {
     lines.push('// Forward declarations');
-    for (const decl of forwardDecls) {
+    // A function-pointer typedef names struct types in its signature, so every
+    // plain forward declaration has to precede the typedef block that uses one.
+    const isTypedefBlock = (d: string) => d.startsWith('#ifndef RECON_FPTD_');
+    for (const decl of forwardDecls.filter(d => !isTypedefBlock(d))) {
+      lines.push(decl);
+    }
+    // A struct this header DEFINES is defined BELOW the typedef block, so the
+    // typedef still needs its own forward declaration of it.
+    const ownedAhead: string[] = [];
+    for (const name of funcDefReferencedTypes) {
+      if (!ownedTypes?.has(name)) continue;
+      const dt = dataTypes?.find(t => t.name === name);
+      if (!dt) continue;
+      if (dt.kind === 'STRUCTURE') ownedAhead.push(`struct ${name};`);
+      else if (dt.kind === 'UNION') ownedAhead.push(`union ${name};`);
+    }
+    for (const decl of ownedAhead.sort()) lines.push(decl);
+    for (const decl of forwardDecls.filter(isTypedefBlock)) {
       lines.push(decl);
     }
     lines.push('');
@@ -487,6 +513,10 @@ export function generateHeader(
         if (sl.startsWith('struct ') || sl.startsWith('class ') || sl.startsWith('union ')) continue;
         sublines[j] = sl.replace(/(\W)([A-Z_]\w+)(\s*\*)/g, (full, pre, name, post) => {
           if (pre === '.' || pre === '>') return full;
+          // Already root-qualified by sigType (`::QServer *`) — the shadow the
+          // `struct` keyword defends against is gone, and inserting it here
+          // would produce `::struct QServer *`.
+          if (pre === ':') return full;
           if (forwardDeclaredStructs.has(name) && !full.startsWith('struct ')) {
             return `${pre}struct ${name}${post}`;
           }
@@ -823,6 +853,16 @@ function generateDataTypeDeclaration(
  * - Gives other unnamed members Ghidra's decompiler default name so body
  *   references resolve: `field<i>` for unions, `field<i>_0x<off>` for structs
  */
+/**
+ * Longest run of unnamed `undefined` filler bytes that gets one named member per
+ * byte. Above this the run stays a collapsed `_pad_` array: the handful of runs
+ * that big in Diablo II are multi-kilobyte unanalysed tails (up to 59999 bytes),
+ * and expanding them would add ~85k member declarations to headers that hundreds
+ * of translation units include. Every filler offset any reconstructed body
+ * actually reaches lies well inside this limit.
+ */
+const MAX_NAMED_FILLER_BYTES = 4096;
+
 function emitFieldLines(fields: StructField[], lines: string[], isUnion = false): void {
   // Determine hex width from the largest offset (minimum 2 digits)
   const maxOffset = fields.length > 0 ? Math.max(...fields.map(f => f.offset)) : 0;
@@ -885,18 +925,39 @@ function emitFieldLines(fields: StructField[], lines: string[], isUnion = false)
         count++;
       }
       if (count > 1) {
-        // Name the run's FIRST byte using Ghidra's unnamed-field convention
-        // (`field_0x<unpadded-hex>`) so decompiled bodies that read the run start
-        // as a scalar flag byte (`pTxt->field_0x8 & 0x10`) resolve — a bare `_pad`
-        // array can't ("struct has no member named 'field_0x8'"). Collapse the rest.
+        // Ghidra's decompiler names an access into undefined filler
+        // `field_0x<unpadded-lowercase-hex>` at the offset it touches — so a body
+        // that reaches into the middle of a run needs a member AT that offset, not
+        // just at the run's start. A lumped `uint8_t _pad[N]` gives no name at any
+        // offset ("struct D2WinScrollbar has no member named 'field_0x48'"), so
+        // name every byte of the run instead.
+        //
+        // Layout is untouched: N consecutive `uint8_t` members occupy the same N
+        // bytes at the same offsets, with the same alignment, as `uint8_t[N]`.
+        if (count <= MAX_NAMED_FILLER_BYTES) {
+          for (let k = 0; k < count; k++) {
+            const byteOffset = field.offset + k;
+            const byteOffsetHex = `0x${byteOffset.toString(16).toUpperCase().padStart(hexWidth, '0')}`;
+            let byteName = `field_0x${byteOffset.toString(16)}`;
+            // A real member of that exact name elsewhere in the struct wins; this
+            // byte still has to occupy its slot, so fall back to a unique pad name.
+            if (seenNames.has(byteName)) byteName = `_pad_${byteOffsetHex}`;
+            seenNames.add(byteName);
+            lines.push(`    /* ${byteOffsetHex} */ uint8_t ${byteName};`);
+          }
+          i += count;
+          continue;
+        }
+        // Runs past the limit stay collapsed — naming every byte of a multi-kilobyte
+        // unanalysed tail would add more declarations than the rest of the header
+        // holds, and nothing in the tree reaches that far into one. The run's first
+        // byte still gets its Ghidra name, which is the offset bodies actually read.
         const ghName = `field_0x${field.offset.toString(16)}`;
         if (!seenNames.has(ghName)) {
           seenNames.add(ghName);
           lines.push(`    /* ${offsetHex} */ uint8_t ${ghName};`);
-          if (count > 1) {
-            const restOffsetHex = `0x${(field.offset + 1).toString(16).toUpperCase().padStart(hexWidth, '0')}`;
-            lines.push(`    /* ${restOffsetHex} */ uint8_t _pad_${restOffsetHex}[${count - 1}];`);
-          }
+          const restOffsetHex = `0x${(field.offset + 1).toString(16).toUpperCase().padStart(hexWidth, '0')}`;
+          lines.push(`    /* ${restOffsetHex} */ uint8_t _pad_${restOffsetHex}[${count - 1}];`);
           i += count;
           continue;
         }
@@ -979,9 +1040,13 @@ function isBitfield(field: StructField): boolean {
   return /:\d+$/.test((field.dataType ?? '').trim());
 }
 
-/** Map Ghidra `undefined` types to C types. Odd sizes become uint8_t[N]. */
+/**
+ * Map Ghidra `undefined` types to C types. Odd sizes become uint8_t[N].
+ * Also unifies D2's wide-character spellings on `uint16_t` so struct fields
+ * agree with the `uint16_t` that decompiled bodies produce.
+ */
 function normalizeUndefinedType(dataType: string, size: number): string {
-  const t = (dataType ?? '').trim();
+  const t = normalizeWideCharType((dataType ?? '').trim());
 
   // Handle pointer variants: "undefined4 *" → "uint32_t *"
   const ptrMatch = t.match(/^(undefined\d?)\s*([\s*]+)$/);
@@ -992,7 +1057,7 @@ function normalizeUndefinedType(dataType: string, size: number): string {
   }
 
   // Replace Ghidra artifact pointer types: "vtable *" → "void *"
-  const artifactPtrMatch = t.match(/^(vtable|unicode|wchar16)\s*([\s*]+)$/);
+  const artifactPtrMatch = t.match(/^(vtable)\s*([\s*]+)$/);
   if (artifactPtrMatch) {
     const stars = artifactPtrMatch[2].replace(/\s+/g, '').trim();
     return `void ${stars}`;
@@ -1011,8 +1076,6 @@ function normalizeUndefinedType(dataType: string, size: number): string {
     case 'undefined7': return 'uint8_t[7]';
     // Ghidra artifact types
     case 'vtable': return 'void';
-    case 'unicode': return 'uint16_t';
-    case 'wchar16': return 'uint16_t';
     case 'pointer': return 'void*';
     default:
       // Ghidra anonymous struct/union: _struct_1234 → uint8_t[size], _union_1234 → uint8_t[size]
@@ -1111,6 +1174,27 @@ function normalizeFieldDeclaration(fieldType: string, fieldName: string, fieldSi
 }
 
 /**
+ * The type spelling a struct field is EMITTED with, or null when the field is
+ * not a cast target at all (a bitfield, or an array).
+ *
+ * `sigType` is NOT that spelling and using it is a real defect, not a nicety:
+ * Ghidra's `string *` is emitted `char *`, and a `fnFoo *` field is emitted
+ * `fnFoo`. A cast written from the wrong spelling names a type the struct does
+ * not have - `(string*)` fails to parse and takes the rest of the file with it.
+ */
+export function emittedFieldType(dataType: string, size: number): string | null {
+  const raw = normalizeUndefinedType(dataType ?? '', size);
+  if (/^.+?:\d+$/.test(raw.trim())) return null; // bitfield
+  const SENTINEL = 'RECON_FIELD_NAME';
+  const decl = normalizeFieldDeclaration(raw, SENTINEL, size);
+  const idx = decl.indexOf(SENTINEL);
+  if (idx < 0) return null;
+  if (decl.slice(idx + SENTINEL.length).trim() !== '') return null; // array suffix
+  const type = decl.slice(0, idx).trim();
+  return type === '' ? null : type;
+}
+
+/**
  * Generate struct declaration
  */
 export function generateStructDeclaration(struct: ExtractedStruct): string {
@@ -1177,11 +1261,35 @@ export function generateEnumDeclaration(enumType: ExtractedEnum): string {
 }
 
 /**
+ * Does `d2_platform.h` (or a system header it pulls in) already declare a
+ * FUNCTION by this name? Memoised: the registry is assembled from five tables
+ * and this is asked once per candidate type name per header.
+ */
+let emitterDeclaredFunctions: Set<string> | undefined;
+function emitterDeclaresFunction(name: string): boolean {
+  emitterDeclaredFunctions ??= platformDeclaredFunctionNames();
+  return emitterDeclaredFunctions.has(name);
+}
+
+/**
  * Generate typedef declaration
  */
 // FunctionDefinition datatypes by name, registered before emission so a typedef
 // whose target is a pointer to one can be inlined (see generateTypedefDeclaration).
 const knownFuncDefs = new Map<string, ExtractedFunctionDefinition>();
+
+/**
+ * The guarded typedef for a function-pointer type, or undefined when no
+ * FUNCTION_DEFINITION by that name is registered. The `RECON_FPTD_<name>` guard
+ * is the same one `addForwardDeclaration` uses, so a file that emits the typedef
+ * locally and a header that also declares it cannot both expand in one TU.
+ */
+export function guardedFuncDefTypedef(name: string): string | undefined {
+  if (emitterDeclaresFunction(name)) return undefined;
+  const fd = knownFuncDefs.get(name);
+  if (!fd) return undefined;
+  return `#ifndef RECON_FPTD_${name}\n#define RECON_FPTD_${name}\n${generateFunctionDefinitionDeclaration(fd)}\n#endif`;
+}
 
 export function setKnownFuncDefs(defs: Iterable<ExtractedFunctionDefinition>): void {
   knownFuncDefs.clear();
@@ -1224,7 +1332,11 @@ export function generateUnionDeclaration(type: ExtractedUnion): string {
 export function generateFunctionDefinitionDeclaration(type: ExtractedFunctionDefinition): string {
   const params = type.parameters
     .map(p => {
-      const name = p.name && p.name !== '' ? ` ${p.name}` : '';
+      // Ghidra spells a __thiscall receiver `this`; as a parameter name in a
+      // free function-pointer typedef that is a C++ keyword, not an identifier
+      // ("'this' must be the first specifier in a parameter declaration").
+      // Same rename the function signatures make.
+      const name = p.name && p.name !== '' ? ` ${cleanParamName(p.name)}` : '';
       return `${sigType(p.dataType)}${name}`;
     })
     .join(', ');
@@ -1356,7 +1468,8 @@ function collectForwardDeclarations(
   alreadyDefined?: Set<string>,
   ownedTypes?: Set<string>,
   allClasses?: DetectedClass[],
-  allFunctions?: ExtractedFunction[]
+  allFunctions?: ExtractedFunction[],
+  funcDefReferencedTypes?: Set<string>
 ): string[] {
   const declarations = new Set<string>();
 
@@ -1405,14 +1518,14 @@ function collectForwardDeclarations(
     for (const param of func.parameters) {
       for (const type of extractAllTypeRefs(param.dataType)) {
         if (type !== classInfo?.name) {
-          addForwardDeclaration(declarations, type, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes);
+          addForwardDeclaration(declarations, type, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes, undefined, funcDefReferencedTypes);
         }
       }
     }
 
     const returnType = extractClassName(func.returnType);
     if (returnType && returnType !== classInfo?.name) {
-      addForwardDeclaration(declarations, returnType, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes);
+      addForwardDeclaration(declarations, returnType, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes, undefined, funcDefReferencedTypes);
     }
   }
 
@@ -1425,7 +1538,7 @@ function collectForwardDeclarations(
       for (const field of fields) {
         const type = extractClassName(field.dataType);
         if (type && type !== dt.name) {
-          addForwardDeclaration(declarations, type, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes);
+          addForwardDeclaration(declarations, type, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes, undefined, funcDefReferencedTypes);
         }
       }
     }
@@ -1438,12 +1551,12 @@ function collectForwardDeclarations(
       for (const param of func.parameters) {
         const type = extractClassName(param.dataType);
         if (type && type !== classInfo.name) {
-          addForwardDeclaration(declarations, type, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes);
+          addForwardDeclaration(declarations, type, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes, undefined, funcDefReferencedTypes);
         }
       }
       const returnType = extractClassName(func.returnType);
       if (returnType && returnType !== classInfo.name) {
-        addForwardDeclaration(declarations, returnType, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes);
+        addForwardDeclaration(declarations, returnType, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes, undefined, funcDefReferencedTypes);
       }
     }
   }
@@ -1468,13 +1581,13 @@ function collectForwardDeclarations(
         for (const param of func.parameters) {
           for (const type of extractAllTypeRefs(param.dataType)) {
             if (type !== cls.name) {
-              addForwardDeclaration(declarations, type, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes);
+              addForwardDeclaration(declarations, type, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes, undefined, funcDefReferencedTypes);
             }
           }
         }
         const returnType = extractClassName(func.returnType);
         if (returnType && returnType !== cls.name) {
-          addForwardDeclaration(declarations, returnType, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes);
+          addForwardDeclaration(declarations, returnType, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes, undefined, funcDefReferencedTypes);
         }
       }
     }
@@ -1495,9 +1608,18 @@ function addForwardDeclaration(
   classNames?: Set<string>,
   alreadyDefined?: Set<string>,
   ownedTypes?: Set<string>,
+  visiting: Set<string> = new Set(),
+  funcDefReferencedTypes?: Set<string>,
 ): void {
   // Validate: skip malformed or artifact type names
   if (!type || isPlatformOrBuiltinType(type)) return;
+  // A name the emitter already declares as a FUNCTION cannot also be introduced
+  // as a type. Ghidra records the MSVC pure-virtual thunk twice — as the
+  // function `__purecall` and as a FUNCTION_DEFINITION of the same name — and
+  // declaring both makes the typedef win every lookup, so a vtable initializer
+  // taking `&__purecall` takes the address of a type. The function is the one
+  // call sites and initializers mean; the type declaration is dropped.
+  if (emitterDeclaresFunction(type)) return;
   if (/[{}:<>,]/.test(type)) return;    // Ghidra size annotations, bitfields, templates
   if (/^\d/.test(type)) return;          // Numeric garbage
   if (!/^[A-Za-z_]/.test(type)) return;  // Must start with letter or underscore
@@ -1520,6 +1642,27 @@ function addForwardDeclaration(
     declarations.add(`struct ${type};`);
   } else if (/^fn[A-Z]/.test(type) || /^fp[A-Z]/.test(type) || funcDefNames.has(type)) {
     const funcDef = funcDefMap.get(type);
+    // The typedef spells its parameter and return types by name, so those need
+    // declarations of their own — and BEFORE it. A vtable slot typed
+    // `pfnIgnoreListGetPersistent` names `::IgnoreList`, a class Ghidra holds
+    // only as a category, and nothing else in the header mentions it.
+    if (funcDef && !visiting.has(type)) {
+      visiting.add(type);
+      const referenced = [funcDef.returnType, ...funcDef.parameters.map(fp => fp.dataType)];
+      for (const ref of referenced) {
+        const name = extractClassName(ref ?? '');
+        if (!name || name === type) continue;
+        // A type this header DEFINES is still declared too late: the typedef
+        // block sits in the forward-declaration section, above the definitions.
+        funcDefReferencedTypes?.add(name);
+        addForwardDeclaration(
+          declarations, name, structNames, unionNames, enumNames, typedefNames,
+          funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes, visiting,
+          funcDefReferencedTypes,
+        );
+      }
+      visiting.delete(type);
+    }
     // Guard the typedef with a per-name macro so the real signature (here) and
     // an opaque fallback (in a header that lacks the FUNCTION_DEFINITION) can't
     // both expand in one translation unit — first include wins, the rest skip.

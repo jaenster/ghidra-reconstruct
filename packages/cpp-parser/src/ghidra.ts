@@ -183,6 +183,14 @@ export interface TransformResult {
 
   /** All identifiers referenced in the transformed AST */
   identifiers: Set<string>;
+
+  /**
+   * Names used as TYPES in the transformed AST. The visitor gives TypedefType
+   * no children, so its name never reaches `identifiers` — but a body that
+   * declares `pfnEHHandlerRoutine pExcHandler;` still needs that typedef
+   * declared somewhere the file can see.
+   */
+  typeNames: Set<string>;
 }
 
 /**
@@ -241,6 +249,7 @@ export function transformGhidraCode(
         success: false,
         error: e.message,
         identifiers: new Set<string>(),
+        typeNames: new Set<string>(),
       };
     }
     throw e;
@@ -322,10 +331,14 @@ export function transformGhidraCode(
   }
 
   const identifiers = new Set<string>();
+  const typeNames = new Set<string>();
   for (const node of traverseAST(transformedAst)) {
     if (node.kind === NodeKind.Identifier) {
       const name = (node as Identifier).name;
       identifiers.add(name);
+    } else if (node.kind === NodeKind.TypedefType) {
+      const named = (node as { name?: { kind: NodeKind; name?: string } }).name;
+      if (named && named.kind === NodeKind.Identifier && named.name) typeNames.add(named.name);
     }
   }
 
@@ -355,6 +368,7 @@ export function transformGhidraCode(
     success: true,
     preamble,
     identifiers,
+    typeNames,
   };
 }
 

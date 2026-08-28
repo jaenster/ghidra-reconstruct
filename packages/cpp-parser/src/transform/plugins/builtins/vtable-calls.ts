@@ -1,13 +1,25 @@
 /**
  * VTable Call Pattern Plugin
  *
- * Transforms C++ virtual function call patterns into readable method calls.
- *
  * Ghidra produces extremely ugly patterns for vtable calls:
  *   (**(code **)(*this + 0x10))(this, param_1)
  *
- * This plugin transforms them to:
- *   this->vmethod_10(param_1)
+ * The readable rendering is `this->vmethod_4(param_1)`, but that only compiles
+ * when the object's type is a class/struct that actually DECLARES `vmethod_4`.
+ * Reconstructed C has no such classes: the object is a `void*`, a `vtable*`, an
+ * `int`, or a struct whose members are byte-offset fields — so the readable form
+ * is a member that does not exist ("'void*' is not a pointer-to-object type",
+ * "request for member 'vmethod_25' in '*p', which is of non-class type 'int'").
+ *
+ * So the readable form is emitted only where it can be checked — an actual `this`
+ * inside a converted method — and every other site gets the faithful indirect
+ * call, the same shape the function-pointer-table branch already used:
+ *
+ *   (**(code**)((char*)*(void**)(uintptr_t)obj + 0x10))(obj, param_1)
+ *
+ * `(uintptr_t)` first so an object Ghidra typed as a scalar converts, `(char*)`
+ * so the offset stays byte-wise, and the ORIGINAL argument list so the `this`
+ * the pattern passed by hand is preserved exactly.
  *
  * Also handles:
  * - (**(code **)(*(long *)this + offset))(this, ...)
@@ -94,6 +106,16 @@ function getIntValue(expr: Expression): number | null {
     }
   }
   return null;
+}
+
+/**
+ * The object of a real C++ method call — `this`, or the identifier a converted
+ * method uses for it. Only here does a class exist to declare `vmethod_N`.
+ */
+function isThisExpr(expr: Expression): boolean {
+  const e = unwrapParens(unwrapCasts(expr));
+  if (e.kind === NodeKind.ThisExpr) return true;
+  return e.kind === NodeKind.Identifier && (e as Identifier).name === 'this';
 }
 
 /**
@@ -287,7 +309,23 @@ function createVTableCallTransformer(pointerSize = 4): Transformer {
         return updateNode(call, { callee: Expr.paren(fn), arguments: call.arguments });
       }
 
-      // Real object vtable (`*this + off`): keep the readable method-call form.
+      // Real object vtable (`*this + off`). `obj->vmethod_N` names a member that
+      // only exists when obj is a class instance — true for a converted method's
+      // `this`, false for every reconstructed C object. Everywhere else, emit the
+      // indirect call through the object's vtable pointer, which is what the
+      // machine does and what Ghidra decompiled.
+      if (!isThisExpr(vtableInfo.object)) {
+        const codePtrPtr = Type.pointer(Type.pointer(Type.builtin('code')));
+        const objWord = Expr.cast(Type.builtin('uintptr_t'), vtableInfo.object);
+        const vtable = Expr.unary('*', Expr.cast(Type.pointer(Type.pointer(Type.void())), objWord));
+        const charCast = Expr.cast(Type.pointer(Type.builtin('char')), vtable);
+        const slotAddr = vtableInfo.vtableOffset === 0
+          ? charCast
+          : Expr.paren(Expr.add(charCast, Expr.intLiteral(vtableInfo.vtableOffset)));
+        const fn = Expr.unary('*', Expr.unary('*', Expr.cast(codePtrPtr, slotAddr)));
+        return updateNode(call, { callee: Expr.paren(fn), arguments: call.arguments });
+      }
+
       const methodName = generateMethodName(vtableInfo.vtableOffset, pointerSize);
       const methodId: Identifier = {
         kind: NodeKind.Identifier,

@@ -45,17 +45,19 @@ import type {
   SourceMap,
   ProgramInfo,
   AnalyzedDataSymbol,
+  DataValue,
 } from '../types.js';
 import { resolveOverridePlaceholders } from './impl.js';
+import { VOID_POINTER_SLOT } from '@ghidra-mcp/cpp-parser';
 
-import { generateHeader, setKnownFuncDefs } from './header.js';
-import { generateImplementation, setQuestStructLayouts, type ImplGenContext } from './impl.js';
+import { emittedFieldType, generateHeader, setKnownFuncDefs, sigType } from './header.js';
+import { generateImplementation, setQuestStructLayouts, setStructFieldRenames, decompiledReturnType, decompiledFunctionName, type ImplGenContext, type FuncPtrArgCastTables } from './impl.js';
 import { generateCMakeLists, generateTopLevelCMake, generateTargetCMake, generateUnsortedCMake } from './cmake.js';
 import { generateSourceMap } from './sourcemap.js';
 import { generateReadme } from './readme.js';
-import { organizeByNamespace, getFilePath, setModuleNames, setNamespaceCollisionTypes } from './namespace.js';
-import { generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setMultidimArrayGlobals } from './globals-header.js';
-import { isPlatformOrBuiltinType, generatePlatformHeader } from './platform-types.js';
+import { organizeByNamespace, getFilePath, setModuleNames, setNamespaceCollisionTypes, normalizeQualifiedReference } from './namespace.js';
+import { sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, setKnownNamespaces, isFuncDefTypedefName, setInitializerSignatureTables, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType } from './globals-header.js';
+import { isPlatformOrBuiltinType, generatePlatformHeader, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
 import { createOverrideRegistry } from '../overrides/index.js';
 import { createLibraryRegistry } from '../library/index.js';
 import { createMethodConversionRegistry, getOrCreateRegistry, applyMethodConversions, detectMethodConversionsFromTags, type MethodCallMapping, type MethodConversionRegistry } from '../methods/index.js';
@@ -63,7 +65,9 @@ import type { MethodConversionEntry, ModuleConfig, AutoMethodConversionConfig, T
 import { normalizeAddress } from '../config/loader.js';
 import { resolveTargets, getTargetDirectory, type ResolvedTarget } from '../targets/index.js';
 import { generateStubsHeader } from '../targets/stubs.js';
-import { collectCrtHeaders } from './crt-mapping.js';
+import { collectCrtHeaders, EXCLUDED_SYMBOL_DECLS } from './crt-mapping.js';
+import { flattenTemplateNames } from './template-names.js';
+import { NeedleIndex } from './needle-index.js';
 import {
   computeTypeOwnership,
   stripTypeName,
@@ -110,6 +114,20 @@ export function generateProject(
     }
   }
 
+  // Flatten Ghidra's demangled template spellings (`TSHashTable<struct_CELLIST,
+  // class_HASHKEY_NONE>`) across the WHOLE model before anything is emitted, so
+  // the declaration side and every reference side share one identifier.
+  flattenTemplateNames(dataTypes, functions, globals as Array<{ name?: string; dataType?: string; suggestedType?: string; suggestedName?: string; namespace?: string | null }>);
+
+  // A function's return type comes from the raw database field, but its BODY
+  // comes from the decompiler's own resolved prototype. When nobody has curated
+  // the field it reads `undefined` — normalised to `uint8_t` — while the body is
+  // the decompiler's `void` one, full of bare `return;` statements, and the
+  // emitted function cannot compile. Where the database has nothing to say,
+  // take the answer from the same prototype the body came from. A curated field
+  // always wins: `undefined` is the only case where there is nothing to override.
+  reconcileUndefinedReturnTypes(functions);
+
   // Register every function-pointer typedef name (FUNCTION_DEFINITION datatypes)
   // so stripFuncDefIndirection / struct-field stripping recognise all-caps and
   // irregular fnptr typedefs (QUESTCALLBACK, ...), not just naming conventions.
@@ -130,10 +148,23 @@ export function generateProject(
     dataTypes.filter(dt => dt.kind === 'STRUCTURE') as import('../types.js').ExtractedStruct[],
   );
 
+  // Register the declaration-time field renames so body references to a field
+  // the header had to rename (a column literally named `int` → `int_`) use the
+  // same spelling. Applied on member-access nodes by `reserved-field-rename`.
+  setStructFieldRenames(
+    dataTypes.filter(
+      dt => dt.kind === 'STRUCTURE' || dt.kind === 'UNION',
+    ) as import('../types.js').ExtractedStruct[],
+  );
+
   // Register multidimensional-array globals so their `&name` initializers get a
   // cast to the pointer field type (`(T*)&name`) — a 2-D+ array address is
   // `T(*)[N][M]`, incompatible with the `T*` field even after array decay.
-  setMultidimArrayGlobals(globals as Array<{ name: string; dataType?: string }>);
+  setMultidimArrayGlobals(globals as Array<{ name: string; dataType?: string; suggestedName?: string; suggestedType?: string }>);
+  // Register struct/union layouts so a struct-shaped global initializer can be
+  // typed field by field — without it a pointer field is spelled `&sym` with no
+  // idea whether that expression's type is the field's type.
+  setGlobalInitializerTypes(dataTypes);
 
   // Drop excluded namespaces/modules ENTIRELY (functions + classes + datatypes
   // + globals + namespace records) so no per-namespace header/impl file is ever
@@ -294,7 +325,10 @@ export function generateProject(
   // Emit platform types header
   files.set('d2_platform.h', {
     path: 'd2_platform.h',
-    content: generatePlatformHeader({ seedType: dataTypes.some(dt => dt.name === 'D2SeedStrc') }),
+    content: generatePlatformHeader({
+      seedType: dataTypes.some(dt => dt.name === 'D2SeedStrc'),
+      anonymousAggregates: buildAnonymousAggregateDefs(dataTypes, functions),
+    }),
     type: 'header',
     functions: [],
     includes: [],
@@ -379,12 +413,38 @@ export function generateProject(
   // Wire analyzed globals into context for static-local injection
   context.analyzedGlobals = analyzedGlobals;
 
+  // A symbol whose address is taken by ANOTHER symbol's initialized data cannot
+  // be a function-scope static: the initializer is emitted at namespace scope and
+  // names it there. Ghidra's `referencingFunctions` only counts code xrefs, so a
+  // table that is written once and only ever read through that table looks
+  // single-owner and gets demoted — then 46 initializer entries name something
+  // no scope declares. Promote them back before anything is emitted, so the
+  // declaration and the reference come from one place.
+  promoteInitializerReferencedStaticLocals(analyzedGlobals);
+
   // Qualified names (namespace::name) of every emitted function. A data symbol
   // can share its name with a function in the same namespace (getter + backing
   // flag both named e.g. IsRecording); globals.h must not redeclare those.
   const functionQualifiedNames = new Set<string>();
   for (const f of functions) {
-    functionQualifiedNames.add(f.namespace ? `${f.namespace}::${f.name}` : f.name);
+    const qn = f.namespace ? `${f.namespace}::${f.name}` : f.name;
+    functionQualifiedNames.add(qn);
+    // A decorated function name (`GLIDEDLL_grLfbLock@24`) is DECLARED under the
+    // shared identifier sanitizer, so the globals side must test the collision
+    // under that same spelling — otherwise a data symbol at the same decorated
+    // name is emitted as an `extern` beside the function declaration
+    // ("redeclared as a different kind of entity", once per including TU).
+    const sanitized = sanitizeQualifiedReference(qn);
+    if (sanitized !== qn) functionQualifiedNames.add(sanitized);
+  }
+  // d2_platform.h declares the excluded-namespace callees (CRT forwarders, the
+  // Glide/RAD/DDraw import thunks) as FUNCTIONS under the same emitted spelling.
+  // They own those names in every TU, so an IAT data symbol at the same name —
+  // `GLIDEDLL_grLfbLock@24` — must not also get an extern in globals.h.
+  for (const d of EXCLUDED_SYMBOL_DECLS) {
+    functionQualifiedNames.add(d.emitted);
+    const sd = sanitizeQualifiedReference(d.emitted);
+    if (sd !== d.emitted) functionQualifiedNames.add(sd);
   }
 
   // Check if we have target configuration
@@ -455,6 +515,21 @@ export function generateProject(
 
     // Generate globals.h/cpp AFTER classification (which happens in generateFilesForFunctions)
     if (analyzedGlobals.length > 0) {
+      // A global demoted to file-local / struct-colocated is only actually
+      // emitted if the file it was assigned to exists. Restore any that no
+      // generated file claims, so they get a declaration + definition here
+      // instead of vanishing silently.
+      reconcileOrphanedGlobals(analyzedGlobals);
+      // A symbol named by another global's initializer is referenced, even
+      // though no function body mentions it; give it back its extern.
+      promoteCentrallyReferencedGlobals(analyzedGlobals);
+      // Scopes are only final HERE — file-local promotion and orphan reconcile
+      // both ran after the first call. The globals tables (and, with them, the
+      // "can globals.cpp see this symbol?" answer) have to be rebuilt from the
+      // final scopes, or the central initializers reference symbols that end up
+      // `static` in someone else's .cpp.
+      setMultidimArrayGlobals(analyzedGlobals as Array<{ name: string; dataType?: string; suggestedName?: string; suggestedType?: string; scope?: string }>);
+
       // Filter out struct-colocated globals (they go in struct headers/impls)
       const centralGlobals = analyzedGlobals.filter(
         g => g.scope !== 'struct-colocated'
@@ -477,11 +552,13 @@ export function generateProject(
 
         // Generate globals.cpp with definitions
         const globalsImplPath = globalsPath!.replace(/\.h$/, options.format === 'c' ? '.c' : '.cpp');
+        setCentralInitializerScope(true);
         const globalsImplContent = generateGlobalsImpl(centralGlobals, {
           ...options,
           projectName: name,
           binaryName: programInfo?.name,
         }, globalsPath!.split('/').pop());
+        setCentralInitializerScope(false);
         files.set(globalsImplPath, {
           path: globalsImplPath,
           content: globalsImplContent,
@@ -491,7 +568,7 @@ export function generateProject(
         });
 
         // Patch globals.cpp with extra includes for non-pointer struct types
-        patchGlobalsExtraIncludes(files, globalsImplPath, centralGlobals, mergedTypeOwnerMap, globalsPath!);
+        patchGlobalsExtraIncludes(files, globalsImplPath, centralGlobals, mergedTypeOwnerMap, globalsPath!, context.functionNameCandidates);
       }
     }
   } else {
@@ -514,6 +591,21 @@ export function generateProject(
 
     // Generate globals.h/cpp AFTER classification
     if (analyzedGlobals.length > 0) {
+      // A global demoted to file-local / struct-colocated is only actually
+      // emitted if the file it was assigned to exists. Restore any that no
+      // generated file claims, so they get a declaration + definition here
+      // instead of vanishing silently.
+      reconcileOrphanedGlobals(analyzedGlobals);
+      // A symbol named by another global's initializer is referenced, even
+      // though no function body mentions it; give it back its extern.
+      promoteCentrallyReferencedGlobals(analyzedGlobals);
+      // Scopes are only final HERE — file-local promotion and orphan reconcile
+      // both ran after the first call. The globals tables (and, with them, the
+      // "can globals.cpp see this symbol?" answer) have to be rebuilt from the
+      // final scopes, or the central initializers reference symbols that end up
+      // `static` in someone else's .cpp.
+      setMultidimArrayGlobals(analyzedGlobals as Array<{ name: string; dataType?: string; suggestedName?: string; suggestedType?: string; scope?: string }>);
+
       // Filter out struct-colocated globals (they go in struct headers/impls)
       const centralGlobals = analyzedGlobals.filter(
         g => g.scope !== 'struct-colocated'
@@ -537,11 +629,13 @@ export function generateProject(
         // Generate globals.cpp with definitions
         const implExt = options.format === 'c' ? '.c' : '.cpp';
         const globalsImplPath = `globals${implExt}`;
+        setCentralInitializerScope(true);
         const globalsImplContent = generateGlobalsImpl(centralGlobals, {
           ...options,
           projectName: name,
           binaryName: programInfo?.name,
         });
+        setCentralInitializerScope(false);
         files.set(globalsImplPath, {
           path: globalsImplPath,
           content: globalsImplContent,
@@ -551,7 +645,7 @@ export function generateProject(
         });
 
         // Patch globals.cpp with extra includes for non-pointer struct types
-        patchGlobalsExtraIncludes(files, globalsImplPath, centralGlobals, flatTypeOwnerMap, 'globals.h');
+        patchGlobalsExtraIncludes(files, globalsImplPath, centralGlobals, flatTypeOwnerMap, 'globals.h', context.functionNameCandidates);
       }
     }
   }
@@ -575,22 +669,67 @@ export function generateProject(
  */
 function computeGlobalsExtraIncludes(
   globals: AnalyzedDataSymbol[],
-  typeOwnerMap: Map<string, string>
+  typeOwnerMap: Map<string, string>,
+  functionNameCandidates?: Map<string, { qualified: string; header: string }[]>
 ): string[] {
   const includes = new Set<string>();
   for (const g of globals) {
     if (g.scope !== 'global') continue;
     const type = g.suggestedType || g.dataType;
     // Skip pointer types — forward declaration suffices
-    if (type.includes('*') || type.includes('&')) continue;
-    const stripped = stripTypeName(type);
-    if (!stripped) continue;
-    const ownerHeader = typeOwnerMap.get(stripped);
-    if (ownerHeader && ownerHeader !== 'globals.h') {
-      includes.add(ownerHeader);
+    if (!type.includes('*') && !type.includes('&')) {
+      const stripped = stripTypeName(type);
+      const ownerHeader = stripped ? typeOwnerMap.get(stripped) : undefined;
+      if (ownerHeader && ownerHeader !== 'globals.h') {
+        includes.add(ownerHeader);
+      }
+    }
+    // A namespace can be reached ONLY through an address-taken reference in the
+    // initializer — `&D2Common::Skills::SkillMonst::Skills_SrvDoFunc_083` in a
+    // handler table. The declared type says nothing about it, so without walking
+    // the initializer tree nothing includes SkillMonst.h and every entry is
+    // "has not been declared".
+    if (g.initializedData && functionNameCandidates) {
+      for (const ref of collectInitializerSymbolRefs(g.initializedData)) {
+        const header = resolveSymbolReferenceHeader(ref, functionNameCandidates);
+        if (header && header !== 'globals.h') includes.add(header);
+      }
     }
   }
   return [...includes].sort();
+}
+
+/**
+ * Every symbol name an initializer tree takes the address of, at any nesting
+ * depth (arrays of structs of function-pointer tables all appear here).
+ */
+function collectInitializerSymbolRefs(dv: DataValue, out: string[] = []): string[] {
+  if (dv.kind === 'pointer' && dv.value && /^[A-Za-z_]/.test(dv.value)) {
+    out.push(dv.value);
+  }
+  if (dv.elements) for (const e of dv.elements) collectInitializerSymbolRefs(e, out);
+  if (dv.fields) for (const f of dv.fields) collectInitializerSymbolRefs(f.value, out);
+  return out;
+}
+
+/**
+ * Resolve a (possibly qualified) initializer symbol reference to the header that
+ * declares it. Ambiguous bare names are resolved by the qualifier — the emitted
+ * reference is a suffix of the declaration's qualified name.
+ */
+function resolveSymbolReferenceHeader(
+  rawRef: string,
+  functionNameCandidates: Map<string, { qualified: string; header: string }[]>
+): string | undefined {
+  const ref = normalizeQualifiedReference(rawRef.replace(/\b(?:compiler|VisualStudio)::/g, ''));
+  const bare = ref.includes('::') ? ref.slice(ref.lastIndexOf('::') + 2) : ref;
+  const candidates = functionNameCandidates.get(bare);
+  if (!candidates || candidates.length === 0) return undefined;
+  if (candidates.length === 1) return candidates[0].header;
+  for (const c of candidates) {
+    if (c.qualified === ref || c.qualified.endsWith(`::${ref}`)) return c.header;
+  }
+  return undefined;
 }
 
 /**
@@ -601,12 +740,13 @@ function patchGlobalsExtraIncludes(
   globalsImplPath: string,
   centralGlobals: AnalyzedDataSymbol[],
   typeOwnerMap: Map<string, string>,
-  globalsHeaderPath: string
+  globalsHeaderPath: string,
+  functionNameCandidates?: Map<string, { qualified: string; header: string }[]>
 ): void {
   const globalsFile = files.get(globalsImplPath);
   if (!globalsFile) return;
 
-  const extraIncludes = computeGlobalsExtraIncludes(centralGlobals, typeOwnerMap);
+  const extraIncludes = computeGlobalsExtraIncludes(centralGlobals, typeOwnerMap, functionNameCandidates);
   if (extraIncludes.length === 0) return;
 
   const includeLines = extraIncludes.map(inc => `#include "${inc}"`).join('\n');
@@ -1151,6 +1291,13 @@ function generateFilesForFunctions(
   // When Mac and Windows both define a function with the same name (e.g. SFILE_HashString),
   // prefer the Windows definition so Windows callers don't get pointed to Mac-only headers.
   const funcNameToHeaderPath = new Map<string, string>();
+  // A bare function name is NOT a key: `Initialize` is declared by Glide,
+  // Direct3D, DirectDraw and Windowed alike, and a one-entry-per-name map is
+  // last-wins — the include feedback below then pulls in whichever renderer
+  // happened to be organized last and leaves the other three undeclared. Keep
+  // every candidate, each tagged with the qualified name a reference to it is
+  // spelled with, so an ambiguous name can be resolved from its qualifier.
+  const funcNameCandidates = new Map<string, { qualified: string; header: string }[]>();
   const platformHeaders = new Set<string>(); // headers that contain ONLY platform-guarded functions
   for (const [unitName, unitFunctions] of organized) {
     const headerPath = unitHeaderPaths.get(unitName)!;
@@ -1164,6 +1311,18 @@ function generateFilesForFunctions(
         continue;
       }
       funcNameToHeaderPath.set(func.name, headerPath);
+
+      const qualified = func.namespace
+        ? normalizeQualifiedReference(`${func.namespace}::${func.name}`)
+        : func.name;
+      let candidates = funcNameCandidates.get(func.name);
+      if (!candidates) {
+        candidates = [];
+        funcNameCandidates.set(func.name, candidates);
+      }
+      if (!candidates.some(c => c.qualified === qualified && c.header === headerPath)) {
+        candidates.push({ qualified, header: headerPath });
+      }
     }
   }
 
@@ -1278,6 +1437,56 @@ function generateFilesForFunctions(
   if (context.functionAddressMap) {
     context.functionNameToHeader = funcNameToHeaderPath;
   }
+  // globals.cpp is generated after this pass and needs the same resolution to
+  // include the headers its data initializers name.
+  context.functionNameCandidates = funcNameCandidates;
+
+  // ── Reference-vs-declaration spelling reconciliation ────────────────
+  // A function's DECLARATION is spelled from the symbol table (`name` +
+  // `namespace`); its REFERENCES are spelled by the decompiler, in a separate
+  // round-trip. A rename or a namespace move landing between the two — naming
+  // campaigns run continuously — leaves every body calling a name the tree
+  // never declares. Read the decompiler's own spelling for each address back
+  // out of its body and map it onto the declaration's spelling, so the pair
+  // moves together whatever the campaign renamed.
+  const declaredSpellings = new Set<string>();
+  for (const func of functions) {
+    declaredSpellings.add(func.name);
+    if (func.namespace) declaredSpellings.add(`${func.namespace}::${func.name}`);
+  }
+  // A destructor, an operator or a symbol whose name is not a legal C++
+  // identifier (`0x44PacketHandler`) is spelled by the emitter's own
+  // legalisation, not carried through from the database — respelling a
+  // reference with the raw database spelling would emit what the compiler
+  // cannot parse.
+  const isPlainQualifiedName = (n: string) =>
+    n.split('::').every(seg => /^[A-Za-z_]\w*$/.test(seg));
+  const aliasClaims = new Map<string, string | null>(); // alias → canonical, null = ambiguous
+  for (const func of functions) {
+    if (func.isExternal || func.isThunk) continue;
+    // A method conversion renames a free function on the EMITTER's side, and
+    // `method-call-rewrite` already rewrites its call sites to `this->Init(0)`.
+    // Reconciling it here would flatten those back to a plain call.
+    if (context.methodConversions?.has(func.address)) continue;
+    const alias = decompiledFunctionName(func.decompiled);
+    if (!alias || !isPlainQualifiedName(alias)) continue;
+    const canonical = func.namespace ? `${func.namespace}::${func.name}` : func.name;
+    if (alias === canonical) continue;
+    if (!isPlainQualifiedName(canonical)) continue;
+    // A spelling that some function really does declare is that function's, not
+    // an alias — respelling it would hijack a live name.
+    if (declaredSpellings.has(alias)) continue;
+    // A qualified alias whose tail already matches keeps the tail; both halves
+    // are rewritten from `canonical`, so nothing here is name-specific.
+    const prev = aliasClaims.get(alias);
+    if (prev === undefined) aliasClaims.set(alias, canonical);
+    else if (prev !== canonical) aliasClaims.set(alias, null);
+  }
+  const functionRefAliases: Record<string, string> = {};
+  for (const [alias, canonical] of aliasClaims) {
+    if (canonical) functionRefAliases[alias] = canonical;
+  }
+  context.functionRefAliases = functionRefAliases;
 
   // Build the set of all namespace paths so body-qualifier stripping can avoid
   // creating ambiguous references (e.g. shortening D2Common::Path::DynamicPath::Fn
@@ -1293,6 +1502,49 @@ function generateFilesForFunctions(
   for (const ns of namespaces) registerNamespacePath(ns.fullPath ?? ns.name);
   for (const func of functions) registerNamespacePath(func.namespace);
   context.knownNamespaces = knownNamespaces;
+  // Data initializers are emitted from strings, not an AST — the globals emitter
+  // needs the same table to spot a shadowed qualifier.
+  setKnownNamespaces(knownNamespaces);
+
+  // A class's vtable data and its member functions hang under a namespace named
+  // after the class, so `namespace D2Client::ButtonWrapper` and the root-scope
+  // `struct ButtonWrapper` coexist. Inside `namespace D2Client` the NAMESPACE
+  // wins unqualified lookup and the type name stops being a type — every use
+  // has to be spelled `::ButtonWrapper`. Collect exactly those names.
+  const namespaceComponents = new Set<string>();
+  const addComponents = (path: string | undefined) => {
+    if (!path) return;
+    for (const seg of path.split('::')) if (seg) namespaceComponents.add(seg);
+  };
+  for (const ns of knownNamespaces) addComponents(ns);
+  // A class whose only remaining symbol is its vtable has no function in that
+  // namespace, so `knownNamespaces` never sees it — but globals.h still opens
+  // `namespace D2Client::ListBoxWrapper` around it and the shadow is just as real.
+  for (const g of analyzedGlobals) addComponents(g.namespace);
+  const shadowedTypeNames = new Set<string>();
+  for (const dt of dataTypes) {
+    if (namespaceComponents.has(dt.name)) shadowedTypeNames.add(dt.name);
+  }
+  for (const typeName of typeOwnerMap.keys()) {
+    if (namespaceComponents.has(typeName)) shadowedTypeNames.add(typeName);
+  }
+  context.shadowedTypeNames = shadowedTypeNames;
+  setShadowedTypeNames(shadowedTypeNames);
+
+  // Function-pointer parameters take the address of a function whose prototype
+  // may differ (`CONTAINER_InitializeBuffer(..., STRING_ZeroOneWCHAR)` fills a
+  // `void(*)(void*)` slot with a `void(*)(uint16_t*)`). Function pointer types
+  // are invariant in C++, so the original source had to write a cast there; the
+  // `funcptr-arg-cast` transform emits it, but only where the MODEL says the two
+  // prototypes actually differ. Build that comparison table here, once.
+  context.funcPtrArgCasts = buildFuncPtrArgCastTables(functions, analyzedGlobals, dataTypes.filter(dt => dt.kind === 'FUNCTION_DEFINITION') as import('../types.js').ExtractedFunctionDefinition[], dataTypes);
+  // Data initializers are emitted from strings, not an AST — the globals emitter
+  // needs the same prototype tables to decide whether a function address stored
+  // in a slot needs the cast C++ has never let it do implicitly.
+  setInitializerSignatureTables(
+    context.funcPtrArgCasts.functionSignatures,
+    context.funcPtrArgCasts.funcdefSignatures,
+  );
 
   // ── Build module graph for include resolution ────────────────────────
   const moduleGraph = buildModuleGraph({
@@ -1322,6 +1574,13 @@ function generateFilesForFunctions(
     symbolHashes[g.name] = hashGlobal(g);
   }
   context._buildInfo = moduleGraph.serialize(resolvedModules, symbolHashes, '1.0.0');
+
+  // One index over every name the per-file include feedback below asks about,
+  // so each generated .cpp is scanned once instead of ~20,000 times.
+  const dependencyNeedles = new NeedleIndex([
+    ...(context.functionAddressMap ? context.functionAddressMap.values() : []),
+    ...typeOwnerMap.keys(),
+  ]);
 
   // ── Pass 2: Generate files using graph-resolved includes ──────────
   for (const [unitName, unitFunctions] of organized) {
@@ -1403,6 +1662,9 @@ function generateFilesForFunctions(
       if (context.fileLocalGlobals.length === 0) {
         context.fileLocalGlobals = undefined;
       }
+      // This file now owns their definitions — record it, so the globals.h/cpp
+      // pass knows they are not orphans.
+      markGlobalsClaimed(context.fileLocalGlobals);
     }
 
     let implContent = generateImplementation(
@@ -1420,20 +1682,72 @@ function generateFilesForFunctions(
     context.fileLocalGlobals = prevFileLocals;
     context._preambles = prevPreambles;
 
+    // Co-located global definitions belong to this .cpp's content BEFORE the
+    // dependency scan below runs. Appending them afterwards means their type and
+    // function references are invisible to the scan, so nothing includes the
+    // headers that declare them — e.g. Renderer.cpp's GlideFunctionTable, whose
+    // initializer names D2Client::Renderer::Glide::* and got 54 "has not been
+    // declared" errors for exactly that reason.
+    const implColocatedGlobals = analyzedGlobals.filter(g =>
+      g.scope === 'struct-colocated' &&
+      g.ownerStructHeader === headerPath
+    );
+
+    if (implColocatedGlobals.length > 0) {
+      markGlobalsClaimed(implColocatedGlobals);
+      const globalsDefSection = generateColocatedGlobalsImpl(
+        implColocatedGlobals,
+        options
+      );
+      implContent = implContent + '\n\n' + globalsDefSection;
+    }
+
     // Body dep feedback: scan generated impl for type/function references not yet included
     {
       const existingIncludes = new Set(implIncludes);
       existingIncludes.add(headerPath);
       const newIncludes: string[] = [];
 
-      // Scan for function references from func-ptr-literal plugin
-      if (context.functionAddressMap && context.functionNameToHeader) {
+      // Same predicate as `implContent.includes(name)`, resolved for every name
+      // in one pass over the file.
+      const mentioned = dependencyNeedles.matchesIn(implContent);
+
+      const addInclude = (path: string) => {
+        if (!existingIncludes.has(path)) {
+          existingIncludes.add(path);
+          newIncludes.push(path);
+        }
+      };
+
+      // Scan for function references — call sites, func-ptr literals, and the
+      // address-taken names inside data initializers (the co-located block above
+      // is already part of implContent).
+      if (context.functionAddressMap) {
+        const ambiguous: string[] = [];
         for (const [, funcName] of context.functionAddressMap) {
-          if (implContent.includes(funcName)) {
-            const funcHeader = context.functionNameToHeader.get(funcName);
-            if (funcHeader && !existingIncludes.has(funcHeader)) {
-              existingIncludes.add(funcHeader);
-              newIncludes.push(funcHeader);
+          if (!mentioned.has(funcName)) continue;
+          const candidates = funcNameCandidates.get(funcName);
+          if (!candidates || candidates.length === 0) continue;
+          if (candidates.length === 1) {
+            addInclude(candidates[0].header);
+          } else {
+            ambiguous.push(funcName);
+          }
+        }
+        // One bare name, several declaring headers: read the qualifier that is
+        // actually written at the reference site. An emitted reference is a
+        // SUFFIX of the declaration's qualified name — the enclosing namespace
+        // is stripped off the front where it is redundant — so match by suffix.
+        for (const funcName of ambiguous) {
+          const candidates = funcNameCandidates.get(funcName)!;
+          const escaped = funcName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const re = new RegExp(`((?:[A-Za-z_]\\w*::)+)${escaped}(?![A-Za-z0-9_])`, 'g');
+          for (const m of implContent.matchAll(re)) {
+            const observed = m[1] + funcName;
+            for (const c of candidates) {
+              if (c.qualified === observed || c.qualified.endsWith(`::${observed}`)) {
+                addInclude(c.header);
+              }
             }
           }
         }
@@ -1444,7 +1758,7 @@ function generateFilesForFunctions(
         if (existingIncludes.has(ownerPath)) continue;
         if (ownerPath === headerPath) continue;
         // Quick word-boundary check to avoid substring false positives
-        if (implContent.includes(typeName)) {
+        if (mentioned.has(typeName)) {
           const re = new RegExp(`\\b${typeName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
           if (re.test(implContent)) {
             existingIncludes.add(ownerPath);
@@ -1494,20 +1808,6 @@ function generateFilesForFunctions(
         const lineEnd = implContent.indexOf('\n', lastIncludeIdx);
         implContent = implContent.slice(0, lineEnd + 1) + includeLines + '\n' + implContent.slice(lineEnd + 1);
       }
-    }
-
-    // Append co-located global definitions to struct .cpp files
-    const implColocatedGlobals = analyzedGlobals.filter(g =>
-      g.scope === 'struct-colocated' &&
-      g.ownerStructHeader === headerPath
-    );
-
-    if (implColocatedGlobals.length > 0) {
-      const globalsDefSection = generateColocatedGlobalsImpl(
-        implColocatedGlobals,
-        options
-      );
-      implContent = implContent + '\n\n' + globalsDefSection;
     }
 
     files.set(implPath, {
@@ -1702,3 +2002,536 @@ export async function writeProject(
 
   return writtenFiles;
 }
+
+/**
+ * Normalized signature key for a prototype: `ret(a,b,c)`, each type spelled the
+ * way the emitted header spells it, so two keys compare exactly as the compiler
+ * compares the two types.
+ */
+function signatureKey(returnType: string, paramTypes: string[]): string {
+  const spell = (t: string) =>
+    collapseFuncPtrTypedef(normalizeSignatureType(t ?? ''), isFuncDefTypedefName)
+      .replace(/\s+/g, ' ')
+      .trim();
+  const params = paramTypes.map(spell).filter(t => t !== '' && t !== 'void');
+  return `${spell(returnType)}(${params.join(',')})`;
+}
+
+/**
+ * Index a name under both its qualified and its bare spelling — a call site may
+ * write either. A key claimed by two different signatures is ambiguous and is
+ * dropped rather than guessed at.
+ *
+ * EVERY key goes through that guard, the qualified one included. An
+ * UNNAMESPACED function has qualified === bare, so writing the qualified key
+ * unconditionally silently overwrote whatever a namespaced function had already
+ * claimed for that bare name — the table then bound one name to the other
+ * symbol's signature, which compiles and is wrong. Two functions sharing a
+ * fully-qualified name land in the same trap.
+ */
+function indexBothSpellings<T>(
+  into: Record<string, T>,
+  ambiguous: Set<string>,
+  qualified: string,
+  bare: string,
+  value: T,
+  same: (a: T, b: T) => boolean,
+): void {
+  const keys = bare === qualified ? [qualified] : [qualified, bare];
+  for (const key of keys) {
+    if (ambiguous.has(key)) continue;
+    const existing = into[key];
+    if (existing !== undefined && !same(existing, value)) {
+      ambiguous.add(key);
+      delete into[key];
+      continue;
+    }
+    into[key] = value;
+  }
+}
+
+/** Ghidra's placeholder name for an anonymous aggregate inside another type. */
+const ANONYMOUS_AGGREGATE_RE = /^_(struct|union)_\d+$/;
+
+/**
+ * Definitions for the anonymous struct/union members of system types, in
+ * dependency order (`_union_1226` holds a `_struct_1227`). They are declared by
+ * no real header — Ghidra invented the names — but bodies read their fields, so
+ * they have to be emitted somewhere every translation unit sees.
+ */
+function buildAnonymousAggregateDefs(
+  dataTypes: ExtractedDataType[],
+  functions: ExtractedFunction[],
+): string[] {
+  const anon = new Map<string, ExtractedDataType>();
+  for (const dt of dataTypes) {
+    if (!ANONYMOUS_AGGREGATE_RE.test(dt.name)) continue;
+    const fields = (dt as import('../types.js').ExtractedStruct).fields ?? [];
+    // Ghidra spells an UNNAMED member `null`, and two of them in one aggregate
+    // cannot both be declared. Such a type cannot be emitted faithfully, so it
+    // is left out rather than emitted wrong — d2_platform.h is force-included
+    // everywhere and one bad definition breaks every file.
+    const names = new Set(fields.map(f => f.name));
+    if (names.size !== fields.length) continue;
+    if ([...names].some(n => !/^[A-Za-z_]\w*$/.test(n ?? ''))) continue;
+    anon.set(dt.name, dt);
+  }
+  if (anon.size === 0) return [];
+
+  // Only the ones a body actually names — the rest are members of system structs
+  // nothing decompiled ever touches.
+  const wanted = new Set<string>();
+  for (const fn of functions) {
+    const body = fn.decompiled;
+    if (!body) continue;
+    for (const name of anon.keys()) {
+      if (!wanted.has(name) && body.includes(name)) wanted.add(name);
+    }
+  }
+  if (wanted.size === 0) return [];
+
+  const defs: string[] = [];
+  const emitted = new Set<string>();
+  const visiting = new Set<string>();
+  const visit = (name: string): void => {
+    if (emitted.has(name) || visiting.has(name)) return;
+    const dt = anon.get(name);
+    if (!dt) return;
+    visiting.add(name);
+    for (const f of (dt as import('../types.js').ExtractedStruct).fields ?? []) {
+      const base = (f.dataType ?? '').replace(/[*&]/g, '').replace(/\[[^\]]*\]/g, '').trim();
+      if (base !== name && anon.has(base)) visit(base);
+    }
+    visiting.delete(name);
+    emitted.add(name);
+    defs.push(emitAnonymousAggregate(dt));
+  };
+  for (const name of wanted) visit(name);
+  return defs;
+}
+
+/**
+ * Emit one anonymous aggregate verbatim from its Ghidra field list.
+ *
+ * The shared struct emitter cannot be used here: it runs field types through the
+ * platform-type filter, which classifies `_struct_1227` as an artifact and
+ * rewrites it to a same-sized scalar — erasing the very member the body reads.
+ */
+function emitAnonymousAggregate(dt: ExtractedDataType): string {
+  const keyword = dt.kind === 'UNION' ? 'union' : 'struct';
+  const fields = (dt as import('../types.js').ExtractedStruct).fields ?? [];
+  const lines = [`${keyword} ${dt.name} {`];
+  for (const f of fields) {
+    lines.push(`    ${normalizeSignatureType(f.dataType ?? 'uint8_t')} ${f.name};`);
+  }
+  lines.push('};');
+  return lines.join('\n');
+}
+
+/**
+ * Every symbol name a data initializer takes the address of, across all globals.
+ * Ghidra hands interior references back too (`Tbl[3].pField`, `DAT_x+1`); the
+ * LEADING identifier is the symbol that must be declared.
+ */
+function collectInitializerReferencedNames(globals: AnalyzedDataSymbol[]): Set<string> {
+  const names = new Set<string>();
+  const walk = (dv: DataValue | undefined): void => {
+    if (!dv) return;
+    if (dv.kind === 'pointer' && dv.value) {
+      const m = dv.value.match(/^(?:[A-Za-z_]\w*::)*([A-Za-z_]\w*)/);
+      if (m) names.add(m[1]);
+    }
+    for (const e of dv.elements ?? []) walk(e);
+    for (const f of dv.fields ?? []) walk(f.value);
+  };
+  for (const g of globals) walk(g.initializedData);
+  return names;
+}
+
+/** @see the call site — restores static-locals that a file-scope initializer names. */
+function promoteInitializerReferencedStaticLocals(globals: AnalyzedDataSymbol[]): number {
+  const referenced = collectInitializerReferencedNames(globals);
+  if (referenced.size === 0) return 0;
+  let promoted = 0;
+  for (const g of globals) {
+    if (g.scope !== 'static-local') continue;
+    const name = g.suggestedName || g.name;
+    if (!referenced.has(name)) continue;
+    g.scope = 'global';
+    g.ownerFunction = undefined;
+    promoted++;
+  }
+  return promoted;
+}
+
+/**
+ * The funcdef a declaration spelling names, or undefined when it names anything
+ * else. Ghidra writes a function-pointer slot as the funcdef with one star, and
+ * where the type is used directly with none; more indirection than that is a
+ * pointer TO a function pointer, whose call shape this does not model.
+ *
+ * The star carries a POINTER WIDTH more often than not — `fnFindPlayerToken *32`
+ * is how a 32-bit pointer is spelled in a database whose default width differs,
+ * and it is the spelling most of these fields actually use. Reading only a bare
+ * star finds the minority of them, which looks like the mechanism working.
+ */
+export function funcdefBaseName(
+  spelling: string, funcdefDecls: Record<string, unknown>,
+): string | undefined {
+  let s = spelling.replace(/\b(const|volatile)\b/g, ' ').trim();
+  let stars = 0;
+  for (;;) {
+    const m = s.match(/\*\d*$/);
+    if (!m) break;
+    stars++;
+    s = s.slice(0, -m[0].length).trim();
+  }
+  if (stars > 1 || !s || !/^[A-Za-z_]\w*$/.test(s)) return undefined;
+  return funcdefDecls[s] !== undefined ? s : undefined;
+}
+
+function buildFuncPtrArgCastTables(
+  functions: ExtractedFunction[],
+  globals: AnalyzedDataSymbol[],
+  funcDefs: import('../types.js').ExtractedFunctionDefinition[],
+  dataTypes: ExtractedDataType[],
+): FuncPtrArgCastTables {
+  const funcdefSignatures: Record<string, string> = {};
+  for (const fd of funcDefs) {
+    funcdefSignatures[fd.name] = signatureKey(
+      fd.returnType,
+      [...(fd.parameters ?? [])].sort((a, b) => a.ordinal - b.ordinal).map(p => p.dataType),
+    );
+  }
+
+  // The same funcdefs, kept as DECLARATION SPELLINGS rather than as a comparison
+  // key. A call made through a function-pointer field or variable has no callee
+  // name, so no name table can say what it returns or what it takes - the
+  // funcdef the slot is declared with is the only record of that contract, and
+  // it is spelled here exactly as the emitted typedef spells it.
+  const funcdefDecls: Record<string, import('./impl.js').FuncdefDecl> = {};
+  for (const fd of funcDefs) {
+    if (!fd.name) continue;
+    funcdefDecls[fd.name] = {
+      returnType: sigType(fd.returnType ?? 'void'),
+      paramTypes: [...(fd.parameters ?? [])]
+        .sort((a, b) => a.ordinal - b.ordinal)
+        .map(p => sigType(p.dataType ?? '')),
+      varArgs: fd.hasVarArgs === true,
+    };
+  }
+
+  // A funcdef typedef whose name is ALSO a function name is HIDDEN by that
+  // function inside its namespace, so `(fpRequiredUserAction)f` parses as a call
+  // rather than a cast ("expected ')' before 'f'"). The typedef itself is always
+  // emitted at ROOT scope, so the cast just has to say so: `(::fpRequired...)f`.
+  const bareFunctionNames = new Set<string>();
+  for (const fn of functions) if (fn.name) bareFunctionNames.add(fn.name);
+  const rootQualifiedTypedefs = Object.keys(funcdefSignatures).filter(n => bareFunctionNames.has(n));
+
+  const functionSignatures: Record<string, string> = {};
+  const paramFuncdefs: Record<string, Record<number, string>> = {};
+  const ambiguousSig = new Set<string>();
+  const ambiguousSlots = new Set<string>();
+  const sameString = (a: string, b: string) => a === b;
+  const sameSlots = (a: Record<number, string>, b: Record<number, string>) =>
+    JSON.stringify(a) === JSON.stringify(b);
+
+  for (const fn of functions) {
+    if (!fn.name) continue;
+    const params = [...(fn.parameters ?? [])].sort((a, b) => a.ordinal - b.ordinal);
+    const qualified = fn.namespace ? `${fn.namespace}::${fn.name}` : fn.name;
+
+    indexBothSpellings(
+      functionSignatures, ambiguousSig, qualified, fn.name,
+      signatureKey(fn.returnType ?? 'void', params.map(p => p.dataType)), sameString,
+    );
+
+    // Which of this function's own parameters are declared with a funcdef typedef?
+    const slots: Record<number, string> = {};
+    params.forEach((p, i) => {
+      const base = (p.dataType ?? '').replace(/[*&]/g, '').replace(/\bconst\b/g, '').trim();
+      if (base && funcdefSignatures[base] !== undefined) slots[i] = base;
+      // A plain `void*` parameter takes a function address at some call sites.
+      // C++ has no implicit function-pointer-to-`void*` conversion at all, so
+      // the cast the original source wrote is the only spelling that compiles.
+      else if (isVoidPointerSpelling(p.dataType)) slots[i] = VOID_POINTER_SLOT;
+    });
+    if (Object.keys(slots).length === 0) continue;
+    indexBothSpellings(paramFuncdefs, ambiguousSlots, qualified, fn.name, slots, sameSlots);
+  }
+
+  const variableNames = [...new Set(globals.map(g => g.suggestedName || g.name).filter(Boolean))];
+
+  // Field names whose declared type is `void*` in EVERY struct/union that
+  // declares them. A member access alone does not say which struct it walked,
+  // so a name that means `void*` in one type and a funcdef in another is
+  // dropped rather than guessed at.
+  const fieldTypeSpellings = new Map<string, Set<string>>();
+  for (const dt of dataTypes) {
+    if (dt.kind !== 'STRUCTURE' && dt.kind !== 'UNION') continue;
+    if (!('fields' in dt)) continue;
+    for (const f of (dt as import('../types.js').ExtractedStruct).fields ?? []) {
+      if (!f.name) continue;
+      let seen = fieldTypeSpellings.get(f.name);
+      if (!seen) { seen = new Set(); fieldTypeSpellings.set(f.name, seen); }
+      seen.add(isVoidPointerSpelling(f.dataType) ? 'void*' : (f.dataType ?? '').replace(/\s+/g, ''));
+    }
+  }
+  const voidPointerFields: string[] = [];
+  for (const [name, spellings] of fieldTypeSpellings) {
+    if (spellings.size === 1 && spellings.has('void*')) voidPointerFields.push(name);
+  }
+
+  // Field name → its declared type, but ONLY where every struct and union that
+  // declares that name agrees. A member access does not say which aggregate it
+  // walked, so a name that means one type here and another there is dropped
+  // rather than guessed at - the same rule `voidPointerFields` runs on.
+  const fieldDeclSpellings = new Map<string, Set<string>>();
+  for (const dt of dataTypes) {
+    if (dt.kind !== 'STRUCTURE' && dt.kind !== 'UNION') continue;
+    if (!('fields' in dt)) continue;
+    for (const f of (dt as import('../types.js').ExtractedStruct).fields ?? []) {
+      if (!f.name || !f.dataType) continue;
+      const spelled = emittedFieldType(f.dataType, f.size);
+      if (!spelled) continue;
+      let seen = fieldDeclSpellings.get(f.name);
+      if (!seen) { seen = new Set(); fieldDeclSpellings.set(f.name, seen); }
+      seen.add(spelled);
+    }
+  }
+  const fieldTypes: Record<string, string> = {};
+  for (const [name, spellings] of fieldDeclSpellings) {
+    if (spellings.size === 1) fieldTypes[name] = [...spellings][0];
+  }
+
+  // The same field types, but keyed by the aggregate that declares them. Where
+  // the expression walked says WHICH struct it is walking, this is exact and the
+  // unanimity rule above does not have to apply - `pNext` may mean a different
+  // type in every struct and still be known in each one.
+  const structFields: Record<string, Record<string, string>> = {};
+  for (const dt of dataTypes) {
+    if (dt.kind !== 'STRUCTURE' && dt.kind !== 'UNION') continue;
+    if (!('fields' in dt) || !dt.name) continue;
+    const into: Record<string, string> = structFields[dt.name] ?? (structFields[dt.name] = {});
+    for (const f of (dt as import('../types.js').ExtractedStruct).fields ?? []) {
+      if (!f.name || !f.dataType) continue;
+      const spelled = emittedFieldType(f.dataType, f.size);
+      if (spelled) into[f.name] = spelled;
+    }
+  }
+
+  // Which fields hold a FUNCTION POINTER, and which funcdef declares its
+  // contract. `structFields` cannot answer this: a funcdef field is emitted as
+  // an inline declarator (`void *(*pfnLoad)()`), which `emittedFieldType`
+  // rejects because the name sits in the middle of the spelling - so the type of
+  // every such field is dropped there and a call through one has no signature at
+  // all. Read off the raw Ghidra spelling instead, which names the funcdef.
+  const structFieldFuncdefs: Record<string, Record<string, string>> = {};
+  const fieldFuncdefSpellings = new Map<string, Set<string>>();
+  for (const dt of dataTypes) {
+    if (dt.kind !== 'STRUCTURE' && dt.kind !== 'UNION') continue;
+    if (!('fields' in dt)) continue;
+    for (const f of (dt as import('../types.js').ExtractedStruct).fields ?? []) {
+      if (!f.name || !f.dataType) continue;
+      const fd = funcdefBaseName(f.dataType, funcdefDecls);
+      if (!fd) continue;
+      if (dt.name) (structFieldFuncdefs[dt.name] ??= {})[f.name] = fd;
+      let seen = fieldFuncdefSpellings.get(f.name);
+      if (!seen) { seen = new Set(); fieldFuncdefSpellings.set(f.name, seen); }
+      seen.add(fd);
+    }
+  }
+  // A member access alone does not say which aggregate it walked, so a field
+  // name two types declare with DIFFERENT funcdefs is dropped rather than
+  // guessed at - the same unanimity rule `fieldTypes` runs on. A name that is a
+  // funcdef in one struct and an ordinary field in another is dropped too: the
+  // second declaration is a disagreement about the contract, not a silence.
+  const fieldFuncdefs: Record<string, string> = {};
+  for (const [name, spellings] of fieldFuncdefSpellings) {
+    if (spellings.size !== 1) continue;
+    if (fieldDeclSpellings.has(name)) continue;
+    fieldFuncdefs[name] = [...spellings][0];
+  }
+
+  // Ghidra's decompiler emits C, where `void*` converts to any object pointer
+  // implicitly. C++ requires the cast, and the original MSVC source carried it.
+  const voidPointerFunctions = new Set<string>();
+  const ambiguousReturn = new Set<string>();
+  for (const fn of functions) {
+    if (!fn.name) continue;
+    const ret = normalizeSignatureType(fn.returnType ?? '').replace(/\s+/g, ' ').trim();
+    const qualified = fn.namespace ? `${fn.namespace}::${fn.name}` : fn.name;
+    if (ret !== 'void *' && ret !== 'void*') {
+      // A bare name claimed by a function that does NOT return void* is not safe
+      // to key on — the call site may mean that one.
+      ambiguousReturn.add(fn.name);
+      voidPointerFunctions.delete(fn.name);
+      continue;
+    }
+    voidPointerFunctions.add(qualified);
+    if (!ambiguousReturn.has(fn.name)) voidPointerFunctions.add(fn.name);
+  }
+
+  // The declared type of every callable's parameters and of every global, in
+  // the SAME spelling the declaration is emitted with. A call argument whose own
+  // type differs from the slot it fills was an implicit conversion in the C the
+  // decompiler emits; C++ has no such conversion between unrelated pointers, so
+  // the cast has to be written. Both spellings are indexed because a call site
+  // may write either, and a bare name claimed by two different parameter lists
+  // is dropped rather than guessed at.
+  // A call site spells the callee with whatever suffix of its qualified name
+  // resolves from where the call sits, and the namespace path a function is
+  // EMITTED under is the module's, not the one Ghidra recorded — so `Units::f`
+  // in the model is written `D2Common::Units::f` at the call. Every suffix is
+  // therefore indexed, and any suffix two functions disagree over is dropped:
+  // a slot whose type is not certain is one this must not cast into.
+  const functionParamTypes: Record<string, string[]> = {};
+  const functionReturnTypes: Record<string, string> = {};
+  // Every spelling that denotes a FUNCTION. Unlike the tables above this one is
+  // not pruned on disagreement: two functions sharing a bare name disagree about
+  // the SIGNATURE, not about being functions, and a pass that only needs to know
+  // "this identifier is not an object" must not lose the name to that collision.
+  const functionNames = new Set<string>();
+  const varArgFunctions = new Set<string>();
+  const paramTypeClaims = new Map<string, Set<string>>();
+  const returnTypeClaims = new Map<string, Set<string>>();
+  const varArgClaims = new Map<string, Set<string>>();
+  const nameSuffixes = (qualified: string): string[] => {
+    const parts = qualified.split('::');
+    const out: string[] = [];
+    for (let i = 0; i < parts.length; i++) out.push(parts.slice(i).join('::'));
+    return out;
+  };
+  const claim = <T>(
+    into: Record<string, T>, claims: Map<string, Set<string>>,
+    key: string, value: T, spelling: string,
+  ): void => {
+    let seen = claims.get(key);
+    if (!seen) { seen = new Set(); claims.set(key, seen); }
+    seen.add(spelling);
+    if (seen.size > 1) { delete into[key]; return; }
+    into[key] = value;
+  };
+  // A callee whose declaration the EMITTER writes — a Win32 stub, an inline
+  // forwarder, a CRT name a system header declares, an excluded-namespace decl —
+  // is compiled against that declaration, not against Ghidra's record of it, and
+  // the two routinely disagree: `winuser.h` says `int wsprintfA(LPSTR, LPCSTR,
+  // ...)` where the database says `void wsprintfA(undefined4, undefined4,
+  // undefined4, undefined4)`. Casting an argument to the database's answer
+  // spells a conversion the real declaration rejects, so these names carry no
+  // parameter or return types at all. They stay in `functionNames`: the fact
+  // that the identifier denotes a function is not in doubt.
+  const headerOwned = platformDeclaredFunctionNames();
+  for (const fn of functions) {
+    if (!fn.name) continue;
+    const params = [...(fn.parameters ?? [])].sort((a, b) => a.ordinal - b.ordinal);
+    const qualified = fn.namespace ? `${fn.namespace}::${fn.name}` : fn.name;
+    const paramSpellings = params.map(p => sigType(p.dataType ?? ''));
+    const returnSpelling = sigType(fn.returnType ?? 'void');
+    for (const key of nameSuffixes(qualified)) {
+      functionNames.add(key);
+      if (!headerOwned.has(key)) {
+        claim(functionParamTypes, paramTypeClaims, key, paramSpellings, paramSpellings.join('|'));
+        claim(functionReturnTypes, returnTypeClaims, key, returnSpelling, returnSpelling);
+      }
+      let va = varArgClaims.get(key);
+      if (!va) { va = new Set(); varArgClaims.set(key, va); }
+      va.add(fn.hasVarArgs ? 'yes' : 'no');
+      if (fn.hasVarArgs) varArgFunctions.add(key);
+    }
+  }
+  // A name some overload spells with `...` is never safe to index positionally.
+  for (const [key, seen] of varArgClaims) {
+    if (seen.size > 1 || seen.has('yes')) { varArgFunctions.add(key); }
+  }
+
+  const globalTypes: Record<string, string> = {};
+  const ambiguousGlobalTypes = new Set<string>();
+  for (const g of globals) {
+    const name = g.suggestedName || g.name;
+    if (!name || /[^A-Za-z0-9_]/.test(name)) continue;
+    const spelled = normalizeGlobalDeclType(g.suggestedType || g.dataType || '');
+    if (!spelled) continue;
+    if (ambiguousGlobalTypes.has(name)) continue;
+    const existing = globalTypes[name];
+    if (existing !== undefined && existing !== spelled) {
+      ambiguousGlobalTypes.add(name);
+      delete globalTypes[name];
+      continue;
+    }
+    globalTypes[name] = spelled;
+  }
+
+  // Typedef name → the spelling it stands for. Windows and Ghidra both hide
+  // indirection inside a name (`HACCEL` IS `HACCEL__ *`), so without this a
+  // pointer stored into such a slot reads as an integer store and no cast is
+  // written. Self-referential entries are Ghidra artefacts (`FARPROC ->
+  // FARPROC *`) and are dropped rather than followed.
+  const typedefTargets: Record<string, string> = { ...EMITTER_POINTER_TYPEDEFS };
+  for (const dt of dataTypes) {
+    if (dt.kind !== 'TYPEDEF') continue;
+    const under = (dt as import('../types.js').ExtractedTypedef).underlyingType;
+    if (!dt.name || !under) continue;
+    if (under.replace(/[*&\s]/g, '') === dt.name) continue;
+    typedefTargets[dt.name] = under;
+  }
+
+  if (process.env.RECON_DUMP_TABLES) {
+    const probe = (process.env.RECON_DUMP_TABLES || '').split(',');
+    for (const k of probe) {
+      console.error(`[probe] ${k}: params=${JSON.stringify(functionParamTypes[k])} ret=${JSON.stringify(functionReturnTypes[k])} isFn=${functionNames.has(k)} varArg=${varArgFunctions.has(k)} isVar=${variableNames.includes(k)} global=${JSON.stringify(globalTypes[k])} funcdefSlots=${JSON.stringify(paramFuncdefs[k])}`);
+    }
+  }
+  return {
+    paramFuncdefs,
+    funcdefSignatures,
+    functionSignatures,
+    variableNames,
+    voidPointerFunctions: [...voidPointerFunctions],
+    rootQualifiedTypedefs,
+    voidPointerFields,
+    functionParamTypes,
+    functionReturnTypes,
+    functionNames: [...functionNames],
+    globalTypes,
+    varArgFunctions: [...varArgFunctions],
+    fieldTypes,
+    typedefTargets,
+    structFields,
+    funcdefDecls,
+    structFieldFuncdefs,
+    fieldFuncdefs,
+  };
+}
+
+
+/** Ghidra's "no information" return types — see reconcileUndefinedReturnTypes. */
+const UNCURATED_RETURN_TYPES = new Set([
+  'undefined', 'undefined1', 'undefined2', 'undefined3', 'undefined4',
+  'undefined5', 'undefined6', 'undefined7', 'undefined8',
+]);
+
+/**
+ * Replace an uncurated (`undefined*`) return type with the one the decompiler
+ * resolved for the body that will be emitted under it, so the signature and the
+ * body cannot disagree about whether the function returns a value.
+ *
+ * Only `undefined*` is overridden. A database field that says anything else is
+ * a curated answer and is left alone even when the decompiler disagrees — and a
+ * body whose prototype cannot be read keeps the database's answer too.
+ */
+function reconcileUndefinedReturnTypes(functions: ExtractedFunction[]): void {
+  for (const fn of functions) {
+    const declared = (fn.returnType ?? '').trim();
+    if (!UNCURATED_RETURN_TYPES.has(declared)) continue;
+    const resolved = decompiledReturnType(fn.decompiled);
+    if (!resolved || resolved === declared) continue;
+    // Guard against a prototype line that parsed into something that is not a
+    // type at all (a stray comment, an unusual header) — only accept a plain
+    // type spelling.
+    if (!/^[A-Za-z_][\w:]*(\s*\*+)?$/.test(resolved)) continue;
+    fn.returnType = resolved;
+  }
+}
+

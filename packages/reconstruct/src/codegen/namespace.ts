@@ -147,6 +147,32 @@ export function collapseConsecutiveDuplicates(name: string): string {
 }
 
 /**
+ * Rewrite a qualified REFERENCE (`Ns::Sub::Sub::sym`) so its qualifier is spelled
+ * exactly the way the DECLARATION side spells it.
+ *
+ * The declaration side runs its namespace through collapseConsecutiveDuplicates()
+ * — impl.ts and header.ts both do, and organizeByNamespace() does it via
+ * normalizeUnitName(). Reference sites built from Ghidra's raw symbol path (data
+ * initializers naming a function, e.g. `&D2Game::Quests::Quests::A1Q6::Fn`) did
+ * not, so a `Module::Dir::Dir::Sub` symbol was declared in `Module::Dir::Sub` but
+ * referenced through a namespace that does not exist.
+ *
+ * Only the QUALIFIER is normalized; the trailing symbol name is left alone, so a
+ * symbol legitimately named after its own namespace (`Foo::Foo`, a constructor-ish
+ * name) keeps both segments.
+ */
+export function normalizeQualifiedReference(name: string): string {
+  const idx = name.lastIndexOf('::');
+  if (idx < 0) return name;
+  const qualifier = name.slice(0, idx);
+  const symbol = name.slice(idx + 2);
+  const emitted = stripLastCollidingNamespaceComponent(
+    collapseConsecutiveDuplicates(qualifier)
+  );
+  return emitted ? `${emitted}::${symbol}` : symbol;
+}
+
+/**
  * Global struct/union/enum type names, registered once per reconstruct run, used
  * to strip a namespace component that collides with a type. The HEADER decl, the
  * IMPL definition, and the call-site rewriter must all strip the SAME component or

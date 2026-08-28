@@ -151,12 +151,14 @@ function createSbbBranchlessTransformer(): Transformer {
               const offset = ternary.thenExpr as IntegerLiteralExpr;
               const trueVal = binary.operator === '+' ? base.value + offset.value : base.value - offset.value;
               const falseVal = base.value;
+              // The subtraction branch can go negative, and `BigInt.toString(16)`
+              // puts the sign on the digits — `0x-1` is not a literal at all.
               const makeLit = (v: bigint): IntegerLiteralExpr => ({
                 kind: NodeKind.IntegerLiteral,
                 value: v,
                 suffix: '',
                 base: 16,
-                raw: '0x' + v.toString(16),
+                raw: v < 0n ? '-0x' + (-v).toString(16) : '0x' + v.toString(16),
                 location: node.location,
                 leadingTrivia: [],
                 trailingTrivia: [],

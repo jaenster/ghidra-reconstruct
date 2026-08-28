@@ -37,6 +37,15 @@ describe('gotoCrossesInitPlugin', () => {
     assert.ok(/int a\[3\]\s*\{/.test(out), `array decl must stay intact: ${out}`);
   });
 
+  it('splits a decl crossed by a goto whose label sits in a nested scope', () => {
+    // The label is inside an else branch, one scope deeper than the crossed decl —
+    // the jump crosses it just the same.
+    const out = transform(
+      `void f(int* p, int c) { if (!c) goto L; int a = p[0]; if (c) { use(a); } else { L: use(p); } }`);
+    assert.ok(out.includes('int a;') && out.includes('a = p[0]'),
+      `decl crossed by a jump into a nested scope should split: ${out}`);
+  });
+
   it('does not split a decl after the label (not crossed)', () => {
     const out = transform(`void f(int* p) { goto L; int a = p[0]; L: use(a); int b = p[1]; use(b); }`);
     // a (before label) is split; b (after label) is not crossed -> stays merged

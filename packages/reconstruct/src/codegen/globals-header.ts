@@ -6,9 +6,9 @@
  */
 
 import type { AnalyzedDataSymbol, ReconstructOptions, DataValue, ExtractedDataType, ExtractedStruct, ExtractedEnum, ExtractedUnion, ExtractedFunctionDefinition } from '../types.js';
-import { isPlatformOrBuiltinType, isLibraryType, isStructType, castPointerInitializer, normalizeDataValue, isMsvcEhInternal } from './platform-types.js';
+import { isPlatformOrBuiltinType, isLibraryType, isStructType, castPointerInitializer, normalizeDataValue, isCharacterValueType, isMsvcEhInternal, normalizeWideCharType, isVoidPointerSpelling, rootQualifyShadowedType, platformDeclaredFunctionNames } from './platform-types.js';
 import { generateStructDeclaration, generateEnumDeclaration, generateUnionDeclaration, generateFunctionDefinitionDeclaration } from './header.js';
-import { collapseConsecutiveDuplicates } from './namespace.js';
+import { collapseConsecutiveDuplicates, normalizeQualifiedReference, stripLastCollidingNamespaceComponent } from './namespace.js';
 
 /**
  * Exact Win32 SDK typedef names (not `LP`/`IMAGE_` prefixed) seen as
@@ -72,6 +72,163 @@ function makeLibraryTypeSkipPredicate(
  * - Extern declarations for all multi-function globals
  * - Constants for read-only data with known values
  */
+/**
+ * Drop globals whose TYPE is an MSVC-EH internal (C++ exception-handling
+ * metadata: `__ehfuncinfo$…` typed as FuncInfo / UnwindMapEntry / HandlerType /
+ * TryBlockMapEntry). No real header declares those types, so emitting these
+ * globals yields "X does not name a type" wherever they land.
+ *
+ * NOTE: only EH internals — NOT Win32 SDK types (RGBQUAD, SYSTEMTIME, …), which
+ * the real <windows.h> provides, so game globals typed as those stay.
+ *
+ * The DECLARATION side (globals.h) and the DEFINITION side (globals.cpp, and the
+ * co-located blocks in struct .cpp files) must agree on this, or globals.cpp
+ * defines symbols whose type no TU can see.
+ */
+function isEmittableGlobal(g: AnalyzedDataSymbol): boolean {
+  const base = (g.suggestedType || g.dataType || '')
+    .replace(/[*&]/g, '').replace(/\bconst\b/g, '').replace(/\[[^\]]*\]/g, '').trim();
+  return !isMsvcEhInternal(base);
+}
+
+/**
+ * Decompiler/linker artifacts that are not program data: switch jump tables,
+ * relative-offset jump entries, and per-element aliases of an array that is
+ * itself declared. globals.h has always filtered these out of the DECLARATION
+ * set; globals.cpp did not filter its DEFINITION set, so it defined symbols no
+ * TU could see declared — including `Alignment LAB_00687d4a = align(1);`, which
+ * is padding, not a variable. The two sets must be the same set.
+ */
+function isDataArtifact(g: AnalyzedDataSymbol, allNames: Set<string>): boolean {
+  const name = g.suggestedName || g.name;
+  return isSwitchTableSymbol(name)
+    || isJumpTableArtifact(g)
+    || isArrayElementSymbol(name, allNames);
+}
+
+/**
+ * The globals that an output file actually took responsibility for emitting.
+ * Populated as each impl file is generated; consumed by
+ * `reconcileOrphanedGlobals`. Identity-based deliberately: comparing PATHS is
+ * what let these symbols go missing in the first place.
+ */
+const claimedGlobals = new WeakSet<AnalyzedDataSymbol>();
+
+/**
+ * Globals that globals.h refused to declare because a FUNCTION already owns the
+ * name in that scope. globals.cpp must skip the same set, or it emits a
+ * definition that redeclares the function ("redeclared as different kind of
+ * entity"). Declaration and definition share one decision, recorded here.
+ */
+const functionCollidingGlobals = new Set<AnalyzedDataSymbol>();
+
+/**
+ * The globals `globals.h` actually emitted an extern for. globals.cpp forward-
+ * declares only what is NOT in here: adding a second declaration for a symbol
+ * the header already declares would expose (as "conflicting declaration") any
+ * place the two sides normalize the type differently, which is a separate bug.
+ */
+const headerDeclaredGlobals = new Set<AnalyzedDataSymbol>();
+
+/** Record that an output file emits these globals itself. */
+export function markGlobalsClaimed(globals: Iterable<AnalyzedDataSymbol> | undefined): void {
+  if (!globals) return;
+  for (const g of globals) claimedGlobals.add(g);
+}
+
+/**
+ * Put back every global that no output file ended up claiming.
+ *
+ * `computeFileLocalGlobals` demotes a global to `file-local` when all its
+ * referencing functions land in one impl file, and the struct-co-location pass
+ * demotes one to `struct-colocated` when its type is owned by a header. Both
+ * record a PATH, and both paths are recomputed independently of the paths the
+ * file generator actually emits (`effectiveUnitName`, type-ownership overrides
+ * and module resolution can all move a unit's file). When the two disagree, the
+ * global is emitted by nobody: no extern in globals.h, no definition anywhere,
+ * and the bodies that use it fail with "was not declared in this scope".
+ *
+ * That is the worst failure mode in this file — a symbol Ghidra knows, with a
+ * name and a type, vanishing without a diagnostic. So the demotion is treated as
+ * an OPTIMIZATION that must be verified: if the owning file is not among the
+ * files actually generated, the global goes back to `global` scope and gets its
+ * declaration and definition in globals.h/globals.cpp.
+ *
+ * @returns the globals that were restored, for reporting.
+ */
+export function reconcileOrphanedGlobals(
+  globals: AnalyzedDataSymbol[]
+): AnalyzedDataSymbol[] {
+  const restored: AnalyzedDataSymbol[] = [];
+  for (const g of globals) {
+    if (g.scope !== 'file-local' && g.scope !== 'struct-colocated') continue;
+    if (claimedGlobals.has(g)) continue;
+    g.scope = 'global';
+    g.ownerFile = undefined;
+    g.ownerStructType = undefined;
+    g.ownerStructHeader = undefined;
+    restored.push(g);
+  }
+  return restored;
+}
+
+/**
+ * A global named by a CENTRAL initializer cannot stay file-scoped.
+ *
+ * `computeFileLocalGlobals` demotes a global to static-local/file-local from its
+ * XREF count, which counts function bodies only — a reference from another
+ * global's initializer is invisible to it. globals.cpp then initializes
+ * `gaUnitSoundTable[...] = { …, gaUnitSoundTableModeChange, … }` naming a symbol
+ * that is `static` inside D2Common/Unit/UnitSnd.cpp. Promote every such symbol
+ * back to `global` so the reference keeps its NAME instead of decaying to an
+ * address literal. Iterated to a fixpoint: a promoted symbol's own initializer
+ * can name the next one.
+ */
+export function promoteCentrallyReferencedGlobals(globals: AnalyzedDataSymbol[]): AnalyzedDataSymbol[] {
+  const byName = new Map<string, AnalyzedDataSymbol[]>();
+  for (const g of globals) {
+    const n = sanitizeSymbolName(symbolEmittedName(g));
+    if (!n) continue;
+    const list = byName.get(n);
+    if (list) list.push(g); else byName.set(n, [g]);
+  }
+
+  const rootOf = (value: string): string | undefined => {
+    const m = value.replace(/\b(?:compiler|VisualStudio)::/g, '').match(/^([A-Za-z_]\w*)/);
+    return m ? m[1] : undefined;
+  };
+
+  const promoted: AnalyzedDataSymbol[] = [];
+  let frontier = globals.filter(g => g.scope === 'global' && g.initializedData);
+  while (frontier.length > 0) {
+    const next: AnalyzedDataSymbol[] = [];
+    const visit = (dv: DataValue | undefined): void => {
+      if (!dv) return;
+      if (dv.kind === 'pointer' && dv.value) {
+        const root = rootOf(dv.value);
+        const candidates = root ? byName.get(root) ?? [] : [];
+        // Two distinct Ghidra symbols can share an emitted name; then there is
+        // no telling which one the initializer meant, and promoting BOTH gives
+        // globals.cpp two definitions of it. Promote only an unambiguous name.
+        if (candidates.length !== 1) return;
+        for (const g of candidates) {
+          if (g.scope !== 'static-local' && g.scope !== 'file-local') continue;
+          g.scope = 'global';
+          g.ownerFile = undefined;
+          g.ownerFunction = undefined;
+          promoted.push(g);
+          if (g.initializedData) next.push(g);
+        }
+      }
+      for (const e of dv.elements ?? []) visit(e);
+      for (const f of dv.fields ?? []) visit(f.value);
+    };
+    for (const g of frontier) visit(g.initializedData);
+    frontier = next;
+  }
+  return promoted;
+}
+
 export function generateGlobalsHeader(
   globals: AnalyzedDataSymbol[],
   options: ReconstructOptions & { projectName?: string; binaryName?: string },
@@ -98,17 +255,9 @@ export function generateGlobalsHeader(
   // type's Ghidra category (a system-header path) or by a conservative Win32 name set.
   const isSkippableLibraryType = makeLibraryTypeSkipPredicate(dataTypes);
 
-  // Drop globals whose TYPE is an MSVC-EH internal (C++ exception-handling
-  // metadata: __ehfuncinfo$ etc. typed as FuncInfo / UnwindMapEntry /
-  // HandlerType / TryBlockMapEntry). No real header declares those types, so
-  // emitting these globals yields "X does not name a type" across every TU.
-  // NOTE: only EH internals — NOT Win32 SDK types (RGBQUAD, SYSTEMTIME, ...),
-  // which the real <windows.h> provides, so game globals typed as those stay.
-  globals = globals.filter(g => {
-    const base = (g.suggestedType || g.dataType || '')
-      .replace(/[*&]/g, '').replace(/\bconst\b/g, '').replace(/\[[^\]]*\]/g, '').trim();
-    return !isMsvcEhInternal(base);
-  });
+  globals = globals.filter(isEmittableGlobal);
+  functionCollidingGlobals.clear();
+  headerDeclaredGlobals.clear();
 
   // Header comment
   lines.push('/**');
@@ -209,7 +358,8 @@ export function generateGlobalsHeader(
   for (const g of globals) {
     if (g.scope !== 'global') continue;
     const gName = g.suggestedName || g.name;
-    if (/^[A-Za-z_]\w*$/.test(gName)) collidingNamespaceParts.add(gName);
+    if (isInteriorLabel(gName)) continue;
+    collidingNamespaceParts.add(sanitizeSymbolName(gName));
   }
 
   // Group globals by namespace, stripping components that collide with struct
@@ -217,7 +367,12 @@ export function generateGlobalsHeader(
   const rawByNamespace = groupByNamespace(globals);
   const byNamespace = new Map<string | undefined, typeof globals>();
   for (const [ns, nsGlobals] of rawByNamespace) {
-    let cleanNs = ns;
+    // The IMPL side already drops a last component that names a type
+    // (`D2Client::Renderer::Direct3D` → `D2Client::Renderer`, because `Direct3D`
+    // is a struct). The extern has to land in the same scope or the body that
+    // names the symbol unqualified cannot see it — decl, def and reference share
+    // one rule, and this is that rule.
+    let cleanNs = ns ? stripLastCollidingNamespaceComponent(ns) : ns;
     if (cleanNs && collidingNamespaceParts.size > 0) {
       const parts = cleanNs.split('::');
       const filtered = parts.filter(p => !collidingNamespaceParts.has(p));
@@ -275,7 +430,7 @@ export function generateGlobalsHeader(
         const comment = constant.address ? `// @${constant.address}` : '';
         const type = constant.suggestedType || constant.dataType;
         const name = constant.suggestedName || constant.name;
-        const value = ensureHexPrefix(constant.value ?? '0');
+        const value = ensureHexPrefix(constant.value ?? '0', type);
         lines.push(`constexpr ${normalizeArrayDeclaration(type, name)} = ${value}; ${comment}`);
       }
 
@@ -323,15 +478,18 @@ export function generateGlobalsHeader(
       let currentIfdef: string | undefined;
       for (const global of nsGlobalSymbols) {
         // Skip duplicate extern declarations (same name, different namespace scope already emitted)
-        const qualifiedName = namespace ? `${namespace}::${global.suggestedName || global.name}` : (global.suggestedName || global.name);
+        const emitted = sanitizeSymbolName(global.suggestedName || global.name);
+        const qualifiedName = namespace ? `${namespace}::${emitted}` : emitted;
         if (emittedGlobalNames.has(qualifiedName)) continue;
         // Skip globals that collide with a same-named function in the same scope
         // (the function declaration owns the name — see fnNames above).
         if (fnNames.has(qualifiedName)) {
           lines.push(`// skipped: ${qualifiedName} (collides with a function of the same name)`);
+          functionCollidingGlobals.add(global);
           continue;
         }
         emittedGlobalNames.add(qualifiedName);
+        headerDeclaredGlobals.add(global);
         // Group consecutive globals with the same ifdef under one guard
         if (global.ifdef !== currentIfdef) {
           if (currentIfdef) {
@@ -377,9 +535,8 @@ export function generateGlobalsHeader(
       if (isJumpTableArtifact(g)) continue;
       if (isArrayElementSymbol(g.suggestedName || g.name, allGlobalNames)) continue;
 
-      const rawName = g.suggestedName || g.name;
-      // Must be a valid C identifier (generateExternDeclaration would otherwise
-      // drop it; an invalid-name extern can't resolve a body reference anyway).
+      // Bodies name the symbol by its SANITIZED identifier; so does the extern.
+      const rawName = sanitizeSymbolName(g.suggestedName || g.name);
       if (!/^[A-Za-z_]\w*$/.test(rawName)) continue;
 
       // Skip self-redeclarations: a symbol whose type base equals its own name
@@ -456,6 +613,33 @@ export function isInteriorLabel(name: string): boolean {
 }
 
 /**
+ * Ghidra type strings that are not legal C++ declaration types.
+ *
+ * Every place that turns a data symbol's type into a declaration — the extern in
+ * globals.h, the definition in globals.cpp, the co-located definition in a struct
+ * .cpp, the static local injected into a body — must apply the SAME normalization,
+ * or the declaration and the definition disagree and the linker (or the compiler)
+ * rejects them. Route all of them through this.
+ *
+ *   `auto`        Ghidra's "type undecided". `auto x;` needs an initializer, so it
+ *                 is illegal on an extern and on a BSS definition alike.
+ *   `T *32`       Ghidra's pointer-SIZE annotation ("a 32-bit pointer to T"), not C
+ *                 syntax: `void *32 x;` is "expected unqualified-id before numeric
+ *                 constant". Also shows up as `undefined *32`.
+ */
+export function normalizeGhidraType(type: string): string {
+  let t = type;
+  if (t.trim() === 'auto') t = 'void*';
+  // "void *32" / "undefined *32" / "D2BeltsTxt *32" → "void*" / "undefined*" / …
+  t = t.replace(/\s*\*\s*\d+\b/g, '*');
+  // D2's 16-bit char reaches globals as WCHAR/wchar_t/wchar16/unicode; bodies and
+  // signatures both settle on uint16_t, so globals must agree or every crossing is
+  // an invalid conversion.
+  t = normalizeWideCharType(t);
+  return t;
+}
+
+/**
  * Generate a single extern declaration for a global
  */
 export function generateExternDeclaration(
@@ -475,18 +659,15 @@ export function generateExternDeclaration(
     type = type + nameArr[2];
   }
 
-  // Skip globals with invalid C++ identifier names (digits, special chars)
+  // Labels on the interior of another global (`g_chunks.capacity`, `DAT_x+1`):
+  // the containing global is already declared, and the reference side spells
+  // them as a member/offset expression, so there is nothing to declare here.
   if (isInteriorLabel(name)) return '';
-  if (/[^A-Za-z0-9_]/.test(name) || /^\d/.test(name)) return `// skipped: ${name} (invalid identifier)`;
+  // Everything else keeps its identity — sanitized with the SAME rule the
+  // reference side uses, so a declaration always exists for a name in use.
+  name = sanitizeSymbolName(name);
 
-  // 'auto' is not valid for extern declarations
-  if (type === 'auto') type = 'void*';
-  // Strip Ghidra pointer size annotations: "void *32" → "void*"
-  type = type.replace(/\s*\*\s*\d+\b/g, '*');
-  // Ghidra artifact types that have no C equivalent — use uint8_t
-  if (type === 'Alignment' || type === 'IMAGE_DOS_HEADER' || type === 'IMAGE_DEBUG_DIRECTORY'
-    || type === 'IMAGE_DIRECTORY_ENTRY_EXPORT' || type === 'IMAGE_RESOURCE_DIRECTORY'
-    || type === 'VS_VERSION_INFO' || type === 'IMAGE_NT_HEADERS' || type === 'IMAGE_SECTION_HEADER') type = 'uint8_t';
+  type = normalizeGlobalDeclType(type);
 
   // Evidence comment, same convention as functions: how the name was established.
   let evidence = '';
@@ -529,18 +710,17 @@ export function generateStaticLocalDeclaration(
   let type = symbol.suggestedType || symbol.dataType;
   let name = symbol.suggestedName || symbol.name;
 
-  // Sanitize names with invalid C++ identifier characters
-  // RTTI names like ".?AUStringEntryNode@@" and dotted names like "Obj.field"
-  name = name.replace(/[^A-Za-z0-9_]/g, '_');
-  if (/^\d/.test(name)) name = '_' + name;
+  // Same sanitizer the declaration side and the reference side use.
+  name = sanitizeSymbolName(name);
 
   // auto is not useful in reconstructed code — use int for scalar values
-  if (type === 'auto') type = 'int';
+  if (type.trim() === 'auto') type = 'int';
+  type = normalizeGlobalDeclType(type);
 
   let initializer = '';
   if (symbol.initializedData) {
     const arrayInfo = inferArrayDeclaration(symbol);
-    const init = emitDataValue(symbol.initializedData, 0);
+    const init = emitDataValue(symbol.initializedData, 0, type);
     if (arrayInfo && symbol.initializedData.kind === 'array') {
       return `static ${arrayInfo.type} ${name}[${arrayInfo.count}] = ${init};`;
     }
@@ -550,7 +730,9 @@ export function generateStaticLocalDeclaration(
     if (type === 'const char*' && !symbol.value.startsWith('"')) {
       initializer = ` = "${escapeStringForC(symbol.value)}"`;
     } else {
-      initializer = ` = ${ensureHexPrefix(symbol.value)}`;
+      // An address stored in a pointer slot still needs the pointer cast — the
+      // hex prefix only makes it a valid literal, not a valid initializer.
+      initializer = ` = ${castPointerInitializer(type, ensureHexPrefix(symbol.value, type))}`;
     }
   } else if (type === 'auto') {
     // Can't have uninitialized auto
@@ -581,13 +763,18 @@ export function generateStaticLocalsBlock(
       && !isJumpTableArtifact(s)
   );
 
-  // Filter out globals whose sanitized name doesn't appear in the function body
+
+  // Filter out globals whose sanitized name doesn't appear in the function body.
+  //
+  // Ghidra references a global's reused storage slot as `_<global>` (one leading
+  // underscore). `declareUnderscoreSlotLocals` rewrites that back to `<global>`
+  // in the emitted body, but it runs AFTER this block is generated, so the
+  // identifier set still carries the underscore form. Accept either spelling —
+  // otherwise the body names a static local this block just declined to declare.
   if (bodyIdentifiers) {
     statics = statics.filter(s => {
-      let name = s.suggestedName || s.name;
-      name = name.replace(/[^A-Za-z0-9_]/g, '_');
-      if (/^\d/.test(name)) name = '_' + name;
-      return bodyIdentifiers.has(name);
+      const n = sanitizeSymbolName(s.suggestedName || s.name);
+      return bodyIdentifiers.has(n) || bodyIdentifiers.has(`_${n}`);
     });
   }
 
@@ -647,7 +834,7 @@ export function inferArrayDeclaration(
     const count = symbol.size / baseTypeSize;
     if (count > 1 && count <= 1000) { // Reasonable array size
       return {
-        type: symbol.suggestedType || symbol.dataType,
+        type: normalizeGlobalDeclType(symbol.suggestedType || symbol.dataType),
         count,
       };
     }
@@ -688,12 +875,233 @@ function getBaseTypeSize(dataType: string): number {
 // globals.cpp generation — definitions with initializers
 // =============================================================================
 
+/** Slot types that take a bare integer literal rather than a `void*` cast. */
+const INTEGER_SLOT_TYPES = new Set([
+  'char', 'signed char', 'unsigned char', 'uchar', 'byte', 'word', 'dword', 'qword',
+  'short', 'int', 'long', 'uint', 'ulong', 'ushort', 'size_t', 'bool',
+  'int8_t', 'uint8_t', 'int16_t', 'uint16_t', 'int32_t', 'uint32_t', 'int64_t', 'uint64_t',
+  'undefined', 'undefined1', 'undefined2', 'undefined4', 'undefined8',
+]);
+
 /**
- * Convert a DataValue tree to a C initializer string
+ * Ghidra's placeholder name for an address it has no symbol for — `DAT_000a0000`,
+ * `LAB_0057ee77_1`, `FUN_004503f0`, `s_umod_006e6f60`, or the bare `ffffffff`.
+ * A pointer initializer that names one of these has nothing to point AT: the
+ * generator emits no such declaration, so `&DAT_000a0000` is an undeclared
+ * identifier. The name still carries the address it stood for, and that address
+ * is the actual content of the slot, so spell it as the address.
+ *
+ * Only names the globals table does NOT declare go down this path — a real
+ * symbol that merely looks like one of these keeps its reference.
  */
-export function emitDataValue(dv: DataValue, indent = 0): string {
+function unresolvedSymbolAddress(name: string): string | undefined {
+  // "Declared" has to mean "declared where this initializer can see it". A
+  // static-local / file-local symbol is emitted `static` inside ONE .cpp, so the
+  // central globals.cpp cannot name it — `&DAT_00070000`, `&aNpcGossipData…`.
+  // Existing in the globals table is not the same as being visible here.
+  const invisibleHere = centralInitializerScope && fileScopedGlobalNames.has(name);
+  // Being in the globals TABLE is not being DECLARED: every emitter drops the
+  // switch/jump-table and interior-label names, so `&LAB_006c6569` names nothing.
+  const neverDeclared = isSwitchTableSymbol(name) || isInteriorLabel(name);
+  if (globalVariableNames.has(name) && !invisibleHere && !neverDeclared) return undefined;
+  const artifact = name.match(/^(?:DAT|LAB|PTR|UNK|FUN|SUB)_([0-9a-fA-F]{6,8})(?:_\d+)?$/);
+  if (artifact) return artifact[1];
+  const stringSymbol = name.match(/^s_\w*_([0-9a-fA-F]{6,8})$/);
+  if (stringSymbol) return stringSymbol[1];
+  const bareHex = name.match(/^([0-9a-fA-F]{8})$/);
+  if (bareHex) return bareHex[1];
+  return undefined;
+}
+
+/**
+ * The namespace table and the block a data initializer is currently being
+ * emitted inside. A pointer initializer names its target with the target's OWN
+ * namespace path (`Game::Launcher::AppModeLauncherInit`), which is correct at
+ * root scope but not necessarily from inside another namespace block: C++ looks
+ * the leading qualifier up through the enclosing scopes and stops at the first
+ * one that declares it, so `Game` binds to `D2Client::Game` and the reference
+ * fails to resolve. Same decision as the `namespace-shadow-qualify` transform
+ * makes for function bodies — initializers are emitted from strings, not from
+ * an AST, so it has to be made here too.
+ */
+let shadowNamespaces: Set<string> | undefined;
+let initializerScopes: string[] = [];
+let initializerOwnScopes: Set<string> = new Set();
+
+export function setKnownNamespaces(namespaces: Set<string> | undefined): void {
+  shadowNamespaces = namespaces && namespaces.size > 0 ? namespaces : undefined;
+}
+
+/**
+ * Enter (or leave, with `undefined`) the namespace block whose initializers are
+ * about to be emitted.
+ */
+export function setInitializerNamespace(namespace: string | undefined): void {
+  initializerScopes = [];
+  initializerOwnScopes = new Set();
+  if (!namespace) return;
+  const segs = namespace.split('::').filter(Boolean);
+  for (let i = segs.length; i > 0; i--) initializerScopes.push(segs.slice(0, i).join('::'));
+  // Any contiguous run of the enclosing path names a scope the reference is
+  // already inside, so it always resolves — see namespace-shadow-qualify.
+  for (let i = 0; i < segs.length; i++) {
+    for (let j = i + 1; j <= segs.length; j++) initializerOwnScopes.add(segs.slice(i, j).join('::'));
+  }
+}
+
+function isShadowedQualifier(qualifier: string): boolean {
+  if (!shadowNamespaces || initializerScopes.length === 0) return false;
+  if (!shadowNamespaces.has(qualifier) || initializerOwnScopes.has(qualifier)) return false;
+  const cut = qualifier.indexOf('::');
+  const first = cut === -1 ? qualifier : qualifier.slice(0, cut);
+  for (const scope of initializerScopes) {
+    if (!shadowNamespaces.has(`${scope}::${first}`)) continue;
+    return !shadowNamespaces.has(`${scope}::${qualifier}`);
+  }
+  return false;
+}
+
+/**
+ * Root-qualify the leading qualified name of an initializer expression when the
+ * enclosing block would shadow its first segment. Interior forms (`Tbl[3].pFn`,
+ * `DAT_x+1`) keep everything after the name untouched.
+ */
+function shadowQualifyReference(expr: string): string {
+  const m = expr.match(/^([A-Za-z_]\w*(?:::[A-Za-z_]\w*)+)/);
+  if (!m) return expr;
+  const name = m[1];
+  const qualifier = name.slice(0, name.lastIndexOf('::'));
+  return isShadowedQualifier(qualifier) ? `::${expr}` : expr;
+}
+
+/**
+ * Spell a pointer-valued initializer so that its STATIC TYPE matches the slot it
+ * fills, without changing the ADDRESS it denotes.
+ *
+ * The DataValue model carries only "this 4-byte slot holds the address of X".
+ * Three things can then be true of `X`:
+ *   - `X` is a 1-D array of the slot's pointee type → the bare name decays to
+ *     exactly the right pointer. No `&`, no cast.
+ *   - `X` is an object of the slot's pointee type → `&X`. No cast.
+ *   - Ghidra types `X` as something else (or as `undefined`, which arrives here
+ *     as `void*`), or the address lands on a FIELD inside another table. Then no
+ *     spelling of `&`/decay has the slot's type, and the only faithful C++ is a
+ *     cast to the DECLARED SLOT TYPE — which narrows nothing and preserves the
+ *     address exactly. Whenever this branch fires, the underlying disagreement
+ *     is in the database, not here.
+ */
+function emitPointerToSymbol(rawValue: string, expectedType?: string): string {
+  // Drop the CRT-helper namespace prefixes (compiler/VisualStudio are not emitted).
+  const stripped = rawValue.replace(/\b(?:compiler|VisualStudio)::/g, '');
+  // Ghidra also hands back INTERIOR references — `Tbl[14].pField`, `DAT_x+1`.
+  // Those are already legal C++ expressions and must survive intact; only names
+  // that are not legal C++ go through the sanitizer.
+  const isLegalExpression =
+    /^[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*(?:\[\d+\]|\.[A-Za-z_]\w*)*(?:\+\d+)?$/.test(stripped);
+  const legalized = isLegalExpression ? stripped : sanitizeQualifiedReference(stripped);
+  // Spell the qualifier the way the DECLARATION side spells it. Ghidra hands back
+  // the raw symbol path (`D2Game::Quests::Quests::A1Q6::Fn`); the declaration is
+  // emitted into the collapsed namespace, so the raw path names a scope that does
+  // not exist. Same collapse function both sides — one source of truth.
+  const value = normalizeQualifiedReference(legalized);
+  // The name the lookups below use is the unqualified one; the SPELLING may need
+  // a root qualifier to survive the namespace block it lands in.
+  const spelled = shadowQualifyReference(value);
+  const bare = value.match(/^[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*$/) ? value : undefined;
+  const slotType = expectedType ? stripFuncDefIndirection(expectedType.trim()) : undefined;
+  const expectsPointer = !!slotType && /\*\s*$/.test(slotType);
+  // Compared UNQUALIFIED against the symbol's own declared type; spelled
+  // root-qualified, because the cast lands inside a namespace block whose own
+  // name may shadow the type (`namespace D2Client::Mouse` hides root `Mouse`).
+  const pointeeBare = expectsPointer ? baseTypeName(slotType!.replace(/\*\s*$/, '')) : undefined;
+  const pointee = pointeeBare ? rootQualifyShadowedType(pointeeBare) : undefined;
+
+  // The same, one level out: `s_umod_006e6f60+3` / `LAB_00646c24+1` is an
+  // INTERIOR pointer whose root is one of those invented names. The root carries
+  // its address and the suffix is a byte offset, so the pair is a literal.
+  const interior = value.match(/^([A-Za-z_]\w*)\+(\d+)$/);
+  if (interior) {
+    const rootAddress = unresolvedSymbolAddress(interior[1]);
+    if (rootAddress !== undefined) {
+      const literal = `0x${(parseInt(rootAddress, 16) + Number(interior[2])).toString(16).padStart(8, '0')}`;
+      if (pointee) return `(${pointee}*)${literal}`;
+      const base = slotType ? baseTypeName(slotType).toLowerCase() : undefined;
+      return base && INTEGER_SLOT_TYPES.has(base) ? literal : `(void*)${literal}`;
+    }
+  }
+
+  // A name Ghidra invented for a bare address is not a declaration anywhere —
+  // emit the address it stood for instead of a reference to nothing.
+  if (bare) {
+    const address = unresolvedSymbolAddress(bare);
+    if (address !== undefined) {
+      const literal = `0x${address.toLowerCase()}`;
+      if (pointee) return `(${pointee}*)${literal}`;
+      // Only a slot whose type is NAMED as an integer takes the bare value; a
+      // pointer spelled through a typedef (`pointer`, `LPVOID`, `HANDLE`) has no
+      // `*` to test for, so anything else gets the `void*` cast.
+      const base = slotType ? baseTypeName(slotType).toLowerCase() : undefined;
+      return base && INTEGER_SLOT_TYPES.has(base) ? literal : `(void*)${literal}`;
+    }
+  }
+
+  // `&<multidim-array-global>` is `T(*)[N][M]`; array decay still leaves
+  // `T(*)[M]`, so this one genuinely needs the cast even when T matches.
+  const multidimElem = bare ? multidimArrayGlobals.get(bare) : undefined;
+  if (multidimElem) return `(${multidimElem}*)&${spelled}`;
+
+  // A function address in a slot whose type is `void*` or a differing funcdef.
+  if (bare) {
+    const castTo = functionInitializerCast(value, slotType);
+    if (castTo) return `(${rootQualifyShadowedType(castTo)})&${spelled}`;
+  }
+
+  if (bare) {
+    const elem = arrayGlobals.get(bare);
+    if (elem) {
+      // 1-D array: decay. Cast only when Ghidra's element type is not the slot's.
+      if (pointee && baseTypeName(elem) !== pointeeBare) return `(${pointee}*)${spelled}`;
+      return value;
+    }
+    const declared = globalDeclaredTypes.get(bare);
+    // `&sym` has type `<declared> *`. Compare at FULL pointer depth, not just the
+    // base name: a symbol declared `DC6 *` yields `DC6 **`, which a `DC6 *` slot
+    // does not take — `baseTypeName` erases exactly the `*` that makes them differ.
+    if (pointee && declared !== undefined && pointerDepthAwareName(declared) !== pointeeBare) {
+      return `(${pointee}*)&${spelled}`;
+    }
+    return `&${spelled}`;
+  }
+
+  // Not a bare symbol: an interior path like `Tbl[14].pField`. `&` there yields a
+  // pointer to the FIELD's type, which is only by luck the slot's type.
+  if (pointee) return `(${pointee}*)&${spelled}`;
+  return `&${spelled}`;
+}
+
+/**
+ * Types whose slot a `char` literal actually fits. Anything else — notably the
+ * 16-bit char unified on `uint16_t` — takes the numeric code unit, because a
+ * `char` literal with the high bit set is negative and will not narrow.
+ */
+const CHAR_SLOT_TYPES = new Set(['char', 'signed char', 'unsigned char', 'uchar', 'byte', 'int8_t', 'uint8_t', 'undefined1', 'undefined']);
+
+function isCharSlotType(base: string): boolean {
+  return CHAR_SLOT_TYPES.has(base.toLowerCase());
+}
+
+/**
+ * Convert a DataValue tree to a C initializer string.
+ *
+ * `expectedType` is the declared type of the slot being initialized — the
+ * global's own type at the top level, then the array element type / struct field
+ * type as the walk descends. It is what lets a pointer slot be spelled with the
+ * right static type instead of a guess.
+ */
+export function emitDataValue(dv: DataValue, indent = 0, expectedType?: string): string {
   const pad = '    '.repeat(indent);
   const innerPad = '    '.repeat(indent + 1);
+  const baseExpected = expectedType ? baseTypeName(expectedType) : undefined;
 
   switch (dv.kind) {
     case 'scalar': {
@@ -701,6 +1109,13 @@ export function emitDataValue(dv: DataValue, indent = 0): string {
       // If value is a single printable char (not a number/hex), wrap in char literal quotes
       if (val.length === 1 && !/\d/.test(val)) {
         const code = val.charCodeAt(0);
+        // A char literal only belongs in a char-shaped slot. In any wider integer
+        // slot (D2's 16-bit char is uint16_t) a code unit >= 0x80 is a NEGATIVE
+        // `char` and cannot narrow into the slot: `narrowing conversion of '\200'
+        // from 'char' to 'uint16_t'`. Emit the numeric code unit instead.
+        if (baseExpected !== undefined && !isCharSlotType(baseExpected)) {
+          return `0x${code.toString(16)}`;
+        }
         // Non-printable or non-ASCII: emit as hex escape
         if (code > 127 || code < 0x20) {
           return `'\\x${code.toString(16).padStart(2, '0')}'`;
@@ -716,39 +1131,49 @@ export function emitDataValue(dv: DataValue, indent = 0): string {
       // Escape the string for C
       return `"${escapeStringForC(dv.value ?? '')}"`;
 
-    case 'pointer':
+    case 'pointer': {
       if (!dv.value || dv.value === '0x0' || dv.value === '0x00000000' || dv.value === 'DAT_00000000') {
         return 'nullptr';
       }
-      // If it looks like a symbol name (not hex), emit as address-of.
-      // Drop the CRT-helper namespace prefixes (compiler/VisualStudio are not emitted).
+      // A funcdef typedef is emitted pointer-style, so Ghidra's `Mouse *` is one
+      // star too many for the slot the header actually declares (`Mouse`). The
+      // declaration already collapses it; the cast has to agree or it produces
+      // `BOOL (**)(...)` where a `BOOL (*)(...)` is wanted.
+      const slotType = expectedType ? stripFuncDefIndirection(expectedType.trim()) : undefined;
+      // If it looks like a symbol name (not hex), emit as address-of / decay.
       if (/^[A-Za-z_]/.test(dv.value)) {
-        const sym = dv.value.replace(/\b(?:compiler|VisualStudio)::/g, '');
-        // `&<multidim-array-global>` is `T(*)[N][M]`; the pointer field wants `T*`.
-        // Cast it (a 1-D array would just decay, but a 2-D+ one needs the cast).
-        const elem = multidimArrayGlobals.get(sym);
-        return elem ? `(${elem}*)&${sym}` : `&${sym}`;
+        return emitPointerToSymbol(dv.value, slotType);
+      }
+      const literal = normalizeDataValue(dv.value);
+      // A funcdef slot carries its indirection in the typedef, so it has no `*`
+      // for castPointerInitializer to key on — but an address literal still
+      // needs the cast to become a function pointer.
+      if (slotType && isFuncDefTypedefName(slotType)) {
+        return `(${rootQualifyShadowedType(slotType)})${literal}`;
       }
       // Raw hex pointer — normalize value (add 0x prefix if needed)
-      return `(void*)${normalizeDataValue(dv.value)}`;
+      return castPointerInitializer(slotType ?? 'void*', literal);
+    }
 
     case 'enum':
       return dv.value ?? '0';
 
     case 'array': {
       if (!dv.elements || dv.elements.length === 0) return '{}';
+      // The element type is the declared type minus its outermost dimension.
+      const elemType = expectedType ? stripOuterArrayDimension(expectedType) : undefined;
       // For small arrays of scalars/pointers, emit on fewer lines
       const isSimple = dv.elements.every(e => e.kind === 'scalar' || e.kind === 'pointer' || e.kind === 'enum');
       if (isSimple && dv.elements.length <= 8) {
         const vals = dv.elements.map((e, i) => {
-          const v = emitDataValue(e, 0);
+          const v = emitDataValue(e, 0, elemType);
           return i < dv.elements!.length - 1 ? `${v},` : v;
         });
         return `{ ${vals.join(' ')} }`;
       }
       // Multi-line array
       const lines = dv.elements.map((e, i) => {
-        const v = emitDataValue(e, indent + 1);
+        const v = emitDataValue(e, indent + 1, elemType);
         const comma = i < dv.elements!.length - 1 ? ',' : '';
         return `${innerPad}${v}${comma}`;
       });
@@ -757,8 +1182,9 @@ export function emitDataValue(dv: DataValue, indent = 0): string {
 
     case 'struct': {
       if (!dv.fields || dv.fields.length === 0) return '{}';
+      const layout = baseExpected ? structFieldTypes.get(baseExpected) : undefined;
       const fieldLines = dv.fields.map((f, i) => {
-        const v = emitDataValue(f.value, indent + 1);
+        const v = emitDataValue(f.value, indent + 1, layout?.get(f.name));
         const comma = i < dv.fields!.length - 1 ? ',' : '';
         // Use positional init (field names may be auto-generated)
         const isAutoName = /^field_\d+$/.test(f.name);
@@ -776,13 +1202,28 @@ export function emitDataValue(dv: DataValue, indent = 0): string {
 }
 
 /**
+ * `D2Foo[8][4]` → `D2Foo[4]`, `D2Foo[8]` → `D2Foo`, `D2Foo` → `D2Foo`.
+ * Descending one level into an array initializer drops one dimension.
+ */
+function stripOuterArrayDimension(type: string): string {
+  const m = type.match(/^(.*?)\s*\[\d+\]((?:\s*\[\d+\])*)\s*$/);
+  if (!m) return type;
+  return (m[1] + m[2]).trim();
+}
+
+/**
  * Check if a symbol name is a switch jump table artifact (dead after goto cleanup)
+ *
+ * MSVC decoration (`@`) is NOT evidence of an artifact: `PTR__BinkOpen@8_006cc5b8`
+ * is a real import thunk pointer and `s_.?AUSGAMEDATA@@_0070f56c` is a real RTTI
+ * name string that SMemAlloc call sites pass as their allocator tag. Both are
+ * referenced by function bodies under the shared identifier sanitizer, so
+ * refusing to declare them only removes the declaration, never the reference.
  */
 export function isSwitchTableSymbol(name: string): boolean {
   return name.startsWith('switchdataD_') || name.startsWith('PTR_caseD_')
     || name.startsWith('LAB_') || name.startsWith('SUB_')
-    || name.includes('+')   // Malformed names like "PTR_caseD_3_0067582c+2"
-    || name.includes('@');  // Decorated names like "PTR__BinkOpen@8_006cc5b8"
+    || name.includes('+');  // Malformed names like "PTR_caseD_3_0067582c+2"
 }
 
 /**
@@ -809,6 +1250,37 @@ export function isJumpTableArtifact(symbol: AnalyzedDataSymbol): boolean {
  * "DC6 *[4]" + "pAutoMapDC6" → "DC6* pAutoMapDC6[4]"
  * "int[10]"  + "counts"       → "int counts[10]"
  */
+
+/**
+ * Does `normalizeArrayDeclaration` turn this type into an ARRAY object rather
+ * than a scalar or a pointer? It mirrors that function's branches — the
+ * pointer-to-array form declares a pointer, the two dimension-bearing forms
+ * declare an array — so the two cannot answer differently about one type.
+ */
+export function declaresArrayObject(type: string): boolean {
+  const t = stripFuncDefIndirection(type);
+  if (/^(.+?)((?:\[\d+\])+)\s*\*$/.test(t)) return false;   // TYPE[N] * → pointer
+  if (/^(.+?)((?:\[\d+\])+)$/.test(t)) return true;          // TYPE[N]
+  if (/^(.+?\*)\s*(\[.+\])$/.test(t)) return true;            // TYPE *[N]
+  return false;
+}
+
+/**
+ * An array object needs a brace-enclosed initializer; C++ rejects
+ * `CRITICAL_SECTION g[256] = 0;` outright. Ghidra hands back a single scalar for
+ * such a symbol when only its first element carries data, so the faithful
+ * spelling is that one element in braces — which zero-fills the rest, exactly
+ * what the record says about them. A plain zero becomes `{}` rather than `{0}`
+ * because a struct element cannot be initialized from `0`.
+ */
+export function braceArrayInitializer(type: string, initializer: string): string {
+  if (!declaresArrayObject(type)) return initializer;
+  if (initializer.startsWith('{')) return initializer;
+  const v = initializer.trim();
+  if (v === '0' || v === 'nullptr' || v === 'NULL') return '{}';
+  return `{ ${v} }`;
+}
+
 export function normalizeArrayDeclaration(type: string, name: string): string {
   type = stripFuncDefIndirection(type);
   // "TYPE[N] *" → pointer to array: "TYPE (*name)[N]"
@@ -875,16 +1347,269 @@ export function getKnownFuncDefTypedefs(): string[] {
  */
 const multidimArrayGlobals = new Map<string, string>();
 
+/**
+ * Globals declared as a ONE-dimensional array (`T[N]`), mapped to their element
+ * type `T`. `&name` on such a global is `T(*)[N]`, which is NOT what a `T*`
+ * pointer slot wants — but the bare name decays to exactly `T*`. So the `&` is
+ * dropped rather than cast: array-to-pointer decay is the faithful, cast-free
+ * spelling of "the address of the first element".
+ */
+const arrayGlobals = new Map<string, string>();
+
+/** Declared (already Ghidra-normalized) type of every global, by emitted name. */
+const globalDeclaredTypes = new Map<string, string>();
+
+/**
+ * Normalized signature keys for every FUNCTION (bare and qualified) and every
+ * function-pointer typedef, so a data initializer that stores a function address
+ * can tell whether the slot's type and the function's own prototype agree.
+ *
+ * A function pointer converts to NOTHING implicitly in C++ — not to `void*`, not
+ * to a differently-typed function pointer — so wherever they disagree the
+ * original source carried the cast, and emitting it reconstructs that. An ARITY
+ * disagreement is a different problem: no cast makes such a call work, so those
+ * are left alone and counted for the database owner.
+ */
+/**
+ * Does `d2_platform.h` — or a system header it pulls in — declare a FUNCTION by
+ * this name? The registry is what lets the initializer emitter tell a callee it
+ * declared itself from one Ghidra handed it. Memoised; it is asked once per
+ * symbol reference in every initializer in the tree.
+ */
+let emitterDeclaredFunctions: Set<string> | undefined;
+function emitterDeclaresFunction(name: string): boolean {
+  emitterDeclaredFunctions ??= platformDeclaredFunctionNames();
+  return emitterDeclaredFunctions.has(name);
+}
+
+let initializerFunctionSignatures: Record<string, string> = {};
+let initializerFuncdefSignatures: Record<string, string> = {};
+let initializerFuncPtrArityMismatches = 0;
+
+export function setInitializerSignatureTables(
+  functionSignatures: Record<string, string>,
+  funcdefSignatures: Record<string, string>,
+): void {
+  initializerFunctionSignatures = functionSignatures;
+  initializerFuncdefSignatures = funcdefSignatures;
+  initializerFuncPtrArityMismatches = 0;
+}
+
+/** How many function-address initializers were left uncast because the arity differs. */
+export function getInitializerFuncPtrArityMismatches(): number {
+  return initializerFuncPtrArityMismatches;
+}
+
+/** The arity encoded in a signature key `ret(a,b,c)`; -1 when unparseable. */
+function signatureArity(sig: string): number {
+  const open = sig.indexOf('(');
+  if (open === -1 || !sig.endsWith(')')) return -1;
+  const inner = sig.slice(open + 1, -1).trim();
+  if (inner === '' || inner === 'void') return 0;
+  let depth = 0;
+  let count = 1;
+  for (const ch of inner) {
+    if (ch === '(') depth++;
+    else if (ch === ')') depth--;
+    else if (ch === ',' && depth === 0) count++;
+  }
+  return count;
+}
+
+/**
+ * The cast a function-address initializer needs to land in `expectedType`, or
+ * undefined when none is needed (or when a cast cannot honestly fix it).
+ */
+function functionInitializerCast(name: string, expectedType?: string): string | undefined {
+  if (!expectedType) return undefined;
+  // A name that also denotes DATA is not proof of a function.
+  if (globalDeclaredTypes.has(name) || globalVariableNames.has(name)) return undefined;
+  const bare = name.includes('::') ? name.slice(name.lastIndexOf('::') + 2) : name;
+  if (globalDeclaredTypes.has(bare) || globalVariableNames.has(bare)) return undefined;
+  const actual = initializerFunctionSignatures[name] ?? initializerFunctionSignatures[bare];
+  if (actual === undefined) {
+    // A callee the EMITTER declares has no model prototype to compare, but it is
+    // still a function, and a function address reaches `void*` through a cast or
+    // not at all. `__purecall` is the case: the MSVC pure-virtual thunk fills
+    // every slot of an abstract class's vtable, and the vtable is a `pointer[]`.
+    // A slot spelled as a funcdef is left alone — without a signature there is
+    // nothing to compare it against, and a cast would be a guess.
+    if (isVoidPointerSpelling(expectedType) && emitterDeclaresFunction(bare)) return 'void*';
+    return undefined;
+  }
+
+  if (isVoidPointerSpelling(expectedType)) return 'void*';
+
+  const slot = baseTypeName(expectedType);
+  const target = initializerFuncdefSignatures[slot];
+  if (target === undefined || target === actual) return undefined;
+  if (signatureArity(actual) !== signatureArity(target)) {
+    initializerFuncPtrArityMismatches++;
+    return undefined;
+  }
+  return slot;
+}
+
+/** Field name → field type, per STRUCTURE/UNION, for typing struct initializers. */
+const structFieldTypes = new Map<string, Map<string, string>>();
+
+/** Names of STRUCTURE/UNION data types (for the elaborated-specifier rule). */
+const structOrUnionTypeNames = new Set<string>();
+
+/** Emitted names of every global variable (for the elaborated-specifier rule). */
+const globalVariableNames = new Set<string>();
+
+/**
+ * Globals classified static-local / file-local: emitted `static` into a single
+ * .cpp, so no other translation unit can name them. Consulted only while the
+ * CENTRAL globals.cpp is being emitted (`centralInitializerScope`), because a
+ * file-local block referencing its OWN statics is perfectly fine.
+ */
+const fileScopedGlobalNames = new Set<string>();
+let centralInitializerScope = false;
+
+/** Enter/leave emission of the central globals.cpp initializers. */
+export function setCentralInitializerScope(on: boolean): void {
+  centralInitializerScope = on;
+}
+
+/** The emitted name of a data symbol: suggestedName, else name, else sanitized. */
+function symbolEmittedName(g: { name: string; suggestedName?: string }): string {
+  return g.suggestedName || g.name;
+}
+
 export function setMultidimArrayGlobals(
-  globals: Iterable<{ name: string; dataType?: string }>,
+  globals: Iterable<{ name: string; dataType?: string; suggestedName?: string; suggestedType?: string; scope?: string }>,
 ): void {
   multidimArrayGlobals.clear();
+  arrayGlobals.clear();
+  globalDeclaredTypes.clear();
+  globalVariableNames.clear();
+  fileScopedGlobalNames.clear();
   for (const g of globals) {
-    if (!g.dataType) continue;
+    const name = sanitizeSymbolName(symbolEmittedName(g));
+    const rawType = g.suggestedType || g.dataType;
+    if (name) globalVariableNames.add(name);
+    if (name && (g.scope === 'static-local' || g.scope === 'file-local')) fileScopedGlobalNames.add(name);
+    if (!rawType) continue;
+    const type = normalizeGhidraType(rawType);
+    if (name) globalDeclaredTypes.set(name, type);
     // `char[5][4]`, `undefined1 [3][2]`, `D2Foo[8][8]` → 2+ dimensions.
-    const m = g.dataType.match(/^([\w:]+(?:\s*\*)*)\s*(?:\[\d+\]\s*){2,}$/);
-    if (m) multidimArrayGlobals.set(g.name, m[1].trim());
+    const multi = type.match(/^([\w:]+(?:\s*\*)*)\s*(?:\[\d+\]\s*){2,}$/);
+    if (multi) {
+      multidimArrayGlobals.set(g.name, multi[1].trim());
+      if (name) multidimArrayGlobals.set(name, multi[1].trim());
+      continue;
+    }
+    const single = type.match(/^([\w:]+(?:\s*\*)*)\s*\[\d+\]$/);
+    if (single && name) arrayGlobals.set(name, single[1].trim());
   }
+}
+
+/**
+ * Register the struct/union layouts so a struct-shaped initializer can be typed
+ * field by field. Without this, `emitDataValue` sees only `{name, value}` pairs
+ * and has to guess how to spell a pointer — which is how `&sym` ends up one
+ * indirection off the slot it initializes.
+ */
+export function setGlobalInitializerTypes(dataTypes: ExtractedDataType[] | undefined): void {
+  structFieldTypes.clear();
+  structOrUnionTypeNames.clear();
+  if (!dataTypes) return;
+  for (const dt of dataTypes) {
+    if (dt.kind !== 'STRUCTURE' && dt.kind !== 'UNION') continue;
+    structOrUnionTypeNames.add(dt.name);
+    const fields = (dt as ExtractedStruct).fields;
+    if (!fields) continue;
+    const byName = new Map<string, string>();
+    for (const f of fields) {
+      if (f.name && f.dataType) byName.set(f.name, f.dataType);
+    }
+    structFieldTypes.set(dt.name, byName);
+  }
+}
+
+/**
+ * Ghidra names that are not legal C++ identifiers — MSVC RTTI symbols
+ * (`RTTI_Base_Class_Descriptor_at_(0,-1,0,64)`), decompiler string labels
+ * (`s_.?AUBREAKCMD@@_007088d8`), demangled template names. They cannot be
+ * emitted verbatim, but they ARE referenced — by other globals' initializers and
+ * by function bodies (which sanitize with exactly this rule). Refusing to
+ * declare a symbol that is still referenced is the worst of both worlds, so
+ * declaration and reference are put through the SAME sanitizer instead.
+ */
+export function sanitizeSymbolName(name: string): string {
+  let out = name.replace(/[^A-Za-z0-9_]/g, '_');
+  // A leading digit is REPLACED, not prefixed. Ghidra's decompiler already has to
+  // legalize the same name to print a body, and it substitutes: `800BorderFrame`
+  // comes out of the decompiler as `_00BorderFrame`. Prefixing here would declare
+  // `_800BorderFrame` and leave every body naming an identifier that exists
+  // nowhere ("'_00BorderFrame' was not declared; did you mean '_800BorderFrame'?").
+  // The reference side is the decompiler's, so the declaration follows its rule.
+  out = out.replace(/^\d/, '_');
+  return out;
+}
+
+/**
+ * Sanitize a possibly-qualified reference (`Ns::Sub::sym`) component-wise, so
+ * the `::` scope operator survives while each component becomes a legal
+ * identifier — matching what the declaration side emits.
+ */
+export function sanitizeQualifiedReference(name: string): string {
+  return name.split('::').map(sanitizeSymbolName).join('::');
+}
+
+/**
+ * Strip pointer/array/const noise off a type string to get its base type name.
+ */
+/**
+ * `baseTypeName` with the pointer stars KEPT (`DC6 *` → `DC6*`), for comparing a
+ * slot's pointee type against the type an `&symbol` really produces.
+ */
+function pointerDepthAwareName(type: string): string {
+  const stars = (type.match(/\*/g) ?? []).length;
+  return baseTypeName(type) + '*'.repeat(stars);
+}
+
+function baseTypeName(type: string): string {
+  return type
+    .replace(/[*&]/g, '')
+    .replace(/\bconst\b/g, '')
+    .replace(/\[[^\]]*\]/g, '')
+    .replace(/\bstruct\b|\bunion\b/g, '')
+    .replace(/\s+\d+$/, '')
+    .trim();
+}
+
+/**
+ * A global variable may carry the SAME name as the struct type it is declared
+ * with (`extern D2NpcMenuOptions D2NpcMenuOptions[48];` — Ghidra names the table
+ * after its element type). After that declaration the name denotes the variable,
+ * so the definition in globals.cpp reads `D2NpcMenuOptions D2NpcMenuOptions[48]`
+ * → "'D2NpcMenuOptions' does not name a type". The elaborated specifier
+ * `struct D2NpcMenuOptions` is unambiguous in both positions and costs nothing.
+ */
+function elaborateCollidingStructType(type: string): string {
+  const base = baseTypeName(type);
+  if (!base || !/^[A-Za-z_]\w*$/.test(base)) return type;
+  if (/\b(?:struct|union|enum)\b/.test(type)) return type;
+  if (!structOrUnionTypeNames.has(base) || !globalVariableNames.has(base)) return type;
+  return type.replace(new RegExp(`\\b${base}\\b`), `struct ${base}`);
+}
+
+/**
+ * The single type-normalization every global DECLARATION and DEFINITION must
+ * share. `generateExternDeclaration` used to hold the artifact mapping on its
+ * own, so globals.h said `uint8_t` where globals.cpp said `IMAGE_DOS_HEADER` —
+ * "conflicting declaration". One function, both sides.
+ */
+export function normalizeGlobalDeclType(type: string): string {
+  let t = normalizeGhidraType(type);
+  // Ghidra artifact types that have no C equivalent — use uint8_t
+  if (t === 'Alignment' || t === 'IMAGE_DOS_HEADER' || t === 'IMAGE_DEBUG_DIRECTORY'
+    || t === 'IMAGE_DIRECTORY_ENTRY_EXPORT' || t === 'IMAGE_RESOURCE_DIRECTORY'
+    || t === 'VS_VERSION_INFO' || t === 'IMAGE_NT_HEADERS' || t === 'IMAGE_SECTION_HEADER') t = 'uint8_t';
+  return elaborateCollidingStructType(t);
 }
 
 /** Name conventions for FunctionDefinition typedefs emitted by the codegen. */
@@ -912,13 +1637,34 @@ function isArrayElementSymbol(name: string, allNames: Set<string>): boolean {
 /**
  * Ensure bare hex values have 0x prefix
  */
-function ensureHexPrefix(value: string): string {
-  // Matches bare hex like "005a32f5" — has hex digits and at least one a-f letter
-  if (/^[0-9a-fA-F]+$/.test(value) && /[a-fA-F]/.test(value)) {
-    return `0x${value}`;
+/**
+ * Ghidra hands a pointer/address value back as bare hex, and the emitter has to
+ * put the `0x` back on. Two shapes, both established by evidence rather than by
+ * what the digits happen to look like:
+ *
+ *  - **Exactly 8 digits** is Ghidra's fixed-width address spelling, so it is hex
+ *    whether or not any digit lands in a-f. The letter test alone got 340 of them
+ *    wrong: `gszCrashDumpLine_6 = 00584245` is the bytes of "EBX", and
+ *    `PTR_s_dialogbackground_007274ac = 00727498` is an address 0x14 below the one
+ *    in its own name. Left bare, C++ reads a leading zero as OCTAL — `00584245`
+ *    is a hard error only because of the 8; `00442150` compiles silently at a
+ *    different value, which is the worse half of this bug.
+ *  - Any other width keeps the letter test, so a short decimal is not mangled.
+ *
+ * A CHARACTER type is excluded from both: Ghidra spells a `char`'s value as the
+ * character itself, so `'A'` was being read as hex and emitted as `0xA` — the
+ * value 10 where the binary holds 65.
+ */
+function ensureHexPrefix(value: string, declaredType?: string): string {
+  if (!/^[0-9a-fA-F]+$/.test(value)) return value;
+  if (declaredType && isCharacterValueType(declaredType)) {
+    return value.length === 1 ? `'${escapeStringForC(value)}'` : value;
   }
+  if (value.length === 8) return `0x${value}`;
+  if (/[a-fA-F]/.test(value)) return `0x${value}`;
   return value;
 }
+
 
 /**
  * Escape a string for use in a C string literal
@@ -963,8 +1709,13 @@ export function generateGlobalsImpl(
   }
   lines.push('');
 
-  // Only emit definitions for non-constant globals
-  const definable = globals.filter(g => g.scope === 'global');
+  // Only emit definitions for non-constant globals, and only for the ones
+  // globals.h is willing to declare (see isEmittableGlobal).
+  const allGlobalNames = new Set(globals.map(g => g.suggestedName || g.name));
+  const definable = globals.filter(g =>
+    g.scope === 'global' && isEmittableGlobal(g) && !isDataArtifact(g, allGlobalNames)
+    && !functionCollidingGlobals.has(g)
+  );
   if (definable.length === 0) {
     lines.push('// No global definitions to emit');
     return lines.join('\n');
@@ -972,6 +1723,35 @@ export function generateGlobalsImpl(
 
   // Group by namespace for proper wrapping
   const byNamespace = groupByNamespace(definable);
+
+  // Forward declarations for everything this file defines.
+  //
+  // A data initializer can name a symbol defined LATER in this same file
+  // (`aNpcGossipData` is used at :2333 and defined at :74472), and globals.h
+  // does not declare every symbol globals.cpp defines — a global reconciled back
+  // from `static-local` gets a definition here but no extern there. Declaring
+  // the file's own definitions up front makes the order irrelevant. The
+  // declaration is built by the same shape rules as the definition below, so a
+  // redundant one is exactly the extern globals.h already has.
+  for (const [namespace, nsGlobals] of byNamespace) {
+    if (nsGlobals.length === 0) continue;
+    if (namespace && /[<>,*]/.test(namespace)) continue;
+    const undeclared = nsGlobals.filter(g => !headerDeclaredGlobals.has(g));
+    if (undeclared.length === 0) continue;
+    if (namespace) lines.push(`namespace ${namespace} {`);
+    emitGlobalDefsWithIfdef(lines, undeclared, false, (global, ls) => {
+      const type = normalizeGlobalDeclType(global.suggestedType || global.dataType);
+      const name = sanitizeSymbolName(global.suggestedName || global.name);
+      const arrayInfo = inferArrayDeclaration(global);
+      if (arrayInfo && (!global.initializedData || global.initializedData.kind === 'array')) {
+        ls.push(`extern ${arrayInfo.type} ${name}[${arrayInfo.count}];`);
+      } else {
+        ls.push(`extern ${normalizeArrayDeclaration(type, name)};`);
+      }
+    });
+    if (namespace) lines.push(`} // namespace ${namespace}`);
+  }
+  lines.push('');
 
   for (const [namespace, nsGlobals] of byNamespace) {
     if (nsGlobals.length === 0) continue;
@@ -987,6 +1767,8 @@ export function generateGlobalsImpl(
       lines.push(`namespace ${namespace} {`);
       lines.push('');
     }
+    // Pointer initializers below resolve from inside this block.
+    setInitializerNamespace(namespace || undefined);
 
     // Initialized data with full values
     if (withData.length > 0) {
@@ -996,8 +1778,8 @@ export function generateGlobalsImpl(
       lines.push('');
 
       emitGlobalDefsWithIfdef(lines, withData, options.includeAddressComments, (global, ls) => {
-        const type = global.suggestedType || global.dataType;
-        const name = global.suggestedName || global.name;
+        const type = normalizeGlobalDeclType(global.suggestedType || global.dataType);
+        const name = sanitizeSymbolName(global.suggestedName || global.name);
 
         if (options.includeAddressComments) {
           ls.push(`// @${global.address}`);
@@ -1005,12 +1787,12 @@ export function generateGlobalsImpl(
 
         // Check if this should be an array declaration
         const arrayInfo = inferArrayDeclaration(global);
-        const initializer = emitDataValue(global.initializedData!, 0);
+        const initializer = emitDataValue(global.initializedData!, 0, type);
 
         if (arrayInfo && global.initializedData!.kind === 'array') {
           ls.push(`${arrayInfo.type} ${name}[${arrayInfo.count}] = ${initializer};`);
         } else {
-          ls.push(`${normalizeArrayDeclaration(type, name)} = ${initializer};`);
+          ls.push(`${normalizeArrayDeclaration(type, name)} = ${braceArrayInitializer(type, initializer)};`);
         }
         ls.push('');
       });
@@ -1024,8 +1806,8 @@ export function generateGlobalsImpl(
       lines.push('');
 
       emitGlobalDefsWithIfdef(lines, withoutData, options.includeAddressComments, (global, ls) => {
-        const type = global.suggestedType || global.dataType;
-        const name = global.suggestedName || global.name;
+        const type = normalizeGlobalDeclType(global.suggestedType || global.dataType);
+        const name = sanitizeSymbolName(global.suggestedName || global.name);
         let value = normalizeDataValue(global.value ?? '0');
 
         // Struct types can't be initialized with = 0; use = {} instead
@@ -1042,7 +1824,7 @@ export function generateGlobalsImpl(
         if (arrayInfo) {
           ls.push(`${arrayInfo.type} ${name}[${arrayInfo.count}] = { ${value} };`);
         } else {
-          ls.push(`${normalizeArrayDeclaration(type, name)} = ${value};`);
+          ls.push(`${normalizeArrayDeclaration(type, name)} = ${braceArrayInitializer(type, value)};`);
         }
       });
       lines.push('');
@@ -1056,8 +1838,8 @@ export function generateGlobalsImpl(
       lines.push('');
 
       emitGlobalDefsWithIfdef(lines, uninitialized, options.includeAddressComments, (global, ls) => {
-        const type = global.suggestedType || global.dataType;
-        const name = global.suggestedName || global.name;
+        const type = normalizeGlobalDeclType(global.suggestedType || global.dataType);
+        const name = sanitizeSymbolName(global.suggestedName || global.name);
 
         if (options.includeAddressComments) {
           ls.push(`// @${global.address}`);
@@ -1072,6 +1854,8 @@ export function generateGlobalsImpl(
       });
       lines.push('');
     }
+
+    setInitializerNamespace(undefined);
 
     if (namespace) {
       lines.push(`} // namespace ${namespace}`);
@@ -1093,13 +1877,9 @@ function emitGlobalDefsWithIfdef(
 ): void {
   let currentIfdef: string | undefined;
   for (const global of globals) {
-    // Skip globals with invalid C++ identifier names (dots, digits, special chars)
+    // Interior labels name a slot inside another global — nothing to define.
     const gName = global.suggestedName || global.name;
     if (isInteriorLabel(gName)) continue;
-    if (/[^A-Za-z0-9_]/.test(gName) || /^\d/.test(gName)) {
-      lines.push(`// skipped: ${gName} (invalid identifier)`);
-      continue;
-    }
     if (global.ifdef !== currentIfdef) {
       if (currentIfdef) {
         lines.push(`#endif // ${currentIfdef}`);
@@ -1202,6 +1982,42 @@ function collectGlobalForwardDeclarations(
       } else {
         typeInfo.set(typeName, { byValue: !isPointer });
         if (!isPointer && dataTypeMap.has(typeName)) worklist.push(typeName);
+      }
+    }
+  }
+
+  // A function-pointer typedef is emitted IN FULL even when every global that
+  // reaches it does so through a pointer (see the pointer-only loop below, which
+  // calls generateFunctionDefinitionDeclaration rather than emitting `struct X;`).
+  // That typedef names its return type and every parameter type, so those types
+  // need a declaration in globals.h too — but the by-value worklist above never
+  // reaches them, because the typedef itself was never by-value. Result:
+  //   typedef void (*D2MissileSrvDmgFunc)(…, D2MissileDamageDataStrc * pDamage);
+  // with no `struct D2MissileDamageDataStrc;` anywhere above it, which fails to
+  // compile in every TU that includes globals.h.
+  //
+  // Register those signature types as POINTER references only: an incomplete type
+  // is legal in a function-type parameter list, so a forward declaration always
+  // suffices and we never drag a full struct body into globals.h.
+  {
+    const pending = [...typeInfo.keys()].filter(n => dataTypeMap.get(n)?.kind === 'FUNCTION_DEFINITION');
+    const walked = new Set<string>();
+    while (pending.length > 0) {
+      const name = pending.pop()!;
+      if (walked.has(name)) continue;
+      walked.add(name);
+      const fd = dataTypeMap.get(name) as ExtractedFunctionDefinition;
+      const signature = [fd.returnType, ...fd.parameters.map(p => p.dataType)];
+      for (const t of signature) {
+        const parsed = parseReferencedType(t);
+        if (!parsed) continue;
+        if (isSkippableLibraryType(parsed.typeName)) continue;
+        if (!typeInfo.has(parsed.typeName)) {
+          typeInfo.set(parsed.typeName, { byValue: false });
+        }
+        if (dataTypeMap.get(parsed.typeName)?.kind === 'FUNCTION_DEFINITION') {
+          pending.push(parsed.typeName);
+        }
       }
     }
   }
@@ -1373,6 +2189,8 @@ export function generateColocatedGlobalsImpl(
 ): string {
   const lines: string[] = [];
 
+  const colocatedNames = new Set(globals.map(g => g.suggestedName || g.name));
+  globals = globals.filter(g => isEmittableGlobal(g) && !isDataArtifact(g, colocatedNames));
   if (globals.length === 0) {
     return '';
   }
@@ -1399,6 +2217,8 @@ export function generateColocatedGlobalsImpl(
       lines.push(`namespace ${namespace} {`);
       lines.push('');
     }
+    // Pointer initializers below resolve from inside this block.
+    setInitializerNamespace(namespace || undefined);
 
     // Initialized data with full values
     if (withData.length > 0) {
@@ -1406,20 +2226,20 @@ export function generateColocatedGlobalsImpl(
       lines.push('');
 
       emitGlobalDefsWithIfdef(lines, withData, options.includeAddressComments, (global, ls) => {
-        const type = global.suggestedType || global.dataType;
-        const name = global.suggestedName || global.name;
+        const type = normalizeGlobalDeclType(global.suggestedType || global.dataType);
+        const name = sanitizeSymbolName(global.suggestedName || global.name);
 
         if (options.includeAddressComments) {
           ls.push(`// @${global.address}`);
         }
 
         const arrayInfo = inferArrayDeclaration(global);
-        const initializer = emitDataValue(global.initializedData!, 0);
+        const initializer = emitDataValue(global.initializedData!, 0, type);
 
         if (arrayInfo && global.initializedData!.kind === 'array') {
           ls.push(`${arrayInfo.type} ${name}[${arrayInfo.count}] = ${initializer};`);
         } else {
-          ls.push(`${normalizeArrayDeclaration(type, name)} = ${initializer};`);
+          ls.push(`${normalizeArrayDeclaration(type, name)} = ${braceArrayInitializer(type, initializer)};`);
         }
         ls.push('');
       });
@@ -1431,8 +2251,8 @@ export function generateColocatedGlobalsImpl(
       lines.push('');
 
       emitGlobalDefsWithIfdef(lines, withoutData, options.includeAddressComments, (global, ls) => {
-        const type = global.suggestedType || global.dataType;
-        const name = global.suggestedName || global.name;
+        const type = normalizeGlobalDeclType(global.suggestedType || global.dataType);
+        const name = sanitizeSymbolName(global.suggestedName || global.name);
         let value = normalizeDataValue(global.value ?? '0');
 
         // Struct types can't be initialized with = 0; use = {} instead
@@ -1449,7 +2269,7 @@ export function generateColocatedGlobalsImpl(
         if (arrayInfo) {
           ls.push(`${arrayInfo.type} ${name}[${arrayInfo.count}] = { ${value} };`);
         } else {
-          ls.push(`${normalizeArrayDeclaration(type, name)} = ${value};`);
+          ls.push(`${normalizeArrayDeclaration(type, name)} = ${braceArrayInitializer(type, value)};`);
         }
       });
       lines.push('');
@@ -1461,8 +2281,8 @@ export function generateColocatedGlobalsImpl(
       lines.push('');
 
       emitGlobalDefsWithIfdef(lines, uninitialized, options.includeAddressComments, (global, ls) => {
-        const type = global.suggestedType || global.dataType;
-        const name = global.suggestedName || global.name;
+        const type = normalizeGlobalDeclType(global.suggestedType || global.dataType);
+        const name = sanitizeSymbolName(global.suggestedName || global.name);
 
         if (options.includeAddressComments) {
           ls.push(`// @${global.address}`);
@@ -1477,6 +2297,8 @@ export function generateColocatedGlobalsImpl(
       });
       lines.push('');
     }
+
+    setInitializerNamespace(undefined);
 
     if (namespace) {
       lines.push(`} // namespace ${namespace}`);

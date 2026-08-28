@@ -14,21 +14,23 @@ import type {
   AnalyzedDataSymbol,
   StructField,
 } from '../types.js';
-import { isPlatformOrBuiltinType, isStructType, castPointerInitializer } from './platform-types.js';
+import { isPlatformOrBuiltinType, isStructType, castPointerInitializer, normalizeDataValue, isCharacterValueType } from './platform-types.js';
 import { resolveCrtInclude } from './crt-mapping.js';
 import { CPP_KEYWORDS } from './header.js';
 
 // Import cpp-parser for code transformation
-import { transformGhidraCode, preprocessGhidraCode, isGhidraGeneratedName, suggestBetterName, type TransformResult } from '@ghidra-mcp/cpp-parser';
+import { transformGhidraCode, preprocessGhidraCode, isGhidraGeneratedName, suggestBetterName, takeFuncPtrArgCastTypedefs, type TransformResult } from '@ghidra-mcp/cpp-parser';
 import { parseTemplateName, collapseConsecutiveDuplicates, stripLastCollidingNamespaceComponent } from './namespace.js';
-import { cleanFunctionComment } from './header.js';
-import { normalizeSignatureType, collapseFuncPtrTypedef } from './platform-types.js';
-import { generateStaticLocalsBlock, emitDataValue, inferArrayDeclaration, normalizeArrayDeclaration, isFuncDefTypedefName, getKnownFuncDefTypedefs } from './globals-header.js';
+import { cleanFunctionComment, guardedFuncDefTypedef } from './header.js';
+import { normalizeSignatureType, collapseFuncPtrTypedef, rootQualifyShadowedType } from './platform-types.js';
+import { generateStaticLocalsBlock, emitDataValue, inferArrayDeclaration, normalizeArrayDeclaration, braceArrayInitializer, isFuncDefTypedefName, getKnownFuncDefTypedefs, setInitializerNamespace } from './globals-header.js';
 
 /** normalizeSignatureType + fn-ptr-typedef double-indirection collapse, for
  *  emitting function parameter and return types ("fpFoo *" → "fpFoo"). */
 function sigType(type: string): string {
-  return collapseFuncPtrTypedef(normalizeSignatureType(type), isFuncDefTypedefName);
+  return rootQualifyShadowedType(
+    collapseFuncPtrTypedef(normalizeSignatureType(type), isFuncDefTypedefName)
+  );
 }
 
 /**
@@ -44,6 +46,107 @@ function cleanParamName(name: string): string {
  * Renumber param_N / param_N_NN names sequentially to fix Ghidra's
  * mixed calling convention duplicate naming
  */
+/**
+ * The parameter names of the prototype Ghidra's DECOMPILER emitted, in order.
+ * They are not always the names the symbol table holds: a prototype whose
+ * storage was never committed decompiles with `param_1`, `param_2`, … while the
+ * symbol table already carries the real names.
+ *
+ * Returns undefined when the prototype cannot be located or a parameter's name
+ * cannot be read (a function-pointer parameter, varargs, an unnamed slot) —
+ * a partial pairing would rename the wrong identifier.
+ */
+/**
+ * The return type of the prototype Ghidra's DECOMPILER emitted.
+ *
+ * The emitter takes a function's return type from `Function.getReturnType()` —
+ * the raw database field — but its BODY from the decompiler, which resolves its
+ * own prototype through `HighFunction`. The two disagree whenever the database
+ * field was never curated: the field says `undefined`, which normalises to
+ * `uint8_t`, while the decompiler produced a `void` body full of bare `return;`
+ * statements. The emitted function then cannot compile ("return-statement with
+ * no value, in function returning 'uint8_t'").
+ *
+ * Returns undefined when the prototype cannot be read, so the caller keeps the
+ * database's answer rather than guessing.
+ */
+export function decompiledReturnType(decompiled: string | undefined): string | undefined {
+  if (!decompiled) return undefined;
+  const open = prototypeOpenParen(decompiled);
+  if (open === undefined) return undefined;
+
+  // Everything before the `(` is a PLATE comment, then
+  // `<return type> [convention] <qualified name>` — which Ghidra wraps across up
+  // to three lines when it is long, so the whole head is normalised rather than
+  // just its last line.
+  let head = decompiled.slice(0, open);
+  head = head.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ');
+  head = head.replace(/\s+/g, ' ').trim();
+  // Drop the function name (the final identifier, possibly qualified).
+  head = head.replace(/[A-Za-z_][\w:]*\s*$/, '').trim();
+  // Drop the calling convention, which is not part of the type.
+  head = head.replace(/\b__(?:fastcall|cdecl|stdcall|thiscall|clrcall|vectorcall)\b/g, '').trim();
+  head = head.replace(/\s+/g, ' ').replace(/\s+\*/g, ' *').trim();
+  return head === '' ? undefined : head;
+}
+
+/**
+ * The (possibly qualified) name the DECOMPILER printed for this function.
+ *
+ * This is the spelling every call site in every other body is written with,
+ * which is not necessarily the spelling the symbol table hands the emitter for
+ * the declaration — the two are separate round-trips, so a rename or a namespace
+ * move landing between them splits the pair. Reading it back is what lets the
+ * reference be respelled as the declaration (see `function-name-reconcile`).
+ *
+ * Returns undefined when the prototype cannot be located.
+ */
+export function decompiledFunctionName(decompiled: string | undefined): string | undefined {
+  if (!decompiled) return undefined;
+  const open = prototypeOpenParen(decompiled);
+  if (open === undefined) return undefined;
+  let head = decompiled.slice(0, open);
+  head = head.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ');
+  head = head.replace(/\s+/g, ' ').trim();
+  const m = head.match(/([A-Za-z_][\w:]*)\s*$/);
+  return m ? m[1] : undefined;
+}
+
+/** Index of the `(` that opens the decompiled prototype's parameter list. */
+function prototypeOpenParen(decompiled: string): number | undefined {
+  const bodyStart = decompiled.search(/\)[\s\n]*\{/);
+  if (bodyStart === -1) return undefined;
+  let depth = 0;
+  for (let i = bodyStart; i >= 0; i--) {
+    const c = decompiled[i];
+    if (c === ')') depth++;
+    else if (c === '(') {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return undefined;
+}
+
+export function decompiledParameterNames(decompiled: string | undefined): string[] | undefined {
+  if (!decompiled) return undefined;
+  const open = prototypeOpenParen(decompiled);
+  if (open === undefined) return undefined;
+  const bodyStart = decompiled.search(/\)[\s\n]*\{/);
+
+  const inner = decompiled.slice(open + 1, bodyStart).trim();
+  if (inner === '' || inner === 'void') return [];
+  if (inner.includes('(')) return undefined;  // function-pointer parameter
+
+  const names: string[] = [];
+  for (const part of inner.split(',')) {
+    const m = part.trim().match(/([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?$/);
+    if (!m) return undefined;
+    names.push(m[1]);
+  }
+  return names;
+}
+
 function renumberParams(params: Array<{ name: string; dataType: string }>): Array<{ name: string; dataType: string }> {
   let counter = 1;
   return params.map(p => {
@@ -348,6 +451,33 @@ const QUEST_PREFIX_TO_UNION_MEMBER: Record<string, string> = {
 };
 
 /**
+ * Declaration-time struct field renames: Ghidra field name → emitted C++ member
+ * name. header.ts renames a field whose name is a C++ keyword (`int` → `int_`),
+ * so every reference to it has to use the same spelling. The map is built from
+ * the same struct model the declarations come from and from the same keyword
+ * set, then applied on MemberExpr nodes by the `reserved-field-rename` pass.
+ */
+const structFieldRenames = new Map<string, string>();
+
+export function setStructFieldRenames(
+  structs: Iterable<{ fields?: StructField[] }>,
+): void {
+  structFieldRenames.clear();
+  for (const dt of structs) {
+    for (const f of dt.fields ?? []) {
+      const raw = (f.name ?? '').replace(/\[\d+\](?:\[\d+\])*$/, '');
+      if (!raw || !CPP_KEYWORDS.has(raw)) continue;
+      structFieldRenames.set(raw, `${raw}_`);
+    }
+  }
+}
+
+/** The declaration-time field renames, as the plugin option shape. */
+export function getStructFieldRenames(): Record<string, string> {
+  return Object.fromEntries(structFieldRenames);
+}
+
+/**
  * Per-quest struct field layout: offset↔name maps for each D2QuestDataA#Q#Strc,
  * keyed by the quest tag (e.g. "A5Q5"). Populated from the extracted structs so
  * the union-member rewrite can remap a field by its BYTE OFFSET when it switches
@@ -564,6 +694,13 @@ export interface ImplGenContext {
   fileLocalGlobals?: AnalyzedDataSymbol[];
   /** Internal: accumulated preambles from injection-aware plugins */
   _preambles?: Set<string>;
+  /**
+   * Internal: the namespace block the current impl file's bodies are emitted
+   * inside. C++ name lookup for a reference's leading qualifier starts here, so
+   * `namespace-shadow-qualify` needs it to tell a shadowed reference from a
+   * correct one. Set per file by `generateImplementation`.
+   */
+  _enclosingNamespace?: string;
   /** Enum type names moved to shared d2_enums.h — skip in per-file headers */
   _sharedEnumTypes?: Set<string>;
   /**
@@ -574,10 +711,31 @@ export interface ImplGenContext {
    * reachable from a deeper enclosing scope.
    */
   knownNamespaces?: Set<string>;
+  /**
+   * Type names that are ALSO an emitted namespace component (`ButtonWrapper`,
+   * `Draw`). The type lives at root scope, so every reference to it from inside
+   * the shadowing namespace must be spelled `::ButtonWrapper`.
+   */
+  shadowedTypeNames?: Set<string>;
   /** Map from function address (bigint) to function name for pointer literal resolution */
   functionAddressMap?: Map<bigint, string>;
   /** Map from function name to its header path — for adding includes when func-ptr-literal resolves references */
   functionNameToHeader?: Map<string, string>;
+  /**
+   * Every header that declares a given bare function name, each tagged with the
+   * qualified name a reference to it is spelled with. A bare name is not a key:
+   * `Initialize` is declared by four different renderers, so a reference has to
+   * be resolved from the qualifier written at the reference site.
+   */
+  functionNameCandidates?: Map<string, { qualified: string; header: string }[]>;
+  /**
+   * Reference spelling the DECOMPILER printed for a function → the spelling its
+   * emitted DECLARATION uses. Non-empty only where the two round-trips
+   * disagree, i.e. where a rename or a namespace move landed between them; the
+   * body then references a name the tree never declares. Applied on the AST by
+   * `function-name-reconcile`.
+   */
+  functionRefAliases?: Record<string, string>;
   /** Bitfield catalog: "field_0xNN:mask" → bitfield member name */
   bitfieldCatalog?: Map<string, string>;
   /** Current source file name (e.g., "D2Game/Quests/A1Q4") — used for quest union rewriting */
@@ -587,12 +745,80 @@ export interface ImplGenContext {
   /** Internal: accumulated identifiers from all function bodies in the current file */
   _fileIdentifiers?: Set<string>;
   /**
+   * Internal: function-pointer typedef names `funcptr-arg-cast` spelled into the
+   * current file's bodies. They have to be declared in the file — the callee's
+   * header need not be included there.
+   */
+  _castTypedefs?: Set<string>;
+  /**
    * Internal: for each body identifier, how many distinct function bodies (across
    * ALL files) reference it. Drives the globals.h "referenced-but-undeclared"
    * safety net — a static-local symbol named in >1 body needs an extern so those
    * other bodies compile. Unlike `_fileIdentifiers`, this is NOT reset per file.
    */
   bodyIdentifierFnCounts?: Map<string, number>;
+  /**
+   * Tables that let `funcptr-arg-cast` decide, per call site, whether the
+   * function whose address is being passed really has a different prototype
+   * from the funcdef the parameter is declared with. Built once per run.
+   */
+  funcPtrArgCasts?: FuncPtrArgCastTables;
+}
+
+/** @see ImplGenContext.funcPtrArgCasts */
+export interface FuncPtrArgCastTables {
+  /** Callable name (bare AND qualified) → param index → funcdef typedef name */
+  paramFuncdefs: Record<string, Record<number, string>>;
+  /** Funcdef typedef name → its normalized signature key */
+  funcdefSignatures: Record<string, string>;
+  /** Function name (bare AND qualified) → its own normalized signature key */
+  functionSignatures: Record<string, string>;
+  /** Data-symbol names — a name that denotes data is never cast as a function */
+  variableNames: string[];
+  /** Names (bare AND qualified) of functions that return `void*` */
+  voidPointerFunctions: string[];
+  /** Funcdef typedefs a same-named function hides — the cast must say `::T` */
+  rootQualifiedTypedefs: string[];
+  /** Field names declared `void*` by every struct/union that has them */
+  voidPointerFields?: string[];
+  /** Callable name (bare AND qualified) → its emitted parameter type spellings, in order */
+  functionParamTypes?: Record<string, string[]>;
+  /** Callable name (bare AND qualified) → its emitted return type spelling */
+  functionReturnTypes?: Record<string, string>;
+  /**
+   * Every spelling that denotes a FUNCTION. Not pruned on signature collision -
+   * two functions sharing a bare name disagree about the signature, not about
+   * being functions.
+   */
+  functionNames?: string[];
+  /** Global variable name (as emitted) → its emitted declaration type spelling */
+  globalTypes?: Record<string, string>;
+  /** Callables with a `...` tail — arguments past the declared ones have no type */
+  varArgFunctions?: string[];
+  /** Field name → declared type, where every aggregate declaring it agrees */
+  fieldTypes?: Record<string, string>;
+  /** Typedef name → the spelling it stands for, so hidden indirection is visible */
+  typedefTargets?: Record<string, string>;
+  /** Aggregate name → field name → declared type, exact where the walk is known */
+  structFields?: Record<string, Record<string, string>>;
+  /**
+   * Funcdef name → the return and parameter spellings the funcdef declares. A
+   * call made THROUGH a function-pointer field or variable has no callee name
+   * for a name table to match, so this is the only record of what that call
+   * returns and what it takes.
+   */
+  funcdefDecls?: Record<string, FuncdefDecl>;
+  /** Aggregate name → field name → the funcdef its declared type names */
+  structFieldFuncdefs?: Record<string, Record<string, string>>;
+  /** Field name → funcdef, where every aggregate declaring that name agrees */
+  fieldFuncdefs?: Record<string, string>;
+}
+
+/** @see FuncPtrArgCastTables.funcdefDecls */
+export interface FuncdefDecl {
+  returnType: string;
+  paramTypes: string[];
+  varArgs: boolean;
 }
 
 /**
@@ -700,17 +926,29 @@ export function generateImplementation(
   // Only emit namespace block if it's a valid C++ namespace (not a template instantiation)
   const useNamespace = namespace && options.organization === 'namespace' && isValidNamespace(namespace);
 
+  // Funcdef typedefs the body casts to must be declared at ROOT scope, before
+  // the namespace opens: a cast may spell one `::T` to escape a same-named
+  // function that would otherwise hide it.
+  const rootTypedefInsertIndex = lines.length;
+
   // Open namespace
   if (useNamespace) {
     lines.push(`namespace ${namespace} {`);
     lines.push('');
   }
 
+  // Bodies are transformed below and their references resolve from inside this
+  // block — tell the shadow-qualifier which scope that is.
+  if (context) context._enclosingNamespace = useNamespace ? namespace : undefined;
+
   // File-local globals are deferred until after function bodies are generated,
   // so we can filter out globals whose names don't appear in any function body.
   const fileLocalInsertIndex = lines.length;
   // Reset accumulated identifiers for this file
-  if (context) context._fileIdentifiers = undefined;
+  if (context) {
+    context._fileIdentifiers = undefined;
+    context._castTypedefs = undefined;
+  }
 
   // Generate function implementations, grouping consecutive same-ifdef functions
   let currentIfdef: string | undefined;
@@ -764,6 +1002,9 @@ export function generateImplementation(
   // Now that all function bodies have been generated and _fileIdentifiers accumulated,
   // emit file-local globals filtered by actual usage, spliced at the deferred position.
   if (context?.fileLocalGlobals && context.fileLocalGlobals.length > 0) {
+    // These are spliced INSIDE the namespace block opened above, so a pointer
+    // initializer naming another namespace's symbol resolves from in there.
+    setInitializerNamespace(useNamespace ? namespace : undefined);
     const fileLocalLines: string[] = [];
     for (const global of context.fileLocalGlobals) {
       let type = global.suggestedType || global.dataType;
@@ -786,17 +1027,24 @@ export function generateImplementation(
 
       if (global.initializedData) {
         const arrayInfo = inferArrayDeclaration(global);
-        const initializer = emitDataValue(global.initializedData, 0);
+        // The declared type must travel with the value: without it the walk has
+        // no element/field types and every pointer slot is emitted uncast — the
+        // same call in globals.cpp has always passed it.
+        const initializer = emitDataValue(global.initializedData, 0, type);
         if (arrayInfo && global.initializedData.kind === 'array') {
           fileLocalLines.push(`static ${arrayInfo.type} ${name}[${arrayInfo.count}] = ${initializer};`);
         } else {
-          fileLocalLines.push(`static ${normalizeArrayDeclaration(type, name)} = ${initializer};`);
+          fileLocalLines.push(`static ${normalizeArrayDeclaration(type, name)} = ${braceArrayInitializer(type, initializer)};`);
         }
       } else if (global.isInitialized) {
-        let value = global.value ?? '0';
-        if (/^[0-9a-fA-F]+$/.test(value) && /[a-fA-F]/.test(value)) {
-          value = `0x${value}`;
-        }
+        // Same rule the globals emitter uses. The local copy of it tested only
+        // for an a-f digit, so Ghidra's all-numeric addresses (`00304096`) went
+        // out bare and C++ read the leading zero as OCTAL — an error where a
+        // digit is 8 or 9, and a silently wrong value everywhere else.
+        const rawValue = global.value ?? '0';
+        let value = (rawValue.length === 1 && isCharacterValueType(type))
+          ? `'${rawValue.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`
+          : normalizeDataValue(rawValue);
         if ((value === '0' || value === '0x0') && isStructType(type)) {
           value = '{}';
         }
@@ -824,8 +1072,27 @@ export function generateImplementation(
       }
     }
 
+    setInitializerNamespace(undefined);
+
     if (fileLocalLines.length > 0) {
       lines.splice(fileLocalInsertIndex, 0, ...fileLocalLines, '');
+    }
+  }
+
+  // `funcptr-arg-cast` spells a funcdef typedef into a cast whose callee lives in
+  // another module, so no header this file includes declares it ("error: expected
+  // ')' before 'fpInsertExpansionCd'"). Declare exactly the typedefs the casts
+  // used — NOT every body identifier that happens to share a FUNCTION_DEFINITION
+  // name, which turns a local called `length` into a typedef. The RECON_FPTD
+  // guard is the same one the headers use, so at most one definition expands.
+  if (context?._castTypedefs && context._castTypedefs.size > 0) {
+    const typedefs: string[] = [];
+    for (const name of context._castTypedefs) {
+      const decl = guardedFuncDefTypedef(name);
+      if (decl) typedefs.push(decl);
+    }
+    if (typedefs.length > 0) {
+      lines.splice(rootTypedefInsertIndex, 0, ...typedefs, '');
     }
   }
 
@@ -906,10 +1173,6 @@ export function generateImplementation(
   }
 
   let output = lines.join('\n');
-
-  // Collapse consecutive duplicate namespace segments in qualified references
-  // e.g. "Dungeon::Dungeon::GetFunc" → "Dungeon::GetFunc"
-  output = collapseConsecutiveDuplicateQualifiers(output);
 
   // Strip type-name namespace components from qualified references
   // e.g. "Forms::D2WinImage::FuncName" → "Forms::FuncName" when D2WinImage is a struct
@@ -1000,6 +1263,72 @@ export function generateFunctionImplementation(
   let overrideApplied = false;
   const override = context?.overrides?.get(func.address);
 
+  const isMethod = classInfo && classInfo.methods.some(m => m.address === func.address);
+
+  // Ghidra spells the hidden __thiscall argument `this`; a free function has no
+  // `this`, so the body must name the parameter the signature actually declares.
+  // Applied on the `this` EXPRESSION by the `this-param-rewrite` pass — a `this`
+  // in a comment or a string stays as written.
+  const thisName = func.parameters?.some(p => p.name === 'this')
+    ? 'pThis'
+    : (!isMethod && func.parameters.length > 0
+        ? cleanParamName(func.parameters[0].name)
+        : undefined);
+
+  // Identifier renames the SIGNATURE performs and the body must mirror, applied
+  // on the AST by the transform's rename map rather than by word-boundary text
+  // substitution:
+  //  - Ghidra's mixed-calling-convention duplicate `param_N_NN` names are
+  //    renumbered sequentially (see renumberParams, which the signature uses).
+  //  - A param whose name equals its own base type (`fpLevelDataFn1
+  //    fpLevelDataFn1`) is renamed to `n<name>`, else a body reference resolves
+  //    to the TYPE and `(int)fpLevelDataFn1` is a cast-of-a-type.
+  const bodyRenames: Record<string, string> = {};
+  {
+    let counter = 1;
+    for (const p of func.parameters ?? []) {
+      const origName = p.name === 'this' ? 'pThis' : p.name;
+      if (/^param_\d+(_\d+)?$/.test(origName)) {
+        const newName = `param_${counter}`;
+        if (origName !== newName) bodyRenames[origName] = newName;
+        counter++;
+      }
+    }
+    // Ghidra can hold a NAMED parameter list whose storage was never committed to
+    // the decompiler (`storage: <UNASSIGNED>`). The signature then reads
+    // `BNCLIENT_SendLogonRequest(char *szUsername, char *szPassword)` while the
+    // body it decompiled still says `param_1`/`param_2` — the emitted function
+    // uses identifiers it never declares. Pair the two lists positionally and
+    // rename the body to the names the signature actually declares.
+    const decompiledNames = decompiledParameterNames(func.decompiled);
+    const declaredNames = renumberParams(func.parameters ?? []).map(p => p.name);
+    //
+    // The two lists can also differ in LENGTH: with an unknown calling
+    // convention the decompiler recovers only the parameters it could place
+    // (`SCOMP_ADPCMEncode` decompiles as 5 `param_N` against a 6-name committed
+    // prototype), or invents extras beyond it. Ghidra numbers `param_N` by
+    // position in the prototype it printed, so the two lists still agree on
+    // their common prefix — pair that prefix and leave the remainder alone.
+    if (decompiledNames) {
+      decompiledNames.slice(0, declaredNames.length).forEach((fromName, i) => {
+        const toName = declaredNames[i];
+        if (!/^param_\d+(_\d+)?$/.test(fromName)) return;
+        if (!toName || /^param_\d+(_\d+)?$/.test(toName)) return;
+        if (fromName in bodyRenames) return;
+        bodyRenames[fromName] = toName;
+      });
+    }
+
+    for (const p of renumberParams(func.parameters ?? [])) {
+      const baseType = sigType(p.dataType)
+        .replace(/\s*[*&]+\s*$/, '')
+        .replace(/^(struct|class|union|enum)\s+/, '')
+        .replace(/^::/, '')
+        .trim();
+      if (p.name === baseType) bodyRenames[p.name] = `n${p.name}`;
+    }
+  }
+
   if (override?.action === 'replace') {
     // Full replacement — body will be loaded async, so we use a sync placeholder.
     // The actual async loading happens in generateImplementationAsync() below.
@@ -1017,9 +1346,38 @@ export function generateFunctionImplementation(
       for (const v of func.localVariables ?? []) {
         if (v.name && v.dataType && !(v.name in slotVarTypes)) slotVarTypes[v.name] = v.dataType;
       }
-      const transformed = transformDecompiledCode(func.decompiled, options, func.name, func.address, context, slotVarTypes);
+      const transformed = transformDecompiledCode(
+        func.decompiled, options, func.name, func.address, context, slotVarTypes,
+        {
+          thisName,
+          returnsNonPointer: !!func.returnType && !func.returnType.includes('*'),
+          returnsVoid: (func.returnType ?? '').replace(/\bconst\b/g, '').trim() === 'void',
+          // The wrapper the body is parsed inside carries the definition's own
+          // signature, spelled by the same code that emits it, so the two cannot
+          // drift apart.
+          signature: wrapperSignature(func),
+          renames: bodyRenames,
+        },
+      );
       body = func.name ? rewriteQuestUnionMembers(transformed.code, func.name, context?.sourceFileName, [...(func.parameters ?? []), ...(func.localVariables ?? [])]) : transformed.code;
       bodyIdentifiers = transformed.identifiers;
+      // A body can DECLARE a local of a funcdef type Ghidra applied to the
+      // variable (`pfnEHHandlerRoutine pExcHandler = …`) without any signature
+      // in this file naming it, so no header declares it. Restricted to the
+      // `fp`/`fn`/`pfn` + CamelCase spelling of a function-pointer typedef, so a
+      // local that merely shares a FUNCTION_DEFINITION name is not caught.
+      if (context) {
+        for (const name of transformed.typeNames ?? []) {
+          if (!isFuncDefTypedefName(name)) continue;
+          if (!context._castTypedefs) context._castTypedefs = new Set();
+          context._castTypedefs.add(name);
+        }
+      }
+      const castTypedefs = takeFuncPtrArgCastTypedefs();
+      if (context && castTypedefs.length > 0) {
+        if (!context._castTypedefs) context._castTypedefs = new Set();
+        for (const name of castTypedefs) context._castTypedefs.add(name);
+      }
       if (transformed.preamble) {
         // Store preamble on the context for accumulation by generateImplementation
         if (context) {
@@ -1043,42 +1401,7 @@ export function generateFunctionImplementation(
     lines.push(`// [override: ${override!.action}]`);
   }
 
-  // Renumber param_N_NN names in body to match signature renumbering
-  {
-    let counter = 1;
-    for (const p of func.parameters) {
-      const origName = p.name === 'this' ? 'pThis' : p.name;
-      if (/^param_\d+(_\d+)?$/.test(origName)) {
-        const newName = `param_${counter}`;
-        if (origName !== newName) {
-          body = body.replace(new RegExp(`\\b${origName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g'), newName);
-        }
-        counter++;
-      }
-    }
-  }
-
-  // Mirror the signature's param-shadows-type rename in the body. The signature
-  // renames a param whose name equals its own (base) type to `n<name>` (e.g. a
-  // `fpLevelDataFn1 fpLevelDataFn1` param → `nfpLevelDataFn1`). Without rewriting
-  // the body, body references stay `fpLevelDataFn1` — which now resolves to the
-  // TYPE, so `(int)fpLevelDataFn1` is a cast-of-a-type → syntax errors.
-  for (const p of renumberParams(func.parameters)) {
-    const baseType = sigType(p.dataType)
-      .replace(/\s*[*&]+\s*$/, '')
-      .replace(/^(struct|class|union|enum)\s+/, '')
-      .trim();
-    if (p.name === baseType) {
-      body = body.replace(
-        new RegExp(`\\b${p.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g'),
-        `n${p.name}`,
-      );
-    }
-  }
-
   // Generate function signature
-  const isMethod = classInfo && classInfo.methods.some(m => m.address === func.address);
-
   if (isMethod) {
     // Method implementation with class prefix
     const methodInfo = classInfo!.methods.find(m => m.address === func.address);
@@ -1098,49 +1421,22 @@ export function generateFunctionImplementation(
 
   // Inject static-local globals owned by this function
   if (context?.analyzedGlobals) {
+    // The block lands inside the file's namespace block, so its pointer
+    // initializers resolve from in there — same shadowing rule as the bodies.
+    setInitializerNamespace(context._enclosingNamespace);
     const block = generateStaticLocalsBlock(
       context.analyzedGlobals, func.name, options.includeAddressComments, bodyIdentifiers
     );
+    setInitializerNamespace(undefined);
     // Drop spurious `&` on Ghidra array globals (`&X_ARRAY_<hex>` is `T(*)[N]`, but
     // the array name alone decays to the `T*` the pointer-array element expects).
     if (block) lines.push(block.replace(/&\s*(\w+_ARRAY_[0-9a-fA-F]+)\b(?!\s*\[)/g, '$1'));
   }
 
-  // If a parameter was renamed from `this` to `pThis`, apply the same rename in the body
-  if (func.parameters?.some(p => p.name === 'this')) {
-    body = body.replace(/\bthis\b/g, 'pThis');
-  }
-
-  // For non-method functions, replace `this` in the body.
-  // Ghidra's decompiler uses `this` for thiscall-convention functions, but the codegen emits
-  // these as standalone functions. If param is named `this`, it becomes `pThis`.
-  // If the body uses `this` but no param is named `this`, replace with first param name.
-  if (!isMethod && /\bthis\b/.test(body)) {
-    const hasThisParam = func.parameters.some(p => p.name === 'this');
-    if (hasThisParam) {
-      body = body.replace(/\bthis\b/g, 'pThis');
-    } else if (func.parameters.length > 0) {
-      const firstParam = cleanParamName(func.parameters[0].name);
-      body = body.replace(/\bthis\b/g, firstParam);
-    }
-  }
-
-  // Replace "return nullptr" with "return 0" for functions returning non-pointer types
-  // Ghidra decompiler sometimes emits nullptr for what should be integer zero
-  if (func.returnType && !func.returnType.includes('*') && /\breturn\s+nullptr\b/.test(body)) {
-    body = body.replace(/\breturn\s+nullptr\b/g, 'return 0');
-  }
-
-  // `x = nullptr` where x is a non-pointer (int) fails ("cannot convert nullptr_t
-  // to uint32_t"). `0` is a valid initializer for BOTH pointers and integers, so
-  // rewriting the assignment form is universally safe.
-  body = body.replace(/=\s*nullptr\b/g, '= 0');
-
-  // `&<name>_ARRAY_<hex>` is a spurious address-of on a Ghidra-named array global:
-  // the array name already decays to a pointer-to-element (the target type), while
-  // `&name` is pointer-to-ARRAY (`T(*)[N]`) and won't convert. Drop the `&` (but
-  // not `&name[i]`, a valid element address).
-  body = body.replace(/&\s*(\w+_ARRAY_[0-9a-fA-F]+)\b(?!\s*\[)/g, '$1');
+  // (`this` → the declared parameter name, `nullptr` → `0` where an integer is
+  //  meant, and the spurious `&` on a `<name>_ARRAY_<hex>` global are all done on
+  //  the AST by `this-param-rewrite`, `nullptr-cleanup` and
+  //  `array-global-address-of` — see transformDecompiledCode.)
 
   body = uniquifyDuplicateLabels(body);
   body = hoistSwitchPreCaseDecls(body);
@@ -1152,14 +1448,6 @@ export function generateFunctionImplementation(
     ? new Set(context.analyzedGlobals.map(g => g.name))
     : undefined;
   body = declareUnderscoreSlotLocals(body, func, globalNames);
-
-  // A struct field auto-named after a C++ keyword is emitted with a `_` suffix
-  // (header.ts); rewrite member accesses `.default`/`->class` to match. Only the
-  // member-access forms — never `default:`/`case X:` switch labels.
-  body = body.replace(
-    /(\.|->)\s*([A-Za-z_]\w*)\b/g,
-    (m, op, name) => (CPP_KEYWORDS.has(name) ? `${op}${name}_` : m),
-  );
 
   // Add function body
   lines.push(body);
@@ -1228,7 +1516,7 @@ export async function resolveOverridePlaceholders(
 /**
  * Generate function signature for standalone function
  */
-function generateFunctionSignature(func: ExtractedFunction): string {
+function signatureParameterList(func: ExtractedFunction): string {
   let params = renumberParams(func.parameters)
     .map(p => {
       const type = sigType(p.dataType);
@@ -1240,6 +1528,23 @@ function generateFunctionSignature(func: ExtractedFunction): string {
     })
     .join(', ');
   if (func.hasVarArgs) params = params ? `${params}, ...` : '...';
+  return params;
+}
+
+/**
+ * The return type and parameter list the emitted definition declares, for the
+ * wrapper the body is parsed inside. Returns undefined when the return type is
+ * not spellable, so the caller keeps the signature-less wrapper rather than
+ * emitting one that will not parse.
+ */
+function wrapperSignature(func: ExtractedFunction): { returnType: string; params: string } | undefined {
+  const returnType = sigType(func.returnType).trim();
+  if (!returnType) return undefined;
+  return { returnType, params: signatureParameterList(func) };
+}
+
+function generateFunctionSignature(func: ExtractedFunction): string {
+  const params = signatureParameterList(func);
 
   // Strip trailing parens/invalid chars from function names (Ghidra artifacts)
   let cleanName = func.name.replace(/[()]+$/, '').replace(/[^A-Za-z0-9_]/g, '_');
@@ -1288,16 +1593,8 @@ interface TransformDecompiledResult {
   code: string;
   preamble?: string;
   identifiers?: Set<string>;
-}
-
-/**
- * Collapse consecutive duplicate namespace segments in qualified references.
- * e.g. "Dungeon::Dungeon::GetFunc" → "Dungeon::GetFunc"
- *      "Monsters::Monsters::Spawn" → "Monsters::Spawn"
- */
-function collapseConsecutiveDuplicateQualifiers(code: string): string {
-  // Match Word::Word:: where both words are the same identifier
-  return code.replace(/\b(\w+)::\1::/g, '$1::');
+  /** Names the body used as TYPES (see TransformResult.typeNames). */
+  typeNames?: Set<string>;
 }
 
 /**
@@ -1355,32 +1652,16 @@ function stripRedundantNamespaceQualifiers(
 }
 
 /**
- * Strip CRT namespace prefixes that Ghidra adds from MSVC PDB symbols.
- * e.g. "VisualStudio::sprintf" → "sprintf"
+ * Replace Ghidra stack-variable artifacts: stack0xNNNNNNNN → 0 (stack cookie pattern).
+ *
+ * The rest of what this used to do is on the AST now — CRT/compiler namespace
+ * qualifiers, the `_exref` import-thunk suffix and the `A::A::` duplicate are
+ * `qualified-name-cleanup`; the `--2147483648` double negative is
+ * `signed-literal`; the non-ASCII char literal is `char-literal-escape`.
+ * (Ghidra's `type[N]*` pointer-to-array is flattened by `pointer-array-flatten`.)
  */
-function stripCrtNamespacePrefixes(code: string): string {
-  let result = code.replace(/\bVisualStudio::/g, '');
-  // CRT/compiler-helper namespace: drop the prefix (the compiler module is not emitted)
-  result = result.replace(/\bcompiler::/g, '');
-  // Replace Ghidra stack variable artifacts: stack0xNNNNNNNN → 0 (stack cookie pattern)
-  result = result.replace(/&?stack0x[0-9a-fA-F]+/g, '0');
-  // (Ghidra's `type[N]*` pointer-to-array is now flattened to `type*` on the AST
-  //  by the `pointer-array-flatten` plugin — NOT with a text regex here. The old
-  //  regex over-matched subscript-multiplies like `pLevelArray[2] * 6`.)
-  // Strip Ghidra's _exref suffix from external references (import thunks)
-  result = result.replace(/(\w+)_exref\b/g, '$1');
-  // Fix Ghidra double-negative on INT_MIN: --2147483648 → (-2147483648)
-  result = result.replace(/--2147483648\b/g, '(-2147483648)');
-  result = result.replace(/--0x80000000\b/g, '(int)0x80000000');
-  // Fix non-ASCII char literals: '²' → '\xb2' (Ghidra emits raw Unicode in char context)
-  result = result.replace(/'([^'\\])'/g, (match, ch) => {
-    const code = ch.charCodeAt(0);
-    if (code > 127) {
-      return `'\\x${code.toString(16)}'`;
-    }
-    return match;
-  });
-  return result;
+function stripStackArtifacts(code: string): string {
+  return code.replace(/&?stack0x[0-9a-fA-F]+/g, '0');
 }
 
 /**
@@ -1515,6 +1796,97 @@ export function replacePrngWithMacro(code: string): string {
 /**
  * Transform decompiled code using cpp-parser
  */
+/**
+ * Symbol tables for the `root-scope-qualify` pass: which data-symbol names the
+ * generator emits at global scope, and which fully qualified names really do
+ * live in a namespace. Cached per analyzed-globals array — the tables are
+ * project-wide, but every function body needs them.
+ */
+interface RootScopeSymbolTables {
+  rootScopeSymbols: string[];
+  scopedSymbols: string[];
+}
+const rootScopeSymbolCache = new WeakMap<AnalyzedDataSymbol[], RootScopeSymbolTables>();
+
+function collectRootScopeSymbols(context?: ImplGenContext): RootScopeSymbolTables | undefined {
+  const globals = context?.analyzedGlobals;
+  if (!globals || globals.length === 0) return undefined;
+
+  const cached = rootScopeSymbolCache.get(globals);
+  if (cached) return cached;
+
+  const rootScopeSymbols = new Set<string>();
+  const scopedSymbols = new Set<string>();
+  for (const g of globals) {
+    if (g.scope !== 'global') continue;
+    const name = g.suggestedName || g.name;
+    if (!name || !/^[A-Za-z_]\w*$/.test(name)) continue;
+    const ns = g.namespace ? collapseConsecutiveDuplicates(g.namespace) : undefined;
+    if (ns && !/[<>,*]/.test(ns)) scopedSymbols.add(`${ns}::${name}`);
+    else rootScopeSymbols.add(name);
+  }
+
+  // A name that also denotes a function must keep its qualifier — the call is
+  // resolved by the function declaration, not by the same-named global.
+  if (context?.functionNameToHeader) {
+    for (const fn of context.functionNameToHeader.keys()) {
+      rootScopeSymbols.delete(fn.includes('::') ? fn.slice(fn.lastIndexOf('::') + 2) : fn);
+    }
+  }
+
+  const tables: RootScopeSymbolTables = {
+    rootScopeSymbols: [...rootScopeSymbols],
+    scopedSymbols: [...scopedSymbols],
+  };
+  rootScopeSymbolCache.set(globals, tables);
+  return tables;
+}
+
+/**
+ * Options for `namespace-shadow-qualify`, memoised per namespace-table identity —
+ * the table is project-wide and every function body in the run needs it.
+ */
+const shadowQualifyCache = new WeakMap<Set<string>, Map<string, { enclosingNamespace: string; knownNamespaces: string[] }>>();
+
+function shadowQualifyOptions(
+  context?: ImplGenContext,
+): { enclosingNamespace: string; knownNamespaces: string[] } | undefined {
+  const enclosing = context?._enclosingNamespace;
+  const known = context?.knownNamespaces;
+  if (!enclosing || !known || known.size === 0) return undefined;
+
+  let perNamespace = shadowQualifyCache.get(known);
+  if (!perNamespace) {
+    perNamespace = new Map();
+    shadowQualifyCache.set(known, perNamespace);
+  }
+  let entry = perNamespace.get(enclosing);
+  if (!entry) {
+    entry = { enclosingNamespace: enclosing, knownNamespaces: [...known] };
+    perNamespace.set(enclosing, entry);
+  }
+  return entry;
+}
+
+/**
+ * The shadowed-type table is project-wide and identical for every body, so the
+ * array form the plugin wants is built once per (Set) rather than per function.
+ */
+const shadowedTypeCache = new WeakMap<Set<string>, { shadowedTypeNames: string[] }>();
+
+function shadowedTypeQualifyOptions(
+  context?: ImplGenContext,
+): { shadowedTypeNames: string[] } | undefined {
+  const names = context?.shadowedTypeNames;
+  if (!names || names.size === 0) return undefined;
+  let entry = shadowedTypeCache.get(names);
+  if (!entry) {
+    entry = { shadowedTypeNames: [...names] };
+    shadowedTypeCache.set(names, entry);
+  }
+  return entry;
+}
+
 function transformDecompiledCode(
   decompiled: string,
   options: ReconstructOptions,
@@ -1525,6 +1897,23 @@ function transformDecompiledCode(
   // wraps the body as `void dummy() {...}` (no signature), so the underscore-slot
   // plugin can't see param types from the AST — pass them in.
   varTypes?: Record<string, string>,
+  // Facts about the ENCLOSING function that the body AST cannot show, because
+  // the body is parsed on its own inside a `void dummy()` wrapper.
+  enclosing?: {
+    thisName?: string;
+    returnsNonPointer?: boolean;
+    /**
+     * The function's own signature, spelled exactly as the emitted definition
+     * spells it. The body is parsed inside a wrapper that carries it, so the
+     * AST holds the real return type and the real parameter declarations - the
+     * type environment every cast pass needs, from the AST rather than from a
+     * side channel.
+     */
+    signature?: { returnType: string; params: string };
+    /** Only read when no `signature` is available - see the goto-cleanup option. */
+    returnsVoid?: boolean;
+    renames?: Record<string, string>;
+  },
 ): TransformDecompiledResult {
   try {
     // Extract just the function body (remove signature and braces)
@@ -1553,7 +1942,7 @@ function transformDecompiledCode(
     }
 
     if (!bodyMatch) {
-      return { code: stripCrtNamespacePrefixes(indentCode(decompiled, 4)) };
+      return { code: stripStackArtifacts(indentCode(decompiled, 4)) };
     }
 
     const body = bodyMatch[1];
@@ -1561,9 +1950,15 @@ function transformDecompiledCode(
     // Pre-process Ghidra quirks before parsing
     const preprocessedBody = preprocessGhidraCode(body);
 
-    // Try to transform through cpp-parser
-    // Wrap in a dummy function for parsing
-    const wrapped = `void dummy() {${preprocessedBody}}`;
+    // Try to transform through cpp-parser.
+    // The wrapper carries the function's REAL signature, so the AST knows the
+    // return type and the parameters. `void dummy()` used to stand here and lied
+    // about both: it told `goto-cleanup` every function returned void, and it
+    // hid every parameter from the type environment.
+    const sig = enclosing?.signature;
+    const wrapped = sig
+      ? `${sig.returnType} dummy(${sig.params}) {${preprocessedBody}}`
+      : `void dummy() {${preprocessedBody}}`;
 
     // Build plugin options for method-call-rewrite when mappings or current context exist
     let pluginOptions: Record<string, unknown> | undefined;
@@ -1595,6 +1990,10 @@ function transformDecompiledCode(
       perPluginOptions['func-ptr-literal'] = { functionAddressMap: context.functionAddressMap };
     }
 
+    if (context?.functionRefAliases && Object.keys(context.functionRefAliases).length > 0) {
+      perPluginOptions['function-name-reconcile'] = { aliases: context.functionRefAliases };
+    }
+
     if (context?.bitfieldCatalog && context.bitfieldCatalog.size > 0) {
       perPluginOptions['bitfield-access'] = { bitfieldCatalog: context.bitfieldCatalog };
     }
@@ -1603,6 +2002,93 @@ function transformDecompiledCode(
       perPluginOptions['underscore-slot-local'] = { varTypes };
     }
 
+
+    const fieldRenames = getStructFieldRenames();
+    if (Object.keys(fieldRenames).length > 0) {
+      perPluginOptions['reserved-field-rename'] = { fieldRenames };
+    }
+
+    const rootScope = collectRootScopeSymbols(context);
+    if (rootScope) {
+      perPluginOptions['root-scope-qualify'] = rootScope;
+    }
+
+    const shadowOptions = shadowQualifyOptions(context);
+    if (shadowOptions) {
+      perPluginOptions['namespace-shadow-qualify'] = shadowOptions;
+    }
+
+    if (context?.funcPtrArgCasts) {
+      perPluginOptions['funcptr-arg-cast'] = context.funcPtrArgCasts;
+      perPluginOptions['pointer-assign-cast'] = {
+        voidPointerFunctions: context.funcPtrArgCasts.voidPointerFunctions,
+      };
+      // The body is parsed inside a `void dummy()` wrapper, so the AST never
+      // shows a PARAMETER's type — and a parameter handed straight on to
+      // another call is the commonest argument there is. Pass them in, spelled
+      // the way the signature spells them.
+      const enclosingVarTypes: Record<string, string> = {};
+      for (const [n, t] of Object.entries(varTypes ?? {})) {
+        const spelled = sigType(t);
+        enclosingVarTypes[n] = spelled;
+        const renamed = enclosing?.renames?.[n];
+        if (renamed) enclosingVarTypes[renamed] = spelled;
+      }
+      perPluginOptions['assign-cast'] = {
+        functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        functionNames: context.funcPtrArgCasts.functionNames,
+        variableNames: context.funcPtrArgCasts.variableNames,
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        funcdefNames: Object.keys(context.funcPtrArgCasts.funcdefSignatures ?? {}),
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        typedefTargets: context.funcPtrArgCasts.typedefTargets,
+        structFields: context.funcPtrArgCasts.structFields,
+        funcdefDecls: context.funcPtrArgCasts.funcdefDecls,
+        structFieldFuncdefs: context.funcPtrArgCasts.structFieldFuncdefs,
+        fieldFuncdefs: context.funcPtrArgCasts.fieldFuncdefs,
+        enclosingVarTypes,
+      };
+      perPluginOptions['call-arg-cast'] = {
+        functionParamTypes: context.funcPtrArgCasts.functionParamTypes,
+        functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        functionNames: context.funcPtrArgCasts.functionNames,
+        variableNames: context.funcPtrArgCasts.variableNames,
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        varArgFunctions: context.funcPtrArgCasts.varArgFunctions,
+        funcdefNames: Object.keys(context.funcPtrArgCasts.funcdefSignatures ?? {}),
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        typedefTargets: context.funcPtrArgCasts.typedefTargets,
+        structFields: context.funcPtrArgCasts.structFields,
+        funcdefDecls: context.funcPtrArgCasts.funcdefDecls,
+        structFieldFuncdefs: context.funcPtrArgCasts.structFieldFuncdefs,
+        fieldFuncdefs: context.funcPtrArgCasts.fieldFuncdefs,
+        enclosingVarTypes,
+      };
+    }
+
+    if (enclosing?.thisName) {
+      perPluginOptions['this-param-rewrite'] = { thisName: enclosing.thisName };
+    }
+
+    const shadowedTypes = shadowedTypeQualifyOptions(context);
+    if (shadowedTypes) {
+      perPluginOptions['shadowed-type-qualify'] = shadowedTypes;
+    }
+
+    // goto-cleanup reads the enclosing return type off the AST. It is the real one
+    // whenever the wrapper carries a signature; a caller that parses a bare body
+    // without one still has to say so, or a fabricated bare `return;` at the tail
+    // of a non-void function would drop the value the caller reads.
+    if (!sig) perPluginOptions['goto-cleanup'] = { enclosingReturnsVoid: enclosing?.returnsVoid === true };
+
+    // `x = nullptr` / `return nullptr` where an integer is meant does not compile
+    // ("cannot convert nullptr_t to uint32_t"); `0` is valid for both pointers and
+    // integers. The return form is only safe once the return type is known not to
+    // be a pointer, which only the caller can say.
+    perPluginOptions['nullptr-cleanup'] = {
+      zeroForAssignedNullptr: true,
+      zeroForReturnedNullptr: enclosing?.returnsNonPointer === true,
+    };
 
     const funcdefTypedefs = getKnownFuncDefTypedefs();
     if (funcdefTypedefs.length > 0) {
@@ -1621,6 +2107,8 @@ function transformDecompiledCode(
       tolerateErrors: true,
       usePluginRegistry: true,  // Enable all registered plugins including fourcc
       pluginOptions: pluginOptions as any,
+      // Signature-driven identifier renames, applied on the AST after the pipeline
+      renames: enclosing?.renames,
       // Always brace single-statement control-flow bodies (no `if (c) return;`)
       // and space loops/blocks apart with blank lines for readability.
       emitOptions: { alwaysUseBraces: true, blankLineAroundControlFlow: true },
@@ -1631,9 +2119,10 @@ function transformDecompiledCode(
       const transformedMatch = result.code.match(/\{([\s\S]*)\}/);
       if (transformedMatch) {
         return {
-          code: stripCrtNamespacePrefixes(indentCode(transformedMatch[1], 4)),
+          code: stripStackArtifacts(indentCode(transformedMatch[1], 4)),
           preamble: result.preamble,
           identifiers: result.identifiers,
+          typeNames: result.typeNames,
         };
       }
     }
@@ -1649,13 +2138,13 @@ function transformDecompiledCode(
     );
 
     // Fall back to original body if transformation fails
-    return { code: stripCrtNamespacePrefixes(indentCode(body, 4)) };
+    return { code: stripStackArtifacts(indentCode(body, 4)) };
   } catch (err) {
     // Stack overflow: do minimal work to avoid overflowing again in the handler
     if (err instanceof RangeError && /call stack|stack size/i.test(err.message)) {
       parseErrorCount++;
       console.error(`[STACK OVERFLOW] ${funcName ?? '<unknown>'} @ ${funcAddress ?? '???'} — using raw body`);
-      return { code: stripCrtNamespacePrefixes(indentCode(decompiled, 4)) };
+      return { code: stripStackArtifacts(indentCode(decompiled, 4)) };
     }
 
     const msg = err instanceof Error
@@ -1664,7 +2153,7 @@ function transformDecompiledCode(
     logParseError(msg, funcName ?? '<unknown>', funcAddress ?? '???', decompiled);
 
     // If transformation fails, return original code indented
-    return { code: stripCrtNamespacePrefixes(indentCode(decompiled, 4)) };
+    return { code: stripStackArtifacts(indentCode(decompiled, 4)) };
   }
 }
 

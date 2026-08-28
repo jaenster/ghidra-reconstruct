@@ -10,6 +10,7 @@ import type {
   // Types
   TypeNode,
   BuiltinType,
+  TypedefType,
   PointerType,
   ReferenceType,
   ArrayType,
@@ -122,6 +123,23 @@ function withDefaults<T>(node: Omit<T, 'location' | 'leadingTrivia' | 'trailingT
 // ============================================
 
 export const Type = {
+  /** A named type that is not a builtin — a typedef, struct alias or enum name. */
+  typedef(name: string): TypedefType {
+    return withDefaults({
+      kind: NodeKind.TypedefType,
+      name: Expr.identifier(name),
+    }) as TypedefType;
+  },
+
+  /** As `typedef`, but spelled `::name` so an enclosing scope cannot hide it. */
+  typedefAt(name: string, atRootScope: boolean): TypedefType {
+    if (!atRootScope) return Type.typedef(name);
+    return withDefaults({
+      kind: NodeKind.TypedefType,
+      name: Expr.qualifiedId([name], true),
+    }) as TypedefType;
+  },
+
   builtin(name: string, modifiers: TypeModifier[] = []): BuiltinType {
     return withDefaults({
       kind: NodeKind.BuiltinType,
@@ -236,9 +254,16 @@ export const Expr = {
 
   intLiteral(value: bigint | number, base: 2 | 8 | 10 | 16 = 10): IntegerLiteralExpr {
     const bigValue = typeof value === 'number' ? BigInt(value) : value;
-    const raw = base === 16 ? `0x${bigValue.toString(16)}` :
-                base === 2 ? `0b${bigValue.toString(2)}` :
-                base === 8 ? `0${bigValue.toString(8)}` :
+    // `BigInt.toString(radix)` puts the minus sign on the DIGITS, so a naive
+    // template renders -75 as `0x-4b`. C++ has no negative literal — the sign is
+    // a unary operator — so it belongs outside the base prefix: `-0x4b`.
+    // Left inside, `0x-4b` lexes as `0`, then `x` and `b` as user-defined
+    // literal suffixes ("unable to find numeric literal operator").
+    const sign = bigValue < 0n ? '-' : '';
+    const magnitude = bigValue < 0n ? -bigValue : bigValue;
+    const raw = base === 16 ? `${sign}0x${magnitude.toString(16)}` :
+                base === 2 ? `${sign}0b${magnitude.toString(2)}` :
+                base === 8 ? `${sign}0${magnitude.toString(8)}` :
                 bigValue.toString();
     return withDefaults({
       kind: NodeKind.IntegerLiteral,

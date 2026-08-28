@@ -1,0 +1,683 @@
+/**
+ * Call-Argument Cast-Insertion Plugin
+ *
+ * Ghidra's decompiler emits C, and C converts freely across an argument
+ * boundary: `void*` reaches any object pointer implicitly, and an integer
+ * reaches a pointer (and back) with nothing worse than a warning. C++ has never
+ * allowed either, so the original MSVC source carried a cast at every such call
+ * site. Reconstructing it is transcription, not repair - the machine really does
+ * hand the callee that word.
+ *
+ * For every call whose callee resolves to a known function, each argument whose
+ * OWN type is determinable and whose pointer-ness or pointee differs from the
+ * declared parameter is wrapped in a cast to the parameter type, spelled exactly
+ * as the declaration spells it.
+ *
+ * Deliberately narrow:
+ *  - only fires when at least one side is a pointer, because an integer-to-
+ *    integer argument mismatch is legal C++ and needs no cast (a cast there
+ *    would be pure noise);
+ *  - never fires when the parameter is `void*`, which every object pointer
+ *    still reaches implicitly;
+ *  - never fires on a function-pointer parameter - `funcptr-arg-cast` owns
+ *    those, and it compares whole prototypes rather than one slot;
+ *  - never fires when the argument's type cannot be established, so an
+ *    unmodelled expression is left exactly as the decompiler wrote it.
+ *
+ * AST-based and idempotent: a re-run reads the cast it inserted, finds it equal
+ * to the parameter type, and inserts nothing.
+ */
+
+import { NodeKind } from '../../../ast/kinds.js';
+import type {
+  ASTNode, FunctionDecl, VariableDecl, ParameterDecl, Identifier, TypeNode,
+  PointerType, BuiltinType, TypedefType, ElaboratedType, ArrayType, QualifiedType,
+  Expression, CStyleCastExpr, UnaryExpr, ParenExpr, CallExpr, QualifiedId,
+  MemberExpr, SubscriptExpr, BinaryExpr,
+} from '../../../ast/nodes.js';
+import { findNodesByKind } from '../../../ast/visitor.js';
+import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
+import { Type, Expr } from '../../../ast/factory.js';
+import type { TransformPlugin, PluginOptions } from '../types.js';
+
+export interface CallArgCastOptions extends PluginOptions {
+  /** Callable name (bare AND qualified) → declared parameter type spellings */
+  functionParamTypes?: Record<string, string[]>;
+  /** Callable name (bare AND qualified) → declared return type spelling */
+  functionReturnTypes?: Record<string, string>;
+  /** Global variable name → its declared type spelling */
+  globalTypes?: Record<string, string>;
+  /** Callables with a `...` tail */
+  varArgFunctions?: string[];
+  /** Funcdef typedef names — a parameter spelled with one belongs to funcptr-arg-cast */
+  funcdefNames?: string[];
+  /**
+   * Every spelling that denotes a FUNCTION. A function designator is not an
+   * object and has no `TypeShape`, so this is what tells the pass that an
+   * argument is a callback address rather than an unmodelled expression.
+   */
+  functionNames?: string[];
+  /** Data-symbol names — a name that denotes data is never treated as a function */
+  variableNames?: string[];
+  /**
+   * The enclosing function's own parameter and local type spellings. The body
+   * is transformed inside a `void dummy()` wrapper, so a PARAMETER's type is
+   * nowhere in the AST — and passing a parameter straight on to another call is
+   * the commonest argument shape there is.
+   */
+  enclosingVarTypes?: Record<string, string>;
+  /** Field name → declared type, where every aggregate declaring it agrees */
+  fieldTypes?: Record<string, string>;
+  /**
+   * Typedef name → the spelling it stands for. `LPCANDIDATELIST` and `HACCEL`
+   * ARE pointers with no star in the name; without this a pointer stored into
+   * one of them reads as an integer store and no cast is written.
+   */
+  typedefTargets?: Record<string, string>;
+  /**
+   * Aggregate name → field name → declared type. Where the expression says
+   * WHICH struct it walks, the field's type is exact and the unanimity rule
+   * behind `fieldTypes` does not have to apply.
+   */
+  structFields?: Record<string, Record<string, string>>;
+  /** Funcdef name → the return and parameter spellings the funcdef declares */
+  funcdefDecls?: Record<string, FuncdefDecl>;
+  /** Aggregate name → field name → the funcdef its declared type names */
+  structFieldFuncdefs?: Record<string, Record<string, string>>;
+  /** Field name → funcdef, where every aggregate declaring that name agrees */
+  fieldFuncdefs?: Record<string, string>;
+}
+
+/**
+ * What a funcdef declares. A call through a function-pointer field or variable
+ * has no callee NAME, so every name-keyed table in this pass misses it and both
+ * its result and its arguments come out untyped. The funcdef the slot is
+ * declared with is the contract that call is made under, and this is it.
+ */
+export interface FuncdefDecl {
+  returnType: string;
+  paramTypes: string[];
+  varArgs?: boolean;
+}
+
+/** The three tables that turn a computed callee into the funcdef it calls. */
+export interface FuncdefCalleeTables {
+  funcdefDecls?: Record<string, FuncdefDecl>;
+  structFieldFuncdefs?: Record<string, Record<string, string>>;
+  fieldFuncdefs?: Record<string, string>;
+}
+
+/**
+ * Resolve the callee of a call made through a function pointer to the funcdef
+ * that declares it — `gpBNetCallbacks->pfnBnetLoadAndReturn()`,
+ * `pTable[i].fpUpdate(...)`, `(*pfn)(...)`, a funcdef-typed local or global.
+ *
+ * `shapeOf` supplies the type of an ordinary expression, which is how the
+ * OBJECT side of a member access is identified; the field itself cannot come
+ * from there, because a funcdef field is emitted as an inline declarator and so
+ * carries no reducible type spelling at all.
+ *
+ * Returns undefined for anything the model does not place, which is what leaves
+ * a call whose slot Ghidra typed as an integer exactly as the decompiler wrote
+ * it — that disagreement belongs in the database, not under a cast.
+ */
+export function createFuncdefCalleeResolver(
+  tables: FuncdefCalleeTables,
+  shapeOf: (expr: Expression) => TypeShape | null,
+): (callee: Expression) => FuncdefDecl | undefined {
+  const decls = tables.funcdefDecls ?? {};
+  const structFieldFuncdefs = tables.structFieldFuncdefs ?? {};
+  const fieldFuncdefs = tables.fieldFuncdefs ?? {};
+  if (Object.keys(decls).length === 0) return () => undefined;
+
+  return (callee: Expression): FuncdefDecl | undefined => {
+    let e = unwrapParens(callee);
+    // `(*pfn)(...)` and `(**pfn)(...)` call the very same function `pfn` does:
+    // dereferencing a function pointer yields the function, and the address of
+    // a function is the function again. Peeling is exact, not an approximation.
+    while (e.kind === NodeKind.UnaryExpr && (e as UnaryExpr).operator === '*') {
+      e = unwrapParens((e as UnaryExpr).operand);
+    }
+    if (e.kind === NodeKind.MemberExpr) {
+      const m = e as MemberExpr;
+      const member = (m.member as { name?: string })?.name;
+      if (typeof member !== 'string') return undefined;
+      // Where the walk says WHICH aggregate it is in, the field is exact.
+      const obj = shapeOf(m.object);
+      if (obj && obj.stars === (m.isArrow ? 1 : 0)) {
+        const own = structFieldFuncdefs[obj.base];
+        // The aggregate this walks is known, so its own answer settles it -
+        // including the answer "this field is not a function pointer", which a
+        // unanimous table built from OTHER structs must not overrule.
+        if (own) return own[member] ? decls[own[member]] : undefined;
+      }
+      const anyAggregate = fieldFuncdefs[member];
+      return anyAggregate ? decls[anyAggregate] : undefined;
+    }
+    const shape = shapeOf(e);
+    // A funcdef typedef IS the pointer type (`typedef void (*fnFoo)()`), so the
+    // slot holding one is star-less; one more star is a pointer to that slot.
+    if (!shape || shape.stars > 1) return undefined;
+    return decls[shape.base];
+  };
+}
+
+/**
+ * A type reduced to what decides whether a conversion is legal: the pointee
+ * chain depth and the canonical name underneath it. `null` means the spelling
+ * carries something this plugin refuses to reason about (a function pointer, a
+ * template, an array dimension) and the argument is left alone.
+ */
+export interface TypeShape { base: string; stars: number; isConst: boolean }
+
+/**
+ * Spellings that name the SAME C++ type. Ghidra and the Windows headers each
+ * have their own vocabulary for a machine word, and a cast between two names
+ * for one type is noise. Getting an entry wrong is safe in both directions:
+ * a missing alias adds a redundant cast, a wrong one skips a cast that was
+ * never going to compile anyway - neither can change what the program does.
+ *
+ * `LONG`/`DWORD` are deliberately NOT folded into `int`: MSVC's `long` is a
+ * distinct type from `int`, and `LONG*` really does not convert to `int*`.
+ */
+const TYPE_ALIASES: Record<string, string> = {
+  'int32_t': 'int', 'INT': 'int', 'BOOL': 'int', 'int4': 'int',
+  'uint32_t': 'unsigned int', 'uint': 'unsigned int', 'undefined4': 'unsigned int',
+  'unsigned': 'unsigned int', 'UINT': 'unsigned int', 'u_int': 'unsigned int',
+  'int16_t': 'short', 'short int': 'short', 'SHORT': 'short',
+  'uint16_t': 'unsigned short', 'ushort': 'unsigned short', 'undefined2': 'unsigned short',
+  'word': 'unsigned short', 'WORD': 'unsigned short', 'unsigned short int': 'unsigned short',
+  'int8_t': 'signed char', 'sbyte': 'signed char',
+  'uint8_t': 'unsigned char', 'byte': 'unsigned char', 'undefined1': 'unsigned char',
+  'BYTE': 'unsigned char', 'uchar': 'unsigned char', 'UCHAR': 'unsigned char',
+  'undefined': 'unsigned char',
+  'int64_t': 'long long', 'longlong': 'long long', 'undefined8': 'unsigned long long',
+  'uint64_t': 'unsigned long long', 'ulonglong': 'unsigned long long',
+  'ulong': 'unsigned long', 'ULONG': 'unsigned long', 'DWORD': 'unsigned long',
+  'LONG': 'long', 'long int': 'long',
+  'CHAR': 'char',
+};
+
+/**
+ * Integer types exactly as wide as a pointer on this target. A pointer (or a
+ * function address) may be stored into one of these and read back; anything
+ * narrower loses address bits, which is never what the machine did.
+ */
+export const WORD_INTEGER_BASES = new Set([
+  'int', 'unsigned int', 'long', 'unsigned long', 'uintptr_t', 'intptr_t',
+  'size_t', 'ssize_t', 'pointer32',
+]);
+
+export const isWordIntegerShape = (s: TypeShape) =>
+  s.stars === 0 && WORD_INTEGER_BASES.has(s.base);
+
+/**
+ * Canonical bases that name an ARITHMETIC type. Everything reduces to one of
+ * these through `TYPE_ALIASES`, so a base outside the set with no indirection is
+ * a name whose real shape this pass never saw - a Win32 callback typedef such as
+ * `FARPROC`, whose Ghidra record is self-referential and therefore dropped from
+ * the typedef map.
+ */
+export const SCALAR_BASES = new Set([
+  'char', 'signed char', 'unsigned char', 'short', 'unsigned short',
+  'int', 'unsigned int', 'long', 'unsigned long', 'long long',
+  'unsigned long long', 'float', 'double', 'long double', 'bool', 'void',
+  'wchar_t', 'uintptr_t', 'intptr_t', 'size_t', 'ssize_t', 'pointer32',
+]);
+
+/**
+ * True for a star-less base that is neither arithmetic nor an aggregate the model
+ * knows: an opaque callback typedef (`FARPROC`) that hides a whole prototype, so
+ * there is nothing to compare against and nothing a cast can freeze.
+ */
+/**
+ * `new Set(names)` over a project-wide name table, memoised on the ARRAY. The
+ * plugin options object is rebuilt for every function body while these tables
+ * are built once and handed on unchanged, so without this the pass pays for a
+ * 50,000-entry Set once per function.
+ */
+/**
+ * The last segment of a possibly qualified name. Slicing at the separator index
+ * plus two returns 1 for an UNQUALIFIED name and silently chops its first
+ * character, so `gnData` was probed as `nData` - every bare-name lookup missed.
+ */
+export function bareName(name: string): string {
+  const cut = name.lastIndexOf('::');
+  return cut === -1 ? name : name.slice(cut + 2);
+}
+
+/**
+ * The spelled name in a type node's `name` slot.
+ *
+ * That slot holds an `Identifier` as parsed, but a root-qualified type
+ * (`::D2WinImage`, written by `shadowed-type-qualify` / `root-scope-qualify` so
+ * a same-named namespace cannot hide the type) holds a `QualifiedId` instead.
+ * Reading `.name` off it then yields a NODE, not a string, and every type table
+ * keyed on the spelling silently missed — so every cast pass stopped reasoning
+ * about exactly the types the emitter had to disambiguate. The tail is what the
+ * tables are keyed on, so that is what comes back.
+ */
+export function typeNodeName(name: unknown): string | undefined {
+  const n = name as { kind?: string; name?: unknown } | undefined | null;
+  if (!n || typeof n !== 'object') return undefined;
+  if (typeof n.name === 'string') return n.name;
+  if (n.kind === NodeKind.QualifiedId) {
+    const tail = n.name as { name?: unknown } | undefined;
+    if (tail && typeof tail.name === 'string') return tail.name;
+  }
+  return undefined;
+}
+
+const setCache = new WeakMap<readonly string[], Set<string>>();
+export function cachedSet(names: readonly string[] | undefined): Set<string> {
+  if (!names) return new Set();
+  let s = setCache.get(names);
+  if (!s) { s = new Set(names); setCache.set(names, s); }
+  return s;
+}
+
+export function isOpaqueCallbackBase(
+  base: string, structFields: Record<string, Record<string, string>>,
+): boolean {
+  return !SCALAR_BASES.has(base) && !structFields[base];
+}
+
+/**
+ * Windows typedefs that carry the `const` inside the name. `LPCVOID` reaching a
+ * `void*` parameter, or `LPCSTR` reaching `char*`, is the one conversion C did
+ * silently that C++ refuses outright - so const has to survive the reduction.
+ */
+const CONST_POINTER_TYPEDEFS = new Set([
+  'LPCVOID', 'LPCSTR', 'LPCWSTR', 'LPCTSTR', 'PCSTR', 'PCWSTR', 'PCTSTR', 'LPCCH', 'LPCBYTE',
+]);
+
+/**
+ * Resolves a typedef NAME to the spelling it stands for, or undefined when the
+ * name is not a typedef. Windows and Ghidra alike hide indirection inside a
+ * name - `LPCANDIDATELIST` IS a pointer and `HACCEL` IS a pointer, with no star
+ * in the spelling - so without this a pointer store into one of those slots
+ * looks like an integer store and no cast is written.
+ */
+export type TypedefResolver = (name: string) => string | undefined;
+
+export function canonicalBase(name: string): string {
+  const stripped = name
+    .replace(/\b(const|volatile)\b/g, ' ')
+    .replace(/^\s*(struct|class|union|enum)\s+/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return TYPE_ALIASES[stripped] ?? stripped;
+}
+
+/**
+ * Follow a typedef chain to the type it really names, accumulating indirection
+ * and const on the way. Depth-capped and self-reference-proof: Ghidra records
+ * several typedefs as their own underlying type (`FARPROC -> FARPROC *`), and
+ * following one of those forever is not a hypothetical.
+ */
+function resolveThroughTypedefs(
+  shape: TypeShape, resolve: TypedefResolver | undefined, depth: number,
+): TypeShape {
+  if (!resolve || depth > 8) return shape;
+  const under = resolve(shape.base);
+  if (!under) return shape;
+  const inner = shapeOfSpelling(under, resolve, depth + 1);
+  if (!inner || inner.base === shape.base) return shape;
+  return {
+    base: inner.base,
+    stars: inner.stars + shape.stars,
+    isConst: shape.isConst || inner.isConst,
+  };
+}
+
+/** Parse a declaration spelling ("uint8_t **", "D2UnitStrc *") into a shape. */
+export function shapeOfSpelling(
+  spelling: string, resolve?: TypedefResolver, depth = 0,
+): TypeShape | null {
+  let s = spelling.trim();
+  if (!s) return null;
+  // Function pointers, templates, references and array dimensions are out of scope.
+  if (/[()<>&\[\]]/.test(s)) return null;
+  let stars = 0;
+  while (s.endsWith('*')) { stars++; s = s.slice(0, -1).trim(); }
+  if (s.includes('*')) return null; // pointer-to-const and the like, mid-spelling
+  const base = canonicalBase(s);
+  if (!base || /\s/.test(base) && !base.startsWith('unsigned') && !base.startsWith('signed')
+      && !base.startsWith('long') && !base.startsWith('short')) return null;
+  const isConst = /\bconst\b/.test(s) || CONST_POINTER_TYPEDEFS.has(s.trim());
+  return resolveThroughTypedefs({ base, stars, isConst }, resolve, depth);
+}
+
+/** The same reduction, for a type already parsed into the AST. */
+export function shapeOfNode(t: TypeNode, stars = 0, resolve?: TypedefResolver): TypeShape | null {
+  switch (t.kind) {
+    case NodeKind.PointerType:
+      return shapeOfNode((t as PointerType).pointee, stars + 1, resolve);
+    case NodeKind.ArrayType:
+      // An array argument decays to a pointer to its element.
+      return shapeOfNode((t as ArrayType).elementType, stars + 1, resolve);
+    case NodeKind.QualifiedType: {
+      const q = t as QualifiedType;
+      const inner = shapeOfNode(q.type, stars, resolve);
+      if (!inner) return null;
+      return q.qualifiers?.includes('const') ? { ...inner, isConst: true } : inner;
+    }
+    case NodeKind.BuiltinType:
+      return resolveThroughTypedefs(
+        { base: canonicalBase((t as BuiltinType).name), stars, isConst: false }, resolve, 0);
+    case NodeKind.TypedefType: {
+      const n = typeNodeName((t as TypedefType).name);
+      if (n === undefined) return null;
+      return resolveThroughTypedefs(
+        { base: canonicalBase(n), stars, isConst: CONST_POINTER_TYPEDEFS.has(n) },
+        resolve, 0);
+    }
+    case NodeKind.ElaboratedType: {
+      const n = typeNodeName((t as ElaboratedType).name);
+      return n !== undefined
+        ? resolveThroughTypedefs({ base: canonicalBase(n), stars, isConst: false }, resolve, 0)
+        : null;
+    }
+    default:
+      return null;
+  }
+}
+
+export const sameShape = (a: TypeShape, b: TypeShape) => a.stars === b.stars && a.base === b.base;
+export const isVoid = (s: TypeShape) => s.base === 'void';
+
+export function unwrapParens(e: Expression): Expression {
+  while (e.kind === NodeKind.ParenExpr) e = (e as ParenExpr).expression;
+  return e;
+}
+
+/** The spelled name of a call's callee, or undefined for a computed callee. */
+export function calleeName(expr: Expression): string | undefined {
+  const e = unwrapParens(expr);
+  if (e.kind === NodeKind.Identifier) return (e as Identifier).name;
+  if (e.kind === NodeKind.QualifiedId) {
+    const q = e as QualifiedId;
+    if (q.name.kind !== NodeKind.Identifier) return undefined;
+    const parts: string[] = [];
+    for (const part of q.qualifier) {
+      if (part.kind !== NodeKind.Identifier) return undefined;
+      parts.push((part as Identifier).name);
+    }
+    parts.push((q.name as Identifier).name);
+    return parts.join('::');
+  }
+  return undefined;
+}
+
+/** Turn a declaration spelling back into a type node the cast can be written with. */
+export function typeFromSpelling(spelling: string): TypeNode | null {
+  let s = spelling.trim();
+  if (!s || /[()<>&\[\]]/.test(s)) return null;
+  let stars = 0;
+  while (s.endsWith('*')) { stars++; s = s.slice(0, -1).trim(); }
+  if (!s || s.includes('*')) return null;
+  let node: TypeNode = Type.typedef(s);
+  for (let i = 0; i < stars; i++) node = Type.pointer(node);
+  return node;
+}
+
+export function createCallArgCastTransformer(options?: PluginOptions): Transformer {
+  const o = (options ?? {}) as CallArgCastOptions;
+  const paramTypes = o.functionParamTypes;
+  const returnTypes = o.functionReturnTypes ?? {};
+  const globalTypes = o.globalTypes ?? {};
+  const varArgs = cachedSet(o.varArgFunctions);
+  const funcdefNames = cachedSet(o.funcdefNames);
+  const enclosingVarTypes = o.enclosingVarTypes ?? {};
+  const fieldTypes = o.fieldTypes ?? {};
+  const typedefTargets = o.typedefTargets ?? {};
+  const resolve: TypedefResolver = name => typedefTargets[name];
+  const structFields = o.structFields ?? {};
+  const functionNames = cachedSet(o.functionNames);
+  const dataNames = cachedSet(o.variableNames);
+  const funcdefTables: FuncdefCalleeTables = {
+    funcdefDecls: o.funcdefDecls,
+    structFieldFuncdefs: o.structFieldFuncdefs,
+    fieldFuncdefs: o.fieldFuncdefs,
+  };
+  if (!paramTypes || Object.keys(paramTypes).length === 0) {
+    return createTransformer({});
+  }
+
+  return createTransformer({
+    visitFunctionDecl(node: FunctionDecl): ASTNode | undefined {
+      if (!node.body) return undefined;
+
+      // name → declared type, from this function's params and body-declared locals.
+      const localTypes = new Map<string, TypeNode>();
+      for (const p of node.parameters) {
+        const pd = p as ParameterDecl;
+        if (pd.name) localTypes.set(pd.name.name, pd.type);
+      }
+      for (const d of findNodesByKind(node.body, NodeKind.VariableDecl)) {
+        const v = d as VariableDecl;
+        if (!localTypes.has(v.name.name)) localTypes.set(v.name.name, v.type);
+      }
+
+      /** The type of an argument expression, or null when it is not determinable. */
+      const argShape = (expr: Expression): TypeShape | null => {
+        const e = unwrapParens(expr);
+        switch (e.kind) {
+          case NodeKind.CStyleCastExpr:
+            return shapeOfNode((e as CStyleCastExpr).type, 0, resolve);
+          case NodeKind.UnaryExpr: {
+            const u = e as UnaryExpr;
+            if (u.operator === '*') {
+              const pointee = argShape(u.operand);
+              return pointee && pointee.stars > 0 ? { ...pointee, stars: pointee.stars - 1 } : null;
+            }
+            if (u.operator !== '&') return null;
+            const inner = argShape(u.operand);
+            // `&arr` where arr is already an array decayed once - taking the
+            // address of that is a pointer-to-array, which this does not model.
+            return inner ? { ...inner, stars: inner.stars + 1 } : null;
+          }
+          case NodeKind.Identifier: {
+            const name = (e as Identifier).name;
+            const local = localTypes.get(name);
+            if (local) return shapeOfNode(local, 0, resolve);
+            const declared = enclosingVarTypes[name];
+            if (declared) return shapeOfSpelling(declared, resolve);
+            const g = globalTypes[name];
+            return g ? shapeOfSpelling(g, resolve) : null;
+          }
+          case NodeKind.QualifiedId: {
+            const q = calleeName(e);
+            if (!q) return null;
+            const bare = bareName(q);
+            const g = globalTypes[q] ?? globalTypes[bare];
+            return g ? shapeOfSpelling(g, resolve) : null;
+          }
+          case NodeKind.MemberExpr: {
+            const m = e as MemberExpr;
+            const member = m.member as { name?: string };
+            if (typeof member?.name !== 'string') return null;
+            // If the object's own type is known, the field's type is exact.
+            const obj = argShape(m.object);
+            if (obj && obj.stars === (m.isArrow ? 1 : 0)) {
+              const exact = structFields[obj.base]?.[member.name];
+              if (exact) return shapeOfSpelling(exact, resolve);
+            }
+            const t = fieldTypes[member.name];
+            return t ? shapeOfSpelling(t, resolve) : null;
+          }
+          case NodeKind.SubscriptExpr: {
+            const inner = argShape((e as SubscriptExpr).array);
+            // Subscripting peels one indirection off; a scalar subscript is a
+            // model error somewhere else and is left alone.
+            return inner && inner.stars > 0 ? { ...inner, stars: inner.stars - 1 } : null;
+          }
+          case NodeKind.CallExpr: {
+            const callee = (e as CallExpr).callee;
+            const cn = calleeName(callee);
+            const rt = cn !== undefined
+              ? returnTypes[cn] ?? returnTypes[bareName(cn)]
+              : undefined;
+            if (rt) return shapeOfSpelling(rt, resolve);
+            // No name matched — a call THROUGH a function pointer, whose result
+            // type only the funcdef the slot is declared with can supply.
+            const fd = funcdefOfCallee(callee);
+            return fd ? shapeOfSpelling(fd.returnType, resolve) : null;
+          }
+          case NodeKind.BinaryExpr: {
+            // Pointer arithmetic keeps the pointer's type: `pBuf + 0x11` is still
+            // a `T*`, and Ghidra writes an offset onto a base constantly. Only
+            // `+`/`-` do this, and only with exactly one pointer operand -
+            // `p - q` is an integer distance, and everything else is arithmetic.
+            const b = e as BinaryExpr;
+            if (b.operator !== '+' && b.operator !== '-') return null;
+            const l = argShape(b.left);
+            const r = argShape(b.right);
+            if (l && l.stars > 0 && (!r || r.stars === 0)) return l;
+            if (b.operator === '+' && r && r.stars > 0 && (!l || l.stars === 0)) return r;
+            return null;
+          }
+          default:
+            return null;
+        }
+      };
+
+      /** The funcdef a call through a function pointer is made under. */
+      const funcdefOfCallee = createFuncdefCalleeResolver(funcdefTables, argShape);
+
+      /**
+       * True when the expression names a FUNCTION rather than a value: a bare
+       * `f` or `&f` whose name the model knows as a callable and which nothing
+       * nearer declares as data. A function designator has no `TypeShape` - it
+       * is not an object - so `argShape` returns null for it and no cast is
+       * written, which is why a callback handed to a `FARPROC`, a `void*` or an
+       * `undefined4` parameter arrives uncast.
+       */
+      const functionDesignator = (expr: Expression): boolean => {
+        let e = unwrapParens(expr);
+        if (e.kind === NodeKind.UnaryExpr && (e as UnaryExpr).operator === '&') {
+          e = unwrapParens((e as UnaryExpr).operand);
+        }
+        if (e.kind !== NodeKind.Identifier && e.kind !== NodeKind.QualifiedId) return false;
+        const name = calleeName(e);
+        if (!name) return false;
+        const bare = bareName(name);
+        // A name that denotes data here is not a function, whatever else shares it.
+        if (localTypes.has(name) || enclosingVarTypes[name] !== undefined) return false;
+        if (localTypes.has(bare) || enclosingVarTypes[bare] !== undefined) return false;
+        if (globalTypes[name] !== undefined || globalTypes[bare] !== undefined) return false;
+        // A bare name a data symbol also claims is not proof of a function.
+        if (dataNames.has(bare)) return false;
+        return functionNames.has(name) || functionNames.has(bare);
+      };
+
+      /**
+       * The declared parameter spellings this call fills, or undefined when the
+       * model does not know them. Two routes, in order of certainty: the callee
+       * NAMES a function the model has a signature for, or - for a call made
+       * through a function pointer, which has no callee name at all - the slot
+       * the pointer lives in is declared with a funcdef, and that funcdef is the
+       * contract the call is made under.
+       */
+      const declaredParametersOf = (call: CallExpr): string[] | undefined => {
+        const name = calleeName(call.callee);
+        if (name !== undefined) {
+          const bare = bareName(name);
+          const declared = paramTypes[name] ?? paramTypes[bare];
+          if (declared) {
+            return varArgs.has(name) || varArgs.has(bare) ? undefined : declared;
+          }
+        }
+        const fd = funcdefOfCallee(call.callee);
+        // A funcdef with a `...` tail types nothing past its declared slots, and
+        // a positional index into it is not safe.
+        return fd && !fd.varArgs ? fd.paramTypes : undefined;
+      };
+
+      let changed = false;
+      const inner = createTransformer({
+        visitNode(n: ASTNode): ASTNode | undefined {
+          if (n.kind !== NodeKind.CallExpr) return undefined;
+          const call = n as CallExpr;
+          const declared = declaredParametersOf(call);
+          if (!declared) return undefined;
+          if (call.arguments.length !== declared.length) return undefined; // arity mismatch is Ghidra's, not ours
+
+          let anyCast = false;
+          const newArgs = call.arguments.map((arg, i) => {
+            const spelling = declared[i];
+            if (!spelling) return arg;
+            const bareParam = spelling.replace(/[*\s]/g, '');
+            if (funcdefNames.has(bareParam)) return arg;
+            const want = shapeOfSpelling(spelling, resolve);
+            // A function address reaching a slot that is not a function pointer of
+            // the same prototype: C converted it silently and C++ converts it not
+            // at all, in EITHER direction, so the original source carried a cast
+            // here. `funcptr-arg-cast` owns the funcdef-typedef slots (it compares
+            // whole prototypes and refuses an arity disagreement); what is left is
+            // an object pointer, a machine word, or an opaque Win32 callback
+            // typedef, and none of those has a prototype to freeze.
+            if (functionDesignator(arg as Expression)) {
+              const castType = typeFromSpelling(spelling);
+              if (!castType) return arg;
+              // `want` is null for a spelling this pass will not reduce - an
+              // opaque typedef that hides a whole prototype. It is still a single
+              // name, so the cast is spellable and is the only form that compiles.
+              if (!want) { anyCast = true; return Expr.cast(castType, arg as Expression); }
+              if (want.stars > 0) { anyCast = true; return Expr.cast(castType, arg as Expression); }
+              // A star-less base that is neither arithmetic nor an aggregate this
+              // model knows is an opaque callback typedef (`FARPROC`). It hides a
+              // whole prototype, so there is nothing to compare and nothing to
+              // freeze - the cast is the only spelling that ever compiled.
+              if (isOpaqueCallbackBase(want.base, structFields)) {
+                anyCast = true;
+                return Expr.cast(castType, arg as Expression);
+              }
+              // Into a word-wide integer the address goes through `uintptr_t`, so
+              // the reinterpret is width-exact. A narrower slot would TRUNCATE the
+              // address, which the machine never did - leave it visible.
+              if (!isWordIntegerShape(want)) return arg;
+              anyCast = true;
+              return Expr.cast(castType, Expr.cast(Type.typedef('uintptr_t'), arg as Expression));
+            }
+            if (!want) return arg;
+            const have = argShape(arg as Expression);
+            if (!have) return arg;
+            // Any NON-const object pointer still reaches `void*` implicitly;
+            // a const one has never reached a non-const slot in either language.
+            if (have.stars > 0 && want.stars === 1 && isVoid(want)
+                && !want.isConst && !have.isConst) return arg;
+            const losesConst = have.isConst && !want.isConst;
+            if (sameShape(have, want) && !losesConst) return arg;
+            // Only a pointer boundary needs the cast; integer widths convert.
+            if (want.stars === 0 && have.stars === 0 && !losesConst) return arg;
+            const castType = typeFromSpelling(spelling);
+            if (!castType) return arg;
+            anyCast = true;
+            return Expr.cast(castType, arg as Expression);
+          });
+          if (!anyCast) return undefined;
+          changed = true;
+          return updateNode(call, { arguments: newArgs } as Partial<CallExpr>);
+        },
+      });
+
+      const newBody = inner(node.body);
+      if (!changed) return undefined;
+      return updateNode(node, { body: newBody } as Partial<FunctionDecl>);
+    },
+  });
+}
+
+export const callArgCastPlugin: TransformPlugin = {
+  id: 'call-arg-cast',
+  name: 'Call Argument Cast Insertion',
+  description:
+    'Casts a call argument to its declared parameter type where C converted implicitly and C++ will not',
+  version: '1.0.0',
+  defaultEnabled: true,
+  // After pointer-assign-cast (600), so the argument's final form is what is read.
+  priority: 610,
+  tags: ['cleanup', 'type'],
+  createTransformer: createCallArgCastTransformer,
+};
