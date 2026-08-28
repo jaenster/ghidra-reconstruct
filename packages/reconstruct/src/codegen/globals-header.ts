@@ -8,7 +8,8 @@
 import type { AnalyzedDataSymbol, ReconstructOptions, DataValue, ExtractedDataType, ExtractedStruct, ExtractedEnum, ExtractedUnion, ExtractedFunctionDefinition } from '../types.js';
 import { isPlatformOrBuiltinType, isLibraryType, isStructType, castPointerInitializer, normalizeDataValue, isCharacterValueType, isMsvcEhInternal, normalizeWideCharType, isVoidPointerSpelling, rootQualifyShadowedType, platformDeclaredFunctionNames } from './platform-types.js';
 import { generateStructDeclaration, generateEnumDeclaration, generateUnionDeclaration, generateFunctionDefinitionDeclaration } from './header.js';
-import { collapseConsecutiveDuplicates, normalizeQualifiedReference, stripLastCollidingNamespaceComponent } from './namespace.js';
+import { normalizeQualifiedReference } from './namespace.js';
+import { namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 
 /**
  * Exact Win32 SDK typedef names (not `LP`/`IMAGE_` prefixed) seen as
@@ -99,11 +100,29 @@ function isEmittableGlobal(g: AnalyzedDataSymbol): boolean {
  * TU could see declared — including `Alignment LAB_00687d4a = align(1);`, which
  * is padding, not a variable. The two sets must be the same set.
  */
-function isDataArtifact(g: AnalyzedDataSymbol, allNames: Set<string>): boolean {
+export function isDataArtifact(g: AnalyzedDataSymbol, allNames: Set<string>): boolean {
   const name = g.suggestedName || g.name;
   return isSwitchTableSymbol(name)
     || isJumpTableArtifact(g)
     || isArrayElementSymbol(name, allNames);
+}
+
+/**
+ * A symbol globals.h will never declare, and that therefore no body can ever
+ * name: a switch/jump-table artifact, a per-element alias of an array that is
+ * itself declared, or an interior label inside another symbol
+ * (`gsCharSelState1.szCommandStringTable[484]`).
+ *
+ * The per-file `static` emitter used to define these anyway, one zero-initialised
+ * object per file that happened to own the parent's address range — objects with
+ * the PARENT's type and size and none of its data, that nothing references.
+ * Declaration and definition share this one predicate now.
+ */
+export function isUnreferenceableArtifact(g: AnalyzedDataSymbol, allNames: Set<string>): boolean {
+  // Interiority is a property of the EMITTED name: `s_.D_0070888c` is a Ghidra
+  // string label, not a member path, and it sanitizes to the perfectly ordinary
+  // identifier `s__D_0070888c` that five bodies name.
+  return isDataArtifact(g, allNames) || isInteriorLabel(sanitizeSymbolName(g.suggestedName || g.name));
 }
 
 /**
@@ -359,37 +378,16 @@ export function generateGlobalsHeader(
     if (g.scope !== 'global') continue;
     const gName = g.suggestedName || g.name;
     if (isInteriorLabel(gName)) continue;
+    // A root-scope variable of that name blocks a root-scope namespace of it too.
+    if (g.namespace) continue;
     collidingNamespaceParts.add(sanitizeSymbolName(gName));
   }
 
-  // Group globals by namespace, stripping components that collide with struct
-  // names or global variable names
-  const rawByNamespace = groupByNamespace(globals);
-  const byNamespace = new Map<string | undefined, typeof globals>();
-  for (const [ns, nsGlobals] of rawByNamespace) {
-    // The IMPL side already drops a last component that names a type
-    // (`D2Client::Renderer::Direct3D` → `D2Client::Renderer`, because `Direct3D`
-    // is a struct). The extern has to land in the same scope or the body that
-    // names the symbol unqualified cannot see it — decl, def and reference share
-    // one rule, and this is that rule.
-    let cleanNs = ns ? stripLastCollidingNamespaceComponent(ns) : ns;
-    if (cleanNs && collidingNamespaceParts.size > 0) {
-      const parts = cleanNs.split('::');
-      const filtered = parts.filter(p => !collidingNamespaceParts.has(p));
-      cleanNs = filtered.length > 0 ? filtered.join('::') : undefined;
-    }
-    // Collapse consecutive duplicate segments (e.g. Monsters::Monsters::Umod →
-    // Monsters::Umod) so the global's emitted namespace matches the collapsed
-    // form function bodies use to reference it — otherwise the qualified body
-    // reference fails to resolve ("not a member of ...::Umod").
-    if (cleanNs) cleanNs = collapseConsecutiveDuplicates(cleanNs) || undefined;
-    const existing = byNamespace.get(cleanNs);
-    if (existing) {
-      existing.push(...nsGlobals);
-    } else {
-      byNamespace.set(cleanNs, [...nsGlobals]);
-    }
-  }
+  // Only the names this header introduces at ROOT scope can block a namespace
+  // there. Published so globals.cpp, which includes this header, is bound by the
+  // same conflict.
+  setUnopenableRootNames(collidingNamespaceParts);
+  const byNamespace = groupByEmittedNamespace(globals);
 
   // Build name set for array element suppression
   const allGlobalNames = new Set(globals.map(g => g.suggestedName || g.name));
@@ -410,8 +408,9 @@ export function generateGlobalsHeader(
     lines.push('');
 
     // Group constants by namespace (same as globals)
-    const constantsByNamespace = groupByNamespace(constants);
-    for (const [rawNamespace, nsConstants] of constantsByNamespace) {
+    const constantsByNamespace = groupByEmittedNamespace(constants);
+    for (const { resolved: constantsScope, rendered: rawNamespace, symbols: nsConstants } of constantsByNamespace) {
+      void constantsScope;
       if (nsConstants.length === 0) continue;
       // Skip template instantiation namespaces (contain < > , *)
       if (rawNamespace && /[<>,*]/.test(rawNamespace)) continue;
@@ -419,7 +418,7 @@ export function generateGlobalsHeader(
       // Collapse consecutive duplicate segments (Quests::Quests → Quests) so the
       // emitted namespace matches the collapsed form bodies use to reference these
       // constants — otherwise the qualified reference fails ("not a member of").
-      const namespace = rawNamespace ? (collapseConsecutiveDuplicates(rawNamespace) || undefined) : rawNamespace;
+      const namespace = rawNamespace;
 
       if (namespace) {
         lines.push(`namespace ${namespace} {`);
@@ -458,7 +457,7 @@ export function generateGlobalsHeader(
     lines.push('// =============================================================================');
     lines.push('');
 
-    for (const [namespace, nsGlobals] of byNamespace) {
+    for (const { rendered: namespace, symbols: nsGlobals } of byNamespace) {
       const nsGlobalSymbols = nsGlobals.filter(g =>
         g.scope === 'global'
         && !isSwitchTableSymbol(g.suggestedName || g.name)
@@ -571,13 +570,12 @@ export function generateGlobalsHeader(
       lines.push('// =============================================================================');
       lines.push('');
 
-      const recoveredByNamespace = groupByNamespace(recovered);
-      for (const [rawNamespace, nsGlobals] of recoveredByNamespace) {
+      const recoveredByNamespace = groupByEmittedNamespace(recovered);
+      for (const { rendered: rawNamespace, symbols: nsGlobals } of recoveredByNamespace) {
         if (nsGlobals.length === 0) continue;
         if (rawNamespace && /[<>,*]/.test(rawNamespace)) continue;
-        // Collapse consecutive duplicate segments (Quests::Quests → Quests) to
-        // match the collapsed form bodies use to reference these recovered globals.
-        const namespace = rawNamespace ? (collapseConsecutiveDuplicates(rawNamespace) || undefined) : rawNamespace;
+        // Already the resolved spelling — groupByEmittedNamespace resolved it.
+        const namespace = rawNamespace;
         if (namespace) {
           lines.push(`namespace ${namespace} {`);
           lines.push('');
@@ -797,6 +795,73 @@ export function generateStaticLocalsBlock(
 }
 
 /**
+ * Group symbols by the namespace RESOLVED for their address.
+ *
+ * Every globals emission path — the extern block, the constants block, the
+ * recovery block, globals.cpp and the struct-header co-located pair — groups
+ * through this, so a symbol is declared and defined in one namespace by
+ * identity. It used to be five independent derivations.
+ */
+export interface NamespaceGroup {
+  /** The resolved entity — the thing every emission path renders from. */
+  readonly resolved: ResolvedNamespace;
+  /** Its rendered form, produced once. */
+  readonly rendered: string | undefined;
+  readonly symbols: AnalyzedDataSymbol[];
+}
+
+/**
+ * Names that cannot open a namespace at ROOT scope in the header being emitted,
+ * because that header declares a struct/class of the same name there. This is a
+ * C++ scope conflict in the emitted file — `struct WardenClient;` and
+ * `namespace WardenClient { }` at one scope is "redeclared as different kind of
+ * entity" — and NOT a second namespace resolution: it constrains only the
+ * LEADING segment, at the one scope where both names are introduced. An inner
+ * segment is fine (`namespace D2Common { namespace Item { } }` does not clash
+ * with a root-scope `struct Item`), which is why dropping inner segments — the
+ * old globals.h rule — was what pushed `ItemMods` into a namespace nothing
+ * declared.
+ */
+let unopenableRootNames: ReadonlySet<string> = new Set();
+export function setUnopenableRootNames(names: ReadonlySet<string>): void {
+  unopenableRootNames = names;
+}
+
+export function groupByEmittedNamespace(symbols: AnalyzedDataSymbol[]): NamespaceGroup[] {
+  const resolution = namespaceResolution();
+  const openable = (ns: ResolvedNamespace): ResolvedNamespace => {
+    if (unopenableRootNames.size === 0 || ns.segments.length === 0) return ns;
+    let cut = 0;
+    while (cut < ns.segments.length && unopenableRootNames.has(ns.segments[cut])) cut++;
+    if (cut === 0) return ns;
+    return { ghidraSegments: ns.ghidraSegments, segments: ns.segments.slice(cut) };
+  };
+  const groups = new Map<string, NamespaceGroup>();
+  const order: NamespaceGroup[] = [];
+  const root = resolution.resolvePath(undefined);
+  const rootGroup: NamespaceGroup = { resolved: root, rendered: undefined, symbols: [] };
+  groups.set('', rootGroup);
+  order.push(rootGroup);
+
+  for (const symbol of symbols) {
+    // System-library paths (macOS frameworks, /usr/lib) are not namespaces.
+    const raw = symbol.namespace;
+    const isSystemPath = !!raw && (raw.startsWith('/') || raw.includes('/usr/') || raw.includes('/lib/') || raw.startsWith('usr_lib_'));
+    const resolved = openable(isSystemPath ? root : resolution.of(symbol));
+    const rendered = renderNamespace(resolved);
+    const key = rendered ?? '';
+    let group = groups.get(key);
+    if (!group) {
+      group = { resolved, rendered, symbols: [] };
+      groups.set(key, group);
+      order.push(group);
+    }
+    group.symbols.push(symbol);
+  }
+  return order;
+}
+
+/**
  * Group symbols by namespace
  */
 export function groupByNamespace(
@@ -936,11 +1001,12 @@ export function setKnownNamespaces(namespaces: Set<string> | undefined): void {
  * Enter (or leave, with `undefined`) the namespace block whose initializers are
  * about to be emitted.
  */
-export function setInitializerNamespace(namespace: string | undefined): void {
+export function setInitializerNamespace(namespace: ResolvedNamespace | undefined): void {
   initializerScopes = [];
   initializerOwnScopes = new Set();
-  if (!namespace) return;
-  const segs = namespace.split('::').filter(Boolean);
+  if (!namespace || namespace.segments.length === 0) return;
+  // Segments come from the resolution; nothing here re-derives them from text.
+  const segs = namespace.segments;
   for (let i = segs.length; i > 0; i--) initializerScopes.push(segs.slice(0, i).join('::'));
   // Any contiguous run of the enclosing path names a scope the reference is
   // already inside, so it always resolves — see namespace-shadow-qualify.
@@ -1721,8 +1787,46 @@ export function generateGlobalsImpl(
     return lines.join('\n');
   }
 
-  // Group by namespace for proper wrapping
-  const byNamespace = groupByNamespace(definable);
+  // Group by the namespace globals.h actually emitted, not the raw Ghidra path.
+  const byNamespace = groupByEmittedNamespace(definable);
+
+  // ONE definition per emitted (namespace, name).
+  //
+  // Two Ghidra symbols at different addresses can sanitize to the same emitted
+  // name in the same emitted namespace — a genuine database collision
+  // (`gLightRoomGreen` at two addresses), a `vftable` per class folded into the
+  // parent namespace, or two spellings of one object. globals.h already picks
+  // ONE of them for its extern and records the winner; globals.cpp defined all
+  // of them, which is a hard C++ redefinition and, where the types differ, a
+  // conflicting declaration as well. Pick the header's winner where there is
+  // one, otherwise the first, and say what was dropped rather than dropping it
+  // silently.
+  const definitionWinner = new Map<string, AnalyzedDataSymbol>();
+  const dropped = new Map<string, AnalyzedDataSymbol[]>();
+  for (const { rendered: namespace, symbols: nsGlobals } of byNamespace) {
+    for (const g of nsGlobals) {
+      const key = `${namespace ?? ''}::${sanitizeSymbolName(g.suggestedName || g.name)}`;
+      const held = definitionWinner.get(key);
+      if (!held) { definitionWinner.set(key, g); continue; }
+      // The header's choice wins, so declaration and definition are the same object.
+      if (!headerDeclaredGlobals.has(held) && headerDeclaredGlobals.has(g)) {
+        definitionWinner.set(key, g);
+        (dropped.get(key) ?? dropped.set(key, []).get(key)!).push(held);
+      } else {
+        (dropped.get(key) ?? dropped.set(key, []).get(key)!).push(g);
+      }
+    }
+  }
+  const isDefinitionWinner = (namespace: string | undefined, g: AnalyzedDataSymbol): boolean =>
+    definitionWinner.get(`${namespace ?? ''}::${sanitizeSymbolName(g.suggestedName || g.name)}`) === g;
+  if (dropped.size > 0) {
+    lines.push(`// ${dropped.size} name(s) claimed by more than one Ghidra symbol in the same`);
+    lines.push('// emitted namespace; one definition each, the others listed by address:');
+    for (const [key, others] of [...dropped].sort()) {
+      lines.push(`//   ${key} — also at ${others.map(o => `${o.address} (${o.suggestedType || o.dataType})`).join(', ')}`);
+    }
+    lines.push('');
+  }
 
   // Forward declarations for everything this file defines.
   //
@@ -1733,10 +1837,10 @@ export function generateGlobalsImpl(
   // the file's own definitions up front makes the order irrelevant. The
   // declaration is built by the same shape rules as the definition below, so a
   // redundant one is exactly the extern globals.h already has.
-  for (const [namespace, nsGlobals] of byNamespace) {
+  for (const { rendered: namespace, symbols: nsGlobals } of byNamespace) {
     if (nsGlobals.length === 0) continue;
     if (namespace && /[<>,*]/.test(namespace)) continue;
-    const undeclared = nsGlobals.filter(g => !headerDeclaredGlobals.has(g));
+    const undeclared = nsGlobals.filter(g => !headerDeclaredGlobals.has(g) && isDefinitionWinner(namespace, g));
     if (undeclared.length === 0) continue;
     if (namespace) lines.push(`namespace ${namespace} {`);
     emitGlobalDefsWithIfdef(lines, undeclared, false, (global, ls) => {
@@ -1753,22 +1857,23 @@ export function generateGlobalsImpl(
   }
   lines.push('');
 
-  for (const [namespace, nsGlobals] of byNamespace) {
+  for (const { resolved: namespaceScope, rendered: namespace, symbols: nsGlobals } of byNamespace) {
     if (nsGlobals.length === 0) continue;
     // Skip template instantiation namespaces (contain < > , *)
     if (namespace && /[<>,*]/.test(namespace)) continue;
 
     // Split into: initialized with data, initialized without data, uninitialized
-    const withData = nsGlobals.filter(g => g.initializedData);
-    const withoutData = nsGlobals.filter(g => g.isInitialized && !g.initializedData);
-    const uninitialized = nsGlobals.filter(g => !g.isInitialized);
+    const owned = nsGlobals.filter(g => isDefinitionWinner(namespace, g));
+    const withData = owned.filter(g => g.initializedData);
+    const withoutData = owned.filter(g => g.isInitialized && !g.initializedData);
+    const uninitialized = owned.filter(g => !g.isInitialized);
 
     if (namespace) {
       lines.push(`namespace ${namespace} {`);
       lines.push('');
     }
     // Pointer initializers below resolve from inside this block.
-    setInitializerNamespace(namespace || undefined);
+    setInitializerNamespace(namespaceScope);
 
     // Initialized data with full values
     if (withData.length > 0) {
@@ -2200,10 +2305,11 @@ export function generateColocatedGlobalsImpl(
   lines.push('// =============================================================================');
   lines.push('');
 
-  // Group by namespace for proper wrapping
-  const byNamespace = groupByNamespace(globals);
+  // Group by the namespace globals.h actually emitted, not the raw Ghidra path.
+  // Same grouping as the struct header's extern block.
+  const byNamespace = groupByEmittedNamespace(globals);
 
-  for (const [namespace, nsGlobals] of byNamespace) {
+  for (const { resolved: namespaceScope, rendered: namespace, symbols: nsGlobals } of byNamespace) {
     if (nsGlobals.length === 0) continue;
     // Skip template instantiation namespaces (contain < > , *)
     if (namespace && /[<>,*]/.test(namespace)) continue;
@@ -2218,7 +2324,7 @@ export function generateColocatedGlobalsImpl(
       lines.push('');
     }
     // Pointer initializers below resolve from inside this block.
-    setInitializerNamespace(namespace || undefined);
+    setInitializerNamespace(namespaceScope);
 
     // Initialized data with full values
     if (withData.length > 0) {

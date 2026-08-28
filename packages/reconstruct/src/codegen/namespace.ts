@@ -1,3 +1,4 @@
+import { NamespaceResolution, namespaceResolution, renderNamespace, setNamespaceResolution } from './namespace-resolution.js';
 /**
  * Namespace and directory management
  *
@@ -166,9 +167,9 @@ export function normalizeQualifiedReference(name: string): string {
   if (idx < 0) return name;
   const qualifier = name.slice(0, idx);
   const symbol = name.slice(idx + 2);
-  const emitted = stripLastCollidingNamespaceComponent(
-    collapseConsecutiveDuplicates(qualifier)
-  );
+  // The reference side resolves the qualifier through the SAME entity the
+  // declaration and the definition render from.
+  const emitted = renderNamespace(namespaceResolution().resolvePath(qualifier));
   return emitted ? `${emitted}::${symbol}` : symbol;
 }
 
@@ -178,9 +179,10 @@ export function normalizeQualifiedReference(name: string): string {
  * IMPL definition, and the call-site rewriter must all strip the SAME component or
  * a function's decl/def/calls land in different namespaces.
  */
-let namespaceCollisionTypes: Set<string> = new Set();
 export function setNamespaceCollisionTypes(typeNames: Set<string>): void {
-  namespaceCollisionTypes = typeNames;
+  // The type registry is one half of the single namespace rule; installing it
+  // installs the resolution every emitter renders from.
+  setNamespaceResolution(new NamespaceResolution(typeNames));
 }
 
 /**
@@ -192,11 +194,9 @@ export function setNamespaceCollisionTypes(typeNames: Set<string>): void {
  * stripped — that would move the def to an unreachable sibling scope).
  */
 export function stripLastCollidingNamespaceComponent(ns: string): string | undefined {
-  const parts = ns.split('::');
-  if (parts.length > 1 && namespaceCollisionTypes.has(parts[parts.length - 1])) {
-    parts.pop();
-  }
-  return parts.length > 0 ? parts.join('::') : undefined;
+  // Kept as a thin adapter for callers that still hold a Ghidra path string.
+  // The decision itself is the resolution's, so there is one implementation.
+  return renderNamespace(namespaceResolution().resolvePath(ns));
 }
 
 /**

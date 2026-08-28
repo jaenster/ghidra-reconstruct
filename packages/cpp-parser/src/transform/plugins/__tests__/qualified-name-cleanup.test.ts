@@ -35,6 +35,48 @@ describe('qualifiedNameCleanupPlugin', () => {
     assert.ok(!/compiler::/.test(out), out);
   });
 
+  it('drops a type-named qualifier that sits directly before the name', () => {
+    // Ghidra hangs D2WinImage's members under a namespace named after the struct.
+    const out = transformCode(
+      'void f() { D2Client::Forms::D2WinImage::Draw(pImage); }',
+      { typeQualifierNames: ['D2WinImage'] }
+    );
+    assert.ok(/D2Client::Forms::Draw\(pImage\)/.test(out), out);
+    assert.ok(!/D2WinImage::/.test(out), out);
+  });
+
+  it('keeps an INTERMEDIATE type-named qualifier — it is a real namespace', () => {
+    // `Item` is a struct AND the folder namespace of ItemMods. Dropping it points
+    // the reference at D2Common::ItemMods, which nothing declares.
+    const out = transformCode(
+      'void f() { D2Common::Item::ItemMods::ITEMMOD_CanApplyAffix(p, n); }',
+      { typeQualifierNames: ['Item'] }
+    );
+    assert.ok(/D2Common::Item::ItemMods::ITEMMOD_CanApplyAffix/.test(out), out);
+  });
+
+  it('keeps a SOLE type-named qualifier — that is a member reference', () => {
+    const out = transformCode(
+      'void f() { D2WinImage::Draw(pImage); }',
+      { typeQualifierNames: ['D2WinImage'] }
+    );
+    assert.ok(/D2WinImage::Draw\(pImage\)/.test(out), out);
+  });
+
+  it('cannot reach a namespace DECLARATION, however the qualifier is spelled', () => {
+    // The predecessor regex rewrote `namespace D2Common::Item::ItemMods {` itself,
+    // because its penultimate-only guard looks for a following `::` and a
+    // declaration is followed by ` {`. Every definition in the unit then landed in
+    // a namespace its header never declared.
+    const out = transformCode(
+      'namespace D2Common { namespace Item { namespace ItemMods { void f() { Forms::D2WinImage::Draw(p); } } } }',
+      { typeQualifierNames: ['Item', 'D2WinImage'] }
+    );
+    assert.ok(/namespace Item\b/.test(out), out);
+    assert.ok(/namespace ItemMods\b/.test(out), out);
+    assert.ok(/Forms::Draw\(p\)/.test(out), out);
+  });
+
   it('strips the _exref import-thunk suffix', () => {
     const out = transformCode('void f() { Fog_10021_exref(nMode); }');
     assert.ok(/\bFog_10021\(nMode\)/.test(out), out);

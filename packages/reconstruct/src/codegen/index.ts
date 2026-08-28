@@ -56,7 +56,8 @@ import { generateCMakeLists, generateTopLevelCMake, generateTargetCMake, generat
 import { generateSourceMap } from './sourcemap.js';
 import { generateReadme } from './readme.js';
 import { organizeByNamespace, getFilePath, setModuleNames, setNamespaceCollisionTypes, normalizeQualifiedReference } from './namespace.js';
-import { sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, setKnownNamespaces, isFuncDefTypedefName, setInitializerSignatureTables, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType } from './globals-header.js';
+import { buildNamespaceResolution, namespaceResolution, renderNamespace } from './namespace-resolution.js';
+import { isUnreferenceableArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, setKnownNamespaces, isFuncDefTypedefName, setInitializerSignatureTables, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType } from './globals-header.js';
 import { isPlatformOrBuiltinType, generatePlatformHeader, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
 import { createOverrideRegistry } from '../overrides/index.js';
 import { createLibraryRegistry } from '../library/index.js';
@@ -423,6 +424,9 @@ export function generateProject(
   const analyzedGlobals: AnalyzedDataSymbol[] = (globals as AnalyzedDataSymbol[]).filter(
     g => 'scope' in g
   );
+  // Every type name in the program: a global that shares a name with one cannot
+  // be reasoned about from body text, and cannot be declared beside it.
+  const allDataTypeNames = new Set(dataTypes.map(dt => dt.name));
 
   // Wire analyzed globals into context for static-local injection
   context.analyzedGlobals = analyzedGlobals;
@@ -484,6 +488,10 @@ export function generateProject(
         for (const [k, v] of unsortedMap) funcToImpl.set(k, v);
       }
       computeFileLocalGlobals(analyzedGlobals, funcToImpl);
+      const rescoped = reconcileStaticScopeWithBodyReferences(analyzedGlobals, functions, funcToImpl, allDataTypeNames);
+      if (rescoped.promotedToGlobal || rescoped.promotedToFileLocal) {
+        console.log(`Globals rescoped from body references: ${rescoped.promotedToGlobal} to file scope in globals.cpp, ${rescoped.promotedToFileLocal} from function-local to file-local`);
+      }
     }
 
     // Calculate globals path (needed for generateFilesForFunctions includes)
@@ -592,6 +600,7 @@ export function generateProject(
     if (options.promoteStaticGlobals && analyzedGlobals.length > 0) {
       const funcToImpl = buildFuncToImplPathMap(functions, classes, namespaces, options, '');
       computeFileLocalGlobals(analyzedGlobals, funcToImpl);
+      reconcileStaticScopeWithBodyReferences(analyzedGlobals, functions, funcToImpl, allDataTypeNames);
     }
 
     // Calculate globals path (needed for generateFilesForFunctions includes)
@@ -807,7 +816,10 @@ function resolveModuleForFunction(
   modules: Record<string, ModuleConfig>
 ): string | null {
   if (!func.namespace) return null;
-  const firstSegment = func.namespace.split('::')[0];
+  // Ghidra's own path, split once by the resolution — the module is its first
+  // segment, before any collapsing.
+  const firstSegment = namespaceResolution().of(func).ghidraSegments[0];
+  if (!firstSegment) return null;
   for (const [moduleName, mod] of Object.entries(modules)) {
     if (mod.namespaces.some(ns => ns === firstSegment)) {
       return moduleName;
@@ -1092,6 +1104,107 @@ function buildFuncToImplPathMap(
 }
 
 /**
+ * Undo a static/file-local demotion that the emitted code cannot honour.
+ *
+ * A global's scope is decided from Ghidra's XREF count at its EXACT start
+ * address, but what actually decides whether `static` is legal is how many
+ * function bodies NAME the symbol. Those two disagree constantly, most visibly
+ * where a Ghidra array is longer than the real table: every
+ * `AllocServerMemory(..., __FILE__, ...)` inside its extent decompiles its
+ * filename argument as `(char*)(gTable + 0xNN)`, so a symbol with xrefCount 1
+ * is named by dozens of functions across a dozen files.
+ *
+ * The result was a symbol emitted `static` in one place and declared `extern` by
+ * globals.h's multi-body safety net — a declaration nothing can ever satisfy,
+ * plus, for a function-local static, a body-scoped object no other function can
+ * see. Both decisions now come from ONE count.
+ *
+ * The demotion stays where it is provably safe: a static-local whose name only
+ * one function mentions, a file-local whose name only one output file mentions.
+ */
+export function reconcileStaticScopeWithBodyReferences(
+  analyzedGlobals: AnalyzedDataSymbol[],
+  functions: ExtractedFunction[],
+  funcNameToImplPath: Map<string, string>,
+  typeNames: ReadonlySet<string>
+): { promotedToGlobal: number; promotedToFileLocal: number } {
+  // Names a `scope === 'global'` symbol already owns. Promoting a second symbol
+  // into one of them cannot help: globals.h declares exactly one of the two, and
+  // whichever loses is worse off than it was as a local — `gaPlayerInitStats` is
+  // a `uint[4]` at 006e1520 and a `D2PlayerInitStatsStrc[7]` at 00711e00, and the
+  // bodies that index the struct need the struct. That collision is a Ghidra
+  // fault; until it is fixed the local copy is the only one that is right.
+  const namesOwnedByAGlobal = new Set<string>();
+  for (const g of analyzedGlobals) {
+    if (g.scope === 'global') namesOwnedByAGlobal.add(sanitizeSymbolName(g.suggestedName || g.name));
+  }
+
+  const candidates = new Map<string, AnalyzedDataSymbol[]>();
+  for (const g of analyzedGlobals) {
+    if (g.scope !== 'static-local' && g.scope !== 'file-local') continue;
+    if (namesOwnedByAGlobal.has(sanitizeSymbolName(g.suggestedName || g.name))) continue;
+    const name = sanitizeSymbolName(g.suggestedName || g.name);
+    if (!/^[A-Za-z_]\w*$/.test(name)) continue;
+    // A symbol whose name is ALSO a type name cannot be counted this way: the
+    // decompiled text that names it may be naming the type, and `enum E; E E;`
+    // is not declarable at one scope anyway — globals.h refuses to emit an
+    // extern for it, so promoting it would produce a definition nothing declares.
+    if (typeNames.has(name)) continue;
+    const list = candidates.get(name);
+    if (list) list.push(g); else candidates.set(name, [g]);
+  }
+  if (candidates.size === 0) return { promotedToGlobal: 0, promotedToFileLocal: 0 };
+
+  // Which functions name each candidate, read off Ghidra's decompiler output —
+  // the INPUT to codegen, and the only place the eventual references exist
+  // before any file has been generated.
+  const namingFunctions = new Map<string, Set<string>>();
+  const identifier = /[A-Za-z_]\w*/g;
+  for (const func of functions) {
+    const body = func.decompiled;
+    if (!body) continue;
+    identifier.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    const seen = new Set<string>();
+    while ((m = identifier.exec(body)) !== null) {
+      const id = m[0];
+      if (seen.has(id) || !candidates.has(id)) continue;
+      seen.add(id);
+      let fns = namingFunctions.get(id);
+      if (!fns) { fns = new Set(); namingFunctions.set(id, fns); }
+      fns.add(func.name);
+    }
+  }
+
+  let promotedToGlobal = 0;
+  let promotedToFileLocal = 0;
+  for (const [name, globalsWithName] of candidates) {
+    const fns = namingFunctions.get(name);
+    if (!fns || fns.size <= 1) continue;
+    const files = new Set<string>();
+    let unresolved = false;
+    for (const fn of fns) {
+      const path = funcNameToImplPath.get(fn);
+      if (!path) { unresolved = true; break; }
+      files.add(path);
+    }
+    void files; void unresolved;
+    for (const g of globalsWithName) {
+      // File scope is NOT a safe halfway house: globals.h emits a fallback
+      // extern for any symbol more than one body names, so a `static` that
+      // several functions share is a declaration nothing can satisfy however
+      // the functions are distributed over files. More than one body ⇒ a
+      // global.
+      g.scope = 'global';
+      g.ownerFile = undefined;
+      g.ownerFunction = undefined;
+      promotedToGlobal++;
+    }
+  }
+  return { promotedToGlobal, promotedToFileLocal };
+}
+
+/**
  * Rescope globals to 'file-local' when all referencing functions live in the same impl file.
  * Mutates the scope and ownerFile fields of the analyzed globals.
  */
@@ -1291,6 +1404,22 @@ function generateFilesForFunctions(
 
   // ── Pass 1: Assign type ownership (via modules/type-ownership.ts) ──
   const analyzedGlobals = (globals as AnalyzedDataSymbol[]).filter(g => 'scope' in g);
+  const allAnalyzedGlobalNames = new Set(analyzedGlobals.map(g => g.suggestedName || g.name));
+
+  // Resolve every symbol's namespace ONCE, before anything is emitted, and bind
+  // it to that symbol's address. Function definition, header declaration,
+  // globals.h extern, globals.cpp definition, struct-header co-located extern
+  // and every qualified reference all render from this one entity — they used to
+  // derive it five times, three different ways.
+  {
+    const structUnionEnumNames = new Set<string>();
+    for (const dt of dataTypes) {
+      if (dt.kind === 'STRUCTURE' || dt.kind === 'UNION' || dt.kind === 'ENUM') {
+        structUnionEnumNames.add(dt.name);
+      }
+    }
+    buildNamespaceResolution(structUnionEnumNames, [...functions, ...analyzedGlobals]);
+  }
   const { typeOwnerMap, structsWithOwnUnit, extraHeaderTypes } = computeTypeOwnership({
     organized,
     classes,
@@ -1426,9 +1555,15 @@ function generateFilesForFunctions(
       structUnionEnumNames.add(dt.name);
     }
   }
-  // Header decl + impl def + call-site rewriter must strip the SAME colliding
-  // namespace component; register the global type set they all consult.
-  setNamespaceCollisionTypes(structUnionEnumNames);
+  // The namespace resolution — the single entity header decl, impl def, globals
+  // and every call site render from — is built once by generateProject, before
+  // any file is emitted. It is deliberately NOT reinstalled here: this function
+  // runs once per target with that target's slice of the program, and rebuilding
+  // from a slice would give each target its own answer, which is the very bug
+  // being removed.
+  void setNamespaceCollisionTypes;
+  // The reference side of the same decision, applied on the name node.
+  context._namespaceCollisionTypeNames = [...structUnionEnumNames];
 
   // struct/union name → { fieldName → field's struct/union type name }, used to
   // resolve deref chains (`a->b->c`) so the headers of the INTERMEDIATE struct
@@ -1672,6 +1807,7 @@ function generateFilesForFunctions(
     if (context.analyzedGlobals) {
       context.fileLocalGlobals = context.analyzedGlobals.filter(
         g => g.scope === 'file-local' && g.ownerFile === implPath
+          && !isUnreferenceableArtifact(g, allAnalyzedGlobalNames)
       );
       if (context.fileLocalGlobals.length === 0) {
         context.fileLocalGlobals = undefined;

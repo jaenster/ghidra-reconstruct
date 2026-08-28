@@ -19,7 +19,8 @@ import type {
   AnalyzedDataSymbol,
 } from '../types.js';
 import type { MethodConversionRegistry } from '../methods/index.js';
-import { parseTemplateName, collapseConsecutiveDuplicates, stripLastCollidingNamespaceComponent } from './namespace.js';
+import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js';
+import { namespaceResolution, renderNamespace } from './namespace-resolution.js';
 import { isGhidraGeneratedName, suggestBetterName } from '@ghidra-mcp/cpp-parser';
 import { isPlatformOrBuiltinType, isLibraryType, normalizeSignatureType, normalizeWideCharType, collapseFuncPtrTypedef, rootQualifyShadowedType, WINDOWS_STRUCTS, platformDeclaredFunctionNames } from './platform-types.js';
 import { generateExternDeclaration, isFuncDefTypedefName } from './globals-header.js';
@@ -326,20 +327,38 @@ export function generateHeader(
       lines.push('// =============================================================================');
       lines.push('');
 
-      let currentIfdef: string | undefined;
-      for (const global of colocatedGlobals) {
-        if (global.ifdef !== currentIfdef) {
-          if (currentIfdef) lines.push(`#endif // ${currentIfdef}`);
-          if (global.ifdef) lines.push(`#ifdef ${global.ifdef}`);
-          currentIfdef = global.ifdef;
-        }
-        {
-          const decl = generateExternDeclaration(global, options.includeAddressComments);
-          if (decl) lines.push(decl);
-        }
+      // These externs used to go out at ROOT scope while
+      // `generateColocatedGlobalsImpl` wrapped the matching DEFINITIONS in the
+      // symbol's namespace — so `D2Client::UI::Hireables::gpHireablesList` was
+      // defined and `::gpHireablesList` was declared, and the reference sites,
+      // which spell the namespace, resolved to neither. Both sides call
+      // `colocatedGlobalNamespace` now.
+      const colocatedByNamespace = new Map<string | undefined, AnalyzedDataSymbol[]>();
+      for (const g of colocatedGlobals) {
+        const ns = renderNamespace(namespaceResolution().of(g));
+        const bucket = colocatedByNamespace.get(ns);
+        if (bucket) bucket.push(g); else colocatedByNamespace.set(ns, [g]);
       }
-      if (currentIfdef) lines.push(`#endif // ${currentIfdef}`);
-      lines.push('');
+
+      for (const [ns, nsGlobals] of colocatedByNamespace) {
+        if (ns && /[<>,*]/.test(ns)) continue;
+        if (ns) { lines.push(`namespace ${ns} {`); lines.push(''); }
+        let currentIfdef: string | undefined;
+        for (const global of nsGlobals) {
+          if (global.ifdef !== currentIfdef) {
+            if (currentIfdef) lines.push(`#endif // ${currentIfdef}`);
+            if (global.ifdef) lines.push(`#ifdef ${global.ifdef}`);
+            currentIfdef = global.ifdef;
+          }
+          {
+            const decl = generateExternDeclaration(global, options.includeAddressComments);
+            if (decl) lines.push(decl);
+          }
+        }
+        if (currentIfdef) lines.push(`#endif // ${currentIfdef}`);
+        if (ns) { lines.push(''); lines.push(`} // namespace ${ns}`); }
+        lines.push('');
+      }
     }
   }
 
@@ -374,21 +393,14 @@ export function generateHeader(
   // Methods are scoped to struct name (StructName::Method), not namespace
   const standaloneFunctions = functions.filter(f => !f.parentClass);
   const hasStandaloneFunctions = standaloneFunctions && standaloneFunctions.length > 0;
-  let namespace = (hasStandaloneFunctions && rawNamespace) ? rawNamespace : undefined;
-
-  // Collapse consecutive duplicate namespace segments (e.g., Monsters::Monsters → Monsters)
-  if (namespace) {
-    namespace = collapseConsecutiveDuplicates(namespace);
-  }
-
-  // Strip the LAST namespace component if it collides with a (global) type — the
-  // SAME rule the impl definition and the call-site rewriter use, so a function's
-  // decl, def, and calls all land in one namespace. (Was: strip components
-  // colliding with types used IN THIS FILE — which kept `D2Common::Item` here
-  // while the impl stripped it to `D2Common`, splitting decl and def.)
-  if (namespace) {
-    namespace = stripLastCollidingNamespaceComponent(namespace);
-  }
+  // Rendered from the resolution, so the declaration is in the namespace the
+  // definition opens — by identity, not by two copies of the same rule.
+  const namespaceOwner = (hasStandaloneFunctions && rawNamespace)
+    ? (classInfo?.namespace ? { address: undefined, namespace: rawNamespace } : functions[0])
+    : undefined;
+  let namespace = namespaceOwner
+    ? renderNamespace(namespaceResolution().of(namespaceOwner))
+    : undefined;
 
   // Only emit namespace block if it's a valid C++ namespace (not a template instantiation)
   const useNamespace = namespace && options.organization === 'namespace' && isValidNamespace(namespace);

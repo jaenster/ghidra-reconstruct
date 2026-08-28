@@ -20,7 +20,8 @@ import { CPP_KEYWORDS } from './header.js';
 
 // Import cpp-parser for code transformation
 import { transformGhidraCode, preprocessGhidraCode, isGhidraGeneratedName, suggestBetterName, takeFuncPtrArgCastTypedefs, type TransformResult } from '@ghidra-mcp/cpp-parser';
-import { parseTemplateName, collapseConsecutiveDuplicates, stripLastCollidingNamespaceComponent } from './namespace.js';
+import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js';
+import { namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 import { cleanFunctionComment, guardedFuncDefTypedef } from './header.js';
 import { normalizeSignatureType, collapseFuncPtrTypedef, rootQualifyShadowedType } from './platform-types.js';
 import { generateStaticLocalsBlock, emitDataValue, inferArrayDeclaration, normalizeArrayDeclaration, braceArrayInitializer, isFuncDefTypedefName, getKnownFuncDefTypedefs, setInitializerNamespace } from './globals-header.js';
@@ -644,40 +645,10 @@ function isValidNamespace(name: string): boolean {
 }
 
 /**
- * Strip namespace components that collide with struct/union/enum type names.
- * e.g. "D2Client::Forms::D2WinImage" → "D2Client::Forms" if D2WinImage is a struct.
- * Returns the cleaned namespace (or undefined if all components were stripped).
+ * Function names the platform resolves at ROOT scope, whatever namespace Ghidra
+ * files them under.
  */
-function stripCollidingNamespaceComponents(ns: string, typeNames: Set<string>): string | undefined {
-  const parts = ns.split('::');
-  const cleaned = parts.filter(p => !typeNames.has(p));
-  return cleaned.length > 0 ? cleaned.join('::') : undefined;
-}
-
-/**
- * Build a regex and replacement map for rewriting qualified references
- * that include type-name namespace components.
- * e.g. "Forms::D2WinImage::FuncName" → "Forms::FuncName"
- *
- * Only strips the type-name when it is the PENULTIMATE component (directly
- * before the function/member name), never when it is a true intermediate
- * namespace with further sub-components.  Without this guard, a path like
- * "D2Common::Item::ItemMods::Fn" (where Item is both a struct name and a
- * real namespace) would have ::Item:: stripped, leaving the sibling-scope
- * "D2Common::ItemMods::Fn" which is unreachable from a file in D2Common::Items.
- */
-function buildNamespaceCollisionRewriter(typeNames: Set<string>): (body: string) => string {
-  if (!typeNames || typeNames.size === 0) return (body) => body;
-  // Remove "TypeName::" from qualified namespace paths ONLY when preceded by "::"
-  // This preserves class-qualified uses like "D2QuestDataStrc::Method()" (first qualifier)
-  // but strips mid-path namespace uses like "Forms::D2WinImage::Func()" → "Forms::Func()"
-  const escaped = [...typeNames].filter(n => /^[A-Za-z_]\w*$/.test(n)).map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-  if (escaped.length === 0) return (body) => body;
-  // Only match ::TypeName:: (mid-path) when NOT followed by another identifier::
-  // (i.e. TypeName must be the penultimate qualifier, not an intermediate namespace)
-  const pattern = new RegExp(`(::)(${escaped.join('|')})::(?![A-Za-z_]\\w*::)`, 'g');
-  return (body: string) => body.replace(pattern, (match, prefix) => prefix);
-}
+const ENTRY_POINT_NAMES = new Set(['WinMain', 'wWinMain', 'main', 'wmain', 'DllMain']);
 
 /**
  * Context for code generation, carrying optional registries
@@ -692,6 +663,11 @@ export interface ImplGenContext {
   analyzedGlobals?: AnalyzedDataSymbol[];
   /** File-local globals for the current impl file */
   fileLocalGlobals?: AnalyzedDataSymbol[];
+  /** Struct/union/enum names, for the qualified-name cleanup on reference sites. */
+  _namespaceCollisionTypeNames?: string[];
+  /** The resolved entity behind `_enclosingNamespace`; passes segments around
+   *  without anyone re-splitting the rendered text. */
+  _enclosingResolvedNamespace?: ResolvedNamespace;
   /** Internal: accumulated preambles from injection-aware plugins */
   _preambles?: Set<string>;
   /**
@@ -834,7 +810,9 @@ export function generateImplementation(
   extraIncludes?: string[],
   crtHeaders?: Set<string>,
   internalFunctions?: Set<string>,
-  /** Set of data type names (struct/union/enum) that collide with namespace components */
+  /** Set of data type names (struct/union/enum) that collide with namespace
+   *  components. Kept in the signature for callers; the collision itself is now
+   *  resolved on the AST by `qualified-name-cleanup`. */
   dataTypeNames?: Set<string>
 ): string {
   // Set source file name for quest union rewriting
@@ -908,23 +886,19 @@ export function generateImplementation(
   // Methods are always scoped as StructName::Method() at global scope.
   // The classInfo.namespace is often wrong (set from function namespace, not struct location).
   // Wrapper functions will preserve the original namespace for compatibility.
-  let namespace = allMethods ? undefined : (rawNamespace ?? undefined);
-
-  // Collapse consecutive duplicate namespace segments (e.g., Monsters::Monsters → Monsters)
-  if (namespace) {
-    namespace = collapseConsecutiveDuplicates(namespace);
-  }
-
-  // Strip the LAST namespace component if it collides with a type — same rule as
-  // the header decl and the call-site rewriter (penultimate-only), so decl/def/
-  // calls stay in one namespace. (Was: strip ALL colliding components, which
-  // moved intermediate-collision defs to unreachable sibling scopes.)
-  if (namespace) {
-    namespace = stripLastCollidingNamespaceComponent(namespace);
-  }
+  // The namespace is the one resolved for THIS symbol's address — the same
+  // entity the header declaration, globals.h and every call site render from.
+  const namespaceOwner = allMethods
+    ? undefined
+    : (classInfo?.namespace ? { address: undefined, namespace: rawNamespace } : functions[0]);
+  const resolvedNamespace = namespaceOwner
+    ? namespaceResolution().of(namespaceOwner)
+    : undefined;
+  let namespace = renderNamespace(resolvedNamespace);
 
   // Only emit namespace block if it's a valid C++ namespace (not a template instantiation)
   const useNamespace = namespace && options.organization === 'namespace' && isValidNamespace(namespace);
+
 
   // Funcdef typedefs the body casts to must be declared at ROOT scope, before
   // the namespace opens: a cast may spell one `::T` to escape a same-named
@@ -939,7 +913,10 @@ export function generateImplementation(
 
   // Bodies are transformed below and their references resolve from inside this
   // block — tell the shadow-qualifier which scope that is.
-  if (context) context._enclosingNamespace = useNamespace ? namespace : undefined;
+  if (context) {
+    context._enclosingNamespace = useNamespace ? namespace : undefined;
+    context._enclosingResolvedNamespace = useNamespace ? resolvedNamespace : undefined;
+  }
 
   // File-local globals are deferred until after function bodies are generated,
   // so we can filter out globals whose names don't appear in any function body.
@@ -977,7 +954,7 @@ export function generateImplementation(
     const isInternal = internalFunctions?.has(func.name) ?? false;
     let impl: string;
     try {
-      impl = generateFunctionImplementation(func, classInfo, options, context, isInternal);
+      impl = generateFunctionImplementation(func, classInfo, options, context, isInternal, useNamespace ? resolvedNamespace : undefined);
     } catch (err) {
       if (err instanceof RangeError && /call stack|stack size/i.test(String(err.message))) {
         parseErrorCount++;
@@ -1004,7 +981,7 @@ export function generateImplementation(
   if (context?.fileLocalGlobals && context.fileLocalGlobals.length > 0) {
     // These are spliced INSIDE the namespace block opened above, so a pointer
     // initializer naming another namespace's symbol resolves from in there.
-    setInitializerNamespace(useNamespace ? namespace : undefined);
+    setInitializerNamespace(useNamespace ? resolvedNamespace : undefined);
     const fileLocalLines: string[] = [];
     for (const global of context.fileLocalGlobals) {
       let type = global.suggestedType || global.dataType;
@@ -1174,15 +1151,62 @@ export function generateImplementation(
 
   let output = lines.join('\n');
 
-  // Strip type-name namespace components from qualified references
-  // e.g. "Forms::D2WinImage::FuncName" → "Forms::FuncName" when D2WinImage is a struct
-  if (dataTypeNames && dataTypeNames.size > 0) {
-    output = buildNamespaceCollisionRewriter(dataTypeNames)(output);
-  }
+  // (`Forms::D2WinImage::FuncName` → `Forms::FuncName` when D2WinImage is a
+  //  struct is decided on the QualifiedId node by `qualified-name-cleanup`, not
+  //  on this file's text — see transformDecompiledCode.)
 
-  // Strip redundant namespace qualifiers from function bodies
-  if (useNamespace && namespace) {
-    output = stripRedundantNamespaceQualifiers(output, namespace, context?.knownNamespaces);
+  // (Redundant enclosing-namespace prefixes are dropped on the reference's own
+  //  QualifiedId by `enclosing-namespace-strip` — see transformDecompiledCode.)
+
+  const entryPointLines: string[] = [];
+  // ── Process entry point ───────────────────────────────────────────────────
+  // The PE entry symbol is `WinMain@16` at ROOT scope. Ghidra hangs the function
+  // under the namespace of the file it belongs to, so the emitted definition
+  // mangles as `D2Client::Engine::Application::WinMain(...)` and no link can ever
+  // find an entry point. Emit a forwarder that has the name the linker wants.
+  //
+  // The forwarder takes exactly the STACK parameters. Ghidra's recovered
+  // prototype for 1.14d has three further parameters whose storage is EBP/ESI/EBX
+  // — registers, inherited at entry, never pushed by the OS. They are part of the
+  // body's model of itself, not of the call contract, so they cannot appear in
+  // the entry signature; they are forwarded as zero and the comment says so.
+  if (useNamespace && options.organization === 'namespace') {
+    for (const func of functions) {
+      if (func.isExternal || func.isThunk || func.isLibrary) continue;
+      if (func.parentClass) continue;
+      if (!ENTRY_POINT_NAMES.has(func.name)) continue;
+      const params = func.parameters ?? [];
+      const isStackParam = (p: { storage?: string }) => !p.storage || /^Stack\[/.test(p.storage);
+      const stackParams = params.filter(isStackParam);
+      // A prototype with no stack parameters at all says nothing about the ABI;
+      // do not invent one.
+      if (params.length > 0 && stackParams.length === 0) continue;
+      const registerParams = params.filter(p => !isStackParam(p));
+      const declArgs = stackParams.length > 0
+        ? stackParams.map(p => `${p.dataType} ${p.name}`).join(', ')
+        : 'void';
+      const callArgs = [
+        ...stackParams.map(p => p.name),
+        ...registerParams.map(() => '0'),
+      ].join(', ');
+      const ret = func.returnType && func.returnType !== 'void' ? 'return ' : '';
+      entryPointLines.push('');
+      entryPointLines.push(`// Process entry point — the linker resolves \`${func.name}\` at root scope,`);
+      entryPointLines.push(`// not \`${namespace}::${func.name}\`.`);
+      if (registerParams.length > 0) {
+        entryPointLines.push(`// ${registerParams.map(p => p.name).join(', ')} are register-storage in Ghidra's`);
+        entryPointLines.push('// prototype (inherited, not pushed by the caller); they are not entry arguments.');
+      }
+      entryPointLines.push(`extern "C" ${func.returnType || 'int'} __stdcall ${func.name}(${declArgs}) {`);
+      entryPointLines.push(`    ${ret}${namespace}::${func.name}(${callArgs});`);
+      entryPointLines.push('}');
+    }
+  }
+  if (entryPointLines.length > 0) {
+    // Appended AFTER the qualifier stripper: it removes the enclosing namespace
+    // from a qualified name, which would turn the forwarder's
+    // `D2Client::Engine::Application::WinMain(...)` into a call to ITSELF.
+    output = output + '\n' + entryPointLines.join('\n');
   }
 
   // Prepend any accumulated preambles (deduplicated inline helpers, etc.)
@@ -1226,7 +1250,14 @@ export function generateFunctionImplementation(
   classInfo: DetectedClass | undefined,
   options: ReconstructOptions,
   context?: ImplGenContext,
-  isInternal?: boolean
+  isInternal?: boolean,
+  /**
+   * The namespace block this body is emitted inside, as the resolved entity.
+   * Passed explicitly rather than read back off the rendered text: the body's
+   * references are shortened against these segments, and a file that opens no
+   * namespace block must not have anything shortened.
+   */
+  enclosingNamespace?: ResolvedNamespace,
 ): string {
   const lines: string[] = [];
 
@@ -1357,6 +1388,7 @@ export function generateFunctionImplementation(
           // drift apart.
           signature: wrapperSignature(func),
           renames: bodyRenames,
+          namespaceSegments: enclosingNamespace?.segments,
         },
       );
       body = func.name ? rewriteQuestUnionMembers(transformed.code, func.name, context?.sourceFileName, [...(func.parameters ?? []), ...(func.localVariables ?? [])]) : transformed.code;
@@ -1423,7 +1455,7 @@ export function generateFunctionImplementation(
   if (context?.analyzedGlobals) {
     // The block lands inside the file's namespace block, so its pointer
     // initializers resolve from in there — same shadowing rule as the bodies.
-    setInitializerNamespace(context._enclosingNamespace);
+    setInitializerNamespace(context._enclosingResolvedNamespace);
     const block = generateStaticLocalsBlock(
       context.analyzedGlobals, func.name, options.includeAddressComments, bodyIdentifiers
     );
@@ -1595,60 +1627,6 @@ interface TransformDecompiledResult {
   identifiers?: Set<string>;
   /** Names the body used as TYPES (see TransformResult.typeNames). */
   typeNames?: Set<string>;
-}
-
-/**
- * Strip namespace prefixes that are redundant inside the enclosing namespace block.
- * Inside `namespace A::B::C`, `A::B::C::Foo()` → `Foo()`, `A::B::X()` → `X()`, etc.
- *
- * Stripping is collision-aware: removing a prefix is only safe if the segment that
- * becomes the new leading qualifier cannot be intercepted by a sibling namespace
- * reachable from a deeper enclosing scope. For example, inside
- * `D2Common::Unit::Monster`, the reference `D2Common::Path::DynamicPath::GetYPos`
- * must NOT be shortened to `Path::DynamicPath::...` when `D2Common::Unit::Path`
- * exists, because C++ would resolve `Path` to `D2Common::Unit::Path` (which has no
- * `DynamicPath`) instead of `D2Common::Path`. In that case the longest safely
- * strippable prefix is `D2Common::Unit::` → but that doesn't match here, so the
- * reference is left fully qualified.
- */
-function stripRedundantNamespaceQualifiers(
-  code: string,
-  namespace: string,
-  knownNamespaces?: Set<string>,
-): string {
-  const parts = namespace.split('::');
-  // Candidate prefixes from longest to shortest: ["A::B::C::", "A::B::", "A::"]
-  const prefixCandidates: string[] = [];
-  for (let i = parts.length; i > 0; i--) {
-    prefixCandidates.push(parts.slice(0, i).join('::') + '::');
-  }
-  const escaped = prefixCandidates.map(p => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-  // Capture the prefix AND the next segment so we can verify the shortened name
-  // still resolves to the same namespace.
-  const pattern = new RegExp(`\\b(${escaped.join('|')})([A-Za-z_]\\w*)`, 'g');
-
-  /**
-   * Is it safe to strip `prefix` (= parts[0..k]::) leaving `nextSeg` as the new
-   * leading qualifier? Unsafe when a deeper enclosing scope (parts[0..j], j>k)
-   * has a child namespace also named `nextSeg` — C++ would bind to that first.
-   */
-  const canStrip = (prefix: string, nextSeg: string): boolean => {
-    if (!knownNamespaces) return true;
-    // k = number of leading parts the prefix covers
-    const k = prefix.slice(0, -2).split('::').length;
-    for (let j = k + 1; j <= parts.length; j++) {
-      const sibling = parts.slice(0, j).join('::') + '::' + nextSeg;
-      if (knownNamespaces.has(sibling)) return false;
-    }
-    return true;
-  };
-
-  return code.split('\n').map(line => {
-    if (line.startsWith('namespace ') || line.startsWith('} // namespace')) return line;
-    return line.replace(pattern, (match, prefix: string, nextSeg: string) =>
-      canStrip(prefix, nextSeg) ? nextSeg : match,
-    );
-  }).join('\n');
 }
 
 /**
@@ -1910,6 +1888,8 @@ function transformDecompiledCode(
      * side channel.
      */
     signature?: { returnType: string; params: string };
+    /** Segments of the enclosing namespace block, from the resolution. */
+    namespaceSegments?: readonly string[];
     /** Only read when no `signature` is available - see the goto-cleanup option. */
     returnsVoid?: boolean;
     renames?: Record<string, string>;
@@ -2089,6 +2069,25 @@ function transformDecompiledCode(
       zeroForAssignedNullptr: true,
       zeroForReturnedNullptr: enclosing?.returnsNonPointer === true,
     };
+
+    // Inside a namespace block the enclosing scopes are already open, so the
+    // callee's full path is redundant — but only where the shortened form still
+    // resolves to the same entity. Segments come from the resolution.
+    const enclosingSegments = enclosing?.namespaceSegments;
+    if (enclosingSegments && enclosingSegments.length > 0) {
+      perPluginOptions['enclosing-namespace-strip'] = {
+        enclosingSegments: [...enclosingSegments],
+        knownNamespaces: context?.knownNamespaces ? [...context.knownNamespaces] : undefined,
+      };
+    }
+
+    // Ghidra hangs a class's members under a namespace named after the class;
+    // the emitter puts them in the parent. The reference side has to agree, and
+    // it is decided on the name node.
+    const collisionTypeNames = context?._namespaceCollisionTypeNames;
+    if (collisionTypeNames && collisionTypeNames.length > 0) {
+      perPluginOptions['qualified-name-cleanup'] = { typeQualifierNames: collisionTypeNames };
+    }
 
     const funcdefTypedefs = getKnownFuncDefTypedefs();
     if (funcdefTypedefs.length > 0) {

@@ -494,6 +494,8 @@ import { namespaceShadowQualifyPlugin } from './builtins/namespace-shadow-qualif
 export { namespaceShadowQualifyPlugin, type NamespaceShadowQualifyOptions } from './builtins/namespace-shadow-qualify.js';
 import { funcPtrArgCastPlugin } from './builtins/funcptr-arg-cast.js';
 export { funcPtrArgCastPlugin, getFuncPtrArgCastArityMismatches, resetFuncPtrArgCastStats, takeFuncPtrArgCastTypedefs, VOID_POINTER_SLOT, type FuncPtrArgCastOptions } from './builtins/funcptr-arg-cast.js';
+import { enclosingNamespaceStripPlugin } from './builtins/enclosing-namespace-strip.js';
+export { enclosingNamespaceStripPlugin, type EnclosingNamespaceStripOptions } from './builtins/enclosing-namespace-strip.js';
 import { qualifiedNameCleanupPlugin } from './builtins/qualified-name-cleanup.js';
 import { functionNameReconcilePlugin } from './builtins/function-name-reconcile.js';
 export { qualifiedNameCleanupPlugin, type QualifiedNameCleanupOptions } from './builtins/qualified-name-cleanup.js';
@@ -572,6 +574,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   rootScopeQualifyPlugin,     // Cleanup: crashy::vftable → ::vftable for root-scope symbols (priority 48)
   namespaceShadowQualifyPlugin, // Cleanup: Game::Launcher::f → ::Game::Launcher::f when an enclosing scope shadows `Game` (priority 49)
   qualifiedNameCleanupPlugin, // Cleanup: A::A::f → A::f, VisualStudio::f → f, f_exref → f (priority 46)
+  enclosingNamespaceStripPlugin, // Cleanup: drop the enclosing namespace prefix from a reference (priority 900, last)
   functionNameReconcilePlugin, // Cleanup: respell a reference with the declaration's name+namespace (priority 20)
   thisParamRewritePlugin,     // Cleanup: __thiscall `this` → the free function's param name (priority 46)
   shadowedTypeQualifyPlugin,  // Cleanup: (Draw**)x → (::Draw**)x when a same-named namespace shadows the type (priority 47)

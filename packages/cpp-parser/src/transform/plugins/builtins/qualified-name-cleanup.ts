@@ -18,6 +18,23 @@
  *
  *  - The `_exref` suffix Ghidra appends to an import-thunk reference
  *    (`Fog_10021_exref`); the emitted declaration carries the undecorated name.
+ *
+ *  - A qualifier segment that names a struct/union/enum and sits DIRECTLY before
+ *    the name: `Forms::D2WinImage::Draw` → `Forms::Draw`, because Ghidra hangs a
+ *    class's members under a namespace named after the class while the emitter
+ *    puts them in the parent. Only the last qualifier segment, and only when
+ *    something else qualifies it: an INTERMEDIATE type-named segment
+ *    (`D2Common::Item::ItemMods::Fn`, where `Item` is also a struct) is a real
+ *    enclosing namespace, and dropping it points the reference at a sibling
+ *    scope that does not exist.
+ *
+ *    This was a `String.replace` over the whole emitted file. It could not tell
+ *    a reference from anything else that looks like one, and it rewrote the
+ *    file's own `namespace D2Common::Item::ItemMods {` header — the guard looks
+ *    for a following `::`, and a namespace declaration is followed by ` {` — so
+ *    every definition in the unit moved to a namespace its header never
+ *    declared. Deciding it on the QualifiedId node cannot reach a declaration,
+ *    a comment or a string literal.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -32,6 +49,11 @@ export interface QualifiedNameCleanupOptions extends PluginOptions {
   collapseDuplicateQualifiers?: boolean;
   /** Strip the trailing `_exref` import-thunk suffix from identifiers (default true) */
   stripExrefSuffix?: boolean;
+  /**
+   * Struct/union/enum names. A qualifier segment naming one of these is dropped
+   * when it is the LAST segment of the qualifier and is itself qualified.
+   */
+  typeQualifierNames?: string[];
 }
 
 const DEFAULT_DROPPED_QUALIFIERS = ['VisualStudio', 'compiler'];
@@ -45,7 +67,8 @@ function segmentName(part: Identifier | TemplateType): string | undefined {
 function cleanQualifier(
   qualifier: (Identifier | TemplateType)[],
   dropped: Set<string>,
-  collapseDuplicates: boolean
+  collapseDuplicates: boolean,
+  typeNames: Set<string>
 ): (Identifier | TemplateType)[] | undefined {
   const out: (Identifier | TemplateType)[] = [];
   let changed = false;
@@ -66,6 +89,17 @@ function cleanQualifier(
     out.push(part);
   }
 
+  // Penultimate-only: the segment immediately before the name, never an
+  // intermediate one, and never the sole qualifier (`D2WinImage::Draw` is a
+  // member reference, not a namespace path).
+  if (typeNames.size > 0 && out.length >= 2) {
+    const last = segmentName(out[out.length - 1]);
+    if (last !== undefined && typeNames.has(last)) {
+      out.pop();
+      changed = true;
+    }
+  }
+
   return changed ? out : undefined;
 }
 
@@ -75,6 +109,7 @@ function createQualifiedNameCleanupTransformer(
   const dropped = new Set(options.dropQualifiers ?? DEFAULT_DROPPED_QUALIFIERS);
   const collapseDuplicates = options.collapseDuplicateQualifiers ?? true;
   const stripExref = options.stripExrefSuffix ?? true;
+  const typeNames = new Set(options.typeQualifierNames ?? []);
 
   return createTransformer({
     visitNode(n: ASTNode): ASTNode | undefined {
@@ -91,7 +126,7 @@ function createQualifiedNameCleanupTransformer(
       const q = n as QualifiedId;
       if (q.qualifier.length === 0) return undefined;
 
-      const cleaned = cleanQualifier(q.qualifier, dropped, collapseDuplicates);
+      const cleaned = cleanQualifier(q.qualifier, dropped, collapseDuplicates, typeNames);
       if (!cleaned) return undefined;
 
       // Nothing qualifies the name any more — emit it bare, unless the
