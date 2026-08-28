@@ -240,6 +240,24 @@ const OPERATOR_PRECEDENCE: Record<string, number> = {
 const ASSOCIATIVE_OPS = new Set(['+', '*', '&&', '||', '&', '|', '^']);
 
 /**
+ * The last statement of a switch body when it is a `case`/`default` label with
+ * nothing after it. Returns null for every other shape, so an empty label that
+ * is followed by more cases (a deliberate fallthrough) is never touched.
+ */
+function trailingEmptyLabel(body: ASTNode | null | undefined): ASTNode | null {
+  if (!body || body.kind !== NodeKind.CompoundStmt) return null;
+  const statements = (body as CompoundStmt).statements;
+  const last = statements[statements.length - 1];
+  if (!last) return null;
+  if (last.kind !== NodeKind.CaseStmt && last.kind !== NodeKind.DefaultStmt) return null;
+  const inner = (last as CaseStmt | DefaultStmt).statement;
+  if (!inner) return last;
+  if (inner.kind === NodeKind.NullStmt) return last;
+  if (inner.kind === NodeKind.CompoundStmt && (inner as CompoundStmt).statements.length === 0) return last;
+  return null;
+}
+
+/**
  * C++ Code Emitter
  */
 export class CppEmitter {
@@ -1879,7 +1897,27 @@ export class CppEmitter {
     }
   }
 
+  /**
+   * The trailing `case`/`default` of a switch whose statement is empty. C++
+   * (before C++23) needs a statement after a label, so `case X:` as the last
+   * thing before the closing brace is a hard error. Falling off the end of a
+   * switch and breaking out of it are the same thing, so `break;` is faithful —
+   * but ONLY for the last label. An empty label anywhere else is a deliberate
+   * fallthrough and must stay empty.
+   */
+  private emptyTrailingLabel: ASTNode | null = null;
+
   private emitSwitchStmt(node: SwitchStmt): void {
+    const previousTrailingLabel = this.emptyTrailingLabel;
+    this.emptyTrailingLabel = trailingEmptyLabel(node.body);
+    try {
+      this.emitSwitchStmtInner(node);
+    } finally {
+      this.emptyTrailingLabel = previousTrailingLabel;
+    }
+  }
+
+  private emitSwitchStmtInner(node: SwitchStmt): void {
     this.write('switch');
     if (this.style.spaceAfterKeyword) this.write(' ');
     this.write('(');
@@ -1904,8 +1942,12 @@ export class CppEmitter {
     this.newline();
     this.indentLevel++;
     this.write(this.indent());
-    this.emitNode(node.statement);
-    if (this.needsSemicolon(node.statement)) this.write(';');
+    if (node === this.emptyTrailingLabel) {
+      this.write('break;');
+    } else {
+      this.emitNode(node.statement);
+      if (this.needsSemicolon(node.statement)) this.write(';');
+    }
     this.indentLevel--;
   }
 
@@ -1914,8 +1956,12 @@ export class CppEmitter {
     this.newline();
     this.indentLevel++;
     this.write(this.indent());
-    this.emitNode(node.statement);
-    if (this.needsSemicolon(node.statement)) this.write(';');
+    if (node === this.emptyTrailingLabel) {
+      this.write('break;');
+    } else {
+      this.emitNode(node.statement);
+      if (this.needsSemicolon(node.statement)) this.write(';');
+    }
     this.indentLevel--;
   }
 

@@ -50,15 +50,15 @@ import type {
 import { resolveOverridePlaceholders } from './impl.js';
 import { VOID_POINTER_SLOT } from '@ghidra-mcp/cpp-parser';
 
-import { emittedFieldType, generateHeader, setKnownFuncDefs, sigType } from './header.js';
+import { emittedFieldType, generateHeader, generateFunctionDeclaration, setKnownFuncDefs, sigType } from './header.js';
 import { generateImplementation, setQuestStructLayouts, setStructFieldRenames, decompiledReturnType, decompiledFunctionName, type ImplGenContext, type FuncPtrArgCastTables } from './impl.js';
 import { generateCMakeLists, generateTopLevelCMake, generateTargetCMake, generateUnsortedCMake } from './cmake.js';
 import { generateSourceMap } from './sourcemap.js';
 import { generateReadme } from './readme.js';
 import { organizeByNamespace, getFilePath, setModuleNames, setNamespaceCollisionTypes, normalizeQualifiedReference } from './namespace.js';
 import { buildNamespaceResolution, namespaceResolution, renderNamespace } from './namespace-resolution.js';
-import { isUnreferenceableArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, setInitializerSignatureTables, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType } from './globals-header.js';
-import { isPlatformOrBuiltinType, generatePlatformHeader, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
+import { resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, getDeclarationClosureReport, isUnreferenceableArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, setInitializerSignatureTables, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType } from './globals-header.js';
+import { isPlatformOrBuiltinType, isLibraryType, generatePlatformHeader, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
 import { createOverrideRegistry } from '../overrides/index.js';
 import { createLibraryRegistry } from '../library/index.js';
 import { createMethodConversionRegistry, getOrCreateRegistry, applyMethodConversions, detectMethodConversionsFromTags, type MethodCallMapping, type MethodConversionRegistry } from '../methods/index.js';
@@ -215,6 +215,13 @@ export function generateProject(
   // (b) mac-merged functions from a secondary source (which is extracted
   // WITHOUT excludePatterns), still arrive here. Filtering by namespace at the
   // single codegen choke point closes both gaps.
+  //
+  // The declaration closure needs the model as Ghidra gave it — this filter is
+  // exactly what creates the gap it closes — so it is captured first. Nothing
+  // about that changes what is emitted.
+  resetDeclaredNames();
+  setDeclarationClosureModel(functions, globals as AnalyzedDataSymbol[]);
+
   const excludeNs = options.excludeNamespaces ?? [];
   if (excludeNs.length > 0) {
     const nsMatches = (ns: string | undefined | null): boolean => {
@@ -245,6 +252,18 @@ export function generateProject(
     if (dropped > 0) {
       console.log(`Excluded ${dropped} function(s) in excluded namespaces (no file emitted for them)`);
     }
+  }
+
+  // What survived the filter is what gets a definition, and therefore what a
+  // bare call needs QUALIFYING rather than declaring. Everything else that a
+  // body calls is a closure candidate.
+  {
+    const emittedFunctionNames = new Set<string>();
+    for (const f of functions) emittedFunctionNames.add(f.name);
+    setDeclarationClosureEmitters(
+      emittedFunctionNames,
+      makeClosurePrototypeRenderer(dataTypes, options),
+    );
   }
 
   // Initialize namespace collapsing with module names from project config
@@ -720,8 +739,115 @@ export function generateProject(
   reportUnresolvableIncludes(project);
   reportCaseCollidingOutputPaths(project);
   reportGlobalsTakingATypeName();
+  reportDeclarationClosure();
 
   return project;
+}
+
+/**
+ * What the closure declared, and what it refused to.
+ *
+ * The refusals are the interesting half: each class is a separate defect the
+ * closure deliberately does not paper over, and the count is how much of the
+ * "was not declared" error family is NOT a closure problem.
+ */
+function reportDeclarationClosure(): void {
+  const report = getDeclarationClosureReport();
+  if (!report) return;
+  const byOrigin = new Map<string, number>();
+  for (const d of report.declarations) byOrigin.set(d.origin, (byOrigin.get(d.origin) ?? 0) + 1);
+  if (report.declarations.length > 0) {
+    const parts = [...byOrigin].map(([k, v]) => `${v} ${k}`).join(', ');
+    console.log(`Declaration closure: ${report.declarations.length} declaration(s) added (${parts})`);
+  }
+  if (report.unresolved.size > 0) {
+    const total = [...report.unresolved.values()].reduce((a, l) => a + l.length, 0);
+    console.log(`Declaration closure: ${total} referenced name(s) left undeclared, by cause:`);
+    for (const [reason, names] of [...report.unresolved].sort((a, b) => b[1].length - a[1].length)) {
+      const sample = names.slice(0, 6).join(', ');
+      console.log(`  ${String(names.length).padStart(5)}  ${reason}  e.g. ${sample}${names.length > 6 ? ', ...' : ''}`);
+    }
+  }
+}
+
+/**
+ * Build the prototype renderer the declaration closure uses for a callee that
+ * has no emitted definition.
+ *
+ * The signature is Ghidra's, unedited. What the renderer will NOT do is emit a
+ * prototype it cannot spell honestly: a parameter or return type that is neither
+ * a builtin, a platform type, nor a struct/union this build declares would have
+ * to be guessed at, and a guessed prototype compiles a call that cannot be
+ * right. Those are refused and reported instead.
+ *
+ * Struct and union types reach the closure block by pointer, so a forward
+ * declaration is enough and is emitted alongside. A by-value aggregate is not:
+ * that needs the full definition, which globals.h has no way to order correctly.
+ */
+/**
+ * Ghidra type names that describe a byte layout rather than a C type. They pass
+ * `isPlatformOrBuiltinType` (the emitter maps them elsewhere) but no header
+ * declares them, so a declaration that spells one is not a declaration at all.
+ */
+const GHIDRA_PSEUDO_TYPE_NAMES = new Set([
+  'string', 'TerminatedCString', 'string-utf8', 'undefined', 'code',
+]);
+
+function makeClosurePrototypeRenderer(
+  dataTypes: ExtractedDataType[],
+  options: ReconstructOptions,
+): (func: ExtractedFunction) => string | null {
+  const forwardDeclarable = new Set<string>();
+  for (const dt of dataTypes) {
+    if (dt.kind === 'STRUCTURE' || dt.kind === 'UNION') {
+      if (!isLibraryType(dt.name, dt.category)) forwardDeclarable.add(dt.name);
+    }
+  }
+
+  const baseOf = (type: string): string =>
+    type.replace(/\[[^\]]*\]/g, '')
+        .replace(/[*&]/g, '')
+        .replace(/\b(const|volatile|struct|union|enum|unsigned|signed)\b/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+  // Names the platform header already declares — the CRT/Win32 stubs, the
+  // curated excluded-symbol prototypes, the inline forwarders. A second
+  // declaration here is not a closure, it is an "ambiguating new declaration"
+  // (or, for a CRT name that is a MACRO, a macro invoked with the wrong arity).
+  const platformDeclared = platformDeclaredFunctionNames();
+
+  return (func: ExtractedFunction): string | null => {
+    if (platformDeclared.has(func.name)) return null;
+    // A secondary-source function is emitted (where it is emitted at all) behind
+    // `#ifdef D2_PLATFORM_MAC`, and every body that calls it is behind the same
+    // guard. An unconditional declaration in the one header the WHOLE tree
+    // includes is not what those call sites are missing — and several of these
+    // names are libc's, which the real headers declare differently.
+    if (func.platform) return null;
+    const spelled = [func.returnType, ...func.parameters.map(p => p.dataType)].map(sigType);
+    const forwards: string[] = [];
+    for (const type of spelled) {
+      const base = baseOf(type);
+      if (!base || base === 'void') continue;
+      // Ghidra pseudo-types that the platform predicate accepts but no header
+      // declares: `string` is Ghidra's name for a NUL-terminated byte run, not
+      // a C type, and a prototype spelling it is undeclared wherever it lands.
+      if (GHIDRA_PSEUDO_TYPE_NAMES.has(base)) return null;
+      if (isPlatformOrBuiltinType(base)) continue;
+      if (!forwardDeclarable.has(base)) return null;
+      // Only by pointer — an aggregate passed or returned by value needs the
+      // layout, and a forward declaration cannot supply it.
+      if (!/[*&]/.test(type)) return null;
+      forwards.push(`struct ${base};`);
+    }
+    const decl = generateFunctionDeclaration(func, options);
+    // `generateFunctionDeclaration` prefixes Ghidra's comment block; the closure
+    // block wants the one line.
+    const line = decl.split('\n').filter(l => !l.startsWith('//')).join('\n').trim();
+    if (!line) return null;
+    return [...new Set(forwards), line].join('\n');
+  };
 }
 
 /**

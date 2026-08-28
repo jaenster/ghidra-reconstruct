@@ -9,7 +9,7 @@
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, CompoundStmt, DeclStmt, VariableDecl,
-  IfStmt, ForStmt, WhileStmt, DoWhileStmt, SwitchStmt,
+  IfStmt, ForStmt, WhileStmt, DoWhileStmt,
 } from '../../../ast/nodes.js';
 import { findIdentifiers } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
@@ -109,12 +109,11 @@ function createDeclScopeSinkTransformer(_options: DeclScopeSinkOptions = {}): Tr
           const doWhileStmt = target as DoWhileStmt;
           conditionParts = [doWhileStmt.condition];
           bodyNode = doWhileStmt.body;
-        } else if (target.kind === NodeKind.SwitchStmt) {
-          const switchStmt = target as SwitchStmt;
-          conditionParts = [switchStmt.condition];
-          if (switchStmt.init) conditionParts.push(switchStmt.init);
-          bodyNode = switchStmt.body;
         }
+        // NOT a switch. A switch body's statements begin at the first `case`
+        // label, so a declaration prepended there is unreachable AND crosses
+        // every label — `jump to case label` on each one. Leaving it where it
+        // is keeps it before the switch, which is where it has to be.
 
         if (!bodyNode) continue;
 

@@ -5,11 +5,12 @@
  * Also provides helpers for generating static local declarations.
  */
 
-import type { AnalyzedDataSymbol, ReconstructOptions, DataValue, ExtractedDataType, ExtractedStruct, ExtractedUnion, ExtractedFunctionDefinition } from '../types.js';
+import type { AnalyzedDataSymbol, ReconstructOptions, DataValue, ExtractedDataType, ExtractedStruct, ExtractedUnion, ExtractedFunctionDefinition, ExtractedFunction } from '../types.js';
 import { isPlatformOrBuiltinType, isLibraryType, isStructType, castPointerInitializer, normalizeDataValue, isCharacterValueType, isMsvcEhInternal, normalizeWideCharType, isVoidPointerSpelling, rootQualifyShadowedType, platformDeclaredFunctionNames } from './platform-types.js';
 import { generateStructDeclaration, generateUnionDeclaration, generateFunctionDefinitionDeclaration } from './header.js';
 import { normalizeQualifiedReference } from './namespace.js';
 import { namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
+import { computeDeclarationClosure, renderClosureBlock, type ClosureResult } from './declaration-closure.js';
 
 /**
  * Exact Win32 SDK typedef names (not `LP`/`IMAGE_` prefixed) seen as
@@ -149,6 +150,56 @@ const functionCollidingGlobals = new Set<AnalyzedDataSymbol>();
  */
 const headerDeclaredGlobals = new Set<AnalyzedDataSymbol>();
 
+/**
+ * Every NAME the tree actually emits a declaration for.
+ *
+ * The model is not the answer to "is this declared?": a symbol Ghidra has can be
+ * dropped by any of the globals filters and still be referenced by a body — that
+ * asymmetry IS the closure gap. So the emitters record what they emit, and the
+ * closure pass reads this rather than the model. Over-recording is the safe
+ * direction (it suppresses a closure declaration, leaving an error); under-
+ * recording risks a second, conflicting declaration.
+ */
+const emittedDeclarationNames = new Set<string>();
+
+export function recordDeclaredName(name: string | undefined | null): void {
+  if (name) emittedDeclarationNames.add(name);
+}
+
+export function resetDeclaredNames(): void {
+  emittedDeclarationNames.clear();
+}
+
+export function getDeclaredNames(): ReadonlySet<string> {
+  return emittedDeclarationNames;
+}
+
+/**
+ * The full pre-exclusion model, held for the closure pass. Codegen drops the
+ * excluded namespaces before anything is emitted, so by the time the gap is
+ * measurable the data that would close it is already gone.
+ */
+let closureFunctions: ReadonlyArray<ExtractedFunction> = [];
+let closureGlobals: ReadonlyArray<AnalyzedDataSymbol> = [];
+let closureEmittedFunctionNames: ReadonlySet<string> = new Set<string>();
+let closureRenderPrototype: ((func: ExtractedFunction) => string | null) | undefined;
+
+export function setDeclarationClosureModel(
+  functions: ReadonlyArray<ExtractedFunction>,
+  globals: ReadonlyArray<AnalyzedDataSymbol>,
+): void {
+  closureFunctions = functions;
+  closureGlobals = globals;
+}
+
+export function setDeclarationClosureEmitters(
+  emittedFunctionNames: ReadonlySet<string>,
+  renderPrototype: (func: ExtractedFunction) => string | null,
+): void {
+  closureEmittedFunctionNames = emittedFunctionNames;
+  closureRenderPrototype = renderPrototype;
+}
+
 /** Record that an output file emits these globals itself. */
 export function markGlobalsClaimed(globals: Iterable<AnalyzedDataSymbol> | undefined): void {
   if (!globals) return;
@@ -273,6 +324,13 @@ export function generateGlobalsHeader(
   // an error ("using typedef-name 'X' after 'struct'"). Recognised either by the
   // type's Ghidra category (a system-header path) or by a conservative Win32 name set.
   const isSkippableLibraryType = makeLibraryTypeSkipPredicate(dataTypes);
+
+  // Aggregates this build declares somewhere, so a `struct X;` here is a forward
+  // declaration of the same type rather than a second, unrelated one.
+  const forwardDeclarableTypeNames = new Set<string>();
+  for (const dt of dataTypes ?? []) {
+    if (dt.kind === 'STRUCTURE' || dt.kind === 'UNION') forwardDeclarableTypeNames.add(dt.name);
+  }
 
   globals = globals.filter(isEmittableGlobal);
   functionCollidingGlobals.clear();
@@ -429,8 +487,11 @@ export function generateGlobalsHeader(
         const comment = constant.address ? `// @${constant.address}` : '';
         const type = constant.suggestedType || constant.dataType;
         const name = constant.suggestedName || constant.name;
-        const value = ensureHexPrefix(constant.value ?? '0', type);
-        lines.push(`constexpr ${normalizeArrayDeclaration(type, name)} = ${value}; ${comment}`);
+        const arrayInfo = inferArrayDeclaration(constant);
+        const value = renderGlobalScalarInitializer(constant.value, type, arrayInfo?.count);
+        const init = arrayInfo ? `{ ${value} }` : value;
+        recordDeclaredName(name);
+        lines.push(`constexpr ${normalizeArrayDeclaration(type, name)} = ${init}; ${comment}`);
       }
 
       if (namespace) {
@@ -595,7 +656,66 @@ export function generateGlobalsHeader(
     }
   }
 
+  // Everything above declared what the globals model said to declare. The
+  // bodies, meanwhile, reference names nothing declared at all — callees in
+  // excluded namespaces, symbols the filters above dropped, and Ghidra's own
+  // names for data it never typed. This is the one header every translation
+  // unit includes, so it is where that closure belongs.
+  if (bodyIdentifierFnCounts && bodyIdentifierFnCounts.size > 0) {
+    const closure = computeDeclarationClosure({
+      allFunctions: closureFunctions,
+      allGlobals: closureGlobals,
+      referenced: bodyIdentifierFnCounts,
+      declared: emittedDeclarationNames,
+      emittedFunctionNames: closureEmittedFunctionNames,
+      renderPrototype: closureRenderPrototype ?? (() => null),
+      renderExtern: (symbol) => {
+        // Root scope: the references that fail are the UNQUALIFIED ones, so the
+        // declaration has to be reachable unqualified too.
+        const type = normalizeGlobalDeclType(symbol.suggestedType || symbol.dataType);
+        const name = sanitizeSymbolName(symbol.suggestedName || symbol.name);
+        if (!type || !name) return null;
+        const base = type.replace(/[*&]/g, '').replace(/\[[^\]]*\]/g, '')
+          .replace(/\b(const|volatile|struct|union|enum|unsigned|signed)\b/g, '')
+          .replace(/\s+/g, ' ').trim();
+        if (isMsvcEhInternal(base)) return null;
+        // This block sits at the END of globals.h, and a TU can include a type's
+        // owning header AFTER it. A named type therefore needs a forward
+        // declaration here, and one this file is allowed to make: the SDK
+        // provides its own types as typedefs, and `struct X;` after a typedef is
+        // an error. When neither applies the symbol is left undeclared and
+        // reported — an `extern` naming a type nobody declares is not a fix.
+        // `string` and friends are Ghidra byte-layout names, not C types: a
+        // declaration spelling one names a type nothing declares.
+        if (['string', 'TerminatedCString', 'string-utf8', 'code'].includes(base)) return null;
+        const forwards: string[] = [];
+        if (base && base !== 'void' && !isPlatformOrBuiltinType(base)) {
+          if (isSkippableLibraryType(base)) return null;
+          if (!forwardDeclarableTypeNames.has(base)) return null;
+          if (!/[*&]/.test(type)) return null;
+          forwards.push(`struct ${base};`);
+        }
+        const arrayInfo = inferArrayDeclaration(symbol);
+        const decl = arrayInfo
+          ? `extern ${arrayInfo.type} ${name}[${arrayInfo.count}];`
+          : `extern ${normalizeArrayDeclaration(type, name)};`;
+        return [...forwards, decl].join('\n');
+      },
+      sanitize: sanitizeSymbolName,
+    });
+    for (const line of renderClosureBlock(closure.declarations)) lines.push(line);
+    for (const d of closure.declarations) recordDeclaredName(d.name);
+    lastClosureResult = closure;
+  }
+
   return lines.join('\n');
+}
+
+/** The closure the last `generateGlobalsHeader` computed, for reporting. */
+let lastClosureResult: ClosureResult | undefined;
+
+export function getDeclarationClosureReport(): ClosureResult | undefined {
+  return lastClosureResult;
 }
 
 /**
@@ -678,6 +798,7 @@ export function generateExternDeclaration(
     if (lines.length > 0) evidence = lines.map(l => `// ${l}`).join('\n') + '\n';
   }
 
+  recordDeclaredName(name);
   let declaration = `${evidence}extern ${normalizeArrayDeclaration(type, name)};`;
 
   if (includeAddressComment) {
@@ -730,13 +851,16 @@ export function generateStaticLocalDeclaration(
     } else {
       // An address stored in a pointer slot still needs the pointer cast — the
       // hex prefix only makes it a valid literal, not a valid initializer.
-      initializer = ` = ${castPointerInitializer(type, ensureHexPrefix(symbol.value, type))}`;
+      const valueArrayInfo = inferArrayDeclaration(symbol);
+      const body = renderGlobalScalarInitializer(symbol.value, type, valueArrayInfo?.count);
+      initializer = ` = ${valueArrayInfo ? `{ ${body} }` : body}`;
     }
   } else if (type === 'auto') {
     // Can't have uninitialized auto
     initializer = ' = {}';
   }
 
+  recordDeclaredName(name);
   let declaration = `static ${normalizeArrayDeclaration(type, name)}${initializer};`;
 
   if (includeAddressComment) {
@@ -1792,7 +1916,10 @@ function isArrayElementSymbol(name: string, allNames: Set<string>): boolean {
  */
 function ensureHexPrefix(value: string, declaredType?: string): string {
   if (!/^[0-9a-fA-F]+$/.test(value)) return value;
-  if (declaredType && isCharacterValueType(declaredType)) {
+  // Only the types Ghidra renders as TEXT. `uint8_t` / `byte` / `int8_t` are
+  // character-sized but Ghidra renders them as hex, so reading one as a
+  // character turns the byte 0 into `'0'`, which is 0x30.
+  if (declaredType && isTextRenderedType(declaredType)) {
     return value.length === 1 ? `'${escapeStringForC(value)}'` : value;
   }
   if (value.length === 8) return `0x${value}`;
@@ -1800,6 +1927,119 @@ function ensureHexPrefix(value: string, declaredType?: string): string {
   return value;
 }
 
+
+/**
+ * Types whose VALUE Ghidra renders as the text of the bytes rather than as a
+ * number. A `char` at 006ed5b4 holding 0x43 comes back as `"C"`, and a
+ * `char[4]` holding "end\0" comes back as `"end"` — neither is a C expression.
+ * Emitted verbatim they become undeclared identifiers (`= C;`, `= { end };`),
+ * or, when the byte is a control character, a literal newline inside the
+ * declaration (`char szOOGPasswordDialogTimeFmt = <CR>;`).
+ *
+ * Only the genuinely character-shaped spellings are listed. `uint8_t` / `byte` /
+ * `undefined1` are deliberately absent: Ghidra renders those as hex, so reading
+ * their value as text would corrupt every one of them.
+ */
+const TEXT_RENDERED_TYPES = new Set(['char', 'CHAR', 'signed char', 'unsigned char']);
+
+function isTextRenderedType(type: string): boolean {
+  const base = type
+    .replace(/\[[^\]]*\]/g, '')
+    .replace(/\b(const|volatile)\b/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return TEXT_RENDERED_TYPES.has(base);
+}
+
+/**
+ * Ghidra pseudo-types whose "value" is listing text, not data: a resource blob
+ * renders as `<Icon-Image>` or as the bare renderer name `GroupIcon`, and
+ * section padding renders as `align(1)`. `normalizeDataValue` already catches
+ * the two bracketed/parenthesised shapes by their punctuation; the bare word is
+ * indistinguishable from a symbol reference by text alone, so it is caught by
+ * the TYPE instead.
+ */
+function isGhidraRenderedPseudoType(type: string): boolean {
+  const base = type.replace(/\[[^\]]*\]/g, '').replace(/[*&]/g, '').trim();
+  return /Resource$/.test(base) || base === 'Alignment';
+}
+
+/**
+ * One byte of Ghidra-rendered text as a C character literal.
+ *
+ * A code unit above 0xFF means the text did not come back as bytes — that is a
+ * decode fault upstream, so the numeric code is emitted rather than a literal
+ * that would silently narrow.
+ */
+function charLiteralFor(ch: string): string {
+  const code = ch.charCodeAt(0);
+  if (code > 0xff) return `0x${code.toString(16)}`;
+  if (ch === "'") return "'\\''";
+  if (ch === '\\') return "'\\\\'";
+  if (code < 0x20 || code > 0x7e) return `'\\x${code.toString(16).padStart(2, '0')}'`;
+  return `'${ch}'`;
+}
+
+/**
+ * Render Ghidra's rendered text for a character slot as an initializer.
+ *
+ * `elementCount` is the declared array length when the slot is an array; the
+ * list is padded with 0 to that length (Ghidra stops the text at the NUL) and
+ * truncated to it when the text is longer, because the declaration's length is
+ * what the rest of the emitted tree agrees on.
+ *
+ * Returns the initializer BODY — the caller supplies the braces, exactly as it
+ * already does for every other value.
+ */
+export function renderTextDataInitializer(rawValue: string | undefined, elementCount?: number): string {
+  const text = rawValue ?? '';
+  if (elementCount === undefined) {
+    return text.length > 0 ? charLiteralFor(text[0]) : '0';
+  }
+  const parts: string[] = [];
+  for (let i = 0; i < elementCount; i++) {
+    parts.push(i < text.length ? charLiteralFor(text[i]) : '0');
+  }
+  return parts.join(', ');
+}
+
+/**
+ * The one place a global's raw Ghidra `value` becomes a C initializer body.
+ *
+ * Three emitters used to do this by hand — globals.h's `static` declarations,
+ * globals.cpp's "initialized scalars", and the co-located per-file statics in
+ * impl.ts — and they disagreed: one quoted a single character, one did not, and
+ * none of them handled a multi-character `char[N]`. Same input, same output,
+ * everywhere.
+ *
+ * Returns the initializer BODY; callers wrap it in braces where the declaration
+ * is an array.
+ */
+export function renderGlobalScalarInitializer(
+  rawValue: string | undefined,
+  declaredType: string,
+  elementCount?: number
+): string {
+  if (isGhidraRenderedPseudoType(declaredType)) {
+    // Value-initialize: there is no datum here to carry, and `{}` is valid for
+    // the aggregate spelling and the scalar one alike.
+    return '{}';
+  }
+  if (isTextRenderedType(declaredType)) {
+    // The caller's array info is derived from byte sizes and is absent for a
+    // type that already carries its own dimension (`char[4]`). Take the length
+    // from the declaration itself when that happens, or the text collapses to
+    // its first character.
+    const declaredCount = declaredType.match(/\[\s*(\d+)\s*\]\s*$/);
+    return renderTextDataInitializer(
+      rawValue,
+      elementCount ?? (declaredCount ? Number(declaredCount[1]) : undefined),
+    );
+  }
+  let value = normalizeDataValue(rawValue ?? '0');
+  if ((value === '0' || value === '0x0') && isStructType(declaredType)) return '{}';
+  return castPointerInitializer(declaredType, ensureHexPrefix(value, declaredType));
+}
 
 /**
  * Escape a string for use in a C string literal
@@ -1917,8 +2157,10 @@ export function generateGlobalsImpl(
       const name = sanitizeSymbolName(global.suggestedName || global.name);
       const arrayInfo = inferArrayDeclaration(global);
       if (arrayInfo && (!global.initializedData || global.initializedData.kind === 'array')) {
+        recordDeclaredName(name);
         ls.push(`extern ${arrayInfo.type} ${name}[${arrayInfo.count}];`);
       } else {
+        recordDeclaredName(name);
         ls.push(`extern ${normalizeArrayDeclaration(type, name)};`);
       }
     });
@@ -1982,19 +2224,13 @@ export function generateGlobalsImpl(
       emitGlobalDefsWithIfdef(lines, withoutData, options.includeAddressComments, (global, ls) => {
         const type = normalizeGlobalDeclType(global.suggestedType || global.dataType);
         const name = sanitizeSymbolName(global.suggestedName || global.name);
-        let value = normalizeDataValue(global.value ?? '0');
-
-        // Struct types can't be initialized with = 0; use = {} instead
-        if ((value === '0' || value === '0x0') && isStructType(type)) {
-          value = '{}';
-        }
 
         if (options.includeAddressComments) {
           ls.push(`// @${global.address}`);
         }
 
-        value = castPointerInitializer(type, value);
         const arrayInfo = inferArrayDeclaration(global);
+        const value = renderGlobalScalarInitializer(global.value, type, arrayInfo?.count);
         if (arrayInfo) {
           ls.push(`${arrayInfo.type} ${name}[${arrayInfo.count}] = { ${value} };`);
         } else {
@@ -2445,19 +2681,13 @@ export function generateColocatedGlobalsImpl(
       emitGlobalDefsWithIfdef(lines, withoutData, options.includeAddressComments, (global, ls) => {
         const type = normalizeGlobalDeclType(global.suggestedType || global.dataType);
         const name = sanitizeSymbolName(global.suggestedName || global.name);
-        let value = normalizeDataValue(global.value ?? '0');
-
-        // Struct types can't be initialized with = 0; use = {} instead
-        if ((value === '0' || value === '0x0') && isStructType(type)) {
-          value = '{}';
-        }
 
         if (options.includeAddressComments) {
           ls.push(`// @${global.address}`);
         }
 
-        value = castPointerInitializer(type, value);
         const arrayInfo = inferArrayDeclaration(global);
+        const value = renderGlobalScalarInitializer(global.value, type, arrayInfo?.count);
         if (arrayInfo) {
           ls.push(`${arrayInfo.type} ${name}[${arrayInfo.count}] = { ${value} };`);
         } else {

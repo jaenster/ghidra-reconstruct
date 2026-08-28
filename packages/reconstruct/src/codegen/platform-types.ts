@@ -1141,6 +1141,33 @@ export function generatePlatformHeader(
   lines.push('#define SEXT48(x) ((int64_t)(int32_t)(x))');
   lines.push('');
 
+  // Ghidra pseudo-operations — instructions the decompiler cannot express in C
+  // and calls out by name instead. They reach bodies exactly as written, so they
+  // need a definition, not a declaration; each is what the instruction does.
+  lines.push('// Ghidra pseudo-operations (instructions with no C spelling)');
+  lines.push('#define ABS(x) ((x) < 0 ? -(x) : (x))');
+  lines.push('static inline uint64_t rdtsc(void) {');
+  lines.push('#if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))');
+  lines.push('  uint32_t nLow, nHigh;');
+  lines.push('  __asm__ __volatile__("rdtsc" : "=a"(nLow), "=d"(nHigh));');
+  lines.push('  return ((uint64_t)nHigh << 32) | nLow;');
+  lines.push('#else');
+  lines.push('  return 0;');
+  lines.push('#endif');
+  lines.push('}');
+  lines.push('// `swi(n)` is INT n. Ghidra models it as returning the handler address the');
+  lines.push('// body then calls; there is no such value at runtime, so the trap is raised');
+  lines.push('// and a null handler returned rather than pretending otherwise.');
+  lines.push('static inline void* swi(int nVector) {');
+  lines.push('#if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))');
+  lines.push('  if (nVector == 3) __asm__ __volatile__("int3");');
+  lines.push('#else');
+  lines.push('  (void)nVector;');
+  lines.push('#endif');
+  lines.push('  return nullptr;');
+  lines.push('}');
+  lines.push('');
+
   // Ghidra carry/borrow detection macros
   lines.push('// Ghidra carry/borrow detection');
   lines.push('#define CARRY4(a, b) ((uint32_t)(a) + (uint32_t)(b) < (uint32_t)(a))');

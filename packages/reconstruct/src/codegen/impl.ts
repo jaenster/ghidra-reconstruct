@@ -24,7 +24,7 @@ import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js
 import { namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 import { cleanFunctionComment, guardedFuncDefTypedef } from './header.js';
 import { normalizeSignatureType, collapseFuncPtrTypedef, rootQualifyShadowedType, emittedParameterName } from './platform-types.js';
-import { generateStaticLocalsBlock, emitDataValue, inferArrayDeclaration, normalizeArrayDeclaration, braceArrayInitializer, isFuncDefTypedefName, getKnownFuncDefTypedefs, getKnownEnumConstants, setInitializerNamespace } from './globals-header.js';
+import { generateStaticLocalsBlock, emitDataValue, inferArrayDeclaration, normalizeArrayDeclaration, braceArrayInitializer, isFuncDefTypedefName, getKnownFuncDefTypedefs, getKnownEnumConstants, setInitializerNamespace, renderGlobalScalarInitializer, recordDeclaredName } from './globals-header.js';
 
 /** normalizeSignatureType + fn-ptr-typedef double-indirection collapse, for
  *  emitting function parameter and return types ("fpFoo *" → "fpFoo"). */
@@ -1029,6 +1029,11 @@ export function generateImplementation(
 
       if (type === 'auto') type = 'int';
 
+      // A file-local static IS a declaration — and the only one this symbol
+      // gets. The closure pass must not add an `extern` for it: that would be a
+      // conflicting declaration in this TU and a phantom symbol in every other.
+      recordDeclaredName(name);
+
       if (global.initializedData) {
         const arrayInfo = inferArrayDeclaration(global);
         // The declared type must travel with the value: without it the walk has
@@ -1041,22 +1046,15 @@ export function generateImplementation(
           fileLocalLines.push(`static ${normalizeArrayDeclaration(type, name)} = ${braceArrayInitializer(type, initializer)};`);
         }
       } else if (global.isInitialized) {
-        // Same rule the globals emitter uses. The local copy of it tested only
-        // for an a-f digit, so Ghidra's all-numeric addresses (`00304096`) went
-        // out bare and C++ read the leading zero as OCTAL — an error where a
-        // digit is 8 or 9, and a silently wrong value everywhere else.
-        const rawValue = global.value ?? '0';
-        let value = (rawValue.length === 1 && isCharacterValueType(type))
-          ? `'${rawValue.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`
-          : normalizeDataValue(rawValue);
-        if ((value === '0' || value === '0x0') && isStructType(type)) {
-          value = '{}';
-        }
+        // The one renderer globals.h and globals.cpp use. The local copy of it
+        // quoted a single character and nothing else, so Ghidra's rendered text
+        // for a `char[N]` went out bare (`= { end }`) and its all-numeric
+        // addresses (`00304096`) were read by C++ as OCTAL.
         const arrayInfo = inferArrayDeclaration(global);
+        let value = renderGlobalScalarInitializer(global.value, type, arrayInfo?.count);
         if (arrayInfo) {
           fileLocalLines.push(`static ${arrayInfo.type} ${name}[${arrayInfo.count}] = { ${value} };`);
         } else {
-          value = castPointerInitializer(type, value);
           const decl = normalizeArrayDeclaration(type, name);
           const isArray = /\[\d+\]/.test(decl);
           if (isArray) {
@@ -1343,6 +1341,14 @@ export function generateFunctionImplementation(
   //    to the TYPE and `(int)fpLevelDataFn1` is a cast-of-a-type.
   const bodyRenames: Record<string, string> = {};
   {
+    // `preprocessGhidraCode` rewrites Ghidra's `this` to `self` in the raw TEXT,
+    // before the body is ever parsed — so `this-param-rewrite` finds no `this`
+    // expression to rewrite and the body keeps saying `self` while the emitted
+    // signature says `pThis`. Two renamers, one parameter, two answers. Carry
+    // the preprocessor's spelling into the rename map so they agree.
+    if (func.parameters?.some(p => p.name === 'this')) {
+      bodyRenames['self'] = 'pThis';
+    }
     let counter = 1;
     for (const p of func.parameters ?? []) {
       const origName = p.name === 'this' ? 'pThis' : p.name;
