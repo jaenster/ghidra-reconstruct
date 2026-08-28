@@ -5,9 +5,9 @@
  * Also provides helpers for generating static local declarations.
  */
 
-import type { AnalyzedDataSymbol, ReconstructOptions, DataValue, ExtractedDataType, ExtractedStruct, ExtractedEnum, ExtractedUnion, ExtractedFunctionDefinition } from '../types.js';
+import type { AnalyzedDataSymbol, ReconstructOptions, DataValue, ExtractedDataType, ExtractedStruct, ExtractedUnion, ExtractedFunctionDefinition } from '../types.js';
 import { isPlatformOrBuiltinType, isLibraryType, isStructType, castPointerInitializer, normalizeDataValue, isCharacterValueType, isMsvcEhInternal, normalizeWideCharType, isVoidPointerSpelling, rootQualifyShadowedType, platformDeclaredFunctionNames } from './platform-types.js';
-import { generateStructDeclaration, generateEnumDeclaration, generateUnionDeclaration, generateFunctionDefinitionDeclaration } from './header.js';
+import { generateStructDeclaration, generateUnionDeclaration, generateFunctionDefinitionDeclaration } from './header.js';
 import { normalizeQualifiedReference } from './namespace.js';
 import { namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 
@@ -300,7 +300,7 @@ export function generateGlobalsHeader(
   lines.push('#include "d2_platform.h"');
 
   // Classify types: by-value types get full definitions, pointer-only types get forward declarations
-  const { forwardDecls, fullDefs, extraIncludes: byValueIncludes } = collectGlobalForwardDeclarations(globals, dataTypes, typeOwnerMap);
+  const { forwardDecls, fullDefs, extraIncludes: byValueIncludes, sharedHeaderOwned } = collectGlobalForwardDeclarations(globals, dataTypes, typeOwnerMap);
 
   // Include headers for by-value types that have an owning header (avoid duplicate definitions)
   if (byValueIncludes.length > 0) {
@@ -311,7 +311,7 @@ export function generateGlobalsHeader(
   lines.push('');
 
   // Safety net: scan all globals for type names that may be missing from forward declarations
-  const declaredNames = new Set<string>();
+  const declaredNames = new Set<string>(sharedHeaderOwned);
   for (const decl of forwardDecls) {
     const m = decl.match(/(?:struct|class)\s+(\w+)/);
     if (m) declaredNames.add(m[1]);
@@ -1543,6 +1543,13 @@ const structFieldTypes = new Map<string, Map<string, string>>();
 /** Names of STRUCTURE/UNION data types (for the elaborated-specifier rule). */
 const structOrUnionTypeNames = new Set<string>();
 
+/**
+ * Names of ENUM data types. d2_enums.h spells each as `typedef int X;`, and a
+ * typedef-name has no elaborated form — so where a struct gets `struct X`, an
+ * enum cannot be hidden at all. See `enumTypeNameTakenByAGlobal`.
+ */
+const enumTypeNames = new Set<string>();
+
 /** Emitted names of every global variable (for the elaborated-specifier rule). */
 const globalVariableNames = new Set<string>();
 
@@ -1602,8 +1609,10 @@ export function setMultidimArrayGlobals(
 export function setGlobalInitializerTypes(dataTypes: ExtractedDataType[] | undefined): void {
   structFieldTypes.clear();
   structOrUnionTypeNames.clear();
+  enumTypeNames.clear();
   if (!dataTypes) return;
   for (const dt of dataTypes) {
+    if (dt.kind === 'ENUM') enumTypeNames.add(dt.name);
     if (dt.kind !== 'STRUCTURE' && dt.kind !== 'UNION') continue;
     structOrUnionTypeNames.add(dt.name);
     const fields = (dt as ExtractedStruct).fields;
@@ -1683,6 +1692,45 @@ function elaborateCollidingStructType(type: string): string {
   if (!structOrUnionTypeNames.has(base) || !globalVariableNames.has(base)) return type;
   return type.replace(new RegExp(`\\b${base}\\b`), `struct ${base}`);
 }
+
+/**
+ * Globals whose NAME is already a type name — a fault only Ghidra can settle.
+ *
+ * Ghidra names the app-mode word at 0x0074c704 `eD2ApplicationMode`, which is
+ * also the enum it is typed with. C++ has no spelling for that: an enum reaches
+ * the tree through d2_enums.h as `typedef int X;`, and a typedef-name may
+ * neither be redeclared as a variable in its scope nor be hidden by one (only a
+ * class or enum name can be). Every escape was tried and each breaks something
+ * real:
+ *
+ *  - an alias (`using X_type = X;`) does not help — the conflict is the NAME,
+ *    not the spelling of the type;
+ *  - dropping the typedef and declaring the underlying `int` compiles the
+ *    declaration, but `Fog::Engine::Application::CLIENT_CheckIfApplicationMode…`
+ *    takes an `eD2ApplicationMode *` parameter, so the type is genuinely in use;
+ *  - a real `enum X : int` can be hidden by a variable, but then every use of
+ *    the type needs the `enum` keyword — including inside decompiled bodies,
+ *    which are not spelled by this emitter.
+ *
+ * So the emitter reports it with the address and leaves the declaration alone.
+ * Renaming the label in Ghidra (`geD2ApplicationMode`) fixes it at the source
+ * and costs one symbol.
+ */
+export function reportGlobalsTakingATypeName(): void {
+  const taken: string[] = [];
+  for (const [name, type] of globalDeclaredTypes) {
+    // A struct or union is not a problem: `elaborateCollidingStructType` gives
+    // it `struct X`, which is exactly what the elaborated form is for. Only a
+    // typedef-name — every ENUM — is unrepresentable.
+    if (!enumTypeNames.has(name)) continue;
+    if (baseTypeName(type) !== name) continue;
+    taken.push(name);
+  }
+  if (taken.length === 0) return;
+  console.warn(`warning: ${taken.length} global(s) carry the name of the type they are declared with; the declaration in globals.h is ill-formed and fails every translation unit. Rename the label in Ghidra:`);
+  for (const name of taken.sort()) console.warn(`  ${name}`);
+}
+
 
 /**
  * The single type-normalization every global DECLARATION and DEFINITION must
@@ -2030,7 +2078,7 @@ function collectGlobalForwardDeclarations(
   globals: AnalyzedDataSymbol[],
   dataTypes?: ExtractedDataType[],
   typeOwnerMap?: Map<string, string>
-): { forwardDecls: string[]; fullDefs: string[]; extraIncludes: string[] } {
+): { forwardDecls: string[]; fullDefs: string[]; extraIncludes: string[]; sharedHeaderOwned: Set<string> } {
   // Library types (Win32 SDK / CRT) are provided by the real headers under
   // _WIN32 — never emit our own forward decl/definition for them.
   const isSkippableLibraryType = makeLibraryTypeSkipPredicate(dataTypes);
@@ -2224,6 +2272,10 @@ function collectGlobalForwardDeclarations(
   const forwardDecls: string[] = [];
   const fullDefs: string[] = [];
   const extraIncludes = new Set<string>();
+  // Types this header deliberately does not declare because a shared header
+  // already does. They are declared as far as the caller's safety net is
+  // concerned — without that, the net emits `struct X;` over a `typedef int X`.
+  const sharedHeaderOwned = new Set<string>();
 
   // Emit full definitions in topological order, but prefer #include for types with an owning header
   for (const name of sorted) {
@@ -2235,12 +2287,18 @@ function collectGlobalForwardDeclarations(
     }
 
     const dt = dataTypeMap.get(name)!;
+    if (dt.kind === 'ENUM') {
+      // d2_enums.h holds EVERY ENUM datatype and d2_platform.h includes it
+      // unconditionally, so by the time this header's body is reached the type
+      // is already complete. Defining it again re-defines each enumerator's
+      // `constexpr` in `<name>_ns` — one such enum failed every translation
+      // unit in the tree four times over.
+      sharedHeaderOwned.add(name);
+      continue;
+    }
     switch (dt.kind) {
       case 'STRUCTURE':
         fullDefs.push(generateStructDeclaration(dt as ExtractedStruct));
-        break;
-      case 'ENUM':
-        fullDefs.push(generateEnumDeclaration(dt as ExtractedEnum));
         break;
       case 'UNION':
         fullDefs.push(generateUnionDeclaration(dt as ExtractedUnion));
@@ -2263,6 +2321,13 @@ function collectGlobalForwardDeclarations(
     // Check if this type is a FUNCTION_DEFINITION in the dataTypeMap
     // (it might be owned by another header and not in fullDefTypes)
     const dt = dataTypeMap.get(name);
+    if (dt?.kind === 'ENUM') {
+      // Same reason as the by-value case: d2_enums.h owns it. The fallback here
+      // would be `typedef int X;` for an `eXxx` name but `struct X;` for any
+      // other, and that second form contradicts the typedef d2_enums.h emits.
+      sharedHeaderOwned.add(name);
+      continue;
+    }
     if (dt?.kind === 'FUNCTION_DEFINITION') {
       // Emit the actual funcdef typedef, not a struct forward decl
       forwardDecls.push(generateFunctionDefinitionDeclaration(dt as ExtractedFunctionDefinition));
@@ -2271,7 +2336,7 @@ function collectGlobalForwardDeclarations(
     }
   }
 
-  return { forwardDecls, fullDefs, extraIncludes: [...extraIncludes].sort() };
+  return { forwardDecls, fullDefs, extraIncludes: [...extraIncludes].sort(), sharedHeaderOwned };
 }
 
 /**
