@@ -290,47 +290,6 @@ function uniquifyDuplicateLabels(body: string): string {
   return out.join('\n');
 }
 
-/**
- * Ghidra emits a declaration-with-initializer between `switch (x) {` and the
- * first `case` — unreachable code that the case labels jump over, so C++ rejects
- * it ("jump to case label crosses initialization of 'T x'"). Hoist such
- * declarations to before the switch (they become reachable, the value is still
- * available to the cases). Conservative: bails on any nesting in the pre-case
- * region; only moves simple `TYPE name = expr;` lines.
- */
-function hoistSwitchPreCaseDecls(body: string): string {
-  const lines = body.split('\n');
-  const declRe = /^(\s*)((?:[A-Za-z_][\w:<>]*\s*[*&]?\s+)+)([A-Za-z_]\w*)\s*=\s*[^;]+;\s*$/;
-  const result: string[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    if (!/^\s*switch\s*\(.*\)\s*\{\s*$/.test(lines[i])) { result.push(lines[i]); continue; }
-    const hoisted: string[] = [];
-    const keep: string[] = [];
-    let j = i + 1;
-    let reachedCase = false;
-    for (; j < lines.length; j++) {
-      if (/^\s*(case\b|default\s*:)/.test(lines[j])) { reachedCase = true; break; }
-      if (/[{}]/.test(lines[j])) break; // bail on nesting
-      const dm = declRe.exec(lines[j]);
-      if (dm && !/^(if|for|while|switch|return|do|else|goto|sizeof)$/.test(dm[3])) {
-        hoisted.push(lines[j].trimStart());
-      } else {
-        keep.push(lines[j]);
-      }
-    }
-    if (reachedCase && hoisted.length > 0) {
-      const indent = lines[i].match(/^\s*/)?.[0] ?? '';
-      for (const h of hoisted) result.push(indent + h);
-      result.push(lines[i]);
-      for (const k of keep) result.push(k);
-      i = j - 1;
-    } else {
-      result.push(lines[i]);
-    }
-  }
-  return result.join('\n');
-}
-
 // ── Parse error logging ─────────────────────────────────────────────────────
 
 let parseErrorLogPath: string | null = null;
@@ -1523,13 +1482,18 @@ export function generateFunctionImplementation(
   //  `nullptr-cleanup`, `array-global-address-of` and `switch-case-dedup` — see
   //  transformDecompiledCode.)
   //
-  // STILL TEXT, and owed the same move: the two passes below and
+  // `hoistSwitchPreCaseDecls` stood here and is GONE, not moved: it hoisted a
+  // declaration-with-initializer sitting between `switch (x) {` and the first
+  // `case`, and over the whole corpus it fires on zero bodies. Nothing puts a
+  // declaration there any more - `decl-scope-sink` is the pass that used to, and
+  // it now refuses to sink into a switch body for this exact reason.
+  //
+  // STILL TEXT, and owed the same move: the pass below and
   // `declareUnderscoreSlotLocals`. Each splits the finished body on `\n` and
-  // matches C++ with regexes, so none of them can tell an identifier from the
-  // same characters inside a string literal or a comment.
+  // matches C++ with regexes, so neither can tell an identifier from the same
+  // characters inside a string literal or a comment.
 
   body = uniquifyDuplicateLabels(body);
-  body = hoistSwitchPreCaseDecls(body);
 
   // Synthesize declarations for `_<base>` storage-slot locals Ghidra references
   // but never declares (else the body uses an undeclared identifier → compile error).
