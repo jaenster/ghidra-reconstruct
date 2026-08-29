@@ -331,47 +331,6 @@ function hoistSwitchPreCaseDecls(body: string): string {
   return result.join('\n');
 }
 
-/**
- * Ghidra's switch recovery sometimes emits the same `case` value (or `default`)
- * twice in one switch — a malformed double-block where the 2nd occurrence is
- * unreachable (the 1st already matches that value). C++ rejects duplicate case
- * values / multiple defaults. Comment out the duplicate LABEL (keeping its body
- * as now-explicitly-unreachable code) so the switch compiles. Brace-depth stack
- * tracks nested switches.
- */
-function dedupSwitchCases(body: string): string {
-  const lines = body.split('\n');
-  let depth = 0;
-  const stack: Array<{ depth: number; seen: Set<string>; hasDefault: boolean }> = [];
-  const out = lines.map(line => {
-    const opens = (line.match(/\{/g) ?? []).length;
-    const closes = (line.match(/\}/g) ?? []).length;
-    let res = line;
-    const cur = stack.length ? stack[stack.length - 1] : null;
-    if (cur) {
-      // The label runs to the first `:` that is NOT part of a `::`. Written as
-      // `[^:]+` it stopped at the scope operator, so every label of a qualified
-      // enum constant reduced to the namespace — `eD2PlayerAnimMode_ns` — and
-      // the second label of any such switch was struck out as a duplicate.
-      const cm = /^(\s*)case\s+((?:[^:]|::)+)\s*:(?!:)(.*)$/.exec(line);
-      const dm = /^(\s*)default\s*:(.*)$/.exec(line);
-      if (cm) {
-        const val = cm[2].trim();
-        if (cur.seen.has(val)) res = `${cm[1]}/* dup case ${val} */${cm[3]}`;
-        else cur.seen.add(val);
-      } else if (dm) {
-        if (cur.hasDefault) res = `${dm[1]}/* dup default */${dm[2]}`;
-        else cur.hasDefault = true;
-      }
-    }
-    if (/\bswitch\s*\(.*\)\s*\{/.test(line)) stack.push({ depth: depth + 1, seen: new Set(), hasDefault: false });
-    depth += opens - closes;
-    while (stack.length && depth < stack[stack.length - 1].depth) stack.pop();
-    return res;
-  });
-  return out.join('\n');
-}
-
 // ── Parse error logging ─────────────────────────────────────────────────────
 
 let parseErrorLogPath: string | null = null;
@@ -1559,13 +1518,18 @@ export function generateFunctionImplementation(
   }
 
   // (`this` → the declared parameter name, `nullptr` → `0` where an integer is
-  //  meant, and the spurious `&` on a `<name>_ARRAY_<hex>` global are all done on
-  //  the AST by `this-param-rewrite`, `nullptr-cleanup` and
-  //  `array-global-address-of` — see transformDecompiledCode.)
+  //  meant, the spurious `&` on a `<name>_ARRAY_<hex>` global, and a repeated
+  //  `case` value in one switch are all done on the AST by `this-param-rewrite`,
+  //  `nullptr-cleanup`, `array-global-address-of` and `switch-case-dedup` — see
+  //  transformDecompiledCode.)
+  //
+  // STILL TEXT, and owed the same move: the two passes below and
+  // `declareUnderscoreSlotLocals`. Each splits the finished body on `\n` and
+  // matches C++ with regexes, so none of them can tell an identifier from the
+  // same characters inside a string literal or a comment.
 
   body = uniquifyDuplicateLabels(body);
   body = hoistSwitchPreCaseDecls(body);
-  body = dedupSwitchCases(body);
 
   // Synthesize declarations for `_<base>` storage-slot locals Ghidra references
   // but never declares (else the body uses an undeclared identifier → compile error).
