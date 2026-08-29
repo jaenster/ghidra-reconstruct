@@ -39,6 +39,7 @@ import { findNodesByKind } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
 import { Type, Expr } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
+import { createExprShape } from './expr-shape.js';
 
 export interface CallArgCastOptions extends PluginOptions {
   /** Callable name (bare AND qualified) → declared parameter type spellings */
@@ -524,91 +525,20 @@ export function createCallArgCastTransformer(options?: PluginOptions): Transform
         if (!localTypes.has(v.name.name)) localTypes.set(v.name.name, v.type);
       }
 
-      /** The type of an argument expression, or null when it is not determinable. */
-      const argShape = (expr: Expression): TypeShape | null => {
-        const e = unwrapParens(expr);
-        switch (e.kind) {
-          case NodeKind.CStyleCastExpr:
-            return shapeOfNode((e as CStyleCastExpr).type, 0, resolve);
-          case NodeKind.UnaryExpr: {
-            const u = e as UnaryExpr;
-            if (u.operator === '*') {
-              const pointee = argShape(u.operand);
-              return pointee && pointee.stars > 0 ? { ...pointee, stars: pointee.stars - 1 } : null;
-            }
-            if (u.operator !== '&') return null;
-            const inner = argShape(u.operand);
-            // `&arr` where arr is already an array decayed once - taking the
-            // address of that is a pointer-to-array, which this does not model.
-            return inner ? { ...inner, stars: inner.stars + 1 } : null;
-          }
-          case NodeKind.Identifier: {
-            const name = (e as Identifier).name;
-            const local = localTypes.get(name);
-            if (local) return shapeOfNode(local, 0, resolve);
-            const declared = enclosingVarTypes[name];
-            if (declared) return shapeOfSpelling(declared, resolve);
-            const g = globalTypes[name];
-            return g ? shapeOfSpelling(g, resolve) : null;
-          }
-          case NodeKind.QualifiedId: {
-            const q = calleeName(e);
-            if (!q) return null;
-            const bare = bareName(q);
-            const g = globalTypes[q] ?? globalTypes[bare];
-            return g ? shapeOfSpelling(g, resolve) : null;
-          }
-          case NodeKind.MemberExpr: {
-            const m = e as MemberExpr;
-            const member = m.member as { name?: string };
-            if (typeof member?.name !== 'string') return null;
-            // If the object's own type is known, the field's type is exact.
-            const obj = argShape(m.object);
-            if (obj && obj.stars === (m.isArrow ? 1 : 0)) {
-              const exact = structFields[obj.base]?.[member.name];
-              if (exact) return shapeOfSpelling(exact, resolve);
-            }
-            const t = fieldTypes[member.name];
-            return t ? shapeOfSpelling(t, resolve) : null;
-          }
-          case NodeKind.SubscriptExpr: {
-            const inner = argShape((e as SubscriptExpr).array);
-            // Subscripting peels one indirection off; a scalar subscript is a
-            // model error somewhere else and is left alone.
-            return inner && inner.stars > 0 ? { ...inner, stars: inner.stars - 1 } : null;
-          }
-          case NodeKind.CallExpr: {
-            const callee = (e as CallExpr).callee;
-            const cn = calleeName(callee);
-            const rt = cn !== undefined
-              ? returnTypes[cn] ?? returnTypes[bareName(cn)]
-              : undefined;
-            if (rt) return shapeOfSpelling(rt, resolve);
-            // No name matched — a call THROUGH a function pointer, whose result
-            // type only the funcdef the slot is declared with can supply.
-            const fd = funcdefOfCallee(callee);
-            return fd ? shapeOfSpelling(fd.returnType, resolve) : null;
-          }
-          case NodeKind.BinaryExpr: {
-            // Pointer arithmetic keeps the pointer's type: `pBuf + 0x11` is still
-            // a `T*`, and Ghidra writes an offset onto a base constantly. Only
-            // `+`/`-` do this, and only with exactly one pointer operand -
-            // `p - q` is an integer distance, and everything else is arithmetic.
-            const b = e as BinaryExpr;
-            if (b.operator !== '+' && b.operator !== '-') return null;
-            const l = argShape(b.left);
-            const r = argShape(b.right);
-            if (l && l.stars > 0 && (!r || r.stars === 0)) return l;
-            if (b.operator === '+' && r && r.stars > 0 && (!l || l.stars === 0)) return r;
-            return null;
-          }
-          default:
-            return null;
-        }
-      };
+      // The shape resolver is shared with the other passes that need to know
+      // what an expression's type is; see `expr-shape.ts`. The funcdef hook ties
+      // the mutual recursion: resolving a call THROUGH a pointer needs the
+      // resolver, and the resolver needs the funcdef's return type.
+      let funcdefReturn: ((callee: Expression) => string | undefined) | undefined;
+      const argShape = createExprShape(
+        localTypes,
+        { globalTypes, enclosingVarTypes, structFields, fieldTypes, returnTypes, resolve },
+        (callee) => funcdefReturn?.(callee),
+      );
 
       /** The funcdef a call through a function pointer is made under. */
       const funcdefOfCallee = createFuncdefCalleeResolver(funcdefTables, argShape);
+      funcdefReturn = (callee) => funcdefOfCallee(callee)?.returnType;
 
       /**
        * True when the expression names a FUNCTION rather than a value: a bare

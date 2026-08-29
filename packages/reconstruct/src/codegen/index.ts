@@ -50,7 +50,7 @@ import type {
 import { resolveOverridePlaceholders } from './impl.js';
 import { VOID_POINTER_SLOT, type FuncPtrTarget } from '@ghidra-mcp/cpp-parser';
 
-import { emittedFieldType, generateHeader, generateFunctionDeclaration, setKnownFuncDefs, sigType } from './header.js';
+import { emittedFieldType, emittedMemberNames, generateHeader, generateFunctionDeclaration, setKnownFuncDefs, sigType } from './header.js';
 import { generateImplementation, setQuestStructLayouts, setStructFieldRenames, decompiledReturnType, decompiledFunctionName, type ImplGenContext, type FuncPtrArgCastTables } from './impl.js';
 import { generateCMakeLists, generateTopLevelCMake, generateTargetCMake, generateUnsortedCMake } from './cmake.js';
 import { generateSourceMap } from './sourcemap.js';
@@ -2996,6 +2996,19 @@ function buildFuncPtrArgCastTables(
     }
   }
 
+  // Every member name the emitted declaration of each aggregate carries -
+  // taken from the header emitter itself, not rebuilt from its naming rules.
+  // `structFields` cannot answer "does this aggregate declare X": it is keyed on
+  // Ghidra's field names and so holds nothing for the unnamed filler bytes and
+  // bitfield members the header emits under manufactured names, which is exactly
+  // where a decompiled body's `field_0xN` alias has to be checked.
+  const aggregateMembers: Record<string, string[]> = {};
+  for (const dt of dataTypes) {
+    if (dt.kind !== 'STRUCTURE' && dt.kind !== 'UNION') continue;
+    if (!dt.name) continue;
+    aggregateMembers[dt.name] = [...emittedMemberNames(dt)];
+  }
+
   // Which fields hold a FUNCTION POINTER, and which funcdef declares its
   // contract. `structFields` cannot answer this: a funcdef field is emitted as
   // an inline declarator (`void *(*pfnLoad)()`), which `emittedFieldType`
@@ -3191,6 +3204,7 @@ function buildFuncPtrArgCastTables(
     fieldTypes,
     typedefTargets,
     structFields,
+    aggregateMembers,
     funcdefDecls,
     structFieldFuncdefs,
     fieldFuncdefs,

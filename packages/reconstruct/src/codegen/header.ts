@@ -902,7 +902,12 @@ function generateDataTypeDeclaration(
  */
 const MAX_NAMED_FILLER_BYTES = 4096;
 
-function emitFieldLines(fields: StructField[], lines: string[], isUnion = false): void {
+function emitFieldLines(
+  fields: StructField[],
+  lines: string[],
+  isUnion = false,
+  emitted?: Set<string>,
+): void {
   // Determine hex width from the largest offset (minimum 2 digits)
   const maxOffset = fields.length > 0 ? Math.max(...fields.map(f => f.offset)) : 0;
   const hexWidth = Math.max(2, maxOffset.toString(16).length);
@@ -948,6 +953,7 @@ function emitFieldLines(fields: StructField[], lines: string[], isUnion = false)
           const bfName = (bf.name ?? '').replace(/[^a-zA-Z0-9_]/g, '_') || `_bf_${bfOffsetHex}_${j}`;
           const bfDecl = normalizeFieldDeclaration(
             normalizeUndefinedType(bf.dataType, bf.size), bfName, bf.size);
+          emitted?.add(bfName);
           lines.push(`        /* ${bfOffsetHex} */ ${bfDecl};${bfComment}`);
         }
         lines.push(`    };`);
@@ -973,6 +979,7 @@ function emitFieldLines(fields: StructField[], lines: string[], isUnion = false)
         if (!seenNames.has(loneName)) {
           seenNames.add(loneName);
           const loneComment = field.comment ? ` // ${cleanInlineComment(field.comment)}` : '';
+          emitted?.add(loneName);
           lines.push(`    /* ${offsetHex} */ uint8_t ${loneName};${loneComment}`);
           i += 1;
           continue;
@@ -997,6 +1004,7 @@ function emitFieldLines(fields: StructField[], lines: string[], isUnion = false)
             // byte still has to occupy its slot, so fall back to a unique pad name.
             if (seenNames.has(byteName)) byteName = `_pad_${byteOffsetHex}`;
             seenNames.add(byteName);
+            emitted?.add(byteName);
             lines.push(`    /* ${byteOffsetHex} */ uint8_t ${byteName};`);
           }
           i += count;
@@ -1009,12 +1017,15 @@ function emitFieldLines(fields: StructField[], lines: string[], isUnion = false)
         const ghName = `field_0x${field.offset.toString(16)}`;
         if (!seenNames.has(ghName)) {
           seenNames.add(ghName);
+          emitted?.add(ghName);
           lines.push(`    /* ${offsetHex} */ uint8_t ${ghName};`);
           const restOffsetHex = `0x${(field.offset + 1).toString(16).toUpperCase().padStart(hexWidth, '0')}`;
+          emitted?.add(`_pad_${restOffsetHex}`);
           lines.push(`    /* ${restOffsetHex} */ uint8_t _pad_${restOffsetHex}[${count - 1}];`);
           i += count;
           continue;
         }
+        emitted?.add(`_pad_${offsetHex}`);
         lines.push(`    /* ${offsetHex} */ uint8_t _pad_${offsetHex}[${count}];`);
         i += count;
         continue;
@@ -1064,6 +1075,7 @@ function emitFieldLines(fields: StructField[], lines: string[], isUnion = false)
       rawName = `${rawName}_${offsetHex.slice(2)}`;
     }
     seenNames.add(rawName);
+    emitted?.add(rawName);
     // Reconstruct name with array suffix for normalizeFieldDeclaration
     const name = rawName + fieldNameArraySuffix;
 
@@ -1789,4 +1801,40 @@ function filterRelevantTypes(
   }
 
   return dataTypes.filter(t => declarableKinds.has(t.kind) && usedTypes.has(t.name));
+}
+
+/**
+ * The member names an aggregate's declaration actually carries, keyed by type
+ * name.
+ *
+ * A body written by the decompiler reads a bitfield storage unit by its
+ * whole-byte alias (`pSkillsTxt->field_0x4`), and that alias is NOT a member:
+ * Ghidra models offset 4 of `D2SkillsTxt` as eight `int:1` bitfields, so the
+ * emitted struct declares `decquant`, `lob`, … and nothing named `field_0x4`.
+ * Deciding whether such a read resolves needs the member set the header emitter
+ * really wrote, not a reconstruction of its naming rules - the rules are long
+ * (bitfield groups, lone filler bytes, named filler runs, keyword and
+ * leading-digit repair, shadowing and duplicate suffixes) and a second copy of
+ * them would drift the first time one changed.
+ *
+ * So the set is taken FROM the emitter, by running the same `emitFieldLines`
+ * over a throwaway line buffer. Memoised on the type name; the line buffer is
+ * discarded.
+ */
+const emittedMemberNameCache = new Map<string, ReadonlySet<string>>();
+
+export function resetEmittedMemberNames(): void {
+  emittedMemberNameCache.clear();
+}
+
+export function emittedMemberNames(type: ExtractedDataType): ReadonlySet<string> {
+  const cached = emittedMemberNameCache.get(type.name);
+  if (cached) return cached;
+  const names = new Set<string>();
+  if (type.kind === 'STRUCTURE' || type.kind === 'UNION') {
+    const fields = (type as ExtractedStruct | ExtractedUnion).fields ?? [];
+    emitFieldLines(fields, [], type.kind === 'UNION', names);
+  }
+  emittedMemberNameCache.set(type.name, names);
+  return names;
 }

@@ -814,6 +814,8 @@ export interface FuncPtrArgCastTables {
   typedefTargets?: Record<string, string>;
   /** Aggregate name → field name → declared type, exact where the walk is known */
   structFields?: Record<string, Record<string, string>>;
+  /** Aggregate name → every member name its emitted declaration carries */
+  aggregateMembers?: Record<string, string[]>;
   /**
    * Funcdef name → the return and parameter spellings the funcdef declares. A
    * call made THROUGH a function-pointer field or variable has no callee name
@@ -2172,6 +2174,15 @@ function transformDecompiledCode(
         funcdefDecls: context.funcPtrArgCasts.funcdefDecls,
         structFieldFuncdefs: context.funcPtrArgCasts.structFieldFuncdefs,
         fieldFuncdefs: context.funcPtrArgCasts.fieldFuncdefs,
+        enclosingVarTypes,
+      };
+      perPluginOptions['bitfield-alias-lower'] = {
+        aggregateMembers: context.funcPtrArgCasts.aggregateMembers,
+        structFields: context.funcPtrArgCasts.structFields,
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        returnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        typedefTargets: context.funcPtrArgCasts.typedefTargets,
         enclosingVarTypes,
       };
       perPluginOptions['call-arg-cast'] = {
