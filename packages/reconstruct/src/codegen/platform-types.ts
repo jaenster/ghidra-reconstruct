@@ -418,11 +418,34 @@ const GHIDRA_LISTING_BUILTIN_RE = new RegExp(
   `\\b(?:${Object.keys(GHIDRA_LISTING_BUILTINS).join('|')})\\b`, 'g'
 );
 
+/**
+ * PE-image types Ghidra applies to the headers it parsed. They are structures in
+ * the database, but nothing in the tree defines them and windows.h's versions do
+ * not agree field for field, so they are carried as their bytes. Kept out of
+ * GHIDRA_LISTING_BUILTINS on purpose: that map drives a word-boundary rewrite
+ * over every type spelling, and these must only ever match a whole type.
+ */
+const GHIDRA_IMAGE_ARTIFACTS: Record<string, string> = {
+  Alignment: 'uint8_t',
+  IMAGE_DOS_HEADER: 'uint8_t',
+  IMAGE_DEBUG_DIRECTORY: 'uint8_t',
+  IMAGE_DIRECTORY_ENTRY_EXPORT: 'uint8_t',
+  IMAGE_RESOURCE_DIRECTORY: 'uint8_t',
+  VS_VERSION_INFO: 'uint8_t',
+  IMAGE_NT_HEADERS: 'uint8_t',
+  IMAGE_SECTION_HEADER: 'uint8_t',
+};
+
+/** Whole-type match only - see GHIDRA_IMAGE_ARTIFACTS. */
+export function imageArtifactElementType(type: string | undefined): string | undefined {
+  return type ? GHIDRA_IMAGE_ARTIFACTS[type.trim()] : undefined;
+}
+
 /** The byte spelling a listing BUILT_IN stands for, or undefined. */
 export function listingBuiltinElementType(type: string | undefined): string | undefined {
   if (!type) return undefined;
   const base = type.replace(/\s*[*&]+\s*$/, '').replace(/\[\d+\]\s*$/, '').trim();
-  return GHIDRA_LISTING_BUILTINS[base];
+  return GHIDRA_LISTING_BUILTINS[base] ?? GHIDRA_IMAGE_ARTIFACTS[base];
 }
 
 /** Rewrite every listing BUILT_IN inside a type spelling to what it stands for. */

@@ -6,7 +6,7 @@
  */
 
 import type { AnalyzedDataSymbol, ReconstructOptions, DataValue, ExtractedDataType, ExtractedStruct, ExtractedUnion, ExtractedFunctionDefinition, ExtractedFunction } from '../types.js';
-import { isPlatformOrBuiltinType, isLibraryType, isStructType, castPointerInitializer, normalizeDataValue, isCharacterValueType, isMsvcEhInternal, normalizeWideCharType, normalizeListingBuiltinType, listingBuiltinElementType, isVoidPointerSpelling, rootQualifyShadowedType, platformDeclaredFunctionNames } from './platform-types.js';
+import { isPlatformOrBuiltinType, isLibraryType, isStructType, castPointerInitializer, normalizeDataValue, isCharacterValueType, isMsvcEhInternal, normalizeWideCharType, normalizeListingBuiltinType, listingBuiltinElementType, imageArtifactElementType, isVoidPointerSpelling, rootQualifyShadowedType, platformDeclaredFunctionNames } from './platform-types.js';
 import { generateStructDeclaration, generateUnionDeclaration, generateFunctionDefinitionDeclaration } from './header.js';
 import { normalizeQualifiedReference } from './namespace.js';
 import { namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
@@ -1946,10 +1946,11 @@ export function reportGlobalsTakingATypeName(): void {
  */
 export function normalizeGlobalDeclType(type: string): string {
   let t = normalizeGhidraType(type);
-  // Ghidra artifact types that have no C equivalent — use uint8_t
-  if (t === 'Alignment' || t === 'IMAGE_DOS_HEADER' || t === 'IMAGE_DEBUG_DIRECTORY'
-    || t === 'IMAGE_DIRECTORY_ENTRY_EXPORT' || t === 'IMAGE_RESOURCE_DIRECTORY'
-    || t === 'VS_VERSION_INFO' || t === 'IMAGE_NT_HEADERS' || t === 'IMAGE_SECTION_HEADER') t = 'uint8_t';
+  // Ghidra artifact types that have no C equivalent - use uint8_t. A symbol whose
+  // whole type is one of these keeps its EXTENT through resolveListingBuiltinBlobs;
+  // collapsing a 128-byte DOS header to a scalar `uint8_t` also left its struct
+  // initializer behind, which is "scalar object requires one element".
+  t = imageArtifactElementType(t) ?? t;
   return elaborateCollidingStructType(t);
 }
 
