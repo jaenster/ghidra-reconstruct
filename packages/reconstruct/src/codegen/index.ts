@@ -2316,10 +2316,14 @@ function generateFilesForFunctions(
         for (const m of implContent.matchAll(/\b([A-Za-z_]\w*)\s*\*?\s*([A-Za-z_]\w*)\s*[=;]/g)) {
           if (structFieldTypes.has(m[1]) || structUnionEnumNames.has(m[1])) addVar(m[2], m[1]);
         }
-        for (const cm of implContent.matchAll(/\b([A-Za-z_]\w*)((?:\s*->\s*[A-Za-z_]\w*)+)/g)) {
+        // A chain mixes both accessors - `pUnit->pUnitData.pUnitDataMonster->pMonStatsTxt`
+        // reaches the union BY VALUE and then dereferences again. Matching only `->`
+        // stopped at the first `.` and left every type past it incomplete, so both
+        // spellings advance the walk; the field's base type is the same either way.
+        for (const cm of implContent.matchAll(/\b([A-Za-z_]\w*)((?:\s*(?:->|\.)\s*[A-Za-z_]\w*)+)/g)) {
           let curType = varType.get(cm[1]);
           if (!curType) continue;
-          for (const fm of cm[2].matchAll(/->\s*([A-Za-z_]\w*)/g)) {
+          for (const fm of cm[2].matchAll(/(?:->|\.)\s*([A-Za-z_]\w*)/g)) {
             const owner = typeOwnerMap.get(curType);
             if (owner && !existingIncludes.has(owner) && owner !== headerPath) {
               existingIncludes.add(owner);
