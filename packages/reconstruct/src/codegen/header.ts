@@ -1048,9 +1048,7 @@ function emitFieldLines(
     //   - union member at ordinal i      → `field<i>`        (e.g. field0, field1)
     //   - struct member at ordinal i/off → `field<i>_0x<off>` (e.g. field2_0x1f44)
     // Ghidra uses lowercase, unpadded hex (Integer.toHexString) for the offset.
-    const ghidraDefaultName = isUnion
-      ? `field${i}`
-      : `field${i}_0x${field.offset.toString(16)}`;
+    const ghidraDefaultName = ghidraDefaultFieldName(isUnion, i, field.offset);
     // Sanitize field names: replace spaces/invalid chars with underscores
     let rawName = rawFieldName ? rawFieldName.replace(/[^a-zA-Z0-9_]/g, '_') : ghidraDefaultName;
     if (!rawName) rawName = ghidraDefaultName;
@@ -1254,6 +1252,22 @@ function normalizeFieldDeclaration(fieldType: string, fieldName: string, fieldSi
  * `fnFoo`. A cast written from the wrong spelling names a type the struct does
  * not have - `(string*)` fails to parse and takes the rest of the file with it.
  */
+/**
+ * The name Ghidra's decompiler gives a struct/union member the database left
+ * unnamed. Function bodies reference those members by this name, and so do the
+ * field names Ghidra hands back inside an initialized-data record - so the
+ * header declaration and every table keyed on a field name have to spell it the
+ * same way or they silently fail to find each other.
+ *
+ *   union member at ordinal i        -> `field<i>`
+ *   struct member at ordinal i/off   -> `field<i>_0x<off>`
+ *
+ * Ghidra uses lowercase, unpadded hex (`Integer.toHexString`) for the offset.
+ */
+export function ghidraDefaultFieldName(isUnion: boolean, ordinal: number, offset: number): string {
+  return isUnion ? `field${ordinal}` : `field${ordinal}_0x${offset.toString(16)}`;
+}
+
 export function emittedFieldType(dataType: string, size: number): string | null {
   const raw = normalizeUndefinedType(dataType ?? '', size);
   if (/^.+?:\d+$/.test(raw.trim())) return null; // bitfield

@@ -7,7 +7,7 @@
 
 import type { AnalyzedDataSymbol, ReconstructOptions, DataValue, ExtractedDataType, ExtractedStruct, ExtractedUnion, ExtractedFunctionDefinition, ExtractedFunction } from '../types.js';
 import { isPlatformOrBuiltinType, isLibraryType, isStructType, castPointerInitializer, normalizeDataValue, isCharacterValueType, isMsvcEhInternal, normalizeWideCharType, normalizeListingBuiltinType, listingBuiltinElementType, imageArtifactElementType, isVoidPointerSpelling, rootQualifyShadowedType, platformDeclaredFunctionNames } from './platform-types.js';
-import { generateStructDeclaration, generateUnionDeclaration, generateFunctionDefinitionDeclaration } from './header.js';
+import { generateStructDeclaration, generateUnionDeclaration, generateFunctionDefinitionDeclaration, ghidraDefaultFieldName } from './header.js';
 import { normalizeQualifiedReference } from './namespace.js';
 import { namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 import { computeDeclarationClosure, renderClosureBlock, type ClosureResult } from './declaration-closure.js';
@@ -1217,6 +1217,29 @@ function shadowQualifyReference(expr: string): string {
  *     address exactly. Whenever this branch fires, the underlying disagreement
  *     is in the database, not here.
  */
+/**
+ * `a.b` is a member access only when `a` is a symbol we have. Ghidra's own
+ * labels are allowed to contain a dot - a string label carries the string's
+ * text, and `cmncof_a1.d2` is a filename - so `s_cmncof_a1.d2_006d6c44` is ONE
+ * name, not a read of a member `d2_006d6c44` on a variable `s_cmncof_a1` that
+ * does not exist. Read as an expression it compiles to five undeclared
+ * identifiers; read as a name it goes through the sanitizer and then through
+ * `unresolvedSymbolAddress` like every other invented label.
+ *
+ * Only the DOT is judged here. `Tbl[14]` and `sym+4` cannot be anything but an
+ * expression whatever their root is.
+ */
+function dottedNameIsNotAMemberAccess(expr: string): boolean {
+  if (!expr.includes('.')) return false;
+  // A subscript or a byte offset is proof of an expression on its own - nothing
+  // else produces `Tbl[14].pField` or `sym+4`.
+  if (expr.includes('[') || expr.includes('+')) return false;
+  const root = expr.match(/^[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*/)?.[0];
+  if (!root) return true;
+  const bare = root.includes('::') ? root.slice(root.lastIndexOf('::') + 2) : root;
+  return !globalVariableNames.has(root) && !globalVariableNames.has(bare);
+}
+
 function emitPointerToSymbol(rawValue: string, expectedType?: string): string {
   // Drop the CRT-helper namespace prefixes (compiler/VisualStudio are not emitted).
   const stripped = rawValue.replace(/\b(?:compiler|VisualStudio)::/g, '');
@@ -1224,7 +1247,8 @@ function emitPointerToSymbol(rawValue: string, expectedType?: string): string {
   // Those are already legal C++ expressions and must survive intact; only names
   // that are not legal C++ go through the sanitizer.
   const isLegalExpression =
-    /^[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*(?:\[\d+\]|\.[A-Za-z_]\w*)*(?:\+\d+)?$/.test(stripped);
+    /^[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*(?:\[\d+\]|\.[A-Za-z_]\w*)*(?:\+\d+)?$/.test(stripped)
+    && !dottedNameIsNotAMemberAccess(stripped);
   const legalized = isLegalExpression ? stripped : sanitizeQualifiedReference(stripped);
   // Spell the qualifier the way the DECLARATION side spells it. Ghidra hands back
   // the raw symbol path (`D2Game::Quests::Quests::A1Q6::Fn`); the declaration is
@@ -1825,9 +1849,18 @@ export function setGlobalInitializerTypes(dataTypes: ExtractedDataType[] | undef
     const fields = (dt as ExtractedStruct).fields;
     if (!fields) continue;
     const byName = new Map<string, string>();
-    for (const f of fields) {
-      if (f.name && f.dataType) byName.set(f.name, f.dataType);
-    }
+    const isUnion = dt.kind === 'UNION';
+    fields.forEach((f, i) => {
+      if (!f.dataType) return;
+      // A member Ghidra never named still HAS a name everywhere else: the
+      // decompiler auto-names it, the header declares it under that auto-name,
+      // and the initialized-data record hands its fields back under it too. Key
+      // the layout on the same name or a struct initializer for such a slot is
+      // typed as nothing at all - which is how a function address landed in a
+      // `void*` field with no cast, and a sentinel in an int field with no
+      // sentinel spelling.
+      byName.set(f.name || ghidraDefaultFieldName(isUnion, i, f.offset), f.dataType);
+    });
     structFieldTypes.set(dt.name, byName);
   }
 }
