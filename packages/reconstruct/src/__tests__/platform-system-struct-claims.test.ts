@@ -86,7 +86,14 @@ describe('winsock in_addr claim', () => {
     assert.match(text, /#\s*ifndef s_addr/);
     assert.match(text, /union _union_1226 \{/);
     assert.match(text, /struct _struct_1227 \{ unsigned char s_b1; unsigned char s_b2;/);
-    assert.match(text, /struct _struct_1228 \{ unsigned short s_w1; unsigned short s_w2; \};/);
+    assert.match(text, /struct _struct_1228 \{ unsigned short s_w1; unsigned short s_w2; operator unsigned long\(\)/);
+    // The nested structs convert to the word they are, and stay AGGREGATES while
+    // doing it: a conversion operator does not disqualify a type from
+    // brace-initialisation, a constructor would.
+    assert.match(text, /struct _struct_1227 \{[^}]*operator unsigned long\(\) const \{ return \*reinterpret_cast<const unsigned long\*>\(this\); \} \};/);
+    assert.ok(!/_struct_1227\(/.test(text), 'the nested byte struct has no constructor');
+    assert.ok(!/_struct_1228\(/.test(text), 'the nested word struct has no constructor');
+    assert.match(text, /operator unsigned long\(\) const \{ return S_un\.S_addr; \}/);
     assert.match(text, /_struct_1227 S_un_b;/);
     assert.match(text, /unsigned long S_addr;/);
     assert.match(text, /\} IN_ADDR, \*PIN_ADDR, \*LPIN_ADDR;/);

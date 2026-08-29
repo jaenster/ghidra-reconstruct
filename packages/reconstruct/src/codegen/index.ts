@@ -2762,8 +2762,15 @@ export function buildWinsockInAddrClaim(
     '// a no-op. Same layout, same members, same offsets — the union spellings',
     "// decompiled bodies cast through are simply no longer a separate type.",
     '#  ifndef s_addr',
-    `struct ${B} { ${byteFields.map(f => `${byteType} ${f.name};`).join(' ')} };`,
-    `struct ${W} { ${wordFields.map(f => `${wordType} ${f.name};`).join(' ')} };`,
+    // The two nested structs get a conversion OPERATOR and no constructor. An
+    // operator leaves the type an aggregate - it is a constructor that would not -
+    // so `if (nAddrBytes)` and `nAddrBytes == nOther`, which are the decompiler
+    // reading the four bytes as the word they are, resolve without costing the
+    // brace-initialisation the whole tree relies on.
+    `struct ${B} { ${byteFields.map(f => `${byteType} ${f.name};`).join(' ')}`
+      + ` operator ${addrType}() const { return *reinterpret_cast<const ${addrType}*>(this); } };`,
+    `struct ${W} { ${wordFields.map(f => `${wordType} ${f.name};`).join(' ')}`
+      + ` operator ${addrType}() const { return *reinterpret_cast<const ${addrType}*>(this); } };`,
     `union ${U} {`,
     `    ${B} S_un_b;`,
     `    ${W} S_un_w;`,
@@ -2781,6 +2788,7 @@ export function buildWinsockInAddrClaim(
     `    in_addr(${addrType} a) : S_un(a) {}`,
     `    in_addr(${B} b) : S_un(b) {}`,
     `    in_addr(${W} w) : S_un(w) {}`,
+    `    operator ${addrType}() const { return S_un.S_addr; }`,
     '} IN_ADDR, *PIN_ADDR, *LPIN_ADDR;',
     '#    define s_addr  S_un.S_addr',
     '#    define s_host  S_un.S_un_b.s_b2',
@@ -3078,6 +3086,11 @@ function buildFuncPtrArgCastTables(
   const convertingAggregates = new Set<string>();
   for (const dt of dataTypes) {
     if (dt.kind !== 'STRUCTURE' || !dt.name || !('fields' in dt)) continue;
+    // A library type's definition is emitted behind `#ifndef _WIN32`, so on the
+    // target that actually builds it is the Win32 SDK's plain struct and the
+    // constructor is not there. `_FILETIME` and `tagPALETTEENTRY` are both
+    // integer-only and would otherwise be claimed as converting.
+    if (isLibraryType(dt.name, dt.category ?? '')) continue;
     const fields = (dt as import('../types.js').ExtractedStruct).fields ?? [];
     if (getIntegerConversionType(fields)) convertingAggregates.add(dt.name);
   }
