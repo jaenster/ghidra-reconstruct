@@ -1429,10 +1429,54 @@ function generateTypedefDeclaration(type: ExtractedTypedef): string {
 /**
  * Generate union declaration
  */
+/**
+ * The unsigned integer of the union's own width, when every member of the union
+ * is exactly that wide and is a pointer or an integer - i.e. when the union is a
+ * machine word that Ghidra happens to have given several spellings. A union with
+ * a struct, an array or a narrower member is a real union and gets nothing.
+ */
+function unionWordConversionType(type: ExtractedUnion): string | null {
+  const fields = (type.fields ?? []).filter(f => !f.name || !f.name.startsWith('_pad_'));
+  if (fields.length === 0) return null;
+  const width = Math.max(...fields.map(f => f.size));
+  const sizeToType: Record<number, string> = { 1: 'uint8_t', 2: 'uint16_t', 4: 'uint32_t', 8: 'uint64_t' };
+  const word = sizeToType[width];
+  if (!word) return null;
+  const scalar = new Set([
+    'int', 'int8_t', 'int16_t', 'int32_t', 'int64_t',
+    'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t',
+    'char', 'short', 'long', 'unsigned int', 'unsigned short', 'unsigned char',
+    'uchar', 'ushort', 'uint', 'ulong', 'byte', 'BYTE', 'WORD', 'DWORD', 'BOOL',
+    'undefined1', 'undefined2', 'undefined4', 'undefined8', 'pointer',
+  ]);
+  for (const f of fields) {
+    if (f.size !== width) return null;
+    const t = (f.dataType ?? '').trim();
+    if (t.includes('[')) return null;
+    if (t.endsWith('*')) continue;                 // a pointer is one word
+    if (!scalar.has(t.replace(/\s+/g, ' '))) return null;
+  }
+  return word;
+}
+
 export function generateUnionDeclaration(type: ExtractedUnion): string {
   const lines: string[] = [];
 
   lines.push(`union ${type.name} {`);
+
+  // A union every one of whose members is one machine word IS a machine word,
+  // and Ghidra's decompiler reads it as one: `(float)pUnit->pUnitData`,
+  // `(int32_t)pQuestGUID`, `!nin_addr`. C++ needs the conversion spelled.
+  //
+  // Only the conversion OPERATOR is written, never a constructor: a
+  // user-provided constructor would make the union a non-aggregate and break
+  // every braced initializer of it, while a conversion function leaves
+  // aggregate initialization exactly as it was.
+  const wordType = unionWordConversionType(type);
+  if (wordType) {
+    lines.push(`    operator ${wordType}() const { return *reinterpret_cast<const ${wordType}*>(this); }`);
+    lines.push('');
+  }
 
   emitFieldLines(type.fields, lines, /* isUnion */ true);
 
