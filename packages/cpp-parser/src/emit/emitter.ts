@@ -721,6 +721,24 @@ export class CppEmitter {
       this.write(' ' + '*'.repeat(ptrLevels));
       return;
     }
+    // Pointer-to-function: the star binds inside the parentheses, so the flat
+    // `ret(args) *` this method would otherwise write is a different type
+    // (a function returning a pointer). `ret (*)(args)`.
+    if (cur.kind === NodeKind.FunctionType) {
+      const fn = cur as FunctionType;
+      this.emitTypeNode(fn.returnType);
+      this.write(' (' + '*'.repeat(ptrLevels) + ')(');
+      for (let i = 0; i < fn.parameters.length; i++) {
+        if (i > 0) this.write(this.style.spaceAfterComma ? ', ' : ',');
+        this.emitTypeNode(fn.parameters[i]);
+      }
+      if (fn.isVariadic) {
+        if (fn.parameters.length > 0) this.write(this.style.spaceAfterComma ? ', ' : ',');
+        this.write('...');
+      }
+      this.write(')');
+      return;
+    }
     this.emitTypeNode(node.pointee);
     const qualStr = node.qualifiers.length > 0 ? ' ' + node.qualifiers.join(' ') : '';
     switch (this.style.pointerAlignment) {

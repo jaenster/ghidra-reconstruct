@@ -797,6 +797,8 @@ export interface FuncPtrArgCastTables {
    * being functions.
    */
   functionNames?: string[];
+  /** Bare names more than one function carries - i.e. an overload set */
+  overloadedFunctionNames?: string[];
   /** Global variable name (as emitted) → its emitted declaration type spelling */
   globalTypes?: Record<string, string>;
   /** Callables with a `...` tail — arguments past the declared ones have no type */
@@ -2120,6 +2122,9 @@ function transformDecompiledCode(
       }
       perPluginOptions['assign-cast'] = {
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        functionParamTypes: context.funcPtrArgCasts.functionParamTypes,
+        overloadedFunctionNames: context.funcPtrArgCasts.overloadedFunctionNames,
+        enclosingSegments: enclosing?.ghidraNamespaceSegments ?? enclosing?.namespaceSegments,
         functionNames: context.funcPtrArgCasts.functionNames,
         variableNames: context.funcPtrArgCasts.variableNames,
         globalTypes: context.funcPtrArgCasts.globalTypes,

@@ -51,6 +51,7 @@ import {
   typeFromSpelling, unwrapParens, calleeName, sameShape, isVoid, canonicalBase,
   isWordIntegerShape, isOpaqueCallbackBase, cachedSet, bareName,
   createFuncdefCalleeResolver, type FuncdefDecl, type FuncdefCalleeTables,
+  functionPointerTypeFromSpellings, scopedLookup,
 } from './call-arg-cast.js';
 
 export interface AssignCastOptions extends PluginOptions {
@@ -82,6 +83,16 @@ export interface AssignCastOptions extends PluginOptions {
   functionNames?: string[];
   /** Data-symbol names — a name that denotes data is never treated as a function */
   variableNames?: string[];
+  /** Callable name (bare AND qualified) → its emitted parameter type spellings */
+  functionParamTypes?: Record<string, string[]>;
+  /**
+   * Bare names more than one emitted function carries. `(code*)Draw` names an
+   * overload SET, and a cast reduces one only on an EXACT function type — so the
+   * function's own type is spelled first and the reinterpret goes on top.
+   */
+  overloadedFunctionNames?: string[];
+  /** The namespace segments enclosing this body, outermost first */
+  enclosingSegments?: string[];
 }
 
 /**
@@ -148,6 +159,26 @@ export function createAssignCastTransformer(options?: PluginOptions): Transforme
     structFieldFuncdefs: o.structFieldFuncdefs,
     fieldFuncdefs: o.fieldFuncdefs,
   };
+  const enclosingSegments = o.enclosingSegments ?? [];
+  const overloadedNames = cachedSet(o.overloadedFunctionNames);
+  const paramTypeSpellings = o.functionParamTypes ?? {};
+
+  /**
+   * A function designator whose name denotes an overload set, wrapped in its own
+   * exact type so the set reduces to one member. Without it the reinterpret cast
+   * below has nothing to resolve against — "overloaded function with no
+   * contextual type information" — and an INEXACT type selects nothing, so a
+   * signature this cannot spell is left as it is.
+   */
+  const selectOverload = (rhs: Expression, name: string): Expression => {
+    if (!overloadedNames.has(bareName(name))) return rhs;
+    const exact = functionPointerTypeFromSpellings(
+      scopedLookup(returnTypes, name, enclosingSegments),
+      scopedLookup(paramTypeSpellings, name, enclosingSegments),
+    );
+    return exact ? (Expr.cast(exact, rhs) as Expression) : rhs;
+  };
+
   const haveTables =
     Object.keys(globalTypes).length > 0 ||
     Object.keys(enclosingVarTypes).length > 0 ||
@@ -299,20 +330,20 @@ export function createAssignCastTransformer(options?: PluginOptions): Transforme
        * `f` or `&f` the model knows as a callable and which nothing nearer
        * declares as data.
        */
-      const functionDesignator = (expr: Expression): boolean => {
+      const functionDesignator = (expr: Expression): string | undefined => {
         let e = unwrapParens(expr);
         if (e.kind === NodeKind.UnaryExpr && (e as UnaryExpr).operator === '&') {
           e = unwrapParens((e as UnaryExpr).operand);
         }
-        if (e.kind !== NodeKind.Identifier && e.kind !== NodeKind.QualifiedId) return false;
+        if (e.kind !== NodeKind.Identifier && e.kind !== NodeKind.QualifiedId) return undefined;
         const name = calleeName(e);
-        if (!name) return false;
+        if (!name) return undefined;
         const bare = bareName(name);
-        if (localTypes.has(name) || localTypes.has(bare)) return false;
-        if (enclosingVarTypes[name] !== undefined || enclosingVarTypes[bare] !== undefined) return false;
-        if (globalTypes[name] !== undefined || globalTypes[bare] !== undefined) return false;
-        if (dataNames.has(bare)) return false;
-        return functionNames.has(name) || functionNames.has(bare);
+        if (localTypes.has(name) || localTypes.has(bare)) return undefined;
+        if (enclosingVarTypes[name] !== undefined || enclosingVarTypes[bare] !== undefined) return undefined;
+        if (globalTypes[name] !== undefined || globalTypes[bare] !== undefined) return undefined;
+        if (dataNames.has(bare)) return undefined;
+        return functionNames.has(name) || functionNames.has(bare) ? name : undefined;
       };
 
       /**
@@ -325,15 +356,17 @@ export function createAssignCastTransformer(options?: PluginOptions): Transforme
         // the same prototype. C++ converts it in NEITHER direction - not even to
         // `void*` - so the original source carried a cast; `funcptr-arg-cast` owns
         // the funcdef-typedef slots, and what is left has no prototype to freeze.
-        if (functionDesignator(rhs)) {
-          if (want.shape.stars > 0) return Expr.cast(want.node, rhs);
+        const designated = functionDesignator(rhs);
+        if (designated !== undefined) {
+          const value = selectOverload(rhs, designated);
+          if (want.shape.stars > 0) return Expr.cast(want.node, value);
           if (isOpaqueCallbackBase(want.shape.base, structFields)) {
-            return Expr.cast(want.node, rhs);
+            return Expr.cast(want.node, value);
           }
           // Into a word-wide integer the address goes through `uintptr_t`; a
           // narrower slot would truncate it, which the machine never did.
           if (!isWordIntegerShape(want.shape)) return null;
-          return Expr.cast(want.node, Expr.cast(Type.typedef('uintptr_t'), rhs));
+          return Expr.cast(want.node, Expr.cast(Type.typedef('uintptr_t'), value));
         }
         const have = valueShape(rhs);
         if (!have) return null;

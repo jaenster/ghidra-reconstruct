@@ -3065,6 +3065,13 @@ function buildFuncPtrArgCastTables(
   // the SIGNATURE, not about being functions, and a pass that only needs to know
   // "this identifier is not an object" must not lose the name to that collision.
   const functionNames = new Set<string>();
+  // Bare names more than one function carries. Every such name is an OVERLOAD
+  // SET at any scope that sees both — the emitter files a function under the
+  // namespace of its directory, so the per-file `Draw`s of `D2Win/Src/*.cpp` all
+  // land in `D2Win::Src` — and a cast reduces an overload set only on an EXACT
+  // function type. That is precisely what a funcdef-slot cast is not, so both
+  // cast passes spell the function's own type first.
+  const bareNameOwners = new Map<string, Set<string>>();
   const varArgFunctions = new Set<string>();
   const paramTypeClaims = new Map<string, Set<string>>();
   const returnTypeClaims = new Map<string, Set<string>>();
@@ -3101,6 +3108,9 @@ function buildFuncPtrArgCastTables(
     const qualified = fn.namespace ? `${fn.namespace}::${fn.name}` : fn.name;
     const paramSpellings = params.map(p => sigType(p.dataType ?? ''));
     const returnSpelling = sigType(fn.returnType ?? 'void');
+    let owners = bareNameOwners.get(fn.name);
+    if (!owners) { owners = new Set(); bareNameOwners.set(fn.name, owners); }
+    owners.add(qualified);
     for (const key of nameSuffixes(qualified)) {
       functionNames.add(key);
       if (!headerOwned.has(key)) {
@@ -3166,6 +3176,7 @@ function buildFuncPtrArgCastTables(
     functionParamTypes,
     functionReturnTypes,
     functionNames: [...functionNames],
+    overloadedFunctionNames: [...bareNameOwners].filter(([, o]) => o.size > 1).map(([n]) => n),
     globalTypes,
     varArgFunctions: [...varArgFunctions],
     fieldTypes,

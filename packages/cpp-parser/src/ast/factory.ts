@@ -14,6 +14,7 @@ import type {
   PointerType,
   ReferenceType,
   ArrayType,
+  FunctionType,
   QualifiedType,
   TemplateType,
   AutoType,
@@ -185,6 +186,21 @@ export const Type = {
       kind: NodeKind.ReferenceType,
       referenced,
     }) as ReferenceType;
+  },
+
+  /**
+   * A function TYPE, `ret(a, b)`. On its own it is only spellable in a few
+   * places; wrapped in `Type.pointer` it is the `ret (*)(a, b)` that names one
+   * member of an overload set.
+   */
+  function(returnType: TypeNode, parameters: TypeNode[], isVariadic = false): FunctionType {
+    return withDefaults({
+      kind: NodeKind.FunctionType,
+      returnType,
+      parameters,
+      isVariadic,
+      qualifiers: [],
+    }) as FunctionType;
   },
 
   array(elementType: TypeNode, size: Expression | null = null): ArrayType {

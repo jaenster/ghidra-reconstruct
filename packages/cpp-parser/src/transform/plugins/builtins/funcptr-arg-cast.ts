@@ -27,6 +27,7 @@ import type {
   ASTNode,
   AssignExpr,
   CallExpr,
+  ConditionalExpr,
   Expression,
   Identifier,
   MemberExpr,
@@ -35,6 +36,7 @@ import type {
 } from '../../../ast/nodes.js';
 import { Expr, Type } from '../../../ast/factory.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
+import { functionPointerTypeFromSpellings, scopedLookup } from './call-arg-cast.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 
 export interface FuncPtrArgCastOptions extends PluginOptions {
@@ -91,6 +93,19 @@ export interface FuncPtrArgCastOptions extends PluginOptions {
    * the innermost outwards, and so does this.
    */
   enclosingSegments?: string[];
+  /**
+   * Bare names more than one emitted function carries. Casting such a name is
+   * ill-formed on its own ("overloaded function with no contextual type
+   * information"): a cast selects from an overload set only on an EXACT match,
+   * and the slot's funcdef never matches — that disagreement is why the cast is
+   * being written. The function's own type is spelled first so the set reduces
+   * to one member.
+   */
+  overloadedFunctionNames?: string[];
+  /** Callable name (bare AND qualified) → its emitted parameter type spellings */
+  functionParamTypes?: Record<string, string[]>;
+  /** Callable name (bare AND qualified) → its emitted return type spelling */
+  functionReturnTypes?: Record<string, string>;
 }
 
 /** Slot marker for a parameter/field declared plain `void*` rather than a funcdef. */
@@ -187,50 +202,41 @@ function buildTransformer(options: FuncPtrArgCastOptions): Transformer {
   const voidPointerFields = new Set(options.voidPointerFields ?? []);
   const fieldFuncdefs = options.fieldFuncdefs ?? {};
 
+  const enclosingSegments = options.enclosingSegments ?? [];
+  const overloaded = new Set(options.overloadedFunctionNames ?? []);
+  const functionParamTypes = options.functionParamTypes ?? {};
+  const functionReturnTypes = options.functionReturnTypes ?? {};
+
+  /**
+   * The value to cast, with the overload set reduced to one member first where
+   * the name denotes more than one function. When the exact type is not
+   * spellable the value is left alone — an inexact cast selects nothing.
+   */
+  const selectOverload = (value: Expression): Expression => {
+    const fnName = functionArgName(value);
+    if (!fnName || !overloaded.has(bareOf(fnName))) return value;
+    const exact = functionPointerTypeFromSpellings(
+      scopedLookup(functionReturnTypes, fnName, enclosingSegments),
+      scopedLookup(functionParamTypes, fnName, enclosingSegments),
+    );
+    return exact ? (Expr.cast(exact, value) as Expression) : value;
+  };
+
   const castTo = (typedefName: string, value: Expression): Expression => {
     usedTypedefs.add(typedefName);
     const castType = rootQualified.has(typedefName)
       ? Type.typedefAt(typedefName, true)
       : Type.typedef(typedefName);
-    return Expr.cast(castType, value) as Expression;
+    return Expr.cast(castType, selectOverload(value)) as Expression;
   };
 
   const slotsFor = (callee: string): Record<number, string> | undefined =>
     paramFuncdefs[callee] ?? paramFuncdefs[bareOf(callee)];
 
-  const enclosingSegments = options.enclosingSegments ?? [];
-
   const signatureFor = (fn: string): string | undefined => {
     // A name that also denotes data is not proof of a function.
     if (variableNames.has(bareOf(fn))) return undefined;
-    const direct = functionSignatures[fn];
-    if (direct !== undefined) return direct;
-    // Enclosing-scope lookup, innermost first — what C++ does with a name the
-    // enclosing scope supplies, and the only thing that disambiguates `Draw`
-    // (twelve functions carry that bare name across `D2Client::Forms::*`).
-    //
-    // A name that arrives already qualified is walked too, but only DEEPER than
-    // its own qualifier: `D2Client::Forms::Draw` inside
-    // `D2Client::Forms::D2WinList` is the outer spelling of this unit's own
-    // `Draw` (the emitter drops the unit segment, so that is exactly what the
-    // emitted call binds to). A qualifier that is not a prefix of the enclosing
-    // path names something else entirely and is left alone.
-    const bare = bareOf(fn);
-    const cut = fn.lastIndexOf('::');
-    const qualifier = cut === -1 ? '' : fn.slice(0, cut);
-    const qualifierDepth = qualifier === '' ? 0 : qualifier.split('::').length;
-    const enclosingPath = enclosingSegments.join('::');
-    const walkable = qualifier === ''
-      || enclosingPath === qualifier
-      || enclosingPath.startsWith(`${qualifier}::`);
-    if (walkable) {
-      for (let i = enclosingSegments.length; i > qualifierDepth; i--) {
-        const qualified = `${enclosingSegments.slice(0, i).join('::')}::${bare}`;
-        const found = functionSignatures[qualified];
-        if (found !== undefined) return found;
-      }
-    }
-    return functionSignatures[bare];
+    return scopedLookup(functionSignatures, fn, enclosingSegments);
   };
 
   return createTransformer({
@@ -260,6 +266,29 @@ function buildTransformer(options: FuncPtrArgCastOptions): Transformer {
         if (!typedefName) return undefined;
         const target = funcdefSignatures[typedefName];
         if (target === undefined) return undefined;
+
+        // `fpKey = nParam & 1 ? Key : nullptr;` — the branchless-select undo
+        // leaves the function in a ternary ARM, where it is still a designator
+        // whose type has to be spelled. Each arm stores into the same slot, so
+        // each is decided on its own; a null arm needs nothing.
+        if (assign.right.kind === NodeKind.ConditionalExpr) {
+          const cond = assign.right as ConditionalExpr;
+          const armCast = (arm: Expression): Expression => {
+            const armFn = functionArgName(arm);
+            if (!armFn) return arm;
+            const armSig = signatureFor(armFn);
+            if (armSig === undefined || armSig === target) return arm;
+            if (arityOf(armSig) !== arityOf(target)) { arityMismatches++; return arm; }
+            return castTo(typedefName, arm);
+          };
+          const thenExpr = armCast(cond.thenExpr);
+          const elseExpr = armCast(cond.elseExpr);
+          if (thenExpr === cond.thenExpr && elseExpr === cond.elseExpr) return undefined;
+          return updateNode(assign, {
+            right: updateNode(cond, { thenExpr, elseExpr } as Partial<ConditionalExpr>) as Expression,
+          } as Partial<AssignExpr>);
+        }
+
         const fnName = functionArgName(assign.right);
         if (!fnName) return undefined;
         const actual = signatureFor(fnName);

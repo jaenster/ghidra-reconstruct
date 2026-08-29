@@ -410,6 +410,71 @@ export function calleeName(expr: Expression): string | undefined {
 }
 
 /** Turn a declaration spelling back into a type node the cast can be written with. */
+/**
+ * Look a callee name up in a table keyed by both bare and qualified spellings,
+ * resolving an unqualified name the way C++ does: through the enclosing scopes,
+ * innermost first.
+ *
+ * A bare name two functions disagree over is dropped from every such table, so
+ * the walk is the ONLY thing that finds `Draw` from inside `D2Win::Src::…` — and
+ * a name that arrives qualified is walked only DEEPER than its own qualifier,
+ * because a qualifier that is not a prefix of where we sit names something else.
+ */
+export function scopedLookup<T>(
+  table: Record<string, T>,
+  name: string,
+  enclosingSegments: readonly string[],
+): T | undefined {
+  const direct = table[name];
+  if (direct !== undefined) return direct;
+  const bare = bareName(name);
+  const cut = name.lastIndexOf('::');
+  const qualifier = cut === -1 ? '' : name.slice(0, cut);
+  const qualifierDepth = qualifier === '' ? 0 : qualifier.split('::').length;
+  const enclosingPath = enclosingSegments.join('::');
+  const walkable = qualifier === ''
+    || enclosingPath === qualifier
+    || enclosingPath.startsWith(`${qualifier}::`);
+  if (walkable) {
+    for (let i = enclosingSegments.length; i > qualifierDepth; i--) {
+      const found = table[`${enclosingSegments.slice(0, i).join('::')}::${bare}`];
+      if (found !== undefined) return found;
+    }
+  }
+  return table[bare];
+}
+
+/**
+ * `ret (*)(a, b)` — the exact type of ONE function, built from the spellings the
+ * header declares it with.
+ *
+ * This is what selects a single member of an overload set. `(::Draw)Draw` is
+ * ill-formed the moment two `Draw`s share a scope: a cast resolves an overload
+ * set only against an EXACT function type, and the funcdef the slot is declared
+ * with is by construction not any overload's own type — that disagreement is
+ * the whole reason the cast is there. Naming the function's own type first
+ * picks the overload; the outer cast then reinterprets it, exactly as before.
+ *
+ * Returns null when any part of the signature is not spellable as a plain type,
+ * because a cast that does not match the declaration EXACTLY selects nothing and
+ * turns one error into another.
+ */
+export function functionPointerTypeFromSpellings(
+  returnSpelling: string | undefined,
+  paramSpellings: readonly string[] | undefined,
+): TypeNode | null {
+  if (returnSpelling === undefined || paramSpellings === undefined) return null;
+  const ret = typeFromSpelling(returnSpelling);
+  if (!ret) return null;
+  const params: TypeNode[] = [];
+  for (const p of paramSpellings) {
+    const node = typeFromSpelling(p);
+    if (!node) return null;
+    params.push(node);
+  }
+  return Type.pointer(Type.function(ret, params));
+}
+
 export function typeFromSpelling(spelling: string): TypeNode | null {
   let s = spelling.trim();
   if (!s || /[()<>&\[\]]/.test(s)) return null;
