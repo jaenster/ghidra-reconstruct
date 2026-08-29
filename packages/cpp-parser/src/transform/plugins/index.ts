@@ -430,6 +430,8 @@ import { arrayBlockAssignPlugin } from './builtins/array-block-assign.js';
 export { arrayBlockAssignPlugin } from './builtins/array-block-assign.js';
 import { bitfieldAliasLowerPlugin } from './builtins/bitfield-alias-lower.js';
 export { bitfieldAliasLowerPlugin } from './builtins/bitfield-alias-lower.js';
+import { enumConstantQualifyPlugin } from './builtins/enum-constant-qualify.js';
+export { enumConstantQualifyPlugin } from './builtins/enum-constant-qualify.js';
 import { memoryPatternsPlugin } from './builtins/memory-patterns.js';
 import { magicDivisionPlugin } from './builtins/magic-division.js';
 import { ternarySimplifyPlugin } from './builtins/ternary-simplify.js';
@@ -562,6 +564,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   arrayAccessPlugin,
   structFieldPlugin,
   bitfieldAliasLowerPlugin, // Structs: p->field_0xN the aggregate does not declare -> *((uint8_t*)p + N) (priority 55)
+  enumConstantQualifyPlugin, // Enums: a constant two enums number differently -> <Enum>_ns::Name from the controlling type (priority 60)
   arrayBlockAssignPlugin, // Ghidra: whole-array assign -> memcpy/memset (priority 15)
   booleanCleanupPlugin,       // Cleanup: expr != false → expr (priority 50)
   ternarySimplifyPlugin,      // Boolean cleanup

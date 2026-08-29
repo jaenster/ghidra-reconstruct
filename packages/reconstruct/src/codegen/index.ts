@@ -405,10 +405,17 @@ export function generateProject(
       '#include <cstdint>',
       '',
     ];
-    // Track emitted constexpr names to avoid duplicates across enum types.
-    // Values go in a per-enum namespace with `using namespace` to avoid name collisions
-    // between enums that share value names (e.g. Death in both player and monster anim modes).
-    const emittedNames = new Set<string>();
+    // Each enum's constants live in `namespace <Enum>_ns`, and every one of its
+    // members is written there - a member is NEVER dropped because another enum
+    // happened to declare the same name first. That cross-enum drop was silently
+    // wrong: `eD2PlayerAnimMode` lost 15 of its 20 members to
+    // `eD2MonsterAnimMode`, whose numbering differs, so a `case Run:` in a
+    // player-mode switch compiled to the monster's 15 instead of the player's 3.
+    //
+    // Global visibility is then granted one name at a time (`using <Enum>_ns::X;`)
+    // and only where every declaring enum agrees on the value, so an unqualified
+    // reference can no longer resolve to another enum's number.
+
     // Win32/CRT/compiler constants that Ghidra swept into enums collide with the
     // real <windows.h>/<winnt.h> macros. Under _WIN32 the platform headers own
     // them; emit our copies only when building without the SDK (non-_WIN32).
@@ -417,24 +424,66 @@ export function generateProject(
     //   - IMAGE_* values are PE-format section/header constants from <winnt.h>
     const isPlatformEnumValue = (enumName: string, valueName: string): boolean =>
       /^define_/.test(enumName) || /^IMAGE_[A-Z]/.test(valueName);
-    for (const e of enumTypes) {
-      if (isPlatformOrBuiltinType(e.name)) continue;
-      if (/[^a-zA-Z0-9_]/.test(e.name)) continue;
+
+    // Which enums this header actually writes, in the order it writes them.
+    const emittedEnums = enumTypes.filter(
+      e => !isPlatformOrBuiltinType(e.name) && !/[^a-zA-Z0-9_]/.test(e.name)
+    );
+
+    // Every enum a constant name is declared by, with the value each one gives
+    // it. Trim first: Ghidra value names sometimes carry a trailing space
+    // ("UNITEVENTCALLBACK_MODECHANGE "), and C++ ignores it, so the two
+    // spellings are one name here.
+    const nameOwners = new Map<string, Array<{ enumName: string; value: number | string }>>();
+    for (const e of emittedEnums) {
+      for (const v of e.values) {
+        const vname = v.name.trim();
+        if (!vname) continue;
+        const into = nameOwners.get(vname) ?? [];
+        if (into.length === 0) nameOwners.set(vname, into);
+        into.push({ enumName: e.name, value: v.value });
+      }
+    }
+
+    // A constant is spellable UNQUALIFIED only where every enum that declares it
+    // agrees on the value. Where they disagree the name means different numbers
+    // in different switches, and no global spelling of it can be right - it is
+    // exported by nobody, so an unqualified use is a compile error rather than
+    // a silent wrong branch. `enum-constant-qualify` writes the qualified form
+    // wherever the controlling type says which enum is meant.
+    const exportOwner = new Map<string, string>();
+    const ambiguousConstants: string[] = [];
+    for (const [vname, owners] of nameOwners) {
+      const agrees = owners.every(o => String(o.value) === String(owners[0].value));
+      if (agrees) exportOwner.set(vname, owners[0].enumName);
+      else ambiguousConstants.push(vname);
+    }
+    context._ambiguousEnumConstants = ambiguousConstants;
+    context._enumMembers = Object.fromEntries(
+      emittedEnums.map(e => [e.name, e.values.map(v => v.name.trim()).filter(Boolean)])
+    );
+
+    for (const e of emittedEnums) {
       enumLines.push(`typedef int ${e.name};`);
       if (e.values.length > 0) {
         const normalLines: string[] = [];
         const platformLines: string[] = [];
+        const normalUsing: string[] = [];
+        const platformUsing: string[] = [];
+        const declared = new Set<string>();
         for (const v of e.values) {
-          // Trim: Ghidra value names sometimes carry a trailing space
-          // ("UNITEVENTCALLBACK_MODECHANGE "), which made this cross-enum dedup
-          // treat the same constant in two enums as distinct → both emitted →
-          // "reference is ambiguous" (C++ ignores the trailing space).
           const vname = v.name.trim();
-          if (emittedNames.has(vname)) continue;
-          emittedNames.add(vname);
+          if (!vname || declared.has(vname)) continue;
+          declared.add(vname);
           const comment = v.comment ? ` // ${v.comment.replace(/\\n/g, ' ')}` : '';
           const line = `constexpr ${e.name} ${vname} = ${v.value};${comment}`;
-          (isPlatformEnumValue(e.name, vname) ? platformLines : normalLines).push(line);
+          const platform = isPlatformEnumValue(e.name, vname);
+          (platform ? platformLines : normalLines).push(line);
+          // A `using` may only name a declaration that exists in this build, so
+          // an export of a guarded constant carries the same guard.
+          if (exportOwner.get(vname) === e.name) {
+            (platform ? platformUsing : normalUsing).push(`using ${e.name}_ns::${vname};`);
+          }
         }
         if (normalLines.length > 0 || platformLines.length > 0) {
           enumLines.push(`namespace ${e.name}_ns {`);
@@ -445,7 +494,12 @@ export function generateProject(
             enumLines.push('#endif');
           }
           enumLines.push('}');
-          enumLines.push(`using namespace ${e.name}_ns;`);
+          enumLines.push(...normalUsing);
+          if (platformUsing.length > 0) {
+            enumLines.push('#ifndef _WIN32  // provided by <windows.h>/<winnt.h> on Windows');
+            enumLines.push(...platformUsing);
+            enumLines.push('#endif');
+          }
         }
       }
       enumLines.push('');

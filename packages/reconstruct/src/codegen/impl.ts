@@ -681,6 +681,14 @@ export interface ImplGenContext {
   /** Enum type names moved to shared d2_enums.h — skip in per-file headers */
   _sharedEnumTypes?: Set<string>;
   /**
+   * Constant names that more than one enum declares with DIFFERENT values, so
+   * `d2_enums.h` exports none of them at global scope. Only the qualified
+   * `<Enum>_ns::Name` spelling means anything for these.
+   */
+  _ambiguousEnumConstants?: string[];
+  /** Enum name → the member names it declares, un-deduplicated. */
+  _enumMembers?: Record<string, string[]>;
+  /**
    * Full set of namespace paths that exist in the project (e.g.
    * "D2Common::Unit::Path", "D2Common::Path::DynamicPath"). Used to make
    * redundant-qualifier stripping collision-aware: a prefix is only stripped
@@ -2142,6 +2150,18 @@ function transformDecompiledCode(
       perPluginOptions['namespace-shadow-qualify'] = shadowOptions;
     }
 
+    // The body is parsed inside a `void dummy()` wrapper, so the AST never
+    // shows a PARAMETER's type — and a parameter handed straight on to
+    // another call is the commonest argument there is. Pass them in, spelled
+    // the way the signature spells them.
+    const enclosingVarTypes: Record<string, string> = {};
+    for (const [n, t] of Object.entries(varTypes ?? {})) {
+      const spelled = sigType(t);
+      enclosingVarTypes[n] = spelled;
+      const renamed = enclosing?.renames?.[n];
+      if (renamed) enclosingVarTypes[renamed] = spelled;
+    }
+
     if (context?.funcPtrArgCasts) {
       // The tables are shared, but the enclosing scope is not: a bare `Draw`
       // resolves to a different function in each `D2Client::Forms::*` unit. Hand
@@ -2155,17 +2175,6 @@ function transformDecompiledCode(
       perPluginOptions['pointer-assign-cast'] = {
         voidPointerFunctions: context.funcPtrArgCasts.voidPointerFunctions,
       };
-      // The body is parsed inside a `void dummy()` wrapper, so the AST never
-      // shows a PARAMETER's type — and a parameter handed straight on to
-      // another call is the commonest argument there is. Pass them in, spelled
-      // the way the signature spells them.
-      const enclosingVarTypes: Record<string, string> = {};
-      for (const [n, t] of Object.entries(varTypes ?? {})) {
-        const spelled = sigType(t);
-        enclosingVarTypes[n] = spelled;
-        const renamed = enclosing?.renames?.[n];
-        if (renamed) enclosingVarTypes[renamed] = spelled;
-      }
       perPluginOptions['assign-cast'] = {
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         functionParamTypes: context.funcPtrArgCasts.functionParamTypes,
@@ -2276,6 +2285,23 @@ function transformDecompiledCode(
     const enumConstants = getKnownEnumConstants();
     if (enumConstants.length > 0) {
       perPluginOptions['switch-reconstruct'] = { enumConstants };
+    }
+
+    // A constant name several enums number differently is exported by none of
+    // them, so the only spelling that resolves is the qualified one. Which enum
+    // is meant comes from the controlling type, which needs the same object-type
+    // tables `call-arg-cast` reads.
+    const ambiguousEnumConstants = context?._ambiguousEnumConstants;
+    if (ambiguousEnumConstants && ambiguousEnumConstants.length > 0) {
+      perPluginOptions['enum-constant-qualify'] = {
+        ambiguousConstants: ambiguousEnumConstants,
+        enumMembers: context?._enumMembers,
+        structFields: context?.funcPtrArgCasts?.structFields,
+        fieldTypes: context?.funcPtrArgCasts?.fieldTypes,
+        globalTypes: context?.funcPtrArgCasts?.globalTypes,
+        returnTypes: context?.funcPtrArgCasts?.functionReturnTypes,
+        enclosingVarTypes,
+      };
     }
 
     if (enablePlugins.length > 0 || Object.keys(perPluginOptions).length > 0) {
