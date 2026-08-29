@@ -666,8 +666,12 @@ export function generateClassDeclaration(
  * Check if a struct's fields are all integer types and the total size matches
  * a standard integer type. Returns the integer type name or null.
  * This enables Ghidra's decompiler pattern of casting between small structs and integers.
+ *
+ * Exported because it is the ONLY record of which aggregates the emitted header
+ * gives a converting constructor to. A pass that rewrites a cast to an aggregate
+ * has to leave those alone - the cast already means what it says there.
  */
-function getIntegerConversionType(fields: StructField[]): string | null {
+export function getIntegerConversionType(fields: StructField[]): string | null {
   if (!fields || fields.length === 0) return null;
   const integerTypes = new Set([
     'int', 'int8_t', 'int16_t', 'int32_t', 'int64_t',

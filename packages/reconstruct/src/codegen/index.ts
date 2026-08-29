@@ -50,7 +50,7 @@ import type {
 import { resolveOverridePlaceholders } from './impl.js';
 import { VOID_POINTER_SLOT, type FuncPtrTarget } from '@ghidra-mcp/cpp-parser';
 
-import { fieldDeclSpelling, emittedMemberNames, generateHeader, generateFunctionDeclaration, setKnownFuncDefs, sigType } from './header.js';
+import { fieldDeclSpelling, emittedMemberNames, generateHeader, generateFunctionDeclaration, setKnownFuncDefs, sigType, getIntegerConversionType } from './header.js';
 import { generateImplementation, setQuestStructLayouts, setStructFieldRenames, decompiledReturnType, decompiledFunctionName, type ImplGenContext, type FuncPtrArgCastTables } from './impl.js';
 import { generateCMakeLists, generateTopLevelCMake, generateTargetCMake, generateUnsortedCMake } from './cmake.js';
 import { generateSourceMap } from './sourcemap.js';
@@ -2704,8 +2704,8 @@ const WINSOCK_SCALARS: Record<string, string> = {
  */
 export function buildWinsockInAddrClaim(
   dataTypes: ExtractedDataType[],
-): { lines: string[]; claimed: Set<string> } {
-  const empty = { lines: [] as string[], claimed: new Set<string>() };
+): { lines: string[]; claimed: Set<string>; converting: Set<string> } {
+  const empty = { lines: [] as string[], claimed: new Set<string>(), converting: new Set<string>() };
   const byName = new Map<string, ExtractedDataType>();
   for (const dt of dataTypes) byName.set(dt.name, dt);
 
@@ -2791,7 +2791,12 @@ export function buildWinsockInAddrClaim(
     '#  endif  // s_addr',
   ];
 
-  return { lines, claimed: new Set([B, W, U]) };
+  // Which of the four the block above gives a CONVERTING CONSTRUCTOR to. The two
+  // byte/word structs get none deliberately - a user-provided constructor
+  // de-aggregates them across every translation unit this header reaches - so a
+  // cast to one of those is still a cast with no meaning in C++, while a cast to
+  // the union or to `in_addr` already means exactly what it says.
+  return { lines, claimed: new Set([B, W, U]), converting: new Set([U, 'in_addr', 'IN_ADDR']) };
 }
 
 /**
@@ -3065,6 +3070,19 @@ function buildFuncPtrArgCastTables(
     }
   }
 
+  // The aggregates whose EMITTED declaration carries a converting constructor -
+  // the small integer-only structs the header gives `T(uint32_t)` to, plus the
+  // ones `d2_platform.h` writes by hand. A cast to one of those is legal C++ and
+  // already means the reinterpretation; a cast to any other aggregate is not a
+  // conversion that exists and has to be spelled as the bit move it is.
+  const convertingAggregates = new Set<string>();
+  for (const dt of dataTypes) {
+    if (dt.kind !== 'STRUCTURE' || !dt.name || !('fields' in dt)) continue;
+    const fields = (dt as import('../types.js').ExtractedStruct).fields ?? [];
+    if (getIntegerConversionType(fields)) convertingAggregates.add(dt.name);
+  }
+  for (const name of buildWinsockInAddrClaim(dataTypes).converting) convertingAggregates.add(name);
+
   // Every member name the emitted declaration of each aggregate carries -
   // taken from the header emitter itself, not rebuilt from its naming rules.
   // `structFields` cannot answer "does this aggregate declare X": it is keyed on
@@ -3309,6 +3327,7 @@ function buildFuncPtrArgCastTables(
     fieldTypes,
     typedefTargets,
     structFields,
+    convertingAggregates: [...convertingAggregates],
     aggregateMembers,
     funcdefDecls,
     structFieldFuncdefs,

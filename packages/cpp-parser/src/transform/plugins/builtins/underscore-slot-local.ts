@@ -31,7 +31,9 @@
  * its own cast; a site whose type matches the base's collapses to the bare base
  * identifier, which is the same storage.
  *
- * Only a POINTER selects case 2. Two integers disagreeing is Ghidra widening a
+ * Only a POINTER selects case 2 — a pointer to an ARRAY included, which is the
+ * shape a walk over one row of a two-dimensional table wears. Two integers
+ * disagreeing is Ghidra widening a
  * read (`iResult = _nSuffixId` over a `uint16_t` slot), and reinterpreting there
  * would write four bytes over a two-byte local — a silent overrun in place of a
  * loud error. So case 1 keeps every alias whose uses are integral, exactly as
@@ -47,7 +49,7 @@ import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, FunctionDecl, CompoundStmt, VariableDecl, ParameterDecl, Identifier, TypeNode,
   Expression, ParenExpr, UnaryExpr, CStyleCastExpr, AssignExpr, PointerType, BuiltinType,
-  TypedefType, ElaboratedType,
+  TypedefType, ElaboratedType, ArrayType, IntegerLiteralExpr,
 } from '../../../ast/nodes.js';
 import { findNodesByKind } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
@@ -90,6 +92,18 @@ function typeKey(t: TypeNode | undefined): string | null {
     case NodeKind.BuiltinType: {
       const b = t as BuiltinType;
       return builtinBase(b.name, b.modifiers).toLowerCase();
+    }
+    // A POINTER TO AN ARRAY is a pointer whose pointee is an array, and without
+    // this case the key of `D2UnitStrc *(*)[5]` is null - so the one type the
+    // decompiler ever proves for such a slot compares equal to nothing and the
+    // alias silently falls back to the base's own (too narrow) type.
+    case NodeKind.ArrayType: {
+      const a = t as ArrayType;
+      const inner = typeKey(a.elementType);
+      if (inner === null) return null;
+      const size = a.size && a.size.kind === NodeKind.IntegerLiteral
+        ? String((a.size as IntegerLiteralExpr).value) : '';
+      return `${inner}[${size}]`;
     }
     case NodeKind.TypedefType:
       return typeNodeName((t as TypedefType).name) ?? null;

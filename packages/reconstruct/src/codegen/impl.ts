@@ -633,6 +633,12 @@ export interface FuncPtrArgCastTables {
   typedefTargets?: Record<string, string>;
   /** Aggregate name → field name → declared type, exact where the walk is known */
   structFields?: Record<string, Record<string, string>>;
+  /**
+   * The aggregates whose emitted declaration carries a converting constructor,
+   * so a C cast to one of them is legal C++ and already means the four-byte
+   * reinterpretation. Every other aggregate has to have the cast written out.
+   */
+  convertingAggregates?: string[];
   /** Aggregate name → every member name its emitted declaration carries */
   aggregateMembers?: Record<string, string[]>;
   /**
@@ -2050,10 +2056,14 @@ function transformDecompiledCode(
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         enclosingVarTypes,
       };
+      perPluginOptions['array-block-assign'] = {
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+      };
       perPluginOptions['float-pointer-bitcast'] = {
         globalTypes: context.funcPtrArgCasts.globalTypes,
         fieldTypes: context.funcPtrArgCasts.fieldTypes,
         structFields: context.funcPtrArgCasts.structFields,
+        convertingAggregates: context.funcPtrArgCasts.convertingAggregates,
         typedefTargets: context.funcPtrArgCasts.typedefTargets,
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         enclosingVarTypes,

@@ -24,6 +24,9 @@
  * compiles the moment anything makes the assignment legal. So this runs ahead of
  * `array-cast-strip` (17), which is where the pointer-to-array cast is dropped.
  *
+ * The same holds for an array-typed GLOBAL, which is why the set of array names
+ * is seeded from the emitted global declarations and not only from the body's.
+ *
  * Anything else assigned to an array local is left alone and left loud. In
  * particular `arr = (char [4])someScalar` with a non-zero right-hand side is
  * Ghidra typing a REGISTER as an array: the variable holds a pointer, and no
@@ -41,6 +44,14 @@ import { createTransformer, updateNode, type Transformer } from '../../transform
 import { Expr } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 
+export interface ArrayBlockAssignOptions extends PluginOptions {
+  /** Global name → its emitted declaration type spelling. */
+  globalTypes?: Record<string, string>;
+}
+
+/** A declaration spelling that ends in one or more array extents, and is not a pointer. */
+const isArraySpelling = (t: string): boolean => /(?:\[\d+\])+$/.test(t.trim());
+
 function unwrapParens(e: Expression): Expression {
   while (e.kind === NodeKind.ParenExpr) e = (e as { expression: Expression }).expression;
   return e;
@@ -51,7 +62,16 @@ function isZeroLiteral(e: Expression): boolean {
   return u.kind === NodeKind.IntegerLiteral && (u as IntegerLiteralExpr).value === 0n;
 }
 
-function createArrayBlockAssignTransformer(_options: PluginOptions = {}): Transformer {
+function createArrayBlockAssignTransformer(options: PluginOptions = {}): Transformer {
+  const o = options as ArrayBlockAssignOptions;
+  // A GLOBAL declared as an array is assignable no more than a local one is, and
+  // the block operation is the same. `gnQuestScrollLine = *(ushort (*)[2])(p+3)`
+  // is the four-byte packet field copy; it reached here only because the array
+  // names this pass knew came from body declarations alone.
+  const arrayGlobals = new Set<string>();
+  for (const [name, spelling] of Object.entries(o.globalTypes ?? {})) {
+    if (isArraySpelling(spelling)) arrayGlobals.add(name);
+  }
   return createTransformer({
     visitFunctionDecl(node: FunctionDecl): ASTNode | undefined {
       if (!node.body) return undefined;
@@ -59,10 +79,13 @@ function createArrayBlockAssignTransformer(_options: PluginOptions = {}): Transf
       // Array-typed locals this body declares. A parameter spelled `T p[N]` is a
       // pointer, not an array, and assigning to it is legal — so only body
       // declarations count.
-      const arrayLocals = new Set<string>();
+      const arrayLocals = new Set<string>(arrayGlobals);
+      // A body-declared name of the same spelling shadows the global, so a local
+      // that is NOT an array takes the name back out of the set.
       for (const d of findNodesByKind(node.body, NodeKind.VariableDecl)) {
         const v = d as VariableDecl;
         if (v.type.kind === NodeKind.ArrayType) arrayLocals.add(v.name.name);
+        else arrayLocals.delete(v.name.name);
       }
       if (arrayLocals.size === 0) return undefined;
 

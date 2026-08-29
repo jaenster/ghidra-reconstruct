@@ -1103,7 +1103,10 @@ export function generatePlatformHeader(
   lines.push('typedef unsigned int GrTexTable_t;');
   lines.push('typedef unsigned int GrTextureFilterMode_t;');
   lines.push('typedef unsigned int GrTextureFormat_t;');
-  lines.push('struct GrLfbInfo_t { int size; void* lfbPtr; uint32_t strideInBytes; };');
+  // Glide's own GrLfbInfo_t is five members, and `size` is set to 0x14 by every
+  // caller that fills one in - 20 bytes, not the 12 the first three account for.
+  // The two trailing members are what `grLfbLock` reads back out.
+  lines.push('struct GrLfbInfo_t { int size; void* lfbPtr; uint32_t strideInBytes; GrLfbWriteMode_t writeMode; GrOriginLocation_t origin; };');
   lines.push('struct GrTexInfo { GrLOD_t smallLodLog2; GrLOD_t largeLodLog2; GrAspectRatio_t aspectRatioLog2; GrTextureFormat_t format; void* data; };');
   lines.push('typedef void (*GrProc)();');
   lines.push('');
@@ -1205,6 +1208,27 @@ export function generatePlatformHeader(
   lines.push('#define SEXT14(x) ((int32_t)(int8_t)(x))');
   lines.push('#define SEXT24(x) ((int32_t)(int16_t)(x))');
   lines.push('#define SEXT48(x) ((int64_t)(int32_t)(x))');
+  lines.push('');
+
+  // Ghidra bit-range extraction. `ZPULL`/`SPULL` are the decompiler's own ops
+  // (Ghidra `additionalpcode`: CPUI_ZPULL / CPUI_SPULL): pull `nBits` bits out of
+  // a value starting at `nPos`, with the bits of the operand numbered from the
+  // LEAST significant, starting at 0. ZPULL zero-extends what it pulled, SPULL
+  // sign-extends it from the top bit pulled — which is the only difference
+  // between them, and the reason both spellings exist. They appear where the
+  // masked field is NOT a declared bitfield: `SPULL(bySkillFlags, 5, 1)` is the
+  // `TEST` against a 0x20 mask that `pSkill->pRecord->InGame` would have been
+  // had the struct declared bit 5 as a member.
+  lines.push('// Ghidra bit-range extraction (ZPULL/SPULL pseudo-ops): bits [nPos, nPos+nBits)');
+  lines.push('static inline uint32_t ZPULL(uint64_t nValue, int nPos, int nBits) {');
+  lines.push('  uint64_t nMask = (nBits >= 64) ? ~(uint64_t)0 : (((uint64_t)1 << nBits) - 1);');
+  lines.push('  return (uint32_t)((nValue >> nPos) & nMask);');
+  lines.push('}');
+  lines.push('static inline int32_t SPULL(uint64_t nValue, int nPos, int nBits) {');
+  lines.push('  uint32_t nSign = (uint32_t)1 << (nBits - 1);');
+  lines.push('  uint32_t nRaw = ZPULL(nValue, nPos, nBits);');
+  lines.push('  return (int32_t)((nRaw ^ nSign) - nSign);');
+  lines.push('}');
   lines.push('');
 
   // Ghidra pseudo-operations — instructions the decompiler cannot express in C
@@ -1365,6 +1389,13 @@ export function generatePlatformHeader(
   lines.push('static inline uintptr_t d2_bits_of(long double dValue) { return d2_bits_of((float)dValue); }');
   lines.push('template <class T> static inline uintptr_t d2_bits_of(const T& tValue) { uintptr_t nBits = 0; memcpy(&nBits, &tValue, sizeof(T) < sizeof(uintptr_t) ? sizeof(T) : sizeof(uintptr_t)); return nBits; }');
   lines.push('template <class T> static inline float d2_bits_to_float(const T& tValue) { float fValue = 0.0f; memcpy(&fValue, &tValue, sizeof(T) < sizeof(float) ? sizeof(T) : sizeof(float)); return fValue; }');
+  // The same move in the other direction: a machine word read back AS an
+  // aggregate. `(uD2UnitMode)pUnit` and `(FILETIME)0x0` are stores into a slot
+  // the struct occupies, not conversions - C++ reads them as a constructor call
+  // that does not exist. Deliberately a free template and never a constructor:
+  // giving one of these types a user-provided constructor de-aggregates it
+  // everywhere the header reaches, which is the whole tree.
+  lines.push('template <class T, class S> static inline T d2_bits_as(const S& sValue) { T tValue = T(); memcpy(&tValue, &sValue, sizeof(T) < sizeof(S) ? sizeof(T) : sizeof(S)); return tValue; }');
   lines.push('');
 
   // MSVC C++ exception-handling frame types. Not declared by any real header;

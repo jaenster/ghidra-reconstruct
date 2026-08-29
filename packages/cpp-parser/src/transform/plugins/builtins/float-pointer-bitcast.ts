@@ -21,6 +21,14 @@
  *
  * Deliberately narrow: only floating-to-pointer and pointer-to-floating. A
  * float/integer cast IS a value conversion and is left exactly as it is.
+ *
+ * The same disagreement reaches AGGREGATES from both sides — a struct the
+ * machine holds in a register, cast to the word it is (`(int)palPalEntry`), and
+ * a word stored into the bytes a struct occupies (`(uD2UnitMode)pItem`). Neither
+ * is a conversion C++ has, so both are written as the move the instruction
+ * makes: `d2_bits_of` one way, `d2_bits_as<T>` the other. An aggregate whose
+ * emitted declaration carries a converting constructor is left alone — there the
+ * cast is legal C++ and already means exactly this.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -32,9 +40,10 @@ import { findNodesByKind } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
 import { Expr } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
+import { emit } from '../../../emit/index.js';
 import { createExprShape } from './expr-shape.js';
 import {
-  SCALAR_BASES, isAggregateValue, shapeOfNode, unwrapParens,
+  SCALAR_BASES, isAggregateValue, sameShape, shapeOfNode, unwrapParens,
   type TypeShape, type TypedefResolver,
 } from './call-arg-cast.js';
 
@@ -45,6 +54,8 @@ export interface FloatPointerBitcastOptions extends PluginOptions {
   structFields?: Record<string, Record<string, string>>;
   functionReturnTypes?: Record<string, string>;
   typedefTargets?: Record<string, string>;
+  /** Aggregates the emitted header gives a converting constructor to. */
+  convertingAggregates?: string[];
 }
 
 /**
@@ -67,6 +78,7 @@ export function createFloatPointerBitcastTransformer(options?: PluginOptions): T
   const o = (options ?? {}) as FloatPointerBitcastOptions;
   const typedefTargets = o.typedefTargets ?? {};
   const structFields = o.structFields ?? {};
+  const converting = new Set(o.convertingAggregates ?? []);
   const resolve: TypedefResolver = name => typedefTargets[name];
 
   return createTransformer({
@@ -150,6 +162,23 @@ export function createFloatPointerBitcastTransformer(options?: PluginOptions): T
               ),
             } as Partial<CStyleCastExpr>);
           }
+          // And the mirror of it: a machine word read back AS an aggregate.
+          // `(uD2UnitMode)pItem`, `(FILETIME)0x0`, `(_struct_1227)nAddr` are the
+          // store the instruction makes into the bytes the struct occupies -
+          // there is no conversion from a word to a struct for C++ to perform,
+          // so it reads the cast as a constructor call and reports one that does
+          // not exist. Skipped where the emitted declaration DOES carry a
+          // converting constructor (`D2SeedStrc`, `in_addr`): there the cast is
+          // legal and already means this, and rewriting it would churn 900 sites
+          // to no effect.
+          if (target.stars === 0 && !!structFields[target.base] && !converting.has(target.base)
+              && !(operand && sameShape(operand, target))) {
+            changed = true;
+            return Expr.call(
+              `d2_bits_as<${emit(cast.type).trim()}>`,
+              [cast.expression as Expression],
+            );
+          }
           return undefined;
         },
       });
@@ -165,7 +194,7 @@ export const floatPointerBitcastPlugin: TransformPlugin = {
   id: 'float-pointer-bitcast',
   name: 'Float/Pointer Bit Reinterpretation',
   description:
-    'Routes a cast between a floating type and a pointer through a four-byte reinterpretation, which is the move the machine performs',
+    'Routes a cast between a floating type, a pointer or an aggregate through a bit reinterpretation, which is the move the machine performs',
   version: '1.0.0',
   defaultEnabled: true,
   // After pointer-compare-cast (615), so a comparison operand has settled first.
