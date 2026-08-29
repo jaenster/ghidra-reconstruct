@@ -485,6 +485,9 @@ export { switchCaseDedupPlugin, type SwitchCaseDedupOptions } from './builtins/s
 
 import { duplicateLabelUniquifyPlugin } from './builtins/duplicate-label-uniquify.js';
 export { duplicateLabelUniquifyPlugin, type DuplicateLabelUniquifyOptions } from './builtins/duplicate-label-uniquify.js';
+
+import { underscoreStorageAliasPlugin } from './builtins/underscore-storage-alias.js';
+export { underscoreStorageAliasPlugin, type UnderscoreStorageAliasOptions } from './builtins/underscore-storage-alias.js';
 import { ghidraPseudoOpPlugin } from './builtins/ghidra-pseudo-op.js';
 export { ghidraPseudoOpPlugin } from './builtins/ghidra-pseudo-op.js';
 import { labelMacroCollisionPlugin } from './builtins/label-macro-collision.js';
@@ -581,6 +584,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   prngTempCollapsePlugin,     // Cleanup: collapse PRNG temp variables (priority 85)
   voidReturnCleanupPlugin,    // Cleanup: trailing return; in void functions (priority 90)
   undefinedGotoLabelPlugin,   // Control-flow: define dropped Ghidra goto targets (priority 95)
+  underscoreStorageAliasPlugin, // Declaration: bind `_<global>` to the global and `_<crt>(` to the CRT name (priority 599)
   underscoreSlotLocalPlugin,  // Declaration: synthesize Ghidra `_<base>` slot-locals (priority 95)
   phantomLocalSynthesisPlugin, // Declaration: synthesize Ghidra auto-name phantoms uVar3/unique0x… (priority 601)
   switchPointerNormalizePlugin, // Cleanup: strip pointer casts from pointer-typed switch condition + case labels (priority 40)

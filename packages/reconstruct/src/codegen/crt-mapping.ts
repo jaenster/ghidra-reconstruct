@@ -287,6 +287,20 @@ export function resolveCrtInclude(name: string): string | undefined {
 }
 
 /**
+ * The CRT function names an undecorated call can bind to.
+ *
+ * Ghidra emits the MSVC-decorated spelling at the call site (`_memmove(...)`),
+ * which names nothing the header declares; `underscore-storage-alias` strips the
+ * decoration where the base is one of these. Restricted to the lowercase-initial
+ * names, so a decorated identifier is only ever rewritten into a real C function.
+ */
+let crtNamesCache: string[] | null = null;
+export function crtFunctionNames(): string[] {
+  if (!crtNamesCache) crtNamesCache = Object.keys(CRT_TABLE).filter(n => /^[a-z]/.test(n));
+  return crtNamesCache;
+}
+
+/**
  * Collect the set of CRT/stdlib headers needed by a list of called function names.
  */
 export function collectCrtHeaders(calledFunctions: string[]): Set<string> {

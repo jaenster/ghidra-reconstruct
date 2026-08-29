@@ -925,10 +925,11 @@ export function generateStaticLocalsBlock(
   // Filter out globals whose sanitized name doesn't appear in the function body.
   //
   // Ghidra references a global's reused storage slot as `_<global>` (one leading
-  // underscore). `declareUnderscoreSlotLocals` rewrites that back to `<global>`
-  // in the emitted body, but it runs AFTER this block is generated, so the
-  // identifier set still carries the underscore form. Accept either spelling —
-  // otherwise the body names a static local this block just declined to declare.
+  // underscore). `underscore-storage-alias` rewrites that back to `<global>` on
+  // the AST, but only where the base is one of the analyzed globals under its own
+  // `name` — a static local this block spells through `sanitizeSymbolName` can
+  // still reach here wearing the underscore. Accept either spelling, or the body
+  // names a static local this block just declined to declare.
   if (bodyIdentifiers) {
     statics = statics.filter(s => {
       const n = sanitizeSymbolName(s.suggestedName || s.name);

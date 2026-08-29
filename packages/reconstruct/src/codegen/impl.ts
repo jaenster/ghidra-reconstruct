@@ -15,7 +15,7 @@ import type {
   StructField,
 } from '../types.js';
 import { isPlatformOrBuiltinType, isStructType, castPointerInitializer, normalizeDataValue, isCharacterValueType } from './platform-types.js';
-import { resolveCrtInclude } from './crt-mapping.js';
+import { crtFunctionNames } from './crt-mapping.js';
 import { CPP_KEYWORDS } from './header.js';
 
 // Import cpp-parser for code transformation
@@ -164,90 +164,6 @@ import type { OverrideRegistry } from '../overrides/index.js';
 import type { LibraryRegistry } from '../library/index.js';
 import type { MethodConversionRegistry, MethodCallMapping } from '../methods/index.js';
 import { applyPatches } from '../overrides/patches.js';
-
-/**
- * Synthesize declarations for `_<base>` storage-slot locals Ghidra references
- * but never declares.
- *
- * Ghidra's decompiler sometimes reuses a parameter/local's STORAGE SLOT as a
- * fresh local after the original value is dead, naming it `_<base>` (one leading
- * underscore over the original `<base>`). It emits no declaration for it, so the
- * copied-verbatim body USES `_<base>` but never DECLARES it → a compile error
- * ("'_foo' was not declared in this scope; did you mean 'foo'?").
- *
- * For every `_<base>` that is (a) used in the body, (b) not already declared
- * (not a param, not a body-declared local), and (c) whose `<base>` resolves to a
- * known parameter or local, we prepend `<baseType> _<base>;` to the body, reusing
- * the base's type (falling back to `int` when it can't be resolved).
- *
- * Deliberately skips `_DAT_*` / `_LAB_*` and any `_<base>` whose base is unknown
- * — those are globals/labels handled by globals.h / the safety net, not slot reuse.
- */
-function declareUnderscoreSlotLocals(
-  body: string,
-  func: ExtractedFunction,
-  globalNames?: Set<string>
-): string {
-  // Type by name for params and decompiler-declared locals.
-  const typeByName = new Map<string, string>();
-  for (const p of func.parameters ?? []) {
-    const n = cleanParamName(p.name);
-    if (n && p.dataType) typeByName.set(n, p.dataType);
-  }
-  for (const v of func.localVariables ?? []) {
-    if (v.name && v.dataType && !typeByName.has(v.name)) typeByName.set(v.name, v.dataType);
-  }
-
-  // Names declared inline in the body text (`  type name;` / `type name [= ...];`).
-  // Also feeds the type map for locals not present in func.localVariables.
-  const declaredInBody = new Set<string>();
-  const declRe = /^[ \t]*([A-Za-z_][\w:<>,* ]*?[ *])([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?\s*(?:=|;)/gm;
-  let dm: RegExpExecArray | null;
-  while ((dm = declRe.exec(body)) !== null) {
-    const declType = dm[1].trim();
-    const declName = dm[2];
-    // Filter out control-flow / call statements masquerading as declarations.
-    // The keyword can appear as either the "name" (`int return;`) or, more
-    // commonly, the "type" — e.g. `return _bResult;` parses as type=`return`,
-    // name=`_bResult`, which would wrongly mark `_bResult` as declared and
-    // suppress its synthesized slot decl. Reject when the leading word of either
-    // group is a control-flow keyword.
-    const declTypeHead = declType.split(/[\s*]/)[0];
-    if (/^(if|for|while|switch|return|do|else|case|goto|sizeof)$/.test(declName)) continue;
-    if (/^(if|for|while|switch|return|do|else|case|goto|sizeof)$/.test(declTypeHead)) continue;
-    declaredInBody.add(declName);
-    if (!typeByName.has(declName)) typeByName.set(declName, declType);
-  }
-
-  const declared = new Set<string>([...typeByName.keys(), ...declaredInBody]);
-
-  // MSVC-decorated CRT calls: Ghidra emits `_memmove(...)`, `_isspace(...)` etc.
-  // for the standard CRT functions. The leading underscore is MS decoration; the
-  // include resolver already strips it to pick the header, but the call site stays
-  // `_memmove(` and is undeclared. Rewrite undeclared `_<base>(` to `<base>(` when
-  // <base> resolves to a CRT function so it binds to the included header.
-  body = body.replace(/\b_([a-z]\w*)\s*\(/g, (m, base) => {
-    if (declared.has('_' + base)) return m;
-    return resolveCrtInclude(base) ? `${base}(` : m;
-  });
-
-  // `_<global>` storage aliases: Ghidra references a global's reused slot as
-  // `_<global>` (one leading underscore) without declaring it. When <global> is a
-  // known program global, the underscore form is the same storage — rewrite it to
-  // the real global so it binds to the emitted declaration.
-  if (globalNames && globalNames.size > 0) {
-    body = body.replace(/\b_([A-Za-z]\w*)\b/g, (m, base) =>
-      !declared.has('_' + base) && globalNames.has(base) ? base : m,
-    );
-  }
-
-  // NOTE: synthesizing declarations for `_<base>` storage-slot locals is now done
-  // structurally by the `underscore-slot-local` AST plugin (cpp-parser), where
-  // `return _bResult;` is unambiguously a ReturnStmt — the text-level pass here
-  // used to misparse it as a declaration. Only the CRT/global `_`-alias rewrites
-  // above remain text-level.
-  return body;
-}
 
 // ── Parse error logging ─────────────────────────────────────────────────────
 
@@ -1438,27 +1354,18 @@ export function generateFunctionImplementation(
   // (`this` → the declared parameter name, `nullptr` → `0` where an integer is
   //  meant, the spurious `&` on a `<name>_ARRAY_<hex>` global, and a repeated
   //  `case` value in one switch are all done on the AST by `this-param-rewrite`,
-  //  `nullptr-cleanup`, `array-global-address-of`, `switch-case-dedup` and
-  //  `duplicate-label-uniquify` — see transformDecompiledCode.)
+  //  `nullptr-cleanup`, `array-global-address-of`, `switch-case-dedup`,
+  //  `duplicate-label-uniquify` and `underscore-storage-alias` — see
+  //  transformDecompiledCode.)
+  //
+  // NOTHING here rewrites the emitted text any more. Every transform of a body
+  // runs on the AST; what is left below only assembles the file.
   //
   // `hoistSwitchPreCaseDecls` stood here and is GONE, not moved: it hoisted a
   // declaration-with-initializer sitting between `switch (x) {` and the first
   // `case`, and over the whole corpus it fires on zero bodies. Nothing puts a
   // declaration there any more - `decl-scope-sink` is the pass that used to, and
   // it now refuses to sink into a switch body for this exact reason.
-  //
-  // STILL TEXT, and owed the same move: `declareUnderscoreSlotLocals` below. It
-  // splits the finished body on `\n` and matches C++ with regexes, so it cannot
-  // tell an identifier from the same characters inside a string literal or a
-  // comment.
-
-
-  // Synthesize declarations for `_<base>` storage-slot locals Ghidra references
-  // but never declares (else the body uses an undeclared identifier → compile error).
-  const globalNames = context?.analyzedGlobals
-    ? new Set(context.analyzedGlobals.map(g => g.name))
-    : undefined;
-  body = declareUnderscoreSlotLocals(body, func, globalNames);
 
   // Add function body
   lines.push(body);
@@ -1902,6 +1809,27 @@ function shadowedTypeQualifyOptions(
   return entry;
 }
 
+/**
+ * Global names for `underscore-storage-alias`, memoized per context.
+ *
+ * Built from the analyzed globals' own `name`, which is the spelling Ghidra
+ * refers to the reused slot by (`_<name>`). Rebuilding the set per function
+ * would cost a pass over every global in the unit, 15k times over.
+ */
+const underscoreAliasCache = new WeakMap<object, { globalNames: string[]; crtFunctionNames: string[] }>();
+function underscoreAliasOptions(context?: ImplGenContext): { globalNames: string[]; crtFunctionNames: string[] } {
+  const crt = crtFunctionNames();
+  if (!context) return { globalNames: [], crtFunctionNames: crt };
+  const hit = underscoreAliasCache.get(context);
+  if (hit) return hit;
+  const built = {
+    globalNames: (context.analyzedGlobals ?? []).map(g => g.name),
+    crtFunctionNames: crt,
+  };
+  underscoreAliasCache.set(context, built);
+  return built;
+}
+
 function transformDecompiledCode(
   decompiled: string,
   options: ReconstructOptions,
@@ -2027,6 +1955,16 @@ function transformDecompiledCode(
     if (varTypes && Object.keys(varTypes).length > 0) {
       perPluginOptions['underscore-slot-local'] = { varTypes };
     }
+
+    // The two `_<name>` aliases that are NOT a stack slot: a global's reused slot
+    // and an MSVC-decorated CRT call. Both are name-resolution facts the AST
+    // cannot hold — which symbols this unit's globals are, and which names the
+    // CRT headers declare — so they arrive here. Memoized per context so the
+    // plugin's transformer cache (keyed on the options object) still hits.
+    perPluginOptions['underscore-storage-alias'] = {
+      ...underscoreAliasOptions(context),
+      varTypes: varTypes ?? {},
+    };
 
 
     const fieldRenames = getStructFieldRenames();
