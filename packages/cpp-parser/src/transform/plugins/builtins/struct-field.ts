@@ -145,14 +145,24 @@ const SCALAR_TYPEDEF_RE =
   /^(u?int(8|16|32|64)?(_t)?|s?byte|s?word|s?dword|s?qword|undefined[1-8]?|bool[18]?|float\d*|double\d*|u?char|u?short|u?long|u?longlong|wchar(_t)?|code|void|size_t|ssize_t|ptrdiff_t|u?intptr_t)$/i;
 
 /**
- * Is this pointee a scalar/enum (so `((T*)x)->field_N` cannot compile)?
- * BuiltinType (int/char/short/…) and scalar/enum typedefs (uint16_t, byte,
- * eD2Skills) yes; a struct/union (ElaboratedType, or a struct typedef) no.
+ * Does this pointee have no members, so `((T*)x)->field_N` cannot compile?
+ *
+ * The answer belongs to the type model, not to a name pattern. `aggregateNames`
+ * is the set of typedef names that resolve — through Ghidra's own typedef chain —
+ * to a struct or a union; when it is supplied, a typedef outside it has no
+ * members, full stop. That is what catches the Win32 spellings a regex over
+ * Ghidra's primitives never could: `HANDLE` is `void *`, `SOCKET` is `uint`,
+ * `LPBYTE` is `BYTE *`, `PRTL_CRITICAL_SECTION_DEBUG` is a pointer — none of them
+ * name anything with a `field_10` on it.
+ *
+ * With no set supplied (a caller with no type model) the old name test stands,
+ * so the pass still recognises Ghidra's primitives and `e[A-Z]` enums.
  */
-function isScalarPointee(t: TypeNode): boolean {
+function hasNoMembers(t: TypeNode, aggregateNames?: ReadonlySet<string>): boolean {
   if (t.kind === NodeKind.BuiltinType) return true;
   if (t.kind === NodeKind.TypedefType) {
     const n = typeNodeName((t as TypedefType).name) ?? '';
+    if (aggregateNames) return !aggregateNames.has(n);
     return SCALAR_TYPEDEF_RE.test(n) || /^e[A-Z]/.test(n);
   }
   return false;
@@ -193,7 +203,10 @@ function generateFieldName(offset: number, type?: TypeNode): string {
 /**
  * Transform *(type *)(ptr + offset) to ptr->field_offset
  */
-function createStructFieldTransformer(layouts?: Map<string, StructLayout>): Transformer {
+function createStructFieldTransformer(
+  layouts?: Map<string, StructLayout>,
+  aggregateNames?: ReadonlySet<string>,
+): Transformer {
   return createKindTransformer(NodeKind.UnaryExpr, (node) => {
     const unary = node as UnaryExpr;
 
@@ -261,7 +274,7 @@ function createStructFieldTransformer(layouts?: Map<string, StructLayout>): Tran
     // `->` yields `T *` — still a pointer, so `.field_N` on it is "request for
     // member … in pointer type (maybe you meant ->)". Leave the faithful deref.
     if (effPointee.kind === NodeKind.PointerType) return undefined;
-    if (isScalarPointee(effPointee)) return undefined;
+    if (hasNoMembers(effPointee, aggregateNames)) return undefined;
 
     // Determine field name
     let fieldName: string;
@@ -352,6 +365,13 @@ export interface StructFieldOptions extends PluginOptions {
   /** Known struct layouts for accurate field names */
   layouts?: Map<string, StructLayout>;
 
+  /**
+   * Every type name that resolves to a struct or a union, typedefs included.
+   * A pointee typedef outside this set has no members, so the pass leaves the
+   * faithful `*(T*)(base + off)` deref alone instead of inventing `->field_N`.
+   */
+  aggregateTypeNames?: string[];
+
   /** Minimum offset to transform (to avoid false positives) */
   minOffset?: number;
 
@@ -380,7 +400,10 @@ export const structFieldPlugin: TransformPlugin = {
     const transforms: Transformer[] = [];
 
     if (opts.offsetToField !== false) {
-      transforms.push(createStructFieldTransformer(opts.layouts));
+      const aggregateNames = opts.aggregateTypeNames
+        ? new Set(opts.aggregateTypeNames)
+        : undefined;
+      transforms.push(createStructFieldTransformer(opts.layouts, aggregateNames));
     }
 
     return sequence(...transforms);

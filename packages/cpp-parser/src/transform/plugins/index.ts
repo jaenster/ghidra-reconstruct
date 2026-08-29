@@ -503,6 +503,8 @@ export { qualifiedNameCleanupPlugin, type QualifiedNameCleanupOptions } from './
 export { functionNameReconcilePlugin, type FunctionNameReconcileOptions } from './builtins/function-name-reconcile.js';
 import { thisParamRewritePlugin } from './builtins/this-param-rewrite.js';
 export { thisParamRewritePlugin, type ThisParamRewriteOptions } from './builtins/this-param-rewrite.js';
+import { stackFrameAddressPlugin } from './builtins/stack-frame-address.js';
+export { stackFrameAddressPlugin, stackNameOffset, type StackFrameAddressOptions, type StackSlot } from './builtins/stack-frame-address.js';
 import { shadowedTypeQualifyPlugin } from './builtins/shadowed-type-qualify.js';
 export { shadowedTypeQualifyPlugin, type ShadowedTypeQualifyOptions } from './builtins/shadowed-type-qualify.js';
 import { arrayGlobalAddressOfPlugin } from './builtins/array-global-address-of.js';
@@ -578,6 +580,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   enclosingNamespaceStripPlugin, // Cleanup: drop the enclosing namespace prefix from a reference (priority 900, last)
   functionNameReconcilePlugin, // Cleanup: respell a reference with the declaration's name+namespace (priority 20)
   thisParamRewritePlugin,     // Cleanup: __thiscall `this` → the free function's param name (priority 46)
+  stackFrameAddressPlugin,    // Cleanup: `&stack0xNNNN` → the frame slot that owns it (priority 520)
   shadowedTypeQualifyPlugin,  // Cleanup: (Draw**)x → (::Draw**)x when a same-named namespace shadows the type (priority 47)
   arrayGlobalAddressOfPlugin, // Cleanup: &X_ARRAY_<hex> → X_ARRAY_<hex> (priority 46)
   charLiteralEscapePlugin,    // Cleanup: '²' → '\xb2' (priority 46)

@@ -1412,3 +1412,52 @@ export function emittedParameterName(name: string, renderedType: string): string
     .trim();
   return name === baseType ? `n${name}` : name;
 }
+
+/**
+ * Every type name that names a struct or a union — the STRUCTURE/UNION data
+ * types themselves plus every typedef whose chain ends at one.
+ *
+ * `struct-field` needs this to decide whether `((T*)base)->field_N` can compile
+ * at all. It used to decide from a regex over Ghidra's primitive spellings, which
+ * knows nothing about Win32: `HANDLE` is `void *`, `SOCKET` is `uint`,
+ * `PRTL_CRITICAL_SECTION_DEBUG` is a pointer, and each of them slipped through as
+ * "might be a struct" and got a `field_10` that nothing declares. Resolving the
+ * typedef chain answers the question instead of guessing at it.
+ */
+let aggregateTypeNames: Set<string> | undefined;
+
+export function setAggregateTypeNames(
+  dataTypes: Array<{ name: string; kind?: string; underlyingType?: string }>,
+): void {
+  const aggregates = new Set<string>();
+  const typedefTargets = new Map<string, string>();
+  for (const dt of dataTypes) {
+    if (!dt.name) continue;
+    if (dt.kind === 'STRUCTURE' || dt.kind === 'UNION') aggregates.add(dt.name);
+    else if (dt.kind === 'TYPEDEF' && dt.underlyingType) {
+      typedefTargets.set(dt.name, dt.underlyingType);
+    }
+  }
+  // Follow each typedef to its end. A target carrying a `*` or a `[` is a pointer
+  // or an array, never an aggregate lvalue, so the chain stops there.
+  const resolveToAggregate = (name: string): boolean => {
+    let cur = name;
+    for (let depth = 0; depth < 16; depth++) {
+      if (aggregates.has(cur)) return true;
+      const target = typedefTargets.get(cur);
+      if (!target) return false;
+      const base = target.replace(/\b(const|volatile|struct|union)\b/g, '').trim();
+      if (base.includes('*') || base.includes('[')) return false;
+      cur = base;
+    }
+    return false;
+  };
+  for (const name of typedefTargets.keys()) {
+    if (resolveToAggregate(name)) aggregates.add(name);
+  }
+  aggregateTypeNames = aggregates.size > 0 ? aggregates : undefined;
+}
+
+export function getAggregateTypeNames(): Set<string> | undefined {
+  return aggregateTypeNames;
+}

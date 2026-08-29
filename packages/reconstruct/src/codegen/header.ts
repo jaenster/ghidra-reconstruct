@@ -23,7 +23,7 @@ import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js
 import { namespaceResolution, renderNamespace } from './namespace-resolution.js';
 import { isGhidraGeneratedName, suggestBetterName, type FuncPtrTarget } from '@ghidra-mcp/cpp-parser';
 import { isPlatformOrBuiltinType, isLibraryType, normalizeSignatureType, normalizeWideCharType, collapseFuncPtrTypedef, rootQualifyShadowedType, emittedParameterName, WINDOWS_STRUCTS, platformDeclaredFunctionNames } from './platform-types.js';
-import { generateExternDeclaration, isFuncDefTypedefName } from './globals-header.js';
+import { generateExternDeclaration, isFuncDefTypedefName, sanitizeSymbolName } from './globals-header.js';
 
 /** normalizeSignatureType + fn-ptr-typedef double-indirection collapse, for
  *  emitting function parameter and return types ("fpFoo *" → "fpFoo"). */
@@ -451,8 +451,11 @@ export function generateHeader(
       && !f.name.startsWith('~')
       // Skip constructor-like free functions where name matches a known type
       && !knownTypeNames.has(f.name)
-      // Skip names starting with digits (e.g. "0x44PacketHandler")
-      && !/^\d/.test(f.name)
+      // NOTE: a digit-leading name is no longer skipped. It is legalized by the
+      // same rule the definition and every reference use (`emittedFunctionName`),
+      // so `0x44PacketHandler` is declared as `_x44PacketHandler`. Skipping it
+      // here left one symbol with three spellings and no declaration for any.
+      && f.name.length > 0
       // Skip C standard library functions
       && !C_STDLIB_NAMES.has(f.name)
     );
@@ -757,6 +760,28 @@ export function cleanFunctionComment(
 /**
  * Generate a function declaration
  */
+/**
+ * The identifier a function is DEFINED and DECLARED under.
+ *
+ * Ghidra's name is not always a legal C++ identifier, and the reference side has
+ * its own legalizer (`sanitizeSymbolName`), so both must apply the SAME rule or a
+ * call names something that exists nowhere. `0x44PacketHandler` was the proof:
+ * the definition kept it verbatim — `uint32_t 0x44PacketHandler(...)`, not C++ at
+ * all — while every reference to it said `_x44PacketHandler`, one symbol under
+ * three spellings.
+ *
+ * A trailing `()` is a Ghidra artifact and comes off first; a name that equals its
+ * own return type is a constructor and becomes `Create_<name>`, so the declaration
+ * cannot be read as one.
+ */
+export function emittedFunctionName(func: ExtractedFunction, returnType: string): string {
+  const cleanName = sanitizeSymbolName(func.name.replace(/[()]+$/, ''));
+  if (returnType.startsWith(cleanName + ' ') || returnType === cleanName) {
+    return `Create_${cleanName}`;
+  }
+  return cleanName;
+}
+
 export function generateFunctionDeclaration(
   func: ExtractedFunction,
   options: ReconstructOptions,
@@ -793,13 +818,7 @@ export function generateFunctionDeclaration(
     addressComment = ` // 1.14d: ${stripAddr(func.address)}`;
   }
 
-  // Sanitize function names: strip trailing parens, replace invalid chars (hyphens, dots, etc.)
-  let cleanName = func.name.replace(/[()]+$/, '').replace(/[^A-Za-z0-9_]/g, '_');
-  // Detect constructor pattern: function name matches return type (e.g., D2WinButton * D2WinButton(...))
-  const returnType = sigType(func.returnType);
-  if (returnType.startsWith(cleanName + ' ') || returnType === cleanName) {
-    cleanName = `Create_${cleanName}`;
-  }
+  const cleanName = emittedFunctionName(func, sigType(func.returnType));
 
   return `${commentBlock}${sigType(func.returnType)} ${cleanName}(${params});${addressComment}`;
 }

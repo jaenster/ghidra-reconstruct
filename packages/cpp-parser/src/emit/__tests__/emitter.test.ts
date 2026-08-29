@@ -900,8 +900,17 @@ describe('CppEmitter', () => {
       assert.strictEqual(round('void f(D2UnitStrc[3]* p) { }'), 'void f(D2UnitStrc * p) {}');
     });
 
-    it('flattens a pointer-to-array CAST', () => {
-      assert.ok(round('void f(void* x) { p = (int[5]*)x; }').includes('(int *)x'));
+    it('keeps the extent in a pointer-to-array CAST', () => {
+      // `elem (*)[N]` is a well-formed abstract declarator, and the extent is
+      // real: `LVLTBLS_GetLvlTypeFilename` declares `char (*pFileSlot)[60]` and
+      // assigns `(char (*)[60])(*pFileSlot + 1)` to it. Flattening the cast to
+      // `char *` made it disagree with the very declarator it feeds.
+      assert.ok(round('void f(void* x) { p = (int[5]*)x; }').includes('(int (*)[5])x'));
+    });
+
+    it('still flattens a pointer-to-array cast with no extent', () => {
+      // `int (*)[]` is not a complete type in a cast; the flat pointer is.
+      assert.ok(round('void f(void* x) { p = (int[]*)x; }').includes('(int *)x'));
     });
 
     it('keeps a NAMED local as a faithful pointer-to-array declarator', () => {

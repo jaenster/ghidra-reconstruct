@@ -22,8 +22,8 @@ import { CPP_KEYWORDS } from './header.js';
 import { transformGhidraCode, preprocessGhidraCode, isGhidraGeneratedName, suggestBetterName, takeFuncPtrArgCastTypedefs, type TransformResult, type FuncPtrTarget } from '@ghidra-mcp/cpp-parser';
 import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js';
 import { namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
-import { cleanFunctionComment, guardedFuncDefTypedef } from './header.js';
-import { normalizeSignatureType, collapseFuncPtrTypedef, rootQualifyShadowedType, emittedParameterName } from './platform-types.js';
+import { cleanFunctionComment, guardedFuncDefTypedef, emittedFunctionName } from './header.js';
+import { normalizeSignatureType, collapseFuncPtrTypedef, rootQualifyShadowedType, emittedParameterName, getAggregateTypeNames } from './platform-types.js';
 import { generateStaticLocalsBlock, emitDataValue, inferArrayDeclaration, normalizeArrayDeclaration, braceArrayInitializer, isFuncDefTypedefName, getKnownFuncDefTypedefs, getKnownEnumConstants, setInitializerNamespace, renderGlobalScalarInitializer, recordDeclaredName } from './globals-header.js';
 
 /** normalizeSignatureType + fn-ptr-typedef double-indirection collapse, for
@@ -1430,6 +1430,9 @@ export function generateFunctionImplementation(
           // keyed by the Ghidra path, so that is what an unqualified name has to
           // be resolved against.
           ghidraNamespaceSegments: enclosingNamespace?.ghidraSegments,
+          stackSlots: (func.localVariables ?? [])
+            .filter(v => v.name && typeof v.stackOffset === 'number' && typeof v.size === 'number')
+            .map(v => ({ name: v.name, offset: v.stackOffset as number, size: v.size as number })),
         },
       );
       body = func.name ? rewriteQuestUnionMembers(transformed.code, func.name, context?.sourceFileName, [...(func.parameters ?? []), ...(func.localVariables ?? [])]) : transformed.code;
@@ -1615,14 +1618,9 @@ function wrapperSignature(func: ExtractedFunction): { returnType: string; params
 
 function generateFunctionSignature(func: ExtractedFunction): string {
   const params = signatureParameterList(func);
-
-  // Strip trailing parens/invalid chars from function names (Ghidra artifacts)
-  let cleanName = func.name.replace(/[()]+$/, '').replace(/[^A-Za-z0-9_]/g, '_');
-  // Detect constructor pattern: function name matches return type (e.g., D2WinButton * D2WinButton(...))
-  const returnType = sigType(func.returnType);
-  if (returnType.startsWith(cleanName + ' ') || returnType === cleanName) {
-    cleanName = `Create_${cleanName}`;
-  }
+  // The declaration side spells the name with the SAME function, so a definition
+  // and its declaration cannot legalize a Ghidra name differently.
+  const cleanName = emittedFunctionName(func, sigType(func.returnType));
   return `${sigType(func.returnType)} ${cleanName}(${params})`;
 }
 
@@ -1668,7 +1666,32 @@ interface TransformDecompiledResult {
 }
 
 /**
- * Replace Ghidra stack-variable artifacts: stack0xNNNNNNNN → 0 (stack cookie pattern).
+ * The `struct-field` options for this run: the aggregate-type names, listed once.
+ * Cached on the set itself so a per-function call does not rebuild a 3000-entry
+ * array 15,000 times.
+ */
+const structFieldOptionsCache = new WeakMap<Set<string>, { aggregateTypeNames: string[] }>();
+
+function structFieldPluginOptions(): { aggregateTypeNames: string[] } | undefined {
+  const names = getAggregateTypeNames();
+  if (!names || names.size === 0) return undefined;
+  let entry = structFieldOptionsCache.get(names);
+  if (!entry) {
+    entry = { aggregateTypeNames: [...names] };
+    structFieldOptionsCache.set(names, entry);
+  }
+  return entry;
+}
+
+/**
+ * Replace Ghidra stack-variable artifacts: stack0xNNNNNNNN → 0.
+ *
+ * ONLY for a body that never reached the AST — a decompilation with no parsable
+ * `{ … }`, or one the transform threw on. Those are emitted as Ghidra wrote them,
+ * best-effort, and `&stack0xNNNN` is not an identifier anything declares. A body
+ * that did parse is handled by the `stack-frame-address` pass, which binds the
+ * address to the frame slot that owns it and leaves the rest to fail loudly;
+ * substituting `0` there was a silent read of the wrong address.
  *
  * The rest of what this used to do is on the AST now — CRT/compiler namespace
  * qualifiers, the `_exref` import-thunk suffix and the `A::A::` duplicate are
@@ -1933,6 +1956,13 @@ function transformDecompiledCode(
     /** Only read when no `signature` is available - see the goto-cleanup option. */
     returnsVoid?: boolean;
     renames?: Record<string, string>;
+    /**
+     * Ghidra's stack frame for this function: every local with committed stack
+     * storage. `stack-frame-address` resolves a bare `&stack0xNNNN` frame address
+     * against it; the AST cannot show the frame, because the body is parsed
+     * without one.
+     */
+    stackSlots?: Array<{ name: string; offset: number; size: number }>;
   },
 ): TransformDecompiledResult {
   try {
@@ -2098,6 +2128,10 @@ function transformDecompiledCode(
       perPluginOptions['this-param-rewrite'] = { thisName: enclosing.thisName };
     }
 
+    if (enclosing?.stackSlots && enclosing.stackSlots.length > 0) {
+      perPluginOptions['stack-frame-address'] = { slots: enclosing.stackSlots };
+    }
+
     const shadowedTypes = shadowedTypeQualifyOptions(context);
     if (shadowedTypes) {
       perPluginOptions['shadowed-type-qualify'] = shadowedTypes;
@@ -2137,6 +2171,12 @@ function transformDecompiledCode(
       perPluginOptions['qualified-name-cleanup'] = { typeQualifierNames: collisionTypeNames };
     }
 
+    // Which pointee types have members. Without it `struct-field` reads a Win32
+    // pointer typedef as a struct and writes `((HANDLE*)p)->field_10`, which
+    // Ghidra never said and nothing declares.
+    const structFieldOptions = structFieldPluginOptions();
+    if (structFieldOptions) perPluginOptions['struct-field'] = structFieldOptions;
+
     const funcdefTypedefs = getKnownFuncDefTypedefs();
     if (funcdefTypedefs.length > 0) {
       perPluginOptions['funcdef-cast-collapse'] = { funcdefTypedefs };
@@ -2174,7 +2214,11 @@ function transformDecompiledCode(
       const transformedMatch = result.code.match(/\{([\s\S]*)\}/);
       if (transformedMatch) {
         return {
-          code: stripStackArtifacts(indentCode(transformedMatch[1], 4)),
+          // NOT stripStackArtifacts: `stack-frame-address` has already bound every
+          // frame address the frame can account for, and a name that survives it
+          // is one no local owns. Rewriting it to `0` here is what turned sixteen
+          // of them into silent reads of the wrong address.
+          code: indentCode(transformedMatch[1], 4),
           preamble: result.preamble,
           identifiers: result.identifiers,
           typeNames: result.typeNames,

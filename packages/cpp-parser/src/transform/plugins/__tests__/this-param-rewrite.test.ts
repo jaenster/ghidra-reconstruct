@@ -27,6 +27,21 @@ describe('thisParamRewritePlugin', () => {
     assert.ok(/g\(pUnit\)/.test(out), out);
   });
 
+  it('binds `this` to the LOCAL of that name, not to the parameter', () => {
+    // Ghidra's `BigBuffer *this;` reaches the parser as `BigBuffer *self;`
+    // (`preprocessGhidraCode` legalizes the declaration; the bare uses keep the
+    // keyword). Both spellings are one variable, and it is not the hidden
+    // argument: `BigBuffer_Rand` declared an unused `BigBuffer* self` and read
+    // every field of it off `uint *pnResult` instead.
+    const out = transformCode(
+      'void dummy() { BigBuffer *self; this = (BigBuffer *)a; n = this->nStartWord; }',
+      { thisName: 'pnResult' }
+    );
+    assert.ok(!/pnResult/.test(out), out);
+    assert.ok(/self = \(BigBuffer\s*\*\)a/.test(out), out);
+    assert.ok(/self->nStartWord/.test(out), out);
+  });
+
   it('leaves `this` inside a string literal alone', () => {
     // `body.replace(/\bthis\b/g, 'pThis')` had no way to see that these
     // characters are inside a literal, so it corrupted the message.

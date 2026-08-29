@@ -822,6 +822,32 @@ export class CppEmitter {
     return true;
   }
 
+  /**
+   * Emit an ABSTRACT pointer-to-array declarator `T (*)[N]` — the nameless twin of
+   * `emitPointerToArrayDecl`. Legal wherever a type-id is, which is where a cast
+   * lives, so `(char (*)[60])p` keeps the extent the declarator `char (*p)[60]`
+   * already carries. Without it the cast flattened to `char *` and disagreed with
+   * the very variable it was assigned to.
+   *
+   * Returns false — emitting nothing — when the type is not a pointer to a sized
+   * array, so the caller falls back to `emitTypeNode`. An array with no extent
+   * (`T (*)[]`) is not a complete type in a cast, so it takes the fallback too.
+   */
+  private emitAbstractPointerToArray(type: TypeNode): boolean {
+    let levels = 0;
+    let cur: TypeNode = type;
+    while (cur.kind === NodeKind.PointerType) { levels++; cur = (cur as PointerType).pointee; }
+    if (levels === 0 || cur.kind !== NodeKind.ArrayType) return false;
+    const { elementType, arraySizes } = this.unwrapArrayType(cur);
+    if (arraySizes.length === 0 || arraySizes.some(s => !s)) return false;
+    this.emitTypeNode(elementType);
+    this.write(' (');
+    this.write('*'.repeat(levels));
+    this.write(')');
+    this.emitArrayDimensions(arraySizes);
+    return true;
+  }
+
   /** Emit array dimension brackets: [40], [3][4], etc. */
   private emitArrayDimensions(sizes: (Expression | null)[]): void {
     for (const size of sizes) {
@@ -2344,7 +2370,7 @@ export class CppEmitter {
 
   private emitCStyleCastExpr(node: CStyleCastExpr): void {
     this.write('(');
-    this.emitTypeNode(node.type);
+    if (!this.emitAbstractPointerToArray(node.type)) this.emitTypeNode(node.type);
     this.write(')');
     this.emitExprWithPrecedence(node.expression, 3);
   }

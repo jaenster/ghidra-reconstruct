@@ -107,6 +107,36 @@ describe('structFieldPlugin', () => {
     });
   });
 
+  describe('a pointee with no members, resolved against the type model', () => {
+    // Ghidra at 0x0040a080 says `*(HANDLE *)(Line + 0x10)`. The emitter wrote
+    // `((HANDLE*)Line)->field_10` — a member Ghidra never named and nothing
+    // declares — because the scalar test was a regex over Ghidra's own primitive
+    // spellings and knew nothing about Win32.
+    const aggregateTypeNames = ['D2UnitStrc', 'tagPOINT', 'POINT'];
+    function transformWithModel(code: string): string {
+      const ast = parse(code);
+      const t = structFieldPlugin.createTransformer({ aggregateTypeNames });
+      return emit(t(ast) as AnyNode).trim();
+    }
+
+    for (const scalar of ['HANDLE', 'SOCKET', 'PVOID', 'LPBYTE', 'LPCVOID', 'ULONG_PTR', 'uint3']) {
+      it(`leaves the faithful deref for a ${scalar} pointee`, () => {
+        const out = transformWithModel(`void f(void *p) { x = *(${scalar} *)((${scalar} *)p + 16); }`);
+        assert.ok(!out.includes('->'), `${scalar} has no members: ${out}`);
+      });
+    }
+
+    it('still memberizes a pointee the model says IS a struct', () => {
+      const out = transformWithModel('void f(void *p) { x = *(int *)((D2UnitStrc *)p + 16); }');
+      assert.ok(out.includes('->'), out);
+    });
+
+    it('falls back to the name test when no model is supplied', () => {
+      const code = 'void f(void *p) { x = *(int *)((uint16_t *)p + 4); }';
+      assert.ok(!transform(code).includes('->'), transform(code));
+    });
+  });
+
   describe('plugin metadata', () => {
     it('should have correct metadata', () => {
       assert.strictEqual(structFieldPlugin.id, 'struct-field');
