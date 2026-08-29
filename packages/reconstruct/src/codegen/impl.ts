@@ -2050,6 +2050,14 @@ function transformDecompiledCode(
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         enclosingVarTypes,
       };
+      perPluginOptions['float-pointer-bitcast'] = {
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        structFields: context.funcPtrArgCasts.structFields,
+        typedefTargets: context.funcPtrArgCasts.typedefTargets,
+        functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        enclosingVarTypes,
+      };
       perPluginOptions['call-arg-cast'] = {
         functionParamTypes: context.funcPtrArgCasts.functionParamTypes,
         pointerOnlyParamTypes: context.funcPtrArgCasts.pointerOnlyParamTypes,

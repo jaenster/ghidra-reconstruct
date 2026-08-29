@@ -1347,6 +1347,22 @@ export function generatePlatformHeader(
   lines.push('struct _Unwind_Exception { uint64_t exception_class; void (*exception_cleanup)(_Unwind_Reason_Code, struct _Unwind_Exception *); uint64_t private_1; uint64_t private_2; };');
   lines.push('');
 
+  // A cast between a floating type and a pointer is not a conversion - there is
+  // no value to convert - and C++ rejects it. It reaches the tree because the
+  // decompiler recovers ONE type per stack slot while the machine reuses the same
+  // four bytes as a float in one live range and as an address in another, so the
+  // instruction behind the cast is a `mov`. These do that move.
+  //
+  // A `double` operand is narrowed to `float` first: the slot the machine wrote
+  // is four bytes wide, and the `double` is C's promotion of an x87 expression,
+  // not a wider store. `float-pointer-bitcast` writes the calls.
+  lines.push('// Four-byte reinterpretation behind a float/pointer cast (see float-pointer-bitcast)');
+  lines.push('static inline uintptr_t d2_bits_of(float fValue) { uintptr_t nBits = 0; memcpy(&nBits, &fValue, sizeof(float)); return nBits; }');
+  lines.push('static inline uintptr_t d2_bits_of(double dValue) { return d2_bits_of((float)dValue); }');
+  lines.push('static inline uintptr_t d2_bits_of(long double dValue) { return d2_bits_of((float)dValue); }');
+  lines.push('static inline float d2_bits_to_float(const void* pValue) { float fValue = 0.0f; uintptr_t nBits = (uintptr_t)pValue; memcpy(&fValue, &nBits, sizeof(float)); return fValue; }');
+  lines.push('');
+
   // MSVC C++ exception-handling frame types. Not declared by any real header;
   // they appear only as parameter types of the EH personality routine below.
   lines.push('// MSVC C++ EH frame types (opaque — only ever used through a pointer)');

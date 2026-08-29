@@ -1,0 +1,152 @@
+/**
+ * Float/Pointer Bit-Reinterpretation Plugin
+ *
+ * A cast between a floating type and a pointer is not a conversion in any C
+ * dialect - there is no value to convert - and C++ rejects it outright:
+ * "invalid cast from type 'float' to type 'int*'". It appears here because the
+ * decompiler recovers ONE type per stack slot while the machine reuses the same
+ * four bytes as a float in one live range and as an address in another. The
+ * instruction that produced the cast is a `mov`: the same four bytes, read
+ * differently.
+ *
+ * So the faithful translation is a bit reinterpretation, not a value cast:
+ *
+ *     pChannelEntry = (int*)CalculateHypotenuse(...);   // slot holds a float
+ *     if (fFalloffMin < (float)pChannelEntry)           // ...read back as one
+ *
+ * `d2_bits_of` / `d2_bits_to_float` in `d2_platform.h` do the four-byte move.
+ * A `double`-typed operand is narrowed to `float` first, because the slot the
+ * machine wrote is four bytes wide - the `double` is C's promotion of an x87
+ * expression, not a wider store.
+ *
+ * Deliberately narrow: only floating-to-pointer and pointer-to-floating. A
+ * float/integer cast IS a value conversion and is left exactly as it is.
+ */
+
+import { NodeKind } from '../../../ast/kinds.js';
+import type {
+  ASTNode, FunctionDecl, VariableDecl, ParameterDecl, Expression, CStyleCastExpr, TypeNode,
+  BinaryExpr,
+} from '../../../ast/nodes.js';
+import { findNodesByKind } from '../../../ast/visitor.js';
+import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
+import { Expr } from '../../../ast/factory.js';
+import type { TransformPlugin, PluginOptions } from '../types.js';
+import { createExprShape } from './expr-shape.js';
+import { shapeOfNode, unwrapParens, type TypeShape, type TypedefResolver } from './call-arg-cast.js';
+
+export interface FloatPointerBitcastOptions extends PluginOptions {
+  globalTypes?: Record<string, string>;
+  enclosingVarTypes?: Record<string, string>;
+  fieldTypes?: Record<string, string>;
+  structFields?: Record<string, Record<string, string>>;
+  functionReturnTypes?: Record<string, string>;
+  typedefTargets?: Record<string, string>;
+}
+
+/**
+ * Every spelling the emitter uses for a floating slot. `float10` is Ghidra's
+ * name for the x87 80-bit register, which reaches memory as one of these.
+ */
+const FLOAT_BASES = new Set(['float', 'double', 'long double', 'float10']);
+
+const isFloating = (s: TypeShape | null): boolean => !!s && s.stars === 0 && FLOAT_BASES.has(s.base);
+const isPointer = (s: TypeShape | null): boolean => !!s && s.stars > 0;
+
+/** The arithmetic whose result is floating as soon as one operand is. */
+const ARITHMETIC = new Set(['*', '/', '+', '-']);
+
+export function createFloatPointerBitcastTransformer(options?: PluginOptions): Transformer {
+  const o = (options ?? {}) as FloatPointerBitcastOptions;
+  const typedefTargets = o.typedefTargets ?? {};
+  const resolve: TypedefResolver = name => typedefTargets[name];
+
+  return createTransformer({
+    visitFunctionDecl(node: FunctionDecl): ASTNode | undefined {
+      if (!node.body) return undefined;
+
+      const localTypes = new Map<string, TypeNode>();
+      for (const p of node.parameters) {
+        const pd = p as ParameterDecl;
+        if (pd.name) localTypes.set(pd.name.name, pd.type);
+      }
+      for (const d of findNodesByKind(node.body, NodeKind.VariableDecl)) {
+        const v = d as VariableDecl;
+        if (!localTypes.has(v.name.name)) localTypes.set(v.name.name, v.type);
+      }
+
+      const shapeOf = createExprShape(localTypes, {
+        globalTypes: o.globalTypes ?? {},
+        enclosingVarTypes: o.enclosingVarTypes ?? {},
+        structFields: o.structFields ?? {},
+        fieldTypes: o.fieldTypes ?? {},
+        returnTypes: o.functionReturnTypes ?? {},
+        resolve,
+      });
+
+      /**
+       * `expr-shape` has no shape for an arithmetic expression - it types
+       * objects, not results - but `(D2SoundsTxt*)(*(float*)p * 0.003125)` is
+       * still four bytes of float. Arithmetic is floating as soon as one side
+       * is, so the operands are walked directly.
+       */
+      const isFloatingExpr = (e: Expression, depth: number): boolean => {
+        if (depth > 6) return false;
+        const u = unwrapParens(e);
+        if (u.kind === NodeKind.FloatingLiteral) return true;
+        if (u.kind === NodeKind.BinaryExpr) {
+          const b = u as BinaryExpr;
+          if (!ARITHMETIC.has(b.operator)) return false;
+          return isFloatingExpr(b.left as Expression, depth + 1)
+            || isFloatingExpr(b.right as Expression, depth + 1);
+        }
+        return isFloating(shapeOf(u));
+      };
+
+      let changed = false;
+      const inner = createTransformer({
+        visitNode(n: ASTNode): ASTNode | undefined {
+          if (n.kind !== NodeKind.CStyleCastExpr) return undefined;
+          const cast = n as CStyleCastExpr;
+          const target = shapeOfNode(cast.type, 0, resolve);
+          if (!target) return undefined;
+          const operand = shapeOf(cast.expression as Expression);
+
+          // (T*)<floating> — the four bytes become an address.
+          if (isPointer(target) && isFloatingExpr(cast.expression as Expression, 0)) {
+            changed = true;
+            return updateNode(cast, {
+              expression: Expr.call('d2_bits_of', [cast.expression as Expression]),
+            } as Partial<CStyleCastExpr>);
+          }
+          // (float)<pointer> — the address becomes four bytes. The outer cast is
+          // kept so a `double` target still widens exactly as it did.
+          if (isFloating(target) && isPointer(operand)) {
+            changed = true;
+            return updateNode(cast, {
+              expression: Expr.call('d2_bits_to_float', [cast.expression as Expression]),
+            } as Partial<CStyleCastExpr>);
+          }
+          return undefined;
+        },
+      });
+
+      const newBody = inner(node.body);
+      if (!changed) return undefined;
+      return updateNode(node, { body: newBody } as Partial<FunctionDecl>);
+    },
+  });
+}
+
+export const floatPointerBitcastPlugin: TransformPlugin = {
+  id: 'float-pointer-bitcast',
+  name: 'Float/Pointer Bit Reinterpretation',
+  description:
+    'Routes a cast between a floating type and a pointer through a four-byte reinterpretation, which is the move the machine performs',
+  version: '1.0.0',
+  defaultEnabled: true,
+  // After pointer-compare-cast (615), so a comparison operand has settled first.
+  priority: 618,
+  tags: ['cleanup', 'type'],
+  createTransformer: createFloatPointerBitcastTransformer,
+};

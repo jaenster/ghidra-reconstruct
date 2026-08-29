@@ -498,9 +498,11 @@ import { pointerAssignCastPlugin } from './builtins/pointer-assign-cast.js';
 export { pointerAssignCastPlugin } from './builtins/pointer-assign-cast.js';
 import { callArgCastPlugin } from './builtins/call-arg-cast.js';
 import { pointerCompareCastPlugin } from './builtins/pointer-compare-cast.js';
+import { floatPointerBitcastPlugin } from './builtins/float-pointer-bitcast.js';
 import { assignCastPlugin } from './builtins/assign-cast.js';
 export { callArgCastPlugin } from './builtins/call-arg-cast.js';
 export { pointerCompareCastPlugin } from './builtins/pointer-compare-cast.js';
+export { floatPointerBitcastPlugin } from './builtins/float-pointer-bitcast.js';
 export { assignCastPlugin } from './builtins/assign-cast.js';
 import { charArrayDwordAssignPlugin } from './builtins/char-array-dword-assign.js';
 export { charArrayDwordAssignPlugin } from './builtins/char-array-dword-assign.js';
@@ -597,6 +599,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   pointerAssignCastPlugin,    // Type: insert reinterpret cast on pointer-to-pointer assignments (priority 600)
   callArgCastPlugin,          // Type: cast a call argument to its declared parameter type (priority 610)
   pointerCompareCastPlugin,   // Type: cast one side of a distinct-pointer comparison (priority 615)
+  floatPointerBitcastPlugin,  // Type: reinterpret the four bytes a float/pointer cast moves (priority 618)
   assignCastPlugin,           // Type: cast an assigned value to its slot's declared type (priority 615)
   charArrayDwordAssignPlugin, // Type: charArray = scalar -> *(uint32_t*)charArray = scalar (priority 75)
   reservedFieldRenamePlugin,  // Cleanup: ->int → ->int_ for header-renamed keyword fields (priority 47)
