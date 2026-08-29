@@ -370,14 +370,7 @@ export function generateGlobalsHeader(
 
   // Safety net: scan all globals for type names that may be missing from forward declarations
   const declaredNames = new Set<string>(sharedHeaderOwned);
-  for (const decl of forwardDecls) {
-    const m = decl.match(/(?:struct|class)\s+(\w+)/);
-    if (m) declaredNames.add(m[1]);
-    const tm = decl.match(/typedef\s+.*?\(\*(\w+)\)/);
-    if (tm) declaredNames.add(tm[1]);
-    const tm2 = decl.match(/typedef\s+\w+\s+(\w+)/);
-    if (tm2) declaredNames.add(tm2[1]);
-  }
+  for (const decl of forwardDecls) declaredNames.add(decl.name);
   for (const def of fullDefs) {
     const m = def.match(/^struct\s+(\w+)/);
     if (m) declaredNames.add(m[1]);
@@ -399,13 +392,13 @@ export function generateGlobalsHeader(
     if (/^fn[A-Z]/.test(type) || /^fp[A-Z]/.test(type)) continue;
     // Skip types that look like they're from d2_enums.h or standard typedefs
     if (/^__\w+_t$/.test(type)) continue;
-    forwardDecls.push(emitFallbackForwardDecl(type));
+    forwardDecls.push({ name: type, text: emitFallbackForwardDecl(type), deps: [] });
     declaredNames.add(type);
   }
 
   if (forwardDecls.length > 0) {
     lines.push('// Forward declarations');
-    for (const decl of [...forwardDecls].sort()) {
+    for (const decl of orderForwardDeclarations(forwardDecls)) {
       lines.push(decl);
     }
     lines.push('');
@@ -429,8 +422,9 @@ export function generateGlobalsHeader(
   //     namespace component so the inner symbols fold into the parent scope.
   const collidingNamespaceParts = new Set<string>();
   for (const decl of forwardDecls) {
-    const m = decl.match(/^(?:struct|class)\s+(\w+);$/);
-    if (m) collidingNamespaceParts.add(m[1]);
+    if (decl.text === `struct ${decl.name};` || decl.text === `class ${decl.name};`) {
+      collidingNamespaceParts.add(decl.name);
+    }
   }
   for (const g of globals) {
     if (g.scope !== 'global') continue;
@@ -2360,7 +2354,7 @@ function collectGlobalForwardDeclarations(
   globals: AnalyzedDataSymbol[],
   dataTypes?: ExtractedDataType[],
   typeOwnerMap?: Map<string, string>
-): { forwardDecls: string[]; fullDefs: string[]; extraIncludes: string[]; sharedHeaderOwned: Set<string> } {
+): { forwardDecls: ForwardDeclaration[]; fullDefs: string[]; extraIncludes: string[]; sharedHeaderOwned: Set<string> } {
   // Library types (Win32 SDK / CRT) are provided by the real headers under
   // _WIN32 — never emit our own forward decl/definition for them.
   const isSkippableLibraryType = makeLibraryTypeSkipPredicate(dataTypes);
@@ -2551,7 +2545,7 @@ function collectGlobalForwardDeclarations(
     if (!sorted.includes(name)) sorted.push(name);
   }
 
-  const forwardDecls: string[] = [];
+  const forwardDecls: ForwardDeclaration[] = [];
   const fullDefs: string[] = [];
   const extraIncludes = new Set<string>();
   // Types this header deliberately does not declare because a shared header
@@ -2589,7 +2583,7 @@ function collectGlobalForwardDeclarations(
         fullDefs.push(generateFunctionDefinitionDeclaration(dt as ExtractedFunctionDefinition));
         break;
       default:
-        forwardDecls.push(emitFallbackForwardDecl(name));
+        forwardDecls.push({ name, text: emitFallbackForwardDecl(name), deps: [] });
         break;
     }
   }
@@ -2611,10 +2605,18 @@ function collectGlobalForwardDeclarations(
       continue;
     }
     if (dt?.kind === 'FUNCTION_DEFINITION') {
-      // Emit the actual funcdef typedef, not a struct forward decl
-      forwardDecls.push(generateFunctionDefinitionDeclaration(dt as ExtractedFunctionDefinition));
+      // Emit the actual funcdef typedef, not a struct forward decl. Its signature
+      // may name other typedefs in this same block, so it carries them as
+      // dependencies — the emission order is resolved from those, not from the
+      // name the declaration happens to sort under.
+      const fd = dt as ExtractedFunctionDefinition;
+      forwardDecls.push({
+        name,
+        text: generateFunctionDefinitionDeclaration(fd),
+        deps: signatureTypeNames(fd),
+      });
     } else {
-      forwardDecls.push(emitFallbackForwardDecl(name));
+      forwardDecls.push({ name, text: emitFallbackForwardDecl(name), deps: [] });
     }
   }
 
@@ -2640,6 +2642,100 @@ function parseReferencedType(typeStr: string): { typeName: string; isPointer: bo
     return null;
   }
   return { typeName: stripped, isPointer };
+}
+
+/**
+ * One line of the forward-declaration block, kept as a record rather than as
+ * text: the type it introduces and the types its own spelling needs already
+ * declared. A function-pointer typedef whose signature names another typedef
+ * must be emitted after it, and that fact lives in the data type, not in the
+ * characters of the emitted line.
+ */
+interface ForwardDeclaration {
+  /** The type this line declares. */
+  name: string;
+  /** The emitted line. */
+  text: string;
+  /** Types this line names and therefore must follow. */
+  deps: string[];
+}
+
+/** Type names a function definition's signature spells out (return type + parameters). */
+function signatureTypeNames(fd: ExtractedFunctionDefinition): string[] {
+  const names: string[] = [];
+  for (const t of [fd.returnType, ...fd.parameters.map(p => p.dataType)]) {
+    const parsed = parseReferencedType(t);
+    if (parsed && parsed.typeName !== fd.name) names.push(parsed.typeName);
+  }
+  return names;
+}
+
+/**
+ * Order the forward-declaration block so a declaration follows every declaration
+ * it names. Kahn's algorithm over the recorded dependencies, with the ready set
+ * drained in the block's existing key order (the declaration text) so the output
+ * is stable: an unconstrained declaration keeps the place it had, and only the
+ * ones an edge actually binds move.
+ */
+function orderForwardDeclarations(decls: ForwardDeclaration[]): string[] {
+  const byKey = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+
+  const byName = new Map<string, ForwardDeclaration>();
+  for (const d of decls) if (!byName.has(d.name)) byName.set(d.name, d);
+
+  // Edges are kept only between declarations this block actually emits; a
+  // signature naming a library type or a type declared elsewhere constrains
+  // nothing here.
+  const pending = new Map<string, Set<string>>();
+  const dependents = new Map<string, string[]>();
+  for (const d of decls) {
+    const need = new Set<string>();
+    for (const dep of d.deps) {
+      if (dep === d.name || !byName.has(dep)) continue;
+      need.add(dep);
+    }
+    pending.set(d.name, need);
+    for (const dep of need) {
+      const list = dependents.get(dep);
+      if (list) list.push(d.name);
+      else dependents.set(dep, [d.name]);
+    }
+  }
+
+  const ready = decls.filter(d => pending.get(d.name)!.size === 0).map(d => d.name);
+  ready.sort((a, b) => byKey(byName.get(a)!.text, byName.get(b)!.text));
+
+  const ordered: string[] = [];
+  const emitted = new Set<string>();
+  while (ready.length > 0) {
+    const name = ready.shift()!;
+    if (emitted.has(name)) continue;
+    emitted.add(name);
+    ordered.push(byName.get(name)!.text);
+    for (const dependent of dependents.get(name) ?? []) {
+      const need = pending.get(dependent)!;
+      need.delete(name);
+      if (need.size > 0 || emitted.has(dependent)) continue;
+      const text = byName.get(dependent)!.text;
+      const idx = ready.findIndex(q => byKey(byName.get(q)!.text, text) > 0);
+      if (idx === -1) ready.push(dependent);
+      else ready.splice(idx, 0, dependent);
+    }
+  }
+
+  // A cycle cannot be resolved by ordering. C has no forward declaration for a
+  // typedef name, so report the members rather than pick an arbitrary order for
+  // them, and fall back to the key order.
+  const stuck = decls.filter(d => !emitted.has(d.name));
+  if (stuck.length > 0) {
+    console.warn(`globals.h: ${stuck.length} forward declaration(s) form a dependency cycle and stay in key order:`);
+    for (const d of [...stuck].sort((a, b) => byKey(a.name, b.name))) {
+      console.warn(`  ${d.name} -> ${d.deps.filter(x => stuck.some(o => o.name === x)).join(', ')}`);
+    }
+    for (const d of [...stuck].sort((a, b) => byKey(a.text, b.text))) ordered.push(d.text);
+  }
+
+  return ordered;
 }
 
 function emitFallbackForwardDecl(name: string): string {
