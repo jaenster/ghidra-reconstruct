@@ -321,6 +321,42 @@ const CONST_POINTER_TYPEDEFS = new Set([
  */
 export type TypedefResolver = (name: string) => string | undefined;
 
+/**
+ * The base a parsed `BuiltinType` really names.
+ *
+ * The parser splits a multi-word builtin into a head plus modifiers - `short`
+ * arrives as `{ name: 'int', modifiers: ['short'] }`, `unsigned char` as
+ * `{ name: 'char', modifiers: ['unsigned'] }`. Reading `name` alone therefore
+ * answers `int` for a `short *` and `char` for a `byte *`, which is both a
+ * false equality (a `char *` and an `unsigned char *` reduce alike, so no cast
+ * is written where C++ needs one) and a false spelling (a cast written from
+ * that shape names `int *` over a 16-bit walk). The string path
+ * (`shapeOfSpelling`) never had the problem, so the two reducers disagreed on
+ * every modified builtin in the program.
+ */
+export function builtinBase(name: string, modifiers?: readonly string[]): string {
+  const mods = (modifiers ?? []).filter(m => m !== 'const' && m !== 'volatile');
+  const core = canonicalBase(name);
+  if (mods.length === 0) return core;
+  const isUnsigned = mods.includes('unsigned');
+  const isSigned = mods.includes('signed');
+  const isShort = mods.includes('short');
+  const longs = mods.filter(m => m === 'long').length;
+  if (core === 'char') {
+    return isUnsigned ? 'unsigned char' : isSigned ? 'signed char' : 'char';
+  }
+  if (core === 'double') return longs > 0 ? 'long double' : 'double';
+  if (core === 'int') {
+    const width = isShort ? 'short' : longs >= 2 ? 'long long' : longs === 1 ? 'long' : 'int';
+    if (!isUnsigned) return width;
+    return width === 'int' ? 'unsigned int' : `unsigned ${width}`;
+  }
+  // A head the modifiers do not describe - `unsigned __int64`, `long float`.
+  // Keeping the words produces a base no rule matches, which declines rather
+  // than guesses, and that is the direction this pass errs in everywhere else.
+  return canonicalBase(`${mods.join(' ')} ${core}`);
+}
+
 export function canonicalBase(name: string): string {
   const stripped = name
     .replace(/\b(const|volatile)\b/g, ' ')
@@ -383,9 +419,15 @@ export function shapeOfNode(t: TypeNode, stars = 0, resolve?: TypedefResolver): 
       if (!inner) return null;
       return q.qualifiers?.includes('const') ? { ...inner, isConst: true } : inner;
     }
-    case NodeKind.BuiltinType:
+    case NodeKind.BuiltinType: {
+      const b = t as BuiltinType;
       return resolveThroughTypedefs(
-        { base: canonicalBase((t as BuiltinType).name), stars, isConst: false }, resolve, 0);
+        {
+          base: builtinBase(b.name, b.modifiers),
+          stars,
+          isConst: (b.modifiers ?? []).includes('const'),
+        }, resolve, 0);
+    }
     case NodeKind.TypedefType: {
       const n = typeNodeName((t as TypedefType).name);
       if (n === undefined) return null;
