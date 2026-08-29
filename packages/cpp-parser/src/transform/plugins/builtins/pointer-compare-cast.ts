@@ -14,6 +14,13 @@
  * touched: `(T*)a - (T*)b` divides by `sizeof(T)`, and picking a side there would
  * change the value.
  *
+ * The same argument settles a pointer compared against an INTEGER, which C++
+ * also rejects. There the pointer side goes through `uintptr_t`: that is the
+ * machine's own operation - a `cmp` of two 32-bit words - it is width-exact,
+ * and `uintptr_t` is spellable everywhere, where the pointee type may not be.
+ * Only a MACHINE-WORD integer qualifies; a narrower one would mean the model
+ * disagrees about the width somewhere else, and that stays visible.
+ *
  * The cast is always spelled with a BUILTIN type - `(unsigned char*)`,
  * `(short*)`, `(void*)`. One of the two sides in this shape is essentially always
  * a raw byte/word walk, and confining the emitted spelling to a builtin means
@@ -26,6 +33,7 @@
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, FunctionDecl, VariableDecl, ParameterDecl, Expression, BinaryExpr, TypeNode,
+  IntegerLiteralExpr,
 } from '../../../ast/nodes.js';
 import { findNodesByKind } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
@@ -33,7 +41,7 @@ import { Type, Expr } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { createExprShape } from './expr-shape.js';
 import {
-  SCALAR_BASES, sameShape, type TypeShape, type TypedefResolver,
+  SCALAR_BASES, sameShape, unwrapParens, type TypeShape, type TypedefResolver,
 } from './call-arg-cast.js';
 
 export interface PointerCompareCastOptions extends PluginOptions {
@@ -50,6 +58,31 @@ const COMPARISONS = new Set(['==', '!=', '<', '<=', '>', '>=']);
 
 /** A shape that can be written as a cast with nothing but a builtin type name. */
 const isBuiltinPointer = (s: TypeShape): boolean => s.stars > 0 && SCALAR_BASES.has(s.base);
+
+/**
+ * The integer widths a pointer's value fits in exactly. A narrower slot would
+ * truncate the address, which the machine never did, so it is left visible.
+ */
+const WORD_INTEGER_BASES = new Set([
+  'int', 'unsigned int', 'long', 'unsigned long', 'uintptr_t', 'intptr_t',
+  'size_t', 'ssize_t', 'pointer32',
+]);
+
+const isWordInteger = (s: TypeShape) => s.stars === 0 && WORD_INTEGER_BASES.has(s.base);
+
+/**
+ * An integer LITERAL compared against a pointer. `expr-shape` deliberately has
+ * no shape for a literal - it is not an object with a declared type - but
+ * `3 < pnOddPart` is the same machine comparison as any other, and the literal
+ * side needs no cast at all.
+ */
+const isIntegerLiteral = (e: Expression): boolean => {
+  const u = unwrapParens(e);
+  if (u.kind !== NodeKind.IntegerLiteral) return false;
+  // `p == 0` is a null-pointer comparison and already legal; `nullptr-cleanup`
+  // owns how it is spelled.
+  return (u as IntegerLiteralExpr).value !== 0n;
+};
 
 function spell(s: TypeShape): TypeNode {
   let node: TypeNode = Type.builtin(s.base);
@@ -93,6 +126,24 @@ export function createPointerCompareCastTransformer(options?: PluginOptions): Tr
           if (!COMPARISONS.has(b.operator)) return undefined;
           const left = shapeOf(b.left as Expression);
           const right = shapeOf(b.right as Expression);
+          // A pointer against a machine word: the `cmp` reads both as words, so
+          // the pointer goes through `uintptr_t` and the integer stays as it is.
+          const wordCompare = (
+            ptr: TypeShape | null, other: TypeShape | null, otherExpr: Expression,
+          ) => !!ptr && ptr.stars > 0
+            && (isIntegerLiteral(otherExpr) ? true : !!other && isWordInteger(other));
+          if (wordCompare(left, right, b.right as Expression)) {
+            changed = true;
+            return updateNode(b, {
+              left: Expr.cast(Type.typedef('uintptr_t'), b.left as Expression),
+            } as Partial<BinaryExpr>);
+          }
+          if (wordCompare(right, left, b.left as Expression)) {
+            changed = true;
+            return updateNode(b, {
+              right: Expr.cast(Type.typedef('uintptr_t'), b.right as Expression),
+            } as Partial<BinaryExpr>);
+          }
           if (!left || !right) return undefined;
           if (left.stars === 0 || right.stars === 0) return undefined;
           if (sameShape(left, right)) return undefined;
