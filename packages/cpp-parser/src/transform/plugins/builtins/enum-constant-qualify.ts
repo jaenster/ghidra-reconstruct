@@ -32,8 +32,8 @@
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, AssignExpr, BinaryExpr, CallExpr, CaseStmt, CompoundStmt, DefaultStmt, Expression,
-  FunctionDecl, Identifier, IfStmt, LabelStmt, ParameterDecl, ParenExpr, SwitchStmt, TypeNode,
-  VariableDecl,
+  FunctionDecl, Identifier, IfStmt, LabelStmt, ParameterDecl, ParenExpr, QualifiedId, SwitchStmt,
+  TypeNode, VariableDecl,
 } from '../../../ast/nodes.js';
 import { findNodesByKind } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
@@ -342,7 +342,54 @@ function createEnumConstantQualifyTransformer(
         },
       });
 
-      return updateNode(node, { body: sub(node.body) } as Partial<FunctionDecl>);
+      const body = sub(node.body);
+
+      /**
+       * The seventh source, and still a CONTROLLING TYPE rather than a label:
+       * one that six lines away in the same body already settled.
+       *
+       *     if (eAnimMode == eD2PlayerAnimMode_ns::Neutral) ...   // settled
+       *     D2Common::Units::SetupUpdateFlag(pUnit, Neutral);     // int32_t param
+       *
+       * `SetupUpdateFlag` takes `int32_t` - sixty callers push item, object,
+       * missile and player modes through it - so no parameter type names the
+       * enum, and `Neutral` is one of the names `d2_enums.h` refuses to export
+       * (Monster 1, Object 0, Player 1). The other site in the body carries the
+       * answer, and it got it from a declared type.
+       *
+       * Applied only where the body resolved the name to exactly ONE enum, and
+       * only to a bare identifier that is not a declared name here. Where two
+       * enums appear for one name, nothing is written and the error stays.
+       */
+      const settled = new Map<string, string | null>();
+      for (const q of findNodesByKind(body, NodeKind.QualifiedId)) {
+        const qi = q as QualifiedId;
+        if (qi.qualifier.length !== 1 || qi.name.kind !== NodeKind.Identifier) continue;
+        const scope = qi.qualifier[0];
+        if (scope.kind !== NodeKind.Identifier) continue;
+        const enumName = (scope as Identifier).name.replace(/_ns$/, '');
+        if (enumName === (scope as Identifier).name) continue;
+        const member = (qi.name as Identifier).name;
+        if (!model.ambiguous.has(member)) continue;
+        if (!model.members.get(enumName)?.has(member)) continue;
+        const seen = settled.get(member);
+        if (seen === undefined) settled.set(member, enumName);
+        else if (seen !== enumName) settled.set(member, null);
+      }
+      if (settled.size === 0) return updateNode(node, { body } as Partial<FunctionDecl>);
+
+      const fromBody = createTransformer({
+        visitNode(n: ASTNode): ASTNode | undefined {
+          if (n.kind !== NodeKind.Identifier) return undefined;
+          const name = (n as Identifier).name;
+          if (localTypes.has(name)) return undefined;
+          const enumName = settled.get(name);
+          if (!enumName) return undefined;
+          return qualify(n as Expression, enumName);
+        },
+      });
+
+      return updateNode(node, { body: fromBody(body) } as Partial<FunctionDecl>);
     },
   });
 }
