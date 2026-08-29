@@ -509,8 +509,6 @@ import { thisParamRewritePlugin } from './builtins/this-param-rewrite.js';
 export { thisParamRewritePlugin, type ThisParamRewriteOptions } from './builtins/this-param-rewrite.js';
 import { stackFrameAddressPlugin } from './builtins/stack-frame-address.js';
 export { stackFrameAddressPlugin, stackNameOffset, type StackFrameAddressOptions, type StackSlot } from './builtins/stack-frame-address.js';
-import { codePointerLocalTypePlugin } from './builtins/code-pointer-local-type.js';
-export { codePointerLocalTypePlugin } from './builtins/code-pointer-local-type.js';
 import { shadowedTypeQualifyPlugin } from './builtins/shadowed-type-qualify.js';
 export { shadowedTypeQualifyPlugin, type ShadowedTypeQualifyOptions } from './builtins/shadowed-type-qualify.js';
 import { functionShadowedGlobalPlugin } from './builtins/function-shadowed-global.js';
@@ -591,7 +589,6 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   functionNameReconcilePlugin, // Cleanup: respell a reference with the declaration's name+namespace (priority 20)
   thisParamRewritePlugin,     // Cleanup: __thiscall `this` → the free function's param name (priority 46)
   stackFrameAddressPlugin,    // Cleanup: `&stack0xNNNN` → the frame slot that owns it (priority 520)
-  codePointerLocalTypePlugin, // Type: `code* f = F;` → `auto f = F;` when F is the slot's only source (priority 560)
   shadowedTypeQualifyPlugin,  // Cleanup: (Draw**)x → (::Draw**)x when a same-named namespace shadows the type (priority 47)
   functionShadowedGlobalPlugin,  // Cleanup: bare x → ::x when a same-named function hides the root-scope global (priority 49)
   arrayGlobalAddressOfPlugin, // Cleanup: &X_ARRAY_<hex> → X_ARRAY_<hex> (priority 46)
