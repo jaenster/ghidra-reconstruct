@@ -26,7 +26,25 @@
  * non-x86 host parses it and ignores it, so the Mac path still compiles.
  */
 
-/** Conventions that are worth spelling and safe to spell. */
+/**
+ * `__fastcall` is measured, not overlooked. Spelling it as well costs **+42
+ * strict errors and +12 failing files** on the whole tree (810/204 against
+ * 768/192 at v726) and clears nothing, and the reason is structural: no Win32
+ * or CRT entry point takes a `__fastcall` callback, so the only counterparties
+ * are D2's own funcdef typedefs — and while no convention is spelled anywhere,
+ * every one of those pairs agrees trivially at `__cdecl`. Spelling one half
+ * breaks the tie the wrong way. `PFN_StatExpireCallback` alone (an
+ * `unknown`-convention funcdef assigned `__fastcall` functions) accounts for
+ * ~30 of the 42.
+ *
+ * `__stdcall` pays because its counterparty is the Win32 SDK header, which is
+ * already right: `LPTHREAD_START_ROUTINE`, `WNDPROC`, `LPHANDLER_FUNCTION`,
+ * `LPTOP_LEVEL_EXCEPTION_FILTER`.
+ *
+ * So the rule is not "spell what Ghidra knows" — it is "spell what has a
+ * correct counterparty". Adding `__fastcall` here needs the funcdef-vs-function
+ * disagreements fixed in Ghidra first.
+ */
 const SPELLED: ReadonlySet<string> = new Set(['__stdcall']);
 
 /**
