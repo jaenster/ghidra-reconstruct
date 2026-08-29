@@ -378,14 +378,29 @@ function createEnumConstantQualifyTransformer(
       }
       if (settled.size === 0) return updateNode(node, { body } as Partial<FunctionDecl>);
 
+      // Applied to CALL ARGUMENTS only. A bare identifier anywhere else is
+      // reached by one of the six type-carrying rules above if it can be
+      // reached at all, and a blanket identifier visitor would also rewrite the
+      // name INSIDE an already-qualified reference - the traversal is
+      // bottom-up, so `eD2PlayerAnimMode_ns::Neutral` hands its own `Neutral`
+      // leaf to the visitor and doubles the qualifier.
       const fromBody = createTransformer({
         visitNode(n: ASTNode): ASTNode | undefined {
-          if (n.kind !== NodeKind.Identifier) return undefined;
-          const name = (n as Identifier).name;
-          if (localTypes.has(name)) return undefined;
-          const enumName = settled.get(name);
-          if (!enumName) return undefined;
-          return qualify(n as Expression, enumName);
+          if (n.kind !== NodeKind.CallExpr) return undefined;
+          const call = n as CallExpr;
+          let touched = false;
+          const args = call.arguments.map(a => {
+            if (a.kind !== NodeKind.Identifier) return a;
+            const name = (a as Identifier).name;
+            if (localTypes.has(name)) return a;
+            const enumName = settled.get(name);
+            if (!enumName) return a;
+            const next = qualify(a as Expression, enumName);
+            if (!next) return a;
+            touched = true;
+            return next;
+          });
+          return touched ? updateNode(call, { arguments: args } as Partial<CallExpr>) : undefined;
         },
       });
 
