@@ -31,6 +31,8 @@ const AMBIGUOUS = [
   // MONSTATSEX05 is a bitfield (1,4,8,…) and TXTMonStats2Field0x04 an index
   // enum (8..15) over the same seven names.
   'revive', 'isAtt', 'large', 'soft', 'critter', 'shadow',
+  // eD2ObjectAnimMode numbers Neutral 0 where the two anim modes number it 1.
+  'Neutral',
 ];
 
 const OPTIONS = {
@@ -201,12 +203,79 @@ void f(D2UnitStrc *pUnit) {
     );
   });
 
+  it('qualifies across a relational or bitwise operator, not just equality', () => {
+    const output = transformCode(`
+void f(eD2PlayerAnimMode eMode) {
+  if (Run < eMode && eMode <= Skill4) {
+    a();
+  }
+  b(eMode & Attack1);
+}
+`);
+    assert.ok(output.includes('eD2PlayerAnimMode_ns::Run < eMode'), output);
+    assert.ok(output.includes('eMode <= eD2PlayerAnimMode_ns::Skill4'), output);
+    assert.ok(output.includes('eMode & eD2PlayerAnimMode_ns::Attack1'), output);
+  });
+
+  it('leaves a boolean operand alone: && and || do not name an enum', () => {
+    const output = transformCode(`
+void f(eD2PlayerAnimMode eMode) {
+  if (eMode && Run) {
+    a();
+  }
+}
+`);
+    assert.ok(!output.includes('_ns::Run'), `Run must stay bare in: ${output}`);
+  });
+
+  it('qualifies a declaration initializer from the declared type', () => {
+    const output = transformCode(`
+void f(void) {
+  eD2PlayerAnimMode eAnimMode = Attack1;
+}
+`);
+    assert.ok(
+      output.includes('eAnimMode = eD2PlayerAnimMode_ns::Attack1'),
+      `Expected the player enum's Attack1 in: ${output}`
+    );
+  });
+
+  it("takes a mistyped local's enum from what is assigned to it", () => {
+    const output = transformCode(`
+void f(D2UnitStrc *pUnit) {
+  bool bMode;
+  bMode = 0;
+  bMode = pUnit->eAnimMode.ePlayerMode;
+  if (bMode == Neutral) {
+    a();
+  }
+}
+`);
+    assert.ok(
+      output.includes('bMode == eD2PlayerAnimMode_ns::Neutral'),
+      `Expected the player enum's Neutral in: ${output}`
+    );
+  });
+
+  it('refuses a local two different enums are assigned to', () => {
+    const output = transformCode(`
+void f(D2UnitStrc *pUnit) {
+  int nMode;
+  nMode = pUnit->eAnimMode.ePlayerMode;
+  nMode = pUnit->eAnimMode.eMonsterMode;
+  if (nMode == Run) {
+    a();
+  }
+}
+`);
+    assert.ok(!output.includes('_ns::Run'), `Run must stay bare in: ${output}`);
+  });
+
   it('leaves every unambiguous constant unqualified', () => {
     const output = transformCode(`
 void f(D2UnitStrc *pUnit) {
   switch (pUnit->eAnimMode.ePlayerMode) {
     case Death:
-    case Neutral:
     case Walk:
     case Throw:
       a();

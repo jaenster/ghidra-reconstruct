@@ -36,7 +36,7 @@ import { createTransformer, updateNode, type Transformer } from '../../transform
 import { Expr } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { createExprShape } from './expr-shape.js';
-import { calleeName, scopedLookup, unwrapParens } from './call-arg-cast.js';
+import { calleeName, scopedLookup, shapeOfNode, unwrapParens } from './call-arg-cast.js';
 
 export interface EnumConstantQualifyOptions extends PluginOptions {
   /** Names declared by more than one enum with different values. */
@@ -57,6 +57,23 @@ export interface EnumConstantQualifyOptions extends PluginOptions {
   functionParamTypes?: Record<string, string[]>;
   /** The namespace path the body is emitted inside, for unqualified callee lookup. */
   enclosingSegments?: string[];
+}
+
+/**
+ * Operators whose two operands are values of the same type, so one side's enum
+ * names the other's. `&&`/`||` are excluded (their operands are booleans), and
+ * so is arithmetic, where the other operand is an offset rather than a member.
+ */
+const TYPED_BINARY_OPS: ReadonlySet<string> = new Set([
+  '==', '!=', '<', '>', '<=', '>=', '&', '|', '^',
+]);
+const TYPED_ASSIGN_OPS: ReadonlySet<string> = new Set(['&=', '|=', '^=']);
+
+/** The undecorated name of a declared type - null for anything with a `*`. */
+function typeBaseName(type: TypeNode | undefined): string | undefined {
+  if (!type) return undefined;
+  const shape = shapeOfNode(type, 0);
+  return shape && shape.stars === 0 ? shape.base : undefined;
 }
 
 interface Model {
@@ -117,12 +134,44 @@ function createEnumConstantQualifyTransformer(
 
       const shape = createExprShape(localTypes, tables);
 
+      /**
+       * A local Ghidra declared as a plain integer but only ever assigns an
+       * enum-typed value to. `bool _bNeedsGfxReload` is assigned
+       * `pItem->eAnimMode.ePlayerMode` and then compared against `Neutral`: the
+       * declared type is a lie the decompiler tells about a one-byte slot, and
+       * the assignment is what says which enum the comparison is over. Recorded
+       * only where every enum-typed assignment to the name agrees.
+       */
+      const assignedEnums = new Map<string, string | null>();
+      const noteAssignment = (name: string, base: string | undefined): void => {
+        if (!base || !model.members.has(base)) return;
+        const seen = assignedEnums.get(name);
+        if (seen === undefined) assignedEnums.set(name, base);
+        else if (seen !== base) assignedEnums.set(name, null);
+      };
+      for (const a of findNodesByKind(node.body, NodeKind.AssignExpr)) {
+        const asg = a as AssignExpr;
+        if (asg.operator !== '=') continue;
+        const target = unwrapParens(asg.left);
+        if (target.kind !== NodeKind.Identifier) continue;
+        const s = shape(asg.right);
+        noteAssignment((target as Identifier).name, s && s.stars === 0 ? s.base : undefined);
+      }
+      for (const d of findNodesByKind(node.body, NodeKind.VariableDecl)) {
+        const v = d as VariableDecl;
+        if (!v.initializer) continue;
+        const s = shape(v.initializer as Expression);
+        noteAssignment(v.name.name, s && s.stars === 0 ? s.base : undefined);
+      }
+
       /** The enum an expression has, or undefined when it is not one. */
       const enumOf = (expr: Expression | undefined): string | undefined => {
         if (!expr) return undefined;
-        const s = shape(expr);
-        if (!s || s.stars !== 0) return undefined;
-        return model.members.has(s.base) ? s.base : undefined;
+        const e = unwrapParens(expr);
+        const s = shape(e);
+        if (s && s.stars === 0 && model.members.has(s.base)) return s.base;
+        if (e.kind !== NodeKind.Identifier) return undefined;
+        return assignedEnums.get((e as Identifier).name) ?? undefined;
       };
 
       /** `Name` → `<Enum>_ns::Name`, only when that enum declares it. */
@@ -200,7 +249,7 @@ function createEnumConstantQualifyTransformer(
           }
           if (n.kind === NodeKind.BinaryExpr) {
             const b = n as BinaryExpr;
-            if (b.operator !== '==' && b.operator !== '!=') return undefined;
+            if (!TYPED_BINARY_OPS.has(b.operator)) return undefined;
             const fromLeft = enumOf(b.left);
             if (fromLeft) {
               const right = qualify(b.right, fromLeft);
@@ -235,9 +284,19 @@ function createEnumConstantQualifyTransformer(
             });
             return touched ? updateNode(call, { arguments: args } as Partial<CallExpr>) : undefined;
           }
+          if (n.kind === NodeKind.VariableDecl) {
+            // `eD2PlayerAnimMode eAnimMode = Attack1;` — the declaration says
+            // the enum outright.
+            const v = n as VariableDecl;
+            if (!v.initializer) return undefined;
+            const declared = typeBaseName(v.type);
+            if (!declared || !model.members.has(declared)) return undefined;
+            const initializer = qualify(v.initializer as Expression, declared);
+            return initializer && updateNode(v, { initializer } as Partial<VariableDecl>);
+          }
           if (n.kind === NodeKind.AssignExpr) {
             const a = n as AssignExpr;
-            if (a.operator !== '=') return undefined;
+            if (a.operator !== '=' && !TYPED_ASSIGN_OPS.has(a.operator)) return undefined;
             const enumName = enumOf(a.left);
             if (!enumName) return undefined;
             const right = qualify(a.right, enumName);
