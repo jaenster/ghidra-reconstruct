@@ -159,7 +159,8 @@ export function generateHeader(
   // Don't skip ownedTypes: they might not be emitted due to filtering, and need forward decl.
   const alreadyDefined = new Set<string>([...(includedTypes ?? [])]);
   const funcDefReferencedTypes = new Set<string>();
-  const forwardDecls = collectForwardDeclarations(functions, classInfo, dataTypes, classNames, alreadyDefined, ownedTypes, allClasses, allFunctions, funcDefReferencedTypes);
+  const funcDefTypedefDeps = new Map<string, Set<string>>();
+  const forwardDecls = collectForwardDeclarations(functions, classInfo, dataTypes, classNames, alreadyDefined, ownedTypes, allClasses, allFunctions, funcDefReferencedTypes, funcDefTypedefDeps);
   if (forwardDecls.length > 0) {
     lines.push('// Forward declarations');
     // A function-pointer typedef names struct types in its signature, so every
@@ -179,7 +180,7 @@ export function generateHeader(
       else if (dt.kind === 'UNION') ownedAhead.push(`union ${name};`);
     }
     for (const decl of ownedAhead.sort()) lines.push(decl);
-    for (const decl of forwardDecls.filter(isTypedefBlock)) {
+    for (const decl of orderTypedefBlocks(forwardDecls.filter(isTypedefBlock), funcDefTypedefDeps)) {
       lines.push(decl);
     }
     lines.push('');
@@ -1618,6 +1619,50 @@ function extractBaseTypeName(typeStr: string): string | null {
 }
 
 /**
+ * Order the guarded function-pointer typedef blocks so a typedef that names
+ * another one in its signature is emitted after it.
+ *
+ * The blocks arrive sorted by name, which is dependency order only by accident:
+ * `D3DDev3_EnumTextureFormats` takes a `D3DEnumPixelFormatsCallback` and `D3DD`
+ * sorts before `D3DE`, so the user was emitted 24 lines above its target and
+ * every translation unit including that header reported the target undeclared.
+ *
+ * The block's identity is its `RECON_FPTD_<name>` guard, which
+ * `addForwardDeclaration` and `guardedFuncDefTypedef` both write; ties keep the
+ * incoming name order so output stays stable.
+ */
+function orderTypedefBlocks(
+  blocks: string[],
+  deps: Map<string, Set<string>>,
+): string[] {
+  if (blocks.length < 2 || deps.size === 0) return blocks;
+  const byName = new Map<string, string>();
+  for (const block of blocks) {
+    const name = block.slice('#ifndef RECON_FPTD_'.length, block.indexOf('\n'));
+    if (name) byName.set(name, block);
+  }
+  const ordered: string[] = [];
+  const emitted = new Set<string>();
+  const visiting = new Set<string>();
+  const visit = (name: string): void => {
+    if (emitted.has(name) || visiting.has(name)) return;
+    const block = byName.get(name);
+    if (!block) return;
+    visiting.add(name);
+    for (const dep of deps.get(name) ?? []) visit(dep);
+    visiting.delete(name);
+    emitted.add(name);
+    ordered.push(block);
+  };
+  for (const block of blocks) {
+    const name = block.slice('#ifndef RECON_FPTD_'.length, block.indexOf('\n'));
+    if (name) visit(name);
+    else ordered.push(block);
+  }
+  return ordered;
+}
+
+/**
  * Collect forward declarations needed
  */
 function collectForwardDeclarations(
@@ -1629,7 +1674,8 @@ function collectForwardDeclarations(
   ownedTypes?: Set<string>,
   allClasses?: DetectedClass[],
   allFunctions?: ExtractedFunction[],
-  funcDefReferencedTypes?: Set<string>
+  funcDefReferencedTypes?: Set<string>,
+  funcDefTypedefDeps?: Map<string, Set<string>>
 ): string[] {
   const declarations = new Set<string>();
 
@@ -1678,14 +1724,14 @@ function collectForwardDeclarations(
     for (const param of func.parameters) {
       for (const type of extractAllTypeRefs(param.dataType)) {
         if (type !== classInfo?.name) {
-          addForwardDeclaration(declarations, type, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes, undefined, funcDefReferencedTypes);
+          addForwardDeclaration(declarations, type, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes, undefined, funcDefReferencedTypes, funcDefTypedefDeps);
         }
       }
     }
 
     const returnType = extractClassName(func.returnType);
     if (returnType && returnType !== classInfo?.name) {
-      addForwardDeclaration(declarations, returnType, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes, undefined, funcDefReferencedTypes);
+      addForwardDeclaration(declarations, returnType, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes, undefined, funcDefReferencedTypes, funcDefTypedefDeps);
     }
   }
 
@@ -1698,7 +1744,7 @@ function collectForwardDeclarations(
       for (const field of fields) {
         const type = extractClassName(field.dataType);
         if (type && type !== dt.name) {
-          addForwardDeclaration(declarations, type, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes, undefined, funcDefReferencedTypes);
+          addForwardDeclaration(declarations, type, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes, undefined, funcDefReferencedTypes, funcDefTypedefDeps);
         }
       }
     }
@@ -1711,12 +1757,12 @@ function collectForwardDeclarations(
       for (const param of func.parameters) {
         const type = extractClassName(param.dataType);
         if (type && type !== classInfo.name) {
-          addForwardDeclaration(declarations, type, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes, undefined, funcDefReferencedTypes);
+          addForwardDeclaration(declarations, type, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes, undefined, funcDefReferencedTypes, funcDefTypedefDeps);
         }
       }
       const returnType = extractClassName(func.returnType);
       if (returnType && returnType !== classInfo.name) {
-        addForwardDeclaration(declarations, returnType, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes, undefined, funcDefReferencedTypes);
+        addForwardDeclaration(declarations, returnType, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes, undefined, funcDefReferencedTypes, funcDefTypedefDeps);
       }
     }
   }
@@ -1741,13 +1787,13 @@ function collectForwardDeclarations(
         for (const param of func.parameters) {
           for (const type of extractAllTypeRefs(param.dataType)) {
             if (type !== cls.name) {
-              addForwardDeclaration(declarations, type, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes, undefined, funcDefReferencedTypes);
+              addForwardDeclaration(declarations, type, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes, undefined, funcDefReferencedTypes, funcDefTypedefDeps);
             }
           }
         }
         const returnType = extractClassName(func.returnType);
         if (returnType && returnType !== cls.name) {
-          addForwardDeclaration(declarations, returnType, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes, undefined, funcDefReferencedTypes);
+          addForwardDeclaration(declarations, returnType, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes, undefined, funcDefReferencedTypes, funcDefTypedefDeps);
         }
       }
     }
@@ -1770,6 +1816,7 @@ function addForwardDeclaration(
   ownedTypes?: Set<string>,
   visiting: Set<string> = new Set(),
   funcDefReferencedTypes?: Set<string>,
+  funcDefTypedefDeps?: Map<string, Set<string>>,
 ): void {
   // Validate: skip malformed or artifact type names
   if (!type || isPlatformOrBuiltinType(type)) return;
@@ -1815,10 +1862,22 @@ function addForwardDeclaration(
         // A type this header DEFINES is still declared too late: the typedef
         // block sits in the forward-declaration section, above the definitions.
         funcDefReferencedTypes?.add(name);
+        // One function-pointer typedef may name another in its signature
+        // (`D3DDev3_EnumTextureFormats` takes a `D3DEnumPixelFormatsCallback`).
+        // Record that edge: the blocks are emitted sorted by name, and
+        // `D3DDev3_` sorts before `D3DE`, so the user came out above its target.
+        if (funcDefMap.has(name)) {
+          let deps = funcDefTypedefDeps?.get(type);
+          if (funcDefTypedefDeps && !deps) {
+            deps = new Set<string>();
+            funcDefTypedefDeps.set(type, deps);
+          }
+          deps?.add(name);
+        }
         addForwardDeclaration(
           declarations, name, structNames, unionNames, enumNames, typedefNames,
           funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes, visiting,
-          funcDefReferencedTypes,
+          funcDefReferencedTypes, funcDefTypedefDeps,
         );
       }
       visiting.delete(type);
