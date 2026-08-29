@@ -482,6 +482,9 @@ export { switchPointerNormalizePlugin } from './builtins/switch-pointer-normaliz
 
 import { switchCaseDedupPlugin } from './builtins/switch-case-dedup.js';
 export { switchCaseDedupPlugin, type SwitchCaseDedupOptions } from './builtins/switch-case-dedup.js';
+
+import { duplicateLabelUniquifyPlugin } from './builtins/duplicate-label-uniquify.js';
+export { duplicateLabelUniquifyPlugin, type DuplicateLabelUniquifyOptions } from './builtins/duplicate-label-uniquify.js';
 import { ghidraPseudoOpPlugin } from './builtins/ghidra-pseudo-op.js';
 export { ghidraPseudoOpPlugin } from './builtins/ghidra-pseudo-op.js';
 import { labelMacroCollisionPlugin } from './builtins/label-macro-collision.js';
@@ -582,6 +585,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   phantomLocalSynthesisPlugin, // Declaration: synthesize Ghidra auto-name phantoms uVar3/unique0x… (priority 601)
   switchPointerNormalizePlugin, // Cleanup: strip pointer casts from pointer-typed switch condition + case labels (priority 40)
   switchCaseDedupPlugin, // Control-flow: drop a repeated case value / second default in one switch (priority 691)
+  duplicateLabelUniquifyPlugin, // Control-flow: rename the 2nd+ copy of a duplicated Ghidra label, retarget its gotos (priority 690)
   ghidraPseudoOpPlugin, // Cleanup: rename decompiler pseudo-ops that collide with a standard macro (priority 20)
   labelMacroCollisionPlugin, // Cleanup: rename goto labels colliding with Win32/CRT macros — ERROR/DELETE/… (priority 41)
   funcdefCastCollapsePlugin,  // Type: collapse (Funcdef*) casts to (Funcdef) (priority 70)

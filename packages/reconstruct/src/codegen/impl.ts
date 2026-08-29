@@ -249,47 +249,6 @@ function declareUnderscoreSlotLocals(
   return body;
 }
 
-/**
- * Ghidra's control-flow recovery sometimes emits the SAME address-labeled block
- * twice in one function (identical code, each region with its own gotos to it),
- * producing duplicate `LAB_xxxx:` definitions — a C++ error, and `goto` targets
- * become ambiguous. Uniquify the 2nd+ definition of each duplicated label and
- * retarget each `goto` to the most-recent PRECEDING definition (these blocks use
- * backward gotos). Safe for compilability: every goto still resolves to an
- * existing label; at worst a forward goto picks an earlier copy (control flow was
- * already approximate). Only touches Ghidra label names (LAB_/switchD_/…).
- */
-function uniquifyDuplicateLabels(body: string): string {
-  const isGhidraLabel = (n: string) => /^(LAB|switchD|caseD|joined|code|UNRECOVERED)_/.test(n);
-  const labelDef = /^(\s*)([A-Za-z_]\w*):(\s*(?:\/\/.*)?)$/;
-  const lines = body.split('\n');
-
-  const totalDefs = new Map<string, number>();
-  for (const line of lines) {
-    const m = labelDef.exec(line);
-    if (m && isGhidraLabel(m[2])) totalDefs.set(m[2], (totalDefs.get(m[2]) ?? 0) + 1);
-  }
-  const dup = new Set([...totalDefs].filter(([, c]) => c >= 2).map(([n]) => n));
-  if (dup.size === 0) return body;
-
-  const seen = new Map<string, number>(); // definitions of each dup label seen so far
-  const out = lines.map(line => {
-    const dm = labelDef.exec(line);
-    if (dm && dup.has(dm[2])) {
-      const n = (seen.get(dm[2]) ?? 0) + 1;
-      seen.set(dm[2], n);
-      const name = n === 1 ? dm[2] : `${dm[2]}__dup${n}`;
-      return `${dm[1]}${name}:${dm[3]}`;
-    }
-    return line.replace(/\bgoto\s+([A-Za-z_]\w*)\s*;/g, (g, lbl) => {
-      if (!dup.has(lbl)) return g;
-      const n = seen.get(lbl) ?? 0; // most recent PRECEDING definition
-      return n <= 1 ? `goto ${lbl};` : `goto ${lbl}__dup${n};`;
-    });
-  });
-  return out.join('\n');
-}
-
 // ── Parse error logging ─────────────────────────────────────────────────────
 
 let parseErrorLogPath: string | null = null;
@@ -1479,8 +1438,8 @@ export function generateFunctionImplementation(
   // (`this` → the declared parameter name, `nullptr` → `0` where an integer is
   //  meant, the spurious `&` on a `<name>_ARRAY_<hex>` global, and a repeated
   //  `case` value in one switch are all done on the AST by `this-param-rewrite`,
-  //  `nullptr-cleanup`, `array-global-address-of` and `switch-case-dedup` — see
-  //  transformDecompiledCode.)
+  //  `nullptr-cleanup`, `array-global-address-of`, `switch-case-dedup` and
+  //  `duplicate-label-uniquify` — see transformDecompiledCode.)
   //
   // `hoistSwitchPreCaseDecls` stood here and is GONE, not moved: it hoisted a
   // declaration-with-initializer sitting between `switch (x) {` and the first
@@ -1488,12 +1447,11 @@ export function generateFunctionImplementation(
   // declaration there any more - `decl-scope-sink` is the pass that used to, and
   // it now refuses to sink into a switch body for this exact reason.
   //
-  // STILL TEXT, and owed the same move: the pass below and
-  // `declareUnderscoreSlotLocals`. Each splits the finished body on `\n` and
-  // matches C++ with regexes, so neither can tell an identifier from the same
-  // characters inside a string literal or a comment.
+  // STILL TEXT, and owed the same move: `declareUnderscoreSlotLocals` below. It
+  // splits the finished body on `\n` and matches C++ with regexes, so it cannot
+  // tell an identifier from the same characters inside a string literal or a
+  // comment.
 
-  body = uniquifyDuplicateLabels(body);
 
   // Synthesize declarations for `_<base>` storage-slot locals Ghidra references
   // but never declares (else the body uses an undeclared identifier → compile error).
