@@ -79,7 +79,13 @@ const TYPED_BINARY_OPS: ReadonlySet<string> = new Set([
  * `mode & (Skill4 | Skill3)` names both from the enum `mode` has.
  */
 const MEMBER_COMBINING_OPS: ReadonlySet<string> = new Set(['&', '|', '^', '+', '-']);
-const TYPED_ASSIGN_OPS: ReadonlySet<string> = new Set(['&=', '|=', '^=']);
+/**
+ * The compound assignments whose right operand is a value of the LEFT's type.
+ * The same set as `TYPED_BINARY_OPS` restricted to what can be compounded, and
+ * for the same reason: `mode -= Neutral` is Ghidra spelling that enum's 1, not
+ * an untyped offset, exactly as `mode - Neutral` is.
+ */
+const TYPED_ASSIGN_OPS: ReadonlySet<string> = new Set(['&=', '|=', '^=', '+=', '-=']);
 
 /** The undecorated name of a declared type - null for anything with a `*`. */
 function typeBaseName(type: TypeNode | undefined): string | undefined {

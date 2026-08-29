@@ -3201,6 +3201,14 @@ function buildFuncPtrArgCastTables(
   // spells a conversion the real declaration rejects, so these names carry no
   // parameter or return types at all. They stay in `functionNames`: the fact
   // that the identifier denotes a function is not in doubt.
+  // A SECONDARY-SOURCE function's prototype is not this call's prototype. The
+  // Mac build carries its own `CopyRect` - a two-int Carbon helper at
+  // DiabloII_macho:001668bd - and the merge indexes it under the bare name, so
+  // every WINDOWS call to the Win32 `CopyRect` was cast to `(int *)` against a
+  // record from another binary. Those functions are emitted behind
+  // `#ifdef D2_PLATFORM_MAC` and only Mac bodies call them, which is the same
+  // reason the declaration closure already refuses them. They stay in
+  // `functionNames`: the identifier does denote a function either way.
   const headerOwned = platformDeclaredFunctionNames();
   for (const fn of functions) {
     if (!fn.name) continue;
@@ -3214,7 +3222,7 @@ function buildFuncPtrArgCastTables(
     owners.add(qualified);
     for (const key of nameSuffixes(qualified)) {
       functionNames.add(key);
-      if (!headerOwned.has(key)) {
+      if (!headerOwned.has(key) && !fn.platform) {
         claim(functionParamTypes, paramTypeClaims, key, paramSpellings, paramSpellings.join('|'));
         claim(functionReturnTypes, returnTypeClaims, key, returnSpelling, returnSpelling);
         claim(functionConventions, conventionClaims, key, conventionSpelling, conventionSpelling);
@@ -3239,7 +3247,9 @@ function buildFuncPtrArgCastTables(
   // hold a record for is left to the tables above, including where they dropped
   // it as ambiguous: an overload disagreement must not be papered over here.
   const modelClaimed = new Set<string>();
-  for (const fn of functions) if (fn.name && !headerOwned.has(fn.name)) modelClaimed.add(fn.name);
+  for (const fn of functions) {
+    if (fn.name && !headerOwned.has(fn.name) && !fn.platform) modelClaimed.add(fn.name);
+  }
   const pointerOnlyParamTypes = harvestAnnotatedParameterTypes(functions, modelClaimed);
 
   const globalTypes: Record<string, string> = {};
