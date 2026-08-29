@@ -23,7 +23,10 @@ describe('excluded-namespace symbol declarations', () => {
       'CRT_Pow10', 'CRT_Srand', 'CRT_Fgetc',
       '_eh_vector_constructor_iterator_', '_eh_vector_destructor_iterator_',
       '_Wrappers::accept', '_Wrappers::bind', '_Wrappers::listen', '_Wrappers::WSASetLastError',
-      '_SmackOpen_12', '_BinkCopyToBuffer_28', 'GLIDEDLL_grLfbLock_24',
+      '_SmackOpen_12', '_BinkCopyToBuffer_28',
+      // No GLIDEDLL_* here: every one of them is a DATA symbol in Ghidra (an
+      // import slot filled by GetProcAddress), so globals.h owns the
+      // declaration and the shim must not also claim the name.
     ]) {
       assert.ok(declared.has(name), `${name} must be declared`);
     }

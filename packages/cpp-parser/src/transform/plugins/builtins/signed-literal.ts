@@ -177,14 +177,76 @@ function undoDoubleNegative(node: ASTNode): ASTNode | undefined {
 }
 
 /**
+ * Fold `-<magnitude>` where this pass has already re-signed the magnitude.
+ *
+ * Ghidra prints a negative constant as minus-magnitude, and the magnitude of
+ * INT32_MIN is `0x80000000` — a value this pass reads as negative in its own
+ * right. The tree is walked children-first, so by the time the enclosing minus
+ * is visited its operand is already `-2147483648` and the two signs print
+ * adjacent: `--2147483648`, which C++ lexes as a pre-decrement of a literal.
+ *
+ * The sign is settled here instead, in the width the constant came from:
+ * negate the ORIGINAL unsigned magnitude modulo 2^bits and read the result back
+ * as signed. `-0x80000000` is INT32_MIN, `-0xffffffff` is 1.
+ */
+function foldReSignedNegation(
+  node: ASTNode,
+  originalValue: WeakMap<ASTNode, { value: bigint; bits: 32 | 64 }>
+): ASTNode | undefined {
+  if (node.kind !== NodeKind.UnaryExpr) return undefined;
+  const u = node as UnaryExpr;
+  if (u.operator !== '-') return undefined;
+
+  const origin = originalValue.get(u.operand);
+  if (!origin) return undefined;
+
+  const mask = origin.bits === 32 ? 0xffffffffn : 0xffffffffffffffffn;
+  const half = origin.bits === 32 ? 0x80000000n : 0x8000000000000000n;
+  const wrapped = (mask + 1n - (origin.value & mask)) & mask;
+  const signed = wrapped >= half ? wrapped - (mask + 1n) : wrapped;
+
+  if (signed >= 0n) {
+    const literal: IntegerLiteralExpr = {
+      kind: NodeKind.IntegerLiteral,
+      value: signed,
+      suffix: '',
+      base: 10,
+      raw: signed.toString(),
+      location: u.location,
+      leadingTrivia: u.leadingTrivia || [],
+      trailingTrivia: u.trailingTrivia || [],
+    };
+    return literal;
+  }
+
+  const negation = createNegativeLiteral(signed, u);
+  const paren: ParenExpr = {
+    kind: NodeKind.ParenExpr,
+    expression: negation,
+    location: u.location,
+    leadingTrivia: u.leadingTrivia || [],
+    trailingTrivia: u.trailingTrivia || [],
+  };
+  return paren;
+}
+
+/**
  * Create the signed literal cleanup transformer
  */
 function createSignedLiteralCleanup(options: SignedLiteralOptions): Transformer {
   const threshold = options.conversionThreshold ?? 0xf0000000n;
   const onlyKnown = options.onlyKnownValues ?? false;
+  // Nodes this pass re-signed, against the unsigned value they were written
+  // with. Lets the enclosing minus, visited afterwards, recover the original.
+  const reSigned = new WeakMap<ASTNode, { value: bigint; bits: 32 | 64 }>();
 
   return createTransformer({
     visitNode(node) {
+      const folded = foldReSignedNegation(node, reSigned);
+      if (folded) {
+        return folded;
+      }
+
       const doubleNegative = undoDoubleNegative(node);
       if (doubleNegative) {
         return doubleNegative;
@@ -219,7 +281,9 @@ function createSignedLiteralCleanup(options: SignedLiteralOptions): Transformer 
         return undefined;
       }
 
-      return createNegativeLiteral(result.signed, literal);
+      const negated = createNegativeLiteral(result.signed, literal);
+      reSigned.set(negated, { value, bits: result.bits });
+      return negated;
     },
   });
 }

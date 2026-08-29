@@ -129,10 +129,10 @@ describe('decorated (@) symbol names are sanitized at reference sites', () => {
     // so the one line contains both conventions at once.
     assert.match(decl!, /\b_BinkClose_4\b/);
     assert.doesNotMatch(decl!, /@/);
-    // `GLIDEDLL_grLfbLock_24` is one of the excluded-namespace symbols the
-    // emitter declares itself, and it declares it as a FUNCTION. A function
-    // address reaches `void*` through a cast or not at all, so the slot takes
-    // `(void*)&f` - `&f` alone is "invalid conversion from 'FxBool (*)(...)'".
-    assert.match(decl!, /=\s*\(void\*\)&GLIDEDLL_grLfbLock_24;/);
+    // `GLIDEDLL_grLfbLock@24` is a DATA symbol - an import slot globals.h
+    // declares as `extern grLfbLock GLIDEDLL_grLfbLock_24;` - so `&name` is an
+    // object pointer and reaches `void*` on its own. What this line pins is the
+    // spelling: the reference must carry the sanitized name, never the `@`.
+    assert.match(decl!, /=\s*&GLIDEDLL_grLfbLock_24;/);
   });
 });

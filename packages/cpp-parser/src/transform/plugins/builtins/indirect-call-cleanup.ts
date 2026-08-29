@@ -176,6 +176,56 @@ function cleanStructFieldFnPtrs(): Transformer {
 }
 
 // ============================================
+// 2c: TAIL-JUMP SELF-ARGUMENT
+// ============================================
+
+/**
+ * A member-access chain, spelled as a comparable key. `null` for anything else,
+ * so only the shapes this comparison actually understands are ever matched.
+ */
+function memberChainKey(expr: Expression): string | null {
+  const e = unwrapParens(expr);
+  if (e.kind === NodeKind.Identifier) {
+    return `#${(e as Identifier).name}`;
+  }
+  if (e.kind === NodeKind.MemberExpr) {
+    const m = e as MemberExpr;
+    if (m.member.kind !== NodeKind.Identifier) return null;
+    const base = memberChainKey(m.object);
+    if (base === null) return null;
+    return `${base}${m.isArrow ? '->' : '.'}${(m.member as Identifier).name}`;
+  }
+  return null;
+}
+
+/**
+ * Drop the sole argument of an indirect call when it IS the callee.
+ *
+ * A zero-parameter slot reached by a tail `jmp [reg]` decompiles with the
+ * register that held the callee re-inserted as argument 1:
+ *
+ *     bResult = (*RENDERER_CurrentRenderedFunctions->nfpCheckGamma)
+ *                         (RENDERER_CurrentRenderedFunctions->nfpCheckGamma);
+ *
+ * Ghidra flags it — the same statement carries "Could not recover jumptable" and
+ * "Treating indirect jump as call" — and a function pointer is never an argument
+ * to itself, so the argument is the artifact and the call is a zero-argument
+ * one. Matched only when the argument is the SAME member-access chain as the
+ * callee, which is why nothing that passes a different callback is touched.
+ */
+function dropTailJumpSelfArgument(): Transformer {
+  return createTransformer({
+    visitCallExpr(call: CallExpr) {
+      if (call.arguments.length !== 1) return undefined;
+      const calleeKey = memberChainKey(call.callee);
+      if (calleeKey === null) return undefined;
+      if (memberChainKey(call.arguments[0]) !== calleeKey) return undefined;
+      return updateNode(call, { arguments: [] });
+    },
+  });
+}
+
+// ============================================
 // PLUGIN DEFINITION
 // ============================================
 
@@ -195,6 +245,7 @@ export const indirectCallCleanupPlugin: TransformPlugin = {
     return sequence(
       stripJumptableWarnings(),
       cleanStructFieldFnPtrs(),
+      dropTailJumpSelfArgument(),
     );
   },
 };

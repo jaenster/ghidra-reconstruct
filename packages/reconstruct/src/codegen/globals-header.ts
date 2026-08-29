@@ -1276,8 +1276,20 @@ function emitPointerToSymbol(rawValue: string, expectedType?: string): string {
  */
 const CHAR_SLOT_TYPES = new Set(['char', 'signed char', 'unsigned char', 'uchar', 'byte', 'int8_t', 'uint8_t', 'undefined1', 'undefined']);
 
+/**
+ * The 8-bit slots that are UNSIGNED. A `char` literal is signed on this target,
+ * so `'\x9c'` is -100 and narrowing it into one of these is an error even though
+ * the byte fits: `narrowing conversion of '\234' from 'char' to 'uint8_t'`.
+ * A code unit at or above 0x80 takes the numeric byte in these slots.
+ */
+const UNSIGNED_BYTE_SLOT_TYPES = new Set(['unsigned char', 'uchar', 'byte', 'uint8_t', 'undefined1', 'undefined']);
+
 function isCharSlotType(base: string): boolean {
   return CHAR_SLOT_TYPES.has(base.toLowerCase());
+}
+
+function isUnsignedByteSlotType(base: string): boolean {
+  return UNSIGNED_BYTE_SLOT_TYPES.has(base.toLowerCase());
 }
 
 /**
@@ -1304,6 +1316,12 @@ export function emitDataValue(dv: DataValue, indent = 0, expectedType?: string):
         // `char` and cannot narrow into the slot: `narrowing conversion of '\200'
         // from 'char' to 'uint16_t'`. Emit the numeric code unit instead.
         if (baseExpected !== undefined && !isCharSlotType(baseExpected)) {
+          return `0x${code.toString(16)}`;
+        }
+        // Same reasoning one slot narrower: an UNSIGNED byte slot cannot take a
+        // `char` literal with the high bit set either, because that literal is
+        // negative. The byte is right, the spelling is not.
+        if (code > 127 && baseExpected !== undefined && isUnsignedByteSlotType(baseExpected)) {
           return `0x${code.toString(16)}`;
         }
         // Non-printable or non-ASCII: emit as hex escape

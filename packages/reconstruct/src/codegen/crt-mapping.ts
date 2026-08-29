@@ -554,41 +554,20 @@ const RAD_DECLS: ExcludedSymbolDecl[] = [
 ];
 
 /**
- * 3dfx Glide 2.x entry points, called through the `GLIDEDLL_` import thunks.
- * Same `_N` stdcall byte count as above; each signature was checked against it
- * (e.g. `grLfbLock` takes six dwords, hence `_24`). The Gr*_t / Fx* typedefs are
- * already defined further up in this header.
+ * The 3dfx Glide entry points are NOT declared here.
+ *
+ * Every `GLIDEDLL_gr*` name is a DATA symbol in Ghidra — an import-table slot
+ * the game fills at run time (`GLIDEDLL_grTexSource@16 = (grTexSource)
+ * GetProcAddress(hGlide3x, "_grTexSource@16")`), typed `<funcdef> *` at its
+ * address. All 44 of them are emitted as externs by globals.h, spelled with the
+ * `GLIDE3/glide.h` funcdefs Ghidra already carries, and calls through them
+ * compile unchanged.
+ *
+ * Declaring fourteen of the same names as FUNCTIONS here made the shim own the
+ * name in every TU, which suppressed the extern in globals.h (the header says
+ * so: "skipped: ... collides with a function of the same name") and turned the
+ * four `GetProcAddress` stores into `assignment of function`.
  */
-const GLIDE_DECLS: ExcludedSymbolDecl[] = [
-  { emitted: 'GLIDEDLL_grClipWindow_16', real: 'grClipWindow', source: 'glide',
-    decl: 'extern "C" __stdcall void GLIDEDLL_grClipWindow_16(FxU32 minx, FxU32 miny, FxU32 maxx, FxU32 maxy);' },
-  { emitted: 'GLIDEDLL_grDepthBufferFunction_4', real: 'grDepthBufferFunction', source: 'glide',
-    decl: 'extern "C" __stdcall void GLIDEDLL_grDepthBufferFunction_4(GrCmpFnc_t func);' },
-  { emitted: 'GLIDEDLL_grDepthBufferMode_4', real: 'grDepthBufferMode', source: 'glide',
-    decl: 'extern "C" __stdcall void GLIDEDLL_grDepthBufferMode_4(GrDepthBufferMode_t mode);' },
-  { emitted: 'GLIDEDLL_grDisable_4', real: 'grDisable', source: 'glide',
-    decl: 'extern "C" __stdcall void GLIDEDLL_grDisable_4(GrEnableMode_t mode);' },
-  { emitted: 'GLIDEDLL_grEnable_4', real: 'grEnable', source: 'glide',
-    decl: 'extern "C" __stdcall void GLIDEDLL_grEnable_4(GrEnableMode_t mode);' },
-  { emitted: 'GLIDEDLL_grDrawTriangle_12', real: 'grDrawTriangle', source: 'glide',
-    decl: 'extern "C" __stdcall void GLIDEDLL_grDrawTriangle_12(const void* a, const void* b, const void* c);' },
-  { emitted: 'GLIDEDLL_grGetProcAddress_4', real: 'grGetProcAddress', source: 'glide',
-    decl: 'extern "C" __stdcall GrProc GLIDEDLL_grGetProcAddress_4(char* procName);' },
-  { emitted: 'GLIDEDLL_grGetString_4', real: 'grGetString', source: 'glide',
-    decl: 'extern "C" __stdcall const char* GLIDEDLL_grGetString_4(FxU32 pname);' },
-  { emitted: 'GLIDEDLL_grLfbLock_24', real: 'grLfbLock', source: 'glide',
-    decl: 'extern "C" __stdcall FxBool GLIDEDLL_grLfbLock_24(GrLock_t type, GrBuffer_t buffer, GrLfbWriteMode_t writeMode, GrOriginLocation_t origin, FxBool pixelPipeline, GrLfbInfo_t* info);' },
-  { emitted: 'GLIDEDLL_grLfbUnlock_8', real: 'grLfbUnlock', source: 'glide',
-    decl: 'extern "C" __stdcall FxBool GLIDEDLL_grLfbUnlock_8(GrLock_t type, GrBuffer_t buffer);' },
-  { emitted: 'GLIDEDLL_grTexDownloadMipMap_16', real: 'grTexDownloadMipMap', source: 'glide',
-    decl: 'extern "C" __stdcall void GLIDEDLL_grTexDownloadMipMap_16(GrChipID_t tmu, FxU32 startAddress, FxU32 evenOdd, GrTexInfo* info);' },
-  { emitted: 'GLIDEDLL_grTexMipMapMode_12', real: 'grTexMipMapMode', source: 'glide',
-    decl: 'extern "C" __stdcall void GLIDEDLL_grTexMipMapMode_12(GrChipID_t tmu, GrMipMapMode_t mode, FxBool lodBlend);' },
-  { emitted: 'GLIDEDLL_grTexSource_16', real: 'grTexSource', source: 'glide',
-    decl: 'extern "C" __stdcall void GLIDEDLL_grTexSource_16(GrChipID_t tmu, FxU32 startAddress, FxU32 evenOdd, GrTexInfo* info);' },
-  { emitted: 'GLIDEDLL_grTexTextureMemRequired_8', real: 'grTexTextureMemRequired', source: 'glide',
-    decl: 'extern "C" __stdcall FxU32 GLIDEDLL_grTexTextureMemRequired_8(FxU32 evenOdd, GrTexInfo* info);' },
-];
 
 /** Every excluded-namespace declaration, in emission order. */
 export const EXCLUDED_SYMBOL_DECLS: readonly ExcludedSymbolDecl[] = [
@@ -596,7 +575,6 @@ export const EXCLUDED_SYMBOL_DECLS: readonly ExcludedSymbolDecl[] = [
   ...MSVC_RUNTIME_DECLS,
   ...WRAPPER_DECLS,
   ...RAD_DECLS,
-  ...GLIDE_DECLS,
 ];
 
 /**
