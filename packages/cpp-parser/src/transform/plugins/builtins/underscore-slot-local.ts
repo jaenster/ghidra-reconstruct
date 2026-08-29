@@ -1,29 +1,59 @@
 /**
- * Underscore Storage-Slot Local Synthesis Plugin
+ * Underscore Storage-Slot Local Plugin
  *
- * Ghidra's decompiler reuses a parameter/local's STORAGE SLOT as a fresh local
- * after the original value is dead, rendering it `_<base>` (one leading underscore
- * over `<base>`) but emitting no declaration — so the body uses an undeclared
- * identifier (`'_foo' was not declared; did you mean 'foo'?`).
+ * Ghidra's decompiler reuses a parameter/local's STORAGE SLOT and renders the
+ * second occupant as `_<base>` (one leading underscore over `<base>`), emitting
+ * no declaration for it — the body then uses an undeclared identifier
+ * (`'_foo' was not declared; did you mean 'foo'?`).
  *
- * For every `_<base>` referenced in the body where `<base>` is a declared
- * parameter/local and `_<base>` itself is not declared, synthesize a
- * `<baseType> _<base>;` at the top of the body, reusing the base's type.
+ * Two different things wear that spelling, and they need different emissions:
  *
- * AST-based: `_<base>` and `<base>` are real Identifier/VariableDecl nodes, so —
- * unlike the previous text-level pass — `return _bResult;` is unambiguously a
- * ReturnStmt (not a declaration), and we read the base's TypeNode directly instead
- * of re-parsing a type string. Skips `_DAT_*` / `_LAB_*` (globals/labels).
+ *  1. **Same-width reuse.** The slot holds another value of the base's own type.
+ *     A second local of the base's type is a faithful rendering, so synthesize
+ *     `<baseType> _<base>;` at the top of the body.
+ *
+ *  2. **Width alias.** The slot is also accessed at a WIDER type than the one
+ *     Ghidra committed to it — `D2GSPacketClt0x89 sPacket0x89` (2 bytes) at
+ *     `Stack[-0x34]` that also carries a `D2GameStrc *`. Ghidra keeps ONE
+ *     variable (`get_stack_frame` reports one slot) and refers to the wide
+ *     access as `_sPacket0x89`; the wide type shows up only in the casts Ghidra
+ *     puts at the use sites. Declaring a second variable of the NARROW type
+ *     makes every wide use a type error, and declaring it wide would break the
+ *     aliasing the code relies on — `_sPacket0x89` is written as a dword and
+ *     then `&sPacket0x89` is sent as the packet. The faithful emission is the
+ *     reinterpret the machine performs: `*(T *)&<base>`.
+ *
+ * The alias's type is taken from the USE, not from the base's declaration — the
+ * base's declared type is exactly the thing that is too narrow. Evidence, in
+ * order: the type of the value assigned INTO the alias, the type of the variable
+ * assigned FROM it, and, per site, the cast Ghidra wrapped that particular read
+ * in. Where two sites disagree the slot is a genuine union and each site keeps
+ * its own cast; a site whose type matches the base's collapses to the bare base
+ * identifier, which is the same storage.
+ *
+ * Only a POINTER selects case 2. Two integers disagreeing is Ghidra widening a
+ * read (`iResult = _nSuffixId` over a `uint16_t` slot), and reinterpreting there
+ * would write four bytes over a two-byte local — a silent overrun in place of a
+ * loud error. So case 1 keeps every alias whose uses are integral, exactly as
+ * before.
+ *
+ * AST-based throughout: `_<base>` and `<base>` are Identifier nodes, casts are
+ * CStyleCastExpr nodes, so `return _bResult;` is unambiguously a ReturnStmt and
+ * the base's type is read off its TypeNode rather than re-parsed from text.
+ * Skips `_DAT_*` / `_LAB_*` (globals/labels).
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, FunctionDecl, CompoundStmt, VariableDecl, ParameterDecl, Identifier, TypeNode,
+  Expression, ParenExpr, UnaryExpr, CStyleCastExpr, AssignExpr, PointerType, BuiltinType,
+  TypedefType, ElaboratedType,
 } from '../../../ast/nodes.js';
 import { findNodesByKind } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
-import { Decl, Stmt, Type } from '../../../ast/factory.js';
+import { Decl, Expr, Stmt, Type } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
+import { typeNodeName } from './call-arg-cast.js';
 
 export interface UnderscoreSlotLocalOptions extends PluginOptions {
   /** name → Ghidra type string for params/locals not visible in the transform AST
@@ -41,6 +71,72 @@ function buildTypeFromString(s: string): TypeNode {
   for (let i = 0; i < ptr; i++) t = Type.pointer(t);
   return t;
 }
+
+/** Stable equality key for a type; null when the type is not one we can compare. */
+function typeKey(t: TypeNode | undefined): string | null {
+  if (!t) return null;
+  switch (t.kind) {
+    case NodeKind.PointerType: {
+      const inner = typeKey((t as PointerType).pointee);
+      return inner === null ? null : inner + '*';
+    }
+    case NodeKind.BuiltinType:
+      return (t as BuiltinType).name.toLowerCase();
+    case NodeKind.TypedefType:
+      return typeNodeName((t as TypedefType).name) ?? null;
+    case NodeKind.ElaboratedType: {
+      const e = t as ElaboratedType;
+      const n = typeNodeName(e.name);
+      return n !== undefined ? `${e.keyword} ${n}` : null;
+    }
+    default:
+      return null;
+  }
+}
+
+function unwrapParens(e: Expression): Expression {
+  while (e.kind === NodeKind.ParenExpr) e = (e as ParenExpr).expression;
+  return e;
+}
+
+/** The type an expression evaluates to, when it is spelled plainly enough to tell. */
+function exprType(e: Expression, typeByName: Map<string, TypeNode>): TypeNode | undefined {
+  const x = unwrapParens(e);
+  if (x.kind === NodeKind.CStyleCastExpr) return (x as CStyleCastExpr).type;
+  if (x.kind === NodeKind.Identifier) return typeByName.get((x as Identifier).name);
+  if (x.kind === NodeKind.UnaryExpr && (x as UnaryExpr).operator === '&') {
+    const inner = unwrapParens((x as UnaryExpr).operand);
+    if (inner.kind === NodeKind.Identifier) {
+      const t = typeByName.get((inner as Identifier).name);
+      if (t) return Type.pointer(t);
+    }
+  }
+  return undefined;
+}
+
+/** `(*(T *)&base)` — the slot reinterpreted at `T`. */
+function slotDeref(base: string, type: TypeNode): Expression {
+  return Expr.paren(
+    Expr.unary('*', Expr.cast(Type.pointer(type), Expr.unary('&', Expr.identifier(base)))),
+  );
+}
+
+/** Recognise a `(*(T *)&base)` this plugin built, so a site can retype it. */
+function matchSlotDeref(e: Expression): { base: string; type: TypeNode } | null {
+  const deref = unwrapParens(e);
+  if (deref.kind !== NodeKind.UnaryExpr || (deref as UnaryExpr).operator !== '*') return null;
+  const cast = unwrapParens((deref as UnaryExpr).operand);
+  if (cast.kind !== NodeKind.CStyleCastExpr) return null;
+  const ptr = (cast as CStyleCastExpr).type;
+  if (ptr.kind !== NodeKind.PointerType) return null;
+  const addr = unwrapParens((cast as CStyleCastExpr).expression);
+  if (addr.kind !== NodeKind.UnaryExpr || (addr as UnaryExpr).operator !== '&') return null;
+  const id = unwrapParens((addr as UnaryExpr).operand);
+  if (id.kind !== NodeKind.Identifier) return null;
+  return { base: (id as Identifier).name, type: (ptr as PointerType).pointee };
+}
+
+interface AliasRewrite { base: string; type: TypeNode }
 
 function createUnderscoreSlotLocalTransformer(options: UnderscoreSlotLocalOptions = {}): Transformer {
   const varTypes = options.varTypes ?? {};
@@ -67,23 +163,95 @@ function createUnderscoreSlotLocalTransformer(options: UnderscoreSlotLocalOption
 
       // `_<base>` identifiers used in the body where <base> is declared but
       // `_<base>` is not (so every occurrence is a use, never a declaration).
-      const synth = new Map<string, TypeNode>();
+      const aliases = new Map<string, TypeNode>();
       for (const id of findNodesByKind(node.body, NodeKind.Identifier)) {
         const name = (id as Identifier).name;
         if (name.length < 2 || name[0] !== '_') continue;
-        if (typeByName.has(name) || synth.has(name)) continue;
+        if (typeByName.has(name) || aliases.has(name)) continue;
         const base = name.slice(1);
         if (base.startsWith('DAT_') || base.startsWith('LAB_')) continue;
         const baseType = typeByName.get(base);
-        if (baseType) synth.set(name, baseType);
+        if (baseType) aliases.set(name, baseType);
       }
-      if (synth.size === 0) return undefined;
+      if (aliases.size === 0) return undefined;
 
-      const decls = [...synth.entries()].map(([name, type]) => Stmt.declStmt([Decl.variable(name, type)]));
-      const newBody = updateNode(node.body, {
-        statements: [...decls, ...node.body.statements],
-      } as Partial<CompoundStmt>);
-      return updateNode(node, { body: newBody } as Partial<FunctionDecl>);
+      // Split the aliases: one whose uses prove a type OTHER than the base's is a
+      // width alias on one slot and becomes `*(T *)&base`; the rest are same-width
+      // slot reuse and keep the synthesized declaration.
+      const rewrites = new Map<string, AliasRewrite>();
+      const assigns = findNodesByKind(node.body, NodeKind.AssignExpr) as AssignExpr[];
+      for (const [name, baseType] of aliases) {
+        const baseKey = typeKey(baseType);
+        let wide: TypeNode | undefined;
+        for (const a of assigns) {
+          const left = unwrapParens(a.left);
+          const right = unwrapParens(a.right);
+          let cand: TypeNode | undefined;
+          if (left.kind === NodeKind.Identifier && (left as Identifier).name === name) {
+            cand = exprType(a.right, typeByName);
+          } else if (right.kind === NodeKind.Identifier && (right as Identifier).name === name
+                     && left.kind === NodeKind.Identifier) {
+            cand = typeByName.get((left as Identifier).name);
+          }
+          // Only a POINTER proves a width alias. Two integer types disagreeing is
+          // routine — `iResult = _nSuffixId` with an `int` result over a `uint16_t`
+          // slot is Ghidra widening a read, and reinterpreting the slot at `int`
+          // there would write four bytes over a two-byte local: a silent overrun
+          // traded for a loud error. A pointer in a narrow slot cannot be anything
+          // but the second, wider occupant.
+          if (!cand || cand.kind !== NodeKind.PointerType) continue;
+          const key = typeKey(cand);
+          if (key !== null && key !== baseKey) { wide = cand; break; }
+        }
+        if (wide) rewrites.set(name, { base: name.slice(1), type: wide });
+      }
+
+      const rewriteBases = new Set([...rewrites.values()].map(r => r.base));
+      let body = node.body;
+
+      if (rewrites.size > 0) {
+        // Bottom-up: every `_<base>` first becomes the function-wide reading of the
+        // slot, then the enclosing site — a cast Ghidra wrote around the read, or an
+        // assignment whose source types the write — retypes its own occurrence.
+        const rewriteSites = createTransformer({
+          visitNode(n: ASTNode): ASTNode | undefined {
+            if (n.kind === NodeKind.Identifier) {
+              const r = rewrites.get((n as Identifier).name);
+              return r ? slotDeref(r.base, r.type) : undefined;
+            }
+            if (n.kind === NodeKind.CStyleCastExpr) {
+              const cast = n as CStyleCastExpr;
+              const m = matchSlotDeref(cast.expression);
+              if (!m || !rewriteBases.has(m.base)) return undefined;
+              const key = typeKey(cast.type);
+              if (key === null || key === typeKey(m.type)) return undefined;
+              return updateNode(cast, { expression: slotDeref(m.base, cast.type) } as Partial<CStyleCastExpr>);
+            }
+            if (n.kind === NodeKind.AssignExpr) {
+              const assign = n as AssignExpr;
+              const m = matchSlotDeref(assign.left);
+              if (!m || !rewriteBases.has(m.base)) return undefined;
+              const t = exprType(assign.right, typeByName);
+              const key = typeKey(t);
+              if (!t || key === null || key === typeKey(m.type)) return undefined;
+              return updateNode(assign, { left: slotDeref(m.base, t) } as Partial<AssignExpr>);
+            }
+            return undefined;
+          },
+        });
+        body = rewriteSites(body) as CompoundStmt;
+      }
+
+      const synth = [...aliases].filter(([name]) => !rewrites.has(name));
+      if (synth.length > 0) {
+        const decls = synth.map(([name, type]) => Stmt.declStmt([Decl.variable(name, type)]));
+        body = updateNode(body, {
+          statements: [...decls, ...body.statements],
+        } as Partial<CompoundStmt>);
+      }
+
+      if (body === node.body) return undefined;
+      return updateNode(node, { body } as Partial<FunctionDecl>);
     },
   });
 }
@@ -91,8 +259,8 @@ function createUnderscoreSlotLocalTransformer(options: UnderscoreSlotLocalOption
 export const underscoreSlotLocalPlugin: TransformPlugin = {
   id: 'underscore-slot-local',
   name: 'Underscore Storage-Slot Local Synthesis',
-  description: 'Declares Ghidra `_<base>` storage-slot locals that are used but never declared',
-  version: '1.0.0',
+  description: 'Declares Ghidra `_<base>` storage-slot locals, and renders a width alias as `*(T*)&<base>`',
+  version: '2.0.0',
   defaultEnabled: true,
   // Run LAST (after boilerplate-cleanup at 500): synthesizing a declaration early
   // lets later decl-cleanup passes strip it again. The slot-local must persist.

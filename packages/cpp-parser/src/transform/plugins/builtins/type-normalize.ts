@@ -66,10 +66,16 @@ const WINDOWS_SCALAR_MAP: ReadonlyMap<string, string> = new Map([
   // discarded the type Ghidra already had (its bodies declare HANDLE/HWND/LPSTR
   // locals) and made every call into a Win32 or D2 signature an invalid
   // conversion. Leaving them unmapped keeps the name as a TypedefType, which
-  // resolves against d2_platform.h. The wide ones stay mapped: WCHAR/wchar_t and
-  // LPWSTR/LPCWSTR must agree with the uint16_t the signature emitter uses.
-  ['LPWSTR', 'uint32_t'],
-  ['LPCWSTR', 'uint32_t'],
+  // resolves against d2_platform.h.
+  //
+  // LPWSTR/LPCWSTR were mapped here on the grounds that they had to agree with
+  // the `uint16_t` the signature emitter uses for wide strings. It does not use
+  // one: `FILETOOLS_CreateDirectoryW(LPCWSTR lpPathName)` is what the headers
+  // emit. They are POINTER typedefs, and flattening one to a 32-bit scalar is the
+  // same defect the paragraph above describes — Ghidra writes `(LPWSTR)pWideStr`
+  // at a `MultiByteToWideChar` and the body reached the compiler as
+  // `(uint32_t)pWideStr`, which no Win32 signature accepts. Unmapped, the cast
+  // Ghidra wrote is the cast that is emitted.
   ['LRESULT', 'int32_t'],
   ['WPARAM', 'uint32_t'],
   ['LPARAM', 'int32_t'],

@@ -177,6 +177,24 @@ function anchoredAddress(slot: StackSlot, delta: number, from: ASTNode): Express
   return { kind: NodeKind.ParenExpr, expression: sum, ...outer } as ParenExpr;
 }
 
+/** `(va_list)expr` — the frame address the cdecl ABI hands to a `v`-printf. */
+function vaListCast(expr: Expression, from: ASTNode): Expression {
+  const at = { location: from.location, leadingTrivia: [], trailingTrivia: [] };
+  const vaListType: TypedefType = {
+    kind: NodeKind.TypedefType,
+    name: makeIdentifier('va_list', from),
+    ...at,
+  };
+  return {
+    kind: NodeKind.CStyleCastExpr,
+    type: vaListType,
+    expression: expr,
+    location: from.location,
+    leadingTrivia: from.leadingTrivia ?? [],
+    trailingTrivia: from.trailingTrivia ?? [],
+  } as CStyleCastExpr;
+}
+
 /** Names the emitted body declares — parameters included. */
 function declaredNames(root: ASTNode): Set<string> {
   const names = new Set<string>();
@@ -288,7 +306,12 @@ function createFrameSlotTransformer(slots: StackSlot[]): Transformer {
       for (const s of slots) {
         if (!s.isParameter || !declared.has(s.name)) continue;
         if (offset !== s.offset + s.size) continue;
-        return anchoredAddress(s, s.size, unary);
+        // The one place where the ABI, not a guess, fixes what the address MEANS:
+        // this is the varargs list, and on cdecl a `va_list` IS a byte pointer into
+        // the frame. The address is only ever handed to a `v`-printf, whose
+        // parameter is `va_list`, so spell the conversion the ABI already makes
+        // rather than leaving a `uint8_t*` the callee cannot take.
+        return vaListCast(anchoredAddress(s, s.size, unary), unary);
       }
 
       // Nothing in the frame owns this address. Leave Ghidra's name, so it fails

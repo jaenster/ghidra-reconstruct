@@ -107,6 +107,14 @@ describe('stack-frame-address', () => {
     assert.ok(/\(uint8_t\s*\*\)&szFormat \+ 4/.test(out), out);
   });
 
+  it('spells the varargs list `va_list`, which is what every caller takes', () => {
+    // The address goes straight into a `v`-printf, whose parameter is `va_list` -
+    // a `char*` on this ABI. Leaving it a `uint8_t*` is an invalid conversion at
+    // every one of those calls, and the conversion is the ABI's, not a guess.
+    const out = run('void f(char *szFormat) { vsprintf(buf, szFormat, &stack0x00000008); }');
+    assert.ok(/\(va_list\)\s*\(\(uint8_t\s*\*\)&szFormat \+ 4\)/.test(out), out);
+  });
+
   it('does NOT step past a local, whose frame position is the compiler\'s to choose', () => {
     // -28 is immediately past `local_20` (-32, size 4). For a parameter that step
     // is the ABI; for a local it is a guess.
