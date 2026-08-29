@@ -1355,12 +1355,16 @@ export function generatePlatformHeader(
   //
   // A `double` operand is narrowed to `float` first: the slot the machine wrote
   // is four bytes wide, and the `double` is C's promotion of an x87 expression,
-  // not a wider store. `float-pointer-bitcast` writes the calls.
+  // not a wider store. The templates take the same four bytes out of a struct
+  // the machine holds in a register - `(int)palPalEntry`. `float-pointer-bitcast`
+  // writes the calls, and only ever for a floating, pointer or known-aggregate
+  // operand; a float/integer cast is a real conversion and never reaches here.
   lines.push('// Four-byte reinterpretation behind a float/pointer cast (see float-pointer-bitcast)');
   lines.push('static inline uintptr_t d2_bits_of(float fValue) { uintptr_t nBits = 0; memcpy(&nBits, &fValue, sizeof(float)); return nBits; }');
   lines.push('static inline uintptr_t d2_bits_of(double dValue) { return d2_bits_of((float)dValue); }');
   lines.push('static inline uintptr_t d2_bits_of(long double dValue) { return d2_bits_of((float)dValue); }');
-  lines.push('static inline float d2_bits_to_float(const void* pValue) { float fValue = 0.0f; uintptr_t nBits = (uintptr_t)pValue; memcpy(&fValue, &nBits, sizeof(float)); return fValue; }');
+  lines.push('template <class T> static inline uintptr_t d2_bits_of(const T& tValue) { uintptr_t nBits = 0; memcpy(&nBits, &tValue, sizeof(T) < sizeof(uintptr_t) ? sizeof(T) : sizeof(uintptr_t)); return nBits; }');
+  lines.push('template <class T> static inline float d2_bits_to_float(const T& tValue) { float fValue = 0.0f; memcpy(&fValue, &tValue, sizeof(T) < sizeof(float) ? sizeof(T) : sizeof(float)); return fValue; }');
   lines.push('');
 
   // MSVC C++ exception-handling frame types. Not declared by any real header;

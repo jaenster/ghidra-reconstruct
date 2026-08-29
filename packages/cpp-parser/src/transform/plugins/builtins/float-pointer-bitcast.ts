@@ -33,7 +33,10 @@ import { createTransformer, updateNode, type Transformer } from '../../transform
 import { Expr } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { createExprShape } from './expr-shape.js';
-import { shapeOfNode, unwrapParens, type TypeShape, type TypedefResolver } from './call-arg-cast.js';
+import {
+  SCALAR_BASES, isAggregateValue, shapeOfNode, unwrapParens,
+  type TypeShape, type TypedefResolver,
+} from './call-arg-cast.js';
 
 export interface FloatPointerBitcastOptions extends PluginOptions {
   globalTypes?: Record<string, string>;
@@ -56,9 +59,14 @@ const isPointer = (s: TypeShape | null): boolean => !!s && s.stars > 0;
 /** The arithmetic whose result is floating as soon as one operand is. */
 const ARITHMETIC = new Set(['*', '/', '+', '-']);
 
+/** A cast target that is one machine value: any pointer, or an arithmetic type. */
+const isScalarTarget = (s: TypeShape): boolean =>
+  s.stars > 0 || (SCALAR_BASES.has(s.base) && s.base !== 'void');
+
 export function createFloatPointerBitcastTransformer(options?: PluginOptions): Transformer {
   const o = (options ?? {}) as FloatPointerBitcastOptions;
   const typedefTargets = o.typedefTargets ?? {};
+  const structFields = o.structFields ?? {};
   const resolve: TypedefResolver = name => typedefTargets[name];
 
   return createTransformer({
@@ -78,7 +86,7 @@ export function createFloatPointerBitcastTransformer(options?: PluginOptions): T
       const shapeOf = createExprShape(localTypes, {
         globalTypes: o.globalTypes ?? {},
         enclosingVarTypes: o.enclosingVarTypes ?? {},
-        structFields: o.structFields ?? {},
+        structFields,
         fieldTypes: o.fieldTypes ?? {},
         returnTypes: o.functionReturnTypes ?? {},
         resolve,
@@ -125,6 +133,21 @@ export function createFloatPointerBitcastTransformer(options?: PluginOptions): T
             changed = true;
             return updateNode(cast, {
               expression: Expr.call('d2_bits_to_float', [cast.expression as Expression]),
+            } as Partial<CStyleCastExpr>);
+          }
+          // The same disagreement one step up: a struct the machine holds in a
+          // register, cast to the word it is. `(int)palPalEntry` and
+          // `(D2QServerHacklistEntryStrc*)nin_addr.S_un` are the decompiler
+          // reading four bytes back out of an aggregate, not a conversion that
+          // exists. Only a KNOWN aggregate qualifies, so an enum - where the
+          // cast is legal and means the value - is never touched.
+          if (operand && isScalarTarget(target) && isAggregateValue(operand, structFields)) {
+            changed = true;
+            return updateNode(cast, {
+              expression: Expr.call(
+                isFloating(target) ? 'd2_bits_to_float' : 'd2_bits_of',
+                [cast.expression as Expression],
+              ),
             } as Partial<CStyleCastExpr>);
           }
           return undefined;
