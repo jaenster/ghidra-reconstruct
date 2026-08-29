@@ -27,12 +27,13 @@
 
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
-  ASTNode, SwitchStmt, CompoundStmt, Statement, CaseStmt, DefaultStmt, LabelStmt,
+  ASTNode, SwitchStmt, Statement, CaseStmt, DefaultStmt,
   Expression, IntegerLiteralExpr, CharLiteralExpr, BoolLiteralExpr, UnaryExpr, ParenExpr,
 } from '../../../ast/nodes.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
 import { emit } from '../../../emit/index.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
+import { childStatements, withChildStatements } from './stmt-structure.js';
 
 export interface SwitchCaseDedupOptions extends PluginOptions {}
 
@@ -74,12 +75,15 @@ interface DedupState { seen: Set<string>; hasDefault: boolean; changed: boolean 
 /**
  * Strip duplicate labels off one statement of a switch body.
  *
- * Descends only through the label forms — `case`, `default` and a goto label —
- * because that is the chain a single labelled statement can wear. It never
- * descends into a nested switch: that one is deduplicated by its own visit,
- * against its own set of seen values.
+ * A `case` label belongs to its nearest enclosing switch however deeply it is
+ * nested, and Ghidra's recovery does nest them — a second `case 6:` can sit
+ * inside an `if` inside the switch. So this descends through every statement
+ * form and stops only at a nested SWITCH, which owns its own labels and is
+ * deduplicated by its own visit against its own set of values.
  */
 function stripDuplicateLabels(s: Statement, st: DedupState): Statement {
+  if (s.kind === NodeKind.SwitchStmt) return s;
+
   if (s.kind === NodeKind.CaseStmt) {
     const c = s as CaseStmt;
     const key = caseKey(c.value);
@@ -88,6 +92,7 @@ function stripDuplicateLabels(s: Statement, st: DedupState): Statement {
     st.seen.add(key);
     return inner === c.statement ? c : updateNode(c, { statement: inner } as Partial<CaseStmt>);
   }
+
   if (s.kind === NodeKind.DefaultStmt) {
     const d = s as DefaultStmt;
     const inner = stripDuplicateLabels(d.statement, st);
@@ -95,29 +100,25 @@ function stripDuplicateLabels(s: Statement, st: DedupState): Statement {
     st.hasDefault = true;
     return inner === d.statement ? d : updateNode(d, { statement: inner } as Partial<DefaultStmt>);
   }
-  if (s.kind === NodeKind.LabelStmt) {
-    const l = s as LabelStmt;
-    const inner = stripDuplicateLabels(l.statement, st);
-    return inner === l.statement ? l : updateNode(l, { statement: inner } as Partial<LabelStmt>);
-  }
-  return s;
+
+  const kids = childStatements(s);
+  if (kids.length === 0) return s;
+  let changed = false;
+  const newKids = kids.map(k => {
+    const nk = stripDuplicateLabels(k, st);
+    if (nk !== k) changed = true;
+    return nk;
+  });
+  return changed ? withChildStatements(s, newKids) : s;
 }
 
 function createSwitchCaseDedupTransformer(_options: SwitchCaseDedupOptions = {}): Transformer {
   return createTransformer({
     visitSwitchStmt(node: SwitchStmt): ASTNode | undefined {
       const st: DedupState = { seen: new Set(), hasDefault: false, changed: false };
-      if (node.body.kind === NodeKind.CompoundStmt) {
-        const block = node.body as CompoundStmt;
-        const stmts = block.statements.map(s => stripDuplicateLabels(s, st));
-        if (!st.changed) return undefined;
-        return updateNode(node, {
-          body: updateNode(block, { statements: stmts } as Partial<CompoundStmt>),
-        } as Partial<SwitchStmt>);
-      }
-      const only = stripDuplicateLabels(node.body, st);
+      const body = stripDuplicateLabels(node.body, st);
       if (!st.changed) return undefined;
-      return updateNode(node, { body: only } as Partial<SwitchStmt>);
+      return updateNode(node, { body } as Partial<SwitchStmt>);
     },
   });
 }

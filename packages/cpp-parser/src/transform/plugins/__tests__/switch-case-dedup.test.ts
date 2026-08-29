@@ -60,6 +60,15 @@ describe('switchCaseDedupPlugin', () => {
     assert.strictEqual(count(out, /case /g), 2, out);
   });
 
+  it('finds a duplicate case NESTED inside the switch body', () => {
+    // Ghidra's recovery emits the repeat inside an `if` in the switch body. A
+    // case label belongs to its enclosing switch however deep it sits.
+    const out = transform(
+      `void f(int x, int c) { switch (x) { case 6: a(); return; case 3: if (c) { case 6: b(); return; } break; } }`);
+    assert.strictEqual(count(out, /case 6\s*:/g), 1, `the nested repeat is the same switch: ${out}`);
+    assert.ok(out.includes('b()'), `its body is kept: ${out}`);
+  });
+
   it('scopes case values to their own switch', () => {
     const out = transform(
       `void f(int x, int y) { switch (x) { case 1: switch (y) { case 1: a(); break; } break; case 2: b(); break; } }`);
