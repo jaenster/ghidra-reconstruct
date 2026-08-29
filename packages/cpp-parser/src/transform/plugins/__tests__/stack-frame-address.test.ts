@@ -15,7 +15,7 @@ import { stackFrameAddressPlugin, stackNameOffset } from '../builtins/stack-fram
 
 const SLOTS = [
   { name: 'szFormat', offset: 4, size: 4, isParameter: true },
-  { name: 'szPath', offset: -268, size: 260 },
+  { name: 'szPath', offset: -268, size: 260, isArray: true },
   { name: 'local_20', offset: -32, size: 4 },
   { name: 'undeclared_slot', offset: -64, size: 4 },
 ];
@@ -59,11 +59,36 @@ describe('stack-frame-address', () => {
   });
 
   it('LEAVES an address no slot owns, so it fails loudly', () => {
-    // -269 is one byte below the lowest modelled slot. There is no C++ spelling
-    // for it, and `0` was a silent read of the wrong address.
-    const out = run('void f() { char szPath[260]; p = (&stack0xfffffef3)[i]; }');
-    assert.ok(out.includes('stack0xfffffef3'), out);
+    // -272 is below every modelled slot and adjacent to none. There is no C++
+    // spelling for it, and `0` was a silent read of the wrong address.
+    const out = run('void f() { char szPath[260]; p = (&stack0xfffffef0)[i]; }');
+    assert.ok(out.includes('stack0xfffffef0'), out);
     assert.ok(!out.includes('(0)['), out);
+  });
+
+  it('anchors one byte below an array on the array', () => {
+    // MSVC's inlined strcat starts the scan at `szPath - 1` and pre-increments,
+    // so the first byte it reads is `szPath[0]` and the walk stays in the array.
+    const out = run('void f() { char szPath[260]; p = &stack0xfffffef3; }');
+    assert.ok(/\(uint8_t\s*\*\)&szPath - 1/.test(out), out);
+    assert.ok(!out.includes('stack0x'), out);
+  });
+
+  it('does NOT step below a scalar, whose extent cannot hold the walk', () => {
+    // -33 is one below `local_20` (-32, size 4). Below an array the walk is
+    // bounded by the array; below a scalar it runs into whatever the compiler
+    // put next, so the frame is modelled too small and Ghidra owns the fix.
+    const out = run('void f() { int local_20; p = &stack0xffffffdf; }');
+    assert.ok(out.includes('stack0xffffffdf'), out);
+  });
+
+  it('does not step below an array when a slot owns the byte itself', () => {
+    // -269 is inside `low`, so it is `low`'s byte, not `szPath - 1`.
+    const out = run('void f() { char szPath[260]; int low; p = &stack0xfffffef3; }', [
+      { name: 'szPath', offset: -268, size: 260, isArray: true },
+      { name: 'low', offset: -272, size: 4 },
+    ]);
+    assert.ok(/\(uint8_t\s*\*\)&low \+ 3/.test(out), out);
   });
 
   it('will not bind to a slot the emitted body does not declare', () => {

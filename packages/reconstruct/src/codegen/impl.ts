@@ -1668,18 +1668,25 @@ interface TransformDecompiledResult {
  * out of their `Stack[0xN]:size` storage) and locals with a committed stack
  * offset. Both are frame slots; a `&stack0xNNNN` address is resolved against them.
  */
-function frameSlots(func: ExtractedFunction): Array<{ name: string; offset: number; size: number; isParameter?: boolean }> {
-  const slots: Array<{ name: string; offset: number; size: number; isParameter?: boolean }> = [];
+type FrameSlot = { name: string; offset: number; size: number; isParameter?: boolean; isArray?: boolean };
+
+/** Ghidra spells an array slot `undefined1[260]`, `char[250]`, `int16_t[3]`. */
+function isArrayTypeName(dataType: string | undefined): boolean {
+  return !!dataType && /\[\s*\d+\s*\]\s*$/.test(dataType);
+}
+
+function frameSlots(func: ExtractedFunction): FrameSlot[] {
+  const slots: FrameSlot[] = [];
   for (const p of func.parameters ?? []) {
     const m = /^Stack\[(-?0x[0-9a-fA-F]+)\]:(\d+)/.exec(p.storage ?? '');
     if (!m) continue;
     const name = cleanParamName(p.name);
     if (!name) continue;
-    slots.push({ name, offset: Number.parseInt(m[1], 16), size: Number.parseInt(m[2], 10), isParameter: true });
+    slots.push({ name, offset: Number.parseInt(m[1], 16), size: Number.parseInt(m[2], 10), isParameter: true, isArray: isArrayTypeName(p.dataType) });
   }
   for (const v of func.localVariables ?? []) {
     if (!v.name || typeof v.stackOffset !== 'number' || typeof v.size !== 'number') continue;
-    slots.push({ name: v.name, offset: v.stackOffset, size: v.size });
+    slots.push({ name: v.name, offset: v.stackOffset, size: v.size, isArray: isArrayTypeName(v.dataType) });
   }
   return slots;
 }
@@ -1981,7 +1988,7 @@ function transformDecompiledCode(
      * `&stack0xNNNN` frame address against it; the AST cannot show the frame,
      * because the body is parsed without one.
      */
-    stackSlots?: Array<{ name: string; offset: number; size: number; isParameter?: boolean }>;
+    stackSlots?: FrameSlot[];
   },
 ): TransformDecompiledResult {
   try {

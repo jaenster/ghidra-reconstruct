@@ -30,6 +30,16 @@
  *                                        not the compiler's whim — fixes that
  *                                        layout, which is why the step is only
  *                                        taken across a parameter;
+ *   - one byte BELOW an ARRAY          → `((uint8_t*)&arr - 1)`. MSVC starts an
+ *                                        inlined `strcat`/`strlen` scan one byte
+ *                                        under the buffer and pre-increments, so
+ *                                        the first byte read is `arr[0]` and the
+ *                                        walk stays inside the array. The step is
+ *                                        taken only below an array, whose extent
+ *                                        is what keeps the walk on the object
+ *                                        that anchors it — one byte below a
+ *                                        scalar means the frame is modelled too
+ *                                        small, and that belongs in Ghidra;
  *   - nothing that owns it             → Ghidra's own name, left in place.
  *
  * The last case does not compile, and that is the point. An unowned frame slot
@@ -76,6 +86,8 @@ export interface StackSlot {
   size: number;
   /** A parameter's frame position is fixed by the ABI; a local's is not. */
   isParameter?: boolean;
+  /** An array's extent is what makes an address just below it walkable. */
+  isArray?: boolean;
 }
 
 export interface StackFrameAddressOptions extends PluginOptions {
@@ -255,6 +267,19 @@ function createFrameSlotTransformer(slots: StackSlot[]): Transformer {
         if (!owner || s.size < owner.size) owner = s;
       }
       if (owner) return anchoredAddress(owner, offset - owner.offset, unary);
+
+      // One byte below an array. Nothing may own the byte itself — an owned byte
+      // is the slot before it, and binding across a boundary the compiler chooses
+      // is a guess. Below an array the walk immediately enters the array, so the
+      // arithmetic stays on the object that anchors it.
+      const ownedByAny = slots.some((s) => offset >= s.offset && offset < s.offset + Math.max(s.size, 1));
+      if (!ownedByAny) {
+        for (const s of slots) {
+          if (!s.isArray || !declared.has(s.name)) continue;
+          if (offset !== s.offset - 1) continue;
+          return anchoredAddress(s, -1, unary);
+        }
+      }
 
       // The address just past a parameter: the varargs list. `va_start(ap, fmt)`
       // on cdecl is `&fmt + sizeof fmt`, and the ABI guarantees the adjacency —
