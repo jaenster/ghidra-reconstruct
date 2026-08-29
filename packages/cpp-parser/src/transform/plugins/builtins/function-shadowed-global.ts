@@ -38,6 +38,7 @@ import type {
   ParameterDecl,
   FieldDecl,
 } from '../../../ast/nodes.js';
+import { findNodesByKind } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 
@@ -49,12 +50,38 @@ export interface FunctionShadowedGlobalOptions extends PluginOptions {
   functionShadowedGlobals?: string[];
 }
 
+/** Names this body declares itself — a parameter or a local of its own. */
+function declaredInBody(root: ASTNode): Set<string> {
+  const names = new Set<string>();
+  const add = (n: ASTNode | undefined) => {
+    if (n && n.kind === NodeKind.Identifier) names.add((n as Identifier).name);
+  };
+  for (const d of findNodesByKind(root, NodeKind.ParameterDecl)) add((d as ParameterDecl).name);
+  for (const d of findNodesByKind(root, NodeKind.VariableDecl)) add((d as VariableDecl).name);
+  return names;
+}
+
 function createFunctionShadowedGlobalTransformer(
   options: FunctionShadowedGlobalOptions = {},
 ): Transformer {
-  const shadowed = new Set(options.functionShadowedGlobals ?? []);
-  if (shadowed.size === 0) return (node: ASTNode) => node;
+  const configured = new Set(options.functionShadowedGlobals ?? []);
+  if (configured.size === 0) return (node: ASTNode) => node;
 
+  return (root: ASTNode) => {
+    // A parameter or local of the same name is what a bare occurrence means, and
+    // it is nearer than either the global or the function.
+    // `MPQ_LoadAllMediaMpqFiles(fpRequiredUserAction fpInsertPlayCd, …)` takes the
+    // callback as a PARAMETER named after the flag, and every use of it in that
+    // body is the parameter. The name is dropped for the whole body rather than
+    // scope-tracked: a body that declares it never needs the rewrite anyway.
+    const declared = declaredInBody(root);
+    const shadowed = new Set([...configured].filter(n => !declared.has(n)));
+    if (shadowed.size === 0) return root;
+    return rewrite(shadowed)(root);
+  };
+}
+
+function rewrite(shadowed: Set<string>): Transformer {
   /** Each `::name` this pass built, against the Identifier it replaced. */
   const builtFrom = new WeakMap<ASTNode, Identifier>();
 
