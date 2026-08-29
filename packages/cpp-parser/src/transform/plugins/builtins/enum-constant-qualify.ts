@@ -14,13 +14,16 @@
  *       case eD2PlayerAnimMode_ns::Run:      // 3, what Ghidra said
  *
  * This pass writes that qualifier, and it takes it from the CONTROLLING TYPE,
- * never from the label. The switch's condition, the other side of an equality
- * test, the assigned-to lvalue - each says which enum is meant, and the name is
- * qualified to that enum only when that enum really declares it. Where the type
- * is unknown, or the enum does not declare the name, the reference is left
- * exactly as Ghidra wrote it, and the missing global export turns it into a
- * compile error. A name borrowed from a different enum would compile and branch
- * on the wrong mode, which is the failure this exists to prevent.
+ * never from the label. Six places state that type - the switch's condition, the
+ * other side of a comparison or a bitwise operator, the assignment target, the
+ * declared type of an initialised variable, the callee's declared parameter,
+ * and (for a local Ghidra typed as a plain integer) whatever enum-typed value is
+ * assigned to it. The name is qualified to that enum only when that enum really
+ * declares it. Where the type is unknown, or the enum does not declare the name,
+ * the reference is left exactly as Ghidra wrote it, and the missing global
+ * export turns it into a compile error. A name borrowed from a different enum
+ * would compile and branch on the wrong mode, which is the failure this exists
+ * to prevent.
  *
  * Only ambiguous names are touched. The ~8.6k constants that mean one number
  * everywhere keep their unqualified spelling and their global export.
@@ -29,7 +32,8 @@
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, AssignExpr, BinaryExpr, CallExpr, CaseStmt, CompoundStmt, DefaultStmt, Expression,
-  FunctionDecl, Identifier, IfStmt, LabelStmt, ParameterDecl, SwitchStmt, TypeNode, VariableDecl,
+  FunctionDecl, Identifier, IfStmt, LabelStmt, ParameterDecl, ParenExpr, SwitchStmt, TypeNode,
+  VariableDecl,
 } from '../../../ast/nodes.js';
 import { findNodesByKind } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
@@ -61,12 +65,20 @@ export interface EnumConstantQualifyOptions extends PluginOptions {
 
 /**
  * Operators whose two operands are values of the same type, so one side's enum
- * names the other's. `&&`/`||` are excluded (their operands are booleans), and
- * so is arithmetic, where the other operand is an offset rather than a member.
+ * names the other's - `+`/`-` included, because a decompiled `mode + Neutral` is
+ * Ghidra spelling that enum's 1, not an untyped offset. `&&`/`||` are excluded:
+ * their operands are booleans, and a name there means nothing about an enum.
  */
 const TYPED_BINARY_OPS: ReadonlySet<string> = new Set([
-  '==', '!=', '<', '>', '<=', '>=', '&', '|', '^',
+  '==', '!=', '<', '>', '<=', '>=', '&', '|', '^', '+', '-',
 ]);
+
+/**
+ * Operators that combine members of ONE enum into another value of it, so a
+ * qualifier pushed into the expression reaches every name inside it -
+ * `mode & (Skill4 | Skill3)` names both from the enum `mode` has.
+ */
+const MEMBER_COMBINING_OPS: ReadonlySet<string> = new Set(['&', '|', '^', '+', '-']);
 const TYPED_ASSIGN_OPS: ReadonlySet<string> = new Set(['&=', '|=', '^=']);
 
 /** The undecorated name of a declared type - null for anything with a `*`. */
@@ -174,11 +186,29 @@ function createEnumConstantQualifyTransformer(
         return assignedEnums.get((e as Identifier).name) ?? undefined;
       };
 
-      /** `Name` → `<Enum>_ns::Name`, only when that enum declares it. */
+      /**
+       * `Name` → `<Enum>_ns::Name`, only when that enum declares it. A
+       * parenthesised combination of members - `(Skill4 | Skill3)` - is
+       * qualified through, each leaf on its own; anything else is left alone.
+       */
       const qualify = (expr: Expression, enumName: string): Expression | undefined => {
-        const e = unwrapParens(expr);
-        if (e.kind !== NodeKind.Identifier) return undefined;
-        const name = (e as Identifier).name;
+        if (expr.kind === NodeKind.ParenExpr) {
+          const inner = qualify((expr as ParenExpr).expression, enumName);
+          return inner && updateNode(expr, { expression: inner } as Partial<ParenExpr>);
+        }
+        if (expr.kind === NodeKind.BinaryExpr) {
+          const b = expr as BinaryExpr;
+          if (!MEMBER_COMBINING_OPS.has(b.operator)) return undefined;
+          const left = qualify(b.left, enumName);
+          const right = qualify(b.right, enumName);
+          if (!left && !right) return undefined;
+          return updateNode(b, {
+            left: left ?? b.left,
+            right: right ?? b.right,
+          } as Partial<BinaryExpr>);
+        }
+        if (expr.kind !== NodeKind.Identifier) return undefined;
+        const name = (expr as Identifier).name;
         if (!model.ambiguous.has(name)) return undefined;
         if (!model.members.get(enumName)?.has(name)) return undefined;
         return {

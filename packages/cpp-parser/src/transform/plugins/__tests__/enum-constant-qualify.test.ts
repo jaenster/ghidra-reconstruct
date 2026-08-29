@@ -271,6 +271,23 @@ void f(D2UnitStrc *pUnit) {
     assert.ok(!output.includes('_ns::Run'), `Run must stay bare in: ${output}`);
   });
 
+  it('qualifies through a parenthesised combination of members', () => {
+    const output = transformCode(`
+void f(D2UnitStrc *pUnit) {
+  int n = pUnit->eAnimMode.ePlayerMode & (Skill4 | Skill3);
+  pUnit->eAnimMode.ePlayerMode = pUnit->eAnimMode.ePlayerMode + Neutral;
+}
+`);
+    assert.ok(
+      output.includes('(eD2PlayerAnimMode_ns::Skill4 | eD2PlayerAnimMode_ns::Skill3)'),
+      `Both leaves take the player enum in: ${output}`
+    );
+    assert.ok(
+      output.includes('+ eD2PlayerAnimMode_ns::Neutral'),
+      `A decompiled +1 spelled Neutral takes the player enum in: ${output}`
+    );
+  });
+
   it('leaves every unambiguous constant unqualified', () => {
     const output = transformCode(`
 void f(D2UnitStrc *pUnit) {
