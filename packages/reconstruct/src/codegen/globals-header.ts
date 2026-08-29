@@ -11,6 +11,7 @@ import { generateStructDeclaration, generateUnionDeclaration, generateFunctionDe
 import { normalizeQualifiedReference } from './namespace.js';
 import { namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 import { computeDeclarationClosure, renderClosureBlock, type ClosureResult } from './declaration-closure.js';
+import { allOnesSentinel } from './sentinel-literal.js';
 
 /**
  * Exact Win32 SDK typedef names (not `LP`/`IMAGE_` prefixed) seen as
@@ -1322,6 +1323,21 @@ function isUnsignedByteSlotType(base: string): boolean {
 }
 
 /**
+ * The all-ones sentinel, asked with this module's knowledge of what is an enum
+ * and what is a funcdef typedef. One wrapper, so every emit point below asks
+ * the question the same way.
+ */
+function sentinelSpelling(rawValue: string | undefined, slotType: string | undefined): string | undefined {
+  return allOnesSentinel(rawValue, slotType, {
+    isEnumType: (n) => enumTypeNames.has(n),
+    isFuncDefTypedef: isFuncDefTypedefName,
+    // Collapse `void *` to `void*`: the same spelling castPointerInitializer
+    // already writes, so one cast form appears in the output, not two.
+    spellType: (t) => rootQualifyShadowedType(t.replace(/\s+/g, ' ').trim()).replace(/\s+\*/g, '*'),
+  });
+}
+
+/**
  * Convert a DataValue tree to a C initializer string.
  *
  * `expectedType` is the declared type of the slot being initialized — the
@@ -1336,6 +1352,10 @@ export function emitDataValue(dv: DataValue, indent = 0, expectedType?: string):
 
   switch (dv.kind) {
     case 'scalar': {
+      // Ask before normalizing: the raw value may be bare hex or decimal, and
+      // the slot type is what decides whether all-ones means -1 here.
+      const sentinel = sentinelSpelling(dv.value, expectedType);
+      if (sentinel !== undefined) return sentinel;
       const val = normalizeDataValue(dv.value ?? '0');
       // If value is a single printable char (not a number/hex), wrap in char literal quotes
       if (val.length === 1 && !/\d/.test(val)) {
@@ -1377,6 +1397,10 @@ export function emitDataValue(dv: DataValue, indent = 0, expectedType?: string):
       // declaration already collapses it; the cast has to agree or it produces
       // `BOOL (**)(...)` where a `BOOL (*)(...)` is wanted.
       const slotType = expectedType ? stripFuncDefIndirection(expectedType.trim()) : undefined;
+      // Before the symbol test: a bare unprefixed `ffffffff` begins with a
+      // letter and would otherwise be read as a symbol name.
+      const sentinel = sentinelSpelling(dv.value, slotType ?? expectedType ?? 'void*');
+      if (sentinel !== undefined) return sentinel;
       // If it looks like a symbol name (not hex), emit as address-of / decay.
       if (/^[A-Za-z_]/.test(dv.value)) {
         return emitPointerToSymbol(dv.value, slotType);
@@ -2083,6 +2107,8 @@ export function renderGlobalScalarInitializer(
       elementCount ?? (declaredCount ? Number(declaredCount[1]) : undefined),
     );
   }
+  const sentinel = sentinelSpelling(rawValue, declaredType);
+  if (sentinel !== undefined) return sentinel;
   let value = normalizeDataValue(rawValue ?? '0');
   if ((value === '0' || value === '0x0') && isStructType(declaredType)) return '{}';
   return castPointerInitializer(declaredType, ensureHexPrefix(value, declaredType));

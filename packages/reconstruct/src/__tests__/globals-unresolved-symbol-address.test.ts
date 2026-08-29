@@ -24,7 +24,14 @@ describe('pointer initializer naming an address Ghidra had no symbol for', () =>
     assert.strictEqual(emitDataValue(ptr('DAT_000a0000'), 0, 'D2MonSeqTxt *'), '(D2MonSeqTxt*)0x000a0000');
     assert.strictEqual(emitDataValue(ptr('LAB_0057ee77_1'), 0, 'void *'), '(void*)0x0057ee77');
     assert.strictEqual(emitDataValue(ptr('s_umod_006e6f60'), 0, 'char *'), '(char*)0x006e6f60');
-    assert.strictEqual(emitDataValue(ptr('ffffffff'), 0, 'void *'), '(void*)0xffffffff');
+  });
+
+  it('spells the all-ones address -1, which is all ones at any width', () => {
+    // This value used to come out as `(void*)0xffffffff`, which on a 64-bit
+    // rebuild is 0x00000000FFFFFFFF and no longer equal to -1. It is not an
+    // address Ghidra failed to name; it is D2's invalid-pointer sentinel.
+    setMultidimArrayGlobals([]);
+    assert.strictEqual(emitDataValue(ptr('ffffffff'), 0, 'void *'), '(void*)-1');
   });
 
   it('keeps the reference when the globals table really declares the name', () => {
