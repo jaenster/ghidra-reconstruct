@@ -289,9 +289,15 @@ export function isStructType(type: string): boolean {
 /**
  * If type is a pointer and value is a non-zero integer literal, wrap in a cast.
  * e.g. type="void*", value="0x006e3598" → "(void*)0x006e3598"
+ *
+ * A pointer spelled through a TYPEDEF has no `*` to find, so `LPCSTR`, `HANDLE`
+ * and `LPSERVICE_STATUS` slots used to take the bare word and become a compile
+ * error - the machine really does store four bytes there, and the cast is the
+ * only C++ that says so without changing the address.
  */
 export function castPointerInitializer(type: string, value: string): string {
-  if (!type.includes('*')) return value;
+  const named = type.replace(/\b(const|volatile|struct|union)\b/g, '').replace(/\s+/g, ' ').trim();
+  if (!type.includes('*') && !isPointerTypedefName(named)) return value;
   // 0 / 0x0 / nullptr are fine without cast
   if (value === '0' || value === '0x0' || value === 'nullptr') return value;
   // Non-zero integer literal needs cast
@@ -1610,6 +1616,43 @@ export function setAggregateTypeNames(
     if (resolveToAggregate(name)) aggregates.add(name);
   }
   aggregateTypeNames = aggregates.size > 0 ? aggregates : undefined;
+
+  // The same chain, asking the opposite question: does it end at a POINTER?
+  // A target carrying a `[` is an array, which is not an assignable pointer slot.
+  const resolveToPointer = (name: string): boolean => {
+    let cur = name;
+    for (let depth = 0; depth < 16; depth++) {
+      const target = typedefTargets.get(cur);
+      if (!target) return false;
+      const base = target.replace(/\b(const|volatile|struct|union)\b/g, '').trim();
+      if (base.includes('*')) return true;
+      if (base.includes('[')) return false;
+      cur = base;
+    }
+    return false;
+  };
+  const pointers = new Set<string>();
+  for (const name of typedefTargets.keys()) {
+    if (resolveToPointer(name)) pointers.add(name);
+  }
+  pointerTypedefNames = pointers;
+}
+
+/**
+ * Every typedef name whose chain ends at a pointer - `LPCSTR` IS `CHAR *`,
+ * `HANDLE` IS `void *`, `LPSERVICE_STATUS` IS `_SERVICE_STATUS *`.
+ *
+ * `castPointerInitializer` decided "is this a pointer slot?" by looking for a
+ * `*` in the SPELLING, which a typedef never has. A word stored into such a slot
+ * was therefore emitted as a bare integer, for which C++ has no conversion at
+ * all. Built by the same single walk that finds the aggregate typedefs, so the
+ * two answers cannot drift apart.
+ */
+let pointerTypedefNames: Set<string> = new Set();
+
+/** Does this name denote a typedef whose chain ends at a pointer? */
+export function isPointerTypedefName(name: string): boolean {
+  return pointerTypedefNames.has(name);
 }
 
 export function getAggregateTypeNames(): Set<string> | undefined {

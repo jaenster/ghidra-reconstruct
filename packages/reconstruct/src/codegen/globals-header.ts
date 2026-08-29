@@ -1412,7 +1412,11 @@ export function emitDataValue(dv: DataValue, indent = 0, expectedType?: string):
         const escaped = val === '\\' ? '\\\\' : val === '\'' ? '\\\'' : val;
         return `'${escaped}'`;
       }
-      return val;
+      // Ghidra reports a four-byte datum as a SCALAR whether the slot is an
+      // integer or a pointer, so the same word that the `pointer` case above
+      // casts arrives here uncast. A bare integer converts to no pointer type in
+      // C++; the cast keeps the bytes and gives them the slot's type.
+      return castPointerInitializer(expectedType ? stripFuncDefIndirection(expectedType.trim()) : '', val);
     }
 
     case 'string':
