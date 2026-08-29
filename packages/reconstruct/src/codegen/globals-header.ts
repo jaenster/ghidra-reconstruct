@@ -741,15 +741,20 @@ export function isInteriorLabel(name: string): boolean {
  * or the declaration and the definition disagree and the linker (or the compiler)
  * rejects them. Route all of them through this.
  *
- *   `auto`        Ghidra's "type undecided". `auto x;` needs an initializer, so it
- *                 is illegal on an extern and on a BSS definition alike.
+ *   `auto`        what a data symbol Ghidra types bare `undefined` arrives as, and
+ *                 nothing else: every one of them is a ONE-BYTE slot whose type is
+ *                 undecided. `auto x;` needs an initializer, so it is illegal on an
+ *                 extern and on a BSS definition alike - but the replacement has to
+ *                 keep the width and the kind. `void*` kept neither: it turned a
+ *                 1-byte integer slot into a 4-byte pointer. `uint8_t` is the same
+ *                 answer `undefined1` already gets from all four mapping tables.
  *   `T *32`       Ghidra's pointer-SIZE annotation ("a 32-bit pointer to T"), not C
  *                 syntax: `void *32 x;` is "expected unqualified-id before numeric
  *                 constant". Also shows up as `undefined *32`.
  */
 export function normalizeGhidraType(type: string): string {
   let t = type;
-  if (t.trim() === 'auto') t = 'void*';
+  if (t.trim() === 'auto') t = 'uint8_t';
   // "void *32" / "undefined *32" / "D2BeltsTxt *32" → "void*" / "undefined*" / …
   t = t.replace(/\s*\*\s*\d+\b/g, '*');
   // D2's 16-bit char reaches globals as WCHAR/wchar_t/wchar16/unicode; bodies and
@@ -862,8 +867,9 @@ export function generateStaticLocalDeclaration(
   // Same sanitizer the declaration side and the reference side use.
   name = sanitizeSymbolName(name);
 
-  // auto is not useful in reconstructed code — use int for scalar values
-  if (type.trim() === 'auto') type = 'int';
+  // `auto` is a one-byte `undefined` slot. It must resolve to the SAME type the
+  // extern path gives it, or a symbol that is file-local here and referenced as
+  // `&sym` is `int*` on one side and `uint8_t*` on the other.
   type = normalizeGlobalDeclType(type);
 
   let initializer = '';

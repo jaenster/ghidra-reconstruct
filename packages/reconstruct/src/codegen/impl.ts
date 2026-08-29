@@ -1061,7 +1061,10 @@ export function generateImplementation(
       // dropped genuinely-used globals → "'x' was not declared". An emitted-but-
       // unused static is at worst a warning, never an error.
 
-      if (type === 'auto') type = 'int';
+      // `auto` is a one-byte `undefined` slot, and it must resolve to the SAME
+      // type globals.h gives the same symbol when it is not file-local - `int`
+      // here made `&sym` an `int*` against a `uint8_t*` reference.
+      if (type === 'auto') type = 'uint8_t';
 
       // A file-local static IS a declaration — and the only one this symbol
       // gets. The closure pass must not add an `extern` for it: that would be a
@@ -1098,7 +1101,7 @@ export function generateImplementation(
           }
         }
       } else {
-        if (type === 'auto') type = 'int';
+        if (type === 'auto') type = 'uint8_t';
         const arrayInfo = inferArrayDeclaration(global);
         if (arrayInfo) {
           fileLocalLines.push(`static ${arrayInfo.type} ${name}[${arrayInfo.count}];`);

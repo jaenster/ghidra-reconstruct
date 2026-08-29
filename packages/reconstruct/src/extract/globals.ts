@@ -201,7 +201,10 @@ function isStringType(dataType: string): boolean {
  * Map Ghidra data types to C/C++ types
  */
 const TYPE_MAP: Record<string, string> = {
-  'undefined': 'auto',
+  // A bare `undefined` data symbol is a ONE-BYTE slot of unknown type - Ghidra
+  // reports every one of them with size 1. It gets the same answer `undefined1`
+  // gets here and in the three other mapping tables, so the width survives.
+  'undefined': 'uint8_t',
   'undefined1': 'uint8_t',
   'undefined2': 'uint16_t',
   'undefined4': 'uint32_t',
