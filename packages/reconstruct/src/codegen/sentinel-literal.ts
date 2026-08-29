@@ -114,8 +114,10 @@ export interface SentinelSlotContext {
  * prefix (`ffffffff`), or as decimal (`4294967295` - which is how an enum slot
  * arrives). All three have to reach the same decision.
  */
-export function parseDataValueNumber(raw: string | undefined): bigint | undefined {
-  if (raw === undefined) return undefined;
+export function parseDataValueNumber(raw: string | null | undefined): bigint | undefined {
+  // Ghidra hands over `null` for a symbol that carries no datum, and the
+  // extraction types that as an optional string. Both mean the same here.
+  if (raw === undefined || raw === null) return undefined;
   const v = raw.trim();
   if (v === '') return undefined;
   try {
@@ -164,8 +166,8 @@ function isPointerShaped(type: string, ctx: SentinelSlotContext): boolean {
  * is most of them, by design.
  */
 export function allOnesSentinel(
-  rawValue: string | undefined,
-  declaredType: string | undefined,
+  rawValue: string | null | undefined,
+  declaredType: string | null | undefined,
   ctx: SentinelSlotContext = {}
 ): string | undefined {
   if (!declaredType) return undefined;

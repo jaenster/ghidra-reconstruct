@@ -1327,7 +1327,7 @@ function isUnsignedByteSlotType(base: string): boolean {
  * and what is a funcdef typedef. One wrapper, so every emit point below asks
  * the question the same way.
  */
-function sentinelSpelling(rawValue: string | undefined, slotType: string | undefined): string | undefined {
+function sentinelSpelling(rawValue: string | null | undefined, slotType: string | null | undefined): string | undefined {
   return allOnesSentinel(rawValue, slotType, {
     isEnumType: (n) => enumTypeNames.has(n),
     isFuncDefTypedef: isFuncDefTypedefName,
