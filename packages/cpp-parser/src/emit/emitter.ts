@@ -727,7 +727,8 @@ export class CppEmitter {
     if (cur.kind === NodeKind.FunctionType) {
       const fn = cur as FunctionType;
       this.emitTypeNode(fn.returnType);
-      this.write(' (' + '*'.repeat(ptrLevels) + ')(');
+      const convention = fn.callingConvention ? fn.callingConvention + ' ' : '';
+      this.write(' (' + convention + '*'.repeat(ptrLevels) + ')(');
       for (let i = 0; i < fn.parameters.length; i++) {
         if (i > 0) this.write(this.style.spaceAfterComma ? ', ' : ',');
         this.emitTypeNode(fn.parameters[i]);

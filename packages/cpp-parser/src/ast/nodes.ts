@@ -105,6 +105,14 @@ export interface FunctionType extends ASTNode {
   parameters: TypeNode[];
   isVariadic: boolean;
   qualifiers: FunctionQualifier[];
+  /**
+   * `__stdcall` and friends. Part of the TYPE on this ABI, so a cast that omits
+   * it names a different function than the one it is trying to name — which is
+   * how an overload-selecting cast stops selecting anything. Spelled only in the
+   * pointer form, `R (__stdcall *)(args)`; the bare function type has nowhere to
+   * put it.
+   */
+  callingConvention?: string;
 }
 
 export type FunctionQualifier = 'const' | 'volatile' | 'noexcept' | '&' | '&&';

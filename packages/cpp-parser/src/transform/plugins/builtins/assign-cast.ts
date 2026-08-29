@@ -91,6 +91,13 @@ export interface AssignCastOptions extends PluginOptions {
    * function's own type is spelled first and the reinterpret goes on top.
    */
   overloadedFunctionNames?: string[];
+  /**
+   * Callable name (bare AND qualified) → the calling convention its emitted
+   * declaration carries, for the conventions the emitter spells. The convention
+   * is part of the function's type, so an overload-selecting cast that omits it
+   * names a type no overload has and selects nothing.
+   */
+  functionConventions?: Record<string, string>;
   /** The namespace segments enclosing this body, outermost first */
   enclosingSegments?: string[];
 }
@@ -162,6 +169,7 @@ export function createAssignCastTransformer(options?: PluginOptions): Transforme
   const enclosingSegments = o.enclosingSegments ?? [];
   const overloadedNames = cachedSet(o.overloadedFunctionNames);
   const paramTypeSpellings = o.functionParamTypes ?? {};
+  const conventions = o.functionConventions ?? {};
 
   /**
    * A function designator whose name denotes an overload set, wrapped in its own
@@ -175,6 +183,7 @@ export function createAssignCastTransformer(options?: PluginOptions): Transforme
     const exact = functionPointerTypeFromSpellings(
       scopedLookup(returnTypes, name, enclosingSegments),
       scopedLookup(paramTypeSpellings, name, enclosingSegments),
+      scopedLookup(conventions, name, enclosingSegments),
     );
     return exact ? (Expr.cast(exact, rhs) as Expression) : rhs;
   };

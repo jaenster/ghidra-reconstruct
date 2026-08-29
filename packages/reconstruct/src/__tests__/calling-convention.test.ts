@@ -15,6 +15,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 
+import { Type, emit } from '@ghidra-mcp/cpp-parser';
+
 import { generateFunctionDeclaration, generateFunctionDefinitionDeclaration } from '../codegen/header.js';
 import type {
   ExtractedFunction,
@@ -83,5 +85,21 @@ describe('calling conventions in emitted declarations', () => {
       generateFunctionDefinitionDeclaration({ ...fd, callingConvention: 'unknown' }),
       'typedef LRESULT (*fpWindowProc)(HWND hWnd);'
     );
+  });
+});
+
+describe('the overload-selecting cast names the convention too', () => {
+  it('emits `R (__stdcall *)(args)` for a pointer to a function type carrying one', () => {
+    const type = Type.pointer(
+      Type.function(Type.typedef('BOOL'), [Type.pointer(Type.typedef('D2WinButton'))], false, '__stdcall')
+    );
+    assert.strictEqual(emit(type), 'BOOL (__stdcall *)(D2WinButton*)');
+  });
+
+  it('emits no convention when the function type carries none', () => {
+    const type = Type.pointer(
+      Type.function(Type.typedef('BOOL'), [Type.pointer(Type.typedef('D2WinButton'))])
+    );
+    assert.strictEqual(emit(type), 'BOOL (*)(D2WinButton*)');
   });
 });

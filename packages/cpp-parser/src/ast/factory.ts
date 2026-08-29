@@ -193,13 +193,19 @@ export const Type = {
    * places; wrapped in `Type.pointer` it is the `ret (*)(a, b)` that names one
    * member of an overload set.
    */
-  function(returnType: TypeNode, parameters: TypeNode[], isVariadic = false): FunctionType {
+  function(
+    returnType: TypeNode,
+    parameters: TypeNode[],
+    isVariadic = false,
+    callingConvention?: string,
+  ): FunctionType {
     return withDefaults({
       kind: NodeKind.FunctionType,
       returnType,
       parameters,
       isVariadic,
       qualifiers: [],
+      ...(callingConvention ? { callingConvention } : {}),
     }) as FunctionType;
   },
 

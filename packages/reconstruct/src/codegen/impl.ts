@@ -798,6 +798,13 @@ export interface FuncPtrArgCastTables {
   /** Callable name (bare AND qualified) → its emitted return type spelling */
   functionReturnTypes?: Record<string, string>;
   /**
+   * Callable name (bare AND qualified) → the calling convention its emitted
+   * declaration carries, for the conventions the emitter spells. A cast that
+   * selects one member of an overload set has to name the member's whole type,
+   * and the convention is part of it.
+   */
+  functionConventions?: Record<string, string>;
+  /**
    * Every spelling that denotes a FUNCTION. Not pruned on signature collision -
    * two functions sharing a bare name disagree about the signature, not about
    * being functions.
@@ -2162,6 +2169,7 @@ function transformDecompiledCode(
       perPluginOptions['assign-cast'] = {
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         functionParamTypes: context.funcPtrArgCasts.functionParamTypes,
+        functionConventions: context.funcPtrArgCasts.functionConventions,
         overloadedFunctionNames: context.funcPtrArgCasts.overloadedFunctionNames,
         enclosingSegments: enclosing?.ghidraNamespaceSegments ?? enclosing?.namespaceSegments,
         functionNames: context.funcPtrArgCasts.functionNames,

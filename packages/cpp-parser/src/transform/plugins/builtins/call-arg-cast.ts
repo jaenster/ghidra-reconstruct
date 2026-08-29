@@ -463,6 +463,7 @@ export function scopedLookup<T>(
 export function functionPointerTypeFromSpellings(
   returnSpelling: string | undefined,
   paramSpellings: readonly string[] | undefined,
+  callingConvention?: string,
 ): TypeNode | null {
   if (returnSpelling === undefined || paramSpellings === undefined) return null;
   const ret = typeFromSpelling(returnSpelling);
@@ -473,7 +474,7 @@ export function functionPointerTypeFromSpellings(
     if (!node) return null;
     params.push(node);
   }
-  return Type.pointer(Type.function(ret, params));
+  return Type.pointer(Type.function(ret, params, false, callingConvention));
 }
 
 export function typeFromSpelling(spelling: string): TypeNode | null {

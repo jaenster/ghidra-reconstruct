@@ -121,6 +121,13 @@ export interface FuncPtrArgCastOptions extends PluginOptions {
   functionParamTypes?: Record<string, string[]>;
   /** Callable name (bare AND qualified) → its emitted return type spelling */
   functionReturnTypes?: Record<string, string>;
+  /**
+   * Callable name (bare AND qualified) → the calling convention its emitted
+   * declaration carries, for the conventions the emitter spells. The convention
+   * is part of the function's type, so an overload-selecting cast that omits it
+   * names a type no overload has and selects nothing.
+   */
+  functionConventions?: Record<string, string>;
 }
 
 /** Slot marker for a parameter/field declared plain `void*` rather than a funcdef. */
@@ -221,6 +228,7 @@ function buildTransformer(options: FuncPtrArgCastOptions): Transformer {
   const overloaded = new Set(options.overloadedFunctionNames ?? []);
   const functionParamTypes = options.functionParamTypes ?? {};
   const functionReturnTypes = options.functionReturnTypes ?? {};
+  const functionConventions = options.functionConventions ?? {};
 
   /**
    * The value to cast, with the overload set reduced to one member first where
@@ -233,6 +241,7 @@ function buildTransformer(options: FuncPtrArgCastOptions): Transformer {
     const exact = functionPointerTypeFromSpellings(
       scopedLookup(functionReturnTypes, fnName, enclosingSegments),
       scopedLookup(functionParamTypes, fnName, enclosingSegments),
+      scopedLookup(functionConventions, fnName, enclosingSegments),
     );
     return exact ? (Expr.cast(exact, value) as Expression) : value;
   };

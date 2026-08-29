@@ -55,6 +55,7 @@ import { generateImplementation, setQuestStructLayouts, setStructFieldRenames, d
 import { generateCMakeLists, generateTopLevelCMake, generateTargetCMake, generateUnsortedCMake } from './cmake.js';
 import { generateSourceMap } from './sourcemap.js';
 import { generateReadme } from './readme.js';
+import { conventionKeyword } from './calling-convention.js';
 import { organizeByNamespace, getFilePath, setModuleNames, setNamespaceCollisionTypes, normalizeQualifiedReference } from './namespace.js';
 import { buildNamespaceResolution, namespaceResolution, renderNamespace } from './namespace-resolution.js';
 import { resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, getDeclarationClosureReport, isUnreferenceableArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType } from './globals-header.js';
@@ -3081,6 +3082,11 @@ function buildFuncPtrArgCastTables(
   // a slot whose type is not certain is one this must not cast into.
   const functionParamTypes: Record<string, string[]> = {};
   const functionReturnTypes: Record<string, string> = {};
+  // The convention the emitted declaration carries, claimed the same way: two
+  // functions that share a spelling and disagree about the convention leave the
+  // slot empty, because an overload-selecting cast written with the wrong one
+  // selects nothing at all.
+  const functionConventions: Record<string, string> = {};
   // Every spelling that denotes a FUNCTION. Unlike the tables above this one is
   // not pruned on disagreement: two functions sharing a bare name disagree about
   // the SIGNATURE, not about being functions, and a pass that only needs to know
@@ -3096,6 +3102,7 @@ function buildFuncPtrArgCastTables(
   const varArgFunctions = new Set<string>();
   const paramTypeClaims = new Map<string, Set<string>>();
   const returnTypeClaims = new Map<string, Set<string>>();
+  const conventionClaims = new Map<string, Set<string>>();
   const varArgClaims = new Map<string, Set<string>>();
   const nameSuffixes = (qualified: string): string[] => {
     const parts = qualified.split('::');
@@ -3129,6 +3136,7 @@ function buildFuncPtrArgCastTables(
     const qualified = fn.namespace ? `${fn.namespace}::${fn.name}` : fn.name;
     const paramSpellings = params.map(p => sigType(p.dataType ?? ''));
     const returnSpelling = sigType(fn.returnType ?? 'void');
+    const conventionSpelling = conventionKeyword(fn.callingConvention);
     let owners = bareNameOwners.get(fn.name);
     if (!owners) { owners = new Set(); bareNameOwners.set(fn.name, owners); }
     owners.add(qualified);
@@ -3137,6 +3145,7 @@ function buildFuncPtrArgCastTables(
       if (!headerOwned.has(key)) {
         claim(functionParamTypes, paramTypeClaims, key, paramSpellings, paramSpellings.join('|'));
         claim(functionReturnTypes, returnTypeClaims, key, returnSpelling, returnSpelling);
+        claim(functionConventions, conventionClaims, key, conventionSpelling, conventionSpelling);
       }
       let va = varArgClaims.get(key);
       if (!va) { va = new Set(); varArgClaims.set(key, va); }
@@ -3197,6 +3206,7 @@ function buildFuncPtrArgCastTables(
     voidPointerFields,
     functionParamTypes,
     functionReturnTypes,
+    functionConventions,
     functionNames: [...functionNames],
     overloadedFunctionNames: [...bareNameOwners].filter(([, o]) => o.size > 1).map(([n]) => n),
     globalTypes,
