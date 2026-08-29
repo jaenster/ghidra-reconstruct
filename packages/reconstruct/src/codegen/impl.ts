@@ -1430,9 +1430,7 @@ export function generateFunctionImplementation(
           // keyed by the Ghidra path, so that is what an unqualified name has to
           // be resolved against.
           ghidraNamespaceSegments: enclosingNamespace?.ghidraSegments,
-          stackSlots: (func.localVariables ?? [])
-            .filter(v => v.name && typeof v.stackOffset === 'number' && typeof v.size === 'number')
-            .map(v => ({ name: v.name, offset: v.stackOffset as number, size: v.size as number })),
+          stackSlots: frameSlots(func),
         },
       );
       body = func.name ? rewriteQuestUnionMembers(transformed.code, func.name, context?.sourceFileName, [...(func.parameters ?? []), ...(func.localVariables ?? [])]) : transformed.code;
@@ -1663,6 +1661,27 @@ interface TransformDecompiledResult {
   identifiers?: Set<string>;
   /** Names the body used as TYPES (see TransformResult.typeNames). */
   typeNames?: Set<string>;
+}
+
+/**
+ * The function's stack frame as Ghidra models it: parameters (whose offsets come
+ * out of their `Stack[0xN]:size` storage) and locals with a committed stack
+ * offset. Both are frame slots; a `&stack0xNNNN` address is resolved against them.
+ */
+function frameSlots(func: ExtractedFunction): Array<{ name: string; offset: number; size: number; isParameter?: boolean }> {
+  const slots: Array<{ name: string; offset: number; size: number; isParameter?: boolean }> = [];
+  for (const p of func.parameters ?? []) {
+    const m = /^Stack\[(-?0x[0-9a-fA-F]+)\]:(\d+)/.exec(p.storage ?? '');
+    if (!m) continue;
+    const name = cleanParamName(p.name);
+    if (!name) continue;
+    slots.push({ name, offset: Number.parseInt(m[1], 16), size: Number.parseInt(m[2], 10), isParameter: true });
+  }
+  for (const v of func.localVariables ?? []) {
+    if (!v.name || typeof v.stackOffset !== 'number' || typeof v.size !== 'number') continue;
+    slots.push({ name: v.name, offset: v.stackOffset, size: v.size });
+  }
+  return slots;
 }
 
 /**
@@ -1957,12 +1976,12 @@ function transformDecompiledCode(
     returnsVoid?: boolean;
     renames?: Record<string, string>;
     /**
-     * Ghidra's stack frame for this function: every local with committed stack
-     * storage. `stack-frame-address` resolves a bare `&stack0xNNNN` frame address
-     * against it; the AST cannot show the frame, because the body is parsed
-     * without one.
+     * Ghidra's stack frame for this function: every parameter and local with
+     * committed stack storage. `stack-frame-address` resolves a bare
+     * `&stack0xNNNN` frame address against it; the AST cannot show the frame,
+     * because the body is parsed without one.
      */
-    stackSlots?: Array<{ name: string; offset: number; size: number }>;
+    stackSlots?: Array<{ name: string; offset: number; size: number; isParameter?: boolean }>;
   },
 ): TransformDecompiledResult {
   try {

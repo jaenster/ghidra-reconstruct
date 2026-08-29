@@ -22,6 +22,14 @@
  *   - a slot whose extent COVERS it    → `((uint8_t*)&buf + delta)`, the same
  *                                        arithmetic the machine does, on the
  *                                        object that owns the storage;
+ *   - one byte past the last PARAMETER → the same anchored form. This is
+ *                                        `va_start`: every positive frame offset
+ *                                        in the corpus is exactly the address
+ *                                        after the last named argument of a
+ *                                        varargs function, and the cdecl ABI —
+ *                                        not the compiler's whim — fixes that
+ *                                        layout, which is why the step is only
+ *                                        taken across a parameter;
  *   - nothing that owns it             → Ghidra's own name, left in place.
  *
  * The last case does not compile, and that is the point. An unowned frame slot
@@ -66,6 +74,8 @@ export interface StackSlot {
   name: string;
   offset: number;
   size: number;
+  /** A parameter's frame position is fixed by the ABI; a local's is not. */
+  isParameter?: boolean;
 }
 
 export interface StackFrameAddressOptions extends PluginOptions {
@@ -245,6 +255,16 @@ function createFrameSlotTransformer(slots: StackSlot[]): Transformer {
         if (!owner || s.size < owner.size) owner = s;
       }
       if (owner) return anchoredAddress(owner, offset - owner.offset, unary);
+
+      // The address just past a parameter: the varargs list. `va_start(ap, fmt)`
+      // on cdecl is `&fmt + sizeof fmt`, and the ABI guarantees the adjacency —
+      // so the step is taken across a parameter and never across a local, whose
+      // frame position the compiler is free to choose.
+      for (const s of slots) {
+        if (!s.isParameter || !declared.has(s.name)) continue;
+        if (offset !== s.offset + s.size) continue;
+        return anchoredAddress(s, s.size, unary);
+      }
 
       // Nothing in the frame owns this address. Leave Ghidra's name, so it fails
       // where it is instead of turning into a read of address `0 + index`.

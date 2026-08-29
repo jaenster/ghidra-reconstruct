@@ -413,21 +413,24 @@ export function generateHeader(
 
   // Emit standalone functions (class was already emitted above)
   if (!classInfo) {
-    // Global/file-level function declarations
-    // Build set of known type names for filtering constructor/destructor artifacts
-    // A function whose name is a data type's name is NOT declared here. For the
-    // 53 functions Ghidra names after their own funcdef (`Push`, `Draw`,
-    // `Release`, `fpDrawGroundTile`) that is a real loss — every other TU calling
-    // `D2Win::Src::Push` gets "is not a member of" — and letting them through is
-    // legal C++, because the typedef is at ROOT scope and the function is inside
-    // its namespace. It was tried and measured: +25 errors, because the
-    // declaration then lets the compiler compare each function against the
-    // funcdef slot it is stored in, and they disagree — which is the SAME
-    // wrong-signature bug `disambiguateCategoryDuplicates` repairs upstream. Redo
-    // this after a regen has carried that fix into the model, not before.
-    const knownTypeNames = new Set<string>();
-    if (dataTypes) for (const dt of dataTypes) knownTypeNames.add(dt.name);
-    for (const ws of WINDOWS_STRUCTS) knownTypeNames.add(ws);
+    // Global/file-level function declarations.
+    //
+    // A function whose name ALSO names a data type used to be dropped here. That
+    // was a real loss: Ghidra names ~53 functions after their own funcdef
+    // (`Push`, `Release`, `fpDrawGroundTile`, the eleven `D2Win*` control
+    // factories), and every other TU calling one got "is not a member of", or —
+    // where the type is a struct — parsed the call as a functional cast and asked
+    // for a constructor that does not exist. Declaring them is legal C++: the
+    // typedef is at ROOT scope, the function is inside its namespace, and the
+    // elaborated-`struct` post-pass below defends the signatures against the
+    // struct/function shadow.
+    //
+    // It was tried once and measured at +25 errors, because the declaration lets
+    // the compiler compare each function against the funcdef slot it is stored
+    // in and they disagreed — the wrong-signature bug `disambiguateCategoryDuplicates`
+    // repairs upstream. That fix is in the model now (`fpDrawGroundTile` and
+    // `D2RendererFunctionsStrc_fpDrawGroundTile` are separate types), so the
+    // declaration is emitted.
 
     // C/C++ standard library functions that must never be re-declared
     const C_STDLIB_NAMES = new Set([
@@ -449,8 +452,6 @@ export function generateHeader(
       && !f.name.startsWith('operator')
       // Skip destructor-like free functions (~TypeName)
       && !f.name.startsWith('~')
-      // Skip constructor-like free functions where name matches a known type
-      && !knownTypeNames.has(f.name)
       // NOTE: a digit-leading name is no longer skipped. It is legalized by the
       // same rule the definition and every reference use (`emittedFunctionName`),
       // so `0x44PacketHandler` is declared as `_x44PacketHandler`. Skipping it

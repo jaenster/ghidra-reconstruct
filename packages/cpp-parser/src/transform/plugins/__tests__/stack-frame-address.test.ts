@@ -14,6 +14,7 @@ import type { AnyNode } from '../../../ast/nodes.js';
 import { stackFrameAddressPlugin, stackNameOffset } from '../builtins/stack-frame-address.js';
 
 const SLOTS = [
+  { name: 'szFormat', offset: 4, size: 4, isParameter: true },
   { name: 'szPath', offset: -268, size: 260 },
   { name: 'local_20', offset: -32, size: 4 },
   { name: 'undeclared_slot', offset: -64, size: 4 },
@@ -71,6 +72,21 @@ describe('stack-frame-address', () => {
     const out = run('void f() { p = &stack0xffffffc0; }');
     assert.ok(out.includes('stack0xffffffc0'), out);
     assert.ok(!out.includes('undeclared_slot'), out);
+  });
+
+  it('reads the address past the last parameter as the varargs list', () => {
+    // `&stack0x00000008` in a function whose last named argument sits at +4 is
+    // `va_start(ap, szFormat)`. Every positive frame offset in the corpus is
+    // this, and the cdecl ABI - not the compiler - fixes the adjacency.
+    const out = run('void f(char *szFormat) { p = &stack0x00000008; }');
+    assert.ok(/\(uint8_t\s*\*\)&szFormat \+ 4/.test(out), out);
+  });
+
+  it('does NOT step past a local, whose frame position is the compiler\'s to choose', () => {
+    // -28 is immediately past `local_20` (-32, size 4). For a parameter that step
+    // is the ABI; for a local it is a guess.
+    const out = run('void f() { int local_20; p = &stack0xffffffe4; }');
+    assert.ok(out.includes('stack0xffffffe4'), out);
   });
 
   it('keeps the security-cookie seed a constant', () => {
