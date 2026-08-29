@@ -144,3 +144,31 @@ describe('allOnesSentinel', () => {
     });
   });
 });
+
+describe('emitDataValue reaches every kind a data value arrives as', () => {
+  it('rewrites an enum-kind value, which Ghidra hands over in decimal', async () => {
+    const { emitDataValue, setGlobalInitializerTypes } = await import('../codegen/globals-header.js');
+    setGlobalInitializerTypes([
+      { name: 'eD2UnitStat', kind: 'ENUM', values: [] } as never,
+      {
+        name: 'D2ShrinesEntryStrc',
+        kind: 'STRUCTURE',
+        fields: [{ name: 'eStat', dataType: 'eD2UnitStat', offset: 0, size: 4 }],
+      } as never,
+    ]);
+    const out = emitDataValue(
+      { kind: 'struct', fields: [{ name: 'eStat', value: { kind: 'enum', value: '4294967295' } }] } as never,
+      0,
+      'D2ShrinesEntryStrc'
+    );
+    assert.match(out, /\.eStat = \*\/ -1/);
+  });
+
+  it('leaves an enum-kind value alone when no slot type names the enum', async () => {
+    const { emitDataValue } = await import('../codegen/globals-header.js');
+    assert.strictEqual(
+      emitDataValue({ kind: 'enum', value: '4294967295' } as never, 0, undefined),
+      '4294967295'
+    );
+  });
+});

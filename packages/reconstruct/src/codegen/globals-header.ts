@@ -1416,8 +1416,13 @@ export function emitDataValue(dv: DataValue, indent = 0, expectedType?: string):
       return castPointerInitializer(slotType ?? 'void*', literal);
     }
 
-    case 'enum':
+    case 'enum': {
+      // Ghidra says this slot is an enum but not which one, so the width still
+      // has to come from the declared type; without it there is no rewrite.
+      const sentinel = sentinelSpelling(dv.value, expectedType);
+      if (sentinel !== undefined) return sentinel;
       return dv.value ?? '0';
+    }
 
     case 'array': {
       if (!dv.elements || dv.elements.length === 0) return '{}';
