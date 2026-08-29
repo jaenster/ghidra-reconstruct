@@ -2754,7 +2754,7 @@ function parseReferencedType(typeStr: string): { typeName: string; isPointer: bo
  * must be emitted after it, and that fact lives in the data type, not in the
  * characters of the emitted line.
  */
-interface ForwardDeclaration {
+export interface ForwardDeclaration {
   /** The type this line declares. */
   name: string;
   /** The emitted line. */
@@ -2800,7 +2800,10 @@ function signatureTypeNames(fd: ExtractedFunctionDefinition): string[] {
  * is stable: an unconstrained declaration keeps the place it had, and only the
  * ones an edge actually binds move.
  */
-function orderForwardDeclarations(decls: ForwardDeclaration[]): string[] {
+export function orderForwardDeclarations(
+  decls: ForwardDeclaration[],
+  where = 'globals.h',
+): string[] {
   const byKey = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
   const byName = new Map<string, ForwardDeclaration>();
@@ -2851,7 +2854,7 @@ function orderForwardDeclarations(decls: ForwardDeclaration[]): string[] {
   // them, and fall back to the key order.
   const stuck = decls.filter(d => !emitted.has(d.name));
   if (stuck.length > 0) {
-    console.warn(`globals.h: ${stuck.length} forward declaration(s) form a dependency cycle and stay in key order:`);
+    console.warn(`${where}: ${stuck.length} forward declaration(s) form a dependency cycle and stay in key order:`);
     for (const d of [...stuck].sort((a, b) => byKey(a.name, b.name))) {
       console.warn(`  ${d.name} -> ${d.deps.filter(x => stuck.some(o => o.name === x)).join(', ')}`);
     }

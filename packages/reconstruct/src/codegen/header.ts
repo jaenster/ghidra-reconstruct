@@ -23,7 +23,7 @@ import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js
 import { namespaceResolution, renderNamespace } from './namespace-resolution.js';
 import { isGhidraGeneratedName, suggestBetterName, type FuncPtrTarget } from '@ghidra-mcp/cpp-parser';
 import { isPlatformOrBuiltinType, isLibraryType, normalizeSignatureType, normalizeWideCharType, collapseFuncPtrTypedef, rootQualifyShadowedType, emittedParameterName, WINDOWS_STRUCTS, platformDeclaredFunctionNames } from './platform-types.js';
-import { generateExternDeclaration, isFuncDefTypedefName, sanitizeSymbolName } from './globals-header.js';
+import { generateExternDeclaration, isFuncDefTypedefName, sanitizeSymbolName, orderForwardDeclarations, type ForwardDeclaration } from './globals-header.js';
 import { declarationHead, pointerConvention } from './calling-convention.js';
 
 /** normalizeSignatureType + fn-ptr-typedef double-indirection collapse, for
@@ -1627,39 +1627,24 @@ function extractBaseTypeName(typeStr: string): string | null {
  * sorts before `D3DE`, so the user was emitted 24 lines above its target and
  * every translation unit including that header reported the target undeclared.
  *
- * The block's identity is its `RECON_FPTD_<name>` guard, which
- * `addForwardDeclaration` and `guardedFuncDefTypedef` both write; ties keep the
- * incoming name order so output stays stable.
+ * The sort is `globals.h`'s own `orderForwardDeclarations` - Kahn drained in the
+ * existing key order, so an unconstrained line keeps its place - reused rather
+ * than rewritten. The block's identity is its `RECON_FPTD_<name>` guard, which
+ * `addForwardDeclaration` and `guardedFuncDefTypedef` both write.
  */
 function orderTypedefBlocks(
   blocks: string[],
   deps: Map<string, Set<string>>,
 ): string[] {
   if (blocks.length < 2 || deps.size === 0) return blocks;
-  const byName = new Map<string, string>();
-  for (const block of blocks) {
-    const name = block.slice('#ifndef RECON_FPTD_'.length, block.indexOf('\n'));
-    if (name) byName.set(name, block);
+  const guarded: ForwardDeclaration[] = [];
+  const unnamed: string[] = [];
+  for (const text of blocks) {
+    const name = text.slice('#ifndef RECON_FPTD_'.length, text.indexOf('\n'));
+    if (name) guarded.push({ name, text, deps: [...(deps.get(name) ?? [])] });
+    else unnamed.push(text);
   }
-  const ordered: string[] = [];
-  const emitted = new Set<string>();
-  const visiting = new Set<string>();
-  const visit = (name: string): void => {
-    if (emitted.has(name) || visiting.has(name)) return;
-    const block = byName.get(name);
-    if (!block) return;
-    visiting.add(name);
-    for (const dep of deps.get(name) ?? []) visit(dep);
-    visiting.delete(name);
-    emitted.add(name);
-    ordered.push(block);
-  };
-  for (const block of blocks) {
-    const name = block.slice('#ifndef RECON_FPTD_'.length, block.indexOf('\n'));
-    if (name) visit(name);
-    else ordered.push(block);
-  }
-  return ordered;
+  return [...orderForwardDeclarations(guarded, 'function-pointer typedefs'), ...unnamed];
 }
 
 /**
