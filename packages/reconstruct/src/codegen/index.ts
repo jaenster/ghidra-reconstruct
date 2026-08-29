@@ -59,6 +59,7 @@ import { conventionKeyword } from './calling-convention.js';
 import { organizeByNamespace, getFilePath, setModuleNames, setNamespaceCollisionTypes, normalizeQualifiedReference } from './namespace.js';
 import { buildNamespaceResolution, namespaceResolution, renderNamespace } from './namespace-resolution.js';
 import { resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, getDeclarationClosureReport, isUnreferenceableArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType } from './globals-header.js';
+import { harvestAnnotatedParameterTypes } from './win32-signatures.js';
 import { isPlatformOrBuiltinType, isLibraryType, generatePlatformHeader, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
 import { createOverrideRegistry } from '../overrides/index.js';
 import { createLibraryRegistry } from '../library/index.js';
@@ -3225,6 +3226,18 @@ function buildFuncPtrArgCastTables(
     if (seen.size > 1 || seen.has('yes')) { varArgFunctions.add(key); }
   }
 
+  // The imported SDK functions have no `Function` record at all — they are
+  // import thunks — so every table above misses them and an argument crossing
+  // into a Win32 slot has no declared type to be cast to. Ghidra writes those
+  // prototypes into the pseudo-C as per-argument annotations; that is the SDK
+  // header's own answer, not the database's guess at it, so it does not carry
+  // the disagreement `headerOwned` exists to avoid. A name the database DOES
+  // hold a record for is left to the tables above, including where they dropped
+  // it as ambiguous: an overload disagreement must not be papered over here.
+  const modelClaimed = new Set<string>();
+  for (const fn of functions) if (fn.name && !headerOwned.has(fn.name)) modelClaimed.add(fn.name);
+  const pointerOnlyParamTypes = harvestAnnotatedParameterTypes(functions, modelClaimed);
+
   const globalTypes: Record<string, string> = {};
   const ambiguousGlobalTypes = new Set<string>();
   for (const g of globals) {
@@ -3272,6 +3285,7 @@ function buildFuncPtrArgCastTables(
     rootQualifiedTypedefs,
     voidPointerFields,
     functionParamTypes,
+    pointerOnlyParamTypes,
     functionReturnTypes,
     functionConventions,
     functionNames: [...functionNames],

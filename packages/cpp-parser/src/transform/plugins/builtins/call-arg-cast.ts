@@ -44,6 +44,19 @@ import { createExprShape } from './expr-shape.js';
 export interface CallArgCastOptions extends PluginOptions {
   /** Callable name (bare AND qualified) → declared parameter type spellings */
   functionParamTypes?: Record<string, string[]>;
+  /**
+   * Imported-SDK callee → parameter type spellings, recovered from the
+   * decompiler's own per-argument annotations. Consulted only where
+   * `functionParamTypes` has no answer, and — the reason for the separate
+   * table — a slot from it is cast into ONLY when the declared parameter AND
+   * the argument are both pointers.
+   *
+   * That restriction is what keeps `int -> LPCSTR` loud. Those integers hold
+   * packed inline string data (`0x73257325` is `"%s%s"` in an immediate), and a
+   * cast there compiles into a wild pointer. Excluding them by construction is
+   * the point; a list of exceptions would not survive the next regen.
+   */
+  pointerOnlyParamTypes?: Record<string, string[]>;
   /** Callable name (bare AND qualified) → declared return type spelling */
   functionReturnTypes?: Record<string, string>;
   /** Global variable name → its declared type spelling */
@@ -170,6 +183,13 @@ export function createFuncdefCalleeResolver(
  * template, an array dimension) and the argument is left alone.
  */
 export interface TypeShape { base: string; stars: number; isConst: boolean }
+
+/**
+ * A resolved parameter list plus how far it may be trusted. `pointerOnly` marks
+ * a list recovered from the decompiler's argument annotations rather than from a
+ * declaration, and restricts it to the pointer boundary.
+ */
+interface Declared { spellings: string[]; pointerOnly: boolean }
 
 /**
  * Spellings that name the SAME C++ type. Ghidra and the Windows headers each
@@ -491,6 +511,7 @@ export function typeFromSpelling(spelling: string): TypeNode | null {
 export function createCallArgCastTransformer(options?: PluginOptions): Transformer {
   const o = (options ?? {}) as CallArgCastOptions;
   const paramTypes = o.functionParamTypes;
+  const pointerOnlyParamTypes = o.pointerOnlyParamTypes ?? {};
   const returnTypes = o.functionReturnTypes ?? {};
   const globalTypes = o.globalTypes ?? {};
   const varArgs = cachedSet(o.varArgFunctions);
@@ -575,19 +596,23 @@ export function createCallArgCastTransformer(options?: PluginOptions): Transform
        * the pointer lives in is declared with a funcdef, and that funcdef is the
        * contract the call is made under.
        */
-      const declaredParametersOf = (call: CallExpr): string[] | undefined => {
+      const declaredParametersOf = (call: CallExpr): Declared | undefined => {
         const name = calleeName(call.callee);
         if (name !== undefined) {
           const bare = bareName(name);
           const declared = paramTypes[name] ?? paramTypes[bare];
           if (declared) {
-            return varArgs.has(name) || varArgs.has(bare) ? undefined : declared;
+            return varArgs.has(name) || varArgs.has(bare)
+              ? undefined : { spellings: declared, pointerOnly: false };
           }
+          const annotated = pointerOnlyParamTypes[name] ?? pointerOnlyParamTypes[bare];
+          if (annotated) return { spellings: annotated, pointerOnly: true };
         }
         const fd = funcdefOfCallee(call.callee);
         // A funcdef with a `...` tail types nothing past its declared slots, and
         // a positional index into it is not safe.
-        return fd && !fd.varArgs ? fd.paramTypes : undefined;
+        return fd && !fd.varArgs
+          ? { spellings: fd.paramTypes, pointerOnly: false } : undefined;
       };
 
       let changed = false;
@@ -595,8 +620,9 @@ export function createCallArgCastTransformer(options?: PluginOptions): Transform
         visitNode(n: ASTNode): ASTNode | undefined {
           if (n.kind !== NodeKind.CallExpr) return undefined;
           const call = n as CallExpr;
-          const declared = declaredParametersOf(call);
-          if (!declared) return undefined;
+          const decl = declaredParametersOf(call);
+          if (!decl) return undefined;
+          const declared = decl.spellings;
           if (call.arguments.length !== declared.length) return undefined; // arity mismatch is Ghidra's, not ours
 
           let anyCast = false;
@@ -606,6 +632,26 @@ export function createCallArgCastTransformer(options?: PluginOptions): Transform
             const bareParam = spelling.replace(/[*\s]/g, '');
             if (funcdefNames.has(bareParam)) return arg;
             const want = shapeOfSpelling(spelling, resolve);
+            // A signature recovered from the decompiler's annotations types only
+            // the pointer boundary. Both sides must reduce to a pointer: an
+            // integer reaching a pointer slot stays exactly as the decompiler
+            // wrote it, and so does a function address, whose prototype this
+            // table does not carry.
+            if (decl.pointerOnly) {
+              // A function address is not an integer and is never packed string
+              // data, so it may reach a slot that holds an address - a pointer,
+              // or an opaque Win32 callback typedef such as `FARPROC` that hides
+              // one. Into a machine-word INTEGER it stays uncast, which is the
+              // same boundary the pointer rule draws for every other argument.
+              if (functionDesignator(arg as Expression)) {
+                if (!want) return arg;
+                if (want.stars === 0 && !isOpaqueCallbackBase(want.base, structFields)) return arg;
+              } else {
+                if (!want || want.stars === 0) return arg;
+                const shape = argShape(arg as Expression);
+                if (!shape || shape.stars === 0) return arg;
+              }
+            }
             // A function address reaching a slot that is not a function pointer of
             // the same prototype: C converted it silently and C++ converts it not
             // at all, in EITHER direction, so the original source carried a cast

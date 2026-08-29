@@ -807,6 +807,12 @@ export interface FuncPtrArgCastTables {
   voidPointerFields?: string[];
   /** Callable name (bare AND qualified) → its emitted parameter type spellings, in order */
   functionParamTypes?: Record<string, string[]>;
+  /**
+   * Imported-SDK callee → its parameter type spellings, read off Ghidra's own
+   * argument annotations (see `win32-signatures.ts`). A slot from this table is
+   * cast into ONLY when both the parameter and the argument are pointers.
+   */
+  pointerOnlyParamTypes?: Record<string, string[]>;
   /** Callable name (bare AND qualified) → its emitted return type spelling */
   functionReturnTypes?: Record<string, string>;
   /**
@@ -2210,8 +2216,17 @@ function transformDecompiledCode(
         typedefTargets: context.funcPtrArgCasts.typedefTargets,
         enclosingVarTypes,
       };
+      perPluginOptions['pointer-compare-cast'] = {
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        structFields: context.funcPtrArgCasts.structFields,
+        typedefTargets: context.funcPtrArgCasts.typedefTargets,
+        functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        enclosingVarTypes,
+      };
       perPluginOptions['call-arg-cast'] = {
         functionParamTypes: context.funcPtrArgCasts.functionParamTypes,
+        pointerOnlyParamTypes: context.funcPtrArgCasts.pointerOnlyParamTypes,
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         functionNames: context.funcPtrArgCasts.functionNames,
         variableNames: context.funcPtrArgCasts.variableNames,
