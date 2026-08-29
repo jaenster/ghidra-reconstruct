@@ -2622,7 +2622,7 @@ function collectGlobalForwardDeclarations(
         text: generateFunctionDefinitionDeclaration(fd),
         deps: signatureTypeNames(fd),
       });
-    } else if ((dt?.kind === 'STRUCTURE' || dt?.kind === 'UNION') && !typeOwnerMap?.get(name)) {
+    } else if ((dt?.kind === 'STRUCTURE' || dt?.kind === 'UNION') && typeOwnerMap && !typeOwnerMap.get(name)) {
       // An aggregate Ghidra fully describes that NO header owns. Every global
       // reaching it does so through a pointer, so the pointer-only rule spells
       // `struct X;` — but with no owner there is no header that could ever
@@ -2630,9 +2630,10 @@ function collectGlobalForwardDeclarations(
       // "invalid use of incomplete type" and nothing to include. Ghidra has the
       // layout; emit it here, where the pointer is declared.
       //
-      // Only when unowned: a type some header defines must stay a forward
-      // declaration here, or the two definitions collide in every TU that sees
-      // both.
+      // Only when unowned, and only when ownership was computed at all: a type
+      // some header defines must stay a forward declaration here, or the two
+      // definitions collide in every TU that sees both, and without the map
+      // there is no way to tell which types those are.
       forwardDecls.push({
         name,
         text: dt.kind === 'STRUCTURE'
