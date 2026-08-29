@@ -304,6 +304,20 @@ export function isOpaqueCallbackBase(
 }
 
 /**
+ * A cast to an AGGREGATE BY VALUE. No conversion exists from a pointer or a
+ * machine word to a struct, so writing one produces "invalid cast from type X
+ * to type Y" - a diagnostic the pass manufactured on top of whatever
+ * disagreement was already there. Where the target is a known aggregate and
+ * nothing indirects it, the store stays exactly as the decompiler wrote it and
+ * the real disagreement stays visible.
+ */
+export function isAggregateValue(
+  shape: TypeShape, structFields: Record<string, Record<string, string>>,
+): boolean {
+  return shape.stars === 0 && !!structFields[shape.base];
+}
+
+/**
  * Windows typedefs that carry the `const` inside the name. `LPCVOID` reaching a
  * `void*` parameter, or `LPCSTR` reaching `char*`, is the one conversion C did
  * silently that C++ refuses outright - so const has to survive the reduction.
@@ -754,6 +768,7 @@ export function createCallArgCastTransformer(options?: PluginOptions): Transform
               return Expr.cast(castType, Expr.cast(Type.typedef('uintptr_t'), arg as Expression));
             }
             if (!want) return arg;
+            if (isAggregateValue(want, structFields)) return arg;
             const have = argShape(arg as Expression);
             if (!have) return arg;
             // Any NON-const object pointer still reaches `void*` implicitly;

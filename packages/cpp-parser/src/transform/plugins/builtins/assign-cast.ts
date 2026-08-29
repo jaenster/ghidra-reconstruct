@@ -49,6 +49,7 @@ import { Type, Expr } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import {
   type TypeShape, type TypedefResolver, shapeOfNode, shapeOfSpelling, isBareStringLiteral,
+  isAggregateValue,
   typeFromSpelling, unwrapParens, calleeName, sameShape, isVoid, canonicalBase,
   isWordIntegerShape, isOpaqueCallbackBase, cachedSet, bareName,
   createFuncdefCalleeResolver, type FuncdefDecl, type FuncdefCalleeTables,
@@ -127,10 +128,23 @@ function peel(t: Target): Target | null {
   return null;
 }
 
+/** `T[N]` -> the element spelling, or null when the spelling is not an array. */
+const arraySpellingElement = (spelling: string): string | null => {
+  const m = /^(.*?)\s*\[[^\[\]]*\]$/.exec(spelling.trim());
+  return m ? m[1].trim() : null;
+};
+
 function targetFromSpelling(spelling: string, resolve?: TypedefResolver): Target | null {
   const shape = shapeOfSpelling(spelling, resolve);
   if (!shape) return null;
-  const node = typeFromSpelling(spelling);
+  // The same decay `targetFromNode` performs, for a type that arrived as a
+  // string. `shapeOfSpelling` reduces `void *[252]` to `void **`, but the array
+  // type ITSELF cannot be cast to, so the node has to decay with the shape or
+  // the two disagree and every read of an array global stays untyped.
+  const element = arraySpellingElement(spelling);
+  const node = element !== null
+    ? (() => { const e = typeFromSpelling(element); return e ? Type.pointer(e) : null; })()
+    : typeFromSpelling(spelling);
   return node ? { shape, node } : null;
 }
 
@@ -214,6 +228,19 @@ export function createAssignCastTransformer(options?: PluginOptions): Transforme
       /** True when this lvalue names an array, which nothing can be stored into. */
       const isArrayLvalue = (expr: Expression): boolean => {
         const e2 = unwrapParens(expr);
+        // A MEMBER that is an array is no more assignable than a named one, and
+        // the field tables now carry the dimension, so the store has to be
+        // refused here rather than silently cast.
+        if (e2.kind === NodeKind.MemberExpr) {
+          const me = e2 as MemberExpr;
+          const m = me.member as { name?: string };
+          if (typeof m?.name !== 'string') return false;
+          const obj = lvalueTarget(me.object);
+          const exact = obj && obj.shape.stars === (me.isArrow ? 1 : 0)
+            ? structFields[obj.shape.base]?.[m.name] : undefined;
+          const spelled = exact ?? fieldTypes[m.name];
+          return typeof spelled === 'string' && spelled.includes('[');
+        }
         if (e2.kind !== NodeKind.Identifier) return false;
         const t = localTypes.get((e2 as Identifier).name);
         if (t) return arrayTypeOf(t) !== null;
@@ -381,6 +408,9 @@ export function createAssignCastTransformer(options?: PluginOptions): Transforme
        */
       const castFor = (want: Target, rhs: Expression): Expression | null => {
         if (funcdefNames.has(canonicalBase(want.shape.base))) return null;
+        // Nothing converts to a struct by value; writing the cast only invents
+        // an "invalid cast" on top of the disagreement already there.
+        if (isAggregateValue(want.shape, structFields)) return null;
         // A function address stored into a slot that is not a function pointer of
         // the same prototype. C++ converts it in NEITHER direction - not even to
         // `void*` - so the original source carried a cast; `funcptr-arg-cast` owns
