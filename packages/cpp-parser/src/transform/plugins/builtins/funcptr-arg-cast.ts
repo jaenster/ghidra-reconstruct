@@ -86,6 +86,21 @@ export interface FuncPtrArgCastOptions extends PluginOptions {
    */
   fieldFuncdefs?: Record<string, string>;
   /**
+   * Callable name → slot → the callback typedef the slot's own declaration
+   * names, for callees whose declaration comes from a SYSTEM header rather than
+   * from the model — `CreateThread`'s third parameter is
+   * `LPTHREAD_START_ROUTINE`, and no reconstructed prototype says so.
+   *
+   * These slots are cast into ONLY when the supplied function takes no
+   * parameters at all. A zero-parameter function passed as a callback that
+   * receives one is not a disagreement any retype can settle: the function
+   * really is `f(void)`, the slot really does hand it a parameter, and the
+   * original source had to write the cast. Every other mismatch in the same
+   * slot — a wrong return width, a wrong calling convention — IS settleable,
+   * stays uncast, and stays loud.
+   */
+  zeroArityCallbackSlots?: Record<string, Record<number, string>>;
+  /**
    * The namespace segments enclosing the body being transformed, outermost
    * first. A body writes `fpDraw = Draw;` with the bare name, and twelve
    * `Draw`s exist across `D2Client::Forms::*` — so the bare name is ambiguous
@@ -233,6 +248,10 @@ function buildTransformer(options: FuncPtrArgCastOptions): Transformer {
   const slotsFor = (callee: string): Record<number, string> | undefined =>
     paramFuncdefs[callee] ?? paramFuncdefs[bareOf(callee)];
 
+  const zeroAritySlots = options.zeroArityCallbackSlots ?? {};
+  const zeroAritySlotsFor = (callee: string): Record<number, string> | undefined =>
+    zeroAritySlots[callee] ?? zeroAritySlots[bareOf(callee)];
+
   const signatureFor = (fn: string): string | undefined => {
     // A name that also denotes data is not proof of a function.
     if (variableNames.has(bareOf(fn))) return undefined;
@@ -307,6 +326,26 @@ function buildTransformer(options: FuncPtrArgCastOptions): Transformer {
 
       const callee = nameOf(call.callee);
       if (!callee) return undefined;
+
+      // A system-header callback slot handed a function that takes nothing.
+      const systemSlots = zeroAritySlotsFor(callee);
+      if (systemSlots) {
+        let systemChanged = false;
+        const systemArgs = call.arguments.map((arg, i) => {
+          const typedefName = systemSlots[i];
+          if (!typedefName) return arg;
+          const argFn = functionArgName(arg);
+          if (!argFn) return arg;
+          const actual = signatureFor(argFn);
+          if (actual === undefined || arityOf(actual) !== 0) return arg;
+          systemChanged = true;
+          return castTo(typedefName, arg);
+        });
+        if (systemChanged) {
+          return updateNode(call, { arguments: systemArgs } as Partial<CallExpr>);
+        }
+      }
+
       const slots = slotsFor(callee);
       if (!slots) return undefined;
 

@@ -775,6 +775,11 @@ function funcPtrArgCastsForScope(
 export interface FuncPtrArgCastTables {
   /** Callable name (bare AND qualified) → param index → funcdef typedef name */
   paramFuncdefs: Record<string, Record<number, string>>;
+  /**
+   * System-header callee → slot → the callback typedef that slot declares.
+   * Cast into only when the supplied function takes no parameters at all.
+   */
+  zeroArityCallbackSlots?: Record<string, Record<number, string>>;
   /** Funcdef typedef name → its normalized signature key */
   funcdefSignatures: Record<string, string>;
   /** Function name (bare AND qualified) → its own normalized signature key */
@@ -1888,6 +1893,12 @@ export function replacePrngWithMacro(code: string): string {
 interface RootScopeSymbolTables {
   rootScopeSymbols: string[];
   scopedSymbols: string[];
+  /**
+   * Root-scope data symbols a function of the same name hides. They are NOT in
+   * `rootScopeSymbols` — a qualified reference to one of these names means the
+   * function — but a BARE reference means the global and has to say `::name`.
+   */
+  functionShadowedGlobals: string[];
 }
 const rootScopeSymbolCache = new WeakMap<AnalyzedDataSymbol[], RootScopeSymbolTables>();
 
@@ -1910,16 +1921,20 @@ function collectRootScopeSymbols(context?: ImplGenContext): RootScopeSymbolTable
   }
 
   // A name that also denotes a function must keep its qualifier — the call is
-  // resolved by the function declaration, not by the same-named global.
+  // resolved by the function declaration, not by the same-named global. The
+  // reverse case is the bare spelling, which still means the global.
+  const functionShadowedGlobals = new Set<string>();
   if (context?.functionNameToHeader) {
     for (const fn of context.functionNameToHeader.keys()) {
-      rootScopeSymbols.delete(fn.includes('::') ? fn.slice(fn.lastIndexOf('::') + 2) : fn);
+      const bare = fn.includes('::') ? fn.slice(fn.lastIndexOf('::') + 2) : fn;
+      if (rootScopeSymbols.delete(bare)) functionShadowedGlobals.add(bare);
     }
   }
 
   const tables: RootScopeSymbolTables = {
     rootScopeSymbols: [...rootScopeSymbols],
     scopedSymbols: [...scopedSymbols],
+    functionShadowedGlobals: [...functionShadowedGlobals],
   };
   rootScopeSymbolCache.set(globals, tables);
   return tables;
@@ -2105,6 +2120,11 @@ function transformDecompiledCode(
     const rootScope = collectRootScopeSymbols(context);
     if (rootScope) {
       perPluginOptions['root-scope-qualify'] = rootScope;
+      if (rootScope.functionShadowedGlobals.length > 0) {
+        perPluginOptions['function-shadowed-global'] = {
+          functionShadowedGlobals: rootScope.functionShadowedGlobals,
+        };
+      }
     }
 
     const shadowOptions = shadowQualifyOptions(context);
@@ -2145,6 +2165,7 @@ function transformDecompiledCode(
         variableNames: context.funcPtrArgCasts.variableNames,
         globalTypes: context.funcPtrArgCasts.globalTypes,
         funcdefNames: Object.keys(context.funcPtrArgCasts.funcdefSignatures ?? {}),
+        zeroArityCallbackSlots: context.funcPtrArgCasts.zeroArityCallbackSlots,
         fieldTypes: context.funcPtrArgCasts.fieldTypes,
         typedefTargets: context.funcPtrArgCasts.typedefTargets,
         structFields: context.funcPtrArgCasts.structFields,

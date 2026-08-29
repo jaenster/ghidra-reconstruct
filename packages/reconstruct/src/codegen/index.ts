@@ -66,7 +66,7 @@ import type { MethodConversionEntry, ModuleConfig, AutoMethodConversionConfig, T
 import { normalizeAddress } from '../config/loader.js';
 import { resolveTargets, getTargetDirectory, type ResolvedTarget } from '../targets/index.js';
 import { generateStubsHeader } from '../targets/stubs.js';
-import { collectCrtHeaders, EXCLUDED_SYMBOL_DECLS } from './crt-mapping.js';
+import { collectCrtHeaders, EXCLUDED_SYMBOL_DECLS, WIN32_ZERO_ARITY_CALLBACK_SLOTS } from './crt-mapping.js';
 import { normalizePointerSizeSpellings } from './pointer-size-spelling.js';
 import { flattenTemplateNames } from './template-names.js';
 import { retypeVtableLocals, vtableMembersByType } from '../modules/vtable-types.js';
@@ -3175,6 +3175,7 @@ function buildFuncPtrArgCastTables(
   }
   return {
     paramFuncdefs,
+    zeroArityCallbackSlots: WIN32_ZERO_ARITY_CALLBACK_SLOTS,
     funcdefSignatures,
     functionSignatures,
     variableNames,

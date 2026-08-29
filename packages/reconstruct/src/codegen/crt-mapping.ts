@@ -611,6 +611,28 @@ export const EXCLUDED_SYMBOL_DECLS: readonly ExcludedSymbolDecl[] = [
 ];
 
 /**
+ * Win32 entry points that take a callback, and the typedef the SDK names for
+ * that slot.
+ *
+ * These are the slots where the callee's declaration comes from a system header,
+ * so no reconstructed prototype records the parameter type and neither cast pass
+ * can see it. The table is consulted for ONE case only: an argument that is a
+ * function taking no parameters at all. `ThreadHandler` @0044a070 and
+ * `BattleConnectFastest` @0051d0a0 are genuine `f(void)` — arity 0, purge 0, no
+ * reference to any positive frame offset, and their single xref is the
+ * `CreateThread` push with a NULL `lpParameter` — so the thread proc really does
+ * ignore the parameter the API hands it, and the original source cast them.
+ *
+ * Every other mismatch in the same slot is left alone: a proc typed
+ * `uint (*)(void *)` disagrees about the return width and the calling
+ * convention, both of which a prototype can state correctly, and those must stay
+ * visible rather than be papered over here.
+ */
+export const WIN32_ZERO_ARITY_CALLBACK_SLOTS: Record<string, Record<number, string>> = {
+  CreateThread: { 2: 'LPTHREAD_START_ROUTINE' },
+};
+
+/**
  * Win32 SDK headers that declare imports the reconstruction calls but that
  * `<windows.h>` alone does not pull in. Preferring the real header over a
  * hand-written prototype keeps the signature honest and picks up the SDK's own

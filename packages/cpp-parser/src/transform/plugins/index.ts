@@ -507,6 +507,8 @@ import { stackFrameAddressPlugin } from './builtins/stack-frame-address.js';
 export { stackFrameAddressPlugin, stackNameOffset, type StackFrameAddressOptions, type StackSlot } from './builtins/stack-frame-address.js';
 import { shadowedTypeQualifyPlugin } from './builtins/shadowed-type-qualify.js';
 export { shadowedTypeQualifyPlugin, type ShadowedTypeQualifyOptions } from './builtins/shadowed-type-qualify.js';
+import { functionShadowedGlobalPlugin } from './builtins/function-shadowed-global.js';
+export { functionShadowedGlobalPlugin, type FunctionShadowedGlobalOptions } from './builtins/function-shadowed-global.js';
 import { arrayGlobalAddressOfPlugin } from './builtins/array-global-address-of.js';
 export { arrayGlobalAddressOfPlugin } from './builtins/array-global-address-of.js';
 import { charLiteralEscapePlugin } from './builtins/char-literal-escape.js';
@@ -582,6 +584,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   thisParamRewritePlugin,     // Cleanup: __thiscall `this` → the free function's param name (priority 46)
   stackFrameAddressPlugin,    // Cleanup: `&stack0xNNNN` → the frame slot that owns it (priority 520)
   shadowedTypeQualifyPlugin,  // Cleanup: (Draw**)x → (::Draw**)x when a same-named namespace shadows the type (priority 47)
+  functionShadowedGlobalPlugin,  // Cleanup: bare x → ::x when a same-named function hides the root-scope global (priority 49)
   arrayGlobalAddressOfPlugin, // Cleanup: &X_ARRAY_<hex> → X_ARRAY_<hex> (priority 46)
   charLiteralEscapePlugin,    // Cleanup: '²' → '\xb2' (priority 46)
   memoryPatternsPlugin,       // Pattern detection (late)
