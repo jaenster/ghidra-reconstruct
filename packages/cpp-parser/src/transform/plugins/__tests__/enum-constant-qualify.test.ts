@@ -28,6 +28,9 @@ const MONSTER = [
 const AMBIGUOUS = [
   'Run', 'GetHit', 'Attack1', 'Attack2', 'Block', 'Cast', 'Skill1', 'Skill2', 'Skill3', 'Skill4',
   'Dead', 'Sequence',
+  // MONSTATSEX05 is a bitfield (1,4,8,…) and TXTMonStats2Field0x04 an index
+  // enum (8..15) over the same seven names.
+  'revive', 'isAtt', 'large', 'soft', 'critter', 'shadow',
 ];
 
 const OPTIONS = {
@@ -35,6 +38,8 @@ const OPTIONS = {
   enumMembers: {
     eD2PlayerAnimMode: PLAYER,
     eD2MonsterAnimMode: MONSTER,
+    TXTMonStats2Field0x04: ['revive', 'isAtt', 'large', 'soft', 'critter', 'shadow'],
+    MONSTATSEX05: ['revive', 'isAtt', 'large', 'soft', 'critter', 'shadow'],
   },
   structFields: {
     D2UnitStrc: { eAnimMode: 'D2AnimModeUnion', eUnitType: 'eD2UnitType' },
@@ -44,6 +49,10 @@ const OPTIONS = {
     },
   },
   globalTypes: { gPlayerMode: 'eD2PlayerAnimMode' },
+  functionParamTypes: {
+    'D2Client::UNIT::Player::GetFlagsByBitOffset': ['int32_t', 'TXTMonStats2Field0x04'],
+    SetAnimMode: ['D2UnitStrc *', 'eD2MonsterAnimMode'],
+  },
 };
 
 function transformCode(code: string): string {
@@ -172,6 +181,23 @@ void f(void) {
     assert.ok(
       output.includes('gPlayerMode = eD2PlayerAnimMode_ns::Attack1'),
       `Expected the player enum's Attack1 in: ${output}`
+    );
+  });
+
+  it('qualifies a call argument from the declared parameter type', () => {
+    const output = transformCode(`
+void f(D2UnitStrc *pUnit) {
+  BOOL b = D2Client::UNIT::Player::GetFlagsByBitOffset(pUnit->nClassId, revive);
+  SetAnimMode(pUnit, Dead);
+}
+`);
+    assert.ok(
+      output.includes('TXTMonStats2Field0x04_ns::revive'),
+      `Expected the index enum's revive in: ${output}`
+    );
+    assert.ok(
+      output.includes('eD2MonsterAnimMode_ns::Dead'),
+      `Expected the monster enum's Dead in: ${output}`
     );
   });
 

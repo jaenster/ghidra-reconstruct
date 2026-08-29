@@ -426,9 +426,18 @@ export function generateProject(
       /^define_/.test(enumName) || /^IMAGE_[A-Z]/.test(valueName);
 
     // Which enums this header actually writes, in the order it writes them.
-    const emittedEnums = enumTypes.filter(
-      e => !isPlatformOrBuiltinType(e.name) && !/[^a-zA-Z0-9_]/.test(e.name)
-    );
+    // One namespace per enum NAME: Ghidra carries the same enum under two
+    // category paths in seven cases (`eD2Sounds` twice is 3586 members twice),
+    // and now that a namespace keeps every member it declares, a second block of
+    // the same name would redeclare all of them. The extraction currently folds
+    // those before they get here; the guard is what makes that not matter.
+    const seenEnumNames = new Set<string>();
+    const emittedEnums = enumTypes.filter(e => {
+      if (isPlatformOrBuiltinType(e.name) || /[^a-zA-Z0-9_]/.test(e.name)) return false;
+      if (seenEnumNames.has(e.name)) return false;
+      seenEnumNames.add(e.name);
+      return true;
+    });
 
     // Every enum a constant name is declared by, with the value each one gives
     // it. Trim first: Ghidra value names sometimes carry a trailing space

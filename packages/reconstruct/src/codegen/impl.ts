@@ -2304,6 +2304,8 @@ function transformDecompiledCode(
         fieldTypes: context?.funcPtrArgCasts?.fieldTypes,
         globalTypes: context?.funcPtrArgCasts?.globalTypes,
         returnTypes: context?.funcPtrArgCasts?.functionReturnTypes,
+        functionParamTypes: context?.funcPtrArgCasts?.functionParamTypes,
+        enclosingSegments: enclosing?.ghidraNamespaceSegments ?? enclosing?.namespaceSegments,
         enclosingVarTypes,
       };
     }

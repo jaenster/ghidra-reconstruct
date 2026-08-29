@@ -28,15 +28,15 @@
 
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
-  ASTNode, AssignExpr, BinaryExpr, CaseStmt, CompoundStmt, DefaultStmt, Expression, FunctionDecl,
-  Identifier, IfStmt, LabelStmt, ParameterDecl, SwitchStmt, TypeNode, VariableDecl,
+  ASTNode, AssignExpr, BinaryExpr, CallExpr, CaseStmt, CompoundStmt, DefaultStmt, Expression,
+  FunctionDecl, Identifier, IfStmt, LabelStmt, ParameterDecl, SwitchStmt, TypeNode, VariableDecl,
 } from '../../../ast/nodes.js';
 import { findNodesByKind } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
 import { Expr } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { createExprShape } from './expr-shape.js';
-import { unwrapParens } from './call-arg-cast.js';
+import { calleeName, scopedLookup, unwrapParens } from './call-arg-cast.js';
 
 export interface EnumConstantQualifyOptions extends PluginOptions {
   /** Names declared by more than one enum with different values. */
@@ -53,6 +53,10 @@ export interface EnumConstantQualifyOptions extends PluginOptions {
   enclosingVarTypes?: Record<string, string>;
   /** Function name → return spelling. */
   returnTypes?: Record<string, string>;
+  /** Function name → the spelling of each declared parameter. */
+  functionParamTypes?: Record<string, string[]>;
+  /** The namespace path the body is emitted inside, for unqualified callee lookup. */
+  enclosingSegments?: string[];
 }
 
 interface Model {
@@ -85,6 +89,9 @@ function createEnumConstantQualifyTransformer(
 ): Transformer {
   const model = buildModel(options);
   if (!model) return createTransformer({});
+
+  const paramTypes = options.functionParamTypes ?? {};
+  const enclosingSegments = options.enclosingSegments ?? [];
 
   const tables = {
     globalTypes: options.globalTypes,
@@ -205,6 +212,28 @@ function createEnumConstantQualifyTransformer(
               if (left) return updateNode(b, { left } as Partial<BinaryExpr>);
             }
             return undefined;
+          }
+          if (n.kind === NodeKind.CallExpr) {
+            // A parameter declared with an enum type says which enum the
+            // argument means. This is where the MonStats bit-offset flags live:
+            // `TXT_MonStats_MonStats2_GetFlagsByBitOffset(nClassId, revive)`
+            // reads `revive` from an index enum, never from the bitfield enum
+            // that numbers it 0 instead of 8.
+            const call = n as CallExpr;
+            const name = calleeName(call.callee);
+            if (!name) return undefined;
+            const params = scopedLookup(paramTypes, name, enclosingSegments);
+            if (!params) return undefined;
+            let touched = false;
+            const args = call.arguments.map((a, i) => {
+              const declared = params[i]?.trim();
+              if (!declared || !model.members.has(declared)) return a;
+              const next = qualify(a, declared);
+              if (!next) return a;
+              touched = true;
+              return next;
+            });
+            return touched ? updateNode(call, { arguments: args } as Partial<CallExpr>) : undefined;
           }
           if (n.kind === NodeKind.AssignExpr) {
             const a = n as AssignExpr;
