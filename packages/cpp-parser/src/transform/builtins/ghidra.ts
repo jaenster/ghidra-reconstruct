@@ -139,8 +139,13 @@ export function removeRedundantCasts(): Transformer {
     if (cast.expression.kind === NodeKind.IntegerLiteral) {
       const type = cast.type;
       if (type.kind === NodeKind.BuiltinType) {
-        const builtin = type as any;
-        if (builtin.name === 'int' || builtin.name === 'long') {
+        const builtin = type as { name: string; modifiers?: readonly string[] };
+        // A multi-word builtin arrives as a head plus modifiers, so `(short)`
+        // and `(unsigned)` both present as head `int`. Dropping the cast then
+        // drops a truncation or a signedness the machine really performed, so
+        // only a cast with NO width/sign modifier is redundant here.
+        const mods = (builtin.modifiers ?? []).filter(m => m !== 'const' && m !== 'volatile');
+        if (mods.length === 0 && (builtin.name === 'int' || builtin.name === 'long')) {
           return cast.expression;
         }
       }

@@ -1546,3 +1546,57 @@ export function setAggregateTypeNames(
 export function getAggregateTypeNames(): Set<string> | undefined {
   return aggregateTypeNames;
 }
+
+/**
+ * SDK functions whose declared return type is `void *`.
+ *
+ * Ghidra has no `Function` record for `VirtualAlloc`, `HeapAlloc` or `malloc` -
+ * they are import thunks and CRT names, not code - so the emitter's
+ * return-type index, which is built from model functions, does not know what a
+ * call to one evaluates to, and `T *p = VirtualAlloc(...)` is emitted with no
+ * cast. Ghidra's decompiler emits C, where `void *` converts to any object
+ * pointer implicitly; C++ has never allowed that, and the original MSVC source
+ * carried the cast.
+ *
+ * The return type here is the SDK header's own, which is exactly the record the
+ * COMPILER will use, so unlike a Ghidra prototype for a platform name it cannot
+ * disagree with the declaration in scope. Where this file already carries the
+ * full declaration the return type is read off it rather than restated; the
+ * explicit list is only for names the platform header declares and no stub here
+ * repeats.
+ *
+ * A model function of the same bare name that returns something else still
+ * wins - the caller applies the same ambiguity rule it applies to its own
+ * records.
+ */
+const VOID_POINTER_RETURN_SPELLINGS = new Set(['void*', 'void *', 'LPVOID', 'PVOID']);
+
+/** SDK names the platform headers declare that no stub table above repeats. */
+const PLATFORM_VOID_POINTER_RETURNS: readonly string[] = [
+  // <memoryapi.h> / <heapapi.h> / <winbase.h>
+  'VirtualAllocEx', 'HeapReAlloc', 'GlobalLock', 'LocalLock',
+  'MapViewOfFile', 'MapViewOfFileEx', 'LockResource',
+  // <stdlib.h> / <string.h>
+  'malloc', 'calloc', 'realloc', 'bsearch',
+  'memcpy', 'memmove', 'memset', 'memchr',
+];
+
+/**
+ * Every platform function name that returns `void *`, from the declarations
+ * this file already holds plus the names only the SDK header declares.
+ */
+export function platformVoidPointerFunctionNames(): Set<string> {
+  const names = new Set<string>(PLATFORM_VOID_POINTER_RETURNS);
+  for (const group of [
+    WIN32_CORE_STUBS, WIN32_UI_STUBS, CRT_EXTERN_STUBS,
+    WIN32_SYNC_FALLBACK_STUBS, WIN32_FILE_FALLBACK_STUBS,
+  ]) {
+    for (const d of group) {
+      // `<RETURN> <name>(` - the declaration is written return-type first.
+      const m = /^\s*(.+?)\s*\b([A-Za-z_]\w*)\s*\(/.exec(d.decl);
+      if (!m || m[2] !== d.name) continue;
+      if (VOID_POINTER_RETURN_SPELLINGS.has(m[1].trim())) names.add(d.name);
+    }
+  }
+  return names;
+}

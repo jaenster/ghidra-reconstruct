@@ -53,7 +53,7 @@ import { findNodesByKind } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
 import { Decl, Expr, Stmt, Type } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
-import { typeNodeName } from './call-arg-cast.js';
+import { typeNodeName, builtinBase } from './call-arg-cast.js';
 
 export interface UnderscoreSlotLocalOptions extends PluginOptions {
   /** name → Ghidra type string for params/locals not visible in the transform AST
@@ -72,7 +72,14 @@ function buildTypeFromString(s: string): TypeNode {
   return t;
 }
 
-/** Stable equality key for a type; null when the type is not one we can compare. */
+/**
+ * Stable equality key for a type; null when the type is not one we can compare.
+ *
+ * A multi-word builtin reaches the AST as a head plus modifiers, so the head
+ * alone answers `int` for short, long, long long and every unsigned variant.
+ * `builtinBase` reassembles the spelling, which is what makes the key an
+ * equality and not a width-blind bucket.
+ */
 function typeKey(t: TypeNode | undefined): string | null {
   if (!t) return null;
   switch (t.kind) {
@@ -80,8 +87,10 @@ function typeKey(t: TypeNode | undefined): string | null {
       const inner = typeKey((t as PointerType).pointee);
       return inner === null ? null : inner + '*';
     }
-    case NodeKind.BuiltinType:
-      return (t as BuiltinType).name.toLowerCase();
+    case NodeKind.BuiltinType: {
+      const b = t as BuiltinType;
+      return builtinBase(b.name, b.modifiers).toLowerCase();
+    }
     case NodeKind.TypedefType:
       return typeNodeName((t as TypedefType).name) ?? null;
     case NodeKind.ElaboratedType: {

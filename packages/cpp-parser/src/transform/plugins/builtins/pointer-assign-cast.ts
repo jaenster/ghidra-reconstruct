@@ -29,7 +29,7 @@ import { createTransformer, updateNode, type Transformer } from '../../transform
 import { Expr } from '../../../ast/factory.js';
 import { Type } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
-import { typeNodeName } from './call-arg-cast.js';
+import { typeNodeName, builtinBase } from './call-arg-cast.js';
 
 export interface PointerAssignCastOptions extends PluginOptions {
   /**
@@ -43,15 +43,28 @@ export interface PointerAssignCastOptions extends PluginOptions {
   voidPointerFunctions?: string[];
 }
 
-/** Stable equality key for a pointer/scalar type; null = can't reason about it. */
+/**
+ * Stable equality key for a pointer/scalar type; null = can't reason about it.
+ *
+ * The parser splits a multi-word builtin into a head plus modifiers - `short`
+ * is `{ name: 'int', modifiers: ['short'] }`, `unsigned char` is
+ * `{ name: 'char', modifiers: ['unsigned'] }`. Reading the head alone collapses
+ * short, long, long long and every unsigned variant onto `int`, and both
+ * signednesses of char onto `char`, so `unsigned char *x = (char *)e` looked
+ * like an identity and no cast was written, while a key that DID differ named
+ * the wrong width when the cast was spelled from it. `builtinBase` puts the
+ * modifiers back.
+ */
 function typeKey(t: TypeNode): string | null {
   switch (t.kind) {
     case NodeKind.PointerType: {
       const inner = typeKey((t as PointerType).pointee);
       return inner === null ? null : inner + '*';
     }
-    case NodeKind.BuiltinType:
-      return (t as BuiltinType).name.toLowerCase();
+    case NodeKind.BuiltinType: {
+      const b = t as BuiltinType;
+      return builtinBase(b.name, b.modifiers).toLowerCase();
+    }
     case NodeKind.TypedefType:
       return typeNodeName((t as TypedefType).name) ?? null;
     case NodeKind.ElaboratedType: {
@@ -175,7 +188,11 @@ function isNarrowInteger(t: TypeNode): boolean {
 /** The word-integer type of an lvalue, or null when it is not one. */
 function wordIntegerType(t: TypeNode): TypeNode | null {
   if (t.kind === NodeKind.BuiltinType) {
-    return WORD_INTEGER_TYPES.has((t as BuiltinType).name.trim().toLowerCase()) ? t : null;
+    // Same head-plus-modifiers split as `typeKey`: reading the head alone made
+    // `short` and `long long` answer to `int` and be treated as pointer-wide.
+    const b = t as BuiltinType;
+    return WORD_INTEGER_TYPES.has(builtinBase(b.name, b.modifiers).trim().toLowerCase())
+      ? t : null;
   }
   if (t.kind === NodeKind.TypedefType) {
     const n = typeNodeName((t as TypedefType).name);

@@ -14,6 +14,27 @@ describe('pointerAssignCastPlugin', () => {
   const transform = (code: string): string =>
     emit(transformer(parse(code)) as AnyNode).replace(/\s+/g, ' ').trim();
 
+  // The parser splits a multi-word builtin into a head plus modifiers, so
+  // `unsigned char` arrives as `{ name: 'char', modifiers: ['unsigned'] }`. A
+  // key read off the head alone made these two types EQUAL and wrote no cast.
+  it('casts between the two signednesses of char', () => {
+    const out = transform(`void f() { unsigned char* x; char* y; x = y; }`);
+    assert.ok(out.includes('x = (unsigned char*)y'), out);
+  });
+
+  // The other direction of the same defect: short/long/long long all reduce to
+  // the head `int`, so a genuinely differing width looked identical.
+  it('casts between short* and int*', () => {
+    const out = transform(`void f() { short* x; int* y; x = y; }`);
+    // The emitter spells the modifier out - `short int*` - which is the same type.
+    assert.ok(/x = \(short\s*(int)?\*\)y/.test(out), out);
+  });
+
+  it('leaves a same-modified-builtin assignment alone', () => {
+    const out = transform(`void f() { unsigned char* x; unsigned char* y; x = y; }`);
+    assert.ok(!out.includes('(unsigned char*)y'), out);
+  });
+
   it('casts a differing-pointer assignment (char* = int*)', () => {
     const out = transform(`void f() { char* x; int* y; x = y; }`);
     assert.ok(out.includes('x = (char*)y'), out);
