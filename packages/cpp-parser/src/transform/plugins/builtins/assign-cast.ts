@@ -41,13 +41,14 @@ import type {
   ASTNode, FunctionDecl, VariableDecl, ParameterDecl, Identifier, TypeNode,
   PointerType, ArrayType, Expression, CStyleCastExpr, UnaryExpr, CallExpr,
   MemberExpr, SubscriptExpr, AssignExpr, QualifiedType, ReturnStmt, BinaryExpr,
+  StringLiteralExpr, ConditionalExpr,
 } from '../../../ast/nodes.js';
 import { findNodesByKind } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
 import { Type, Expr } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import {
-  type TypeShape, type TypedefResolver, shapeOfNode, shapeOfSpelling,
+  type TypeShape, type TypedefResolver, shapeOfNode, shapeOfSpelling, isBareStringLiteral,
   typeFromSpelling, unwrapParens, calleeName, sameShape, isVoid, canonicalBase,
   isWordIntegerShape, isOpaqueCallbackBase, cachedSet, bareName,
   createFuncdefCalleeResolver, type FuncdefDecl, type FuncdefCalleeTables,
@@ -285,6 +286,25 @@ export function createAssignCastTransformer(options?: PluginOptions): Transforme
         switch (e.kind) {
           case NodeKind.CStyleCastExpr:
             return shapeOfNode((e as CStyleCastExpr).type, 0, resolve);
+          // A string literal is an array of CONST char that decays to
+          // `const char *` - const with nothing in the source spelling it. C let
+          // it reach a `char *` slot and C++ has not since C++11, so the store
+          // the decompiler wrote needs the cast the original source did not.
+          case NodeKind.StringLiteral: {
+            const prefix = (e as StringLiteralExpr).prefix ?? '';
+            if (prefix === '') return { base: 'char', stars: 1, isConst: true };
+            if (prefix === 'L') return { base: 'wchar_t', stars: 1, isConst: true };
+            return null;
+          }
+          // `c ? a : b` has one type; where the arms disagree the conversion
+          // happened inside the conditional and either answer would be a guess.
+          case NodeKind.ConditionalExpr: {
+            const c = e as ConditionalExpr;
+            const a = valueShape(c.thenExpr);
+            const b2 = valueShape(c.elseExpr);
+            if (!a || !b2 || !sameShape(a, b2)) return null;
+            return { ...a, isConst: a.isConst || b2.isConst };
+          }
           case NodeKind.UnaryExpr: {
             const u = e as UnaryExpr;
             if (u.operator === '*') {
@@ -382,7 +402,8 @@ export function createAssignCastTransformer(options?: PluginOptions): Transforme
         // Any non-const object pointer still reaches `void*` implicitly.
         if (have.stars > 0 && want.shape.stars === 1 && isVoid(want.shape)
             && !want.shape.isConst && !have.isConst) return null;
-        const losesConst = have.isConst && !want.shape.isConst;
+        const losesConst = have.isConst && !want.shape.isConst
+          && !(sameShape(have, want.shape) && isBareStringLiteral(rhs));
         if (sameShape(have, want.shape) && !losesConst) return null;
         // Two integers assign to one another; only a pointer boundary needs a cast.
         if (want.shape.stars === 0 && have.stars === 0 && !losesConst) return null;

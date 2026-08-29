@@ -459,6 +459,22 @@ export function shapeOfNode(t: TypeNode, stars = 0, resolve?: TypedefResolver): 
   }
 }
 
+/**
+ * A bare string literal, written where the value is used.
+ *
+ * C++ has kept ONE exception to const-correctness for it: a string literal
+ * still converts to `char *` (deprecated, and only a warning), which is why the
+ * decompiled `f("...")` against a `char *` parameter compiles untouched and
+ * needs no cast. The exception is for the literal ITSELF - once it has passed
+ * through a conditional or any other operator the value is a plain
+ * `const char *` and reaching a `char *` is a hard error. Distinguishing the
+ * two is the difference between casting a handful of real conversions and
+ * casting every string in the program.
+ */
+export function isBareStringLiteral(e: Expression): boolean {
+  return unwrapParens(e).kind === NodeKind.StringLiteral;
+}
+
 export const sameShape = (a: TypeShape, b: TypeShape) => a.stars === b.stars && a.base === b.base;
 export const isVoid = (s: TypeShape) => s.base === 'void';
 
@@ -744,7 +760,8 @@ export function createCallArgCastTransformer(options?: PluginOptions): Transform
             // a const one has never reached a non-const slot in either language.
             if (have.stars > 0 && want.stars === 1 && isVoid(want)
                 && !want.isConst && !have.isConst) return arg;
-            const losesConst = have.isConst && !want.isConst;
+            const losesConst = have.isConst && !want.isConst
+              && !(sameShape(have, want) && isBareStringLiteral(arg as Expression));
             if (sameShape(have, want) && !losesConst) return arg;
             // Only a pointer boundary needs the cast; integer widths convert.
             if (want.stars === 0 && have.stars === 0 && !losesConst) return arg;

@@ -19,10 +19,10 @@
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
   Expression, Identifier, MemberExpr, SubscriptExpr, CallExpr, CStyleCastExpr,
-  UnaryExpr, BinaryExpr, TypeNode,
+  UnaryExpr, BinaryExpr, TypeNode, StringLiteralExpr, ConditionalExpr,
 } from '../../../ast/nodes.js';
 import {
-  bareName, calleeName, shapeOfNode, shapeOfSpelling, unwrapParens,
+  bareName, calleeName, sameShape, shapeOfNode, shapeOfSpelling, unwrapParens,
   type TypeShape, type TypedefResolver,
 } from './call-arg-cast.js';
 
@@ -69,6 +69,18 @@ export function createExprShape(
     switch (e.kind) {
       case NodeKind.CStyleCastExpr:
         return shapeOfNode((e as CStyleCastExpr).type, 0, resolve);
+      // A string literal is an ARRAY OF CONST CHAR that decays to `const char *`
+      // - the one shape in the language that is const without anything spelling
+      // it. C let it reach a `char *` and C++ has not since C++11, so the
+      // original MSVC source needed no cast and this one does. Without a shape
+      // here every such store simply looked undeterminable and was left alone.
+      case NodeKind.StringLiteral: {
+        const prefix = (e as StringLiteralExpr).prefix ?? '';
+        if (prefix === '') return { base: 'char', stars: 1, isConst: true };
+        if (prefix === 'L') return { base: 'wchar_t', stars: 1, isConst: true };
+        // u8/u/U carry a character type this model does not name.
+        return null;
+      }
       case NodeKind.UnaryExpr: {
         const u = e as UnaryExpr;
         if (u.operator === '*') {
@@ -127,6 +139,16 @@ export function createExprShape(
         // type only the funcdef the slot is declared with can supply.
         const fd = funcdefReturnOfCallee?.(callee);
         return fd ? shapeOfSpelling(fd, resolve) : null;
+      }
+      // `c ? a : b` has ONE type, and where both arms reduce to the same shape
+      // that is it. Where they disagree the conversion happened inside the
+      // conditional and naming either arm's type would be a guess.
+      case NodeKind.ConditionalExpr: {
+        const c = e as ConditionalExpr;
+        const a = shape(c.thenExpr);
+        const b2 = shape(c.elseExpr);
+        if (!a || !b2 || !sameShape(a, b2)) return null;
+        return { ...a, isConst: a.isConst || b2.isConst };
       }
       case NodeKind.BinaryExpr: {
         // Pointer arithmetic keeps the pointer's type: `pBuf + 0x11` is still
