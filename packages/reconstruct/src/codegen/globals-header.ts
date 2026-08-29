@@ -425,6 +425,13 @@ export function generateGlobalsHeader(
     if (decl.text === `struct ${decl.name};` || decl.text === `class ${decl.name};`) {
       collidingNamespaceParts.add(decl.name);
     }
+    // A block that DEFINES the aggregate introduces the same root-scope name a
+    // forward declaration does, so it blocks a namespace of that name just as
+    // hard. Promoting an unowned type from declaration to definition must not
+    // quietly lift that constraint.
+    if (decl.defines) {
+      collidingNamespaceParts.add(decl.name);
+    }
   }
   for (const g of globals) {
     if (g.scope !== 'global') continue;
@@ -2615,6 +2622,25 @@ function collectGlobalForwardDeclarations(
         text: generateFunctionDefinitionDeclaration(fd),
         deps: signatureTypeNames(fd),
       });
+    } else if ((dt?.kind === 'STRUCTURE' || dt?.kind === 'UNION') && !typeOwnerMap?.get(name)) {
+      // An aggregate Ghidra fully describes that NO header owns. Every global
+      // reaching it does so through a pointer, so the pointer-only rule spells
+      // `struct X;` — but with no owner there is no header that could ever
+      // complete it, and a body that dereferences the pointer fails with
+      // "invalid use of incomplete type" and nothing to include. Ghidra has the
+      // layout; emit it here, where the pointer is declared.
+      //
+      // Only when unowned: a type some header defines must stay a forward
+      // declaration here, or the two definitions collide in every TU that sees
+      // both.
+      forwardDecls.push({
+        name,
+        text: dt.kind === 'STRUCTURE'
+          ? generateStructDeclaration(dt as ExtractedStruct)
+          : generateUnionDeclaration(dt as ExtractedUnion),
+        deps: aggregateMemberTypeNames(dt as ExtractedStruct | ExtractedUnion),
+        defines: true,
+      });
     } else {
       forwardDecls.push({ name, text: emitFallbackForwardDecl(name), deps: [] });
     }
@@ -2658,6 +2684,26 @@ interface ForwardDeclaration {
   text: string;
   /** Types this line names and therefore must follow. */
   deps: string[];
+  /**
+   * True when the line DEFINES the aggregate rather than declaring it. The name
+   * lands at root scope either way, so a namespace of that name still collides.
+   */
+  defines?: boolean;
+}
+
+/**
+ * Type names an aggregate's members spell out. An EMBEDDED member needs its type
+ * complete, so its declaration has to come first; a pointer member does not, but
+ * ordering it first costs nothing and the block only keeps edges between lines it
+ * actually emits.
+ */
+function aggregateMemberTypeNames(agg: ExtractedStruct | ExtractedUnion): string[] {
+  const names: string[] = [];
+  for (const field of agg.fields ?? []) {
+    const parsed = parseReferencedType(field.dataType);
+    if (parsed && parsed.typeName !== agg.name) names.push(parsed.typeName);
+  }
+  return names;
 }
 
 /** Type names a function definition's signature spells out (return type + parameters). */

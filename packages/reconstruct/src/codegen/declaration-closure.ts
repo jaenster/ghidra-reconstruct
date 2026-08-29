@@ -57,6 +57,14 @@ const ARTIFACT_PATTERNS: Array<{ re: RegExp; reason: string }> = [
   { re: /^[a-z]{1,3}(Var|Stack)_?\d+$/, reason: 'decompiler local leaked out of the scope that declares it' },
   { re: /^(in|unaff|extraout)_/, reason: 'decompiler register pseudo-variable' },
   { re: /^register0x[0-9a-f]+$/i, reason: 'decompiler register pseudo-variable' },
+  // `stack0xNNNNNNNN` is a raw frame OFFSET, not a symbol. `stack-frame-address`
+  // binds every one the function's Ghidra frame actually owns; what survives to
+  // here is an offset the frame does not model — the saved EBP at -4, the SEH
+  // prologue's saved ESP, or a slot Ghidra types `undefined1` where the code
+  // uses hundreds of bytes. Declaring one would turn a loud missing address into
+  // a silent write past a one-byte object, so it stays a report and the fix is
+  // the frame in Ghidra.
+  { re: /^stack0x[0-9a-f]+$/i, reason: 'raw frame offset the function\'s Ghidra stack frame does not model' },
   { re: /^[a-z]Ram[0-9a-f]{6,}$/, reason: 'unnamed absolute-address access (decompiler varnode, not a symbol)' },
   { re: /^ram0x[0-9a-f]+$/i, reason: 'unnamed absolute-address access (decompiler varnode, not a symbol)' },
 ];
