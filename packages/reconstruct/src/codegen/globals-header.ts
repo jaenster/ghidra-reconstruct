@@ -1752,7 +1752,11 @@ function functionInitializerCast(name: string, expectedType?: string): string | 
     // every slot of an abstract class's vtable, and the vtable is a `pointer[]`.
     // A slot spelled as a funcdef is left alone — without a signature there is
     // nothing to compare it against, and a cast would be a guess.
-    if (isVoidPointerSpelling(expectedType) && emitterDeclaresFunction(bare)) return 'void*';
+    // Asked under BOTH spellings: the registry keys an excluded-namespace
+    // prototype by the qualified name it is emitted under
+    // (`_Wrappers::CRT_StrLen`), which is also the name the initializer carries.
+    if (isVoidPointerSpelling(expectedType)
+      && (emitterDeclaresFunction(name) || emitterDeclaresFunction(bare))) return 'void*';
     return undefined;
   }
 

@@ -1354,6 +1354,24 @@ export function generatePlatformHeader(
   lines.push('struct EHRegistrationNode;');
   lines.push('');
 
+  // The two function-SIGNATURE types of the excluded `_Wrappers` category. Bodies
+  // declare locals with them (`PFN_ExceptHandler4 *pSehHandler = __except_handler4;`)
+  // because Ghidra reaches them through a local variable's type — but the
+  // category is excluded, so no type table carries them and the declaration is
+  // ill-formed, costing a second error for the local it fails to declare.
+  //
+  // Spelled as FUNCTION-type typedefs, not pointer typedefs: what the body
+  // declares is `PFN_X *`, so the typedef has to name the function itself for
+  // that to be one pointer, not two. Signatures are Ghidra's own record —
+  // `undefined4(int *, PVOID, undefined4)` and
+  // `void(EHExceptionRecord *, EHRegistrationNode *, _CONTEXT *, void *)` — which
+  // agree exactly with the `__except_handler4` and `_Wrappers::CRT_ExceptionFilterN`
+  // declarations this header already writes, so the assignment needs no cast.
+  lines.push('// Function-signature types from the excluded `_Wrappers` category (Ghidra: /_Wrappers)');
+  lines.push('typedef uint32_t PFN_ExceptHandler4(int* pnParam, void* pParam, uint32_t dwParam);');
+  lines.push('typedef void PFN_CrtExceptionFilter(EHExceptionRecord* pExceptionRecord, EHRegistrationNode* pRegistrationNode, CONTEXT* pContext, void* pParam);');
+  lines.push('');
+
   // Declarations for the Ghidra namespaces run.ts excludes from emission.
   lines.push(...generateExcludedSymbolDecls());
 
