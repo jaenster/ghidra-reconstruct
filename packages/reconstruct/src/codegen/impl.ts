@@ -349,7 +349,11 @@ function dedupSwitchCases(body: string): string {
     let res = line;
     const cur = stack.length ? stack[stack.length - 1] : null;
     if (cur) {
-      const cm = /^(\s*)case\s+([^:]+):(.*)$/.exec(line);
+      // The label runs to the first `:` that is NOT part of a `::`. Written as
+      // `[^:]+` it stopped at the scope operator, so every label of a qualified
+      // enum constant reduced to the namespace — `eD2PlayerAnimMode_ns` — and
+      // the second label of any such switch was struck out as a duplicate.
+      const cm = /^(\s*)case\s+((?:[^:]|::)+)\s*:(?!:)(.*)$/.exec(line);
       const dm = /^(\s*)default\s*:(.*)$/.exec(line);
       if (cm) {
         const val = cm[2].trim();
