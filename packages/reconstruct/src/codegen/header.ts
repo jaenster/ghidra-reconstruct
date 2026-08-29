@@ -24,6 +24,7 @@ import { namespaceResolution, renderNamespace } from './namespace-resolution.js'
 import { isGhidraGeneratedName, suggestBetterName, type FuncPtrTarget } from '@ghidra-mcp/cpp-parser';
 import { isPlatformOrBuiltinType, isLibraryType, normalizeSignatureType, normalizeWideCharType, collapseFuncPtrTypedef, rootQualifyShadowedType, emittedParameterName, WINDOWS_STRUCTS, platformDeclaredFunctionNames } from './platform-types.js';
 import { generateExternDeclaration, isFuncDefTypedefName, sanitizeSymbolName } from './globals-header.js';
+import { declarationHead, pointerConvention } from './calling-convention.js';
 
 /** normalizeSignatureType + fn-ptr-typedef double-indirection collapse, for
  *  emitting function parameter and return types ("fpFoo *" → "fpFoo"). */
@@ -821,7 +822,7 @@ export function generateFunctionDeclaration(
 
   const cleanName = emittedFunctionName(func, sigType(func.returnType));
 
-  return `${commentBlock}${sigType(func.returnType)} ${cleanName}(${params});${addressComment}`;
+  return `${commentBlock}${declarationHead(sigType(func.returnType), func.callingConvention)}${cleanName}(${params});${addressComment}`;
 }
 
 /**
@@ -1088,7 +1089,7 @@ function emitFieldLines(
     if (fd) {
       const fdParams = fd.parameters.map(p => sigType(p.dataType)).join(', ');
       const fdVarArgs = fd.hasVarArgs ? (fdParams ? ', ...' : '...') : '';
-      lines.push(`    /* ${offsetHex} */ ${normalizeSignatureType(fd.returnType)} (*${name})(${fdParams}${fdVarArgs});${comment}`);
+      lines.push(`    /* ${offsetHex} */ ${normalizeSignatureType(fd.returnType)} (${pointerConvention(fd.callingConvention)}*${name})(${fdParams}${fdVarArgs});${comment}`);
       i++;
       continue;
     }
@@ -1414,7 +1415,7 @@ export function generateFunctionDefinitionDeclaration(type: ExtractedFunctionDef
 
   const varArgs = type.hasVarArgs ? (params ? ', ...' : '...') : '';
 
-  return `typedef ${normalizeSignatureType(type.returnType)} (*${type.name})(${params}${varArgs});`;
+  return `typedef ${normalizeSignatureType(type.returnType)} (${pointerConvention(type.callingConvention)}*${type.name})(${params}${varArgs});`;
 }
 
 /**

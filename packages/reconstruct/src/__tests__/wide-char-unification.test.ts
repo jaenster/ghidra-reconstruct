@@ -143,7 +143,9 @@ describe('generateHeader emits one wide-char spelling', () => {
       !/\bWCHAR\b|\bwchar_t\b|\bwchar16\b|\bunicode\b/.test(code),
       `No wide-char spelling other than uint16_t may reach declarations:\n${code}`
     );
-    assert.ok(code.includes('uint16_t * STRING_CopyWide(uint16_t * wszDest, uint16_t * * ppwszSrc'),
+    // The fixture's function is `__stdcall` in Ghidra, so the declaration carries
+    // the convention; this test is about the wide-char spelling around it.
+    assert.ok(code.includes('uint16_t * __stdcall STRING_CopyWide(uint16_t * wszDest, uint16_t * * ppwszSrc'),
       `Wide params/return must be uint16_t:\n${code}`);
     assert.ok(code.includes('uint16_t wszName[16]'), `Wide array field must be uint16_t:\n${code}`);
     assert.ok(code.includes('uint16_t * pwszNext'), `wchar_t* field must be uint16_t*:\n${code}`);

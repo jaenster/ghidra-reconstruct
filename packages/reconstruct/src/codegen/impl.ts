@@ -23,6 +23,7 @@ import { transformGhidraCode, preprocessGhidraCode, isGhidraGeneratedName, sugge
 import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js';
 import { namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 import { cleanFunctionComment, guardedFuncDefTypedef, emittedFunctionName } from './header.js';
+import { declarationHead } from './calling-convention.js';
 import { normalizeSignatureType, collapseFuncPtrTypedef, rootQualifyShadowedType, emittedParameterName, getAggregateTypeNames } from './platform-types.js';
 import { generateStaticLocalsBlock, emitDataValue, inferArrayDeclaration, normalizeArrayDeclaration, braceArrayInitializer, isFuncDefTypedefName, getKnownFuncDefTypedefs, getKnownEnumConstants, setInitializerNamespace, renderGlobalScalarInitializer, recordDeclaredName } from './globals-header.js';
 
@@ -1641,7 +1642,7 @@ function generateFunctionSignature(func: ExtractedFunction): string {
   // The declaration side spells the name with the SAME function, so a definition
   // and its declaration cannot legalize a Ghidra name differently.
   const cleanName = emittedFunctionName(func, sigType(func.returnType));
-  return `${sigType(func.returnType)} ${cleanName}(${params})`;
+  return `${declarationHead(sigType(func.returnType), func.callingConvention)}${cleanName}(${params})`;
 }
 
 /**
