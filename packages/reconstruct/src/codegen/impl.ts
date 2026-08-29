@@ -1358,8 +1358,10 @@ export function generateFunctionImplementation(
   //  `duplicate-label-uniquify` and `underscore-storage-alias` — see
   //  transformDecompiledCode.)
   //
-  // NOTHING here rewrites the emitted text any more. Every transform of a body
-  // runs on the AST; what is left below only assembles the file.
+  // Nothing between here and the closing brace rewrites the body's text any
+  // more. One text pass over a body is left in the pipeline and it runs
+  // earlier: `rewriteQuestUnionMembers`, at the transform call above, which
+  // still regexes the emitted code and is owed the same move.
   //
   // `hoistSwitchPreCaseDecls` stood here and is GONE, not moved: it hoisted a
   // declaration-with-initializer sitting between `switch (x) {` and the first
