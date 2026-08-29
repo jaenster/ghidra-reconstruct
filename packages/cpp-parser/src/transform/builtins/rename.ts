@@ -26,6 +26,7 @@ import type {
   GotoStmt,
   LabelStmt,
   EnumeratorDecl,
+  MemberExpr,
 } from '../../ast/nodes.js';
 import {
   type Transformer,
@@ -125,6 +126,13 @@ export function createRenameTransformer(
     return null;
   }
 
+  // What each renamed Identifier was called before. A MEMBER name is not a
+  // reference to a variable — `pFindData->fpUnitTest` is a struct field, and the
+  // struct still declares it under that name — but the member is an Identifier
+  // child like any other and the generic visitor reaches it first. The original
+  // is kept so the member access can be put back.
+  const renamedFrom = new WeakMap<ASTNode, string>();
+
   function renameIdentifier(node: Identifier, context: RenameContext): Identifier | undefined {
     if (!shouldRenameInContext(context)) {
       return undefined;
@@ -136,6 +144,7 @@ export function createRenameTransformer(
     }
 
     const renamed = updateNode(node, { name: newName });
+    renamedFrom.set(renamed, node.name);
 
     if (preserveOriginal) {
       renamed.ghidraInfo = {
@@ -151,6 +160,27 @@ export function createRenameTransformer(
     visitIdentifier(node) {
       // General identifier reference
       return renameIdentifier(node, 'reference');
+    },
+
+    visitNode(node) {
+      // Same reasoning as the member access below, one node kind over: the tail
+      // of `Ns::name` names something in Ns, not the local this map renames.
+      if (node.kind !== NodeKind.QualifiedId) return undefined;
+      const q = node as QualifiedId;
+      const original = renamedFrom.get(q.name);
+      if (original === undefined) return undefined;
+      return updateNode(q, {
+        name: updateNode(q.name as Identifier, { name: original }),
+      } as Partial<QualifiedId>);
+    },
+
+    visitMemberExpr(node) {
+      // Undo a rename that landed on the member name of `obj.field` / `obj->field`.
+      const original = renamedFrom.get(node.member);
+      if (original === undefined) return undefined;
+      return updateNode(node, {
+        member: updateNode(node.member as Identifier, { name: original }),
+      } as Partial<MemberExpr>);
     },
 
     visitFunctionDecl(node) {
