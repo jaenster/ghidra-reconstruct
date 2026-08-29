@@ -39,10 +39,18 @@ import { createTransformer, updateNode, type Transformer } from '../../transform
 import { Expr } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { childStatements, withChildStatements } from './stmt-structure.js';
+import { isMacroRenamedLabel } from './label-macro-collision.js';
 
 export interface DuplicateLabelUniquifyOptions extends PluginOptions {}
 
-const isGhidraLabel = (n: string): boolean => /^(LAB|switchD|caseD|joined|code|UNRECOVERED)_/.test(n);
+// A label the DECOMPILER authored - either under one of its own name prefixes,
+// or under a name `label-macro-collision` has since renamed off a Win32 macro
+// (`ERROR` -> `ERROR_lbl`, at priority 41, long before this pass runs). Missing
+// the second form left the one shape that always needs this pass - the same
+// block emitted twice - untouched whenever the block happened to be an error
+// exit.
+const isGhidraLabel = (n: string): boolean =>
+  /^(LAB|switchD|caseD|joined|code|UNRECOVERED)_/.test(n) || isMacroRenamedLabel(n);
 
 interface Site {
   /** Structural path from the function body: one child index per level. */

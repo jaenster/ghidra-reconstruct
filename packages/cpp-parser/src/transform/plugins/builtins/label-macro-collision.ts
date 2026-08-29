@@ -28,6 +28,17 @@ function renamed(name: string): string | null {
   return RESERVED_MACROS.has(name) ? `${name}_lbl` : null;
 }
 
+/**
+ * A name this pass produced. The rename happens at priority 41, long before the
+ * passes that reason about labels, so by the time one of them asks "is this a
+ * decompiler-authored label?" the decompiler's `ERROR` is spelled `ERROR_lbl`
+ * and answers no. This is the record that it still is one.
+ */
+export function isMacroRenamedLabel(name: string): boolean {
+  const stem = /^(\w+)_lbl$/.exec(name);
+  return stem !== null && RESERVED_MACROS.has(stem[1]);
+}
+
 function rename(id: Identifier): Identifier {
   const nn = renamed(id.name);
   return nn ? updateNode(id, { name: nn } as Partial<Identifier>) as Identifier : id;

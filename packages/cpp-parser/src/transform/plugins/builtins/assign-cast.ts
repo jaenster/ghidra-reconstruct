@@ -52,6 +52,7 @@ import {
   isAggregateValue,
   typeFromSpelling, unwrapParens, calleeName, sameShape, isVoid, canonicalBase,
   isWordIntegerShape, isOpaqueCallbackBase, cachedSet, bareName,
+  asCodeAddress, isCodeAddress,
   createFuncdefCalleeResolver, type FuncdefDecl, type FuncdefCalleeTables,
   functionPointerTypeFromSpellings, scopedLookup,
 } from './call-arg-cast.js';
@@ -407,7 +408,17 @@ export function createAssignCastTransformer(options?: PluginOptions): Transforme
        * finished expression so the pointer→word case can spell its two steps.
        */
       const castFor = (want: Target, rhs: Expression): Expression | null => {
-        if (funcdefNames.has(canonicalBase(want.shape.base))) return null;
+        if (funcdefNames.has(canonicalBase(want.shape.base))) {
+          // `funcptr-arg-cast` owns this slot because it can compare the two
+          // PROTOTYPES. A `void*` has none to compare - it is an untyped address
+          // the code is about to call through - and C++ converts between an
+          // object pointer and a code pointer in neither direction, so the cast
+          // the original source carried belongs here.
+          if (functionDesignator(rhs) !== undefined) return null;
+          const untyped = valueShape(rhs);
+          if (!untyped || untyped.stars !== 1 || !isVoid(untyped)) return null;
+          return Expr.cast(want.node, rhs);
+        }
         // Nothing converts to a struct by value; writing the cast only invents
         // an "invalid cast" on top of the disagreement already there.
         if (isAggregateValue(want.shape, structFields)) return null;
@@ -427,10 +438,11 @@ export function createAssignCastTransformer(options?: PluginOptions): Transforme
           if (!isWordIntegerShape(want.shape)) return null;
           return Expr.cast(want.node, Expr.cast(Type.typedef('uintptr_t'), value));
         }
-        const have = valueShape(rhs);
+        const have = asCodeAddress(valueShape(rhs), funcdefNames);
         if (!have) return null;
-        // Any non-const object pointer still reaches `void*` implicitly.
-        if (have.stars > 0 && want.shape.stars === 1 && isVoid(want.shape)
+        // Any non-const OBJECT pointer still reaches `void*` implicitly. A code
+        // address reaches it in no language, so it crosses a real boundary here.
+        if (have.stars > 0 && !isCodeAddress(have) && want.shape.stars === 1 && isVoid(want.shape)
             && !want.shape.isConst && !have.isConst) return null;
         const losesConst = have.isConst && !want.shape.isConst
           && !(sameShape(have, want.shape) && isBareStringLiteral(rhs));

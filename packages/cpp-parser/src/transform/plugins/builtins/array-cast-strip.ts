@@ -19,14 +19,22 @@ import { createKindTransformer, type Transformer } from '../../transformer.js';
 import type { TransformPlugin } from '../types.js';
 import { createPlugin } from '../registry.js';
 
-/** A cast to ANY type containing an array dimension is invalid C++. Ghidra emits
- *  both `(char[4])x` (direct array) and `(D2UnitStrc*[5]*)x` (the malformed
- *  pointer-to-array-of-pointers — valid would be `T*(*)[N]`). Detect an ArrayType
- *  anywhere in the cast type so both are stripped. */
+/**
+ * A cast whose type IS an array. `(char[4])x` is ill-formed C++ and the value it
+ * reinterprets is the scalar already there, so dropping it is exact.
+ *
+ * A cast to a POINTER to an array is a different type and a legal one.
+ * `(char (*)[60])x` says the address strides sixty bytes; Ghidra spells it
+ * `char[60] *` and this pass used to see the ArrayType underneath and drop the
+ * whole cast, leaving the raw integer at a slot the compiler then refuses — or,
+ * where it did not refuse, leaving an address that walks one byte per step
+ * instead of sixty. That is the shape of the byte-offset bug fixed in `ae2c1fc`:
+ * valid C++, wrong address, no diagnostic. So only the OUTERMOST type decides,
+ * and a pointer to an array keeps both its cast and its extent.
+ */
 function typeHasArray(t: any): boolean {
   if (!t || typeof t !== 'object') return false;
   if (t.kind === NodeKind.ArrayType) return true;
-  if (t.kind === NodeKind.PointerType) return typeHasArray(t.pointee);
   if (t.kind === NodeKind.QualifiedType) return typeHasArray(t.type ?? t.inner);
   return false;
 }

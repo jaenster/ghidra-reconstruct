@@ -492,6 +492,60 @@ export function isBareStringLiteral(e: Expression): boolean {
 export const sameShape = (a: TypeShape, b: TypeShape) => a.stars === b.stars && a.base === b.base;
 export const isVoid = (s: TypeShape) => s.base === 'void';
 
+/**
+ * The base a CODE ADDRESS reduces to.
+ *
+ * A funcdef typedef names a whole prototype, which `shapeOfSpelling` refuses to
+ * parse - so the chain stops on the typedef's own name and the shape reads as a
+ * star-less opaque base. That is the wrong answer twice over: the slot holds one
+ * indirection, and the thing it points at is not an object. Both errors cancel
+ * for a funcdef-to-funcdef store (two opaque bases, no cast, which is
+ * `funcptr-arg-cast`'s business anyway) and both show up the moment a code
+ * address meets a data pointer:
+ *
+ *   - a function pointer read as star-less looked like a scalar that was not
+ *     word-wide, so `pSymGetModuleBase64` reaching a `void *` parameter was
+ *     declined as a truncating store;
+ *   - and had it read as a pointer it would have been waved through by the
+ *     "every object pointer reaches `void*`" rule, which a code address does
+ *     not obey in either C++ or, formally, C.
+ *
+ * So a funcdef reduces to one indirection over a base of its own, distinct from
+ * every object base. `void*` and a machine word then meet it across a real
+ * boundary and the cast the original source carried is written back, while two
+ * code addresses still reduce alike and stay with the pass that compares
+ * prototypes.
+ */
+export const CODE_BASE = '#code';
+export const isCodeAddress = (s: TypeShape) => s.base === CODE_BASE;
+
+/**
+ * The shape of a slot spelled with a funcdef typedef, as a code address.
+ * Anything else is returned unchanged.
+ *
+ * Star-less AND one-star both mean the same slot, for the same reason
+ * `createFuncdefCalleeResolver` peels both: the typedef IS the pointer type in
+ * the emitted header (`pfnStackWalk64 pStackWalk64`), while Ghidra's own type
+ * table spells the very same global `pfnStackWalk64 *` because it models the
+ * funcdef as the FUNCTION and the variable as a pointer to it. Two stars is a
+ * real pointer TO that slot and keeps its own shape.
+ */
+export function asCodeAddress(
+  shape: TypeShape | null, funcdefNames: ReadonlySet<string>,
+): TypeShape | null {
+  if (!shape || shape.stars > 1) return shape;
+  // A root-qualified `::fpDraw` names the very same funcdef as `fpDraw`, and the
+  // two spellings reach this from different sides: a PARAMETER's spelling comes
+  // from the table, which root-qualifies a typedef a same-named function hides,
+  // while an ARGUMENT's comes from the parsed AST, where the qualifier is a
+  // separate node and only the leaf survives the reduction. Reducing one and not
+  // the other made the two sides disagree about a value that had not changed,
+  // and the pass wrote a second, identical cast over the first.
+  const bare = canonicalBase(shape.base).replace(/^::/, '');
+  if (!funcdefNames.has(bare)) return shape;
+  return { base: CODE_BASE, stars: 1, isConst: shape.isConst };
+}
+
 export function unwrapParens(e: Expression): Expression {
   while (e.kind === NodeKind.ParenExpr) e = (e as ParenExpr).expression;
   return e;
@@ -715,8 +769,20 @@ export function createCallArgCastTransformer(options?: PluginOptions): Transform
             const spelling = declared[i];
             if (!spelling) return arg;
             const bareParam = spelling.replace(/[*\s]/g, '');
-            if (funcdefNames.has(bareParam)) return arg;
-            const want = shapeOfSpelling(spelling, resolve);
+            if (funcdefNames.has(bareParam)) {
+              // `funcptr-arg-cast` owns this slot because it can compare the two
+              // PROTOTYPES. A `void*` has none to compare: it is an untyped
+              // address the callee is about to call through, and C++ converts it
+              // to a code pointer in neither direction, so the cast belongs here.
+              if (functionDesignator(arg as Expression)) return arg;
+              const voidArg = argShape(arg as Expression);
+              if (!voidArg || voidArg.stars !== 1 || !isVoid(voidArg)) return arg;
+              const castType = typeFromSpelling(spelling);
+              if (!castType) return arg;
+              anyCast = true;
+              return Expr.cast(castType, arg as Expression);
+            }
+            const want = asCodeAddress(shapeOfSpelling(spelling, resolve), funcdefNames);
             // A signature recovered from the decompiler's annotations types only
             // the pointer boundary. Both sides must reduce to a pointer: an
             // integer reaching a pointer slot stays exactly as the decompiler
@@ -769,11 +835,12 @@ export function createCallArgCastTransformer(options?: PluginOptions): Transform
             }
             if (!want) return arg;
             if (isAggregateValue(want, structFields)) return arg;
-            const have = argShape(arg as Expression);
+            const have = asCodeAddress(argShape(arg as Expression), funcdefNames);
             if (!have) return arg;
-            // Any NON-const object pointer still reaches `void*` implicitly;
-            // a const one has never reached a non-const slot in either language.
-            if (have.stars > 0 && want.stars === 1 && isVoid(want)
+            // Any NON-const OBJECT pointer still reaches `void*` implicitly;
+            // a const one has never reached a non-const slot in either language,
+            // and a code address reaches it in no language at all.
+            if (have.stars > 0 && !isCodeAddress(have) && want.stars === 1 && isVoid(want)
                 && !want.isConst && !have.isConst) return arg;
             const losesConst = have.isConst && !want.isConst
               && !(sameShape(have, want) && isBareStringLiteral(arg as Expression));
