@@ -76,8 +76,10 @@ describe('concatTransformPlugin', () => {
     it('should wrap result in parentheses by default', () => {
       const input = `void foo() { int x = CONCAT31(a, b); }`;
       const output = transformCode(input, true);
-      // The ParenExpr wrapper is transparent in the emitter, but the expression is correct
-      assert.ok(output.includes('a << 8 | b'), `Expected concat result in: ${output}`);
+      // The ParenExpr wrapper is transparent in the emitter, but the expression is
+      // correct — and both halves carry the cast to the assembled width, without
+      // which `a << 8` is computed in whatever width `a` happens to have.
+      assert.ok(output.includes('(uint32_t)a << 8 | (uint32_t)b & 0xffu'), `Expected concat result in: ${output}`);
     });
 
     it('should not wrap when wrapInParens=false', () => {
@@ -87,7 +89,7 @@ describe('concatTransformPlugin', () => {
       assert.ok(output.includes('<<'), `Expected shift in: ${output}`);
       assert.ok(output.includes('|'), `Expected OR in: ${output}`);
       // The expression shouldn't have extra outer parens
-      assert.ok(output.includes('a << 8 | b'), `Expected unwrapped in: ${output}`);
+      assert.ok(output.includes('(uint32_t)a << 8 | (uint32_t)b & 0xffu'), `Expected unwrapped in: ${output}`);
     });
   });
 

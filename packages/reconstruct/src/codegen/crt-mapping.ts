@@ -22,6 +22,10 @@ const CRT_TABLE: Record<string, string> = {
   strrchr: '<cstring>',
   strstr: '<cstring>',
   strtok: '<cstring>',
+  strpbrk: '<cstring>',
+  strspn: '<cstring>',
+  strcspn: '<cstring>',
+  strcoll: '<cstring>',
   _stricmp: '<cstring>',
   _strnicmp: '<cstring>',
   _memicmp: '<cstring>',
@@ -125,6 +129,20 @@ const CRT_TABLE: Record<string, string> = {
   fmodf: '<cmath>',
   ldexp: '<cmath>',
   frexp: '<cmath>',
+
+  // <cwchar>
+  wcslen: '<cwchar>',
+  wcscmp: '<cwchar>',
+  wcsncmp: '<cwchar>',
+  wcscpy: '<cwchar>',
+  wcsncpy: '<cwchar>',
+  wcscat: '<cwchar>',
+  wcsncat: '<cwchar>',
+  wcschr: '<cwchar>',
+  wcsrchr: '<cwchar>',
+  wcsstr: '<cwchar>',
+  wcstok: '<cwchar>',
+  wcspbrk: '<cwchar>',
 
   // <cctype>
   isalpha: '<cctype>',
@@ -438,6 +456,21 @@ const MSVC_RUNTIME_DECLS: ExcludedSymbolDecl[] = [
     decl: 'extern "C" long double CRT_Log10(void);' },
   { emitted: 'CRT_Sqrt', real: 'sqrt', source: 'ghidra',
     decl: 'extern "C" long double CRT_Sqrt(void);' },
+  // The `_CI*` x87 helpers. Unlike CRT_Pow10/CRT_Log10/CRT_Sqrt above, Ghidra
+  // recovered these WITH their operands as `float10` parameters, and every call
+  // site passes them that way — `CRT_CIPow((float10)dwLinearValue,(float10)dwScale)`,
+  // `CRT_CICos(fVar1)`. The declaration answers to the call sites, so the operand
+  // count is theirs, not the ABI's.
+  { emitted: 'CRT_CIPow', real: '_CIpow', source: 'ghidra',
+    decl: 'extern "C" long double CRT_CIPow(long double x, long double y);' },
+  { emitted: 'CRT_CILog', real: '_CIlog', source: 'ghidra',
+    decl: 'extern "C" long double CRT_CILog(long double x);' },
+  { emitted: 'CRT_CILog10', real: '_CIlog10', source: 'ghidra',
+    decl: 'extern "C" long double CRT_CILog10(long double x);' },
+  { emitted: 'CRT_CISin', real: '_CIsin', source: 'ghidra',
+    decl: 'extern "C" long double CRT_CISin(long double x);' },
+  { emitted: 'CRT_CICos', real: '_CIcos', source: 'ghidra',
+    decl: 'extern "C" long double CRT_CICos(long double x);' },
   // CRT_Srand @ 00687454 — Ghidra: undefined (ulong)
   { emitted: 'CRT_Srand', real: 'srand', source: 'ghidra',
     decl: 'static inline void CRT_Srand(unsigned long nSeed) { srand((unsigned int)nSeed); }' },

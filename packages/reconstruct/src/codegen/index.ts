@@ -57,8 +57,8 @@ import { generateSourceMap } from './sourcemap.js';
 import { generateReadme } from './readme.js';
 import { organizeByNamespace, getFilePath, setModuleNames, setNamespaceCollisionTypes, normalizeQualifiedReference } from './namespace.js';
 import { buildNamespaceResolution, namespaceResolution, renderNamespace } from './namespace-resolution.js';
-import { resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, getDeclarationClosureReport, isUnreferenceableArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, setInitializerSignatureTables, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType } from './globals-header.js';
-import { isPlatformOrBuiltinType, isLibraryType, generatePlatformHeader, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setAggregateTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
+import { resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, getDeclarationClosureReport, isUnreferenceableArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType } from './globals-header.js';
+import { isPlatformOrBuiltinType, isLibraryType, generatePlatformHeader, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
 import { createOverrideRegistry } from '../overrides/index.js';
 import { createLibraryRegistry } from '../library/index.js';
 import { createMethodConversionRegistry, getOrCreateRegistry, applyMethodConversions, detectMethodConversionsFromTags, type MethodCallMapping, type MethodConversionRegistry } from '../methods/index.js';
@@ -170,6 +170,9 @@ export function generateProject(
   // `((T*)base)->field_off`; without it a Win32 pointer typedef looked like a
   // struct and got a member nothing declares.
   setAggregateTypeNames(dataTypes as Array<{ name: string; kind?: string; underlyingType?: string }>);
+  // Every declared type name, so no variable is emitted under a name that
+  // already denotes a type in the scope it lands in.
+  setDeclaredTypeNames(dataTypes.map(dt => dt.name).filter(Boolean));
   // A `case` label must be a constant expression. `switch-reconstruct` treated
   // any bare identifier as one ("could be an enum constant"), which turned an
   // if/else chain over D2ControlStrc* globals into `switch (p) { case gGlobal: }`.
@@ -478,6 +481,11 @@ export function generateProject(
   // no scope declares. Promote them back before anything is emitted, so the
   // declaration and the reference come from one place.
   promoteInitializerReferencedStaticLocals(analyzedGlobals);
+
+  // Ghidra's listing BUILT_INs (`IconResource`, `GroupIconResource`) are runs of
+  // bytes with no C++ type. Respell them as byte arrays of their own size once,
+  // before globals.h and globals.cpp are written from the same records.
+  resolveListingBuiltinBlobs(analyzedGlobals);
 
   // Resolve every symbol's namespace ONCE, for the whole run, and bind it to
   // that symbol's address. Function definition, header declaration, globals.h

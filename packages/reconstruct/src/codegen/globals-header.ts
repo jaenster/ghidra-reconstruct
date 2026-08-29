@@ -6,7 +6,7 @@
  */
 
 import type { AnalyzedDataSymbol, ReconstructOptions, DataValue, ExtractedDataType, ExtractedStruct, ExtractedUnion, ExtractedFunctionDefinition, ExtractedFunction } from '../types.js';
-import { isPlatformOrBuiltinType, isLibraryType, isStructType, castPointerInitializer, normalizeDataValue, isCharacterValueType, isMsvcEhInternal, normalizeWideCharType, isVoidPointerSpelling, rootQualifyShadowedType, platformDeclaredFunctionNames } from './platform-types.js';
+import { isPlatformOrBuiltinType, isLibraryType, isStructType, castPointerInitializer, normalizeDataValue, isCharacterValueType, isMsvcEhInternal, normalizeWideCharType, normalizeListingBuiltinType, listingBuiltinElementType, isVoidPointerSpelling, rootQualifyShadowedType, platformDeclaredFunctionNames } from './platform-types.js';
 import { generateStructDeclaration, generateUnionDeclaration, generateFunctionDefinitionDeclaration } from './header.js';
 import { normalizeQualifiedReference } from './namespace.js';
 import { namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
@@ -754,7 +754,35 @@ export function normalizeGhidraType(type: string): string {
   // signatures both settle on uint16_t, so globals must agree or every crossing is
   // an invalid conversion.
   t = normalizeWideCharType(t);
+  // `string *` is `char *`, `IconResource` is a run of bytes. Ghidra's listing
+  // BUILT_INs describe data, and nothing declares them as C++ types.
+  t = normalizeListingBuiltinType(t);
   return t;
+}
+
+/**
+ * Give every listing-BUILT_IN symbol the array declaration its bytes deserve.
+ *
+ * `IconResource Rsrc_Icon_5_409 = <Icon-Image>;` is two problems at once: the
+ * type has no definition, and the "value" is listing text, not an expression.
+ * The size is the part of the record that IS modelled and the part that has to
+ * survive — the symbol occupies exactly that many bytes and the next symbol
+ * begins after them — so the symbol is respelled as a byte array of its own size
+ * with no initializer, which at namespace scope is the zero-fill it already was.
+ *
+ * Run once over the analyzed globals, so globals.h and globals.cpp cannot
+ * disagree about a symbol's type.
+ */
+export function resolveListingBuiltinBlobs(globals: AnalyzedDataSymbol[]): void {
+  for (const g of globals) {
+    const element = listingBuiltinElementType(g.suggestedType || g.dataType);
+    // A pointer TO one of these is a plain pointer and normalizes on its own.
+    if (!element || /[*&]/.test(g.suggestedType || g.dataType || '')) continue;
+    if (!(g.size > 1)) continue;
+    g.suggestedType = `${element}[${g.size}]`;
+    g.initializedData = undefined;
+    g.value = undefined;
+  }
 }
 
 /**

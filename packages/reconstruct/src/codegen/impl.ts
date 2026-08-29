@@ -1394,6 +1394,17 @@ export function generateFunctionImplementation(
       const emitted = emittedParameterName(p.name, sigType(p.dataType));
       if (emitted !== p.name) bodyRenames[p.name] = emitted;
     }
+    // Locals carry the same hazard as parameters and by the same rule: Ghidra
+    // names a `sockaddr_in` local `sockaddr` and a `fpTimerFunction *` local
+    // `fpTimerFunction`, and the declaration then hides the type the rest of the
+    // scope still spells. The rename map is applied on the AST, and the visitor
+    // gives a TypedefType no children, so a cast's type name is not touched —
+    // only the declaration and its references move.
+    for (const v of func.localVariables ?? []) {
+      if (!v.name || v.name in bodyRenames) continue;
+      const emitted = emittedParameterName(v.name, sigType(v.dataType ?? ''));
+      if (emitted !== v.name) bodyRenames[v.name] = emitted;
+    }
   }
 
   if (override?.action === 'replace') {
@@ -1411,7 +1422,9 @@ export function generateFunctionImplementation(
         if (n && p.dataType) slotVarTypes[n] = p.dataType;
       }
       for (const v of func.localVariables ?? []) {
-        if (v.name && v.dataType && !(v.name in slotVarTypes)) slotVarTypes[v.name] = v.dataType;
+        if (!v.name || !v.dataType) continue;
+        const n = emittedParameterName(v.name, sigType(v.dataType));
+        if (!(n in slotVarTypes)) slotVarTypes[n] = v.dataType;
       }
       const transformed = transformDecompiledCode(
         func.decompiled, options, func.name, func.address, context, slotVarTypes,
@@ -1688,7 +1701,10 @@ function frameSlots(func: ExtractedFunction): FrameSlot[] {
   }
   for (const v of func.localVariables ?? []) {
     if (!v.name || typeof v.stackOffset !== 'number' || typeof v.size !== 'number') continue;
-    slots.push({ name: v.name, offset: v.stackOffset, size: v.size, isArray: isArrayTypeName(v.dataType) });
+    // The same name the body was renamed to — a slot address has to resolve to
+    // an identifier the body actually declares.
+    const name = emittedParameterName(v.name, sigType(v.dataType ?? ''));
+    slots.push({ name, offset: v.stackOffset, size: v.size, isArray: isArrayTypeName(v.dataType) });
   }
   return slots;
 }

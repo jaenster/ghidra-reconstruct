@@ -9,11 +9,13 @@ import { emittedFieldType, sigType } from '../codegen/header.js';
 
 describe('emittedFieldType', () => {
   it("spells Ghidra's `string *` the way the struct declares it", () => {
-    // CHANGED: the cast tables used to read `sigType`, which leaves this
+    // CHANGED: the cast tables used to read `sigType`, which left this
     // `string*` — a type no header declares, so the cast failed to parse and
     // took the rest of the file with it (MonsterTbls.cpp: 6 -> 251 errors).
+    // `sigType` now agrees: Ghidra's listing BUILT_INs are respelled as the
+    // bytes they describe everywhere, not only in struct fields.
     assert.strictEqual(emittedFieldType('string *', 4), 'char *');
-    assert.notStrictEqual(sigType('string *'), 'char *');
+    assert.strictEqual(sigType('string *'), 'char *');
   });
 
   it('drops an array field — it is not a cast target', () => {

@@ -388,6 +388,49 @@ export function normalizeWideCharType(type: string): string {
 }
 
 /**
+ * Ghidra BUILT_IN types that describe how the LISTING renders a run of bytes,
+ * not a C type: `string` is "String (fixed length)", `IconResource` is "Icon
+ * stored as a Resource". They have no definition anywhere, so the emitted tree
+ * carries `struct IconResource;` forward declarations that nothing completes
+ * ("variable has initializer but incomplete type") and `static string *` where
+ * gcc answers "'string' does not name a type" and every later name in that file
+ * cascades off it.
+ *
+ * The bytes are what is real. A Ghidra string is a run of `char`; a resource is
+ * an opaque run of bytes. Ghidra is not wrong here — it is describing data, and
+ * this is that description in C++.
+ */
+const GHIDRA_LISTING_BUILTINS: Record<string, string> = {
+  string: 'char',
+  TerminatedCString: 'char',
+  IconResource: 'uint8_t',
+  GroupIconResource: 'uint8_t',
+  CursorResource: 'uint8_t',
+  BitmapResource: 'uint8_t',
+  MenuResource: 'uint8_t',
+  HTMLResource: 'uint8_t',
+  StringResource: 'uint8_t',
+  MessageResource: 'uint8_t',
+  VersionResource: 'uint8_t',
+};
+
+const GHIDRA_LISTING_BUILTIN_RE = new RegExp(
+  `\\b(?:${Object.keys(GHIDRA_LISTING_BUILTINS).join('|')})\\b`, 'g'
+);
+
+/** The byte spelling a listing BUILT_IN stands for, or undefined. */
+export function listingBuiltinElementType(type: string | undefined): string | undefined {
+  if (!type) return undefined;
+  const base = type.replace(/\s*[*&]+\s*$/, '').replace(/\[\d+\]\s*$/, '').trim();
+  return GHIDRA_LISTING_BUILTINS[base];
+}
+
+/** Rewrite every listing BUILT_IN inside a type spelling to what it stands for. */
+export function normalizeListingBuiltinType(type: string): string {
+  return type.replace(GHIDRA_LISTING_BUILTIN_RE, m => GHIDRA_LISTING_BUILTINS[m]);
+}
+
+/**
  * Normalize Ghidra `undefined[N]` types in function signatures to C equivalents.
  *
  * Handles both bare types and pointer variants:
@@ -401,7 +444,7 @@ export function normalizeWideCharType(type: string): string {
  * Returns the input unchanged for known/normal types.
  */
 export function normalizeSignatureType(type: string): string {
-  return normalizeWideCharType(normalizeSignatureTypeInner(type));
+  return normalizeListingBuiltinType(normalizeWideCharType(normalizeSignatureTypeInner(type)));
 }
 
 function normalizeSignatureTypeInner(type: string): string {
@@ -1392,10 +1435,28 @@ export function isVoidPointerSpelling(type: string | undefined): boolean {
 }
 
 /**
- * The name a parameter is emitted under, given its already-rendered type.
+ * Every type name the project declares — structures, unions, enums, typedefs and
+ * function definitions alike. A VARIABLE that takes one of these names hides the
+ * type for the rest of its scope, which is a compile error the moment the scope
+ * uses the type again.
+ */
+let declaredTypeNames: ReadonlySet<string> = new Set();
+
+export function setDeclaredTypeNames(names: Iterable<string>): void {
+  declaredTypeNames = new Set(names);
+}
+
+/**
+ * The name a parameter or local is emitted under, given its already-rendered type.
  *
  * `eD2ItemFlag eD2ItemFlag` is not a declaration a body can then name — the
- * parameter hides its own type — so such a parameter is emitted as `n<name>`.
+ * variable hides its own type — so such a variable is emitted as `n<name>`.
+ *
+ * The same hazard exists when the name belongs to a DIFFERENT type: Ghidra names
+ * a `sockaddr_in` local `sockaddr`, and the very next line's `(sockaddr *)&sockaddr`
+ * no longer parses; it names a `fpTimerFunction *` local `fpTimerFunction`, and
+ * the sibling declaration `fpTimerFunction pfVar1;` becomes "expected ';'". One
+ * rule covers both: a variable never takes a name this project declares as a type.
  *
  * The comparison has to ignore a leading `::`. The rule lived in three places
  * and only ONE of them stripped it, so as soon as a parameter's type became
@@ -1410,7 +1471,8 @@ export function emittedParameterName(name: string, renderedType: string): string
     .replace(/^(struct|class|union|enum)\s+/, '')
     .replace(/^::/, '')
     .trim();
-  return name === baseType ? `n${name}` : name;
+  if (name === baseType) return `n${name}`;
+  return declaredTypeNames.has(name) ? `n${name}` : name;
 }
 
 /**

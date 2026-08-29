@@ -260,6 +260,12 @@ function createSignedLiteralCleanup(options: SignedLiteralOptions): Transformer 
       const literal = node as IntegerLiteralExpr;
       const value = literal.value;
 
+      // An explicit unsigned suffix says the literal is already the value it
+      // means. Re-signing `0xffffffffu` to `-1` changes what a mask does.
+      if (/u/i.test(literal.suffix ?? '')) {
+        return undefined;
+      }
+
       // Check known values first (they bypass threshold)
       const known32 = NEGATIVE_32.get(value);
       const known64 = NEGATIVE_64.get(value);
