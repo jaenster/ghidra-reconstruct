@@ -50,7 +50,7 @@ import type {
 import { resolveOverridePlaceholders } from './impl.js';
 import { VOID_POINTER_SLOT, type FuncPtrTarget } from '@ghidra-mcp/cpp-parser';
 
-import { emittedFieldType, emittedMemberNames, generateHeader, generateFunctionDeclaration, setKnownFuncDefs, sigType } from './header.js';
+import { fieldDeclSpelling, emittedMemberNames, generateHeader, generateFunctionDeclaration, setKnownFuncDefs, sigType } from './header.js';
 import { generateImplementation, setQuestStructLayouts, setStructFieldRenames, decompiledReturnType, decompiledFunctionName, type ImplGenContext, type FuncPtrArgCastTables } from './impl.js';
 import { generateCMakeLists, generateTopLevelCMake, generateTargetCMake, generateUnsortedCMake } from './cmake.js';
 import { generateSourceMap } from './sourcemap.js';
@@ -3037,7 +3037,7 @@ function buildFuncPtrArgCastTables(
     if (!('fields' in dt)) continue;
     for (const f of (dt as import('../types.js').ExtractedStruct).fields ?? []) {
       if (!f.name || !f.dataType) continue;
-      const spelled = emittedFieldType(f.dataType, f.size);
+      const spelled = fieldDeclSpelling(f.dataType, f.size);
       if (!spelled) continue;
       let seen = fieldDeclSpellings.get(f.name);
       if (!seen) { seen = new Set(); fieldDeclSpellings.set(f.name, seen); }
@@ -3060,7 +3060,7 @@ function buildFuncPtrArgCastTables(
     const into: Record<string, string> = structFields[dt.name] ?? (structFields[dt.name] = {});
     for (const f of (dt as import('../types.js').ExtractedStruct).fields ?? []) {
       if (!f.name || !f.dataType) continue;
-      const spelled = emittedFieldType(f.dataType, f.size);
+      const spelled = fieldDeclSpelling(f.dataType, f.size);
       if (spelled) into[f.name] = spelled;
     }
   }

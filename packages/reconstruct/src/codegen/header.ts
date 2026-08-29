@@ -1267,6 +1267,36 @@ export function emittedFieldType(dataType: string, size: number): string | null 
 }
 
 /**
+ * The type spelling a struct field DECLARES, array dimension included -
+ * `uint[4]`, not null.
+ *
+ * `emittedFieldType` answers what may be written as a cast, and an array may
+ * not: `(uint[4])x` is ill-formed. But the type-reasoning tables need to know
+ * the field exists and what it holds, and dropping every array field left them
+ * blind to it - a `uint[4]` member reaching a `LPDWORD` parameter had no
+ * determinable type at all, so no pass could see the conversion. The value an
+ * array name yields is a pointer to its element, which `shapeOfSpelling`
+ * decays; nothing builds a cast node from a spelling carrying a bracket, so
+ * this widens what can be reasoned about without widening what can be written.
+ */
+export function fieldDeclSpelling(dataType: string, size: number): string | null {
+  const direct = emittedFieldType(dataType, size);
+  if (direct !== null) return direct;
+  const raw = normalizeUndefinedType(dataType ?? '', size);
+  if (/^.+?:\d+$/.test(raw.trim())) return null; // bitfield
+  const SENTINEL = 'RECON_FIELD_NAME';
+  const decl = normalizeFieldDeclaration(raw, SENTINEL, size);
+  const idx = decl.indexOf(SENTINEL);
+  if (idx < 0) return null;
+  const suffix = decl.slice(idx + SENTINEL.length).trim();
+  // Only a plain array suffix; a declarator whose name sits mid-spelling (a
+  // funcdef field) has no reducible type and stays out of the tables.
+  if (!/^(?:\[\d+\])+$/.test(suffix)) return null;
+  const type = decl.slice(0, idx).trim();
+  return type === '' ? null : `${type}${suffix}`;
+}
+
+/**
  * Generate struct declaration
  */
 export function generateStructDeclaration(struct: ExtractedStruct): string {

@@ -393,9 +393,22 @@ export function shapeOfSpelling(
 ): TypeShape | null {
   let s = spelling.trim();
   if (!s) return null;
-  // Function pointers, templates, references and array dimensions are out of scope.
+  // A declared array yields a pointer to its element wherever a VALUE is asked
+  // for, which is the only thing this function is asked for. `shapeOfNode`
+  // already decays one; refusing the string form left the two reducers
+  // answering differently about the same struct field depending on which side
+  // it was reached from, so an array-typed field or global was simply invisible
+  // to every pass. Exactly ONE dimension is decayed: `T[a][b]` yields
+  // `T(*)[b]`, which this model cannot spell, so it still declines. Nothing
+  // builds a cast NODE from a spelling with a bracket - `typeFromSpelling`
+  // keeps rejecting one - so this widens what can be reasoned about without
+  // widening what can be written.
+  const array = /^(.*?)\s*\[[^\[\]]*\]$/.exec(s);
+  let arrayStars = 0;
+  if (array) { s = array[1].trim(); arrayStars = 1; }
+  // Function pointers, templates, references and further dimensions are out of scope.
   if (/[()<>&\[\]]/.test(s)) return null;
-  let stars = 0;
+  let stars = arrayStars;
   while (s.endsWith('*')) { stars++; s = s.slice(0, -1).trim(); }
   if (s.includes('*')) return null; // pointer-to-const and the like, mid-spelling
   const base = canonicalBase(s);
