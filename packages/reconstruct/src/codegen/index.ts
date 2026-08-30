@@ -60,7 +60,7 @@ import { organizeByNamespace, getFilePath, setModuleNames, setNamespaceCollision
 import { buildNamespaceResolution, namespaceResolution, renderNamespace } from './namespace-resolution.js';
 import { resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, getDeclarationClosureReport, isUnreferenceableArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType } from './globals-header.js';
 import { harvestAnnotatedParameterTypes } from './win32-signatures.js';
-import { isPlatformOrBuiltinType, isLibraryType, generatePlatformHeader, arrayRowTypedefLines, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, platformVoidPointerFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
+import { isPlatformOrBuiltinType, isLibraryType, generatePlatformHeader, arrayRowTypedefLines, arrayRowReturn, arrayRowSpelling, GHIDRA_PSEUDO_OP_RESULT_TYPES, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, platformVoidPointerFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
 import { createOverrideRegistry } from '../overrides/index.js';
 import { createLibraryRegistry } from '../library/index.js';
 import { createMethodConversionRegistry, getOrCreateRegistry, applyMethodConversions, detectMethodConversionsFromTags, type MethodCallMapping, type MethodConversionRegistry } from '../methods/index.js';
@@ -68,7 +68,7 @@ import type { MethodConversionEntry, ModuleConfig, AutoMethodConversionConfig, T
 import { normalizeAddress } from '../config/loader.js';
 import { resolveTargets, getTargetDirectory, type ResolvedTarget } from '../targets/index.js';
 import { generateStubsHeader } from '../targets/stubs.js';
-import { collectCrtHeaders, EXCLUDED_SYMBOL_DECLS, WIN32_ZERO_ARITY_CALLBACK_SLOTS } from './crt-mapping.js';
+import { collectCrtHeaders, EXCLUDED_SYMBOL_DECLS, WIN32_ZERO_ARITY_CALLBACK_SLOTS, WIN32_OVERLOADED_INTRINSICS } from './crt-mapping.js';
 import { normalizePointerSizeSpellings } from './pointer-size-spelling.js';
 import { flattenTemplateNames } from './template-names.js';
 import { retypeVtableLocals, vtableMembersByType } from '../modules/vtable-types.js';
@@ -379,7 +379,13 @@ export function generateProject(
     content: generatePlatformHeader({
       seedType: dataTypes.some(dt => dt.name === 'D2SeedStrc'),
       anonymousAggregates: buildAnonymousAggregateDefs(dataTypes, functions, inAddrClaim.claimed),
-      arrayRowTypedefs: arrayRowTypedefLines(functions.map(f => f.returnType)),
+      // Return types and GLOBAL types alike: `gpGlideSmackerTexBuf0` is
+      // `byte[32768] *`, and the cast into it is spelled through the same row
+      // typedef a `T[N] *` return is.
+      arrayRowTypedefs: arrayRowTypedefLines([
+        ...functions.map(f => f.returnType),
+        ...globals.map(g => normalizeGlobalDeclType(g.suggestedType || g.dataType || '')),
+      ]),
       winsockInAddr: inAddrClaim.lines,
     }),
     type: 'header',
@@ -3329,6 +3335,26 @@ function buildFuncPtrArgCastTables(
       if (fn.hasVarArgs) varArgFunctions.add(key);
     }
   }
+  // A Win32 name the target headers make an overload set. The model has no
+  // record of an import thunk, so these tables miss it however it is spelled;
+  // without the exact type the overload set cannot be reduced and the address
+  // cannot be taken. `headerOwned` keeps the model out of these slots, and this
+  // is the header's own answer rather than the database's guess at it.
+  for (const [name, sig] of Object.entries(WIN32_OVERLOADED_INTRINSICS)) {
+    functionParamTypes[name] = sig.paramTypes;
+    functionReturnTypes[name] = sig.returnType;
+    functionConventions[name] = sig.convention;
+  }
+
+  // The emitter's own pseudo-op macros type their result exactly. A call table
+  // is where every pass already looks for "what does this expression evaluate
+  // to", and these are not model functions, so nothing claims those names.
+  for (const [macro, type] of Object.entries(GHIDRA_PSEUDO_OP_RESULT_TYPES)) {
+    if (functionReturnTypes[macro] === undefined && !functionNames.has(macro)) {
+      functionReturnTypes[macro] = type;
+    }
+  }
+
   // A name some overload spells with `...` is never safe to index positionally.
   for (const [key, seen] of varArgClaims) {
     if (seen.size > 1 || seen.has('yes')) { varArgFunctions.add(key); }
@@ -3353,7 +3379,13 @@ function buildFuncPtrArgCastTables(
   for (const g of globals) {
     const name = g.suggestedName || g.name;
     if (!name || /[^A-Za-z0-9_]/.test(name)) continue;
-    const spelled = normalizeGlobalDeclType(g.suggestedType || g.dataType || '');
+    // A POINTER TO AN ARRAY has no prefix cast spelling: `(byte[32768] *)p` is
+    // not C++ at all, and flattening it to `(byte *)` would name a different
+    // type — one element wide instead of the whole row. `d2_platform.h` already
+    // writes a row typedef for the same shape appearing as a return type, so the
+    // cast is spelled through it and the type is preserved exactly.
+    const spelled = arrayRowSpelling(
+      normalizeGlobalDeclType(g.suggestedType || g.dataType || ''));
     if (!spelled) continue;
     if (ambiguousGlobalTypes.has(name)) continue;
     const existing = globalTypes[name];
@@ -3378,6 +3410,14 @@ function buildFuncPtrArgCastTables(
     if (under.replace(/[*&\s]/g, '') === dt.name) continue;
     typedefTargets[dt.name] = under;
   }
+  // A row typedef stands for the array it was written for, so every shape
+  // computed through it is the one the unspelled `T[N]` had. Only the SPELLING
+  // of the cast changes; nothing downstream sees a different type.
+  for (const g of globals) {
+    const row = arrayRowReturn(
+      normalizeGlobalDeclType(g.suggestedType || g.dataType || ''));
+    if (row) typedefTargets[row.typedefName] = `${row.element}${row.dims.map(d => `[${d}]`).join('')}`;
+  }
 
   if (process.env.RECON_DUMP_TABLES) {
     const probe = (process.env.RECON_DUMP_TABLES || '').split(',');
@@ -3399,7 +3439,12 @@ function buildFuncPtrArgCastTables(
     functionReturnTypes,
     functionConventions,
     functionNames: [...functionNames],
-    overloadedFunctionNames: [...bareNameOwners].filter(([, o]) => o.size > 1).map(([n]) => n),
+    overloadedFunctionNames: [...new Set([
+      ...[...bareNameOwners].filter(([, o]) => o.size > 1).map(([n]) => n),
+      // Overloaded by the TARGET headers rather than by the model - the set has
+      // one member here and several there, and the cast has to say which.
+      ...Object.keys(WIN32_OVERLOADED_INTRINSICS),
+    ])],
     globalTypes,
     varArgFunctions: [...varArgFunctions],
     fieldTypes,

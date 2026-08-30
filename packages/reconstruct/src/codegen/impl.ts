@@ -445,8 +445,19 @@ function isValidNamespace(name: string): boolean {
 /**
  * Function names the platform resolves at ROOT scope, whatever namespace Ghidra
  * files them under.
+ *
+ * `main` and `wmain` are NOT among them, and cannot be. C++ reserves `::main`:
+ * it must return `int`, it may not be declared `extern "C"`, and it may not
+ * carry a calling convention — so a forwarder for it is ill-formed whatever the
+ * function behind it looks like. Nor is one ever wanted here: the only `main`
+ * 1.14d has is `Fog::Engine::Application::Service::main` @ 004065e0, which
+ * returns `void` and is stored into a `SERVICE_TABLE_ENTRYA.lpServiceProc` two
+ * statements before `StartServiceCtrlDispatcherA`. The service control manager
+ * dispatches that by the name STRING in the table, not through the linker, so
+ * the process entry point is `WinMain` and this function needs no root-scope
+ * symbol at all.
  */
-const ENTRY_POINT_NAMES = new Set(['WinMain', 'wWinMain', 'main', 'wmain', 'DllMain']);
+const ENTRY_POINT_NAMES = new Set(['WinMain', 'wWinMain', 'DllMain']);
 
 /**
  * Context for code generation, carrying optional registries

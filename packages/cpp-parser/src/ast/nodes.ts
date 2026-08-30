@@ -17,6 +17,19 @@ import type { Trivia } from '../lexer/trivia.js';
 export interface GhidraMetadata {
   originalAddress?: string;        // e.g., "0x00401000"
   originalName?: string;           // Pre-transformation name
+  /**
+   * The FULL name the model spelled at this reference, before a pass shortened
+   * it to something the emitted namespace tree can resolve.
+   *
+   * Ghidra hangs a form's callbacks under a namespace named after the form
+   * (`D2Win::Src::D2WinImage::Push`) while the emitter files them in the parent,
+   * so the reference has to lose that segment - and every one of the eight
+   * `Push`es loses a DIFFERENT segment onto the same `D2Win::Src::Push`. The
+   * shortened spelling is therefore an overload set and no longer identifies
+   * which function is meant; this keeps the spelling that did, for the passes
+   * that resolve a signature by name.
+   */
+  modelQualifiedName?: string;
   decompilerWarnings?: string[];
   addressRanges?: AddressRange[];  // Which binary addresses this code covers
 }

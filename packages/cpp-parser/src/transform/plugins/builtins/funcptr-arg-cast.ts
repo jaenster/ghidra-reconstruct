@@ -224,6 +224,23 @@ function functionArgName(arg: Expression): string | undefined {
   return nameOf(arg);
 }
 
+/**
+ * The same reference under the name the MODEL spelled it with, where a pass has
+ * since shortened it. `D2Win::Src::D2WinImage::Push` and seven siblings all
+ * shorten to `D2Win::Src::Push`, so only the model's spelling still says which
+ * function the address is of.
+ */
+function modelArgName(arg: Expression): string | undefined {
+  let e = arg;
+  if (e.kind === NodeKind.UnaryExpr) {
+    const u = e as UnaryExpr;
+    if (u.operator !== '&') return undefined;
+    e = u.operand as Expression;
+  }
+  if (e.kind !== NodeKind.Identifier && e.kind !== NodeKind.QualifiedId) return undefined;
+  return e.ghidraInfo?.modelQualifiedName;
+}
+
 /** The arity encoded in a signature key `ret(a,b,c)`; -1 when unparseable. */
 function arityOf(sig: string): number {
   const open = sig.indexOf('(');
@@ -269,10 +286,11 @@ function buildTransformer(options: FuncPtrArgCastOptions): Transformer {
   const selectOverload = (value: Expression): Expression => {
     const fnName = functionArgName(value);
     if (!fnName || !overloaded.has(bareOf(fnName))) return value;
+    const lookup = modelArgName(value) ?? fnName;
     const exact = functionPointerTypeFromSpellings(
-      scopedLookup(functionReturnTypes, fnName, enclosingSegments),
-      scopedLookup(functionParamTypes, fnName, enclosingSegments),
-      scopedLookup(functionConventions, fnName, enclosingSegments),
+      scopedLookup(functionReturnTypes, lookup, enclosingSegments),
+      scopedLookup(functionParamTypes, lookup, enclosingSegments),
+      scopedLookup(functionConventions, lookup, enclosingSegments),
     );
     return exact ? (Expr.cast(exact, value) as Expression) : value;
   };
@@ -292,9 +310,15 @@ function buildTransformer(options: FuncPtrArgCastOptions): Transformer {
   const zeroAritySlotsFor = (callee: string): Record<number, string> | undefined =>
     zeroAritySlots[callee] ?? zeroAritySlots[bareOf(callee)];
 
-  const signatureFor = (fn: string): string | undefined => {
+  const signatureFor = (fn: string, model?: string): string | undefined => {
     // A name that also denotes data is not proof of a function.
     if (variableNames.has(bareOf(fn))) return undefined;
+    // The model's own spelling is exact where the shortened one is an overload
+    // set, so it is asked first and only falls back when it has no answer.
+    if (model !== undefined) {
+      const exact = scopedLookup(functionSignatures, model, enclosingSegments);
+      if (exact !== undefined) return exact;
+    }
     return scopedLookup(functionSignatures, fn, enclosingSegments);
   };
 
@@ -312,7 +336,7 @@ function buildTransformer(options: FuncPtrArgCastOptions): Transformer {
 
         if (voidPointerFields.has(fieldName)) {
           const fnName = functionArgName(assign.right);
-          if (!fnName || signatureFor(fnName) === undefined) return undefined;
+          if (!fnName || signatureFor(fnName, modelArgName(assign.right)) === undefined) return undefined;
           return updateNode(assign, {
             right: Expr.cast(Type.pointer(Type.void()), assign.right) as Expression,
           } as Partial<AssignExpr>);
@@ -335,7 +359,7 @@ function buildTransformer(options: FuncPtrArgCastOptions): Transformer {
           const armCast = (arm: Expression): Expression => {
             const armFn = functionArgName(arm);
             if (!armFn) return arm;
-            const armSig = signatureFor(armFn);
+            const armSig = signatureFor(armFn, modelArgName(arm));
             if (armSig === undefined || armSig === target) return arm;
             if (arityOf(armSig) !== arityOf(target)) { noteArityMismatch(typedefName, armFn, armSig, target); return arm; }
             return castTo(typedefName, arm);
@@ -350,7 +374,7 @@ function buildTransformer(options: FuncPtrArgCastOptions): Transformer {
 
         const fnName = functionArgName(assign.right);
         if (!fnName) return undefined;
-        const actual = signatureFor(fnName);
+        const actual = signatureFor(fnName, modelArgName(assign.right));
         if (actual === undefined || actual === target) return undefined;
         if (arityOf(actual) !== arityOf(target)) {
           noteArityMismatch(typedefName, fnName, actual, target);
@@ -376,7 +400,7 @@ function buildTransformer(options: FuncPtrArgCastOptions): Transformer {
           if (!typedefName) return arg;
           const argFn = functionArgName(arg);
           if (!argFn) return arg;
-          const actual = signatureFor(argFn);
+          const actual = signatureFor(argFn, modelArgName(arg));
           if (actual === undefined || arityOf(actual) !== 0) return arg;
           systemChanged = true;
           return castTo(typedefName, arg);
@@ -400,7 +424,7 @@ function buildTransformer(options: FuncPtrArgCastOptions): Transformer {
         // the only spelling that ever compiled.
         if (typedefName === VOID_POINTER_SLOT) {
           const fnName = functionArgName(arg);
-          if (!fnName || signatureFor(fnName) === undefined) return arg;
+          if (!fnName || signatureFor(fnName, modelArgName(arg)) === undefined) return arg;
           changed = true;
           return Expr.cast(Type.pointer(Type.void()), arg) as Expression;
         }
@@ -410,7 +434,7 @@ function buildTransformer(options: FuncPtrArgCastOptions): Transformer {
 
         const argFn = functionArgName(arg);
         if (!argFn) return arg;
-        const actual = signatureFor(argFn);
+        const actual = signatureFor(argFn, modelArgName(arg));
         if (actual === undefined || actual === target) return arg;
 
         // Arity (and by extension calling convention) is not something a cast

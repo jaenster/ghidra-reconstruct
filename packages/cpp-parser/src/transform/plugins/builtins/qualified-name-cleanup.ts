@@ -64,6 +64,19 @@ function segmentName(part: Identifier | TemplateType): string | undefined {
   return part.kind === NodeKind.Identifier ? (part as Identifier).name : undefined;
 }
 
+/** `A::B::f` for a reference built only from plain identifiers; undefined otherwise. */
+function modelName(q: QualifiedId): string | undefined {
+  if (q.name.kind !== NodeKind.Identifier) return undefined;
+  const parts: string[] = [];
+  for (const part of q.qualifier) {
+    const name = segmentName(part);
+    if (name === undefined) return undefined;
+    parts.push(name);
+  }
+  parts.push((q.name as Identifier).name);
+  return parts.join('::');
+}
+
 function cleanQualifier(
   qualifier: (Identifier | TemplateType)[],
   dropped: Set<string>,
@@ -129,17 +142,28 @@ function createQualifiedNameCleanupTransformer(
       const cleaned = cleanQualifier(q.qualifier, dropped, collapseDuplicates, typeNames);
       if (!cleaned) return undefined;
 
+      // What the model spelled here, kept for the passes that resolve a
+      // signature by name. Dropping the form's own segment maps eight distinct
+      // functions onto one spelling; the signature tables still hold the
+      // spelling that told them apart. Recorded only when a name is actually
+      // spellable from the node, and never overwritten: the FIRST pass to
+      // shorten a reference is the one that held the model's answer.
+      const info = modelName(q) === undefined || q.ghidraInfo?.modelQualifiedName !== undefined
+        ? q.ghidraInfo
+        : { ...q.ghidraInfo, modelQualifiedName: modelName(q)! };
+
       // Nothing qualifies the name any more — emit it bare, unless the
       // reference was explicitly root-qualified (`::name`), which must stay.
       if (cleaned.length === 0 && !q.isGlobal && q.name.kind === NodeKind.Identifier) {
         const name = q.name as Identifier;
         return updateNode(name, {
+          ghidraInfo: info ?? name.ghidraInfo,
           leadingTrivia: [...(q.leadingTrivia ?? []), ...(name.leadingTrivia ?? [])],
           trailingTrivia: [...(name.trailingTrivia ?? []), ...(q.trailingTrivia ?? [])],
         } as Partial<Identifier>);
       }
 
-      return updateNode(q, { qualifier: cleaned } as Partial<QualifiedId>);
+      return updateNode(q, { qualifier: cleaned, ghidraInfo: info } as Partial<QualifiedId>);
     },
   });
 }

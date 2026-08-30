@@ -601,6 +601,60 @@ export function arrayRowReturn(type: string | undefined): ArrayRowReturn | null 
   return { element, dims, typedefName: `D2Row_${element}_${dims.join('_')}` };
 }
 
+/**
+ * The type each Ghidra pseudo-op macro `d2_platform.h` writes evaluates to.
+ *
+ * These are the emitter's OWN macros, so their result types are not inferred —
+ * they are the outermost cast of the line the emitter wrote, read off it. They
+ * are supplied to the cast passes exactly as if they were function return types,
+ * because for the purpose of typing an expression that is what they are: without
+ * them `f(SUB84(x, 0))` has an argument of no known type, and the pass that
+ * would otherwise write the pointer cast the slot needs leaves it alone. The
+ * identifier form of the same argument — `f(in_stack_ffffffec)` — is already
+ * cast, so the gap was in the inference, not in the rule.
+ *
+ * Kept beside `generatePlatformHeader`'s macro block, which is the only place
+ * these are defined.
+ */
+export const GHIDRA_PSEUDO_OP_RESULT_TYPES: Readonly<Record<string, string>> = {
+  CONCAT11: 'uint16_t',
+  CONCAT12: 'uint32_t',
+  CONCAT13: 'uint32_t',
+  CONCAT21: 'uint32_t',
+  CONCAT22: 'uint32_t',
+  CONCAT31: 'uint32_t',
+  CONCAT44: 'uint64_t',
+  CONCAT14: 'uint64_t',
+  CONCAT41: 'uint64_t',
+  CONCAT24: 'uint64_t',
+  CONCAT42: 'uint64_t',
+  SUB41: 'uint8_t',
+  SUB42: 'uint16_t',
+  SUB43: 'uint32_t',
+  SUB84: 'uint32_t',
+  SUB82: 'uint16_t',
+  SUB81: 'uint8_t',
+  SUB21: 'uint8_t',
+  SUB14: 'uint8_t',
+  ZEXT14: 'uint32_t',
+  ZEXT24: 'uint32_t',
+  ZEXT48: 'uint64_t',
+  SEXT14: 'int32_t',
+  SEXT24: 'int32_t',
+  SEXT48: 'int64_t',
+};
+
+/**
+ * The same type, with a `T[N] *` spelled through its row typedef so it can be
+ * written where only a plain type name is legal — a prefix cast, above all:
+ * `(byte[32768] *)p` is not C++, and `(byte *)p` names one element rather than
+ * the whole row. Anything else comes back untouched.
+ */
+export function arrayRowSpelling(type: string): string {
+  const row = arrayRowReturn(type);
+  return row ? `${row.typedefName} *` : type;
+}
+
 /** The `typedef` lines the array-row returns in a build need, deduplicated. */
 export function arrayRowTypedefLines(returnTypes: Iterable<string | undefined>): string[] {
   const byName = new Map<string, string>();
@@ -1245,6 +1299,8 @@ export function generatePlatformHeader(
 
 
   // Ghidra CONCAT macros (byte concatenation intrinsics)
+  // The type each of these yields is recorded in GHIDRA_PSEUDO_OP_RESULT_TYPES
+  // below; a macro added or rewidened here must be changed there too.
   lines.push('// Ghidra CONCAT macros — CONCATmn concatenates m-byte and n-byte values');
   lines.push('#define CONCAT11(a, b) ((uint16_t)(((uint16_t)(uint8_t)(a) << 8) | (uint8_t)(b)))');
   lines.push('#define CONCAT12(a, b) ((uint32_t)(((uint32_t)(uint8_t)(a) << 16) | (uint16_t)(b)))');
@@ -1524,7 +1580,7 @@ export function generatePlatformHeader(
   // dereferences it to get the row back. Spelling that through a typedef keeps
   // every return-type path on an ordinary pointer; see `arrayRowReturn`.
   if (options.arrayRowTypedefs && options.arrayRowTypedefs.length > 0) {
-    lines.push('// Array rows returned by pointer (Ghidra `T[N] *` return types)');
+    lines.push('// Array rows held by pointer (Ghidra `T[N] *` return and global types)');
     for (const def of options.arrayRowTypedefs) lines.push(def);
     lines.push('');
   }

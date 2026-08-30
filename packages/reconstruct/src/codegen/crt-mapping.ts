@@ -692,6 +692,33 @@ export const WIN32_ZERO_ARITY_CALLBACK_SLOTS: Record<string, Record<number, stri
 };
 
 /**
+ * Win32 names the TARGET toolchain declares as an overload set, and the exact
+ * type that picks the member the import is.
+ *
+ * `pfnInterlocked = (code *)InterlockedCompareExchange;` was a single function's
+ * address when MSVC compiled it. mingw's `<winbase.h>` writes
+ * `#define InterlockedCompareExchange _InterlockedCompareExchange` onto a GCC
+ * intrinsic that is declared more than once, so the bare name is an overload set
+ * and its address cannot be taken at all — "overloaded function with no
+ * contextual type information", six times in `BnSend.cpp` alone. The disagreement
+ * is between the original source and the headers it is being recompiled against,
+ * not anything the database records: Ghidra has no `Function` for an import
+ * thunk, so every signature table misses the name by construction.
+ *
+ * Spelled as the emitted declaration spells it — the `volatile` and the `__cdecl`
+ * are part of the type, and a cast that omits either selects nothing.
+ */
+export const WIN32_OVERLOADED_INTRINSICS: Record<string, {
+  returnType: string; paramTypes: string[]; convention: string;
+}> = {
+  InterlockedCompareExchange: {
+    returnType: 'LONG',
+    paramTypes: ['LONG volatile *', 'LONG', 'LONG'],
+    convention: '__cdecl',
+  },
+};
+
+/**
  * Win32 SDK headers that declare imports the reconstruction calls but that
  * `<windows.h>` alone does not pull in. Preferring the real header over a
  * hand-written prototype keeps the signature honest and picks up the SDK's own
