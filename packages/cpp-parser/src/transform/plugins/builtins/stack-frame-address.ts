@@ -30,16 +30,26 @@
  *                                        not the compiler's whim — fixes that
  *                                        layout, which is why the step is only
  *                                        taken across a parameter;
- *   - one byte BELOW an ARRAY          → `((uint8_t*)&arr - 1)`. MSVC starts an
+ *   - one byte BELOW an ARRAY, or a
+ *     whole number of ELEMENTS below
+ *     one whose elements are wider     → `((uint8_t*)&arr - n)`. MSVC starts an
  *                                        inlined `strcat`/`strlen` scan one byte
- *                                        under the buffer and pre-increments, so
- *                                        the first byte read is `arr[0]` and the
+ *                                        under the buffer and pre-increments, and
+ *                                        a strided walk one stride under it, so
+ *                                        the first thing read is `arr[0]` and the
  *                                        walk stays inside the array. The step is
  *                                        taken only below an array, whose extent
  *                                        is what keeps the walk on the object
- *                                        that anchors it — one byte below a
- *                                        scalar means the frame is modelled too
- *                                        small, and that belongs in Ghidra;
+ *                                        that anchors it — below a scalar it
+ *                                        means the frame is modelled too small,
+ *                                        and that belongs in Ghidra;
+ *   - the frame pointer as a VALUE     → `((uint8_t*)__builtin_frame_address(0))`,
+ *                                        for the hand-rolled `CONTEXT.Ebp` store
+ *                                        that is `PUSH EBP; POP [EBP-0x2dc]`.
+ *                                        Refused for the whole body the moment
+ *                                        the value is offset to reach a local,
+ *                                        because that spelling compiles and is
+ *                                        silently wrong;
  *   - nothing that owns it             → Ghidra's own name, left in place.
  *
  * The last case does not compile, and that is the point. An unowned frame slot
@@ -66,6 +76,9 @@ import type {
   BinaryExpr,
   CStyleCastExpr,
   IntegerLiteralExpr,
+  AssignExpr,
+  SubscriptExpr,
+  ArrayType,
   PointerType,
   TypedefType,
   TypeNode,
@@ -257,12 +270,155 @@ function createFrameIdentityTransformer(): Transformer {
   });
 }
 
+
+/**
+ * The frame-pointer slot. A standard prologue pushes EBP at frame offset -4, so
+ * `&stack0xfffffffc` in an EBP-framed function IS the frame pointer.
+ */
+const FRAME_POINTER_OFFSET = -4;
+
+/**
+ * `((uint8_t*)__builtin_frame_address(0))` — the frame pointer as a VALUE.
+ *
+ * `PUSH EBP; POP [EBP-0x2dc]` inside a hand-rolled `CONTEXT` fill is storing the
+ * frame pointer itself; the address is the datum. The `uint8_t*` cast is the
+ * same anchor spelling `anchoredAddress` uses, and it is load-bearing: the
+ * builtin is `void*`, which reaches no other pointer type in C++.
+ */
+function frameAddressValue(from: ASTNode): Expression {
+  const at = { location: from.location, leadingTrivia: [] as never[], trailingTrivia: [] as never[] };
+  const zero: IntegerLiteralExpr = {
+    kind: NodeKind.IntegerLiteral, value: 0n, suffix: '', base: 10, raw: '0', ...at,
+  };
+  const call = {
+    kind: NodeKind.CallExpr,
+    callee: makeIdentifier('__builtin_frame_address', from),
+    arguments: [zero],
+    ...at,
+  } as unknown as Expression;
+  const byteType: TypedefType = { kind: NodeKind.TypedefType, name: makeIdentifier('uint8_t', from), ...at };
+  const bytePointer: PointerType = { kind: NodeKind.PointerType, pointee: byteType, qualifiers: [], ...at };
+  const cast: CStyleCastExpr = { kind: NodeKind.CStyleCastExpr, type: bytePointer, expression: call, ...at };
+  return { kind: NodeKind.ParenExpr, expression: cast, ...at } as unknown as Expression;
+}
+
+/**
+ * Is the frame pointer used in this body as a VALUE and nothing else?
+ *
+ * The distinction decides whether `&stack0xfffffffc` may become the frame
+ * pointer at all, and getting it wrong is worse than the error it replaces.
+ * Two bodies in the corpus spell the very same statement:
+ *
+ *     uint8_t *pContextEbp = &stack0xfffffffc;   // Fog/Debug.cpp — a CONTEXT.Ebp store
+ *     uint8_t *puVar3      = &stack0xfffffffc;   // D2Client/UNIT/Item.cpp
+ *
+ * and the second one later reads `*(byte**)(puVar3 - 0xc)` — a LOCAL, which
+ * Ghidra's frame already holds under its own name. Materialising a frame pointer
+ * there produces code that compiles and reads whatever the compiler happened to
+ * put at that offset, which is a silent wrong answer.
+ *
+ * So the value is followed: every name it flows into is tainted, and if any
+ * tainted name is ever an operand of pointer arithmetic or the base of a
+ * subscript, the whole body is refused and the loud error stays. Refusing the
+ * BODY rather than the site is deliberate — the flow is through assignments the
+ * decompiler split across branches, and a per-site answer would be a guess.
+ */
+function frameAddressIsValueOnly(root: ASTNode): boolean {
+  const tainted = new Set<string>();
+  // The decompiler assigns through several names across branches, so the flow is
+  // closed over rather than walked once.
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const n of traverseAST(root)) {
+      let name: string | undefined;
+      let value: Expression | undefined;
+      if (n.kind === NodeKind.VariableDecl) {
+        const v = n as VariableDecl;
+        name = v.name?.name;
+        value = v.initializer as Expression | undefined;
+      } else if (n.kind === NodeKind.AssignExpr) {
+        const a = n as AssignExpr;
+        if (a.operator !== '=') continue;
+        const lhs = unwrapParens(a.left);
+        if (lhs.kind !== NodeKind.Identifier) continue;
+        name = (lhs as Identifier).name;
+        value = a.right;
+      }
+      if (!name || !value || tainted.has(name)) continue;
+      const rhs = unwrapParens(value);
+      const flows = frameAddressOffset(rhs) === FRAME_POINTER_OFFSET
+        || (rhs.kind === NodeKind.Identifier && tainted.has((rhs as Identifier).name));
+      if (!flows) continue;
+      tainted.add(name);
+      changed = true;
+    }
+  }
+
+  const isTaintedRef = (e: Expression): boolean => {
+    const u = unwrapParens(e);
+    return u.kind === NodeKind.Identifier && tainted.has((u as Identifier).name);
+  };
+  for (const n of traverseAST(root)) {
+    if (n.kind === NodeKind.BinaryExpr) {
+      const b = n as BinaryExpr;
+      if (b.operator !== '+' && b.operator !== '-') continue;
+      if (isTaintedRef(b.left) || isTaintedRef(b.right)) return false;
+    } else if (n.kind === NodeKind.SubscriptExpr) {
+      if (isTaintedRef((n as SubscriptExpr).array)) return false;
+    } else if (n.kind === NodeKind.AssignExpr) {
+      const a = n as AssignExpr;
+      if (a.operator !== '+=' && a.operator !== '-=') continue;
+      if (isTaintedRef(a.left)) return false;
+    }
+  }
+  return true;
+}
+
+
+/**
+ * Each declared array's element size in bytes.
+ *
+ * Ghidra's frame carries a slot's total BYTE extent and no element type, and the
+ * emitted declaration carries the element count and no byte size. One is the
+ * other's missing half: `D2RoomExStrc *nRoomPtrs[60]` in a 240-byte slot is a
+ * 4-byte stride. Derived rather than computed from the type, because a `sizeof`
+ * over reconstructed structs is exactly the number the emitter does not have.
+ *
+ * Only an exact division counts. A slot Ghidra sized differently from the
+ * declaration is a disagreement, and guessing a stride from it would put an
+ * address on the wrong element.
+ */
+function arrayElementSizes(root: ASTNode, slots: StackSlot[]): Map<string, number> {
+  const bySlotName = new Map<string, number>();
+  for (const s of slots) if (s.isArray) bySlotName.set(s.name, s.size);
+
+  const sizes = new Map<string, number>();
+  for (const n of traverseAST(root)) {
+    if (n.kind !== NodeKind.VariableDecl) continue;
+    const decl = n as VariableDecl;
+    const name = decl.name?.name;
+    if (!name) continue;
+    const bytes = bySlotName.get(name);
+    if (bytes === undefined) continue;
+    const array = decl.type && decl.type.kind === NodeKind.ArrayType ? (decl.type as ArrayType) : null;
+    const dim = array?.size;
+    if (!dim || dim.kind !== NodeKind.IntegerLiteral) continue;
+    const count = Number((dim as IntegerLiteralExpr).value);
+    if (!Number.isFinite(count) || count <= 0) continue;
+    if (bytes % count !== 0) continue;
+    sizes.set(name, bytes / count);
+  }
+  return sizes;
+}
+
 function createFrameSlotTransformer(slots: StackSlot[]): Transformer {
   const byOffset = new Map<number, StackSlot>();
   for (const s of slots) if (!byOffset.has(s.offset)) byOffset.set(s.offset, s);
 
   return (root: ASTNode) => {
     const declared = declaredNames(root);
+    const elementSizes = arrayElementSizes(root, slots);
+    const framePointerIsValue = frameAddressIsValueOnly(root);
     return createKindTransformer(NodeKind.UnaryExpr, (node) => {
       const unary = node as UnaryExpr;
       if (unary.operator !== '&') return undefined;
@@ -297,6 +453,30 @@ function createFrameSlotTransformer(slots: StackSlot[]): Transformer {
           if (offset !== s.offset - 1) continue;
           return anchoredAddress(s, -1, unary);
         }
+
+        // A whole number of ELEMENTS below an array of elements wider than a
+        // byte. The byte rule above is the same walk on a `char` buffer: MSVC
+        // pre-advances a strided walk from one stride under the object, so the
+        // first thing read is element 0 and the walk stays inside the array.
+        // `&stack0xfffffee0` against `D2RoomExStrc *nRoomPtrs[60]` is exactly
+        // `&nRoomPtrs[-2]`.
+        //
+        // An ELEMENT boundary is what makes this different from "some address
+        // near an array": an offset that is not a multiple of the stride is not
+        // a pre-advanced walk and gets no anchor. That is also why a `char`
+        // array is excluded here rather than reached with a bigger radius —
+        // every offset is an element boundary in a byte array, and the one-byte
+        // rule is the whole of what the corpus justifies for those. The reach
+        // stops at the array's own length, and the NEAREST array wins.
+        let below: StackSlot | undefined;
+        for (const s of slots) {
+          if (!s.isArray || !declared.has(s.name)) continue;
+          if (offset >= s.offset || s.offset - offset > s.size) continue;
+          const stride = elementSizes.get(s.name);
+          if (!stride || stride <= 1 || (s.offset - offset) % stride !== 0) continue;
+          if (!below || s.offset - offset < below.offset - offset) below = s;
+        }
+        if (below) return anchoredAddress(below, offset - below.offset, unary);
       }
 
       // The address just past a parameter: the varargs list. `va_start(ap, fmt)`
@@ -312,6 +492,12 @@ function createFrameSlotTransformer(slots: StackSlot[]): Transformer {
         // parameter is `va_list`, so spell the conversion the ABI already makes
         // rather than leaving a `uint8_t*` the callee cannot take.
         return vaListCast(anchoredAddress(s, s.size, unary), unary);
+      }
+
+      // The frame pointer itself, consumed as a value. See
+      // `frameAddressIsValueOnly` for why the whole body has to agree.
+      if (offset === FRAME_POINTER_OFFSET && framePointerIsValue) {
+        return frameAddressValue(unary);
       }
 
       // Nothing in the frame owns this address. Leave Ghidra's name, so it fails

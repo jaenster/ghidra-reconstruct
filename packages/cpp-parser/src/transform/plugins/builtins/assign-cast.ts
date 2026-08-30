@@ -64,6 +64,13 @@ export interface AssignCastOptions extends PluginOptions {
   globalTypes?: Record<string, string>;
   /** Funcdef typedef names — a slot spelled with one belongs to funcptr-arg-cast */
   funcdefNames?: string[];
+  /**
+   * Funcdef typedefs a FUNCTION of the same name hides. `Draw` is both the
+   * callback typedef and one of the callbacks; unqualified, the function wins
+   * and `(Draw)p` parses as a call. The typedef is emitted at root scope, so the
+   * cast has to say `(::Draw)` to reach it.
+   */
+  rootQualifiedTypedefs?: string[];
   /** The enclosing function's own parameter and local type spellings */
   enclosingVarTypes?: Record<string, string>;
   /** Field name → declared type, where every aggregate declaring it agrees */
@@ -170,6 +177,7 @@ export function createAssignCastTransformer(options?: PluginOptions): Transforme
   const returnTypes = o.functionReturnTypes ?? {};
   const globalTypes = o.globalTypes ?? {};
   const funcdefNames = cachedSet(o.funcdefNames);
+  const rootQualifiedTypedefs = cachedSet(o.rootQualifiedTypedefs);
   const enclosingVarTypes = o.enclosingVarTypes ?? {};
   const fieldTypes = o.fieldTypes ?? {};
   const typedefTargets = o.typedefTargets ?? {};
@@ -407,6 +415,16 @@ export function createAssignCastTransformer(options?: PluginOptions): Transforme
        * The cast this store needs, or null when it needs none. Returns the
        * finished expression so the pointer→word case can spell its two steps.
        */
+      /**
+       * The funcdef slot's type, spelled so it reaches the TYPEDEF. A funcdef
+       * whose name a function shares is hidden by that function at every scope
+       * the cast could be written in, so it is named from the root.
+       */
+      const funcdefCastType = (want: Target): TypeNode => {
+        const name = canonicalBase(want.shape.base).replace(/^::/, '');
+        return rootQualifiedTypedefs.has(name) ? Type.typedefAt(name, true) : want.node;
+      };
+
       const castFor = (want: Target, rhs: Expression): Expression | null => {
         if (funcdefNames.has(canonicalBase(want.shape.base))) {
           // `funcptr-arg-cast` owns this slot because it can compare the two
@@ -421,7 +439,7 @@ export function createAssignCastTransformer(options?: PluginOptions): Transforme
           // second prototype for `funcptr-arg-cast` to compare and the store
           // would otherwise reach no pass at all.
           if (!untyped || untyped.stars !== 1 || !(isVoid(untyped) || isGhidraCode(untyped))) return null;
-          return Expr.cast(want.node, rhs);
+          return Expr.cast(funcdefCastType(want), rhs);
         }
         // Nothing converts to a struct by value; writing the cast only invents
         // an "invalid cast" on top of the disagreement already there.

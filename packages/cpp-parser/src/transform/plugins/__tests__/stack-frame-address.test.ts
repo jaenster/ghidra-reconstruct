@@ -66,6 +66,38 @@ describe('stack-frame-address', () => {
     assert.ok(!out.includes('(0)['), out);
   });
 
+  it('anchors a whole ELEMENT below an array of wider elements', () => {
+    // `D2RoomExStrc *nRoomPtrs[60]` in a 240-byte slot is a 4-byte stride, so
+    // -288 against a slot starting at -280 is `&nRoomPtrs[-2]` — the strided
+    // walk MSVC pre-advances from one stride under the object.
+    const slots = [{ name: 'nRoomPtrs', offset: -280, size: 240, isArray: true }];
+    const out = run('void f() { D2RoomExStrc* nRoomPtrs[60]; p = &stack0xfffffee0; }', slots);
+    assert.ok(/\(uint8_t\s*\*\)&nRoomPtrs - 8/.test(out), out);
+    assert.ok(!out.includes('stack0x'), out);
+  });
+
+  it('refuses an offset below an array that is not an element boundary', () => {
+    // Not a stride, so not a pre-advanced walk. No anchor, and the loud error stays.
+    const slots = [{ name: 'nRoomPtrs', offset: -280, size: 240, isArray: true }];
+    const out = run('void f() { D2RoomExStrc* nRoomPtrs[60]; p = &stack0xfffffee2; }', slots);
+    assert.ok(out.includes('stack0xfffffee2'), out);
+  });
+
+  it('spells the frame pointer as a value when nothing offsets it', () => {
+    // `PUSH EBP; POP [EBP-0x2dc]` — the frame pointer IS the datum being stored.
+    const out = run('void f() { uint8_t* pContextEbp = &stack0xfffffffc; }');
+    assert.ok(out.includes('__builtin_frame_address(0)'), out);
+    assert.ok(!out.includes('stack0x'), out);
+  });
+
+  it('REFUSES the frame pointer when the body offsets it to reach a local', () => {
+    // The Item.cpp shape. A materialised frame pointer here compiles and reads
+    // whatever the compiler put at -0xc, which is a silent wrong answer.
+    const out = run('void f() { uint8_t* puVar3 = &stack0xfffffffc; p = *(byte**)(puVar3 - 0xc); }');
+    assert.ok(out.includes('stack0xfffffffc'), out);
+    assert.ok(!out.includes('__builtin_frame_address'), out);
+  });
+
   it('anchors one byte below an array on the array', () => {
     // MSVC's inlined strcat starts the scan at `szPath - 1` and pre-increments,
     // so the first byte it reads is `szPath[0]` and the walk stays in the array.

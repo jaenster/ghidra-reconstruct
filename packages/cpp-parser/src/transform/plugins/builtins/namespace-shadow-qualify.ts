@@ -135,7 +135,11 @@ function buildTransformer(options: NamespaceShadowQualifyOptions): Transformer {
     const hit = memberCache.get(key);
     if (hit !== undefined) return hit;
     let shadowed = false;
-    if (known.has(qual) && scopedSymbols.has(key)) {
+    // `scopedSymbols` carrying `qual::name` is the proof that the generator
+    // emits a namespace of that path with that member in it - stronger than the
+    // namespace table, which is built from FUNCTION paths and never sees a
+    // namespace that holds only data.
+    if (scopedSymbols.has(key)) {
       const cut = qual.indexOf('::');
       const first = cut === -1 ? qual : qual.slice(0, cut);
       for (const scope of scopes) {

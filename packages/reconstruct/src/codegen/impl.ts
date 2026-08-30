@@ -2061,6 +2061,7 @@ function transformDecompiledCode(
         funcdefDecls: context.funcPtrArgCasts.funcdefDecls,
         structFieldFuncdefs: context.funcPtrArgCasts.structFieldFuncdefs,
         fieldFuncdefs: context.funcPtrArgCasts.fieldFuncdefs,
+        rootQualifiedTypedefs: context.funcPtrArgCasts.rootQualifiedTypedefs,
         enclosingVarTypes,
       };
       perPluginOptions['bitfield-alias-lower'] = {
