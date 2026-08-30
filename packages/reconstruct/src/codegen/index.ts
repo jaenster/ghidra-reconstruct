@@ -3513,7 +3513,7 @@ function buildFuncPtrArgCastTables(
   if (process.env.RECON_DUMP_TABLES) {
     const probe = (process.env.RECON_DUMP_TABLES || '').split(',');
     for (const k of probe) {
-      console.error(`[probe] ${k}: params=${JSON.stringify(functionParamTypes[k])} ret=${JSON.stringify(functionReturnTypes[k])} isFn=${functionNames.has(k)} varArg=${varArgFunctions.has(k)} isVar=${variableNames.includes(k)} global=${JSON.stringify(globalTypes[k])} funcdefSlots=${JSON.stringify(paramFuncdefs[k])}`);
+      console.error(`[probe] ${k}: params=${JSON.stringify(functionParamTypes[k])} ret=${JSON.stringify(functionReturnTypes[k])} isFn=${functionNames.has(k)} varArg=${varArgFunctions.has(k)} isVar=${variableNames.includes(k)} global=${JSON.stringify(globalTypes[k])} funcdefSlots=${JSON.stringify(paramFuncdefs[k])} sig=${JSON.stringify(functionSignatures[k])}`);
     }
   }
   return {

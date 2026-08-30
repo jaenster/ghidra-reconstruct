@@ -716,6 +716,13 @@ export const WIN32_ZERO_ARITY_CALLBACK_SLOTS: Record<string, Record<number, stri
 export const WIN32_ZERO_ARITY_CALLBACK_CASTS: Record<string, Record<number, {
   returnType: string; paramTypes: string[]; convention?: string;
 }>> = {
+  // Keyed on the name the TRANSFORM sees, which is not the name the output
+  // carries: Ghidra spells the callee `compiler::_atexit`, and `compiler` is an
+  // excluded namespace whose members reach the emitted text as the bare CRT name
+  // long after the cast passes have run. `_atexit` is what the lookup matches
+  // (it also tries the bare last segment); `atexit` is there for the day the
+  // database is renamed.
+  _atexit: { 0: { returnType: 'void', paramTypes: [], convention: '__cdecl' } },
   atexit: { 0: { returnType: 'void', paramTypes: [], convention: '__cdecl' } },
 };
 
