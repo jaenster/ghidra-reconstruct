@@ -22,7 +22,7 @@ import type { MethodConversionRegistry } from '../methods/index.js';
 import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js';
 import { namespaceResolution, renderNamespace } from './namespace-resolution.js';
 import { isGhidraGeneratedName, suggestBetterName, type FuncPtrTarget } from '@ghidra-mcp/cpp-parser';
-import { isPlatformOrBuiltinType, isLibraryType, normalizeSignatureType, normalizeWideCharType, collapseFuncPtrTypedef, rootQualifyShadowedType, emittedParameterName, WINDOWS_STRUCTS, platformDeclaredFunctionNames } from './platform-types.js';
+import { isPlatformOrBuiltinType, isLibraryType, normalizeSignatureType, normalizeWideCharType, collapseFuncPtrTypedef, rootQualifyShadowedType, emittedParameterName, arrayRowReturn, WINDOWS_STRUCTS, platformDeclaredFunctionNames } from './platform-types.js';
 import { generateExternDeclaration, isFuncDefTypedefName, sanitizeSymbolName, orderForwardDeclarations, type ForwardDeclaration } from './globals-header.js';
 import { declarationHead, pointerConvention } from './calling-convention.js';
 
@@ -32,6 +32,20 @@ export function sigType(type: string): string {
   return rootQualifyShadowedType(
     collapseFuncPtrTypedef(normalizeSignatureType(type), isFuncDefTypedefName)
   );
+}
+
+/**
+ * The spelling for a RETURN type.
+ *
+ * Identical to {@link sigType} except for `T[N] *`: a pointer to an array is a
+ * pointer to the whole row, and flattening it to `T *` (which is right for a
+ * parameter) makes the caller's `*f(...)` yield a `T`. The row goes through the
+ * typedef `d2_platform.h` writes for it, so the spelling stays an ordinary
+ * pointer everywhere it has to be handled.
+ */
+export function returnSigType(type: string): string {
+  const row = arrayRowReturn(type);
+  return row ? `${row.typedefName} *` : sigType(type);
 }
 
 /**
@@ -825,9 +839,9 @@ export function generateFunctionDeclaration(
     addressComment = ` // 1.14d: ${stripAddr(func.address)}`;
   }
 
-  const cleanName = emittedFunctionName(func, sigType(func.returnType));
+  const cleanName = emittedFunctionName(func, returnSigType(func.returnType));
 
-  return `${commentBlock}${declarationHead(sigType(func.returnType), func.callingConvention)}${cleanName}(${params});${addressComment}`;
+  return `${commentBlock}${declarationHead(returnSigType(func.returnType), func.callingConvention)}${cleanName}(${params});${addressComment}`;
 }
 
 /**

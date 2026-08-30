@@ -22,7 +22,7 @@ import { CPP_KEYWORDS } from './header.js';
 import { transformGhidraCode, preprocessGhidraCode, isGhidraGeneratedName, suggestBetterName, takeFuncPtrArgCastTypedefs, type TransformResult, type FuncPtrTarget } from '@ghidra-mcp/cpp-parser';
 import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js';
 import { namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
-import { cleanFunctionComment, guardedFuncDefTypedef, emittedFunctionName } from './header.js';
+import { cleanFunctionComment, guardedFuncDefTypedef, emittedFunctionName, returnSigType } from './header.js';
 import { declarationHead } from './calling-convention.js';
 import { normalizeSignatureType, collapseFuncPtrTypedef, rootQualifyShadowedType, emittedParameterName, getAggregateTypeNames } from './platform-types.js';
 import { generateStaticLocalsBlock, emitDataValue, inferArrayDeclaration, normalizeArrayDeclaration, braceArrayInitializer, isFuncDefTypedefName, getKnownFuncDefTypedefs, getKnownEnumConstants, setInitializerNamespace, renderGlobalScalarInitializer, recordDeclaredName } from './globals-header.js';
@@ -1461,7 +1461,7 @@ function signatureParameterList(func: ExtractedFunction): string {
  * emitting one that will not parse.
  */
 function wrapperSignature(func: ExtractedFunction): { returnType: string; params: string } | undefined {
-  const returnType = sigType(func.returnType).trim();
+  const returnType = returnSigType(func.returnType).trim();
   if (!returnType) return undefined;
   return { returnType, params: signatureParameterList(func) };
 }
@@ -1470,8 +1470,8 @@ function generateFunctionSignature(func: ExtractedFunction): string {
   const params = signatureParameterList(func);
   // The declaration side spells the name with the SAME function, so a definition
   // and its declaration cannot legalize a Ghidra name differently.
-  const cleanName = emittedFunctionName(func, sigType(func.returnType));
-  return `${declarationHead(sigType(func.returnType), func.callingConvention)}${cleanName}(${params})`;
+  const cleanName = emittedFunctionName(func, returnSigType(func.returnType));
+  return `${declarationHead(returnSigType(func.returnType), func.callingConvention)}${cleanName}(${params})`;
 }
 
 /**

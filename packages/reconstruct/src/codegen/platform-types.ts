@@ -564,6 +564,55 @@ export function collapseFuncPtrTypedef(
 // =============================================================================
 
 /**
+ * A RETURN type of the shape `T[N] *` — a pointer to an array, not a pointer to
+ * an element.
+ *
+ * For a PARAMETER the two are interchangeable (an array argument has already
+ * decayed by the time it is passed), which is why `normalizeSignatureType`
+ * flattens `T[N] *` to `T *` there. For a return type they are not: the caller
+ * writes `*f(...)` to get the row, and against a flattened `char *` that
+ * dereference yields a `char`. `ITEM_GetTxtItemTypes_invgfx` is the case —
+ * Ghidra records `char[32] *`, the row is one `itemtypes.txt` invgfx column.
+ *
+ * The row is spelled through a typedef rather than a `T (*f(args))[N]`
+ * declarator so that every place that handles a return type — the header, the
+ * definition, and the wrapper the body is parsed inside — keeps working with an
+ * ordinary pointer spelling.
+ */
+export interface ArrayRowReturn {
+  /** The element type, already normalized. */
+  readonly element: string;
+  /** The array extents, outermost first. */
+  readonly dims: readonly number[];
+  /** The typedef `d2_platform.h` writes for this row. */
+  readonly typedefName: string;
+}
+
+export function arrayRowReturn(type: string | undefined): ArrayRowReturn | null {
+  if (!type) return null;
+  const m = type.trim().match(/^([^*&\[\]]+?)((?:\s*\[\d+\])+)\s*\*$/);
+  if (!m) return null;
+  const element = normalizeSignatureType(m[1].trim());
+  // A row typedef has to be spellable as `<element> <name>[dims]`, so anything
+  // that is not a plain type name is left to the existing flattening.
+  if (!/^[A-Za-z_]\w*$/.test(element)) return null;
+  const dims = [...m[2].matchAll(/\[(\d+)\]/g)].map(d => Number(d[1]));
+  if (dims.length === 0 || dims.some(d => d <= 0)) return null;
+  return { element, dims, typedefName: `D2Row_${element}_${dims.join('_')}` };
+}
+
+/** The `typedef` lines the array-row returns in a build need, deduplicated. */
+export function arrayRowTypedefLines(returnTypes: Iterable<string | undefined>): string[] {
+  const byName = new Map<string, string>();
+  for (const t of returnTypes) {
+    const row = arrayRowReturn(t);
+    if (!row) continue;
+    byName.set(row.typedefName, `typedef ${row.element} ${row.typedefName}${row.dims.map(d => `[${d}]`).join('')};`);
+  }
+  return [...byName.keys()].sort().map(n => byName.get(n)!);
+}
+
+/**
  * Generate d2_platform.h content with cross-platform type definitions
  */
 
@@ -776,6 +825,8 @@ export function generatePlatformHeader(
   options: {
     seedType?: boolean;
     anonymousAggregates?: string[];
+    /** `typedef T D2Row_T_N[N];` for every `T[N] *` RETURN type in the build. */
+    arrayRowTypedefs?: string[];
     /** `in_addr` under Ghidra's names, claimed ahead of <winsock2.h>. */
     winsockInAddr?: string[];
   } = {},
@@ -1467,6 +1518,15 @@ export function generatePlatformHeader(
       lines.push(def);
       lines.push('');
     }
+  }
+
+  // A function returning `T[N] *` returns a pointer to the ROW, and the caller
+  // dereferences it to get the row back. Spelling that through a typedef keeps
+  // every return-type path on an ordinary pointer; see `arrayRowReturn`.
+  if (options.arrayRowTypedefs && options.arrayRowTypedefs.length > 0) {
+    lines.push('// Array rows returned by pointer (Ghidra `T[N] *` return types)');
+    for (const def of options.arrayRowTypedefs) lines.push(def);
+    lines.push('');
   }
 
   // Include shared enum definitions (all Ghidra enum types collected into one file)

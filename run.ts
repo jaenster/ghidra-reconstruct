@@ -153,6 +153,7 @@ async function main() {
         /^CRT$/,
         /^_Wrappers$/,
         /^DName(Node|StatusNode)?$/,
+        /^pDNameNode$/,
         /^UnDecorator$/,
         /^EXCEPTION$/i,
         /^LDBL12$/,

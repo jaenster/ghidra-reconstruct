@@ -60,7 +60,7 @@ import { organizeByNamespace, getFilePath, setModuleNames, setNamespaceCollision
 import { buildNamespaceResolution, namespaceResolution, renderNamespace } from './namespace-resolution.js';
 import { resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, getDeclarationClosureReport, isUnreferenceableArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType } from './globals-header.js';
 import { harvestAnnotatedParameterTypes } from './win32-signatures.js';
-import { isPlatformOrBuiltinType, isLibraryType, generatePlatformHeader, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, platformVoidPointerFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
+import { isPlatformOrBuiltinType, isLibraryType, generatePlatformHeader, arrayRowTypedefLines, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, platformVoidPointerFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
 import { createOverrideRegistry } from '../overrides/index.js';
 import { createLibraryRegistry } from '../library/index.js';
 import { createMethodConversionRegistry, getOrCreateRegistry, applyMethodConversions, detectMethodConversionsFromTags, type MethodCallMapping, type MethodConversionRegistry } from '../methods/index.js';
@@ -379,6 +379,7 @@ export function generateProject(
     content: generatePlatformHeader({
       seedType: dataTypes.some(dt => dt.name === 'D2SeedStrc'),
       anonymousAggregates: buildAnonymousAggregateDefs(dataTypes, functions, inAddrClaim.claimed),
+      arrayRowTypedefs: arrayRowTypedefLines(functions.map(f => f.returnType)),
       winsockInAddr: inAddrClaim.lines,
     }),
     type: 'header',
