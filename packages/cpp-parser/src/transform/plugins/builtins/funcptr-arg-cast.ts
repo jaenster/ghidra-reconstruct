@@ -438,6 +438,10 @@ function buildTransformer(options: FuncPtrArgCastOptions): Transformer {
           if (!argFn) return arg;
           const actual = signatureFor(argFn, modelArgName(arg));
           if (actual === undefined || arityOf(actual) !== 0) return arg;
+          // A callback that already IS the slot's prototype needs no cast, and
+          // writing one anyway is noise in a body that compiles. Four of the
+          // seven `atexit` sites are `void (void)` already.
+          if (actual === `${spec.returnType}(${spec.paramTypes.join(',')})`) return arg;
           const castType = functionPointerTypeFromSpellings(
             spec.returnType, spec.paramTypes, spec.convention,
           );
