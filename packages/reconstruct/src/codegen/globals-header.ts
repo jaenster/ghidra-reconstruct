@@ -2253,7 +2253,18 @@ export function renderGlobalScalarInitializer(
   if (sentinel !== undefined) return sentinel;
   let value = normalizeDataValue(rawValue ?? '0');
   if ((value === '0' || value === '0x0') && isStructType(declaredType)) return '{}';
-  return castPointerInitializer(declaredType, ensureHexPrefix(value, declaredType));
+  // A funcdef typedef carries its own indirection in this tree, so Ghidra's
+  // `pfnD2CmdHandler *` is spelled `pfnD2CmdHandler` here — which is what every
+  // declaration printer this renderer is paired with already prints. Without
+  // the same normalization the cast came out one star wider than the
+  // declaration it initialises. The typedef then has no `*` for
+  // `castPointerInitializer` to key on, so the cast is spelled here, exactly as
+  // `emitDataValue`'s pointer case spells it.
+  const slotType = stripFuncDefIndirection(declaredType.trim());
+  if (isFuncDefTypedefName(slotType)) {
+    return `(${rootQualifyShadowedType(slotType)})${ensureHexPrefix(value, declaredType)}`;
+  }
+  return castPointerInitializer(slotType, ensureHexPrefix(value, declaredType));
 }
 
 /**

@@ -21,6 +21,7 @@ import {
   generateGlobalsImpl,
   setMultidimArrayGlobals,
   setGlobalInitializerTypes,
+  setKnownFuncDefTypedefs,
 } from '../codegen/globals-header.js';
 import type { AnalyzedDataSymbol, ReconstructOptions } from '../types.js';
 
@@ -85,5 +86,36 @@ describe('character data whose value Ghidra renders as text', () => {
     ], options);
     assert.match(impl, /^char CHAR_C_006ed5b4 = 'C';$/m);
     assert.match(impl, /^char gTxtCompilationMemPool\[4\] = \{ 'e', 'n', 'd', 0 \};$/m);
+  });
+});
+
+describe('a funcdef-typed slot initialised from an address', () => {
+  beforeEach(() => {
+    setMultidimArrayGlobals([]);
+    setGlobalInitializerTypes(undefined);
+  });
+
+  it('casts to the typedef, which already carries the indirection', () => {
+    // gaKeyBindingEnabled @00712698 — Ghidra types it `pfnD2CmdHandler *`
+    // because it models the funcdef as the FUNCTION, while the emitted typedef
+    // is `void (__stdcall *pfnD2CmdHandler)()`. The declaration printer strips
+    // the star; this renderer did not, so the cast was one star wider than the
+    // declaration it initialised.
+    setKnownFuncDefTypedefs(new Set(['pfnD2CmdHandler']));
+    try {
+      assert.strictEqual(
+        renderGlobalScalarInitializer('00468940', 'pfnD2CmdHandler *'),
+        '(pfnD2CmdHandler)0x00468940',
+      );
+    } finally {
+      setKnownFuncDefTypedefs(new Set());
+    }
+  });
+
+  it('leaves an ordinary pointer slot with the star it really has', () => {
+    assert.strictEqual(
+      renderGlobalScalarInitializer('006d8768', 'uint8_t *'),
+      '(uint8_t *)0x006d8768',
+    );
   });
 });
