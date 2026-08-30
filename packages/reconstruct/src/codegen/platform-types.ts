@@ -794,6 +794,7 @@ const WIN32_FILE_FALLBACK_STUBS: readonly PlatformFunctionDecl[] = [
   { name: "GetKeyState", decl: "SHORT GetKeyState(int nVirtKey);" },
   { name: "SetRect", decl: "void SetRect(LPRECT lprc, int left, int top, int right, int bottom);" },
   { name: "WSAGetLastError", decl: "int WSAGetLastError();" },
+  { name: "WSACleanup", decl: "int WSACleanup();" },
   { name: "timeGetTime", decl: "DWORD timeGetTime(void);" },
 ];
 

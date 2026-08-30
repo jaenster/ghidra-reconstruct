@@ -7,6 +7,7 @@ import type {
   ExtractedFunction,
   ExtractedParameter,
   ExtractedVariable,
+  ThunkTarget,
 } from '../types.js';
 import { FunctionCache, type CacheOptions } from '../cache.js';
 import { timePhase } from '../timing.js';
@@ -325,6 +326,21 @@ export async function extractAllFunctions(
     }
   }
 
+  // Where every thunk jumps. One call for the whole program, because the answer
+  // exists nowhere else: `list_functions` reports `isThunk` and no target, and
+  // decompiling a thunk returns the TARGET's body under the thunk's name.
+  {
+    const thunks = allFunctions.filter(f => f.isThunk);
+    if (thunks.length > 0) {
+      let resolved = 0;
+      await timePhase(
+        `${label}extract/thunk-targets`,
+        async () => { resolved = await attachThunkTargets(connection, allFunctions); },
+        () => `${resolved}/${thunks.length} thunk targets`
+      );
+    }
+  }
+
   // Second pass: decompile if requested — use batch_decompile for speed
   if (decompile) {
     await timePhase(
@@ -533,6 +549,89 @@ export async function getFunctionInfo(
   } catch {
     return null;
   }
+}
+
+/**
+ * The Ghidra-side half of thunk-target resolution.
+ *
+ * `Function.getThunkedFunction(true)` follows a chain of thunks to the function
+ * that has the code, which is the only correct answer: `Fog::Src::Safesock::
+ * WSACleanup` reaches the ws2_32 import through a second stub, and its name is
+ * no evidence of that. Java only — Jython was removed in Ghidra 12.1 — and no
+ * `import` statements, so every class is spelled out.
+ */
+const THUNK_TARGET_SCRIPT = `
+ghidra.program.model.listing.FunctionIterator it = currentProgram.getFunctionManager().getFunctions(true);
+StringBuilder sb = new StringBuilder();
+while (it.hasNext()) {
+  ghidra.program.model.listing.Function f = it.next();
+  if (!f.isThunk()) continue;
+  ghidra.program.model.listing.Function t = f.getThunkedFunction(true);
+  if (t == null) continue;
+  ghidra.program.model.symbol.Namespace tns = t.getParentNamespace();
+  sb.append(f.getEntryPoint()).append('\\t')
+    .append(t.getEntryPoint()).append('\\t')
+    .append(tns == null ? "" : tns.getName(true)).append('\\t')
+    .append(t.getName()).append('\\t')
+    .append(t.isExternal() ? "EXT" : "INT").append('\\n');
+}
+println(sb.toString());
+`;
+
+/** The hex tail of a Ghidra address ("Game.exe.ram:005011f0" -> "005011f0"). */
+function addressKey(address: string): string {
+  return address.includes(':') ? address.slice(address.lastIndexOf(':') + 1) : address;
+}
+
+/**
+ * Record each thunk's target on the thunk. Returns how many were resolved.
+ *
+ * A thunk whose target Ghidra cannot resolve keeps no `thunkTarget` and stays
+ * body-less: the emitter has nothing to forward to and must not invent one.
+ */
+export async function attachThunkTargets(
+  connection: GhidraConnection,
+  functions: ExtractedFunction[]
+): Promise<number> {
+  let output: string;
+  try {
+    const result = await connection.sendCommand<{ success?: boolean; output?: string; error?: string }>(
+      'execute_script',
+      { language: 'java', code: THUNK_TARGET_SCRIPT, scriptTimeout: 120, _commandTimeout: 180000 }
+    );
+    if (result.success === false || typeof result.output !== 'string') {
+      console.warn(`  Thunk targets unavailable: ${result.error ?? 'no output'}`);
+      return 0;
+    }
+    output = result.output;
+  } catch (err) {
+    console.warn(`  Thunk targets unavailable: ${(err as Error).message}`);
+    return 0;
+  }
+
+  const targets = new Map<string, ThunkTarget>();
+  for (const line of output.split('\n')) {
+    const cols = line.split('\t');
+    if (cols.length < 5) continue;
+    const [thunkAddr, targetAddr, targetNs, targetName, kind] = cols;
+    if (!thunkAddr || !targetName) continue;
+    targets.set(addressKey(thunkAddr.trim()), {
+      address: targetAddr,
+      name: targetName,
+      namespace: targetNs || undefined,
+      isExternal: kind.trim() === 'EXT',
+    });
+  }
+
+  let attached = 0;
+  for (const func of functions) {
+    if (!func.isThunk) continue;
+    const target = targets.get(addressKey(func.address));
+    if (!target) continue;
+    func.thunkTarget = target;
+    attached++;
+  }
+  return attached;
 }
 
 /**

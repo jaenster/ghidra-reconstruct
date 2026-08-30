@@ -462,7 +462,28 @@ const ENTRY_POINT_NAMES = new Set(['WinMain', 'wWinMain', 'DllMain']);
 /**
  * Context for code generation, carrying optional registries
  */
+/**
+ * What a thunk forwards to, already spelled the way the target's own definition
+ * is emitted. Resolved once per run, in codegen/index.ts, from the run's
+ * namespace resolution — so the forwarder names exactly the symbol the target's
+ * declaration and definition agree on, and never re-derives it from a string.
+ */
+export interface ThunkForward {
+  /** Root-qualified callee, e.g. "::D2Client::UI::QuestLog::Handler". */
+  qualified: string;
+  /** Return type as the target's own definition spells it. */
+  returnType: string;
+  /** Declared parameter count of the target, excluding varargs. */
+  parameterCount: number;
+}
+
 export interface ImplGenContext {
+  /**
+   * Thunk address → the forwarder's callee. Absent for a thunk whose target
+   * Ghidra could not resolve, or which is not emitted anywhere in this tree;
+   * such a thunk stays declared and undefined, which is the honest state.
+   */
+  thunkForwards?: Map<string, ThunkForward>;
   overrides?: OverrideRegistry | null;
   libraries?: LibraryRegistry | null;
   methodConversions?: MethodConversionRegistry | null;
@@ -823,11 +844,33 @@ export function generateImplementation(
     // Skip external functions (they're just declarations)
     if (func.isExternal) continue;
 
-    // Skip thunk functions
-    if (func.isThunk) continue;
-
     // Skip library functions — they don't get implementations
     if (func.isLibrary) continue;
+
+    // A thunk is a single JMP. It gets a forwarder, never a decompiled body:
+    // `decompile` on a thunk returns the TARGET's body under the thunk's name,
+    // so emitting that text would copy every target under a second name.
+    if (func.isThunk) {
+      // A method is declared and defined as `Class::name` at root scope, which
+      // is a different signature path; no thunk is one today.
+      const isMethodThunk =
+        Boolean(func.parentClass) || Boolean(classInfo?.methods.some(m => m.address === func.address));
+      const forwarder = isMethodThunk ? undefined : generateThunkForwarder(
+        func, context, useNamespace ? resolvedNamespace : undefined
+      );
+      if (!forwarder) continue;
+      if (func.ifdef !== currentIfdef) {
+        if (currentIfdef) {
+          lines.push(`#endif // ${currentIfdef}`);
+          lines.push('');
+        }
+        if (func.ifdef) lines.push(`#ifdef ${func.ifdef}`);
+        currentIfdef = func.ifdef;
+      }
+      lines.push(forwarder);
+      lines.push('');
+      continue;
+    }
 
     // Group consecutive functions with the same ifdef under one guard
     if (func.ifdef !== currentIfdef) {
@@ -1488,6 +1531,66 @@ function wrapperSignature(func: ExtractedFunction): { returnType: string; params
   const returnType = returnSigType(func.returnType).trim();
   if (!returnType) return undefined;
   return { returnType, params: signatureParameterList(func) };
+}
+
+/**
+ * A thunk's honest C++ definition: a one-line forwarder to the function it
+ * jumps to.
+ *
+ * The callee is written from the ROOT. That is not style. Ten of these forward
+ * to a function carrying the same leaf name in a different namespace, and the
+ * four import thunks forward to a Win32 function of exactly their own name — an
+ * unqualified call inside `namespace Fog { namespace System {` binds to the
+ * enclosing function, and infinite recursion that compiles and links clean is
+ * strictly worse than no definition at all.
+ *
+ * Returns undefined — leaving the thunk declared and undefined — whenever the
+ * forwarder cannot be written honestly: no resolved target, a target this tree
+ * does not emit, a signature the call cannot satisfy, or a callee that would
+ * name this very function.
+ */
+export function generateThunkForwarder(
+  func: ExtractedFunction,
+  context: ImplGenContext | undefined,
+  enclosingNamespace: ResolvedNamespace | undefined,
+): string | undefined {
+  const forward = context?.thunkForwards?.get(func.address);
+  if (!forward) return undefined;
+
+  // `...` cannot be passed on without va_list plumbing the binary does not have.
+  if (func.hasVarArgs) return undefined;
+
+  const returnType = returnSigType(func.returnType).trim();
+  if (!returnType) return undefined;
+
+  // The thunk and its target are one function in the binary, so a disagreement
+  // here is a database defect. Forwarding across it would either drop a return
+  // value or invent one.
+  const returnsVoid = returnType === 'void';
+  const targetReturnsVoid = forward.returnType.trim() === 'void';
+  if (returnsVoid !== targetReturnsVoid) return undefined;
+  if (func.parameters.length !== forward.parameterCount) return undefined;
+
+  const ownName = emittedFunctionName(func, returnSigType(func.returnType));
+  const ownQualified = ['', ...(enclosingNamespace?.segments ?? []), ownName].join('::');
+  if (forward.qualified === ownQualified) {
+    console.warn(
+      `[thunk] ${ownQualified} @ ${func.address} would forward to itself — left undefined`
+    );
+    return undefined;
+  }
+
+  const args = renumberParams(func.parameters)
+    .map(p => emittedParameterName(p.name, sigType(p.dataType)))
+    .join(', ');
+
+  const stripAddr = (a: string) => (a.includes(':') ? a.slice(a.lastIndexOf(':') + 1) : a);
+  return [
+    `// 1.14d: ${stripAddr(func.address)} — JMP thunk`,
+    `${generateFunctionSignature(func)} {`,
+    `    ${returnsVoid ? '' : 'return '}${forward.qualified}(${args});`,
+    `}`,
+  ].join('\n');
 }
 
 function generateFunctionSignature(func: ExtractedFunction): string {

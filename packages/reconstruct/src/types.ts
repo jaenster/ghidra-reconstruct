@@ -48,6 +48,30 @@ export interface ExtractedFunction {
   ifdef?: string;
   /** Address in the other binary (for cross-reference comments) */
   crossPlatformAddress?: { address: string; platform: string };
+  /** Where a thunk jumps. Only set when `isThunk`. */
+  thunkTarget?: ThunkTarget;
+}
+
+/**
+ * The function a thunk forwards to, resolved by Ghidra's
+ * `Function.getThunkedFunction(true)` — i.e. through a chain of thunks to the
+ * function that actually has the code.
+ *
+ * This has to be extracted rather than derived: `decompile` on a thunk returns
+ * the TARGET's body under the thunk's name, and the target's name is frequently
+ * not the thunk's (`PLRSKILLS_DrawChargeTrailIfPrimary` jumps to
+ * `PLRSKILLS_CheckSkillWhipAndLeap`), so neither the body text nor the name is
+ * evidence of where it goes.
+ */
+export interface ThunkTarget {
+  /** Entry point of the target. For an import this is Ghidra's EXTERNAL address. */
+  address: string;
+  /** Target's own name — the import's name when `isExternal`. */
+  name: string;
+  /** Target's Ghidra namespace path. The DLL name when `isExternal`. */
+  namespace?: string;
+  /** True when the target is a DLL import rather than a function in this binary. */
+  isExternal: boolean;
 }
 
 export interface ExtractedParameter {

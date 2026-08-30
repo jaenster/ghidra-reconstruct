@@ -50,8 +50,8 @@ import type {
 import { resolveOverridePlaceholders } from './impl.js';
 import { VOID_POINTER_SLOT, getFuncPtrArgCastArityMismatchList, type FuncPtrTarget } from '@ghidra-mcp/cpp-parser';
 
-import { fieldDeclSpelling, emittedMemberNames, generateHeader, generateFunctionDeclaration, setKnownFuncDefs, sigType, getIntegerConversionType } from './header.js';
-import { generateImplementation, setQuestStructLayouts, setStructFieldRenames, decompiledReturnType, decompiledFunctionName, type ImplGenContext, type FuncPtrArgCastTables } from './impl.js';
+import { fieldDeclSpelling, emittedMemberNames, generateHeader, generateFunctionDeclaration, setKnownFuncDefs, sigType, getIntegerConversionType, emittedFunctionName, returnSigType } from './header.js';
+import { generateImplementation, setQuestStructLayouts, setStructFieldRenames, decompiledReturnType, decompiledFunctionName, type ImplGenContext, type FuncPtrArgCastTables, type ThunkForward } from './impl.js';
 import { generateCMakeLists, generateTopLevelCMake, generateTargetCMake, generateUnsortedCMake } from './cmake.js';
 import { generateSourceMap } from './sourcemap.js';
 import { generateReadme } from './readme.js';
@@ -613,6 +613,62 @@ export function generateProject(
     });
   }
   if (functionAddressMap.size > 0) context.functionAddressMap = functionAddressMap;
+
+  // Where each thunk's forwarder points, resolved ONCE from the same namespace
+  // resolution the target's own definition renders from. Ghidra gives a thunk no
+  // body of its own, so without this the header declares it and nothing defines
+  // it — 57 of the tree's undefined symbols were exactly that.
+  {
+    const thunkForwards = new Map<string, ThunkForward>();
+    const byAddressKey = new Map<string, ExtractedFunction>();
+    for (const func of functions) {
+      const hex = func.address.includes(':')
+        ? func.address.slice(func.address.lastIndexOf(':') + 1)
+        : func.address;
+      byAddressKey.set(hex, func);
+    }
+    const platformDeclaredNames = platformDeclaredFunctionNames();
+
+    for (const func of functions) {
+      if (!func.isThunk || !func.thunkTarget) continue;
+      const target = func.thunkTarget;
+
+      if (target.isExternal) {
+        // A DLL import. The forwarder goes to global scope, and only where this
+        // emitter already owns a declaration for that name — inventing one here
+        // would be a second, possibly conflicting, prototype for the same symbol.
+        const name = sanitizeSymbolName(target.name);
+        if (!platformDeclaredNames.has(name)) continue;
+        thunkForwards.set(func.address, {
+          qualified: `::${name}`,
+          // An import thunk carries the import's own signature, so the two sides
+          // agree by construction.
+          returnType: returnSigType(func.returnType),
+          parameterCount: func.parameters.length,
+        });
+        continue;
+      }
+
+      const hex = target.address.includes(':')
+        ? target.address.slice(target.address.lastIndexOf(':') + 1)
+        : target.address;
+      const targetFunc = byAddressKey.get(hex);
+      // A target this tree never emits has no declaration to call.
+      if (!targetFunc || targetFunc.isExternal || targetFunc.isLibrary) continue;
+
+      const targetReturn = returnSigType(targetFunc.returnType);
+      const segments = targetFunc.parentClass
+        ? [targetFunc.parentClass]
+        : [...namespaceResolution().of(targetFunc).segments];
+      const leaf = emittedFunctionName(targetFunc, targetReturn);
+      thunkForwards.set(func.address, {
+        qualified: ['', ...segments, leaf].join('::'),
+        returnType: targetReturn,
+        parameterCount: targetFunc.parameters.length,
+      });
+    }
+    if (thunkForwards.size > 0) context.thunkForwards = thunkForwards;
+  }
 
   // Qualified names (namespace::name) of every emitted function. A data symbol
   // can share its name with a function in the same namespace (getter + backing
