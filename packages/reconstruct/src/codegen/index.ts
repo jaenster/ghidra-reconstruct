@@ -69,7 +69,7 @@ import { partitionGlobalsByModule, buildFunctionModuleMap } from './globals-part
 import { normalizeAddress } from '../config/loader.js';
 import { resolveTargets, getTargetDirectory, type ResolvedTarget } from '../targets/index.js';
 import { generateStubsHeader } from '../targets/stubs.js';
-import { collectCrtHeaders, EXCLUDED_SYMBOL_DECLS, WIN32_ZERO_ARITY_CALLBACK_SLOTS, WIN32_ZERO_ARITY_CALLBACK_CASTS, WIN32_OVERLOADED_INTRINSICS, WIN32_GENERIC_HANDLE_RETURNS } from './crt-mapping.js';
+import { collectCrtHeaders, EXCLUDED_SYMBOL_DECLS, WIN32_ZERO_ARITY_CALLBACK_SLOTS, WIN32_ZERO_ARITY_CALLBACK_CASTS, WIN32_OVERLOADED_INTRINSICS, WIN32_GENERIC_HANDLE_RETURNS, HEADER_DECLARED_SIGNATURES } from './crt-mapping.js';
 import { normalizePointerSizeSpellings } from './pointer-size-spelling.js';
 import { flattenTemplateNames } from './template-names.js';
 import { retypeVtableLocals, vtableMembersByType } from '../modules/vtable-types.js';
@@ -3468,6 +3468,17 @@ function buildFuncPtrArgCastTables(
     functionConventions[name] = sig.convention;
   }
 
+  // A name whose DECLARATION the reconstruction is compiled against is the only
+  // authority on its slots, and `headerOwned` deliberately keeps the database's
+  // disagreeing record out of these tables. Without an entry here such a name
+  // carries no slot type at all, so no pass can write the conversion the header
+  // requires. See `HEADER_DECLARED_SIGNATURES`.
+  for (const [name, sig] of Object.entries(HEADER_DECLARED_SIGNATURES)) {
+    functionParamTypes[name] = sig.paramTypes;
+    functionReturnTypes[name] = sig.returnType;
+    functionConventions[name] = sig.convention;
+  }
+
   // The generic-handle returns the SDK header declares. Same reason as the
   // overload set above: no model record exists for an import thunk, and this is
   // the header's own answer. A model function of the same name still wins.
@@ -3574,6 +3585,7 @@ function buildFuncPtrArgCastTables(
       // Overloaded by the TARGET headers rather than by the model - the set has
       // one member here and several there, and the cast has to say which.
       ...Object.keys(WIN32_OVERLOADED_INTRINSICS),
+      ...Object.entries(HEADER_DECLARED_SIGNATURES).filter(([, s]) => s.overloaded).map(([n]) => n),
     ])],
     globalTypes,
     varArgFunctions: [...varArgFunctions],

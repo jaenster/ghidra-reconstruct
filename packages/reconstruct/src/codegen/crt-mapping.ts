@@ -754,6 +754,55 @@ export const WIN32_OVERLOADED_INTRINSICS: Record<string, {
 };
 
 /**
+ * Signatures stated by the HEADER the call is compiled against, for names every
+ * signature table misses by construction.
+ *
+ * `platformDeclaredFunctionNames()` — which includes every `EXCLUDED_SYMBOL_DECLS`
+ * entry — is kept out of `functionParamTypes` on purpose: Ghidra's record of a
+ * CRT or excluded-namespace callee and the declaration the reconstruction is
+ * actually compiled against routinely disagree, and casting to the database's
+ * answer spells a conversion the real declaration rejects. The cost is that
+ * there was no way to state the DECLARATION's own answer either, so an argument
+ * that needs a conversion the header requires got none:
+ *
+ *   - `CRT_Encode_Secure_Pointer(HandleExceptionWithStackDump)` — the header
+ *     takes `void *`, and a function designator does not convert to it in C++.
+ *     `d2_platform.h` writes `extern "C" void* CRT_Encode_Secure_Pointer(void*)`,
+ *     which is `EncodePointer`'s real prototype; the original source carried the
+ *     cast the emitter now writes.
+ *   - `FloatToLong(nJulianDay, pYear)` — MSVC's `_ftol2_sse`, whose argument
+ *     really arrives as the two halves of a double. `d2_platform.h` spells the
+ *     shim `static inline uint32_t FloatToLong(int32_t lo, int32_t hi)`, so a
+ *     pointer reaching that slot is the `(int32_t)` the machine performs.
+ *
+ * This is the header's own answer, not the database's guess at it — the same
+ * standing as `WIN32_OVERLOADED_INTRINSICS` and `WIN32_GENERIC_HANDLE_RETURNS`.
+ * `overloaded` marks a name the target headers make a genuine overload SET, so
+ * that taking its address has to spell the exact type; `FloatToLong` is one
+ * (`d2_platform.h` declares a `float` overload beside the two-word one),
+ * `CRT_Encode_Secure_Pointer` is not.
+ *
+ * Arity is what keeps a stated signature off the wrong overload: `call-arg-cast`
+ * refuses a call whose argument count differs from the stated one, so the
+ * single-argument `FloatToLong(float)` sites are untouched by the two-word entry.
+ */
+export const HEADER_DECLARED_SIGNATURES: Record<string, {
+  returnType: string; paramTypes: string[]; convention: string; overloaded?: boolean;
+}> = {
+  CRT_Encode_Secure_Pointer: {
+    returnType: 'void *',
+    paramTypes: ['void *'],
+    convention: '__cdecl',
+  },
+  FloatToLong: {
+    returnType: 'uint32_t',
+    paramTypes: ['int32_t', 'int32_t'],
+    convention: '__cdecl',
+    overloaded: true,
+  },
+};
+
+/**
  * SDK functions whose declared return is a GENERIC handle, and that spelling.
  *
  * `wndClass.hIcon = LoadImageA(...)` and `wndClass.hbrBackground =
