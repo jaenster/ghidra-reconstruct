@@ -754,6 +754,28 @@ export const WIN32_OVERLOADED_INTRINSICS: Record<string, {
 };
 
 /**
+ * SDK functions whose declared return is a GENERIC handle, and that spelling.
+ *
+ * `wndClass.hIcon = LoadImageA(...)` and `wndClass.hbrBackground =
+ * GetStockObject(5)` compiled as C, where `void *` reaches every object
+ * pointer; in C++ `HANDLE` does not convert to `HICON` nor `HGDIOBJ` to
+ * `HBRUSH`, and the original source carried the cast. The model cannot supply
+ * the return type - Ghidra holds no `Function` record for an import thunk - and
+ * the declaration the compiler actually uses is mingw's own, so the header's
+ * answer is stated here rather than guessed at from the database.
+ *
+ * Only the genuinely GENERIC returns belong here. `LoadIconA` returns `HICON`
+ * and needs nothing; writing `HANDLE` for it would be a lie that happens to
+ * compile.
+ */
+export const WIN32_GENERIC_HANDLE_RETURNS: Record<string, string> = {
+  LoadImageA: 'HANDLE',
+  LoadImageW: 'HANDLE',
+  GetStockObject: 'HGDIOBJ',
+  SelectObject: 'HGDIOBJ',
+};
+
+/**
  * Win32 SDK headers that declare imports the reconstruction calls but that
  * `<windows.h>` alone does not pull in. Preferring the real header over a
  * hand-written prototype keeps the signature honest and picks up the SDK's own

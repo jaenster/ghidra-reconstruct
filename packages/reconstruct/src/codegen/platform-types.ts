@@ -1657,6 +1657,19 @@ const VOID_POINTER_SPELLINGS = new Set<string>([
 export const EMITTER_POINTER_TYPEDEFS: Record<string, string> = {
   pointer: 'void *',
   _locale_t: 'void *',
+  // The Win32 handle family, spelled as `windows.h` spells it. Ghidra records
+  // these as typedefs with no target, so without them the cast passes read a
+  // `HANDLE` as a star-less opaque base and cannot see that it crosses a
+  // pointer boundary on the way into an `HICON` or an `HBRUSH`.
+  //
+  // `HANDLE` and `HGDIOBJ` really are `void *`; the rest are `DECLARE_HANDLE`,
+  // i.e. a pointer to a struct of their own, which is exactly why the generic
+  // two do not convert to them in C++ and the original C source carried a cast.
+  HANDLE: 'void *',
+  HGDIOBJ: 'void *',
+  HICON: 'HICON__ *',
+  HCURSOR: 'HICON__ *', // `typedef HICON HCURSOR;`
+  HBRUSH: 'HBRUSH__ *',
 };
 
 /** Does this Ghidra type string denote a plain `void`-pointer slot? */

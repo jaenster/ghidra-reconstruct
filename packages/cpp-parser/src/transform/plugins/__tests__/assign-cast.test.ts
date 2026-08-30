@@ -259,3 +259,41 @@ describe('assignCastPlugin — results of calls through a function pointer', () 
     assert.ok(out.includes('gpGateway = gpCallbacks->pfnMystery()'), out);
   });
 });
+
+describe('assignCastPlugin — a generic Win32 handle reaching a specific one', () => {
+  const run = (code: string, options: Record<string, unknown>): string =>
+    emit(assignCastPlugin.createTransformer(options)(parse(code)) as AnyNode)
+      .replace(/\s+/g, ' ')
+      .trim();
+
+  // `wndClass.hIcon = LoadImageA(...)` @004f52e0 and `wndClass.hbrBackground =
+  // GetStockObject(5)` @004f52e0 / @006b4c90. `windows.h` really does declare
+  // those returns as `HANDLE` and `HGDIOBJ`, both `void *`; C converted them to
+  // `HICON` / `HBRUSH` implicitly and C++ does not.
+  const win32 = {
+    fieldTypes: { hIcon: 'HICON', hbrBackground: 'HBRUSH' },
+    typedefTargets: {
+      HANDLE: 'void *', HGDIOBJ: 'void *',
+      HICON: 'HICON__ *', HBRUSH: 'HBRUSH__ *',
+    },
+    functionReturnTypes: { LoadImageA: 'HANDLE', GetStockObject: 'HGDIOBJ' },
+  };
+
+  it('casts a HANDLE return into an HICON field', () => {
+    const out = run('void f() { wndClass.hIcon = LoadImageA(h, n, 1, 0, 0, 0); }', win32);
+    assert.ok(out.includes('(HICON)LoadImageA'), out);
+  });
+
+  it('casts an HGDIOBJ return into an HBRUSH field', () => {
+    const out = run('void f() { wndClass.hbrBackground = GetStockObject(5); }', win32);
+    assert.ok(out.includes('(HBRUSH)GetStockObject'), out);
+  });
+
+  it('leaves a field whose own type the return already matches alone', () => {
+    const out = run('void f() { wndClass.hIcon = LoadIconA(h, n); }', {
+      ...win32,
+      functionReturnTypes: { ...win32.functionReturnTypes, LoadIconA: 'HICON' },
+    });
+    assert.ok(!out.includes('(HICON)LoadIconA'), out);
+  });
+});

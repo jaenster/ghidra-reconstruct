@@ -68,7 +68,7 @@ import type { MethodConversionEntry, ModuleConfig, AutoMethodConversionConfig, T
 import { normalizeAddress } from '../config/loader.js';
 import { resolveTargets, getTargetDirectory, type ResolvedTarget } from '../targets/index.js';
 import { generateStubsHeader } from '../targets/stubs.js';
-import { collectCrtHeaders, EXCLUDED_SYMBOL_DECLS, WIN32_ZERO_ARITY_CALLBACK_SLOTS, WIN32_ZERO_ARITY_CALLBACK_CASTS, WIN32_OVERLOADED_INTRINSICS } from './crt-mapping.js';
+import { collectCrtHeaders, EXCLUDED_SYMBOL_DECLS, WIN32_ZERO_ARITY_CALLBACK_SLOTS, WIN32_ZERO_ARITY_CALLBACK_CASTS, WIN32_OVERLOADED_INTRINSICS, WIN32_GENERIC_HANDLE_RETURNS } from './crt-mapping.js';
 import { normalizePointerSizeSpellings } from './pointer-size-spelling.js';
 import { flattenTemplateNames } from './template-names.js';
 import { retypeVtableLocals, vtableMembersByType } from '../modules/vtable-types.js';
@@ -3435,6 +3435,13 @@ function buildFuncPtrArgCastTables(
     functionParamTypes[name] = sig.paramTypes;
     functionReturnTypes[name] = sig.returnType;
     functionConventions[name] = sig.convention;
+  }
+
+  // The generic-handle returns the SDK header declares. Same reason as the
+  // overload set above: no model record exists for an import thunk, and this is
+  // the header's own answer. A model function of the same name still wins.
+  for (const [name, ret] of Object.entries(WIN32_GENERIC_HANDLE_RETURNS)) {
+    if (functionReturnTypes[name] === undefined) functionReturnTypes[name] = ret;
   }
 
   // The emitter's own pseudo-op macros type their result exactly. A call table
