@@ -1123,7 +1123,13 @@ export function generatePlatformHeader(
   lines.push('typedef uintptr_t WPARAM;');
   lines.push('typedef intptr_t LPARAM;');
   lines.push('typedef uint16_t LANGID;');
-  lines.push('typedef void (*FARPROC)();');
+  // `()` means "no parameters" in C++, where in C it meant "unspecified". A
+  // FARPROC is the UNKNOWN signature GetProcAddress hands back, and Game.exe
+  // calls one through the same local with two arities: `InstallKeyboardHook(HWND)`
+  // and `UninstallKeyboardHook(void)` (00405c30). `(...)` is the C++ spelling of
+  // "any arguments" ([dcl.fct]), and it is left __cdecl - GCC ignores __stdcall
+  // on a varargs function and warns.
+  lines.push('typedef void (*FARPROC)(...);');
   lines.push('');
 
   // String pointer types
