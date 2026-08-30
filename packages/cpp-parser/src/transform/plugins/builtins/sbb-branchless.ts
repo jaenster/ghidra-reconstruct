@@ -81,6 +81,12 @@ function unwrapParens(expr: Expression): Expression {
 function detectSbbPattern(expr: Expression): {
   condition: Expression;
   addr: Expression;
+  /**
+   * The masked operand with its own cast still on it. `-(uint)(c) & (uint)p`
+   * has type `uint` BECAUSE of that cast; a ternary built from the stripped
+   * operand has type `char *` and no longer fits where the mask did.
+   */
+  addrTyped: Expression;
 } | null {
   // Unwrap outer parens (e.g. (uint8_t*)(expr) → the expr may be ParenExpr wrapped)
   const unwrapped = unwrapParens(expr);
@@ -102,6 +108,19 @@ function detectSbbPattern(expr: Expression): {
     const lit = addr as IntegerLiteralExpr;
     if (lit.value === 0n) return null;
   }
+  // ... but remember the spelling WITH the cast. Stripping is right for an
+  // address literal — `(uint32_t)0x4fc3f0` is the same address either way, and
+  // `func-ptr-literal` needs the bare literal to recognise it — and right when
+  // the cast is itself a pointer cast, which the ternary reproduces. It is
+  // wrong for an integer cast over a POINTER: that cast is what gave the whole
+  // `&` expression its integer type, and the value flows on into an integer
+  // slot that a bare pointer cannot reach.
+  const rhs = unwrapParens(binary.right);
+  const castIsIntegral =
+    rhs.kind === NodeKind.CStyleCastExpr &&
+    (rhs as CStyleCastExpr).type.kind !== NodeKind.PointerType;
+  const addrTyped =
+    castIsIntegral && addr.kind !== NodeKind.IntegerLiteral ? rhs : addr;
 
   // Extract condition from inside the negation (strip casts and parens)
   const condition = unwrapCastAndParens(unary.operand);
@@ -112,7 +131,7 @@ function detectSbbPattern(expr: Expression): {
     if (lit.value === 0n || lit.value === 1n) return null;
   }
 
-  return { condition, addr };
+  return { condition, addr, addrTyped };
 }
 
 // ============================================
@@ -130,7 +149,7 @@ function createSbbBranchlessTransformer(): Transformer {
         // Case 1a: SBB pattern itself
         const match = detectSbbPattern(binary);
         if (match) {
-          return makeTernary(node, match.condition, match.addr, false);
+          return makeTernary(node, match.condition, match.addrTyped, false);
         }
 
         // Case 1b: Constant folding — (cond ? offset : 0) + base → cond ? (base+offset) : base
@@ -204,8 +223,18 @@ function createSbbBranchlessTransformer(): Transformer {
               leadingTrivia: [],
               trailingTrivia: [],
             };
+            // The whole expression is a POINTER here, so the integer cast the
+            // inner rewrite kept — `(uint32_t)p`, which existed to give the
+            // mask its width — has to come back off, or the arms disagree.
+            const thenInner = unwrapParens(ternary.thenExpr);
+            const thenExpr =
+              thenInner.kind === NodeKind.CStyleCastExpr &&
+              (thenInner as CStyleCastExpr).type.kind !== NodeKind.PointerType
+                ? (thenInner as CStyleCastExpr).expression
+                : ternary.thenExpr;
             return {
               ...ternary,
+              thenExpr,
               elseExpr: nullptrNode,
               leadingTrivia: node.leadingTrivia || [],
               trailingTrivia: node.trailingTrivia || [],
