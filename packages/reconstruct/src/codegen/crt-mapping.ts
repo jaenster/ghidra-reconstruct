@@ -376,8 +376,16 @@ const CRT_FORWARDERS: ExcludedSymbolDecl[] = [
   { emitted: '__fullpath', real: '_fullpath', source: 'crt',
     decl: 'static inline char* __fullpath(char* absPath, const char* relPath, size_t maxLength) { return _fullpath(absPath, relPath, maxLength); }',
     win32Only: true },
+  // The second overload is not a convenience. D2 spells every wide string as
+  // `uint16_t*` — Ghidra's own width for the type, and what `normalizeWideCharType`
+  // unifies the tree on — while `_wfopen` takes `wchar_t*`, a DISTINCT type on
+  // this target even though it is the same 16 bits. Both call sites in
+  // `Fog/File.cpp` build their buffers with `MultiByteToWideChar` and hand them
+  // straight over, so without this the two spellings of one UTF-16 string do not
+  // convert.
   { emitted: '__wfopen', real: '_wfopen', source: 'crt',
-    decl: 'static inline FILE* __wfopen(const wchar_t* filename, const wchar_t* mode) { return _wfopen(filename, mode); }',
+    decl: 'static inline FILE* __wfopen(const wchar_t* filename, const wchar_t* mode) { return _wfopen(filename, mode); }\n'
+        + 'static inline FILE* __wfopen(const uint16_t* filename, const uint16_t* mode) { return _wfopen((const wchar_t*)filename, (const wchar_t*)mode); }',
     win32Only: true },
   { emitted: '__time64', real: '_time64', source: 'crt',
     decl: 'static inline __time64_t __time64(__time64_t* destTime) { return _time64(destTime); }',

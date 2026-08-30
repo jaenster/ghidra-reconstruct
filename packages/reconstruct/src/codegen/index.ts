@@ -2290,18 +2290,47 @@ function generateFilesForFunctions(
         // actually written at the reference site. An emitted reference is a
         // SUFFIX of the declaration's qualified name — the enclosing namespace
         // is stripped off the front where it is redundant — so match by suffix.
+        // The namespace this unit's bodies are emitted inside. An UNQUALIFIED
+        // call in it resolves outward — `Fog::Engine::Application` looks in
+        // Application, then Engine, then Fog — so when several headers declare
+        // the name, the one unqualified lookup will land on is the candidate
+        // declared in the nearest enclosing namespace. Without this the include
+        // is never added and the call is undeclared, even though a header in
+        // the tree declares exactly the function the compiler would have found.
+        const unitNamespace = unitFunctions.find(f => f.namespace)?.namespace ?? '';
+        const enclosingCandidate = (
+          candidates: { qualified: string; header: string }[],
+        ): string | undefined => {
+          if (!unitNamespace) return undefined;
+          let best: { depth: number; header: string } | undefined;
+          for (const c of candidates) {
+            const sep = c.qualified.lastIndexOf('::');
+            if (sep < 0) continue;
+            const ns = c.qualified.slice(0, sep);
+            if (unitNamespace !== ns && !unitNamespace.startsWith(`${ns}::`)) continue;
+            const depth = ns.split('::').length;
+            if (!best || depth > best.depth) best = { depth, header: c.header };
+          }
+          return best?.header;
+        };
+
         for (const funcName of ambiguous) {
           const candidates = funcNameCandidates.get(funcName)!;
           const escaped = funcName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
           const re = new RegExp(`((?:[A-Za-z_]\\w*::)+)${escaped}(?![A-Za-z0-9_])`, 'g');
+          let resolvedByQualifier = false;
           for (const m of implContent.matchAll(re)) {
             const observed = m[1] + funcName;
             for (const c of candidates) {
               if (c.qualified === observed || c.qualified.endsWith(`::${observed}`)) {
                 addInclude(c.header);
+                resolvedByQualifier = true;
               }
             }
           }
+          if (resolvedByQualifier) continue;
+          const enclosing = enclosingCandidate(candidates);
+          if (enclosing) addInclude(enclosing);
         }
       }
 
