@@ -155,6 +155,7 @@ async function main() {
         /^DName(Node|StatusNode)?$/,
         /^pDNameNode$/,
         /^UnDecorator$/,
+        /(^|::)Replicator$/,
         /^EXCEPTION$/i,
         /^LDBL12$/,
         /^LDOUBLE$/,
