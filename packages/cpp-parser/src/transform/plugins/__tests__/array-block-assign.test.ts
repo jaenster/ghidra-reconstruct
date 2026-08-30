@@ -12,9 +12,35 @@ describe('array-block-assign', () => {
   local_10 = *(char (*) [4])(pPacket + 5);
 }`);
     assert.ok(r.success, r.error);
-    assert.ok(/memcpy\(local_10, pPacket \+ 5, sizeof\(local_10\)\)/.test(r.code), r.code);
+    assert.ok(
+      /memcpy\(local_10, \(const void\*\)\(?pPacket \+ 5\)?, sizeof\(local_10\)\)/.test(r.code),
+      r.code,
+    );
     // The 4-byte read must not have decayed to a 1-byte subscript.
     assert.ok(!/pPacket\[5\]/.test(r.code), r.code);
+  });
+
+  // The `T (*)[N]` cast is the only thing that says the source is an ADDRESS.
+  // Ghidra reaches one through an integer-typed struct slot, and without the
+  // cast written back `memcpy` gets an `int` where it wants `const void *`.
+  it('casts an integer-valued source to const void*', () => {
+    const r = run(`void f(D2QuestDataA5Q3Strc *pRewardList, int nPlayerClassId, int nRandIndex) {
+  char nRewardClassId [4];
+  nRewardClassId = *(char (*) [4])(pRewardList->aPlayerGUID[nPlayerClassId * 2] + nRandIndex * 4);
+}`);
+    assert.ok(r.success, r.error);
+    assert.ok(/memcpy\(nRewardClassId, \(const void\*\)/.test(r.code), r.code);
+  });
+
+  // The cast is the identity for a source that is already a pointer, so it may
+  // never be doubled up or applied twice on a re-run.
+  it('writes exactly one cast', () => {
+    const r = run(`void f(uint8_t *pPacket) {
+  char local_10 [4];
+  local_10 = *(char (*) [4])(pPacket + 5);
+}`);
+    assert.ok(r.success, r.error);
+    assert.ok(!/\(const void\*\)\s*\(const void\*\)/.test(r.code), r.code);
   });
 
   it('turns a whole-array clear into memset', () => {

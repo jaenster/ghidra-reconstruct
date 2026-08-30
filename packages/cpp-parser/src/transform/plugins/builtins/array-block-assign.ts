@@ -18,11 +18,17 @@
  * `sizeof` keeps the width tied to the declaration rather than to a number
  * written here, so a later retype of the local moves the copy with it.
  *
- * The width matters and it was being lost. `*(char (*) [4])(pPacket + 5)` is a
+ * Two things were being lost. The width: `*(char (*) [4])(pPacket + 5)` is a
  * FOUR-byte read; with the array cast stripped and the deref turned into a
  * subscript it became `pPacket[5]`, a ONE-byte read of the same address that
  * compiles the moment anything makes the assignment legal. So this runs ahead of
  * `array-cast-strip` (17), which is where the pointer-to-array cast is dropped.
+ *
+ * And the ADDRESS-ness. The same cast is the only thing that says the source
+ * expression is an address at all; Ghidra routinely reaches one through an
+ * integer-typed struct slot. So `memcpy`'s source is written back through
+ * `(const void *)`, which is the identity for a real pointer and the missing
+ * reinterpretation for an integer.
  *
  * The same holds for an array-typed GLOBAL, which is why the set of array names
  * is seeded from the emitted global declarations and not only from the body's.
@@ -41,7 +47,7 @@ import type {
 } from '../../../ast/nodes.js';
 import { findNodesByKind } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
-import { Expr } from '../../../ast/factory.js';
+import { Expr, Type } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 
 export interface ArrayBlockAssignOptions extends PluginOptions {
@@ -109,8 +115,18 @@ function createArrayBlockAssignTransformer(options: PluginOptions = {}): Transfo
             if (castType.kind !== NodeKind.PointerType) return undefined;
             if ((castType as PointerType).pointee.kind !== NodeKind.ArrayType) return undefined;
             const src = unwrapParens((operand as CStyleCastExpr).expression);
+            // The `T (*)[N]` cast was also the only thing saying `src` holds an
+            // ADDRESS. Ghidra reaches a struct field through an integer slot
+            // (`aPlayerGUID[i] + n * 4`), and dropping the cast hands `memcpy`
+            // an `int` where it wants a `const void *`. On i686 the cast is a
+            // reinterpretation of the same four bytes, and where `src` is
+            // already a pointer it is the identity — so it restores exactly what
+            // was thrown away and can never make a compiling call fail.
+            const srcAddr = Expr.cast(
+              Type.pointer(Type.const(Type.builtin('void'))), src,
+            );
             return {
-              ...Expr.call('memcpy', [Expr.identifier(name), src, size]),
+              ...Expr.call('memcpy', [Expr.identifier(name), srcAddr, size]),
               leadingTrivia: n.leadingTrivia,
               trailingTrivia: n.trailingTrivia,
             };
