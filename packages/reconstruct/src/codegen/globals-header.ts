@@ -721,15 +721,125 @@ export function getDeclarationClosureReport(): ClosureResult | undefined {
 }
 
 /**
+ * Does the name READ like a path into another symbol — `g_chunks.capacity`,
+ * `slots[0].highscores[0].score`, `DAT_0043e7e0+1`?
+ *
+ * Shape only. A dot is not proof of interiority: Ghidra's auto-label for string
+ * data embeds the string's own text (`s_.I_00708874` is the four bytes `".I"`),
+ * and a hand-given name can carry a filename (`MPQ_d2kfixup.mpq`,
+ * `lpGLIDE3x.dll`). `isInteriorLabel` decides those from addresses.
+ */
+function looksLikeMemberPath(name: string): boolean {
+  const segment = String.raw`[A-Za-z_]\w*(?:\[\d+\])*`;
+  return new RegExp(`^${segment}(?:\\.${segment})+$`).test(name)
+    || /^[A-Za-z_]\w*\+\d+$/.test(name);
+}
+
+/**
+ * The member-path-shaped names `setInteriorLabelSymbols` saw, and the subset it
+ * proved lie inside another datum. A name the registry never saw keeps the
+ * shape test's answer — the registry replaces the guess only where it has the
+ * addresses to replace it with.
+ */
+let judgedInteriorCandidates: ReadonlySet<string> | undefined;
+let provenInteriorLabels: ReadonlySet<string> | undefined;
+
+/**
+ * Decide, from ADDRESSES, which member-path-shaped names are really interior.
+ *
+ * The shape test alone was wrong for a whole class and cost four symbols their
+ * definitions: `generateExternDeclaration` and `emitGlobalDefsWithIfdef` both
+ * drop an interior label, so `s_.I_00708874`, `s_.E_00708880`,
+ * `MPQ_d2kfixup.mpq` and `lpGLIDE3x.dll` got neither declaration nor definition
+ * — and the declaration closure, which reads the model rather than what the
+ * emitters did, then declared them anyway. An `extern` with no definition in any
+ * unit is exactly the link failure the closure's contract says it is not.
+ *
+ * Interiority is a property of the DATA, so it is read off the data:
+ *
+ *  - a label is interior when some other symbol's extent strictly contains its
+ *    address. Only a symbol whose own name is not member-path-shaped can be that
+ *    container: an interior label reports its PARENT's type and size, so
+ *    `gaPaletteBlendEntries[52].peRed` claims 288 bytes and would swallow every
+ *    unrelated symbol behind it;
+ *  - failing that, a root segment that ends in Ghidra's own `_<address>` suffix
+ *    names the datum the label sits in even when that datum has no record of its
+ *    own — `dylib_command_00001bb0.dylib.current_version` at 00001bc4 is a field
+ *    of the command at 00001bb0. A root with no address in it (`s_`, `TlsLinks`,
+ *    `MPQ_d2kfixup`) says nothing, so the symbol stands on its own;
+ *  - a `+N` offset label stays interior regardless. It is a byte offset into
+ *    something by construction, and every one of them is a switch/jump artifact
+ *    the data filters drop anyway.
+ */
+export function setInteriorLabelSymbols(globals: readonly AnalyzedDataSymbol[]): void {
+  const starts: number[] = [];
+  const ends: number[] = [];
+  for (const g of globals) {
+    const name = g.suggestedName || g.name;
+    if (looksLikeMemberPath(name)) continue;
+    const start = parseInt(g.address, 16);
+    if (!Number.isFinite(start) || !(g.size > 1)) continue;
+    starts.push(start);
+    ends.push(start + g.size);
+  }
+  const order = starts.map((_, i) => i).sort((a, b) => starts[a] - starts[b]);
+  const sortedStarts = order.map(i => starts[i]);
+  // Running maximum of the end of every container starting at or before each
+  // index, so "does any container reach past this address?" is one lookup.
+  const maxEnd: number[] = [];
+  let running = -Infinity;
+  for (const i of order) {
+    running = Math.max(running, ends[i]);
+    maxEnd.push(running);
+  }
+  const containedStrictly = (addr: number): boolean => {
+    let lo = 0, hi = sortedStarts.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (sortedStarts[mid] < addr) lo = mid + 1; else hi = mid;
+    }
+    return lo > 0 && maxEnd[lo - 1] > addr;
+  };
+
+  const candidates = new Set<string>();
+  const interior = new Set<string>();
+  for (const g of globals) {
+    const name = g.suggestedName || g.name;
+    if (!looksLikeMemberPath(name)) continue;
+    candidates.add(name);
+    if (/\+\d+$/.test(name)) { interior.add(name); continue; }
+    const addr = parseInt(g.address, 16);
+    // No address to judge by — keep the shape test's answer rather than
+    // promoting a symbol on no evidence.
+    if (!Number.isFinite(addr)) { interior.add(name); continue; }
+    if (containedStrictly(addr)) { interior.add(name); continue; }
+    const root = name.split('.')[0].replace(/(?:\[\d+\])+$/, '');
+    const rootAddr = /_([0-9a-f]{6,})$/i.exec(root);
+    if (rootAddr && parseInt(rootAddr[1], 16) !== addr) interior.add(name);
+  }
+  judgedInteriorCandidates = candidates;
+  provenInteriorLabels = interior;
+}
+
+/** For tests and repeat runs: go back to the shape-only answer. */
+export function resetInteriorLabelSymbols(): void {
+  judgedInteriorCandidates = undefined;
+  provenInteriorLabels = undefined;
+}
+
+/**
  * `g_chunks.capacity`, `slots[0].highscores[0].score`, `DAT_0043e7e0+1` — labels
  * Ghidra puts on the interior of a global: struct field paths once a type is
  * applied, or a byte offset into an untyped blob. The containing global is already
  * declared, so these are noise rather than something we failed to translate.
+ *
+ * With a registered globals model the answer comes from addresses
+ * (`setInteriorLabelSymbols`); without one it falls back to the name's shape.
  */
 export function isInteriorLabel(name: string): boolean {
-  const segment = String.raw`[A-Za-z_]\w*(?:\[\d+\])*`;
-  return new RegExp(`^${segment}(?:\\.${segment})+$`).test(name)
-    || /^[A-Za-z_]\w*\+\d+$/.test(name);
+  if (!looksLikeMemberPath(name)) return false;
+  if (!judgedInteriorCandidates || !judgedInteriorCandidates.has(name)) return true;
+  return provenInteriorLabels!.has(name);
 }
 
 /**
