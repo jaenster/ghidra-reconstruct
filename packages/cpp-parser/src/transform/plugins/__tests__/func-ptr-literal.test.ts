@@ -144,3 +144,21 @@ describe('funcPtrLiteralPlugin', () => {
     });
   });
 });
+
+describe('funcPtrLiteralPlugin — pipeline position', () => {
+  it('runs before the two passes that cast a function designator into its slot', async () => {
+    const { funcdefCastCollapsePlugin } = await import('../builtins/funcdef-cast-collapse.js');
+    const { funcPtrArgCastPlugin } = await import('../builtins/funcptr-arg-cast.js');
+    const { sbbBranchlessPlugin } = await import('../builtins/sbb-branchless.js');
+    const { signedLiteralPlugin } = await import('../builtins/signed-literal.js');
+
+    // Those two can only recognise a function reference once the address has
+    // become a designator; at 95 the arm of a branchless-select ternary was
+    // still a bare literal when they ran, so it came out uncast.
+    assert.ok(funcPtrLiteralPlugin.priority < funcdefCastCollapsePlugin.priority);
+    assert.ok(funcPtrLiteralPlugin.priority < funcPtrArgCastPlugin.priority);
+    // The constraints it has always had still hold.
+    assert.ok(funcPtrLiteralPlugin.priority > sbbBranchlessPlugin.priority);
+    assert.ok(funcPtrLiteralPlugin.priority > signedLiteralPlugin.priority);
+  });
+});

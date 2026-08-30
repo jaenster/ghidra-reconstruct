@@ -158,7 +158,15 @@ export const funcPtrLiteralPlugin: TransformPlugin = {
     'Resolve hex literals matching known function addresses to a reference qualified by the namespace the function is defined in',
   version: '2.0.0',
   defaultEnabled: true,
-  priority: 95, // Late: after sbb-branchless (42) and signed-literal (30)
+  // After sbb-branchless (42) and signed-literal (30), which is what this pass
+  // has always required — but BEFORE funcdef-cast-collapse (70) and
+  // funcptr-arg-cast (71). Those two cast a function reference into the slot it
+  // is stored in, and they can only recognise one once the address has become a
+  // designator. Left at 95 the address was still a bare literal when they ran,
+  // so a store that Ghidra spelled as an address (a branchless-select arm, say)
+  // came out as an uncast overload-set name while its siblings, which Ghidra
+  // spelled by name, got the full cast.
+  priority: 69,
   tags: ['core', 'cleanup', 'readability'],
 
   createTransformer(options?: FuncPtrLiteralOptions) {
