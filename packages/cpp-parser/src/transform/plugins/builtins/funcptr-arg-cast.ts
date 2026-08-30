@@ -133,8 +133,33 @@ export interface FuncPtrArgCastOptions extends PluginOptions {
 /** Slot marker for a parameter/field declared plain `void*` rather than a funcdef. */
 export const VOID_POINTER_SLOT = 'void*';
 
-/** How many arity mismatches were skipped — a cast cannot fix those. */
-let arityMismatches = 0;
+/**
+ * The arity mismatches skipped — a cast cannot fix those, so each one is a
+ * disagreement between a funcdef typedef and a function assigned into it, and
+ * the pair has to be settled in the database. Recorded rather than counted: a
+ * number says how large the class is, a list says which prototypes to look at.
+ */
+export interface ArityMismatch {
+  /** The funcdef typedef naming the slot. */
+  slot: string;
+  /** The function whose address is being stored into it. */
+  callee: string;
+  /** Parameters the function declares. */
+  actualArity: number;
+  /** Parameters the slot declares. */
+  slotArity: number;
+}
+
+const arityMismatchList: ArityMismatch[] = [];
+const arityMismatchSeen = new Set<string>();
+function noteArityMismatch(slot: string, callee: string, actual: string, target: string): void {
+  const key = `${slot}\u0000${callee}`;
+  if (arityMismatchSeen.has(key)) return;
+  arityMismatchSeen.add(key);
+  arityMismatchList.push({
+    slot, callee, actualArity: arityOf(actual), slotArity: arityOf(target),
+  });
+}
 
 /**
  * Typedef names this plugin has spelled into a cast since the last drain. The
@@ -153,11 +178,17 @@ export function takeFuncPtrArgCastTypedefs(): string[] {
 }
 
 export function getFuncPtrArgCastArityMismatches(): number {
-  return arityMismatches;
+  return arityMismatchList.length;
+}
+
+/** The recorded disagreements, as a worklist for the database. */
+export function getFuncPtrArgCastArityMismatchList(): readonly ArityMismatch[] {
+  return arityMismatchList;
 }
 
 export function resetFuncPtrArgCastStats(): void {
-  arityMismatches = 0;
+  arityMismatchList.length = 0;
+  arityMismatchSeen.clear();
 }
 
 /** The spelled name of an Identifier / QualifiedId, or undefined for anything else. */
@@ -306,7 +337,7 @@ function buildTransformer(options: FuncPtrArgCastOptions): Transformer {
             if (!armFn) return arm;
             const armSig = signatureFor(armFn);
             if (armSig === undefined || armSig === target) return arm;
-            if (arityOf(armSig) !== arityOf(target)) { arityMismatches++; return arm; }
+            if (arityOf(armSig) !== arityOf(target)) { noteArityMismatch(typedefName, armFn, armSig, target); return arm; }
             return castTo(typedefName, arm);
           };
           const thenExpr = armCast(cond.thenExpr);
@@ -322,7 +353,7 @@ function buildTransformer(options: FuncPtrArgCastOptions): Transformer {
         const actual = signatureFor(fnName);
         if (actual === undefined || actual === target) return undefined;
         if (arityOf(actual) !== arityOf(target)) {
-          arityMismatches++;
+          noteArityMismatch(typedefName, fnName, actual, target);
           return undefined;
         }
         return updateNode(assign, {
@@ -385,7 +416,7 @@ function buildTransformer(options: FuncPtrArgCastOptions): Transformer {
         // Arity (and by extension calling convention) is not something a cast
         // reconciles — the disagreement is real and wants reporting.
         if (arityOf(actual) !== arityOf(target)) {
-          arityMismatches++;
+          noteArityMismatch(typedefName, argFn, actual, target);
           return arg;
         }
 

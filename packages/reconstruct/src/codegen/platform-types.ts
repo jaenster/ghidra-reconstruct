@@ -62,6 +62,19 @@ export const WINDOWS_TYPES = new Set([
   '_SECURITY_ATTRIBUTES', '_SYSTEMTIME',
   'OVERLAPPED', 'GUID', 'SECURITY_ATTRIBUTES', 'WIN32_FIND_DATA',
   'LPPALETTEENTRY', 'PALETTEENTRY',
+  // Tool Help and PSAPI entry structs. `<tlhelp32.h>` and `<psapi.h>` are both
+  // in EXTRA_WIN32_SDK_HEADERS, so these names are already defined by the time
+  // any translation unit is compiled; without them here isPlatformOrBuiltinType
+  // says false and the emitter writes a SECOND definition of the same tag, which
+  // is a redefinition in every TU rather than an error in the four that use them.
+  'PROCESSENTRY32', 'PROCESSENTRY32W', 'tagPROCESSENTRY32', 'tagPROCESSENTRY32W',
+  'LPPROCESSENTRY32', 'LPPROCESSENTRY32W',
+  'MODULEENTRY32', 'MODULEENTRY32W', 'tagMODULEENTRY32', 'tagMODULEENTRY32W',
+  'LPMODULEENTRY32', 'LPMODULEENTRY32W',
+  'THREADENTRY32', 'tagTHREADENTRY32', 'LPTHREADENTRY32',
+  'HEAPENTRY32', 'tagHEAPENTRY32', 'LPHEAPENTRY32',
+  'HEAPLIST32', 'tagHEAPLIST32', 'LPHEAPLIST32',
+  'MODULEINFO', '_MODULEINFO', 'LPMODULEINFO',
   // PE header types
   'IMAGE_DOS_HEADER', 'IMAGE_NT_HEADERS', 'IMAGE_SECTION_HEADER',
   'IMAGE_DEBUG_DIRECTORY', 'IMAGE_RESOURCE_DIRECTORY',
@@ -676,6 +689,7 @@ const PLATFORM_INLINE_FORWARDERS: readonly string[] = [
   'FloatToLong', 'LongToFloat',
   '__alldiv', '__allmul', '__allrem', '__alldvrm', '__allshr', '__allshl',
   '__aulldiv', '__aullrem', '__aullshr',
+  '_strncpy_s',
 ];
 
 /**
@@ -690,7 +704,7 @@ const PLATFORM_MACRO_ALIASES: readonly string[] = [
   '_fprintf', '_printf', '_malloc', '_free', '_calloc', '_realloc', '_abs',
   'builtin_strncpy', 'builtin_memcpy', 'builtin_memset', 'builtin_strcmp',
   'builtin_strlen', 'builtin_strcpy',
-  '__snprintf_s', '__snprintf', '_snprintf', '_vsnprintf', '_strncpy_s',
+  '__snprintf_s', '__snprintf', '_snprintf', '_vsnprintf',
   '__stricmp', '_stricmp', '_strnicmp', '_strrchr', '_strtok', '_strcspn',
   '_fopen', '_fclose', '_fread', '_fwrite', '_ftell', '_fseek', '_fflush',
   '_fgets', '_fputs', '_time64', '_difftime64',
@@ -1295,6 +1309,7 @@ export function generatePlatformHeader(
   lines.push('static inline int64_t __allmul(int64_t a, int64_t b) { return a * b; }');
   lines.push('static inline int64_t __allmul(uint32_t lo1, uint32_t hi1, uint32_t lo2, uint32_t hi2) { return (int64_t)(lo1 | ((uint64_t)hi1 << 32)) * (int64_t)(lo2 | ((uint64_t)hi2 << 32)); }');
   lines.push('static inline int64_t __allrem(int64_t a, int64_t b) { return a % b; }');
+  lines.push('static inline int64_t __allrem(uint32_t lo1, uint32_t hi1, uint32_t lo2, int hi2) { return (int64_t)(lo1 | ((uint64_t)hi1 << 32)) % (int64_t)(lo2 | ((uint64_t)(uint32_t)hi2 << 32)); }');
   lines.push('static inline int64_t __alldvrm(uint32_t lo1, uint32_t hi1, uint32_t lo2, int hi2) { return (int64_t)(lo1 | ((uint64_t)hi1 << 32)) / (int64_t)(lo2 | ((uint64_t)(uint32_t)hi2 << 32)); }');
   lines.push('static inline int64_t __allshr(int64_t a, int n) { return a >> n; }');
   lines.push('static inline int64_t __allshl(int64_t a, int n) { return a << n; }');
@@ -1332,7 +1347,17 @@ export function generatePlatformHeader(
   lines.push('#define __snprintf snprintf');
   lines.push('#define _snprintf snprintf');
   lines.push('#define _vsnprintf vsnprintf');
-  lines.push('#define _strncpy_s(dst, dsz, src, cnt) strncpy(dst, src, cnt)');
+  // strncpy_s returns errno_t, not the destination — every call site here stores
+  // the result. cnt == (size_t)-1 is MSVC's _TRUNCATE, which means "as much as
+  // fits", so the copy is bounded by dsz and not by cnt.
+  lines.push('static inline errno_t _strncpy_s(char* dst, size_t dsz, const char* src, size_t cnt) {');
+  lines.push('    if (!dst || dsz == 0) return 22 /* EINVAL */;');
+  lines.push('    size_t n = (cnt >= dsz) ? dsz - 1 : cnt;');
+  lines.push('    size_t i = 0;');
+  lines.push('    for (; i < n && src[i]; ++i) dst[i] = src[i];');
+  lines.push('    dst[i] = 0;');
+  lines.push('    return (src[i] && cnt >= dsz) ? 80 /* STRUNCATE */ : 0;');
+  lines.push('}');
   lines.push('#define __stricmp strcasecmp');
   lines.push('#define _stricmp strcasecmp');
   lines.push('#define _strnicmp strncasecmp');

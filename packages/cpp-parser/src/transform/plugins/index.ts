@@ -513,7 +513,7 @@ export { rootScopeQualifyPlugin, type RootScopeQualifyOptions } from './builtins
 import { namespaceShadowQualifyPlugin } from './builtins/namespace-shadow-qualify.js';
 export { namespaceShadowQualifyPlugin, type NamespaceShadowQualifyOptions } from './builtins/namespace-shadow-qualify.js';
 import { funcPtrArgCastPlugin } from './builtins/funcptr-arg-cast.js';
-export { funcPtrArgCastPlugin, getFuncPtrArgCastArityMismatches, resetFuncPtrArgCastStats, takeFuncPtrArgCastTypedefs, VOID_POINTER_SLOT, type FuncPtrArgCastOptions } from './builtins/funcptr-arg-cast.js';
+export { funcPtrArgCastPlugin, getFuncPtrArgCastArityMismatches, getFuncPtrArgCastArityMismatchList, resetFuncPtrArgCastStats, takeFuncPtrArgCastTypedefs, VOID_POINTER_SLOT, type ArityMismatch, type FuncPtrArgCastOptions } from './builtins/funcptr-arg-cast.js';
 import { enclosingNamespaceStripPlugin } from './builtins/enclosing-namespace-strip.js';
 export { enclosingNamespaceStripPlugin, type EnclosingNamespaceStripOptions } from './builtins/enclosing-namespace-strip.js';
 import { qualifiedNameCleanupPlugin } from './builtins/qualified-name-cleanup.js';

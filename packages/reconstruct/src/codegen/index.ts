@@ -48,7 +48,7 @@ import type {
   DataValue,
 } from '../types.js';
 import { resolveOverridePlaceholders } from './impl.js';
-import { VOID_POINTER_SLOT, type FuncPtrTarget } from '@ghidra-mcp/cpp-parser';
+import { VOID_POINTER_SLOT, getFuncPtrArgCastArityMismatchList, type FuncPtrTarget } from '@ghidra-mcp/cpp-parser';
 
 import { fieldDeclSpelling, emittedMemberNames, generateHeader, generateFunctionDeclaration, setKnownFuncDefs, sigType, getIntegerConversionType } from './header.js';
 import { generateImplementation, setQuestStructLayouts, setStructFieldRenames, decompiledReturnType, decompiledFunctionName, type ImplGenContext, type FuncPtrArgCastTables } from './impl.js';
@@ -847,6 +847,7 @@ export function generateProject(
   reportCaseCollidingOutputPaths(project);
   reportGlobalsTakingATypeName();
   reportDeclarationClosure();
+  reportFuncPtrArityMismatches();
 
   return project;
 }
@@ -858,6 +859,25 @@ export function generateProject(
  * closure deliberately does not paper over, and the count is how much of the
  * "was not declared" error family is NOT a closure problem.
  */
+/**
+ * The funcdef-vs-function arity disagreements both cast paths refused.
+ *
+ * A cast reconciles a parameter TYPE; it cannot reconcile a parameter COUNT, so
+ * every line here is a place where the database says a slot takes N arguments
+ * and the function stored into it takes M. One of the two prototypes is wrong
+ * and only the database can say which — printing the pairs is what turns the
+ * class from a number into a worklist.
+ */
+function reportFuncPtrArityMismatches(): void {
+  const bodies = getFuncPtrArgCastArityMismatchList();
+  const initializers = getInitializerFuncPtrArityMismatches();
+  if (bodies.length === 0 && initializers === 0) return;
+  console.log(`Funcdef arity disagreements: ${bodies.length} in bodies, ${initializers} in data initializers (no cast attempted — a cast cannot change arity)`);
+  for (const m of [...bodies].sort((a, b) => a.slot.localeCompare(b.slot) || a.callee.localeCompare(b.callee))) {
+    console.log(`  ${m.slot} takes ${m.slotArity}, ${m.callee} takes ${m.actualArity}`);
+  }
+}
+
 function reportDeclarationClosure(): void {
   const report = getDeclarationClosureReport();
   if (!report) return;
@@ -2623,8 +2643,20 @@ function signatureKey(returnType: string, paramTypes: string[]): string {
 }
 
 /**
- * Index a name under both its qualified and its bare spelling — a call site may
- * write either. A key claimed by two different signatures is ambiguous and is
+ * Index a name under its qualified spelling, its bare spelling, and the spelling
+ * the EMITTER actually writes — a reference site may carry any of the three.
+ *
+ * The third is not cosmetic. Ghidra's namespace is `D2Direct3D::Renderer::Direct3D`
+ * and the emitted one is `D2Direct3D::Renderer` (the trailing segment collides
+ * with a type, so the declaration side drops it). A data initializer naming
+ * `&D2Direct3D::Renderer::DrawGroundTile` then matched neither key — the qualified
+ * one because it is the raw path, the bare one because `DrawGroundTile` exists in
+ * three renderers and is dropped as ambiguous — so the signature comparison saw
+ * nothing and no cast was written, while the same field in the Glide and
+ * DirectDraw tables (whose namespaces survive intact) got one. Two records of the
+ * same name, written at different times, drifting apart.
+ *
+ * A call site may write either. A key claimed by two different signatures is ambiguous and is
  * dropped rather than guessed at.
  *
  * EVERY key goes through that guard, the qualified one included. An
@@ -2641,8 +2673,9 @@ function indexBothSpellings<T>(
   bare: string,
   value: T,
   same: (a: T, b: T) => boolean,
+  emitted?: string,
 ): void {
-  const keys = bare === qualified ? [qualified] : [qualified, bare];
+  const keys = [...new Set([qualified, bare, ...(emitted ? [emitted] : [])])];
   for (const key of keys) {
     if (ambiguous.has(key)) continue;
     const existing = into[key];
@@ -3002,6 +3035,7 @@ function buildFuncPtrArgCastTables(
     indexBothSpellings(
       functionSignatures, ambiguousSig, qualified, fn.name,
       signatureKey(fn.returnType ?? 'void', params.map(p => p.dataType)), sameString,
+      normalizeQualifiedReference(qualified),
     );
 
     // Which of this function's own parameters are declared with a funcdef typedef?
@@ -3015,7 +3049,8 @@ function buildFuncPtrArgCastTables(
       else if (isVoidPointerSpelling(p.dataType)) slots[i] = VOID_POINTER_SLOT;
     });
     if (Object.keys(slots).length === 0) continue;
-    indexBothSpellings(paramFuncdefs, ambiguousSlots, qualified, fn.name, slots, sameSlots);
+    indexBothSpellings(paramFuncdefs, ambiguousSlots, qualified, fn.name, slots, sameSlots,
+      normalizeQualifiedReference(qualified));
   }
 
   const variableNames = [...new Set(globals.map(g => g.suggestedName || g.name).filter(Boolean))];

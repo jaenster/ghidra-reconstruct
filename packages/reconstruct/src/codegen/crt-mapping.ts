@@ -581,7 +581,9 @@ const RAD_DECLS: ExcludedSymbolDecl[] = [
   { emitted: '_SmackToBuffer_28', real: 'SmackToBuffer', source: 'rad',
     decl: 'extern "C" __stdcall void _SmackToBuffer_28(void* pSmack, uint32_t nLeft, uint32_t nTop, uint32_t nPitch, uint32_t nDestHeight, void* pBuffer, uint32_t dwFlags);' },
   { emitted: '_BinkOpen_8', real: 'BinkOpen', source: 'rad',
-    decl: 'extern "C" __stdcall void* _BinkOpen_8(const char* szName, uint32_t dwFlags);' },
+    // First parameter is a file HANDLE, not a name: all three call sites pass an
+    // open Storm MPQ handle and set BINKFILEHANDLE (0x00800000) in dwFlags.
+    decl: 'extern "C" __stdcall void* _BinkOpen_8(void* hFile, uint32_t dwFlags);' },
   { emitted: '_BinkClose_4', real: 'BinkClose', source: 'rad',
     decl: 'extern "C" __stdcall void _BinkClose_4(void* pBink);' },
   { emitted: '_BinkDoFrame_4', real: 'BinkDoFrame', source: 'rad',
@@ -593,7 +595,9 @@ const RAD_DECLS: ExcludedSymbolDecl[] = [
   { emitted: '_BinkCopyToBuffer_28', real: 'BinkCopyToBuffer', source: 'rad',
     decl: 'extern "C" __stdcall int32_t _BinkCopyToBuffer_28(void* pBink, void* pDest, int32_t nDestPitch, uint32_t nDestHeight, uint32_t nDestX, uint32_t nDestY, uint32_t dwFlags);' },
   { emitted: '_BinkSetSoundSystem_8', real: 'BinkSetSoundSystem', source: 'rad',
-    decl: 'extern "C" __stdcall int32_t _BinkSetSoundSystem_8(void* pfnOpen, uint32_t dwParam);' },
+    // First parameter is the sound-system opener itself — every call site passes
+    // _BinkOpenDirectSound_4, so the slot is a function, not an object pointer.
+    decl: 'extern "C" __stdcall int32_t _BinkSetSoundSystem_8(void* (__stdcall* pfnOpen)(uint32_t), uint32_t dwParam);' },
   { emitted: '_BinkOpenDirectSound_4', real: 'BinkOpenDirectSound', source: 'rad',
     decl: 'extern "C" __stdcall void* _BinkOpenDirectSound_4(uint32_t dwParam);' },
   { emitted: '_BinkDDSurfaceType_4', real: 'BinkDDSurfaceType', source: 'rad',
@@ -616,12 +620,45 @@ const RAD_DECLS: ExcludedSymbolDecl[] = [
  * four `GetProcAddress` stores into `assignment of function`.
  */
 
+/**
+ * Import-table entry points whose own SDK header cannot be included.
+ *
+ * `<ddraw.h>` and `<dsound.h>` were tried first, because the real header is
+ * always the better counterparty. Both are refused, measured: `<dsound.h>`
+ * takes `D2Sound/Sound.cpp` from 2 errors to 43 and `<ddraw.h>` takes
+ * `D2Direct3D/Renderer/Direct3D.cpp` from 10 to 100 — the reconstruction
+ * already carries its own COM interface declarations and the SDK's collide with
+ * them. `<wintrust.h>` was measured the same way and is clean, so WinVerifyTrust
+ * comes from its header and these do not.
+ *
+ * IJL11 is Intel's JPEG Library, statically bound through an import thunk. The
+ * convention is read off the caller: `004fa036 PUSH EAX` / `004fa037 CALL dword
+ * ptr [0x006cc5e0]` is followed by no stack adjustment, so the callee cleans —
+ * `__stdcall`. The first parameter is a `JPEG_CORE_PROPERTIES`, a 0x4e40-byte
+ * block the caller memsets before the call; it is spelled `void*` because the
+ * reconstruction has no declaration of that structure.
+ */
+const IMPORT_THUNK_DECLS: ExcludedSymbolDecl[] = [
+  { emitted: 'ijlInit', real: 'IJL11.DLL ijlInit', source: 'ghidra',
+    decl: 'extern "C" __stdcall int32_t ijlInit(void* pJpegCoreProps);' },
+  { emitted: 'ijlFree', real: 'IJL11.DLL ijlFree', source: 'ghidra',
+    decl: 'extern "C" __stdcall int32_t ijlFree(void* pJpegCoreProps);' },
+  { emitted: 'ijlWrite', real: 'IJL11.DLL ijlWrite', source: 'ghidra',
+    decl: 'extern "C" __stdcall int32_t ijlWrite(void* pJpegCoreProps, int32_t nWriteOption);' },
+  // The one call site passes `(0, &gnDirectSoundInitStatus, 0)` and that global
+  // is declared `IDirectSound*`, so the SDK's own shape fits exactly.
+  { emitted: 'DirectSoundCreate', real: 'DSOUND.DLL DirectSoundCreate', source: 'ghidra',
+    decl: 'extern "C" __stdcall int32_t DirectSoundCreate(const GUID* pcGuidDevice, struct IDirectSound** ppDS, struct IUnknown* pUnkOuter);',
+    win32Only: true },
+];
+
 /** Every excluded-namespace declaration, in emission order. */
 export const EXCLUDED_SYMBOL_DECLS: readonly ExcludedSymbolDecl[] = [
   ...CRT_FORWARDERS,
   ...MSVC_RUNTIME_DECLS,
   ...WRAPPER_DECLS,
   ...RAD_DECLS,
+  ...IMPORT_THUNK_DECLS,
 ];
 
 /**
@@ -659,6 +696,7 @@ export const EXTRA_WIN32_SDK_HEADERS: readonly string[] = [
   '<tlhelp32.h>',   // CreateToolhelp32Snapshot, Process32/Thread32/Module32*
   '<psapi.h>',      // GetModuleFileNameExA, GetModuleInformation, MODULEINFO
   '<mmsystem.h>',   // timeGetTime, and WAVEFORMATEX for <dsound.h> below
+  '<wintrust.h>',   // WinVerifyTrust, WINTRUST_DATA, and the action GUIDs
 ];
 
 /** Render the excluded-namespace declaration block for `d2_platform.h`. */
