@@ -174,3 +174,52 @@ describe('stack-frame-address', () => {
     assert.ok(out.includes('stack0xfffffef3'), out);
   });
 });
+
+/**
+ * MSVC's inlined SEH prologue ends `MOV [EBP-0x10], ESP`. The address is ESP
+ * after the whole prologue - twelve bytes below the deepest local, inside the
+ * register save area - so no slot owns it and none honestly can. What settles it
+ * is that the destination is never read.
+ */
+describe('stack-frame-address dead store', () => {
+  // -72 is below every modelled slot: the `Direct3D.cpp` `BootDirect3d` shape.
+  const UNOWNED = 'stack0xffffffb8';
+
+  it('drops a store of an unowned frame address into a local nothing reads', () => {
+    const out = run(`void f() { uint8_t* local_14 = &${UNOWNED}; g(); }`);
+    assert.ok(!out.includes('stack0x'), out);
+    assert.ok(out.includes('uint8_t* local_14;'), out);
+  });
+
+  it('drops the same store when it stands as its own statement', () => {
+    const out = run(`void f() { uint8_t* local_14; local_14 = &${UNOWNED}; g(); }`);
+    assert.ok(!out.includes('stack0x'), out);
+    assert.ok(out.includes('uint8_t* local_14;'), out);
+    assert.ok(!out.includes('local_14 ='), out);
+  });
+
+  it('KEEPS the store when the local is read later', () => {
+    const out = run(`void f() { uint8_t* local_14 = &${UNOWNED}; g(local_14); }`);
+    assert.ok(out.includes(UNOWNED), out);
+  });
+
+  it('KEEPS the store when the local is only read through its address', () => {
+    const out = run(`void f() { uint8_t* local_14; local_14 = &${UNOWNED}; g(&local_14); }`);
+    assert.ok(out.includes(UNOWNED), out);
+  });
+
+  it('KEEPS a store into something the body does not declare', () => {
+    // A global, or a local the emitter dropped. Deleting a write to it would be
+    // deleting an effect the function has on the world outside its frame.
+    const out = run(`void f() { ExceptionList = &${UNOWNED}; }`);
+    assert.ok(out.includes(UNOWNED), out);
+  });
+
+  it('KEEPS a dead store whose address the frame DID account for', () => {
+    // `&stack0xffffffe0` is `&local_20`. Once bound it is ordinary code, and
+    // dropping it would be dead-store elimination on the reconstruction at large.
+    const out = run('void f() { int local_20; uint8_t* p2 = &stack0xffffffe0; }');
+    assert.ok(out.includes('&local_20'), out);
+    assert.ok(out.includes('p2'), out);
+  });
+});

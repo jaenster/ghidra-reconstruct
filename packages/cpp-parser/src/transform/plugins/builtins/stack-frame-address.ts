@@ -54,7 +54,10 @@
  *
  * The last case does not compile, and that is the point. An unowned frame slot
  * cannot be spelled in C++ without a frame pointer, so it fails loudly at the
- * exact offset rather than silently reading somewhere else.
+ * exact offset rather than silently reading somewhere else. The one exception is
+ * an unowned address STORED into a local nothing ever reads - MSVC's SEH
+ * saved-ESP slot - where the store itself is dead and goes; see
+ * `createDeadFrameStoreTransformer`.
  *
  * A slot is only bound when the emitted body actually DECLARES it: Ghidra lists
  * frame variables the emitter drops (the cookie's own `local_8` goes with the
@@ -85,9 +88,13 @@ import type {
   BuiltinType,
   VariableDecl,
   ParameterDecl,
+  CompoundStmt,
+  ExprStmt,
+  Statement,
 } from '../../../ast/nodes.js';
+import type { Trivia } from '../../../lexer/trivia.js';
 import { traverseAST } from '../../../ast/visitor.js';
-import { createKindTransformer, sequence, type Transformer } from '../../transformer.js';
+import { createKindTransformer, createTransformer, sequence, updateNode, type Transformer } from '../../transformer.js';
 import { typeNodeName } from './call-arg-cast.js';
 import { createPlugin } from '../registry.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
@@ -507,13 +514,152 @@ function createFrameSlotTransformer(slots: StackSlot[]): Transformer {
   };
 }
 
+/**
+ * A store of an address the frame could not account for, into a local that
+ * nothing ever reads.
+ *
+ * MSVC's inlined SEH prologue ends with `MOV [EBP-0x10], ESP` - the unwinder's
+ * saved-ESP slot. It has no counterpart in the C the compiler was given, which
+ * held a `__try` and not a store. The value is ESP after the WHOLE prologue,
+ * twelve bytes below the deepest local Ghidra models, inside the EBX/ESI/EDI
+ * save area - storage the function does not allocate as locals, so no honest
+ * declaration can cover it. It is not the frame pointer either: EBP sits at -4,
+ * and `__builtin_frame_address(0)` would compile and be wrong by the frame's
+ * whole size (3216 and 68 bytes at the two `D2Direct3D/Renderer/Direct3D.cpp`
+ * sites).
+ *
+ * Every available spelling of the value asserts something false. What is true is
+ * that the store is DEAD - the destination is written and never read - so the
+ * statement is dropped. That removes compiler scaffolding rather than inventing
+ * a value, which is the difference between this and substituting `0`.
+ *
+ * The guard is a property, not an address list:
+ *
+ *   - the value is a frame address `createFrameSlotTransformer` could not bind
+ *     to any slot. That is why this runs LAST in the sequence - before it, the
+ *     cookie seed, the frame pointer and every owned slot still look the same;
+ *   - the destination is a plain local the body DECLARES, so a store to a global
+ *     or through a pointer is never touched;
+ *   - that local is not READ anywhere in the function. A compound assignment
+ *     reads its target, and taking the address of the local is a read, so a
+ *     value that is used anywhere keeps its loud error.
+ *
+ * The declaration stays; only the store goes. A local Ghidra put in the frame is
+ * evidence, and another write to it elsewhere would still need somewhere to go.
+ */
+
+/**
+ * Names that appear in a READ position: every identifier occurrence except a
+ * declaration's own name and the target of a plain `=`.
+ *
+ * Deliberately over-inclusive - `&x`, `x++` and `x += 1` all count as reads -
+ * because every name it wrongly reports as read merely keeps an error that was
+ * already there, while one it wrongly reports as dead deletes a live store.
+ */
+function namesRead(root: ASTNode): Set<string> {
+  const writePositions = new Set<ASTNode>();
+  for (const n of traverseAST(root)) {
+    if (n.kind === NodeKind.VariableDecl) {
+      const name = (n as VariableDecl).name;
+      if (name) writePositions.add(name);
+    } else if (n.kind === NodeKind.ParameterDecl) {
+      const name = (n as ParameterDecl).name;
+      if (name) writePositions.add(name);
+    } else if (n.kind === NodeKind.AssignExpr) {
+      const assign = n as AssignExpr;
+      // `+=` and friends read the target first; only a plain `=` overwrites it.
+      if (assign.operator !== '=') continue;
+      const lhs = unwrapParens(assign.left);
+      if (lhs.kind === NodeKind.Identifier) writePositions.add(lhs);
+    }
+  }
+
+  const names = new Set<string>();
+  for (const n of traverseAST(root)) {
+    if (n.kind !== NodeKind.Identifier || writePositions.has(n)) continue;
+    names.add((n as Identifier).name);
+  }
+  return names;
+}
+
+/** Is this value a `&stack0xNNNN` no slot claimed - through parens and casts? */
+function isUnresolvedFrameAddress(expr: Expression): boolean {
+  let e = unwrapParens(expr);
+  while (e.kind === NodeKind.CStyleCastExpr) {
+    e = unwrapParens((e as CStyleCastExpr).expression);
+  }
+  return frameAddressOffset(e) !== null;
+}
+
+function createDeadFrameStoreTransformer(): Transformer {
+  return (root: ASTNode) => {
+    const read = namesRead(root);
+    const declared = declaredNames(root);
+
+    /** A plain local the body declares and never reads. */
+    const isDeadLocal = (target: Expression): boolean => {
+      const lhs = unwrapParens(target);
+      if (lhs.kind !== NodeKind.Identifier) return false;
+      const name = (lhs as Identifier).name;
+      return declared.has(name) && !read.has(name);
+    };
+
+    const isDeadFrameStore = (stmt: Statement): boolean => {
+      if (stmt.kind !== NodeKind.ExprStmt) return false;
+      const expr = (stmt as ExprStmt).expression;
+      if (expr.kind !== NodeKind.AssignExpr) return false;
+      const assign = expr as AssignExpr;
+      if (assign.operator !== '=') return false;
+      return isUnresolvedFrameAddress(assign.right) && isDeadLocal(assign.left);
+    };
+
+    return createTransformer({
+      // `uint8_t *local_14 = &stack0xffffffb8;` - keep the local, drop the store.
+      visitVariableDecl(decl: VariableDecl): ASTNode | undefined {
+        const init = decl.initializer;
+        if (!init || !isUnresolvedFrameAddress(init as Expression)) return undefined;
+        if (!isDeadLocal(decl.name)) return undefined;
+        return updateNode(decl, { initializer: null } as Partial<VariableDecl>);
+      },
+
+      // `local_14 = &stack0xfffff36c;` standing on its own - drop the statement.
+      visitCompoundStmt(node: CompoundStmt): ASTNode | undefined {
+        const kept: Statement[] = [];
+        let carried: Trivia[] = [];
+        let dropped = false;
+        for (const stmt of node.statements) {
+          if (isDeadFrameStore(stmt)) {
+            dropped = true;
+            carried = [...carried, ...(stmt.leadingTrivia ?? [])];
+            continue;
+          }
+          kept.push(
+            carried.length > 0
+              ? updateNode(stmt, { leadingTrivia: [...carried, ...(stmt.leadingTrivia ?? [])] })
+              : stmt
+          );
+          carried = [];
+        }
+        if (!dropped) return undefined;
+        // A comment on the dropped statement with nothing after it to carry it:
+        // the store is not worth losing a Ghidra comment over.
+        if (carried.length > 0) return undefined;
+        return updateNode(node, { statements: kept } as Partial<CompoundStmt>);
+      },
+    })(root);
+  };
+}
+
 function createStackFrameAddressTransformer(options: StackFrameAddressOptions = {}): Transformer {
   const slots = options.slots ?? [];
   // The identity pass runs first, so a cookie seed is settled before the frame is
   // consulted — and it runs even for a function with no modelled frame at all.
+  // Dead-store elimination runs LAST: its guard is "the frame could not account
+  // for this address", which is only true of what survives the two passes above.
   return sequence(
     createFrameIdentityTransformer(),
     slots.length > 0 ? createFrameSlotTransformer(slots) : ((node: ASTNode) => node),
+    createDeadFrameStoreTransformer(),
   );
 }
 
