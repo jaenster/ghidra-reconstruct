@@ -2091,6 +2091,15 @@ function transformDecompiledCode(
       perPluginOptions['array-block-assign'] = {
         globalTypes: context.funcPtrArgCasts.globalTypes,
       };
+      perPluginOptions['indirect-call-cleanup'] = {
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        structFields: context.funcPtrArgCasts.structFields,
+        fieldFuncdefs: context.funcPtrArgCasts.fieldFuncdefs,
+        structFieldFuncdefs: context.funcPtrArgCasts.structFieldFuncdefs,
+        typedefTargets: context.funcPtrArgCasts.typedefTargets,
+        enclosingVarTypes,
+      };
       perPluginOptions['narrow-cast-through-uintptr'] = {
         globalTypes: context.funcPtrArgCasts.globalTypes,
         fieldTypes: context.funcPtrArgCasts.fieldTypes,

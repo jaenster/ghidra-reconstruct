@@ -32,6 +32,56 @@ describe('indirectCallCleanupPlugin', () => {
     });
   });
 
+  // Ghidra writes `(*(code *)X)()` precisely BECAUSE X's type is not a function
+  // pointer; when it is, it writes `(*X)()` and Pattern 2 handles that. So on a
+  // field the model knows as plain data the cast is load-bearing, and stripping
+  // it gives "expression cannot be used as a function".
+  describe('Pattern 1 gating on the field type', () => {
+    const gated = (code: string, options: Record<string, unknown>): string =>
+      emit(indirectCallCleanupPlugin.createTransformer(options as never)(parse(code)) as AnyNode)
+        .replace(/\s+/g, ' ').trim();
+
+    it('keeps the (code*) cast on a field known to hold data', () => {
+      const out = gated(
+        `void f(D2PoolStrc* pPool) { (*(code *)pPool->nSize)(); }`,
+        { fieldTypes: { nSize: 'size_t' } },
+      );
+      assert.ok(out.includes('(*(code*)pPool->nSize)()'), out);
+    });
+
+    it('keeps the cast on a void* field, resolved through the object type', () => {
+      const out = gated(
+        `void f(D2WardenStrc* pWarden) { (*(code *)pWarden->pLibrary)(); }`,
+        {
+          enclosingVarTypes: {},
+          structFields: { D2WardenStrc: { pLibrary: 'void *' } },
+        },
+      );
+      assert.ok(out.includes('(*(code*)pWarden->pLibrary)()'), out);
+    });
+
+    it('still strips the cast on a field declared with a funcdef', () => {
+      const out = gated(
+        `void f(D2ClientStrc* pClient) { (*(code *)pClient->pfnDraw)(); }`,
+        { fieldFuncdefs: { pfnDraw: 'fnDraw' }, fieldTypes: { pfnDraw: 'size_t' } },
+      );
+      assert.ok(out.includes('pClient->pfnDraw()'), out);
+    });
+
+    it('still strips the cast on a field the model cannot place', () => {
+      const out = gated(`void f(D2X* p) { (*(code *)p->fpUnknown)(); }`, {});
+      assert.ok(out.includes('p->fpUnknown()'), out);
+    });
+
+    it('still strips the cast on a field spelled as a function pointer', () => {
+      const out = gated(
+        `void f(D2X* p) { (*(code *)p->fpDraw)(); }`,
+        { fieldTypes: { fpDraw: 'BOOL (__stdcall *)(D2ControlStrc *)' } },
+      );
+      assert.ok(out.includes('p->fpDraw()'), out);
+    });
+  });
+
   describe('WARNING trivia stripping', () => {
     it('should strip jumptable warning from before function', () => {
       const code = `/* WARNING: Could not recover jumptable */
