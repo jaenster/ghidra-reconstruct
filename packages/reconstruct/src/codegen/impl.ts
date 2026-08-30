@@ -25,7 +25,7 @@ import { namespaceResolution, renderNamespace, type ResolvedNamespace } from './
 import { cleanFunctionComment, guardedFuncDefTypedef, emittedFunctionName, returnSigType } from './header.js';
 import { declarationHead } from './calling-convention.js';
 import { normalizeSignatureType, collapseFuncPtrTypedef, rootQualifyShadowedType, emittedParameterName, getAggregateTypeNames } from './platform-types.js';
-import { generateStaticLocalsBlock, emitDataValue, inferArrayDeclaration, normalizeArrayDeclaration, braceArrayInitializer, isFuncDefTypedefName, getKnownFuncDefTypedefs, getKnownEnumConstants, setInitializerNamespace, renderGlobalScalarInitializer, recordDeclaredName } from './globals-header.js';
+import { generateStaticLocalsBlock, emitDataValue, inferArrayDeclaration, isWideTextDatum, normalizeArrayDeclaration, braceArrayInitializer, isFuncDefTypedefName, getKnownFuncDefTypedefs, getKnownEnumConstants, setInitializerNamespace, renderGlobalScalarInitializer, recordDeclaredName } from './globals-header.js';
 
 /** normalizeSignatureType + fn-ptr-typedef double-indirection collapse, for
  *  emitting function parameter and return types ("fpFoo *" → "fpFoo"). */
@@ -900,7 +900,7 @@ export function generateImplementation(
         // no element/field types and every pointer slot is emitted uncast — the
         // same call in globals.cpp has always passed it.
         const initializer = emitDataValue(global.initializedData, 0, type);
-        if (arrayInfo && global.initializedData.kind === 'array') {
+        if (arrayInfo && (global.initializedData.kind === 'array' || isWideTextDatum(global, type))) {
           fileLocalLines.push(`static ${arrayInfo.type} ${name}[${arrayInfo.count}] = ${initializer};`);
         } else {
           fileLocalLines.push(`static ${normalizeArrayDeclaration(type, name)} = ${braceArrayInitializer(type, initializer)};`);

@@ -822,6 +822,13 @@ export function generateExternDeclaration(
 
   type = normalizeGlobalDeclType(type);
 
+  // A Ghidra `unicode` run is an ARRAY of code units, and its type spelling
+  // carries no dimension of its own. Without one the declaration here is a
+  // scalar while globals.cpp defines the array, which is a conflicting
+  // declaration rather than the missing dimension it looks like.
+  const wideText = isWideTextDatum(global, type) ? inferArrayDeclaration(global) : null;
+  if (wideText) type = `${wideText.type}[${wideText.count}]`;
+
   // Evidence comment, same convention as functions: how the name was established.
   let evidence = '';
   if (global.comment) {
@@ -1049,6 +1056,23 @@ export function groupByNamespace(
 }
 
 /**
+ * Is this datum a WIDE character run — a Ghidra `string` value sitting in a
+ * 16-bit character slot?
+ *
+ * Such a datum has to be declared as an array and initialised element-wise. The
+ * spelling the narrow path produces, `uint16_t s = "(null)";`, gets both halves
+ * wrong: the scalar type for a seven-element run, and a narrow literal for a
+ * wide one.
+ */
+export function isWideTextDatum(
+  symbol: AnalyzedDataSymbol,
+  declaredType: string
+): boolean {
+  return symbol.initializedData?.kind === 'string'
+    && isWideTextSlotType(baseTypeName(declaredType));
+}
+
+/**
  * Generate array declaration if the symbol looks like an array
  */
 export function inferArrayDeclaration(
@@ -1092,6 +1116,13 @@ function getBaseTypeSize(dataType: string): number {
     'double': 8,
     'pointer': 4, // 32-bit
     'void*': 4,
+    // D2's wide character. Ghidra's `unicode` is a NUL-terminated run of 16-bit
+    // code units, so a 14-byte datum is seven of them — without this the run is
+    // read as one scalar and a 7-element array is declared as a single `uint16_t`.
+    'unicode': 2,
+    'wchar16': 2,
+    'wchar_t': 2,
+    'wchar': 2,
   };
 
   return sizes[dataType.toLowerCase()] || 0;
@@ -1352,6 +1383,22 @@ function isCharSlotType(base: string): boolean {
   return CHAR_SLOT_TYPES.has(base.toLowerCase());
 }
 
+/**
+ * Slots whose element is a 16-BIT character. Ghidra's `unicode` is a
+ * NUL-terminated run of these, and D2's wide char is emitted as `uint16_t`
+ * (mingw's `wchar_t` is 16-bit but is a distinct type that no narrow string
+ * literal reaches either way).
+ *
+ * Named positively rather than as "not a char slot": Ghidra's own `string` is
+ * the byte-layout name for a NARROW run, and every one of those lands in a
+ * `char[N]` that a string literal initialises perfectly well.
+ */
+const WIDE_TEXT_SLOT_TYPES = new Set(['uint16_t', 'wchar_t', 'wchar16', 'unicode', 'WCHAR']);
+
+function isWideTextSlotType(base: string | undefined): boolean {
+  return base !== undefined && WIDE_TEXT_SLOT_TYPES.has(base);
+}
+
 function isUnsignedByteSlotType(base: string): boolean {
   return UNSIGNED_BYTE_SLOT_TYPES.has(base.toLowerCase());
 }
@@ -1440,9 +1487,19 @@ export function emitDataValue(dv: DataValue, indent = 0, expectedType?: string):
       return castPointerInitializer(expectedType ? stripFuncDefIndirection(expectedType.trim()) : '', val);
     }
 
-    case 'string':
+    case 'string': {
+      const text = dv.value ?? '';
+      // A narrow string literal initialises only a char-shaped array. Ghidra's
+      // `unicode` datum lands in a 16-bit slot (D2's wide char is `uint16_t`
+      // here), where `= "(null)"` is `const char*` into an integer and there is
+      // no `L"…"` spelling that reaches a non-`wchar_t` element either. Emit the
+      // code units, which is what the bytes are.
+      if (isWideTextSlotType(baseExpected)) {
+        return `{ ${[...[...text].map(charLiteralFor), '0'].join(', ')} }`;
+      }
       // Escape the string for C
-      return `"${escapeStringForC(dv.value ?? '')}"`;
+      return `"${escapeStringForC(text)}"`;
+    }
 
     case 'pointer': {
       if (!dv.value || dv.value === '0x0' || dv.value === '0x00000000' || dv.value === 'DAT_00000000') {
@@ -2314,7 +2371,8 @@ export function generateGlobalsImpl(
       const type = normalizeGlobalDeclType(global.suggestedType || global.dataType);
       const name = sanitizeSymbolName(global.suggestedName || global.name);
       const arrayInfo = inferArrayDeclaration(global);
-      if (arrayInfo && (!global.initializedData || global.initializedData.kind === 'array')) {
+      if (arrayInfo && (!global.initializedData || global.initializedData.kind === 'array'
+                        || isWideTextDatum(global, type))) {
         recordDeclaredName(name);
         ls.push(`extern ${arrayInfo.type} ${name}[${arrayInfo.count}];`);
       } else {
@@ -2363,7 +2421,7 @@ export function generateGlobalsImpl(
         const arrayInfo = inferArrayDeclaration(global);
         const initializer = emitDataValue(global.initializedData!, 0, type);
 
-        if (arrayInfo && global.initializedData!.kind === 'array') {
+        if (arrayInfo && (global.initializedData!.kind === 'array' || isWideTextDatum(global, type))) {
           ls.push(`${arrayInfo.type} ${name}[${arrayInfo.count}] = ${initializer};`);
         } else {
           ls.push(`${normalizeArrayDeclaration(type, name)} = ${braceArrayInitializer(type, initializer)};`);
@@ -2967,7 +3025,7 @@ export function generateColocatedGlobalsImpl(
         const arrayInfo = inferArrayDeclaration(global);
         const initializer = emitDataValue(global.initializedData!, 0, type);
 
-        if (arrayInfo && global.initializedData!.kind === 'array') {
+        if (arrayInfo && (global.initializedData!.kind === 'array' || isWideTextDatum(global, type))) {
           ls.push(`${arrayInfo.type} ${name}[${arrayInfo.count}] = ${initializer};`);
         } else {
           ls.push(`${normalizeArrayDeclaration(type, name)} = ${braceArrayInitializer(type, initializer)};`);
