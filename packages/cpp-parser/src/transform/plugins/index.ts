@@ -480,6 +480,9 @@ export { phantomLocalSynthesisPlugin } from './builtins/phantom-local-synthesis.
 import { switchPointerNormalizePlugin } from './builtins/switch-pointer-normalize.js';
 export { switchPointerNormalizePlugin } from './builtins/switch-pointer-normalize.js';
 
+import { switchCaseSignednessPlugin } from './builtins/switch-case-signedness.js';
+export { switchCaseSignednessPlugin } from './builtins/switch-case-signedness.js';
+
 import { switchCaseDedupPlugin } from './builtins/switch-case-dedup.js';
 export { switchCaseDedupPlugin, type SwitchCaseDedupOptions } from './builtins/switch-case-dedup.js';
 
@@ -590,6 +593,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   underscoreSlotLocalPlugin,  // Declaration: synthesize Ghidra `_<base>` slot-locals (priority 95)
   phantomLocalSynthesisPlugin, // Declaration: synthesize Ghidra auto-name phantoms uVar3/unique0x… (priority 601)
   switchPointerNormalizePlugin, // Cleanup: strip pointer casts from pointer-typed switch condition + case labels (priority 40)
+  switchCaseSignednessPlugin, // Type: sign the switch control when the switch carries a negative case label (priority 605)
   switchCaseDedupPlugin, // Control-flow: drop a repeated case value / second default in one switch (priority 691)
   duplicateLabelUniquifyPlugin, // Control-flow: rename the 2nd+ copy of a duplicated Ghidra label, retarget its gotos (priority 690)
   ghidraPseudoOpPlugin, // Cleanup: rename decompiler pseudo-ops that collide with a standard macro (priority 20)
