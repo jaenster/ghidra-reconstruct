@@ -251,23 +251,31 @@ function createStructFieldTransformer(
     if (offsetValue === 0) return undefined;
 
     // `castBase->field_N` compiles only when castBase is a pointer to a struct/
-    // union. castBase's pointer type is the base's OWN cast (when base is already
-    // a cast) or the deref's `cast.type` (when we wrap a bare base). Skip when:
+    // union, and only MEANS anything when something said so. Skip when:
     //   - the base is raw pointer arithmetic `(int)p + n` (BinaryExpr) — a
     //     computed address, never a struct lvalue; or
-    //   - the effective pointer points to a scalar/enum (`((int *)x)->f`,
+    //   - the base carries no pointer cast of its own (see below); or
+    //   - that cast points to a scalar/enum (`((int *)x)->f`,
     //     `((uint16_t *)x)->f`, `((char *)((int)p+n))->str_c` never compile); or
-    //   - the effective "pointer" is not a pointer at all (`(int)p` base →
-    //     "base operand is not a pointer").
+    //   - it is not a pointer at all (`(int)p` base → "base operand is not a
+    //     pointer").
     // The faithful `*(T*)(base + off)` deref already compiles and is what the
-    // decompiler meant. A genuine struct base (Identifier/MemberExpr cast to a
-    // struct pointer) is preserved as `ptr->field_N`. (Subsumes the old SUBPIECE
-    // `(char *)&x` guard.)
+    // decompiler meant. A genuine struct base (an Identifier/MemberExpr already
+    // cast to a struct pointer) is preserved as `ptr->field_N`. (Subsumes the
+    // old SUBPIECE `(char *)&x` guard.)
+    //
+    // The base must carry its OWN pointer cast. `cast.type` is the type of the
+    // VALUE at `base + off`, not the type of `base`; using it as the base's type
+    // asserts that `base` points at a `T`, which nothing established. That
+    // fabricates a member out of thin air — `*(D2PathPointStrc *)(pUnitAsInt[5]
+    // + 0x158)` became `((D2PathPointStrc*)pUnitAsInt[5])->field_158`, 86 struct
+    // lengths past the end of a 4-byte struct. It is only VISIBLE where the
+    // invented member fails to exist; wherever the fabricated struct happens to
+    // have a field at that offset it compiles and reads a different object.
     const baseUnwrapped = unwrapParens(base);
     if (baseUnwrapped.kind === NodeKind.BinaryExpr) return undefined;
-    const effectiveType = baseUnwrapped.kind === NodeKind.CStyleCastExpr
-      ? (baseUnwrapped as CStyleCastExpr).type
-      : cast.type;
+    if (baseUnwrapped.kind !== NodeKind.CStyleCastExpr) return undefined;
+    const effectiveType = (baseUnwrapped as CStyleCastExpr).type;
     if (effectiveType.kind !== NodeKind.PointerType) return undefined;
     const effPointee = (effectiveType as PointerType).pointee;
     // A pointer-to-pointer (`(T **)x`) memberized gives `((T **)x)->field`, whose
