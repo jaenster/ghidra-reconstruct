@@ -657,9 +657,15 @@ export function generateProject(
       if (!targetFunc || targetFunc.isExternal || targetFunc.isLibrary) continue;
 
       const targetReturn = returnSigType(targetFunc.returnType);
+      // Resolved from the PATH, not the address. A data symbol sharing the
+      // target's address claims that address after the function does — Ghidra
+      // has an `nlist_0061b2d0` sitting on `DRLGROOMEX_ActivateRoomEx` — and the
+      // address claim then answers root scope for a function that has a
+      // namespace. Both sides memoise on the path, so this is the same entity
+      // the target's own definition renders from.
       const segments = targetFunc.parentClass
         ? [targetFunc.parentClass]
-        : [...namespaceResolution().of(targetFunc).segments];
+        : [...namespaceResolution().resolvePath(targetFunc.namespace).segments];
       const leaf = emittedFunctionName(targetFunc, targetReturn);
       thunkForwards.set(func.address, {
         qualified: ['', ...segments, leaf].join('::'),

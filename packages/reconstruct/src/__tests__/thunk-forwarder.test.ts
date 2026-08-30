@@ -253,7 +253,21 @@ describe('thunk forwarders through the whole emitter', () => {
     const functions: ExtractedFunction[] = [target, homonym, importThunk, unknownImport];
     const dataTypes: ExtractedDataType[] = [];
     const classes: DetectedClass[] = [];
-    const globals: AnalyzedDataSymbol[] = [];
+    // A data symbol sitting ON the target's entry point. Ghidra has these
+    // (`nlist_0061b2d0` on `DRLGROOMEX_ActivateRoomEx`), and it claims the
+    // address after the function does — so an address-keyed namespace lookup
+    // answers root scope and the forwarder loses its qualifier.
+    const globals: AnalyzedDataSymbol[] = [
+      {
+        name: 'nlist_004a40d0',
+        address: 'Game.exe.ram:004a40d0',
+        dataType: 'undefined4',
+        size: 4,
+        isInitialized: false,
+        xrefCount: 1,
+        scope: 'global',
+      },
+    ];
     const namespaces: ExtractedNamespace[] = [
       { name: 'D2Client::UI::QuestLog', fullPath: 'D2Client::UI::QuestLog', functionCount: 1, isClass: false },
       { name: 'D2Game::GAME::SCmd', fullPath: 'D2Game::GAME::SCmd', functionCount: 1, isClass: false },
