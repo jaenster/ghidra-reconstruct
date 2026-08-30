@@ -23,6 +23,7 @@ import type {
   ASTNode, FunctionDecl, VariableDecl, ParameterDecl, Identifier, TypeNode,
   PointerType, BuiltinType, TypedefType, ElaboratedType, Expression,
   CStyleCastExpr, UnaryExpr, ParenExpr, AssignExpr, CallExpr, QualifiedId, BinaryExpr,
+  ArrayType, IntegerLiteralExpr, SubscriptExpr,
 } from '../../../ast/nodes.js';
 import { findNodesByKind } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
@@ -72,8 +73,21 @@ function typeKey(t: TypeNode): string | null {
       const n = typeNodeName(e.name);
       return n !== undefined ? `${e.keyword} ${n}` : null;
     }
+    // `T (*)[N]` is the type an array-of-array decays to, and the extent is
+    // part of it: a `T (*)[5]` and a `T (*)[128]` are as different as two
+    // unrelated struct pointers, and C++ rejects the assignment between them
+    // exactly as loudly. Without the extent in the key the two answered alike
+    // and the row width could be silently reinterpreted.
+    case NodeKind.ArrayType: {
+      const a = t as ArrayType;
+      const elem = typeKey(a.elementType);
+      if (elem === null) return null;
+      const size = a.size;
+      if (!size || size.kind !== NodeKind.IntegerLiteral) return null;
+      return `${elem}[${(size as IntegerLiteralExpr).value}]`;
+    }
     default:
-      return null; // ArrayType / QualifiedType / funcptr — leave alone
+      return null; // QualifiedType / funcptr — leave alone
   }
 }
 
@@ -223,6 +237,47 @@ function integerAssignTarget(lhs: Expression, typeByName: Map<string, TypeNode>)
 }
 
 /**
+ * The POINTER type an assignment TARGET has, for `*(T **)expr = <pointer>`.
+ *
+ * `underscore-storage-alias` spells a decompiler slot that overlays a narrower
+ * declaration this way — `*(D2UnitStrc *(**)[5])&nServerId` is a 4-byte access
+ * at a `uint16_t` parameter's stack slot — so the destination's type is written
+ * right there in the cast and needs no type map.
+ *
+ * Restricted to a pointee that is a pointer to an ARRAY. That is the shape
+ * whose extent Ghidra's model and the emitted header disagree about: a
+ * multidimensional member decays to a pointer to its ROW, the decompiler walks
+ * it one ELEMENT at a time and types the walking slot by the stride it uses, and
+ * C++ rejects the assignment that C only warned about. Every other pointee is
+ * left to the identifier path above, which has a declared type to compare.
+ */
+function pointerToArrayAssignTarget(lhs: Expression): TypeNode | null {
+  const e = unwrapParens(lhs);
+  if (e.kind !== NodeKind.UnaryExpr || (e as UnaryExpr).operator !== '*') return null;
+  const inner = unwrapParens((e as UnaryExpr).operand);
+  if (inner.kind !== NodeKind.CStyleCastExpr) return null;
+  const ct = (inner as CStyleCastExpr).type;
+  if (ct.kind !== NodeKind.PointerType) return null;
+  const slot = (ct as PointerType).pointee;
+  if (slot.kind !== NodeKind.PointerType) return null;
+  return (slot as PointerType).pointee.kind === NodeKind.ArrayType ? slot : null;
+}
+
+/**
+ * A NAMED object on the right of such an assignment — a member, a variable, a
+ * subscript. A literal or a call is deliberately not one: the reinterpretation
+ * being written back is of an object's ADDRESS, and there is no address to
+ * reinterpret in `= 0`.
+ */
+function isNamedObject(expr: Expression): boolean {
+  const e = unwrapParens(expr);
+  return e.kind === NodeKind.MemberExpr
+    || e.kind === NodeKind.Identifier
+    || e.kind === NodeKind.QualifiedId
+    || e.kind === NodeKind.SubscriptExpr;
+}
+
+/**
  * A pointer-valued RHS, for the pointer→integer store. Broader than
  * `rhsPointerType` because the VALUE is all that matters here, not its pointee:
  * `&x` and a bare array name both decay to an address.
@@ -250,6 +305,105 @@ function isPointerValued(
     return false;
   }
   return rhsPointerType(e, typeByName, voidPointerFunctions) !== null;
+}
+
+/**
+ * Pointer typedefs the TARGET headers declare `const`, and the writable pointer
+ * each one is a `const` view of.
+ *
+ * The const-ness is a fact about the header the reconstruction is compiled
+ * against, not about the database: Ghidra records `LPCSTR` as `CHAR *` with no
+ * qualifier at all, while `winnt.h` spells it `const CHAR *`. So the store rule
+ * below cannot read the qualifier off the model, and this states the header's
+ * own answer — the same standing as `WORD_INTEGER_TYPES` above.
+ *
+ * Only the unambiguous ones. `LPCTSTR` resolves through `TCHAR`, whose width
+ * depends on `UNICODE`, and naming one of the two here would be a guess.
+ */
+const CONST_POINTER_TYPEDEFS: Record<string, string> = {
+  LPCSTR: 'char',
+  PCSTR: 'char',
+  LPCCH: 'char',
+  PCCH: 'char',
+  LPCWSTR: 'wchar_t',
+  PCWSTR: 'wchar_t',
+  LPCVOID: 'void',
+  LPCBYTE: 'BYTE',
+};
+
+/**
+ * The writable pointer type a const-qualified pointer is a view of, or null.
+ *
+ * `const char *p` and `LPCSTR p` are the same object type to the machine; the
+ * qualifier exists only in the C++ the reconstruction is being compiled as.
+ */
+function writableViewOf(t: TypeNode): TypeNode | null {
+  if (t.kind === NodeKind.PointerType) {
+    const pointee = (t as PointerType).pointee;
+    if (pointee.kind !== NodeKind.QualifiedType) return null;
+    const q = pointee as import('../../../ast/nodes.js').QualifiedType;
+    const quals = ((q.qualifiers ?? []) as unknown as string[]).map(x => String(x));
+    if (!quals.includes('const')) return null;
+    return Type.pointer(q.type);
+  }
+  if (t.kind === NodeKind.TypedefType) {
+    const n = typeNodeName((t as TypedefType).name);
+    const pointee = n !== undefined ? CONST_POINTER_TYPEDEFS[n] : undefined;
+    if (pointee === undefined) return null;
+    return Type.pointer(pointee === 'void' ? Type.void()
+      : pointee === 'char' ? Type.char()
+      : Type.typedef(pointee));
+  }
+  return null;
+}
+
+/**
+ * The identifier a STORE writes through, when the destination is addressed off
+ * a base pointer: `p[i] = c`, `*p = c`, `*(p + i) = c`.
+ *
+ * Only an identifier base counts. A store through a cast already says what type
+ * it writes through, and a store through a call result has no name to re-spell.
+ */
+function storeBaseIdentifier(lhs: Expression): Identifier | null {
+  const e = unwrapParens(lhs);
+  if (e.kind === NodeKind.SubscriptExpr) {
+    const base = unwrapParens((e as SubscriptExpr).array);
+    return base.kind === NodeKind.Identifier ? base as Identifier : null;
+  }
+  if (e.kind === NodeKind.UnaryExpr && (e as UnaryExpr).operator === '*') {
+    let inner = unwrapParens((e as UnaryExpr).operand);
+    if (inner.kind === NodeKind.BinaryExpr) {
+      const b = inner as BinaryExpr;
+      if (b.operator !== '+' && b.operator !== '-') return null;
+      const left = unwrapParens(b.left), right = unwrapParens(b.right);
+      if (left.kind === NodeKind.Identifier) inner = left;
+      else if (b.operator === '+' && right.kind === NodeKind.Identifier) inner = right;
+      else return null;
+    }
+    return inner.kind === NodeKind.Identifier ? inner as Identifier : null;
+  }
+  return null;
+}
+
+/** Rebuild a `*p` / `*(p ± e)` destination with the base identifier re-spelled. */
+function replaceIdentifier(lhs: Expression, base: Identifier, replacement: Expression): Expression {
+  const rebuild = (e: Expression): Expression => {
+    if (e === (base as unknown as Expression)) return replacement;
+    if (e.kind === NodeKind.ParenExpr) {
+      return updateNode(e, { expression: rebuild((e as ParenExpr).expression) } as Partial<ParenExpr>) as Expression;
+    }
+    if (e.kind === NodeKind.UnaryExpr) {
+      return updateNode(e, { operand: rebuild((e as UnaryExpr).operand) } as Partial<UnaryExpr>) as Expression;
+    }
+    if (e.kind === NodeKind.BinaryExpr) {
+      const b = e as BinaryExpr;
+      return updateNode(b, {
+        left: rebuild(b.left), right: rebuild(b.right),
+      } as Partial<BinaryExpr>) as Expression;
+    }
+    return e;
+  };
+  return rebuild(lhs);
 }
 
 function needsCast(
@@ -292,6 +446,32 @@ function createPointerAssignCastTransformer(options?: PluginOptions): Transforme
           // x = (U*)e  where x is T* and T != U
           if (n.kind === NodeKind.AssignExpr) {
             const a = n as AssignExpr;
+            // `pSrcName[i] = c` where `pSrcName` is `LPCSTR` — a STORE through a
+            // const-qualified base. Ghidra emits it because the machine's
+            // strength-reduced `strcpy` addresses the writable destination off
+            // the SOURCE pointer (`MOV [EDX+EAX*1],CL` with `EDX = &dst - src`),
+            // and the decompiler keeps the base it was given. The object written
+            // is the writable one; C++ is the only party that objects, so the
+            // base is re-spelled as the writable pointer it is a const view of.
+            // A READ through the same base is well-formed and gets nothing.
+            {
+              const base = storeBaseIdentifier(a.left);
+              const bt = base ? typeByName.get(base.name) : undefined;
+              const writable = bt ? writableViewOf(bt) : null;
+              if (base && writable) {
+                changed = true;
+                const recast = Expr.paren(Expr.cast(writable, base));
+                const lhs = unwrapParens(a.left);
+                if (lhs.kind === NodeKind.SubscriptExpr) {
+                  return updateNode(a, {
+                    left: updateNode(lhs, { array: recast } as Partial<SubscriptExpr>) as Expression,
+                  } as Partial<AssignExpr>);
+                }
+                return updateNode(a, {
+                  left: replaceIdentifier(lhs, base, recast),
+                } as Partial<AssignExpr>);
+              }
+            }
             if (a.operator !== '=') return undefined;
             if (a.left.kind === NodeKind.Identifier) {
               const lt = typeByName.get((a.left as Identifier).name);
@@ -303,6 +483,24 @@ function createPointerAssignCastTransformer(options?: PluginOptions): Transforme
             // `*(uint *)&block = ptr` — the machine stores an ADDRESS into a
             // word-sized slot. C++ needs the pointer→integer reinterpret spelled
             // out; `(uintptr_t)` first so it is width-exact on the way in.
+            // `*(T (**)[N])&slot = pStruct->aRows` — the member decays to a
+            // pointer to ITS row, the slot is typed by the stride the walk
+            // uses, and the two extents differ. The address is the same either
+            // way, so the cast reinterprets and cannot change what is read; the
+            // sibling statement that advances the same slot already carries the
+            // identical cast, put there by Ghidra itself.
+            const ptrTarget = pointerToArrayAssignTarget(a.left);
+            if (ptrTarget && isNamedObject(a.right)) {
+              const rt = rhsPointerType(a.right, typeByName, voidPointerFunctions);
+              const lk = typeKey(ptrTarget);
+              const rk = rt ? typeKey(rt) : null;
+              // A determinable RHS of the very same type needs nothing. An
+              // undeterminable one is the array member this rule exists for.
+              if (lk !== null && (rk === null || rk !== lk)) {
+                changed = true;
+                return updateNode(a, { right: Expr.cast(ptrTarget, a.right) } as Partial<AssignExpr>);
+              }
+            }
             const intTarget = integerAssignTarget(a.left, typeByName);
             if (intTarget && isPointerValued(a.right, typeByName, voidPointerFunctions)) {
               changed = true;
