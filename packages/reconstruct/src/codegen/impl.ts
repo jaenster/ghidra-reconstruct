@@ -643,6 +643,12 @@ export interface FuncPtrArgCastTables {
   overloadedFunctionNames?: string[];
   /** Global variable name (as emitted) → its emitted declaration type spelling */
   globalTypes?: Record<string, string>;
+  /**
+   * Global variable name (as emitted) → its address in the image. Only the
+   * `stack-frame-address` fold solver reads it: a folded `frameSlot -
+   * globalAddress` literal cannot be undone without knowing where the global is.
+   */
+  globalAddresses?: Record<string, number>;
   /** Callables with a `...` tail — arguments past the declared ones have no type */
   varArgFunctions?: string[];
   /** Field name → declared type, where every aggregate declaring it agrees */
@@ -2142,7 +2148,10 @@ function transformDecompiledCode(
     }
 
     if (enclosing?.stackSlots && enclosing.stackSlots.length > 0) {
-      perPluginOptions['stack-frame-address'] = { slots: enclosing.stackSlots };
+      perPluginOptions['stack-frame-address'] = {
+        slots: enclosing.stackSlots,
+        globalAddresses: context.funcPtrArgCasts?.globalAddresses,
+      };
     }
 
     const shadowedTypes = shadowedTypeQualifyOptions(context);

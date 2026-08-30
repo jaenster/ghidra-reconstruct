@@ -113,6 +113,15 @@ export interface StackSlot {
 export interface StackFrameAddressOptions extends PluginOptions {
   /** The enclosing function's frame, from Ghidra's own local-variable list. */
   slots?: StackSlot[];
+  /**
+   * Global data symbol name (as emitted) → its address in the image.
+   *
+   * The decompiler's constant folding can collapse a frame address and a global
+   * address into ONE literal, and neither anchor survives in the name. The map
+   * is what lets the fold be undone; see
+   * `createFoldedGlobalAddressTransformer`.
+   */
+  globalAddresses?: Record<string, number>;
 }
 
 const STACK_NAME_RE = /^stack0x([0-9a-fA-F]+)$/;
@@ -324,11 +333,21 @@ function frameAddressValue(from: ASTNode): Expression {
  * there produces code that compiles and reads whatever the compiler happened to
  * put at that offset, which is a silent wrong answer.
  *
- * So the value is followed: every name it flows into is tainted, and if any
- * tainted name is ever an operand of pointer arithmetic or the base of a
- * subscript, the whole body is refused and the loud error stays. Refusing the
- * BODY rather than the site is deliberate — the flow is through assignments the
- * decompiler split across branches, and a per-site answer would be a guess.
+ * So the value is followed: every name it flows into is tainted, and a tainted
+ * name used in pointer arithmetic or as a subscript base refuses the whole body.
+ * Refusing the BODY rather than the site is deliberate — the flow is through
+ * assignments the decompiler split across branches, and a per-site answer would
+ * be a guess.
+ *
+ * The refusal is over NEGATIVE and unknown offsets, which is all the `Item.cpp`
+ * evidence covers. A CONSTANT offset of `+8` or more is different in kind: on
+ * i386 with a frame pointer, `[fp+8]` and up are the incoming stack arguments,
+ * at positions the ABI fixes rather than the compiler chooses. MSVC's
+ * `_except_handler3` at `D2Sound/D2SoundUntil.cpp` reads exactly those — `+8`
+ * is its own `pRecord` and `+0xc` its own `pRegistrationFrame` — and the
+ * builtin is what forces GCC to keep the frame pointer that makes them correct.
+ * A non-constant offset, a `-`, or a compound `+=`/`-=` (which moves the base,
+ * so every later offset means something else) still refuses the body.
  */
 function frameAddressIsValueOnly(root: ASTNode): boolean {
   const tainted = new Set<string>();
@@ -365,13 +384,33 @@ function frameAddressIsValueOnly(root: ASTNode): boolean {
     const u = unwrapParens(e);
     return u.kind === NodeKind.Identifier && tainted.has((u as Identifier).name);
   };
+  /** A non-negative integer literal, or null for anything the offset is not. */
+  const constantOffset = (e: Expression): number | null => {
+    const u = unwrapParens(e);
+    if (u.kind !== NodeKind.IntegerLiteral) return null;
+    const v = Number((u as IntegerLiteralExpr).value);
+    return Number.isSafeInteger(v) ? v : null;
+  };
+  /** The lowest offset an incoming stack argument can sit at, with a frame pointer. */
+  const FIRST_STACK_ARGUMENT = 8;
   for (const n of traverseAST(root)) {
     if (n.kind === NodeKind.BinaryExpr) {
       const b = n as BinaryExpr;
       if (b.operator !== '+' && b.operator !== '-') continue;
-      if (isTaintedRef(b.left) || isTaintedRef(b.right)) return false;
+      const leftTainted = isTaintedRef(b.left), rightTainted = isTaintedRef(b.right);
+      if (!leftTainted && !rightTainted) continue;
+      // A `-` is a NEGATIVE offset — a local, whose frame position the host
+      // compiler is free to choose — and both sides tainted is not a read of an
+      // argument at all.
+      if (b.operator === '-') return false;
+      if (leftTainted && rightTainted) return false;
+      const offset = constantOffset(leftTainted ? b.right : b.left);
+      if (offset === null || offset < FIRST_STACK_ARGUMENT) return false;
     } else if (n.kind === NodeKind.SubscriptExpr) {
-      if (isTaintedRef((n as SubscriptExpr).array)) return false;
+      const sub = n as SubscriptExpr;
+      if (!isTaintedRef(sub.array)) continue;
+      const offset = constantOffset(sub.index);
+      if (offset === null || offset < FIRST_STACK_ARGUMENT) return false;
     } else if (n.kind === NodeKind.AssignExpr) {
       const a = n as AssignExpr;
       if (a.operator !== '+=' && a.operator !== '-=') continue;
@@ -515,6 +554,163 @@ function createFrameSlotTransformer(slots: StackSlot[]): Transformer {
 }
 
 /**
+ * A `&stack0xNNNN` whose offset lies nowhere in the frame because a frame
+ * address and a GLOBAL address were folded into one literal.
+ *
+ * `D2Launch/CharSel.cpp`'s `CHARSEL_EnumerateLocalSaves` inlines a `strcpy`
+ * whose destination is addressed off the source pointer, and the source is a
+ * global:
+ *
+ *     00438fe8 MOV  ECX,0x779b68        ; gszLocalSaveFilenameBuffer
+ *     00438fef LEA  EDX,[EBP-0x114]     ; &findData.cFileName[0]
+ *     00438ff5 SUB  EDX,ECX
+ *     00438ffd MOV  AL,[EDX+ECX*1+0x1]  ; the +1 folds into the constant too
+ *
+ * Constant propagation collapses `frameSlot - globalAddress + 1` into a single
+ * word, the decompiler prints the word as a pseudo stack symbol, and both
+ * anchors are gone: no slot owns the offset, so every rule above declines and
+ * the name reaches the compiler undeclared.
+ *
+ * The fold is undone by solving it. For a global `G` at address `A`, the frame
+ * offset the machine actually took is `F = C + A`; if `F` binds to a slot the
+ * body declares — exactly, or inside its extent — then `&stack0xC` is that
+ * slot's address minus `&G`, which is a DISPLACEMENT and not an address. The
+ * only sound use of a displacement is added to a pointer that walks `G`, and
+ * that is the shape the site has, so the rewrite is at the `+` rather than at
+ * the name:
+ *
+ *     &stack0xff886381 + (int)pszNameDst
+ *   → pszNameDst + (((uint8_t*)&findData + 45) - (uint8_t*)&gszLocalSaveFilenameBuffer)
+ *
+ * which re-folds to the identical constant and keeps the walking pointer's own
+ * type, so nothing downstream has to re-spell the assignment.
+ *
+ * Two things keep this from inventing an address:
+ *
+ *   - only a global the BODY NAMES is a candidate. Both operands of the fold
+ *     were in the same instruction stream, and Ghidra names the global
+ *     elsewhere in the function; a global picked from the whole image would be
+ *     numerology. A name the frame also carries as a stack slot is dropped —
+ *     that one is shadowed and `&name` would not be the global at all;
+ *   - the solution must be UNIQUE. Two globals whose addresses differ by less
+ *     than the frame's depth both land inside it, and there is nothing in the
+ *     literal to choose between them. A second candidate means guessing which
+ *     object is written, so nothing is emitted and the loud error stays.
+ */
+
+/** Every bare identifier the body mentions. */
+function referencedNames(root: ASTNode): Set<string> {
+  const names = new Set<string>();
+  for (const n of traverseAST(root)) {
+    if (n.kind === NodeKind.Identifier) names.add((n as Identifier).name);
+  }
+  return names;
+}
+
+/** `(uint8_t*)&name` — the global's address, in the same byte-pointer spelling. */
+function globalByteAddress(name: string, from: ASTNode): Expression {
+  const at = { location: from.location, leadingTrivia: [] as never[], trailingTrivia: [] as never[] };
+  const addressOf: UnaryExpr = {
+    kind: NodeKind.UnaryExpr, operator: '&', operand: makeIdentifier(name, from), ...at,
+  };
+  const byteType: TypedefType = { kind: NodeKind.TypedefType, name: makeIdentifier('uint8_t', from), ...at };
+  const bytePointer: PointerType = { kind: NodeKind.PointerType, pointee: byteType, qualifiers: [], ...at };
+  return { kind: NodeKind.CStyleCastExpr, type: bytePointer, expression: addressOf, ...at } as CStyleCastExpr;
+}
+
+/** The pointer expression a folded displacement is added to, through `(int)p` casts. */
+function walkedPointer(expr: Expression, pointerNames: Set<string>): Expression | null {
+  let e = unwrapParens(expr);
+  while (e.kind === NodeKind.CStyleCastExpr) e = unwrapParens((e as CStyleCastExpr).expression);
+  if (e.kind !== NodeKind.Identifier) return null;
+  return pointerNames.has((e as Identifier).name) ? e : null;
+}
+
+function createFoldedGlobalAddressTransformer(
+  slots: StackSlot[],
+  globalAddresses: Record<string, number>,
+): Transformer {
+  return (root: ASTNode) => {
+    const declared = declaredNames(root);
+    const referenced = referencedNames(root);
+    const slotNames = new Set(slots.map(s => s.name));
+    const candidates: { name: string; address: number }[] = [];
+    for (const [name, address] of Object.entries(globalAddresses)) {
+      if (!referenced.has(name) || slotNames.has(name)) continue;
+      if (!Number.isSafeInteger(address)) continue;
+      candidates.push({ name, address });
+    }
+    if (candidates.length === 0) return root;
+
+    // Names the body declares as POINTERS — what a displacement may be added to.
+    const pointerNames = new Set<string>();
+    for (const n of traverseAST(root)) {
+      let name: string | undefined;
+      let type: TypeNode | undefined;
+      if (n.kind === NodeKind.VariableDecl) {
+        const v = n as VariableDecl;
+        name = v.name?.name; type = v.type;
+      } else if (n.kind === NodeKind.ParameterDecl) {
+        const pd = n as ParameterDecl;
+        name = pd.name?.name; type = pd.type;
+      }
+      if (name && type && type.kind === NodeKind.PointerType) pointerNames.add(name);
+    }
+
+    /** The slot that owns frame offset `F`, and the delta into it. */
+    const bind = (offset: number): { slot: StackSlot; delta: number } | null => {
+      let owner: StackSlot | undefined;
+      for (const sl of slots) {
+        if (!declared.has(sl.name)) continue;
+        if (offset < sl.offset || offset >= sl.offset + Math.max(sl.size, 1)) continue;
+        if (!owner || sl.size < owner.size) owner = sl;
+      }
+      return owner ? { slot: owner, delta: offset - owner.offset } : null;
+    };
+
+    return createKindTransformer(NodeKind.BinaryExpr, (node) => {
+      const b = node as BinaryExpr;
+      if (b.operator !== '+') return undefined;
+      const leftOffset = frameAddressOffset(b.left);
+      const rightOffset = frameAddressOffset(b.right);
+      if ((leftOffset === null) === (rightOffset === null)) return undefined;
+      const folded = (leftOffset ?? rightOffset) as number;
+      const other = leftOffset === null ? b.left : b.right;
+      const pointer = walkedPointer(other, pointerNames);
+      if (!pointer) return undefined;
+
+      let solution: { name: string; slot: StackSlot; delta: number } | null = null;
+      for (const g of candidates) {
+        const bound = bind(folded + g.address);
+        if (!bound) continue;
+        if (solution) return undefined; // not unique — guessing which object is written
+        solution = { name: g.name, slot: bound.slot, delta: bound.delta };
+      }
+      if (!solution) return undefined;
+
+      const at = { location: b.location, leadingTrivia: [] as never[], trailingTrivia: [] as never[] };
+      const displacement: BinaryExpr = {
+        kind: NodeKind.BinaryExpr,
+        operator: '-',
+        left: anchoredAddress(solution.slot, solution.delta, b),
+        right: globalByteAddress(solution.name, b),
+        ...at,
+      };
+      const parenthesised: ParenExpr = { kind: NodeKind.ParenExpr, expression: displacement, ...at };
+      return {
+        kind: NodeKind.BinaryExpr,
+        operator: '+',
+        left: pointer,
+        right: parenthesised,
+        location: b.location,
+        leadingTrivia: b.leadingTrivia ?? [],
+        trailingTrivia: b.trailingTrivia ?? [],
+      } as BinaryExpr;
+    })(root);
+  };
+}
+
+/**
  * A store of an address the frame could not account for, into a local that
  * nothing ever reads.
  *
@@ -652,6 +848,7 @@ function createDeadFrameStoreTransformer(): Transformer {
 
 function createStackFrameAddressTransformer(options: StackFrameAddressOptions = {}): Transformer {
   const slots = options.slots ?? [];
+  const globalAddresses = options.globalAddresses ?? {};
   // The identity pass runs first, so a cookie seed is settled before the frame is
   // consulted — and it runs even for a function with no modelled frame at all.
   // Dead-store elimination runs LAST: its guard is "the frame could not account
@@ -659,6 +856,12 @@ function createStackFrameAddressTransformer(options: StackFrameAddressOptions = 
   return sequence(
     createFrameIdentityTransformer(),
     slots.length > 0 ? createFrameSlotTransformer(slots) : ((node: ASTNode) => node),
+    // Only what the frame could NOT account for reaches the fold solver, which
+    // is what makes "no slot owns this offset" evidence of a fold rather than a
+    // rule that has not run yet.
+    slots.length > 0 && Object.keys(globalAddresses).length > 0
+      ? createFoldedGlobalAddressTransformer(slots, globalAddresses)
+      : ((node: ASTNode) => node),
     createDeadFrameStoreTransformer(),
   );
 }

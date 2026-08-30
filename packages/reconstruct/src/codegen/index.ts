@@ -3537,6 +3537,28 @@ function buildFuncPtrArgCastTables(
     globalTypes[name] = spelled;
   }
 
+  // Global name → its address in the image. The decompiler's constant folding
+  // can collapse a frame address and a global address into ONE literal, and the
+  // only way back is to know where the global sits; see the `stack-frame-address`
+  // fold solver. A name at two addresses is dropped rather than resolved
+  // arbitrarily — the wrong one would put a store at an invented address.
+  const globalAddresses: Record<string, number> = {};
+  const ambiguousGlobalAddresses = new Set<string>();
+  for (const g of globals) {
+    const name = g.suggestedName || g.name;
+    if (!name || /[^A-Za-z0-9_]/.test(name)) continue;
+    if (ambiguousGlobalAddresses.has(name)) continue;
+    const address = Number.parseInt(String(g.address ?? '').replace(/^0x/i, ''), 16);
+    if (!Number.isSafeInteger(address)) continue;
+    const existing = globalAddresses[name];
+    if (existing !== undefined && existing !== address) {
+      ambiguousGlobalAddresses.add(name);
+      delete globalAddresses[name];
+      continue;
+    }
+    globalAddresses[name] = address;
+  }
+
   // Typedef name → the spelling it stands for. Windows and Ghidra both hide
   // indirection inside a name (`HACCEL` IS `HACCEL__ *`), so without this a
   // pointer stored into such a slot reads as an integer store and no cast is
@@ -3588,6 +3610,7 @@ function buildFuncPtrArgCastTables(
       ...Object.entries(HEADER_DECLARED_SIGNATURES).filter(([, s]) => s.overloaded).map(([n]) => n),
     ])],
     globalTypes,
+    globalAddresses,
     varArgFunctions: [...varArgFunctions],
     fieldTypes,
     typedefTargets,

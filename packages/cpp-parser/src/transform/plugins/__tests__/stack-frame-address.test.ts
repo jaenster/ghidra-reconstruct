@@ -20,9 +20,9 @@ const SLOTS = [
   { name: 'undeclared_slot', offset: -64, size: 4 },
 ];
 
-function run(src: string, slots = SLOTS): string {
+function run(src: string, slots = SLOTS, globalAddresses?: Record<string, number>): string {
   const ast = parse(src);
-  const transformed = stackFrameAddressPlugin.createTransformer({ slots })(ast);
+  const transformed = stackFrameAddressPlugin.createTransformer({ slots, globalAddresses })(ast);
   return emit(transformed as AnyNode).replace(/\s+/g, ' ').trim();
 }
 
@@ -94,6 +94,36 @@ describe('stack-frame-address', () => {
     // The Item.cpp shape. A materialised frame pointer here compiles and reads
     // whatever the compiler put at -0xc, which is a silent wrong answer.
     const out = run('void f() { uint8_t* puVar3 = &stack0xfffffffc; p = *(byte**)(puVar3 - 0xc); }');
+    assert.ok(out.includes('stack0xfffffffc'), out);
+    assert.ok(!out.includes('__builtin_frame_address'), out);
+  });
+
+  it('spells the frame pointer as a value when the body only reads its ARGUMENTS', () => {
+    // MSVC's `_except_handler3`. With a frame pointer, `[fp+8]` and `[fp+0xc]`
+    // are the first two incoming stack arguments by ABI, not by the compiler's
+    // choice, and the builtin is what forces GCC to keep that frame pointer.
+    const out = run(
+      'void f() { uint8_t* puVar4 = &stack0xfffffffc; a = *(int**)(puVar4 + 8);'
+      + ' b = *(void**)(puVar4 + 0xc); }');
+    assert.ok(out.includes('__builtin_frame_address(0)'), out);
+    assert.ok(!out.includes('stack0x'), out);
+  });
+
+  it('REFUSES the frame pointer when an offset off it is not a constant', () => {
+    const out = run('void f() { uint8_t* puVar4 = &stack0xfffffffc; a = *(int**)(puVar4 + i); }');
+    assert.ok(out.includes('stack0xfffffffc'), out);
+    assert.ok(!out.includes('__builtin_frame_address'), out);
+  });
+
+  it('REFUSES the frame pointer for a positive offset BELOW the first argument', () => {
+    // `+4` is the return address, whose position no ABI promises to a C body.
+    const out = run('void f() { uint8_t* puVar4 = &stack0xfffffffc; a = *(int**)(puVar4 + 4); }');
+    assert.ok(out.includes('stack0xfffffffc'), out);
+    assert.ok(!out.includes('__builtin_frame_address'), out);
+  });
+
+  it('REFUSES the frame pointer when the body MOVES it', () => {
+    const out = run('void f() { uint8_t* puVar4 = &stack0xfffffffc; puVar4 += 8; a = *puVar4; }');
     assert.ok(out.includes('stack0xfffffffc'), out);
     assert.ok(!out.includes('__builtin_frame_address'), out);
   });
@@ -221,5 +251,83 @@ describe('stack-frame-address dead store', () => {
     const out = run('void f() { int local_20; uint8_t* p2 = &stack0xffffffe0; }');
     assert.ok(out.includes('&local_20'), out);
     assert.ok(out.includes('p2'), out);
+  });
+});
+
+/**
+ * A frame address and a GLOBAL address folded into one literal. Ghidra prints
+ * the fold as a pseudo stack symbol at an offset that lies nowhere in the frame,
+ * so every frame rule declines and the name reaches the compiler undeclared.
+ *
+ * The numbers are `D2Launch/CharSel.cpp`'s, unchanged: `findData` at frame
+ * offset -324 (320 bytes), `gszLocalSaveFilenameBuffer` at 0x779b68, and
+ * `0xff886381` = (-324 + 45) - 0x779b68. Re-folding the emitted form has to give
+ * that literal back, which is what says the right global was picked.
+ */
+describe('stack-frame-address: a folded global address', () => {
+  const FOLD_SLOTS = [
+    { name: 'findData', offset: -324, size: 320 },
+    { name: 'abSaveData', offset: -580, size: 256, isArray: true },
+  ];
+  const GLOBALS = {
+    gszLocalSaveFilenameBuffer: 0x779b68,
+    gnLocalSaveFileCount: 0x779de0,
+  };
+  const BODY = (extra = '') =>
+    'void f() { _WIN32_FIND_DATAA findData; byte abSaveData[256]; char* pszNameDst;'
+    + ' char* pszNameSrc; pszNameDst = (char*)&gszLocalSaveFilenameBuffer;'
+    + ' gnLocalSaveFileCount = 0;' + extra
+    + ' pszNameSrc = &stack0xff886381 + (int)pszNameDst; }';
+
+  it('re-anchors the fold on the slot and the global it was made of', () => {
+    const out = run(BODY(), FOLD_SLOTS, GLOBALS);
+    assert.ok(!out.includes('stack0x'), out);
+    assert.ok(
+      /pszNameSrc = pszNameDst \+ \(\(uint8_t\s*\*\)&findData \+ 45 - \(uint8_t\s*\*\)&gszLocalSaveFilenameBuffer\)/
+        .test(out), out);
+  });
+
+  it('re-folds to the identical literal', () => {
+    // (-324 + 45) - 0x779b68, as an unsigned word, is what Ghidra printed.
+    const refolded = ((-324 + 45) - 0x779b68) >>> 0;
+    assert.equal(refolded.toString(16), 'ff886381');
+  });
+
+  it('emits NOTHING when two globals both solve the fold', () => {
+    // A second global 8 bytes along lands 8 bytes further into the same slot.
+    // There is nothing in the literal to choose between them, so the loud error
+    // is better than a store at a guessed address.
+    const out = run(BODY(' gszOtherBuffer = 0;'), FOLD_SLOTS,
+      { ...GLOBALS, gszOtherBuffer: 0x779b68 + 8 });
+    assert.ok(out.includes('stack0xff886381'), out);
+  });
+
+  it('emits nothing for a global the body never names', () => {
+    const out = run(
+      'void f() { _WIN32_FIND_DATAA findData; char* pszNameDst;'
+      + ' pszNameSrc = &stack0xff886381 + (int)pszNameDst; }', FOLD_SLOTS, GLOBALS);
+    assert.ok(out.includes('stack0xff886381'), out);
+  });
+
+  it('emits nothing when the fold is not added to a pointer', () => {
+    const out = run(
+      'void f() { _WIN32_FIND_DATAA findData; int nIndex;'
+      + ' gszLocalSaveFilenameBuffer = 0; p = &stack0xff886381 + nIndex; }',
+      FOLD_SLOTS, GLOBALS);
+    assert.ok(out.includes('stack0xff886381'), out);
+  });
+
+  it('emits nothing when no global puts the fold inside the frame', () => {
+    const out = run(BODY(), FOLD_SLOTS, { gnLocalSaveFileCount: 0x779de0 });
+    assert.ok(out.includes('stack0xff886381'), out);
+  });
+
+  it('leaves a frame address the frame DID account for alone', () => {
+    const out = run(
+      'void f() { _WIN32_FIND_DATAA findData; char* pszNameDst;'
+      + ' gszLocalSaveFilenameBuffer = 0; p = &stack0xfffffebc + (int)pszNameDst; }',
+      FOLD_SLOTS, GLOBALS);
+    assert.ok(out.includes('&findData'), out);
+    assert.ok(!out.includes('gszLocalSaveFilenameBuffer)'), out);
   });
 });
