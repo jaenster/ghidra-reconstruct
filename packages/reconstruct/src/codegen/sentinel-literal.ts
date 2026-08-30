@@ -103,6 +103,13 @@ const POINTER_SHAPED_TYPEDEFS = new Set([
 export interface SentinelSlotContext {
   /** Is this type name a Ghidra enum? Enums are emitted with an `int` base. */
   isEnumType?(name: string): boolean;
+  /**
+   * Is this type name spelled UNSIGNED by the header that declares it? Asked
+   * only of the emitted spelling, which is not always what Ghidra modelled -
+   * `GrAspectRatio_t` is a typedef over a signed base in the program database
+   * and `unsigned int` in the Glide declarations the platform header carries.
+   */
+  isUnsignedSlot?(name: string): boolean;
   /** Is this type name a funcdef typedef, i.e. pointer-shaped without a `*`? */
   isFuncDefTypedef?(name: string): boolean;
   /** Spell a type for use inside a cast (root-qualification lives in the caller). */
@@ -207,4 +214,42 @@ export function allOnesSentinel(
   const bytes = SIGNED_WIDTHS.get(base);
   if (bytes === undefined) return undefined;   // unsigned, `char`, or unknown
   return value === allOnes(bytes) ? '-1' : undefined;
+}
+
+/**
+ * A NEGATIVE datum in an UNSIGNED slot, spelled with the conversion written out.
+ *
+ * `-1` is D2's "none" everywhere, and Ghidra hands it back with the sign the
+ * slot's own modelled type gives it. Where the EMITTED slot is unsigned the two
+ * disagree, and C++ calls the difference narrowing:
+ *
+ *     GrTexInfo t = { 4, 4, -0x1, 5, nullptr };   // narrowing to unsigned int
+ *
+ * The bits are not in dispute - the same word is stored either way - so the
+ * answer is not to change the value but to say which type it is being stored as.
+ * `(GrAspectRatio_t)-0x1` keeps the sentinel legible, is the conversion the
+ * original source performed implicitly, and stays the same object at any target
+ * width because the typedef fixes the width.
+ *
+ * Spelling it `0xffffffff` instead would compile and would be the wrong answer:
+ * it discards the fact that the value is -1, which is the thing a later reader -
+ * or a 64-bit rebuild - needs to know.
+ *
+ * Returns `undefined` for a non-negative value, an unknown slot, or a slot the
+ * caller does not vouch for as unsigned.
+ */
+export function negativeInUnsignedSlot(
+  rawValue: string | null | undefined,
+  declaredType: string | null | undefined,
+  ctx: SentinelSlotContext = {}
+): string | undefined {
+  if (!declaredType || !ctx.isUnsignedSlot) return undefined;
+  if (rawValue === undefined || rawValue === null) return undefined;
+  const v = rawValue.trim();
+  if (!/^-\s*(0[xX][0-9a-fA-F]+|\d+)$/.test(v)) return undefined;
+  const base = withoutArrayDimensions(declaredType);
+  if (base.includes('*')) return undefined;
+  if (!ctx.isUnsignedSlot(base)) return undefined;
+  const spell = ctx.spellType ?? ((t: string) => t);
+  return `(${spell(base)})${v.replace(/\s+/g, '')}`;
 }

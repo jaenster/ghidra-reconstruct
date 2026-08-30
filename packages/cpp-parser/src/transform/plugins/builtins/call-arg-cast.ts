@@ -493,6 +493,20 @@ export const sameShape = (a: TypeShape, b: TypeShape) => a.stars === b.stars && 
 export const isVoid = (s: TypeShape) => s.base === 'void';
 
 /**
+ * Ghidra's own `code` builtin - the type of a byte the disassembler knows is
+ * executable and nothing more. The emitter spells it `typedef int code(...)`, so
+ * `code *` is a function pointer that carries NO prototype: a slot Ghidra never
+ * managed to type, not a slot whose type it disagrees about.
+ *
+ * That distinction is what makes it different from a funcdef typedef. Two
+ * prototypes can be compared and the pass that compares them owns the store;
+ * `code *` has nothing on one side to compare, so no prototype-comparing pass
+ * can ever reach it, and the conversion C++ refuses is left to the sites that
+ * spell it - which is exactly where the original source carried its cast.
+ */
+export const isGhidraCode = (s: TypeShape) => canonicalBase(s.base).replace(/^::/, '') === 'code';
+
+/**
  * The base a CODE ADDRESS reduces to.
  *
  * A funcdef typedef names a whole prototype, which `shapeOfSpelling` refuses to

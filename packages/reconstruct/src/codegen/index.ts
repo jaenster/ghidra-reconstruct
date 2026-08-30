@@ -386,7 +386,7 @@ export function generateProject(
         ...functions.map(f => f.returnType),
         ...globals.map(g => normalizeGlobalDeclType(g.suggestedType || g.dataType || '')),
       ]),
-      winsockInAddr: inAddrClaim.lines,
+      winsockInAddr: [...inAddrClaim.lines, ...buildWinsockIpTypesClaim(dataTypes)],
     }),
     type: 'header',
     functions: [],
@@ -2874,6 +2874,97 @@ export function buildWinsockInAddrClaim(
   // cast to one of those is still a cast with no meaning in C++, while a cast to
   // the union or to `in_addr` already means exactly what it says.
   return { lines, claimed: new Set([B, W, U]), converting: new Set([U, 'in_addr', 'IN_ADDR']) };
+}
+
+/** A 4-byte unsigned scalar under any spelling the model uses for `sin_addr`. */
+const WINSOCK_DWORD_SPELLINGS = new Set([
+  'uint32_t', 'uint', 'dword', 'DWORD', 'ULONG', 'UINT32', 'u_long', 'undefined4',
+]);
+
+/**
+ * mingw's `psdk_inc/_ip_types.h`, re-declared with Ghidra's `sin_addr`.
+ *
+ * The tree carries TWO structs named `sockaddr_in`. Ghidra models `sin_addr` as
+ * a 32-bit word — which is what the machine code does with it — and the emitter
+ * writes that struct out under `#ifndef _WIN32`, so on Windows the SDK's
+ * definition wins instead and `sin_addr` is a `struct in_addr`. A translation
+ * unit that includes the emitted header sees one type and a unit that does not
+ * sees the other, and no rule keyed on the member can be right in both:
+ * `nsockaddr.sin_addr` in a ternary against `0` is ambiguous BOTH ways against
+ * the claimed `in_addr` (`operator unsigned long` one way, the converting
+ * constructor the other), while `Safesock.cpp` stores a plain word into the very
+ * same member and compiles.
+ *
+ * This is the other half of the `in_addr` claim: declare the struct once, ahead
+ * of the SDK, so there is only one of it. The whole of `_ip_types.h` is guarded
+ * on `_MINGW_IP_TYPES_H` — there is no finer guard around `sockaddr_in` alone —
+ * so the claim has to supply everything that file declares. The types Ghidra
+ * models are checked against the model and emitted from it; the rest are the
+ * vendor's own declarations, reproduced unchanged.
+ *
+ * Emitted ONLY when the model agrees with winsock's shape field for field. Any
+ * disagreement means the two layouts are not the same object after all, and the
+ * SDK's header is left to win as it does today.
+ */
+export function buildWinsockIpTypesClaim(dataTypes: ExtractedDataType[]): string[] {
+  const byName = new Map<string, ExtractedDataType>();
+  for (const dt of dataTypes) byName.set(dt.name, dt);
+  const fieldsOf = (dt: ExtractedDataType | undefined) =>
+    (dt as import('../types.js').ExtractedStruct | undefined)?.fields ?? [];
+
+  /** Every named field at the named offset, and nothing else. */
+  const shapeIs = (name: string, want: [string, number][]): boolean => {
+    const dt = byName.get(name);
+    if (!dt || dt.kind !== 'STRUCTURE') return false;
+    const fs = fieldsOf(dt);
+    return fs.length === want.length
+      && fs.every((f, i) => f.name === want[i][0] && f.offset === want[i][1]);
+  };
+
+  if (!shapeIs('sockaddr_in', [['sin_family', 0], ['sin_port', 2], ['sin_addr', 4], ['sin_zero', 8]])) return [];
+  if (!shapeIs('sockaddr', [['sa_family', 0], ['sa_data', 2]])) return [];
+  if (!shapeIs('hostent', [['h_name', 0], ['h_aliases', 4], ['h_addrtype', 8], ['h_length', 10], ['h_addr_list', 12]])) return [];
+
+  const sinAddr = fieldsOf(byName.get('sockaddr_in'))[2].dataType.trim();
+  if (!WINSOCK_DWORD_SPELLINGS.has(sinAddr)) return [];
+
+  return [
+    "// mingw's psdk_inc/_ip_types.h, claimed so that `sockaddr_in` is ONE type.",
+    "// Ghidra models sin_addr as the 32-bit word the code treats it as; the SDK",
+    "// models it as `struct in_addr`. The file has no guard finer than its own,",
+    '// so everything it declares is declared here, unchanged apart from that one',
+    '// member. Same layout, same offsets, same names.',
+    '#  ifndef _MINGW_IP_TYPES_H',
+    '#  define _MINGW_IP_TYPES_H',
+    '#    include <_bsd_types.h>',
+    '#    include <_timeval.h>',
+    '#    define h_addr h_addr_list[0]',
+    'struct hostent { char *h_name; char **h_aliases; short h_addrtype; short h_length; char **h_addr_list; };',
+    'struct netent { char *n_name; char **n_aliases; short n_addrtype; u_long n_net; };',
+    '#    ifdef _WIN64',
+    'struct servent { char *s_name; char **s_aliases; char *s_proto; short s_port; };',
+    '#    else',
+    'struct servent { char *s_name; char **s_aliases; short s_port; char *s_proto; };',
+    '#    endif',
+    'struct protoent { char *p_name; char **p_aliases; short p_proto; };',
+    'struct sockproto { u_short sp_family; u_short sp_protocol; };',
+    'struct linger { u_short l_onoff; u_short l_linger; };',
+    'struct sockaddr { u_short sa_family; char sa_data[14]; };',
+    `struct sockaddr_in { short sin_family; u_short sin_port; ${sinAddr} sin_addr; char sin_zero[8]; };`,
+    'typedef struct hostent HOSTENT, *PHOSTENT, *LPHOSTENT;',
+    'typedef struct servent SERVENT, *PSERVENT, *LPSERVENT;',
+    'typedef struct protoent PROTOENT, *PPROTOENT, *LPPROTOENT;',
+    'typedef struct sockaddr SOCKADDR, *PSOCKADDR, *LPSOCKADDR;',
+    'typedef struct sockaddr_in SOCKADDR_IN, *PSOCKADDR_IN, *LPSOCKADDR_IN;',
+    'typedef struct linger LINGER, *PLINGER, *LPLINGER;',
+    '#    ifdef __LP64__',
+    'struct __ms_timeval { __LONG32 tv_sec; __LONG32 tv_usec; };',
+    'typedef struct __ms_timeval TIMEVAL, *PTIMEVAL, *LPTIMEVAL;',
+    '#    else',
+    'typedef struct timeval TIMEVAL, *PTIMEVAL, *LPTIMEVAL;',
+    '#    endif',
+    '#  endif  // _MINGW_IP_TYPES_H',
+  ];
 }
 
 /**

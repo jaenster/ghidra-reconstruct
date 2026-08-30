@@ -1787,11 +1787,17 @@ function collectRootScopeSymbols(context?: ImplGenContext): RootScopeSymbolTable
  * Options for `namespace-shadow-qualify`, memoised per namespace-table identity —
  * the table is project-wide and every function body in the run needs it.
  */
-const shadowQualifyCache = new WeakMap<Set<string>, Map<string, { enclosingNamespace: string; knownNamespaces: string[] }>>();
+interface ShadowQualifyOptions {
+  enclosingNamespace: string;
+  knownNamespaces: string[];
+  scopedSymbols: string[];
+}
+const shadowQualifyCache = new WeakMap<Set<string>, Map<string, ShadowQualifyOptions>>();
 
 function shadowQualifyOptions(
   context?: ImplGenContext,
-): { enclosingNamespace: string; knownNamespaces: string[] } | undefined {
+  scopedSymbols: string[] = [],
+): ShadowQualifyOptions | undefined {
   const enclosing = context?._enclosingNamespace;
   const known = context?.knownNamespaces;
   if (!enclosing || !known || known.size === 0) return undefined;
@@ -1803,7 +1809,14 @@ function shadowQualifyOptions(
   }
   let entry = perNamespace.get(enclosing);
   if (!entry) {
-    entry = { enclosingNamespace: enclosing, knownNamespaces: [...known] };
+    entry = { enclosingNamespace: enclosing, knownNamespaces: [...known], scopedSymbols };
+    perNamespace.set(enclosing, entry);
+  } else if (entry.scopedSymbols.length === 0 && scopedSymbols.length > 0) {
+    // The symbol table comes from the analyzed globals, which a caller may not
+    // have had on the first body through this namespace. The plugin memoises its
+    // transformer on the options OBJECT, so the table has to arrive as a new one
+    // rather than as a mutation of the one already handed out.
+    entry = { enclosingNamespace: enclosing, knownNamespaces: entry.knownNamespaces, scopedSymbols };
     perNamespace.set(enclosing, entry);
   }
   return entry;
@@ -2001,7 +2014,7 @@ function transformDecompiledCode(
       }
     }
 
-    const shadowOptions = shadowQualifyOptions(context);
+    const shadowOptions = shadowQualifyOptions(context, rootScope?.scopedSymbols ?? []);
     if (shadowOptions) {
       perPluginOptions['namespace-shadow-qualify'] = shadowOptions;
     }

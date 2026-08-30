@@ -31,6 +31,14 @@ export interface NamespaceShadowQualifyOptions extends PluginOptions {
   enclosingNamespace?: string;
   /** Every namespace path the project emits, each ancestor included */
   knownNamespaces?: string[];
+  /**
+   * Fully qualified names of data symbols that live in a namespace
+   * ("TSHashTable_CELLIST::vftable"). A qualifier that names a scope the body is
+   * INSIDE still resolves — but to that scope, which need not declare the member
+   * the reference asks for. Without the symbol table the pass can only reason
+   * about scopes and has to assume it does.
+   */
+  scopedSymbols?: string[];
 }
 
 function qualifierText(parts: (Identifier | TemplateType)[]): string[] | undefined {
@@ -62,6 +70,7 @@ function createNamespaceShadowQualifyTransformer(
 function buildTransformer(options: NamespaceShadowQualifyOptions): Transformer {
   const enclosing = options.enclosingNamespace;
   const known = new Set(options.knownNamespaces ?? []);
+  const scopedSymbols = new Set(options.scopedSymbols ?? []);
   if (!enclosing || known.size === 0) return (node: ASTNode) => node;
 
   // Enclosing scopes innermost-first: ["D2Client::CharSel", "D2Client"].
@@ -102,6 +111,44 @@ function buildTransformer(options: NamespaceShadowQualifyOptions): Transformer {
     return shadowed;
   };
 
+  /**
+   * The same shadowing one level down: the qualifier resolves to a scope, and
+   * that scope does not declare the MEMBER.
+   *
+   * Ghidra hangs `vftable` under the bare class name, so the generator emits it
+   * in root `namespace TSHashTable_CELLIST` while the class's methods are filed
+   * under their module in `namespace D2CMP::TSHashTable_CELLIST`. From inside
+   * the second, `TSHashTable_CELLIST::vftable` binds the qualifier to the
+   * enclosing namespace itself and the member is not there:
+   *
+   *     error: 'vftable' is not a member of 'D2CMP::TSHashTable_CELLIST'
+   *
+   * The scope-only rule above cannot see this - the qualifier names a run of the
+   * enclosing path, so it "always resolves", which is true of the scope and
+   * false of the reference. Decided from the symbol table and only where it
+   * gives a definite answer both ways: the ROOT-qualified spelling must be a
+   * known symbol and the resolved one must not.
+   */
+  const memberCache = new Map<string, boolean>();
+  const memberIsShadowed = (qual: string, name: string): boolean => {
+    const key = `${qual}::${name}`;
+    const hit = memberCache.get(key);
+    if (hit !== undefined) return hit;
+    let shadowed = false;
+    if (known.has(qual) && scopedSymbols.has(key)) {
+      const cut = qual.indexOf('::');
+      const first = cut === -1 ? qual : qual.slice(0, cut);
+      for (const scope of scopes) {
+        if (!known.has(`${scope}::${first}`)) continue;
+        // Where the lookup lands. Root-qualify only when the member is not there.
+        shadowed = !scopedSymbols.has(`${scope}::${qual}::${name}`);
+        break;
+      }
+    }
+    memberCache.set(key, shadowed);
+    return shadowed;
+  };
+
   return createTransformer({
     visitNode(n: ASTNode): ASTNode | undefined {
       if (n.kind !== NodeKind.QualifiedId) return undefined;
@@ -111,7 +158,11 @@ function buildTransformer(options: NamespaceShadowQualifyOptions): Transformer {
       const parts = qualifierText(q.qualifier);
       if (parts === undefined) return undefined;
 
-      if (!isShadowed(parts.join('::'))) return undefined;
+      const qual = parts.join('::');
+      if (!isShadowed(qual)) {
+        if (q.name.kind !== NodeKind.Identifier) return undefined;
+        if (!memberIsShadowed(qual, (q.name as Identifier).name)) return undefined;
+      }
       return updateNode(q, { isGlobal: true } as Partial<QualifiedId>);
     },
   });

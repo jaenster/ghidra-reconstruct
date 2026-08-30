@@ -94,6 +94,26 @@ export const WINDOWS_TYPES = new Set([
   '_Unwind_Reason_Code', '_Unwind_Exception',
 ]);
 
+/**
+ * The Glide enumeration typedefs, every one of them `unsigned int`.
+ *
+ * Listed once, because two places need the same answer: the platform header
+ * DECLARES them, and the data-initializer path has to know that a slot spelled
+ * with one of these names is unsigned. Ghidra models several of them as a
+ * typedef over a SIGNED base and hands back `-0x1` for the all-ones datum in
+ * `GrTexInfo::aspectRatioLog2`; the value is right and the spelling is what
+ * has to say so.
+ */
+export const GLIDE_UNSIGNED_ENUM_TYPEDEFS: readonly string[] = [
+  'GrAlphaBlendFnc_t', 'GrAlpha_t', 'GrAspectRatio_t', 'GrBuffer_t',
+  'GrChipID_t', 'GrChromakeyMode_t', 'GrCmpFnc_t', 'GrColorFormat_t',
+  'GrColor_t', 'GrCombineFactor_t', 'GrCombineFunction_t', 'GrCombineLocal_t',
+  'GrCombineOther_t', 'GrContext_t', 'GrCoordinateSpaceMode_t', 'GrDepthBufferMode_t',
+  'GrDitherMode_t', 'GrEnableMode_t', 'GrLOD_t', 'GrLfbWriteMode_t',
+  'GrLock_t', 'GrMipMapMode_t', 'GrOriginLocation_t', 'GrScreenRefresh_t',
+  'GrScreenResolution_t', 'GrTexTable_t', 'GrTextureFilterMode_t', 'GrTextureFormat_t',
+];
+
 /** 3dfx Glide API types (used by Diablo 2's Glide renderer) */
 export const GLIDE_TYPES = new Set([
   'FxBool', 'GrAlphaBlendFnc_t', 'GrAlpha_t', 'GrAspectRatio_t',
@@ -1200,34 +1220,7 @@ export function generatePlatformHeader(
   lines.push('typedef short FxI16;');
   lines.push('typedef unsigned short FxU16;');
   lines.push('typedef int FxBool;');
-  lines.push('typedef unsigned int GrAlphaBlendFnc_t;');
-  lines.push('typedef unsigned int GrAlpha_t;');
-  lines.push('typedef unsigned int GrAspectRatio_t;');
-  lines.push('typedef unsigned int GrBuffer_t;');
-  lines.push('typedef unsigned int GrChipID_t;');
-  lines.push('typedef unsigned int GrChromakeyMode_t;');
-  lines.push('typedef unsigned int GrCmpFnc_t;');
-  lines.push('typedef unsigned int GrColorFormat_t;');
-  lines.push('typedef unsigned int GrColor_t;');
-  lines.push('typedef unsigned int GrCombineFactor_t;');
-  lines.push('typedef unsigned int GrCombineFunction_t;');
-  lines.push('typedef unsigned int GrCombineLocal_t;');
-  lines.push('typedef unsigned int GrCombineOther_t;');
-  lines.push('typedef unsigned int GrContext_t;');
-  lines.push('typedef unsigned int GrCoordinateSpaceMode_t;');
-  lines.push('typedef unsigned int GrDepthBufferMode_t;');
-  lines.push('typedef unsigned int GrDitherMode_t;');
-  lines.push('typedef unsigned int GrEnableMode_t;');
-  lines.push('typedef unsigned int GrLOD_t;');
-  lines.push('typedef unsigned int GrLfbWriteMode_t;');
-  lines.push('typedef unsigned int GrLock_t;');
-  lines.push('typedef unsigned int GrMipMapMode_t;');
-  lines.push('typedef unsigned int GrOriginLocation_t;');
-  lines.push('typedef unsigned int GrScreenRefresh_t;');
-  lines.push('typedef unsigned int GrScreenResolution_t;');
-  lines.push('typedef unsigned int GrTexTable_t;');
-  lines.push('typedef unsigned int GrTextureFilterMode_t;');
-  lines.push('typedef unsigned int GrTextureFormat_t;');
+  for (const t of GLIDE_UNSIGNED_ENUM_TYPEDEFS) lines.push(`typedef unsigned int ${t};`);
   // Glide's own GrLfbInfo_t is five members, and `size` is set to 0x14 by every
   // caller that fills one in - 20 bytes, not the 12 the first three account for.
   // The two trailing members are what `grLfbLock` reads back out.

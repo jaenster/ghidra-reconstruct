@@ -52,7 +52,7 @@ import {
   isAggregateValue,
   typeFromSpelling, unwrapParens, calleeName, sameShape, isVoid, canonicalBase,
   isWordIntegerShape, isOpaqueCallbackBase, cachedSet, bareName,
-  asCodeAddress, isCodeAddress,
+  asCodeAddress, isCodeAddress, isGhidraCode,
   createFuncdefCalleeResolver, type FuncdefDecl, type FuncdefCalleeTables,
   functionPointerTypeFromSpellings, scopedLookup,
 } from './call-arg-cast.js';
@@ -416,7 +416,11 @@ export function createAssignCastTransformer(options?: PluginOptions): Transforme
           // the original source carried belongs here.
           if (functionDesignator(rhs) !== undefined) return null;
           const untyped = valueShape(rhs);
-          if (!untyped || untyped.stars !== 1 || !isVoid(untyped)) return null;
+          // Ghidra's `code *` is the same case from the other side: a code
+          // address the decompiler never gave a prototype to, so there is no
+          // second prototype for `funcptr-arg-cast` to compare and the store
+          // would otherwise reach no pass at all.
+          if (!untyped || untyped.stars !== 1 || !(isVoid(untyped) || isGhidraCode(untyped))) return null;
           return Expr.cast(want.node, rhs);
         }
         // Nothing converts to a struct by value; writing the cast only invents

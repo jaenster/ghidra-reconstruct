@@ -6,12 +6,12 @@
  */
 
 import type { AnalyzedDataSymbol, ReconstructOptions, DataValue, ExtractedDataType, ExtractedStruct, ExtractedUnion, ExtractedFunctionDefinition, ExtractedFunction } from '../types.js';
-import { isPlatformOrBuiltinType, isLibraryType, isStructType, castPointerInitializer, normalizeDataValue, isCharacterValueType, isMsvcEhInternal, normalizeWideCharType, normalizeListingBuiltinType, listingBuiltinElementType, imageArtifactElementType, isVoidPointerSpelling, rootQualifyShadowedType, platformDeclaredFunctionNames } from './platform-types.js';
+import { GLIDE_UNSIGNED_ENUM_TYPEDEFS, isPlatformOrBuiltinType, isLibraryType, isStructType, castPointerInitializer, normalizeDataValue, isCharacterValueType, isMsvcEhInternal, normalizeWideCharType, normalizeListingBuiltinType, listingBuiltinElementType, imageArtifactElementType, isVoidPointerSpelling, rootQualifyShadowedType, platformDeclaredFunctionNames } from './platform-types.js';
 import { generateStructDeclaration, generateUnionDeclaration, generateFunctionDefinitionDeclaration, ghidraDefaultFieldName } from './header.js';
 import { normalizeQualifiedReference } from './namespace.js';
 import { namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 import { computeDeclarationClosure, renderClosureBlock, type ClosureResult } from './declaration-closure.js';
-import { allOnesSentinel } from './sentinel-literal.js';
+import { allOnesSentinel, negativeInUnsignedSlot } from './sentinel-literal.js';
 
 /**
  * Exact Win32 SDK typedef names (not `LP`/`IMAGE_` prefixed) seen as
@@ -1343,6 +1343,9 @@ const CHAR_SLOT_TYPES = new Set(['char', 'signed char', 'unsigned char', 'uchar'
  * the byte fits: `narrowing conversion of '\234' from 'char' to 'uint8_t'`.
  * A code unit at or above 0x80 takes the numeric byte in these slots.
  */
+/** Glide's enumeration typedefs, which the platform header spells `unsigned int`. */
+const GLIDE_UNSIGNED_SLOTS = new Set<string>(GLIDE_UNSIGNED_ENUM_TYPEDEFS);
+
 const UNSIGNED_BYTE_SLOT_TYPES = new Set(['unsigned char', 'uchar', 'byte', 'uint8_t', 'undefined1', 'undefined']);
 
 function isCharSlotType(base: string): boolean {
@@ -1358,14 +1361,27 @@ function isUnsignedByteSlotType(base: string): boolean {
  * and what is a funcdef typedef. One wrapper, so every emit point below asks
  * the question the same way.
  */
-function sentinelSpelling(rawValue: string | null | undefined, slotType: string | null | undefined): string | undefined {
-  return allOnesSentinel(rawValue, slotType, {
-    isEnumType: (n) => enumTypeNames.has(n),
+function sentinelContext() {
+  return {
+    isEnumType: (n: string) => enumTypeNames.has(n),
     isFuncDefTypedef: isFuncDefTypedefName,
+    isUnsignedSlot: (n: string) => GLIDE_UNSIGNED_SLOTS.has(n),
     // Collapse `void *` to `void*`: the same spelling castPointerInitializer
     // already writes, so one cast form appears in the output, not two.
-    spellType: (t) => rootQualifyShadowedType(t.replace(/\s+/g, ' ').trim()).replace(/\s+\*/g, '*'),
-  });
+    spellType: (t: string) => rootQualifyShadowedType(t.replace(/\s+/g, ' ').trim()).replace(/\s+\*/g, '*'),
+  };
+}
+
+function sentinelSpelling(rawValue: string | null | undefined, slotType: string | null | undefined): string | undefined {
+  return allOnesSentinel(rawValue, slotType, sentinelContext());
+}
+
+/**
+ * The unsigned spelling a negative datum needs written out, or `undefined` when
+ * the slot takes the value as it stands.
+ */
+function unsignedSlotSpelling(rawValue: string | null | undefined, slotType: string | null | undefined): string | undefined {
+  return negativeInUnsignedSlot(rawValue, slotType, sentinelContext());
 }
 
 /**
@@ -1387,6 +1403,11 @@ export function emitDataValue(dv: DataValue, indent = 0, expectedType?: string):
       // the slot type is what decides whether all-ones means -1 here.
       const sentinel = sentinelSpelling(dv.value, expectedType);
       if (sentinel !== undefined) return sentinel;
+      // Ghidra reads the datum against the type IT modelled; where the emitted
+      // slot is unsigned a negative reading narrows, and the conversion the
+      // original source made implicitly has to be spelled.
+      const unsignedSlot = unsignedSlotSpelling(dv.value, expectedType);
+      if (unsignedSlot !== undefined) return unsignedSlot;
       const val = normalizeDataValue(dv.value ?? '0');
       // If value is a single printable char (not a number/hex), wrap in char literal quotes
       if (val.length === 1 && !/\d/.test(val)) {
