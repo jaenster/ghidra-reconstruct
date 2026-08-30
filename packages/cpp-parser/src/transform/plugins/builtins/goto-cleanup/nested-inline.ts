@@ -172,6 +172,87 @@ function stripNestedLabelWrapper(stmt: Statement, labelName: string): { stmt: St
 }
 
 /**
+ * A `break` (or `continue`) that binds to something OUTSIDE these statements.
+ *
+ * A switch-case tail ends in `break`, and that `break` belongs to the switch
+ * the label sits in. Copy the tail somewhere that construct does not reach and
+ * the copy carries a `break` with nothing to break out of.
+ */
+function escapesBreakable(stmt: Statement | ASTNode): boolean {
+  switch (stmt.kind) {
+    case NodeKind.BreakStmt:
+    case NodeKind.ContinueStmt:
+      return true;
+    // A construct of its own binds every break/continue below it.
+    case NodeKind.SwitchStmt:
+    case NodeKind.ForStmt:
+    case NodeKind.ForRangeStmt:
+    case NodeKind.WhileStmt:
+    case NodeKind.DoWhileStmt:
+      return false;
+    default:
+      break;
+  }
+  for (const key of Object.keys(stmt as object)) {
+    const child = (stmt as any)[key];
+    if (Array.isArray(child)) {
+      for (const c of child) {
+        if (c && typeof c === 'object' && typeof c.kind === 'string' && escapesBreakable(c)) return true;
+      }
+    } else if (child && typeof child === 'object' && typeof child.kind === 'string') {
+      if (escapesBreakable(child)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * What a `break` would bind to at the label, and at every `goto` to it, within
+ * these statements.
+ *
+ * `null` means "whatever encloses this whole statement list" - which, since all
+ * of these sites share that enclosure, still makes them agree. Two sites agree
+ * exactly when the same construct governs both, and only then may a tail whose
+ * `break` escapes it be copied from one to the other. Case-to-case inside one
+ * switch agrees; a jump in from outside the switch does not.
+ */
+function breakBinders(stmts: Statement[], label: string): {
+  labelBinder: ASTNode | null;
+  gotoBinders: (ASTNode | null)[];
+  sawLabel: boolean;
+} {
+  let labelBinder: ASTNode | null = null;
+  let sawLabel = false;
+  const gotoBinders: (ASTNode | null)[] = [];
+
+  const walk = (node: ASTNode, binder: ASTNode | null): void => {
+    if (node.kind === NodeKind.LabelStmt && (node as LabelStmt).label.name === label) {
+      labelBinder = binder;
+      sawLabel = true;
+    } else if (node.kind === NodeKind.GotoStmt && (node as GotoStmt).label.name === label) {
+      gotoBinders.push(binder);
+    }
+    const opensBinder =
+      node.kind === NodeKind.SwitchStmt || node.kind === NodeKind.ForStmt
+      || node.kind === NodeKind.ForRangeStmt || node.kind === NodeKind.WhileStmt
+      || node.kind === NodeKind.DoWhileStmt;
+    const inner = opensBinder ? node : binder;
+    for (const key of Object.keys(node as object)) {
+      const child = (node as any)[key];
+      if (Array.isArray(child)) {
+        for (const c of child) {
+          if (c && typeof c === 'object' && typeof c.kind === 'string') walk(c, inner);
+        }
+      } else if (child && typeof child === 'object' && typeof child.kind === 'string') {
+        walk(child, inner);
+      }
+    }
+  };
+  for (const st of stmts) walk(st, null);
+  return { labelBinder, gotoBinders, sawLabel };
+}
+
+/**
  * Nested label tail inlining.
  *
  * Finds labels inside nested scopes (if branches, loops, switch cases),
@@ -231,6 +312,17 @@ export function processNestedTailInlining(
     const effectiveTail = fabricateReturn
       ? [...tail, createReturnStmt(tail[tail.length - 1])]
       : tail;
+
+    // A tail whose `break`/`continue` binds outside it may only be copied to a
+    // site the SAME construct governs. Case-to-case inside one switch is that
+    // site and stays. A jump in from outside the switch is not: the copy would
+    // carry a `break` with nothing to break out of - and Ghidra's own spelling,
+    // a `goto` to a label at function scope, compiles as it stands.
+    if (effectiveTail.some(escapesBreakable)) {
+      const { labelBinder, gotoBinders, sawLabel } = breakBinders(stmts, name);
+      if (!sawLabel) continue;
+      if (!gotoBinders.every(b => b === labelBinder)) continue;
+    }
 
     // Check tail doesn't contain escaping gotos
     const tailLabels = new Set<string>();
