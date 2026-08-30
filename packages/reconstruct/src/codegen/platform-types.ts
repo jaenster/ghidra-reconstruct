@@ -1123,13 +1123,15 @@ export function generatePlatformHeader(
   lines.push('typedef uintptr_t WPARAM;');
   lines.push('typedef intptr_t LPARAM;');
   lines.push('typedef uint16_t LANGID;');
-  // `()` means "no parameters" in C++, where in C it meant "unspecified". A
-  // FARPROC is the UNKNOWN signature GetProcAddress hands back, and Game.exe
-  // calls one through the same local with two arities: `InstallKeyboardHook(HWND)`
-  // and `UninstallKeyboardHook(void)` (00405c30). `(...)` is the C++ spelling of
-  // "any arguments" ([dcl.fct]), and it is left __cdecl - GCC ignores __stdcall
-  // on a varargs function and warns.
-  lines.push('typedef void (*FARPROC)(...);');
+  // Exactly what <winnt.h> declares, because under mingw the real windows.h wins
+  // over this branch and the two must not disagree. `()` is the UNKNOWN signature
+  // GetProcAddress hands back; Game.exe calls one through the same local with two
+  // arities, `InstallKeyboardHook(HWND)` and `UninstallKeyboardHook(void)`
+  // (00405c30), so the parameter list belongs to the call and not to the typedef -
+  // `unprototyped-call-cast` writes it there. `(...)` was tried here and cannot
+  // work: GCC makes a varargs function __cdecl, so the caller would clean a stack
+  // the __stdcall hook has already cleaned.
+  lines.push('typedef intptr_t (__stdcall *FARPROC)();');
   lines.push('');
 
   // String pointer types

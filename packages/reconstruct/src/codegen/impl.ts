@@ -2097,6 +2097,13 @@ function transformDecompiledCode(
       perPluginOptions['array-block-assign'] = {
         globalTypes: context.funcPtrArgCasts.globalTypes,
       };
+      perPluginOptions['unprototyped-call-cast'] = {
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        structFields: context.funcPtrArgCasts.structFields,
+        returnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        enclosingVarTypes,
+      };
       perPluginOptions['indirect-call-cleanup'] = {
         globalTypes: context.funcPtrArgCasts.globalTypes,
         fieldTypes: context.funcPtrArgCasts.fieldTypes,
