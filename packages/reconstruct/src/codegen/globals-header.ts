@@ -2291,7 +2291,8 @@ export function generateGlobalsImpl(
   globals: AnalyzedDataSymbol[],
   options: ReconstructOptions & { projectName?: string; binaryName?: string },
   globalsHeaderPath = 'globals.h',
-  extraIncludes?: string[]
+  extraIncludes?: string[],
+  partition?: ReadonlySet<AnalyzedDataSymbol>
 ): string {
   const lines: string[] = [];
 
@@ -2317,7 +2318,7 @@ export function generateGlobalsImpl(
     g.scope === 'global' && isEmittableGlobal(g) && !isDataArtifact(g, allGlobalNames)
     && !functionCollidingGlobals.has(g)
   );
-  if (definable.length === 0) {
+  if (definable.length === 0 || (partition && partition.size === 0)) {
     lines.push('// No global definitions to emit');
     return lines.join('\n');
   }
@@ -2354,7 +2355,7 @@ export function generateGlobalsImpl(
   }
   const isDefinitionWinner = (namespace: string | undefined, g: AnalyzedDataSymbol): boolean =>
     definitionWinner.get(`${namespace ?? ''}::${sanitizeSymbolName(g.suggestedName || g.name)}`) === g;
-  if (dropped.size > 0) {
+  if (dropped.size > 0 && !partition) {
     lines.push(`// ${dropped.size} name(s) claimed by more than one Ghidra symbol in the same`);
     lines.push('// emitted namespace; one definition each, the others listed by address:');
     for (const [key, others] of [...dropped].sort()) {
@@ -2375,6 +2376,11 @@ export function generateGlobalsImpl(
   for (const { rendered: namespace, symbols: nsGlobals } of byNamespace) {
     if (nsGlobals.length === 0) continue;
     if (namespace && /[<>,*]/.test(namespace)) continue;
+    // Not restricted to the partition: a symbol this file's initializers name may
+    // be DEFINED in a sibling partition, and globals.h does not declare every
+    // symbol the globals files define (one reconciled back from `static-local`
+    // gets a definition but no extern). An extern for a symbol defined
+    // elsewhere is exactly what the reference needs.
     const undeclared = nsGlobals.filter(g => !headerDeclaredGlobals.has(g) && isDefinitionWinner(namespace, g));
     if (undeclared.length === 0) continue;
     if (namespace) lines.push(`namespace ${namespace} {`);
@@ -2401,7 +2407,8 @@ export function generateGlobalsImpl(
     if (namespace && /[<>,*]/.test(namespace)) continue;
 
     // Split into: initialized with data, initialized without data, uninitialized
-    const owned = nsGlobals.filter(g => isDefinitionWinner(namespace, g));
+    const owned = nsGlobals.filter(g =>
+      isDefinitionWinner(namespace, g) && (!partition || partition.has(g)));
     const withData = owned.filter(g => g.initializedData);
     const withoutData = owned.filter(g => g.isInitialized && !g.initializedData);
     const uninitialized = owned.filter(g => !g.isInitialized);

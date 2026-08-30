@@ -65,6 +65,7 @@ import { createOverrideRegistry } from '../overrides/index.js';
 import { createLibraryRegistry } from '../library/index.js';
 import { createMethodConversionRegistry, getOrCreateRegistry, applyMethodConversions, detectMethodConversionsFromTags, type MethodCallMapping, type MethodConversionRegistry } from '../methods/index.js';
 import type { MethodConversionEntry, ModuleConfig, AutoMethodConversionConfig, TypeOwnershipEntry } from '../config/schema.js';
+import { partitionGlobalsByModule, buildFunctionModuleMap } from './globals-partition.js';
 import { normalizeAddress } from '../config/loader.js';
 import { resolveTargets, getTargetDirectory, type ResolvedTarget } from '../targets/index.js';
 import { generateStubsHeader } from '../targets/stubs.js';
@@ -737,25 +738,11 @@ export function generateProject(
           includes: [],
         });
 
-        // Generate globals.cpp with definitions
-        const globalsImplPath = globalsPath!.replace(/\.h$/, options.format === 'c' ? '.c' : '.cpp');
-        setCentralInitializerScope(true);
-        const globalsImplContent = generateGlobalsImpl(centralGlobals, {
-          ...options,
-          projectName: name,
-          binaryName: programInfo?.name,
-        }, globalsPath!.split('/').pop());
-        setCentralInitializerScope(false);
-        files.set(globalsImplPath, {
-          path: globalsImplPath,
-          content: globalsImplContent,
-          type: 'implementation',
-          functions: [],
-          includes: [globalsPath!],
-        });
-
-        // Patch globals.cpp with extra includes for non-pointer struct types
-        patchGlobalsExtraIncludes(files, globalsImplPath, centralGlobals, mergedTypeOwnerMap, globalsPath!, context.functionNameCandidates);
+        // One globals translation unit per module, plus a shared remainder.
+        emitCentralGlobalsUnits(
+          centralGlobals, functions, files,
+          { ...options, projectName: name, binaryName: programInfo?.name },
+          globalsPath!, mergedTypeOwnerMap, context.functionNameCandidates);
       }
     }
   } else {
@@ -814,26 +801,11 @@ export function generateProject(
           includes: [],
         });
 
-        // Generate globals.cpp with definitions
-        const implExt = options.format === 'c' ? '.c' : '.cpp';
-        const globalsImplPath = `globals${implExt}`;
-        setCentralInitializerScope(true);
-        const globalsImplContent = generateGlobalsImpl(centralGlobals, {
-          ...options,
-          projectName: name,
-          binaryName: programInfo?.name,
-        });
-        setCentralInitializerScope(false);
-        files.set(globalsImplPath, {
-          path: globalsImplPath,
-          content: globalsImplContent,
-          type: 'implementation',
-          functions: [],
-          includes: ['globals.h'],
-        });
-
-        // Patch globals.cpp with extra includes for non-pointer struct types
-        patchGlobalsExtraIncludes(files, globalsImplPath, centralGlobals, flatTypeOwnerMap, 'globals.h', context.functionNameCandidates);
+        // One globals translation unit per module, plus a shared remainder.
+        emitCentralGlobalsUnits(
+          centralGlobals, functions, files,
+          { ...options, projectName: name, binaryName: programInfo?.name },
+          'globals.h', flatTypeOwnerMap, context.functionNameCandidates);
       }
     }
   }
@@ -1153,6 +1125,65 @@ function resolveSymbolReferenceHeader(
 /**
  * Patch globals.cpp in the files map with extra includes for non-pointer struct types.
  */
+/**
+ * Emit the central globals definitions as one translation unit PER MODULE plus a
+ * shared remainder, instead of one unit for the whole binary.
+ *
+ * See `globals-partition.ts` for why and for how a global's module is decided.
+ * The one-definition-per-name winner is still computed by `generateGlobalsImpl`
+ * over the WHOLE set and each file emits only the winners in its own partition,
+ * so the split moves definitions and can neither duplicate nor lose one.
+ *
+ * Every unit includes globals.h and gets its own extra-include patch, because a
+ * by-value aggregate initializer needs the type's own header and which types a
+ * unit uses now differs per unit.
+ */
+function emitCentralGlobalsUnits(
+  centralGlobals: AnalyzedDataSymbol[],
+  functions: ExtractedFunction[],
+  files: Map<string, SourceFile>,
+  options: ReconstructOptions & { projectName?: string; binaryName?: string },
+  globalsHeaderPath: string,
+  typeOwnerMap: Map<string, string>,
+  functionNameCandidates: Map<string, { qualified: string; header: string }[]> | undefined,
+): void {
+  const implExt = options.format === 'c' ? '.c' : '.cpp';
+  const headerName = globalsHeaderPath.split('/').pop()!;
+  const implDir = globalsHeaderPath.includes('/')
+    ? globalsHeaderPath.slice(0, globalsHeaderPath.lastIndexOf('/') + 1)
+    : '';
+  const implBase = headerName.replace(/\.h$/, '');
+
+  const { partitions, shared } = partitionGlobalsByModule(
+    centralGlobals, buildFunctionModuleMap(functions));
+
+  const units: { path: string; members: ReadonlySet<AnalyzedDataSymbol> | undefined }[] = [
+    { path: `${implDir}${implBase}${implExt}`, members: new Set(shared) },
+    ...partitions.map(p => ({
+      path: `${implDir}${implBase}.${p.module}${implExt}`,
+      members: new Set(p.members) as ReadonlySet<AnalyzedDataSymbol>,
+    })),
+  ];
+
+  for (const unit of units) {
+    setCentralInitializerScope(true);
+    const content = generateGlobalsImpl(centralGlobals, options, headerName, undefined, unit.members);
+    setCentralInitializerScope(false);
+    files.set(unit.path, {
+      path: unit.path,
+      content,
+      type: 'implementation',
+      functions: [],
+      includes: [globalsHeaderPath],
+    });
+    patchGlobalsExtraIncludes(
+      files, unit.path, [...(unit.members ?? [])], typeOwnerMap, globalsHeaderPath,
+      functionNameCandidates);
+  }
+  const placed = partitions.reduce((n, p) => n + p.members.length, 0);
+  console.log(`Globals: ${units.length} translation unit(s) — ${placed} definition(s) placed by module, ${shared.length} shared`);
+}
+
 function patchGlobalsExtraIncludes(
   files: Map<string, SourceFile>,
   globalsImplPath: string,
