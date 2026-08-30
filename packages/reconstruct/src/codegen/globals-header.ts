@@ -6,7 +6,7 @@
  */
 
 import type { AnalyzedDataSymbol, ReconstructOptions, DataValue, ExtractedDataType, ExtractedStruct, ExtractedUnion, ExtractedFunctionDefinition, ExtractedFunction } from '../types.js';
-import { GLIDE_UNSIGNED_ENUM_TYPEDEFS, isPlatformOrBuiltinType, isLibraryType, isStructType, castPointerInitializer, normalizeDataValue, isCharacterValueType, isMsvcEhInternal, normalizeWideCharType, normalizeListingBuiltinType, listingBuiltinElementType, imageArtifactElementType, isVoidPointerSpelling, rootQualifyShadowedType, platformDeclaredFunctionNames } from './platform-types.js';
+import { GLIDE_UNSIGNED_ENUM_TYPEDEFS, getAggregateTypeNames, isPlatformOrBuiltinType, isLibraryType, isStructType, castPointerInitializer, normalizeDataValue, isCharacterValueType, isMsvcEhInternal, normalizeWideCharType, normalizeListingBuiltinType, listingBuiltinElementType, imageArtifactElementType, isVoidPointerSpelling, rootQualifyShadowedType, platformDeclaredFunctionNames } from './platform-types.js';
 import { generateStructDeclaration, generateUnionDeclaration, generateFunctionDefinitionDeclaration, ghidraDefaultFieldName } from './header.js';
 import { normalizeQualifiedReference } from './namespace.js';
 import { namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
@@ -2017,10 +2017,20 @@ export function normalizeGlobalDeclType(type: string): string {
   return elaborateCollidingStructType(t);
 }
 
-/** Name conventions for FunctionDefinition typedefs emitted by the codegen. */
+/**
+ * Name conventions for FunctionDefinition typedefs emitted by the codegen.
+ *
+ * The conventions are a fallback for a name the model does not record, and they
+ * lose to the model wherever it has an answer. `D2Vtable_Callback` is a
+ * STRUCTURE with one function-pointer member; the `Callback` suffix made it look
+ * like the funcdef it is not, and `collapseFuncPtrTypedef` then ate the star off
+ * every `D2Vtable_Callback *` parameter - so a body that reads
+ * `pCallbackVtable->vmethod_0` had nothing to dereference.
+ */
 export function isFuncDefTypedefName(name: string): boolean {
-  return knownFuncDefTypedefs.has(name)
-    || /^fn[A-Z]/.test(name)
+  if (knownFuncDefTypedefs.has(name)) return true;
+  if (getAggregateTypeNames()?.has(name)) return false;
+  return /^fn[A-Z]/.test(name)
     || /^fp[A-Z]/.test(name)
     || /^AI_/.test(name)
     || /^D2NET_/.test(name)

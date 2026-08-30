@@ -597,6 +597,13 @@ export interface FuncPtrArgCastTables {
    * Cast into only when the supplied function takes no parameters at all.
    */
   zeroArityCallbackSlots?: Record<string, Record<number, string>>;
+  /**
+   * The same, for a slot the SDK leaves unnamed: the callback type in parts,
+   * built rather than named. Same arity-0 gate.
+   */
+  zeroArityCallbackCasts?: Record<string, Record<number, {
+    returnType: string; paramTypes: string[]; convention?: string;
+  }>>;
   /** Funcdef typedef name → its normalized signature key */
   funcdefSignatures: Record<string, string>;
   /** Function name (bare AND qualified) → its own normalized signature key */

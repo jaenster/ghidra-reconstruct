@@ -86,6 +86,16 @@ export interface FuncPtrArgCastOptions extends PluginOptions {
    */
   fieldFuncdefs?: Record<string, string>;
   /**
+   * Callable name → slot → the callback type the slot's own declaration names,
+   * for a system slot the SDK leaves UNNAMED. `atexit` takes
+   * `void (__cdecl *)(void)` and there is no typedef for it, so the type is
+   * given in parts and built rather than named. Same gate as
+   * `zeroArityCallbackSlots`: only an argument of arity 0 is cast.
+   */
+  zeroArityCallbackCasts?: Record<string, Record<number, {
+    returnType: string; paramTypes: string[]; convention?: string;
+  }>>;
+  /**
    * Callable name → slot → the callback typedef the slot's own declaration
    * names, for callees whose declaration comes from a SYSTEM header rather than
    * from the model — `CreateThread`'s third parameter is
@@ -310,6 +320,10 @@ function buildTransformer(options: FuncPtrArgCastOptions): Transformer {
   const zeroAritySlotsFor = (callee: string): Record<number, string> | undefined =>
     zeroAritySlots[callee] ?? zeroAritySlots[bareOf(callee)];
 
+  const zeroArityCasts = options.zeroArityCallbackCasts ?? {};
+  const zeroArityCastsFor = (callee: string) =>
+    zeroArityCasts[callee] ?? zeroArityCasts[bareOf(callee)];
+
   const signatureFor = (fn: string, model?: string): string | undefined => {
     // A name that also denotes data is not proof of a function.
     if (variableNames.has(bareOf(fn))) return undefined;
@@ -407,6 +421,32 @@ function buildTransformer(options: FuncPtrArgCastOptions): Transformer {
         });
         if (systemChanged) {
           return updateNode(call, { arguments: systemArgs } as Partial<CallExpr>);
+        }
+      }
+
+      // The same slot, where the SDK names no typedef for it. `atexit(Release)`
+      // is `BOOL (*)()` into `void (__cdecl *)(void)`: same arity, same
+      // convention, a return value the CRT discards — so the original source
+      // carried the cast, exactly as it did for the named case above.
+      const systemCasts = zeroArityCastsFor(callee);
+      if (systemCasts) {
+        let castChanged = false;
+        const castArgs = call.arguments.map((arg, i) => {
+          const spec = systemCasts[i];
+          if (!spec) return arg;
+          const argFn = functionArgName(arg);
+          if (!argFn) return arg;
+          const actual = signatureFor(argFn, modelArgName(arg));
+          if (actual === undefined || arityOf(actual) !== 0) return arg;
+          const castType = functionPointerTypeFromSpellings(
+            spec.returnType, spec.paramTypes, spec.convention,
+          );
+          if (!castType) return arg;
+          castChanged = true;
+          return Expr.cast(castType, selectOverload(arg)) as Expression;
+        });
+        if (castChanged) {
+          return updateNode(call, { arguments: castArgs } as Partial<CallExpr>);
         }
       }
 

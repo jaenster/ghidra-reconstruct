@@ -658,6 +658,15 @@ const IMPORT_THUNK_DECLS: ExcludedSymbolDecl[] = [
   { emitted: 'DirectSoundCreate', real: 'DSOUND.DLL DirectSoundCreate', source: 'ghidra',
     decl: 'extern "C" __stdcall int32_t DirectSoundCreate(const GUID* pcGuidDevice, struct IDirectSound** ppDS, struct IUnknown* pUnkOuter);',
     win32Only: true },
+  // The SDK spells the callback `BOOL CALLBACK (LPGUID, LPCSTR, LPCSTR, LPVOID)`.
+  // The one call site passes `SOUND_DetectLegacySoundDrivers` @00513a20, which
+  // Ghidra records as `BOOL __stdcall (int, char *, char *, DWORD)` — the same
+  // four pointer-width arguments in the same __stdcall order, with the device
+  // GUID read as the word it is and the context unused. Declared as the
+  // reconstruction calls it, so the call is the one the machine makes.
+  { emitted: 'DirectSoundEnumerateA', real: 'DSOUND.DLL DirectSoundEnumerateA', source: 'ghidra',
+    decl: 'extern "C" __stdcall int32_t DirectSoundEnumerateA(BOOL (__stdcall* pCallback)(int, char*, char*, DWORD), void* pContext);',
+    win32Only: true },
 ];
 
 /** Every excluded-namespace declaration, in emission order. */
@@ -689,6 +698,25 @@ export const EXCLUDED_SYMBOL_DECLS: readonly ExcludedSymbolDecl[] = [
  */
 export const WIN32_ZERO_ARITY_CALLBACK_SLOTS: Record<string, Record<number, string>> = {
   CreateThread: { 2: 'LPTHREAD_START_ROUTINE' },
+};
+
+/**
+ * The same slots, where the SDK names no typedef the cast could be spelled with.
+ *
+ * `atexit` takes `void (__cdecl *)(void)` and neither the CRT headers nor the
+ * database give that type a name, so it is given in parts. `Release`
+ * @`006c3ff0` is `BOOL (*)()` — arity 0, same convention, and its return value
+ * is one the CRT discards by contract — so the disagreement is the return width
+ * alone and the original source carried the cast.
+ *
+ * The arity-0 gate is the same one `WIN32_ZERO_ARITY_CALLBACK_SLOTS` applies:
+ * an argument that takes parameters where the slot takes none is a real
+ * prototype disagreement and stays visible.
+ */
+export const WIN32_ZERO_ARITY_CALLBACK_CASTS: Record<string, Record<number, {
+  returnType: string; paramTypes: string[]; convention?: string;
+}>> = {
+  atexit: { 0: { returnType: 'void', paramTypes: [], convention: '__cdecl' } },
 };
 
 /**
