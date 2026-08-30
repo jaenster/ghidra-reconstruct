@@ -8,7 +8,7 @@
 
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
-  ASTNode, CompoundStmt, DeclStmt, VariableDecl,
+  ASTNode, CompoundStmt, DeclStmt, VariableDecl, Identifier,
   IfStmt, ForStmt, WhileStmt, DoWhileStmt,
 } from '../../../ast/nodes.js';
 import { findIdentifiers } from '../../../ast/visitor.js';
@@ -17,9 +17,60 @@ import type { TransformPlugin, PluginOptions } from '../types.js';
 
 export interface DeclScopeSinkOptions extends PluginOptions {}
 
+/** Ghidra's name for a frame address that owns no variable. */
+const STACK_SLOT_NAME_RE = /^stack0x[0-9a-fA-F]+$/;
+
+/**
+ * Does this block still hold an unresolved `stack0xNNNN` frame address?
+ *
+ * `stack-frame-address` runs at priority 520, long after this pass, and
+ * rewrites each of those into `&<local> ± k` — a BRAND NEW reference to a local
+ * that may by then have been sunk into some inner scope, hundreds of lines
+ * away. Nothing re-hoists it, so the emitted body names an out-of-scope
+ * variable. While any such residue is present, nothing in the block may move.
+ *
+ * Declining to sink is always safe: a declaration left at function scope is
+ * valid C++ wherever a sunk one would have been.
+ *
+ * Memoised per node. The visitor asks this of every compound it walks, and the
+ * nested compounds of one function body overlap almost entirely; answering each
+ * node once turns a quadratic re-scan of every enclosing block into one pass.
+ */
+const stackSlotResidue = new WeakMap<ASTNode, boolean>();
+
+function hasUnresolvedStackSlot(node: ASTNode): boolean {
+  const cached = stackSlotResidue.get(node);
+  if (cached !== undefined) return cached;
+
+  let found = node.kind === NodeKind.Identifier
+    && STACK_SLOT_NAME_RE.test((node as Identifier).name);
+  if (!found) {
+    for (const key of Object.keys(node as object)) {
+      if (key === 'location' || key === 'leadingTrivia' || key === 'trailingTrivia') continue;
+      const child = (node as unknown as Record<string, unknown>)[key];
+      if (Array.isArray(child)) {
+        for (const c of child) {
+          if (isNode(c) && hasUnresolvedStackSlot(c)) { found = true; break; }
+        }
+      } else if (isNode(child) && hasUnresolvedStackSlot(child)) {
+        found = true;
+      }
+      if (found) break;
+    }
+  }
+  stackSlotResidue.set(node, found);
+  return found;
+}
+
+function isNode(value: unknown): value is ASTNode {
+  return typeof value === 'object' && value !== null
+    && typeof (value as { kind?: unknown }).kind === 'string';
+}
+
 function createDeclScopeSinkTransformer(_options: DeclScopeSinkOptions = {}): Transformer {
   return createTransformer({
     visitCompoundStmt(node: CompoundStmt): ASTNode | undefined {
+      if (hasUnresolvedStackSlot(node)) return undefined;
       const stmts = node.statements;
 
       for (let i = 0; i < stmts.length; i++) {

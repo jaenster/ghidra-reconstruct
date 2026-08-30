@@ -70,3 +70,26 @@ describe('declScopeSinkPlugin', () => {
     assert.ok(declScopeSinkPlugin.tags?.includes('cleanup'));
   });
 });
+
+describe('declScopeSinkPlugin — frame-slot residue', () => {
+  function transformCode(code: string): string {
+    const ast = parse(code);
+    const transformer = declScopeSinkPlugin.createTransformer({});
+    return emit(transformer(ast) as AnyNode).trim();
+  }
+
+  it('does not sink while an unresolved stack0x frame address is still present', () => {
+    // `stack-frame-address` runs at priority 520 and turns `&stack0xfffffeef`
+    // into `&szNameCopy - 1`. Sinking `szNameCopy` into the loop first leaves
+    // that later reference naming an out-of-scope variable.
+    const out = transformCode(
+      'void f() { char szNameCopy[260]; uint8_t* p; p = &stack0xfffffeef; while (c) { use(szNameCopy); } }'
+    );
+    assert.ok(/^\s*char szNameCopy\[260\];/m.test(out.split('\n')[1] ?? ''), `sunk anyway:\n${out}`);
+  });
+
+  it('still sinks in a function with no frame-slot residue', () => {
+    const out = transformCode('void f() { int x; while (c) { use(x); } }');
+    assert.strictEqual(out, 'void f() {\n  while (c) {\n    int x;\n    use(x);\n  }\n}');
+  });
+});
