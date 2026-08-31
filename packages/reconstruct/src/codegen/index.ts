@@ -46,6 +46,7 @@ import type {
   ProgramInfo,
   AnalyzedDataSymbol,
   DataValue,
+  ExtractedString,
 } from '../types.js';
 import { resolveOverridePlaceholders } from './impl.js';
 import { VOID_POINTER_SLOT, getFuncPtrArgCastArityMismatchList, type FuncPtrTarget } from '@ghidra-mcp/cpp-parser';
@@ -58,7 +59,7 @@ import { generateReadme } from './readme.js';
 import { conventionKeyword } from './calling-convention.js';
 import { organizeByNamespace, getFilePath, setModuleNames, setNamespaceCollisionTypes, normalizeQualifiedReference } from './namespace.js';
 import { buildNamespaceResolution, namespaceResolution, renderNamespace } from './namespace-resolution.js';
-import { setInteriorLabelSymbols, resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, getDeclarationClosureReport, isUnreferenceableArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType } from './globals-header.js';
+import { setInteriorLabelSymbols, resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, setDeclarationClosureDataContent, getDeclarationClosureReport, isUnreferenceableArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType } from './globals-header.js';
 import { harvestAnnotatedParameterTypes } from './win32-signatures.js';
 import { isPlatformOrBuiltinType, isLibraryType, generatePlatformHeader, arrayRowTypedefLines, arrayRowReturn, arrayRowSpelling, GHIDRA_PSEUDO_OP_RESULT_TYPES, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, platformVoidPointerFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
 import { createOverrideRegistry } from '../overrides/index.js';
@@ -98,7 +99,8 @@ export function generateProject(
   globals: AnalyzedDataSymbol[] | ExtractedGlobal[],
   namespaces: ExtractedNamespace[],
   options: ReconstructOptions,
-  programInfo?: ProgramInfo
+  programInfo?: ProgramInfo,
+  strings?: ExtractedString[]
 ): ReconstructedProject {
   const files = new Map<string, SourceFile>();
   const sourceMaps = new Map<string, SourceMap>();
@@ -232,6 +234,10 @@ export function generateProject(
   // about that changes what is emitted.
   resetDeclaredNames();
   setDeclarationClosureModel(functions, globals as AnalyzedDataSymbol[]);
+  // The bytes behind the data the closure declares. Keyed on address inside the
+  // setter, because a Ghidra string LABEL is a lossy rendering of its content
+  // and only the address in it is exact.
+  setDeclarationClosureDataContent(strings ?? []);
 
   const excludeNs = options.excludeNamespaces ?? [];
   if (excludeNs.length > 0) {
@@ -944,6 +950,18 @@ function reportDeclarationClosure(): void {
       console.log(`  ${String(names.length).padStart(5)}  ${reason}  e.g. ${sample}${names.length > 6 ? ', ...' : ''}`);
     }
   }
+  const defined = report.declarations.filter(d => d.def).length;
+  if (defined > 0) {
+    console.log(`Declaration closure: ${defined} declaration(s) also defined from Ghidra's own bytes`);
+  }
+  if (report.definitionGaps.size > 0) {
+    const total = [...report.definitionGaps.values()].reduce((a, l) => a + l.length, 0);
+    console.log(`Declaration closure: ${total} declared symbol(s) with no definition (undefined at link), by cause:`);
+    for (const [reason, names] of [...report.definitionGaps].sort((a, b) => b[1].length - a[1].length)) {
+      const sample = names.slice(0, 6).join(', ');
+      console.log(`  ${String(names.length).padStart(5)}  ${reason}  e.g. ${sample}${names.length > 6 ? ', ...' : ''}`);
+    }
+  }
 }
 
 /**
@@ -1227,17 +1245,22 @@ function emitCentralGlobalsUnits(
   const { partitions, shared } = partitionGlobalsByModule(
     centralGlobals, buildFunctionModuleMap(functions));
 
-  const units: { path: string; members: ReadonlySet<AnalyzedDataSymbol> | undefined }[] = [
-    { path: `${implDir}${implBase}${implExt}`, members: new Set(shared) },
+  // The shared remainder is first, and it is the unit that owns the closure
+  // definitions: they belong to no module, and emitting them from every unit
+  // would be as many duplicate definitions as there are units.
+  const units: { path: string; members: ReadonlySet<AnalyzedDataSymbol> | undefined; ownsClosure: boolean }[] = [
+    { path: `${implDir}${implBase}${implExt}`, members: new Set(shared), ownsClosure: true },
     ...partitions.map(p => ({
       path: `${implDir}${implBase}.${p.module}${implExt}`,
       members: new Set(p.members) as ReadonlySet<AnalyzedDataSymbol>,
+      ownsClosure: false,
     })),
   ];
 
   for (const unit of units) {
     setCentralInitializerScope(true);
-    const content = generateGlobalsImpl(centralGlobals, options, headerName, undefined, unit.members);
+    const content = generateGlobalsImpl(
+      centralGlobals, options, headerName, undefined, unit.members, unit.ownsClosure);
     setCentralInitializerScope(false);
     files.set(unit.path, {
       path: unit.path,

@@ -161,6 +161,7 @@ import type {
   ExtractedDataType,
   AnalyzedDataSymbol,
   ExtractedNamespace,
+  ExtractedString,
   ProgramInfo,
 } from './types.js';
 import { defaultOptions } from './types.js';
@@ -312,8 +313,12 @@ interface CodegenInputs {
   globals: AnalyzedDataSymbol[];
   namespaces: ExtractedNamespace[];
   programInfo: ProgramInfo;
-  /** Only feeds `stats.stringsExtracted`; nothing downstream reads the strings. */
-  stringCount: number;
+  /**
+   * String literals with their addresses. Feeds `stats.stringsExtracted`, and
+   * feeds the declaration closure the byte content behind Ghidra's string
+   * labels — without it those labels are declared and never defined.
+   */
+  strings: ExtractedString[];
 }
 
 /**
@@ -359,7 +364,8 @@ async function generateAndWrite(
       inputs.globals,
       inputs.namespaces,
       options,
-      inputs.programInfo
+      inputs.programInfo,
+      inputs.strings
     ),
     p => `${p.files.size} files, ${formatBytes([...p.files.values()].reduce((a, f) => a + f.content.length, 0))} of source`
   );
@@ -390,7 +396,7 @@ async function generateAndWrite(
       filesGenerated: filesWritten.length,
       dataTypesExtracted: inputs.dataTypes.length,
       globalsExtracted: inputs.globals.length,
-      stringsExtracted: inputs.stringCount,
+      stringsExtracted: inputs.strings.length,
       timeMs: Date.now() - startTime,
     },
     buildInfo: project.buildInfo,
@@ -628,7 +634,7 @@ export async function reconstruct(
           globals: snapshot.globals,
           namespaces: snapshot.namespaces,
           programInfo: snapshot.manifest.provenance.programInfo,
-          stringCount: snapshot.manifest.counts.strings,
+          strings: snapshot.strings,
         },
         options,
         excludePatterns,
@@ -880,7 +886,7 @@ export async function reconstruct(
       globals: extraction.globals,
       namespaces: extraction.namespaces,
       programInfo: extraction.programInfo,
-      stringCount: extraction.strings.length,
+      strings: extraction.strings,
     };
 
     // Persist the extraction before codegen runs, so a codegen crash still
@@ -904,7 +910,7 @@ export async function reconstruct(
               globals: codegenInputs.globals.length,
               namespaces: codegenInputs.namespaces.length,
               classes: codegenInputs.classes.length,
-              strings: codegenInputs.stringCount,
+              strings: codegenInputs.strings.length,
             },
           },
           functions: codegenInputs.functions,
@@ -912,6 +918,7 @@ export async function reconstruct(
           globals: codegenInputs.globals,
           namespaces: codegenInputs.namespaces,
           classes: codegenInputs.classes,
+          strings: codegenInputs.strings,
           staticPromotions: [...analysis.staticPromotions],
           warnings: [...warnings],
         };

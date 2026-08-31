@@ -39,6 +39,7 @@ import type {
   ExtractedNamespace,
   ProgramInfo,
   ReconstructOptions,
+  ExtractedString,
 } from '../types.js';
 
 const programInfo: ProgramInfo = {
@@ -188,6 +189,15 @@ const namespaces: ExtractedNamespace[] = [
 
 const classes: DetectedClass[] = [];
 
+/**
+ * Strings carry the byte content the declaration closure defines its string
+ * labels from, so they are part of what a replay has to reproduce exactly.
+ */
+const strings: ExtractedString[] = [
+  { address: '006e1730', value: 'block', length: 5, encoding: 'TerminatedCString', xrefCount: 3 },
+  { address: '0070f130', value: '207.82.87.133', length: 13, encoding: 'string', xrefCount: 1 },
+];
+
 function makeOptions(outputDir: string): ReconstructOptions {
   return {
     outputDir,
@@ -220,7 +230,7 @@ function makeSnapshot(): CodegenSnapshot {
         globals: globals.length,
         namespaces: namespaces.length,
         classes: classes.length,
-        strings: 4242,
+        strings: strings.length,
       },
     },
     functions,
@@ -228,6 +238,7 @@ function makeSnapshot(): CodegenSnapshot {
     globals,
     namespaces,
     classes,
+    strings,
     staticPromotions: [['006fc030', 'D2Common::Rooms::ROOM_Count']],
     warnings: ['Excluded 7 data types matching exclude patterns'],
   };
@@ -286,9 +297,10 @@ describe('extraction snapshot round trip', () => {
     assert.deepStrictEqual(loaded.globals, original.globals);
     assert.deepStrictEqual(loaded.namespaces, original.namespaces);
     assert.deepStrictEqual(loaded.classes, original.classes);
+    assert.deepStrictEqual(loaded.strings, original.strings);
     assert.deepStrictEqual(loaded.staticPromotions, original.staticPromotions);
     assert.deepStrictEqual(loaded.warnings, original.warnings);
-    assert.strictEqual(loaded.manifest.counts.strings, 4242);
+    assert.strictEqual(loaded.manifest.counts.strings, strings.length);
   });
 
   it('generateProject from a reloaded snapshot is byte-identical', async () => {
@@ -305,7 +317,8 @@ describe('extraction snapshot round trip', () => {
       globals,
       namespaces,
       makeOptions(join(tmp, 'out-direct')),
-      programInfo
+      programInfo,
+      strings
     );
 
     const loaded = await readSnapshot(dir);
@@ -317,7 +330,8 @@ describe('extraction snapshot round trip', () => {
       loaded.globals,
       loaded.namespaces,
       makeOptions(join(tmp, 'out-replayed')),
-      loaded.manifest.provenance.programInfo
+      loaded.manifest.provenance.programInfo,
+      loaded.strings
     );
 
     const a = [...direct.files.entries()].map(([p, f]) => [p, f.content]).sort();
@@ -342,7 +356,8 @@ describe('extraction snapshot round trip', () => {
       globals,
       namespaces,
       baselineOpts,
-      programInfo
+      programInfo,
+      strings
     );
     await writeProject(baseline, baselineDir, baselineOpts);
 
@@ -356,7 +371,7 @@ describe('extraction snapshot round trip', () => {
 
     assert.ok(result.success, `codegen-only run failed: ${result.errors.join('; ')}`);
     assert.strictEqual(result.stats.functionsProcessed, functions.length);
-    assert.strictEqual(result.stats.stringsExtracted, 4242);
+    assert.strictEqual(result.stats.stringsExtracted, strings.length);
     // The warnings recorded at extraction time come back with it.
     assert.ok(result.warnings.some(w => w.includes('Excluded 7 data types')));
 

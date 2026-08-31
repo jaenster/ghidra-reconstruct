@@ -37,7 +37,31 @@ export interface ClosureDeclaration {
   name: string;
   /** The line to emit. */
   decl: string;
+  /**
+   * The DEFINITION, when the bytes behind the declaration are known. A
+   * declaration alone leaves the symbol undefined at link; only a symbol whose
+   * content extraction actually recovered gets one, and the content comes from
+   * Ghidra's own reading of the binary — never from the label's text, which is a
+   * truncated and mangled rendering of it.
+   */
+  def?: string;
   origin: ClosureOrigin;
+}
+
+/**
+ * Byte content for one data address, as extraction recovered it from Ghidra.
+ *
+ * `value` is what Ghidra decoded and `length` is how many bytes that was, both
+ * WITHOUT the terminator. Carrying the length separately is what makes the
+ * content checkable: a value whose encoded length disagrees with Ghidra's is a
+ * value that lost bytes in transit, and a definition built from it would be the
+ * wrong size.
+ */
+export interface ClosureStringContent {
+  value: string;
+  length: number;
+  /** Ghidra's data type for it — `string`, `TerminatedCString`, `unicode`, … */
+  encoding: string;
 }
 
 /**
@@ -104,8 +128,88 @@ function untypedDataType(name: string): string | null {
   return null;
 }
 
-/** Ghidra's auto-name for string data: `s_<text>_<address>`. */
-const STRING_LABEL_RE = /^s_.*_[0-9a-f]{6,}$/i;
+/**
+ * Ghidra's auto-name for string data: `s_<text>_<address>`.
+ *
+ * The `<text>` half is a TRUNCATED and MANGLED rendering of the bytes — 34
+ * characters at most, with everything that is not identifier-legal replaced by
+ * `_`. `s_Error_1__Diablo_II_is_unable_to_p_0072daa8` is 69 bytes of string with
+ * a mangled colon and two spaces collapsed. Nothing may ever be reconstructed
+ * from it. The ADDRESS half is exact, and that is what the content is keyed on.
+ */
+const STRING_LABEL_RE = /^s_.*_([0-9a-f]{6,})$/i;
+
+/** Ghidra's byte-string data types. A `char[]` definition is honest for these. */
+const BYTE_STRING_ENCODINGS = new Set(['string', 'terminatedcstring', 'string-utf8', 'char']);
+
+/** Compare addresses as numbers, not as text: `0070f130` and `70f130` are one address. */
+export function normalizeDataAddress(address: string): string {
+  const bare = address.includes(':') ? address.slice(address.lastIndexOf(':') + 1) : address;
+  return bare.replace(/^0x/i, '').toLowerCase().replace(/^0+(?=.)/, '');
+}
+
+/**
+ * The address a Ghidra string label carries, or null if it carries none.
+ * Greedy on the text half, so the LAST hex run is the address — a label whose
+ * own text is hexadecimal (`s_deadbeef_006ebefc`) still resolves correctly.
+ */
+export function stringLabelAddress(name: string): string | null {
+  const m = STRING_LABEL_RE.exec(name);
+  return m ? normalizeDataAddress(m[1]) : null;
+}
+
+/**
+ * One byte as it appears inside a C++ string literal.
+ *
+ * Octal, never hex: a hex escape is greedy and `"\x0a" + "1"` written as
+ * `"\x0a1"` is one character 0xA1. A three-digit octal escape has a fixed width,
+ * so a digit after it can never be swallowed. `?` is escaped so no run of them
+ * can form a trigraph.
+ */
+function escapeByte(byte: number): string {
+  switch (byte) {
+    case 0x22: return '\\"';
+    case 0x5c: return '\\\\';
+    case 0x3f: return '\\?';
+  }
+  if (byte >= 0x20 && byte <= 0x7e) return String.fromCharCode(byte);
+  return '\\' + byte.toString(8).padStart(3, '0');
+}
+
+/** The exact bytes as a C++ string literal. */
+export function cxxStringLiteral(bytes: Uint8Array): string {
+  let out = '"';
+  for (const byte of bytes) out += escapeByte(byte);
+  return out + '"';
+}
+
+/**
+ * A definition for a byte string, or the reason there cannot be one.
+ *
+ * `char x[] = "…"` and not `const char*`: the bodies both index it and pass it
+ * where a `char*` is wanted, and the array form makes the object's size the
+ * string's own size rather than a pointer's. It has to agree with the `extern
+ * char x[];` the declaration side emits, which is the whole point of building
+ * both here.
+ */
+export function stringDefinition(
+  name: string,
+  content: ClosureStringContent
+): { def: string } | { reason: string } {
+  if (!BYTE_STRING_ENCODINGS.has(content.encoding.toLowerCase())) {
+    return { reason: `string data Ghidra encodes as ${content.encoding}, which no char[] can hold` };
+  }
+  const bytes = Buffer.from(content.value, 'utf8');
+  if (bytes.length !== content.length) {
+    // The decoded text does not weigh what Ghidra says the datum weighs, so
+    // something was lost between the binary and here. A definition built from it
+    // would be the wrong size, which is worse than no definition at all.
+    return {
+      reason: `string content is ${bytes.length} byte(s) but Ghidra reports ${content.length} — content lost in transit`,
+    };
+  }
+  return { def: `char ${name}[] = ${cxxStringLiteral(bytes)};` };
+}
 
 export interface ClosureInputs {
   /** Every function Ghidra gave us, INCLUDING the ones codegen excludes. */
@@ -124,12 +228,23 @@ export interface ClosureInputs {
   renderExtern: (symbol: AnalyzedDataSymbol) => string | null;
   /** Sanitize a Ghidra name to the spelling the bodies use. */
   sanitize: (name: string) => string;
+  /**
+   * Byte content keyed by NORMALIZED ADDRESS (see `normalizeDataAddress`), not
+   * by name. Ghidra's label text is lossy; its address is not.
+   */
+  stringContentByAddress?: ReadonlyMap<string, ClosureStringContent>;
 }
 
 export interface ClosureResult {
   declarations: ClosureDeclaration[];
   /** Referenced, undeclared, and not sourceable — grouped by why. */
   unresolved: Map<string, string[]>;
+  /**
+   * Declared here but NOT defined here, grouped by why. Every one of these is
+   * an undefined symbol at link, so the group is the work list — and the reason
+   * says whether the fix belongs in Ghidra or in extraction.
+   */
+  definitionGaps: Map<string, string[]>;
 }
 
 /**
@@ -153,11 +268,14 @@ export function computeDeclarationClosure(inputs: ClosureInputs): ClosureResult 
 
   const declarations: ClosureDeclaration[] = [];
   const unresolved = new Map<string, string[]>();
-  const note = (reason: string, name: string): void => {
-    const list = unresolved.get(reason);
+  const definitionGaps = new Map<string, string[]>();
+  const into = (map: Map<string, string[]>, reason: string, name: string): void => {
+    const list = map.get(reason);
     if (list) list.push(name);
-    else unresolved.set(reason, [name]);
+    else map.set(reason, [name]);
   };
+  const note = (reason: string, name: string): void => into(unresolved, reason, name);
+  const undefinable = (reason: string, name: string): void => into(definitionGaps, reason, name);
 
   for (const name of [...inputs.referenced.keys()].sort()) {
     if (inputs.declared.has(name)) continue;
@@ -191,21 +309,72 @@ export function computeDeclarationClosure(inputs: ClosureInputs): ClosureResult 
 
     const untyped = untypedDataType(name);
     if (untyped) {
+      // The name gives a WIDTH, which is enough to declare. It does not give an
+      // EXTENT, and the bodies index off these (`(&UNK_006dff20)[i]`), so the
+      // object is an array whose length only Ghidra can supply. Defining one
+      // byte here would link and then read past it — a defect that compiles.
       declarations.push({ name, decl: `extern ${untyped} ${name};`, origin: 'ghidra-untyped-data' });
+      undefinable(
+        'untyped data with no sized symbol in Ghidra — needs a typed array at that address before a definition can be honest',
+        name,
+      );
       continue;
     }
 
-    if (STRING_LABEL_RE.test(name)) {
+    const stringAddress = stringLabelAddress(name);
+    if (stringAddress !== null) {
       // Ghidra's auto-name for string data. It never became a `globals` record,
       // but the name says what it is: bytes at that address.
-      declarations.push({ name, decl: `extern char ${name}[];`, origin: 'ghidra-untyped-data' });
+      const decl = `extern char ${name}[];`;
+      const content = inputs.stringContentByAddress?.get(stringAddress);
+      if (!content) {
+        declarations.push({ name, decl, origin: 'ghidra-untyped-data' });
+        undefinable('string label whose byte content the extraction did not carry', name);
+        continue;
+      }
+      const built = stringDefinition(name, content);
+      if ('reason' in built) {
+        declarations.push({ name, decl, origin: 'ghidra-untyped-data' });
+        undefinable(built.reason, name);
+        continue;
+      }
+      declarations.push({ name, decl, def: built.def, origin: 'ghidra-untyped-data' });
       continue;
     }
 
     note('no symbol of this name in the Ghidra data the pipeline was given', name);
   }
 
-  return { declarations, unresolved };
+  return { declarations, unresolved, definitionGaps };
+}
+
+/**
+ * Render the definitions the closure could source, for the one translation unit
+ * that owns them.
+ *
+ * Exactly the declarations that carry a `def`, so the DEFINITION set is a subset
+ * of the DECLARATION set by construction and the two can never name different
+ * objects — the failure mode `isEmittableGlobal` exists to prevent on the
+ * modelled globals, applied to the closure's.
+ */
+export function renderClosureDefinitionBlock(
+  declarations: ReadonlyArray<ClosureDeclaration>
+): string[] {
+  const defined = declarations.filter(d => d.def);
+  if (defined.length === 0) return [];
+  const lines: string[] = [];
+  lines.push('// =============================================================================');
+  lines.push('// Declaration closure — definitions');
+  lines.push('//');
+  lines.push('// The storage behind the closure declarations in globals.h whose content Ghidra');
+  lines.push('// actually has. The bytes are read from the binary, never rebuilt from the');
+  lines.push('// label: a Ghidra string label is a truncated, mangled rendering of its own');
+  lines.push('// content and agrees with it only by accident.');
+  lines.push('// =============================================================================');
+  lines.push('');
+  for (const d of defined) lines.push(d.def!);
+  lines.push('');
+  return lines;
 }
 
 /**
@@ -219,9 +388,9 @@ export function renderClosureBlock(declarations: ReadonlyArray<ClosureDeclaratio
   lines.push('//');
   lines.push('// Symbols the emitted bodies reference that no emitted file declares: callees');
   lines.push('// in namespaces this build excludes, data symbols the globals filters dropped,');
-  lines.push('// and Ghidra\'s own names for data it never typed. Declared here, never defined');
-  lines.push('// here — the definition is in the binary, and its absence is a link question,');
-  lines.push('// not a compile one.');
+  lines.push('// and Ghidra\'s own names for data it never typed. Where the content behind one');
+  lines.push('// is known, globals.cpp defines it; where it is not, the symbol stays undefined');
+  lines.push('// and its absence is a link question, not a compile one.');
   lines.push('// =============================================================================');
   lines.push('');
   const byOrigin = new Map<ClosureOrigin, ClosureDeclaration[]>();

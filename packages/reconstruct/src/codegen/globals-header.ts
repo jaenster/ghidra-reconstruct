@@ -10,7 +10,7 @@ import { GLIDE_UNSIGNED_ENUM_TYPEDEFS, getAggregateTypeNames, isPlatformOrBuilti
 import { generateStructDeclaration, generateUnionDeclaration, generateFunctionDefinitionDeclaration, ghidraDefaultFieldName } from './header.js';
 import { normalizeQualifiedReference } from './namespace.js';
 import { namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
-import { computeDeclarationClosure, renderClosureBlock, type ClosureResult } from './declaration-closure.js';
+import { computeDeclarationClosure, renderClosureBlock, renderClosureDefinitionBlock, normalizeDataAddress, type ClosureResult, type ClosureStringContent } from './declaration-closure.js';
 import { allOnesSentinel, negativeInUnsignedSlot } from './sentinel-literal.js';
 
 /**
@@ -191,6 +191,33 @@ export function setDeclarationClosureModel(
 ): void {
   closureFunctions = functions;
   closureGlobals = globals;
+}
+
+/**
+ * Byte content for the data the closure declares, keyed by normalized address.
+ *
+ * Held here rather than passed down because the closure is computed deep inside
+ * `generateGlobalsHeader`, exactly like the model above it. Empty until
+ * extraction supplies it, and an empty map is not an error: every declaration
+ * still gets emitted, they simply stay undefined and say so in the report.
+ */
+let closureStringContent: ReadonlyMap<string, ClosureStringContent> = new Map();
+
+export function setDeclarationClosureDataContent(
+  strings: ReadonlyArray<{ address: string; value: string; length: number; encoding: string }>,
+): void {
+  const byAddress = new Map<string, ClosureStringContent>();
+  for (const s of strings) {
+    if (!s.address) continue;
+    const key = normalizeDataAddress(s.address);
+    // First wins. Two records for one address would be two readings of the same
+    // bytes, and picking the later one silently would make the tree depend on
+    // extraction order.
+    if (!byAddress.has(key)) {
+      byAddress.set(key, { value: s.value, length: s.length, encoding: s.encoding });
+    }
+  }
+  closureStringContent = byAddress;
 }
 
 export function setDeclarationClosureEmitters(
@@ -704,6 +731,7 @@ export function generateGlobalsHeader(
         return [...forwards, decl].join('\n');
       },
       sanitize: sanitizeSymbolName,
+      stringContentByAddress: closureStringContent,
     });
     for (const line of renderClosureBlock(closure.declarations)) lines.push(line);
     for (const d of closure.declarations) recordDeclaredName(d.name);
@@ -718,6 +746,16 @@ let lastClosureResult: ClosureResult | undefined;
 
 export function getDeclarationClosureReport(): ClosureResult | undefined {
   return lastClosureResult;
+}
+
+/**
+ * The definitions for the closure globals.h just declared. Empty until
+ * `generateGlobalsHeader` has run, because the declaration set is what decides
+ * the definition set.
+ */
+export function renderClosureDefinitions(): string[] {
+  if (!lastClosureResult) return [];
+  return renderClosureDefinitionBlock(lastClosureResult.declarations);
 }
 
 /**
@@ -2402,7 +2440,8 @@ export function generateGlobalsImpl(
   options: ReconstructOptions & { projectName?: string; binaryName?: string },
   globalsHeaderPath = 'globals.h',
   extraIncludes?: string[],
-  partition?: ReadonlySet<AnalyzedDataSymbol>
+  partition?: ReadonlySet<AnalyzedDataSymbol>,
+  emitClosureDefinitions = false
 ): string {
   const lines: string[] = [];
 
@@ -2420,6 +2459,15 @@ export function generateGlobalsImpl(
     }
   }
   lines.push('');
+
+  // Before anything the globals MODEL owns: the storage behind globals.h's
+  // closure declarations. It belongs to exactly one unit — this one — and has to
+  // be emitted before the early return below, or a partition that happens to
+  // hold no modelled global would drop it.
+  if (emitClosureDefinitions) {
+    const closureDefs = renderClosureDefinitions();
+    if (closureDefs.length > 0) lines.push(...closureDefs);
+  }
 
   // Only emit definitions for non-constant globals, and only for the ones
   // globals.h is willing to declare (see isEmittableGlobal).

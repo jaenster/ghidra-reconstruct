@@ -31,6 +31,7 @@ import type {
   ExtractedDataType,
   ExtractedFunction,
   ExtractedNamespace,
+  ExtractedString,
   ProgramInfo,
 } from './types.js';
 
@@ -89,8 +90,10 @@ export interface SnapshotManifest {
 
 /**
  * Everything `generateProject` and the result stats need. Deliberately NOT the
- * whole ExtractionResult: `strings` are kept only as a count because nothing
- * downstream of analysis reads them, and they would double the snapshot size.
+ * whole ExtractionResult — but `strings` ARE part of it: they carry the byte
+ * content behind Ghidra's string labels, and the declaration closure defines
+ * those labels from it. Keeping only the count is what left them declared and
+ * undefined.
  */
 export interface CodegenSnapshot {
   manifest: SnapshotManifest;
@@ -100,6 +103,12 @@ export interface CodegenSnapshot {
   globals: AnalyzedDataSymbol[];
   namespaces: ExtractedNamespace[];
   classes: DetectedClass[];
+  /**
+   * String literals with their addresses and content. The closure joins these
+   * onto its declarations BY ADDRESS — never by label text, which Ghidra
+   * truncates and mangles.
+   */
+  strings: ExtractedString[];
   /** analysis.staticPromotions, flattened from its Map. */
   staticPromotions: [string, string][];
   /** Warnings accumulated before codegen, so a reload reproduces them. */
@@ -113,6 +122,7 @@ const PARTS = {
   globals: 'globals.ndjson',
   namespaces: 'namespaces.ndjson',
   classes: 'classes.ndjson',
+  strings: 'strings.ndjson',
 } as const;
 const SIDECAR = 'sidecar.json';
 
@@ -163,6 +173,7 @@ export async function writeSnapshot(dir: string, snapshot: CodegenSnapshot): Pro
   await writeNdjson(join(staging, PARTS.globals), snapshot.globals);
   await writeNdjson(join(staging, PARTS.namespaces), snapshot.namespaces);
   await writeNdjson(join(staging, PARTS.classes), snapshot.classes);
+  await writeNdjson(join(staging, PARTS.strings), snapshot.strings);
 
   await writeFile(
     join(staging, SIDECAR),
@@ -221,6 +232,13 @@ export async function readSnapshot(dir: string): Promise<CodegenSnapshot> {
     readNdjson<DetectedClass>(join(dir, PARTS.classes)),
   ]);
 
+  // The strings part arrived after the format did, so a snapshot written before
+  // it simply has no such file. That is a snapshot with fewer definitions in the
+  // tree it produces, not a corrupt one, and the closure report names every
+  // symbol it costs — so it is read leniently rather than rejected, which would
+  // force a 20-minute re-extraction for a file that is one page long.
+  const strings = await readNdjson<ExtractedString>(join(dir, PARTS.strings)).catch(() => []);
+
   const sidecar = JSON.parse(await readFile(join(dir, SIDECAR), 'utf8')) as {
     staticPromotions: [string, string][];
     warnings: string[];
@@ -234,6 +252,8 @@ export async function readSnapshot(dir: string): Promise<CodegenSnapshot> {
     globals: globals.length,
     namespaces: namespaces.length,
     classes: classes.length,
+    // Not `strings.length`: an older snapshot legitimately has none, and the
+    // manifest count is what the extraction saw either way.
     strings: manifest.counts.strings,
   };
   for (const key of Object.keys(manifest.counts) as (keyof SnapshotCounts)[]) {
@@ -252,6 +272,7 @@ export async function readSnapshot(dir: string): Promise<CodegenSnapshot> {
     globals,
     namespaces,
     classes,
+    strings,
     staticPromotions: sidecar.staticPromotions,
     warnings: sidecar.warnings,
   };
