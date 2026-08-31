@@ -77,6 +77,65 @@ describe('qualifiedNameCleanupPlugin', () => {
     assert.ok(/Forms::Draw\(p\)/.test(out), out);
   });
 
+  describe('external stdcall import undecoration', () => {
+    // The declaration table's own rule, handed in as a closed set: an import
+    // whose Ghidra name is `_BinkClose@4` is declared `BinkClose` and
+    // `__stdcall` puts the `@4` back, so the reference has to move with it.
+    const importRenames = {
+      _BinkClose_4: 'BinkClose',
+      _BinkOpenDirectSound_4: 'BinkOpenDirectSound',
+      _BinkSetSoundSystem_8: 'BinkSetSoundSystem',
+      _SmackOpen_12: 'SmackOpen',
+    };
+
+    it('respells a call site onto the declared identifier', () => {
+      const out = transformCode(
+        'void f() { _BinkClose_4(gpBink); _SmackOpen_12(sz, 0xfe000, -1); }',
+        { importRenames }
+      );
+      assert.ok(/\bBinkClose\(gpBink\)/.test(out), out);
+      assert.ok(/\bSmackOpen\(sz/.test(out), out);
+      assert.ok(!/_BinkClose_4|_SmackOpen_12/.test(out), out);
+    });
+
+    it('respells the reference that also carries the _exref suffix', () => {
+      // `_BinkOpenDirectSound_4` NEVER appears bare in any body — only as
+      // `_BinkOpenDirectSound_4_exref`. A pass that ran before the suffix came
+      // off would miss it and leave one call site spelling the old name.
+      const out = transformCode(
+        'void f() { _BinkSetSoundSystem_8(_BinkOpenDirectSound_4_exref, 0); }',
+        { importRenames }
+      );
+      assert.ok(/BinkSetSoundSystem\(BinkOpenDirectSound, 0\)/.test(out), out);
+      assert.ok(!/_exref/.test(out), out);
+    });
+
+    it('renames nothing outside the set', () => {
+      // Stack slots and a Glide import SLOT — the slot is data globals.h
+      // declares, and renaming it turns its store into "assignment of function".
+      const src = 'void f() { int _iStack_10; int _local_8; '
+        + 'GLIDEDLL_grSstWinClose_4 = (void*)p; _GLIDEDLL_grSstWinClose_4(h); }';
+      const out = transformCode(src, { importRenames });
+      assert.ok(/_iStack_10/.test(out), out);
+      assert.ok(/_local_8/.test(out), out);
+      assert.ok(/GLIDEDLL_grSstWinClose_4 = /.test(out), out);
+      assert.ok(/_GLIDEDLL_grSstWinClose_4\(h\)/.test(out), out);
+    });
+
+    it('leaves the same characters inside a string literal alone', () => {
+      const out = transformCode(
+        'void f() { Log("_BinkClose_4 failed"); }',
+        { importRenames }
+      );
+      assert.ok(out.includes('"_BinkClose_4 failed"'), out);
+    });
+
+    it('is a no-op with no set', () => {
+      const out = transformCode('void f() { _BinkClose_4(p); }');
+      assert.ok(/_BinkClose_4\(p\)/.test(out), out);
+    });
+  });
+
   it('strips the _exref import-thunk suffix', () => {
     const out = transformCode('void f() { Fog_10021_exref(nMode); }');
     assert.ok(/\bFog_10021\(nMode\)/.test(out), out);

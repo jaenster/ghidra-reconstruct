@@ -15,7 +15,7 @@ import type {
   StructField,
 } from '../types.js';
 import { isPlatformOrBuiltinType, isStructType, castPointerInitializer, normalizeDataValue, isCharacterValueType } from './platform-types.js';
-import { crtFunctionNames } from './crt-mapping.js';
+import { crtFunctionNames, EXTERNAL_IMPORT_REFERENCE_RENAMES } from './crt-mapping.js';
 import { CPP_KEYWORDS } from './header.js';
 
 // Import cpp-parser for code transformation
@@ -2298,10 +2298,18 @@ function transformDecompiledCode(
     // Ghidra hangs a class's members under a namespace named after the class;
     // the emitter puts them in the parent. The reference side has to agree, and
     // it is decided on the name node.
+    //
+    // The same pass carries the external-import undecoration, so a call site and
+    // the declaration in d2_platform.h always spell the import the same way.
+    // Unconditional: it is the declaration table's own rule, not a property of
+    // this unit.
     const collisionTypeNames = context?._namespaceCollisionTypeNames;
-    if (collisionTypeNames && collisionTypeNames.length > 0) {
-      perPluginOptions['qualified-name-cleanup'] = { typeQualifierNames: collisionTypeNames };
-    }
+    perPluginOptions['qualified-name-cleanup'] = {
+      importRenames: EXTERNAL_IMPORT_REFERENCE_RENAMES,
+      ...(collisionTypeNames && collisionTypeNames.length > 0
+        ? { typeQualifierNames: collisionTypeNames }
+        : {}),
+    };
 
     // Which pointee types have members. Without it `struct-field` reads a Win32
     // pointer typedef as a struct and writes `((HANDLE*)p)->field_10`, which

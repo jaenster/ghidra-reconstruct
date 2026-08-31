@@ -14,7 +14,10 @@ import {
   generatePlatformHeader,
   platformDeclaredFunctionNames,
 } from '../codegen/platform-types.js';
-import { EXCLUDED_SYMBOL_DECLS, CRT_DECLARED_FUNCTION_NAMES } from '../codegen/crt-mapping.js';
+import {
+  EXCLUDED_SYMBOL_DECLS, CRT_DECLARED_FUNCTION_NAMES,
+  EXTERNAL_IMPORT_REFERENCE_RENAMES, declaredIdentifier,
+} from '../codegen/crt-mapping.js';
 
 describe('platform declaration registry', () => {
   const header = generatePlatformHeader({ seedType: true });
@@ -31,9 +34,15 @@ describe('platform declaration registry', () => {
   it('every name it declares itself is really written into d2_platform.h', () => {
     // The CRT names come from <cstring>/<cstdio>/<windows.h> and the _Wrappers::
     // entries are written inside a namespace block, so neither appears verbatim.
+    // An external stdcall import's DECORATED spelling is in the registry for the
+    // passes that see a call site before it is undecorated, and is deliberately
+    // never written into the header — the identifier it renames to is.
     const external = new Set<string>(CRT_DECLARED_FUNCTION_NAMES);
     for (const d of EXCLUDED_SYMBOL_DECLS) {
       if (d.emitted.startsWith('_Wrappers::')) external.add(d.emitted);
+    }
+    for (const spelling of Object.keys(EXTERNAL_IMPORT_REFERENCE_RENAMES)) {
+      external.add(spelling);
     }
     const missing = [...names].filter(
       n => !external.has(n) && !header.includes(n),
@@ -42,7 +51,10 @@ describe('platform declaration registry', () => {
   });
 
   it('carries the excluded-namespace declarations and the CRT header names', () => {
-    for (const d of EXCLUDED_SYMBOL_DECLS) assert.ok(names.has(d.emitted), d.emitted);
+    for (const d of EXCLUDED_SYMBOL_DECLS) {
+      assert.ok(names.has(d.emitted), d.emitted);
+      assert.ok(names.has(declaredIdentifier(d)), declaredIdentifier(d));
+    }
     for (const n of CRT_DECLARED_FUNCTION_NAMES) assert.ok(names.has(n), n);
   });
 

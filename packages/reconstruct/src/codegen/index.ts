@@ -70,7 +70,7 @@ import { partitionGlobalsByModule, buildFunctionModuleMap } from './globals-part
 import { normalizeAddress } from '../config/loader.js';
 import { resolveTargets, getTargetDirectory, type ResolvedTarget } from '../targets/index.js';
 import { generateStubsHeader } from '../targets/stubs.js';
-import { collectCrtHeaders, EXCLUDED_SYMBOL_DECLS, WIN32_ZERO_ARITY_CALLBACK_SLOTS, WIN32_ZERO_ARITY_CALLBACK_CASTS, WIN32_OVERLOADED_INTRINSICS, WIN32_GENERIC_HANDLE_RETURNS, HEADER_DECLARED_SIGNATURES } from './crt-mapping.js';
+import { collectCrtHeaders, EXCLUDED_SYMBOL_DECLS, declaredIdentifier, WIN32_ZERO_ARITY_CALLBACK_SLOTS, WIN32_ZERO_ARITY_CALLBACK_CASTS, WIN32_OVERLOADED_INTRINSICS, WIN32_GENERIC_HANDLE_RETURNS, HEADER_DECLARED_SIGNATURES } from './crt-mapping.js';
 import { selectExclusionEmissions, setPlatformDefinedNames, setPlatformRootDeclaredNames, emitsAtRootScope } from './exclusion-closure.js';
 import { normalizePointerSizeSpellings } from './pointer-size-spelling.js';
 import { flattenTemplateNames } from './template-names.js';
@@ -754,9 +754,11 @@ export function generateProject(
   // They own those names in every TU, so an IAT data symbol at the same name —
   // `GLIDEDLL_grLfbLock@24` — must not also get an extern in globals.h.
   for (const d of EXCLUDED_SYMBOL_DECLS) {
-    functionQualifiedNames.add(d.emitted);
-    const sd = sanitizeQualifiedReference(d.emitted);
-    if (sd !== d.emitted) functionQualifiedNames.add(sd);
+    for (const spelling of new Set([d.emitted, declaredIdentifier(d)])) {
+      functionQualifiedNames.add(spelling);
+      const sd = sanitizeQualifiedReference(spelling);
+      if (sd !== spelling) functionQualifiedNames.add(sd);
+    }
   }
 
   // Check if we have target configuration

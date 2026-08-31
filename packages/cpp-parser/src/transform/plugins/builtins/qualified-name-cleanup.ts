@@ -19,6 +19,16 @@
  *  - The `_exref` suffix Ghidra appends to an import-thunk reference
  *    (`Fog_10021_exref`); the emitted declaration carries the undecorated name.
  *
+ *  - The `@N` stdcall decoration on an external import, which Ghidra's emitter
+ *    prints flattened to `_N` (`_BinkClose_4`). The declaration carries the
+ *    UNDECORATED name, because `__stdcall` re-applies the decoration the DLL's
+ *    export table already has, so the reference has to move with it. Driven by
+ *    a closed name set (`importRenames`) handed in from the declaration table,
+ *    never by the shape of the name: `_iStack_10`, `_pad_08`, `_union_1226` and
+ *    `_GLIDEDLL_grSstWinClose_4` all look exactly like it and none is an import.
+ *    Decided here rather than in an earlier pass because the reference can also
+ *    carry the `_exref` suffix, which this same visit takes off first.
+ *
  *  - A qualifier segment that names a struct/union/enum and sits DIRECTLY before
  *    the name: `Forms::D2WinImage::Draw` → `Forms::Draw`, because Ghidra hangs a
  *    class's members under a namespace named after the class while the emitter
@@ -49,6 +59,12 @@ export interface QualifiedNameCleanupOptions extends PluginOptions {
   collapseDuplicateQualifiers?: boolean;
   /** Strip the trailing `_exref` import-thunk suffix from identifiers (default true) */
   stripExrefSuffix?: boolean;
+  /**
+   * Reference spelling → the identifier its declaration carries, for external
+   * imports whose Ghidra name is stdcall-decorated. A closed set; nothing
+   * outside it is renamed.
+   */
+  importRenames?: Record<string, string>;
   /**
    * Struct/union/enum names. A qualifier segment naming one of these is dropped
    * when it is the LAST segment of the qualifier and is itself qualified.
@@ -123,16 +139,23 @@ function createQualifiedNameCleanupTransformer(
   const collapseDuplicates = options.collapseDuplicateQualifiers ?? true;
   const stripExref = options.stripExrefSuffix ?? true;
   const typeNames = new Set(options.typeQualifierNames ?? []);
+  const importRenames = options.importRenames ?? {};
 
   return createTransformer({
     visitNode(n: ASTNode): ASTNode | undefined {
       if (n.kind === NodeKind.Identifier) {
-        if (!stripExref) return undefined;
         const id = n as Identifier;
-        if (!id.name.endsWith(EXREF_SUFFIX)) return undefined;
-        const base = id.name.slice(0, -EXREF_SUFFIX.length);
-        if (base.length === 0) return undefined;
-        return updateNode(id, { name: base } as Partial<Identifier>);
+        // The suffix comes off first: an import reference can carry both
+        // artefacts at once (`_BinkOpenDirectSound_4_exref`), and the rename set
+        // is keyed on the spelling without it.
+        let name = id.name;
+        if (stripExref && name.endsWith(EXREF_SUFFIX)) {
+          const base = name.slice(0, -EXREF_SUFFIX.length);
+          if (base.length > 0) name = base;
+        }
+        name = importRenames[name] ?? name;
+        if (name === id.name) return undefined;
+        return updateNode(id, { name } as Partial<Identifier>);
       }
 
       if (n.kind !== NodeKind.QualifiedId) return undefined;
@@ -173,7 +196,7 @@ import { createPlugin } from '../registry.js';
 export const qualifiedNameCleanupPlugin: TransformPlugin = createPlugin(
   'qualified-name-cleanup',
   'Qualified Name Cleanup',
-  'Collapses repeated namespace segments, drops CRT/compiler qualifiers and strips the _exref import-thunk suffix',
+  'Collapses repeated namespace segments, drops CRT/compiler qualifiers, strips the _exref import-thunk suffix and undecorates external stdcall imports',
   (options?: PluginOptions) =>
     createQualifiedNameCleanupTransformer(options as QualifiedNameCleanupOptions),
   {

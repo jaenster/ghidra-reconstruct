@@ -12,7 +12,7 @@
 /** Standard C/C++ types from <cstdint>, <cstddef>, and language primitives */
 import {
   generateExcludedSymbolDecls, EXTRA_WIN32_SDK_HEADERS,
-  EXCLUDED_SYMBOL_DECLS, CRT_DECLARED_FUNCTION_NAMES,
+  EXCLUDED_SYMBOL_DECLS, CRT_DECLARED_FUNCTION_NAMES, declaredIdentifier,
 } from './crt-mapping.js';
 
 export const STANDARD_C_TYPES = new Set([
@@ -851,7 +851,13 @@ export function platformDeclaredFunctionNames(): Set<string> {
   }
   for (const n of PLATFORM_INLINE_FORWARDERS) names.add(n);
   for (const n of PLATFORM_MACRO_ALIASES) names.add(n);
-  for (const d of EXCLUDED_SYMBOL_DECLS) names.add(d.emitted);
+  // Both spellings: the passes that ask this run either side of the
+  // external-import undecoration, so a name is header-owned under the spelling
+  // Ghidra printed AND under the identifier the declaration carries.
+  for (const d of EXCLUDED_SYMBOL_DECLS) {
+    names.add(d.emitted);
+    names.add(declaredIdentifier(d));
+  }
   for (const n of CRT_DECLARED_FUNCTION_NAMES) names.add(n);
   return names;
 }

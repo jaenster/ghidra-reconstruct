@@ -9,7 +9,10 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 
-import { EXCLUDED_SYMBOL_DECLS, generateExcludedSymbolDecls } from '../codegen/crt-mapping.js';
+import {
+  EXCLUDED_SYMBOL_DECLS, EXTERNAL_IMPORT_REFERENCE_RENAMES, declaredIdentifier,
+  generateExcludedSymbolDecls, undecoratedImportName,
+} from '../codegen/crt-mapping.js';
 import { generatePlatformHeader, isLibraryType, isMsvcEhInternal } from '../codegen/platform-types.js';
 
 describe('excluded-namespace symbol declarations', () => {
@@ -40,7 +43,7 @@ describe('excluded-namespace symbol declarations', () => {
         `${d.emitted}: a bare (...) parameter list is a silencer, not a signature`);
       // `void*` is legitimate for real void* parameters, but never as a return
       // type stand-in for something we failed to identify.
-      assert.ok(d.decl.includes(d.emitted.replace(/^.*::/, '')),
+      assert.ok(d.decl.includes(declaredIdentifier(d).replace(/^.*::/, '')),
         `${d.emitted}: declaration must actually declare that name`);
     }
   });

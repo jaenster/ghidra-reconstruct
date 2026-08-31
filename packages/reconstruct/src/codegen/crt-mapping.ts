@@ -330,15 +330,23 @@ export function collectCrtHeaders(calledFunctions: string[]): Set<string> {
  * for this binary). Nothing here is variadic-to-silence or void*-to-silence: a
  * symbol whose true signature could not be established is deliberately absent.
  *
- * `emitted` is the identifier the generator actually writes at the call site.
- * Where that differs from `real`, it is a Ghidra naming artifact — an extra
- * leading underscore on the decorated CRT name, a `FID_conflict_` FunctionID
- * collision prefix, or a stdcall `@N` byte count rewritten as `_N`. Normalising
- * those names belongs upstream in the emitter; until it happens, the declaration
- * has to answer to the name the call site uses.
+ * `emitted` is the spelling Ghidra's C emitter prints at the call site. Where
+ * that differs from `real`, it is a Ghidra naming artifact — an extra leading
+ * underscore on the decorated CRT name, a `FID_conflict_` FunctionID collision
+ * prefix, or a stdcall `@N` byte count rewritten as `_N`. For most of them the
+ * declaration answers to that spelling; for an external `__stdcall` import it
+ * cannot, because the calling convention re-decorates whatever identifier it is
+ * given, so the declaration carries the undecorated name and the call sites are
+ * respelled onto it. `declaredIdentifier` decides which of the two an entry is.
  */
 export interface ExcludedSymbolDecl {
-  /** Identifier as written at the emitted call site. */
+  /**
+   * The spelling Ghidra's C emitter prints at the call site.
+   *
+   * This is the REFERENCE side, not necessarily the identifier the declaration
+   * carries: for an external `__stdcall` import the two differ, and
+   * `declaredIdentifier` is the one that goes in the C++ source.
+   */
   emitted: string;
   /** The real entry point this is, for a reader chasing it back to an SDK. */
   real: string;
@@ -348,6 +356,60 @@ export interface ExcludedSymbolDecl {
   decl: string;
   /** Emit only when the Win32 platform SDK is present. */
   win32Only?: boolean;
+}
+
+/**
+ * The undecorated name behind a 32-bit `__stdcall` import's Ghidra spelling.
+ *
+ * A DLL that exports `__stdcall` entry points exports them DECORATED: the
+ * export table of the shipped BINKW32.DLL says `_BinkClose@4`, an underscore
+ * plus the argument-byte count. Ghidra's symbol is that decorated name, and its
+ * C emitter flattens the `@` — which is not an identifier character — to `_`,
+ * so every call site prints `_BinkClose_4`.
+ *
+ * Declaring THAT identifier `__stdcall` decorates it a second time: the object
+ * file asks the linker for `_BinkClose_4@4`, and no import library has ever
+ * exported such a name. The identifier has to be the UNDECORATED one, and the
+ * calling convention supplies the single decoration the DLL actually exports.
+ *
+ * The shape alone is not evidence — `_iStack_10`, `_local_8`, `_pad_08`,
+ * `__alloca_probe_16` and `_GLIDEDLL_grSstWinClose_4` all match it and none is
+ * an import — so this is only ever asked about a name the declaration table
+ * already says is an external import. Returns undefined for anything that
+ * cannot be read as a decorated stdcall name, which is how an import that
+ * exports undecorated (IJL11) keeps the identifier it already has.
+ */
+export function undecoratedImportName(spelling: string): string | undefined {
+  const m = /^_([A-Za-z_][A-Za-z0-9_]*)_(\d+)$/.exec(spelling);
+  if (!m) return undefined;
+  // `@N` is a byte count over dword-aligned stack arguments; anything else is
+  // some other name that happens to end in digits.
+  if (Number(m[2]) % 4 !== 0) return undefined;
+  return m[1];
+}
+
+/**
+ * A name the LOADER resolves out of a DLL, as opposed to one this build or the
+ * CRT defines.
+ *
+ * Read off the declaration itself: an `extern "C" __stdcall` prototype with no
+ * body is an import and nothing else. The inline forwarders, the `_Wrappers`
+ * thunks and the CRT entries all fail it.
+ */
+function isExternalImport(d: ExcludedSymbolDecl): boolean {
+  return /^extern "C" __stdcall\s/.test(d.decl);
+}
+
+/**
+ * The identifier the declaration carries and every reference must use.
+ *
+ * The same for both sides by construction — there is one rule and both the
+ * declaration text and the call-site rewrite are checked against it — so a
+ * rename can never land on one side alone.
+ */
+export function declaredIdentifier(d: ExcludedSymbolDecl): string {
+  if (!isExternalImport(d)) return d.emitted;
+  return undecoratedImportName(d.emitted) ?? d.emitted;
 }
 
 /** MSVC CRT entry points that a real libc / mingw CRT header already declares. */
@@ -574,42 +636,46 @@ const WRAPPER_DECLS: ExcludedSymbolDecl[] = [
  * `__stdcall` builds, so Ghidra's symbol carries the decorated `@N` argument-byte
  * count rewritten as `_N` — which pins the arity exactly and is what each
  * signature below was checked against (e.g. `_SmackToBuffer_28` = 7 dword args).
+ *
+ * `emitted` is that reference spelling; the DECLARATION carries the undecorated
+ * name, because `__stdcall` re-applies the `@N` the shipped BINKW32.DLL /
+ * SMACKW32.DLL export tables already carry. See `undecoratedImportName`.
  */
 const RAD_DECLS: ExcludedSymbolDecl[] = [
   { emitted: '_SmackOpen_12', real: 'SmackOpen', source: 'rad',
-    decl: 'extern "C" __stdcall void* _SmackOpen_12(const char* szName, uint32_t dwFlags, uint32_t dwExtraBuf);' },
+    decl: 'extern "C" __stdcall void* SmackOpen(const char* szName, uint32_t dwFlags, uint32_t dwExtraBuf);' },
   { emitted: '_SmackClose_4', real: 'SmackClose', source: 'rad',
-    decl: 'extern "C" __stdcall void _SmackClose_4(void* pSmack);' },
+    decl: 'extern "C" __stdcall void SmackClose(void* pSmack);' },
   { emitted: '_SmackDoFrame_4', real: 'SmackDoFrame', source: 'rad',
-    decl: 'extern "C" __stdcall int32_t _SmackDoFrame_4(void* pSmack);' },
+    decl: 'extern "C" __stdcall int32_t SmackDoFrame(void* pSmack);' },
   { emitted: '_SmackNextFrame_4', real: 'SmackNextFrame', source: 'rad',
-    decl: 'extern "C" __stdcall void _SmackNextFrame_4(void* pSmack);' },
+    decl: 'extern "C" __stdcall void SmackNextFrame(void* pSmack);' },
   { emitted: '_SmackWait_4', real: 'SmackWait', source: 'rad',
-    decl: 'extern "C" __stdcall int32_t _SmackWait_4(void* pSmack);' },
+    decl: 'extern "C" __stdcall int32_t SmackWait(void* pSmack);' },
   { emitted: '_SmackToBuffer_28', real: 'SmackToBuffer', source: 'rad',
-    decl: 'extern "C" __stdcall void _SmackToBuffer_28(void* pSmack, uint32_t nLeft, uint32_t nTop, uint32_t nPitch, uint32_t nDestHeight, void* pBuffer, uint32_t dwFlags);' },
+    decl: 'extern "C" __stdcall void SmackToBuffer(void* pSmack, uint32_t nLeft, uint32_t nTop, uint32_t nPitch, uint32_t nDestHeight, void* pBuffer, uint32_t dwFlags);' },
   { emitted: '_BinkOpen_8', real: 'BinkOpen', source: 'rad',
     // First parameter is a file HANDLE, not a name: all three call sites pass an
     // open Storm MPQ handle and set BINKFILEHANDLE (0x00800000) in dwFlags.
-    decl: 'extern "C" __stdcall void* _BinkOpen_8(void* hFile, uint32_t dwFlags);' },
+    decl: 'extern "C" __stdcall void* BinkOpen(void* hFile, uint32_t dwFlags);' },
   { emitted: '_BinkClose_4', real: 'BinkClose', source: 'rad',
-    decl: 'extern "C" __stdcall void _BinkClose_4(void* pBink);' },
+    decl: 'extern "C" __stdcall void BinkClose(void* pBink);' },
   { emitted: '_BinkDoFrame_4', real: 'BinkDoFrame', source: 'rad',
-    decl: 'extern "C" __stdcall int32_t _BinkDoFrame_4(void* pBink);' },
+    decl: 'extern "C" __stdcall int32_t BinkDoFrame(void* pBink);' },
   { emitted: '_BinkNextFrame_4', real: 'BinkNextFrame', source: 'rad',
-    decl: 'extern "C" __stdcall void _BinkNextFrame_4(void* pBink);' },
+    decl: 'extern "C" __stdcall void BinkNextFrame(void* pBink);' },
   { emitted: '_BinkWait_4', real: 'BinkWait', source: 'rad',
-    decl: 'extern "C" __stdcall int32_t _BinkWait_4(void* pBink);' },
+    decl: 'extern "C" __stdcall int32_t BinkWait(void* pBink);' },
   { emitted: '_BinkCopyToBuffer_28', real: 'BinkCopyToBuffer', source: 'rad',
-    decl: 'extern "C" __stdcall int32_t _BinkCopyToBuffer_28(void* pBink, void* pDest, int32_t nDestPitch, uint32_t nDestHeight, uint32_t nDestX, uint32_t nDestY, uint32_t dwFlags);' },
+    decl: 'extern "C" __stdcall int32_t BinkCopyToBuffer(void* pBink, void* pDest, int32_t nDestPitch, uint32_t nDestHeight, uint32_t nDestX, uint32_t nDestY, uint32_t dwFlags);' },
   { emitted: '_BinkSetSoundSystem_8', real: 'BinkSetSoundSystem', source: 'rad',
     // First parameter is the sound-system opener itself — every call site passes
-    // _BinkOpenDirectSound_4, so the slot is a function, not an object pointer.
-    decl: 'extern "C" __stdcall int32_t _BinkSetSoundSystem_8(void* (__stdcall* pfnOpen)(uint32_t), uint32_t dwParam);' },
+    // BinkOpenDirectSound, so the slot is a function, not an object pointer.
+    decl: 'extern "C" __stdcall int32_t BinkSetSoundSystem(void* (__stdcall* pfnOpen)(uint32_t), uint32_t dwParam);' },
   { emitted: '_BinkOpenDirectSound_4', real: 'BinkOpenDirectSound', source: 'rad',
-    decl: 'extern "C" __stdcall void* _BinkOpenDirectSound_4(uint32_t dwParam);' },
+    decl: 'extern "C" __stdcall void* BinkOpenDirectSound(uint32_t dwParam);' },
   { emitted: '_BinkDDSurfaceType_4', real: 'BinkDDSurfaceType', source: 'rad',
-    decl: 'extern "C" __stdcall uint32_t _BinkDDSurfaceType_4(void* pDDSurface);' },
+    decl: 'extern "C" __stdcall uint32_t BinkDDSurfaceType(void* pDDSurface);' },
 ];
 
 /**
@@ -677,6 +743,26 @@ export const EXCLUDED_SYMBOL_DECLS: readonly ExcludedSymbolDecl[] = [
   ...RAD_DECLS,
   ...IMPORT_THUNK_DECLS,
 ];
+
+/**
+ * Every reference spelling that has to be respelled in a body, and what to.
+ *
+ * Derived from the declaration table by the one rule, so the declaration and
+ * every call site move together: a symbol reaches this map only because its
+ * declaration already carries the other name.
+ *
+ * A closed name set, never a shape test. The bodies are full of identifiers
+ * that look decorated and are not — `_iStack_10`, `_pad_08`, `_union_1226`,
+ * `_GLIDEDLL_grSstWinClose_4` — and every `GLIDEDLL_gr*` name is a DATA symbol,
+ * an import slot the game fills through `GetProcAddress`, which globals.h
+ * declares and this table deliberately does not.
+ */
+export const EXTERNAL_IMPORT_REFERENCE_RENAMES: Readonly<Record<string, string>> =
+  Object.fromEntries(
+    EXCLUDED_SYMBOL_DECLS
+      .map(d => [d.emitted, declaredIdentifier(d)] as const)
+      .filter(([reference, identifier]) => reference !== identifier)
+  );
 
 /**
  * Win32 entry points that take a callback, and the typedef the SDK names for
