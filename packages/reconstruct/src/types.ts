@@ -110,6 +110,16 @@ export interface ExtractedDataType {
   platform?: string;
   /** #ifdef macro guard (e.g. "D2_PLATFORM_MAC") — wraps this type in codegen */
   ifdef?: string;
+  /**
+   * Set on the shallow listing entry, cleared by the detail that replaces it.
+   * While it is set the members are UNKNOWN, which is not the same as a type
+   * that genuinely has none: `D2GameViewStrc` has 60,023 components and a
+   * ~5 MB `get_data_type` response, and when that fetch was lost the entry it
+   * left behind emitted `struct D2GameViewStrc {};` — a body that compiles and
+   * then fails at every member access. Codegen refuses to emit a type still
+   * carrying this.
+   */
+  detailUnavailable?: boolean;
 }
 
 export type DataTypeKind =

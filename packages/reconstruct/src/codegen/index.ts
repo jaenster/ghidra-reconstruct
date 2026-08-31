@@ -90,6 +90,26 @@ import { buildModuleGraph } from '../modules/builder.js';
 import { hashFunction, hashDataType, hashGlobal } from '../modules/buildinfo.js';
 
 /**
+ * Refuse a model that carries a type whose members were never read.
+ *
+ * The mark is set on the shallow listing entry and cleared by the detail that
+ * replaces it, so it distinguishes the two cases the emitted text cannot: a
+ * struct Ghidra reports as genuinely empty (39 of them in 1.14d, opaque handles
+ * every one) still emits, and one whose ~5 MB detail response was lost does not.
+ */
+export function assertTypeDetailsComplete(dataTypes: readonly ExtractedDataType[]): void {
+  const holes = dataTypes.filter(dt => dt.detailUnavailable);
+  if (holes.length === 0) return;
+  const listed = holes.map(dt => `  ${dt.kind} ${dt.name} (${dt.category})`).join('\n');
+  throw new Error(
+    `${holes.length} data type(s) reached codegen with no detail — their members are ` +
+    `unknown, not absent, and an emitted body would be a lie the compiler accepts:\n` +
+    `${listed}\n` +
+    `Re-fetch these types (a full extraction, or get_data_type for each) and re-run.`
+  );
+}
+
+/**
  * Generate a complete reconstructed project
  */
 export function generateProject(
@@ -105,6 +125,15 @@ export function generateProject(
 ): ReconstructedProject {
   const files = new Map<string, SourceFile>();
   const sourceMaps = new Map<string, SourceMap>();
+
+  // A type whose detail fetch never landed reaches here as the shallow listing
+  // entry: no fields, no values, no parameters. Emitting it produces a body that
+  // is not the type — `struct D2GameViewStrc {};` for a 60 KB struct compiles,
+  // and then every member access against it fails. There is nothing to fall back
+  // to, because the members are not held anywhere else, so say what is missing
+  // and stop. The snapshot on disk is intact; a re-fetch of the named types is
+  // all it takes.
+  assertTypeDetailsComplete(dataTypes);
 
   // Defensive: a datatype can reach codegen with its detail array undefined —
   // a type whose detail fetch was skipped/failed leaves the shallow listing

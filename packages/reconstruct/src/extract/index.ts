@@ -11,7 +11,13 @@ export {
   shouldExcludeFunction,
   type FunctionExtractionOptions,
 } from './functions.js';
-export { extractDataTypes, extractDataType } from './types.js';
+export {
+  extractDataTypes,
+  extractDataType,
+  hydrateDataTypeDetails,
+  DETAIL_KINDS,
+  type TypeDetailHydration,
+} from './types.js';
 export {
   extractGlobals,
   extractAllGlobals,
@@ -38,7 +44,7 @@ import type {
 import { FunctionCache, type CacheOptions } from '../cache.js';
 
 import { extractAllFunctions } from './functions.js';
-import { extractDataTypes, extractDataType } from './types.js';
+import { extractDataTypes, hydrateDataTypeDetails } from './types.js';
 import { extractAllGlobals, analyzeDataSymbols, fetchInitializedData } from './globals.js';
 import { extractAllStrings } from './strings.js';
 import { extractAllNamespaces } from './namespaces.js';
@@ -147,39 +153,15 @@ export async function extractAll(
       `${ns.length} namespaces, ${dts.length} types, ${gl.length} globals, ${st.length} strings`
   );
 
-  // Fetch detailed info (fields, values) for STRUCTURE/ENUM/UNION types
-  const detailKinds = new Set(['STRUCTURE', 'ENUM', 'UNION', 'TYPEDEF', 'FUNCTION_DEFINITION']);
-  const typesNeedingDetail = dataTypesList.filter(t => detailKinds.has(t.kind));
+  // Fetch detailed info (fields, values) for STRUCTURE/ENUM/UNION types.
+  // A detail that never lands leaves the shallow entry, whose empty member list
+  // means "not known", not "none" — hydrateDataTypeDetails retries it and then
+  // stops the run by name rather than let it through.
   const dataTypes = [...dataTypesList];
-
-  // Batch fetch details in groups of 20 for performance
-  const BATCH_SIZE = 20;
-  // Index by name+category ONCE — the previous findIndex per detail was a linear
-  // scan of every type for every detailed type (O(n^2) over ~5k types).
-  const dataTypeIndex = new Map<string, number>();
-  for (let i = 0; i < dataTypes.length; i++) {
-    dataTypeIndex.set(`${dataTypes[i].name}\u0000${dataTypes[i].category}`, i);
-  }
   await timePhase(
     `${label}extract/type-details`,
-    async () => {
-      for (let i = 0; i < typesNeedingDetail.length; i += BATCH_SIZE) {
-        const batch = typesNeedingDetail.slice(i, i + BATCH_SIZE);
-        const details = await Promise.all(
-          batch.map(t => extractDataType(connection, t.name, t.category))
-        );
-        for (let j = 0; j < details.length; j++) {
-          if (details[j]) {
-            // Replace the listing entry with the detailed version
-            const idx = dataTypeIndex.get(`${batch[j].name}\u0000${batch[j].category}`);
-            if (idx !== undefined) {
-              dataTypes[idx] = details[j]!;
-            }
-          }
-        }
-      }
-    },
-    () => `${typesNeedingDetail.length} types in ${Math.ceil(typesNeedingDetail.length / BATCH_SIZE)} batches`
+    () => hydrateDataTypeDetails(connection, dataTypes),
+    r => `${r.fetched} details${r.recovered > 0 ? `, ${r.recovered} recovered on retry` : ''}`
   );
 
   // Fetch initialized data values for non-trivial globals (arrays, structs, tables)

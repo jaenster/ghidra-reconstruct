@@ -928,8 +928,11 @@ function emitFieldLines(
   isUnion = false,
   emitted?: Set<string>,
 ): void {
-  // Determine hex width from the largest offset (minimum 2 digits)
-  const maxOffset = fields.length > 0 ? Math.max(...fields.map(f => f.offset)) : 0;
+  // Determine hex width from the largest offset (minimum 2 digits).
+  // Folded rather than spread: `D2GameViewStrc` arrives with 60,023 components,
+  // and `Math.max(...)` over a list that size is an argument list, not a loop.
+  let maxOffset = 0;
+  for (const f of fields) if (f.offset > maxOffset) maxOffset = f.offset;
   const hexWidth = Math.max(2, maxOffset.toString(16).length);
 
   // Track seen field names to deduplicate (Ghidra sometimes has duplicate names at different offsets)
