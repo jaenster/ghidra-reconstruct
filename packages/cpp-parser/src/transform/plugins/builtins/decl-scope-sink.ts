@@ -10,8 +10,10 @@ import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, CompoundStmt, DeclStmt, VariableDecl, Identifier,
   IfStmt, ForStmt, WhileStmt, DoWhileStmt,
+  Expression, ExprStmt, ReturnStmt, ParenExpr,
+  AssignExpr, UnaryExpr, PostfixExpr, MemberExpr,
 } from '../../../ast/nodes.js';
-import { findIdentifiers } from '../../../ast/visitor.js';
+import { findIdentifiers, getChildren } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 
@@ -65,6 +67,230 @@ function hasUnresolvedStackSlot(node: ASTNode): boolean {
 function isNode(value: unknown): value is ASTNode {
   return typeof value === 'object' && value !== null
     && typeof (value as { kind?: unknown }).kind === 'string';
+}
+
+// ============================================
+// LOOP BACK-EDGE LIVENESS
+// ============================================
+
+/**
+ * How a region of code first touches a variable, along EVERY path through it.
+ *
+ * - `overwrites` - every path assigns the whole variable before reading it, so
+ *   nothing that reaches this region can be observed.
+ * - `observes` - some path may read the incoming value first. Also the answer
+ *   whenever the shape is beyond this analysis: unproven is treated as unsafe.
+ * - `none` - no path touches the variable at all.
+ */
+type FirstTouch = 'none' | 'overwrites' | 'observes';
+
+/** Strip parentheses and casts down to the expression they wrap. */
+function unwrap(expr: ASTNode): ASTNode {
+  let cur = expr;
+  for (;;) {
+    if (cur.kind === NodeKind.ParenExpr) { cur = (cur as ParenExpr).expression; continue; }
+    if (cur.kind === NodeKind.CStyleCastExpr || cur.kind === NodeKind.StaticCastExpr
+      || cur.kind === NodeKind.ReinterpretCastExpr || cur.kind === NodeKind.ConstCastExpr) {
+      cur = (cur as unknown as { expression: Expression }).expression;
+      continue;
+    }
+    return cur;
+  }
+}
+
+/** Is `expr` the bare variable itself, so that assigning it replaces the whole value? */
+function isWholeVarRef(expr: ASTNode, varName: string): boolean {
+  const inner = unwrap(expr);
+  return inner.kind === NodeKind.Identifier && (inner as Identifier).name === varName;
+}
+
+/**
+ * Does anything in `node` write `varName` itself?
+ *
+ * `*p = x` and `p[i] = x` write through the variable, not to it, and do not
+ * count. `&p` does count: whatever receives the address may store through it.
+ */
+function writesVar(node: ASTNode, varName: string): boolean {
+  if (node.kind === NodeKind.AssignExpr && isWholeVarRef((node as AssignExpr).left, varName)) return true;
+  if ((node.kind === NodeKind.UnaryExpr || node.kind === NodeKind.PostfixExpr)) {
+    const un = node as UnaryExpr | PostfixExpr;
+    if ((un.operator === '++' || un.operator === '--' || un.operator === '&')
+      && isWholeVarRef(un.operand, varName)) return true;
+  }
+  return getChildren(node).some(child => writesVar(child, varName));
+}
+
+/** First touch of `varName` in `expr`, in evaluation order. */
+function firstTouchInExpr(expr: ASTNode, varName: string): FirstTouch {
+  switch (expr.kind) {
+    case NodeKind.Identifier:
+      return (expr as Identifier).name === varName ? 'observes' : 'none';
+
+    case NodeKind.MemberExpr:
+      // `x->varName` selects a field; only the object position is a use.
+      return firstTouchInExpr((expr as MemberExpr).object, varName);
+
+    case NodeKind.AssignExpr: {
+      const assign = expr as AssignExpr;
+      // The right-hand side counts first: `p = p + 1` reads before it writes.
+      // C++ leaves the order of the two operands unspecified before C++17, so
+      // any read on either side is taken as happening first.
+      const rhs = firstTouchInExpr(assign.right, varName);
+      if (rhs !== 'none') return rhs;
+      if (isWholeVarRef(assign.left, varName)) {
+        return assign.operator === '=' ? 'overwrites' : 'observes';
+      }
+      return firstTouchInExpr(assign.left, varName);
+    }
+
+    case NodeKind.UnaryExpr:
+    case NodeKind.PostfixExpr: {
+      const un = expr as UnaryExpr | PostfixExpr;
+      if ((un.operator === '++' || un.operator === '--' || un.operator === '&')
+        && isWholeVarRef(un.operand, varName)) return 'observes';
+      return firstTouchInExpr(un.operand, varName);
+    }
+
+    default: {
+      const children = getChildren(expr);
+      // A node kind `getChildren` does not descend into is a blind spot; if the
+      // name is anywhere under it, assume the worst.
+      if (children.length === 0) {
+        return findIdentifiers(expr, varName).length > 0 ? 'observes' : 'none';
+      }
+      for (const child of children) {
+        const touch = firstTouchInExpr(child, varName);
+        if (touch !== 'none') return touch;
+      }
+      return 'none';
+    }
+  }
+}
+
+/** Merge the two arms of a branch. Only an overwrite on both arms is an overwrite. */
+function mergeBranches(a: FirstTouch, b: FirstTouch): FirstTouch {
+  if (a === 'none' && b === 'none') return 'none';
+  if (a === 'overwrites' && b === 'overwrites') return 'overwrites';
+  // One arm writes and the other does not: a later read may still see the
+  // incoming value.
+  return 'observes';
+}
+
+function firstTouchInStmts(stmts: readonly ASTNode[], varName: string): FirstTouch {
+  for (const stmt of stmts) {
+    const touch = firstTouchInStmt(stmt, varName);
+    if (touch !== 'none') return touch;
+  }
+  return 'none';
+}
+
+function firstTouchInStmt(stmt: ASTNode, varName: string): FirstTouch {
+  switch (stmt.kind) {
+    case NodeKind.CompoundStmt:
+      return firstTouchInStmts((stmt as CompoundStmt).statements, varName);
+
+    case NodeKind.ExprStmt:
+      return firstTouchInExpr((stmt as ExprStmt).expression, varName);
+
+    case NodeKind.DeclStmt: {
+      for (const decl of (stmt as DeclStmt).declarations) {
+        if (decl.kind !== NodeKind.VariableDecl) {
+          if (findIdentifiers(decl, varName).length > 0) return 'observes';
+          continue;
+        }
+        const varDecl = decl as VariableDecl;
+        // An inner declaration of the same name shadows it; the reference
+        // counting that got us here no longer describes this body.
+        if (varDecl.name.name === varName) return 'observes';
+        if (varDecl.initializer) {
+          const touch = firstTouchInExpr(varDecl.initializer, varName);
+          if (touch !== 'none') return touch;
+        }
+      }
+      return 'none';
+    }
+
+    case NodeKind.IfStmt: {
+      const ifStmt = stmt as IfStmt;
+      const cond = firstTouchInExpr(ifStmt.condition, varName);
+      if (cond !== 'none') return cond;
+      const thenTouch = firstTouchInStmt(ifStmt.thenBranch, varName);
+      const elseTouch = ifStmt.elseBranch ? firstTouchInStmt(ifStmt.elseBranch, varName) : 'none';
+      return mergeBranches(thenTouch, elseTouch);
+    }
+
+    case NodeKind.ReturnStmt: {
+      const value = (stmt as ReturnStmt).value;
+      return value ? firstTouchInExpr(value, varName) : 'none';
+    }
+
+    // A nested loop, a switch, a try or a label is a control-flow shape this
+    // analysis does not model. Any mention of the variable inside one is taken
+    // as a possible read of the incoming value.
+    default:
+      return findIdentifiers(stmt, varName).length > 0 ? 'observes' : 'none';
+  }
+}
+
+/** Does the body contain a jump that this straight-line reasoning cannot follow? */
+function hasUnstructuredJump(node: ASTNode): boolean {
+  if (node.kind === NodeKind.GotoStmt || node.kind === NodeKind.LabelStmt) return true;
+  return getChildren(node).some(hasUnstructuredJump);
+}
+
+/**
+ * Is `initializer` safe to evaluate once per iteration instead of once?
+ *
+ * Two ways it is not: it has a side effect of its own (a call, an assignment,
+ * an increment), or it reads something the body then changes, which would make
+ * later iterations start from a different value. An initialiser that only reads
+ * memory is taken as invariant - nothing in the AST can prove otherwise.
+ */
+function initializerSurvivesReevaluation(initializer: ASTNode, body: ASTNode): boolean {
+  const hasSideEffect = (node: ASTNode): boolean => {
+    if (node.kind === NodeKind.CallExpr || node.kind === NodeKind.AssignExpr) return true;
+    if (node.kind === NodeKind.UnaryExpr || node.kind === NodeKind.PostfixExpr) {
+      const op = (node as UnaryExpr | PostfixExpr).operator;
+      if (op === '++' || op === '--') return true;
+    }
+    return getChildren(node).some(hasSideEffect);
+  };
+  if (hasSideEffect(initializer)) return false;
+
+  const names = new Set<string>();
+  const collect = (node: ASTNode): void => {
+    if (node.kind === NodeKind.Identifier) { names.add((node as Identifier).name); return; }
+    if (node.kind === NodeKind.MemberExpr) { collect((node as MemberExpr).object); return; }
+    for (const child of getChildren(node)) collect(child);
+  };
+  collect(initializer);
+  for (const name of names) {
+    if (writesVar(body, name)) return false;
+  }
+  return true;
+}
+
+/**
+ * May a declaration move into this loop body?
+ *
+ * Only if the variable is dead at the back-edge: no iteration can observe a
+ * value a previous one left behind. `lpCriticalSection = DebugMemoryCriticalSection;`
+ * before a `do { InitializeCriticalSection(lpCriticalSection); lpCriticalSection++; }`
+ * is the shape that must not move - sunk, the cursor resets to the array base
+ * every iteration and only element zero is ever initialised.
+ */
+function loopBodyAcceptsDecl(
+  body: CompoundStmt,
+  varName: string,
+  initializer: ASTNode | null,
+): boolean {
+  if (initializer && !initializerSurvivesReevaluation(initializer, body)) return false;
+
+  // Nothing writes it, so every iteration sees the same value it does today.
+  if (!writesVar(body, varName)) return true;
+
+  if (hasUnstructuredJump(body)) return false;
+  return firstTouchInStmts(body.statements, varName) === 'overwrites';
 }
 
 function createDeclScopeSinkTransformer(_options: DeclScopeSinkOptions = {}): Transformer {
@@ -173,6 +399,10 @@ function createDeclScopeSinkTransformer(_options: DeclScopeSinkOptions = {}): Tr
 
         if (bodyNode.kind !== NodeKind.CompoundStmt) continue;
         const bodyCompound = bodyNode as CompoundStmt;
+
+        // A loop has a back-edge, so the declaration may only move in if no
+        // iteration can observe what the previous one left in the variable.
+        if (!loopBodyAcceptsDecl(bodyCompound, varName, varDecl.initializer)) continue;
 
         // Prepend declaration into the body
         const newBody = updateNode(bodyCompound, {
