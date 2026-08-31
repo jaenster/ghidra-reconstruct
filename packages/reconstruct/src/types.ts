@@ -50,6 +50,12 @@ export interface ExtractedFunction {
   crossPlatformAddress?: { address: string; platform: string };
   /** Where a thunk jumps. Only set when `isThunk`. */
   thunkTarget?: ThunkTarget;
+  /**
+   * Listed in an EXCLUDED namespace, and kept anyway because kept code
+   * references it and it has a real body in the binary. Extraction sets it; the
+   * codegen namespace filter reads it. See `codegen/exclusion-closure`.
+   */
+  excludedNamespaceReachable?: boolean;
 }
 
 /**

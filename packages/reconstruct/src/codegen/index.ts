@@ -61,7 +61,7 @@ import { organizeByNamespace, getFilePath, setModuleNames, setNamespaceCollision
 import { buildNamespaceResolution, namespaceResolution, renderNamespace } from './namespace-resolution.js';
 import { setInteriorLabelSymbols, resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, setDeclarationClosureDataContent, getDeclarationClosureReport, isUnreferenceableArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType } from './globals-header.js';
 import { harvestAnnotatedParameterTypes } from './win32-signatures.js';
-import { isPlatformOrBuiltinType, isLibraryType, generatePlatformHeader, arrayRowTypedefLines, arrayRowReturn, arrayRowSpelling, GHIDRA_PSEUDO_OP_RESULT_TYPES, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, platformVoidPointerFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
+import { isPlatformOrBuiltinType, isLibraryType, generatePlatformHeader, arrayRowTypedefLines, arrayRowReturn, arrayRowSpelling, GHIDRA_PSEUDO_OP_RESULT_TYPES, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, platformDefinedFunctionNames, platformVoidPointerFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
 import { createOverrideRegistry } from '../overrides/index.js';
 import { createLibraryRegistry } from '../library/index.js';
 import { createMethodConversionRegistry, getOrCreateRegistry, applyMethodConversions, detectMethodConversionsFromTags, type MethodCallMapping, type MethodConversionRegistry } from '../methods/index.js';
@@ -71,6 +71,7 @@ import { normalizeAddress } from '../config/loader.js';
 import { resolveTargets, getTargetDirectory, type ResolvedTarget } from '../targets/index.js';
 import { generateStubsHeader } from '../targets/stubs.js';
 import { collectCrtHeaders, EXCLUDED_SYMBOL_DECLS, WIN32_ZERO_ARITY_CALLBACK_SLOTS, WIN32_ZERO_ARITY_CALLBACK_CASTS, WIN32_OVERLOADED_INTRINSICS, WIN32_GENERIC_HANDLE_RETURNS, HEADER_DECLARED_SIGNATURES } from './crt-mapping.js';
+import { selectExclusionEmissions, setPlatformDefinedNames, setPlatformRootDeclaredNames, emitsAtRootScope } from './exclusion-closure.js';
 import { normalizePointerSizeSpellings } from './pointer-size-spelling.js';
 import { flattenTemplateNames } from './template-names.js';
 import { retypeVtableLocals, vtableMembersByType } from '../modules/vtable-types.js';
@@ -239,6 +240,11 @@ export function generateProject(
   // and only the address in it is exact.
   setDeclarationClosureDataContent(strings ?? []);
 
+  // Module state, so a second run in the same process must not inherit the
+  // first's answer — and a run with no exclusions must clear it, not skip it.
+  setPlatformDefinedNames(new Set<string>());
+  setPlatformRootDeclaredNames(new Set<string>());
+
   const excludeNs = options.excludeNamespaces ?? [];
   if (excludeNs.length > 0) {
     const nsMatches = (ns: string | undefined | null): boolean => {
@@ -257,17 +263,63 @@ export function generateProject(
       return category.split('/').filter(Boolean).some(seg => nsMatches(seg));
     };
 
+    // The exclusion closure: which of the excluded-namespace functions kept code
+    // reaches get a BODY rather than a declaration. Extraction held them and
+    // decompiled everything reachable; the decision of what that is worth is
+    // made here, from the emitter's own tables, so a `--codegen-only` run can
+    // change it without going back to the server.
+    const reachable = functions.filter(f => nsMatches(f.namespace) && f.excludedNamespaceReachable);
+    setPlatformDefinedNames(platformDefinedFunctionNames());
+    setPlatformRootDeclaredNames(platformDeclaredFunctionNames());
+    const selection = selectExclusionEmissions(reachable);
+    const emittedByClosure = new Set<ExtractedFunction>(selection.emit);
+
+    // A body has to define the symbol the CALL SITES bind to, and the
+    // declaration they see decides which one that is. `d2_platform.h` declares
+    // `FID_conflict____CxxFrameHandler3` at root, so its definition goes to
+    // root; `_Wrappers::CRT_StrLen` is declared inside its namespace and keeps
+    // it. Getting this wrong defines a second, differently-mangled symbol and
+    // leaves the first exactly as undefined as it was.
+    const rootScoped: ExtractedFunction[] = [];
+    for (const f of selection.emit) {
+      if (!emitsAtRootScope(f)) continue;
+      f.namespace = undefined;
+      rootScoped.push(f);
+    }
+
     const fnBefore = functions.length;
-    functions = functions.filter(f => !nsMatches(f.namespace));
+    functions = functions.filter(f => !nsMatches(f.namespace) || emittedByClosure.has(f));
+    const retainedNamespaces = new Set(selection.emit.map(f => f.namespace).filter(Boolean));
     classes = classes.filter(c => !nsMatches(c.namespace) && !nsMatches(c.name));
     dataTypes = dataTypes.filter(dt => !catMatches(dt.category) && !nsMatches(dt.name));
     globals = (globals as Array<{ namespace?: string }>).filter(
       g => !nsMatches(g.namespace)
     ) as typeof globals;
-    namespaces = namespaces.filter(ns => !nsMatches(ns.name) && !nsMatches(ns.fullPath));
+    // A namespace that still owns a body has to keep its record, or the file
+    // generator has nowhere to put the function it just kept.
+    namespaces = namespaces.filter(
+      ns => retainedNamespaces.has(ns.name) || (!nsMatches(ns.name) && !nsMatches(ns.fullPath))
+    );
     const dropped = fnBefore - functions.length;
     if (dropped > 0) {
       console.log(`Excluded ${dropped} function(s) in excluded namespaces (no file emitted for them)`);
+    }
+    if (selection.emit.length > 0 || selection.alreadyDefined.length > 0) {
+      console.log(
+        `Exclusion closure: ${selection.emit.length} body/bodies emitted, `
+        + `${selection.alreadyDefined.length} left to the platform layer, `
+        + `${selection.duplicates.length} duplicate name(s) dropped`
+      );
+      for (const f of selection.emit) {
+        const scope = f.namespace ? `${f.namespace}::` : 'root scope, ';
+        console.log(`  emit  ${scope}${f.name} @${f.address} (${f.size} bytes)`);
+      }
+      if (rootScoped.length > 0) {
+        console.log(`  ${rootScoped.length} emitted at root scope, where the platform header declares them`);
+      }
+      for (const f of selection.duplicates) {
+        console.log(`  dupe  ${f.namespace}::${f.name} @${f.address} — same emitted name as an earlier body`);
+      }
     }
   }
 

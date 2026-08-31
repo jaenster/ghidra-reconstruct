@@ -11,6 +11,9 @@ import type {
 } from '../types.js';
 import { FunctionCache, type CacheOptions } from '../cache.js';
 import { timePhase } from '../timing.js';
+import {
+  indexCandidatesBySpelling, nextClosureFrontier, mayReferenceNamespaces,
+} from '../codegen/exclusion-closure.js';
 
 /**
  * Options for function extraction
@@ -288,6 +291,8 @@ export async function extractAllFunctions(
   let decompiledCount = 0;
   let needsDecompileCount = 0;
   let decompileBatches = 0;
+  let closureAdmitted = 0;
+  let closureRounds = 0;
   const pageSize = 100;
   let offset = 0;
   let total = 0;
@@ -316,14 +321,22 @@ export async function extractAllFunctions(
     () => `${total} functions in ${listPages} pages of ${pageSize}`
   );
 
-  // Filter out excluded functions
+  // Filter out excluded functions.
+  //
+  // Held, not discarded. An excluded namespace is dropped because it is library
+  // code nobody calls, but some of it IS called: `compiler::PKWARE_explode` has
+  // 373 bytes of body and a live call site in Storm. Dropping the list here is
+  // what made those undefined at link, because a function never listed is a
+  // function never decompiled, and codegen cannot emit a body it does not have.
+  // The reserve is closed over after decompilation, below.
+  const excludedReserve: ExtractedFunction[] = [];
   if (patterns.length > 0) {
-    const beforeCount = allFunctions.length;
-    allFunctions = allFunctions.filter(func => !shouldExcludeFunction(func, patterns));
-    const excludedCount = beforeCount - allFunctions.length;
-    if (excludedCount > 0) {
-      // Progress callback can be used to report exclusions if needed
+    const kept: ExtractedFunction[] = [];
+    for (const func of allFunctions) {
+      if (shouldExcludeFunction(func, patterns)) excludedReserve.push(func);
+      else kept.push(func);
     }
+    allFunctions = kept;
   }
 
   // Where every thunk jumps. One call for the whole program, because the answer
@@ -348,6 +361,16 @@ export async function extractAllFunctions(
       () => decompileAll(),
       () => `${decompiledCount}/${needsDecompileCount} bodies in ${decompileBatches} batches of ${DECOMPILE_BATCH_SIZE}`
     );
+
+    // Third pass: put back the excluded-namespace functions the kept bodies
+    // actually reach.
+    if (excludedReserve.length > 0) {
+      await timePhase(
+        `${label}extract/exclusion-closure`,
+        () => admitExclusionClosure(),
+        () => `${closureAdmitted} reachable excluded-namespace function(s), ${closureRounds} round(s)`
+      );
+    }
   }
 
   return allFunctions;
@@ -461,6 +484,103 @@ export async function extractAllFunctions(
 
     decompiledCount = decompiled;
     console.log(`  Decompiled: ${decompiled}/${needsDecompile.length}`);
+  }
+
+  /**
+   * Put back every held excluded-namespace function the kept bodies reach.
+   *
+   * A fixpoint, because an admitted body's own callees are reachable too. The
+   * loop is here rather than in the pure closure module because closing the set
+   * needs the NEXT round's bodies, and getting those means going back to the
+   * decompiler.
+   *
+   * Deliberately over-approximate: everything reachable with a body is
+   * decompiled, and whether a body is the right answer for a given name is
+   * codegen's decision, made from the emitter's tables. Keeping it that way is
+   * what lets a `--codegen-only` run change that decision without re-extracting.
+   */
+  async function admitExclusionClosure(): Promise<void> {
+    const index = indexCandidatesBySpelling(excludedReserve);
+    if (index.size === 0) return;
+
+    const namespaces = new Set<string>();
+    for (const key of index.keys()) namespaces.add(key.slice(0, key.indexOf('::')));
+
+    const admitted = new Set<string>();
+    let bodies = allFunctions
+      .map(f => f.decompiled)
+      .filter((b): b is string => !!b && mayReferenceNamespaces(b, namespaces));
+
+    while (bodies.length > 0) {
+      const frontier = nextClosureFrontier(bodies, index, admitted);
+      if (frontier.length === 0) break;
+      closureRounds++;
+      for (const func of frontier) admitted.add(func.address);
+      await decompileList(frontier);
+      for (const func of frontier) {
+        func.excludedNamespaceReachable = true;
+        allFunctions.push(func);
+      }
+      closureAdmitted += frontier.length;
+      bodies = frontier
+        .map(f => f.decompiled)
+        .filter((b): b is string => !!b && mayReferenceNamespaces(b, namespaces));
+    }
+  }
+
+  /**
+   * Decompile an explicit list of functions.
+   *
+   * Separate from `decompileAll`, which walks `allFunctions` by index and cannot
+   * be pointed at a set that is not in it yet. A batch that fails falls back to
+   * one call per function for the same reason the main pass does: one bad
+   * function must not cost the whole batch its bodies.
+   */
+  async function decompileList(funcs: ExtractedFunction[]): Promise<void> {
+    for (let i = 0; i < funcs.length; i += DECOMPILE_BATCH_SIZE) {
+      const batch = funcs.slice(i, i + DECOMPILE_BATCH_SIZE);
+      const pending: ExtractedFunction[] = [];
+      for (const func of batch) {
+        const cached = cache ? await cache.getByAddress(func.address) : null;
+        if (cached) func.decompiled = cached;
+        else pending.push(func);
+      }
+      if (pending.length === 0) continue;
+
+      const addresses = pending.map(f => f.address);
+      try {
+        const result = await connection.sendCommand<BatchDecompileResult>(
+          'batch_decompile',
+          {
+            addresses,
+            limit: addresses.length,
+            decompileTimeout,
+            _commandTimeout: Math.max(300000, (decompileTimeout + 5) * addresses.length * 1000),
+          }
+        );
+        const byAddress = new Map(result.results.map(r => [r.address, r]));
+        for (const func of pending) {
+          const decomp = byAddress.get(func.address);
+          if (!decomp) continue;
+          func.decompiled = decomp.pseudocode;
+          if (cache) await cache.setByAddress(func.address, decomp.pseudocode);
+        }
+      } catch (err) {
+        console.warn(`  Exclusion-closure batch decompile failed (${err}) — falling back per function`);
+        for (const func of pending) {
+          try {
+            const code = await decompileFunction(connection, func.address, decompileTimeout);
+            if (code) {
+              func.decompiled = code;
+              if (cache) await cache.setByAddress(func.address, code);
+            }
+          } catch {
+            // A body that will not decompile is one this closure cannot emit;
+            // codegen drops it for want of a body rather than emitting a stub.
+          }
+        }
+      }
+    }
   }
 }
 

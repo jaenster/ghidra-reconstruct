@@ -857,6 +857,24 @@ export function platformDeclaredFunctionNames(): Set<string> {
 }
 
 /**
+ * The subset of the above the header DEFINES rather than declares.
+ *
+ * `platformDeclaredFunctionNames` answers "will this name resolve at compile
+ * time"; this answers "will it resolve at LINK time", which is the question the
+ * exclusion closure asks before emitting a body. The three groups that answer
+ * yes are the inline forwarders, the macro aliases onto a real entry point, and
+ * the CRT/Win32 names a system library defines. Everything else in the stub
+ * tables is `char* __strrev(char*);` — a declaration and nothing behind it.
+ */
+export function platformDefinedFunctionNames(): Set<string> {
+  const names = new Set<string>();
+  for (const n of PLATFORM_INLINE_FORWARDERS) names.add(n);
+  for (const n of PLATFORM_MACRO_ALIASES) names.add(n);
+  for (const n of CRT_DECLARED_FUNCTION_NAMES) names.add(n);
+  return names;
+}
+
+/**
  * The MSVC CRT `FILE` layout, claimed before any libc header can define it.
  *
  * Ghidra models the CRT stream object the way MSVC 6/7 declared it — `struct
