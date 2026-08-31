@@ -3329,7 +3329,7 @@ export function funcdefBaseName(
   return funcdefDecls[s] !== undefined ? s : undefined;
 }
 
-function buildFuncPtrArgCastTables(
+export function buildFuncPtrArgCastTables(
   functions: ExtractedFunction[],
   globals: AnalyzedDataSymbol[],
   funcDefs: import('../types.js').ExtractedFunctionDefinition[],
@@ -3537,21 +3537,38 @@ function buildFuncPtrArgCastTables(
   // no record for an import thunk or a CRT name, so without this a store from
   // `VirtualAlloc` or `malloc` has no return type and no cast is written. The
   // loop below still lets a model function of the same bare name overrule it.
-  const voidPointerFunctions = new Set<string>(platformVoidPointerFunctionNames());
-  const ambiguousReturn = new Set<string>();
+  //
+  // The spelling is read through `isVoidPointerSpelling`, not compared against
+  // the two literal forms: Ghidra records `CRT_CreateTLS` as returning `LPVOID`
+  // and the header emits it that way, and an alias that missed the comparison
+  // was not merely skipped — it was filed as a DISAGREEMENT, which deletes the
+  // name even when a platform stub had already vouched for it.
+  //
+  // Every record of a name is collected before any of them decides, so the
+  // answer does not depend on the order the model happens to list them in. A
+  // name every record answers `void*` for is safe to key a cast on; one two
+  // records disagree about is not. An `undefined*` return is Ghidra never
+  // having curated the slot — a silence, not a second opinion — so it neither
+  // vouches nor vetoes.
+  const returnAnswers = new Map<string, { voidPointer: boolean; other: boolean }>();
+  const noteReturn = (key: string, isVoidPointer: boolean): void => {
+    const answer = returnAnswers.get(key) ?? { voidPointer: false, other: false };
+    if (isVoidPointer) answer.voidPointer = true; else answer.other = true;
+    returnAnswers.set(key, answer);
+  };
   for (const fn of functions) {
     if (!fn.name) continue;
+    if (UNCURATED_RETURN_TYPES.has((fn.returnType ?? '').trim())) continue;
     const ret = normalizeSignatureType(fn.returnType ?? '').replace(/\s+/g, ' ').trim();
+    const isVoidPointer = isVoidPointerSpelling(ret);
     const qualified = fn.namespace ? `${fn.namespace}::${fn.name}` : fn.name;
-    if (ret !== 'void *' && ret !== 'void*') {
-      // A bare name claimed by a function that does NOT return void* is not safe
-      // to key on — the call site may mean that one.
-      ambiguousReturn.add(fn.name);
-      voidPointerFunctions.delete(fn.name);
-      continue;
-    }
-    voidPointerFunctions.add(qualified);
-    if (!ambiguousReturn.has(fn.name)) voidPointerFunctions.add(fn.name);
+    noteReturn(qualified, isVoidPointer);
+    if (qualified !== fn.name) noteReturn(fn.name, isVoidPointer);
+  }
+  const voidPointerFunctions = new Set<string>(platformVoidPointerFunctionNames());
+  for (const [name, answer] of returnAnswers) {
+    if (answer.other) voidPointerFunctions.delete(name);
+    else if (answer.voidPointer) voidPointerFunctions.add(name);
   }
 
   // The declared type of every callable's parameters and of every global, in

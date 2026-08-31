@@ -1690,6 +1690,14 @@ const VOID_POINTER_SPELLINGS = new Set<string>([
 export const EMITTER_POINTER_TYPEDEFS: Record<string, string> = {
   pointer: 'void *',
   _locale_t: 'void *',
+  // The SDK's own `void *` aliases. `windows.h` defines them, so nothing in the
+  // model or in the emitted headers declares them as typedefs, and a return or
+  // a slot spelled `LPVOID` read as a star-less opaque base — a `return
+  // CRT_CreateTLS();` into a `DWORD *` then crossed a pointer boundary with no
+  // cast, which C converts silently and C++ rejects.
+  LPVOID: 'void *',
+  PVOID: 'void *',
+  LPCVOID: 'void *',
   // The Win32 handle family, spelled as `windows.h` spells it. Ghidra records
   // these as typedefs with no target, so without them the cast passes read a
   // `HANDLE` as a star-less opaque base and cannot see that it crosses a
