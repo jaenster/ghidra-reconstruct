@@ -26,8 +26,10 @@ import {
   mayReferenceNamespaces,
   selectExclusionEmissions,
   setPlatformDefinedNames,
-  setPlatformRootDeclaredNames,
-  emitsAtRootScope,
+  setPlatformDeclaredNames,
+  signatureIsExpressible,
+  bodyIsPlainCxx,
+  baseTypeName,
   candidateSpellings,
   type ExclusionCandidate,
 } from '../codegen/exclusion-closure.js';
@@ -193,60 +195,146 @@ describe('mayReferenceNamespaces', () => {
   });
 });
 
+describe('signatureIsExpressible', () => {
+  const known = (n: string) => n !== '_ptiddata';
+
+  it('refuses a signature naming a type the tree dropped with its namespace', () => {
+    assert.equal(
+      signatureIsExpressible(
+        candidate({ name: '__getptd', address: '00688e0d', returnType: '_ptiddata' }),
+        known,
+      ),
+      false,
+    );
+  });
+
+  it('reads through pointers, arrays and cv-qualifiers to the name that must resolve', () => {
+    assert.equal(baseTypeName('pfnPkwareRead *'), 'pfnPkwareRead');
+    assert.equal(baseTypeName('const struct _iobuf * *'), '_iobuf');
+    assert.equal(baseTypeName('char[16]'), 'char');
+    assert.ok(signatureIsExpressible(
+      candidate({
+        name: 'PKWARE_explode', address: '006b01b0', returnType: 'byte',
+        parameters: [{ dataType: 'pfnPkwareRead *' }, { dataType: 'void *' }],
+      }),
+      known,
+    ));
+  });
+});
+
+describe('bodyIsPlainCxx', () => {
+  it('refuses a body that needs an assembler', () => {
+    assert.equal(bodyIsPlainCxx('void f(void) { __asm__("fld1"); }'), false);
+    assert.equal(bodyIsPlainCxx('void f(void) { asm { fld1 } }'), false);
+  });
+
+  it('does not mistake the word in a string or a comment for a statement', () => {
+    assert.ok(bodyIsPlainCxx('void f(void) { puts("asm"); /* __asm__ */ }'));
+  });
+
+  it('refuses a body that is not there at all', () => {
+    assert.equal(bodyIsPlainCxx(undefined), false);
+  });
+});
+
 describe('selectExclusionEmissions', () => {
   const body = 'void f(void) { return; }';
+  const anyType = () => true;
+  const select = (candidates: ExclusionCandidate[], referenced: string[]) =>
+    selectExclusionEmissions({
+      candidates,
+      directlyReferenced: new Set(referenced),
+      isKnownType: anyType,
+    });
 
-  it('emits a body for a name the platform layer only DECLARES', () => {
+  it('emits a body for a name nothing else speaks for', () => {
     setPlatformDefinedNames(platformDefinedFunctionNames());
-    const selection = selectExclusionEmissions([
-      // Both are `extern "C" …;` entries in EXCLUDED_SYMBOL_DECLS / the CRT stub
-      // table — a prototype with nothing behind it, which is the whole gap.
-      candidate({ name: '__strrev', address: '00687860', size: 53, decompiled: body }),
-      candidate({ name: 'PKWARE_explode', address: '006b01b0', size: 373, decompiled: body }),
-    ]);
-    assert.deepEqual(selection.emit.map(f => f.name).sort(), ['PKWARE_explode', '__strrev']);
-    assert.equal(selection.alreadyDefined.length, 0);
+    setPlatformDeclaredNames(platformDeclaredFunctionNames());
+    const selection = select(
+      [candidate({ name: 'PKWARE_explode', address: '006b01b0', size: 373, decompiled: body })],
+      ['compiler::PKWARE_explode'],
+    );
+    assert.deepEqual(selection.emit.map(f => f.name), ['PKWARE_explode']);
+  });
+
+  it('leaves a name the platform header already declares to that declaration', () => {
+    setPlatformDefinedNames(platformDefinedFunctionNames());
+    setPlatformDeclaredNames(platformDeclaredFunctionNames());
+    // Every one of these broke all 509 units as an ambiguating redeclaration.
+    const names: Array<[string, string]> = [
+      ['__ftol2', '00683006'], ['__CIsqrt', '006879c0'], ['CRT_CIPow', '00687c10'],
+      ['CRT_CILog', '00687ac0'], ['CRT_CILog10', '00687ea0'], ['CRT_ReturnValue', '006b1a30'],
+      ['_eh_vector_constructor_iterator_', '006869fc'],
+      ['_eh_vector_destructor_iterator_', '00686ad1'],
+      ['CRT_Strchr', '00687740'], ['CRT_Floor', '00683080'], ['__except_handler4', '00684f50'],
+      ['__strrev', '00687860'],
+    ];
+    const selection = select(
+      names.map(([name, address]) => candidate({ name, address, decompiled: body })),
+      names.map(([name]) => `compiler::${name}`),
+    );
+    assert.equal(selection.emit.length, 0);
+    assert.equal(selection.alreadySpokenFor.length, names.length);
   });
 
   it('leaves a name the C library defines to the C library', () => {
     setPlatformDefinedNames(platformDefinedFunctionNames());
-    const selection = selectExclusionEmissions([
-      candidate({ name: 'memset', address: '00680000', size: 100, decompiled: body }),
-      candidate({ name: '_sprintf', address: '00680100', size: 100, decompiled: body }),
-    ]);
+    setPlatformDeclaredNames(platformDeclaredFunctionNames());
+    const selection = select(
+      [candidate({ name: 'memset', address: '00680000', decompiled: body })],
+      ['compiler::memset'],
+    );
     assert.equal(selection.emit.length, 0);
-    assert.deepEqual(selection.alreadyDefined.map(f => f.name).sort(), ['_sprintf', 'memset']);
   });
 
-  it('leaves a name the platform header forwards inline to its forwarder', () => {
-    setPlatformDefinedNames(platformDefinedFunctionNames());
-    const selection = selectExclusionEmissions([
-      candidate({ name: '__alldiv', address: '00680200', size: 100, decompiled: body }),
-      // `__strnicmp` is an EXCLUDED_SYMBOL_DECLS entry whose text carries a body.
-      candidate({ name: '__strnicmp', address: '00680300', size: 100, decompiled: body }),
-    ]);
+  it('refuses a body only another excluded body reaches', () => {
+    setPlatformDefinedNames(new Set());
+    setPlatformDeclaredNames(new Set());
+    const selection = select(
+      [candidate({ name: '__getptd', address: '00688e0d', decompiled: body })],
+      ['compiler::CRT_Output'],
+    );
     assert.equal(selection.emit.length, 0);
-    assert.equal(selection.alreadyDefined.length, 2);
+    assert.deepEqual(selection.indirect.map(f => f.name), ['__getptd']);
+  });
+
+  it('refuses a body it cannot write down', () => {
+    setPlatformDefinedNames(new Set());
+    setPlatformDeclaredNames(new Set());
+    const selection = selectExclusionEmissions({
+      candidates: [
+        candidate({ name: '__getptd', address: '00688e0d', returnType: '_ptiddata', decompiled: body }),
+        candidate({ name: 'AsmHelper', address: '00688e0f', decompiled: 'void f(void) { __asm__("nop"); }' }),
+      ],
+      directlyReferenced: new Set(['compiler::__getptd', 'compiler::AsmHelper']),
+      isKnownType: (n: string) => n !== '_ptiddata',
+    });
+    assert.equal(selection.emit.length, 0);
+    assert.deepEqual(selection.inexpressible.map(f => f.name).sort(), ['AsmHelper', '__getptd']);
   });
 
   it('emits one body for the three copies that print as one identifier', () => {
     setPlatformDefinedNames(new Set());
+    setPlatformDeclaredNames(new Set());
     const copies = ['0068333c', '00683372', '006833a8'].map(address =>
       candidate({ name: 'FID_conflict:___CxxFrameHandler3', address, size: 54, decompiled: body }),
     );
-    const selection = selectExclusionEmissions(copies);
+    const selection = select(copies, ['compiler::FID_conflict____CxxFrameHandler3']);
     assert.equal(selection.emit.length, 1);
-    // Lowest address wins, so the choice does not depend on extraction order.
     assert.equal(selection.emit[0].address, '0068333c');
     assert.equal(selection.duplicates.length, 2);
   });
 
   it('refuses a candidate with no body, however reachable it is', () => {
     setPlatformDefinedNames(new Set());
-    const selection = selectExclusionEmissions([
-      candidate({ name: 'NeverDecompiled', address: '00680400', size: 100 }),
-      candidate({ name: 'IsAThunk', address: '00680500', isThunk: true, decompiled: body }),
-    ]);
+    setPlatformDeclaredNames(new Set());
+    const selection = select(
+      [
+        candidate({ name: 'NeverDecompiled', address: '00680400' }),
+        candidate({ name: 'IsAThunk', address: '00680500', isThunk: true, decompiled: body }),
+      ],
+      ['compiler::NeverDecompiled', 'compiler::IsAThunk'],
+    );
     assert.equal(selection.emit.length, 0);
   });
 });
@@ -257,21 +345,5 @@ describe('candidateSpellings', () => {
       candidateSpellings(candidate({ name: 'CRT_StrLen', address: '006d5bd0', namespace: '_Wrappers' })),
       ['CRT_StrLen', '_Wrappers::CRT_StrLen'],
     );
-  });
-});
-
-describe('emitsAtRootScope', () => {
-  it('sends a body to the scope the platform header declares the name in', () => {
-    setPlatformRootDeclaredNames(platformDeclaredFunctionNames());
-    // `d2_platform.h` writes this one at root, as `extern "C"`.
-    assert.ok(emitsAtRootScope(candidate({ name: 'FID_conflict:___CxxFrameHandler3', address: '0068333c' })));
-    assert.ok(emitsAtRootScope(candidate({ name: '__strrev', address: '00687860' })));
-    // Declared inside `namespace _Wrappers`, so the definition belongs there.
-    assert.equal(
-      emitsAtRootScope(candidate({ name: 'CRT_StrLen', address: '006d5bd0', namespace: '_Wrappers' })),
-      false,
-    );
-    // The platform layer says nothing about it, so Ghidra's namespace stands.
-    assert.equal(emitsAtRootScope(candidate({ name: 'PKWARE_explode', address: '006b01b0' })), false);
   });
 });

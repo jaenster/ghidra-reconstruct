@@ -40,6 +40,8 @@ export interface ExclusionCandidate {
   isThunk: boolean;
   isExternal: boolean;
   decompiled?: string;
+  returnType?: string;
+  parameters?: ReadonlyArray<{ dataType?: string }>;
 }
 
 /**
@@ -192,31 +194,88 @@ export function setPlatformDefinedNames(names: ReadonlySet<string>): void {
 }
 
 /**
- * Names the platform layer declares at ROOT scope.
+ * Names the platform layer already DECLARES.
  *
- * Where a body goes is not a free choice: it has to define the symbol the CALL
- * SITES already bind to, and that is decided by the declaration they see.
- * `d2_platform.h` writes `extern "C" uint32_t FID_conflict____CxxFrameHandler3(…)`
- * at root, so a definition of the same name inside `namespace compiler` is a
- * different symbol and leaves the original just as undefined as before. The
- * `_Wrappers` entries are declared inside `namespace _Wrappers` and keep it.
+ * A declaration is not a lesser version of a definition here, it is a
+ * commitment: `d2_platform.h` is force-included into every translation unit, so
+ * 30+ call sites are already bound to the signature it states, and a body whose
+ * signature differs is not an improvement but a second, ambiguating declaration
+ * of the same name in every one of those units. It broke all 509 of them:
+ * Ghidra says `ulonglong __stdcall __ftol2()` and the header says
+ * `extern "C" uint64_t __ftol2(void)`, `float10 CRT_CIPow(float10, float10)`
+ * against `long double CRT_CIPow(long double, long double)`.
+ *
+ * Several of those cannot be reconciled at all rather than merely being spelled
+ * differently: the `_CI*` family passes its operands on the x87 stack and Ghidra
+ * models that as `float10` register parameters, which mingw has no way to
+ * express. So a declared name keeps its declaration and the body is refused —
+ * the symbol stays undefined at link, exactly as it was, and a stub answers it.
+ *
+ * This closure therefore emits only what NOTHING already speaks for.
  */
-let platformRootDeclaredNames: ReadonlySet<string> = new Set<string>();
+let platformDeclaredNames: ReadonlySet<string> = new Set<string>();
 
-export function setPlatformRootDeclaredNames(names: ReadonlySet<string>): void {
-  platformRootDeclaredNames = names;
+export function setPlatformDeclaredNames(names: ReadonlySet<string>): void {
+  platformDeclaredNames = names;
+}
+
+/** Ghidra's type spelling reduced to the one name a declaration has to resolve. */
+export function baseTypeName(spelling: string): string {
+  let out = spelling;
+  const bracket = out.indexOf('[');
+  if (bracket >= 0) out = out.slice(0, bracket);
+  out = out.replace(/[*&]/g, ' ');
+  const words = out.split(/\s+/).filter(Boolean)
+    .filter(w => w !== 'const' && w !== 'volatile' && w !== 'struct' && w !== 'union' && w !== 'enum');
+  return words.length > 0 ? words[words.length - 1] : '';
 }
 
 /**
- * Whether this body must be emitted at root scope rather than in its namespace.
+ * Whether every type this function's signature names is one the tree declares.
  *
- * True exactly when the platform layer already declares the bare name — the
- * declaration the call sites resolve against. A name the platform layer says
- * nothing about (`PKWARE_explode`) keeps Ghidra's namespace, which is also where
- * the hand-written layer declares it.
+ * A body is only worth emitting if its prototype can be written down. The
+ * excluded namespaces are dropped WITH their types, so a CRT-internal one
+ * survives in no header: `_ptiddata __getptd();` is `'_ptiddata' does not name a
+ * type` in every unit that sees it. The signature is the check because it is
+ * what lands in the shared header, and a shared header is what turns one bad
+ * body into a whole-tree failure.
  */
-export function emitsAtRootScope(candidate: ExclusionCandidate): boolean {
-  return platformRootDeclaredNames.has(emittedSpelling(candidate.name));
+export function signatureIsExpressible(
+  candidate: ExclusionCandidate,
+  isKnownType: (name: string) => boolean,
+): boolean {
+  const spellings = [candidate.returnType, ...(candidate.parameters ?? []).map(p => p.dataType)];
+  for (const spelling of spellings) {
+    if (!spelling) continue;
+    const base = baseTypeName(spelling);
+    if (!base) continue;
+    if (!isKnownType(base)) return false;
+  }
+  return true;
+}
+
+/** Assembler keywords, in every spelling the target toolchain accepts. */
+const ASM_KEYWORDS = new Set(['asm', '__asm', '__asm__']);
+
+/**
+ * Whether the body is plain C++.
+ *
+ * Read off the token stream rather than the text, so the word `asm` inside a
+ * string or a comment is not mistaken for a statement. A decompiled body that
+ * needs an assembler is one this pipeline cannot emit at all.
+ */
+export function bodyIsPlainCxx(body: string | undefined): boolean {
+  if (!body) return false;
+  let tokens;
+  try {
+    tokens = new Lexer(body, { preserveTrivia: false }).tokenize();
+  } catch {
+    return false;
+  }
+  for (const token of tokens) {
+    if (ASM_KEYWORDS.has(token.text)) return false;
+  }
+  return true;
 }
 
 /** A declaration text that carries a body — an inline forwarder, a template. */
@@ -260,10 +319,32 @@ export function candidateSpellings(candidate: ExclusionCandidate): string[] {
 export interface EmissionSelection<T extends ExclusionCandidate = ExclusionCandidate> {
   /** Admitted: a body is emitted for these. */
   emit: T[];
-  /** Reachable with a body, but something else already defines the name. */
-  alreadyDefined: T[];
+  /** Reached only through another excluded body, never from kept code. */
+  indirect: T[];
+  /** Something already declares or defines the name; the declaration wins. */
+  alreadySpokenFor: T[];
+  /** A body the tree cannot express — an undeclarable type, or assembler. */
+  inexpressible: T[];
   /** Dropped as a duplicate of an admitted candidate under the same name. */
   duplicates: T[];
+}
+
+export interface EmissionInputs<T extends ExclusionCandidate> {
+  candidates: Iterable<T>;
+  /**
+   * Names KEPT code writes, and only kept code.
+   *
+   * Reachability is transitive and emission is not, and conflating the two
+   * imported the C runtime: following an excluded body's own callees admitted
+   * 445 CRT internals and a per-namespace header for them, which every one of
+   * the 509 translation units then failed on. Exclusion exists to keep that code
+   * out; what this closure restores is the bodies KEPT code calls, one edge
+   * deep. Their own excluded callees keep the declaration they had and stay
+   * undefined at link, which is where a stub answers them.
+   */
+  directlyReferenced: ReadonlySet<string>;
+  /** Is this type name one the emitted tree declares? */
+  isKnownType: (name: string) => boolean;
 }
 
 /**
@@ -278,19 +359,29 @@ export interface EmissionSelection<T extends ExclusionCandidate = ExclusionCandi
  * and the report is what makes it visible.
  */
 export function selectExclusionEmissions<T extends ExclusionCandidate>(
-  candidates: Iterable<T>,
+  inputs: EmissionInputs<T>,
 ): EmissionSelection<T> {
   const emit: T[] = [];
-  const alreadyDefined: T[] = [];
+  const indirect: T[] = [];
+  const alreadySpokenFor: T[] = [];
+  const inexpressible: T[] = [];
   const duplicates: T[] = [];
   const claimed = new Map<string, T>();
 
-  const ordered = [...candidates].sort((a, b) => a.address.localeCompare(b.address));
+  const ordered = [...inputs.candidates].sort((a, b) => a.address.localeCompare(b.address));
   for (const candidate of ordered) {
     if (!hasRealBody(candidate) || !candidate.decompiled) continue;
     const spellings = candidateSpellings(candidate);
-    if (platformProvidesDefinition(spellings)) {
-      alreadyDefined.push(candidate);
+    if (!spellings.some(s => inputs.directlyReferenced.has(s))) {
+      indirect.push(candidate);
+      continue;
+    }
+    if (platformProvidesDefinition(spellings) || spellings.some(s => platformDeclaredNames.has(s))) {
+      alreadySpokenFor.push(candidate);
+      continue;
+    }
+    if (!signatureIsExpressible(candidate, inputs.isKnownType) || !bodyIsPlainCxx(candidate.decompiled)) {
+      inexpressible.push(candidate);
       continue;
     }
     const key = spellings[spellings.length - 1];
@@ -301,5 +392,5 @@ export function selectExclusionEmissions<T extends ExclusionCandidate>(
     claimed.set(key, candidate);
     emit.push(candidate);
   }
-  return { emit, alreadyDefined, duplicates };
+  return { emit, indirect, alreadySpokenFor, inexpressible, duplicates };
 }

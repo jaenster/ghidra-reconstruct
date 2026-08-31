@@ -71,7 +71,7 @@ import { normalizeAddress } from '../config/loader.js';
 import { resolveTargets, getTargetDirectory, type ResolvedTarget } from '../targets/index.js';
 import { generateStubsHeader } from '../targets/stubs.js';
 import { collectCrtHeaders, EXCLUDED_SYMBOL_DECLS, declaredIdentifier, WIN32_ZERO_ARITY_CALLBACK_SLOTS, WIN32_ZERO_ARITY_CALLBACK_CASTS, WIN32_OVERLOADED_INTRINSICS, WIN32_GENERIC_HANDLE_RETURNS, HEADER_DECLARED_SIGNATURES } from './crt-mapping.js';
-import { selectExclusionEmissions, setPlatformDefinedNames, setPlatformRootDeclaredNames, emitsAtRootScope } from './exclusion-closure.js';
+import { selectExclusionEmissions, setPlatformDefinedNames, setPlatformDeclaredNames, collectReferencedNames, mayReferenceNamespaces } from './exclusion-closure.js';
 import { normalizePointerSizeSpellings } from './pointer-size-spelling.js';
 import { flattenTemplateNames } from './template-names.js';
 import { retypeVtableLocals, vtableMembersByType } from '../modules/vtable-types.js';
@@ -243,7 +243,7 @@ export function generateProject(
   // Module state, so a second run in the same process must not inherit the
   // first's answer — and a run with no exclusions must clear it, not skip it.
   setPlatformDefinedNames(new Set<string>());
-  setPlatformRootDeclaredNames(new Set<string>());
+  setPlatformDeclaredNames(new Set<string>());
 
   const excludeNs = options.excludeNamespaces ?? [];
   if (excludeNs.length > 0) {
@@ -263,35 +263,49 @@ export function generateProject(
       return category.split('/').filter(Boolean).some(seg => nsMatches(seg));
     };
 
+    // Types survive or fall on their own, and the closure needs the answer
+    // before it decides anything: a body whose signature names a type that did
+    // not survive cannot be written down.
+    dataTypes = dataTypes.filter(dt => !catMatches(dt.category) && !nsMatches(dt.name));
+    const declaredTypeNames = new Set<string>();
+    for (const dt of dataTypes) if (dt.name) declaredTypeNames.add(dt.name);
+    const isKnownType = (name: string): boolean =>
+      declaredTypeNames.has(name) || isPlatformOrBuiltinType(name);
+
     // The exclusion closure: which of the excluded-namespace functions kept code
     // reaches get a BODY rather than a declaration. Extraction held them and
     // decompiled everything reachable; the decision of what that is worth is
-    // made here, from the emitter's own tables, so a `--codegen-only` run can
-    // change it without going back to the server.
+    // made here, from the emitter's own tables and from the kept bodies, so a
+    // `--codegen-only` run can change it without going back to the server.
+    //
+    // Directness is computed here rather than carried from extraction for the
+    // same reason: it is a property of what is KEPT, and what is kept is decided
+    // on this line, not on the server.
+    const excludedNamespaceNames = new Set<string>();
+    for (const f of functions) {
+      if (f.namespace && nsMatches(f.namespace)) excludedNamespaceNames.add(f.namespace);
+    }
+    const directlyReferenced = new Set<string>();
+    for (const f of functions) {
+      if (nsMatches(f.namespace) || !f.decompiled) continue;
+      if (!mayReferenceNamespaces(f.decompiled, excludedNamespaceNames)) continue;
+      for (const name of collectReferencedNames(f.decompiled)) directlyReferenced.add(name);
+    }
+
     const reachable = functions.filter(f => nsMatches(f.namespace) && f.excludedNamespaceReachable);
     setPlatformDefinedNames(platformDefinedFunctionNames());
-    setPlatformRootDeclaredNames(platformDeclaredFunctionNames());
-    const selection = selectExclusionEmissions(reachable);
+    setPlatformDeclaredNames(platformDeclaredFunctionNames());
+    const selection = selectExclusionEmissions({
+      candidates: reachable,
+      directlyReferenced,
+      isKnownType,
+    });
     const emittedByClosure = new Set<ExtractedFunction>(selection.emit);
-
-    // A body has to define the symbol the CALL SITES bind to, and the
-    // declaration they see decides which one that is. `d2_platform.h` declares
-    // `FID_conflict____CxxFrameHandler3` at root, so its definition goes to
-    // root; `_Wrappers::CRT_StrLen` is declared inside its namespace and keeps
-    // it. Getting this wrong defines a second, differently-mangled symbol and
-    // leaves the first exactly as undefined as it was.
-    const rootScoped: ExtractedFunction[] = [];
-    for (const f of selection.emit) {
-      if (!emitsAtRootScope(f)) continue;
-      f.namespace = undefined;
-      rootScoped.push(f);
-    }
 
     const fnBefore = functions.length;
     functions = functions.filter(f => !nsMatches(f.namespace) || emittedByClosure.has(f));
     const retainedNamespaces = new Set(selection.emit.map(f => f.namespace).filter(Boolean));
     classes = classes.filter(c => !nsMatches(c.namespace) && !nsMatches(c.name));
-    dataTypes = dataTypes.filter(dt => !catMatches(dt.category) && !nsMatches(dt.name));
     globals = (globals as Array<{ namespace?: string }>).filter(
       g => !nsMatches(g.namespace)
     ) as typeof globals;
@@ -304,18 +318,19 @@ export function generateProject(
     if (dropped > 0) {
       console.log(`Excluded ${dropped} function(s) in excluded namespaces (no file emitted for them)`);
     }
-    if (selection.emit.length > 0 || selection.alreadyDefined.length > 0) {
+    if (reachable.length > 0) {
       console.log(
-        `Exclusion closure: ${selection.emit.length} body/bodies emitted, `
-        + `${selection.alreadyDefined.length} left to the platform layer, `
-        + `${selection.duplicates.length} duplicate name(s) dropped`
+        `Exclusion closure: ${selection.emit.length} body/bodies emitted of ${reachable.length} reachable`
+        + ` (${selection.indirect.length} reached only through excluded code,`
+        + ` ${selection.alreadySpokenFor.length} already declared elsewhere,`
+        + ` ${selection.inexpressible.length} not expressible,`
+        + ` ${selection.duplicates.length} duplicate name(s))`
       );
       for (const f of selection.emit) {
-        const scope = f.namespace ? `${f.namespace}::` : 'root scope, ';
-        console.log(`  emit  ${scope}${f.name} @${f.address} (${f.size} bytes)`);
+        console.log(`  emit  ${f.namespace}::${f.name} @${f.address} (${f.size} bytes)`);
       }
-      if (rootScoped.length > 0) {
-        console.log(`  ${rootScoped.length} emitted at root scope, where the platform header declares them`);
+      for (const f of selection.inexpressible) {
+        console.log(`  skip  ${f.namespace}::${f.name} @${f.address} — no C++ spelling for its signature or body`);
       }
       for (const f of selection.duplicates) {
         console.log(`  dupe  ${f.namespace}::${f.name} @${f.address} — same emitted name as an earlier body`);
