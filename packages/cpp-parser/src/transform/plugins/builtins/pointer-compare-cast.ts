@@ -33,7 +33,7 @@
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, FunctionDecl, VariableDecl, ParameterDecl, Expression, BinaryExpr, TypeNode,
-  IntegerLiteralExpr,
+  IntegerLiteralExpr, Identifier,
 } from '../../../ast/nodes.js';
 import { findNodesByKind } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
@@ -90,6 +90,34 @@ function spell(s: TypeShape): TypeNode {
   return node;
 }
 
+/**
+ * Ghidra's auto-name for string data: `s_<mangled text>_<hex address>` — see
+ * `declaration-closure.ts`'s `STRING_LABEL_RE`, which this mirrors (cpp-parser
+ * has no dependency on the reconstruct package the closure lives in). A name
+ * shaped like this can be referenced by a function body without ever having
+ * become a `globals` model record at all: it was never sized, never typed,
+ * never listed. The declaration closure still owes it a declaration, and the
+ * only one it CAN write from a bare label is `extern char NAME[];` - the
+ * bytes at that address, unsized. No `globalTypes` table this plugin is ever
+ * handed will carry such a name, so `shapeOf` alone can never see it as a
+ * pointer.
+ *
+ * `gaPKWARE_DistCodeTable`'s loop bound in `compiler.cpp` is exactly this: the
+ * label Ghidra wrote for the byte immediately after the table, which happens
+ * to be where a copyright string starts. The comparison is real - `psVar8` is
+ * walking off the end of an array that a string just happens to sit past -
+ * and the bound genuinely is `char*`, just not through any table this pass
+ * reads. This is the one shape a Ghidra string-label identifier can be known
+ * to have with no table at all: a bare use of a declared array decays to a
+ * pointer to its element the same way any other one does.
+ */
+const GHIDRA_STRING_LABEL_RE = /^s_.*_[0-9a-fA-F]{6,}$/;
+
+const isStringLabelIdentifier = (e: Expression): boolean => {
+  const u = unwrapParens(e);
+  return u.kind === NodeKind.Identifier && GHIDRA_STRING_LABEL_RE.test((u as Identifier).name);
+};
+
 export function createPointerCompareCastTransformer(options?: PluginOptions): Transformer {
   const o = (options ?? {}) as PointerCompareCastOptions;
   const typedefTargets = o.typedefTargets ?? {};
@@ -109,7 +137,7 @@ export function createPointerCompareCastTransformer(options?: PluginOptions): Tr
         if (!localTypes.has(v.name.name)) localTypes.set(v.name.name, v.type);
       }
 
-      const shapeOf = createExprShape(localTypes, {
+      const shapeOfModeled = createExprShape(localTypes, {
         globalTypes: o.globalTypes ?? {},
         enclosingVarTypes: o.enclosingVarTypes ?? {},
         structFields: o.structFields ?? {},
@@ -117,6 +145,12 @@ export function createPointerCompareCastTransformer(options?: PluginOptions): Tr
         returnTypes: o.functionReturnTypes ?? {},
         resolve,
       });
+      // A string-label identifier only falls back to the naming convention
+      // when every modeled source declined - a local, a global, or a field
+      // table naming it is always the more exact answer.
+      const shapeOf = (e: Expression): TypeShape | null =>
+        shapeOfModeled(e)
+        ?? (isStringLabelIdentifier(e) ? { base: 'char', stars: 1, isConst: false } : null);
 
       let changed = false;
       const inner = createTransformer({
