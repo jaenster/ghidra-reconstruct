@@ -9,6 +9,59 @@ import type { ResolvedTarget } from '../targets/index.js';
 import type { TargetConfig } from '../config/schema.js';
 
 /**
+ * Mac-only modules. The build targets the Windows binary and these functions
+ * have no `win:` address, so they are written to the tree but never compiled.
+ * Shared Win/Mac functions live in the normal Windows modules and are kept.
+ */
+const MAC_ONLY_PREFIXES = ['MacSpecific/', 'StormMac/'];
+
+const isMacOnly = (path: string) => MAC_ONLY_PREFIXES.some((p) => path.startsWith(p));
+
+/**
+ * The one place that decides which project files become build inputs.
+ *
+ * The invariant this exists to hold is set equality: **the sources and headers
+ * a build file names are exactly the files the generator writes**, minus the
+ * single deliberate exclusion above. `writeProject` writes every entry of
+ * `project.files`, so any list built from a different traversal - or with a
+ * different filter - describes intent rather than the tree, and a configure
+ * then fails on a source that was never written or silently drops one that
+ * was.
+ *
+ * The same invariant was broken once before between the declaration side and
+ * the definition side of the globals model, where two traversals disagreed
+ * about which symbols were emittable; see `isEmittableGlobal` in
+ * `globals-header.ts`. Four emitters here used to carry four copies of this
+ * loop, three of which had already drifted - only one applied the Mac filter.
+ * They all route through this function now so they cannot disagree again.
+ *
+ * @param dir  restrict to this directory and return paths relative to it
+ */
+export function collectBuildFiles(
+  files: ReadonlyMap<string, SourceFile>,
+  dir?: string
+): { sources: string[]; headers: string[] } {
+  const sources: string[] = [];
+  const headers: string[] = [];
+  const prefix = dir ? dir.replace(/\/+$/, '') + '/' : '';
+
+  for (const [path, file] of files) {
+    if (isMacOnly(path)) continue;
+    if (prefix && !path.startsWith(prefix)) continue;
+    const listed = path.slice(prefix.length);
+    if (file.type === 'implementation') {
+      sources.push(listed);
+    } else if (file.type === 'header') {
+      headers.push(listed);
+    }
+  }
+
+  sources.sort();
+  headers.sort();
+  return { sources, headers };
+}
+
+/**
  * Generate CMakeLists.txt content
  */
 export function generateCMakeLists(
@@ -54,40 +107,23 @@ export function generateCMakeLists(
 
   // Compiler flags for decompiled code
   lines.push('# Flags for Ghidra-decompiled code (32-bit Win32 binary)');
-  lines.push('# -fpermissive: the decompiler drops the explicit casts the original C++');
-  lines.push('# had, so implicit conversions (void* allocator returns -> typed pointers,');
-  lines.push('# integer<->pointer) read as hard errors under strict C++. Downgrade them to');
-  lines.push('# warnings (then silenced by -w) so genuine type-holes remain the signal.');
+  lines.push('# -w silences the warning flood the decompiled spelling produces;');
+  lines.push('# -fms-extensions admits the MSVC constructs the binary was built with.');
+  lines.push('# The tree compiles under strict C++ with no conformance relaxation, so');
+  lines.push('# nothing here downgrades an error - a type-hole stays a hard failure.');
   lines.push('if(MSVC)');
   lines.push('    add_compile_options(/W0)');
   lines.push('else()');
-  lines.push('    add_compile_options(-w -fms-extensions -fpermissive)');
+  lines.push('    add_compile_options(-w -fms-extensions)');
   lines.push('endif()');
   lines.push('');
 
-  // Collect source files.
-  // Build targets the Windows binary, so exclude the Mac-only modules
-  // (their functions have no win: address). Shared Win/Mac functions live in
-  // the normal Windows modules and are kept.
-  const MAC_ONLY_PREFIXES = ['MacSpecific/', 'StormMac/'];
-  const isMacOnly = (path: string) => MAC_ONLY_PREFIXES.some((p) => path.startsWith(p));
-
-  const sourceFiles: string[] = [];
-  const headerFiles: string[] = [];
-
-  for (const [path, file] of project.files) {
-    if (isMacOnly(path)) continue;
-    if (file.type === 'implementation') {
-      sourceFiles.push(path);
-    } else if (file.type === 'header') {
-      headerFiles.push(path);
-    }
-  }
+  const { sources: sourceFiles, headers: headerFiles } = collectBuildFiles(project.files);
 
   // Source files
   lines.push('# Source files');
   lines.push('set(SOURCES');
-  for (const source of sourceFiles.sort()) {
+  for (const source of sourceFiles) {
     lines.push(`    ${source}`);
   }
   lines.push(')');
@@ -96,7 +132,7 @@ export function generateCMakeLists(
   // Header files
   lines.push('# Header files');
   lines.push('set(HEADERS');
-  for (const header of headerFiles.sort()) {
+  for (const header of headerFiles) {
     lines.push(`    ${header}`);
   }
   lines.push(')');
@@ -163,13 +199,7 @@ export function generateMakefile(
   lines.push(`TARGET = ${sanitizeName(projectName)}`);
   lines.push('');
 
-  // Collect source files
-  const sourceFiles: string[] = [];
-  for (const [path, file] of project.files) {
-    if (file.type === 'implementation') {
-      sourceFiles.push(path);
-    }
-  }
+  const { sources: sourceFiles } = collectBuildFiles(project.files);
 
   // Object files
   lines.push('SOURCES = \\');
@@ -269,12 +299,12 @@ export function generateTopLevelCMake(
   lines.push('');
 
   lines.push('# Flags for Ghidra-decompiled code (32-bit Win32 binary)');
-  lines.push('# -fpermissive: decompiler-dropped casts make implicit void*/integer<->pointer');
-  lines.push('# conversions read as errors under strict C++; downgrade to (silenced) warnings.');
+  lines.push('# -w silences the decompiled spelling\'s warning flood, -fms-extensions admits');
+  lines.push('# the MSVC constructs. Strict C++ otherwise: no error is downgraded.');
   lines.push('if(MSVC)');
   lines.push('    add_compile_options(/W0)');
   lines.push('else()');
-  lines.push('    add_compile_options(-w -fms-extensions -fpermissive)');
+  lines.push('    add_compile_options(-w -fms-extensions)');
   lines.push('endif()');
   lines.push('');
 
@@ -308,20 +338,8 @@ export function generateTargetCMake(
   }
   lines.push('');
 
-  // Collect source and header files in this target directory
-  const sourceFiles: string[] = [];
-  const headerFiles: string[] = [];
-
-  for (const [filePath, file] of files) {
-    if (filePath.startsWith(targetDir + '/')) {
-      const relativePath = filePath.substring(targetDir.length + 1);
-      if (file.type === 'implementation') {
-        sourceFiles.push(relativePath);
-      } else if (file.type === 'header') {
-        headerFiles.push(relativePath);
-      }
-    }
-  }
+  // Source and header files in this target directory
+  const { sources: sourceFiles, headers: headerFiles } = collectBuildFiles(files, targetDir);
 
   if (target.config.type === 'interface') {
     // Header-only INTERFACE library
@@ -334,7 +352,7 @@ export function generateTargetCMake(
     // Source files
     if (sourceFiles.length > 0) {
       lines.push('set(SOURCES');
-      for (const source of sourceFiles.sort()) {
+      for (const source of sourceFiles) {
         lines.push(`    ${source}`);
       }
       lines.push(')');
@@ -343,7 +361,7 @@ export function generateTargetCMake(
 
     if (headerFiles.length > 0) {
       lines.push('set(HEADERS');
-      for (const header of headerFiles.sort()) {
+      for (const header of headerFiles) {
         lines.push(`    ${header}`);
       }
       lines.push(')');
@@ -399,23 +417,11 @@ export function generateUnsortedCMake(
   lines.push('# Unsorted functions (not assigned to any target)');
   lines.push('');
 
-  const sourceFiles: string[] = [];
-  const headerFiles: string[] = [];
-
-  for (const [filePath, file] of files) {
-    if (filePath.startsWith('unsorted/')) {
-      const relativePath = filePath.substring('unsorted/'.length);
-      if (file.type === 'implementation') {
-        sourceFiles.push(relativePath);
-      } else if (file.type === 'header') {
-        headerFiles.push(relativePath);
-      }
-    }
-  }
+  const { sources: sourceFiles, headers: headerFiles } = collectBuildFiles(files, 'unsorted');
 
   if (sourceFiles.length > 0) {
     lines.push('set(SOURCES');
-    for (const source of sourceFiles.sort()) {
+    for (const source of sourceFiles) {
       lines.push(`    ${source}`);
     }
     lines.push(')');
@@ -424,7 +430,7 @@ export function generateUnsortedCMake(
 
   if (headerFiles.length > 0) {
     lines.push('set(HEADERS');
-    for (const header of headerFiles.sort()) {
+    for (const header of headerFiles) {
       lines.push(`    ${header}`);
     }
     lines.push(')');
