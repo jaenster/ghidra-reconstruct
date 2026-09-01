@@ -518,11 +518,12 @@ const MSVC_RUNTIME_DECLS: ExcludedSymbolDecl[] = [
   // __CIsqrt @ 006879c0 — Ghidra: undefined (void); x87-stack argument, as above.
   { emitted: '__CIsqrt', real: '_CIsqrt', source: 'ghidra',
     decl: 'extern "C" double __CIsqrt(void);' },
-  // __sqrt_common @ 006879dd — Ghidra: uint (int, uint, undefined4 in EDX). The
-  // double arrives split across two stack dwords plus EDX, which is exactly the
-  // three-argument shape the call sites use.
+  // __sqrt_common @ 006879dd — Ghidra: uint (int, uint). The double arrives split
+  // across two stack dwords. There is no third argument: the function opens with
+  // `PUSH EDX; FSTCW word ptr [ESP]`, so the push reserves four bytes for the FPU
+  // control word and EDX's value is never read.
   { emitted: '__sqrt_common', real: '_sqrt_common', source: 'ghidra',
-    decl: 'extern "C" uint32_t __sqrt_common(int nMantissaLo, uint32_t nMantissaHi, uint32_t nEdxIn);' },
+    decl: 'extern "C" uint32_t __sqrt_common(int nMantissaLo, uint32_t nMantissaHi);' },
   // __aulldvrm @ 00686b60 — unsigned 64/64 divide-and-remainder, four dword args.
   // Matches the existing __alldvrm/__aulldiv inlines below in this header.
   { emitted: '__aulldvrm', real: '_aulldvrm', source: 'ghidra',
