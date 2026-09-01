@@ -328,6 +328,46 @@ export function promoteCentrallyReferencedGlobals(globals: AnalyzedDataSymbol[])
   return promoted;
 }
 
+/**
+ * Resolve the CENTRAL globals' initializers once, ahead of the header, purely to
+ * learn which symbols they will name.
+ *
+ * The declaration closure — the `extern char s_X[];` in globals.h and the one
+ * matching definition the shared globals unit emits — is computed inside
+ * `generateGlobalsHeader`, and `emitCentralGlobalsUnits` runs after it. So a
+ * string that ONLY a globals unit's initializer resolves was added to
+ * `initializerAddressReferences()` too late for the header that had to declare
+ * it: seventeen `error: 'NAME' was not declared in this scope`, across
+ * `globals.cpp`, `globals.Bnclient.cpp` and `globals.D2Multi.cpp`.
+ *
+ * A static-locals block never had the problem — `impl.ts` emits it during
+ * `generateFilesForFunctions`, earlier than either — which is why
+ * `s_Diablo_II_006cc8b8` came out declared and `s_D2_LNG_006d5ee0` did not. The
+ * partitioned units are not a different PATH, they are a later one.
+ *
+ * This re-derives nothing: it calls the same two renderers `generateGlobalsImpl`
+ * calls, over the same symbols, and throws the text away. The set it records is
+ * deliberately a SUPERSET — it does not repeat the emitter's definition-winner
+ * and template-namespace filters — because a name missing here is a build error
+ * while an extra one is an unreferenced definition.
+ */
+export function recordCentralInitializerAddressReferences(
+  globals: readonly AnalyzedDataSymbol[]
+): void {
+  // Emission counts this for the database owner; a discovery pass that counted
+  // it too would double every mismatch in the report.
+  const mismatchesBeforeDiscovery = initializerFuncPtrArityMismatches;
+  for (const global of globals) {
+    const type = normalizeGlobalDeclType(global.suggestedType || global.dataType);
+    if (global.initializedData) {
+      emitDataValue(global.initializedData, 0, type);
+    } else if (global.isInitialized) {
+      renderGlobalScalarInitializer(global.value, type, inferArrayDeclaration(global)?.count);
+    }
+  }
+  initializerFuncPtrArityMismatches = mismatchesBeforeDiscovery;
+}
+
 export function generateGlobalsHeader(
   globals: AnalyzedDataSymbol[],
   options: ReconstructOptions & { projectName?: string; binaryName?: string },
@@ -337,6 +377,11 @@ export function generateGlobalsHeader(
   bodyIdentifierFnCounts?: Map<string, number>
 ): string {
   const lines: string[] = [];
+
+  // The globals units are emitted AFTER this header, so what their initializers
+  // resolve to has to be discovered here, or the closure below declares none of
+  // it. Same symbols the units will be given, same renderers.
+  recordCentralInitializerAddressReferences(globals);
 
   // Qualified function names (namespace::name) emitted elsewhere as their own
   // declarations. A data symbol can share its name with a function in the same

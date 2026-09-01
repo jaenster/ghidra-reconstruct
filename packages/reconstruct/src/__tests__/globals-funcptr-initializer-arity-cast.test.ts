@@ -42,6 +42,7 @@ import {
   setKnownFuncDefTypedefs,
   setMultidimArrayGlobals,
   getInitializerFuncPtrArityMismatches,
+  recordCentralInitializerAddressReferences,
 } from '../codegen/globals-header.js';
 import { buildFuncPtrArgCastTables, buildGlobalAddressExtentTables } from '../codegen/index.js';
 import type {
@@ -171,6 +172,26 @@ describe('a function address stored in a differing function-pointer slot', () =>
   it('still counts the arity disagreement it now casts', () => {
     emitDataValue(
       entry('0x40', 'Storm::Source::SSComp::SCOMP_ADPCMMonoEncode'), 0, 'SCompCodecEntryStrc');
+    assert.strictEqual(getInitializerFuncPtrArityMismatches(), 1);
+  });
+
+  it('counts it once, though the globals units are rendered twice', () => {
+    // `generateGlobalsHeader` resolves the central initializers ahead of itself,
+    // to learn which symbols they name before the closure has to declare them.
+    // That pass renders the same trees the units will render, so the count it
+    // walks past is the SAME disagreement, not a second one. The number goes to
+    // the database owner as work to do; doubling it would be a lie about how
+    // much there is.
+    const global = {
+      name: 'gaSCompCodecTable', address: '006cc960', dataType: 'SCompCodecEntryStrc',
+      suggestedType: 'SCompCodecEntryStrc', size: 8, isInitialized: true,
+      initializedData: entry('0x40', 'Storm::Source::SSComp::SCOMP_ADPCMMonoEncode'),
+      xrefCount: 1, scope: 'global',
+    } as unknown as AnalyzedDataSymbol;
+    recordCentralInitializerAddressReferences([global]);
+    assert.strictEqual(getInitializerFuncPtrArityMismatches(), 0,
+      'discovery is not emission — it counts nothing');
+    emitDataValue(global.initializedData!, 0, 'SCompCodecEntryStrc');
     assert.strictEqual(getInitializerFuncPtrArityMismatches(), 1);
   });
 
