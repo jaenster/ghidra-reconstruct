@@ -187,9 +187,12 @@ export interface TypeShape { base: string; stars: number; isConst: boolean }
 /**
  * A resolved parameter list plus how far it may be trusted. `pointerOnly` marks
  * a list recovered from the decompiler's argument annotations rather than from a
- * declaration, and restricts it to the pointer boundary.
+ * declaration, and restricts it to the pointer boundary. `variadic` marks a
+ * callee with a `...` tail: `spellings` still covers only the NAMED
+ * parameters, and an argument past that count has no declared type at all -
+ * it is passed under default argument promotion, not a cast.
  */
-interface Declared { spellings: string[]; pointerOnly: boolean }
+interface Declared { spellings: string[]; pointerOnly: boolean; variadic: boolean }
 
 /**
  * Spellings that name the SAME C++ type. Ghidra and the Windows headers each
@@ -748,6 +751,12 @@ export function createCallArgCastTransformer(options?: PluginOptions): Transform
        * through a function pointer, which has no callee name at all - the slot
        * the pointer lives in is declared with a funcdef, and that funcdef is the
        * contract the call is made under.
+       *
+       * A `...` tail does not blank this out. It only bounds how much of the
+       * call it can speak for: the NAMED parameters are still a declaration
+       * exactly as fixed as any other, and get cast exactly as any other -
+       * `variadic` tells the caller where that declared prefix ends, past which
+       * default argument promotion applies and there is nothing to cast.
        */
       const declaredParametersOf = (call: CallExpr): Declared | undefined => {
         const name = calleeName(call.callee);
@@ -755,17 +764,16 @@ export function createCallArgCastTransformer(options?: PluginOptions): Transform
           const bare = bareName(name);
           const declared = paramTypes[name] ?? paramTypes[bare];
           if (declared) {
-            return varArgs.has(name) || varArgs.has(bare)
-              ? undefined : { spellings: declared, pointerOnly: false };
+            const variadic = varArgs.has(name) || varArgs.has(bare);
+            return { spellings: declared, pointerOnly: false, variadic };
           }
           const annotated = pointerOnlyParamTypes[name] ?? pointerOnlyParamTypes[bare];
-          if (annotated) return { spellings: annotated, pointerOnly: true };
+          if (annotated) return { spellings: annotated, pointerOnly: true, variadic: false };
         }
         const fd = funcdefOfCallee(call.callee);
-        // A funcdef with a `...` tail types nothing past its declared slots, and
-        // a positional index into it is not safe.
-        return fd && !fd.varArgs
-          ? { spellings: fd.paramTypes, pointerOnly: false } : undefined;
+        return fd
+          ? { spellings: fd.paramTypes, pointerOnly: false, variadic: !!fd.varArgs }
+          : undefined;
       };
 
       let changed = false;
@@ -776,7 +784,13 @@ export function createCallArgCastTransformer(options?: PluginOptions): Transform
           const decl = declaredParametersOf(call);
           if (!decl) return undefined;
           const declared = decl.spellings;
-          if (call.arguments.length !== declared.length) return undefined; // arity mismatch is Ghidra's, not ours
+          // A variadic callee only fixes the named prefix, so the call may
+          // legitimately carry more arguments than `declared` has entries -
+          // those extra slots have no declared type and are left alone below,
+          // the same way an unmodelled expression already is. Fewer arguments
+          // than the named prefix is still Ghidra's arity to fix, not ours.
+          if (decl.variadic ? call.arguments.length < declared.length
+                             : call.arguments.length !== declared.length) return undefined;
 
           let anyCast = false;
           const newArgs = call.arguments.map((arg, i) => {

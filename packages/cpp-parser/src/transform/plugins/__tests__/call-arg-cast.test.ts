@@ -92,12 +92,20 @@ describe('callArgCastPlugin', () => {
     assert.ok(!out.includes('(fpHandler)p'), out);
   });
 
-  it('leaves a varargs callee alone', () => {
+  it('still casts a named parameter of a varargs callee', () => {
     const out = run(`void f() { int* p; Callee(p); }`, {
       functionParamTypes: paramTypes,
       varArgFunctions: ['Callee'],
     });
-    assert.ok(out.includes('Callee(p)') && !out.includes('(uint8_t**)p'), out);
+    assert.ok(out.includes('Callee((uint8_t**)p)'), out);
+  });
+
+  it('leaves the trailing ... arguments of a varargs call alone', () => {
+    const out = run(`void f() { int* p; int* q; Callee(p, q); }`, {
+      functionParamTypes: paramTypes,
+      varArgFunctions: ['Callee'],
+    });
+    assert.ok(out.includes('Callee((uint8_t**)p, q)'), out);
   });
 
   it('leaves an arity mismatch alone — that is the database\'s to fix', () => {
@@ -262,7 +270,7 @@ describe('callArgCastPlugin — calls through a function pointer', () => {
     assert.ok(out.includes('c->pfnDraw(p, 1, 2)') && !out.includes('(uint8_t*)p'), out);
   });
 
-  it('leaves a varargs funcdef alone — a positional index into it is not safe', () => {
+  it('still casts the named parameters of a varargs funcdef', () => {
     const out = run(`void f() { Callbacks* c; int* p; c->pfnLog(p, 1); }`, {
       ...base,
       funcdefDecls: {
@@ -272,7 +280,20 @@ describe('callArgCastPlugin — calls through a function pointer', () => {
       structFieldFuncdefs: { Callbacks: { pfnLog: 'fnLog' } },
       fieldFuncdefs: {},
     });
-    assert.ok(out.includes('c->pfnLog(p, 1)') && !out.includes('(uint8_t*)p'), out);
+    assert.ok(out.includes('c->pfnLog((uint8_t*)p, 1)'), out);
+  });
+
+  it('leaves the trailing ... arguments of a varargs funcdef call alone — no declared type past the named slots', () => {
+    const out = run(`void f() { Callbacks* c; int* p; c->pfnLog(p, 1, p); }`, {
+      ...base,
+      funcdefDecls: {
+        ...base.funcdefDecls,
+        fnLog: { returnType: 'void', paramTypes: ['uint8_t *', 'int'], varArgs: true },
+      },
+      structFieldFuncdefs: { Callbacks: { pfnLog: 'fnLog' } },
+      fieldFuncdefs: {},
+    });
+    assert.ok(out.includes('c->pfnLog((uint8_t*)p, 1, p)'), out);
   });
 
   it('leaves a field the model does not record as a function pointer alone', () => {
