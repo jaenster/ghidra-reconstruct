@@ -93,8 +93,10 @@ import type {
   CommaExpr,
   ConditionalExpr,
   Expression,
+  Identifier,
   IntegerLiteralExpr,
   ParenExpr,
+  QualifiedId,
   ReturnStmt,
   UnaryExpr,
 } from '../../../ast/nodes.js';
@@ -315,6 +317,40 @@ function complemented(form: Expression): Expression {
 // TRANSFORMER
 // ============================================
 
+/**
+ * Calls whose argument is a RETURN VALUE, not an argument.
+ *
+ * `Fog::Debug::GuardStack` is the MSVC `/GS` epilogue: it checks the stack
+ * cookie and passes EAX straight through, so `return GuardStack(x)` is how every
+ * cookie-using function in this binary returns `x`. The value in that slot is
+ * therefore typed by the CALLER's return type, not by a parameter, and a
+ * function returning a pointer through it is exactly the case this pass exists
+ * to resolve.
+ *
+ * Withdrawing pointer forms there put an absolute image address back into
+ * `NET_GetLocalIp`, which returns `cp_0075d040`; the caller printed it as `%s`
+ * and faulted reading 0x0075D040.
+ *
+ * This is a claim about one function's semantics, not a guess about a name — the
+ * pass-through is documented at the definition and is why `d2_hand.h` implements
+ * `GuardStack` as an identity.
+ */
+const RETURN_VALUE_CARRIERS = new Set(['GuardStack']);
+
+function isReturnValueCarrier(callee: Expression): boolean {
+  if (callee.kind === NodeKind.Identifier) {
+    return RETURN_VALUE_CARRIERS.has((callee as { name: string }).name);
+  }
+  if (callee.kind === NodeKind.QualifiedId) {
+    // The trailing name is `name`, not the last element of `qualifier` — the
+    // qualifier holds only the `ns::nested::` part.
+    const tail = (callee as QualifiedId).name;
+    if (tail.kind !== NodeKind.Identifier) return false;
+    return RETURN_VALUE_CARRIERS.has((tail as Identifier).name);
+  }
+  return false;
+}
+
 function createGlobalAddressLiteralTransformer(
   options: GlobalAddressLiteralOptions,
 ): Transformer {
@@ -510,6 +546,7 @@ function createGlobalAddressLiteralTransformer(
     // expression by construction, and passing one is no different from passing
     // any other computed word.
     visitCallExpr(node: CallExpr) {
+      if (isReturnValueCarrier(node.callee)) return undefined;
       let changed = false;
       const args = node.arguments.map(arg => {
         const restored = restorePointerForms(arg);

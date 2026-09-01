@@ -517,5 +517,35 @@ describe('globalAddressLiteralPlugin', () => {
         `Nothing is shared, nothing comes off: ${out}`,
       );
     });
+
+    it('resolves through GuardStack, whose argument is a return value', () => {
+      // GuardStack is the /GS epilogue: it passes EAX through, so its argument is
+      // typed by the CALLER's return type, not by a parameter. Withdrawing pointer
+      // forms there put an absolute image address back into NET_GetLocalIp, whose
+      // caller printed it as %s and faulted reading 0x0075D040.
+      const opts: GlobalAddressLiteralOptions = {
+        globalAddresses: { cp_0075d040: 0x75d040 },
+        globalSizes: { cp_0075d040: 256 },
+        imageBase: '0x400000',
+      };
+      const out = run(`void f() { p = (char*)GuardStack(0x75d040); }`, opts);
+      assert.ok(out.includes('cp_0075d040'), `Must resolve through GuardStack: ${out}`);
+      assert.ok(!out.includes('0x75d040'), `Literal must be gone: ${out}`);
+
+      // Qualified spelling reaches the same rule.
+      const q = run(`void f() { p = (char*)Fog::Debug::GuardStack(0x75d040); }`, opts);
+      assert.ok(q.includes('cp_0075d040'), `Qualified callee too: ${q}`);
+    });
+
+    it('still withdraws a pointer form in an ordinary call argument', () => {
+      // __allmul's 0x989680 is FILETIME's 10,000,000 colliding with a global.
+      const opts: GlobalAddressLiteralOptions = {
+        globalAddresses: { gnCurrentTimestamp: 0x989680 },
+        globalSizes: { gnCurrentTimestamp: 4 },
+        imageBase: '0x400000',
+      };
+      const out = run(`void f() { q = __allmul(a, b, 0x989680, 0); }`, opts);
+      assert.ok(!out.includes('gnCurrentTimestamp'), `Ordinary call must not resolve: ${out}`);
+    });
   });
 });
