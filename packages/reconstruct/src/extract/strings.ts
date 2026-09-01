@@ -72,9 +72,20 @@ export async function extractAllStrings(
   const allStrings: ExtractedString[] = [];
   const pageSize = 500;
   let offset = 0;
-  let total = 0;
 
-  do {
+  // Paginate until a SHORT page, rather than until `offset` reaches `total`.
+  //
+  // `list_strings` reports `total` as the size of the page it just returned, not
+  // the size of the result set: asking for one string answers `total: 1`. Read
+  // as an overall count it says "you have them all" after every full page, so
+  // the loop stopped at 500 and the tree was built from the first 500 strings
+  // for as long as this function has existed. That is why the six .rdata
+  // addresses in gApplicationModeCommandLineArgumentArray never resolved — their
+  // labels were simply absent from the table.
+  //
+  // A short page is the one termination signal that holds whether `total` means
+  // the page, the remainder, or the whole set, so it is the one used here.
+  for (;;) {
     const result = await extractStrings(connection, {
       ...options,
       limit: pageSize,
@@ -82,9 +93,9 @@ export async function extractAllStrings(
     });
 
     allStrings.push(...result.strings);
-    total = result.total;
+    if (result.strings.length < pageSize) break;
     offset += pageSize;
-  } while (offset < total);
+  }
 
   return allStrings;
 }
