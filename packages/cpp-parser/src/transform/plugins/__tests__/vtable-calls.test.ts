@@ -47,6 +47,36 @@ describe('vtableCallPlugin', () => {
     });
   });
 
+  describe('table vs object dispatch', () => {
+    it('keeps ->vmethod_N only for a real `this`, where a class exists to declare it', () => {
+      const code = `void f(int x) { (**(code **)(*this + 0x10))(this, x); }`;
+      const result = transform(code);
+      assert.ok(result.includes('->vmethod_4'), `Expected ->vmethod_4 in: ${result}`);
+    });
+
+    it('rewrites an object vtable on a non-`this` object to a faithful indirect call', () => {
+      // `self` is a `int**`, not a class instance — `self->vmethod_4` would name a
+      // member no type declares ("'int*' is not a pointer-to-object type").
+      const code = `void f(int **self, int x) { (**(code **)(*self + 0x10))(self, x); }`;
+      const result = transform(code);
+      const norm = result.replace(/\s+/g, '');
+      assert.ok(!norm.includes('->vmethod_'), `Expected no ->vmethod_ in: ${result}`);
+      assert.ok(
+        norm.includes('(**(code**)((char*)*(void**)(uintptr_t)self+16))(self,x)'),
+        `Expected the indirect call in: ${result}`,
+      );
+    });
+
+    it('rewrites a function-pointer TABLE (base + off) to a faithful byte-offset indirect call, not ->vmethod', () => {
+      const code = `void f(void **arr, int a) { (**(code **)(arr + 8))(a); }`;
+      const result = transform(code);
+      const norm = result.replace(/\s+/g, '');
+      assert.ok(!result.includes('vmethod'), `Should NOT emit vmethod for a table: ${result}`);
+      assert.ok(norm.includes('(char*)arr+8'), `Expected byte-offset cast in: ${result}`);
+      assert.ok(norm.includes('(code**)'), `Expected code** read in: ${result}`);
+    });
+  });
+
   describe('plugin metadata', () => {
     it('should have correct metadata', () => {
       assert.strictEqual(vtableCallPlugin.id, 'vtable-calls');

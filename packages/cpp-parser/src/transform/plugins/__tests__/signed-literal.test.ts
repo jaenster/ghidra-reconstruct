@@ -17,6 +17,38 @@ describe('signedLiteralPlugin', () => {
     return emit(result as AnyNode).trim();
   }
 
+  describe("Ghidra's double negative on a constant", () => {
+    it('rewrites --2147483648 to a single negation', () => {
+      const output = transformCode('void foo() { int x = --2147483648; }');
+      assert.ok(!output.includes('--'), `should not keep the double negative: ${output}`);
+      assert.ok(output.includes('-2147483648'), output);
+    });
+
+    it('rewrites --0x80000000 to the same value', () => {
+      const output = transformCode('void foo() { int x = --0x80000000; }');
+      assert.ok(!output.includes('--'), `should not keep the double negative: ${output}`);
+      assert.ok(output.includes('-2147483648'), output);
+    });
+
+    it('rewrites a double negative the hardcoded pair never covered', () => {
+      // The predecessor was two literal string replacements, so `--0x100` and
+      // every other magnitude fell straight through.
+      const output = transformCode('void foo() { int x = --256; }');
+      assert.ok(!output.includes('--'), `should not keep the double negative: ${output}`);
+      assert.ok(output.includes('-256'), output);
+    });
+
+    it('leaves a real pre-decrement of a variable alone', () => {
+      const output = transformCode('void foo() { --nCount; }');
+      assert.ok(output.includes('--nCount'), output);
+    });
+
+    it('leaves the same characters inside a string literal alone', () => {
+      const output = transformCode('void foo() { Log("value --2147483648 seen"); }');
+      assert.ok(output.includes('"value --2147483648 seen"'), output);
+    });
+  });
+
   describe('32-bit negative values', () => {
     it('should convert 0xffffffff to -1', () => {
       const input = `void foo() { int x = 0xffffffff; }`;

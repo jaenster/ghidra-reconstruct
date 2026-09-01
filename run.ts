@@ -5,6 +5,29 @@
  * OAuth-protected daemon.
  *
  * Needs --stack-size=8192 for deeply nested function ASTs; re-execs itself.
+ *
+ * Fast codegen loop:
+ *
+ *   npx tsx run.ts                    full run; also writes an extraction snapshot
+ *   npx tsx run.ts --codegen-only     replay that snapshot, never touch the daemon
+ *
+ * Flags (each also settable from the env):
+ *   --codegen-only          GHIDRA_CODEGEN_ONLY=1
+ *   --snapshot-dir=PATH     GHIDRA_SNAPSHOT_DIR      default <projectDir>/.ghidra-mcp/codegen-snapshot
+ *   --no-snapshot           GHIDRA_SNAPSHOT=0        full run, but do not write one
+ *                           GHIDRA_SNAPSHOT_MAX_AGE_HOURS  refuse a snapshot older than this (default 168)
+ *
+ * The cross-check binary (the mac build) is extracted once per Ghidra version of
+ * THAT program and replayed from disk after that — it moves at version 5 while
+ * the windows build is at 643. Its cache invalidates on the exact version, so a
+ * bypass is rarely needed, but:
+ *
+ *   --no-mac-cache          GHIDRA_MAC_CACHE=0       always re-extract it, cache nothing
+ *   --mac-decompile-all     GHIDRA_MAC_DECOMPILE_ALL=1  fetch the ~8k bodies the merge drops
+ *   --source-cache-dir=PATH GHIDRA_SOURCE_CACHE_DIR  default <projectDir>/.ghidra-mcp/source-cache
+ *
+ * The two together restore the pre-shortcut secondary phase exactly, which is
+ * how a suspected difference gets bisected.
  */
 
 import { execFileSync } from 'child_process';
@@ -31,7 +54,27 @@ import { writeFileSync, mkdirSync } from 'fs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-const PROJECT_PATH = process.env.GHIDRA_PROJECT_PATH;
+const argv = process.argv.slice(2);
+const hasFlag = (name: string) => argv.includes(name);
+const flagValue = (name: string): string | undefined => {
+  const prefix = `${name}=`;
+  const inline = argv.find(a => a.startsWith(prefix));
+  if (inline) return inline.slice(prefix.length);
+  const idx = argv.indexOf(name);
+  return idx >= 0 ? argv[idx + 1] : undefined;
+};
+
+const CODEGEN_ONLY = hasFlag('--codegen-only') || process.env.GHIDRA_CODEGEN_ONLY === '1';
+const WRITE_SNAPSHOT = !hasFlag('--no-snapshot') && process.env.GHIDRA_SNAPSHOT !== '0';
+const SNAPSHOT_MAX_AGE_HOURS = process.env.GHIDRA_SNAPSHOT_MAX_AGE_HOURS
+  ? Number(process.env.GHIDRA_SNAPSHOT_MAX_AGE_HOURS)
+  : undefined;
+const USE_SOURCE_CACHE = !hasFlag('--no-mac-cache') && process.env.GHIDRA_MAC_CACHE !== '0';
+const MAC_DECOMPILE_ALL = hasFlag('--mac-decompile-all') || process.env.GHIDRA_MAC_DECOMPILE_ALL === '1';
+
+// Codegen-only replays a snapshot, so it needs no project URL at all — the
+// snapshot records which program it came from.
+const PROJECT_PATH = process.env.GHIDRA_PROJECT_PATH ?? (CODEGEN_ONLY ? '(from snapshot)' : undefined);
 if (!PROJECT_PATH) {
   console.error('error: GHIDRA_PROJECT_PATH not set (e.g. ghidra://HOST:PORT/ProjectName)');
   process.exit(2);
@@ -40,8 +83,16 @@ if (!PROJECT_PATH) {
 // (e.g. a remote host or a container).
 const DAEMON_URL = process.env.GHIDRA_DAEMON_URL ?? 'http://localhost:8432';
 const PROGRAM_PATH = process.env.GHIDRA_PROGRAM_PATH ?? '/Game.exe';
-const PROJECT_DIR = join(__dirname, 'project');
-const OUTPUT_DIR = join(__dirname, 'output');
+// Overridable so a codegen-only replay can be pointed at a scratch tree without
+// touching the real one; both default to what they always were.
+const PROJECT_DIR = process.env.GHIDRA_PROJECT_DIR ?? join(__dirname, 'project');
+const OUTPUT_DIR = process.env.GHIDRA_OUTPUT_DIR ?? join(__dirname, 'output');
+const SNAPSHOT_DIR = flagValue('--snapshot-dir')
+  ?? process.env.GHIDRA_SNAPSHOT_DIR
+  ?? undefined;
+const SOURCE_CACHE_DIR = flagValue('--source-cache-dir')
+  ?? process.env.GHIDRA_SOURCE_CACHE_DIR
+  ?? undefined;
 
 const ERROR_LOG_PATH = join(PROJECT_DIR, 'parser-errors.log');
 try { writeFileSync(ERROR_LOG_PATH, `# Parse errors\n`); } catch { /* ok */ }
@@ -50,7 +101,7 @@ setParseErrorLogPath(ERROR_LOG_PATH);
 defaultRegistry.setEnabled('goto-cleanup', true);
 
 async function main() {
-  if (!process.env.GHIDRA_MCP_TOKEN) {
+  if (!CODEGEN_ONLY && !process.env.GHIDRA_MCP_TOKEN) {
     console.error('error: GHIDRA_MCP_TOKEN not set (run oauth-login and export it)');
     process.exit(2);
   }
@@ -58,8 +109,12 @@ async function main() {
   console.log('='.repeat(60));
   console.log('Ghidra binary reconstruction (TS)');
   console.log('='.repeat(60));
-  console.log(`Project: ${PROJECT_PATH}`);
-  console.log(`Daemon:  ${DAEMON_URL}`);
+  if (CODEGEN_ONLY) {
+    console.log('Mode:    codegen-only (no daemon, no extraction, no analysis)');
+  } else {
+    console.log(`Project: ${PROJECT_PATH}`);
+    console.log(`Daemon:  ${DAEMON_URL}`);
+  }
   console.log(`Output:  ${OUTPUT_DIR}`);
 
   const projectConfig = await loadProjectConfig(PROJECT_DIR);
@@ -85,14 +140,22 @@ async function main() {
       programPath: PROGRAM_PATH,
       decompileTimeout: 60,
       excludeLibraryCode: false,
+      codegenOnly: CODEGEN_ONLY,
+      writeSnapshotFile: WRITE_SNAPSHOT,
+      snapshotDir: SNAPSHOT_DIR,
+      snapshotMaxAgeHours: SNAPSHOT_MAX_AGE_HOURS,
+      sourceCacheDir: SOURCE_CACHE_DIR,
+      useSourceCache: USE_SOURCE_CACHE,
+      decompileAllSecondary: MAC_DECOMPILE_ALL,
       excludePatterns: [
         /^compiler$/,
         /^VisualStudio$/,
         /^CRT$/,
         /^_Wrappers$/,
         /^DName(Node|StatusNode)?$/,
+        /^pDNameNode$/,
         /^UnDecorator$/,
-        /^EH(ExceptionRecord|RegistrationNode)$/,
+        /(^|::)Replicator$/,
         /^EXCEPTION$/i,
         /^LDBL12$/,
         /^LDOUBLE$/,
@@ -102,7 +165,6 @@ async function main() {
         /^localeinfo_struct$/,
         /^threadmbcinfostruct$/,
         /^tm$/,
-        /^vtable$/,
         /^wchar_t$/,
         /^s$/,
         /^\/usr\//,

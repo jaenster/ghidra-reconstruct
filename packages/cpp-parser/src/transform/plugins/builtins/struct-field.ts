@@ -9,6 +9,7 @@
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
+import { typeNodeName } from './call-arg-cast.js';
 import type {
   ASTNode,
   Expression,
@@ -22,6 +23,7 @@ import type {
   PointerType,
   TypeNode,
   BuiltinType,
+  TypedefType,
 } from '../../../ast/nodes.js';
 import {
   createTransformer,
@@ -138,6 +140,34 @@ function getTypeSize(type: TypeNode): number | null {
   return null;
 }
 
+/** Scalar / Ghidra-primitive typedef names (a pointer to one has no members). */
+const SCALAR_TYPEDEF_RE =
+  /^(u?int(8|16|32|64)?(_t)?|s?byte|s?word|s?dword|s?qword|undefined[1-8]?|bool[18]?|float\d*|double\d*|u?char|u?short|u?long|u?longlong|wchar(_t)?|code|void|size_t|ssize_t|ptrdiff_t|u?intptr_t)$/i;
+
+/**
+ * Does this pointee have no members, so `((T*)x)->field_N` cannot compile?
+ *
+ * The answer belongs to the type model, not to a name pattern. `aggregateNames`
+ * is the set of typedef names that resolve — through Ghidra's own typedef chain —
+ * to a struct or a union; when it is supplied, a typedef outside it has no
+ * members, full stop. That is what catches the Win32 spellings a regex over
+ * Ghidra's primitives never could: `HANDLE` is `void *`, `SOCKET` is `uint`,
+ * `LPBYTE` is `BYTE *`, `PRTL_CRITICAL_SECTION_DEBUG` is a pointer — none of them
+ * name anything with a `field_10` on it.
+ *
+ * With no set supplied (a caller with no type model) the old name test stands,
+ * so the pass still recognises Ghidra's primitives and `e[A-Z]` enums.
+ */
+function hasNoMembers(t: TypeNode, aggregateNames?: ReadonlySet<string>): boolean {
+  if (t.kind === NodeKind.BuiltinType) return true;
+  if (t.kind === NodeKind.TypedefType) {
+    const n = typeNodeName((t as TypedefType).name) ?? '';
+    if (aggregateNames) return !aggregateNames.has(n);
+    return SCALAR_TYPEDEF_RE.test(n) || /^e[A-Z]/.test(n);
+  }
+  return false;
+}
+
 /**
  * Generate a field name from offset
  */
@@ -173,7 +203,10 @@ function generateFieldName(offset: number, type?: TypeNode): string {
 /**
  * Transform *(type *)(ptr + offset) to ptr->field_offset
  */
-function createStructFieldTransformer(layouts?: Map<string, StructLayout>): Transformer {
+function createStructFieldTransformer(
+  layouts?: Map<string, StructLayout>,
+  aggregateNames?: ReadonlySet<string>,
+): Transformer {
   return createKindTransformer(NodeKind.UnaryExpr, (node) => {
     const unary = node as UnaryExpr;
 
@@ -216,6 +249,40 @@ function createStructFieldTransformer(layouts?: Map<string, StructLayout>): Tran
 
     // Don't transform offset 0 (that's just a cast)
     if (offsetValue === 0) return undefined;
+
+    // `castBase->field_N` compiles only when castBase is a pointer to a struct/
+    // union, and only MEANS anything when something said so. Skip when:
+    //   - the base is raw pointer arithmetic `(int)p + n` (BinaryExpr) — a
+    //     computed address, never a struct lvalue; or
+    //   - the base carries no pointer cast of its own (see below); or
+    //   - that cast points to a scalar/enum (`((int *)x)->f`,
+    //     `((uint16_t *)x)->f`, `((char *)((int)p+n))->str_c` never compile); or
+    //   - it is not a pointer at all (`(int)p` base → "base operand is not a
+    //     pointer").
+    // The faithful `*(T*)(base + off)` deref already compiles and is what the
+    // decompiler meant. A genuine struct base (an Identifier/MemberExpr already
+    // cast to a struct pointer) is preserved as `ptr->field_N`. (Subsumes the
+    // old SUBPIECE `(char *)&x` guard.)
+    //
+    // The base must carry its OWN pointer cast. `cast.type` is the type of the
+    // VALUE at `base + off`, not the type of `base`; using it as the base's type
+    // asserts that `base` points at a `T`, which nothing established. That
+    // fabricates a member out of thin air — `*(D2PathPointStrc *)(pUnitAsInt[5]
+    // + 0x158)` became `((D2PathPointStrc*)pUnitAsInt[5])->field_158`, 86 struct
+    // lengths past the end of a 4-byte struct. It is only VISIBLE where the
+    // invented member fails to exist; wherever the fabricated struct happens to
+    // have a field at that offset it compiles and reads a different object.
+    const baseUnwrapped = unwrapParens(base);
+    if (baseUnwrapped.kind === NodeKind.BinaryExpr) return undefined;
+    if (baseUnwrapped.kind !== NodeKind.CStyleCastExpr) return undefined;
+    const effectiveType = (baseUnwrapped as CStyleCastExpr).type;
+    if (effectiveType.kind !== NodeKind.PointerType) return undefined;
+    const effPointee = (effectiveType as PointerType).pointee;
+    // A pointer-to-pointer (`(T **)x`) memberized gives `((T **)x)->field`, whose
+    // `->` yields `T *` — still a pointer, so `.field_N` on it is "request for
+    // member … in pointer type (maybe you meant ->)". Leave the faithful deref.
+    if (effPointee.kind === NodeKind.PointerType) return undefined;
+    if (hasNoMembers(effPointee, aggregateNames)) return undefined;
 
     // Determine field name
     let fieldName: string;
@@ -306,6 +373,13 @@ export interface StructFieldOptions extends PluginOptions {
   /** Known struct layouts for accurate field names */
   layouts?: Map<string, StructLayout>;
 
+  /**
+   * Every type name that resolves to a struct or a union, typedefs included.
+   * A pointee typedef outside this set has no members, so the pass leaves the
+   * faithful `*(T*)(base + off)` deref alone instead of inventing `->field_N`.
+   */
+  aggregateTypeNames?: string[];
+
   /** Minimum offset to transform (to avoid false positives) */
   minOffset?: number;
 
@@ -334,7 +408,10 @@ export const structFieldPlugin: TransformPlugin = {
     const transforms: Transformer[] = [];
 
     if (opts.offsetToField !== false) {
-      transforms.push(createStructFieldTransformer(opts.layouts));
+      const aggregateNames = opts.aggregateTypeNames
+        ? new Set(opts.aggregateTypeNames)
+        : undefined;
+      transforms.push(createStructFieldTransformer(opts.layouts, aggregateNames));
     }
 
     return sequence(...transforms);

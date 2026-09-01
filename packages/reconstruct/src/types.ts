@@ -48,6 +48,36 @@ export interface ExtractedFunction {
   ifdef?: string;
   /** Address in the other binary (for cross-reference comments) */
   crossPlatformAddress?: { address: string; platform: string };
+  /** Where a thunk jumps. Only set when `isThunk`. */
+  thunkTarget?: ThunkTarget;
+  /**
+   * Listed in an EXCLUDED namespace, and kept anyway because kept code
+   * references it and it has a real body in the binary. Extraction sets it; the
+   * codegen namespace filter reads it. See `codegen/exclusion-closure`.
+   */
+  excludedNamespaceReachable?: boolean;
+}
+
+/**
+ * The function a thunk forwards to, resolved by Ghidra's
+ * `Function.getThunkedFunction(true)` — i.e. through a chain of thunks to the
+ * function that actually has the code.
+ *
+ * This has to be extracted rather than derived: `decompile` on a thunk returns
+ * the TARGET's body under the thunk's name, and the target's name is frequently
+ * not the thunk's (`PLRSKILLS_DrawChargeTrailIfPrimary` jumps to
+ * `PLRSKILLS_CheckSkillWhipAndLeap`), so neither the body text nor the name is
+ * evidence of where it goes.
+ */
+export interface ThunkTarget {
+  /** Entry point of the target. For an import this is Ghidra's EXTERNAL address. */
+  address: string;
+  /** Target's own name — the import's name when `isExternal`. */
+  name: string;
+  /** Target's Ghidra namespace path. The DLL name when `isExternal`. */
+  namespace?: string;
+  /** True when the target is a DLL import rather than a function in this binary. */
+  isExternal: boolean;
 }
 
 export interface ExtractedParameter {
@@ -80,6 +110,16 @@ export interface ExtractedDataType {
   platform?: string;
   /** #ifdef macro guard (e.g. "D2_PLATFORM_MAC") — wraps this type in codegen */
   ifdef?: string;
+  /**
+   * Set on the shallow listing entry, cleared by the detail that replaces it.
+   * While it is set the members are UNKNOWN, which is not the same as a type
+   * that genuinely has none: `D2GameViewStrc` has 60,023 components and a
+   * ~5 MB `get_data_type` response, and when that fetch was lost the entry it
+   * left behind emitted `struct D2GameViewStrc {};` — a body that compiles and
+   * then fails at every member access. Codegen refuses to emit a type still
+   * carrying this.
+   */
+  detailUnavailable?: boolean;
 }
 
 export type DataTypeKind =
@@ -160,6 +200,8 @@ export interface ExtractedGlobal {
   platform?: string;
   /** #ifdef macro guard (e.g. "D2_PLATFORM_MAC") — wraps this global in codegen */
   ifdef?: string;
+  /** PLATE comment on the data symbol — how the name/type was established */
+  comment?: string;
 }
 
 /**

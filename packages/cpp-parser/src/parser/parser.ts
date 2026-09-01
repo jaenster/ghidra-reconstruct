@@ -482,6 +482,36 @@ export class Parser {
   }
 
   /**
+   * Consume a declarator's `[N]` suffixes and wrap `type` in the ArrayType
+   * chain they denote.
+   *
+   * C declarator order is outermost-first but the chain nests the other way:
+   * for `byte a[7][520]` the object is an array of 7 whose ELEMENT is an array
+   * of 520 bytes. Building the chain left-to-right — each new bracket wrapping
+   * what came before — yields `Array(520, Array(7, byte))`, which the emitter
+   * then prints as `[520][7]`. That is not merely an unprintable declaration:
+   * every `a[i]` in the body indexes the wrong stride.
+   *
+   * So: collect the sizes in source order, then wrap from the LAST inward.
+   * A single-bracket declarator is bit-identical either way.
+   */
+  private parseArrayDeclaratorSuffix(type: TypeNode, startLoc: SourceLocation): TypeNode {
+    const dims: (Expression | null)[] = [];
+    while (this.check(TokenKind.LeftBracket)) {
+      this.advance();
+      dims.push(this.check(TokenKind.RightBracket) ? null : this.parseExpression());
+      this.expect(TokenKind.RightBracket);
+    }
+    for (let d = dims.length - 1; d >= 0; d--) {
+      type = this.node(NodeKind.ArrayType, startLoc, {
+        elementType: type,
+        size: dims[d],
+      }) as ArrayType;
+    }
+    return type;
+  }
+
+  /**
    * Parse parameter declaration
    */
   private parseParameterDecl(): ParameterDecl {
@@ -491,16 +521,11 @@ export class Parser {
     const name = this.check(TokenKind.Identifier) ? this.parseIdentifier() : null;
 
     // Handle array syntax in parameters: int arr[], int arr[10]
-    // In C/C++, array parameters decay to pointers, but we parse them correctly
-    while (this.check(TokenKind.LeftBracket)) {
-      this.advance();
-      const size = this.check(TokenKind.RightBracket) ? null : this.parseExpression();
-      this.expect(TokenKind.RightBracket);
-      type = this.node(NodeKind.ArrayType, startLoc, {
-        elementType: type,
-        size,
-      }) as ArrayType;
-    }
+    // In C/C++, array parameters decay to pointers, but we parse them correctly.
+    // Brackets are collected in source order and the ArrayType chain is built
+    // from the LAST inward: in a C declarator the rightmost bracket names the
+    // innermost element, so `byte a[7][520]` is 7 rows of 520 bytes.
+    type = this.parseArrayDeclaratorSuffix(type, startLoc);
 
     let defaultValue: Expression | null = null;
     if (this.match(TokenKind.Equal)) {
@@ -525,15 +550,7 @@ export class Parser {
     name: Identifier | QualifiedId
   ): VariableDecl {
     // Handle array suffix
-    while (this.check(TokenKind.LeftBracket)) {
-      this.advance();
-      const size = this.check(TokenKind.RightBracket) ? null : this.parseExpression();
-      this.expect(TokenKind.RightBracket);
-      type = this.node(NodeKind.ArrayType, startLoc, {
-        elementType: type,
-        size,
-      }) as ArrayType;
-    }
+    type = this.parseArrayDeclaratorSuffix(type, startLoc);
 
     let initializer: Expression | InitListExpr | null = null;
     if (this.match(TokenKind.Equal)) {

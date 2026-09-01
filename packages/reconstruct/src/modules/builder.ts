@@ -71,6 +71,17 @@ export function buildModuleGraph(input: BuildModuleGraphInput): ModuleGraph {
 
   const implExt = options.format === 'c' ? '.c' : '.cpp';
 
+  // Indexes for the incomplete-type impl-include closure (see the closure block
+  // in the per-module loop below).
+  const structByName = new Map<string, ExtractedStruct>();
+  for (const dt of dataTypes) {
+    if (dt.kind === 'STRUCTURE' || dt.kind === 'UNION') {
+      structByName.set(dt.name, dt as ExtractedStruct);
+    }
+  }
+  const globalTypeByName = new Map<string, string>();
+  for (const g of globals) globalTypeByName.set(g.name, g.dataType);
+
   // Register implicit modules
   if (sharedEnumTypes && sharedEnumTypes.size > 0) {
     graph.createModule({ id: 'd2_enums.h', implPath: '', unitName: '_enums' });
@@ -178,6 +189,66 @@ export function buildModuleGraph(input: BuildModuleGraphInput): ModuleGraph {
           graph.addDependency(headerPath, stripped, strength);
         }
         mod.globals.push(g);
+      }
+    }
+
+    // Incomplete-type impl-include closure. A function body routinely dereferences
+    // a struct's POINTER field and accesses the pointee by value (e.g.
+    // `gDataTables->pMonStats[i].field`), but that pointee type gets no dependency
+    // edge of its own — leaving it forward-declared and the impl failing with
+    // "invalid use of incomplete type". Collect the struct types this module's
+    // bodies actually reach (referenced globals scanned from the decompiled body,
+    // plus params/returns/owned fields) and add an impl-level (by-pointer) dep on
+    // each of THEIR pointer-field types so the impl full-includes them. One level
+    // only; impl-only, so it can never create a header cycle.
+    const reachedStructs = new Set<string>();
+    const noteType = (typeStr: string) => {
+      const n = stripTypeName(typeStr);
+      if (n && !isPlatformOrBuiltinType(n) && !ownedTypeNames.has(n)) reachedStructs.add(n);
+    };
+    for (const func of unitFunctions) {
+      noteType(func.returnType);
+      for (const p of func.parameters) noteType(p.dataType);
+      // Local-variable struct types are not a dependency source anywhere else, so
+      // a by-value local (e.g. `D2GSPacketSrv0x22_0x23 packet;`) leaves its type
+      // undeclared in the impl — failing the declaration and cascading to every
+      // `packet.field` use. Impl-include the local's own struct type, and feed it
+      // into the pointer-field closure below.
+      for (const lv of func.localVariables ?? []) {
+        const ln = stripTypeName(lv.dataType);
+        if (ln && structByName.has(ln) && !ownedTypeNames.has(ln)) {
+          graph.addDependency(headerPath, ln, 'by-pointer');
+        }
+        noteType(lv.dataType);
+      }
+      const body = func.decompiled;
+      if (body) {
+        for (const id of body.match(/[A-Za-z_]\w*/g) ?? []) {
+          const gt = globalTypeByName.get(id);
+          if (gt) noteType(gt);
+        }
+      }
+    }
+    for (const dt of mod.ownedTypes) {
+      if ((dt.kind === 'STRUCTURE' || dt.kind === 'UNION') && (dt as ExtractedStruct).fields) {
+        for (const f of (dt as ExtractedStruct).fields!) noteType(f.dataType);
+      }
+    }
+    for (const name of reachedStructs) {
+      const s = structByName.get(name);
+      if (!s) continue;
+      // The reached struct ITSELF may be deref'd by-value: a body that does
+      // `gBattleNet->field` (gBattleNet is a global D2BattleNetEventCallbackTable*)
+      // needs the pointee complete, but the global gives only a by-pointer edge
+      // (forward-decl). Impl-include the reached struct so it is fully defined.
+      if (!ownedTypeNames.has(name)) graph.addDependency(headerPath, name, 'by-pointer');
+      if (!s.fields) continue;
+      for (const f of s.fields) {
+        if (!(f.dataType.includes('*') || f.dataType.includes('&'))) continue;
+        const pn = stripTypeName(f.dataType);
+        if (pn && structByName.has(pn) && !ownedTypeNames.has(pn)) {
+          graph.addDependency(headerPath, pn, 'by-pointer');
+        }
       }
     }
 

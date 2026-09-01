@@ -11,6 +11,7 @@ import {
   MethodConversionRegistry,
   createMethodConversionRegistry,
   applyMethodConversions,
+  detectMethodConversionsFromTags,
 } from '../methods/index.js';
 import { normalizeAddress } from '../config/loader.js';
 import { generateHeader } from '../codegen/header.js';
@@ -659,5 +660,80 @@ describe('config validation', () => {
       unlink(badPath2).catch(() => {}),
       unlink(badPath3).catch(() => {}),
     ]);
+  });
+});
+
+describe('generateFunctionImplementation — variadic functions emit "..."', () => {
+  it('appends ", ..." to a variadic function signature', () => {
+    const fn = makeFunc('SRVLog', '0x0052be20', [
+      makeParam('nParam', 'int32_t', 0),
+      makeParam('szText', 'char*', 1),
+    ], 'void SRVLog(int32_t nParam, char *szText)\n{\n  return;\n}');
+    fn.hasVarArgs = true;
+    const out = generateFunctionImplementation(fn, undefined, defaultOptions);
+    assert.ok(/SRVLog\(int32_t nParam, char\s*\*\s*szText, \.\.\.\)/.test(out), `expected variadic signature, got:\n${out.split('\n').find(l => l.includes('SRVLog'))}`);
+  });
+
+  it('emits "..." for a variadic function with no fixed params', () => {
+    const fn = makeFunc('vlog', '0x00410610', []);
+    fn.hasVarArgs = true;
+    const out = generateFunctionImplementation(fn, undefined, defaultOptions);
+    assert.ok(/vlog\(\.\.\.\)/.test(out), `expected vlog(...), got:\n${out.split('\n').find(l => l.includes('vlog'))}`);
+  });
+});
+
+describe('generateFunctionImplementation — param-shadows-type body rewrite', () => {
+  it('renames a body reference to a param whose name equals its type', () => {
+    const fn = makeFunc('DoLevel', '0x00677180', [
+      makeParam('pLevel', 'D2DrlgLevelStrc*', 0),
+      makeParam('fpLevelDataFn1', 'fpLevelDataFn1', 1),
+    ], 'void DoLevel(D2DrlgLevelStrc *pLevel, fpLevelDataFn1 fpLevelDataFn1)\n{\n  int idx = (int)fpLevelDataFn1;\n  return;\n}');
+    const out = generateFunctionImplementation(fn, undefined, defaultOptions);
+    // signature + body both use the disambiguated name; no bare type-as-value left
+    assert.ok(out.includes('nfpLevelDataFn1'), 'expected renamed identifier in output');
+    assert.ok(!/\(int\)\s*fpLevelDataFn1\b/.test(out), 'body still casts the bare type name');
+  });
+});
+
+describe('detectMethodConversionsFromTags — double-pointer receiver guard', () => {
+  it('converts a method whose receiver is a single pointer (T*)', () => {
+    const fn = makeFunc('DRLG_Init', '0x00661000', [
+      makeParam('pDrlg', 'D2DrlgStrc*', 0),
+      makeParam('nAct', 'int32_t', 1),
+    ]);
+    fn.tags = [{ type: 'method', data: 'D2DrlgStrc' }];
+    const entries = detectMethodConversionsFromTags([fn]);
+    assert.strictEqual(entries.length, 1);
+    assert.strictEqual(entries[0].className, 'D2DrlgStrc');
+  });
+
+  it('does NOT convert a D2QuestDataStrc-tagged quest handler (fn-ptr table entry)', () => {
+    const fn = makeFunc('Q08_Callback_11', '0x00598640', [
+      makeParam('pQuestData', 'D2QuestDataStrc *', 0),
+      makeParam('pQuestArgs', 'D2QuestArgStrc *', 1),
+    ]);
+    fn.tags = [{ type: 'method', data: 'D2QuestDataStrc' }];
+    const entries = detectMethodConversionsFromTags([fn]);
+    assert.strictEqual(entries.length, 0);
+  });
+
+  it('does NOT convert when the receiver is a double pointer (T**)', () => {
+    const fn = makeFunc('ReturnMonsterRegionEntryForLevel', '0x00547bb0', [
+      makeParam('ppMonsterRegion', 'D2MonsterRegionStrc**', 0),
+      makeParam('eLevel', 'eD2LevelId', 1),
+    ]);
+    fn.tags = [{ type: 'method', data: 'D2MonsterRegionStrc' }];
+    const entries = detectMethodConversionsFromTags([fn]);
+    assert.strictEqual(entries.length, 0);
+  });
+
+  it('still converts a STATIC method even with a double-pointer first param', () => {
+    const fn = makeFunc('AllocFromSlot', '0x00547cc0', [
+      makeParam('ppSlot', 'D2DrlgFileStrc**', 0),
+    ]);
+    fn.tags = [{ type: 'method', data: 'D2DrlgFileStrc,static' }];
+    const entries = detectMethodConversionsFromTags([fn]);
+    assert.strictEqual(entries.length, 1);
+    assert.strictEqual(entries[0].thisParam, -1);
   });
 });

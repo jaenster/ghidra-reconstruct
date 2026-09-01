@@ -24,6 +24,7 @@ import type {
   IntegerLiteralExpr,
   ParenExpr,
 } from '../../../ast/nodes.js';
+import { Expr, Type } from '../../../ast/factory.js';
 import { createTransformer, type Transformer } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions, InjectionTransformer, InjectionContext } from '../types.js';
 import { createInlineFunction } from '../injection.js';
@@ -42,6 +43,24 @@ function createIntLiteral(value: bigint, original: ASTNode): IntegerLiteralExpr 
     raw: value.toString(),
     suffix: '',
     base: 10,
+    location: original.location,
+    leadingTrivia: [],
+    trailingTrivia: [],
+  };
+}
+
+/**
+ * A hex integer literal — the readable spelling for a bit mask. The `u` suffix
+ * is not decoration: without it `signed-literal` reads `0xffffffff` as -1, and a
+ * mask of -1 widens to all-ones instead of truncating to the low half.
+ */
+function createHexLiteral(value: bigint, original: ASTNode): IntegerLiteralExpr {
+  return {
+    kind: NodeKind.IntegerLiteral,
+    value,
+    raw: `0x${value.toString(16)}u`,
+    suffix: 'u',
+    base: 16,
     location: original.location,
     leadingTrivia: [],
     trailingTrivia: [],
@@ -134,10 +153,31 @@ function createConcatTransformer(options: ConcatTransformOptions = {}): Transfor
       // Calculate shift amount: low bytes * 8 bits per byte
       const shiftAmount = BigInt(lowBytes * 8);
 
-      // Build: (high << shift) | low
+      // Build: ((T)high << shift) | ((T)low & mask), T the assembled width.
+      //
+      // Both casts are load-bearing. Without the one on the high half,
+      // `CONCAT44(0x29a, p)` expands to `0x29a << 32` — a 32-bit shift by 32,
+      // which is undefined and in practice yields zero, so the whole high dword
+      // is silently lost. Without the mask on the low half, a signed operand
+      // sign-extends across the join. And either operand can be a POINTER —
+      // packing a unit pointer beside a tag into a 64-bit seed is what the game
+      // actually does — which is `invalid operands ... to binary '|'` until the
+      // cast makes the arithmetic integral, exactly as the original source had to.
+      const resultType = Type.typedef(cTypeForBytes(highBytes + lowBytes));
+      const lowMask = (1n << BigInt(lowBytes * 8)) - 1n;
       const shiftLiteral = createIntLiteral(shiftAmount, node);
-      const shifted = createBinaryExpr(highArg, '<<', shiftLiteral, node);
-      const result = createBinaryExpr(shifted, '|', lowArg, node);
+      const highCast = createParenExpr(Expr.cast(resultType, highArg), node);
+      const lowCast = createParenExpr(
+        createBinaryExpr(
+          createParenExpr(Expr.cast(resultType, lowArg), node),
+          '&',
+          createHexLiteral(lowMask, node),
+          node,
+        ),
+        node,
+      );
+      const shifted = createBinaryExpr(highCast, '<<', shiftLiteral, node);
+      const result = createBinaryExpr(shifted, '|', lowCast, node);
 
       // Optionally wrap in parentheses for precedence safety
       if (wrapInParens) {

@@ -1,15 +1,24 @@
 /**
  * FourCC (Four Character Code) Literal Simplification Plugin
  *
- * Transforms Ghidra's wide character literal representation of 4-byte character
- * codes (like Diablo 2 item codes) to readable string literals.
+ * Ghidra spells a 32-bit character code as a WIDE character literal:
+ * `L'\x20646c67'` for `'gld '`. That is not a wide character. `wchar_t` is 16
+ * bits on this target, so the literal holds one code unit and the top half is
+ * dropped: GCC evaluates `L'\x20736831'` as 26673, not 544434225, and says so
+ * only in a warning that `-w` erases. clang rejects it outright.
+ *
+ * Silent truncation is worse than a wrong number here, because it is not
+ * injective: `'g33'`/`'g34'`, `'qf1'`/`'qf2'`, `'1hs'`/`'1ht'` and
+ * `'bkd'`/`'bks'` all collapse onto the same 16 bits, so a multi-way test on
+ * item codes degenerates into fewer branches against the wrong values.
  *
  * Transforms:
- * - (char [4])L'\x20736831'  →  "1hs "   (little-endian decode)
- * - (char (*)[4])L'\x20687468'  →  "hth " (item code)
+ * - L'\x20646c67'            →  0x20646c67   (the value the machine had)
+ * - (char [4])L'\x20736831'  →  "1hs "       (little-endian decode)
+ * - (char (*)[4])L'\x20687468'  →  "hth "    (item code)
  *
- * These patterns commonly appear in game code where item/type codes are
- * compared as 32-bit integers for efficiency.
+ * A genuine wide character — one that fits a code unit — is left exactly as it
+ * is: `L'\0'` and `L'A'` are what they say.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -18,6 +27,7 @@ import type {
   CStyleCastExpr,
   ArrayType,
   CharLiteralExpr,
+  IntegerLiteralExpr,
   StringLiteralExpr,
   TypeNode,
 } from '../../../ast/nodes.js';
@@ -61,6 +71,37 @@ function isChar4ArrayType(type: TypeNode): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * The largest value one code unit of an encoding-prefixed character literal can
+ * hold on the target. `wchar_t` and `char16_t` are both 16 bits under
+ * i686-w64-mingw32; `char32_t` is 32 and never truncates.
+ */
+const CODE_UNIT_MAX: Record<string, number> = {
+  L: 0xffff,
+  u: 0xffff,
+  U: 0xffffffff,
+};
+
+/** Does this literal hold more than one code unit of its own encoding? */
+function overflowsCodeUnit(lit: CharLiteralExpr): boolean {
+  const max = CODE_UNIT_MAX[lit.prefix];
+  return max !== undefined && lit.value > max;
+}
+
+/** The same 32-bit value, spelled as the integer constant it actually is. */
+function asIntegerLiteral(lit: CharLiteralExpr): IntegerLiteralExpr {
+  return {
+    kind: NodeKind.IntegerLiteral,
+    value: BigInt(lit.value),
+    suffix: '',
+    base: 16,
+    raw: '0x' + lit.value.toString(16),
+    location: lit.location,
+    leadingTrivia: lit.leadingTrivia || [],
+    trailingTrivia: lit.trailingTrivia || [],
+  };
 }
 
 /**
@@ -154,6 +195,14 @@ function createFourCCTransformer(options: FourCCOptions = {}): Transformer {
 
   return createTransformer({
     visitNode(node: ASTNode): ASTNode | undefined {
+      // A prefixed character literal too wide for one code unit is not a
+      // character at all — it is Ghidra's spelling of a multi-character
+      // constant, and left alone the compiler keeps only its bottom half.
+      if (node.kind === NodeKind.CharLiteral) {
+        const lit = node as CharLiteralExpr;
+        return overflowsCodeUnit(lit) ? asIntegerLiteral(lit) : undefined;
+      }
+
       // Look for C-style cast expressions
       if (node.kind !== NodeKind.CStyleCastExpr) {
         return undefined;
@@ -166,27 +215,28 @@ function createFourCCTransformer(options: FourCCOptions = {}): Transformer {
         return undefined;
       }
 
-      // Check if the operand is a wide char literal (L'...')
-      if (cast.expression.kind !== NodeKind.CharLiteral) {
-        return undefined;
-      }
-
-      const charLit = cast.expression as CharLiteralExpr;
-
-      // Must have L prefix (wide char)
-      if (charLit.prefix !== 'L') {
-        return undefined;
-      }
-
-      // Get the numeric value - either from parsed value or raw hex
+      // The operand is the wide char literal Ghidra wrote — or, since children
+      // are visited first, the integer the rule above has already made of it.
       let hexValue: number | null = null;
 
-      // If the value is already a number (parsed from hex), use it directly
-      if (typeof charLit.value === 'number' && charLit.value > 0x7F) {
-        hexValue = charLit.value;
-      } else if (charLit.raw) {
-        // Try to extract from raw representation
-        hexValue = extractHexValue(charLit.raw);
+      if (cast.expression.kind === NodeKind.IntegerLiteral) {
+        const int = cast.expression as IntegerLiteralExpr;
+        if (int.value > 0x7Fn) hexValue = Number(int.value);
+      } else if (cast.expression.kind === NodeKind.CharLiteral) {
+        const charLit = cast.expression as CharLiteralExpr;
+        // Must have L prefix (wide char)
+        if (charLit.prefix !== 'L') {
+          return undefined;
+        }
+        // If the value is already a number (parsed from hex), use it directly
+        if (typeof charLit.value === 'number' && charLit.value > 0x7F) {
+          hexValue = charLit.value;
+        } else if (charLit.raw) {
+          // Try to extract from raw representation
+          hexValue = extractHexValue(charLit.raw);
+        }
+      } else {
+        return undefined;
       }
 
       if (hexValue === null) {
@@ -214,7 +264,8 @@ function createFourCCTransformer(options: FourCCOptions = {}): Transformer {
 export const fourccLiteralPlugin: TransformPlugin = {
   id: 'fourcc-literal',
   name: 'FourCC Literal Simplification',
-  description: 'Transforms (char[4])L\'\\xABCD\' to readable "abcd" strings',
+  description:
+    'Spells a >16-bit `L\'\\xABCD\'` as the integer it is, and decodes a char[4] cast of one to "abcd"',
   version: '1.0.0',
   defaultEnabled: true,
   priority: 25, // Early in pipeline, before other cleanups

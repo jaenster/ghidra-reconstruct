@@ -10,6 +10,11 @@
 // =============================================================================
 
 /** Standard C/C++ types from <cstdint>, <cstddef>, and language primitives */
+import {
+  generateExcludedSymbolDecls, EXTRA_WIN32_SDK_HEADERS,
+  EXCLUDED_SYMBOL_DECLS, CRT_DECLARED_FUNCTION_NAMES, declaredIdentifier,
+} from './crt-mapping.js';
+
 export const STANDARD_C_TYPES = new Set([
   // Language primitives
   'void', 'bool', 'char', 'short', 'int', 'long', 'float', 'double',
@@ -57,6 +62,19 @@ export const WINDOWS_TYPES = new Set([
   '_SECURITY_ATTRIBUTES', '_SYSTEMTIME',
   'OVERLAPPED', 'GUID', 'SECURITY_ATTRIBUTES', 'WIN32_FIND_DATA',
   'LPPALETTEENTRY', 'PALETTEENTRY',
+  // Tool Help and PSAPI entry structs. `<tlhelp32.h>` and `<psapi.h>` are both
+  // in EXTRA_WIN32_SDK_HEADERS, so these names are already defined by the time
+  // any translation unit is compiled; without them here isPlatformOrBuiltinType
+  // says false and the emitter writes a SECOND definition of the same tag, which
+  // is a redefinition in every TU rather than an error in the four that use them.
+  'PROCESSENTRY32', 'PROCESSENTRY32W', 'tagPROCESSENTRY32', 'tagPROCESSENTRY32W',
+  'LPPROCESSENTRY32', 'LPPROCESSENTRY32W',
+  'MODULEENTRY32', 'MODULEENTRY32W', 'tagMODULEENTRY32', 'tagMODULEENTRY32W',
+  'LPMODULEENTRY32', 'LPMODULEENTRY32W',
+  'THREADENTRY32', 'tagTHREADENTRY32', 'LPTHREADENTRY32',
+  'HEAPENTRY32', 'tagHEAPENTRY32', 'LPHEAPENTRY32',
+  'HEAPLIST32', 'tagHEAPLIST32', 'LPHEAPLIST32',
+  'MODULEINFO', '_MODULEINFO', 'LPMODULEINFO',
   // PE header types
   'IMAGE_DOS_HEADER', 'IMAGE_NT_HEADERS', 'IMAGE_SECTION_HEADER',
   'IMAGE_DEBUG_DIRECTORY', 'IMAGE_RESOURCE_DIRECTORY',
@@ -75,6 +93,26 @@ export const WINDOWS_TYPES = new Set([
   'tagWINDOWPLACEMENT', 'WINDOWPLACEMENT', 'IID',
   '_Unwind_Reason_Code', '_Unwind_Exception',
 ]);
+
+/**
+ * The Glide enumeration typedefs, every one of them `unsigned int`.
+ *
+ * Listed once, because two places need the same answer: the platform header
+ * DECLARES them, and the data-initializer path has to know that a slot spelled
+ * with one of these names is unsigned. Ghidra models several of them as a
+ * typedef over a SIGNED base and hands back `-0x1` for the all-ones datum in
+ * `GrTexInfo::aspectRatioLog2`; the value is right and the spelling is what
+ * has to say so.
+ */
+export const GLIDE_UNSIGNED_ENUM_TYPEDEFS: readonly string[] = [
+  'GrAlphaBlendFnc_t', 'GrAlpha_t', 'GrAspectRatio_t', 'GrBuffer_t',
+  'GrChipID_t', 'GrChromakeyMode_t', 'GrCmpFnc_t', 'GrColorFormat_t',
+  'GrColor_t', 'GrCombineFactor_t', 'GrCombineFunction_t', 'GrCombineLocal_t',
+  'GrCombineOther_t', 'GrContext_t', 'GrCoordinateSpaceMode_t', 'GrDepthBufferMode_t',
+  'GrDitherMode_t', 'GrEnableMode_t', 'GrLOD_t', 'GrLfbWriteMode_t',
+  'GrLock_t', 'GrMipMapMode_t', 'GrOriginLocation_t', 'GrScreenRefresh_t',
+  'GrScreenResolution_t', 'GrTexTable_t', 'GrTextureFilterMode_t', 'GrTextureFormat_t',
+];
 
 /** 3dfx Glide API types (used by Diablo 2's Glide renderer) */
 export const GLIDE_TYPES = new Set([
@@ -136,6 +174,17 @@ const EH_INTERNAL_TYPES = new Set<string>([
   'CatchableType', '_s_CatchableType',
   'CatchableTypeArray', '_s_CatchableTypeArray',
   'PMD', '_PMD',
+  // MSVC RTTI metadata (the `??_R*` object-locator chain the compiler emits for
+  // every polymorphic class). Ghidra recovers these from the statically-linked
+  // CRT into root category `/`, exactly like the EH internals above, and no real
+  // header declares them either — the C++ compiler regenerates the whole chain
+  // from the class definitions, so re-emitting Ghidra's copies is both
+  // uncompilable and redundant.
+  'RTTICompleteObjectLocator', '_s__RTTICompleteObjectLocator',
+  'RTTIClassHierarchyDescriptor', '_s__RTTIClassHierarchyDescriptor',
+  'RTTIBaseClassDescriptor', '_s__RTTIBaseClassDescriptor',
+  'RTTIBaseClassArray', '_s__RTTIBaseClassArray',
+  'TypeDescriptor', '_TypeDescriptor',
 ]);
 
 /** System-header category path, e.g. `/winsock.h`, `/inaddr.h`, `/WinDef.h` */
@@ -147,6 +196,30 @@ const SYSTEM_HEADER_CATEGORY_RE = /^\/[A-Za-z0-9_]+\.h$/;
  * real header (windows.h/CRT) — so anything typed as one cannot compile and
  * must be dropped, not merely left to the SDK.
  */
+/**
+ * Ghidra's CPUID pseudo-operations, one per leaf. These are decompiler output,
+ * not symbols in the binary, so nothing but the platform header can declare them.
+ */
+const GHIDRA_CPUID_PSEUDO_OPS = [
+  'cpuid',
+  'cpuid_basic_info',
+  'cpuid_Version_info',
+  'cpuid_cache_tlb_info',
+  'cpuid_serial_info',
+  'cpuid_Deterministic_Cache_Parameters_info',
+  'cpuid_MONITOR_MWAIT_Features_info',
+  'cpuid_Thermal_Power_Management_info',
+  'cpuid_Extended_Feature_Enumeration_info',
+  'cpuid_Direct_Cache_Access_info',
+  'cpuid_Architectural_Performance_Monitoring_info',
+  'cpuid_Extended_Topology_info',
+  'cpuid_Processor_Extended_States_info',
+  'cpuid_Quality_of_Service_info',
+  'cpuid_brand_part1_info',
+  'cpuid_brand_part2_info',
+  'cpuid_brand_part3_info',
+] as const;
+
 export function isMsvcEhInternal(name: string): boolean {
   return EH_INTERNAL_TYPES.has(name);
 }
@@ -168,15 +241,53 @@ export function isMsvcEhInternal(name: string): boolean {
  *   2. its name is a known MSVC C++ exception-handling internal (these sit at
  *      root category `/`, shared with game types, so they need a name-set).
  */
+/**
+ * Winsock types Ghidra filed under the ROOT category instead of `/winsock.h`,
+ * so the category test cannot see them. Their siblings — `sockaddr`, `hostent`,
+ * `fd_set`, `timeval`, `WSAData` — all carry `/winsock.h` and are guarded
+ * correctly; `sockaddr_in` alone lost its attribution, and emitting an
+ * unguarded definition of it collides with `<winsock2.h>` in every translation
+ * unit that reaches it (178 diagnostics when it first became reachable).
+ *
+ * The authoritative fix is in Ghidra — move the type to `/winsock.h` — at which
+ * point this entry becomes redundant but stays harmless.
+ */
+const ROOT_CATEGORY_WINSOCK_TYPES = new Set<string>([
+  'sockaddr_in',
+]);
+
 export function isLibraryType(name: string, category: string): boolean {
   if (SYSTEM_HEADER_CATEGORY_RE.test(category)) return true;
   if (EH_INTERNAL_TYPES.has(name)) return true;
+  if (ROOT_CATEGORY_WINSOCK_TYPES.has(name)) return true;
   return false;
 }
 
 // =============================================================================
 // Type Checking
 // =============================================================================
+
+/**
+ * Types the platform headers DEFINE, not merely name — the type-level counterpart
+ * of `platformDeclaredFunctionNames()`. Emitting our own definition of one of
+ * these is a redefinition, not a fallback, because `d2_platform.h` has already
+ * pulled the real one in.
+ *
+ * `IUnknown` is the proven case: mingw's `unknwnbase.h:75` defines it as a C++
+ * interface class whenever `CINTERFACE` is not set, which is every translation
+ * unit here, and Ghidra's own `IUnknown` (the C shape, `{ IUnknownVtbl* lpVtbl; }`)
+ * collided with it in 12 files. Nothing in the tree reads a field through an
+ * `IUnknown`, so the platform's is a drop-in.
+ *
+ * Deliberately NOT extended to the DirectDraw/DirectSound/Direct3D interfaces or
+ * to `IUnknownVtbl`: the C++ branch of those headers defines only the interface
+ * classes, so `IUnknownVtbl` and the `IDirect*Vtbl` shapes have no platform
+ * definition at all and ours is the only one. Add a name here only after seeing
+ * it collide.
+ */
+const PLATFORM_DEFINED_TYPES = new Set<string>([
+  'IUnknown',
+]);
 
 /**
  * Check if a type name is a platform, standard, or Ghidra artifact type
@@ -187,6 +298,7 @@ export function isPlatformOrBuiltinType(name: string): boolean {
     || WINDOWS_TYPES.has(name)
     || GHIDRA_ARTIFACT_TYPES.has(name)
     || GLIDE_TYPES.has(name)
+    || PLATFORM_DEFINED_TYPES.has(name)
     // Ghidra internal anonymous types: _struct_NNNN, _union_NNNN
     || /^_(struct|union)_\d+$/.test(name);
 }
@@ -210,18 +322,35 @@ export function isStructType(type: string): boolean {
 /**
  * If type is a pointer and value is a non-zero integer literal, wrap in a cast.
  * e.g. type="void*", value="0x006e3598" → "(void*)0x006e3598"
+ *
+ * A pointer spelled through a TYPEDEF has no `*` to find, so `LPCSTR`, `HANDLE`
+ * and `LPSERVICE_STATUS` slots used to take the bare word and become a compile
+ * error - the machine really does store four bytes there, and the cast is the
+ * only C++ that says so without changing the address.
  */
 export function castPointerInitializer(type: string, value: string): string {
-  if (!type.includes('*')) return value;
+  const named = type.replace(/\b(const|volatile|struct|union)\b/g, '').replace(/\s+/g, ' ').trim();
+  if (!type.includes('*') && !isPointerTypedefName(named)) return value;
   // 0 / 0x0 / nullptr are fine without cast
   if (value === '0' || value === '0x0' || value === 'nullptr') return value;
   // Non-zero integer literal needs cast
   if (/^0x[0-9a-fA-F]+$/.test(value) || /^[0-9]+$/.test(value)) {
-    // Use the base pointer type for the cast
-    const castType = type.replace(/\s+/g, ' ').trim();
+    // Use the base pointer type for the cast. The initializer may land inside a
+    // namespace block whose own name shadows the type, so spell it root-qualified.
+    const castType = rootQualifyShadowedType(type.replace(/\s+/g, ' ').trim());
     return `(${castType})${value}`;
   }
   return value;
+}
+
+/**
+ * A single-character scalar, whose Ghidra `value` is the CHARACTER, not a number.
+ * `CHAR_A_006ed5ac` is declared `char` and valued `A`; read as a number that is
+ * the hex digit 0xA, and the emitted byte becomes 10 where the binary holds 65.
+ */
+export function isCharacterValueType(type: string): boolean {
+  const t = type.replace(/\b(const|volatile|unsigned|signed)\b/g, '').replace(/\s+/g, ' ').trim();
+  return t === 'char' || t === 'CHAR' || t === 'int8_t' || t === 'uint8_t' || t === 'byte';
 }
 
 /**
@@ -241,6 +370,13 @@ export function normalizeDataValue(value: string): string {
   // (Ghidra reports addresses and data values without 0x prefix)
   if (/^[0-9a-fA-F]{4,}$/.test(value) && (/[a-fA-F]/.test(value) || /^0[0-9]/.test(value))) {
     return `0x${value}`;
+  }
+  // Ghidra RENDERS some data rather than valuing it: `<Icon-Image>` for an icon
+  // resource, `align(1)` for section padding. That is listing text, not a C
+  // expression — emitted verbatim it parses as undeclared identifiers
+  // ('Icon' / 'Image' / 'align' was not declared in this scope).
+  if (/^<.*>$/.test(value) || /^align\(\d+\)$/.test(value)) {
+    return '0';
   }
   return value;
 }
@@ -263,6 +399,100 @@ const UNDEFINED_TYPE_MAP: Record<string, string> = {
 };
 
 /**
+ * Ghidra spellings of Diablo II's own 16-bit character.
+ *
+ * The game is Unicode internally: its strings are 16-bit code units. Ghidra
+ * carries that as `ushort` in decompiled bodies but as `WCHAR`, `wchar_t`,
+ * `wchar16` or `unicode` in the prototypes and struct layouts that were typed
+ * by hand. `ushort` normalizes to `uint16_t` (type-normalize, on bodies), so a
+ * prototype spelled `WCHAR *` and a body spelled `uint16_t *` are two distinct
+ * C++ types at every call — even though on i686 they are the same 16 bits.
+ *
+ * D2's own APIs therefore converge on `uint16_t`, the one spelling the bodies
+ * can produce. `WCHAR`/`wchar_t` stay untouched for the real Win32 and CRT
+ * declarations (windows.h, wcslen, MessageBoxW), which need the true wchar_t.
+ */
+const D2_WIDE_CHAR_TYPES = ['WCHAR', 'wchar_t', 'wchar16', 'unicode'] as const;
+const D2_WIDE_CHAR_RE = new RegExp(`\\b(?:${D2_WIDE_CHAR_TYPES.join('|')})\\b`, 'g');
+
+/**
+ * Rewrite every Ghidra spelling of D2's 16-bit character to `uint16_t`.
+ *
+ * Applies to the base type inside any pointer/array/const decoration:
+ * `WCHAR *` → `uint16_t *`, `wchar_t * *` → `uint16_t * *`, `WCHAR[16]` →
+ * `uint16_t[16]`.
+ */
+export function normalizeWideCharType(type: string): string {
+  return type.replace(D2_WIDE_CHAR_RE, 'uint16_t');
+}
+
+/**
+ * Ghidra BUILT_IN types that describe how the LISTING renders a run of bytes,
+ * not a C type: `string` is "String (fixed length)", `IconResource` is "Icon
+ * stored as a Resource". They have no definition anywhere, so the emitted tree
+ * carries `struct IconResource;` forward declarations that nothing completes
+ * ("variable has initializer but incomplete type") and `static string *` where
+ * gcc answers "'string' does not name a type" and every later name in that file
+ * cascades off it.
+ *
+ * The bytes are what is real. A Ghidra string is a run of `char`; a resource is
+ * an opaque run of bytes. Ghidra is not wrong here — it is describing data, and
+ * this is that description in C++.
+ */
+const GHIDRA_LISTING_BUILTINS: Record<string, string> = {
+  string: 'char',
+  TerminatedCString: 'char',
+  IconResource: 'uint8_t',
+  GroupIconResource: 'uint8_t',
+  CursorResource: 'uint8_t',
+  BitmapResource: 'uint8_t',
+  MenuResource: 'uint8_t',
+  HTMLResource: 'uint8_t',
+  StringResource: 'uint8_t',
+  MessageResource: 'uint8_t',
+  VersionResource: 'uint8_t',
+};
+
+const GHIDRA_LISTING_BUILTIN_RE = new RegExp(
+  `\\b(?:${Object.keys(GHIDRA_LISTING_BUILTINS).join('|')})\\b`, 'g'
+);
+
+/**
+ * PE-image types Ghidra applies to the headers it parsed. They are structures in
+ * the database, but nothing in the tree defines them and windows.h's versions do
+ * not agree field for field, so they are carried as their bytes. Kept out of
+ * GHIDRA_LISTING_BUILTINS on purpose: that map drives a word-boundary rewrite
+ * over every type spelling, and these must only ever match a whole type.
+ */
+const GHIDRA_IMAGE_ARTIFACTS: Record<string, string> = {
+  Alignment: 'uint8_t',
+  IMAGE_DOS_HEADER: 'uint8_t',
+  IMAGE_DEBUG_DIRECTORY: 'uint8_t',
+  IMAGE_DIRECTORY_ENTRY_EXPORT: 'uint8_t',
+  IMAGE_RESOURCE_DIRECTORY: 'uint8_t',
+  VS_VERSION_INFO: 'uint8_t',
+  IMAGE_NT_HEADERS: 'uint8_t',
+  IMAGE_SECTION_HEADER: 'uint8_t',
+};
+
+/** Whole-type match only - see GHIDRA_IMAGE_ARTIFACTS. */
+export function imageArtifactElementType(type: string | undefined): string | undefined {
+  return type ? GHIDRA_IMAGE_ARTIFACTS[type.trim()] : undefined;
+}
+
+/** The byte spelling a listing BUILT_IN stands for, or undefined. */
+export function listingBuiltinElementType(type: string | undefined): string | undefined {
+  if (!type) return undefined;
+  const base = type.replace(/\s*[*&]+\s*$/, '').replace(/\[\d+\]\s*$/, '').trim();
+  return GHIDRA_LISTING_BUILTINS[base] ?? GHIDRA_IMAGE_ARTIFACTS[base];
+}
+
+/** Rewrite every listing BUILT_IN inside a type spelling to what it stands for. */
+export function normalizeListingBuiltinType(type: string): string {
+  return type.replace(GHIDRA_LISTING_BUILTIN_RE, m => GHIDRA_LISTING_BUILTINS[m]);
+}
+
+/**
  * Normalize Ghidra `undefined[N]` types in function signatures to C equivalents.
  *
  * Handles both bare types and pointer variants:
@@ -270,9 +500,16 @@ const UNDEFINED_TYPE_MAP: Record<string, string> = {
  * - `undefined4 *` → `uint32_t *`
  * - `undefined` → `uint8_t`
  *
+ * Also unifies D2's wide-character spellings on `uint16_t`
+ * (see {@link normalizeWideCharType}).
+ *
  * Returns the input unchanged for known/normal types.
  */
 export function normalizeSignatureType(type: string): string {
+  return normalizeListingBuiltinType(normalizeWideCharType(normalizeSignatureTypeInner(type)));
+}
+
+function normalizeSignatureTypeInner(type: string): string {
   // Strip leading/trailing unbalanced parentheses (Ghidra decompiler artifacts)
   let trimmed = type.trim();
   if (trimmed.startsWith('(') && !trimmed.includes(')')) {
@@ -347,9 +584,352 @@ export function collapseFuncPtrTypedef(
 // =============================================================================
 
 /**
+ * A RETURN type of the shape `T[N] *` — a pointer to an array, not a pointer to
+ * an element.
+ *
+ * For a PARAMETER the two are interchangeable (an array argument has already
+ * decayed by the time it is passed), which is why `normalizeSignatureType`
+ * flattens `T[N] *` to `T *` there. For a return type they are not: the caller
+ * writes `*f(...)` to get the row, and against a flattened `char *` that
+ * dereference yields a `char`. `ITEM_GetTxtItemTypes_invgfx` is the case —
+ * Ghidra records `char[32] *`, the row is one `itemtypes.txt` invgfx column.
+ *
+ * The row is spelled through a typedef rather than a `T (*f(args))[N]`
+ * declarator so that every place that handles a return type — the header, the
+ * definition, and the wrapper the body is parsed inside — keeps working with an
+ * ordinary pointer spelling.
+ */
+export interface ArrayRowReturn {
+  /** The element type, already normalized. */
+  readonly element: string;
+  /** The array extents, outermost first. */
+  readonly dims: readonly number[];
+  /** The typedef `d2_platform.h` writes for this row. */
+  readonly typedefName: string;
+}
+
+export function arrayRowReturn(type: string | undefined): ArrayRowReturn | null {
+  if (!type) return null;
+  const m = type.trim().match(/^([^*&\[\]]+?)((?:\s*\[\d+\])+)\s*\*$/);
+  if (!m) return null;
+  const element = normalizeSignatureType(m[1].trim());
+  // A row typedef has to be spellable as `<element> <name>[dims]`, so anything
+  // that is not a plain type name is left to the existing flattening.
+  if (!/^[A-Za-z_]\w*$/.test(element)) return null;
+  const dims = [...m[2].matchAll(/\[(\d+)\]/g)].map(d => Number(d[1]));
+  if (dims.length === 0 || dims.some(d => d <= 0)) return null;
+  return { element, dims, typedefName: `D2Row_${element}_${dims.join('_')}` };
+}
+
+/**
+ * The type each Ghidra pseudo-op macro `d2_platform.h` writes evaluates to.
+ *
+ * These are the emitter's OWN macros, so their result types are not inferred —
+ * they are the outermost cast of the line the emitter wrote, read off it. They
+ * are supplied to the cast passes exactly as if they were function return types,
+ * because for the purpose of typing an expression that is what they are: without
+ * them `f(SUB84(x, 0))` has an argument of no known type, and the pass that
+ * would otherwise write the pointer cast the slot needs leaves it alone. The
+ * identifier form of the same argument — `f(in_stack_ffffffec)` — is already
+ * cast, so the gap was in the inference, not in the rule.
+ *
+ * Kept beside `generatePlatformHeader`'s macro block, which is the only place
+ * these are defined.
+ */
+export const GHIDRA_PSEUDO_OP_RESULT_TYPES: Readonly<Record<string, string>> = {
+  CONCAT11: 'uint16_t',
+  CONCAT12: 'uint32_t',
+  CONCAT13: 'uint32_t',
+  CONCAT21: 'uint32_t',
+  CONCAT22: 'uint32_t',
+  CONCAT31: 'uint32_t',
+  CONCAT44: 'uint64_t',
+  CONCAT14: 'uint64_t',
+  CONCAT41: 'uint64_t',
+  CONCAT24: 'uint64_t',
+  CONCAT42: 'uint64_t',
+  SUB41: 'uint8_t',
+  SUB42: 'uint16_t',
+  SUB43: 'uint32_t',
+  SUB84: 'uint32_t',
+  SUB82: 'uint16_t',
+  SUB81: 'uint8_t',
+  SUB21: 'uint8_t',
+  SUB14: 'uint8_t',
+  ZEXT14: 'uint32_t',
+  ZEXT24: 'uint32_t',
+  ZEXT48: 'uint64_t',
+  SEXT14: 'int32_t',
+  SEXT24: 'int32_t',
+  SEXT48: 'int64_t',
+};
+
+/**
+ * The same type, with a `T[N] *` spelled through its row typedef so it can be
+ * written where only a plain type name is legal — a prefix cast, above all:
+ * `(byte[32768] *)p` is not C++, and `(byte *)p` names one element rather than
+ * the whole row. Anything else comes back untouched.
+ */
+export function arrayRowSpelling(type: string): string {
+  const row = arrayRowReturn(type);
+  return row ? `${row.typedefName} *` : type;
+}
+
+/** The `typedef` lines the array-row returns in a build need, deduplicated. */
+export function arrayRowTypedefLines(returnTypes: Iterable<string | undefined>): string[] {
+  const byName = new Map<string, string>();
+  for (const t of returnTypes) {
+    const row = arrayRowReturn(t);
+    if (!row) continue;
+    byName.set(row.typedefName, `typedef ${row.element} ${row.typedefName}${row.dims.map(d => `[${d}]`).join('')};`);
+  }
+  return [...byName.keys()].sort().map(n => byName.get(n)!);
+}
+
+/**
  * Generate d2_platform.h content with cross-platform type definitions
  */
-export function generatePlatformHeader(): string {
+
+// =============================================================================
+// The declaration registry — what THIS emitter declares, versus what Ghidra did
+// =============================================================================
+
+/**
+ * One function `d2_platform.h` declares itself.
+ *
+ * The emitter has to be able to answer "did I write this callee's declaration,
+ * or did it come out of the database?", because the two answers demand opposite
+ * treatment. A callee reconstructed from Ghidra carries the prototype Ghidra
+ * recovered, and a call into it can be cast to that prototype. A callee declared
+ * HERE — or by `<windows.h>` in the `_WIN32` build, where these same names come
+ * from the vendor instead — carries the platform's prototype, and Ghidra's
+ * record of it is frequently wrong: `wsprintfA` is `(LPSTR, LPCSTR, ...)` in
+ * `winuser.h` and `void wsprintfA(undefined4, undefined4, undefined4,
+ * undefined4)` in the database. Casting an argument to Ghidra's answer there
+ * writes a conversion the real declaration rejects.
+ *
+ * `name` is the identifier a call site writes. It is a field rather than
+ * something recovered from `decl`, for the same reason `ExcludedSymbolDecl`
+ * spells `emitted` out: the registry has to be readable without parsing C++.
+ */
+export interface PlatformFunctionDecl {
+  /** Identifier as written at the call site. */
+  readonly name: string;
+  /** The declaration line, verbatim. */
+  readonly decl: string;
+}
+
+const WIN32_CORE_STUBS: readonly PlatformFunctionDecl[] = [
+  { name: "GetTickCount", decl: "DWORD GetTickCount();" },
+  { name: "Sleep", decl: "void Sleep(DWORD dwMilliseconds);" },
+  { name: "QueryPerformanceCounter", decl: "BOOL QueryPerformanceCounter(LARGE_INTEGER* lpPerformanceCount);" },
+  { name: "QueryPerformanceFrequency", decl: "BOOL QueryPerformanceFrequency(LARGE_INTEGER* lpFrequency);" },
+  { name: "wsprintfA", decl: "int wsprintfA(LPSTR lpOut, LPCSTR lpFmt, ...);" },
+  { name: "wsprintfW", decl: "int wsprintfW(LPWSTR lpOut, LPCWSTR lpFmt, ...);" },
+  { name: "GetLastError", decl: "DWORD GetLastError();" },
+  { name: "SetLastError", decl: "void SetLastError(DWORD dwErrCode);" },
+  { name: "GetCurrentThreadId", decl: "DWORD GetCurrentThreadId();" },
+  { name: "GetCurrentProcessId", decl: "DWORD GetCurrentProcessId();" },
+  { name: "OutputDebugStringA", decl: "void OutputDebugStringA(LPCSTR lpOutputString);" },
+  { name: "GetModuleHandleA", decl: "HMODULE GetModuleHandleA(LPCSTR lpModuleName);" },
+  { name: "GetProcAddress", decl: "FARPROC GetProcAddress(HMODULE hModule, LPCSTR lpProcName);" },
+  { name: "LoadLibraryA", decl: "HMODULE LoadLibraryA(LPCSTR lpLibFileName);" },
+  { name: "FreeLibrary", decl: "BOOL FreeLibrary(HMODULE hLibModule);" },
+  { name: "GetProcessHeap", decl: "HANDLE GetProcessHeap();" },
+  { name: "HeapAlloc", decl: "LPVOID HeapAlloc(HANDLE hHeap, DWORD dwFlags, SIZE_T dwBytes);" },
+  { name: "HeapFree", decl: "BOOL HeapFree(HANDLE hHeap, DWORD dwFlags, LPVOID lpMem);" },
+  { name: "InitializeCriticalSection", decl: "void InitializeCriticalSection(LPCRITICAL_SECTION lpCriticalSection);" },
+  { name: "EnterCriticalSection", decl: "void EnterCriticalSection(LPCRITICAL_SECTION lpCriticalSection);" },
+  { name: "LeaveCriticalSection", decl: "void LeaveCriticalSection(LPCRITICAL_SECTION lpCriticalSection);" },
+  { name: "DeleteCriticalSection", decl: "void DeleteCriticalSection(LPCRITICAL_SECTION lpCriticalSection);" },
+  { name: "CreateThread", decl: "HANDLE CreateThread(LPSECURITY_ATTRIBUTES lpThreadAttributes, SIZE_T dwStackSize, LPTHREAD_START_ROUTINE lpStartAddress, LPVOID lpParameter, DWORD dwCreationFlags, LPDWORD lpThreadId);" },
+  { name: "WaitForSingleObject", decl: "DWORD WaitForSingleObject(HANDLE hHandle, DWORD dwMilliseconds);" },
+  { name: "CloseHandle", decl: "BOOL CloseHandle(HANDLE hObject);" },
+  { name: "ExitProcess", decl: "void ExitProcess(UINT uExitCode);" },
+  { name: "MessageBoxA", decl: "int MessageBoxA(HWND hWnd, LPCSTR lpText, LPCSTR lpCaption, UINT uType);" },
+  { name: "VirtualAlloc", decl: "LPVOID VirtualAlloc(LPVOID lpAddress, SIZE_T dwSize, DWORD flAllocationType, DWORD flProtect);" },
+  { name: "VirtualFree", decl: "BOOL VirtualFree(LPVOID lpAddress, SIZE_T dwSize, DWORD dwFreeType);" },
+];
+const WIN32_UI_STUBS: readonly PlatformFunctionDecl[] = [
+  { name: "IsBadCodePtr", decl: "BOOL IsBadCodePtr(FARPROC lpfn);" },
+  { name: "IsBadReadPtr", decl: "BOOL IsBadReadPtr(const void* lp, UINT ucb);" },
+  { name: "IsBadWritePtr", decl: "BOOL IsBadWritePtr(LPVOID lp, UINT ucb);" },
+  { name: "CreateEventA", decl: "HANDLE CreateEventA(LPSECURITY_ATTRIBUTES lpEventAttributes, BOOL bManualReset, BOOL bInitialState, LPCSTR lpName);" },
+  { name: "SetEvent", decl: "BOOL SetEvent(HANDLE hEvent);" },
+  { name: "ResetEvent", decl: "BOOL ResetEvent(HANDLE hEvent);" },
+  { name: "PostQuitMessage", decl: "void PostQuitMessage(int nExitCode);" },
+  { name: "PostMessageA", decl: "BOOL PostMessageA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam);" },
+  { name: "GetSystemMetrics", decl: "int GetSystemMetrics(int nIndex);" },
+  { name: "SetWindowPos", decl: "BOOL SetWindowPos(HWND hWnd, HWND hWndInsertAfter, int X, int Y, int cx, int cy, UINT uFlags);" },
+  { name: "ShowWindow", decl: "BOOL ShowWindow(HWND hWnd, int nCmdShow);" },
+  { name: "DestroyWindow", decl: "BOOL DestroyWindow(HWND hWnd);" },
+  { name: "CreateWindowExA", decl: "HWND CreateWindowExA(DWORD dwExStyle, LPCSTR lpClassName, LPCSTR lpWindowName, DWORD dwStyle, int X, int Y, int nWidth, int nHeight, HWND hWndParent, HMENU hMenu, HINSTANCE hInstance, LPVOID lpParam);" },
+  { name: "GetClientRect", decl: "BOOL GetClientRect(HWND hWnd, LPRECT lpRect);" },
+  { name: "GetDC", decl: "HDC GetDC(HWND hWnd);" },
+  { name: "ReleaseDC", decl: "int ReleaseDC(HWND hWnd, HDC hDC);" },
+];
+const CRT_EXTERN_STUBS: readonly PlatformFunctionDecl[] = [
+  { name: "CRT_Floor", decl: "double CRT_Floor(...);" },
+  { name: "CRT_Ceil", decl: "double CRT_Ceil(...);" },
+  { name: "CRT_Strchr", decl: "char* CRT_Strchr(...);" },
+  { name: "CRT_ClearFP", decl: "unsigned int CRT_ClearFP(...);" },
+  { name: "_strrev", decl: "char* _strrev(char*);" },
+  { name: "__strrev", decl: "char* __strrev(char*);" },
+];
+const WIN32_SYNC_FALLBACK_STUBS: readonly PlatformFunctionDecl[] = [
+  { name: "CreateEventW", decl: "HANDLE CreateEventW(LPSECURITY_ATTRIBUTES lpEventAttributes, BOOL bManualReset, BOOL bInitialState, LPCWSTR lpName);" },
+  { name: "WaitForMultipleObjects", decl: "DWORD WaitForMultipleObjects(DWORD nCount, const HANDLE* lpHandles, BOOL bWaitAll, DWORD dwMilliseconds);" },
+  { name: "SendMessageA", decl: "LRESULT SendMessageA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam);" },
+];
+const WIN32_FILE_FALLBACK_STUBS: readonly PlatformFunctionDecl[] = [
+  { name: "WriteFile", decl: "BOOL WriteFile(HANDLE hFile, LPCVOID lpBuffer, DWORD nBytes, LPDWORD lpBytesWritten, LPOVERLAPPED lpOverlapped);" },
+  { name: "ReadFile", decl: "BOOL ReadFile(HANDLE hFile, LPVOID lpBuffer, DWORD nBytes, LPDWORD lpBytesRead, LPOVERLAPPED lpOverlapped);" },
+  { name: "CreateFileA", decl: "HANDLE CreateFileA(LPCSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode, LPSECURITY_ATTRIBUTES lpSec, DWORD dwCreationDisposition, DWORD dwFlagsAndAttributes, HANDLE hTemplate);" },
+  { name: "SetFilePointer", decl: "DWORD SetFilePointer(HANDLE hFile, LONG lDistanceToMove, PLONG lpDistanceToMoveHigh, DWORD dwMoveMethod);" },
+  { name: "GetFileSize", decl: "DWORD GetFileSize(HANDLE hFile, LPDWORD lpFileSizeHigh);" },
+  { name: "GetFileAttributesA", decl: "DWORD GetFileAttributesA(LPCSTR lpFileName);" },
+  { name: "GetModuleFileNameA", decl: "DWORD GetModuleFileNameA(HMODULE hModule, LPSTR lpFilename, DWORD nSize);" },
+  { name: "GetLocalTime", decl: "void GetLocalTime(LPSYSTEMTIME lpSystemTime);" },
+  { name: "GetCurrentProcess", decl: "HANDLE GetCurrentProcess();" },
+  { name: "GetKeyState", decl: "SHORT GetKeyState(int nVirtKey);" },
+  { name: "SetRect", decl: "void SetRect(LPRECT lprc, int left, int top, int right, int bottom);" },
+  { name: "WSAGetLastError", decl: "int WSAGetLastError();" },
+  { name: "WSACleanup", decl: "int WSACleanup();" },
+  { name: "timeGetTime", decl: "DWORD timeGetTime(void);" },
+];
+
+/**
+ * Functions the platform header DEFINES rather than declares — the `static
+ * inline` forwarders and the extra overloads that adapt Ghidra's spelling of an
+ * argument to the vendor's (`int32_t*` to `LONG*`, `uint32_t*` to
+ * `LPCRITICAL_SECTION`, `uint16_t*` to `wchar_t*`). Their bodies are written
+ * inline above rather than as a table because each one carries a conversion, not
+ * just a signature; only the names belong in the registry.
+ */
+const PLATFORM_INLINE_FORWARDERS: readonly string[] = [
+  'InterlockedIncrement', 'InterlockedDecrement', 'InterlockedExchange',
+  'InterlockedCompareExchange',
+  'MultiByteToWideChar', 'WideCharToMultiByte',
+  'FloatToLong', 'LongToFloat',
+  '__alldiv', '__allmul', '__allrem', '__alldvrm', '__allshr', '__allshl',
+  '__aulldiv', '__aullrem', '__aullshr',
+  '_strncpy_s',
+];
+
+/**
+ * CRT entry points the header maps to the real one with an object-like macro
+ * (`#define _fclose fclose`). The call site writes the left-hand name and the
+ * preprocessor hands the compiler the right-hand one, so the prototype that
+ * actually binds is the C library's — never Ghidra's.
+ */
+const PLATFORM_MACRO_ALIASES: readonly string[] = [
+  '_sprintf', '_memcpy', '_memset', '_memcmp', '_strlen', '_strcpy', '_strncpy',
+  '_strcmp', '_strncmp', '_strcat', '_strncat', '_atoi', '_atol', '_sscanf',
+  '_fprintf', '_printf', '_malloc', '_free', '_calloc', '_realloc', '_abs',
+  'builtin_strncpy', 'builtin_memcpy', 'builtin_memset', 'builtin_strcmp',
+  'builtin_strlen', 'builtin_strcpy',
+  '__snprintf_s', '__snprintf', '_snprintf', '_vsnprintf',
+  '__stricmp', '_stricmp', '_strnicmp', '_strrchr', '_strtok', '_strcspn',
+  '_fopen', '_fclose', '_fread', '_fwrite', '_ftell', '_fseek', '_fflush',
+  '_fgets', '_fputs', '_time64', '_difftime64',
+];
+
+/**
+ * Every callee whose declaration this emitter owns — the stub tables above, the
+ * inline forwarders, the macro aliases, the excluded-namespace declarations in
+ * `crt-mapping`, and the CRT/Win32 names a system header declares. Ghidra's
+ * prototype for any of these is not the one the compiler will see, so nothing
+ * may be cast to it.
+ */
+export function platformDeclaredFunctionNames(): Set<string> {
+  const names = new Set<string>();
+  for (const group of [
+    WIN32_CORE_STUBS, WIN32_UI_STUBS, CRT_EXTERN_STUBS,
+    WIN32_SYNC_FALLBACK_STUBS, WIN32_FILE_FALLBACK_STUBS,
+  ]) {
+    for (const d of group) names.add(d.name);
+  }
+  for (const n of PLATFORM_INLINE_FORWARDERS) names.add(n);
+  for (const n of PLATFORM_MACRO_ALIASES) names.add(n);
+  // Both spellings: the passes that ask this run either side of the
+  // external-import undecoration, so a name is header-owned under the spelling
+  // Ghidra printed AND under the identifier the declaration carries.
+  for (const d of EXCLUDED_SYMBOL_DECLS) {
+    names.add(d.emitted);
+    names.add(declaredIdentifier(d));
+  }
+  for (const n of CRT_DECLARED_FUNCTION_NAMES) names.add(n);
+  return names;
+}
+
+/**
+ * The subset of the above the header DEFINES rather than declares.
+ *
+ * `platformDeclaredFunctionNames` answers "will this name resolve at compile
+ * time"; this answers "will it resolve at LINK time", which is the question the
+ * exclusion closure asks before emitting a body. The three groups that answer
+ * yes are the inline forwarders, the macro aliases onto a real entry point, and
+ * the CRT/Win32 names a system library defines. Everything else in the stub
+ * tables is `char* __strrev(char*);` — a declaration and nothing behind it.
+ */
+export function platformDefinedFunctionNames(): Set<string> {
+  const names = new Set<string>();
+  for (const n of PLATFORM_INLINE_FORWARDERS) names.add(n);
+  for (const n of PLATFORM_MACRO_ALIASES) names.add(n);
+  for (const n of CRT_DECLARED_FUNCTION_NAMES) names.add(n);
+  return names;
+}
+
+/**
+ * The MSVC CRT `FILE` layout, claimed before any libc header can define it.
+ *
+ * Ghidra models the CRT stream object the way MSVC 6/7 declared it — `struct
+ * _iobuf { char *_ptr; int _cnt; char *_base; int _flag; int _file; int
+ * _charbuf; int _bufsiz; char *_tmpfname; }` — and D2 reaches into those
+ * members directly (`FILETOOLS_ResetOffsets` writes a vftable through `_ptr`).
+ * A UCRT toolchain declares the same struct as a single opaque `void
+ * *_Placeholder`, so every one of those member reads fails to compile against
+ * a type that is nominally the same.
+ *
+ * Both mingw-w64's `stdio.h` and its `mbstring.h` gate the declaration on
+ * `_FILE_DEFINED`, so defining the struct first and claiming that guard makes
+ * `FILE` resolve to the layout the binary was actually built against. Nothing
+ * is masked: the members are the real ones, at their real offsets, and every
+ * `<cstdio>` entry point still takes `FILE *` — the same `struct _iobuf *`.
+ */
+function msvcFileStructLines(): string[] {
+  return [
+    '// MSVC CRT stream layout (what Ghidra models and what D2 indexes into).',
+    '// Claimed before <cstdio> so a UCRT toolchain cannot substitute its opaque',
+    '// one-member _iobuf; FILE stays `struct _iobuf`, so the CRT calls still fit.',
+    '#ifndef _FILE_DEFINED',
+    '#define _FILE_DEFINED',
+    'struct _iobuf {',
+    '    char* _ptr;',
+    '    int _cnt;',
+    '    char* _base;',
+    '    int _flag;',
+    '    int _file;',
+    '    int _charbuf;',
+    '    int _bufsiz;',
+    '    char* _tmpfname;',
+    '};',
+    'typedef struct _iobuf FILE;',
+    '#endif',
+    '',
+  ];
+}
+
+export function generatePlatformHeader(
+  options: {
+    seedType?: boolean;
+    anonymousAggregates?: string[];
+    /** `typedef T D2Row_T_N[N];` for every `T[N] *` RETURN type in the build. */
+    arrayRowTypedefs?: string[];
+    /** `in_addr` under Ghidra's names, claimed ahead of <winsock2.h>. */
+    winsockInAddr?: string[];
+  } = {},
+): string {
   const lines: string[] = [];
 
   lines.push('// Auto-generated by ghidra-mcp — DO NOT EDIT');
@@ -369,11 +949,14 @@ export function generatePlatformHeader(): string {
   lines.push('');
   lines.push('#include <cstdint>');
   lines.push('#include <cstddef>');
+  lines.push(...msvcFileStructLines());
   lines.push('#include <cstdio>');
   lines.push('#include <cstdarg>');
   lines.push('#include <cstring>');
   lines.push('#include <cstdlib>');
   lines.push('#include <cmath>');
+  lines.push('#include <ctime>');
+  lines.push('#include <cwchar>');
   lines.push('');
   lines.push('// MSVC _locale_t stub (not available on all platforms)');
   lines.push('#ifndef _WIN32');
@@ -403,7 +986,12 @@ export function generatePlatformHeader(): string {
   lines.push('typedef uint8_t undefined1;');
   lines.push('typedef uint16_t undefined2;');
   lines.push('typedef uint8_t undefined3;  // 3 bytes — no exact C type');
-  lines.push('typedef void* vtable;');
+  // Ghidra's `vtable` is the (opaque) virtual function table STRUCT, so `vtable *`
+  // is a single pointer. `typedef void* vtable` made `vtable *` a DOUBLE pointer
+  // and disagreed with the struct-field mapping in header.ts, which renders the
+  // same Ghidra type `vtable *` as `void *` — every field read into a `vtable *`
+  // local was then "invalid conversion from 'void*' to 'void**'".
+  lines.push('typedef void vtable;   // opaque virtual function table; `vtable *` == `void *`');
   lines.push('// Ghidra non-standard integer sizes (approximate to nearest C type)');
   lines.push('typedef int32_t int3;   // 3 bytes — Ghidra artifact, use int32_t');
   lines.push('typedef uint32_t uint3;  // 3 bytes — Ghidra artifact, use uint32_t');
@@ -416,6 +1004,41 @@ export function generatePlatformHeader(): string {
   lines.push('typedef uint8_t unkbool1;');
   lines.push('typedef int code(...);  // Ghidra executable code type — code* = callable function pointer');
   lines.push('');
+  // Decompiler pseudo-operations. Ghidra prints these where the instruction has
+  // no C spelling; they are not symbols in the binary, so nothing else declares
+  // them and every body that names one fails to compile. `NAN` arrives renamed
+  // to `D2_IsNaN` — the Ghidra spelling collides with <cmath>'s object-like NAN
+  // macro, which turns `NAN(x)` into a float constant applied to an argument.
+  lines.push('// Ghidra decompiler pseudo-operations (no instruction-level C spelling)');
+  lines.push('static inline bool D2_IsNaN(double x) { return x != x; }');
+  lines.push('static inline void LOCK() {}    // x86 LOCK prefix — marks the atomic region');
+  lines.push('static inline void UNLOCK() {}  // end of the region LOCK opened');
+  lines.push('');
+  // CPUID: Ghidra models the instruction as a pseudo-op per leaf, each returning
+  // a POINTER to the four result registers — every body reads them back as
+  // `*(uint32_t*)(r + 0|4|8|0xc)` == eax|ebx|ecx|edx. Reproduce that contract
+  // rather than stub it: a stub returning zeroes would make CPU detection report
+  // a vendorless CPU and every caller would silently take the wrong branch.
+  lines.push('// Ghidra models CPUID as one pseudo-op per leaf, each returning a pointer to');
+  lines.push('// the four result registers, read back as *(uint32_t*)(r + 0|4|8|0xc).');
+  lines.push('#if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))');
+  lines.push('#  include <cpuid.h>');
+  lines.push('#endif');
+  lines.push('static inline int D2_Cpuid(uint32_t nLeaf) {');
+  lines.push('  static uint32_t aRegs[4];');
+  lines.push('#if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))');
+  lines.push('  __get_cpuid(nLeaf, &aRegs[0], &aRegs[1], &aRegs[2], &aRegs[3]);');
+  lines.push('#elif defined(_MSC_VER)');
+  lines.push('  __cpuid((int*)aRegs, (int)nLeaf);');
+  lines.push('#else');
+  lines.push('  aRegs[0] = aRegs[1] = aRegs[2] = aRegs[3] = 0;');
+  lines.push('#endif');
+  lines.push('  return (int)(uintptr_t)aRegs;');
+  lines.push('}');
+  for (const op of GHIDRA_CPUID_PSEUDO_OPS) {
+    lines.push(`static inline int ${op}(uint32_t nLeaf) { return D2_Cpuid(nLeaf); }`);
+  }
+  lines.push('');
   lines.push('// __debugbreak stub for non-Windows (INT 3 debug breakpoint)');
   lines.push('#ifndef _WIN32');
   lines.push('#define __debugbreak() ((void)0)');
@@ -425,8 +1048,18 @@ export function generatePlatformHeader(): string {
   lines.push('#  ifndef WIN32_LEAN_AND_MEAN');
   lines.push('#    define WIN32_LEAN_AND_MEAN');
   lines.push('#  endif');
+  if (options.winsockInAddr && options.winsockInAddr.length > 0) {
+    lines.push(...options.winsockInAddr);
+    lines.push('');
+  }
   lines.push('#  include <windows.h>');
   lines.push('#  include <winsock2.h>');
+  // Imports the reconstruction calls that <windows.h> alone does not declare.
+  // The real SDK header is preferred over a hand-written prototype so the
+  // signature and its dependent types come from the vendor, not from us.
+  for (const h of EXTRA_WIN32_SDK_HEADERS) {
+    lines.push(`#  include ${h}`);
+  }
   // D2 declares its own functions whose names collide with <windows.h> A/W macros
   // (e.g. a renderer CreateWindow(HWND,int)). The macro expands the declaration to
   // an 11-arg CreateWindowExA call → "macro requires 11 arguments". Undef the macro
@@ -437,6 +1070,28 @@ export function generatePlatformHeader(): string {
     lines.push(`#    undef ${m}`);
     lines.push(`#  endif`);
   }
+  // Win32 Interlocked* take LONG*; D2 calls them with int32_t* (a distinct type on
+  // i686). Add int32_t* overloads forwarding to the real LONG* intrinsics.
+  lines.push('static inline LONG InterlockedIncrement(int32_t volatile* p) { return InterlockedIncrement((LONG volatile*)p); }');
+  lines.push('static inline LONG InterlockedDecrement(int32_t volatile* p) { return InterlockedDecrement((LONG volatile*)p); }');
+  // CriticalSection fns take LPCRITICAL_SECTION; D2 calls them with uint32_t*
+  // (Ghidra typed the lock as a generic dword). Add forwarding overloads.
+  lines.push('static inline void EnterCriticalSection(uint32_t* p) { EnterCriticalSection((LPCRITICAL_SECTION)p); }');
+  lines.push('static inline void LeaveCriticalSection(uint32_t* p) { LeaveCriticalSection((LPCRITICAL_SECTION)p); }');
+  lines.push('static inline void InitializeCriticalSection(uint32_t* p) { InitializeCriticalSection((LPCRITICAL_SECTION)p); }');
+  lines.push('static inline void DeleteCriticalSection(uint32_t* p) { DeleteCriticalSection((LPCRITICAL_SECTION)p); }');
+  // D2's own wide strings are uint16_t* (Ghidra's ushort, the one spelling the
+  // decompiled bodies produce). The Win32 code-page converters take the true
+  // wchar_t*. On i686 the two are the same 16 bits but distinct C++ types, so
+  // give the converters uint16_t* overloads that forward to the real ones —
+  // same pattern as the Interlocked*/CriticalSection overloads above. The real
+  // wchar_t* declarations from windows.h stay intact.
+  lines.push('static inline int MultiByteToWideChar(UINT cp, DWORD flags, LPCCH src, int srcLen, uint16_t* dst, int dstLen) {');
+  lines.push('  return MultiByteToWideChar(cp, flags, src, srcLen, (LPWSTR)dst, dstLen);');
+  lines.push('}');
+  lines.push('static inline int WideCharToMultiByte(UINT cp, DWORD flags, const uint16_t* src, int srcLen, LPSTR dst, int dstLen, LPCCH dflt, LPBOOL usedDflt) {');
+  lines.push('  return WideCharToMultiByte(cp, flags, (LPCWCH)src, srcLen, dst, dstLen, dflt, usedDflt);');
+  lines.push('}');
   lines.push('#else');
   lines.push('');
 
@@ -493,7 +1148,15 @@ export function generatePlatformHeader(): string {
   lines.push('typedef uintptr_t WPARAM;');
   lines.push('typedef intptr_t LPARAM;');
   lines.push('typedef uint16_t LANGID;');
-  lines.push('typedef void (*FARPROC)();');
+  // Exactly what <winnt.h> declares, because under mingw the real windows.h wins
+  // over this branch and the two must not disagree. `()` is the UNKNOWN signature
+  // GetProcAddress hands back; Game.exe calls one through the same local with two
+  // arities, `InstallKeyboardHook(HWND)` and `UninstallKeyboardHook(void)`
+  // (00405c30), so the parameter list belongs to the call and not to the typedef -
+  // `unprototyped-call-cast` writes it there. `(...)` was tried here and cannot
+  // work: GCC makes a varargs function __cdecl, so the caller would clean a stack
+  // the __stdcall hook has already cleaned.
+  lines.push('typedef intptr_t (__stdcall *FARPROC)();');
   lines.push('');
 
   // String pointer types
@@ -570,55 +1233,12 @@ export function generatePlatformHeader(): string {
   // Common Win32 API function declarations
   lines.push('// Common Win32 API function stubs');
   lines.push('extern "C" {');
-  lines.push('DWORD GetTickCount();');
-  lines.push('void Sleep(DWORD dwMilliseconds);');
-  lines.push('BOOL QueryPerformanceCounter(LARGE_INTEGER* lpPerformanceCount);');
-  lines.push('BOOL QueryPerformanceFrequency(LARGE_INTEGER* lpFrequency);');
-  lines.push('int wsprintfA(LPSTR lpOut, LPCSTR lpFmt, ...);');
-  lines.push('int wsprintfW(LPWSTR lpOut, LPCWSTR lpFmt, ...);');
-  lines.push('DWORD GetLastError();');
-  lines.push('void SetLastError(DWORD dwErrCode);');
-  lines.push('DWORD GetCurrentThreadId();');
-  lines.push('DWORD GetCurrentProcessId();');
-  lines.push('void OutputDebugStringA(LPCSTR lpOutputString);');
-  lines.push('HMODULE GetModuleHandleA(LPCSTR lpModuleName);');
-  lines.push('FARPROC GetProcAddress(HMODULE hModule, LPCSTR lpProcName);');
-  lines.push('HMODULE LoadLibraryA(LPCSTR lpLibFileName);');
-  lines.push('BOOL FreeLibrary(HMODULE hLibModule);');
-  lines.push('HANDLE GetProcessHeap();');
-  lines.push('LPVOID HeapAlloc(HANDLE hHeap, DWORD dwFlags, SIZE_T dwBytes);');
-  lines.push('BOOL HeapFree(HANDLE hHeap, DWORD dwFlags, LPVOID lpMem);');
-  lines.push('void InitializeCriticalSection(LPCRITICAL_SECTION lpCriticalSection);');
-  lines.push('void EnterCriticalSection(LPCRITICAL_SECTION lpCriticalSection);');
-  lines.push('void LeaveCriticalSection(LPCRITICAL_SECTION lpCriticalSection);');
-  lines.push('void DeleteCriticalSection(LPCRITICAL_SECTION lpCriticalSection);');
-  lines.push('HANDLE CreateThread(LPSECURITY_ATTRIBUTES lpThreadAttributes, SIZE_T dwStackSize, LPTHREAD_START_ROUTINE lpStartAddress, LPVOID lpParameter, DWORD dwCreationFlags, LPDWORD lpThreadId);');
-  lines.push('DWORD WaitForSingleObject(HANDLE hHandle, DWORD dwMilliseconds);');
-  lines.push('BOOL CloseHandle(HANDLE hObject);');
-  lines.push('void ExitProcess(UINT uExitCode);');
-  lines.push('int MessageBoxA(HWND hWnd, LPCSTR lpText, LPCSTR lpCaption, UINT uType);');
-  lines.push('LPVOID VirtualAlloc(LPVOID lpAddress, SIZE_T dwSize, DWORD flAllocationType, DWORD flProtect);');
-  lines.push('BOOL VirtualFree(LPVOID lpAddress, SIZE_T dwSize, DWORD dwFreeType);');
+  for (const d of WIN32_CORE_STUBS) lines.push(d.decl);
   lines.push('}');
   lines.push('');
 
   // Additional Win32 APIs
-  lines.push('BOOL IsBadCodePtr(FARPROC lpfn);');
-  lines.push('BOOL IsBadReadPtr(const void* lp, UINT ucb);');
-  lines.push('BOOL IsBadWritePtr(LPVOID lp, UINT ucb);');
-  lines.push('HANDLE CreateEventA(LPSECURITY_ATTRIBUTES lpEventAttributes, BOOL bManualReset, BOOL bInitialState, LPCSTR lpName);');
-  lines.push('BOOL SetEvent(HANDLE hEvent);');
-  lines.push('BOOL ResetEvent(HANDLE hEvent);');
-  lines.push('void PostQuitMessage(int nExitCode);');
-  lines.push('BOOL PostMessageA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam);');
-  lines.push('int GetSystemMetrics(int nIndex);');
-  lines.push('BOOL SetWindowPos(HWND hWnd, HWND hWndInsertAfter, int X, int Y, int cx, int cy, UINT uFlags);');
-  lines.push('BOOL ShowWindow(HWND hWnd, int nCmdShow);');
-  lines.push('BOOL DestroyWindow(HWND hWnd);');
-  lines.push('HWND CreateWindowExA(DWORD dwExStyle, LPCSTR lpClassName, LPCSTR lpWindowName, DWORD dwStyle, int X, int Y, int nWidth, int nHeight, HWND hWndParent, HMENU hMenu, HINSTANCE hInstance, LPVOID lpParam);');
-  lines.push('BOOL GetClientRect(HWND hWnd, LPRECT lpRect);');
-  lines.push('HDC GetDC(HWND hWnd);');
-  lines.push('int ReleaseDC(HWND hWnd, HDC hDC);');
+  for (const d of WIN32_UI_STUBS) lines.push(d.decl);
   lines.push('');
 
   lines.push('#endif // _WIN32');
@@ -633,35 +1253,11 @@ export function generatePlatformHeader(): string {
   lines.push('typedef short FxI16;');
   lines.push('typedef unsigned short FxU16;');
   lines.push('typedef int FxBool;');
-  lines.push('typedef unsigned int GrAlphaBlendFnc_t;');
-  lines.push('typedef unsigned int GrAlpha_t;');
-  lines.push('typedef unsigned int GrAspectRatio_t;');
-  lines.push('typedef unsigned int GrBuffer_t;');
-  lines.push('typedef unsigned int GrChipID_t;');
-  lines.push('typedef unsigned int GrChromakeyMode_t;');
-  lines.push('typedef unsigned int GrCmpFnc_t;');
-  lines.push('typedef unsigned int GrColorFormat_t;');
-  lines.push('typedef unsigned int GrColor_t;');
-  lines.push('typedef unsigned int GrCombineFactor_t;');
-  lines.push('typedef unsigned int GrCombineFunction_t;');
-  lines.push('typedef unsigned int GrCombineLocal_t;');
-  lines.push('typedef unsigned int GrCombineOther_t;');
-  lines.push('typedef unsigned int GrContext_t;');
-  lines.push('typedef unsigned int GrCoordinateSpaceMode_t;');
-  lines.push('typedef unsigned int GrDepthBufferMode_t;');
-  lines.push('typedef unsigned int GrDitherMode_t;');
-  lines.push('typedef unsigned int GrEnableMode_t;');
-  lines.push('typedef unsigned int GrLOD_t;');
-  lines.push('typedef unsigned int GrLfbWriteMode_t;');
-  lines.push('typedef unsigned int GrLock_t;');
-  lines.push('typedef unsigned int GrMipMapMode_t;');
-  lines.push('typedef unsigned int GrOriginLocation_t;');
-  lines.push('typedef unsigned int GrScreenRefresh_t;');
-  lines.push('typedef unsigned int GrScreenResolution_t;');
-  lines.push('typedef unsigned int GrTexTable_t;');
-  lines.push('typedef unsigned int GrTextureFilterMode_t;');
-  lines.push('typedef unsigned int GrTextureFormat_t;');
-  lines.push('struct GrLfbInfo_t { int size; void* lfbPtr; uint32_t strideInBytes; };');
+  for (const t of GLIDE_UNSIGNED_ENUM_TYPEDEFS) lines.push(`typedef unsigned int ${t};`);
+  // Glide's own GrLfbInfo_t is five members, and `size` is set to 0x14 by every
+  // caller that fills one in - 20 bytes, not the 12 the first three account for.
+  // The two trailing members are what `grLfbLock` reads back out.
+  lines.push('struct GrLfbInfo_t { int size; void* lfbPtr; uint32_t strideInBytes; GrLfbWriteMode_t writeMode; GrOriginLocation_t origin; };');
   lines.push('struct GrTexInfo { GrLOD_t smallLodLog2; GrLOD_t largeLodLog2; GrAspectRatio_t aspectRatioLog2; GrTextureFormat_t format; void* data; };');
   lines.push('typedef void (*GrProc)();');
   lines.push('');
@@ -691,6 +1287,14 @@ export function generatePlatformHeader(): string {
   lines.push('#define _abs abs');
   lines.push('');
 
+  // Ghidra placeholder constants for immediates it could not resolve (an
+  // "unknown" float / id). They are decompiler artifacts with no real value;
+  // define them so the bodies compile (placeholder zero).
+  lines.push('// Ghidra unresolved-immediate placeholders');
+  lines.push('#define FLOAT_UNKNOWN 0.0f');
+  lines.push('#define GL_ID_UNKNOWN 0');
+  lines.push('');
+
   // Ghidra builtin_ prefixed functions
   lines.push('// Ghidra builtin_ prefixed functions');
   lines.push('#define builtin_strncpy strncpy');
@@ -701,10 +1305,28 @@ export function generatePlatformHeader(): string {
   lines.push('#define builtin_strcpy strcpy');
   lines.push('');
 
+  // Ghidra ROUND intrinsic: rounds a floating-point value to the nearest integer
+  // value (kept as floating-point). Maps to <cmath> round().
+  lines.push('// Ghidra ROUND intrinsic (round-to-nearest, result stays floating-point)');
+  lines.push('#define ROUND(x) round(x)');
+  lines.push('');
+
+  // Statically-linked CRT functions Ghidra named with a `CRT_` prefix that the
+  // reconstruction does NOT rebuild (we don't reconstruct the C runtime). Their
+  // call sites survive (often with mangled x87/FP argument lists), so declare them
+  // as variadic externs — enough to compile; they resolve to the real CRT at link.
+  lines.push('// External statically-linked CRT functions (Ghidra `CRT_`-prefixed, not reconstructed)');
+  lines.push('extern "C" {');
+  for (const d of CRT_EXTERN_STUBS) lines.push(d.decl);
+  lines.push('}');
+  lines.push('');
+
   lines.push('');
 
 
   // Ghidra CONCAT macros (byte concatenation intrinsics)
+  // The type each of these yields is recorded in GHIDRA_PSEUDO_OP_RESULT_TYPES
+  // below; a macro added or rewidened here must be changed there too.
   lines.push('// Ghidra CONCAT macros — CONCATmn concatenates m-byte and n-byte values');
   lines.push('#define CONCAT11(a, b) ((uint16_t)(((uint16_t)(uint8_t)(a) << 8) | (uint8_t)(b)))');
   lines.push('#define CONCAT12(a, b) ((uint32_t)(((uint32_t)(uint8_t)(a) << 16) | (uint16_t)(b)))');
@@ -741,6 +1363,54 @@ export function generatePlatformHeader(): string {
   lines.push('#define SEXT48(x) ((int64_t)(int32_t)(x))');
   lines.push('');
 
+  // Ghidra bit-range extraction. `ZPULL`/`SPULL` are the decompiler's own ops
+  // (Ghidra `additionalpcode`: CPUI_ZPULL / CPUI_SPULL): pull `nBits` bits out of
+  // a value starting at `nPos`, with the bits of the operand numbered from the
+  // LEAST significant, starting at 0. ZPULL zero-extends what it pulled, SPULL
+  // sign-extends it from the top bit pulled — which is the only difference
+  // between them, and the reason both spellings exist. They appear where the
+  // masked field is NOT a declared bitfield: `SPULL(bySkillFlags, 5, 1)` is the
+  // `TEST` against a 0x20 mask that `pSkill->pRecord->InGame` would have been
+  // had the struct declared bit 5 as a member.
+  lines.push('// Ghidra bit-range extraction (ZPULL/SPULL pseudo-ops): bits [nPos, nPos+nBits)');
+  lines.push('static inline uint32_t ZPULL(uint64_t nValue, int nPos, int nBits) {');
+  lines.push('  uint64_t nMask = (nBits >= 64) ? ~(uint64_t)0 : (((uint64_t)1 << nBits) - 1);');
+  lines.push('  return (uint32_t)((nValue >> nPos) & nMask);');
+  lines.push('}');
+  lines.push('static inline int32_t SPULL(uint64_t nValue, int nPos, int nBits) {');
+  lines.push('  uint32_t nSign = (uint32_t)1 << (nBits - 1);');
+  lines.push('  uint32_t nRaw = ZPULL(nValue, nPos, nBits);');
+  lines.push('  return (int32_t)((nRaw ^ nSign) - nSign);');
+  lines.push('}');
+  lines.push('');
+
+  // Ghidra pseudo-operations — instructions the decompiler cannot express in C
+  // and calls out by name instead. They reach bodies exactly as written, so they
+  // need a definition, not a declaration; each is what the instruction does.
+  lines.push('// Ghidra pseudo-operations (instructions with no C spelling)');
+  lines.push('#define ABS(x) ((x) < 0 ? -(x) : (x))');
+  lines.push('static inline uint64_t rdtsc(void) {');
+  lines.push('#if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))');
+  lines.push('  uint32_t nLow, nHigh;');
+  lines.push('  __asm__ __volatile__("rdtsc" : "=a"(nLow), "=d"(nHigh));');
+  lines.push('  return ((uint64_t)nHigh << 32) | nLow;');
+  lines.push('#else');
+  lines.push('  return 0;');
+  lines.push('#endif');
+  lines.push('}');
+  lines.push('// `swi(n)` is INT n. Ghidra models it as returning the handler address the');
+  lines.push('// body then calls; there is no such value at runtime, so the trap is raised');
+  lines.push('// and a null handler returned rather than pretending otherwise.');
+  lines.push('static inline void* swi(int nVector) {');
+  lines.push('#if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))');
+  lines.push('  if (nVector == 3) __asm__ __volatile__("int3");');
+  lines.push('#else');
+  lines.push('  (void)nVector;');
+  lines.push('#endif');
+  lines.push('  return nullptr;');
+  lines.push('}');
+  lines.push('');
+
   // Ghidra carry/borrow detection macros
   lines.push('// Ghidra carry/borrow detection');
   lines.push('#define CARRY4(a, b) ((uint32_t)(a) + (uint32_t)(b) < (uint32_t)(a))');
@@ -750,11 +1420,14 @@ export function generatePlatformHeader(): string {
   lines.push('#define SBORROW2(a, b) ((int16_t)((uint16_t)(a) ^ (uint16_t)(b)) < 0 && (int16_t)((uint16_t)(a) ^ ((uint16_t)(a) - (uint16_t)(b))) < 0)');
   lines.push('');
 
-  // Diablo 2 PRNG (Linear Congruential Generator) macros
-  lines.push('// Diablo 2 PRNG — LCG with multiplier 0x6AC690C5');
-  lines.push('#define D2_SEED_NEXT(seed) ((D2SeedStrc)((uint64_t)(uint32_t)(seed).nSeedLow * 0x6ac690c5u + (uint64_t)(uint32_t)(seed).nSeedHigh))');
-  lines.push('#define D2_SEED_NEXT_VAL(sv) ((D2SeedStrc)((uint64_t)(uint32_t)(sv) * 0x6ac690c5u + ((uint64_t)(sv) >> 32)))');
-  lines.push('');
+  // Diablo 2 PRNG (Linear Congruential Generator) macros. These name D2SeedStrc, so
+  // they only make sense for a binary that actually has that type.
+  if (options.seedType) {
+    lines.push('// Diablo 2 PRNG — LCG with multiplier 0x6AC690C5');
+    lines.push('#define D2_SEED_NEXT(seed) ((D2SeedStrc)((uint64_t)(uint32_t)(seed).nSeedLow * 0x6ac690c5u + (uint64_t)(uint32_t)(seed).nSeedHigh))');
+    lines.push('#define D2_SEED_NEXT_VAL(sv) ((D2SeedStrc)((uint64_t)(uint32_t)(sv) * 0x6ac690c5u + ((uint64_t)(sv) >> 32)))');
+    lines.push('');
+  }
 
   // Ghidra type conversion helpers
   lines.push('// Ghidra type conversion helpers');
@@ -769,11 +1442,14 @@ export function generatePlatformHeader(): string {
   lines.push('static inline int64_t __allmul(int64_t a, int64_t b) { return a * b; }');
   lines.push('static inline int64_t __allmul(uint32_t lo1, uint32_t hi1, uint32_t lo2, uint32_t hi2) { return (int64_t)(lo1 | ((uint64_t)hi1 << 32)) * (int64_t)(lo2 | ((uint64_t)hi2 << 32)); }');
   lines.push('static inline int64_t __allrem(int64_t a, int64_t b) { return a % b; }');
+  lines.push('static inline int64_t __allrem(uint32_t lo1, uint32_t hi1, uint32_t lo2, int hi2) { return (int64_t)(lo1 | ((uint64_t)hi1 << 32)) % (int64_t)(lo2 | ((uint64_t)(uint32_t)hi2 << 32)); }');
   lines.push('static inline int64_t __alldvrm(uint32_t lo1, uint32_t hi1, uint32_t lo2, int hi2) { return (int64_t)(lo1 | ((uint64_t)hi1 << 32)) / (int64_t)(lo2 | ((uint64_t)(uint32_t)hi2 << 32)); }');
   lines.push('static inline int64_t __allshr(int64_t a, int n) { return a >> n; }');
   lines.push('static inline int64_t __allshl(int64_t a, int n) { return a << n; }');
   lines.push('static inline uint64_t __aulldiv(uint64_t a, uint64_t b) { return a / b; }');
+  lines.push('static inline uint64_t __aulldiv(uint32_t lo1, uint32_t hi1, uint32_t lo2, uint32_t hi2) { return (lo1 | ((uint64_t)hi1 << 32)) / (lo2 | ((uint64_t)hi2 << 32)); }');
   lines.push('static inline uint64_t __aullrem(uint64_t a, uint64_t b) { return a % b; }');
+  lines.push('static inline uint64_t __aullrem(uint32_t lo1, uint32_t hi1, uint32_t lo2, uint32_t hi2) { return (lo1 | ((uint64_t)hi1 << 32)) % (lo2 | ((uint64_t)hi2 << 32)); }');
   lines.push('static inline uint64_t __aullshr(uint64_t a, unsigned int n) { return a >> n; }');
   lines.push('');
 
@@ -786,9 +1462,7 @@ export function generatePlatformHeader(): string {
   lines.push('// Overloads for int32_t* (Ghidra decompiler uses int32_t instead of LONG)');
   lines.push('static inline int32_t InterlockedIncrement(volatile int32_t* p) { return ++(*p); }');
   lines.push('static inline int32_t InterlockedDecrement(volatile int32_t* p) { return --(*p); }');
-  lines.push('HANDLE CreateEventW(LPSECURITY_ATTRIBUTES lpEventAttributes, BOOL bManualReset, BOOL bInitialState, LPCWSTR lpName);');
-  lines.push('DWORD WaitForMultipleObjects(DWORD nCount, const HANDLE* lpHandles, BOOL bWaitAll, DWORD dwMilliseconds);');
-  lines.push('LRESULT SendMessageA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam);');
+  for (const d of WIN32_SYNC_FALLBACK_STUBS) lines.push(d.decl);
   lines.push('#endif');
   lines.push('');
 
@@ -806,7 +1480,17 @@ export function generatePlatformHeader(): string {
   lines.push('#define __snprintf snprintf');
   lines.push('#define _snprintf snprintf');
   lines.push('#define _vsnprintf vsnprintf');
-  lines.push('#define _strncpy_s(dst, dsz, src, cnt) strncpy(dst, src, cnt)');
+  // strncpy_s returns errno_t, not the destination — every call site here stores
+  // the result. cnt == (size_t)-1 is MSVC's _TRUNCATE, which means "as much as
+  // fits", so the copy is bounded by dsz and not by cnt.
+  lines.push('static inline errno_t _strncpy_s(char* dst, size_t dsz, const char* src, size_t cnt) {');
+  lines.push('    if (!dst || dsz == 0) return 22 /* EINVAL */;');
+  lines.push('    size_t n = (cnt >= dsz) ? dsz - 1 : cnt;');
+  lines.push('    size_t i = 0;');
+  lines.push('    for (; i < n && src[i]; ++i) dst[i] = src[i];');
+  lines.push('    dst[i] = 0;');
+  lines.push('    return (src[i] && cnt >= dsz) ? 80 /* STRUNCATE */ : 0;');
+  lines.push('}');
   lines.push('#define __stricmp strcasecmp');
   lines.push('#define _stricmp strcasecmp');
   lines.push('#define _strnicmp strncasecmp');
@@ -828,18 +1512,7 @@ export function generatePlatformHeader(): string {
 
   // More Win32 file/system APIs
   lines.push('#ifndef _WIN32');
-  lines.push('BOOL WriteFile(HANDLE hFile, LPCVOID lpBuffer, DWORD nBytes, LPDWORD lpBytesWritten, LPOVERLAPPED lpOverlapped);');
-  lines.push('BOOL ReadFile(HANDLE hFile, LPVOID lpBuffer, DWORD nBytes, LPDWORD lpBytesRead, LPOVERLAPPED lpOverlapped);');
-  lines.push('HANDLE CreateFileA(LPCSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode, LPSECURITY_ATTRIBUTES lpSec, DWORD dwCreationDisposition, DWORD dwFlagsAndAttributes, HANDLE hTemplate);');
-  lines.push('DWORD SetFilePointer(HANDLE hFile, LONG lDistanceToMove, PLONG lpDistanceToMoveHigh, DWORD dwMoveMethod);');
-  lines.push('DWORD GetFileSize(HANDLE hFile, LPDWORD lpFileSizeHigh);');
-  lines.push('DWORD GetFileAttributesA(LPCSTR lpFileName);');
-  lines.push('DWORD GetModuleFileNameA(HMODULE hModule, LPSTR lpFilename, DWORD nSize);');
-  lines.push('void GetLocalTime(LPSYSTEMTIME lpSystemTime);');
-  lines.push('HANDLE GetCurrentProcess();');
-  lines.push('SHORT GetKeyState(int nVirtKey);');
-  lines.push('void SetRect(LPRECT lprc, int left, int top, int right, int bottom);');
-  lines.push('int WSAGetLastError();');
+  for (const d of WIN32_FILE_FALLBACK_STUBS) lines.push(d.decl);
   lines.push('#endif');
   lines.push('');
 
@@ -862,10 +1535,368 @@ export function generatePlatformHeader(): string {
   lines.push('struct _Unwind_Exception { uint64_t exception_class; void (*exception_cleanup)(_Unwind_Reason_Code, struct _Unwind_Exception *); uint64_t private_1; uint64_t private_2; };');
   lines.push('');
 
+  // A cast between a floating type and a pointer is not a conversion - there is
+  // no value to convert - and C++ rejects it. It reaches the tree because the
+  // decompiler recovers ONE type per stack slot while the machine reuses the same
+  // four bytes as a float in one live range and as an address in another, so the
+  // instruction behind the cast is a `mov`. These do that move.
+  //
+  // A `double` operand is narrowed to `float` first: the slot the machine wrote
+  // is four bytes wide, and the `double` is C's promotion of an x87 expression,
+  // not a wider store. The templates take the same four bytes out of a struct
+  // the machine holds in a register - `(int)palPalEntry`. `float-pointer-bitcast`
+  // writes the calls, and only ever for a floating, pointer or known-aggregate
+  // operand; a float/integer cast is a real conversion and never reaches here.
+  lines.push('// Four-byte reinterpretation behind a float/pointer cast (see float-pointer-bitcast)');
+  lines.push('static inline uintptr_t d2_bits_of(float fValue) { uintptr_t nBits = 0; memcpy(&nBits, &fValue, sizeof(float)); return nBits; }');
+  lines.push('static inline uintptr_t d2_bits_of(double dValue) { return d2_bits_of((float)dValue); }');
+  lines.push('static inline uintptr_t d2_bits_of(long double dValue) { return d2_bits_of((float)dValue); }');
+  lines.push('template <class T> static inline uintptr_t d2_bits_of(const T& tValue) { uintptr_t nBits = 0; memcpy(&nBits, &tValue, sizeof(T) < sizeof(uintptr_t) ? sizeof(T) : sizeof(uintptr_t)); return nBits; }');
+  lines.push('template <class T> static inline float d2_bits_to_float(const T& tValue) { float fValue = 0.0f; memcpy(&fValue, &tValue, sizeof(T) < sizeof(float) ? sizeof(T) : sizeof(float)); return fValue; }');
+  // The same move in the other direction: a machine word read back AS an
+  // aggregate. `(uD2UnitMode)pUnit` and `(FILETIME)0x0` are stores into a slot
+  // the struct occupies, not conversions - C++ reads them as a constructor call
+  // that does not exist. Deliberately a free template and never a constructor:
+  // giving one of these types a user-provided constructor de-aggregates it
+  // everywhere the header reaches, which is the whole tree.
+  lines.push('template <class T, class S> static inline T d2_bits_as(const S& sValue) { T tValue = T(); memcpy(&tValue, &sValue, sizeof(T) < sizeof(S) ? sizeof(T) : sizeof(S)); return tValue; }');
+  lines.push('');
+
+  // MSVC C++ exception-handling frame types. Not declared by any real header;
+  // they appear only as parameter types of the EH personality routine below.
+  lines.push('// MSVC C++ EH frame types (opaque — only ever used through a pointer)');
+  lines.push('struct EHExceptionRecord;');
+  lines.push('struct EHRegistrationNode;');
+  lines.push('');
+
+  // The two function-SIGNATURE types of the excluded `_Wrappers` category. Bodies
+  // declare locals with them (`PFN_ExceptHandler4 *pSehHandler = __except_handler4;`)
+  // because Ghidra reaches them through a local variable's type — but the
+  // category is excluded, so no type table carries them and the declaration is
+  // ill-formed, costing a second error for the local it fails to declare.
+  //
+  // Spelled as FUNCTION-type typedefs, not pointer typedefs: what the body
+  // declares is `PFN_X *`, so the typedef has to name the function itself for
+  // that to be one pointer, not two. Signatures are Ghidra's own record —
+  // `undefined4(int *, PVOID, undefined4)` and
+  // `void(EHExceptionRecord *, EHRegistrationNode *, _CONTEXT *, void *)` — which
+  // agree exactly with the `__except_handler4` and `_Wrappers::CRT_ExceptionFilterN`
+  // declarations this header already writes, so the assignment needs no cast.
+  lines.push('// Function-signature types from the excluded `_Wrappers` category (Ghidra: /_Wrappers)');
+  lines.push('typedef uint32_t PFN_ExceptHandler4(int* pnParam, void* pParam, uint32_t dwParam);');
+  lines.push('typedef void PFN_CrtExceptionFilter(EHExceptionRecord* pExceptionRecord, EHRegistrationNode* pRegistrationNode, CONTEXT* pContext, void* pParam);');
+  lines.push('');
+
+  // Declarations for the Ghidra namespaces run.ts excludes from emission.
+  lines.push(...generateExcludedSymbolDecls());
+
+  // Ghidra's placeholder names for the ANONYMOUS aggregates inside a system
+  // struct (`in_addr`'s unnamed union is `_union_1226`). No real header ever
+  // declares those names, yet decompiled bodies cast through them and read their
+  // fields — so this is the only place they can come from.
+  if (options.anonymousAggregates && options.anonymousAggregates.length > 0) {
+    lines.push('// Anonymous aggregates of system structs, under the names Ghidra gave them');
+    for (const def of options.anonymousAggregates) {
+      lines.push(def);
+      lines.push('');
+    }
+  }
+
+  // A function returning `T[N] *` returns a pointer to the ROW, and the caller
+  // dereferences it to get the row back. Spelling that through a typedef keeps
+  // every return-type path on an ordinary pointer; see `arrayRowReturn`.
+  if (options.arrayRowTypedefs && options.arrayRowTypedefs.length > 0) {
+    lines.push('// Array rows held by pointer (Ghidra `T[N] *` return and global types)');
+    for (const def of options.arrayRowTypedefs) lines.push(def);
+    lines.push('');
+  }
+
   // Include shared enum definitions (all Ghidra enum types collected into one file)
   lines.push('// Shared enum constants (SOUND_NONE, UNIT_PLAYER, SKILL_Attack, etc.)');
   lines.push('#include "d2_enums.h"');
   lines.push('');
 
   return lines.join('\n');
+}
+
+/**
+ * Project type names that are ALSO emitted as a namespace component.
+ *
+ * Ghidra hangs a class's vtable data and its member functions under a namespace
+ * named after the class (`D2Client::ButtonWrapper`, `D2Client::Draw`), and the
+ * generator emits that namespace. The struct/typedef of the same name is emitted
+ * at ROOT scope. Inside `namespace D2Client { ... }` unqualified lookup for
+ * `ButtonWrapper` then finds the NAMESPACE first and stops:
+ *
+ *     namespace D2Client {
+ *       void F(ButtonWrapper * pThis) { ... }   // error: 'ButtonWrapper' is not a type
+ *       pwszCursor = (Draw**)...;               // error: expected primary-expression
+ *     }
+ *
+ * The type must be spelled root-qualified (`::ButtonWrapper`) at every use site.
+ * Only names that really are both a namespace component and a root-scope type
+ * are listed, so nothing else is touched.
+ */
+let shadowedTypeNames: Set<string> | undefined;
+
+export function setShadowedTypeNames(names: Set<string> | undefined): void {
+  shadowedTypeNames = names && names.size > 0 ? names : undefined;
+}
+
+export function getShadowedTypeNames(): Set<string> | undefined {
+  return shadowedTypeNames;
+}
+
+/**
+ * Root-qualify the base name of a Ghidra type string when it is shadowed by a
+ * same-named namespace. `ButtonWrapper *` → `::ButtonWrapper *`,
+ * `struct Item *` → `struct ::Item *`. Already-qualified names, names with no
+ * base identifier, and unshadowed names come back unchanged.
+ */
+export function rootQualifyShadowedType(type: string): string {
+  if (!shadowedTypeNames || !type) return type;
+  if (type.includes('::')) return type;
+  const m = type.match(
+    /^(\s*(?:(?:const|volatile)\s+)*(?:(?:struct|class|union|enum)\s+)?)([A-Za-z_]\w*)\b([\s\S]*)$/
+  );
+  if (!m) return type;
+  if (!shadowedTypeNames.has(m[2])) return type;
+  return `${m[1]}::${m[2]}${m[3]}`;
+}
+
+
+/**
+ * Ghidra's spellings for a `void`-pointer slot. `pointer` is its own alias
+ * (`typedef void* pointer`), and the Win32 SDK ones reach the emitter unexpanded.
+ * A function address stored in any of them needs the same explicit `(void*)`.
+ */
+const VOID_POINTER_SPELLINGS = new Set<string>([
+  'void*', 'pointer', 'LPVOID', 'PVOID', 'LPCVOID',
+]);
+
+/**
+ * Typedefs `d2_platform.h` writes ITSELF, whose target is a pointer, mapped to
+ * what the emitted line actually says.
+ *
+ * Ghidra records `pointer` as a POINTER data type, not as a TYPEDEF, so it never
+ * reaches the typedef map the cast passes read — and every one of them then
+ * treats a `pointer` slot as a star-less integer, which is exactly the shape
+ * that needs no cast. A funcdef declaring seven `pointer` parameters therefore
+ * types nothing at all, however well the funcdef itself is resolved.
+ *
+ * Only pointer-valued aliases belong here: an alias for an integer (`pointer32`
+ * really is `uint32_t`) is already reduced correctly by name.
+ */
+export const EMITTER_POINTER_TYPEDEFS: Record<string, string> = {
+  pointer: 'void *',
+  _locale_t: 'void *',
+  // The SDK's own `void *` aliases. `windows.h` defines them, so nothing in the
+  // model or in the emitted headers declares them as typedefs, and a return or
+  // a slot spelled `LPVOID` read as a star-less opaque base — a `return
+  // CRT_CreateTLS();` into a `DWORD *` then crossed a pointer boundary with no
+  // cast, which C converts silently and C++ rejects.
+  LPVOID: 'void *',
+  PVOID: 'void *',
+  LPCVOID: 'void *',
+  // The Win32 handle family, spelled as `windows.h` spells it. Ghidra records
+  // these as typedefs with no target, so without them the cast passes read a
+  // `HANDLE` as a star-less opaque base and cannot see that it crosses a
+  // pointer boundary on the way into an `HICON` or an `HBRUSH`.
+  //
+  // `HANDLE` and `HGDIOBJ` really are `void *`; the rest are `DECLARE_HANDLE`,
+  // i.e. a pointer to a struct of their own, which is exactly why the generic
+  // two do not convert to them in C++ and the original C source carried a cast.
+  HANDLE: 'void *',
+  HGDIOBJ: 'void *',
+  HICON: 'HICON__ *',
+  HCURSOR: 'HICON__ *', // `typedef HICON HCURSOR;`
+  HBRUSH: 'HBRUSH__ *',
+};
+
+/** Does this Ghidra type string denote a plain `void`-pointer slot? */
+export function isVoidPointerSpelling(type: string | undefined): boolean {
+  if (!type) return false;
+  const t = type.replace(/\bconst\b/g, '').replace(/\s+/g, '').trim();
+  return VOID_POINTER_SPELLINGS.has(t);
+}
+
+/**
+ * Every type name the project declares — structures, unions, enums, typedefs and
+ * function definitions alike. A VARIABLE that takes one of these names hides the
+ * type for the rest of its scope, which is a compile error the moment the scope
+ * uses the type again.
+ */
+let declaredTypeNames: ReadonlySet<string> = new Set();
+
+export function setDeclaredTypeNames(names: Iterable<string>): void {
+  declaredTypeNames = new Set(names);
+}
+
+/**
+ * The name a parameter or local is emitted under, given its already-rendered type.
+ *
+ * `eD2ItemFlag eD2ItemFlag` is not a declaration a body can then name — the
+ * variable hides its own type — so such a variable is emitted as `n<name>`.
+ *
+ * The same hazard exists when the name belongs to a DIFFERENT type: Ghidra names
+ * a `sockaddr_in` local `sockaddr`, and the very next line's `(sockaddr *)&sockaddr`
+ * no longer parses; it names a `fpTimerFunction *` local `fpTimerFunction`, and
+ * the sibling declaration `fpTimerFunction pfVar1;` becomes "expected ';'". One
+ * rule covers both: a variable never takes a name this project declares as a type.
+ *
+ * The comparison has to ignore a leading `::`. The rule lived in three places
+ * and only ONE of them stripped it, so as soon as a parameter's type became
+ * root-qualified (`::fpRequiredUserAction`, once a same-named function shadowed
+ * it) the body renamed the parameter and the two signature emitters did not:
+ * the declaration said `fpRequiredUserAction` and the body said
+ * `nfpRequiredUserAction`. One rule, one implementation.
+ */
+export function emittedParameterName(name: string, renderedType: string): string {
+  const baseType = renderedType
+    .replace(/\s*[*&]+\s*$/, '')
+    .replace(/^(struct|class|union|enum)\s+/, '')
+    .replace(/^::/, '')
+    .trim();
+  if (name === baseType) return `n${name}`;
+  return declaredTypeNames.has(name) ? `n${name}` : name;
+}
+
+/**
+ * Every type name that names a struct or a union — the STRUCTURE/UNION data
+ * types themselves plus every typedef whose chain ends at one.
+ *
+ * `struct-field` needs this to decide whether `((T*)base)->field_N` can compile
+ * at all. It used to decide from a regex over Ghidra's primitive spellings, which
+ * knows nothing about Win32: `HANDLE` is `void *`, `SOCKET` is `uint`,
+ * `PRTL_CRITICAL_SECTION_DEBUG` is a pointer, and each of them slipped through as
+ * "might be a struct" and got a `field_10` that nothing declares. Resolving the
+ * typedef chain answers the question instead of guessing at it.
+ */
+let aggregateTypeNames: Set<string> | undefined;
+
+export function setAggregateTypeNames(
+  dataTypes: Array<{ name: string; kind?: string; underlyingType?: string }>,
+): void {
+  const aggregates = new Set<string>();
+  const typedefTargets = new Map<string, string>();
+  for (const dt of dataTypes) {
+    if (!dt.name) continue;
+    if (dt.kind === 'STRUCTURE' || dt.kind === 'UNION') aggregates.add(dt.name);
+    else if (dt.kind === 'TYPEDEF' && dt.underlyingType) {
+      typedefTargets.set(dt.name, dt.underlyingType);
+    }
+  }
+  // Follow each typedef to its end. A target carrying a `*` or a `[` is a pointer
+  // or an array, never an aggregate lvalue, so the chain stops there.
+  const resolveToAggregate = (name: string): boolean => {
+    let cur = name;
+    for (let depth = 0; depth < 16; depth++) {
+      if (aggregates.has(cur)) return true;
+      const target = typedefTargets.get(cur);
+      if (!target) return false;
+      const base = target.replace(/\b(const|volatile|struct|union)\b/g, '').trim();
+      if (base.includes('*') || base.includes('[')) return false;
+      cur = base;
+    }
+    return false;
+  };
+  for (const name of typedefTargets.keys()) {
+    if (resolveToAggregate(name)) aggregates.add(name);
+  }
+  aggregateTypeNames = aggregates.size > 0 ? aggregates : undefined;
+
+  // The same chain, asking the opposite question: does it end at a POINTER?
+  // A target carrying a `[` is an array, which is not an assignable pointer slot.
+  const resolveToPointer = (name: string): boolean => {
+    let cur = name;
+    for (let depth = 0; depth < 16; depth++) {
+      const target = typedefTargets.get(cur);
+      if (!target) return false;
+      const base = target.replace(/\b(const|volatile|struct|union)\b/g, '').trim();
+      if (base.includes('*')) return true;
+      if (base.includes('[')) return false;
+      cur = base;
+    }
+    return false;
+  };
+  const pointers = new Set<string>();
+  for (const name of typedefTargets.keys()) {
+    if (resolveToPointer(name)) pointers.add(name);
+  }
+  pointerTypedefNames = pointers;
+}
+
+/**
+ * Every typedef name whose chain ends at a pointer - `LPCSTR` IS `CHAR *`,
+ * `HANDLE` IS `void *`, `LPSERVICE_STATUS` IS `_SERVICE_STATUS *`.
+ *
+ * `castPointerInitializer` decided "is this a pointer slot?" by looking for a
+ * `*` in the SPELLING, which a typedef never has. A word stored into such a slot
+ * was therefore emitted as a bare integer, for which C++ has no conversion at
+ * all. Built by the same single walk that finds the aggregate typedefs, so the
+ * two answers cannot drift apart.
+ */
+let pointerTypedefNames: Set<string> = new Set();
+
+/** Does this name denote a typedef whose chain ends at a pointer? */
+export function isPointerTypedefName(name: string): boolean {
+  return pointerTypedefNames.has(name);
+}
+
+export function getAggregateTypeNames(): Set<string> | undefined {
+  return aggregateTypeNames;
+}
+
+/**
+ * SDK functions whose declared return type is `void *`.
+ *
+ * Ghidra has no `Function` record for `VirtualAlloc`, `HeapAlloc` or `malloc` -
+ * they are import thunks and CRT names, not code - so the emitter's
+ * return-type index, which is built from model functions, does not know what a
+ * call to one evaluates to, and `T *p = VirtualAlloc(...)` is emitted with no
+ * cast. Ghidra's decompiler emits C, where `void *` converts to any object
+ * pointer implicitly; C++ has never allowed that, and the original MSVC source
+ * carried the cast.
+ *
+ * The return type here is the SDK header's own, which is exactly the record the
+ * COMPILER will use, so unlike a Ghidra prototype for a platform name it cannot
+ * disagree with the declaration in scope. Where this file already carries the
+ * full declaration the return type is read off it rather than restated; the
+ * explicit list is only for names the platform header declares and no stub here
+ * repeats.
+ *
+ * A model function of the same bare name that returns something else still
+ * wins - the caller applies the same ambiguity rule it applies to its own
+ * records.
+ */
+const VOID_POINTER_RETURN_SPELLINGS = new Set(['void*', 'void *', 'LPVOID', 'PVOID']);
+
+/** SDK names the platform headers declare that no stub table above repeats. */
+const PLATFORM_VOID_POINTER_RETURNS: readonly string[] = [
+  // <memoryapi.h> / <heapapi.h> / <winbase.h>
+  'VirtualAllocEx', 'HeapReAlloc', 'GlobalLock', 'LocalLock',
+  'MapViewOfFile', 'MapViewOfFileEx', 'LockResource',
+  // <stdlib.h> / <string.h>
+  'malloc', 'calloc', 'realloc', 'bsearch',
+  'memcpy', 'memmove', 'memset', 'memchr',
+];
+
+/**
+ * Every platform function name that returns `void *`, from the declarations
+ * this file already holds plus the names only the SDK header declares.
+ */
+export function platformVoidPointerFunctionNames(): Set<string> {
+  const names = new Set<string>(PLATFORM_VOID_POINTER_RETURNS);
+  for (const group of [
+    WIN32_CORE_STUBS, WIN32_UI_STUBS, CRT_EXTERN_STUBS,
+    WIN32_SYNC_FALLBACK_STUBS, WIN32_FILE_FALLBACK_STUBS,
+  ]) {
+    for (const d of group) {
+      // `<RETURN> <name>(` - the declaration is written return-type first.
+      const m = /^\s*(.+?)\s*\b([A-Za-z_]\w*)\s*\(/.exec(d.decl);
+      if (!m || m[2] !== d.name) continue;
+      if (VOID_POINTER_RETURN_SPELLINGS.has(m[1].trim())) names.add(d.name);
+    }
+  }
+  return names;
 }

@@ -50,6 +50,69 @@ function isTransient(err: unknown): boolean {
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
 /**
+ * How chatty was this run? Every phase goes through `rpcCallOnce`, so counting
+ * here gives the true HTTP round-trip count and response volume against the
+ * remote daemon — the number that decides whether batch sizes are tuned or
+ * whether latency is the wall.
+ */
+export interface RpcStats {
+  calls: number;
+  retries: number;
+  bytesIn: number;
+  /** Total time spent inside fetch+parse, summed across calls (may overlap). */
+  ms: number;
+  /** Per-tool breakdown, so "146 list_functions pages" is visible, not inferred. */
+  byTool: Map<string, { calls: number; bytesIn: number; ms: number }>;
+}
+
+const rpcStats: RpcStats = { calls: 0, retries: 0, bytesIn: 0, ms: 0, byTool: new Map() };
+
+export function getRpcStats(): RpcStats {
+  return rpcStats;
+}
+
+export function resetRpcStats(): void {
+  rpcStats.calls = 0;
+  rpcStats.retries = 0;
+  rpcStats.bytesIn = 0;
+  rpcStats.ms = 0;
+  rpcStats.byTool.clear();
+}
+
+function recordRpc(tool: string, bytesIn: number, ms: number): void {
+  rpcStats.calls++;
+  rpcStats.bytesIn += bytesIn;
+  rpcStats.ms += ms;
+  let entry = rpcStats.byTool.get(tool);
+  if (!entry) {
+    entry = { calls: 0, bytesIn: 0, ms: 0 };
+    rpcStats.byTool.set(tool, entry);
+  }
+  entry.calls++;
+  entry.bytesIn += bytesIn;
+  entry.ms += ms;
+}
+
+/** Top tools by wall time, e.g. "batch_decompile 268x/612.1s/54MB". */
+export function summarizeRpcStats(limit = 6): string[] {
+  if (rpcStats.calls === 0) return [];
+  const rows = [...rpcStats.byTool.entries()].sort((a, b) => b[1].ms - a[1].ms).slice(0, limit);
+  const lines = [
+    `RPC: ${rpcStats.calls} calls, ${rpcStats.retries} retries, ` +
+    `${(rpcStats.ms / 1000).toFixed(1)}s in-flight, ${(rpcStats.bytesIn / 1e6).toFixed(1)} MB received`,
+  ];
+  for (const [tool, s] of rows) {
+    lines.push(
+      `  ${tool.padEnd(24)} ${String(s.calls).padStart(6)}x ` +
+      `${(s.ms / 1000).toFixed(1)}s`.padStart(9) +
+      ` ${(s.bytesIn / 1e6).toFixed(1)} MB` +
+      (s.calls > 1 ? `  (${(s.ms / s.calls).toFixed(0)} ms/call)` : '')
+    );
+  }
+  return lines;
+}
+
+/**
  * Send a JSON-RPC call to the daemon's /mcp/rpc endpoint.
  *
  * Retries transient network failures (port-forward tunnel drops, worker
@@ -70,6 +133,7 @@ async function rpcCall<T>(
     } catch (err) {
       lastErr = err;
       if (attempt >= maxRetries || !isTransient(err)) throw err;
+      rpcStats.retries++;
       const delay = Math.min(500 * 2 ** attempt, 8000);
       console.warn(
         `[rpc] transient failure on ${toolName} (attempt ${attempt + 1}/${maxRetries + 1}): ${(err as Error).message} — retrying in ${delay}ms`
@@ -86,6 +150,7 @@ async function rpcCallOnce<T>(
   args: Record<string, unknown>,
   timeoutMs: number
 ): Promise<T> {
+  const startedAt = Date.now();
   const resp = await fetch(`${daemonUrl}/mcp/rpc`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
@@ -102,7 +167,11 @@ async function rpcCallOnce<T>(
     throw new Error(`Daemon returned HTTP ${resp.status}: ${resp.statusText}`);
   }
 
-  const json = await resp.json() as {
+  // Read as text first so the response size is measurable — the JSON is parsed
+  // from the same string, so this costs nothing extra.
+  const raw = await resp.text();
+  recordRpc(toolName, raw.length, Date.now() - startedAt);
+  const json = JSON.parse(raw) as {
     error?: { message: string };
     result?: { content?: Array<{ type: string; text: string }> };
   };
@@ -169,7 +238,10 @@ export async function createConnection(
       daemonUrl,
       'create_session',
       createArgs,
-      120000 // 2 min timeout for worker startup
+      // Worker startup. A fresh checkout downloads the whole program DB from the
+      // remote Ghidra server, which can far exceed 2 min; reused checkouts are
+      // near-instant. Configurable so a cold first checkout doesn't get aborted.
+      Number(process.env.GHIDRA_CREATE_SESSION_TIMEOUT_MS) || 120000
     );
     sessionId = session.id;
     console.log(`Session created: ${sessionId}`);

@@ -119,12 +119,23 @@ describe('buildModuleGraph', () => {
     assert.strictEqual(graph.findOwner('GraphNodeT'), 'Util/Graph/Graph.h');
     assert.strictEqual(graph.findOwner('EdgeT'), 'Util/Edge/Edge.h');
 
-    // GraphNodeT has pointer to EdgeT — by-pointer deps now go to headerIncludes
+    // GraphNodeT holds `EdgeT *`, which needs only `struct EdgeT;` in the header.
+    //
+    // CHANGED: this used to assert the dep landed in headerIncludes. It lands in
+    // implIncludes, and should: the header emitter forward-declares pointer-only
+    // types itself, and promoting by-pointer deps to header includes was measured
+    // on the real tree (run.ts --codegen-only) at 20051 -> 28563 mingw
+    // -fsyntax-only errors over the same 400 .cpp. See the matching note in
+    // module-graph.test.ts.
     const resolved = graph.resolve();
     const drlgModule = resolved.get('Util/Graph/Graph.h')!;
     assert.ok(
-      drlgModule.headerIncludes.includes('Util/Edge/Edge.h'),
-      'Expected EdgeT pointer dep in headerIncludes',
+      !drlgModule.headerIncludes.includes('Util/Edge/Edge.h'),
+      'A pointer-only dep must not force a header include',
+    );
+    assert.ok(
+      drlgModule.implIncludes.includes('Util/Edge/Edge.h'),
+      'Expected EdgeT pointer dep in implIncludes',
     );
   });
 

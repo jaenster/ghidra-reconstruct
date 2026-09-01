@@ -20,15 +20,54 @@ import type {
 } from '../types.js';
 import type { MethodConversionRegistry } from '../methods/index.js';
 import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js';
-import { isGhidraGeneratedName, suggestBetterName } from '@ghidra-mcp/cpp-parser';
-import { isPlatformOrBuiltinType, isLibraryType, normalizeSignatureType, collapseFuncPtrTypedef, WINDOWS_STRUCTS } from './platform-types.js';
-import { generateExternDeclaration, isFuncDefTypedefName } from './globals-header.js';
+import { namespaceResolution, renderNamespace } from './namespace-resolution.js';
+import { isGhidraGeneratedName, suggestBetterName, type FuncPtrTarget } from '@ghidra-mcp/cpp-parser';
+import { isPlatformOrBuiltinType, isLibraryType, normalizeSignatureType, normalizeWideCharType, collapseFuncPtrTypedef, rootQualifyShadowedType, emittedParameterName, arrayRowReturn, WINDOWS_STRUCTS, platformDeclaredFunctionNames } from './platform-types.js';
+import { generateExternDeclaration, isFuncDefTypedefName, sanitizeSymbolName, orderForwardDeclarations, type ForwardDeclaration } from './globals-header.js';
+import { declarationHead, pointerConvention } from './calling-convention.js';
 
 /** normalizeSignatureType + fn-ptr-typedef double-indirection collapse, for
  *  emitting function parameter and return types ("fpFoo *" → "fpFoo"). */
-function sigType(type: string): string {
-  return collapseFuncPtrTypedef(normalizeSignatureType(type), isFuncDefTypedefName);
+export function sigType(type: string): string {
+  return rootQualifyShadowedType(
+    collapseFuncPtrTypedef(normalizeSignatureType(type), isFuncDefTypedefName)
+  );
 }
+
+/**
+ * The spelling for a RETURN type.
+ *
+ * Identical to {@link sigType} except for `T[N] *`: a pointer to an array is a
+ * pointer to the whole row, and flattening it to `T *` (which is right for a
+ * parameter) makes the caller's `*f(...)` yield a `T`. The row goes through the
+ * typedef `d2_platform.h` writes for it, so the spelling stays an ordinary
+ * pointer everywhere it has to be handled.
+ */
+export function returnSigType(type: string): string {
+  const row = arrayRowReturn(type);
+  return row ? `${row.typedefName} *` : sigType(type);
+}
+
+/**
+ * C++ keywords that Ghidra can auto-pick as a struct field / variable name
+ * (`int default;`, `char class;`). Using one as an identifier is a syntax error;
+ * such names are suffixed with `_`. Shared with impl.ts so body member accesses
+ * get the same rename.
+ *
+ * Type keywords belong here too: Ghidra names the data-table structs after the
+ * .txt column headers, and CharTemplate.txt has a column called `int`, so
+ * D2CharTemplateTxt really does carry a field named `int`.
+ */
+export const CPP_KEYWORDS = new Set<string>([
+  'default', 'class', 'new', 'delete', 'operator', 'template', 'namespace',
+  'this', 'friend', 'public', 'private', 'protected', 'virtual', 'register',
+  'export', 'goto', 'throw', 'try', 'catch', 'typename', 'typeid', 'switch',
+  'case', 'return', 'while', 'for', 'do', 'if', 'else', 'break', 'continue',
+  'and', 'or', 'not', 'xor', 'bitand', 'bitor', 'compl', 'typedef', 'sizeof',
+  'int', 'char', 'float', 'double', 'short', 'long', 'bool', 'void',
+  'signed', 'unsigned', 'auto', 'const', 'static', 'struct', 'union', 'enum',
+  'inline', 'extern', 'volatile',
+]);
 
 /**
  * Clean a parameter name: apply the same renaming the body transform does
@@ -96,10 +135,10 @@ export function generateHeader(
   const lines: string[] = [];
 
   // Build address→name map for resolving FUN_ references in comments
-  const fnAddrMap = new Map<bigint, string>();
+  const fnAddrMap = new Map<bigint, FuncPtrTarget>();
   for (const f of functions) {
     if (f.address && !f.name.startsWith('FUN_')) {
-      try { fnAddrMap.set(BigInt(f.address), f.name); } catch { /* skip invalid */ }
+      try { fnAddrMap.set(BigInt(f.address), { name: f.name }); } catch { /* skip invalid */ }
     }
   }
 
@@ -120,8 +159,12 @@ export function generateHeader(
 
   // Type includes: needed for by-value struct fields (before type definitions)
   if (extraIncludes && extraIncludes.length > 0) {
+    const seen = new Set<string>();
     for (const inc of [...extraIncludes].sort()) {
-      lines.push(`#include "${inc}"`);
+      const normalized = inc.replace(/\\/g, '/');
+      if (seen.has(normalized)) continue;
+      seen.add(normalized);
+      lines.push(`#include "${normalized}"`);
     }
   }
   lines.push('');
@@ -129,10 +172,29 @@ export function generateHeader(
   // Forward declarations — skip types already fully defined via #includes (includedTypes).
   // Don't skip ownedTypes: they might not be emitted due to filtering, and need forward decl.
   const alreadyDefined = new Set<string>([...(includedTypes ?? [])]);
-  const forwardDecls = collectForwardDeclarations(functions, classInfo, dataTypes, classNames, alreadyDefined, ownedTypes, allClasses, allFunctions);
+  const funcDefReferencedTypes = new Set<string>();
+  const funcDefTypedefDeps = new Map<string, Set<string>>();
+  const forwardDecls = collectForwardDeclarations(functions, classInfo, dataTypes, classNames, alreadyDefined, ownedTypes, allClasses, allFunctions, funcDefReferencedTypes, funcDefTypedefDeps);
   if (forwardDecls.length > 0) {
     lines.push('// Forward declarations');
-    for (const decl of forwardDecls) {
+    // A function-pointer typedef names struct types in its signature, so every
+    // plain forward declaration has to precede the typedef block that uses one.
+    const isTypedefBlock = (d: string) => d.startsWith('#ifndef RECON_FPTD_');
+    for (const decl of forwardDecls.filter(d => !isTypedefBlock(d))) {
+      lines.push(decl);
+    }
+    // A struct this header DEFINES is defined BELOW the typedef block, so the
+    // typedef still needs its own forward declaration of it.
+    const ownedAhead: string[] = [];
+    for (const name of funcDefReferencedTypes) {
+      if (!ownedTypes?.has(name)) continue;
+      const dt = dataTypes?.find(t => t.name === name);
+      if (!dt) continue;
+      if (dt.kind === 'STRUCTURE') ownedAhead.push(`struct ${name};`);
+      else if (dt.kind === 'UNION') ownedAhead.push(`union ${name};`);
+    }
+    for (const decl of ownedAhead.sort()) lines.push(decl);
+    for (const decl of orderTypedefBlocks(forwardDecls.filter(isTypedefBlock), funcDefTypedefDeps)) {
       lines.push(decl);
     }
     lines.push('');
@@ -281,17 +343,38 @@ export function generateHeader(
       lines.push('// =============================================================================');
       lines.push('');
 
-      let currentIfdef: string | undefined;
-      for (const global of colocatedGlobals) {
-        if (global.ifdef !== currentIfdef) {
-          if (currentIfdef) lines.push(`#endif // ${currentIfdef}`);
-          if (global.ifdef) lines.push(`#ifdef ${global.ifdef}`);
-          currentIfdef = global.ifdef;
-        }
-        lines.push(generateExternDeclaration(global, options.includeAddressComments));
+      // These externs used to go out at ROOT scope while
+      // `generateColocatedGlobalsImpl` wrapped the matching DEFINITIONS in the
+      // symbol's namespace — so `D2Client::UI::Hireables::gpHireablesList` was
+      // defined and `::gpHireablesList` was declared, and the reference sites,
+      // which spell the namespace, resolved to neither. Both sides call
+      // `colocatedGlobalNamespace` now.
+      const colocatedByNamespace = new Map<string | undefined, AnalyzedDataSymbol[]>();
+      for (const g of colocatedGlobals) {
+        const ns = renderNamespace(namespaceResolution().of(g));
+        const bucket = colocatedByNamespace.get(ns);
+        if (bucket) bucket.push(g); else colocatedByNamespace.set(ns, [g]);
       }
-      if (currentIfdef) lines.push(`#endif // ${currentIfdef}`);
-      lines.push('');
+
+      for (const [ns, nsGlobals] of colocatedByNamespace) {
+        if (ns && /[<>,*]/.test(ns)) continue;
+        if (ns) { lines.push(`namespace ${ns} {`); lines.push(''); }
+        let currentIfdef: string | undefined;
+        for (const global of nsGlobals) {
+          if (global.ifdef !== currentIfdef) {
+            if (currentIfdef) lines.push(`#endif // ${currentIfdef}`);
+            if (global.ifdef) lines.push(`#ifdef ${global.ifdef}`);
+            currentIfdef = global.ifdef;
+          }
+          {
+            const decl = generateExternDeclaration(global, options.includeAddressComments);
+            if (decl) lines.push(decl);
+          }
+        }
+        if (currentIfdef) lines.push(`#endif // ${currentIfdef}`);
+        if (ns) { lines.push(''); lines.push(`} // namespace ${ns}`); }
+        lines.push('');
+      }
     }
   }
 
@@ -326,29 +409,14 @@ export function generateHeader(
   // Methods are scoped to struct name (StructName::Method), not namespace
   const standaloneFunctions = functions.filter(f => !f.parentClass);
   const hasStandaloneFunctions = standaloneFunctions && standaloneFunctions.length > 0;
-  let namespace = (hasStandaloneFunctions && rawNamespace) ? rawNamespace : undefined;
-
-  // Collapse consecutive duplicate namespace segments (e.g., Monsters::Monsters → Monsters)
-  if (namespace) {
-    namespace = collapseConsecutiveDuplicates(namespace);
-  }
-
-  // Strip namespace components that collide with type names USED IN THIS FILE.
-  if (namespace) {
-    const parts = namespace.split('::');
-    const localTypeNames = new Set<string>();
-    if (ownedTypes) for (const t of ownedTypes) localTypeNames.add(t);
-    for (const decl of forwardDecls) {
-      const m = decl.match(/^(?:struct|class|union)\s+(\w+);$/);
-      if (m) localTypeNames.add(m[1]);
-      const tm = decl.match(/^typedef\s+\w+\s+(?:\(\*)?(\w+)/);
-      if (tm) localTypeNames.add(tm[1]);
-    }
-    if (localTypeNames.size > 0) {
-      const filtered = parts.filter(p => !localTypeNames.has(p));
-      namespace = filtered.length > 0 ? filtered.join('::') : undefined;
-    }
-  }
+  // Rendered from the resolution, so the declaration is in the namespace the
+  // definition opens — by identity, not by two copies of the same rule.
+  const namespaceOwner = (hasStandaloneFunctions && rawNamespace)
+    ? (classInfo?.namespace ? { address: undefined, namespace: rawNamespace } : functions[0])
+    : undefined;
+  let namespace = namespaceOwner
+    ? renderNamespace(namespaceResolution().of(namespaceOwner))
+    : undefined;
 
   // Only emit namespace block if it's a valid C++ namespace (not a template instantiation)
   const useNamespace = namespace && options.organization === 'namespace' && isValidNamespace(namespace);
@@ -361,11 +429,24 @@ export function generateHeader(
 
   // Emit standalone functions (class was already emitted above)
   if (!classInfo) {
-    // Global/file-level function declarations
-    // Build set of known type names for filtering constructor/destructor artifacts
-    const knownTypeNames = new Set<string>();
-    if (dataTypes) for (const dt of dataTypes) knownTypeNames.add(dt.name);
-    for (const ws of WINDOWS_STRUCTS) knownTypeNames.add(ws);
+    // Global/file-level function declarations.
+    //
+    // A function whose name ALSO names a data type used to be dropped here. That
+    // was a real loss: Ghidra names ~53 functions after their own funcdef
+    // (`Push`, `Release`, `fpDrawGroundTile`, the eleven `D2Win*` control
+    // factories), and every other TU calling one got "is not a member of", or —
+    // where the type is a struct — parsed the call as a functional cast and asked
+    // for a constructor that does not exist. Declaring them is legal C++: the
+    // typedef is at ROOT scope, the function is inside its namespace, and the
+    // elaborated-`struct` post-pass below defends the signatures against the
+    // struct/function shadow.
+    //
+    // It was tried once and measured at +25 errors, because the declaration lets
+    // the compiler compare each function against the funcdef slot it is stored
+    // in and they disagreed — the wrong-signature bug `disambiguateCategoryDuplicates`
+    // repairs upstream. That fix is in the model now (`fpDrawGroundTile` and
+    // `D2RendererFunctionsStrc_fpDrawGroundTile` are separate types), so the
+    // declaration is emitted.
 
     // C/C++ standard library functions that must never be re-declared
     const C_STDLIB_NAMES = new Set([
@@ -387,10 +468,11 @@ export function generateHeader(
       && !f.name.startsWith('operator')
       // Skip destructor-like free functions (~TypeName)
       && !f.name.startsWith('~')
-      // Skip constructor-like free functions where name matches a known type
-      && !knownTypeNames.has(f.name)
-      // Skip names starting with digits (e.g. "0x44PacketHandler")
-      && !/^\d/.test(f.name)
+      // NOTE: a digit-leading name is no longer skipped. It is legalized by the
+      // same rule the definition and every reference use (`emittedFunctionName`),
+      // so `0x44PacketHandler` is declared as `_x44PacketHandler`. Skipping it
+      // here left one symbol with three spellings and no declaration for any.
+      && f.name.length > 0
       // Skip C standard library functions
       && !C_STDLIB_NAMES.has(f.name)
     );
@@ -473,6 +555,10 @@ export function generateHeader(
         if (sl.startsWith('struct ') || sl.startsWith('class ') || sl.startsWith('union ')) continue;
         sublines[j] = sl.replace(/(\W)([A-Z_]\w+)(\s*\*)/g, (full, pre, name, post) => {
           if (pre === '.' || pre === '>') return full;
+          // Already root-qualified by sigType (`::QServer *`) — the shadow the
+          // `struct` keyword defends against is gone, and inserting it here
+          // would produce `::struct QServer *`.
+          if (pre === ':') return full;
           if (forwardDeclaredStructs.has(name) && !full.startsWith('struct ')) {
             return `${pre}struct ${name}${post}`;
           }
@@ -594,8 +680,12 @@ export function generateClassDeclaration(
  * Check if a struct's fields are all integer types and the total size matches
  * a standard integer type. Returns the integer type name or null.
  * This enables Ghidra's decompiler pattern of casting between small structs and integers.
+ *
+ * Exported because it is the ONLY record of which aggregates the emitted header
+ * gives a converting constructor to. A pass that rewrites a cast to an aggregate
+ * has to leave those alone - the cast already means what it says there.
  */
-function getIntegerConversionType(fields: StructField[]): string | null {
+export function getIntegerConversionType(fields: StructField[]): string | null {
   if (!fields || fields.length === 0) return null;
   const integerTypes = new Set([
     'int', 'int8_t', 'int16_t', 'int32_t', 'int64_t',
@@ -628,10 +718,18 @@ function cleanInlineComment(comment: string): string {
  */
 export function cleanFunctionComment(
   comment: string,
-  functionAddressMap?: Map<bigint, string>,
+  functionAddressMap?: Map<bigint, FuncPtrTarget>,
 ): string {
   // Convert literal \n sequences to actual newlines
-  const lines = comment.replace(/\\n/g, '\n').split('\n');
+  const rawLines = comment.replace(/\\n/g, '\n').split('\n');
+  // Ghidra's batch_rename rewrites plate comments into an @function/@address/@date/
+  // @calling/@description template and buries the original text inside @description.
+  // That text is the source-file attribution, so unwrap it rather than dropping it
+  // with the tag.
+  const lines = rawLines.map(line => {
+    const described = line.match(/^\s*@description\s+(.*)$/i);
+    return described ? described[1] : line;
+  });
   const cleaned = lines.filter(line => {
     const trimmed = line.trim();
     if (!trimmed) return false;
@@ -640,7 +738,9 @@ export function cleanFunctionComment(
     // Custom register warning
     if (trimmed === 'Function uses custom registers for function arguments!') return false;
     // Plate comment metadata tags (case-insensitive, with or without colon)
-    if (/^@(date|author|function|address|description|params)\b/i.test(trimmed)) return false;
+    // (@description is unwrapped above, so a bare tag with no payload falls through here.)
+    // @calling is redundant — the emitted signature already carries the convention.
+    if (/^@(date|author|function|address|description|params|calling)\b/i.test(trimmed)) return false;
     // Param lines inside @params block (e.g. "  param_1: ECX:4 (int32_t)")
     if (/^\s*param_\d+\s*:/.test(trimmed)) return false;
     // Bare URLs
@@ -650,14 +750,28 @@ export function cleanFunctionComment(
     return true;
   });
 
-  let result = cleaned.join('\n');
+  // Evidence lines quote debug strings verbatim, and those strings often embed a
+  // newline — which would otherwise split the quote across two comment lines
+  // mid-sentence. Fold continuations back into the `name:`/`name?:` line they belong to.
+  const folded: string[] = [];
+  for (const line of cleaned) {
+    const isTagged = /^\s*(src\??:|name\??:|logged locals:)/.test(line);
+    const prev = folded[folded.length - 1];
+    if (!isTagged && prev !== undefined && /^\s*name\??:/.test(prev)) {
+      folded[folded.length - 1] = `${prev.trimEnd()} ${line.trim()}`;
+    } else {
+      folded.push(line);
+    }
+  }
+
+  let result = folded.join('\n');
 
   // Resolve inline FUN_ references to their actual names
   if (functionAddressMap && result.includes('FUN_')) {
     result = result.replace(/FUN_([0-9a-fA-F]{6,8})/g, (_match, hex: string) => {
       const addr = BigInt('0x' + hex);
-      const name = functionAddressMap.get(addr);
-      return name ?? _match;
+      const target = functionAddressMap.get(addr);
+      return target?.name ?? _match;
     });
   }
 
@@ -667,10 +781,32 @@ export function cleanFunctionComment(
 /**
  * Generate a function declaration
  */
+/**
+ * The identifier a function is DEFINED and DECLARED under.
+ *
+ * Ghidra's name is not always a legal C++ identifier, and the reference side has
+ * its own legalizer (`sanitizeSymbolName`), so both must apply the SAME rule or a
+ * call names something that exists nowhere. `0x44PacketHandler` was the proof:
+ * the definition kept it verbatim — `uint32_t 0x44PacketHandler(...)`, not C++ at
+ * all — while every reference to it said `_x44PacketHandler`, one symbol under
+ * three spellings.
+ *
+ * A trailing `()` is a Ghidra artifact and comes off first; a name that equals its
+ * own return type is a constructor and becomes `Create_<name>`, so the declaration
+ * cannot be read as one.
+ */
+export function emittedFunctionName(func: ExtractedFunction, returnType: string): string {
+  const cleanName = sanitizeSymbolName(func.name.replace(/[()]+$/, ''));
+  if (returnType.startsWith(cleanName + ' ') || returnType === cleanName) {
+    return `Create_${cleanName}`;
+  }
+  return cleanName;
+}
+
 export function generateFunctionDeclaration(
   func: ExtractedFunction,
   options: ReconstructOptions,
-  functionAddressMap?: Map<bigint, string>,
+  functionAddressMap?: Map<bigint, FuncPtrTarget>,
 ): string {
   let commentBlock = '';
   if (func.comment) {
@@ -679,16 +815,14 @@ export function generateFunctionDeclaration(
       commentBlock = cleaned.split('\n').map(l => `// ${l}`).join('\n') + '\n';
     }
   }
-  const params = renumberParams(func.parameters)
+  let params = renumberParams(func.parameters)
     .map(p => {
       const type = sigType(p.dataType);
-      let name = p.name;
       // Avoid param name shadowing its own type (e.g., "eD2ItemFlag eD2ItemFlag")
-      const baseType = type.replace(/\s*[*&]+\s*$/, '').replace(/^(struct|class|union|enum)\s+/, '').trim();
-      if (name === baseType) name = `n${name}`;
-      return `${type} ${name}`;
+      return `${type} ${emittedParameterName(p.name, type)}`;
     })
     .join(', ');
+  if (func.hasVarArgs) params = params ? `${params}, ...` : '...';
 
   const stripAddr = (a: string) => a.includes(':') ? a.slice(a.lastIndexOf(':') + 1) : a;
   let addressComment = '';
@@ -705,15 +839,9 @@ export function generateFunctionDeclaration(
     addressComment = ` // 1.14d: ${stripAddr(func.address)}`;
   }
 
-  // Sanitize function names: strip trailing parens, replace invalid chars (hyphens, dots, etc.)
-  let cleanName = func.name.replace(/[()]+$/, '').replace(/[^A-Za-z0-9_]/g, '_');
-  // Detect constructor pattern: function name matches return type (e.g., D2WinButton * D2WinButton(...))
-  const returnType = sigType(func.returnType);
-  if (returnType.startsWith(cleanName + ' ') || returnType === cleanName) {
-    cleanName = `Create_${cleanName}`;
-  }
+  const cleanName = emittedFunctionName(func, returnSigType(func.returnType));
 
-  return `${commentBlock}${sigType(func.returnType)} ${cleanName}(${params});${addressComment}`;
+  return `${commentBlock}${declarationHead(returnSigType(func.returnType), func.callingConvention)}${cleanName}(${params});${addressComment}`;
 }
 
 /**
@@ -784,13 +912,42 @@ function generateDataTypeDeclaration(
  * - Gives other unnamed members Ghidra's decompiler default name so body
  *   references resolve: `field<i>` for unions, `field<i>_0x<off>` for structs
  */
-function emitFieldLines(fields: StructField[], lines: string[], isUnion = false): void {
-  // Determine hex width from the largest offset (minimum 2 digits)
-  const maxOffset = fields.length > 0 ? Math.max(...fields.map(f => f.offset)) : 0;
+/**
+ * Longest run of unnamed `undefined` filler bytes that gets one named member per
+ * byte. Above this the run stays a collapsed `_pad_` array: the handful of runs
+ * that big in Diablo II are multi-kilobyte unanalysed tails (up to 59999 bytes),
+ * and expanding them would add ~85k member declarations to headers that hundreds
+ * of translation units include. Every filler offset any reconstructed body
+ * actually reaches lies well inside this limit.
+ */
+const MAX_NAMED_FILLER_BYTES = 4096;
+
+function emitFieldLines(
+  fields: StructField[],
+  lines: string[],
+  isUnion = false,
+  emitted?: Set<string>,
+): void {
+  // Determine hex width from the largest offset (minimum 2 digits).
+  // Folded rather than spread: `D2GameViewStrc` arrives with 60,023 components,
+  // and `Math.max(...)` over a list that size is an argument list, not a loop.
+  let maxOffset = 0;
+  for (const f of fields) if (f.offset > maxOffset) maxOffset = f.offset;
   const hexWidth = Math.max(2, maxOffset.toString(16).length);
 
   // Track seen field names to deduplicate (Ghidra sometimes has duplicate names at different offsets)
   const seenNames = new Set<string>();
+
+  // Count how many fields use each base type name. A field whose name equals its
+  // own type only shadows that type for SUBSEQUENT same-typed fields, so a
+  // single-use field can keep its name — which matters because the decompiled
+  // body accesses it by that name. Renaming a single-use field (n-prefix) without
+  // rewriting bodies produced "has no member named 'eD2LevelId'".
+  const typeUseCount = new Map<string, number>();
+  for (const f of fields) {
+    const bt = extractBaseTypeName(normalizeUndefinedType(f.dataType, f.size));
+    if (bt) typeUseCount.set(bt, (typeUseCount.get(bt) ?? 0) + 1);
+  }
 
   let i = 0;
   while (i < fields.length) {
@@ -819,6 +976,7 @@ function emitFieldLines(fields: StructField[], lines: string[], isUnion = false)
           const bfName = (bf.name ?? '').replace(/[^a-zA-Z0-9_]/g, '_') || `_bf_${bfOffsetHex}_${j}`;
           const bfDecl = normalizeFieldDeclaration(
             normalizeUndefinedType(bf.dataType, bf.size), bfName, bf.size);
+          emitted?.add(bfName);
           lines.push(`        /* ${bfOffsetHex} */ ${bfDecl};${bfComment}`);
         }
         lines.push(`    };`);
@@ -834,7 +992,63 @@ function emitFieldLines(fields: StructField[], lines: string[], isUnion = false)
       while (i + count < fields.length && isUnnamedUndefined1(fields[i + count])) {
         count++;
       }
+      if (count === 1) {
+        // A LONE undefined byte is still undefined space, and the decompiler names
+        // a read of it `field_0x<off>` exactly as it does inside a longer run —
+        // the component's ordinal never appears. Emitting the ordinal-bearing
+        // `field<i>_0x<off>` here gave the one member Ghidra's own body text never
+        // spells ("has no member named 'field_0x44'"). Same offset, same byte.
+        const loneName = `field_0x${field.offset.toString(16)}`;
+        if (!seenNames.has(loneName)) {
+          seenNames.add(loneName);
+          const loneComment = field.comment ? ` // ${cleanInlineComment(field.comment)}` : '';
+          emitted?.add(loneName);
+          lines.push(`    /* ${offsetHex} */ uint8_t ${loneName};${loneComment}`);
+          i += 1;
+          continue;
+        }
+      }
       if (count > 1) {
+        // Ghidra's decompiler names an access into undefined filler
+        // `field_0x<unpadded-lowercase-hex>` at the offset it touches — so a body
+        // that reaches into the middle of a run needs a member AT that offset, not
+        // just at the run's start. A lumped `uint8_t _pad[N]` gives no name at any
+        // offset ("struct D2WinScrollbar has no member named 'field_0x48'"), so
+        // name every byte of the run instead.
+        //
+        // Layout is untouched: N consecutive `uint8_t` members occupy the same N
+        // bytes at the same offsets, with the same alignment, as `uint8_t[N]`.
+        if (count <= MAX_NAMED_FILLER_BYTES) {
+          for (let k = 0; k < count; k++) {
+            const byteOffset = field.offset + k;
+            const byteOffsetHex = `0x${byteOffset.toString(16).toUpperCase().padStart(hexWidth, '0')}`;
+            let byteName = `field_0x${byteOffset.toString(16)}`;
+            // A real member of that exact name elsewhere in the struct wins; this
+            // byte still has to occupy its slot, so fall back to a unique pad name.
+            if (seenNames.has(byteName)) byteName = `_pad_${byteOffsetHex}`;
+            seenNames.add(byteName);
+            emitted?.add(byteName);
+            lines.push(`    /* ${byteOffsetHex} */ uint8_t ${byteName};`);
+          }
+          i += count;
+          continue;
+        }
+        // Runs past the limit stay collapsed — naming every byte of a multi-kilobyte
+        // unanalysed tail would add more declarations than the rest of the header
+        // holds, and nothing in the tree reaches that far into one. The run's first
+        // byte still gets its Ghidra name, which is the offset bodies actually read.
+        const ghName = `field_0x${field.offset.toString(16)}`;
+        if (!seenNames.has(ghName)) {
+          seenNames.add(ghName);
+          emitted?.add(ghName);
+          lines.push(`    /* ${offsetHex} */ uint8_t ${ghName};`);
+          const restOffsetHex = `0x${(field.offset + 1).toString(16).toUpperCase().padStart(hexWidth, '0')}`;
+          emitted?.add(`_pad_${restOffsetHex}`);
+          lines.push(`    /* ${restOffsetHex} */ uint8_t _pad_${restOffsetHex}[${count - 1}];`);
+          i += count;
+          continue;
+        }
+        emitted?.add(`_pad_${offsetHex}`);
         lines.push(`    /* ${offsetHex} */ uint8_t _pad_${offsetHex}[${count}];`);
         i += count;
         continue;
@@ -856,19 +1070,25 @@ function emitFieldLines(fields: StructField[], lines: string[], isUnion = false)
     //   - union member at ordinal i      → `field<i>`        (e.g. field0, field1)
     //   - struct member at ordinal i/off → `field<i>_0x<off>` (e.g. field2_0x1f44)
     // Ghidra uses lowercase, unpadded hex (Integer.toHexString) for the offset.
-    const ghidraDefaultName = isUnion
-      ? `field${i}`
-      : `field${i}_0x${field.offset.toString(16)}`;
+    const ghidraDefaultName = ghidraDefaultFieldName(isUnion, i, field.offset);
     // Sanitize field names: replace spaces/invalid chars with underscores
     let rawName = rawFieldName ? rawFieldName.replace(/[^a-zA-Z0-9_]/g, '_') : ghidraDefaultName;
     if (!rawName) rawName = ghidraDefaultName;
-    // Prefix names starting with a digit (e.g., "0x1B" → "field_0x1B") — invalid C++ identifiers
-    if (/^\d/.test(rawName)) rawName = `field_${rawName}`;
+    // A leading digit is not a valid identifier start, and Ghidra's decompiler
+    // repairs it the same way it repairs every other illegal character in a field
+    // name: by REPLACING that character with `_`. `D2UIFlagStrc` really does have
+    // members named `0x1D`/`0x1E`/`0x20`, and bodies spell them `_x1D`/`_x1E`/
+    // `_x20` (just as `Day Event` is spelled `Day_Event`). Prefixing instead —
+    // `field_0x1D` — declared a member under a name no body ever uses.
+    if (/^[0-9]/.test(rawName)) rawName = `_${rawName.slice(1)}`;
+    // A field auto-named after a C++ keyword (Ghidra: `char class;`, `int default;`)
+    // is a syntax error. Append `_`; body accesses are rewritten to match (impl.ts).
+    if (CPP_KEYWORDS.has(rawName)) rawName = `${rawName}_`;
     const type = normalizeUndefinedType(field.dataType, field.size);
     // If field name exactly matches its type name, prefix to avoid C++ name hiding
     // (a field shadows the type within the struct, breaking subsequent fields of the same type)
     const baseTypeName = extractBaseTypeName(type);
-    if (baseTypeName && rawName === baseTypeName) {
+    if (baseTypeName && rawName === baseTypeName && (typeUseCount.get(baseTypeName) ?? 0) >= 2) {
       rawName = `n${rawName}`;
     }
     // Deduplicate field names (Ghidra can have same name at different offsets)
@@ -876,8 +1096,24 @@ function emitFieldLines(fields: StructField[], lines: string[], isUnion = false)
       rawName = `${rawName}_${offsetHex.slice(2)}`;
     }
     seenNames.add(rawName);
+    emitted?.add(rawName);
     // Reconstruct name with array suffix for normalizeFieldDeclaration
     const name = rawName + fieldNameArraySuffix;
+
+    // A field typed `<FuncDef> *` (pointer to a Ghidra function-signature type)
+    // must be emitted as an INLINE function pointer: the bare FuncDef name has no
+    // standalone C definition, so normalizeFieldDeclaration falls back to `void*`
+    // and the field becomes uncallable ("expression cannot be used as a function").
+    const fdMatch = !fieldNameArraySuffix && type.trim().match(/^(\w+)\s*\*(?:32|64)?$/);
+    const fd = fdMatch ? knownFuncDefs.get(fdMatch[1]) : undefined;
+    if (fd) {
+      const fdParams = fd.parameters.map(p => sigType(p.dataType)).join(', ');
+      const fdVarArgs = fd.hasVarArgs ? (fdParams ? ', ...' : '...') : '';
+      lines.push(`    /* ${offsetHex} */ ${normalizeSignatureType(fd.returnType)} (${pointerConvention(fd.callingConvention)}*${name})(${fdParams}${fdVarArgs});${comment}`);
+      i++;
+      continue;
+    }
+
     const decl = normalizeFieldDeclaration(type, name, field.size);
 
     lines.push(`    /* ${offsetHex} */ ${decl};${comment}`);
@@ -896,9 +1132,13 @@ function isBitfield(field: StructField): boolean {
   return /:\d+$/.test((field.dataType ?? '').trim());
 }
 
-/** Map Ghidra `undefined` types to C types. Odd sizes become uint8_t[N]. */
+/**
+ * Map Ghidra `undefined` types to C types. Odd sizes become uint8_t[N].
+ * Also unifies D2's wide-character spellings on `uint16_t` so struct fields
+ * agree with the `uint16_t` that decompiled bodies produce.
+ */
 function normalizeUndefinedType(dataType: string, size: number): string {
-  const t = (dataType ?? '').trim();
+  const t = normalizeWideCharType((dataType ?? '').trim());
 
   // Handle pointer variants: "undefined4 *" → "uint32_t *"
   const ptrMatch = t.match(/^(undefined\d?)\s*([\s*]+)$/);
@@ -909,7 +1149,7 @@ function normalizeUndefinedType(dataType: string, size: number): string {
   }
 
   // Replace Ghidra artifact pointer types: "vtable *" → "void *"
-  const artifactPtrMatch = t.match(/^(vtable|unicode|wchar16)\s*([\s*]+)$/);
+  const artifactPtrMatch = t.match(/^(vtable)\s*([\s*]+)$/);
   if (artifactPtrMatch) {
     const stars = artifactPtrMatch[2].replace(/\s+/g, '').trim();
     return `void ${stars}`;
@@ -928,8 +1168,6 @@ function normalizeUndefinedType(dataType: string, size: number): string {
     case 'undefined7': return 'uint8_t[7]';
     // Ghidra artifact types
     case 'vtable': return 'void';
-    case 'unicode': return 'uint16_t';
-    case 'wchar16': return 'uint16_t';
     case 'pointer': return 'void*';
     default:
       // Ghidra anonymous struct/union: _struct_1234 → uint8_t[size], _union_1234 → uint8_t[size]
@@ -1028,6 +1266,73 @@ function normalizeFieldDeclaration(fieldType: string, fieldName: string, fieldSi
 }
 
 /**
+ * The type spelling a struct field is EMITTED with, or null when the field is
+ * not a cast target at all (a bitfield, or an array).
+ *
+ * `sigType` is NOT that spelling and using it is a real defect, not a nicety:
+ * Ghidra's `string *` is emitted `char *`, and a `fnFoo *` field is emitted
+ * `fnFoo`. A cast written from the wrong spelling names a type the struct does
+ * not have - `(string*)` fails to parse and takes the rest of the file with it.
+ */
+/**
+ * The name Ghidra's decompiler gives a struct/union member the database left
+ * unnamed. Function bodies reference those members by this name, and so do the
+ * field names Ghidra hands back inside an initialized-data record - so the
+ * header declaration and every table keyed on a field name have to spell it the
+ * same way or they silently fail to find each other.
+ *
+ *   union member at ordinal i        -> `field<i>`
+ *   struct member at ordinal i/off   -> `field<i>_0x<off>`
+ *
+ * Ghidra uses lowercase, unpadded hex (`Integer.toHexString`) for the offset.
+ */
+export function ghidraDefaultFieldName(isUnion: boolean, ordinal: number, offset: number): string {
+  return isUnion ? `field${ordinal}` : `field${ordinal}_0x${offset.toString(16)}`;
+}
+
+export function emittedFieldType(dataType: string, size: number): string | null {
+  const raw = normalizeUndefinedType(dataType ?? '', size);
+  if (/^.+?:\d+$/.test(raw.trim())) return null; // bitfield
+  const SENTINEL = 'RECON_FIELD_NAME';
+  const decl = normalizeFieldDeclaration(raw, SENTINEL, size);
+  const idx = decl.indexOf(SENTINEL);
+  if (idx < 0) return null;
+  if (decl.slice(idx + SENTINEL.length).trim() !== '') return null; // array suffix
+  const type = decl.slice(0, idx).trim();
+  return type === '' ? null : type;
+}
+
+/**
+ * The type spelling a struct field DECLARES, array dimension included -
+ * `uint[4]`, not null.
+ *
+ * `emittedFieldType` answers what may be written as a cast, and an array may
+ * not: `(uint[4])x` is ill-formed. But the type-reasoning tables need to know
+ * the field exists and what it holds, and dropping every array field left them
+ * blind to it - a `uint[4]` member reaching a `LPDWORD` parameter had no
+ * determinable type at all, so no pass could see the conversion. The value an
+ * array name yields is a pointer to its element, which `shapeOfSpelling`
+ * decays; nothing builds a cast node from a spelling carrying a bracket, so
+ * this widens what can be reasoned about without widening what can be written.
+ */
+export function fieldDeclSpelling(dataType: string, size: number): string | null {
+  const direct = emittedFieldType(dataType, size);
+  if (direct !== null) return direct;
+  const raw = normalizeUndefinedType(dataType ?? '', size);
+  if (/^.+?:\d+$/.test(raw.trim())) return null; // bitfield
+  const SENTINEL = 'RECON_FIELD_NAME';
+  const decl = normalizeFieldDeclaration(raw, SENTINEL, size);
+  const idx = decl.indexOf(SENTINEL);
+  if (idx < 0) return null;
+  const suffix = decl.slice(idx + SENTINEL.length).trim();
+  // Only a plain array suffix; a declarator whose name sits mid-spelling (a
+  // funcdef field) has no reducible type and stays out of the tables.
+  if (!/^(?:\[\d+\])+$/.test(suffix)) return null;
+  const type = decl.slice(0, idx).trim();
+  return type === '' ? null : `${type}${suffix}`;
+}
+
+/**
  * Generate struct declaration
  */
 export function generateStructDeclaration(struct: ExtractedStruct): string {
@@ -1042,6 +1347,21 @@ export function generateStructDeclaration(struct: ExtractedStruct): string {
     lines.push(`    ${struct.name}() = default;`);
     lines.push(`    ${struct.name}(${intConversionType} v) { *reinterpret_cast<${intConversionType}*>(this) = v; }`);
     lines.push(`    operator ${intConversionType}() const { return *reinterpret_cast<const ${intConversionType}*>(this); }`);
+    // The conversion ctor/operator make the struct non-aggregate, which breaks
+    // brace-init of multi-field int structs (`{0, 0}` arrays). Add a field-wise
+    // constructor so `{a, b, ...}` matches it.
+    const realFields = struct.fields.filter(f => f.name && !f.name.startsWith('_pad_'));
+    if (realFields.length >= 2) {
+      const sani = (n: string) => {
+        let r = n.replace(/[^a-zA-Z0-9_]/g, '_');
+        if (/^\d/.test(r)) r = `field_${r}`;
+        if (CPP_KEYWORDS.has(r)) r = `${r}_`;
+        return r;
+      };
+      const params = realFields.map((f, i) => `${f.dataType} a${i}`).join(', ');
+      const inits = realFields.map((f, i) => `${sani(f.name!)}(a${i})`).join(', ');
+      lines.push(`    ${struct.name}(${params}) : ${inits} {}`);
+    }
     lines.push('');
   }
 
@@ -1079,11 +1399,35 @@ export function generateEnumDeclaration(enumType: ExtractedEnum): string {
 }
 
 /**
+ * Does `d2_platform.h` (or a system header it pulls in) already declare a
+ * FUNCTION by this name? Memoised: the registry is assembled from five tables
+ * and this is asked once per candidate type name per header.
+ */
+let emitterDeclaredFunctions: Set<string> | undefined;
+function emitterDeclaresFunction(name: string): boolean {
+  emitterDeclaredFunctions ??= platformDeclaredFunctionNames();
+  return emitterDeclaredFunctions.has(name);
+}
+
+/**
  * Generate typedef declaration
  */
 // FunctionDefinition datatypes by name, registered before emission so a typedef
 // whose target is a pointer to one can be inlined (see generateTypedefDeclaration).
 const knownFuncDefs = new Map<string, ExtractedFunctionDefinition>();
+
+/**
+ * The guarded typedef for a function-pointer type, or undefined when no
+ * FUNCTION_DEFINITION by that name is registered. The `RECON_FPTD_<name>` guard
+ * is the same one `addForwardDeclaration` uses, so a file that emits the typedef
+ * locally and a header that also declares it cannot both expand in one TU.
+ */
+export function guardedFuncDefTypedef(name: string): string | undefined {
+  if (emitterDeclaresFunction(name)) return undefined;
+  const fd = knownFuncDefs.get(name);
+  if (!fd) return undefined;
+  return `#ifndef RECON_FPTD_${name}\n#define RECON_FPTD_${name}\n${generateFunctionDefinitionDeclaration(fd)}\n#endif`;
+}
 
 export function setKnownFuncDefs(defs: Iterable<ExtractedFunctionDefinition>): void {
   knownFuncDefs.clear();
@@ -1107,10 +1451,54 @@ function generateTypedefDeclaration(type: ExtractedTypedef): string {
 /**
  * Generate union declaration
  */
+/**
+ * The unsigned integer of the union's own width, when every member of the union
+ * is exactly that wide and is a pointer or an integer - i.e. when the union is a
+ * machine word that Ghidra happens to have given several spellings. A union with
+ * a struct, an array or a narrower member is a real union and gets nothing.
+ */
+function unionWordConversionType(type: ExtractedUnion): string | null {
+  const fields = (type.fields ?? []).filter(f => !f.name || !f.name.startsWith('_pad_'));
+  if (fields.length === 0) return null;
+  const width = Math.max(...fields.map(f => f.size));
+  const sizeToType: Record<number, string> = { 1: 'uint8_t', 2: 'uint16_t', 4: 'uint32_t', 8: 'uint64_t' };
+  const word = sizeToType[width];
+  if (!word) return null;
+  const scalar = new Set([
+    'int', 'int8_t', 'int16_t', 'int32_t', 'int64_t',
+    'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t',
+    'char', 'short', 'long', 'unsigned int', 'unsigned short', 'unsigned char',
+    'uchar', 'ushort', 'uint', 'ulong', 'byte', 'BYTE', 'WORD', 'DWORD', 'BOOL',
+    'undefined1', 'undefined2', 'undefined4', 'undefined8', 'pointer',
+  ]);
+  for (const f of fields) {
+    if (f.size !== width) return null;
+    const t = (f.dataType ?? '').trim();
+    if (t.includes('[')) return null;
+    if (t.endsWith('*')) continue;                 // a pointer is one word
+    if (!scalar.has(t.replace(/\s+/g, ' '))) return null;
+  }
+  return word;
+}
+
 export function generateUnionDeclaration(type: ExtractedUnion): string {
   const lines: string[] = [];
 
   lines.push(`union ${type.name} {`);
+
+  // A union every one of whose members is one machine word IS a machine word,
+  // and Ghidra's decompiler reads it as one: `(float)pUnit->pUnitData`,
+  // `(int32_t)pQuestGUID`, `!nin_addr`. C++ needs the conversion spelled.
+  //
+  // Only the conversion OPERATOR is written, never a constructor: a
+  // user-provided constructor would make the union a non-aggregate and break
+  // every braced initializer of it, while a conversion function leaves
+  // aggregate initialization exactly as it was.
+  const wordType = unionWordConversionType(type);
+  if (wordType) {
+    lines.push(`    operator ${wordType}() const { return *reinterpret_cast<const ${wordType}*>(this); }`);
+    lines.push('');
+  }
 
   emitFieldLines(type.fields, lines, /* isUnion */ true);
 
@@ -1126,14 +1514,18 @@ export function generateUnionDeclaration(type: ExtractedUnion): string {
 export function generateFunctionDefinitionDeclaration(type: ExtractedFunctionDefinition): string {
   const params = type.parameters
     .map(p => {
-      const name = p.name && p.name !== '' ? ` ${p.name}` : '';
+      // Ghidra spells a __thiscall receiver `this`; as a parameter name in a
+      // free function-pointer typedef that is a C++ keyword, not an identifier
+      // ("'this' must be the first specifier in a parameter declaration").
+      // Same rename the function signatures make.
+      const name = p.name && p.name !== '' ? ` ${cleanParamName(p.name)}` : '';
       return `${sigType(p.dataType)}${name}`;
     })
     .join(', ');
 
   const varArgs = type.hasVarArgs ? (params ? ', ...' : '...') : '';
 
-  return `typedef ${normalizeSignatureType(type.returnType)} (*${type.name})(${params}${varArgs});`;
+  return `typedef ${normalizeSignatureType(type.returnType)} (${pointerConvention(type.callingConvention)}*${type.name})(${params}${varArgs});`;
 }
 
 /**
@@ -1248,6 +1640,35 @@ function extractBaseTypeName(typeStr: string): string | null {
 }
 
 /**
+ * Order the guarded function-pointer typedef blocks so a typedef that names
+ * another one in its signature is emitted after it.
+ *
+ * The blocks arrive sorted by name, which is dependency order only by accident:
+ * `D3DDev3_EnumTextureFormats` takes a `D3DEnumPixelFormatsCallback` and `D3DD`
+ * sorts before `D3DE`, so the user was emitted 24 lines above its target and
+ * every translation unit including that header reported the target undeclared.
+ *
+ * The sort is `globals.h`'s own `orderForwardDeclarations` - Kahn drained in the
+ * existing key order, so an unconstrained line keeps its place - reused rather
+ * than rewritten. The block's identity is its `RECON_FPTD_<name>` guard, which
+ * `addForwardDeclaration` and `guardedFuncDefTypedef` both write.
+ */
+function orderTypedefBlocks(
+  blocks: string[],
+  deps: Map<string, Set<string>>,
+): string[] {
+  if (blocks.length < 2 || deps.size === 0) return blocks;
+  const guarded: ForwardDeclaration[] = [];
+  const unnamed: string[] = [];
+  for (const text of blocks) {
+    const name = text.slice('#ifndef RECON_FPTD_'.length, text.indexOf('\n'));
+    if (name) guarded.push({ name, text, deps: [...(deps.get(name) ?? [])] });
+    else unnamed.push(text);
+  }
+  return [...orderForwardDeclarations(guarded, 'function-pointer typedefs'), ...unnamed];
+}
+
+/**
  * Collect forward declarations needed
  */
 function collectForwardDeclarations(
@@ -1258,7 +1679,9 @@ function collectForwardDeclarations(
   alreadyDefined?: Set<string>,
   ownedTypes?: Set<string>,
   allClasses?: DetectedClass[],
-  allFunctions?: ExtractedFunction[]
+  allFunctions?: ExtractedFunction[],
+  funcDefReferencedTypes?: Set<string>,
+  funcDefTypedefDeps?: Map<string, Set<string>>
 ): string[] {
   const declarations = new Set<string>();
 
@@ -1307,14 +1730,14 @@ function collectForwardDeclarations(
     for (const param of func.parameters) {
       for (const type of extractAllTypeRefs(param.dataType)) {
         if (type !== classInfo?.name) {
-          addForwardDeclaration(declarations, type, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes);
+          addForwardDeclaration(declarations, type, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes, undefined, funcDefReferencedTypes, funcDefTypedefDeps);
         }
       }
     }
 
     const returnType = extractClassName(func.returnType);
     if (returnType && returnType !== classInfo?.name) {
-      addForwardDeclaration(declarations, returnType, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes);
+      addForwardDeclaration(declarations, returnType, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes, undefined, funcDefReferencedTypes, funcDefTypedefDeps);
     }
   }
 
@@ -1327,7 +1750,7 @@ function collectForwardDeclarations(
       for (const field of fields) {
         const type = extractClassName(field.dataType);
         if (type && type !== dt.name) {
-          addForwardDeclaration(declarations, type, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes);
+          addForwardDeclaration(declarations, type, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes, undefined, funcDefReferencedTypes, funcDefTypedefDeps);
         }
       }
     }
@@ -1340,12 +1763,12 @@ function collectForwardDeclarations(
       for (const param of func.parameters) {
         const type = extractClassName(param.dataType);
         if (type && type !== classInfo.name) {
-          addForwardDeclaration(declarations, type, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes);
+          addForwardDeclaration(declarations, type, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes, undefined, funcDefReferencedTypes, funcDefTypedefDeps);
         }
       }
       const returnType = extractClassName(func.returnType);
       if (returnType && returnType !== classInfo.name) {
-        addForwardDeclaration(declarations, returnType, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes);
+        addForwardDeclaration(declarations, returnType, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes, undefined, funcDefReferencedTypes, funcDefTypedefDeps);
       }
     }
   }
@@ -1370,13 +1793,13 @@ function collectForwardDeclarations(
         for (const param of func.parameters) {
           for (const type of extractAllTypeRefs(param.dataType)) {
             if (type !== cls.name) {
-              addForwardDeclaration(declarations, type, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes);
+              addForwardDeclaration(declarations, type, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes, undefined, funcDefReferencedTypes, funcDefTypedefDeps);
             }
           }
         }
         const returnType = extractClassName(func.returnType);
         if (returnType && returnType !== cls.name) {
-          addForwardDeclaration(declarations, returnType, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes);
+          addForwardDeclaration(declarations, returnType, structNames, unionNames, enumNames, typedefNames, funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes, undefined, funcDefReferencedTypes, funcDefTypedefDeps);
         }
       }
     }
@@ -1397,9 +1820,19 @@ function addForwardDeclaration(
   classNames?: Set<string>,
   alreadyDefined?: Set<string>,
   ownedTypes?: Set<string>,
+  visiting: Set<string> = new Set(),
+  funcDefReferencedTypes?: Set<string>,
+  funcDefTypedefDeps?: Map<string, Set<string>>,
 ): void {
   // Validate: skip malformed or artifact type names
   if (!type || isPlatformOrBuiltinType(type)) return;
+  // A name the emitter already declares as a FUNCTION cannot also be introduced
+  // as a type. Ghidra records the MSVC pure-virtual thunk twice — as the
+  // function `__purecall` and as a FUNCTION_DEFINITION of the same name — and
+  // declaring both makes the typedef win every lookup, so a vtable initializer
+  // taking `&__purecall` takes the address of a type. The function is the one
+  // call sites and initializers mean; the type declaration is dropped.
+  if (emitterDeclaresFunction(type)) return;
   if (/[{}:<>,]/.test(type)) return;    // Ghidra size annotations, bitfields, templates
   if (/^\d/.test(type)) return;          // Numeric garbage
   if (!/^[A-Za-z_]/.test(type)) return;  // Must start with letter or underscore
@@ -1422,6 +1855,39 @@ function addForwardDeclaration(
     declarations.add(`struct ${type};`);
   } else if (/^fn[A-Z]/.test(type) || /^fp[A-Z]/.test(type) || funcDefNames.has(type)) {
     const funcDef = funcDefMap.get(type);
+    // The typedef spells its parameter and return types by name, so those need
+    // declarations of their own — and BEFORE it. A vtable slot typed
+    // `pfnIgnoreListGetPersistent` names `::IgnoreList`, a class Ghidra holds
+    // only as a category, and nothing else in the header mentions it.
+    if (funcDef && !visiting.has(type)) {
+      visiting.add(type);
+      const referenced = [funcDef.returnType, ...funcDef.parameters.map(fp => fp.dataType)];
+      for (const ref of referenced) {
+        const name = extractClassName(ref ?? '');
+        if (!name || name === type) continue;
+        // A type this header DEFINES is still declared too late: the typedef
+        // block sits in the forward-declaration section, above the definitions.
+        funcDefReferencedTypes?.add(name);
+        // One function-pointer typedef may name another in its signature
+        // (`D3DDev3_EnumTextureFormats` takes a `D3DEnumPixelFormatsCallback`).
+        // Record that edge: the blocks are emitted sorted by name, and
+        // `D3DDev3_` sorts before `D3DE`, so the user came out above its target.
+        if (funcDefMap.has(name)) {
+          let deps = funcDefTypedefDeps?.get(type);
+          if (funcDefTypedefDeps && !deps) {
+            deps = new Set<string>();
+            funcDefTypedefDeps.set(type, deps);
+          }
+          deps?.add(name);
+        }
+        addForwardDeclaration(
+          declarations, name, structNames, unionNames, enumNames, typedefNames,
+          funcDefNames, funcDefMap, classNames, alreadyDefined, ownedTypes, visiting,
+          funcDefReferencedTypes, funcDefTypedefDeps,
+        );
+      }
+      visiting.delete(type);
+    }
     // Guard the typedef with a per-name macro so the real signature (here) and
     // an opaque fallback (in a header that lacks the FUNCTION_DEFINITION) can't
     // both expand in one translation unit — first include wins, the rest skip.
@@ -1489,4 +1955,40 @@ function filterRelevantTypes(
   }
 
   return dataTypes.filter(t => declarableKinds.has(t.kind) && usedTypes.has(t.name));
+}
+
+/**
+ * The member names an aggregate's declaration actually carries, keyed by type
+ * name.
+ *
+ * A body written by the decompiler reads a bitfield storage unit by its
+ * whole-byte alias (`pSkillsTxt->field_0x4`), and that alias is NOT a member:
+ * Ghidra models offset 4 of `D2SkillsTxt` as eight `int:1` bitfields, so the
+ * emitted struct declares `decquant`, `lob`, … and nothing named `field_0x4`.
+ * Deciding whether such a read resolves needs the member set the header emitter
+ * really wrote, not a reconstruction of its naming rules - the rules are long
+ * (bitfield groups, lone filler bytes, named filler runs, keyword and
+ * leading-digit repair, shadowing and duplicate suffixes) and a second copy of
+ * them would drift the first time one changed.
+ *
+ * So the set is taken FROM the emitter, by running the same `emitFieldLines`
+ * over a throwaway line buffer. Memoised on the type name; the line buffer is
+ * discarded.
+ */
+const emittedMemberNameCache = new Map<string, ReadonlySet<string>>();
+
+export function resetEmittedMemberNames(): void {
+  emittedMemberNameCache.clear();
+}
+
+export function emittedMemberNames(type: ExtractedDataType): ReadonlySet<string> {
+  const cached = emittedMemberNameCache.get(type.name);
+  if (cached) return cached;
+  const names = new Set<string>();
+  if (type.kind === 'STRUCTURE' || type.kind === 'UNION') {
+    const fields = (type as ExtractedStruct | ExtractedUnion).fields ?? [];
+    emitFieldLines(fields, [], type.kind === 'UNION', names);
+  }
+  emittedMemberNameCache.set(type.name, names);
+  return names;
 }

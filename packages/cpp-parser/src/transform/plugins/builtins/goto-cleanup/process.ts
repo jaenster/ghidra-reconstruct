@@ -29,10 +29,11 @@ import { processNestedTailInlining } from './nested-inline.js';
 export function processCompound(
   stmts: Statement[],
   options: RequiredGotoCleanupOptions,
-  // True only when this compound is the function body. False for loop/switch bodies,
-  // where a cleanup-fallthrough label's fallthrough continues the loop / next case
-  // rather than reaching the function's implicit return — so no return may be fabricated.
-  fallthroughMeansReturn = true,
+  // True only when falling off the end of this compound reaches the function's implicit
+  // `return;` — i.e. it is the tail of a void function body. Everywhere else a
+  // cleanup-fallthrough label's fallthrough continues into code that may still return a
+  // value, so no return may be fabricated. Defaults to the safe answer.
+  fallthroughMeansReturn = false,
 ): Statement[] | null {
   const labels = analyzeLabels(stmts, options);
   const gotoCounts = countGotosInStatements(stmts);

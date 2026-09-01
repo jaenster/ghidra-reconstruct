@@ -352,6 +352,7 @@ export {
 export {
   funcPtrLiteralPlugin,
   type FuncPtrLiteralOptions,
+  type FuncPtrTarget,
 } from './builtins/func-ptr-literal.js';
 
 // ============================================
@@ -425,6 +426,12 @@ import { ghidraCleanupPlugins } from './builtins/ghidra-cleanup.js';
 import { loopCanonicalizePlugin } from './builtins/loop-canonicalize.js';
 import { arrayAccessPlugin } from './builtins/array-access.js';
 import { structFieldPlugin } from './builtins/struct-field.js';
+import { arrayBlockAssignPlugin } from './builtins/array-block-assign.js';
+export { arrayBlockAssignPlugin } from './builtins/array-block-assign.js';
+import { bitfieldAliasLowerPlugin } from './builtins/bitfield-alias-lower.js';
+export { bitfieldAliasLowerPlugin } from './builtins/bitfield-alias-lower.js';
+import { enumConstantQualifyPlugin } from './builtins/enum-constant-qualify.js';
+export { enumConstantQualifyPlugin } from './builtins/enum-constant-qualify.js';
 import { memoryPatternsPlugin } from './builtins/memory-patterns.js';
 import { magicDivisionPlugin } from './builtins/magic-division.js';
 import { ternarySimplifyPlugin } from './builtins/ternary-simplify.js';
@@ -449,6 +456,7 @@ import { prngTransformPlugin } from './builtins/prng-transform.js';
 import { prngTempCollapsePlugin } from './builtins/prng-temp-collapse.js';
 import { bitfieldAccessPlugin } from './builtins/bitfield-access.js';
 import { subpieceAccessPlugin } from './builtins/subpiece-access.js';
+import { arrayCastStripPlugin } from './builtins/array-cast-strip.js';
 import { indirectCallCleanupPlugin } from './builtins/indirect-call-cleanup.js';
 import { methodCallRewritePlugin } from './builtins/method-call-rewrite.js';
 import { pointerCastNormalizePlugin } from './builtins/pointer-cast-normalize.js';
@@ -458,10 +466,79 @@ import { redundantParenCleanupPlugin } from './builtins/redundant-paren-cleanup.
 import { shortCircuitFoldPlugin } from './builtins/short-circuit-fold.js';
 import { deadBranchCleanupPlugin } from './builtins/dead-branch-cleanup.js';
 import { declInitMergePlugin } from './builtins/decl-init-merge.js';
+import { gotoCrossesInitPlugin } from './builtins/goto-crosses-init.js';
 import { declOrderFixPlugin } from './builtins/decl-order-fix.js';
 import { declScopeSinkPlugin } from './builtins/decl-scope-sink.js';
 import { phiNodeTernaryPlugin } from './builtins/phi-node-ternary.js';
 import { voidReturnCleanupPlugin } from './builtins/void-return-cleanup.js';
+import { undefinedGotoLabelPlugin } from './builtins/undefined-goto-label.js';
+export { undefinedGotoLabelPlugin } from './builtins/undefined-goto-label.js';
+import { underscoreSlotLocalPlugin } from './builtins/underscore-slot-local.js';
+export { underscoreSlotLocalPlugin } from './builtins/underscore-slot-local.js';
+import { phantomLocalSynthesisPlugin } from './builtins/phantom-local-synthesis.js';
+export { phantomLocalSynthesisPlugin } from './builtins/phantom-local-synthesis.js';
+import { switchPointerNormalizePlugin } from './builtins/switch-pointer-normalize.js';
+export { switchPointerNormalizePlugin } from './builtins/switch-pointer-normalize.js';
+
+import { switchCaseSignednessPlugin } from './builtins/switch-case-signedness.js';
+export { switchCaseSignednessPlugin } from './builtins/switch-case-signedness.js';
+
+import { switchCaseDedupPlugin } from './builtins/switch-case-dedup.js';
+export { switchCaseDedupPlugin, type SwitchCaseDedupOptions } from './builtins/switch-case-dedup.js';
+
+import { duplicateLabelUniquifyPlugin } from './builtins/duplicate-label-uniquify.js';
+export { duplicateLabelUniquifyPlugin, type DuplicateLabelUniquifyOptions } from './builtins/duplicate-label-uniquify.js';
+
+import { underscoreStorageAliasPlugin } from './builtins/underscore-storage-alias.js';
+export { underscoreStorageAliasPlugin, type UnderscoreStorageAliasOptions } from './builtins/underscore-storage-alias.js';
+import { ghidraPseudoOpPlugin } from './builtins/ghidra-pseudo-op.js';
+export { ghidraPseudoOpPlugin } from './builtins/ghidra-pseudo-op.js';
+import { labelMacroCollisionPlugin } from './builtins/label-macro-collision.js';
+export { labelMacroCollisionPlugin } from './builtins/label-macro-collision.js';
+import { funcdefCastCollapsePlugin } from './builtins/funcdef-cast-collapse.js';
+export { funcdefCastCollapsePlugin } from './builtins/funcdef-cast-collapse.js';
+import { pointerAssignCastPlugin } from './builtins/pointer-assign-cast.js';
+export { pointerAssignCastPlugin } from './builtins/pointer-assign-cast.js';
+import { callArgCastPlugin } from './builtins/call-arg-cast.js';
+import { pointerCompareCastPlugin } from './builtins/pointer-compare-cast.js';
+import { floatPointerBitcastPlugin } from './builtins/float-pointer-bitcast.js';
+import { narrowCastThroughUintptrPlugin } from './builtins/narrow-cast-through-uintptr.js';
+import { assignCastPlugin } from './builtins/assign-cast.js';
+import { unprototypedCallCastPlugin } from './builtins/unprototyped-call-cast.js';
+export { callArgCastPlugin } from './builtins/call-arg-cast.js';
+export { pointerCompareCastPlugin } from './builtins/pointer-compare-cast.js';
+export { floatPointerBitcastPlugin } from './builtins/float-pointer-bitcast.js';
+export { narrowCastThroughUintptrPlugin } from './builtins/narrow-cast-through-uintptr.js';
+export { assignCastPlugin } from './builtins/assign-cast.js';
+export { unprototypedCallCastPlugin, type UnprototypedCallCastOptions, type UnprototypedFuncPtr } from './builtins/unprototyped-call-cast.js';
+import { charArrayDwordAssignPlugin } from './builtins/char-array-dword-assign.js';
+export { charArrayDwordAssignPlugin } from './builtins/char-array-dword-assign.js';
+import { reservedFieldRenamePlugin } from './builtins/reserved-field-rename.js';
+export { reservedFieldRenamePlugin, type ReservedFieldRenameOptions } from './builtins/reserved-field-rename.js';
+import { rootScopeQualifyPlugin } from './builtins/root-scope-qualify.js';
+export { rootScopeQualifyPlugin, type RootScopeQualifyOptions } from './builtins/root-scope-qualify.js';
+import { namespaceShadowQualifyPlugin } from './builtins/namespace-shadow-qualify.js';
+export { namespaceShadowQualifyPlugin, type NamespaceShadowQualifyOptions } from './builtins/namespace-shadow-qualify.js';
+import { funcPtrArgCastPlugin } from './builtins/funcptr-arg-cast.js';
+export { funcPtrArgCastPlugin, getFuncPtrArgCastArityMismatches, getFuncPtrArgCastArityMismatchList, resetFuncPtrArgCastStats, takeFuncPtrArgCastTypedefs, VOID_POINTER_SLOT, type ArityMismatch, type FuncPtrArgCastOptions } from './builtins/funcptr-arg-cast.js';
+import { enclosingNamespaceStripPlugin } from './builtins/enclosing-namespace-strip.js';
+export { enclosingNamespaceStripPlugin, type EnclosingNamespaceStripOptions } from './builtins/enclosing-namespace-strip.js';
+import { qualifiedNameCleanupPlugin } from './builtins/qualified-name-cleanup.js';
+import { functionNameReconcilePlugin } from './builtins/function-name-reconcile.js';
+export { qualifiedNameCleanupPlugin, type QualifiedNameCleanupOptions } from './builtins/qualified-name-cleanup.js';
+export { functionNameReconcilePlugin, type FunctionNameReconcileOptions } from './builtins/function-name-reconcile.js';
+import { thisParamRewritePlugin } from './builtins/this-param-rewrite.js';
+export { thisParamRewritePlugin, type ThisParamRewriteOptions } from './builtins/this-param-rewrite.js';
+import { stackFrameAddressPlugin } from './builtins/stack-frame-address.js';
+export { stackFrameAddressPlugin, stackNameOffset, type StackFrameAddressOptions, type StackSlot } from './builtins/stack-frame-address.js';
+import { shadowedTypeQualifyPlugin } from './builtins/shadowed-type-qualify.js';
+export { shadowedTypeQualifyPlugin, type ShadowedTypeQualifyOptions } from './builtins/shadowed-type-qualify.js';
+import { functionShadowedGlobalPlugin } from './builtins/function-shadowed-global.js';
+export { functionShadowedGlobalPlugin, type FunctionShadowedGlobalOptions } from './builtins/function-shadowed-global.js';
+import { arrayGlobalAddressOfPlugin } from './builtins/array-global-address-of.js';
+export { arrayGlobalAddressOfPlugin } from './builtins/array-global-address-of.js';
+import { charLiteralEscapePlugin } from './builtins/char-literal-escape.js';
+export { charLiteralEscapePlugin } from './builtins/char-literal-escape.js';
 export { getGotoCleanupStats, resetGotoCleanupStats } from './builtins/goto-cleanup/index.js';
 export type { GotoCleanupStats } from './builtins/goto-cleanup/index.js';
 import type { TransformPlugin } from './types.js';
@@ -483,6 +560,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   redundantNegationPlugin,    // Cleanup: x + -y → x - y (priority 40)
   bitfieldAccessPlugin,       // Cleanup: field_0xNN & MASK → bitfieldName (priority 45)
   subpieceAccessPlugin,       // Cleanup: expr._N_M_ → *(T *)((char *)expr + N) (priority 46)
+  arrayCastStripPlugin,       // Cleanup: drop (char[4])x array-type casts (priority 17)
   sbbBranchlessPlugin,        // Cleanup: -(uint32_t)(cond) & addr → cond ? addr : nullptr (priority 42)
   branchlessSelectPlugin,     // Cleanup: (cond - 1 & mask) + off → cond ? off : off+mask (priority 43)
   earlyReturnPlugin,          // Readability: flatten nested if(C){...}return X; → if(!C)return X; ... (priority 60)
@@ -494,6 +572,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   shortCircuitFoldPlugin,     // Cleanup: if(a){if(b){...}} → if(a&&b){...} (priority 57)
   deadBranchCleanupPlugin,    // Cleanup: if(true)/if(false) dead branch elimination (priority 58)
   declInitMergePlugin,        // Cleanup: int x; x = expr; → int x = expr; (priority 60)
+  gotoCrossesInitPlugin,      // Late: split T x=e; → T x; x=e; for goto-crossed locals (priority 700)
   declOrderFixPlugin,         // Cleanup: reorder merged decls to respect initializer deps (priority 61)
   declScopeSinkPlugin,        // Cleanup: sink decls into single-use scope (priority 62)
   phiNodeTernaryPlugin,       // Cleanup: int x; if(c){x=a;}else{x=b;} → int x = c?a:b; (priority 63)
@@ -504,12 +583,47 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   loopCanonicalizePlugin,
   arrayAccessPlugin,
   structFieldPlugin,
+  bitfieldAliasLowerPlugin, // Structs: p->field_0xN the aggregate does not declare -> *((uint8_t*)p + N) (priority 55)
+  enumConstantQualifyPlugin, // Enums: a constant two enums number differently -> <Enum>_ns::Name from the controlling type (priority 60)
+  arrayBlockAssignPlugin, // Ghidra: whole-array assign -> memcpy/memset (priority 15)
   booleanCleanupPlugin,       // Cleanup: expr != false → expr (priority 50)
   ternarySimplifyPlugin,      // Boolean cleanup
   funcPtrLiteralPlugin,        // Cleanup: 0x5011f0 → FunctionName (priority 95)
   prngTransformPlugin,        // Pattern detection: PRNG (priority 80)
   prngTempCollapsePlugin,     // Cleanup: collapse PRNG temp variables (priority 85)
   voidReturnCleanupPlugin,    // Cleanup: trailing return; in void functions (priority 90)
+  undefinedGotoLabelPlugin,   // Control-flow: define dropped Ghidra goto targets (priority 95)
+  underscoreStorageAliasPlugin, // Declaration: bind `_<global>` to the global and `_<crt>(` to the CRT name (priority 599)
+  underscoreSlotLocalPlugin,  // Declaration: synthesize Ghidra `_<base>` slot-locals (priority 95)
+  phantomLocalSynthesisPlugin, // Declaration: synthesize Ghidra auto-name phantoms uVar3/unique0x… (priority 601)
+  switchPointerNormalizePlugin, // Cleanup: strip pointer casts from pointer-typed switch condition + case labels (priority 40)
+  switchCaseSignednessPlugin, // Type: sign the switch control when the switch carries a negative case label (priority 605)
+  switchCaseDedupPlugin, // Control-flow: drop a repeated case value / second default in one switch (priority 691)
+  duplicateLabelUniquifyPlugin, // Control-flow: rename the 2nd+ copy of a duplicated Ghidra label, retarget its gotos (priority 690)
+  ghidraPseudoOpPlugin, // Cleanup: rename decompiler pseudo-ops that collide with a standard macro (priority 20)
+  labelMacroCollisionPlugin, // Cleanup: rename goto labels colliding with Win32/CRT macros — ERROR/DELETE/… (priority 41)
+  funcdefCastCollapsePlugin,  // Type: collapse (Funcdef*) casts to (Funcdef) (priority 70)
+  funcPtrArgCastPlugin,       // Type: cast a function address passed to a differing funcdef param (priority 71)
+  pointerAssignCastPlugin,    // Type: insert reinterpret cast on pointer-to-pointer assignments (priority 600)
+  callArgCastPlugin,          // Type: cast a call argument to its declared parameter type (priority 610)
+  pointerCompareCastPlugin,   // Type: cast one side of a distinct-pointer comparison (priority 615)
+  floatPointerBitcastPlugin,  // Type: reinterpret the four bytes a float/pointer cast moves (priority 618)
+  narrowCastThroughUintptrPlugin, // Type: route a pointer->narrow-integer cast through uintptr_t (priority 620)
+  assignCastPlugin,           // Type: cast an assigned value to its slot's declared type (priority 615)
+  unprototypedCallCastPlugin, // Type: give a FARPROC call the parameter list C left unspecified (priority 622)
+  charArrayDwordAssignPlugin, // Type: charArray = scalar -> *(uint32_t*)charArray = scalar (priority 75)
+  reservedFieldRenamePlugin,  // Cleanup: ->int → ->int_ for header-renamed keyword fields (priority 47)
+  rootScopeQualifyPlugin,     // Cleanup: crashy::vftable → ::vftable for root-scope symbols (priority 48)
+  namespaceShadowQualifyPlugin, // Cleanup: Game::Launcher::f → ::Game::Launcher::f when an enclosing scope shadows `Game` (priority 49)
+  qualifiedNameCleanupPlugin, // Cleanup: A::A::f → A::f, VisualStudio::f → f, f_exref → f (priority 46)
+  enclosingNamespaceStripPlugin, // Cleanup: drop the enclosing namespace prefix from a reference (priority 900, last)
+  functionNameReconcilePlugin, // Cleanup: respell a reference with the declaration's name+namespace (priority 20)
+  thisParamRewritePlugin,     // Cleanup: __thiscall `this` → the free function's param name (priority 46)
+  stackFrameAddressPlugin,    // Cleanup: `&stack0xNNNN` → the frame slot that owns it (priority 520)
+  shadowedTypeQualifyPlugin,  // Cleanup: (Draw**)x → (::Draw**)x when a same-named namespace shadows the type (priority 47)
+  functionShadowedGlobalPlugin,  // Cleanup: bare x → ::x when a same-named function hides the root-scope global (priority 49)
+  arrayGlobalAddressOfPlugin, // Cleanup: &X_ARRAY_<hex> → X_ARRAY_<hex> (priority 46)
+  charLiteralEscapePlugin,    // Cleanup: '²' → '\xb2' (priority 46)
   memoryPatternsPlugin,       // Pattern detection (late)
 ];
 

@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "project": "A2RacerII",
+  "ghidra": "ghidra://ghidra.typeguru.nl:13100/A2Racer2",
+  "additionalSources": [],
+  "overrides": [],
+  "libraries": [],
+  "libraryDetection": {
+    "enabled": true
+  },
+  "targets": {},
+  "modules": {
+    "A2racII": {
+      "namespaces": [
+        "A2racII"
+      ],
+      "dependencies": [
+        "winlib"
+      ]
+    },
+    "winlib": {
+      "namespaces": [
+        "winlib"
+      ],
+      "dependencies": []
+    },
+    "misc": {
+      "namespaces": [
+        "misc"
+      ],
+      "dependencies": []
+    },
+    "dplib": {
+      "namespaces": [
+        "dplib"
+      ],
+      "dependencies": []
+    },
+    "inputlib": {
+      "namespaces": [
+        "inputlib"
+      ],
+      "dependencies": []
+    },
+    "win3dlib": {
+      "namespaces": [
+        "win3dlib"
+      ],
+      "dependencies": []
+    },
+    "win3ddp": {
+      "namespaces": [
+        "win3ddp"
+      ],
+      "dependencies": []
+    }
+  },
+  "typeOwnership": [],
+  "crossPlatformLinks": [],
+  "crossPlatformTables": []
+}

@@ -240,6 +240,24 @@ const OPERATOR_PRECEDENCE: Record<string, number> = {
 const ASSOCIATIVE_OPS = new Set(['+', '*', '&&', '||', '&', '|', '^']);
 
 /**
+ * The last statement of a switch body when it is a `case`/`default` label with
+ * nothing after it. Returns null for every other shape, so an empty label that
+ * is followed by more cases (a deliberate fallthrough) is never touched.
+ */
+function trailingEmptyLabel(body: ASTNode | null | undefined): ASTNode | null {
+  if (!body || body.kind !== NodeKind.CompoundStmt) return null;
+  const statements = (body as CompoundStmt).statements;
+  const last = statements[statements.length - 1];
+  if (!last) return null;
+  if (last.kind !== NodeKind.CaseStmt && last.kind !== NodeKind.DefaultStmt) return null;
+  const inner = (last as CaseStmt | DefaultStmt).statement;
+  if (!inner) return last;
+  if (inner.kind === NodeKind.NullStmt) return last;
+  if (inner.kind === NodeKind.CompoundStmt && (inner as CompoundStmt).statements.length === 0) return last;
+  return null;
+}
+
+/**
  * C++ Code Emitter
  */
 export class CppEmitter {
@@ -688,6 +706,40 @@ export class CppEmitter {
   }
 
   private emitPointerType(node: PointerType): void {
+    // Pointer-to-array in a NON-declarator position (parameter / cast / abstract
+    // type): Ghidra's `type[N]*` denotes a plain pointer, and `elem[N]*` is
+    // ill-formed C++. Emit the flat `elem *` and drop the dimension. Named
+    // declarators keep the faithful `T (*name)[N]` form via emitPointerToArrayDecl,
+    // which bypasses this method — so 2D-array locals are untouched.
+    // (This replaces a fragile text regex that also clobbered subscript-multiplies.)
+    let ptrLevels = 0;
+    let cur: TypeNode = node;
+    while (cur.kind === NodeKind.PointerType) { ptrLevels++; cur = (cur as PointerType).pointee; }
+    if (cur.kind === NodeKind.ArrayType) {
+      const { elementType } = this.unwrapArrayType(cur);
+      this.emitTypeNode(elementType);
+      this.write(' ' + '*'.repeat(ptrLevels));
+      return;
+    }
+    // Pointer-to-function: the star binds inside the parentheses, so the flat
+    // `ret(args) *` this method would otherwise write is a different type
+    // (a function returning a pointer). `ret (*)(args)`.
+    if (cur.kind === NodeKind.FunctionType) {
+      const fn = cur as FunctionType;
+      this.emitTypeNode(fn.returnType);
+      const convention = fn.callingConvention ? fn.callingConvention + ' ' : '';
+      this.write(' (' + convention + '*'.repeat(ptrLevels) + ')(');
+      for (let i = 0; i < fn.parameters.length; i++) {
+        if (i > 0) this.write(this.style.spaceAfterComma ? ', ' : ',');
+        this.emitTypeNode(fn.parameters[i]);
+      }
+      if (fn.isVariadic) {
+        if (fn.parameters.length > 0) this.write(this.style.spaceAfterComma ? ', ' : ',');
+        this.write('...');
+      }
+      this.write(')');
+      return;
+    }
     this.emitTypeNode(node.pointee);
     const qualStr = node.qualifiers.length > 0 ? ' ' + node.qualifiers.join(' ') : '';
     switch (this.style.pointerAlignment) {
@@ -756,6 +808,63 @@ export class CppEmitter {
       current = arr.elementType;
     }
     return { elementType: current, arraySizes };
+  }
+
+  /**
+   * Emit a pointer-to-array declarator `T (*name)[N]…` when the type is a pointer
+   * (possibly multi-level) whose pointee is an array. Returns false (emit nothing)
+   * for any other type, so the caller falls back to the normal declarator path.
+   */
+  /** True when a type is a (multi-level) pointer whose pointee is an array. */
+  private isPointerToArray(type: TypeNode): boolean {
+    let cur: TypeNode = type;
+    let levels = 0;
+    while (cur.kind === NodeKind.PointerType) { levels++; cur = (cur as PointerType).pointee; }
+    return levels > 0 && cur.kind === NodeKind.ArrayType;
+  }
+
+  private emitPointerToArrayDecl(type: TypeNode, name: import('../ast/nodes.js').Identifier): boolean {
+    let levels = 0;
+    let cur: TypeNode = type;
+    while (cur.kind === NodeKind.PointerType) {
+      levels++;
+      cur = (cur as PointerType).pointee;
+    }
+    if (levels === 0 || cur.kind !== NodeKind.ArrayType) return false;
+    const { elementType, arraySizes } = this.unwrapArrayType(cur);
+    this.emitTypeNode(elementType);
+    this.write(' (');
+    this.write('*'.repeat(levels));
+    this.emitIdentifier(name);
+    this.write(')');
+    this.emitArrayDimensions(arraySizes);
+    return true;
+  }
+
+  /**
+   * Emit an ABSTRACT pointer-to-array declarator `T (*)[N]` — the nameless twin of
+   * `emitPointerToArrayDecl`. Legal wherever a type-id is, which is where a cast
+   * lives, so `(char (*)[60])p` keeps the extent the declarator `char (*p)[60]`
+   * already carries. Without it the cast flattened to `char *` and disagreed with
+   * the very variable it was assigned to.
+   *
+   * Returns false — emitting nothing — when the type is not a pointer to a sized
+   * array, so the caller falls back to `emitTypeNode`. An array with no extent
+   * (`T (*)[]`) is not a complete type in a cast, so it takes the fallback too.
+   */
+  private emitAbstractPointerToArray(type: TypeNode): boolean {
+    let levels = 0;
+    let cur: TypeNode = type;
+    while (cur.kind === NodeKind.PointerType) { levels++; cur = (cur as PointerType).pointee; }
+    if (levels === 0 || cur.kind !== NodeKind.ArrayType) return false;
+    const { elementType, arraySizes } = this.unwrapArrayType(cur);
+    if (arraySizes.length === 0 || arraySizes.some(s => !s)) return false;
+    this.emitTypeNode(elementType);
+    this.write(' (');
+    this.write('*'.repeat(levels));
+    this.write(')');
+    this.emitArrayDimensions(arraySizes);
+    return true;
   }
 
   /** Emit array dimension brackets: [40], [3][4], etc. */
@@ -988,12 +1097,18 @@ export class CppEmitter {
       this.write(node.specifiers.join(' ') + ' ');
     }
 
-    // Unwrap array type — C/C++ requires brackets after the declarator name
-    const { elementType, arraySizes } = this.unwrapArrayType(node.type);
-    this.emitTypeNode(elementType);
-    this.write(' ');
-    this.emitIdentifier(node.name);
-    this.emitArrayDimensions(arraySizes);
+    // Pointer-to-array (`T (*name)[N]`): a pointer whose pointee is an array needs
+    // the C declarator syntax, NOT `T[N]* name` (invalid C++). Without this,
+    // Ghidra's `D2UnitStrc*(*)[5]` locals emit as `D2UnitStrc*[5]* name` and the
+    // declaration — plus every use of the name — fails to compile.
+    if (!this.emitPointerToArrayDecl(node.type, node.name)) {
+      // Unwrap array type — C/C++ requires brackets after the declarator name
+      const { elementType, arraySizes } = this.unwrapArrayType(node.type);
+      this.emitTypeNode(elementType);
+      this.write(' ');
+      this.emitIdentifier(node.name);
+      this.emitArrayDimensions(arraySizes);
+    }
 
     if (node.initializer) {
       if (node.initializer.kind === NodeKind.InitListExpr) {
@@ -1714,6 +1829,22 @@ export class CppEmitter {
       if (decl.kind === NodeKind.VariableDecl) {
         // For DeclStmt, emit inline (without indent and trailing semicolon)
         const v = decl as VariableDecl;
+        // Pointer-to-array (`T (*name)[N]`) needs the C declarator syntax. Handle
+        // the (common) single-declarator case here so body locals like
+        // `D2UnitStrc*(*)[5] ppUnitTable` don't emit as invalid `T[N]* name`.
+        if (i === 0 && node.declarations.length === 1 && this.isPointerToArray(v.type)) {
+          if (v.specifiers.length > 0) this.write(v.specifiers.join(' ') + ' ');
+          this.emitPointerToArrayDecl(v.type, v.name);
+          if (v.initializer) {
+            if ((v.initializer as ASTNode).kind === NodeKind.InitListExpr) {
+              this.emitInitListExpr(v.initializer as InitListExpr);
+            } else {
+              this.write(this.style.spaceAroundOperators ? ' = ' : '=');
+              this.emitNode(v.initializer);
+            }
+          }
+          continue;
+        }
         // Unwrap array type — C/C++ requires brackets after the declarator name
         const { elementType, arraySizes } = this.unwrapArrayType(v.type);
         if (i === 0) {
@@ -1811,7 +1942,27 @@ export class CppEmitter {
     }
   }
 
+  /**
+   * The trailing `case`/`default` of a switch whose statement is empty. C++
+   * (before C++23) needs a statement after a label, so `case X:` as the last
+   * thing before the closing brace is a hard error. Falling off the end of a
+   * switch and breaking out of it are the same thing, so `break;` is faithful —
+   * but ONLY for the last label. An empty label anywhere else is a deliberate
+   * fallthrough and must stay empty.
+   */
+  private emptyTrailingLabel: ASTNode | null = null;
+
   private emitSwitchStmt(node: SwitchStmt): void {
+    const previousTrailingLabel = this.emptyTrailingLabel;
+    this.emptyTrailingLabel = trailingEmptyLabel(node.body);
+    try {
+      this.emitSwitchStmtInner(node);
+    } finally {
+      this.emptyTrailingLabel = previousTrailingLabel;
+    }
+  }
+
+  private emitSwitchStmtInner(node: SwitchStmt): void {
     this.write('switch');
     if (this.style.spaceAfterKeyword) this.write(' ');
     this.write('(');
@@ -1836,8 +1987,12 @@ export class CppEmitter {
     this.newline();
     this.indentLevel++;
     this.write(this.indent());
-    this.emitNode(node.statement);
-    if (this.needsSemicolon(node.statement)) this.write(';');
+    if (node === this.emptyTrailingLabel) {
+      this.write('break;');
+    } else {
+      this.emitNode(node.statement);
+      if (this.needsSemicolon(node.statement)) this.write(';');
+    }
     this.indentLevel--;
   }
 
@@ -1846,8 +2001,12 @@ export class CppEmitter {
     this.newline();
     this.indentLevel++;
     this.write(this.indent());
-    this.emitNode(node.statement);
-    if (this.needsSemicolon(node.statement)) this.write(';');
+    if (node === this.emptyTrailingLabel) {
+      this.write('break;');
+    } else {
+      this.emitNode(node.statement);
+      if (this.needsSemicolon(node.statement)) this.write(';');
+    }
     this.indentLevel--;
   }
 
@@ -2153,7 +2312,12 @@ export class CppEmitter {
   }
 
   private emitPostfixExpr(node: PostfixExpr): void {
-    this.emitNode(node.operand);
+    // Parenthesize a lower-precedence operand so `++`/`--` binds to it, not to a
+    // sub-expression: a deref operand `*(short *)(p)` (prec 3) must emit
+    // `(*(short *)(p))++`, else `*(short *)(p)++` increments the cast (an rvalue)
+    // → "lvalue required as increment operand".
+    const precedence = OPERATOR_PRECEDENCE[node.operator + '_post'] ?? 2;
+    this.emitExprWithPrecedence(node.operand, precedence);
     this.write(node.operator);
   }
 
@@ -2225,7 +2389,7 @@ export class CppEmitter {
 
   private emitCStyleCastExpr(node: CStyleCastExpr): void {
     this.write('(');
-    this.emitTypeNode(node.type);
+    if (!this.emitAbstractPointerToArray(node.type)) this.emitTypeNode(node.type);
     this.write(')');
     this.emitExprWithPrecedence(node.expression, 3);
   }

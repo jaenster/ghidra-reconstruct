@@ -51,51 +51,35 @@ const SHORTHAND_MAP: ReadonlyMap<string, string> = new Map([
 
 /** Windows scalar typedefs -> C++ fixed-width type (32-bit x86) */
 const WINDOWS_SCALAR_MAP: ReadonlyMap<string, string> = new Map([
-  ['BOOL', 'int32_t'],
+  // BOOL / WORD / DWORD / ULONG / LONG / SHORT / USHORT / SIZE_T / DWORD_PTR /
+  // HRESULT are deliberately NOT listed, for the same reason the pointer
+  // typedefs are not: flattening them threw away a type Ghidra already had.
+  // Ghidra stores `AUTOMAP_SaveLayerToFile.dwBytesTransferred` as DWORD; the map
+  // re-spelled it uint32_t on the way out, so 55 WinDef.h out-parameter retypes
+  // made in the database delivered exactly zero errors. Unmapped, the name stays
+  // a TypedefType and resolves against d2_platform.h.
   ['BYTE', 'uint8_t'],
-  ['WORD', 'uint16_t'],
-  ['DWORD', 'uint32_t'],
-  ['LONG', 'int32_t'],
-  ['ULONG', 'uint32_t'],
-  ['USHORT', 'uint16_t'],
-  ['SHORT', 'int16_t'],
   ['WCHAR', 'uint16_t'],
-  ['CHAR', 'int8_t'],
-  ['SIZE_T', 'uint32_t'],     // 32-bit x86
-  ['DWORD_PTR', 'uint32_t'],  // 32-bit x86
-  ['HRESULT', 'int32_t'],
-  // Pointer typedefs — on 32-bit x86 these are all 4-byte pointers.
-  // Map to uint32_t since constructing PointerType nodes from here isn't practical.
-  ['LPVOID', 'uint32_t'],
-  ['LPCVOID', 'uint32_t'],
-  ['HANDLE', 'uint32_t'],
-  ['HMODULE', 'uint32_t'],
-  ['HINSTANCE', 'uint32_t'],
-  ['HWND', 'uint32_t'],
-  ['LPSTR', 'uint32_t'],
-  ['LPCSTR', 'uint32_t'],
-  ['LPWSTR', 'uint32_t'],
-  ['LPCWSTR', 'uint32_t'],
-  ['FARPROC', 'uint32_t'],
+  ['wchar_t', 'uint16_t'],
+  ['CHAR', 'char'],
+  // Pointer typedefs are deliberately NOT listed. Flattening them to uint32_t
+  // discarded the type Ghidra already had (its bodies declare HANDLE/HWND/LPSTR
+  // locals) and made every call into a Win32 or D2 signature an invalid
+  // conversion. Leaving them unmapped keeps the name as a TypedefType, which
+  // resolves against d2_platform.h.
+  //
+  // LPWSTR/LPCWSTR were mapped here on the grounds that they had to agree with
+  // the `uint16_t` the signature emitter uses for wide strings. It does not use
+  // one: `FILETOOLS_CreateDirectoryW(LPCWSTR lpPathName)` is what the headers
+  // emit. They are POINTER typedefs, and flattening one to a 32-bit scalar is the
+  // same defect the paragraph above describes — Ghidra writes `(LPWSTR)pWideStr`
+  // at a `MultiByteToWideChar` and the body reached the compiler as
+  // `(uint32_t)pWideStr`, which no Win32 signature accepts. Unmapped, the cast
+  // Ghidra wrote is the cast that is emitted.
   ['LRESULT', 'int32_t'],
   ['WPARAM', 'uint32_t'],
   ['LPARAM', 'int32_t'],
   ['ATOM', 'uint16_t'],
-  ['HGLOBAL', 'uint32_t'],
-  ['HDC', 'uint32_t'],
-  ['HBITMAP', 'uint32_t'],
-  ['HFONT', 'uint32_t'],
-  ['HBRUSH', 'uint32_t'],
-  ['HPEN', 'uint32_t'],
-  ['HKEY', 'uint32_t'],
-  ['HCURSOR', 'uint32_t'],
-  ['HICON', 'uint32_t'],
-  ['HMENU', 'uint32_t'],
-  ['HPALETTE', 'uint32_t'],
-  ['HRGN', 'uint32_t'],
-  ['HRSRC', 'uint32_t'],
-  ['SOCKET', 'uint32_t'],
-  ['CRITICAL_SECTION', 'uint32_t'],
 ]);
 
 /** Ghidra float artifacts -> standard C types */
@@ -228,6 +212,14 @@ function createTypeRenamePass(options: TypeNormalizeOptions = {}): Transformer {
 
   return createTransformer({
     visitNode(node: ASTNode): ASTNode | undefined {
+      // `wchar_t` is a C++ keyword, so it parses as BuiltinType and never reaches
+      // the typedef maps below - unlike `WCHAR`, which is a TypedefType. Ghidra
+      // spells D2's 16-bit char both ways; the signature emitter settles on
+      // uint16_t, so bodies must too or every call across that boundary is an
+      // invalid conversion.
+      if (node.kind === NodeKind.BuiltinType && (node as { name?: string }).name === 'wchar_t') {
+        return createTypedefTypeNode('uint16_t', node);
+      }
       if (node.kind !== NodeKind.TypedefType) {
         return undefined;
       }

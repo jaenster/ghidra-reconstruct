@@ -125,6 +125,14 @@ describe('CppEmitter', () => {
       assert.strictEqual(emit(Expr.postfix(i, '++')), 'i++');
       assert.strictEqual(emit(Expr.postfix(i, '--')), 'i--');
     });
+
+    it('parenthesizes a deref operand of postfix ++/--', () => {
+      // (*(short *)p)++  — not  *(short *)p++  (which increments the cast/rvalue
+      // → "lvalue required as increment operand").
+      const deref = Expr.unary('*', Expr.cast(Type.pointer(Type.builtin('short')), Expr.identifier('p')));
+      assert.strictEqual(emit(Expr.postfix(deref, '++')), '(*(short*)p)++');
+      assert.strictEqual(emit(Expr.postfix(deref, '--')), '(*(short*)p)--');
+    });
   });
 
   describe('Member Access', () => {
@@ -882,6 +890,35 @@ describe('CppEmitter', () => {
   done();
   return s;
 }`);
+    });
+  });
+
+  describe('Pointer-to-array types', () => {
+    const round = (s: string) => emit(parse(s)).replace(/\s+/g, ' ').trim();
+
+    it('flattens a pointer-to-array PARAMETER to a plain pointer (type[N]* -> type *)', () => {
+      assert.strictEqual(round('void f(D2UnitStrc[3]* p) { }'), 'void f(D2UnitStrc * p) {}');
+    });
+
+    it('keeps the extent in a pointer-to-array CAST', () => {
+      // `elem (*)[N]` is a well-formed abstract declarator, and the extent is
+      // real: `LVLTBLS_GetLvlTypeFilename` declares `char (*pFileSlot)[60]` and
+      // assigns `(char (*)[60])(*pFileSlot + 1)` to it. Flattening the cast to
+      // `char *` made it disagree with the very declarator it feeds.
+      assert.ok(round('void f(void* x) { p = (int[5]*)x; }').includes('(int (*)[5])x'));
+    });
+
+    it('still flattens a pointer-to-array cast with no extent', () => {
+      // `int (*)[]` is not a complete type in a cast; the flat pointer is.
+      assert.ok(round('void f(void* x) { p = (int[]*)x; }').includes('(int *)x'));
+    });
+
+    it('keeps a NAMED local as a faithful pointer-to-array declarator', () => {
+      assert.strictEqual(round('void f() { undefined1[16]* puVar1; }'), 'void f() { undefined1 (*puVar1)[16]; }');
+    });
+
+    it('never touches a subscript-multiply expression', () => {
+      assert.ok(round('void f(int* a) { return a[2] * 6; }').includes('a[2] * 6'));
     });
   });
 });

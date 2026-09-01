@@ -159,3 +159,55 @@ void f(int x) { int r = -(uint32_t)(x) & 0; }`;
     });
   });
 });
+
+describe('sbbBranchlessPlugin — the mask operand keeps its own type', () => {
+  const transformer = sbbBranchlessPlugin.createTransformer();
+
+  function transform(code: string): string {
+    const ast = parse(code);
+    return emit(transformer(ast) as AnyNode).trim();
+  }
+
+  it('keeps the integer cast that gave the mask its type', () => {
+    // `return -(uint)(a < b) & (uint)pOther;` is a UINT-valued select in an
+    // int32_t-returning function. Dropping the cast leaves a `D2UnitStrc *`
+    // where an integer is wanted.
+    const code = `
+typedef unsigned int uint;
+struct D2UnitStrc { int x; };
+int32_t f(uint n, uint* test, D2UnitStrc* pOther) {
+  return -(uint)(n < *test) & (uint)pOther;
+}`;
+    const result = transform(code);
+    assert.ok(result.includes('?'), `expected a ternary:\n${result}`);
+    assert.ok(/\(uint\)\s*pOther/.test(result), `cast dropped:\n${result}`);
+  });
+
+  it('still strips a numeric cast from an ADDRESS literal', () => {
+    // `func-ptr-literal` has to see the bare address to resolve it, and the
+    // cast says nothing the literal does not.
+    const code = `
+typedef unsigned int uint;
+void f(int c) {
+  int nSlot;
+  nSlot = -(uint)(c != 0) & (uint)0x5c3370;
+}`;
+    const result = transform(code);
+    assert.ok(result.includes('0x5c3370'), `address lost:\n${result}`);
+    assert.ok(!/\(uint\)\s*0x5c3370/.test(result), `literal cast kept:\n${result}`);
+  });
+
+  it('drops the integer cast again under a POINTER cast, where the arms must agree', () => {
+    const code = `
+typedef unsigned int uint;
+typedef unsigned char uint8_t;
+struct S { int flag; };
+void f(S* p, uint8_t* q) {
+  uint8_t* r;
+  r = (uint8_t*)(-(uint)(p->flag) & (uint)q);
+}`;
+    const result = transform(code);
+    assert.ok(result.includes('nullptr'), `expected nullptr arm:\n${result}`);
+    assert.ok(!/\(uint\)\s*q/.test(result), `integer cast survived into a pointer ternary:\n${result}`);
+  });
+});

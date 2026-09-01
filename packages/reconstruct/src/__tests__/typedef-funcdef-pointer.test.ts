@@ -16,6 +16,7 @@ import { generateHeader, setKnownFuncDefs } from '../codegen/header.js';
 import type {
   ExtractedFunctionDefinition,
   ExtractedTypedef,
+  ExtractedStruct,
   ReconstructOptions,
 } from '../types.js';
 
@@ -73,6 +74,48 @@ describe('typedef targeting a FunctionDefinition pointer', () => {
     assert.ok(
       !/typedef\s+QUESTCALLBACK\s*\*\s*QUESTCALLBACKFN/.test(header),
       `Must not emit the dangling pointer-to-funcdef typedef:\n${header}`,
+    );
+  });
+
+  it('inlines a STRUCT FIELD typed `<FuncDef> *` as a function pointer', () => {
+    const fnCloseGame: ExtractedFunctionDefinition = {
+      name: 'fnCloseGame',
+      category: '/Diablo2',
+      kind: 'FUNCTION_DEFINITION',
+      size: 4,
+      returnType: 'void',
+      parameters: [
+        { name: 'nSpawnedPlayers', dataType: 'int', ordinal: 0 },
+        { name: 'nGameFrameDiv', dataType: 'int', ordinal: 1 },
+      ],
+    };
+    const callbackTable: ExtractedStruct = {
+      name: 'D2BattleNetEventCallbackTable',
+      category: '/',
+      kind: 'STRUCTURE',
+      size: 4,
+      fields: [
+        // Ghidra delivers a pointer-to-funcdef as `<name> *32` (32-bit pointer).
+        { name: 'fpCloseGame', dataType: 'fnCloseGame *32', offset: 0, size: 4 },
+      ],
+    } as ExtractedStruct;
+
+    setKnownFuncDefs([fnCloseGame]);
+
+    const header = generateHeader(
+      'Net', [], undefined,
+      [callbackTable],
+      [], defaultOptions, undefined, undefined,
+      new Set(['D2BattleNetEventCallbackTable']),
+    );
+
+    assert.ok(
+      /void\s*\(\*fpCloseGame\)\(int, int\);/.test(header),
+      `Expected inline fn-ptr field, not void*:\n${header}`,
+    );
+    assert.ok(
+      !/void\s*\*\s*fpCloseGame/.test(header),
+      `Must not fall back to void* for a funcdef-pointer field:\n${header}`,
     );
   });
 });

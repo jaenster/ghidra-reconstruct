@@ -47,6 +47,13 @@ export interface NestedLabelInfo {
   name: string;
   tailStatements: Statement[];
   kind: LabelKind;
+  /**
+   * True when falling off the end of this label's tail reaches the function's implicit
+   * `return;` — i.e. the tail is at the tail of a void function body. False everywhere
+   * else (end of an if/else branch, loop body, switch case), where fallthrough continues
+   * into code that may still compute and return a value.
+   */
+  fallthroughReturns: boolean;
 }
 
 export interface GotoInfo {
@@ -73,13 +80,20 @@ export interface BackwardGotoEntry {
 }
 
 export interface GotoCleanupOptions {
+  /**
+   * Whether the function whose body is being transformed returns void. Callers that
+   * parse a bare body inside a synthetic `void dummy()` wrapper MUST set this — the
+   * wrapper's own `void` says nothing about the real function, and a fabricated bare
+   * `return;` in a non-void function drops the returned value.
+   */
+  enclosingReturnsVoid?: boolean;
   maxNestingDepth?: number;
   noreturnFunctions?: string[];
   detectGhidraNoreturn?: boolean;
   eliminateDeadCode?: boolean;
 }
 
-export type RequiredGotoCleanupOptions = Required<GotoCleanupOptions>;
+export type RequiredGotoCleanupOptions = Required<Omit<GotoCleanupOptions, 'enclosingReturnsVoid'>>;
 
 // ============================================
 // CONSTANTS
@@ -87,6 +101,12 @@ export type RequiredGotoCleanupOptions = Required<GotoCleanupOptions>;
 
 export const DEFAULT_MAX_NESTING = 8;
 export const MAX_FIXPOINT_PASSES = 50;
+/**
+ * Whole-AST rounds. Restructuring a compound can create NEW nested compounds (an if/else
+ * body built from a goto cascade) that the bottom-up walk has already passed. Re-running
+ * the walk lets those be structured too, instead of leaving a goto behind.
+ */
+export const MAX_WHOLE_AST_PASSES = 4;
 export const MAX_INLINE_TAIL_SIZE = 20;
 
 export const DEFAULT_NORETURN_FUNCTIONS = new Set([

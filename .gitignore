@@ -16,3 +16,13 @@ type-holes-report.md
 local-typing-worklist.md
 cast-hell-worklist.md
 reconstruct-run*.log
+
+# generated output / local run scripts / IDE / build cache
+output-d2server/
+run-d2server.ts
+.idea/
+*.tsbuildinfo
+
+# generated reconstruction output (lives in its own repo)
+repo-game/
+repo-menu/

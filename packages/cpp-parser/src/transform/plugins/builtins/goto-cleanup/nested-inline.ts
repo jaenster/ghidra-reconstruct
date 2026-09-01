@@ -49,34 +49,36 @@ export function clearGlobalGotoCounts(): void {
 }
 
 // ============================================
-// Loop/switch body marker.
+// Fallthrough-reaches-implicit-return marker.
 //
-// A `cleanup-fallthrough` label only "falls through to the function's implicit
-// return" when its enclosing compound is the FUNCTION BODY. When the label lives
-// in a loop body, fallthrough means "continue the loop", so fabricating a return
-// is always wrong. Switch bodies are likewise not the function body (fallthrough
-// there means "next case" / "after the switch"), so they are not return contexts.
+// A `cleanup-fallthrough` label's tail ends without return/noreturn. Inlining it at a
+// goto site is only equivalent to the original jump if, after the tail runs, control
+// would have reached the function's implicit `return;` — which requires BOTH:
+//   * the label's tail is at the tail of the function body (not the end of an if/else
+//     branch, a loop body, a switch case, ... where fallthrough continues elsewhere), and
+//   * the function returns void (in a non-void function a bare `return;` drops the value).
+// Anything else must keep the goto.
 //
-// The bottom-up transformer gives no parent context to visitCompoundStmt, so we
-// mark every loop/switch *body* compound with an enumerable symbol property on the
-// ORIGINAL AST before transforming. Object spread ({...node}) and updateNode both
-// copy enumerable own symbol properties, so the mark survives the child-first
-// rebuild and is still present when visitCompoundStmt fires on the body.
+// The bottom-up transformer gives no parent context to visitCompoundStmt, so every
+// CompoundStmt in a function body is marked with an enumerable symbol property on the
+// ORIGINAL AST before transforming. Object spread ({...node}) and updateNode both copy
+// enumerable own symbol properties, so the mark survives the child-first rebuild.
+// An unmarked compound reads false — the safe default.
 // ============================================
 
-export const LOOP_OR_SWITCH_BODY_MARK = Symbol.for('ghidra-mcp:goto-cleanup-loop-body');
+export const FALLTHROUGH_RETURNS_MARK = Symbol.for('ghidra-mcp:goto-cleanup-fallthrough-returns');
 
-export function markCompoundAsLoopOrSwitchBody(compound: object): void {
-  Object.defineProperty(compound, LOOP_OR_SWITCH_BODY_MARK, {
-    value: true,
+export function markCompoundFallthroughReturns(compound: object, value: boolean): void {
+  Object.defineProperty(compound, FALLTHROUGH_RETURNS_MARK, {
+    value,
     enumerable: true,
     configurable: true,
     writable: true,
   });
 }
 
-export function isLoopOrSwitchBodyCompound(compound: object): boolean {
-  return (compound as { [k: symbol]: unknown })[LOOP_OR_SWITCH_BODY_MARK] === true;
+export function compoundFallthroughReturns(compound: object): boolean {
+  return (compound as { [k: symbol]: unknown })[FALLTHROUGH_RETURNS_MARK] === true;
 }
 
 /**
@@ -170,6 +172,87 @@ function stripNestedLabelWrapper(stmt: Statement, labelName: string): { stmt: St
 }
 
 /**
+ * A `break` (or `continue`) that binds to something OUTSIDE these statements.
+ *
+ * A switch-case tail ends in `break`, and that `break` belongs to the switch
+ * the label sits in. Copy the tail somewhere that construct does not reach and
+ * the copy carries a `break` with nothing to break out of.
+ */
+function escapesBreakable(stmt: Statement | ASTNode): boolean {
+  switch (stmt.kind) {
+    case NodeKind.BreakStmt:
+    case NodeKind.ContinueStmt:
+      return true;
+    // A construct of its own binds every break/continue below it.
+    case NodeKind.SwitchStmt:
+    case NodeKind.ForStmt:
+    case NodeKind.ForRangeStmt:
+    case NodeKind.WhileStmt:
+    case NodeKind.DoWhileStmt:
+      return false;
+    default:
+      break;
+  }
+  for (const key of Object.keys(stmt as object)) {
+    const child = (stmt as any)[key];
+    if (Array.isArray(child)) {
+      for (const c of child) {
+        if (c && typeof c === 'object' && typeof c.kind === 'string' && escapesBreakable(c)) return true;
+      }
+    } else if (child && typeof child === 'object' && typeof child.kind === 'string') {
+      if (escapesBreakable(child)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * What a `break` would bind to at the label, and at every `goto` to it, within
+ * these statements.
+ *
+ * `null` means "whatever encloses this whole statement list" - which, since all
+ * of these sites share that enclosure, still makes them agree. Two sites agree
+ * exactly when the same construct governs both, and only then may a tail whose
+ * `break` escapes it be copied from one to the other. Case-to-case inside one
+ * switch agrees; a jump in from outside the switch does not.
+ */
+function breakBinders(stmts: Statement[], label: string): {
+  labelBinder: ASTNode | null;
+  gotoBinders: (ASTNode | null)[];
+  sawLabel: boolean;
+} {
+  let labelBinder: ASTNode | null = null;
+  let sawLabel = false;
+  const gotoBinders: (ASTNode | null)[] = [];
+
+  const walk = (node: ASTNode, binder: ASTNode | null): void => {
+    if (node.kind === NodeKind.LabelStmt && (node as LabelStmt).label.name === label) {
+      labelBinder = binder;
+      sawLabel = true;
+    } else if (node.kind === NodeKind.GotoStmt && (node as GotoStmt).label.name === label) {
+      gotoBinders.push(binder);
+    }
+    const opensBinder =
+      node.kind === NodeKind.SwitchStmt || node.kind === NodeKind.ForStmt
+      || node.kind === NodeKind.ForRangeStmt || node.kind === NodeKind.WhileStmt
+      || node.kind === NodeKind.DoWhileStmt;
+    const inner = opensBinder ? node : binder;
+    for (const key of Object.keys(node as object)) {
+      const child = (node as any)[key];
+      if (Array.isArray(child)) {
+        for (const c of child) {
+          if (c && typeof c === 'object' && typeof c.kind === 'string') walk(c, inner);
+        }
+      } else if (child && typeof child === 'object' && typeof child.kind === 'string') {
+        walk(child, inner);
+      }
+    }
+  };
+  for (const st of stmts) walk(st, null);
+  return { labelBinder, gotoBinders, sawLabel };
+}
+
+/**
  * Nested label tail inlining.
  *
  * Finds labels inside nested scopes (if branches, loops, switch cases),
@@ -183,10 +266,11 @@ export function processNestedTailInlining(
   topLevelLabels: Map<string, LabelInfo>,
   gotoCounts: Map<string, number>,
   options: RequiredGotoCleanupOptions,
-  // True only when this compound is the function body (see processCompound).
-  fallthroughMeansReturn = true,
+  // True only when falling off the end of THIS compound reaches the function's
+  // implicit `return;` (see processCompound).
+  fallthroughMeansReturn = false,
 ): Statement[] | null {
-  const nestedLabels = discoverNestedLabels(stmts, topLevelLabels, options);
+  const nestedLabels = discoverNestedLabels(stmts, topLevelLabels, options, fallthroughMeansReturn);
   if (nestedLabels.size === 0) return null;
 
   // Use global goto counts (set by the visitor at function body level) to verify
@@ -212,22 +296,33 @@ export function processNestedTailInlining(
     if (info.kind !== 'exit-return' && info.kind !== 'cleanup-return'
         && info.kind !== 'exit-noreturn' && info.kind !== 'cleanup-fallthrough') continue;
 
-    // A cleanup-fallthrough label only reaches the function's implicit return when it
-    // lives in the function body. Inside a loop/switch body, fallthrough continues the
-    // loop / next case, so a fabricated return is wrong.
+    // A cleanup-fallthrough label only reaches the function's implicit return when its
+    // own fallthrough point is the tail of a void function body. Anywhere else — the end
+    // of an if/else branch, a loop body, a switch case — fallthrough continues to code
+    // that may still compute and return a value.
     //  - If the tail self-terminates (break/return/continue/goto), inline it AS-IS.
-    //  - Otherwise it can fall through (loop-continue code): inlining loses the
-    //    loop-continue and duplicates the real label body. Preserve the goto.
-    const inLoopOrSwitchBody = info.kind === 'cleanup-fallthrough' && !fallthroughMeansReturn;
-    if (inLoopOrSwitchBody && canFallThrough(tail[tail.length - 1])) continue;
+    //  - Otherwise, preserve the goto: inlining would silently drop everything the
+    //    fallthrough would have run next, including the function's real return.
+    const noImplicitReturn = info.kind === 'cleanup-fallthrough' && !info.fallthroughReturns;
+    if (noImplicitReturn && canFallThrough(tail[tail.length - 1])) continue;
 
-    // For cleanup-fallthrough at function-body level, build tail with an explicit return
-    // appended (the goto would have jumped to code that falls off the function end). In a
-    // loop/switch body the tail already self-terminates — inline it unchanged.
-    const fabricateReturn = info.kind === 'cleanup-fallthrough' && !inLoopOrSwitchBody;
+    // For cleanup-fallthrough whose tail really does fall off a void function's end,
+    // build the tail with the explicit return appended.
+    const fabricateReturn = info.kind === 'cleanup-fallthrough' && !noImplicitReturn;
     const effectiveTail = fabricateReturn
       ? [...tail, createReturnStmt(tail[tail.length - 1])]
       : tail;
+
+    // A tail whose `break`/`continue` binds outside it may only be copied to a
+    // site the SAME construct governs. Case-to-case inside one switch is that
+    // site and stays. A jump in from outside the switch is not: the copy would
+    // carry a `break` with nothing to break out of - and Ghidra's own spelling,
+    // a `goto` to a label at function scope, compiles as it stands.
+    if (effectiveTail.some(escapesBreakable)) {
+      const { labelBinder, gotoBinders, sawLabel } = breakBinders(stmts, name);
+      if (!sawLabel) continue;
+      if (!gotoBinders.every(b => b === labelBinder)) continue;
+    }
 
     // Check tail doesn't contain escaping gotos
     const tailLabels = new Set<string>();

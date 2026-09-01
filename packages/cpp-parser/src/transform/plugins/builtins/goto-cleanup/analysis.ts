@@ -288,10 +288,14 @@ export function discoverNestedLabels(
   stmts: Statement[],
   topLevelLabels: Map<string, LabelInfo>,
   options: RequiredGotoCleanupOptions,
+  // True when falling off the end of `stmts` reaches the function's implicit `return;`
+  // (i.e. `stmts` is the tail of a void function body). Propagated down to each nested
+  // label so a cleanup-fallthrough tail is only treated as a return when it really is one.
+  fallthroughReturns = false,
 ): Map<string, NestedLabelInfo> {
   const result = new Map<string, NestedLabelInfo>();
 
-  function walkCompound(compound: Statement[]) {
+  function walkCompound(compound: Statement[], reachesEnd: boolean) {
     for (let i = 0; i < compound.length; i++) {
       const stmt = compound[i];
       if (stmt.kind === NodeKind.LabelStmt) {
@@ -300,7 +304,9 @@ export function discoverNestedLabels(
         if (isSimpleLabelName(name) && !topLevelLabels.has(name) && !result.has(name)) {
           const tail: Statement[] = [labelStmt.statement, ...compound.slice(i + 1)];
           const kind = classifyLabelTail(tail, options);
-          result.set(name, { name, tailStatements: tail, kind });
+          // The tail runs to the end of THIS compound, so its fallthrough point is
+          // this compound's fallthrough point.
+          result.set(name, { name, tailStatements: tail, kind, fallthroughReturns: reachesEnd });
         }
       } else if (stmt.kind === NodeKind.CaseStmt || stmt.kind === NodeKind.DefaultStmt) {
         // A label as the FIRST statement of a case/default (e.g. `case N: LBL: ...`)
@@ -318,34 +324,40 @@ export function discoverNestedLabels(
             }
             const tail: Statement[] = [labelStmt.statement, ...siblings];
             const kind = classifyLabelTail(tail, options);
-            result.set(name, { name, tailStatements: tail, kind });
+            // Falling off the end of a case runs into the next case, never the
+            // function's implicit return.
+            result.set(name, { name, tailStatements: tail, kind, fallthroughReturns: false });
           }
         }
       }
-      // Recurse into the statement regardless (it may contain deeper labels)
-      walkStmt(compound[i]);
+      // Recurse into the statement regardless (it may contain deeper labels).
+      // Only the LAST statement of the compound inherits the compound's fallthrough point.
+      walkStmt(compound[i], reachesEnd && i === compound.length - 1);
     }
   }
 
-  function walkStmt(stmt: Statement) {
+  // `reachesEnd` — true when falling off the end of `stmt` reaches the function's
+  // implicit `return;`. Loop bodies and switch/case bodies always reset it to false:
+  // falling off them continues the loop / the next case.
+  function walkStmt(stmt: Statement, reachesEnd: boolean) {
     if (stmt.kind === NodeKind.CompoundStmt) {
-      walkCompound((stmt as CompoundStmt).statements);
+      walkCompound((stmt as CompoundStmt).statements, reachesEnd);
     } else if (stmt.kind === NodeKind.IfStmt) {
       const ifStmt = stmt as IfStmt;
-      walkStmt(ifStmt.thenBranch);
-      if (ifStmt.elseBranch) walkStmt(ifStmt.elseBranch);
+      walkStmt(ifStmt.thenBranch, reachesEnd);
+      if (ifStmt.elseBranch) walkStmt(ifStmt.elseBranch, reachesEnd);
     } else if (stmt.kind === NodeKind.ForStmt) {
-      walkStmt((stmt as ForStmt).body);
+      walkStmt((stmt as ForStmt).body, false);
     } else if (stmt.kind === NodeKind.WhileStmt) {
-      walkStmt((stmt as WhileStmt).body);
+      walkStmt((stmt as WhileStmt).body, false);
     } else if (stmt.kind === NodeKind.DoWhileStmt) {
-      walkStmt((stmt as DoWhileStmt).body);
+      walkStmt((stmt as DoWhileStmt).body, false);
     } else if (stmt.kind === NodeKind.SwitchStmt) {
-      walkStmt((stmt as SwitchStmt).body);
+      walkStmt((stmt as SwitchStmt).body, false);
     } else if (stmt.kind === NodeKind.CaseStmt) {
-      walkStmt((stmt as CaseStmt).statement);
+      walkStmt((stmt as CaseStmt).statement, false);
     } else if (stmt.kind === NodeKind.DefaultStmt) {
-      walkStmt((stmt as DefaultStmt).statement);
+      walkStmt((stmt as DefaultStmt).statement, false);
     } else if (stmt.kind === NodeKind.LabelStmt) {
       // Bare label not inside a compound — tail is just the inner statement
       const labelStmt = stmt as LabelStmt;
@@ -353,16 +365,16 @@ export function discoverNestedLabels(
       if (isSimpleLabelName(name) && !topLevelLabels.has(name) && !result.has(name)) {
         const tail: Statement[] = [labelStmt.statement];
         const kind = classifyLabelTail(tail, options);
-        result.set(name, { name, tailStatements: tail, kind });
+        result.set(name, { name, tailStatements: tail, kind, fallthroughReturns: reachesEnd });
       }
-      walkStmt(labelStmt.statement);
+      walkStmt(labelStmt.statement, reachesEnd);
     }
   }
 
   // Walk the top-level statements via walkCompound so labels wrapped directly in a
   // case/default at this level (e.g. `case N: LBL: ...`) get a sibling-aware tail.
   // Direct LabelStmt children are still filtered out by the topLevelLabels check.
-  walkCompound(stmts);
+  walkCompound(stmts, fallthroughReturns);
 
   return result;
 }

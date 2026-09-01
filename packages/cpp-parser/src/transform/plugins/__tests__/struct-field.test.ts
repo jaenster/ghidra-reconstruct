@@ -19,33 +19,41 @@ describe('structFieldPlugin', () => {
   }
 
   describe('field offset patterns', () => {
-    it('should transform *(int*)(ptr + 4) to field access', () => {
-      const code = `void f(void *ptr) { int x = *(int *)(ptr + 4); }`;
+    // Memberization is valid only when the access lands on a STRUCT pointer.
+    // A base already cast to a struct pointer carries that type through.
+    it('should memberize a struct-pointer cast base', () => {
+      const code = `void f(void *p) { int x = *(int *)((struct S *)p + 4); }`;
       const result = transform(code);
-      // Should have arrow notation
       assert.ok(result.includes('->'), `Expected -> in: ${result}`);
-      // When cast type is int*, produces int_4 (type-aware field name)
       assert.ok(result.includes('int_4'), `Expected int_4 in: ${result}`);
     });
 
-    it('should transform *(long*)(ptr + 8) to field access', () => {
+    it('should generate hex field names for a struct-pointer base', () => {
+      const code = `void f(void *p) { int x = *(int *)((struct S *)p + 16); }`;
+      const result = transform(code);
+      // 16 decimal = 10 hex, int* deref → int_10
+      assert.ok(result.includes('int_10'), `Expected int_10 in: ${result}`);
+    });
+
+    // A bare scalar-pointer deref must NOT be memberized — `((int *)ptr)->int_4`
+    // never compiles (int has no members). The faithful deref is kept.
+    it('should NOT memberize a bare int-pointer cast', () => {
+      const code = `void f(void *ptr) { int x = *(int *)(ptr + 4); }`;
+      const result = transform(code);
+      assert.ok(!result.includes('->'), `Scalar ptr must stay a deref: ${result}`);
+    });
+
+    it('should NOT memberize a bare long-pointer cast', () => {
       const code = `void f(void *ptr) { long x = *(long *)(ptr + 8); }`;
       const result = transform(code);
-      assert.ok(result.includes('->'), `Expected -> in: ${result}`);
+      assert.ok(!result.includes('->'), `Scalar ptr must stay a deref: ${result}`);
     });
 
     it('should not transform offset 0 (just a cast)', () => {
-      const code = `void f(void *ptr) { int x = *(int *)(ptr + 0); }`;
+      const code = `void f(void *p) { int x = *(int *)((struct S *)p + 0); }`;
       const result = transform(code);
-      // Offset 0 should not be transformed as it's just a cast
       assert.ok(!result.includes('field_0'), `Should not contain field_0 in: ${result}`);
-    });
-
-    it('should generate hex field names', () => {
-      const code = `void f(void *ptr) { int x = *(int *)(ptr + 16); }`;
-      const result = transform(code);
-      // 16 decimal = 10 hex, with int* cast produces int_10
-      assert.ok(result.includes('int_10'), `Expected int_10 in: ${result}`);
+      assert.ok(!result.includes('int_0'), `Should not contain int_0 in: ${result}`);
     });
   });
 
@@ -62,6 +70,70 @@ describe('structFieldPlugin', () => {
       const code = `void f(void *ptr) { int x = *(int *)(ptr - 4); }`;
       const result = transform(code);
       assert.ok(!result.includes('->'), `Should not contain -> in: ${result}`);
+    });
+
+    it('should not memberize a computed scalar-pointer-cast base', () => {
+      // `(char *)((int)p + n)` is a raw computed pointer, not a struct lvalue.
+      // Memberizing would emit `((char *)...)->str_c`, invalid since char has no
+      // members. The faithful deref must survive untouched.
+      const code = `void f(void *p, int n) { char x = *(char *)((char *)((int)p + n) + 12); }`;
+      const result = transform(code);
+      assert.ok(!result.includes('->'), `Should leave deref, not char*->member: ${result}`);
+    });
+
+    it('should not memberize an (int)-cast (non-pointer) base', () => {
+      // `(int)p` is not a pointer at all; `((int)p)->field_4` is "base operand is
+      // not a pointer". Leave the deref.
+      const code = `void f(void *p) { int x = *(int *)((int)p + 4); }`;
+      const result = transform(code);
+      assert.ok(!result.includes('->'), `Should not produce int->field: ${result}`);
+    });
+
+    it('should not memberize a double-pointer cast', () => {
+      // `((T **)p)->field_4` → `->` yields `T *` (still a pointer); `.field_4` on
+      // it is "request for member in pointer type". Leave the deref.
+      const code = `void f(void *p) { int x = *(int *)((struct S **)p + 4); }`;
+      const result = transform(code);
+      assert.ok(!result.includes('->'), `Double ptr must stay a deref: ${result}`);
+    });
+
+    it('should not memberize a pointer-arithmetic (BinaryExpr) base', () => {
+      // The real D2 pattern: base = `(int)tbl + n` (arithmetic), offset 12 split
+      // off, then the transform wraps base in the deref cast →
+      // `((char *)((int)tbl + n))->str_c`, invalid (char has no str_c). Skip.
+      const code = `void f(void *tbl, int n) { char x = *(char *)((int)tbl + n + 12); }`;
+      const result = transform(code);
+      assert.ok(!result.includes('->'), `Should not produce char*->str_c: ${result}`);
+    });
+  });
+
+  describe('a pointee with no members, resolved against the type model', () => {
+    // Ghidra at 0x0040a080 says `*(HANDLE *)(Line + 0x10)`. The emitter wrote
+    // `((HANDLE*)Line)->field_10` — a member Ghidra never named and nothing
+    // declares — because the scalar test was a regex over Ghidra's own primitive
+    // spellings and knew nothing about Win32.
+    const aggregateTypeNames = ['D2UnitStrc', 'tagPOINT', 'POINT'];
+    function transformWithModel(code: string): string {
+      const ast = parse(code);
+      const t = structFieldPlugin.createTransformer({ aggregateTypeNames });
+      return emit(t(ast) as AnyNode).trim();
+    }
+
+    for (const scalar of ['HANDLE', 'SOCKET', 'PVOID', 'LPBYTE', 'LPCVOID', 'ULONG_PTR', 'uint3']) {
+      it(`leaves the faithful deref for a ${scalar} pointee`, () => {
+        const out = transformWithModel(`void f(void *p) { x = *(${scalar} *)((${scalar} *)p + 16); }`);
+        assert.ok(!out.includes('->'), `${scalar} has no members: ${out}`);
+      });
+    }
+
+    it('still memberizes a pointee the model says IS a struct', () => {
+      const out = transformWithModel('void f(void *p) { x = *(int *)((D2UnitStrc *)p + 16); }');
+      assert.ok(out.includes('->'), out);
+    });
+
+    it('falls back to the name test when no model is supplied', () => {
+      const code = 'void f(void *p) { x = *(int *)((uint16_t *)p + 4); }';
+      assert.ok(!transform(code).includes('->'), transform(code));
     });
   });
 

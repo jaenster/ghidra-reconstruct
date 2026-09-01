@@ -419,12 +419,48 @@ function createGuardStackRemover(): Transformer {
 }
 
 /**
+ * Records the halt function each collapsed assertion called, so the injected
+ * macro can name the SAME symbol the call site named.
+ *
+ * The macro body used to spell `Fog::ErrorManager::ERROR_...` as a string
+ * literal. Macro text bypasses the namespace resolver, so when Ghidra moved the
+ * symbol to `Fog::Src::ErrorManager` the ordinary call sites followed and the
+ * macro did not — 30 `'Fog::ErrorManager' has not been declared` errors, one per
+ * expansion. The name is a REFERENCE to a symbol, not decoration, so it is taken
+ * from the callee the boilerplate actually called; that callee reached the AST
+ * through the same resolution every other reference does.
+ */
+class HaltCallees {
+  /** Insertion-ordered: the first collapsed site decides the macro's callee. */
+  private readonly names: string[] = [];
+
+  record(name: string): void {
+    if (!this.names.includes(name)) this.names.push(name);
+  }
+
+  /**
+   * The callee the macro will name, or undefined if nothing was collapsed.
+   * Deliberately the FIRST one seen, not a merge: one `D2_ASSERT` can only name
+   * one function, and `willAccept` keeps every collapsed site consistent with it.
+   */
+  chosen(): string | undefined {
+    return this.names[0];
+  }
+
+  /** A site calling a different halt function is left as it stands — collapsing
+   *  it would put it under a macro that calls someone else. */
+  willAccept(name: string): boolean {
+    return this.names.length === 0 || this.names[0] === name;
+  }
+}
+
+/**
  * Simplify assertion boilerplate to macros
  * Patterns:
  * - General: if (cond) { nLine = ...; ERROR_Halt(...); } → D2_ASSERT(!(cond))
  * - Range: if (val < min || max < val) { ... } → D2_ASSERT_RANGE(val, min, max)
  */
-function createAssertionSimplifier(): Transformer {
+function createAssertionSimplifier(callees: HaltCallees): Transformer {
   return createTransformer({
     visitIfStmt(ifStmt: IfStmt): Statement | undefined {
       // Check if body matches assertion boilerplate
@@ -432,6 +468,14 @@ function createAssertionSimplifier(): Transformer {
       if (!assertInfo) {
         return undefined; // Not assertion boilerplate
       }
+
+      // The macro that replaces this site must call the function this site
+      // called. If a previous site in the same body fixed a different one, leave
+      // this one expanded rather than misdirect it.
+      if (!callees.willAccept(assertInfo.errorFunction)) {
+        return undefined;
+      }
+      callees.record(assertInfo.errorFunction);
 
       // Check for range check pattern first (more specific)
       const rangeCheck = parseRangeCheck(ifStmt.condition);
@@ -509,6 +553,57 @@ export interface BoilerplateCleanupOptions extends PluginOptions {
  * Removes verbose compiler-inserted security boilerplate and simplifies
  * assertion patterns from Ghidra decompiler output.
  */
+/**
+ * The transform chain. Shared by `createTransformer` and
+ * `createInjectionTransformer` so the injection observes exactly the chain that
+ * ran, rather than a second one built from the same options.
+ */
+function buildTransformer(
+  options: BoilerplateCleanupOptions | undefined,
+  callees: HaltCallees
+): Transformer {
+  const opts = options ?? {};
+  const transforms: Transformer[] = [];
+
+  if (opts.removeSecurityCookies !== false) {
+    transforms.push(createSecurityCookieRemover());
+    transforms.push(createGuardStackRemover());
+  }
+
+  if (opts.simplifyAssertions !== false) {
+    transforms.push(createAssertionSimplifier(callees));
+  }
+
+  return sequence(...transforms);
+}
+
+/**
+ * The D2_ASSERT preamble, naming the halt function the collapsed sites called.
+ * `haltCallee` is the callee spelling from the AST — already resolved, already
+ * qualified the way every other reference to that symbol is qualified in this
+ * translation unit.
+ */
+export function assertMacroPreamble(haltCallee: string): string {
+  return `
+// Assertion macros (simplified from ERROR boilerplate)
+#ifndef D2_ASSERT
+#define D2_ASSERT(condition) \\
+  do { \\
+    if (!(condition)) { \\
+      ${haltCallee}( \\
+        __FILE__, __LINE__, #condition \\
+      ); \\
+    } \\
+  } while (0)
+#endif
+
+#ifndef D2_ASSERT_RANGE
+#define D2_ASSERT_RANGE(value, min, max) \\
+  D2_ASSERT((value) >= (min) && (value) <= (max))
+#endif
+`;
+}
+
 export const boilerplateCleanupPlugin: TransformPlugin = {
   id: 'boilerplate-cleanup',
   name: 'Boilerplate Pattern Cleanup',
@@ -520,52 +615,32 @@ export const boilerplateCleanupPlugin: TransformPlugin = {
   tags: ['cleanup', 'ghidra', 'decompiler'],
 
   createTransformer(options?: BoilerplateCleanupOptions) {
-    const opts = options ?? {};
-    const transforms: Transformer[] = [];
-
-    if (opts.removeSecurityCookies !== false) {
-      transforms.push(createSecurityCookieRemover());
-      transforms.push(createGuardStackRemover());
-    }
-
-    if (opts.simplifyAssertions !== false) {
-      transforms.push(createAssertionSimplifier());
-    }
-
-    return sequence(...transforms);
+    return buildTransformer(options, new HaltCallees());
   },
 
   createInjectionTransformer(options?: BoilerplateCleanupOptions) {
-    const baseTransformer = this.createTransformer(options);
     const opts = options ?? {};
 
     return (node: ASTNode, context: InjectionContext) => {
-      // Run transformations first
-      const result = baseTransformer(node);
+      // One record per body: the callees this call collapsed, not a previous one's.
+      const callees = new HaltCallees();
+      const result = buildTransformer(options, callees)(node);
 
-      // Only inject D2_ASSERT macros if the transform actually produced any
-      if (opts.simplifyAssertions !== false && !context.has('d2-assert-macros') && astContainsAssertMacro(result)) {
+      // Only inject D2_ASSERT macros if the transform actually produced any.
+      // `chosen()` is what makes the injection possible at all: without a
+      // collapsed site there is no symbol to name, and inventing one is the bug
+      // this replaced.
+      const halt = callees.chosen();
+      if (
+        opts.simplifyAssertions !== false &&
+        halt &&
+        !context.has('d2-assert-macros') &&
+        astContainsAssertMacro(result)
+      ) {
         context.inject({
           id: 'd2-assert-macros',
           type: 'preamble',
-          code: `
-// Assertion macros (simplified from ERROR boilerplate)
-#ifndef D2_ASSERT
-#define D2_ASSERT(condition) \\
-  do { \\
-    if (!(condition)) { \\
-      Fog::ErrorManager::ERROR_UnrecoverableInternalError_Halt( \\
-        __FILE__, __LINE__, #condition \\
-      ); \\
-    } \\
-  } while (0)
-#endif
-
-#ifndef D2_ASSERT_RANGE
-#define D2_ASSERT_RANGE(value, min, max) \\
-  D2_ASSERT((value) >= (min) && (value) <= (max))
-#endif
-`,
+          code: assertMacroPreamble(halt),
           priority: 100,
         });
       }

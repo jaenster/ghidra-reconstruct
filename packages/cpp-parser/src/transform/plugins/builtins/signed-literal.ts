@@ -9,6 +9,10 @@
  * - 0xffffffffffffffff  →  -1  (64-bit)
  * - 0x80000000  →  -2147483648 or INT32_MIN
  *
+ * It also undoes Ghidra's double negative on an already-negative constant
+ * (`--2147483648`, `--0x80000000` → `(-2147483648)`), which as written is a
+ * pre-decrement of a literal and does not compile.
+ *
  * This makes the code more readable when the original source used negative values.
  */
 
@@ -16,6 +20,7 @@ import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode,
   IntegerLiteralExpr,
+  ParenExpr,
   UnaryExpr,
 } from '../../../ast/nodes.js';
 import { createTransformer, type Transformer } from '../../transformer.js';
@@ -129,14 +134,124 @@ function createNegativeLiteral(
 // ============================================
 
 /**
+ * Magnitude of a literal operand, seeing through a leading '-' this pass may
+ * itself have introduced (0x80000000 → -2147483648).
+ */
+function literalMagnitude(node: ASTNode): bigint | null {
+  if (node.kind === NodeKind.IntegerLiteral) {
+    return (node as IntegerLiteralExpr).value;
+  }
+  if (node.kind === NodeKind.UnaryExpr) {
+    const u = node as UnaryExpr;
+    if (u.operator === '-') return literalMagnitude(u.operand);
+  }
+  if (node.kind === NodeKind.ParenExpr) {
+    return literalMagnitude((node as ParenExpr).expression);
+  }
+  return null;
+}
+
+/**
+ * Ghidra prints a negated constant with the sign glued to the minus of the
+ * expression, so INT_MIN comes out as `--2147483648` / `--0x80000000`. As C++
+ * that is a pre-decrement of a literal, which does not compile. The value meant
+ * is the single negation of the printed magnitude.
+ */
+function undoDoubleNegative(node: ASTNode): ASTNode | undefined {
+  if (node.kind !== NodeKind.UnaryExpr) return undefined;
+  const u = node as UnaryExpr;
+  if (u.operator !== '--') return undefined;
+
+  const magnitude = literalMagnitude(u.operand);
+  if (magnitude === null) return undefined;
+
+  const negation = createNegativeLiteral(-magnitude, u);
+  const paren: ParenExpr = {
+    kind: NodeKind.ParenExpr,
+    expression: negation,
+    location: u.location,
+    leadingTrivia: u.leadingTrivia || [],
+    trailingTrivia: u.trailingTrivia || [],
+  };
+  return paren;
+}
+
+/**
+ * Fold `-<magnitude>` where this pass has already re-signed the magnitude.
+ *
+ * Ghidra prints a negative constant as minus-magnitude, and the magnitude of
+ * INT32_MIN is `0x80000000` — a value this pass reads as negative in its own
+ * right. The tree is walked children-first, so by the time the enclosing minus
+ * is visited its operand is already `-2147483648` and the two signs print
+ * adjacent: `--2147483648`, which C++ lexes as a pre-decrement of a literal.
+ *
+ * The sign is settled here instead, in the width the constant came from:
+ * negate the ORIGINAL unsigned magnitude modulo 2^bits and read the result back
+ * as signed. `-0x80000000` is INT32_MIN, `-0xffffffff` is 1.
+ */
+function foldReSignedNegation(
+  node: ASTNode,
+  originalValue: WeakMap<ASTNode, { value: bigint; bits: 32 | 64 }>
+): ASTNode | undefined {
+  if (node.kind !== NodeKind.UnaryExpr) return undefined;
+  const u = node as UnaryExpr;
+  if (u.operator !== '-') return undefined;
+
+  const origin = originalValue.get(u.operand);
+  if (!origin) return undefined;
+
+  const mask = origin.bits === 32 ? 0xffffffffn : 0xffffffffffffffffn;
+  const half = origin.bits === 32 ? 0x80000000n : 0x8000000000000000n;
+  const wrapped = (mask + 1n - (origin.value & mask)) & mask;
+  const signed = wrapped >= half ? wrapped - (mask + 1n) : wrapped;
+
+  if (signed >= 0n) {
+    const literal: IntegerLiteralExpr = {
+      kind: NodeKind.IntegerLiteral,
+      value: signed,
+      suffix: '',
+      base: 10,
+      raw: signed.toString(),
+      location: u.location,
+      leadingTrivia: u.leadingTrivia || [],
+      trailingTrivia: u.trailingTrivia || [],
+    };
+    return literal;
+  }
+
+  const negation = createNegativeLiteral(signed, u);
+  const paren: ParenExpr = {
+    kind: NodeKind.ParenExpr,
+    expression: negation,
+    location: u.location,
+    leadingTrivia: u.leadingTrivia || [],
+    trailingTrivia: u.trailingTrivia || [],
+  };
+  return paren;
+}
+
+/**
  * Create the signed literal cleanup transformer
  */
 function createSignedLiteralCleanup(options: SignedLiteralOptions): Transformer {
   const threshold = options.conversionThreshold ?? 0xf0000000n;
   const onlyKnown = options.onlyKnownValues ?? false;
+  // Nodes this pass re-signed, against the unsigned value they were written
+  // with. Lets the enclosing minus, visited afterwards, recover the original.
+  const reSigned = new WeakMap<ASTNode, { value: bigint; bits: 32 | 64 }>();
 
   return createTransformer({
     visitNode(node) {
+      const folded = foldReSignedNegation(node, reSigned);
+      if (folded) {
+        return folded;
+      }
+
+      const doubleNegative = undoDoubleNegative(node);
+      if (doubleNegative) {
+        return doubleNegative;
+      }
+
       // Only handle integer literals
       if (node.kind !== NodeKind.IntegerLiteral) {
         return undefined;
@@ -144,6 +259,12 @@ function createSignedLiteralCleanup(options: SignedLiteralOptions): Transformer 
 
       const literal = node as IntegerLiteralExpr;
       const value = literal.value;
+
+      // An explicit unsigned suffix says the literal is already the value it
+      // means. Re-signing `0xffffffffu` to `-1` changes what a mask does.
+      if (/u/i.test(literal.suffix ?? '')) {
+        return undefined;
+      }
 
       // Check known values first (they bypass threshold)
       const known32 = NEGATIVE_32.get(value);
@@ -166,7 +287,9 @@ function createSignedLiteralCleanup(options: SignedLiteralOptions): Transformer 
         return undefined;
       }
 
-      return createNegativeLiteral(result.signed, literal);
+      const negated = createNegativeLiteral(result.signed, literal);
+      reSigned.set(negated, { value, bits: result.bits });
+      return negated;
     },
   });
 }

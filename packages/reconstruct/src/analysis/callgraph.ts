@@ -45,7 +45,26 @@ export function buildCallGraph(functions: ExtractedFunction[]): CallGraph {
     }
   }
 
+  // A thunk has no body to scan, but it calls exactly one function. Without this
+  // edge nothing knows the target is referenced, so its header is not included
+  // where the forwarder is emitted and its declaration is not made public.
+  const byAddressKey = new Map<string, string>();
+  for (const func of functions) byAddressKey.set(addressKey(func.address), func.address);
+  for (const func of functions) {
+    const target = func.thunkTarget;
+    if (!target || target.isExternal) continue;
+    const targetAddress = byAddressKey.get(addressKey(target.address));
+    if (targetAddress && targetAddress !== func.address) {
+      edges.get(func.address)?.add(targetAddress);
+    }
+  }
+
   return { nodes, edges };
+}
+
+/** The hex tail of a Ghidra address ("Game.exe.ram:005011f0" -> "005011f0"). */
+function addressKey(address: string): string {
+  return address.includes(':') ? address.slice(address.lastIndexOf(':') + 1) : address;
 }
 
 /**

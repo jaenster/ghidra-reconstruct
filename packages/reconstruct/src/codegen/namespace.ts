@@ -1,3 +1,4 @@
+import { NamespaceResolution, namespaceResolution, renderNamespace, setNamespaceResolution } from './namespace-resolution.js';
 /**
  * Namespace and directory management
  *
@@ -144,6 +145,58 @@ export function collapseConsecutiveDuplicates(name: string): string {
     }
   }
   return collapsed.join('::');
+}
+
+/**
+ * Rewrite a qualified REFERENCE (`Ns::Sub::Sub::sym`) so its qualifier is spelled
+ * exactly the way the DECLARATION side spells it.
+ *
+ * The declaration side runs its namespace through collapseConsecutiveDuplicates()
+ * — impl.ts and header.ts both do, and organizeByNamespace() does it via
+ * normalizeUnitName(). Reference sites built from Ghidra's raw symbol path (data
+ * initializers naming a function, e.g. `&D2Game::Quests::Quests::A1Q6::Fn`) did
+ * not, so a `Module::Dir::Dir::Sub` symbol was declared in `Module::Dir::Sub` but
+ * referenced through a namespace that does not exist.
+ *
+ * Only the QUALIFIER is normalized; the trailing symbol name is left alone, so a
+ * symbol legitimately named after its own namespace (`Foo::Foo`, a constructor-ish
+ * name) keeps both segments.
+ */
+export function normalizeQualifiedReference(name: string): string {
+  const idx = name.lastIndexOf('::');
+  if (idx < 0) return name;
+  const qualifier = name.slice(0, idx);
+  const symbol = name.slice(idx + 2);
+  // The reference side resolves the qualifier through the SAME entity the
+  // declaration and the definition render from.
+  const emitted = renderNamespace(namespaceResolution().resolvePath(qualifier));
+  return emitted ? `${emitted}::${symbol}` : symbol;
+}
+
+/**
+ * Global struct/union/enum type names, registered once per reconstruct run, used
+ * to strip a namespace component that collides with a type. The HEADER decl, the
+ * IMPL definition, and the call-site rewriter must all strip the SAME component or
+ * a function's decl/def/calls land in different namespaces.
+ */
+export function setNamespaceCollisionTypes(typeNames: Set<string>): void {
+  // The type registry is one half of the single namespace rule; installing it
+  // installs the resolution every emitter renders from.
+  setNamespaceResolution(new NamespaceResolution(typeNames));
+}
+
+/**
+ * Strip ONLY the LAST namespace component if it collides with a type name —
+ * matching the call-site rewriter, which strips a type-name qualifier only when
+ * it is PENULTIMATE (directly before the symbol). e.g. `D2Common::Item` → (Item
+ * is a struct) → `D2Common`, but `D2Common::Skills::SkillsServer` is left intact
+ * (SkillsServer is the last component; an intermediate `Skills` collision is NOT
+ * stripped — that would move the def to an unreachable sibling scope).
+ */
+export function stripLastCollidingNamespaceComponent(ns: string): string | undefined {
+  // Kept as a thin adapter for callers that still hold a Ghidra path string.
+  // The decision itself is the resolution's, so there is one implementation.
+  return renderNamespace(namespaceResolution().resolvePath(ns));
 }
 
 /**

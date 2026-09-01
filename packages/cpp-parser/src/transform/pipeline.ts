@@ -249,6 +249,11 @@ export class TransformPipeline<N extends ASTNode = ASTNode> {
     let currentAst = ast;
     let totalChanges = 0;
 
+    // `changesCount` costs two full AST traversals per step. Only the two
+    // features that read it are worth paying for; with neither enabled,
+    // `changesCount`/`totalChanges` report 0 and the ASTs are unaffected.
+    const trackChanges = opts.trackSteps === true || opts.stopOnNoChange === true;
+
     for (const step of this.steps) {
       // Skip disabled steps
       if (step.enabled === false) {
@@ -271,7 +276,7 @@ export class TransformPipeline<N extends ASTNode = ASTNode> {
       let stepResult: StepResult<N>;
 
       try {
-        const result = transformWithTracking(currentAst, step.transform);
+        const result = transformWithTracking(currentAst, step.transform, { trackChanges });
 
         stepResult = {
           name: step.name,
@@ -394,7 +399,7 @@ export function createFixpointPipeline<N extends ASTNode = ASTNode>(
   return (node: N) => {
     let current = node;
     for (let i = 0; i < maxIterations; i++) {
-      const result = transformWithTracking(current, combined);
+      const result = transformWithTracking(current, combined, { trackChanges: true });
       if (result.changesCount === 0) {
         break;
       }

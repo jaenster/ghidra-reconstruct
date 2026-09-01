@@ -101,20 +101,119 @@ export async function extractDataTypes(
 export async function extractDataType(
   connection: GhidraConnection,
   name: string,
-  category?: string
-): Promise<ExtractedDataType | null> {
+  category?: string,
+  options: { timeoutMs?: number } = {}
+): Promise<ExtractedDataType> {
   const params: Record<string, unknown> = { name };
   if (category) params.category = category;
+  // A struct's detail is as big as the struct: `D2GameViewStrc` has 60,023
+  // components and answers with ~5 MB. The 30 s default cut that off whenever
+  // the daemon was busy, so give a detail the same headroom the listing gets.
+  params._commandTimeout = options.timeoutMs ?? 300000;
 
-  try {
-    const result = await connection.sendCommand<GhidraDataTypeDetail>(
-      'get_data_type',
-      params
-    );
-    return mapDataTypeDetail(result);
-  } catch {
-    return null;
+  const result = await connection.sendCommand<GhidraDataTypeDetail>(
+    'get_data_type',
+    params
+  );
+  return mapDataTypeDetail(result);
+}
+
+/** The kinds whose listing entry carries no members until a detail fetch lands. */
+export const DETAIL_KINDS: ReadonlySet<string> = new Set([
+  'STRUCTURE', 'UNION', 'ENUM', 'TYPEDEF', 'FUNCTION_DEFINITION',
+]);
+
+export interface TypeDetailHydration {
+  /** Types whose detail landed on the first pass. */
+  fetched: number;
+  /** Types whose first fetch failed and whose retry succeeded. */
+  recovered: number;
+}
+
+/**
+ * Replace every shallow listing entry with its detail, IN PLACE.
+ *
+ * A detail fetch that fails leaves an entry with no members, and for years that
+ * was silent: the entry stayed, `detailUnavailable` had nowhere to be recorded,
+ * and codegen emitted an empty body for a 60 KB struct. So every failure is
+ * retried once on its own — the failure mode is a loaded daemon, and a lone
+ * request after the batches have drained usually lands — and anything still
+ * missing stops the extraction by name. A hole here is cheap to fix and
+ * ruinous to carry: it is seven minutes into the run, and the alternative is a
+ * tree that compiles the hole into a hundred errors an hour later.
+ */
+export async function hydrateDataTypeDetails(
+  connection: GhidraConnection,
+  dataTypes: ExtractedDataType[],
+  options: { batchSize?: number; onProgress?: (done: number, total: number) => void } = {}
+): Promise<TypeDetailHydration> {
+  const batchSize = options.batchSize ?? 20;
+
+  const index = new Map<string, number>();
+  for (let i = 0; i < dataTypes.length; i++) {
+    index.set(`${dataTypes[i].name}\u0000${dataTypes[i].category}`, i);
   }
+
+  const pending: number[] = [];
+  for (let i = 0; i < dataTypes.length; i++) {
+    if (DETAIL_KINDS.has(dataTypes[i].kind)) pending.push(i);
+  }
+
+  const apply = (slot: number, detail: ExtractedDataType): void => {
+    // The detail may name a different category than the listing did; the slot
+    // the listing occupied is the one that has to be replaced either way.
+    const at = index.get(`${detail.name}\u0000${detail.category}`) ?? slot;
+    dataTypes[at] = detail;
+  };
+
+  const failures: { slot: number; error: Error }[] = [];
+  let fetched = 0;
+  for (let i = 0; i < pending.length; i += batchSize) {
+    const batch = pending.slice(i, i + batchSize);
+    const results = await Promise.all(
+      batch.map(async slot => {
+        const t = dataTypes[slot];
+        try {
+          return { slot, detail: await extractDataType(connection, t.name, t.category) };
+        } catch (e) {
+          return { slot, error: e as Error };
+        }
+      })
+    );
+    for (const r of results) {
+      if ('detail' in r && r.detail) { apply(r.slot, r.detail); fetched++; }
+      else if ('error' in r && r.error) failures.push({ slot: r.slot, error: r.error });
+    }
+    options.onProgress?.(Math.min(i + batchSize, pending.length), pending.length);
+  }
+
+  let recovered = 0;
+  const unresolved: { name: string; category: string; reason: string }[] = [];
+  for (const f of failures) {
+    const t = dataTypes[f.slot];
+    console.warn(
+      `[type-detail] ${t.name} (${t.category}) failed: ${f.error.message} — retrying alone`
+    );
+    try {
+      apply(f.slot, await extractDataType(connection, t.name, t.category));
+      recovered++;
+    } catch (e) {
+      unresolved.push({ name: t.name, category: t.category, reason: (e as Error).message });
+    }
+  }
+
+  if (unresolved.length > 0) {
+    const listed = unresolved
+      .map(u => `  ${u.name} (${u.category}): ${u.reason}`)
+      .join('\n');
+    throw new Error(
+      `${unresolved.length} data type(s) have no members because their detail fetch ` +
+      `never landed. Their members are unknown, not absent, and emitting them would ` +
+      `produce a type that compiles and then fails at every access:\n${listed}`
+    );
+  }
+
+  return { fetched, recovered };
 }
 
 /**
@@ -133,7 +232,10 @@ export async function extractStructures(
   // Filter to structures and get details
   for (const type of types) {
     if (type.kind === 'STRUCTURE') {
-      const detail = await extractDataType(connection, type.name, type.category);
+      // A convenience helper, not the pipeline: a type it cannot read is skipped
+      // rather than fatal. `hydrateDataTypeDetails` is the one that must not.
+      const detail = await extractDataType(connection, type.name, type.category)
+        .catch(() => null);
       if (detail && detail.kind === 'STRUCTURE') {
         allTypes.push(detail as ExtractedStruct);
       }
@@ -154,7 +256,8 @@ export async function extractEnums(
   const enums: ExtractedEnum[] = [];
   for (const type of types) {
     if (type.kind === 'ENUM') {
-      const detail = await extractDataType(connection, type.name, type.category);
+      const detail = await extractDataType(connection, type.name, type.category)
+        .catch(() => null);
       if (detail && detail.kind === 'ENUM') {
         enums.push(detail as ExtractedEnum);
       }
@@ -185,7 +288,11 @@ function mapDataTypeInfo(info: GhidraDataTypeInfo): ExtractedDataType {
 
   // A shallow listing entry carries no detail arrays. Seed empty ones per kind
   // so a type whose detail fetch is later skipped/fails never reaches codegen
-  // with an undefined fields/values/parameters array.
+  // with an undefined fields/values/parameters array. The empty array is a
+  // crash guard and nothing more, so mark the entry: until the detail lands,
+  // "no members" means "not known yet".
+  if (DETAIL_KINDS.has(base.kind)) base.detailUnavailable = true;
+
   if (base.kind === 'STRUCTURE' || base.kind === 'UNION') {
     return { ...base, fields: [] } as ExtractedStruct | ExtractedUnion;
   }

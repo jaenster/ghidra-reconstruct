@@ -7,10 +7,10 @@ import assert from 'node:assert';
 import { parse } from '../../../parser/index.js';
 import { emit } from '../../../emit/index.js';
 import type { AnyNode } from '../../../ast/nodes.js';
-import { funcPtrLiteralPlugin, type FuncPtrLiteralOptions } from '../builtins/func-ptr-literal.js';
+import { funcPtrLiteralPlugin, type FuncPtrLiteralOptions, type FuncPtrTarget } from '../builtins/func-ptr-literal.js';
 
 describe('funcPtrLiteralPlugin', () => {
-  function transformCode(code: string, addressMap: Map<bigint, string>): string {
+  function transformCode(code: string, addressMap: Map<bigint, FuncPtrTarget>): string {
     const ast = parse(code);
     const opts: FuncPtrLiteralOptions = { functionAddressMap: addressMap };
     const transformer = funcPtrLiteralPlugin.createTransformer(opts);
@@ -18,11 +18,11 @@ describe('funcPtrLiteralPlugin', () => {
     return emit(result as AnyNode).trim();
   }
 
-  const testMap = new Map<bigint, string>([
-    [0x5011f0n, 'D2WINBUTTON_HandleFormMouseEvent'],
-    [0xcd40n, 'SBMP_ValidateTGAHeader'],
-    [0x1ad80n, 'SNET_InsertConnectionNode'],
-    [0x400100n, 'SomeFunc'],
+  const testMap = new Map<bigint, FuncPtrTarget>([
+    [0x5011f0n, { name: 'D2WINBUTTON_HandleFormMouseEvent' }],
+    [0xcd40n, { name: 'SBMP_ValidateTGAHeader' }],
+    [0x1ad80n, { name: 'SNET_InsertConnectionNode' }],
+    [0x400100n, { name: 'SomeFunc' }],
   ]);
 
   describe('valid function pointer replacements', () => {
@@ -106,11 +106,59 @@ describe('funcPtrLiteralPlugin', () => {
     });
   });
 
+  describe('the namespace the function is defined in', () => {
+    const scoped = new Map<bigint, FuncPtrTarget>([
+      [0x5f1380n, { name: 'MONSTERAI_FindFallenForRevival', namespaceSegments: ['D2Game', 'Monster', 'AI'] }],
+      [0xcd40n, { name: 'SBMP_ValidateTGAHeader', namespaceSegments: [] }],
+    ]);
+
+    it('spells the reference with the qualifier of the definition', () => {
+      const input = `void foo() { int fp = 0x5f1380; }`;
+      const output = transformCode(input, scoped);
+      assert.ok(
+        output.includes('D2Game::Monster::AI::MONSTERAI_FindFallenForRevival'),
+        `Expected the qualified reference in: ${output}`
+      );
+    });
+
+    it('leaves a root-scope function bare', () => {
+      const input = `void foo() { int fp = 0xcd40; }`;
+      const output = transformCode(input, scoped);
+      assert.ok(output.includes('SBMP_ValidateTGAHeader'), `Expected the name in: ${output}`);
+      assert.ok(!output.includes('::'), `Expected no qualifier in: ${output}`);
+    });
+
+    it('still reverts a qualified replacement used as an arithmetic operand', () => {
+      const input = `void foo(int base) { int x = base + 0x5f1380; }`;
+      const output = transformCode(input, scoped);
+      assert.ok(!output.includes('MONSTERAI_FindFallenForRevival'), `Should NOT replace arithmetic operand in: ${output}`);
+      assert.ok(output.includes('0x5f1380'), `Should keep hex literal in: ${output}`);
+    });
+  });
+
   describe('no address map', () => {
     it('should not transform anything with empty map', () => {
       const input = `void foo() { int x = 0x5011f0; }`;
       const output = transformCode(input, new Map());
       assert.ok(output.includes('0x5011f0'), `Should keep original: ${output}`);
     });
+  });
+});
+
+describe('funcPtrLiteralPlugin — pipeline position', () => {
+  it('runs before the two passes that cast a function designator into its slot', async () => {
+    const { funcdefCastCollapsePlugin } = await import('../builtins/funcdef-cast-collapse.js');
+    const { funcPtrArgCastPlugin } = await import('../builtins/funcptr-arg-cast.js');
+    const { sbbBranchlessPlugin } = await import('../builtins/sbb-branchless.js');
+    const { signedLiteralPlugin } = await import('../builtins/signed-literal.js');
+
+    // Those two can only recognise a function reference once the address has
+    // become a designator; at 95 the arm of a branchless-select ternary was
+    // still a bare literal when they ran, so it came out uncast.
+    assert.ok(funcPtrLiteralPlugin.priority < funcdefCastCollapsePlugin.priority);
+    assert.ok(funcPtrLiteralPlugin.priority < funcPtrArgCastPlugin.priority);
+    // The constraints it has always had still hold.
+    assert.ok(funcPtrLiteralPlugin.priority > sbbBranchlessPlugin.priority);
+    assert.ok(funcPtrLiteralPlugin.priority > signedLiteralPlugin.priority);
   });
 });

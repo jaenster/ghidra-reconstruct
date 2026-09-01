@@ -77,8 +77,9 @@ export function processCleanupTailInlining(
   labels: Map<string, LabelInfo>,
   gotoCounts: Map<string, number>,
   options: RequiredGotoCleanupOptions,
-  // True only when this compound is the function body (see processCompound).
-  fallthroughMeansReturn = true,
+  // True only when falling off the end of this compound reaches the function's
+  // implicit `return;` (see processCompound).
+  fallthroughMeansReturn = false,
 ): Statement[] | null {
   // Process labels from last to first (so removal doesn't shift earlier indices)
   const labelEntries = [...labels.values()].sort((a, b) => b.index - a.index);
@@ -94,16 +95,17 @@ export function processCleanupTailInlining(
     if (labelInfo.kind !== 'exit-return' && labelInfo.kind !== 'cleanup-return'
         && labelInfo.kind !== 'exit-noreturn' && labelInfo.kind !== 'cleanup-fallthrough') continue;
 
-    // A cleanup-fallthrough label only reaches the function's implicit return when it
-    // lives in the function body. Inside a loop/switch body, fallthrough continues the
-    // loop / next case, so a fabricated return is wrong.
+    // A cleanup-fallthrough label only reaches the function's implicit return when its
+    // fallthrough point is the tail of a void function body. Anywhere else — a loop or
+    // switch body, an if/else branch, a non-void function — fallthrough continues into
+    // code that may still compute and return a value.
     //  - If the tail self-terminates (ends in break/return/continue/goto, e.g. a switch
     //    case ending in `break`), inline it AS-IS without fabricating a return.
-    //  - Otherwise the tail can fall through (e.g. a loop-continue increment): inlining it
-    //    would both lose the loop-continue and duplicate the real label's code. Preserve
-    //    the goto un-inlined — the safe default.
-    const inLoopOrSwitchBody = labelInfo.kind === 'cleanup-fallthrough' && !fallthroughMeansReturn;
-    if (inLoopOrSwitchBody && canFallThrough(tail[tail.length - 1])) continue;
+    //  - Otherwise the tail can fall through: inlining it would silently drop everything
+    //    the fallthrough would have run next, including the function's real return.
+    //    Preserve the goto un-inlined — the safe default.
+    const noImplicitReturn = labelInfo.kind === 'cleanup-fallthrough' && !fallthroughMeansReturn;
+    if (noImplicitReturn && canFallThrough(tail[tail.length - 1])) continue;
 
     // Check tail doesn't contain gotos/labels that escape the tail.
     // Self-contained tails (all gotos target labels within the tail) are allowed.
@@ -119,7 +121,7 @@ export function processCleanupTailInlining(
     if (hasEscapingGoto) continue;
 
     // Try to inline all gotos to this label
-    const result = inlineAllGotosToLabel(stmts, labelInfo.name, tail, labelInfo.index, labelInfo.kind, inLoopOrSwitchBody);
+    const result = inlineAllGotosToLabel(stmts, labelInfo.name, tail, labelInfo.index, labelInfo.kind, noImplicitReturn);
     if (result) return result;
   }
 
@@ -136,14 +138,16 @@ function inlineAllGotosToLabel(
   tail: Statement[],
   labelIndex: number,
   kind: LabelKind,
-  // True when this is a cleanup-fallthrough label inside a loop/switch body whose tail
+  // True when this cleanup-fallthrough label's fallthrough point is not the function's
+  // implicit return (loop/switch body, if/else branch, non-void function) and its tail
   // self-terminates: inline the tail AS-IS, never fabricate a function-level return.
   suppressFabricatedReturn = false,
 ): Statement[] | null {
   // For cleanup-fallthrough, build a tail with explicit return appended
   // for use in nested contexts (where fallthrough doesn't mean "end of function").
-  // In a loop/switch body the tail already self-terminates (break/return) — appending
-  // a return would be wrong, so inline it unchanged.
+  // When the fallthrough point isn't the function's implicit return the tail already
+  // self-terminates (break/return) — appending a return would be wrong, so inline
+  // it unchanged.
   const tailWithReturn = (kind === 'cleanup-fallthrough' && !suppressFabricatedReturn)
     ? [...tail, createReturnStmt(tail[tail.length - 1])]
     : tail;

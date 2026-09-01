@@ -96,6 +96,24 @@ describe('underscore storage-slot local synthesis', () => {
     );
   });
 
+  it('synthesizes `_bResult` even when it only appears in `return _bResult;`', () => {
+    // `return _bResult;` must not be misread as a declaration (type=`return`,
+    // name=`_bResult`) — that would mark `_bResult` as already-declared and
+    // suppress the synthesized slot decl, leaving an undeclared identifier.
+    const func = makeFunc('ReturnsSlot', '0x00400040', [],
+      'uint32_t ReturnsSlot(void) {\n' +
+      '    bool bResult;\n' +
+      '    _bResult = 1;\n' +
+      '    return _bResult;\n' +
+      '}'
+    );
+    const impl = generateImplementation('m', [func], undefined, 'm.h', options, {});
+    assert.ok(
+      /\b_bResult\s*;/.test(impl),
+      `Expected a '_bResult;' decl in:\n${impl}`
+    );
+  });
+
   it('does NOT synthesize a local decl for `_DAT_*` globals', () => {
     const func = makeFunc('UsesGlobal', '0x00400020', [],
       'void UsesGlobal(void) {\n' +

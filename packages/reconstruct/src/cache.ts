@@ -3,6 +3,16 @@
  *
  * Caches transformed pseudocode based on a hash of the raw decompiled output.
  * If the decompiled code hasn't changed, we can skip re-running the transform pipeline.
+ *
+ * NOT the codegen fast loop, and not wired into any run script. `FunctionCache`
+ * only short-circuits the transform pass for one function at a time, and still
+ * needs a live daemon and a full extraction to get there; its `cacheDir` is
+ * opt-in via the `cache` option that no entry point passes. It stays for API
+ * consumers of `analyze()` / `extractAll()` who want it.
+ *
+ * To iterate on CODEGEN without re-extracting, use the extraction snapshot in
+ * ./snapshot.ts (`run.ts --codegen-only`) — it replaces daemon, extraction AND
+ * analysis, which is where the ~20 minutes actually goes.
  */
 
 import { createHash } from 'crypto';

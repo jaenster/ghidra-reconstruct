@@ -161,6 +161,14 @@ export function getOrCreateRegistry(
 // Auto-detect method conversions from tags
 // =============================================================================
 
+/** True when a parameter dataType string is a pointer-to-pointer (`T**`) or
+ *  deeper — counts trailing `*` tokens, ignoring whitespace. */
+function isDoublePointerType(dataType: string | undefined): boolean {
+  if (!dataType) return false;
+  const stars = (dataType.match(/\*/g) ?? []).length;
+  return stars >= 2;
+}
+
 /**
  * Detect method conversions from structured tags on functions.
  * Returns MethodConversionEntry[] that can be added to the registry.
@@ -182,11 +190,29 @@ export function detectMethodConversionsFromTags(
       const className = getMethodClassName(tag);
       if (!className) continue;
 
+      // A real method's receiver is a single pointer (`this` is `T* const`). If
+      // the would-be `this` param is a DOUBLE pointer (`T**`), the function is not
+      // a method — it operates on a pointer SLOT (e.g. ReturnMonsterRegionEntryForLevel
+      // (D2MonsterRegionStrc** ppRegion, ...)). Converting its call sites to
+      // `recv->Method(...)` then dereferences one level too few and emits a member
+      // access on a pointer ("...which is of pointer type 'T*'"). Leave it a free call.
+      const isStatic = isStaticMethodTag(tag);
+      if (!isStatic && isDoublePointerType(func.parameters?.[0]?.dataType)) break;
+
+      // Quest state-machine handlers are tagged `method, D2QuestDataStrc` but are
+      // NOT methods — they're stored in fn-ptr tables (fpQuestStateHandler[],
+      // init-data, filters) and referenced by their namespace-qualified name
+      // (D2Game::Quests::A2Q0::Q08_Callback_11). Method-converting them makes a
+      // quest unit "all-methods", which DROPS its namespace wrapper, so those
+      // qualified fn-ptr references then fail ("not a member of ...::A2Q0").
+      // Leave them as free namespaced functions.
+      if (className === 'D2QuestDataStrc') break;
+
       entries.push({
         address: func.address,
         className,
         methodName: func.name,
-        thisParam: isStaticMethodTag(tag) ? -1 : 0,
+        thisParam: isStatic ? -1 : 0,
       });
       break; // Only one method tag per function
     }
