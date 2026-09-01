@@ -491,6 +491,14 @@ export interface ImplGenContext {
   methodMappings?: Record<string, MethodCallMapping>;
   /** Analyzed globals for static-local injection into function bodies */
   analyzedGlobals?: AnalyzedDataSymbol[];
+  /**
+   * Where the program is mapped, as Ghidra reports it (`ProgramInfo.imageBase`,
+   * hex, e.g. `"00400000"`). `global-address-literal` uses it as the floor below
+   * which an "address" is not one: a symbol under the base is a Ghidra
+   * placeholder, and the literal matching it is a size or a count — `0x30000`
+   * clears the 64KB platform reserve and is still a byte count.
+   */
+  imageBase?: string;
   /** File-local globals for the current impl file */
   fileLocalGlobals?: AnalyzedDataSymbol[];
   /** Struct/union/enum names, for the qualified-name cleanup on reference sites. */
@@ -2173,6 +2181,11 @@ function transformDecompiledCode(
       perPluginOptions['global-address-literal'] = {
         globalAddresses: context.funcPtrArgCasts.globalAddresses,
         globalSizes: context.funcPtrArgCasts.globalSizes,
+        imageBase: context.imageBase,
+        // `&global` is pointer-typed and does not convert to an integer return.
+        // The body is parsed without its signature, so the AST cannot show the
+        // return type — same fact, same source as `nullptr-cleanup` below.
+        enclosingReturnsNonPointer: enclosing?.returnsNonPointer === true,
       };
       perPluginOptions['assign-cast'] = {
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,

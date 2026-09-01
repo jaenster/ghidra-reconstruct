@@ -64,15 +64,37 @@
  * A negation is the one arithmetic shape the pass DOES claim, because it is not
  * arithmetic on an address at all: the emitter's `-7373669` is how a
  * top-bit-set word prints, not a subtraction anyone wrote.
+ *
+ * **A compound assignment is arithmetic.** `x |= 0x800000` reads an operand,
+ * combines it and stores the result, which is the binary operator with the store
+ * folded in; `0x800000` there is a flag bit that happens to collide with a
+ * global's base. It is a different AST node (`AssignExpr`) from the binary
+ * operators, so it needs its own revert. Plain `=` is deliberately NOT in that
+ * set: an address assigned into a slot is exactly the case the pass exists for.
+ *
+ * **A pointer form only stands where a pointer is wanted.** `&name` and
+ * `(char*)&name + n` are pointer-typed; `~(uintptr_t)<form>` is not, which is
+ * why the Storm anchors survive being assigned into an `int32_t` field. Where
+ * the caller can say the enclosing function returns a non-pointer, a direct
+ * form reached from `return` is withdrawn — the return value is the one context
+ * whose type the body's AST cannot show, and the same signal already drives
+ * `nullptr-cleanup`'s `zeroForReturnedNullptr`. Nothing else is judged: the pass
+ * has no type inference, and guessing at an integral context would cost more
+ * than the constants it would save.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
 import { Expr, Type } from '../../../ast/factory.js';
 import type {
   ASTNode,
+  AssignExpr,
   BinaryExpr,
+  CommaExpr,
+  ConditionalExpr,
   Expression,
   IntegerLiteralExpr,
+  ParenExpr,
+  ReturnStmt,
   UnaryExpr,
 } from '../../../ast/nodes.js';
 import { createTransformer, type Transformer } from '../../transformer.js';
@@ -81,13 +103,27 @@ import type { TransformPlugin, PluginOptions } from '../types.js';
 // Operators where an integer literal is a numeric operand, not an address
 const ARITHMETIC_OPS = new Set(['+', '-', '*', '/', '%', '&', '|', '^', '<<', '>>']);
 
+/**
+ * The same reasoning as `ARITHMETIC_OPS`, one node kind over.
+ *
+ * `x |= 0x800000` is the binary operator with its store folded in, so its right
+ * operand is as likely a mask, a size or a flag bit as it is an address — and it
+ * parses to `AssignExpr`, which `visitBinaryExpr` never sees. Plain `=` is
+ * excluded on purpose: that is the assignment of an address to a slot, the case
+ * the pass was written for.
+ */
+const COMPOUND_ASSIGN_OPS = new Set([
+  '+=', '-=', '*=', '/=', '%=', '&=', '|=', '^=', '<<=', '>>=',
+]);
+
 /** `~address` of a 32-bit image address always lands above this. */
 const COMPLEMENT_FLOOR = 0xff000000;
 
 const WORD = 0x100000000;
 
 /**
- * Below this, an "address" is not one.
+ * The floor of last resort: a Win32 process reserves the first 64KB and never
+ * maps an image there, so nothing real can live below it.
  *
  * Ghidra manufactures a data symbol wherever it sees a reference it cannot
  * resolve, so the symbol table carries `DAT_00000000`, `DAT_00000001`,
@@ -96,11 +132,49 @@ const WORD = 0x100000000;
  * and `2` in the program an address: the first run of this pass rewrote
  * `pdwParam[1]` to `pdwParam[&DAT_00000001]` and failed 394 of 505 files.
  *
- * A Win32 process reserves the first 64KB and never maps an image there, so no
- * global can live below it. The bound is a property of the platform rather than
- * of this binary, which is why it is a constant here and not a configured base.
+ * This is only the fallback. THE FLOOR IS THE IMAGE BASE — see
+ * `effectiveAddressFloor`. 64KB is a platform truth but a weak one: `0x30000`
+ * clears it and is still a byte count, not an address, because this image is
+ * mapped at 0x400000 and Ghidra has a placeholder `DAT_00030000` sitting where
+ * nothing is loaded. `memcpy(&gPaletteAct1, src, 0x30000)` came out of the tree
+ * as `memcpy(&gPaletteAct1, src, &DAT_00030000)`.
  */
 const ADDRESS_FLOOR = 0x10000;
+
+/**
+ * The image base as the candidate floor, or null when the caller gave none.
+ *
+ * Ghidra reports it as hex, sometimes bare (`"00400000"`) and sometimes prefixed
+ * (`"0x400000"`); a bare string read as decimal would be off by orders of
+ * magnitude, so it is ALWAYS base 16. A caller that has already parsed it may
+ * pass the number.
+ *
+ * An unusable value returns null rather than throwing: the pass then runs on the
+ * 64KB fallback, which is what it did before the base was plumbed through. A
+ * degraded floor costs unresolved constants; a dead pass costs the anchors.
+ */
+function parseImageBase(raw: string | number | undefined): number | null {
+  const value = typeof raw === 'number'
+    ? raw
+    : typeof raw === 'string' && /^\s*(0x)?[0-9a-f]+\s*$/i.test(raw)
+      ? Number.parseInt(raw.trim().replace(/^0x/i, ''), 16)
+      : NaN;
+  if (!Number.isSafeInteger(value) || value <= 0 || value >= ADDRESS_CEILING) return null;
+  return value;
+}
+
+/**
+ * Where this image is actually mapped, never below the platform reserve.
+ *
+ * The base raises the floor; it may not lower it below 64KB. A base that small
+ * would not be one — and readmitting `DAT_00000001` is the failure that cost 394
+ * files, whereas a floor a little too high only leaves a constant unresolved,
+ * which is the cheap failure this pass takes everywhere else.
+ */
+function effectiveAddressFloor(imageBase: string | number | undefined): number {
+  const base = parseImageBase(imageBase);
+  return base === null ? ADDRESS_FLOOR : Math.max(base, ADDRESS_FLOOR);
+}
 
 /**
  * At or above this, an "address" is not one either.
@@ -191,10 +265,12 @@ function createGlobalAddressLiteralTransformer(
 ): Transformer {
   const addresses = options.globalAddresses ?? {};
   const sizes = options.globalSizes ?? {};
+  const floor = effectiveAddressFloor(options.imageBase);
+  const returnsNonPointer = options.enclosingReturnsNonPointer === true;
 
   const candidates: Candidate[] = [];
   for (const [name, address] of Object.entries(addresses)) {
-    if (!Number.isSafeInteger(address) || address < ADDRESS_FLOOR || address >= ADDRESS_CEILING) {
+    if (!Number.isSafeInteger(address) || address < floor || address >= ADDRESS_CEILING) {
       continue;
     }
     const size = sizes[name];
@@ -214,13 +290,23 @@ function createGlobalAddressLiteralTransformer(
    */
   const produced = new Map<ASTNode, ASTNode>();
 
+  /**
+   * The subset of `produced` whose replacement is POINTER-typed — `&name` and
+   * `(char*)&name + n`. The complement form is not in here: `~(uintptr_t)...` is
+   * an integer expression, and the anchor initialisers that assign it into an
+   * `int32_t` field depend on its staying one.
+   */
+  const pointerForms = new Set<ASTNode>();
+
   /** The literal `v`, or its complement, spelled through whichever global owns it. */
-  function resolve(v: number): Expression | null {
+  function resolve(v: number): { form: Expression; pointer: boolean } | null {
     const direct = ownerOf(v, candidates);
-    if (direct) return anchoredAddress(direct);
+    if (direct) return { form: anchoredAddress(direct), pointer: true };
     if (v < COMPLEMENT_FLOOR) return null;
     const flipped = ownerOf((~v) >>> 0, candidates);
-    return flipped ? complemented(anchoredAddress(flipped)) : null;
+    return flipped
+      ? { form: complemented(anchoredAddress(flipped)), pointer: false }
+      : null;
   }
 
   /** Carry the original node's trivia onto the replacement that stands in for it. */
@@ -241,20 +327,95 @@ function createGlobalAddressLiteralTransformer(
       : null;
   }
 
+  /** Restore whichever of a two-operand node's operands this pass replaced. */
+  function withOperandsRestored<N extends { left: Expression; right: Expression }>(
+    node: N,
+  ): N | undefined {
+    const left = produced.get(node.left);
+    const right = produced.get(node.right);
+    if (!left && !right) return undefined;
+    return {
+      ...node,
+      left: (left ?? node.left) as Expression,
+      right: (right ?? node.right) as Expression,
+    };
+  }
+
+  /**
+   * The value positions of `expr` — where a subexpression IS the value the whole
+   * expression yields, so its type has to be the type the context demands. A
+   * ternary hands over both its branches; a comma its last operand; a paren its
+   * contents. A cast is where the walk stops: the cast is itself the conversion,
+   * so a pointer form under one is already legal.
+   */
+  function restorePointerForms(expr: Expression): Expression | null {
+    const original = pointerForms.has(expr) ? produced.get(expr) : undefined;
+    if (original) return original as Expression;
+
+    switch (expr.kind) {
+      case NodeKind.ParenExpr: {
+        const paren = expr as ParenExpr;
+        const inner = restorePointerForms(paren.expression);
+        return inner ? { ...paren, expression: inner } : null;
+      }
+      case NodeKind.ConditionalExpr: {
+        const cond = expr as ConditionalExpr;
+        const then = restorePointerForms(cond.thenExpr);
+        const other = restorePointerForms(cond.elseExpr);
+        if (!then && !other) return null;
+        return { ...cond, thenExpr: then ?? cond.thenExpr, elseExpr: other ?? cond.elseExpr };
+      }
+      case NodeKind.CommaExpr: {
+        const comma = expr as CommaExpr;
+        const last = comma.expressions[comma.expressions.length - 1];
+        if (!last) return null;
+        const restored = restorePointerForms(last);
+        if (!restored) return null;
+        return {
+          ...comma,
+          expressions: [...comma.expressions.slice(0, -1), restored],
+        };
+      }
+      default:
+        return null;
+    }
+  }
+
   return createTransformer({
     // Bottom-up: a literal is visited before the expression that contains it.
     visitNode(node: ASTNode) {
+      // `x |= 0x800000` is arithmetic with a store folded in, but it is an
+      // AssignExpr, so `visitBinaryExpr` never sees it. There is no
+      // `visitAssignExpr` on the visitor either — the catch-all is where the
+      // kind arrives.
+      if (node.kind === NodeKind.AssignExpr) {
+        const assign = node as AssignExpr;
+        if (!COMPOUND_ASSIGN_OPS.has(assign.operator)) return undefined;
+        return withOperandsRestored(assign);
+      }
+
       if (node.kind !== NodeKind.IntegerLiteral) return undefined;
 
       const literal = node as IntegerLiteralExpr;
       if (literal.value < 0n || literal.value >= BigInt(WORD)) return undefined;
 
-      const form = resolve(Number(literal.value));
-      if (!form) return undefined;
+      const resolved = resolve(Number(literal.value));
+      if (!resolved) return undefined;
 
-      const ref = replacing(literal, form);
+      const ref = replacing(literal, resolved.form);
       produced.set(ref, literal);
+      if (resolved.pointer) pointerForms.add(ref);
       return ref;
+    },
+
+    // The return value's type is the one fact a body parsed on its own cannot
+    // show, so the caller states it. `&name` and `(char*)&name + n` are pointers
+    // and do not convert to a `uint32_t` return; `~(uintptr_t)...` already is an
+    // integer and stays.
+    visitReturnStmt(node: ReturnStmt) {
+      if (!returnsNonPointer || !node.value) return undefined;
+      const restored = restorePointerForms(node.value);
+      return restored ? { ...node, value: restored } : undefined;
     },
 
     // `-7373669` is one folded word, not a subtraction: reduce the negation and
@@ -268,15 +429,16 @@ function createGlobalAddressLiteralTransformer(
       if (literal.value <= 0n || literal.value > BigInt(WORD)) return undefined;
 
       const restored: UnaryExpr = { ...node, operand: literal };
-      const form = resolve((WORD - Number(literal.value)) >>> 0);
-      if (!form) {
+      const resolved = resolve((WORD - Number(literal.value)) >>> 0);
+      if (!resolved) {
         // No match for the negated word — put back whatever the magnitude alone
         // matched, so the number reads as the number it is.
         return produced.has(node.operand) ? restored : undefined;
       }
 
-      const ref = replacing(node, form);
+      const ref = replacing(node, resolved.form);
       produced.set(ref, restored);
+      if (resolved.pointer) pointerForms.add(ref);
       return ref;
     },
 
@@ -284,16 +446,7 @@ function createGlobalAddressLiteralTransformer(
     // factor, so a replacement under an arithmetic operator is withdrawn.
     visitBinaryExpr(node: BinaryExpr) {
       if (!ARITHMETIC_OPS.has(node.operator)) return undefined;
-
-      const left = produced.get(node.left);
-      const right = produced.get(node.right);
-      if (!left && !right) return undefined;
-
-      return {
-        ...node,
-        left: (left ?? node.left) as Expression,
-        right: (right ?? node.right) as Expression,
-      };
+      return withOperandsRestored(node);
     },
   });
 }
@@ -312,6 +465,25 @@ export interface GlobalAddressLiteralOptions extends PluginOptions {
    * distance to the next symbol would invent storage the global does not own.
    */
   globalSizes?: Record<string, number>;
+  /**
+   * Where the program is mapped, as Ghidra's `ProgramInfo.imageBase` reports it
+   * — hex, with or without an `0x` prefix, or already parsed to a number.
+   *
+   * This is the candidate floor. A symbol below the base is not a global: it is
+   * a Ghidra placeholder standing where a reference could not be resolved, and
+   * the literal that "matches" it is a size or a count. Absent or unparseable,
+   * the pass falls back to the 64KB platform reserve and still runs.
+   */
+  imageBase?: string | number;
+  /**
+   * True when the enclosing function's return type is not a pointer.
+   *
+   * The body is parsed on its own, so the AST cannot show the return type; the
+   * caller has it. Only the pointer-typed forms are affected — a `return` of
+   * `&name` in a `uint32_t` function does not compile, while the complement form
+   * is an integer and is left alone. Omitted, no return is judged.
+   */
+  enclosingReturnsNonPointer?: boolean;
 }
 
 export const globalAddressLiteralPlugin: TransformPlugin = {

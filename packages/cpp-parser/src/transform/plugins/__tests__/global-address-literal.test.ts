@@ -67,6 +67,16 @@ describe('globalAddressLiteralPlugin', () => {
       }
     });
 
+    it('still resolves with the real image base in play', () => {
+      // The floor moved from a platform constant to the mapped base; the anchor
+      // the whole pass exists for has to survive that.
+      const out = run(`void f() { x = (void*)-7373669; }`, { ...STORM, imageBase: '0x400000' });
+      assert.ok(
+        out.includes('~(uintptr_t)((char*)&gSFileAsyncReqQueue + 4)'),
+        `Expected the anchored complement in: ${out}`,
+      );
+    });
+
     it('resolves the same value written as an unsigned hex literal', () => {
       const out = run(`void f() { x = (void*)0xff8f7c9b; }`, STORM);
       assert.ok(
@@ -235,6 +245,145 @@ describe('globalAddressLiteralPlugin', () => {
       const out = run(`void f() { p = (void*)-7373669; }`, opts);
       assert.ok(out.includes('~(uintptr_t)'), `Complement must resolve: ${out}`);
       assert.ok(out.includes('gAnchor'), `Complement must name the global: ${out}`);
+    });
+  });
+
+  describe('compound assignment is arithmetic too', () => {
+    // `dwParam2->eRoomExFlags |= 0x800000` — a flag bit that collides with a
+    // real global's base. `|=` is an AssignExpr, not a BinaryExpr, so the
+    // arithmetic revert never saw it and 14 sites in the tree came out as
+    // `|= &D2PoolManagerStrc_00800000`.
+    const FLAGS: GlobalAddressLiteralOptions = {
+      globalAddresses: { D2PoolManagerStrc_00800000: 0x800000, gThing: 0x500100 },
+      globalSizes: { D2PoolManagerStrc_00800000: 4, gThing: 12 },
+    };
+
+    it('reverts a match under |=', () => {
+      const out = run(`void f(S* p) { p->eRoomExFlags |= 0x800000; }`, FLAGS);
+      assert.ok(out.includes('0x800000'), `Flag bit must stay a literal: ${out}`);
+      assert.ok(!out.includes('D2PoolManagerStrc'), `Must not name a global: ${out}`);
+    });
+
+    it('reverts a match under every compound operator', () => {
+      for (const op of ['|=', '&=', '^=', '+=', '-=', '*=', '/=', '%=', '<<=', '>>=']) {
+        const out = run(`void f() { n ${op} 0x500100; }`, FLAGS);
+        assert.ok(out.includes('0x500100'), `${op} must keep the literal: ${out}`);
+        assert.ok(!out.includes('&gThing'), `${op} must not resolve: ${out}`);
+      }
+    });
+
+    it('reverts the folded complement under a compound operator too', () => {
+      const out = run(`void f() { n |= -7373669; }`, STORM);
+      assert.ok(out.includes('7373669'), `Must keep the folded word: ${out}`);
+      assert.ok(!out.includes('gSFileAsyncReqQueue'), `Must not name a global: ${out}`);
+    });
+
+    it('still resolves a plain assignment, which is the wanted case', () => {
+      const out = run(`void f() { p = 0x500100; }`, FLAGS);
+      assert.ok(out.includes('&gThing'), `Plain = must still resolve: ${out}`);
+    });
+  });
+
+  describe('the floor is the mapped image base', () => {
+    // `memcpy(&gPaletteAct1, ..., 0x30000)` is a byte count. It clears the 64KB
+    // platform reserve, but it sits far below where this image is mapped — and
+    // Ghidra has a placeholder `DAT_00030000` sitting exactly there.
+    const BELOW_BASE: GlobalAddressLiteralOptions = {
+      globalAddresses: { DAT_00030000: 0x30000, gReal: 0x500100 },
+      globalSizes: { DAT_00030000: 4, gReal: 12 },
+      imageBase: '00400000',
+    };
+
+    it('ignores a candidate below the mapped base', () => {
+      const out = run(`void f() { memcpy(a, b, 0x30000); }`, BELOW_BASE);
+      assert.ok(out.includes('0x30000'), `Byte count must stay a literal: ${out}`);
+      assert.ok(!out.includes('DAT_00030000'), `Must not name a placeholder: ${out}`);
+    });
+
+    it('still resolves a candidate above the mapped base', () => {
+      assert.ok(run(`void f() { p = 0x500100; }`, BELOW_BASE).includes('&gReal'));
+    });
+
+    it('reads the base whether or not it carries an 0x prefix', () => {
+      for (const spelling of ['00400000', '0x400000', '0X400000', ' 400000 ']) {
+        const out = run(`void f() { n = 0x30000; }`, { ...BELOW_BASE, imageBase: spelling });
+        assert.ok(!out.includes('DAT_00030000'), `${spelling} must raise the floor: ${out}`);
+        assert.ok(
+          run(`void f() { p = 0x500100; }`, { ...BELOW_BASE, imageBase: spelling }).includes('&gReal'),
+          `${spelling} must not block a real global`,
+        );
+      }
+    });
+
+    it('accepts a numeric base as well as a spelled one', () => {
+      const out = run(`void f() { n = 0x30000; }`, { ...BELOW_BASE, imageBase: 0x400000 });
+      assert.ok(!out.includes('DAT_00030000'), `A numeric base must raise the floor: ${out}`);
+    });
+
+    it('falls back to the 64KB floor when the base is missing or unparseable', () => {
+      // Degrade, do not die: the pass still runs, just with the old bound.
+      for (const base of [undefined, '', 'nonsense', '0x0', 'zzzz'] as (string | undefined)[]) {
+        const out = run(`void f() { n = 0x30000; }`, { ...BELOW_BASE, imageBase: base });
+        assert.ok(out.includes('DAT_00030000'), `base ${base} should fall back: ${out}`);
+      }
+    });
+
+    it('never drops the floor below the platform 64KB reserve', () => {
+      const tiny: GlobalAddressLiteralOptions = {
+        globalAddresses: { DAT_00000001: 1, gHigh: 0x10000 },
+        globalSizes: { DAT_00000001: 1, gHigh: 4 },
+        imageBase: '0x100',
+      };
+      const out = run(`void f(uint32_t* p) { p[1] = 0; }`, tiny);
+      assert.ok(!out.includes('DAT_00000001'), `Sub-64KB must stay excluded: ${out}`);
+      assert.ok(run(`void f() { p = 0x10000; }`, tiny).includes('&gHigh'));
+    });
+  });
+
+  describe('a pointer form where an integer is required', () => {
+    // `uint32_t SFILE_GetGlobalPointer() { return gbInit ? &gbInit : 0; }` —
+    // the direct forms are pointer-typed and do not convert to the return type.
+    const RET: GlobalAddressLiteralOptions = { ...SIMPLE, enclosingReturnsNonPointer: true };
+
+    it('reverts a direct match returned from a non-pointer function', () => {
+      const out = run(`void f() { return 0x500100; }`, RET);
+      assert.ok(out.includes('0x500100'), `Should keep the literal in: ${out}`);
+      assert.ok(!out.includes('&gThing'), `A pointer cannot be returned as an int: ${out}`);
+    });
+
+    it('reverts through the branches of a returned ternary', () => {
+      const out = run(`void f() { return gFlag ? 0x500100 : 0; }`, RET);
+      assert.ok(out.includes('0x500100'), `Should keep the literal in: ${out}`);
+      assert.ok(!out.includes('&gThing'), `A ternary branch is the return value: ${out}`);
+    });
+
+    it('reverts an interior form the same way', () => {
+      const out = run(`void f() { return 0x500108; }`, RET);
+      assert.ok(out.includes('0x500108'), `Should keep the literal in: ${out}`);
+      assert.ok(!out.includes('gThing'), `Should not name a global in: ${out}`);
+    });
+
+    it('keeps the complement form, which is already integer-typed', () => {
+      // The Storm anchors assign into an int32_t field; `~(uintptr_t)...` is an
+      // integer expression and MUST survive an integral context.
+      const out = run(`void f() { return -7373669; }`, {
+        ...STORM,
+        enclosingReturnsNonPointer: true,
+      });
+      assert.ok(
+        out.includes('~(uintptr_t)((char*)&gSFileAsyncReqQueue + 4)'),
+        `The complement form must survive an integer return: ${out}`,
+      );
+    });
+
+    it('leaves a return through a cast alone — the cast is the conversion', () => {
+      const out = run(`void f() { return (uint32_t)0x500100; }`, RET);
+      assert.ok(out.includes('&gThing'), `A cast makes the pointer form legal: ${out}`);
+    });
+
+    it('resolves the same return when the enclosing function returns a pointer', () => {
+      const out = run(`void f() { return 0x500100; }`, SIMPLE);
+      assert.ok(out.includes('&gThing'), `A pointer return is the wanted case: ${out}`);
     });
   });
 });

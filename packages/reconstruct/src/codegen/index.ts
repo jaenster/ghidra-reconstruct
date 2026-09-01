@@ -456,6 +456,7 @@ export function generateProject(
     overrides,
     libraries,
     methodConversions,
+    imageBase: programInfo?.imageBase,
     methodMappings: Object.keys(mergedMappings).length > 0 ? mergedMappings : undefined,
     bitfieldCatalog: bitfieldCatalog.size > 0 ? bitfieldCatalog : undefined,
   };
