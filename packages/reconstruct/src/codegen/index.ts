@@ -59,7 +59,7 @@ import { generateReadme } from './readme.js';
 import { conventionKeyword } from './calling-convention.js';
 import { organizeByNamespace, getFilePath, setModuleNames, setNamespaceCollisionTypes, normalizeQualifiedReference } from './namespace.js';
 import { buildNamespaceResolution, namespaceResolution, renderNamespace } from './namespace-resolution.js';
-import { setInteriorLabelSymbols, resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, setDeclarationClosureDataContent, getDeclarationClosureReport, isUnreferenceableArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType } from './globals-header.js';
+import { setInteriorLabelSymbols, resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, setDeclarationClosureDataContent, getDeclarationClosureReport, isUnreferenceableArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType, emittedNamespaceOf } from './globals-header.js';
 import { harvestAnnotatedParameterTypes } from './win32-signatures.js';
 import { isPlatformOrBuiltinType, isLibraryType, generatePlatformHeader, arrayRowTypedefLines, arrayRowReturn, arrayRowSpelling, GHIDRA_PSEUDO_OP_RESULT_TYPES, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, platformDefinedFunctionNames, platformVoidPointerFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
 import { createOverrideRegistry } from '../overrides/index.js';
@@ -3789,6 +3789,59 @@ export function buildFuncPtrArgCastTables(
     globalSizes[name] = size;
   }
 
+  // Global name → the namespace segments its DEFINITION is emitted in. A literal
+  // address is folded into a body anywhere — a table in one module pointing into
+  // another module's data — so a reference resolved from one has to name the
+  // scope the global actually lives in, exactly as `func-ptr-literal` does for a
+  // function. Same source and same ambiguity rule as the address table.
+  //
+  // Two restrictions, both to keep this from ever making a reference WORSE than
+  // the bare name it replaces:
+  //
+  //  - only `scope === 'global'`. Those are the symbols `globals.h` emits
+  //    through `groupByEmittedNamespace`, so their emitted scope is the one this
+  //    helper reports. A file-local static, a static local and a
+  //    struct-colocated extern are written by other emitters into scopes those
+  //    emitters decide; a bare name is what they get, which is what they got
+  //    before this table existed.
+  //
+  //  - not a leading segment a root-scope entity of the same name can block.
+  //    `generateGlobalsHeader` folds such a segment away (`setUnopenableRootNames`)
+  //    and it has not run yet when this table is built, so the segment list here
+  //    could name a namespace the header never opens. Dropping those names costs
+  //    an unqualified reference; keeping them would cost an unresolvable one.
+  const globalNamespaces: Record<string, readonly string[]> = {};
+  {
+    const blockableLeadSegments = new Set<string>();
+    for (const dt of dataTypes) {
+      if (dt.kind === 'STRUCTURE' || dt.kind === 'UNION' || dt.kind === 'ENUM') {
+        if (dt.name) blockableLeadSegments.add(dt.name);
+      }
+    }
+    for (const g of globals) {
+      if (g.scope === 'global' && !g.namespace) {
+        const n = g.suggestedName || g.name;
+        if (n) blockableLeadSegments.add(n);
+      }
+    }
+    const ambiguous = new Set<string>();
+    for (const g of globals) {
+      const name = g.suggestedName || g.name;
+      if (!name || /[^A-Za-z0-9_]/.test(name)) continue;
+      if (ambiguous.has(name)) continue;
+      if (g.scope !== 'global') continue;
+      const segments = emittedNamespaceOf(g).segments;
+      if (segments.length > 0 && blockableLeadSegments.has(segments[0])) continue;
+      const existing = globalNamespaces[name];
+      if (existing !== undefined && existing.join('::') !== segments.join('::')) {
+        ambiguous.add(name);
+        delete globalNamespaces[name];
+        continue;
+      }
+      globalNamespaces[name] = [...segments];
+    }
+  }
+
   // Typedef name → the spelling it stands for. Windows and Ghidra both hide
   // indirection inside a name (`HACCEL` IS `HACCEL__ *`), so without this a
   // pointer stored into such a slot reads as an integer store and no cast is
@@ -3842,6 +3895,7 @@ export function buildFuncPtrArgCastTables(
     globalTypes,
     globalAddresses,
     globalSizes,
+    globalNamespaces,
     varArgFunctions: [...varArgFunctions],
     fieldTypes,
     typedefTargets,

@@ -688,6 +688,15 @@ export interface FuncPtrArgCastTables {
    * it does not own and anchor a store to the wrong object.
    */
   globalSizes?: Record<string, number>;
+  /**
+   * Global variable name (as emitted) → the namespace segments its DEFINITION is
+   * emitted in, empty for root scope. Read by `global-address-literal` so an
+   * address resolved to a global is spelled with the scope that global actually
+   * lives in — a literal address is folded into a body anywhere, and the bare
+   * name only resolves where the definition happens to be in scope. The same
+   * fact `func-ptr-literal` already carries for a function.
+   */
+  globalNamespaces?: Record<string, readonly string[]>;
   /** Callables with a `...` tail — arguments past the declared ones have no type */
   varArgFunctions?: string[];
   /** Field name → declared type, where every aggregate declaring it agrees */
@@ -2181,6 +2190,7 @@ function transformDecompiledCode(
       perPluginOptions['global-address-literal'] = {
         globalAddresses: context.funcPtrArgCasts.globalAddresses,
         globalSizes: context.funcPtrArgCasts.globalSizes,
+        globalNamespaces: context.funcPtrArgCasts.globalNamespaces,
         imageBase: context.imageBase,
         // `&global` is pointer-typed and does not convert to an integer return.
         // The body is parsed without its signature, so the AST cannot show the

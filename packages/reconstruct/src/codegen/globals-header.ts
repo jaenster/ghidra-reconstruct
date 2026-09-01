@@ -1143,15 +1143,30 @@ export function setUnopenableRootNames(names: ReadonlySet<string>): void {
   unopenableRootNames = names;
 }
 
+/**
+ * The namespace a data symbol is EMITTED in — the one derivation every grouping
+ * and every reference to it has to agree on.
+ *
+ * A system-library path (a macOS framework, `/usr/lib`) is not a namespace at
+ * all, and a leading segment the header cannot open at root scope is folded
+ * away; both are properties of the emitted file, not of Ghidra's model, which is
+ * why they live here and not in the resolution.
+ */
+export function emittedNamespaceOf(symbol: AnalyzedDataSymbol): ResolvedNamespace {
+  const resolution = namespaceResolution();
+  const root = resolution.resolvePath(undefined);
+  const raw = symbol.namespace;
+  const isSystemPath = !!raw && (raw.startsWith('/') || raw.includes('/usr/') || raw.includes('/lib/') || raw.startsWith('usr_lib_'));
+  const ns = isSystemPath ? root : resolution.of(symbol);
+  if (unopenableRootNames.size === 0 || ns.segments.length === 0) return ns;
+  let cut = 0;
+  while (cut < ns.segments.length && unopenableRootNames.has(ns.segments[cut])) cut++;
+  if (cut === 0) return ns;
+  return { ghidraSegments: ns.ghidraSegments, segments: ns.segments.slice(cut) };
+}
+
 export function groupByEmittedNamespace(symbols: AnalyzedDataSymbol[]): NamespaceGroup[] {
   const resolution = namespaceResolution();
-  const openable = (ns: ResolvedNamespace): ResolvedNamespace => {
-    if (unopenableRootNames.size === 0 || ns.segments.length === 0) return ns;
-    let cut = 0;
-    while (cut < ns.segments.length && unopenableRootNames.has(ns.segments[cut])) cut++;
-    if (cut === 0) return ns;
-    return { ghidraSegments: ns.ghidraSegments, segments: ns.segments.slice(cut) };
-  };
   const groups = new Map<string, NamespaceGroup>();
   const order: NamespaceGroup[] = [];
   const root = resolution.resolvePath(undefined);
@@ -1160,10 +1175,7 @@ export function groupByEmittedNamespace(symbols: AnalyzedDataSymbol[]): Namespac
   order.push(rootGroup);
 
   for (const symbol of symbols) {
-    // System-library paths (macOS frameworks, /usr/lib) are not namespaces.
-    const raw = symbol.namespace;
-    const isSystemPath = !!raw && (raw.startsWith('/') || raw.includes('/usr/') || raw.includes('/lib/') || raw.startsWith('usr_lib_'));
-    const resolved = openable(isSystemPath ? root : resolution.of(symbol));
+    const resolved = emittedNamespaceOf(symbol);
     const rendered = renderNamespace(resolved);
     const key = rendered ?? '';
     let group = groups.get(key);

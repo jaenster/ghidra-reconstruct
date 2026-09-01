@@ -11,6 +11,7 @@ import {
   globalAddressLiteralPlugin,
   type GlobalAddressLiteralOptions,
 } from '../builtins/global-address-literal.js';
+import { enclosingNamespaceStripPlugin } from '../builtins/enclosing-namespace-strip.js';
 
 describe('globalAddressLiteralPlugin', () => {
   function run(code: string, opts: GlobalAddressLiteralOptions): string {
@@ -384,6 +385,137 @@ describe('globalAddressLiteralPlugin', () => {
     it('resolves the same return when the enclosing function returns a pointer', () => {
       const out = run(`void f() { return 0x500100; }`, SIMPLE);
       assert.ok(out.includes('&gThing'), `A pointer return is the wanted case: ${out}`);
+    });
+  });
+  describe('the namespace the global is defined in', () => {
+    // Same reasoning as `func-ptr-literal`: a global's address is taken from
+    // anywhere, and a bare name only resolves where the definition is in scope.
+    const NS: GlobalAddressLiteralOptions = {
+      ...SIMPLE,
+      globalNamespaces: {
+        gThing: ['D2Client', 'Cursor'],
+      },
+    };
+
+    it('qualifies a direct match with the namespace the global is defined in', () => {
+      const out = run(`void f() { p = 0x500100; }`, NS);
+      assert.ok(
+        out.includes('&D2Client::Cursor::gThing'),
+        `Expected the qualified reference in: ${out}`,
+      );
+    });
+
+    it('qualifies an interior match the same way', () => {
+      const out = run(`void f() { p = 0x500104; }`, NS);
+      assert.ok(
+        out.includes('(char*)&D2Client::Cursor::gThing + 4'),
+        `Expected the qualified interior form in: ${out}`,
+      );
+    });
+
+    it('qualifies the folded complement form too', () => {
+      const out = run(`void f() { x = (void*)-5243141; }`, NS);
+      assert.ok(
+        out.includes('~(uintptr_t)((char*)&D2Client::Cursor::gThing + 4)'),
+        `Expected the qualified complement in: ${out}`,
+      );
+    });
+
+    it('leaves a global with no namespace entry as a bare name', () => {
+      const out = run(`void f() { p = 0x600200; }`, NS);
+      assert.ok(out.includes('&gOther'), `Root-scope globals stay bare: ${out}`);
+      assert.ok(!out.includes('::gOther'), `Nothing to qualify with: ${out}`);
+    });
+
+    it('treats an empty segment list as root scope', () => {
+      const out = run(`void f() { p = 0x500100; }`, {
+        ...SIMPLE,
+        globalNamespaces: { gThing: [] },
+      });
+      assert.ok(out.includes('&gThing'), `Empty segments mean root scope: ${out}`);
+      assert.ok(!out.includes('::gThing'), `No qualifier should be written: ${out}`);
+    });
+  });
+
+  describe('a pointer form in a call argument', () => {
+    // `__allmul(nUnixTime + 0xb6109100, ..., 0x989680, 0)` is the FILETIME
+    // conversion's 10,000,000 — a genuine numeric constant that happens to be
+    // where `gnCurrentTimestamp` sits. A parameter's type is not visible from
+    // the body, so a call argument carries no evidence either way and the
+    // literal stands, exactly as it does under an arithmetic operator.
+    it('reverts a direct match passed as a call argument', () => {
+      const out = run(`void f() { g(0x500100); }`, SIMPLE);
+      assert.ok(out.includes('0x500100'), `The literal must stand: ${out}`);
+      assert.ok(!out.includes('&gThing'), `No pointer form in an argument: ${out}`);
+    });
+
+    it('reverts an interior match passed as a call argument', () => {
+      const out = run(`void f() { g(1, 0x500104, 2); }`, SIMPLE);
+      assert.ok(out.includes('0x500104'), `The literal must stand: ${out}`);
+      assert.ok(!out.includes('gThing'), `No pointer form in an argument: ${out}`);
+    });
+
+    it('reverts through a parenthesised argument', () => {
+      const out = run(`void f() { g((0x500100)); }`, SIMPLE);
+      assert.ok(!out.includes('&gThing'), `A paren is not a conversion: ${out}`);
+    });
+
+    it('keeps the complement form, which is already integer-typed', () => {
+      const out = run(`void f() { g(-7373669); }`, STORM);
+      assert.ok(
+        out.includes('~(uintptr_t)((char*)&gSFileAsyncReqQueue + 4)'),
+        `The complement form must survive an argument: ${out}`,
+      );
+    });
+
+    it('leaves an argument written through a cast alone', () => {
+      const out = run(`void f() { g((void*)0x500100); }`, SIMPLE);
+      assert.ok(out.includes('&gThing'), `A cast is the conversion: ${out}`);
+    });
+  });
+  // The qualifier this pass writes is the DEFINITION's scope, whatever unit the
+  // reference lands in. `enclosing-namespace-strip` (priority 900) runs after and
+  // drops whatever prefix the enclosing block already opens, so a same-namespace
+  // reference is not left over-qualified. Both halves are checked here rather
+  // than asserted, because the second pass is the one that has to see a
+  // QualifiedId at all.
+  describe('handing the qualifier to enclosing-namespace-strip', () => {
+    function runThenStrip(
+      code: string,
+      opts: GlobalAddressLiteralOptions,
+      enclosingSegments: string[],
+    ): string {
+      const resolved = globalAddressLiteralPlugin.createTransformer(opts)(parse(code));
+      const stripper = enclosingNamespaceStripPlugin.createTransformer({ enclosingSegments });
+      return emit(stripper(resolved) as AnyNode).trim();
+    }
+
+    const NS: GlobalAddressLiteralOptions = {
+      globalAddresses: { gThing: 0x500100 },
+      globalSizes: { gThing: 12 },
+      globalNamespaces: { gThing: ['D2Client', 'Cursor'] },
+    };
+
+    it('strips back to the bare name inside the global\'s own namespace', () => {
+      const out = runThenStrip(`void f() { p = 0x500100; }`, NS, ['D2Client', 'Cursor']);
+      assert.ok(out.includes('&gThing'), `Expected the bare name in: ${out}`);
+      assert.ok(!out.includes('::'), `Nothing should stay qualified: ${out}`);
+    });
+
+    it('keeps the segments a sibling namespace does not open', () => {
+      const out = runThenStrip(`void f() { p = 0x500100; }`, NS, ['D2Client', 'UI', 'NpcMenu']);
+      assert.ok(
+        out.includes('&Cursor::gThing'),
+        `Only the shared prefix comes off: ${out}`,
+      );
+    });
+
+    it('keeps the whole qualifier in an unrelated module', () => {
+      const out = runThenStrip(`void f() { p = 0x500100; }`, NS, ['D2Game', 'Items']);
+      assert.ok(
+        out.includes('&D2Client::Cursor::gThing'),
+        `Nothing is shared, nothing comes off: ${out}`,
+      );
     });
   });
 });

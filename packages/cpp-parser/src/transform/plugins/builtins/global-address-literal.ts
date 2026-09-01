@@ -89,6 +89,7 @@ import type {
   ASTNode,
   AssignExpr,
   BinaryExpr,
+  CallExpr,
   CommaExpr,
   ConditionalExpr,
   Expression,
@@ -197,11 +198,14 @@ interface Candidate {
   name: string;
   address: number;
   size: number;
+  /** The namespace the DEFINITION is emitted in. Empty means root scope. */
+  segments: readonly string[];
 }
 
 /** A resolved literal: the global it names and the byte offset into it. */
 interface Anchor {
   name: string;
+  segments: readonly string[];
   offset: number;
 }
 
@@ -224,12 +228,12 @@ function ownerOf(v: number, candidates: readonly Candidate[]): Anchor | null {
 
   for (const c of candidates) {
     if (c.address === v) {
-      base = { name: c.name, offset: 0 };
+      base = { name: c.name, segments: c.segments, offset: 0 };
       baseCount++;
       continue;
     }
     if (c.size > 0 && v > c.address && v < c.address + c.size) {
-      interior = { name: c.name, offset: v - c.address };
+      interior = { name: c.name, segments: c.segments, offset: v - c.address };
       interiorCount++;
     }
   }
@@ -245,7 +249,10 @@ function ownerOf(v: number, candidates: readonly Candidate[]): Anchor | null {
 
 /** `&name`, or `((char*)&name + n)` for a non-zero offset. */
 function anchoredAddress(anchor: Anchor): Expression {
-  const addressOf = Expr.unary('&', Expr.identifier(anchor.name));
+  const designator = anchor.segments.length === 0
+    ? Expr.identifier(anchor.name)
+    : Expr.qualifiedId([...anchor.segments, anchor.name]);
+  const addressOf = Expr.unary('&', designator);
   if (anchor.offset === 0) return addressOf;
   const bytes = Expr.cast(Type.pointer(Type.char()), addressOf);
   return Expr.paren(Expr.binary(bytes, '+', Expr.intLiteral(anchor.offset)));
@@ -265,6 +272,7 @@ function createGlobalAddressLiteralTransformer(
 ): Transformer {
   const addresses = options.globalAddresses ?? {};
   const sizes = options.globalSizes ?? {};
+  const namespaces = options.globalNamespaces ?? {};
   const floor = effectiveAddressFloor(options.imageBase);
   const returnsNonPointer = options.enclosingReturnsNonPointer === true;
 
@@ -278,6 +286,7 @@ function createGlobalAddressLiteralTransformer(
       name,
       address,
       size: Number.isSafeInteger(size) && size! > 0 ? size! : 0,
+      segments: namespaces[name] ?? [],
     });
   }
   if (candidates.length === 0) return createTransformer({});
@@ -442,6 +451,27 @@ function createGlobalAddressLiteralTransformer(
       return ref;
     },
 
+    // A parameter's type is not visible from a body parsed on its own, so an
+    // argument slot says nothing about whether the value there is an address.
+    // `__allmul(nUnixTime + 0xb6109100, ..., 0x989680, 0)` — the FILETIME
+    // conversion's 10,000,000 — sits exactly where `gnCurrentTimestamp` does,
+    // and came out of the tree as `&gnCurrentTimestamp` in a `uint32_t` slot.
+    // Same evidence, same verdict as an arithmetic operand: the literal stands.
+    //
+    // Only the POINTER forms are withdrawn. `~(uintptr_t)...` is an integer
+    // expression by construction, and passing one is no different from passing
+    // any other computed word.
+    visitCallExpr(node: CallExpr) {
+      let changed = false;
+      const args = node.arguments.map(arg => {
+        const restored = restorePointerForms(arg);
+        if (!restored) return arg;
+        changed = true;
+        return restored;
+      });
+      return changed ? { ...node, arguments: args } : undefined;
+    },
+
     // An address in arithmetic is indistinguishable from a mask or a scale
     // factor, so a replacement under an arithmetic operator is withdrawn.
     visitBinaryExpr(node: BinaryExpr) {
@@ -465,6 +495,17 @@ export interface GlobalAddressLiteralOptions extends PluginOptions {
    * distance to the next symbol would invent storage the global does not own.
    */
   globalSizes?: Record<string, number>;
+  /**
+   * Global variable name (as emitted) → the namespace segments its DEFINITION is
+   * emitted in. Absent or empty means root scope, and the reference is the bare
+   * name — which is also what a name this table does not carry gets.
+   *
+   * The same fact `func-ptr-literal` carries on `FuncPtrTarget`, for the same
+   * reason: a global's address is taken from anywhere, and a bare name only
+   * resolves where the definition happens to be in scope. The segments arrive
+   * already resolved; this pass renders a qualifier, it never decides one.
+   */
+  globalNamespaces?: Record<string, readonly string[]>;
   /**
    * Where the program is mapped, as Ghidra's `ProgramInfo.imageBase` reports it
    * — hex, with or without an `0x` prefix, or already parsed to a number.

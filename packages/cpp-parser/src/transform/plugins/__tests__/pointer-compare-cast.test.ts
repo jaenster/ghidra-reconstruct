@@ -53,4 +53,42 @@ describe('pointerCompareCastPlugin', () => {
     const out = transform(`void f() { short* x; if (x == 0) {} }`);
     assert.ok(!out.includes('(short'), out);
   });
+  // LightMap.cpp: `pCollisionCell` walks `gaLightmapInterpBuffer` and stops at
+  // the address of the global that follows it. Both are file-local statics, so
+  // no table this pass reads carries either type — but `&anything` is a pointer
+  // by construction, and the comparison against `(int)pCollisionCell` is the
+  // machine's own `cmp` of two words.
+  it('casts an address-of bound compared against a machine-word integer', () => {
+    const out = transform(`void f() {
+      int32_t* pCollisionCell;
+      do {
+        pCollisionCell++;
+      } while ((int)pCollisionCell < &gnLightmapInterpDirX);
+    }`);
+    assert.ok(
+      out.includes('(uintptr_t)&gnLightmapInterpDirX'),
+      `The address-of side goes through uintptr_t: ${out}`,
+    );
+  });
+
+  it('casts an anchored interior address the same way, on either side', () => {
+    const out = transform(`void f() {
+      int nVar;
+      if (((char*)&gAnchor + 3) < (int)nVar) {}
+    }`);
+    assert.ok(
+      out.includes('(uintptr_t)((char*)&gAnchor + 3)'),
+      `The address expression goes through uintptr_t: ${out}`,
+    );
+  });
+
+  it('leaves an address-of compared against something of unknown type alone', () => {
+    const out = transform(`void f() { if (&gAnchor < pSomething) {} }`);
+    assert.ok(!out.includes('uintptr_t'), `No evidence of a word comparison: ${out}`);
+  });
+
+  it('leaves an address-of null comparison alone', () => {
+    const out = transform(`void f() { if (&gAnchor == 0) {} }`);
+    assert.ok(!out.includes('uintptr_t'), `A null comparison is already legal: ${out}`);
+  });
 });

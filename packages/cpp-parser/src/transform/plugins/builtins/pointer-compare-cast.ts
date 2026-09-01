@@ -19,7 +19,10 @@
  * machine's own operation - a `cmp` of two 32-bit words - it is width-exact,
  * and `uintptr_t` is spellable everywhere, where the pointee type may not be.
  * Only a MACHINE-WORD integer qualifies; a narrower one would mean the model
- * disagrees about the width somewhere else, and that stays visible.
+ * disagrees about the width somewhere else, and that stays visible. The pointer
+ * side is recognised by its shape, or — where no table types the operand, as
+ * with a file-local static — by its being an `&` expression, which is a pointer
+ * in the language regardless of what it points at.
  *
  * The cast is always spelled with a BUILTIN type - `(unsigned char*)`,
  * `(short*)`, `(void*)`. One of the two sides in this shape is essentially always
@@ -33,7 +36,7 @@
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, FunctionDecl, VariableDecl, ParameterDecl, Expression, BinaryExpr, TypeNode,
-  IntegerLiteralExpr, Identifier,
+  IntegerLiteralExpr, Identifier, UnaryExpr,
 } from '../../../ast/nodes.js';
 import { findNodesByKind } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
@@ -118,6 +121,29 @@ const isStringLabelIdentifier = (e: Expression): boolean => {
   return u.kind === NodeKind.Identifier && GHIDRA_STRING_LABEL_RE.test((u as Identifier).name);
 };
 
+/**
+ * `&anything` is a pointer. Not a SHAPE — the pointee is exactly what is unknown
+ * here — but the one fact the pointer-vs-word branch needs, and it is the
+ * language's, not a model's.
+ *
+ * `shapeOf` declines an address-of whose operand it cannot type, and a
+ * file-local static is precisely that: `LightMap.cpp` declares
+ * `gaLightmapInterpBuffer` and `gnLightmapInterpDirX` `static` in its own
+ * translation unit, so no globals table names either. The loop that walks the
+ * first and stops at the address of the second came out as
+ * `(int)pCollisionCell < &gnLightmapInterpDirX` — "ISO C++ forbids comparison
+ * between pointer and integer" — with nothing in the model to say the right-hand
+ * side was an address at all.
+ *
+ * Confined to that branch on purpose: it only needs to know THAT the side is an
+ * address. The two-pointer branches still require a real shape, because they
+ * have to SPELL a pointee type.
+ */
+const isAddressOf = (e: Expression): boolean => {
+  const u = unwrapParens(e);
+  return u.kind === NodeKind.UnaryExpr && (u as UnaryExpr).operator === '&';
+};
+
 export function createPointerCompareCastTransformer(options?: PluginOptions): Transformer {
   const o = (options ?? {}) as PointerCompareCastOptions;
   const typedefTargets = o.typedefTargets ?? {};
@@ -163,16 +189,17 @@ export function createPointerCompareCastTransformer(options?: PluginOptions): Tr
           // A pointer against a machine word: the `cmp` reads both as words, so
           // the pointer goes through `uintptr_t` and the integer stays as it is.
           const wordCompare = (
-            ptr: TypeShape | null, other: TypeShape | null, otherExpr: Expression,
-          ) => !!ptr && ptr.stars > 0
+            ptr: TypeShape | null, other: TypeShape | null,
+            otherExpr: Expression, ptrExpr: Expression,
+          ) => (ptr ? ptr.stars > 0 : isAddressOf(ptrExpr))
             && (isIntegerLiteral(otherExpr) ? true : !!other && isWordInteger(other));
-          if (wordCompare(left, right, b.right as Expression)) {
+          if (wordCompare(left, right, b.right as Expression, b.left as Expression)) {
             changed = true;
             return updateNode(b, {
               left: Expr.cast(Type.typedef('uintptr_t'), b.left as Expression),
             } as Partial<BinaryExpr>);
           }
-          if (wordCompare(right, left, b.left as Expression)) {
+          if (wordCompare(right, left, b.left as Expression, b.right as Expression)) {
             changed = true;
             return updateNode(b, {
               right: Expr.cast(Type.typedef('uintptr_t'), b.right as Expression),
