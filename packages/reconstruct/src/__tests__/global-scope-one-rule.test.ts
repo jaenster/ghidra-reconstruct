@@ -120,6 +120,134 @@ describe('one rule decides whether a global is `static`', () => {
     assert.strictEqual(g.scope, 'static-local');
   });
 
+  it('counts a folded address literal in another function of the SAME file', () => {
+    // cSCompCompressMethod @00724a80: Ghidra records the `cmp esi, offset` operand
+    // as a SCALAR, so the xref count is 1 and no body names the symbol. It was
+    // emitted `static int cSCompCompressMethod = 0x40;` inside one function of
+    // SSComp.cpp while two others compared against its address, which
+    // `global-address-literal` renders as `&cSCompCompressMethod`.
+    const g: AnalyzedDataSymbol = {
+      name: 'cSCompCompressMethod', address: '00724a80', dataType: 'int',
+      suggestedType: 'int', size: 4, isInitialized: true, value: '0x40',
+      xrefCount: 1, scope: 'static-local', ownerFunction: 'SCompCompress',
+    } as unknown as AnalyzedDataSymbol;
+    const funcs = [
+      makeFunc({ name: 'SCompCompress', decompiled: 'void SCompCompress(){ cSCompCompressMethod = 0x40; }' }),
+      makeFunc({ name: 'SCompDecompress', decompiled: 'void SCompDecompress(){ do { pSrc++; } while ((int)pSrc < 0x724a80); }' }),
+    ];
+    const r = reconcileStaticScopeWithBodyReferences(
+      [g], funcs,
+      new Map([['SCompCompress', 'Storm/Source/SSComp.cpp'], ['SCompDecompress', 'Storm/Source/SSComp.cpp']]),
+      new Set(),
+    );
+    assert.strictEqual(r.promotedToGlobal, 1);
+    assert.strictEqual(g.scope, 'global');
+    assert.strictEqual(g.ownerFunction, undefined);
+  });
+
+  it('counts a folded address literal in another TRANSLATION UNIT', () => {
+    // gnOutJungPresetOffsetByLevel: `static` in a function of OutJung.cpp,
+    // address taken from OutPlace/Act5.cpp. Sound as neither a function-local
+    // nor a file-scope static.
+    const g: AnalyzedDataSymbol = {
+      name: 'gnOutJungPresetOffsetByLevel', address: '006e3120', dataType: 'int',
+      suggestedType: 'int', size: 4, isInitialized: true, value: '0',
+      xrefCount: 1, scope: 'file-local', ownerFile: 'D2Common/Drlg/OutJung.cpp',
+    } as unknown as AnalyzedDataSymbol;
+    const funcs = [
+      makeFunc({ name: 'DRLGOUTJUNG_Build', decompiled: 'void DRLGOUTJUNG_Build(){ gnOutJungPresetOffsetByLevel = 0; }' }),
+      makeFunc({ name: 'DRLGACT5_Place', decompiled: 'void DRLGACT5_Place(){ if (p == 0x6e3120) return; }' }),
+    ];
+    reconcileStaticScopeWithBodyReferences(
+      [g], funcs,
+      new Map([['DRLGOUTJUNG_Build', 'D2Common/Drlg/OutJung.cpp'], ['DRLGACT5_Place', 'D2Common/Drlg/OutPlace/Act5.cpp']]),
+      new Set(),
+    );
+    assert.strictEqual(g.scope, 'global');
+    assert.strictEqual(g.ownerFile, undefined);
+  });
+
+  it('counts a literal that lands INSIDE the extent, not only on its base', () => {
+    // `(char*)&cSCompCompressMethod + 3` — the emitted form for 00724a83.
+    const g: AnalyzedDataSymbol = {
+      name: 'cSCompCompressMethod', address: '00724a80', dataType: 'int',
+      suggestedType: 'int', size: 4, isInitialized: true, value: '0x40',
+      xrefCount: 1, scope: 'static-local', ownerFunction: 'A',
+    } as unknown as AnalyzedDataSymbol;
+    reconcileStaticScopeWithBodyReferences(
+      [g],
+      [makeFunc({ name: 'A', decompiled: 'void A(){ cSCompCompressMethod = 0x40; }' }),
+       makeFunc({ name: 'B', decompiled: 'void B(){ while (0x724a83 < (int)pp) pp--; }' })],
+      new Map([['A', 'X.cpp'], ['B', 'Y.cpp']]), new Set(),
+    );
+    assert.strictEqual(g.scope, 'global');
+  });
+
+  it('counts the complement form the decompiler folds into one negative literal', () => {
+    // -7373669 is 0xFF8F7C9B is ~0x00708364 — four bytes into the queue head.
+    const g: AnalyzedDataSymbol = {
+      name: 'gSFileAsyncReqQueue', address: '00708360', dataType: 'undefined8',
+      suggestedType: 'uint64_t', size: 8, isInitialized: true, value: '0',
+      xrefCount: 1, scope: 'static-local', ownerFunction: 'A',
+    } as unknown as AnalyzedDataSymbol;
+    reconcileStaticScopeWithBodyReferences(
+      [g],
+      [makeFunc({ name: 'A', decompiled: 'void A(){ gSFileAsyncReqQueue = 0; }' }),
+       makeFunc({ name: 'B', decompiled: 'void B(){ q->pHead = (void *)-7373669; }' })],
+      new Map([['A', 'X.cpp'], ['B', 'Y.cpp']]), new Set(),
+    );
+    assert.strictEqual(g.scope, 'global');
+  });
+
+  it('leaves a static alone when the literals in other bodies are not its address', () => {
+    const g: AnalyzedDataSymbol = {
+      name: 'gLocalOnly', address: '00700000', dataType: 'int', suggestedType: 'int',
+      size: 4, isInitialized: true, value: '0', xrefCount: 1, scope: 'static-local',
+      ownerFunction: 'A',
+    } as unknown as AnalyzedDataSymbol;
+    reconcileStaticScopeWithBodyReferences(
+      [g],
+      [makeFunc({ name: 'A', decompiled: 'void A(){ gLocalOnly = 1; }' }),
+       makeFunc({ name: 'B', decompiled: 'void B(){ memset(buf, 0, 0x700004); n = 0x6fffff; }' })],
+      new Map([['A', 'X.cpp'], ['B', 'Y.cpp']]), new Set(),
+    );
+    assert.strictEqual(g.scope, 'static-local');
+  });
+
+  it('does not read the address digits out of a symbol NAME', () => {
+    // `DAT_00724a80` names the symbol; the digits inside it are not a literal.
+    const g: AnalyzedDataSymbol = {
+      name: 'gaLanguageNames', address: '00724a80', dataType: 'int',
+      suggestedType: 'int', size: 4, isInitialized: true, value: '0',
+      xrefCount: 1, scope: 'static-local', ownerFunction: 'A',
+    } as unknown as AnalyzedDataSymbol;
+    reconcileStaticScopeWithBodyReferences(
+      [g],
+      [makeFunc({ name: 'A', decompiled: 'void A(){ gaLanguageNames = 1; }' }),
+       makeFunc({ name: 'B', decompiled: 'void B(){ int v = DAT_00724a80; }' })],
+      new Map([['A', 'X.cpp'], ['B', 'Y.cpp']]), new Set(),
+    );
+    assert.strictEqual(g.scope, 'static-local');
+  });
+
+  it('holds the candidate floor at the image base, so a byte count is not an address', () => {
+    // Ghidra manufactures `DAT_00030000` where nothing is mapped; the `0x30000`
+    // in `memcpy(dst, src, 0x30000)` is a size, and admitting it would demote
+    // every static whose "address" collides with a common constant.
+    const placeholder: AnalyzedDataSymbol = {
+      name: 'DAT_00030000', address: '00030000', dataType: 'int', suggestedType: 'int',
+      size: 4, isInitialized: false, value: null, xrefCount: 1, scope: 'static-local',
+      ownerFunction: 'A',
+    } as unknown as AnalyzedDataSymbol;
+    reconcileStaticScopeWithBodyReferences(
+      [placeholder],
+      [makeFunc({ name: 'A', decompiled: 'void A(){ DAT_00030000 = 1; }' }),
+       makeFunc({ name: 'B', decompiled: 'void B(){ memcpy(dst, src, 0x30000); }' })],
+      new Map([['A', 'X.cpp'], ['B', 'Y.cpp']]), new Set(), '00400000',
+    );
+    assert.strictEqual(placeholder.scope, 'static-local');
+  });
+
   it('does not promote a symbol whose name is also a type name', () => {
     // `enum eD2ApplicationMode; eD2ApplicationMode eD2ApplicationMode;` is not
     // declarable, and body text naming it may be naming the type.

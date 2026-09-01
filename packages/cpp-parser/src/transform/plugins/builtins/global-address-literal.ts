@@ -221,26 +221,74 @@ interface Anchor {
  * the address does not identify one object and the literal stands.
  */
 function ownerOf(v: number, candidates: readonly Candidate[]): Anchor | null {
-  let base: Anchor | null = null;
+  const owned = ownerOfAddress(v, candidates);
+  return owned
+    ? { name: owned.candidate.name, segments: owned.candidate.segments, offset: owned.offset }
+    : null;
+}
+
+/** A global's extent, the only thing address ownership depends on. */
+export interface AddressExtent {
+  readonly address: number;
+  readonly size: number;
+}
+
+/** Which extent owns an address, and how far into it the address sits. */
+export interface AddressOwnership<C extends AddressExtent> {
+  readonly candidate: C;
+  readonly offset: number;
+}
+
+/**
+ * The ownership rule itself, over anything carrying an extent.
+ *
+ * Exported because the decision "is this global safe to emit `static`?" has to
+ * be made from the SAME rule, one phase earlier: a literal the pass will turn
+ * into `&name` is a reference to `name`, and a scope analysis that cannot see it
+ * promotes a symbol whose address is taken from another function or another
+ * translation unit. Two implementations of this rule would disagree, and the
+ * disagreement is a link error.
+ */
+export function ownerOfAddress<C extends AddressExtent>(
+  v: number,
+  candidates: readonly C[],
+): AddressOwnership<C> | null {
+  let base: C | undefined;
   let baseCount = 0;
-  let interior: Anchor | null = null;
+  let interior: AddressOwnership<C> | null = null;
   let interiorCount = 0;
 
   for (const c of candidates) {
     if (c.address === v) {
-      base = { name: c.name, segments: c.segments, offset: 0 };
+      base = c;
       baseCount++;
       continue;
     }
     if (c.size > 0 && v > c.address && v < c.address + c.size) {
-      interior = { name: c.name, segments: c.segments, offset: v - c.address };
+      interior = { candidate: c, offset: v - c.address };
       interiorCount++;
     }
   }
 
-  if (baseCount === 1) return base;
+  if (baseCount === 1) return { candidate: base!, offset: 0 };
   if (baseCount > 1) return null;
   return interiorCount === 1 ? interior : null;
+}
+
+/** At or above this value, a literal may be a folded `~&global`. */
+export const ADDRESS_LITERAL_COMPLEMENT_FLOOR = COMPLEMENT_FLOOR;
+
+/** At or above this address, a Ghidra data symbol is not a real global. */
+export const ADDRESS_LITERAL_CEILING = ADDRESS_CEILING;
+
+/**
+ * The candidate floor for this image — the image base, never below the 64KB
+ * platform reserve. Shared so the scope analysis admits exactly the addresses
+ * the pass admits; a floor that disagreed would either miss references (link
+ * error) or count `DAT_00000001` as one (mass false demotion).
+ */
+export function addressLiteralFloor(imageBase: string | number | undefined): number {
+  return effectiveAddressFloor(imageBase);
 }
 
 // ============================================

@@ -49,7 +49,14 @@ import type {
   ExtractedString,
 } from '../types.js';
 import { resolveOverridePlaceholders } from './impl.js';
-import { VOID_POINTER_SLOT, getFuncPtrArgCastArityMismatchList, type FuncPtrTarget } from '@ghidra-mcp/cpp-parser';
+import {
+  VOID_POINTER_SLOT,
+  getFuncPtrArgCastArityMismatchList,
+  addressLiteralFloor,
+  ADDRESS_LITERAL_CEILING,
+  ADDRESS_LITERAL_COMPLEMENT_FLOOR,
+  type FuncPtrTarget,
+} from '@ghidra-mcp/cpp-parser';
 
 import { fieldDeclSpelling, emittedMemberNames, generateHeader, generateFunctionDeclaration, setKnownFuncDefs, sigType, getIntegerConversionType, emittedFunctionName, returnSigType } from './header.js';
 import { generateImplementation, setQuestStructLayouts, setStructFieldRenames, decompiledReturnType, decompiledFunctionName, type ImplGenContext, type FuncPtrArgCastTables, type ThunkForward } from './impl.js';
@@ -829,7 +836,7 @@ export function generateProject(
         for (const [k, v] of unsortedMap) funcToImpl.set(k, v);
       }
       computeFileLocalGlobals(analyzedGlobals, funcToImpl);
-      const rescoped = reconcileStaticScopeWithBodyReferences(analyzedGlobals, functions, funcToImpl, allDataTypeNames);
+      const rescoped = reconcileStaticScopeWithBodyReferences(analyzedGlobals, functions, funcToImpl, allDataTypeNames, programInfo?.imageBase);
       if (rescoped.promotedToGlobal || rescoped.promotedToFileLocal) {
         console.log(`Globals rescoped from body references: ${rescoped.promotedToGlobal} to file scope in globals.cpp, ${rescoped.promotedToFileLocal} from function-local to file-local`);
       }
@@ -927,7 +934,7 @@ export function generateProject(
     if (options.promoteStaticGlobals && analyzedGlobals.length > 0) {
       const funcToImpl = buildFuncToImplPathMap(functions, classes, namespaces, options, '');
       computeFileLocalGlobals(analyzedGlobals, funcToImpl);
-      reconcileStaticScopeWithBodyReferences(analyzedGlobals, functions, funcToImpl, allDataTypeNames);
+      reconcileStaticScopeWithBodyReferences(analyzedGlobals, functions, funcToImpl, allDataTypeNames, programInfo?.imageBase);
     }
 
     // Calculate globals path (needed for generateFilesForFunctions includes)
@@ -1726,25 +1733,40 @@ function buildFuncToImplPathMap(
  *
  * A global's scope is decided from Ghidra's XREF count at its EXACT start
  * address, but what actually decides whether `static` is legal is how many
- * function bodies NAME the symbol. Those two disagree constantly, most visibly
- * where a Ghidra array is longer than the real table: every
- * `AllocServerMemory(..., __FILE__, ...)` inside its extent decompiles its
- * filename argument as `(char*)(gTable + 0xNN)`, so a symbol with xrefCount 1
- * is named by dozens of functions across a dozen files.
+ * function bodies REFERENCE the symbol. Those two disagree constantly, in two
+ * distinct ways:
+ *
+ *  - By NAME. A Ghidra array longer than the real table swallows its
+ *    neighbours, so every `AllocServerMemory(..., __FILE__, ...)` inside its
+ *    extent decompiles its filename argument as `(char*)(gTable + 0xNN)`, and a
+ *    symbol with xrefCount 1 is named by dozens of functions across a dozen
+ *    files.
+ *
+ *  - By ADDRESS. Where the decompiler folded an address into a plain integer,
+ *    Ghidra records the operand as a SCALAR, not a data reference, so the xref
+ *    count at the symbol never sees it and neither does any scan for the name.
+ *    `global-address-literal` later resolves exactly those literals back into
+ *    `&name` / `(char*)&name + n` / `~(uintptr_t)<form>` — which is a reference,
+ *    created after this decision was taken. `cSCompCompressMethod` was emitted
+ *    `static` inside one function of SSComp.cpp and its address then taken from
+ *    two others; `gnOutJungPresetOffsetByLevel` was emitted `static` in
+ *    OutJung.cpp and its address taken from Act5.cpp, a different translation
+ *    unit. Both are undefined at link.
  *
  * The result was a symbol emitted `static` in one place and declared `extern` by
  * globals.h's multi-body safety net — a declaration nothing can ever satisfy,
  * plus, for a function-local static, a body-scoped object no other function can
- * see. Both decisions now come from ONE count.
+ * see. All of it now comes from ONE count, over both reference classes.
  *
  * The demotion stays where it is provably safe: a static-local whose name only
- * one function mentions, a file-local whose name only one output file mentions.
+ * one function mentions and whose address no other function takes.
  */
 export function reconcileStaticScopeWithBodyReferences(
   analyzedGlobals: AnalyzedDataSymbol[],
   functions: ExtractedFunction[],
   funcNameToImplPath: Map<string, string>,
-  typeNames: ReadonlySet<string>
+  typeNames: ReadonlySet<string>,
+  imageBase?: string | number
 ): { promotedToGlobal: number; promotedToFileLocal: number } {
   // Names a `scope === 'global'` symbol already owns. Promoting a second symbol
   // into one of them cannot help: globals.h declares exactly one of the two, and
@@ -1773,32 +1795,78 @@ export function reconcileStaticScopeWithBodyReferences(
   }
   if (candidates.size === 0) return { promotedToGlobal: 0, promotedToFileLocal: 0 };
 
-  // Which functions name each candidate, read off Ghidra's decompiler output —
-  // the INPUT to codegen, and the only place the eventual references exist
-  // before any file has been generated.
+  const ownerOfLiteral = buildAddressLiteralResolver(analyzedGlobals, imageBase);
+
+  // Which functions reference each candidate, read off Ghidra's decompiler
+  // output — the INPUT to codegen, and the only place the eventual references
+  // exist before any file has been generated. One pass yields both classes: a
+  // token is an identifier or it is a number, and a number that resolves to a
+  // candidate's extent is the reference `global-address-literal` will write.
   const namingFunctions = new Map<string, Set<string>>();
-  const identifier = /[A-Za-z_]\w*/g;
+  const literalFunctions = new Map<string, Set<string>>();
+  // Numbers first, so the digits inside `DAT_00724a80` are consumed by the
+  // identifier alternative and never read as an address of their own.
+  const token = /0[xX][0-9a-fA-F]+|\d+|[A-Za-z_]\w*/g;
   for (const func of functions) {
     const body = func.decompiled;
     if (!body) continue;
-    identifier.lastIndex = 0;
+    token.lastIndex = 0;
     let m: RegExpExecArray | null;
     const seen = new Set<string>();
-    while ((m = identifier.exec(body)) !== null) {
-      const id = m[0];
-      if (seen.has(id) || !candidates.has(id)) continue;
-      seen.add(id);
-      let fns = namingFunctions.get(id);
-      if (!fns) { fns = new Set(); namingFunctions.set(id, fns); }
-      fns.add(func.name);
+    while ((m = token.exec(body)) !== null) {
+      const text = m[0];
+      const lead = text.charCodeAt(0);
+      const isIdentifier = lead === 0x5f /* _ */
+        || (lead >= 0x41 && lead <= 0x5a) || (lead >= 0x61 && lead <= 0x7a);
+      if (isIdentifier) {
+        if (seen.has(text) || !candidates.has(text)) continue;
+        seen.add(text);
+        let fns = namingFunctions.get(text);
+        if (!fns) { fns = new Set(); namingFunctions.set(text, fns); }
+        fns.add(func.name);
+        continue;
+      }
+      if (!ownerOfLiteral) continue;
+      const value = Number(text);
+      if (!Number.isSafeInteger(value) || value <= 0 || value > WORD_VALUES) continue;
+      // `-7373669` is one folded word: the emitter prints a top-bit-set address
+      // as a signed decimal, so the magnitude preceded by a minus is tried as
+      // the word it stands for as well as on its own. A genuine subtraction
+      // whose operand happens to complete an address costs a promotion that
+      // could have been made, which is the cheap failure.
+      const negated = m.index > 0 && body.charCodeAt(m.index - 1) === 0x2d /* - */
+        ? (WORD_VALUES - value) >>> 0
+        : undefined;
+      for (const v of negated === undefined ? [value] : [value, negated]) {
+        const name = ownerOfLiteral(v);
+        if (name === null || !candidates.has(name)) continue;
+        let fns = literalFunctions.get(name);
+        if (!fns) { fns = new Set(); literalFunctions.set(name, fns); }
+        fns.add(func.name);
+      }
     }
   }
 
   let promotedToGlobal = 0;
   let promotedToFileLocal = 0;
   for (const [name, globalsWithName] of candidates) {
-    const fns = namingFunctions.get(name);
-    if (!fns || fns.size <= 1) continue;
+    const byName = namingFunctions.get(name);
+    const byAddress = literalFunctions.get(name);
+    const fns = new Set<string>(byName ?? []);
+    if (byAddress) for (const fn of byAddress) fns.add(fn);
+    // A function-local static lives in ONE body. A single body that only takes
+    // its address is still a foreign reference when that body is not the owner
+    // — the xref the owner contributed is the reason the symbol was scoped
+    // static-local in the first place, and it does not show up here when the
+    // decompiler spelled the owner's access some other way.
+    if (byAddress && fns.size === 1) {
+      for (const g of globalsWithName) {
+        if (g.scope === 'static-local' && g.ownerFunction && !byAddress.has(g.ownerFunction)) {
+          fns.add(g.ownerFunction);
+        }
+      }
+    }
+    if (fns.size <= 1) continue;
     const files = new Set<string>();
     let unresolved = false;
     for (const fn of fns) {
@@ -1820,6 +1888,98 @@ export function reconcileStaticScopeWithBodyReferences(
     }
   }
   return { promotedToGlobal, promotedToFileLocal };
+}
+
+/** One 32-bit word — the width every folded image address was printed at. */
+const WORD_VALUES = 0x100000000;
+
+/** Address bucketing for the interior index. 4KB, the page the image is mapped in. */
+const ADDRESS_PAGE_SHIFT = 12;
+
+/**
+ * A size beyond which a Ghidra extent is not one. The interior index costs one
+ * entry per page an extent spans, so a bogus `size` would cost a million of
+ * them; nothing in a 32-bit image's data section is 16MB wide. The symbol still
+ * resolves on its exact base.
+ */
+const MAX_INDEXED_EXTENT = 0x1000000;
+
+/**
+ * `value → the global that owns it`, over every extracted global.
+ *
+ * The ownership RULE is `ownerOfAddress` in `global-address-literal`, and this
+ * has to answer the way that does or the two disagree over whether a `static`
+ * is legal. It differs only in shape: that pass resolves a handful of literals
+ * against a prepared candidate list, this one resolves every literal in the
+ * program, so exact bases go in a map and extents into a page index rather than
+ * being rescanned per literal.
+ *
+ * Null when no global clears the floor — there is then nothing to resolve, and
+ * the caller can skip the numeric half of its scan entirely.
+ */
+function buildAddressLiteralResolver(
+  analyzedGlobals: AnalyzedDataSymbol[],
+  imageBase: string | number | undefined
+): ((v: number) => string | null) | null {
+  const floor = addressLiteralFloor(imageBase);
+
+  const baseAt = new Map<number, string[]>();
+  const interiorPages = new Map<number, Array<{ name: string; address: number; size: number }>>();
+  const seenExtents = new Set<string>();
+  let any = false;
+
+  for (const g of analyzedGlobals) {
+    const name = sanitizeSymbolName(g.suggestedName || g.name);
+    if (!/^[A-Za-z_]\w*$/.test(name)) continue;
+    const address = Number.parseInt(String(g.address ?? '').replace(/^0x/i, ''), 16);
+    if (!Number.isSafeInteger(address) || address < floor || address >= ADDRESS_LITERAL_CEILING) {
+      continue;
+    }
+    // The same symbol extracted twice is one object, not two claimants: counted
+    // twice it would look ambiguous and the reference would go uncounted, which
+    // is the failure this whole resolver exists to prevent.
+    const key = `${name}@${address}`;
+    if (seenExtents.has(key)) continue;
+    seenExtents.add(key);
+    any = true;
+
+    const bases = baseAt.get(address);
+    if (bases) bases.push(name); else baseAt.set(address, [name]);
+
+    const rawSize = Number(g.size);
+    const size = Number.isSafeInteger(rawSize) && rawSize > 1 ? rawSize : 0;
+    if (size === 0 || size > MAX_INDEXED_EXTENT) continue;
+    const first = address >>> ADDRESS_PAGE_SHIFT;
+    const last = (address + size - 1) >>> ADDRESS_PAGE_SHIFT;
+    for (let page = first; page <= last; page++) {
+      const bucket = interiorPages.get(page);
+      const entry = { name, address, size };
+      if (bucket) bucket.push(entry); else interiorPages.set(page, [entry]);
+    }
+  }
+  if (!any) return null;
+
+  /** Rule 1 then rule 2, each requiring a unique owner. */
+  const direct = (v: number): string | null => {
+    const bases = baseAt.get(v);
+    if (bases) return bases.length === 1 ? bases[0] : null;
+    const bucket = interiorPages.get(v >>> ADDRESS_PAGE_SHIFT);
+    if (!bucket) return null;
+    let hit: string | null = null;
+    let hits = 0;
+    for (const e of bucket) {
+      if (v > e.address && v < e.address + e.size) { hit = e.name; hits++; }
+    }
+    return hits === 1 ? hit : null;
+  };
+
+  return (v: number): string | null => {
+    const hit = direct(v);
+    if (hit !== null) return hit;
+    // Rule 3: a folded `~&global` always lands above 0xFF000000.
+    if (v < ADDRESS_LITERAL_COMPLEMENT_FLOOR) return null;
+    return direct((~v) >>> 0);
+  };
 }
 
 /**

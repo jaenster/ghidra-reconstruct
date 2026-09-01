@@ -362,6 +362,14 @@ export {
 export {
   globalAddressLiteralPlugin,
   type GlobalAddressLiteralOptions,
+  // The address-ownership rule, shared with the scope analysis that has to
+  // count the references this pass is about to create.
+  ownerOfAddress,
+  addressLiteralFloor,
+  ADDRESS_LITERAL_CEILING,
+  ADDRESS_LITERAL_COMPLEMENT_FLOOR,
+  type AddressExtent,
+  type AddressOwnership,
 } from './builtins/global-address-literal.js';
 
 // ============================================
