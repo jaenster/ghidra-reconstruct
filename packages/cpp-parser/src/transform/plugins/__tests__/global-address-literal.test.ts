@@ -181,5 +181,33 @@ describe('globalAddressLiteralPlugin', () => {
       assert.ok(run(`void f() { p = 0x500104; }`, zeroSize).includes('0x500104'));
       assert.ok(run(`void f() { p = 0x500100; }`, zeroSize).includes('&gZero'));
     });
+
+    it('ignores Ghidra placeholder symbols at sub-64KB addresses', () => {
+      // Ghidra manufactures a data symbol wherever it cannot resolve a
+      // reference, so DAT_00000000/1/4/... sit at single-digit addresses. Taking
+      // them as candidates makes every small integer an address: this exact case
+      // rewrote `pdwParam[1]` to `pdwParam[&DAT_00000001]` and failed 394 of 505
+      // translation units.
+      const junk: GlobalAddressLiteralOptions = {
+        globalAddresses: { DAT_00000000: 0, DAT_00000001: 1, DAT_00000004: 4, gReal: 0x500100 },
+        globalSizes: { DAT_00000000: 1, DAT_00000001: 1, DAT_00000004: 1, gReal: 12 },
+      };
+      const out = run(`void f(uint32_t* pdwParam) { pdwParam[1] = 0; pdwParam[4] = 2; }`, junk);
+      assert.ok(!out.includes('DAT_0000'), `No sub-64KB symbol may resolve: ${out}`);
+      assert.ok(out.includes('pdwParam[1]'), `Index must stay numeric: ${out}`);
+
+      // The real global in the same table still resolves.
+      assert.ok(run(`void f() { p = 0x500100; }`, junk).includes('&gReal'));
+    });
+
+    it('ignores a candidate just below the 64KB floor and takes one just above', () => {
+      const edge: GlobalAddressLiteralOptions = {
+        globalAddresses: { gLow: 0xffff, gHigh: 0x10000 },
+        globalSizes: { gLow: 4, gHigh: 4 },
+      };
+      assert.ok(run(`void f() { p = 0xffff; }`, edge).includes('0xffff'));
+      assert.ok(!run(`void f() { p = 0xffff; }`, edge).includes('gLow'));
+      assert.ok(run(`void f() { p = 0x10000; }`, edge).includes('&gHigh'));
+    });
   });
 });

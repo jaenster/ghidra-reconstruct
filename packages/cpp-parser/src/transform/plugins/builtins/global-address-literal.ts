@@ -86,6 +86,22 @@ const COMPLEMENT_FLOOR = 0xff000000;
 
 const WORD = 0x100000000;
 
+/**
+ * Below this, an "address" is not one.
+ *
+ * Ghidra manufactures a data symbol wherever it sees a reference it cannot
+ * resolve, so the symbol table carries `DAT_00000000`, `DAT_00000001`,
+ * `DAT_00000004` and dozens more at single-digit addresses — the residue of
+ * `[reg + 4]` style operands, not objects. Admitting them makes every `0`, `1`
+ * and `2` in the program an address: the first run of this pass rewrote
+ * `pdwParam[1]` to `pdwParam[&DAT_00000001]` and failed 394 of 505 files.
+ *
+ * A Win32 process reserves the first 64KB and never maps an image there, so no
+ * global can live below it. The bound is a property of the platform rather than
+ * of this binary, which is why it is a constant here and not a configured base.
+ */
+const ADDRESS_FLOOR = 0x10000;
+
 interface Candidate {
   name: string;
   address: number;
@@ -161,7 +177,7 @@ function createGlobalAddressLiteralTransformer(
 
   const candidates: Candidate[] = [];
   for (const [name, address] of Object.entries(addresses)) {
-    if (!Number.isSafeInteger(address) || address < 0 || address >= WORD) continue;
+    if (!Number.isSafeInteger(address) || address < ADDRESS_FLOOR || address >= WORD) continue;
     const size = sizes[name];
     candidates.push({
       name,
