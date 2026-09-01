@@ -625,4 +625,193 @@ describe('globalAddressLiteralPlugin', () => {
       assert.ok(!out.includes('gnCurrentTimestamp'), `Ordinary call must not resolve: ${out}`);
     });
   });
+
+  // ============================================
+  // ONE-PAST-THE-END vs THE NEXT OBJECT'S BASE
+  // ============================================
+
+  describe('the end of one global is the base of the next', () => {
+    // 1.14d's Y-buffer table and the tile-clip word that follows it:
+    // 0x7c97a8 + 732*4 == 0x7ca318 == &gnTileClipLeft. In the image the two
+    // readings are the same byte; after relinking they are different objects.
+    const YBUFFER: GlobalAddressLiteralOptions = {
+      globalAddresses: {
+        gaYBufferRowOffsets: 0x7c97a8,
+        gnTileClipLeft: 0x7ca318,
+        gUnrelated: 0x700000,
+      },
+      globalSizes: {
+        gaYBufferRowOffsets: 2928,
+        gnTileClipLeft: 4,
+        gUnrelated: 16,
+      },
+      imageBase: '0x400000',
+    };
+
+    const CLEAR_Y_BUFFER = `
+      void f() {
+        uint32_t* pRow;
+        pRow = (uint32_t*)gaYBufferRowOffsets;
+        do {
+          *pRow = nRowOffset;
+          pRow = pRow + 1;
+        } while ((int)pRow < 0x7ca318);
+      }`;
+
+    it('resolves the D2GFX_ClearYBuffer bound to the end of the array it walks', () => {
+      const out = run(CLEAR_Y_BUFFER, YBUFFER);
+      assert.ok(
+        out.includes('(char*)&gaYBufferRowOffsets + sizeof(gaYBufferRowOffsets)'),
+        `Expected the end of the array in: ${out}`,
+      );
+      assert.ok(!out.includes('gnTileClipLeft'), `The next object must not appear: ${out}`);
+      assert.ok(!out.includes('0x7ca318'), `The literal must be gone: ${out}`);
+    });
+
+    it('reaches the same answer through the post-transform spelling', () => {
+      // By the time later passes have run the base reads `&name` and the
+      // advance is a postfix `++`; the evidence is the same either way.
+      const out = run(`
+        void f() {
+          uint32_t* pRow = &gaYBufferRowOffsets;
+          do {
+            *pRow = nRowOffset;
+            pRow++;
+          } while ((int)pRow < 0x7ca318);
+        }`, YBUFFER);
+      assert.ok(
+        out.includes('(char*)&gaYBufferRowOffsets + sizeof(gaYBufferRowOffsets)'),
+        `Expected the end of the array in: ${out}`,
+      );
+    });
+
+    it('reads the base through the literal this pass would resolve itself', () => {
+      const out = run(`
+        void f() {
+          uint32_t* pRow;
+          pRow = (uint32_t*)0x7c97a8;
+          do { pRow = pRow + 1; } while ((int)pRow < 0x7ca318);
+        }`, YBUFFER);
+      assert.ok(
+        out.includes('(char*)&gaYBufferRowOffsets + sizeof(gaYBufferRowOffsets)'),
+        `Expected the end of the array in: ${out}`,
+      );
+    });
+
+    it('resolves the same bound written with the operands the other way round', () => {
+      const out = run(`
+        void f() {
+          uint32_t* pRow = &gaYBufferRowOffsets;
+          do { pRow = pRow + 1; } while (0x7ca318 > (int)pRow);
+        }`, YBUFFER);
+      assert.ok(
+        out.includes('(char*)&gaYBufferRowOffsets + sizeof(gaYBufferRowOffsets)'),
+        `Expected the end of the array in: ${out}`,
+      );
+    });
+
+    it('resolves an end-of-array bound no global claims as a base', () => {
+      // Same evidence, no ambiguity to break: nothing lives at 0x7ca318, so
+      // today the literal survives as an absolute image address.
+      const out = run(CLEAR_Y_BUFFER, {
+        ...YBUFFER,
+        globalAddresses: { gaYBufferRowOffsets: 0x7c97a8, gUnrelated: 0x700000 },
+        globalSizes: { gaYBufferRowOffsets: 2928, gUnrelated: 16 },
+      });
+      assert.ok(
+        out.includes('(char*)&gaYBufferRowOffsets + sizeof(gaYBufferRowOffsets)'),
+        `Expected the end of the array in: ${out}`,
+      );
+    });
+
+    it('keeps &B where the same literal is not in a comparison', () => {
+      const out = run(`void f() { p = 0x7ca318; }`, YBUFFER);
+      assert.ok(out.includes('&gnTileClipLeft'), `Expected &gnTileClipLeft in: ${out}`);
+      assert.ok(!out.includes('sizeof'), `No end form outside a comparison: ${out}`);
+    });
+
+    it('keeps &B where the compared pointer comes from somewhere else', () => {
+      const out = run(`
+        void f() {
+          uint32_t* q;
+          q = (uint32_t*)gUnrelated;
+          while ((int)q < 0x7ca318) { q = q + 1; }
+        }`, YBUFFER);
+      assert.ok(out.includes('&gnTileClipLeft'), `Expected &gnTileClipLeft in: ${out}`);
+      assert.ok(!out.includes('sizeof'), `Unrelated base is no evidence: ${out}`);
+    });
+
+    it('keeps &B where the compared pointer has no traceable origin', () => {
+      const out = run(`
+        void f() {
+          uint32_t* pRow = GetRows();
+          do { pRow = pRow + 1; } while ((int)pRow < 0x7ca318);
+        }`, YBUFFER);
+      assert.ok(out.includes('&gnTileClipLeft'), `Expected &gnTileClipLeft in: ${out}`);
+      assert.ok(!out.includes('sizeof'), `An untraced pointer is no evidence: ${out}`);
+    });
+
+    it('keeps &B where the pointer is assigned from two different globals', () => {
+      const out = run(`
+        void f() {
+          uint32_t* pRow = &gaYBufferRowOffsets;
+          if (c) { pRow = (uint32_t*)gUnrelated; }
+          do { pRow = pRow + 1; } while ((int)pRow < 0x7ca318);
+        }`, YBUFFER);
+      assert.ok(out.includes('&gnTileClipLeft'), `Two origins are no evidence: ${out}`);
+    });
+
+    it('keeps &B where the pointer had its address taken', () => {
+      const out = run(`
+        void f() {
+          uint32_t* pRow = &gaYBufferRowOffsets;
+          Init(&pRow);
+          do { pRow = pRow + 1; } while ((int)pRow < 0x7ca318);
+        }`, YBUFFER);
+      assert.ok(out.includes('&gnTileClipLeft'), `An aliased pointer is no evidence: ${out}`);
+    });
+
+    it('skips an ambiguity whose base global has no known size', () => {
+      const out = run(CLEAR_Y_BUFFER, {
+        ...YBUFFER,
+        globalSizes: { gnTileClipLeft: 4, gUnrelated: 16 },
+      });
+      assert.ok(out.includes('&gnTileClipLeft'), `No extent, no end: ${out}`);
+      assert.ok(!out.includes('sizeof'), `No extent, no end form: ${out}`);
+    });
+
+    it('keeps &B where the literal is the base of the very global walked', () => {
+      // p walks gnTileClipLeft and the bound is gnTileClipLeft's own base: that
+      // is not one-past-the-end of anything, and the base reading stands.
+      const out = run(`
+        void f() {
+          uint32_t* p = &gnTileClipLeft;
+          while ((int)p < 0x7ca318) { p = p + 1; }
+        }`, YBUFFER);
+      assert.ok(out.includes('&gnTileClipLeft'), `Expected &gnTileClipLeft in: ${out}`);
+      assert.ok(!out.includes('sizeof'), `Not an end: ${out}`);
+    });
+
+    it('leaves an equality comparison alone', () => {
+      // `==` is not a bound; a pointer tested against an object's address is
+      // the ordinary reading and the ambiguity rule has no business there.
+      const out = run(`
+        void f() {
+          uint32_t* pRow = &gaYBufferRowOffsets;
+          if ((int)pRow == 0x7ca318) { g(); }
+        }`, YBUFFER);
+      assert.ok(out.includes('&gnTileClipLeft'), `Expected &gnTileClipLeft in: ${out}`);
+      assert.ok(!out.includes('sizeof'), `Equality is not a bound: ${out}`);
+    });
+
+    it('does not fire on a bound that is merely inside the array', () => {
+      const out = run(`
+        void f() {
+          uint32_t* pRow = &gaYBufferRowOffsets;
+          do { pRow = pRow + 1; } while ((int)pRow < 0x7c9800);
+        }`, YBUFFER);
+      assert.ok(!out.includes('sizeof'), `An interior bound is not the end: ${out}`);
+      assert.ok(out.includes('(char*)&gaYBufferRowOffsets + 88'), `Interior form: ${out}`);
+    });
+  });
 });

@@ -42,6 +42,28 @@
  * another's interior names the base, which is the more specific fact. Rule 2
  * requires uniqueness among interiors only.
  *
+ * ## One past the end of A is also the base of B
+ *
+ * `gaYBufferRowOffsets` is `int32_t[732]` at 0x7c97a8; 0x7c97a8 + 732*4 is
+ * 0x7ca318, which is `&gnTileClipLeft`. In the image those are the same byte.
+ * In this tree they are two objects the linker places wherever it likes, and
+ * `D2GFX_ClearYBuffer`'s `while ((int)pRow < 0x7ca318)` read as `&gnTileClipLeft`
+ * ran a quarter of a million iterations and smeared a megabyte over whatever
+ * was in between.
+ *
+ * The tie-break is USE, and only one use is decisive. Under a RELATIONAL
+ * operator the literal is a bound, and a bound is a bound on something: when the
+ * other operand provably walks A — traced from the bindings in the same function
+ * back to a global, never guessed — and `A.address + A.size` is exactly the
+ * literal, the literal is A's end and is emitted as one. Everywhere else,
+ * including a comparison whose other operand cannot be traced or traces
+ * somewhere else, rules 1-3 stand unchanged and the literal reads `&B`.
+ *
+ * `==` and `!=` are not bounds and are not touched. Neither is a walk over a RUN
+ * of separate globals — `p = &gFirst; ... while (p < &gSixth)` — where no single
+ * extent ends at the bound: that shape is equally broken by relocation, but the
+ * repair is to type the run as one array in Ghidra, not to invent an extent here.
+ *
  * ## Guards
  *
  * **The complement path needs the high bit.** Image addresses live around
@@ -87,10 +109,12 @@
 
 import { NodeKind } from '../../../ast/kinds.js';
 import { Expr, Type } from '../../../ast/factory.js';
+import { traverseAST } from '../../../ast/visitor.js';
 import type {
   ASTNode,
   AssignExpr,
   BinaryExpr,
+  CStyleCastExpr,
   CallExpr,
   CommaExpr,
   ConditionalExpr,
@@ -101,12 +125,23 @@ import type {
   QualifiedId,
   ReturnStmt,
   UnaryExpr,
+  VariableDecl,
 } from '../../../ast/nodes.js';
 import { createTransformer, type Transformer } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 
 // Operators where an integer literal is a numeric operand, not an address
 const ARITHMETIC_OPS = new Set(['+', '-', '*', '/', '%', '&', '|', '^', '<<', '>>']);
+
+/**
+ * The operators that make a literal a BOUND rather than an identity.
+ *
+ * `==` and `!=` are deliberately absent: testing a pointer against an object's
+ * address is the ordinary reading of that address, and the one-past-the-end
+ * rule below has no business rewriting it. A `<` is different — it is the
+ * termination test of a walk, and what terminates a walk over A is the end of A.
+ */
+const RELATIONAL_OPS = new Set(['<', '<=', '>', '>=']);
 
 /**
  * The same reasoning as `ARITHMETIC_OPS`, one node kind over.
@@ -344,6 +379,32 @@ function complemented(form: Expression): Expression {
   return Expr.unary('~', Expr.cast(Type.typedef('uintptr_t'), form));
 }
 
+/**
+ * One past the end of `a`, spelled through `sizeof` — `((char*)&a + sizeof(a))`,
+ * or `(a + sizeof(a))` for a string constant, whose name already decays.
+ *
+ * **Why `sizeof` and not the byte count the extraction reports.** The extent is
+ * what PROVES the literal is A's end; it is not what the bound should be
+ * SPELLED as. A literal count is a second, independent statement of A's size,
+ * and if the declaration this tree emits for A disagrees with it — a lost array
+ * dimension is exactly the shape of that failure, and `gaYBufferRowOffsets` is
+ * emitted `static uint32_t` today while Ghidra types it `int32_t[732]` — the
+ * count walks off the end of the object and the smear this rule exists to stop
+ * comes back in a smaller form. `sizeof(a)` cannot: whatever A is declared as,
+ * the bound is A's own storage, so the loop is either right or short, never
+ * out of bounds. A short loop is a visible functional bug; an over-long one
+ * corrupts whatever the linker put next.
+ */
+function endOfExtent(anchor: Candidate): Expression {
+  const designator = (): Expression => (anchor.segments.length === 0
+    ? Expr.identifier(anchor.name)
+    : Expr.qualifiedId([...anchor.segments, anchor.name]));
+  const base = anchor.stringConstant
+    ? designator()
+    : Expr.cast(Type.pointer(Type.char()), Expr.unary('&', designator()));
+  return Expr.paren(Expr.binary(base, '+', Expr.sizeof(designator(), false)));
+}
+
 // ============================================
 // TRANSFORMER
 // ============================================
@@ -407,6 +468,198 @@ function createGlobalAddressLiteralTransformer(
     });
   }
   if (candidates.length === 0) return createTransformer({});
+
+  /** By emitted name, for the derivation scan below. */
+  const byName = new Map<string, Candidate>();
+  /** By exact base, so a raw address literal in an initialiser names its global. */
+  const baseAt = new Map<number, Candidate[]>();
+  for (const c of candidates) {
+    if (!byName.has(c.name)) byName.set(c.name, c);
+    const at = baseAt.get(c.address);
+    if (at) at.push(c); else baseAt.set(c.address, [c]);
+  }
+  /** The one global based exactly at `v`, or null where none or several are. */
+  function exactBase(v: number): Candidate | null {
+    const at = baseAt.get(v);
+    return at && at.length === 1 ? at[0]! : null;
+  }
+
+  // ============================================
+  // WHERE A POINTER CAME FROM
+  // ============================================
+
+  /**
+   * What an expression ultimately designates: a global, a local variable, or
+   * nothing this pass can name.
+   *
+   * The walk sees through the conversions that do not change WHICH object is
+   * being pointed at — parens, casts, `&`, unary `+`, and pointer displacement
+   * by `+`/`-`. It stops at everything that does: a dereference, a subscript, a
+   * member access, a call. `*p` is a different object from `p`, and treating it
+   * as the same would let a load through an unrelated pointer stand in as
+   * evidence about A's extent.
+   */
+  type Root =
+    | { readonly kind: 'global'; readonly candidate: Candidate }
+    | { readonly kind: 'variable'; readonly name: string }
+    | null;
+
+  function namedRoot(name: string): Root {
+    const global = byName.get(name);
+    return global ? { kind: 'global', candidate: global } : { kind: 'variable', name };
+  }
+
+  function rootOf(expr: Expression | null | undefined): Root {
+    if (!expr) return null;
+    switch (expr.kind) {
+      case NodeKind.ParenExpr:
+        return rootOf((expr as ParenExpr).expression);
+      case NodeKind.CStyleCastExpr:
+        return rootOf((expr as CStyleCastExpr).expression);
+      case NodeKind.UnaryExpr: {
+        const unary = expr as UnaryExpr;
+        // `&a` and `+a` designate `a`; `*a` and the increments do not.
+        if (unary.operator === '&' || unary.operator === '+') return rootOf(unary.operand);
+        return null;
+      }
+      case NodeKind.Identifier:
+        return namedRoot((expr as Identifier).name);
+      case NodeKind.QualifiedId: {
+        const tail = (expr as QualifiedId).name;
+        return tail.kind === NodeKind.Identifier
+          ? namedRoot((tail as Identifier).name)
+          : null;
+      }
+      case NodeKind.IntegerLiteral: {
+        const literal = expr as IntegerLiteralExpr;
+        if (literal.value < 0n || literal.value >= BigInt(WORD)) return null;
+        const owner = exactBase(Number(literal.value));
+        return owner ? { kind: 'global', candidate: owner } : null;
+      }
+      case NodeKind.BinaryExpr: {
+        const binary = expr as BinaryExpr;
+        // Displacement keeps the object; anything else is a new value.
+        if (binary.operator !== '+' && binary.operator !== '-') return null;
+        const left = rootOf(binary.left);
+        if (left) return left;
+        return binary.operator === '+' ? rootOf(binary.right) : null;
+      }
+      default:
+        return null;
+    }
+  }
+
+  /**
+   * What each local was last known to have come from, over the whole unit this
+   * transformer was handed — which is one function.
+   *
+   * `origin` is the single global every binding of the name traced back to;
+   * `poisoned` records that they did not all agree, or that one of them was
+   * something this pass cannot follow. Only an unpoisoned name with an origin
+   * is evidence, so every uncertainty collapses to "no answer" rather than to a
+   * guess.
+   *
+   * A name assigned FROM ITSELF is not a rebinding: `pRow = pRow + 1` is the
+   * walk, and it is the shape the whole rule is about. Compound assignment and
+   * the increments are the same statement written shorter and are ignored for
+   * the same reason. Taking a name's ADDRESS poisons it: `Init(&pRow)` can
+   * store anything into it, and the scan does not follow callees.
+   */
+  interface Origin {
+    candidate: Candidate | null;
+    poisoned: boolean;
+  }
+  const origins = new Map<string, Origin>();
+
+  function originOf(name: string): Origin {
+    let origin = origins.get(name);
+    if (!origin) {
+      origin = { candidate: null, poisoned: false };
+      origins.set(name, origin);
+    }
+    return origin;
+  }
+
+  function noteBinding(name: string, source: Root): void {
+    const origin = originOf(name);
+    if (origin.poisoned) return;
+    if (source && source.kind === 'variable' && source.name === name) return;
+    if (source && source.kind === 'global') {
+      if (origin.candidate && origin.candidate !== source.candidate) {
+        origin.poisoned = true;
+        return;
+      }
+      origin.candidate = source.candidate;
+      return;
+    }
+    origin.poisoned = true;
+  }
+
+  /** The bare name a binding target designates, or null if it is not a name. */
+  function boundName(target: Expression): string | null {
+    const root = rootOf(target);
+    return root && root.kind === 'variable' ? root.name : null;
+  }
+
+  function scanOrigins(unit: ASTNode): void {
+    origins.clear();
+    for (const node of traverseAST(unit)) {
+      if (node.kind === NodeKind.VariableDecl) {
+        const decl = node as VariableDecl;
+        if (decl.initializer && decl.initializer.kind !== NodeKind.InitListExpr) {
+          noteBinding(decl.name.name, rootOf(decl.initializer as Expression));
+        }
+        continue;
+      }
+      if (node.kind === NodeKind.AssignExpr) {
+        const assign = node as AssignExpr;
+        // A compound assignment displaces; only `=` rebinds.
+        if (assign.operator !== '=') continue;
+        const name = boundName(assign.left);
+        if (name) noteBinding(name, rootOf(assign.right));
+        continue;
+      }
+      if (node.kind === NodeKind.UnaryExpr) {
+        const unary = node as UnaryExpr;
+        if (unary.operator !== '&') continue;
+        const name = boundName(unary.operand);
+        if (name) originOf(name).poisoned = true;
+      }
+    }
+  }
+
+  /** The global a compared operand provably walks, or null. */
+  function walkedGlobal(expr: Expression): Candidate | null {
+    const root = rootOf(expr);
+    if (!root) return null;
+    if (root.kind === 'global') return root.candidate;
+    const origin = origins.get(root.name);
+    return origin && !origin.poisoned ? origin.candidate : null;
+  }
+
+  /**
+   * The end-of-A reading of one side of a comparison, or null to leave it as it
+   * is.
+   *
+   * Both readings of the literal have to exist for there to be a decision, but
+   * only ONE of them can be checked cheaply: `A.address + A.size === v` says
+   * `v` is one past the end of A, and the other operand walking A says which
+   * object the bound belongs to. Those two together identify A uniquely, so no
+   * separate search for "globals ending at v" is needed — a second global
+   * ending there is not the one the walk started in.
+   */
+  function endReading(side: ASTNode, other: Expression): Expression | null {
+    const literal = literalBehind(side);
+    if (!literal) return null;
+    if (literal.value < 0n || literal.value >= BigInt(WORD)) return null;
+    const v = Number(literal.value);
+
+    const walked = walkedGlobal(other);
+    // A zero or unknown extent has no computable end, and a global whose own
+    // base is the literal is not one past anything.
+    if (!walked || walked.size <= 0 || walked.address + walked.size !== v) return null;
+    return endOfExtent(walked);
+  }
 
   /**
    * Every replacement this pass produced, against the node it came from — the
@@ -507,7 +760,7 @@ function createGlobalAddressLiteralTransformer(
     }
   }
 
-  return createTransformer({
+  const transform = createTransformer({
     // Bottom-up: a literal is visited before the expression that contains it.
     visitNode(node: ASTNode) {
       // `x |= 0x800000` is arithmetic with a store folded in, but it is an
@@ -592,11 +845,39 @@ function createGlobalAddressLiteralTransformer(
 
     // An address in arithmetic is indistinguishable from a mask or a scale
     // factor, so a replacement under an arithmetic operator is withdrawn.
+    //
+    // A relational operator is the other case entirely: there the literal is a
+    // BOUND, and a bound one past the end of the object the other operand walks
+    // is that object's end, not the next object's base — the two are the same
+    // byte in the image and different objects once the linker has placed them.
     visitBinaryExpr(node: BinaryExpr) {
-      if (!ARITHMETIC_OPS.has(node.operator)) return undefined;
-      return withOperandsRestored(node);
+      if (ARITHMETIC_OPS.has(node.operator)) return withOperandsRestored(node);
+      if (!RELATIONAL_OPS.has(node.operator)) return undefined;
+
+      const right = endReading(node.right, node.left);
+      if (right) {
+        const form = replacing(node.right, right) as Expression;
+        produced.set(form, produced.get(node.right) ?? node.right);
+        return { ...node, right: form };
+      }
+      const left = endReading(node.left, node.right);
+      if (left) {
+        const form = replacing(node.left, left) as Expression;
+        produced.set(form, produced.get(node.left) ?? node.left);
+        return { ...node, left: form };
+      }
+      return undefined;
     },
   });
+
+  // The origins have to be read while the comparison is being visited, and the
+  // visitor is bottom-up, so they are collected in one pass over the ORIGINAL
+  // tree before the transform runs — before this pass has rewritten any of the
+  // literals the scan itself resolves.
+  return (unit: ASTNode) => {
+    scanOrigins(unit);
+    return transform(unit);
+  };
 }
 
 // ============================================
