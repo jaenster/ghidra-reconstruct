@@ -66,7 +66,8 @@ import { generateReadme } from './readme.js';
 import { conventionKeyword } from './calling-convention.js';
 import { organizeByNamespace, getFilePath, setModuleNames, setNamespaceCollisionTypes, normalizeQualifiedReference } from './namespace.js';
 import { buildNamespaceResolution, namespaceResolution, renderNamespace } from './namespace-resolution.js';
-import { setInteriorLabelSymbols, resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, setDeclarationClosureDataContent, getDeclarationClosureReport, isUnreferenceableArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType, emittedNamespaceOf } from './globals-header.js';
+import { setInteriorLabelSymbols, resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, setDeclarationClosureDataContent, getDeclarationClosureReport, isUnreferenceableArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, setInitializerAddressTable, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType, emittedNamespaceOf } from './globals-header.js';
+import { normalizeDataAddress, stringDefinition } from './declaration-closure.js';
 import { harvestAnnotatedParameterTypes } from './win32-signatures.js';
 import { isPlatformOrBuiltinType, isLibraryType, generatePlatformHeader, arrayRowTypedefLines, arrayRowReturn, arrayRowSpelling, GHIDRA_PSEUDO_OP_RESULT_TYPES, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, platformDefinedFunctionNames, platformVoidPointerFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
 import { createOverrideRegistry } from '../overrides/index.js';
@@ -836,7 +837,7 @@ export function generateProject(
         for (const [k, v] of unsortedMap) funcToImpl.set(k, v);
       }
       computeFileLocalGlobals(analyzedGlobals, funcToImpl);
-      const rescoped = reconcileStaticScopeWithBodyReferences(analyzedGlobals, functions, funcToImpl, allDataTypeNames, programInfo?.imageBase);
+      const rescoped = reconcileStaticScopeWithBodyReferences(analyzedGlobals, functions, funcToImpl, allDataTypeNames, programInfo?.imageBase, strings ?? []);
       if (rescoped.promotedToGlobal || rescoped.promotedToFileLocal) {
         console.log(`Globals rescoped from body references: ${rescoped.promotedToGlobal} to file scope in globals.cpp, ${rescoped.promotedToFileLocal} from function-local to file-local`);
       }
@@ -857,7 +858,7 @@ export function generateProject(
       const targetDir = getTargetDirectory(targetName);
       const tom = generateFilesForFunctions(
         target.functions, classes, namespaces, dataTypes, globals,
-        options, context, targetDir, files, sourceMaps, globalsPath
+        options, context, targetDir, files, sourceMaps, globalsPath, strings
       );
       for (const [k, v] of tom) mergedTypeOwnerMap.set(k, v);
 
@@ -878,7 +879,7 @@ export function generateProject(
     if (resolution.unsorted.length > 0) {
       const tom = generateFilesForFunctions(
         resolution.unsorted, classes, namespaces, dataTypes, globals,
-        options, context, 'unsorted', files, sourceMaps, globalsPath
+        options, context, 'unsorted', files, sourceMaps, globalsPath, strings
       );
       for (const [k, v] of tom) mergedTypeOwnerMap.set(k, v);
     }
@@ -934,7 +935,7 @@ export function generateProject(
     if (options.promoteStaticGlobals && analyzedGlobals.length > 0) {
       const funcToImpl = buildFuncToImplPathMap(functions, classes, namespaces, options, '');
       computeFileLocalGlobals(analyzedGlobals, funcToImpl);
-      reconcileStaticScopeWithBodyReferences(analyzedGlobals, functions, funcToImpl, allDataTypeNames, programInfo?.imageBase);
+      reconcileStaticScopeWithBodyReferences(analyzedGlobals, functions, funcToImpl, allDataTypeNames, programInfo?.imageBase, strings ?? []);
     }
 
     // Calculate globals path (needed for generateFilesForFunctions includes)
@@ -943,7 +944,7 @@ export function generateProject(
     // Generate files (classification happens here)
     const flatTypeOwnerMap = generateFilesForFunctions(
       functions, classes, namespaces, dataTypes, globals,
-      options, context, '', files, sourceMaps, flatGlobalsPath
+      options, context, '', files, sourceMaps, flatGlobalsPath, strings
     );
 
     // Generate globals.h/cpp AFTER classification
@@ -1766,7 +1767,8 @@ export function reconcileStaticScopeWithBodyReferences(
   functions: ExtractedFunction[],
   funcNameToImplPath: Map<string, string>,
   typeNames: ReadonlySet<string>,
-  imageBase?: string | number
+  imageBase?: string | number,
+  strings?: ReadonlyArray<ExtractedString>
 ): { promotedToGlobal: number; promotedToFileLocal: number } {
   // Names a `scope === 'global'` symbol already owns. Promoting a second symbol
   // into one of them cannot help: globals.h declares exactly one of the two, and
@@ -1795,7 +1797,7 @@ export function reconcileStaticScopeWithBodyReferences(
   }
   if (candidates.size === 0) return { promotedToGlobal: 0, promotedToFileLocal: 0 };
 
-  const ownerOfLiteral = buildAddressLiteralResolver(analyzedGlobals, imageBase);
+  const ownerOfLiteral = buildAddressLiteralResolver(analyzedGlobals, imageBase, strings ?? []);
 
   // Which functions reference each candidate, read off Ghidra's decompiler
   // output — the INPUT to codegen, and the only place the eventual references
@@ -1934,9 +1936,94 @@ const MAX_INDEXED_EXTENT = 0x1000000;
  *    the larger size would claim bytes the smaller object does not own. An
  *    address entry with no size entry still resolves on its exact base.
  */
+/**
+ * Ghidra's own label for a string datum, reproduced: `s_<text>_<address>`.
+ *
+ * Every character that is not identifier-legal becomes `_`, one for one — that
+ * is what turns `Error 1:\nDiablo II is unable to p…` into
+ * `Error_1__Diablo_II_is_unable_to_p` — and the text is cut at 33 characters.
+ * Both facts are read off the labels ALREADY in the tree: every truncated one
+ * there is exactly 33 characters wide, and no invalid character is ever
+ * collapsed or dropped. The address is 8 lowercase hex digits, which is what
+ * `stringLabelAddress` reads back out.
+ *
+ * WHY REPRODUCE IT rather than carry it: `list_strings` reports address, bytes,
+ * length and encoding, and no name — Ghidra's label is not a symbol, it is
+ * derived from the datum on demand. The bodies that reference one spell it this
+ * way, so a reference synthesized here reaches the SAME object the closure
+ * already declares and defines for them.
+ *
+ * The failure mode of getting the convention wrong is bounded and visible: a
+ * second `char[]` with identical bytes under a slightly different name, both
+ * defined by the closure. Nothing miscompiles and nothing goes undefined.
+ */
+export function ghidraStringLabelName(address: number, value: string): string {
+  let text = '';
+  for (const ch of value) {
+    if (text.length >= 33) break;
+    text += /[A-Za-z0-9_]/.test(ch) ? ch : '_';
+  }
+  return `s_${text}_${address.toString(16).padStart(8, '0')}`;
+}
+
+/**
+ * The string constants an address literal may legitimately resolve to.
+ *
+ * A string datum is NOT a global: Ghidra types it `string`, which is a byte
+ * layout and not a C type, so `analyzeDataSymbols` filters it out and no
+ * `globals` record for it is ever built. Its declaration comes from the
+ * declaration closure instead, off the `s_<text>_<hex>` naming convention, as
+ * `extern char <name>[];` plus a definition built from the bytes.
+ *
+ * That last part is the admission rule here, and it is exact rather than
+ * approximate: a candidate is admitted only if `stringDefinition` — the same
+ * function the closure will call — can actually produce the definition. A
+ * literal resolved to a name nothing defines is an undefined symbol at link,
+ * which is strictly worse than the literal it replaced. So a `unicode` datum, or
+ * one whose decoded bytes disagree with the length Ghidra reports, is skipped.
+ *
+ * The extent is `length + 1`: the object the closure emits is
+ * `char name[] = "…"`, whose size is the bytes plus the terminator. Ghidra's own
+ * data size is deliberately NOT used — it can include alignment padding the
+ * emitted object does not own, and an interior offset into padding would point
+ * past the end.
+ */
+function stringConstantExtents(
+  strings: ReadonlyArray<ExtractedString>
+): Array<{ name: string; address: number; size: number }> {
+  const out: Array<{ name: string; address: number; size: number }> = [];
+  const claimed = new Set<string>();
+  for (const s of strings) {
+    if (!s || typeof s.value !== 'string') continue;
+    const address = Number.parseInt(normalizeDataAddress(String(s.address ?? '')), 16);
+    if (!Number.isSafeInteger(address) || address <= 0) continue;
+    if (!Number.isSafeInteger(s.length) || s.length <= 0) continue;
+    const name = ghidraStringLabelName(address, s.value);
+    // First record for an address wins, exactly as the closure's content table
+    // decides it — two records are two readings of the same bytes, and taking
+    // the later one silently would make the tree depend on extraction order.
+    if (claimed.has(name)) continue;
+    const built = stringDefinition(name, {
+      value: s.value,
+      length: s.length,
+      encoding: s.encoding ?? '',
+    });
+    if ('reason' in built) continue;
+    claimed.add(name);
+    out.push({ name, address, size: s.length + 1 });
+  }
+  return out;
+}
+
 export function buildGlobalAddressExtentTables(
-  globals: AnalyzedDataSymbol[]
-): { globalAddresses: Record<string, number>; globalSizes: Record<string, number> } {
+  globals: AnalyzedDataSymbol[],
+  strings: ReadonlyArray<ExtractedString> = []
+): {
+  globalAddresses: Record<string, number>;
+  globalSizes: Record<string, number>;
+  /** The subset of the two tables above whose objects are `char[N]` strings. */
+  stringConstantNames: string[];
+} {
   const globalAddresses: Record<string, number> = {};
   const ambiguousGlobalAddresses = new Set<string>();
   for (const g of globals) {
@@ -1971,7 +2058,20 @@ export function buildGlobalAddressExtentTables(
     globalSizes[name] = size;
   }
 
-  return { globalAddresses, globalSizes };
+  // The string constants last, and never over a name a global already owns: a
+  // global has a modelled type and a declaration of its own, and a synthesized
+  // label losing to it costs one unresolved literal, while the reverse would
+  // give the global's address the wrong type at every use.
+  const stringConstantNames: string[] = [];
+  for (const { name, address, size } of stringConstantExtents(strings)) {
+    if (globalAddresses[name] !== undefined || ambiguousGlobalAddresses.has(name)) continue;
+    if (globalSizes[name] !== undefined || ambiguousGlobalSizes.has(name)) continue;
+    globalAddresses[name] = address;
+    globalSizes[name] = size;
+    stringConstantNames.push(name);
+  }
+
+  return { globalAddresses, globalSizes, stringConstantNames };
 }
 
 /**
@@ -1991,9 +2091,10 @@ export function buildGlobalAddressExtentTables(
  */
 function buildAddressLiteralResolver(
   globals: AnalyzedDataSymbol[],
-  imageBase: string | number | undefined
+  imageBase: string | number | undefined,
+  strings: ReadonlyArray<ExtractedString> = []
 ): ((v: number) => string | null) | null {
-  const { globalAddresses, globalSizes } = buildGlobalAddressExtentTables(globals);
+  const { globalAddresses, globalSizes } = buildGlobalAddressExtentTables(globals, strings);
   const floor = addressLiteralFloor(imageBase);
 
   const baseAt = new Map<number, string[]>();
@@ -2209,7 +2310,14 @@ function generateFilesForFunctions(
   dirPrefix: string,
   files: Map<string, SourceFile>,
   sourceMaps: Map<string, SourceMap>,
-  globalsHeaderPath?: string
+  globalsHeaderPath?: string,
+  /**
+   * The string data Ghidra read, for the address tables built below. A string
+   * datum is not a global — the globals extraction drops its `string` type — so
+   * it has to arrive on its own or an address literal pointing at one resolves
+   * to nothing.
+   */
+  strings?: ExtractedString[]
 ): Map<string, string> {
   const organized = organizeByNamespace(functions, classes, namespaces);
 
@@ -2539,7 +2647,7 @@ function generateFilesForFunctions(
   // are invariant in C++, so the original source had to write a cast there; the
   // `funcptr-arg-cast` transform emits it, but only where the MODEL says the two
   // prototypes actually differ. Build that comparison table here, once.
-  context.funcPtrArgCasts = buildFuncPtrArgCastTables(functions, analyzedGlobals, dataTypes.filter(dt => dt.kind === 'FUNCTION_DEFINITION') as import('../types.js').ExtractedFunctionDefinition[], dataTypes);
+  context.funcPtrArgCasts = buildFuncPtrArgCastTables(functions, analyzedGlobals, dataTypes.filter(dt => dt.kind === 'FUNCTION_DEFINITION') as import('../types.js').ExtractedFunctionDefinition[], dataTypes, strings ?? []);
   // Data initializers are emitted from strings, not an AST — the globals emitter
   // needs the same prototype tables to decide whether a function address stored
   // in a slot needs the cast C++ has never let it do implicitly.
@@ -2547,6 +2655,36 @@ function generateFilesForFunctions(
     context.funcPtrArgCasts.functionSignatures,
     context.funcPtrArgCasts.funcdefSignatures,
   );
+
+  // The address table those initializers resolve against — the SAME one
+  // `global-address-literal` reads, off the same build. A literal in an
+  // initializer is unreachable from the AST pass (the static-locals block is
+  // appended as text after the body was transformed), and the six absolute
+  // `.rdata` addresses in `gApplicationModeCommandLineArgumentArray` are how
+  // that showed up: the recompiled executable walked unmapped memory at
+  // 0x006CC928.
+  //
+  // Only names an initializer can legally NAME are offered. A string constant
+  // qualifies — the declaration closure gives each one an `extern char N[];` in
+  // globals.h plus a single definition — and so does a `scope === 'global'`
+  // symbol. A file-local or static-local is emitted `static` inside one .cpp and
+  // referencing it from another is undefined at link. Scopes are already final
+  // for demotion at this point: `computeFileLocalGlobals` ran before this
+  // function was called, and everything after it only promotes.
+  {
+    const referenceableNames = new Set<string>(context.funcPtrArgCasts.stringConstantNames);
+    for (const g of analyzedGlobals) {
+      if (g.scope !== 'global') continue;
+      const name = g.suggestedName || g.name;
+      if (name) referenceableNames.add(name);
+    }
+    setInitializerAddressTable({
+      globalAddresses: context.funcPtrArgCasts.globalAddresses,
+      stringConstantNames: context.funcPtrArgCasts.stringConstantNames,
+      referenceableNames,
+      imageBase: context.imageBase,
+    });
+  }
 
   // ── Build module graph for include resolution ────────────────────────
   const moduleGraph = buildModuleGraph({
@@ -3558,6 +3696,7 @@ export function buildFuncPtrArgCastTables(
   globals: AnalyzedDataSymbol[],
   funcDefs: import('../types.js').ExtractedFunctionDefinition[],
   dataTypes: ExtractedDataType[],
+  strings: ReadonlyArray<ExtractedString> = [],
 ): FuncPtrArgCastTables {
   const funcdefSignatures: Record<string, string> = {};
   for (const fd of funcDefs) {
@@ -3969,7 +4108,12 @@ export function buildFuncPtrArgCastTables(
     globalTypes[name] = spelled;
   }
 
-  const { globalAddresses, globalSizes } = buildGlobalAddressExtentTables(globals);
+  // The string constants enter the address table HERE, through the shared
+  // builder, so the pass and the scope analysis resolve against one table. They
+  // are not globals — see `stringConstantExtents` — and the only thing their
+  // membership changes is the spelling of a reference to one.
+  const { globalAddresses, globalSizes, stringConstantNames } =
+    buildGlobalAddressExtentTables(globals, strings);
 
   // Global name → the namespace segments its DEFINITION is emitted in. A literal
   // address is folded into a body anywhere — a table in one module pointing into
@@ -4078,6 +4222,7 @@ export function buildFuncPtrArgCastTables(
     globalAddresses,
     globalSizes,
     globalNamespaces,
+    stringConstantNames,
     varArgFunctions: [...varArgFunctions],
     fieldTypes,
     typedefTargets,

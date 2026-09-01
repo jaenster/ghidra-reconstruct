@@ -33,6 +33,7 @@ import {
 import {
   reconcileStaticScopeWithBodyReferences,
   buildGlobalAddressExtentTables,
+  ghidraStringLabelName,
 } from '../codegen/index.js';
 import { setNamespaceCollisionTypes } from '../codegen/namespace.js';
 import type {
@@ -471,6 +472,55 @@ describe('the address table admits the same symbols on both sides', () => {
     assert.strictEqual(globalAddresses['gaLanguageNames_00724a80'], 0x724a80);
     assert.strictEqual(globalSizes['gaLanguageNames_00724a80'], 60);
     assert.strictEqual(globalAddresses['gaLanguageNames_00724a80_1_'], undefined);
+  });
+
+  it('admits a string constant, sized to the object the closure defines', () => {
+    // A string datum is not a global — `analyzeDataSymbols` drops its `string`
+    // type — so it enters the ONE table here or an address literal pointing at
+    // it resolves to nothing. `modstate0` is 9 bytes; the object the closure
+    // emits is `char[10]`, terminator included.
+    const { globalAddresses, globalSizes, stringConstantNames } =
+      buildGlobalAddressExtentTables([], [
+        { address: '006cc928', value: 'modstate0', length: 9, encoding: 'string', xrefCount: 1 },
+      ] as never);
+    assert.strictEqual(globalAddresses['s_modstate0_006cc928'], 0x6cc928);
+    assert.strictEqual(globalSizes['s_modstate0_006cc928'], 10);
+    assert.deepStrictEqual(stringConstantNames, ['s_modstate0_006cc928']);
+  });
+
+  it('refuses a string the closure could not define', () => {
+    // A `unicode` datum has no honest `char[]`, and a value whose bytes
+    // disagree with Ghidra's length lost content in transit. Either one
+    // admitted would resolve a literal to a name nothing ever defines — an
+    // undefined symbol at link, strictly worse than the literal it replaced.
+    const { globalAddresses, stringConstantNames } = buildGlobalAddressExtentTables([], [
+      { address: '006e1750', value: 'Wide', length: 4, encoding: 'unicode', xrefCount: 1 },
+      { address: '006e1740', value: 'block!', length: 20, encoding: 'string', xrefCount: 1 },
+    ] as never);
+    assert.deepStrictEqual(stringConstantNames, []);
+    assert.deepStrictEqual(Object.keys(globalAddresses), []);
+  });
+
+  it('lets a global keep a name a string label would otherwise take', () => {
+    const globals = [
+      { name: 's_modstate0_006cc928', address: '00700000', size: 4 },
+    ] as unknown as AnalyzedDataSymbol[];
+    const { globalAddresses, stringConstantNames } = buildGlobalAddressExtentTables(globals, [
+      { address: '006cc928', value: 'modstate0', length: 9, encoding: 'string', xrefCount: 1 },
+    ] as never);
+    assert.strictEqual(globalAddresses['s_modstate0_006cc928'], 0x700000);
+    assert.deepStrictEqual(stringConstantNames, []);
+  });
+
+  it('reproduces Ghidra\'s label convention', () => {
+    // 1:1 replacement of every character that is not identifier-legal, cut at
+    // 33 — both read off the labels already in the tree.
+    assert.strictEqual(ghidraStringLabelName(0x6ebefc, 'Skill1'), 's_Skill1_006ebefc');
+    assert.strictEqual(ghidraStringLabelName(0x70f130, '207.82.87.133'), 's_207_82_87_133_0070f130');
+    assert.strictEqual(
+      ghidraStringLabelName(0x72daa8, 'Error 1:\nDiablo II is unable to proceed'),
+      's_Error_1__Diablo_II_is_unable_to_p_0072daa8',
+    );
   });
 
   it('drops a name reported at two addresses rather than picking one', () => {

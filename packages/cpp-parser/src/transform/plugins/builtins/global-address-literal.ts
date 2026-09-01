@@ -10,6 +10,8 @@
  * - `0x708360`    →  `&gSFileAsyncReqQueue`
  * - `0x708368`    →  `((char*)&gSFileAsyncReqQueue + 8)`
  * - `-7373669`    →  `~(uintptr_t)((char*)&gSFileAsyncReqQueue + 4)`
+ * - `0x6cc928`    →  `s_modstate0_006cc928`      (a string constant: `char[N]`)
+ * - `0x6cc92b`    →  `(s_modstate0_006cc928 + 3)`
  *
  * ## Why the complement form exists
  *
@@ -202,6 +204,12 @@ interface Candidate {
   size: number;
   /** The namespace the DEFINITION is emitted in. Empty means root scope. */
   segments: readonly string[];
+  /**
+   * True when the object at this address is a STRING CONSTANT, declared
+   * `char <name>[N]`. It changes the spelling, not the resolution — see
+   * `anchoredAddress`.
+   */
+  stringConstant: boolean;
 }
 
 /** A resolved literal: the global it names and the byte offset into it. */
@@ -209,6 +217,7 @@ interface Anchor {
   name: string;
   segments: readonly string[];
   offset: number;
+  stringConstant: boolean;
 }
 
 // ============================================
@@ -225,7 +234,12 @@ interface Anchor {
 function ownerOf(v: number, candidates: readonly Candidate[]): Anchor | null {
   const owned = ownerOfAddress(v, candidates);
   return owned
-    ? { name: owned.candidate.name, segments: owned.candidate.segments, offset: owned.offset }
+    ? {
+      name: owned.candidate.name,
+      segments: owned.candidate.segments,
+      offset: owned.offset,
+      stringConstant: owned.candidate.stringConstant,
+    }
     : null;
 }
 
@@ -297,11 +311,28 @@ export function addressLiteralFloor(imageBase: string | number | undefined): num
 // EMISSION
 // ============================================
 
-/** `&name`, or `((char*)&name + n)` for a non-zero offset. */
+/**
+ * `&name`, or `((char*)&name + n)` for a non-zero offset — and for a STRING
+ * CONSTANT, the bare `name` or `(name + n)`.
+ *
+ * A string constant is declared `char <name>[N]`, so the name already decays to
+ * the `char*` every use of it wants. `&name` there is `char(*)[N]`, a different
+ * type that converts to nothing — the same mistake `array-global-address-of`
+ * exists to undo on Ghidra's `<base>_ARRAY_<hex>` globals, and one this pass
+ * must not make in the first place: that plugin runs at priority 46, before this
+ * one, so nothing would come along afterwards to clean it up.
+ *
+ * The interior form needs no `(char*)` either, for the same reason: pointer
+ * arithmetic on a `char[N]` is already byte arithmetic.
+ */
 function anchoredAddress(anchor: Anchor): Expression {
   const designator = anchor.segments.length === 0
     ? Expr.identifier(anchor.name)
     : Expr.qualifiedId([...anchor.segments, anchor.name]);
+  if (anchor.stringConstant) {
+    if (anchor.offset === 0) return designator;
+    return Expr.paren(Expr.binary(designator, '+', Expr.intLiteral(anchor.offset)));
+  }
   const addressOf = Expr.unary('&', designator);
   if (anchor.offset === 0) return addressOf;
   const bytes = Expr.cast(Type.pointer(Type.char()), addressOf);
@@ -357,6 +388,7 @@ function createGlobalAddressLiteralTransformer(
   const addresses = options.globalAddresses ?? {};
   const sizes = options.globalSizes ?? {};
   const namespaces = options.globalNamespaces ?? {};
+  const stringConstants = new Set(options.stringConstantNames ?? []);
   const floor = effectiveAddressFloor(options.imageBase);
   const returnsNonPointer = options.enclosingReturnsNonPointer === true;
 
@@ -371,6 +403,7 @@ function createGlobalAddressLiteralTransformer(
       address,
       size: Number.isSafeInteger(size) && size! > 0 ? size! : 0,
       segments: namespaces[name] ?? [],
+      stringConstant: stringConstants.has(name),
     });
   }
   if (candidates.length === 0) return createTransformer({});
@@ -591,6 +624,21 @@ export interface GlobalAddressLiteralOptions extends PluginOptions {
    * already resolved; this pass renders a qualifier, it never decides one.
    */
   globalNamespaces?: Record<string, readonly string[]>;
+  /**
+   * The subset of `globalAddresses` whose objects are STRING CONSTANTS —
+   * declared `char <name>[N]`, defined from the bytes Ghidra read.
+   *
+   * Ghidra types a string label `string`, which is not a C type, so the globals
+   * extraction drops it and no `globals` record for it ever exists; the address
+   * table therefore has to be told which of its entries are strings, because the
+   * only thing that changes is the SPELLING of the reference. Everything else —
+   * the floor, the ceiling, the uniqueness rule, the arithmetic withdrawal — is
+   * identical to any other candidate.
+   *
+   * A name here that `globalAddresses` does not carry is ignored: the table is
+   * what admits an address, and this only classifies what it admitted.
+   */
+  stringConstantNames?: readonly string[];
   /**
    * Where the program is mapped, as Ghidra's `ProgramInfo.imageBase` reports it
    * — hex, with or without an `0x` prefix, or already parsed to a number.

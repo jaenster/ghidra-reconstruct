@@ -12,6 +12,7 @@ import { normalizeQualifiedReference } from './namespace.js';
 import { namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 import { computeDeclarationClosure, renderClosureBlock, renderClosureDefinitionBlock, normalizeDataAddress, type ClosureResult, type ClosureStringContent } from './declaration-closure.js';
 import { allOnesSentinel, negativeInUnsignedSlot } from './sentinel-literal.js';
+import { addressLiteralFloor, ADDRESS_LITERAL_CEILING } from '@ghidra-mcp/cpp-parser';
 
 /**
  * Exact Win32 SDK typedef names (not `LP`/`IMAGE_` prefixed) seen as
@@ -691,10 +692,19 @@ export function generateGlobalsHeader(
   // names for data it never typed. This is the one header every translation
   // unit includes, so it is where that closure belongs.
   if (bodyIdentifierFnCounts && bodyIdentifierFnCounts.size > 0) {
+    // A symbol resolved into a DATA INITIALIZER is referenced by the tree even
+    // though no function body names it: the initializer is emitted as text,
+    // after the bodies were parsed and their identifiers counted. Without this
+    // merge a string constant resolved in `gApplicationModeCommandLineArgumentArray`
+    // would reach the compiler with nothing declaring it.
+    const referencedNames = new Map(bodyIdentifierFnCounts);
+    for (const name of initializerAddressReferences()) {
+      if (!referencedNames.has(name)) referencedNames.set(name, 1);
+    }
     const closure = computeDeclarationClosure({
       allFunctions: closureFunctions,
       allGlobals: closureGlobals,
-      referenced: bodyIdentifierFnCounts,
+      referenced: referencedNames,
       declared: emittedDeclarationNames,
       emittedFunctionNames: closureEmittedFunctionNames,
       renderPrototype: closureRenderPrototype ?? (() => null),
@@ -1592,6 +1602,151 @@ function unsignedSlotSpelling(rawValue: string | null | undefined, slotType: str
 }
 
 /**
+ * The exact symbol bases an initializer scalar may be resolved to.
+ *
+ * A literal in a DATA INITIALIZER is out of reach of `global-address-literal`:
+ * `generateStaticLocalsBlock` is emitted as TEXT, and `impl.ts` appends it after
+ * the body has already been parsed, transformed and emitted. The literals here
+ * are `DataValue` scalars, not AST nodes — so the resolution has to happen here,
+ * and it has to happen against the SAME table the pass resolves against, or the
+ * two disagree about what an address even is.
+ *
+ * The table is therefore built by `buildGlobalAddressExtentTables` and pushed in
+ * from the one place that builds it, exactly like the signature tables above it.
+ *
+ * `referenceableNames` is the extra restriction this side needs: a reference
+ * written into an initializer has to be a name the emitted file can NAME. A
+ * string constant qualifies (the declaration closure gives every one an
+ * `extern char N[];` in globals.h and one definition), and so does a
+ * `scope === 'global'` symbol. A file-local or static-local is emitted `static`
+ * inside one .cpp and naming it from anywhere else is undefined at link.
+ */
+interface InitializerAddressEntry {
+  readonly name: string;
+  /** `char[N]`: the bare name already decays. `&name` would be `char(*)[N]`. */
+  readonly stringConstant: boolean;
+}
+
+let initializerAddressBases = new Map<number, InitializerAddressEntry | null>();
+let initializerAddressNamesUsed = new Set<string>();
+
+export function setInitializerAddressTable(input?: {
+  globalAddresses: Record<string, number>;
+  stringConstantNames: readonly string[];
+  referenceableNames: ReadonlySet<string>;
+  imageBase?: string | number;
+}): void {
+  // Module state: a second run in the same process must not inherit the first's
+  // table, and a run with no table must clear it rather than skip the reset.
+  initializerAddressBases = new Map();
+  initializerAddressNamesUsed = new Set();
+  if (!input) return;
+
+  const floor = addressLiteralFloor(input.imageBase);
+  const strings = new Set(input.stringConstantNames);
+  for (const [name, address] of Object.entries(input.globalAddresses)) {
+    if (!input.referenceableNames.has(name)) continue;
+    if (!Number.isSafeInteger(address)) continue;
+    // The same floor and the same ceiling the pass applies. Below the image base
+    // a "symbol" is a Ghidra placeholder standing where a reference could not be
+    // resolved; at 0x80000000 and above nothing is mapped in a 32-bit image.
+    if (address < floor || address >= ADDRESS_LITERAL_CEILING) continue;
+    // Two names on one address identify no object. Recorded as null rather than
+    // deleted, so a later entry cannot resurrect the address.
+    initializerAddressBases.set(address, initializerAddressBases.has(address) ? null : { name, stringConstant: strings.has(name) });
+  }
+}
+
+/**
+ * The names initializers actually referenced, for the declaration closure.
+ *
+ * The closure declares what FUNCTION BODIES name, counted off the transformed
+ * AST. A reference written here is in neither place — it is emitted text, made
+ * after the bodies were counted — so a string constant resolved in an
+ * initializer would reach the compiler with nothing declaring it. These names
+ * are merged into the closure's reference set when globals.h is built.
+ */
+export function initializerAddressReferences(): ReadonlySet<string> {
+  return initializerAddressNamesUsed;
+}
+
+/** The word a Ghidra scalar holds, or null when it is not a plain number. */
+function scalarWordValue(raw: string | null | undefined): number | null {
+  const normalized = normalizeDataValue((raw ?? '').trim());
+  const value = /^0x[0-9a-fA-F]+$/.test(normalized)
+    ? Number.parseInt(normalized.slice(2), 16)
+    : /^\d+$/.test(normalized) ? Number.parseInt(normalized, 10) : NaN;
+  return Number.isSafeInteger(value) ? value : null;
+}
+
+/**
+ * The reference, spelled to fit the slot it is stored in — or null when it
+ * cannot be spelled and the literal must stand.
+ *
+ * The slot in the live case is `uint`, so the value has to be INTEGRAL: a
+ * `char[N]` decays to `char*`, which is not an integer, and a braced initializer
+ * rejects a narrowing conversion outright. `(uint)(uintptr_t)name` carries the
+ * address, is spelled at the slot's own width so nothing narrows, and — not
+ * being a constant expression — becomes dynamic initialization, which is what
+ * makes it follow the object wherever the linker puts it.
+ */
+function initializerAddressSpelling(
+  entry: InitializerAddressEntry,
+  slotType: string | undefined
+): string | null {
+  const slot = slotType?.trim();
+  if (!slot) return null;
+  const reference = shadowQualifyReference(
+    entry.stringConstant ? entry.name : `&${entry.name}`);
+  if (/\*\s*$/.test(slot)) return `(${rootQualifyShadowedType(slot)})${reference}`;
+  const base = baseTypeName(slot).toLowerCase();
+  if (!INTEGER_SLOT_TYPES.has(base)) return null;
+  return `(${rootQualifyShadowedType(slot)})(uintptr_t)${reference}`;
+}
+
+/**
+ * The spellings for one array's elements, or null to leave every one of them
+ * alone.
+ *
+ * The decision is taken per ARRAY, never per element, and that is the whole
+ * safeguard: an initializer scalar has no surrounding expression to corroborate
+ * it, so the corroboration has to come from its neighbours. Six elements all
+ * landing on a symbol base is a pointer table; one of six is a number that
+ * happens to collide with an address, and rewriting it would put a symbol
+ * reference in the middle of five raw words.
+ *
+ *  - every element is a plain scalar,
+ *  - every non-zero one resolves to an EXACT base — no interiors, no complement
+ *    retry, both of which the pass allows itself only because a body gives it a
+ *    surrounding expression,
+ *  - and at least two do, so a lone scalar (or a one-element array, which is the
+ *    same thing) is never rewritten,
+ *  - zero stays zero: a null slot is a null slot.
+ */
+function arrayAddressSpellings(
+  elements: readonly DataValue[],
+  elemType: string | undefined
+): Array<string | undefined> | null {
+  if (elements.length < 2) return null;
+  const out: Array<string | undefined> = new Array(elements.length);
+  let resolved = 0;
+  for (let i = 0; i < elements.length; i++) {
+    const element = elements[i];
+    if (element.kind !== 'scalar') return null;
+    const word = scalarWordValue(element.value);
+    if (word === null) return null;
+    if (word === 0) continue;
+    const entry = initializerAddressBases.get(word);
+    if (!entry) return null;
+    const spelling = initializerAddressSpelling(entry, elemType);
+    if (!spelling) return null;
+    out[i] = spelling;
+    resolved++;
+  }
+  return resolved >= 2 ? out : null;
+}
+
+/**
  * Convert a DataValue tree to a C initializer string.
  *
  * `expectedType` is the declared type of the slot being initialized — the
@@ -1701,18 +1856,29 @@ export function emitDataValue(dv: DataValue, indent = 0, expectedType?: string):
       if (!dv.elements || dv.elements.length === 0) return '{}';
       // The element type is the declared type minus its outermost dimension.
       const elemType = expectedType ? stripOuterArrayDimension(expectedType) : undefined;
+      // A table of absolute image addresses, decided over the whole array — see
+      // `arrayAddressSpellings`. Undefined per element means "emit it as it is",
+      // which is what a zero slot and every element of an unresolved array get.
+      const addressed = arrayAddressSpellings(dv.elements, elemType);
+      if (addressed) {
+        for (const spelling of addressed) {
+          if (!spelling) continue;
+          const named = spelling.match(/[A-Za-z_]\w*$/);
+          if (named) initializerAddressNamesUsed.add(named[0]);
+        }
+      }
       // For small arrays of scalars/pointers, emit on fewer lines
       const isSimple = dv.elements.every(e => e.kind === 'scalar' || e.kind === 'pointer' || e.kind === 'enum');
       if (isSimple && dv.elements.length <= 8) {
         const vals = dv.elements.map((e, i) => {
-          const v = emitDataValue(e, 0, elemType);
+          const v = addressed?.[i] ?? emitDataValue(e, 0, elemType);
           return i < dv.elements!.length - 1 ? `${v},` : v;
         });
         return `{ ${vals.join(' ')} }`;
       }
       // Multi-line array
       const lines = dv.elements.map((e, i) => {
-        const v = emitDataValue(e, indent + 1, elemType);
+        const v = addressed?.[i] ?? emitDataValue(e, indent + 1, elemType);
         const comma = i < dv.elements!.length - 1 ? ',' : '';
         return `${innerPad}${v}${comma}`;
       });

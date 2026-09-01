@@ -22,6 +22,7 @@ import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert';
 
 import {
+  emitDataValue,
   generateGlobalsHeader,
   generateGlobalsImpl,
   getDeclarationClosureReport,
@@ -30,6 +31,7 @@ import {
   setDeclarationClosureEmitters,
   setDeclarationClosureModel,
   setGlobalInitializerTypes,
+  setInitializerAddressTable,
   setMultidimArrayGlobals,
 } from '../codegen/globals-header.js';
 import type { AnalyzedDataSymbol, ReconstructOptions } from '../types.js';
@@ -265,6 +267,38 @@ describe('globals.h declares and exactly one globals unit defines', () => {
     assert.ok(gapped.has('UNK_006da48c'));
     assert.ok(gapped.has('s_207_82_87_133_0070f130'),
       'with no content carried, the string label is a gap too — never invented from its label');
+  });
+
+  it('declares and defines a string only a DATA INITIALIZER references', () => {
+    // The closure counts identifiers off transformed function bodies. A symbol
+    // resolved into an initializer is in neither that count nor any body — the
+    // block is emitted as text afterwards — so without the initializer's own
+    // reference set the reference would reach the compiler undeclared, and the
+    // fix for `gApplicationModeCommandLineArgumentArray` would trade a wild read
+    // for a build error.
+    setDeclarationClosureDataContent([
+      { address: '006cc928', value: 'modstate0', length: 9, encoding: 'string' },
+      { address: '006cc920', value: 'modstate1', length: 9, encoding: 'string' },
+    ]);
+    setInitializerAddressTable({
+      globalAddresses: { s_modstate0_006cc928: 0x6cc928, s_modstate1_006cc920: 0x6cc920 },
+      stringConstantNames: ['s_modstate0_006cc928', 's_modstate1_006cc920'],
+      referenceableNames: new Set(['s_modstate0_006cc928', 's_modstate1_006cc920']),
+      imageBase: '0x400000',
+    });
+    const table = emitDataValue(
+      { kind: 'array', elements: [{ kind: 'scalar', value: '0x6cc928' }, { kind: 'scalar', value: '0x6cc920' }] },
+      0, 'uint');
+    assert.ok(table.includes('s_modstate0_006cc928'), `sanity: ${table}`);
+
+    // No body names either label.
+    const header = generateGlobalsHeader(
+      [GAME_GLOBAL], options, [], undefined, undefined, new Map([['UNK_006da48c', 1]]));
+    assert.match(header, /^extern char s_modstate0_006cc928\[\];$/m);
+    const owner = generateGlobalsImpl([GAME_GLOBAL], options, 'globals.h', undefined, undefined, true);
+    assert.match(owner, /^char s_modstate0_006cc928\[\] = "modstate0";$/m);
+
+    setInitializerAddressTable();
   });
 
   it('still defines nothing when the owning unit has no modelled global left', () => {

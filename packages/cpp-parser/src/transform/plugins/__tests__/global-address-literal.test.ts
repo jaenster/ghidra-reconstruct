@@ -109,6 +109,83 @@ describe('globalAddressLiteralPlugin', () => {
     });
   });
 
+  describe('string constants', () => {
+    // 1.14d's application-mode names, as Ghidra types them: `string` data with a
+    // label naming its own address. `s_modstate0_006cc928` is 9 bytes plus the
+    // terminator, so the object the closure defines is `char[10]`.
+    const MODES: GlobalAddressLiteralOptions = {
+      globalAddresses: {
+        s_modstate0_006cc928: 0x6cc928,
+        s_modstate1_006cc920: 0x6cc920,
+        gThing: 0x500100,
+      },
+      globalSizes: {
+        s_modstate0_006cc928: 10,
+        s_modstate1_006cc920: 8,
+        gThing: 12,
+      },
+      stringConstantNames: ['s_modstate0_006cc928', 's_modstate1_006cc920'],
+      imageBase: '0x400000',
+    };
+
+    it('spells an exact string base as the BARE NAME, never &name', () => {
+      const out = run(`void f() { p = (char*)0x6cc928; }`, MODES);
+      assert.ok(out.includes('s_modstate0_006cc928'), `Expected the label in: ${out}`);
+      // `&s_modstate0_006cc928` is `char(*)[10]`, which converts to nothing.
+      assert.ok(!out.includes('&s_modstate0'), `The & would be the wrong type: ${out}`);
+      assert.ok(!out.includes('0x6cc928'), `Literal should be gone from: ${out}`);
+    });
+
+    it('spells an interior offset as (name + n), with no byte cast', () => {
+      const out = run(`void f() { p = (char*)0x6cc92b; }`, MODES);
+      assert.ok(out.includes('s_modstate0_006cc928 + 3'), `Expected name + 3 in: ${out}`);
+      assert.ok(!out.includes('char*)s_modstate0'), `char[] needs no byte cast: ${out}`);
+      assert.ok(!out.includes('&s_modstate0'), `Still no address-of: ${out}`);
+    });
+
+    it('leaves a literal near a string but outside every extent alone', () => {
+      // 0x6cc932 is past the end of the 10-byte object at 0x6cc928 and before
+      // any other. A wrong resolution here is worse than no resolution.
+      const out = run(`void f() { p = (char*)0x6cc932; }`, MODES);
+      assert.ok(out.includes('0x6cc932'), `Should keep the literal in: ${out}`);
+      assert.ok(!out.includes('s_modstate'), `Nothing owns it: ${out}`);
+    });
+
+    it('still spells an ordinary global with the address-of it needs', () => {
+      // The classification changes the SPELLING of string entries only; a
+      // non-string candidate in the same table is untouched.
+      const out = run(`void f() { p = 0x500100; }`, MODES);
+      assert.ok(out.includes('&gThing'), `Expected &gThing in: ${out}`);
+    });
+
+    it('complements a string base through the same rule', () => {
+      // ~0x6cc928 == 0xff9336d7
+      const out = run(`void f() { p = (void*)0xff9336d7; }`, MODES);
+      assert.ok(
+        out.includes('~(uintptr_t)s_modstate0_006cc928'),
+        `Expected the complemented label in: ${out}`,
+      );
+    });
+
+    it('withdraws a string reference from an ordinary call argument', () => {
+      // Same evidence as any other pointer form in an argument slot: a
+      // parameter's type is not visible from a body parsed on its own.
+      const out = run(`void f() { g(a, 0x6cc928); }`, MODES);
+      assert.ok(out.includes('0x6cc928'), `Argument literal must stand: ${out}`);
+      assert.ok(!out.includes('s_modstate0'), `No resolution in an argument: ${out}`);
+    });
+
+    it('is not a string when the table does not say so', () => {
+      // Without the classification the same entry is an ordinary global and
+      // keeps the address-of — the option is the only signal.
+      const out = run(`void f() { p = (char*)0x6cc928; }`, {
+        ...MODES,
+        stringConstantNames: [],
+      });
+      assert.ok(out.includes('&s_modstate0_006cc928'), `Expected &name in: ${out}`);
+    });
+  });
+
   describe('false positives that must not be rewritten', () => {
     it('leaves a literal that matches no global alone', () => {
       const out = run(`void f() { p = 0x401000; }`, SIMPLE);

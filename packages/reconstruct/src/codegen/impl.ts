@@ -689,6 +689,13 @@ export interface FuncPtrArgCastTables {
    */
   globalSizes?: Record<string, number>;
   /**
+   * The entries of `globalAddresses` that are STRING CONSTANTS — `char[N]`
+   * objects the declaration closure declares and defines from Ghidra's bytes.
+   * A reference to one is the BARE NAME, which decays to `char*`; `&name` would
+   * be `char(*)[N]`. Only the spelling differs; the resolution does not.
+   */
+  stringConstantNames?: string[];
+  /**
    * Global variable name (as emitted) → the namespace segments its DEFINITION is
    * emitted in, empty for root scope. Read by `global-address-literal` so an
    * address resolved to a global is spelled with the scope that global actually
@@ -2191,6 +2198,7 @@ function transformDecompiledCode(
         globalAddresses: context.funcPtrArgCasts.globalAddresses,
         globalSizes: context.funcPtrArgCasts.globalSizes,
         globalNamespaces: context.funcPtrArgCasts.globalNamespaces,
+        stringConstantNames: context.funcPtrArgCasts.stringConstantNames,
         imageBase: context.imageBase,
         // `&global` is pointer-typed and does not convert to an integer return.
         // The body is parsed without its signature, so the AST cannot show the
