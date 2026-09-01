@@ -1431,7 +1431,13 @@ export function generatePlatformHeader(
 
   // Ghidra type conversion helpers
   lines.push('// Ghidra type conversion helpers');
+  // MSVC _ftol2_sse. Ghidra models the operand as a float10 in ST0, which the emitter spells
+  // `long double`; a double appears wherever the caller had already widened. One overload per
+  // width, because a single float parameter would make every call a narrowing conversion and a
+  // float/long-double pair leaves a plain double ambiguous between them.
   lines.push('static inline int32_t FloatToLong(float f) { return (int32_t)f; }');
+  lines.push('static inline int32_t FloatToLong(double f) { return (int32_t)f; }');
+  lines.push('static inline int32_t FloatToLong(long double f) { return (int32_t)f; }');
   lines.push('static inline float LongToFloat(int32_t n) { return (float)n; }');
   lines.push('');
 
