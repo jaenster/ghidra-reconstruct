@@ -356,6 +356,15 @@ export {
 } from './builtins/func-ptr-literal.js';
 
 // ============================================
+// BUILT-IN PLUGINS: GLOBAL ADDRESS LITERAL
+// ============================================
+
+export {
+  globalAddressLiteralPlugin,
+  type GlobalAddressLiteralOptions,
+} from './builtins/global-address-literal.js';
+
+// ============================================
 // BUILT-IN PLUGINS: PRNG TRANSFORM
 // ============================================
 
@@ -452,6 +461,7 @@ import { earlyReturnPlugin } from './builtins/early-return.js';
 import { commaExpandPlugin } from './builtins/comma-expand.js';
 import { arrayFillCollapsePlugin } from './builtins/array-fill-collapse.js';
 import { funcPtrLiteralPlugin } from './builtins/func-ptr-literal.js';
+import { globalAddressLiteralPlugin } from './builtins/global-address-literal.js';
 import { prngTransformPlugin } from './builtins/prng-transform.js';
 import { prngTempCollapsePlugin } from './builtins/prng-temp-collapse.js';
 import { bitfieldAccessPlugin } from './builtins/bitfield-access.js';
@@ -589,6 +599,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   booleanCleanupPlugin,       // Cleanup: expr != false → expr (priority 50)
   ternarySimplifyPlugin,      // Boolean cleanup
   funcPtrLiteralPlugin,        // Cleanup: 0x5011f0 → FunctionName (priority 95)
+  globalAddressLiteralPlugin,  // Correctness: a folded global address (incl. ~&g) → the symbol (priority 68)
   prngTransformPlugin,        // Pattern detection: PRNG (priority 80)
   prngTempCollapsePlugin,     // Cleanup: collapse PRNG temp variables (priority 85)
   voidReturnCleanupPlugin,    // Cleanup: trailing return; in void functions (priority 90)

@@ -665,11 +665,21 @@ export interface FuncPtrArgCastTables {
   /** Global variable name (as emitted) → its emitted declaration type spelling */
   globalTypes?: Record<string, string>;
   /**
-   * Global variable name (as emitted) → its address in the image. Only the
-   * `stack-frame-address` fold solver reads it: a folded `frameSlot -
-   * globalAddress` literal cannot be undone without knowing where the global is.
+   * Global variable name (as emitted) → its address in the image. Read by the
+   * `stack-frame-address` fold solver — a folded `frameSlot - globalAddress`
+   * literal cannot be undone without knowing where the global is — and by
+   * `global-address-literal`, which turns a bare image address back into the
+   * symbol it points into.
    */
   globalAddresses?: Record<string, number>;
+  /**
+   * Global variable name (as emitted) → its size in bytes, as the extraction
+   * reports it. Paired with `globalAddresses` so an address that lands INSIDE a
+   * global can be anchored to it at the right offset. The extent is never
+   * inferred from the gap to the next symbol: that would hand a global storage
+   * it does not own and anchor a store to the wrong object.
+   */
+  globalSizes?: Record<string, number>;
   /** Callables with a `...` tail — arguments past the declared ones have no type */
   varArgFunctions?: string[];
   /** Field name → declared type, where every aggregate declaring it agrees */
@@ -2159,6 +2169,10 @@ function transformDecompiledCode(
       );
       perPluginOptions['pointer-assign-cast'] = {
         voidPointerFunctions: context.funcPtrArgCasts.voidPointerFunctions,
+      };
+      perPluginOptions['global-address-literal'] = {
+        globalAddresses: context.funcPtrArgCasts.globalAddresses,
+        globalSizes: context.funcPtrArgCasts.globalSizes,
       };
       perPluginOptions['assign-cast'] = {
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,

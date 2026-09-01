@@ -3767,6 +3767,27 @@ export function buildFuncPtrArgCastTables(
     globalAddresses[name] = address;
   }
 
+  // Global name → its size in bytes. Same source and same ambiguity rule as the
+  // address table: a name reported at two sizes is dropped, because the larger
+  // one would claim bytes the smaller object does not own. An address table
+  // entry with no size entry still resolves on its exact base.
+  const globalSizes: Record<string, number> = {};
+  const ambiguousGlobalSizes = new Set<string>();
+  for (const g of globals) {
+    const name = g.suggestedName || g.name;
+    if (!name || /[^A-Za-z0-9_]/.test(name)) continue;
+    if (ambiguousGlobalSizes.has(name)) continue;
+    const size = Number(g.size);
+    if (!Number.isSafeInteger(size) || size <= 0) continue;
+    const existing = globalSizes[name];
+    if (existing !== undefined && existing !== size) {
+      ambiguousGlobalSizes.add(name);
+      delete globalSizes[name];
+      continue;
+    }
+    globalSizes[name] = size;
+  }
+
   // Typedef name → the spelling it stands for. Windows and Ghidra both hide
   // indirection inside a name (`HACCEL` IS `HACCEL__ *`), so without this a
   // pointer stored into such a slot reads as an integer store and no cast is
@@ -3819,6 +3840,7 @@ export function buildFuncPtrArgCastTables(
     ])],
     globalTypes,
     globalAddresses,
+    globalSizes,
     varArgFunctions: [...varArgFunctions],
     fieldTypes,
     typedefTargets,
