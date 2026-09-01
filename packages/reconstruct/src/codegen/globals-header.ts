@@ -6,12 +6,12 @@
  */
 
 import type { AnalyzedDataSymbol, ReconstructOptions, DataValue, ExtractedDataType, ExtractedStruct, ExtractedUnion, ExtractedFunctionDefinition, ExtractedFunction } from '../types.js';
-import { GLIDE_UNSIGNED_ENUM_TYPEDEFS, getAggregateTypeNames, isPlatformOrBuiltinType, isLibraryType, isStructType, castPointerInitializer, normalizeDataValue, isCharacterValueType, isMsvcEhInternal, normalizeWideCharType, normalizeListingBuiltinType, listingBuiltinElementType, imageArtifactElementType, isVoidPointerSpelling, rootQualifyShadowedType, platformDeclaredFunctionNames } from './platform-types.js';
+import { GLIDE_UNSIGNED_ENUM_TYPEDEFS, PLATFORM_STRUCT_FIELD_TYPES, getAggregateTypeNames, isPlatformOrBuiltinType, isLibraryType, isStructType, castPointerInitializer, normalizeDataValue, isCharacterValueType, isMsvcEhInternal, normalizeWideCharType, normalizeListingBuiltinType, listingBuiltinElementType, imageArtifactElementType, isVoidPointerSpelling, rootQualifyShadowedType, platformDeclaredFunctionNames } from './platform-types.js';
 import { generateStructDeclaration, generateUnionDeclaration, generateFunctionDefinitionDeclaration, ghidraDefaultFieldName } from './header.js';
 import { normalizeQualifiedReference } from './namespace.js';
 import { namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 import { computeDeclarationClosure, renderClosureBlock, renderClosureDefinitionBlock, normalizeDataAddress, type ClosureResult, type ClosureStringContent } from './declaration-closure.js';
-import { allOnesSentinel, negativeInUnsignedSlot } from './sentinel-literal.js';
+import { allOnesSentinel, negativeBytePatternInUnsignedSlot, negativeInUnsignedSlot } from './sentinel-literal.js';
 import { addressLiteralFloor, ADDRESS_LITERAL_CEILING } from '@ghidra-mcp/cpp-parser';
 
 /**
@@ -1656,6 +1656,14 @@ function unsignedSlotSpelling(rawValue: string | null | undefined, slotType: str
 }
 
 /**
+ * The bit pattern a negative datum has to be written as to survive its unsigned
+ * slot, or `undefined` when the slot takes the value as it stands.
+ */
+function unsignedSlotBitPattern(rawValue: string | null | undefined, slotType: string | null | undefined): string | undefined {
+  return negativeBytePatternInUnsignedSlot(rawValue, slotType, sentinelContext());
+}
+
+/**
  * The exact symbol bases an initializer scalar may be resolved to.
  *
  * A literal in a DATA INITIALIZER is out of reach of `global-address-literal`:
@@ -1866,6 +1874,11 @@ export function emitDataValue(dv: DataValue, indent = 0, expectedType?: string):
       // original source made implicitly has to be spelled.
       const unsignedSlot = unsignedSlotSpelling(dv.value, expectedType);
       if (unsignedSlot !== undefined) return unsignedSlot;
+      // Same disagreement one step down: a real array extent gives a byte slot
+      // its real contents, and Ghidra reads those bytes SIGNED. `-0x60` is the
+      // palette byte 0xA0, and only the spelling is wrong.
+      const bitPattern = unsignedSlotBitPattern(dv.value, expectedType);
+      if (bitPattern !== undefined) return bitPattern;
       const val = normalizeDataValue(dv.value ?? '0');
       // If value is a single printable char (not a number/hex), wrap in char literal quotes
       if (val.length === 1 && !/\d/.test(val)) {
@@ -2371,6 +2384,13 @@ export function setGlobalInitializerTypes(dataTypes: ExtractedDataType[] | undef
   structFieldTypes.clear();
   structOrUnionTypeNames.clear();
   enumTypeNames.clear();
+  // The platform structs this generator declares itself. Ghidra reports them as
+  // BUILT_IN with no field list, so without this an initializer for one is typed
+  // as nothing and its bytes are spelled as `char` literals. Seeded FIRST, so a
+  // real Ghidra layout of the same name still wins.
+  for (const [name, fields] of PLATFORM_STRUCT_FIELD_TYPES) {
+    structFieldTypes.set(name, new Map(fields));
+  }
   if (!dataTypes) return;
   for (const dt of dataTypes) {
     if (dt.kind === 'ENUM') enumTypeNames.add(dt.name);

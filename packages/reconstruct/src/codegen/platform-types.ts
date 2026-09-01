@@ -920,6 +920,39 @@ function msvcFileStructLines(): string[] {
   ];
 }
 
+/**
+ * The field layouts of the platform structs THIS FILE declares.
+ *
+ * Ghidra hands these back as `BUILT_IN` with no field list, so
+ * `setGlobalInitializerTypes` learns nothing about them and a struct-shaped
+ * initializer for one is typed as nothing at all. That is not a missing type -
+ * the layout is written out a few lines below, by this generator, and is the one
+ * the compiler will see. Registering it is how a `GUID`'s `Data4` byte gets
+ * emitted as a byte instead of as `'\x89'`, a NEGATIVE `char` that gcc rejects
+ * with `narrowing conversion of ''\37777777611'' from 'char' to 'unsigned char'`.
+ *
+ * Keep in step with the declarations below - they are the contract.
+ */
+export const PLATFORM_STRUCT_FIELD_TYPES: ReadonlyMap<string, ReadonlyMap<string, string>> = new Map([
+  ['CRITICAL_SECTION', new Map([
+    ['DebugInfo', 'void*'], ['LockCount', 'long'], ['RecursionCount', 'long'],
+    ['OwningThread', 'void*'], ['LockSemaphore', 'void*'], ['SpinCount', 'unsigned long'],
+  ])],
+  ['POINT', new Map([['x', 'long'], ['y', 'long']])],
+  ['RECT', new Map([['left', 'long'], ['top', 'long'], ['right', 'long'], ['bottom', 'long']])],
+  ['FILETIME', new Map([['dwLowDateTime', 'DWORD'], ['dwHighDateTime', 'DWORD']])],
+  ['GUID', new Map([
+    ['Data1', 'DWORD'], ['Data2', 'WORD'], ['Data3', 'WORD'], ['Data4', 'BYTE[8]'],
+  ])],
+  ['OVERLAPPED', new Map([
+    ['Internal', 'DWORD'], ['InternalHigh', 'DWORD'], ['Offset', 'DWORD'],
+    ['OffsetHigh', 'DWORD'], ['hEvent', 'HANDLE'],
+  ])],
+  ['PALETTEENTRY', new Map([
+    ['peRed', 'BYTE'], ['peGreen', 'BYTE'], ['peBlue', 'BYTE'], ['peFlags', 'BYTE'],
+  ])],
+]);
+
 export function generatePlatformHeader(
   options: {
     seedType?: boolean;

@@ -253,3 +253,97 @@ export function negativeInUnsignedSlot(
   const spell = ctx.spellType ?? ((t: string) => t);
   return `(${spell(base)})${v.replace(/\s+/g, '')}`;
 }
+
+/**
+ * Unsigned integer slot spellings, by width in bytes. Keyed lower-case, so the
+ * Win32 spelling and the Ghidra spelling of one type reach the same entry
+ * (`BYTE`/`byte`, `DWORD`/`dword`, `USHORT`/`ushort`).
+ *
+ * Every name here has a width the EMITTED tree fixes - the platform header
+ * writes the typedef itself - which is the only reason a modulo is safe. The
+ * deliberate absentees:
+ *
+ * - `char`, whose signedness is implementation-defined and which is where raw
+ *   bytes live anyway;
+ * - `undefined3`/`undefined5`/`undefined6`/`undefined7`, whose Ghidra width and
+ *   emitted width DISAGREE (`undefined3` is three bytes there and `uint8_t`
+ *   here). Two candidate widths is no width;
+ * - the pointer-width unsigned integers, refused for the same reason
+ *   `allOnesSentinel` refuses them: the width is the defect, and it belongs in
+ *   the Ghidra type work order rather than under a spelling.
+ */
+const UNSIGNED_WIDTHS = new Map<string, number>([
+  ['uint8_t', 1], ['unsigned char', 1], ['uchar', 1], ['byte', 1],
+  ['undefined', 1], ['undefined1', 1], ['unkbool1', 1],
+  ['uint16_t', 2], ['unsigned short', 2], ['unsigned short int', 2], ['ushort', 2],
+  ['undefined2', 2], ['word', 2], ['wchar16', 2], ['unicode', 2],
+  ['uint32_t', 4], ['unsigned int', 4], ['uint', 4], ['unsigned long', 4],
+  ['unsigned long int', 4], ['ulong', 4], ['undefined4', 4], ['dword', 4],
+  ['pointer32', 4], ['imagebaseoffset32', 4],
+  ['uint64_t', 8], ['unsigned long long', 8], ['unsigned long long int', 8],
+  ['ulonglong', 8], ['undefined8', 8], ['qword', 8],
+]);
+
+/**
+ * A NEGATIVE datum in a fixed-width UNSIGNED slot, spelled as the bit pattern
+ * it is - or `undefined` when the slot takes the value as it stands.
+ *
+ * Ghidra prints an initialized datum against the type IT modelled, and for the
+ * one-byte slots a real array extent turned into real contents that reading is
+ * signed: the palette byte 0xA0 arrives as `-0x60`. The emitted slot is
+ * `undefined1`, i.e. `uint8_t`, and C++ rejects the negative inside a braced
+ * initializer outright - `narrowing conversion of '-96' from 'int' to
+ * 'undefined1'` - which fails the whole translation unit.
+ *
+ * The value is not in dispute. The same eight bits are stored either way; only
+ * the spelling is wrong, and the slot's DECLARED TYPE is what settles it. So the
+ * datum is reduced modulo 2^N for the slot's own N and written in hex, which is
+ * how the rest of these binary blobs already read.
+ *
+ * WHY NOT THE CAST FORM `(uint8_t)-0x60`
+ *
+ * `negativeInUnsignedSlot` above spells its answer as a cast precisely because
+ * the value there IS `-1`, D2's "none", and a reader needs to keep seeing it.
+ * Here the value is a byte of palette or lookup-table data that never meant
+ * minus anything; `-0x60` is an artifact of how Ghidra read it, and preserving
+ * that reading in the output would preserve the artifact.
+ *
+ * WHAT IS REFUSED
+ *
+ * - a signed slot, where the negative IS the value;
+ * - a pointer, funcdef-typedef or enum slot;
+ * - any slot whose width the emitted tree does not fix (see UNSIGNED_WIDTHS);
+ * - a magnitude outside the slot's own signed range. `-200` cannot have come out
+ *   of one signed byte, so the datum and the declared width disagree - and
+ *   reducing it would invent a byte pattern that nothing downstream reports.
+ */
+export function negativeBytePatternInUnsignedSlot(
+  rawValue: string | null | undefined,
+  declaredType: string | null | undefined,
+  ctx: SentinelSlotContext = {}
+): string | undefined {
+  if (!declaredType) return undefined;
+  if (rawValue === undefined || rawValue === null) return undefined;
+  const m = /^-\s*(0[xX][0-9a-fA-F]+|\d+)$/.exec(rawValue.trim());
+  if (!m) return undefined;
+
+  const base = withoutArrayDimensions(declaredType);
+  if (isPointerShaped(base, ctx)) return undefined;
+  if (ctx.isEnumType?.(base) === true) return undefined;
+  if (UNSIGNED_POINTER_WIDTH.has(base)) return undefined;
+
+  const bytes = UNSIGNED_WIDTHS.get(base.toLowerCase());
+  if (bytes === undefined) return undefined;
+
+  let magnitude: bigint;
+  try {
+    magnitude = BigInt(m[1]);
+  } catch {
+    return undefined;
+  }
+  if (magnitude === 0n) return undefined;
+  // The slot's own signed range. Outside it the width and the datum disagree.
+  if (magnitude > 1n << BigInt(bytes * 8 - 1)) return undefined;
+
+  return `0x${((1n << BigInt(bytes * 8)) - magnitude).toString(16)}`;
+}
