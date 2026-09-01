@@ -1022,19 +1022,25 @@ export function generateProject(
  * "was not declared" error family is NOT a closure problem.
  */
 /**
- * The funcdef-vs-function arity disagreements both cast paths refused.
+ * The funcdef-vs-function arity disagreements the two cast paths met.
  *
- * A cast reconciles a parameter TYPE; it cannot reconcile a parameter COUNT, so
- * every line here is a place where the database says a slot takes N arguments
+ * Every line here is a place where the database says a slot takes N arguments
  * and the function stored into it takes M. One of the two prototypes is wrong
  * and only the database can say which — printing the pairs is what turns the
  * class from a number into a worklist.
+ *
+ * The two paths answer it differently, because they are different operations. A
+ * CALL through the slot is refused: no cast reconciles a parameter count at the
+ * point the arguments are pushed. A data INITIALIZER is a store, not a call, and
+ * a conversion between two function-pointer types is well formed whatever their
+ * arities — a heterogeneous dispatch table is built exactly that way — so those
+ * are cast and still counted here.
  */
 function reportFuncPtrArityMismatches(): void {
   const bodies = getFuncPtrArgCastArityMismatchList();
   const initializers = getInitializerFuncPtrArityMismatches();
   if (bodies.length === 0 && initializers === 0) return;
-  console.log(`Funcdef arity disagreements: ${bodies.length} in bodies, ${initializers} in data initializers (no cast attempted — a cast cannot change arity)`);
+  console.log(`Funcdef arity disagreements: ${bodies.length} in bodies (no cast attempted — a cast cannot change a call's arity), ${initializers} in data initializers (cast to the slot type — a store can)`);
   for (const m of [...bodies].sort((a, b) => a.slot.localeCompare(b.slot) || a.callee.localeCompare(b.callee))) {
     console.log(`  ${m.slot} takes ${m.slotArity}, ${m.callee} takes ${m.actualArity}`);
   }

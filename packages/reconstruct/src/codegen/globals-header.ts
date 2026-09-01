@@ -1502,10 +1502,19 @@ function emitPointerToSymbol(rawValue: string, expectedType?: string): string {
   const multidimElem = bare ? multidimArrayGlobals.get(bare) : undefined;
   if (multidimElem) return `(${multidimElem}*)&${spelled}`;
 
-  // A function address in a slot whose type is `void*` or a differing funcdef.
+  // A function address in a slot whose type is `void*`, a differing funcdef, or
+  // a plain integer word.
   if (bare) {
     const castTo = functionInitializerCast(value, slotType);
-    if (castTo) return `(${rootQualifyShadowedType(castTo)})&${spelled}`;
+    if (castTo) {
+      const cast = `(${rootQualifyShadowedType(castTo)})`;
+      // An INTEGER slot takes no pointer of any kind, so the address goes
+      // through `uintptr_t` first and is then spelled at the slot's own width —
+      // the same two-step a string address in an integral slot already takes.
+      return INTEGER_SLOT_TYPES.has(castTo.toLowerCase())
+        ? `${cast}(uintptr_t)&${spelled}`
+        : `${cast}&${spelled}`;
+    }
   }
 
   if (bare) {
@@ -2092,9 +2101,19 @@ const globalDeclaredTypes = new Map<string, string>();
  *
  * A function pointer converts to NOTHING implicitly in C++ — not to `void*`, not
  * to a differently-typed function pointer — so wherever they disagree the
- * original source carried the cast, and emitting it reconstructs that. An ARITY
- * disagreement is a different problem: no cast makes such a call work, so those
- * are left alone and counted for the database owner.
+ * original source carried the cast, and emitting it reconstructs that.
+ *
+ * That includes an ARITY disagreement, which is where this used to stop. The
+ * reasoning it stopped on — "no cast makes such a CALL work" — is about a call,
+ * and this is a STORE. A heterogeneous dispatch table is built exactly this way:
+ * `paSCompCompressCodecTable` declares its slot `pfnSCompCodec *` (five
+ * parameters) and fills it with codecs taking six and seven, because
+ * `SCompCompress` casts the slot away at the call site
+ * (`(*(code *)pSrc[1])(...)`). The conversion between two function-pointer types
+ * is well formed whatever their arities, it names the same symbol, and without
+ * it the initializer does not compile at all. The disagreement is still real, so
+ * it is still counted for the database owner — but it is counted over emitted
+ * text that builds, not over text that does not.
  */
 /**
  * Does `d2_platform.h` — or a system header it pulls in — declare a FUNCTION by
@@ -2121,7 +2140,7 @@ export function setInitializerSignatureTables(
   initializerFuncPtrArityMismatches = 0;
 }
 
-/** How many function-address initializers were left uncast because the arity differs. */
+/** How many function-address initializers were cast across an arity disagreement. */
 export function getInitializerFuncPtrArityMismatches(): number {
   return initializerFuncPtrArityMismatches;
 }
@@ -2172,11 +2191,19 @@ function functionInitializerCast(name: string, expectedType?: string): string | 
 
   const slot = baseTypeName(expectedType);
   const target = initializerFuncdefSignatures[slot];
-  if (target === undefined || target === actual) return undefined;
-  if (signatureArity(actual) !== signatureArity(target)) {
-    initializerFuncPtrArityMismatches++;
-    return undefined;
+  if (target === undefined) {
+    // The slot is not a function pointer at all: a word-wide integer field
+    // holding a callback. `&Fn` is a function pointer and no integer type takes
+    // one, so the address has to be spelled as the number it is — the caller
+    // routes it through `uintptr_t`, exactly as a string address in an integral
+    // slot already is. Only an UNDECORATED integer qualifies: `uint32_t *` is a
+    // pointer slot whose base name reads as an integer and is not one.
+    const undecorated = !/[*[\]]/.test(expectedType);
+    return undecorated && INTEGER_SLOT_TYPES.has(slot.toLowerCase()) ? slot : undefined;
   }
+  if (target === actual) return undefined;
+  // Counted, not refused — see the note on `initializerFunctionSignatures`.
+  if (signatureArity(actual) !== signatureArity(target)) initializerFuncPtrArityMismatches++;
   return slot;
 }
 
