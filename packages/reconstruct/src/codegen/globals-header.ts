@@ -1714,6 +1714,48 @@ function initializerAddressSpelling(
 }
 
 /**
+ * The reference an address literal in a POINTER slot resolves to, or null.
+ *
+ * The per-array corroboration rule below guards INTEGER slots, where the word
+ * could plausibly be a number and only its neighbours can say otherwise. A slot
+ * whose declared type is a POINTER is a slot that holds an address by
+ * declaration, so one exact base is evidence enough on its own — the same
+ * standard `emitPointerToSymbol` already applies when Ghidra hands back a NAME
+ * for the slot instead of a word. Without this, `char * fnCursorVisibilityHook =
+ * (char *)0x006cc8b8` reached `RegisterClassA` as an absolute 1.14d address and
+ * faulted inside user32.
+ *
+ * Exact bases only, as everywhere on this side: an interior address (base + n)
+ * is not in the table and keeps its literal, because there is no surrounding
+ * expression here to check an extent against.
+ */
+function pointerSlotAddressReference(
+  rawValue: string | null | undefined,
+  slotType: string | undefined
+): string | null {
+  const slot = slotType?.trim();
+  if (!slot || !/\*\s*$/.test(slot)) return null;
+  const word = scalarWordValue(rawValue);
+  // Zero is a null slot, not an address; the table's floor excludes it anyway.
+  if (word === null || word === 0) return null;
+  const entry = initializerAddressBases.get(word);
+  if (!entry) return null;
+  const reference = shadowQualifyReference(
+    entry.stringConstant ? entry.name : `&${entry.name}`);
+  initializerAddressNamesUsed.add(entry.name);
+  // A string constant is `char N[]`, which decays to exactly `char*` and to
+  // nothing else: in a char-shaped slot the bare name IS the initializer.
+  // `&name` would be `char(*)[N]`, and `array-global-address-of` runs at
+  // priority 46 — before the address passes — so it would never be cleaned up.
+  // Every other pairing takes the slot's own type, which carries the address
+  // across unchanged and narrows nothing.
+  if (entry.stringConstant && baseTypeName(slot.replace(/\*\s*$/, '')) === 'char') {
+    return reference;
+  }
+  return `(${rootQualifyShadowedType(slot.replace(/\s+/g, ' '))})${reference}`;
+}
+
+/**
  * The spellings for one array's elements, or null to leave every one of them
  * alone.
  *
@@ -1849,6 +1891,10 @@ export function emitDataValue(dv: DataValue, indent = 0, expectedType?: string):
       if (slotType && isFuncDefTypedefName(slotType)) {
         return `(${rootQualifyShadowedType(slotType)})${literal}`;
       }
+      // The word may be the base of a symbol this file can name. A pointer slot
+      // holds an address by declaration, so one exact base settles it.
+      const resolved = pointerSlotAddressReference(literal, slotType);
+      if (resolved) return resolved;
       // Raw hex pointer — normalize value (add 0x prefix if needed)
       return castPointerInitializer(slotType ?? 'void*', literal);
     }
@@ -2617,6 +2663,12 @@ export function renderGlobalScalarInitializer(
   if (isFuncDefTypedefName(slotType)) {
     return `(${rootQualifyShadowedType(slotType)})${ensureHexPrefix(value, declaredType)}`;
   }
+  // A four-byte pointer never carries `initializedData` — `fetchInitializedData`
+  // only asks Ghidra for `size > 4` — so a `char *` global or static local whose
+  // content is a string base arrives HERE as a raw `value`, not through
+  // `emitDataValue`. Same table, same rule as the pointer case there.
+  const resolved = pointerSlotAddressReference(value, slotType);
+  if (resolved) return resolved;
   return castPointerInitializer(slotType, ensureHexPrefix(value, declaredType));
 }
 
