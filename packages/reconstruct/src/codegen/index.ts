@@ -1838,8 +1838,14 @@ export function reconcileStaticScopeWithBodyReferences(
         ? (WORD_VALUES - value) >>> 0
         : undefined;
       for (const v of negated === undefined ? [value] : [value, negated]) {
-        const name = ownerOfLiteral(v);
-        if (name === null || !candidates.has(name)) continue;
+        // The table is keyed by the RAW Ghidra name, the candidate map by the
+        // emitted one. They differ only where the sanitizer changed something
+        // (a leading digit), and a reference lost to that would be one the
+        // emitted tree still makes.
+        const owner = ownerOfLiteral(v);
+        if (owner === null) continue;
+        const name = sanitizeSymbolName(owner);
+        if (!candidates.has(name)) continue;
         let fns = literalFunctions.get(name);
         if (!fns) { fns = new Set(); literalFunctions.set(name, fns); }
         fns.add(func.name);
@@ -1905,49 +1911,106 @@ const ADDRESS_PAGE_SHIFT = 12;
 const MAX_INDEXED_EXTENT = 0x1000000;
 
 /**
- * `value → the global that owns it`, over every extracted global.
+ * Global name → its address in the image, and global name → its size in bytes.
  *
- * The ownership RULE is `ownerOfAddress` in `global-address-literal`, and this
- * has to answer the way that does or the two disagree over whether a `static`
- * is legal. It differs only in shape: that pass resolves a handful of literals
- * against a prepared candidate list, this one resolves every literal in the
- * program, so exact bases go in a map and extents into a page index rather than
- * being rescanned per literal.
+ * This IS the table `global-address-literal` resolves against, and the only one:
+ * the pass reads it through `funcPtrArgCasts`, and the scope analysis that has
+ * to count the references the pass will create reads it here. When the two were
+ * built separately they disagreed over which symbols are even admissible, and
+ * the disagreement cost a link error — see `buildAddressLiteralResolver`.
+ *
+ * Both restrictions matter, and both are about ADMISSION, not resolution:
+ *
+ *  - The name is tested RAW. A Ghidra interior label is named after the object
+ *    it points into — `gaLanguageNames_00724a80[1]` is element 1 of the array at
+ *    00724a80, not an object of its own — and the bracket disqualifies it. That
+ *    is what makes 00724a84 resolve as `(char*)&gaLanguageNames_00724a80 + 4`,
+ *    a reference to the ARRAY, rather than as a symbol in its own right.
+ *    Sanitizing first would legalise `[1]` into `_1_` and readmit exactly the
+ *    symbols this filter exists to exclude.
+ *
+ *  - A name at two addresses, or at two sizes, is dropped rather than resolved
+ *    arbitrarily: the wrong address would put a store at an invented one, and
+ *    the larger size would claim bytes the smaller object does not own. An
+ *    address entry with no size entry still resolves on its exact base.
+ */
+export function buildGlobalAddressExtentTables(
+  globals: AnalyzedDataSymbol[]
+): { globalAddresses: Record<string, number>; globalSizes: Record<string, number> } {
+  const globalAddresses: Record<string, number> = {};
+  const ambiguousGlobalAddresses = new Set<string>();
+  for (const g of globals) {
+    const name = g.suggestedName || g.name;
+    if (!name || /[^A-Za-z0-9_]/.test(name)) continue;
+    if (ambiguousGlobalAddresses.has(name)) continue;
+    const address = Number.parseInt(String(g.address ?? '').replace(/^0x/i, ''), 16);
+    if (!Number.isSafeInteger(address)) continue;
+    const existing = globalAddresses[name];
+    if (existing !== undefined && existing !== address) {
+      ambiguousGlobalAddresses.add(name);
+      delete globalAddresses[name];
+      continue;
+    }
+    globalAddresses[name] = address;
+  }
+
+  const globalSizes: Record<string, number> = {};
+  const ambiguousGlobalSizes = new Set<string>();
+  for (const g of globals) {
+    const name = g.suggestedName || g.name;
+    if (!name || /[^A-Za-z0-9_]/.test(name)) continue;
+    if (ambiguousGlobalSizes.has(name)) continue;
+    const size = Number(g.size);
+    if (!Number.isSafeInteger(size) || size <= 0) continue;
+    const existing = globalSizes[name];
+    if (existing !== undefined && existing !== size) {
+      ambiguousGlobalSizes.add(name);
+      delete globalSizes[name];
+      continue;
+    }
+    globalSizes[name] = size;
+  }
+
+  return { globalAddresses, globalSizes };
+}
+
+/**
+ * `value → the global that owns it`, over the same table and by the same rule
+ * `global-address-literal` uses.
+ *
+ * Same admission (`buildGlobalAddressExtentTables`), same floor, same ownership
+ * rule as `ownerOfAddress`; it differs only in SHAPE. That pass resolves a
+ * handful of literals against a prepared candidate list, this one resolves every
+ * literal in the program, so exact bases go in a map and extents into a page
+ * index rather than being rescanned per literal.
+ *
+ * Answers with the RAW Ghidra name, which is what the table is keyed by.
  *
  * Null when no global clears the floor — there is then nothing to resolve, and
  * the caller can skip the numeric half of its scan entirely.
  */
 function buildAddressLiteralResolver(
-  analyzedGlobals: AnalyzedDataSymbol[],
+  globals: AnalyzedDataSymbol[],
   imageBase: string | number | undefined
 ): ((v: number) => string | null) | null {
+  const { globalAddresses, globalSizes } = buildGlobalAddressExtentTables(globals);
   const floor = addressLiteralFloor(imageBase);
 
   const baseAt = new Map<number, string[]>();
   const interiorPages = new Map<number, Array<{ name: string; address: number; size: number }>>();
-  const seenExtents = new Set<string>();
   let any = false;
 
-  for (const g of analyzedGlobals) {
-    const name = sanitizeSymbolName(g.suggestedName || g.name);
-    if (!/^[A-Za-z_]\w*$/.test(name)) continue;
-    const address = Number.parseInt(String(g.address ?? '').replace(/^0x/i, ''), 16);
+  for (const [name, address] of Object.entries(globalAddresses)) {
     if (!Number.isSafeInteger(address) || address < floor || address >= ADDRESS_LITERAL_CEILING) {
       continue;
     }
-    // The same symbol extracted twice is one object, not two claimants: counted
-    // twice it would look ambiguous and the reference would go uncounted, which
-    // is the failure this whole resolver exists to prevent.
-    const key = `${name}@${address}`;
-    if (seenExtents.has(key)) continue;
-    seenExtents.add(key);
     any = true;
 
     const bases = baseAt.get(address);
     if (bases) bases.push(name); else baseAt.set(address, [name]);
 
-    const rawSize = Number(g.size);
-    const size = Number.isSafeInteger(rawSize) && rawSize > 1 ? rawSize : 0;
+    const declared = globalSizes[name];
+    const size = Number.isSafeInteger(declared) && declared > 1 ? declared : 0;
     if (size === 0 || size > MAX_INDEXED_EXTENT) continue;
     const first = address >>> ADDRESS_PAGE_SHIFT;
     const last = (address + size - 1) >>> ADDRESS_PAGE_SHIFT;
@@ -3906,48 +3969,7 @@ export function buildFuncPtrArgCastTables(
     globalTypes[name] = spelled;
   }
 
-  // Global name → its address in the image. The decompiler's constant folding
-  // can collapse a frame address and a global address into ONE literal, and the
-  // only way back is to know where the global sits; see the `stack-frame-address`
-  // fold solver. A name at two addresses is dropped rather than resolved
-  // arbitrarily — the wrong one would put a store at an invented address.
-  const globalAddresses: Record<string, number> = {};
-  const ambiguousGlobalAddresses = new Set<string>();
-  for (const g of globals) {
-    const name = g.suggestedName || g.name;
-    if (!name || /[^A-Za-z0-9_]/.test(name)) continue;
-    if (ambiguousGlobalAddresses.has(name)) continue;
-    const address = Number.parseInt(String(g.address ?? '').replace(/^0x/i, ''), 16);
-    if (!Number.isSafeInteger(address)) continue;
-    const existing = globalAddresses[name];
-    if (existing !== undefined && existing !== address) {
-      ambiguousGlobalAddresses.add(name);
-      delete globalAddresses[name];
-      continue;
-    }
-    globalAddresses[name] = address;
-  }
-
-  // Global name → its size in bytes. Same source and same ambiguity rule as the
-  // address table: a name reported at two sizes is dropped, because the larger
-  // one would claim bytes the smaller object does not own. An address table
-  // entry with no size entry still resolves on its exact base.
-  const globalSizes: Record<string, number> = {};
-  const ambiguousGlobalSizes = new Set<string>();
-  for (const g of globals) {
-    const name = g.suggestedName || g.name;
-    if (!name || /[^A-Za-z0-9_]/.test(name)) continue;
-    if (ambiguousGlobalSizes.has(name)) continue;
-    const size = Number(g.size);
-    if (!Number.isSafeInteger(size) || size <= 0) continue;
-    const existing = globalSizes[name];
-    if (existing !== undefined && existing !== size) {
-      ambiguousGlobalSizes.add(name);
-      delete globalSizes[name];
-      continue;
-    }
-    globalSizes[name] = size;
-  }
+  const { globalAddresses, globalSizes } = buildGlobalAddressExtentTables(globals);
 
   // Global name → the namespace segments its DEFINITION is emitted in. A literal
   // address is folded into a body anywhere — a table in one module pointing into

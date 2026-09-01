@@ -30,7 +30,10 @@ import {
   setMultidimArrayGlobals,
   setGlobalInitializerTypes,
 } from '../codegen/globals-header.js';
-import { reconcileStaticScopeWithBodyReferences } from '../codegen/index.js';
+import {
+  reconcileStaticScopeWithBodyReferences,
+  buildGlobalAddressExtentTables,
+} from '../codegen/index.js';
 import { setNamespaceCollisionTypes } from '../codegen/namespace.js';
 import type {
   AnalyzedDataSymbol,
@@ -197,6 +200,40 @@ describe('one rule decides whether a global is `static`', () => {
       new Map([['A', 'X.cpp'], ['B', 'Y.cpp']]), new Set(),
     );
     assert.strictEqual(g.scope, 'global');
+  });
+
+  it('resolves a literal through an interior LABEL to the array that owns it', () => {
+    // Ghidra carries a label for element 1 of the array at 00724a80, named after
+    // it: `gaLanguageNames_00724a80[1]` @00724a84, scope global. The bracket
+    // disqualifies it from the address table, so 00724a84 belongs to the array —
+    // which is what the emitted tree says too:
+    // `(uintptr_t)((char*)&gaLanguageNames_00724a80 + 4)`.
+    //
+    // Counting it as a symbol of its own instead left the array `static` inside
+    // INPUT_StatScreenMouseDown while two other functions took its address, and
+    // it was the last undefined symbol in the 509-TU link.
+    const array: AnalyzedDataSymbol = {
+      name: 'gaLanguageNames_00724a80', address: '00724a80', dataType: 'char *[15]',
+      suggestedType: 'char *[15]', size: 60, isInitialized: true, value: null,
+      xrefCount: 1, scope: 'static-local', ownerFunction: 'INPUT_StatScreenMouseDown',
+    } as unknown as AnalyzedDataSymbol;
+    const interiorLabel: AnalyzedDataSymbol = {
+      name: 'gaLanguageNames_00724a80[1]', address: '00724a84', dataType: 'char *[15]',
+      suggestedType: 'char *[15]', size: 60, isInitialized: true, value: null,
+      xrefCount: 2, scope: 'global',
+    } as unknown as AnalyzedDataSymbol;
+    // Neither body NAMES the symbol — both reference it only by folded address.
+    const funcs = [
+      makeFunc({ name: 'INPUT_StatScreenMouseDown', decompiled: 'void INPUT_StatScreenMouseDown(){ do { pBtnEntry++; } while ((int)pBtnEntry < 0x724a80); }' }),
+      makeFunc({ name: 'INPUT_StatScreenMouseUp', decompiled: 'void INPUT_StatScreenMouseUp(){ do { pBtnEntry++; } while ((int)pBtnEntry < 0x724a84); }' }),
+    ];
+    reconcileStaticScopeWithBodyReferences(
+      [array, interiorLabel], funcs,
+      new Map([['INPUT_StatScreenMouseDown', 'D2Client/UI/ui.cpp'], ['INPUT_StatScreenMouseUp', 'D2Client/UI/ui.cpp']]),
+      new Set(), '00400000',
+    );
+    assert.strictEqual(array.scope, 'global');
+    assert.strictEqual(array.ownerFunction, undefined);
   });
 
   it('leaves a static alone when the literals in other bodies are not its address', () => {
@@ -414,5 +451,37 @@ describe('a co-located global is declared where it is defined', () => {
 
     assert.match(header, /namespace D2Client::UI::Hireables \{[\s\S]*extern[^;]*gpHireablesList;/);
     assert.match(impl, /^namespace D2Client::UI::Hireables \{$/m);
+  });
+});
+
+describe('the address table admits the same symbols on both sides', () => {
+  it('excludes an interior label, so its address belongs to the object it points into', () => {
+    // `global-address-literal` and the scope analysis read ONE table. A symbol
+    // whose Ghidra name is not a legal identifier is not a candidate for either:
+    // sanitizing first would turn `gaLanguageNames_00724a80[1]` into
+    // `gaLanguageNames_00724a80_1_` and readmit it, and then 00724a84 resolves
+    // to a symbol in one place and to `&array + 4` in the other.
+    const globals = [
+      { name: 'gaLanguageNames_00724a80', address: '00724a80', size: 60 },
+      { name: 'gaLanguageNames_00724a80[1]', address: '00724a84', size: 60 },
+    ] as unknown as AnalyzedDataSymbol[];
+
+    const { globalAddresses, globalSizes } = buildGlobalAddressExtentTables(globals);
+    assert.deepStrictEqual(Object.keys(globalAddresses), ['gaLanguageNames_00724a80']);
+    assert.strictEqual(globalAddresses['gaLanguageNames_00724a80'], 0x724a80);
+    assert.strictEqual(globalSizes['gaLanguageNames_00724a80'], 60);
+    assert.strictEqual(globalAddresses['gaLanguageNames_00724a80_1_'], undefined);
+  });
+
+  it('drops a name reported at two addresses rather than picking one', () => {
+    const globals = [
+      { name: 'gLightRoomGreen', address: '007a7430', size: 4 },
+      { name: 'gLightRoomGreen', address: '007a7435', size: 1 },
+      { name: 'gKept', address: '00700000', size: 4 },
+    ] as unknown as AnalyzedDataSymbol[];
+    const { globalAddresses, globalSizes } = buildGlobalAddressExtentTables(globals);
+    assert.strictEqual(globalAddresses['gLightRoomGreen'], undefined);
+    assert.strictEqual(globalSizes['gLightRoomGreen'], undefined);
+    assert.strictEqual(globalAddresses['gKept'], 0x700000);
   });
 });
