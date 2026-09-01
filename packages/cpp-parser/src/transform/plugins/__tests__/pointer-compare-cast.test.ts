@@ -91,4 +91,91 @@ describe('pointerCompareCastPlugin', () => {
     const out = transform(`void f() { if (&gAnchor == 0) {} }`);
     assert.ok(!out.includes('uintptr_t'), `A null comparison is already legal: ${out}`);
   });
+  // The same gap one shape further along. A folded interior address now resolves
+  // to a STRING CONSTANT's interior — `s_label + 8` — and the pass declined it
+  // for exactly the reason it declined a bare `&static`: `expr-shape` walks into
+  // the `+`, asks for the base's type, and no table names a Ghidra string label.
+  // The label's ONE knowable shape has to be reachable at every level of the
+  // walk, not only at the top.
+  describe('a string label with an offset on it', () => {
+    it('casts the interior of a string constant compared against a machine word', () => {
+      const out = transform(`void f() {
+        int32_t* pElemStatTable;
+        do {
+          pElemStatTable++;
+        } while ((int)pElemStatTable < s___UI_SkillDesc_cpp_006dbf24 + 8);
+      }`);
+      assert.ok(
+        out.includes('(uintptr_t)(s___UI_SkillDesc_cpp_006dbf24 + 8)'),
+        `The offset stays inside the cast: ${out}`,
+      );
+    });
+
+    it('casts the same shape with the label on the left', () => {
+      const out = transform(`void f() {
+        int nVar;
+        if (s___not_xlated_call_ken_w_00730520 + 4 < (int)nVar) {}
+      }`);
+      assert.ok(
+        out.includes('(uintptr_t)(s___not_xlated_call_ken_w_00730520 + 4)'),
+        `The label side goes through uintptr_t: ${out}`,
+      );
+    });
+
+    it('casts a parenthesised offset too', () => {
+      const out = transform(`void f() {
+        int nVar;
+        if ((int)nVar < (s___UI_SkillDesc_cpp_006dbf24 + 8)) {}
+      }`);
+      assert.ok(out.includes('uintptr_t'), `A paren is not a conversion: ${out}`);
+    });
+
+    it('still casts the bare label with no offset', () => {
+      const out = transform(`void f() {
+        int nVar;
+        if ((int)nVar < s___UI_SkillDesc_cpp_006dbf24) {}
+      }`);
+      assert.ok(
+        out.includes('(uintptr_t)s___UI_SkillDesc_cpp_006dbf24'),
+        `The bare form must keep working: ${out}`,
+      );
+    });
+
+    it('casts an offset onto a MODELED array the same way', () => {
+      // Nothing convention-based about this one: the table says `char[74]`, and
+      // an array name plus an integer has always been a pointer.
+      const out = transform(`void f() {
+        int nVar;
+        if ((int)nVar < gaTable + 8) {}
+      }`, { globalTypes: { gaTable: 'char[74]' } });
+      assert.ok(out.includes('(uintptr_t)(gaTable + 8)'), `A modeled array decays: ${out}`);
+    });
+
+    it('leaves an offset onto something no table and no convention names alone', () => {
+      const out = transform(`void f() { int nVar; if ((int)nVar < nSomething + 8) {} }`);
+      assert.ok(!out.includes('uintptr_t'), `No evidence of a pointer: ${out}`);
+    });
+
+    // The shape is admitted in the two-pointer branch as well, not only the
+    // pointer-vs-word one. `char` is a spellable base — it is the same base the
+    // bare label has always been given there (the compiler.cpp regression above)
+    // — and the shape it replaces is `null`, which today means "no cast" and so
+    // means "comparison between distinct pointer types". Nothing that compiles
+    // now can change.
+    it('reaches the distinct-pointer branch too, where the base is spellable', () => {
+      const out = transform(`void f() {
+        short* psVar8;
+        if (psVar8 < s___UI_SkillDesc_cpp_006dbf24 + 8) {}
+      }`);
+      assert.ok(/\(short\s*(int)?\*\)\(s___UI_SkillDesc_cpp_006dbf24 \+ 8\)/.test(out), out);
+    });
+
+    it('leaves a subtraction of two labels alone — that is a distance', () => {
+      const out = transform(`void f() {
+        int nVar;
+        if ((int)nVar < s_a_006dbf24 - s_b_00730520) {}
+      }`);
+      assert.ok(!out.includes('uintptr_t'), `A pointer difference is an integer: ${out}`);
+    });
+  });
 });

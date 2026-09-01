@@ -22,7 +22,11 @@
  * disagrees about the width somewhere else, and that stays visible. The pointer
  * side is recognised by its shape, or — where no table types the operand, as
  * with a file-local static — by its being an `&` expression, which is a pointer
- * in the language regardless of what it points at.
+ * in the language regardless of what it points at. The same reach applies one
+ * shape further along: a Ghidra STRING LABEL carries its `char[N]` by naming
+ * convention alone, and an offset onto one (`s_label + 8`, how a folded interior
+ * address into a string constant comes out) is that array walked, so the
+ * convention has to survive the arithmetic.
  *
  * The cast is always spelled with a BUILTIN type - `(unsigned char*)`,
  * `(short*)`, `(void*)`. One of the two sides in this shape is essentially always
@@ -174,9 +178,32 @@ export function createPointerCompareCastTransformer(options?: PluginOptions): Tr
       // A string-label identifier only falls back to the naming convention
       // when every modeled source declined - a local, a global, or a field
       // table naming it is always the more exact answer.
-      const shapeOf = (e: Expression): TypeShape | null =>
-        shapeOfModeled(e)
-        ?? (isStringLabelIdentifier(e) ? { base: 'char', stars: 1, isConst: false } : null);
+      //
+      // The fallback has to be reachable at EVERY level of the walk, not only at
+      // the top. `expr-shape` handles pointer arithmetic itself - `p + 8` keeps
+      // p's type - but it resolves the base through its own tables, and a string
+      // label is exactly the name no table carries. So an interior address folded
+      // onto a string constant, `s___UI_SkillDesc_cpp_006dbf24 + 8`, came back
+      // shapeless and the comparison stayed "pointer and integer". Recursing
+      // here re-walks the same rule with the convention in hand.
+      //
+      // The arithmetic rule is copied from `expr-shape`, deliberately: `+`/`-`
+      // with EXACTLY ONE pointer operand. `s_a - s_b` is a distance, an integer,
+      // and must not come back a pointer.
+      function shapeOf(e: Expression): TypeShape | null {
+        const modeled = shapeOfModeled(e);
+        if (modeled) return modeled;
+        if (isStringLabelIdentifier(e)) return { base: 'char', stars: 1, isConst: false };
+        const u = unwrapParens(e);
+        if (u.kind !== NodeKind.BinaryExpr) return null;
+        const b = u as BinaryExpr;
+        if (b.operator !== '+' && b.operator !== '-') return null;
+        const l = shapeOf(b.left as Expression);
+        const r = shapeOf(b.right as Expression);
+        if (l && l.stars > 0 && (!r || r.stars === 0)) return l;
+        if (b.operator === '+' && r && r.stars > 0 && (!l || l.stars === 0)) return r;
+        return null;
+      }
 
       let changed = false;
       const inner = createTransformer({
