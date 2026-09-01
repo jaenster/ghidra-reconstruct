@@ -121,9 +121,11 @@ import type {
   Expression,
   Identifier,
   IntegerLiteralExpr,
+  MemberExpr,
   ParenExpr,
   QualifiedId,
   ReturnStmt,
+  SubscriptExpr,
   UnaryExpr,
   VariableDecl,
 } from '../../../ast/nodes.js';
@@ -142,6 +144,22 @@ const ARITHMETIC_OPS = new Set(['+', '-', '*', '/', '%', '&', '|', '^', '<<', '>
  * termination test of a walk, and what terminates a walk over A is the end of A.
  */
 const RELATIONAL_OPS = new Set(['<', '<=', '>', '>=']);
+
+/**
+ * How far from A's edge a bound may sit when A's element stride is unknown.
+ *
+ * What makes a bound miss A's edge at all is the FIELD OFFSET the cursor walks
+ * at: a walk over `a[i].field` runs from `&a[0].field` to `&a[N].field`, so its
+ * bound misses A's base or A's end by that offset, which is always less than
+ * one element. The stride is therefore the exact window, and it is known
+ * wherever Ghidra typed the global as an array — see `Candidate.elementSize`.
+ *
+ * This is only the fallback for the globals it did not. One 32-bit pointer pair:
+ * wider starts admitting bounds that belong to the next object, narrower misses
+ * the ordinary field-at-offset-4 walk. A bound outside the window is not this
+ * shape and is left exactly as it was.
+ */
+const EDGE_SLACK = 8;
 
 /**
  * The same reasoning as `ARITHMETIC_OPS`, one node kind over.
@@ -237,6 +255,17 @@ interface Candidate {
   name: string;
   address: number;
   size: number;
+  /**
+   * The stride of one element, for a global Ghidra typed as an array — its
+   * extent divided by its element count, so it is exact rather than inferred.
+   *
+   * Zero means the global is NOT a declared array: its type carried no `[N]`,
+   * or the count did not divide the extent. That is a load-bearing distinction,
+   * not a missing number. `p[4]` reaches a subobject of `p` where `p` is an
+   * array and the POINTEE of `p` where it is a pointer, and only the first says
+   * anything about `p`'s own storage.
+   */
+  elementSize: number;
   /** The namespace the DEFINITION is emitted in. Empty means root scope. */
   segments: readonly string[];
   /**
@@ -380,29 +409,47 @@ function complemented(form: Expression): Expression {
 }
 
 /**
- * One past the end of `a`, spelled through `sizeof` — `((char*)&a + sizeof(a))`,
- * or `(a + sizeof(a))` for a string constant, whose name already decays.
+ * A bound at the EDGE of `anchor`, `k` bytes from its base.
+ *
+ * Two anchorings, chosen by which edge `k` is at:
+ *
+ *  - below the end — `((char*)&a + k)`, or `((char*)&a - k)` for a bound just
+ *    under the base, which is how the decompiler folds `p >= &a[0].field` into
+ *    `&a - 1 < p`;
+ *  - at or past the end — `((char*)&a + sizeof(a))`, plus the field
+ *    displacement past it where there is one.
  *
  * **Why `sizeof` and not the byte count the extraction reports.** The extent is
- * what PROVES the literal is A's end; it is not what the bound should be
+ * what PROVES the literal is at A's edge; it is not what the bound should be
  * SPELLED as. A literal count is a second, independent statement of A's size,
  * and if the declaration this tree emits for A disagrees with it — a lost array
- * dimension is exactly the shape of that failure, and `gaYBufferRowOffsets` is
- * emitted `static uint32_t` today while Ghidra types it `int32_t[732]` — the
- * count walks off the end of the object and the smear this rule exists to stop
- * comes back in a smaller form. `sizeof(a)` cannot: whatever A is declared as,
- * the bound is A's own storage, so the loop is either right or short, never
- * out of bounds. A short loop is a visible functional bug; an over-long one
- * corrupts whatever the linker put next.
+ * dimension is exactly the shape of that failure — the count walks off the end
+ * of the object and the smear this rule exists to stop comes back in a smaller
+ * form. `sizeof(a)` cannot: whatever A is declared as, the bound is A's own
+ * storage plus a field offset, so the loop is either right or short, never
+ * wild. A short loop is a visible functional bug; an over-long one corrupts
+ * whatever the linker put next.
+ *
+ * A bound below the end takes no `sizeof`: it is measured from the base, which
+ * no declaration can move.
  */
-function endOfExtent(anchor: Candidate): Expression {
+function edgeOfExtent(anchor: Candidate, k: number): Expression {
   const designator = (): Expression => (anchor.segments.length === 0
     ? Expr.identifier(anchor.name)
     : Expr.qualifiedId([...anchor.segments, anchor.name]));
   const base = anchor.stringConstant
     ? designator()
     : Expr.cast(Type.pointer(Type.char()), Expr.unary('&', designator()));
-  return Expr.paren(Expr.binary(base, '+', Expr.sizeof(designator(), false)));
+
+  const displaced = (from: Expression, delta: number): Expression => (delta === 0
+    ? from
+    : Expr.binary(from, delta > 0 ? '+' : '-', Expr.intLiteral(Math.abs(delta))));
+
+  // Below the end the base is the fixed point; at or past it, the declaration is.
+  const form = anchor.size > 0 && k >= anchor.size
+    ? displaced(Expr.binary(base, '+', Expr.sizeof(designator(), false)), k - anchor.size)
+    : displaced(base, k);
+  return Expr.paren(form);
 }
 
 // ============================================
@@ -449,6 +496,7 @@ function createGlobalAddressLiteralTransformer(
   const addresses = options.globalAddresses ?? {};
   const sizes = options.globalSizes ?? {};
   const namespaces = options.globalNamespaces ?? {};
+  const elementSizes = options.globalElementSizes ?? {};
   const stringConstants = new Set(options.stringConstantNames ?? []);
   const floor = effectiveAddressFloor(options.imageBase);
   const returnsNonPointer = options.enclosingReturnsNonPointer === true;
@@ -459,10 +507,12 @@ function createGlobalAddressLiteralTransformer(
       continue;
     }
     const size = sizes[name];
+    const stride = elementSizes[name];
     candidates.push({
       name,
       address,
       size: Number.isSafeInteger(size) && size! > 0 ? size! : 0,
+      elementSize: Number.isSafeInteger(stride) && stride! > 0 ? stride! : 0,
       segments: namespaces[name] ?? [],
       stringConstant: stringConstants.has(name),
     });
@@ -471,17 +521,8 @@ function createGlobalAddressLiteralTransformer(
 
   /** By emitted name, for the derivation scan below. */
   const byName = new Map<string, Candidate>();
-  /** By exact base, so a raw address literal in an initialiser names its global. */
-  const baseAt = new Map<number, Candidate[]>();
   for (const c of candidates) {
     if (!byName.has(c.name)) byName.set(c.name, c);
-    const at = baseAt.get(c.address);
-    if (at) at.push(c); else baseAt.set(c.address, [c]);
-  }
-  /** The one global based exactly at `v`, or null where none or several are. */
-  function exactBase(v: number): Candidate | null {
-    const at = baseAt.get(v);
-    return at && at.length === 1 ? at[0]! : null;
   }
 
   // ============================================
@@ -531,10 +572,14 @@ function createGlobalAddressLiteralTransformer(
           : null;
       }
       case NodeKind.IntegerLiteral: {
+        // Ownership, not just the base: a walk that starts at a FIELD of the
+        // first element starts at an interior address, and that address names
+        // the object it is inside by exactly the rule the pass resolves every
+        // other literal with.
         const literal = expr as IntegerLiteralExpr;
         if (literal.value < 0n || literal.value >= BigInt(WORD)) return null;
-        const owner = exactBase(Number(literal.value));
-        return owner ? { kind: 'global', candidate: owner } : null;
+        const owner = ownerOfAddress(Number(literal.value), candidates);
+        return owner ? { kind: 'global', candidate: owner.candidate } : null;
       }
       case NodeKind.BinaryExpr: {
         const binary = expr as BinaryExpr;
@@ -543,6 +588,20 @@ function createGlobalAddressLiteralTransformer(
         const left = rootOf(binary.left);
         if (left) return left;
         return binary.operator === '+' ? rootOf(binary.right) : null;
+      }
+      case NodeKind.SubscriptExpr: {
+        // `a[i]` is a subobject of `a` only where `a` is an ARRAY. On a pointer
+        // it is the pointee — somebody else's storage entirely — and a bound
+        // placed at the pointer variable's own edge would be nonsense. A local
+        // is never admitted either: nothing here says which of the two it is.
+        const root = rootOf((expr as SubscriptExpr).array);
+        if (!root || root.kind !== 'global') return null;
+        return root.candidate.elementSize > 0 ? root : null;
+      }
+      case NodeKind.MemberExpr: {
+        // `.field` names a subobject; `->field` follows a pointer out of one.
+        const member = expr as MemberExpr;
+        return member.isArrow ? null : rootOf(member.object);
       }
       default:
         return null;
@@ -638,27 +697,46 @@ function createGlobalAddressLiteralTransformer(
   }
 
   /**
-   * The end-of-A reading of one side of a comparison, or null to leave it as it
-   * is.
+   * The edge-of-A reading of one side of a comparison, or null to leave it as
+   * it is.
    *
-   * Both readings of the literal have to exist for there to be a decision, but
-   * only ONE of them can be checked cheaply: `A.address + A.size === v` says
-   * `v` is one past the end of A, and the other operand walking A says which
-   * object the bound belongs to. Those two together identify A uniquely, so no
-   * separate search for "globals ending at v" is needed — a second global
-   * ending there is not the one the walk started in.
+   * The other operand PROVABLY walking A is what makes A known rather than
+   * guessed, and nothing here relaxes it. What it widens is the offset. A
+   * cursor that walks A at field offset `d` runs from `A.address + d` to
+   * `A.address + A.size + d`, so a bound belonging to A sits at `A.address + k`
+   * for a `k` within one element of either edge: below the base for a
+   * descending walk, past the end for an ascending one. The two differ only in
+   * which way the operator points, and neither the rule nor the spelling has to
+   * know which — the offset says everything.
+   *
+   * `k === 0` is excluded. A bound at A's own base is `&A`, which rule 1
+   * already spells, and overriding it here would only make the same address
+   * read worse.
+   *
+   * A `k` strictly inside A is rule 2's interior form already and this agrees
+   * with it; where A's extent is unknown it reaches an interior bound rule 2
+   * cannot.
    */
-  function endReading(side: ASTNode, other: Expression): Expression | null {
+  function edgeReading(side: ASTNode, other: Expression): Expression | null {
     const literal = literalBehind(side);
     if (!literal) return null;
     if (literal.value < 0n || literal.value >= BigInt(WORD)) return null;
-    const v = Number(literal.value);
 
     const walked = walkedGlobal(other);
-    // A zero or unknown extent has no computable end, and a global whose own
-    // base is the literal is not one past anything.
-    if (!walked || walked.size <= 0 || walked.address + walked.size !== v) return null;
-    return endOfExtent(walked);
+    if (!walked) return null;
+
+    const k = Number(literal.value) - walked.address;
+    if (k === 0) return null;
+
+    // The exact window where the stride is known, one pointer pair where it is
+    // not. Further out than one element is not a field offset, and a literal
+    // that far from A is not this shape.
+    const slack = walked.elementSize > 0 ? walked.elementSize : EDGE_SLACK;
+    const nearBase = k > -slack && k < slack;
+    const pastEnd = walked.size > 0 && k >= walked.size && k < walked.size + slack;
+    if (!nearBase && !pastEnd) return null;
+
+    return edgeOfExtent(walked, k);
   }
 
   /**
@@ -854,13 +932,13 @@ function createGlobalAddressLiteralTransformer(
       if (ARITHMETIC_OPS.has(node.operator)) return withOperandsRestored(node);
       if (!RELATIONAL_OPS.has(node.operator)) return undefined;
 
-      const right = endReading(node.right, node.left);
+      const right = edgeReading(node.right, node.left);
       if (right) {
         const form = replacing(node.right, right) as Expression;
         produced.set(form, produced.get(node.right) ?? node.right);
         return { ...node, right: form };
       }
-      const left = endReading(node.left, node.right);
+      const left = edgeReading(node.left, node.right);
       if (left) {
         const form = replacing(node.left, left) as Expression;
         produced.set(form, produced.get(node.left) ?? node.left);
@@ -905,6 +983,16 @@ export interface GlobalAddressLiteralOptions extends PluginOptions {
    * already resolved; this pass renders a qualifier, it never decides one.
    */
   globalNamespaces?: Record<string, readonly string[]>;
+  /**
+   * Global variable name (as emitted) → the stride of ONE ELEMENT, for a global
+   * Ghidra typed as an array: its extent divided by its element count.
+   *
+   * Exact, not inferred — both numbers come from the same Ghidra record — and
+   * its ABSENCE is information too: a name missing here is not a declared
+   * array, which is what stops a subscript on a POINTER global from being read
+   * as a walk over the pointer's own four bytes.
+   */
+  globalElementSizes?: Record<string, number>;
   /**
    * The subset of `globalAddresses` whose objects are STRING CONSTANTS —
    * declared `char <name>[N]`, defined from the bytes Ghidra read.

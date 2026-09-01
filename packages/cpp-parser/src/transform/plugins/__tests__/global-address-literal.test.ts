@@ -814,4 +814,176 @@ describe('globalAddressLiteralPlugin', () => {
       assert.ok(out.includes('(char*)&gaYBufferRowOffsets + 88'), `Interior form: ${out}`);
     });
   });
+
+  // ============================================
+  // THE EDGE OF A, NOT ONLY ITS END
+  // ============================================
+
+  describe('a bound at the edge of the object the walk covers', () => {
+    // D2WINFONT_FreeFontCache walks a FIELD of each entry: the cursor starts at
+    // `&gaFontCache[0].pFontTable` — four bytes into the first entry — and the
+    // bound is the array's end plus that same four. 0x841da8 + 280 + 4.
+    const FONT: GlobalAddressLiteralOptions = {
+      globalAddresses: { gaFontCache: 0x841da8, gcTooltipBarColor: 0x841ec4 },
+      globalSizes: { gaFontCache: 280, gcTooltipBarColor: 4 },
+      globalElementSizes: { gaFontCache: 20 },
+      imageBase: '0x400000',
+    };
+
+    const FREE_FONT_CACHE = `
+      void f() {
+        void** ppFontTable;
+        ppFontTable = &gaFontCache[0].pFontTable;
+        do {
+          *ppFontTable = 0;
+          ppFontTable = ppFontTable + 5;
+        } while ((int)ppFontTable < 0x841ec4);
+      }`;
+
+    it('resolves the FreeFontCache bound to the array end plus the field offset', () => {
+      const out = run(FREE_FONT_CACHE, FONT);
+      assert.ok(
+        out.includes('(char*)&gaFontCache + sizeof(gaFontCache) + 4'),
+        `Expected the end of the array plus the field offset in: ${out}`,
+      );
+      assert.ok(!out.includes('gcTooltipBarColor'), `A live variable must not be named: ${out}`);
+      assert.ok(!out.includes('0x841ec4'), `The literal must be gone: ${out}`);
+    });
+
+    // SCompDecompress walks the codec table backwards from
+    // `&paSCompDecompressCodecTable[4].pfnCodec` and stops just below the first
+    // entry's field: base + 3, where the field sits at base + 4.
+    const CODEC: GlobalAddressLiteralOptions = {
+      globalAddresses: { paSCompDecompressCodecTable: 0x6cfec4 },
+      globalSizes: { paSCompDecompressCodecTable: 40 },
+      globalElementSizes: { paSCompDecompressCodecTable: 8 },
+      imageBase: '0x400000',
+    };
+
+    it('resolves the SCompDecompress descending bound relative to the table', () => {
+      const out = run(`
+        void f() {
+          void** ppMethodEntry;
+          ppMethodEntry = &paSCompDecompressCodecTable[4].pfnCodec;
+          do {
+            ppMethodEntry = ppMethodEntry + -2;
+          } while (0x6cfec7 < (int)ppMethodEntry);
+        }`, CODEC);
+      assert.ok(
+        out.includes('(char*)&paSCompDecompressCodecTable + 3'),
+        `Expected a bound relative to the table in: ${out}`,
+      );
+      assert.ok(!out.includes('0x6cfec7'), `The literal must be gone: ${out}`);
+    });
+
+    it('resolves a descending bound one byte BELOW the table base', () => {
+      // The same fold where the walked field sits at offset 0: `p >= base`
+      // comes out of the decompiler as `base - 1 < p`, and nothing else in the
+      // pass can reach a literal below every symbol.
+      const out = run(`
+        void f() {
+          void** ppMethodEntry;
+          ppMethodEntry = &paSCompDecompressCodecTable[4].pfnCodec;
+          do {
+            ppMethodEntry = ppMethodEntry + -2;
+          } while (0x6cfec3 < (int)ppMethodEntry);
+        }`, CODEC);
+      assert.ok(
+        out.includes('(char*)&paSCompDecompressCodecTable - 1'),
+        `Expected a bound just below the table in: ${out}`,
+      );
+    });
+
+    it('declines a bound past the end by more than one element', () => {
+      // 0x841da8 + 280 + 20 is a whole element past the array: no field of an
+      // entry sits there, so this is not the shape and the literal stands.
+      const out = run(`
+        void f() {
+          void** ppFontTable;
+          ppFontTable = &gaFontCache[0].pFontTable;
+          do { ppFontTable = ppFontTable + 5; } while ((int)ppFontTable < 0x841ed8);
+        }`, FONT);
+      assert.ok(!out.includes('sizeof'), `Too far past the end to be an edge: ${out}`);
+      assert.ok(out.includes('0x841ed8'), `The literal stands: ${out}`);
+    });
+
+    it('declines a bound below the base by more than one element', () => {
+      const out = run(`
+        void f() {
+          void** ppMethodEntry;
+          ppMethodEntry = &paSCompDecompressCodecTable[4].pfnCodec;
+          do {
+            ppMethodEntry = ppMethodEntry + -2;
+          } while (0x6cfeb4 < (int)ppMethodEntry);
+        }`, CODEC);
+      assert.ok(
+        !out.includes('paSCompDecompressCodecTable -'),
+        `Too far below the base to be an edge: ${out}`,
+      );
+    });
+
+    it('keeps &B at a global’s exact base where no walk is proven', () => {
+      const out = run(`
+        void f() {
+          void** p = GetTable();
+          do { p = p + 5; } while ((int)p < 0x841ec4);
+        }`, FONT);
+      assert.ok(out.includes('&gcTooltipBarColor'), `Expected &gcTooltipBarColor in: ${out}`);
+      assert.ok(!out.includes('sizeof'), `No walk, no edge reading: ${out}`);
+    });
+
+    it('does not trace a subscript through a global that is not an array', () => {
+      // `pTable[4]` on a POINTER global reaches the pointee, which is not the
+      // pointer's own storage; a bound at the pointer's edge would be nonsense.
+      const out = run(`
+        void f() {
+          void** p;
+          p = &pSomeTable[4].pfnCodec;
+          do { p = p + -2; } while (0x6cfec8 < (int)p);
+        }`, {
+        globalAddresses: { pSomeTable: 0x6cfec4 },
+        // A pointer slot: four bytes. The bound sits one word past it, which the
+        // fallback slack WOULD admit had the walk been traceable — so what the
+        // literal surviving proves is that the subscript was refused.
+        globalSizes: { pSomeTable: 4 },
+        imageBase: '0x400000',
+      });
+      assert.ok(out.includes('0x6cfec8'), `A pointer is not an array: ${out}`);
+    });
+
+    it('does not trace a subscript through an arrow member access', () => {
+      const out = run(`
+        void f() {
+          void** p;
+          p = &gaFontCache[0].pEntry->pFontTable;
+          do { p = p + 5; } while ((int)p < 0x841ec4);
+        }`, FONT);
+      assert.ok(out.includes('&gcTooltipBarColor'), `An arrow leaves the object: ${out}`);
+    });
+
+    it('falls back to a small slack where the element size is unknown', () => {
+      // No array type means no element size, and no subscript trace either — so
+      // the walk has to name its start the other way the decompiler spells it,
+      // as the interior address itself. The window then shrinks to a platform
+      // stride rather than opening up.
+      const near = run(`
+        void f() {
+          void** ppFontTable;
+          ppFontTable = (void**)0x841dac;
+          do { ppFontTable = ppFontTable + 5; } while ((int)ppFontTable < 0x841ec4);
+        }`, { ...FONT, globalElementSizes: {} });
+      assert.ok(
+        near.includes('(char*)&gaFontCache + sizeof(gaFontCache) + 4'),
+        `Four past the end is inside the fallback slack: ${near}`,
+      );
+
+      const far = run(`
+        void f() {
+          void** ppFontTable;
+          ppFontTable = (void**)0x841dac;
+          do { ppFontTable = ppFontTable + 5; } while ((int)ppFontTable < 0x841ec8);
+        }`, { ...FONT, globalElementSizes: {} });
+      assert.ok(!far.includes('sizeof'), `Eight past the end is outside it: ${far}`);
+    });
+  });
 });

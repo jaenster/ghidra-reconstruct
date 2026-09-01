@@ -2015,12 +2015,34 @@ function stringConstantExtents(
   return out;
 }
 
+/**
+ * The element count Ghidra's own type spelling declares, or null.
+ *
+ * ONLY a trailing `[N]`, and only on the type the extraction carries — the same
+ * record `size` comes from, so a stride derived from the pair is exact rather
+ * than inferred. A multidimensional `T[A][B]` gives the OUTER count, which is
+ * the stride a walk over the rows advances by.
+ */
+function declaredElementCount(dataType: string | undefined): number | null {
+  const match = /\[(\d+)\]\s*$/.exec(String(dataType ?? '').trim());
+  if (!match) return null;
+  const count = Number.parseInt(match[1]!, 10);
+  return Number.isSafeInteger(count) && count > 0 ? count : null;
+}
+
 export function buildGlobalAddressExtentTables(
   globals: AnalyzedDataSymbol[],
   strings: ReadonlyArray<ExtractedString> = []
 ): {
   globalAddresses: Record<string, number>;
   globalSizes: Record<string, number>;
+  /**
+   * Name → the stride of ONE element, for the globals Ghidra typed as arrays:
+   * the extent divided by the declared count. A name is ABSENT where the type
+   * carried no `[N]` or the count did not divide the extent, and that absence
+   * is read as "not a declared array" — see `global-address-literal`.
+   */
+  globalElementSizes: Record<string, number>;
   /** The subset of the two tables above whose objects are `char[N]` strings. */
   stringConstantNames: string[];
 } {
@@ -2058,6 +2080,25 @@ export function buildGlobalAddressExtentTables(
     globalSizes[name] = size;
   }
 
+  const globalElementSizes: Record<string, number> = {};
+  for (const g of globals) {
+    const name = g.suggestedName || g.name;
+    if (!name || /[^A-Za-z0-9_]/.test(name)) continue;
+    // Only where the extent itself survived unambiguous: a stride computed from
+    // a size two records disagreed about would be a third disagreement.
+    const size = globalSizes[name];
+    if (size === undefined) continue;
+    const count = declaredElementCount(g.suggestedType || g.dataType);
+    if (count === null || size % count !== 0) continue;
+    const stride = size / count;
+    const existing = globalElementSizes[name];
+    if (existing !== undefined && existing !== stride) {
+      delete globalElementSizes[name];
+      continue;
+    }
+    globalElementSizes[name] = stride;
+  }
+
   // The string constants last, and never over a name a global already owns: a
   // global has a modelled type and a declaration of its own, and a synthesized
   // label losing to it costs one unresolved literal, while the reverse would
@@ -2071,7 +2112,7 @@ export function buildGlobalAddressExtentTables(
     stringConstantNames.push(name);
   }
 
-  return { globalAddresses, globalSizes, stringConstantNames };
+  return { globalAddresses, globalSizes, globalElementSizes, stringConstantNames };
 }
 
 /**
@@ -4112,7 +4153,7 @@ export function buildFuncPtrArgCastTables(
   // builder, so the pass and the scope analysis resolve against one table. They
   // are not globals — see `stringConstantExtents` — and the only thing their
   // membership changes is the spelling of a reference to one.
-  const { globalAddresses, globalSizes, stringConstantNames } =
+  const { globalAddresses, globalSizes, globalElementSizes, stringConstantNames } =
     buildGlobalAddressExtentTables(globals, strings);
 
   // Global name → the namespace segments its DEFINITION is emitted in. A literal
@@ -4221,6 +4262,7 @@ export function buildFuncPtrArgCastTables(
     globalTypes,
     globalAddresses,
     globalSizes,
+    globalElementSizes,
     globalNamespaces,
     stringConstantNames,
     varArgFunctions: [...varArgFunctions],

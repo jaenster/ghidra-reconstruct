@@ -689,6 +689,13 @@ export interface FuncPtrArgCastTables {
    */
   globalSizes?: Record<string, number>;
   /**
+   * Global name → the stride of one element, for the globals Ghidra typed as
+   * arrays. Read by `global-address-literal`: it is the exact width of the
+   * window in which a loop bound can still belong to the object being walked,
+   * and its absence says the global is not a declared array at all.
+   */
+  globalElementSizes?: Record<string, number>;
+  /**
    * The entries of `globalAddresses` that are STRING CONSTANTS — `char[N]`
    * objects the declaration closure declares and defines from Ghidra's bytes.
    * A reference to one is the BARE NAME, which decays to `char*`; `&name` would
@@ -2197,6 +2204,7 @@ function transformDecompiledCode(
       perPluginOptions['global-address-literal'] = {
         globalAddresses: context.funcPtrArgCasts.globalAddresses,
         globalSizes: context.funcPtrArgCasts.globalSizes,
+        globalElementSizes: context.funcPtrArgCasts.globalElementSizes,
         globalNamespaces: context.funcPtrArgCasts.globalNamespaces,
         stringConstantNames: context.funcPtrArgCasts.stringConstantNames,
         imageBase: context.imageBase,
