@@ -102,6 +102,23 @@ const WORD = 0x100000000;
  */
 const ADDRESS_FLOOR = 0x10000;
 
+/**
+ * At or above this, an "address" is not one either.
+ *
+ * The same placeholder machinery runs at the other end: a small NEGATIVE offset
+ * becomes a symbol near the top of the word, so the table also carries
+ * `DAT_fffffffb` and `hWndInsertAfter_fffffffe`. Those turned `pDstExtra[-5]`
+ * into `pDstExtra[&DAT_fffffffb]`.
+ *
+ * A 32-bit Win32 process maps its image in the low half of the address space;
+ * everything from 0x80000000 up is kernel-reserved and never holds a global.
+ *
+ * This bounds the CANDIDATE addresses only. It does not constrain the literal
+ * VALUES the pass inspects, which is what `COMPLEMENT_FLOOR` is for — a folded
+ * `~address` legitimately lands above 0xFF000000 and must still be tried.
+ */
+const ADDRESS_CEILING = 0x80000000;
+
 interface Candidate {
   name: string;
   address: number;
@@ -177,7 +194,9 @@ function createGlobalAddressLiteralTransformer(
 
   const candidates: Candidate[] = [];
   for (const [name, address] of Object.entries(addresses)) {
-    if (!Number.isSafeInteger(address) || address < ADDRESS_FLOOR || address >= WORD) continue;
+    if (!Number.isSafeInteger(address) || address < ADDRESS_FLOOR || address >= ADDRESS_CEILING) {
+      continue;
+    }
     const size = sizes[name];
     candidates.push({
       name,

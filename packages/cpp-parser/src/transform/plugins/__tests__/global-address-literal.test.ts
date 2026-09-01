@@ -209,5 +209,32 @@ describe('globalAddressLiteralPlugin', () => {
       assert.ok(!run(`void f() { p = 0xffff; }`, edge).includes('gLow'));
       assert.ok(run(`void f() { p = 0x10000; }`, edge).includes('&gHigh'));
     });
+
+    it('ignores placeholder symbols near the top of the word', () => {
+      // The same machinery runs at the other end: a small negative offset becomes
+      // a symbol like DAT_fffffffb, which turned `pDstExtra[-5]` into
+      // `pDstExtra[&DAT_fffffffb]`.
+      const junk: GlobalAddressLiteralOptions = {
+        globalAddresses: { DAT_fffffffb: 0xfffffffb, hWndInsertAfter_fffffffe: 0xfffffffe, gReal: 0x500100 },
+        globalSizes: { DAT_fffffffb: 4, hWndInsertAfter_fffffffe: 4, gReal: 12 },
+      };
+      const out = run(`void f(uint32_t* pDstExtra) { pDstExtra[-5] = 0; pDstExtra[-2] = 0; }`, junk);
+      assert.ok(!out.includes('DAT_ffff'), `No kernel-space symbol may resolve: ${out}`);
+      assert.ok(!out.includes('hWndInsertAfter'), `No kernel-space symbol may resolve: ${out}`);
+      assert.ok(out.includes('pDstExtra[-5]'), `Index must stay numeric: ${out}`);
+    });
+
+    it('still resolves a folded complement, which the ceiling must not block', () => {
+      // COMPLEMENT_FLOOR bounds literal VALUES; ADDRESS_CEILING bounds CANDIDATE
+      // addresses. A folded ~address is a value above 0xFF000000 pointing at a
+      // candidate in the low half, and must survive both.
+      const opts: GlobalAddressLiteralOptions = {
+        globalAddresses: { gAnchor: 0x708360 },
+        globalSizes: { gAnchor: 12 },
+      };
+      const out = run(`void f() { p = (void*)-7373669; }`, opts);
+      assert.ok(out.includes('~(uintptr_t)'), `Complement must resolve: ${out}`);
+      assert.ok(out.includes('gAnchor'), `Complement must name the global: ${out}`);
+    });
   });
 });
