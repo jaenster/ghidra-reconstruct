@@ -10,6 +10,13 @@ ROOT="$(dirname "$HERE")"
 export GHIDRA_PROJECT_PATH GHIDRA_PROGRAM_PATH GHIDRA_MCP_TOKEN
 export GHIDRA_DAEMON_URL="${GHIDRA_DAEMON_URL:-http://localhost:8433}"
 
+# `run.ts` imports @ghidra-mcp/reconstruct, whose package `exports` resolve to
+# dist/ — so the regen runs whatever was LAST BUILT, not what is in src/. A run
+# started against a stale dist/ silently reproduces the previous emitter and
+# reads as "the fix did not work"; that has already cost a diagnosis cycle.
+echo "[regen] build -> dist"
+( cd "$ROOT" && npx tsc -b )
+
 echo "[regen] reconstruct -> $ROOT/output"
 ( cd "$ROOT" && npx tsx run.ts )
 

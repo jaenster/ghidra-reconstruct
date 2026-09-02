@@ -1541,12 +1541,24 @@ function emitPointerToSymbol(rawValue: string, expectedType?: string): string {
   const spelled = shadowQualifyReference(value);
   const bare = value.match(/^[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*$/) ? value : undefined;
   const slotType = expectedType ? stripFuncDefIndirection(expectedType.trim()) : undefined;
-  const expectsPointer = !!slotType && /\*\s*$/.test(slotType);
+  // Asked of what the slot STANDS FOR: `typedef void* pointer` has no star to
+  // find, and without this a `pointer` slot got no pointee and fell back to a
+  // `void*` cast — which is how `(void*)0x006dc978` came to be spelled.
+  const expectsPointer = isPointerSlotSpelling(slotType);
   // Compared UNQUALIFIED against the symbol's own declared type; spelled
   // root-qualified, because the cast lands inside a namespace block whose own
   // name may shadow the type (`namespace D2Client::Mouse` hides root `Mouse`).
-  const pointeeBare = expectsPointer ? baseTypeName(slotType!.replace(/\*\s*$/, '')) : undefined;
+  // What the slot STANDS FOR, so a typedef's pointee is the typedef's pointee
+  // and not the typedef itself: `pointer` is `void*`, whose pointee is `void`.
+  const standsFor = expectsPointer ? slotStandsFor(slotType!) : undefined;
+  const pointeeBare = standsFor ? baseTypeName(standsFor.replace(/\*\s*$/, '')) : undefined;
   const pointee = pointeeBare ? rootQualifyShadowedType(pointeeBare) : undefined;
+  // The CAST is the slot's own spelling. A star-less pointer typedef already
+  // carries its indirection, so `(pointer)` is the slot's type and `(pointer*)`
+  // would be `void**` — one level too many.
+  const pointerCast = !expectsPointer ? undefined
+    : /\*\s*$/.test(slotType!.trim()) ? `${pointee}*`
+    : rootQualifyShadowedType(slotType!.trim());
 
   // The same, one level out: `s_umod_006e6f60+3` / `LAB_00646c24+1` is an
   // INTERIOR pointer whose root is one of those invented names. The root carries
@@ -1556,7 +1568,7 @@ function emitPointerToSymbol(rawValue: string, expectedType?: string): string {
     const rootAddress = unresolvedSymbolAddress(interior[1]);
     if (rootAddress !== undefined) {
       const literal = `0x${(parseInt(rootAddress, 16) + Number(interior[2])).toString(16).padStart(8, '0')}`;
-      if (pointee) return `(${pointee}*)${literal}`;
+      if (pointerCast) return `(${pointerCast})${literal}`;
       const base = slotType ? baseTypeName(slotType).toLowerCase() : undefined;
       return base && INTEGER_SLOT_TYPES.has(base) ? literal : `(void*)${literal}`;
     }
@@ -1568,7 +1580,17 @@ function emitPointerToSymbol(rawValue: string, expectedType?: string): string {
     const address = unresolvedSymbolAddress(bare);
     if (address !== undefined) {
       const literal = `0x${address.toLowerCase()}`;
-      if (pointee) return `(${pointee}*)${literal}`;
+      // Unless the tree CAN name it after all. That rule predates the
+      // declaration closure, which now gives every referenced string constant an
+      // `extern char N[];` in globals.h and exactly one definition — so
+      // `s_Font8_006dc978` is declarable, and demoting it to 0x006DC978 throws
+      // away the only spelling that survives relinking. `aFontNames` is fifteen
+      // of these, and `D2WINFONT_BuildFontPath` passes each to `wsprintfA` as a
+      // `%s`. Same table and same rule as every other address on this side, so
+      // a label the table cannot name still falls through to the literal below.
+      const named = pointerSlotAddressReference(literal, slotType);
+      if (named) return named;
+      if (pointerCast) return `(${pointerCast})${literal}`;
       // Only a slot whose type is NAMED as an integer takes the bare value; a
       // pointer spelled through a typedef (`pointer`, `LPVOID`, `HANDLE`) has no
       // `*` to test for, so anything else gets the `void*` cast.
@@ -1593,22 +1615,22 @@ function emitPointerToSymbol(rawValue: string, expectedType?: string): string {
     const elem = arrayGlobals.get(bare);
     if (elem) {
       // 1-D array: decay. Cast only when Ghidra's element type is not the slot's.
-      if (pointee && baseTypeName(elem) !== pointeeBare) return `(${pointee}*)${spelled}`;
+      if (pointerCast && baseTypeName(elem) !== pointeeBare) return `(${pointerCast})${spelled}`;
       return value;
     }
     const declared = globalDeclaredTypes.get(bare);
     // `&sym` has type `<declared> *`. Compare at FULL pointer depth, not just the
     // base name: a symbol declared `DC6 *` yields `DC6 **`, which a `DC6 *` slot
     // does not take — `baseTypeName` erases exactly the `*` that makes them differ.
-    if (pointee && declared !== undefined && pointerDepthAwareName(declared) !== pointeeBare) {
-      return `(${pointee}*)&${spelled}`;
+    if (pointerCast && declared !== undefined && pointerDepthAwareName(declared) !== pointeeBare) {
+      return `(${pointerCast})&${spelled}`;
     }
     return `&${spelled}`;
   }
 
   // Not a bare symbol: an interior path like `Tbl[14].pField`. `&` there yields a
   // pointer to the FIELD's type, which is only by luck the slot's type.
-  if (pointee) return `(${pointee}*)&${spelled}`;
+  if (pointerCast) return `(${pointerCast})&${spelled}`;
   return `&${spelled}`;
 }
 
