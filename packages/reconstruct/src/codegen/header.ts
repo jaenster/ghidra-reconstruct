@@ -26,6 +26,7 @@ import { isPlatformOrBuiltinType, isLibraryType, normalizeSignatureType, normali
 import { generateExternDeclaration, isFuncDefTypedefName, sanitizeSymbolName, orderForwardDeclarations, type ForwardDeclaration } from './globals-header.js';
 import { declarationHead, pointerConvention } from './calling-convention.js';
 import { enumTypedefLine } from './enum-width.js';
+import { requiresPacking } from './struct-packing.js';
 
 /** normalizeSignatureType + fn-ptr-typedef double-indirection collapse, for
  *  emitting function parameter and return types ("fpFoo *" → "fpFoo"). */
@@ -1339,7 +1340,13 @@ export function fieldDeclSpelling(dataType: string, size: number): string | null
 export function generateStructDeclaration(struct: ExtractedStruct): string {
   const lines: string[] = [];
 
-  const packed = struct.packed ? '__attribute__((packed)) ' : '';
+  // Ghidra's own `packed` flag is not reliably set, so the requirement is also
+  // DERIVED: if natural C alignment cannot reproduce the declared offsets, the
+  // struct is packed. Emitting it unpacked compiles cleanly and reads the wrong
+  // bytes - D2StringTableTblFileStrc's dwords at 0x09/0x0D/0x11 land at 12/16/20
+  // and the .tbl CRC then runs off the end of the buffer. See struct-packing.ts.
+  const packed = (struct.packed || requiresPacking(struct.fields))
+    ? '__attribute__((packed)) ' : '';
   lines.push(`struct ${packed}${struct.name} {`);
 
   // Add integer conversion operators for small integer-only structs
