@@ -6,7 +6,7 @@
  */
 
 import type { AnalyzedDataSymbol, ReconstructOptions, DataValue, ExtractedDataType, ExtractedStruct, ExtractedUnion, ExtractedFunctionDefinition, ExtractedFunction } from '../types.js';
-import { GLIDE_UNSIGNED_ENUM_TYPEDEFS, PLATFORM_STRUCT_FIELD_TYPES, getAggregateTypeNames, isPlatformOrBuiltinType, isLibraryType, isStructType, castPointerInitializer, normalizeDataValue, isCharacterValueType, isMsvcEhInternal, normalizeWideCharType, normalizeListingBuiltinType, listingBuiltinElementType, imageArtifactElementType, isVoidPointerSpelling, rootQualifyShadowedType, platformDeclaredFunctionNames } from './platform-types.js';
+import { GLIDE_UNSIGNED_ENUM_TYPEDEFS, PLATFORM_STRUCT_FIELD_TYPES, getAggregateTypeNames, isPlatformOrBuiltinType, isLibraryType, isStructType, castPointerInitializer, normalizeDataValue, isCharacterValueType, isMsvcEhInternal, normalizeWideCharType, normalizeListingBuiltinType, listingBuiltinElementType, imageArtifactElementType, isVoidPointerSpelling, resolveTypedefSpelling, rootQualifyShadowedType, platformDeclaredFunctionNames } from './platform-types.js';
 import { generateStructDeclaration, generateUnionDeclaration, generateFunctionDefinitionDeclaration, ghidraDefaultFieldName } from './header.js';
 import { normalizeQualifiedReference } from './namespace.js';
 import { namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
@@ -1848,6 +1848,43 @@ function scalarWordValue(raw: string | null | undefined): number | null {
 }
 
 /**
+ * The shape of a slot, read off what its spelling STANDS FOR.
+ *
+ * `d2_platform.h` has `typedef void* pointer;`, so `pointer aFontNames[15]` is
+ * fifteen pointer slots with not one star between them. Both resolvers below
+ * used to ask `/\*$/` of the spelling and decline — fifteen string constants
+ * kept their absolute addresses and `D2WINFONT_BuildFontPath` read 0x006DC970.
+ * The same is true of `LPVOID`, `PVOID`, `LPCVOID`, `LPCSTR` and the HANDLE
+ * family wherever they land as an element or field type.
+ *
+ * A trailing `[N]` is checked FIRST and is never a pointer slot: after the outer
+ * dimension has come off, a remaining one is a row of a 2-D array, and a row is
+ * not assignable.
+ */
+function slotStandsFor(slotType: string): string {
+  const slot = slotType.trim();
+  if (/\]\s*$/.test(slot)) return slot;
+  if (/\*\s*$/.test(slot)) return slot;
+  return resolveTypedefSpelling(baseTypeName(slot));
+}
+
+/** A slot that holds an ADDRESS, however its type is spelled. */
+function isPointerSlotSpelling(slotType: string | undefined): boolean {
+  const slot = slotType?.trim();
+  if (!slot) return false;
+  return /\*\s*$/.test(slotStandsFor(slot));
+}
+
+/** A slot that holds a WORD, however its type is spelled. */
+function isIntegerSlotSpelling(slotType: string | undefined): boolean {
+  const slot = slotType?.trim();
+  if (!slot) return false;
+  const stands = slotStandsFor(slot);
+  if (/[*[\]]/.test(stands)) return false;
+  return INTEGER_SLOT_TYPES.has(baseTypeName(stands).toLowerCase());
+}
+
+/**
  * The reference, spelled to fit the slot it is stored in — or null when it
  * cannot be spelled and the literal must stand.
  *
@@ -1866,9 +1903,10 @@ function initializerAddressSpelling(
   if (!slot) return null;
   const reference = shadowQualifyReference(
     entry.stringConstant ? entry.name : `&${entry.name}`);
-  if (/\*\s*$/.test(slot)) return `(${rootQualifyShadowedType(slot)})${reference}`;
-  const base = baseTypeName(slot).toLowerCase();
-  if (!INTEGER_SLOT_TYPES.has(base)) return null;
+  // The cast carries the DECLARED spelling either way: it is the type the
+  // reader declared, and it converts exactly as the resolved one would.
+  if (isPointerSlotSpelling(slot)) return `(${rootQualifyShadowedType(slot)})${reference}`;
+  if (!isIntegerSlotSpelling(slot)) return null;
   return `(${rootQualifyShadowedType(slot)})(uintptr_t)${reference}`;
 }
 
@@ -1893,7 +1931,7 @@ function pointerSlotAddressReference(
   slotType: string | undefined
 ): string | null {
   const slot = slotType?.trim();
-  if (!slot || !/\*\s*$/.test(slot)) return null;
+  if (!slot || !isPointerSlotSpelling(slot)) return null;
   const word = scalarWordValue(rawValue);
   // Zero is a null slot, not an address; the table's floor excludes it anyway.
   if (word === null || word === 0) return null;

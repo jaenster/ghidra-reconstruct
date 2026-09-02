@@ -1817,7 +1817,7 @@ export function setAggregateTypeNames(
   dataTypes: Array<{ name: string; kind?: string; underlyingType?: string }>,
 ): void {
   const aggregates = new Set<string>();
-  const typedefTargets = new Map<string, string>();
+  const typedefTargets = new Map<string, string>(Object.entries(EMITTER_POINTER_TYPEDEFS));
   for (const dt of dataTypes) {
     if (!dt.name) continue;
     if (dt.kind === 'STRUCTURE' || dt.kind === 'UNION') aggregates.add(dt.name);
@@ -1825,6 +1825,9 @@ export function setAggregateTypeNames(
       typedefTargets.set(dt.name, dt.underlyingType);
     }
   }
+  // Kept, so a caller can ask what a star-less spelling actually STANDS FOR
+  // rather than only whether it ends at a pointer — see `resolveTypedefSpelling`.
+  typedefChain = typedefTargets;
   // Follow each typedef to its end. A target carrying a `*` or a `[` is a pointer
   // or an array, never an aggregate lvalue, so the chain stops there.
   const resolveToAggregate = (name: string): boolean => {
@@ -1880,6 +1883,45 @@ let pointerTypedefNames: Set<string> = new Set();
 /** Does this name denote a typedef whose chain ends at a pointer? */
 export function isPointerTypedefName(name: string): boolean {
   return pointerTypedefNames.has(name);
+}
+
+/**
+ * Typedef name -> the spelling it stands for, one hop.
+ *
+ * Seeded with the emitter's own pointer typedefs, because Ghidra records
+ * `pointer`, `LPVOID`, `PVOID` and the HANDLE family as typedefs with NO target
+ * — so a chain walk over the model alone stops at the first hop and answers
+ * "not a pointer" for the very spellings that most need the answer.
+ */
+let typedefChain = new Map<string, string>(Object.entries(EMITTER_POINTER_TYPEDEFS));
+
+/**
+ * What a type spelling actually STANDS FOR, with its typedefs followed out.
+ *
+ * `typedef void* pointer;` gives `pointer` no star, and every emitter that
+ * decides "is this a pointer slot?" by looking for one in the spelling gets the
+ * answer wrong — `castPointerInitializer` had exactly that bug, and so did the
+ * two initializer address resolvers. Ask this first, then read the shape off
+ * what comes back; keep spelling the CAST with the declared name, which is the
+ * one the reader declared.
+ *
+ * A spelling that already carries a `*` or a `[` is its own answer. The walk
+ * stops at the first target that carries either, and is bounded, so a typedef
+ * cycle terminates.
+ */
+export function resolveTypedefSpelling(spelling: string): string {
+  const start = spelling.trim();
+  if (!start || /[*[\]]/.test(start)) return start;
+  let cur = start;
+  for (let depth = 0; depth < 16; depth++) {
+    const target = typedefChain.get(cur);
+    if (!target) return cur;
+    const base = target.replace(/\b(const|volatile|struct|union)\b/g, '').trim();
+    if (base.includes('*') || base.includes('[')) return base;
+    if (base === cur) return cur;
+    cur = base;
+  }
+  return cur;
 }
 
 export function getAggregateTypeNames(): Set<string> | undefined {
