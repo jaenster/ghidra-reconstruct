@@ -359,11 +359,13 @@ export function recordCentralInitializerAddressReferences(
   const mismatchesBeforeDiscovery = initializerFuncPtrArityMismatches;
   for (const global of globals) {
     const type = normalizeGlobalDeclType(global.suggestedType || global.dataType);
+    setInitializerOwnerAddress(global.address);
     if (global.initializedData) {
       emitDataValue(global.initializedData, 0, type);
     } else if (global.isInitialized) {
       renderGlobalScalarInitializer(global.value, type, inferArrayDeclaration(global)?.count);
     }
+    setInitializerOwnerAddress(undefined);
   }
   initializerFuncPtrArityMismatches = mismatchesBeforeDiscovery;
 }
@@ -563,7 +565,9 @@ export function generateGlobalsHeader(
         const type = constant.suggestedType || constant.dataType;
         const name = constant.suggestedName || constant.name;
         const arrayInfo = inferArrayDeclaration(constant);
+        setInitializerOwnerAddress(constant.address);
         const value = renderGlobalScalarInitializer(constant.value, type, arrayInfo?.count);
+        setInitializerOwnerAddress(undefined);
         const init = arrayInfo ? `{ ${value} }` : value;
         recordDeclaredName(name);
         lines.push(`constexpr ${normalizeArrayDeclaration(type, name)} = ${init}; ${comment}`);
@@ -1082,10 +1086,15 @@ export function generateStaticLocalDeclaration(
   // `&sym` is `int*` on one side and `uint8_t*` on the other.
   type = normalizeGlobalDeclType(type);
 
+  // Whose object this is, for the initializer renderers below — see
+  // `setInitializerOwnerAddress`. Cleared before every return.
+  setInitializerOwnerAddress(symbol.address);
+
   let initializer = '';
   if (symbol.initializedData) {
     const arrayInfo = inferArrayDeclaration(symbol);
     const init = emitDataValue(symbol.initializedData, 0, type);
+    setInitializerOwnerAddress(undefined);
     if (arrayInfo && symbol.initializedData.kind === 'array') {
       return `static ${arrayInfo.type} ${name}[${arrayInfo.count}] = ${init};`;
     }
@@ -1105,6 +1114,8 @@ export function generateStaticLocalDeclaration(
     // Can't have uninitialized auto
     initializer = ' = {}';
   }
+
+  setInitializerOwnerAddress(undefined);
 
   recordDeclaredName(name);
   let declaration = `static ${normalizeArrayDeclaration(type, name)}${initializer};`;
@@ -1486,6 +1497,30 @@ function dottedNameIsNotAMemberAccess(expr: string): boolean {
   return !globalVariableNames.has(root) && !globalVariableNames.has(bare);
 }
 
+/**
+ * A function's address, spelled for the slot it is stored in — or null when the
+ * slot takes `&Fn` as it stands.
+ *
+ * One spelling for both ways a function address arrives: as a NAME from Ghidra,
+ * and as a WORD an initializer resolved against `func-ptr-literal`'s table. The
+ * two must agree about the cast, so there is one place that decides it.
+ */
+function functionAddressSpelling(
+  name: string,
+  spelled: string,
+  slotType?: string
+): string | null {
+  const castTo = functionInitializerCast(name, slotType);
+  if (!castTo) return null;
+  const cast = `(${rootQualifyShadowedType(castTo)})`;
+  // An INTEGER slot takes no pointer of any kind, so the address goes through
+  // `uintptr_t` first and is then spelled at the slot's own width — the same
+  // two-step a string address in an integral slot already takes.
+  return INTEGER_SLOT_TYPES.has(castTo.toLowerCase())
+    ? `${cast}(uintptr_t)&${spelled}`
+    : `${cast}&${spelled}`;
+}
+
 function emitPointerToSymbol(rawValue: string, expectedType?: string): string {
   // Drop the CRT-helper namespace prefixes (compiler/VisualStudio are not emitted).
   const stripped = rawValue.replace(/\b(?:compiler|VisualStudio)::/g, '');
@@ -1550,16 +1585,8 @@ function emitPointerToSymbol(rawValue: string, expectedType?: string): string {
   // A function address in a slot whose type is `void*`, a differing funcdef, or
   // a plain integer word.
   if (bare) {
-    const castTo = functionInitializerCast(value, slotType);
-    if (castTo) {
-      const cast = `(${rootQualifyShadowedType(castTo)})`;
-      // An INTEGER slot takes no pointer of any kind, so the address goes
-      // through `uintptr_t` first and is then spelled at the slot's own width —
-      // the same two-step a string address in an integral slot already takes.
-      return INTEGER_SLOT_TYPES.has(castTo.toLowerCase())
-        ? `${cast}(uintptr_t)&${spelled}`
-        : `${cast}&${spelled}`;
-    }
+    const asFunction = functionAddressSpelling(value, spelled, slotType);
+    if (asFunction) return asFunction;
   }
 
   if (bare) {
@@ -1692,6 +1719,83 @@ interface InitializerAddressEntry {
 let initializerAddressBases = new Map<number, InitializerAddressEntry | null>();
 let initializerAddressNamesUsed = new Set<string>();
 
+/**
+ * The image window `setInitializerAddressTable` admitted, kept so the FUNCTION
+ * table below can be held to exactly the same one.
+ */
+let initializerAddressFloor = 0;
+
+/**
+ * Address -> the function defined there, spelled with the namespace its
+ * DEFINITION is emitted in.
+ *
+ * This is `func-ptr-literal`'s own map, pushed in from the one place that builds
+ * it. A function address in a data initializer is the same question that pass
+ * answers for a function address in a BODY, down to the qualifier the reference
+ * needs, and answering it from a second table is how the two would drift.
+ */
+let initializerFunctionBases = new Map<number, string>();
+
+export function setInitializerFunctionAddresses(
+  functionAddresses?: ReadonlyMap<bigint, { name: string; namespaceSegments?: readonly string[] }>,
+): void {
+  // Module state: a second run must not inherit the first's map, and a run with
+  // no map must clear it rather than skip the reset.
+  initializerFunctionBases = new Map();
+  if (!functionAddresses) return;
+  for (const [address, target] of functionAddresses) {
+    const word = Number(address);
+    if (!Number.isSafeInteger(word)) continue;
+    const segments = target.namespaceSegments ?? [];
+    initializerFunctionBases.set(
+      word, segments.length > 0 ? `${segments.join('::')}::${target.name}` : target.name);
+  }
+}
+
+/**
+ * The address of the object whose initializer is being rendered, or undefined.
+ *
+ * THE TREE HOLDS TWO IMAGES. The Mac build's data symbols are merged in beside
+ * the Windows ones for their cross-platform anchors, and the two address spaces
+ * overlap: `PTR_DAT_00396304 = (void*)0x005cc240` is a Mac pointer holding a Mac
+ * address that lands exactly on a Windows function, and so is
+ * `PTR_DAT_00396178 = (void*)0x005c6910`. Two of the five values in the tree
+ * that hit a Windows function are these — a rule reading only the VALUE would be
+ * wrong two times in five.
+ *
+ * The owner is what separates them: an object below the Windows image base is
+ * not a Windows image pointer, so what it holds is not a Windows address. An
+ * emit path that has not said whose object it is resolves no function at all,
+ * so a path nobody wired renders exactly what it rendered before.
+ */
+let initializerOwnerAddress: number | undefined;
+
+export function setInitializerOwnerAddress(address?: string | number): void {
+  if (address === undefined || address === null) {
+    initializerOwnerAddress = undefined;
+    return;
+  }
+  const word = typeof address === 'number'
+    ? address
+    : Number.parseInt(String(address).replace(/^0x/i, '').replace(/^.*:/, ''), 16);
+  initializerOwnerAddress = Number.isSafeInteger(word) ? word : undefined;
+}
+
+/** Is `word` an address in the image the object being initialised belongs to? */
+function ownerSharesImageWith(word: number): boolean {
+  if (initializerOwnerAddress === undefined) return false;
+  if (initializerOwnerAddress < initializerAddressFloor) return false;
+  if (initializerOwnerAddress >= ADDRESS_LITERAL_CEILING) return false;
+  return word >= initializerAddressFloor && word < ADDRESS_LITERAL_CEILING;
+}
+
+/** The function defined at `word`, when the owner argues that is what it is. */
+function initializerFunctionAt(word: number): string | null {
+  if (initializerFunctionBases.size === 0) return null;
+  if (!ownerSharesImageWith(word)) return null;
+  return initializerFunctionBases.get(word) ?? null;
+}
+
 export function setInitializerAddressTable(input?: {
   globalAddresses: Record<string, number>;
   stringConstantNames: readonly string[];
@@ -1702,9 +1806,11 @@ export function setInitializerAddressTable(input?: {
   // table, and a run with no table must clear it rather than skip the reset.
   initializerAddressBases = new Map();
   initializerAddressNamesUsed = new Set();
+  initializerAddressFloor = 0;
   if (!input) return;
 
   const floor = addressLiteralFloor(input.imageBase);
+  initializerAddressFloor = floor;
   const strings = new Set(input.stringConstantNames);
   for (const [name, address] of Object.entries(input.globalAddresses)) {
     if (!input.referenceableNames.has(name)) continue;
@@ -1792,7 +1898,15 @@ function pointerSlotAddressReference(
   // Zero is a null slot, not an address; the table's floor excludes it anyway.
   if (word === null || word === 0) return null;
   const entry = initializerAddressBases.get(word);
-  if (!entry) return null;
+  if (!entry) {
+    // Not data — a third kind the extent table never held. A function needs no
+    // declaration from the closure (a header already has its prototype), so
+    // nothing is recorded for it.
+    const func = initializerFunctionAt(word);
+    if (!func) return null;
+    const spelled = shadowQualifyReference(func);
+    return functionAddressSpelling(func, spelled, slot) ?? `&${spelled}`;
+  }
   const reference = shadowQualifyReference(
     entry.stringConstant ? entry.name : `&${entry.name}`);
   initializerAddressNamesUsed.add(entry.name);
@@ -1806,6 +1920,14 @@ function pointerSlotAddressReference(
     return reference;
   }
   return `(${rootQualifyShadowedType(slot.replace(/\s+/g, ' '))})${reference}`;
+}
+
+/** One array element that holds a function address, or null when it holds none. */
+function functionElementSpelling(word: number, elemType: string | undefined): string | null {
+  const func = initializerFunctionAt(word);
+  if (!func) return null;
+  const spelled = shadowQualifyReference(func);
+  return functionAddressSpelling(func, spelled, elemType) ?? `&${spelled}`;
 }
 
 /**
@@ -1841,8 +1963,12 @@ function arrayAddressSpellings(
     if (word === null) return null;
     if (word === 0) continue;
     const entry = initializerAddressBases.get(word);
-    if (!entry) return null;
-    const spelling = initializerAddressSpelling(entry, elemType);
+    // A dispatch table's entries are function addresses, which the extent table
+    // does not hold. Same corroboration rule either way: the decision is still
+    // taken over the whole array.
+    const spelling = entry
+      ? initializerAddressSpelling(entry, elemType)
+      : functionElementSpelling(word, elemType);
     if (!spelling) return null;
     out[i] = spelling;
     resolved++;
@@ -2917,7 +3043,9 @@ export function generateGlobalsImpl(
 
         // Check if this should be an array declaration
         const arrayInfo = inferArrayDeclaration(global);
+        setInitializerOwnerAddress(global.address);
         const initializer = emitDataValue(global.initializedData!, 0, type);
+        setInitializerOwnerAddress(undefined);
 
         if (arrayInfo && (global.initializedData!.kind === 'array' || isWideTextDatum(global, type))) {
           ls.push(`${arrayInfo.type} ${name}[${arrayInfo.count}] = ${initializer};`);
@@ -2944,7 +3072,9 @@ export function generateGlobalsImpl(
         }
 
         const arrayInfo = inferArrayDeclaration(global);
+        setInitializerOwnerAddress(global.address);
         const value = renderGlobalScalarInitializer(global.value, type, arrayInfo?.count);
+        setInitializerOwnerAddress(undefined);
         if (arrayInfo) {
           ls.push(`${arrayInfo.type} ${name}[${arrayInfo.count}] = { ${value} };`);
         } else {
@@ -3521,7 +3651,9 @@ export function generateColocatedGlobalsImpl(
         }
 
         const arrayInfo = inferArrayDeclaration(global);
+        setInitializerOwnerAddress(global.address);
         const initializer = emitDataValue(global.initializedData!, 0, type);
+        setInitializerOwnerAddress(undefined);
 
         if (arrayInfo && (global.initializedData!.kind === 'array' || isWideTextDatum(global, type))) {
           ls.push(`${arrayInfo.type} ${name}[${arrayInfo.count}] = ${initializer};`);
@@ -3546,7 +3678,9 @@ export function generateColocatedGlobalsImpl(
         }
 
         const arrayInfo = inferArrayDeclaration(global);
+        setInitializerOwnerAddress(global.address);
         const value = renderGlobalScalarInitializer(global.value, type, arrayInfo?.count);
+        setInitializerOwnerAddress(undefined);
         if (arrayInfo) {
           ls.push(`${arrayInfo.type} ${name}[${arrayInfo.count}] = { ${value} };`);
         } else {

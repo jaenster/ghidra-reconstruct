@@ -25,7 +25,7 @@ import { namespaceResolution, renderNamespace, type ResolvedNamespace } from './
 import { cleanFunctionComment, guardedFuncDefTypedef, emittedFunctionName, returnSigType } from './header.js';
 import { declarationHead } from './calling-convention.js';
 import { normalizeSignatureType, collapseFuncPtrTypedef, rootQualifyShadowedType, emittedParameterName, getAggregateTypeNames } from './platform-types.js';
-import { generateStaticLocalsBlock, emitDataValue, inferArrayDeclaration, isWideTextDatum, normalizeArrayDeclaration, braceArrayInitializer, isFuncDefTypedefName, getKnownFuncDefTypedefs, getKnownEnumConstants, setInitializerNamespace, renderGlobalScalarInitializer, recordDeclaredName } from './globals-header.js';
+import { generateStaticLocalsBlock, emitDataValue, setInitializerOwnerAddress, inferArrayDeclaration, isWideTextDatum, normalizeArrayDeclaration, braceArrayInitializer, isFuncDefTypedefName, getKnownFuncDefTypedefs, getKnownEnumConstants, setInitializerNamespace, renderGlobalScalarInitializer, recordDeclaredName } from './globals-header.js';
 
 /** normalizeSignatureType + fn-ptr-typedef double-indirection collapse, for
  *  emitting function parameter and return types ("fpFoo *" → "fpFoo"). */
@@ -989,7 +989,9 @@ export function generateImplementation(
         // The declared type must travel with the value: without it the walk has
         // no element/field types and every pointer slot is emitted uncast — the
         // same call in globals.cpp has always passed it.
+        setInitializerOwnerAddress(global.address);
         const initializer = emitDataValue(global.initializedData, 0, type);
+        setInitializerOwnerAddress(undefined);
         if (arrayInfo && (global.initializedData.kind === 'array' || isWideTextDatum(global, type))) {
           fileLocalLines.push(`static ${arrayInfo.type} ${name}[${arrayInfo.count}] = ${initializer};`);
         } else {
@@ -1001,7 +1003,9 @@ export function generateImplementation(
         // for a `char[N]` went out bare (`= { end }`) and its all-numeric
         // addresses (`00304096`) were read by C++ as OCTAL.
         const arrayInfo = inferArrayDeclaration(global);
+        setInitializerOwnerAddress(global.address);
         let value = renderGlobalScalarInitializer(global.value, type, arrayInfo?.count);
+        setInitializerOwnerAddress(undefined);
         if (arrayInfo) {
           fileLocalLines.push(`static ${arrayInfo.type} ${name}[${arrayInfo.count}] = { ${value} };`);
         } else {
