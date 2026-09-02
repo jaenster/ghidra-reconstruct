@@ -2212,10 +2212,12 @@ function transformDecompiledCode(
         globalNamespaces: context.funcPtrArgCasts.globalNamespaces,
         stringConstantNames: context.funcPtrArgCasts.stringConstantNames,
         imageBase: context.imageBase,
-        // `&global` is pointer-typed and does not convert to an integer return.
-        // The body is parsed without its signature, so the AST cannot show the
-        // return type — same fact, same source as `nullptr-cleanup` below.
-        enclosingReturnsNonPointer: enclosing?.returnsNonPointer === true,
+        // `&global` is pointer-typed and does not convert to an integer return,
+        // so it is spelled `(T)(uintptr_t)&global` there rather than withdrawn.
+        // The T is the wrapper's own return type — the same spelling the emitted
+        // definition carries, so the cast cannot name a type this tree does not
+        // declare.
+        enclosingReturnType: enclosing?.signature?.returnType,
       };
       perPluginOptions['assign-cast'] = {
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,

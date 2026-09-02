@@ -419,49 +419,121 @@ describe('globalAddressLiteralPlugin', () => {
   });
 
   describe('a pointer form where an integer is required', () => {
-    // `uint32_t SFILE_GetGlobalPointer() { return gbInit ? &gbInit : 0; }` —
-    // the direct forms are pointer-typed and do not convert to the return type.
-    const RET: GlobalAddressLiteralOptions = { ...SIMPLE, enclosingReturnsNonPointer: true };
+    // `uint32_t __stdcall SFILE_GetGlobalPointer() { return gbInit ? 0x74d88c : 0; }`
+    // — the function really does return a pointer carried in an integer, and
+    // `GFX_InitCelDataCache` reads `*(int*)(SFILE_GetGlobalPointer() + 0xc)`
+    // through it. Withdrawing the match restored the absolute `0x74d88c`, which
+    // the linker does not move, and that read faulted at 0x0074D898. The symbol
+    // stays; only its width is spelled.
+    const RET: GlobalAddressLiteralOptions = { ...SIMPLE, enclosingReturnType: 'uint32_t' };
 
-    it('reverts a direct match returned from a non-pointer function', () => {
+    it('casts a direct match returned from a non-pointer function', () => {
       const out = run(`void f() { return 0x500100; }`, RET);
-      assert.ok(out.includes('0x500100'), `Should keep the literal in: ${out}`);
-      assert.ok(!out.includes('&gThing'), `A pointer cannot be returned as an int: ${out}`);
+      assert.ok(
+        out.includes('(uint32_t)(uintptr_t)&gThing'),
+        `Expected the width-exact cast in: ${out}`,
+      );
+      assert.ok(!out.includes('0x500100'), `The literal must be gone from: ${out}`);
     });
 
-    it('reverts through the branches of a returned ternary', () => {
-      const out = run(`void f() { return gFlag ? 0x500100 : 0; }`, RET);
-      assert.ok(out.includes('0x500100'), `Should keep the literal in: ${out}`);
-      assert.ok(!out.includes('&gThing'), `A ternary branch is the return value: ${out}`);
+    it('casts through the branches of a returned ternary, keeping the null branch', () => {
+      const out = run(`void f() { return gThing ? 0x500100 : 0; }`, RET);
+      assert.ok(
+        out.includes('(uint32_t)(uintptr_t)&gThing'),
+        `A ternary branch is the return value: ${out}`,
+      );
+      assert.ok(/:\s*0/.test(out), `The null branch must stay 0: ${out}`);
+      assert.ok(!out.includes('0x500100'), `The literal must be gone from: ${out}`);
     });
 
-    it('reverts an interior form the same way', () => {
+    it('casts an interior form the same way', () => {
       const out = run(`void f() { return 0x500108; }`, RET);
-      assert.ok(out.includes('0x500108'), `Should keep the literal in: ${out}`);
-      assert.ok(!out.includes('gThing'), `Should not name a global in: ${out}`);
+      assert.ok(
+        out.includes('(uint32_t)(uintptr_t)((char*)&gThing + 8)'),
+        `Expected the anchored interior, cast: ${out}`,
+      );
+      assert.ok(!out.includes('0x500108'), `The literal must be gone from: ${out}`);
     });
 
-    it('keeps the complement form, which is already integer-typed', () => {
+    it('spells the cast with the return type it was given', () => {
+      const out = run(`void f() { return 0x500100; }`, { ...SIMPLE, enclosingReturnType: 'DWORD' });
+      assert.ok(out.includes('(DWORD)(uintptr_t)&gThing'), `Expected a DWORD cast: ${out}`);
+    });
+
+    it('keeps the complement form untouched, which is already integer-typed', () => {
       // The Storm anchors assign into an int32_t field; `~(uintptr_t)...` is an
-      // integer expression and MUST survive an integral context.
+      // integer expression and must not collect a second cast.
       const out = run(`void f() { return -7373669; }`, {
         ...STORM,
-        enclosingReturnsNonPointer: true,
+        enclosingReturnType: 'int32_t',
       });
       assert.ok(
         out.includes('~(uintptr_t)((char*)&gSFileAsyncReqQueue + 4)'),
         `The complement form must survive an integer return: ${out}`,
       );
+      assert.ok(!out.includes('(int32_t)'), `It needs no cast of its own: ${out}`);
     });
 
     it('leaves a return through a cast alone — the cast is the conversion', () => {
       const out = run(`void f() { return (uint32_t)0x500100; }`, RET);
-      assert.ok(out.includes('&gThing'), `A cast makes the pointer form legal: ${out}`);
+      assert.ok(out.includes('(uint32_t)&gThing'), `A cast makes the pointer form legal: ${out}`);
+      assert.ok(!out.includes('uintptr_t'), `No second cast is needed: ${out}`);
     });
 
-    it('resolves the same return when the enclosing function returns a pointer', () => {
+    it('emits the bare form when the enclosing function returns a pointer', () => {
+      for (const spelling of ['uint32_t*', 'void *', 'D2UnitStrc*']) {
+        const out = run(`void f() { return 0x500100; }`, {
+          ...SIMPLE,
+          enclosingReturnType: spelling,
+        });
+        assert.ok(out.includes('&gThing'), `${spelling} is the wanted case: ${out}`);
+        assert.ok(!out.includes('uintptr_t'), `${spelling} needs no cast: ${out}`);
+      }
+    });
+
+    it('emits the bare form when no return type is supplied, judging nothing', () => {
       const out = run(`void f() { return 0x500100; }`, SIMPLE);
-      assert.ok(out.includes('&gThing'), `A pointer return is the wanted case: ${out}`);
+      assert.ok(out.includes('&gThing'), `Should still resolve: ${out}`);
+      assert.ok(!out.includes('uintptr_t'), `Nothing to cast to: ${out}`);
+    });
+
+    it('leaves a void return and an unspellable type alone', () => {
+      for (const spelling of ['void', '', '   ', 'std::vector<int>', 'int&']) {
+        const out = run(`void f() { return 0x500100; }`, {
+          ...SIMPLE,
+          enclosingReturnType: spelling,
+        });
+        assert.ok(out.includes('&gThing'), `"${spelling}": should still resolve: ${out}`);
+        assert.ok(!out.includes('uintptr_t'), `"${spelling}": must not cast: ${out}`);
+      }
+    });
+
+    it('never puts the absolute address back', () => {
+      // The regression this replaced: withdrawing the symbol restored
+      // `0x74d88c`, which the linker does not move, and the caller faulted.
+      for (const type of ['uint32_t', 'int', 'DWORD', 'void', 'uint32_t*', undefined]) {
+        const out = run(`void f() { return gThing ? 0x500100 : 0; }`, {
+          ...SIMPLE,
+          enclosingReturnType: type,
+        });
+        assert.ok(!out.includes('0x500100'), `${type}: the address must not come back: ${out}`);
+        assert.ok(out.includes('&gThing'), `${type}: the symbol must stay: ${out}`);
+      }
+    });
+
+    it('leaves a pointer form outside a return untouched', () => {
+      const out = run(`void f() { p = 0x500100; }`, RET);
+      assert.ok(out.includes('&gThing'), `Should resolve: ${out}`);
+      assert.ok(!out.includes('uintptr_t'), `Only a return is judged: ${out}`);
+    });
+
+    it('still withdraws a pointer form in a call argument, return type or not', () => {
+      // The argument rule is a different rule for a different reason — a
+      // parameter's type is invisible from the body — and the return type says
+      // nothing about it.
+      const out = run(`void f() { g(0x500100); }`, RET);
+      assert.ok(out.includes('0x500100'), `The argument literal must stand: ${out}`);
+      assert.ok(!out.includes('&gThing'), `No pointer form in an argument: ${out}`);
     });
   });
   describe('the namespace the global is defined in', () => {

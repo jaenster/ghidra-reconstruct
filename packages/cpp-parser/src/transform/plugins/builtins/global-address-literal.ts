@@ -96,15 +96,33 @@
  * operators, so it needs its own revert. Plain `=` is deliberately NOT in that
  * set: an address assigned into a slot is exactly the case the pass exists for.
  *
- * **A pointer form only stands where a pointer is wanted.** `&name` and
+ * **A pointer form in an integer RETURN is cast, never withdrawn.** `&name` and
  * `(char*)&name + n` are pointer-typed; `~(uintptr_t)<form>` is not, which is
- * why the Storm anchors survive being assigned into an `int32_t` field. Where
- * the caller can say the enclosing function returns a non-pointer, a direct
- * form reached from `return` is withdrawn — the return value is the one context
- * whose type the body's AST cannot show, and the same signal already drives
- * `nullptr-cleanup`'s `zeroForReturnedNullptr`. Nothing else is judged: the pass
- * has no type inference, and guessing at an integral context would cost more
- * than the constants it would save.
+ * why the Storm anchors survive being assigned into an `int32_t` field. A
+ * `return &name` from `uint32_t SFILE_GetGlobalPointer()` does not compile — but
+ * the answer is the spelling, not the retreat:
+ *
+ *     return gbSystemInfoInitialized
+ *         ? (uint32_t)(uintptr_t)&gbSystemInfoInitialized : 0;
+ *
+ * That function really does return a pointer carried in an integer, and
+ * `GFX_InitCelDataCache` reads `*(int*)(SFILE_GetGlobalPointer() + 0xc)` through
+ * it. Withdrawing the match put the absolute `0x74d88c` back, which the linker
+ * does not move, and the read faulted at 0x0074D898 — the 1.14d address plus
+ * twelve. An address that resolved to an EXACT symbol is that symbol; the
+ * return type's width is a spelling problem, and `(T)(uintptr_t)&name` is the
+ * spelling the globals emitter already writes for an address in an integer slot.
+ *
+ * The return value is the one context whose type the body's AST cannot show —
+ * the body is parsed inside a wrapper — so the caller supplies the return type.
+ * With no type, a pointer type, or a type no cast can be spelled with, nothing
+ * is judged and the bare form stands.
+ *
+ * A call ARGUMENT is the opposite case and keeps its withdrawal, for a reason
+ * that does not apply here: a parameter's type is invisible from the body, so
+ * `__allmul(..., 0x989680, 0)` carries no evidence that the slot wants an
+ * address at all. A return type is evidence, and it says WIDTH, not "not an
+ * address".
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -250,6 +268,30 @@ function effectiveAddressFloor(imageBase: string | number | undefined): number {
  * `~address` legitimately lands above 0xFF000000 and must still be tried.
  */
 const ADDRESS_CEILING = 0x80000000;
+
+/**
+ * The spelling to cast a pointer form to before returning it, or null to leave
+ * the form exactly as it is.
+ *
+ * Null for a pointer or reference return — the bare `&name` is already right
+ * there — for `void`, for a missing type, and for anything that is not a plain
+ * type name (a template-id, a qualified name). Those the pass cannot spell a
+ * cast with, and it does not withdraw instead: an unresolved symbol is a
+ * compile error a human reads, while a restored absolute address is a fault at
+ * runtime. `const`/`volatile` are dropped — they mean nothing on a prvalue and
+ * only get in the cast's way.
+ */
+function integralReturnTarget(spelling: string | undefined): string | null {
+  if (typeof spelling !== 'string') return null;
+  if (spelling.includes('*') || spelling.includes('&')) return null;
+  const bare = spelling
+    .replace(/\b(?:const|volatile)\b/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+  if (!bare || bare === 'void') return null;
+  if (!/^[A-Za-z_][A-Za-z0-9_]*(?: [A-Za-z_][A-Za-z0-9_]*)*$/.test(bare)) return null;
+  return bare;
+}
 
 interface Candidate {
   name: string;
@@ -409,6 +451,19 @@ function complemented(form: Expression): Expression {
 }
 
 /**
+ * `(T)(uintptr_t)<form>` — a pointer form spelled at an integer slot's width.
+ *
+ * Through `uintptr_t` first so nothing narrows on the way. That is the same
+ * two-step `initializerAddressSpelling` writes for an address stored in an
+ * integer slot and `narrow-cast-through-uintptr` writes for a pointer read as a
+ * byte; `(T)` alone is a narrowing pointer-to-integer cast the moment `T` is
+ * smaller than a pointer, which C++ rejects outright.
+ */
+function widthSpelled(target: string, form: Expression): Expression {
+  return Expr.cast(Type.typedef(target), Expr.cast(Type.typedef('uintptr_t'), form));
+}
+
+/**
  * A bound at the EDGE of `anchor`, `k` bytes from its base.
  *
  * Two anchorings, chosen by which edge `k` is at:
@@ -499,7 +554,7 @@ function createGlobalAddressLiteralTransformer(
   const elementSizes = options.globalElementSizes ?? {};
   const stringConstants = new Set(options.stringConstantNames ?? []);
   const floor = effectiveAddressFloor(options.imageBase);
-  const returnsNonPointer = options.enclosingReturnsNonPointer === true;
+  const returnTarget = integralReturnTarget(options.enclosingReturnType);
 
   const candidates: Candidate[] = [];
   for (const [name, address] of Object.entries(addresses)) {
@@ -805,20 +860,22 @@ function createGlobalAddressLiteralTransformer(
    * contents. A cast is where the walk stops: the cast is itself the conversion,
    * so a pointer form under one is already legal.
    */
-  function restorePointerForms(expr: Expression): Expression | null {
-    const original = pointerForms.has(expr) ? produced.get(expr) : undefined;
-    if (original) return original as Expression;
+  function mapPointerForms(
+    expr: Expression,
+    respell: (form: Expression) => Expression | null,
+  ): Expression | null {
+    if (pointerForms.has(expr)) return respell(expr);
 
     switch (expr.kind) {
       case NodeKind.ParenExpr: {
         const paren = expr as ParenExpr;
-        const inner = restorePointerForms(paren.expression);
+        const inner = mapPointerForms(paren.expression, respell);
         return inner ? { ...paren, expression: inner } : null;
       }
       case NodeKind.ConditionalExpr: {
         const cond = expr as ConditionalExpr;
-        const then = restorePointerForms(cond.thenExpr);
-        const other = restorePointerForms(cond.elseExpr);
+        const then = mapPointerForms(cond.thenExpr, respell);
+        const other = mapPointerForms(cond.elseExpr, respell);
         if (!then && !other) return null;
         return { ...cond, thenExpr: then ?? cond.thenExpr, elseExpr: other ?? cond.elseExpr };
       }
@@ -826,16 +883,21 @@ function createGlobalAddressLiteralTransformer(
         const comma = expr as CommaExpr;
         const last = comma.expressions[comma.expressions.length - 1];
         if (!last) return null;
-        const restored = restorePointerForms(last);
-        if (!restored) return null;
+        const mapped = mapPointerForms(last, respell);
+        if (!mapped) return null;
         return {
           ...comma,
-          expressions: [...comma.expressions.slice(0, -1), restored],
+          expressions: [...comma.expressions.slice(0, -1), mapped],
         };
       }
       default:
         return null;
     }
+  }
+
+  /** Put the literal back wherever this pass wrote a pointer form. */
+  function restorePointerForms(expr: Expression): Expression | null {
+    return mapPointerForms(expr, form => (produced.get(form) ?? null) as Expression | null);
   }
 
   const transform = createTransformer({
@@ -867,12 +929,14 @@ function createGlobalAddressLiteralTransformer(
 
     // The return value's type is the one fact a body parsed on its own cannot
     // show, so the caller states it. `&name` and `(char*)&name + n` are pointers
-    // and do not convert to a `uint32_t` return; `~(uintptr_t)...` already is an
-    // integer and stays.
+    // and do not convert to a `uint32_t` return, so they are spelled at that
+    // width — NOT withdrawn: the function returns a pointer carried in an
+    // integer, and the literal put back is an address the linker will not move.
+    // `~(uintptr_t)...` is already an integer and is left as it is.
     visitReturnStmt(node: ReturnStmt) {
-      if (!returnsNonPointer || !node.value) return undefined;
-      const restored = restorePointerForms(node.value);
-      return restored ? { ...node, value: restored } : undefined;
+      if (!returnTarget || !node.value) return undefined;
+      const spelled = mapPointerForms(node.value, form => widthSpelled(returnTarget, form));
+      return spelled ? { ...node, value: spelled } : undefined;
     },
 
     // `-7373669` is one folded word, not a subtraction: reduce the negation and
@@ -1019,14 +1083,18 @@ export interface GlobalAddressLiteralOptions extends PluginOptions {
    */
   imageBase?: string | number;
   /**
-   * True when the enclosing function's return type is not a pointer.
+   * The enclosing function's return type, spelled the way its emitted definition
+   * spells it.
    *
-   * The body is parsed on its own, so the AST cannot show the return type; the
-   * caller has it. Only the pointer-typed forms are affected — a `return` of
-   * `&name` in a `uint32_t` function does not compile, while the complement form
-   * is an integer and is left alone. Omitted, no return is judged.
+   * The body is parsed inside a wrapper, so at the point a `return` is visited
+   * the AST cannot show the return type; the caller has it. A pointer form
+   * returned from a function declared to return an integer is spelled
+   * `(T)(uintptr_t)&name` rather than put back as a literal — the symbol is the
+   * value either way, and only its width was ever in question. A pointer return,
+   * `void`, a type no cast can be spelled with, or no type at all: nothing is
+   * judged and the bare form stands.
    */
-  enclosingReturnsNonPointer?: boolean;
+  enclosingReturnType?: string;
 }
 
 export const globalAddressLiteralPlugin: TransformPlugin = {
