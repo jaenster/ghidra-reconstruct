@@ -16,6 +16,8 @@
  *                           (default 1 = single-threaded). Needs a snapshot to
  *                           replay, so it is unavailable with --no-snapshot.
  *   --codegen-only          GHIDRA_CODEGEN_ONLY=1
+ *   --only-unit=<substr>    GHIDRA_ONLY_UNITS        emit ONLY matching units (partial tree!)
+ *                           repeatable; pair with --codegen-only and GHIDRA_OUTPUT_DIR=<scratch>
  *   --snapshot-dir=PATH     GHIDRA_SNAPSHOT_DIR      default <projectDir>/.ghidra-mcp/codegen-snapshot
  *   --no-snapshot           GHIDRA_SNAPSHOT=0        full run, but do not write one
  *                           GHIDRA_SNAPSHOT_MAX_AGE_HOURS  refuse a snapshot older than this (default 168)
@@ -68,6 +70,14 @@ const flagValue = (name: string): string | undefined => {
 };
 
 const CODEGEN_ONLY = hasFlag('--codegen-only') || process.env.GHIDRA_CODEGEN_ONLY === '1';
+// --only-unit=<substr>, repeatable, or GHIDRA_ONLY_UNITS as a comma list. Emits
+// ONLY the matching units - a partial tree, for answering "what does the emitter
+// make of THIS function now" in seconds instead of a 16-minute whole-tree cycle.
+// Pair with --codegen-only and GHIDRA_OUTPUT_DIR pointed somewhere scratch.
+const ONLY_UNITS = [
+  ...argv.filter(a => a.startsWith('--only-unit=')).map(a => a.slice('--only-unit='.length)),
+  ...(process.env.GHIDRA_ONLY_UNITS ?? '').split(',').map(x => x.trim()).filter(Boolean),
+];
 const WRITE_SNAPSHOT = !hasFlag('--no-snapshot') && process.env.GHIDRA_SNAPSHOT !== '0';
 const SNAPSHOT_MAX_AGE_HOURS = process.env.GHIDRA_SNAPSHOT_MAX_AGE_HOURS
   ? Number(process.env.GHIDRA_SNAPSHOT_MAX_AGE_HOURS)
@@ -135,6 +145,7 @@ async function main() {
     PROJECT_PATH,
     {
       outputDir: OUTPUT_DIR,
+      ...(ONLY_UNITS.length > 0 ? { onlyUnits: ONLY_UNITS } : {}),
       projectDir: PROJECT_DIR,
       generateCMake: true,
       generateSourceMaps: true,

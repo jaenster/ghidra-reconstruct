@@ -939,8 +939,13 @@ export function setInteriorLabelSymbols(globals: readonly AnalyzedDataSymbol[]):
     if (!looksLikeMemberPath(name)) {
       // Not member-path shaped, so the shape test never considers it - but the
       // inherited-size signature is proof on its own.
+      // >= 8 bytes: the rule identifies a label that inherited a CONTAINER's type,
+      // and a container is an array or struct. Without this bound, two 4-byte
+      // symbols a byte or two apart satisfy "strictly contains, same size" purely
+      // by misalignment - which is how gpfnMouseLeftButtonAltHandler lost its
+      // declaration while its supposed container was itself only 4 bytes.
       const a = parseInt(g.address, 16);
-      if (Number.isFinite(a) && g.size > 1 && sizeOfContainerAt(a, g.size)) {
+      if (Number.isFinite(a) && g.size >= 8 && sizeOfContainerAt(a, g.size)) {
         candidates.add(name);
         interior.add(name);
       }
