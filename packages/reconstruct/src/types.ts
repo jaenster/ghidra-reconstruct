@@ -441,21 +441,6 @@ export interface ReconstructOptions {
   outputDir: string;
 
   /**
-   * Emit ONLY units whose name or implementation path contains one of these
-   * substrings. A debugging aid, not a build mode.
-   *
-   * The whole-tree cycle is ~16 minutes, which is the wrong instrument for the
-   * question "did my Ghidra edit produce the C++ I intended for THIS function".
-   * With a snapshot replay (--codegen-only) the global tables still cost their
-   * ~10s, but one unit then emits in well under a second.
-   *
-   * Units that do not match are skipped ENTIRELY - no file, no shard
-   * placeholder - so the result is a partial tree. Never rsync it over a real
-   * one; point GHIDRA_OUTPUT_DIR at a scratch directory and diff.
-   */
-  onlyUnits?: string[];
-
-  /**
    * Project directory containing project.json, overrides/, etc.
    * Defaults to outputDir if not specified.
    * This directory is NOT deleted on regeneration — only outputDir is.

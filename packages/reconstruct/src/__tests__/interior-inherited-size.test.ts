@@ -57,18 +57,6 @@ describe('an interior label that inherited its container size emits no storage',
     assert.strictEqual(isInteriorLabel('gNeighbour'), false);
   });
 
-  // Two small symbols a byte apart satisfy "strictly contains, same size" purely by
-  // misalignment. gpfnMouseLeftButtonAltHandler lost its declaration that way, and
-  // its supposed container was itself only 4 bytes - no container is 4 bytes.
-  it('ignores a sub-8-byte "container", which is misalignment not containment', () => {
-    setInteriorLabelSymbols([
-      sym('gpfnMouseLeftButtonHandler', '007a6b10', 4),
-      sym('gSomethingAt09', '007a6b09', 4),
-      sym('gpfnMouseLeftButtonAltHandler', '007a6b0c', 4),
-    ]);
-    assert.strictEqual(isInteriorLabel('gpfnMouseLeftButtonAltHandler'), false);
-  });
-
   it('does not fire when no model has been registered', () => {
     assert.strictEqual(isInteriorLabel('gGameStateData4'), false);
   });

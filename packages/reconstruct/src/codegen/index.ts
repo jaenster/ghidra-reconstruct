@@ -3163,15 +3163,6 @@ function generateFilesForFunctions(
     const implExt = options.format === 'c' ? '.c' : '.cpp';
     let implPath = headerPath.replace(/\.h$/, implExt);
 
-    // --only-unit: skip non-matching units outright, WITHOUT reserving a shard
-    // placeholder, so the run emits a deliberately partial tree. Taken before
-    // the shard decision because the two are independent and only-mode is
-    // single-process by construction.
-    if (options.onlyUnits && options.onlyUnits.length > 0) {
-      const hay = `${unitName}\n${implPath}`.toLowerCase();
-      if (!options.onlyUnits.some(pat => hay.includes(pat.toLowerCase()))) continue;
-    }
-
     // The shard decision is taken for every unit in every process, in this same
     // order, so all shards agree on the partition without talking to each other.
     if (!shardOwnsNext(unitCost(unitFunctions))) {
