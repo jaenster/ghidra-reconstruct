@@ -1924,6 +1924,19 @@ export function initializerAddressReferences(): ReadonlySet<string> {
   return initializerAddressNamesUsed;
 }
 
+/**
+ * Fold a shard worker's initializer references into this process's set.
+ *
+ * A shard renders the co-located initializers of the files it owns, so the
+ * names those resolve to are recorded in ITS module instance. The closure runs
+ * on the coordinator, and a name missing from it is a build error in a file the
+ * coordinator never emitted.
+ */
+export function addInitializerAddressReferences(names: Iterable<string>): void {
+  for (const n of names) initializerAddressNamesUsed.add(n);
+}
+
+
 /** The word a Ghidra scalar holds, or null when it is not a plain number. */
 function scalarWordValue(raw: string | null | undefined): number | null {
   const normalized = normalizeDataValue((raw ?? '').trim());

@@ -254,6 +254,19 @@ export async function extractFunctions(
 }
 
 /**
+ * How many `list_functions` pages to have in flight at once.
+ *
+ * 1 is the historical one-at-a-time walk and stays the default: the pages are
+ * independent, but whether the daemon actually serves them in parallel is a
+ * property of the worker, not of this loop, and an unmeasured default would be
+ * a guess dressed as a speedup.
+ */
+function listPageConcurrency(): number {
+  const raw = Number(process.env.GHIDRA_LIST_PAGE_CONCURRENCY ?? '1');
+  return Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : 1;
+}
+
+/**
  * Extract all functions from Ghidra (handles pagination)
  */
 export async function extractAllFunctions(
@@ -297,26 +310,50 @@ export async function extractAllFunctions(
   let offset = 0;
   let total = 0;
 
-  // First pass: get all function info
+  // First pass: get all function info.
+  //
+  // The first page also reports the total, so every page after it is a request
+  // that depends on nothing but its own offset. They were nonetheless walked one
+  // at a time: 147 pages at ~1s each was 147s of a 259s extraction on 2026-09-02,
+  // the one extraction phase still fully sequential while initialized-data and
+  // type-details were already flying 20 requests at once.
+  //
+  // Pages are fetched in flights and spliced back BY OFFSET, so the assembled
+  // list is in exactly the order a one-at-a-time walk produced — the order every
+  // downstream table and the emitted file order depend on.
+  //
+  // Default 1 keeps the historical behaviour; raise it with
+  // GHIDRA_LIST_PAGE_CONCURRENCY once the daemon has been measured under it, and
+  // note that a WRITE landing mid-walk corrupts a concurrent walk exactly as it
+  // corrupts a sequential one — neither is a consistent snapshot.
   let listPages = 0;
   await timePhase(
     `${label}extract/list-functions`,
     async () => {
-      do {
-        const result = await extractFunctions(connection, {
-          filter,
-          namespace,
-          limit: pageSize,
-          offset,
-        });
+      const first = await extractFunctions(connection, { filter, namespace, limit: pageSize, offset: 0 });
+      allFunctions.push(...first.functions);
+      total = first.total;
+      listPages = 1;
+      offset = pageSize;
+      onProgress?.(Math.min(pageSize, total), total);
 
-        allFunctions.push(...result.functions);
-        total = result.total;
-        offset += pageSize;
-        listPages++;
+      const offsets: number[] = [];
+      for (let o = pageSize; o < total; o += pageSize) offsets.push(o);
+      if (offsets.length === 0) return;
 
-        onProgress?.(Math.min(offset, total), total);
-      } while (offset < total);
+      const flightSize = listPageConcurrency();
+      const pages = new Map<number, ExtractedFunction[]>();
+      for (let i = 0; i < offsets.length; i += flightSize) {
+        const flight = offsets.slice(i, i + flightSize);
+        const results = await Promise.all(
+          flight.map(o => extractFunctions(connection, { filter, namespace, limit: pageSize, offset: o }))
+        );
+        for (let j = 0; j < flight.length; j++) pages.set(flight[j], results[j].functions);
+        listPages += flight.length;
+        offset = Math.min(flight[flight.length - 1] + pageSize, total);
+        onProgress?.(offset, total);
+      }
+      for (const o of offsets) allFunctions.push(...(pages.get(o) ?? []));
     },
     () => `${total} functions in ${listPages} pages of ${pageSize}`
   );

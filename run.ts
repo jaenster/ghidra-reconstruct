@@ -12,6 +12,9 @@
  *   npx tsx run.ts --codegen-only     replay that snapshot, never touch the daemon
  *
  * Flags (each also settable from the env):
+ *   --gen-workers=N         GHIDRA_GEN_WORKERS       shard generation over N worker threads
+ *                           (default 1 = single-threaded). Needs a snapshot to
+ *                           replay, so it is unavailable with --no-snapshot.
  *   --codegen-only          GHIDRA_CODEGEN_ONLY=1
  *   --snapshot-dir=PATH     GHIDRA_SNAPSHOT_DIR      default <projectDir>/.ghidra-mcp/codegen-snapshot
  *   --no-snapshot           GHIDRA_SNAPSHOT=0        full run, but do not write one
@@ -45,9 +48,9 @@ if (!process.execArgv.some(a => /stack.size/i.test(a))) {
   process.exit(0);
 }
 
-import { reconstruct, setParseErrorLogPath } from './packages/reconstruct/src/index.js';
+import { reconstruct } from './packages/reconstruct/src/index.js';
 import { loadProjectConfig } from './packages/reconstruct/src/config/index.js';
-import { resetGotoCleanupStats, defaultRegistry } from './packages/cpp-parser/dist/transform/plugins/index.js';
+import { configureCodegen } from './packages/reconstruct/src/codegen-defaults.js';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { writeFileSync, mkdirSync } from 'fs';
@@ -70,6 +73,12 @@ const SNAPSHOT_MAX_AGE_HOURS = process.env.GHIDRA_SNAPSHOT_MAX_AGE_HOURS
   ? Number(process.env.GHIDRA_SNAPSHOT_MAX_AGE_HOURS)
   : undefined;
 const USE_SOURCE_CACHE = !hasFlag('--no-mac-cache') && process.env.GHIDRA_MAC_CACHE !== '0';
+// Parallel generation. Off by default: the serial path is the one a
+// correctness-critical run should take, and this one is only trustworthy
+// because scripts/verify-parallel-codegen.sh diffs the two trees byte for byte.
+const GENERATION_WORKERS = Number(
+  flagValue('--gen-workers') ?? process.env.GHIDRA_GEN_WORKERS ?? '1'
+) || 1;
 const MAC_DECOMPILE_ALL = hasFlag('--mac-decompile-all') || process.env.GHIDRA_MAC_DECOMPILE_ALL === '1';
 
 // Codegen-only replays a snapshot, so it needs no project URL at all — the
@@ -96,9 +105,9 @@ const SOURCE_CACHE_DIR = flagValue('--source-cache-dir')
 
 const ERROR_LOG_PATH = join(PROJECT_DIR, 'parser-errors.log');
 try { writeFileSync(ERROR_LOG_PATH, `# Parse errors\n`); } catch { /* ok */ }
-setParseErrorLogPath(ERROR_LOG_PATH);
-
-defaultRegistry.setEnabled('goto-cleanup', true);
+// The same call the generation workers make, from the same module — see
+// codegen-defaults.ts for why a setting applied only here would break the shards.
+configureCodegen(ERROR_LOG_PATH);
 
 async function main() {
   if (!CODEGEN_ONLY && !process.env.GHIDRA_MCP_TOKEN) {
@@ -121,8 +130,6 @@ async function main() {
   console.log(projectConfig
     ? `Config: ${projectConfig.modules ? Object.keys(projectConfig.modules).length : 0} modules, ${projectConfig.typeOwnership?.length ?? 0} type-owners, ${projectConfig.crossPlatformLinks?.length ?? 0} links`
     : 'Config: none');
-
-  resetGotoCleanupStats();
 
   const result = await reconstruct(
     PROJECT_PATH,
@@ -147,6 +154,7 @@ async function main() {
       sourceCacheDir: SOURCE_CACHE_DIR,
       useSourceCache: USE_SOURCE_CACHE,
       decompileAllSecondary: MAC_DECOMPILE_ALL,
+      generationWorkers: GENERATION_WORKERS,
       excludePatterns: [
         /^compiler$/,
         /^VisualStudio$/,

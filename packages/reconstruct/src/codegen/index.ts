@@ -5,7 +5,7 @@
  */
 
 export { generateHeader, cleanFunctionComment } from './header.js';
-export { generateImplementation, resolveOverridePlaceholders, setParseErrorLogPath, getParseErrorCount, type ImplGenContext } from './impl.js';
+export { generateImplementation, resolveOverridePlaceholders, setParseErrorLogPath, getParseErrorLogPath, getParseErrorCount, type ImplGenContext } from './impl.js';
 export { generateCMakeLists, generateTopLevelCMake, generateTargetCMake, generateUnsortedCMake } from './cmake.js';
 export { generateSourceMap } from './sourcemap.js';
 export { generateReadme } from './readme.js';
@@ -52,6 +52,7 @@ import { resolveOverridePlaceholders } from './impl.js';
 import {
   VOID_POINTER_SLOT,
   getFuncPtrArgCastArityMismatchList,
+  type ArityMismatch,
   addressLiteralFloor,
   ADDRESS_LITERAL_CEILING,
   ADDRESS_LITERAL_COMPLEMENT_FLOOR,
@@ -67,7 +68,7 @@ import { generateReadme } from './readme.js';
 import { conventionKeyword } from './calling-convention.js';
 import { organizeByNamespace, getFilePath, setModuleNames, setNamespaceCollisionTypes, normalizeQualifiedReference } from './namespace.js';
 import { buildNamespaceResolution, namespaceResolution, renderNamespace } from './namespace-resolution.js';
-import { setInteriorLabelSymbols, resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, setDeclarationClosureDataContent, getDeclarationClosureReport, isUnreferenceableArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, setInitializerAddressTable, setInitializerFunctionAddresses, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType, emittedNamespaceOf } from './globals-header.js';
+import { setInteriorLabelSymbols, resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, setDeclarationClosureDataContent, getDeclarationClosureReport, isUnreferenceableArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, setInitializerAddressTable, setInitializerFunctionAddresses, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType, emittedNamespaceOf, getDeclaredNames, initializerAddressReferences, addInitializerAddressReferences } from './globals-header.js';
 import { normalizeDataAddress, stringDefinition } from './declaration-closure.js';
 import { harvestAnnotatedParameterTypes } from './win32-signatures.js';
 import { isPlatformOrBuiltinType, isLibraryType, generatePlatformHeader, normalizeDataValue, arrayRowTypedefLines, arrayRowReturn, arrayRowSpelling, GHIDRA_PSEUDO_OP_RESULT_TYPES, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, platformDefinedFunctionNames, platformVoidPointerFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
@@ -121,6 +122,279 @@ export function assertTypeDetailsComplete(dataTypes: readonly ExtractedDataType[
 /**
  * Generate a complete reconstructed project
  */
+
+// ── Shard state for parallel generation ─────────────────────────────────────
+//
+// A shard emits a SLICE OF THE FILES, never a slice of the inputs: every worker
+// ingests the whole model and rebuilds every global table from it, so the cast,
+// qualification and closure passes see exactly what a serial run sees. All a
+// shard changes is WHICH units it writes.
+//
+// Assignment is by least-loaded-first over a cost proxy (the decompiled bytes a
+// unit carries), evaluated for EVERY unit in every process. The sequence of
+// calls is identical everywhere because the inputs and the iteration order are,
+// so all shards agree on the partition without exchanging a message.
+let activeShard: ShardSpec | null = null;
+let shardLoads: number[] = [];
+/** Paths this shard actually emitted from the unit loops — what it ships back. */
+let shardEmittedPaths: Set<string> | null = null;
+/** Object -> position in the codegen `globals` array; a shard ships claims as positions. */
+let globalIndexOf: Map<object, number> | null = null;
+let shardClaimedGlobals: number[] = [];
+
+/**
+ * Placeholder for a unit file another shard owns. Written in the SAME iteration
+ * order a serial run writes the real one, so merging a shard's result back with
+ * `Map.set` lands it in its serial position — file order reaches CMake and the
+ * emitted tree, and a merged-at-the-end order would differ from a full run's.
+ */
+const SHARD_PLACEHOLDER = '\u0000shard-placeholder';
+
+function beginShard(shard: ShardSpec | undefined): void {
+  activeShard = shard ?? null;
+  shardLoads = shard ? new Array(shard.count).fill(0) : [];
+  shardEmittedPaths = shard ? new Set<string>() : null;
+  shardClaimedGlobals = [];
+  globalIndexOf = null;
+}
+
+/**
+ * Index the globals array a claim is addressed against.
+ *
+ * Called AFTER the excluded namespaces have been filtered out, never before:
+ * `globals` is rebound by that filter, and an index taken over the pre-exclusion
+ * array addresses a different symbol in the post-exclusion one. That is exactly
+ * what happened the first time — the coordinator marked the wrong globals
+ * claimed, `reconcileOrphanedGlobals` restored 199 that a serial run keeps
+ * file-local, and globals.h grew 199 externs and definitions nothing asked for.
+ * The tree still compiled. Only the byte diff found it.
+ */
+function shardIndexGlobals(globals: readonly unknown[]): void {
+  if (!activeShard) return;
+  globalIndexOf = new Map<object, number>();
+  for (let i = 0; i < globals.length; i++) {
+    const g = globals[i];
+    if (g && typeof g === 'object') globalIndexOf.set(g as object, i);
+  }
+}
+
+/**
+ * Does this shard own the next unit? Called once per unit in EVERY process, in
+ * the same order — the load bookkeeping is what makes the answers partition.
+ */
+function shardOwnsNext(cost: number): boolean {
+  if (!activeShard) return true;
+  let best = 0;
+  for (let i = 1; i < shardLoads.length; i++) {
+    if (shardLoads[i] < shardLoads[best]) best = i;
+  }
+  shardLoads[best] += cost;
+  return best === activeShard.index;
+}
+
+/** Cost proxy for one unit: the decompiled bytes its bodies carry. */
+function unitCost(unitFunctions: ReadonlyArray<ExtractedFunction>): number {
+  let n = 0;
+  for (const f of unitFunctions) n += (f.decompiled?.length ?? 0) + 200;
+  return n;
+}
+
+function shardRecordEmitted(path: string): void {
+  shardEmittedPaths?.add(path);
+}
+
+/** Reserve a unit file's slot without emitting it — another shard owns it. */
+function shardPlaceholder(files: Map<string, SourceFile>, path: string, type: SourceFile['type']): void {
+  files.set(path, { path, content: SHARD_PLACEHOLDER, type, functions: [], includes: [] });
+}
+
+/**
+ * Reserve a source map's slot too.
+ *
+ * Not cosmetic: several unit names differ only in CASE (`SKILLS`/`Skills`,
+ * `QUESTS`/`Quests`), so on a case-insensitive filesystem their outputs are one
+ * file and the LAST write wins. Write order therefore reaches the tree, and a
+ * map order assembled shard-by-shard would pick a different winner from a serial
+ * run's.
+ */
+function shardPlaceholderMap(sourceMaps: Map<string, SourceMap>, path: string): void {
+  sourceMaps.set(path, { file: SHARD_PLACEHOLDER, functions: [] } as unknown as SourceMap);
+}
+
+function shardRecordClaims(globals: Iterable<AnalyzedDataSymbol> | undefined): void {
+  if (!globalIndexOf || !globals) return;
+  for (const g of globals) {
+    const idx = globalIndexOf.get(g as unknown as object);
+    // A claim that cannot be addressed is a claim the coordinator will not see,
+    // and an unclaimed global is silently restored to globals.h with an extern
+    // and a definition nobody asked for. Never drop one quietly.
+    if (idx === undefined) {
+      throw new Error(
+        `shard: claimed global ${(g as { name?: string }).name ?? '(unnamed)'} is not in the globals array`
+      );
+    }
+    shardClaimedGlobals.push(idx);
+  }
+}
+
+/** How many globals this shard claimed — for the parallel run's own accounting. */
+export function shardClaimCount(): number {
+  return shardClaimedGlobals.length;
+}
+
+/** Everything one shard produced, for the coordinator to merge. */
+export interface ShardOutput {
+  files: [string, SourceFile][];
+  sourceMaps: [string, SourceMap][];
+  declaredNames: string[];
+  initializerAddressRefs: string[];
+  claimedGlobals: number[];
+  bodyIdentifierFnCounts: [string, number][];
+  arityMismatches: ArityMismatch[];
+  initializerArityMismatches: number;
+}
+
+export function takeShardOutput(state: GenerationState): ShardOutput {
+  const owned = shardEmittedPaths ?? new Set<string>();
+  const files: [string, SourceFile][] = [];
+  for (const [path, file] of state.files) {
+    if (owned.has(path)) files.push([path, file]);
+  }
+  const sourceMaps: [string, SourceMap][] = [];
+  for (const [path, map] of state.sourceMaps) {
+    if (owned.has(path)) sourceMaps.push([path, map]);
+  }
+  return {
+    files,
+    sourceMaps,
+    declaredNames: [...getDeclaredNames()],
+    initializerAddressRefs: [...initializerAddressReferences()],
+    claimedGlobals: shardClaimedGlobals,
+    bodyIdentifierFnCounts: [...(state.context.bodyIdentifierFnCounts ?? new Map())],
+    arityMismatches: [...getFuncPtrArgCastArityMismatchList()],
+    initializerArityMismatches: getInitializerFuncPtrArityMismatches(),
+  };
+}
+
+/**
+ * Fold one shard's output into the coordinator's state.
+ *
+ * Files land on their reserved placeholder slots, so the merged map keeps the
+ * order a serial run produces. The cross-file accumulators — the names the tree
+ * declared, the symbols an initializer resolved, which globals an output file
+ * claimed, how many bodies name each identifier — are unioned here and nowhere
+ * else: a shard that computed its own closure from its own slice would compute
+ * a wrong one.
+ */
+export function mergeShardOutput(state: GenerationState, out: ShardOutput): void {
+  for (const [path, file] of out.files) {
+    const existing = state.files.get(path);
+    if (existing && existing.content !== SHARD_PLACEHOLDER) {
+      throw new Error(`shard merge: ${path} was emitted by two shards`);
+    }
+    state.files.set(path, file);
+  }
+  for (const [path, map] of out.sourceMaps) state.sourceMaps.set(path, map);
+  for (const n of out.declaredNames) recordDeclaredName(n);
+  addInitializerAddressReferences(out.initializerAddressRefs);
+  const globals = state.globals as AnalyzedDataSymbol[];
+  const claimed: AnalyzedDataSymbol[] = [];
+  for (const i of out.claimedGlobals) {
+    const g = globals[i];
+    if (!g) throw new Error(`shard merge: claim index ${i} is outside the globals array (${globals.length})`);
+    claimed.push(g);
+  }
+  markGlobalsClaimed(claimed);
+  if (!state.context.bodyIdentifierFnCounts) state.context.bodyIdentifierFnCounts = new Map();
+  const counts = state.context.bodyIdentifierFnCounts;
+  for (const [name, n] of out.bodyIdentifierFnCounts) counts.set(name, (counts.get(name) ?? 0) + n);
+  state.extraArityMismatches.push(...out.arityMismatches);
+  state.extraInitializerArityMismatches += out.initializerArityMismatches;
+}
+
+/** Fail loudly rather than write a hole: every reserved slot must be filled. */
+export function assertNoShardPlaceholders(state: GenerationState): void {
+  const missing: string[] = [];
+  for (const [path, file] of state.files) {
+    if (file.content === SHARD_PLACEHOLDER) missing.push(path);
+  }
+  for (const [path, map] of state.sourceMaps) {
+    if ((map as { file?: string }).file === SHARD_PLACEHOLDER) missing.push(path);
+  }
+  if (missing.length > 0) {
+    throw new Error(
+      `shard merge: ${missing.length} file(s) no shard emitted, e.g. ${missing.slice(0, 5).join(', ')}`
+    );
+  }
+}
+
+/**
+ * Sub-phase timing for the generation phase.
+ *
+ * `generation` was one 617-second number, so every claim about whether the cost
+ * is global setup or per-file emission was folklore. These buckets split it.
+ * Enabled by RECON_GEN_TIMING=1; zero cost otherwise.
+ */
+const GEN_TIMING = process.env.RECON_GEN_TIMING === '1';
+const genBuckets = new Map<string, { ms: number; n: number }>();
+function genAdd(label: string, ms: number): void {
+  const b = genBuckets.get(label);
+  if (b) { b.ms += ms; b.n++; } else { genBuckets.set(label, { ms, n: 1 }); }
+}
+function genMark<T>(label: string, fn: () => T): T {
+  if (!GEN_TIMING) return fn();
+  const t = Date.now();
+  try { return fn(); } finally { genAdd(label, Date.now() - t); }
+}
+function genReport(): void {
+  if (!GEN_TIMING || genBuckets.size === 0) return;
+  const total = [...genBuckets.values()].reduce((a, b) => a + b.ms, 0);
+  const w = Math.max(...[...genBuckets.keys()].map(k => k.length));
+  console.log(`\ngeneration sub-phases (${(total / 1000).toFixed(1)}s attributed):`);
+  for (const [k, b] of [...genBuckets].sort((a, b) => b[1].ms - a[1].ms)) {
+    console.log(`  ${k.padEnd(w)} ${(b.ms / 1000).toFixed(1).padStart(8)}s ${((b.ms / total) * 100).toFixed(1).padStart(5)}%  n=${b.n}`);
+  }
+  genBuckets.clear();
+}
+
+/**
+ * One shard of a parallel generation run: emit only the units this shard owns.
+ *
+ * The INPUTS are never sharded — every shard builds its global tables (type
+ * ownership, enum widths, the funcdef registry, the declaration-closure model)
+ * from the FULL model, because a table built from a subset would make the cast
+ * and qualification passes decline where a full run acts, and the tree would
+ * still compile while being quietly different.
+ */
+export interface ShardSpec {
+  index: number;
+  count: number;
+}
+
+/** Everything stage 2 needs, handed over at the seam the shard workers meet at. */
+export interface GenerationState {
+  name: string;
+  functions: ExtractedFunction[];
+  classes: DetectedClass[];
+  dataTypes: ExtractedDataType[];
+  globals: AnalyzedDataSymbol[] | ExtractedGlobal[];
+  namespaces: ExtractedNamespace[];
+  options: ReconstructOptions;
+  programInfo?: ProgramInfo;
+  files: Map<string, SourceFile>;
+  sourceMaps: Map<string, SourceMap>;
+  context: ImplGenContext;
+  analyzedGlobals: AnalyzedDataSymbol[];
+  functionQualifiedNames: Set<string>;
+  typeOwnerMap: Map<string, string>;
+  globalsPath?: string;
+  genT0: number;
+  /** Arity mismatches merged in from shard workers; the local ones live in cpp-parser. */
+  extraArityMismatches: ArityMismatch[];
+  /** Initializer arity mismatches counted by shard workers. */
+  extraInitializerArityMismatches: number;
+}
+
 export function generateProject(
   name: string,
   functions: ExtractedFunction[],
@@ -132,6 +406,27 @@ export function generateProject(
   programInfo?: ProgramInfo,
   strings?: ExtractedString[]
 ): ReconstructedProject {
+  return generateProjectStage2(
+    generateProjectStage1(name, functions, classes, dataTypes, globals, namespaces, options, programInfo, strings)
+  );
+}
+
+export function generateProjectStage1(
+  name: string,
+  functions: ExtractedFunction[],
+  classes: DetectedClass[],
+  dataTypes: ExtractedDataType[],
+  globals: AnalyzedDataSymbol[] | ExtractedGlobal[],
+  namespaces: ExtractedNamespace[],
+  options: ReconstructOptions,
+  programInfo?: ProgramInfo,
+  strings?: ExtractedString[],
+  shard?: ShardSpec
+): GenerationState {
+  const genT0 = Date.now();
+  beginShard(shard);
+  let stageTypeOwnerMap = new Map<string, string>();
+  let stageGlobalsPath: string | undefined;
   const files = new Map<string, SourceFile>();
   const sourceMaps = new Map<string, SourceMap>();
 
@@ -654,6 +949,9 @@ export function generateProject(
   }
 
   // Generate globals.h if we have analyzed globals with scope info
+  // The exclusion filter above rebinds `globals`; this is the array `state.globals`
+  // ends up holding and the one a shard's claim indices must address.
+  shardIndexGlobals(globals);
   const analyzedGlobals: AnalyzedDataSymbol[] = (globals as AnalyzedDataSymbol[]).filter(
     g => 'scope' in g
   );
@@ -821,6 +1119,8 @@ export function generateProject(
     }
   }
 
+  if (GEN_TIMING) genAdd('project/pre-setup', Date.now() - genT0);
+
   // Check if we have target configuration
   const targetConfigs = options.projectConfig?.targets;
   const hasTargets = targetConfigs && Object.keys(targetConfigs).length > 0;
@@ -891,50 +1191,8 @@ export function generateProject(
       for (const [k, v] of tom) mergedTypeOwnerMap.set(k, v);
     }
 
-    // Generate globals.h/cpp AFTER classification (which happens in generateFilesForFunctions)
-    if (analyzedGlobals.length > 0) {
-      // A global demoted to file-local / struct-colocated is only actually
-      // emitted if the file it was assigned to exists. Restore any that no
-      // generated file claims, so they get a declaration + definition here
-      // instead of vanishing silently.
-      reconcileOrphanedGlobals(analyzedGlobals);
-      // A symbol named by another global's initializer is referenced, even
-      // though no function body mentions it; give it back its extern.
-      promoteCentrallyReferencedGlobals(analyzedGlobals);
-      // Scopes are only final HERE — file-local promotion and orphan reconcile
-      // both ran after the first call. The globals tables (and, with them, the
-      // "can globals.cpp see this symbol?" answer) have to be rebuilt from the
-      // final scopes, or the central initializers reference symbols that end up
-      // `static` in someone else's .cpp.
-      setMultidimArrayGlobals(analyzedGlobals as Array<{ name: string; dataType?: string; suggestedName?: string; suggestedType?: string; scope?: string }>);
-
-      // Filter out struct-colocated globals (they go in struct headers/impls)
-      const centralGlobals = analyzedGlobals.filter(
-        g => g.scope !== 'struct-colocated'
-      );
-
-      if (centralGlobals.length > 0) {
-        const globalsHeaderContent = generateGlobalsHeader(centralGlobals, {
-          ...options,
-          projectName: name,
-          binaryName: programInfo?.name,
-        }, dataTypes, mergedTypeOwnerMap, functionQualifiedNames, context.bodyIdentifierFnCounts);
-
-        files.set(globalsPath!, {
-          path: globalsPath!,
-          content: globalsHeaderContent,
-          type: 'header',
-          functions: [],
-          includes: [],
-        });
-
-        // One globals translation unit per module, plus a shared remainder.
-        emitCentralGlobalsUnits(
-          centralGlobals, functions, files,
-          { ...options, projectName: name, binaryName: programInfo?.name },
-          globalsPath!, mergedTypeOwnerMap, context.functionNameCandidates);
-      }
-    }
+    stageTypeOwnerMap = mergedTypeOwnerMap;
+    stageGlobalsPath = globalsPath;
   } else {
     // Non-target mode: existing flat generation
 
@@ -954,49 +1212,85 @@ export function generateProject(
       options, context, '', files, sourceMaps, flatGlobalsPath, strings
     );
 
-    // Generate globals.h/cpp AFTER classification
-    if (analyzedGlobals.length > 0) {
-      // A global demoted to file-local / struct-colocated is only actually
-      // emitted if the file it was assigned to exists. Restore any that no
-      // generated file claims, so they get a declaration + definition here
-      // instead of vanishing silently.
-      reconcileOrphanedGlobals(analyzedGlobals);
-      // A symbol named by another global's initializer is referenced, even
-      // though no function body mentions it; give it back its extern.
-      promoteCentrallyReferencedGlobals(analyzedGlobals);
-      // Scopes are only final HERE — file-local promotion and orphan reconcile
-      // both ran after the first call. The globals tables (and, with them, the
-      // "can globals.cpp see this symbol?" answer) have to be rebuilt from the
-      // final scopes, or the central initializers reference symbols that end up
-      // `static` in someone else's .cpp.
-      setMultidimArrayGlobals(analyzedGlobals as Array<{ name: string; dataType?: string; suggestedName?: string; suggestedType?: string; scope?: string }>);
+    stageTypeOwnerMap = flatTypeOwnerMap;
+    stageGlobalsPath = flatGlobalsPath;
+  }
 
-      // Filter out struct-colocated globals (they go in struct headers/impls)
-      const centralGlobals = analyzedGlobals.filter(
-        g => g.scope !== 'struct-colocated'
-      );
+  const state: GenerationState = {
+    name, functions, classes, dataTypes, globals, namespaces, options, programInfo,
+    files, sourceMaps, context, analyzedGlobals, functionQualifiedNames,
+    typeOwnerMap: stageTypeOwnerMap,
+    globalsPath: stageGlobalsPath,
+    genT0,
+    extraArityMismatches: [],
+    extraInitializerArityMismatches: 0,
+  };
+  return state;
+}
 
-      if (centralGlobals.length > 0) {
-        const globalsHeaderContent = generateGlobalsHeader(centralGlobals, {
-          ...options,
-          projectName: name,
-          binaryName: programInfo?.name,
-        }, dataTypes, flatTypeOwnerMap, functionQualifiedNames, context.bodyIdentifierFnCounts);
+/**
+ * The tail of generation: globals.h / globals.cpp, project assembly, reports.
+ *
+ * Split out from stage 1 because the parallel driver has to await its shard
+ * workers between the two — everything here reads state the unit loop
+ * accumulates across ALL files (claimed globals, emitted declaration names,
+ * per-identifier body counts), so it is only correct once every shard's
+ * contribution has been merged in.
+ */
+export function generateProjectStage2(state: GenerationState): ReconstructedProject {
+  const {
+    name, functions, dataTypes, globals, classes, namespaces, options, programInfo,
+    files, sourceMaps, context, analyzedGlobals, functionQualifiedNames,
+    typeOwnerMap, globalsPath, genT0,
+  } = state;
 
-        files.set('globals.h', {
-          path: 'globals.h',
-          content: globalsHeaderContent,
-          type: 'header',
-          functions: [],
-          includes: [],
-        });
+  if (analyzedGlobals.length > 0) {
+    // A global demoted to file-local / struct-colocated is only actually
+    // emitted if the file it was assigned to exists. Restore any that no
+    // generated file claims, so they get a declaration + definition here
+    // instead of vanishing silently.
+    const restored = reconcileOrphanedGlobals(analyzedGlobals);
+    if (restored.length > 0) {
+      // The count is the parallel path's canary: a shard whose claims did not
+      // reach the coordinator shows up here as a jump, and every restored global
+      // is an extern and a definition a serial run does not emit.
+      console.log(`Globals restored to file scope (no output file claimed them): ${restored.length}`);
+    }
+    // A symbol named by another global's initializer is referenced, even
+    // though no function body mentions it; give it back its extern.
+    promoteCentrallyReferencedGlobals(analyzedGlobals);
+    // Scopes are only final HERE — file-local promotion and orphan reconcile
+    // both ran after the first call. The globals tables (and, with them, the
+    // "can globals.cpp see this symbol?" answer) have to be rebuilt from the
+    // final scopes, or the central initializers reference symbols that end up
+    // `static` in someone else's .cpp.
+    setMultidimArrayGlobals(analyzedGlobals as Array<{ name: string; dataType?: string; suggestedName?: string; suggestedType?: string; scope?: string }>);
 
-        // One globals translation unit per module, plus a shared remainder.
-        emitCentralGlobalsUnits(
-          centralGlobals, functions, files,
-          { ...options, projectName: name, binaryName: programInfo?.name },
-          'globals.h', flatTypeOwnerMap, context.functionNameCandidates);
-      }
+    // Filter out struct-colocated globals (they go in struct headers/impls)
+    const centralGlobals = analyzedGlobals.filter(
+      g => g.scope !== 'struct-colocated'
+    );
+
+    if (centralGlobals.length > 0) {
+      const globalsHeaderContent = genMark('project/globals-header', () => generateGlobalsHeader(centralGlobals, {
+        ...options,
+        projectName: name,
+        binaryName: programInfo?.name,
+      }, dataTypes, typeOwnerMap, functionQualifiedNames, context.bodyIdentifierFnCounts));
+
+      files.set(globalsPath!, {
+        path: globalsPath!,
+        content: globalsHeaderContent,
+        type: 'header',
+        functions: [],
+        includes: [],
+      });
+
+      // One globals translation unit per module, plus a shared remainder.
+      genMark('project/globals-units', () => emitCentralGlobalsUnits(
+        centralGlobals, functions, files,
+        { ...options, projectName: name, binaryName: programInfo?.name },
+        globalsPath!, typeOwnerMap, context.functionNameCandidates));
     }
   }
 
@@ -1012,11 +1306,14 @@ export function generateProject(
     buildInfo: context._buildInfo,
   };
 
+  if (GEN_TIMING) genAdd('project/total', Date.now() - genT0);
+  genReport();
+
   reportUnresolvableIncludes(project);
   reportCaseCollidingOutputPaths(project);
   reportGlobalsTakingATypeName();
   reportDeclarationClosure();
-  reportFuncPtrArityMismatches();
+  reportFuncPtrArityMismatches(state.extraArityMismatches, state.extraInitializerArityMismatches);
 
   return project;
 }
@@ -1043,9 +1340,12 @@ export function generateProject(
  * arities — a heterogeneous dispatch table is built exactly that way — so those
  * are cast and still counted here.
  */
-function reportFuncPtrArityMismatches(): void {
-  const bodies = getFuncPtrArgCastArityMismatchList();
-  const initializers = getInitializerFuncPtrArityMismatches();
+function reportFuncPtrArityMismatches(
+  extraBodies: readonly ArityMismatch[] = [],
+  extraInitializers = 0,
+): void {
+  const bodies = [...getFuncPtrArgCastArityMismatchList(), ...extraBodies];
+  const initializers = getInitializerFuncPtrArityMismatches() + extraInitializers;
   if (bodies.length === 0 && initializers === 0) return;
   console.log(`Funcdef arity disagreements: ${bodies.length} in bodies (no cast attempted — a cast cannot change a call's arity), ${initializers} in data initializers (cast to the slot type — a store can)`);
   for (const m of [...bodies].sort((a, b) => a.slot.localeCompare(b.slot) || a.callee.localeCompare(b.callee))) {
@@ -2442,6 +2742,7 @@ function generateFilesForFunctions(
    */
   strings?: ExtractedString[]
 ): Map<string, string> {
+  const gffT0 = Date.now();
   const organized = organizeByNamespace(functions, classes, namespaces);
 
   const typeOwnershipOverrides = new Map<string, string>();
@@ -2850,7 +3151,10 @@ function generateFilesForFunctions(
     ...typeOwnerMap.keys(),
   ]);
 
+  if (GEN_TIMING) genAdd('units/setup', Date.now() - gffT0);
+
   // ── Pass 2: Generate files using graph-resolved includes ──────────
+  const unitsT0 = Date.now();
   for (const [unitName, unitFunctions] of organized) {
     const namespace = namespaces.find(ns => ns.name === unitName);
     const classInfo = classes.find(cls => cls.name === unitName);
@@ -2858,6 +3162,17 @@ function generateFilesForFunctions(
     const headerPath = unitHeaderPaths.get(unitName)!;
     const implExt = options.format === 'c' ? '.c' : '.cpp';
     let implPath = headerPath.replace(/\.h$/, implExt);
+
+    // The shard decision is taken for every unit in every process, in this same
+    // order, so all shards agree on the partition without talking to each other.
+    if (!shardOwnsNext(unitCost(unitFunctions))) {
+      shardPlaceholder(files, headerPath, 'header');
+      shardPlaceholder(files, implPath, 'implementation');
+      if (options.generateSourceMaps) shardPlaceholderMap(sourceMaps, `${implPath}.map`);
+      continue;
+    }
+    shardRecordEmitted(headerPath);
+    shardRecordEmitted(implPath);
 
     // Get graph-resolved includes for this module
     const resolved = resolvedModules.get(headerPath);
@@ -2884,7 +3199,7 @@ function generateFilesForFunctions(
     }
 
     // Generate header — no funcIncludes to avoid circular include chains
-    const headerContent = generateHeader(
+    const headerContent = genMark('units/header', () => generateHeader(
       unitName,
       unitFunctions,
       classInfo,
@@ -2901,7 +3216,7 @@ function generateFilesForFunctions(
       undefined,  // no funcIncludes
       functions,  // allFunctions for cross-module method lookup
       classes     // allClasses so cross-namespace method structs get method declarations
-    );
+    ));
 
     files.set(headerPath, {
       path: headerPath,
@@ -2934,9 +3249,10 @@ function generateFilesForFunctions(
       // This file now owns their definitions — record it, so the globals.h/cpp
       // pass knows they are not orphans.
       markGlobalsClaimed(context.fileLocalGlobals);
+      shardRecordClaims(context.fileLocalGlobals);
     }
 
-    let implContent = generateImplementation(
+    let implContent = genMark('units/impl', () => generateImplementation(
       unitName,
       unitFunctions,
       classInfo,
@@ -2947,7 +3263,7 @@ function generateFilesForFunctions(
       crtHeaders,
       undefined,  // no internalFunctions — don't apply static to standalone functions
       structUnionEnumNames
-    );
+    ));
     context.fileLocalGlobals = prevFileLocals;
     context._preambles = prevPreambles;
 
@@ -2964,6 +3280,7 @@ function generateFilesForFunctions(
 
     if (implColocatedGlobals.length > 0) {
       markGlobalsClaimed(implColocatedGlobals);
+      shardRecordClaims(implColocatedGlobals);
       const globalsDefSection = generateColocatedGlobalsImpl(
         implColocatedGlobals,
         options
@@ -2972,6 +3289,7 @@ function generateFilesForFunctions(
     }
 
     // Body dep feedback: scan generated impl for type/function references not yet included
+    const depScanT0 = Date.now();
     {
       const existingIncludes = new Set(implIncludes);
       existingIncludes.add(headerPath);
@@ -3112,6 +3430,7 @@ function generateFilesForFunctions(
         implContent = implContent.slice(0, lineEnd + 1) + includeLines + '\n' + implContent.slice(lineEnd + 1);
       }
     }
+    if (GEN_TIMING) genAdd('units/dep-scan', Date.now() - depScanT0);
 
     files.set(implPath, {
       path: implPath,
@@ -3126,14 +3445,25 @@ function generateFilesForFunctions(
     // Generate source map if requested
     if (options.generateSourceMaps) {
       const mapPath = `${implPath}.map`;
+      shardRecordEmitted(mapPath);
       const crossMatches = crossPlatformMatchesByUnit.get(implPath);
       const sourceMap = generateSourceMap(implPath, unitFunctions, undefined, crossMatches);
       sourceMaps.set(mapPath, sourceMap);
     }
   }
 
+  if (GEN_TIMING) genAdd('units/loop-total', Date.now() - unitsT0);
+
   // ── Pass 3: Generate type-only headers (if any) ────────────────────
+  const extraT0 = Date.now();
   for (const [headerPath, ownedTypeNames] of extraHeaderTypes) {
+    // A type-only header costs roughly what its types cost to render; the exact
+    // proxy does not matter, only that every shard computes the same one.
+    if (!shardOwnsNext([...ownedTypeNames].length * 4000 + 200)) {
+      shardPlaceholder(files, headerPath, 'header');
+      continue;
+    }
+    shardRecordEmitted(headerPath);
     const ownedTypes = new Set<string>(ownedTypeNames);
     const guardBase = headerPath.replace(/\\/g, '/').replace(/\.[^/.]+$/, '');
 
@@ -3176,6 +3506,7 @@ function generateFilesForFunctions(
       includes: sortedIncludes,
     });
   }
+  if (GEN_TIMING) genAdd('units/extra-headers', Date.now() - extraT0);
 
   return typeOwnerMap;
 }

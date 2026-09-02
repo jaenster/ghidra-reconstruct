@@ -152,6 +152,7 @@ export {
 import type {
   ReconstructOptions,
   ReconstructResult,
+  ReconstructedProject,
   ProgressCallback,
   GhidraConnection,
   DetectedClass,
@@ -172,7 +173,8 @@ import { lintAutoProtoConventions, describeAutoProtoLint } from './modules/auto-
 import { extractAll, type ExtractionResult } from './extract/index.js';
 import { applyResolvedTypes } from './extract/functions.js';
 import { analyzeAll, type AnalysisResult } from './analysis/index.js';
-import { generateProject, writeProject } from './codegen/index.js';
+import { generateProject, writeProject, getParseErrorLogPath as parseErrorLogPath } from './codegen/index.js';
+import { generateProjectParallel } from './codegen-parallel.js';
 import { createConnection, closeConnection, getCacheVersion, summarizeRpcStats, resetRpcStats } from './connection.js';
 import { timePhase, timePhaseSync, formatTimings, resetTimings, recordPhase, formatBytes } from './timing.js';
 import {
@@ -295,6 +297,27 @@ export interface ReconstructionOptions {
   useSourceCache?: boolean;
 
   /**
+   * Generate across this many shards (worker threads), coordinator included.
+   * 1 or absent keeps the single-threaded path, which stays the default because
+   * it is the one a correctness-critical run should take.
+   *
+   * Every shard rebuilds the whole model from the extraction snapshot and emits
+   * only its slice of the files, so this needs a snapshot on disk: with
+   * `writeSnapshotFile: false` there is nothing to replay and the run falls back
+   * to serial.
+   */
+  generationWorkers?: number;
+
+  /**
+   * Module each generation worker imports and calls `configureCodegen(logPath?)`
+   * on. Process-wide emitter configuration applied by the ENTRY POINT — which
+   * transform plugins are enabled, where parse errors are logged — is not part
+   * of `ReconstructOptions`, and a worker that skipped it would emit different
+   * bodies from the coordinator.
+   */
+  generationWorkerBootstrap?: string;
+
+  /**
    * Decompile every function of an additional source, including the ~8k whose
    * bodies the merge throws away. Default false. Together with
    * `useSourceCache: false` this restores the secondary phase to exactly what
@@ -327,6 +350,13 @@ interface CodegenInputs {
  * A full run and a codegen-only run both land here with the same `CodegenInputs`,
  * which is what makes the two produce an identical tree.
  */
+interface ParallelGenerationSettings {
+  workers: number;
+  snapshotDir: string;
+  bootstrap?: string;
+  parseErrorLogPath?: string;
+}
+
 async function generateAndWrite(
   inputs: CodegenInputs,
   options: ReconstructOptions,
@@ -334,7 +364,8 @@ async function generateAndWrite(
   onProgress: ProgressCallback | undefined,
   warnings: string[],
   errors: string[],
-  startTime: number
+  startTime: number,
+  parallel?: ParallelGenerationSettings
 ): Promise<ReconstructResult> {
   // Promote the connection-level excludePatterns to codegen-level
   // excludeNamespaces so the SAME pattern list that drops library functions
@@ -354,21 +385,48 @@ async function generateAndWrite(
   if (resolvedTypeCount > 0) {
     console.log(`  Resolved types folded in: ${resolvedTypeCount}`);
   }
-  const project = timePhaseSync(
-    'generation',
-    () => generateProject(
-      inputs.projectName,
-      inputs.functions,
-      inputs.classes,
-      inputs.dataTypes,
-      inputs.globals,
-      inputs.namespaces,
-      options,
-      inputs.programInfo,
-      inputs.strings
-    ),
-    p => `${p.files.size} files, ${formatBytes([...p.files.values()].reduce((a, f) => a + f.content.length, 0))} of source`
-  );
+  const generationDetail = (p: ReconstructedProject) =>
+    `${p.files.size} files, ${formatBytes([...p.files.values()].reduce((a, f) => a + f.content.length, 0))} of source` +
+    (parallel && parallel.workers > 1 ? `, ${parallel.workers} shards` : '');
+  const project = parallel && parallel.workers > 1
+    ? await timePhase(
+        'generation',
+        () => generateProjectParallel(
+          {
+            projectName: inputs.projectName,
+            functions: inputs.functions,
+            classes: inputs.classes,
+            dataTypes: inputs.dataTypes,
+            globals: inputs.globals,
+            namespaces: inputs.namespaces,
+            options,
+            programInfo: inputs.programInfo,
+            strings: inputs.strings,
+          },
+          {
+            workers: parallel.workers,
+            snapshotDir: parallel.snapshotDir,
+            bootstrap: parallel.bootstrap,
+            parseErrorLogPath: parallel.parseErrorLogPath,
+          }
+        ),
+        generationDetail
+      )
+    : timePhaseSync(
+        'generation',
+        () => generateProject(
+          inputs.projectName,
+          inputs.functions,
+          inputs.classes,
+          inputs.dataTypes,
+          inputs.globals,
+          inputs.namespaces,
+          options,
+          inputs.programInfo,
+          inputs.strings
+        ),
+        generationDetail
+      );
   onProgress?.('generation', 1, 1);
 
   onProgress?.('writing', 0, 1);
@@ -594,6 +652,8 @@ export async function reconstruct(
     snapshotMaxAgeHours,
     useSourceCache = true,
     decompileAllSecondary = false,
+    generationWorkers = 1,
+    generationWorkerBootstrap,
   } = connectionOptions;
 
   const snapshotDir = connectionOptions.snapshotDir
@@ -641,7 +701,13 @@ export async function reconstruct(
         onProgress,
         warnings,
         errors,
-        startTime
+        startTime,
+        {
+          workers: generationWorkers,
+          snapshotDir,
+          bootstrap: generationWorkerBootstrap,
+          parseErrorLogPath: parseErrorLogPath(),
+        }
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -891,6 +957,7 @@ export async function reconstruct(
 
     // Persist the extraction before codegen runs, so a codegen crash still
     // leaves behind a snapshot to iterate against.
+    let snapshotWritten = false;
     if (writeSnapshotFile) {
       try {
         const provenance = await captureProvenance(
@@ -927,6 +994,7 @@ export async function reconstruct(
           () => writeSnapshot(snapshotDir, snapshot),
           () => `${snapshot.functions.length} functions to ${snapshotDir}`
         );
+        snapshotWritten = true;
         console.log(
           `Snapshot written: ${snapshotDir} ` +
           `(Ghidra version ${provenance.programVersion ?? 'unknown'}, ` +
@@ -940,6 +1008,15 @@ export async function reconstruct(
       }
     }
 
+    // Sharding replays the snapshot in each worker, so it is only available
+    // when this run actually wrote one. Say so rather than silently halving the
+    // expected speed.
+    if (generationWorkers > 1 && !snapshotWritten) {
+      console.warn(
+        'WARNING: parallel generation needs an extraction snapshot to replay; ' +
+        'none was written, so generation runs single-threaded.'
+      );
+    }
     return await generateAndWrite(
       codegenInputs,
       options,
@@ -947,7 +1024,13 @@ export async function reconstruct(
       onProgress,
       warnings,
       errors,
-      startTime
+      startTime,
+      {
+        workers: snapshotWritten ? generationWorkers : 1,
+        snapshotDir,
+        bootstrap: generationWorkerBootstrap,
+        parseErrorLogPath: parseErrorLogPath(),
+      }
     );
   } catch (error) {
     // Capture the full stack (not just the message) so codegen crashes are

@@ -175,6 +175,10 @@ let parseErrorCount = 0;
  * Errors are appended so the file accumulates across runs — truncate it
  * yourself if you want a clean slate.
  */
+export function getParseErrorLogPath(): string | undefined {
+  return parseErrorLogPath ?? undefined;
+}
+
 export function setParseErrorLogPath(path: string): void {
   parseErrorLogPath = path;
   parseErrorCount = 0;
