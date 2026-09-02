@@ -59,7 +59,7 @@ import {
 } from '@ghidra-mcp/cpp-parser';
 
 import { fieldDeclSpelling, emittedMemberNames, generateHeader, generateFunctionDeclaration, setKnownFuncDefs, sigType, getIntegerConversionType, emittedFunctionName, returnSigType } from './header.js';
-import { enumTypedefLine, setKnownEnumWidths } from './enum-width.js';
+import { enumTypedefLine, registerEnumTypedefTargets, setKnownEnumWidths } from './enum-width.js';
 import { generateImplementation, setQuestStructLayouts, setStructFieldRenames, decompiledReturnType, decompiledFunctionName, type ImplGenContext, type FuncPtrArgCastTables, type ThunkForward } from './impl.js';
 import { generateCMakeLists, generateTopLevelCMake, generateTargetCMake, generateUnsortedCMake } from './cmake.js';
 import { generateSourceMap } from './sourcemap.js';
@@ -4309,6 +4309,16 @@ export function buildFuncPtrArgCastTables(
     if (under.replace(/[*&\s]/g, '') === dt.name) continue;
     typedefTargets[dt.name] = under;
   }
+  // An enum is spelled `typedef <int> <Name>;`, so for every shape question it
+  // IS that integer. Ghidra reports it under kind ENUM, not TYPEDEF, so the loop
+  // above never saw one and this map has never carried an enum. That silence was
+  // survivable while every enum was `int` and cost nothing; once widths are
+  // carried it is a defect, because a cast to a 1-byte enum reads as a cast to an
+  // unknown base and never reaches narrow-cast-through-uintptr — leaving
+  // `(eInventoryPage)pInventoryTmp`, which g++ rejects for losing precision.
+  // enumUnderlyingFor is the SAME accessor d2_enums.h is written with, so the map
+  // and the header cannot drift.
+  registerEnumTypedefTargets(dataTypes, typedefTargets);
   // A row typedef stands for the array it was written for, so every shape
   // computed through it is the one the unspelled `T[N]` had. Only the SPELLING
   // of the cast changes; nothing downstream sees a different type.

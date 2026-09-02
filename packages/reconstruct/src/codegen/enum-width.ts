@@ -131,3 +131,31 @@ export function enumTypedefLine(
 ): string {
   return `typedef ${enumUnderlyingFor(name, fallback)} ${name};`;
 }
+
+/**
+ * Register every enum in a `typedefTargets` map as the integer it is emitted as.
+ *
+ * Ghidra reports an enum under kind `ENUM`, never `TYPEDEF`, so the map's own
+ * typedef loop has never seen one and the map has never carried an enum. That
+ * was survivable while every enum was `int`: a pass that could not resolve
+ * `eSomething` refused to act, and refusing was the same answer resolving would
+ * have given. Once widths are carried it stops being survivable — a cast to a
+ * 1- or 2-byte enum reads as a cast to an unknown base, never reaches
+ * `narrow-cast-through-uintptr`, and the tree keeps `(eInventoryPage)pInventory`
+ * for g++ to reject.
+ *
+ * The value comes from `enumUnderlyingFor`, which is the same accessor
+ * `d2_enums.h` is written with, so the map and the header cannot disagree —
+ * including for a name Ghidra models at two sizes, which both resolve to the
+ * status quo.
+ */
+export function registerEnumTypedefTargets(
+  dataTypes: Iterable<{ kind?: string; name?: string }>,
+  typedefTargets: Record<string, string>
+): void {
+  for (const dt of dataTypes) {
+    if (dt.kind !== 'ENUM' || !dt.name) continue;
+    typedefTargets[dt.name] = enumUnderlyingFor(
+      dt.name, dt as { size?: number; values?: readonly EnumValue[] });
+  }
+}

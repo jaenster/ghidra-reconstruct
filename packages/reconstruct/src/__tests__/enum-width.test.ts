@@ -23,6 +23,7 @@ import {
   enumTypedefLine,
   setKnownEnumWidths,
   clearKnownEnumWidths,
+  registerEnumTypedefTargets,
 } from '../codegen/enum-width.js';
 import { generateEnumDeclaration, generateStructDeclaration } from '../codegen/header.js';
 
@@ -264,5 +265,57 @@ describe('the eCollisionFlags array that the disassembly strides by 2', () => {
     const out = generateStructDeclaration(COLLISION_GRID);
     assert.ok(/aMap/.test(out), out);
     assert.ok(out.includes('eCollisionFlags'), out);
+  });
+});
+
+/**
+ * The shape model's map of "what does this name stand for" is what decides
+ * whether a cast pass can act on `(eInventoryPage)p`. Enums arrive under kind
+ * ENUM and so were never in it; carrying widths made that gap visible as six
+ * `loses precision` errors that had been legal only because every enum was int.
+ */
+describe('enums are registered in typedefTargets as the integer they emit as', () => {
+  beforeEach(() => clearKnownEnumWidths());
+
+  const PAGE: ExtractedEnum = {
+    name: 'eInventoryPage', category: '/Diablo2', kind: 'ENUM', size: 1,
+    values: [{ name: 'PAGE_INVENTORY', value: 0 }, { name: 'PAGE_STASH', value: 3 }],
+  };
+  const QUALITY: ExtractedEnum = {
+    name: 'eD2ItemQuality', category: '/Diablo2', kind: 'ENUM', size: 4,
+    values: [{ name: 'QUALITY_NORMAL', value: 2 }],
+  };
+
+  it('maps a 1-byte enum to the same spelling d2_enums.h writes', () => {
+    setKnownEnumWidths([PAGE]);
+    const map: Record<string, string> = {};
+    registerEnumTypedefTargets([PAGE], map);
+    assert.strictEqual(map.eInventoryPage, 'uint8_t');
+    assert.ok(enumTypedefLine('eInventoryPage', PAGE).includes('uint8_t'));
+  });
+
+  it('maps a 4-byte enum to int, the status quo', () => {
+    setKnownEnumWidths([QUALITY]);
+    const map: Record<string, string> = {};
+    registerEnumTypedefTargets([QUALITY], map);
+    assert.strictEqual(map.eD2ItemQuality, 'int');
+  });
+
+  it('ignores a non-enum data type', () => {
+    const map: Record<string, string> = {};
+    registerEnumTypedefTargets([{ kind: 'STRUCTURE', name: 'D2UnitStrc' }], map);
+    assert.deepStrictEqual(map, {});
+  });
+
+  // A name Ghidra models at two sizes keeps `int` at the definition; the map has
+  // to agree, or the cast passes would act on a width the header never wrote.
+  it('a size-conflicted name resolves the same in the map as in the header', () => {
+    const a: ExtractedEnum = { ...PAGE, name: 'eDup', size: 1 };
+    const b: ExtractedEnum = { ...PAGE, name: 'eDup', category: '/Other', size: 4 };
+    setKnownEnumWidths([a, b]);
+    const map: Record<string, string> = {};
+    registerEnumTypedefTargets([a, b], map);
+    assert.strictEqual(map.eDup, 'int');
+    assert.ok(enumTypedefLine('eDup', a).includes('int '));
   });
 });

@@ -26,6 +26,39 @@ describe('narrowCastThroughUintptrPlugin', () => {
 
   // --- must fix -----------------------------------------------------------
 
+  // An enum reaches this pass as a plain name. It is spelled `typedef uint8_t
+  // eInventoryPage;` in d2_enums.h, so it IS a narrow integer — but only if the
+  // shape model was told, which is what registerEnumTypedefTargets does. These
+  // three are the six real sites in D2Client/UNIT/Item.cpp and
+  // D2Game/Player/PlayerMsg.cpp, where a register holding a small enum value was
+  // modelled as a unit pointer.
+  it('routes a pointer narrowed to a 1-byte enum through uintptr_t', () => {
+    const out = transform(
+      `void f() { D2InventoryStrc* pInv; g(pItem, (eInventoryPage)pInv); }`,
+      { typedefTargets: { eInventoryPage: 'uint8_t' } },
+    );
+    assert.ok(/\(eInventoryPage\)\s*\(uintptr_t\)\s*pInv/.test(out), out);
+  });
+
+  it('routes a pointer narrowed to a 2-byte enum through uintptr_t', () => {
+    const out = transform(
+      `void f() { D2UnitStrc* p; g((eCollisionFlags)p); }`,
+      { typedefTargets: { eCollisionFlags: 'uint16_t' } },
+    );
+    assert.ok(/\(eCollisionFlags\)\s*\(uintptr_t\)\s*p/.test(out), out);
+  });
+
+  // The counterpart guarantee: a 4-byte enum is `typedef int`, which is already
+  // a legal cast target for a 32-bit pointer. Rewriting it would touch a
+  // translation unit that builds, which the pass promises never to do.
+  it('leaves a pointer cast to a 4-byte enum alone', () => {
+    const out = transform(
+      `void f() { D2UnitStrc* p; g((eD2ItemQuality)p); }`,
+      { typedefTargets: { eD2ItemQuality: 'int' } },
+    );
+    assert.ok(!/uintptr_t/.test(out), out);
+  });
+
   it('routes a struct-pointer local narrowed to uint8_t through uintptr_t', () => {
     const out = transform(`void f() { D2SUnitMsgStrc* p; uint8_t b; b = (uint8_t)p; }`);
     assert.ok(/\(uint8_t\)\s*\(uintptr_t\)\s*p/.test(out), out);
