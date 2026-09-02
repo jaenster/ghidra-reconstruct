@@ -890,6 +890,9 @@ export function setInteriorLabelSymbols(globals: readonly AnalyzedDataSymbol[]):
     running = Math.max(running, ends[i]);
     maxEnd.push(running);
   }
+  let maxSize = 0;
+  for (let i = 0; i < starts.length; i++) maxSize = Math.max(maxSize, ends[i] - starts[i]);
+
   const containedStrictly = (addr: number): boolean => {
     let lo = 0, hi = sortedStarts.length;
     while (lo < hi) {
@@ -899,11 +902,50 @@ export function setInteriorLabelSymbols(globals: readonly AnalyzedDataSymbol[]):
     return lo > 0 && maxEnd[lo - 1] > addr;
   };
 
+  // A symbol strictly inside a container that reports the CONTAINER'S OWN SIZE
+  // did not measure itself - it inherited the container's type, which is what
+  // Ghidra hands back for a label placed on the interior of a typed object.
+  // It cannot be an independent datum: an object at +4 cannot also be 80 bytes
+  // and end past the thing containing it.
+  //
+  // Emitting storage for it is what makes two globals alias one object in the
+  // original and NOT alias after relinking. gGameStateData4 became a second
+  // 80-byte FILE*[20] beside globalOpenFileHandleArray, so the log manager wrote
+  // through one and read through the other, and fclose() got a junk handle.
+  // 15663 symbols across the program have this shape.
+  //
+  // Deliberately narrower than "contained": a contained symbol with its OWN
+  // smaller size may well be a real field someone typed, and dropping those cost
+  // four symbols their definitions once already - see the comment above.
+  const sizeOfContainerAt = (addr: number, ownSize: number): boolean => {
+    let lo = 0, hi = sortedStarts.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (sortedStarts[mid] < addr) lo = mid + 1; else hi = mid;
+    }
+    for (let k = lo - 1; k >= 0; k--) {
+      const ci = order[k];
+      if (ends[ci] <= addr) continue;
+      if (starts[ci] < addr && ends[ci] - starts[ci] === ownSize) return true;
+      if (starts[ci] + maxSize < addr) break;
+    }
+    return false;
+  };
+
   const candidates = new Set<string>();
   const interior = new Set<string>();
   for (const g of globals) {
     const name = g.suggestedName || g.name;
-    if (!looksLikeMemberPath(name)) continue;
+    if (!looksLikeMemberPath(name)) {
+      // Not member-path shaped, so the shape test never considers it - but the
+      // inherited-size signature is proof on its own.
+      const a = parseInt(g.address, 16);
+      if (Number.isFinite(a) && g.size > 1 && sizeOfContainerAt(a, g.size)) {
+        candidates.add(name);
+        interior.add(name);
+      }
+      continue;
+    }
     candidates.add(name);
     if (/\+\d+$/.test(name)) { interior.add(name); continue; }
     const addr = parseInt(g.address, 16);
@@ -935,6 +977,8 @@ export function resetInteriorLabelSymbols(): void {
  * (`setInteriorLabelSymbols`); without one it falls back to the name's shape.
  */
 export function isInteriorLabel(name: string): boolean {
+  // Proven interior by the inherited-size rule, whatever the name looks like.
+  if (provenInteriorLabels?.has(name)) return true;
   if (!looksLikeMemberPath(name)) return false;
   if (!judgedInteriorCandidates || !judgedInteriorCandidates.has(name)) return true;
   return provenInteriorLabels!.has(name);
