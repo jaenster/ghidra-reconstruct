@@ -69,7 +69,7 @@ import { buildNamespaceResolution, namespaceResolution, renderNamespace } from '
 import { setInteriorLabelSymbols, resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, setDeclarationClosureDataContent, getDeclarationClosureReport, isUnreferenceableArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, setInitializerAddressTable, setInitializerFunctionAddresses, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType, emittedNamespaceOf } from './globals-header.js';
 import { normalizeDataAddress, stringDefinition } from './declaration-closure.js';
 import { harvestAnnotatedParameterTypes } from './win32-signatures.js';
-import { isPlatformOrBuiltinType, isLibraryType, generatePlatformHeader, arrayRowTypedefLines, arrayRowReturn, arrayRowSpelling, GHIDRA_PSEUDO_OP_RESULT_TYPES, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, platformDefinedFunctionNames, platformVoidPointerFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
+import { isPlatformOrBuiltinType, isLibraryType, generatePlatformHeader, normalizeDataValue, arrayRowTypedefLines, arrayRowReturn, arrayRowSpelling, GHIDRA_PSEUDO_OP_RESULT_TYPES, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, platformDefinedFunctionNames, platformVoidPointerFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
 import { createOverrideRegistry } from '../overrides/index.js';
 import { createLibraryRegistry } from '../library/index.js';
 import { createMethodConversionRegistry, getOrCreateRegistry, applyMethodConversions, detectMethodConversionsFromTags, type MethodCallMapping, type MethodConversionRegistry } from '../methods/index.js';
@@ -1760,6 +1760,15 @@ function buildFuncToImplPathMap(
  *    OutJung.cpp and its address taken from Act5.cpp, a different translation
  *    unit. Both are undefined at link.
  *
+ *  - By a DATA INITIALIZER. Neither of the two scans above reads one, because
+ *    neither reads anything but a function body. `gpszExtDc6` is a `pointer`
+ *    global holding `006e3590`, the address of the `char[5]` `gszExtDc6` — whose
+ *    own two xrefs both land in SpriteCache.cpp, so it was file-local, and whose
+ *    name no decompiled body spells, so the body scan had nothing to undo. The
+ *    globals unit then emitted `void* gpszExtDc6 = (void*)0x006e3590;`, because
+ *    the initializer's address table offers only names a globals unit can
+ *    legally write. That is the file-extension string the sprite cache appends.
+ *
  * The result was a symbol emitted `static` in one place and declared `extern` by
  * globals.h's multi-body safety net — a declaration nothing can ever satisfy,
  * plus, for a function-local static, a body-scoped object no other function can
@@ -1861,6 +1870,48 @@ export function reconcileStaticScopeWithBodyReferences(
     }
   }
 
+  // The third reference class, and the one no body carries: a DATA INITIALIZER.
+  // `gpszExtDc6` is a `pointer` global whose Ghidra value is `006e3590`, the
+  // address of `gszExtDc6` — so the globals unit initializes it by taking a
+  // file-local's address, and neither scan above can see it. The name-based pass
+  // that runs later (`promoteCentrallyReferencedGlobals`) cannot either: it
+  // matches a symbol NAME in the initializer, and here the initializer holds a
+  // number. Left uncounted, the emitter's address table — which offers only
+  // string constants and `scope === 'global'` symbols, correctly — declines the
+  // name and writes `(void*)0x006e3590`, an absolute address into an image that
+  // does not exist at runtime.
+  //
+  // One body is enough here, and so is none: a reference from a globals unit is
+  // a reference from a translation unit that can never hold the `static`.
+  const initializerReferenced = new Set<string>();
+  if (ownerOfLiteral) {
+    const noteLiteral = (raw: string | null | undefined, holder: AnalyzedDataSymbol): void => {
+      const word = initializerWordValue(raw);
+      if (word === null) return;
+      const owner = ownerOfLiteral(word);
+      if (owner === null) return;
+      const name = sanitizeSymbolName(owner);
+      if (!candidates.has(name)) return;
+      // A record resolving to itself is not a reference from anywhere it is not
+      // already visible.
+      if (sanitizeSymbolName(holder.suggestedName || holder.name) === name) return;
+      initializerReferenced.add(name);
+    };
+    const walkInitializer = (dv: DataValue | undefined, holder: AnalyzedDataSymbol): void => {
+      if (!dv) return;
+      if (dv.kind === 'scalar' || dv.kind === 'pointer') noteLiteral(dv.value, holder);
+      for (const e of dv.elements ?? []) walkInitializer(e, holder);
+      for (const f of dv.fields ?? []) walkInitializer(f.value, holder);
+    };
+    for (const g of analyzedGlobals) {
+      // A four-byte datum never carries `initializedData` — the extraction only
+      // asks Ghidra for it above four bytes — so a pointer global's whole
+      // initializer IS its `value`.
+      if (g.initializedData) walkInitializer(g.initializedData, g);
+      else noteLiteral(g.value, g);
+    }
+  }
+
   let promotedToGlobal = 0;
   let promotedToFileLocal = 0;
   for (const [name, globalsWithName] of candidates) {
@@ -1880,7 +1931,7 @@ export function reconcileStaticScopeWithBodyReferences(
         }
       }
     }
-    if (fns.size <= 1) continue;
+    if (fns.size <= 1 && !initializerReferenced.has(name)) continue;
     const files = new Set<string>();
     let unresolved = false;
     for (const fn of fns) {
@@ -1902,6 +1953,24 @@ export function reconcileStaticScopeWithBodyReferences(
     }
   }
   return { promotedToGlobal, promotedToFileLocal };
+}
+
+/**
+ * The word a Ghidra initializer value holds, or null when it is not a number.
+ *
+ * `normalizeDataValue` first, for the same reason `emitDataValue` calls it: an
+ * address arrives as the bare `006e3590` and a scalar as `0x40`, and only that
+ * function knows which bare digit runs are hex. `.dc6` — the `value` of a
+ * character array — is neither, and comes back null.
+ */
+function initializerWordValue(raw: string | null | undefined): number | null {
+  const text = String(raw ?? '').trim();
+  if (!text) return null;
+  const normalized = normalizeDataValue(text);
+  const value = /^0x[0-9a-fA-F]+$/.test(normalized)
+    ? Number.parseInt(normalized.slice(2), 16)
+    : /^\d+$/.test(normalized) ? Number.parseInt(normalized, 10) : NaN;
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
 }
 
 /** One 32-bit word — the width every folded image address was printed at. */

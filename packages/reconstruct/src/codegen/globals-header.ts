@@ -1672,6 +1672,23 @@ function isWideTextSlotType(base: string | undefined): boolean {
   return base !== undefined && WIDE_TEXT_SLOT_TYPES.has(base);
 }
 
+/**
+ * A slot whose datum Ghidra RENDERS as a character rather than as a number.
+ *
+ * This is the question that decides whether a bare `6` in an initializer is the
+ * byte 0x36 or the byte 0x06, and the type is the only thing that can answer it:
+ * `sinTable_f32` holds 1.0 at a quarter turn and Ghidra renders that `1`, so a
+ * float slot reading its digits as characters would spell 0x31.
+ *
+ * Narrow and wide both, because both are text: a `WCHAR[256]` lookup table
+ * renders the code unit as the character exactly as a `char[N]` does. What the
+ * character becomes in the wide slot is still the numeric code unit - see the
+ * branches below - only the READING changes here.
+ */
+function isCharacterRenderedSlot(base: string | undefined): boolean {
+  return base !== undefined && (isCharSlotType(base) || isWideTextSlotType(base));
+}
+
 function isUnsignedByteSlotType(base: string): boolean {
   return UNSIGNED_BYTE_SLOT_TYPES.has(base.toLowerCase());
 }
@@ -1710,6 +1727,52 @@ function unsignedSlotSpelling(rawValue: string | null | undefined, slotType: str
  */
 function unsignedSlotBitPattern(rawValue: string | null | undefined, slotType: string | null | undefined): string | undefined {
   return negativeBytePatternInUnsignedSlot(rawValue, slotType, sentinelContext());
+}
+
+/**
+ * `0` is the one rendering Ghidra writes BOTH ways, and the collision is inside
+ * a single datum.
+ *
+ * A defined character datum spells its zero byte `'\x00'`; an UNDEFINED byte —
+ * the tail of a BSS buffer — spells it `0`. But `0` is also how the character
+ * 0x30 arrives, so the same three glyphs mean 0x00 in `szCustomSymbolSearchPath`
+ * (32768 of them) and 0x30 in `"207.82.87.243"`. `gszFogCrashReportCustomMessage`
+ * holds both readings in ONE `char[4096]`: 1976 defined `'\x00'` followed by
+ * 2120 undefined `0`. So the datum as a whole cannot decide it — a rule that
+ * asked "does this array render anything as text?" would have written 0x30 over
+ * all 2120 of those bytes.
+ *
+ * Its NEIGHBOURS can. A character 0 sits between two other characters, because
+ * that is what text is; the undefined tail is a RUN, so every `0` in it has a
+ * `0` on at least one side, and the byte before the run is the `'\x00'` that
+ * ends the defined part. Requiring both sides to be single characters that are
+ * not themselves `0` — and neither end of the array, which has only one side —
+ * reads exactly seven zeros in the whole image as characters: the `0` of
+ * `207.82.87.243` in both realm addresses, the `$0?` of four MSVC RTTI names,
+ * and index 0x30 of `CharacterLookupTable`, which holds its own index. It reads
+ * none of the 162909 others.
+ */
+function characterZeroSpellings(
+  elements: readonly DataValue[] | null | undefined,
+  elemType: string | undefined,
+): Array<string | undefined> | undefined {
+  if (!elements || elements.length < 3) return undefined;
+  const base = elemType ? baseTypeName(elemType) : undefined;
+  if (!isCharacterRenderedSlot(base)) return undefined;
+  const isCharacter = (dv: DataValue | undefined): boolean =>
+    dv !== undefined && dv.kind === 'scalar' && (dv.value ?? '').length === 1 && dv.value !== '0';
+  let any = false;
+  const out = new Array<string | undefined>(elements.length).fill(undefined);
+  for (let i = 1; i < elements.length - 1; i++) {
+    const e = elements[i];
+    if (e.kind !== 'scalar' || e.value !== '0') continue;
+    if (!isCharacter(elements[i - 1]) || !isCharacter(elements[i + 1])) continue;
+    // A wide slot takes the code unit, exactly as every other character in it
+    // does — a narrow `char` literal does not reach a `uint16_t`.
+    out[i] = isCharSlotType(base!) ? "'0'" : '0x30';
+    any = true;
+  }
+  return any ? out : undefined;
 }
 
 /**
@@ -2066,8 +2129,19 @@ export function emitDataValue(dv: DataValue, indent = 0, expectedType?: string):
       const bitPattern = unsignedSlotBitPattern(dv.value, expectedType);
       if (bitPattern !== undefined) return bitPattern;
       const val = normalizeDataValue(dv.value ?? '0');
-      // If value is a single printable char (not a number/hex), wrap in char literal quotes
-      if (val.length === 1 && !/\d/.test(val)) {
+      // A single character is a CHARACTER, and a digit is no exception: Ghidra
+      // renders a character slot's byte as the character, and renders a NUMERIC
+      // byte `0x`-prefixed, so a bare `6` in a `char` slot is 0x36. Reading it
+      // as the number 6 turned ".dc6" into ".dc\x06" and 207.82.87.243 into
+      // \x02\x00\x07.\x08\x02..., with nothing to diagnose either.
+      //
+      // `0` alone is excluded here and decided one level up, by its neighbours:
+      // see `characterZeroSpellings`. Outside a character slot every digit stays
+      // a number, because there that is what it is.
+      const digit = val.length === 1 && val >= '0' && val <= '9';
+      const characterValue = val.length === 1
+        && (!digit || (val !== '0' && isCharacterRenderedSlot(baseExpected)));
+      if (characterValue) {
         const code = val.charCodeAt(0);
         // A char literal only belongs in a char-shaped slot. In any wider integer
         // slot (D2's 16-bit char is uint16_t) a code unit >= 0x80 is a NEGATIVE
@@ -2155,33 +2229,7 @@ export function emitDataValue(dv: DataValue, indent = 0, expectedType?: string):
       if (!dv.elements || dv.elements.length === 0) return '{}';
       // The element type is the declared type minus its outermost dimension.
       const elemType = expectedType ? stripOuterArrayDimension(expectedType) : undefined;
-      // A table of absolute image addresses, decided over the whole array — see
-      // `arrayAddressSpellings`. Undefined per element means "emit it as it is",
-      // which is what a zero slot and every element of an unresolved array get.
-      const addressed = arrayAddressSpellings(dv.elements, elemType);
-      if (addressed) {
-        for (const spelling of addressed) {
-          if (!spelling) continue;
-          const named = spelling.match(/[A-Za-z_]\w*$/);
-          if (named) initializerAddressNamesUsed.add(named[0]);
-        }
-      }
-      // For small arrays of scalars/pointers, emit on fewer lines
-      const isSimple = dv.elements.every(e => e.kind === 'scalar' || e.kind === 'pointer' || e.kind === 'enum');
-      if (isSimple && dv.elements.length <= 8) {
-        const vals = dv.elements.map((e, i) => {
-          const v = addressed?.[i] ?? emitDataValue(e, 0, elemType);
-          return i < dv.elements!.length - 1 ? `${v},` : v;
-        });
-        return `{ ${vals.join(' ')} }`;
-      }
-      // Multi-line array
-      const lines = dv.elements.map((e, i) => {
-        const v = addressed?.[i] ?? emitDataValue(e, indent + 1, elemType);
-        const comma = i < dv.elements!.length - 1 ? ',' : '';
-        return `${innerPad}${v}${comma}`;
-      });
-      return `{\n${lines.join('\n')}\n${pad}}`;
+      return emitArrayElements(dv, indent, elemType, pad, innerPad);
     }
 
     case 'struct': {
@@ -2203,6 +2251,47 @@ export function emitDataValue(dv: DataValue, indent = 0, expectedType?: string):
     default:
       return dv.value ?? '0';
   }
+}
+
+/** The body of an array initializer, once the datum's rendering is settled. */
+function emitArrayElements(
+  dv: DataValue,
+  indent: number,
+  elemType: string | undefined,
+  pad: string,
+  innerPad: string,
+): string {
+  // A table of absolute image addresses, decided over the whole array — see
+  // `arrayAddressSpellings`. Undefined per element means "emit it as it is",
+  // which is what a zero slot and every element of an unresolved array get.
+  const addressed = arrayAddressSpellings(dv.elements, elemType);
+  // A zero byte Ghidra rendered as `0` where its neighbours say it is the
+  // CHARACTER. Never overlaps the table above: an address spelling is only ever
+  // produced for a non-zero word.
+  const characterZeros = characterZeroSpellings(dv.elements, elemType);
+  if (addressed) {
+    for (const spelling of addressed) {
+      if (!spelling) continue;
+      const named = spelling.match(/[A-Za-z_]\w*$/);
+      if (named) initializerAddressNamesUsed.add(named[0]);
+    }
+  }
+  // For small arrays of scalars/pointers, emit on fewer lines
+  const isSimple = dv.elements.every(e => e.kind === 'scalar' || e.kind === 'pointer' || e.kind === 'enum');
+  if (isSimple && dv.elements.length <= 8) {
+    const vals = dv.elements.map((e, i) => {
+      const v = addressed?.[i] ?? characterZeros?.[i] ?? emitDataValue(e, 0, elemType);
+      return i < dv.elements!.length - 1 ? `${v},` : v;
+    });
+    return `{ ${vals.join(' ')} }`;
+  }
+  // Multi-line array
+  const lines = dv.elements.map((e, i) => {
+    const v = addressed?.[i] ?? characterZeros?.[i] ?? emitDataValue(e, indent + 1, elemType);
+    const comma = i < dv.elements!.length - 1 ? ',' : '';
+    return `${innerPad}${v}${comma}`;
+  });
+  return `{\n${lines.join('\n')}\n${pad}}`;
 }
 
 /**
