@@ -59,6 +59,7 @@ import {
 } from '@ghidra-mcp/cpp-parser';
 
 import { fieldDeclSpelling, emittedMemberNames, generateHeader, generateFunctionDeclaration, setKnownFuncDefs, sigType, getIntegerConversionType, emittedFunctionName, returnSigType } from './header.js';
+import { enumTypedefLine, setKnownEnumWidths } from './enum-width.js';
 import { generateImplementation, setQuestStructLayouts, setStructFieldRenames, decompiledReturnType, decompiledFunctionName, type ImplGenContext, type FuncPtrArgCastTables, type ThunkForward } from './impl.js';
 import { generateCMakeLists, generateTopLevelCMake, generateTargetCMake, generateUnsortedCMake } from './cmake.js';
 import { generateSourceMap } from './sourcemap.js';
@@ -228,6 +229,12 @@ export function generateProject(
   // Same set, by name, so a typedef targeting `<FunctionDefinition> *` can be
   // inlined into a self-contained function-pointer typedef.
   setKnownFuncDefs(funcDefDataTypes);
+  // Enum widths, before ANY header is emitted: the definition in d2_enums.h and
+  // every forward declaration of the same name must agree on the underlying
+  // integer, and the forward-declaration sites only have the name.
+  setKnownEnumWidths(
+    dataTypes.filter(dt => dt.kind === 'ENUM') as import('../types.js').ExtractedEnum[]
+  );
 
   // Register per-quest struct layouts so the union-member rewrite (impl.ts) can
   // remap a field by byte offset when it switches union members. Ghidra resolves
@@ -593,7 +600,7 @@ export function generateProject(
     );
 
     for (const e of emittedEnums) {
-      enumLines.push(`typedef int ${e.name};`);
+      enumLines.push(enumTypedefLine(e.name, e));
       if (e.values.length > 0) {
         const normalLines: string[] = [];
         const platformLines: string[] = [];
@@ -1435,7 +1442,7 @@ const GENERIC_TYPES = new Set([
   'WCHAR', 'wchar_t', 'byte', 'FILE', 'POINT', 'RECT', 'HWND',
   'HINSTANCE', 'HDC', 'HBITMAP', 'HPALETTE', 'HMODULE',
   'LPCRITICAL_SECTION', 'CRITICAL_SECTION', 'LPPALETTEENTRY',
-  'LPPOINT', 'LPRECT', 'float10', 'exception',
+  'LPPOINT', 'LPRECT', 'float10', 'float2', 'exception',
 ]);
 
 /**

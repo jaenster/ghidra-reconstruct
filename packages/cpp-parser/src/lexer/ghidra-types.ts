@@ -106,6 +106,12 @@ export function getStandardEquivalent(ghidraType: string): string | null {
     // Floats
     'float10': 'long double',
     'float8': 'double',
+    // Ghidra's 2-byte float. No portable 2-byte C++ float exists (`_Float16` is
+    // not available on the i686-w64-mingw32 target), and every site that reaches
+    // the tree is a value-carrying artifact of a 16-bit return composed through
+    // a synthetic upper half - so it is spelled as the 2-byte integer it is
+    // standing in for, which compiles and keeps the low 16 bits.
+    'float2': 'uint16_t',
   };
 
   return mapping[ghidraType] || null;

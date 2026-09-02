@@ -12,6 +12,7 @@ import { normalizeQualifiedReference } from './namespace.js';
 import { namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 import { computeDeclarationClosure, renderClosureBlock, renderClosureDefinitionBlock, normalizeDataAddress, type ClosureResult, type ClosureStringContent } from './declaration-closure.js';
 import { allOnesSentinel, negativeBytePatternInUnsignedSlot, negativeInUnsignedSlot } from './sentinel-literal.js';
+import { enumTypedefLine } from './enum-width.js';
 import { addressLiteralFloor, ADDRESS_LITERAL_CEILING } from '@ghidra-mcp/cpp-parser';
 
 /**
@@ -3736,7 +3737,7 @@ export function orderForwardDeclarations(
 
 function emitFallbackForwardDecl(name: string): string {
   if (/^e[A-Z]/.test(name)) {
-    return `typedef int ${name};`;
+    return enumTypedefLine(name);
   }
   if (/^fn[A-Z]/.test(name) || /^fp[A-Z]/.test(name) || /Proc[A-Z]?$/.test(name) || /Callback$/.test(name) || /Handler$/.test(name)) {
     return `typedef void (*${name})();`;

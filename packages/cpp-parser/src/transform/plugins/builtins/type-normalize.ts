@@ -86,6 +86,8 @@ const WINDOWS_SCALAR_MAP: ReadonlyMap<string, string> = new Map([
 const GHIDRA_FLOAT_MAP: ReadonlyMap<string, string> = new Map([
   ['unkfloat1', 'float'],
   ['float10', 'long double'],
+  // 2-byte float: no portable C++ spelling, mapped to the 2-byte integer it carries.
+  ['float2', 'uint16_t'],
 ]);
 
 /** undefined[N] -> sized fallback (for non-auto contexts) */

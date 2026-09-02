@@ -36,7 +36,15 @@ export interface TypeExtractionOptions {
 interface GhidraDataTypeInfo {
   name: string;
   category: string;
-  length: number;
+  /**
+   * Java sends this as `size` (DataTypeInfo.size / DataTypeDetail.size, both
+   * `dt.getLength()`), not `length`. Reading the wrong key left EVERY extracted
+   * data type with `size: undefined` — which is why the snapshot on disk has no
+   * `size` on a single row and why a 2-byte enum reached codegen indistinguishable
+   * from a 4-byte one. `length` is kept as a fallback for an older daemon.
+   */
+  size?: number;
+  length?: number;
   description?: string;
   /** Java sends this as `type`, not `kind` */
   type: string;
@@ -281,7 +289,7 @@ function mapDataTypeInfo(info: GhidraDataTypeInfo): ExtractedDataType {
   const base: ExtractedDataType = {
     name: info.name,
     category: info.category,
-    size: info.length,
+    size: info.size ?? info.length,
     kind: mapDataTypeKind(info.type),
     description: info.description,
   };
@@ -313,7 +321,7 @@ function mapDataTypeDetail(detail: GhidraDataTypeDetail): ExtractedDataType {
   const base: ExtractedDataType = {
     name: detail.name,
     category: detail.category,
-    size: detail.length,
+    size: detail.size ?? detail.length,
     kind: mapDataTypeKind(detail.type),
     description: detail.description,
   };

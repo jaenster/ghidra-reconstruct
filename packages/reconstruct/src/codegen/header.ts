@@ -25,6 +25,7 @@ import { isGhidraGeneratedName, suggestBetterName, type FuncPtrTarget } from '@g
 import { isPlatformOrBuiltinType, isLibraryType, normalizeSignatureType, normalizeWideCharType, collapseFuncPtrTypedef, rootQualifyShadowedType, emittedParameterName, arrayRowReturn, WINDOWS_STRUCTS, platformDeclaredFunctionNames } from './platform-types.js';
 import { generateExternDeclaration, isFuncDefTypedefName, sanitizeSymbolName, orderForwardDeclarations, type ForwardDeclaration } from './globals-header.js';
 import { declarationHead, pointerConvention } from './calling-convention.js';
+import { enumTypedefLine } from './enum-width.js';
 
 /** normalizeSignatureType + fn-ptr-typedef double-indirection collapse, for
  *  emitting function parameter and return types ("fpFoo *" → "fpFoo"). */
@@ -1379,11 +1380,15 @@ export function generateEnumDeclaration(enumType: ExtractedEnum): string {
   const lines: string[] = [];
 
   // Emit as typedef + named constants instead of C++ enum.
-  // This ensures forward declarations (typedef int eXxx;) are always
+  // This ensures forward declarations (typedef <int> eXxx;) are always
   // compatible with the full definition (no enum/typedef tag mismatch).
   // Values go in a dedicated namespace to avoid collisions when multiple enums
   // share value names (e.g., eD2MonsterAnimMode::Death vs eD2PlayerAnimMode::Death).
-  lines.push(`typedef int ${enumType.name};`);
+  //
+  // The underlying integer is the width Ghidra models, not always `int`: an
+  // enum emitted 2 bytes too wide relays every struct that holds one and every
+  // array indexed through one, and nothing reports that. See enum-width.ts.
+  lines.push(enumTypedefLine(enumType.name, enumType));
 
   if (enumType.values.length > 0) {
     lines.push(`namespace ${enumType.name}_ns {`);
@@ -1843,9 +1848,11 @@ function addForwardDeclaration(
   // Skip types already fully defined via included headers
   if (alreadyDefined?.has(type)) return;
 
-  // Enum types: emit typedef int as forward declaration.
+  // Enum types: emit the typedef as forward declaration, at the same width the
+  // definition in d2_enums.h uses — two spellings of one typedef name in one TU
+  // is a redefinition error, so both sides go through enumTypedefLine.
   if (/^e[A-Z]/.test(type) || enumNames.has(type)) {
-    declarations.add(`typedef int ${type};`);
+    declarations.add(enumTypedefLine(type));
     return;
   }
 

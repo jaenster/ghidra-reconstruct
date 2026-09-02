@@ -137,7 +137,7 @@ export const GHIDRA_ARTIFACT_TYPES = new Set([
   'uint', 'ushort', 'ulong', 'ulonglong',
   'uchar',
   'longlong', 'int3', 'int5', 'int6', 'int7', 'uint3', 'uint5', 'uint6', 'uint7',
-  'unkfloat1', 'float10', 'unkbool1', 'pointer', 'Alignment',
+  'unkfloat1', 'float10', 'float2', 'unkbool1', 'pointer', 'Alignment',
   'string', 'TerminatedCString', 'string-utf8',
   'vtable', 'unicode', 'wchar16', 'pointer32', 'ImageBaseOffset32',
 ]);
@@ -1013,6 +1013,13 @@ export function generatePlatformHeader(
   lines.push('typedef int32_t sdword;');
   lines.push('typedef int64_t sqword;');
   lines.push('typedef long double float10;');
+  // Ghidra's 2-byte float. It reaches the tree only as a cast artifact, where a
+  // function that genuinely returns 16 bits (CheckCollision_Vector and friends,
+  // `MOV AX,0x27`) has its result recomposed from a synthetic upper half and cast
+  // back down. There is no portable 2-byte C++ float - `_Float16` needs SSE2 and a
+  // compiler that offers it, neither guaranteed on i686-w64-mingw32 - and half-float
+  // SEMANTICS are not what those sites need: they need the low 16 bits to survive.
+  lines.push('typedef uint16_t float2;');
   lines.push('typedef uint16_t wchar16;');
   lines.push('typedef uint16_t unicode;');
   lines.push('typedef uint8_t undefined;');
