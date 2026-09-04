@@ -78,12 +78,31 @@ interface Config {
   httpPort: number;
 }
 
+/**
+ * An environment variable that has no sensible default, with an error that says
+ * what to set rather than failing later on an empty path.
+ */
+function requireEnv(name: string): string {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(
+      `${name} is not set. The live daemon has no default for it: it is a deployment ` +
+      `fact, not something this package can guess. See recon/runs/start-live.sh.`,
+    );
+  }
+  return value;
+}
+
 function loadConfig(): Config {
   const projectDir = process.env.RECON_PROJECT_DIR
     ?? join(process.cwd(), 'project');
   return {
-    regenDir: process.env.D2_REGEN_DIR ?? join(process.env.HOME ?? '', 'code/re/diablo2/recon/diablo-2'),
-    modifiedDir: process.env.D2_MODIFIED_DIR ?? join(process.env.HOME ?? '', 'code/re/diablo2/recon/modified'),
+    // No defaults for these. This package ships in a public, target-neutral repo:
+    // baking one target's checkout paths in would be both wrong for every other
+    // caller and a quiet way to leak where someone's tree lives. The launcher that
+    // knows the target supplies them.
+    regenDir: requireEnv('D2_REGEN_DIR'),
+    modifiedDir: requireEnv('D2_MODIFIED_DIR'),
     daemonUrl: (process.env.GHIDRA_MCP_URL ?? 'http://localhost:8432').replace(/\/+$/, ''),
     // GHIDRA_MCP_TOKEN is what `connection.ts` and run-regen.sh already use, so
     // it is accepted as a fallback rather than making the operator export the
@@ -91,8 +110,9 @@ function loadConfig(): Config {
     token: process.env.GHIDRA_MCP_API_TOKEN ?? process.env.GHIDRA_MCP_TOKEN,
     sessionId: process.env.GHIDRA_SESSION,
     projectDir,
-    projectPath: process.env.GHIDRA_PROJECT_PATH ?? 'ghidra://ghidra.typeguru.nl:13100/Diablo2Lod',
-    programPath: process.env.GHIDRA_PROGRAM_PATH ?? '/windows/lod/1.14d/Game.exe',
+    // Likewise: a server URL and a program path are deployment facts, not defaults.
+    projectPath: requireEnv('GHIDRA_PROJECT_PATH'),
+    programPath: process.env.GHIDRA_PROGRAM_PATH ?? '',
     projectName: process.env.GHIDRA_PROJECT_NAME ?? 'Reconstructed',
     // The daemon keeps its OWN snapshot, seeded from the batch one at startup and
     // owned by it thereafter.
