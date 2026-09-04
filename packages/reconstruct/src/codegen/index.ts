@@ -29,6 +29,7 @@ export {
   isSwitchTableSymbol,
 } from './globals-header.js';
 
+import { isMainThread } from 'worker_threads';
 import * as fs from 'node:fs/promises';
 import * as nodeFs from 'node:fs';
 import * as path from 'node:path';
@@ -261,6 +262,12 @@ function loadUnitIdentCache(): void {
 
 function saveUnitIdentCache(): void {
   if (!unitIdentCachePath) return;
+  // Only the coordinator writes. Generation shards are worker_threads in this same
+  // process, so they inherit RECON_UNIT_IDENT_CACHE and would each replace the whole
+  // file with their own slice - the last one to finish wins and the next incremental
+  // run goes quietly stale. Shards ship their tallies back through
+  // ShardOutput.unitRecords instead, and the coordinator writes the merged map.
+  if (!isMainThread) return;
   try {
     nodeFs.writeFileSync(
       unitIdentCachePath,
@@ -356,6 +363,16 @@ export interface ShardOutput {
   bodyIdentifierFnCounts: [string, number][];
   arityMismatches: ArityMismatch[];
   initializerArityMismatches: number;
+  /**
+   * The per-unit tallies this shard produced.
+   *
+   * Incremental emission reads these back on the NEXT run to replay the three
+   * accumulators for units it did not parse. A shard holds only its own slice, so
+   * without shipping them the coordinator would write a cache describing one shard
+   * of the tree - and the next incremental run would silently drop the declarations
+   * every other shard justified. The same hole as the reuse path, one level up.
+   */
+  unitRecords: [string, UnitEmitRecord][];
 }
 
 export function takeShardOutput(state: GenerationState): ShardOutput {
@@ -369,6 +386,7 @@ export function takeShardOutput(state: GenerationState): ShardOutput {
     if (owned.has(path)) sourceMaps.push([path, map]);
   }
   return {
+    unitRecords: [...unitIdentifierCounts],
     files,
     sourceMaps,
     declaredNames: [...getDeclaredNames()],
@@ -412,6 +430,7 @@ export function mergeShardOutput(state: GenerationState, out: ShardOutput): void
   if (!state.context.bodyIdentifierFnCounts) state.context.bodyIdentifierFnCounts = new Map();
   const counts = state.context.bodyIdentifierFnCounts;
   for (const [name, n] of out.bodyIdentifierFnCounts) counts.set(name, (counts.get(name) ?? 0) + n);
+  for (const [unit, rec] of out.unitRecords ?? []) unitIdentifierCounts.set(unit, rec);
   state.extraArityMismatches.push(...out.arityMismatches);
   state.extraInitializerArityMismatches += out.initializerArityMismatches;
 }
