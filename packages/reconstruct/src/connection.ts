@@ -8,10 +8,17 @@
 import type { GhidraConnection } from './types.js';
 
 /**
- * Optional bearer auth for an OAuth-protected daemon. Reads GHIDRA_MCP_TOKEN.
+ * Optional bearer auth for an OAuth-protected daemon.
+ *
+ * Accepts either name. GHIDRA_MCP_API_TOKEN is what the live daemon's launcher and
+ * its handover tell you to export - it is the long-lived service token - while this
+ * module historically read only GHIDRA_MCP_TOKEN. Setting exactly what the docs said
+ * therefore produced an unauthenticated RPC and a bare `HTTP 401: Unauthorized` from
+ * a daemon that had just reported a healthy model, with nothing pointing at the
+ * variable name. Prefer the API token and fall back to the browser one.
  */
 function authHeaders(): Record<string, string> {
-  const tok = process.env.GHIDRA_MCP_TOKEN;
+  const tok = process.env.GHIDRA_MCP_API_TOKEN ?? process.env.GHIDRA_MCP_TOKEN;
   return tok ? { Authorization: `Bearer ${tok}` } : {};
 }
 
