@@ -328,6 +328,18 @@ export interface ResumeCheck {
 export async function verifyResume(
   sendCommand: <T>(command: string, params?: Record<string, unknown>) => Promise<T>,
   seq: number,
+  /**
+   * Does this daemon already hold a model on disk?
+   *
+   * `seq === 0` means two different things and only one of them is safe. A daemon
+   * with NO persisted model is genuinely starting fresh and reads the journal from
+   * the beginning. A daemon that HAS a model but sits at seq 0 cannot correlate that
+   * model with the journal at all - which is exactly what a worker restart produces,
+   * since the journal is rebuilt empty while `live-snapshot` survives on disk. It
+   * then resumes, trusts a stale model and emits an old program: observed 2026-09-04,
+   * committing "v892 at change seq 0" while Ghidra was at v894.
+   */
+  hasPersistedModel = false,
 ): Promise<ResumeCheck> {
   let result: { events?: Array<{ seq: number }>; head?: number };
   try {
@@ -347,7 +359,18 @@ export async function verifyResume(
   const events = result.events ?? [];
 
   if (seq === 0) {
-    return { resumable: true, reason: 'starting from the beginning of the journal', head };
+    if (!hasPersistedModel) {
+      return { resumable: true, reason: 'no persisted model; starting from the beginning of the journal', head };
+    }
+    return {
+      resumable: false,
+      reason:
+        `this daemon holds a persisted model but its sequence is 0, so nothing ties that ` +
+        `model to the journal now on offer (head ${head}). A worker restart rebuilds the ` +
+        `journal empty while the model survives on disk, and resuming here emits whatever ` +
+        `the model last knew`,
+      head,
+    };
   }
   if (head < seq) {
     return {

@@ -262,6 +262,9 @@ function loadUnitIdentCache(): void {
 
 function saveUnitIdentCache(): void {
   if (!unitIdentCachePath) return;
+  // An empty map here means the next incremental run has nothing to replay, which is
+  // the silent-staleness failure. Say so where it can be seen.
+  console.log(`[ident-cache] persisting ${unitIdentifierCounts.size} unit record(s) -> ${unitIdentCachePath}`);
   // Only the coordinator writes. Generation shards are worker_threads in this same
   // process, so they inherit RECON_UNIT_IDENT_CACHE and would each replace the whole
   // file with their own slice - the last one to finish wins and the next incremental
@@ -3559,7 +3562,21 @@ function generateFilesForFunctions(
     if (reusedImpl !== undefined) {
       // Replay what parsing this unit would have contributed.
       const recorded = unitIdentifierCounts.get(unitName);
-      if (recorded) {
+      if (!recorded) {
+        // Reusing a unit whose contribution cannot be replayed GUARANTEES a wrong
+        // aggregate: globals.h/globals.cpp are a link step over three accumulators
+        // that a reused unit never touches. Silently skipping the replay is how a
+        // 0-unit incremental run deleted 1216 lines of globals.h and 195 of
+        // globals.cpp, committed it, and merged it clean. Refuse instead - a slow
+        // full emission is always better than a tree that is wrong and compiles.
+        throw new Error(
+          `incremental emission: reusing unit '${unitName}' but its identifier record is ` +
+          `missing from ${unitIdentCachePath ?? '(no cache configured)'}. The cache holds ` +
+          `${unitIdentifierCounts.size} unit(s). Re-emit everything instead of reusing text ` +
+          `whose contribution to globals.h/globals.cpp cannot be replayed.`
+        );
+      }
+      {
         if (!context.bodyIdentifierFnCounts) context.bodyIdentifierFnCounts = new Map();
         const counts = context.bodyIdentifierFnCounts;
         for (const [name, n] of recorded.idents) counts.set(name, (counts.get(name) ?? 0) + n);

@@ -265,6 +265,7 @@ export class LiveLoop {
     const resume = await verifyResume(
       (cmd, params) => this.connection.sendCommand(cmd, params),
       state.seq,
+      this.hashCache !== null,
     );
     this.log(`resume check: ${resume.reason}`);
     if (!resume.resumable) {
