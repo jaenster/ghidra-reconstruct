@@ -1,5 +1,7 @@
 # ghidra-reconstruct
 
+[![Discord](https://img.shields.io/badge/Discord-join%20the%20chat-5865F2?logo=discord&logoColor=white)](https://discord.gg/MHK2Dg9)
+
 Turn a Ghidra decompilation into a clean, namespaced, **recompilable** C++ source tree.
 
 Ghidra's decompiler produces correct-but-ugly pseudo-C: `CONCAT44`, `undefined4`,
@@ -14,6 +16,8 @@ addresses).
 
 It was written against a 32-bit MSVC binary (Diablo II `Game.exe`) but the engine is
 binary-agnostic.
+
+If it's useful to you, you can [sponsor the work](https://github.com/sponsors/jaenster).
 
 ---
 
