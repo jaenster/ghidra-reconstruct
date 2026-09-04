@@ -18,7 +18,8 @@
  * loop STOPS on any evidence of a gap and waits for an operator.
  */
 
-import { join, relative } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { join, relative, dirname } from 'node:path';
 import { readFile, readdir, mkdtemp, rm, cp } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -444,9 +445,19 @@ export class LiveLoop {
     await this.guardBuild();
 
     this.phase = 'selecting';
+    const identCachePath = join(dirname(this.cfg.snapshotDir), 'unit-identifiers.json');
+    let identCacheEmpty = true;
+    try {
+      const raw = readFileSync(identCachePath, 'utf-8');
+      identCacheEmpty = Object.keys(JSON.parse(raw) as Record<string, unknown>).length === 0;
+    } catch {
+      identCacheEmpty = true;   // missing or unreadable: no records to replay
+    }
+
     const selection = selectDirtyUnits({
       buildInfo: await loadBuildInfo(join(this.cfg.projectDir, '.ghidra-mcp', 'buildinfo.json')),
       previous: this.hashCache,
+      identCacheEmpty,
       functions: this.model.primary.functions,
       dataTypes: this.model.primary.dataTypes,
       globals: this.model.primary.globals,
@@ -463,7 +474,13 @@ export class LiveLoop {
       log: m => this.log(m),
       emitUnits: selection.units,
       reuseDir: this.cfg.stagingDir,
-      identCachePath: join(this.cfg.snapshotDir, 'unit-identifiers.json'),
+      // BESIDE the snapshot directory, never inside it - for the same reason
+      // stateFilePath() is: writeSnapshot swaps the whole directory out by rename,
+      // so anything within it is destroyed on every save. Kept inside, the per-unit
+      // identifier cache was wiped immediately before each generation, so every
+      // incremental run loaded 0 records and replayed nothing. That is what deleted
+      // 1216 lines of globals.h and 195 of globals.cpp and still committed clean.
+      identCachePath,
     });
 
     this.lastRebuild = {

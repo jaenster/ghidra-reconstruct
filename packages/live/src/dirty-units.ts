@@ -192,6 +192,11 @@ export function computeHashCache(inputs: {
 }
 
 export interface SelectInputs {
+  /**
+   * True when the per-unit identifier cache is missing or empty. Reused units cannot
+   * replay their contribution without it, so reuse is not available this run.
+   */
+  identCacheEmpty?: boolean;
   buildInfo: BuildInfoFile | null;
   /** null on the first run after a cold start: everything is re-emitted. */
   previous: SymbolHashCache | null;
@@ -220,6 +225,19 @@ export function selectDirtyUnits(inputs: SelectInputs): DirtySelection {
     return {
       units: null,
       reason: 'no hash cache from a previous generation; re-emitting everything',
+      changedSymbols: [],
+      expandedTypes: [],
+    };
+  }
+
+  // Reuse needs BOTH a hash cache (which units moved) and the per-unit identifier
+  // records (what a reused unit contributes to globals.h/globals.cpp). Without the
+  // records the generator refuses outright, so decide it here and re-emit instead:
+  // a slow full pass is the correct answer, and failing the queue is not.
+  if (inputs.identCacheEmpty) {
+    return {
+      units: null,
+      reason: 'no per-unit identifier records to replay; re-emitting everything',
       changedSymbols: [],
       expandedTypes: [],
     };
