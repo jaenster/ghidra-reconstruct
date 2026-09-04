@@ -30,6 +30,7 @@ export {
 } from './globals-header.js';
 
 import * as fs from 'node:fs/promises';
+import * as nodeFs from 'node:fs';
 import * as path from 'node:path';
 
 import type {
@@ -190,6 +191,109 @@ function shardOwnsNext(cost: number): boolean {
   }
   shardLoads[best] += cost;
   return best === activeShard.index;
+}
+
+/**
+ * Incremental emission: which units must be re-emitted, and where the previous
+ * output for the others can be read from.
+ *
+ * Null means "emit everything", which is what a full run does and stays the
+ * default. Configured per run alongside the shard state, and for the same reason:
+ * both decide, per unit, whether this process produces that unit's bytes.
+ */
+/**
+ * Defaults come from the environment so that an incremental run can be driven
+ * through the ORDINARY entry point (`run.ts --codegen-only`) rather than a second
+ * one that rebuilds its options. run.ts carries a long `excludePatterns` list that
+ * reaches codegen on this path; a caller that assembled its own options would
+ * silently emit a different tree the first time that list changed.
+ *
+ * RECON_REUSE_DIR alone means "reuse every unit" - the degenerate incremental run,
+ * which is what the oracle uses to prove reuse changes nothing.
+ */
+let emitUnitsFilter: Set<string> | null =
+  process.env.RECON_REUSE_DIR
+    ? new Set((process.env.RECON_EMIT_UNITS ?? '').split(',').filter(Boolean))
+    : null;
+let reuseImplDir: string | null = process.env.RECON_REUSE_DIR ?? null;
+
+/**
+ * Per-unit identifier tallies, carried across incremental runs.
+ *
+ * The declaration closure is driven by `bodyIdentifierFnCounts` - how many function
+ * bodies name each identifier - and that map is filled while bodies are PARSED. A
+ * reused unit is never parsed, so without this its identifiers vanish from the
+ * tally and the closure silently drops the declarations they justified: 1227 lines
+ * of globals.h and 195 of globals.cpp, with nothing failing to say so.
+ *
+ * The shard path has the same hole and plugs it the same way, by shipping the
+ * counts between processes (`takeShardOutput` / `mergeShardOutput`). Here they are
+ * shipped between RUNS instead, through a file the daemon points at.
+ */
+interface UnitEmitRecord {
+  /** identifier -> how many bodies in this unit name it */
+  idents: [string, number][];
+  /** names this unit's implementation emits a declaration for */
+  declared: string[];
+  /**
+   * Symbols this unit's DATA INITIALIZERS name by address. A third accumulator,
+   * filled as initializer text is emitted, and the closure merges it with the body
+   * tally. Miss it and a global referenced only from another global's initializer
+   * looks unreferenced, which flips it between claimed and orphaned.
+   */
+  initRefs: string[];
+}
+const unitIdentifierCounts = new Map<string, UnitEmitRecord>();
+let unitIdentCachePath: string | null = process.env.RECON_UNIT_IDENT_CACHE ?? null;
+
+function loadUnitIdentCache(): void {
+  if (!unitIdentCachePath) return;
+  try {
+    const raw = nodeFs.readFileSync(unitIdentCachePath, 'utf-8');
+    for (const [unit, rec] of Object.entries(JSON.parse(raw) as Record<string, UnitEmitRecord>)) {
+      unitIdentifierCounts.set(unit, rec);
+    }
+  } catch {
+    // No cache yet, or unreadable. Every unit is then emitted the slow way, which
+    // is correct; a stale or partial cache is the only outcome worth avoiding.
+  }
+}
+
+function saveUnitIdentCache(): void {
+  if (!unitIdentCachePath) return;
+  try {
+    nodeFs.writeFileSync(
+      unitIdentCachePath,
+      JSON.stringify(Object.fromEntries(unitIdentifierCounts)),
+      'utf-8'
+    );
+  } catch {
+    // A cache that cannot be written costs the next run its speed, nothing else.
+  }
+}
+
+export function configureIncrementalEmit(units: Iterable<string> | null, previousDir: string | null): void {
+  emitUnitsFilter = units ? new Set(units) : null;
+  reuseImplDir = previousDir ?? null;
+}
+
+/**
+ * The previous implementation text for a unit that does not need re-emitting, or
+ * undefined when it must be generated.
+ *
+ * Falls back to generating whenever anything is off - no filter configured, the
+ * unit is in the affected set, no previous directory, or the file is not on disk.
+ * A missing previous file means a slower rebuild; guessing at its contents would
+ * mean a wrong tree, and the two are not comparable.
+ */
+function reuseUnitImpl(unitName: string, implPath: string): string | undefined {
+  if (!emitUnitsFilter || !reuseImplDir) return undefined;
+  if (emitUnitsFilter.has(unitName)) return undefined;
+  try {
+    return nodeFs.readFileSync(path.join(reuseImplDir, implPath), 'utf-8');
+  } catch {
+    return undefined;
+  }
 }
 
 /** Cost proxy for one unit: the decompiled bytes its bodies carry. */
@@ -406,9 +510,29 @@ export function generateProject(
   programInfo?: ProgramInfo,
   strings?: ExtractedString[]
 ): ReconstructedProject {
-  return generateProjectStage2(
-    generateProjectStage1(name, functions, classes, dataTypes, globals, namespaces, options, programInfo, strings)
+  // RECON_GEN_TIMING splits generation into its two halves. The split matters because
+  // stage 1 is whole-program setup that no incremental scheme can avoid re-running, while
+  // stage 2 is per-unit emission that one can. Which of the two dominates decides whether
+  // re-emitting only the affected units is worth building at all, so it is measured rather
+  // than assumed.
+  const timing = process.env.RECON_GEN_TIMING === '1';
+  if (!timing) {
+    return generateProjectStage2(
+      generateProjectStage1(name, functions, classes, dataTypes, globals, namespaces, options, programInfo, strings)
+    );
+  }
+
+  const t0 = Date.now();
+  const state = generateProjectStage1(name, functions, classes, dataTypes, globals, namespaces, options, programInfo, strings);
+  const t1 = Date.now();
+  const project = generateProjectStage2(state);
+  const t2 = Date.now();
+  const s = (ms: number) => (ms / 1000).toFixed(1);
+  console.log(
+    `  [gen-timing] stage1=${s(t1 - t0)}s stage2=${s(t2 - t1)}s ` +
+    `total=${s(t2 - t0)}s files=${project.files.size}`
   );
+  return project;
 }
 
 export function generateProjectStage1(
@@ -3154,6 +3278,7 @@ function generateFilesForFunctions(
   if (GEN_TIMING) genAdd('units/setup', Date.now() - gffT0);
 
   // ── Pass 2: Generate files using graph-resolved includes ──────────
+  loadUnitIdentCache();
   const unitsT0 = Date.now();
   for (const [unitName, unitFunctions] of organized) {
     const namespace = namespaces.find(ns => ns.name === unitName);
@@ -3252,7 +3377,45 @@ function generateFilesForFunctions(
       shardRecordClaims(context.fileLocalGlobals);
     }
 
-    let implContent = genMark('units/impl', () => generateImplementation(
+    // Re-emitting a unit whose inputs did not move produces the bytes it produced
+    // last time, and costs ~1.07s to prove it: `units/impl` is 515s of a 547s
+    // generation, spread over 482 units. Reusing the previous file instead is what
+    // makes an incremental rebuild cost seconds rather than ten minutes.
+    //
+    // The reuse point is here and nowhere earlier ON PURPOSE. Everything above -
+    // the header, `markGlobalsClaimed`, `shardRecordClaims` - still runs for a
+    // reused unit, because a unit that does not claim its file-local globals hands
+    // them back to globals.h as orphans, which silently adds definitions nobody
+    // asked for. Skipping the emission is safe; skipping the bookkeeping is not.
+    //
+    // The dep-scan below then runs over the reused text, so its include set is
+    // derived the same way it was derived when the text was written.
+    const reusedImpl = reuseUnitImpl(unitName, implPath);
+    // Snapshot the tally before emitting so this unit's contribution can be
+    // isolated: the map is cumulative across units, so the delta is the only way
+    // to say which identifiers came from here.
+    const identsBefore = reusedImpl === undefined && unitIdentCachePath
+      ? new Map(context.bodyIdentifierFnCounts ?? [])
+      : null;
+    const declaredBefore = identsBefore ? new Set(getDeclaredNames()) : null;
+    const initRefsBefore = identsBefore ? new Set(initializerAddressReferences()) : null;
+    if (reusedImpl !== undefined) {
+      // Replay what parsing this unit would have contributed.
+      const recorded = unitIdentifierCounts.get(unitName);
+      if (recorded) {
+        if (!context.bodyIdentifierFnCounts) context.bodyIdentifierFnCounts = new Map();
+        const counts = context.bodyIdentifierFnCounts;
+        for (const [name, n] of recorded.idents) counts.set(name, (counts.get(name) ?? 0) + n);
+        // The declarations this unit's .cpp emits. Without them the closure sees
+        // every file-local static as referenced-but-undeclared and adds a second,
+        // conflicting extern to globals.h.
+        for (const name of recorded.declared) recordDeclaredName(name);
+        addInitializerAddressReferences(recorded.initRefs);
+      }
+    }
+    let implContent = reusedImpl !== undefined
+      ? reusedImpl
+      : genMark('units/impl', () => generateImplementation(
       unitName,
       unitFunctions,
       classInfo,
@@ -3281,16 +3444,27 @@ function generateFilesForFunctions(
     if (implColocatedGlobals.length > 0) {
       markGlobalsClaimed(implColocatedGlobals);
       shardRecordClaims(implColocatedGlobals);
-      const globalsDefSection = generateColocatedGlobalsImpl(
-        implColocatedGlobals,
-        options
-      );
-      implContent = implContent + '\n\n' + globalsDefSection;
+      // Reused text already carries this section from the run that wrote it;
+      // appending it again would define every co-located global twice.
+      if (reusedImpl === undefined) {
+        const globalsDefSection = generateColocatedGlobalsImpl(
+          implColocatedGlobals,
+          options
+        );
+        implContent = implContent + '\n\n' + globalsDefSection;
+      }
     }
 
     // Body dep feedback: scan generated impl for type/function references not yet included
     const depScanT0 = Date.now();
-    {
+    // A reused unit's text already carries every include this scan would find:
+    // the same scan put them there on the run that wrote it, and the insertion is
+    // skipped below for exactly that reason. Running it anyway computes a result
+    // that is then discarded - 20.6s of a 33.4s incremental generation, which is
+    // most of what an incremental rebuild costs when nothing needs re-emitting.
+    // Everything the block touches is local to it, so skipping it changes nothing
+    // else.
+    if (reusedImpl === undefined) {
       const existingIncludes = new Set(implIncludes);
       existingIncludes.add(headerPath);
       const newIncludes: string[] = [];
@@ -3432,6 +3606,28 @@ function generateFilesForFunctions(
     }
     if (GEN_TIMING) genAdd('units/dep-scan', Date.now() - depScanT0);
 
+    // Everything this unit contributes to the three cross-unit accumulators is in
+    // by now - bodies, the co-located globals block, and their initializers. Record
+    // the delta here so a later run that reuses this unit's text can replay exactly
+    // what emitting it would have contributed.
+    if (identsBefore && declaredBefore && initRefsBefore) {
+      const after = context.bodyIdentifierFnCounts ?? new Map();
+      const idents: [string, number][] = [];
+      for (const [name, n] of after) {
+        const d = n - (identsBefore.get(name) ?? 0);
+        if (d > 0) idents.push([name, d]);
+      }
+      const declared: string[] = [];
+      for (const name of getDeclaredNames()) {
+        if (!declaredBefore.has(name)) declared.push(name);
+      }
+      const initRefs: string[] = [];
+      for (const name of initializerAddressReferences()) {
+        if (!initRefsBefore.has(name)) initRefs.push(name);
+      }
+      unitIdentifierCounts.set(unitName, { idents, declared, initRefs });
+    }
+
     files.set(implPath, {
       path: implPath,
       content: implContent,
@@ -3453,6 +3649,7 @@ function generateFilesForFunctions(
   }
 
   if (GEN_TIMING) genAdd('units/loop-total', Date.now() - unitsT0);
+  saveUnitIdentCache();
 
   // ── Pass 3: Generate type-only headers (if any) ────────────────────
   const extraT0 = Date.now();

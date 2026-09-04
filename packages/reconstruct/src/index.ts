@@ -1092,6 +1092,138 @@ interface SecondarySourceOptions {
  * Merge functions and globals from additional (secondary) Ghidra projects
  * into the primary extraction result, tagging them with platform/ifdef.
  */
+/**
+ * Resolve a secondary-binary function to the primary function that is the same code, or
+ * null when the secondary is the only place it exists.
+ *
+ * Split out of the merge so a caller that already holds a cached secondary extraction can
+ * redo the merge without opening a connection. The live reconstruction daemon rebuilds its
+ * model on every change; re-reaching the Ghidra daemon for a binary that has not moved
+ * would put a network round trip in the middle of an otherwise in-memory rebuild.
+ */
+export function buildPrimaryMatcher(
+  extraction: ExtractionResult,
+  crossPlatformLinks?: Array<{ mac: string; win: string }>
+): (func: ExtractedFunction) => ExtractedFunction | null {
+  // Normalize address to bare hex (strip "Program.ram:" prefix and "0x" prefix)
+  const bareAddr = (addr: string) => {
+    const hex = addr.includes(':') ? addr.slice(addr.lastIndexOf(':') + 1) : addr;
+    return hex.replace(/^0x/i, '').toLowerCase();
+  };
+
+  const primaryByQualified = new Map<string, ExtractedFunction>();
+  const primaryByAddress = new Map<string, ExtractedFunction>();
+  const primaryByBareName = new Map<string, ExtractedFunction[]>();
+  for (const f of extraction.functions) {
+    const qname = f.namespace ? `${f.namespace}::${f.name}` : f.name;
+    primaryByQualified.set(qname, f);
+    primaryByAddress.set(bareAddr(f.address), f);
+    if (!primaryByBareName.has(f.name)) primaryByBareName.set(f.name, []);
+    primaryByBareName.get(f.name)!.push(f);
+  }
+
+  const macToWinLink = new Map<string, string>();
+  for (const link of crossPlatformLinks ?? []) {
+    macToWinLink.set(bareAddr(link.mac), bareAddr(link.win));
+  }
+
+  // Tried in order: qualified name, unique bare name across namespaces, then an explicit
+  // crossPlatformLinks entry (same function, renamed).
+  return (func: ExtractedFunction): ExtractedFunction | null => {
+    const qname = func.namespace ? `${func.namespace}::${func.name}` : func.name;
+    const byQualified = primaryByQualified.get(qname);
+    if (byQualified) return byQualified;
+
+    const bareMatches = primaryByBareName.get(func.name);
+    if (bareMatches && bareMatches.length === 1) return bareMatches[0];
+
+    const linkedWinAddr = macToWinLink.get(bareAddr(func.address));
+    return (linkedWinAddr ? primaryByAddress.get(linkedWinAddr) : undefined) ?? null;
+  };
+}
+
+/**
+ * Fold a secondary-binary extraction into the primary one. Pure: it does no I/O and takes
+ * the secondary as data, so the same merge runs from a live extraction or from the disk
+ * cache. Mutates `extraction` in place, as the batch pipeline always has.
+ */
+export function mergeSecondaryPure(
+  extraction: ExtractionResult,
+  secondary: { functions: ExtractedFunction[]; globals: ExtractionResult['globals']; namespaces: ExtractionResult['namespaces']; dataTypes: ExtractionResult['dataTypes'] },
+  source: AdditionalSource,
+  ifdef: string,
+  matchPrimary: (func: ExtractedFunction) => ExtractedFunction | null,
+  warnings: string[]
+): void {
+      // Filter out unnamed FUN_ functions
+      const namedFunctions = secondary.functions.filter(
+        f => !f.name.startsWith('FUN_')
+      );
+
+      let macOnlyCount = 0;
+      let sharedCount = 0;
+
+      for (const func of namedFunctions) {
+        const primaryMatch = matchPrimary(func);
+        if (primaryMatch) {
+          // Shared function: annotate primary with the secondary address
+          // (no body duplication — this is the cross-platform anchor).
+          primaryMatch.crossPlatformAddress = { address: func.address, platform: source.platform };
+          sharedCount++;
+        } else {
+          // Source-only function: tag with ifdef and add to extraction
+          func.platform = source.platform;
+          func.ifdef = ifdef;
+          extraction.functions.push(func);
+          macOnlyCount++;
+        }
+      }
+
+      // Merge mac-only globals
+      const namedGlobals = secondary.globals.filter(
+        g => !g.name.startsWith('DAT_')
+      );
+      const primaryGlobalNames = new Set(extraction.globals.map(g =>
+        g.namespace ? `${g.namespace}::${g.name}` : g.name
+      ));
+      let macOnlyGlobals = 0;
+      for (const global of namedGlobals) {
+        const qname = global.namespace ? `${global.namespace}::${global.name}` : global.name;
+        if (!primaryGlobalNames.has(qname)) {
+          global.platform = source.platform;
+          global.ifdef = ifdef;
+          extraction.globals.push(global);
+          macOnlyGlobals++;
+        }
+      }
+
+      // Merge mac-only namespaces
+      const primaryNsNames = new Set(extraction.namespaces.map(n => n.fullPath));
+      for (const ns of secondary.namespaces) {
+        if (!primaryNsNames.has(ns.fullPath)) {
+          extraction.namespaces.push(ns);
+        }
+      }
+
+      // Merge mac-only data types
+      const existingTypes = new Set(
+        extraction.dataTypes.map(dt => `${dt.category}::${dt.name}`)
+      );
+      for (const dt of secondary.dataTypes) {
+        const key = `${dt.category}::${dt.name}`;
+        if (!existingTypes.has(key)) {
+          dt.platform = source.platform;
+          dt.ifdef = ifdef;
+          extraction.dataTypes.push(dt);
+          existingTypes.add(key);
+        }
+      }
+
+      warnings.push(
+        `Merged ${macOnlyCount} mac-only functions, ${sharedCount} cross-ref annotations, ${macOnlyGlobals} mac-only globals from ${source.platform} (all-named mode)`
+      );
+}
+
 async function mergeAdditionalSources(
   extraction: ExtractionResult,
   sources: AdditionalSource[],
@@ -1116,57 +1248,7 @@ async function mergeAdditionalSources(
         // decompiling those was pure waste: 8,221 of the mac binary's 11,379
         // bodies were thrown away on every run.
 
-        // Normalize address to bare hex (strip "Program.ram:" prefix and "0x" prefix)
-        const bareAddr = (addr: string) => {
-          const hex = addr.includes(':') ? addr.slice(addr.lastIndexOf(':') + 1) : addr;
-          return hex.replace(/^0x/i, '').toLowerCase();
-        };
-
-        // Build qualified name → primary function lookup
-        const primaryByQualified = new Map<string, ExtractedFunction>();
-        for (const f of extraction.functions) {
-          const qname = f.namespace ? `${f.namespace}::${f.name}` : f.name;
-          primaryByQualified.set(qname, f);
-        }
-
-        // Also build address → primary function lookup for crossPlatformLinks
-        const primaryByAddress = new Map<string, ExtractedFunction>();
-        for (const f of extraction.functions) {
-          primaryByAddress.set(bareAddr(f.address), f);
-        }
-
-        // Build bare name → primary functions lookup (for cross-namespace matching)
-        const primaryByBareName = new Map<string, ExtractedFunction[]>();
-        for (const f of extraction.functions) {
-          if (!primaryByBareName.has(f.name)) primaryByBareName.set(f.name, []);
-          primaryByBareName.get(f.name)!.push(f);
-        }
-
-        // Build mac address → win address from crossPlatformLinks
-        const macToWinLink = new Map<string, string>();
-        if (opts.crossPlatformLinks) {
-          for (const link of opts.crossPlatformLinks) {
-            macToWinLink.set(bareAddr(link.mac), bareAddr(link.win));
-          }
-        }
-
-        /**
-         * The primary function this secondary one is the same code as, or null
-         * when the secondary binary is the only place it exists. Tried in order:
-         * qualified name, unique bare name across namespaces, then an explicit
-         * crossPlatformLinks entry (same function, renamed).
-         */
-        const matchPrimary = (func: ExtractedFunction): ExtractedFunction | null => {
-          const qname = func.namespace ? `${func.namespace}::${func.name}` : func.name;
-          const byQualified = primaryByQualified.get(qname);
-          if (byQualified) return byQualified;
-
-          const bareMatches = primaryByBareName.get(func.name);
-          if (bareMatches && bareMatches.length === 1) return bareMatches[0];
-
-          const linkedWinAddr = macToWinLink.get(bareAddr(func.address));
-          return (linkedWinAddr ? primaryByAddress.get(linkedWinAddr) : undefined) ?? null;
-        };
+        const matchPrimary = buildPrimaryMatcher(extraction, opts.crossPlatformLinks);
 
         /** Only a source-only function's body survives the merge. */
         const needsBody = (func: ExtractedFunction): boolean =>
@@ -1180,73 +1262,7 @@ async function mergeAdditionalSources(
           warnings
         );
 
-        // Filter out unnamed FUN_ functions
-        const namedFunctions = secondary.functions.filter(
-          f => !f.name.startsWith('FUN_')
-        );
-
-        let macOnlyCount = 0;
-        let sharedCount = 0;
-
-        for (const func of namedFunctions) {
-          const primaryMatch = matchPrimary(func);
-          if (primaryMatch) {
-            // Shared function: annotate primary with the secondary address
-            // (no body duplication — this is the cross-platform anchor).
-            primaryMatch.crossPlatformAddress = { address: func.address, platform: source.platform };
-            sharedCount++;
-          } else {
-            // Source-only function: tag with ifdef and add to extraction
-            func.platform = source.platform;
-            func.ifdef = ifdef;
-            extraction.functions.push(func);
-            macOnlyCount++;
-          }
-        }
-
-        // Merge mac-only globals
-        const namedGlobals = secondary.globals.filter(
-          g => !g.name.startsWith('DAT_')
-        );
-        const primaryGlobalNames = new Set(extraction.globals.map(g =>
-          g.namespace ? `${g.namespace}::${g.name}` : g.name
-        ));
-        let macOnlyGlobals = 0;
-        for (const global of namedGlobals) {
-          const qname = global.namespace ? `${global.namespace}::${global.name}` : global.name;
-          if (!primaryGlobalNames.has(qname)) {
-            global.platform = source.platform;
-            global.ifdef = ifdef;
-            extraction.globals.push(global);
-            macOnlyGlobals++;
-          }
-        }
-
-        // Merge mac-only namespaces
-        const primaryNsNames = new Set(extraction.namespaces.map(n => n.fullPath));
-        for (const ns of secondary.namespaces) {
-          if (!primaryNsNames.has(ns.fullPath)) {
-            extraction.namespaces.push(ns);
-          }
-        }
-
-        // Merge mac-only data types
-        const existingTypes = new Set(
-          extraction.dataTypes.map(dt => `${dt.category}::${dt.name}`)
-        );
-        for (const dt of secondary.dataTypes) {
-          const key = `${dt.category}::${dt.name}`;
-          if (!existingTypes.has(key)) {
-            dt.platform = source.platform;
-            dt.ifdef = ifdef;
-            extraction.dataTypes.push(dt);
-            existingTypes.add(key);
-          }
-        }
-
-        warnings.push(
-          `Merged ${macOnlyCount} mac-only functions, ${sharedCount} cross-ref annotations, ${macOnlyGlobals} mac-only globals from ${source.platform} (all-named mode)`
-        );
+        mergeSecondaryPure(extraction, secondary, source, ifdef, matchPrimary, warnings);
       } else {
         // Legacy mode: extract specific namespaces
         for (const ns of namespaces!) {

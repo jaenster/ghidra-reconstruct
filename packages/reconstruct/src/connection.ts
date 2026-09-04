@@ -208,6 +208,16 @@ export async function createConnection(
   projectPath: string,
   daemonUrl = 'http://localhost:8432',
   programPath?: string,
+  /**
+   * Attach to a session that already exists instead of resolving one by program
+   * path.
+   *
+   * Resolution by path always ends in creating a session when it finds no match,
+   * and spawning a worker for a large program is expensive and disruptive on a
+   * shared daemon - it is not something a long-lived client should do implicitly.
+   * A caller that already knows which session it wants says so here.
+   */
+  existingSessionId?: string,
 ): Promise<GhidraConnection> {
   // Check daemon is reachable
   try {
@@ -221,9 +231,25 @@ export async function createConnection(
   // List sessions and find a matching one
   const sessions = await rpcCall<DaemonSession[]>(daemonUrl, 'list_sessions', {});
 
-  let sessionId = sessions.find(
-    s => s.programPath === programPath && s.status === 'ready'
-  )?.id;
+  let sessionId: string | undefined;
+  if (existingSessionId) {
+    const named = sessions.find(s => s.id === existingSessionId);
+    if (!named) {
+      throw new Error(
+        `Session ${existingSessionId} does not exist on ${daemonUrl}. ` +
+        `Available: ${sessions.map(s => `${s.id}(${s.status})`).join(', ') || 'none'}`
+      );
+    }
+    if (named.status !== 'ready') {
+      throw new Error(`Session ${existingSessionId} is '${named.status}', not ready`);
+    }
+    sessionId = named.id;
+    console.log(`Attached to session ${sessionId}`);
+  } else {
+    sessionId = sessions.find(
+      s => s.programPath === programPath && s.status === 'ready'
+    )?.id;
+  }
 
   // Create session if not found
   if (!sessionId) {
