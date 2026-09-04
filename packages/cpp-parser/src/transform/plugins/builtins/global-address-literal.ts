@@ -34,7 +34,13 @@
  *  2. `v` falls strictly inside `[address, address + size)` of exactly ONE
  *     global → `((char*)&name + n)`. Sizes come from the extraction, never from
  *     the gap to the next symbol — an inferred extent would silently widen a
- *     global and swallow a neighbour's base.
+ *     global and swallow a neighbour's base. A global no wider than a machine
+ *     word that is not a declared ARRAY has no interior at all: see
+ *     `hasAddressableInterior`. (Extents that OVERLAP a later symbol's base are
+ *     shortened before they reach here, by `clampExtentsAtNeighbouringBases` in
+ *     the table builder — that is the mirror of the same rule and the only
+ *     correction that is safe without knowing which size is right, because it
+ *     can only shrink.)
  *  3. Neither matched, and `v`'s high bit is set → retry rules 1 and 2 against
  *     `~v`, and wrap the hit as `~(uintptr_t)<form>`.
  *
@@ -89,6 +95,21 @@
  * arithmetic on an address at all: the emitter's `-7373669` is how a
  * top-bit-set word prints, not a subtraction anyone wrote.
  *
+ * **A byte cursor minus a literal is the other.** `pszNameSrc - 0x779b6a` has
+ * the evidence the blanket withdrawal assumes is missing: a mask is not
+ * subtracted from a `char*`. Where the left operand is a pointer to a ONE-BYTE
+ * object — declared so in this unit, or cast to one — the literal is an
+ * address, the stride is one, and the difference is a byte count. The whole
+ * expression is then cast back to `char*`, because `p - <literal>` yields a
+ * pointer and `p - <anchor>` yields a `ptrdiff_t`, and the code around it was
+ * written against the first. Anything but `-`, anything but the literal on the
+ * right, and any cursor whose pointee is wider than a byte is refused: at a
+ * stride of four the same respelling would silently divide the offset by four.
+ * See `byteDisplacement`.
+ *
+ * **A literal shaped like a mask is not an address.** One set bit, or one bit
+ * short of a power of two, whatever it collides with — see `isMaskShaped`.
+ *
  * **A compound assignment is arithmetic.** `x |= 0x800000` reads an operand,
  * combines it and stores the result, which is the binary operator with the store
  * folded in; `0x800000` there is a flag bit that happens to collide with a
@@ -132,6 +153,7 @@ import type {
   ASTNode,
   AssignExpr,
   BinaryExpr,
+  BuiltinType,
   CStyleCastExpr,
   CallExpr,
   CommaExpr,
@@ -140,10 +162,15 @@ import type {
   Identifier,
   IntegerLiteralExpr,
   MemberExpr,
+  ParameterDecl,
   ParenExpr,
+  PointerType,
   QualifiedId,
+  QualifiedType,
   ReturnStmt,
   SubscriptExpr,
+  TypeNode,
+  TypedefType,
   UnaryExpr,
   VariableDecl,
 } from '../../../ast/nodes.js';
@@ -152,6 +179,24 @@ import type { TransformPlugin, PluginOptions } from '../types.js';
 
 // Operators where an integer literal is a numeric operand, not an address
 const ARITHMETIC_OPS = new Set(['+', '-', '*', '/', '%', '&', '|', '^', '<<', '>>']);
+
+/**
+ * The pointee spellings whose pointer arithmetic is BYTE arithmetic.
+ *
+ * The whole displacement rule below turns on this and nothing else. `p - k`
+ * advances by `k * sizeof(*p)`, so a literal that is an ADDRESS can only appear
+ * in that position when the stride is one — on an `int*` the same expression
+ * means four times the distance, and respelling the literal as a symbol would
+ * silently divide the offset by four. That is exactly the "worse than leaving
+ * it alone" failure, so the set is a whitelist of one-byte pointees and nothing
+ * is inferred: an unrecognised spelling is not a byte pointer.
+ *
+ * `void*` is deliberately absent. Its arithmetic is a GNU extension with a
+ * stride of one only by that extension's grace, and the tree is built strict.
+ */
+const BYTE_POINTEE_NAMES = new Set([
+  'uint8_t', 'int8_t', 'byte', 'undefined1', 'BYTE', 'CHAR', 'UCHAR', 'u_char',
+]);
 
 /**
  * The operators that make a literal a BOUND rather than an identity.
@@ -281,6 +326,58 @@ const ADDRESS_CEILING = 0x80000000;
  * runtime. `const`/`volatile` are dropped — they mean nothing on a prvalue and
  * only get in the cast's way.
  */
+/** The bare name a type designator carries, or null where it carries none. */
+function typeName(name: QualifiedId | Identifier): string | null {
+  if (name.kind === NodeKind.Identifier) return (name as Identifier).name;
+  const tail = (name as QualifiedId).name;
+  return tail.kind === NodeKind.Identifier ? (tail as Identifier).name : null;
+}
+
+/**
+ * How a pointee counts for pointer arithmetic: `char`, some other one-byte
+ * spelling, or not a byte at all.
+ *
+ * `char` is separated from the rest because it is the type the respelling is
+ * written in, so a `char*` operand needs no cast while a `byte*` one does — the
+ * two are distinct types and `byte* - char*` does not compile.
+ */
+type Pointee = 'char' | 'byte' | null;
+
+function pointeeClass(type: TypeNode | null | undefined): Pointee {
+  if (!type) return null;
+  switch (type.kind) {
+    case NodeKind.QualifiedType:
+      return pointeeClass((type as QualifiedType).type);
+    case NodeKind.BuiltinType: {
+      const builtin = type as BuiltinType;
+      // `short`/`long` on a `char` is not a thing, but a modifier list that
+      // carries one is not describing a byte and is refused rather than parsed.
+      if (builtin.modifiers.some(m => m === 'short' || m === 'long')) return null;
+      if (builtin.name !== 'char') return null;
+      // `signed char` and `unsigned char` are one byte but are NOT `char`.
+      return builtin.modifiers.some(m => m === 'signed' || m === 'unsigned')
+        ? 'byte'
+        : 'char';
+    }
+    case NodeKind.TypedefType: {
+      const named = typeName((type as TypedefType).name);
+      return named !== null && BYTE_POINTEE_NAMES.has(named) ? 'byte' : null;
+    }
+    default:
+      return null;
+  }
+}
+
+/** What `type` points at, for a pointer to a one-byte object; null otherwise. */
+function bytePointerClass(type: TypeNode | null | undefined): Pointee {
+  if (!type) return null;
+  if (type.kind === NodeKind.QualifiedType) {
+    return bytePointerClass((type as QualifiedType).type);
+  }
+  if (type.kind !== NodeKind.PointerType) return null;
+  return pointeeClass((type as PointerType).pointee);
+}
+
 function integralReturnTarget(spelling: string | undefined): string | null {
   if (typeof spelling !== 'string') return null;
   if (spelling.includes('*') || spelling.includes('&')) return null;
@@ -297,6 +394,8 @@ interface Candidate {
   name: string;
   address: number;
   size: number;
+  /** The extent an interior address may land in — see `hasAddressableInterior`. */
+  interiorSize: number;
   /**
    * The stride of one element, for a global Ghidra typed as an array — its
    * extent divided by its element count, so it is exact rather than inferred.
@@ -353,6 +452,39 @@ function ownerOf(v: number, candidates: readonly Candidate[]): Anchor | null {
 export interface AddressExtent {
   readonly address: number;
   readonly size: number;
+  /**
+   * The extent an INTERIOR address may land in, where that is narrower than the
+   * object — see `hasAddressableInterior`. Absent means `size`.
+   */
+  readonly interiorSize?: number;
+}
+
+/**
+ * Whether an address strictly inside this object names anything.
+ *
+ * A declared ARRAY has elements and a STRUCT has fields, so an interior address
+ * into either is a subobject and resolving it is the whole point of rule 2 —
+ * the Storm anchors are `&gSFileAsyncReqQueue + 4`, the second field of a
+ * 12-byte list head.
+ *
+ * A global no bigger than a machine word has neither. An address three bytes
+ * into a 4-byte `BOOL` is not a pointer anyone wrote; it is a bound belonging
+ * to the array that ENDS where that `BOOL` begins, and reading it as the `BOOL`
+ * is the neighbour-steals-the-bound failure in its smallest form. `Inv.cpp`'s
+ * `0x7bcd37` and `0x7bce25` are both that: loop bounds one stride past a
+ * screen-coordinate table, landing in the four-byte flags that follow it.
+ *
+ * So an interior needs an array's stride or an object wider than a pointer. A
+ * scalar that is neither keeps its BASE — rule 1 is untouched, and a base is a
+ * base whatever the extent says.
+ */
+export function hasAddressableInterior(
+  size: number | undefined,
+  elementSize: number | undefined
+): boolean {
+  if (!Number.isSafeInteger(size) || size! <= 1) return false;
+  if (Number.isSafeInteger(elementSize) && elementSize! > 0) return true;
+  return size! > 4;
 }
 
 /** Which extent owns an address, and how far into it the address sits. */
@@ -386,7 +518,8 @@ export function ownerOfAddress<C extends AddressExtent>(
       baseCount++;
       continue;
     }
-    if (c.size > 0 && v > c.address && v < c.address + c.size) {
+    const extent = c.interiorSize ?? c.size;
+    if (extent > 0 && v > c.address && v < c.address + extent) {
       interior = { candidate: c, offset: v - c.address };
       interiorCount++;
     }
@@ -395,6 +528,30 @@ export function ownerOfAddress<C extends AddressExtent>(
   if (baseCount === 1) return { candidate: base!, offset: 0 };
   if (baseCount > 1) return null;
   return interiorCount === 1 ? interior : null;
+}
+
+/**
+ * A literal whose BIT PATTERN says it is a mask: one set bit (`0x800000`) or
+ * one bit short of a power of two (`0x7fffff`, `0x3fffff`).
+ *
+ * Used to refuse an INTERIOR only, which is where the coincidence lives. An
+ * image holds thousands of globals across a few megabytes, so a big array
+ * necessarily contains some round constants — `gPaletteAct1` is 192KB and
+ * covers both `0x800000` and `0x7fffff` — and the arithmetic withdrawal only
+ * catches a mask used as arithmetic. It does not catch one ASSIGNED into a
+ * slot, and nine sites in the tree were already wrong because of it:
+ * `dwBinkOpenFlags = 0x800000` came out as `(char*)&gPaletteAct1 + 72600`.
+ *
+ * A BASE is a different claim and keeps its resolution whatever the bit
+ * pattern: an object's address is a fact about the image, not a coincidence
+ * with a constant. The one base that is not — the image base itself, where
+ * Ghidra puts the PE header — is excluded when the candidates are built, not
+ * here.
+ */
+function isMaskShaped(v: number): boolean {
+  if (!Number.isSafeInteger(v) || v <= 0) return false;
+  if (((v & (v - 1)) >>> 0) === 0) return true;
+  return (((v + 1) & v) >>> 0) === 0;
 }
 
 /** At or above this value, a literal may be a folded `~&global`. */
@@ -555,18 +712,29 @@ function createGlobalAddressLiteralTransformer(
   const stringConstants = new Set(options.stringConstantNames ?? []);
   const floor = effectiveAddressFloor(options.imageBase);
   const returnTarget = integralReturnTarget(options.enclosingReturnType);
+  /**
+   * Nothing a program references lives AT the image base — Ghidra labels the
+   * PE header there. `uCodepoint < 0x400000`, a Unicode range test, came out as
+   * `(uintptr_t)&IMAGE_DOS_HEADER__00400000`, and two DRLG flag assignments
+   * with it. A round constant collides with the base of the image far more
+   * often than anything points at it.
+   */
+  const imageBaseAddress = parseImageBase(options.imageBase);
 
   const candidates: Candidate[] = [];
   for (const [name, address] of Object.entries(addresses)) {
     if (!Number.isSafeInteger(address) || address < floor || address >= ADDRESS_CEILING) {
       continue;
     }
+    if (imageBaseAddress !== null && address === imageBaseAddress) continue;
     const size = sizes[name];
     const stride = elementSizes[name];
+    const extent = Number.isSafeInteger(size) && size! > 0 ? size! : 0;
     candidates.push({
       name,
       address,
-      size: Number.isSafeInteger(size) && size! > 0 ? size! : 0,
+      size: extent,
+      interiorSize: hasAddressableInterior(size, stride) ? extent : 0,
       elementSize: Number.isSafeInteger(stride) && stride! > 0 ? stride! : 0,
       segments: namespaces[name] ?? [],
       stringConstant: stringConstants.has(name),
@@ -678,17 +846,61 @@ function createGlobalAddressLiteralTransformer(
    * the increments are the same statement written shorter and are ignored for
    * the same reason. Taking a name's ADDRESS poisons it: `Init(&pRow)` can
    * store anything into it, and the scan does not follow callees.
+   *
+   * ## A walk carried by two locals
+   *
+   * `aliases` is the reason this is a graph and not a table. The decompiler
+   * routinely splits one cursor across two names — `LogManager`'s scan of
+   * `gLogFileNameArray` binds `pStoredName = gLogFileNameArray[nSlot]`, then
+   * carries it as `pNameEnd = pStoredName` and `pStoredName = pNameEnd + 0x10`.
+   * Read one binding at a time, `pStoredName = pNameEnd + …` traces to a LOCAL,
+   * which the flat version treated as unfollowable and poisoned — so the bound
+   * `0x75d288` fell through to rule 1 and read as `&lpSystemTime_0075d288`,
+   * one past the array's end and, once relinked, 44KB past it. The loop then
+   * ran ~2810 iterations instead of 20 and wrote through every log-manager
+   * array behind it.
+   *
+   * A binding from another local is therefore recorded as an EDGE, and the
+   * origin is the transitive closure over those edges: one global reachable and
+   * nothing contradicted anywhere along the way is an answer, two globals is
+   * not. That is the same "every uncertainty collapses to no answer" rule,
+   * applied to a chain instead of a single step.
+   *
+   * ## Two strengths of "no", because a decompiler reuses slots
+   *
+   * `blocked` and `opaque` are not the same fact and cannot be merged.
+   *
+   * `blocked` is a CONTRADICTION: the name was bound from two different
+   * globals, or its address was taken so a callee can store anything into it.
+   * Either kills the whole closure — a walk over a run of separate globals is
+   * exactly the shape the pass refuses to invent an extent for.
+   *
+   * `opaque` is only ABSENCE: one binding came from somewhere this pass does
+   * not follow, typically a call. It kills the closure when it sits on the name
+   * being asked about, which keeps a cursor that is ever assigned a call's
+   * result out of the rule. It does NOT kill a global reached THROUGH an alias,
+   * because Ghidra gives one stack slot several unrelated lives: the real
+   * `FindOrOpenLogFileSlot` reuses `pNameEnd` for `SStrLen`'s result in the
+   * code after the loop, and treating that as evidence about `pStoredName` —
+   * whose own three bindings are the array, itself, and `pNameEnd + 0x10` —
+   * discards the one fact that makes the bound safe. The cursor's own bindings
+   * still have to be clean; the slot it was carried through does not.
    */
   interface Origin {
     candidate: Candidate | null;
-    poisoned: boolean;
+    /** Other locals this name was bound FROM — followed transitively. */
+    aliases: Set<string>;
+    /** A contradiction: two globals, or the address escaped. Kills the closure. */
+    blocked: boolean;
+    /** A binding this pass cannot follow. Kills only a query that starts here. */
+    opaque: boolean;
   }
   const origins = new Map<string, Origin>();
 
   function originOf(name: string): Origin {
     let origin = origins.get(name);
     if (!origin) {
-      origin = { candidate: null, poisoned: false };
+      origin = { candidate: null, aliases: new Set(), blocked: false, opaque: false };
       origins.set(name, origin);
     }
     return origin;
@@ -696,17 +908,68 @@ function createGlobalAddressLiteralTransformer(
 
   function noteBinding(name: string, source: Root): void {
     const origin = originOf(name);
-    if (origin.poisoned) return;
+    if (origin.blocked) return;
     if (source && source.kind === 'variable' && source.name === name) return;
     if (source && source.kind === 'global') {
       if (origin.candidate && origin.candidate !== source.candidate) {
-        origin.poisoned = true;
+        origin.blocked = true;
         return;
       }
       origin.candidate = source.candidate;
       return;
     }
-    origin.poisoned = true;
+    if (source && source.kind === 'variable') {
+      origin.aliases.add(source.name);
+      return;
+    }
+    origin.opaque = true;
+  }
+
+  /**
+   * The single global `name` transitively traces to, or null.
+   *
+   * Breadth over the alias edges, cycle-safe — `pStoredName` and `pNameEnd`
+   * name each other and the walk has to terminate. A `blocked` name anywhere in
+   * the closure, or a second distinct global, is a contradiction and returns
+   * null; `opaque` returns null only on the name the question was asked about.
+   *
+   * Memoised per resolution, not across the unit: `resolvedOrigins` is cleared
+   * with `origins` at the start of every scan.
+   */
+  const resolvedOrigins = new Map<string, Candidate | null>();
+
+  function resolvedOriginOf(name: string): Candidate | null {
+    const memo = resolvedOrigins.get(name);
+    if (memo !== undefined) return memo;
+
+    const start = origins.get(name);
+    if (start && start.opaque) {
+      resolvedOrigins.set(name, null);
+      return null;
+    }
+
+    const seen = new Set<string>();
+    const queue = [name];
+    let found: Candidate | null = null;
+    let ok = true;
+
+    while (queue.length > 0) {
+      const current = queue.pop()!;
+      if (seen.has(current)) continue;
+      seen.add(current);
+      const origin = origins.get(current);
+      if (!origin) continue;
+      if (origin.blocked) { ok = false; break; }
+      if (origin.candidate) {
+        if (found && found !== origin.candidate) { ok = false; break; }
+        found = origin.candidate;
+      }
+      for (const alias of origin.aliases) queue.push(alias);
+    }
+
+    const result = ok ? found : null;
+    resolvedOrigins.set(name, result);
+    return result;
   }
 
   /** The bare name a binding target designates, or null if it is not a name. */
@@ -715,11 +978,38 @@ function createGlobalAddressLiteralTransformer(
     return root && root.kind === 'variable' ? root.name : null;
   }
 
+  /**
+   * The names this unit declares as a pointer to a one-byte object, and what
+   * that object is spelled as.
+   *
+   * A name declared twice with types that disagree is dropped rather than
+   * resolved: the displacement rule below is only ever safe on a stride of one,
+   * and a name whose stride two declarations argue about does not have one.
+   */
+  const byteCursors = new Map<string, Pointee>();
+
+  function noteDeclaredType(name: string, type: TypeNode | null | undefined): void {
+    const cls = bytePointerClass(type);
+    if (!byteCursors.has(name)) {
+      byteCursors.set(name, cls);
+      return;
+    }
+    if (byteCursors.get(name) !== cls) byteCursors.set(name, null);
+  }
+
   function scanOrigins(unit: ASTNode): void {
     origins.clear();
+    resolvedOrigins.clear();
+    byteCursors.clear();
     for (const node of traverseAST(unit)) {
+      if (node.kind === NodeKind.ParameterDecl) {
+        const param = node as ParameterDecl;
+        if (param.name) noteDeclaredType(param.name.name, param.type);
+        continue;
+      }
       if (node.kind === NodeKind.VariableDecl) {
         const decl = node as VariableDecl;
+        noteDeclaredType(decl.name.name, decl.type);
         if (decl.initializer && decl.initializer.kind !== NodeKind.InitListExpr) {
           noteBinding(decl.name.name, rootOf(decl.initializer as Expression));
         }
@@ -737,7 +1027,7 @@ function createGlobalAddressLiteralTransformer(
         const unary = node as UnaryExpr;
         if (unary.operator !== '&') continue;
         const name = boundName(unary.operand);
-        if (name) originOf(name).poisoned = true;
+        if (name) originOf(name).blocked = true;
       }
     }
   }
@@ -747,8 +1037,7 @@ function createGlobalAddressLiteralTransformer(
     const root = rootOf(expr);
     if (!root) return null;
     if (root.kind === 'global') return root.candidate;
-    const origin = origins.get(root.name);
-    return origin && !origin.poisoned ? origin.candidate : null;
+    return resolvedOriginOf(root.name);
   }
 
   /**
@@ -810,15 +1099,41 @@ function createGlobalAddressLiteralTransformer(
    */
   const pointerForms = new Set<ASTNode>();
 
+  /**
+   * The subset of `pointerForms` that is already `char*`-typed.
+   *
+   * `anchoredAddress` writes `((char*)&name + n)` for an interior and the bare
+   * `name` for a string constant, both of which are `char*`; a base-exact
+   * `&name` is `T*` for whatever `T` the global is. The displacement rule needs
+   * to know which, because it subtracts the form from a `char*` cursor and
+   * `char* - T*` does not compile.
+   */
+  const charTypedForms = new Set<ASTNode>();
+
+  /** True where `anchoredAddress` will yield a `char*` rather than a `T*`. */
+  function anchorIsCharTyped(anchor: Anchor): boolean {
+    return anchor.stringConstant || anchor.offset !== 0;
+  }
+
   /** The literal `v`, or its complement, spelled through whichever global owns it. */
-  function resolve(v: number): { form: Expression; pointer: boolean } | null {
+  function resolve(
+    v: number,
+  ): { form: Expression; pointer: boolean; charTyped: boolean } | null {
     const direct = ownerOf(v, candidates);
-    if (direct) return { form: anchoredAddress(direct), pointer: true };
+    if (direct) {
+      if (direct.offset !== 0 && isMaskShaped(v)) return null;
+      return {
+        form: anchoredAddress(direct),
+        pointer: true,
+        charTyped: anchorIsCharTyped(direct),
+      };
+    }
     if (v < COMPLEMENT_FLOOR) return null;
-    const flipped = ownerOf((~v) >>> 0, candidates);
-    return flipped
-      ? { form: complemented(anchoredAddress(flipped)), pointer: false }
-      : null;
+    const complement = (~v) >>> 0;
+    const flipped = ownerOf(complement, candidates);
+    if (!flipped) return null;
+    if (flipped.offset !== 0 && isMaskShaped(complement)) return null;
+    return { form: complemented(anchoredAddress(flipped)), pointer: false, charTyped: false };
   }
 
   /** Carry the original node's trivia onto the replacement that stands in for it. */
@@ -863,19 +1178,20 @@ function createGlobalAddressLiteralTransformer(
   function mapPointerForms(
     expr: Expression,
     respell: (form: Expression) => Expression | null,
+    claimed: (form: Expression) => boolean = form => pointerForms.has(form),
   ): Expression | null {
-    if (pointerForms.has(expr)) return respell(expr);
+    if (claimed(expr)) return respell(expr);
 
     switch (expr.kind) {
       case NodeKind.ParenExpr: {
         const paren = expr as ParenExpr;
-        const inner = mapPointerForms(paren.expression, respell);
+        const inner = mapPointerForms(paren.expression, respell, claimed);
         return inner ? { ...paren, expression: inner } : null;
       }
       case NodeKind.ConditionalExpr: {
         const cond = expr as ConditionalExpr;
-        const then = mapPointerForms(cond.thenExpr, respell);
-        const other = mapPointerForms(cond.elseExpr, respell);
+        const then = mapPointerForms(cond.thenExpr, respell, claimed);
+        const other = mapPointerForms(cond.elseExpr, respell, claimed);
         if (!then && !other) return null;
         return { ...cond, thenExpr: then ?? cond.thenExpr, elseExpr: other ?? cond.elseExpr };
       }
@@ -883,7 +1199,7 @@ function createGlobalAddressLiteralTransformer(
         const comma = expr as CommaExpr;
         const last = comma.expressions[comma.expressions.length - 1];
         if (!last) return null;
-        const mapped = mapPointerForms(last, respell);
+        const mapped = mapPointerForms(last, respell, claimed);
         if (!mapped) return null;
         return {
           ...comma,
@@ -898,6 +1214,107 @@ function createGlobalAddressLiteralTransformer(
   /** Put the literal back wherever this pass wrote a pointer form. */
   function restorePointerForms(expr: Expression): Expression | null {
     return mapPointerForms(expr, form => (produced.get(form) ?? null) as Expression | null);
+  }
+
+  /**
+   * The displacement forms this pass wrote — `(char*)(p - <anchor>)`.
+   *
+   * Kept apart from `pointerForms` because the two want opposite treatment in
+   * the two contexts that inspect them. A displacement is the SAME TYPE as the
+   * expression it replaced (`char*` either way), so a call argument holding one
+   * needs no withdrawal — the evidence that made it an address is the cursor's
+   * own declared type, not the slot's. A `return` still has to spell it at the
+   * return type's width, for exactly the reason a bare `&name` does.
+   */
+  const displacementForms = new Set<ASTNode>();
+
+  /** `(char*)e`, or `e` where it is already `char*`. */
+  function asCharPointer(expr: Expression, already: boolean): Expression {
+    return already ? expr : Expr.cast(Type.pointer(Type.char()), expr);
+  }
+
+  /**
+   * The cursor a byte-wise displacement subtracts from, or null.
+   *
+   * A local or parameter this unit declares as a pointer to a one-byte object,
+   * or an explicit cast to one. Nothing else: the rule below is only sound at a
+   * stride of one, and an operand whose stride cannot be read off the unit does
+   * not establish one.
+   */
+  function byteCursorClass(expr: Expression): Pointee {
+    switch (expr.kind) {
+      case NodeKind.ParenExpr:
+        return byteCursorClass((expr as ParenExpr).expression);
+      case NodeKind.CStyleCastExpr:
+        return bytePointerClass((expr as CStyleCastExpr).type);
+      case NodeKind.Identifier:
+        return byteCursors.get((expr as Identifier).name) ?? null;
+      default:
+        return null;
+    }
+  }
+
+  /**
+   * `p - 0x779b6a` where `p` is a byte cursor, respelled through the symbol the
+   * literal is inside.
+   *
+   * The one arithmetic shape with LOCAL evidence that its literal is an address
+   * rather than a mask: a mask is not subtracted from a `char*`. That is what
+   * the blanket arithmetic withdrawal above could not see, and what left
+   * `CHARSEL_EnumerateLocalSaves`'s `pszNameSrc - 0x779b6a < (char*)0xe` — a
+   * length test on the save filename, spelled as the distance from two bytes
+   * into `gszLocalSaveFilenameBuffer` — as an absolute 1.14d address. Relinked,
+   * the buffer is nowhere near it, the test is false for every file, and the
+   * character-select screen lists no characters at all.
+   *
+   * ## Why the whole difference is cast back to `char*`
+   *
+   * `p - <literal>` is pointer-minus-INTEGER and yields a pointer;
+   * `p - <anchor>` is pointer-minus-POINTER and yields a `ptrdiff_t`. The
+   * surrounding expression was written against the first — the CharSel test
+   * compares the result with `(char*)(void*)0xe` — so changing the type would
+   * turn a live defect into a compile error one line over. `(char*)(...)` puts
+   * the type back exactly, and the value is unchanged: both operands are
+   * `char*`, so the difference is the byte count the literal subtraction
+   * produced.
+   *
+   * ## What it refuses
+   *
+   *  - anything but `-`, and anything but the literal on the RIGHT. `p + &g` is
+   *    not a legal expression to respell into, and `&g - p` is not the shape.
+   *  - both operands resolved. Two anchors say nothing about which is the base.
+   *  - a cursor whose pointee is not one byte, and a cursor this unit does not
+   *    declare. On an `int*` the same literal means four times the distance, so
+   *    respelling it would silently divide the offset by four — the failure
+   *    that is worse than the bare literal.
+   *
+   * The size guard rule 2 already carries applies unchanged: a symbol Ghidra
+   * typed `undefined` size 1 has no interior for a literal to land in, so a
+   * near-miss into one resolves to nothing and never reaches here. Only a
+   * base-exact hit on such a symbol fires, and a base is a base whatever the
+   * type says about the extent.
+   */
+  function byteDisplacement(node: BinaryExpr): ASTNode | null {
+    if (node.operator !== '-') return null;
+    if (!pointerForms.has(node.right) || produced.has(node.left)) return null;
+
+    const cursor = byteCursorClass(node.left);
+    if (cursor === null) return null;
+
+    const restored: BinaryExpr = {
+      ...node,
+      right: (produced.get(node.right) ?? node.right) as Expression,
+    };
+    const difference: BinaryExpr = {
+      ...node,
+      left: asCharPointer(node.left, cursor === 'char'),
+      right: asCharPointer(node.right, charTypedForms.has(node.right)),
+    };
+    const form = Expr.cast(Type.pointer(Type.char()), Expr.paren(difference));
+    const ref = replacing(node, form);
+    produced.set(ref, restored);
+    displacementForms.add(ref);
+    return ref;
   }
 
   const transform = createTransformer({
@@ -924,6 +1341,7 @@ function createGlobalAddressLiteralTransformer(
       const ref = replacing(literal, resolved.form);
       produced.set(ref, literal);
       if (resolved.pointer) pointerForms.add(ref);
+      if (resolved.pointer && resolved.charTyped) charTypedForms.add(ref);
       return ref;
     },
 
@@ -935,7 +1353,13 @@ function createGlobalAddressLiteralTransformer(
     // `~(uintptr_t)...` is already an integer and is left as it is.
     visitReturnStmt(node: ReturnStmt) {
       if (!returnTarget || !node.value) return undefined;
-      const spelled = mapPointerForms(node.value, form => widthSpelled(returnTarget, form));
+      // A displacement is `char*`-typed too, so an integer return narrows it the
+      // same way — and for the same reason it is spelled, not withdrawn.
+      const spelled = mapPointerForms(
+        node.value,
+        form => widthSpelled(returnTarget, form),
+        form => pointerForms.has(form) || displacementForms.has(form),
+      );
       return spelled ? { ...node, value: spelled } : undefined;
     },
 
@@ -960,6 +1384,7 @@ function createGlobalAddressLiteralTransformer(
       const ref = replacing(node, resolved.form);
       produced.set(ref, restored);
       if (resolved.pointer) pointerForms.add(ref);
+      if (resolved.pointer && resolved.charTyped) charTypedForms.add(ref);
       return ref;
     },
 
@@ -993,7 +1418,9 @@ function createGlobalAddressLiteralTransformer(
     // is that object's end, not the next object's base — the two are the same
     // byte in the image and different objects once the linker has placed them.
     visitBinaryExpr(node: BinaryExpr) {
-      if (ARITHMETIC_OPS.has(node.operator)) return withOperandsRestored(node);
+      if (ARITHMETIC_OPS.has(node.operator)) {
+        return byteDisplacement(node) ?? withOperandsRestored(node);
+      }
       if (!RELATIONAL_OPS.has(node.operator)) return undefined;
 
       const right = edgeReading(node.right, node.left);

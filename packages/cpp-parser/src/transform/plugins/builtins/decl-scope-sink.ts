@@ -239,6 +239,97 @@ function hasUnstructuredJump(node: ASTNode): boolean {
 }
 
 /**
+ * Expression kinds that compute a value and do nothing else.
+ *
+ * An allowlist, not a denylist: a kind this pass has never seen is unproven,
+ * and unproven means unsafe. A call, an assignment, a `++`/`--`, a `new`, a
+ * `throw` and anything containing one are all absent by construction.
+ */
+const PURE_EXPR_KINDS = new Set<string>([
+  NodeKind.IntegerLiteral, NodeKind.FloatingLiteral, NodeKind.CharLiteral,
+  NodeKind.StringLiteral, NodeKind.BoolLiteral, NodeKind.NullptrLiteral,
+  NodeKind.Identifier, NodeKind.QualifiedId, NodeKind.ThisExpr,
+  NodeKind.ParenExpr, NodeKind.BinaryExpr, NodeKind.ConditionalExpr,
+  NodeKind.MemberExpr, NodeKind.SubscriptExpr,
+  NodeKind.CStyleCastExpr, NodeKind.StaticCastExpr,
+  NodeKind.ReinterpretCastExpr, NodeKind.ConstCastExpr,
+  NodeKind.SizeofExpr, NodeKind.AlignofExpr,
+  NodeKind.InitListExpr,
+]);
+
+/**
+ * Does evaluating `node` do anything but produce a value?
+ *
+ * This is the question that decides whether a declaration may be moved at all.
+ * `int n = SStrPrintf(buf, ...)` fills `buf`; sink that into an `if` and the
+ * buffer is only filled when the branch is taken, and the code after the `if`
+ * reads uninitialised stack. That is not a formatting change, it is a different
+ * program — 1.14d's main menu printed stack residue instead of `V 1.14D`
+ * because of exactly this.
+ */
+function isSideEffectFree(node: ASTNode): boolean {
+  if (node.kind === NodeKind.UnaryExpr) {
+    const op = (node as UnaryExpr).operator;
+    // `&`, `*`, `-`, `!`, `~`, `+` compute; `++`/`--` mutate.
+    if (op === '++' || op === '--') return false;
+  } else if (!PURE_EXPR_KINDS.has(node.kind)) {
+    return false;
+  }
+  return getChildren(node).every(isSideEffectFree);
+}
+
+/** Every variable name `node` reads, ignoring `.field` / `->field` selectors. */
+function readNames(node: ASTNode, into: Set<string> = new Set()): Set<string> {
+  if (node.kind === NodeKind.Identifier) { into.add((node as Identifier).name); return into; }
+  if (node.kind === NodeKind.MemberExpr) { readNames((node as MemberExpr).object, into); return into; }
+  for (const child of getChildren(node)) readNames(child, into);
+  return into;
+}
+
+/**
+ * May this initializer be evaluated at the sink site instead of where it is?
+ *
+ * Two separate hazards, and both have to be clear:
+ *
+ * 1. The initializer itself must do nothing but compute. Sinking moves it under
+ *    a branch, so a side effect that happened unconditionally would become
+ *    conditional — or, for a branch never taken, would stop happening.
+ * 2. Nothing evaluated between the old position and the new one may write what
+ *    the initializer reads. `int n = g_count; g_count = 0; if (c) { use(n); }`
+ *    has a side-effect-free initializer and still changes meaning when moved.
+ *
+ * `evaluatedFirst` carries the parts of the target statement that run before
+ * the sunk declaration would — an `if` condition, a loop's init/condition.
+ *
+ * Refusing is always correct: a declaration left where Ghidra put it is valid
+ * C++ everywhere a sunk one would have been.
+ */
+function initializerMayRelocate(
+  initializer: ASTNode,
+  stmts: readonly ASTNode[],
+  declIndex: number,
+  targetIndex: number,
+  evaluatedFirst: readonly ASTNode[],
+): boolean {
+  if (!isSideEffectFree(initializer)) return false;
+
+  const names = readNames(initializer);
+  if (names.size === 0) return true; // a constant; nothing can disturb it
+
+  const crossed: ASTNode[] = [...evaluatedFirst];
+  const lo = Math.min(declIndex, targetIndex);
+  const hi = Math.max(declIndex, targetIndex);
+  for (let j = lo + 1; j < hi; j++) crossed.push(stmts[j]);
+
+  for (const stmt of crossed) {
+    for (const name of names) {
+      if (writesVar(stmt, name)) return false;
+    }
+  }
+  return true;
+}
+
+/**
  * Is `initializer` safe to evaluate once per iteration instead of once?
  *
  * Two ways it is not: it has a side effect of its own (a call, an assignment,
@@ -344,6 +435,13 @@ function createDeclScopeSinkTransformer(_options: DeclScopeSinkOptions = {}): Tr
           // Must be in exactly one branch
           if (inThen === inElse) continue; // both or neither
 
+          // The branch may not be taken, so an initializer that does anything
+          // other than compute a value must stay where it is.
+          if (varDecl.initializer
+            && !initializerMayRelocate(varDecl.initializer, stmts, i, refIndex, [ifStmt.condition])) {
+            continue;
+          }
+
           const targetBranch = inThen ? ifStmt.thenBranch : ifStmt.elseBranch;
           if (!targetBranch || targetBranch.kind !== NodeKind.CompoundStmt) continue;
 
@@ -403,6 +501,13 @@ function createDeclScopeSinkTransformer(_options: DeclScopeSinkOptions = {}): Tr
         // A loop has a back-edge, so the declaration may only move in if no
         // iteration can observe what the previous one left in the variable.
         if (!loopBodyAcceptsDecl(bodyCompound, varName, varDecl.initializer)) continue;
+
+        // The loop may run zero times, and whatever runs between the two
+        // positions may change what the initializer reads.
+        if (varDecl.initializer
+          && !initializerMayRelocate(varDecl.initializer, stmts, i, refIndex, conditionParts)) {
+          continue;
+        }
 
         // Prepend declaration into the body
         const newBody = updateNode(bodyCompound, {

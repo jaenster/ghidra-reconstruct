@@ -1,0 +1,191 @@
+function	variable	requiredType	sourceFile
+UI_ScrollConfigListVertical	gnUICtrlConfigHoveredControl	D2ConfigControlDescStrc *	D2Client/UI/ControlConfig.cpp
+Forms::D2WINEDITBOX_SetPasswordMode	gbPasswordChangeInProgress	D2ControlStrc *	D2Client/MainMenus.cpp
+Forms::StoreLastKnownIpTcpIp	gbPasswordChangeInProgress	D2ControlStrc *	D2Client/MainMenus.cpp
+Engine::GfxInfo::D2GFX_DrawSolidRectExBySize	gpEscMenuOptBarDC6	DC6 *	D2Client/UI/EscMenu.cpp
+builtin_strncpy	gpAncientsBgDC6	DC6 *	D2Game/Game/View.cpp
+Fog::SMem::SMemFree	gpWardenPendingModule	WardenClient *	D2Client/Warden/WardenClient.cpp
+RENDERER_GLIDE_SetTextureFiltering	gfGlideLightVertexY	float *	D2Client/Renderer/Glide.cpp
+QSERVER_KillConnection	nClientId	struct D2QServerClientConnectionStrc *	D2Game/Game/Server.cpp
+UI_GetRosterPlayerInfoForDisplay	nOwnerGUID	struct D2RosterStrc *	D2Client/UI.cpp
+memset	gpRosterOther	struct D2RosterStrc *	D2Game/Game/Roster.cpp
+D2Client::D2GFX::D2GFX_DrawImage	gnDrawBackgroundRenderOffset	struct DC6 *	D2Game/Game/View.cpp
+D2GFX::D2GFX_DrawImage	WaypointWayGateTabs	struct DC6 *	D2Client/UI/Waypoint.cpp
+D2GFX::D2GFX_DrawImage	WaypointWaygateIcons	struct DC6 *	D2Client/UI/Waypoint.cpp
+D2GFX::D2GFX_DrawImage	gpInvBodySlotImage1	struct DC6 *	D2Client/UI/Inv.cpp
+D2GFX::D2GFX_DrawImage	gpInvBodySlotImage2	struct DC6 *	D2Client/UI/Inv.cpp
+D2GFX::D2GFX_DrawImage	gpInvBodySlotImage4	struct DC6 *	D2Client/UI/Inv.cpp
+D2GFX::D2GFX_DrawImage	gpInvCubeImage4	struct DC6 *	D2Client/UI/Inv.cpp
+D2GFX::D2GFX_DrawImage	gpInvMercArmorSlotImage	struct DC6 *	D2Client/UI/Inv.cpp
+D2GFX::D2GFX_DrawImage	gpInvMercHelmetSlotImage	struct DC6 *	D2Client/UI/Inv.cpp
+D2GFX::D2GFX_DrawImage	gpInvMercWeaponSlotImage1	struct DC6 *	D2Client/UI/Inv.cpp
+D2GFX::D2GFX_DrawImage	gpInvMercWeaponSlotImage2	struct DC6 *	D2Client/UI/Inv.cpp
+D2GFX::D2GFX_DrawImage	gpInvShopTab1Image	struct DC6 *	D2Client/UI/Inv.cpp
+D2GFX::D2GFX_DrawImage	gpInvShopTabImage	struct DC6 *	D2Client/UI/Inv.cpp
+D2Game::Game::Msg::NET_D2GS_CLIENT_Send_SHORT_SHORT_SHORT	gpInvCubeBgImage	struct DC6 *	D2Client/UI/Inv.cpp
+DRAW_UI_InventoryContent	UI_GFX	struct DC6 *	D2Client/UI/Inv.cpp
+Engine::GfxInfo::D2GFX_DrawSolidRectExBySize	gnLoadedActIndex	struct DC6 *	D2Client/UI/Draw.cpp
+InitializeiInventoryPages	gpInvBodySlotImage4	struct DC6 *	D2Client/UI/Inv.cpp
+_sprintf	gpQuestScrollImageBottom	struct DC6 *	D2Client/UI/Text.cpp
+memset	WaypointWayGateBackGround	struct DC6 *	D2Client/UI/Waypoint.cpp
+memset	_gpUICtrlConfigScrollbarDC6	struct DC6 *	D2Client/UI/ControlConfig.cpp
+memset	gpEscMenuOptSkullDC6	struct DC6 *	D2Client/UI/EscMenu.cpp
+memset	gpHoradricBackgroundDC6	struct DC6 *	D2Client/UI/UseItem.cpp
+memset	gpInvGoldCoinImage	struct DC6 *	D2Client/UI/Inv.cpp
+memset	gpInvMercBodyImage	struct DC6 *	D2Client/UI/Inv.cpp
+memset	gpInvMercHelmetSlotImage	struct DC6 *	D2Client/UI/Inv.cpp
+memset	gpInvStashImage1	struct DC6 *	D2Client/UI/Inv.cpp
+memset	gpInvStashImage2	struct DC6 *	D2Client/UI/Inv.cpp
+memset	gpMessageLogDC6	struct DC6 *	D2Client/UI/ListBoxImplementation.cpp
+memset	gpMiniPanelBackgroundDC6	struct DC6 *	D2Client/UI/MiniPanel.cpp
+memset	gpMiniPanelButtonsDC6	struct DC6 *	D2Client/UI/MiniPanel.cpp
+memset	gpNpcMenuShopInventoryDC6	struct DC6 *	D2Client/UI/Inv.cpp
+memset	gpPentSpinCursorDC6	struct DC6 *	D2Client/Forms/D2WinList.cpp
+memset	gpQuestScrollImageTop	struct DC6 *	D2Client/UI/Text.cpp
+memset	gpUpgradeMenuDC6	struct DC6 *	D2Client/UI/UseItem.cpp
+AUTOMAP_InitPaletteColors	nAutoMapColorGreen	infer-from-field:_0_1_	D2Client/UI/Automap.cpp
+D2Common::Dungeon::ToggleHasPortalFlag	nEscapePortalGUID	infer-from-field:_0_1_	D2Game/Quests/A5Q2.cpp
+D2Common::Unit::SUnit::IteratePlayerOrMonsterUnits	sVar1	infer-from-field:_0_1_	D2Game/Quests/A1Q5.cpp
+D2Common::Units::GetCoords	nEscapePortalGUID	infer-from-field:_0_1_	D2Game/Quests/A5Q2.cpp
+D2WINEDITBOX_HandleDelete	nTypeCheck	infer-from-field:_0_1_	D2Client/Forms/D2WinEditBox.cpp
+D2Win::D2WinMain::D2WINMAIN_SetFormFourth	gnLobbyTabCompletionIndex	infer-from-field:_0_1_	D2Client/OOGUtilities.cpp
+D2_ASSERT	nWarpDest	infer-from-field:_0_1_	D2Common/Drlg/RoomTile.cpp
+D3D_InvalidateTileCachesForEntry	iVar1	infer-from-field:_0_1_	D2Client/d3dFloorCache.cpp
+D3D_InvalidateTileCachesForEntry	iVar4	infer-from-field:_0_1_	D2Client/d3dFloorCache.cpp
+FindSpawnableLocation	nEscapePortalGUID	infer-from-field:_0_1_	D2Game/Quests/A5Q2.cpp
+Fog::ErrorManager::ERROR_UnrecoverableInternalError_Halt	nIdaStarInitCopy	infer-from-field:_0_1_	D2Common/Path/DynamicPath.cpp
+Fog::ErrorManager::ERROR_UnrecoverableInternalError_Halt	savedChecksum2	infer-from-field:_0_1_	D2Game/Player/PlayerSave.cpp
+Fog::ErrorManager::ERROR_UnrecoverableInternalError_Halt	savedInitSeed	infer-from-field:_0_1_	D2Game/Player/PlayerSave.cpp
+Fog::ErrorManager::ERROR_UnrecoverableInternalError_Halt	savedNTimeEx	infer-from-field:_0_1_	D2Game/Player/PlayerSave.cpp
+Fog::ErrorManager::ERROR_UnrecoverableInternalError_Halt	savedTime32	infer-from-field:_0_1_	D2Game/Player/PlayerSave.cpp
+Fog::File::CONTAINER_InitializeBuffer	bIgnored1	infer-from-field:_0_1_	D2Client/UI/Chat.cpp
+NET_D2GS_CLIENT_Send_0x5D	nPlayerGUID	infer-from-field:_0_1_	D2Game/Game/Msg.cpp
+Objects_InitFn01	nShrineTypeOrRetries	infer-from-field:_0_1_	D2Game/Objects/Objects.cpp
+Objects_InitFn66	nObjectGUID	infer-from-field:_0_1_	D2Game/Quests/Quest40.cpp
+Objects_InitFn68	dwFrozensteinFlags	infer-from-field:_0_1_	D2Game/Quests/A5Q3.cpp
+Q05_Callback_03	sVar1	infer-from-field:_0_1_	D2Game/Quests/A1Q5.cpp
+Q05_Callback_11	sVar1	infer-from-field:_0_1_	D2Game/Quests/A1Q5.cpp
+Q12_IsSanctuaryComplete	sVar1	infer-from-field:_0_1_	D2Game/Quests/A2Q4.cpp
+Q33_SpawnPortalNearAnya	nPortalX	infer-from-field:_0_1_	D2Game/Quests/A5Q3.cpp
+QUEST_SendNpcGossipPacket	nPlayerClassId	infer-from-field:_0_1_	D2Game/Quests/A5Q3.cpp
+QUEST_SetQuestRecordState	nPlayerCount	infer-from-field:_0_1_	D2Game/Quests/A1Q5.cpp
+Stats::StatsEx::STATLIST_AttachStatListToUnit	nBaseStatVal	infer-from-field:_0_1_	D2Common/Unit/PlrSkills.cpp
+TSHASH_DtorMappingHashTable	nSehState	infer-from-field:_0_1_	D2Client/Chat/IgnoreList.cpp
+TSHASH_FreeAllBucketMappingEntries	nSehState	infer-from-field:_0_1_	D2Client/Chat/IgnoreList.cpp
+CLIENT_GetMonsterNameColor	nClassId	infer-from-field:_0_2_	D2Common/Unit/Monster.cpp
+CLIENT_UpdateSkillMissilePosition	nClassOrMode	infer-from-field:_0_2_	D2Common/Skills/SkillsBar.cpp
+CLIENT_UpdateUnitNameplate	nUnitModeWord	infer-from-field:_0_2_	D2Common/Unit/Monster.cpp
+CMD_GetKeyDescForCommand	nCmdSlot	infer-from-field:_0_2_	D2Client/UI/CmdTbl.cpp
+CMD_GetKeyForCommand	nCmdSlot	infer-from-field:_0_2_	D2Client/UI/CmdTbl.cpp
+CMD_GetKeyNameForCommand	nCmdSlot	infer-from-field:_0_2_	D2Client/UI/CmdTbl.cpp
+CMD_IsCommandBound	nCmdSlot	infer-from-field:_0_2_	D2Client/UI/CmdTbl.cpp
+CMD_SetKeyBinding	nCmdSlot	infer-from-field:_0_2_	D2Client/UI/CmdTbl.cpp
+CMD_UnbindCommand	nCmdSlot	infer-from-field:_0_2_	D2Client/UI/CmdTbl.cpp
+D2Sound::Sound::SOUND_PlaySound	gnUICtrlConfigPendingKeyStrId	infer-from-field:_0_2_	D2Client/UI.cpp
+Draw::DRAW_RegisterDrawHandlers	gnUICtrlConfigPendingKeyStrId	infer-from-field:_0_2_	D2Client/UI.cpp
+INPUT_ConfigMouseWheelScroll	gnUICtrlConfigPendingKeyStrId	infer-from-field:_0_2_	D2Client/UI.cpp
+MISSILE_SetDamage	nMinDamage	infer-from-field:_0_2_	D2Game/Missiles/MissilesMode.cpp
+MONSTER_HandleSkillAnimEnd	nModeWord	infer-from-field:_0_2_	D2Common/Unit/Monster.cpp
+MONSTER_ProcessSkillAnimation	nInteractModeWord	infer-from-field:_0_2_	D2Common/Unit/Monster.cpp
+MonsterMessage	nDeltaCheck	infer-from-field:_0_2_	D2Common/Unit/Monster.cpp
+Path::DynamicPath::PATH_PeriodicPathRecalc	nInteractModeWord	infer-from-field:_0_2_	D2Common/Unit/Monster.cpp
+Q33_UpdateFrozenAnyaNpcState	nArrivalCount	infer-from-field:_0_2_	D2Game/Quests/A1Q4.cpp
+STATLIST_AddStatValue	nPackedStat	infer-from-field:_0_2_	D2Common/Stats/StatsEx.cpp
+STATLIST_AttachStatListToUnit	nShiftedStat_00	infer-from-field:_0_2_	D2Common/Stats/StatsEx.cpp
+STATLIST_BinarySearchStatInfoArray	nPackedStatKey	infer-from-field:_0_2_	D2Common/Stats/StatsEx.cpp
+STATLIST_CalcFullStatFromChildren	nMid	infer-from-field:_0_2_	D2Common/Stats/StatsEx.cpp
+STATLIST_CalcFullStatFromChildren	nPackedStatKey	infer-from-field:_0_2_	D2Common/Stats/StatsEx.cpp
+STATLIST_DetachAndRecalc	iVar1	infer-from-field:_0_2_	D2Common/Stats/StatsEx.cpp
+STATLIST_DetachAndRecalc	nShiftedStat	infer-from-field:_0_2_	D2Common/Stats/StatsEx.cpp
+STATLIST_DispatchUnchangedStatToCallback	nStatKey	infer-from-field:_0_2_	D2Common/Stats/StatsEx.cpp
+STATLIST_FreeChildStatLists	nCmpShiftedStat	infer-from-field:_0_2_	D2Common/Stats/StatsEx.cpp
+STATLIST_GetItemStatBonusValues	nStatPair	infer-from-field:_0_2_	D2Common/Stats/StatsEx.cpp
+STATLIST_IterateChangedStats	nStatKey	infer-from-field:_0_2_	D2Common/Stats/StatsEx.cpp
+STATLIST_LookupBaseStatWithMinAccr	nPackedStatKey	infer-from-field:_0_2_	D2Common/Stats/StatsEx.cpp
+STATLIST_PropagateStatDelta	iVar1	infer-from-field:_0_2_	D2Common/Stats/StatsEx.cpp
+STATLIST_SetFullStatValue	iVar1	infer-from-field:_0_2_	D2Common/Stats/StatsEx.cpp
+STATLIST_SetStatValue	nPackedStatKey	infer-from-field:_0_2_	D2Common/Stats/StatsEx.cpp
+STATLIST_SetStatValueInBaseArray	nPackedStatKey	infer-from-field:_0_2_	D2Common/Stats/StatsEx.cpp
+TXT_ItemStatCost_GetMinimumStatValueShifted	nPackedStatKey	infer-from-field:_0_2_	D2Common/Stats/StatsEx.cpp
+Units::Missile::SetTargetX	nDeltaY	infer-from-field:_0_2_	D2Common/Unit/Missile.cpp
+memset	nMinDamage	infer-from-field:_0_2_	D2Common/Skills/SkillAss.cpp
+Fog::Debug::GuardStack	nFrameNumber	infer-from-field:_1_1_	D2Game/Player/PlayerSave.cpp
+Fog::Debug::GuardStack	savedChecksum2	infer-from-field:_1_1_	D2Game/Player/PlayerSave.cpp
+Fog::Debug::GuardStack	savedInitSeed	infer-from-field:_1_1_	D2Game/Player/PlayerSave.cpp
+Fog::Debug::GuardStack	savedNTimeEx	infer-from-field:_1_1_	D2Game/Player/PlayerSave.cpp
+Fog::Debug::GuardStack	savedTime32	infer-from-field:_1_1_	D2Game/Player/PlayerSave.cpp
+memset	savedChecksum2	infer-from-field:_1_1_	D2Game/Player/PlayerSave.cpp
+memset	savedInitSeed	infer-from-field:_1_1_	D2Game/Player/PlayerSave.cpp
+memset	savedNTimeEx	infer-from-field:_1_1_	D2Game/Player/PlayerSave.cpp
+memset	savedTime32	infer-from-field:_1_1_	D2Game/Player/PlayerSave.cpp
+NET_D2GS_CLIENT_Incoming0x2A	nGold	infer-from-field:_1_2_	D2Game/Game/SCmd.cpp
+NET_D2GS_CLIENT_Incoming0x4E	nSeed	infer-from-field:_1_2_	D2Game/Game/SCmd.cpp
+NET_D2GS_CLIENT_Incoming0x5D	nPlayerGUID	infer-from-field:_1_2_	D2Game/Game/SCmd.cpp
+NPCMENU_HandleTradePacket	nGold	infer-from-field:_1_2_	D2Client/UI/NpcMenu/NpcMenu.cpp
+AdjustPerspectivePosition	nScreenMode	infer-from-field:_1_3_	D2Client/Renderer/Direct3D.cpp
+SERVER_InitClassicTowns	nActByte	infer-from-field:_1_3_	D2Common/Unit/SUnitProxy.cpp
+SKILLMONST_SpiderLayTrail	nDirGfxOffset	infer-from-field:_1_3_	D2Common/Skills/SkillMonst.cpp
+TSHASH_DtorStringHashTable	nSehState	infer-from-field:_1_3_	D2Client/Chat/IgnoreList.cpp
+Items::ITEM_GetItemsTxt_nWidthAndHeight	bUseWidthHeight	infer-from-field:_3_1_	D2Common/Inventory.cpp
+memset	local_1c	infer-from-field:vmethod_0	D2Client/Renderer/Direct3D.cpp
+STATLIST_RemoveStatFromArray	aurastat	infer-from-field:vmethod_1	D2Common/Stats/StatsEx.cpp
+TSHASH_InsertOrUpdateMappingEntry	pnParam	infer-from-field:vmethod_1	D2Client/Chat/IgnoreList.cpp
+TSHASH_InsertOrUpdateStringEntry	pnParam	infer-from-field:vmethod_1	D2Client/Chat/IgnoreList.cpp
+LISTBOX_DrawTruncatedText	pThis	infer-from-field:vmethod_12	D2Client/UI/ListBoxImplementation.cpp
+memset	local_24	infer-from-field:vmethod_12	D2Client/Renderer/Direct3D.cpp
+D2WINTEXTBOX_ComputeLineSpacingForLanguage	pTextBoxData	infer-from-field:vmethod_13	D2Client/Forms/D2WinTextBox.cpp
+D2WINTEXTBOX_ScrollToLine	pTextBoxData	infer-from-field:vmethod_13	D2Client/Forms/D2WinTextBox.cpp
+D2WINTIMER_GetElapsed	pTimer	infer-from-field:vmethod_13	D2Client/Forms/D2WinTimer.cpp
+D2_ASSERT	pCtrl	infer-from-field:vmethod_13	D2Client/Forms/D2WinButton.cpp
+Push	pControl	infer-from-field:vmethod_13	D2Client/Forms/D2WinList.cpp
+Push	pInnerData	infer-from-field:vmethod_13	D2Client/Forms/D2WinAnimImage.cpp
+D2WINEDITBOX_UpdateCursorPosition	pnParam	infer-from-field:vmethod_155	D2Client/Forms/D2WinEditBox.cpp
+DIRECTD3D_LogError	local_24	infer-from-field:vmethod_2	D2Client/Renderer/Direct3D.cpp
+DIRECTD3D_LogError	pTestDevice	infer-from-field:vmethod_2	D2Client/Renderer/Direct3D.cpp
+DIRECTD3D_LogError	pTestSurface	infer-from-field:vmethod_2	D2Client/Renderer/Direct3D.cpp
+Fog::ErrorManager::ERROR_UnrecoverableInternalError_Halt	pComIface	infer-from-field:vmethod_2	D2Client/d3dSubtileCache.cpp
+Fog::ErrorManager::ERROR_UnrecoverableInternalError_Halt	pIface	infer-from-field:vmethod_2	D2Client/d3dFloorCache.cpp
+Fog::LogManager::LOGFILE_WriteStringToFile	pTestDevice	infer-from-field:vmethod_2	D2Client/Renderer/Direct3D.cpp
+Fog::LogManager::LOGFILE_WriteStringToFile	pTestSurface	infer-from-field:vmethod_2	D2Client/Renderer/Direct3D.cpp
+Fog::Memory::FreeClientMemory	piVar1	infer-from-field:vmethod_2	D2Client/Renderer/Direct3D.cpp
+RENDERER_D3D_CopySurfacePixels	pMemorySurface	infer-from-field:vmethod_2	D2Client/Renderer/Direct3D.cpp
+RENDERER_D3D_CopySurfacePixels	pMemoryTexture	infer-from-field:vmethod_2	D2Client/Renderer/Direct3D.cpp
+RENDERER_D3D_ReleaseAllInterfaces	piVar1	infer-from-field:vmethod_2	D2Client/Renderer/Direct3D.cpp
+RENDERER_D3D_ReleaseFontTextures	piVar1	infer-from-field:vmethod_2	D2Client/Renderer/Direct3D.cpp
+RENDERER_D3D_ReleaseSmackerSurfaces	piVar1	infer-from-field:vmethod_2	D2Client/Renderer/Direct3D.cpp
+RENDERER_D3D_ReleaseTexturePools	pD3DTextureSpriteVtable	infer-from-field:vmethod_2	D2Client/Renderer/Direct3D.cpp
+RENDERER_DIRECT3D_ErrorLog	pTestDevice	infer-from-field:vmethod_2	D2Client/Renderer/Direct3D.cpp
+RENDERER_DIRECT3D_ErrorLog	pTestSurface	infer-from-field:vmethod_2	D2Client/Renderer/Direct3D.cpp
+D2WINTEXTBOX_ScrollToLine	pCtrl	infer-from-field:vmethod_23	D2Client/Forms/D2WinScrollbar.cpp
+memset	nMipIdx	infer-from-field:vmethod_25	D2Client/Renderer/Direct3D.cpp
+memset	pDestSurface	infer-from-field:vmethod_25	D2Client/Renderer/Direct3D.cpp
+memset	pMemorySurface	infer-from-field:vmethod_25	D2Client/Renderer/Direct3D.cpp
+memset	pSrcSurface	infer-from-field:vmethod_25	D2Client/Renderer/Direct3D.cpp
+memset	pTargetSurface	infer-from-field:vmethod_25	D2Client/Renderer/Direct3D.cpp
+Fog::LogManager::LOGFILE_WriteStringToFile	local_18	infer-from-field:vmethod_3	D2Client/Renderer/Direct3D.cpp
+RENDERER_D3D_DrawShadowQuad	pD3DTextureSpriteVtable	infer-from-field:vmethod_3	D2Client/Renderer/Direct3D.cpp
+RENDERER_D3D_SetTextureFilterMode	pD3DTextureSpriteVtable	infer-from-field:vmethod_3	D2Client/Renderer/Direct3D.cpp
+D3DFLOOR_SetPalette	piVar1	infer-from-field:vmethod_31	D2Client/d3dFloorCache.cpp
+D3DSUBTILE_SetPalette	piVar1	infer-from-field:vmethod_31	D2Client/d3dSubtileCache.cpp
+D3DTEXCACHE_SetPalette	piVar1	infer-from-field:vmethod_31	D2Client/d3dTextureCache.cpp
+DIRECTD3D_LogError	pDestSurface	infer-from-field:vmethod_32	D2Client/Renderer/Direct3D.cpp
+DIRECTD3D_LogError	pMemorySurface	infer-from-field:vmethod_32	D2Client/Renderer/Direct3D.cpp
+DIRECTD3D_LogError	pSrcSurface	infer-from-field:vmethod_32	D2Client/Renderer/Direct3D.cpp
+RENDERER_D3D_ConvertPalettedTo16Bit	nMipIdx	infer-from-field:vmethod_32	D2Client/Renderer/Direct3D.cpp
+RENDERER_D3D_SetTextureStageColor	pD3DTextureSpriteVtable	infer-from-field:vmethod_4	D2Client/Renderer/Direct3D.cpp
+DIRECTD3D_LogError	pVtbl	infer-from-field:vmethod_5	D2Client/Renderer/Direct3D.cpp
+D2Sound::Sound::SOUND_PlaySound	pItemData	infer-from-field:vmethod_69	D2Client/UI/EscMenu.cpp
+ESCMENU_ClickMenuItem	pItemData	infer-from-field:vmethod_69	D2Client/UI/EscMenu.cpp
+IGNORELIST_ExtractPrefix	pnParam	infer-from-field:vmethod_7	D2Client/Chat/IgnoreList.cpp
+LISTBOX_OnMouseUp	pThis	infer-from-field:vmethod_7	D2Client/UI/ListBoxImplementation.cpp
+DIRECTD3D_LogError	local_18	infer-from-field:vmethod_8	D2Client/Renderer/Direct3D.cpp
+IGNORELIST_AddAccountMapping	pnParam	infer-from-field:vmethod_8	D2Client/IgnoreList.cpp
+IGNORELIST_AddByAccountName	pnParam	infer-from-field:vmethod_8	D2Client/Chat/IgnoreList.cpp
+IGNORELIST_AddByPattern	pnParam	infer-from-field:vmethod_8	D2Client/Chat/IgnoreList.cpp
+IGNORELIST_CheckAccountNameIgnored	pnParam	infer-from-field:vmethod_8	D2Client/Chat/IgnoreList.cpp
+IGNORELIST_CheckCharNameIgnored	pnParam	infer-from-field:vmethod_8	D2Client/Chat/IgnoreList.cpp
+IGNORELIST_CheckIgnored	pnParam	infer-from-field:vmethod_8	D2Client/Chat/IgnoreList.cpp
+IGNORELIST_RemoveByAccountName	pnParam	infer-from-field:vmethod_8	D2Client/Chat/IgnoreList.cpp
+IGNORELIST_RemoveByPattern	pnParam	infer-from-field:vmethod_8	D2Client/Chat/IgnoreList.cpp
+INPUT_ListBoxScroll	pnParam	infer-from-field:vmethod_8	D2Client/UI/ListBoxImplementation.cpp
+WriteIgnoreList	pnParam	infer-from-field:vmethod_8	D2Client/Chat/IgnoreList.cpp

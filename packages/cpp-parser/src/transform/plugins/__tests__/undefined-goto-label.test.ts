@@ -3,7 +3,11 @@ import assert from 'node:assert';
 import { parse } from '../../../parser/index.js';
 import { emit } from '../../../emit/index.js';
 import type { AnyNode } from '../../../ast/nodes.js';
-import { undefinedGotoLabelPlugin } from '../builtins/undefined-goto-label.js';
+import {
+  undefinedGotoLabelPlugin,
+  getSynthesizedGotoLabels,
+  resetSynthesizedGotoLabels,
+} from '../builtins/undefined-goto-label.js';
 
 describe('undefinedGotoLabelPlugin', () => {
   function transformCode(code: string): string {
@@ -26,6 +30,32 @@ describe('undefinedGotoLabelPlugin', () => {
   it('leaves a non-Ghidra undefined label alone (real labels are not ours to invent)', () => {
     const out = transformCode('void f(int n) { if (n) goto cleanup; return; }');
     assert.ok(!/^\s*cleanup\s*:/m.test(out), `must not synthesize non-Ghidra label in:\n${out}`);
+  });
+
+  // A synthesized label means a goto whose target has no body: either Ghidra never
+  // recovered the block, or a transform deleted it. The second case leaves a non-void
+  // function able to fall off its end, so the stubs have to be countable, not silent.
+
+  function record(code: string) {
+    resetSynthesizedGotoLabels();
+    transformCode(code);
+    return getSynthesizedGotoLabels();
+  }
+
+  it('records every goto target it had to invent', () => {
+    const recorded = record('uint32_t f(int n) { if (n) goto LAB_00677aa7; return 1; }');
+    assert.deepStrictEqual(recorded, [{ functionName: 'f', label: 'LAB_00677aa7' }]);
+  });
+
+  it('records nothing when every goto target already has a body', () => {
+    const recorded = record('void f(int n) { if (n) goto LAB_001; work(); LAB_001: done(); }');
+    assert.deepStrictEqual(recorded, []);
+  });
+
+  it('resets the record on demand', () => {
+    record('void f(int n) { if (n) goto LAB_002; }');
+    resetSynthesizedGotoLabels();
+    assert.deepStrictEqual(getSynthesizedGotoLabels(), []);
   });
 
   it('has correct metadata', () => {

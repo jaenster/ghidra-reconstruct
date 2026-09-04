@@ -23,6 +23,41 @@ import type { TransformPlugin, PluginOptions } from '../types.js';
 
 export interface UndefinedGotoLabelOptions extends PluginOptions {}
 
+/**
+ * Every label this plugin had to invent, i.e. every goto whose target no longer has a
+ * body once all transforms have run.
+ *
+ * A stub is legitimate when Ghidra itself never recovered the block (a fault exit like
+ * `nLine = 0x63e; goto LAB_00677aa7;`). It is a DEFECT when a transform deleted a live
+ * block and left the goto behind: the body is gone, and in a non-void function control
+ * can now fall off the end, which gcc turns into a `ud2` — an instant crash the moment
+ * that path runs. Nothing here can tell the two apart, so this records rather than
+ * throws; a regen can compare the list against the previous run and investigate growth.
+ */
+export interface SynthesizedGotoLabel {
+  /** Name of the enclosing function, when the declaration carries one. */
+  functionName: string;
+  /** The Ghidra label that had to be invented. */
+  label: string;
+}
+
+const SYNTHESIZED_KEY = Symbol.for('ghidra-mcp:undefined-goto-label-synthesized');
+
+function synthesizedStore(): SynthesizedGotoLabel[] {
+  const g = globalThis as Record<symbol, unknown>;
+  if (!g[SYNTHESIZED_KEY]) g[SYNTHESIZED_KEY] = [] as SynthesizedGotoLabel[];
+  return g[SYNTHESIZED_KEY] as SynthesizedGotoLabel[];
+}
+
+/** Every goto target this plugin had to stub since the last reset. */
+export function getSynthesizedGotoLabels(): SynthesizedGotoLabel[] {
+  return [...synthesizedStore()];
+}
+
+export function resetSynthesizedGotoLabels(): void {
+  (globalThis as Record<symbol, unknown>)[SYNTHESIZED_KEY] = [] as SynthesizedGotoLabel[];
+}
+
 const isGhidraLabel = (n: string): boolean => /^(LAB|switchD|caseD|joined|code|UNRECOVERED)_/.test(n);
 
 function createUndefinedGotoLabelTransformer(_options: UndefinedGotoLabelOptions = {}): Transformer {
@@ -40,6 +75,12 @@ function createUndefinedGotoLabelTransformer(_options: UndefinedGotoLabelOptions
         if (isGhidraLabel(name) && !defined.has(name)) missing.add(name);
       }
       if (missing.size === 0) return undefined;
+
+      const fnName = typeof (node.name as { name?: string } | undefined)?.name === 'string'
+        ? (node.name as { name: string }).name
+        : '<anonymous>';
+      const record = synthesizedStore();
+      for (const name of missing) record.push({ functionName: fnName, label: name });
 
       const stubs = [...missing].map(name => Stmt.label(name));
       const newBody = updateNode(node.body, {

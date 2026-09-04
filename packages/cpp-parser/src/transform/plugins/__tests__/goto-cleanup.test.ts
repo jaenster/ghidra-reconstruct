@@ -222,7 +222,6 @@ LAB_end:
 void foo() {
   cleanup();
   return;
-  return;
 }
 `);
   });
@@ -1098,7 +1097,6 @@ void foo(int x) {
     return;
   }
   done();
-  return;
   return;
 }
 `);
@@ -2246,5 +2244,83 @@ void foo(int x, int y) {
   done();
 }
 `);
+  });
+
+  // ======================================
+  // Regression: a switch case body parked behind a label must not be
+  // eliminated as dead code by the unconditional-goto handler.
+  // ======================================
+
+  it('keeps a switch case body reached by goto switchD_xxx_caseD_N', () => {
+    const out = transformCode(`
+void D2WIN_RegisterWindowHandler(int hHandle, int nHandlerType, int nMessage, int pCallback) {
+  int nAddress;
+  int nLine;
+  if (hHandle != 0) {
+    switch(nHandlerType) {
+    case 0:
+      goto switchD_00506c68_caseD_0;
+    case 1:
+      WND_RegisterCommandHandler(hHandle,nMessage,pCallback);
+      return;
+    default:
+      return;
+    }
+  }
+  nLine = 0x13;
+  goto LAB_00506c49;
+switchD_00506c68_caseD_0:
+  if (nMessage != 0x100) {
+    WND_RegisterMessageHandler(hHandle,nMessage,pCallback);
+    return;
+  }
+  nLine = 0x19;
+LAB_00506c49:
+  nAddress = GetInstructionPointer();
+  ERROR_UnrecoverableInternalError_Halt("",nAddress,nLine);
+}
+`);
+    assert.ok(
+      out.includes('WND_RegisterMessageHandler'),
+      `case 0 body was dropped:\n${out}`,
+    );
+    // and it must be reachable from case 0, not merely parked somewhere unreachable
+    const caseZero = out.indexOf('case 0:');
+    const caseOne = out.indexOf('case 1:');
+    assert.ok(caseZero >= 0 && caseOne > caseZero, `switch shape lost:\n${out}`);
+    const between = out.slice(caseZero, caseOne);
+    assert.ok(
+      between.includes('WND_RegisterMessageHandler') || between.includes('goto switchD_00506c68_caseD_0'),
+      `case 0 is empty and falls through into case 1:\n${out}`,
+    );
+  });
+
+  it('does not delete a labelled block that a goto elsewhere still targets', () => {
+    const out = transformCode(`
+void foo(int x) {
+  if (x) goto LAB_body;
+  goto LAB_end;
+LAB_body:
+  live_work();
+LAB_end:
+  cleanup();
+  return;
+}
+`);
+    assert.ok(out.includes('live_work'), `live labelled block deleted as dead code:\n${out}`);
+  });
+
+  it('does not duplicate the label tail when eliminating an unconditional goto', () => {
+    const out = transformCode(`
+void foo() {
+  goto LAB_end;
+  dead_code();
+LAB_end:
+  cleanup();
+  after();
+}
+`);
+    assert.strictEqual(out.match(/after\(\)/g)?.length, 1, `tail duplicated:\n${out}`);
+    assert.ok(!out.includes('dead_code'), `genuinely dead code kept:\n${out}`);
   });
 });

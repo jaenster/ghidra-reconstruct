@@ -1129,15 +1129,16 @@ export class CppEmitter {
     this.emitClassOrStructDecl(node, 'class');
   }
 
-  private emitStructDecl(node: StructDecl): void {
-    this.emitClassOrStructDecl(node, 'struct');
+  private emitStructDecl(node: StructDecl, noIndent = false): void {
+    this.emitClassOrStructDecl(node, 'struct', noIndent);
   }
 
   private emitClassOrStructDecl(
     node: ClassDecl | StructDecl,
-    keyword: 'class' | 'struct'
+    keyword: 'class' | 'struct',
+    noIndent = false
   ): void {
-    this.write(this.indent());
+    if (!noIndent) this.write(this.indent());
     this.emitAttributes(node.attributes);
     this.write(keyword);
 
@@ -1674,8 +1675,8 @@ export class CppEmitter {
     this.write(node.access + ':');
   }
 
-  private emitStaticAssertDecl(node: StaticAssertDecl): void {
-    this.write(this.indent());
+  private emitStaticAssertDecl(node: StaticAssertDecl, noIndent = false): void {
+    if (!noIndent) this.write(this.indent());
     this.write('static_assert(');
     this.emitNode(node.condition);
     if (node.message) {
@@ -1810,8 +1811,25 @@ export class CppEmitter {
       case NodeKind.CaseStmt:
       case NodeKind.DefaultStmt:
         return false;
+      // A record definition or a static_assert inside a block writes its own
+      // `};` / `);`. Emitting a statement terminator after it leaves a stray
+      // empty declaration.
+      case NodeKind.DeclStmt:
+        return !this.isSelfTerminatingDecl(stmt as DeclStmt);
       default:
         return true;
+    }
+  }
+
+  /** A `DeclStmt` whose one declaration emits its own indent and terminator. */
+  private isSelfTerminatingDecl(stmt: DeclStmt): boolean {
+    if (stmt.declarations.length !== 1) return false;
+    switch (stmt.declarations[0].kind) {
+      case NodeKind.StructDecl:
+      case NodeKind.StaticAssertDecl:
+        return true;
+      default:
+        return false;
     }
   }
 
@@ -1820,6 +1838,15 @@ export class CppEmitter {
   }
 
   private emitDeclStmt(node: DeclStmt): void {
+    // The enclosing block already wrote the indent and, per `needsSemicolon`,
+    // adds no terminator: these declarations supply their own.
+    if (this.isSelfTerminatingDecl(node)) {
+      const decl = node.declarations[0];
+      this.emitTrivia(decl.leadingTrivia);
+      if (decl.kind === NodeKind.StructDecl) this.emitStructDecl(decl as StructDecl, true);
+      else this.emitStaticAssertDecl(decl as StaticAssertDecl, true);
+      return;
+    }
     for (let i = 0; i < node.declarations.length; i++) {
       if (i > 0) {
         this.write(',');

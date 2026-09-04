@@ -69,7 +69,7 @@ import { generateReadme } from './readme.js';
 import { conventionKeyword } from './calling-convention.js';
 import { organizeByNamespace, getFilePath, setModuleNames, setNamespaceCollisionTypes, normalizeQualifiedReference } from './namespace.js';
 import { buildNamespaceResolution, namespaceResolution, renderNamespace } from './namespace-resolution.js';
-import { setInteriorLabelSymbols, resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, setDeclarationClosureDataContent, getDeclarationClosureReport, isUnreferenceableArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, setInitializerAddressTable, setInitializerFunctionAddresses, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType, emittedNamespaceOf, getDeclaredNames, initializerAddressReferences, addInitializerAddressReferences } from './globals-header.js';
+import { setInteriorLabelSymbols, resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, setDeclarationClosureDataContent, getDeclarationClosureReport, isUnreferenceableArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, wasGlobalClaimed, findDuplicateLinkageNames, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, setInitializerAddressTable, setInitializerFunctionAddresses, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType, emittedNamespaceOf, getDeclaredNames, initializerAddressReferences, addInitializerAddressReferences } from './globals-header.js';
 import { normalizeDataAddress, stringDefinition } from './declaration-closure.js';
 import { harvestAnnotatedParameterTypes } from './win32-signatures.js';
 import { isPlatformOrBuiltinType, isLibraryType, generatePlatformHeader, normalizeDataValue, arrayRowTypedefLines, arrayRowReturn, arrayRowSpelling, GHIDRA_PSEUDO_OP_RESULT_TYPES, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, platformDefinedFunctionNames, platformVoidPointerFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
@@ -917,11 +917,12 @@ export function generateProjectStage1(
     content: generatePlatformHeader({
       seedType: dataTypes.some(dt => dt.name === 'D2SeedStrc'),
       anonymousAggregates: buildAnonymousAggregateDefs(dataTypes, functions, inAddrClaim.claimed),
-      // Return types and GLOBAL types alike: `gpGlideSmackerTexBuf0` is
-      // `byte[32768] *`, and the cast into it is spelled through the same row
-      // typedef a `T[N] *` return is.
+      // Parameter, return and GLOBAL types alike: `gpGlideSmackerTexBuf0` is
+      // `byte[32768] *` and `D2GFX_SetPaletteTable` takes `LPPALETTEENTRY[72] *`,
+      // and the cast into either is spelled through the same row typedef.
       arrayRowTypedefs: arrayRowTypedefLines([
         ...functions.map(f => f.returnType),
+        ...functions.flatMap(f => (f.parameters ?? []).map(p => p.dataType)),
         ...globals.map(g => normalizeGlobalDeclType(g.suggestedType || g.dataType || '')),
       ]),
       winsockInAddr: [...inAddrClaim.lines, ...buildWinsockIpTypesClaim(dataTypes)],
@@ -1093,7 +1094,7 @@ export function generateProjectStage1(
   // single-owner and gets demoted — then 46 initializer entries name something
   // no scope declares. Promote them back before anything is emitted, so the
   // declaration and the reference come from one place.
-  promoteInitializerReferencedStaticLocals(analyzedGlobals);
+  promoteInitializerReferencedGlobals(analyzedGlobals);
 
   // Ghidra's listing BUILT_INs (`IconResource`, `GroupIconResource`) are runs of
   // bytes with no C++ type. Respell them as byte arrays of their own size once,
@@ -1267,10 +1268,19 @@ export function generateProjectStage1(
         const unsortedMap = buildFuncToImplPathMap(resolution.unsorted, classes, namespaces, options, 'unsorted');
         for (const [k, v] of unsortedMap) funcToImpl.set(k, v);
       }
-      computeFileLocalGlobals(analyzedGlobals, funcToImpl);
+      const initializerReferencedNames = collectInitializerReferencedNames(analyzedGlobals);
+      computeFileLocalGlobals(analyzedGlobals, funcToImpl, initializerReferencedNames);
       const rescoped = reconcileStaticScopeWithBodyReferences(analyzedGlobals, functions, funcToImpl, allDataTypeNames, programInfo?.imageBase, strings ?? []);
       if (rescoped.promotedToGlobal || rescoped.promotedToFileLocal) {
         console.log(`Globals rescoped from body references: ${rescoped.promotedToGlobal} to file scope in globals.cpp, ${rescoped.promotedToFileLocal} from function-local to file-local`);
+      }
+      // Last word before a single file is written: nothing a globals initializer
+      // names may still hold internal linkage. `promoteCentrallyReferencedGlobals`
+      // does the same thing in stage 2, but stage 2 runs AFTER every unit .cpp is
+      // already on disk with its `static` in it — too late to stop the shadow.
+      const reclaimed = promoteInitializerReferencedGlobals(analyzedGlobals);
+      if (reclaimed > 0) {
+        console.log(`Globals kept external (named by a global initializer): ${reclaimed}`);
       }
     }
 
@@ -1323,8 +1333,9 @@ export function generateProjectStage1(
     // Compute file-scoped statics BEFORE globals.h/cpp generation
     if (options.promoteStaticGlobals && analyzedGlobals.length > 0) {
       const funcToImpl = buildFuncToImplPathMap(functions, classes, namespaces, options, '');
-      computeFileLocalGlobals(analyzedGlobals, funcToImpl);
+      computeFileLocalGlobals(analyzedGlobals, funcToImpl, collectInitializerReferencedNames(analyzedGlobals));
       reconcileStaticScopeWithBodyReferences(analyzedGlobals, functions, funcToImpl, allDataTypeNames, programInfo?.imageBase, strings ?? []);
+      promoteInitializerReferencedGlobals(analyzedGlobals);
     }
 
     // Calculate globals path (needed for generateFilesForFunctions includes)
@@ -1382,7 +1393,35 @@ export function generateProjectStage2(state: GenerationState): ReconstructedProj
     }
     // A symbol named by another global's initializer is referenced, even
     // though no function body mentions it; give it back its extern.
-    promoteCentrallyReferencedGlobals(analyzedGlobals);
+    //
+    // GUARD. This runs after every unit .cpp has been written, so a symbol some
+    // file already emitted `static` cannot be promoted here without producing
+    // TWO objects of that name — one internal, one external. C++ permits it and
+    // neither the compiler nor the linker says a word, so nothing downstream
+    // will ever catch it: the loader fills one copy and every reader through a
+    // global table sees the other, forever zero. The demotion is vetoed at its
+    // decision point in stage 1 (`computeFileLocalGlobals`), so an escape here
+    // is a hole in that veto and must stop the run.
+    const centrallyPromoted = promoteCentrallyReferencedGlobals(analyzedGlobals);
+    const shadowed = centrallyPromoted.filter(g => wasGlobalClaimed(g));
+    if (shadowed.length > 0) {
+      const names = shadowed.map(g => `${g.suggestedName || g.name} (${g.address})`);
+      throw new Error(
+        `${shadowed.length} symbol(s) were emitted with internal linkage in a unit .cpp and ` +
+        `are ALSO defined at namespace scope by a globals unit — duplicate storage under one ` +
+        `name, with no compiler or linker diagnostic: ${names.slice(0, 20).join(', ')}` +
+        (names.length > 20 ? `, +${names.length - 20} more` : '')
+      );
+    }
+    const duplicateLinkage = findDuplicateLinkageNames(analyzedGlobals);
+    if (duplicateLinkage.length > 0) {
+      console.error(
+        `WARNING: ${duplicateLinkage.length} emitted name(s) are file-scoped for one Ghidra ` +
+        `symbol and external for another — two objects share the name: ` +
+        duplicateLinkage.slice(0, 10).join(', ') +
+        (duplicateLinkage.length > 10 ? `, +${duplicateLinkage.length - 10} more` : '')
+      );
+    }
     // Scopes are only final HERE — file-local promotion and orphan reconcile
     // both ran after the first call. The globals tables (and, with them, the
     // "can globals.cpp see this symbol?" answer) have to be rebuilt from the
@@ -2618,7 +2657,69 @@ export function buildGlobalAddressExtentTables(
     stringConstantNames.push(name);
   }
 
+  clampExtentsAtNeighbouringBases(globalAddresses, globalSizes);
+
   return { globalAddresses, globalSizes, globalElementSizes, stringConstantNames };
+}
+
+/**
+ * No global's extent may cross another global's BASE.
+ *
+ * Two distinct objects do not overlap in an image, so an extent that reaches
+ * past the next symbol's address is not describing storage — it is a size
+ * Ghidra got wrong, and 1.14d's table is full of them:
+ * `gaGlideEmblemPrimaryColorTableEntries_Minus1` is 241,920 bytes starting ONE
+ * BYTE before the array it names and therefore swallows `DATA_LastGameToken`
+ * whole; `gnColorLookupTableData` runs 0x20 bytes past its end into
+ * `gaPaletteBlendEntries`; `gaChatHistoryBuffer_Entry7` covers ten later
+ * symbols.
+ *
+ * The cost was not a wrong answer but NO answer. `ownerOfAddress` requires a
+ * UNIQUE owner, so every address inside one of those overlaps had two and
+ * resolved to nothing: `QSERVER_GetFirstActiveGame`'s seven `0x883d37` bounds
+ * on `DATA_LastGameToken`, `PALETTE_InitColorLookupTables`' `0x7d5528`, and the
+ * D2Client command-table walks all stayed absolute image addresses that the
+ * linker does not move.
+ *
+ * Clamping is the one correction that is safe without knowing which size is
+ * right, because it only ever SHRINKS. The rule the pass already states — never
+ * infer an extent from the gap to the next symbol, because that invents storage
+ * a global does not own — is about growing one; this is its mirror, and the
+ * failure mode is the cheap one the pass takes everywhere else. A secondary
+ * Ghidra label dropped inside a real array costs the interior literals past it
+ * their symbol, which is a visible constant; leaving the overlap costs every
+ * literal in the region its symbol AND leaves the wrong extent available to
+ * whichever consumer asks next.
+ *
+ * Applied AFTER the string constants are merged in, so a label's extent is
+ * clamped by a global's base and vice versa: they are one address space.
+ */
+function clampExtentsAtNeighbouringBases(
+  globalAddresses: Record<string, number>,
+  globalSizes: Record<string, number>
+): void {
+  const bases = [...new Set(Object.values(globalAddresses))].sort((a, b) => a - b);
+  if (bases.length < 2) return;
+
+  /** The smallest base strictly greater than `address`, or null past the end. */
+  const nextBaseAfter = (address: number): number | null => {
+    let lo = 0;
+    let hi = bases.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (bases[mid]! <= address) lo = mid + 1; else hi = mid;
+    }
+    return lo < bases.length ? bases[lo]! : null;
+  };
+
+  for (const [name, size] of Object.entries(globalSizes)) {
+    const address = globalAddresses[name];
+    if (address === undefined) continue;
+    const next = nextBaseAfter(address);
+    if (next === null) continue;
+    const room = next - address;
+    if (room > 0 && room < size) globalSizes[name] = room;
+  }
 }
 
 /**
@@ -2657,6 +2758,14 @@ function buildAddressLiteralResolver(
     const bases = baseAt.get(address);
     if (bases) bases.push(name); else baseAt.set(address, [name]);
 
+    // DELIBERATELY BROADER than the pass's own interior rule. The pass declines
+    // an interior into a global no wider than a machine word that is not a
+    // declared array (`hasAddressableInterior`); this does not, and the
+    // asymmetry is the safe direction. A reference counted here that the pass
+    // then does not emit leaves a global `extern` that could have been `static`
+    // — a missed narrowing. The reverse, a reference the pass emits and this
+    // does not count, makes the symbol `static` in another translation unit and
+    // is a LINK ERROR. So this rule may only ever over-count.
     const declared = globalSizes[name];
     const size = Number.isSafeInteger(declared) && declared > 1 ? declared : 0;
     if (size === 0 || size > MAX_INDEXED_EXTENT) continue;
@@ -2696,11 +2805,27 @@ function buildAddressLiteralResolver(
 /**
  * Rescope globals to 'file-local' when all referencing functions live in the same impl file.
  * Mutates the scope and ownerFile fields of the analyzed globals.
+ *
+ * `referencingFunctions` counts CODE xrefs only, and not even all of them - a
+ * read Ghidra classifies as non-primary does not appear. A symbol whose address
+ * another global's initializer takes therefore looks single-owner, gets internal
+ * linkage in the one .cpp that writes it, and the globals unit that names it
+ * defines a SECOND object under the same name. C++ allows that (one internal,
+ * one external linkage) so neither the compiler nor the linker says anything;
+ * the writer fills one copy and every reader through the table sees the other,
+ * still zero. `initializerReferencedNames` is the veto: a symbol a global
+ * initializer names keeps external linkage, whatever the xrefs say. An
+ * unnecessarily external symbol costs nothing; a shadowed one is silent
+ * corruption.
  */
-function computeFileLocalGlobals(
+export function computeFileLocalGlobals(
   analyzedGlobals: AnalyzedDataSymbol[],
-  funcNameToImplPath: Map<string, string>
+  funcNameToImplPath: Map<string, string>,
+  initializerReferencedNames?: ReadonlySet<string>
 ): void {
+  // Derived here when the caller does not hand one in, so the veto cannot be
+  // lost by adding a call site that forgets the argument.
+  const referenced = initializerReferencedNames ?? collectInitializerReferencedNames(analyzedGlobals);
   for (const g of analyzedGlobals) {
     if (g.scope !== 'global') continue;
     if (!g.referencingFunctions || g.referencingFunctions.length === 0) continue;
@@ -2708,6 +2833,10 @@ function computeFileLocalGlobals(
     // Skip file-local promotion for namespaced globals — a namespace indicates
     // the symbol is part of that subsystem's interface, not an internal detail
     if (g.namespace) continue;
+
+    // A global initializer takes this symbol's address: it is named at namespace
+    // scope in a globals unit, which no `static` can satisfy.
+    if (isInitializerReferencedName(g, referenced)) continue;
 
     let targetFile: string | undefined;
     let allSameFile = true;
@@ -2804,9 +2933,18 @@ export function buildBitfieldCatalog(dataTypes: ExtractedDataType[]): Map<string
           currentByteOffset = bf.offset;
         }
 
+        // The BIT the field actually occupies. Ghidra exports it as `bitOffset`
+        // (relative to this field's own byte); the running `bitPosition` is the
+        // consecutive-from-bit-0 assumption, which only holds where the original
+        // C used every bit. `D2MonStats2Txt` byte 0x104 uses bits 4, 5 and 7, so
+        // the assumption cataloged `A1mv` under mask 0x1 while every body that
+        // touches it reads `& 0x10` - the rewrite missed, and mask 0x1 (an unused
+        // bit) got A1mv's name.
+        const bit = typeof bf.bitOffset === 'number' ? bf.bitOffset : bitPosition;
+
         // Only map single-bit fields with meaningful names
         if (bitWidth === 1 && bf.name && !bf.name.startsWith('_bf_')) {
-          const mask = 1 << bitPosition;
+          const mask = 1 << bit;
           const hexOffset = `0x${bf.offset.toString(16)}`;
           const fieldAccessor = `field_${hexOffset}`;
           const key = `${fieldAccessor}:${mask}`;
@@ -3430,6 +3568,7 @@ function generateFilesForFunctions(
     context.fileLocalGlobals = prevFileLocals;
     context._preambles = prevPreambles;
 
+
     // Co-located global definitions belong to this .cpp's content BEFORE the
     // dependency scan below runs. Appending them afterwards means their type and
     // function references are invisible to the scan, so nothing includes the
@@ -3910,10 +4049,12 @@ async function outputFilesystemIgnoresCase(dir: string): Promise<boolean> {
  * compares the two types.
  */
 function signatureKey(returnType: string, paramTypes: string[]): string {
-  const spell = (t: string) =>
-    collapseFuncPtrTypedef(normalizeSignatureType(t ?? ''), isFuncDefTypedefName)
-      .replace(/\s+/g, ' ')
-      .trim();
+  // `sigType`, not a private copy of its body: the key is only worth anything
+  // while it agrees with the emitted text, and a second copy of the spelling
+  // rule drifts from it silently. impl.ts kept one, missed the `T[N] *` row
+  // typedef, and emitted a definition whose mangled name no longer matched its
+  // own declaration.
+  const spell = (t: string) => sigType(t ?? '').replace(/\s+/g, ' ').trim();
   const params = paramTypes.map(spell).filter(t => t !== '' && t !== 'void');
   return `${spell(returnType)}(${params.join(',')})`;
 }
@@ -4290,13 +4431,31 @@ function emitAnonymousAggregate(dt: ExtractedDataType): string {
  * Ghidra hands interior references back too (`Tbl[3].pField`, `DAT_x+1`); the
  * LEADING identifier is the symbol that must be declared.
  */
-function collectInitializerReferencedNames(globals: AnalyzedDataSymbol[]): Set<string> {
+export function collectInitializerReferencedNames(globals: AnalyzedDataSymbol[]): Set<string> {
   const names = new Set<string>();
   const walk = (dv: DataValue | undefined): void => {
     if (!dv) return;
     if (dv.kind === 'pointer' && dv.value) {
       const m = dv.value.match(/^(?:[A-Za-z_]\w*::)*([A-Za-z_]\w*)/);
-      if (m) names.add(m[1]);
+      if (m) {
+        names.add(m[1]);
+        // A demotion decides on the EMITTED spelling; the initializer carries
+        // whatever Ghidra held. Record both so a sanitizer difference cannot
+        // hide the reference.
+        const sanitized = sanitizeSymbolName(m[1]);
+        if (sanitized) names.add(sanitized);
+      }
+      // `promoteCentrallyReferencedGlobals` resolves the same value by its
+      // LEADING identifier instead. Record that spelling too, so this veto is a
+      // superset of what that pass can promote — anything it promotes after the
+      // unit files are written is duplicate storage, and the assertion there
+      // must only ever fire on a real hole, never on a spelling difference.
+      const head = dv.value.replace(/\b(?:compiler|VisualStudio)::/g, '').match(/^([A-Za-z_]\w*)/);
+      if (head) {
+        names.add(head[1]);
+        const sanitizedHead = sanitizeSymbolName(head[1]);
+        if (sanitizedHead) names.add(sanitizedHead);
+      }
     }
     for (const e of dv.elements ?? []) walk(e);
     for (const f of dv.fields ?? []) walk(f.value);
@@ -4305,20 +4464,39 @@ function collectInitializerReferencedNames(globals: AnalyzedDataSymbol[]): Set<s
   return names;
 }
 
-/** @see the call site — restores static-locals that a file-scope initializer names. */
-function promoteInitializerReferencedStaticLocals(globals: AnalyzedDataSymbol[]): number {
+/**
+ * @see the call sites — restores every symbol a file-scope initializer names.
+ *
+ * Both internal-linkage classes are undone here, not just the function-scope
+ * one. A `file-local` symbol is emitted `static` into one .cpp; a globals unit
+ * that names it still gets an extern and a DEFINITION of its own, and the two
+ * are DIFFERENT OBJECTS with the same name — legal C++, no diagnostic, and the
+ * writer and the reader end up on opposite copies. That is how the char-select
+ * DC6 pointers ended up loaded into `D2Launch::MainMenus::DC6_*` while
+ * `gaCharSelectAnimFrames*` kept pointing at a null `::DC6_*`.
+ */
+export function promoteInitializerReferencedGlobals(globals: AnalyzedDataSymbol[]): number {
   const referenced = collectInitializerReferencedNames(globals);
   if (referenced.size === 0) return 0;
   let promoted = 0;
   for (const g of globals) {
-    if (g.scope !== 'static-local') continue;
-    const name = g.suggestedName || g.name;
-    if (!referenced.has(name)) continue;
+    if (g.scope !== 'static-local' && g.scope !== 'file-local') continue;
+    if (!isInitializerReferencedName(g, referenced)) continue;
     g.scope = 'global';
+    g.ownerFile = undefined;
     g.ownerFunction = undefined;
     promoted++;
   }
   return promoted;
+}
+
+/** Does either spelling of this symbol appear in a global initializer? */
+function isInitializerReferencedName(
+  g: { name: string; suggestedName?: string },
+  referenced: ReadonlySet<string>,
+): boolean {
+  const raw = g.suggestedName || g.name;
+  return referenced.has(raw) || referenced.has(sanitizeSymbolName(raw));
 }
 
 /**
@@ -4854,6 +5032,12 @@ export function buildFuncPtrArgCastTables(
     const row = arrayRowReturn(
       normalizeGlobalDeclType(g.suggestedType || g.dataType || ''));
     if (row) typedefTargets[row.typedefName] = `${row.element}${row.dims.map(d => `[${d}]`).join('')}`;
+  }
+  for (const f of functions) {
+    for (const p of f.parameters ?? []) {
+      const row = arrayRowReturn(p.dataType);
+      if (row) typedefTargets[row.typedefName] = `${row.element}${row.dims.map(d => `[${d}]`).join('')}`;
+    }
   }
 
   if (process.env.RECON_DUMP_TABLES) {

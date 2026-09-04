@@ -26,11 +26,20 @@ import { isPlatformOrBuiltinType, isLibraryType, normalizeSignatureType, normali
 import { generateExternDeclaration, isFuncDefTypedefName, sanitizeSymbolName, orderForwardDeclarations, type ForwardDeclaration } from './globals-header.js';
 import { declarationHead, pointerConvention } from './calling-convention.js';
 import { enumTypedefLine } from './enum-width.js';
-import { requiresPacking } from './struct-packing.js';
+import { requiresPacking, adoptGhidraLayout } from './struct-packing.js';
 
 /** normalizeSignatureType + fn-ptr-typedef double-indirection collapse, for
- *  emitting function parameter and return types ("fpFoo *" → "fpFoo"). */
+ *  emitting function parameter and return types ("fpFoo *" → "fpFoo").
+ *
+ *  `T[N] *` goes through its row typedef here too. A pointer-to-array parameter
+ *  is NOT interchangeable with a pointer-to-element: the body dereferences it to
+ *  reach the row, and against a flattened `T *` that `*p` yields one element.
+ *  `D2GFX_SetPaletteTable(LPPALETTEENTRY (*)[72])` is the case — flattened, its
+ *  `nfpSetPaletteTable(*pPaletteTable)` handed the renderer the first palette
+ *  pointer instead of the 72-entry table, which compiles and paints nothing. */
 export function sigType(type: string): string {
+  const row = arrayRowReturn(type);
+  if (row) return `${row.typedefName} *`;
   return rootQualifyShadowedType(
     collapseFuncPtrTypedef(normalizeSignatureType(type), isFuncDefTypedefName)
   );
@@ -39,15 +48,12 @@ export function sigType(type: string): string {
 /**
  * The spelling for a RETURN type.
  *
- * Identical to {@link sigType} except for `T[N] *`: a pointer to an array is a
- * pointer to the whole row, and flattening it to `T *` (which is right for a
- * parameter) makes the caller's `*f(...)` yield a `T`. The row goes through the
- * typedef `d2_platform.h` writes for it, so the spelling stays an ordinary
- * pointer everywhere it has to be handled.
+ * Now identical to {@link sigType}, which spells `T[N] *` through the row
+ * typedef for parameters as well as returns. Kept as its own name because every
+ * return-type path is written against it.
  */
 export function returnSigType(type: string): string {
-  const row = arrayRowReturn(type);
-  return row ? `${row.typedefName} *` : sigType(type);
+  return sigType(type);
 }
 
 /**
@@ -250,8 +256,8 @@ export function generateHeader(
   const emitTypeDefinition = (type: ExtractedDataType, out: string[]): boolean => {
     // If this is the class type, emit it as a class declaration (with methods)
     if (classInfo && type.name === classInfo.name) {
-      if ((!classInfo.fields || classInfo.fields.length === 0) && 'fields' in type) {
-        classInfo.fields = (type as ExtractedStruct).fields;
+      if ('fields' in type) {
+        adoptGhidraLayout(classInfo, type as ExtractedStruct);
       }
       out.push(generateClassDeclaration(classInfo, functions, options, methodConversions, true, allFunctions));
       out.push('');
@@ -264,8 +270,8 @@ export function generateHeader(
     if (type.kind === 'STRUCTURE' && allClasses && type.name !== classInfo?.name) {
       const matchingClass = allClasses.find(c => c.name === type.name && c.methods.length > 0);
       if (matchingClass) {
-        if ((!matchingClass.fields || matchingClass.fields.length === 0) && 'fields' in type) {
-          matchingClass.fields = (type as ExtractedStruct).fields;
+        if ('fields' in type) {
+          adoptGhidraLayout(matchingClass, type as ExtractedStruct);
         }
         out.push(generateClassDeclaration(matchingClass, functions, options, methodConversions, true, allFunctions));
         out.push('');
@@ -383,13 +389,11 @@ export function generateHeader(
   // For class-based headers, emit the class struct BEFORE funcIncludes (if not already
   // emitted during topo-sort above — which happens when other types depend on it).
   if (classInfo && !classEmittedInTopoSort) {
-    if ((!classInfo.fields || classInfo.fields.length === 0) && dataTypes) {
+    if (dataTypes) {
       const matchingStruct = dataTypes.find(
         t => t.kind === 'STRUCTURE' && t.name === classInfo.name && 'fields' in t && (t as ExtractedStruct).fields?.length
       ) as ExtractedStruct | undefined;
-      if (matchingStruct?.fields) {
-        classInfo.fields = matchingStruct.fields;
-      }
+      if (matchingStruct) adoptGhidraLayout(classInfo, matchingStruct);
     }
     lines.push(generateClassDeclaration(classInfo, functions, options, methodConversions, true, allFunctions));
     lines.push('');
@@ -604,8 +608,16 @@ export function generateClassDeclaration(
     baseClause = ` : public ${classInfo.baseClasses.join(', public ')}`;
   }
 
+  // A class here is a Ghidra structure that acquired methods, so it carries the
+  // same layout obligation a struct-shaped aggregate does and gets the same
+  // check. It was skipped entirely until `alignment`/`size` were carried onto
+  // DetectedClass - a class whose fields Ghidra packs was emitted unpacked and
+  // read the wrong bytes with nothing to report it. Packing a DERIVED class
+  // packs only its own members; the base subobject keeps its own layout.
   const keyword = isStruct ? 'struct' : 'class';
-  lines.push(`${keyword} ${classInfo.name}${baseClause} {`);
+  const packed = requiresPacking(classInfo.fields, classInfo.alignment, classInfo.size)
+    ? '__attribute__((packed)) ' : '';
+  lines.push(`${keyword} ${packed}${classInfo.name}${baseClause} {`);
 
   // Helper: get thisParamIndex for a method conversion (default 0 for instance methods)
   const getThisParamIndex = (address: string, isStatic: boolean): number | undefined => {
@@ -970,6 +982,7 @@ function emitFieldLines(
       if (bitfieldCount >= 2) {
         // Emit anonymous struct with bitfields (no union wrapper needed —
         // the bitfield-access transform plugin handles mask-to-name mapping in .cpp)
+        const bitPlan = isUnion ? null : planBitfieldGroup(fields.slice(groupStart, groupEnd));
         lines.push(`    /* ${offsetHex} */ struct {`);
         for (let j = groupStart; j < groupEnd; j++) {
           const bf = fields[j];
@@ -978,8 +991,16 @@ function emitFieldLines(
           const bfName = (bf.name ?? '').replace(/[^a-zA-Z0-9_]/g, '_') || `_bf_${bfOffsetHex}_${j}`;
           const bfDecl = normalizeFieldDeclaration(
             normalizeUndefinedType(bf.dataType, bf.size), bfName, bf.size);
+          const pad = bitPlan?.get(j - groupStart);
+          const padType = bitfieldPadType(bf);
+          for (const width of pad?.before ?? []) {
+            lines.push(`        ${padType} : ${width};  // unused`);
+          }
           emitted?.add(bfName);
           lines.push(`        /* ${bfOffsetHex} */ ${bfDecl};${bfComment}`);
+          for (const width of pad?.after ?? []) {
+            lines.push(`        ${padType} : ${width};  // unused`);
+          }
         }
         lines.push(`    };`);
         continue;
@@ -1118,6 +1139,23 @@ function emitFieldLines(
 
     const decl = normalizeFieldDeclaration(type, name, field.size);
 
+    // A LONE bitfield sits at a bit too, and reads the wrong flag just as a
+    // grouped one does when it is placed at bit 0 regardless.
+    const lonePlan = isUnion || !isBitfield(field) ? null : planBitfieldGroup([field]);
+    const lonePad = lonePlan?.get(0);
+    if (lonePad) {
+      const padType = bitfieldPadType(field);
+      for (const width of lonePad.before) {
+        lines.push(`    ${padType} : ${width};  // unused`);
+      }
+      lines.push(`    /* ${offsetHex} */ ${decl};${comment}`);
+      for (const width of lonePad.after) {
+        lines.push(`    ${padType} : ${width};  // unused`);
+      }
+      i++;
+      continue;
+    }
+
     lines.push(`    /* ${offsetHex} */ ${decl};${comment}`);
     i++;
   }
@@ -1132,6 +1170,126 @@ function isUnnamedUndefined1(field: StructField): boolean {
 /** Check if a field is a bitfield (type contains ":N" suffix, e.g. "int:1") */
 function isBitfield(field: StructField): boolean {
   return /:\d+$/.test((field.dataType ?? '').trim());
+}
+
+/** Declared width of a bitfield spelling: "int:3" -> 3. Zero if unspelled. */
+function bitfieldWidth(field: StructField): number {
+  const m = (field.dataType ?? '').trim().match(/:(\d+)$/);
+  return m ? parseInt(m[1], 10) : 0;
+}
+
+/**
+ * Storage type to spell an anonymous filler bitfield with: the same unit the
+ * real field gets, so the pad consumes bits of the SAME allocation unit rather
+ * than opening a new one.
+ */
+function bitfieldPadType(field: StructField): string {
+  const base = (field.dataType ?? '').trim().replace(/:\d+$/, '');
+  return bitfieldStorageType(base, field.size);
+}
+
+/** Anonymous filler bits to declare around one bitfield of a group. */
+export interface BitfieldPadding {
+  /** Widths to declare BEFORE the field, already split at unit boundaries. */
+  before: number[];
+  /** Widths to declare AFTER the field (group tail), same splitting. */
+  after: number[];
+}
+
+/**
+ * Split a bit gap into declarations that never straddle a storage unit.
+ *
+ * `uint8_t : 12;` is not a legal declaration and a pad that crosses a byte is
+ * not portable between the Itanium ABI and MSVC, so a 12-bit gap becomes
+ * `: 8` + `: 4` aligned to the unit grid.
+ */
+function padWidths(fromBit: number, toBit: number, unitBits: number): number[] {
+  const widths: number[] = [];
+  let cur = fromBit;
+  while (cur < toBit) {
+    const boundary = (Math.floor(cur / unitBits) + 1) * unitBits;
+    const end = Math.min(toBit, boundary);
+    widths.push(end - cur);
+    cur = end;
+  }
+  return widths;
+}
+
+/**
+ * Place each bitfield of a group at the BIT Ghidra assigns it, rather than
+ * packing the group consecutively from bit 0.
+ *
+ * Consecutive-from-zero is right only where the original C used every bit.
+ * `D2MonStats2Txt` byte 0x104 carries `A1mv`/`A2mv`/`SCmv` at bits 4, 5 and 7 —
+ * monstats2.txt has no "mv" flag for the other five — so packing them at bits
+ * 0, 1, 2 compiles and links and then tests the WRONG BIT at runtime, and the
+ * group collapses from the two bytes Ghidra spans (0x104 and 0x105) to one,
+ * shifting all 22 members behind it by -1.
+ *
+ * Returns null when the group must keep the old consecutive packing:
+ *   - no member carries `bitOffset` (a snapshot older than the exporter's fix);
+ *   - some member's storage is not one byte, where the unit arithmetic below
+ *     and C's own unit-change rules stop agreeing.
+ * Null is the graceful degradation: the caller then emits exactly what it
+ * emitted before this existed.
+ */
+export function planBitfieldGroup(group: readonly StructField[]): Map<number, BitfieldPadding> | null {
+  if (group.length === 0) return null;
+  if (!group.some(f => typeof f.bitOffset === 'number')) return null;
+  if (!group.every(f => f.size === 1)) return null;
+
+  const unitBits = 8;
+  const startByte = group[0].offset;
+  const plan = new Map<number, BitfieldPadding>();
+  let cursor = 0;
+  let maxByte = startByte;
+
+  for (let k = 0; k < group.length; k++) {
+    const field = group[k];
+    if (field.offset > maxByte) maxByte = field.offset;
+    const bitOffset = field.bitOffset;
+    if (typeof bitOffset === 'number') {
+      const target = (field.offset - startByte) * unitBits + bitOffset;
+      if (target > cursor) {
+        plan.set(k, { before: padWidths(cursor, target, unitBits), after: [] });
+        cursor = target;
+      }
+      // target < cursor would mean two components claim the same bit. Ghidra
+      // cannot produce that, and shifting a field BACKWARDS to honour it would
+      // silently drop the earlier one, so keep packing forward.
+    }
+    cursor += bitfieldWidth(field);
+  }
+
+  // Pad the group out to the byte range Ghidra assigns it, so the member behind
+  // the group keeps its offset.
+  const spanBits = (maxByte - startByte + 1) * unitBits;
+  if (spanBits > cursor) {
+    const last = group.length - 1;
+    const entry = plan.get(last) ?? { before: [], after: [] };
+    entry.after = padWidths(cursor, spanBits, unitBits);
+    plan.set(last, entry);
+  }
+
+  return plan;
+}
+
+/**
+ * Declared base type of a bitfield: the UNSIGNED integer of Ghidra's storage
+ * `size`, never the spelling in front of the colon.
+ *
+ * See the long note in `normalizeFieldDeclaration`. Falls back to the declared
+ * spelling for a size C has no exact integer for, which keeps a future Ghidra
+ * shape from silently emitting the wrong width.
+ */
+export function bitfieldStorageType(declaredBase: string, size: number): string {
+  switch (size) {
+    case 1: return 'uint8_t';
+    case 2: return 'uint16_t';
+    case 4: return 'uint32_t';
+    case 8: return 'uint64_t';
+    default: return declaredBase;
+  }
 }
 
 /**
@@ -1190,10 +1348,22 @@ function normalizeFieldDeclaration(fieldType: string, fieldName: string, fieldSi
   let name = fieldName ?? '';
   let arraySuffix = '';
 
-  // Fix bitfield syntax: "int:1" -> type="int", emit "int name : 1"
+  // Fix bitfield syntax: "int:1" -> emit "<storage> name : 1".
+  //
+  // The base type comes from Ghidra's field SIZE, not from the spelling before
+  // the colon. Ghidra's bitfield storage unit is one byte - it models the eight
+  // flags of `D2SkillsTxt` byte 0x04 as eight `int:1` components each with
+  // `size=1`, and starts a fresh byte at 0x05. The `int` is the value type, not
+  // the allocation unit. Spelling that as `int x : 1` in C++ allocates a FOUR
+  // byte unit, so a 7-bit group at 0x08 swallowed 0x08..0x0B and shifted every
+  // later member by 3: `offsetof(D2SkillsTxt, charclass)` came out 0x0F where
+  // Ghidra says 0x0C, and `sizeof` 575 where Ghidra says 572.
+  //
+  // Unsigned, always. `int x : 1` is a SIGNED one-bit field: it holds 0 and -1,
+  // never +1, so every `if (p->passive == 1)` the decompiler emitted was dead.
   const bitfieldMatch = type.match(/^(.+?):(\d+)$/);
   if (bitfieldMatch) {
-    return `${bitfieldMatch[1]} ${name} : ${bitfieldMatch[2]}`;
+    return `${bitfieldStorageType(bitfieldMatch[1], fieldSize)} ${name} : ${bitfieldMatch[2]}`;
   }
 
   // Strip Ghidra pointer size annotations: "Type *32" → "Type *"
@@ -1345,7 +1515,7 @@ export function generateStructDeclaration(struct: ExtractedStruct): string {
   // struct is packed. Emitting it unpacked compiles cleanly and reads the wrong
   // bytes - D2StringTableTblFileStrc's dwords at 0x09/0x0D/0x11 land at 12/16/20
   // and the .tbl CRC then runs off the end of the buffer. See struct-packing.ts.
-  const packed = (struct.packed || requiresPacking(struct.fields))
+  const packed = (struct.packed || requiresPacking(struct.fields, struct.alignment, struct.size))
     ? '__attribute__((packed)) ' : '';
   lines.push(`struct ${packed}${struct.name} {`);
 

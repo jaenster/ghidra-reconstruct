@@ -539,7 +539,8 @@ function normalizeSignatureTypeInner(type: string): string {
     return stars ? `void ${stars[1].trim()}` : 'void';
   }
 
-  // Fix array-pointer types: "Type[N] *" → "Type *" (Ghidra artifact for pointer-to-array params)
+  // Fall back to "Type[N] *" → "Type *" only for an element a row typedef cannot
+  // be spelled for; `sigType`/`returnSigType` take the row typedef first.
   const arrayPtrMatch = trimmed.match(/^(.+?)\[\d+\]\s*\*$/);
   if (arrayPtrMatch) {
     return `${arrayPtrMatch[1].trim()} *`;
@@ -584,15 +585,20 @@ export function collapseFuncPtrTypedef(
 // =============================================================================
 
 /**
- * A RETURN type of the shape `T[N] *` — a pointer to an array, not a pointer to
- * an element.
+ * A type of the shape `T[N] *` — a pointer to an array, not a pointer to an
+ * element. Applies to parameters and return types alike.
  *
- * For a PARAMETER the two are interchangeable (an array argument has already
- * decayed by the time it is passed), which is why `normalizeSignatureType`
- * flattens `T[N] *` to `T *` there. For a return type they are not: the caller
- * writes `*f(...)` to get the row, and against a flattened `char *` that
- * dereference yields a `char`. `ITEM_GetTxtItemTypes_invgfx` is the case —
+ * A PARAMETER is no different: the body dereferences it to reach the row, and
+ * against a flattened `T *` that `*p` yields one element.
+ * `D2GFX_SetPaletteTable` is the case — Ghidra records `LPPALETTEENTRY[72] *`,
+ * and flattened, its `nfpSetPaletteTable(*pPaletteTable)` handed the renderer
+ * the first palette pointer instead of the 72-entry table: it compiled, and the
+ * out-of-game scene painted nothing. Returns have the same shape: the caller
+ * writes `*f(...)` to get the row. `ITEM_GetTxtItemTypes_invgfx` is that case —
  * Ghidra records `char[32] *`, the row is one `itemtypes.txt` invgfx column.
+ *
+ * `normalizeSignatureType` still flattens `T[N] *` when the element is not a
+ * plain type name, which is the only shape a row typedef cannot be written for.
  *
  * The row is spelled through a typedef rather than a `T (*f(args))[N]`
  * declarator so that every place that handles a return type — the header, the
@@ -675,10 +681,11 @@ export function arrayRowSpelling(type: string): string {
   return row ? `${row.typedefName} *` : type;
 }
 
-/** The `typedef` lines the array-row returns in a build need, deduplicated. */
-export function arrayRowTypedefLines(returnTypes: Iterable<string | undefined>): string[] {
+/** The `typedef` lines the array rows in a build need, deduplicated. Fed every
+ *  parameter, return and global type, since all three spell `T[N] *` this way. */
+export function arrayRowTypedefLines(types: Iterable<string | undefined>): string[] {
   const byName = new Map<string, string>();
-  for (const t of returnTypes) {
+  for (const t of types) {
     const row = arrayRowReturn(t);
     if (!row) continue;
     byName.set(row.typedefName, `typedef ${row.element} ${row.typedefName}${row.dims.map(d => `[${d}]`).join('')};`);
@@ -1653,6 +1660,19 @@ export function generatePlatformHeader(
   // every return-type path on an ordinary pointer; see `arrayRowReturn`.
   if (options.arrayRowTypedefs && options.arrayRowTypedefs.length > 0) {
     lines.push('// Array rows held by pointer (Ghidra `T[N] *` return and global types)');
+    // This header is force-included BEFORE every other, so a project struct used
+    // as the element type is not declared yet and the typedef fails to compile -
+    // it took out all 511 translation units at once. Forward-declare the project
+    // types first; system typedefs (LPPALETTEENTRY) and builtins already exist.
+    const seen = new Set<string>();
+    for (const def of options.arrayRowTypedefs) {
+      const m = /^typedef\s+([A-Za-z_][A-Za-z0-9_]*)\s/.exec(def);
+      if (!m) continue;
+      const elem = m[1];
+      if (!/^D2[A-Za-z0-9_]*$/.test(elem) || seen.has(elem)) continue;
+      seen.add(elem);
+      lines.push(`struct ${elem};`);
+    }
     for (const def of options.arrayRowTypedefs) lines.push(def);
     lines.push('');
   }

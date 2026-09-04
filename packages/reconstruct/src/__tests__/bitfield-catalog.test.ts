@@ -27,6 +27,11 @@ function byte(name: string, offset: number, size = 1): ExtractedStruct['fields']
   return { name, dataType: 'undefined1', offset, size };
 }
 
+/** A bitfield that carries the BIT Ghidra assigns it, not just its byte. */
+function bfAt(name: string, offset: number, bitOffset: number): ExtractedStruct['fields'][number] {
+  return { name, dataType: 'byte:1', offset, size: 1, bitOffset, bitSize: 1 };
+}
+
 describe('buildBitfieldCatalog', () => {
   it('maps a single-bit named bitfield to (offset,mask)', () => {
     const dts: ExtractedDataType[] = [
@@ -76,6 +81,32 @@ describe('buildBitfieldCatalog', () => {
     ];
     const catalog = buildBitfieldCatalog(dts);
     assert.ok(!catalog.has('field_0x3:1'), 'conflicting names must drop the key');
+  });
+
+  it('keys on the exported bit position, not on declaration order', () => {
+    // D2MonStats2Txt byte 0x104: bits 4, 5 and 7 only - monstats2.txt has no
+    // "mv" flag for the rest. Cataloged consecutively, A1mv answered to mask
+    // 0x1 (an unused bit) and the `field_0x104 & 0x10` that bodies actually
+    // contain matched nothing.
+    const dts: ExtractedDataType[] = [
+      struct('D2MonStats2Txt', [
+        bfAt('A1mv', 0x104, 4), bfAt('A2mv', 0x104, 5), bfAt('SCmv', 0x104, 7),
+      ]),
+    ];
+    const catalog = buildBitfieldCatalog(dts);
+    assert.strictEqual(catalog.get('field_0x104:16'), 'A1mv');
+    assert.strictEqual(catalog.get('field_0x104:32'), 'A2mv');
+    assert.strictEqual(catalog.get('field_0x104:128'), 'SCmv');
+    assert.ok(!catalog.has('field_0x104:1'), 'bit 0 is unused and must map to nothing');
+  });
+
+  it('falls back to consecutive packing when no bit position was exported', () => {
+    const dts: ExtractedDataType[] = [
+      struct('Old', [bf('first', 0x20, 1), bf('second', 0x20, 1)]),
+    ];
+    const catalog = buildBitfieldCatalog(dts);
+    assert.strictEqual(catalog.get('field_0x20:1'), 'first');
+    assert.strictEqual(catalog.get('field_0x20:2'), 'second');
   });
 
   it('drops when a multi-byte field overlaps the bitfield byte in another struct', () => {

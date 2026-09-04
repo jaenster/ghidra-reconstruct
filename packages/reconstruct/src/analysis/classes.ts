@@ -17,6 +17,7 @@ import type {
   StructField,
   GhidraConnection,
 } from '../types.js';
+import { adoptGhidraLayout } from '../codegen/struct-packing.js';
 
 export interface ClassDetectionResult {
   classes: DetectedClass[];
@@ -68,7 +69,7 @@ export async function detectClasses(
   for (const struct of safeStructs) {
     const existingClass = classes.find(c => c.name === struct.name);
     if (existingClass && struct.fields) {
-      existingClass.fields = struct.fields;
+      adoptGhidraLayout(existingClass, struct);
     }
   }
 

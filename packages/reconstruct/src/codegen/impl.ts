@@ -22,18 +22,11 @@ import { CPP_KEYWORDS } from './header.js';
 import { transformGhidraCode, preprocessGhidraCode, isGhidraGeneratedName, suggestBetterName, takeFuncPtrArgCastTypedefs, type TransformResult, type FuncPtrTarget } from '@ghidra-mcp/cpp-parser';
 import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js';
 import { namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
-import { cleanFunctionComment, guardedFuncDefTypedef, emittedFunctionName, returnSigType } from './header.js';
+import { cleanFunctionComment, guardedFuncDefTypedef, emittedFunctionName, returnSigType, sigType } from './header.js';
 import { declarationHead } from './calling-convention.js';
-import { normalizeSignatureType, collapseFuncPtrTypedef, rootQualifyShadowedType, emittedParameterName, getAggregateTypeNames } from './platform-types.js';
+import { emittedParameterName, getAggregateTypeNames } from './platform-types.js';
 import { generateStaticLocalsBlock, emitDataValue, setInitializerOwnerAddress, inferArrayDeclaration, isWideTextDatum, normalizeArrayDeclaration, braceArrayInitializer, isFuncDefTypedefName, getKnownFuncDefTypedefs, getKnownEnumConstants, setInitializerNamespace, renderGlobalScalarInitializer, recordDeclaredName } from './globals-header.js';
 
-/** normalizeSignatureType + fn-ptr-typedef double-indirection collapse, for
- *  emitting function parameter and return types ("fpFoo *" → "fpFoo"). */
-function sigType(type: string): string {
-  return rootQualifyShadowedType(
-    collapseFuncPtrTypedef(normalizeSignatureType(type), isFuncDefTypedefName)
-  );
-}
 
 /**
  * Clean a parameter name: apply the same renaming the body transform does
@@ -2223,6 +2216,13 @@ function transformDecompiledCode(
         // declare.
         enclosingReturnType: enclosing?.signature?.returnType,
       };
+      // Same tables as `global-address-literal`: this pass reads the `&sym`
+      // form that one produces, and needs the same addresses to turn it back
+      // into a distance.
+      perPluginOptions['address-run-bound'] = {
+        globalAddresses: context.funcPtrArgCasts.globalAddresses,
+        globalNamespaces: context.funcPtrArgCasts.globalNamespaces,
+      };
       perPluginOptions['assign-cast'] = {
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         functionParamTypes: context.funcPtrArgCasts.functionParamTypes,
@@ -2325,6 +2325,9 @@ function transformDecompiledCode(
         slots: enclosing.stackSlots,
         globalAddresses: context.funcPtrArgCasts?.globalAddresses,
       };
+      // The same frame, read for a different question: which locals the original
+      // kept as ONE object on the stack, addressed through the first slot.
+      perPluginOptions['frame-group-locals'] = { slots: enclosing.stackSlots };
     }
 
     const shadowedTypes = shadowedTypeQualifyOptions(context);

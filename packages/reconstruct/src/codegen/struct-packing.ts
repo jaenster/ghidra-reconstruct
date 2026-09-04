@@ -22,10 +22,24 @@
  * offsets the database carries.
  *
  * A field whose alignment cannot be determined (a nested struct, an unknown
- * typedef) makes the struct UNDECIDABLE, and undecidable returns false: adding
- * `packed` on a hunch would change the ABI of a struct that may be fine. Those
- * are the ones `static_assert` on `offsetof` is for, and they stay silent until
- * that lands.
+ * typedef, a bitfield) makes the struct UNDECIDABLE - and undecidable used to
+ * return false. That threw away an answer the database already had. Ghidra
+ * records an `alignment` per structure, and 914 of the 1063 non-mac structures
+ * carry `alignment: 1`; every one of the 42 structs the cross compiler proved
+ * mislaid was among them. So undecidable now defers to Ghidra's own alignment
+ * instead of to a guess: `alignment === 1` is Ghidra saying "packed", and
+ * nothing but the derivation above can say it for us.
+ *
+ * The positive derivation is unchanged. An undecidable struct with no recorded
+ * alignment still returns false - adding `packed` on a hunch would change the
+ * ABI of a struct that may be fine.
+ *
+ * The third trigger is TRAILING PADDING. A struct can reproduce every declared
+ * offset naturally and still be the wrong SIZE, because C rounds the total up
+ * to the struct's own alignment where Ghidra does not. Offsets alone cannot see
+ * it, and `sizeof` is the array stride - so an array of such a struct reads the
+ * wrong row from its second element on. 43 structures in 1.14d are in this
+ * class; `layout_check.py` had already caught three of them by hand.
  */
 
 import type { StructField } from '../types.js';
@@ -58,21 +72,43 @@ export function fieldAlignment(dataType: string): number | undefined {
 }
 
 /**
- * True when natural C alignment cannot reproduce the declared field offsets.
+ * True when natural C layout cannot reproduce what Ghidra records.
  *
- * Returns false for an undecidable struct - see the module comment. Also false
- * for a struct with fewer than two positioned fields, where there is nothing
- * for alignment to disagree about.
+ * Three independent triggers, any one of which is sufficient:
+ *
+ *  1. A field lands EARLIER than natural alignment would put it. Only a packed
+ *     layout explains the offset the database carries.
+ *  2. The derivation is undecidable and Ghidra records `alignment: 1` - the
+ *     database answering the question the derivation could not.
+ *  3. Every offset reproduces, but the natural TOTAL is bigger than Ghidra's
+ *     `size` - trailing padding C adds and the database does not model.
+ *
+ * Also false for a struct with fewer than two positioned fields, where there
+ * is nothing for alignment to disagree about.
+ *
+ * @param ghidraAlignment the structure's `alignment` as Ghidra records it; 1
+ *   means Ghidra itself laid the struct out packed.
+ * @param ghidraSize the structure's `size` as Ghidra records it, for trigger 3.
  */
-export function requiresPacking(fields: readonly StructField[]): boolean {
+export function requiresPacking(
+  fields: readonly StructField[],
+  ghidraAlignment?: number,
+  ghidraSize?: number,
+): boolean {
+  // Ghidra could not size a field, so the derivation below cannot run past it.
+  // Defer to what the database recorded rather than to a guess.
+  const undecidable = () => ghidraAlignment === 1;
+
   if (!fields || fields.length < 2) return false;
   let cursor = 0;
+  let maxAlign = 1;
   for (const f of fields) {
     if (typeof f.offset !== 'number' || typeof f.size !== 'number' || f.size <= 0) {
-      return false;                              // undecidable
+      return undecidable();
     }
     const align = fieldAlignment(f.dataType);
-    if (align === undefined) return false;       // undecidable
+    if (align === undefined) return undecidable();
+    if (align > maxAlign) maxAlign = align;
     const aligned = Math.ceil(cursor / align) * align;
     if (aligned !== f.offset) {
       // Natural layout would put this field somewhere else. Only a packed
@@ -84,5 +120,47 @@ export function requiresPacking(fields: readonly StructField[]): boolean {
     }
     cursor = f.offset + f.size;
   }
+
+  // Every field offset reproduces naturally - and the struct can STILL be
+  // wrong, because C rounds the total up to the struct's own alignment and
+  // Ghidra does not. `D2ConfigControlDescStrc` is 10 bytes in the database and
+  // 12 in C; `D2HirelingHireData` 58 and 60. Every `offsetof` agrees, so the
+  // offset derivation above sees nothing - but `sizeof` IS the array stride,
+  // so an array of one of these reads the wrong row from element 1 onward, and
+  // any allocation sized by `sizeof` is over-large in a way nothing reports.
+  //
+  // Only a total LARGER than Ghidra's is evidence: a declared size bigger than
+  // the fields need is trailing filler the database models on purpose, and
+  // packing cannot add bytes anyway.
+  if (typeof ghidraSize === 'number' && ghidraSize > 0 && cursor <= ghidraSize) {
+    const naturalSize = Math.ceil(cursor / maxAlign) * maxAlign;
+    if (naturalSize > ghidraSize) return true;
+  }
+
   return false;
+}
+
+/**
+ * Give an aggregate the layout facts of the Ghidra structure it is built from.
+ *
+ * A `DetectedClass` is a Ghidra STRUCTURE that acquired methods, and it takes
+ * its fields from that structure at four separate points in the pipeline. Each
+ * of those points copied `fields` and nothing else, so the emitted class had no
+ * way to know its own alignment and `generateClassDeclaration` could not pack
+ * it - a class-shaped aggregate silently escaped the check a struct-shaped one
+ * gets. The fields and the numbers that describe their layout travel together.
+ *
+ * Fields are only adopted when the target has none, matching what each call
+ * site already did; the numbers are adopted whenever the target lacks them,
+ * because a class whose fields arrived earlier still needs them.
+ */
+export function adoptGhidraLayout(
+  target: { fields?: StructField[]; alignment?: number; size?: number },
+  source: { fields?: StructField[]; alignment?: number; size?: number },
+): void {
+  if ((!target.fields || target.fields.length === 0) && source.fields) {
+    target.fields = source.fields;
+  }
+  if (target.alignment === undefined) target.alignment = source.alignment;
+  if (target.size === undefined) target.size = source.size;
 }

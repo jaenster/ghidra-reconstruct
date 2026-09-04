@@ -145,6 +145,20 @@ export interface StructField {
   offset: number;
   size: number;
   comment?: string;
+  /**
+   * Bitfields only: the bit position of this field's least-significant bit
+   * WITHIN the storage unit that starts at `offset`. Ghidra normalises a
+   * bitfield component to minimal storage, so this is always relative to this
+   * field's own `offset` and is 0..7 for a one-byte unit.
+   *
+   * Absent on a snapshot taken before the exporter carried it, and on every
+   * non-bitfield. Absent means UNKNOWN, not zero: codegen then falls back to
+   * packing the group consecutively from bit 0, which is what it did before
+   * the key existed.
+   */
+  bitOffset?: number;
+  /** Bitfields only: effective width in bits, as Ghidra computed it. */
+  bitSize?: number;
 }
 
 export interface ExtractedEnum extends ExtractedDataType {
@@ -292,6 +306,19 @@ export interface DetectedClass {
   baseClasses: string[];
   constructorAddress?: string;
   destructorAddress?: string;
+  /**
+   * Ghidra's recorded alignment and size for the STRUCTURE this class takes its
+   * fields from, carried alongside those fields.
+   *
+   * A class here is not a C++ class the binary declared - it is a Ghidra
+   * structure that acquired methods. Its layout obligations are identical to a
+   * struct-shaped one's, and `generateClassDeclaration` needs the same two
+   * numbers `generateStructDeclaration` reads off `ExtractedStruct` to decide
+   * whether the aggregate has to be packed. Both stay undefined for a class
+   * with no matching data type, and an undefined alignment never packs.
+   */
+  alignment?: number;
+  size?: number;
 }
 
 export interface DetectedMethod {

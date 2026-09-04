@@ -5,6 +5,8 @@ import {
   extractAddressFromName,
   suggestBetterName,
   cleanGhidraNames,
+  simplifyBooleanExpressions,
+  simplifyNullChecks,
   ghidraCleanup,
   ghidraQuickClean,
   ghidraFullClean,
@@ -14,6 +16,46 @@ import { emit } from '../../emit/emitter.js';
 import type { FunctionDecl, Identifier, AnyNode } from '../../ast/nodes.js';
 
 describe('Ghidra Transforms', () => {
+
+  describe('a comparison-to-int conversion is a VALUE, not a condition', () => {
+    // The SETNZ at 0040ee0e. Slot 0 is the empty log name, so the index is 0
+    // or 1; dropping the `!= 0` made it the first CHARACTER of the file name.
+    function run(code: string): string {
+      const ast = parse(code);
+      return emit(simplifyNullChecks()(simplifyBooleanExpressions()(ast)) as AnyNode);
+    }
+
+    it('keeps (uint)(x != 0) normalised where the value is assigned', () => {
+      const out = run('void f(byte *s) { uint n; n = (uint)(*s != 0); }');
+      assert.ok(out.includes('(*s != 0)'), `lost the 0/1 normalisation: ${out}`);
+    });
+
+    it('keeps x != 0 under a relational operator', () => {
+      const out = run('void f(byte *s) { if ((*s != 0) < 0x14) { g(); } }');
+      assert.ok(out.includes('(*s != 0) < 0x14'), `lost the bound operand: ${out}`);
+    });
+
+    it('keeps x != 0 in a call argument and a return', () => {
+      const arg = run('void f(int x) { g(x != 0); }');
+      assert.ok(arg.includes('x != 0'), `lost the argument: ${arg}`);
+      const ret = run('int f(int x) { return x != 0; }');
+      assert.ok(ret.includes('x != 0'), `lost the return value: ${ret}`);
+    });
+
+    it('still drops it where the value is read only for truth', () => {
+      assert.ok(run('void f(int x) { if (x != 0) { g(); } }').includes('if (x)'));
+      assert.ok(run('void f(int x) { while (x != 0) { g(); } }').includes('while (x)'));
+      assert.ok(run('void f(int x) { if (!(x != 0)) { g(); } }').includes('if (!x)'));
+      assert.ok(run('void f(int a, int b) { if ((a != 0) && (b != 0)) { g(); } }')
+        .includes('if (a && b)'));
+    });
+
+    it('still rewrites x == 0 to !x anywhere, which preserves the value', () => {
+      assert.ok(run('void f(int x) { int n; n = (x == 0); }').includes('!x'));
+      assert.ok(run('void f(int *p) { if (p == (void *)0x0) { g(); } }').includes('if (!p)'));
+    });
+  });
+
   describe('isGhidraGeneratedName', () => {
     it('detects FUN_ names', () => {
       assert.ok(isGhidraGeneratedName('FUN_00401000'));

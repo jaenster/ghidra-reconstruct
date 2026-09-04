@@ -18,6 +18,27 @@ describe('ternarySimplifyPlugin', () => {
     return emit(transformed as AnyNode).trim();
   }
 
+  describe('a comparison against 0 or 1 is not a comparison against a bool', () => {
+    it('keeps (uint)(x != 0) where the value is assigned', () => {
+      const out = transform(`void f(byte *s) { uint n; n = (uint)(*s != 0); }`);
+      assert.ok(out.includes('(*s != 0)'), `lost the 0/1 normalisation: ${out}`);
+    });
+
+    it('keeps x == 1 and x != 1 for an integer', () => {
+      assert.ok(transform(`void f(int x) { if (x == 1) { g(); } }`).includes('x == 1'));
+      assert.ok(transform(`void f(int x) { if (x != 1) { g(); } }`).includes('x != 1'));
+    });
+
+    it('still simplifies against the real keywords', () => {
+      assert.ok(transform(`void f(bool b) { if (b != false) { g(); } }`).includes('if (b)'));
+      assert.ok(transform(`void f(bool b) { if (b == true) { g(); } }`).includes('if (b)'));
+    });
+
+    it('still simplifies cond ? 1 : 0, whose own branches say it is 0 or 1', () => {
+      assert.ok(!transform(`void f(int x) { int y = (x > 0) ? 1 : 0; }`).includes('?'));
+    });
+  });
+
   describe('ternary with boolean results', () => {
     it('should simplify (cond) ? 1 : 0 to cond', () => {
       const code = `void f(int x) { int y = (x > 0) ? 1 : 0; }`;

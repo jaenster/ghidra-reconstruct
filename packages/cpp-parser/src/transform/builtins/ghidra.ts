@@ -188,42 +188,173 @@ export function simplifyPointerArithmetic(): Transformer {
 }
 
 /**
+ * The expression positions where a value is read for its TRUTH and nothing else.
+ *
+ * These are the only places `x != 0` may be spelled `x`. Everywhere else the
+ * comparison is a VALUE — an `int` that is 0 or 1 — and dropping it substitutes
+ * `x` itself, which is a different number for every `x` outside {0, 1}.
+ *
+ * `truthyContext` walks down through the shapes that keep a position truthy:
+ * parentheses carry it, `!` and the short-circuit operators read their operands
+ * for truth too, so `!(a != 0)` and `(a != 0) && (b != 0)` are all inside one
+ * condition. Anything else stops the descent.
+ */
+function truthyContext(expr: Expression, isNil: (e: Expression) => boolean): Expression {
+  if (expr.kind === NodeKind.ParenExpr) {
+    const paren = expr as unknown as { expression: Expression };
+    const inner = truthyContext(paren.expression, isNil);
+    return inner === paren.expression ? expr : { ...expr, expression: inner } as Expression;
+  }
+
+  if (expr.kind === NodeKind.UnaryExpr) {
+    const unary = expr as UnaryExpr;
+    if (unary.operator !== '!') return expr;
+    const operand = truthyContext(unary.operand, isNil);
+    return operand === unary.operand ? expr : { ...unary, operand };
+  }
+
+  if (expr.kind === NodeKind.BinaryExpr) {
+    const binary = expr as BinaryExpr;
+    if (binary.operator === '&&' || binary.operator === '||') {
+      const left = truthyContext(binary.left, isNil);
+      const right = truthyContext(binary.right, isNil);
+      return left === binary.left && right === binary.right
+        ? expr
+        : { ...binary, left, right };
+    }
+    if (binary.operator !== '!=') return expr;
+    const nilLeft = isNil(binary.left);
+    const nilRight = isNil(binary.right);
+    if (!nilLeft && !nilRight) return expr;
+    const nonNil = nilLeft ? binary.right : binary.left;
+    return {
+      ...nonNil,
+      leadingTrivia: binary.leadingTrivia,
+      trailingTrivia: binary.trailingTrivia,
+    } as Expression;
+  }
+
+  return expr;
+}
+
+/**
+ * Rewrite the truthy positions a node owns, or `undefined` when nothing moved.
+ *
+ * The truthy positions are the conditions of the control-flow statements and
+ * the ternary, and the operands of `!`, `&&` and `||`. A node kind not in that
+ * set has none and is left alone; the caller handles the value-preserving
+ * `== nil` direction separately, which needs no context at all.
+ */
+function rewriteTruthyPositions(
+  node: ASTNode,
+  isNil: (e: Expression) => boolean,
+): ASTNode | undefined {
+  switch (node.kind) {
+    case NodeKind.IfStmt:
+    case NodeKind.WhileStmt:
+    case NodeKind.DoWhileStmt:
+    case NodeKind.ForStmt:
+    case NodeKind.ConditionalExpr: {
+      const owner = node as unknown as { condition: Expression | null };
+      if (!owner.condition) return undefined;
+      const condition = truthyContext(owner.condition, isNil);
+      return condition === owner.condition
+        ? undefined
+        : ({ ...node, condition } as unknown as ASTNode);
+    }
+    case NodeKind.UnaryExpr: {
+      const unary = node as UnaryExpr;
+      if (unary.operator !== '!') return undefined;
+      const operand = truthyContext(unary.operand, isNil);
+      return operand === unary.operand
+        ? undefined
+        : ({ ...unary, operand } as unknown as ASTNode);
+    }
+    case NodeKind.BinaryExpr: {
+      const binary = node as BinaryExpr;
+      if (binary.operator !== '&&' && binary.operator !== '||') return undefined;
+      const left = truthyContext(binary.left, isNil);
+      const right = truthyContext(binary.right, isNil);
+      return left === binary.left && right === binary.right
+        ? undefined
+        : ({ ...binary, left, right } as unknown as ASTNode);
+    }
+    default:
+      return undefined;
+  }
+}
+
+/** `x == nil` → `!x`. Value-preserving in every context: `!x` is already 0 or 1. */
+function negatedNilCompare(
+  node: ASTNode,
+  isNil: (e: Expression) => boolean,
+): ASTNode | undefined {
+  const binary = node as BinaryExpr;
+  if (binary.operator !== '==') return undefined;
+
+  const nilLeft = isNil(binary.left);
+  const nilRight = isNil(binary.right);
+  if (!nilLeft && !nilRight) return undefined;
+
+  return {
+    kind: NodeKind.UnaryExpr,
+    operator: '!',
+    operand: nilLeft ? binary.right : binary.left,
+    location: binary.location,
+    leadingTrivia: binary.leadingTrivia,
+    trailingTrivia: binary.trailingTrivia,
+  } as UnaryExpr;
+}
+
+/** A bare integer `0`. */
+function isZeroLiteral(expr: Expression): boolean {
+  return expr.kind === NodeKind.IntegerLiteral
+    && (expr as IntegerLiteralExpr).value === 0n;
+}
+
+/** `nullptr`, a bare `0`, or a cast of `0` — the spellings Ghidra writes NULL as. */
+function isNullLiteral(expr: Expression): boolean {
+  if (expr.kind === NodeKind.NullptrLiteral) return true;
+  if (expr.kind === NodeKind.CStyleCastExpr) {
+    const cast = expr as CStyleCastExpr;
+    return cast.expression.kind === NodeKind.IntegerLiteral
+      && (cast.expression as IntegerLiteralExpr).value === 0n;
+  }
+  return isZeroLiteral(expr);
+}
+
+/**
  * Clean up Ghidra's boolean expressions
- * e.g., (x != 0) -> x (in boolean context)
- *       (x == 0) -> !x
+ * e.g., (x != 0) -> x  — ONLY where the value is read for truth
+ *       (x == 0) -> !x — anywhere
+ *
+ * ## Why the two directions are not symmetric
+ *
+ * `!x` is already 0 or 1, so `x == 0` → `!x` preserves the value in every
+ * context and needs no guard. `x != 0` → `x` does not: the comparison yields 0
+ * or 1 and `x` yields whatever `x` is.
+ *
+ * The unguarded version of this cost a crash. A `SETNZ` at `0040ee0e` decompiles
+ * as `nSlot = (uint)(*szFileName != 0)` — slot 0 is reserved for the empty log
+ * name, so the log manager's slot index is 0 or 1. Rewritten to
+ * `nSlot = (uint32_t)*szFileName` it became the first CHARACTER of the file
+ * name, and Ghidra's own `(*szFileName != 0) < 0x14` guard, given the same
+ * treatment, went false for every name starting at or above 'T' — so the scan
+ * that fills the slot never ran and every log open fell into LRU eviction.
+ *
+ * A comparison is therefore only dropped at a position that reads it for truth:
+ * a condition, an operand of `!`, `&&` or `||`. In an assignment, a cast, an
+ * argument, a `return`, or under a relational operator it stands, and stands as
+ * the normalised 0/1 the instruction produced.
  */
 export function simplifyBooleanExpressions(): Transformer {
-  return createKindTransformer(NodeKind.BinaryExpr, (node) => {
-    const binary = node as BinaryExpr;
-
-    // Check for comparison with zero
-    const isLeftZero = binary.left.kind === NodeKind.IntegerLiteral &&
-                       (binary.left as IntegerLiteralExpr).value === 0n;
-    const isRightZero = binary.right.kind === NodeKind.IntegerLiteral &&
-                        (binary.right as IntegerLiteralExpr).value === 0n;
-
-    if (!isLeftZero && !isRightZero) return undefined;
-
-    const nonZero = isLeftZero ? binary.right : binary.left;
-
-    // x != 0 -> x (in boolean context)
-    if (binary.operator === '!=') {
-      return nonZero;
-    }
-
-    // x == 0 -> !x
-    if (binary.operator === '==') {
-      return {
-        kind: NodeKind.UnaryExpr,
-        operator: '!',
-        operand: nonZero,
-        location: binary.location,
-        leadingTrivia: binary.leadingTrivia,
-        trailingTrivia: binary.trailingTrivia,
-      } as UnaryExpr;
-    }
-
-    return undefined;
+  return createTransformer({
+    visitNode(node) {
+      return rewriteTruthyPositions(node, isZeroLiteral)
+        ?? (node.kind === NodeKind.BinaryExpr
+          ? negatedNilCompare(node, isZeroLiteral)
+          : undefined);
+    },
   });
 }
 
@@ -232,51 +363,13 @@ export function simplifyBooleanExpressions(): Transformer {
  * e.g., if (ptr != (void *)0x0) -> if (ptr)
  */
 export function simplifyNullChecks(): Transformer {
-  return createKindTransformer(NodeKind.BinaryExpr, (node) => {
-    const binary = node as BinaryExpr;
-
-    if (binary.operator !== '!=' && binary.operator !== '==') {
-      return undefined;
-    }
-
-    // Check for cast to void* of 0
-    const isNullLiteral = (expr: Expression): boolean => {
-      if (expr.kind === NodeKind.CStyleCastExpr) {
-        const cast = expr as CStyleCastExpr;
-        if (cast.expression.kind === NodeKind.IntegerLiteral) {
-          return (cast.expression as IntegerLiteralExpr).value === 0n;
-        }
-      }
-      if (expr.kind === NodeKind.IntegerLiteral) {
-        return (expr as IntegerLiteralExpr).value === 0n;
-      }
-      if (expr.kind === NodeKind.NullptrLiteral) {
-        return true;
-      }
-      return false;
-    };
-
-    const leftIsNull = isNullLiteral(binary.left);
-    const rightIsNull = isNullLiteral(binary.right);
-
-    if (!leftIsNull && !rightIsNull) return undefined;
-
-    const nonNull = leftIsNull ? binary.right : binary.left;
-
-    if (binary.operator === '!=') {
-      // ptr != NULL -> ptr
-      return nonNull;
-    } else {
-      // ptr == NULL -> !ptr
-      return {
-        kind: NodeKind.UnaryExpr,
-        operator: '!',
-        operand: nonNull,
-        location: binary.location,
-        leadingTrivia: binary.leadingTrivia,
-        trailingTrivia: binary.trailingTrivia,
-      } as UnaryExpr;
-    }
+  return createTransformer({
+    visitNode(node) {
+      return rewriteTruthyPositions(node, isNullLiteral)
+        ?? (node.kind === NodeKind.BinaryExpr
+          ? negatedNilCompare(node, isNullLiteral)
+          : undefined);
+    },
   });
 }
 

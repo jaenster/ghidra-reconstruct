@@ -57,6 +57,10 @@ interface GhidraDataTypeDetail extends GhidraDataTypeInfo {
     offset: number;
     size: number;
     comment?: string;
+    /** Bitfields only: bit position within the storage unit at `offset`. */
+    bitOffset?: number;
+    /** Bitfields only: effective width in bits. */
+    bitSize?: number;
   }>;
   values?: Array<{
     name: string;
@@ -413,6 +417,11 @@ function mapStructField(field: NonNullable<GhidraDataTypeDetail['fields']>[0]): 
     offset: field.offset,
     size: field.size,
     comment: field.comment,
+    // Java sends these as null for a non-bitfield component (Gson serializes
+    // nulls); normalise to undefined so `typeof f.bitOffset === 'number'` is the
+    // one test codegen has to make.
+    ...(typeof field.bitOffset === 'number' ? { bitOffset: field.bitOffset } : {}),
+    ...(typeof field.bitSize === 'number' ? { bitSize: field.bitSize } : {}),
   };
 }
 

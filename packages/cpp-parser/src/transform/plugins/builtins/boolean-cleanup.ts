@@ -33,7 +33,15 @@ import type { TransformPlugin, PluginOptions } from '../types.js';
 // ============================================
 
 /**
- * Check if expression is the literal `false` or `0`
+ * Check if expression is the literal `false`.
+ *
+ * The integer `0` is deliberately NOT one of the spellings, though it compares
+ * equal to `false`. `x != false` is `x` because a `bool` is already 0 or 1;
+ * `x != 0` is `x` only where the result is read for truth, and `x` otherwise is
+ * whatever `x` is. Admitting `0` here made this rule fire everywhere and cost a
+ * crash — `nSlot = (uint)(*szFileName != 0)` became the first CHARACTER of the
+ * log file's name. The integer form belongs to `createZeroComparisonSimplifier`
+ * below, which is guarded.
  */
 function isFalse(expr: Expression): boolean {
   if (expr.kind === NodeKind.BoolLiteral) {
@@ -42,14 +50,15 @@ function isFalse(expr: Expression): boolean {
   if (expr.kind === NodeKind.Identifier) {
     return (expr as Identifier).name === 'false';
   }
-  if (expr.kind === NodeKind.IntegerLiteral) {
-    return (expr as IntegerLiteralExpr).value === 0n;
-  }
   return false;
 }
 
 /**
- * Check if expression is the literal `true` or `1`
+ * Check if expression is the literal `true`.
+ *
+ * The integer `1` is excluded for a stronger reason than `isFalse`'s: `x == 1`
+ * is not `x` and `x != 1` is not `!x` for ANY context when `x` can be 2. Those
+ * equivalences hold for a `bool` and for nothing else.
  */
 function isTrue(expr: Expression): boolean {
   if (expr.kind === NodeKind.BoolLiteral) {
@@ -57,9 +66,6 @@ function isTrue(expr: Expression): boolean {
   }
   if (expr.kind === NodeKind.Identifier) {
     return (expr as Identifier).name === 'true';
-  }
-  if (expr.kind === NodeKind.IntegerLiteral) {
-    return (expr as IntegerLiteralExpr).value === 1n;
   }
   return false;
 }

@@ -25,6 +25,7 @@ import type {
   UnaryExpr,
   ConditionalExpr,
   IntegerLiteralExpr,
+  BoolLiteralExpr,
   Identifier,
   ParenExpr,
 } from '../../../ast/nodes.js';
@@ -56,6 +57,29 @@ function isBooleanLiteral(expr: Expression): { value: boolean } | null {
     if (name === 'false') return { value: false };
   }
 
+  return null;
+}
+
+/**
+ * Check if expression is a REAL boolean literal — `true`/`false`, never `1`/`0`.
+ *
+ * `isBooleanLiteral` above accepts the integers because `cond ? 1 : 0` really is
+ * `cond`: the ternary's own branches say the result is 0 or 1. A COMPARISON
+ * against a literal says no such thing. `x == 1` is `x` and `x != 1` is `!x`
+ * only when `x` is a `bool`; for an `int` that can be 2 both are simply wrong,
+ * and `x != 0` is `x` only where the value is read for truth — Ghidra writes
+ * `nSlot = (uint)(*szFileName != 0)` for a `SETNZ`, and dropping the comparison
+ * there made the log manager's slot index the first CHARACTER of the file name.
+ */
+function isBoolKeywordLiteral(expr: Expression): { value: boolean } | null {
+  if (expr.kind === NodeKind.BoolLiteral) {
+    return { value: (expr as BoolLiteralExpr).value === true };
+  }
+  if (expr.kind === NodeKind.Identifier) {
+    const name = (expr as Identifier).name;
+    if (name === 'true') return { value: true };
+    if (name === 'false') return { value: false };
+  }
   return null;
 }
 
@@ -184,11 +208,11 @@ function createBoolComparisonSimplifier(): Transformer {
     visitBinaryExpr(binary) {
       // x == true  →  x
       if (binary.operator === '==') {
-        const rightBool = isBooleanLiteral(binary.right);
+        const rightBool = isBoolKeywordLiteral(binary.right);
         if (rightBool?.value === true) {
           return binary.left;
         }
-        const leftBool = isBooleanLiteral(binary.left);
+        const leftBool = isBoolKeywordLiteral(binary.left);
         if (leftBool?.value === true) {
           return binary.right;
         }
@@ -196,7 +220,7 @@ function createBoolComparisonSimplifier(): Transformer {
 
       // x == false  →  !x
       if (binary.operator === '==') {
-        const rightBool = isBooleanLiteral(binary.right);
+        const rightBool = isBoolKeywordLiteral(binary.right);
         if (rightBool?.value === false) {
           return {
             kind: NodeKind.UnaryExpr,
@@ -212,7 +236,7 @@ function createBoolComparisonSimplifier(): Transformer {
 
       // x != true  →  !x
       if (binary.operator === '!=') {
-        const rightBool = isBooleanLiteral(binary.right);
+        const rightBool = isBoolKeywordLiteral(binary.right);
         if (rightBool?.value === true) {
           return {
             kind: NodeKind.UnaryExpr,
@@ -228,7 +252,7 @@ function createBoolComparisonSimplifier(): Transformer {
 
       // x != false  →  x
       if (binary.operator === '!=') {
-        const rightBool = isBooleanLiteral(binary.right);
+        const rightBool = isBoolKeywordLiteral(binary.right);
         if (rightBool?.value === false) {
           return binary.left;
         }

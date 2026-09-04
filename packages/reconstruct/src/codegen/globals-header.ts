@@ -237,6 +237,42 @@ export function markGlobalsClaimed(globals: Iterable<AnalyzedDataSymbol> | undef
 }
 
 /**
+ * Has an output file already emitted this global's own definition?
+ *
+ * A claim is made when the unit .cpp is written, so this is the "already on
+ * disk" test any later rescope has to pass. A claimed symbol that ends up
+ * `scope === 'global'` gets a SECOND definition in a globals unit under the same
+ * name — internal linkage in one TU, external in the other, which C++ accepts
+ * without a word from the compiler or the linker.
+ */
+export function wasGlobalClaimed(g: AnalyzedDataSymbol): boolean {
+  return claimedGlobals.has(g);
+}
+
+/**
+ * Emitted names that are BOTH file-scoped somewhere and defined at namespace
+ * scope in a globals unit — two objects, one name, no diagnostic.
+ *
+ * Scopes partition the symbol records, so this can only fire where two DISTINCT
+ * Ghidra symbols sanitize to the same emitted name and land on opposite sides of
+ * the linkage decision. Reported rather than thrown: the collision is in the
+ * database, not in this pass, and the caller decides what to do about it.
+ */
+export function findDuplicateLinkageNames(globals: readonly AnalyzedDataSymbol[]): string[] {
+  const fileScoped = new Set<string>();
+  const external = new Set<string>();
+  for (const g of globals) {
+    const name = sanitizeSymbolName(symbolEmittedName(g));
+    if (!name) continue;
+    if (g.scope === 'file-local' || g.scope === 'static-local') fileScoped.add(name);
+    else if (g.scope === 'global') external.add(name);
+  }
+  const both: string[] = [];
+  for (const n of fileScoped) if (external.has(n)) both.push(n);
+  return both.sort();
+}
+
+/**
  * Put back every global that no output file ended up claiming.
  *
  * `computeFileLocalGlobals` demotes a global to `file-local` when all its

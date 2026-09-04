@@ -757,6 +757,101 @@ describe('globalAddressLiteralPlugin', () => {
       );
     });
 
+    // Fog::Src::LogManager::FindOrOpenLogFileSlot. `gLogFileNameArray` is
+    // char[20][16] at 0x75d148; 0x75d148 + 320 is 0x75d288, which is where
+    // `lpSystemTime_0075d288` starts. The scan is carried by TWO locals, and
+    // one of them is reused for `SStrLen`'s result after the loop.
+    const LOG_SLOTS: GlobalAddressLiteralOptions = {
+      globalAddresses: {
+        gLogFileNameArray: 0x75d148,
+        lpSystemTime_0075d288: 0x75d288,
+        gUnrelated: 0x700000,
+      },
+      globalSizes: {
+        gLogFileNameArray: 320,
+        lpSystemTime_0075d288: 2,
+        gUnrelated: 16,
+      },
+      globalElementSizes: { gLogFileNameArray: 16 },
+      imageBase: '0x400000',
+    };
+
+    it('follows a cursor carried through a second local', () => {
+      const out = run(`
+        void f() {
+          char* pStoredName;
+          char* pNameEnd;
+          pStoredName = gLogFileNameArray[nSlot];
+          pNameEnd = pStoredName;
+          do {
+            pStoredName = pNameEnd + 0x10;
+            pNameEnd = pStoredName;
+          } while ((int)pStoredName < 0x75d288);
+        }`, LOG_SLOTS);
+      assert.ok(
+        out.includes('(char*)&gLogFileNameArray + sizeof(gLogFileNameArray)'),
+        `Expected the end of the array in: ${out}`,
+      );
+      assert.ok(!out.includes('lpSystemTime'), `The next object must not appear: ${out}`);
+    });
+
+    it('is not vetoed by the carrier slot being reused for a call result', () => {
+      // Ghidra gives one stack slot several lives. `pNameEnd` holding
+      // SStrLen's result after the loop says nothing about `pStoredName`,
+      // whose own bindings are the array, itself, and pNameEnd + 0x10.
+      const out = run(`
+        void f() {
+          char* pStoredName;
+          char* pNameEnd;
+          pStoredName = gLogFileNameArray[nSlot];
+          pNameEnd = pStoredName;
+          do {
+            pStoredName = pNameEnd + 0x10;
+            pNameEnd = pStoredName;
+          } while ((int)pStoredName < 0x75d288);
+          pNameEnd = SStrLen(szFileName);
+        }`, LOG_SLOTS);
+      assert.ok(
+        out.includes('(char*)&gLogFileNameArray + sizeof(gLogFileNameArray)'),
+        `Expected the end of the array in: ${out}`,
+      );
+    });
+
+    it('still refuses when the carrier also comes from a different global', () => {
+      const out = run(`
+        void f() {
+          char* pStoredName;
+          char* pNameEnd;
+          pStoredName = gLogFileNameArray[nSlot];
+          pNameEnd = pStoredName;
+          pNameEnd = (char*)gUnrelated;
+          do {
+            pStoredName = pNameEnd + 0x10;
+            pNameEnd = pStoredName;
+          } while ((int)pStoredName < 0x75d288);
+        }`, LOG_SLOTS);
+      assert.ok(
+        !out.includes('sizeof'),
+        `Two globals in the chain are no evidence: ${out}`,
+      );
+    });
+
+    it('still refuses when the cursor itself comes from a call', () => {
+      const out = run(`
+        void f() {
+          char* pStoredName;
+          char* pNameEnd;
+          pStoredName = gLogFileNameArray[nSlot];
+          pStoredName = GetNames();
+          pNameEnd = pStoredName;
+          do {
+            pStoredName = pNameEnd + 0x10;
+            pNameEnd = pStoredName;
+          } while ((int)pStoredName < 0x75d288);
+        }`, LOG_SLOTS);
+      assert.ok(!out.includes('sizeof'), `An untraced cursor is no evidence: ${out}`);
+    });
+
     it('reads the base through the literal this pass would resolve itself', () => {
       const out = run(`
         void f() {
@@ -1056,6 +1151,186 @@ describe('globalAddressLiteralPlugin', () => {
           do { ppFontTable = ppFontTable + 5; } while ((int)ppFontTable < 0x841ec8);
         }`, { ...FONT, globalElementSizes: {} });
       assert.ok(!far.includes('sizeof'), `Eight past the end is outside it: ${far}`);
+    });
+  });
+
+  // ==========================================================================
+  // A BYTE CURSOR MINUS AN ADDRESS
+  // ==========================================================================
+
+  describe('a byte cursor minus an address literal', () => {
+    // CHARSEL_EnumerateLocalSaves. `gszLocalSaveFilenameBuffer` is `char[256]`
+    // at 0x779b68, and 0x779b6a is two bytes into it; the test is the save
+    // name's length. Left as a literal it compares against an absolute 1.14d
+    // address, so after relinking it is false for every file and the
+    // character-select screen lists no characters at all.
+    const SAVES: GlobalAddressLiteralOptions = {
+      globalAddresses: { gszLocalSaveFilenameBuffer: 0x779b68, gnScalar: 0x600200 },
+      globalSizes: { gszLocalSaveFilenameBuffer: 256, gnScalar: 4 },
+      globalElementSizes: { gszLocalSaveFilenameBuffer: 1 },
+      imageBase: '00400000',
+    };
+
+    it('respells an interior offset under a char* subtraction', () => {
+      const out = run(
+        `void f() { char* pszNameSrc; if (pszNameSrc - 0x779b6a < (char*)(void*)0xe) { g(); } }`,
+        SAVES,
+      );
+      assert.ok(
+        out.includes('(char*)(pszNameSrc - ((char*)&gszLocalSaveFilenameBuffer + 2))'),
+        `Expected the anchored displacement in: ${out}`,
+      );
+      assert.ok(!out.includes('0x779b6a'), `Literal should be gone from: ${out}`);
+    });
+
+    it('keeps the result a pointer, so the comparison around it still compiles', () => {
+      const out = run(
+        `void f() { char* p; if (p - 0x779b6a < (char*)(void*)0xe) { g(); } }`, SAVES,
+      );
+      // `p - <literal>` is a pointer; `p - <anchor>` is a ptrdiff_t. Without
+      // the outer cast the `<` compares an integer with a `char*`.
+      assert.ok(/\(char\*\)\(p - /.test(out), `Difference must be cast back: ${out}`);
+    });
+
+    it('normalises a cursor that is a byte pointer but not a char pointer', () => {
+      const out = run(`void f() { byte* p; x = p - 0x779b6a; }`, SAVES);
+      assert.ok(
+        out.includes('(char*)p - ((char*)&gszLocalSaveFilenameBuffer + 2)'),
+        `byte* and char* are distinct types and both sides need the cast: ${out}`,
+      );
+    });
+
+    it('takes the cursor from a parameter and from an explicit cast', () => {
+      assert.ok(run(`void g(char* pEnd) { x = pEnd - 0x779b6a; }`, SAVES)
+        .includes('&gszLocalSaveFilenameBuffer + 2'));
+      assert.ok(run(`void f() { x = (uint8_t*)v - 0x779b6a; }`, SAVES)
+        .includes('&gszLocalSaveFilenameBuffer + 2'));
+    });
+
+    it('LEAVES a cursor whose stride is not one byte', () => {
+      // `p - 0x779b6a` on an `int*` is four times the distance. Respelling it
+      // would divide the offset by four and say nothing about it.
+      const out = run(`void f() { int* p; x = p - 0x779b6a; }`, SAVES);
+      assert.ok(out.includes('0x779b6a'), `Should keep the scaled literal in: ${out}`);
+    });
+
+    it('LEAVES a cursor this unit does not declare', () => {
+      const out = run(`void f() { x = q - 0x779b6a; }`, SAVES);
+      assert.ok(out.includes('0x779b6a'), `No declared stride, no claim: ${out}`);
+    });
+
+    it('LEAVES a name two declarations disagree about', () => {
+      const out = run(`void f() { char* p; { int* p; x = p - 0x779b6a; } }`, SAVES);
+      assert.ok(out.includes('0x779b6a'), `A contested stride is no stride: ${out}`);
+    });
+
+    it('LEAVES every arithmetic operator that is not a subtraction', () => {
+      for (const op of ['+', '*', '&', '|', '^']) {
+        const out = run(`void f() { char* p; x = p ${op} 0x779b6a; }`, SAVES);
+        assert.ok(out.includes('0x779b6a'), `${op} is not a displacement: ${out}`);
+      }
+    });
+
+    it('LEAVES the literal on the left of the subtraction', () => {
+      const out = run(`void f() { char* p; x = 0x779b6a - p; }`, SAVES);
+      assert.ok(out.includes('0x779b6a'), `Not the shape: ${out}`);
+    });
+
+    it('spells a displacement at an integer return type rather than withdrawing it', () => {
+      const out = run(`uint32_t f() { char* p; return p - 0x779b6a; }`, {
+        ...SAVES, enclosingReturnType: 'uint32_t',
+      });
+      assert.ok(out.includes('(uint32_t)(uintptr_t)'), `Width, not retreat: ${out}`);
+      assert.ok(!out.includes('0x779b6a'), `Literal should be gone from: ${out}`);
+    });
+  });
+
+  // ==========================================================================
+  // WHAT HAS NO INTERIOR, AND WHAT IS NOT AN ADDRESS AT ALL
+  // ==========================================================================
+
+  describe('an interior needs an object with subobjects', () => {
+    it('LEAVES an address inside a size-1 undefined symbol', () => {
+      // Ghidra types an unmodelled byte `undefined` size 1. A one-byte window
+      // has no interior, so a near miss into one resolves to nothing — the fix
+      // for those is the type in Ghidra, not a guess here.
+      const opts: GlobalAddressLiteralOptions = {
+        globalAddresses: { lpData: 0x8829f8 },
+        globalSizes: { lpData: 1 },
+        imageBase: '00400000',
+      };
+      assert.ok(run(`void f() { char* p; x = p - 0x8829f9; }`, opts).includes('0x8829f9'));
+      // Its BASE still resolves: a base is a base whatever the extent says.
+      assert.ok(run(`void f() { char* p; x = p - 0x8829f8; }`, opts).includes('&lpData'));
+    });
+
+    it('LEAVES an interior of a machine-word scalar that is not an array', () => {
+      // `Inv.cpp`'s 0x7bcd37 is a loop bound one stride past a coordinate
+      // table; the four-byte flag that follows the table contains it, and
+      // reading the bound as that flag is the neighbour stealing it.
+      const opts: GlobalAddressLiteralOptions = {
+        globalAddresses: { gbFlag: 0x7bcd34 },
+        globalSizes: { gbFlag: 4 },
+        imageBase: '00400000',
+      };
+      assert.ok(run(`void f() { p = 0x7bcd37; }`, opts).includes('0x7bcd37'));
+    });
+
+    it('still resolves an interior of a struct wider than a word', () => {
+      // The Storm anchors are field 4 of a 12-byte list head and must survive.
+      assert.ok(run(`void f() { p = 0x708364; }`, STORM)
+        .includes('(char*)&gSFileAsyncReqQueue + 4'));
+    });
+
+    it('still resolves an interior of a declared array of any width', () => {
+      const opts: GlobalAddressLiteralOptions = {
+        globalAddresses: { gaPair: 0x600200 },
+        globalSizes: { gaPair: 4 },
+        globalElementSizes: { gaPair: 2 },
+        imageBase: '00400000',
+      };
+      assert.ok(run(`void f() { p = 0x600202; }`, opts).includes('(char*)&gaPair + 2'));
+    });
+  });
+
+  describe('a mask is never an address', () => {
+    // 12 sites in the tree were already wrong: `dwBinkOpenFlags = 0x800000`
+    // read as 72,600 bytes into a 192KB palette, and `uCodepoint < 0x400000`
+    // — a Unicode range test — as the PE header at the image base.
+    const COLLIDING: GlobalAddressLiteralOptions = {
+      globalAddresses: { gaPalette: 0x7ee468, gImageBase: 0x400000 },
+      globalSizes: { gaPalette: 196608, gImageBase: 128 },
+      globalElementSizes: { gaPalette: 1, gImageBase: 1 },
+      imageBase: '00400000',
+    };
+
+    it('LEAVES a single set bit that lands inside a big array', () => {
+      const out = run(`void f() { dwFlags = 0x800000; }`, COLLIDING);
+      assert.ok(out.includes('0x800000'), `A flag bit is not an address: ${out}`);
+    });
+
+    it('LEAVES the image base, where Ghidra puts the PE header', () => {
+      const out = run(`void f() { if (uCodepoint < 0x400000) { g(); } }`, COLLIDING);
+      assert.ok(out.includes('0x400000'), `A range bound is not an address: ${out}`);
+      assert.ok(!out.includes('gImageBase'), `Nothing points at the DOS header: ${out}`);
+    });
+
+    it('still resolves a single set bit that is an ordinary symbol BASE', () => {
+      // Only the interior is a coincidence. A base is a fact about the image.
+      const out = run(`void f() { p = 0x10000; }`, {
+        globalAddresses: { gAligned: 0x10000 }, globalSizes: { gAligned: 4 },
+      });
+      assert.ok(out.includes('&gAligned'), `A base keeps its symbol: ${out}`);
+    });
+
+    it('LEAVES a run of low bits', () => {
+      const out = run(`void f() { x = 0x7fffff; }`, COLLIDING);
+      assert.ok(out.includes('0x7fffff'), `A mantissa mask is not an address: ${out}`);
+    });
+
+    it('still resolves an ordinary address in the same array', () => {
+      assert.ok(run(`void f() { p = 0x7ee46a; }`, COLLIDING)
+        .includes('(char*)&gaPalette + 2'));
     });
   });
 });

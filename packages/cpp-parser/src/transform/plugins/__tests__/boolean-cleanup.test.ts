@@ -17,6 +17,21 @@ describe('booleanCleanupPlugin', () => {
     return emit(result as AnyNode).trim();
   }
 
+  describe('an integer 0 is not the literal false', () => {
+    // `x != false` is `x` because a bool is already 0 or 1. `x != 0` is not:
+    // the SETNZ at 0040ee0e writes `nSlot = (uint)(*szFileName != 0)`, and
+    // dropping the comparison made the slot index the file name's first char.
+    it('keeps (uint)(x != 0) where the value is assigned', () => {
+      const out = transformCode(`void f(byte *s) { uint n; n = (uint)(*s != 0); }`);
+      assert.ok(out.includes('(*s != 0)'), `lost the 0/1 normalisation: ${out}`);
+    });
+
+    it('keeps x != 1 and x == 1, which are not !x and x for an int', () => {
+      assert.ok(transformCode(`void f(int x) { if (x != 1) { g(); } }`).includes('x != 1'));
+      assert.ok(transformCode(`void f(int x) { if (x == 1) { g(); } }`).includes('x == 1'));
+    });
+  });
+
   describe('false comparisons', () => {
     it('should simplify expr != false to expr', () => {
       const input = `void foo(bool isReady) { if (isReady != false) { doSomething(); } }`;

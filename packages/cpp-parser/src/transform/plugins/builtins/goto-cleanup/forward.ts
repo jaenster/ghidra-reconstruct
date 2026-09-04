@@ -4,13 +4,16 @@
 
 import { NodeKind } from '../../../../ast/kinds.js';
 import type {
+  ASTNode,
   CompoundStmt,
   DoWhileStmt,
   ForStmt,
   IfStmt,
+  LabelStmt,
   Statement,
   WhileStmt,
 } from '../../../../ast/nodes.js';
+import { traverseAST } from '../../../../ast/visitor.js';
 import { updateNode } from '../../../transformer.js';
 import type { GotoInfo, LabelInfo } from './types.js';
 import {
@@ -26,6 +29,8 @@ import {
   negateCondition,
 } from './helpers.js';
 import { stripTerminalGoto } from './cross-scope.js';
+import { countGotosInStatements } from './analysis.js';
+import { getGlobalGotoCounts } from './nested-inline.js';
 
 /**
  * Build cascading nesting for gotos that are all top-level-if or cross-scope-terminal.
@@ -125,6 +130,12 @@ export function buildGeneralizedCascade(
 
 /**
  * Handle unconditional goto + dead code elimination (Pattern 3).
+ *
+ * The span between the goto and its label is unreachable by fallthrough, but it is
+ * only dead if nothing jumps *into* it. Ghidra routinely parks a switch case body
+ * behind such a label (`case N: goto switchD_..._caseD_N;` with the body sitting
+ * after an unconditional goto later in the function), so deleting the span blindly
+ * silently drops live code and leaves an empty case that falls through.
  */
 export function handleUnconditionalGoto(
   stmts: Statement[],
@@ -138,11 +149,45 @@ export function handleUnconditionalGoto(
 
   if (!eliminateDeadCode) return null;
 
-  // Remove the goto and everything between goto and label (dead code)
-  const prefix = stmts.slice(0, gotoIndex);
-  const suffix = stmts.slice(labelIndex + 1);
+  // Everything from the goto up to (not including) the label is what would be dropped.
+  const removed = stmts.slice(gotoIndex, labelIndex);
+  if (spanIsJumpedInto(removed, stmts)) return null;
 
-  return [...prefix, ...tail, ...suffix];
+  // `tailStatements` already runs to the end of the compound, so it covers everything
+  // after the label — appending stmts.slice(labelIndex + 1) as well would duplicate it.
+  const prefix = stmts.slice(0, gotoIndex);
+
+  return [...prefix, ...tail];
+}
+
+/**
+ * True when any label defined inside `removed` is still targeted by a goto that lives
+ * outside `removed` — in this compound or, when the whole-function counts are known,
+ * anywhere in the function. Such a span is reachable and must not be deleted.
+ */
+function spanIsJumpedInto(removed: Statement[], stmts: Statement[]): boolean {
+  const defined = collectLabelNames(removed);
+  if (defined.size === 0) return false;
+
+  const inside = countGotosInStatements(removed);
+  const global = getGlobalGotoCounts();
+  const outer = global ?? countGotosInStatements(stmts);
+
+  for (const name of defined) {
+    if ((outer.get(name) ?? 0) > (inside.get(name) ?? 0)) return true;
+  }
+  return false;
+}
+
+/** Every label name defined anywhere within these statements, at any nesting depth. */
+function collectLabelNames(stmts: Statement[]): Set<string> {
+  const names = new Set<string>();
+  for (const stmt of stmts) {
+    for (const node of traverseAST(stmt as ASTNode)) {
+      if (node.kind === NodeKind.LabelStmt) names.add((node as LabelStmt).label.name);
+    }
+  }
+  return names;
 }
 
 /**

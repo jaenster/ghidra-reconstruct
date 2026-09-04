@@ -360,12 +360,18 @@ export {
 // ============================================
 
 export {
+  addressRunBoundPlugin,
+  type AddressRunBoundOptions,
+} from './builtins/address-run-bound.js';
+
+export {
   globalAddressLiteralPlugin,
   type GlobalAddressLiteralOptions,
   // The address-ownership rule, shared with the scope analysis that has to
   // count the references this pass is about to create.
   ownerOfAddress,
   addressLiteralFloor,
+  hasAddressableInterior,
   ADDRESS_LITERAL_CEILING,
   ADDRESS_LITERAL_COMPLEMENT_FLOOR,
   type AddressExtent,
@@ -470,6 +476,7 @@ import { commaExpandPlugin } from './builtins/comma-expand.js';
 import { arrayFillCollapsePlugin } from './builtins/array-fill-collapse.js';
 import { funcPtrLiteralPlugin } from './builtins/func-ptr-literal.js';
 import { globalAddressLiteralPlugin } from './builtins/global-address-literal.js';
+import { addressRunBoundPlugin } from './builtins/address-run-bound.js';
 import { prngTransformPlugin } from './builtins/prng-transform.js';
 import { prngTempCollapsePlugin } from './builtins/prng-temp-collapse.js';
 import { bitfieldAccessPlugin } from './builtins/bitfield-access.js';
@@ -490,7 +497,8 @@ import { declScopeSinkPlugin } from './builtins/decl-scope-sink.js';
 import { phiNodeTernaryPlugin } from './builtins/phi-node-ternary.js';
 import { voidReturnCleanupPlugin } from './builtins/void-return-cleanup.js';
 import { undefinedGotoLabelPlugin } from './builtins/undefined-goto-label.js';
-export { undefinedGotoLabelPlugin } from './builtins/undefined-goto-label.js';
+export { undefinedGotoLabelPlugin, getSynthesizedGotoLabels, resetSynthesizedGotoLabels } from './builtins/undefined-goto-label.js';
+export type { SynthesizedGotoLabel } from './builtins/undefined-goto-label.js';
 import { underscoreSlotLocalPlugin } from './builtins/underscore-slot-local.js';
 export { underscoreSlotLocalPlugin } from './builtins/underscore-slot-local.js';
 import { phantomLocalSynthesisPlugin } from './builtins/phantom-local-synthesis.js';
@@ -559,6 +567,8 @@ import { charLiteralEscapePlugin } from './builtins/char-literal-escape.js';
 export { charLiteralEscapePlugin } from './builtins/char-literal-escape.js';
 export { getGotoCleanupStats, resetGotoCleanupStats } from './builtins/goto-cleanup/index.js';
 export type { GotoCleanupStats } from './builtins/goto-cleanup/index.js';
+import { frameGroupLocalsPlugin } from './builtins/frame-group-locals.js';
+export { frameGroupLocalsPlugin, frameTypeLayout, type FrameGroupLocalsOptions } from './builtins/frame-group-locals.js';
 import type { TransformPlugin } from './types.js';
 
 /**
@@ -608,6 +618,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   ternarySimplifyPlugin,      // Boolean cleanup
   funcPtrLiteralPlugin,        // Cleanup: 0x5011f0 → FunctionName (priority 95)
   globalAddressLiteralPlugin,  // Correctness: a folded global address (incl. ~&g) → the symbol (priority 68)
+  addressRunBoundPlugin,  // Correctness: a loop bound that is another global's address → a distance from the one being walked (priority 69)
   prngTransformPlugin,        // Pattern detection: PRNG (priority 80)
   prngTempCollapsePlugin,     // Cleanup: collapse PRNG temp variables (priority 85)
   voidReturnCleanupPlugin,    // Cleanup: trailing return; in void functions (priority 90)
@@ -644,6 +655,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   arrayGlobalAddressOfPlugin, // Cleanup: &X_ARRAY_<hex> → X_ARRAY_<hex> (priority 46)
   charLiteralEscapePlugin,    // Cleanup: '²' → '\xb2' (priority 46)
   memoryPatternsPlugin,       // Pattern detection (late)
+  frameGroupLocalsPlugin,     // Correctness: a contiguous frame run whose first slot's address escapes -> one struct-typed local (priority 950)
 ];
 
 // ============================================

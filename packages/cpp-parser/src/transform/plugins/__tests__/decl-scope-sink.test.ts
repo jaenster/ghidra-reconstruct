@@ -194,12 +194,79 @@ describe('declScopeSinkPlugin — loop back-edge liveness', () => {
     );
   });
 
-  it('still sinks an initialised declaration into an if branch', () => {
-    // No back-edge, so nothing can observe a previous iteration's value.
+  it('keeps a call-initialised declaration out of the if branch that uses it', () => {
+    // The call ran unconditionally; sunk, it runs only when `c` holds.
     const output = transformCode('void f() { int x = get(); if (c) { use(x); x++; report(x); } }');
     assert.strictEqual(
       output,
-      'void f() {\n  if (c) {\n    int x = get();\n    use(x);\n    x++;\n    report(x);\n  }\n}'
+      'void f() {\n  int x = get();\n  if (c) {\n    use(x);\n    x++;\n    report(x);\n  }\n}'
+    );
+  });
+
+  it('keeps a buffer-filling call outside the branch that reads the buffer', () => {
+    // D2Launch UIMENU_MainMenu (1.14d 004336c0). Sinking the SStrPrintf left
+    // szVersionText uninitialised whenever bBUILD was 0, and the main menu
+    // rendered stack residue instead of the version string.
+    const output = transformCode(
+      'void f() { char buf[64]; size_t n = SStrPrintf(buf, 64, "v"); '
+      + 'if (ini->bBUILD) { SStrPrintf(buf + n, 64 - n, " %d", 71); } SetText(buf); }'
+    );
+    assert.match(output, /size_t n = SStrPrintf\(buf, 64, "v"\);\n\s+if \(ini->bBUILD\)/);
+  });
+
+  it('keeps a call-initialised declaration out of a loop body', () => {
+    const output = transformCode('void f() { int x = get(); while (c) { use(x); } }');
+    assert.strictEqual(
+      output,
+      'void f() {\n  int x = get();\n  while (c) {\n    use(x);\n  }\n}'
+    );
+  });
+
+  it('keeps an assignment-initialised declaration where it is', () => {
+    const output = transformCode('void f() { int x = (g = 1); if (c) { use(x); } }');
+    assert.strictEqual(
+      output,
+      'void f() {\n  int x = g = 1;\n  if (c) {\n    use(x);\n  }\n}'
+    );
+  });
+
+  it('keeps a call nested inside a larger initialiser expression where it is', () => {
+    const output = transformCode('void f() { int x = base + get(); if (c) { use(x); } }');
+    assert.strictEqual(
+      output,
+      'void f() {\n  int x = base + get();\n  if (c) {\n    use(x);\n  }\n}'
+    );
+  });
+
+  it('still sinks a literal-initialised declaration into an if branch', () => {
+    const output = transformCode('void f() { int x = 5; if (c) { use(x); x++; report(x); } }');
+    assert.strictEqual(
+      output,
+      'void f() {\n  if (c) {\n    int x = 5;\n    use(x);\n    x++;\n    report(x);\n  }\n}'
+    );
+  });
+
+  it('still sinks a plain read into an if branch', () => {
+    const output = transformCode('void f() { int x = g_count; if (c) { use(x); } }');
+    assert.strictEqual(
+      output,
+      'void f() {\n  if (c) {\n    int x = g_count;\n    use(x);\n  }\n}'
+    );
+  });
+
+  it('keeps a read whose source is overwritten before the sink site', () => {
+    const output = transformCode('void f() { int x = g_count; g_count = 0; if (c) { use(x); } }');
+    assert.strictEqual(
+      output,
+      'void f() {\n  int x = g_count;\n  g_count = 0;\n  if (c) {\n    use(x);\n  }\n}'
+    );
+  });
+
+  it('keeps a read whose source the if condition mutates', () => {
+    const output = transformCode('void f() { int x = n; if (n++) { use(x); } }');
+    assert.strictEqual(
+      output,
+      'void f() {\n  int x = n;\n  if (n++) {\n    use(x);\n  }\n}'
     );
   });
 });
