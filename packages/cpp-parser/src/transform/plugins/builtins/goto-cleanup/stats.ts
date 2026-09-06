@@ -16,6 +16,7 @@ const emptyStats = (): GotoCleanupStats => ({
   nestedTailInline: 0,
   loopBodyGoto: 0,
   unconditionalGoto: 0,
+  vetoedUnsafe: 0,
   total: 0,
 });
 
@@ -34,5 +35,6 @@ export function resetGotoCleanupStats(): void { (globalThis as any)[STATS_KEY] =
 export function recordStat(kind: keyof Omit<GotoCleanupStats, 'total'>, count: number = 1): void {
   const s = getStats();
   s[kind] += count;
-  s.total += count;
+  // `total` counts transforms APPLIED. A vetoed candidate was not applied.
+  if (kind !== 'vetoedUnsafe') s.total += count;
 }

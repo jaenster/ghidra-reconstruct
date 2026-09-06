@@ -56,6 +56,9 @@ import {
 export type { GotoCleanupStats } from './types.js';
 export type { GotoCleanupOptions } from './types.js';
 export { getGotoCleanupStats, resetGotoCleanupStats } from './stats.js';
+// Diagnostics for a non-zero `vetoedUnsafe`: which handler produced an unsafe candidate,
+// and which reachable keys or edges it would have dropped.
+export { setGotoCleanupVetoReporter } from './process.js';
 
 /**
  * Pre-compute global goto counts for every function body in the AST.

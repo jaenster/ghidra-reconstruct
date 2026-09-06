@@ -527,6 +527,8 @@ import { pointerAssignCastPlugin } from './builtins/pointer-assign-cast.js';
 export { pointerAssignCastPlugin } from './builtins/pointer-assign-cast.js';
 import { callArgCastPlugin } from './builtins/call-arg-cast.js';
 import { pointerCompareCastPlugin } from './builtins/pointer-compare-cast.js';
+import { returnCastPlugin } from './builtins/return-cast.js';
+export { returnCastPlugin, type ReturnCastOptions } from './builtins/return-cast.js';
 import { floatPointerBitcastPlugin } from './builtins/float-pointer-bitcast.js';
 import { narrowCastThroughUintptrPlugin } from './builtins/narrow-cast-through-uintptr.js';
 import { assignCastPlugin } from './builtins/assign-cast.js';
@@ -637,6 +639,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   pointerAssignCastPlugin,    // Type: insert reinterpret cast on pointer-to-pointer assignments (priority 600)
   callArgCastPlugin,          // Type: cast a call argument to its declared parameter type (priority 610)
   pointerCompareCastPlugin,   // Type: cast one side of a distinct-pointer comparison (priority 615)
+  returnCastPlugin,           // Type: cast a returned pointer to the declared return type (priority 616)
   floatPointerBitcastPlugin,  // Type: reinterpret the four bytes a float/pointer cast moves (priority 618)
   narrowCastThroughUintptrPlugin, // Type: route a pointer->narrow-integer cast through uintptr_t (priority 620)
   assignCastPlugin,           // Type: cast an assigned value to its slot's declared type (priority 615)

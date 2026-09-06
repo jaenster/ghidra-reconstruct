@@ -8,6 +8,19 @@
  *   - Forward goto analysis and cascading
  *   - Cleanup tail inlining (top-level labels, fallback)
  *   - Nested label tail inlining (cross-scope labels in if/else/loop/switch)
+ *
+ * ## Every candidate is checked before it is accepted
+ *
+ * These are peephole rewrites, so each one decides on its own whether the span it is
+ * about to drop is dead. That question has been answered wrongly three times, each time
+ * by deleting live code, and each fix taught ONE pass to ask ONE more thing. So the
+ * answer is no longer left to the pass: whatever a handler returns is put through
+ * `preservesReachableWork` against what it was given, and is only accepted if every
+ * reachable statement is still reachable and every reachable edge still exists.
+ *
+ * A rejected candidate is not an error. `processCompound` moves on to the next handler,
+ * and if none survives the compound keeps its gotos — which is the right default when
+ * the deliverable is a program that runs.
  */
 
 import type { Statement } from '../../../../ast/nodes.js';
@@ -20,7 +33,35 @@ import { handleSwitchCaseGoto } from './switch-case-goto.js';
 import { processBackwardGotos } from './backward.js';
 import { buildGeneralizedCascade, handleUnconditionalGoto, handleLoopBodyGoto } from './forward.js';
 import { processCleanupTailInlining } from './tail-inline.js';
-import { processNestedTailInlining } from './nested-inline.js';
+import { processNestedTailInlining, getGlobalGotoCounts } from './nested-inline.js';
+import { preservesReachableWork } from '../../../cfg/index.js';
+
+/** Set by the caller to see which handlers are being vetoed and why. */
+let onVeto: ((handler: string, lost: string[]) => void) | null = null;
+
+export function setGotoCleanupVetoReporter(fn: ((handler: string, lost: string[]) => void) | null): void {
+  onVeto = fn;
+}
+
+/**
+ * Accept `candidate` only if it still reaches everything `before` reached.
+ *
+ * The whole-function goto counts decide which labels are entry points of this region, so
+ * both graphs are built with the same ones.
+ */
+function accept(
+  before: Statement[],
+  candidate: Statement[] | null,
+  handler: string,
+): Statement[] | null {
+  if (!candidate) return null;
+  const opts = { externalGotoCounts: getGlobalGotoCounts() };
+  const check = preservesReachableWork(before, candidate, opts);
+  if (check.ok) return candidate;
+  recordStat('vetoedUnsafe');
+  onVeto?.(handler, [...check.lostKeys, ...check.lostEdges]);
+  return null;
+}
 
 /**
  * Process a compound statement's statements array once.
@@ -40,17 +81,17 @@ export function processCompound(
 
   if (labels.size > 0) {
     // Switch goto-to-break: replace goto-to-label-after-switch with break
-    const switchResult = handleSwitchGotoToBreak(stmts, labels, gotoCounts);
+    const switchResult = accept(stmts, handleSwitchGotoToBreak(stmts, labels, gotoCounts), 'switchGotoToBreak');
     if (switchResult) { recordStat('switchGotoToBreak'); return switchResult; }
   }
 
   // Switch case-to-case: inline goto switchD_xxx_caseD_N within the same switch
-  const switchCaseResult = handleSwitchCaseGoto(stmts, gotoCounts);
+  const switchCaseResult = accept(stmts, handleSwitchCaseGoto(stmts, gotoCounts), 'switchCaseGoto');
   if (switchCaseResult) { recordStat('switchCaseGoto'); return switchCaseResult; }
 
   if (labels.size > 0) {
     // Backward goto → loop: converts backward gotos (including nested) to loops
-    const backwardResult = processBackwardGotos(stmts, labels, gotoCounts);
+    const backwardResult = accept(stmts, processBackwardGotos(stmts, labels, gotoCounts), 'backwardToLoop');
     if (backwardResult) { recordStat('backwardToLoop'); return backwardResult; }
 
     // Forward goto analysis and cascading
@@ -124,12 +165,13 @@ export function processCompound(
         }
       }
 
-      if (result) {
-        const ctx = freshGotos[0].context;
+      const ctx = freshGotos[0].context;
+      const checked = accept(current, result, ctx);
+      if (checked) {
         if (ctx === 'unconditional') recordStat('unconditionalGoto');
         else if (ctx === 'loop-body') recordStat('loopBodyGoto');
         else recordStat('forwardCascade');
-        current = result;
+        current = checked;
         modified = true;
       }
     }
@@ -137,13 +179,21 @@ export function processCompound(
     if (modified) return current;
 
     // Cleanup tail inlining: handles gotos at any nesting depth to top-level labels
-    const inlineResult = processCleanupTailInlining(stmts, labels, gotoCounts, options, fallthroughMeansReturn);
+    const inlineResult = accept(
+      stmts,
+      processCleanupTailInlining(stmts, labels, gotoCounts, options, fallthroughMeansReturn),
+      'cleanupTailInline',
+    );
     if (inlineResult) { recordStat('cleanupTailInline'); return inlineResult; }
   }
 
   // Nested label tail inlining: cross-scope labels in if/else/loop/switch
   // Runs even when no top-level labels exist — discovers labels inside nested scopes
-  const nestedResult = processNestedTailInlining(stmts, labels, gotoCounts, options, fallthroughMeansReturn);
+  const nestedResult = accept(
+    stmts,
+    processNestedTailInlining(stmts, labels, gotoCounts, options, fallthroughMeansReturn),
+    'nestedTailInline',
+  );
   if (nestedResult) { recordStat('nestedTailInline'); return nestedResult; }
 
   return null;

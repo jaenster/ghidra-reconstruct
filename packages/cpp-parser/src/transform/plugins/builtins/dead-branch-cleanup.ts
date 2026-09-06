@@ -15,6 +15,10 @@
  * targeting a label that no longer has a body. So every discard is guarded by
  * `branchIsJumpedInto`: a branch holding a label still targeted from outside it
  * is kept verbatim. A redundant `if (false)` compiles; a missing body does not.
+ *
+ * A `case`/`default` inside the branch is the same hazard wearing a different label -
+ * the switch dispatch jumps straight to it - so the guard asks the shared entry-point
+ * analysis rather than counting gotos itself. See `transform/cfg/labels.ts`.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -23,7 +27,9 @@ import type {
   CaseStmt, DefaultStmt, LabelStmt, BinaryExpr, GotoStmt,
 } from '../../../ast/nodes.js';
 import { traverseAST } from '../../../ast/visitor.js';
+import type { Statement } from '../../../ast/nodes.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
+import { spanIsEnterable } from '../../cfg/index.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 
 export interface DeadBranchCleanupOptions extends PluginOptions {}
@@ -33,15 +39,6 @@ function unwrapCompound(node: ASTNode): ASTNode[] {
     return (node as CompoundStmt).statements;
   }
   return [node];
-}
-
-/** Every label name defined anywhere in this subtree. */
-function collectLabelNames(node: ASTNode): Set<string> {
-  const names = new Set<string>();
-  for (const inner of traverseAST(node)) {
-    if (inner.kind === NodeKind.LabelStmt) names.add((inner as LabelStmt).label.name);
-  }
-  return names;
 }
 
 /** Per-label count of gotos anywhere in this subtree. */
@@ -70,15 +67,7 @@ function branchIsJumpedInto(
   outerCounts: Map<string, number> | null,
 ): boolean {
   if (!branch) return false;
-  const defined = collectLabelNames(branch);
-  if (defined.size === 0) return false;
-  if (!outerCounts) return true;
-
-  const inside = countGotos(branch);
-  for (const name of defined) {
-    if ((outerCounts.get(name) ?? 0) > (inside.get(name) ?? 0)) return true;
-  }
-  return false;
+  return spanIsEnterable([branch as Statement], outerCounts);
 }
 
 function createDeadBranchCleanupTransformer(_options: DeadBranchCleanupOptions = {}): Transformer {

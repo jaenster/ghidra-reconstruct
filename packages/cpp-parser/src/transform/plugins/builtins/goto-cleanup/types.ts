@@ -24,6 +24,13 @@ export interface GotoCleanupStats {
   nestedTailInline: number;
   loopBodyGoto: number;
   unconditionalGoto: number;
+  /**
+   * Candidates a handler produced and the preservation check refused, because they would
+   * have made reachable work unreachable. Not an error - the compound keeps its gotos.
+   * A number that climbs after a generator change is the signal that the change is
+   * deleting live code somewhere.
+   */
+  vetoedUnsafe: number;
   total: number;
 }
 
