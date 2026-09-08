@@ -192,9 +192,15 @@ describe('stack-frame-address', () => {
     assert.ok(!out.includes('stack0x'), out);
   });
 
-  it('settles the cookie even for a function with no modelled frame', () => {
+  it('does NOT zero a frame address outside a cookie XOR', () => {
+    // Zeroing was only ever right for the cookie, where the value is XORed and
+    // compared against itself. Anywhere else the frame base can take part in
+    // pointer arithmetic, and handing back 0 makes a wild pointer with no
+    // diagnostic - Send_0x5B_PlayerJoin wrote a guild name through one. The
+    // identifier is left undeclared instead, so the unit fails to compile and
+    // names the line.
     const out = run('void f() { g((uintptr_t)&stack0xfffffffc); }', []);
-    assert.ok(out.includes('(uintptr_t)0'), out);
+    assert.ok(!out.includes('(uintptr_t)0'), `must not be silently zeroed: ${out}`);
   });
 
   it('does not treat an integer cast of frame ARITHMETIC as an identity', () => {

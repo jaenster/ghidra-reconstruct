@@ -263,15 +263,45 @@ function isIntegerType(type: TypeNode): boolean {
 }
 
 /**
- * `(uintptr_t)&stack0xfffffffc` — the security-cookie seed. The value is XORed
- * into a cookie and compared against itself; it is never dereferenced, so the
- * constant it has always been is faithful enough and stays.
+ * `DEFAULT_SECURITY_COOKIE ^ (uintptr_t)&stack0xfffffffc` — the security-cookie
+ * seed. The value is XORed into a cookie and compared against itself; it is never
+ * dereferenced, so the constant it has always been is faithful enough and stays.
+ *
+ * ONLY that shape. This used to fire on every `(uintptr_t)&stack0xNNNN` and hand
+ * back 0, which is right for the cookie and catastrophic everywhere else: a frame
+ * base that takes part in POINTER ARITHMETIC becomes a wild pointer with no
+ * diagnostic at all. NET_D2GS_SERVER_Send_0x5B_PlayerJoin computes its guild-name
+ * cursor as `szGuildTag + 1 + (cursor + (0x109 - frameBase))`; with the frame base
+ * read as zero, GetGuildName wrote through the result and took the server down on
+ * the join path. Nine sites carried the substitution outside a cookie, three of
+ * them doing arithmetic like that.
+ *
+ * Anything else keeps its `stack0xNNNN` identifier, which nothing declares, so the
+ * translation unit fails to compile and names the line. That is the whole point:
+ * the frame base is not representable here, and a build error is the correct
+ * outcome for an expression we cannot honestly emit.
  */
+function isSecurityCookieOperand(parent: ASTNode | undefined): boolean {
+  if (!parent || parent.kind !== NodeKind.BinaryExpr) return false;
+  const b = parent as unknown as { operator: string; left: ASTNode; right: ASTNode };
+  if (b.operator !== '^') return false;
+  const names = [b.left, b.right]
+    .filter(n => n && n.kind === NodeKind.Identifier)
+    .map(n => (n as unknown as { name: string }).name);
+  return names.some(n => n.toUpperCase().includes('COOKIE'));
+}
+
 function createFrameIdentityTransformer(): Transformer {
-  return createKindTransformer(NodeKind.CStyleCastExpr, (node) => {
-    const cast = node as CStyleCastExpr;
-    if (!isIntegerType(cast.type)) return undefined;
-    if (frameAddressOffset(cast.expression) === null) return undefined;
+  return createKindTransformer(NodeKind.BinaryExpr, (node) => {
+    const bin = node as unknown as { operator: string; left: ASTNode; right: ASTNode };
+    if (bin.operator !== '^') return undefined;
+    if (!isSecurityCookieOperand(node)) return undefined;
+    const side = [bin.left, bin.right].find(
+      n => n && n.kind === NodeKind.CStyleCastExpr
+        && isIntegerType((n as CStyleCastExpr).type)
+        && frameAddressOffset((n as CStyleCastExpr).expression) !== null);
+    if (!side) return undefined;
+    const cast = side as CStyleCastExpr;
     const zero: IntegerLiteralExpr = {
       kind: NodeKind.IntegerLiteral,
       value: 0n,
@@ -282,7 +312,12 @@ function createFrameIdentityTransformer(): Transformer {
       leadingTrivia: [],
       trailingTrivia: [],
     };
-    return { ...cast, expression: zero } as CStyleCastExpr;
+    const replaced = { ...cast, expression: zero } as CStyleCastExpr;
+    return {
+      ...(node as unknown as Record<string, unknown>),
+      left: bin.left === side ? replaced : bin.left,
+      right: bin.right === side ? replaced : bin.right,
+    } as unknown as ASTNode;
   });
 }
 
