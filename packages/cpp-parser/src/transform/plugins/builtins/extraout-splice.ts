@@ -50,7 +50,14 @@ import { traverseAST } from '../../../ast/visitor.js';
 import { createTransformer, type Transformer } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 
-/** Ghidra's synthetic name for register bytes a callee left undefined. */
+/**
+ * Ghidra's usual name for register bytes a callee left undefined. The name is
+ * only a hint: these get renamed in the database (`dwTmp`, `extraout_boolHigh`,
+ * ...), so the real test is the SHAPE - a local the function declares, never
+ * assigns, and shifts into the top of a word. `D2Net/SRC/Client.cpp` carried a
+ * hand fix for a renamed one whose splice decided whether the single-player
+ * handshake ran at all.
+ */
 const EXTRAOUT_RE = /^extraout_/;
 
 function unwrap(expr: Expression): Expression {
@@ -62,12 +69,10 @@ function unwrap(expr: Expression): Expression {
   }
 }
 
-/** The `extraout_*` identifier this expression is, ignoring casts and parens. */
-function extraoutName(expr: Expression): string | null {
+/** The identifier this expression is, ignoring casts and parens. */
+function identName(expr: Expression): string | null {
   const e = unwrap(expr);
-  if (e.kind !== NodeKind.Identifier) return null;
-  const name = (e as Identifier).name;
-  return EXTRAOUT_RE.test(name) ? name : null;
+  return e.kind === NodeKind.Identifier ? (e as Identifier).name : null;
 }
 
 function intValue(expr: Expression): bigint | null {
@@ -87,21 +92,41 @@ function isExtraoutShift(expr: Expression): boolean {
   if (e.kind !== NodeKind.BinaryExpr) return false;
   const b = e as BinaryExpr;
   if (b.operator !== '<<') return false;
-  if (extraoutName(b.left) === null) return false;
+  if (identName(b.left) === null) return false;
   const n = intValue(b.right);
   return n !== null && n > 0n && n < 32n;
 }
 
 function createExtraoutSpliceTransformer(): Transformer {
   return (root: ASTNode) => {
-    // An `extraout_*` the body DOES assign is not Ghidra's synthetic one, and
-    // dropping it would discard a real value.
+    // Locals the function declares. Only those can be judged - a parameter or a
+    // global may be set anywhere, so their upper bytes are not known garbage.
+    const declared = new Set<string>();
+    for (const n of traverseAST(root)) {
+      if (n.kind !== NodeKind.VariableDecl) continue;
+      const nm = (n as unknown as { name?: { name?: string } }).name?.name;
+      if (nm) declared.add(nm);
+    }
+
+    // Anything the body writes, or whose address it takes, may hold a real
+    // value. Conservative on purpose: a name that escapes is left alone.
     const assigned = new Set<string>();
     for (const n of traverseAST(root)) {
-      if (n.kind !== NodeKind.AssignExpr) continue;
-      const name = extraoutName((n as unknown as { left: Expression }).left);
-      if (name) assigned.add(name);
+      if (n.kind === NodeKind.AssignExpr) {
+        const nm = identName((n as unknown as { left: Expression }).left);
+        if (nm) assigned.add(nm);
+      } else if (n.kind === NodeKind.UnaryExpr) {
+        const u = n as unknown as { operator: string; operand: Expression };
+        if (u.operator === '&' || u.operator === '++' || u.operator === '--') {
+          const nm = identName(u.operand);
+          if (nm) assigned.add(nm);
+        }
+      }
     }
+
+    /** Never written, so its bytes are whatever the frame happened to hold. */
+    const isGarbage = (name: string): boolean =>
+      (declared.has(name) || EXTRAOUT_RE.test(name)) && !assigned.has(name);
 
     return createTransformer({
       visitNode(node: ASTNode): ASTNode | undefined {
@@ -110,12 +135,12 @@ function createExtraoutSpliceTransformer(): Transformer {
         if (bin.operator !== '|') return undefined;
 
         const spliceName = (side: Expression): string | null =>
-          isExtraoutShift(side) ? extraoutName((unwrap(side) as BinaryExpr).left) : null;
+          isExtraoutShift(side) ? identName((unwrap(side) as BinaryExpr).left) : null;
         const leftName = spliceName(bin.left);
         const rightName = spliceName(bin.right);
 
-        if (leftName !== null && !assigned.has(leftName)) return bin.right as unknown as ASTNode;
-        if (rightName !== null && !assigned.has(rightName)) return bin.left as unknown as ASTNode;
+        if (leftName !== null && isGarbage(leftName)) return bin.right as unknown as ASTNode;
+        if (rightName !== null && isGarbage(rightName)) return bin.left as unknown as ASTNode;
         return undefined;
       },
     })(root);

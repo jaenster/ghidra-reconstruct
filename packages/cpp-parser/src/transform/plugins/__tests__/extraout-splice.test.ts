@@ -65,3 +65,44 @@ describe('extraout-splice', () => {
     assert.ok(out.includes('extraout_var'), out);
   });
 });
+
+/**
+ * The synthetic name is only a hint - these get renamed in the database.
+ * `D2Net/SRC/Client.cpp` carried a hand fix for one called `dwTmp`, whose
+ * splice decided whether the single-player handshake ran at all: taken the
+ * wrong way it started the multiplayer connect thread instead and packet 0xAF
+ * never arrived. The real test is the shape.
+ */
+describe('extraout-splice: judged by shape, not by name', () => {
+  const run2 = (src: string): string => {
+    const t = extraoutSplicePlugin.createTransformer();
+    return emit(t(parse(src)) as AnyNode).replace(/\s+/g, ' ').trim();
+  };
+
+  it('drops a renamed splice variable the body never assigns', () => {
+    const out = run2(
+      'void f() { undefined3 dwTmp;'
+      + ' if ((uint32_t)dwTmp << 8 | (uint32_t)bIsSinglePlayer & 0xffu) { g(); } }');
+    assert.ok(!out.includes('dwTmp <<'), out);
+    assert.ok(out.includes('bIsSinglePlayer'), out);
+  });
+
+  it('keeps one the body assigns', () => {
+    const out = run2(
+      'void f() { undefined3 dwTmp; dwTmp = h();'
+      + ' if ((uint32_t)dwTmp << 8 | (uint32_t)b & 0xffu) { g(); } }');
+    assert.ok(out.includes('dwTmp <<'), out);
+  });
+
+  it('keeps one whose address escapes', () => {
+    const out = run2(
+      'void f() { undefined3 dwTmp; h(&dwTmp);'
+      + ' if ((uint32_t)dwTmp << 8 | (uint32_t)b & 0xffu) { g(); } }');
+    assert.ok(out.includes('dwTmp <<'), out);
+  });
+
+  it('keeps a name the function does not declare at all', () => {
+    const out = run2('void f(uint32_t hi, uint32_t lo) { if (hi << 8 | lo & 0xffu) { g(); } }');
+    assert.ok(out.includes('hi << 8'), out);
+  });
+});
