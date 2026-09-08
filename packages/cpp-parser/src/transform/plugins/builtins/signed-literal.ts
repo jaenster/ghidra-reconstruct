@@ -7,7 +7,7 @@
  * - 0xffffffff  →  -1   (32-bit)
  * - 0xfffffffe  →  -2   (32-bit)
  * - 0xffffffffffffffff  →  -1  (64-bit)
- * - 0x80000000  →  -2147483648 or INT32_MIN
+ * - 0x80000000 is left ALONE - see the note in NEGATIVE_32.
  *
  * It also undoes Ghidra's double negative on an already-negative constant
  * (`--2147483648`, `--0x80000000` → `(-2147483648)`), which as written is a
@@ -49,7 +49,18 @@ const NEGATIVE_32: Map<bigint, bigint> = new Map([
   [0xffffff00n, -256n],
   [0xfffffe00n, -512n],
   [0xfffffc00n, -1024n],
-  [0x80000000n, -2147483648n], // INT32_MIN
+  // 0x80000000 is deliberately ABSENT. Spelled as decimal `-2147483648` it is
+  // `-(2147483648)`, and 2147483648 does not fit in `int`, so the literal's type
+  // is `long long`. Every 32-bit operand it is compared against then promotes to
+  // 64 bits and the comparison stops meaning what the machine meant:
+  //   SMemFreeBlockUpdateBins @0x00411aa0 - Ghidra `nHash < 0x80000000`
+  //     became `nHash >= -2147483648`, always true, so the heap-cleanup
+  //     registration below it was dead;
+  //   UTF16_CalculateUTF8Length @0x006c7030 - `uCodepoint < 0x80000000`
+  //     became `uCodepoint < -2147483648`, always false, killing the 6-byte arm.
+  // Left as hex it has type `unsigned int`, which is what Ghidra typed the
+  // operands as, and every mask, `|=` and `^=` use truncates to the identical
+  // bit pattern. It also sits below THRESHOLD_32, so nothing else converts it.
 ]);
 
 // Common negative values for 64-bit

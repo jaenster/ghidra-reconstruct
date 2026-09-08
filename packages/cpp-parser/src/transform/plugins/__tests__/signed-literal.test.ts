@@ -63,10 +63,29 @@ describe('signedLiteralPlugin', () => {
       assert.ok(output.includes('-2'), `Expected -2 in: ${output}`);
     });
 
-    it('should convert 0x80000000 to -2147483648', () => {
+    /**
+     * 0x80000000 must stay hex. As decimal `-2147483648` it is `-(2147483648)`,
+     * and 2147483648 does not fit in `int`, so the literal is `long long` and
+     * drags any 32-bit operand up to 64 bits with it.
+     */
+    it('leaves 0x80000000 alone so an assignment keeps its bit pattern', () => {
       const input = `void foo() { int x = 0x80000000; }`;
       const output = transformCode(input);
-      assert.ok(output.includes('-2147483648'), `Expected INT_MIN value in: ${output}`);
+      assert.ok(!output.includes('-2147483648'), output);
+      assert.ok(/0x80000000/i.test(output), output);
+    });
+
+    /**
+     * SMemFreeBlockUpdateBins @0x00411aa0: Ghidra `nHash < 0x80000000` became
+     * `nHash >= -2147483648`, which is always true because the unsigned operand
+     * promotes to long long - so the heap-cleanup registration was dead code.
+     * UTF16_CalculateUTF8Length @0x006c7030 had the mirror image, always false.
+     */
+    it('keeps a comparison against 0x80000000 a 32-bit unsigned one', () => {
+      const input = `void foo(unsigned int nHash) { if (nHash < 0x80000000) { bar(); } }`;
+      const output = transformCode(input);
+      assert.ok(!output.includes('-2147483648'), output);
+      assert.ok(/0x80000000/i.test(output), output);
     });
 
     it('should convert other negative values in range', () => {
