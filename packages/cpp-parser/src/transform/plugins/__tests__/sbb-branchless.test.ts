@@ -90,7 +90,7 @@ void f(S* s) {
       assert.ok(!result.includes('nullptr'), `Expected no nullptr in arithmetic fold:\\n${result}`);
     });
 
-    it('folds with subtraction: (cond ? offset : 0) - base to cond ? (base-offset) : base', () => {
+    it('folds with subtraction: (cond ? offset : 0) - base to cond ? offset-base : -base', () => {
       const code = `
 typedef unsigned int uint32_t;
 struct S { int flag; };
@@ -98,10 +98,29 @@ void f(S* s) {
   int r = (-(uint32_t)(s->flag) & 0x10) - 0x44324456;
 }`;
       const result = transform(code);
-      // 0x44324456 - 0x10 = 0x44324446
-      assert.ok(result.includes('0x44324446'), `Expected true-branch addr:\\n${result}`);
-      assert.ok(result.includes('0x44324456'), `Expected false-branch addr:\\n${result}`);
-      assert.ok(!result.includes('nullptr'), `Expected no nullptr:\\n${result}`);
+      // The literal is the SUBTRAHEND, so it comes off BOTH arms - including the
+      // zero one, which is what makes the false arm negative.
+      assert.ok(/\?\s*-0x44324446/.test(result), `Expected true-branch value:\n${result}`);
+      assert.ok(/:\s*-0x44324456/.test(result), `Expected false-branch value:\n${result}`);
+      assert.ok(!result.includes('nullptr'), `Expected no nullptr:\n${result}`);
+    });
+
+    /**
+     * `AUTOMAP_DrawCellTree` @0x00459440. Ghidra prints
+     * `(-(uint)(eBorderType != 0) & 0x60) - 0x15`; the machine computes
+     * `? 0x4b : -0x15`. Folding it as `base - offset : base` gave
+     * `? -0x4b : 0x15` - both arms sign-flipped - which shifted the minimap's
+     * sprite clip rect by 42px so the cells clipped out.
+     */
+    it('gets the automap clip-rect origin the right way round', () => {
+      const code = `
+typedef unsigned int uint32_t;
+void f(uint32_t eBorderType) {
+  int nClipTop = (-(uint32_t)(eBorderType != 0) & 0x60) - 0x15;
+}`;
+      const result = transform(code);
+      assert.ok(/\?\s*0x4b/.test(result), result);
+      assert.ok(/:\s*-0x15/.test(result), result);
     });
   });
 

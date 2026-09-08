@@ -152,8 +152,19 @@ function createSbbBranchlessTransformer(): Transformer {
           return makeTernary(node, match.condition, match.addrTyped, false);
         }
 
-        // Case 1b: Constant folding — (cond ? offset : 0) + base → cond ? (base+offset) : base
-        // This recovers the two explicit function addresses that SBB selects between.
+        // Case 1b: Constant folding — the mask's result combined with a literal.
+        //   (cond ? offset : 0) + base  →  cond ? offset + base : base
+        //   (cond ? offset : 0) - base  →  cond ? offset - base : -base
+        // This recovers the two explicit function addresses that SBB selects
+        // between, and the clip-rect origins the automap picks between.
+        //
+        // The subtraction is NOT the addition with the operands swapped: the
+        // literal is the SUBTRAHEND, so it is taken from both arms - including
+        // the zero one, which is what makes the false arm negative. Folding it
+        // as `base - offset : base` flips the sign of both:
+        // `AUTOMAP_DrawCellTree` @0x00459440 emitted `eBorderType ? -0x4b :
+        // 0x15` for a machine that computes `? 0x4b : -0x15`, which shifted the
+        // minimap's sprite clip rect by 42px and clipped the cells away.
         if (binary.operator === '+' || binary.operator === '-') {
           const lhs = unwrapParens(binary.left);
           const rhs = binary.right;
@@ -168,8 +179,9 @@ function createSbbBranchlessTransformer(): Transformer {
               (ternary.elseExpr as IntegerLiteralExpr).value === 0n;
             if (isZeroElse && ternary.thenExpr.kind === NodeKind.IntegerLiteral) {
               const offset = ternary.thenExpr as IntegerLiteralExpr;
-              const trueVal = binary.operator === '+' ? base.value + offset.value : base.value - offset.value;
-              const falseVal = base.value;
+              const isAdd = binary.operator === '+';
+              const trueVal = isAdd ? offset.value + base.value : offset.value - base.value;
+              const falseVal = isAdd ? base.value : -base.value;
               // The subtraction branch can go negative, and `BigInt.toString(16)`
               // puts the sign on the digits — `0x-1` is not a literal at all.
               const makeLit = (v: bigint): IntegerLiteralExpr => ({
