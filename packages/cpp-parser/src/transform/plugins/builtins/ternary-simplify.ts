@@ -28,6 +28,7 @@ import type {
   BoolLiteralExpr,
   Identifier,
   ParenExpr,
+  CStyleCastExpr,
 } from '../../../ast/nodes.js';
 import {
   createTransformer,
@@ -318,6 +319,31 @@ function createNegationSimplifier(): Transformer {
 // ============================================
 
 /**
+ * An expression whose VALUE is already 0 or 1, so flipping its low bit and
+ * negating it agree.
+ *
+ * `x ^ 1` is `!x` only there. For an `int` that can be 5 the two disagree at
+ * once - `5 ^ 1` is 4, `!5` is 0 - and the rewrite silently changes the value.
+ * The plugin header always said "when used as boolean"; nothing checked it.
+ */
+const BOOLEAN_VALUED_OPS = new Set(['==', '!=', '<', '>', '<=', '>=', '&&', '||']);
+
+function isBooleanValued(expr: Expression): boolean {
+  const e = unwrapParens(expr);
+  if (e.kind === NodeKind.BinaryExpr) {
+    return BOOLEAN_VALUED_OPS.has((e as BinaryExpr).operator);
+  }
+  if (e.kind === NodeKind.BoolLiteral) return true;
+  if (e.kind === NodeKind.UnaryExpr) return (e as UnaryExpr).operator === '!';
+  if (e.kind === NodeKind.CStyleCastExpr) {
+    const t = (e as CStyleCastExpr).type as unknown as { name?: { name?: string } | string };
+    const n = typeof t.name === 'string' ? t.name : t.name?.name;
+    return n === 'bool';
+  }
+  return false;
+}
+
+/**
  * Simplify x ^ 1 to !x when used as boolean
  */
 function createXorBooleanSimplifier(): Transformer {
@@ -325,10 +351,10 @@ function createXorBooleanSimplifier(): Transformer {
     visitBinaryExpr(binary) {
       if (binary.operator !== '^') return undefined;
 
-      // x ^ 1  →  !x (boolean flip)
+      // x ^ 1  →  !x (boolean flip), only where x is already 0 or 1
       if (binary.right.kind === NodeKind.IntegerLiteral) {
         const val = (binary.right as IntegerLiteralExpr).value;
-        if (val === 1n) {
+        if (val === 1n && isBooleanValued(binary.left)) {
           return {
             kind: NodeKind.UnaryExpr,
             operator: '!',
@@ -344,7 +370,7 @@ function createXorBooleanSimplifier(): Transformer {
       // 1 ^ x  →  !x
       if (binary.left.kind === NodeKind.IntegerLiteral) {
         const val = (binary.left as IntegerLiteralExpr).value;
-        if (val === 1n) {
+        if (val === 1n && isBooleanValued(binary.right)) {
           return {
             kind: NodeKind.UnaryExpr,
             operator: '!',

@@ -171,3 +171,35 @@ void f(int x) {
     assert.ok(deadBranchCleanupPlugin.tags?.includes('cleanup'));
   });
 });
+
+/**
+ * Short-circuit is asymmetric. `false && X` never evaluates X, so folding to
+ * `false` is exact. `X && false` DOES evaluate X, so folding to `false` deletes
+ * whatever X did - and Ghidra puts calls there.
+ */
+describe('dead-branch-cleanup: short-circuit folds keep the side that runs', () => {
+  function run(code: string): string {
+    const t = deadBranchCleanupPlugin.createTransformer();
+    return emit(t(parse(code)) as AnyNode).replace(/\s+/g, ' ');
+  }
+
+  it('does not delete a call on the left of && false', () => {
+    const out = run('void f() { if (sideEffect() && false) { g(); } }');
+    assert.ok(out.includes('sideEffect()'), out);
+  });
+
+  it('does not delete a call on the left of || true', () => {
+    const out = run('void f() { if (sideEffect() || true) { g(); } }');
+    assert.ok(out.includes('sideEffect()'), out);
+  });
+
+  it('still folds when the left operand is inert', () => {
+    const out = run('void f(int x) { if (x && false) { g(); } }');
+    assert.ok(!out.includes('&&'), out);
+  });
+
+  it('still folds false && X, which never evaluates X', () => {
+    const out = run('void f() { if (false && sideEffect()) { g(); } }');
+    assert.ok(!out.includes('&&'), out);
+  });
+});

@@ -141,3 +141,26 @@ describe('ternarySimplifyPlugin', () => {
     });
   });
 });
+
+/**
+ * `x ^ 1` is `!x` only when x is already 0 or 1. The plugin header always said
+ * "when used as boolean"; nothing checked it, so `5 ^ 1` (= 4) became `!5`
+ * (= 0). The old test for this shape asserted nothing at all - its body was
+ * `int y = x ^ 1;` with the comment "verify no crash".
+ */
+describe('ternary-simplify: xor is only a boolean flip on a boolean', () => {
+  const xf = ternarySimplifyPlugin.createTransformer();
+  const transformCode = (code: string): string =>
+    emit(xf(parse(code)) as AnyNode).replace(/\s+/g, ' ').trim();
+
+  it('leaves x ^ 1 alone when x is an arbitrary int', () => {
+    const out = transformCode('void f(int x) { int y = x ^ 1; }');
+    assert.ok(out.includes('^'), out);
+    assert.ok(!out.includes('!x'), out);
+  });
+
+  it('still flips a comparison, whose value is already 0 or 1', () => {
+    const out = transformCode('void f(int x) { int y = (x == 3) ^ 1; }');
+    assert.ok(out.includes('!'), out);
+  });
+});

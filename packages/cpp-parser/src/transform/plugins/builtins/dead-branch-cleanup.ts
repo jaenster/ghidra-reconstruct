@@ -25,6 +25,7 @@ import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, CompoundStmt, IfStmt, BoolLiteralExpr,
   CaseStmt, DefaultStmt, LabelStmt, BinaryExpr, GotoStmt,
+  UnaryExpr,
 } from '../../../ast/nodes.js';
 import { traverseAST } from '../../../ast/visitor.js';
 import type { Statement } from '../../../ast/nodes.js';
@@ -68,6 +69,33 @@ function branchIsJumpedInto(
 ): boolean {
   if (!branch) return false;
   return spanIsEnterable([branch as Statement], outerCounts);
+}
+
+/**
+ * Conservatively: could evaluating this expression do anything observable?
+ *
+ * Only used to decide whether an operand may be DELETED. Anything not
+ * recognised as inert answers yes, because a wrongly deleted call is silent and
+ * a wrongly kept one costs nothing.
+ */
+function mayHaveSideEffects(expr: ASTNode): boolean {
+  for (const n of traverseAST(expr)) {
+    switch (n.kind) {
+      case NodeKind.CallExpr:
+      case NodeKind.AssignExpr:
+      case NodeKind.NewExpr:
+      case NodeKind.DeleteExpr:
+        return true;
+      case NodeKind.UnaryExpr: {
+        const op = (n as UnaryExpr).operator;
+        if (op === '++' || op === '--') return true;
+        break;
+      }
+      default:
+        break;
+    }
+  }
+  return false;
 }
 
 function createDeadBranchCleanupTransformer(_options: DeadBranchCleanupOptions = {}): Transformer {
@@ -180,16 +208,20 @@ function createDeadBranchCleanupTransformer(_options: DeadBranchCleanupOptions =
         // X && true → X; true && X → X
         if (rightBool === true) return node.left;
         if (leftBool === true) return node.right;
-        // X && false → false; false && X → false
-        if (rightBool === false) return node.right;
+        // false && X → false. X is never evaluated, so dropping it is exact.
         if (leftBool === false) return node.left;
+        // X && false → false, but ONLY if X does nothing. Short-circuit runs the
+        // LEFT operand either way, so folding to the literal deletes whatever it
+        // did - Ghidra puts calls there, and a deleted call is silent.
+        if (rightBool === false && !mayHaveSideEffects(node.left)) return node.right;
       } else {
         // X || false → X; false || X → X
         if (rightBool === false) return node.left;
         if (leftBool === false) return node.right;
-        // X || true → true; true || X → true
-        if (rightBool === true) return node.right;
+        // true || X → true. X is never evaluated.
         if (leftBool === true) return node.left;
+        // X || true → true, same asymmetry as above.
+        if (rightBool === true && !mayHaveSideEffects(node.left)) return node.right;
       }
 
       return undefined;
