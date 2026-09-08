@@ -688,6 +688,18 @@ function planRun(
   stuck: ReadonlySet<string>,
   splits: Map<string, SlotPiece[]>,
   blocked: ReadonlySet<string>,
+  /**
+   * Lay a split variable's pieces into this run instead of stopping at it.
+   *
+   * Only a base-fold seed passes this. That run exists BECAUSE an address is
+   * computed across the slots, so the thing it must reproduce is their layout
+   * relative to each other - which is exactly what stopping at a split gives
+   * up. `D2WinEditBox`'s paste cursor folds a walk over `szFilteredClipText`
+   * with a destination inside `awszEditBuffer`, and Ghidra printed
+   * `awszEditBuffer` as three pieces, so a run that stops there leaves the two
+   * objects in different structs and the fold unanchorable.
+   */
+  absorbSplits = false,
 ): GroupMember[] | null {
   const base = slots[start].offset;
   const members: GroupMember[] = [];
@@ -700,7 +712,7 @@ function planRun(
     if (i > start) {
       // A split variable is a whole object with a known extent; it is grouped on
       // its own, and a run reaching it stops exactly where it stopped before.
-      if (splits.has(slot.name)) break;
+      if (!absorbSplits && splits.has(slot.name)) break;
       // A slot a known-count group already owns has a STATED extent; an inferred
       // run must not reach into it.
       if (blocked.has(slot.name)) break;
@@ -710,7 +722,7 @@ function planRun(
     const rel = slot.offset - base;
     if (rel < cursor) break;
 
-    const pieces = i === start ? splits.get(slot.name) : undefined;
+    const pieces = (i === start || absorbSplits) ? splits.get(slot.name) : undefined;
     if (pieces) {
       // ONE variable is one group. Its extent is exactly known, and nothing about
       // it is evidence for its neighbours — extending is the escape rule's job,
@@ -736,7 +748,14 @@ function planRun(
       if (end > at) members.push(paddingMember(at, end - at, true));
       cursor = end;
       declared += pieces.length;
-      break;
+      // A split variable normally ENDS the run - one variable is one group, and
+      // its extent is exactly known. A base-fold run has to keep going: it
+      // exists BECAUSE an address is computed across this slot and the ones
+      // after it, and stopping here leaves them in different structs with only
+      // the compiler's choice of layout between them.
+      if (!absorbSplits) break;
+      lastEnd = slot.offset + slot.size;
+      continue;
     }
 
     const local = movable.get(slot.name);
@@ -1081,7 +1100,7 @@ function createFrameGroupLocalsTransformer(options: FrameGroupLocalsOptions = {}
         if (!isSplit && !isBaseFold
             && (!escaping.has(slot.name) || !movable.has(slot.name))) continue;
 
-        const run = planRun(locals, i, movable, stuck, splits, blocked);
+        const run = planRun(locals, i, movable, stuck, splits, blocked, isBaseFold);
         if (!run) continue;
 
         const declared = run.filter(m => m.name !== null);
