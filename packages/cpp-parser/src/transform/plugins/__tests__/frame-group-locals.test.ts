@@ -118,10 +118,16 @@ describe('frameGroupLocalsPlugin', () => {
     assert.ok(!/__frame\d/.test(out), `*&a keeps the address inside the expression:\n${out}`);
   });
 
-  it('skips rather than mis-lays-out a frame whose alignment cannot be reproduced', () => {
-    // Ghidra puts a 4-byte slot two bytes after a 2-byte one. A struct member
-    // cannot sit at offset 2 with its natural 4-byte alignment, so the run stops
-    // at the first member and the group is dropped.
+  /**
+   * Ghidra puts a 4-byte slot two bytes after a 2-byte one. A struct member
+   * cannot sit at offset 2 with its natural 4-byte alignment, so the group is
+   * emitted PACKED rather than dropped - a wire packet is packed by definition,
+   * and dropping the group is what split
+   * NET_D2GS_SERVER_Send_0x9D_ItemOwned's header: its dwOwnerGUID sits at
+   * offset 9, so the run stopped one member early and everything past offset 8
+   * reached the wire as whatever the compiler had put there.
+   */
+  it('packs a frame whose alignment its members would not give it', () => {
     const out = run(
       `void f() { uint16_t w; uint32_t d; g(&w); h(w, d); }`,
       [
@@ -129,8 +135,17 @@ describe('frameGroupLocalsPlugin', () => {
         { name: 'd', offset: -8, size: 4 },
       ],
     );
-    assert.ok(!/__frame\d/.test(out), `an unreproducible offset must be skipped:\n${out}`);
-    assert.ok(/uint16_t\s+w\s*;/.test(out) && /uint32_t\s+d\s*;/.test(out), out);
+    assert.ok(/__frame\d/.test(out), `the run must be grouped, not dropped:\n${out}`);
+    assert.ok(out.includes('#pragma pack(push, 1)'), out);
+    assert.ok(out.includes('#pragma pack(pop)'), out);
+    // The assert must demand Ghidra's exact extent, not a padded one.
+    assert.ok(/sizeof\(__frame0_t\) == 6/.test(out), out);
+  });
+
+  it('does not pack a group whose members are all naturally aligned', () => {
+    const out = run(dispatchBody, dispatchSlots);
+    assert.ok(/__frame\d/.test(out), out);
+    assert.ok(!out.includes('#pragma pack'), out);
   });
 
   it('skips a run whose member type has no size this pass can name', () => {

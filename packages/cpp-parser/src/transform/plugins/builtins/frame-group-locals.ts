@@ -584,6 +584,11 @@ const FRAME_OBJECT_MIN_SIZE = 16;
 type GroupReason = 'escape' | 'split' | 'write' | 'base-fold';
 
 interface FrameGroup {
+  /**
+   * At least one member sits at an offset its own alignment would not give it,
+   * so the struct must be emitted packed to reproduce Ghidra's frame.
+   */
+  packed?: boolean;
   varName: string;
   typeName: string;
   members: GroupMember[];
@@ -771,9 +776,19 @@ function planRun(
         padded.push(paddingMember(cursor, rel - cursor));
         at = rel;
       }
-      // Padding is `uint8_t`, so the member sits exactly at `rel` only when
-      // `rel` already satisfies its own alignment.
-      if (alignUp(at, local.layout.align) !== rel) break;
+      // A member whose own alignment does not admit its frame offset used to end
+      // the run. That is what split NET_D2GS_SERVER_Send_0x9D_ItemOwned's packet
+      // header: Ghidra has dwOwnerGUID at offset 9 - correct, and what the client
+      // reads - but an `int` cannot sit at 9 in a naturally aligned struct, so the
+      // run stopped at byOwnerType and both dwOwnerGUID and the serialised item
+      // buffer fell outside the object. The send took &firstField for the whole
+      // length, so everything past offset 8 went on the wire as whatever the
+      // compiler had put there.
+      // A wire packet is packed by definition, so the member goes in at its exact
+      // offset and the struct is emitted `#pragma pack(1)` below. The size assert
+      // still has to reproduce Ghidra's extent exactly, so a wrong layout remains
+      // a build error rather than a silent one.
+      if (at !== rel) break;
       members.push(...padded, {
         name: slot.name,
         type: local.decl.type,
@@ -985,14 +1000,27 @@ function sizeAssert(group: FrameGroup): StaticAssertDecl {
 /** The three statements that introduce one group at the top of the body. */
 function groupStatements(group: FrameGroup): Statement[] {
   const struct = Stmt.declStmt([structFor(group)]);
-  struct.leadingTrivia = explanation(group).map(text => ({
+  const lines = explanation(group);
+  // A member at an offset its own alignment forbids is only reproducible packed.
+  // The pragma goes around the struct alone; the pop rides on the assert that
+  // follows, which is emitted immediately after it.
+  if (group.packed) lines.push('#pragma pack(push, 1)');
+  struct.leadingTrivia = lines.map(text => ({
     kind: TriviaKind.LineComment,
     text,
     location: struct.location,
   }));
+  const assert = Stmt.declStmt([sizeAssert(group)]);
+  if (group.packed) {
+    assert.leadingTrivia = [{
+      kind: TriviaKind.LineComment,
+      text: '#pragma pack(pop)',
+      location: assert.location,
+    }];
+  }
   return [
     struct,
-    Stmt.declStmt([sizeAssert(group)]),
+    assert,
     Stmt.declStmt([Decl.variable(group.varName, Type.typedef(group.typeName))]),
   ];
 }
@@ -1106,10 +1134,12 @@ function createFrameGroupLocalsTransformer(options: FrameGroupLocalsOptions = {}
         const declared = run.filter(m => m.name !== null);
         const maxAlign = declared.reduce((a, m) => Math.max(a, m.align), 1);
         const span = run.reduce((end, m) => Math.max(end, m.at + m.size), 0);
+        const isPacked = run.some(m => m.align > 1 && m.at % m.align !== 0);
         plans.push({
           members: run,
           baseOffset: slot.offset,
-          expectedSize: alignUp(span, maxAlign),
+          packed: isPacked,
+          expectedSize: isPacked ? span : alignUp(span, maxAlign),
           reason: isSplit ? 'split' : isBaseFold ? 'base-fold' : 'escape',
         });
         for (const m of declared) consumedSlots.add(m.name as string);
