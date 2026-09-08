@@ -31,6 +31,11 @@
  * which is relocation-proof, needs no adjacency, and is the same ten iterations
  * on any layout.
  *
+ * The bound arrives either as `&sym` or, when no symbol sits at that address, as the
+ * raw integer the machine compared. Both are handled the same way; the integer form is
+ * what remains once an interior label - a folded field offset that Ghidra had named as
+ * its own symbol - is dropped.
+ *
  * The anchor is not guessed. It must be a global that FLOWS INTO the walking
  * pointer — named in the compared expression itself, or assigned into its root
  * variable somewhere in the same function — and it must lie below the bound.
@@ -153,9 +158,25 @@ export function createAddressRunBoundTransformer(options?: PluginOptions): Trans
           if (!ORDERINGS.has(b.operator)) return undefined;
 
           const rewrite = (bound: Expression, walker: Expression): Expression | undefined => {
+            // The bound reaches us in one of two shapes. `&sym` is what
+            // `global-address-literal` leaves when some symbol happens to sit at the
+            // compared address. When nothing sits exactly there - or the label that did
+            // was an interior artifact and has been dropped - the raw `cmp esi, 0x7a7403`
+            // survives as a plain integer, and it is the same defect either way: a fixed
+            // distance from the walked object, frozen as an absolute address.
             const sym = boundName(bound);
-            if (!sym) return undefined;
-            const boundAddr = addresses[sym];
+            let boundAddr: number | undefined;
+            if (sym) {
+              boundAddr = addresses[sym];
+            } else {
+              const lit = unwrap(bound);
+              if (lit.kind === NodeKind.IntegerLiteral) {
+                const v = Number((lit as unknown as { value: string | number | bigint }).value);
+                // Only a value that could be an address in this image. A small
+                // constant is a count, not a location, and must not be respelled.
+                if (Number.isFinite(v) && v > 0x10000) boundAddr = v;
+              }
+            }
             if (boundAddr === undefined) return undefined;
 
             // Candidates: globals named in the walking expression itself, plus

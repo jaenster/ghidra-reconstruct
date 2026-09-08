@@ -104,3 +104,43 @@ describe('addressRunBoundPlugin', () => {
     assert.ok(run(src, {}).includes('&gbCompItemEmblemColorTableTemp4'));
   });
 });
+
+describe('addressRunBoundPlugin - raw address literals', () => {
+  function run(code: string, opts: AddressRunBoundOptions): string {
+    const ast = parse(code);
+    const transformer = addressRunBoundPlugin.createTransformer(opts);
+    return emit(transformer(ast) as AnyNode).trim();
+  }
+
+  // CMD_RebuildDerivedBindings @004694a0. g_KeyBindingsTable is 114 ten-byte
+  // entries at 0x7a6f90, so its last byte is 0x7a7403 - which is exactly what the
+  // machine compares. Ghidra had a label at 0x7a6f94 (element 0's wKeyCode, a
+  // folded field offset); once that artifact is dropped the bound survives as the
+  // bare integer.
+  const KEYBIND: AddressRunBoundOptions = {
+    globalAddresses: { g_KeyBindingsTable: 0x7a6f90 },
+  };
+
+  it('respells a raw address bound as a distance from the walked table', () => {
+    const out = run(
+      'void f(void) { D2KeyBindStrc *p = g_KeyBindingsTable;'
+      + ' do { p++; } while ((int)p <= 0x7a7403); }', KEYBIND);
+    assert.match(out, /\(uintptr_t\)&g_KeyBindingsTable \+ 1139/);
+    assert.ok(!out.includes('0x7a7403'), `absolute address must be gone, got: ${out}`);
+  });
+
+  it('leaves a small constant alone - that is a count, not a location', () => {
+    const out = run(
+      'void f(void) { D2KeyBindStrc *p = g_KeyBindingsTable;'
+      + ' do { p++; } while ((int)p <= 114); }', KEYBIND);
+    assert.ok(out.includes('114'), `count must survive, got: ${out}`);
+    assert.ok(!out.includes('uintptr_t'), 'must not respell a count');
+  });
+
+  it('leaves a literal alone when no global flows into the walker', () => {
+    const out = run(
+      'void f(void) { D2KeyBindStrc *p = pSomethingElse;'
+      + ' do { p++; } while ((int)p <= 0x7a7403); }', KEYBIND);
+    assert.ok(out.includes('0x7a7403'), `no anchor, so no rewrite: ${out}`);
+  });
+});
