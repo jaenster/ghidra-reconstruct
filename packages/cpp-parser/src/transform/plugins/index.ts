@@ -289,6 +289,8 @@ export {
   type SbbBranchlessOptions,
 } from './builtins/sbb-branchless.js';
 
+export { extraoutSplicePlugin } from './builtins/extraout-splice.js';
+
 export {
   branchlessSelectPlugin,
   type BranchlessSelectOptions,
@@ -473,6 +475,7 @@ import { fourccLiteralPlugin } from './builtins/fourcc-literal.js';
 import { typeNormalizePlugin } from './builtins/type-normalize.js';
 import { concatTransformPlugin } from './builtins/concat-transform.js';
 import { redundantNegationPlugin } from './builtins/redundant-negation.js';
+import { extraoutSplicePlugin } from './builtins/extraout-splice.js';
 import { sbbBranchlessPlugin } from './builtins/sbb-branchless.js';
 import { branchlessSelectPlugin } from './builtins/branchless-select.js';
 import { earlyReturnPlugin } from './builtins/early-return.js';
@@ -599,6 +602,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   arrayCastAssignPlugin,      // Cleanup: a = (byte[4])x → *(uint32_t *)a = x (priority 16, before strip)
   vtableStoreCastPlugin,      // Cleanup: *(T**)x = name → *(T**)x = (T*)name (priority 48)
   arrayCastStripPlugin,       // Cleanup: drop (char[4])x array-type casts (priority 17)
+  extraoutSplicePlugin,       // Correctness: drop Ghidra's uninitialised extraout_* upper bytes (priority 41)
   sbbBranchlessPlugin,        // Cleanup: -(uint32_t)(cond) & addr → cond ? addr : nullptr (priority 42)
   branchlessSelectPlugin,     // Cleanup: (cond - 1 & mask) + off → cond ? off : off+mask (priority 43)
   earlyReturnPlugin,          // Readability: flatten nested if(C){...}return X; → if(!C)return X; ... (priority 60)
