@@ -822,6 +822,90 @@ function isUnresolvedFrameAddress(expr: Expression): boolean {
   return frameAddressOffset(e) !== null;
 }
 
+/**
+ * The smallest frame variable that counts as an OBJECT rather than a scalar. A
+ * fold that walks the frame walks a buffer or a struct; four- and eight-byte
+ * slots are the counters and pointers doing the walking, not the thing walked.
+ */
+const FRAME_OBJECT_MIN_SIZE = 16;
+
+/**
+ * The frame BASE itself, anchored to the one object the frame is built around.
+ *
+ * Every rule above resolves a `&stack0xNNNN` whose offset some slot owns. The
+ * base is the offset no slot can ever own: it sits above every local, in the
+ * saved-EBP and return-address words the function does not allocate. Ghidra
+ * still prints it, because constant propagation folds `EBP` into arithmetic
+ * that was written against a local:
+ *
+ *     packet.szGuildTag + 1 + (pGuildTagEnd + (0x109 - (uint)&stack0x00000000))
+ *
+ * Read as an address that expression is nonsense, and substituting `0` for the
+ * base - which is what this pass used to do - turns it into a wild pointer that
+ * `GetGuildName` then writes a string through. Read as ARITHMETIC it is exact:
+ * every frame term carries `EBP` with the sign that cancels, and what is left
+ * is `pGuildTagEnd`, the byte after the guild tag's terminator.
+ *
+ * So the base is given the value that makes the cancellation come out right:
+ * the address of a frame object, plus that object's own frame offset. Any slot
+ * at its true offset yields the same FRAME offset for the result; it yields the
+ * same ADDRESS only for results that land inside the slot that anchors it,
+ * because the compiler chooses where the emitted locals actually sit and only
+ * an object's INTERNAL layout is faithful.
+ *
+ * That is the whole of the guard: the function must have exactly ONE frame
+ * object. With one object every folded address the function can form lands
+ * inside it, so the anchor is not a choice. With two the expression may need
+ * both of them at their true offsets relative to each other - which the emitted
+ * frame does not provide - and no anchor is correct; `D2WinEditBox`'s paste
+ * cursor is one of those, folding `szFilteredClipText` and `awszEditBuffer`
+ * together. Those keep Ghidra's undeclared name and fail where they are, which
+ * is the honest outcome: a wrong address is silent and a build error names the
+ * line.
+ *
+ * Retire when the decompiler stops folding the frame pointer into
+ * frame-relative arithmetic, or when the frame-group pass can put every slot a
+ * single fold touches into one object.
+ */
+function createFrameBaseAnchorTransformer(slots: StackSlot[]): Transformer {
+  return (root: ASTNode) => {
+    const declared = declaredNames(root);
+    const objects = slots.filter(
+      (s) => !s.isParameter && s.size >= FRAME_OBJECT_MIN_SIZE && declared.has(s.name));
+    if (objects.length !== 1) return root;
+    const anchor = objects[0];
+
+    const locals = slots.filter((s) => !s.isParameter);
+    if (locals.length === 0) return root;
+    const localsEnd = Math.max(...locals.map((s) => s.offset + Math.max(s.size, 1)));
+    const params = slots.filter((s) => s.isParameter);
+    const paramsStart = params.length > 0
+      ? Math.min(...params.map((s) => s.offset))
+      // No parameter names the boundary: allow just the two saved words.
+      : localsEnd + 8;
+    if (paramsStart <= localsEnd) return root;
+
+    return createKindTransformer(NodeKind.UnaryExpr, (node) => {
+      const unary = node as UnaryExpr;
+      if (unary.operator !== '&') return undefined;
+      const operand = unwrapParens(unary.operand);
+      if (operand.kind !== NodeKind.Identifier) return undefined;
+      const offset = stackNameOffset((operand as Identifier).name);
+      if (offset === null) return undefined;
+
+      // The SAVE AREA, and nothing else: above every local, below the first
+      // parameter. That window is the saved frame pointer and the return
+      // address - storage the function does not allocate - so an address in it
+      // can only be the base, and an offset outside it is either a slot the
+      // rules above declined for their own reasons or a fold constant the
+      // solver refused to guess at. Both keep their loud undeclared name.
+      if (offset < localsEnd || offset >= paramsStart) return undefined;
+
+      return anchoredAddress(anchor, offset - anchor.offset, unary);
+    })(root);
+  };
+}
+
 function createDeadFrameStoreTransformer(): Transformer {
   return (root: ASTNode) => {
     const read = namesRead(root);
@@ -897,6 +981,9 @@ function createStackFrameAddressTransformer(options: StackFrameAddressOptions = 
     slots.length > 0 && Object.keys(globalAddresses).length > 0
       ? createFoldedGlobalAddressTransformer(slots, globalAddresses)
       : ((node: ASTNode) => node),
+    // Last of the resolving rules: the frame BASE, which no slot can own, so it
+    // only ever reaches here.
+    slots.length > 0 ? createFrameBaseAnchorTransformer(slots) : ((node: ASTNode) => node),
     createDeadFrameStoreTransformer(),
   );
 }

@@ -191,11 +191,11 @@ import type {
   StringLiteralExpr,
 } from '../../../ast/nodes.js';
 import { traverseAST, getChildren, findNodesByKind } from '../../../ast/visitor.js';
-import { createTransformer, updateNode, identity, type Transformer } from '../../transformer.js';
+import { createTransformer, createKindTransformer, updateNode, identity, type Transformer } from '../../transformer.js';
 import { Decl, Expr, Stmt, Type } from '../../../ast/factory.js';
 import { TriviaKind } from '../../../lexer/trivia.js';
 import { typeNodeName, builtinBase } from './call-arg-cast.js';
-import type { StackSlot } from './stack-frame-address.js';
+import { stackNameOffset, type StackSlot } from './stack-frame-address.js';
 import { createPlugin } from '../registry.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 
@@ -574,7 +574,14 @@ interface SlotPiece {
 }
 
 /** Why a group exists, which is also what its comment has to say. */
-type GroupReason = 'escape' | 'split' | 'write';
+/**
+ * The smallest frame variable that counts as an OBJECT rather than a scalar,
+ * matching `stack-frame-address`. A fold walks a buffer or a struct; the four-
+ * and eight-byte slots are the counters and pointers doing the walking.
+ */
+const FRAME_OBJECT_MIN_SIZE = 16;
+
+type GroupReason = 'escape' | 'split' | 'write' | 'base-fold';
 
 interface FrameGroup {
   varName: string;
@@ -877,6 +884,31 @@ function freeName(used: Set<string>, index: number): { varName: string; typeName
   }
 }
 
+/**
+ * The `stack0xNNNN` names the frame-address pass could not resolve, if any.
+ *
+ * That pass anchors a folded frame base to the function's ONE frame object and
+ * refuses when there are several, because the arithmetic then needs two objects
+ * at their true offsets relative to each other and the compiler chooses where
+ * separate locals sit. `D2WinEditBox`'s paste cursor is the case: it folds a
+ * walk over `szFilteredClipText` with a destination in `awszEditBuffer`, and
+ * the two are adjacent in the frame.
+ *
+ * A surviving name is therefore evidence of the same kind the other three rules
+ * act on - the code computes an address ACROSS these slots, so they are one
+ * object. Grouping them makes their relative offsets faithful again, and the
+ * base can then be anchored to the group.
+ */
+function unresolvedFrameBases(body: ASTNode): Set<string> {
+  const names = new Set<string>();
+  for (const n of traverseAST(body)) {
+    if (n.kind !== NodeKind.Identifier) continue;
+    const name = (n as Identifier).name;
+    if (stackNameOffset(name) !== null) names.add(name);
+  }
+  return names;
+}
+
 /** The two comment lines that say why the group exists, ahead of its definition. */
 function explanation(group: FrameGroup): string[] {
   const first = group.members.find(m => m.name)?.name ?? '';
@@ -885,6 +917,13 @@ function explanation(group: FrameGroup): string[] {
       `// Frame ${group.baseOffset}..${group.baseOffset + group.expectedSize} is ONE object:`
         + ` a call writes ${group.expectedSize} literal bytes starting at &${first}.`,
       '// Separate locals let the compiler reorder them, and the write would run off the frame.',
+    ];
+  }
+  if (group.reason === 'base-fold') {
+    return [
+      `// Frame ${group.baseOffset}..${group.baseOffset + group.expectedSize} is ONE object:`
+        + ' an address is computed ACROSS these slots, folded against the frame pointer.',
+      '// Separate locals let the compiler reorder them, so the arithmetic needs one struct.',
     ];
   }
   if (group.reason === 'split') {
@@ -997,7 +1036,17 @@ function createFrameGroupLocalsTransformer(options: FrameGroupLocalsOptions = {}
       // A call with a literal byte count STATES the extent; the other two rules
       // only infer it.
       const writes = knownCountWrites(body, movable);
-      if (escaping.size === 0 && splits.size === 0 && writes.size === 0) return undefined;
+      // A frame base the address pass could not anchor. The run is seeded at the
+      // LOWEST local so it reaches every object the fold might touch; if the
+      // frame has a gap the run stops there, the guard below fails, and the
+      // undeclared name survives to fail loudly rather than bind to a guess.
+      const frameBases = unresolvedFrameBases(body);
+      const baseFoldSeed = new Set<string>();
+      if (frameBases.size > 0 && locals.length > 0) baseFoldSeed.add(locals[0].name);
+      if (escaping.size === 0 && splits.size === 0 && writes.size === 0
+          && baseFoldSeed.size === 0) {
+        return undefined;
+      }
 
       const used = new Set<string>(declaredNames);
       for (const id of traverseAST(body)) {
@@ -1028,7 +1077,9 @@ function createFrameGroupLocalsTransformer(options: FrameGroupLocalsOptions = {}
         const slot = locals[i];
         if (consumedSlots.has(slot.name) || blocked.has(slot.name)) continue;
         const isSplit = splits.has(slot.name);
-        if (!isSplit && (!escaping.has(slot.name) || !movable.has(slot.name))) continue;
+        const isBaseFold = baseFoldSeed.has(slot.name);
+        if (!isSplit && !isBaseFold
+            && (!escaping.has(slot.name) || !movable.has(slot.name))) continue;
 
         const run = planRun(locals, i, movable, stuck, splits, blocked);
         if (!run) continue;
@@ -1040,7 +1091,7 @@ function createFrameGroupLocalsTransformer(options: FrameGroupLocalsOptions = {}
           members: run,
           baseOffset: slot.offset,
           expectedSize: alignUp(span, maxAlign),
-          reason: isSplit ? 'split' : 'escape',
+          reason: isSplit ? 'split' : isBaseFold ? 'base-fold' : 'escape',
         });
         for (const m of declared) consumedSlots.add(m.name as string);
       }
@@ -1141,6 +1192,43 @@ function createFrameGroupLocalsTransformer(options: FrameGroupLocalsOptions = {}
       });
 
       let rewritten = rewrite(body) as CompoundStmt;
+
+      // With the run grouped, the frame base has a spelling again: the group
+      // reproduces Ghidra's layout over its whole extent, so `&group + (N -
+      // baseOffset)` is the address frame offset N really names, and every
+      // folded term in the expression cancels against it exactly.
+      //
+      // Only ONE group, and only when it holds every frame object: a second
+      // object outside it is one the arithmetic could also be anchored on, and
+      // that is the ambiguity the address pass already refused. The offset must
+      // also lie in the save area - above every local, below the first
+      // parameter - which is the only place the base can be and no slot can.
+      if (frameBases.size > 0 && groups.length === 1) {
+        const group = groups[0];
+        const groupEnd = group.baseOffset + group.expectedSize;
+        const outside = locals.some(
+          s => s.size >= FRAME_OBJECT_MIN_SIZE
+            && (s.offset < group.baseOffset || s.offset + s.size > groupEnd));
+        const params = slots.filter(s => s.isParameter);
+        const paramsStart = params.length > 0
+          ? Math.min(...params.map(s => s.offset))
+          : groupEnd + 8;
+        if (!outside && paramsStart > groupEnd) {
+          rewritten = createKindTransformer(NodeKind.UnaryExpr, (n) => {
+            const u = n as UnaryExpr;
+            if (u.operator !== '&' || u.operand.kind !== NodeKind.Identifier) return undefined;
+            const offset = stackNameOffset((u.operand as Identifier).name);
+            if (offset === null) return undefined;
+            if (offset < groupEnd || offset >= paramsStart) return undefined;
+            return Expr.paren(Expr.binary(
+              Expr.cast(Type.pointer(Type.typedef('uint8_t')),
+                        Expr.unary('&', Expr.identifier(group.varName))),
+              '+',
+              Expr.intLiteral(offset - group.baseOffset)));
+          })(rewritten) as CompoundStmt;
+        }
+      }
+
       const preamble: Statement[] = [];
       for (const g of groups) preamble.push(...groupStatements(g));
       rewritten = updateNode(rewritten, {

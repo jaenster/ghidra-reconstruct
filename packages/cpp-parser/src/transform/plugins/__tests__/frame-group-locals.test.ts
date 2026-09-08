@@ -608,4 +608,57 @@ describe('frameGroupLocalsPlugin', () => {
     const code = 'void f() { uint32_t a; uint32_t b; g(&a); h(b); }';
     assert.strictEqual(run(code, []), emit(parse(code) as AnyNode));
   });
+  /**
+   * `D2WinEditBox`'s clipboard paste @0x004feae0. The cursor is computed as
+   * `pbClipEnd*2 - 0x25e + nSelEnd*2 - EBP`, folding a walk over
+   * `szFilteredClipText` with a destination inside `awszEditBuffer`. Two frame
+   * objects, so `stack-frame-address` refuses to anchor the base - grouping the
+   * run is what gives them faithful offsets relative to each other.
+   */
+  const pasteSlots: StackSlot[] = [
+    { name: 'awszPasteText', offset: -1956, size: 512, isArray: true },
+    { name: 'awszEditBuffer', offset: -1444, size: 1024, isArray: true },
+    { name: 'szFilteredClipText', offset: -420, size: 144, isArray: true },
+    { name: 'nPasteCharCount', offset: -20, size: 4 },
+    { name: 'pParam', offset: 4, size: 4, isParameter: true },
+  ];
+
+  const pasteBody = `void f(void* pParam) {
+    uint16_t awszPasteText[256];
+    uint16_t awszEditBuffer[512];
+    char szFilteredClipText[144];
+    int nPasteCharCount;
+    char* pbClipEnd;
+    uint16_t* pwszCursor;
+    pbClipEnd = szFilteredClipText;
+    pwszCursor = (uint16_t*)((int)pbClipEnd * 2 - 0x25e + nPasteCharCount * 2 - (uintptr_t)&stack0x00000000);
+  }`;
+
+  it('groups the run a frame-base fold computes across', () => {
+    const out = run(pasteBody, pasteSlots);
+    assert.ok(/struct __frame0_t/.test(out), out);
+    // Both objects the fold needs are members, so their offsets relative to
+    // each other are the frame's and not the compiler's.
+    assert.ok(/uint16_t awszEditBuffer\[512\];/.test(out), out);
+    assert.ok(/char szFilteredClipText\[144\];/.test(out), out);
+    assert.ok(out.includes('__frame0.szFilteredClipText'), out);
+  });
+
+  it('anchors the frame base on the group it grouped for', () => {
+    const out = run(pasteBody, pasteSlots);
+    assert.ok(!out.includes('stack0x00000000'), out);
+    // The group starts at -1956, so the base is its address plus 1956.
+    assert.ok(/\(uint8_t\s*\*\)&__frame0 \+ 1956/.test(out.replace(/\s+/g, ' ')), out);
+  });
+
+  it('leaves the base alone when an object sits outside the group', () => {
+    const out = run(pasteBody, [
+      ...pasteSlots,
+      // A gap below the run stops it, so this buffer cannot join and its
+      // offset relative to the group is whatever the compiler picks.
+      { name: 'awszStrandedText', offset: -3000, size: 512, isArray: true },
+    ]);
+    assert.ok(out.includes('stack0x00000000'), out);
+  });
 });
+

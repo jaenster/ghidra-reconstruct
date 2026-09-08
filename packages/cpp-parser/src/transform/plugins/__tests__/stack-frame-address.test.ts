@@ -337,3 +337,52 @@ describe('stack-frame-address: a folded global address', () => {
     assert.ok(!out.includes('gszLocalSaveFilenameBuffer)'), out);
   });
 });
+
+/**
+ * The frame BASE. No slot owns offset 0 — it is the saved EBP the function does
+ * not allocate — so it reaches the anchor rule and nothing else. These pin what
+ * makes the anchor sound: one frame object, or no answer.
+ */
+describe('stack-frame-address: frame base', () => {
+  const ONE_OBJECT = [
+    { name: 'pOther', offset: 4, size: 4, isParameter: true },
+    { name: 'pClientSaved', offset: -304, size: 4 },
+    { name: 'packet', offset: -300, size: 290 },
+    { name: 'nGuardCookie', offset: -8, size: 4 },
+  ];
+
+  it('anchors the base to the one object the frame is built around', () => {
+    const out = run(
+      'void f() { D2GSPacketSrv0x5B packet; char* pEnd;'
+      + ' p = packet.szGuildTag + 1 + (int)(pEnd + (0x109 - (uintptr_t)&stack0x00000000)); }',
+      ONE_OBJECT);
+    // &packet + 300 — the object's address plus its own frame offset, which is
+    // what makes the surrounding arithmetic cancel back to pEnd.
+    assert.ok(out.includes('&packet') && out.includes('300'), out);
+    assert.ok(!out.includes('stack0x00000000'), out);
+  });
+
+  it('refuses when two frame objects could anchor it', () => {
+    const out = run(
+      'void f() { char awszEditBuffer[1024]; char szFilteredClipText[144]; char* pbClipEnd;'
+      + ' p = (int)pbClipEnd * 2 - 0x25e - (uintptr_t)&stack0x00000000; }',
+      [
+        { name: 'awszEditBuffer', offset: -1444, size: 1024, isArray: true },
+        { name: 'szFilteredClipText', offset: -420, size: 144, isArray: true },
+        { name: 'pbClipEnd', offset: -12, size: 4 },
+      ]);
+    assert.ok(out.includes('stack0x00000000'), out);
+  });
+
+  it('leaves an offset the frame owns to the rules that own it', () => {
+    const out = run('void f() { D2GSPacketSrv0x5B packet; p = &stack0xfffffed4; }', ONE_OBJECT);
+    assert.ok(out.includes('&packet'), out);
+    assert.ok(!out.includes('300'), out);
+  });
+
+  it('does not anchor to an object the body never declares', () => {
+    const out = run(
+      'void f() { char* pEnd; p = pEnd - (uintptr_t)&stack0x00000000; }', ONE_OBJECT);
+    assert.ok(out.includes('stack0x00000000'), out);
+  });
+});
