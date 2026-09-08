@@ -7,6 +7,7 @@
  */
 
 import type { GhidraConnection, ExtractedGlobal, AnalyzedDataSymbol, DataSymbolScope, DataValue } from '../types.js';
+import { isStructType } from '../codegen/platform-types.js';
 
 /**
  * Strip namespace prefix from a qualified function name.
@@ -347,9 +348,21 @@ export async function fetchInitializedData(
   globals: AnalyzedDataSymbol[],
   onProgress?: (fetched: number, total: number) => void
 ): Promise<void> {
-  // Only fetch for initialized globals with reasonable size (skip tiny scalars, cap at 64KB)
+  // Only fetch for initialized globals with reasonable size (skip tiny scalars, cap at 64KB).
+  //
+  // "Tiny" has to mean tiny SCALAR. Ghidra's own `value` covers those, but it returns
+  // nothing for a composite, so a struct of four bytes or fewer fell into the gap between
+  // the two: no scalar value, no fetched bytes, and the renderer turned it into `= {}`.
+  // That is not a missing initializer, it is a WRONG one - real .data bytes replaced by
+  // zeroes, silently, in something that still compiles and links.
+  //
+  // It cost a crash three subsystems away: `g_InventorySizesDefaultConfig` @0x7447b4 is a
+  // 2-byte D2InventorySizesStrc holding {16, 1}, the belt grid. Emitted as {0, 0} it made
+  // ReinitializeInventoryGrid allocate a ZERO-byte grid, and every belt item restored from
+  // a save then wrote past it, corrupting the Fog pool that also holds the inventory's
+  // update-list nodes - which is where the access violation finally surfaced.
   const candidates = globals.filter(g =>
-    g.isInitialized && g.size > 4 && g.size <= 64 * 1024
+    g.isInitialized && g.size <= 64 * 1024 && (g.size > 4 || isStructType(g.dataType))
   );
 
   if (candidates.length === 0) return;

@@ -414,6 +414,8 @@ export {
   subpieceAccessPlugin,
 } from './builtins/subpiece-access.js';
 
+export { arrayCastAssignPlugin } from './builtins/array-cast-assign.js';
+
 // ============================================
 // BUILT-IN PLUGINS: INDIRECT CALL CLEANUP
 // ============================================
@@ -481,6 +483,7 @@ import { prngTransformPlugin } from './builtins/prng-transform.js';
 import { prngTempCollapsePlugin } from './builtins/prng-temp-collapse.js';
 import { bitfieldAccessPlugin } from './builtins/bitfield-access.js';
 import { subpieceAccessPlugin } from './builtins/subpiece-access.js';
+import { arrayCastAssignPlugin } from './builtins/array-cast-assign.js';
 import { arrayCastStripPlugin } from './builtins/array-cast-strip.js';
 import { indirectCallCleanupPlugin } from './builtins/indirect-call-cleanup.js';
 import { methodCallRewritePlugin } from './builtins/method-call-rewrite.js';
@@ -590,6 +593,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   redundantNegationPlugin,    // Cleanup: x + -y → x - y (priority 40)
   bitfieldAccessPlugin,       // Cleanup: field_0xNN & MASK → bitfieldName (priority 45)
   subpieceAccessPlugin,       // Cleanup: expr._N_M_ → *(T *)((char *)expr + N) (priority 46)
+  arrayCastAssignPlugin,      // Cleanup: a = (byte[4])x → *(uint32_t *)a = x (priority 16, before strip)
   arrayCastStripPlugin,       // Cleanup: drop (char[4])x array-type casts (priority 17)
   sbbBranchlessPlugin,        // Cleanup: -(uint32_t)(cond) & addr → cond ? addr : nullptr (priority 42)
   branchlessSelectPlugin,     // Cleanup: (cond - 1 & mask) + off → cond ? off : off+mask (priority 43)
