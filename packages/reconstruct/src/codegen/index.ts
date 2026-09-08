@@ -5007,6 +5007,11 @@ export function buildFuncPtrArgCastTables(
   //    could name a namespace the header never opens. Dropping those names costs
   //    an unqualified reference; keeping them would cost an unresolvable one.
   const globalNamespaces: Record<string, readonly string[]> = {};
+  // Global leaf names the program gives to more than one namespace. Stripping such a
+  // name to its bare form hands the choice to C++ inner-scope lookup: `vftable` exists
+  // under several classes, so D2Client::UIWidget::vftable became a bare `vftable` that
+  // bound to a different class's table with an incompatible type.
+  const ambiguousGlobalNames = new Set<string>();
   {
     const blockableLeadSegments = new Set<string>();
     for (const dt of dataTypes) {
@@ -5020,7 +5025,7 @@ export function buildFuncPtrArgCastTables(
         if (n) blockableLeadSegments.add(n);
       }
     }
-    const ambiguous = new Set<string>();
+    const ambiguous = ambiguousGlobalNames;
     for (const g of globals) {
       const name = g.suggestedName || g.name;
       if (!name || /[^A-Za-z0-9_]/.test(name)) continue;
@@ -5109,6 +5114,7 @@ export function buildFuncPtrArgCastTables(
     globalSizes,
     globalElementSizes,
     globalNamespaces,
+    ambiguousGlobalNames: [...ambiguousGlobalNames],
     stringConstantNames,
     varArgFunctions: [...varArgFunctions],
     fieldTypes,

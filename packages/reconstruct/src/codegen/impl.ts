@@ -667,6 +667,8 @@ export interface FuncPtrArgCastTables {
   functionNames?: string[];
   /** Bare names more than one function carries - i.e. an overload set */
   overloadedFunctionNames?: string[];
+  /** Global leaf names owned by more than one namespace - never strip these bare. */
+  ambiguousGlobalNames?: string[];
   /** Global variable name (as emitted) → its emitted declaration type spelling */
   globalTypes?: Record<string, string>;
   /**
@@ -2358,6 +2360,17 @@ function transformDecompiledCode(
       perPluginOptions['enclosing-namespace-strip'] = {
         enclosingSegments: [...enclosingSegments],
         knownNamespaces: context?.knownNamespaces ? [...context.knownNamespaces] : undefined,
+        // Leaf names the program gives to more than one function. Stripping to such a
+        // bare name hands the choice to C++ inner-scope lookup, and RoomTile::InitGridCells
+        // then called itself instead of D2Common::Drlg::InitGridCells - unbounded
+        // recursion and a stack overflow on the Act 1 path.
+        // Data symbols collide the same way functions do: `vftable` exists under several
+        // classes, and a stripped D2Client::UIWidget::vftable bound to another class's
+        // table - a type error at best, the wrong table at worst.
+        ambiguousLeafNames: [...new Set([
+          ...(context?.funcPtrArgCasts?.overloadedFunctionNames ?? []),
+          ...(context?.funcPtrArgCasts?.ambiguousGlobalNames ?? []),
+        ])].filter(n => !n.includes('::')),
       };
     }
 
