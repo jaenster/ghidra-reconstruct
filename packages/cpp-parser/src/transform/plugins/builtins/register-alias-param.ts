@@ -29,14 +29,30 @@
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
-import type { ASTNode, Expression, Identifier, VariableDecl } from '../../../ast/nodes.js';
+import type { ASTNode, AnyNode, Expression, Identifier, VariableDecl } from '../../../ast/nodes.js';
+import { emit } from '../../../emit/index.js';
 import { traverseAST } from '../../../ast/visitor.js';
 import { createTransformer, type Transformer } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 
 export interface RegisterAliasOptions {
-  /** emitted local name -> the parameter sharing its register */
-  aliases?: Record<string, string>;
+  /**
+   * emitted local name -> the parameter sharing its register, and that
+   * parameter's EMITTED type. The type is compared against the declaration the
+   * AST holds, because that is what the compiler will see: Ghidra types these
+   * locals `undefined4` while emitting them as the resolved pointer, so
+   * comparing Ghidra's own type strings rejects every real case.
+   */
+  aliases?: Record<string, { param: string; type: string }>;
+}
+
+/** The declaration's type, spelled the way the emitter will spell it. */
+function declTypeText(decl: VariableDecl): string {
+  try {
+    return emit(decl.type as unknown as AnyNode).replace(/\s+/g, '');
+  } catch {
+    return '';
+  }
 }
 
 /** The identifier this expression is, ignoring parens and casts. */
@@ -84,7 +100,7 @@ function createRegisterAliasTransformer(options?: PluginOptions): Transformer {
 
   return (root: ASTNode) => {
     const assigned = assignedNames(root);
-    const fold = new Map<string, string>();
+    const fold = new Map<string, { param: string; type: string }>();
     for (const local of names) {
       if (assigned.has(local)) continue;      // genuinely a local - leave it alone
       fold.set(local, aliases[local]);
@@ -102,15 +118,19 @@ function createRegisterAliasTransformer(options?: PluginOptions): Transformer {
       visitVariableDecl(decl: VariableDecl): VariableDecl | undefined {
         const nm = decl.name?.name;
         if (!nm) return undefined;
-        const param = fold.get(nm);
+        const alias = fold.get(nm);
         // Never touch one that already has an initialiser - it is not the shape
         // this pass is for, whatever the storage says.
-        if (!param || decl.initializer) return undefined;
+        if (!alias || decl.initializer) return undefined;
+        // The seed must typecheck. Compare what the compiler will see, not what
+        // Ghidra called it.
+        const want = (alias.type ?? '').replace(/\s+/g, '');
+        if (!want || declTypeText(decl) !== want) return undefined;
         return {
           ...decl,
           initializer: {
             kind: NodeKind.Identifier,
-            name: param,
+            name: alias.param,
             location: decl.location,
             leadingTrivia: [],
             trailingTrivia: [],

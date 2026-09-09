@@ -13,7 +13,7 @@ import { emit } from '../../../emit/index.js';
 import type { AnyNode } from '../../../ast/nodes.js';
 import { registerAliasParamPlugin } from '../builtins/register-alias-param.js';
 
-function run(src: string, aliases: Record<string, string>): string {
+function run(src: string, aliases: Record<string, { param: string; type: string }>): string {
   const t = registerAliasParamPlugin.createTransformer({ aliases } as never);
   return emit(t(parse(src)) as AnyNode).replace(/\s+/g, ' ').trim();
 }
@@ -22,7 +22,7 @@ describe('register-alias-param', () => {
   it('seeds a never-assigned register local from its parameter', () => {
     const out = run(
       'void f() { D2UnitStrc* pUnitUnused; g(pUnitUnused, 1); }',
-      { pUnitUnused: 'pUnit' });
+      { pUnitUnused: { param: 'pUnit', type: 'D2UnitStrc*' } });
     assert.ok(/pUnitUnused\s*=\s*pUnit/.test(out), out);
     assert.ok(out.includes('g(pUnitUnused, 1)'), out);
   });
@@ -37,7 +37,7 @@ describe('register-alias-param', () => {
   it('leaves exactly one declaration, never a second one named after the param', () => {
     const out = run(
       'void f() { int a; int b; g(a, b); }',
-      { a: 'pGfxData', b: 'pGfxData' });
+      { a: { param: 'pGfxData', type: 'int' }, b: { param: 'pGfxData', type: 'int' } });
     assert.strictEqual((out.match(/int pGfxData/g) ?? []).length, 0, out);
     assert.ok(/a\s*=\s*pGfxData/.test(out), out);
     assert.ok(/b\s*=\s*pGfxData/.test(out), out);
@@ -46,7 +46,7 @@ describe('register-alias-param', () => {
   it('never touches a local that already has an initialiser', () => {
     const out = run(
       'void f() { D2SkillStrc* pSkillUnused = h(); g(pSkillUnused); }',
-      { pSkillUnused: 'pSkill' });
+      { pSkillUnused: { param: 'pSkill', type: 'D2SkillStrc*' } });
     assert.ok(out.includes('= h()'), out);
     assert.ok(!/pSkillUnused\s*=\s*pSkill/.test(out), out);
   });
@@ -55,22 +55,34 @@ describe('register-alias-param', () => {
   it('refuses to seed a local the body assigns', () => {
     const out = run(
       'void f() { D2UnitStrc* pLocal; pLocal = h(); g(pLocal); }',
-      { pLocal: 'pUnit' });
+      { pLocal: { param: 'pUnit', type: 'D2UnitStrc*' } });
     assert.ok(!/pLocal\s*=\s*pUnit\s*;/.test(out), out);
   });
 
   it('refuses to seed a local whose address escapes', () => {
     const out = run(
       'void f() { int nLocal; h(&nLocal); g(nLocal); }',
-      { nLocal: 'nParam' });
+      { nLocal: { param: 'nParam', type: 'int' } });
     assert.ok(!/nLocal\s*=\s*nParam/.test(out), out);
   });
 
   it('refuses a local that is incremented', () => {
     const out = run(
       'void f() { int nLocal; nLocal++; g(nLocal); }',
-      { nLocal: 'nParam' });
+      { nLocal: { param: 'nParam', type: 'int' } });
     assert.ok(!/nLocal\s*=\s*nParam/.test(out), out);
+  });
+
+  /**
+   * A struct seeded from a pointer failed Draw.cpp and took six drawing symbols
+   * undefined at link. The seed has to typecheck against the declaration the
+   * compiler will actually see.
+   */
+  it('declines when the declared type does not match the parameter type', () => {
+    const out = run(
+      'void f() { D2GfxLightStrc sLight; g(sLight); }',
+      { sLight: { param: 'pGameView', type: 'D2GameViewStrc*' } });
+    assert.ok(!/sLight\s*=\s*pGameView/.test(out), out);
   });
 
   it('leaves everything alone when there are no aliases', () => {
@@ -82,7 +94,8 @@ describe('register-alias-param', () => {
     const out = run(
       'void f() { D2UnitStrc* pUnitUnused; D2SkillStrc* pSkillUnused;'
       + ' g(pUnitUnused, &c, &d, pSkillUnused); }',
-      { pUnitUnused: 'pUnit', pSkillUnused: 'pSkill' });
+      { pUnitUnused: { param: 'pUnit', type: 'D2UnitStrc*' },
+        pSkillUnused: { param: 'pSkill', type: 'D2SkillStrc*' } });
     assert.ok(/pUnitUnused\s*=\s*pUnit/.test(out), out);
     assert.ok(/pSkillUnused\s*=\s*pSkill/.test(out), out);
   });

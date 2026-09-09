@@ -1738,7 +1738,7 @@ function frameSlots(func: ExtractedFunction): FrameSlot[] {
  * Deliberately conservative - exactly one parameter may claim the register, and the
  * plugin still refuses to fold a local the body assigns or takes the address of.
  */
-function registerAliases(func: ExtractedFunction): Record<string, string> {
+function registerAliases(func: ExtractedFunction): Record<string, { param: string; type: string }> {
   const reg = (storage: string | undefined): string | null => {
     const m = /^([A-Z][A-Z0-9]*):\d+$/.exec((storage ?? '').trim());
     return m ? m[1] : null;
@@ -1757,7 +1757,7 @@ function registerAliases(func: ExtractedFunction): Record<string, string> {
   }
   if (byRegister.size === 0) return {};
 
-  const aliases: Record<string, string> = {};
+  const aliases: Record<string, { param: string; type: string }> = {};
   for (const v of func.localVariables ?? []) {
     if (!v.name) continue;
     const r = reg(v.storage) ?? (v.register ? v.register.toUpperCase() : null);
@@ -1766,15 +1766,15 @@ function registerAliases(func: ExtractedFunction): Record<string, string> {
     if (!param) continue;
     const local = emittedParameterName(v.name, sigType(v.dataType ?? ''));
     if (!local || local === param) continue;
-    // The types must MATCH, not merely agree about pointer-ness. Ghidra hands one
-    // register to unrelated locals, and C++ rejects every mismatch: a struct seeded
-    // from a pointer (`D2GfxLightStrc sLight = pGameView;` broke Draw.cpp, taking
-    // six drawing symbols undefined at link) and equally one pointer type seeded
-    // from an unrelated one. Anything but an exact match is a pairing this pass
-    // cannot justify, so it declines.
-    const norm = (t: string | undefined) => (t ?? '').replace(/\s+/g, '').trim();
-    if (!norm(v.dataType) || norm(v.dataType) !== norm(paramTypes.get(param))) continue;
-    aliases[local] = param;
+    // Hand the parameter's EMITTED type down and let the plugin compare it against
+    // the declaration the AST actually holds. Comparing Ghidra's raw types here is
+    // the wrong comparison in both directions: it is too loose (a struct seeded from
+    // a pointer, `D2GfxLightStrc sLight = pGameView;`, failed Draw.cpp and took six
+    // drawing symbols undefined at link) and too strict (Ghidra types the very locals
+    // this pass exists for as `undefined4` while emitting them as the resolved
+    // pointer, so an exact match on raw types rejected every real case and emitted
+    // nothing at all).
+    aliases[local] = { param, type: sigType(paramTypes.get(param) ?? '') };
   }
   return aliases;
 }
@@ -2125,7 +2125,7 @@ function transformDecompiledCode(
      * local name -> the parameter that shares its register. @see registerAliases.
      * The AST cannot show storage, so the pairing arrives here.
      */
-    registerAliases?: Record<string, string>;
+    registerAliases?: Record<string, { param: string; type: string }>;
   },
 ): TransformDecompiledResult {
   try {
