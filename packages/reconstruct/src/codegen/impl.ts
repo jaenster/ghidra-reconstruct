@@ -1744,11 +1744,13 @@ function registerAliases(func: ExtractedFunction): Record<string, string> {
     return m ? m[1] : null;
   };
   const byRegister = new Map<string, string | null>();
+  const paramTypes = new Map<string, string>();
   for (const p of func.parameters ?? []) {
     const r = reg(p.storage);
     if (!r) continue;
     const name = cleanParamName(p.name);
     if (!name) continue;
+    paramTypes.set(name, p.dataType ?? '');
     // Two parameters in one register cannot happen, but a malformed prototype can
     // claim it does; refuse the register rather than pick one.
     byRegister.set(r, byRegister.has(r) ? null : name);
@@ -1764,6 +1766,13 @@ function registerAliases(func: ExtractedFunction): Record<string, string> {
     if (!param) continue;
     const local = emittedParameterName(v.name, sigType(v.dataType ?? ''));
     if (!local || local === param) continue;
+    // Only pair like with like. Ghidra hands the same register to unrelated locals,
+    // so an `int` local can share ECX with a pointer parameter; seeding it produced
+    // `int nPlayerDist = (int)(uintptr_t)pCell;` in Automap.cpp - a pointer-to-int
+    // conversion the generator has no business inventing, and one a hand fix had
+    // already deleted. Both pointers, or neither.
+    const isPtr = (t: string | undefined) => /\*\s*$/.test((t ?? '').trim());
+    if (isPtr(v.dataType) !== isPtr(paramTypes.get(param))) continue;
     aliases[local] = param;
   }
   return aliases;
