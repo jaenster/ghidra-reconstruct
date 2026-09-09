@@ -1766,13 +1766,14 @@ function registerAliases(func: ExtractedFunction): Record<string, string> {
     if (!param) continue;
     const local = emittedParameterName(v.name, sigType(v.dataType ?? ''));
     if (!local || local === param) continue;
-    // Only pair like with like. Ghidra hands the same register to unrelated locals,
-    // so an `int` local can share ECX with a pointer parameter; seeding it produced
-    // `int nPlayerDist = (int)(uintptr_t)pCell;` in Automap.cpp - a pointer-to-int
-    // conversion the generator has no business inventing, and one a hand fix had
-    // already deleted. Both pointers, or neither.
-    const isPtr = (t: string | undefined) => /\*\s*$/.test((t ?? '').trim());
-    if (isPtr(v.dataType) !== isPtr(paramTypes.get(param))) continue;
+    // The types must MATCH, not merely agree about pointer-ness. Ghidra hands one
+    // register to unrelated locals, and C++ rejects every mismatch: a struct seeded
+    // from a pointer (`D2GfxLightStrc sLight = pGameView;` broke Draw.cpp, taking
+    // six drawing symbols undefined at link) and equally one pointer type seeded
+    // from an unrelated one. Anything but an exact match is a pairing this pass
+    // cannot justify, so it declines.
+    const norm = (t: string | undefined) => (t ?? '').replace(/\s+/g, '').trim();
+    if (!norm(v.dataType) || norm(v.dataType) !== norm(paramTypes.get(param))) continue;
     aliases[local] = param;
   }
   return aliases;
