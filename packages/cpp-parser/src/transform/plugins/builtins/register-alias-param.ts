@@ -29,7 +29,7 @@
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
-import type { ASTNode, Expression, Identifier } from '../../../ast/nodes.js';
+import type { ASTNode, Expression, Identifier, VariableDecl } from '../../../ast/nodes.js';
 import { traverseAST } from '../../../ast/visitor.js';
 import { createTransformer, type Transformer } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
@@ -91,20 +91,31 @@ function createRegisterAliasTransformer(options?: PluginOptions): Transformer {
     }
     if (fold.size === 0) return root;
 
+    // Seed the declaration instead of renaming its uses and deleting it. This
+    // transformer has no node-removal protocol - returning undefined means
+    // "unchanged" - so a rename-and-delete leaves the declaration behind with the
+    // parameter's name on it, and several locals sharing one register then emit
+    // several `int pGfxData;` that redeclare and shadow the parameter. Seeding is
+    // also the smaller claim: the local keeps its identity, it just starts with
+    // the value the register actually held.
     return createTransformer({
-      visitNode(node: ASTNode): ASTNode | undefined {
-        // Drop the now-dead declaration of the folded local.
-        if (node.kind === NodeKind.VariableDecl) {
-          const nm = (node as unknown as { name?: { name?: string } }).name?.name;
-          if (nm && fold.has(nm)) return null as unknown as ASTNode;
-          return undefined;
-        }
-        if (node.kind === NodeKind.Identifier) {
-          const id = node as unknown as Identifier;
-          const to = fold.get(id.name);
-          if (to) return { ...id, name: to } as unknown as ASTNode;
-        }
-        return undefined;
+      visitVariableDecl(decl: VariableDecl): VariableDecl | undefined {
+        const nm = decl.name?.name;
+        if (!nm) return undefined;
+        const param = fold.get(nm);
+        // Never touch one that already has an initialiser - it is not the shape
+        // this pass is for, whatever the storage says.
+        if (!param || decl.initializer) return undefined;
+        return {
+          ...decl,
+          initializer: {
+            kind: NodeKind.Identifier,
+            name: param,
+            location: decl.location,
+            leadingTrivia: [],
+            trailingTrivia: [],
+          } as unknown as Expression,
+        };
       },
     })(root);
   };

@@ -19,43 +19,58 @@ function run(src: string, aliases: Record<string, string>): string {
 }
 
 describe('register-alias-param', () => {
-  it('folds a never-assigned register local onto its parameter', () => {
+  it('seeds a never-assigned register local from its parameter', () => {
     const out = run(
       'void f() { D2UnitStrc* pUnitUnused; g(pUnitUnused, 1); }',
       { pUnitUnused: 'pUnit' });
-    assert.ok(out.includes('g(pUnit, 1)'), out);
-    assert.ok(!out.includes('pUnitUnused'), out);
+    assert.ok(/pUnitUnused\s*=\s*pUnit/.test(out), out);
+    assert.ok(out.includes('g(pUnitUnused, 1)'), out);
   });
 
-  it('drops the dead declaration too', () => {
+  /**
+   * Renaming uses and deleting the declaration was the first design. This
+   * transformer has no removal protocol, so the declaration survived with the
+   * parameter's name on it and several locals sharing one register emitted
+   * several `int pGfxData;` - 921 compile errors across 87 files. Seeding keeps
+   * exactly one declaration per local.
+   */
+  it('leaves exactly one declaration, never a second one named after the param', () => {
     const out = run(
-      'void f() { D2SkillStrc* pSkillUnused; g(pSkillUnused); }',
+      'void f() { int a; int b; g(a, b); }',
+      { a: 'pGfxData', b: 'pGfxData' });
+    assert.strictEqual((out.match(/int pGfxData/g) ?? []).length, 0, out);
+    assert.ok(/a\s*=\s*pGfxData/.test(out), out);
+    assert.ok(/b\s*=\s*pGfxData/.test(out), out);
+  });
+
+  it('never touches a local that already has an initialiser', () => {
+    const out = run(
+      'void f() { D2SkillStrc* pSkillUnused = h(); g(pSkillUnused); }',
       { pSkillUnused: 'pSkill' });
-    assert.ok(!out.includes('D2SkillStrc* pSkillUnused'), out);
-    assert.ok(!out.includes('pSkillUnused'), out);
+    assert.ok(out.includes('= h()'), out);
+    assert.ok(!/pSkillUnused\s*=\s*pSkill/.test(out), out);
   });
 
   /** The storage says they share a register; a write says it is a real local. */
-  it('refuses to fold a local the body assigns', () => {
+  it('refuses to seed a local the body assigns', () => {
     const out = run(
       'void f() { D2UnitStrc* pLocal; pLocal = h(); g(pLocal); }',
       { pLocal: 'pUnit' });
-    assert.ok(out.includes('pLocal'), out);
-    assert.ok(!out.includes('g(pUnit)'), out);
+    assert.ok(!/pLocal\s*=\s*pUnit\s*;/.test(out), out);
   });
 
-  it('refuses to fold a local whose address escapes', () => {
+  it('refuses to seed a local whose address escapes', () => {
     const out = run(
       'void f() { int nLocal; h(&nLocal); g(nLocal); }',
       { nLocal: 'nParam' });
-    assert.ok(out.includes('nLocal'), out);
+    assert.ok(!/nLocal\s*=\s*nParam/.test(out), out);
   });
 
   it('refuses a local that is incremented', () => {
     const out = run(
       'void f() { int nLocal; nLocal++; g(nLocal); }',
       { nLocal: 'nParam' });
-    assert.ok(out.includes('nLocal'), out);
+    assert.ok(!/nLocal\s*=\s*nParam/.test(out), out);
   });
 
   it('leaves everything alone when there are no aliases', () => {
@@ -63,11 +78,12 @@ describe('register-alias-param', () => {
     assert.ok(out.includes('D2UnitStrc* p'), out);
   });
 
-  it('folds several aliases in one function', () => {
+  it('seeds several aliases in one function', () => {
     const out = run(
       'void f() { D2UnitStrc* pUnitUnused; D2SkillStrc* pSkillUnused;'
-      + ' g(pUnitUnused, &a, &b, pSkillUnused); }',
+      + ' g(pUnitUnused, &c, &d, pSkillUnused); }',
       { pUnitUnused: 'pUnit', pSkillUnused: 'pSkill' });
-    assert.ok(out.includes('g(pUnit, &a, &b, pSkill)'), out);
+    assert.ok(/pUnitUnused\s*=\s*pUnit/.test(out), out);
+    assert.ok(/pSkillUnused\s*=\s*pSkill/.test(out), out);
   });
 });
