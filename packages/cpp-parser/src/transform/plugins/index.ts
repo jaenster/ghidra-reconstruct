@@ -290,6 +290,7 @@ export {
 } from './builtins/sbb-branchless.js';
 
 export { extraoutSplicePlugin } from './builtins/extraout-splice.js';
+export { registerAliasParamPlugin } from './builtins/register-alias-param.js';
 
 export {
   branchlessSelectPlugin,
@@ -476,6 +477,7 @@ import { typeNormalizePlugin } from './builtins/type-normalize.js';
 import { concatTransformPlugin } from './builtins/concat-transform.js';
 import { redundantNegationPlugin } from './builtins/redundant-negation.js';
 import { extraoutSplicePlugin } from './builtins/extraout-splice.js';
+import { registerAliasParamPlugin } from './builtins/register-alias-param.js';
 import { sbbBranchlessPlugin } from './builtins/sbb-branchless.js';
 import { branchlessSelectPlugin } from './builtins/branchless-select.js';
 import { earlyReturnPlugin } from './builtins/early-return.js';
@@ -602,6 +604,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   arrayCastAssignPlugin,      // Cleanup: a = (byte[4])x → *(uint32_t *)a = x (priority 16, before strip)
   vtableStoreCastPlugin,      // Cleanup: *(T**)x = name → *(T**)x = (T*)name (priority 48)
   arrayCastStripPlugin,       // Cleanup: drop (char[4])x array-type casts (priority 17)
+  registerAliasParamPlugin,   // Correctness: fold a never-assigned register local onto its parameter (priority 40)
   extraoutSplicePlugin,       // Correctness: drop Ghidra's uninitialised extraout_* upper bytes (priority 41)
   sbbBranchlessPlugin,        // Cleanup: -(uint32_t)(cond) & addr → cond ? addr : nullptr (priority 42)
   branchlessSelectPlugin,     // Cleanup: (cond - 1 & mask) + off → cond ? off : off+mask (priority 43)

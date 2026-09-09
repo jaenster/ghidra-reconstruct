@@ -1392,6 +1392,7 @@ export function generateFunctionImplementation(
           // be resolved against.
           ghidraNamespaceSegments: enclosingNamespace?.ghidraSegments,
           stackSlots: frameSlots(func),
+          registerAliases: registerAliases(func),
         },
       );
       body = func.name ? rewriteQuestUnionMembers(transformed.code, func.name, context?.sourceFileName, [...(func.parameters ?? []), ...(func.localVariables ?? [])]) : transformed.code;
@@ -1715,6 +1716,57 @@ function frameSlots(func: ExtractedFunction): FrameSlot[] {
     slots.push({ name, offset: v.stackOffset, size: v.size, isArray: isArrayTypeName(v.dataType) });
   }
   return slots;
+}
+
+/**
+ * Locals that share a REGISTER with one of the function's own parameters.
+ *
+ * Ghidra's calling-convention model kills EAX/ECX/EDX across every call. When a
+ * callee does not really touch them - `SKILLDESC_ElemTypeToColorIndex` @0x004e6fb0
+ * is five instructions long and writes EAX only - the decompiler still assumes the
+ * caller's ECX died, so it invents a FRESH local in the same storage and the emitted
+ * C++ declares it, never assigns it, and passes it on:
+ *
+ *     D2UnitStrc *pUnitUnused;                       // storage ECX, never assigned
+ *     SKILLDESC_DrawElemDamageWithRange(pUnitUnused, ...);   // callee dereferences it
+ *
+ * The machine kept the parameter in that register the whole time, so the local IS the
+ * parameter. Folding them is value-preserving: the body never writes the local, so
+ * every read sees whatever the register held, and the original program only works if
+ * that is the parameter.
+ *
+ * Deliberately conservative - exactly one parameter may claim the register, and the
+ * plugin still refuses to fold a local the body assigns or takes the address of.
+ */
+function registerAliases(func: ExtractedFunction): Record<string, string> {
+  const reg = (storage: string | undefined): string | null => {
+    const m = /^([A-Z][A-Z0-9]*):\d+$/.exec((storage ?? '').trim());
+    return m ? m[1] : null;
+  };
+  const byRegister = new Map<string, string | null>();
+  for (const p of func.parameters ?? []) {
+    const r = reg(p.storage);
+    if (!r) continue;
+    const name = cleanParamName(p.name);
+    if (!name) continue;
+    // Two parameters in one register cannot happen, but a malformed prototype can
+    // claim it does; refuse the register rather than pick one.
+    byRegister.set(r, byRegister.has(r) ? null : name);
+  }
+  if (byRegister.size === 0) return {};
+
+  const aliases: Record<string, string> = {};
+  for (const v of func.localVariables ?? []) {
+    if (!v.name) continue;
+    const r = reg(v.storage) ?? (v.register ? v.register.toUpperCase() : null);
+    if (!r) continue;
+    const param = byRegister.get(r);
+    if (!param) continue;
+    const local = emittedParameterName(v.name, sigType(v.dataType ?? ''));
+    if (!local || local === param) continue;
+    aliases[local] = param;
+  }
+  return aliases;
 }
 
 /**
@@ -2059,6 +2111,11 @@ function transformDecompiledCode(
      * because the body is parsed without one.
      */
     stackSlots?: FrameSlot[];
+    /**
+     * local name -> the parameter that shares its register. @see registerAliases.
+     * The AST cannot show storage, so the pairing arrives here.
+     */
+    registerAliases?: Record<string, string>;
   },
 ): TransformDecompiledResult {
   try {
@@ -2320,6 +2377,10 @@ function transformDecompiledCode(
 
     if (enclosing?.thisName) {
       perPluginOptions['this-param-rewrite'] = { thisName: enclosing.thisName };
+    }
+
+    if (enclosing?.registerAliases && Object.keys(enclosing.registerAliases).length > 0) {
+      perPluginOptions['register-alias-param'] = { aliases: enclosing.registerAliases };
     }
 
     if (enclosing?.stackSlots && enclosing.stackSlots.length > 0) {
