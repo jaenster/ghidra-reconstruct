@@ -358,7 +358,38 @@ function initializerSurvivesReevaluation(initializer: ASTNode, body: ASTNode): b
   for (const name of names) {
     if (writesVar(body, name)) return false;
   }
+
+  // The name check cannot see ALIASING. `pVertex2 = pThirdVertex->pNext` reads a
+  // field, and the body stores `pEdgeVertex->pNext = pNewVertex` - a different
+  // NAME for the same object on the iteration where pEdgeVertex is pThirdVertex.
+  // Re-evaluating then hands later iterations a vertex the loop itself spliced in,
+  // which is how the DRLG room outline came out with a corner missing and a
+  // diagonal edge the border tables cannot index.
+  //
+  // Any read through a pointer is therefore only invariant if the body stores
+  // through no pointer at all. Declining to sink is always safe.
+  if (readsThroughPointer(initializer) && storesThroughPointer(body)) return false;
   return true;
+}
+
+/** A read that goes through a pointer: `p->f`, `*p`, `p[i]`. */
+function readsThroughPointer(node: ASTNode): boolean {
+  if (node.kind === NodeKind.MemberExpr && (node as MemberExpr).isArrow) return true;
+  if (node.kind === NodeKind.UnaryExpr && (node as UnaryExpr).operator === '*') return true;
+  if (node.kind === NodeKind.SubscriptExpr) return true;
+  return getChildren(node).some(readsThroughPointer);
+}
+
+/** A store that goes through a pointer: `p->f = x`, `*p = x`, `p[i] = x`. */
+function storesThroughPointer(node: ASTNode): boolean {
+  if (node.kind === NodeKind.AssignExpr) {
+    let lhs: ASTNode = (node as AssignExpr).left;
+    while (lhs.kind === NodeKind.ParenExpr) lhs = (lhs as ParenExpr).expression;
+    if (lhs.kind === NodeKind.SubscriptExpr) return true;
+    if (lhs.kind === NodeKind.MemberExpr && (lhs as MemberExpr).isArrow) return true;
+    if (lhs.kind === NodeKind.UnaryExpr && (lhs as UnaryExpr).operator === '*') return true;
+  }
+  return getChildren(node).some(storesThroughPointer);
 }
 
 /**

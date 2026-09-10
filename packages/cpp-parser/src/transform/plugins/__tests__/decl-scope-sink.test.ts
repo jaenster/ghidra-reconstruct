@@ -270,3 +270,33 @@ describe('declScopeSinkPlugin — loop back-edge liveness', () => {
     );
   });
 });
+
+describe('declScopeSinkPlugin aliasing', () => {
+  function transformCode(code: string): string {
+    const ast = parse(code);
+    const transformer = declScopeSinkPlugin.createTransformer({});
+    const result = transformer(ast);
+    return emit(result as AnyNode).trim();
+  }
+
+  it('should not sink a pointer read into a loop that stores through a pointer', () => {
+    const output = transformCode(
+      'void f() { Vtx* v2 = third->pNext; do { edge->pNext = fresh; use(v2); } while (1); }');
+    assert.ok(output.includes('Vtx* v2 = third->pNext;\n  do'),
+      `initializer must stay outside the loop, got:\n${output}`);
+  });
+
+  it('should not sink an array read into a loop that stores through a subscript', () => {
+    const output = transformCode(
+      'void f() { int n = table[i]; do { table[j] = 1; use(n); } while (1); }');
+    assert.ok(output.includes('int n = table[i];\n  do'),
+      `initializer must stay outside the loop, got:\n${output}`);
+  });
+
+  it('should still sink a pointer read into a loop that stores nothing through a pointer', () => {
+    const output = transformCode(
+      'void f() { Vtx* v2 = third->pNext; do { n = n + 1; use(v2); } while (1); }');
+    assert.ok(output.includes('do {\n    Vtx* v2 = third->pNext;'),
+      `invariant read should still sink, got:\n${output}`);
+  });
+});
