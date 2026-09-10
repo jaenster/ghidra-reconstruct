@@ -1796,18 +1796,41 @@ function characterZeroSpellings(
   if (!elements || elements.length < 3) return undefined;
   const base = elemType ? baseTypeName(elemType) : undefined;
   if (!isCharacterRenderedSlot(base)) return undefined;
+  /** A printable character: one code unit, neither the ambiguous `0` nor NUL. */
   const isCharacter = (dv: DataValue | undefined): boolean =>
-    dv !== undefined && dv.kind === 'scalar' && (dv.value ?? '').length === 1 && dv.value !== '0';
+    dv !== undefined &&
+    dv.kind === 'scalar' &&
+    (dv.value ?? '').length === 1 &&
+    dv.value !== '0' &&
+    dv.value !== '\u0000';
+  /** The NUL Ghidra rendered as a character. Only ever follows text. */
+  const isNul = (dv: DataValue | undefined): boolean =>
+    dv !== undefined && dv.kind === 'scalar' && dv.value === '\u0000';
+  const isAmbiguousZero = (dv: DataValue | undefined): boolean =>
+    dv !== undefined && dv.kind === 'scalar' && dv.value === '0';
   let any = false;
   const out = new Array<string | undefined>(elements.length).fill(undefined);
-  for (let i = 1; i < elements.length - 1; i++) {
-    const e = elements[i];
-    if (e.kind !== 'scalar' || e.value !== '0') continue;
-    if (!isCharacter(elements[i - 1]) || !isCharacter(elements[i + 1])) continue;
-    // A wide slot takes the code unit, exactly as every other character in it
-    // does — a narrow `char` literal does not reach a `uint16_t`.
-    out[i] = isCharSlotType(base!) ? "'0'" : '0x30';
-    any = true;
+  // Decided over the whole RUN, not per element. `800x600` renders
+  // `'8', 0, 0, 'x', '6', 0, 0, '\x00'`, and asking each `0` about its immediate
+  // neighbours answers no for every one of them - each doubled `0` has another
+  // `0` on one side. The run is what has a character on each end.
+  for (let i = 0; i < elements.length; i++) {
+    if (!isAmbiguousZero(elements[i])) continue;
+    let end = i;
+    while (end + 1 < elements.length && isAmbiguousZero(elements[end + 1])) end++;
+    const before = i > 0 ? elements[i - 1] : undefined;
+    const after = end + 1 < elements.length ? elements[end + 1] : undefined;
+    // A zero-FILL run runs to the end of the datum, or follows the NUL that
+    // ended the text - `gszFogCrashReportCustomMessage` is 1976 `'\x00'` then
+    // 2120 `0`. Text is bounded by a printable character on the left and by a
+    // printable character or its own terminator on the right.
+    if (isCharacter(before) && (isCharacter(after) || isNul(after))) {
+      // A wide slot takes the code unit, exactly as every other character in it
+      // does — a narrow `char` literal does not reach a `uint16_t`.
+      for (let k = i; k <= end; k++) out[k] = isCharSlotType(base!) ? "'0'" : '0x30';
+      any = true;
+    }
+    i = end;
   }
   return any ? out : undefined;
 }

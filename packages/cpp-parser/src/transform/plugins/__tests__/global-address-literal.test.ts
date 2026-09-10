@@ -42,6 +42,47 @@ describe('globalAddressLiteralPlugin', () => {
     globalSizes: { gThing: 12, gOther: 4 },
   };
 
+  // The socketed-item offset table, as 1.14d lays it out: 288 {x,y} records at
+  // 0x6d91e8. The Y column is read through `base + 4` held in a register, and
+  // Ghidra keeps that as an absolute.
+  const SOCKETS: GlobalAddressLiteralOptions = {
+    globalAddresses: { gaSocketOffsets: 0x6d91e8 },
+    globalSizes: { gaSocketOffsets: 2304 },
+    globalElementSizes: { gaSocketOffsets: 8 },
+  };
+
+  describe('an addend under a pointer cast is an address', () => {
+    it('resolves the socket table Y column that arithmetic withdrawal was keeping', () => {
+      const out = run(
+        `void f() { y = *(int*)(iVar1 * 0x30 + 0x6d91ec + nSocketIndex * 8); }`,
+        SOCKETS,
+      );
+      assert.ok(
+        out.includes('(char*)&gaSocketOffsets + 4'),
+        `Expected the Y column through the array in: ${out}`,
+      );
+      assert.ok(!out.includes('0x6d91ec'), `Literal should be gone from: ${out}`);
+    });
+
+    it('LEAVES the same sum when no pointer cast makes it an address', () => {
+      const out = run(
+        `void f() { y = iVar1 * 0x30 + 0x6d91ec + nSocketIndex * 8; }`,
+        SOCKETS,
+      );
+      assert.ok(out.includes('0x6d91ec'), `Bare arithmetic must keep the literal: ${out}`);
+    });
+
+    it('LEAVES a literal on the right of a subtraction - int - char* does not compile', () => {
+      const out = run(`void f() { y = *(int*)(pCursor - 0x6d91ec); }`, SOCKETS);
+      assert.ok(out.includes('0x6d91ec'), `Right of '-' must keep the literal: ${out}`);
+    });
+
+    it('does not touch a cast to a non-pointer type', () => {
+      const out = run(`void f() { y = (int)(iVar1 + 0x6d91ec); }`, SOCKETS);
+      assert.ok(out.includes('0x6d91ec'), `An int cast is not evidence: ${out}`);
+    });
+  });
+
   describe('the real StaticInit case', () => {
     it('resolves -7373669 to the interior of gSFileAsyncReqQueue', () => {
       const out = run(`void f() { x = (void*)-7373669; }`, STORM);

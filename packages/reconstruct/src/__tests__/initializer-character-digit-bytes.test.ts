@@ -131,3 +131,35 @@ describe('a digit in a character initializer keeps its byte', () => {
     assert.strictEqual(emitDataValue(dv, 0, 'uint16_t[3]'), '{ 0x41, 0x37, 0xff }');
   });
 });
+
+describe('a RUN of character zeros', () => {
+  it('spells 800x600, where every ambiguous 0 has another 0 beside it', () => {
+    // 0071b420: 38 30 30 78 36 30 30 00 - the sub-image path of the Resolution
+    // row in the video-options table. Asking each `0` about its immediate
+    // neighbours answers no for all four of them, so the emitter wrote
+    // `{ '8', 0, 0, 'x', '6', 0, 0 }` - a C string of "8". 800x600.dc6 then
+    // never loaded, pDC6SubImages[1] stayed NULL, and opening VIDEO OPTIONS
+    // faulted in IMAGE_GetFramesCount. The run is what has a character on each end.
+    const dv = scalars('8', '0', '0', 'x', '6', '0', '0', NUL, NUL, NUL);
+    assert.deepStrictEqual(
+      bytesOf(emitDataValue(dv, 0, 'char[10]')),
+      [0x38, 0x30, 0x30, 0x78, 0x36, 0x30, 0x30, 0, 0, 0],
+    );
+  });
+
+  it('leaves a zero FILL alone when it follows the terminator', () => {
+    // gszFogCrashReportCustomMessage: Ghidra renders the head as '\x00' and the
+    // tail as 0, in one char[4096]. A run whose left neighbour is the NUL is
+    // padding, not text.
+    const dv = scalars('h', 'i', NUL, '0', '0', '0', '0');
+    assert.deepStrictEqual(
+      bytesOf(emitDataValue(dv, 0, 'char[7]')),
+      [0x68, 0x69, 0, 0, 0, 0, 0],
+    );
+  });
+
+  it('leaves a zero fill alone when it runs to the end of the datum', () => {
+    const dv = scalars('h', 'i', '0', '0', '0');
+    assert.deepStrictEqual(bytesOf(emitDataValue(dv, 0, 'char[5]')), [0x68, 0x69, 0, 0, 0]);
+  });
+});

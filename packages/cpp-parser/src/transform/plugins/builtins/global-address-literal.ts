@@ -1317,6 +1317,57 @@ function createGlobalAddressLiteralTransformer(
     return ref;
   }
 
+  /**
+   * The addends of an expression a POINTER CAST is applied to.
+   *
+   * The blanket arithmetic withdrawal in `visitBinaryExpr` exists because an
+   * address in arithmetic reads the same as a mask or a scale factor. Under a
+   * `(T*)` cast it does not: the sum IS being made into a pointer, so an addend
+   * that is exactly a global's base, or an address inside one, is that object
+   * and nothing else.
+   *
+   * `INV_DrawSocketedItems` reads the second column of its socket-offset table
+   * as `*(int*)(iVar1 * 0x30 + 0x6d91ec + nSocketIndex * 8)`. The base is held
+   * in a register across the loop (`ADD EBX, 0x6d91e8`), Ghidra folds only the
+   * first column back to the array, and withdrawn the second is an unrelocated
+   * 1.14d address: hovering an item with sockets faults with a READ at
+   * 0x006d930c.
+   *
+   * Only `+` addends and the LEFT operand of `-` are respelled. `int - char*`
+   * does not compile, and a literal on the right of a subtraction is a
+   * displacement from a cursor - `byteDisplacement`'s case, not this one.
+   *
+   * Every form is spelled `char*` so the surrounding arithmetic stays BYTE
+   * arithmetic: `&name` for an array is `T(*)[N]`, and adding to that scales by
+   * the whole array.
+   */
+  function addendsUnderPointerCast(expr: Expression): Expression | null {
+    if (expr.kind === NodeKind.ParenExpr) {
+      const paren = expr as ParenExpr;
+      const inner = addendsUnderPointerCast(paren.expression);
+      return inner ? { ...paren, expression: inner } : null;
+    }
+    if (expr.kind === NodeKind.IntegerLiteral) {
+      const literal = expr as IntegerLiteralExpr;
+      if (literal.value < 0n || literal.value >= BigInt(WORD)) return null;
+      const resolved = resolve(Number(literal.value));
+      if (!resolved || !resolved.pointer) return null;
+      // Spelled as an INTEGER, not left as a pointer. The sum is already
+      // integer arithmetic everywhere else in it - `iVar1 * 0x30`,
+      // `- (int)pPalette` - and a `char*` term in the middle of that is
+      // `uint8_t* + char*`, which does not compile. The outer cast is what
+      // makes the result a pointer, exactly as it did with the literal.
+      return Expr.cast(Type.int(), Expr.paren(asCharPointer(resolved.form, resolved.charTyped)));
+    }
+    if (expr.kind !== NodeKind.BinaryExpr) return null;
+    const sum = expr as BinaryExpr;
+    if (sum.operator !== '+' && sum.operator !== '-') return null;
+    const left = addendsUnderPointerCast(sum.left);
+    const right = sum.operator === '+' ? addendsUnderPointerCast(sum.right) : null;
+    if (!left && !right) return null;
+    return { ...sum, left: left ?? sum.left, right: right ?? sum.right };
+  }
+
   const transform = createTransformer({
     // Bottom-up: a literal is visited before the expression that contains it.
     visitNode(node: ASTNode) {
@@ -1328,6 +1379,17 @@ function createGlobalAddressLiteralTransformer(
         const assign = node as AssignExpr;
         if (!COMPOUND_ASSIGN_OPS.has(assign.operator)) return undefined;
         return withOperandsRestored(assign);
+      }
+
+      // A sum cast to a pointer is pointer arithmetic, and an addend that owns
+      // an address in it is that object - see `addendsUnderPointerCast`. The
+      // visitor is bottom-up, so the operands here have already been through the
+      // arithmetic withdrawal and carry their literals again.
+      if (node.kind === NodeKind.CStyleCastExpr) {
+        const cast = node as CStyleCastExpr;
+        if (cast.type.kind !== NodeKind.PointerType) return undefined;
+        const rebuilt = addendsUnderPointerCast(cast.expression);
+        return rebuilt ? { ...cast, expression: rebuilt } : undefined;
       }
 
       if (node.kind !== NodeKind.IntegerLiteral) return undefined;
