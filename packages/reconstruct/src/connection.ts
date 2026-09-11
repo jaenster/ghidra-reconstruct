@@ -206,6 +206,28 @@ interface DaemonSession {
 }
 
 /**
+ * Do two program paths name the same program?
+ *
+ * A server session reports the path inside its repository ("/windows/lod/1.14d/
+ * Game.exe") while callers address it repo-first ("Diablo2Lod/windows/lod/1.14d/
+ * Game.exe"), because that is what the ghidra:// project URL is missing. Compared
+ * literally the two never match, so a client that already had a perfectly good
+ * session would create a second worker for the same 14k-function program.
+ */
+export function samePrograms(a: string | null | undefined,
+                             b: string | null | undefined): boolean {
+  // A repo session carries no programPath at all - it is the repository connection
+  // itself, not a program. Listing one used to throw `Cannot read properties of
+  // undefined (reading 'replace')` out of the session scan and abort the whole
+  // regen, which reads as "the daemon is broken" rather than "skip that row".
+  if (!a || !b) return false;
+  const norm = (p: string) => p.replace(/\/+/g, '/').replace(/^\//, '');
+  const x = norm(a);
+  const y = norm(b);
+  return x === y || x.endsWith(`/${y}`) || y.endsWith(`/${x}`);
+}
+
+/**
  * Create a connection to Ghidra via the live daemon
  *
  * Auto-discovers an existing session matching the programPath,
@@ -254,7 +276,7 @@ export async function createConnection(
     console.log(`Attached to session ${sessionId}`);
   } else {
     sessionId = sessions.find(
-      s => s.programPath === programPath && s.status === 'ready'
+      s => samePrograms(s.programPath, programPath) && s.status === 'ready'
     )?.id;
   }
 
