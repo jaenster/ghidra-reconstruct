@@ -26,10 +26,15 @@ interface GitOutput {
  * Half of what this module does is branch on a non-zero exit (nothing to
  * commit, merge conflict), so a rejected promise would mean try/catch around
  * the normal path.
+ *
+ * Signing is forced off. These are machine-generated commits in a generated
+ * tree, and a signer backed by an interactive agent (1Password, a smartcard,
+ * gpg-agent with a pinentry) cannot prompt from a daemon: it fails the commit,
+ * the batch is retried, and the loop spins forever without producing a tree.
  */
 async function git(dir: string, args: string[]): Promise<GitOutput> {
   try {
-    const { stdout, stderr } = await run('git', args, {
+    const { stdout, stderr } = await run('git', ['-c', 'commit.gpgsign=false', ...args], {
       cwd: dir,
       maxBuffer: 64 * 1024 * 1024,
       // A commit hook or merge driver must never sit waiting on a terminal.

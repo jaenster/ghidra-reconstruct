@@ -30,6 +30,14 @@ export interface EnclosingNamespaceStripOptions extends PluginOptions {
   enclosingSegments?: string[];
   /** Every namespace that exists, so an interception can be detected. */
   knownNamespaces?: string[];
+  /**
+   * Leaf names owned by MORE THAN ONE qualified symbol. Stripping a qualifier down to
+   * such a bare name lets C++ inner-scope lookup pick the wrong one, and the emitted
+   * code then means something else entirely: `D2Common::Drlg::InitGridCells(p)` inside
+   * `namespace D2Common::Drlg::RoomTile` became a call to the function being defined,
+   * which is unbounded recursion and a stack overflow. Ghidra had the qualifier right.
+   */
+  ambiguousLeafNames?: string[];
 }
 
 function segmentName(part: Identifier | TemplateType): string | undefined {
@@ -41,6 +49,7 @@ function createEnclosingNamespaceStripTransformer(
 ): Transformer {
   const enclosing = options.enclosingSegments ?? [];
   const known = new Set(options.knownNamespaces ?? []);
+  const ambiguous = new Set(options.ambiguousLeafNames ?? []);
   if (enclosing.length === 0) return (node) => node;
 
   /**
@@ -54,6 +63,13 @@ function createEnclosingNamespaceStripTransformer(
     }
     return true;
   };
+
+  /**
+   * Removing the WHOLE qualifier leaves a bare leaf name. If two symbols in the program
+   * share that leaf, keep at least one segment: which one C++ picks is then a lookup
+   * accident, and in this program that accident has already been a crash.
+   */
+  const canStripToBare = (lead: string): boolean => !ambiguous.has(lead);
 
   return createTransformer({
     visitNode(n: ASTNode): ASTNode | undefined {
@@ -85,6 +101,7 @@ function createEnclosingNamespaceStripTransformer(
         const lead = k < names.length ? names[k] : nameSegment;
         if (lead === undefined) return undefined;
         if (!canStrip(k, lead)) continue;
+        if (k === names.length && !canStripToBare(lead)) continue;
 
         const kept = q.qualifier.slice(k);
         if (kept.length === 0) {

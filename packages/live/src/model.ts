@@ -28,7 +28,7 @@ import {
   type ReconstructionOptions,
 } from '@ghidra-mcp/reconstruct';
 import { decompileFunction, getFunctionInfo } from '@ghidra-mcp/reconstruct/extract/functions';
-import { fetchInitializedData } from '@ghidra-mcp/reconstruct/extract/globals';
+import { fetchInitializedData, inferType } from '@ghidra-mcp/reconstruct/extract/globals';
 
 /**
  * The primary binary plus whatever cross-check source was merged into it, and
@@ -86,6 +86,8 @@ export interface ChangeEvent {
   key: string;
   oldName?: string;
   newName?: string;
+  /** Ghidra's name for the transaction that produced the event. */
+  txDescription?: string;
 }
 
 export interface AppliedResult {
@@ -134,6 +136,26 @@ const IDENTIFIER = /[A-Za-z_][A-Za-z0-9_]*/g;
  */
 const DT_SEP = '\u0000';
 
+
+/**
+ * The name and category to fetch a datatype by, for one change event.
+ *
+ * Both `key` and `newName` may arrive as a category path, and `newName` is the
+ * one that wins on a rename - so splitting only the key still handed the worker
+ * a path and it still answered "Data type not found".
+ */
+export function eventDataTypeTarget(
+  event: { key: string; newName?: string },
+  fallback: { name: string; category?: string },
+): { name: string; category?: string } {
+  const renamed = event.newName ? splitDataTypeKey(event.newName) : undefined;
+  const fromKey = splitDataTypeKey(event.key);
+  return {
+    name: renamed?.name ?? fallback.name,
+    category: renamed?.category ?? fromKey.category ?? fallback.category,
+  };
+}
+
 /** The hex tail of a Ghidra address ("Game.exe.ram:005011f0" -> "005011f0"). */
 function addressKey(address: string): string {
   const bare = address.includes(':') ? address.slice(address.lastIndexOf(':') + 1) : address;
@@ -144,10 +166,18 @@ function dataTypeKey(name: string, category: string | undefined): string {
   return `${name}${DT_SEP}${category ?? ''}`;
 }
 
-function splitDataTypeKey(key: string): { name: string; category?: string } {
+export function splitDataTypeKey(key: string): { name: string; category?: string } {
   const sep = key.indexOf(DT_SEP);
-  if (sep < 0) return { name: key };
-  return { name: key.slice(0, sep), category: key.slice(sep + DT_SEP.length) };
+  if (sep >= 0) return { name: key.slice(0, sep), category: key.slice(sep + DT_SEP.length) };
+
+  // The journal also spells a datatype as a category path ("/D2CMP/Foo"), and
+  // the worker will not resolve one of those as a bare name - it wants name and
+  // category apart. Passed through whole, a newly created type is reported
+  // changed and then "not extractable", so it never enters the model and every
+  // body that now uses it emits against a type nothing declares.
+  const slash = key.lastIndexOf('/');
+  if (slash < 0) return { name: key };
+  return { name: key.slice(slash + 1), category: key.slice(0, slash) || '/' };
 }
 
 function tokenize(body: string | undefined): Set<string> {
@@ -231,10 +261,19 @@ export async function applyEvents(
   // A restore rolls the program back to a state this model has no diff against:
   // symbols it never saw removed are back, and the event stream describes none
   // of it. Nothing incremental is safe, so nothing incremental is attempted.
-  if (events.some(e => e.kind === 'restored')) {
+  if (events.some(e => isModelInvalidatingRestore(e, events))) {
     result.needsFullResync = true;
     model.seq = Math.max(model.seq, highestSeq);
     log('restored: incremental state discarded, full resync required');
+    return result;
+  }
+
+  // Drop every restore that is explained by its own transaction before the
+  // program-wide test below, which would otherwise resync on it for naming no
+  // symbol.
+  events = events.filter(e => e.kind !== 'restored');
+  if (events.length === 0) {
+    model.seq = Math.max(model.seq, highestSeq);
     return result;
   }
 
@@ -287,7 +326,8 @@ export async function applyEvents(
 
       let fresh: ExtractedDataType;
       try {
-        fresh = await extractDataType(client, event.newName ?? previous.name, previous.category);
+        const target = eventDataTypeTarget(event, { name: previous.name, category: previous.category });
+        fresh = await extractDataType(client, target.name, target.category);
       } catch (e) {
         log(`datatype ${previous.name}: re-extract failed (${(e as Error).message}); keeping previous`);
         continue;
@@ -307,9 +347,9 @@ export async function applyEvents(
     // A type Ghidra has and the model does not: nothing to diff against, and
     // nothing to invalidate beyond the type's own name.
     if (slots.length === 0 && event.kind !== 'datatype.removed') {
-      const { name, category } = splitDataTypeKey(event.key);
+      const { name, category } = eventDataTypeTarget(event, splitDataTypeKey(event.key));
       try {
-        const fresh = await extractDataType(client, event.newName ?? name, category);
+        const fresh = await extractDataType(client, name, category);
         // No address to sort by, so a new type goes at the end: codegen groups
         // types by category and ownership, not by array position.
         model.primary.dataTypes.push(fresh);
@@ -368,6 +408,14 @@ export async function applyEvents(
       // its per-symbol helpers are private, so the analysis fields ride along
       // from the record being replaced rather than being recomputed from a row.
       const merged: AnalyzedDataSymbol = { ...existing, ...defined(match) };
+      // `suggestedType` is DERIVED from dataType, and codegen prefers it, so a type
+      // that changed in Ghidra has to re-derive it here or the old spelling wins.
+      // Retyping a scalar to the array it really is then emitted an array-sized
+      // initializer against a scalar declaration - and the clear-loop that walks the
+      // array wrote past a four-byte object.
+      if (merged.dataType && merged.dataType !== existing.dataType) {
+        merged.suggestedType = inferType(merged.dataType);
+      }
       model.primary.globals[slot] = merged;
       indices.globalByAddr.set(addressKey(merged.address), merged);
       await fetchInitializedData(client, [merged]);
@@ -567,6 +615,46 @@ function reindexCallers(model: LiveModel, indices: ModelIndices): void {
       }
     }
   }
+}
+
+/**
+ * Ghidra's transaction name for the version bookkeeping a check-in writes.
+ * The program's content is untouched by it.
+ */
+const METADATA_ONLY_TX = 'Update Metadata';
+
+/**
+ * Does this event say the program moved under us in a way no diff describes?
+ *
+ * Ghidra fires an object-restored event for an undo, a redo, a rollback - and
+ * also for the metadata write that records a new version on check-in, and again
+ * for edits that re-sync the program, such as giving a function custom parameter
+ * storage. Only a genuine rollback invalidates the model.
+ *
+ * The discriminator is the TRANSACTION. A rollback replaces state no event
+ * describes, so its restore arrives alone. An edit that happens to re-sync the
+ * program is one transaction that ALSO emitted targeted events naming exactly
+ * what changed - and those events are a complete description, so the model can
+ * be brought up to date from them the ordinary way.
+ *
+ * Getting this wrong is expensive in one direction only: treating an edit as a
+ * rollback stops the loop for good, on the very actions an operator performs
+ * most.
+ */
+export function isModelInvalidatingRestore(
+  e: ChangeEvent,
+  batch: readonly ChangeEvent[],
+): boolean {
+  if (e.kind !== 'restored') return false;
+  if (e.txDescription === METADATA_ONLY_TX) return false;
+  const txId = (e as { txId?: number }).txId;
+  if (txId !== undefined && batch.some(other =>
+    other !== e &&
+    (other as { txId?: number }).txId === txId &&
+    other.target !== 'program')) {
+    return false;
+  }
+  return true;
 }
 
 /**

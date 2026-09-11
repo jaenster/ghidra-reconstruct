@@ -1377,10 +1377,20 @@ function normalizeFieldDeclaration(fieldType: string, fieldName: string, fieldSi
   }
 
   // Fix pointer-to-array field types: "Type *[N]" → "Type *" + move [N] to array suffix
-  const ptrArrayMatch = type.match(/^(.+\*)\[(\d+)\](.*)$/);
+  //
+  // Every trailing dimension must be taken in ONE bite, outermost first, exactly
+  // as Ghidra spells it. Peeling only the first `[N]` and leaving the rest glued
+  // to the type handed the remainder to the generic array split below, which
+  // PREPENDS what it finds to the suffix already collected - so a two-dimensional
+  // pointer array came out transposed. `D2TimerQueueStrc::pActiveTimersByType`,
+  // `D2TimerListStrc *[5][64]` in Ghidra (5 unit types x 64 frame buckets, row
+  // stride 0x100, confirmed in EVENT_DispatchAllTimers), was emitted `[64][5]`.
+  // Same total size, so no static_assert fires; the row stride becomes 5 pointers
+  // and all five unit types alias into one window. That crashed the game.
+  const ptrArrayMatch = type.match(/^(.+\*)((?:\[\d+\])+)(.*)$/);
   if (ptrArrayMatch) {
     type = ptrArrayMatch[1] + ptrArrayMatch[3];
-    arraySuffix = `[${ptrArrayMatch[2]}]${arraySuffix}`;
+    arraySuffix = `${ptrArrayMatch[2]}${arraySuffix}`;
     // Re-apply the fnptr-typedef strip: an array of fnptr-typedef pointers
     // ("QUESTCALLBACK *[15]") reduces to "QUESTCALLBACK *" here, but the typedef
     // already encodes the pointer, so collapse to "QUESTCALLBACK" (→ QUESTCALLBACK

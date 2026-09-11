@@ -676,8 +676,11 @@ export async function decompileFunction(
 ): Promise<string> {
   const result = await connection.sendCommand<GhidraDecompileResult>('decompile', {
     address,
-    // Java handler reads 'timeout' in seconds for Ghidra decompiler timeout
-    timeout: decompileTimeout,
+    // The worker reads 'decompileTimeout' in seconds for the Ghidra decompiler.
+    // A bare 'timeout' is the WORKER POOL's budget, not the decompiler's: sending
+    // the seconds value there gave large functions a 60ms budget, and every one
+    // of them came back "Command timeout" and kept its stale body.
+    decompileTimeout,
     // sendCommand reads '_commandTimeout' (ms) for the command-level timeout
     _commandTimeout: (decompileTimeout + 10) * 1000,
   });

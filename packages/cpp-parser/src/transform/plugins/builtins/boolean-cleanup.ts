@@ -24,6 +24,7 @@ import type {
   IntegerLiteralExpr,
   BoolLiteralExpr,
   Identifier,
+  ParenExpr,
 } from '../../../ast/nodes.js';
 import { createTransformer, sequence, type Transformer } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
@@ -241,6 +242,84 @@ function createTrueComparisonSimplifier(): Transformer {
  * - (flags & MASK) != 0  →  (flags & MASK)
  * - boolExpr != 0        →  boolExpr
  */
+
+/**
+ * Rewrite `(x & mask) != 0` to `(x & mask)` inside an expression that is read
+ * ONLY for truth.
+ *
+ * The two are the same test and a DIFFERENT VALUE: `BitMaskAnd[8] & word` is
+ * 0x100, whose truth is 1 and whose low byte is 0.
+ * `CODEC_BuildInversePaletteFromBitmask` stores exactly that into a `char[256]`
+ * of used-colour flags, so dropping the comparison marked 24 of every 32 palette
+ * entries unused; every decoded sprite pixel then remapped through a
+ * quarter-built inverse palette and character select died with "Sprite
+ * Decompression Error". It compiled and linked and meant something else.
+ *
+ * So the rewrite is applied HERE, descending from the condition, rather than at
+ * every `!=` while asking what contains it: the transformer is bottom-up and
+ * rebuilds a parent once a child changes, so the parent a child would have to
+ * consult is not the node the visitor was given.
+ *
+ * `&&`, `||` and `!` pass the context to their operands, and parentheses are
+ * transparent. Everything else reads the value and is left alone.
+ */
+function simplifyMaskedTests(expr: Expression): Expression {
+  if (expr.kind === NodeKind.ParenExpr) {
+    const inner = (expr as ParenExpr).expression;
+    const next = simplifyMaskedTests(inner);
+    return next === inner ? expr : { ...(expr as ParenExpr), expression: next };
+  }
+
+  if (expr.kind === NodeKind.UnaryExpr && (expr as UnaryExpr).operator === '!') {
+    const operand = (expr as UnaryExpr).operand;
+    const next = simplifyMaskedTests(operand);
+    return next === operand ? expr : { ...(expr as UnaryExpr), operand: next };
+  }
+
+  if (expr.kind === NodeKind.BinaryExpr) {
+    const binary = expr as BinaryExpr;
+
+    if (binary.operator === '&&' || binary.operator === '||') {
+      const left = simplifyMaskedTests(binary.left);
+      const right = simplifyMaskedTests(binary.right);
+      return left === binary.left && right === binary.right
+        ? expr
+        : { ...binary, left, right };
+    }
+
+    if (binary.operator === '!=') {
+      let masked: Expression | null = null;
+      if (isZero(binary.right) && isBitwiseAnd(binary.left)) masked = binary.left;
+      else if (isZero(binary.left) && isBitwiseAnd(binary.right)) masked = binary.right;
+      if (masked) {
+        return {
+          ...masked,
+          leadingTrivia: binary.leadingTrivia,
+          trailingTrivia: binary.trailingTrivia,
+        } as Expression;
+      }
+    }
+  }
+
+  return expr;
+}
+
+/** Applies `simplifyMaskedTests` to every expression a statement tests. */
+function createMaskedTestSimplifier(): Transformer {
+  const onCondition = <T extends { condition?: Expression | null }>(node: T) => {
+    if (!node.condition) return undefined;
+    const next = simplifyMaskedTests(node.condition);
+    return next === node.condition ? undefined : { ...node, condition: next };
+  };
+  return createTransformer({
+    visitIfStmt: onCondition,
+    visitWhileStmt: onCondition,
+    visitDoWhileStmt: onCondition,
+    visitForStmt: onCondition,
+    visitConditionalExpr: onCondition,
+  } as never);
+}
+
 function createZeroComparisonSimplifier(): Transformer {
   return createTransformer({
     visitBinaryExpr(binary) {
@@ -262,14 +341,13 @@ function createZeroComparisonSimplifier(): Transformer {
         return undefined;
       }
 
-      // For bitwise AND, simplify (x & mask) != 0 to (x & mask)
+      // `(x & mask) != 0` is NOT handled here - it is only an identity where the
+      // result is read for truth, which `createMaskedTestSimplifier` decides by
+      // descending from the condition. `== 0` is safe anywhere: `!(x & mask)` is
+      // 0-or-1 exactly as the comparison was.
       if (isBitwiseAnd(expr)) {
         if (isNotEqual) {
-          return {
-            ...expr,
-            leadingTrivia: binary.leadingTrivia,
-            trailingTrivia: binary.trailingTrivia,
-          };
+          return undefined;
         } else {
           // (x & mask) == 0  →  !(x & mask)
           return createNegation(expr, binary);
@@ -431,6 +509,7 @@ export const booleanCleanupPlugin: TransformPlugin = {
 
     if (opts.simplifyZeroComparison !== false) {
       transforms.push(createZeroComparisonSimplifier());
+      transforms.push(createMaskedTestSimplifier());
     }
 
     if (opts.simplifyDoubleNegation !== false) {

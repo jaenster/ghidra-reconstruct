@@ -168,6 +168,13 @@ export class LiveLoop {
   private lastCommit: string | null = null;
 
   /**
+   * Set only while a freshly-seeded model is catching up from the beginning of
+   * the journal: the instant its snapshot was written. Cleared by the first
+   * batch. See dropEventsAlreadyInSnapshot.
+   */
+  private bootstrapCutoffMs: number | null = null;
+
+  /**
    * Set when the journal could not cover the gap, or a batch reported that the
    * model can no longer be trusted incrementally. While it is set NO events are
    * applied and NOTHING is committed — the loop is deliberately stuck, because
@@ -249,6 +256,13 @@ export class LiveLoop {
 
     this.model = await loadSnapshotModel(this.cfg.snapshotDir, options, state.seq);
     this.indices = indexSnapshotModel(this.model);
+    if (state.seq === 0) {
+      // No persisted position, so the stream will replay from the start of the
+      // journal. The snapshot is a full extraction with a timestamp, and that is
+      // the position.
+      const writtenAt = Date.parse(this.model.manifest.provenance.writtenAt ?? '');
+      this.bootstrapCutoffMs = Number.isNaN(writtenAt) ? null : writtenAt;
+    }
     const counts = countModel(this.model);
     this.log(`model: ${counts.functions} functions, ${counts.dataTypes} types, ${counts.globals} globals`);
 
@@ -376,10 +390,43 @@ export class LiveLoop {
     } as never);
   }
 
+  /**
+   * Drop events the seeded snapshot already contains.
+   *
+   * A daemon starting with no persisted model resumes from the beginning of the
+   * journal, because it has no seq to resume from. But its model came from a
+   * snapshot that is itself a full extraction taken at a known instant, so every
+   * event older than that instant is already in the model. Replaying them is at
+   * best wasted decompiles - and at worst fatal, because one historical
+   * `restored` in that backlog stops the loop for good over a rollback that the
+   * snapshot was taken after.
+   *
+   * Only the first batch after a fresh seed can contain such events; once one is
+   * applied the persisted seq carries the position forward.
+   */
+  private dropEventsAlreadyInSnapshot(batch: ChangeEvent[]): ChangeEvent[] {
+    if (!this.bootstrapCutoffMs) return batch;
+    const cutoff = this.bootstrapCutoffMs;
+    this.bootstrapCutoffMs = null;
+    const keep = batch.filter(e => !e.ts || e.ts > cutoff);
+    if (keep.length !== batch.length) {
+      const dropped = batch.length - keep.length;
+      this.log(
+        `  ${dropped} event(s) predate the seeded snapshot ` +
+        `(${new Date(cutoff).toISOString()}) and are already in it; skipping them`,
+      );
+      if (keep.length === 0) this.model.seq = Math.max(this.model.seq, batch[batch.length - 1].seq);
+    }
+    return keep;
+  }
+
   private async applyAndRebuild(batch: ChangeEvent[]): Promise<void> {
     try {
       this.phase = 'applying';
       this.log(`batch of ${batch.length} event(s), seq ${batch[0].seq}..${batch[batch.length - 1].seq}`);
+
+      batch = this.dropEventsAlreadyInSnapshot(batch);
+      if (batch.length === 0) return;
 
       const result = await applyEvents(
         this.model,
@@ -798,6 +845,20 @@ export class LiveLoop {
   private async doRetryMerge(): Promise<unknown> {
     const merge = await mergeIntoModified(this.cfg.modifiedDir, 'source/regen');
     this.lastMerge = { ...merge, at: new Date().toISOString() };
+    // Clearing the block is the whole point of this call, and it was missing:
+    // `Queue.unblock()` existed but had no caller anywhere, so a conflict was a
+    // one-way door. Once blocked the daemon rejected every batch with "daemon is
+    // blocked", the change stream redelivered it every three seconds for ever, and
+    // the only recovery was a restart - three of them in one session, each time
+    // after the conflict had already been resolved and committed.
+    //
+    // Only a merge that actually reached a good state clears it. 'conflict' and
+    // 'error' mean the tree still needs a human; 'dirty' means the worktree has
+    // uncommitted work and the merge never ran, so unblocking there would let the
+    // next batch merge onto a tree nobody has looked at.
+    if (merge.state === 'clean' || merge.state === 'uptodate') {
+      this.queue.unblock();
+    }
     return this.lastMerge;
   }
 

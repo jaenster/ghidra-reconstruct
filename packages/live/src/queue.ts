@@ -77,7 +77,7 @@ export class WorkQueue {
    * than waiting on work that will never be scheduled.
    */
   submit<T>(task: Task<T>): Promise<T> {
-    if (this.blocked && task.kind !== 'merge' && task.kind !== 'measure') {
+    if (this.blocked && !WorkQueue.runsWhileBlocked(task.kind)) {
       return Promise.reject(new Error(`daemon is blocked: ${this.blocked}`));
     }
 
@@ -146,12 +146,30 @@ export class WorkQueue {
     }
   }
 
+  /**
+   * Kinds that may still run while the queue is blocked. These ARE the recovery
+   * path - refusing them is what makes a block permanent.
+   */
+  private static runsWhileBlocked(kind: TaskKind): boolean {
+    return kind === 'merge' || kind === 'measure';
+  }
+
   private async drain(): Promise<void> {
     if (this.draining) return;
     this.draining = true;
     try {
-      while (this.pending.length > 0 && !this.blocked) {
-        const entry = this.pending.shift()!;
+      for (;;) {
+        // `submit` lets a merge through while blocked; this loop used to be
+        // `while (pending.length && !this.blocked)`, which then refused to RUN it.
+        // The operator's retry_merge sat in `pending` with `running: null` for
+        // ever while the change stream redelivered its batch every three seconds,
+        // and the only way out was restarting the daemon. Pick the first entry
+        // that is allowed to run instead of stopping at the first that is not.
+        const idx = this.pending.findIndex(
+          (e) => !this.blocked || WorkQueue.runsWhileBlocked(e.task.kind),
+        );
+        if (idx < 0) break;
+        const entry = this.pending.splice(idx, 1)[0]!;
         this.running = {
           kind: entry.task.kind,
           describe: entry.task.describe,
