@@ -16,6 +16,7 @@ import { oobLocalAccess, oversizedFormattedWrite, oversizedFrameWrite, undersize
 import { unassignedLocalRead, uninitialisedSendBuffer } from './checks/locals.js';
 import { arglessIndirectCall } from './checks/calls.js';
 import { structPackingMismatch } from './checks/layout.js';
+import { arrayIndexRange } from './checks/ranges.js';
 
 export type { Check, Finding } from './context.js';
 export { LintContext } from './context.js';
@@ -38,6 +39,7 @@ export const ALL_CHECKS: Check[] = [
   uninitialisedSendBuffer,
   oversizedFormattedWrite,
   oobLocalAccess,
+  arrayIndexRange,
 ];
 
 export interface RunResult {

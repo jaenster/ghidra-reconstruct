@@ -5,8 +5,8 @@
 
 import { NodeKind, getChildren, type ASTNode } from '@ghidra-mcp/cpp-parser';
 import {
-  addressOfName, calleeName, isArrayType, isPointerType, line, primitiveName,
-  refName, signature, strip, typeText, typeWidth, unparen, walk,
+  addressOfName, calleeName, declName, isArrayType, isCast, isPointerType, line, parentMap, primitiveName,
+  refName, signature, strip, typeRefName, typeText, typeWidth, unparen, walk,
 } from '../ast.js';
 import type { Check, Finding, LintContext, Resolved } from '../context.js';
 import type { FunctionInfo, SourceFile } from '../tree.js';
@@ -179,23 +179,153 @@ function isCharPointer(t: any): boolean {
   return p === 'char';
 }
 
+/** Pointer-to-char typedefs the Windows headers and the emitter spell instead of `char *`. */
+const CHAR_POINTER_TYPEDEFS = new Set(['LPSTR', 'LPCSTR', 'PSTR', 'PCSTR', 'LPCCH', 'PCHAR', 'LPCH', 'PCH']);
+
+function isStringParamType(t: any): boolean {
+  if (isCharPointer(t)) return true;
+  const n = typeRefName(t);
+  return !!n && CHAR_POINTER_TYPEDEFS.has(n);
+}
+
+/** Library calls whose listed arguments are C strings, whatever their prototype in the tree says. */
+const STRING_SINKS: Record<string, number[]> = {
+  strcpy: [0, 1], strcat: [0, 1], strncpy: [0, 1], strncat: [0, 1], strcmp: [0, 1], strncmp: [0, 1],
+  _stricmp: [0, 1], stricmp: [0, 1], _strcmpi: [0, 1], strcmpi: [0, 1], _strnicmp: [0, 1], strnicmp: [0, 1],
+  strlen: [0], strchr: [0], strrchr: [0], strstr: [0, 1], strdup: [0], _strdup: [0], atoi: [0], atol: [0],
+  strtol: [0], strtoul: [0], fopen: [0, 1], _mkdir: [0], remove: [0], rename: [0, 1],
+  lstrcpyA: [0, 1], lstrcpy: [0, 1], lstrcpynA: [0, 1], lstrcatA: [0, 1], lstrcat: [0, 1],
+  lstrcmpA: [0, 1], lstrcmp: [0, 1], lstrcmpiA: [0, 1], lstrcmpi: [0, 1], lstrlenA: [0], lstrlen: [0],
+  CreateFileA: [0], CreateDirectoryA: [0], DeleteFileA: [0], FindFirstFileA: [0], GetFileAttributesA: [0],
+  LoadLibraryA: [0], GetModuleHandleA: [0], OutputDebugStringA: [0], MessageBoxA: [1, 2], SetWindowTextA: [1],
+  SStrCopy: [0, 1], SStrNCat: [0, 1], SStrPack: [0, 1], SStrCmp: [0, 1], SStrCmpI: [0, 1], SStrLen: [0],
+  SStrChr: [0], SStrChrR: [0], SStrStr: [0, 1], SStrStrI: [0, 1], SStrDup: [0], SStrHash: [0],
+};
+
+/** printf/scanf-family calls: index of the format argument. A `%s` argument is a string. */
+const FORMAT_SINKS: Record<string, number> = {
+  sprintf: 1, wsprintfA: 1, wsprintf: 1, printf: 0, fprintf: 1, sscanf: 1, fscanf: 1,
+  SStrPrintf: 2, snprintf: 2, _snprintf: 2,
+};
+
+/** The conversion each variadic argument feeds, in order; `*` widths consume an int. */
+export function formatConversions(fmt: string): string[] {
+  const out: string[] = [];
+  const re = /%([-+ #0]*)(\*|\d+)?(?:\.(\*|\d+))?(hh|h|ll|l|L|I64|I32|I|w|z|j|t)?([diouxXcsSpeEfgGaAn%])/g;
+  for (let m; (m = re.exec(fmt));) {
+    if (m[5] === '%') continue;
+    if (m[2] === '*') out.push('*');
+    if (m[3] === '*') out.push('*');
+    out.push(m[5]);
+  }
+  return out;
+}
+
+/** Prototypes by simple name: the parameter types and whether it is variadic. */
+type Protos = Map<string, Array<{ params: any[]; variadic: boolean }>>;
+
+function collectPrototypes(ctx: LintContext): Protos {
+  const out: Protos = new Map();
+  for (const file of ctx.tree.files) {
+    walk(file.tu as any, (n: any) => {
+      if (n.kind !== NodeKind.FunctionDecl) return undefined;
+      const name = calleeName(n.name);
+      if (name) {
+        let l = out.get(name);
+        if (!l) out.set(name, (l = []));
+        l.push({ params: (n.parameters ?? []).map((p: any) => p.type), variadic: !!n.isVariadic });
+      }
+      return 'skip';
+    });
+  }
+  return out;
+}
+
+/**
+ * Is argument `ai` of `call` used as a C string? A known string function, a `%s` slot of a
+ * format (the library's or any variadic prototype whose last fixed parameter is a char
+ * pointer), or a parameter every prototype of that name declares as a char pointer.
+ */
+function stringArgument(call: any, ai: number, protos: Protos): string | null {
+  const name = calleeName(call.callee);
+  if (!name) return null;
+  if (STRING_SINKS[name]?.includes(ai)) return `${name} arg ${ai}`;
+  const decls = protos.get(name) ?? [];
+  let fmtIndex: number | undefined = FORMAT_SINKS[name];
+  if (fmtIndex === undefined) {
+    const v = decls.find(d => d.variadic && d.params.length && isStringParamType(d.params[d.params.length - 1]));
+    if (v) fmtIndex = v.params.length - 1;
+  }
+  if (fmtIndex !== undefined) {
+    if (ai === fmtIndex) return `${name} format`;
+    const lit = strip(call.arguments[fmtIndex]);
+    if (ai > fmtIndex && lit?.kind === NodeKind.StringLiteral) {
+      const conv = formatConversions(String(lit.value))[ai - fmtIndex - 1];
+      if (conv === 's') return `${name} %s`;
+      return null;
+    }
+  }
+  if (decls.length && decls.every(d => d.params.length > ai && isStringParamType(d.params[ai]))) {
+    return `${name} char* param ${ai}`;
+  }
+  return null;
+}
+
+/** Climb parens and casts from `e`: the node that actually sits in the enclosing expression. */
+function outermost(parents: Map<any, any>, e: any): any {
+  let cur = e;
+  for (let p = parents.get(cur); p && (p.kind === NodeKind.ParenExpr || isCast(p)); p = parents.get(cur)) cur = p;
+  return cur;
+}
+
 /**
  * A string constant modelled as a one-byte (or one-int) scalar, so relinking keeps only its
  * first character. `gaLanguageCodeAbbrevTable` is "ENG\0" typed undefined1; relinked, the
  * game built `data\local\lng\E\string.tbl` and faulted on the NULL load.
  *
- * The signal is a contradiction the AST states directly: a CAST to `char *` whose operand is
- * the address of a global of primitive scalar type, used as a pointer rather than
- * dereferenced on the spot. The regex also fired on a local or parameter that shares a
- * global's name (nPosX, nPosY, nScreenMode) and on sized stores like
- * `*(uint16_t *)(char *)&gnUICtrlConfigPendingKeyStrId = v`, which write the scalar and read
- * no string; name resolution and the dereference rule the AST can see rule both out.
+ * The signal is a contradiction the AST states directly: the ADDRESS of a global of
+ * primitive scalar type used as a string. Two spellings:
+ *
+ * - a CAST to `char *` of `&g`, used as a pointer rather than dereferenced on the spot;
+ * - `&g` under any cast (`(uint32_t)&gszDirObjects`) handed to a string argument - a known
+ *   string function, a `%s` slot of a format, a parameter the callee declares `char *` -
+ *   directly or through one local it is stored in. COMPOSIT_BuildCofPath did the second:
+ *   `nTypeToken = (uintptr_t)&gszDirObjects` then `wsprintfA(..., "%s\\%s\\COF...", nTypeToken,
+ *   ...)`, with the 20-byte "DATA\GLOBAL\OBJECTS" emitted as one uint8_t zero - an empty
+ *   directory, and every object COF load failed.
+ *
+ * The regex also fired on a local or parameter that shares a global's name (nPosX, nPosY,
+ * nScreenMode) and on sized stores like `*(uint16_t *)(char *)&gnUICtrlConfigPendingKeyStrId
+ * = v`, which write the scalar and read no string; name resolution and the dereference rule
+ * the AST can see rule both out.
  */
 export const truncatedStringGlobal: Check = {
   id: 'truncated-string-global',
   blurb: 'string constant modelled as a scalar - only its first char survives relinking',
   run(ctx) {
-    const hits = new Map<string, { sites: Array<{ file: string; line: number }>; ty: string }>();
+    const hits = new Map<string, { sites: Array<{ file: string; line: number; how: string }>; ty: string }>();
+    const record = (r: Extract<Resolved, { kind: 'global' }>, file: string, ln: number, how: string) => {
+      const name = r.decl.name;
+      let h = hits.get(name);
+      if (!h) hits.set(name, (h = { sites: [], ty: typeText(r.type) }));
+      h.sites.push({ file, line: ln, how });
+    };
+    const scalarGlobal = (r: Resolved | null): r is Extract<Resolved, { kind: 'global' }> => {
+      if (!r || r.kind !== 'global') return false;
+      if (isArrayType(r.type) || isPointerType(r.type)) return false;
+      const p = primitiveName(r.type);
+      return !!p && STRINGISH_SCALARS.has(p) && !stringFits(r);
+    };
+    // A scalar whose initialised bytes hold a NUL is a string that ends inside the object:
+    // `uint32_t gdwSystemMemoryMax = 0x29` is ")" and relinks intact.
+    const stringFits = (r: Extract<Resolved, { kind: 'global' }>): boolean => {
+      const v = ctx.snapshot?.globalByName.get(r.decl.name)?.value;
+      const w = typeWidth(r.type, ctx.sizeEnv);
+      if (v === null || v === undefined || w === null) return false;
+      let x = BigInt.asUintN(w * 8, BigInt(v));
+      for (let i = 0; i < w; i++, x >>= 8n) if ((x & 0xffn) === 0n) return true;
+      return false;
+    };
     // `*(uint16_t *)(char *)&g = v` is a sized store into g, not a string: a char* cast that
     // is dereferenced (directly, through further casts, or after `+ k`) is byte access.
     const dereferenced = new Set<any>();
@@ -213,25 +343,73 @@ export const truncatedStringGlobal: Check = {
       if (n.kind === NodeKind.UnaryExpr && n.operator === '*') markDeref(n.operand);
       else if (n.kind === NodeKind.SubscriptExpr) markDeref(n.array);
     }
+    const viaCast = new Set<any>();
     for (const { node: n, fn, file } of sites) {
       if (n.kind !== NodeKind.CStyleCastExpr && n.kind !== NodeKind.ReinterpretCastExpr) continue;
       if (!isCharPointer(n.type) || dereferenced.has(n)) continue;
       const op = unparen(n.expression);
       if (op?.kind !== NodeKind.UnaryExpr || op.operator !== '&') continue;
-      const target = unparen(op.operand);
-      const r = ctx.resolve(fn, target, file);
-      if (!r || r.kind !== 'global') continue;
-      if (isArrayType(r.type) || isPointerType(r.type)) continue;
-      const p = primitiveName(r.type);
-      if (!p || !STRINGISH_SCALARS.has(p)) continue;
-      const name = r.decl.name;
-      let h = hits.get(name);
-      if (!h) hits.set(name, (h = { sites: [], ty: typeText(r.type) }));
-      h.sites.push({ file: file.path, line: line(n) });
+      const r = ctx.resolve(fn, unparen(op.operand), file);
+      if (!scalarGlobal(r)) continue;
+      viaCast.add(op);
+      record(r, file.path, line(n), 'char* cast');
+    }
+
+    // The address under any other cast, reaching a string argument.
+    const protos = collectPrototypes(ctx);
+    for (const fn of ctx.tree.functions) {
+      const addrs = ctx.of(fn, NodeKind.UnaryExpr).filter((u: any) => u.operator === '&' && !viaCast.has(u));
+      if (!addrs.length) continue;
+      let parents: Map<any, any> | null = null;
+      for (const a of addrs) {
+        const r = ctx.resolve(fn, strip(a.operand));
+        if (!scalarGlobal(r)) continue;
+        parents ??= parentMap((fn.node as any).body);
+        const top = outermost(parents, a);
+        if (dereferenced.has(top)) continue;
+        const p = parents.get(top);
+        const asArg = (node: any, via: string) => {
+          const call = parents!.get(node);
+          if (call?.kind !== NodeKind.CallExpr) return false;
+          const ai = (call.arguments ?? []).indexOf(node);
+          if (ai < 0) return false;
+          const how = stringArgument(call, ai, protos);
+          if (how) record(r, fn.file.path, line(call), via + how);
+          return !!how;
+        };
+        if (asArg(top, '')) continue;
+        // Stored in a local first, then handed on: `t = (uintptr_t)&g; wsprintfA(b, "%s", t)`.
+        let local: string | null = null;
+        if (p?.kind === NodeKind.AssignExpr && p.operator === '=' && p.right === top) local = refName(unparen(p.left));
+        else if (p?.kind === NodeKind.VariableDecl && p.initializer === top) local = declName(p);
+        if (!local) continue;
+        const lr = ctx.resolve(fn, { kind: NodeKind.Identifier, name: local });
+        if (lr?.kind !== 'local') continue;
+        // Reaching the uses: the statements after the store in its own block, up to the next
+        // store to the same local. The emitter reuses one local for several stores (three
+        // directory names into nTypeToken in COMPOSIT_BuildCofPath), each read right after.
+        let stmt = p;
+        while (stmt && parents.get(stmt)?.kind !== NodeKind.CompoundStmt) stmt = parents.get(stmt);
+        const block = stmt ? parents.get(stmt) : null;
+        if (!block) continue;
+        const list: any[] = block.statements ?? [];
+        for (let i = list.indexOf(stmt) + 1; i < list.length; i++) {
+          let used = false;
+          let stored = false;
+          walk(list[i], (n: any) => {
+            if (used) return 'skip';
+            if (n.kind === NodeKind.AssignExpr && refName(unparen(n.left)) === local) stored = true;
+            if (n.kind === NodeKind.Identifier && n.name === local && asArg(outermost(parents!, n), `via ${local}: `)) used = true;
+            return undefined;
+          });
+          if (used || stored) break;
+        }
+      }
     }
     return [...hits].map(([name, h]) => ({
       check: this.id, subject: name,
-      detail: `${h.sites.length} char* cast(s), declared ${h.ty} (${h.sites[0].file}:${h.sites[0].line})`,
+      detail: `${h.sites.length} string use(s) of its address, declared ${h.ty} ` +
+        `(${h.sites[0].file}:${h.sites[0].line} ${h.sites[0].how})`,
     }));
   },
 };

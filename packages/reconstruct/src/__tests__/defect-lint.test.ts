@@ -154,6 +154,58 @@ describe('defect lint: truncated-string-global', () => {
   });
 });
 
+describe('defect lint: truncated-string-global, address used as a string', () => {
+  // The v1026 shape: "DATA\\GLOBAL\\OBJECTS" emitted as one uint8_t, its address stored in a
+  // reused local and fed to a %s - COMPOSIT_BuildCofPath, D2Common/COMPOSIT/Composit.cpp.
+  const globalsH = 'extern uint8_t gszDirObjects;\nextern uint32_t gdwCloseParen;\nextern uint8_t gbFlag;\n';
+  const composit = `void COMPOSIT_BuildCofPath(char* szOutCofPath, int nKind, uint32_t* pszTypeToken, uint32_t* pszModeToken, uint32_t* pszWeaponToken) {
+    uint32_t nTypeToken;
+    if (nKind == 0) {
+        nTypeToken = (uint32_t)"DATA\\\\GLOBAL\\\\CHARS";
+        /* LPCSTR param_2 for wsprintfA */ wsprintfA(szOutCofPath, "%s\\\\%s\\\\COF\\\\%s%s%s.COF", nTypeToken, pszTypeToken, pszTypeToken, pszModeToken, pszWeaponToken);
+        return;
+    }
+    if (nKind == 2) {
+        nTypeToken = (uintptr_t)&gszDirObjects;
+        /* LPCSTR param_2 for wsprintfA */ wsprintfA(szOutCofPath, "%s\\\\%s\\\\COF\\\\%s%s%s.COF", nTypeToken, pszTypeToken, pszTypeToken, pszModeToken, pszWeaponToken);
+        return;
+    }
+}`;
+
+  it('reports the address stored in a local and handed to a %s (the old gszDirObjects)', () => {
+    const fs = lint('truncated-string-global', { files: { 'globals.h': globalsH, 'Composit.cpp': composit } });
+    assert.deepStrictEqual(subjects(fs), ['gszDirObjects']);
+    assert.match(fs[0].detail, /via nTypeToken: wsprintfA %s/);
+  });
+
+  it('reports the address passed straight to a string function or a char* parameter', () => {
+    const fs = lint('truncated-string-global', { files: {
+      'globals.h': globalsH,
+      'a.h': 'void BuildPath(int n, const char* szDir);',
+      'a.cpp': 'void f(char* d) { SStrCopy(d, (char*)(uintptr_t)&gszDirObjects, 0x104); }\nvoid g() { BuildPath(1, (LPCSTR)(int)&gbFlag); }',
+    } });
+    assert.deepStrictEqual(subjects(fs), ['gbFlag', 'gszDirObjects']);
+  });
+
+  it('ignores a string that ends inside the scalar, a non-string argument, and a local re-stored before use', () => {
+    const fs = lint('truncated-string-global', {
+      globals: [{ name: 'gdwCloseParen', address: 0x6cf324, size: 4, value: 0x29 }],
+      files: {
+        'globals.h': globalsH,
+        'a.cpp': `void f(char* d, int n) {
+    SStrPack(d, (char*)&gdwCloseParen, n);
+    memset(&gbFlag, 0, 1);
+    uint32_t t = (uintptr_t)&gszDirObjects;
+    t = n;
+    sprintf(d, "%s", t);
+    sprintf(d, "%d", (int)&gszDirObjects);
+}`,
+      },
+    });
+    assert.deepStrictEqual(fs, []);
+  });
+});
+
 describe('defect lint: constant-shaped-address', () => {
   it('reports an image address shaped like a constant, and only a referenced one', () => {
     const fs = lint('constant-shaped-address', {
@@ -413,6 +465,103 @@ describe('defect lint: struct-packing-mismatch', () => {
     const a = assertableStructs(structs as any);
     assert.deepStrictEqual(a.map(s => [s.name, s.size]), [['D2TblHeader', 21], ['Vt', null]]);
     assert.match(simulatedLayout(structs as any).get('D2TblHeader')!, /nCount.*0x4.*0x2/);
+  });
+});
+
+describe('defect lint: array-index-range', () => {
+  // The v1026 SStrHash, Storm/Source/SSTR.cpp: a sixteen-dword table Ghidra sized to five
+  // because two stray labels sat inside it.
+  const sstrHash = `uint32_t __stdcall SStrHash(char * pszText, byte bCaseSensitive, uint32_t nSeed) {
+    // Static local variables (originally global data)
+    static int gnHashLowTable[5] = { 0x486e26ee, -0x2355e94d, -0x1e6e7111, 0x202dafdb, 0x341c7dc7 };
+
+    uint32_t nChar;
+    if (pszText) {
+      int nAccum;
+      if (!nSeed) {
+        nSeed = 0x7fed7fed;
+      }
+
+      nChar = (uint32_t)(byte)*pszText;
+      nAccum = -0x11111112;
+      if (!(bCaseSensitive & 1)) {
+        while (nChar) {
+          pszText++;
+          if (nChar - 0x61 < 0x1a) {
+            nChar -= 0x20;
+          }
+          if (nChar == 0x2f) {
+            nChar = 0x5c;
+          }
+
+          nSeed = nSeed + nAccum ^ gnHashLowTable[nChar >> 4] - gnHashLowTable[nChar & 0xf];
+          nAccum = nAccum * 0x21 + nChar + 3 + nSeed;
+          nChar = (uint32_t)(byte)*pszText;
+        }
+      } else {
+        while (nChar) {
+          nSeed = nSeed + nAccum ^ gnHashLowTable[nChar >> 4] - gnHashLowTable[nChar & 0xf];
+          pszText++;
+          nAccum = nAccum * 0x21 + nChar + 3 + nSeed;
+          nChar = (uint32_t)(byte)*pszText;
+        }
+      }
+      if (nSeed) {
+        return nSeed;
+      }
+
+      nSeed = 1;
+      return nSeed;
+    }
+
+    SErr::SErrSetLastError(0x57);
+    return 0;
+}`;
+
+  it('reports the old SStrHash table read with a mask wider than it', () => {
+    const fs = lint('array-index-range', { files: { 'SSTR.cpp': sstrHash } });
+    assert.deepStrictEqual(subjects(fs), ['gnHashLowTable', 'gnHashLowTable']);
+    assert.match(fs[0].detail, /\[<= 15\] \(& 0xf\) but declared int\[5\] \(static local\)/);
+    const fixed = sstrHash.replace('gnHashLowTable[5]', 'gnHashLowTable[16]');
+    assert.deepStrictEqual(lint('array-index-range', { files: { 'SSTR.cpp': fixed } }), []);
+  });
+
+  it('bounds an index by a loop, a guard on the variable, a switch case and a modulus', () => {
+    const fs = lint('array-index-range', { files: {
+      'globals.h': 'extern uint gaTaskHeads[28];\nextern int gaLoop[4];\nextern int gaCase[3];\nextern int gaMod[6];\n',
+      'a.cpp': `void f(uint n, int k) {
+    for (int i = 0; i < 5; i++) { gaLoop[i] = 0; }
+    if (n < 0x20) { use(gaTaskHeads[n]); n = 0; }
+    switch (k) { case 1: case 3: gaCase[k] = 1; break; }
+    use(gaMod[n % 8]);
+}`,
+    } });
+    assert.deepStrictEqual(subjects(fs), ['gaCase', 'gaLoop', 'gaMod', 'gaTaskHeads']);
+  });
+
+  it('ignores a MOVZX-width mask, a guard on the masked expression, one-past-the-end, a flat 2-D access and a fitting loop', () => {
+    const fs = lint('array-index-range', { files: {
+      'globals.h': 'extern int gaSound[28];\nextern byte gaDir[8];\nextern int* gaHash[128][6];\nextern int gaFit[5];\n',
+      'a.cpp': `void f(uint32_t nMode, int d, int g) {
+    if ((nMode & 0xf) < 0xe) { use(gaSound[(nMode & 0xf) * 2 + 1]); nMode = 0; }
+    use(gaDir[d & 0xff]);
+    use(&gaFit[5]);
+    use(gaHash[0x55][(g & 0x7f) + 2]);
+    for (int i = 0; i < 5; i++) { gaFit[i] = 0; }
+}`,
+    } });
+    assert.deepStrictEqual(fs, []);
+  });
+
+  it('leaves a constant index on a stack array to oob-local-access, but ranges one', () => {
+    const fs = lint('array-index-range', { files: {
+      'a.cpp': `void f(int n) {
+    char szLine[1022];
+    szLine[1030] = 0;
+    if (n < 0x3ff) { szLine[n] = 10; szLine[n + 1] = 0; }
+}`,
+    } });
+    assert.deepStrictEqual(fs.map(f => f.detail.split(' (')[0]), ['szLine[<= 1022]', 'szLine[<= 1023]']);
   });
 });
 

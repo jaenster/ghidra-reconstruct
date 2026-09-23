@@ -18,6 +18,8 @@ export interface SnapshotGlobal {
   size: number;
   xrefCount: number;
   dataType: string;
+  /** The initialised value Ghidra shows, when it is a plain number and the data is initialised. */
+  value?: number | null;
 }
 
 export interface SnapshotStruct {
@@ -67,6 +69,7 @@ export function loadSnapshot(dir: string = DEFAULT_SNAPSHOT_DIR): Snapshot | nul
     globals.push({
       name: String(d.name), address: v, addressText: String(d.address),
       size: Number(d.size) || 0, xrefCount: Number(d.xrefCount) || 0, dataType: String(d.dataType ?? ''),
+      value: d.isInitialized && /^-?0x[0-9a-f]+$|^-?\d+$/i.test(String(d.value ?? '')) ? Number(BigInt(String(d.value).replace(/^-/, '')) * (String(d.value).startsWith('-') ? -1n : 1n)) : null,
     });
   }
   return buildSnapshot(dir, globals, ndjson(join(dir, 'dataTypes.ndjson')), all);
