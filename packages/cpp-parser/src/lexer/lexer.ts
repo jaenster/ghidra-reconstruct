@@ -166,6 +166,15 @@ export class Lexer {
     return true;
   }
 
+  private onlyWhitespaceBeforeOnLine(): boolean {
+    for (let i = this.pos - 1; i >= 0; i--) {
+      const c = this.source[i];
+      if (c === '\n') return true;
+      if (c !== ' ' && c !== '\t' && c !== '\r') return false;
+    }
+    return true;
+  }
+
   /**
    * Scan trivia (whitespace, comments, directives)
    */
@@ -229,9 +238,9 @@ export class Lexer {
           text,
           location: { file: this.filename, start, end: this.getPosition() },
         });
-      } else if (char === '#' && this.column === 1) {
-        // Preprocessor directive (must be at start of line, but we already consumed leading whitespace)
-        // Actually, let's handle # at any point for safety
+      } else if (char === '#' && this.onlyWhitespaceBeforeOnLine()) {
+        // Preprocessor directive: `#` is the first non-blank character of its line, so an
+        // indented `#pragma pack(push, 1)` inside a function body is a directive too.
         let text = '';
         while (!this.isAtEnd() && this.peek() !== '\n') {
           // Handle line continuation

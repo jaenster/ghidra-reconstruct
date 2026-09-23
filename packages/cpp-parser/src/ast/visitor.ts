@@ -531,6 +531,19 @@ export function getChildren(node: ASTNode): ASTNode[] {
       break;
     }
 
+    case NodeKind.NamespaceDecl: {
+      const ns = node as any;
+      children.push(...ns.declarations);
+      break;
+    }
+
+    case NodeKind.ClassDecl:
+    case NodeKind.StructDecl: {
+      const cls = node as any;
+      children.push(...(cls.members ?? []));
+      break;
+    }
+
     case NodeKind.StaticAssertDecl: {
       const sa = node as any;
       children.push(sa.condition);

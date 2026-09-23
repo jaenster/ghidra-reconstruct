@@ -83,6 +83,12 @@ import {
 
 export interface ParserOptions {
   filename?: string;
+  /**
+   * Keep going past a declaration that does not parse. The failed declaration is skipped
+   * to its balanced end and recorded in `TranslationUnit.parseErrors`, so one construct the
+   * parser does not know costs one declaration, not the whole file.
+   */
+  recover?: boolean;
 }
 
 export class ParserError extends Error {
@@ -122,11 +128,66 @@ export class Parser {
   private tokens: TokenWithTrivia[];
   private pos: number = 0;
   private filename: string;
+  private recover: boolean;
+  private errors: ParserError[] = [];
 
   constructor(source: string, options: ParserOptions = {}) {
     const lexer = new Lexer(source, { filename: options.filename, preserveTrivia: true });
     this.tokens = lexer.tokenizeWithTrivia();
     this.filename = options.filename ?? '<input>';
+    this.recover = options.recover ?? false;
+  }
+
+  /**
+   * parseDeclaration, or - in recovery mode - skip the declaration it choked on.
+   *
+   * The skip is token-balanced: it stops after a `;` at nesting depth 0, or after the `}`
+   * that closes the declaration's outermost brace, and never consumes a `}` it did not open
+   * (that one belongs to an enclosing namespace or class).
+   */
+  private parseDeclarationRecovering(): Declaration | null {
+    if (!this.recover) return this.parseDeclaration();
+    const start = this.pos;
+    try {
+      return this.parseDeclaration();
+    } catch (e) {
+      if (!(e instanceof ParserError)) throw e;
+      this.errors.push(e);
+      this.extraDecls = [];
+      this.pos = start;
+      let depth = 0;
+      while (!this.isAtEnd()) {
+        const k = this.current().token.kind;
+        if (k === TokenKind.LeftBrace || k === TokenKind.LeftParen || k === TokenKind.LeftBracket) {
+          depth++;
+        } else if (k === TokenKind.RightBrace || k === TokenKind.RightParen || k === TokenKind.RightBracket) {
+          if (depth === 0) break;
+          depth--;
+          if (depth === 0 && k === TokenKind.RightBrace) { this.advance(); break; }
+        } else if (k === TokenKind.Semicolon && depth === 0) {
+          this.advance();
+          break;
+        }
+        this.advance();
+      }
+      // A declaration that is nothing but an unmatched closer would loop forever.
+      if (this.pos === start && !this.isAtEnd()) {
+        if (this.check(TokenKind.RightBrace) && this.inNamespace > 0) return null;
+        this.advance();
+      }
+      return null;
+    }
+  }
+
+  private inNamespace = 0;
+
+  /** Declarators after the first in `T a, *b, c[4];` - drained by whoever holds the list. */
+  private extraDecls: Declaration[] = [];
+
+  private takeExtraDecls(): Declaration[] {
+    const x = this.extraDecls;
+    this.extraDecls = [];
+    return x;
   }
 
   /**
@@ -138,13 +199,16 @@ export class Parser {
     // Don't capture leading trivia for TranslationUnit - let the first declaration own it
 
     while (!this.isAtEnd()) {
-      const decl = this.parseDeclaration();
+      const decl = this.parseDeclarationRecovering();
       if (decl) {
         declarations.push(decl);
       }
+      declarations.push(...this.takeExtraDecls());
     }
 
-    return this.node(NodeKind.TranslationUnit, startLoc, { declarations }) as TranslationUnit;
+    const tu = this.node(NodeKind.TranslationUnit, startLoc, { declarations }) as TranslationUnit;
+    if (this.recover) tu.parseErrors = this.errors;
+    return tu;
   }
 
   /**
@@ -159,6 +223,39 @@ export class Parser {
       const loc = this.currentLocation();
       this.advance();
       return this.node(NodeKind.EmptyDecl, loc, {}, leadingTrivia) as Declaration;
+    }
+
+    if (this.check(TokenKind.Using)) {
+      const decl = this.parseUsing();
+      decl.leadingTrivia = leadingTrivia;
+      return decl;
+    }
+
+    if (this.check(TokenKind.Static_assert)) {
+      const decl = this.parseStaticAssertDecl();
+      decl.leadingTrivia = leadingTrivia;
+      return decl;
+    }
+
+    // extern "C" { ... } or extern "C" <declaration>
+    if (this.check(TokenKind.Extern) && this.checkAhead(1, TokenKind.StringLiteral)) {
+      const loc = this.currentLocation();
+      this.advance();
+      const language = this.advance().token.text.replace(/^"|"$/g, '');
+      const declarations: Declaration[] = [];
+      if (this.match(TokenKind.LeftBrace)) {
+        while (!this.check(TokenKind.RightBrace) && !this.isAtEnd()) {
+          const d = this.parseDeclarationRecovering();
+          if (d) declarations.push(d);
+          declarations.push(...this.takeExtraDecls());
+        }
+        this.expect(TokenKind.RightBrace);
+      } else {
+        const d = this.parseDeclaration();
+        if (d) declarations.push(d);
+        declarations.push(...this.takeExtraDecls());
+      }
+      return this.node(NodeKind.LinkageSpec, loc, { language, declarations }, leadingTrivia) as Declaration;
     }
 
     // Check for namespace
@@ -186,6 +283,7 @@ export class Parser {
       // - `struct Name varname` - variable declaration (handle via parseFunctionOrVariableDecl)
       const saved = this.pos;
       this.advance(); // skip struct/class/union
+      while (this.checkGnuAttribute()) this.parseGnuAttribute();
       if (this.check(TokenKind.LeftBrace)) {
         // Anonymous struct definition
         this.pos = saved;
@@ -232,6 +330,41 @@ export class Parser {
     return decl;
   }
 
+  /** `using namespace N;`, `using N::name;` or `using Alias = Type;`. */
+  private parseUsing(): Declaration {
+    const startLoc = this.currentLocation();
+    this.expect(TokenKind.Using);
+    if (this.match(TokenKind.Namespace)) {
+      const namespace = this.parseIdentifierOrQualified();
+      this.expect(TokenKind.Semicolon);
+      return this.node(NodeKind.UsingDirective, startLoc, { namespace, attributes: [] }) as Declaration;
+    }
+    const isTypename = this.match(TokenKind.Typename);
+    if (this.check(TokenKind.Identifier) && this.checkAhead(1, TokenKind.Equal)) {
+      const name = this.parseIdentifier();
+      this.advance(); // =
+      const type = this.parseType();
+      this.expect(TokenKind.Semicolon);
+      return this.node(NodeKind.TypeAliasDecl, startLoc, { name, type, attributes: [] }) as Declaration;
+    }
+    const name = this.parseIdentifierOrQualified();
+    this.expect(TokenKind.Semicolon);
+    return this.node(NodeKind.UsingDecl, startLoc, { name, isTypename }) as Declaration;
+  }
+
+  /** `static_assert(cond[, "message"]);` - at namespace, class or block scope. */
+  private parseStaticAssertDecl(): Declaration {
+    const startLoc = this.currentLocation();
+    this.expect(TokenKind.Static_assert);
+    this.expect(TokenKind.LeftParen);
+    const condition = this.parseAssignmentExpression();
+    let message: StringLiteralExpr | null = null;
+    if (this.match(TokenKind.Comma)) message = this.parseStringLiteral();
+    this.expect(TokenKind.RightParen);
+    this.expect(TokenKind.Semicolon);
+    return this.node(NodeKind.StaticAssertDecl, startLoc, { condition, message }) as Declaration;
+  }
+
   /**
    * Parse namespace declaration
    */
@@ -240,24 +373,47 @@ export class Parser {
     this.expect(TokenKind.Namespace);
 
     const isInline = this.match(TokenKind.Inline);
-    const name = this.check(TokenKind.Identifier) ? this.parseIdentifier() : null;
+    // `namespace A::B::C {` (C++17) is three nested namespaces sharing one body.
+    const names: Identifier[] = [];
+    if (this.check(TokenKind.Identifier)) {
+      names.push(this.parseIdentifier());
+      while (this.check(TokenKind.ColonColon) && this.checkAhead(1, TokenKind.Identifier)) {
+        this.advance();
+        names.push(this.parseIdentifier());
+      }
+    }
 
     this.expect(TokenKind.LeftBrace);
 
     const declarations: Declaration[] = [];
-    while (!this.check(TokenKind.RightBrace) && !this.isAtEnd()) {
-      const decl = this.parseDeclaration();
-      if (decl) declarations.push(decl);
+    this.inNamespace++;
+    try {
+      while (!this.check(TokenKind.RightBrace) && !this.isAtEnd()) {
+        const decl = this.parseDeclarationRecovering();
+        if (decl) declarations.push(decl);
+        declarations.push(...this.takeExtraDecls());
+      }
+    } finally {
+      this.inNamespace--;
     }
 
     this.expect(TokenKind.RightBrace);
 
-    return this.node(NodeKind.NamespaceDecl, startLoc, {
-      name,
+    let ns = this.node(NodeKind.NamespaceDecl, startLoc, {
+      name: names.length ? names[names.length - 1] : null,
       declarations,
       isInline,
       attributes: [],
     }) as NamespaceDecl;
+    for (let i = names.length - 2; i >= 0; i--) {
+      ns = this.node(NodeKind.NamespaceDecl, startLoc, {
+        name: names[i],
+        declarations: [ns],
+        isInline: false,
+        attributes: [],
+      }) as NamespaceDecl;
+    }
+    return ns;
   }
 
   /**
@@ -267,8 +423,27 @@ export class Parser {
     const startLoc = this.currentLocation();
     this.expect(TokenKind.Typedef);
 
-    const type = this.parseType();
-    const name = this.parseIdentifier();
+    let type = this.parseType();
+    if (this.checkCallingConvention()) this.parseCallingConvention();
+    let name: Identifier;
+    if (this.check(TokenKind.LeftParen) && this.looksLikeParenDeclarator(true)) {
+      const d = this.parseParenDeclarator(type, true);
+      type = d.type;
+      name = d.name!;
+    } else {
+      name = this.parseIdentifier();
+      const base = type;
+      type = this.parseArrayDeclaratorSuffix(type, startLoc);
+      // `typedef struct T T, *PT;`
+      while (this.match(TokenKind.Comma)) {
+        const loc = this.currentLocation();
+        const t = this.parseTypeSuffixes(base);
+        const n = this.parseIdentifier();
+        this.extraDecls.push(this.node(NodeKind.TypedefDecl, loc, {
+          name: n, type: this.parseArrayDeclaratorSuffix(t, loc),
+        }) as Declaration);
+      }
+    }
     this.expect(TokenKind.Semicolon);
 
     return this.node(NodeKind.TypedefDecl, startLoc, { name, type }) as TypedefDecl;
@@ -282,6 +457,12 @@ export class Parser {
     const keyword = this.advance();
     const isClass = keyword.token.kind === TokenKind.Class;
 
+    let packed = false;
+    while (this.checkGnuAttribute()) {
+      const at = this.pos;
+      this.parseGnuAttribute();
+      if (this.tokens.slice(at, this.pos).some(t => t.token.text === 'packed')) packed = true;
+    }
     const name = this.check(TokenKind.Identifier) ? this.parseIdentifier() : null;
 
     // Check for forward declaration
@@ -308,9 +489,32 @@ export class Parser {
 
     const members: any[] = [];
     while (!this.check(TokenKind.RightBrace) && !this.isAtEnd()) {
+      // `Name(...)` / `~Name(...)` inside the class body: a constructor or destructor.
+      if (name && ((this.check(TokenKind.Identifier) && this.current().token.text === name.name) ||
+                   (this.check(TokenKind.Tilde) && this.checkAhead(1, TokenKind.Identifier))) &&
+          this.checkAhead(this.check(TokenKind.Tilde) ? 2 : 1, TokenKind.LeftParen)) {
+        const loc = this.currentLocation();
+        const ctorName = this.check(TokenKind.Tilde) ? this.parseDestructorName() : this.parseIdentifier();
+        const voidType = this.node(NodeKind.BuiltinType, loc, { name: 'void', modifiers: [] }) as TypeNode;
+        members.push(this.parseFunctionDeclRest(loc, [], voidType, ctorName));
+        continue;
+      }
+      // `operator T() const { ... }` - a conversion function.
+      if (this.check(TokenKind.Operator) && (this.checkAhead(1, TokenKind.Identifier) ||
+          [TokenKind.Int, TokenKind.Char, TokenKind.Unsigned, TokenKind.Bool, TokenKind.Void,
+           TokenKind.Const, TokenKind.Short, TokenKind.Long, TokenKind.Float, TokenKind.Double]
+            .some(k => this.checkAhead(1, k)))) {
+        const loc = this.currentLocation();
+        this.advance();
+        const target = this.parseType();
+        const opName = this.node(NodeKind.Identifier, loc, { name: 'operator ' + this.typeText(target) }) as Identifier;
+        members.push(this.parseFunctionDeclRest(loc, [], target, opName));
+        continue;
+      }
       // Parse member - simplified for now
       const member = this.parseDeclaration();
       if (member) members.push(member);
+      members.push(...this.takeExtraDecls());
     }
 
     this.expect(TokenKind.RightBrace);
@@ -323,6 +527,7 @@ export class Parser {
       members,
       isFinal: false,
       attributes: [],
+      ...(packed ? { packed: true } : {}),
     }) as ClassDecl | StructDecl;
   }
 
@@ -402,13 +607,18 @@ export class Parser {
       specifiers.push(this.advance().token.text as FunctionSpecifier);
     }
 
+    // A convention may also precede the type: `__stdcall void *f(...)`.
+    let callingConvention: CallingConvention | undefined;
+    if (this.checkCallingConvention()) {
+      callingConvention = this.parseCallingConvention() as CallingConvention;
+    }
+
     // Parse type
     const returnType = this.parseType();
 
     // Parse optional calling convention (Ghidra: void __fastcall FUN_...)
-    let callingConvention: CallingConvention | undefined;
     if (this.checkCallingConvention()) {
-      callingConvention = this.advance().token.text as CallingConvention;
+      callingConvention = this.parseCallingConvention() as CallingConvention;
     }
 
     // Check for pointer-to-array declaration: type (*name)[size]
@@ -416,12 +626,57 @@ export class Parser {
       return this.parsePointerToArrayDecl(startLoc, specifiers as VariableSpecifier[], returnType);
     }
 
+    // Pointer-to-function variable: R (CC *name)(params) [= init];
+    if (this.check(TokenKind.LeftParen) && this.looksLikeParenDeclarator(true)) {
+      const d = this.parseParenDeclarator(returnType, true);
+      return this.parseVariableDeclRest(startLoc, specifiers as VariableSpecifier[], d.type, d.name!);
+    }
+
+    // `T : 3;` - an unnamed bit-field (padding).
+    if (this.check(TokenKind.Colon)) {
+      this.advance();
+      const bitWidth = this.parseConditionalExpression();
+      this.expect(TokenKind.Semicolon);
+      const anon = this.node(NodeKind.Identifier, startLoc, { name: '' }) as Identifier;
+      return this.node(NodeKind.VariableDecl, startLoc, {
+        name: anon, type: returnType, initializer: null, specifiers, attributes: [], bitWidth,
+      }) as VariableDecl;
+    }
+
+    // `restrict` is not a C++ keyword; Ghidra field names use it.
+    if (this.check(TokenKind.Restrict)) {
+      const tok = this.current();
+      tok.token = { ...tok.token, kind: TokenKind.Identifier };
+    }
+
     // Parse name (could be qualified)
     const name = this.parseIdentifierOrQualified();
 
     // Check if this is a function (has parameters)
     if (this.check(TokenKind.LeftParen)) {
-      return this.parseFunctionDeclRest(startLoc, specifiers, returnType, name, callingConvention);
+      const saved = this.pos;
+      try {
+        return this.parseFunctionDeclRest(startLoc, specifiers, returnType, name, callingConvention);
+      } catch (e) {
+        // `T x(args);` - a variable constructed from arguments, not a function.
+        if (!(e instanceof ParserError) || name.kind !== NodeKind.Identifier) throw e;
+        // Only a failure inside the parenthesised list itself means "not parameters"; one
+        // in a function body is a real error and must be reported as such.
+        if (this.pos > this.matchingParenIndex(saved)) throw e;
+        this.pos = saved;
+        const initLoc = this.currentLocation();
+        this.expect(TokenKind.LeftParen);
+        const elements: Expression[] = [];
+        if (!this.check(TokenKind.RightParen)) {
+          do { elements.push(this.parseAssignmentExpression()); } while (this.match(TokenKind.Comma));
+        }
+        this.expect(TokenKind.RightParen);
+        this.expect(TokenKind.Semicolon);
+        const initializer = this.node(NodeKind.InitListExpr, initLoc, { elements }) as InitListExpr;
+        return this.node(NodeKind.VariableDecl, startLoc, {
+          name, type: returnType, initializer, specifiers, attributes: [], directInit: true,
+        }) as VariableDecl;
+      }
     }
 
     // Otherwise it's a variable declaration
@@ -458,6 +713,31 @@ export class Parser {
 
     // Parse optional qualifiers (const, noexcept, etc.)
     while (this.check(TokenKind.Const) || this.check(TokenKind.Noexcept)) {
+      this.advance();
+    }
+
+    // Constructor member-initializer list: `: a(x), b{y}`
+    const memberInits: { name: Identifier; args: Expression[] }[] = [];
+    if (this.check(TokenKind.Colon) && this.checkAhead(1, TokenKind.Identifier)) {
+      this.advance();
+      do {
+        const mName = this.parseIdentifier();
+        const close = this.check(TokenKind.LeftBrace) ? TokenKind.RightBrace : TokenKind.RightParen;
+        this.advance();
+        const args: Expression[] = [];
+        if (!this.check(close)) {
+          do { args.push(this.parseAssignmentExpression()); } while (this.match(TokenKind.Comma));
+        }
+        this.expect(close);
+        memberInits.push({ name: mName, args });
+      } while (this.match(TokenKind.Comma));
+    }
+
+    // `= default;`, `= delete;`, `= 0;`
+    if (this.check(TokenKind.Equal) &&
+        (this.checkAhead(1, TokenKind.Default) || this.checkAhead(1, TokenKind.Delete) ||
+         this.checkAhead(1, TokenKind.IntegerLiteral))) {
+      this.advance();
       this.advance();
     }
 
@@ -518,7 +798,14 @@ export class Parser {
     const startLoc = this.currentLocation();
 
     let type = this.parseType();
-    const name = this.check(TokenKind.Identifier) ? this.parseIdentifier() : null;
+    let name: Identifier | null = null;
+    if (this.check(TokenKind.LeftParen) && this.looksLikeParenDeclarator(true)) {
+      const d = this.parseParenDeclarator(type, true);
+      type = d.type;
+      name = d.name;
+    } else if (this.check(TokenKind.Identifier)) {
+      name = this.parseIdentifier();
+    }
 
     // Handle array syntax in parameters: int arr[], int arr[10]
     // In C/C++, array parameters decay to pointers, but we parse them correctly.
@@ -552,12 +839,26 @@ export class Parser {
     // Handle array suffix
     type = this.parseArrayDeclaratorSuffix(type, startLoc);
 
-    let initializer: Expression | InitListExpr | null = null;
-    if (this.match(TokenKind.Equal)) {
-      if (this.check(TokenKind.LeftBrace)) {
-        initializer = this.parseInitializerList();
-      } else {
-        initializer = this.parseAssignmentExpression();
+    // `T x : 3;` - a bit-field member.
+    let bitWidth: Expression | null = null;
+    if (this.match(TokenKind.Colon)) bitWidth = this.parseConditionalExpression();
+
+    const initializer = this.parseOptionalInitializer();
+
+    // `T a, *b, c[4];` - the later declarators share T but not the first one's `*` or `[]`.
+    if (this.check(TokenKind.Comma)) {
+      let base: TypeNode = type;
+      while (base.kind === NodeKind.ArrayType || base.kind === NodeKind.PointerType) {
+        base = base.kind === NodeKind.ArrayType ? (base as ArrayType).elementType : (base as PointerType).pointee;
+      }
+      while (this.match(TokenKind.Comma)) {
+        const loc = this.currentLocation();
+        const t = this.parseTypeSuffixes(base);
+        const n = this.parseIdentifier();
+        const full = this.parseArrayDeclaratorSuffix(t, loc);
+        this.extraDecls.push(this.node(NodeKind.VariableDecl, loc, {
+          name: n, type: full, initializer: this.parseOptionalInitializer(), specifiers, attributes: [],
+        }) as VariableDecl);
       }
     }
 
@@ -569,7 +870,13 @@ export class Parser {
       initializer,
       specifiers,
       attributes: [],
+      ...(bitWidth ? { bitWidth } : {}),
     }) as VariableDecl;
+  }
+
+  private parseOptionalInitializer(): Expression | InitListExpr | null {
+    if (!this.match(TokenKind.Equal)) return null;
+    return this.check(TokenKind.LeftBrace) ? this.parseInitializerList() : this.parseAssignmentExpression();
   }
 
   // ============================================
@@ -711,7 +1018,16 @@ export class Parser {
    */
   private parseTypeSuffixes(type: TypeNode): TypeNode {
     while (true) {
-      if (this.check(TokenKind.Star)) {
+      if ((this.check(TokenKind.Const) || this.check(TokenKind.Volatile)) &&
+          type.kind !== NodeKind.PointerType) {
+        // East-const: `LONG volatile *` qualifies LONG, exactly like `volatile LONG *`.
+        const startLoc = this.currentLocation();
+        const qualifiers: TypeQualifier[] = [];
+        while (this.check(TokenKind.Const) || this.check(TokenKind.Volatile)) {
+          qualifiers.push(this.advance().token.text as TypeQualifier);
+        }
+        type = this.node(NodeKind.QualifiedType, startLoc, { qualifiers, type }) as QualifiedType;
+      } else if (this.check(TokenKind.Star)) {
         const startLoc = this.currentLocation();
         this.advance();
 
@@ -746,6 +1062,9 @@ export class Parser {
           elementType: type,
           size,
         }) as ArrayType;
+      } else if (this.check(TokenKind.LeftParen) && this.looksLikeParenDeclarator(false)) {
+        // Abstract pointer-to-function declarator: R (*)(args), R (__stdcall **)(args)
+        type = this.parseParenDeclarator(type, false).type;
       } else if (this.check(TokenKind.LeftParen) && this.checkAhead(1, TokenKind.Star) &&
                  this.looksLikeAbstractPtrDeclarator()) {
         // Abstract pointer-to-array/function declarator in casts: (char (*) [4]) or (char (**) [32])
@@ -904,7 +1223,7 @@ export class Parser {
         const decl = this.parseDeclaration();
         if (decl) {
           statements.push(this.node(NodeKind.DeclStmt, decl.location, {
-            declarations: [decl],
+            declarations: [decl, ...this.takeExtraDecls()],
           }) as Statement);
         }
       } else {
@@ -990,7 +1309,7 @@ export class Parser {
         const decl = this.parseDeclaration();
         if (decl) {
           init = this.node(NodeKind.DeclStmt, decl.location, {
-            declarations: [decl],
+            declarations: [decl, ...this.takeExtraDecls()],
           }) as Statement;
         }
       } else {
@@ -1252,12 +1571,19 @@ export class Parser {
     if (this.check(TokenKind.LeftParen)) {
       this.advance();
       if (this.looksLikeType()) {
-        const type = this.parseType();
-        this.expect(TokenKind.RightParen);
-        return this.node(NodeKind.SizeofExpr, startLoc, {
-          operand: type,
-          isType: true,
-        }) as SizeofExpr;
+        // `sizeof(p->a[0])` starts like a type too; only a parse that ends exactly at `)`
+        // is a type operand.
+        const saved = this.pos;
+        let type: TypeNode | null = null;
+        try { type = this.parseType(); } catch (e) { if (!(e instanceof ParserError)) throw e; }
+        if (type && this.check(TokenKind.RightParen)) {
+          this.advance();
+          return this.node(NodeKind.SizeofExpr, startLoc, {
+            operand: type,
+            isType: true,
+          }) as SizeofExpr;
+        }
+        this.pos = saved;
       }
       const expr = this.parseExpression();
       this.expect(TokenKind.RightParen);
@@ -1390,7 +1716,7 @@ export class Parser {
                this.check(TokenKind.Enum) || this.check(TokenKind.Int) ||
                this.check(TokenKind.Char) || this.check(TokenKind.Short) ||
                this.check(TokenKind.Long) || this.check(TokenKind.Float) ||
-               this.check(TokenKind.Double)) {
+               this.check(TokenKind.Double) || this.check(TokenKind.Restrict)) {
       // Keyword used as member name (Ghidra decompiler quirk, e.g. obj.class)
       const kwLoc = this.currentLocation();
       const tok = this.advance();
@@ -1455,6 +1781,38 @@ export class Parser {
       return this.parseInitializerList();
     }
 
+    // static_cast<T>(e) and its siblings
+    const namedCast: Partial<Record<TokenKind, NodeKind>> = {
+      [TokenKind.Static_cast]: NodeKind.StaticCastExpr,
+      [TokenKind.Reinterpret_cast]: NodeKind.ReinterpretCastExpr,
+      [TokenKind.Const_cast]: NodeKind.ConstCastExpr,
+      [TokenKind.Dynamic_cast]: NodeKind.DynamicCastExpr,
+    };
+    const castKind = namedCast[this.current().token.kind];
+    if (castKind) {
+      this.advance();
+      this.expect(TokenKind.Less);
+      const type = this.parseType();
+      if (this.check(TokenKind.GreaterGreater)) {
+        const tok = this.current();
+        tok.token = { ...tok.token, kind: TokenKind.Greater, text: '>' };
+      } else {
+        this.expect(TokenKind.Greater);
+      }
+      this.expect(TokenKind.LeftParen);
+      const expression = this.parseExpression();
+      this.expect(TokenKind.RightParen);
+      return this.node(castKind, startLoc, { type, expression }) as Expression;
+    }
+
+    // throw [expr]
+    if (this.check(TokenKind.Throw)) {
+      this.advance();
+      const expression = this.check(TokenKind.Semicolon) || this.check(TokenKind.RightParen)
+        ? null : this.parseAssignmentExpression();
+      return this.node(NodeKind.ThrowExpr, startLoc, { expression }) as Expression;
+    }
+
     // This
     if (this.check(TokenKind.This)) {
       this.advance();
@@ -1512,12 +1870,20 @@ export class Parser {
     const startLoc = this.currentLocation();
     const token = this.expect(TokenKind.StringLiteral);
     const value = token.value as { value: string; prefix: string; isRaw: boolean };
+    let text = value.value;
+    let raw = token.text;
+    // "a" "b" is one literal (translation phase 6).
+    while (this.check(TokenKind.StringLiteral)) {
+      const next = this.advance().token;
+      text += (next.value as { value: string }).value;
+      raw += ' ' + next.text;
+    }
 
     return this.node(NodeKind.StringLiteral, startLoc, {
-      value: value.value,
+      value: text,
       prefix: value.prefix,
       isRaw: value.isRaw,
-      raw: token.text,
+      raw,
     }) as StringLiteralExpr;
   }
 
@@ -1679,6 +2045,27 @@ export class Parser {
     return this.current().token.location;
   }
 
+  /** A rough spelling of a type, for synthesised names only. */
+  private typeText(t: any): string {
+    if (!t) return '?';
+    if (t.kind === NodeKind.BuiltinType) return [...(t.modifiers ?? []), t.name].join(' ');
+    if (t.kind === NodeKind.PointerType) return this.typeText(t.pointee) + '*';
+    if (t.kind === NodeKind.QualifiedType) return t.qualifiers.join(' ') + ' ' + this.typeText(t.type);
+    const n = t.name;
+    return typeof n?.name === 'string' ? n.name : typeof n === 'string' ? n : '?';
+  }
+
+  /** Token index of the `)` that closes the `(` at `open`. */
+  private matchingParenIndex(open: number): number {
+    let depth = 0;
+    for (let i = open; i < this.tokens.length; i++) {
+      const k = this.tokens[i].token.kind;
+      if (k === TokenKind.LeftParen) depth++;
+      else if (k === TokenKind.RightParen && --depth === 0) return i;
+    }
+    return this.tokens.length;
+  }
+
   private isAtEnd(): boolean {
     return this.current().token.kind === TokenKind.EOF;
   }
@@ -1766,7 +2153,34 @@ export class Parser {
     );
   }
 
+  /** `__attribute__((fastcall))` - GCC's spelling of a calling convention. */
+  private checkGnuAttribute(): boolean {
+    return this.check(TokenKind.Identifier) && this.current().token.text === '__attribute__' &&
+      this.checkAhead(1, TokenKind.LeftParen);
+  }
+
+  /** Consume a GCC attribute; returns the calling convention it names, if any. */
+  private parseGnuAttribute(): string | undefined {
+    this.advance(); // __attribute__
+    let depth = 0;
+    let text = '';
+    do {
+      if (this.check(TokenKind.LeftParen)) depth++;
+      else if (this.check(TokenKind.RightParen)) depth--;
+      else text += this.current().token.text + ' ';
+      this.advance();
+    } while (depth > 0 && !this.isAtEnd());
+    const m = /\b(fastcall|stdcall|cdecl|thiscall)\b/.exec(text);
+    return m ? `__${m[1]}` : undefined;
+  }
+
+  private parseCallingConvention(): string | undefined {
+    if (this.checkGnuAttribute()) return this.parseGnuAttribute();
+    return this.advance().token.text;
+  }
+
   private checkCallingConvention(): boolean {
+    if (this.checkGnuAttribute()) return true;
     const kind = this.current().token.kind;
     return (
       kind === TokenKind.CallingConvCdecl ||
@@ -1832,6 +2246,9 @@ export class Parser {
       // Check for type specifiers
       if (this.checkSpecifier()) return true;
       if (this.checkBuiltinType()) return true;
+      if (this.check(TokenKind.Const) || this.check(TokenKind.Volatile) ||
+          this.check(TokenKind.Static_assert)) return true;
+      if (this.check(TokenKind.ColonColon) && this.checkAhead(1, TokenKind.Identifier)) this.advance();
       if (this.check(TokenKind.Struct) || this.check(TokenKind.Class) ||
           this.check(TokenKind.Enum) || this.check(TokenKind.Typedef)) return true;
 
@@ -1989,6 +2406,7 @@ export class Parser {
 
         // Template arguments - skip balanced <>
         if (kind === TokenKind.Less) {
+          if (!this.looksLikeTemplateArgs()) return false;
           let depth = 1;
           this.advance();
           while (depth > 0 && !this.isAtEnd()) {
@@ -2064,7 +2482,95 @@ export class Parser {
            this.check(TokenKind.Const) ||
            this.check(TokenKind.Volatile) ||
            this.check(TokenKind.Restrict) ||
-           this.check(TokenKind.Identifier);
+           this.check(TokenKind.Identifier) ||
+           (this.check(TokenKind.ColonColon) && this.checkAhead(1, TokenKind.Identifier));
+  }
+
+  /**
+   * `( [CC] *... [name] [dims] )` followed by `(` - a pointer-to-function declarator.
+   * With `named`, the name is required; without it, the declarator must be abstract.
+   * A pointer-to-array `(*name)[N]` is left to looksLikePointerToArrayDecl.
+   */
+  private looksLikeParenDeclarator(named: boolean): boolean {
+    const saved = this.pos;
+    try {
+      if (!this.match(TokenKind.LeftParen)) return false;
+      if (this.checkCallingConvention()) this.parseCallingConvention();
+      if (!this.check(TokenKind.Star)) return false;
+      while (this.check(TokenKind.Star) || this.check(TokenKind.Const) || this.check(TokenKind.Volatile)) {
+        this.advance();
+      }
+      if (named) {
+        if (!this.match(TokenKind.Identifier)) return false;
+        while (this.check(TokenKind.LeftBracket)) {
+          let depth = 0;
+          do {
+            if (this.check(TokenKind.LeftBracket)) depth++;
+            else if (this.check(TokenKind.RightBracket)) depth--;
+            this.advance();
+          } while (depth > 0 && !this.isAtEnd());
+        }
+      }
+      if (!this.match(TokenKind.RightParen)) return false;
+      return this.check(TokenKind.LeftParen);
+    } finally {
+      this.pos = saved;
+    }
+  }
+
+  /**
+   * Parse a parenthesised pointer-to-function declarator after its return type has been
+   * read. `R (CC **name[4])(A, B)` is an array of 4 pointers to pointers to CC-function
+   * (A, B) returning R.
+   */
+  private parseParenDeclarator(returnType: TypeNode, named: boolean): { type: TypeNode; name: Identifier | null } {
+    const startLoc = this.currentLocation();
+    this.expect(TokenKind.LeftParen);
+    const callingConvention = this.checkCallingConvention() ? this.parseCallingConvention() : undefined;
+    const ptrQualifiers: TypeQualifier[][] = [];
+    while (this.check(TokenKind.Star)) {
+      this.advance();
+      const q: TypeQualifier[] = [];
+      while (this.check(TokenKind.Const) || this.check(TokenKind.Volatile)) {
+        q.push(this.advance().token.text as TypeQualifier);
+      }
+      ptrQualifiers.push(q);
+    }
+    const name = named ? this.parseIdentifier() : null;
+    const dims: (Expression | null)[] = [];
+    while (this.check(TokenKind.LeftBracket)) {
+      this.advance();
+      dims.push(this.check(TokenKind.RightBracket) ? null : this.parseExpression());
+      this.expect(TokenKind.RightBracket);
+    }
+    this.expect(TokenKind.RightParen);
+
+    this.expect(TokenKind.LeftParen);
+    const parameters: TypeNode[] = [];
+    let isVariadic = false;
+    if (!this.check(TokenKind.RightParen)) {
+      do {
+        if (this.match(TokenKind.Ellipsis)) { isVariadic = true; break; }
+        parameters.push(this.parseParameterDecl().type as TypeNode);
+      } while (this.match(TokenKind.Comma));
+    }
+    this.expect(TokenKind.RightParen);
+    // `(void)` is an empty parameter list.
+    if (parameters.length === 1 && parameters[0].kind === NodeKind.BuiltinType &&
+        (parameters[0] as BuiltinType).name === 'void' && !(parameters[0] as BuiltinType).modifiers?.length) {
+      parameters.length = 0;
+    }
+
+    let type: TypeNode = this.node(NodeKind.FunctionType, startLoc, {
+      returnType, parameters, isVariadic, qualifiers: [], callingConvention,
+    }) as TypeNode;
+    for (const q of ptrQualifiers) {
+      type = this.node(NodeKind.PointerType, startLoc, { pointee: type, qualifiers: q }) as PointerType;
+    }
+    for (let d = dims.length - 1; d >= 0; d--) {
+      type = this.node(NodeKind.ArrayType, startLoc, { elementType: type, size: dims[d] }) as ArrayType;
+    }
+    return { type, name };
   }
 
   /**
@@ -2157,7 +2663,11 @@ export class Parser {
     try {
       this.advance(); // <
       let depth = 1;
+      let parens = 0;
       while (depth > 0 && !this.isAtEnd()) {
+        if (this.check(TokenKind.LeftParen)) parens++;
+        else if (this.check(TokenKind.RightParen)) { if (--parens < 0) return false; }
+        else if (this.check(TokenKind.Question)) return false;
         if (this.check(TokenKind.Less)) depth++;
         else if (this.check(TokenKind.Greater)) depth--;
         else if (this.check(TokenKind.GreaterGreater)) depth -= 2;

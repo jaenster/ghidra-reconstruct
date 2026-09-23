@@ -58,6 +58,8 @@ export interface ASTNode {
 export interface TranslationUnit extends ASTNode {
   kind: NodeKind.TranslationUnit;
   declarations: Declaration[];
+  /** Declarations skipped in recovery mode (ParserOptions.recover), in source order. */
+  parseErrors?: Error[];
 }
 
 // ============================================
@@ -278,6 +280,10 @@ export interface VariableDecl extends ASTNode {
   initializer: Expression | InitListExpr | null;
   specifiers: VariableSpecifier[];
   attributes: Attribute[];
+  /** `T x(a, b);` - the initializer list holds the constructor arguments. */
+  directInit?: boolean;
+  /** `T x : 3;` - a bit-field member declared with the variable grammar. */
+  bitWidth?: Expression;
 }
 
 export type VariableSpecifier =
@@ -305,6 +311,8 @@ export interface StructDecl extends ASTNode {
   members: ClassMember[];
   isFinal: boolean;
   attributes: Attribute[];
+  /** `struct __attribute__((packed)) X` */
+  packed?: boolean;
 }
 
 export interface UnionDecl extends ASTNode {
