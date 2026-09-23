@@ -67,6 +67,18 @@ describe('vtableCallPlugin', () => {
       );
     });
 
+    it('treats the `this` of a FREE function as an untyped object, not a class instance', () => {
+      // Every __thiscall function is emitted free: Ghidra's `this` is its `void *` ECX
+      // argument. `pThis->vmethod_0(nEntry)` on it was "'void*' is not a
+      // pointer-to-object type" (CELCMP_CelDataHash_RemoveAndCallbackSingle 00602620).
+      const free = vtableCallPlugin.createTransformer({ thisIsClassInstance: false } as any);
+      const code = `void f(int nEntry) { (*(code *)**(undefined4 **)this)(nEntry); }`;
+      const result = emit(free(parse(code)) as AnyNode).trim();
+      const norm = result.replace(/\s+/g, '');
+      assert.ok(!norm.includes('->vmethod_'), `Expected no ->vmethod_ in: ${result}`);
+      assert.ok(norm.includes('(**(code**)(char*)*(void**)(uintptr_t)this)(nEntry)'), `Expected the indirect call in: ${result}`);
+    });
+
     it('rewrites a function-pointer TABLE (base + off) to a faithful byte-offset indirect call, not ->vmethod', () => {
       const code = `void f(void **arr, int a) { (**(code **)(arr + 8))(a); }`;
       const result = transform(code);

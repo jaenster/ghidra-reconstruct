@@ -112,7 +112,8 @@ function getIntValue(expr: Expression): number | null {
  * The object of a real C++ method call — `this`, or the identifier a converted
  * method uses for it. Only here does a class exist to declare `vmethod_N`.
  */
-function isThisExpr(expr: Expression): boolean {
+function isThisExpr(expr: Expression, thisIsClassInstance: boolean): boolean {
+  if (!thisIsClassInstance) return false;
   const e = unwrapParens(unwrapCasts(expr));
   if (e.kind === NodeKind.ThisExpr) return true;
   return e.kind === NodeKind.Identifier && (e as Identifier).name === 'this';
@@ -287,7 +288,7 @@ function generateMethodName(offset: number, pointerSize: number): string {
   return `vmethod_${slot}`;
 }
 
-function createVTableCallTransformer(pointerSize = 4): Transformer {
+function createVTableCallTransformer(pointerSize = 4, thisIsClassInstance = true): Transformer {
   return createTransformer({
     visitCallExpr(call) {
       const vtableInfo = detectVTableCall(call);
@@ -314,7 +315,7 @@ function createVTableCallTransformer(pointerSize = 4): Transformer {
       // `this`, false for every reconstructed C object. Everywhere else, emit the
       // indirect call through the object's vtable pointer, which is what the
       // machine does and what Ghidra decompiled.
-      if (!isThisExpr(vtableInfo.object)) {
+      if (!isThisExpr(vtableInfo.object, thisIsClassInstance)) {
         const codePtrPtr = Type.pointer(Type.pointer(Type.builtin('code')));
         const objWord = Expr.cast(Type.builtin('uintptr_t'), vtableInfo.object);
         const vtable = Expr.unary('*', Expr.cast(Type.pointer(Type.pointer(Type.void())), objWord));
@@ -364,6 +365,17 @@ export interface VTableCallOptions extends PluginOptions {
 
   /** Known vtable layouts for better naming */
   vtableLayouts?: Map<string, string[]>;
+
+  /**
+   * Whether a `this` in the body is the `this` of a real C++ method, whose class can
+   * declare `vmethod_N` (default: true). The generator emits every `__thiscall`
+   * function as a FREE function: Ghidra's `this` is its `void *` ECX argument, which
+   * `this-param-rewrite` (priority 46) renames only after this pass (30) has run. Read
+   * as a class `this`, it became `pThis->vmethod_0(...)` on a `void *` - "'void*' is
+   * not a pointer-to-object type", seven strict errors. The generator passes false
+   * for every function that is not a converted method.
+   */
+  thisIsClassInstance?: boolean;
 }
 
 /**
@@ -382,6 +394,6 @@ export const vtableCallPlugin: TransformPlugin = {
   tags: ['core', 'cleanup', 'cpp'],
 
   createTransformer(options?: VTableCallOptions) {
-    return createVTableCallTransformer(options?.pointerSize ?? 4);
+    return createVTableCallTransformer(options?.pointerSize ?? 4, options?.thisIsClassInstance ?? true);
   },
 };
