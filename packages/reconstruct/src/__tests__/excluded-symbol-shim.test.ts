@@ -26,6 +26,9 @@ describe('excluded-namespace symbol declarations', () => {
       'CRT_Pow10', 'CRT_Srand', 'CRT_Fgetc',
       '_eh_vector_constructor_iterator_', '_eh_vector_destructor_iterator_',
       '_Wrappers::accept', '_Wrappers::bind', '_Wrappers::listen', '_Wrappers::WSASetLastError',
+      // DDRAW.DLL imports: 'DirectDrawCreate' was not declared in this scope (00511ce0,
+      // 006b42f0, 006b59a0), 'DirectDrawEnumerateA' is not a member of '_Wrappers' (006b4c90).
+      'DirectDrawCreate', '_Wrappers::DirectDrawEnumerateA',
       '_SmackOpen_12', '_BinkCopyToBuffer_28',
       // No GLIDEDLL_* here: every one of them is a DATA symbol in Ghidra (an
       // import slot filled by GetProcAddress), so globals.h owns the

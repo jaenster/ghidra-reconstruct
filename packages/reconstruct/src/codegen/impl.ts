@@ -1572,6 +1572,9 @@ function signatureParameterList(func: ExtractedFunction): string {
  * not spellable, so the caller keeps the signature-less wrapper rather than
  * emitting one that will not parse.
  */
+/** One shared options object, so the plugin's transformer cache (keyed on it) still hits. */
+const VTABLE_CALLS_FREE_FUNCTION = Object.freeze({ thisIsClassInstance: false });
+
 function wrapperSignature(func: ExtractedFunction): { returnType: string; params: string } | undefined {
   const returnType = returnSigType(func.returnType).trim();
   if (!returnType) return undefined;
@@ -2387,6 +2390,12 @@ function transformDecompiledCode(
 
     if (enclosing?.thisName) {
       perPluginOptions['this-param-rewrite'] = { thisName: enclosing.thisName };
+    }
+
+    // A free function's `this` is its untyped ECX argument, not an instance of a class
+    // that declares `vmethod_N`; only a converted method has one.
+    if (!currentFunction) {
+      perPluginOptions['vtable-calls'] = VTABLE_CALLS_FREE_FUNCTION;
     }
 
     if (enclosing?.registerAliases && Object.keys(enclosing.registerAliases).length > 0) {

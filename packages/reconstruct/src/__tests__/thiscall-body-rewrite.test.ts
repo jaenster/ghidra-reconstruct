@@ -209,4 +209,50 @@ describe('signature-driven parameter renames reach the body through the rename m
       `the message string must be untouched — got:\n${impl}`,
     );
   });
+
+  it('casts a returned `void *this` to the typed-pointer return type (UNICODE_FindWideChar 00526670)', () => {
+    const impl = gen(func({
+      name: 'UNICODE_FindWideChar',
+      signature: 'short * UNICODE_FindWideChar(void * this, int16_t wCharToFind)',
+      returnType: 'short *',
+      parameters: [
+        { name: 'this', dataType: 'void *', size: 4, ordinal: 0 },
+        { name: 'wCharToFind', dataType: 'int16_t', size: 2, ordinal: 1 },
+      ] as ExtractedFunction['parameters'],
+      decompiled: [
+        'short * __thiscall UNICODE_FindWideChar(void *this,int16_t wCharToFind)',
+        '{',
+        '  if (*(short *)this == 0) {',
+        '    return (short *)0x0;',
+        '  }',
+        '  return this;',
+        '}',
+      ].join('\n'),
+    }));
+    assert.match(impl, /return \(short\s*(int)?\s*\*\)pThis;/, `expected the cast — got:\n${impl}`);
+    assert.ok(!/\bself\b/.test(impl), `the preprocessor's \`self\` must not reach the tree — got:\n${impl}`);
+  });
+
+  it('calls a vtable slot through a free function\'s `this` indirectly, not as ->vmethod_N (00602620)', () => {
+    const impl = gen(func({
+      name: 'CELCMP_CelDataHash_RemoveAndCallbackSingle',
+      signature: 'void CELCMP_CelDataHash_RemoveAndCallbackSingle(void * this, int32_t nEntry)',
+      returnType: 'void',
+      parameters: [
+        { name: 'this', dataType: 'void *', size: 4, ordinal: 0 },
+        { name: 'nEntry', dataType: 'int32_t', size: 4, ordinal: 1 },
+      ] as ExtractedFunction['parameters'],
+      decompiled: [
+        'void __thiscall CELCMP_CelDataHash_RemoveAndCallbackSingle(void *this,int32_t nEntry)',
+        '{',
+        '  (*(code *)**(undefined4 **)this)(nEntry);',
+        '  return;',
+        '}',
+      ].join('\n'),
+    }));
+    assert.ok(!/->vmethod_/.test(impl), `void* has no members — got:\n${impl}`);
+    assert.ok(impl.replace(/\s+/g, '').includes('(**(code**)(char*)*(void**)(uintptr_t)pThis)(nEntry)'),
+      `expected the faithful indirect call — got:\n${impl}`);
+  });
 });
+

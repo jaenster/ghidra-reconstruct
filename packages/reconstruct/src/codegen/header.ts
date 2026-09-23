@@ -1525,8 +1525,18 @@ export function generateStructDeclaration(struct: ExtractedStruct): string {
   // struct is packed. Emitting it unpacked compiles cleanly and reads the wrong
   // bytes - D2StringTableTblFileStrc's dwords at 0x09/0x0D/0x11 land at 12/16/20
   // and the .tbl CRC then runs off the end of the buffer. See struct-packing.ts.
-  const packed = (struct.packed || requiresPacking(struct.fields, struct.alignment, struct.size))
-    ? '__attribute__((packed)) ' : '';
+  const needsPacking = struct.packed || requiresPacking(struct.fields, struct.alignment, struct.size);
+  // `__attribute__((packed))` does not reach a member whose type GCC counts as
+  // non-POD - and every struct this emitter gives conversion constructors is one.
+  // GCC drops the attribute for that member ("ignoring packed attribute because of
+  // unpacked non-POD field"), the member keeps its natural alignment, and so does
+  // the struct: D2SaveFileHeaderStrc (Ghidra: 335 bytes, alignment 1) came out 336,
+  // `pSaveFile + 1` landed one byte into the quest section and every save was
+  // refused. `#pragma pack(1)` caps every member's alignment whatever its type, so
+  // it is used exactly where the attribute cannot do the job.
+  const pragmaPack = needsPacking && hasConstructorBearingMember(struct.fields);
+  const packed = needsPacking && !pragmaPack ? '__attribute__((packed)) ' : '';
+  if (pragmaPack) lines.push('#pragma pack(push, 1)');
   lines.push(`struct ${packed}${struct.name} {`);
 
   // Add integer conversion operators for small integer-only structs
@@ -1556,8 +1566,36 @@ export function generateStructDeclaration(struct: ExtractedStruct): string {
   emitFieldLines(struct.fields, lines);
 
   lines.push('};');
+  if (pragmaPack) lines.push('#pragma pack(pop)');
 
   return lines.join('\n');
+}
+
+/**
+ * Struct names `generateStructDeclaration` gives constructors - the integer
+ * conversion set, see `getIntegerConversionType`. Registered from the whole model
+ * before emission, because a struct's layout depends on its MEMBERS' types.
+ */
+const constructorBearingStructs = new Set<string>();
+
+export function setConstructorBearingStructs(
+  dataTypes: Iterable<{ name: string; kind?: string; fields?: StructField[] }>,
+): void {
+  constructorBearingStructs.clear();
+  for (const dt of dataTypes) {
+    if (dt.kind !== 'STRUCTURE' || !dt.name || !dt.fields) continue;
+    if (getIntegerConversionType(dt.fields)) constructorBearingStructs.add(dt.name);
+  }
+}
+
+/** Does a field hold a constructor-bearing struct BY VALUE (itself or as an array)? */
+function hasConstructorBearingMember(fields: StructField[]): boolean {
+  for (const f of fields) {
+    const t = (f.dataType ?? '').replace(/\b(struct|const|volatile)\b/g, '').replace(/\[[^\]]*\]/g, '').trim();
+    if (t.includes('*')) continue;
+    if (constructorBearingStructs.has(t)) return true;
+  }
+  return false;
 }
 
 /**

@@ -588,13 +588,12 @@ const MSVC_RUNTIME_DECLS: ExcludedSymbolDecl[] = [
  * winsock entry point, so the shim forwards to the SDK declaration rather than
  * restating it.
  *
- * `_Wrappers::DirectDrawEnumerateA` is deliberately absent: its true signature is
- * known (`HRESULT WINAPI(LPDDENUMCALLBACKA, LPVOID)`), but the reconstruction
- * declares its own `IDirectDraw`, and the call site passes a callback typed
- * `uint32_t(uint32_t*, uint32_t, uint*)`. Declaring the real one only turns
- * "not declared" into "cannot convert" — the fix is the COM vtable work in
- * Ghidra, not a shim. Same for `DirectDrawCreate` / `DirectSoundCreate` /
- * `DirectSoundEnumerateA`.
+ * `_Wrappers::DirectDrawEnumerateA` is the import itself, declared `extern "C"`: a
+ * C-linkage function is one entity whatever namespace declares it, so this is the
+ * same `DirectDrawEnumerateA` the import table binds, not a second function. It
+ * used to be absent because the call site's callback did not fit the SDK shape;
+ * `Direct3DCallBack` @006b42f0 is now typed `BOOL __stdcall (GUID *, char *,
+ * char *, void *)` in Ghidra, which is `LPDDENUMCALLBACKA` exactly.
  */
 const WRAPPER_DECLS: ExcludedSymbolDecl[] = [
   { emitted: '_Wrappers::accept', real: 'accept', source: 'winsock',
@@ -627,6 +626,12 @@ const WRAPPER_DECLS: ExcludedSymbolDecl[] = [
   // the arity is not load-bearing at any call site.
   { emitted: '_Wrappers::gCmdLineHelpText', real: 'Game.exe 006d5b20', source: 'ghidra',
     decl: 'uint32_t gCmdLineHelpText(unsigned short* pText, uint32_t nEcx, unsigned char* pBytes);' },
+  // DDRAW.DLL, ddraw.h: HRESULT WINAPI DirectDrawEnumerateA(LPDDENUMCALLBACKA, LPVOID),
+  // LPDDENUMCALLBACKA = BOOL (FAR PASCAL *)(GUID FAR *, LPSTR, LPSTR, LPVOID).
+  // One call site, in 006b4c90, passing Direct3DCallBack @006b42f0 and 0.
+  { emitted: '_Wrappers::DirectDrawEnumerateA', real: 'DDRAW.DLL DirectDrawEnumerateA', source: 'ghidra',
+    decl: 'extern "C" __stdcall HRESULT DirectDrawEnumerateA(BOOL (__stdcall* lpCallback)(GUID* lpGUID, char* lpDriverDescription, char* lpDriverName, void* lpContext), void* lpContext);',
+    win32Only: true },
   { emitted: '_Wrappers::WSASetLastError', real: 'WSASetLastError', source: 'winsock',
     decl: 'static inline void WSASetLastError(int iError) { ::WSASetLastError(iError); }',
     win32Only: true },
@@ -720,6 +725,14 @@ const IMPORT_THUNK_DECLS: ExcludedSymbolDecl[] = [
     decl: 'extern "C" __stdcall int32_t ijlFree(void* pJpegCoreProps);' },
   { emitted: 'ijlWrite', real: 'IJL11.DLL ijlWrite', source: 'ghidra',
     decl: 'extern "C" __stdcall int32_t ijlWrite(void* pJpegCoreProps, int32_t nWriteOption);' },
+  // DDRAW.DLL, ddraw.h: HRESULT WINAPI DirectDrawCreate(GUID FAR *, LPDIRECTDRAW FAR *,
+  // IUnknown FAR *). `LPDIRECTDRAW` is the v1 interface, which the reconstruction
+  // models as `IDirectDraw1`: the three call sites (00511ce0, 006b42f0, 006b59a0)
+  // create into a v1 pointer and QueryInterface the v7 interface off it. Called
+  // with three arguments everywhere.
+  { emitted: 'DirectDrawCreate', real: 'DDRAW.DLL DirectDrawCreate', source: 'ghidra',
+    decl: 'extern "C" __stdcall HRESULT DirectDrawCreate(GUID* lpGUID, struct IDirectDraw1** lplpDD, struct IUnknown* pUnkOuter);',
+    win32Only: true },
   // The one call site passes `(0, &gnDirectSoundInitStatus, 0)` and that global
   // is declared `IDirectSound*`, so the SDK's own shape fits exactly.
   { emitted: 'DirectSoundCreate', real: 'DSOUND.DLL DirectSoundCreate', source: 'ghidra',
