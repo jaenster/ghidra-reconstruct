@@ -43,6 +43,14 @@ import { traverseAST } from './ast/visitor.js';
  * 3. `Type[N]` in parameter lists → `Type*`       (Ghidra array-in-param quirk)
  * 4. Literal `\n` in `//` comments → actual newlines with `//` continuation
  */
+/**
+ * Keywords that are followed by an EXPRESSION, never by a declarator: a `this`
+ * after one of them is the hidden argument itself, not a variable being declared.
+ */
+const EXPRESSION_KEYWORDS: ReadonlySet<string> = new Set([
+  'return', 'case', 'else', 'do', 'goto', 'sizeof', 'throw', 'delete', 'new',
+]);
+
 export function preprocessGhidraCode(code: string): string {
   let result = code;
 
@@ -60,8 +68,15 @@ export function preprocessGhidraCode(code: string): string {
 
   // Fix 1: Ghidra uses 'this' as a parameter name, but it's a reserved keyword in C++
   // Handle both pointer and non-pointer: "Type *this", "Type this"
+  //
+  // Only a DECLARATION is renamed. `return this;` is a word followed by `this` too,
+  // but `return` is not a type: renaming it to `return self;` hid the expression from
+  // `this-param-rewrite`, so every pass between it and the final rename map saw an
+  // undeclared `self` - `return-cast` could not read its type and a `void *pThis`
+  // returned from a typed-pointer function reached the tree uncast (26 strict errors).
   result = result.replace(/(\w+\s*\*\s*)this\b/g, '$1self');
-  result = result.replace(/(\w+)\s+this\b/g, '$1 self');
+  result = result.replace(/(\w+)\s+this\b/g, (m, word: string) =>
+    EXPRESSION_KEYWORDS.has(word) ? m : `${word} self`);
 
   // Fix 2: Array declarations — Type[N] name; → Type name[N];
   // Matches: "  int[10] arr;" → "  int arr[10];"
