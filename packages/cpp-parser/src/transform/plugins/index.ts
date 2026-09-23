@@ -459,6 +459,8 @@ import { structFieldPlugin } from './builtins/struct-field.js';
 import { arrayBlockAssignPlugin } from './builtins/array-block-assign.js';
 export { arrayBlockAssignPlugin } from './builtins/array-block-assign.js';
 import { bitfieldAliasLowerPlugin } from './builtins/bitfield-alias-lower.js';
+import { unionArrowMemberPlugin } from './builtins/union-arrow-member.js';
+export { unionArrowMemberPlugin } from './builtins/union-arrow-member.js';
 export { bitfieldAliasLowerPlugin } from './builtins/bitfield-alias-lower.js';
 import { enumConstantQualifyPlugin } from './builtins/enum-constant-qualify.js';
 export { enumConstantQualifyPlugin } from './builtins/enum-constant-qualify.js';
@@ -628,6 +630,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   loopCanonicalizePlugin,
   arrayAccessPlugin,
   structFieldPlugin,
+  unionArrowMemberPlugin, // Structs: U->f on a union of pointers held by value -> U.m->f, the one member whose pointee declares f (priority 52)
   bitfieldAliasLowerPlugin, // Structs: p->field_0xN the aggregate does not declare -> *((uint8_t*)p + N) (priority 55)
   enumConstantQualifyPlugin, // Enums: a constant two enums number differently -> <Enum>_ns::Name from the controlling type (priority 60)
   arrayBlockAssignPlugin, // Ghidra: whole-array assign -> memcpy/memset (priority 15)

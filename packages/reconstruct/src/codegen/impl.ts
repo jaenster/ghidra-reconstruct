@@ -726,6 +726,8 @@ export interface FuncPtrArgCastTables {
   convertingAggregates?: string[];
   /** Aggregate name → every member name its emitted declaration carries */
   aggregateMembers?: Record<string, string[]>;
+  /** The aggregates that are unions */
+  unionNames?: string[];
   /**
    * Funcdef name → the return and parameter spellings the funcdef declares. A
    * call made THROUGH a function-pointer field or variable has no callee name
@@ -2313,6 +2315,14 @@ function transformDecompiledCode(
         structFieldFuncdefs: context.funcPtrArgCasts.structFieldFuncdefs,
         fieldFuncdefs: context.funcPtrArgCasts.fieldFuncdefs,
         rootQualifiedTypedefs: context.funcPtrArgCasts.rootQualifiedTypedefs,
+        enclosingVarTypes,
+      };
+      perPluginOptions['union-arrow-member'] = {
+        unionNames: context.funcPtrArgCasts.unionNames,
+        aggregateMembers: context.funcPtrArgCasts.aggregateMembers,
+        structFields: context.funcPtrArgCasts.structFields,
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        typedefTargets: context.funcPtrArgCasts.typedefTargets,
         enclosingVarTypes,
       };
       perPluginOptions['bitfield-alias-lower'] = {

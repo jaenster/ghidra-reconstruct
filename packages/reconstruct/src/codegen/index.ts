@@ -4725,6 +4725,9 @@ export function buildFuncPtrArgCastTables(
     if (!dt.name) continue;
     aggregateMembers[dt.name] = [...emittedMemberNames(dt)];
   }
+  const unionNames = dataTypes
+    .filter((dt) => dt.kind === 'UNION' && !!dt.name)
+    .map((dt) => dt.name as string);
 
   // Which fields hold a FUNCTION POINTER, and which funcdef declares its
   // contract. `structFields` cannot answer this: a funcdef field is emitted as
@@ -5127,6 +5130,7 @@ export function buildFuncPtrArgCastTables(
     structFields,
     convertingAggregates: [...convertingAggregates],
     aggregateMembers,
+    unionNames,
     funcdefDecls,
     structFieldFuncdefs,
     fieldFuncdefs,
