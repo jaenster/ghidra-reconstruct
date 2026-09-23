@@ -21,7 +21,7 @@
  *   - no `stack0x` name survives,
  *   - each function declares exactly as many `__builtin_alloca` buffers as the
  *     binary has `CALL __alloca_probe_16` sites (2 and 3),
- *   - in `Finish`, the buffer handed to STORM_Memcpy / CryptRSA_Process /
+ *   - in `Finish`, the buffer handed to SMemCopy / CryptRSA_Process /
  *     SSYSTEM_MemCompare is `pSig` - the SECOND allocation - and never the
  *     first. This is the exact inversion that made a spelling-only fix unsafe.
  */
@@ -87,7 +87,7 @@ describe('SSignature alloca overrides', () => {
     // EBX == pSig is the operand of all three of these (0041d73f, 0041d767,
     // 0041d774). Ghidra put the first buffer's base there instead.
     for (const [call, arg] of [
-      ['STORM_Memcpy', 'pSig'],
+      ['SMemCopy', 'pSig'],
       ['CryptRSA_Process', 'pSig'],
     ] as const) {
       const m = new RegExp(`${call}\\(\\s*([A-Za-z_][A-Za-z0-9_]*)`).exec(body);
@@ -99,7 +99,7 @@ describe('SSignature alloca overrides', () => {
     assert.match(body, /SSYSTEM_MemCompare\(\s*\(int\*\)pSig,\s*\(D2QServerClientConnectionStrc\*\)pHash/);
 
     // Only Sha1_Finalize and the Memset touch pHash.
-    assert.match(body, /SSYSTEM_Memset\(pHash,/);
+    assert.match(body, /SMemFill\(pHash,/);
     assert.match(body, /Sha1_Finalize\(\(int32_t\)pHash,/);
   });
 
@@ -115,10 +115,10 @@ describe('SSignature alloca overrides', () => {
     // into the second; 0041d662 compares the second against the hash; 0041d693
     // writes the FIRST RSA buffer into the caller's data. Getting 0041d693
     // wrong would emit a valid-looking but unverifiable signature.
-    assert.match(body, /STORM_Memcpy\(pSig1, pHash, nKeySize\)/);
-    assert.match(body, /STORM_Memcpy\(pSig2, pSig1, nKeySize\)/);
+    assert.match(body, /SMemCopy\(pSig1, pHash, nKeySize\)/);
+    assert.match(body, /SMemCopy\(pSig2, pSig1, nKeySize\)/);
     assert.match(body, /SSYSTEM_MemCompare\(\(int\*\)pSig2,/);
-    assert.match(body, /STORM_Memcpy\(pDataBytes \+ nMarkerOffset \+ 4, pSig1, nKeySize\)/);
+    assert.match(body, /SMemCopy\(pDataBytes \+ nMarkerOffset \+ 4, pSig1, nKeySize\)/);
   });
 });
 
