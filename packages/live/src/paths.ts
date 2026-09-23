@@ -1,7 +1,7 @@
 /**
  * Output-tree paths the live writer must never create, overwrite or delete.
  *
- * The first five mirror the rsync exclusions in
+ * The first six mirror the rsync exclusions in
  * `~/code/re/diablo2/recon/runs/run-regen.sh`: the regen rsync deletes anything
  * in the target it did not produce, and these are the entries it is told to
  * leave alone. The last three exist only on `source/modified` — hand-written
@@ -14,6 +14,7 @@
 export const NEVER_TOUCH: string[] = [
   'README.md',
   'CMakeLists.txt',
+  'cmake/',
   'metrics/',
   '.gitignore',
   'compile-errors.txt',
