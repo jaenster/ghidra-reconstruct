@@ -1,90 +1,127 @@
 /**
- * "Which of these ~20,000 names appear in this file?" — answered in one pass.
+ * "Which of these ~20,000 names does this file REFERENCE?" — answered in one pass.
  *
  * The include-dependency feedback in `generateFilesForFunctions` asks, for every
- * generated .cpp, whether each of ~15k function names and ~5k type names occurs
- * in its text. Done as one `String.includes` per name that is ~19M scans of a
- * ~38 kB string per run, and it measured as the single largest self-time cost in
- * codegen (70.5s of 288s).
+ * generated .cpp, which of ~15k function names and ~5k type names it uses, and
+ * adds the declaring header of each. The answer has to be by WHOLE IDENTIFIER. It
+ * used to be `text.includes(name)`, and a substring is not a reference: the old
+ * name `ARCHIVE_OpenD2File` matched inside every call to `ARCHIVE_OpenD2FileWrap`
+ * and pulled a header DataTbls.cpp never needed - and a name in a comment or a
+ * string literal pulled one too.
  *
- * This flips it around. Almost every needle is a C identifier, i.e. made only of
- * `[A-Za-z0-9_]`. Such a needle occurs in the text if and only if it occurs
- * inside one of the text's MAXIMAL identifier runs — a match can never straddle
- * a non-identifier character. So: split the text into its distinct identifier
- * runs once, then walk a trie of the needles from every offset of each run. The
- * predicate is exactly `text.includes(needle)`, including matches that fall in
- * the middle of a longer identifier; only the way it is computed changes.
+ * So the file is lexed with the project's own C++ lexer, once, and a needle
+ * matches when it is one of the file's Identifier TOKENS. Comments, string and
+ * character literals and preprocessor lines are trivia or literals to the lexer
+ * and never produce an Identifier, so a name that only appears there is not a use.
  *
- * Needles that are not pure identifiers (a name with `::`, a space, a `*`) can
- * straddle those boundaries, so they keep the plain substring scan.
+ * Needles that are not a single identifier (a name with `::`, a space, a `<`)
+ * cannot be one token; they keep the plain substring scan, as before.
  */
 
-interface TrieNode {
-  children: Map<string, TrieNode>;
-  /** Set when a needle ends here. */
-  word?: string;
+import { Lexer, TokenKind } from '@ghidra-mcp/cpp-parser';
+
+function isIdentifierChar(c: number): boolean {
+  return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95;
 }
 
-const IDENTIFIER_RUN = /[A-Za-z0-9_]+/g;
-const PURE_IDENTIFIER = /^[A-Za-z0-9_]+$/;
+function isPureIdentifier(s: string): boolean {
+  if (!s.length || (s.charCodeAt(0) >= 48 && s.charCodeAt(0) <= 57)) return false;
+  for (let i = 0; i < s.length; i++) if (!isIdentifierChar(s.charCodeAt(i))) return false;
+  return true;
+}
+
+export interface References {
+  /** Every Identifier token. */
+  identifiers: Set<string>;
+  /** name -> each `A::B::name` spelling written with at least one qualifier. */
+  qualified: Map<string, Set<string>>;
+}
+
+/**
+ * The names a C++ text references, from the project's lexer. A text the lexer
+ * refuses falls back to a character scan for identifier runs and `::` chains -
+ * still whole names, but without the lexer's knowledge of comments and literals -
+ * so a lexer gap can only ADD includes, never drop one a reference needs.
+ */
+export function scanReferences(text: string): References {
+  const identifiers = new Set<string>();
+  const qualified = new Map<string, Set<string>>();
+  const note = (chain: string[]) => {
+    if (chain.length < 2) return;
+    const name = chain[chain.length - 1];
+    let q = qualified.get(name);
+    if (!q) qualified.set(name, (q = new Set()));
+    q.add(chain.join('::'));
+  };
+  let words: Array<{ text: string; scope: boolean }>;
+  try {
+    const tokens = new Lexer(text, { preserveTrivia: false }).tokenize();
+    words = [];
+    for (const t of tokens) {
+      if (t.kind === TokenKind.Identifier) words.push({ text: t.text, scope: false });
+      else if (t.kind === TokenKind.ColonColon) words.push({ text: '::', scope: true });
+      else words.push({ text: '', scope: false });
+    }
+  } catch {
+    words = [];
+    for (let i = 0; i < text.length;) {
+      const c = text.charCodeAt(i);
+      if (isIdentifierChar(c)) {
+        let j = i;
+        while (j < text.length && isIdentifierChar(text.charCodeAt(j))) j++;
+        words.push({ text: text.slice(i, j), scope: false });
+        i = j;
+      } else if (c === 58 && text.charCodeAt(i + 1) === 58) {
+        words.push({ text: '::', scope: true });
+        i += 2;
+      } else {
+        if (c > 32) words.push({ text: '', scope: false });
+        i++;
+      }
+    }
+  }
+  let chain: string[] = [];
+  let expectName = true;
+  for (const w of words) {
+    if (w.scope) { if (expectName) chain = []; expectName = true; continue; }
+    if (w.text && isPureIdentifier(w.text)) {
+      identifiers.add(w.text);
+      if (!expectName) { note(chain); chain = []; }
+      chain.push(w.text);
+      expectName = false;
+      continue;
+    }
+    note(chain);
+    chain = [];
+    expectName = true;
+  }
+  note(chain);
+  return { identifiers, qualified };
+}
 
 export class NeedleIndex {
-  private readonly root: TrieNode = { children: new Map() };
+  private readonly identifiers = new Set<string>();
   private readonly others: string[] = [];
-  private trieEmpty = true;
 
   constructor(needles: Iterable<string>) {
-    const seen = new Set<string>();
     for (const needle of needles) {
-      if (seen.has(needle)) continue;
-      seen.add(needle);
+      if (isPureIdentifier(needle)) this.identifiers.add(needle);
       // `''.includes('')` is true for every text; nothing sane produces one, but
-      // routing it to the substring path keeps the predicate honest if it does.
-      if (needle.length > 0 && PURE_IDENTIFIER.test(needle)) {
-        this.insert(needle);
-        this.trieEmpty = false;
-      } else {
-        this.others.push(needle);
-      }
+      // keeping it on the substring path keeps the predicate honest if it does.
+      else if (!this.others.includes(needle)) this.others.push(needle);
     }
   }
 
-  private insert(needle: string): void {
-    let node = this.root;
-    for (const ch of needle) {
-      let next = node.children.get(ch);
-      if (!next) {
-        next = { children: new Map() };
-        node.children.set(ch, next);
-      }
-      node = next;
-    }
-    node.word = needle;
-  }
-
-  /** Every registered needle for which `text.includes(needle)` holds. */
-  matchesIn(text: string): Set<string> {
+  /**
+   * Every registered needle the text references: an identifier needle that is one
+   * of the text's Identifier tokens, or any other needle that occurs as a substring.
+   */
+  matchesIn(text: string, refs: References = scanReferences(text)): Set<string> {
     const found = new Set<string>();
-
-    if (!this.trieEmpty) {
-      // Distinct runs only — a repeated identifier contributes nothing new.
-      const runs = new Set(text.match(IDENTIFIER_RUN) ?? []);
-      for (const run of runs) {
-        for (let start = 0; start < run.length; start++) {
-          let node: TrieNode | undefined = this.root;
-          for (let i = start; i < run.length; i++) {
-            node = node.children.get(run[i]);
-            if (!node) break;
-            if (node.word !== undefined) found.add(node.word);
-          }
-        }
-      }
-    }
-
+    for (const id of refs.identifiers) if (this.identifiers.has(id)) found.add(id);
     for (const needle of this.others) {
       if (text.includes(needle)) found.add(needle);
     }
-
     return found;
   }
 }

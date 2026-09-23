@@ -87,7 +87,7 @@ import { selectExclusionEmissions, setPlatformDefinedNames, setPlatformDeclaredN
 import { normalizePointerSizeSpellings } from './pointer-size-spelling.js';
 import { flattenTemplateNames } from './template-names.js';
 import { retypeVtableLocals, vtableMembersByType } from '../modules/vtable-types.js';
-import { NeedleIndex } from './needle-index.js';
+import { NeedleIndex, scanReferences } from './needle-index.js';
 import {
   computeTypeOwnership,
   stripTypeName,
@@ -3644,9 +3644,11 @@ function generateFilesForFunctions(
       existingIncludes.add(headerPath);
       const newIncludes: string[] = [];
 
-      // Same predicate as `implContent.includes(name)`, resolved for every name
-      // in one pass over the file.
-      const mentioned = dependencyNeedles.matchesIn(implContent);
+      // Every name the file references as a whole identifier token - never a
+      // substring of a longer name, a comment or a string literal - resolved for
+      // every name in one lexing pass over the file.
+      const refs = scanReferences(implContent);
+      const mentioned = dependencyNeedles.matchesIn(implContent, refs);
 
       const addInclude = (path: string) => {
         if (!existingIncludes.has(path)) {
@@ -3701,11 +3703,8 @@ function generateFilesForFunctions(
 
         for (const funcName of ambiguous) {
           const candidates = funcNameCandidates.get(funcName)!;
-          const escaped = funcName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-          const re = new RegExp(`((?:[A-Za-z_]\\w*::)+)${escaped}(?![A-Za-z0-9_])`, 'g');
           let resolvedByQualifier = false;
-          for (const m of implContent.matchAll(re)) {
-            const observed = m[1] + funcName;
+          for (const observed of refs.qualified.get(funcName) ?? []) {
             for (const c of candidates) {
               if (c.qualified === observed || c.qualified.endsWith(`::${observed}`)) {
                 addInclude(c.header);
@@ -3723,13 +3722,9 @@ function generateFilesForFunctions(
       for (const [typeName, ownerPath] of typeOwnerMap) {
         if (existingIncludes.has(ownerPath)) continue;
         if (ownerPath === headerPath) continue;
-        // Quick word-boundary check to avoid substring false positives
         if (mentioned.has(typeName)) {
-          const re = new RegExp(`\\b${typeName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
-          if (re.test(implContent)) {
-            existingIncludes.add(ownerPath);
-            newIncludes.push(ownerPath);
-          }
+          existingIncludes.add(ownerPath);
+          newIncludes.push(ownerPath);
         }
       }
 
