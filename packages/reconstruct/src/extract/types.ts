@@ -2,6 +2,7 @@
  * Data type extraction from Ghidra
  */
 
+import { mapWindowed, envConcurrency } from './pool.js';
 import type {
   GhidraConnection,
   ExtractedDataType,
@@ -159,7 +160,9 @@ export async function hydrateDataTypeDetails(
   dataTypes: ExtractedDataType[],
   options: { batchSize?: number; onProgress?: (done: number, total: number) => void } = {}
 ): Promise<TypeDetailHydration> {
-  const batchSize = options.batchSize ?? 20;
+  // Flights of 20 took 19.9s for 2,393 details, a window of 32 took 8.8s
+  // (2026-09-23, byte-identical snapshot).
+  const batchSize = options.batchSize ?? envConcurrency('GHIDRA_TYPE_CONCURRENCY', 32);
 
   const index = new Map<string, number>();
   for (let i = 0; i < dataTypes.length; i++) {
@@ -180,23 +183,32 @@ export async function hydrateDataTypeDetails(
 
   const failures: { slot: number; error: Error }[] = [];
   let fetched = 0;
-  for (let i = 0; i < pending.length; i += batchSize) {
-    const batch = pending.slice(i, i + batchSize);
-    const results = await Promise.all(
-      batch.map(async slot => {
-        const t = dataTypes[slot];
-        try {
-          return { slot, detail: await extractDataType(connection, t.name, t.category) };
-        } catch (e) {
-          return { slot, error: e as Error };
-        }
-      })
-    );
-    for (const r of results) {
-      if ('detail' in r && r.detail) { apply(r.slot, r.detail); fetched++; }
-      else if ('error' in r && r.error) failures.push({ slot: r.slot, error: r.error });
-    }
-    options.onProgress?.(Math.min(i + batchSize, pending.length), pending.length);
+  // A window `batchSize` deep instead of flights of `batchSize` - see pool.ts.
+  // Nothing is applied until every fetch is back, and then in PENDING order, the
+  // order the flights applied in. That is the same result, not just the same set:
+  //  - the only state a fetch reads is its listing entry's name and category, and
+  //    `apply` only ever writes a detail into the slot whose listing key IS that
+  //    detail's name and category - so an earlier apply can replace the entry a
+  //    later fetch reads, but never change the name and category it reads from it;
+  //  - two details that land on one slot land in pending order either way.
+  const results = await mapWindowed(
+    pending,
+    batchSize,
+    async slot => {
+      const t = dataTypes[slot];
+      try {
+        return { slot, detail: await extractDataType(connection, t.name, t.category) };
+      } catch (e) {
+        return { slot, error: e as Error };
+      }
+    },
+    options.onProgress
+      ? (done, total) => { if (done % batchSize === 0 || done === total) options.onProgress!(done, total); }
+      : undefined,
+  );
+  for (const r of results) {
+    if ('detail' in r && r.detail) { apply(r.slot, r.detail); fetched++; }
+    else if ('error' in r && r.error) failures.push({ slot: r.slot, error: r.error });
   }
 
   let recovered = 0;
