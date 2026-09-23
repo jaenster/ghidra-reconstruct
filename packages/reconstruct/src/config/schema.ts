@@ -44,6 +44,13 @@ export interface AdditionalSource {
   namespaces?: string[];
   /** #ifdef macro name — defaults to "D2_PLATFORM_" + platform.toUpperCase() */
   ifdef?: string;
+  /**
+   * true merges this source into the tree. Anything else, including absent,
+   * leaves it out: no preflight, no extraction, no merge, no anchors, and its
+   * records are stripped from a snapshot replay. A secondary binary is opt-in,
+   * so a fresh checkout reconstructs the primary alone.
+   */
+  enabled?: boolean;
 }
 
 export interface CrossPlatformLink {

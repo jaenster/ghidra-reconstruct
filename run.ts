@@ -20,6 +20,10 @@
  *   --no-snapshot           GHIDRA_SNAPSHOT=0        full run, but do not write one
  *                           GHIDRA_SNAPSHOT_MAX_AGE_HOURS  refuse a snapshot older than this (default 168)
  *
+ * The cross-check binary (the mac build) is merged only when its
+ * `additionalSources` entry in project/project.json says `"enabled": true`.
+ * Absent means off; the flags below only matter once it is enabled.
+ *
  * The cross-check binary (the mac build) is extracted once per Ghidra version of
  * THAT program and replayed from disk after that — it moves at version 5 while
  * the windows build is at 643. Its cache invalidates on the exact version, so a

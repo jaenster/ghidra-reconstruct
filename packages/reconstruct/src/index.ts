@@ -235,6 +235,13 @@ export {
 import { join } from 'path';
 import { loadProjectConfig as loadConfig } from './config/loader.js';
 import type { AdditionalSource } from './config/schema.js';
+import {
+  isSourceEnabled,
+  enabledAdditionalSources,
+  disabledSourcePlatforms,
+  stripDisabledSources,
+  describeStrip,
+} from './additional-sources.js';
 
 /**
  * Options for reconstruction
@@ -685,13 +692,20 @@ export async function reconstruct(
       }
 
       warnings.push(...snapshot.warnings);
+      const disabled = disabledSourcePlatforms(options.projectConfig);
+      const replay = stripDisabledSources(snapshot, disabled);
+      if (disabled.size > 0) {
+        const line = describeStrip(replay, disabled);
+        console.log(line);
+        warnings.push(line);
+      }
       return await generateAndWrite(
         {
           projectName: options.projectName || snapshot.manifest.projectName,
-          functions: snapshot.functions,
+          functions: replay.functions,
           classes: snapshot.classes,
-          dataTypes: snapshot.dataTypes,
-          globals: snapshot.globals,
+          dataTypes: replay.dataTypes,
+          globals: replay.globals,
           namespaces: snapshot.namespaces,
           programInfo: snapshot.manifest.provenance.programInfo,
           strings: snapshot.strings,
@@ -754,8 +768,13 @@ export async function reconstruct(
     // Ghidra worker and loses every session. (Do NOT closeConnection here — that
     // drops the session and reintroduces the crash.)
     const preflightConns: GhidraConnection[] = [];
-    const requiredSources = options.projectConfig?.additionalSources;
-    if (requiredSources && requiredSources.length > 0) {
+    for (const src of options.projectConfig?.additionalSources ?? []) {
+      if (!isSourceEnabled(src)) {
+        console.log(`Additional source ${src.platform} (${src.programPath ?? src.ghidra}) is not enabled in project.json — not merged`);
+      }
+    }
+    const requiredSources = enabledAdditionalSources(options.projectConfig);
+    if (requiredSources.length > 0) {
       const preflightStart = Date.now();
       for (const src of requiredSources) {
         try {
@@ -789,8 +808,8 @@ export async function reconstruct(
     );
 
     // Merge additional sources (secondary binaries) into the extraction
-    const additionalSources = options.projectConfig?.additionalSources;
-    if (additionalSources && additionalSources.length > 0) {
+    const additionalSources = enabledAdditionalSources(options.projectConfig);
+    if (additionalSources.length > 0) {
       await timePhase(
         'merge-additional (total)',
         () => mergeAdditionalSources(

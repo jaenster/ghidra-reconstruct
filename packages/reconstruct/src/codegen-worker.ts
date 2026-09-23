@@ -17,6 +17,7 @@
 import { parentPort, workerData } from 'worker_threads';
 
 import { readSnapshot } from './snapshot.js';
+import { stripDisabledSources, disabledSourcePlatforms } from './additional-sources.js';
 import { applyResolvedTypes } from './extract/functions.js';
 import { generateProjectStage1, takeShardOutput, shardClaimCount, type ShardSpec } from './codegen/index.js';
 import { configureCodegen } from './codegen-defaults.js';
@@ -67,7 +68,10 @@ async function main(): Promise<void> {
 
     at('bootstrap done');
     const snapshot = await readSnapshot(data.snapshotDir);
-    const functions = snapshot.functions;
+    // Must match the coordinator's replay exactly, or a shard emits a disabled
+    // source's records into its slice of an otherwise source-free tree.
+    const replay = stripDisabledSources(snapshot, disabledSourcePlatforms(data.options.projectConfig));
+    const functions = replay.functions;
     applyResolvedTypes(functions);
     at('snapshot loaded');
 
@@ -75,8 +79,8 @@ async function main(): Promise<void> {
       data.projectName || snapshot.manifest.projectName,
       functions,
       snapshot.classes,
-      snapshot.dataTypes,
-      snapshot.globals,
+      replay.dataTypes,
+      replay.globals,
       snapshot.namespaces,
       data.options,
       snapshot.manifest.provenance.programInfo,
