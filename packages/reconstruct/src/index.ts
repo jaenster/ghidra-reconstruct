@@ -288,6 +288,12 @@ export interface ReconstructionOptions {
    */
   codegenOnly?: boolean;
 
+  /**
+   * Stop after the extraction snapshot is written: no codegen, no output files.
+   * The extraction half of a regen on its own, for comparing two snapshots.
+   */
+  extractOnly?: boolean;
+
   /** Hours before a snapshot is refused outright in codegen-only mode. */
   snapshotMaxAgeHours?: number;
 
@@ -656,6 +662,7 @@ export async function reconstruct(
     programPath,
     writeSnapshotFile = true,
     codegenOnly = false,
+    extractOnly = false,
     snapshotMaxAgeHours,
     useSourceCache = true,
     decompileAllSecondary = false,
@@ -1025,6 +1032,26 @@ export async function reconstruct(
         warnings.push(`Failed to write extraction snapshot to ${snapshotDir}: ${msg}`);
         console.warn(`WARNING: could not write snapshot: ${msg}`);
       }
+    }
+
+    if (extractOnly) {
+      if (!snapshotWritten) throw new Error('extract-only run wrote no snapshot');
+      console.log(formatTimings(Date.now() - startTime, summarizeRpcStats()));
+      return {
+        success: true,
+        filesWritten: [],
+        warnings,
+        errors,
+        stats: {
+          functionsProcessed: codegenInputs.functions.length,
+          classesDetected: codegenInputs.classes.length,
+          filesGenerated: 0,
+          dataTypesExtracted: codegenInputs.dataTypes.length,
+          globalsExtracted: codegenInputs.globals.length,
+          stringsExtracted: codegenInputs.strings.length,
+          timeMs: Date.now() - startTime,
+        },
+      };
     }
 
     // Sharding replays the snapshot in each worker, so it is only available
