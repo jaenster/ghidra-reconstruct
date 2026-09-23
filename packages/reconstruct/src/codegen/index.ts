@@ -4903,7 +4903,12 @@ export function buildFuncPtrArgCastTables(
   // without the exact type the overload set cannot be reduced and the address
   // cannot be taken. `headerOwned` keeps the model out of these slots, and this
   // is the header's own answer rather than the database's guess at it.
+  // The name has to be known as a FUNCTION too, or `assign-cast` never treats
+  // `pfn = InterlockedCompareExchange` as taking a function's address and the
+  // exact type is never written. Nothing in the model supplies it: with the Mac
+  // build merged, its own import stub of the same name did, by accident.
   for (const [name, sig] of Object.entries(WIN32_OVERLOADED_INTRINSICS)) {
+    functionNames.add(name);
     functionParamTypes[name] = sig.paramTypes;
     functionReturnTypes[name] = sig.returnType;
     functionConventions[name] = sig.convention;
