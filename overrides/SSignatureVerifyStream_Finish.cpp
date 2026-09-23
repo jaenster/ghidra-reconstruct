@@ -37,13 +37,13 @@ if (pContext->nBytesBuffered == pContext->nBufferSize &&     // 0041d6e4 / 0041d
   uint32_t nSigLen = pContext->nDataLen;                     // 0041d705  MOV EBX,[ESI]
   uint8_t* pHash   = (uint8_t*)__builtin_alloca(nSigLen);    // 0041d709 / 0041d70e
 
-  SSystem::SSYSTEM_Memset(pHash, nSigLen, 0xbb);             // 0041d710-0041d717
+  SSystem::SMemFill(pHash, nSigLen, 0xbb);             // 0041d710-0041d717
   pHash[pContext->nDataLen - 1] = 0x0b;                      // 0041d71c / 0041d722
   Sha1_Finalize((int32_t)pHash, pContext->sha1State + 1);    // 0041d71e-0041d727
 
   uint8_t* pSig = (uint8_t*)__builtin_alloca(pContext->nDataLen); // 0041d72c-0041d735
 
-  SSystem::STORM_Memcpy(pSig, (void*)((int)pContext->pDataBuffer + 4),
+  SSystem::SMemCopy(pSig, (void*)((int)pContext->pDataBuffer + 4),
                         pContext->nDataLen);                 // 0041d733-0041d740
   SSIG_InitRSAPair((uint32_t*)rsaPair);                      // 0041d745 / 0041d748
   CryptRSA_Prepare(nKeyIdSaved, pContext->nDataLen, pModulus,

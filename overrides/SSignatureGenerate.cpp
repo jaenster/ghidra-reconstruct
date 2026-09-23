@@ -36,18 +36,18 @@ if (!SSIG_FindSignatureMarker(nKeySize, nDataLen, pData, &nMarkerOffset)) // 004
   nMarkerOffset = (int)nDataLen;                             // 0041d5bd  MOV [EBP-0x8],EDX
 
 uint8_t* pHash = (uint8_t*)__builtin_alloca(nKeySize);       // 0041d5c0-0041d5c7
-SSystem::SSYSTEM_Memset(pHash, nKeySize, 0xbb);              // 0041d5c9-0041d5d0
+SSystem::SMemFill(pHash, nKeySize, 0xbb);              // 0041d5c9-0041d5d0
 pHash[nKeySize - 1] = 0x0b;                                  // 0041d5dc
 SSIG_HashData((uint32_t)nMarkerOffset, pDataBytes, (int32_t)pHash); // 0041d5d5-0041d5e1
 
 uint8_t* pSig1 = (uint8_t*)__builtin_alloca(nKeySize);       // 0041d5e6-0041d5ed
-SSystem::STORM_Memcpy(pSig1, pHash, nKeySize);               // 0041d5ef-0041d5f2
+SSystem::SMemCopy(pSig1, pHash, nKeySize);               // 0041d5ef-0041d5f2
 SSIG_InitRSAPair((uint32_t*)rsaPair1);                       // 0041d5f7 / 0041d5fa
 CryptRSA_Prepare(nKeyId, nKeySize, pModulus1, nModulus1Len, rsaPair1); // 0041d5ff-0041d60f
 CryptRSA_Process(pSig1, nKeySize, rsaPair1);                 // 0041d614-0041d619
 
 uint8_t* pSig2 = (uint8_t*)__builtin_alloca(nKeySize);       // 0041d61e-0041d625
-SSystem::STORM_Memcpy(pSig2, pSig1, nKeySize);               // 0041d627-0041d62d
+SSystem::SMemCopy(pSig2, pSig1, nKeySize);               // 0041d627-0041d62d
 SSIG_InitRSAPair((uint32_t*)rsaPair2);                       // 0041d632 / 0041d635
 CryptRSA_Prepare(nKeyId, nKeySize, pModulus2, nModulus2Len, rsaPair2); // 0041d63a-0041d64a
 CryptRSA_Process(pSig2, nKeySize, rsaPair2);                 // 0041d64f-0041d657
@@ -56,7 +56,7 @@ if (SSystem::SSYSTEM_MemCompare((int*)pSig2,
                                 (D2QServerClientConnectionStrc*)pHash,
                                 nKeySize) == 0) {            // 0041d65c-0041d669
   *(uint32_t*)(pDataBytes + nMarkerOffset) = 0x5349474e;     // 0041d686  'SIGN'
-  SSystem::STORM_Memcpy(pDataBytes + nMarkerOffset + 4, pSig1, nKeySize); // 0041d685-0041d693
+  SSystem::SMemCopy(pDataBytes + nMarkerOffset + 4, pSig1, nKeySize); // 0041d685-0041d693
   *pnDataLen = (uint32_t)(nMarkerOffset + nKeySize + 4);     // 0041d69b / 0041d69f
   SSIG_FreeRSAPair((void**)rsaPair2);                        // 0041d6a1 / 0041d6a4
   SSIG_FreeRSAPair((void**)rsaPair1);                        // 0041d6a9 / 0041d6ac
