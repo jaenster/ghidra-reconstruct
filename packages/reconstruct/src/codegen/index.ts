@@ -61,7 +61,7 @@ import {
   type FuncPtrTarget,
 } from '@ghidra-mcp/cpp-parser';
 
-import { fieldDeclSpelling, emittedMemberNames, generateHeader, generateFunctionDeclaration, setKnownFuncDefs, sigType, getIntegerConversionType, emittedFunctionName, returnSigType } from './header.js';
+import { fieldDeclSpelling, emittedMemberNames, generateHeader, generateFunctionDeclaration, setKnownFuncDefs, setConstructorBearingStructs, sigType, getIntegerConversionType, emittedFunctionName, returnSigType } from './header.js';
 import { enumTypedefLine, registerEnumTypedefTargets, setKnownEnumWidths } from './enum-width.js';
 import { generateImplementation, setQuestStructLayouts, setStructFieldRenames, decompiledReturnType, decompiledFunctionName, type ImplGenContext, type FuncPtrArgCastTables, type ThunkForward } from './impl.js';
 import { generateCMakeLists, generateTopLevelCMake, generateTargetCMake, generateUnsortedCMake } from './cmake.js';
@@ -670,6 +670,11 @@ export function generateProjectStage1(
   // Same set, by name, so a typedef targeting `<FunctionDefinition> *` can be
   // inlined into a self-contained function-pointer typedef.
   setKnownFuncDefs(funcDefDataTypes);
+  // Which structs the emitter gives constructors: a packed struct holding one by
+  // value needs `#pragma pack`, because GCC's packed attribute skips non-POD members.
+  setConstructorBearingStructs(
+    dataTypes as Array<{ name: string; kind?: string; fields?: import('../types.js').StructField[] }>,
+  );
   // Enum widths, before ANY header is emitted: the definition in d2_enums.h and
   // every forward declaration of the same name must agree on the underlying
   // integer, and the forward-declaration sites only have the name.
