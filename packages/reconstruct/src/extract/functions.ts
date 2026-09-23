@@ -11,6 +11,7 @@ import type {
 } from '../types.js';
 import { FunctionCache, type CacheOptions } from '../cache.js';
 import { timePhase } from '../timing.js';
+import { mapWindowed, envConcurrency } from './pool.js';
 import {
   indexCandidatesBySpelling, nextClosureFrontier, mayReferenceNamespaces,
 } from '../codegen/exclusion-closure.js';
@@ -254,16 +255,18 @@ export async function extractFunctions(
 }
 
 /**
- * How many `list_functions` pages to have in flight at once.
+ * How many `list_functions` pages to keep in flight (GHIDRA_LIST_PAGE_CONCURRENCY).
  *
- * 1 is the historical one-at-a-time walk and stays the default: the pages are
- * independent, but whether the daemon actually serves them in parallel is a
- * property of the worker, not of this loop, and an unmeasured default would be
- * a guess dressed as a speedup.
+ * Measured 2026-09-23 against the shared daemon, 14,664 functions: 1 page took
+ * 224.5s, 4 pages 159.9s, and the snapshot was byte-identical. Each page spends
+ * its time in the worker's decompiler pool (the resolved-type enrichment), which
+ * 4 pages keep saturated - per-page latency rose from 1.5s to 4.3s - and the
+ * worker serves at most 4 reads at once, so more would only queue.
  */
+export const LIST_PAGE_CONCURRENCY = 4;
+
 function listPageConcurrency(): number {
-  const raw = Number(process.env.GHIDRA_LIST_PAGE_CONCURRENCY ?? '1');
-  return Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : 1;
+  return envConcurrency('GHIDRA_LIST_PAGE_CONCURRENCY', LIST_PAGE_CONCURRENCY);
 }
 
 /**
@@ -318,14 +321,12 @@ export async function extractAllFunctions(
   // the one extraction phase still fully sequential while initialized-data and
   // type-details were already flying 20 requests at once.
   //
-  // Pages are fetched in flights and spliced back BY OFFSET, so the assembled
-  // list is in exactly the order a one-at-a-time walk produced — the order every
-  // downstream table and the emitted file order depend on.
+  // Pages are fetched through a window and spliced back BY OFFSET, so the
+  // assembled list is in exactly the order a one-at-a-time walk produced — the
+  // order every downstream table and the emitted file order depend on.
   //
-  // Default 1 keeps the historical behaviour; raise it with
-  // GHIDRA_LIST_PAGE_CONCURRENCY once the daemon has been measured under it, and
-  // note that a WRITE landing mid-walk corrupts a concurrent walk exactly as it
-  // corrupts a sequential one — neither is a consistent snapshot.
+  // A WRITE landing mid-walk corrupts a concurrent walk exactly as it corrupts a
+  // sequential one — neither is a consistent snapshot.
   let listPages = 0;
   await timePhase(
     `${label}extract/list-functions`,
@@ -341,18 +342,18 @@ export async function extractAllFunctions(
       for (let o = pageSize; o < total; o += pageSize) offsets.push(o);
       if (offsets.length === 0) return;
 
-      const flightSize = listPageConcurrency();
       const pages = new Map<number, ExtractedFunction[]>();
-      for (let i = 0; i < offsets.length; i += flightSize) {
-        const flight = offsets.slice(i, i + flightSize);
-        const results = await Promise.all(
-          flight.map(o => extractFunctions(connection, { filter, namespace, limit: pageSize, offset: o }))
-        );
-        for (let j = 0; j < flight.length; j++) pages.set(flight[j], results[j].functions);
-        listPages += flight.length;
-        offset = Math.min(flight[flight.length - 1] + pageSize, total);
-        onProgress?.(offset, total);
-      }
+      await mapWindowed(
+        offsets,
+        listPageConcurrency(),
+        async o => {
+          const page = await extractFunctions(connection, { filter, namespace, limit: pageSize, offset: o });
+          pages.set(o, page.functions);
+          listPages++;
+          offset = Math.min(offset + pageSize, total);
+          onProgress?.(offset, total);
+        },
+      );
       for (const o of offsets) allFunctions.push(...(pages.get(o) ?? []));
     },
     () => `${total} functions in ${listPages} pages of ${pageSize}`

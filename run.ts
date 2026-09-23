@@ -16,9 +16,17 @@
  *                           (default 1 = single-threaded). Needs a snapshot to
  *                           replay, so it is unavailable with --no-snapshot.
  *   --codegen-only          GHIDRA_CODEGEN_ONLY=1
+ *   --extract-only          GHIDRA_EXTRACT_ONLY=1    stop once the snapshot is written
  *   --snapshot-dir=PATH     GHIDRA_SNAPSHOT_DIR      default <projectDir>/.ghidra-mcp/codegen-snapshot
  *   --no-snapshot           GHIDRA_SNAPSHOT=0        full run, but do not write one
  *                           GHIDRA_SNAPSHOT_MAX_AGE_HOURS  refuse a snapshot older than this (default 168)
+ *
+ * Extraction read windows (requests kept in flight; results are assembled in the
+ * same order whatever order they complete in, so these only change the time):
+ *   GHIDRA_LIST_PAGE_CONCURRENCY     list_functions pages      default 4
+ *   GHIDRA_GLOBALS_PAGE_CONCURRENCY  list_data_symbols pages   default 4
+ *   GHIDRA_DATA_CONCURRENCY          read_data_value           default 32
+ *   GHIDRA_TYPE_CONCURRENCY          get_data_type             default 32
  *
  * The cross-check binary (the mac build) is merged only when its
  * `additionalSources` entry in project/project.json says `"enabled": true`.
@@ -72,6 +80,7 @@ const flagValue = (name: string): string | undefined => {
 };
 
 const CODEGEN_ONLY = hasFlag('--codegen-only') || process.env.GHIDRA_CODEGEN_ONLY === '1';
+const EXTRACT_ONLY = hasFlag('--extract-only') || process.env.GHIDRA_EXTRACT_ONLY === '1';
 const WRITE_SNAPSHOT = !hasFlag('--no-snapshot') && process.env.GHIDRA_SNAPSHOT !== '0';
 const SNAPSHOT_MAX_AGE_HOURS = process.env.GHIDRA_SNAPSHOT_MAX_AGE_HOURS
   ? Number(process.env.GHIDRA_SNAPSHOT_MAX_AGE_HOURS)
@@ -152,6 +161,7 @@ async function main() {
       decompileTimeout: 60,
       excludeLibraryCode: false,
       codegenOnly: CODEGEN_ONLY,
+      extractOnly: EXTRACT_ONLY,
       writeSnapshotFile: WRITE_SNAPSHOT,
       snapshotDir: SNAPSHOT_DIR,
       snapshotMaxAgeHours: SNAPSHOT_MAX_AGE_HOURS,
