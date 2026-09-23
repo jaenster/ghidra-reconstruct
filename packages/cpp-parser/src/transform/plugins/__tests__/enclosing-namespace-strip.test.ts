@@ -108,4 +108,31 @@ describe('ambiguous data symbols', () => {
     });
     assert.ok(!out.includes('UIWidget::gnOnlyOne'), `should strip, got: ${out}`);
   });
+  it('keeps a qualifier when a local of the function has the bare name', () => {
+    // AllocUiPartyFromRoster (0049a1d0) declares a local pUiParty and stores it
+    // into the global D2Client::UI::Party::pUiParty. Stripped bare, the store is
+    // `pUiParty = pUiParty;` and the global is never written.
+    const out = run(
+      'void D2Client::UI::Party::AllocUiPartyFromRoster(int n) { D2UiPartyStrc *pUiParty; '
+        + 'pUiPartyGlobal = D2Client::UI::Party::pUiParty; D2Client::UI::Party::pUiParty = pUiParty; }',
+      { enclosingSegments: ['D2Client', 'UI', 'Party'], knownNamespaces: ['D2Client', 'D2Client::UI', 'D2Client::UI::Party'] },
+    );
+    assert.ok(!/^\s*pUiParty = pUiParty;/m.test(out), out);
+    assert.ok(/Party::pUiParty = pUiParty;/.test(out), out);
+    assert.ok(/pUiPartyGlobal = (\w+::)*Party::pUiParty;/.test(out), out);
+  });
+
+  it('keeps a qualifier when a parameter has the bare name', () => {
+    const out = run('void f(int gnCount) { gnCount = A::B::gnCount; }', { enclosingSegments: ['A', 'B'] });
+    assert.ok(/B::gnCount;/.test(out), out);
+  });
+
+  it('strips in one function what a local of another function shadows', () => {
+    const out = run(
+      'void f(void) { int gn; gn = A::B::gn; } void g(void) { x = A::B::gn; }',
+      { enclosingSegments: ['A', 'B'] },
+    );
+    assert.ok(/gn = B::gn;/.test(out), out);
+    assert.ok(/x = gn;/.test(out), out);
+  });
 });

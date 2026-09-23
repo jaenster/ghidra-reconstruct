@@ -21,7 +21,11 @@
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
-import type { ASTNode, Identifier, QualifiedId, TemplateType } from '../../../ast/nodes.js';
+import type {
+  ASTNode, FunctionDecl, Identifier, ParameterDecl, QualifiedId, TemplateType, TranslationUnit,
+  VariableDecl,
+} from '../../../ast/nodes.js';
+import { findNodesByKind } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 
@@ -71,7 +75,16 @@ function createEnclosingNamespaceStripTransformer(
    */
   const canStripToBare = (lead: string): boolean => !ambiguous.has(lead);
 
-  return createTransformer({
+  /**
+   * The parameters and locals of the function being rewritten. A bare name
+   * binds to them before any namespace member, so `A::B::pUiParty` inside a
+   * function that declares a local `pUiParty` must keep its qualifier -
+   * stripped, `A::B::pUiParty = pUiParty;` becomes a self-assignment of the
+   * local and the global is never written (AllocUiPartyFromRoster, 0049a1d0).
+   */
+  let locals: ReadonlySet<string> = new Set();
+
+  const strip = createTransformer({
     visitNode(n: ASTNode): ASTNode | undefined {
       if (n.kind !== NodeKind.QualifiedId) return undefined;
       const q = n as QualifiedId;
@@ -102,6 +115,7 @@ function createEnclosingNamespaceStripTransformer(
         if (lead === undefined) return undefined;
         if (!canStrip(k, lead)) continue;
         if (k === names.length && !canStripToBare(lead)) continue;
+        if (k === names.length && locals.has(lead)) continue;
 
         const kept = q.qualifier.slice(k);
         if (kept.length === 0) {
@@ -117,6 +131,43 @@ function createEnclosingNamespaceStripTransformer(
       return undefined;
     },
   });
+
+  const localsOf = (fn: FunctionDecl): Set<string> => {
+    const names = new Set<string>();
+    for (const p of fn.parameters) {
+      const pd = p as ParameterDecl;
+      if (pd.name) names.add(pd.name.name);
+    }
+    if (fn.body) {
+      for (const d of findNodesByKind(fn.body, NodeKind.VariableDecl)) {
+        names.add((d as VariableDecl).name.name);
+      }
+    }
+    return names;
+  };
+
+  const stripWith = (node: ASTNode, scope: ReadonlySet<string>): ASTNode => {
+    locals = scope;
+    try {
+      return strip(node);
+    } finally {
+      locals = new Set();
+    }
+  };
+
+  const none: ReadonlySet<string> = new Set();
+  return (root: ASTNode): ASTNode => {
+    if (root.kind === NodeKind.FunctionDecl) return stripWith(root, localsOf(root as FunctionDecl));
+    if (root.kind === NodeKind.TranslationUnit) {
+      const tu = root as TranslationUnit;
+      return updateNode(tu, {
+        declarations: tu.declarations.map((d) => d.kind === NodeKind.FunctionDecl
+          ? stripWith(d, localsOf(d as FunctionDecl))
+          : stripWith(d, none)),
+      } as Partial<TranslationUnit>);
+    }
+    return stripWith(root, none);
+  };
 }
 
 import { createPlugin } from '../registry.js';
