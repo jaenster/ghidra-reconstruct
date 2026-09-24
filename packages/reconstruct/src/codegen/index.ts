@@ -61,6 +61,7 @@ import {
   type FuncPtrTarget,
 } from '@ghidra-mcp/cpp-parser';
 
+import { buildVtableDispatch } from './vtable-dispatch.js';
 import { fieldDeclSpelling, emittedMemberNames, generateHeader, generateFunctionDeclaration, setKnownFuncDefs, setConstructorBearingStructs, sigType, getIntegerConversionType, emittedFunctionName, returnSigType } from './header.js';
 import { enumTypedefLine, registerEnumTypedefTargets, setKnownEnumWidths } from './enum-width.js';
 import { generateImplementation, setQuestStructLayouts, setStructFieldRenames, decompiledReturnType, decompiledFunctionName, type ImplGenContext, type FuncPtrArgCastTables, type ThunkForward } from './impl.js';
@@ -5134,6 +5135,7 @@ export function buildFuncPtrArgCastTables(
     funcdefDecls,
     structFieldFuncdefs,
     fieldFuncdefs,
+    vtableDispatch: buildVtableDispatch(dataTypes, funcDefs, emittedMemberNames),
   };
 }
 

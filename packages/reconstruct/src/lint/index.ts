@@ -14,7 +14,7 @@ import { loadSnapshot, type Snapshot } from './snapshot.js';
 import { addressRunBound, constantShapedAddress, indexedScalarGlobal, oversizedGlobalWrite, truncatedStringGlobal } from './checks/globals.js';
 import { oobLocalAccess, oversizedFormattedWrite, oversizedFrameWrite, undersizedStackBuffer } from './checks/buffers.js';
 import { unassignedLocalRead, uninitialisedSendBuffer } from './checks/locals.js';
-import { arglessIndirectCall } from './checks/calls.js';
+import { arglessIndirectCall, untypedVirtualCall } from './checks/calls.js';
 import { structPackingMismatch } from './checks/layout.js';
 import { arrayIndexRange } from './checks/ranges.js';
 
@@ -40,6 +40,7 @@ export const ALL_CHECKS: Check[] = [
   oversizedFormattedWrite,
   oobLocalAccess,
   arrayIndexRange,
+  untypedVirtualCall,
 ];
 
 export interface RunResult {

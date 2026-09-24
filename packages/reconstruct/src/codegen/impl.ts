@@ -741,6 +741,8 @@ export interface FuncPtrArgCastTables {
   fieldFuncdefs?: Record<string, string>;
   /** Enclosing namespace segments for the body being transformed, outermost first */
   enclosingSegments?: string[];
+  /** Typed vtables: where each class keeps its vtable pointer and what every slot takes */
+  vtableDispatch?: import('./vtable-dispatch.js').VtableDispatchTables;
 }
 
 /** @see FuncPtrArgCastTables.funcdefDecls */
@@ -2403,9 +2405,26 @@ function transformDecompiledCode(
     }
 
     // A free function's `this` is its untyped ECX argument, not an instance of a class
-    // that declares `vmethod_N`; only a converted method has one.
+    // that declares `vmethod_N`; only a converted method has one. A receiver whose
+    // declared type carries a typed vtable is called through it; the tables are
+    // shared, the receiver types are this body's own.
     if (!currentFunction) {
-      perPluginOptions['vtable-calls'] = VTABLE_CALLS_FREE_FUNCTION;
+      const dispatch = context?.funcPtrArgCasts?.vtableDispatch;
+      perPluginOptions['vtable-calls'] = dispatch && Object.keys(dispatch.classes).length > 0
+        ? {
+          thisIsClassInstance: false,
+          dispatch: {
+            classes: dispatch.classes,
+            vtables: dispatch.vtables,
+            // Ghidra's `this` is still spelled `this` when this pass runs; the
+            // parameter list already carries it under the name the signature gives it.
+            receiverTypes: enclosing?.thisName && enclosingVarTypes[enclosing.thisName]
+              ? { ...enclosingVarTypes, this: enclosingVarTypes[enclosing.thisName] }
+              : enclosingVarTypes,
+            globalTypes: context?.funcPtrArgCasts?.globalTypes,
+          },
+        }
+        : VTABLE_CALLS_FREE_FUNCTION;
     }
 
     if (enclosing?.registerAliases && Object.keys(enclosing.registerAliases).length > 0) {

@@ -597,3 +597,34 @@ describe('defect lint: content-keyed baseline', () => {
     assert.deepStrictEqual(newFindings(grown, base).map(f => f.subject), ['y']);
   });
 });
+
+describe('defect lint: untyped-virtual-call', () => {
+  it('reports the fallback virtual call that drops the receiver, with its slot', () => {
+    const fs = lint('untyped-virtual-call', { files: {
+      'a.cpp': [
+        'void f(void* pThis, int n) {',
+        '    (**(code**)(char*)*(void**)(uintptr_t)pThis)(n);',
+        '    x = (**(code**)((char*)*(void**)(uintptr_t)pThis + 4))(n, 0, 8);',
+        '}',
+      ].join('\n'),
+    } });
+    assert.deepStrictEqual(subjects(fs), ['pThis', 'pThis']);
+    assert.deepStrictEqual(fs.map(f => f.detail).sort(), [
+      'slot 0 (+0x0) called with 1 argument(s), receiver not passed',
+      'slot 1 (+0x4) called with 3 argument(s), receiver not passed',
+    ]);
+  });
+
+  it('ignores a COM call that passes the object itself, a typed dispatch, and a table call', () => {
+    const fs = lint('untyped-virtual-call', { files: {
+      'a.cpp': [
+        'void f(uint32_t* p, ListBox* pList, void** arr) {',
+        '    r = (**(code**)(char*)*(void**)(uintptr_t)*p)((uint32_t*)*p, 1);',
+        '    pList->pVtable->Draw(pList);',
+        '    (**(code**)((char*)arr + 8))(1);',
+        '}',
+      ].join('\n'),
+    } });
+    assert.deepStrictEqual(fs, []);
+  });
+});
