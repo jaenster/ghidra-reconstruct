@@ -4631,11 +4631,22 @@ export function buildFuncPtrArgCastTables(
     const params = [...(fn.parameters ?? [])].sort((a, b) => a.ordinal - b.ordinal);
     const qualified = fn.namespace ? `${fn.namespace}::${fn.name}` : fn.name;
 
+    const signature = signatureKey(fn.returnType ?? 'void', params.map(p => p.dataType));
     indexBothSpellings(
       functionSignatures, ambiguousSig, qualified, fn.name,
-      signatureKey(fn.returnType ?? 'void', params.map(p => p.dataType)), sameString,
+      signature, sameString,
       normalizeQualifiedReference(qualified),
     );
+    // A name that is not an identifier (`~EditBoxImplementation`) reaches an
+    // initializer legalized, the way its definition spells it; key that too.
+    if (!/^[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*$/.test(qualified)) {
+      const legal = sanitizeQualifiedReference(qualified);
+      indexBothSpellings(
+        functionSignatures, ambiguousSig, legal, legal.slice(legal.lastIndexOf('::') + 2),
+        signature, sameString,
+        normalizeQualifiedReference(legal),
+      );
+    }
 
     // Which of this function's own parameters are declared with a funcdef typedef?
     const slots: Record<number, string> = {};

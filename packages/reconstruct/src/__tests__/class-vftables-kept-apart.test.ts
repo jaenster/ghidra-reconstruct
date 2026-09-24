@@ -18,9 +18,10 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert';
 
 import { parse } from '@ghidra-mcp/cpp-parser';
-import { resolveProgramNamespaces } from '../codegen/index.js';
+import { resolveProgramNamespaces, buildFuncPtrArgCastTables } from '../codegen/index.js';
 import { namespaceResolution, renderNamespace } from '../codegen/namespace-resolution.js';
 import { normalizeQualifiedReference } from '../codegen/namespace.js';
+import { generateHeader } from '../codegen/header.js';
 import {
   generateGlobalsHeader,
   generateGlobalsImpl,
@@ -175,5 +176,48 @@ describe('class vftables stay apart', () => {
       normalizeQualifiedReference('D2Client::ButtonImplementation::BUTTON_Draw'),
       'D2Client::BUTTON_Draw',
     );
+  });
+});
+
+describe('a destructor-named function reaches a vftable initializer', () => {
+  it('its legalized spelling carries its signature', () => {
+    // `~EditBoxImplementation` is slot 0 of EditBoxImplementation's vftable. It is
+    // defined as `_EditBoxImplementation`, which is the spelling the initializer
+    // sees; without its signature the slot got no `(void*)` cast and a function
+    // pointer does not convert to `pointer` implicitly.
+    setUnopenableRootNames(new Set());
+    const dtor = {
+      name: '~EditBoxImplementation', address: '004bbd50',
+      namespace: 'D2Client::EditBoxImplementation',
+      returnType: 'EditBoxImplementation *',
+      parameters: [
+        { name: 'pEditBoxImpl', dataType: 'EditBoxImplementation *', ordinal: 0 },
+        { name: 'nDelete', dataType: 'bool', ordinal: 1 },
+      ],
+    } as unknown as ExtractedFunction;
+    resolveProgramNamespaces(
+      [{ kind: 'STRUCTURE', name: 'EditBoxImplementation' }], [dtor], [],
+    );
+    const t = buildFuncPtrArgCastTables([dtor], [], [], []);
+    assert.ok(t.functionSignatures['D2Client::_EditBoxImplementation'] !== undefined);
+  });
+
+  it('its header declares it under the name its definition carries', () => {
+    // The header skipped every `~Name` function while the definition emitted it
+    // as `_Name`, so the vftable initializer named something nothing declared.
+    setUnopenableRootNames(new Set());
+    const dtor = {
+      name: '~EditBoxImplementation', address: '004bbd50', namespace: 'D2Client',
+      returnType: 'void', parameters: [], callingConvention: '__cdecl',
+    } as unknown as ExtractedFunction;
+    resolveProgramNamespaces([], [dtor], []);
+    const header = generateHeader('EditBoxImplementation', [dtor], undefined, [], [], options);
+    const declared: string[] = [];
+    const visit = (node: any): void => {
+      if (node.kind === 'FunctionDecl') declared.push(node.name.name);
+      for (const d of node.declarations ?? []) visit(d);
+    };
+    visit(parse(header));
+    assert.deepStrictEqual(declared, ['_EditBoxImplementation']);
   });
 });
