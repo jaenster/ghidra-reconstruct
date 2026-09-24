@@ -500,6 +500,8 @@ export interface ImplGenContext {
   fileLocalGlobals?: AnalyzedDataSymbol[];
   /** Struct/union/enum names, for the qualified-name cleanup on reference sites. */
   _namespaceCollisionTypeNames?: string[];
+  /** `Ns::Class::name` data references whose class segment is kept. */
+  _keptTypeQualifiedNames?: string[];
   /** The resolved entity behind `_enclosingNamespace`; passes segments around
    *  without anyone re-splitting the rendered text. */
   _enclosingResolvedNamespace?: ResolvedNamespace;
@@ -2492,10 +2494,14 @@ function transformDecompiledCode(
     // Unconditional: it is the declaration table's own rule, not a property of
     // this unit.
     const collisionTypeNames = context?._namespaceCollisionTypeNames;
+    const keptTypeQualifiedNames = context?._keptTypeQualifiedNames;
     perPluginOptions['qualified-name-cleanup'] = {
       importRenames: EXTERNAL_IMPORT_REFERENCE_RENAMES,
       ...(collisionTypeNames && collisionTypeNames.length > 0
         ? { typeQualifierNames: collisionTypeNames }
+        : {}),
+      ...(keptTypeQualifiedNames && keptTypeQualifiedNames.length > 0
+        ? { keepTypeQualifierOf: keptTypeQualifiedNames }
         : {}),
     };
 

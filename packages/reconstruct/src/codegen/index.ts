@@ -1143,15 +1143,7 @@ export function generateProjectStage1(
   // qualified reference all render from this one entity. It is built here, over
   // the WHOLE model, rather than inside the per-target file generator: that ran
   // once per target and each run replaced the previous one's address claims.
-  {
-    const structUnionEnumNames = new Set<string>();
-    for (const dt of dataTypes) {
-      if (dt.kind === 'STRUCTURE' || dt.kind === 'UNION' || dt.kind === 'ENUM') {
-        structUnionEnumNames.add(dt.name);
-      }
-    }
-    buildNamespaceResolution(structUnionEnumNames, [...functions, ...analyzedGlobals]);
-  }
+  resolveProgramNamespaces(dataTypes, functions, analyzedGlobals);
 
   // Build the function address map for func-ptr-literal resolution.
   // Address format is "Game.exe.ram:005011f0" — extract hex after last colon.
@@ -3215,6 +3207,7 @@ function generateFilesForFunctions(
   void setNamespaceCollisionTypes;
   // The reference side of the same decision, applied on the name node.
   context._namespaceCollisionTypeNames = [...structUnionEnumNames];
+  context._keptTypeQualifiedNames = namespaceResolution().keptReferenceNames();
 
   // struct/union name → { fieldName → field's struct/union type name }, used to
   // resolve deref chains (`a->b->c`) so the headers of the INTERMEDIATE struct
@@ -4560,6 +4553,29 @@ export function funcdefBaseName(
   }
   if (stars > 1 || !s || !/^[A-Za-z_]\w*$/.test(s)) return undefined;
   return funcdefDecls[s] !== undefined ? s : undefined;
+}
+
+/**
+ * Build the run's one namespace resolution from the whole model. Data the
+ * type-segment drop would merge keep their class segment: without that the ten
+ * widget vftables (`D2Client::ButtonImplementation::vftable`, ...) are one
+ * `D2Client::vftable`, and every widget constructor installs the same table.
+ */
+export function resolveProgramNamespaces(
+  dataTypes: readonly { kind: string; name: string }[],
+  functions: readonly { address?: string; namespace?: string | null }[],
+  globals: readonly AnalyzedDataSymbol[],
+): void {
+  const structUnionEnumNames = new Set<string>();
+  for (const dt of dataTypes) {
+    if (dt.kind === 'STRUCTURE' || dt.kind === 'UNION' || dt.kind === 'ENUM') {
+      structUnionEnumNames.add(dt.name);
+    }
+  }
+  buildNamespaceResolution(structUnionEnumNames, [...functions, ...globals], {
+    symbols: globals,
+    nameOf: g => sanitizeSymbolName(g.suggestedName || g.name),
+  });
 }
 
 export function buildFuncPtrArgCastTables(

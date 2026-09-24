@@ -70,6 +70,13 @@ export interface QualifiedNameCleanupOptions extends PluginOptions {
    * when it is the LAST segment of the qualifier and is itself qualified.
    */
   typeQualifierNames?: string[];
+  /**
+   * Fully qualified names (`D2Client::ButtonImplementation::vftable`, duplicate
+   * segments already collapsed) whose type-named last qualifier is KEPT: data
+   * the declaration side leaves in its class namespace, because dropping the
+   * class would merge it with a sibling class's datum of the same name.
+   */
+  keepTypeQualifierOf?: string[];
 }
 
 const DEFAULT_DROPPED_QUALIFIERS = ['VisualStudio', 'compiler'];
@@ -97,7 +104,8 @@ function cleanQualifier(
   qualifier: (Identifier | TemplateType)[],
   dropped: Set<string>,
   collapseDuplicates: boolean,
-  typeNames: Set<string>
+  typeNames: Set<string>,
+  keepTypeQualifier: (kept: (Identifier | TemplateType)[]) => boolean = () => false
 ): (Identifier | TemplateType)[] | undefined {
   const out: (Identifier | TemplateType)[] = [];
   let changed = false;
@@ -123,7 +131,7 @@ function cleanQualifier(
   // member reference, not a namespace path).
   if (typeNames.size > 0 && out.length >= 2) {
     const last = segmentName(out[out.length - 1]);
-    if (last !== undefined && typeNames.has(last)) {
+    if (last !== undefined && typeNames.has(last) && !keepTypeQualifier(out)) {
       out.pop();
       changed = true;
     }
@@ -140,6 +148,7 @@ function createQualifiedNameCleanupTransformer(
   const stripExref = options.stripExrefSuffix ?? true;
   const typeNames = new Set(options.typeQualifierNames ?? []);
   const importRenames = options.importRenames ?? {};
+  const keptQualified = new Set(options.keepTypeQualifierOf ?? []);
 
   return createTransformer({
     visitNode(n: ASTNode): ASTNode | undefined {
@@ -162,7 +171,18 @@ function createQualifiedNameCleanupTransformer(
       const q = n as QualifiedId;
       if (q.qualifier.length === 0) return undefined;
 
-      const cleaned = cleanQualifier(q.qualifier, dropped, collapseDuplicates, typeNames);
+      const refName = q.name.kind === NodeKind.Identifier ? (q.name as Identifier).name : undefined;
+      const keepTypeQualifier = (kept: (Identifier | TemplateType)[]): boolean => {
+        if (keptQualified.size === 0 || refName === undefined) return false;
+        const parts: string[] = [];
+        for (const part of kept) {
+          const name = segmentName(part);
+          if (name === undefined) return false;
+          parts.push(name);
+        }
+        return keptQualified.has(`${parts.join('::')}::${refName}`);
+      };
+      const cleaned = cleanQualifier(q.qualifier, dropped, collapseDuplicates, typeNames, keepTypeQualifier);
       if (!cleaned) return undefined;
 
       // What the model spelled here, kept for the passes that resolve a

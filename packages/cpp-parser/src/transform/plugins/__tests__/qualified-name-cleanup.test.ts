@@ -4,6 +4,9 @@ import { parse } from '../../../parser/index.js';
 import { emit } from '../../../emit/index.js';
 import type { AnyNode } from '../../../ast/nodes.js';
 import { qualifiedNameCleanupPlugin } from '../builtins/qualified-name-cleanup.js';
+import { NodeKind } from '../../../ast/kinds.js';
+import type { ASTNode, Identifier, QualifiedId } from '../../../ast/nodes.js';
+import { findNodesByKind } from '../../../ast/visitor.js';
 
 describe('qualifiedNameCleanupPlugin', () => {
   function transformCode(code: string, options: Record<string, unknown> = {}): string {
@@ -43,6 +46,21 @@ describe('qualifiedNameCleanupPlugin', () => {
     );
     assert.ok(/D2Client::Forms::Draw\(pImage\)/.test(out), out);
     assert.ok(!/D2WinImage::/.test(out), out);
+  });
+
+  it('keeps the class qualifier of a datum the declaration side kept in its class', () => {
+    // Ten classes each own a `vftable` under their class namespace. Folding the
+    // class away made every reference name one merged `D2Client::vftable`.
+    const ast = parse(
+      'void f(void **p) { *p = D2Client::ButtonWrapper::vftable; D2Client::ButtonWrapper::Draw(p); }'
+    );
+    const transformer = qualifiedNameCleanupPlugin.createTransformer({
+      typeQualifierNames: ['ButtonWrapper'],
+      keepTypeQualifierOf: ['D2Client::ButtonWrapper::vftable'],
+    });
+    const names = (findNodesByKind(transformer(ast) as ASTNode, NodeKind.QualifiedId) as QualifiedId[])
+      .map(q => [...q.qualifier.map(p => (p as Identifier).name), (q.name as Identifier).name].join('::'));
+    assert.deepStrictEqual(names, ['D2Client::ButtonWrapper::vftable', 'D2Client::Draw']);
   });
 
   it('keeps an INTERMEDIATE type-named qualifier — it is a real namespace', () => {
