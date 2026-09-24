@@ -169,7 +169,7 @@ export function normalizeQualifiedReference(name: string): string {
   const symbol = name.slice(idx + 2);
   // The reference side resolves the qualifier through the SAME entity the
   // declaration and the definition render from.
-  const emitted = renderNamespace(namespaceResolution().resolvePath(qualifier));
+  const emitted = renderNamespace(namespaceResolution().resolveReference(qualifier, symbol));
   return emitted ? `${emitted}::${symbol}` : symbol;
 }
 

@@ -36,6 +36,18 @@
  *      it moves the definition to a sibling scope its own declaration cannot
  *      reach. That is the same "penultimate only" rule the reference side
  *      applies to a qualified name's qualifier list.
+ *
+ * Rule 2 has one exception, for DATA. A function the drop moves beside a
+ * same-named sibling survives as an overload told apart by its `this` type; a
+ * datum cannot. Ghidra hangs every class's RTTI records and its `vftable` under
+ * the class namespace (`D2Client::ButtonImplementation::vftable`), so dropping
+ * the class segment puts ten widget vftables into one `D2Client::vftable` and
+ * the globals emitter keeps the first — every widget constructor then installs
+ * the same table. A datum whose drop would merge it with a different datum
+ * therefore keeps its class segment. The root-scope struct of that name is not
+ * redeclared by a NESTED namespace, and the shadow the namespace casts over it
+ * inside the enclosing scope is already root-qualified away
+ * (`shadowedTypeNames`, fed from Ghidra's raw paths).
  */
 
 /** A resolved namespace. Segments, never a joined string in flight. */
@@ -48,6 +60,23 @@ export interface ResolvedNamespace {
 
 const ROOT: ResolvedNamespace = { ghidraSegments: [], segments: [] };
 
+/** A datum as the resolution sees it. */
+export interface DataSymbol {
+  address?: string;
+  namespace?: string | null;
+  name: string;
+}
+
+/** Rule 1: drop a segment identical to the one before it. */
+function collapseSegments(segments: readonly string[]): string[] {
+  const collapsed: string[] = [];
+  for (const segment of segments) {
+    if (collapsed.length > 0 && collapsed[collapsed.length - 1] === segment) continue;
+    collapsed.push(segment);
+  }
+  return collapsed;
+}
+
 /** Render a resolved namespace. The ONLY place segments become text. */
 export function renderNamespace(ns: ResolvedNamespace | undefined): string | undefined {
   if (!ns || ns.segments.length === 0) return undefined;
@@ -58,6 +87,8 @@ export class NamespaceResolution {
   private readonly typeNames: ReadonlySet<string>;
   private readonly byAddr = new Map<string, ResolvedNamespace>();
   private readonly byPath = new Map<string, ResolvedNamespace>();
+  /** Data that keeps its class segment, keyed `collapsedGhidraPath::name`. */
+  private readonly keptByReference = new Map<string, ResolvedNamespace>();
 
   constructor(typeNames: ReadonlySet<string>) {
     this.typeNames = typeNames;
@@ -73,11 +104,7 @@ export class NamespaceResolution {
     // The one and only split of Ghidra's path.
     const ghidraSegments = rawNamespace.split('::').filter(s => s.length > 0);
 
-    const collapsed: string[] = [];
-    for (const segment of ghidraSegments) {
-      if (collapsed.length > 0 && collapsed[collapsed.length - 1] === segment) continue;
-      collapsed.push(segment);
-    }
+    const collapsed = collapseSegments(ghidraSegments);
     if (collapsed.length > 1 && this.typeNames.has(collapsed[collapsed.length - 1])) {
       collapsed.pop();
     }
@@ -85,6 +112,60 @@ export class NamespaceResolution {
     const resolved: ResolvedNamespace = { ghidraSegments, segments: collapsed };
     this.byPath.set(rawNamespace, resolved);
     return resolved;
+  }
+
+  /**
+   * Give every datum whose type-segment drop would land it on another datum's
+   * emitted name its class segment back (see the header). `nameOf` is the
+   * emitted spelling the globals emitters key on. Returns the data re-homed.
+   */
+  keepClassSegmentsOfMergedData<T extends DataSymbol>(
+    data: Iterable<T>,
+    nameOf: (symbol: T) => string
+  ): T[] {
+    const byEmitted = new Map<string, { symbol: T; resolved: ResolvedNamespace }[]>();
+    for (const symbol of data) {
+      const resolved = this.of(symbol);
+      const key = `${resolved.segments.join('::')}::${nameOf(symbol)}`;
+      let group = byEmitted.get(key);
+      if (!group) byEmitted.set(key, (group = []));
+      group.push({ symbol, resolved });
+    }
+
+    const kept: T[] = [];
+    for (const group of byEmitted.values()) {
+      if (group.length < 2) continue;
+      // Only a merge the DROP made: two data Ghidra already homes in the same
+      // namespace under one name are that scope's own duplicate, not ours.
+      const homes = new Set(group.map(m => collapseSegments(m.resolved.ghidraSegments).join('::')));
+      if (homes.size < 2) continue;
+      for (const { symbol, resolved } of group) {
+        const full = collapseSegments(resolved.ghidraSegments);
+        if (full.length === resolved.segments.length) continue;
+        const own: ResolvedNamespace = { ghidraSegments: resolved.ghidraSegments, segments: full };
+        if (symbol.address) this.byAddr.set(symbol.address, own);
+        for (const name of new Set([symbol.name, nameOf(symbol)])) {
+          if (name) this.keptByReference.set(`${full.join('::')}::${name}`, own);
+        }
+        kept.push(symbol);
+      }
+    }
+    return kept;
+  }
+
+  /**
+   * The resolution of a qualified REFERENCE `qualifier::name` — the class-kept
+   * namespace when that datum kept its segment, otherwise the path's own.
+   */
+  resolveReference(qualifier: string, name: string): ResolvedNamespace {
+    const resolved = this.resolvePath(qualifier);
+    const full = collapseSegments(resolved.ghidraSegments);
+    return this.keptByReference.get(`${full.join('::')}::${name}`) ?? resolved;
+  }
+
+  /** `Ns::Class::name` references that must keep their type-named qualifier. */
+  keptReferenceNames(): string[] {
+    return [...this.keptByReference.keys()];
   }
 
   /** Bind a symbol's address to its resolved namespace. */
@@ -132,13 +213,16 @@ export function namespaceResolution(): NamespaceResolution {
 
 /**
  * Build the run's resolution and claim every function and global by address.
+ * `data`, when given, is checked for data the type-segment drop would merge.
  */
-export function buildNamespaceResolution(
+export function buildNamespaceResolution<T extends DataSymbol>(
   typeNames: ReadonlySet<string>,
-  symbols: Iterable<{ address?: string; namespace?: string | null }>
+  symbols: Iterable<{ address?: string; namespace?: string | null }>,
+  data?: { symbols: Iterable<T>; nameOf: (symbol: T) => string }
 ): NamespaceResolution {
   const resolution = new NamespaceResolution(typeNames);
   for (const s of symbols) resolution.claim(s.address, s.namespace);
+  if (data) resolution.keepClassSegmentsOfMergedData(data.symbols, data.nameOf);
   setNamespaceResolution(resolution);
   return resolution;
 }

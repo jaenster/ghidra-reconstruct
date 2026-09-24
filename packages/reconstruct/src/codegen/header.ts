@@ -472,12 +472,12 @@ export function generateHeader(
       && !f.name.includes('@')
       // Skip operator overloads as free functions — these are Ghidra thiscall artifacts
       && !f.name.startsWith('operator')
-      // Skip destructor-like free functions (~TypeName)
-      && !f.name.startsWith('~')
       // NOTE: a digit-leading name is no longer skipped. It is legalized by the
       // same rule the definition and every reference use (`emittedFunctionName`),
       // so `0x44PacketHandler` is declared as `_x44PacketHandler`. Skipping it
       // here left one symbol with three spellings and no declaration for any.
+      // A destructor-named `~EditBoxImplementation` is the same case: defined as
+      // `_EditBoxImplementation` and named by its class's vftable initializer.
       && f.name.length > 0
       // Skip C standard library functions
       && !C_STDLIB_NAMES.has(f.name)

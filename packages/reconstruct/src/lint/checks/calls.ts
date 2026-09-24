@@ -77,3 +77,61 @@ export const arglessIndirectCall: Check = {
     return out;
   },
 };
+
+/** A cast whose target is `uintptr_t` - the first step of the untyped virtual call. */
+function isUintptrCast(e: any): boolean {
+  const c = unparen(e);
+  return !!c && c.kind === NodeKind.CStyleCastExpr && typeRefName(unqualified(c.type)) === 'uintptr_t';
+}
+
+/**
+ * A virtual call the generator could not type: `(**(code**)(char*)*(void**)(uintptr_t)obj)(args)`.
+ *
+ * The machine passes the object in ECX and calls slot N of its vtable. Ghidra drops that
+ * argument from an untyped call, and `vtable-calls` keeps the drop when the receiver's type
+ * does not say which table it holds. The rebuilt slot function then gets the wrong
+ * arguments: a `__thiscall` slot is emitted with the object as its first parameter, and a
+ * `__stdcall` one pops its own arguments while `code` is a caller-pops type. Deleting a
+ * list box through slot 0 passed `1` as the object. The cure is the receiver's type in
+ * Ghidra; this lists what is left.
+ *
+ * AST: a CallExpr whose callee, through parentheses and dereferences, is a cast to `code **`
+ * of an expression that dereferences a `void **` cast of a `uintptr_t` cast - the spelling
+ * only that fallback produces.
+ */
+export const untypedVirtualCall: Check = {
+  id: 'untyped-virtual-call',
+  blurb: 'virtual call through an untyped receiver - the object the slot takes is not passed',
+  run(ctx) {
+    const out: Finding[] = [];
+    for (const fn of ctx.tree.functions) {
+      for (const c of ctx.of(fn, NodeKind.CallExpr)) {
+        let callee = unparen(c.callee);
+        let derefs = 0;
+        while (callee?.kind === NodeKind.UnaryExpr && callee.operator === '*') { callee = unparen(callee.operand); derefs++; }
+        if (derefs !== 2 || callee?.kind !== NodeKind.CStyleCastExpr || !isCodePointer(callee.type)) continue;
+        let slotAddr = unparen(callee.expression);
+        let offset = 0;
+        if (slotAddr?.kind === NodeKind.BinaryExpr && slotAddr.operator === '+') {
+          const r = unparen(slotAddr.right);
+          if (r?.kind === NodeKind.IntegerLiteral) offset = Number(r.value);
+          slotAddr = unparen(slotAddr.left);
+        }
+        if (slotAddr?.kind === NodeKind.CStyleCastExpr) slotAddr = unparen(slotAddr.expression);
+        if (slotAddr?.kind !== NodeKind.UnaryExpr || slotAddr.operator !== '*') continue;
+        const table = unparen(slotAddr.operand);
+        if (table?.kind !== NodeKind.CStyleCastExpr || !isUintptrCast(table.expression)) continue;
+        const receiver = strip(unparen(table.expression).expression);
+        // A COM-style call passes the object itself as the first argument; nothing is dropped.
+        if (c.arguments.length > 0 && signature(strip(c.arguments[0])) === signature(receiver)) continue;
+        out.push({
+          check: this.id, file: fn.file.path, line: line(c), fn: fn.qualifiedName,
+          subject: refName(receiver) ?? 'expression',
+          detail: `slot ${offset / 4} (+0x${offset.toString(16)}) called with ${c.arguments.length} argument(s), receiver not passed`,
+          sig: signature(c),
+        });
+      }
+    }
+    return out;
+  },
+};

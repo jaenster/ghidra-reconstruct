@@ -61,6 +61,7 @@ import {
   type FuncPtrTarget,
 } from '@ghidra-mcp/cpp-parser';
 
+import { buildVtableDispatch } from './vtable-dispatch.js';
 import { fieldDeclSpelling, emittedMemberNames, generateHeader, generateFunctionDeclaration, setKnownFuncDefs, setConstructorBearingStructs, sigType, getIntegerConversionType, emittedFunctionName, returnSigType } from './header.js';
 import { enumTypedefLine, registerEnumTypedefTargets, setKnownEnumWidths } from './enum-width.js';
 import { generateImplementation, setQuestStructLayouts, setStructFieldRenames, decompiledReturnType, decompiledFunctionName, type ImplGenContext, type FuncPtrArgCastTables, type ThunkForward } from './impl.js';
@@ -1142,15 +1143,7 @@ export function generateProjectStage1(
   // qualified reference all render from this one entity. It is built here, over
   // the WHOLE model, rather than inside the per-target file generator: that ran
   // once per target and each run replaced the previous one's address claims.
-  {
-    const structUnionEnumNames = new Set<string>();
-    for (const dt of dataTypes) {
-      if (dt.kind === 'STRUCTURE' || dt.kind === 'UNION' || dt.kind === 'ENUM') {
-        structUnionEnumNames.add(dt.name);
-      }
-    }
-    buildNamespaceResolution(structUnionEnumNames, [...functions, ...analyzedGlobals]);
-  }
+  resolveProgramNamespaces(dataTypes, functions, analyzedGlobals);
 
   // Build the function address map for func-ptr-literal resolution.
   // Address format is "Game.exe.ram:005011f0" — extract hex after last colon.
@@ -3214,6 +3207,7 @@ function generateFilesForFunctions(
   void setNamespaceCollisionTypes;
   // The reference side of the same decision, applied on the name node.
   context._namespaceCollisionTypeNames = [...structUnionEnumNames];
+  context._keptTypeQualifiedNames = namespaceResolution().keptReferenceNames();
 
   // struct/union name → { fieldName → field's struct/union type name }, used to
   // resolve deref chains (`a->b->c`) so the headers of the INTERMEDIATE struct
@@ -4561,6 +4555,29 @@ export function funcdefBaseName(
   return funcdefDecls[s] !== undefined ? s : undefined;
 }
 
+/**
+ * Build the run's one namespace resolution from the whole model. Data the
+ * type-segment drop would merge keep their class segment: without that the ten
+ * widget vftables (`D2Client::ButtonImplementation::vftable`, ...) are one
+ * `D2Client::vftable`, and every widget constructor installs the same table.
+ */
+export function resolveProgramNamespaces(
+  dataTypes: readonly { kind: string; name: string }[],
+  functions: readonly { address?: string; namespace?: string | null }[],
+  globals: readonly AnalyzedDataSymbol[],
+): void {
+  const structUnionEnumNames = new Set<string>();
+  for (const dt of dataTypes) {
+    if (dt.kind === 'STRUCTURE' || dt.kind === 'UNION' || dt.kind === 'ENUM') {
+      structUnionEnumNames.add(dt.name);
+    }
+  }
+  buildNamespaceResolution(structUnionEnumNames, [...functions, ...globals], {
+    symbols: globals,
+    nameOf: g => sanitizeSymbolName(g.suggestedName || g.name),
+  });
+}
+
 export function buildFuncPtrArgCastTables(
   functions: ExtractedFunction[],
   globals: AnalyzedDataSymbol[],
@@ -4614,11 +4631,22 @@ export function buildFuncPtrArgCastTables(
     const params = [...(fn.parameters ?? [])].sort((a, b) => a.ordinal - b.ordinal);
     const qualified = fn.namespace ? `${fn.namespace}::${fn.name}` : fn.name;
 
+    const signature = signatureKey(fn.returnType ?? 'void', params.map(p => p.dataType));
     indexBothSpellings(
       functionSignatures, ambiguousSig, qualified, fn.name,
-      signatureKey(fn.returnType ?? 'void', params.map(p => p.dataType)), sameString,
+      signature, sameString,
       normalizeQualifiedReference(qualified),
     );
+    // A name that is not an identifier (`~EditBoxImplementation`) reaches an
+    // initializer legalized, the way its definition spells it; key that too.
+    if (!/^[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*$/.test(qualified)) {
+      const legal = sanitizeQualifiedReference(qualified);
+      indexBothSpellings(
+        functionSignatures, ambiguousSig, legal, legal.slice(legal.lastIndexOf('::') + 2),
+        signature, sameString,
+        normalizeQualifiedReference(legal),
+      );
+    }
 
     // Which of this function's own parameters are declared with a funcdef typedef?
     const slots: Record<number, string> = {};
@@ -5134,6 +5162,7 @@ export function buildFuncPtrArgCastTables(
     funcdefDecls,
     structFieldFuncdefs,
     fieldFuncdefs,
+    vtableDispatch: buildVtableDispatch(dataTypes, funcDefs, emittedMemberNames),
   };
 }
 

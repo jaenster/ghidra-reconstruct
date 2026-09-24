@@ -89,6 +89,89 @@ describe('vtableCallPlugin', () => {
     });
   });
 
+  describe('typed dispatch through the receiver\'s declared vtable', () => {
+    // Shapes from the snapshot: a `__thiscall` slot is emitted with the object as its
+    // first parameter; a `__stdcall` slot whose ECX Ghidra dropped is not.
+    const dispatch = {
+      classes: {
+        ListBoxImplementation: { vfptrPath: ['pVtable'], vtable: 'ListBoxImplementationVtable' },
+        TSExportTableSync_CELLIST: {
+          vfptrPath: ['super_TSExportTableSimple_CELLIST', 'super_TSHashTable_CELLIST', '_vfptr'],
+          vtable: 'TSHashTable_CELLIST_Vtable',
+        },
+      },
+      vtables: {
+        ListBoxImplementationVtable: {
+          0: { member: 'ScalarDeletingDestructor', arity: 2, takesThis: true },
+          4: { member: 'Draw', arity: 1, takesThis: true },
+        },
+        TSHashTable_CELLIST_Vtable: {
+          0: { member: 'InternalDelete', arity: 1, takesThis: false },
+          4: { member: 'InternalNew', arity: 4, takesThis: true },
+        },
+      },
+    };
+    const typed = (receiverTypes: Record<string, string>, globalTypes: Record<string, string> = {}) =>
+      vtableCallPlugin.createTransformer({
+        thisIsClassInstance: false,
+        dispatch: { ...dispatch, receiverTypes, globalTypes },
+      } as any);
+    const run = (t: ReturnType<typeof typed>, code: string) =>
+      emit(t(parse(code)) as AnyNode).trim().replace(/\s+/g, '');
+
+    it('puts back the object a __thiscall slot takes first, which the untyped call dropped', () => {
+      const out = run(typed({ pList: '::ListBoxImplementation *' }),
+        `void f() { (**(code **)*(undefined4 *)pList)(1); }`);
+      assert.ok(out.includes('pList->pVtable->ScalarDeletingDestructor(pList,1)'), out);
+      assert.ok(!out.includes('code'), out);
+    });
+
+    it('keeps the argument list of a slot that takes no `this`', () => {
+      const out = run(typed({ pThis: 'TSExportTableSync_CELLIST *' }),
+        `void f(int nEntry) { (**(code **)*(undefined4 *)pThis)(nEntry); }`);
+      assert.ok(out.includes(
+        'pThis->super_TSExportTableSimple_CELLIST.super_TSHashTable_CELLIST._vfptr->InternalDelete(nEntry)'), out);
+    });
+
+    it('reads the slot at the byte offset the call indexes', () => {
+      const out = run(typed({ pThis: 'TSExportTableSync_CELLIST *' }),
+        `void f(int a, int b, int c) { x = (**(code **)(*(int *)pThis + 4))(a, b, c); }`);
+      assert.ok(out.includes('._vfptr->InternalNew(pThis,a,b,c)'), out);
+    });
+
+    it('resolves a global receiver from its declared type', () => {
+      const out = run(typed({}, { gpMercList: 'ListBoxImplementation *' }),
+        `void f() { (**(code **)*gpMercList)(1); }`);
+      assert.ok(out.includes('gpMercList->pVtable->ScalarDeletingDestructor(gpMercList,1)'), out);
+    });
+
+    it('does not pass the object twice when Ghidra already passed it', () => {
+      const out = run(typed({ pList: 'ListBoxImplementation *' }),
+        `void f() { (**(code **)(*(int *)pList + 4))(pList); }`);
+      assert.ok(out.includes('pList->pVtable->Draw(pList)'), out);
+    });
+
+    it('falls back to the untyped call when the receiver is untyped (void *)', () => {
+      const out = run(typed({ pThis: 'void *' }), `void f(int n) { (**(code **)*(undefined4 *)pThis)(n); }`);
+      assert.ok(out.includes('(**(code**)(char*)*(void**)(uintptr_t)pThis)(n)'), out);
+    });
+
+    it('falls back when the arguments disagree with the slot\'s arity', () => {
+      const out = run(typed({ pList: 'ListBoxImplementation *' }), `void f() { (**(code **)*(int *)pList)(1, 2, 3); }`);
+      assert.ok(out.includes('(**(code**)(char*)*(void**)(uintptr_t)pList)(1,2,3)'), out);
+    });
+
+    it('falls back for a slot the vtable does not publish', () => {
+      const out = run(typed({ pList: 'ListBoxImplementation *' }), `void f() { (**(code **)(*(int *)pList + 0x30))(); }`);
+      assert.ok(out.includes('(**(code**)((char*)*(void**)(uintptr_t)pList+48))()'), out);
+    });
+
+    it('never retypes a pointer-to-pointer receiver', () => {
+      const out = run(typed({ pp: 'ListBoxImplementation * *' }), `void f() { (**(code **)*pp)(1); }`);
+      assert.ok(!out.includes('pVtable'), out);
+    });
+  });
+
   describe('plugin metadata', () => {
     it('should have correct metadata', () => {
       assert.strictEqual(vtableCallPlugin.id, 'vtable-calls');

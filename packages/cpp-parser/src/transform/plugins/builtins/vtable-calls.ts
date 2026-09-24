@@ -12,8 +12,15 @@
  * "request for member 'vmethod_25' in '*p', which is of non-class type 'int'").
  *
  * So the readable form is emitted only where it can be checked — an actual `this`
- * inside a converted method — and every other site gets the faithful indirect
- * call, the same shape the function-pointer-table branch already used:
+ * inside a converted method. Where the receiver's DECLARED type is a class whose
+ * first word is a typed vtable pointer, the call goes through that table with the
+ * slot's own signature (`dispatch` option):
+ *
+ *   obj->pVtable->OnMouseUp(obj, param_1)
+ *
+ * which also puts back the object the machine passes in ECX and an untyped call
+ * drops. Every other site gets the indirect call, the same shape the
+ * function-pointer-table branch already used:
  *
  *   (**(code**)((char*)*(void**)(uintptr_t)obj + 0x10))(obj, param_1)
  *
@@ -288,7 +295,87 @@ function generateMethodName(offset: number, pointerSize: number): string {
   return `vmethod_${slot}`;
 }
 
-function createVTableCallTransformer(pointerSize = 4, thisIsClassInstance = true): Transformer {
+/** A slot of a typed vtable, as the header declares it. */
+export interface VTableDispatchSlot {
+  member: string;
+  /** Parameters the slot's pointer type lists, `this` included when it takes one. */
+  arity: number;
+  /** The slot is `__thiscall`: its emitted pointer type takes the object first. */
+  takesThis: boolean;
+}
+
+/** Where an object's typed vtable pointer is, and what its slots take. */
+export interface VTableDispatch {
+  /** Class name → member path to its vtable pointer, and that vtable's type name. */
+  classes: Record<string, { vfptrPath: string[]; vtable: string }>;
+  /** Vtable type name → byte offset → slot. */
+  vtables: Record<string, Record<number, VTableDispatchSlot>>;
+  /** Parameter/local name → declared type spelling, for the body being transformed. */
+  receiverTypes?: Record<string, string>;
+  /** Global name → declared type spelling. */
+  globalTypes?: Record<string, string>;
+}
+
+/** `T *`, `struct T *`, `::T *` → `T`; anything but one pointer to a name → undefined. */
+function pointeeName(spelling: string | undefined): string | undefined {
+  if (!spelling) return undefined;
+  const s = spelling.replace(/\b(struct|class|const|volatile)\b/g, ' ').replace(/\s+/g, '');
+  const m = s.match(/^(?:::)?([A-Za-z_][\w:]*)\*$/);
+  return m ? m[1] : undefined;
+}
+
+function ident(name: string, location: CallExpr['location']): Identifier {
+  return { kind: NodeKind.Identifier, name, location, leadingTrivia: [], trailingTrivia: [] };
+}
+
+function member(object: Expression, name: string, isArrow: boolean, location: CallExpr['location']): MemberExpr {
+  return {
+    kind: NodeKind.MemberExpr, object, member: ident(name, location), isArrow,
+    location, leadingTrivia: [], trailingTrivia: [],
+  };
+}
+
+/**
+ * The call through the receiver's own typed vtable, or undefined when the receiver's
+ * declared type does not say which table it holds or the slot's arity disagrees with
+ * the arguments the machine passes.
+ *
+ * The machine passes the object in ECX; Ghidra drops it from an untyped call. A
+ * `__thiscall` slot is emitted with the object as its first parameter, so it is put
+ * back there. A slot that does not take one keeps the argument list Ghidra printed.
+ */
+function typedDispatch(call: CallExpr, info: VTableInfo, dispatch: VTableDispatch): CallExpr | undefined {
+  const obj = info.object;
+  // `this` is still Ghidra's ThisExpr here; `this-param-rewrite` renames it later.
+  let name: string;
+  if (obj.kind === NodeKind.Identifier) name = (obj as Identifier).name;
+  else if (obj.kind === NodeKind.ThisExpr) name = 'this';
+  else return undefined;
+  const spelled = dispatch.receiverTypes?.[name] ?? dispatch.globalTypes?.[name];
+  const pointee = pointeeName(spelled);
+  if (!pointee) return undefined;
+  const cls = dispatch.classes[pointee] ?? dispatch.classes[pointee.replace(/^.*::/, '')];
+  if (!cls) return undefined;
+  const slot = dispatch.vtables[cls.vtable]?.[info.vtableOffset];
+  if (!slot) return undefined;
+
+  const given = call.arguments;
+  const args = slot.takesThis && !info.hasThisArg ? [obj, ...given] : [...given];
+  if (args.length !== slot.arity) return undefined;
+
+  let table: Expression = obj;
+  cls.vfptrPath.forEach((m, i) => { table = member(table, m, i === 0, call.location); });
+  return updateNode(call, {
+    callee: member(table, slot.member, true, call.location),
+    arguments: args,
+  });
+}
+
+function createVTableCallTransformer(
+  pointerSize = 4,
+  thisIsClassInstance = true,
+  dispatch?: VTableDispatch,
+): Transformer {
   return createTransformer({
     visitCallExpr(call) {
       const vtableInfo = detectVTableCall(call);
@@ -316,6 +403,8 @@ function createVTableCallTransformer(pointerSize = 4, thisIsClassInstance = true
       // indirect call through the object's vtable pointer, which is what the
       // machine does and what Ghidra decompiled.
       if (!isThisExpr(vtableInfo.object, thisIsClassInstance)) {
+        const typed = dispatch ? typedDispatch(call, vtableInfo, dispatch) : undefined;
+        if (typed) return typed;
         const codePtrPtr = Type.pointer(Type.pointer(Type.builtin('code')));
         const objWord = Expr.cast(Type.builtin('uintptr_t'), vtableInfo.object);
         const vtable = Expr.unary('*', Expr.cast(Type.pointer(Type.pointer(Type.void())), objWord));
@@ -376,6 +465,14 @@ export interface VTableCallOptions extends PluginOptions {
    * for every function that is not a converted method.
    */
   thisIsClassInstance?: boolean;
+
+  /**
+   * Typed vtables, and the declared types of the names a body can use as a receiver.
+   * A virtual call whose receiver is declared as a class with a typed vtable pointer
+   * is spelled through that table (`obj->pVtable->Slot(obj, x)`), with the slot's own
+   * signature, instead of as an untyped indirect call that drops the object.
+   */
+  dispatch?: VTableDispatch;
 }
 
 /**
@@ -394,6 +491,10 @@ export const vtableCallPlugin: TransformPlugin = {
   tags: ['core', 'cleanup', 'cpp'],
 
   createTransformer(options?: VTableCallOptions) {
-    return createVTableCallTransformer(options?.pointerSize ?? 4, options?.thisIsClassInstance ?? true);
+    return createVTableCallTransformer(
+      options?.pointerSize ?? 4,
+      options?.thisIsClassInstance ?? true,
+      options?.dispatch,
+    );
   },
 };

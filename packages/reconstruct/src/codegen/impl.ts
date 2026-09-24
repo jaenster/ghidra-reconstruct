@@ -500,6 +500,8 @@ export interface ImplGenContext {
   fileLocalGlobals?: AnalyzedDataSymbol[];
   /** Struct/union/enum names, for the qualified-name cleanup on reference sites. */
   _namespaceCollisionTypeNames?: string[];
+  /** `Ns::Class::name` data references whose class segment is kept. */
+  _keptTypeQualifiedNames?: string[];
   /** The resolved entity behind `_enclosingNamespace`; passes segments around
    *  without anyone re-splitting the rendered text. */
   _enclosingResolvedNamespace?: ResolvedNamespace;
@@ -741,6 +743,8 @@ export interface FuncPtrArgCastTables {
   fieldFuncdefs?: Record<string, string>;
   /** Enclosing namespace segments for the body being transformed, outermost first */
   enclosingSegments?: string[];
+  /** Typed vtables: where each class keeps its vtable pointer and what every slot takes */
+  vtableDispatch?: import('./vtable-dispatch.js').VtableDispatchTables;
 }
 
 /** @see FuncPtrArgCastTables.funcdefDecls */
@@ -2403,9 +2407,26 @@ function transformDecompiledCode(
     }
 
     // A free function's `this` is its untyped ECX argument, not an instance of a class
-    // that declares `vmethod_N`; only a converted method has one.
+    // that declares `vmethod_N`; only a converted method has one. A receiver whose
+    // declared type carries a typed vtable is called through it; the tables are
+    // shared, the receiver types are this body's own.
     if (!currentFunction) {
-      perPluginOptions['vtable-calls'] = VTABLE_CALLS_FREE_FUNCTION;
+      const dispatch = context?.funcPtrArgCasts?.vtableDispatch;
+      perPluginOptions['vtable-calls'] = dispatch && Object.keys(dispatch.classes).length > 0
+        ? {
+          thisIsClassInstance: false,
+          dispatch: {
+            classes: dispatch.classes,
+            vtables: dispatch.vtables,
+            // Ghidra's `this` is still spelled `this` when this pass runs; the
+            // parameter list already carries it under the name the signature gives it.
+            receiverTypes: enclosing?.thisName && enclosingVarTypes[enclosing.thisName]
+              ? { ...enclosingVarTypes, this: enclosingVarTypes[enclosing.thisName] }
+              : enclosingVarTypes,
+            globalTypes: context?.funcPtrArgCasts?.globalTypes,
+          },
+        }
+        : VTABLE_CALLS_FREE_FUNCTION;
     }
 
     if (enclosing?.registerAliases && Object.keys(enclosing.registerAliases).length > 0) {
@@ -2473,10 +2494,14 @@ function transformDecompiledCode(
     // Unconditional: it is the declaration table's own rule, not a property of
     // this unit.
     const collisionTypeNames = context?._namespaceCollisionTypeNames;
+    const keptTypeQualifiedNames = context?._keptTypeQualifiedNames;
     perPluginOptions['qualified-name-cleanup'] = {
       importRenames: EXTERNAL_IMPORT_REFERENCE_RENAMES,
       ...(collisionTypeNames && collisionTypeNames.length > 0
         ? { typeQualifierNames: collisionTypeNames }
+        : {}),
+      ...(keptTypeQualifiedNames && keptTypeQualifiedNames.length > 0
+        ? { keepTypeQualifierOf: keptTypeQualifiedNames }
         : {}),
     };
 
