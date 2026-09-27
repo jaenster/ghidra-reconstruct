@@ -23,7 +23,7 @@ describe('excluded-namespace symbol declarations', () => {
       '__strnicmp', '__vsnprintf', '__itoa', '__strlwr',
       'FID_conflict____CxxFrameHandler3', 'FID_conflict___time32', 'FID_conflict__sscanf',
       '__purecall', '__except_handler4', '__ftol2', '__sqrt_common',
-      'CRT_Pow10', 'CRT_Srand', 'CRT_Fgetc',
+      'CRT_Pow10', 'CRT_Srand', 'CRT_Fgets',
       '_eh_vector_constructor_iterator_', '_eh_vector_destructor_iterator_',
       '_Wrappers::accept', '_Wrappers::bind', '_Wrappers::listen', '_Wrappers::WSASetLastError',
       // DDRAW.DLL imports: 'DirectDrawCreate' was not declared in this scope (00511ce0,
@@ -36,6 +36,16 @@ describe('excluded-namespace symbol declarations', () => {
     ]) {
       assert.ok(declared.has(name), `${name} must be declared`);
     }
+  });
+
+  it('leaves _fprintf to the variadic <cstdio> fprintf', () => {
+    // 00684c94 was once named CRT_Fgetc and shimmed as `int (FILE*, unsigned char*)`,
+    // which dropped every format argument. It is fprintf, typed variadic in Ghidra,
+    // and the platform header's macro alias is the whole mapping.
+    const declared = new Set(EXCLUDED_SYMBOL_DECLS.map(d => d.emitted));
+    assert.ok(!declared.has('CRT_Fgetc'), 'CRT_Fgetc must not be declared any more');
+    assert.ok(!declared.has('_fprintf'), '_fprintf must not get a fixed-arity declaration');
+    assert.match(generatePlatformHeader(), /^#define _fprintf fprintf$/m);
   });
 
   it('never weakens a signature to make a call typecheck', () => {

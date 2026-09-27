@@ -559,10 +559,9 @@ const MSVC_RUNTIME_DECLS: ExcludedSymbolDecl[] = [
   // CRT_Srand @ 00687454 — Ghidra: undefined (ulong)
   { emitted: 'CRT_Srand', real: 'srand', source: 'ghidra',
     decl: 'static inline void CRT_Srand(unsigned long nSeed) { srand((unsigned int)nSeed); }' },
-  // CRT_Fgetc @ 00684c94 — Ghidra: int (FILE*, byte*). NOT plain fgetc: it takes a
-  // second buffer pointer, so it is not forwarded to <cstdio>.
-  { emitted: 'CRT_Fgetc', real: '_fgetc_nolock (MSVC internal)', source: 'ghidra',
-    decl: 'extern "C" int CRT_Fgetc(FILE* pFile, unsigned char* pBuffer);' },
+  // 00684c94 is `compiler::_fprintf` — Ghidra: int (FILE*, char*, ...). It needs no
+  // entry here: the call sites spell `_fprintf`, which the platform header's macro
+  // aliases hand to the variadic <cstdio> fprintf, as it does `_sprintf`.
   // CRT_Fgets @ 00688271 — Ghidra: char* (char*, int, FILE*)
   { emitted: 'CRT_Fgets', real: 'fgets', source: 'ghidra',
     decl: 'static inline char* CRT_Fgets(char* szText, int nMax, FILE* pFile) { return fgets(szText, nMax, pFile); }' },
