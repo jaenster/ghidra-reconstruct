@@ -1373,6 +1373,14 @@ struct WardenClientVtable {
   it('reports the typedef and the vtable member that Ghidra types __thiscall', () => {
     const fs = lint('callback-convention-dropped', { types, files: { 'WardenClient.h': header } });
     assert.deepStrictEqual(subjects(fs), ['WardenClientVtable.LoadModule', 'WardenClient_LoadModule']);
+    assert.ok(fs.every(f => !f.census), 'the Warden vtable is called from outside: a defect');
+  });
+
+  it('files a callback nobody outside calls as census', () => {
+    const t = [{ name: 'OnTick', kind: 'FUNCTION_DEFINITION', size: -1, callingConvention: '__fastcall', parameters: [] }];
+    const fs = lint('callback-convention-dropped', { types: t, files: { 'a.h': 'typedef void (*OnTick)(int);' } });
+    assert.deepStrictEqual(subjects(fs), ['OnTick']);
+    assert.strictEqual(fs[0].census, true);
   });
 
   it('accepts a spelled convention, and leaves __stdcall to the compiler', () => {
@@ -1403,6 +1411,16 @@ void __thiscall Spelled(::WardenClient * pThis) { }
       'globals.cpp': 'pointer vftable[2] = { (void*)&Class::WardenClient::LoadModule, (void*)&Class::WardenClient::Spelled };' } });
     assert.deepStrictEqual(subjects(fs), ['Class::WardenClient::LoadModule']);
     assert.match(fs[0].detail, /__thiscall in Ghidra/);
+    assert.strictEqual(fs[0].census, false);
+    assert.match(fs[0].detail, /called from outside by warden-module/);
+  });
+
+  it('files an escaped method nobody outside calls as census, and an outside-called one as a defect without an escape', () => {
+    const fs = lint('escaped-method-convention-dropped', { functions, files: {
+      'WardenClient.cpp': defs,
+      'globals.cpp': 'pointer vftable[1] = { (void*)&Class::WardenClient::Helper };' } });
+    const by = Object.fromEntries(fs.map(f => [f.subject, f.census]));
+    assert.deepStrictEqual(by, { 'Class::WardenClient::Helper': true, 'Class::WardenClient::LoadModule': false });
   });
 });
 

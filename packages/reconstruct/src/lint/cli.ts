@@ -9,6 +9,7 @@
  *   --check <id>[,<id>]    run only these checks
  *   --snapshot <dir>       extraction snapshot (default: the project's codegen-snapshot)
  *   --json <file>          write every keyed finding as JSON
+ *   --census <file>        where census entries go (default: lint-census.json beside the baseline)
  *   --no-layout            skip struct-packing-mismatch (it compiles a TU and takes a while)
  *   --fail-on <id>[,<id>]  run these counted checks and FAIL (exit 3) when one is over its
  *                          allowlist; today only ghidra-artifact
@@ -55,7 +56,7 @@ function arg(argv: string[], flag: string): string | undefined {
 
 export function main(argv = process.argv.slice(2)): number {
   const tree = argv.find((a, i) => !a.startsWith('--') &&
-    !['--baseline', '--check', '--snapshot', '--json', '--fail-on', '--allowlist'].includes(argv[i - 1]));
+    !['--baseline', '--check', '--snapshot', '--json', '--census', '--fail-on', '--allowlist'].includes(argv[i - 1]));
   if (!tree) {
     console.error('usage: cli.ts <tree> [--baseline f] [--update-baseline] [--details] [--check ids] [--json f] [--no-layout]');
     return 2;
@@ -82,7 +83,11 @@ export function main(argv = process.argv.slice(2)): number {
   const t = loadTree(root);
   const snap = loadSnapshot(arg(argv, '--snapshot'));
   const { findings, errors } = runChecks(t, snap, checks);
-  const keyed = keyFindings(findings);
+  const everything = keyFindings(findings);
+  // Census entries are the same classes without an outside caller: counted and written to
+  // their own report, never baselined and never new.
+  const census = everything.filter(f => f.census);
+  const keyed = everything.filter(f => !f.census);
   const base = loadBaseline(baselinePath);
   const unbaselined = (id: string) => COUNTED_CHECKS.has(id) || ZERO_TOLERANCE_CHECKS.has(id);
   const fresh = newFindings(keyed, base).filter(f => !unbaselined(f.check));
@@ -94,13 +99,14 @@ export function main(argv = process.argv.slice(2)): number {
     `${unparsed.length} unparsed declaration(s)${snap ? '' : ', NO SNAPSHOT'} (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
   if (!base) console.log(`baseline ${baselinePath}: none - every finding is new`);
   console.log('');
-  console.log(`${'check'.padEnd(26)} ${'found'.padStart(6)} ${'new'.padStart(5)}  what`);
+  console.log(`${'check'.padEnd(26)} ${'found'.padStart(6)} ${'new'.padStart(5)} ${'census'.padStart(7)}  what`);
   for (const c of checks) {
     const err = errors.find(e => e.check === c.id);
-    if (err) { console.log(`${c.id.padEnd(26)} ${'ERR'.padStart(6)} ${'-'.padStart(5)}  ${err.error}`); continue; }
+    if (err) { console.log(`${c.id.padEnd(26)} ${'ERR'.padStart(6)} ${'-'.padStart(5)} ${'-'.padStart(7)}  ${err.error}`); continue; }
     const n = keyed.filter(f => f.check === c.id).length;
     const nn = unbaselined(c.id) ? '-' : String(fresh.filter(f => f.check === c.id).length);
-    console.log(`${c.id.padEnd(26)} ${String(n).padStart(6)} ${nn.padStart(5)}  ${c.blurb}`);
+    const nc = census.filter(f => f.check === c.id).length;
+    console.log(`${c.id.padEnd(26)} ${String(n).padStart(6)} ${nn.padStart(5)} ${String(nc).padStart(7)}  ${c.blurb}`);
   }
 
   const details = argv.includes('--details');
@@ -122,8 +128,14 @@ export function main(argv = process.argv.slice(2)): number {
     for (const u of unparsed) console.log(`  ${u.file}:${u.line}: ${u.message}`);
   }
 
+  const censusPath = resolve(arg(argv, '--census') ?? resolve(dirname(baselinePath), 'lint-census.json'));
+  if (census.length) {
+    writeFileSync(censusPath, JSON.stringify(toBaseline(census, [...new Set(census.map(f => f.check))]), null, 1) + '\n');
+    console.log(`\ncensus: ${census.length} entr${census.length === 1 ? 'y' : 'ies'} -> ${censusPath}`);
+  }
+
   const jsonOut = arg(argv, '--json');
-  if (jsonOut) writeFileSync(jsonOut, JSON.stringify(keyed, null, 1));
+  if (jsonOut) writeFileSync(jsonOut, JSON.stringify(everything, null, 1));
 
   // The counted gate. Every rule is printed, so a class that reached 0 is visible as one.
   let gateFailed = false;

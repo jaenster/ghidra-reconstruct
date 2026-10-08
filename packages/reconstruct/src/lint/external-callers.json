@@ -1,0 +1,338 @@
+{
+ "about": "Functions and callbacks that code outside the rebuilt image calls. A register-convention function or callback on this list is a defect when the rebuild drops its convention; everything else the lint finds in the same classes is a census (lint-census.json). Addresses are 1.14d VAs.",
+ "modules": {
+  "warden-module": {
+   "why": "The downloaded Warden module calls these through WardenClientVtable (vftable slots 0x00..0x18) with ECX = this.",
+   "functions": [
+    {
+     "va": "00480000",
+     "name": "SendPacket"
+    },
+    {
+     "va": "00480020",
+     "name": "CheckModule"
+    },
+    {
+     "va": "00480040",
+     "name": "LoadModule"
+    },
+    {
+     "va": "004800c0",
+     "name": "AllocateMemory"
+    },
+    {
+     "va": "004800e0",
+     "name": "FreeMemory"
+    },
+    {
+     "va": "00480100",
+     "name": "SetRC4Data"
+    },
+    {
+     "va": "00480150",
+     "name": "GetRC4Data"
+    }
+   ],
+   "callbackTypes": [
+    "WardenClient_SendPacket",
+    "WardenClient_CheckModule",
+    "WardenClient_LoadModule",
+    "WardenClient_AllocateMemory",
+    "WardenClient_FreeMemory",
+    "WardenClient_SetRC4Data",
+    "WardenClient_GetRC4Data"
+   ],
+   "callbackMembers": [
+    "WardenClientVtable.SendPacket",
+    "WardenClientVtable.CheckModule",
+    "WardenClientVtable.LoadModule",
+    "WardenClientVtable.AllocateMemory",
+    "WardenClientVtable.FreeMemory",
+    "WardenClientVtable.SetRC4Data",
+    "WardenClientVtable.GetRC4Data"
+   ]
+  },
+  "d2bsng": {
+   "why": "d2bsng imports declared FastcallFunc (imports/*.h, rva + 0x400000); the bind table translates the address, the caller still needs the real ABI.",
+   "functions": [
+    {
+     "va": "0040576f",
+     "name": "D2GAME_Exit",
+     "via": "D2Game.h"
+    },
+    {
+     "va": "00442810",
+     "name": "D2MULTI_DoChat",
+     "via": "D2Multi.h"
+    },
+    {
+     "va": "0044c6b0",
+     "name": "UI_CloseInteract",
+     "via": "D2Client.h"
+    },
+    {
+     "va": "0044dd60",
+     "name": "GAME_Exit",
+     "via": "D2Client.h"
+    },
+    {
+     "va": "00452e50",
+     "name": "UI_DrawRectFrame",
+     "via": "D2Client.h"
+    },
+    {
+     "va": "004538d0",
+     "name": "UI_GetVar",
+     "via": "D2Client.h"
+    },
+    {
+     "va": "00454080",
+     "name": "UI_PerformGoldDialogAction",
+     "via": "D2Client.h"
+    },
+    {
+     "va": "00455f20",
+     "name": "UI_SetVar",
+     "via": "D2Client.h"
+    },
+    {
+     "va": "00455f20",
+     "name": "UI_SetUIFlag",
+     "via": "D2Client.h"
+    },
+    {
+     "va": "00457b00",
+     "name": "AUTOMAP_AddCell",
+     "via": "D2Client.h"
+    },
+    {
+     "va": "00457c30",
+     "name": "AUTOMAP_NewCell",
+     "via": "D2Client.h"
+    },
+    {
+     "va": "0045adf0",
+     "name": "UNITS_GetClientCoordX",
+     "via": "D2Common.h"
+    },
+    {
+     "va": "0045ae20",
+     "name": "UNITS_GetClientCoordY",
+     "via": "D2Common.h"
+    },
+    {
+     "va": "0045afb0",
+     "name": "UI_GetMouseYOffset",
+     "via": "D2Client.h"
+    },
+    {
+     "va": "0045afc0",
+     "name": "UI_GetMouseXOffset",
+     "via": "D2Client.h"
+    },
+    {
+     "va": "00462d00",
+     "name": "UI_ClickMap",
+     "via": "D2Client.h"
+    },
+    {
+     "va": "00463990",
+     "name": "UNITS_GetClientSideUnit",
+     "via": "D2Client.h"
+    },
+    {
+     "va": "004639b0",
+     "name": "UNITS_GetServerSideUnit",
+     "via": "D2Client.h"
+    },
+    {
+     "va": "004639d0",
+     "name": "MISSILE_GetOwnerUnit",
+     "via": "D2Common.h"
+    },
+    {
+     "va": "00464a60",
+     "name": "UNITS_GetName",
+     "via": "D2Client.h"
+    },
+    {
+     "va": "004680a0",
+     "name": "INVENTORY_GetCursorItem",
+     "via": "D2Common.h"
+    },
+    {
+     "va": "004785b0",
+     "name": "MERCENARY_ItemAction",
+     "via": "D2Client.h"
+    },
+    {
+     "va": "004786a0",
+     "name": "NET_D2GS_CLIENT_Send_INT_INT",
+     "via": "D2Client.h"
+    },
+    {
+     "va": "00478ee0",
+     "name": "UNITS_GetMinionCount",
+     "via": "D2Client.h"
+    },
+    {
+     "va": "00479080",
+     "name": "UNITS_GetCurrentLifePercentage",
+     "via": "D2Common.h"
+    },
+    {
+     "va": "00479150",
+     "name": "MONSTERS_GetOwner",
+     "via": "D2Client.h"
+    },
+    {
+     "va": "00479eb0",
+     "name": "ClickParty_I",
+     "via": "D2Client.h"
+    },
+    {
+     "va": "00479fc0",
+     "name": "PARTY_Leave",
+     "via": "D2Client.h"
+    },
+    {
+     "va": "004845a0",
+     "name": "INVENTORY_Init",
+     "via": "D2Client.h"
+    },
+    {
+     "va": "0048a0d0",
+     "name": "ITEMS_Transmute",
+     "via": "D2Client.h"
+    },
+    {
+     "va": "0048c060",
+     "name": "ITEMS_GetName",
+     "via": "D2Client.h"
+    },
+    {
+     "va": "0049e3a0",
+     "name": "UI_PrintGameString",
+     "via": "D2Client.h"
+    },
+    {
+     "va": "004b1620",
+     "name": "UI_GetInteractingNPC",
+     "via": "D2Client.h"
+    },
+    {
+     "va": "004b2370",
+     "name": "ITEMS_Submit",
+     "via": "D2Client.h"
+    },
+    {
+     "va": "004b3870",
+     "name": "NPCS_ShopAction",
+     "via": "D2Client.h"
+    },
+    {
+     "va": "004b3f10",
+     "name": "UI_CloseNPCInteract",
+     "via": "D2Client.h"
+    },
+    {
+     "va": "004b4620",
+     "name": "UI_ClearScreen",
+     "via": "D2Client.h"
+    },
+    {
+     "va": "004b9070",
+     "name": "TRADE_Accept",
+     "via": "D2Client.h"
+    },
+    {
+     "va": "004b90b0",
+     "name": "TRADE_Cancel",
+     "via": "D2Client.h"
+    },
+    {
+     "va": "004b9a00",
+     "name": "SOUND_PlaySound",
+     "via": "D2Client.h"
+    },
+    {
+     "va": "004dc440",
+     "name": "PLAYERLIST_CheckFlag",
+     "via": "D2Client.h"
+    },
+    {
+     "va": "004f9870",
+     "name": "D2WIN_DrawSprites",
+     "via": "D2Win.h"
+    },
+    {
+     "va": "004fa7a0",
+     "name": "D2WIN_TakeScreenshot",
+     "via": "D2Win.h"
+    },
+    {
+     "va": "004fa9b0",
+     "name": "ARCHIVE_LoadCellFile",
+     "via": "D2Win.h"
+    },
+    {
+     "va": "004ff5a0",
+     "name": "CONTROL_SetText",
+     "via": "D2Win.h"
+    },
+    {
+     "va": "00502320",
+     "name": "D2WIN_DrawText",
+     "via": "D2Win.h"
+    },
+    {
+     "va": "00502520",
+     "name": "D2WIN_GetTextSize",
+     "via": "D2Win.h"
+    },
+    {
+     "va": "00502ef0",
+     "name": "D2WIN_SetTextSize",
+     "via": "D2Win.h"
+    },
+    {
+     "va": "00517332",
+     "name": "ARCHIVE_InitMPQ",
+     "via": "D2Win.h"
+    },
+    {
+     "va": "00524a30",
+     "name": "D2LANG_GetLocaleText",
+     "via": "D2Lang.h"
+    },
+    {
+     "va": "00525150",
+     "name": "GAME_GetLanguageCode",
+     "via": "D2Client.h"
+    },
+    {
+     "va": "0052aeb0",
+     "name": "CLIENT_DequeueGamePacket",
+     "via": "D2Net.h"
+    },
+    {
+     "va": "0052b920",
+     "name": "CLIENT_ReceivePacket_I",
+     "via": "D2Net.h"
+    },
+    {
+     "va": "0061e470",
+     "name": "DRLG_GetLayer",
+     "via": "D2Common.h"
+    },
+    {
+     "va": "00642ae0",
+     "name": "DRLG_GetLevel",
+     "via": "D2Common.h"
+    }
+   ],
+   "callbackTypes": [],
+   "callbackMembers": []
+  }
+ }
+}

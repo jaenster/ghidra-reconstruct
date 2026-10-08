@@ -13,6 +13,7 @@ import {
 } from '../ast.js';
 import type { Check, Finding } from '../context.js';
 import type { FunctionInfo } from '../tree.js';
+import { loadExternalCallers } from '../external.js';
 
 const REGISTER_CONVENTIONS = new Set(['__thiscall', '__fastcall', '__fastcall_ecxsafe']);
 
@@ -104,6 +105,7 @@ export const callbackConventionDropped: Check = {
     const out: Finding[] = [];
     const snap = ctx.snapshot;
     if (!snap) return out;
+    const external = loadExternalCallers();
     const fieldFuncdef = new Map<string, string>();
     for (const s of snap.structs) {
       for (const f of s.fields) {
@@ -121,7 +123,9 @@ export const callbackConventionDropped: Check = {
           if (conv && REGISTER_CONVENTIONS.has(conv) && fp && !fp.fnType.callingConvention) {
             out.push({
               check: this.id, file: file.path, line: line(n), subject: name,
-              detail: `typedef ${name} is ${conv} in Ghidra, spelled without it`, sig: `typedef:${name}`,
+              detail: `typedef ${name} is ${conv} in Ghidra, spelled without it` +
+                (external.callbacks.has(name) ? `; called from outside by ${external.callbacks.get(name)}` : ''),
+              sig: `typedef:${name}`, census: !external.callbacks.has(name),
             });
           }
         } else if (n.kind === NodeKind.StructDecl && n.name?.name) {
@@ -134,7 +138,9 @@ export const callbackConventionDropped: Check = {
             if (conv && REGISTER_CONVENTIONS.has(conv) && fp && !fp.fnType.callingConvention) {
               out.push({
                 check: this.id, file: file.path, line: line(m), subject: `${n.name.name}.${mn}`,
-                detail: `member is ${fd} (${conv}) in Ghidra, spelled without it`, sig: `member:${n.name.name}.${mn}`,
+                detail: `member is ${fd} (${conv}) in Ghidra, spelled without it` +
+                  (external.callbacks.has(`${n.name.name}.${mn}`) ? `; called from outside by ${external.callbacks.get(`${n.name.name}.${mn}`)}` : ''),
+                sig: `member:${n.name.name}.${mn}`, census: !external.callbacks.has(`${n.name.name}.${mn}`),
               });
             }
           }
@@ -222,18 +228,29 @@ export const escapedMethodConventionDropped: Check = {
       });
     }
     const wanted = new Set(['table', 'assignment']);
-    for (const [fn, at] of escaped) {
-      if (!wanted.has(at.via)) continue;
+    const external = loadExternalCallers();
+    // A function an outside module calls by address is a candidate whether or not the tree
+    // ever takes its address; one that only escapes inside the tree is census.
+    const candidates = new Map<FunctionInfo, { file: string; line: number; via: string } | null>();
+    for (const [fn, at] of escaped) if (wanted.has(at.via)) candidates.set(fn, at);
+    for (const fn of ctx.tree.functions) {
+      const a = addressOfFunction(fn);
+      if (a !== null && external.functions.has(a) && !candidates.has(fn)) candidates.set(fn, null);
+    }
+    for (const [fn, at] of candidates) {
       const addr = addressOfFunction(fn);
       const sf = addr === null ? null : table.get(addr);
       if (!sf || !REGISTER_CONVENTIONS.has(sf.callingConvention)) continue;
       const spelled = (fn.node as any).callingConvention as string | undefined;
       if (spelled && REGISTER_CONVENTIONS.has(spelled)) continue;
+      const ext = external.functions.get(addr!);
       out.push({
         check: this.id, file: fn.file.path, line: line(fn.node), fn: fn.qualifiedName, subject: fn.qualifiedName,
         detail: `${sf.name} @${addr!.toString(16)} is ${sf.callingConvention} in Ghidra (${sf.storage.slice(0, 2).join(', ')}), ` +
-          `defined ${spelled ?? 'without a convention'}; address taken (${at.via}) at ${at.file}:${at.line}`,
-        sig: `fn:${fn.qualifiedName}`,
+          `defined ${spelled ?? 'without a convention'}` +
+          (at ? `; address taken (${at.via}) at ${at.file}:${at.line}` : '') +
+          (ext ? `; called from outside by ${ext.module} (${ext.name})` : ''),
+        sig: `fn:${fn.qualifiedName}`, census: !ext,
       });
     }
     return out;

@@ -23,6 +23,11 @@ export interface Finding {
   detail: string;
   /** Location-free identity of the offending node - see ast.signature. */
   sig?: string;
+  /**
+   * A census entry: the class is real but harmless until something outside the image is
+   * involved. Reported apart from the defects, never baselined, never counted as new.
+   */
+  census?: boolean;
 }
 
 export interface Check {
