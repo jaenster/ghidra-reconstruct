@@ -321,6 +321,11 @@ export {
   type DeclInitMergeOptions,
 } from './builtins/decl-init-merge.js';
 
+export {
+  haltSiteFoldPlugin,
+  type HaltSiteFoldOptions,
+} from './builtins/halt-site-fold.js';
+
 // ============================================
 // BUILT-IN PLUGINS: DECLARATION SCOPE SINK
 // ============================================
@@ -505,6 +510,7 @@ import { shortCircuitFoldPlugin } from './builtins/short-circuit-fold.js';
 import { deadBranchCleanupPlugin } from './builtins/dead-branch-cleanup.js';
 import { declInitMergePlugin } from './builtins/decl-init-merge.js';
 import { gotoCrossesInitPlugin } from './builtins/goto-crosses-init.js';
+import { haltSiteFoldPlugin } from './builtins/halt-site-fold.js';
 import { declOrderFixPlugin } from './builtins/decl-order-fix.js';
 import { declScopeSinkPlugin } from './builtins/decl-scope-sink.js';
 import { phiNodeTernaryPlugin } from './builtins/phi-node-ternary.js';
@@ -620,6 +626,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   deadBranchCleanupPlugin,    // Cleanup: if(true)/if(false) dead branch elimination (priority 58)
   declInitMergePlugin,        // Cleanup: int x; x = expr; → int x = expr; (priority 60)
   gotoCrossesInitPlugin,      // Late: split T x=e; → T x; x=e; for goto-crossed locals (priority 700)
+  haltSiteFoldPlugin,         // Cleanup: fold nLine/nAddress temporaries into the halt call, copy a shared halt tail to its jumps (priority 930)
   declOrderFixPlugin,         // Cleanup: reorder merged decls to respect initializer deps (priority 61)
   declScopeSinkPlugin,        // Cleanup: sink decls into single-use scope (priority 62)
   phiNodeTernaryPlugin,       // Cleanup: int x; if(c){x=a;}else{x=b;} → int x = c?a:b; (priority 63)
