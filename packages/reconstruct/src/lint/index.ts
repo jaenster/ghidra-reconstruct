@@ -16,6 +16,8 @@ import { oobLocalAccess, oversizedFormattedWrite, oversizedFrameWrite, undersize
 import { unassignedLocalRead, uninitialisedSendBuffer } from './checks/locals.js';
 import { arglessIndirectCall, untypedVirtualCall } from './checks/calls.js';
 import { structPackingMismatch } from './checks/layout.js';
+import { adjacentScalarRun, scalarExtentPassed, scalarLocalCursor } from './checks/extents.js';
+import { callbackConventionDropped, escapedMethodConventionDropped, partialArgumentBlock, rawCodeAddressArgument } from './checks/contracts.js';
 import { arrayIndexRange } from './checks/ranges.js';
 import { ghidraArtifact } from './checks/artifacts.js';
 import { rawAddressInitializer, zeroInitializerDropsValue } from './checks/initializers.js';
@@ -72,6 +74,13 @@ export const ALL_CHECKS: Check[] = [
   ghidraArtifact,
   plateTemplateComment,
   includePathCase,
+  scalarExtentPassed,
+  scalarLocalCursor,
+  adjacentScalarRun,
+  rawCodeAddressArgument,
+  callbackConventionDropped,
+  escapedMethodConventionDropped,
+  partialArgumentBlock,
 ];
 
 /**

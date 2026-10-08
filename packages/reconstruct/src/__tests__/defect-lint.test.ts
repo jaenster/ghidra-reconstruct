@@ -22,6 +22,7 @@ interface Fixture {
   files: Record<string, string>;
   globals?: Array<Partial<SnapshotGlobal> & { name: string; address: number }>;
   types?: any[];
+  functions?: any[];
 }
 
 function lint(check: string, fx: Fixture): Finding[] {
@@ -31,7 +32,7 @@ function lint(check: string, fx: Fixture): Finding[] {
   const globals: SnapshotGlobal[] = (fx.globals ?? []).map(g => ({
     addressText: g.address.toString(16).padStart(8, '0'), size: 1, xrefCount: 1, dataType: 'undefined', ...g,
   }));
-  const snap = buildSnapshot('', globals, fx.types ?? []);
+  const snap = buildSnapshot('', globals, fx.types ?? [], undefined, () => fx.functions ?? []);
   const c = ALL_CHECKS.find(x => x.id === check)!;
   const r = runChecks(tree, snap, [c]);
   assert.deepStrictEqual(r.errors, []);
@@ -1235,5 +1236,196 @@ describe('defect lint: store-sunk-past-pointer-read', () => {
         'void F(int a) {\n    D2PacketStrc sPacket;\n' +
         '    memset(&sPacket, 0, sizeof(sPacket));\n    sPacket.nType = a;\n    Send(&sPacket);\n}\n',
     } }), []);
+  });
+});
+
+describe('defect lint: scalar-extent-passed', () => {
+  // WARDEN_ResolveAndLoadModule: the built-in module is 0x12b2 bytes at 0x6d74b0, sized one byte.
+  const snap = [
+    { name: 'gaWardenModuleLoadData', address: 0x6d74b0, size: 1 }, { name: 'BYTE_ARRAY_006d8778', address: 0x6d8778 },
+    { name: 'nTxtRunesSize', address: 0x96ca98, size: 4 }, { name: 'nTxtNext', address: 0x96ca9c, size: 4 },
+    { name: 'hWndInsertAfter_fffffffe', address: 0xfffffffe, size: 1 },
+  ];
+  const warden = `uint32_t WARDEN_ResolveAndLoadModule(void * pRc4Key, int * pModuleHash) {
+    static uint8_t gaWardenModuleLoadData = 0x1;
+    uint32_t r = WARDEN_DecryptAndLoadModule(&gaWardenModuleLoadData, BYTE_ARRAY_006d8778, 0x12b2);
+    return r;
+}`;
+
+  it('reports a static local sized one byte that is handed to the module loader with 0x12b2', () => {
+    const fs = lint('scalar-extent-passed', { globals: snap, files: { 'a.cpp': warden } });
+    assert.deepStrictEqual(subjects(fs), ['gaWardenModuleLoadData']);
+    assert.match(fs[0].detail, /0x12b2/);
+    assert.match(fs[0].detail, /185 to the next|to the next/);
+  });
+
+  it('ignores an out-parameter that fills its slot, a constant with a name, and an array', () => {
+    const fs = lint('scalar-extent-passed', { globals: snap, files: {
+      'globals.h': 'extern int nTxtRunesSize;\nextern uint8_t hWndInsertAfter_fffffffe;\nextern uint8_t gaTable[64];\n',
+      'a.cpp': 'void f() { TXT_Alloc(&nTxtRunesSize, 0x120); SetWindowPos(&hWndInsertAfter_fffffffe, 0x14); TXT_Alloc(&gaTable, 0x40); }',
+    } });
+    assert.deepStrictEqual(fs, []);
+  });
+});
+
+describe('defect lint: scalar-local-cursor', () => {
+  // WardenClient::LoadModule: `char szHexBuf;` receives sixteen "%02x" pairs through a walking cursor.
+  const loadModule = `void LoadModule(WardenClient * pThis, uint8_t * pModuleHash, void * pData, uint32_t nSize) {
+    char szHexBuf;
+    char szExt[8];
+    uint32_t i = 0;
+    char* pszHexCursor = &szHexBuf;
+    do {
+      sprintf(pszHexCursor, "%02x", (uint32_t)pModuleHash[i]);
+      i++;
+      pszHexCursor += 2;
+    } while (i < 0x10);
+    SStrCopy(szExt, ".mod", 5);
+}`;
+
+  it('reports a pointer seeded from a scalar local and then advanced, naming what is declared next', () => {
+    const fs = lint('scalar-local-cursor', { files: { 'a.cpp': loadModule } });
+    assert.deepStrictEqual(subjects(fs), ['szHexBuf']);
+    assert.match(fs[0].detail, /pszHexCursor = &szHexBuf/);
+    assert.match(fs[0].detail, /szExt:char\[8\]/);
+  });
+
+  it('reports a string write straight into a scalar local', () => {
+    const fs = lint('scalar-local-cursor', { files: { 'a.cpp': 'void f() { char c; sprintf(&c, "%s%s", a, ".mod"); strcpy(&c, "abc"); }' } });
+    assert.strictEqual(fs.length, 2);   // sprintf: the literal ".mod" alone needs 5; strcpy of "abc" needs 4
+    assert.ok(fs.some(f => /strcpy writes 4 bytes into char c/.test(f.detail)));
+  });
+
+  it('ignores an array, a pointer that is only dereferenced, and a one-byte copy', () => {
+    const fs = lint('scalar-local-cursor', { files: { 'a.cpp':
+      'void f() { char buf[64]; char c; char* p = &c; sprintf(buf, "%02x", 1); *p = 1; memcpy(&c, src, 1); }' } });
+    assert.deepStrictEqual(fs, []);
+  });
+});
+
+describe('defect lint: adjacent-scalar-run', () => {
+  // The two Storm command lists: head, link and priority are three scalars in Ghidra, 12 bytes in the binary.
+  const snap = [
+    { name: 'gStormCmdListHeadBackslash', address: 0x74c48c, size: 4 },
+    { name: 'gpStormCmdListHeadBackslash', address: 0x74c490, size: 4 },
+    { name: 'gStormCmdListHeadPriority', address: 0x74c494, size: 4 },
+    { name: 'gLone', address: 0x74c600, size: 4 },
+  ];
+  const globalsH = 'extern int gStormCmdListHeadBackslash;\nextern void * gpStormCmdListHeadBackslash;\n' +
+    'extern void * gStormCmdListHeadPriority;\nextern int gLone;\n';
+  const fini = `void StaticFini_gStormCmdListBackslash() {
+    uint32_t* puVar1 = (uint32_t*)((int)gStormCmdListHeadPriority + ((uintptr_t)&gpStormCmdListHeadBackslash - *(int*)((int)gpStormCmdListHeadBackslash + 4)));
+}`;
+
+  it('reports a touching run whose member address is used in arithmetic, as one finding for the run', () => {
+    const fs = lint('adjacent-scalar-run', { globals: snap, files: { 'globals.h': globalsH, 'g.cpp': fini } });
+    assert.strictEqual(fs.length, 1);
+    assert.match(fs[0].detail, /3 touching scalar globals \[gStormCmdListHeadBackslash, gpStormCmdListHeadBackslash, gStormCmdListHeadPriority\]/);
+  });
+
+  it('reports a list head initialised with its own address', () => {
+    const fs = lint('adjacent-scalar-run', { globals: snap, files: { 'globals.h': globalsH,
+      'g.cpp': 'int gStormCmdListHeadBackslash = 0x0;\nvoid * gpStormCmdListHeadBackslash = (void *)&gpStormCmdListHeadBackslash;\n' } });
+    assert.strictEqual(fs.length, 1);
+    assert.match(fs[0].detail, /initialised with its own address/);
+  });
+
+  it('ignores a run that is only read and written by name, and a lone symbol', () => {
+    const fs = lint('adjacent-scalar-run', { globals: snap, files: { 'globals.h': globalsH,
+      'g.cpp': 'void f() { gStormCmdListHeadPriority = 0; int x = gLone + 1; p(&gLone + 1); }' } });
+    assert.deepStrictEqual(fs, []);
+  });
+});
+
+describe('defect lint: raw-code-address-argument', () => {
+  const functions = [{ name: 'SCMD_OnSlash', address: '004c1d20', callingConvention: '__stdcall', parameters: [] }];
+  const globals = [{ name: 'gStormCmdListHeadSlash', address: 0x74c498, size: 4 }];
+
+  it('reports a callback handed over as its 1.14d function address', () => {
+    const fs = lint('raw-code-address-argument', { globals, functions, files: {
+      'a.cpp': 'void f() { Storm::Source::SCMD_Register(0x4c1d20); }' } });
+    assert.deepStrictEqual(subjects(fs), ['SCMD_Register#arg0']);
+    assert.match(fs[0].detail, /SCMD_OnSlash/);
+  });
+
+  it('leaves a data address to raw-address-argument, and ignores decimals and non-symbols', () => {
+    const fs = lint('raw-code-address-argument', { globals, functions, files: {
+      'a.cpp': 'void f() { g(0x74c498); __allmul(a, b, 4988192); g(0x4c1d24); h(&SCMD_OnSlash); }' } });
+    assert.deepStrictEqual(fs, []);
+  });
+});
+
+describe('defect lint: callback-convention-dropped', () => {
+  const types = [
+    { name: 'WardenClient_LoadModule', kind: 'FUNCTION_DEFINITION', size: -1, callingConvention: '__thiscall', parameters: [] },
+    { name: 'OnPress', kind: 'FUNCTION_DEFINITION', size: -1, callingConvention: '__stdcall', parameters: [] },
+    { name: 'WardenClientVtable', kind: 'STRUCTURE', size: 8, fields: [
+      { name: 'LoadModule', dataType: 'WardenClient_LoadModule *', offset: 0, size: 4 },
+      { name: 'Press', dataType: 'OnPress *', offset: 4, size: 4 }] },
+  ];
+  const header = `typedef void (*WardenClient_LoadModule)(WardenClient * pThis, uint8_t * pModuleHash, void * pData, uint32_t nSize);
+typedef int (__stdcall *OnPress)(int);
+struct WardenClientVtable {
+    void (*LoadModule)(WardenClient *, uint8_t *, void *, uint32_t);
+    int (__stdcall *Press)(int);
+};`;
+
+  it('reports the typedef and the vtable member that Ghidra types __thiscall', () => {
+    const fs = lint('callback-convention-dropped', { types, files: { 'WardenClient.h': header } });
+    assert.deepStrictEqual(subjects(fs), ['WardenClientVtable.LoadModule', 'WardenClient_LoadModule']);
+  });
+
+  it('accepts a spelled convention, and leaves __stdcall to the compiler', () => {
+    const fs = lint('callback-convention-dropped', { types, files: { 'WardenClient.h':
+      'typedef void (__thiscall *WardenClient_LoadModule)(WardenClient * pThis);\ntypedef int (*OnPress)(int);' } });
+    assert.deepStrictEqual(fs, []);
+  });
+});
+
+describe('defect lint: escaped-method-convention-dropped', () => {
+  const functions = [
+    { name: 'LoadModule', address: '00480040', callingConvention: '__thiscall', parameters: [{ storage: 'ECX:4 (auto)' }] },
+    { name: 'Helper', address: '00480200', callingConvention: '__thiscall', parameters: [{ storage: 'ECX:4 (auto)' }] },
+    { name: 'Spelled', address: '00480300', callingConvention: '__thiscall', parameters: [] },
+  ];
+  const defs = `namespace Class { namespace WardenClient {
+// 1.14d: 00480040
+void LoadModule(::WardenClient * pThis, uint8_t * pModuleHash) { }
+// 1.14d: 00480200
+void Helper(::WardenClient * pThis) { }
+// 1.14d: 00480300
+void __thiscall Spelled(::WardenClient * pThis) { }
+} }`;
+
+  it('reports a __thiscall method whose address sits in a vtable, and not one only called by name', () => {
+    const fs = lint('escaped-method-convention-dropped', { functions, files: {
+      'WardenClient.cpp': defs + '\nvoid g(::WardenClient* p) { Class::WardenClient::Helper(p); }',
+      'globals.cpp': 'pointer vftable[2] = { (void*)&Class::WardenClient::LoadModule, (void*)&Class::WardenClient::Spelled };' } });
+    assert.deepStrictEqual(subjects(fs), ['Class::WardenClient::LoadModule']);
+    assert.match(fs[0].detail, /__thiscall in Ghidra/);
+  });
+});
+
+describe('defect lint: partial-argument-block', () => {
+  // SCMD_GenerateError: [0] and [2] stored, [1] was the filename in EBX.
+  const generateError = `void SCMD_GenerateError(uint errorCode, pfnSCmdErrorCallback pfnCallback) {
+    uint32_t sCallbackArgs[3];
+    char szFmtBuf[256];
+    sCallbackArgs[2] = (uint32_t)szFmtBuf;
+    sCallbackArgs[0] = errorCode;
+    pfnCallback = (pfnSCmdErrorCallback)(*pfnCallback)(sCallbackArgs);
+}`;
+
+  it('reports an argument block with a skipped slot handed to a callback', () => {
+    const fs = lint('partial-argument-block', { files: { 'a.cpp': generateError } });
+    assert.deepStrictEqual(subjects(fs), ['sCallbackArgs']);
+    assert.match(fs[0].detail, /\[1\] never/);
+  });
+
+  it('ignores a block with every slot stored, and one that is also filled by a loop', () => {
+    const full = generateError.replace('sCallbackArgs[2] =', 'sCallbackArgs[1] = 0; sCallbackArgs[2] =');
+    const loop = generateError.replace('pfnCallback =', 'for (int i = 0; i < 3; i++) sCallbackArgs[i] = 0; pfnCallback =');
+    assert.deepStrictEqual(lint('partial-argument-block', { files: { 'a.cpp': full } }), []);
+    assert.deepStrictEqual(lint('partial-argument-block', { files: { 'a.cpp': loop } }), []);
   });
 });
