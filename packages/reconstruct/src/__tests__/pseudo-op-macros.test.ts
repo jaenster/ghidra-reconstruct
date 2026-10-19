@@ -1,7 +1,8 @@
 /**
- * The pseudo-op macros d2_platform.h defines, compiled and run. Each case is the value
- * Ghidra's p-code operation produces; a macro that compiles but computes something else
- * is a silent wrong flag or a wrong byte in the rebuild.
+ * The pseudo-op macros d2_platform.h still defines, compiled and run. Every other
+ * pseudo-op is lowered on the AST (pseudo-op-lower) and must NOT have a definition: a
+ * macro that compiles but computes something else is a silent wrong value in the rebuild,
+ * and a missing one is a compile error that names the site.
  */
 
 import { describe, it } from 'node:test';
@@ -13,23 +14,15 @@ const run = (exprs: Record<string, string>) =>
   readHex(compileAndRun(ghidraPseudoOpMacroLines().join('\n'),
     Object.entries(exprs).map(([k, e]) => printHex(k, e)).join('\n')));
 
-describe('pseudo-op macros: carry flag', { skip: !hasNativeGpp() }, () => {
-  it('CARRY1/CARRY2 report the carry out of the operand width', () => {
-    // (uint16_t)a + (uint16_t)b promotes to int and never wraps, so without the cast back
-    // to the operand width the carry is never seen.
-    const v = run({
-      c1: 'CARRY1(0xFF, 1)', c1n: 'CARRY1(0xFE, 1)',
-      c2: 'CARRY2(0xFFFF, 1)', c2n: 'CARRY2(0xFFFE, 1)',
-      c4: 'CARRY4(0xFFFFFFFFu, 1)', c4n: 'CARRY4(0xFFFFFFFEu, 1)',
-    });
-    assert.deepStrictEqual(v, { c1: 1n, c1n: 0n, c2: 1n, c2n: 0n, c4: 1n, c4n: 0n });
+describe('pseudo-op macros: what is left', { skip: !hasNativeGpp() }, () => {
+  it('CONCAT still joins two halves, for an operand pseudo-op-lower left in place', () => {
+    assert.deepStrictEqual(run({ c: 'CONCAT22(0x1234, 0x5678)' }), { c: 0x12345678n });
   });
-});
 
-describe('pseudo-op macros: SUB43', { skip: !hasNativeGpp() }, () => {
-  it('SUB43 yields three bytes, not four', () => {
-    const v = run({ k0: 'SUB43(0xAABBCCDDu, 0)', k1: 'SUB43(0xAABBCCDDu, 1)' });
-    assert.deepStrictEqual(v, { k0: 0xBBCCDDn, k1: 0xAABBCCn });
+  it('the lowered pseudo-ops have no definition, so a survivor fails to compile', () => {
+    for (const call of ['SUB41(1u, 0)', 'ZEXT14(1)', 'CARRY4(1u, 1u)', 'SBORROW4(1, 1)', 'ZPULL(1u, 0, 1)']) {
+      assert.throws(() => run({ v: call }), undefined, `${call} still compiles`);
+    }
   });
 });
 

@@ -197,29 +197,6 @@ const SYSTEM_HEADER_CATEGORY_RE = /^\/[A-Za-z0-9_]+\.h$/;
  * real header (windows.h/CRT) — so anything typed as one cannot compile and
  * must be dropped, not merely left to the SDK.
  */
-/**
- * Ghidra's CPUID pseudo-operations, one per leaf. These are decompiler output,
- * not symbols in the binary, so nothing but the platform header can declare them.
- */
-const GHIDRA_CPUID_PSEUDO_OPS = [
-  'cpuid',
-  'cpuid_basic_info',
-  'cpuid_Version_info',
-  'cpuid_cache_tlb_info',
-  'cpuid_serial_info',
-  'cpuid_Deterministic_Cache_Parameters_info',
-  'cpuid_MONITOR_MWAIT_Features_info',
-  'cpuid_Thermal_Power_Management_info',
-  'cpuid_Extended_Feature_Enumeration_info',
-  'cpuid_Direct_Cache_Access_info',
-  'cpuid_Architectural_Performance_Monitoring_info',
-  'cpuid_Extended_Topology_info',
-  'cpuid_Processor_Extended_States_info',
-  'cpuid_Quality_of_Service_info',
-  'cpuid_brand_part1_info',
-  'cpuid_brand_part2_info',
-  'cpuid_brand_part3_info',
-] as const;
 
 export function isMsvcEhInternal(name: string): boolean {
   return EH_INTERNAL_TYPES.has(name);
@@ -655,20 +632,6 @@ export const GHIDRA_PSEUDO_OP_RESULT_TYPES: Readonly<Record<string, string>> = {
   CONCAT41: 'uint64_t',
   CONCAT24: 'uint64_t',
   CONCAT42: 'uint64_t',
-  SUB41: 'uint8_t',
-  SUB42: 'uint16_t',
-  SUB43: 'uint32_t',
-  SUB84: 'uint32_t',
-  SUB82: 'uint16_t',
-  SUB81: 'uint8_t',
-  SUB21: 'uint8_t',
-  SUB14: 'uint8_t',
-  ZEXT14: 'uint32_t',
-  ZEXT24: 'uint32_t',
-  ZEXT48: 'uint64_t',
-  SEXT14: 'int32_t',
-  SEXT24: 'int32_t',
-  SEXT48: 'int64_t',
 };
 
 /**
@@ -834,8 +797,6 @@ const PLATFORM_MACRO_ALIASES: readonly string[] = [
   '_sprintf', '_memcpy', '_memset', '_memcmp', '_strlen', '_strcpy', '_strncpy',
   '_strcmp', '_strncmp', '_strcat', '_strncat', '_atoi', '_atol', '_sscanf',
   '_fprintf', '_printf', '_malloc', '_free', '_calloc', '_realloc', '_abs',
-  'builtin_strncpy', 'builtin_memcpy', 'builtin_memset', 'builtin_strcmp',
-  'builtin_strlen', 'builtin_strcpy',
   '__snprintf_s', '__snprintf', '_snprintf', '_vsnprintf',
   '__stricmp', '_stricmp', '_strnicmp', '_strrchr', '_strtok', '_strcspn',
   '_fopen', '_fclose', '_fread', '_fwrite', '_ftell', '_fseek', '_fflush',
@@ -1059,8 +1020,6 @@ export function generatePlatformHeader(
   // macro, which turns `NAN(x)` into a float constant applied to an argument.
   lines.push('// Ghidra decompiler pseudo-operations (no instruction-level C spelling)');
   lines.push('static inline bool D2_IsNaN(double x) { return x != x; }');
-  lines.push('static inline void LOCK() {}    // x86 LOCK prefix — marks the atomic region');
-  lines.push('static inline void UNLOCK() {}  // end of the region LOCK opened');
   lines.push('');
   // CPUID: Ghidra models the instruction as a pseudo-op per leaf, each returning
   // a POINTER to the four result registers — every body reads them back as
@@ -1083,9 +1042,6 @@ export function generatePlatformHeader(
   lines.push('#endif');
   lines.push('  return (int)(uintptr_t)aRegs;');
   lines.push('}');
-  for (const op of GHIDRA_CPUID_PSEUDO_OPS) {
-    lines.push(`static inline int ${op}(uint32_t nLeaf) { return D2_Cpuid(nLeaf); }`);
-  }
   lines.push('');
   lines.push('// __debugbreak stub for non-Windows (INT 3 debug breakpoint)');
   lines.push('#ifndef _WIN32');
@@ -1343,22 +1299,8 @@ export function generatePlatformHeader(
   lines.push('#define GL_ID_UNKNOWN 0');
   lines.push('');
 
-  // Ghidra builtin_ prefixed functions
-  lines.push('// Ghidra builtin_ prefixed functions');
-  lines.push('#define builtin_strncpy strncpy');
-  lines.push('#define builtin_memcpy memcpy');
-  lines.push('#define builtin_memset memset');
-  lines.push('#define builtin_strcmp strcmp');
-  lines.push('#define builtin_strlen strlen');
-  lines.push('#define builtin_strcpy strcpy');
   lines.push('');
 
-  // Ghidra ROUND is FLOAT_ROUND (FRNDINT, and the rounding half of FIST): the x87
-  // control word's mode, nearest-even, which std::nearbyint uses. round() rounds half
-  // away from zero. pseudo-op-lower writes the call itself; this covers a body that
-  // never reached the AST.
-  lines.push('// Ghidra ROUND (FLOAT_ROUND): current rounding mode, nearest-even by default');
-  lines.push('#define ROUND(x) std::nearbyint(x)');
   lines.push('');
 
   // Statically-linked CRT functions Ghidra named with a `CRT_` prefix that the
@@ -1922,10 +1864,10 @@ export function platformVoidPointerFunctionNames(): Set<string> {
 
 
 /**
- * The pseudo-op macros `d2_platform.h` defines: the decompiler operations (CONCAT, SUB,
- * ZEXT/SEXT, ZPULL/SPULL, the carry and borrow flags and the other instructions with no
- * C spelling) that reach a body unlowered. Kept as its own block so a test can compile
- * exactly these definitions without the rest of the platform header.
+ * The pseudo-op macros `d2_platform.h` still defines: CONCAT only, for an operand
+ * pseudo-op-lower could not type and left in place in report mode. Every other pseudo-op
+ * is lowered on the AST and deliberately has no definition. Kept as its own block so a
+ * test can compile exactly these definitions without the rest of the platform header.
  */
 export function ghidraPseudoOpMacroLines(): string[] {
   const lines: string[] = [];
@@ -1946,85 +1888,10 @@ export function ghidraPseudoOpMacroLines(): string[] {
   lines.push('#define CONCAT42(a, b) ((uint64_t)(((uint64_t)(uint32_t)(a) << 16) | (uint16_t)(b)))');
   lines.push('');
 
-  // Ghidra SUB macros (byte extraction — SUBmn extracts n bytes at position from m-byte value)
-  lines.push('// Ghidra SUB macros — SUBmn extracts n-byte sub-value from m-byte value');
-  lines.push('#define SUB41(x, n) ((uint8_t)((uint32_t)(x) >> ((n) * 8)))');
-  lines.push('#define SUB42(x, n) ((uint16_t)((uint32_t)(x) >> ((n) * 8)))');
-  lines.push('#define SUB43(x, n) ((uint32_t)(((uint32_t)(x) >> ((n) * 8)) & 0xFFFFFFu))');
-  lines.push('#define SUB84(x, n) ((uint32_t)((uint64_t)(x) >> ((n) * 8)))');
-  lines.push('#define SUB82(x, n) ((uint16_t)((uint64_t)(x) >> ((n) * 8)))');
-  lines.push('#define SUB81(x, n) ((uint8_t)((uint64_t)(x) >> ((n) * 8)))');
-  lines.push('#define SUB21(x, n) ((uint8_t)((uint16_t)(x) >> ((n) * 8)))');
-  lines.push('#define SUB14(x, n) ((uint8_t)((uint32_t)(x) >> ((n) * 8)))');
-  lines.push('');
-
-  // Ghidra zero/sign extension macros
-  lines.push('// Ghidra zero/sign extension macros');
-  lines.push('#define ZEXT14(x) ((uint32_t)(uint8_t)(x))');
-  lines.push('#define ZEXT24(x) ((uint32_t)(uint16_t)(x))');
-  lines.push('#define ZEXT48(x) ((uint64_t)(uint32_t)(x))');
-  lines.push('#define SEXT14(x) ((int32_t)(int8_t)(x))');
-  lines.push('#define SEXT24(x) ((int32_t)(int16_t)(x))');
-  lines.push('#define SEXT48(x) ((int64_t)(int32_t)(x))');
-  lines.push('');
-
-  // Ghidra bit-range extraction. `ZPULL`/`SPULL` are the decompiler's own ops
-  // (Ghidra `additionalpcode`: CPUI_ZPULL / CPUI_SPULL): pull `nBits` bits out of
-  // a value starting at `nPos`, with the bits of the operand numbered from the
-  // LEAST significant, starting at 0. ZPULL zero-extends what it pulled, SPULL
-  // sign-extends it from the top bit pulled — which is the only difference
-  // between them, and the reason both spellings exist. They appear where the
-  // masked field is NOT a declared bitfield: `SPULL(bySkillFlags, 5, 1)` is the
-  // `TEST` against a 0x20 mask that `pSkill->pRecord->InGame` would have been
-  // had the struct declared bit 5 as a member.
-  lines.push('// Ghidra bit-range extraction (ZPULL/SPULL pseudo-ops): bits [nPos, nPos+nBits)');
-  lines.push('static inline uint32_t ZPULL(uint64_t nValue, int nPos, int nBits) {');
-  lines.push('  uint64_t nMask = (nBits >= 64) ? ~(uint64_t)0 : (((uint64_t)1 << nBits) - 1);');
-  lines.push('  return (uint32_t)((nValue >> nPos) & nMask);');
-  lines.push('}');
-  lines.push('static inline int32_t SPULL(uint64_t nValue, int nPos, int nBits) {');
-  lines.push('  uint32_t nSign = (uint32_t)1 << (nBits - 1);');
-  lines.push('  uint32_t nRaw = ZPULL(nValue, nPos, nBits);');
-  lines.push('  return (int32_t)((nRaw ^ nSign) - nSign);');
-  lines.push('}');
-  lines.push('');
-
-  // Ghidra pseudo-operations — instructions the decompiler cannot express in C
-  // and calls out by name instead. They reach bodies exactly as written, so they
-  // need a definition, not a declaration; each is what the instruction does.
-  lines.push('// Ghidra pseudo-operations (instructions with no C spelling)');
-  lines.push('#define ABS(x) std::fabs(x)  // FLOAT_ABS clears the sign bit, -0.0 and -NaN included');
-  lines.push('static inline uint64_t rdtsc(void) {');
-  lines.push('#if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))');
-  lines.push('  uint32_t nLow, nHigh;');
-  lines.push('  __asm__ __volatile__("rdtsc" : "=a"(nLow), "=d"(nHigh));');
-  lines.push('  return ((uint64_t)nHigh << 32) | nLow;');
-  lines.push('#else');
-  lines.push('  return 0;');
-  lines.push('#endif');
-  lines.push('}');
-  lines.push('// `swi(n)` is INT n. Ghidra models it as returning the handler address the');
-  lines.push('// body then calls; there is no such value at runtime, so the trap is raised');
-  lines.push('// and a null handler returned rather than pretending otherwise.');
-  lines.push('static inline void* swi(int nVector) {');
-  lines.push('#if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))');
-  lines.push('  if (nVector == 3) __asm__ __volatile__("int3");');
-  lines.push('#else');
-  lines.push('  (void)nVector;');
-  lines.push('#endif');
-  lines.push('  return nullptr;');
-  lines.push('}');
-  lines.push('');
-
-  // Ghidra carry/borrow detection macros
-  lines.push('// Ghidra carry/borrow detection');
-  // The sum is cast back to the operand width before the compare: a 1- or 2-byte add
-  // promotes to int and never wraps, so without the cast the carry is never seen.
-  lines.push('#define CARRY4(a, b) ((uint32_t)((uint32_t)(a) + (uint32_t)(b)) < (uint32_t)(a))');
-  lines.push('#define CARRY2(a, b) ((uint16_t)((uint16_t)(a) + (uint16_t)(b)) < (uint16_t)(a))');
-  lines.push('#define CARRY1(a, b) ((uint8_t)((uint8_t)(a) + (uint8_t)(b)) < (uint8_t)(a))');
-  lines.push('#define SBORROW4(a, b) ((int32_t)((uint32_t)(a) ^ (uint32_t)(b)) < 0 && (int32_t)((uint32_t)(a) ^ ((uint32_t)(a) - (uint32_t)(b))) < 0)');
-  lines.push('#define SBORROW2(a, b) ((int16_t)((uint16_t)(a) ^ (uint16_t)(b)) < 0 && (int16_t)((uint16_t)(a) ^ ((uint16_t)(a) - (uint16_t)(b))) < 0)');
-  lines.push('');
+  // SUB, ZEXT/SEXT, ZPULL/SPULL, CARRY/SBORROW, ABS, rdtsc and swi are lowered on the
+  // AST by pseudo-op-lower and have no definition here: one that reappears in a body is
+  // a compile error, not a macro that silently means something else. Measured 0 left
+  // outside the excluded CRT on the v1050 snapshot. CONCAT stays because an operand of
+  // unknown type is still left for it in report mode (one site: _g_nLadderFilterMode).
   return lines;
 }
