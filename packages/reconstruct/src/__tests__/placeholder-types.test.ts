@@ -31,9 +31,14 @@ describe('respellPlaceholderType', () => {
 });
 
 describe('respellPlaceholderTypes: SDK records', () => {
-  it('leaves a system-header typedef as Ghidra describes the real one', () => {
-    const dts = [{ name: 'PULONG_PTR', category: '/basetsd.h', kind: 'TYPEDEF', underlyingType: 'ulong *' }] as unknown as ExtractedDataType[];
+  it('spells a system-header record\'s ulong as the SDK\'s unsigned long', () => {
+    const dts = [
+      { name: 'PULONG_PTR', category: '/basetsd.h', kind: 'TYPEDEF', underlyingType: 'ulong *' },
+      { name: 'sockaddr_in', category: '/ws2def.h', kind: 'STRUCTURE', fields: [{ dataType: 'ushort' }, { dataType: 'byte[8]' }] },
+    ] as unknown as ExtractedDataType[];
     respellPlaceholderTypes([], [], dts);
-    assert.strictEqual((dts[0] as unknown as { underlyingType: string }).underlyingType, 'ulong *');
+    assert.strictEqual((dts[0] as unknown as { underlyingType: string }).underlyingType, 'unsigned long *');
+    const f = (dts[1] as unknown as { fields: { dataType: string }[] }).fields;
+    assert.deepStrictEqual(f.map(x => x.dataType), ['uint16_t', 'uint8_t[8]']);
   });
 });

@@ -26,14 +26,26 @@ export const PLACEHOLDER_TYPE_SPELLINGS: Readonly<Record<string, string>> = {
   vtable: 'void',
 };
 
+/**
+ * Inside an SDK type's record Ghidra's `ulong` is the header's `unsigned long`
+ * (`/basetsd.h/PULONG_PTR` = `ulong *`), a distinct C++ type from the `unsigned int`
+ * the program's own `ulong` was typedef'd as. Spelled `uint32_t` there, the cast passes
+ * concluded a `uint32_t *` already fit GetQueuedCompletionStatus and dropped the cast.
+ */
+const SDK_RECORD_SPELLINGS: Readonly<Record<string, string>> = {
+  ...PLACEHOLDER_TYPE_SPELLINGS,
+  ulong: 'unsigned long',
+};
+
 const RE = new RegExp(`\\b(${Object.keys(PLACEHOLDER_TYPE_SPELLINGS).join('|')})\\b`, 'g');
 
 /** One type spelling, with every placeholder name respelled. */
-export function respellPlaceholderType(type: string): string;
-export function respellPlaceholderType(type: string | undefined): string | undefined;
-export function respellPlaceholderType(type: string | undefined): string | undefined {
+export function respellPlaceholderType(type: string, sdkRecord?: boolean): string;
+export function respellPlaceholderType(type: string | undefined, sdkRecord?: boolean): string | undefined;
+export function respellPlaceholderType(type: string | undefined, sdkRecord = false): string | undefined {
   if (!type) return type;
-  return type.replace(RE, (m) => PLACEHOLDER_TYPE_SPELLINGS[m]);
+  const table = sdkRecord ? SDK_RECORD_SPELLINGS : PLACEHOLDER_TYPE_SPELLINGS;
+  return type.replace(RE, (m) => table[m]);
 }
 
 interface TypedSlot { dataType?: string }
@@ -46,10 +58,11 @@ export function respellPlaceholderTypes(
   dataTypes: ExtractedDataType[],
 ): number {
   let changed = 0;
+  let sdk = false;
   const fix = <T extends object, K extends keyof T>(o: T, k: K) => {
     const v = o[k];
     if (typeof v !== 'string') return;
-    const r = respellPlaceholderType(v);
+    const r = respellPlaceholderType(v, sdk);
     if (r !== v) { (o as Record<K, unknown>)[k] = r; changed++; }
   };
   for (const f of functions) {
@@ -59,12 +72,8 @@ export function respellPlaceholderTypes(
   }
   for (const g of globals) { fix(g, 'dataType'); fix(g, 'suggestedType'); }
   for (const dt of dataTypes) {
-    // An SDK type's record (`/basetsd.h/PULONG_PTR` = `ulong *`) describes the REAL
-    // header's type, which the tree takes from <windows.h>, not from us: there `ulong`
-    // is the SDK's `unsigned long`, and respelling it would tell the cast passes that
-    // `PULONG_PTR` is `uint32_t *` (QServerNT.cpp: the cast into GetQueuedCompletionStatus
-    // was dropped).
-    if (isLibraryType(dt.name, dt.category ?? '')) continue;
+    // An SDK type's record describes the REAL header's type (see SDK_RECORD_SPELLINGS).
+    sdk = isLibraryType(dt.name, dt.category ?? '');
     const d = dt as unknown as {
       fields?: TypedSlot[]; parameters?: TypedSlot[]; underlyingType?: string; returnType?: string;
     };
