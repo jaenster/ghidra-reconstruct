@@ -83,8 +83,19 @@ describe('typeNormalizePlugin', () => {
   // ============================================
 
   describe('byte preservation', () => {
-    it('should keep byte as-is by default', () => {
-      assertTransform('void foo(byte x) {}', 'void foo(byte x) {}');
+    // CHANGED: byte is a Ghidra placeholder name like uint; by default it is respelled
+    // as the uint8_t its platform typedef was, so the tree names no Ghidra type.
+    it('converts byte to uint8_t by default', () => {
+      assertTransform('void foo(byte x) {}', 'void foo(uint8_t x) {}');
+    });
+
+    it('keeps byte when keepByte=true', () => {
+      assertTransform('void foo(byte x) {}', 'void foo(byte x) {}', { keepByte: true });
+    });
+
+    it('respells the remaining placeholders as their typedefs', () => {
+      assertTransform('void foo(uchar a, wchar16 b, pointer c, vtable *d, pointer32 e) {}',
+        'void foo(uint8_t a, uint16_t b, void* c, void* d, uint32_t e) {}');
     });
 
     it('should convert byte to uint8_t when keepByte=false', () => {

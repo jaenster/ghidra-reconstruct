@@ -38,7 +38,7 @@ describe('generateProject: d2_platform.h follows the tree', () => {
     generateSourceMaps: false, transformPreset: 'quick', includeAddressComments: false,
     promoteStaticGlobals: false,
   };
-  it('keeps byte for a body that declares a byte array, drops float10 and undefined4', () => {
+  it('a body that declares a byte array names uint8_t; no placeholder typedef is left', () => {
     const fn = {
       name: 'Send', address: '0052b780', signature: 'void Send(void)', returnType: 'void',
       parameters: [], localVariables: [], callingConvention: '__cdecl', size: 16,
@@ -48,7 +48,9 @@ describe('generateProject: d2_platform.h follows the tree', () => {
     } as unknown as ExtractedFunction;
     const project = generateProject('T', [fn], [], [], [], [], options);
     const h = project.files.get('d2_platform.h')!.content;
-    assert.match(h, /typedef unsigned char byte;/);
+    assert.ok(!/typedef unsigned char byte;/.test(h));
+    const cpp = [...project.files.values()].find(f => f.content.includes('aPacket'))!.content;
+    assert.match(cpp, /uint8_t aPacket\[4\];/);
     assert.ok(!/typedef long double float10;/.test(h));
     assert.ok(!/typedef uint32_t undefined4;/.test(h));
   });

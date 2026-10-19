@@ -58,6 +58,14 @@ const SHORTHAND_MAP: ReadonlyMap<string, string> = new Map([
   ['sdword', 'int32_t'],
   ['qword', 'uint64_t'],
   ['sqword', 'int64_t'],
+  // The remaining Ghidra placeholder names, each exactly the platform typedef it had, so
+  // a body names no Ghidra type at all (reconstruct's placeholder-types.ts does the same
+  // for every declaration).
+  ['uchar', 'uint8_t'],
+  ['wchar16', 'uint16_t'],
+  ['unicode', 'uint16_t'],
+  ['pointer32', 'uint32_t'],
+  ['ImageBaseOffset32', 'uint32_t'],
 ]);
 
 /** Windows scalar typedefs -> C++ fixed-width type (32-bit x86) */
@@ -199,7 +207,7 @@ export interface TypeNormalizeOptions extends PluginOptions {
   /** Convert undefined types to auto when initialized (default: true) */
   undefinedToAuto?: boolean;
 
-  /** Keep 'byte' as-is instead of converting to uint8_t (default: true) */
+  /** Keep 'byte' as-is instead of converting to uint8_t (default: false) */
   keepByte?: boolean;
 }
 
@@ -244,7 +252,7 @@ function createAutoPromotionPass(options: TypeNormalizeOptions = {}): Transforme
  * This catches params, return types, uninitialized locals, etc.
  */
 function createTypeRenamePass(options: TypeNormalizeOptions = {}): Transformer {
-  const { normalizeShorthands = true, keepByte = true } = options;
+  const { normalizeShorthands = true, keepByte = false } = options;
 
   return createTransformer({
     visitNode(node: ASTNode): ASTNode | undefined {
@@ -277,6 +285,16 @@ function createTypeRenamePass(options: TypeNormalizeOptions = {}): Transformer {
         const shorthandReplacement = SHORTHAND_MAP.get(typeName);
         if (shorthandReplacement) {
           return createTypedefTypeNode(shorthandReplacement, node);
+        }
+        // `typedef void vtable;` and `typedef void* pointer;` - the same types, spelled.
+        if (typeName === 'vtable') {
+          return { kind: NodeKind.BuiltinType, name: 'void', modifiers: [], location: node.location,
+            leadingTrivia: node.leadingTrivia || [], trailingTrivia: node.trailingTrivia || [] } as unknown as ASTNode;
+        }
+        if (typeName === 'pointer') {
+          return { kind: NodeKind.PointerType, qualifiers: [], location: node.location,
+            pointee: { kind: NodeKind.BuiltinType, name: 'void', modifiers: [], location: node.location, leadingTrivia: [], trailingTrivia: [] },
+            leadingTrivia: node.leadingTrivia || [], trailingTrivia: node.trailingTrivia || [] } as unknown as ASTNode;
         }
       }
 

@@ -29,6 +29,7 @@ export {
   isSwitchTableSymbol,
 } from './globals-header.js';
 
+import { respellPlaceholderTypes } from './placeholder-types.js';
 import { isMainThread } from 'worker_threads';
 import * as fs from 'node:fs/promises';
 import * as nodeFs from 'node:fs';
@@ -576,6 +577,8 @@ export function generateProjectStage1(
 ): GenerationState {
   const genT0 = Date.now();
   beginShard(shard);
+  // Before anything reads a type: one spelling for every Ghidra placeholder name.
+  respellPlaceholderTypes(functions, globals as { dataType?: string; suggestedType?: string }[], dataTypes);
   if (!shard || shard.index === 0) {
     for (const d of ghidraDeclDrift(functions)) {
       console.warn(`[decl-drift] ${d.emitted} @${d.address}: d2_platform.h declares ${d.declArity} parameter(s), Ghidra has ${d.ghidraArity} — update crt-mapping.ts`);
