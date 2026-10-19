@@ -76,6 +76,7 @@ import { normalizeDataAddress, stringDefinition } from './declaration-closure.js
 import { harvestAnnotatedParameterTypes } from './win32-signatures.js';
 import { isPlatformOrBuiltinType, isLibraryType, generatePlatformHeader, normalizeDataValue, arrayRowTypedefLines, arrayRowReturn, arrayRowSpelling, GHIDRA_PSEUDO_OP_RESULT_TYPES, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, platformDefinedFunctionNames, platformVoidPointerFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
 import { createOverrideRegistry } from '../overrides/index.js';
+import { alignPathCase, assertNoCaseCollidingFiles } from './path-case.js';
 import { createLibraryRegistry } from '../library/index.js';
 import { createMethodConversionRegistry, getOrCreateRegistry, applyMethodConversions, detectMethodConversionsFromTags, type MethodCallMapping, type MethodConversionRegistry } from '../methods/index.js';
 import type { MethodConversionEntry, ModuleConfig, AutoMethodConversionConfig, TypeOwnershipEntry } from '../config/schema.js';
@@ -3918,6 +3919,17 @@ export async function writeProject(
         file.content = resolved.code;
       }
     }
+  }
+
+  // The disk spells every path the way the project does: a directory left from an older
+  // spelling on a case-insensitive disk would otherwise keep its name, and the includes,
+  // which use the project's spelling, would not resolve on a case-sensitive checkout.
+  const emittedPaths = [...project.files.keys(), ...project.sourceMaps.keys()];
+  assertNoCaseCollidingFiles(emittedPaths);
+  const caseRenames = await alignPathCase(outputDir, emittedPaths);
+  if (caseRenames.length > 0) {
+    console.log(`Renamed ${caseRenames.length} existing path(s) to the emitted spelling:`);
+    for (const r of caseRenames.slice(0, 10)) console.log(`  ${r}`);
   }
 
   // Write all source files
