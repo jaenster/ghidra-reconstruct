@@ -327,6 +327,33 @@ function fromTemplate(text: string, binds: Record<string, Expression>): Expressi
 // ============================================
 // LOWERING
 // ============================================
+/**
+ * `(T)e`, without a second identical cast when e already is one. Value-preserving: a cast
+ * to the type an expression already has is the identity.
+ */
+function castTo(T: string, e: Expression): Expression {
+  const x = unwrapParens(e);
+  if (x.kind === NodeKind.CStyleCastExpr && typeName((x as CStyleCastExpr).type) === T) return e;
+  return fromTemplate(`(${T})__A`, { __A: e });
+}
+
+/**
+ * `(T)(e & mask)`, without a second identical mask when e already is `(T)(x & mask)` or
+ * `x & mask` with the same mask. Value-preserving: masking twice with one mask is masking once.
+ */
+function maskTo(T: string, n: number, e: Expression): Expression {
+  const lit = maskLiteral(n);
+  let x = unwrapParens(e);
+  if (x.kind === NodeKind.CStyleCastExpr && typeName((x as CStyleCastExpr).type) === T) x = unwrapParens((x as CStyleCastExpr).expression);
+  if (x.kind === NodeKind.BinaryExpr && (x as BinaryExpr).operator === '&') {
+    const r = unwrapParens((x as BinaryExpr).right);
+    if (r.kind === NodeKind.IntegerLiteral && (r as IntegerLiteralExpr).value === (1n << BigInt(n * 8)) - 1n) {
+      return castTo(T, e);
+    }
+  }
+  return fromTemplate(`(${T})(__A & ${lit})`, { __A: e });
+}
+
 
 class Unlowerable extends Error {
   constructor(readonly reason: string) { super(reason); }
@@ -381,7 +408,7 @@ function threeByteCast(e: Expression): { inner: Expression; signed: boolean } | 
  */
 function raw(ctx: Ctx, e: Expression, n: number, need: number): Expression {
   const U = uType(n);
-  const mask3 = (x: Expression) => fromTemplate(`(${U})(__A & ${maskLiteral(3)})`, { __A: x });
+  const mask3 = (x: Expression) => maskTo(U, 3, x);
 
   // Ghidra's own cast to a 24-bit type. From a wider value it keeps the low three bytes,
   // which the container cast and mask below say again; from a narrower one it is the
@@ -394,7 +421,7 @@ function raw(ctx: Ctx, e: Expression, n: number, need: number): Expression {
     if (ic.kind === 'int' && ic.width < 3) {
       const ext = cast3.signed
         ? fromTemplate(`(uint32_t)(int32_t)(${sType(ic.width)})__A`, { __A: cast3.inner })
-        : fromTemplate(`(uint32_t)(${uType(ic.width)})__A`, { __A: cast3.inner });
+        : castTo('uint32_t', castTo(uType(ic.width), cast3.inner));
       return mask3(ext);
     }
     e = cast3.inner;
@@ -402,7 +429,7 @@ function raw(ctx: Ctx, e: Expression, n: number, need: number): Expression {
 
   const cls = ctx.classify(e);
   const spelled = () => emit(e as AnyNode).replace(/\s+/g, ' ').slice(0, 60);
-  const masked = (x: Expression) => (isOddWidth(n) ? fromTemplate(`(${U})(__A & ${maskLiteral(n)})`, { __A: x }) : x);
+  const masked = (x: Expression) => (isOddWidth(n) ? maskTo(U, n, x) : x);
   switch (cls.kind) {
     case 'unknown':
       throw new Unlowerable(`operand type unknown (${cls.why}): ${spelled()}`);
@@ -412,7 +439,7 @@ function raw(ctx: Ctx, e: Expression, n: number, need: number): Expression {
       return masked(fromTemplate(`(${U})(uintptr_t)__A`, { __A: e }));
     case 'int':
       if (cls.width < need) throw new Unlowerable(`operand is ${cls.width} bytes, the operation reads ${need}`);
-      return masked(fromTemplate(`(${U})__A`, { __A: e }));
+      return masked(castTo(U, e));
     case 'float': {
       // `(float)E` of a 1- or 2-byte integer: the value and the bit reading of Ghidra's
       // cast agree for E < 2^24, so the integer itself is exact under both.
@@ -451,9 +478,7 @@ function lowerSub(ctx: Ctx, n: number, m: number, args: Expression[]): Expressio
   if (off + m > n) throw new Unlowerable(`SUB${n}${m} offset ${off} reads past the operand`);
   const src = raw(ctx, x, n, off + m);
   const shifted = off === 0 ? src : fromTemplate(`__A >> ${off * 8}`, { __A: src });
-  return isOddWidth(m)
-    ? fromTemplate(`(${uType(m)})(__A & ${maskLiteral(m)})`, { __A: shifted })
-    : fromTemplate(`(${uType(m)})__A`, { __A: shifted });
+  return isOddWidth(m) ? maskTo(uType(m), m, shifted) : castTo(uType(m), shifted);
 }
 
 function lowerConcat(ctx: Ctx, n: number, m: number, args: Expression[]): Expression {
@@ -461,14 +486,14 @@ function lowerConcat(ctx: Ctx, n: number, m: number, args: Expression[]): Expres
   const T = uType(n + m);
   const h = raw(ctx, hi, n, n);
   const l = raw(ctx, lo, m, m);
-  const joined = fromTemplate(`(${T})((${T})__A << ${m * 8} | (${T})__B)`, { __A: h, __B: l });
-  return isOddWidth(n + m) ? fromTemplate(`(${T})(__A & ${maskLiteral(n + m)})`, { __A: joined }) : joined;
+  const joined = fromTemplate(`(${T})(__A << ${m * 8} | __B)`, { __A: castTo(T, h), __B: castTo(T, l) });
+  return isOddWidth(n + m) ? maskTo(T, n + m, joined) : joined;
 }
 
 function lowerExt(ctx: Ctx, signed: boolean, n: number, m: number, args: Expression[]): Expression {
   if (m < n) throw new Unlowerable(`extension from ${n} to ${m} bytes narrows`);
   const src = raw(ctx, args[0], n, n);
-  if (!signed) return fromTemplate(`(${uType(m)})__A`, { __A: src });
+  if (!signed) return castTo(uType(m), src);
   if (n === 3) {
     // 24-bit sign extension: the sign bit moved to bit 31 and shifted back arithmetically.
     return fromTemplate(`(${sType(m)})((int32_t)((uint32_t)__A << 8) >> 8)`, { __A: src });
