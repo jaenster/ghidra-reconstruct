@@ -10,7 +10,7 @@
 // =============================================================================
 
 /** Standard C/C++ types from <cstdint>, <cstddef>, and language primitives */
-import { ARTIFACT_SUPPORT_LINES } from '@ghidra-mcp/cpp-parser';
+import { ARTIFACT_SUPPORT_LINES, Lexer, TokenKind } from '@ghidra-mcp/cpp-parser';
 import {
   generateExcludedSymbolDecls, EXTRA_WIN32_SDK_HEADERS,
   EXCLUDED_SYMBOL_DECLS, CRT_DECLARED_FUNCTION_NAMES, declaredIdentifier,
@@ -937,6 +937,11 @@ export function generatePlatformHeader(
      * program spells. Only these get a typedef; undefined means all of them.
      */
     oddWidthTypesUsed?: ReadonlySet<string>;
+    /**
+     * The Ghidra placeholder type names (PLACEHOLDER_TYPE_NAMES) the generated tree
+     * spells anywhere. Only these get a typedef; undefined means all of them.
+     */
+    placeholderTypesUsed?: ReadonlySet<string>;
   } = {},
 ): string {
   const lines: string[] = [];
@@ -949,12 +954,20 @@ export function generatePlatformHeader(
   lines.push('');
   lines.push('#pragma once');
   lines.push('');
+  // Every Ghidra placeholder type is emitted only while the tree spells it (see
+  // PLACEHOLDER_TYPE_NAMES): an unused one is a Ghidra name with no reason to exist,
+  // and a body that reaches one later fails loudly instead of meaning something.
+  const placeholder = (name: string, line: string) => {
+    if (options.placeholderTypesUsed && !options.placeholderTypesUsed.has(name)) return;
+    if (options.oddWidthTypesUsed && ODD_WIDTH_INTEGER_TYPES.includes(name) && !options.oddWidthTypesUsed.has(name)) return;
+    lines.push(line);
+  };
   lines.push('// Core type aliases MUST come before system headers to prevent');
   lines.push('// std::byte (C++17) from shadowing our byte typedef');
-  lines.push('typedef unsigned char byte;');
-  lines.push('typedef unsigned int uint;');
-  lines.push('typedef unsigned short ushort;');
-  lines.push('typedef unsigned int ulong;');
+  placeholder('byte', 'typedef unsigned char byte;');
+  placeholder('uint', 'typedef unsigned int uint;');
+  placeholder('ushort', 'typedef unsigned short ushort;');
+  placeholder('ulong', 'typedef unsigned int ulong;');
   lines.push('');
   lines.push('#include <cstdint>');
   lines.push('#include <cstddef>');
@@ -974,59 +987,56 @@ export function generatePlatformHeader(
   lines.push('');
   lines.push('// Ghidra-style lowercase type aliases (used throughout reconstructed code)');
   lines.push('// (byte, uint, ushort, ulong already defined above before system headers)');
-  lines.push('typedef uint64_t ulonglong;');
-  lines.push('typedef int64_t longlong;');
-  lines.push('typedef uint8_t uchar;');
-  lines.push('typedef void* pointer;');
-  lines.push('typedef uint32_t pointer32;');
-  lines.push('typedef uint32_t ImageBaseOffset32;');
-  lines.push('typedef uint32_t undefined4;');
-  lines.push('typedef uint16_t word;');
-  lines.push('typedef uint32_t dword;');
-  lines.push('typedef uint64_t qword;');
-  lines.push('typedef int8_t sbyte;');
-  lines.push('typedef int16_t sword;');
-  lines.push('typedef int32_t sdword;');
-  lines.push('typedef int64_t sqword;');
-  lines.push('typedef long double float10;');
+  placeholder('ulonglong', 'typedef uint64_t ulonglong;');
+  placeholder('longlong', 'typedef int64_t longlong;');
+  placeholder('uchar', 'typedef uint8_t uchar;');
+  placeholder('pointer', 'typedef void* pointer;');
+  placeholder('pointer32', 'typedef uint32_t pointer32;');
+  placeholder('ImageBaseOffset32', 'typedef uint32_t ImageBaseOffset32;');
+  placeholder('undefined4', 'typedef uint32_t undefined4;');
+  placeholder('word', 'typedef uint16_t word;');
+  placeholder('dword', 'typedef uint32_t dword;');
+  placeholder('qword', 'typedef uint64_t qword;');
+  placeholder('sbyte', 'typedef int8_t sbyte;');
+  placeholder('sword', 'typedef int16_t sword;');
+  placeholder('sdword', 'typedef int32_t sdword;');
+  placeholder('sqword', 'typedef int64_t sqword;');
+  placeholder('float10', 'typedef long double float10;');
   // Ghidra's 2-byte float. It reaches the tree only as a cast artifact, where a
   // function that genuinely returns 16 bits (CheckCollision_Vector and friends,
   // `MOV AX,0x27`) has its result recomposed from a synthetic upper half and cast
   // back down. There is no portable 2-byte C++ float - `_Float16` needs SSE2 and a
   // compiler that offers it, neither guaranteed on i686-w64-mingw32 - and half-float
   // SEMANTICS are not what those sites need: they need the low 16 bits to survive.
-  lines.push('typedef uint16_t float2;');
-  lines.push('typedef uint16_t wchar16;');
-  lines.push('typedef uint16_t unicode;');
-  lines.push('typedef uint8_t undefined;');
-  lines.push('typedef uint8_t undefined1;');
-  lines.push('typedef uint16_t undefined2;');
-  const oddWidth = (name: string, line: string) => {
-    if (!options.oddWidthTypesUsed || options.oddWidthTypesUsed.has(name)) lines.push(line);
-  };
-  oddWidth('undefined3', 'typedef uint8_t undefined3;  // 3 bytes — no exact C type');
+  placeholder('float2', 'typedef uint16_t float2;');
+  placeholder('wchar16', 'typedef uint16_t wchar16;');
+  placeholder('unicode', 'typedef uint16_t unicode;');
+  placeholder('undefined', 'typedef uint8_t undefined;');
+  placeholder('undefined1', 'typedef uint8_t undefined1;');
+  placeholder('undefined2', 'typedef uint16_t undefined2;');
+  placeholder('undefined3', 'typedef uint8_t undefined3;  // 3 bytes — no exact C type');
   // Ghidra's `vtable` is the (opaque) virtual function table STRUCT, so `vtable *`
   // is a single pointer. `typedef void* vtable` made `vtable *` a DOUBLE pointer
   // and disagreed with the struct-field mapping in header.ts, which renders the
   // same Ghidra type `vtable *` as `void *` — every field read into a `vtable *`
   // local was then "invalid conversion from 'void*' to 'void**'".
-  lines.push('typedef void vtable;   // opaque virtual function table; `vtable *` == `void *`');
+  placeholder('vtable', 'typedef void vtable;   // opaque virtual function table; `vtable *` == `void *`');
   // Ghidra non-standard integer sizes, approximated by the next C type up. A body never
   // needs one - three-byte-access lowers loads and stores through them, type-normalize
   // spells a 3-byte value as its 4-byte container - so each typedef is emitted only while a
   // DECLARATION in the program still spells it, and a body that names one fails loudly.
   lines.push('// Ghidra non-standard integer sizes still spelled by a declaration');
-  oddWidth('int3', 'typedef int32_t int3;   // 3 bytes — Ghidra artifact, use int32_t');
-  oddWidth('uint3', 'typedef uint32_t uint3;  // 3 bytes — Ghidra artifact, use uint32_t');
-  oddWidth('int5', 'typedef int32_t int5;   // 5 bytes — Ghidra artifact');
-  oddWidth('uint5', 'typedef uint64_t uint5;  // 5 bytes — Ghidra artifact');
-  oddWidth('int6', 'typedef int32_t int6;   // 6 bytes — Ghidra artifact');
-  oddWidth('uint6', 'typedef uint64_t uint6;  // 6 bytes — Ghidra artifact');
-  oddWidth('int7', 'typedef int32_t int7;   // 7 bytes — Ghidra artifact');
+  placeholder('int3', 'typedef int32_t int3;   // 3 bytes — Ghidra artifact, use int32_t');
+  placeholder('uint3', 'typedef uint32_t uint3;  // 3 bytes — Ghidra artifact, use uint32_t');
+  placeholder('int5', 'typedef int32_t int5;   // 5 bytes — Ghidra artifact');
+  placeholder('uint5', 'typedef uint64_t uint5;  // 5 bytes — Ghidra artifact');
+  placeholder('int6', 'typedef int32_t int6;   // 6 bytes — Ghidra artifact');
+  placeholder('uint6', 'typedef uint64_t uint6;  // 6 bytes — Ghidra artifact');
+  placeholder('int7', 'typedef int32_t int7;   // 7 bytes — Ghidra artifact');
   // No `unkfloat1`: type-normalize spells Ghidra's 1-byte float varnode `uint8_t`, so a
   // body that still names it fails to compile instead of meaning something else.
-  lines.push('typedef uint8_t unkbool1;');
-  lines.push('typedef int code(...);  // Ghidra executable code type — code* = callable function pointer');
+  placeholder('unkbool1', 'typedef uint8_t unkbool1;');
+  placeholder('code', 'typedef int code(...);  // Ghidra executable code type — code* = callable function pointer');
   lines.push('');
   // Decompiler pseudo-operations. Ghidra prints these where the instruction has
   // no C spelling; they are not symbols in the binary, so nothing else declares
@@ -1893,6 +1903,18 @@ export function platformVoidPointerFunctionNames(): Set<string> {
   return names;
 }
 
+/**
+ * Ghidra's placeholder type names: spellings of Ghidra's own data types (built-ins,
+ * undefined-N, odd widths, code, vtable) that C++ does not have. The platform header
+ * typedefs each one only while the generated tree still spells it.
+ */
+export const PLACEHOLDER_TYPE_NAMES: readonly string[] = [
+  'byte', 'uint', 'ushort', 'ulong', 'ulonglong', 'longlong', 'uchar', 'pointer', 'pointer32',
+  'ImageBaseOffset32', 'undefined4', 'word', 'dword', 'qword', 'sbyte', 'sword', 'sdword', 'sqword',
+  'float10', 'float2', 'wchar16', 'unicode', 'undefined', 'undefined1', 'undefined2', 'undefined3',
+  'vtable', 'unkbool1', 'code', 'int3', 'uint3', 'int5', 'uint5', 'int6', 'uint6', 'int7',
+];
+
 /** Ghidra's odd-width integer type names the platform header can typedef. */
 export const ODD_WIDTH_INTEGER_TYPES: readonly string[] = ['undefined3', 'int3', 'uint3', 'int5', 'uint5', 'int6', 'uint6', 'int7'];
 
@@ -1903,6 +1925,38 @@ export function oddWidthTypesSpelled(typeSpellings: Iterable<string | undefined>
   for (const t of typeSpellings) {
     if (!t) continue;
     for (const m of t.matchAll(re)) used.add(m[1]);
+  }
+  return used;
+}
+
+/**
+ * The placeholder type names a generated tree spells, read token by token so a name in
+ * a comment or a string is not a use. The platform header's own typedef of a name is
+ * not a use of it; anything else there (a row typedef over `byte`) is.
+ */
+export function placeholderTypesUsedIn(
+  files: Iterable<{ path: string; content: string }>,
+  platformPath = 'd2_platform.h',
+): Set<string> {
+  const names = new Set(PLACEHOLDER_TYPE_NAMES);
+  const used = new Set<string>();
+  for (const f of files) {
+    let tokens;
+    try {
+      tokens = new Lexer(f.content, { preserveTrivia: false }).tokenize();
+    } catch {
+      // A file the lexer refuses could spell anything: keep every typedef.
+      return names;
+    }
+    const isPlatform = f.path === platformPath;
+    const seen = new Map<string, number>();
+    for (const t of tokens) {
+      if (t.kind !== TokenKind.Identifier || !names.has(t.text)) continue;
+      if (!isPlatform) { used.add(t.text); continue; }
+      seen.set(t.text, (seen.get(t.text) ?? 0) + 1);
+    }
+    // Each placeholder is DEFINED exactly once in the platform header.
+    for (const [n, count] of seen) if (count > 1) used.add(n);
   }
   return used;
 }

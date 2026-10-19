@@ -74,7 +74,7 @@ import { buildNamespaceResolution, namespaceResolution, renderNamespace } from '
 import { setInteriorLabelSymbols, resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, setDeclarationClosureDataContent, getDeclarationClosureReport, isUnreferenceableArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, wasGlobalClaimed, findDuplicateLinkageNames, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, setInitializerAddressTable, setInitializerFunctionAddresses, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType, emittedNamespaceOf, getDeclaredNames, initializerAddressReferences, addInitializerAddressReferences } from './globals-header.js';
 import { normalizeDataAddress, stringDefinition } from './declaration-closure.js';
 import { harvestAnnotatedParameterTypes } from './win32-signatures.js';
-import { isPlatformOrBuiltinType, isLibraryType, generatePlatformHeader, oddWidthTypesSpelled, normalizeDataValue, arrayRowTypedefLines, arrayRowReturn, arrayRowSpelling, GHIDRA_PSEUDO_OP_RESULT_TYPES, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, platformDefinedFunctionNames, platformVoidPointerFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
+import { isPlatformOrBuiltinType, isLibraryType, generatePlatformHeader, oddWidthTypesSpelled, placeholderTypesUsedIn, normalizeDataValue, arrayRowTypedefLines, arrayRowReturn, arrayRowSpelling, GHIDRA_PSEUDO_OP_RESULT_TYPES, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, platformDefinedFunctionNames, platformVoidPointerFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
 import { createOverrideRegistry } from '../overrides/index.js';
 import { alignPathCase, assertNoCaseCollidingFiles } from './path-case.js';
 import { createLibraryRegistry } from '../library/index.js';
@@ -522,6 +522,8 @@ export interface GenerationState {
   extraArityMismatches: ArityMismatch[];
   /** Initializer arity mismatches counted by shard workers. */
   extraInitializerArityMismatches: number;
+  /** What d2_platform.h was generated from, so stage 2 can regenerate it against the tree. */
+  platformHeaderOptions?: Parameters<typeof generatePlatformHeader>[0];
 }
 
 export function generateProject(
@@ -952,9 +954,7 @@ export function generateProjectStage1(
 
   // Emit platform types header
   const inAddrClaim = buildWinsockInAddrClaim(dataTypes);
-  files.set('d2_platform.h', {
-    path: 'd2_platform.h',
-    content: generatePlatformHeader({
+  const platformHeaderOptions: Parameters<typeof generatePlatformHeader>[0] = {
       seedType: dataTypes.some(dt => dt.name === 'D2SeedStrc'),
       anonymousAggregates: buildAnonymousAggregateDefs(dataTypes, functions, inAddrClaim.claimed),
       // Parameter, return and GLOBAL types alike: `gpGlideSmackerTexBuf0` is
@@ -979,7 +979,10 @@ export function generateProjectStage1(
                ...((dt as { parameters?: { dataType?: string }[] }).parameters ?? []).map(p => p.dataType)]
             : []),
       ]),
-    }),
+  };
+  files.set('d2_platform.h', {
+    path: 'd2_platform.h',
+    content: generatePlatformHeader(platformHeaderOptions),
     type: 'header',
     functions: [],
     includes: [],
@@ -1409,6 +1412,7 @@ export function generateProjectStage1(
     genT0,
     extraArityMismatches: [],
     extraInitializerArityMismatches: 0,
+    platformHeaderOptions,
   };
   return state;
 }
@@ -1505,6 +1509,16 @@ export function generateProjectStage2(state: GenerationState): ReconstructedProj
         { ...options, projectName: name, binaryName: programInfo?.name },
         globalsPath!, typeOwnerMap, context.functionNameCandidates));
     }
+  }
+
+  // Last, against the finished tree: d2_platform.h keeps a Ghidra placeholder typedef
+  // only while some emitted file still spells the name.
+  if (state.platformHeaderOptions && files.has('d2_platform.h')) {
+    const used = placeholderTypesUsedIn(files.values());
+    files.set('d2_platform.h', {
+      ...files.get('d2_platform.h')!,
+      content: generatePlatformHeader({ ...state.platformHeaderOptions, placeholderTypesUsed: used }),
+    });
   }
 
   const project: ReconstructedProject = {
