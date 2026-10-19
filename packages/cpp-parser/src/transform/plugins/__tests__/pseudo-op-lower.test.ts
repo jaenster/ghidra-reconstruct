@@ -358,6 +358,15 @@ describe('pseudo-op-lower: instruction-like ops', () => {
   });
 });
 
+describe('pseudo-op-lower: in_stack_ declarations', () => {
+  it('drops one nothing references, keeps one that is read', () => {
+    // D2Gdi/Renderer/Windowed.cpp: `undefined3 in_stack_00000005;` beside a byte parameter.
+    const out = transform('void fn(uint8_t b) { undefined3 in_stack_00000005; int in_stack_ffffffec; g(in_stack_ffffffec); }');
+    assert.ok(!out.includes('in_stack_00000005'), out);
+    assert.ok(out.includes('int in_stack_ffffffec;'), out);
+  });
+});
+
 describe('pseudo-op-lower: what is not lowered', () => {
   it('leaves an operand of unknown type alone and reports it', () => {
     const seen: ArtifactRecord[] = [];

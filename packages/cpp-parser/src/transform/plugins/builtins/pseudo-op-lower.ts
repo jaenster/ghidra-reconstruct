@@ -946,7 +946,7 @@ function lowerStatements(stmts: ASTNode[], report: (r: ArtifactRecord) => void, 
   return changed ? out : null;
 }
 
-/** Drop the declaration of a temporary nothing refers to any more. */
+/** Drop the declaration of a temporary (or an in_stack_ slot) nothing refers to. */
 function dropUnusedDecls(body: ASTNode, names: Set<string>): ASTNode {
   if (names.size === 0) return body;
   const unused = [...names].filter(n => {
@@ -1126,6 +1126,19 @@ function createPseudoOpLowerTransformer(options: PseudoOpLowerOptions = {}): Tra
         return next ? ({ ...node, statements: next } as ASTNode) : undefined;
       },
     });
+    // `undefined3 in_stack_00000005;` declared and never used: the upper bytes of a byte
+    // parameter's slot. A declaration nothing reads cannot change a value; it goes.
+    // An in_stack_ name that IS used is a value Ghidra lost or misnamed, left for Ghidra.
+    // Not while a frame address is still unbound: stack-frame-address resolves those later
+    // against the frame, and may name the slot.
+    const frameAddressLeft = findNodesByKind(body, NodeKind.Identifier)
+      .some(n => (n as Identifier).name.startsWith('stack0x'));
+    if (!frameAddressLeft) {
+      for (const d of findNodesByKind(body, NodeKind.VariableDecl)) {
+        const name = (d as VariableDecl).name.name;
+        if (/^in_stack_[0-9a-f]+$/.test(name)) swiTemps.add(name);
+      }
+    }
     return dropUnusedDecls(statements(lower(fold(['==', '!='])(fold(['||', '&&'])(body)))), swiTemps);
   };
 
