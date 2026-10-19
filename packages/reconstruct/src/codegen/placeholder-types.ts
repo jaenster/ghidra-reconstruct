@@ -14,6 +14,7 @@
  */
 
 import type { ExtractedDataType, ExtractedFunction } from '../types.js';
+import { isLibraryType } from './platform-types.js';
 
 export const PLACEHOLDER_TYPE_SPELLINGS: Readonly<Record<string, string>> = {
   byte: 'uint8_t', uchar: 'uint8_t', sbyte: 'int8_t',
@@ -58,6 +59,12 @@ export function respellPlaceholderTypes(
   }
   for (const g of globals) { fix(g, 'dataType'); fix(g, 'suggestedType'); }
   for (const dt of dataTypes) {
+    // An SDK type's record (`/basetsd.h/PULONG_PTR` = `ulong *`) describes the REAL
+    // header's type, which the tree takes from <windows.h>, not from us: there `ulong`
+    // is the SDK's `unsigned long`, and respelling it would tell the cast passes that
+    // `PULONG_PTR` is `uint32_t *` (QServerNT.cpp: the cast into GetQueuedCompletionStatus
+    // was dropped).
+    if (isLibraryType(dt.name, dt.category ?? '')) continue;
     const d = dt as unknown as {
       fields?: TypedSlot[]; parameters?: TypedSlot[]; underlyingType?: string; returnType?: string;
     };

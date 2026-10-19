@@ -29,3 +29,11 @@ describe('respellPlaceholderType', () => {
     assert.strictEqual(respellPlaceholderTypes([fn], [g], dts), 0, 'idempotent');
   });
 });
+
+describe('respellPlaceholderTypes: SDK records', () => {
+  it('leaves a system-header typedef as Ghidra describes the real one', () => {
+    const dts = [{ name: 'PULONG_PTR', category: '/basetsd.h', kind: 'TYPEDEF', underlyingType: 'ulong *' }] as unknown as ExtractedDataType[];
+    respellPlaceholderTypes([], [], dts);
+    assert.strictEqual((dts[0] as unknown as { underlyingType: string }).underlyingType, 'ulong *');
+  });
+});
