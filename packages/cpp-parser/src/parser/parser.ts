@@ -91,6 +91,12 @@ export interface ParserOptions {
   recover?: boolean;
 }
 
+/** Calling conventions that may open a declarator group in a cast type: `(void (__stdcall *)(int))`. */
+const CALLING_CONVENTIONS = new Set<TokenKind>([
+  TokenKind.CallingConvCdecl, TokenKind.CallingConvStdcall, TokenKind.CallingConvFastcall,
+  TokenKind.CallingConvThiscall, TokenKind.CallingConvVectorcall, TokenKind.CallingConvClrcall,
+]);
+
 export class ParserError extends Error {
   constructor(
     message: string,
@@ -2334,8 +2340,11 @@ export class Parser {
       let lastWasColonColon = false;
       let lastWasStar = false;
       let lastWasAmpersand = false;
+      let lastWasParenGroup = false;
       while (!this.check(TokenKind.RightParen) && !this.isAtEnd()) {
         const kind = this.current().token.kind;
+        const groupBefore = lastWasParenGroup;
+        lastWasParenGroup = false;
 
         // Valid type tokens
         if (kind === TokenKind.Identifier) {
@@ -2433,6 +2442,18 @@ export class Parser {
         // Pointer-to-array cast: (char (*) [4]) or (int (*) [12])
         // Skip balanced () inside type
         if (kind === TokenKind.LeftParen) {
+          // A parenthesised group inside a type is a declarator - `(*)`, `(&)`,
+          // `(__stdcall *)` - or the parameter list that follows one. Anything else
+          // is an expression: `(v * (float)(w))` is a product, and taking it for the
+          // type `v *(float)(w)` made the parser read `((int)(v * (float)(w)) - g)` as
+          // a cast of `-g` and fail.
+          const next = this.tokens[this.pos + 1]?.token.kind;
+          const after = this.tokens[this.pos + 2]?.token.kind;
+          const declarator = next === TokenKind.Star || next === TokenKind.Ampersand ||
+            next === TokenKind.Caret ||
+            (CALLING_CONVENTIONS.has(next as TokenKind) && (after === TokenKind.Star || after === TokenKind.Ampersand)) ||
+            this.tokens[this.pos + 1]?.token.text === '__attribute__';
+          if (!declarator && !groupBefore) return false;
           let depth = 1;
           this.advance();
           while (depth > 0 && !this.isAtEnd()) {
@@ -2440,6 +2461,7 @@ export class Parser {
             else if (this.check(TokenKind.RightParen)) depth--;
             this.advance();
           }
+          lastWasParenGroup = true;
           continue;
         }
 
