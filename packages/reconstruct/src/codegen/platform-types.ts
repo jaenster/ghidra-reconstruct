@@ -1048,7 +1048,7 @@ export function generatePlatformHeader(
   lines.push('typedef int32_t int6;   // 6 bytes — Ghidra artifact');
   lines.push('typedef uint64_t uint6;  // 6 bytes — Ghidra artifact');
   lines.push('typedef int32_t int7;   // 7 bytes — Ghidra artifact');
-  lines.push('typedef float unkfloat1;');
+  lines.push('typedef uint8_t unkfloat1;  // a 1-byte varnode Ghidra typed as float: a byte, not a value');
   lines.push('typedef uint8_t unkbool1;');
   lines.push('typedef int code(...);  // Ghidra executable code type — code* = callable function pointer');
   lines.push('');

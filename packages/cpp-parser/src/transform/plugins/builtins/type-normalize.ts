@@ -15,11 +15,20 @@
  * - undefined4 in params/returns -> uint32_t
  * - undefined/undefined1 -> uint8_t fallback
  * - undefined3/5/6/7 -> kept as-is (odd sizes)
+ *
+ * Part C - Ghidra float types: unkfloat1 -> uint8_t (a 1-byte bit container),
+ * float10 -> long double, float2 -> uint16_t; float constants printed through one
+ * are settled first (see createFloatConstantPass).
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode,
+  CStyleCastExpr,
+  Expression,
+  FloatingLiteralExpr,
+  ParenExpr,
+  UnaryExpr,
   TypedefType,
   AutoType,
   Identifier,
@@ -28,6 +37,7 @@ import type {
 } from '../../../ast/nodes.js';
 import { createTransformer, sequence, updateNode, type Transformer } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
+import { Expr } from '../../../ast/factory.js';
 
 // ============================================
 // MAPS
@@ -84,7 +94,11 @@ const WINDOWS_SCALAR_MAP: ReadonlyMap<string, string> = new Map([
 
 /** Ghidra float artifacts -> standard C types */
 const GHIDRA_FLOAT_MAP: ReadonlyMap<string, string> = new Map([
-  ['unkfloat1', 'float'],
+  // A 1-byte varnode Ghidra gave a float type: in practice the AL of a bool return.
+  // It never held a float VALUE, so it is a 1-byte bit container. As `float` it made
+  // `(char)(unkfloat1)bRet` a round trip through a 4-byte float, which is undefined
+  // for bRet >= 256 where the machine truncated.
+  ['unkfloat1', 'uint8_t'],
   ['float10', 'long double'],
   // 2-byte float: no portable C++ spelling, mapped to the 2-byte integer it carries.
   ['float2', 'uint16_t'],
@@ -270,13 +284,102 @@ function createTypeRenamePass(options: TypeNormalizeOptions = {}): Transformer {
   });
 }
 
+/** Ghidra's float-typed spellings: a literal under one of these casts was printed through it. */
+const FLOAT_TYPED = new Set(['float', 'double', 'unkfloat1', 'float10', 'FxFloat']);
+
+/** The type name of a cast, when it is a plain named type. */
+function castTypeName(node: ASTNode): string | undefined {
+  if (node.kind !== NodeKind.CStyleCastExpr) return undefined;
+  const t = (node as CStyleCastExpr).type as { kind: NodeKind; name?: unknown };
+  if (t.kind === NodeKind.BuiltinType) {
+    const b = t as unknown as { name: string; modifiers?: string[] };
+    return (b.modifiers ?? []).includes('long') && b.name === 'double' ? 'long double' : b.name;
+  }
+  if (t.kind === NodeKind.TypedefType) return getTypedefName(t as unknown as TypedefType);
+  return undefined;
+}
+
+function stripParens(e: Expression): Expression {
+  let x = e;
+  while (x.kind === NodeKind.ParenExpr) x = (x as ParenExpr).expression;
+  return x;
+}
+
+/**
+ * A float constant as Ghidra printed it, with its sign: a FloatingLiteral, or `NAN` /
+ * `INFINITY`, under any number of unary minuses. null for anything else.
+ */
+function floatConstant(e: Expression): { value: number; negative: boolean } | null {
+  let x = stripParens(e);
+  let negative = false;
+  while (x.kind === NodeKind.UnaryExpr && (x as UnaryExpr).operator === '-') {
+    negative = !negative;
+    x = stripParens((x as UnaryExpr).operand);
+  }
+  if (x.kind === NodeKind.FloatingLiteral) {
+    const v = (x as FloatingLiteralExpr).value;
+    return { value: negative ? -v : v, negative };
+  }
+  if (x.kind === NodeKind.Identifier) {
+    const n = (x as Identifier).name;
+    if (n === 'NAN') return { value: NaN, negative };
+    if (n === 'INFINITY') return { value: negative ? -Infinity : Infinity, negative };
+  }
+  return null;
+}
+
+/**
+ * Float constants Ghidra printed through a float type are bit patterns, and the
+ * spelling only survives where both readings agree:
+ *
+ *   (bool)(T)c          -> true / false   nonzero bits <=> nonzero value, except -0.0
+ *   (unkfloat1)c        -> (unkfloat1)b    b = the float's bits, when they fit the byte
+ *
+ * `(unkfloat1)1.4013e-45` is the byte 1 (the smallest denormal's bits); converted by
+ * value, as a 1-byte integer would now convert it, it is 0. Anything else is left for
+ * Ghidra to retype.
+ */
+function createFloatConstantPass(): Transformer {
+  const f32 = new Float32Array(1);
+  const u32 = new Uint32Array(f32.buffer);
+  const boolFold = createTransformer({
+    visitNode(n: ASTNode): ASTNode | undefined {
+      if (castTypeName(n) !== 'bool') return undefined;
+      const node = n as CStyleCastExpr;
+      const inner = stripParens(node.expression);
+      const t = castTypeName(inner);
+      if (!t || !FLOAT_TYPED.has(t)) return undefined;
+      const c = floatConstant((inner as CStyleCastExpr).expression);
+      if (!c) return undefined;
+      // -0.0 has nonzero bits and a zero value: the two readings disagree.
+      if (c.value === 0 && c.negative) return undefined;
+      return { ...Expr.boolLiteral(c.value !== 0), leadingTrivia: node.leadingTrivia, trailingTrivia: node.trailingTrivia } as ASTNode;
+    },
+  });
+  const byteBits = createTransformer({
+    visitNode(n: ASTNode): ASTNode | undefined {
+      if (castTypeName(n) !== 'unkfloat1') return undefined;
+      const node = n as CStyleCastExpr;
+      const c = floatConstant(node.expression);
+      if (!c || Number.isNaN(c.value)) return undefined;
+      f32[0] = c.value;
+      const bits = u32[0];
+      if (bits > 0xff) return undefined;
+      return updateNode(node, { expression: Expr.intLiteral(bits) } as Partial<CStyleCastExpr>);
+    },
+  });
+  return sequence(boolFold, byteBits);
+}
+
 /**
  * Create the combined type normalization transformer.
- * Uses sequence() to run auto-promotion before type rename.
+ * Uses sequence() to run auto-promotion before type rename; float constants printed
+ * through a Ghidra float type are settled while that type is still visible.
  */
 function createTypeNormalizeTransformer(options: TypeNormalizeOptions = {}): Transformer {
   return sequence(
     createAutoPromotionPass(options),
+    createFloatConstantPass(),
     createTypeRenamePass(options),
   );
 }

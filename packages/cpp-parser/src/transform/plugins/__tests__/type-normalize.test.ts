@@ -8,6 +8,7 @@ import { parse } from '../../../parser/index.js';
 import { emit } from '../../../emit/index.js';
 import type { AnyNode } from '../../../ast/nodes.js';
 import { typeNormalizePlugin, type TypeNormalizeOptions } from '../builtins/type-normalize.js';
+import { compileAndRun, hasNativeGpp } from '../../../testing/native-cpp.js';
 
 describe('typeNormalizePlugin', () => {
   function transformCode(code: string, options?: TypeNormalizeOptions): string {
@@ -307,5 +308,39 @@ describe('typeNormalizePlugin', () => {
       assert.strictEqual(typeNormalizePlugin.version, '1.0.0');
       assert.deepStrictEqual(typeNormalizePlugin.tags, ['core', 'cleanup', 'types']);
     });
+  });
+});
+
+describe('typeNormalizePlugin: Ghidra float types, compiled and run', () => {
+  const lowerExpr = (expr: string, decls = ''): string => {
+    const out = emit(typeNormalizePlugin.createTransformer({})(parse(`void f() { ${decls} r = ${expr}; }`)) as AnyNode);
+    const at = out.indexOf('r = ');
+    return out.slice(at + 4, out.indexOf(';', at));
+  };
+
+  it('unkfloat1 is a 1-byte container, and a literal printed through it is its byte', { skip: !hasNativeGpp() }, () => {
+    // `(char)(unkfloat1)1.4013e-45` is the byte 1 on the machine; through a float it was 0.
+    // `(char)(unkfloat1)bRet` truncates on the machine; through a float it is undefined.
+    const out = compileAndRun('', [
+      'unsigned bRet = 0x1FF;',
+      `int a = (int)(${lowerExpr('(char)(unkfloat1)1.4013e-45')});`,
+      `int b = (int)(uint8_t)(${lowerExpr('(char)(unkfloat1)bRet')});`,
+      'printf("%d %d\\n", a, b);',
+    ].join('\n'));
+    assert.strictEqual(out.trim(), '1 255');
+    const decl = emit(typeNormalizePlugin.createTransformer({})(parse('void f() { unkfloat1 bVar; }')) as AnyNode);
+    assert.ok(decl.includes('uint8_t bVar'), decl);
+  });
+
+  it('(bool) of a float constant is settled only where both readings agree', () => {
+    assert.strictEqual(lowerExpr('(bool)(unkfloat1)-NAN'), 'true');
+    assert.strictEqual(lowerExpr('(bool)(float)1.4013e-45'), 'true');
+    assert.strictEqual(lowerExpr('(bool)(float)0.0'), 'false');
+    // -0.0: zero value, nonzero bits.
+    assert.ok(lowerExpr('(bool)(float)-0.0').includes('0.0'));
+  });
+
+  it('a literal whose bits do not fit the byte is left alone', () => {
+    assert.ok(lowerExpr('(unkfloat1)3.58732e-43').includes('3.58732e-43'));
   });
 });
