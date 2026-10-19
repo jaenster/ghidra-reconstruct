@@ -25,17 +25,25 @@ binding is checkable against the disassembly.
 
 ## Registration
 
-`project/` is gitignored, so the registration itself is not tracked. `project.json`
-needs:
+`registry.json` in this directory registers every body here, by address, with
+`sourceFile` relative to this directory. The generator loads it on every run, with or
+without a `project/project.json`; a project entry for the same address replaces the
+shipped one. A body whose file cannot be read is an error, never an empty function.
+An entry may carry `attributes` (GCC attribute names) for the definition, e.g.
+`["noinline"]` for a body that reads its own return address.
 
-```json
-"overrides": [
-  { "address": "0041d590", "name": "SSignatureGenerate",
-    "action": "replace", "sourceFile": "../overrides/SSignatureGenerate.cpp" },
-  { "address": "0041d6d0", "name": "SSignatureVerifyStream_Finish",
-    "action": "replace", "sourceFile": "../overrides/SSignatureVerifyStream_Finish.cpp" }
-]
-```
+`project/project.json` (gitignored) still takes overrides of its own, with `sourceFile`
+relative to `project/`; the `patch` entries below live there.
+
+## The register-contract bodies
+
+|Body|Address|Why it cannot come from the decompiler|
+|-|-|-|
+|`GuardStack.cpp`|00681a48|MSVC `__security_check_cookie`: compares ECX, which the caller loads from its own cookie slot. The rebuilt callers have no slot and pass nothing; the body is the intact-frame path, `return`.|
+|`GetInstructionPointer.cpp`|00408090|`MOV EAX,[ESP]; RET`: its own return address. `__builtin_return_address(0)`, under `noinline`.|
+|`AtomicExchange64.cpp`|004107d0|`LOCK CMPXCHG8B` with comparand = new value = ECX:EBX, a don't-care: an atomic 64-bit read. `__atomic_compare_exchange_n` with 0 on both sides.|
+
+`packages/reconstruct/src/__tests__/builtin-overrides.test.ts` compiles and runs them.
 
 ## Open Ghidra item
 

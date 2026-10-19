@@ -100,6 +100,12 @@ export interface OverrideEntry {
   sourceFile?: string;
   /** For action: "patch" — sequential find/replace patches */
   patches?: PatchEntry[];
+  /**
+   * For action: "replace" — GCC function attributes the definition needs for the
+   * body to mean what the binary does, spelled without `__attribute__((...))`:
+   * `noinline` for a body that reads its own return address.
+   */
+  attributes?: string[];
 }
 
 export interface PatchEntry {

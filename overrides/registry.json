@@ -1,0 +1,9 @@
+{
+  "overrides": [
+    { "address": "0041d590", "name": "SSignatureGenerate", "action": "replace", "sourceFile": "SSignatureGenerate.cpp" },
+    { "address": "0041d6d0", "name": "SSignatureVerifyStream_Finish", "action": "replace", "sourceFile": "SSignatureVerifyStream_Finish.cpp" },
+    { "address": "00681a48", "name": "GuardStack", "action": "replace", "sourceFile": "GuardStack.cpp" },
+    { "address": "00408090", "name": "GetInstructionPointer", "action": "replace", "sourceFile": "GetInstructionPointer.cpp", "attributes": ["noinline"] },
+    { "address": "004107d0", "name": "AtomicExchange64", "action": "replace", "sourceFile": "AtomicExchange64.cpp" }
+  ]
+}

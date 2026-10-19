@@ -154,6 +154,7 @@ function renumberParams(params: Array<{ name: string; dataType: string }>): Arra
   });
 }
 import type { OverrideRegistry } from '../overrides/index.js';
+import type { OverrideEntry } from '../config/schema.js';
 import type { LibraryRegistry } from '../library/index.js';
 import type { MethodConversionRegistry, MethodCallMapping } from '../methods/index.js';
 import { applyPatches } from '../overrides/patches.js';
@@ -1459,7 +1460,7 @@ export function generateFunctionImplementation(
     // Standalone function — prefix with `static` if internal to this unit
     const staticPrefix = isInternal ? 'static ' : '';
     const signature = generateFunctionSignature(func);
-    lines.push(staticPrefix + signature + ' {');
+    lines.push(overrideAttributePrefix(override) + staticPrefix + signature + ' {');
   }
 
   // Inject static-local globals owned by this function
@@ -1516,6 +1517,19 @@ export function generateFunctionImplementation(
 }
 
 /**
+ * `__attribute__((a, b)) ` for a replaced body that declares attributes, else ''.
+ * A replaced body is hand-written against the binary; some only mean what the binary
+ * does under an attribute (a body reading its own return address must not be inlined).
+ */
+export function overrideAttributePrefix(override: OverrideEntry | undefined): string {
+  if (override?.action !== 'replace' || !override.attributes?.length) return '';
+  for (const a of override.attributes) {
+    if (!/^[A-Za-z_]\w*$/.test(a)) throw new Error(`override ${override.address}: attribute "${a}" is not a plain GCC attribute name`);
+  }
+  return `__attribute__((${override.attributes.join(', ')})) `;
+}
+
+/**
  * Resolve all override placeholders in generated implementation code.
  *
  * This is the async counterpart that reads override source files from disk.
@@ -1526,7 +1540,6 @@ export async function resolveOverridePlaceholders(
   overrides: OverrideRegistry
 ): Promise<{ code: string; warnings: string[] }> {
   const fsModule = await import('node:fs/promises');
-  const pathModule = await import('node:path');
 
   const warnings: string[] = [];
   const regex = /    \/\/ \[OVERRIDE:REPLACE\] (.+)/g;
@@ -1540,19 +1553,15 @@ export async function resolveOverridePlaceholders(
   }
 
   for (const { full, sourceFile } of replacements) {
-    try {
-      const filePath = pathModule.resolve(overrides.getProjectDir(), sourceFile);
-      const content = await fsModule.readFile(filePath, 'utf-8');
-      const indented = content
-        .trim()
-        .split('\n')
-        .map(line => (line.trim() ? '    ' + line : ''))
-        .join('\n');
-      result = result.replace(full, indented);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      warnings.push(`Could not read override file ${sourceFile}: ${msg}`);
-    }
+    // Unreadable is fatal: the placeholder is a comment, so the function would be
+    // emitted with an empty body that compiles and does nothing.
+    const content = await fsModule.readFile(overrides.resolveSource(sourceFile), 'utf-8');
+    const indented = content
+      .trim()
+      .split('\n')
+      .map(line => (line.trim() ? '    ' + line : ''))
+      .join('\n');
+    result = result.replace(full, () => indented);
   }
 
   return { code: result, warnings };
