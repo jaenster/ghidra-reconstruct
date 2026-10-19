@@ -284,6 +284,80 @@ describe('pseudo-op-lower: ABS', native, () => {
   });
 });
 
+describe('pseudo-op-lower: instruction-like ops', () => {
+  it('builtin_strncpy is an n-byte store, embedded NUL included', { skip: !hasNativeGpp() }, () => {
+    // The old header spelled it strncpy, which stops at the NUL and zero-fills.
+    const out = transform('void fn(char *p) { builtin_strncpy(p, "ab\\0c", 4); }');
+    const call = out.slice(out.indexOf('{') + 1, out.lastIndexOf('}'));
+    const run = compileAndRun(PRELUDE + '\n#define builtin_strncpy strncpy', [
+      'char buf[5] = {9, 9, 9, 9, 9}; char *p = buf;', call,
+      'printf("%d %d %d %d\\n", buf[0], buf[1], buf[2], buf[3]);',
+    ].join('\n'));
+    assert.strictEqual(run.trim(), '97 98 0 99');
+  });
+  it('builtin_strncpy longer than its literal is reported', () => {
+    const seen: ArtifactRecord[] = [];
+    transform('void fn(char *p) { builtin_strncpy(p, "ab", 8); }', { onArtifact: r => seen.push(r) });
+    assert.match(seen[0]?.reason ?? '', /8 bytes from a 3-byte literal/);
+  });
+  it('builtin_memcpy is memcpy, rdtsc is __rdtsc, cpuid_<leaf>(n) is D2_Cpuid(n)', () => {
+    const out = transform('void fn(char *p) { builtin_memcpy(p, "x", 2); t = rdtsc(); r = cpuid_Version_info(1); q = cpuid(n); }');
+    assert.ok(out.includes('memcpy(p, "x", 2)') && !out.includes('builtin_'), out);
+    assert.ok(out.includes('t = __rdtsc()'), out);
+    assert.ok(out.includes('r = D2_Cpuid(1)') && out.includes('q = D2_Cpuid(n)'), out);
+  });
+  it('ZPULL/SPULL pull a bit range, zero- and sign-extended', { skip: !hasNativeGpp() }, () => {
+    const v = evaluate({
+      z: 'ZPULL(u32, 4, 8)', s1: 'SPULL(u8, 5, 1)', s4: 'SPULL(u32, 8, 4)', s4p: 'SPULL(i32, 8, 4)', z64: 'ZPULL(ull, 36, 8)',
+    }, { u32: '0x0F0ABCDu', u8: '0x20', i32: '0x0700', ull: '0xAB000000000ull' });
+    assert.deepStrictEqual(v, { z: 0xBCn, s1: 0xFFFFFFFFFFFFFFFFn, s4: 0xFFFFFFFFFFFFFFFBn, s4p: 7n, z64: 0xABn });
+  });
+  it('INT3 through swi(3) is __debugbreak, and the temporary goes', () => {
+    const out = transform('void __break(void) { code *pcVar1; pcVar1 = (code *)swi(3); (*pcVar1)(); return; }');
+    assert.ok(out.includes('__debugbreak();'), out);
+    assert.ok(!out.includes('pcVar1') && !out.includes('swi'), out);
+  });
+  it('a LOCK/UNLOCK compare-exchange region is __atomic_compare_exchange_n', { skip: !hasNativeGpp() }, () => {
+    // AtomicCompareExchange64 @004107b0, CONCAT44 already lowered by this pass.
+    const src = `void AtomicCompareExchange64(longlong *pllParam1, longlong *pllParam2) {
+      uint dwCompareLo; uint dwExpectedHi; bool bMatched; longlong llNewValue; longlong llCurrent;
+      llNewValue = *pllParam2;
+      dwCompareLo = (uint)*pllParam1;
+      dwExpectedHi = *(uint *)((int)pllParam1 + 4);
+      do {
+        LOCK();
+        llCurrent = *pllParam1;
+        bMatched = CONCAT44(dwExpectedHi, dwCompareLo) == llCurrent;
+        if (bMatched) {
+          *pllParam1 = llNewValue;
+        }
+        else {
+          dwExpectedHi = (uint)((ulonglong)llCurrent >> 0x20);
+          dwCompareLo = (uint)llCurrent;
+        }
+        UNLOCK();
+      } while (!bMatched);
+      return;
+    }`;
+    const out = transform(src);
+    assert.ok(out.includes('__atomic_compare_exchange_n(pllParam1, &llCurrent, llNewValue'), out);
+    assert.ok(!out.includes('LOCK'), out);
+    const fn = out.replace('(int)pllParam1', '(intptr_t)pllParam1');
+    const run = compileAndRun(PRELUDE + '\n' + fn, [
+      'longlong a = 0x1122334455667788LL, b = 0x0102030405060708LL;',
+      'AtomicCompareExchange64(&a, &b);',
+      'printf("%llx\\n", (unsigned long long)a);',
+    ].join('\n'));
+    assert.strictEqual(run.trim(), '102030405060708');
+  });
+  it('a LOCK region of another shape is reported and kept', () => {
+    const seen: ArtifactRecord[] = [];
+    const out = transform('void fn(int *p) { LOCK(); *p = *p + 1; UNLOCK(); }', { onArtifact: r => seen.push(r) });
+    assert.ok(out.includes('LOCK();'), out);
+    assert.deepStrictEqual(seen.map(s => s.op), ['LOCK']);
+  });
+});
+
 describe('pseudo-op-lower: what is not lowered', () => {
   it('leaves an operand of unknown type alone and reports it', () => {
     const seen: ArtifactRecord[] = [];

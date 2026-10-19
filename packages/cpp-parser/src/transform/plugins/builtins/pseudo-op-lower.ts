@@ -35,6 +35,11 @@
  *
  * `NAN(x)` is renamed to `D2_IsNaN(x)`: the spelling collides with <cmath>'s object-like
  * NAN macro, which would turn the call into a constant applied to an argument.
+ *
+ * The instruction-like ops get the spelling of the instruction: ROUND -> std::nearbyint,
+ * ABS -> std::fabs, rdtsc -> __rdtsc, cpuid_<leaf> -> D2_Cpuid, builtin_strncpy -> memcpy,
+ * ZPULL/SPULL -> shift and mask, `(code*)swi(3)` called -> __debugbreak, and a LOCK/UNLOCK
+ * compare-exchange region -> __atomic_compare_exchange_n.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -710,6 +715,241 @@ function reportValuelessConstants(body: ASTNode, report: (r: ArtifactRecord) => 
   walk(body, false, false);
 }
 
+// ============================================
+// INTRINSIC-LIKE OPS
+// ============================================
+
+/** Ghidra's builtin_* with the libc function that does exactly the same. */
+const BUILTIN_SPELLINGS: Record<string, string> = {
+  builtin_memcpy: 'memcpy',
+  builtin_memset: 'memset',
+  builtin_strcmp: 'strcmp',
+  builtin_strlen: 'strlen',
+  builtin_strcpy: 'strcpy',
+};
+
+/**
+ * `builtin_strncpy(d, "lit", n)` is Ghidra's name for an n-byte store of a constant, not
+ * strncpy: strncpy stops at an embedded NUL and zero-fills, the store copies every byte.
+ * memcpy is the store, provided the literal has n bytes to give (its NUL included).
+ */
+function lowerBuiltinStrncpy(args: Expression[]): Expression {
+  if (args.length !== 3) throw new Unlowerable(`builtin_strncpy with ${args.length} arguments`);
+  const lit = unwrapParens(args[1]);
+  const n = unwrapParens(args[2]);
+  if (lit.kind !== NodeKind.StringLiteral) throw new Unlowerable('builtin_strncpy source is not a string literal');
+  if (n.kind !== NodeKind.IntegerLiteral) throw new Unlowerable('builtin_strncpy length is not a literal');
+  const value = (lit as unknown as { value: string; prefix?: string }).value;
+  if ((lit as unknown as { prefix?: string }).prefix) throw new Unlowerable('builtin_strncpy of a wide literal');
+  if ([...value].some(ch => ch.charCodeAt(0) > 0xff)) throw new Unlowerable('builtin_strncpy literal is not a byte string');
+  const size = BigInt(value.length + 1);
+  if ((n as IntegerLiteralExpr).value > size) {
+    throw new Unlowerable(`builtin_strncpy copies ${(n as IntegerLiteralExpr).value} bytes from a ${size}-byte literal`);
+  }
+  return Expr.call('memcpy', args);
+}
+
+/**
+ * ZPULL/SPULL(x, pos, bits): `bits` bits of x from bit `pos` (counted from the least
+ * significant), zero- or sign-extended. Both counts must be literals.
+ */
+function lowerPull(ctx: Ctx, signed: boolean, args: Expression[]): Expression {
+  if (args.length !== 3) throw new Unlowerable(`PULL with ${args.length} arguments`);
+  const [x, pe, ne] = args.map(a => unwrapParens(a));
+  if (pe.kind !== NodeKind.IntegerLiteral || ne.kind !== NodeKind.IntegerLiteral) throw new Unlowerable('PULL position or width is not a literal');
+  const pos = Number((pe as IntegerLiteralExpr).value);
+  const bits = Number((ne as IntegerLiteralExpr).value);
+  const cls = ctx.classify(args[0]);
+  const w = cls.kind === 'int' ? (cls.width <= 4 ? 4 : 8) : cls.kind === 'ptr' ? 4 : 0;
+  if (w === 0) throw new Unlowerable(`PULL operand ${cls.kind === 'unknown' ? `type unknown (${cls.why})` : 'is floating'}`);
+  if (bits < 1 || pos < 0 || pos + bits > w * 8 || bits > 32) throw new Unlowerable(`PULL of bits [${pos}, ${pos + bits}) from ${w} bytes`);
+  const src = raw(ctx, args[0], w, Math.ceil((pos + bits) / 8));
+  if (!signed) {
+    const mask = `0x${((1n << BigInt(bits)) - 1n).toString(16)}u`;
+    return fromTemplate(`(uint32_t)(__A >> ${pos} & ${mask})`, { __A: src });
+  }
+  const S = sType(w);
+  return fromTemplate(`(int32_t)((${S})(__A << ${w * 8 - pos - bits}) >> ${w * 8 - bits})`, { __A: src });
+}
+
+const isCallTo = (e: ASTNode | undefined, name: string, argc?: number): e is CallExpr => {
+  if (!e || e.kind !== NodeKind.CallExpr) return false;
+  const c = e as CallExpr;
+  return c.callee.kind === NodeKind.Identifier && (c.callee as Identifier).name === name
+    && (argc === undefined || c.arguments.length === argc);
+};
+
+const exprOf = (st: ASTNode | undefined): Expression | undefined =>
+  st && st.kind === NodeKind.ExprStmt ? (st as unknown as { expression: Expression }).expression : undefined;
+
+/** `target = value` as a plain assignment statement. */
+function assignOf(st: ASTNode | undefined): { left: Expression; right: Expression } | null {
+  const e = exprOf(st);
+  if (!e || e.kind !== NodeKind.AssignExpr) return null;
+  const a = e as unknown as { operator: string; left: Expression; right: Expression };
+  return a.operator === '=' ? { left: a.left, right: a.right } : null;
+}
+
+/** Does `e` mention the identifier `name` anywhere? */
+function mentions(e: unknown, name: string): boolean {
+  if (Array.isArray(e)) return e.some(x => mentions(x, name));
+  if (e === null || typeof e !== 'object') return false;
+  const o = e as Record<string, unknown>;
+  if (o.kind === NodeKind.Identifier && o.name === name) return true;
+  for (const [k, v] of Object.entries(o)) {
+    if (k === 'location' || k === 'leadingTrivia' || k === 'trailingTrivia') continue;
+    if (v && typeof v === 'object' && mentions(v, name)) return true;
+  }
+  return false;
+}
+
+const stmt = (expression: Expression): ASTNode =>
+  ({ kind: NodeKind.ExprStmt, expression, location: expression.location, leadingTrivia: [], trailingTrivia: [] }) as unknown as ASTNode;
+
+/**
+ * `LOCK(); T = *P; [B =] X == T; if (B) { *P = N; ... } else { ... } UNLOCK();` is
+ * CMPXCHG8B: compare EDX:EAX (X) with *P and store ECX:EBX (N) if equal, else load *P.
+ * T holds the old *P afterwards on both paths. That is __atomic_compare_exchange_n with
+ * T as the expected value, which also leaves the old value in T when it fails:
+ *
+ *   T = X; [B =] __atomic_compare_exchange_n(P, &T, N, false, SEQ_CST, SEQ_CST);
+ *   if (B) { ... } else { ... }
+ *
+ * Without the builtin the rebuild's region is not atomic at all (LOCK was empty).
+ * Returns the replacement statements for [lockIndex, unlockIndex], or null.
+ */
+function lowerLockRegion(region: ASTNode[]): ASTNode[] | null {
+  // region = LOCK(), S1, (S2), IF, UNLOCK()
+  if (region.length !== 4 && region.length !== 5) return null;
+  const load = assignOf(region[1]);
+  if (!load) return null;
+  const T = unwrapParens(load.left);
+  const deref = unwrapParens(load.right);
+  if (T.kind !== NodeKind.Identifier || deref.kind !== NodeKind.UnaryExpr || (deref as UnaryExpr).operator !== '*') return null;
+  const tName = (T as Identifier).name;
+  const P = (deref as UnaryExpr).operand;
+  if (!isPure(P) || mentions(P, tName)) return null;
+
+  let flag: Expression | null = null;
+  let cmp: Expression;
+  const ifSt = region[region.length - 2] as unknown as { kind: NodeKind; condition: Expression; thenBranch: ASTNode; elseBranch: ASTNode | null };
+  if (ifSt.kind !== NodeKind.IfStmt) return null;
+  if (region.length === 5) {
+    const f = assignOf(region[2]);
+    if (!f) return null;
+    flag = f.left;
+    cmp = f.right;
+    if (!sameAst(ifSt.condition, flag)) return null;
+  } else {
+    cmp = ifSt.condition;
+  }
+  const c = unwrapParens(cmp);
+  if (c.kind !== NodeKind.BinaryExpr || (c as BinaryExpr).operator !== '==') return null;
+  const cb = c as BinaryExpr;
+  const X = sameAst(cb.right, T) ? cb.left : sameAst(cb.left, T) ? cb.right : null;
+  if (!X || !isPure(X) || mentions(X, tName)) return null;
+
+  const thenBody = ifSt.thenBranch.kind === NodeKind.CompoundStmt
+    ? (ifSt.thenBranch as unknown as { statements: ASTNode[] }).statements
+    : [ifSt.thenBranch];
+  const store = assignOf(thenBody[0]);
+  if (!store) return null;
+  const sl = unwrapParens(store.left);
+  if (sl.kind !== NodeKind.UnaryExpr || (sl as UnaryExpr).operator !== '*' || !sameAst((sl as UnaryExpr).operand, P)) return null;
+  const N = store.right;
+  if (!isPure(N) || mentions(N, tName)) return null;
+
+  const cas = fromTemplate('__atomic_compare_exchange_n(__P, &__T, __N, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)',
+    { __P: P, __T: T, __N: N });
+  const restThen = { ...(ifSt.thenBranch.kind === NodeKind.CompoundStmt ? ifSt.thenBranch : {
+    kind: NodeKind.CompoundStmt, location: ifSt.thenBranch.location, leadingTrivia: [], trailingTrivia: [] }),
+    statements: thenBody.slice(1) } as unknown as ASTNode;
+  const out: ASTNode[] = [stmt(Expr.assign(T, X))];
+  if (flag) {
+    out.push(stmt(Expr.assign(flag, cas)));
+    out.push({ ...ifSt, thenBranch: restThen } as unknown as ASTNode);
+  } else {
+    out.push({ ...ifSt, condition: cas, thenBranch: restThen } as unknown as ASTNode);
+  }
+  return out;
+}
+
+/**
+ * Statement-level pseudo-ops: the LOCK/UNLOCK region, and `v = (code *)swi(3); (*v)();`,
+ * which is INT3. `__debugbreak` is INT3; `__builtin_trap` would be UD2, the wrong
+ * instruction. Returns the new statement list, or null when nothing matched; `swiTemps`
+ * collects the temporaries whose declaration may now be unused.
+ */
+function lowerStatements(stmts: ASTNode[], report: (r: ArtifactRecord) => void, swiTemps: Set<string>): ASTNode[] | null {
+  let changed = false;
+  const out: ASTNode[] = [];
+  for (let i = 0; i < stmts.length; i++) {
+    const st = stmts[i];
+    if (isCallTo(exprOf(st), 'LOCK', 0)) {
+      const end = stmts.findIndex((x, k) => k > i && isCallTo(exprOf(x), 'UNLOCK', 0));
+      const lowered = end > i ? lowerLockRegion(stmts.slice(i, end + 1)) : null;
+      if (lowered) {
+        out.push(...lowered);
+        i = end;
+        changed = true;
+        continue;
+      }
+      report({ op: 'LOCK', reason: 'the locked region is not the compare-exchange shape' });
+    }
+    const a = assignOf(st);
+    const castCall = a ? unwrapParens(a.right) : undefined;
+    const swiCall = castCall?.kind === NodeKind.CStyleCastExpr ? unwrapParens((castCall as CStyleCastExpr).expression) : castCall;
+    if (a && unwrapParens(a.left).kind === NodeKind.Identifier && isCallTo(swiCall, 'swi', 1)) {
+      const v = (unwrapParens(a.left) as Identifier).name;
+      const vec = unwrapParens((swiCall as CallExpr).arguments[0]);
+      const next = exprOf(stmts[i + 1]);
+      let callee = next?.kind === NodeKind.CallExpr && (next as CallExpr).arguments.length === 0
+        ? unwrapParens((next as CallExpr).callee) : undefined;
+      if (callee?.kind === NodeKind.UnaryExpr && (callee as UnaryExpr).operator === '*') callee = unwrapParens((callee as UnaryExpr).operand);
+      if (vec.kind === NodeKind.IntegerLiteral && (vec as IntegerLiteralExpr).value === 3n
+          && callee?.kind === NodeKind.Identifier && (callee as Identifier).name === v) {
+        out.push({ ...stmt(Expr.call('__debugbreak', [])), leadingTrivia: (st as ASTNode).leadingTrivia ?? [] } as ASTNode);
+        swiTemps.add(v);
+        i++;
+        changed = true;
+        continue;
+      }
+      report({ op: 'swi', reason: 'software interrupt other than INT3 followed by its call' });
+    }
+    out.push(st);
+  }
+  return changed ? out : null;
+}
+
+/** Drop the declaration of a temporary nothing refers to any more. */
+function dropUnusedDecls(body: ASTNode, names: Set<string>): ASTNode {
+  if (names.size === 0) return body;
+  const unused = [...names].filter(n => {
+    let refs = 0;
+    const count = (e: unknown): void => {
+      if (Array.isArray(e)) { e.forEach(count); return; }
+      if (e === null || typeof e !== 'object') return;
+      const o = e as Record<string, unknown>;
+      if (o.kind === NodeKind.VariableDecl) { if (o.initializer) count(o.initializer); return; }
+      if (o.kind === NodeKind.Identifier && o.name === n) refs++;
+      for (const [k, v] of Object.entries(o)) if (k !== 'location' && v && typeof v === 'object') count(v);
+    };
+    count(body);
+    return refs === 0;
+  });
+  if (unused.length === 0) return body;
+  return createTransformer({
+    visitCompoundStmt(node) {
+      const kept = (node.statements as ASTNode[]).filter(st => {
+        if (st.kind !== NodeKind.DeclStmt) return true;
+        const ds = (st as unknown as { declarations: Array<{ kind: NodeKind; name?: { name: string }; initializer?: unknown }> }).declarations;
+        return !(ds.length === 1 && ds[0].kind === NodeKind.VariableDecl && !ds[0].initializer && unused.includes(ds[0].name!.name));
+      });
+      return kept.length === node.statements.length ? undefined : ({ ...node, statements: kept } as ASTNode);
+    },
+  })(body);
+}
+
 function createPseudoOpLowerTransformer(options: PseudoOpLowerOptions = {}): Transformer {
   const mode: ArtifactMode = options.mode ?? 'report';
   const report = (record: ArtifactRecord) => {
@@ -829,9 +1069,21 @@ function createPseudoOpLowerTransformer(options: PseudoOpLowerOptions = {}): Tra
         if (std && call.arguments.length === 1) {
           return updateNode(call, { callee: Expr.qualifiedId(std) } as Partial<CallExpr>);
         }
+        const libc = BUILTIN_SPELLINGS[name];
+        if (libc) return updateNode(call, { callee: Expr.identifier(libc) } as Partial<CallExpr>);
+        // CPUID: one pseudo-op per leaf, each taking EAX - the leaf itself - and
+        // returning a pointer to the four result registers. D2_Cpuid is that contract.
+        if ((name === 'cpuid' || name.startsWith('cpuid_')) && call.arguments.length === 1) {
+          return updateNode(call, { callee: Expr.identifier('D2_Cpuid') } as Partial<CallExpr>);
+        }
+        if (name === 'rdtsc' && call.arguments.length === 0) {
+          return updateNode(call, { callee: Expr.identifier('__rdtsc') } as Partial<CallExpr>);
+        }
         let lowered: Expression | null;
         try {
-          lowered = lowerCall(ctx, name, call.arguments);
+          lowered = name === 'builtin_strncpy' ? lowerBuiltinStrncpy(call.arguments)
+            : name === 'ZPULL' || name === 'SPULL' ? lowerPull(ctx, name === 'SPULL', call.arguments)
+            : lowerCall(ctx, name, call.arguments);
         } catch (e) {
           if (!(e instanceof Unlowerable)) throw e;
           report({ op: name, reason: e.reason });
@@ -842,7 +1094,14 @@ function createPseudoOpLowerTransformer(options: PseudoOpLowerOptions = {}): Tra
       },
     });
     reportValuelessConstants(body, report);
-    return lower(fold(['==', '!='])(fold(['||', '&&'])(body)));
+    const swiTemps = new Set<string>();
+    const statements = createTransformer({
+      visitCompoundStmt(node) {
+        const next = lowerStatements(node.statements as ASTNode[], report, swiTemps);
+        return next ? ({ ...node, statements: next } as ASTNode) : undefined;
+      },
+    });
+    return dropUnusedDecls(statements(lower(fold(['==', '!='])(fold(['||', '&&'])(body)))), swiTemps);
   };
 
   return (root: ASTNode) => {
