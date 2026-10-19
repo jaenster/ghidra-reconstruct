@@ -39,5 +39,9 @@ export const ARTIFACT_SUPPORT_LINES: readonly string[] = [
   '  std::memcpy(&v, p, 3);',
   '  return v;',
   '}',
+  '// The same three bytes as a signed 24-bit value, sign-extended from bit 23.',
+  'static inline int32_t d2_load24s(const void* p) {',
+  '  return (int32_t)(d2_load24(p) ^ 0x800000u) - 0x800000;',
+  '}',
   'static inline void d2_store24(void* p, uint32_t v) { std::memcpy(p, &v, 3); }',
 ];

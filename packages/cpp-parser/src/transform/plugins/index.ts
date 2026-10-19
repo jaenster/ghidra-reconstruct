@@ -424,6 +424,7 @@ export {
 export {
   subpieceAccessPlugin,
 } from './builtins/subpiece-access.js';
+export { threeByteAccessPlugin } from './builtins/three-byte-access.js';
 export { ARTIFACT_SUPPORT_LINES } from './builtins/artifact-support.js';
 
 export { arrayCastAssignPlugin } from './builtins/array-cast-assign.js';
@@ -501,6 +502,7 @@ import { prngTransformPlugin } from './builtins/prng-transform.js';
 import { prngTempCollapsePlugin } from './builtins/prng-temp-collapse.js';
 import { bitfieldAccessPlugin } from './builtins/bitfield-access.js';
 import { subpieceAccessPlugin } from './builtins/subpiece-access.js';
+import { threeByteAccessPlugin } from './builtins/three-byte-access.js';
 import { arrayCastAssignPlugin } from './builtins/array-cast-assign.js';
 import { vtableStoreCastPlugin } from './builtins/vtable-store-cast.js';
 import { arrayCastStripPlugin } from './builtins/array-cast-strip.js';
@@ -605,6 +607,7 @@ import type { TransformPlugin } from './types.js';
 export const allBuiltinPlugins: TransformPlugin[] = [
   indirectCallCleanupPlugin, // Cleanup: strip jumptable warnings, clean fn-ptr casts (priority 5)
   ...ghidraCleanupPlugins,
+  threeByteAccessPlugin,       // Correctness: *(uint3 *)p → d2_load24(p), exactly three bytes (priority 14)
   typeNormalizePlugin,         // Cleanup: uint → uint32_t, undefined4 → auto/uint32_t (priority 15)
   pointerCastNormalizePlugin, // Cleanup: (int)&expr → (uintptr_t)&expr (priority 16)
   pseudoOpLowerPlugin,        // Cleanup: SUB/CONCAT/ZEXT/SEXT/CARRY/SBORROW → exact C++ (priority 20)
