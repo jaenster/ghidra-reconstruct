@@ -4,6 +4,7 @@
  * Generates .cpp files with function implementations
  */
 
+import { isMsvcEhHandlerStub } from './eh-handler-stub.js';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -942,6 +943,16 @@ export function generateImplementation(
         currentIfdef = func.ifdef;
       }
       lines.push(forwarder);
+      lines.push('');
+      continue;
+    }
+
+    // A compiler-generated C++ EH handler stub is a runtime entry: its header
+    // declaration stays (SEH frames take its address), its body does not (see
+    // eh-handler-stub.ts). The symbol is resolved at link, not here.
+    if (context?.funcPtrArgCasts && isMsvcEhHandlerStub(func, context.funcPtrArgCasts.globalTypes ?? {})) {
+      const hexAddr = func.address.includes(':') ? func.address.slice(func.address.lastIndexOf(':') + 1) : func.address;
+      lines.push(`// 1.14d: ${hexAddr} ${func.name}: compiler-generated C++ EH handler stub, declared only (link stage)`);
       lines.push('');
       continue;
     }
