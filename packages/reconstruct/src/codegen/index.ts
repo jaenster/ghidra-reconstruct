@@ -29,7 +29,7 @@ export {
   isSwitchTableSymbol,
 } from './globals-header.js';
 
-import { respellPlaceholderTypes } from './placeholder-types.js';
+import { respellPlaceholderTypes, respellPlaceholderType } from './placeholder-types.js';
 import { isMainThread } from 'worker_threads';
 import * as fs from 'node:fs/promises';
 import * as nodeFs from 'node:fs';
@@ -5297,7 +5297,7 @@ function reconcileUncuratedParameters(functions: ExtractedFunction[]): void {
     if (!params || params.length === 0) continue;
     fn.parameters = params.map((p, ordinal) => ({
       name: p.name,
-      dataType: p.dataType,
+      dataType: respellPlaceholderType(p.dataType),
       size: parameterSize(p.dataType),
       ordinal,
     }));
@@ -5339,7 +5339,8 @@ function reconcileUndefinedReturnTypes(functions: ExtractedFunction[]): void {
     // type at all (a stray comment, an unusual header) — only accept a plain
     // type spelling.
     if (!/^[A-Za-z_][\w:]*(\s*\*+)?$/.test(resolved)) continue;
-    fn.returnType = resolved;
+    // The decompiler's spelling: respelled like every other declaration type.
+    fn.returnType = respellPlaceholderType(resolved);
   }
 }
 

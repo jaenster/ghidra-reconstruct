@@ -69,7 +69,7 @@ describe('uncurated prototype: the definition declares what the body uses', () =
 
   it('an undefined (void) function takes the decompiler parameters', () => {
     const line = definition(fn('undefined', []));
-    assert.match(line, /gf2_matrix_times\(uint param_1, uint \* ?param_2\)/, line);
+    assert.match(line, /gf2_matrix_times\(uint32_t param_1, uint32_t \* ?param_2\)/, line);
   });
 
   it('a curated return type leaves the stored (empty) list alone', () => {
