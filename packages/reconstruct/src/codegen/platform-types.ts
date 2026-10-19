@@ -930,6 +930,11 @@ export function generatePlatformHeader(
     arrayRowTypedefs?: string[];
     /** `in_addr` under Ghidra's names, claimed ahead of <winsock2.h>. */
     winsockInAddr?: string[];
+    /**
+     * The odd-width Ghidra integer types (`uint3`, `int5`, ...) a declaration in the
+     * program spells. Only these get a typedef; undefined means all of them.
+     */
+    oddWidthTypesUsed?: ReadonlySet<string>;
   } = {},
 ): string {
   const lines: string[] = [];
@@ -994,21 +999,28 @@ export function generatePlatformHeader(
   lines.push('typedef uint8_t undefined;');
   lines.push('typedef uint8_t undefined1;');
   lines.push('typedef uint16_t undefined2;');
-  lines.push('typedef uint8_t undefined3;  // 3 bytes — no exact C type');
+  const oddWidth = (name: string, line: string) => {
+    if (!options.oddWidthTypesUsed || options.oddWidthTypesUsed.has(name)) lines.push(line);
+  };
+  oddWidth('undefined3', 'typedef uint8_t undefined3;  // 3 bytes — no exact C type');
   // Ghidra's `vtable` is the (opaque) virtual function table STRUCT, so `vtable *`
   // is a single pointer. `typedef void* vtable` made `vtable *` a DOUBLE pointer
   // and disagreed with the struct-field mapping in header.ts, which renders the
   // same Ghidra type `vtable *` as `void *` — every field read into a `vtable *`
   // local was then "invalid conversion from 'void*' to 'void**'".
   lines.push('typedef void vtable;   // opaque virtual function table; `vtable *` == `void *`');
-  lines.push('// Ghidra non-standard integer sizes (approximate to nearest C type)');
-  lines.push('typedef int32_t int3;   // 3 bytes — Ghidra artifact, use int32_t');
-  lines.push('typedef uint32_t uint3;  // 3 bytes — Ghidra artifact, use uint32_t');
-  lines.push('typedef int32_t int5;   // 5 bytes — Ghidra artifact');
-  lines.push('typedef uint64_t uint5;  // 5 bytes — Ghidra artifact');
-  lines.push('typedef int32_t int6;   // 6 bytes — Ghidra artifact');
-  lines.push('typedef uint64_t uint6;  // 6 bytes — Ghidra artifact');
-  lines.push('typedef int32_t int7;   // 7 bytes — Ghidra artifact');
+  // Ghidra non-standard integer sizes, approximated by the next C type up. A body never
+  // needs one - three-byte-access lowers loads and stores through them, type-normalize
+  // spells a 3-byte value as its 4-byte container - so each typedef is emitted only while a
+  // DECLARATION in the program still spells it, and a body that names one fails loudly.
+  lines.push('// Ghidra non-standard integer sizes still spelled by a declaration');
+  oddWidth('int3', 'typedef int32_t int3;   // 3 bytes — Ghidra artifact, use int32_t');
+  oddWidth('uint3', 'typedef uint32_t uint3;  // 3 bytes — Ghidra artifact, use uint32_t');
+  oddWidth('int5', 'typedef int32_t int5;   // 5 bytes — Ghidra artifact');
+  oddWidth('uint5', 'typedef uint64_t uint5;  // 5 bytes — Ghidra artifact');
+  oddWidth('int6', 'typedef int32_t int6;   // 6 bytes — Ghidra artifact');
+  oddWidth('uint6', 'typedef uint64_t uint6;  // 6 bytes — Ghidra artifact');
+  oddWidth('int7', 'typedef int32_t int7;   // 7 bytes — Ghidra artifact');
   // No `unkfloat1`: type-normalize spells Ghidra's 1-byte float varnode `uint8_t`, so a
   // body that still names it fails to compile instead of meaning something else.
   lines.push('typedef uint8_t unkbool1;');
@@ -1879,4 +1891,16 @@ export function platformVoidPointerFunctionNames(): Set<string> {
   return names;
 }
 
+/** Ghidra's odd-width integer type names the platform header can typedef. */
+export const ODD_WIDTH_INTEGER_TYPES: readonly string[] = ['undefined3', 'int3', 'uint3', 'int5', 'uint5', 'int6', 'uint6', 'int7'];
 
+/** The odd-width integer types any of these declaration type spellings names. */
+export function oddWidthTypesSpelled(typeSpellings: Iterable<string | undefined>): Set<string> {
+  const re = new RegExp(`\\b(${ODD_WIDTH_INTEGER_TYPES.join('|')})\\b`, 'g');
+  const used = new Set<string>();
+  for (const t of typeSpellings) {
+    if (!t) continue;
+    for (const m of t.matchAll(re)) used.add(m[1]);
+  }
+  return used;
+}

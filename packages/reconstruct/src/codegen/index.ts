@@ -74,7 +74,7 @@ import { buildNamespaceResolution, namespaceResolution, renderNamespace } from '
 import { setInteriorLabelSymbols, resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, setDeclarationClosureDataContent, getDeclarationClosureReport, isUnreferenceableArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, wasGlobalClaimed, findDuplicateLinkageNames, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, setInitializerAddressTable, setInitializerFunctionAddresses, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType, emittedNamespaceOf, getDeclaredNames, initializerAddressReferences, addInitializerAddressReferences } from './globals-header.js';
 import { normalizeDataAddress, stringDefinition } from './declaration-closure.js';
 import { harvestAnnotatedParameterTypes } from './win32-signatures.js';
-import { isPlatformOrBuiltinType, isLibraryType, generatePlatformHeader, normalizeDataValue, arrayRowTypedefLines, arrayRowReturn, arrayRowSpelling, GHIDRA_PSEUDO_OP_RESULT_TYPES, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, platformDefinedFunctionNames, platformVoidPointerFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
+import { isPlatformOrBuiltinType, isLibraryType, generatePlatformHeader, oddWidthTypesSpelled, normalizeDataValue, arrayRowTypedefLines, arrayRowReturn, arrayRowSpelling, GHIDRA_PSEUDO_OP_RESULT_TYPES, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, platformDefinedFunctionNames, platformVoidPointerFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
 import { createOverrideRegistry } from '../overrides/index.js';
 import { alignPathCase, assertNoCaseCollidingFiles } from './path-case.js';
 import { createLibraryRegistry } from '../library/index.js';
@@ -965,6 +965,19 @@ export function generateProjectStage1(
         ...globals.map(g => normalizeGlobalDeclType(g.suggestedType || g.dataType || '')),
       ]),
       winsockInAddr: [...inAddrClaim.lines, ...buildWinsockIpTypesClaim(dataTypes)],
+      // Declarations only: a body's 3-byte loads are lowered by three-byte-access and its
+      // 3-byte values spelled as their containers by type-normalize; a struct's undefined3
+      // padding is emitted as uint8_t[3].
+      oddWidthTypesUsed: oddWidthTypesSpelled([
+        ...functions.flatMap(f => [f.returnType, ...(f.parameters ?? []).map(p => p.dataType)]),
+        ...globals.map(g => g.suggestedType || g.dataType),
+        ...dataTypes.flatMap(dt => dt.kind === 'TYPEDEF'
+          ? [(dt as { underlyingType?: string }).underlyingType]
+          : dt.kind === 'FUNCTION_DEFINITION'
+            ? [(dt as { returnType?: string }).returnType,
+               ...((dt as { parameters?: { dataType?: string }[] }).parameters ?? []).map(p => p.dataType)]
+            : []),
+      ]),
     }),
     type: 'header',
     functions: [],
