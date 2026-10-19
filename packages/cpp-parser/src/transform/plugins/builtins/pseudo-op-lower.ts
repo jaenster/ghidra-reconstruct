@@ -104,6 +104,8 @@ export interface PseudoOpLowerOptions extends PluginOptions {
   fieldTypes?: Record<string, string>;
   functionReturnTypes?: Record<string, string>;
   typedefTargets?: Record<string, string>;
+  /** The function's stack frame: name, frame offset and size of each slot. */
+  stackSlots?: ReadonlyArray<{ name: string; offset: number; size: number }>;
 }
 
 // ============================================
@@ -362,6 +364,9 @@ class Unlowerable extends Error {
 
 interface Ctx {
   classify: (e: Expression) => Operand;
+  /** Names the function itself declares: parameters and locals. */
+  isLocal?: (name: string) => boolean;
+  stackSlots?: ReadonlyArray<{ name: string; offset: number; size: number }>;
 }
 
 /** The FLAG and SIZE ops, and how many sizes each name carries. */
@@ -508,17 +513,61 @@ function lowerDeadHighConcat(ctx: Ctx, target: Expression, value: Expression): E
   const parsed = parseOpName((callee as Identifier).name);
   if (!parsed || parsed.op !== 'CONCAT' || (call as CallExpr).arguments.length !== 2) return null;
   const [hi, lo] = (call as CallExpr).arguments;
+  const t = unwrapParens(target);
+  // The neighbour's bytes are its OWN value written back only for the global case this
+  // rule was made from. Over a LOCAL, `hi` is a value the function stores into the next
+  // frame slot (UNICODE_BinarySearchKamap 00527b00: `_searchKey = CONCAT22(wChar, wMapChar)`
+  // builds a 4-byte bsearch key) - see lowerLocalSlotConcat.
+  if (t.kind === NodeKind.Identifier && /^_[A-Za-z]/.test((t as Identifier).name)
+    && ctx.isLocal?.((t as Identifier).name.slice(1))) return null;
   let dest = ctx.classify(target);
   // `_X` over the global `X` is Ghidra's name for the same storage accessed wider (here the
   // 4-byte store over the 2-byte id); underscore-storage-alias binds it to `X` later, so
   // what the assignment stores into is `X`'s type.
-  const t = unwrapParens(target);
   if (dest.kind === 'unknown' && t.kind === NodeKind.Identifier && /^_[A-Za-z]/.test((t as Identifier).name)) {
     dest = ctx.classify(Expr.identifier((t as Identifier).name.slice(1)));
   }
   if (dest.kind !== 'int' || dest.width > parsed.m || !isPure(hi)) return null;
   const l = raw(ctx, lo, parsed.m, parsed.m);
   return isOddWidth(parsed.m) ? l : castTo(uType(parsed.m), l);
+}
+
+/**
+ * `_X = CONCATnm(hi, lo)` over a LOCAL `X`: one n+m-byte store across two frame slots.
+ *
+ * Ghidra names the wide access `_X` and keeps one variable per slot. When `X` is exactly
+ * the low m bytes and the frame has a slot `Y` that is exactly the next n bytes, the
+ * store is `X = lo, Y = hi` - every byte the machine writes, into the slot that holds it,
+ * and nothing outside the two. UNICODE_BinarySearchKamap's key is
+ * `searchKey = wMapChar, wSearchHi = wChar`. Any other layout returns null.
+ */
+function lowerLocalSlotConcat(ctx: Ctx, target: Expression, value: Expression): Expression | null {
+  const t = unwrapParens(target);
+  if (t.kind !== NodeKind.Identifier) return null;
+  const alias = (t as Identifier).name;
+  if (!/^_[A-Za-z]/.test(alias) || ctx.isLocal?.(alias) || !ctx.isLocal?.(alias.slice(1))) return null;
+  const call = unwrapParens(value);
+  if (call.kind !== NodeKind.CallExpr) return null;
+  const callee = (call as CallExpr).callee;
+  if (callee.kind !== NodeKind.Identifier) return null;
+  const parsed = parseOpName((callee as Identifier).name);
+  if (!parsed || parsed.op !== 'CONCAT' || (call as CallExpr).arguments.length !== 2) return null;
+  if (isOddWidth(parsed.n) || isOddWidth(parsed.m)) return null;
+  const slots = ctx.stackSlots ?? [];
+  const x = slots.find(s => s.name === alias.slice(1));
+  if (!x || x.size !== parsed.m) return null;
+  const y = slots.filter(s => s.offset === x.offset + parsed.m && s.size === parsed.n);
+  if (y.length !== 1 || !ctx.isLocal?.(y[0].name)) return null;
+  const [hi, lo] = (call as CallExpr).arguments;
+  const store = (name: string, n: number, e: Expression): Expression => ({
+    kind: NodeKind.AssignExpr, operator: '=', left: Expr.identifier(name), right: castTo(uType(n), e),
+    location: value.location, leadingTrivia: [], trailingTrivia: [],
+  } as unknown as Expression);
+  return {
+    kind: NodeKind.CommaExpr,
+    expressions: [store(x.name, parsed.m, lo), store(y[0].name, parsed.n, hi)],
+    location: value.location, leadingTrivia: [], trailingTrivia: [],
+  } as unknown as Expression;
 }
 
 function lowerExt(ctx: Ctx, signed: boolean, n: number, m: number, args: Expression[]): Expression {
@@ -1227,7 +1276,7 @@ function createPseudoOpLowerTransformer(options: PseudoOpLowerOptions = {}): Tra
       return classOfShape(shape(x));
     };
     const shapeOf = (t: TypeNode) => shape(Expr.cast(t, Expr.identifier('__x')));
-    const ctx: Ctx = { classify };
+    const ctx: Ctx = { classify, isLocal: (n: string) => localTypes.has(n), stackSlots: options.stackSlots };
 
     // The fold has to see the SBORROW calls before they are lowered, and the `||`/`&&`
     // forms before their inner `!=` is folded on its own: the traversal is bottom-up, so
@@ -1284,6 +1333,8 @@ function createPseudoOpLowerTransformer(options: PseudoOpLowerOptions = {}): Tra
         if (node.kind !== NodeKind.AssignExpr) return undefined;
         const a = node as unknown as { operator: string; left: Expression; right: Expression };
         if (a.operator !== '=') return undefined;
+        const split = lowerLocalSlotConcat(ctx, a.left, a.right);
+        if (split) return { ...split, leadingTrivia: node.leadingTrivia, trailingTrivia: node.trailingTrivia } as unknown as ASTNode;
         let lowered: Expression | null;
         try {
           lowered = lowerDeadHighConcat(ctx, a.left, a.right);

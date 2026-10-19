@@ -2471,6 +2471,7 @@ function transformDecompiledCode(
         enclosingVarTypes,
       };
       perPluginOptions['pseudo-op-lower'] = {
+        stackSlots: enclosing?.stackSlots,
         mode: artifactLoweringMode(),
         onArtifact: (r: ArtifactRecord) => reportArtifact(funcName, funcAddress, r),
         globalTypes: context.funcPtrArgCasts.globalTypes,

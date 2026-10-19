@@ -512,3 +512,23 @@ describe('pseudo-op-lower: plugin metadata', () => {
     assert.strictEqual(pseudoOpLowerPlugin.defaultEnabled, true);
   });
 });
+
+describe('pseudo-op-lower: a CONCAT stored over two LOCAL frame slots', () => {
+  // Raw UNICODE_BinarySearchKamap @00527b00 (v1103): a 4-byte bsearch key built in the
+  // PUSH ECX slot, `searchKey` at Stack[-0x8] and `wSearchHi` at Stack[-0x6].
+  const SRC = `uint32_t f(uint16_t wMapChar, uint16_t wChar) {
+    ushort *pFoundEntry; uint16_t searchKey; uint16_t wSearchHi;
+    _searchKey = CONCAT22(wChar,wMapChar);
+    pFoundEntry = _bsearch(&searchKey,gpTable,4,4,Compare);
+    return (uint)*pFoundEntry; }`;
+  const slots = [{ name: 'searchKey', offset: -8, size: 2 }, { name: 'wSearchHi', offset: -6, size: 2 }];
+  it('stores each half into the slot that holds it - the high half is not dropped', () => {
+    const out = transform(SRC, { stackSlots: slots });
+    assert.match(out, /searchKey = \(uint16_t\)wMapChar, wSearchHi = \(uint16_t\)wChar;/, out);
+    assert.ok(!out.includes('_searchKey') && !out.includes('CONCAT'), out);
+  });
+  it('without a slot that exactly holds the high half, the dead-high rule does not fire on a local', () => {
+    const out = transform(SRC, { stackSlots: [slots[0]] });
+    assert.ok(!/_searchKey = \(uint16_t\)wMapChar;/.test(out), out);
+  });
+});
