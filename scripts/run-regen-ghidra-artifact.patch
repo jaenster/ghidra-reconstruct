@@ -1,0 +1,25 @@
+--- a/recon/runs/run-regen.sh
++++ b/recon/runs/run-regen.sh
+@@ -162,6 +162,22 @@
+ # descriptor arrays and unsigned range checks that are not in the defect lint.
+ ts "--- lint-ast: pipeline-AST checks ---"
+ ( cd "$ROOT" && npx tsx scripts/lint-ast/index.ts ) || true
++
++# Decompiler notation in the tree - pseudo-op calls, frame and register names, Ghidra
++# types, subpiece members, WARNING comments, denormal literals. Unlike the steps above
++# this one is a GATE: every rule carries a count in the generator repo's
++# packages/reconstruct/src/lint/ghidra-artifact-allowlist.json that may only shrink,
++# and a count above it fails the regen. It is never baselined. Not `|| true`.
++# The regen commit above has already landed on source/regen; a failure here means
++# do not merge it into source/modified until the class is lowered or fixed in Ghidra.
++ts "--- ghidra-artifact: decompiler notation gate ---"
++( cd "$ROOT" && NODE_OPTIONS=--max-old-space-size=8192 npx tsx packages/reconstruct/src/lint/cli.ts "$OUT" \
++    --check ghidra-artifact --fail-on ghidra-artifact --no-layout --baseline /dev/null )
++GHIDRA_ARTIFACT_STATUS=$?
+ echo "--- by namespace ---"
+ awk -F'\t' '{split($2,a,"/"); ns=(a[2]==""?$2:a[1]); e[ns]+=$1; n[ns]++} END{for(k in e) printf "%-22s %6d errors %4d files\n", k, e[k], n[k]}' "$RUNS/$STAMP.errors.tsv" | sort -k2 -rn
+ echo "=== done $(date +%T) ==="
++if [ "$GHIDRA_ARTIFACT_STATUS" -ne 0 ]; then
++  echo "FAILED: ghidra-artifact gate (exit $GHIDRA_ARTIFACT_STATUS) - decompiler notation over the allowlist, see above"
++  exit "$GHIDRA_ARTIFACT_STATUS"
++fi

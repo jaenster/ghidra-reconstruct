@@ -17,12 +17,17 @@ import { unassignedLocalRead, uninitialisedSendBuffer } from './checks/locals.js
 import { arglessIndirectCall, untypedVirtualCall } from './checks/calls.js';
 import { structPackingMismatch } from './checks/layout.js';
 import { arrayIndexRange } from './checks/ranges.js';
+import { ghidraArtifact } from './checks/artifacts.js';
 
 export type { Check, Finding } from './context.js';
 export { LintContext } from './context.js';
 export * from './baseline.js';
 export { loadTree, treeFromFiles, parseSource } from './tree.js';
 export { loadSnapshot, buildSnapshot } from './snapshot.js';
+export {
+  ghidraArtifact, artifactGate, GHIDRA_ARTIFACT_CHECK_ID, GHIDRA_ARTIFACT_RULES,
+  type ArtifactAllowlist, type ArtifactGateRow,
+} from './checks/artifacts.js';
 
 /** In the order lint.py reported them. */
 export const ALL_CHECKS: Check[] = [
@@ -41,7 +46,15 @@ export const ALL_CHECKS: Check[] = [
   oobLocalAccess,
   arrayIndexRange,
   untypedVirtualCall,
+  ghidraArtifact,
 ];
+
+/**
+ * Checks gated by a per-rule COUNT instead of the content-keyed baseline. They run only when
+ * named (`--check`/`--fail-on`), never in the default sweep, and are never written to the
+ * baseline: an accepted artifact is a number that must shrink, not a site to forget.
+ */
+export const COUNTED_CHECKS = new Set<string>(['ghidra-artifact']);
 
 export interface RunResult {
   findings: Finding[];

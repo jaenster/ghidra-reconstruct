@@ -1,0 +1,13 @@
+{
+  "measured": "recon/diablo-2 15411f874 (Game.exe v1054), before any lowering; each count may only go down",
+  "rules": {
+    "pseudo-op-call": 342,
+    "pseudo-constant": 16,
+    "frame-name": 60,
+    "register-name": 1379,
+    "ghidra-type": 520,
+    "subpiece-member": 0,
+    "warning-comment": 2276,
+    "denormal-literal": 50
+  }
+}

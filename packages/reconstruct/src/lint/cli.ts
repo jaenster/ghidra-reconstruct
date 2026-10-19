@@ -10,17 +10,37 @@
  *   --snapshot <dir>       extraction snapshot (default: the project's codegen-snapshot)
  *   --json <file>          write every keyed finding as JSON
  *   --no-layout            skip struct-packing-mismatch (it compiles a TU and takes a while)
+ *   --fail-on <id>[,<id>]  run these counted checks and FAIL (exit 3) when one is over its
+ *                          allowlist; today only ghidra-artifact
+ *   --allowlist <file>     per-rule counts for ghidra-artifact
+ *                          (default: ghidra-artifact-allowlist.json beside this file)
+ *
+ * Counted checks (ghidra-artifact) run only when named by --check or --fail-on, are judged
+ * by a per-rule count rather than the baseline, and are never written to the baseline.
  *
  * Exit code: 0 clean, 1 when there are NEW findings (candidates to judge, not a failed run),
- * 2 on a usage error.
+ * 2 on a usage error, 3 when a --fail-on check is over its allowlist.
  */
 
-import { writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
-  ALL_CHECKS, goneFindings, keyFindings, loadBaseline, loadSnapshot, loadTree, newFindings,
-  runChecks, saveBaseline, toBaseline,
+  ALL_CHECKS, COUNTED_CHECKS, GHIDRA_ARTIFACT_CHECK_ID, artifactGate, goneFindings, keyFindings,
+  loadBaseline, loadSnapshot, loadTree, newFindings, runChecks, saveBaseline, toBaseline,
+  type ArtifactAllowlist,
 } from './index.js';
+
+export const DEFAULT_ARTIFACT_ALLOWLIST = resolve(
+  dirname(fileURLToPath(import.meta.url)), 'ghidra-artifact-allowlist.json');
+
+export function loadArtifactAllowlist(path: string): ArtifactAllowlist {
+  if (!existsSync(path)) return {};
+  const raw = JSON.parse(readFileSync(path, 'utf8'));
+  const out: ArtifactAllowlist = {};
+  for (const [k, v] of Object.entries(raw.rules ?? raw)) if (typeof v === 'number') out[k] = v;
+  return out;
+}
 
 function arg(argv: string[], flag: string): string | undefined {
   const i = argv.indexOf(flag);
@@ -30,7 +50,8 @@ function arg(argv: string[], flag: string): string | undefined {
 }
 
 export function main(argv = process.argv.slice(2)): number {
-  const tree = argv.find((a, i) => !a.startsWith('--') && !['--baseline', '--check', '--snapshot', '--json'].includes(argv[i - 1]));
+  const tree = argv.find((a, i) => !a.startsWith('--') &&
+    !['--baseline', '--check', '--snapshot', '--json', '--fail-on', '--allowlist'].includes(argv[i - 1]));
   if (!tree) {
     console.error('usage: cli.ts <tree> [--baseline f] [--update-baseline] [--details] [--check ids] [--json f] [--no-layout]');
     return 2;
@@ -38,7 +59,15 @@ export function main(argv = process.argv.slice(2)): number {
   const root = resolve(tree);
   const baselinePath = resolve(arg(argv, '--baseline') ?? resolve(root, '../../docs/data/defect-lint-baseline.json'));
   const only = arg(argv, '--check')?.split(',');
-  let checks = ALL_CHECKS.filter(c => !only || only.includes(c.id));
+  const failOn = arg(argv, '--fail-on')?.split(',').filter(Boolean) ?? [];
+  for (const id of failOn) {
+    if (!COUNTED_CHECKS.has(id)) {
+      console.error(`--fail-on: ${id} is not a counted check (counted: ${[...COUNTED_CHECKS].join(', ')})`);
+      return 2;
+    }
+  }
+  let checks = ALL_CHECKS.filter(c => only ? only.includes(c.id) : !COUNTED_CHECKS.has(c.id) || failOn.includes(c.id));
+  for (const id of failOn) if (!checks.some(c => c.id === id)) checks.push(ALL_CHECKS.find(c => c.id === id)!);
   if (argv.includes('--no-layout')) checks = checks.filter(c => c.id !== 'struct-packing-mismatch');
   if (!checks.length) {
     console.error(`no such check: ${only}\navailable: ${ALL_CHECKS.map(c => c.id).join(', ')}`);
@@ -51,8 +80,9 @@ export function main(argv = process.argv.slice(2)): number {
   const { findings, errors } = runChecks(t, snap, checks);
   const keyed = keyFindings(findings);
   const base = loadBaseline(baselinePath);
-  const fresh = newFindings(keyed, base);
-  const gone = goneFindings(keyed, base).filter(g => checks.some(c => c.id === g.check));
+  const fresh = newFindings(keyed, base).filter(f => !COUNTED_CHECKS.has(f.check));
+  const gone = goneFindings(keyed, base)
+    .filter(g => checks.some(c => c.id === g.check) && !COUNTED_CHECKS.has(g.check));
 
   const unparsed = t.files.flatMap(f => f.parseErrors.map(e => ({ file: f.path, ...e })));
   console.log(`tree ${root}: ${t.files.length} files, ${t.functions.length} functions, ` +
@@ -64,8 +94,8 @@ export function main(argv = process.argv.slice(2)): number {
     const err = errors.find(e => e.check === c.id);
     if (err) { console.log(`${c.id.padEnd(26)} ${'ERR'.padStart(6)} ${'-'.padStart(5)}  ${err.error}`); continue; }
     const n = keyed.filter(f => f.check === c.id).length;
-    const nn = fresh.filter(f => f.check === c.id).length;
-    console.log(`${c.id.padEnd(26)} ${String(n).padStart(6)} ${String(nn).padStart(5)}  ${c.blurb}`);
+    const nn = COUNTED_CHECKS.has(c.id) ? '-' : String(fresh.filter(f => f.check === c.id).length);
+    console.log(`${c.id.padEnd(26)} ${String(n).padStart(6)} ${nn.padStart(5)}  ${c.blurb}`);
   }
 
   const details = argv.includes('--details');
@@ -90,14 +120,34 @@ export function main(argv = process.argv.slice(2)): number {
   const jsonOut = arg(argv, '--json');
   if (jsonOut) writeFileSync(jsonOut, JSON.stringify(keyed, null, 1));
 
+  // The counted gate. Every rule is printed, so a class that reached 0 is visible as one.
+  let gateFailed = false;
+  if (failOn.includes(GHIDRA_ARTIFACT_CHECK_ID) || checks.some(c => c.id === GHIDRA_ARTIFACT_CHECK_ID)) {
+    const allowPath = resolve(arg(argv, '--allowlist') ?? DEFAULT_ARTIFACT_ALLOWLIST);
+    const { rows, ok } = artifactGate(keyed, loadArtifactAllowlist(allowPath));
+    console.log(`\n--- ${GHIDRA_ARTIFACT_CHECK_ID}: count per rule against ${allowPath} ---`);
+    for (const r of rows) {
+      const note = r.over ? `  OVER by ${r.count - r.allowed}` : r.slack ? `  tighten the allowlist to ${r.count}` : '';
+      console.log(`  ${r.rule.padEnd(20)} ${String(r.count).padStart(6)} / ${String(r.allowed).padStart(6)}${note}`);
+    }
+    if (!ok && failOn.includes(GHIDRA_ARTIFACT_CHECK_ID)) {
+      gateFailed = true;
+      console.log(`\n${GHIDRA_ARTIFACT_CHECK_ID}: over the allowlist. Lower the class in the generator or fix it in Ghidra;`);
+      console.log('the allowlist only ever shrinks.');
+    }
+  }
+
   if (argv.includes('--update-baseline')) {
-    const merged = toBaseline(keyed, checks.map(c => c.id));
-    // Checks not run this time keep their accepted state.
+    const merged = toBaseline(keyed.filter(f => !COUNTED_CHECKS.has(f.check)),
+      checks.map(c => c.id).filter(id => !COUNTED_CHECKS.has(id)));
+    // Checks not run this time keep their accepted state; counted checks are never baselined.
     if (base) for (const [id, keys] of Object.entries(base.checks)) if (!(id in merged.checks)) merged.checks[id] = keys;
+    for (const id of COUNTED_CHECKS) delete merged.checks[id];
     saveBaseline(baselinePath, merged);
     console.log(`\nbaseline updated: ${baselinePath}`);
-    return 0;
+    return gateFailed ? 3 : 0;
   }
+  if (gateFailed) return 3;
   if (fresh.length) {
     console.log(`\n${fresh.length} NEW finding(s). Judge each - these are candidates, not errors.`);
     console.log('Accept the current state with --update-baseline.');
