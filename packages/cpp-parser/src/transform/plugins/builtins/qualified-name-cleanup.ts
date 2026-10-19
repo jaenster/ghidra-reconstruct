@@ -77,6 +77,15 @@ export interface QualifiedNameCleanupOptions extends PluginOptions {
    * class would merge it with a sibling class's datum of the same name.
    */
   keepTypeQualifierOf?: string[];
+  /**
+   * Emitted spellings of ROOT-scope classes (`IgnoreList`,
+   * `TSHashTable_CELLIST_HASHKEY_NONE_`). A class namespace at global scope would
+   * redeclare the global struct of the same name, so the class's members are
+   * emitted under `rootClassScope`, and a reference qualified by the class alone
+   * gets that scope in front: `IgnoreList::Constructor` → `Class::IgnoreList::Constructor`.
+   */
+  rootClassQualifiers?: string[];
+  rootClassScope?: string;
 }
 
 const DEFAULT_DROPPED_QUALIFIERS = ['VisualStudio', 'compiler'];
@@ -149,6 +158,8 @@ function createQualifiedNameCleanupTransformer(
   const typeNames = new Set(options.typeQualifierNames ?? []);
   const importRenames = options.importRenames ?? {};
   const keptQualified = new Set(options.keepTypeQualifierOf ?? []);
+  const rootClasses = new Set(options.rootClassQualifiers ?? []);
+  const rootClassScope = options.rootClassScope;
 
   return createTransformer({
     visitNode(n: ASTNode): ASTNode | undefined {
@@ -182,7 +193,17 @@ function createQualifiedNameCleanupTransformer(
         }
         return keptQualified.has(`${parts.join('::')}::${refName}`);
       };
-      const cleaned = cleanQualifier(q.qualifier, dropped, collapseDuplicates, typeNames, keepTypeQualifier);
+      const cleanedOrNull = cleanQualifier(q.qualifier, dropped, collapseDuplicates, typeNames, keepTypeQualifier);
+
+      // A reference qualified by a root-scope class alone (see `rootClassQualifiers`).
+      const effective = cleanedOrNull ?? q.qualifier;
+      const soleName = effective.length === 1 ? segmentName(effective[0]) : undefined;
+      if (!q.isGlobal && rootClassScope && soleName !== undefined && rootClasses.has(soleName)) {
+        const scope = updateNode(effective[0] as Identifier, { name: rootClassScope } as Partial<Identifier>);
+        return updateNode(q, { qualifier: [scope, effective[0]] } as Partial<QualifiedId>);
+      }
+
+      const cleaned = cleanedOrNull;
       if (!cleaned) return undefined;
 
       // What the model spelled here, kept for the passes that resolve a

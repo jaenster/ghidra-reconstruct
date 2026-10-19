@@ -21,7 +21,7 @@ import { CPP_KEYWORDS } from './header.js';
 // Import cpp-parser for code transformation
 import { transformGhidraCode, preprocessGhidraCode, isGhidraGeneratedName, suggestBetterName, takeFuncPtrArgCastTypedefs, type TransformResult, type FuncPtrTarget } from '@ghidra-mcp/cpp-parser';
 import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js';
-import { namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
+import { ROOT_CLASS_SCOPE, namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 import { cleanFunctionComment, guardedFuncDefTypedef, emittedFunctionName, returnSigType, sigType } from './header.js';
 import { declarationHead } from './calling-convention.js';
 import { emittedParameterName, getAggregateTypeNames } from './platform-types.js';
@@ -427,10 +427,9 @@ function rewriteQuestUnionMembers(
  * Check if a name is a valid C++ namespace (not a template instantiation)
  */
 function isValidNamespace(name: string): boolean {
-  const templateInfo = parseTemplateName(name);
-  // Template instantiations are not valid namespace names
-  if (templateInfo.isTemplate) return false;
-  // Also reject names with angle brackets
+  // A template spelling is not a namespace name. A flattened instantiation
+  // (`TSExplicitList_CELLIST__572662307_`) is an ordinary identifier and is.
+  // Reject names with angle brackets
   if (name.includes('<') || name.includes('>')) return false;
   // Also reject names with commas (mangled template params)
   if (name.includes(',')) return false;
@@ -502,6 +501,8 @@ export interface ImplGenContext {
   _namespaceCollisionTypeNames?: string[];
   /** `Ns::Class::name` data references whose class segment is kept. */
   _keptTypeQualifiedNames?: string[];
+  /** Emitted spellings of root-scope classes. */
+  _rootClassQualifiers?: string[];
   /** The resolved entity behind `_enclosingNamespace`; passes segments around
    *  without anyone re-splitting the rendered text. */
   _enclosingResolvedNamespace?: ResolvedNamespace;
@@ -2502,6 +2503,9 @@ function transformDecompiledCode(
         : {}),
       ...(keptTypeQualifiedNames && keptTypeQualifiedNames.length > 0
         ? { keepTypeQualifierOf: keptTypeQualifiedNames }
+        : {}),
+      ...(context?._rootClassQualifiers && context._rootClassQualifiers.length > 0
+        ? { rootClassQualifiers: context._rootClassQualifiers, rootClassScope: ROOT_CLASS_SCOPE }
         : {}),
     };
 

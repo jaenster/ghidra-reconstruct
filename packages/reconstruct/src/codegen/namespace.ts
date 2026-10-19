@@ -255,9 +255,12 @@ export function normalizeUnitName(name: string): string {
   }
   let collapsed = collapseConsecutiveDuplicates(name);
   collapsed = collapseModuleLeaf(collapsed, knownModuleNames);
-  const templateInfo = parseTemplateName(collapsed);
-  if (templateInfo.isTemplate) {
-    return templateInfo.baseName;
+  // Only a real template spelling groups by its base name. A flattened
+  // instantiation (`TSExplicitList_CELLIST__572662307_`) is its own namespace and
+  // its own unit; grouping it by the text before the first `_X` would put several
+  // namespaces in one file, which opens only the first.
+  if (collapsed.includes('<') || collapsed.includes(',')) {
+    return parseTemplateName(collapsed).baseName;
   }
   return collapsed;
 }

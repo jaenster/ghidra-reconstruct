@@ -87,7 +87,7 @@ import { collectCrtHeaders, EXCLUDED_SYMBOL_DECLS, declaredIdentifier, WIN32_ZER
 import { selectExclusionEmissions, setPlatformDefinedNames, setPlatformDeclaredNames, collectReferencedNames, mayReferenceNamespaces } from './exclusion-closure.js';
 import { normalizePointerSizeSpellings } from './pointer-size-spelling.js';
 import { flattenTemplateNames } from './template-names.js';
-import { retypeVtableLocals, vtableMembersByType } from '../modules/vtable-types.js';
+import { retypeVtableLocals, retypeVtableLocalsByAssignment, vtableMembersByType } from '../modules/vtable-types.js';
 import { NeedleIndex, scanReferences } from './needle-index.js';
 import {
   computeTypeOwnership,
@@ -631,6 +631,10 @@ export function generateProjectStage1(
     const retyped = retypeVtableLocals(functions, vtableMembersByType(dataTypes));
     if (retyped > 0) {
       console.log(`Pointed ${retyped} vtable locals/parameters at the vtable they index`);
+    }
+    const byAssignment = retypeVtableLocalsByAssignment(functions, dataTypes, globals as Array<{ name?: string; suggestedName?: string; dataType?: string; suggestedType?: string }>);
+    if (byAssignment > 0) {
+      console.log(`Pointed ${byAssignment} vtable locals at the vtable field they are loaded from`);
     }
   }
 
@@ -1809,6 +1813,14 @@ function resolveSymbolReferenceHeader(
   if (candidates.length === 1) return candidates[0].header;
   for (const c of candidates) {
     if (c.qualified === ref || c.qualified.endsWith(`::${ref}`)) return c.header;
+  }
+  // An initializer keeps Ghidra's template spelling (`TSHashTable<CELLIST,
+  // HASHKEY_NONE>::InternalDelete`); the declaration carries the flattened one.
+  const flat = sanitizeQualifiedReference(ref);
+  if (flat !== ref) {
+    for (const c of candidates) {
+      if (c.qualified.endsWith(`::${flat}`)) return c.header;
+    }
   }
   return undefined;
 }
@@ -3208,6 +3220,10 @@ function generateFilesForFunctions(
   // The reference side of the same decision, applied on the name node.
   context._namespaceCollisionTypeNames = [...structUnionEnumNames];
   context._keptTypeQualifiedNames = namespaceResolution().keptReferenceNames();
+  // Root-scope classes, in the spellings references use: bodies print a name
+  // through the same sanitizer the declarations use.
+  context._rootClassQualifiers = [...new Set(namespaceResolution().rootClassNames()
+    .flatMap(c => [c, sanitizeSymbolName(c)]))];
 
   // struct/union name → { fieldName → field's struct/union type name }, used to
   // resolve deref chains (`a->b->c`) so the headers of the INTERMEDIATE struct
@@ -4916,7 +4932,12 @@ export function buildFuncPtrArgCastTables(
     let owners = bareNameOwners.get(fn.name);
     if (!owners) { owners = new Set(); bareNameOwners.set(fn.name, owners); }
     owners.add(qualified);
-    for (const key of nameSuffixes(qualified)) {
+    // A root-scope class's members are emitted under `Class::` (see
+    // namespace-resolution.ts); a call arrives spelled that way too.
+    const rendered = renderNamespace(namespaceResolution().of(fn));
+    const keys = new Set(nameSuffixes(qualified));
+    if (rendered && rendered !== fn.namespace) for (const k of nameSuffixes(`${rendered}::${fn.name}`)) keys.add(k);
+    for (const key of keys) {
       functionNames.add(key);
       if (!headerOwned.has(key) && !fn.platform) {
         claim(functionParamTypes, paramTypeClaims, key, paramSpellings, paramSpellings.join('|'));
@@ -4927,6 +4948,13 @@ export function buildFuncPtrArgCastTables(
       if (!va) { va = new Set(); varArgClaims.set(key, va); }
       va.add(fn.hasVarArgs ? 'yes' : 'no');
       if (fn.hasVarArgs) varArgFunctions.add(key);
+    }
+    // The bare name with its arity (`SetText#5`). Ghidra prints a call to a
+    // function whose leaf name another namespace also uses as the bare leaf; when
+    // the owners disagree the bare key above is dropped, but an owner set that
+    // differs in parameter count still has exactly one member of the call's arity.
+    if (!headerOwned.has(fn.name) && !fn.platform && !fn.hasVarArgs) {
+      claim(functionParamTypes, paramTypeClaims, `${fn.name}#${params.length}`, paramSpellings, `${qualified}|${paramSpellings.join('|')}`);
     }
   }
   // A Win32 name the target headers make an overload set. The model has no

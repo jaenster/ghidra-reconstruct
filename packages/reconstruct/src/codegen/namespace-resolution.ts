@@ -60,6 +60,14 @@ export interface ResolvedNamespace {
 
 const ROOT: ResolvedNamespace = { ghidraSegments: [], segments: [] };
 
+/**
+ * The enclosing namespace of a ROOT-scope class's members. A nested class
+ * (`D2Client::ButtonImplementation`) is emitted inside its module; a class Ghidra
+ * homes at global scope, as its RTTI name is, would otherwise have to be a
+ * namespace beside the global struct of the same name.
+ */
+export const ROOT_CLASS_SCOPE = 'Class';
+
 /** A datum as the resolution sees it. */
 export interface DataSymbol {
   address?: string;
@@ -90,6 +98,9 @@ export class NamespaceResolution {
   /** Data that keeps its class segment, keyed `collapsedGhidraPath::name`. */
   private readonly keptByReference = new Map<string, ResolvedNamespace>();
 
+  /** One-segment namespaces that name a type, homed under ROOT_CLASS_SCOPE. */
+  private readonly rootClasses = new Set<string>();
+
   constructor(typeNames: ReadonlySet<string>) {
     this.typeNames = typeNames;
   }
@@ -105,7 +116,16 @@ export class NamespaceResolution {
     const ghidraSegments = rawNamespace.split('::').filter(s => s.length > 0);
 
     const collapsed = collapseSegments(ghidraSegments);
-    if (collapsed.length > 1 && this.typeNames.has(collapsed[collapsed.length - 1])) {
+    const last = collapsed[collapsed.length - 1];
+    if (collapsed.length === 1 && this.typeNames.has(last)) {
+      // A root-scope class (`IgnoreList`, `TSHashTable<CELLIST,HASHKEY_NONE>`):
+      // `namespace IgnoreList` beside the global `struct IgnoreList` is a
+      // redeclaration, and dropping the segment would pour every class's
+      // Constructor/Destructor/Draw into one global overload set. It gets the
+      // enclosing scope a nested class already has, so it keeps its own.
+      collapsed.unshift(ROOT_CLASS_SCOPE);
+      this.rootClasses.add(last);
+    } else if (collapsed.length > 1 && this.typeNames.has(last)) {
       collapsed.pop();
     }
 
@@ -142,7 +162,8 @@ export class NamespaceResolution {
       for (const { symbol, resolved } of group) {
         const full = collapseSegments(resolved.ghidraSegments);
         if (full.length === resolved.segments.length) continue;
-        const own: ResolvedNamespace = { ghidraSegments: resolved.ghidraSegments, segments: full };
+        const segments = full;
+        const own: ResolvedNamespace = { ghidraSegments: resolved.ghidraSegments, segments };
         if (symbol.address) this.byAddr.set(symbol.address, own);
         for (const name of new Set([symbol.name, nameOf(symbol)])) {
           if (name) this.keptByReference.set(`${full.join('::')}::${name}`, own);
@@ -161,6 +182,11 @@ export class NamespaceResolution {
     const resolved = this.resolvePath(qualifier);
     const full = collapseSegments(resolved.ghidraSegments);
     return this.keptByReference.get(`${full.join('::')}::${name}`) ?? resolved;
+  }
+
+  /** Root-scope classes the resolution homed under ROOT_CLASS_SCOPE (Ghidra spellings). */
+  rootClassNames(): string[] {
+    return [...this.rootClasses];
   }
 
   /** `Ns::Class::name` references that must keep their type-named qualifier. */

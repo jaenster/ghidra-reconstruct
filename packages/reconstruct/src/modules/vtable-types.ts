@@ -239,3 +239,75 @@ export function vtableMembersByType(dataTypes: ExtractedDataType[]): Map<string,
   for (const m of ambiguous) byMember.delete(m);
   return byMember;
 }
+
+/**
+ * The same retype, decided by the ASSIGNMENT when the members cannot decide it.
+ *
+ * Slot names are shared by design once vtables are typed (`SavePersistentSetting`
+ * is a slot of both ChatIgnoreList's and IgnoreList's table, `AddItem` of both
+ * ListBox tables), so `retypeVtableLocals` rightly finds no unambiguous member.
+ * The body still says which table the local holds: it is loaded from a struct's
+ * vtable field,
+ *
+ *     vtable *pvVar1;
+ *     pvVar1 = (vtable *)ppIgnoreListB->_vfptr;      // ppIgnoreListB: IgnoreList *
+ *
+ * and that field's type is the table's own (`IgnoreListVtable *`). Every
+ * assignment to the local must agree, and the base's type must be declared in
+ * the body, the signature or the globals; anything else is left alone.
+ */
+export function retypeVtableLocalsByAssignment(
+  functions: ExtractedFunction[],
+  dataTypes: ExtractedDataType[],
+  globals: ReadonlyArray<{ name?: string; suggestedName?: string; dataType?: string; suggestedType?: string }>,
+): number {
+  const fieldsOf = new Map<string, Map<string, string>>();
+  for (const dt of dataTypes) {
+    if (dt.kind !== 'STRUCTURE' && dt.kind !== 'UNION') continue;
+    const m = new Map<string, string>();
+    for (const f of (dt as ExtractedStruct).fields ?? []) if (f.name && f.dataType) m.set(f.name, f.dataType);
+    fieldsOf.set(dt.name, m);
+  }
+  const globalType = new Map<string, string>();
+  for (const g of globals) {
+    const t = g.suggestedType || g.dataType;
+    for (const n of [g.name, g.suggestedName]) if (n && t && !globalType.has(n)) globalType.set(n, t);
+  }
+  const pointee = (t: string | undefined): string | undefined => {
+    const m = t?.match(/^\s*(?:struct\s+)?([A-Za-z_]\w*)\s*\*\s*$/);
+    return m ? m[1] : undefined;
+  };
+  let retyped = 0;
+
+  for (const fn of functions) {
+    let body = fn.decompiled;
+    if (!body || !/\bvtable\s*\*/.test(body)) continue;
+    const declared = new Map<string, string>();
+    for (const v of [...(fn.parameters ?? []), ...(fn.localVariables ?? [])]) if (v.name && v.dataType) declared.set(v.name, v.dataType);
+    for (const m of body.matchAll(/^\s*([A-Za-z_]\w*\s*\*)\s*([A-Za-z_]\w*)\s*;/gm)) declared.set(m[2], m[1]);
+
+    for (const decl of [...body.matchAll(/^(\s*)vtable\s*\*\s*([A-Za-z_]\w*)\s*;/gm)]) {
+      const name = decl[2];
+      const assign = new RegExp(`\\b${name}\\s*=\\s*(?:\\(\\s*vtable\\s*\\*\\s*\\)\\s*)?([A-Za-z_]\\w*)\\s*->\\s*([A-Za-z_]\\w*)\\s*;`, 'g');
+      const owners = new Set<string>();
+      let assignments = 0;
+      for (const a of body.matchAll(assign)) {
+        assignments++;
+        const base = pointee(declared.get(a[1]) ?? globalType.get(a[1]));
+        const fieldType = base ? fieldsOf.get(base)?.get(a[2]) : undefined;
+        const table = pointee(fieldType);
+        if (table && table.endsWith('Vtable') && fieldsOf.has(table)) owners.add(table);
+        else owners.add('');
+      }
+      if (assignments === 0 || owners.size !== 1 || owners.has('')) continue;
+      const table = [...owners][0];
+      body = body
+        .replace(new RegExp(`^(\\s*)vtable\\s*\\*\\s*${name}\\s*;`, 'm'), `$1${table} *${name};`)
+        .replace(new RegExp(`(\\b${name}\\s*=\\s*)\\(\\s*vtable\\s*\\*\\s*\\)`, 'g'), `$1(${table} *)`);
+      for (const v of fn.localVariables ?? []) if (v.name === name) v.dataType = `${table} *`;
+      retyped++;
+    }
+    fn.decompiled = body;
+  }
+  return retyped;
+}

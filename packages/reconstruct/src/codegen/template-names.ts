@@ -65,7 +65,16 @@ export function flattenTemplateNames(
   functions: ExtractedFunction[],
   globals: Array<{ name?: string; dataType?: string; suggestedType?: string; suggestedName?: string; namespace?: string | null }>,
 ): void {
-  const names = collectTemplateNames(dataTypes);
+  // Namespaces are spelled from the same instantiations (`TSExplicitList<CELLIST,
+  // -572662307>::UnlinkAll`, a Storm template whose instances are a shared struct,
+  // so no data type carries the spelling). They join the closed set.
+  const all = new Set(collectTemplateNames(dataTypes));
+  for (const holder of [...functions, ...globals]) {
+    for (const segment of holder.namespace?.split('::') ?? []) {
+      if (segment.includes('<') && segment.endsWith('>')) all.add(segment);
+    }
+  }
+  const names = [...all].sort((a, b) => b.length - a.length);
   if (names.length === 0) return;
   const r = (t: string | undefined) => (t === undefined ? t : replaceAll(t, names));
 

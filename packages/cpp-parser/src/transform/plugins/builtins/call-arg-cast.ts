@@ -762,7 +762,10 @@ export function createCallArgCastTransformer(options?: PluginOptions): Transform
         const name = calleeName(call.callee);
         if (name !== undefined) {
           const bare = bareName(name);
-          const declared = paramTypes[name] ?? paramTypes[bare];
+          // `name#arity`: the one owner of a shared leaf name with this call's
+          // parameter count (see the table's builder).
+          const declared = paramTypes[name] ?? paramTypes[bare]
+            ?? (name === bare ? paramTypes[`${bare}#${call.arguments.length}`] : undefined);
           if (declared) {
             const variadic = varArgs.has(name) || varArgs.has(bare);
             return { spellings: declared, pointerOnly: false, variadic };

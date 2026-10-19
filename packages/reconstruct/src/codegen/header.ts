@@ -106,10 +106,9 @@ function renumberParams(params: Array<{ name: string; dataType: string }>): Arra
  * Check if a name is a valid C++ namespace (not a template instantiation)
  */
 function isValidNamespace(name: string): boolean {
-  const templateInfo = parseTemplateName(name);
-  // Template instantiations are not valid namespace names
-  if (templateInfo.isTemplate) return false;
-  // Also reject names with angle brackets
+  // A template spelling is not a namespace name. A flattened instantiation
+  // (`TSExplicitList_CELLIST__572662307_`) is an ordinary identifier and is.
+  // Reject names with angle brackets
   if (name.includes('<') || name.includes('>')) return false;
   // Also reject names with commas (mangled template params)
   if (name.includes(',')) return false;

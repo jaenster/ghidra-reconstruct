@@ -81,15 +81,17 @@ describe('namespace resolution: the segment rule', () => {
   });
 
   it('never strips a sole segment down to root scope', () => {
-    // Emitting this at root scope would collide with every other root symbol.
-    assert.equal(render('Direct3D'), 'Direct3D');
+    // Emitting this at root scope would collide with every other root symbol, and
+    // `namespace Direct3D` beside `struct Direct3D` is a redeclaration, so a sole
+    // type-named segment is homed one level down.
+    assert.equal(render('Direct3D'), 'Class::Direct3D');
   });
 
   it('applies the collapse before the type-name test, not after', () => {
     // `Forms::Forms` collapses to `Forms`, which names a type - but it is now the
-    // sole segment, so it survives. Running the two rules in the other order
-    // drops it and emits the symbol at root scope.
-    assert.equal(renderNamespace(resolver().resolvePath('Forms::Forms')), 'Forms');
+    // sole segment, so it is homed under Class rather than dropped. Running the
+    // two rules in the other order drops it and emits the symbol at root scope.
+    assert.equal(renderNamespace(resolver().resolvePath('Forms::Forms')), 'Class::Forms');
   });
 
   it('lets both rules fire when a doubled segment also names a type', () => {

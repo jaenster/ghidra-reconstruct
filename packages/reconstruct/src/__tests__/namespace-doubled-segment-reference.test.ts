@@ -67,11 +67,11 @@ describe('doubled namespace segments agree between declaration and reference', (
         normalizeQualifiedReference('D2Client::Chat::IgnoreList::ChatIgnoreList_Destructor'),
         'D2Client::Chat::ChatIgnoreList_Destructor'
       );
-      // A single leading qualifier that is a type name is a class qualifier, not a
-      // namespace — it must survive.
+      // A single leading qualifier that is a type name is a root-scope class: its
+      // members are declared under the Class scope, and the reference follows.
       assert.strictEqual(
         normalizeQualifiedReference('IgnoreList::Method'),
-        'IgnoreList::Method'
+        'Class::IgnoreList::Method'
       );
     } finally {
       setNamespaceCollisionTypes(new Set());

@@ -1662,6 +1662,12 @@ function emitPointerToSymbol(rawValue: string, expectedType?: string): string {
     if (pointerCast && declared !== undefined && pointerDepthAwareName(declared) !== pointeeBare) {
       return `(${pointerCast})&${spelled}`;
     }
+    // A qualified name the declared-type table does not key (`Class::WardenClient::
+    // vftable`, one of many `vftable`s) has no type to compare; a pointer slot
+    // still takes its address only through the slot's own type.
+    if (pointerCast && declared === undefined && value.includes('::')) {
+      return `(${pointerCast})&${spelled}`;
+    }
     return `&${spelled}`;
   }
 

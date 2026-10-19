@@ -60,9 +60,12 @@ describe('the namespace resolution is one rule on segments', () => {
     );
   });
 
-  it('keeps a SOLE type-named segment — there is nothing left to hold the symbol', () => {
+  it('homes a SOLE type-named segment under the Class scope', () => {
+    // `namespace IgnoreList` beside the global `struct IgnoreList` is a
+    // redeclaration; the class keeps its own scope one level down.
     const r = new NamespaceResolution(types);
-    assert.strictEqual(renderNamespace(r.resolvePath('Direct3D')), 'Direct3D');
+    assert.strictEqual(renderNamespace(r.resolvePath('Direct3D')), 'Class::Direct3D');
+    assert.deepStrictEqual(r.rootClassNames(), ['Direct3D']);
   });
 
   it('renders root scope as undefined, not as an empty string', () => {
