@@ -105,6 +105,17 @@ const GHIDRA_FLOAT_MAP: ReadonlyMap<string, string> = new Map([
   ['float2', 'uint16_t'],
 ]);
 
+/**
+ * Ghidra's `unk*N` types: an N-byte value of unknown kind. They are bit containers, so the
+ * unsigned integer of that width; a width with no C type is left for the lint to report.
+ * Only the excluded CRT code has them today (`unkbyte10` in `__log_common`).
+ */
+function unknownKindType(name: string): string | undefined {
+  const m = /^unk(byte|uint|int|float|bool)(\d+)$/.exec(name);
+  if (!m) return undefined;
+  return ({ 1: 'uint8_t', 2: 'uint16_t', 4: 'uint32_t', 8: 'uint64_t' } as Record<string, string>)[m[2]];
+}
+
 /** undefined[N] -> sized fallback (for non-auto contexts) */
 const UNDEFINED_FALLBACK_MAP: ReadonlyMap<string, string> = new Map([
   ['undefined', 'uint8_t'],
@@ -280,6 +291,9 @@ function createTypeRenamePass(options: TypeNormalizeOptions = {}): Transformer {
       if (floatReplacement) {
         return createTypedefTypeNode(floatReplacement, node);
       }
+
+      const unknownKind = unknownKindType(typeName);
+      if (unknownKind) return createTypedefTypeNode(unknownKind, node);
 
       // Check undefined fallback map (for non-auto contexts - params, returns, uninitialized)
       const undefinedReplacement = UNDEFINED_FALLBACK_MAP.get(typeName);

@@ -365,3 +365,12 @@ describe('typeNormalizePlugin: 3-byte types, compiled and run', { skip: !hasNati
     assert.strictEqual(out.trim(), '123456 1193046 fffffe -2');
   });
 });
+
+describe('typeNormalizePlugin: unk*N types', () => {
+  it('maps a C-width one to the unsigned integer of that width, and leaves the rest', () => {
+    const out = emit(typeNormalizePlugin.createTransformer({})(parse(
+      'void f() { unkbyte4 a; unkuint8 b; unkint2 c; unkfloat4 d; unkbyte10 e; }')) as AnyNode);
+    assert.ok(out.includes('uint32_t a;') && out.includes('uint64_t b;') && out.includes('uint16_t c;') && out.includes('uint32_t d;'), out);
+    assert.ok(out.includes('unkbyte10 e;'), out);
+  });
+});
