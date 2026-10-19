@@ -4,7 +4,8 @@
  * satisfied by `-0x44` where `0x44` was meant; the compiler is not.
  *
  * Every lowering checked this way is written in fixed-width types (`uint32_t`, `int8_t`),
- * so the host's own word size does not change the answer. Tests skip when no g++ exists.
+ * so the host's own word size does not change the answer, and `char` is made signed as it
+ * is on the target. Tests skip when no g++ exists.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -35,7 +36,8 @@ export function compileAndRun(prelude: string, body: string): string {
       '#include <cstdint>', '#include <cstring>', '#include <cmath>', '#include <cstdio>',
       prelude, 'int main() {', body, 'return 0;', '}', '',
     ].join('\n'));
-    execFileSync('g++', ['-std=c++17', '-O0', '-w', src, '-o', exe], { stdio: 'pipe' });
+    // -fsigned-char: the target (MSVC and mingw on x86) has a signed `char`, an ARM host does not.
+    execFileSync('g++', ['-std=c++17', '-O0', '-w', '-fsigned-char', src, '-o', exe], { stdio: 'pipe' });
     return execFileSync(exe, [], { encoding: 'utf8' });
   } finally {
     rmSync(dir, { recursive: true, force: true });

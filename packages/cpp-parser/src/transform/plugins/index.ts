@@ -224,9 +224,12 @@ export {
 // ============================================
 
 export {
-  concatTransformPlugin,
-  type ConcatTransformOptions,
-} from './builtins/concat-transform.js';
+  pseudoOpLowerPlugin,
+  UnlowerableArtifactError,
+  type PseudoOpLowerOptions,
+  type ArtifactRecord,
+  type ArtifactMode,
+} from './builtins/pseudo-op-lower.js';
 
 // ============================================
 // BUILT-IN PLUGINS: GOTO CLEANUP
@@ -482,7 +485,7 @@ import { boilerplateCleanupPlugin } from './builtins/boilerplate-cleanup.js';
 import { incrementSimplifyPlugin } from './builtins/increment-simplify.js';
 import { fourccLiteralPlugin } from './builtins/fourcc-literal.js';
 import { typeNormalizePlugin } from './builtins/type-normalize.js';
-import { concatTransformPlugin } from './builtins/concat-transform.js';
+import { pseudoOpLowerPlugin } from './builtins/pseudo-op-lower.js';
 import { redundantNegationPlugin } from './builtins/redundant-negation.js';
 import { extraoutSplicePlugin } from './builtins/extraout-splice.js';
 import { registerAliasParamPlugin } from './builtins/register-alias-param.js';
@@ -537,8 +540,6 @@ export { duplicateLabelUniquifyPlugin, type DuplicateLabelUniquifyOptions } from
 
 import { underscoreStorageAliasPlugin } from './builtins/underscore-storage-alias.js';
 export { underscoreStorageAliasPlugin, type UnderscoreStorageAliasOptions } from './builtins/underscore-storage-alias.js';
-import { ghidraPseudoOpPlugin } from './builtins/ghidra-pseudo-op.js';
-export { ghidraPseudoOpPlugin } from './builtins/ghidra-pseudo-op.js';
 import { labelMacroCollisionPlugin } from './builtins/label-macro-collision.js';
 export { labelMacroCollisionPlugin } from './builtins/label-macro-collision.js';
 import { funcdefCastCollapsePlugin } from './builtins/funcdef-cast-collapse.js';
@@ -606,7 +607,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   ...ghidraCleanupPlugins,
   typeNormalizePlugin,         // Cleanup: uint → uint32_t, undefined4 → auto/uint32_t (priority 15)
   pointerCastNormalizePlugin, // Cleanup: (int)&expr → (uintptr_t)&expr (priority 16)
-  concatTransformPlugin,      // Cleanup: CONCAT31(a, b) → (a << 8) | b (priority 20)
+  pseudoOpLowerPlugin,        // Cleanup: SUB/CONCAT/ZEXT/SEXT/CARRY/SBORROW → exact C++ (priority 20)
   fourccLiteralPlugin,        // Cleanup: (char[4])L'\x...' → "abcd" (priority 25)
   methodCallRewritePlugin,    // C++ method call rewrite (priority 25, disabled by default)
   nullptrCleanupPlugin,       // Cleanup: (Type*)0x0 → nullptr (priority 25)
@@ -663,7 +664,6 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   switchCaseSignednessPlugin, // Type: sign the switch control when the switch carries a negative case label (priority 605)
   switchCaseDedupPlugin, // Control-flow: drop a repeated case value / second default in one switch (priority 691)
   duplicateLabelUniquifyPlugin, // Control-flow: rename the 2nd+ copy of a duplicated Ghidra label, retarget its gotos (priority 690)
-  ghidraPseudoOpPlugin, // Cleanup: rename decompiler pseudo-ops that collide with a standard macro (priority 20)
   labelMacroCollisionPlugin, // Cleanup: rename goto labels colliding with Win32/CRT macros — ERROR/DELETE/… (priority 41)
   funcdefCastCollapsePlugin,  // Type: collapse (Funcdef*) casts to (Funcdef) (priority 70)
   funcPtrArgCastPlugin,       // Type: cast a function address passed to a differing funcdef param (priority 71)

@@ -19,7 +19,7 @@ import { crtFunctionNames, EXTERNAL_IMPORT_REFERENCE_RENAMES } from './crt-mappi
 import { CPP_KEYWORDS } from './header.js';
 
 // Import cpp-parser for code transformation
-import { transformGhidraCode, preprocessGhidraCode, isGhidraGeneratedName, suggestBetterName, takeFuncPtrArgCastTypedefs, type TransformResult, type FuncPtrTarget } from '@ghidra-mcp/cpp-parser';
+import { transformGhidraCode, preprocessGhidraCode, isGhidraGeneratedName, suggestBetterName, takeFuncPtrArgCastTypedefs, type TransformResult, type FuncPtrTarget, type ArtifactMode, type ArtifactRecord } from '@ghidra-mcp/cpp-parser';
 import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js';
 import { ROOT_CLASS_SCOPE, namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 import { cleanFunctionComment, guardedFuncDefTypedef, emittedFunctionName, returnSigType, sigType } from './header.js';
@@ -1808,23 +1808,32 @@ function structFieldPluginOptions(): { aggregateTypeNames: string[] } | undefine
 }
 
 /**
- * Replace Ghidra stack-variable artifacts: stack0xNNNNNNNN → 0.
- *
- * ONLY for a body that never reached the AST — a decompilation with no parsable
- * `{ … }`, or one the transform threw on. Those are emitted as Ghidra wrote them,
- * best-effort, and `&stack0xNNNN` is not an identifier anything declares. A body
- * that did parse is handled by the `stack-frame-address` pass, which binds the
- * address to the frame slot that owns it and leaves the rest to fail loudly;
- * substituting `0` there was a silent read of the wrong address.
- *
- * The rest of what this used to do is on the AST now — CRT/compiler namespace
- * qualifiers, the `_exref` import-thunk suffix and the `A::A::` duplicate are
- * `qualified-name-cleanup`; the `--2147483648` double negative is
- * `signed-literal`; the non-ASCII char literal is `char-literal-escape`.
- * (Ghidra's `type[N]*` pointer-to-array is flattened by `pointer-array-flatten`.)
+ * How a decompiler artifact the generator cannot lower faithfully is handled:
+ * `report` (the default) leaves it in place and logs it, `strict` makes it a hard
+ * error in the emitted function. `RECON_ARTIFACT_LOWERING=strict` selects strict.
  */
-function stripStackArtifacts(code: string): string {
-  return code.replace(/&?stack0x[0-9a-fA-F]+/g, '0');
+function artifactLoweringMode(): ArtifactMode {
+  return process.env.RECON_ARTIFACT_LOWERING === 'strict' ? 'strict' : 'report';
+}
+
+/** A pseudo-op left in place by `pseudo-op-lower`, logged with the function it is in. */
+function reportArtifact(funcName: string | undefined, funcAddress: string | undefined, r: ArtifactRecord): void {
+  console.warn(`[artifact] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${r.op}: ${r.reason}`);
+}
+
+/**
+ * The body emitted for a decompilation that never reached the AST - no parsable
+ * `{ … }`, or a transform that threw. None of the passes ran on it, so it is still
+ * Ghidra's notation, `&stack0xNNNN` frame addresses included. It is emitted exactly
+ * as Ghidra wrote it: an unbound frame address then fails to compile instead of
+ * silently reading address 0, which is what rewriting it to `0` here used to do. In
+ * strict mode the function body is a hard error that names the function.
+ */
+function unparsedBody(code: string, funcName: string | undefined, funcAddress: string | undefined, why: string): string {
+  if (artifactLoweringMode() !== 'strict') return code;
+  const text = `body of ${funcName ?? '<unknown>'} @ ${funcAddress ?? '???'} was not transformed: ${why}`
+    .replace(/[\\"\n\r]/g, ' ').slice(0, 300);
+  return `#error "${text}"`;
 }
 
 /**
@@ -2165,7 +2174,7 @@ function transformDecompiledCode(
     }
 
     if (!bodyMatch) {
-      return { code: stripStackArtifacts(indentCode(decompiled, 4)) };
+      return { code: unparsedBody(indentCode(decompiled, 4), funcName, funcAddress, 'no function body found') };
     }
 
     const body = bodyMatch[1];
@@ -2384,6 +2393,16 @@ function transformDecompiledCode(
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         enclosingVarTypes,
       };
+      perPluginOptions['pseudo-op-lower'] = {
+        mode: artifactLoweringMode(),
+        onArtifact: (r: ArtifactRecord) => reportArtifact(funcName, funcAddress, r),
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        structFields: context.funcPtrArgCasts.structFields,
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        typedefTargets: context.funcPtrArgCasts.typedefTargets,
+        enclosingVarTypes,
+      };
       perPluginOptions['call-arg-cast'] = {
         functionParamTypes: context.funcPtrArgCasts.functionParamTypes,
         pointerOnlyParamTypes: context.funcPtrArgCasts.pointerOnlyParamTypes,
@@ -2402,6 +2421,12 @@ function transformDecompiledCode(
         enclosingVarTypes,
       };
     }
+
+    perPluginOptions['pseudo-op-lower'] ??= {
+      mode: artifactLoweringMode(),
+      onArtifact: (r: ArtifactRecord) => reportArtifact(funcName, funcAddress, r),
+      enclosingVarTypes,
+    };
 
     if (enclosing?.thisName) {
       perPluginOptions['this-param-rewrite'] = { thisName: enclosing.thisName };
@@ -2571,7 +2596,7 @@ function transformDecompiledCode(
       const transformedMatch = result.code.match(/\{([\s\S]*)\}/);
       if (transformedMatch) {
         return {
-          // NOT stripStackArtifacts: `stack-frame-address` has already bound every
+          // No frame-address rewrite: `stack-frame-address` has already bound every
           // frame address the frame can account for, and a name that survives it
           // is one no local owns. Rewriting it to `0` here is what turned sixteen
           // of them into silent reads of the wrong address.
@@ -2594,13 +2619,13 @@ function transformDecompiledCode(
     );
 
     // Fall back to original body if transformation fails
-    return { code: stripStackArtifacts(indentCode(body, 4)) };
+    return { code: unparsedBody(indentCode(body, 4), funcName, funcAddress, errorDetail.split('\n')[0]) };
   } catch (err) {
     // Stack overflow: do minimal work to avoid overflowing again in the handler
     if (err instanceof RangeError && /call stack|stack size/i.test(err.message)) {
       parseErrorCount++;
       console.error(`[STACK OVERFLOW] ${funcName ?? '<unknown>'} @ ${funcAddress ?? '???'} — using raw body`);
-      return { code: stripStackArtifacts(indentCode(decompiled, 4)) };
+      return { code: unparsedBody(indentCode(decompiled, 4), funcName, funcAddress, 'stack overflow in the transform') };
     }
 
     const msg = err instanceof Error
@@ -2609,7 +2634,8 @@ function transformDecompiledCode(
     logParseError(msg, funcName ?? '<unknown>', funcAddress ?? '???', decompiled);
 
     // If transformation fails, return original code indented
-    return { code: stripStackArtifacts(indentCode(decompiled, 4)) };
+    const why = err instanceof Error ? err.message.split('\n')[0] : String(err);
+    return { code: unparsedBody(indentCode(decompiled, 4), funcName, funcAddress, why) };
   }
 }
 
