@@ -490,6 +490,29 @@ function lowerConcat(ctx: Ctx, n: number, m: number, args: Expression[]): Expres
   return isOddWidth(n + m) ? maskTo(T, n + m, joined) : joined;
 }
 
+/**
+ * `x = CONCATnm(hi, lo)` where `x` holds at most m bytes: the assignment keeps the low m
+ * bytes, which are `lo`'s, so `hi` never reaches a value. Ghidra prints this where the
+ * binary stores n+m bytes over a narrower variable and its neighbour, writing the
+ * neighbour's own bytes back (`OOGMENU_CreateGame`: a 4-byte store over the `ushort`
+ * request id, `hi` the next global's two bytes). Single-threaded the neighbour is
+ * unchanged either way, so the lowering is `lo` at m bytes; `hi` must be pure, so dropping
+ * it drops no side effect. Any other shape returns null and takes the full lowering.
+ */
+function lowerDeadHighConcat(ctx: Ctx, target: Expression, value: Expression): Expression | null {
+  const call = unwrapParens(value);
+  if (call.kind !== NodeKind.CallExpr) return null;
+  const callee = (call as CallExpr).callee;
+  if (callee.kind !== NodeKind.Identifier) return null;
+  const parsed = parseOpName((callee as Identifier).name);
+  if (!parsed || parsed.op !== 'CONCAT' || (call as CallExpr).arguments.length !== 2) return null;
+  const [hi, lo] = (call as CallExpr).arguments;
+  const dest = ctx.classify(target);
+  if (dest.kind !== 'int' || dest.width > parsed.m || !isPure(hi)) return null;
+  const l = raw(ctx, lo, parsed.m, parsed.m);
+  return isOddWidth(parsed.m) ? l : castTo(uType(parsed.m), l);
+}
+
 function lowerExt(ctx: Ctx, signed: boolean, n: number, m: number, args: Expression[]): Expression {
   if (m < n) throw new Unlowerable(`extension from ${n} to ${m} bytes narrows`);
   const src = raw(ctx, args[0], n, n);
@@ -1118,6 +1141,23 @@ function createPseudoOpLowerTransformer(options: PseudoOpLowerOptions = {}): Tra
         return { ...lowered, leadingTrivia: call.leadingTrivia, trailingTrivia: call.trailingTrivia } as Expression;
       },
     });
+    // Before `lower`: a CONCAT whose high half no value reaches may have a `hi` of no
+    // knowable width, which `lower` would report.
+    const deadHigh = createTransformer({
+      visitNode(node: ASTNode): ASTNode | undefined {
+        if (node.kind !== NodeKind.AssignExpr) return undefined;
+        const a = node as unknown as { operator: string; left: Expression; right: Expression };
+        if (a.operator !== '=') return undefined;
+        let lowered: Expression | null;
+        try {
+          lowered = lowerDeadHighConcat(ctx, a.left, a.right);
+        } catch (e) {
+          if (e instanceof Unlowerable) return undefined;
+          throw e;
+        }
+        return lowered ? ({ ...node, right: lowered } as unknown as ASTNode) : undefined;
+      },
+    });
     reportValuelessConstants(body, report);
     const swiTemps = new Set<string>();
     const statements = createTransformer({
@@ -1139,7 +1179,7 @@ function createPseudoOpLowerTransformer(options: PseudoOpLowerOptions = {}): Tra
         if (/^in_stack_[0-9a-f]+$/.test(name)) swiTemps.add(name);
       }
     }
-    return dropUnusedDecls(statements(lower(fold(['==', '!='])(fold(['||', '&&'])(body)))), swiTemps);
+    return dropUnusedDecls(statements(lower(deadHigh(fold(['==', '!='])(fold(['||', '&&'])(body))))), swiTemps);
   };
 
   return (root: ASTNode) => {

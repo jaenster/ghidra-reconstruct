@@ -367,6 +367,34 @@ describe('pseudo-op-lower: in_stack_ declarations', () => {
   });
 });
 
+describe('pseudo-op-lower: a CONCAT whose high half no value reaches', () => {
+  // OOGMENU_CreateGame: `CreateJoinGameRequestId = CONCAT22(g_nLadderFilterMode, nNextReqId)`.
+  // The binary stores 4 bytes over the ushort id and the byte global after it, writing that
+  // global's own bytes back; `hi` is 2 bytes of which the tables know only one.
+  const fn = (dest: string, hi: string) =>
+    `${dest} fn(uint16_t lo) { ${dest} r; r = CONCAT22(${hi}, lo); return r; }`;
+
+  it('assigned to a 2-byte variable, it is the low half, whatever the high half is', { skip: !hasNativeGpp() }, () => {
+    const seen: ArtifactRecord[] = [];
+    const out = transform(fn('uint16_t', 'gNarrowHi'), { onArtifact: r => seen.push(r), globalTypes: { gNarrowHi: 'uint8_t' } });
+    assert.deepStrictEqual(seen, []);
+    assert.ok(!out.includes('CONCAT'), out);
+    const v = readHex(compileAndRun(`uint8_t gNarrowHi = 0x77;\n${out}`, printHex('r', 'fn(0xBEEF)')));
+    assert.deepStrictEqual(v, { r: 0xBEEFn });
+  });
+  it('assigned to a wider variable, the high half is a value and is still reported', () => {
+    const seen: ArtifactRecord[] = [];
+    const out = transform(fn('uint32_t', 'gNarrowHi'), { onArtifact: r => seen.push(r), globalTypes: { gNarrowHi: 'uint8_t' } });
+    assert.ok(out.includes('CONCAT22'), out);
+    assert.deepStrictEqual(seen.map(s => s.op), ['CONCAT22']);
+  });
+  it('a high half with a side effect is not dropped', () => {
+    const seen: ArtifactRecord[] = [];
+    const out = transform(fn('uint16_t', 'g()'), { onArtifact: r => seen.push(r) });
+    assert.ok(out.includes('CONCAT22(g(), lo)'), out);
+  });
+});
+
 describe('pseudo-op-lower: what is not lowered', () => {
   it('leaves an operand of unknown type alone and reports it', () => {
     const seen: ArtifactRecord[] = [];
