@@ -654,9 +654,13 @@ const RENAMES: Record<string, string> = {
  * the x87 control word's mode, nearest-even unless changed, and the game never changes
  * it (`_ftol` saves and restores it). `round()` rounds half away from zero: ROUND(2.5)
  * is 2 on the machine and was 3 here. `std::nearbyint` uses the current mode.
+ * Integer ABS does not exist in p-code, so ABS is always the float operation.
  */
 const STD_SPELLINGS: Record<string, string[]> = {
   ROUND: ['std', 'nearbyint'],
+  // ABS is FLOAT_ABS (FABS): it clears the sign bit, so ABS(-0.0) is +0.0 and a
+  // negative NaN loses its sign. `x < 0 ? -x : x` kept both signs.
+  ABS: ['std', 'fabs'],
 };
 
 function createPseudoOpLowerTransformer(options: PseudoOpLowerOptions = {}): Transformer {

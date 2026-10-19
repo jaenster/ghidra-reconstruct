@@ -1993,7 +1993,7 @@ export function ghidraPseudoOpMacroLines(): string[] {
   // and calls out by name instead. They reach bodies exactly as written, so they
   // need a definition, not a declaration; each is what the instruction does.
   lines.push('// Ghidra pseudo-operations (instructions with no C spelling)');
-  lines.push('#define ABS(x) ((x) < 0 ? -(x) : (x))');
+  lines.push('#define ABS(x) std::fabs(x)  // FLOAT_ABS clears the sign bit, -0.0 and -NaN included');
   lines.push('static inline uint64_t rdtsc(void) {');
   lines.push('#if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))');
   lines.push('  uint32_t nLow, nHigh;');

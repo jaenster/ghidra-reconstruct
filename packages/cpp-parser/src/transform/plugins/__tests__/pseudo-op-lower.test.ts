@@ -270,6 +270,20 @@ describe('pseudo-op-lower: ROUND', native, () => {
   });
 });
 
+describe('pseudo-op-lower: ABS', native, () => {
+  it('clears the sign bit, of -0.0 too', () => {
+    const out = compileAndRun(PRELUDE, [
+      ...PARAMS.split(', ').filter(p => !p.endsWith(' d')).map(p => `${p.replace(/\*\s*/, '*')} = 0;`),
+      'double d = -0.0;',
+      `double z = ${lower('ABS(d)')};`,
+      'd = -3.5;',
+      `double t = ${lower('ABS(d)')};`,
+      'printf("%d %g\\n", (int)std::signbit(z), t);',
+    ].join('\n')).trim();
+    assert.strictEqual(out, '0 3.5');
+  });
+});
+
 describe('pseudo-op-lower: what is not lowered', () => {
   it('leaves an operand of unknown type alone and reports it', () => {
     const seen: ArtifactRecord[] = [];
