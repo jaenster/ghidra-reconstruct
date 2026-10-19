@@ -382,6 +382,14 @@ describe('pseudo-op-lower: a CONCAT whose high half no value reaches', () => {
     const v = readHex(compileAndRun(`uint8_t gNarrowHi = 0x77;\n${out}`, printHex('r', 'fn(0xBEEF)')));
     assert.deepStrictEqual(v, { r: 0xBEEFn });
   });
+  it('the decompiler\'s `_X` alias of a 2-byte global stores into that global', () => {
+    // Raw OOGMENU_CreateGame: `_CreateJoinGameRequestId = CONCAT22(_g_nLadderFilterMode,nNextReqId);`
+    const seen: ArtifactRecord[] = [];
+    const out = transform('void fn(uint16_t lo) { _gId = CONCAT22(_gNext, lo); }',
+      { onArtifact: r => seen.push(r), globalTypes: { gId: 'ushort' } });
+    assert.deepStrictEqual(seen, []);
+    assert.ok(!out.includes('CONCAT') && out.includes('_gNext') === false, out);
+  });
   it('assigned to a wider variable, the high half is a value and is still reported', () => {
     const seen: ArtifactRecord[] = [];
     const out = transform(fn('uint32_t', 'gNarrowHi'), { onArtifact: r => seen.push(r), globalTypes: { gNarrowHi: 'uint8_t' } });

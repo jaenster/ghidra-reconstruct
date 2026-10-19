@@ -507,7 +507,14 @@ function lowerDeadHighConcat(ctx: Ctx, target: Expression, value: Expression): E
   const parsed = parseOpName((callee as Identifier).name);
   if (!parsed || parsed.op !== 'CONCAT' || (call as CallExpr).arguments.length !== 2) return null;
   const [hi, lo] = (call as CallExpr).arguments;
-  const dest = ctx.classify(target);
+  let dest = ctx.classify(target);
+  // `_X` over the global `X` is Ghidra's name for the same storage accessed wider (here the
+  // 4-byte store over the 2-byte id); underscore-storage-alias binds it to `X` later, so
+  // what the assignment stores into is `X`'s type.
+  const t = unwrapParens(target);
+  if (dest.kind === 'unknown' && t.kind === NodeKind.Identifier && /^_[A-Za-z]/.test((t as Identifier).name)) {
+    dest = ctx.classify(Expr.identifier((t as Identifier).name.slice(1)));
+  }
   if (dest.kind !== 'int' || dest.width > parsed.m || !isPure(hi)) return null;
   const l = raw(ctx, lo, parsed.m, parsed.m);
   return isOddWidth(parsed.m) ? l : castTo(uType(parsed.m), l);
