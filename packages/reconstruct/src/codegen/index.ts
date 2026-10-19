@@ -1022,8 +1022,13 @@ export function generateProjectStage1(
     //   - `define_*` enums are recovered preprocessor #defines
     //     (TRUE, WINVER, _M_IX86, _MSC_VER, the SAL annotation switches...)
     //   - IMAGE_* values are PE-format section/header constants from <winnt.h>
+    //   - `_EXCEPTION_DISPOSITION`'s members (Ghidra's /Demangler enum, given its
+    //     values at v1100) are `#define ExceptionContinueExecution 0` ... in
+    //     <excpt.h>, with the same values; our constexpr spelling of them expands
+    //     to `constexpr int 0 = 0;` in every TU.
+    const SDK_MACRO_ENUMS = new Set(['_EXCEPTION_DISPOSITION']);
     const isPlatformEnumValue = (enumName: string, valueName: string): boolean =>
-      /^define_/.test(enumName) || /^IMAGE_[A-Z]/.test(valueName);
+      /^define_/.test(enumName) || /^IMAGE_[A-Z]/.test(valueName) || SDK_MACRO_ENUMS.has(enumName);
 
     // Which enums this header actually writes, in the order it writes them.
     // One namespace per enum NAME: Ghidra carries the same enum under two
