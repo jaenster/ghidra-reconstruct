@@ -13,6 +13,7 @@
  * Needs --stack-size=8192 for deeply nested function ASTs; re-execs itself.
  */
 
+import { childExit } from './packages/reconstruct/src/child-exit.js';
 import { execFileSync } from 'child_process';
 
 if (!process.execArgv.some(a => /stack.size/i.test(a))) {
@@ -23,7 +24,9 @@ if (!process.execArgv.some(a => /stack.size/i.test(a))) {
       { stdio: 'inherit', env: process.env }
     );
   } catch (e: any) {
-    process.exit(e.status ?? 1);
+    const exit = childExit(e);
+    if (exit.message) console.error(`error: ${exit.message}`);
+    process.exit(exit.code);
   }
   process.exit(0);
 }
