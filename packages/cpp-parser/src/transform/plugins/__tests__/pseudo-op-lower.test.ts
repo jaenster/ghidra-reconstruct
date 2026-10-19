@@ -259,6 +259,17 @@ describe('pseudo-op-lower: SBORROW folded to a signed compare', native, () => {
   });
 });
 
+describe('pseudo-op-lower: ROUND', native, () => {
+  it('rounds half to even, as FRNDINT and FIST do', () => {
+    const v = (x: string) => compileAndRun(PRELUDE, [
+      ...PARAMS.split(', ').filter(p => !p.endsWith(' d')).map(p => `${p.replace(/\*\s*/, '*')} = 0;`),
+      `double d = ${x};`,
+      `printf("%d\\n", (int)(${lower('ROUND(d)')}));`,
+    ].join('\n')).trim();
+    assert.deepStrictEqual(['2.5', '-2.5', '3.5', '0.5', '1.25'].map(v), ['2', '-2', '4', '0', '1']);
+  });
+});
+
 describe('pseudo-op-lower: what is not lowered', () => {
   it('leaves an operand of unknown type alone and reports it', () => {
     const seen: ArtifactRecord[] = [];

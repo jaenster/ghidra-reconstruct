@@ -1353,10 +1353,12 @@ export function generatePlatformHeader(
   lines.push('#define builtin_strcpy strcpy');
   lines.push('');
 
-  // Ghidra ROUND intrinsic: rounds a floating-point value to the nearest integer
-  // value (kept as floating-point). Maps to <cmath> round().
-  lines.push('// Ghidra ROUND intrinsic (round-to-nearest, result stays floating-point)');
-  lines.push('#define ROUND(x) round(x)');
+  // Ghidra ROUND is FLOAT_ROUND (FRNDINT, and the rounding half of FIST): the x87
+  // control word's mode, nearest-even, which std::nearbyint uses. round() rounds half
+  // away from zero. pseudo-op-lower writes the call itself; this covers a body that
+  // never reached the AST.
+  lines.push('// Ghidra ROUND (FLOAT_ROUND): current rounding mode, nearest-even by default');
+  lines.push('#define ROUND(x) std::nearbyint(x)');
   lines.push('');
 
   // Statically-linked CRT functions Ghidra named with a `CRT_` prefix that the

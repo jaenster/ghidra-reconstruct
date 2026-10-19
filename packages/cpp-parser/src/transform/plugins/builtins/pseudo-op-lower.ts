@@ -647,6 +647,18 @@ const RENAMES: Record<string, string> = {
   NAN: 'D2_IsNaN',
 };
 
+/**
+ * Floating pseudo-ops with a standard spelling that computes the same thing.
+ *
+ * ROUND is FLOAT_ROUND: FRNDINT, and the rounding half of FIST/FISTP. Both round in
+ * the x87 control word's mode, nearest-even unless changed, and the game never changes
+ * it (`_ftol` saves and restores it). `round()` rounds half away from zero: ROUND(2.5)
+ * is 2 on the machine and was 3 here. `std::nearbyint` uses the current mode.
+ */
+const STD_SPELLINGS: Record<string, string[]> = {
+  ROUND: ['std', 'nearbyint'],
+};
+
 function createPseudoOpLowerTransformer(options: PseudoOpLowerOptions = {}): Transformer {
   const mode: ArtifactMode = options.mode ?? 'report';
   const report = (record: ArtifactRecord) => {
@@ -762,6 +774,10 @@ function createPseudoOpLowerTransformer(options: PseudoOpLowerOptions = {}): Tra
         const name = (call.callee as Identifier).name;
         const renamed = RENAMES[name];
         if (renamed) return updateNode(call, { callee: Expr.identifier(renamed) } as Partial<CallExpr>);
+        const std = STD_SPELLINGS[name];
+        if (std && call.arguments.length === 1) {
+          return updateNode(call, { callee: Expr.qualifiedId(std) } as Partial<CallExpr>);
+        }
         let lowered: Expression | null;
         try {
           lowered = lowerCall(ctx, name, call.arguments);
