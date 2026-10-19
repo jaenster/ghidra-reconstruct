@@ -532,3 +532,20 @@ describe('pseudo-op-lower: a CONCAT stored over two LOCAL frame slots', () => {
     assert.ok(!/_searchKey = \(uint16_t\)wMapChar;/.test(out), out);
   });
 });
+
+describe('pseudo-op-lower: a register input stored into an array element', () => {
+  it('UNICODE_BinarySearchKamap (v1105): the PUSH ECX half of the key is zero, the read half stays', () => {
+    const out = transform(`uint32_t f(uint16_t wChar) {
+      uint16_t in_CX; uint16_t aSearchKey [2];
+      aSearchKey[1] = wChar;
+      aSearchKey[0] = in_CX;
+      return (uint)*(ushort *)_bsearch(aSearchKey,gpT,4,4,Cmp); }`);
+    assert.ok(!/in_CX/.test(out), out);
+    assert.match(out, /aSearchKey\[1\] = wChar;/);
+    assert.match(out, /aSearchKey\[0\] = 0;/);
+  });
+  it('a register used as an element INDEX is a value, and stays', () => {
+    const out = transform('int f(void) { int in_ECX; int a[4]; a[in_ECX] = 1; Use(a); return 0; }');
+    assert.match(out, /in_ECX/);
+  });
+});

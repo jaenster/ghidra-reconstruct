@@ -1078,9 +1078,19 @@ function retireIndeterminateRegisters(body: ASTNode, dropped: Set<string>): ASTN
     const x = unwrapParens((u as UnaryExpr).operand);
     if ((u as UnaryExpr).operator === '&' && x.kind === NodeKind.Identifier) addressTaken.add((x as Identifier).name);
   }
-  /** The local a store target names: `X`, `X._N_M_`, or the decompiler's `_X` alias of a local `X`. */
+  /**
+   * The local a store target names: `X`, `X._N_M_`, `X[i]` for an array `X`, or the
+   * decompiler's `_X` alias of a local `X`. The element form is UNICODE_BinarySearchKamap's
+   * (v1105): `aSearchKey[0] = in_CX`, the PUSH ECX half its comparator never reads.
+   */
   const targetLocal = (t: Expression): string | null => {
     let x = unwrapParens(t);
+    if (x.kind === NodeKind.SubscriptExpr) {
+      const arr = unwrapParens((x as unknown as { array: Expression }).array);
+      if (arr.kind !== NodeKind.Identifier) return null;
+      const n = (arr as Identifier).name;
+      return decls.get(n)?.type.kind === NodeKind.ArrayType ? n : null;
+    }
     if (x.kind === NodeKind.MemberExpr) {
       const m = x as unknown as MemberExpr;
       const mn = (m.member as Identifier).name;
