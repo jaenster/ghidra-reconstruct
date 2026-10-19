@@ -58,6 +58,7 @@ import type {
   TypeNode,
   UnaryExpr,
   VariableDecl,
+  MemberExpr,
   ParameterDecl,
 } from '../../../ast/nodes.js';
 import { Expr } from '../../../ast/factory.js';
@@ -976,6 +977,134 @@ function lowerStatements(stmts: ASTNode[], report: (r: ArtifactRecord) => void, 
   return changed ? out : null;
 }
 
+/** Occurrences of the identifier `name` in `e` as a value: declarations' own names excluded. */
+function refCount(e: unknown, name: string): number {
+  if (Array.isArray(e)) return e.reduce((n: number, x) => n + refCount(x, name), 0);
+  if (e === null || typeof e !== 'object') return 0;
+  const o = e as Record<string, unknown>;
+  if (o.kind === NodeKind.VariableDecl) return o.initializer ? refCount(o.initializer, name) : 0;
+  if (o.kind === NodeKind.MemberExpr) return refCount(o.object, name);
+  let n = o.kind === NodeKind.Identifier && o.name === name ? 1 : 0;
+  for (const [k, v] of Object.entries(o)) {
+    if (k === 'location' || k === 'leadingTrivia' || k === 'trailingTrivia') continue;
+    if (v && typeof v === 'object') n += refCount(v, name);
+  }
+  return n;
+}
+
+/** Register inputs the decompiler names but no instruction in the function defines. */
+const REGISTER_INPUT = /^(in_[A-Z][A-Z0-9_]*|in_register_[0-9a-f]+)$/;
+
+/**
+ * A register input that reaches only bytes of a frame slot nothing reads as a value.
+ *
+ * MSVC reserves a 4-byte frame slot with `PUSH ECX`. The bytes the function never writes
+ * keep whatever the caller left in ECX, and when the slot's address escapes (to a send or
+ * a copy) the decompiler keeps the PUSH as a store of a register nothing defined:
+ * `aPacketFrame._0_3_ = in_ECX`, `CONCAT31(in_register_00000005, nOpcode)` (CL a real
+ * parameter, the upper bytes junk), `_aPacket = CONCAT22((short)(in_ECX >> 16), 0xaf)`,
+ * `dwScratch = in_ECX` before `&dwScratch + 3` goes to a callee. Those bytes are
+ * indeterminate in the binary: the program never defines them, so any value is one the
+ * machine could have held, and none of them is a value the function computes.
+ *
+ * The register is replaced by 0 when every use of it is in the value stored to a local
+ * that is a frame object (an array, or a local whose address is taken) - those bytes are
+ * then zero instead of the caller's leftovers, and every byte the function itself defines
+ * is stored unchanged. A store to a local nothing ever reads (`byHighByte = in_reg >> 16`)
+ * is dropped. A register input used anywhere else is a value Ghidra lost and stays loud.
+ */
+function retireIndeterminateRegisters(body: ASTNode, dropped: Set<string>): ASTNode {
+  const decls = new Map<string, VariableDecl>();
+  for (const d of findNodesByKind(body, NodeKind.VariableDecl)) {
+    const v = d as VariableDecl;
+    decls.set(v.name.name, v);
+  }
+  const registers = [...decls.values()]
+    .filter(v => REGISTER_INPUT.test(v.name.name) && !v.initializer)
+    .map(v => v.name.name);
+  if (registers.length === 0) return body;
+
+  const addressTaken = new Set<string>();
+  for (const u of findNodesByKind(body, NodeKind.UnaryExpr)) {
+    const x = unwrapParens((u as UnaryExpr).operand);
+    if ((u as UnaryExpr).operator === '&' && x.kind === NodeKind.Identifier) addressTaken.add((x as Identifier).name);
+  }
+  /** The local a store target names: `X`, `X._N_M_`, or the decompiler's `_X` alias of a local `X`. */
+  const targetLocal = (t: Expression): string | null => {
+    let x = unwrapParens(t);
+    if (x.kind === NodeKind.MemberExpr) {
+      const m = x as unknown as MemberExpr;
+      const mn = (m.member as Identifier).name;
+      if (m.isArrow || typeof mn !== 'string' || !/^_\d+_\d+_$/.test(mn)) return null;
+      x = unwrapParens(m.object);
+    }
+    if (x.kind !== NodeKind.Identifier) return null;
+    const name = (x as Identifier).name;
+    if (decls.has(name)) return name;
+    return name.startsWith('_') && decls.has(name.slice(1)) ? name.slice(1) : null;
+  };
+  const frameObject = (n: string) =>
+    decls.get(n)!.type.kind === NodeKind.ArrayType || addressTaken.has(n) || addressTaken.has(`_${n}`);
+  /** Every reference to `n` (and its `_n` alias) is as the target of a plain store. */
+  const neverRead = (n: string, stores: Array<{ local: string }>) =>
+    refCount(body, n) + refCount(body, `_${n}`) === stores.filter(st => st.local === n).length;
+
+  const stores: Array<{ local: string; right: Expression }> = [];
+  for (const st of findNodesByKind(body, NodeKind.ExprStmt)) {
+    const a = assignOf(st);
+    const local = a ? targetLocal(a.left) : null;
+    if (a && local) stores.push({ local, right: a.right });
+  }
+
+  const zeroed = new Set<string>();
+  const deadLocals = new Set<string>();
+  for (const r of registers) {
+    const total = refCount(body, r);
+    if (total === 0) continue;
+    const reaching = stores.filter(st => refCount(st.right, r) > 0);
+    if (reaching.reduce((n, st) => n + refCount(st.right, r), 0) !== total) continue;
+    // A dead store is dropped whole, so its value must have no side effect to keep.
+    if (!reaching.every(st => frameObject(st.local) || (neverRead(st.local, stores) && isPure(st.right)))) continue;
+    for (const st of reaching) {
+      if (!frameObject(st.local) && neverRead(st.local, stores)) {
+        deadLocals.add(st.local);
+        dropped.add(st.local);
+      }
+    }
+    zeroed.add(r);
+    dropped.add(r);
+  }
+  if (zeroed.size === 0) return body;
+
+  const withoutDead = deadLocals.size === 0 ? body : createTransformer({
+    visitCompoundStmt(node) {
+      // Matched by shape, not identity: the walk rebuilds nodes it passes through.
+      const kept = (node.statements as ASTNode[]).filter(st => {
+        const a = assignOf(st);
+        const local = a ? targetLocal(a.left) : null;
+        return !(a && local && deadLocals.has(local) && [...zeroed].some(r => refCount(a.right, r) > 0));
+      });
+      return kept.length === node.statements.length ? undefined : ({ ...node, statements: kept } as ASTNode);
+    },
+  })(body);
+  // Only inside the stored values: the declaration keeps its name, for dropUnusedDecls.
+  const zero = createTransformer({
+    visitNode(node: ASTNode): ASTNode | undefined {
+      if (node.kind !== NodeKind.Identifier || !zeroed.has((node as Identifier).name)) return undefined;
+      return { ...Expr.intLiteral(0), leadingTrivia: node.leadingTrivia, trailingTrivia: node.trailingTrivia } as ASTNode;
+    },
+  });
+  return createTransformer({
+    visitNode(node: ASTNode): ASTNode | undefined {
+      if (node.kind !== NodeKind.ExprStmt) return undefined;
+      const e = exprOf(node) as unknown as { operator: string; right: Expression } | undefined;
+      if (!assignOf(node) || ![...zeroed].some(r => refCount(e!.right, r) > 0)) return undefined;
+      const assign = exprOf(node)!;
+      return { ...node, expression: { ...assign, right: zero(e!.right as ASTNode) } } as unknown as ASTNode;
+    },
+  })(withoutDead);
+}
+
 /** Drop the declaration of a temporary (or an in_stack_ slot) nothing refers to. */
 function dropUnusedDecls(body: ASTNode, names: Set<string>): ASTNode {
   if (names.size === 0) return body;
@@ -1186,7 +1315,8 @@ function createPseudoOpLowerTransformer(options: PseudoOpLowerOptions = {}): Tra
         if (/^in_stack_[0-9a-f]+$/.test(name)) swiTemps.add(name);
       }
     }
-    return dropUnusedDecls(statements(lower(deadHigh(fold(['==', '!='])(fold(['||', '&&'])(body))))), swiTemps);
+    const retired = retireIndeterminateRegisters(body, swiTemps);
+    return dropUnusedDecls(statements(lower(deadHigh(fold(['==', '!='])(fold(['||', '&&'])(retired))))), swiTemps);
   };
 
   return (root: ASTNode) => {

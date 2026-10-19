@@ -403,6 +403,57 @@ describe('pseudo-op-lower: a CONCAT whose high half no value reaches', () => {
   });
 });
 
+describe('pseudo-op-lower: a register input that only fills unread frame bytes', () => {
+  // The PUSH ECX frame class: the raw v1092 bodies, trimmed to the statements that matter.
+  const REG = /\bin_(ECX|register_[0-9a-f]+)\b/;
+  it('Send_0x69: the leftover ECX bytes of the packet slot are zero, the opcode byte stays', () => {
+    const out = transform(`void Send_0x69(void) {
+      undefined3 in_ECX; byte aPacketFrame [4];
+      aPacketFrame[3] = 0x69;
+      aPacketFrame._0_3_ = in_ECX;
+      SendPacketAfterChecks(1,0,(char *)(aPacketFrame + 3)); }`);
+    assert.ok(!REG.test(out), out);
+    assert.match(out, /aPacketFrame\[3\] = 0x69;/);
+    assert.match(out, /aPacketFrame\._0_3_ = 0;/);
+  });
+  it('Send_CMD: CL is a real parameter and keeps its byte; only the upper ECX bytes go', () => {
+    const out = transform(`void Send_CMD(byte nOpcode) {
+      undefined3 in_register_00000005; byte aPacketFrame [4];
+      aPacketFrame._0_3_ = (undefined3)CONCAT31(in_register_00000005,nOpcode);
+      aPacketFrame[3] = nOpcode;
+      Send(aPacketFrame + 3,1); }`);
+    assert.ok(!REG.test(out) && !out.includes('CONCAT'), out);
+    assert.match(out, /nOpcode/);
+    assert.match(out, /aPacketFrame\[3\] = nOpcode;/);
+  });
+  it('Send_SHORT: a local nothing reads is not stored at all', () => {
+    const out = transform(`void Send_SHORT(uint8_t nPacketId, short nArg1) {
+      undefined3 in_register_00000005; undefined1 byHighByte;
+      byHighByte = (undefined1)((uint3)in_register_00000005 >> 0x10);
+      Send(&nPacketId,3); }`);
+    assert.ok(!REG.test(out) && !out.includes('byHighByte'), out);
+  });
+  it('CheckBodyLocationFit: a scratch slot whose address goes to the callee', () => {
+    const out = transform(`int Fit(void *pItem, uint eBodyLoc) {
+      uint3 in_ECX; undefined4 dwScratch;
+      dwScratch = (uint)in_ECX;
+      GetBodyLocs(pItem, (int)&dwScratch + 3);
+      return dwScratch._3_1_ == eBodyLoc; }`);
+    assert.ok(!REG.test(out), out);
+    assert.match(out, /dwScratch = \(uint\)0;/);
+  });
+  it('a register input used as a value anywhere else is left, and stays loud', () => {
+    for (const body of [
+      'undefined4 in_ECX; byte a[4]; a._0_3_ = in_ECX; return in_ECX;',
+      'undefined4 in_ECX; uint x; x = in_ECX; return x;',
+      'undefined4 in_ECX; Use(in_ECX); return 0;',
+    ]) {
+      const out = transform(`int fn(void) { ${body} }`);
+      assert.match(out, /in_ECX/, body);
+    }
+  });
+});
+
 describe('pseudo-op-lower: what is not lowered', () => {
   it('leaves an operand of unknown type alone and reports it', () => {
     const seen: ArtifactRecord[] = [];
