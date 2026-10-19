@@ -1,13 +1,13 @@
 {
-  "measured": "recon/diablo-2 15411f874 (Game.exe v1054), before any lowering; each count may only go down",
+  "measured": "codegen-only of the Game.exe v1092 snapshot on artifact-lowering, with the owner's project.json; each count may only go down",
   "rules": {
-    "pseudo-op-call": 342,
-    "pseudo-constant": 16,
-    "frame-name": 60,
-    "register-name": 1379,
-    "ghidra-type": 520,
+    "pseudo-op-call": 0,
+    "pseudo-constant": 0,
+    "frame-name": 11,
+    "register-name": 19,
+    "ghidra-type": 71,
     "subpiece-member": 0,
-    "warning-comment": 2276,
-    "denormal-literal": 50
+    "warning-comment": 0,
+    "denormal-literal": 0
   }
 }
