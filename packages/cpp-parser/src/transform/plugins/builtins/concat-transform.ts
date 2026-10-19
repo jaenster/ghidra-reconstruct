@@ -163,10 +163,19 @@ function createConcatTransformer(options: ConcatTransformOptions = {}): Transfor
       // packing a unit pointer beside a tag into a 64-bit seed is what the game
       // actually does — which is `invalid operands ... to binary '|'` until the
       // cast makes the arithmetic integral, exactly as the original source had to.
-      const resultType = Type.typedef(cTypeForBytes(highBytes + lowBytes));
+      //
+      // The high half is first cast to its OWN width, unsigned, and only then widened.
+      // Widening a signed operand straight to the result type sign-extends it into the
+      // bytes above the join: CONCAT12((int8_t)-1, 0x2233) gave 0xFFFF2233, not 0xFF2233.
+      // A total that is not a C width (5, 6, 7 bytes) is masked to its own size.
+      const totalBytes = highBytes + lowBytes;
+      const resultType = Type.typedef(cTypeForBytes(totalBytes));
       const lowMask = (1n << BigInt(lowBytes * 8)) - 1n;
       const shiftLiteral = createIntLiteral(shiftAmount, node);
-      const highCast = createParenExpr(Expr.cast(resultType, highArg), node);
+      const highCast = createParenExpr(
+        Expr.cast(resultType, createParenExpr(Expr.cast(Type.typedef(cTypeForBytes(highBytes)), highArg), node)),
+        node,
+      );
       const lowCast = createParenExpr(
         createBinaryExpr(
           createParenExpr(Expr.cast(resultType, lowArg), node),
@@ -177,7 +186,11 @@ function createConcatTransformer(options: ConcatTransformOptions = {}): Transfor
         node,
       );
       const shifted = createBinaryExpr(highCast, '<<', shiftLiteral, node);
-      const result = createBinaryExpr(shifted, '|', lowCast, node);
+      let result = createBinaryExpr(shifted, '|', lowCast, node);
+      if (totalBytes === 5 || totalBytes === 6 || totalBytes === 7) {
+        result = createBinaryExpr(createParenExpr(result, node), '&',
+          createHexLiteral((1n << BigInt(totalBytes * 8)) - 1n, node), node);
+      }
 
       // Optionally wrap in parentheses for precedence safety
       if (wrapInParens) {

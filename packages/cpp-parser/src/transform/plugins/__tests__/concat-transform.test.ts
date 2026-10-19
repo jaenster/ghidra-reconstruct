@@ -8,6 +8,7 @@ import { parse } from '../../../parser/index.js';
 import { emit } from '../../../emit/index.js';
 import type { AnyNode } from '../../../ast/nodes.js';
 import { concatTransformPlugin } from '../builtins/concat-transform.js';
+import { compileAndRun, hasNativeGpp, printHex, readHex } from '../../../testing/native-cpp.js';
 
 describe('concatTransformPlugin', () => {
   function transformCode(code: string, wrapInParens = true): string {
@@ -79,7 +80,7 @@ describe('concatTransformPlugin', () => {
       // The ParenExpr wrapper is transparent in the emitter, but the expression is
       // correct — and both halves carry the cast to the assembled width, without
       // which `a << 8` is computed in whatever width `a` happens to have.
-      assert.ok(output.includes('(uint32_t)a << 8 | (uint32_t)b & 0xffu'), `Expected concat result in: ${output}`);
+      assert.ok(output.includes('(uint32_t)(uint32_t)a << 8 | (uint32_t)b & 0xffu'), `Expected concat result in: ${output}`);
     });
 
     it('should not wrap when wrapInParens=false', () => {
@@ -89,7 +90,7 @@ describe('concatTransformPlugin', () => {
       assert.ok(output.includes('<<'), `Expected shift in: ${output}`);
       assert.ok(output.includes('|'), `Expected OR in: ${output}`);
       // The expression shouldn't have extra outer parens
-      assert.ok(output.includes('(uint32_t)a << 8 | (uint32_t)b & 0xffu'), `Expected unwrapped in: ${output}`);
+      assert.ok(output.includes('(uint32_t)(uint32_t)a << 8 | (uint32_t)b & 0xffu'), `Expected unwrapped in: ${output}`);
     });
   });
 
@@ -127,6 +128,28 @@ describe('concatTransformPlugin', () => {
       const output = transformCode(input);
       // Both CONCAT calls should be transformed
       assert.ok(!output.includes('CONCAT'), `Should not contain any CONCAT in: ${output}`);
+    });
+  });
+
+  describe('value of the lowered expression (compiled and run)', { skip: !hasNativeGpp() }, () => {
+    /** Lower `CONCATnm(...)` inside a function and return the emitted expression. */
+    const lower = (call: string): string => {
+      const out = transformCode(`void foo() { r = ${call}; }`);
+      return out.slice(out.indexOf('r = ') + 4, out.lastIndexOf(';'));
+    };
+    it('a signed high operand does not sign-extend past its own width', () => {
+      const v = readHex(compileAndRun('int8_t sm1 = -1; int16_t s16m1 = -1; int32_t i1ff = 0x1FF;', [
+        printHex('c12', lower('CONCAT12(sm1, 0x2233)')),
+        printHex('c11', lower('CONCAT11(i1ff, 0x22)')),
+        printHex('c14', lower('CONCAT14(sm1, 0)')),
+        printHex('c21', lower('CONCAT21(s16m1, 0x33)')),
+        printHex('c44', lower('CONCAT44(0x29a, 0)')),
+        printHex('c31', lower('CONCAT31(0x7FFFFFFF, 0x80)')),
+      ].join('\n')));
+      assert.deepStrictEqual(v, {
+        c12: 0xFF2233n, c11: 0xFF22n, c14: 0xFF00000000n, c21: 0xFFFF33n,
+        c44: 0x29a00000000n, c31: 0xFFFFFF80n,
+      });
     });
   });
 
