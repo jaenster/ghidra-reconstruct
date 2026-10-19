@@ -451,7 +451,39 @@ export function computeTypeOwnership(input: TypeOwnershipInput): TypeOwnershipRe
     }
   }
 
-  // ── Phase 6: Struct-colocated globals classification ────────────────
+  // ── Phase 6: Single-use type co-location ────────────────────────────
+  const typeUseCount = new Map<string, Set<string>>();
+  for (const dt of dataTypes) {
+    if (dt.kind !== 'STRUCTURE' && dt.kind !== 'UNION') continue;
+    const struct = dt as ExtractedStruct;
+    if (!struct.fields) continue;
+    for (const field of struct.fields) {
+      const stripped = stripTypeName(field.dataType);
+      if (!stripped || isPlatformOrBuiltinType(stripped)) continue;
+      const fieldType = dataTypes.find(d => d.name === stripped && declarableKinds.has(d.kind));
+      if (!fieldType) continue;
+      if (!typeUseCount.has(stripped)) typeUseCount.set(stripped, new Set());
+      typeUseCount.get(stripped)!.add(dt.name);
+    }
+  }
+
+  for (const [typeName, containerStructs] of typeUseCount) {
+    if (containerStructs.size !== 1) continue;
+    const containerStruct = [...containerStructs][0];
+    const containerOwner = typeOwnerMap.get(containerStruct);
+    if (!containerOwner) continue;
+    const typeIsOwnUnit = organized.has(typeName);
+    if (typeIsOwnUnit) continue;
+    typeOwnerMap.set(typeName, containerOwner);
+  }
+
+  // ── Phase 7: Struct-colocated globals classification ────────────────
+  // Runs AFTER single-use co-location (Phase 6): it records the owner header on the
+  // global, and the extern goes into that header. Classified before it,
+  // `aNpcGossipData` (D2NPCMessageTableStrc) was co-located into A1Q4.h, then
+  // that pass moved the TYPE into D2QuestDataStrc.h (its only container) - so
+  // A1Q4.h declared a global of a type it neither defines nor includes, and
+  // every TU including it failed "'D2NPCMessageTableStrc' does not name a type".
   const structTypeToNamespace = new Map<string, string>();
   for (const [unitName] of organized) {
     const headerPath = unitHeaderPaths.get(unitName)!;
@@ -478,32 +510,6 @@ export function computeTypeOwnership(input: TypeOwnershipInput): TypeOwnershipRe
       global.ownerStructType = structTypeName;
       global.ownerStructHeader = typeOwnerMap.get(structTypeName);
     }
-  }
-
-  // ── Phase 7: Single-use type co-location ────────────────────────────
-  const typeUseCount = new Map<string, Set<string>>();
-  for (const dt of dataTypes) {
-    if (dt.kind !== 'STRUCTURE' && dt.kind !== 'UNION') continue;
-    const struct = dt as ExtractedStruct;
-    if (!struct.fields) continue;
-    for (const field of struct.fields) {
-      const stripped = stripTypeName(field.dataType);
-      if (!stripped || isPlatformOrBuiltinType(stripped)) continue;
-      const fieldType = dataTypes.find(d => d.name === stripped && declarableKinds.has(d.kind));
-      if (!fieldType) continue;
-      if (!typeUseCount.has(stripped)) typeUseCount.set(stripped, new Set());
-      typeUseCount.get(stripped)!.add(dt.name);
-    }
-  }
-
-  for (const [typeName, containerStructs] of typeUseCount) {
-    if (containerStructs.size !== 1) continue;
-    const containerStruct = [...containerStructs][0];
-    const containerOwner = typeOwnerMap.get(containerStruct);
-    if (!containerOwner) continue;
-    const typeIsOwnUnit = organized.has(typeName);
-    if (typeIsOwnUnit) continue;
-    typeOwnerMap.set(typeName, containerOwner);
   }
 
   // ── Phase 8: Eliminate duplicate struct definitions ──────────────────
