@@ -426,6 +426,7 @@ export {
 } from './builtins/subpiece-access.js';
 export { threeByteAccessPlugin } from './builtins/three-byte-access.js';
 export { comIUnknownCallPlugin } from './builtins/com-iunknown-call.js';
+export { biasedTableIndexPlugin } from './builtins/biased-table-index.js';
 export { callSiteOverrideCastPlugin, type CallSiteOverride } from './builtins/call-site-override-cast.js';
 export { ARTIFACT_SUPPORT_LINES } from './builtins/artifact-support.js';
 
@@ -506,6 +507,7 @@ import { bitfieldAccessPlugin } from './builtins/bitfield-access.js';
 import { subpieceAccessPlugin } from './builtins/subpiece-access.js';
 import { threeByteAccessPlugin } from './builtins/three-byte-access.js';
 import { comIUnknownCallPlugin } from './builtins/com-iunknown-call.js';
+import { biasedTableIndexPlugin } from './builtins/biased-table-index.js';
 import { callSiteOverrideCastPlugin } from './builtins/call-site-override-cast.js';
 import { arrayCastAssignPlugin } from './builtins/array-cast-assign.js';
 import { vtableStoreCastPlugin } from './builtins/vtable-store-cast.js';
@@ -611,6 +613,7 @@ import type { TransformPlugin } from './types.js';
 export const allBuiltinPlugins: TransformPlugin[] = [
   indirectCallCleanupPlugin, // Cleanup: strip jumptable warnings, clean fn-ptr casts (priority 5)
   ...ghidraCleanupPlugins,
+  biasedTableIndexPlugin,      // Correctness: *(byte*)((int)A + C + i) below the next table → Next[i - bias] (priority 12)
   threeByteAccessPlugin,       // Correctness: *(uint3 *)p → d2_load24(p), exactly three bytes (priority 14)
   typeNormalizePlugin,         // Cleanup: uint → uint32_t, undefined4 → auto/uint32_t (priority 15)
   pointerCastNormalizePlugin, // Cleanup: (int)&expr → (uintptr_t)&expr (priority 16)

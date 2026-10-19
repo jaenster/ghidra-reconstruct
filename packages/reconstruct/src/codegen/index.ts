@@ -5230,7 +5230,25 @@ export function buildFuncPtrArgCastTables(
     structFieldFuncdefs,
     fieldFuncdefs,
     vtableDispatch: buildVtableDispatch(dataTypes, funcDefs, emittedMemberNames),
+    enumValues: buildEnumValues(dataTypes),
   };
+}
+
+/** Enum constant → value, for every constant name that means one value program-wide. */
+function buildEnumValues(dataTypes: ExtractedDataType[]): Record<string, number> {
+  const values: Record<string, number> = {};
+  const ambiguous = new Set<string>();
+  for (const dt of dataTypes) {
+    if (dt.kind !== 'ENUM') continue;
+    for (const v of (dt as import('../types.js').ExtractedEnum).values ?? []) {
+      if (!v.name || ambiguous.has(v.name)) continue;
+      const n = Number(v.value);
+      if (!Number.isFinite(n)) continue;
+      if (v.name in values && values[v.name] !== n) { ambiguous.add(v.name); delete values[v.name]; continue; }
+      values[v.name] = n;
+    }
+  }
+  return values;
 }
 
 

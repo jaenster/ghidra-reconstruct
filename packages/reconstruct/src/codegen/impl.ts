@@ -647,6 +647,8 @@ function funcPtrArgCastsForScope(
 
 /** @see ImplGenContext.funcPtrArgCasts */
 export interface FuncPtrArgCastTables {
+  /** Enum constant → value, for constant names unique program-wide. */
+  enumValues?: Record<string, number>;
   /** Callable name (bare AND qualified) → param index → funcdef typedef name */
   paramFuncdefs: Record<string, Record<number, string>>;
   /**
@@ -2405,6 +2407,12 @@ function transformDecompiledCode(
         typedefTargets: context.funcPtrArgCasts.typedefTargets,
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         enclosingVarTypes,
+      };
+      perPluginOptions['biased-table-index'] = {
+        globalAddresses: context.funcPtrArgCasts.globalAddresses,
+        globalSizes: context.funcPtrArgCasts.globalSizes,
+        globalElementSizes: context.funcPtrArgCasts.globalElementSizes,
+        enumValues: context.funcPtrArgCasts.enumValues,
       };
       perPluginOptions['call-site-override-cast'] = {
         // Only funcdefs the run can declare: the cast spells the typedef by name.
