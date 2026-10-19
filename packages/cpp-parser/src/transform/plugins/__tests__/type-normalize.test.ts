@@ -193,8 +193,8 @@ describe('typeNormalizePlugin', () => {
   // ============================================
 
   describe('odd-sized undefined types', () => {
-    it('should keep undefined3 as-is', () => {
-      assertTransform('void foo(undefined3 x) {}', 'void foo(undefined3 x) {}');
+    it('should make undefined3 a 4-byte container (it holds a 24-bit value)', () => {
+      assertTransform('void foo(undefined3 x) {}', 'void foo(uint32_t x) {}');
     });
 
     it('should keep undefined5 as-is', () => {
@@ -342,5 +342,26 @@ describe('typeNormalizePlugin: Ghidra float types, compiled and run', () => {
 
   it('a literal whose bits do not fit the byte is left alone', () => {
     assert.ok(lowerExpr('(unkfloat1)3.58732e-43').includes('3.58732e-43'));
+  });
+});
+
+describe('typeNormalizePlugin: 3-byte types, compiled and run', { skip: !hasNativeGpp() }, () => {
+  /** The header's typedefs: a 3-byte cast was a 1-byte truncation or a no-op. */
+  const PRELUDE = 'typedef uint8_t undefined3; typedef int32_t int3; typedef uint32_t uint3;';
+  const body = (src: string) => {
+    const out = emit(typeNormalizePlugin.createTransformer({})(parse(`void f() { ${src} }`)) as AnyNode);
+    return out.slice(out.indexOf('{') + 1, out.lastIndexOf('}'));
+  };
+
+  it('a cast to a 3-byte type is the 24-bit value, and a 3-byte local holds one', () => {
+    // GFX_GetUnitHealthBarColor: uVar1 = (undefined3)((uint)nHpPercent >> 8);
+    const out = compileAndRun(PRELUDE, [
+      'uint32_t x = 0xAB123456u; int8_t c = -2; uint32_t r1, r3; int32_t r2;',
+      body('undefined3 uVar1; uVar1 = (undefined3)x; r1 = uVar1; r2 = (int3)x; r3 = (uint3)c;'),
+      'int32_t r4 = 0;',
+      body('r4 = (int3)c;'),
+      'printf("%x %d %x %d\\n", (unsigned)r1, (int)r2, (unsigned)r3, (int)r4);',
+    ].join('\n'));
+    assert.strictEqual(out.trim(), '123456 1193046 fffffe -2');
   });
 });

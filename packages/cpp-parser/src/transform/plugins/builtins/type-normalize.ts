@@ -14,7 +14,8 @@
  * - undefined4 x; (uninitialized local) -> uint32_t x;
  * - undefined4 in params/returns -> uint32_t
  * - undefined/undefined1 -> uint8_t fallback
- * - undefined3/5/6/7 -> kept as-is (odd sizes)
+ * - undefined3, int3, uint3 -> a 4-byte container; a cast to one is the 24-bit value
+ * - undefined5/6/7 -> kept as-is (odd sizes)
  *
  * Part C - Ghidra float types: unkfloat1 -> uint8_t (a 1-byte bit container),
  * float10 -> long double, float2 -> uint16_t; float constants printed through one
@@ -115,8 +116,16 @@ const UNDEFINED_FALLBACK_MAP: ReadonlyMap<string, string> = new Map([
 
 /** Odd-sized undefined types that we leave alone */
 const UNDEFINED_ODD_SIZES = new Set([
-  'undefined3', 'undefined5', 'undefined6', 'undefined7',
+  'undefined5', 'undefined6', 'undefined7',
 ]);
+
+/**
+ * Ghidra's 3-byte integer types. In a body they hold a 24-bit value, so a variable is a
+ * 4-byte container and a cast is the 24-bit truncation or extension it names. The header's
+ * `typedef uint8_t undefined3` (sized for a struct's padding field) made a local or a
+ * cast of this type ONE byte, and `typedef int32_t int3` made the cast a no-op.
+ */
+const THREE_BYTE_TYPES = new Set(['undefined3', 'uint3', 'int3']);
 
 // ============================================
 // HELPERS
@@ -137,7 +146,7 @@ function getTypedefName(node: TypedefType): string {
 
 /** Check if a TypedefType is an undefined type (any size) */
 function isUndefinedType(name: string): boolean {
-  return UNDEFINED_FALLBACK_MAP.has(name) || UNDEFINED_ODD_SIZES.has(name);
+  return UNDEFINED_FALLBACK_MAP.has(name) || UNDEFINED_ODD_SIZES.has(name) || name === 'undefined3';
 }
 
 /** Create a TypedefType node with a new name */
@@ -278,6 +287,10 @@ function createTypeRenamePass(options: TypeNormalizeOptions = {}): Transformer {
         return createTypedefTypeNode(undefinedReplacement, node);
       }
 
+      // A 3-byte local or parameter is a 4-byte container (see THREE_BYTE_TYPES).
+      if (typeName === 'undefined3' || typeName === 'uint3') return createTypedefTypeNode('uint32_t', node);
+      if (typeName === 'int3') return createTypedefTypeNode('int32_t', node);
+
       // Odd-sized undefined types are kept as-is
       return undefined;
     },
@@ -371,6 +384,33 @@ function createFloatConstantPass(): Transformer {
   return sequence(boolFold, byteBits);
 }
 
+/** The 24-bit value of `operand`: zero-extended for uint3/undefined3, sign-extended for int3. */
+function threeByteForm(signed: boolean, operand: Expression, template: ASTNode): Expression {
+  const u32 = createTypedefTypeNode('uint32_t', template);
+  const widened = Expr.cast(u32, Expr.paren(operand));
+  if (!signed) {
+    // ((uint32_t)(E) & 0xffffffu): the low three bytes, zero above.
+    const mask = { ...Expr.intLiteral(0xffffff, 16), raw: '0xffffffu', suffix: 'u' } as Expression;
+    return Expr.paren(Expr.binary(widened, '&', mask));
+  }
+  // ((int32_t)((uint32_t)(E) << 8) >> 8): bit 23 is the sign.
+  const i32 = createTypedefTypeNode('int32_t', template);
+  const up = Expr.cast(i32, Expr.paren(Expr.binary(widened, '<<', Expr.intLiteral(8))));
+  return Expr.paren(Expr.binary(up, '>>', Expr.intLiteral(8)));
+}
+
+/** A cast to a 3-byte type becomes the 24-bit value it names; see THREE_BYTE_TYPES. */
+function createThreeByteValuePass(): Transformer {
+  return createTransformer({
+    visitNode(n: ASTNode): ASTNode | undefined {
+      const t = castTypeName(n);
+      if (!t || !THREE_BYTE_TYPES.has(t)) return undefined;
+      const cast = n as CStyleCastExpr;
+      return { ...threeByteForm(t === 'int3', cast.expression, n), leadingTrivia: n.leadingTrivia, trailingTrivia: n.trailingTrivia } as ASTNode;
+    },
+  });
+}
+
 /**
  * Create the combined type normalization transformer.
  * Uses sequence() to run auto-promotion before type rename; float constants printed
@@ -380,6 +420,7 @@ function createTypeNormalizeTransformer(options: TypeNormalizeOptions = {}): Tra
   return sequence(
     createAutoPromotionPass(options),
     createFloatConstantPass(),
+    createThreeByteValuePass(),
     createTypeRenamePass(options),
   );
 }
