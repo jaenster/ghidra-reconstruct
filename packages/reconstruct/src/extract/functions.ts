@@ -392,6 +392,16 @@ export async function extractAllFunctions(
     }
   }
 
+  // Indirect-call prototype overrides, one script for the whole program.
+  {
+    let attached = 0;
+    await timePhase(
+      `${label}extract/call-site-overrides`,
+      async () => { attached = await attachCallSiteOverrides(connection, allFunctions); },
+      () => `${attached} indirect-call override(s)`
+    );
+  }
+
   // Second pass: decompile if requested — use batch_decompile for speed
   if (decompile) {
     await timePhase(
@@ -791,6 +801,87 @@ export async function attachThunkTargets(
     if (!target) continue;
     func.thunkTarget = target;
     attached++;
+  }
+  return attached;
+}
+
+/**
+ * The Ghidra-side half of call-site override extraction.
+ *
+ * An override is a LABEL in a function's `override` namespace that
+ * `HighFunctionDBUtil.readOverride` resolves to a FUNCTION_DEFINITION. Only those
+ * on a COMPUTED call are reported: a direct call's callee already has a
+ * prototype, and the override there (the 352 varargs `sprintf` sites) changes
+ * nothing the emitter spells. Java, no imports (see THUNK_TARGET_SCRIPT).
+ */
+const CALL_OVERRIDE_SCRIPT = `
+ghidra.program.model.symbol.SymbolTable st = currentProgram.getSymbolTable();
+StringBuilder sb = new StringBuilder();
+for (ghidra.program.model.symbol.Symbol ns : st.getSymbols("override")) {
+  for (ghidra.program.model.symbol.Symbol c : st.getChildren(ns)) {
+    if (c.getSymbolType() != ghidra.program.model.symbol.SymbolType.LABEL) continue;
+    ghidra.program.model.pcode.DataTypeSymbol ds = null;
+    try { ds = ghidra.program.model.pcode.HighFunctionDBUtil.readOverride(c); } catch (Exception e) { continue; }
+    if (ds == null || !(ds.getDataType() instanceof ghidra.program.model.data.FunctionDefinition)) continue;
+    ghidra.program.model.listing.Instruction ins = currentProgram.getListing().getInstructionAt(c.getAddress());
+    if (ins == null || !ins.getFlowType().isCall() || !ins.getFlowType().isComputed()) continue;
+    ghidra.program.model.listing.Function f = currentProgram.getFunctionManager().getFunctionContaining(c.getAddress());
+    if (f == null) continue;
+    ghidra.program.model.data.FunctionDefinition fd = (ghidra.program.model.data.FunctionDefinition) ds.getDataType();
+    sb.append(f.getEntryPoint()).append('\\t').append(c.getAddress()).append('\\t')
+      .append(fd.getName()).append('\\t').append(fd.getArguments().length).append('\\n');
+  }
+}
+println(sb.toString());
+`;
+
+/**
+ * Record each function's indirect-call prototype overrides on it. Returns how
+ * many were attached. A failure leaves every function without the field, which
+ * is what an older snapshot looks like too.
+ */
+export async function attachCallSiteOverrides(
+  connection: GhidraConnection,
+  functions: ExtractedFunction[]
+): Promise<number> {
+  let output: string;
+  try {
+    const result = await connection.sendCommand<{ success?: boolean; output?: string; error?: string }>(
+      'execute_script',
+      { language: 'java', code: CALL_OVERRIDE_SCRIPT, scriptTimeout: 120, _commandTimeout: 180000 }
+    );
+    if (result.success === false || typeof result.output !== 'string') {
+      console.warn(`  Call-site overrides unavailable: ${result.error ?? 'no output'}`);
+      return 0;
+    }
+    output = result.output;
+  } catch (err) {
+    console.warn(`  Call-site overrides unavailable: ${(err as Error).message}`);
+    return 0;
+  }
+  return applyCallSiteOverrides(output, functions);
+}
+
+/** Parse the script's rows onto the functions they belong to. */
+export function applyCallSiteOverrides(output: string, functions: ExtractedFunction[]): number {
+  const byFunction = new Map<string, { callAddress: string; funcdef: string; arity: number }[]>();
+  for (const line of output.split('\n')) {
+    const cols = line.split('\t');
+    if (cols.length < 4) continue;
+    const [entry, call, funcdef, arity] = cols.map(c => c.trim());
+    const n = Number(arity);
+    if (!entry || !funcdef || !Number.isInteger(n)) continue;
+    const key = addressKey(entry);
+    const list = byFunction.get(key) ?? [];
+    list.push({ callAddress: addressKey(call), funcdef, arity: n });
+    byFunction.set(key, list);
+  }
+  let attached = 0;
+  for (const func of functions) {
+    const list = byFunction.get(addressKey(func.address));
+    if (!list) continue;
+    func.callSiteOverrides = list.sort((a, b) => a.callAddress.localeCompare(b.callAddress));
+    attached += list.length;
   }
   return attached;
 }

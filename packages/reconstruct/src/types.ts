@@ -56,6 +56,12 @@ export interface ExtractedFunction {
    * codegen namespace filter reads it. See `codegen/exclusion-closure`.
    */
   excludedNamespaceReachable?: boolean;
+  /**
+   * Ghidra call-site prototype overrides on INDIRECT calls in this function: the
+   * FUNCTION_DEFINITION each names and its parameter count (see
+   * call-site-override-cast). Absent when the snapshot predates them.
+   */
+  callSiteOverrides?: { callAddress: string; funcdef: string; arity: number }[];
 }
 
 /**

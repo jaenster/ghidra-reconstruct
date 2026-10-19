@@ -1438,6 +1438,7 @@ export function generateFunctionImplementation(
           ghidraNamespaceSegments: enclosingNamespace?.ghidraSegments,
           stackSlots: frameSlots(func),
           registerAliases: registerAliases(func),
+          callSiteOverrides: func.callSiteOverrides,
         },
       );
       body = func.name ? rewriteQuestUnionMembers(transformed.code, func.name, context?.sourceFileName, [...(func.parameters ?? []), ...(func.localVariables ?? [])]) : transformed.code;
@@ -2191,6 +2192,8 @@ function transformDecompiledCode(
      * The AST cannot show storage, so the pairing arrives here.
      */
     registerAliases?: Record<string, { param: string; type: string }>;
+    /** Ghidra's prototype overrides on this function's indirect calls. */
+    callSiteOverrides?: { funcdef: string; arity: number }[];
   },
 ): TransformDecompiledResult {
   try {
@@ -2256,6 +2259,7 @@ function transformDecompiledCode(
     }
     const enablePlugins: string[] = [];
     const perPluginOptions: Record<string, unknown> = {};
+    const overrideCastTypedefs = new Set<string>();
 
     // Method-conversion is dropped (free functions only), so mappings/currentFunction
     // are normally empty; keep the original guard so any stray mapping still no-ops.
@@ -2395,6 +2399,17 @@ function transformDecompiledCode(
         enclosingVarTypes,
       };
       perPluginOptions['pointer-compare-cast'] = {
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        structFields: context.funcPtrArgCasts.structFields,
+        typedefTargets: context.funcPtrArgCasts.typedefTargets,
+        functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        enclosingVarTypes,
+      };
+      perPluginOptions['call-site-override-cast'] = {
+        // Only funcdefs the run can declare: the cast spells the typedef by name.
+        overrides: (enclosing?.callSiteOverrides ?? []).filter(o => o.funcdef in (context.funcPtrArgCasts.funcdefSignatures ?? {})),
+        usedTypedefs: overrideCastTypedefs,
         globalTypes: context.funcPtrArgCasts.globalTypes,
         fieldTypes: context.funcPtrArgCasts.fieldTypes,
         structFields: context.funcPtrArgCasts.structFields,
@@ -2644,6 +2659,11 @@ function transformDecompiledCode(
       // and space loops/blocks apart with blank lines for readability.
       emitOptions: { alwaysUseBraces: true, blankLineAroundControlFlow: true },
     });
+
+    if (context && overrideCastTypedefs.size > 0) {
+      if (!context._castTypedefs) context._castTypedefs = new Set();
+      for (const name of overrideCastTypedefs) context._castTypedefs.add(name);
+    }
 
     if (result.success) {
       // Extract transformed body
