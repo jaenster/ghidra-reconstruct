@@ -254,8 +254,10 @@ export function isLibraryType(name: string, category: string): boolean {
  * `IUnknown` is the proven case: mingw's `unknwnbase.h:75` defines it as a C++
  * interface class whenever `CINTERFACE` is not set, which is every translation
  * unit here, and Ghidra's own `IUnknown` (the C shape, `{ IUnknownVtbl* lpVtbl; }`)
- * collided with it in 12 files. Nothing in the tree reads a field through an
- * `IUnknown`, so the platform's is a drop-in.
+ * collided with it in 12 files. The C++ class has the same three methods in the
+ * same vtable slots but no `lpVtbl`, so the C-COM calls Ghidra prints through one
+ * (`p->lpVtbl->Release(p)`, 7 sites at v1096) are respelled `p->Release()` by
+ * the `com-iunknown-call` pass.
  *
  * Deliberately NOT extended to the DirectDraw/DirectSound/Direct3D interfaces or
  * to `IUnknownVtbl`: the C++ branch of those headers defines only the interface

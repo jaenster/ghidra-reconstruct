@@ -425,6 +425,7 @@ export {
   subpieceAccessPlugin,
 } from './builtins/subpiece-access.js';
 export { threeByteAccessPlugin } from './builtins/three-byte-access.js';
+export { comIUnknownCallPlugin } from './builtins/com-iunknown-call.js';
 export { ARTIFACT_SUPPORT_LINES } from './builtins/artifact-support.js';
 
 export { arrayCastAssignPlugin } from './builtins/array-cast-assign.js';
@@ -503,6 +504,7 @@ import { prngTempCollapsePlugin } from './builtins/prng-temp-collapse.js';
 import { bitfieldAccessPlugin } from './builtins/bitfield-access.js';
 import { subpieceAccessPlugin } from './builtins/subpiece-access.js';
 import { threeByteAccessPlugin } from './builtins/three-byte-access.js';
+import { comIUnknownCallPlugin } from './builtins/com-iunknown-call.js';
 import { arrayCastAssignPlugin } from './builtins/array-cast-assign.js';
 import { vtableStoreCastPlugin } from './builtins/vtable-store-cast.js';
 import { arrayCastStripPlugin } from './builtins/array-cast-strip.js';
@@ -618,6 +620,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   incrementSimplifyPlugin,    // Cleanup: x = x + 1 → x++ (priority 35)
   redundantNegationPlugin,    // Cleanup: x + -y → x - y (priority 40)
   bitfieldAccessPlugin,       // Cleanup: field_0xNN & MASK → bitfieldName (priority 45)
+  comIUnknownCallPlugin,      // Platform: p->lpVtbl->Release(p) on IUnknown* → p->Release() (priority 616)
   subpieceAccessPlugin,       // Cleanup: expr._N_M_ → *(T *)((char *)expr + N) (priority 46)
   arrayCastAssignPlugin,      // Cleanup: a = (byte[4])x → *(uint32_t *)a = x (priority 16, before strip)
   vtableStoreCastPlugin,      // Cleanup: *(T**)x = name → *(T**)x = (T*)name (priority 48)
