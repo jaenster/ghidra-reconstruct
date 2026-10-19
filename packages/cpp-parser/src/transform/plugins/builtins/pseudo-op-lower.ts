@@ -20,7 +20,8 @@
  *
  * What an operand IS decides the spelling: an integer is cast, a pointer goes through
  * `uintptr_t`, and a float or double is a bit pattern, read with `d2_bit_cast`. The type
- * comes from the same tables the cast passes use (`expr-shape`). An operand whose type is
+ * comes from the same tables the cast passes use (`expr-shape`); a float is never converted
+ * by value, because SUBPIECE and PIECE never are. An operand whose type is
  * not known, or that is narrower than the bytes the operation reads, is NOT guessed at:
  * the call is left as it was and reported. In strict mode it throws instead, so a regen
  * names every function Ghidra still has to type. Flag operations name their operands
@@ -417,7 +418,16 @@ function raw(ctx: Ctx, e: Expression, n: number, need: number): Expression {
           return fromTemplate(`(${U})__A`, { __A: (x as CStyleCastExpr).expression });
         }
       }
-      throw new Unlowerable(`floating operand (${cls.width} bytes); its bit pattern is lowered separately`);
+      // SUBPIECE and PIECE are bit-level: a float operand is its IEEE bit pattern, never
+      // its value converted to an integer. `grGet` writes integer bits into the float
+      // `fGammaVal`; converting that denormal gives 0 where the machine reads 0x0C.
+      if (x.kind === NodeKind.FloatingLiteral && (n === 4 || n === 8)) {
+        return fromTemplate(`d2_bit_cast<${U}>((${n === 4 ? 'float' : 'double'})__A)`, { __A: e });
+      }
+      if (cls.width !== n || (n !== 4 && n !== 8)) {
+        throw new Unlowerable(`floating operand is ${cls.width} bytes, the varnode ${n}`);
+      }
+      return fromTemplate(`d2_bit_cast<${U}>(__A)`, { __A: e });
     }
   }
 }

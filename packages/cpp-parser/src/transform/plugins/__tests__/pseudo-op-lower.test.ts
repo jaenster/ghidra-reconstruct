@@ -98,6 +98,31 @@ describe('pseudo-op-lower: SUBPIECE', native, () => {
   });
 });
 
+describe('pseudo-op-lower: floating operands are bit patterns', native, () => {
+  it('SUB84 of a double reads its IEEE bits, not its value', () => {
+    // UTILS_SqrtFloat and the CRT callers hand a double to CRT_ClearFP as two dwords.
+    assert.deepStrictEqual(evaluate({ hi: 'SUB84(d, 4)', lo: 'SUB84(d, 0)' }, { d: '1.0' }),
+      { hi: 0x3FF00000n, lo: 0n });
+  });
+  it('SUB41 of a float holding integer bits reads those bits (the Glide gamma case)', () => {
+    // grGet(0x2a, .., &fGammaVal) writes 0x0000000C into the float; its value is a denormal.
+    const out = compileAndRun(PRELUDE, [
+      'float f; uint32_t bits = 0x0000000Cu; std::memcpy(&f, &bits, 4);',
+      ...PARAMS.split(', ').filter(p => !p.endsWith(' f')).map(p => `${p.replace(/\*\s*/, '*')} = 0;`),
+      printHex('mask', `(1 << (${lower('SUB41(f, 0)')} & 0x1f)) - 1`),
+    ].join('\n'));
+    assert.deepStrictEqual(readHex(out), { mask: 0xFFFn });
+  });
+  it('a (float) of a 1- or 2-byte integer is the integer under either reading', () => {
+    assert.deepStrictEqual(evaluate({ s: 'SUB42((float)u16, 0)' }, { u16: '0xC01' }), { s: 0xC01n });
+  });
+  it('a long double operand is reported, not converted', () => {
+    const seen: ArtifactRecord[] = [];
+    transform('void fn(long double x) { r = SUB84(x, 0); }', { onArtifact: r => seen.push(r) });
+    assert.match(seen[0]?.reason ?? '', /10 bytes/);
+  });
+});
+
 describe('pseudo-op-lower: PIECE', native, () => {
   it('joins the halves at their own widths', () => {
     const v = evaluate({
