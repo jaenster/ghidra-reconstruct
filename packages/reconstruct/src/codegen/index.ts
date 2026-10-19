@@ -101,6 +101,7 @@ import {
 } from '../modules/type-ownership.js';
 import { buildModuleGraph } from '../modules/builder.js';
 import { hashFunction, hashDataType, hashGlobal } from '../modules/buildinfo.js';
+import { warningRows, formatWarningsTsv, WARNINGS_TSV } from './warning-facts.js';
 
 /**
  * Refuse a model that carries a type whose members were never read.
@@ -1491,6 +1492,7 @@ export function generateProjectStage2(state: GenerationState): ReconstructedProj
     namespaces,
     programInfo,
     buildInfo: context._buildInfo,
+    warnings: genMark('project/warnings', () => warningRows(functions)),
   };
 
   if (GEN_TIMING) genAdd('project/total', Date.now() - genT0);
@@ -3985,6 +3987,12 @@ export async function writeProject(
       await fs.writeFile(cmakePath, cmakeContent, 'utf-8');
       writtenFiles.push(cmakePath);
     }
+  }
+
+  if (project.warnings) {
+    const warningsPath = path.join(outputDir, WARNINGS_TSV);
+    await fs.writeFile(warningsPath, formatWarningsTsv(project.warnings), 'utf-8');
+    writtenFiles.push(warningsPath);
   }
 
   // Always generate README.md

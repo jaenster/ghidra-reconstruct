@@ -590,6 +590,11 @@ export { charLiteralEscapePlugin } from './builtins/char-literal-escape.js';
 export { getGotoCleanupStats, resetGotoCleanupStats } from './builtins/goto-cleanup/index.js';
 export type { GotoCleanupStats } from './builtins/goto-cleanup/index.js';
 import { frameGroupLocalsPlugin } from './builtins/frame-group-locals.js';
+import { warningCommentStripPlugin } from './builtins/ghidra-warning-facts.js';
+export {
+  warningCommentStripPlugin, collectWarningFacts, classifyWarning, isWarningComment,
+  WARNING_TEMPLATES, TERMINAL_CALLEES, type WarningFact, type WarningTemplate, type WarningClass,
+} from './builtins/ghidra-warning-facts.js';
 export { frameGroupLocalsPlugin, frameTypeLayout, type FrameGroupLocalsOptions } from './builtins/frame-group-locals.js';
 import type { TransformPlugin } from './types.js';
 
@@ -685,6 +690,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   charLiteralEscapePlugin,    // Cleanup: '²' → '\xb2' (priority 46)
   memoryPatternsPlugin,       // Pattern detection (late)
   frameGroupLocalsPlugin,     // Correctness: a contiguous frame run whose first slot's address escapes -> one struct-typed local (priority 950)
+  warningCommentStripPlugin,  // Cleanup: drop Ghidra WARNING comments; warnings.tsv carries them (priority 990, last)
 ];
 
 // ============================================

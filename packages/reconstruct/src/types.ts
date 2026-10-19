@@ -390,6 +390,8 @@ export interface ReconstructedProject {
   programInfo?: ProgramInfo;
   /** Serialized module graph for incremental rebuilds */
   buildInfo?: import('./modules/buildinfo.js').BuildInfo;
+  /** Ghidra WARNING comments of the emitted functions, written as warnings.tsv */
+  warnings?: import('./codegen/warning-facts.js').WarningRow[];
 }
 
 /**
