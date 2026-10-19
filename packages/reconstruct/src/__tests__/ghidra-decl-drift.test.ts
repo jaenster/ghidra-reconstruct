@@ -21,6 +21,7 @@ describe('ghidraDeclDrift', () => {
       { name: 'FID_conflict:___CxxFrameHandler3', address: '0068333c', parameters: p(5) },
       { name: '__aulldvrm', address: '00686b60', parameters: p(4) },
       { name: '___report_gsfailure', address: '006889d6', parameters: [] },
+      { name: '__sqrt_common', address: '006879dd', parameters: p(3) },
     ]), []);
   });
 

@@ -522,12 +522,10 @@ const MSVC_RUNTIME_DECLS: ExcludedSymbolDecl[] = [
   // operand is the x87 ST0 the prototype now names, and every call site passes it.
   { emitted: '__CIsqrt', real: '_CIsqrt', source: 'ghidra',
     decl: 'extern "C" long double __CIsqrt(long double x);' },
-  // __sqrt_common @ 006879dd — Ghidra: uint (int, uint). The double arrives split
-  // across two stack dwords. There is no third argument: the function opens with
-  // `PUSH EDX; FSTCW word ptr [ESP]`, so the push reserves four bytes for the FPU
-  // control word and EDX's value is never read.
+  // __sqrt_common @ 006879dd — Ghidra (v1096+): float10 (double dArg, bool bSpecial,
+  // float10 x), __cdecl. Superseded the earlier (int, uint) reading; no kept code calls it.
   { emitted: '__sqrt_common', real: '_sqrt_common', source: 'ghidra',
-    decl: 'extern "C" uint32_t __sqrt_common(int nMantissaLo, uint32_t nMantissaHi);' },
+    decl: 'extern "C" long double __sqrt_common(double dArg, bool bSpecial, long double x);' },
   // __aulldvrm @ 00686b60 — Ghidra (v1096): LLDVRM_RESULT (uint, uint, uint, uint). Unsigned
   // 64/64 divide AND remainder: the quotient in EDX:EAX, the remainder in EBX:ECX, which
   // Ghidra models as the two-field LLDVRM_RESULT (defined with the 64-bit intrinsics).
