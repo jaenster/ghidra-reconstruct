@@ -64,7 +64,7 @@ import {
 import { buildVtableDispatch } from './vtable-dispatch.js';
 import { fieldDeclSpelling, emittedMemberNames, generateHeader, generateFunctionDeclaration, setKnownFuncDefs, setConstructorBearingStructs, sigType, getIntegerConversionType, emittedFunctionName, returnSigType } from './header.js';
 import { enumTypedefLine, registerEnumTypedefTargets, setKnownEnumWidths } from './enum-width.js';
-import { generateImplementation, setQuestStructLayouts, setStructFieldRenames, decompiledReturnType, decompiledFunctionName, type ImplGenContext, type FuncPtrArgCastTables, type ThunkForward } from './impl.js';
+import { generateImplementation, setQuestStructLayouts, setStructFieldRenames, decompiledReturnType, decompiledFunctionName, decompiledParameters, type ImplGenContext, type FuncPtrArgCastTables, type ThunkForward } from './impl.js';
 import { generateCMakeLists, generateTopLevelCMake, generateTargetCMake, generateUnsortedCMake } from './cmake.js';
 import { generateSourceMap } from './sourcemap.js';
 import { generateReadme } from './readme.js';
@@ -652,6 +652,7 @@ export function generateProjectStage1(
   // emitted function cannot compile. Where the database has nothing to say,
   // take the answer from the same prototype the body came from. A curated field
   // always wins: `undefined` is the only case where there is nothing to override.
+  reconcileUncuratedParameters(functions);
   reconcileUndefinedReturnTypes(functions);
 
   // Register every function-pointer typedef name (FUNCTION_DEFINITION datatypes)
@@ -5232,6 +5233,46 @@ export function buildFuncPtrArgCastTables(
   };
 }
 
+
+/**
+ * Give a function whose prototype was never committed the parameters its body uses.
+ *
+ * A function whose signature is still Ghidra's default (`undefined X(void)`, no
+ * parameters) is decompiled with a prototype the decompiler infers from register
+ * and stack use - and the body is written against THAT prototype. The emitter took
+ * the database's empty list and the decompiler's body, so the definition named
+ * `param_1`/`param_2` it never declared: the nine zlib leaves at v1096
+ * (`gf2_matrix_times` @0042d9f0 `(uint, uint *)`, `deflateSetHeader` @00427200, ...).
+ *
+ * The decompiler prints parameters for a `(void)` function only when the prototype
+ * is NOT locked, so this never overrides a committed signature. Applied only while
+ * the return type is also uncurated (`undefined*`), the database's own sign that
+ * nobody has set the prototype, and only when every parameter reads as `<type> <name>`.
+ */
+function reconcileUncuratedParameters(functions: ExtractedFunction[]): void {
+  for (const fn of functions) {
+    if ((fn.parameters ?? []).length > 0 || fn.hasVarArgs) continue;
+    if (!UNCURATED_RETURN_TYPES.has((fn.returnType ?? '').trim())) continue;
+    const params = decompiledParameters(fn.decompiled);
+    if (!params || params.length === 0) continue;
+    fn.parameters = params.map((p, ordinal) => ({
+      name: p.name,
+      dataType: p.dataType,
+      size: parameterSize(p.dataType),
+      ordinal,
+    }));
+  }
+}
+
+/** Byte size of a decompiler parameter spelling: what a 32-bit x86 slot holds. */
+function parameterSize(dataType: string): number {
+  if (dataType.includes('*')) return 4;
+  const t = dataType.replace(/\b(const|struct|unsigned|signed)\b/g, '').trim();
+  if (/^(char|byte|bool|uchar|undefined1?|u?int8_t)$/.test(t)) return 1;
+  if (/^(short|ushort|word|undefined2|u?int16_t|wchar_t)$/.test(t)) return 2;
+  if (/^(longlong|ulonglong|double|undefined8|u?int64_t|qword)$/.test(t)) return 8;
+  return 4;
+}
 
 /** Ghidra's "no information" return types — see reconcileUndefinedReturnTypes. */
 const UNCURATED_RETURN_TYPES = new Set([

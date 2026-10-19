@@ -142,6 +142,32 @@ export function decompiledParameterNames(decompiled: string | undefined): string
   return names;
 }
 
+/**
+ * The parameters of the prototype Ghidra's DECOMPILER emitted, type and name, in order.
+ *
+ * Returns undefined when any parameter cannot be read as `<type> <name>` - a
+ * function-pointer parameter, varargs, an array - because a partial list would
+ * shift every parameter after the unreadable one.
+ */
+export function decompiledParameters(decompiled: string | undefined): { name: string; dataType: string }[] | undefined {
+  if (!decompiled) return undefined;
+  const open = prototypeOpenParen(decompiled);
+  if (open === undefined) return undefined;
+  const bodyStart = decompiled.search(/\)[\s\n]*\{/);
+  const inner = decompiled.slice(open + 1, bodyStart).replace(/\s+/g, ' ').trim();
+  if (inner === '' || inner === 'void') return [];
+  if (/[()\[\]]|\.\.\./.test(inner)) return undefined;
+  const params: { name: string; dataType: string }[] = [];
+  for (const part of inner.split(',')) {
+    const m = part.trim().match(/^(.*?[\w*])\s*\b([A-Za-z_]\w*)$/);
+    if (!m) return undefined;
+    const dataType = m[1].replace(/\s*\*/g, ' *').replace(/\s+/g, ' ').trim();
+    if (!/^(?:(?:const|struct|unsigned|signed)\s+)*[A-Za-z_][\w:]*(?: \*)*$/.test(dataType)) return undefined;
+    params.push({ name: m[2], dataType });
+  }
+  return params;
+}
+
 function renumberParams(params: Array<{ name: string; dataType: string }>): Array<{ name: string; dataType: string }> {
   let counter = 1;
   return params.map(p => {
