@@ -25,3 +25,29 @@ describe('pseudo-op macros: carry flag', { skip: !hasNativeGpp() }, () => {
     assert.deepStrictEqual(v, { c1: 1n, c1n: 0n, c2: 1n, c2n: 0n, c4: 1n, c4n: 0n });
   });
 });
+
+describe('pseudo-op macros: SUB43', { skip: !hasNativeGpp() }, () => {
+  it('SUB43 yields three bytes, not four', () => {
+    const v = run({ k0: 'SUB43(0xAABBCCDDu, 0)', k1: 'SUB43(0xAABBCCDDu, 1)' });
+    assert.deepStrictEqual(v, { k0: 0xBBCCDDn, k1: 0xAABBCCn });
+  });
+});
+
+describe('platform header: artifact support', { skip: !hasNativeGpp() }, () => {
+  it('refuses -ffast-math, which breaks isnan and float bit patterns', async () => {
+    const { execFileSync } = await import('node:child_process');
+    const { mkdtempSync, writeFileSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { ARTIFACT_SUPPORT_LINES } = await import('@ghidra-mcp/cpp-parser');
+    const dir = mkdtempSync(join(tmpdir(), 'fastmath-'));
+    try {
+      const src = join(dir, 't.cpp');
+      writeFileSync(src, ['#include <cstdint>', ...ARTIFACT_SUPPORT_LINES, 'int main(){}'].join('\n'));
+      execFileSync('g++', ['-std=c++17', '-fsyntax-only', src], { stdio: 'pipe' });
+      assert.throws(() => execFileSync('g++', ['-std=c++17', '-ffast-math', '-fsyntax-only', src], { stdio: 'pipe' }));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

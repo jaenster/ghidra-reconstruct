@@ -10,6 +10,7 @@
 // =============================================================================
 
 /** Standard C/C++ types from <cstdint>, <cstddef>, and language primitives */
+import { ARTIFACT_SUPPORT_LINES } from '@ghidra-mcp/cpp-parser';
 import {
   generateExcludedSymbolDecls, EXTRA_WIN32_SDK_HEADERS,
   EXCLUDED_SYMBOL_DECLS, CRT_DECLARED_FUNCTION_NAMES, declaredIdentifier,
@@ -1371,6 +1372,8 @@ export function generatePlatformHeader(
   lines.push('');
 
 
+  lines.push(...ARTIFACT_SUPPORT_LINES);
+  lines.push('');
   lines.push(...ghidraPseudoOpMacroLines());
 
   // Diablo 2 PRNG (Linear Congruential Generator) macros. These name D2SeedStrc, so
@@ -1945,7 +1948,7 @@ export function ghidraPseudoOpMacroLines(): string[] {
   lines.push('// Ghidra SUB macros — SUBmn extracts n-byte sub-value from m-byte value');
   lines.push('#define SUB41(x, n) ((uint8_t)((uint32_t)(x) >> ((n) * 8)))');
   lines.push('#define SUB42(x, n) ((uint16_t)((uint32_t)(x) >> ((n) * 8)))');
-  lines.push('#define SUB43(x, n) ((uint32_t)((uint32_t)(x) >> ((n) * 8)))');
+  lines.push('#define SUB43(x, n) ((uint32_t)(((uint32_t)(x) >> ((n) * 8)) & 0xFFFFFFu))');
   lines.push('#define SUB84(x, n) ((uint32_t)((uint64_t)(x) >> ((n) * 8)))');
   lines.push('#define SUB82(x, n) ((uint16_t)((uint64_t)(x) >> ((n) * 8)))');
   lines.push('#define SUB81(x, n) ((uint8_t)((uint64_t)(x) >> ((n) * 8)))');

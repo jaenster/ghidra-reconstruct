@@ -14,10 +14,20 @@
  *
  * The byte-size M selects the access type:
  *   1 → uint8_t, 2 → uint16_t, 4 → uint32_t, 8 → uint64_t.
- * For M === 3 we use uint32_t (a 4-byte access). The extra 1-byte over-read is
- * acceptable here: these are decompiler-emitted scalar reads, and a 3-byte field
- * is invariably padded to 4 in the surrounding struct, so reading the 4th byte is
- * harmless. For any other M we leave the node unchanged rather than guess.
+ * M === 3 has no C type and must touch exactly three bytes. A 4-byte access was
+ * used here once, and as a STORE it wrote the byte after the field: the D2GS packet
+ * senders build `aPacketFrame._0_3_ = ...` and `uStack_14._1_3_ = ...`, where that
+ * fourth byte is the next packet byte or the neighbouring local. So:
+ *
+ *   x._1_3_ = v      →  d2_store24((char *)&x + 1, v)
+ *   x._1_3_ |= v     →  d2_store24((char *)&x + 1, d2_load24((char *)&x + 1) | v)
+ *   ... x._1_3_ ...  →  d2_load24((char *)&x + 1)
+ *
+ * (helpers in artifact-support.ts). A cast of `v` to a 3-byte Ghidra type is dropped
+ * on a store: the store keeps the low three bytes, which is all the cast meant, and
+ * `undefined3` is a 1-byte typedef that would otherwise lose two of them. A 3-byte
+ * member in any other position (an increment, an address-of) keeps the old 4-byte
+ * lvalue. For any other M we leave the node unchanged rather than guess.
  *
  * The XMM/register subfield form (e.g. `in_XMM0._0_8_`) also matches this pattern
  * and the same rewrite is valid for it, so it is intentionally not special-cased.
@@ -26,6 +36,8 @@
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode,
+  AssignExpr,
+  CallExpr,
   Expression,
   Identifier,
   UnaryExpr,
@@ -37,7 +49,8 @@ import type {
   PointerType,
   BuiltinType,
 } from '../../../ast/nodes.js';
-import { createKindTransformer, type Transformer } from '../../transformer.js';
+import { createKindTransformer, createTransformer, sequence, type Transformer } from '../../transformer.js';
+import { Expr } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { createPlugin } from '../registry.js';
 
@@ -55,7 +68,8 @@ function accessTypeName(size: number): string | null {
       return 'uint8_t';
     case 2:
       return 'uint16_t';
-    // 3-byte SUBPIECE: access 4 bytes (1-byte over-read is acceptable, see header).
+    // 3-byte SUBPIECE: the 4-byte lvalue is the fallback for positions that are
+    // neither a load nor a store (see the header); loads and stores use the helpers.
     case 3:
       return 'uint32_t';
     case 4:
@@ -153,45 +167,131 @@ function makeBinary(
 // TRANSFORMER
 // ============================================
 
-function createSubpieceAccessTransformer(): Transformer {
-  return createKindTransformer(NodeKind.MemberExpr, (node) => {
-    const member = node as MemberExpr;
+/** `_<offset>_<size>_` of a member access, or null. */
+function subpieceOf(node: ASTNode): { offset: number; size: number; member: MemberExpr } | null {
+  if (node.kind !== NodeKind.MemberExpr) return null;
+  const member = node as MemberExpr;
+  if (member.member.kind !== NodeKind.Identifier) return null;
+  const m = SUBPIECE_RE.exec((member.member as Identifier).name);
+  return m ? { offset: Number(m[1]), size: Number(m[2]), member } : null;
+}
 
-    // Member name must be a plain identifier matching `_N_M_`.
-    if (member.member.kind !== NodeKind.Identifier) return undefined;
-    const name = (member.member as Identifier).name;
-    const m = SUBPIECE_RE.exec(name);
-    if (!m) return undefined;
+/** `(char *)base + offset`, the address of the piece, with base = p or &v. */
+function pieceAddress(member: MemberExpr, offset: number): Expression {
+  const objParen = makeParen(member.object, member);
+  const base: Expression = member.isArrow ? objParen : makeUnary('&', objParen, member);
+  const charCast = makeCast('char', base, member);
+  return offset === 0 ? charCast : makeBinary('+', charCast, makeIntLiteral(offset, member), member);
+}
 
-    const offset = Number(m[1]);
-    const size = Number(m[2]);
-    const typeName = accessTypeName(size);
-    if (typeName === null) return undefined; // unsupported M — leave unchanged
+/** Ghidra's 3-byte integer types. A cast to one is a truncation to 24 bits. */
+const THREE_BYTE_TYPES = new Set(['undefined3', 'int3', 'uint3']);
 
-    // base = object for arrow (pointer), &(object) for dot (value).
-    const objParen = makeParen(member.object, member);
-    const base: Expression = member.isArrow
-      ? objParen
-      : makeUnary('&', objParen, member);
+function stripThreeByteCast(e: Expression): Expression {
+  let x: Expression = e;
+  while (x.kind === NodeKind.ParenExpr) x = (x as ParenExpr).expression;
+  if (x.kind !== NodeKind.CStyleCastExpr) return e;
+  const t = (x as CStyleCastExpr).type as { kind: NodeKind; name?: { name?: string } | string };
+  const name = typeof t.name === 'string' ? t.name : t.name?.name;
+  return (t.kind === NodeKind.TypedefType || t.kind === NodeKind.BuiltinType) && name && THREE_BYTE_TYPES.has(name)
+    ? (x as CStyleCastExpr).expression
+    : e;
+}
 
-    // (char *)base
-    const charCast = makeCast('char', base, member);
+/** An expression that can be evaluated twice with the same result and no effect. */
+function isPure(e: ASTNode): boolean {
+  switch (e.kind) {
+    case NodeKind.Identifier:
+    case NodeKind.QualifiedId:
+    case NodeKind.IntegerLiteral:
+    case NodeKind.ThisExpr:
+      return true;
+    case NodeKind.ParenExpr:
+      return isPure((e as ParenExpr).expression);
+    case NodeKind.CStyleCastExpr:
+      return isPure((e as CStyleCastExpr).expression);
+    case NodeKind.MemberExpr:
+      return isPure((e as MemberExpr).object);
+    case NodeKind.UnaryExpr: {
+      const u = e as UnaryExpr;
+      return (u.operator === '*' || u.operator === '&') && isPure(u.operand);
+    }
+    default:
+      return false;
+  }
+}
 
-    // (char *)base + offset   (omit "+ 0" when offset === 0)
-    const addr: Expression =
-      offset === 0 ? charCast : makeBinary('+', charCast, makeIntLiteral(offset, member), member);
+const call = (name: string, args: Expression[], template: ASTNode): CallExpr =>
+  ({ ...Expr.call(name, args), location: template.location, leadingTrivia: [], trailingTrivia: [] }) as CallExpr;
 
-    // *(<T> *)(<addr>)
-    const typedCast = makeCast(typeName, addr, member);
-    const deref = makeUnary('*', typedCast, member);
-
-    // Preserve the original node's trivia on the produced expression.
+/** A store to a 3-byte piece, written as exactly three bytes. */
+function createThreeByteStoreTransformer(): Transformer {
+  return createKindTransformer(NodeKind.AssignExpr, (node) => {
+    const assign = node as AssignExpr;
+    const piece = subpieceOf(assign.left);
+    if (!piece || piece.size !== 3) return undefined;
+    const addr = pieceAddress(piece.member, piece.offset);
+    let value: Expression;
+    if (assign.operator === '=') {
+      value = stripThreeByteCast(assign.right);
+    } else {
+      // Read-modify-write names the piece twice, so its object must be pure.
+      if (!isPure(piece.member.object)) return undefined;
+      const op = assign.operator.slice(0, -1);
+      value = makeBinary(op, call('d2_load24', [pieceAddress(piece.member, piece.offset)], assign),
+        makeParen(assign.right, assign), assign);
+    }
     return {
-      ...deref,
-      leadingTrivia: member.leadingTrivia,
-      trailingTrivia: member.trailingTrivia,
-    } as UnaryExpr;
+      ...call('d2_store24', [addr, value], assign),
+      leadingTrivia: assign.leadingTrivia,
+      trailingTrivia: assign.trailingTrivia,
+    } as CallExpr;
   });
+}
+
+function createSubpieceReadTransformer(): Transformer {
+  // A read of a 3-byte piece is any position that is not the target of a store, and the
+  // store pass has already removed those. Increments and address-of need an lvalue, which
+  // only the parent can tell: the traversal is bottom-up, so the parent swaps the load it
+  // finds as its operand back for the 4-byte lvalue it was made from.
+  const lvalueOf = new WeakMap<ASTNode, Expression>();
+  return createTransformer({
+    visitNode(node: ASTNode): ASTNode | undefined {
+      if (node.kind === NodeKind.UnaryExpr || node.kind === NodeKind.PostfixExpr) {
+        const u = node as UnaryExpr;
+        const lv = lvalueOf.get(u.operand);
+        if (lv && (node.kind === NodeKind.PostfixExpr || ['&', '++', '--'].includes(u.operator))) {
+          return { ...u, operand: lv } as UnaryExpr;
+        }
+        return undefined;
+      }
+      const piece = subpieceOf(node);
+      if (!piece) return undefined;
+      const { offset, size, member } = piece;
+      const typeName = accessTypeName(size);
+      if (typeName === null) return undefined; // unsupported M — leave unchanged
+
+      // *(<T> *)(<addr>), with the original node's trivia.
+      const deref = {
+        ...makeUnary('*', makeCast(typeName, pieceAddress(member, offset), member), member),
+        leadingTrivia: member.leadingTrivia,
+        trailingTrivia: member.trailingTrivia,
+      } as UnaryExpr;
+      if (size !== 3) return deref;
+
+      const load = {
+        ...call('d2_load24', [pieceAddress(member, offset)], member),
+        leadingTrivia: member.leadingTrivia,
+        trailingTrivia: member.trailingTrivia,
+      } as CallExpr;
+      lvalueOf.set(load, deref);
+      return load;
+    },
+  });
+}
+
+function createSubpieceAccessTransformer(): Transformer {
+  return sequence(createThreeByteStoreTransformer(), createSubpieceReadTransformer());
 }
 
 // ============================================

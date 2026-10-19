@@ -421,6 +421,7 @@ export {
 export {
   subpieceAccessPlugin,
 } from './builtins/subpiece-access.js';
+export { ARTIFACT_SUPPORT_LINES } from './builtins/artifact-support.js';
 
 export { arrayCastAssignPlugin } from './builtins/array-cast-assign.js';
 
