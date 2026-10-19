@@ -196,11 +196,11 @@ describe('writeProject leaves every emitted file on disk', () => {
 
       // Two directory spellings that are one directory on a case-insensitive
       // filesystem, plus a file only the second spelling contains — the exact
-      // shape the prune deleted.
+      // shape the prune deleted. (Two FILES that differ only in case are refused
+      // before writing: on such a disk one overwrites the other; see path-case.test.)
       const paths = [
         'D2Client/GAME/Draw.h',
         'D2Client/GAME/Record.h',
-        'D2Client/Game/Record.h',
         'D2Client/Game/Roster.h',
       ];
 
