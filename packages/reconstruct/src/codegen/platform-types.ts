@@ -1009,7 +1009,8 @@ export function generatePlatformHeader(
   lines.push('typedef int32_t int6;   // 6 bytes — Ghidra artifact');
   lines.push('typedef uint64_t uint6;  // 6 bytes — Ghidra artifact');
   lines.push('typedef int32_t int7;   // 7 bytes — Ghidra artifact');
-  lines.push('typedef uint8_t unkfloat1;  // a 1-byte varnode Ghidra typed as float: a byte, not a value');
+  // No `unkfloat1`: type-normalize spells Ghidra's 1-byte float varnode `uint8_t`, so a
+  // body that still names it fails to compile instead of meaning something else.
   lines.push('typedef uint8_t unkbool1;');
   lines.push('typedef int code(...);  // Ghidra executable code type — code* = callable function pointer');
   lines.push('');
@@ -1028,13 +1029,15 @@ export function generatePlatformHeader(
   // a vendorless CPU and every caller would silently take the wrong branch.
   lines.push('// Ghidra models CPUID as one pseudo-op per leaf, each returning a pointer to');
   lines.push('// the four result registers, read back as *(uint32_t*)(r + 0|4|8|0xc).');
-  lines.push('#if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))');
-  lines.push('#  include <cpuid.h>');
-  lines.push('#endif');
+  // The instruction itself, not GCC's <cpuid.h>: that header defines a 5-argument
+  // `__cpuid` MACRO and mingw's <intrin.h> a 2-argument `__cpuid` FUNCTION, so any TU
+  // that includes both fails to compile. And `__get_cpuid` first checks the leaf
+  // against the CPU's maximum and returns zeroes past it, where the binary's CPUID
+  // returns whatever the processor returns.
   lines.push('static inline int D2_Cpuid(uint32_t nLeaf) {');
   lines.push('  static uint32_t aRegs[4];');
   lines.push('#if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))');
-  lines.push('  __get_cpuid(nLeaf, &aRegs[0], &aRegs[1], &aRegs[2], &aRegs[3]);');
+  lines.push('  __asm__ volatile("cpuid" : "=a"(aRegs[0]), "=b"(aRegs[1]), "=c"(aRegs[2]), "=d"(aRegs[3]) : "a"(nLeaf), "c"(0u));');
   lines.push('#elif defined(_MSC_VER)');
   lines.push('  __cpuid((int*)aRegs, (int)nLeaf);');
   lines.push('#else');
@@ -1316,9 +1319,11 @@ export function generatePlatformHeader(
   lines.push('');
 
 
+  // No pseudo-op has a definition here. pseudo-op-lower spells every one it can as exact
+  // C++; one it cannot is left in the body, reported, and fails to compile, which is the
+  // gate: a definition would compile it into whatever the definition guessed.
   lines.push(...ARTIFACT_SUPPORT_LINES);
   lines.push('');
-  lines.push(...ghidraPseudoOpMacroLines());
 
   // Diablo 2 PRNG (Linear Congruential Generator) macros. These name D2SeedStrc, so
   // they only make sense for a binary that actually has that type.
@@ -1412,8 +1417,15 @@ export function generatePlatformHeader(
   lines.push('#define _fflush fflush');
   lines.push('#define _fgets fgets');
   lines.push('#define _fputs fputs');
+  // `_time64`/`_difftime64` are real CRT entry points on Windows, in msvcrt and UCRT
+  // alike, both declared with `__time64_t`. Mapping them onto `time`/`difftime` made the
+  // header depend on `time_t` being 64-bit, which only UCRT gives a 32-bit target: on
+  // mingw's default msvcrt headers `time_t` is 32 bits and `__time64(__time64_t*)` did not
+  // compile, in every TU. The original was built with a 32-bit `time_t` (VC6).
+  lines.push('#ifndef _WIN32');
   lines.push('#define _time64 time');
   lines.push('#define _difftime64 difftime');
+  lines.push('#endif');
   lines.push('');
 
   // More Win32 file/system APIs
@@ -1863,35 +1875,3 @@ export function platformVoidPointerFunctionNames(): Set<string> {
 }
 
 
-/**
- * The pseudo-op macros `d2_platform.h` still defines: CONCAT only, for an operand
- * pseudo-op-lower could not type and left in place in report mode. Every other pseudo-op
- * is lowered on the AST and deliberately has no definition. Kept as its own block so a
- * test can compile exactly these definitions without the rest of the platform header.
- */
-export function ghidraPseudoOpMacroLines(): string[] {
-  const lines: string[] = [];
-  // Ghidra CONCAT macros (byte concatenation intrinsics)
-  // The type each of these yields is recorded in GHIDRA_PSEUDO_OP_RESULT_TYPES
-  // below; a macro added or rewidened here must be changed there too.
-  lines.push('// Ghidra CONCAT macros — CONCATmn concatenates m-byte and n-byte values');
-  lines.push('#define CONCAT11(a, b) ((uint16_t)(((uint16_t)(uint8_t)(a) << 8) | (uint8_t)(b)))');
-  lines.push('#define CONCAT12(a, b) ((uint32_t)(((uint32_t)(uint8_t)(a) << 16) | (uint16_t)(b)))');
-  lines.push('#define CONCAT13(a, b) ((uint32_t)(((uint32_t)(uint8_t)(a) << 24) | ((uint32_t)(b) & 0xFFFFFF)))');
-  lines.push('#define CONCAT21(a, b) ((uint32_t)(((uint32_t)(uint16_t)(a) << 8) | (uint8_t)(b)))');
-  lines.push('#define CONCAT22(a, b) ((uint32_t)(((uint32_t)(uint16_t)(a) << 16) | (uint16_t)(b)))');
-  lines.push('#define CONCAT31(a, b) ((uint32_t)(((uint32_t)(a) << 8) | (uint8_t)(b)))');
-  lines.push('#define CONCAT44(a, b) ((uint64_t)(((uint64_t)(uint32_t)(a) << 32) | (uint32_t)(b)))');
-  lines.push('#define CONCAT14(a, b) ((uint64_t)(((uint64_t)(uint8_t)(a) << 32) | (uint32_t)(b)))');
-  lines.push('#define CONCAT41(a, b) ((uint64_t)(((uint64_t)(uint32_t)(a) << 8) | (uint8_t)(b)))');
-  lines.push('#define CONCAT24(a, b) ((uint64_t)(((uint64_t)(uint16_t)(a) << 32) | (uint32_t)(b)))');
-  lines.push('#define CONCAT42(a, b) ((uint64_t)(((uint64_t)(uint32_t)(a) << 16) | (uint16_t)(b)))');
-  lines.push('');
-
-  // SUB, ZEXT/SEXT, ZPULL/SPULL, CARRY/SBORROW, ABS, rdtsc and swi are lowered on the
-  // AST by pseudo-op-lower and have no definition here: one that reappears in a body is
-  // a compile error, not a macro that silently means something else. Measured 0 left
-  // outside the excluded CRT on the v1050 snapshot. CONCAT stays because an operand of
-  // unknown type is still left for it in report mode (one site: _g_nLadderFilterMode).
-  return lines;
-}

@@ -16,8 +16,11 @@ export const ARTIFACT_SUPPORT_LINES: readonly string[] = [
   '#if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))',
   '#  include <x86intrin.h>',
   '#endif',
-  '#if defined(_WIN32) && defined(__GNUC__)',
-  '#  include <intrin.h>',
+  // __debugbreak comes with <windows.h> (winnt.h). Not <intrin.h>: beside <windows.h> it
+  // redeclares the 3DNow! intrinsics GCC's <x86intrin.h> declared, and the mingw-w64
+  // headers that do not guard that fail every TU.
+  '#if defined(_WIN32)',
+  '#  include <windows.h>',
   '#endif',
   '#if defined(__FAST_MATH__)',
   '#error "-ffast-math breaks std::isnan and float bit patterns the lowered code relies on"',
