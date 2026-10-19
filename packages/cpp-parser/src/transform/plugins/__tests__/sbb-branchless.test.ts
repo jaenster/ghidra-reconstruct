@@ -36,7 +36,16 @@ void f(S* param_2) {
       assert.ok(result.includes('0x5c3370'), `Expected addr in result:\n${result}`);
       assert.ok(result.includes('nullptr'), `Expected nullptr in result:\n${result}`);
       assert.ok(!result.includes('-('), `Expected no negation:\n${result}`);
-      assert.ok(!result.includes('(uint8_t*)'), `Expected outer cast stripped:\n${result}`);
+      // CHANGED: the outer cast moves onto the selected arm instead of vanishing. It is
+      // the expression's type; dropped, `c ? Fn : nullptr` is an overload set with no
+      // target type wherever Fn names more than one function (D2WinTextBox::Key).
+      assert.ok(result.includes('? (uint8_t*)0x5c3370 : nullptr'), `Expected the cast on the arm:\n${result}`);
+      assert.ok(!result.includes('(uint8_t*)('), `Expected outer cast stripped:\n${result}`);
+    });
+
+    it('keeps the function-pointer type on the arm (D2WinTextBox fpKey @004fc7a0)', () => {
+      const result = transform('void f(D2WinTextBoxStrc* pNew, int nParam) { (pNew->sControl).fpKey = (Key *)(-(uint)((nParam & 1) != 0) & 0x4fc3f0); }');
+      assert.match(result, /\? \(Key\*\)0x4fc3f0 : nullptr/);
     });
 
     it('transforms raw -(uint32_t)(cond) & value without outer cast (uses 0 not nullptr)', () => {

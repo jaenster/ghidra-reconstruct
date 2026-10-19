@@ -246,7 +246,7 @@ function createSbbBranchlessTransformer(): Transformer {
                 : ternary.thenExpr;
             return {
               ...ternary,
-              thenExpr,
+              thenExpr: castArm(cast, thenExpr),
               elseExpr: nullptrNode,
               leadingTrivia: node.leadingTrivia || [],
               trailingTrivia: node.trailingTrivia || [],
@@ -258,7 +258,7 @@ function createSbbBranchlessTransformer(): Transformer {
         if (castIsPointer) {
           const match = detectSbbPattern(inner);
           if (!match) return undefined;
-          return makeTernary(node, match.condition, match.addr, true);
+          return makeTernary(node, match.condition, castArm(cast, match.addr), true);
         }
 
         return undefined;
@@ -267,6 +267,29 @@ function createSbbBranchlessTransformer(): Transformer {
       return undefined;
     },
   });
+}
+
+/**
+ * The selected arm under the pointer cast the whole mask expression had.
+ *
+ * Stripping `(Key *)` off `(Key *)(-(uint)c & 0x4fc3f0)` used to drop the TYPE with it:
+ * `c ? Src::Key : nullptr` once func-ptr-literal names the address, and when three
+ * functions share that name (D2WinTextBox, D2WinTimer and D2WinList each have a `Key`,
+ * all emitted into `D2Win::Src`) the bare name is an overload set with no target type -
+ * "overloaded function with no contextual type information". The cast on the arm keeps
+ * the expression's type and picks the overload, exactly as the original cast did.
+ */
+function castArm(cast: CStyleCastExpr, arm: Expression): Expression {
+  const a = unwrapParens(arm);
+  if (a.kind === NodeKind.CStyleCastExpr && (a as CStyleCastExpr).type.kind === NodeKind.PointerType) return arm;
+  return {
+    kind: NodeKind.CStyleCastExpr,
+    type: cast.type,
+    expression: arm,
+    location: arm.location,
+    leadingTrivia: [],
+    trailingTrivia: [],
+  } as CStyleCastExpr;
 }
 
 function makeTernary(
