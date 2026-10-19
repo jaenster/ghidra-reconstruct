@@ -309,6 +309,15 @@ describe('pseudo-op-lower: what is not lowered', () => {
     transform('void fn(uint8_t b) { r = SUB42(b, 0); }', { onArtifact: r => seen.push(r) });
     assert.match(seen[0]?.reason ?? '', /1 bytes, the operation reads 2/);
   });
+  it('reports a NaN constant, whose bit pattern the text does not carry', () => {
+    // gfGlideDebugFontVertex0ARGB = -NAN; is an ARGB colour; C++ -NAN is 0xFFC00000.
+    const seen: ArtifactRecord[] = [];
+    const out = transform('void fn() { gColour = -NAN; gOow = NAN; x = INFINITY; r = (eStatus)(float)FLOAT_UNKNOWN; }',
+      { onArtifact: r => seen.push(r) });
+    assert.deepStrictEqual(seen.map(s => s.op), ['-NAN', 'NAN', 'FLOAT_UNKNOWN']);
+    assert.ok(out.includes('gColour = -NAN'), out);
+    assert.throws(() => transform('void fn() { gColour = -NAN; }', { mode: 'strict' }), UnlowerableArtifactError);
+  });
   it('renames NAN(x) to D2_IsNaN(x), and leaves the NAN constant alone', () => {
     const out = transform('void fn(double d) { r = NAN(d); q = NAN; }');
     assert.ok(out.includes('D2_IsNaN(d)'), out);

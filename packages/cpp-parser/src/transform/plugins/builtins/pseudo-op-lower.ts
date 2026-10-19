@@ -663,6 +663,53 @@ const STD_SPELLINGS: Record<string, string[]> = {
   ABS: ['std', 'fabs'],
 };
 
+/**
+ * Constants whose value is not in the decompiler's text, so no lowering can be exact:
+ *
+ *   NAN / -NAN       Ghidra prints EVERY NaN bit pattern this way, by sign alone.
+ *                    C++'s NAN is 0x7FC00000; the Glide debug-font ARGB colour Ghidra
+ *                    printed as -NAN is almost certainly 0xFFFFFFFF.
+ *   FLOAT_UNKNOWN    an immediate Ghidra could not type.
+ *   halt_baddata()   data decoded as code.
+ *
+ * They are left as written (the header still defines them) and reported; strict mode
+ * makes each a hard error. The fix is a retype in Ghidra, after which the constant
+ * prints as the integer it is. `INFINITY` has one bit pattern per sign and is exact.
+ */
+function reportValuelessConstants(body: ASTNode, report: (r: ArtifactRecord) => void): void {
+  const walk = (n: unknown, isCallee: boolean, negated: boolean): void => {
+    if (Array.isArray(n)) { for (const x of n) walk(x, false, false); return; }
+    if (n === null || typeof n !== 'object') return;
+    const node = n as Record<string, unknown> & { kind?: NodeKind };
+    if (node.kind === NodeKind.Identifier) {
+      const name = node.name as string;
+      if (name === 'NAN' && !isCallee) {
+        report({ op: negated ? '-NAN' : 'NAN', reason: 'NaN constant: Ghidra prints every NaN bit pattern this way; retype the variable in Ghidra' });
+      } else if (name === 'FLOAT_UNKNOWN') {
+        report({ op: name, reason: 'immediate Ghidra could not type; the value is not in the decompiler output' });
+      } else if (name === 'halt_baddata' && isCallee) {
+        report({ op: name, reason: 'data decoded as code' });
+      }
+      return;
+    }
+    if (node.kind === NodeKind.CallExpr) {
+      walk(node.callee, true, false);
+      walk(node.arguments, false, false);
+      return;
+    }
+    if (node.kind === NodeKind.UnaryExpr && node.operator === '-') {
+      walk(node.operand, false, true);
+      return;
+    }
+    if (node.kind === NodeKind.ParenExpr) { walk(node.expression, false, negated); return; }
+    for (const [k, v] of Object.entries(node)) {
+      if (k === 'location' || k === 'leadingTrivia' || k === 'trailingTrivia') continue;
+      if (v && typeof v === 'object') walk(v, false, false);
+    }
+  };
+  walk(body, false, false);
+}
+
 function createPseudoOpLowerTransformer(options: PseudoOpLowerOptions = {}): Transformer {
   const mode: ArtifactMode = options.mode ?? 'report';
   const report = (record: ArtifactRecord) => {
@@ -794,6 +841,7 @@ function createPseudoOpLowerTransformer(options: PseudoOpLowerOptions = {}): Tra
         return { ...lowered, leadingTrivia: call.leadingTrivia, trailingTrivia: call.trailingTrivia } as Expression;
       },
     });
+    reportValuelessConstants(body, report);
     return lower(fold(['==', '!='])(fold(['||', '&&'])(body)));
   };
 
