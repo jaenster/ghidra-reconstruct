@@ -1371,101 +1371,7 @@ export function generatePlatformHeader(
   lines.push('');
 
 
-  // Ghidra CONCAT macros (byte concatenation intrinsics)
-  // The type each of these yields is recorded in GHIDRA_PSEUDO_OP_RESULT_TYPES
-  // below; a macro added or rewidened here must be changed there too.
-  lines.push('// Ghidra CONCAT macros — CONCATmn concatenates m-byte and n-byte values');
-  lines.push('#define CONCAT11(a, b) ((uint16_t)(((uint16_t)(uint8_t)(a) << 8) | (uint8_t)(b)))');
-  lines.push('#define CONCAT12(a, b) ((uint32_t)(((uint32_t)(uint8_t)(a) << 16) | (uint16_t)(b)))');
-  lines.push('#define CONCAT13(a, b) ((uint32_t)(((uint32_t)(uint8_t)(a) << 24) | ((uint32_t)(b) & 0xFFFFFF)))');
-  lines.push('#define CONCAT21(a, b) ((uint32_t)(((uint32_t)(uint16_t)(a) << 8) | (uint8_t)(b)))');
-  lines.push('#define CONCAT22(a, b) ((uint32_t)(((uint32_t)(uint16_t)(a) << 16) | (uint16_t)(b)))');
-  lines.push('#define CONCAT31(a, b) ((uint32_t)(((uint32_t)(a) << 8) | (uint8_t)(b)))');
-  lines.push('#define CONCAT44(a, b) ((uint64_t)(((uint64_t)(uint32_t)(a) << 32) | (uint32_t)(b)))');
-  lines.push('#define CONCAT14(a, b) ((uint64_t)(((uint64_t)(uint8_t)(a) << 32) | (uint32_t)(b)))');
-  lines.push('#define CONCAT41(a, b) ((uint64_t)(((uint64_t)(uint32_t)(a) << 8) | (uint8_t)(b)))');
-  lines.push('#define CONCAT24(a, b) ((uint64_t)(((uint64_t)(uint16_t)(a) << 32) | (uint32_t)(b)))');
-  lines.push('#define CONCAT42(a, b) ((uint64_t)(((uint64_t)(uint32_t)(a) << 16) | (uint16_t)(b)))');
-  lines.push('');
-
-  // Ghidra SUB macros (byte extraction — SUBmn extracts n bytes at position from m-byte value)
-  lines.push('// Ghidra SUB macros — SUBmn extracts n-byte sub-value from m-byte value');
-  lines.push('#define SUB41(x, n) ((uint8_t)((uint32_t)(x) >> ((n) * 8)))');
-  lines.push('#define SUB42(x, n) ((uint16_t)((uint32_t)(x) >> ((n) * 8)))');
-  lines.push('#define SUB43(x, n) ((uint32_t)((uint32_t)(x) >> ((n) * 8)))');
-  lines.push('#define SUB84(x, n) ((uint32_t)((uint64_t)(x) >> ((n) * 8)))');
-  lines.push('#define SUB82(x, n) ((uint16_t)((uint64_t)(x) >> ((n) * 8)))');
-  lines.push('#define SUB81(x, n) ((uint8_t)((uint64_t)(x) >> ((n) * 8)))');
-  lines.push('#define SUB21(x, n) ((uint8_t)((uint16_t)(x) >> ((n) * 8)))');
-  lines.push('#define SUB14(x, n) ((uint8_t)((uint32_t)(x) >> ((n) * 8)))');
-  lines.push('');
-
-  // Ghidra zero/sign extension macros
-  lines.push('// Ghidra zero/sign extension macros');
-  lines.push('#define ZEXT14(x) ((uint32_t)(uint8_t)(x))');
-  lines.push('#define ZEXT24(x) ((uint32_t)(uint16_t)(x))');
-  lines.push('#define ZEXT48(x) ((uint64_t)(uint32_t)(x))');
-  lines.push('#define SEXT14(x) ((int32_t)(int8_t)(x))');
-  lines.push('#define SEXT24(x) ((int32_t)(int16_t)(x))');
-  lines.push('#define SEXT48(x) ((int64_t)(int32_t)(x))');
-  lines.push('');
-
-  // Ghidra bit-range extraction. `ZPULL`/`SPULL` are the decompiler's own ops
-  // (Ghidra `additionalpcode`: CPUI_ZPULL / CPUI_SPULL): pull `nBits` bits out of
-  // a value starting at `nPos`, with the bits of the operand numbered from the
-  // LEAST significant, starting at 0. ZPULL zero-extends what it pulled, SPULL
-  // sign-extends it from the top bit pulled — which is the only difference
-  // between them, and the reason both spellings exist. They appear where the
-  // masked field is NOT a declared bitfield: `SPULL(bySkillFlags, 5, 1)` is the
-  // `TEST` against a 0x20 mask that `pSkill->pRecord->InGame` would have been
-  // had the struct declared bit 5 as a member.
-  lines.push('// Ghidra bit-range extraction (ZPULL/SPULL pseudo-ops): bits [nPos, nPos+nBits)');
-  lines.push('static inline uint32_t ZPULL(uint64_t nValue, int nPos, int nBits) {');
-  lines.push('  uint64_t nMask = (nBits >= 64) ? ~(uint64_t)0 : (((uint64_t)1 << nBits) - 1);');
-  lines.push('  return (uint32_t)((nValue >> nPos) & nMask);');
-  lines.push('}');
-  lines.push('static inline int32_t SPULL(uint64_t nValue, int nPos, int nBits) {');
-  lines.push('  uint32_t nSign = (uint32_t)1 << (nBits - 1);');
-  lines.push('  uint32_t nRaw = ZPULL(nValue, nPos, nBits);');
-  lines.push('  return (int32_t)((nRaw ^ nSign) - nSign);');
-  lines.push('}');
-  lines.push('');
-
-  // Ghidra pseudo-operations — instructions the decompiler cannot express in C
-  // and calls out by name instead. They reach bodies exactly as written, so they
-  // need a definition, not a declaration; each is what the instruction does.
-  lines.push('// Ghidra pseudo-operations (instructions with no C spelling)');
-  lines.push('#define ABS(x) ((x) < 0 ? -(x) : (x))');
-  lines.push('static inline uint64_t rdtsc(void) {');
-  lines.push('#if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))');
-  lines.push('  uint32_t nLow, nHigh;');
-  lines.push('  __asm__ __volatile__("rdtsc" : "=a"(nLow), "=d"(nHigh));');
-  lines.push('  return ((uint64_t)nHigh << 32) | nLow;');
-  lines.push('#else');
-  lines.push('  return 0;');
-  lines.push('#endif');
-  lines.push('}');
-  lines.push('// `swi(n)` is INT n. Ghidra models it as returning the handler address the');
-  lines.push('// body then calls; there is no such value at runtime, so the trap is raised');
-  lines.push('// and a null handler returned rather than pretending otherwise.');
-  lines.push('static inline void* swi(int nVector) {');
-  lines.push('#if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))');
-  lines.push('  if (nVector == 3) __asm__ __volatile__("int3");');
-  lines.push('#else');
-  lines.push('  (void)nVector;');
-  lines.push('#endif');
-  lines.push('  return nullptr;');
-  lines.push('}');
-  lines.push('');
-
-  // Ghidra carry/borrow detection macros
-  lines.push('// Ghidra carry/borrow detection');
-  lines.push('#define CARRY4(a, b) ((uint32_t)(a) + (uint32_t)(b) < (uint32_t)(a))');
-  lines.push('#define CARRY2(a, b) ((uint16_t)(a) + (uint16_t)(b) < (uint16_t)(a))');
-  lines.push('#define CARRY1(a, b) ((uint8_t)(a) + (uint8_t)(b) < (uint8_t)(a))');
-  lines.push('#define SBORROW4(a, b) ((int32_t)((uint32_t)(a) ^ (uint32_t)(b)) < 0 && (int32_t)((uint32_t)(a) ^ ((uint32_t)(a) - (uint32_t)(b))) < 0)');
-  lines.push('#define SBORROW2(a, b) ((int16_t)((uint16_t)(a) ^ (uint16_t)(b)) < 0 && (int16_t)((uint16_t)(a) ^ ((uint16_t)(a) - (uint16_t)(b))) < 0)');
-  lines.push('');
+  lines.push(...ghidraPseudoOpMacroLines());
 
   // Diablo 2 PRNG (Linear Congruential Generator) macros. These name D2SeedStrc, so
   // they only make sense for a binary that actually has that type.
@@ -2007,4 +1913,113 @@ export function platformVoidPointerFunctionNames(): Set<string> {
     }
   }
   return names;
+}
+
+
+/**
+ * The pseudo-op macros `d2_platform.h` defines: the decompiler operations (CONCAT, SUB,
+ * ZEXT/SEXT, ZPULL/SPULL, the carry and borrow flags and the other instructions with no
+ * C spelling) that reach a body unlowered. Kept as its own block so a test can compile
+ * exactly these definitions without the rest of the platform header.
+ */
+export function ghidraPseudoOpMacroLines(): string[] {
+  const lines: string[] = [];
+  // Ghidra CONCAT macros (byte concatenation intrinsics)
+  // The type each of these yields is recorded in GHIDRA_PSEUDO_OP_RESULT_TYPES
+  // below; a macro added or rewidened here must be changed there too.
+  lines.push('// Ghidra CONCAT macros — CONCATmn concatenates m-byte and n-byte values');
+  lines.push('#define CONCAT11(a, b) ((uint16_t)(((uint16_t)(uint8_t)(a) << 8) | (uint8_t)(b)))');
+  lines.push('#define CONCAT12(a, b) ((uint32_t)(((uint32_t)(uint8_t)(a) << 16) | (uint16_t)(b)))');
+  lines.push('#define CONCAT13(a, b) ((uint32_t)(((uint32_t)(uint8_t)(a) << 24) | ((uint32_t)(b) & 0xFFFFFF)))');
+  lines.push('#define CONCAT21(a, b) ((uint32_t)(((uint32_t)(uint16_t)(a) << 8) | (uint8_t)(b)))');
+  lines.push('#define CONCAT22(a, b) ((uint32_t)(((uint32_t)(uint16_t)(a) << 16) | (uint16_t)(b)))');
+  lines.push('#define CONCAT31(a, b) ((uint32_t)(((uint32_t)(a) << 8) | (uint8_t)(b)))');
+  lines.push('#define CONCAT44(a, b) ((uint64_t)(((uint64_t)(uint32_t)(a) << 32) | (uint32_t)(b)))');
+  lines.push('#define CONCAT14(a, b) ((uint64_t)(((uint64_t)(uint8_t)(a) << 32) | (uint32_t)(b)))');
+  lines.push('#define CONCAT41(a, b) ((uint64_t)(((uint64_t)(uint32_t)(a) << 8) | (uint8_t)(b)))');
+  lines.push('#define CONCAT24(a, b) ((uint64_t)(((uint64_t)(uint16_t)(a) << 32) | (uint32_t)(b)))');
+  lines.push('#define CONCAT42(a, b) ((uint64_t)(((uint64_t)(uint32_t)(a) << 16) | (uint16_t)(b)))');
+  lines.push('');
+
+  // Ghidra SUB macros (byte extraction — SUBmn extracts n bytes at position from m-byte value)
+  lines.push('// Ghidra SUB macros — SUBmn extracts n-byte sub-value from m-byte value');
+  lines.push('#define SUB41(x, n) ((uint8_t)((uint32_t)(x) >> ((n) * 8)))');
+  lines.push('#define SUB42(x, n) ((uint16_t)((uint32_t)(x) >> ((n) * 8)))');
+  lines.push('#define SUB43(x, n) ((uint32_t)((uint32_t)(x) >> ((n) * 8)))');
+  lines.push('#define SUB84(x, n) ((uint32_t)((uint64_t)(x) >> ((n) * 8)))');
+  lines.push('#define SUB82(x, n) ((uint16_t)((uint64_t)(x) >> ((n) * 8)))');
+  lines.push('#define SUB81(x, n) ((uint8_t)((uint64_t)(x) >> ((n) * 8)))');
+  lines.push('#define SUB21(x, n) ((uint8_t)((uint16_t)(x) >> ((n) * 8)))');
+  lines.push('#define SUB14(x, n) ((uint8_t)((uint32_t)(x) >> ((n) * 8)))');
+  lines.push('');
+
+  // Ghidra zero/sign extension macros
+  lines.push('// Ghidra zero/sign extension macros');
+  lines.push('#define ZEXT14(x) ((uint32_t)(uint8_t)(x))');
+  lines.push('#define ZEXT24(x) ((uint32_t)(uint16_t)(x))');
+  lines.push('#define ZEXT48(x) ((uint64_t)(uint32_t)(x))');
+  lines.push('#define SEXT14(x) ((int32_t)(int8_t)(x))');
+  lines.push('#define SEXT24(x) ((int32_t)(int16_t)(x))');
+  lines.push('#define SEXT48(x) ((int64_t)(int32_t)(x))');
+  lines.push('');
+
+  // Ghidra bit-range extraction. `ZPULL`/`SPULL` are the decompiler's own ops
+  // (Ghidra `additionalpcode`: CPUI_ZPULL / CPUI_SPULL): pull `nBits` bits out of
+  // a value starting at `nPos`, with the bits of the operand numbered from the
+  // LEAST significant, starting at 0. ZPULL zero-extends what it pulled, SPULL
+  // sign-extends it from the top bit pulled — which is the only difference
+  // between them, and the reason both spellings exist. They appear where the
+  // masked field is NOT a declared bitfield: `SPULL(bySkillFlags, 5, 1)` is the
+  // `TEST` against a 0x20 mask that `pSkill->pRecord->InGame` would have been
+  // had the struct declared bit 5 as a member.
+  lines.push('// Ghidra bit-range extraction (ZPULL/SPULL pseudo-ops): bits [nPos, nPos+nBits)');
+  lines.push('static inline uint32_t ZPULL(uint64_t nValue, int nPos, int nBits) {');
+  lines.push('  uint64_t nMask = (nBits >= 64) ? ~(uint64_t)0 : (((uint64_t)1 << nBits) - 1);');
+  lines.push('  return (uint32_t)((nValue >> nPos) & nMask);');
+  lines.push('}');
+  lines.push('static inline int32_t SPULL(uint64_t nValue, int nPos, int nBits) {');
+  lines.push('  uint32_t nSign = (uint32_t)1 << (nBits - 1);');
+  lines.push('  uint32_t nRaw = ZPULL(nValue, nPos, nBits);');
+  lines.push('  return (int32_t)((nRaw ^ nSign) - nSign);');
+  lines.push('}');
+  lines.push('');
+
+  // Ghidra pseudo-operations — instructions the decompiler cannot express in C
+  // and calls out by name instead. They reach bodies exactly as written, so they
+  // need a definition, not a declaration; each is what the instruction does.
+  lines.push('// Ghidra pseudo-operations (instructions with no C spelling)');
+  lines.push('#define ABS(x) ((x) < 0 ? -(x) : (x))');
+  lines.push('static inline uint64_t rdtsc(void) {');
+  lines.push('#if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))');
+  lines.push('  uint32_t nLow, nHigh;');
+  lines.push('  __asm__ __volatile__("rdtsc" : "=a"(nLow), "=d"(nHigh));');
+  lines.push('  return ((uint64_t)nHigh << 32) | nLow;');
+  lines.push('#else');
+  lines.push('  return 0;');
+  lines.push('#endif');
+  lines.push('}');
+  lines.push('// `swi(n)` is INT n. Ghidra models it as returning the handler address the');
+  lines.push('// body then calls; there is no such value at runtime, so the trap is raised');
+  lines.push('// and a null handler returned rather than pretending otherwise.');
+  lines.push('static inline void* swi(int nVector) {');
+  lines.push('#if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))');
+  lines.push('  if (nVector == 3) __asm__ __volatile__("int3");');
+  lines.push('#else');
+  lines.push('  (void)nVector;');
+  lines.push('#endif');
+  lines.push('  return nullptr;');
+  lines.push('}');
+  lines.push('');
+
+  // Ghidra carry/borrow detection macros
+  lines.push('// Ghidra carry/borrow detection');
+  // The sum is cast back to the operand width before the compare: a 1- or 2-byte add
+  // promotes to int and never wraps, so without the cast the carry is never seen.
+  lines.push('#define CARRY4(a, b) ((uint32_t)((uint32_t)(a) + (uint32_t)(b)) < (uint32_t)(a))');
+  lines.push('#define CARRY2(a, b) ((uint16_t)((uint16_t)(a) + (uint16_t)(b)) < (uint16_t)(a))');
+  lines.push('#define CARRY1(a, b) ((uint8_t)((uint8_t)(a) + (uint8_t)(b)) < (uint8_t)(a))');
+  lines.push('#define SBORROW4(a, b) ((int32_t)((uint32_t)(a) ^ (uint32_t)(b)) < 0 && (int32_t)((uint32_t)(a) ^ ((uint32_t)(a) - (uint32_t)(b))) < 0)');
+  lines.push('#define SBORROW2(a, b) ((int16_t)((uint16_t)(a) ^ (uint16_t)(b)) < 0 && (int16_t)((uint16_t)(a) ^ ((uint16_t)(a) - (uint16_t)(b))) < 0)');
+  lines.push('');
+  return lines;
 }
