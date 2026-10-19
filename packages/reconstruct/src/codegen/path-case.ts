@@ -87,7 +87,11 @@ export async function alignPathCase(root: string, relPaths: Iterable<string>): P
     // are real and neither is this path's stale spelling.
     if (stale.length !== 1) continue;
     const from = parent ? `${parent}/${stale[0]}` : stale[0];
-    await fs.rename(path.join(root, from), path.join(root, rel));
+    // Through a temporary name: a rename that changes only case is a no-op on some
+    // case-insensitive filesystems (it was on the container's mount of the macOS disk).
+    const tmp = path.join(root, `${from}.case-rename-${process.pid}`);
+    await fs.rename(path.join(root, from), tmp);
+    await fs.rename(tmp, path.join(root, rel));
     entries[entries.indexOf(stale[0])] = name;
     renames.push(`${from} -> ${rel}`);
   }
