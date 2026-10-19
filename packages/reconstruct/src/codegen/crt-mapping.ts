@@ -473,22 +473,25 @@ const CRT_FORWARDERS: ExcludedSymbolDecl[] = [
  * ground truth there is, since none of these are declared by any public header.
  */
 const MSVC_RUNTIME_DECLS: ExcludedSymbolDecl[] = [
-  // __CxxFrameHandler3 @ 0068333c — Ghidra:
-  //   undefined4 (EHExceptionRecord*, EHRegistrationNode*, _CONTEXT*, void*)
+  // __CxxFrameHandler3 @ 0068333c — Ghidra (v1096):
+  //   undefined4 (EHExceptionRecord*, EHRegistrationNode*, _CONTEXT*, void*, _s_FuncInfo*)
+  // The fifth argument is the FuncInfo MSVC's `__ehhandler$` thunk loads into EAX; every
+  // handler body passes it.
   { emitted: 'FID_conflict____CxxFrameHandler3', real: '__CxxFrameHandler3', source: 'ghidra',
-    decl: 'extern "C" uint32_t FID_conflict____CxxFrameHandler3(EHExceptionRecord* pExceptionRecord, EHRegistrationNode* pRegistrationNode, CONTEXT* pContext, void* pDispatcherContext);' },
+    decl: 'extern "C" uint32_t FID_conflict____CxxFrameHandler3(EHExceptionRecord* pExceptionRecord, EHRegistrationNode* pRegistrationNode, CONTEXT* pContext, void* pDispatcherContext, struct _s_FuncInfo* pFuncInfo);' },
   // __except_handler4 @ 00684f50 — Ghidra: undefined4 (int*, PVOID, undefined4)
   { emitted: '__except_handler4', real: '_except_handler4', source: 'ghidra',
     decl: 'extern "C" uint32_t __except_handler4(int* pRecord, void* pRegistration, uint32_t dwContext);' },
   // __global_unwind2 @ 00697f74 — Ghidra: undefined (PVOID)
   { emitted: '__global_unwind2', real: '_global_unwind2', source: 'ghidra',
     decl: 'extern "C" void __global_unwind2(void* pRegistration);' },
-  // __local_unwind2 @ 00697fd9 — Ghidra: undefined (int, uint)
+  // __local_unwind2 @ 00697fd9 — Ghidra (v1096): void (int, uint, void* pFrame)
   { emitted: '__local_unwind2', real: '_local_unwind2', source: 'ghidra',
-    decl: 'extern "C" void __local_unwind2(int nRegistration, uint32_t nStop);' },
-  // __NLG_Notify @ 00698089 — Ghidra: void (ulong), __stdcall
+    decl: 'extern "C" void __local_unwind2(int nRegistration, uint32_t nStop, void* pFrame);' },
+  // __NLG_Notify @ 00698089 — Ghidra (v1096): void (ulong, undefined4 pTarget, void* pFrame),
+  // __stdcall_noclobber
   { emitted: '__NLG_Notify', real: '_NLG_Notify', source: 'ghidra',
-    decl: 'extern "C" void __NLG_Notify(unsigned long nCode);' },
+    decl: 'extern "C" void __NLG_Notify(unsigned long nCode, uint32_t pTarget, void* pFrame);' },
   // __ValidateEH3RN @ 00698170 — Ghidra: undefined4 (void*)
   { emitted: '__ValidateEH3RN', real: '_ValidateEH3RN', source: 'ghidra',
     decl: 'extern "C" uint32_t __ValidateEH3RN(void* pRegistration);' },
@@ -515,19 +518,21 @@ const MSVC_RUNTIME_DECLS: ExcludedSymbolDecl[] = [
   // pass nothing; both agree, so the declaration is exact for this binary.
   { emitted: '__ftol2', real: '_ftol2', source: 'ghidra',
     decl: 'extern "C" uint64_t __ftol2(void);' },
-  // __CIsqrt @ 006879c0 — Ghidra: undefined (void); x87-stack argument, as above.
+  // __CIsqrt @ 006879c0 — Ghidra (v1096): float10 (float10 x), __stdcall_x87safe. The
+  // operand is the x87 ST0 the prototype now names, and every call site passes it.
   { emitted: '__CIsqrt', real: '_CIsqrt', source: 'ghidra',
-    decl: 'extern "C" double __CIsqrt(void);' },
+    decl: 'extern "C" long double __CIsqrt(long double x);' },
   // __sqrt_common @ 006879dd — Ghidra: uint (int, uint). The double arrives split
   // across two stack dwords. There is no third argument: the function opens with
   // `PUSH EDX; FSTCW word ptr [ESP]`, so the push reserves four bytes for the FPU
   // control word and EDX's value is never read.
   { emitted: '__sqrt_common', real: '_sqrt_common', source: 'ghidra',
     decl: 'extern "C" uint32_t __sqrt_common(int nMantissaLo, uint32_t nMantissaHi);' },
-  // __aulldvrm @ 00686b60 — unsigned 64/64 divide-and-remainder, four dword args.
-  // Matches the existing __alldvrm/__aulldiv inlines below in this header.
+  // __aulldvrm @ 00686b60 — Ghidra (v1096): LLDVRM_RESULT (uint, uint, uint, uint). Unsigned
+  // 64/64 divide AND remainder: the quotient in EDX:EAX, the remainder in EBX:ECX, which
+  // Ghidra models as the two-field LLDVRM_RESULT (defined with the 64-bit intrinsics).
   { emitted: '__aulldvrm', real: '_aulldvrm', source: 'ghidra',
-    decl: 'static inline uint64_t __aulldvrm(uint32_t lo1, uint32_t hi1, uint32_t lo2, uint32_t hi2) { return (lo1 | ((uint64_t)hi1 << 32)) / (lo2 | ((uint64_t)hi2 << 32)); }' },
+    decl: 'static inline LLDVRM_RESULT __aulldvrm(uint32_t lo1, uint32_t hi1, uint32_t lo2, uint32_t hi2) { uint64_t a = lo1 | ((uint64_t)hi1 << 32), b = lo2 | ((uint64_t)hi2 << 32); LLDVRM_RESULT r; r.qwQuotient = a / b; r.qwRemainder = a % b; return r; }' },
   // CRT_Pow @ 00683080 — Ghidra: float10 (double)
   { emitted: 'CRT_Pow', real: 'pow', source: 'ghidra',
     decl: 'extern "C" long double CRT_Pow(double x);' },
@@ -977,4 +982,64 @@ export function generateExcludedSymbolDecls(): string[] {
   }
   lines.push('');
   return lines;
+}
+
+/** Parameters a declaration text declares for `identifier`, or undefined if unreadable. */
+function declaredArity(decl: string, identifier: string): number | undefined {
+  const at = decl.search(new RegExp(`\\b${identifier.replace(/[$]/g, '\\$&')}\\s*\\(`));
+  if (at === -1) return undefined;
+  let i = decl.indexOf('(', at) + 1;
+  const start = i;
+  let depth = 1;
+  let commas = 0;
+  for (; i < decl.length && depth > 0; i++) {
+    const c = decl[i];
+    if (c === '(' || c === '<' || c === '[') depth++;
+    else if (c === ')' || c === '>' || c === ']') depth--;
+    else if (c === ',' && depth === 1) commas++;
+  }
+  if (depth !== 0) return undefined;
+  const inner = decl.slice(start, i - 1).trim();
+  if (inner === '' || inner === 'void') return 0;
+  if (inner.includes('...')) return undefined;
+  return commas + 1;
+}
+
+export interface GhidraDeclDrift {
+  emitted: string;
+  address: string;
+  declArity: number;
+  ghidraArity: number;
+}
+
+/**
+ * `source: 'ghidra'` declarations whose parameter count no longer matches the program.
+ *
+ * Those entries are COPIES of a Ghidra prototype, and the program moves under them: at
+ * v1096 `__CIsqrt` had gained its x87 operand, `__local_unwind2` and `__NLG_Notify` their
+ * frame pointer and `__CxxFrameHandler3` its FuncInfo, and every call site Ghidra printed
+ * with the new arity failed "too many arguments" against the stale copy. Nothing else
+ * compares the two, so the run says so instead of the compiler, one error per call site.
+ */
+export function ghidraDeclDrift(
+  functions: ReadonlyArray<{ name: string; address: string; parameters?: ReadonlyArray<unknown>; hasVarArgs?: boolean }>,
+): GhidraDeclDrift[] {
+  const bySpelling = new Map<string, typeof functions[number][]>();
+  for (const f of functions) {
+    const spelling = f.name.replace(/[^A-Za-z0-9_]/g, '_');
+    const list = bySpelling.get(spelling);
+    if (list) list.push(f); else bySpelling.set(spelling, [f]);
+  }
+  const drift: GhidraDeclDrift[] = [];
+  for (const d of EXCLUDED_SYMBOL_DECLS) {
+    if (d.source !== 'ghidra') continue;
+    const declArity = declaredArity(d.decl, declaredIdentifier(d));
+    if (declArity === undefined) continue;
+    for (const f of bySpelling.get(d.emitted) ?? []) {
+      if (f.hasVarArgs) continue;
+      const ghidraArity = f.parameters?.length ?? 0;
+      if (ghidraArity !== declArity) drift.push({ emitted: d.emitted, address: f.address, declArity, ghidraArity });
+    }
+  }
+  return drift;
 }

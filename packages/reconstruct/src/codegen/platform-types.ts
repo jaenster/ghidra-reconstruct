@@ -1354,7 +1354,11 @@ export function generatePlatformHeader(
   lines.push('static inline int64_t __allmul(uint32_t lo1, uint32_t hi1, uint32_t lo2, uint32_t hi2) { return (int64_t)(lo1 | ((uint64_t)hi1 << 32)) * (int64_t)(lo2 | ((uint64_t)hi2 << 32)); }');
   lines.push('static inline int64_t __allrem(int64_t a, int64_t b) { return a % b; }');
   lines.push('static inline int64_t __allrem(uint32_t lo1, uint32_t hi1, uint32_t lo2, int hi2) { return (int64_t)(lo1 | ((uint64_t)hi1 << 32)) % (int64_t)(lo2 | ((uint64_t)(uint32_t)hi2 << 32)); }');
-  lines.push('static inline int64_t __alldvrm(uint32_t lo1, uint32_t hi1, uint32_t lo2, int hi2) { return (int64_t)(lo1 | ((uint64_t)hi1 << 32)) / (int64_t)(lo2 | ((uint64_t)(uint32_t)hi2 << 32)); }');
+  // __alldvrm / __aulldvrm return quotient AND remainder (EDX:EAX and EBX:ECX); Ghidra's
+  // /compiler/LLDVRM_RESULT is that pair. The /compiler category is not extracted, so the
+  // type the two helpers return is defined here, beside them.
+  lines.push('struct LLDVRM_RESULT { uint64_t qwQuotient; uint64_t qwRemainder; };');
+  lines.push('static inline LLDVRM_RESULT __alldvrm(uint32_t lo1, uint32_t hi1, uint32_t lo2, uint32_t hi2) { int64_t a = (int64_t)(lo1 | ((uint64_t)hi1 << 32)), b = (int64_t)(lo2 | ((uint64_t)hi2 << 32)); LLDVRM_RESULT r; r.qwQuotient = (uint64_t)(a / b); r.qwRemainder = (uint64_t)(a % b); return r; }');
   lines.push('static inline int64_t __allshr(int64_t a, int n) { return a >> n; }');
   lines.push('static inline int64_t __allshl(int64_t a, int n) { return a << n; }');
   lines.push('static inline uint64_t __aulldiv(uint64_t a, uint64_t b) { return a / b; }');
@@ -1484,6 +1488,7 @@ export function generatePlatformHeader(
   // they appear only as parameter types of the EH personality routine below.
   lines.push('// MSVC C++ EH frame types (opaque — only ever used through a pointer)');
   lines.push('struct EHExceptionRecord;');
+  lines.push('struct _s_FuncInfo;');
   lines.push('struct EHRegistrationNode;');
   lines.push('');
 

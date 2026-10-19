@@ -84,7 +84,7 @@ import { partitionGlobalsByModule, buildFunctionModuleMap } from './globals-part
 import { normalizeAddress } from '../config/loader.js';
 import { resolveTargets, getTargetDirectory, type ResolvedTarget } from '../targets/index.js';
 import { generateStubsHeader } from '../targets/stubs.js';
-import { collectCrtHeaders, EXCLUDED_SYMBOL_DECLS, declaredIdentifier, WIN32_ZERO_ARITY_CALLBACK_SLOTS, WIN32_ZERO_ARITY_CALLBACK_CASTS, WIN32_OVERLOADED_INTRINSICS, WIN32_GENERIC_HANDLE_RETURNS, HEADER_DECLARED_SIGNATURES } from './crt-mapping.js';
+import { collectCrtHeaders, EXCLUDED_SYMBOL_DECLS, declaredIdentifier, WIN32_ZERO_ARITY_CALLBACK_SLOTS, WIN32_ZERO_ARITY_CALLBACK_CASTS, WIN32_OVERLOADED_INTRINSICS, WIN32_GENERIC_HANDLE_RETURNS, HEADER_DECLARED_SIGNATURES, ghidraDeclDrift } from './crt-mapping.js';
 import { selectExclusionEmissions, setPlatformDefinedNames, setPlatformDeclaredNames, collectReferencedNames, mayReferenceNamespaces } from './exclusion-closure.js';
 import { normalizePointerSizeSpellings } from './pointer-size-spelling.js';
 import { flattenTemplateNames } from './template-names.js';
@@ -574,6 +574,11 @@ export function generateProjectStage1(
 ): GenerationState {
   const genT0 = Date.now();
   beginShard(shard);
+  if (!shard || shard.index === 0) {
+    for (const d of ghidraDeclDrift(functions)) {
+      console.warn(`[decl-drift] ${d.emitted} @${d.address}: d2_platform.h declares ${d.declArity} parameter(s), Ghidra has ${d.ghidraArity} — update crt-mapping.ts`);
+    }
+  }
   let stageTypeOwnerMap = new Map<string, string>();
   let stageGlobalsPath: string | undefined;
   const files = new Map<string, SourceFile>();
