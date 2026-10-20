@@ -14,6 +14,7 @@ import { computeDeclarationClosure, renderClosureBlock, renderClosureDefinitionB
 import { allOnesSentinel, negativeBytePatternInUnsignedSlot, negativeInUnsignedSlot } from './sentinel-literal.js';
 import { enumTypedefLine } from './enum-width.js';
 import { addressLiteralFloor, ADDRESS_LITERAL_CEILING } from '@ghidra-mcp/cpp-parser';
+import { scanReferences } from './needle-index.js';
 
 /**
  * Exact Win32 SDK typedef names (not `LP`/`IMAGE_` prefixed) seen as
@@ -91,6 +92,11 @@ function makeLibraryTypeSkipPredicate(
  * defines symbols whose type no TU can see.
  */
 function isEmittableGlobal(g: AnalyzedDataSymbol): boolean {
+  // An import slot no body names is not program data (markUnnamedImportSlots), and
+  // neither is a placeholder at an unmapped address: bodies lower those to volatile
+  // accesses at the address, and the definitions already drop them.
+  if (g.importSlotUnnamed === true) return false;
+  if (isUnmappedAddressPlaceholder(g.suggestedName || g.name)) return false;
   const base = (g.suggestedType || g.dataType || '')
     .replace(/[*&]/g, '').replace(/\bconst\b/g, '').replace(/\[[^\]]*\]/g, '').trim();
   return !isMsvcEhInternal(base);
@@ -104,6 +110,43 @@ function isEmittableGlobal(g: AnalyzedDataSymbol): boolean {
  * TU could see declared — including `Alignment LAB_00687d4a = align(1);`, which
  * is padding, not a variable. The two sets must be the same set.
  */
+/**
+ * Import address table slots (`PTR_FreeSid_006cc044 -> ADVAPI32.DLL::FreeSid`) that no
+ * function's decompiled body names. The code calls the import by name, so a `void *`
+ * global for the slot is not program data: its "value" in the image is the hint/name RVA
+ * the loader overwrites (`(void*)0x00302d16`), which nothing should ever read. A slot a
+ * body does name (read as data) keeps its declaration. Marked before generation, so the
+ * declaration, the definition and any file-local demotion all see the same answer.
+ * Returns how many were marked.
+ */
+export function markUnnamedImportSlots(
+  globals: AnalyzedDataSymbol[], functions: ReadonlyArray<{ name: string; namespace?: string | null; decompiled?: string }>,
+): number {
+  const slots = globals.filter(g => g.importSlot);
+  if (slots.length === 0) return 0;
+  const byQualified = new Map<string, { decompiled?: string }>();
+  for (const f of functions) byQualified.set(f.namespace ? `${f.namespace}::${f.name}` : f.name, f);
+  const lexed = new Map<string, Set<string>>();
+  const identifiersOf = (qname: string): Set<string> | null => {
+    const hit = lexed.get(qname);
+    if (hit) return hit;
+    const f = byQualified.get(qname);
+    if (!f) return null;
+    const ids = scanReferences(f.decompiled ?? '').identifiers;
+    lexed.set(qname, ids);
+    return ids;
+  };
+  let marked = 0;
+  for (const g of slots) {
+    const refs = g.referencingFunctions ?? [];
+    // A referencing function the model does not have is never emitted, so it names
+    // nothing in the tree; only the bodies the model has can.
+    const named = refs.some(r => identifiersOf(r)?.has(g.name) ?? false);
+    if (!named) { g.importSlotUnnamed = true; marked++; }
+  }
+  return marked;
+}
+
 /**
  * A `DAT_` placeholder at an address no image maps - the null page or kernel space
  * (`DAT_00000000`, `DAT_c0000001`). It is not data: every body that names it is a
@@ -119,7 +162,8 @@ export function isUnmappedAddressPlaceholder(name: string): boolean {
 
 export function isDataArtifact(g: AnalyzedDataSymbol, allNames: Set<string>): boolean {
   const name = g.suggestedName || g.name;
-  return isSwitchTableSymbol(name)
+  return g.importSlotUnnamed === true
+    || isSwitchTableSymbol(name)
     || isUnmappedAddressPlaceholder(name)
     || isJumpTableArtifact(g)
     || isArrayElementSymbol(name, allNames);
@@ -2291,11 +2335,15 @@ export function emitDataValue(dv: DataValue, indent = 0, expectedType?: string):
       // letter and would otherwise be read as a symbol name.
       const sentinel = sentinelSpelling(dv.value, slotType ?? expectedType ?? 'void*');
       if (sentinel !== undefined) return sentinel;
+      // A placeholder at an address no image maps (`DAT_00000004`) is the VALUE 4 that
+      // Ghidra read as a pointer to a label it made there, not an object: spell the
+      // address itself, as the neighbouring `(void *)0x00000002` already is.
+      const unmapped = isUnmappedAddressPlaceholder(dv.value) ? /DAT_([0-9a-fA-F]{8})$/.exec(dv.value) : null;
       // If it looks like a symbol name (not hex), emit as address-of / decay.
-      if (/^[A-Za-z_]/.test(dv.value)) {
+      if (!unmapped && /^[A-Za-z_]/.test(dv.value)) {
         return emitPointerToSymbol(dv.value, slotType);
       }
-      const literal = normalizeDataValue(dv.value);
+      const literal = unmapped ? `0x${unmapped[1]}` : normalizeDataValue(dv.value);
       // A funcdef slot carries its indirection in the typedef, so it has no `*`
       // for castPointerInitializer to key on — but an address literal still
       // needs the cast to become a function pointer.
@@ -2304,7 +2352,7 @@ export function emitDataValue(dv: DataValue, indent = 0, expectedType?: string):
       }
       // The word may be the base of a symbol this file can name. A pointer slot
       // holds an address by declaration, so one exact base settles it.
-      const resolved = pointerSlotAddressReference(literal, slotType);
+      const resolved = unmapped ? undefined : pointerSlotAddressReference(literal, slotType);
       if (resolved) return resolved;
       // Raw hex pointer — normalize value (add 0x prefix if needed)
       return castPointerInitializer(slotType ?? 'void*', literal);
