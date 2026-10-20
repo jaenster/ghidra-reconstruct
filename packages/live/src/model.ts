@@ -28,7 +28,8 @@ import {
   type ReconstructionOptions,
 } from '@ghidra-mcp/reconstruct';
 import { decompileFunction, getFunctionInfo } from '@ghidra-mcp/reconstruct/extract/functions';
-import { fetchInitializedData, inferType } from '@ghidra-mcp/reconstruct/extract/globals';
+import { fetchInitializedData, inferType, extractPrimaryLabels, markPrimaryLabels } from '@ghidra-mcp/reconstruct/extract/globals';
+import { attachOperandRefs } from '@ghidra-mcp/reconstruct/extract/operand-refs';
 
 /**
  * The primary binary plus whatever cross-check source was merged into it, and
@@ -398,7 +399,11 @@ export async function applyEvents(
         filter: event.newName ?? existing.name,
         limit: 25,
       });
-      const match = page.globals.find(g => addressKey(g.address) === addressKey(existing.address));
+      // An address can carry several labels, each its own row: the one this record
+      // is, by name, before any other at the address.
+      const atAddress = page.globals.filter(g => addressKey(g.address) === addressKey(existing.address));
+      const wanted = event.newName ?? existing.name;
+      const match = atAddress.find(g => g.name === wanted) ?? (atAddress.length === 1 ? atAddress[0] : undefined);
       if (!match) {
         log(`global ${existing.name}: no longer listed at ${existing.address}`);
         continue;
@@ -423,6 +428,19 @@ export async function applyEvents(
       markReferencingFunctions(merged, nameToFn, affected);
     } catch (e) {
       log(`global ${existing.name}: re-extract failed (${(e as Error).message}); keeping previous`);
+    }
+  }
+
+  // Which label is primary at an address with several. A re-listed global arrives
+  // without the flag (`list_data_symbols` does not know it), and a rename can move the
+  // primary to another label; the full extraction's script answers for the whole
+  // program in one call, so it is re-run once per batch and the flags re-marked.
+  if (result.touchedGlobals.length > 0) {
+    try {
+      const marked = markPrimaryLabels(model.primary.globals.filter(g => !g.platform), await extractPrimaryLabels(client));
+      if (marked.unmatched > 0) log(`primary labels: ${marked.unmatched} multi-label address(es) whose primary is not listed`);
+    } catch (e) {
+      log(`primary labels: re-extract failed (${(e as Error).message}); keeping previous flags`);
     }
   }
 
@@ -467,10 +485,31 @@ export async function applyEvents(
   if (result.touchedFunctions.length > 0) {
     recomputeCallEdges(model, indices, result.touchedFunctions);
     reindexCallers(model, indices);
+    await refreshOperandRefs(model, client, result.touchedFunctions, log);
   }
 
   model.seq = Math.max(model.seq, highestSeq);
   return result;
+}
+
+/**
+ * The instruction operand references of the given functions (extract/operand-refs.ts),
+ * which `folded-address-rebase` reads: an edit that changes a reference (an offset
+ * reference added, code re-disassembled) must reach the next emit, and a refreshed
+ * record would otherwise carry the old facts forward. One script for the batch; the
+ * covered functions' old facts are cleared first, so a reference that is gone is gone.
+ * Only the primary binary's records: a merged cross-platform record can share an
+ * address with a Windows function.
+ */
+async function refreshOperandRefs(
+  model: LiveModel,
+  client: GhidraConnection,
+  addrs: readonly string[],
+  log: LiveLog,
+): Promise<void> {
+  const primary = model.primary.functions.filter(f => !f.platform);
+  const n = await attachOperandRefs(client, primary, [...addrs]);
+  log(`operand references: ${n} of ${addrs.length} refreshed function(s) have some`);
 }
 
 /** Every function that reads this global, resolved to an address key. */
@@ -689,7 +728,9 @@ async function refreshAllFunctions(
     const key = addressKey(existing.address);
     const update = byAddr.get(key);
     if (!update) continue;
-    model.primary.functions[i] = { ...existing, ...defined(update) };
+    // `operandRefs` is absent on a function that has none: spelled out, so a reference
+    // removed in Ghidra does not survive in the carried-forward record.
+    model.primary.functions[i] = { ...existing, ...defined(update), operandRefs: update.operandRefs };
     byAddr.delete(key);
   }
 
