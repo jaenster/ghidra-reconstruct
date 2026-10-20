@@ -15,6 +15,7 @@
 import { NodeKind } from '../../ast/kinds.js';
 import type {
   CaseStmt,
+  Expression,
   CompoundStmt,
   DefaultStmt,
   DoWhileStmt,
@@ -40,6 +41,14 @@ import { countGotoTargets } from './labels.js';
  * untouched subtree keeps its identity across candidates and re-emits nothing.
  */
 const keyCache = new WeakMap<object, string | null>();
+
+/** A loop condition that is a non-zero literal: the loop has no exit through its test. */
+function alwaysTrue(e: Expression): boolean {
+  while (e.kind === NodeKind.ParenExpr) e = (e as unknown as { expression: Expression }).expression;
+  if (e.kind === NodeKind.BoolLiteral) return (e as unknown as { value: boolean }).value === true;
+  if (e.kind === NodeKind.IntegerLiteral) return (e as unknown as { value: bigint }).value !== 0n;
+  return false;
+}
 
 export function workKey(s: Statement): string | null {
   const hit = keyCache.get(s as object);
@@ -200,7 +209,8 @@ function emitStmt(b: Builder, s: Statement, next: number, ctx: Ctx): number {
       const n = s as WhileStmt;
       const id = addNode(b, s, 'stmt');
       const bodyEntry = emitStmt(b, n.body, id, { ...ctx, breakTarget: next, continueTarget: id });
-      b.nodes[id].succ = bodyEntry === next ? [next] : [bodyEntry, next];
+      // `while (true)` leaves only by a jump: its test has no false edge.
+      b.nodes[id].succ = alwaysTrue(n.condition) ? [bodyEntry] : bodyEntry === next ? [next] : [bodyEntry, next];
       return id;
     }
 
@@ -208,20 +218,40 @@ function emitStmt(b: Builder, s: Statement, next: number, ctx: Ctx): number {
       const n = s as DoWhileStmt;
       const id = addNode(b, s, 'stmt');
       const bodyEntry = emitStmt(b, n.body, id, { ...ctx, breakTarget: next, continueTarget: id });
-      b.nodes[id].succ = bodyEntry === next ? [next] : [bodyEntry, next];
+      b.nodes[id].succ = alwaysTrue(n.condition) ? [bodyEntry] : bodyEntry === next ? [next] : [bodyEntry, next];
       return bodyEntry;
     }
 
     case NodeKind.ForStmt: {
       const n = s as ForStmt;
       const condId = addNode(b, s, 'stmt');
-      const incrId = addNode(b, null, 'stmt');
-      b.nodes[incrId].succ = [condId];
-      if (n.increment) b.nodes[incrId].expr = n.increment;
+      // The increment is work, keyed as the statement `incr;` would be (one node per comma
+      // operand), so a latch `i++;` moved into a for header is the same work.
+      let incrId = condId;
+      if (n.increment) {
+        const parts: Expression[] = [];
+        const split = (e: Expression): void => {
+          let u = e;
+          while (u.kind === NodeKind.ParenExpr) u = (u as unknown as { expression: Expression }).expression;
+          if (u.kind === NodeKind.BinaryExpr && (u as unknown as { operator: string }).operator === ',') {
+            split((u as unknown as { left: Expression }).left);
+            split((u as unknown as { right: Expression }).right);
+          } else parts.push(u);
+        };
+        split(n.increment);
+        for (let i = parts.length - 1; i >= 0; i--) {
+          const st = { kind: NodeKind.ExprStmt, expression: parts[i], location: parts[i].location, leadingTrivia: [], trailingTrivia: [] } as unknown as Statement;
+          const id = addNode(b, null, 'stmt');
+          b.nodes[id].key = workKey(st);
+          b.nodes[id].expr = parts[i];
+          b.nodes[id].succ = [incrId];
+          incrId = id;
+        }
+      }
       const bodyEntry = emitStmt(b, n.body, incrId, {
         ...ctx, breakTarget: next, continueTarget: incrId,
       });
-      b.nodes[condId].succ = bodyEntry === next ? [next] : [bodyEntry, next];
+      b.nodes[condId].succ = !n.condition || alwaysTrue(n.condition) ? [bodyEntry] : bodyEntry === next ? [next] : [bodyEntry, next];
       return n.init ? emitStmt(b, n.init, condId, ctx) : condId;
     }
 

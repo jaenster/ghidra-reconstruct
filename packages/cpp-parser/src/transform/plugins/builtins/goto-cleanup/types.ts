@@ -27,6 +27,16 @@ export interface GotoCleanupStats {
   structureArm: number;
   /** Gotos that only skipped the rest of their block, now `if (!c) { rest }` (structure.ts). */
   structureSkip: number;
+  /** Loop rewrites (loops.ts): gotos that were a loop's own control, by rewrite. */
+  headContinue: number;
+  topContinue: number;
+  latchFor: number;
+  /** latchFor rewrites that needed the entry lemma (C true before the first iteration). */
+  latchForLemma: number;
+  exitSwap: number;
+  exitMove: number;
+  exitHoist: number;
+  rotateEntry: number;
   switchCaseGoto: number;
   backwardToLoop: number;
   forwardCascade: number;

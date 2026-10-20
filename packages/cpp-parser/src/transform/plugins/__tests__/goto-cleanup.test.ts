@@ -1445,7 +1445,10 @@ void foo(int x) {
 `);
   });
 
-  it('keeps a loop exit to a fallthrough tail: no flag variable', () => {
+  // A loop exit to a block nothing else reaches (the code after the loop returns first):
+  // the block moves to the exit (a MOVE, step 7), with the `return;` that ends the void
+  // function. Never a flag variable.
+  it('moves the only block a loop exit reaches into the loop: no flag variable', () => {
     expectTransform(`
 void foo(int x) {
   while (x > 0) {
@@ -1459,13 +1462,13 @@ LAB_done:
 `, `
 void foo(int x) {
   while (x > 0) {
-    if (x == 5)
-      goto LAB_done;
+    if (x == 5) {
+      finish();
+      return;
+    }
     x = x - 1;
   }
   return;
-  LAB_done:
-  finish();
 }
 `);
   });

@@ -256,9 +256,10 @@ function createGotoCleanupTransformer(pluginOptions?: Record<string, unknown>) {
     if (!hasGoto(body)) return null;
     const voidFn = enclosingReturnsVoid ?? returnsVoid(fn.returnType);
     const vctx = { followIsExit: true, noreturn };
+    const params = new Set(fn.parameters.map(p => p.name?.name).filter((n): n is string => !!n));
     const next = structureBody(body, {
-      noreturn, voidFn,
-      accept: (before, after, handler) => accept(before, after, handler, vctx),
+      noreturn, voidFn, params,
+      accept: (before, after, handler, proofBefore) => accept(before, after, handler, vctx, proofBefore),
     });
     return next ? updateNode(fn, { body: next }) : null;
   };
