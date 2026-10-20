@@ -23,7 +23,7 @@ import { readFileSync, writeFileSync, readdirSync, statSync, mkdirSync, existsSy
 import { join, relative } from 'node:path';
 import { parse, NodeKind, type FunctionDecl } from '@ghidra-mcp/cpp-parser';
 import {
-  classifyGotos, countLabels, functionAddress, labelPrefix, LABEL_PREFIXES,
+  classifyGotos, countLabels, labelsLeadingToExit, functionAddress, labelPrefix, LABEL_PREFIXES,
   type GotoRow, type LabelCounts,
 } from '../packages/reconstruct/src/goto-census/census.js';
 import { isMacroRenamedLabel } from '@ghidra-mcp/cpp-parser/transform/plugins/builtins/label-macro-collision';
@@ -66,7 +66,7 @@ for (const d of rawRecords) {
   const entry: RawFn = { name: d.name, address: String(d.address).toLowerCase(), counts: null };
   raw.set(entry.address, entry);
   if (!/\bgoto\b/.test(text) && !/^\s*[A-Za-z_]\w*:\s*$/m.test(text) && !text.includes('if (false)')) {
-    entry.counts = { gotos: 0, labels: 0, gotoTargets: new Map(), labelNames: new Set(), byPrefix: {}, ifFalse: 0, tryStmts: 0 };
+    entry.counts = { gotos: 0, labels: 0, gotoTargets: new Map(), labelNames: new Set(), byPrefix: {}, ifFalse: 0, tryStmts: 0, endStubLabels: new Set(), exitLabels: new Set() };
     continue;
   }
   // The raw text is a whole definition; the body is everything from the first `{` after
@@ -78,6 +78,7 @@ for (const d of rawRecords) {
     const tu = parse(`void __raw() {${m[1]}}`, { recover: true } as Any) as Any;
     const fn = tu.declarations.find((x: Any) => x.kind === NodeKind.FunctionDecl);
     entry.counts = countLabels(fn.body, functionSymbols);
+    entry.counts.exitLabels = labelsLeadingToExit(fn.body);
   } catch {
     rawParseFail++;
   }
@@ -132,6 +133,7 @@ let rawGotos = 0, rawFnsWithGotos = 0, rawIfFalse = 0, rawIfFalseFns = 0;
 const treeGtRaw: Any[] = [];
 const labelsNotInRaw: Any[] = [];
 let dupLabels = 0;
+const stubForRawLabel: Any[] = [];
 const gotoRows: string[] = [
   ['address', 'function', 'file', 'line', 'label', 'prefix', 'class', 'sharedBy', 'fallthroughIn', 'tailStmts', 'tailEnd', 'inIfFalse'].join('\t'),
 ];
@@ -171,6 +173,11 @@ for (const t of [...treeFns.values()].sort((a, b) => a.address.localeCompare(b.a
     const rawName = isMacroRenamedLabel(name) ? name.slice(0, -'_lbl'.length) : name;
     if (r?.counts && !r.counts.labelNames.has(rawName)) labelsNotInRaw.push({ address: t.address, name: t.name, label: name, prefix: labelPrefix(name, functionSymbols) });
   }
+  for (const name of t.counts.endStubLabels) {
+    if (r?.counts && r.counts.labelNames.has(name) && !r.counts.endStubLabels.has(name) && !r.counts.exitLabels.has(name)) {
+      stubForRawLabel.push({ address: t.address, name: t.name, label: name });
+    }
+  }
   fnRows.push([t.address, t.name, t.file, rawG ?? '', t.counts.gotos, r?.counts?.labels ?? '', t.counts.labels,
     ...LABEL_PREFIXES.map(p => t.counts.byPrefix[p] ?? 0)].join('\t'));
 }
@@ -193,6 +200,7 @@ const summary = {
     treeGotosAboveRaw: treeGtRaw,
     labelsNotInRaw,
     dupLabels,
+    stubLabelForRawLabel: stubForRawLabel,
   },
 };
 writeFileSync(join(outDir, 'summary.json'), JSON.stringify(summary, null, 1));
@@ -203,7 +211,8 @@ console.log(`tree: ${treeGotos} gotos in ${treeFnsWithGotos} functions, ${treeLa
 console.log('by class:', JSON.stringify(summary.tree_.byClass));
 console.log('by prefix (tree):', JSON.stringify(byPrefixTree));
 console.log('by prefix (raw): ', JSON.stringify(byPrefixRaw));
-console.log(`gates: tree>raw ${treeGtRaw.length} fns, labels not in raw ${labelsNotInRaw.length}, __dup labels ${dupLabels}`);
+console.log(`gates: tree>raw ${treeGtRaw.length} fns, labels not in raw ${labelsNotInRaw.length}, __dup labels ${dupLabels}, stub for a raw label ${stubForRawLabel.length}`);
+for (const x of stubForRawLabel) console.log(`  stub for raw label: ${x.address} ${x.name} ${x.label}`);
 
 if (compareDir && existsSync(join(compareDir, 'functions.tsv'))) {
   const prev = JSON.parse(readFileSync(join(compareDir, 'summary.json'), 'utf8'));
@@ -228,5 +237,5 @@ if (compareDir && existsSync(join(compareDir, 'functions.tsv'))) {
   for (const r of rose.slice(0, 40)) console.log('   ', r);
 }
 
-const failed = treeGtRaw.length > 0 || dupLabels > 0;
+const failed = treeGtRaw.length > 0 || dupLabels > 0 || stubForRawLabel.length > 0;
 process.exitCode = failed ? 1 : 0;

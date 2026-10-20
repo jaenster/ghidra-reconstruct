@@ -29,7 +29,7 @@ import type {
 import { updateNode } from '../../../transformer.js';
 import { traverseAST } from '../../../../ast/visitor.js';
 import type { BackwardGotoEntry, LabelInfo } from './types.js';
-import { createBoolLiteral, createBreakStmt, getGotoLabel } from './helpers.js';
+import { createBoolLiteral, createBreakStmt, getGotoLabel, negateCondition } from './helpers.js';
 
 /**
  * Find backward gotos (goto targeting a label that appears BEFORE the goto)
@@ -305,7 +305,38 @@ export function processBackwardGotos(
     // If nested, wrap in while(true) and replace with continue
     let loopStmt: Statement;
 
-    if (lastEntry.kind === 'simple-conditional') {
+    if (lastEntry.kind === 'simple-conditional' && sorted.length > 1) {
+      // The earlier gotos become `continue`, and `continue` in a do-while runs the loop
+      // CONDITION - but each of them jumped to the label, the TOP. This shape used to be
+      // emitted as `do { ... continue; ... } while (cond)`, which skipped the body's start
+      // and evaluated `cond` early (the validator refuses it; its test pinned the wrong
+      // output). In `while (true)` a `continue` is the top, and the back edge becomes an
+      // explicit `if (!cond) break;`.
+      const exit: IfStmt = {
+        kind: NodeKind.IfStmt,
+        condition: negateCondition(lastEntry.ifStmt!.condition),
+        thenBranch: createBreakStmt(labelStmt),
+        elseBranch: null,
+        isConstexpr: false,
+        location: lastEntry.ifStmt!.location,
+        leadingTrivia: lastEntry.ifStmt!.leadingTrivia ?? [],
+        trailingTrivia: [],
+      } as IfStmt;
+      loopStmt = {
+        kind: NodeKind.WhileStmt,
+        condition: createBoolLiteral(true, labelStmt),
+        body: {
+          kind: NodeKind.CompoundStmt,
+          statements: [...bodyStmts, exit],
+          location: labelStmt.location,
+          leadingTrivia: [],
+          trailingTrivia: [],
+        } as CompoundStmt,
+        location: labelStmt.location,
+        leadingTrivia: labelStmt.leadingTrivia ?? [],
+        trailingTrivia: [],
+      } as WhileStmt;
+    } else if (lastEntry.kind === 'simple-conditional') {
       // do { body } while (cond);
       const body: CompoundStmt = {
         kind: NodeKind.CompoundStmt,

@@ -1,10 +1,13 @@
 /**
- * Duplicate Goto-Label Uniquify Plugin
+ * Duplicate Goto-Label Uniquify Plugin - now an ASSERTION, kept as a safety net.
  *
- * Ghidra's control-flow recovery sometimes emits the SAME address-labeled block
- * twice in one function — identical code, each copy reached by the gotos of its
- * own region. C++ rejects the second definition ("duplicate label"), and every
- * `goto` to that name is ambiguous.
+ * This header used to say Ghidra's control-flow recovery sometimes emits the same
+ * address-labelled block twice. It does not: raw Ghidra defines no label twice in any
+ * function (re-checked at v1131, 0 of 14,090). Every duplicate came from a goto-cleanup
+ * handler copying a tail that held a label; those handlers now refuse such tails
+ * (goto-cleanup/copy-safety.ts). So any rename here is a generator bug: it is counted and
+ * reported (`dup-label-renamed`, GHIDRA_GOTO_REPORT_DIR), and the census gate requires 0.
+ * The renaming itself stays so that a regression still compiles while it is found.
  *
  * The 2nd and later copies are renamed `<LAB>__dup2`, `__dup3`, … and each
  * `goto` is retargeted to the copy it actually meant.
@@ -40,8 +43,16 @@ import { Expr } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { childStatements, withChildStatements } from './stmt-structure.js';
 import { isMacroRenamedLabel } from './label-macro-collision.js';
+import { gotoReport } from './goto-cleanup/report.js';
 
 export interface DuplicateLabelUniquifyOptions extends PluginOptions {}
+
+const DUP_STATS_KEY = Symbol.for('ghidra-mcp:duplicate-label-uniquify-stats');
+const DUP_STATS: { renamed: number } = ((globalThis as Record<symbol, unknown>)[DUP_STATS_KEY] ??= { renamed: 0 }) as { renamed: number };
+
+/** Label copies renamed since the last reset. Any non-zero value is a generator bug. */
+export function getDupLabelRenamed(): number { return DUP_STATS.renamed; }
+export function resetDupLabelRenamed(): void { DUP_STATS.renamed = 0; }
 
 // A label the DECOMPILER authored - either under one of its own name prefixes,
 // or under a name `label-macro-collision` has since renamed off a Win32 macro
@@ -129,6 +140,10 @@ function createDuplicateLabelUniquifyTransformer(_options: DuplicateLabelUniquif
       const dups = new Map<string, Site[]>();
       for (const [name, list] of byName) if (list.length >= 2) dups.set(name, list);
       if (dups.size === 0) return undefined;
+      for (const [name, list] of dups) {
+        DUP_STATS.renamed += list.length - 1;
+        gotoReport({ event: 'dup-label-renamed', label: name, copies: list.length });
+      }
 
       // Copy i (0-based, source order) keeps the name; the rest get `__dup<i+1>`.
       const nameOfCopy = (name: string, i: number) => (i === 0 ? name : `${name}__dup${i + 1}`);

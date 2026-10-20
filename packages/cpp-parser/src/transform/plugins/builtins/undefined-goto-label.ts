@@ -5,8 +5,14 @@
  * label was never recovered (it sat in a dropped/unreachable block — often a
  * fault/error exit like `nLine = 0x63e; goto LAB_00677aa7;`). C++ then rejects
  * "label used but not defined". Define each such missing Ghidra label as an empty
- * statement at the end of the function body, so the goto compiles (jumps ≈ the
- * function's end / return) — a sound approximation for these dead-end exits.
+ * statement at the end of the function body, so the goto compiles.
+ *
+ * That is only legitimate for a label Ghidra itself never emitted. For one the raw
+ * decompile DEFINES it is a defect: a pass deleted the block, and the goto now jumps to
+ * the function's end - in a non-void function that falls off the end. Four such stubs
+ * shipped at v1131 (00514ec0, 0048c060, 00677880 and a deleted goto in 0062efb0), all from
+ * goto-cleanup handlers that removed a label still targeted from outside their region.
+ * Every stub is reported (`stub-label`) and goto-census fails on a stub for a raw label.
  *
  * Operates on the AST: collects GotoStmt targets and LabelStmt definitions
  * structurally (no text scanning, so a `goto X` inside an expression or a
@@ -19,6 +25,7 @@ import type { ASTNode, FunctionDecl, CompoundStmt, GotoStmt, LabelStmt } from '.
 import { findNodesByKind } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
 import { Stmt } from '../../../ast/factory.js';
+import { gotoReport } from './goto-cleanup/report.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 
 export interface UndefinedGotoLabelOptions extends PluginOptions {}
@@ -80,7 +87,12 @@ function createUndefinedGotoLabelTransformer(_options: UndefinedGotoLabelOptions
         ? (node.name as { name: string }).name
         : '<anonymous>';
       const record = synthesizedStore();
-      for (const name of missing) record.push({ functionName: fnName, label: name });
+      for (const name of missing) {
+        record.push({ functionName: fnName, label: name });
+        // The census decides which of these is a defect: a stub for a label the raw
+        // decompile DEFINES means a pass deleted live code (goto-census `stubLabelForRawLabel`).
+        gotoReport({ event: 'stub-label', label: name });
+      }
 
       const stubs = [...missing].map(name => Stmt.label(name));
       const newBody = updateNode(node.body, {

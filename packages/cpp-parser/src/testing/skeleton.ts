@@ -38,6 +38,7 @@ import type {
 } from '../ast/nodes.js';
 import { emit } from '../emit/index.js';
 import { TriviaKind } from '../lexer/trivia.js';
+import { isPureExpr } from '../transform/cfg/bcfg.js';
 
 export class KeyTable {
   private ids = new Map<string, number>();
@@ -158,7 +159,11 @@ export class SkeletonEmitter {
       return `(${[...parts, this.cond(xs[xs.length - 1])].join(', ')})`;
     }
     this.decisions++;
-    return `D(${this.keys.id(text(e))})`;
+    // A pure atom's value is a function of the program state, and only work changes the
+    // state: model it as a hash of (stream, atom, work done so far), untraced. Evaluating
+    // it twice between the same two statements gives the same answer, and not evaluating
+    // it at all leaves no trace - exactly what "no side effect" means.
+    return isPureExpr(e) ? `P(${this.keys.id(text(e))})` : `D(${this.keys.id(text(e))})`;
   }
 
   stmt(s: Statement): string {
@@ -277,14 +282,21 @@ static inline unsigned bit() {
   if (g_exhaustive) { unsigned b = g_pos < 64 ? (unsigned)((g_bits >> g_pos) & 1u) : 0u; g_pos++; return b; }
   g_state ^= g_state << 13; g_state ^= g_state >> 7; g_state ^= g_state << 17; return (unsigned)(g_state & 1u);
 }
-static void T(int k) { step(); rec(0x10000000u | (uint32_t)k); }
+static uint64_t g_seed; static uint32_t g_work;
+static void T(int k) { step(); g_work++; rec(0x10000000u | (uint32_t)k); }
+static bool P(int k) {
+  step();
+  uint64_t h = g_seed * 0x9E3779B97F4A7C15ull ^ ((uint64_t)k << 32) ^ g_work;
+  h ^= h >> 33; h *= 0xff51afd7ed558ccdull; h ^= h >> 33; h *= 0xc4ceb9fe1a85ec53ull; h ^= h >> 33;
+  return (h & 1) != 0;
+}
 static bool D(int k) { step(); unsigned b = bit(); rec(0x20000000u | ((uint32_t)k << 1) | b); return b != 0; }
 static int S(int k, int n) { step(); unsigned v = 0; for (int i = 0; i < 4; i++) v = (v << 1) | bit(); int r = (int)(v % (unsigned)(n + 1)); rec(0x30000000u | ((uint32_t)k << 8) | (uint32_t)r); return r; }
 [[noreturn]] static void NR() { longjmp(g_jmp, 3); }
 static int E(int k, const int* vals, int n) { step(); unsigned v = 0; for (int i = 0; i < 4; i++) v = (v << 1) | bit(); int r = vals[v % (unsigned)n]; rec(0x40000000u | ((uint32_t)k << 12) | (uint32_t)r); return r; }
 typedef void (*Fn)();
 static int run(Fn f, uint64_t seed, int exhaustive, uint32_t* out, int* outLen) {
-  g_state = seed * 0x9E3779B97F4A7C15ull + 1; g_exhaustive = exhaustive; g_bits = seed; g_pos = 0; g_len = 0; g_steps = 0;
+  g_seed = seed; g_work = 0; g_state = seed * 0x9E3779B97F4A7C15ull + 1; g_exhaustive = exhaustive; g_bits = seed; g_pos = 0; g_len = 0; g_steps = 0;
   int end = setjmp(g_jmp);
   if (end == 0) { f(); end = 1; }
   memcpy(out, g_trace, sizeof(uint32_t) * g_len); *outLen = g_len; return end;

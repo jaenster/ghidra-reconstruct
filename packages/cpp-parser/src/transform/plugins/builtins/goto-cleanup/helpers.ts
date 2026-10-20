@@ -22,6 +22,7 @@ import type {
   WhileStmt,
 } from '../../../../ast/nodes.js';
 import { traverseAST } from '../../../../ast/visitor.js';
+import { markCopy } from '../../../cfg/bcfg.js';
 
 export function isSimpleLabelName(name: string): boolean {
   return name.startsWith('LAB_') || name.startsWith('label_')
@@ -247,10 +248,14 @@ export function getLoopBody(stmt: Statement): Statement | null {
   return null;
 }
 
+/**
+ * A copy of `stmts` for a second site. Each call stamps the copy with a fresh mark, so the
+ * validator can tell a copy of site-unique work (GetInstructionPointer) from the original.
+ */
 export function deepCloneStatements(stmts: Statement[]): Statement[] {
-  return structuredClone(stmts);
+  return markCopy(structuredClone(stmts));
 }
 
 export function deepCloneStatement(stmt: Statement): Statement {
-  return structuredClone(stmt);
+  return markCopy(structuredClone(stmt));
 }

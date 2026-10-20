@@ -39,6 +39,10 @@ export interface GotoCleanupStats {
    * In enforce mode they are dropped and the goto stays.
    */
   cfVerifyFail: number;
+  /** Functions still changing when MAX_WHOLE_AST_PASSES ran out (reported, not hidden). */
+  passLimitHit: number;
+  /** Gotos left pointing at a label no handler kept. Must be 0. */
+  orphanGoto: number;
   total: number;
 }
 
@@ -122,6 +126,7 @@ export const MAX_FIXPOINT_PASSES = 50;
  * the walk lets those be structured too, instead of leaving a goto behind.
  */
 export const MAX_WHOLE_AST_PASSES = 4;
+
 export const MAX_INLINE_TAIL_SIZE = 20;
 
 export const DEFAULT_NORETURN_FUNCTIONS = new Set([

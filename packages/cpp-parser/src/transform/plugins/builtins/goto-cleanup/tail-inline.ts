@@ -26,7 +26,8 @@ import { traverseAST } from '../../../../ast/visitor.js';
 import type { LabelInfo, LabelKind, RequiredGotoCleanupOptions } from './types.js';
 import { MAX_INLINE_TAIL_SIZE } from './types.js';
 import { deepCloneStatement, deepCloneStatements } from './helpers.js';
-import { countGotosInStatements } from './analysis.js';
+import { countGotosInStatements, classifyLabelTail } from './analysis.js';
+import { cutAtCase, holdsLabelOrCase, workNodes } from './copy-safety.js';
 
 /**
  * Check if a statement can fall through to the next one
@@ -68,7 +69,7 @@ export function createReturnStmt(anchor: Statement): Statement {
  * Inline short cleanup/error tails at every goto site.
  *
  * Only inlines when:
- * - Tail is short (≤ MAX_INLINE_TAIL_SIZE statements)
+ * - Tail is short (≤ MAX_INLINE_TAIL_SIZE work nodes, counted recursively)
  * - Tail ends with return or noreturn call
  * - Tail contains no gotos or labels itself
  */
@@ -88,23 +89,29 @@ export function processCleanupTailInlining(
     const totalGotos = gotoCounts.get(labelInfo.name) ?? 0;
     if (totalGotos === 0) continue;
 
-    const tail = labelInfo.tailStatements;
+    // Only the part of the tail that belongs to the label's own switch arm is a candidate
+    // for copying; what follows the next `case` is another arm (copy-safety.ts).
+    const { tail, cut } = cutAtCase(labelInfo.tailStatements);
+    const kind = cut ? classifyLabelTail(tail, options) : labelInfo.kind;
 
-    // Check tail is inlineable: short and ends with return/noreturn
-    if (tail.length === 0 || tail.length > MAX_INLINE_TAIL_SIZE) continue;
-    if (labelInfo.kind !== 'exit-return' && labelInfo.kind !== 'cleanup-return'
-        && labelInfo.kind !== 'exit-noreturn' && labelInfo.kind !== 'cleanup-fallthrough') continue;
+    // Check tail is inlineable: short, ends with return/noreturn, and holds no label or
+    // case label (a copied label is a second definition; a copied case a second arm).
+    if (tail.length === 0 || workNodes(tail) > MAX_INLINE_TAIL_SIZE) continue;
+    if (holdsLabelOrCase(tail)) continue;
+    if (kind !== 'exit-return' && kind !== 'cleanup-return'
+        && kind !== 'exit-noreturn' && kind !== 'cleanup-fallthrough') continue;
 
     // A cleanup-fallthrough label only reaches the function's implicit return when its
     // fallthrough point is the tail of a void function body. Anywhere else — a loop or
-    // switch body, an if/else branch, a non-void function — fallthrough continues into
-    // code that may still compute and return a value.
+    // switch body, an if/else branch, a non-void function, the end of a switch arm cut
+    // short at the next case — fallthrough continues into code that may still compute
+    // and return a value.
     //  - If the tail self-terminates (ends in break/return/continue/goto, e.g. a switch
     //    case ending in `break`), inline it AS-IS without fabricating a return.
     //  - Otherwise the tail can fall through: inlining it would silently drop everything
     //    the fallthrough would have run next, including the function's real return.
     //    Preserve the goto un-inlined — the safe default.
-    const noImplicitReturn = labelInfo.kind === 'cleanup-fallthrough' && !fallthroughMeansReturn;
+    const noImplicitReturn = kind === 'cleanup-fallthrough' && (!fallthroughMeansReturn || cut);
     if (noImplicitReturn && canFallThrough(tail[tail.length - 1])) continue;
 
     // Check tail doesn't contain gotos/labels that escape the tail.
@@ -121,7 +128,7 @@ export function processCleanupTailInlining(
     if (hasEscapingGoto) continue;
 
     // Try to inline all gotos to this label
-    const result = inlineAllGotosToLabel(stmts, labelInfo.name, tail, labelInfo.index, labelInfo.kind, noImplicitReturn);
+    const result = inlineAllGotosToLabel(stmts, labelInfo.name, tail, labelInfo.index, kind, noImplicitReturn);
     if (result) return result;
   }
 
@@ -155,13 +162,18 @@ function inlineAllGotosToLabel(
   let modified = false;
 
   for (let i = 0; i < stmts.length; i++) {
-    // At the label position: remove the label itself, but keep the tail
-    // if code can fall through to it from the preceding statement.
+    // At the label position: remove the label itself. Everything after it stays - the
+    // copied part only when something can still fall into it (it is dead otherwise, since
+    // every goto to it is being replaced), and whatever follows the copied part always:
+    // a tail cut at a `case` is followed by arms the switch dispatches to. The ORIGINAL
+    // statements stay, not clones, so untouched code keeps its identity.
     if (i === labelIndex) {
       modified = true;
-      if (newStmts.length > 0 && canFallThrough(newStmts[newStmts.length - 1])) {
-        newStmts.push(...deepCloneStatements(tail));
-      }
+      const labelStmt = stmts[labelIndex] as LabelStmt;
+      const rest = stmts.slice(labelIndex + 1);
+      const reachable = newStmts.length === 0 || canFallThrough(newStmts[newStmts.length - 1]);
+      if (reachable) newStmts.push(labelStmt.statement, ...rest);
+      else newStmts.push(...rest.slice(tail.length - 1));
       break;
     }
 

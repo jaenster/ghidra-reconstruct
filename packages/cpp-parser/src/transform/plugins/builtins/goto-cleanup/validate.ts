@@ -35,7 +35,7 @@ export function gotoValidatorMode(): GotoValidatorMode {
   const set = (globalThis as Record<symbol, unknown>)[MODE_KEY] as GotoValidatorMode | null | undefined;
   if (set) return set;
   const env = process.env.GHIDRA_GOTO_VALIDATOR;
-  return env === 'off' || env === 'enforce' || env === 'log' ? env : 'log';
+  return env === 'off' || env === 'enforce' || env === 'log' ? env : 'enforce';
 }
 
 /**

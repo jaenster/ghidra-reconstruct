@@ -23,6 +23,7 @@ import { MAX_INLINE_TAIL_SIZE } from './types.js';
 import { deepCloneStatements, isSimpleLabelName } from './helpers.js';
 import { countGotosToLabel } from './cross-scope.js';
 import { inlineGotoInNestedStmt } from './tail-inline.js';
+import { holdsLabelOrCase, workNodes } from './copy-safety.js';
 
 /**
  * Check if a label name is a switch-case label (switchD_xxx_caseD_N).
@@ -177,7 +178,9 @@ function processSingleSwitch(sw: SwitchStmt): SwitchStmt | null {
     if (!extracted) continue;
 
     const { tail, endsWithBreak, endsWithReturn } = extracted;
-    if (tail.length === 0 || tail.length > MAX_INLINE_TAIL_SIZE) continue;
+    if (tail.length === 0 || workNodes(tail) > MAX_INLINE_TAIL_SIZE) continue;
+    // Never copy a label or a case label (copy-safety.ts).
+    if (holdsLabelOrCase(tail)) continue;
 
     // Check tail doesn't contain escaping gotos
     const tailLabels = new Set<string>();

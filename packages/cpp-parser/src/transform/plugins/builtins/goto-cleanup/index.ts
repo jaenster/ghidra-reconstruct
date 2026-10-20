@@ -45,7 +45,9 @@ import type { RequiredGotoCleanupOptions } from './types.js';
 import { DEFAULT_MAX_NESTING, MAX_FIXPOINT_PASSES, MAX_WHOLE_AST_PASSES } from './types.js';
 import { processCompound } from './process.js';
 import { setExactGotoCounts } from './validate.js';
-import { setCurrentGotoFunction } from './report.js';
+import { setCurrentGotoFunction, gotoReport } from './report.js';
+import { recordStat } from './stats.js';
+import { isSimpleLabelName } from './helpers.js';
 import { countGotosInStatements } from './analysis.js';
 import {
   setGlobalGotoCounts,
@@ -182,6 +184,10 @@ function createGotoCleanupTransformer(pluginOptions?: Record<string, unknown>) {
     eliminateDeadCode: (pluginOptions?.eliminateDeadCode as boolean) ?? true,
   };
 
+  // Whether the current round rewrote anything. The transformer rebuilds every node it
+  // walks, so `next === result` is never true and cannot be the convergence test - with it,
+  // every function ran all MAX_WHOLE_AST_PASSES rounds.
+  let roundChanged = false;
   const baseTransformer = createTransformer({
     visitCompoundStmt(compound) {
       const stmts = compound.statements;
@@ -203,32 +209,50 @@ function createGotoCleanupTransformer(pluginOptions?: Record<string, unknown>) {
       }
 
       if (!modified) return undefined;
+      roundChanged = true;
       return updateNode(compound, { statements: current });
     },
   });
 
-  // Wrap the transformer: pre-compute global goto counts and fallthrough marks from the
-  // current AST before each bottom-up walk. Repeat until the walk stops changing anything
-  // — a restructured compound can contain a fresh nested compound the walk already passed,
-  // and the re-analysis both re-marks it and gives it its turn.
-  // Finally sweep each function body for orphaned gotos (targeting labels that no longer
-  // exist) and remove them.
-  return (node: ASTNode): ASTNode => {
-    setCurrentGotoFunction(functionAddress);
-    let result = node;
+  // Rounds run per FUNCTION: the goto counts every handler reads are that function's own,
+  // never a sum over every function in the tree (a label name like `ERROR_lbl` or a
+  // `__dupN` copy is not unique across functions). Each round pre-computes the counts and
+  // fallthrough marks from the current AST and walks it bottom-up; rounds repeat until a
+  // walk changes nothing - a restructured compound can contain a fresh nested compound the
+  // walk already passed. A function still changing when the round limit is reached is
+  // reported, never silently cut off.
+  const runRounds = (fn: ASTNode): ASTNode => {
+    let result = fn;
     for (let round = 0; round < MAX_WHOLE_AST_PASSES; round++) {
       preComputeGlobalGotoCounts(result, enclosingReturnsVoid);
       let next: ASTNode;
+      roundChanged = false;
       try {
         next = baseTransformer(result);
       } finally {
         clearGlobalGotoCounts();
         setExactGotoCounts(null);
       }
-      if (next === result) break;
       result = next;
+      if (!roundChanged) return result;
     }
-    return removeOrphanedGotos(result);
+    recordStat('passLimitHit');
+    gotoReport({ event: 'pass-limit', rounds: MAX_WHOLE_AST_PASSES });
+    return result;
+  };
+  const perFunction = createTransformer({
+    visitFunctionDecl(fn) {
+      const r = runRounds(fn);
+      return r === fn ? undefined : r;
+    },
+  });
+
+  return (node: ASTNode): ASTNode => {
+    setCurrentGotoFunction(functionAddress);
+    let hasFunction = false;
+    for (const n of traverseAST(node)) if (n.kind === NodeKind.FunctionDecl) { hasFunction = true; break; }
+    const result = hasFunction ? perFunction(node) : runRounds(node);
+    return reportOrphanedGotos(result);
   };
 }
 
@@ -246,59 +270,30 @@ function collectLabels(root: ASTNode): Set<string> {
 }
 
 /**
- * Check if a goto label name is an orphaned switchD_*_caseD_* artifact.
+ * A goto whose label no longer exists means a handler deleted the block it jumped to.
+ *
+ * This used to be "fixed" by deleting the goto - turning a jump into a fallthrough, which
+ * is the three-strikes bug in one more form (ITEMS_CalcTransactionCost 0062efb0 lost its
+ * `goto switchD_0062f3a0_caseD_2` that way). Every candidate is now proven before it is
+ * kept, so this should never fire. If it does, the goto is LEFT IN PLACE, counted and
+ * reported with its function: `undefined-goto-label` will still have to stub it, and the
+ * census reports that stub as a defect.
  */
-function isOrphanedSwitchCaseGoto(name: string, labels: Set<string>): boolean {
-  return !labels.has(name) && name.startsWith('switchD_') && name.includes('_caseD_');
-}
-
-/**
- * Post-processing pass: remove orphaned gotos from all function bodies.
- * These gotos target switchD_*_caseD_* labels that were consumed by earlier
- * transforms but the goto in a deeply-nested scope was missed.
- */
-function removeOrphanedGotos(root: ASTNode): ASTNode {
-  const transformer = createTransformer({
-    visitFunctionDecl(fn) {
-      if (!fn.body || fn.body.kind !== NodeKind.CompoundStmt) return undefined;
-      const labels = collectLabels(fn.body);
-
-      // Fast bail-out: check if any orphaned gotos exist
-      let hasOrphaned = false;
-      for (const node of traverseAST(fn.body)) {
-        if (node.kind === NodeKind.GotoStmt && isOrphanedSwitchCaseGoto((node as GotoStmt).label.name, labels)) {
-          hasOrphaned = true;
-          break;
-        }
-      }
-      if (!hasOrphaned) return undefined;
-
-      // Bottom-up transform that:
-      // 1. Replaces orphaned gotos with NullStmt (handles gotos inside case/if/etc.)
-      // 2. Strips orphaned gotos from compound statement arrays (cleaner output)
-      const cleaner = createTransformer({
-        visitNode(node) {
-          // Replace goto→NullStmt when it's a statement field (e.g., CaseStmt.statement)
-          if (node.kind === NodeKind.GotoStmt && isOrphanedSwitchCaseGoto((node as GotoStmt).label.name, labels)) {
-            return { kind: NodeKind.NullStmt, location: node.location, leadingTrivia: [], trailingTrivia: [] } as ASTNode;
-          }
-          return undefined;
-        },
-        visitCompoundStmt(compound) {
-          // After visitNode replaced gotos with NullStmt, filter them out
-          const stmts = compound.statements;
-          const filtered = stmts.filter(s => s.kind !== NodeKind.NullStmt);
-          if (filtered.length === stmts.length) return undefined;
-          return updateNode(compound, { statements: filtered });
-        },
-      });
-
-      const newBody = cleaner(fn.body);
-      if (newBody === fn.body) return undefined;
-      return updateNode(fn, { body: newBody as CompoundStmt });
-    },
-  });
-  return transformer(root);
+function reportOrphanedGotos(root: ASTNode): ASTNode {
+  for (const node of traverseAST(root)) {
+    if (node.kind !== NodeKind.FunctionDecl) continue;
+    const fn = node as FunctionDecl;
+    if (!fn.body || fn.body.kind !== NodeKind.CompoundStmt) continue;
+    const labels = collectLabels(fn.body);
+    for (const n of traverseAST(fn.body)) {
+      if (n.kind !== NodeKind.GotoStmt) continue;
+      const name = (n as GotoStmt).label.name;
+      if (labels.has(name) || !isSimpleLabelName(name)) continue;
+      recordStat('orphanGoto');
+      gotoReport({ event: 'orphan-goto', label: name });
+    }
+  }
+  return root;
 }
 
 export const gotoCleanupPlugin: TransformPlugin = {

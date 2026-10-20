@@ -19,6 +19,8 @@ const emptyStats = (): GotoCleanupStats => ({
   vetoedUnsafe: 0,
   cfVerified: 0,
   cfVerifyFail: 0,
+  passLimitHit: 0,
+  orphanGoto: 0,
   total: 0,
 });
 
@@ -39,5 +41,6 @@ export function recordStat(kind: keyof Omit<GotoCleanupStats, 'total'>, count: n
   s[kind] += count;
   // `total` counts transforms APPLIED. A vetoed candidate was not applied.
   // Neither does a proof outcome: it is a verdict on a candidate, not a transform.
-  if (kind !== 'vetoedUnsafe' && kind !== 'cfVerified' && kind !== 'cfVerifyFail') s.total += count;
+  if (kind !== 'vetoedUnsafe' && kind !== 'cfVerified' && kind !== 'cfVerifyFail'
+    && kind !== 'passLimitHit' && kind !== 'orphanGoto') s.total += count;
 }

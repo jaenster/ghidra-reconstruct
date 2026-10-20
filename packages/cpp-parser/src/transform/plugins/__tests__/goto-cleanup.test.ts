@@ -9,7 +9,7 @@ import assert from 'node:assert';
 import { parse } from '../../../parser/index.js';
 import { emit } from '../../../emit/index.js';
 import type { AnyNode } from '../../../ast/nodes.js';
-import { gotoCleanupPlugin } from '../builtins/goto-cleanup/index.js';
+import { gotoCleanupPlugin, getGotoCleanupStats, resetGotoCleanupStats } from '../builtins/goto-cleanup/index.js';
 
 describe('gotoCleanupPlugin', () => {
   function transformCode(code: string): string {
@@ -59,7 +59,7 @@ void foo(int x) {
 `);
   });
 
-  it('should rewrite loop search goto into flag+break+if', () => {
+  it('keeps the loop search goto: no flag variable is ever introduced', () => {
     expectTransform(`
 void foo(int x) {
   int y = 0;
@@ -74,16 +74,13 @@ LAB_00000001:
 `, `
 void foo(int x) {
   int y = 0;
-  bool found = false;
   for (int i = 0; i < 10; i = i + 1) {
-    if (x == i) {
-      found = true;
-      break;
-    }
+    if (x == i)
+      goto LAB_00000001;
     y = y + i;
   }
-  if (!found)
-    y = 42;
+  y = 42;
+  LAB_00000001:
   y = y + 1;
 }
 `);
@@ -964,7 +961,7 @@ void foo(int x) {
 `);
   });
 
-  it('should convert two backward gotos to loop with continue', () => {
+  it('two backward gotos: while (true) so the earlier continue reaches the top, not the condition', () => {
     expectTransform(`
 void foo(int x) {
 LAB_loop:
@@ -976,12 +973,14 @@ LAB_loop:
 }
 `, `
 void foo(int x) {
-  do {
+  while (true) {
     a();
     if (x == 1)
       continue;
     b();
-  } while (x == 2);
+    if (!(x == 2))
+      break;
+  }
   done();
 }
 `);
@@ -1116,23 +1115,19 @@ LAB_err:
 }
 `, `
 void foo(int x) {
-  bool found = false;
   do {
     if (x == 0) {
-      found = true;
-      break;
+      error();
+      return;
     }
     x = x - 1;
   } while (x > 0);
-  if (!found)
-    return;
-  error();
   return;
 }
 `);
   });
 
-  it('should handle long tail with loop-body flag+break', () => {
+  it('copies a long return tail into the loop rather than adding a flag', () => {
     expectTransform(`
 void foo(int x) {
   do {
@@ -1152,23 +1147,19 @@ LAB_long:
 }
 `, `
 void foo(int x) {
-  bool found = false;
   do {
     if (x == 0) {
-      found = true;
-      break;
+      a();
+      b();
+      c();
+      d();
+      e();
+      f();
+      g();
+      return;
     }
     x = x - 1;
   } while (x > 0);
-  if (!found)
-    return;
-  a();
-  b();
-  c();
-  d();
-  e();
-  f();
-  g();
   return;
 }
 `);
@@ -1308,31 +1299,27 @@ LAB_err:
 }
 `, `
 void foo(int x) {
-  bool found = false;
   do {
     if (x == 0) {
-      found = true;
-      break;
+      s1();
+      s2();
+      s3();
+      s4();
+      s5();
+      s6();
+      s7();
+      s8();
+      s9();
+      return;
     }
     x = x - 1;
   } while (x > 0);
-  if (!found)
-    return;
-  s1();
-  s2();
-  s3();
-  s4();
-  s5();
-  s6();
-  s7();
-  s8();
-  s9();
   return;
 }
 `);
   });
 
-  it('should convert three backward gotos: 2 continue + 1 do/while back-edge', () => {
+  it('three backward gotos: 2 continue to the top + an explicit exit test', () => {
     expectTransform(`
 void foo(int x) {
 LAB_loop:
@@ -1346,7 +1333,7 @@ LAB_loop:
 }
 `, `
 void foo(int x) {
-  do {
+  while (true) {
     a();
     if (x == 1)
       continue;
@@ -1354,7 +1341,9 @@ void foo(int x) {
     if (x == 2)
       continue;
     c();
-  } while (x == 3);
+    if (!(x == 3))
+      break;
+  }
   done();
 }
 `);
@@ -1376,18 +1365,15 @@ LAB_inner:
 }
 `, `
 void foo(int x) {
-  bool found = false;
   do {
     if (x == 0) {
-      found = true;
-      break;
+      if (x < 0)
+        return;
+      cleanup();
+      return;
     }
     x = x - 1;
   } while (x > 0);
-  if (!found)
-    return;
-  if (!(x < 0))
-    cleanup();
   return;
 }
 `);
@@ -1452,7 +1438,7 @@ void foo(int x) {
 `);
   });
 
-  it('should handle fallthrough tail with loop body goto (flag+break pattern)', () => {
+  it('keeps a loop exit to a fallthrough tail: no flag variable', () => {
     expectTransform(`
 void foo(int x) {
   while (x > 0) {
@@ -1465,16 +1451,13 @@ LAB_done:
 }
 `, `
 void foo(int x) {
-  bool found = false;
   while (x > 0) {
-    if (x == 5) {
-      found = true;
-      break;
-    }
+    if (x == 5)
+      goto LAB_done;
     x = x - 1;
   }
-  if (!found)
-    return;
+  return;
+  LAB_done:
   finish();
 }
 `);
@@ -2163,7 +2146,8 @@ void foo(int x) {
 `);
   });
 
-  it('should remove orphaned switchD_caseD gotos when label no longer exists', () => {
+  it('keeps an orphaned goto and counts it: deleting it would turn a jump into a fallthrough', () => {
+    resetGotoCleanupStats();
     const output = transformCode(`
 void foo(int x) {
   switch (x) {
@@ -2175,8 +2159,11 @@ void foo(int x) {
   }
 }
 `);
-    // The goto is removed. CaseStmt.statement becomes NullStmt, emitted as whitespace.
-    assert.ok(!output.includes('goto switchD_'), `Expected orphaned goto to be removed, got:\n${output}`);
+    // A missing label means some pass deleted the block it jumped to (0062efb0 lost a
+    // goto this way at v1131). The goto stays - undefined-goto-label must stub it and the
+    // census reports the stub - and the count is the gate.
+    assert.match(output, /case 0:\s*goto switchD_00451c9b_caseD_0;\s*case 1:/);
+    assert.strictEqual(getGotoCleanupStats().orphanGoto, 1);
   });
 
   it('should NOT wrap switch case labels into a backward-goto loop', () => {
@@ -2233,14 +2220,16 @@ LAB_loop:
 }
 `, `
 void foo(int x, int y) {
-  do {
+  while (true) {
     work();
     if (x == 1) {
       reset();
       continue;
     }
     middle();
-  } while (y);
+    if (!y)
+      break;
+  }
   done();
 }
 `);

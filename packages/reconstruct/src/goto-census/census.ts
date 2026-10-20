@@ -29,7 +29,7 @@ import {
   type FunctionDecl,
   type Statement,
 } from '@ghidra-mcp/cpp-parser';
-import { buildCfg } from '@ghidra-mcp/cpp-parser/transform/cfg/index';
+import { buildCfg, buildBcfg, resolver } from '@ghidra-mcp/cpp-parser/transform/cfg/index';
 
 type Any = any;
 
@@ -87,10 +87,19 @@ export interface LabelCounts {
   ifFalse: number;
   /** `try` statements (SEH). The structurer refuses regions holding one; counted so they show. */
   tryStmts: number;
+  /**
+   * Labels on empty statements at the very end of the body - the shape
+   * `undefined-goto-label` stubs a missing label with. Raw Ghidra writes it too, for a jump
+   * to the function's end, so a tree stub is only a defect when raw defines the label
+   * somewhere ELSE.
+   */
+  endStubLabels: Set<string>;
+  /** Labels whose next real step is the function's bare return (raw side only). */
+  exitLabels: Set<string>;
 }
 
 export function countLabels(body: ASTNode, functionSymbols?: ReadonlySet<string>): LabelCounts {
-  const r: LabelCounts = { gotos: 0, labels: 0, gotoTargets: new Map(), labelNames: new Set(), byPrefix: {}, ifFalse: 0, tryStmts: 0 };
+  const r: LabelCounts = { gotos: 0, labels: 0, gotoTargets: new Map(), labelNames: new Set(), byPrefix: {}, ifFalse: 0, tryStmts: 0, endStubLabels: new Set(), exitLabels: new Set() };
   const walk = (n: Any): void => {
     if (!n || typeof n !== 'object') return;
     if (Array.isArray(n)) { for (const c of n) walk(c); return; }
@@ -116,7 +125,28 @@ export function countLabels(body: ASTNode, functionSymbols?: ReadonlySet<string>
     }
   };
   walk(body);
+  const stmts: Any[] = (body as Any)?.statements ?? [];
+  for (let i = stmts.length - 1; i >= 0; i--) {
+    const st = stmts[i];
+    if (st.kind !== NodeKind.LabelStmt || st.statement?.kind !== NodeKind.NullStmt) break;
+    r.endStubLabels.add(st.label.name);
+  }
   return r;
+}
+
+/**
+ * Labels of a body that lead straight to its bare return - nothing but scaffolding between.
+ * A stub for such a label at the function's end is the same program, not a lost block.
+ */
+export function labelsLeadingToExit(body: ASTNode): Set<string> {
+  const out = new Set<string>();
+  let g;
+  try { g = buildBcfg((body as Any).statements as Statement[], { followIsExit: true }); } catch { return out; }
+  const resolve = resolver(g);
+  for (const [k, id] of g.namedEntries) {
+    if (k.startsWith('label:') && g.nodes[resolve(id)].kind === 'exit') out.add(k.slice('label:'.length));
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------------------

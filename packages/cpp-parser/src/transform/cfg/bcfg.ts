@@ -86,6 +86,8 @@ export interface BNode {
   origin: ASTNode | null;
   /** work/test/dispatch: the region declarations visible here. */
   scope: Scope | null;
+  /** test: the atom has no side effect (see `isPureExpr`). */
+  pure: boolean;
 }
 
 /** A persistent chain of declarations, innermost first. */
@@ -118,6 +120,14 @@ export interface BcfgOptions {
   followIsExit?: boolean;
   /** Names of calls that do not return (A3). */
   noreturn?: ReadonlySet<string>;
+  /**
+   * The halt exception to A2 (design 4.2, "halt-site-fold keeps its own halt-specific
+   * exception"): a site-unique statement whose every successor up to a noreturn call is a
+   * step of the assert/halt sequence is keyed by its text, not its site. Its value only
+   * reaches the halt report, and every assert in the source expanded the sequence at its
+   * own site - copying it back is the E3 evidence class, not a change of behaviour.
+   */
+  haltException?: boolean;
 }
 
 export class Unsupported extends Error {}
@@ -126,10 +136,46 @@ const SITE_UNIQUE = /\bGetInstructionPointer\s*\(|__LINE__|__FILE__|_ReturnAddre
 
 const identity = new WeakMap<object, number>();
 let identityNext = 1;
-function identityOf(o: object): number {
+function objectIdentity(o: object): number {
   let n = identity.get(o);
   if (n === undefined) { n = identityNext++; identity.set(o, n); }
   return n;
+}
+
+/**
+ * Every copy a goto handler makes is stamped with a fresh mark (`markCopy`). An enumerable
+ * symbol property survives the transformer's rebuilding of nodes (it spreads them), and a
+ * fresh `structuredClone` drops it - so `<source offset>#<mark>` names one SITE: stable while
+ * the statement is merely carried through the passes, different the moment it is copied.
+ */
+export const COPY_MARK = Symbol.for('ghidra-mcp:goto-copy-mark');
+let copyNext = 1;
+
+/** Stamp every node of a freshly cloned subtree as one new copy. */
+export function markCopy<T>(tree: T): T {
+  const id = copyNext++;
+  const walk = (n: unknown): void => {
+    if (!n || typeof n !== 'object') return;
+    if (Array.isArray(n)) { n.forEach(walk); return; }
+    const node = n as Record<string | symbol, unknown>;
+    if (typeof node.kind === 'string') {
+      Object.defineProperty(node, COPY_MARK, { value: id, enumerable: true, configurable: true, writable: true });
+    }
+    for (const k of Object.keys(node)) {
+      if (k === 'location' || k === 'leadingTrivia' || k === 'trailingTrivia') continue;
+      const v = node[k];
+      if (v && typeof v === 'object') walk(v);
+    }
+  };
+  walk(tree);
+  return tree;
+}
+
+function identityOf(o: object): string {
+  const loc = (o as { location?: { file?: string; start?: { offset?: number } } }).location;
+  const off = loc?.start?.offset;
+  if (typeof off !== 'number') return 'obj' + objectIdentity(o);
+  return `${loc?.file ?? ''}@${off}.${(o as Record<symbol, unknown>)[COPY_MARK] ?? 0}`;
 }
 
 const textCache = new WeakMap<object, string>();
@@ -209,7 +255,7 @@ class Builder {
 
   add(kind: BNodeKind, key: string, origin: ASTNode | null = null, scope: Scope | null = null): number {
     const id = this.nodes.length;
-    this.nodes.push({ id, kind, key, next: -1, t: -1, f: -1, cases: null, dflt: -1, origin, scope });
+    this.nodes.push({ id, kind, key, next: -1, t: -1, f: -1, cases: null, dflt: -1, origin, scope, pure: false });
     return id;
   }
 
@@ -270,6 +316,7 @@ class Builder {
     }
     const text = nodeText(e);
     const id = this.add('test', SITE_UNIQUE.test(text) ? `${text}#site${identityOf(e)}` : text, e, scope);
+    this.nodes[id].pure = isPureExpr(e);
     this.nodes[id].t = t;
     this.nodes[id].f = f;
     return id;
@@ -426,6 +473,19 @@ export function buildBcfg(stmts: Statement[], opts: BcfgOptions = {}): Bcfg {
   b.nodes[entry].kind = 'entry';
   for (const g of b.pendingGotos) b.nodes[g.from].next = b.labels.get(g.label) ?? b.external('label:' + g.label);
 
+  if (opts.haltException) {
+    const resolve = resolver({ nodes: b.nodes, entry, namedEntries: new Map(), declNodes: b.declNodes });
+    for (const n of b.nodes) {
+      if (n.kind !== 'work' || !n.key.includes('#site') || !n.origin) continue;
+      let cur = resolve(n.next), ok = isHaltStep(n.origin as Statement, opts.noreturn), steps = 0;
+      while (ok && b.nodes[cur].kind === 'work' && steps++ < 8) {
+        ok = isHaltStep(b.nodes[cur].origin as Statement, opts.noreturn);
+        cur = resolve(b.nodes[cur].next);
+      }
+      if (ok && b.nodes[cur].kind === 'noreturn') n.key = n.key.replace(/#site.*$/, '');
+    }
+  }
+
   const namedEntries = new Map<string, number>();
   for (const [k, id] of b.foreignCases) namedEntries.set('case:' + k, id);
   const inside = new Map<string, number>();
@@ -440,11 +500,17 @@ export function buildBcfg(stmts: Statement[], opts: BcfgOptions = {}): Bcfg {
 /**
  * Follow scaffolding to the first node that does something. A cycle of scaffolding is an
  * empty infinite loop and resolves to the graph's `spin` node.
+ *
+ * A PURE test whose two edges lead to the same node is scaffolding too: evaluating an
+ * expression with no side effect and then going the same way either way is the same
+ * program as not evaluating it (`if (x) goto L; L:`). A test whose branch loops back to
+ * itself is never contracted - `while (x) {}` is not `{}`.
  */
 export function resolver(g: Bcfg): (id: number) => number {
   const memo = new Map<number, number>();
   const spin = g.nodes.find(n => n.kind === 'spin')!.id;
-  return (id: number): number => {
+  const testing = new Set<number>();
+  const resolve = (id: number): number => {
     const hit = memo.get(id);
     if (hit !== undefined) return hit;
     const path: number[] = [];
@@ -458,9 +524,52 @@ export function resolver(g: Bcfg): (id: number) => number {
       path.push(cur);
       cur = g.nodes[cur].next;
     }
+    const n = g.nodes[cur];
+    if (n.kind === 'test' && n.pure && !testing.has(cur) && !memo.has(cur)) {
+      testing.add(cur);
+      const a = resolve(n.t), b = resolve(n.f);
+      testing.delete(cur);
+      const r = a === b && a !== cur ? a : cur;
+      memo.set(cur, r);
+      cur = r;
+    } else if (memo.has(cur)) {
+      cur = memo.get(cur)!;
+    }
     for (const p of path) memo.set(p, cur);
     return cur;
   };
+  return resolve;
+}
+
+/**
+ * No side effect: no call, no assignment, no increment or decrement, no `volatile`. A read
+ * through a pointer is pure for this purpose - the compiler deletes an unused load just the
+ * same, and the original only had the test because it branched on it.
+ */
+export function isPureExpr(e: ASTNode): boolean {
+  const walk = (x: ASTNode): boolean => {
+    if (!x || typeof x !== 'object') return true;
+    switch (x.kind) {
+      case NodeKind.CallExpr:
+      case NodeKind.AssignExpr:
+      case NodeKind.PostfixExpr:
+        return false;
+      case NodeKind.UnaryExpr: {
+        const op = (x as unknown as { operator: string }).operator;
+        if (op === '++' || op === '--') return false;
+        break;
+      }
+      default:
+        if (String(x.kind) === 'NewExpr' || String(x.kind) === 'DeleteExpr') return false;
+    }
+    if (String(x.kind).endsWith('Type')) {
+      try { if (/\bvolatile\b/.test(emit(x as never))) return false; } catch { return false; }
+      return true;
+    }
+    for (const c of getChildren(x)) if (!walk(c)) return false;
+    return true;
+  };
+  return walk(e);
 }
 
 /** The identifiers an expression or statement READS or writes (not member names, not types). */
@@ -486,4 +595,31 @@ export function usedNames(n: ASTNode): Set<string> {
 export function lookup(scope: Scope | null, name: string): DeclStmt | null {
   for (let s = scope; s; s = s.parent) if (s.name === name) return s.decl;
   return null;
+}
+
+/**
+ * One step of the assert/halt sequence Ghidra shows for the halt macro: a constant line
+ * number, the instruction-pointer read, a call to a halt routine, or the noreturn exit.
+ */
+export function isHaltStep(s: Statement | null, noreturn?: ReadonlySet<string>): boolean {
+  if (!s || s.kind !== NodeKind.ExprStmt) return false;
+  let e = stripParens((s as unknown as { expression: Expression }).expression);
+  if (e.kind === NodeKind.AssignExpr) {
+    const right = stripParens((e as unknown as { right: Expression }).right);
+    if (isConstantExpr(right)) return true;
+    e = right;
+  }
+  const name = calleeName(e);
+  if (name === null) return false;
+  return name === 'GetInstructionPointer' || /Halt|FatalError|Assert/.test(name) || !!noreturn?.has(name);
+}
+
+function isConstantExpr(e: Expression): boolean {
+  e = stripParens(e);
+  if (e.kind === NodeKind.IntegerLiteral || e.kind === NodeKind.CharLiteral || e.kind === NodeKind.StringLiteral) return true;
+  if (e.kind === NodeKind.UnaryExpr && (e as unknown as { operator: string }).operator === '-') {
+    return isConstantExpr((e as unknown as { operand: Expression }).operand);
+  }
+  if (e.kind === NodeKind.CStyleCastExpr) return isConstantExpr((e as unknown as { expression: Expression }).expression);
+  return false;
 }

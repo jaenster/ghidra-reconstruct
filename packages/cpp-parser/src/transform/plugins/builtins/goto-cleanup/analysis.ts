@@ -27,6 +27,7 @@ import type { GotoInfo, LabelInfo, LabelKind, NestedLabelInfo, RequiredGotoClean
 import { DEFAULT_NORETURN_FUNCTIONS } from './types.js';
 import { getGotoLabel, isLoopStmt, isSimpleLabelName, getLoopBody } from './helpers.js';
 import { alwaysTerminatesWithGoto, countGotosToLabel } from './cross-scope.js';
+import { cutAtCase } from './copy-safety.js';
 
 /**
  * Count all gotos targeting each label recursively within a set of statements.
@@ -302,11 +303,12 @@ export function discoverNestedLabels(
         const labelStmt = stmt as LabelStmt;
         const name = labelStmt.label.name;
         if (isSimpleLabelName(name) && !topLevelLabels.has(name) && !result.has(name)) {
-          const tail: Statement[] = [labelStmt.statement, ...compound.slice(i + 1)];
+          // The tail runs to the end of THIS compound, or to the next case label when the
+          // compound is a switch body (copy-safety.ts). Cut there, its fall-off runs into
+          // the next arm; otherwise its fallthrough point is this compound's.
+          const { tail, cut } = cutAtCase([labelStmt.statement, ...compound.slice(i + 1)]);
           const kind = classifyLabelTail(tail, options);
-          // The tail runs to the end of THIS compound, so its fallthrough point is
-          // this compound's fallthrough point.
-          result.set(name, { name, tailStatements: tail, kind, fallthroughReturns: reachesEnd });
+          result.set(name, { name, tailStatements: tail, kind, fallthroughReturns: reachesEnd && !cut });
         }
       } else if (stmt.kind === NodeKind.CaseStmt || stmt.kind === NodeKind.DefaultStmt) {
         // A label as the FIRST statement of a case/default (e.g. `case N: LBL: ...`)

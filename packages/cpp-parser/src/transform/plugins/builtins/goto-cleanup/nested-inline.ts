@@ -27,6 +27,7 @@ import type { LabelInfo, RequiredGotoCleanupOptions } from './types.js';
 import { MAX_INLINE_TAIL_SIZE } from './types.js';
 import { discoverNestedLabels, countGotosInStatements } from './analysis.js';
 import { deepCloneStatements } from './helpers.js';
+import { holdsLabelOrCase, workNodes } from './copy-safety.js';
 import { inlineGotoInNestedStmt, createReturnStmt, canFallThrough } from './tail-inline.js';
 
 // ============================================
@@ -290,7 +291,10 @@ export function processNestedTailInlining(
     }
 
     const tail = info.tailStatements;
-    if (tail.length === 0 || tail.length > MAX_INLINE_TAIL_SIZE) continue;
+    // Size in work nodes, recursively; and never a tail holding a label or case label
+    // (copy-safety.ts) - copying one is where every `__dupN` label came from.
+    if (tail.length === 0 || workNodes(tail) > MAX_INLINE_TAIL_SIZE) continue;
+    if (holdsLabelOrCase(tail)) continue;
 
     // Safety: only return/noreturn/cleanup-fallthrough tails for nested labels
     if (info.kind !== 'exit-return' && info.kind !== 'cleanup-return'
