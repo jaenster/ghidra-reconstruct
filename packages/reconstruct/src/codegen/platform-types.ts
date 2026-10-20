@@ -340,6 +340,10 @@ export function isCharacterValueType(type: string): boolean {
  * - Already-prefixed "0x..." values pass through
  */
 export function normalizeDataValue(value: string): string {
+  // Ghidra values an IEEE infinity as the WORD `+Infinity` (DOUBLE_0074af20); C++ has no
+  // such literal. <cmath>'s HUGE_VAL is the double +inf, exact in any float slot too.
+  if (value === '+Infinity' || value === 'Infinity') return 'HUGE_VAL';
+  if (value === '-Infinity') return '-HUGE_VAL';
   // Already a valid C literal
   if (value === '0' || value === 'nullptr' || value.startsWith('0x') || value.startsWith('-')) return value;
   // GUID format: 00000000-0000-0000-0000-000000000000
