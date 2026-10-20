@@ -4838,6 +4838,19 @@ export function buildFuncPtrArgCastTables(
     .filter((dt) => dt.kind === 'UNION' && !!dt.name)
     .map((dt) => dt.name as string);
 
+  // Byte offset of each field, and each aggregate's size: what an address computed
+  // through a member (`p->szName + 1`) is, for the passes that compare addresses.
+  const structFieldOffsets: Record<string, Record<string, number>> = {};
+  const aggregateSizes: Record<string, number> = {};
+  for (const dt of dataTypes) {
+    if ((dt.kind !== 'STRUCTURE' && dt.kind !== 'UNION') || !dt.name || !('fields' in dt)) continue;
+    if (typeof dt.size === 'number') aggregateSizes[dt.name] = dt.size;
+    const into: Record<string, number> = structFieldOffsets[dt.name] ?? (structFieldOffsets[dt.name] = {});
+    for (const f of (dt as import('../types.js').ExtractedStruct).fields ?? []) {
+      if (f.name && typeof f.offset === 'number') into[f.name] = f.offset;
+    }
+  }
+
   // Which fields hold a FUNCTION POINTER, and which funcdef declares its
   // contract. `structFields` cannot answer this: a funcdef field is emitted as
   // an inline declarator (`void *(*pfnLoad)()`), which `emittedFieldType`
@@ -5252,6 +5265,8 @@ export function buildFuncPtrArgCastTables(
     convertingAggregates: [...convertingAggregates],
     aggregateMembers,
     unionNames,
+    structFieldOffsets,
+    aggregateSizes,
     funcdefDecls,
     structFieldFuncdefs,
     fieldFuncdefs,

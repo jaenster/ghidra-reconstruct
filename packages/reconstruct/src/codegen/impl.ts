@@ -768,6 +768,10 @@ export interface FuncPtrArgCastTables {
   aggregateMembers?: Record<string, string[]>;
   /** The aggregates that are unions */
   unionNames?: string[];
+  /** Aggregate name -> field name -> byte offset. */
+  structFieldOffsets?: Record<string, Record<string, number>>;
+  /** Aggregate name -> size in bytes. */
+  aggregateSizes?: Record<string, number>;
   /**
    * Funcdef name → the return and parameter spellings the funcdef declares. A
    * call made THROUGH a function-pointer field or variable has no callee name
@@ -2505,6 +2509,8 @@ function transformDecompiledCode(
       perPluginOptions['pseudo-op-lower'] = {
         stackSlots: enclosing?.stackSlots,
         unionNames: context.funcPtrArgCasts.unionNames,
+        structFieldOffsets: context.funcPtrArgCasts.structFieldOffsets,
+        aggregateSizes: context.funcPtrArgCasts.aggregateSizes,
         mode: artifactLoweringMode(),
         onArtifact: (r: ArtifactRecord) => reportArtifact(funcName, funcAddress, r),
         globalTypes: context.funcPtrArgCasts.globalTypes,

@@ -73,6 +73,7 @@ import { createExprShape, type ExprShapeTables } from './expr-shape.js';
 import { calleeName, unwrapParens, type TypeShape } from './call-arg-cast.js';
 import { lowerFlagConditions, lowerNegTestConditions } from './flag-conditions.js';
 import { lowerCarryChains, lowerWholeConcat, lowerWholeZeroTest } from './carry-chains.js';
+import { lowerStringIntrinsics, localArraysOf } from './string-intrinsics.js';
 
 // ============================================
 // REPORTING
@@ -111,6 +112,10 @@ export interface PseudoOpLowerOptions extends PluginOptions {
   stackSlots?: ReadonlyArray<{ name: string; offset: number; size: number }>;
   /** Aggregates that are unions: their members overlap. */
   unionNames?: readonly string[];
+  /** Aggregate name -> field name -> byte offset. */
+  structFieldOffsets?: Record<string, Record<string, number>>;
+  /** Aggregate name -> size in bytes. */
+  aggregateSizes?: Record<string, number>;
 }
 
 // ============================================
@@ -1451,7 +1456,14 @@ function createPseudoOpLowerTransformer(options: PseudoOpLowerOptions = {}): Tra
       ? (() => {
         const list = (registersRetired as unknown as { statements: Statement[] }).statements;
         const deps = { classify, isPure, locals: new Set(localTypes.keys()) };
-        const next = lowerCarryChains(lowerNegTestConditions(lowerFlagConditions(list, deps), deps), carryDeps);
+        const stringDeps = {
+          shape: (e: Expression) => shape(e), isPure, locals: deps.locals,
+          localArrays: localArraysOf(body),
+          stackSlots: options.stackSlots, fieldOffsets: options.structFieldOffsets,
+          structFields: options.structFields, aggregateSizes: options.aggregateSizes,
+        };
+        const next = lowerStringIntrinsics(
+          lowerCarryChains(lowerNegTestConditions(lowerFlagConditions(list, deps), deps), carryDeps), stringDeps);
         return next === list ? registersRetired : ({ ...(registersRetired as object), statements: next } as unknown as ASTNode);
       })()
       : registersRetired;
