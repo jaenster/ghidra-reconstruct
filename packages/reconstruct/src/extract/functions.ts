@@ -896,7 +896,9 @@ function mapFunctionInfo(info: GhidraFunctionInfo): ExtractedFunction {
     signature: info.signature,
     returnType: info.returnType,
     parameters: (info.parameters ?? []).map(mapParameter),
-    localVariables: (info.localVariables ?? []).map(mapVariable),
+    // A forced union facet is stored as a HASH local named `unionfacet...`: a marker
+    // for the decompiler, not a variable of the function.
+    localVariables: (info.localVariables ?? []).filter(v => !/^unionfacet\d*(?:_|$)/.test(v.name ?? '')).map(mapVariable),
     namespace: info.namespace,
     callingConvention: info.callingConvention,
     size: info.size,

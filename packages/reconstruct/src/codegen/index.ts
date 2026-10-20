@@ -76,7 +76,7 @@ import { buildNamespaceResolution, namespaceResolution, renderNamespace } from '
 import { setInteriorLabelSymbols, resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, setDeclarationClosureDataContent, getDeclarationClosureReport, isUnreferenceableArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, wasGlobalClaimed, findDuplicateLinkageNames, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, setInitializerAddressTable, setInitializerFunctionAddresses, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType, emittedNamespaceOf, getDeclaredNames, initializerAddressReferences, addInitializerAddressReferences, markUnnamedImportSlots } from './globals-header.js';
 import { normalizeDataAddress, stringDefinition } from './declaration-closure.js';
 import { harvestAnnotatedParameterTypes } from './win32-signatures.js';
-import { isPlatformOrBuiltinType, isLibraryType, generatePlatformHeader, oddWidthTypesSpelled, placeholderTypesUsedIn, normalizeDataValue, arrayRowTypedefLines, arrayRowReturn, arrayRowSpelling, GHIDRA_PSEUDO_OP_RESULT_TYPES, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, platformDefinedFunctionNames, platformVoidPointerFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
+import { PLATFORM_FUNCDEF_NAMES, isPlatformOrBuiltinType, isLibraryType, generatePlatformHeader, oddWidthTypesSpelled, placeholderTypesUsedIn, normalizeDataValue, arrayRowTypedefLines, arrayRowReturn, arrayRowSpelling, GHIDRA_PSEUDO_OP_RESULT_TYPES, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, platformDefinedFunctionNames, platformVoidPointerFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
 import { createOverrideRegistry } from '../overrides/index.js';
 import { alignPathCase, assertNoCaseCollidingFiles } from './path-case.js';
 import { createLibraryRegistry } from '../library/index.js';
@@ -564,6 +564,30 @@ export function generateProject(
   return project;
 }
 
+/**
+ * Excluded-namespace functions kept code reaches whose name the platform header already
+ * declares (set by the exclusion step of stage 1, read when the function-pointer tables
+ * are built). Module state, reset at every stage 1.
+ */
+let platformDeclaredModelFunctions: ExtractedFunction[] = [];
+
+/** A Ghidra union-facet marker symbol (`UnionFacetSymbol`, base name `unionfacet`). */
+export function isUnionFacetMarker(name: string | undefined): boolean {
+  return !!name && /^unionfacet\d*(?:_|$)/.test(name);
+}
+
+/** Remove union-facet markers from every function's local list, in place. */
+export function dropUnionFacetMarkers(functions: Array<{ localVariables?: Array<{ name: string }> }>): number {
+  let dropped = 0;
+  for (const f of functions) {
+    if (!f.localVariables?.some(v => isUnionFacetMarker(v.name))) continue;
+    const kept = f.localVariables.filter(v => !isUnionFacetMarker(v.name));
+    dropped += f.localVariables.length - kept.length;
+    f.localVariables = kept;
+  }
+  return dropped;
+}
+
 export function generateProjectStage1(
   name: string,
   functions: ExtractedFunction[],
@@ -578,6 +602,12 @@ export function generateProjectStage1(
 ): GenerationState {
   const genT0 = Date.now();
   beginShard(shard);
+  // Ghidra's union-facet markers are not variables: a forced union facet is recorded as
+  // a dynamic (HASH) local named `unionfacet...` whose type is the union, and the
+  // decompiler prints the access through the chosen member, never the symbol. Dropped
+  // before anything reads the local list, so no rename, slot, alias or type dependency
+  // is made from one. Covers snapshots taken before extraction filtered them.
+  dropUnionFacetMarkers(functions);
   // Before anything reads a type: one spelling for every Ghidra placeholder name.
   respellPlaceholderTypes(functions, globals as { dataType?: string; suggestedType?: string }[], dataTypes);
   if (!shard || shard.index === 0) {
@@ -668,7 +698,7 @@ export function generateProjectStage1(
   const funcDefDataTypes = dataTypes.filter(
     dt => dt.kind === 'FUNCTION_DEFINITION'
   ) as import('../types.js').ExtractedFunctionDefinition[];
-  setKnownFuncDefTypedefs(funcDefDataTypes.map(dt => dt.name));
+  setKnownFuncDefTypedefs([...funcDefDataTypes.map(dt => dt.name), ...PLATFORM_FUNCDEF_NAMES]);
   // Which type names have members at all, resolved through Ghidra's typedef
   // chain. `struct-field` asks this before turning `*(T*)(base + off)` into
   // `((T*)base)->field_off`; without it a Win32 pointer typedef looked like a
@@ -755,6 +785,10 @@ export function generateProjectStage1(
   setPlatformDeclaredNames(new Set<string>());
 
   const excludeNs = options.excludeNamespaces ?? [];
+  // Excluded-namespace functions kept code reaches whose name the platform header
+  // already declares (`compiler::_except_handler3`): no body is emitted, but their
+  // address is still taken, so the function-pointer passes need their signature.
+  platformDeclaredModelFunctions = [];
   if (excludeNs.length > 0) {
     const nsMatches = (ns: string | undefined | null): boolean => {
       if (!ns) return false;
@@ -810,6 +844,7 @@ export function generateProjectStage1(
       isKnownType,
     });
     const emittedByClosure = new Set<ExtractedFunction>(selection.emit);
+    platformDeclaredModelFunctions = selection.alreadySpokenFor;
 
     const fnBefore = functions.length;
     functions = functions.filter(f => !nsMatches(f.namespace) || emittedByClosure.has(f));
@@ -3419,7 +3454,7 @@ function generateFilesForFunctions(
   // are invariant in C++, so the original source had to write a cast there; the
   // `funcptr-arg-cast` transform emits it, but only where the MODEL says the two
   // prototypes actually differ. Build that comparison table here, once.
-  context.funcPtrArgCasts = buildFuncPtrArgCastTables(functions, analyzedGlobals, dataTypes.filter(dt => dt.kind === 'FUNCTION_DEFINITION') as import('../types.js').ExtractedFunctionDefinition[], dataTypes, strings ?? []);
+  context.funcPtrArgCasts = buildFuncPtrArgCastTables(functions, analyzedGlobals, dataTypes.filter(dt => dt.kind === 'FUNCTION_DEFINITION') as import('../types.js').ExtractedFunctionDefinition[], dataTypes, strings ?? [], platformDeclaredModelFunctions);
   // Data initializers are emitted from strings, not an AST — the globals emitter
   // needs the same prototype tables to decide whether a function address stored
   // in a slot needs the cast C++ has never let it do implicitly.
@@ -4763,6 +4798,7 @@ export function buildFuncPtrArgCastTables(
   funcDefs: import('../types.js').ExtractedFunctionDefinition[],
   dataTypes: ExtractedDataType[],
   strings: ReadonlyArray<ExtractedString> = [],
+  platformDeclaredModelFunctions: ReadonlyArray<ExtractedFunction> = [],
 ): FuncPtrArgCastTables {
   const funcdefSignatures: Record<string, string> = {};
   // Each funcdef's calling convention as GHIDRA records it. Not the emitted keyword:
@@ -4812,6 +4848,19 @@ export function buildFuncPtrArgCastTables(
   const sameString = (a: string, b: string) => a === b;
   const sameSlots = (a: Record<number, string>, b: Record<number, string>) =>
     JSON.stringify(a) === JSON.stringify(b);
+
+  // Their SIGNATURE only: whether a stored address needs a cast to a differing funcdef
+  // slot is a question about the function's contract, which the model knows. Their
+  // parameter and return slots stay the header's (functionParamTypes etc. below).
+  for (const fn of platformDeclaredModelFunctions) {
+    if (!fn.name) continue;
+    const params = [...(fn.parameters ?? [])].sort((a, b) => a.ordinal - b.ordinal);
+    const bare = fn.name.replace(/[^A-Za-z0-9_]/g, '_');
+    const qualified = fn.namespace ? `${fn.namespace}::${bare}` : bare;
+    indexBothSpellings(functionSignatures, ambiguousSig, qualified, bare,
+      signatureKey(fn.returnType ?? 'void', params.map(p => p.dataType)), sameString);
+    indexBothSpellings(functionGhidraConventions, ambiguousConv, qualified, bare, fn.callingConvention ?? '', sameString);
+  }
 
   for (const fn of functions) {
     if (!fn.name) continue;
