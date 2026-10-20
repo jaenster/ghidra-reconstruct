@@ -1131,7 +1131,9 @@ function emitFieldLines(
     if (fd) {
       const fdParams = fd.parameters.map(p => sigType(p.dataType)).join(', ');
       const fdVarArgs = fd.hasVarArgs ? (fdParams ? ', ...' : '...') : '';
-      lines.push(`    /* ${offsetHex} */ ${normalizeSignatureType(fd.returnType)} (${pointerConvention(fd.callingConvention)}*${name})(${fdParams}${fdVarArgs});${comment}`);
+      // The return goes through returnSigType like the typedef's own: `fnAppModeRun * *`
+      // (D2AppModeBootstrapStrc.pfnInit) is `fnAppModeRun *` here too.
+      lines.push(`    /* ${offsetHex} */ ${returnSigType(fd.returnType)} (${pointerConvention(fd.callingConvention)}*${name})(${fdParams}${fdVarArgs});${comment}`);
       i++;
       continue;
     }
