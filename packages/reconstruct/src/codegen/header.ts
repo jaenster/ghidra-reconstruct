@@ -1754,7 +1754,9 @@ export function generateFunctionDefinitionDeclaration(type: ExtractedFunctionDef
 
   const varArgs = type.hasVarArgs ? (params ? ', ...' : '...') : '';
 
-  return `typedef ${normalizeSignatureType(type.returnType)} (${pointerConvention(type.callingConvention)}*${type.name})(${params}${varArgs});`;
+  // The return type goes through the same spelling the parameters do: `fnAppModeRun * *`
+  // (D2AppModeInitFunc) is `fnAppModeRun *` once the funcdef typedef carries one level.
+  return `typedef ${returnSigType(type.returnType)} (${pointerConvention(type.callingConvention)}*${type.name})(${params}${varArgs});`;
 }
 
 /**
