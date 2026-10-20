@@ -104,9 +104,23 @@ function isEmittableGlobal(g: AnalyzedDataSymbol): boolean {
  * TU could see declared — including `Alignment LAB_00687d4a = align(1);`, which
  * is padding, not a variable. The two sets must be the same set.
  */
+/**
+ * A `DAT_` placeholder at an address no image maps - the null page or kernel space
+ * (`DAT_00000000`, `DAT_c0000001`). It is not data: every body that names it is a
+ * deliberate fault that `nullptr-cleanup` lowers to a volatile access at the address,
+ * and a global by that name would turn the fault into an ordinary write.
+ */
+export function isUnmappedAddressPlaceholder(name: string): boolean {
+  const m = /^_?DAT_([0-9a-fA-F]{8})$/.exec(name);
+  if (!m) return false;
+  const addr = parseInt(m[1], 16);
+  return addr < 0x1000 || addr >= 0x80000000;
+}
+
 export function isDataArtifact(g: AnalyzedDataSymbol, allNames: Set<string>): boolean {
   const name = g.suggestedName || g.name;
   return isSwitchTableSymbol(name)
+    || isUnmappedAddressPlaceholder(name)
     || isJumpTableArtifact(g)
     || isArrayElementSymbol(name, allNames);
 }

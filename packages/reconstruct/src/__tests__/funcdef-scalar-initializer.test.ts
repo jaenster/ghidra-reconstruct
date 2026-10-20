@@ -21,3 +21,13 @@ describe('renderGlobalScalarInitializer: a funcdef slot holding a function addre
     setInitializerAddressTable(undefined);
   });
 });
+
+import { isUnmappedAddressPlaceholder } from '../codegen/globals-header.js';
+describe('isUnmappedAddressPlaceholder', () => {
+  it('is the null page and kernel space, not the image', () => {
+    assert.ok(isUnmappedAddressPlaceholder('DAT_00000000'));
+    assert.ok(isUnmappedAddressPlaceholder('_DAT_00000018'));
+    assert.ok(isUnmappedAddressPlaceholder('DAT_c0000001'));
+    assert.ok(!isUnmappedAddressPlaceholder('DAT_0074a2a0'));
+  });
+});

@@ -2595,6 +2595,7 @@ function transformDecompiledCode(
     // integers. The return form is only safe once the return type is known not to
     // be a pointer, which only the caller can say.
     perPluginOptions['nullptr-cleanup'] = {
+      globalTypes: context?.funcPtrArgCasts?.globalTypes,
       zeroForAssignedNullptr: true,
       zeroForReturnedNullptr: enclosing?.returnsNonPointer === true,
     };
