@@ -116,10 +116,14 @@ LAB_0061bf1a:
   return nTicks;
 }`;
 
-  it('0061bee0 shape: the join is sunk into both arms (E6), the goto skips, the late run nests', () => {
+  // The join `*p = nTicks;` would have to be sunk into both arms (E6). The binary has the
+  // label entered by a fall-through and a conditional jump only, so the copy policy keeps
+  // the goto (audit fixture 0061bee0 LAB_0061bf1a, design section 11); the guard still
+  // reads as one test.
+  it('0061bee0 shape: the join is not copied, the guard keeps its one goto', () => {
     const out = pipeline(NESTED);
-    assert.equal(gotos(out), 0, out);
-    assert.match(out, /nTicks = nTicks \+ 0xf;\s*\*p = nTicks;\s*\} else \{\s*if \(X\(a\) == 2\) \{\s*\*p = X\(nTicks \+ 1\);\s*if \(b == 2\) \{\s*nTicks = nTicks \+ 9;\s*\*p = nTicks;/, out);
+    assert.equal(gotos(out), 1, out);
+    assert.match(out, /if \(X\(a\) != 2 \|\| \(\*p = X\(nTicks \+ 1\) , b != 2\)\)\s*goto LAB_0061bf1a;/, out);
   });
 
   it('0061bee0 shape: compiled, same behaviour', { skip: !hasNativeGpp() }, () => {

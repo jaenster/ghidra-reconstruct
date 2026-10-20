@@ -17,12 +17,7 @@ import {
   buildThenBranch,
   collectIdentifierNames,
   createBreakStmt,
-  createFlagAssignStmt,
-  createFlagDecl,
-  createIfNotFlag,
-  generateUniqueName,
   getLoopBody,
-  hasTopLevelDeclOrLabel,
   negateCondition,
 } from './helpers.js';
 import { stripTerminalGoto } from './cross-scope.js';
@@ -212,27 +207,11 @@ export function handleLoopBodyGoto(
     return [...prefix, updatedLoop, ...tail];
   }
 
-  // Complex case: code between loop and label → flag+break+guard
-  if (hasTopLevelDeclOrLabel(between)) return null;
-
-  const flagName = generateUniqueName('found', usedNames);
-  const flagDecl = createFlagDecl(flagName, loopStmt);
-  const assignStmt = createFlagAssignStmt(flagName, gotoInfo.ifStmt.thenBranch);
-  const breakStmt = createBreakStmt(gotoInfo.ifStmt.thenBranch);
-  const thenBranch = buildThenBranch([assignStmt, breakStmt], gotoInfo.ifStmt.thenBranch);
-
-  const rewrittenIf = updateNode(gotoInfo.ifStmt, {
-    thenBranch,
-    elseBranch: null,
-  });
-
-  const newBodyStmts = bodyCompound.statements.map((s, idx) =>
-    idx === loopGotoIndex ? rewrittenIf : s
-  );
-  const newBody = updateNode(bodyCompound, { statements: newBodyStmts });
-  const updatedLoop = updateNode(loopStmt, { body: newBody } as any);
-  const guardIf = createIfNotFlag(flagName, between, loopStmt as Statement);
-
-  const prefix = stmts.slice(0, loopIndex);
-  return [...prefix, flagDecl, updatedLoop, guardIf, ...tail];
+  // Code between the loop and the label: the exit skips it, the loop's own exit runs it.
+  // There is no flag-free structure for that here - a `bool found` set before the break and
+  // tested after the loop is a variable the binary does not have, and the validator could
+  // not prove it anyway (design 3: no flag variables). The structurer (structure.ts,
+  // loops.ts) moves the block into the loop or swaps the exits when that is possible;
+  // otherwise the goto stays.
+  return null;
 }

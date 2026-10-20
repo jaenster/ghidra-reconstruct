@@ -10,11 +10,13 @@
  *                                            loops before step 3; one E6 copy of a tail
  *                                            with no instruction evidence kept since the
  *                                            2026-10-20 E6 rules (28 -> 29)
- *   TXT_ParseDataAndPutIntoStructure 006bd780  five halt sites cross-jumped to one tail
+ *   TXT_ParseDataAndPutIntoStructure 006bd780  five halt sites cross-jumped to one tail;
+ *                                            loop exits moved into their loops (step 7)
  *   QUEST_OnPlayerJoinGame 00546270          a rotated loop entered at its body
- *   AUTOMAP_RevealUnitsInRoom 00458dc0       15 jumps to a latch that does work (for-loop
- *                                            recovery is step 7; pinned as kept); one arm
- *                                            crossing (E6) structured in step 6
+ *   AUTOMAP_RevealUnitsInRoom 00458dc0       jumps to a latch that does work: since step 7
+ *                                            `for (pUnit = ...; pUnit != 0; pUnit = next)`
+ *                                            with `continue`; one arm crossing (E6) from
+ *                                            step 6
  *   MakeMissile 004cd540                     the first arm-crossing fixture (step 6):
  *                                            LAB_004cd678 `v <<= 8` into the else arm (E6);
  *                                            LAB_004cd774 (9 work nodes, no evidence) kept
@@ -37,9 +39,9 @@ const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtur
 
 const CASES: { file: string; raw: number; after: number }[] = [
   { file: 'ITEM_DeserializeFromBitBuffer_0062cbe0', raw: 35, after: 29 },
-  { file: 'TXT_ParseDataAndPutIntoStructure_006bd780', raw: 24, after: 24 },
+  { file: 'TXT_ParseDataAndPutIntoStructure_006bd780', raw: 24, after: 15 },
   { file: 'QUEST_OnPlayerJoinGame_00546270', raw: 12, after: 6 },
-  { file: 'AUTOMAP_RevealUnitsInRoom_00458dc0', raw: 6, after: 5 },
+  { file: 'AUTOMAP_RevealUnitsInRoom_00458dc0', raw: 6, after: 2 },
   { file: 'MakeMissile_004cd540', raw: 3, after: 1 },
 ];
 
@@ -48,6 +50,15 @@ function body(root: ASTNode): Statement[] {
     if (n.kind === NodeKind.FunctionDecl && (n as FunctionDecl).body) return ((n as FunctionDecl).body as CompoundStmt).statements;
   }
   throw new Error('no function body');
+}
+function isVoid(root: ASTNode): boolean {
+  for (const n of traverseAST(root)) {
+    if (n.kind === NodeKind.FunctionDecl && (n as FunctionDecl).body) {
+      const t = (n as FunctionDecl).returnType as unknown as { name?: string; kind: string };
+      return t?.name === 'void';
+    }
+  }
+  return false;
 }
 const gotos = (s: Statement[]) => [...countGotoTargets(s).values()].reduce((a, b) => a + b, 0);
 function caseLabels(s: Statement[]): number {
@@ -65,7 +76,8 @@ describe('structuring fixtures (v1131)', () => {
       resetGotoCleanupStats();
       const after = body(gotoCleanupPlugin.createTransformer()(ast) as ASTNode);
       const proof = isUnfolding(before, after, {
-        externalGotoCounts: countGotoTargets(before), followIsExit: false,
+        // Falling off a void function's body is its return; off any other it is not.
+        externalGotoCounts: countGotoTargets(before), followIsExit: isVoid(ast),
         noreturn: DEFAULT_NORETURN_FUNCTIONS, haltException: true,
       });
       assert.ok(proof.ok, proof.reason);

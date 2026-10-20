@@ -59,6 +59,9 @@ export function accept(
   candidate: Statement[] | null,
   handler: string,
   vctx: ValidateContext,
+  // The before side the validator proves against, when a lemma pass applied its lemma to it
+  // (design 3.1). The reachability net and the goto accounting still read the real before.
+  proofBefore?: Statement[],
 ): Statement[] | null {
   // The copies the handler announced belong to this candidate only.
   const copies = takeCopies();
@@ -72,7 +75,8 @@ export function accept(
   }
   // The proof of equivalence (validate.ts). In log mode a refusal is reported and the
   // candidate kept; in enforce mode it is dropped and the goto stays.
-  if (!validateCandidate(before, candidate, handler, vctx)) return null;
+  // A lemma pass's proof is against the lemma-applied before; the event says so.
+  if (!validateCandidate(proofBefore ?? before, candidate, proofBefore ? `${handler}+lemma` : handler, vctx)) return null;
   noteRewrite(before, candidate);
   commitCopies(copies);
   return candidate;

@@ -38,7 +38,7 @@ import type {
 } from '../ast/nodes.js';
 import { emit } from '../emit/index.js';
 import { TriviaKind } from '../lexer/trivia.js';
-import { isPureExpr } from '../transform/cfg/bcfg.js';
+import { canonicalComparison, isPureExpr } from '../transform/cfg/bcfg.js';
 
 export class KeyTable {
   private ids = new Map<string, number>();
@@ -140,6 +140,16 @@ export class SkeletonEmitter {
     return `T(${this.keys.id(key)});`;
   }
 
+  /** An expression evaluated for its effect: one T per comma operand, in order. */
+  effect(e: Expression): string {
+    const u = strip(e);
+    if (u.kind === NodeKind.BinaryExpr && (u as unknown as { operator: string }).operator === ',') {
+      const b = u as unknown as { left: Expression; right: Expression };
+      return `(${this.effect(b.left)}, ${this.effect(b.right)})`;
+    }
+    return `T(${this.keys.id('e:' + text(u))})`;
+  }
+
   cond(e: Expression): string {
     e = strip(e);
     if (e.kind === NodeKind.BoolLiteral) return (e as unknown as { value: boolean }).value ? 'true' : 'false';
@@ -150,7 +160,12 @@ export class SkeletonEmitter {
     if (e.kind === NodeKind.BinaryExpr) {
       const b = e as unknown as { operator: string; left: Expression; right: Expression };
       if (b.operator === '&&' || b.operator === '||') return `(${this.cond(b.left)} ${b.operator} ${this.cond(b.right)})`;
+      // The comma operator: the left side is work, the right side the condition.
+      if (b.operator === ',') return `(${this.effect(b.left)}, ${this.cond(b.right)})`;
     }
+    // One atom per comparison with an integer literal, as the validator reads it.
+    const canon = canonicalComparison(e);
+    if (canon) return canon.negate ? `!(${this.cond(canon.e)})` : this.cond(canon.e);
     if (e.kind === NodeKind.ConditionalExpr) {
       const q = e as unknown as { condition: Expression; thenExpr: Expression; elseExpr: Expression };
       return `(${this.cond(q.condition)} ? ${this.cond(q.thenExpr)} : ${this.cond(q.elseExpr)})`;
@@ -191,7 +206,7 @@ export class SkeletonEmitter {
         const n = s as ForStmt;
         const init = n.init ? this.stmt(n.init) : '';
         const c = n.condition ? this.cond(n.condition) : '';
-        const inc = n.increment ? `T(${this.keys.id('e:' + text(n.increment))})` : '';
+        const inc = n.increment ? this.effect(n.increment) : '';
         return `{ ${init} for (; ${c}; ${inc}) ${this.inLoop(() => this.stmt(n.body))} }`;
       }
       case NodeKind.SwitchStmt: {

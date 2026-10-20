@@ -203,6 +203,39 @@ function constTruth(e: Expression): boolean | null {
   return null;
 }
 
+function isIntegerLiteral(e: Expression): boolean {
+  e = stripParens(e);
+  if (e.kind === NodeKind.UnaryExpr && (e as unknown as { operator: string }).operator === '-') {
+    e = stripParens((e as unknown as { operand: Expression }).operand);
+  }
+  return e.kind === NodeKind.IntegerLiteral || e.kind === NodeKind.CharLiteral;
+}
+
+/**
+ * The canonical form of a comparison with an integer literal on one side: `<` or `==`,
+ * possibly negated. Null for anything else (and for the canonical forms themselves).
+ */
+export function canonicalComparison(e: Expression): { e: Expression; negate: boolean } | null {
+  e = stripParens(e);
+  if (e.kind !== NodeKind.BinaryExpr) return null;
+  const b = e as unknown as { operator: string; left: Expression; right: Expression };
+  // `!=` is `!(==)` for every type, NaN included; the order comparisons only with an
+  // integer literal.
+  if (b.operator === '!=') {
+    return { e: { kind: NodeKind.BinaryExpr, operator: '==', left: b.left, right: b.right, location: e.location, leadingTrivia: [], trailingTrivia: [] } as unknown as Expression, negate: true };
+  }
+  if (!isIntegerLiteral(b.left) && !isIntegerLiteral(b.right)) return null;
+  const mk = (op: string, left: Expression, right: Expression): Expression =>
+    ({ kind: NodeKind.BinaryExpr, operator: op, left, right, location: e.location, leadingTrivia: [], trailingTrivia: [] }) as unknown as Expression;
+  switch (b.operator) {
+    case '>': return { e: mk('<', b.right, b.left), negate: false };
+    case '>=': return { e: mk('<', b.left, b.right), negate: true };
+    case '<=': return { e: mk('<', b.right, b.left), negate: true };
+    case '!=': return { e: mk('==', b.left, b.right), negate: true };
+    default: return null;
+  }
+}
+
 const NORETURN_WARNING = 'WARNING: Subroutine does not return';
 
 function calleeName(e: Expression): string | null {
@@ -329,6 +362,12 @@ class Builder {
       }
       return cur;
     }
+    // A comparison against an integer literal has one canonical atom: `n > 3` is `3 < n`,
+    // `n >= 3` is `!(n < 3)`, `n != 3` is `!(n == 3)`. These are identities for integers
+    // and pointers (no NaN), and Ghidra prints an integer literal only in an integer
+    // comparison (a float one gets `3.0`).
+    const canon = canonicalComparison(e);
+    if (canon) return this.cond(canon.e, canon.negate ? f : t, canon.negate ? t : f, scope);
     const text = nodeText(e);
     const id = this.add('test', SITE_UNIQUE.test(text) ? `${text}#site${identityOf(e)}` : text, e, scope);
     this.nodes[id].pure = isPureExpr(e);
@@ -410,11 +449,8 @@ class Builder {
         const n = s as ForStmt;
         const inner = n.init ? this.extendScope(n.init, ctx.scope) : ctx.scope;
         const head = this.nop(-1, s);
-        let incr = head;
-        if (n.increment) {
-          incr = this.add('work', this.exprKey(n.increment), n.increment, inner);
-          this.nodes[incr].next = head;
-        }
+        // `i++, p += 4` is two steps, the same work as `i++; p += 4;` in a latch.
+        const incr = n.increment ? this.effect(n.increment, head, inner) : head;
         const body = this.stmt(n.body, incr, { ...ctx, brk: next, cont: incr, scope: inner });
         this.nodes[head].next = n.condition ? this.cond(n.condition, body, next, inner) : body;
         return n.init ? this.stmt(n.init, head, ctx) : head;
