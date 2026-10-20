@@ -440,8 +440,15 @@ export async function fetchInitializedData(
   // ReinitializeInventoryGrid allocate a ZERO-byte grid, and every belt item restored from
   // a save then wrote past it, corrupting the Fog pool that also holds the inventory's
   // update-list nodes - which is where the access violation finally surfaced.
+  //
+  // An ARRAY of four bytes or fewer is the same gap: Ghidra gives no scalar value for
+  // `fnCmdLineOptionInit *[1]` either. gCmdLineOptionTable @0x6d5be0 holds
+  // {&RegisterCmdLineLngOption} and was emitted with no initializer, so
+  // LoadDataForGameAndSetupServer called NULL; gaSFileSignatureRsaExponent @0x6cf078
+  // (byte[4] = 01 00 01 00, e = 65537) was emitted zero-filled. 106 such arrays at v1234.
   const candidates = globals.filter(g =>
-    g.isInitialized && g.size <= 64 * 1024 && (g.size > 4 || isStructType(g.dataType))
+    g.isInitialized && g.size <= 64 * 1024
+      && (g.size > 4 || isStructType(g.dataType) || /\[\d+\]\s*$/.test(g.dataType ?? ''))
   );
 
   if (candidates.length === 0) return;
