@@ -5,6 +5,7 @@
  * Also provides helpers for generating static local declarations.
  */
 
+import { globalAliasComment } from './global-aliases.js';
 import type { AnalyzedDataSymbol, ReconstructOptions, DataValue, ExtractedDataType, ExtractedStruct, ExtractedUnion, ExtractedFunctionDefinition, ExtractedFunction } from '../types.js';
 import { GLIDE_UNSIGNED_ENUM_TYPEDEFS, PLATFORM_STRUCT_FIELD_TYPES, isAggregateObjectType, getAggregateTypeNames, isPlatformOrBuiltinType, isLibraryType, isStructType, castPointerInitializer, normalizeDataValue, isCharacterValueType, isMsvcEhInternal, normalizeWideCharType, normalizeListingBuiltinType, listingBuiltinElementType, imageArtifactElementType, isVoidPointerSpelling, resolveTypedefSpelling, rootQualifyShadowedType, platformDeclaredFunctionNames } from './platform-types.js';
 import { generateStructDeclaration, generateUnionDeclaration, generateFunctionDefinitionDeclaration, ghidraDefaultFieldName } from './header.js';
@@ -181,10 +182,14 @@ export function isDataArtifact(g: AnalyzedDataSymbol, allNames: Set<string>): bo
  * Declaration and definition share this one predicate now.
  */
 export function isUnreferenceableArtifact(g: AnalyzedDataSymbol, allNames: Set<string>): boolean {
-  // Interiority is a property of the EMITTED name: `s_.D_0070888c` is a Ghidra
-  // string label, not a member path, and it sanitizes to the perfectly ordinary
-  // identifier `s__D_0070888c` that five bodies name.
-  return isDataArtifact(g, allNames) || isInteriorLabel(sanitizeSymbolName(g.suggestedName || g.name));
+  // Interiority is judged on Ghidra's own name, by ADDRESS (`setInteriorLabelSymbols`):
+  // `s_.D_0070888c` is a string label at its own address, not inside another datum,
+  // so it stays; `sgtDataTable.pTxtSounds` @0096bdc4 lies inside sgtDataTable. Judged
+  // on the sanitized name (`sgtDataTable_pTxtSounds`, no dot) nothing was ever
+  // interior, and 407 member paths at v1234 each became a file-local `static`
+  // with the parent's type and size - `static D2DataTableTxtStrc
+  // sgtDataTable_pTxtSounds = {};`, 3,224 bytes nothing reads.
+  return isDataArtifact(g, allNames) || isInteriorLabel(g.suggestedName || g.name);
 }
 
 /**
@@ -1191,7 +1196,8 @@ export function generateStaticLocalDeclaration(
     const init = emitDataValue(symbol.initializedData, 0, type);
     setInitializerOwnerAddress(undefined);
     if (arrayInfo && symbol.initializedData.kind === 'array') {
-      return `static ${arrayInfo.type} ${name}[${arrayInfo.count}] = ${init};`;
+      const aliasLine = globalAliasComment(symbol);
+      return `${aliasLine ? aliasLine + '\n' : ''}static ${arrayInfo.type} ${name}[${arrayInfo.count}] = ${init};`;
     }
     initializer = ` = ${init}`;
   } else if (symbol.value !== undefined && symbol.value !== null) {
@@ -1213,7 +1219,8 @@ export function generateStaticLocalDeclaration(
   setInitializerOwnerAddress(undefined);
 
   recordDeclaredName(name);
-  let declaration = `static ${normalizeArrayDeclaration(type, name)}${initializer};`;
+  const aliasLine = globalAliasComment(symbol);
+  let declaration = `${aliasLine ? aliasLine + '\n' : ''}static ${normalizeArrayDeclaration(type, name)}${initializer};`;
 
   if (includeAddressComment) {
     declaration += ` // Originally: ${symbol.name} @${symbol.address}`;
@@ -3463,6 +3470,8 @@ function emitGlobalDefsWithIfdef(
       }
       currentIfdef = global.ifdef;
     }
+    const aliasLine = globalAliasComment(global);
+    if (aliasLine) lines.push(aliasLine);
     emitOne(global, lines);
   }
   if (currentIfdef) {

@@ -245,6 +245,14 @@ export interface ExtractedGlobal {
    * import's address there; the image holds only a hint/name RVA.
    */
   importSlot?: string;
+  /**
+   * Set only where the address carries two or more labels: true for the one Ghidra
+   * makes primary (`SymbolTable.getPrimarySymbol`, the name the decompiler prints),
+   * false for the others. Absent in snapshots taken before extraction asked.
+   */
+  primary?: boolean;
+  /** Set by codegen's alias fold on the primary: the address's other labels. */
+  aliases?: string[];
 }
 
 /**

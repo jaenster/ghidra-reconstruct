@@ -23,6 +23,7 @@ import { CPP_KEYWORDS } from './header.js';
 // Import cpp-parser for code transformation
 import { transformGhidraCode, preprocessGhidraCode, isGhidraGeneratedName, suggestBetterName, takeFuncPtrArgCastTypedefs, type TransformResult, type FuncPtrTarget, type ArtifactMode, type ArtifactRecord } from '@ghidra-mcp/cpp-parser';
 import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js';
+import { getGlobalReferenceAliases, globalAliasComment } from './global-aliases.js';
 import { ROOT_CLASS_SCOPE, namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 import { cleanFunctionComment, guardedFuncDefTypedef, emittedFunctionName, returnSigType, sigType } from './header.js';
 import { declarationHead } from './calling-convention.js';
@@ -1027,6 +1028,8 @@ export function generateImplementation(
     for (const global of context.fileLocalGlobals) {
       let type = global.suggestedType || global.dataType;
       let name = global.suggestedName || global.name;
+      const aliasLine = globalAliasComment(global);
+      if (aliasLine) fileLocalLines.push(aliasLine);
 
       // Sanitize name
       name = name.replace(/[^A-Za-z0-9_]/g, '_');
@@ -2187,6 +2190,14 @@ function declaredCalleeNames(functionNames: string[] | undefined): string[] {
   return names;
 }
 
+/** One options object per alias table, so the plugin's transformer cache still hits. */
+const globalAliasOptionsCache = new WeakMap<Record<string, string>, { globalAliases: Record<string, string> }>();
+function globalAliasResolveOptions(aliases: Record<string, string>): { globalAliases: Record<string, string> } {
+  let o = globalAliasOptionsCache.get(aliases);
+  if (!o) globalAliasOptionsCache.set(aliases, (o = { globalAliases: aliases }));
+  return o;
+}
+
 function transformDecompiledCode(
   decompiled: string,
   options: ReconstructOptions,
@@ -2309,6 +2320,11 @@ function transformDecompiledCode(
 
     if (context?.functionAddressMap && context.functionAddressMap.size > 0) {
       perPluginOptions['func-ptr-literal'] = { functionAddressMap: context.functionAddressMap };
+    }
+
+    const globalAliases = getGlobalReferenceAliases();
+    if (Object.keys(globalAliases).length > 0) {
+      perPluginOptions['global-alias-resolve'] = globalAliasResolveOptions(globalAliases);
     }
 
     if (context?.functionRefAliases && Object.keys(context.functionRefAliases).length > 0) {

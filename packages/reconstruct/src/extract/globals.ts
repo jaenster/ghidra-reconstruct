@@ -204,7 +204,109 @@ export async function extractAllGlobals(
     console.warn(`  Import slots unavailable: ${(err as Error).message}`);
   }
 
+  // Which label is primary where an address carries several. A failure leaves the
+  // flags unset; codegen then takes the decompiler's spelling as the witness.
+  try {
+    const primaries = await extractPrimaryLabels(connection);
+    const n = markPrimaryLabels(allGlobals, primaries);
+    if (n.unmatched > 0) {
+      console.warn(`  Primary labels: ${n.unmatched} multi-label addresses whose primary is not among the listed globals`);
+    }
+  } catch (err) {
+    console.warn(`  Primary labels unavailable: ${(err as Error).message}`);
+  }
+
   return allGlobals;
+}
+
+/**
+ * The primary label of every non-code address that carries two or more labels.
+ * `list_data_symbols` returns each label as its own row and says nothing of which
+ * one the listing shows and the decompiler prints; that is the symbol table's
+ * `getPrimarySymbol`. Rows: address, name, the parent namespace's full path (empty
+ * for global). Java, no imports (the body runs inside GhidraScript.run()).
+ */
+export const PRIMARY_LABEL_SCRIPT = `
+ghidra.program.model.symbol.SymbolTable st = currentProgram.getSymbolTable();
+ghidra.program.model.listing.FunctionManager fm = currentProgram.getFunctionManager();
+ghidra.program.model.symbol.SymbolIterator it = st.getAllSymbols(false);
+java.util.HashSet<ghidra.program.model.address.Address> seen = new java.util.HashSet<>();
+StringBuilder sb = new StringBuilder();
+while (it.hasNext()) {
+  ghidra.program.model.symbol.Symbol s = it.next();
+  if (s.getSymbolType() != ghidra.program.model.symbol.SymbolType.LABEL) continue;
+  ghidra.program.model.address.Address a = s.getAddress();
+  if (!a.isMemoryAddress() || !seen.add(a) || fm.getFunctionAt(a) != null) continue;
+  if (st.getSymbols(a).length < 2) continue;
+  ghidra.program.model.symbol.Symbol p = st.getPrimarySymbol(a);
+  if (p == null) continue;
+  ghidra.program.model.symbol.Namespace ns = p.getParentNamespace();
+  sb.append(a).append('\t').append(p.getName()).append('\t')
+    .append(ns == null || ns.isGlobal() ? "" : ns.getName(true)).append('\n');
+}
+println(sb.toString());
+`;
+
+export interface PrimaryLabel {
+  name: string;
+  namespace?: string;
+}
+
+/** Address -> its primary label, for every address with two or more labels. */
+export async function extractPrimaryLabels(connection: GhidraConnection): Promise<Map<string, PrimaryLabel>> {
+  const result = await connection.sendCommand<{ success?: boolean; output?: string; error?: string }>(
+    'execute_script',
+    { language: 'java', code: PRIMARY_LABEL_SCRIPT, scriptTimeout: 300, _commandTimeout: 360000 }
+  );
+  if (result.success === false || typeof result.output !== 'string') {
+    throw new Error(result.error ?? 'no output');
+  }
+  return parsePrimaryLabels(result.output);
+}
+
+/** Parse the script's `address<TAB>name<TAB>namespace` rows. */
+export function parsePrimaryLabels(output: string): Map<string, PrimaryLabel> {
+  const out = new Map<string, PrimaryLabel>();
+  for (const line of output.split('\n')) {
+    const cols = line.replace(/\r$/, '').split('\t');
+    if (cols.length < 2) continue;
+    const addr = cols[0].trim();
+    const name = cols[1];
+    if (!addr || !name || !/^[0-9a-f:]+$/i.test(addr.replace(/^.*:/, ''))) continue;
+    const namespace = cols[2] ? cols[2] : undefined;
+    out.set(normalizeAddress(addr), namespace ? { name, namespace } : { name });
+  }
+  return out;
+}
+
+/**
+ * Flag every global at a multi-label address: `primary: true` on the one the symbol
+ * table names, false on the rest. An address with one global listed is left alone,
+ * and so is a group the primary is not part of (it was filtered out of the listing):
+ * no flag is better than a wrong one.
+ */
+export function markPrimaryLabels(
+  globals: Array<{ name: string; address: string; namespace?: string | null; primary?: boolean }>,
+  primaries: Map<string, PrimaryLabel>,
+): { flagged: number; unmatched: number } {
+  const byAddress = new Map<string, typeof globals>();
+  for (const g of globals) {
+    const key = normalizeAddress(g.address);
+    if (!primaries.has(key)) continue;
+    const list = byAddress.get(key);
+    if (list) list.push(g); else byAddress.set(key, [g]);
+  }
+  let flagged = 0;
+  let unmatched = 0;
+  for (const [key, gs] of byAddress) {
+    if (gs.length < 2) continue;
+    const p = primaries.get(key)!;
+    const hits = gs.filter(g => g.name === p.name && (g.namespace ?? '') === (p.namespace ?? ''));
+    if (hits.length !== 1) { unmatched++; continue; }
+    for (const g of gs) g.primary = g === hits[0];
+    flagged++;
+  }
+  return { flagged, unmatched };
 }
 
 /**

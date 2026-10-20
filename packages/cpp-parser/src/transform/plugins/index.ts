@@ -596,6 +596,8 @@ export { stackFrameAddressPlugin, stackNameOffset, type StackFrameAddressOptions
 import { shadowedTypeQualifyPlugin } from './builtins/shadowed-type-qualify.js';
 export { shadowedTypeQualifyPlugin, type ShadowedTypeQualifyOptions } from './builtins/shadowed-type-qualify.js';
 import { functionShadowedGlobalPlugin } from './builtins/function-shadowed-global.js';
+import { globalAliasResolvePlugin } from './builtins/global-alias-resolve.js';
+export { globalAliasResolvePlugin, type GlobalAliasResolveOptions } from './builtins/global-alias-resolve.js';
 export { functionShadowedGlobalPlugin, type FunctionShadowedGlobalOptions } from './builtins/function-shadowed-global.js';
 import { arrayGlobalAddressOfPlugin } from './builtins/array-global-address-of.js';
 export { arrayGlobalAddressOfPlugin } from './builtins/array-global-address-of.js';
@@ -708,6 +710,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   qualifiedNameCleanupPlugin, // Cleanup: A::A::f → A::f, VisualStudio::f → f, f_exref → f (priority 46)
   enclosingNamespaceStripPlugin, // Cleanup: drop the enclosing namespace prefix from a reference (priority 900, last)
   functionNameReconcilePlugin, // Cleanup: respell a reference with the declaration's name+namespace (priority 20)
+  globalAliasResolvePlugin,   // Cleanup: respell a secondary Ghidra label with its address's primary label (priority 19)
   thisParamRewritePlugin,     // Cleanup: __thiscall `this` → the free function's param name (priority 46)
   stackFrameAddressPlugin,    // Cleanup: `&stack0xNNNN` → the frame slot that owns it (priority 520)
   shadowedTypeQualifyPlugin,  // Cleanup: (Draw**)x → (::Draw**)x when a same-named namespace shadows the type (priority 47)
