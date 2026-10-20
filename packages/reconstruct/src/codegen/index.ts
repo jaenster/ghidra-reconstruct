@@ -5253,7 +5253,26 @@ export function buildFuncPtrArgCastTables(
     fieldFuncdefs,
     vtableDispatch: buildVtableDispatch(dataTypes, funcDefs, emittedMemberNames),
     enumValues: buildEnumValues(dataTypes),
+    ...buildEnumSignedness(dataTypes),
   };
+}
+
+/**
+ * Every enum type and constant name, and the enums Ghidra treats as unsigned (no
+ * negative member - the rule enum-width.ts documents), for unsigned-range-compare.
+ */
+function buildEnumSignedness(dataTypes: ExtractedDataType[]): { enumTypes: string[]; unsignedEnums: string[]; enumConstantNames: string[] } {
+  const enumTypes: string[] = [];
+  const unsignedEnums: string[] = [];
+  const constants = new Set<string>();
+  for (const dt of dataTypes) {
+    if (dt.kind !== 'ENUM') continue;
+    const values = (dt as import('../types.js').ExtractedEnum).values ?? [];
+    enumTypes.push(dt.name);
+    if (!values.some(v => Number(v.value) < 0)) unsignedEnums.push(dt.name);
+    for (const v of values) if (v.name) constants.add(v.name.trim());
+  }
+  return { enumTypes, unsignedEnums, enumConstantNames: [...constants] };
 }
 
 /** Enum constant → value, for every constant name that means one value program-wide. */

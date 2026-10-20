@@ -648,6 +648,12 @@ function funcPtrArgCastsForScope(
 
 /** @see ImplGenContext.funcPtrArgCasts */
 export interface FuncPtrArgCastTables {
+  /** Every enum type name. */
+  enumTypes?: string[];
+  /** Enums with no negative member: unsigned in Ghidra's type system. */
+  unsignedEnums?: string[];
+  /** Every enum constant name. */
+  enumConstantNames?: string[];
   /** Enum constant → value, for constant names unique program-wide. */
   enumValues?: Record<string, number>;
   /** Callable name (bare AND qualified) → param index → funcdef typedef name */
@@ -2415,6 +2421,17 @@ function transformDecompiledCode(
         enclosingVarTypes,
       };
       perPluginOptions['pointer-compare-cast'] = {
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        structFields: context.funcPtrArgCasts.structFields,
+        typedefTargets: context.funcPtrArgCasts.typedefTargets,
+        functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        enclosingVarTypes,
+      };
+      perPluginOptions['unsigned-range-compare'] = {
+        unsignedEnums: context.funcPtrArgCasts.unsignedEnums,
+        enumTypes: context.funcPtrArgCasts.enumTypes,
+        enumConstants: context.funcPtrArgCasts.enumConstantNames,
         globalTypes: context.funcPtrArgCasts.globalTypes,
         fieldTypes: context.funcPtrArgCasts.fieldTypes,
         structFields: context.funcPtrArgCasts.structFields,

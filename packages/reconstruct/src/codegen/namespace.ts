@@ -351,6 +351,8 @@ function getNamespacePath(unitName: string, ext: string): string {
   const filename = sanitizeFilename(parts[parts.length - 1]);
 
   if (parts.length === 1) {
+    const stpl = stormTemplatePath(parts[0], ext);
+    if (stpl) return stpl;
     // Single-segment namespaces still get their own directory
     // e.g., "D2OpenGL" -> "D2OpenGL/D2OpenGL.cpp"
     return `${filename}/${filename}${ext}`;
@@ -359,6 +361,29 @@ function getNamespacePath(unitName: string, ext: string): string {
   // Create directory path
   const dirPath = parts.map(sanitizeFilename).join('/');
   return `${dirPath}${ext}`;
+}
+
+/** Storm's container templates, all defined in `storm/H/stpl.h` (the assert paths say so). */
+const STORM_TEMPLATE_FAMILY = /^(TSExplicitList|TSList|TSLink|TSGetLink|TSGrowableArray|TSFixedArray|TSHashTableReuse|TSHashTable|TSHashObjectChunk|TSHashObject|TSExportTableSimple|TSExportTableSync)(?=[<_])/;
+/** stpl.h's hash-key classes; they are part of the template library, not of a module. */
+const STORM_TEMPLATE_KEYS = new Set(['HASHKEY_STRI', 'HASHKEY_STR', 'HASHKEY_NONE', 'HASHKEY_PTR']);
+
+/**
+ * Where a Storm template instantiation's unit lives.
+ *
+ * Ghidra names each instantiation as a root-level class (`TSExplicitList<CELLIST,-572662307>`),
+ * so every one became a directory at the output root. They are instances of templates
+ * in `storm/H/stpl.h`, so they go under `Storm/H/stpl/<template>/`. The `-572662307`
+ * argument (0xDDDDDDDD) is Storm's "default link offset" sentinel and is dropped from
+ * the FILE name; a real offset (`,16`) stays. Only the path changes: the identifiers
+ * the code declares are untouched.
+ */
+export function stormTemplatePath(unitName: string, ext: string): string | undefined {
+  const family = STORM_TEMPLATE_FAMILY.exec(unitName)?.[1];
+  const isKey = STORM_TEMPLATE_KEYS.has(unitName);
+  if (!family && !isKey) return undefined;
+  const file = sanitizeFilename(unitName.replace(/[,_]-?572662307(?=[>,_]|$)/g, '')).replace(/[,-]/g, '_').replace(/_+/g, '_');
+  return isKey ? `Storm/H/stpl/${file}${ext}` : `Storm/H/stpl/${family}/${file}${ext}`;
 }
 
 /**
