@@ -1113,6 +1113,10 @@ export function generatePlatformHeader(
   }
   // Win32 Interlocked* take LONG*; D2 calls them with int32_t* (a distinct type on
   // i686). Add int32_t* overloads forwarding to the real LONG* intrinsics.
+  // The kernel32 export's own prototype, as a real __stdcall function: mingw maps
+  // InterlockedCompareExchange to a GCC intrinsic whose address has no __stdcall type, and
+  // the binary takes the import's address (import-address-forwarder respells it).
+  lines.push('static LONG __stdcall d2_InterlockedCompareExchange(LONG* pDestination, LONG nExchange, LONG nComperand) { return InterlockedCompareExchange((LONG volatile*)pDestination, nExchange, nComperand); }');
   lines.push('static inline LONG InterlockedIncrement(int32_t volatile* p) { return InterlockedIncrement((LONG volatile*)p); }');
   lines.push('static inline LONG InterlockedDecrement(int32_t volatile* p) { return InterlockedDecrement((LONG volatile*)p); }');
   // CriticalSection fns take LPCRITICAL_SECTION; D2 calls them with uint32_t*
