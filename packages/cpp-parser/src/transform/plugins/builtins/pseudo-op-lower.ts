@@ -72,6 +72,7 @@ import type { TransformPlugin, PluginOptions } from '../types.js';
 import { createExprShape, type ExprShapeTables } from './expr-shape.js';
 import { calleeName, unwrapParens, type TypeShape } from './call-arg-cast.js';
 import { lowerFlagConditions, lowerNegTestConditions } from './flag-conditions.js';
+import { lowerCarryChains, lowerWholeConcat, lowerWholeZeroTest } from './carry-chains.js';
 
 // ============================================
 // REPORTING
@@ -108,6 +109,8 @@ export interface PseudoOpLowerOptions extends PluginOptions {
   typedefTargets?: Record<string, string>;
   /** The function's stack frame: name, frame offset and size of each slot. */
   stackSlots?: ReadonlyArray<{ name: string; offset: number; size: number }>;
+  /** Aggregates that are unions: their members overlap. */
+  unionNames?: readonly string[];
 }
 
 // ============================================
@@ -1331,6 +1334,10 @@ function createPseudoOpLowerTransformer(options: PseudoOpLowerOptions = {}): Tra
     };
     const shapeOf = (t: TypeNode) => shape(Expr.cast(t, Expr.identifier('__x')));
     const ctx: Ctx = { classify, isLocal: (n: string) => localTypes.has(n), stackSlots: options.stackSlots };
+    const unions = new Set(options.unionNames ?? []);
+    const carryDeps = {
+      shape: (e: Expression) => shape(e), isPure, locals: new Set(localTypes.keys()), isUnion: (n: string) => unions.has(n),
+    };
 
     // The fold has to see the SBORROW calls before they are lowered, and the `||`/`&&`
     // forms before their inner `!=` is folded on its own: the traversal is bottom-up, so
@@ -1338,6 +1345,10 @@ function createPseudoOpLowerTransformer(options: PseudoOpLowerOptions = {}): Tra
     const fold = (ops: readonly string[]) => createTransformer({
       visitBinaryExpr(node: BinaryExpr): ASTNode | undefined {
         if (!ops.includes(node.operator)) return undefined;
+        if (node.operator === '&&' || node.operator === '||') {
+          const whole = lowerWholeZeroTest(node, carryDeps);
+          if (whole) return { ...whole, leadingTrivia: node.leadingTrivia, trailingTrivia: node.trailingTrivia } as ASTNode;
+        }
         try {
           return foldSborrow(node, ctx) ?? undefined;
         } catch (e) {
@@ -1347,9 +1358,23 @@ function createPseudoOpLowerTransformer(options: PseudoOpLowerOptions = {}): Tra
       },
     });
     const lower = createTransformer({
+      // `!SBORROWn(a, a)` lowers to `!false`: say `true` (the traversal is bottom-up, so
+      // the operand is already lowered here).
+      visitUnaryExpr(node: UnaryExpr): ASTNode | undefined {
+        if (node.operator !== '!') return undefined;
+        const inner = unwrapParens(node.operand);
+        if (inner.kind !== NodeKind.BoolLiteral) return undefined;
+        const v = (inner as unknown as { value: boolean }).value;
+        return { ...Expr.boolLiteral(!v), leadingTrivia: node.leadingTrivia, trailingTrivia: node.trailingTrivia } as ASTNode;
+      },
       visitCallExpr(call: CallExpr): ASTNode | undefined {
         if (call.callee.kind !== NodeKind.Identifier) return undefined;
         const name = (call.callee as Identifier).name;
+        if (name === 'CONCAT44') {
+          // Both halves of one 8-byte object: that object's value, not a reassembly.
+          const whole = lowerWholeConcat(call, carryDeps);
+          if (whole) return { ...whole, leadingTrivia: call.leadingTrivia, trailingTrivia: call.trailingTrivia } as Expression;
+        }
         const renamed = RENAMES[name];
         if (renamed) return updateNode(call, { callee: Expr.identifier(renamed) } as Partial<CallExpr>);
         const std = STD_SPELLINGS[name];
@@ -1426,7 +1451,7 @@ function createPseudoOpLowerTransformer(options: PseudoOpLowerOptions = {}): Tra
       ? (() => {
         const list = (registersRetired as unknown as { statements: Statement[] }).statements;
         const deps = { classify, isPure, locals: new Set(localTypes.keys()) };
-        const next = lowerNegTestConditions(lowerFlagConditions(list, deps), deps);
+        const next = lowerCarryChains(lowerNegTestConditions(lowerFlagConditions(list, deps), deps), carryDeps);
         return next === list ? registersRetired : ({ ...(registersRetired as object), statements: next } as unknown as ASTNode);
       })()
       : registersRetired;
