@@ -512,7 +512,8 @@ function lowerOne(body: Statement[], deps: StringIntrinsicDeps): Statement[] | n
   const flow = buildFunctionFlow(body, deps.locals);
   for (const list of lists) {
     for (let i = 0; i < list.length; i++) {
-      const r = tryAt(list, i, body, deps, flow) ?? tryStrcmp(list, i, body, deps) ?? tryStrcmpLoop(list, i, body, deps, flow);
+      const r = tryAt(list, i, body, deps, flow) ?? tryStrcmp(list, i, body, deps) ?? tryStrcmpLoop(list, i, body, deps, flow)
+        ?? tryStrlenScan(list, i, body, deps, flow);
       if (r) return r;
     }
   }
@@ -1624,4 +1625,131 @@ function dropLabelEverywhere(body: Statement[], name: string): Statement[] {
     return copy ?? x;
   };
   return go(body) as Statement[];
+}
+
+// ============================================
+// A lone strlen scan whose pointer is kept
+// ============================================
+
+/** A one-byte integer type, as the shape table spells it. */
+const BYTE_BASE = /^(char|signed char|unsigned char|uint8_t|int8_t|byte|uchar|BYTE|CHAR|undefined1|bool)$/;
+
+/** `*P` / `P[0]` reading ONE byte through P itself (no cast, or a cast to a byte pointer). */
+function byteReadThrough(e: Expression, P: string, deps: StringIntrinsicDeps): boolean {
+  const x = unwrapParens(e);
+  let ptr: Expression | null = null;
+  if (x.kind === NodeKind.UnaryExpr && (x as UnaryExpr).operator === '*') ptr = (x as UnaryExpr).operand;
+  else if (x.kind === NodeKind.SubscriptExpr && literalOf((x as SubscriptExpr).index) === 0n) ptr = (x as SubscriptExpr).array;
+  if (!ptr) return false;
+  let q = unwrapParens(ptr);
+  if (q.kind === NodeKind.CStyleCastExpr) {
+    const t = emit((q as CStyleCastExpr).type as unknown as AnyNode).replace(/\s+/g, ' ').trim();
+    const m = /^(.*?)\s*\*$/.exec(t);
+    if (!m || !BYTE_BASE.test(m[1].replace(/\bconst\b/g, '').trim())) return false;
+    q = unwrapParens((q as CStyleCastExpr).expression);
+  }
+  return identName(q) === P;
+}
+
+/** `P = P + 1` / `P++` / `++P` / `P += 1`, or (with `from`) `P = from + 1`. */
+function isByteStep(st: Statement, P: string, from = P): boolean {
+  if (st.kind !== NodeKind.ExprStmt) return false;
+  const e = unwrapParens((st as ExprStmt).expression);
+  if (from === P) {
+    if (e.kind === NodeKind.PostfixExpr && (e as PostfixExpr).operator === '++' && identName((e as PostfixExpr).operand) === P) return true;
+    if (e.kind === NodeKind.UnaryExpr && (e as UnaryExpr).operator === '++' && identName((e as UnaryExpr).operand) === P) return true;
+    if (e.kind === NodeKind.AssignExpr && (e as AssignExpr).operator === '+=' && identName((e as AssignExpr).left) === P
+      && literalOf((e as AssignExpr).right) === 1n) return true;
+  }
+  const a = assignOf(st);
+  if (!a || identName(a.left) !== P) return false;
+  const r = unwrapParens(a.right);
+  return r.kind === NodeKind.BinaryExpr && (r as BinaryExpr).operator === '+'
+    && identName((r as BinaryExpr).left) === from && literalOf((r as BinaryExpr).right) === 1n;
+}
+
+/**
+ * MSVC's inline strlen with the cursor kept: the two scans
+ *
+ *   do { c = *P; P = P + 1; } while (c != 0);       // P ends one past the NUL, c is 0
+ *   do { T = P; P = T + 1; } while (*T != 0);       // T ends at the NUL, P one past it
+ *
+ * read the bytes from P's value at entry up to and including the first NUL, and write
+ * nothing but the locals. With P a byte pointer that is exactly `strlen(P)` bytes plus
+ * the terminator, so the loop is
+ *
+ *   P = P + strlen(P) + 1;  (and c = 0 when c is still read)
+ *   T = P + strlen(P); P = T + 1;
+ *
+ * every local keeping the value the loop leaves in it. Folded only when P and the
+ * temporary are unescaped locals, P points at one-byte elements, the read is one byte
+ * through P itself, and (first form) a temporary that is read afterwards is the tested
+ * byte. Run after the strcat/strcmp/length-only recognisers, which consume the scans
+ * that belong to a larger idiom.
+ */
+function tryStrlenScan(list: Statement[], i: number, body: Statement[], deps: StringIntrinsicDeps, flow: FunctionFlow): Statement[] | null {
+  const loop = list[i];
+  if (loop.kind !== NodeKind.DoWhileStmt) return null;
+  const parts = bodyStatements((loop as DoWhileStmt).body);
+  if (parts.length !== 2) return null;
+  const a0 = assignOf(parts[0]);
+  const t = a0 && identName(a0.left);
+  if (!a0 || !t) return null;
+  const cond = unwrapParens((loop as DoWhileStmt).condition);
+  const tested = cond.kind === NodeKind.BinaryExpr && (cond as BinaryExpr).operator === '!=' && literalOf((cond as BinaryExpr).right) === 0n
+    ? (cond as BinaryExpr).left : cond;
+
+  let P: string;
+  let form: 'byte' | 'addr';
+  const srcName = identName(a0.right);
+  if (srcName && srcName !== t && isByteStep(parts[1], srcName, t)) {
+    // T = P; P = T + 1; while (*T)
+    P = srcName; form = 'addr';
+    if (!byteReadThrough(tested, t, deps)) return null;
+  } else {
+    // c = *P; P = P + 1; while (c)
+    const x = unwrapParens(a0.right);
+    const ptr = x.kind === NodeKind.UnaryExpr ? (x as UnaryExpr).operand : x.kind === NodeKind.SubscriptExpr ? (x as SubscriptExpr).array : null;
+    const pn = ptr && identName(unwrapParens(ptr).kind === NodeKind.CStyleCastExpr ? (unwrapParens(ptr) as CStyleCastExpr).expression : ptr);
+    if (!pn || pn === t || !byteReadThrough(a0.right, pn, deps) || !isByteStep(parts[1], pn)) return null;
+    if (identName(stripByteCast(tested)) !== t) return null;
+    const ts = deps.shape(Expr.identifier(t));
+    if (!ts || ts.stars !== 0 || !BYTE_BASE.test(ts.base)) return null;
+    P = pn; form = 'byte';
+  }
+  for (const v of [P, t]) if (!deps.locals.has(v) || deps.localArrays.has(v) || flow.isEscaped(v)) return null;
+  const ps = deps.shape(Expr.identifier(P));
+  if (!ps || ps.stars !== 1 || pointeeSize(ps, deps) !== 1) return null;
+  if (form === 'addr') {
+    const ts = deps.shape(Expr.identifier(t));
+    if (!ts || ts.stars !== 1 || pointeeSize(ts, deps) !== 1) return null;
+  }
+
+  // Is the temporary read after the loop? Its definitions are the loop's own.
+  const loopNodes = new Set<number>();
+  for (const n of flow.cfg.nodes) {
+    const st = n.stmt as ASTNode | null;
+    if ((st && contains(loop, st)) || (!st && n.expr && contains(loop, n.expr))) loopNodes.add(n.id);
+  }
+  let tempLive = false;
+  for (const id of loopNodes) {
+    if (!flow.definition(id, t)) continue;
+    if (flow.usesOf(id, t).some(u => !loopNodes.has(u))) tempLive = true;
+  }
+
+  const charArg = (name: string) => ps.base === 'char' ? Expr.identifier(name) : asCharPointer(Expr.identifier(name));
+  const len = Expr.call('strlen', [charArg(P)]);
+  const out: Statement[] = [];
+  const assign = (l: string, r: Expression): Statement =>
+    ({ kind: NodeKind.ExprStmt, expression: Expr.assign(Expr.identifier(l), r), location: loop.location, leadingTrivia: [], trailingTrivia: [] }) as unknown as Statement;
+  if (form === 'addr') {
+    out.push(assign(t, Expr.add(Expr.identifier(P), len)));
+    out.push(assign(P, Expr.add(Expr.identifier(t), Expr.intLiteral(1))));
+  } else {
+    out.push(assign(P, Expr.add(Expr.add(Expr.identifier(P), len), Expr.intLiteral(1))));
+    if (tempLive) out.push(assign(t, Expr.intLiteral(0)));
+  }
+  out[0].leadingTrivia = loop.leadingTrivia ?? [];
+  const edited = [...list.slice(0, i), ...out, ...list.slice(i + 1)];
+  return replaceList(body, list, edited);
 }
