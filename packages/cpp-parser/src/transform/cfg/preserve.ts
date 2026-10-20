@@ -54,12 +54,17 @@ interface Contracted {
  * measured against the before keys only, so making insertions transparent cannot hide
  * one.
  */
-function synthKey(cfg: Cfg, id: number, visible: Set<string> | null): string | null {
+function synthKey(cfg: Cfg, id: number, visible: Set<string> | null, casesTransparent = false): string | null {
   if (id === cfg.entry) return ENTRY_KEY;
   if (id === cfg.exit) return EXIT_KEY;
   if (id === cfg.external) return EXTERNAL_KEY;
   const key = cfg.nodes[id].key;
   if (key === null) return null;
+  // For EDGES a case label is scaffolding: falling from one arm into the next case label is
+  // the same edge as jumping straight to the statement it labels. For COUNTS it stays
+  // work - the case key is the only evidence the arm exists, and losing one is the
+  // 170-arm class.
+  if (casesTransparent && key.startsWith('c:')) return null;
   return visible === null || visible.has(key) ? key : null;
 }
 
@@ -72,7 +77,7 @@ function synthKey(cfg: Cfg, id: number, visible: Set<string> | null): string | n
  * loses a would-be edge on BOTH sides of the comparison - never invents one on the
  * "after" side, so it can miss a defect but cannot manufacture a false rejection.
  */
-function keyedSuccessors(cfg: Cfg, visible: Set<string> | null): (id: number) => number[] {
+function keyedSuccessors(cfg: Cfg, visible: Set<string> | null, casesTransparent = false): (id: number) => number[] {
   const memo = new Map<number, number[]>();
   const onStack = new Set<number>();
 
@@ -83,7 +88,7 @@ function keyedSuccessors(cfg: Cfg, visible: Set<string> | null): (id: number) =>
     onStack.add(id);
     const out = new Set<number>();
     for (const s of cfg.nodes[id].succ) {
-      if (synthKey(cfg, s, visible) !== null) out.add(s);
+      if (synthKey(cfg, s, visible, casesTransparent) !== null) out.add(s);
       else for (const t of walk(s)) out.add(t);
     }
     onStack.delete(id);
@@ -105,7 +110,7 @@ function contract(cfg: Cfg, visible: Set<string> | null): Contracted {
     }
   }
 
-  const succOf = keyedSuccessors(cfg, visible);
+  const succOf = keyedSuccessors(cfg, visible, true);
   const counts = new Map<string, number>();
   const edges = new Set<string>();
 
@@ -115,8 +120,9 @@ function contract(cfg: Cfg, visible: Set<string> | null): Contracted {
     if (id !== cfg.entry && id !== cfg.exit && id !== cfg.external) {
       counts.set(from, (counts.get(from) ?? 0) + 1);
     }
+    if (from.startsWith('c:')) continue;
     for (const s of succOf(id)) {
-      const to = synthKey(cfg, s, visible);
+      const to = synthKey(cfg, s, visible, true);
       if (to !== null) edges.add(from + EDGE_SEP + to);
     }
   }

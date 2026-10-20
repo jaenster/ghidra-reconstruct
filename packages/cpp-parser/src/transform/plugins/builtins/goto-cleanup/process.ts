@@ -35,7 +35,8 @@ import { buildGeneralizedCascade, handleUnconditionalGoto, handleLoopBodyGoto } 
 import { processCleanupTailInlining } from './tail-inline.js';
 import { processNestedTailInlining, getGlobalGotoCounts } from './nested-inline.js';
 import { preservesReachableWork } from '../../../cfg/index.js';
-import { validateCandidate, noteRewrite, type ValidateContext } from './validate.js';
+import { validateCandidate, noteRewrite, exactGotoCount, type ValidateContext } from './validate.js';
+import { exactCandidates } from './exact.js';
 import { takeCopies, commitCopies } from './copy-policy.js';
 import { DEFAULT_NORETURN_FUNCTIONS } from './types.js';
 
@@ -95,6 +96,13 @@ export function processCompound(
     followIsExit: fallthroughMeansReturn,
     noreturn: new Set([...DEFAULT_NORETURN_FUNCTIONS, ...options.noreturnFunctions]),
   };
+
+  // Exact rewrites first (exact.ts): no copying, each proven like everything else.
+  const total = (label: string) => exactGotoCount(label) ?? getGlobalGotoCounts()?.get(label) ?? gotoCounts.get(label) ?? 0;
+  for (const cand of exactCandidates(stmts, total)) {
+    const r = accept(stmts, cand.out, `exact:${cand.kind}`, vctx);
+    if (r) { recordStat(cand.kind); return r; }
+  }
 
   if (labels.size > 0) {
     // Switch goto-to-break: replace goto-to-label-after-switch with break

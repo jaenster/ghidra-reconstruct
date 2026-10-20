@@ -39,6 +39,7 @@
  */
 
 import type { Statement } from '../../ast/nodes.js';
+import { countGotoTargets } from './labels.js';
 import {
   buildBcfg, lookup, resolver, usedNames, Unsupported,
   type Bcfg, type BcfgOptions, type BNode,
@@ -144,8 +145,22 @@ export function isUnfolding(before: Statement[], after: Statement[], options: Bc
     if (e instanceof Unsupported) return { ok: false, reason: `before: ${e.message}`, pairs: 0 };
     throw e;
   }
+  // Which labels are targeted from OUTSIDE the region is a fact about the original: the
+  // gotos the whole function holds minus those the original region holds. A candidate that
+  // removes one of the region's own gotos to a label must not make that label look
+  // outside-targeted, so the after side sees outside + its own inside count.
+  let afterOptions = options;
+  if (options.externalGotoCounts) {
+    const insideBefore = countGotoTargets(before), insideAfter = countGotoTargets(after);
+    const adjusted = new Map<string, number>();
+    for (const name of new Set([...options.externalGotoCounts.keys(), ...insideAfter.keys()])) {
+      const outside = Math.max(0, (options.externalGotoCounts.get(name) ?? 0) - (insideBefore.get(name) ?? 0));
+      adjusted.set(name, outside + (insideAfter.get(name) ?? 0));
+    }
+    afterOptions = { ...options, externalGotoCounts: adjusted };
+  }
   try {
-    ga = buildBcfg(after, options);
+    ga = buildBcfg(after, afterOptions);
   } catch (e) {
     if (e instanceof Unsupported) return { ok: false, reason: `after: ${e.message}`, pairs: 0 };
     throw e;

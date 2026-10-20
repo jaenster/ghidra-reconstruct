@@ -17,6 +17,12 @@ import type {
 
 export interface GotoCleanupStats {
   switchGotoToBreak: number;
+  /** Exact rewrites (exact.ts): no code copied. */
+  latchContinue: number;
+  nextCase: number;
+  stackCase: number;
+  rotatedEntry: number;
+  ifFalseArm: number;
   switchCaseGoto: number;
   backwardToLoop: number;
   forwardCascade: number;

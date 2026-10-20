@@ -191,7 +191,9 @@ function createGotoCleanupTransformer(pluginOptions?: Record<string, unknown>) {
   const baseTransformer = createTransformer({
     visitCompoundStmt(compound) {
       const stmts = compound.statements;
-      if (stmts.length < 2) return undefined;
+      // A one-statement compound is a region too: a loop body or a switch body can be
+      // the only statement of its parent, and the exact rewrites need to see it.
+      if (stmts.length === 0) return undefined;
 
       // A cleanup-fallthrough label's tail reaches the function's implicit return ONLY
       // when falling off this compound's end does — see markFallthroughReturns.

@@ -41,6 +41,7 @@ import { traverseAST } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
 import { Stmt } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
+import { gotoReport } from './goto-cleanup/report.js';
 
 export interface HaltSiteFoldOptions extends PluginOptions {}
 
@@ -749,6 +750,9 @@ function rewriteFunction(node: FunctionDecl, stats: HaltSiteFoldStats): Function
     });
     body = inline(body) as CompoundStmt;
     stats.gotosReplaced += counter.n;
+    // Reported so the census can see how much of the shared-halt unfolding is still left
+    // to this late, unvalidated pass rather than done (and proven) in goto-cleanup.
+    if (counter.n) gotoReport({ event: 'halt-shared-tail', gotos: counter.n, labels: [...plans.keys()] });
 
     const dissolve = createTransformer({
       visitCompoundStmt(block: CompoundStmt): ASTNode | undefined {

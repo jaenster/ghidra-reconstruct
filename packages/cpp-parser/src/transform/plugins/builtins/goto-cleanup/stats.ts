@@ -9,6 +9,11 @@ import type { GotoCleanupStats } from './types.js';
 
 const emptyStats = (): GotoCleanupStats => ({
   switchGotoToBreak: 0,
+  latchContinue: 0,
+  nextCase: 0,
+  stackCase: 0,
+  rotatedEntry: 0,
+  ifFalseArm: 0,
   switchCaseGoto: 0,
   backwardToLoop: 0,
   forwardCascade: 0,

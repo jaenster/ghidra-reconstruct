@@ -55,6 +55,12 @@ function exactGotoCounts(): Map<string, number> | null {
   return ((globalThis as Record<symbol, unknown>)[EXACT_KEY] as Map<string, number> | null | undefined) ?? null;
 }
 
+/** Gotos to `label` in the whole function, exact through the round (null: not known). */
+export function exactGotoCount(label: string): number | null {
+  const m = exactGotoCounts();
+  return m ? (m.get(label) ?? 0) : null;
+}
+
 /** Record that `after` replaced `before`: every label's count moves by the difference. */
 export function noteRewrite(before: Statement[], after: Statement[]): void {
   const exact = exactGotoCounts();

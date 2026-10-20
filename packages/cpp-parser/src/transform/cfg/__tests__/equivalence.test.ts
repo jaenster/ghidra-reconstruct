@@ -199,6 +199,11 @@ describe('isUnfolding: region entry points', () => {
     assert.ok(!r.ok);
     assert.match((r as { reason: string }).reason, /entry label:LAB_1 lost/);
   });
+  it('removing one of the region\'s own gotos does not make its label outside-targeted', () => {
+    accepted(`switch (a) { case 1: x(); goto LAB_1; case 2: LAB_1: y(); break; } z();`,
+      `switch (a) { case 1: x(); case 2: LAB_1: y(); break; } z();`,
+      { externalGotoCounts: new Map([['LAB_1', 1]]) });
+  });
   it('a label only targeted from inside may go', () => {
     accepted(`if (a) goto LAB_1; x(); LAB_1: y();`, `if (!a) { x(); } y();`, { externalGotoCounts: new Map([['LAB_1', 1]]) });
   });
