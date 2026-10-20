@@ -428,6 +428,7 @@ export {
 export { threeByteAccessPlugin } from './builtins/three-byte-access.js';
 export { comIUnknownCallPlugin } from './builtins/com-iunknown-call.js';
 export { biasedTableIndexPlugin } from './builtins/biased-table-index.js';
+export { foldedAddressRebasePlugin, type FoldedAddress, type FoldedAddressRebaseOptions } from './builtins/folded-address-rebase.js';
 export { importAddressForwarderPlugin, IMPORT_ADDRESS_FORWARDERS } from './builtins/import-address-forwarder.js';
 export { unsignedRangeComparePlugin } from './builtins/unsigned-range-compare.js';
 export { callSiteOverrideCastPlugin, type CallSiteOverride } from './builtins/call-site-override-cast.js';
@@ -511,6 +512,7 @@ import { subpieceAccessPlugin } from './builtins/subpiece-access.js';
 import { threeByteAccessPlugin } from './builtins/three-byte-access.js';
 import { comIUnknownCallPlugin } from './builtins/com-iunknown-call.js';
 import { biasedTableIndexPlugin } from './builtins/biased-table-index.js';
+import { foldedAddressRebasePlugin } from './builtins/folded-address-rebase.js';
 import { importAddressForwarderPlugin } from './builtins/import-address-forwarder.js';
 import { unsignedRangeComparePlugin } from './builtins/unsigned-range-compare.js';
 import { callSiteOverrideCastPlugin } from './builtins/call-site-override-cast.js';
@@ -629,6 +631,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   indirectCallCleanupPlugin, // Cleanup: strip jumptable warnings, clean fn-ptr casts (priority 5)
   ...ghidraCleanupPlugins,
   biasedTableIndexPlugin,      // Correctness: *(byte*)((int)A + C + i) below the next table → Next[i - bias] (priority 12)
+  foldedAddressRebasePlugin,   // Correctness: a folded MOV X; SUB d address respelled X - n, from the instruction refs (priority 13)
   reusedParamSlotPlugin,       // Correctness: a dead parameter slot reused for a function pointer -> a funcdef local (priority 14)
   threeByteAccessPlugin,       // Correctness: *(uint3 *)p → d2_load24(p), exactly three bytes (priority 14)
   typeNormalizePlugin,         // Cleanup: uint → uint32_t, undefined4 → auto/uint32_t (priority 15)

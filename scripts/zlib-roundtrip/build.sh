@@ -17,4 +17,7 @@ for f in adler32 crc32 deflate inflate inffast inftrees trees zutil; do i686-lin
 i686-linux-gnu-g++ -O1 -w -DZ_PREFIX -I$Z -I$H -c $H/ref_side.cpp -o $B/ref_side.o &
 i686-linux-gnu-g++ -O1 -w -I$H -c $H/main.cpp -o $B/main.o &
 wait
+# A TU that failed to compile must not vanish into --unresolved-symbols=ignore-all: the
+# tree side would then crash on every case and read as a broken zlib.
+n=$(ls $B/*.o 2>/dev/null | wc -l); [ "$n" -eq 19 ] || { echo "build.sh: $n of 19 objects compiled" >&2; exit 1; }
 i686-linux-gnu-g++ -static -Wl,--gc-sections -Wl,--unresolved-symbols=ignore-all $B/*.o -o "$OUT"

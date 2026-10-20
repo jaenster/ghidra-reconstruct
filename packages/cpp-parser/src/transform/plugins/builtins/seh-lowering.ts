@@ -47,6 +47,15 @@
  *  - no goto from outside the region targets a label inside it, and no
  *    declaration the region holds is used after it.
  * Anything else is reported and left as Ghidra printed it.
+ *
+ * The handler resumes through `__builtin_longjmp`, so setjmp's rule applies: a local
+ * the `__try` block modifies has an indeterminate value afterwards unless it is
+ * volatile. Every function-scope local the region writes (or whose address is taken
+ * and the region names) and the code the receiver reaches still reads is qualified
+ * `volatile`, and `&x` is cast back to the pointer type it had; a parameter in that
+ * position is refused, because the signature is not the body's to change.
+ * At -O2 GCC otherwise hands the `__except` path the values from before the setjmp.
+
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -62,6 +71,13 @@ import type { Transformer } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 
 export interface SehLoweringScope {
+  /** `__except` (the default) or `__finally`. */
+  kind?: 'except' | 'finally';
+  /**
+   * `__finally`: the termination handler's body. The decompiler prints it inlined
+   * between the -1 store and the deregistration (the normal path CALLs it there).
+   */
+  bodyAddress?: string;
   /** Try level of the scope (its index in the scope table). */
   level: number;
   /** The filter funclet's constant result: 1 execute handler, 0 continue search, -1 continue execution. */
@@ -247,6 +263,46 @@ function lower(fn: FunctionDecl, scopes: SehLoweringScope[], refuse: (r: string)
   if (ri > iEnd) return refuse('the registration follows the region'), false;
   const region = top.slice(i0 + 1, iEnd).filter(s => s !== registers[0][0]);
 
+  // __finally: the block is what the decompiler inlined between the -1 store and the
+  // deregistration (the instructions prove nothing else is there). The __try may only
+  // be left by its end: a return or a goto out would be an abnormal termination, which
+  // runs the block too (MSVC's _local_unwind2) and is not modelled here.
+  const isFinally = scope.kind === 'finally';
+  let finallyStmts: Statement[] = [];
+  let iTail = iEnd;
+  if (isFinally) {
+    const deregs = [...uses].filter(([, u]) => u.kind === 'deregister');
+    if (deregs.length !== 1) return refuse(`${deregs.length} deregistrations; a __finally has the one after its block`), false;
+    const iD = at(deregs[0][0]);
+    if (iD <= i1) return refuse('the deregistration is not a statement after the __try'), false;
+    finallyStmts = top.slice(i1 + 1, iD);
+    iTail = iD;
+    if (region.some(st => findNodesByKind(st, NodeKind.ReturnStmt).length > 0 || st.kind === NodeKind.ReturnStmt)) {
+      return refuse('a return leaves the __try (an abnormal termination)'), false;
+    }
+    const regionLabels = new Set<string>();
+    for (const st of region) for (const l of findNodesByKind(st, NodeKind.LabelStmt)) regionLabels.add((l as LabelStmt).label.name);
+    for (const st of region) {
+      for (const g of findNodesByKind(st, NodeKind.GotoStmt) as GotoStmt[]) {
+        if (!regionLabels.has(g.label.name)) return refuse(`goto ${g.label.name} leaves the __try (an abnormal termination)`), false;
+      }
+    }
+    // The block becomes a lambda's body: a declaration in it may stay there only when
+    // nothing after the block names it.
+    const tailNames = new Set<string>();
+    for (const st of top.slice(iD)) for (const id of findNodesByKind(st, NodeKind.Identifier) as Identifier[]) tailNames.add(id.name);
+    for (const st of finallyStmts) {
+      if (st.kind === NodeKind.DeclStmt && (st as DeclStmt).declarations.some(d => d.kind === NodeKind.VariableDecl && tailNames.has((d as VariableDecl).name.name))) {
+        return refuse('a declaration in the __finally block is used after it'), false;
+      }
+      if (st.kind === NodeKind.LabelStmt || st.kind === NodeKind.ReturnStmt
+        || findNodesByKind(st, NodeKind.ReturnStmt).length > 0 || findNodesByKind(st, NodeKind.GotoStmt).length > 0
+        || findNodesByKind(st, NodeKind.LabelStmt).length > 0) {
+        return refuse('the __finally block labels, returns or jumps'), false;
+      }
+    }
+  }
+
   // No entry into the region except from its top.
   const inside = new Set<string>();
   for (const s of region) for (const l of findNodesByKind(s, NodeKind.LabelStmt)) inside.add((l as LabelStmt).label.name);
@@ -286,6 +342,76 @@ function lower(fn: FunctionDecl, scopes: SehLoweringScope[], refuse: (r: string)
     k += keep.length - 1;
   }
 
+  // setjmp semantics: after the handler's longjmp, a non-volatile local the try block
+  // modified has an indeterminate value (C11 7.13.2.1; __builtin_setjmp restores only
+  // EBP/ESP/EIP, and at -O1 and up GCC keeps such a local in a register or propagates
+  // its value at the setjmp into the receiver). Every function-scope local the region
+  // writes - directly, or through an address taken anywhere - and the code outside the
+  // region names is volatile-qualified; its address is cast back where it is taken, so
+  // a callee still receives the pointer type it declares.
+  const keptDecls = new Map<string, VariableDecl>();
+  for (const s of [...top.slice(0, i0), ...hoisted]) {
+    if (s.kind !== NodeKind.DeclStmt) continue;
+    for (const d of (s as DeclStmt).declarations) {
+      if (d.kind === NodeKind.VariableDecl) keptDecls.set((d as VariableDecl).name.name, d as VariableDecl);
+    }
+  }
+  const params = new Set(fn.parameters.map(p => p.name?.name).filter((n): n is string => !!n));
+  const written = writtenNames(region);
+  const addressed = addressTakenNames(body);
+  const regionNames = new Set<string>();
+  for (const s of region) for (const id of findNodesByKind(s, NodeKind.Identifier) as Identifier[]) regionNames.add(id.name);
+  // Where the receiver can go: the code after the region, and the code before it only
+  // when a goto after the region leads back there. A declarator is not a use.
+  const declarators = new Set<ASTNode>();
+  for (const d of findNodesByKind(body, NodeKind.VariableDecl) as VariableDecl[]) declarators.add(d.name);
+  const preLabels = new Set<string>();
+  for (const s of top.slice(0, i0)) for (const l of findNodesByKind(s, NodeKind.LabelStmt)) preLabels.add((l as LabelStmt).label.name);
+  const loopsBack = top.slice(iEnd).some(s => (findNodesByKind(s, NodeKind.GotoStmt) as GotoStmt[]).some(g => preLabels.has(g.label.name)));
+  const outsideNames = new Set<string>();
+  for (const s of [...(loopsBack ? top.slice(0, i0) : []), ...top.slice(iEnd)]) {
+    for (const id of findNodesByKind(s, NodeKind.Identifier) as Identifier[]) if (!declarators.has(id)) outsideNames.add(id.name);
+  }
+  const preserve: VariableDecl[] = [];
+  for (const n of new Set([...written, ...[...addressed].filter(a => regionNames.has(a))])) {
+    if (!outsideNames.has(n)) continue;
+    if (params.has(n)) return refuse(`parameter ${n} is written in the region and read outside it`), false;
+    const v = keptDecls.get(n);
+    if (!v) continue; // a global, or a local of a nested block the region cannot see
+    if (v.type.kind === NodeKind.ArrayType) return refuse(`array ${n} is written in the region and read outside it`), false;
+    if ((v.specifiers as string[]).includes('static')) continue;
+    preserve.push(v);
+  }
+  for (const v of preserve) {
+    const original = v.type;
+    v.type = volatileOf(original) as VariableDecl["type"];
+    castAddressOf(body, v.name.name, original);
+  }
+
+  // A fault is an asynchronous exception: any load or store through a pointer in the
+  // __try can be the one that raises it, and C++ lets the compiler move such an access
+  // across a store the handler path observes (a volatile local, a global, memory) -
+  // at -O2 GCC hoisted the faulting `*p` above `nStep = 2`, and the __finally saw 1.
+  // MSVC keeps them in order inside a __try. A compiler fence before and after every
+  // statement with an observable store, and at the edges of the blocks its condition
+  // guards, restores that order.
+  const unobservable = new Set<string>();
+  for (const [n] of keptDecls) unobservable.add(n);
+  for (const n of params) unobservable.add(n);
+  for (const v of preserve) unobservable.delete(v.name.name);
+  for (const st of region) {
+    for (const d of findNodesByKind(st, NodeKind.VariableDecl) as VariableDecl[]) {
+      if (!preserve.includes(d)) unobservable.add(d.name.name);
+    }
+  }
+  const fenced = fenceStatements(region, unobservable);
+  region.splice(0, region.length, ...fenced);
+
+  if (isFinally) {
+    buildFinally(body, scope, top, i0, iTail, region, finallyStmts, hoisted, uses);
+    return true;
+  }
+
   // Build the scope.
   const name = `__seh${scope.level}`;
   const scopeDecl = Decl.variable(name, Type.typedef('D2SehScope'), Expr.initList([Expr.intLiteral(scope.filter)]));
@@ -314,6 +440,246 @@ function lower(fn: FunctionDecl, scopes: SehLoweringScope[], refuse: (r: string)
   body.statements = [...before, ...hoisted, block, ...afterRegion];
   removeStatements(body, doomed);
   return true;
+}
+
+/**
+ * The `__finally` shape:
+ *
+ *     auto __finally0 = [&]() { <block> };
+ *     {
+ *       D2SehScope __seh0{__finally0};   // the unwind of an exception runs the block
+ *       __seh0.Enter();
+ *       <try>
+ *     }
+ *     __finally0();                      // the normal path's own call, after the __try
+ *
+ * The scope is popped before the normal path runs the block, as the original's -1
+ * store does before its CALL: an exception the block raises is not this scope's.
+ */
+function buildFinally(
+  body: CompoundStmt, scope: SehLoweringScope, top: Statement[], i0: number, iTail: number,
+  region: Statement[], finallyStmts: Statement[], hoisted: Statement[], uses: Map<Statement, FrameUse>,
+): void {
+  const fname = `__finally${scope.level}`;
+  const name = `__seh${scope.level}`;
+  const lambda = {
+    kind: NodeKind.LambdaExpr, captures: [], captureDefault: '&', parameters: [], returnType: null,
+    body: Stmt.compound(finallyStmts), specifiers: [], location: body.location,
+  } as unknown as Expression;
+  const lambdaDecl = Stmt.declStmt([Decl.variable(fname, Type.auto(), lambda)]);
+  lambdaDecl.leadingTrivia = [
+    lineComment(`__finally block: run by the termination handler ${scope.handlerAddress} on unwind and by the normal path; both reach ${scope.bodyAddress}`, lambdaDecl),
+  ];
+  const scopeDecl = Decl.variable(name, Type.typedef('D2SehScope'), Expr.initList([Expr.identifier(fname)]));
+  scopeDecl.directInit = true;
+  const scopeStmt = Stmt.declStmt([scopeDecl]);
+  scopeStmt.leadingTrivia = [lineComment(`__try / __finally: scope table ${scope.scopeTable}`, scopeStmt)];
+  const enterStmt = Stmt.expr(Expr.call(Expr.member(Expr.identifier(name), 'Enter'), []));
+  const block = Stmt.compound([scopeStmt, enterStmt, ...region]);
+  const callStmt = Stmt.expr(Expr.call(fname, []));
+  callStmt.leadingTrivia = [lineComment(`normal termination: the parent calls ${scope.bodyAddress} after the __try`, callStmt)];
+
+  const doomed = new Set<ASTNode>();
+  for (const [s] of uses) doomed.add(s);
+  const before = top.slice(0, i0).filter(s => !doomed.has(s));
+  const tail = top.slice(iTail).filter(s => !doomed.has(s));
+  body.statements = [...before, ...hoisted, lambdaDecl, block, callStmt, ...tail];
+  removeStatements(body, doomed);
+}
+
+const FENCE = 'D2_SEH_FENCE';
+
+/** Library calls GCC expands into inline stores (so they are stores, not barriers). */
+const INLINE_STORE_BUILTINS = new Set([
+  'memset', 'memcpy', 'memmove', 'strcpy', 'strncpy', 'strcat', 'strncat', 'stpcpy', 'bzero',
+  '_memset', '_memcpy', '_memmove', '_strcpy', '_strncpy', '_strcat', '_strncat',
+]);
+
+function fenceStmt(): Statement {
+  return Stmt.expr(Expr.call(FENCE, []));
+}
+
+function isFence(s: Statement | null | undefined): boolean {
+  if (!s || s.kind !== NodeKind.ExprStmt) return false;
+  const e = (s as ExprStmt).expression;
+  return e.kind === NodeKind.CallExpr && identName((e as unknown as { callee: Expression }).callee) === FENCE;
+}
+
+/** The expressions a statement evaluates itself, not those of the statements it holds. */
+function ownExpressions(s: Statement): ASTNode[] {
+  const n = s as unknown as Record<string, ASTNode | null | undefined>;
+  switch (s.kind) {
+    case NodeKind.ExprStmt: return [n.expression!];
+    case NodeKind.IfStmt: case NodeKind.WhileStmt: case NodeKind.DoWhileStmt: case NodeKind.SwitchStmt:
+      return [n.condition!, n.init].filter((x): x is ASTNode => !!x);
+    case NodeKind.ForStmt: return [n.init, n.condition, n.increment].filter((x): x is ASTNode => !!x);
+    case NodeKind.ReturnStmt: return n.value ? [n.value] : [];
+    case NodeKind.DeclStmt: return [s];
+    default: return [];
+  }
+}
+
+/** Does the expression store somewhere the code after a fault can see? */
+function hasObservableStore(nodes: ASTNode[], unobservable: Set<string>): boolean {
+  const observable = (lv: Expression): boolean => {
+    let x: Expression = lv;
+    for (;;) {
+      if (x.kind === NodeKind.ParenExpr) x = (x as unknown as { expression: Expression }).expression;
+      else if (x.kind === NodeKind.MemberExpr && !(x as MemberExpr).isArrow) x = (x as MemberExpr).object;
+      else break;
+    }
+    const n = identName(x);
+    return !(n && unobservable.has(n));
+  };
+  for (const node of nodes) {
+    // A call to an opaque function already orders memory around it; one GCC may expand
+    // inline into plain stores does not.
+    for (const c of findNodesByKind(node, NodeKind.CallExpr) as unknown as { callee: Expression }[]) {
+      let callee = identName(c.callee);
+      if (!callee && c.callee.kind === NodeKind.QualifiedId) {
+        const q = c.callee as unknown as { name: ASTNode };
+        callee = q.name.kind === NodeKind.Identifier ? (q.name as Identifier).name : undefined;
+      }
+      if (callee && INLINE_STORE_BUILTINS.has(callee)) return true;
+    }
+    for (const a of findNodesByKind(node, NodeKind.AssignExpr) as AssignExpr[]) if (observable(a.left)) return true;
+    for (const u of findNodesByKind(node, NodeKind.UnaryExpr) as UnaryExpr[]) {
+      if ((u.operator === '++' || u.operator === '--') && observable(u.operand)) return true;
+    }
+    for (const p of findNodesByKind(node, NodeKind.PostfixExpr) as unknown as { operand: Expression }[]) {
+      if (observable(p.operand)) return true;
+    }
+  }
+  return false;
+}
+
+function asBlock(s: Statement): CompoundStmt {
+  return s.kind === NodeKind.CompoundStmt ? s as CompoundStmt : Stmt.compound([s]);
+}
+
+/** Fence a statement list: see the comment where it is called. */
+function fenceStatements(list: Statement[], unobservable: Set<string>): Statement[] {
+  const out: Statement[] = [];
+  const push = (s: Statement) => { if (!(isFence(s) && isFence(out[out.length - 1]))) out.push(s); };
+  for (const s of list) {
+    // Labels stay on the statement they name; the fence goes inside them.
+    const labels: Statement[] = [];
+    let core = s;
+    while (core.kind === NodeKind.LabelStmt || core.kind === NodeKind.CaseStmt || core.kind === NodeKind.DefaultStmt) {
+      labels.push(core);
+      core = (core as unknown as { statement: Statement }).statement;
+    }
+    const guard = hasObservableStore(ownExpressions(core), unobservable);
+    const n = core as unknown as Record<string, Statement | null>;
+    const fenceBody = (key: string, atEnd: boolean) => {
+      if (!n[key]) return;
+      const b = asBlock(n[key]!);
+      const inner = fenceStatements(b.statements, unobservable);
+      if (guard) { if (!isFence(inner[0])) inner.unshift(fenceStmt()); if (atEnd && !isFence(inner[inner.length - 1])) inner.push(fenceStmt()); }
+      n[key] = { ...b, statements: inner } as CompoundStmt;
+    };
+    switch (core.kind) {
+      case NodeKind.CompoundStmt: {
+        const c = core as CompoundStmt;
+        c.statements = fenceStatements(c.statements, unobservable);
+        break;
+      }
+      case NodeKind.IfStmt: fenceBody('thenBranch', false); fenceBody('elseBranch', false); break;
+      case NodeKind.WhileStmt: case NodeKind.DoWhileStmt: case NodeKind.ForStmt: fenceBody('body', true); break;
+      case NodeKind.SwitchStmt: fenceBody('body', false); break;
+    }
+    if (!guard) { push(s); continue; }
+    if (labels.length > 0) {
+      // `L: s` -> `L: FENCE; s; FENCE`: a jump to L still passes the first fence.
+      (labels[labels.length - 1] as unknown as { statement: Statement }).statement = fenceStmt();
+      push(s);
+      push(core);
+    } else {
+      push(fenceStmt());
+      push(core);
+    }
+    push(fenceStmt());
+  }
+  return out;
+}
+
+/** Names the statements assign, increment or decrement (as the root of the lvalue). */
+function writtenNames(stmts: Statement[]): Set<string> {
+  const out = new Set<string>();
+  const root = (e: Expression): string | undefined => {
+    let x: Expression = e;
+    for (;;) {
+      if (x.kind === NodeKind.ParenExpr) x = (x as unknown as { expression: Expression }).expression;
+      else if (x.kind === NodeKind.MemberExpr && !(x as MemberExpr).isArrow) x = (x as MemberExpr).object;
+      else if (x.kind === NodeKind.SubscriptExpr) x = (x as unknown as { array: Expression }).array;
+      else break;
+    }
+    return identName(x);
+  };
+  for (const s of stmts) {
+    for (const a of findNodesByKind(s, NodeKind.AssignExpr) as AssignExpr[]) {
+      const n = root(a.left); if (n) out.add(n);
+    }
+    for (const u of findNodesByKind(s, NodeKind.UnaryExpr) as UnaryExpr[]) {
+      if (u.operator === '++' || u.operator === '--') { const n = root(u.operand); if (n) out.add(n); }
+    }
+    for (const p of findNodesByKind(s, NodeKind.PostfixExpr) as unknown as { operand: Expression }[]) {
+      const n = root(p.operand); if (n) out.add(n);
+    }
+  }
+  return out;
+}
+
+/** Names whose address is taken (`&x`, `&x.f`, `&x[i]`) anywhere in the function. */
+function addressTakenNames(node: ASTNode): Set<string> {
+  const out = new Set<string>();
+  for (const u of findNodesByKind(node, NodeKind.UnaryExpr) as UnaryExpr[]) {
+    if (u.operator !== '&') continue;
+    let x: Expression = u.operand;
+    while (x.kind === NodeKind.ParenExpr || x.kind === NodeKind.MemberExpr || x.kind === NodeKind.SubscriptExpr) {
+      if (x.kind === NodeKind.MemberExpr && (x as MemberExpr).isArrow) break;
+      x = x.kind === NodeKind.ParenExpr ? (x as unknown as { expression: Expression }).expression
+        : x.kind === NodeKind.MemberExpr ? (x as MemberExpr).object : (x as unknown as { array: Expression }).array;
+    }
+    const n = identName(x);
+    if (n) out.add(n);
+  }
+  return out;
+}
+
+/** `T` -> `volatile T`; a pointer is qualified itself (`T * volatile`), not its pointee. */
+function volatileOf(t: ASTNode): ASTNode {
+  if (t.kind === NodeKind.PointerType) {
+    const p = t as unknown as { qualifiers: string[] };
+    return p.qualifiers.includes('volatile') ? t : { ...t, qualifiers: [...p.qualifiers, 'volatile'] } as ASTNode;
+  }
+  if (t.kind === NodeKind.QualifiedType) {
+    const q = t as unknown as { qualifiers: string[] };
+    return q.qualifiers.includes('volatile') ? t : { ...t, qualifiers: [...q.qualifiers, 'volatile'] } as ASTNode;
+  }
+  return Type.qualified(t as never, ['volatile']);
+}
+
+/** `&x` -> `(T *)&x`: the address of the now-volatile local, as the pointer it was. */
+function castAddressOf(root: ASTNode, name: string, original: ASTNode): void {
+  const visit = (n: ASTNode): void => {
+    for (const [key, child] of Object.entries(n)) {
+      if (key === 'location' || key === 'leadingTrivia' || key === 'trailingTrivia') continue;
+      const fix = (x: unknown): unknown => {
+        if (!x || typeof x !== 'object' || !('kind' in x)) return x;
+        const node = x as ASTNode;
+        if (node.kind === NodeKind.UnaryExpr && (node as UnaryExpr).operator === '&'
+          && identName((node as UnaryExpr).operand) === name) {
+          return Expr.paren(Expr.cast(Type.pointer(structuredClone(original) as never), node as Expression));
+        }
+        visit(node);
+        return node;
+      };
+      if (Array.isArray(child)) for (let i = 0; i < child.length; i++) child[i] = fix(child[i]);
+      else if (child && typeof child === 'object' && 'kind' in child) (n as unknown as Record<string, unknown>)[key] = fix(child);
+    }
+  };
+  visit(root);
 }
 
 function createSehLoweringTransformer(options: SehLoweringOptions = {}): Transformer {

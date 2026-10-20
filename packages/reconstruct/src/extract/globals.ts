@@ -418,7 +418,7 @@ const TYPE_MAP: Record<string, string> = {
 /**
  * Infer a better C type from Ghidra's type
  */
-function inferType(dataType: string): string {
+export function inferType(dataType: string): string {
   const lower = dataType.toLowerCase();
   return TYPE_MAP[lower] || dataType;
 }

@@ -12,16 +12,31 @@
  *    fall-through or one jump, at the parent's own `[ebp-4] = <enclosing level>` store:
  *    an empty `__except` block whose code is the code after the `__try`.
  *
+ * A `__finally` entry (no filter) is lowered when the instructions prove where its
+ * block is in the decompile:
+ *
+ *  - after the parent's `[ebp-4] = -1` store comes one CALL T and then nothing but
+ *    register loads from the frame up to the `mov fs:[0],reg` deregistration, so the
+ *    statements the decompiler prints between that store and the deregistration are
+ *    T's body, inlined (Ghidra says "Inlined function"), and nothing else;
+ *  - the scope table's handler (the termination handler the unwind calls) reaches T by
+ *    fall-through after register setup only (`XOR EBX,EBX`, `MOV EDI,[EBP-0x1c]`):
+ *    the unwind path runs the same block.
+ *
  * Each level must be stored exactly once (the decompiler's one printed store is then
- * that instruction). EH4 frames are recognised by extraction but their registration is
- * not typed in Ghidra, so nothing here lowers them; neither are `__finally` entries,
- * whose funclet the normal path also calls.
+ * that instruction); a store of a register (`mov [ebp-4],ebx`) counts, its value is the
+ * one the decompiler prints. EH4 frames are recognised by extraction but their
+ * registration is not typed in Ghidra, so nothing here lowers them.
  */
 
 import type { ExtractedFunction } from '../types.js';
-import type { SehInstruction } from '../extract/seh-frames.js';
+import type { SehInstruction, SehFrameFacts } from '../extract/seh-frames.js';
 
 export interface SehLoweringScopeSpec {
+  /** `__except` (the default) or `__finally`. */
+  kind?: 'except' | 'finally';
+  /** `__finally`: the termination handler's body, which the normal path CALLs. */
+  bodyAddress?: string;
   level: number;
   filter: number;
   filterAddress: string;
@@ -67,7 +82,7 @@ export function sehLoweringDecision(func: Pick<ExtractedFunction, 'sehFrame'>): 
   if (frame.entries.length !== 1) return { lower: false, reason: `${frame.entries.length} scope table entries` };
   const e = frame.entries[0];
   if (e.level !== 0 || e.enclosingLevel !== -1) return { lower: false, reason: 'a nested scope' };
-  if (!e.filter) return { lower: false, reason: 'a __finally scope' };
+  if (!e.filter) return finallyDecision(frame);
   const filter = constantFilter(e.filterCode);
   if (filter === undefined) return { lower: false, reason: `filter ${e.filter} is not a constant` };
   const resume = handlerResume(e.handlerCode, e.enclosingLevel);
@@ -83,6 +98,51 @@ export function sehLoweringDecision(func: Pick<ExtractedFunction, 'sehFrame'>): 
       filterAddress: e.filter,
       handlerAddress: e.handler,
       resumeAddress: resume,
+      scopeTable: frame.scopeTable,
+    }],
+  };
+}
+
+/** Register-only setup a termination handler may run before its body. */
+const REGISTER_SETUP = /^(XOR (E[A-Z]{2}),\2|MOV E[A-Z]{2},dword ptr \[EBP \+ -?0x[0-9a-f]+\])$/i;
+const FRAME_LOAD = /^MOV E[A-Z]{2},dword ptr \[EBP \+ -?0x[0-9a-f]+\]$/i;
+const DEREGISTER = /^MOV dword ptr FS:\[0x0\],E[A-Z]{2}$/i;
+
+/** The `__finally` half: see the header. */
+export function finallyDecision(frame: SehFrameFacts): SehLoweringDecision {
+  const e = frame.entries[0];
+  const stores = frame.tryLevelStores;
+  const zero = (stores['0'] ?? 0) + (stores['reg'] ?? 0);
+  if (stores['-1'] !== 1 || zero !== 1 || Object.keys(stores).some(k => !['0', '-1', 'reg'].includes(k))) {
+    return { lower: false, reason: 'a try level is stored more than once' };
+  }
+  const leave = Object.values(frame.afterStores ?? {}).find(a => a.level === '-1');
+  if (!leave) return { lower: false, reason: 'a __finally scope (no record of the code after the try)' };
+  // One CALL T, then frame loads only, then the deregistration.
+  const code = leave.code;
+  const call = code.findIndex(c => c.callTarget !== undefined);
+  if (call < 0) return { lower: false, reason: 'no call of the termination handler after the try' };
+  const pre = code.slice(0, call), post = code.slice(call + 1);
+  const end = post.findIndex(c => DEREGISTER.test(c.text));
+  if (pre.some(c => !FRAME_LOAD.test(c.text)) || end < 0 || post.slice(0, end).some(c => !FRAME_LOAD.test(c.text))) {
+    return { lower: false, reason: 'the code between the try and the deregistration is not one call' };
+  }
+  const body = code[call].callTarget!;
+  // The termination handler falls through register setup into the same body.
+  const at = e.handlerCode.findIndex(i => i.address === body);
+  if (at < 0 || e.handlerCode.slice(0, at).some(i => !REGISTER_SETUP.test(i.text))) {
+    return { lower: false, reason: `termination handler ${e.handler} does not reach ${body} by register setup alone` };
+  }
+  return {
+    lower: true,
+    scopes: [{
+      kind: 'finally',
+      bodyAddress: body,
+      level: 0,
+      filter: 0,
+      filterAddress: '-',
+      handlerAddress: e.handler,
+      resumeAddress: '-',
       scopeTable: frame.scopeTable,
     }],
   };

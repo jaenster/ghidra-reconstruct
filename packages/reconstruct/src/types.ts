@@ -85,6 +85,12 @@ export interface ExtractedFunction {
    * none or the snapshot predates the field.
    */
   sehFrame?: import('./extract/seh-frames.js').SehFrameFacts;
+  /**
+   * Data references from instruction operands, and the addresses the code derives from
+   * them by ADD/SUB/LEA (extract/operand-refs.ts). Absent when the function has none or
+   * the snapshot predates the field.
+   */
+  operandRefs?: import('./extract/operand-refs.js').OperandRefFacts;
 }
 
 /**
