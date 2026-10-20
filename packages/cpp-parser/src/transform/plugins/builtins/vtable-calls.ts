@@ -232,7 +232,15 @@ function detectVTableCall(call: CallExpr): VTableInfo | null {
   } else if (innerExpr.kind === NodeKind.SubscriptExpr) {
     // Array subscript pattern: ((int**)param_1)[8]
     const subscript = innerExpr as SubscriptExpr;
-    const idx = getIntValue(subscript.index);
+    // `(*a[2])(args)` through a TYPED array of function pointers is already a typed
+    // call: the element is the function. Only an untyped base - a cast `((int**)p)[8]`
+    // or a second dereference - is a raw table this pass has to spell. Treating the
+    // typed form as one turned `(*gapObjectOperateCallbacks[2])(pGame, pUnit)` into
+    // `(**(code**)((char*)gapObjectOperateCallbacks + 8))(pGame, pUnit)`, discarding the
+    // funcdef Ghidra gave the array (quest state handlers, object operate callbacks,
+    // room deactivation handlers, DRLG flag operations).
+    const typedElement = !innerDeref && unwrapParens(subscript.array).kind !== NodeKind.CStyleCastExpr;
+    const idx = typedElement ? null : getIntValue(subscript.index);
     if (idx !== null) {
       // The array base may be cast, unwrap it
       const arrayBase = unwrapParens(unwrapCasts(subscript.array));

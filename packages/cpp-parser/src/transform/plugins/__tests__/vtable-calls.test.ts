@@ -186,3 +186,21 @@ describe('vtableCallPlugin', () => {
     });
   });
 });
+
+describe('vtableCallPlugin: a call through a typed function-pointer array', () => {
+  const transformer = vtableCallPlugin.createTransformer();
+  const transform = (code: string) => emit(transformer(parse(code)) as AnyNode).trim();
+  it('keeps (*a[2])(...) and (*s.m[9])(...) as written - the element is already the function', () => {
+    const out = transform(`void f(int g, int u, D2QuestDataStrc *q, QuestArg *a) {
+      (*gapObjectOperateCallbacks[2])(g, u);
+      (*(q->sStateFunctions).fpQuestStateHandler[9])(q, a);
+      (*gaRoomExDeactivationHandlers[0])(u); }`);
+    assert.ok(!out.includes('code'), out);
+    assert.match(out, /\(\*gapObjectOperateCallbacks\[2\]\)\(g, u\)/);
+    assert.match(out, /fpQuestStateHandler\[9\]\)\(q, a\)/);
+  });
+  it('still spells the raw untyped table form', () => {
+    const out = transform('void f(void *p) { (*((int **)p)[8])(p); }');
+    assert.ok(!/\(\(int \*\*\)p\)\[8\]/.test(out), out);
+  });
+});
