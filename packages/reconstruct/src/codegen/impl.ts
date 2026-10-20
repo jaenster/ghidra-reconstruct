@@ -25,6 +25,7 @@ import { transformGhidraCode, preprocessGhidraCode, isGhidraGeneratedName, sugge
 import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js';
 import { getGlobalReferenceAliases, globalAliasComment } from './global-aliases.js';
 import { sehLoweringDecision, type SehLoweringDecision } from './seh-lowering-spec.js';
+import { foldedAddressFacts, type FoldedAddressFact } from './folded-address-spec.js';
 import { ROOT_CLASS_SCOPE, namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 import { cleanFunctionComment, guardedFuncDefTypedef, emittedFunctionName, returnSigType, sigType } from './header.js';
 import { declarationHead } from './calling-convention.js';
@@ -1468,6 +1469,7 @@ export function generateFunctionImplementation(
           callSiteOverrides: func.callSiteOverrides,
           labelFlow: func.labelFlow,
           sehLowering: sehLoweringDecision(func),
+          foldedAddresses: foldedAddressFacts(func),
         },
       );
       body = func.name ? rewriteQuestUnionMembers(transformed.code, func.name, context?.sourceFileName, [...(func.parameters ?? []), ...(func.localVariables ?? [])]) : transformed.code;
@@ -2248,6 +2250,8 @@ function transformDecompiledCode(
     labelFlow?: Record<string, { back: number; first: string; pushedArgs: boolean; address?: string; computed?: number }>;
     /** The function's EH3 frame as `seh-lowering` needs it (codegen/seh-lowering-spec.ts). */
     sehLowering?: SehLoweringDecision;
+    /** Addresses the instructions derive from a global's start (codegen/folded-address-spec.ts). */
+    foldedAddresses?: FoldedAddressFact[];
   },
 ): TransformDecompiledResult {
   try {
@@ -2496,6 +2500,18 @@ function transformDecompiledCode(
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         enclosingVarTypes,
       };
+      if (enclosing?.foldedAddresses && enclosing.foldedAddresses.length > 0) {
+        perPluginOptions['folded-address-rebase'] = {
+          rebases: enclosing.foldedAddresses,
+          globalAddresses: context.funcPtrArgCasts.globalAddresses,
+          globalSizes: context.funcPtrArgCasts.globalSizes,
+          globalElementSizes: context.funcPtrArgCasts.globalElementSizes,
+          globalNamespaces: context.funcPtrArgCasts.globalNamespaces,
+          onRewrite: (r: { value: number; from: string; to: string; ins?: string }) =>
+            console.warn(`[fold] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: 0x${r.value.toString(16)} ${r.from} -> ${r.to} (ins ${r.ins ?? '?'})`),
+          onRefusal: (reason: string) => console.warn(`[fold] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: left as printed: ${reason}`),
+        };
+      }
       perPluginOptions['biased-table-index'] = {
         globalAddresses: context.funcPtrArgCasts.globalAddresses,
         globalSizes: context.funcPtrArgCasts.globalSizes,

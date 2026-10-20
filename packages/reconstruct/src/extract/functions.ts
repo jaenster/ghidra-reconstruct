@@ -3,6 +3,7 @@
  */
 
 import { attachSehFrames } from './seh-frames.js';
+import { attachOperandRefs } from './operand-refs.js';
 import type {
   GhidraConnection,
   ExtractedFunction,
@@ -411,6 +412,18 @@ export async function extractAllFunctions(
       `${label}extract/seh-frames`,
       async () => { attached = await attachSehFrames(connection, allFunctions); },
       () => `${attached} SEH frame(s)`
+    );
+  }
+
+  // Data references from instruction operands and the addresses the code derives from
+  // them (`MOV EAX,lbase; SUB EAX,0x202`), which the decompiler folds into another
+  // object's interior. One script for the whole program.
+  {
+    let attached = 0;
+    await timePhase(
+      `${label}extract/operand-refs`,
+      async () => { attached = await attachOperandRefs(connection, allFunctions); },
+      () => `operand references in ${attached} function(s)`
     );
   }
 
