@@ -307,6 +307,7 @@ export {
 
 export {
   commaExpandPlugin,
+  commaExpandLatePlugin,
   type CommaExpandOptions,
 } from './builtins/comma-expand.js';
 
@@ -498,7 +499,7 @@ import { registerAliasParamPlugin } from './builtins/register-alias-param.js';
 import { sbbBranchlessPlugin } from './builtins/sbb-branchless.js';
 import { branchlessSelectPlugin } from './builtins/branchless-select.js';
 import { earlyReturnPlugin } from './builtins/early-return.js';
-import { commaExpandPlugin } from './builtins/comma-expand.js';
+import { commaExpandPlugin, commaExpandLatePlugin } from './builtins/comma-expand.js';
 import { arrayFillCollapsePlugin } from './builtins/array-fill-collapse.js';
 import { funcPtrLiteralPlugin } from './builtins/func-ptr-literal.js';
 import { globalAddressLiteralPlugin } from './builtins/global-address-literal.js';
@@ -643,6 +644,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   branchlessSelectPlugin,     // Cleanup: (cond - 1 & mask) + off → cond ? off : off+mask (priority 43)
   earlyReturnPlugin,          // Readability: flatten nested if(C){...}return X; → if(!C)return X; ... (priority 60)
   commaExpandPlugin,          // Readability: lower comma/short-circuit side effects into statements + guards (priority 13)
+  commaExpandLatePlugin,      // Readability: the same, on what goto structuring left (priority 59)
   arrayFillCollapsePlugin,    // Cleanup: collapse arr[i]=0 runs into memset (priority 50)
   gotoCleanupPlugin,          // Cleanup: if (cond) goto L; ... L: stmt; → if (!cond) { ... } stmt;
   redundantParenCleanupPlugin, // Cleanup: if((x)) → if(x) (priority 56)

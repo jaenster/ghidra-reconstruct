@@ -287,6 +287,18 @@ class Builder {
     return SITE_UNIQUE.test(text) ? `e:${text}#site${identityOf(e)}` : 'e:' + text;
   }
 
+  /** An expression evaluated only for its effect, then `next`: a comma chain is one work node per operand. */
+  effect(e: Expression, next: number, scope: Scope | null): number {
+    const u = stripParens(e);
+    if (u.kind === NodeKind.BinaryExpr && (u as unknown as { operator: string }).operator === ',') {
+      const b = u as unknown as { left: Expression; right: Expression };
+      return this.effect(b.left, this.effect(b.right, next, scope), scope);
+    }
+    const w = this.add('work', this.exprKey(u), u, scope);
+    this.nodes[w].next = next;
+    return w;
+  }
+
   /** Lower a condition: control reaches `t` when it is true and `f` when false. */
   cond(e: Expression, t: number, f: number, scope: Scope | null): number {
     const c = constTruth(e);
@@ -299,6 +311,9 @@ class Builder {
       const b = e as unknown as { operator: string; left: Expression; right: Expression };
       if (b.operator === '&&') return this.cond(b.left, this.cond(b.right, t, f, scope), f, scope);
       if (b.operator === '||') return this.cond(b.left, t, this.cond(b.right, t, f, scope), scope);
+      // The parser spells the comma operator as a left-associative BinaryExpr `,`: the
+      // left side is evaluated for its effect, then the right side is the condition.
+      if (b.operator === ',') return this.effect(b.left, this.cond(b.right, t, f, scope), scope);
     }
     if (e.kind === NodeKind.ConditionalExpr) {
       const q = e as unknown as { condition: Expression; thenExpr: Expression; elseExpr: Expression };

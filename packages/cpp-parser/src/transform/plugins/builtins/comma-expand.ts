@@ -22,7 +22,7 @@
  *       if ((a, b, c)) {...}  →  a; b; if (c) {...}
  *
  *  2. Short-circuit OR-guard with side effects, where the then-branch is a bare
- *     early-exit (return/break/continue/goto) — split the `||` chain into one
+ *     early-exit (return/break/continue; not goto, see below) — split the `||` chain into one
  *     guard per operand, hoisting each comma operand's assignments first:
  *       if (A || (x = e, !x) || B) return R;
  *         →  if (A) return R;
@@ -36,7 +36,13 @@
  *         →  while (true) { if (!A) break; x = e; if (!x) break; BODY }
  *
  * Runs EARLY (priority 13) so later passes (branchless-select, early-return,
- * etc.) operate on the flattened, single-purpose statements.
+ * etc.) operate on the flattened, single-purpose statements, and once more LATE
+ * (`commaExpandLatePlugin`, priority 59) on what goto structuring produced: a guard
+ * whose exit is a `goto` is left to goto-cleanup, which turns it into the negated,
+ * no-else form that 2b/2c lower by nesting.
+ *
+ * Every lowering keeps the order of evaluation: a comma operand's left side runs only
+ * on the path where `&&`/`||` evaluates that operand, exactly once.
  *
  * Conservative gates: patterns 2 and 3 only fire when the chain actually
  * contains a comma side effect — a plain `if (a || b) return;` is left alone.
@@ -223,7 +229,14 @@ function expandStatement(s: Statement): Statement[] | null {
       const exit = asEarlyExit(ifs.thenBranch);
       if (exit) {
         const ops = flattenChain(ifs.condition, '||');
-        if (ops.length >= 2 && hasCommaOperand(ops)) {
+        // Not for a goto: one guard per operand is one goto per operand, and the jumps
+        // were one in the binary. `if (A || (X, B)) goto L; R` has no comma-free form with
+        // one jump and no flag that is local to the if - the comma-free form nests R under
+        // the negated condition, which is goto-cleanup's job. So the condition is kept for
+        // now; once the goto is structured it reaches the late run of this pass as
+        // `if (!(A || (X, B))) { R }` (2b) or `if (!A && (X, !B)) { R }` (2c), which nest
+        // without copying anything. A goto that survives structuring keeps its comma.
+        if (ops.length >= 2 && hasCommaOperand(ops) && exit.kind !== NodeKind.GotoStmt) {
           const out: Statement[] = [];
           ops.forEach((op, i) => {
             const { assigns, cond } = splitComma(op);
@@ -233,13 +246,16 @@ function expandStatement(s: Statement): Statement[] | null {
           });
           return out;
         }
-        // Pattern 2b: negated OR-guard  if (!(A || B || ...)) E;
-        const neg = unwrap(ifs.condition);
-        if (neg.kind === NodeKind.UnaryExpr && (neg as UnaryExpr).operator === '!') {
-          const negOps = flattenChain((neg as UnaryExpr).operand, '||');
-          if (negOps.length >= 2 && hasCommaOperand(negOps)) {
-            return buildNestedChain(negOps, exit, ifs.leadingTrivia, true);
-          }
+      }
+      // Pattern 2b: negated OR-guard  if (!(A || B || ...)) BODY;  - BODY runs when every
+      // operand is false, so it nests as `if (!A) { <B assigns> if (!B) BODY }`. Any
+      // then-branch: with no else, nesting copies nothing. (goto-cleanup produces this
+      // shape from a goto guard the early run left alone.)
+      const neg = unwrap(ifs.condition);
+      if (neg.kind === NodeKind.UnaryExpr && (neg as UnaryExpr).operator === '!') {
+        const negOps = flattenChain((neg as UnaryExpr).operand, '||');
+        if (negOps.length >= 2 && hasCommaOperand(negOps)) {
+          return buildNestedChain(negOps, exit ?? ifs.thenBranch, ifs.leadingTrivia, true);
         }
       }
       // Pattern 2c: AND-chain with a comma side effect  if (A && (v=X, B)) BODY;
@@ -393,4 +409,17 @@ export const commaExpandPlugin: TransformPlugin = {
   createTransformer(_options?: CommaExpandOptions) {
     return createCommaExpandTransformer();
   },
+};
+
+/**
+ * The same lowering after goto structuring (goto-cleanup 55, loop-rotation-undo 56,
+ * short-circuit-fold 57, dead-branch-cleanup 58) and before early-return (60): an
+ * `if (A || (X, B)) goto L;` the early run left alone has by now become the negated
+ * no-else form when goto-cleanup structured it.
+ */
+export const commaExpandLatePlugin: TransformPlugin = {
+  ...commaExpandPlugin,
+  id: 'comma-expand-late',
+  name: 'Comma Expression Expansion (after goto structuring)',
+  priority: 59,
 };
