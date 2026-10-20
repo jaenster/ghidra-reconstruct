@@ -3080,6 +3080,15 @@ export function renderGlobalScalarInitializer(
   // `emitDataValue`'s pointer case spells it.
   const slotType = stripFuncDefIndirection(declaredType.trim());
   if (isFuncDefTypedefName(slotType)) {
+    // The value is a function's address (the three AppMode run pointers hold
+    // fAPPMODE_*_ReturnAppMode_Caller): name the function, not the 1.14d address,
+    // which nothing relocates.
+    const word = scalarWordValue(value);
+    const func = word ? initializerFunctionAt(word) : undefined;
+    if (func) {
+      const spelled = shadowQualifyReference(func);
+      return functionAddressSpelling(func, spelled, slotType) ?? `&${spelled}`;
+    }
     return `(${rootQualifyShadowedType(slotType)})${ensureHexPrefix(value, declaredType)}`;
   }
   // A four-byte pointer never carries `initializedData` — `fetchInitializedData`
