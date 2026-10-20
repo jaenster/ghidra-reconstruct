@@ -307,6 +307,75 @@ const MSVC_SEH3_TYPE_LINES: readonly string[] = [
 ];
 
 /**
+ * The runtime `seh-lowering` lowers an MSVC `__try`/`__except` onto.
+ *
+ * PSEH2 (`<pseh/pseh2.h>`, shipped with mingw-w64) is the obvious candidate and does
+ * not compile as C++: its `_SEH2_TRY` declares GNU nested functions, which g++ rejects.
+ * So the scope is written out here, in the shape `_except_handler3` itself works in:
+ *
+ *  - `D2SehScope` is an EXCEPTION_REGISTRATION_RECORD (Next, Handler first) that
+ *    `Enter()` pushes on fs:[0] and `Leave()`/the destructor pops, so every way out of
+ *    the `__try` block - its end, a `return`, a `goto` - deregisters it, as the
+ *    original's epilogue and try-level stores did;
+ *  - `D2SehDispatch`, the registered handler, ignores unwind passes, answers the
+ *    filter's constant (-1 continue execution, 0 continue search), and for 1 unwinds
+ *    every frame above its own (`RtlUnwind`, as `_global_unwind2` does), pops itself
+ *    and resumes the `__except` block with `__builtin_longjmp` into the frame that ran
+ *    `D2_SEH_SETJMP`.
+ *
+ * `__builtin_setjmp` restores only EBP/ESP/EIP. That is enough at -O0, where every
+ * local lives in its frame slot (the tree's build); with optimisation a local the try
+ * block writes and the handler path reads would need `volatile`.
+ */
+const MSVC_SEH_RUNTIME_LINES: readonly string[] = [
+  '// MSVC __try/__except, lowered by seh-lowering: a real fs:[0] registration (see platform-types.ts)',
+  '#if defined(_WIN32) && defined(__i386__) && defined(__GNUC__)',
+  'extern "C" EXCEPTION_DISPOSITION __cdecl D2SehDispatch(EXCEPTION_RECORD* pRecord, void* pFrame, CONTEXT* pContext, void* pDispatcherContext);',
+  'struct D2SehScope {',
+  '    D2SehScope* Next;      // EXCEPTION_REGISTRATION_RECORD: the fs:[0] chain ...',
+  '    void* Handler;         // ... and its handler; these two come first',
+  '    long nFilter;          // the __except filter\'s constant result',
+  '    DWORD dwExceptionCode; // the code of the exception the __except block handles',
+  '    int bRegistered;',
+  '    void* jb[5];           // __builtin_setjmp buffer: where the __except block resumes',
+  '    explicit D2SehScope(long filter) : Next(0), Handler((void*)&D2SehDispatch), nFilter(filter), dwExceptionCode(0), bRegistered(0) {}',
+  '    D2SehScope(const D2SehScope&) = delete;',
+  '    D2SehScope& operator=(const D2SehScope&) = delete;',
+  '    // Out of line, so the call gives the setjmp receiver an edge even in a block with no other call.',
+  '    __attribute__((noinline)) void Enter() {',
+  '        NT_TIB* pTib = (NT_TIB*)NtCurrentTeb();',
+  '        Next = (D2SehScope*)pTib->ExceptionList;',
+  '        pTib->ExceptionList = (EXCEPTION_REGISTRATION_RECORD*)this;',
+  '        bRegistered = 1;',
+  '    }',
+  '    void Leave() {',
+  '        if (!bRegistered) return;',
+  '        ((NT_TIB*)NtCurrentTeb())->ExceptionList = (EXCEPTION_REGISTRATION_RECORD*)Next;',
+  '        bRegistered = 0;',
+  '    }',
+  '    ~D2SehScope() { Leave(); }',
+  '};',
+  '#define D2_SEH_SETJMP(scope) __builtin_setjmp((scope).jb)',
+  'extern "C" inline EXCEPTION_DISPOSITION __cdecl D2SehDispatch(EXCEPTION_RECORD* pRecord, void* pFrame, CONTEXT*, void*) {',
+  '    D2SehScope* pScope = (D2SehScope*)pFrame;',
+  '    if (pRecord->ExceptionFlags & (EXCEPTION_UNWINDING | EXCEPTION_EXIT_UNWIND)) return ExceptionContinueSearch;',
+  '    if (pScope->nFilter < 0) return ExceptionContinueExecution;',
+  '    if (pScope->nFilter == 0) return ExceptionContinueSearch;',
+  '    pScope->dwExceptionCode = pRecord->ExceptionCode;',
+  '    // _global_unwind2: unwind every frame above this one, then continue right here.',
+  '    __asm__ __volatile__("pushl $0\\n\\tpushl %1\\n\\tpushl $1f\\n\\tpushl %0\\n\\tcall _RtlUnwind@16\\n1:\\n"',
+  '                         : : "r"(pFrame), "r"(pRecord) : "eax", "ecx", "edx", "memory");',
+  '    pScope->Leave();',
+  '    __builtin_longjmp(pScope->jb, 1);',
+  '}',
+  '#else',
+  '// No fs:[0] to register on: the __try block runs unprotected.',
+  'struct D2SehScope { explicit D2SehScope(long) {} void Enter() {} };',
+  '#define D2_SEH_SETJMP(scope) 0',
+  '#endif',
+];
+
+/**
  * Check if a type name is a platform, standard, or Ghidra artifact type
  * that should never be emitted as a typedef/struct or need a forward declaration.
  */
@@ -1593,6 +1662,8 @@ export function generatePlatformHeader(
   lines.push('typedef void PFN_CrtExceptionFilter(EHExceptionRecord* pExceptionRecord, EHRegistrationNode* pRegistrationNode, CONTEXT* pContext, void* pParam);');
   lines.push('');
   lines.push(...MSVC_SEH3_TYPE_LINES);
+  lines.push('');
+  lines.push(...MSVC_SEH_RUNTIME_LINES);
   lines.push('');
 
   // Declarations for the Ghidra namespaces run.ts excludes from emission.

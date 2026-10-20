@@ -79,6 +79,12 @@ export interface ExtractedFunction {
    * call-site-override-cast). Absent when the snapshot predates them.
    */
   callSiteOverrides?: { callAddress: string; funcdef: string; arity: number }[];
+  /**
+   * The MSVC EH3/EH4 registration the function opens with, its scope table and the
+   * funclets' first instructions (extract/seh-frames.ts). Absent when the function has
+   * none or the snapshot predates the field.
+   */
+  sehFrame?: import('./extract/seh-frames.js').SehFrameFacts;
 }
 
 /**
@@ -245,6 +251,14 @@ export interface ExtractedGlobal {
    * import's address there; the image holds only a hint/name RVA.
    */
   importSlot?: string;
+  /**
+   * Set only where the address carries two or more labels: true for the one Ghidra
+   * makes primary (`SymbolTable.getPrimarySymbol`, the name the decompiler prints),
+   * false for the others. Absent in snapshots taken before extraction asked.
+   */
+  primary?: boolean;
+  /** Set by codegen's alias fold on the primary: the address's other labels. */
+  aliases?: string[];
 }
 
 /**

@@ -23,6 +23,8 @@ import { CPP_KEYWORDS } from './header.js';
 // Import cpp-parser for code transformation
 import { transformGhidraCode, preprocessGhidraCode, isGhidraGeneratedName, suggestBetterName, takeFuncPtrArgCastTypedefs, type TransformResult, type FuncPtrTarget, type ArtifactMode, type ArtifactRecord } from '@ghidra-mcp/cpp-parser';
 import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js';
+import { getGlobalReferenceAliases, globalAliasComment } from './global-aliases.js';
+import { sehLoweringDecision, type SehLoweringDecision } from './seh-lowering-spec.js';
 import { ROOT_CLASS_SCOPE, namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 import { cleanFunctionComment, guardedFuncDefTypedef, emittedFunctionName, returnSigType, sigType } from './header.js';
 import { declarationHead } from './calling-convention.js';
@@ -1027,6 +1029,8 @@ export function generateImplementation(
     for (const global of context.fileLocalGlobals) {
       let type = global.suggestedType || global.dataType;
       let name = global.suggestedName || global.name;
+      const aliasLine = globalAliasComment(global);
+      if (aliasLine) fileLocalLines.push(aliasLine);
 
       // Sanitize name
       name = name.replace(/[^A-Za-z0-9_]/g, '_');
@@ -1463,6 +1467,7 @@ export function generateFunctionImplementation(
           registerAliases: registerAliases(func),
           callSiteOverrides: func.callSiteOverrides,
           labelFlow: func.labelFlow,
+          sehLowering: sehLoweringDecision(func),
         },
       );
       body = func.name ? rewriteQuestUnionMembers(transformed.code, func.name, context?.sourceFileName, [...(func.parameters ?? []), ...(func.localVariables ?? [])]) : transformed.code;
@@ -2187,6 +2192,14 @@ function declaredCalleeNames(functionNames: string[] | undefined): string[] {
   return names;
 }
 
+/** One options object per alias table, so the plugin's transformer cache still hits. */
+const globalAliasOptionsCache = new WeakMap<Record<string, string>, { globalAliases: Record<string, string> }>();
+function globalAliasResolveOptions(aliases: Record<string, string>): { globalAliases: Record<string, string> } {
+  let o = globalAliasOptionsCache.get(aliases);
+  if (!o) globalAliasOptionsCache.set(aliases, (o = { globalAliases: aliases }));
+  return o;
+}
+
 function transformDecompiledCode(
   decompiled: string,
   options: ReconstructOptions,
@@ -2233,6 +2246,8 @@ function transformDecompiledCode(
     callSiteOverrides?: { funcdef: string; arity: number }[];
     /** How control enters each label, from the instructions (extract/label-flow.ts). */
     labelFlow?: Record<string, { back: number; first: string; pushedArgs: boolean; address?: string; computed?: number }>;
+    /** The function's EH3 frame as `seh-lowering` needs it (codegen/seh-lowering-spec.ts). */
+    sehLowering?: SehLoweringDecision;
   },
 ): TransformDecompiledResult {
   try {
@@ -2309,6 +2324,11 @@ function transformDecompiledCode(
 
     if (context?.functionAddressMap && context.functionAddressMap.size > 0) {
       perPluginOptions['func-ptr-literal'] = { functionAddressMap: context.functionAddressMap };
+    }
+
+    const globalAliases = getGlobalReferenceAliases();
+    if (Object.keys(globalAliases).length > 0) {
+      perPluginOptions['global-alias-resolve'] = globalAliasResolveOptions(globalAliases);
     }
 
     if (context?.functionRefAliases && Object.keys(context.functionRefAliases).length > 0) {
@@ -2624,6 +2644,20 @@ function transformDecompiledCode(
     const shadowedTypes = shadowedTypeQualifyOptions(context);
     if (shadowedTypes) {
       perPluginOptions['shadowed-type-qualify'] = shadowedTypes;
+    }
+
+    // An EH3 __try/__except frame: lowered onto D2SehScope when the instructions prove
+    // its filter and handler, reported otherwise.
+    if (enclosing?.sehLowering) {
+      const seh: SehLoweringDecision = enclosing.sehLowering;
+      if ('scopes' in seh) {
+        perPluginOptions['seh-lowering'] = {
+          sehScopes: seh.scopes,
+          onRefusal: (reason: string) => console.warn(`[seh] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: frame left as printed: ${reason}`),
+        };
+      } else {
+        console.warn(`[seh] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: frame left as printed: ${seh.reason}`);
+      }
     }
 
     // goto-cleanup reads the enclosing return type off the AST. It is the real one

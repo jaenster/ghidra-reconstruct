@@ -92,6 +92,7 @@ import { normalizePointerSizeSpellings } from './pointer-size-spelling.js';
 import { flattenTemplateNames } from './template-names.js';
 import { retypeVtableLocals, retypeVtableLocalsByAssignment, vtableMembersByType } from '../modules/vtable-types.js';
 import { NeedleIndex, scanReferences } from './needle-index.js';
+import { foldGlobalAliases, setGlobalReferenceAliases } from './global-aliases.js';
 import {
   computeTypeOwnership,
   stripTypeName,
@@ -608,6 +609,23 @@ export function generateProjectStage1(
   // before anything reads the local list, so no rename, slot, alias or type dependency
   // is made from one. Covers snapshots taken before extraction filtered them.
   dropUnionFacetMarkers(functions);
+  // One object per address. Several labels at one address are one datum: the primary
+  // defines it, the others become aliases, and a reference by an alias is respelled
+  // as the primary (initializers here, bodies in `global-alias-resolve`). Before
+  // anything keys a table on a global's name or address.
+  {
+    const fold = foldGlobalAliases(globals as AnalyzedDataSymbol[], functions, new Set(dataTypes.map(dt => dt.name)));
+    globals = fold.globals;
+    setGlobalReferenceAliases(fold.referenceAliases);
+    if (fold.aliasCount > 0 && (!shard || shard.index === 0)) {
+      const f = fold.folded;
+      console.log(
+        `  Global aliases: ${f.ghidra + f.decompiler + f.first} addresses with several labels folded to their primary ` +
+        `(${f.ghidra} by Ghidra, ${f.decompiler} by the decompiler's reference, ${f.first} first listed); ` +
+        `${fold.aliasCount} labels kept as aliases, ${fold.initializerRespellings} initializer references respelled`
+      );
+    }
+  }
   // Before anything reads a type: one spelling for every Ghidra placeholder name.
   respellPlaceholderTypes(functions, globals as { dataType?: string; suggestedType?: string }[], dataTypes);
   if (!shard || shard.index === 0) {

@@ -2,6 +2,7 @@
  * Function extraction from Ghidra
  */
 
+import { attachSehFrames } from './seh-frames.js';
 import type {
   GhidraConnection,
   ExtractedFunction,
@@ -399,6 +400,17 @@ export async function extractAllFunctions(
       `${label}extract/call-site-overrides`,
       async () => { attached = await attachCallSiteOverrides(connection, allFunctions); },
       () => `${attached} indirect-call override(s)`
+    );
+  }
+
+  // MSVC structured exception frames: the scope tables and their funclets, which no
+  // decompiled body shows. One script for the whole program.
+  {
+    let attached = 0;
+    await timePhase(
+      `${label}extract/seh-frames`,
+      async () => { attached = await attachSehFrames(connection, allFunctions); },
+      () => `${attached} SEH frame(s)`
     );
   }
 
