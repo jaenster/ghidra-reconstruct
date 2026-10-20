@@ -206,6 +206,26 @@ function isStringType(dataType: string): boolean {
 }
 
 /**
+ * A string datum someone NAMED is a variable, not a literal.
+ *
+ * The decompiler inlines an auto-labelled string (`s_...`) as its text, which is why
+ * string-typed symbols are dropped. A user-named one it prints by NAME:
+ * `_strtok(szInput, gszChatWhisperTargetName)` (CHAT_HandleWhisperCommand), where
+ * `gszChatWhisperTargetName` @00712ffc is a writable `" "` in .data that Round 9 typed
+ * from its byte use. Dropped, the name was undeclared. It is kept as the `char[size]`
+ * it occupies, initialised with its text, when the text fits that size with its NUL.
+ */
+export function namedStringAsCharArray<T extends { name: string; dataType: string; size: number; value?: string | null }>(g: T): T | null {
+  if (!isStringType(g.dataType) || /^(s|u|ds|DAT|PTR|LAB)_/.test(g.name)) return null;
+  if (typeof g.value !== 'string' || !(g.size > g.value.length)) return null;
+  return {
+    ...g,
+    dataType: `char[${g.size}]`,
+    initializedData: { kind: 'string', value: g.value },
+  };
+}
+
+/**
  * Map Ghidra data types to C/C++ types
  */
 const TYPE_MAP: Record<string, string> = {
@@ -293,6 +313,7 @@ export async function analyzeDataSymbols(
   const globals = await extractAllGlobals(connection, options, onProgress);
 
   return globals
+    .map(g => namedStringAsCharArray(g) ?? g)
     .filter(g => !isStringType(g.dataType))
     .map(global => ({
       ...global,
