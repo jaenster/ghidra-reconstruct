@@ -4,6 +4,7 @@
  * Generates .cpp files with function implementations
  */
 
+import { platformDeclaredFunctionNames } from './platform-types.js';
 import { isMsvcEhHandlerStub } from './eh-handler-stub.js';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -2152,6 +2153,19 @@ function underscoreAliasOptions(context?: ImplGenContext): { globalNames: string
   return built;
 }
 
+/** Program function names plus the platform's declared ones, built once per table. */
+const declaredCalleeCache = new WeakMap<object, string[]>();
+const EMPTY_NAMES: string[] = [];
+function declaredCalleeNames(functionNames: string[] | undefined): string[] {
+  const key = functionNames ?? EMPTY_NAMES;
+  let names = declaredCalleeCache.get(key);
+  if (!names) {
+    names = [...key, ...platformDeclaredFunctionNames()];
+    declaredCalleeCache.set(key, names);
+  }
+  return names;
+}
+
 function transformDecompiledCode(
   decompiled: string,
   options: ReconstructOptions,
@@ -2418,6 +2432,7 @@ function transformDecompiledCode(
         // Only funcdefs the run can declare: the cast spells the typedef by name.
         overrides: (enclosing?.callSiteOverrides ?? []).filter(o => o.funcdef in (context.funcPtrArgCasts.funcdefSignatures ?? {})),
         usedTypedefs: overrideCastTypedefs,
+        functionNames: declaredCalleeNames(context.funcPtrArgCasts.functionNames),
         globalTypes: context.funcPtrArgCasts.globalTypes,
         fieldTypes: context.funcPtrArgCasts.fieldTypes,
         structFields: context.funcPtrArgCasts.structFields,

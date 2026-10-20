@@ -54,9 +54,27 @@ export interface CallSiteOverrideCastOptions extends PluginOptions {
   fieldTypes?: Record<string, string>;
   functionReturnTypes?: Record<string, string>;
   typedefTargets?: Record<string, string>;
+  /**
+   * Names of functions the tree declares (program functions and Win32/CRT imports). A
+   * call to one is through a declared prototype: an override at an import call
+   * (SetWindowPos, whose override types hWndInsertAfter `int` for the HWND_NOTOPMOST
+   * equate) restates the argument list, and casting the import to it would turn the
+   * SDK's `(HWND)-2` into an argument that no longer converts.
+   */
+  functionNames?: string[];
 }
 
 const UNTYPED_CALLEE = new Set(['void', 'code', 'undefined']);
+
+/** `new Set(names)`, memoised on the array: the table is built once and handed to every body. */
+const nameSets = new WeakMap<readonly string[], Set<string>>();
+const NO_NAMES: readonly string[] = [];
+function nameSet(names: readonly string[] | undefined): Set<string> {
+  const key = names ?? NO_NAMES;
+  let set = nameSets.get(key);
+  if (!set) { set = new Set(key); nameSets.set(key, set); }
+  return set;
+}
 
 export function createCallSiteOverrideCastTransformer(options?: PluginOptions): Transformer {
   const o = (options ?? {}) as CallSiteOverrideCastOptions;
@@ -67,6 +85,7 @@ export function createCallSiteOverrideCastTransformer(options?: PluginOptions): 
   }
   if (byArity.size === 0) return (n: ASTNode) => n;
   const typedefTargets = o.typedefTargets ?? {};
+  const functionNames = nameSet(o.functionNames);
   const resolve: TypedefResolver = name => typedefTargets[name];
 
   return createTransformer({
@@ -98,6 +117,12 @@ export function createCallSiteOverrideCastTransformer(options?: PluginOptions): 
           let target = unwrapParens(call.callee as Expression);
           if (target.kind === NodeKind.UnaryExpr && (target as UnaryExpr).operator === '*') {
             target = unwrapParens((target as UnaryExpr).operand);
+          }
+          if (target.kind === NodeKind.Identifier || target.kind === NodeKind.QualifiedId) {
+            const last = target.kind === NodeKind.Identifier
+              ? (target as unknown as { name: string }).name
+              : ((target as unknown as { name: { name?: string } }).name.name ?? '');
+            if (functionNames.has(last)) return undefined;
           }
           const shape = shapeOf(target);
           if (!shape || shape.stars !== 1 || !UNTYPED_CALLEE.has(shape.base)) return undefined;

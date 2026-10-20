@@ -55,3 +55,15 @@ describe('call-site-override-cast: the decompiler\'s code * cast', () => {
     assert.ok(!out.includes('code'), out);
   });
 });
+
+describe('call-site-override-cast: an override at a call to a declared function', () => {
+  it('keeps the import\'s own prototype (SetWindowPos with HWND_NOTOPMOST, v1126)', () => {
+    const out = emit(createCallSiteOverrideCastTransformer({
+      overrides: [{ funcdef: 'dt_setwindowpos', arity: 7 }],
+      functionNames: ['SetWindowPos'],
+      globalTypes: { SetWindowPos: 'void *' },
+    })(parse('void f(HWND h) { SetWindowPos(h, HWND_NOTOPMOST, 0, 0, 640, 480, 0x13); }')) as AnyNode).trim();
+    assert.match(out, /SetWindowPos\(h, HWND_NOTOPMOST, 0, 0, 640, 480, 0x13\)/, out);
+    assert.ok(!out.includes('dt_setwindowpos'), out);
+  });
+});
