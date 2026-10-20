@@ -928,7 +928,9 @@ export function renderClosureDefinitions(): string[] {
  */
 function looksLikeMemberPath(name: string): boolean {
   const segment = String.raw`[A-Za-z_]\w*(?:\[\d+\])*`;
-  return new RegExp(`^${segment}(?:\\.${segment})+$`).test(name)
+  // A field Ghidra names by its offset is a member too: `GFX_bShowUIFlag.0x1D`.
+  const member = String.raw`\w+(?:\[\d+\])*`;
+  return new RegExp(`^${segment}(?:\\.${member})+$`).test(name)
     || /^[A-Za-z_]\w*\+\d+$/.test(name);
 }
 

@@ -239,13 +239,15 @@ describe('one definition per address, end to end', () => {
     const globals = [
       g('sgtDataTable', '0096bc30', { dataType: 'int[16]', size: 64, referencingFunctions: ['Mod::Reader', 'Other::User'] }),
       g('sgtDataTable.pTxtSounds', '0096bc34', { dataType: 'int[16]', size: 64, referencingFunctions: ['Mod::Reader', 'Mod::Writer'] }),
+      // A field Ghidra names by its offset (GFX_bShowUIFlag.0x1D @007a2834).
+      g('sgtDataTable.0x1D', '0096bc38', { dataType: 'int[16]', size: 64, referencingFunctions: ['Mod::Reader', 'Mod::Writer'] }),
     ];
     const project = generateProject('T', [
       fn('Reader', '  return sgtDataTable[1];'),
       fn('Writer', '  sgtDataTable[0] = 5;\n  return 0;'),
     ], [], [], globals, [], { ...options, promoteStaticGlobals: true }, programInfo, []);
     const all = [...project.files.entries()].map(([p, f]) => `//// ${p}\n${f.content}`).join('\n');
-    assert.ok(!/sgtDataTable_pTxtSounds/.test(all), all);
+    assert.ok(!/sgtDataTable_pTxtSounds|sgtDataTable_0x1D/.test(all), all);
     assert.ok(/int sgtDataTable\[16\]/.test(all), all);
   });
 });
