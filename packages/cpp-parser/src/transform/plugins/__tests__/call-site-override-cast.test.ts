@@ -67,3 +67,12 @@ describe('call-site-override-cast: an override at a call to a declared function'
     assert.ok(!out.includes('dt_setwindowpos'), out);
   });
 });
+
+describe('call-site-override-cast: a slot loaded through code **', () => {
+  it('loads it as the override\'s pointer type (ClientInitFunctions, v1126)', () => {
+    const out = transform('void f(int i, void *pIni) { (**(code **)((int)ClientInitFunctions + i))(pIni); }',
+      [{ funcdef: 'dt_eb7b2831', arity: 1 }]);
+    assert.match(out, /\(\*\(dt_eb7b2831\*\)\(\(int\)ClientInitFunctions \+ i\)\)\(pIni\)/, out);
+    assert.ok(!out.includes('code'), out);
+  });
+});

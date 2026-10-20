@@ -139,6 +139,31 @@ export function createCallSiteOverrideCastTransformer(options?: PluginOptions): 
             if (!pn || !UNTYPED_CALLEE.has(pn)) break;
             target = unwrapParens((target as CStyleCastExpr).expression);
           }
+          // `*(code **)E` - the slot loaded as the decompiler's untyped pointer: load it
+          // as the override's pointer type instead (`*(dt_X *)E`), the same word read
+          // from the same address, so no `code` is left to cast from.
+          {
+            const t = unwrapParens(target);
+            if (t.kind === NodeKind.UnaryExpr && (t as UnaryExpr).operator === '*') {
+              const inner = unwrapParens((t as UnaryExpr).operand);
+              if (inner.kind === NodeKind.CStyleCastExpr) {
+                const ct = (inner as CStyleCastExpr).type as unknown as { kind: NodeKind; pointee?: { kind: NodeKind; pointee?: { name?: { name?: string } | string } } };
+                const pp = ct.kind === NodeKind.PointerType && ct.pointee?.kind === NodeKind.PointerType ? ct.pointee.pointee : undefined;
+                const pn = pp ? (typeof pp.name === 'string' ? pp.name : pp.name?.name) : undefined;
+                if (pn && UNTYPED_CALLEE.has(pn)) {
+                  const slotType = {
+                    kind: NodeKind.PointerType, qualifiers: [],
+                    pointee: { kind: NodeKind.TypedefType, name: { ...Expr.identifier(funcdef), location: call.location, leadingTrivia: [], trailingTrivia: [] },
+                      location: call.location, leadingTrivia: [], trailingTrivia: [] },
+                    location: call.location, leadingTrivia: [], trailingTrivia: [],
+                  } as unknown as TypeNode;
+                  const load = { ...(t as UnaryExpr), operand: { ...(inner as CStyleCastExpr), type: slotType } } as UnaryExpr;
+                  const paren: ParenExpr = { kind: NodeKind.ParenExpr, expression: load, location: call.location, leadingTrivia: [], trailingTrivia: [] };
+                  return updateNode(call, { callee: paren } as Partial<CallExpr>);
+                }
+              }
+            }
+          }
           const cast: CStyleCastExpr = {
             kind: NodeKind.CStyleCastExpr,
             type: {
