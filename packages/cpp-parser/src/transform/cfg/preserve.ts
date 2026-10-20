@@ -138,15 +138,16 @@ function contract(cfg: Cfg, visible: Set<string> | null): Contracted {
 export function preservesReachableWork(
   before: Statement[],
   after: Statement[],
-  options: BuildCfgOptions = {},
+  options: BuildCfgOptions & { allowMerge?: boolean } = {},
 ): PreservationResult {
-  const a = contract(buildCfg(before, options), null);
-  const b = contract(buildCfg(after, options), new Set(a.counts.keys()));
+  const opts = { ...options, commaConditions: true };
+  const a = contract(buildCfg(before, opts), null);
+  const b = contract(buildCfg(after, opts), new Set(a.counts.keys()));
 
   const lostKeys: string[] = [];
   for (const [key, n] of a.counts) {
     const m = b.counts.get(key) ?? 0;
-    if (m < n) lostKeys.push(`${key} (${n} -> ${m})`);
+    if (m < n && !(options.allowMerge && m > 0)) lostKeys.push(`${key} (${n} -> ${m})`);
   }
 
   const lostEdges: string[] = [];

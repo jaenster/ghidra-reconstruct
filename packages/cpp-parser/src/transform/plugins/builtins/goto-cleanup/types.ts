@@ -37,6 +37,10 @@ export interface GotoCleanupStats {
   exitMove: number;
   exitHoist: number;
   rotateEntry: number;
+  /** Gotos that finished a condition, folded into it (conds.ts). */
+  dagFold: number;
+  /** Gotos that were a compare tree's default edges, now a switch (switchtree.ts). */
+  switchTree: number;
   switchCaseGoto: number;
   backwardToLoop: number;
   forwardCascade: number;

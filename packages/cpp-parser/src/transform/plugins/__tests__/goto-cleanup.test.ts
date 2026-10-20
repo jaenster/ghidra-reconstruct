@@ -1565,11 +1565,7 @@ void foo(int a, int b) {
 `, `
 void foo(int a, int b) {
   init();
-  if (a) {
-    if (b) {
-      cleanup();
-      return;
-    }
+  if (a && !b) {
     work();
   } else {
     cleanup();
@@ -2012,11 +2008,10 @@ LAB_X:
     assert.ok(!/\breturn\s*;/.test(output),
       `Must not fabricate a return that skips more() in:\n${output}`);
     assert.ok(output.includes('more();'), `Expected more() to survive in:\n${output}`);
-    // The structurer (step 6) un-merges the one-statement tail into the arm that jumped
-    // to it (E6: two entries, prefixes `y` and `!x` differ). The copy must continue at
-    // more(), like the original: `if (y) { cleanup(); } else { other(); }`.
-    assert.match(output, /if \(y\) \{\s*cleanup\(\);\s*\} else \{\s*other\(\);\s*\}/,
-      `Expected the tail in the arm that jumped to it, in:\n${output}`);
+    // The goto only finishes the condition (conds.ts, step 8): cleanup() runs when !x or
+    // y, written once, in the binary's arm order, and continues at more().
+    assert.match(output, /if \(x && !y\) \{\s*other\(\);\s*\} else \{\s*cleanup\(\);\s*\}\s*more\(\);/,
+      `Expected the folded condition, in:\n${output}`);
     assert.strictEqual((output.match(/\bgoto\b/g) ?? []).length, 0, output);
   });
 

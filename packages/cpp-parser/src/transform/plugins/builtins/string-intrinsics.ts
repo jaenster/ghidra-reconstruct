@@ -57,6 +57,7 @@ import { Expr, Type } from '../../../ast/factory.js';
 import { emit } from '../../../emit/index.js';
 import type { AnyNode } from '../../../ast/nodes.js';
 import { buildFunctionFlow, ENTRY_DEF, type FunctionFlow } from '../../cfg/dataflow.js';
+import { countGotoTargets } from '../../cfg/labels.js';
 import { unwrapParens, type TypeShape } from './call-arg-cast.js';
 
 export interface StringIntrinsicDeps {
@@ -188,6 +189,14 @@ function makeAddress(deps: StringIntrinsicDeps, env: Map<string, Addr>, outer?: 
     if (x.kind === NodeKind.Identifier) {
       const arr = deps.localArrays.get((x as Identifier).name);
       if (arr) return arr.elem;
+    }
+    // An array field: its element type from the struct's spelling (`char[16]`).
+    if (x.kind === NodeKind.MemberExpr) {
+      const m = x as MemberExpr;
+      const owner = deps.shape(m.object);
+      const sp = owner && deps.structFields?.[owner.base.replace(/^::/, '')]?.[(m.member as Identifier).name];
+      const elem = sp && /^(.*?)\s*\[\d*\]\s*$/.exec(sp);
+      if (elem) return pointeeSize({ base: elem[1].trim(), stars: 1, isConst: false }, deps);
     }
     return pointeeSize(deps.shape(x), deps);
   };
@@ -503,7 +512,7 @@ function lowerOne(body: Statement[], deps: StringIntrinsicDeps): Statement[] | n
   const flow = buildFunctionFlow(body, deps.locals);
   for (const list of lists) {
     for (let i = 0; i < list.length; i++) {
-      const r = tryAt(list, i, body, deps, flow) ?? tryStrcmp(list, i, body, deps);
+      const r = tryAt(list, i, body, deps, flow) ?? tryStrcmp(list, i, body, deps) ?? tryStrcmpLoop(list, i, body, deps, flow);
       if (r) return r;
     }
   }
@@ -1108,3 +1117,511 @@ export function localArraysOf(body: ASTNode): Map<string, { elem: number; isChar
   return out;
 }
 
+
+// ============================================
+// The inline strcmp loop: R = strcmp(P, Q)
+// ============================================
+
+/*
+ * MSVC's strcmp intrinsic compares two bytes per iteration and produces -1/0/1 by
+ * `sbb eax,eax; sbb eax,-1`, which Ghidra prints as `(1 - (uint)l) - (uint)(l != 0)`.
+ * Two print shapes cover every v1131 site (CHATDLG_HandleChatListClick 004403f0,
+ * INI_FindConfigValueIndex 00405570):
+ *
+ *   F1  do { c = *P; l = c < *Q; if (c != *Q) { L1: R = SBB(l); goto J; }
+ *            if (c == 0) break; c = P[1]; l = c < Q[1]; if (c != Q[1]) goto L1;
+ *            P = P + 2; Q = Q + 2; } while (c != 0);
+ *       R = 0;
+ *       J: ...
+ *
+ *   F2  H: c = *P; l = c < *Q;
+ *       if (c == *Q) { if (c != 0) { c = P[1]; l = c < Q[1]; if (c != Q[1]) goto L1;
+ *                                    P = P + 2; Q = Q + 2; if (c != 0) goto H; }
+ *                      R = 0; }
+ *       else { L1: R = SBB(l); }
+ *     H on the first statement, or on the do-while whose body the region starts.
+ *
+ * Both are `R = strcmp(P, Q)` up to the value: the loop's R is exactly -1/0/1, a library
+ * strcmp only has its sign. So the result must be a 32-bit local used only as a zero or
+ * sign test, and P, Q, c and l must be dead after the region (the loop leaves them
+ * advanced). Reads are bytes at P+k, P+k+1 (k from field offsets when P is a struct
+ * pointer), each pointer advancing by 2. The lemma test compiles both shapes and strcmp
+ * over every pair of strings up to length 5 drawn from {0, 1, 2, 0x80, 0xff}.
+ */
+
+const BYTE_TYPES = /^(char|signed char|unsigned char|uchar|byte|BYTE|CHAR|uint8_t|int8_t|undefined|undefined1|bool)$/;
+const INT32_TYPES = /^(int|uint|unsigned int|unsigned|int32_t|uint32_t|long|ulong|unsigned long|undefined4|DWORD|BOOL|LONG)$/;
+
+interface StrcmpVars { P: string; Q: string; c: string; c2?: string; l: string; R: string; k: bigint; kq: bigint }
+
+/** `(1 - (uint)l) - (uint)(l != 0)`: the l of it. */
+function sbbOf(e: Expression): string | null {
+  const strip = (x: Expression): Expression => {
+    let u = unwrapParens(x);
+    while (u.kind === NodeKind.CStyleCastExpr) u = unwrapParens((u as CStyleCastExpr).expression);
+    return u;
+  };
+  const x = strip(e);
+  if (x.kind !== NodeKind.BinaryExpr || (x as BinaryExpr).operator !== '-') return null;
+  const a = strip((x as BinaryExpr).left), b = strip((x as BinaryExpr).right);
+  if (a.kind !== NodeKind.BinaryExpr || (a as BinaryExpr).operator !== '-' || literalOf((a as BinaryExpr).left) !== 1n) return null;
+  const l = identName(strip((a as BinaryExpr).right));
+  if (!l || b.kind !== NodeKind.BinaryExpr || (b as BinaryExpr).operator !== '!=' || literalOf((b as BinaryExpr).right) !== 0n) return null;
+  return identName(strip((b as BinaryExpr).left)) === l ? l : null;
+}
+
+/** The byte read `e` as P + k: [P, k], or null. */
+function byteReadOf(e: Expression, addr: ReturnType<typeof makeAddress>, deps: StringIntrinsicDeps): [string, bigint] | null {
+  const x = stripByteCast(e);
+  const sh = deps.shape(x);
+  if (!sh || sh.stars !== 0 || !BYTE_TYPES.test(sh.base.replace(/^::/, ''))) return null;
+  const a = addr.lvalue(x);
+  if (!a || a.terms.size !== 1) return null;
+  const [[t, coef]] = [...a.terms];
+  if (coef !== 1n || !t.startsWith('v:')) return null;
+  return [t.slice(2), a.c >= (1n << 31n) ? a.c - MOD : a.c];
+}
+
+const unlabel = (s: Statement): { names: string[]; inner: Statement } => {
+  const names: string[] = [];
+  let cur = s;
+  while (cur.kind === NodeKind.LabelStmt) {
+    names.push((cur as unknown as { label: Identifier }).label.name);
+    cur = (cur as unknown as { statement: Statement }).statement;
+  }
+  return { names, inner: cur };
+};
+const gotoTo = (s: Statement | undefined, name: string | null): boolean => {
+  if (!s) return false;
+  const b = bodyStatements(s);
+  return b.length === 1 && b[0].kind === NodeKind.GotoStmt && (!name || (b[0] as unknown as { label: Identifier }).label.name === name);
+};
+const gotoName = (s: Statement | undefined): string | null => {
+  if (!s) return null;
+  const b = bodyStatements(s);
+  return b.length === 1 && b[0].kind === NodeKind.GotoStmt ? (b[0] as unknown as { label: Identifier }).label.name : null;
+};
+interface IfParts { cond: Expression; then: Statement; els: Statement | null }
+const ifOf = (s: Statement | undefined): IfParts | null => {
+  if (!s || s.kind !== NodeKind.IfStmt) return null;
+  const n = s as unknown as { condition: Expression; thenBranch: Statement; elseBranch: Statement | null; init?: unknown };
+  if (n.init) return null;
+  return { cond: n.condition, then: n.thenBranch, els: n.elseBranch };
+};
+/** `a OP b` with OP the given operator: [a, b]. */
+const relOf = (e: Expression, op: string): [Expression, Expression] | null => {
+  const x = unwrapParens(e);
+  return x.kind === NodeKind.BinaryExpr && (x as BinaryExpr).operator === op ? [(x as BinaryExpr).left, (x as BinaryExpr).right] : null;
+};
+/** `c OP 0` (or `!c` / `c` for == / !=): c. */
+const zeroTestOf = (e: Expression, op: '==' | '!='): string | null => {
+  const r = relOf(e, op);
+  if (r && literalOf(r[1]) === 0n) return identName(stripByteCast(r[0]));
+  const x = unwrapParens(e);
+  if (op === '==' && x.kind === NodeKind.UnaryExpr && (x as UnaryExpr).operator === '!') return identName(stripByteCast((x as UnaryExpr).operand));
+  if (op === '!=') return identName(stripByteCast(x));
+  return null;
+};
+
+/**
+ * One byte step: `c = <P+k>; l = c < <Q+kq>;` and the test `c != <Q+kq>` (or `==` for
+ * F2's head). Fills or checks the variables.
+ */
+function stepOf(s1: Statement | undefined, s2: Statement | undefined, test: Expression, op: '!=' | '==',
+  addr: ReturnType<typeof makeAddress>, deps: StringIntrinsicDeps, v: Partial<StrcmpVars>, off: bigint): boolean {
+  const a1 = assignOf(s1), a2 = assignOf(s2);
+  if (!a1 || !a2) return false;
+  const c = identName(a1.left), l = identName(a2.left);
+  if (!c || !l || c === l) return false;
+  const rp = byteReadOf(a1.right, addr, deps);
+  const lt = relOf(stripByteCast(a2.right), '<');
+  if (!rp || !lt || identName(stripByteCast(lt[0])) !== c) return false;
+  const rq = byteReadOf(lt[1], addr, deps);
+  const t = relOf(test, op);
+  if (!rq || !t || identName(stripByteCast(t[0])) !== c) return false;
+  const rq2 = byteReadOf(t[1], addr, deps);
+  if (!rq2 || rq2[0] !== rq[0] || rq2[1] !== rq[1]) return false;
+  if (v.P === undefined) { v.P = rp[0]; v.Q = rq[0]; v.c = c; v.l = l; v.k = rp[1] - off; v.kq = rq[1] - off; }
+  // The second byte may land in its own variable (Ghidra splits a char and a byte use).
+  else if (off === 1n && v.c2 === undefined) v.c2 = c;
+  const cOk = off === 0n ? v.c === c : (v.c2 ?? v.c) === c;
+  return v.P === rp[0] && v.Q === rq[0] && cOk && v.l === l && rp[1] === v.k! + off && rq[1] === v.kq! + off && v.P !== v.Q;
+}
+
+/** `P = P + 2; Q = Q + 2;` in either order. */
+function advanceOf(s1: Statement | undefined, s2: Statement | undefined, addr: ReturnType<typeof makeAddress>, v: Partial<StrcmpVars>): boolean {
+  const seen = new Set<string>();
+  for (const s of [s1, s2]) {
+    const a = assignOf(s);
+    const n = a && identName(a.left);
+    if (!a || !n || (n !== v.P && n !== v.Q)) return false;
+    const val = addr.value(a.right);
+    const want = plus(atom(`v:${n}`), 2n);
+    if (!val || !sameAddr(val, want)) return false;
+    seen.add(n);
+  }
+  return seen.size === 2;
+}
+
+interface StrcmpMatch {
+  vars: StrcmpVars;
+  /** Indices of `list` the region spans. */
+  from: number; to: number;
+  /** Labels whose gotos the region holds: the back edge and the exit. */
+  internal: Map<string, number>;
+  /** F2 with the head label on the enclosing do-while. */
+  outerHead: string | null;
+  /** F1's exit label, on list[to + 1]. */
+  exit: string | null;
+}
+
+function matchF1(list: Statement[], i: number, addr: ReturnType<typeof makeAddress>, deps: StringIntrinsicDeps): StrcmpMatch | null {
+  const loop = list[i];
+  if (loop.kind !== NodeKind.DoWhileStmt) return null;
+  const st = bodyStatements((loop as DoWhileStmt).body).filter(s => s.kind !== NodeKind.NullStmt);
+  if (st.length !== 9) return null;
+  const v: Partial<StrcmpVars> = {};
+  const if1 = ifOf(st[2]);
+  if (!if1 || if1.els || !stepOf(st[0], st[1], if1.cond, '!=', addr, deps, v, 0n)) return null;
+  // { L1: R = SBB(l); goto J; }
+  const t1 = bodyStatements(if1.then).filter(s => s.kind !== NodeKind.NullStmt);
+  if (t1.length !== 2) return null;
+  const { names: l1, inner: rs } = unlabel(t1[0]);
+  if (l1.length !== 1) return null;
+  const ra = assignOf(rs);
+  const R = ra && identName(ra.left);
+  if (!ra || !R || sbbOf(ra.right) !== v.l) return null;
+  const J = gotoName(t1[1]);
+  if (!J) return null;
+  // if (c == 0) break;
+  const if2 = ifOf(st[3]);
+  if (!if2 || if2.els || zeroTestOf(if2.cond, '==') !== v.c) return null;
+  const b2 = bodyStatements(if2.then);
+  if (b2.length !== 1 || b2[0].kind !== NodeKind.BreakStmt) return null;
+  const if3 = ifOf(st[6]);
+  if (!if3 || if3.els || !gotoTo(if3.then, l1[0]) || !stepOf(st[4], st[5], if3.cond, '!=', addr, deps, v, 1n)) return null;
+  if (!advanceOf(st[7], st[8], addr, v)) return null;
+  if (zeroTestOf((loop as DoWhileStmt).condition, '!=') !== (v.c2 ?? v.c)) return null;
+  // R = 0; J: ...
+  const z = assignOf(list[i + 1]);
+  if (!z || identName(z.left) !== R || literalOf(z.right) !== 0n) return null;
+  const next = list[i + 2];
+  if (!next || !unlabel(next).names.includes(J)) return null;
+  v.R = R;
+  return { vars: v as StrcmpVars, from: i, to: i + 1, internal: new Map([[l1[0], 1], [J, 1]]), outerHead: null, exit: J };
+}
+
+function matchF2(list: Statement[], i: number, addr: ReturnType<typeof makeAddress>, deps: StringIntrinsicDeps, outerHeadOf: () => string | null): StrcmpMatch | null {
+  const { names: heads, inner: s0 } = unlabel(list[i]);
+  const v: Partial<StrcmpVars> = {};
+  const top = ifOf(list[i + 2]);
+  if (!top || !top.els || !stepOf(s0, list[i + 1], top.cond, '==', addr, deps, v, 0n)) return null;
+  // then: { if (c != 0) { step; if (c != Q[1]) goto L1; advance; if (c != 0) goto H; } R = 0; }
+  const th = bodyStatements(top.then).filter(s => s.kind !== NodeKind.NullStmt);
+  if (th.length !== 2) return null;
+  const nz = ifOf(th[0]);
+  if (!nz || nz.els || zeroTestOf(nz.cond, '!=') !== v.c) return null;
+  const inner = bodyStatements(nz.then).filter(s => s.kind !== NodeKind.NullStmt);
+  if (inner.length !== 6) return null;
+  const t3 = ifOf(inner[2]);
+  const L1 = t3 && !t3.els ? gotoName(t3.then) : null;
+  if (!t3 || !L1 || !stepOf(inner[0], inner[1], t3.cond, '!=', addr, deps, v, 1n)) return null;
+  if (!advanceOf(inner[3], inner[4], addr, v)) return null;
+  const back = ifOf(inner[5]);
+  const H = back && !back.els ? gotoName(back.then) : null;
+  if (!back || !H || zeroTestOf(back.cond, '!=') !== (v.c2 ?? v.c)) return null;
+  const z = assignOf(th[1]);
+  const R = z && identName(z.left);
+  if (!z || !R || literalOf(z.right) !== 0n) return null;
+  // else: { L1: R = SBB(l); }
+  const el = bodyStatements(top.els!).filter(s => s.kind !== NodeKind.NullStmt);
+  if (el.length !== 1) return null;
+  const { names: l1, inner: rs } = unlabel(el[0]);
+  const ra = assignOf(rs);
+  if (l1.length !== 1 || l1[0] !== L1 || !ra || identName(ra.left) !== R || sbbOf(ra.right) !== v.l) return null;
+  let outerHead: string | null = null;
+  if (!heads.includes(H)) {
+    if (i !== 0 || outerHeadOf() !== H) return null;
+    outerHead = H;
+  }
+  if (heads.some(h => h !== H)) return null;
+  v.R = R;
+  return { vars: v as StrcmpVars, from: i, to: i + 2, internal: new Map([[L1, 1], [H, 1]]), outerHead, exit: null };
+}
+
+/**
+ * Whether node u reads the value of v that reaches it. Dataflow keeps one node per test, so
+ * `if (a || (v = x, w = v, ...))` counts as reading v; in evaluation order that read sees
+ * the node's own store. Unknown shapes answer yes.
+ */
+function readsIncoming(flow: FunctionFlow, u: number, v: string): boolean {
+  const n = flow.cfg.nodes[u];
+  const s = n.stmt as unknown as Record<string, unknown> | null;
+  const e = !s ? n.expr ?? null
+    : s.kind === NodeKind.ExprStmt ? s.expression as Expression
+    : (s.kind === NodeKind.IfStmt || s.kind === NodeKind.WhileStmt || s.kind === NodeKind.DoWhileStmt) ? s.condition as Expression
+    : null;
+  if (!e) return true;
+  let written = false, read = false;
+  const go = (x: Expression): void => {
+    const y = unwrapParens(x);
+    if (y.kind === NodeKind.Identifier) { if ((y as Identifier).name === v && !written) read = true; return; }
+    if (y.kind === NodeKind.AssignExpr) {
+      const a = y as AssignExpr;
+      go(a.right);
+      const target = identName(a.left);
+      if (target === v) { if (a.operator !== '=' && !written) read = true; written = true; } else go(a.left);
+      return;
+    }
+    if (y.kind === NodeKind.BinaryExpr) {
+      const b = y as BinaryExpr;
+      go(b.left);
+      if (b.operator === '&&' || b.operator === '||') { const w = written; go(b.right); written = w; } else go(b.right);
+      return;
+    }
+    if (y.kind === NodeKind.ConditionalExpr) {
+      const c = y as unknown as Record<string, Expression>;
+      go(c.condition);
+      const w = written;
+      for (const k of ['trueExpr', 'falseExpr', 'consequent', 'alternate']) if (c[k]) { go(c[k]); written = w; }
+      return;
+    }
+    for (const [k, val] of Object.entries(y as unknown as Record<string, unknown>)) {
+      if (k === 'location' || k === 'leadingTrivia' || k === 'trailingTrivia' || k === 'type') continue;
+      for (const c of Array.isArray(val) ? val : [val]) {
+        if (c && typeof c === 'object' && typeof (c as { kind?: unknown }).kind === 'string') go(c as Expression);
+      }
+    }
+  };
+  go(e);
+  return read;
+}
+
+/** Every use of R that `defs` reach is a zero or sign test. */
+function signOnlyUses(flow: FunctionFlow, defs: number[], R: string): boolean {
+  const ok = (e: Expression, inTruth: boolean): boolean => {
+    // Walk e; R may appear only where its zero-ness or sign is what is read.
+    const go = (x: Expression, truth: boolean): boolean => {
+      const u = unwrapParens(x);
+      if (u.kind === NodeKind.Identifier) return (u as Identifier).name !== R || truth;
+      if (u.kind === NodeKind.CStyleCastExpr) {
+        const t = emit((u as CStyleCastExpr).type as unknown as AnyNode).replace(/\s+/g, ' ').trim();
+        const inner = unwrapParens((u as CStyleCastExpr).expression);
+        if (inner.kind === NodeKind.Identifier && (inner as Identifier).name === R) return truth && INT32_TYPES.test(t);
+        return go(inner, false);
+      }
+      if (u.kind === NodeKind.UnaryExpr && (u as UnaryExpr).operator === '!') return go((u as UnaryExpr).operand, true);
+      if (u.kind === NodeKind.BinaryExpr) {
+        const b = u as BinaryExpr;
+        if (b.operator === '&&' || b.operator === '||') return go(b.left, true) && go(b.right, true);
+        if (['==', '!=', '<', '>', '<=', '>='].includes(b.operator)) {
+          if (literalOf(b.right) === 0n) return go(b.left, true);
+          if (literalOf(b.left) === 0n) return go(b.right, true);
+          // On an integer `R < 1` is `R <= 0` and `R > -1` is `R >= 0`: still only the sign.
+          const r = literalOf(b.right), l = literalOf(b.left);
+          if (r !== null && ((r === 1n && (b.operator === '<' || b.operator === '>=')) || (r === -1n && (b.operator === '>' || b.operator === '<=')))) return go(b.left, true);
+          if (l !== null && ((l === 1n && (b.operator === '>' || b.operator === '<=')) || (l === -1n && (b.operator === '<' || b.operator === '>=')))) return go(b.right, true);
+        }
+        return go(b.left, false) && go(b.right, false);
+      }
+      if (u.kind === NodeKind.ConditionalExpr) {
+        const c = u as unknown as { condition: Expression; trueExpr?: Expression; falseExpr?: Expression; consequent?: Expression; alternate?: Expression };
+        const parts = [c.trueExpr ?? c.consequent, c.falseExpr ?? c.alternate].filter((p): p is Expression => !!p);
+        return go(c.condition, true) && parts.every(p => go(p, false));
+      }
+      // Anything else: each operand is read for its value.
+      for (const [k, v] of Object.entries(u as unknown as Record<string, unknown>)) {
+        if (k === 'location' || k === 'leadingTrivia' || k === 'trailingTrivia' || k === 'type') continue;
+        const kids = Array.isArray(v) ? v : [v];
+        for (const c of kids) {
+          if (c && typeof c === 'object' && typeof (c as { kind?: unknown }).kind === 'string' && !go(c as Expression, false)) return false;
+        }
+      }
+      return true;
+    };
+    return go(e, inTruth);
+  };
+  for (const d of defs) {
+    for (const u of flow.usesOf(d, R)) {
+      const n = flow.cfg.nodes[u];
+      const s = n.stmt as unknown as Record<string, unknown> | null;
+      if (!s) { if (!n.expr || !ok(n.expr, false)) return false; continue; }
+      switch (s.kind) {
+        case NodeKind.IfStmt: case NodeKind.WhileStmt: case NodeKind.DoWhileStmt:
+          if (!ok(s.condition as Expression, true)) return false; break;
+        case NodeKind.ForStmt:
+          if (!s.condition || !ok(s.condition as Expression, true)) return false; break;
+        case NodeKind.ExprStmt:
+          if (!ok(s.expression as Expression, false)) return false; break;
+        default:
+          return false;
+      }
+    }
+  }
+  return true;
+}
+
+function tryStrcmpLoop(list: Statement[], i: number, body: Statement[], deps: StringIntrinsicDeps, flow: FunctionFlow): Statement[] | null {
+  const addr = makeAddress(deps, new Map());
+  // The do-while whose body is `list`, under its labels: F2's head may be its label.
+  const outerHeadOf = (): string | null => {
+    let found: string | null = null;
+    const walk = (x: unknown): void => {
+      if (found || !x || typeof x !== 'object') return;
+      if (Array.isArray(x)) { x.forEach(walk); return; }
+      const o = x as Record<string, unknown>;
+      if (o.kind === NodeKind.LabelStmt) {
+        const { names, inner } = unlabel(o as unknown as Statement);
+        if (inner.kind === NodeKind.DoWhileStmt) {
+          const b = (inner as DoWhileStmt).body as unknown as { statements?: Statement[] };
+          if (b.statements === list) { found = names[names.length - 1]; return; }
+        }
+      }
+      for (const [k, v] of Object.entries(o)) {
+        if (k === 'location' || k === 'leadingTrivia' || k === 'trailingTrivia') continue;
+        if (v && typeof v === 'object') walk(v);
+      }
+    };
+    walk(body);
+    return found;
+  };
+  const m = matchF1(list, i, addr, deps) ?? matchF2(list, i, addr, deps, outerHeadOf);
+  if (!m) return null; // no shape
+  const { P, Q, c, l, R } = m.vars;
+  const c2 = m.vars.c2 ?? c;
+  if (new Set([P, Q, c, l, R]).size !== 5 || [P, Q, l, R].includes(c2)) return fail(101);
+  for (const n of [P, Q, c, c2, l, R]) if (!deps.locals.has(n) || flow.isEscaped(n)) return fail(102);
+  const rsh = deps.shape(Expr.identifier(R));
+  if (!rsh || rsh.stars !== 0 || !INT32_TYPES.test(rsh.base.replace(/^::/, ''))) return fail(103);
+  // The region's labels are entered only from inside it (the head may also be entered
+  // from outside when it labels the region's first statement: that entry stays).
+  const counts = countGotoTargets(body);
+  const region = list.slice(m.from, m.to + 1);
+  const inside = countGotoTargets(region);
+  for (const [L, n] of m.internal) if ((inside.get(L) ?? 0) !== n) return fail(104);
+  for (const [L, n] of inside) if (!m.internal.has(L) || n !== m.internal.get(L)) return fail(105);
+  const regionLabels = new Set<string>();
+  for (const s of region) for (const x of traverseStatements(s)) if (x.kind === NodeKind.LabelStmt) regionLabels.add((x as unknown as { label: Identifier }).label.name);
+  const head = unlabel(list[m.from]).names;
+  for (const L of regionLabels) if ((counts.get(L) ?? 0) > (inside.get(L) ?? 0) && !head.includes(L)) return fail(106);
+  // Nodes of the region; P, Q, c, l dead after it; R's uses are sign tests.
+  const nodes = new Set<number>();
+  for (const n of flow.cfg.nodes) {
+    const st = n.stmt as ASTNode | null;
+    if (st && region.some(r => r === st || contains(r, st))) nodes.add(n.id);
+  }
+  for (const v of new Set([P, Q, c, c2, l])) {
+    for (const id of nodes) {
+      if (!flow.definition(id, v)) continue;
+      if (flow.usesOf(id, v).some(u => !nodes.has(u) && readsIncoming(flow, u, v))) return fail(107);
+    }
+  }
+  const rDefs = [...nodes].filter(id => flow.definition(id, R));
+  if (!signOnlyUses(flow, rDefs, R)) return fail(108);
+  // The pointers' setup right before the region (`q = B; p = A;`) folds into the call when
+  // the region is all it reaches and nothing between changes what it reads.
+  const setup = new Map<string, { index: number; rhs: Expression }>();
+  {
+    const between: number[] = [];
+    for (let j = m.from - 1; j >= 0 && m.from - j <= 4; j--) {
+      if (unlabel(list[j]).names.length) break;
+      const a = assignOf(list[j]);
+      const v = a && identName(a.left);
+      if (!a || !v || !deps.locals.has(v) || hasCall(list[j]) || !deps.isPure(a.right)) break;
+      if ((v === P || v === Q) && !setup.has(v)) {
+        const names = new Set<string>();
+        collectNames(a.right, names);
+        const clobbered = between.some(b => { const w = identName(assignOf(list[b])!.left); return !!w && names.has(w); });
+        const defNode = flow.cfg.nodes.find(n => n.stmt === list[j]);
+        const reachesOnly = defNode && flow.usesOf(defNode.id, v).every(u => nodes.has(u));
+        if (!clobbered && reachesOnly && !names.has(P) && !names.has(Q)) setup.set(v, { index: j, rhs: a.right });
+        else break;
+      } else if (v === P || v === Q) break;
+      between.push(j);
+    }
+  }
+  // The arguments: the bytes P + k and Q + kq at the region's entry.
+  const spell = (p: string, k: bigint): Expression | null => {
+    // The pointer as the call sees it: its setup's value when that folds, else itself.
+    const su = setup.get(p);
+    const holder = su && identName(su.rhs) && deps.locals.has(identName(su.rhs)!) ? identName(su.rhs)! : null;
+    if (su && k !== 0n && !holder) { setup.delete(p); }
+    const via = setup.has(p) ? (holder ?? null) : p;
+    const viaExpr = setup.has(p) ? su!.rhs : Expr.identifier(p);
+    const sh = via ? deps.shape(Expr.identifier(via)) : deps.shape(viaExpr);
+    if (!sh || sh.stars < 1) return null;
+    // A char array field at the offset (a struct cursor, `pRoster->szRosterName`).
+    if (via && !(k === 0n && sh.stars === 1 && BYTE_TYPES.test(sh.base.replace(/^::/, '')))) {
+      const f = spellAddress(plus(atom(`v:${via}`), k), deps);
+      if (f) return f;
+    }
+    // The byte address: `p` itself when it is a char pointer, else through a cast.
+    const asChar = sh.stars === 1 && sh.base === 'char' ? viaExpr : asCharPointer(viaExpr);
+    return k === 0n ? asChar : Expr.binary(asChar, '+', Expr.intLiteral(k));
+  };
+  const A = spell(P, m.vars.k), B = spell(Q, m.vars.kq);
+  if (!A || !B) return fail(110);
+  const call = { kind: NodeKind.ExprStmt, expression: Expr.assign(Expr.identifier(R), Expr.call(Expr.identifier('strcmp'), [A, B])) } as unknown as Statement;
+  // The head label stays on the call when gotos from outside the region still reach it.
+  let first: Statement = call;
+  for (const h of [...head].reverse()) {
+    if ((counts.get(h) ?? 0) > (inside.get(h) ?? 0)) {
+      first = { kind: NodeKind.LabelStmt, label: Expr.identifier(h), statement: first, location: list[m.from].location } as unknown as Statement;
+    }
+  }
+  (first as { leadingTrivia?: unknown }).leadingTrivia = list[m.from].leadingTrivia;
+  const dropped = new Set([...setup.values()].map(x => x.index));
+  const edited: Statement[] = [...list.slice(0, m.from).filter((_, k) => !dropped.has(k)), first];
+  for (let k = m.to + 1; k < list.length; k++) {
+    let s = list[k];
+    // F1's exit label: drop it when the region held its only goto.
+    if (k === m.to + 1 && m.exit && (counts.get(m.exit) ?? 0) === (inside.get(m.exit) ?? 0)) s = dropLabelNamed(s, m.exit);
+    edited.push(s);
+  }
+  let out = replaceList(body, list, edited);
+  if (m.outerHead && (counts.get(m.outerHead) ?? 0) === (inside.get(m.outerHead) ?? 0)) out = dropLabelEverywhere(out, m.outerHead);
+  return dropUnreferencedDecls(out, new Set([c, c2, l, ...setup.keys()]));
+}
+
+function* traverseStatements(s: unknown): Generator<ASTNode> {
+  if (!s || typeof s !== 'object') return;
+  if (Array.isArray(s)) { for (const x of s) yield* traverseStatements(x); return; }
+  const o = s as Record<string, unknown>;
+  if (typeof o.kind === 'string') yield o as unknown as ASTNode;
+  for (const [k, v] of Object.entries(o)) {
+    if (k === 'location' || k === 'leadingTrivia' || k === 'trailingTrivia') continue;
+    if (v && typeof v === 'object') yield* traverseStatements(v);
+  }
+}
+
+function dropLabelNamed(s: Statement, name: string): Statement {
+  if (s.kind !== NodeKind.LabelStmt) return s;
+  const ls = s as unknown as { label: Identifier; statement: Statement; leadingTrivia?: unknown[] };
+  if (ls.label.name === name) {
+    const inner = ls.statement as Statement & { leadingTrivia?: unknown[] };
+    return { ...inner, leadingTrivia: [...(ls.leadingTrivia ?? []), ...(inner.leadingTrivia ?? [])] } as Statement;
+  }
+  const d = dropLabelNamed(ls.statement, name);
+  return d === ls.statement ? s : ({ ...ls, statement: d } as unknown as Statement);
+}
+
+function dropLabelEverywhere(body: Statement[], name: string): Statement[] {
+  const go = (x: unknown): unknown => {
+    if (Array.isArray(x)) {
+      let changed = false;
+      const out = x.map(i => { const r = go(i); if (r !== i) changed = true; return r; });
+      return changed ? out : x;
+    }
+    if (!x || typeof x !== 'object') return x;
+    const o = x as Record<string, unknown>;
+    if (o.kind === NodeKind.LabelStmt && (o.label as Identifier).name === name) return go(dropLabelNamed(o as unknown as Statement, name));
+    let copy: Record<string, unknown> | null = null;
+    for (const [k, v] of Object.entries(o)) {
+      if (k === 'location' || k === 'leadingTrivia' || k === 'trailingTrivia' || !v || typeof v !== 'object') continue;
+      const r = go(v);
+      if (r !== v) { copy = copy ?? { ...o }; copy[k] = r; }
+    }
+    return copy ?? x;
+  };
+  return go(body) as Statement[];
+}

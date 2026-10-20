@@ -92,11 +92,72 @@ interface Builder {
   external: number;
   exit: number;
   noreturn: ReadonlySet<string> | null;
+  commaConditions: boolean;
 }
 
 function addNode(b: Builder, stmt: Statement | null, role: CfgNode['role']): number {
   const id = b.nodes.length;
   b.nodes.push({ id, role, stmt, key: stmt ? workKey(stmt) : null, succ: [] });
+  return id;
+}
+
+const stripParens = (e: Expression): Expression => {
+  while (e.kind === NodeKind.ParenExpr) e = (e as unknown as { expression: Expression }).expression;
+  return e;
+};
+
+function hasComma(e: Expression): boolean {
+  const u = stripParens(e);
+  if (u.kind === NodeKind.BinaryExpr) {
+    const b = u as unknown as { operator: string; left: Expression; right: Expression };
+    if (b.operator === ',') return true;
+    if (b.operator === '||' || b.operator === '&&') return hasComma(b.left) || hasComma(b.right);
+  }
+  if (u.kind === NodeKind.UnaryExpr && (u as unknown as { operator: string }).operator === '!') {
+    return hasComma((u as unknown as { operand: Expression }).operand);
+  }
+  return false;
+}
+
+/**
+ * A condition holding a comma, as short-circuit nodes: each comma operand evaluated for
+ * its effect is work keyed as the statement `w;` would be, so work moved between a
+ * statement and a condition (`w; if (c)` and `if ((w, c))`) is the same work. The nodes
+ * carry no statement or expression: the owning if/loop node keeps the condition's facts.
+ */
+function emitCond(b: Builder, e: Expression, t: number, f: number, owner: Statement): number {
+  const u = stripParens(e);
+  if (u.kind === NodeKind.BinaryExpr) {
+    const x = u as unknown as { operator: string; left: Expression; right: Expression };
+    if (x.operator === '||') return emitCond(b, x.left, t, emitCond(b, x.right, t, f, owner), owner);
+    if (x.operator === '&&') return emitCond(b, x.left, emitCond(b, x.right, t, f, owner), f, owner);
+    if (x.operator === ',') {
+      const rest = emitCond(b, x.right, t, f, owner);
+      const parts: Expression[] = [];
+      const split = (y: Expression): void => {
+        const v = stripParens(y);
+        const vb = v as unknown as { operator?: string; left: Expression; right: Expression };
+        if (v.kind === NodeKind.BinaryExpr && vb.operator === ',') { split(vb.left); split(vb.right); } else parts.push(v);
+      };
+      split(x.left);
+      let cur = rest;
+      for (let i = parts.length - 1; i >= 0; i--) {
+        const st = { kind: NodeKind.ExprStmt, expression: parts[i], location: parts[i].location, leadingTrivia: [], trailingTrivia: [] } as unknown as Statement;
+        const id = addNode(b, null, 'stmt');
+        b.nodes[id].key = workKey(st);
+        b.nodes[id].owner = owner;
+        b.nodes[id].succ = [cur];
+        cur = id;
+      }
+      return cur;
+    }
+  }
+  if (u.kind === NodeKind.UnaryExpr && (u as unknown as { operator: string }).operator === '!') {
+    return emitCond(b, (u as unknown as { operand: Expression }).operand, f, t, owner);
+  }
+  const id = addNode(b, null, 'stmt');
+  b.nodes[id].owner = owner;
+  b.nodes[id].succ = t === f ? [t] : [t, f];
   return id;
 }
 
@@ -135,7 +196,8 @@ function emitStmt(b: Builder, s: Statement, next: number, ctx: Ctx): number {
       const id = addNode(b, s, 'stmt');
       const thenEntry = emitStmt(b, n.thenBranch, next, ctx);
       const elseEntry = n.elseBranch ? emitStmt(b, n.elseBranch, next, ctx) : next;
-      b.nodes[id].succ = elseEntry === thenEntry ? [thenEntry] : [thenEntry, elseEntry];
+      b.nodes[id].succ = b.commaConditions && hasComma(n.condition) ? [emitCond(b, n.condition, thenEntry, elseEntry, s)]
+        : elseEntry === thenEntry ? [thenEntry] : [thenEntry, elseEntry];
       if (n.init) return emitStmt(b, n.init, id, ctx);
       return id;
     }
@@ -210,7 +272,8 @@ function emitStmt(b: Builder, s: Statement, next: number, ctx: Ctx): number {
       const id = addNode(b, s, 'stmt');
       const bodyEntry = emitStmt(b, n.body, id, { ...ctx, breakTarget: next, continueTarget: id });
       // `while (true)` leaves only by a jump: its test has no false edge.
-      b.nodes[id].succ = alwaysTrue(n.condition) ? [bodyEntry] : bodyEntry === next ? [next] : [bodyEntry, next];
+      b.nodes[id].succ = alwaysTrue(n.condition) ? [bodyEntry] : b.commaConditions && hasComma(n.condition) ? [emitCond(b, n.condition, bodyEntry, next, s)]
+        : bodyEntry === next ? [next] : [bodyEntry, next];
       return id;
     }
 
@@ -218,7 +281,8 @@ function emitStmt(b: Builder, s: Statement, next: number, ctx: Ctx): number {
       const n = s as DoWhileStmt;
       const id = addNode(b, s, 'stmt');
       const bodyEntry = emitStmt(b, n.body, id, { ...ctx, breakTarget: next, continueTarget: id });
-      b.nodes[id].succ = alwaysTrue(n.condition) ? [bodyEntry] : bodyEntry === next ? [next] : [bodyEntry, next];
+      b.nodes[id].succ = alwaysTrue(n.condition) ? [bodyEntry] : b.commaConditions && hasComma(n.condition) ? [emitCond(b, n.condition, bodyEntry, next, s)]
+        : bodyEntry === next ? [next] : [bodyEntry, next];
       return bodyEntry;
     }
 
@@ -251,7 +315,9 @@ function emitStmt(b: Builder, s: Statement, next: number, ctx: Ctx): number {
       const bodyEntry = emitStmt(b, n.body, incrId, {
         ...ctx, breakTarget: next, continueTarget: incrId,
       });
-      b.nodes[condId].succ = !n.condition || alwaysTrue(n.condition) ? [bodyEntry] : bodyEntry === next ? [next] : [bodyEntry, next];
+      b.nodes[condId].succ = !n.condition || alwaysTrue(n.condition) ? [bodyEntry]
+        : b.commaConditions && hasComma(n.condition) ? [emitCond(b, n.condition, bodyEntry, next, s)]
+        : bodyEntry === next ? [next] : [bodyEntry, next];
       return n.init ? emitStmt(b, n.init, condId, ctx) : condId;
     }
 
@@ -293,6 +359,7 @@ export function buildCfg(stmts: Statement[], options: BuildCfgOptions = {}): Cfg
     external: -1,
     exit: -1,
     noreturn: options.noreturn ?? null,
+    commaConditions: options.commaConditions === true,
   };
   const entry = addNode(b, null, 'entry');
   b.exit = addNode(b, null, 'exit');

@@ -60,6 +60,8 @@ const LOOP_REWRITES: ((body: CompoundStmt, name: string, ctx: StructureContext) 
   (b, n, c) => rotateEntry(b, n, c),
 ];
 import { gotoReport } from './report.js';
+import { dagFold } from './conds.js';
+import { switchTree } from './switchtree.js';
 
 
 export interface StructureContext {
@@ -68,7 +70,7 @@ export interface StructureContext {
   /** The function's parameter names: locals to the entry lemma unless their address is taken. */
   params?: ReadonlySet<string>;
   /** Proves and keeps a candidate (process.ts `accept`), or returns null. */
-  accept: (before: Statement[], after: Statement[], handler: string, proofBefore?: Statement[]) => Statement[] | null;
+  accept: (before: Statement[], after: Statement[], handler: string, proofBefore?: Statement[], merge?: boolean) => Statement[] | null;
 }
 
 /**
@@ -464,6 +466,49 @@ function labelNames(body: CompoundStmt): string[] {
  * whole body. Labels are tried in sweeps: a label refused in one sweep is tried again only
  * after a later rewrite in the same sweep changed the body.
  */
+/** A compare tree whose default edges are the gotos to this label (switchtree.ts). */
+function trySwitchTree(cur: CompoundStmt, name: string, ctx: StructureContext): CompoundStmt | null {
+  let st: ReturnType<typeof switchTree>;
+  try { st = switchTree(cur, name, ctx); } catch { st = null; }
+  if (!st) return null;
+  recordStat('switchTree', st.sites);
+  gotoReport({ event: 'structure', label: name, cls: 'switchTree', sites: st.sites });
+  return st.body;
+}
+
+/** A goto that finishes a condition (conds.ts): the label's arm is the shared true edge. */
+function tryFold(cur: CompoundStmt, name: string, ctx: StructureContext): CompoundStmt | null {
+  let df: ReturnType<typeof dagFold>;
+  try { df = dagFold(cur, name, ctx); } catch { df = null; }
+  if (!df) return null;
+  const kept = ctx.accept(cur.statements, df.body.statements, 'structure:dagFold');
+  if (!kept) return null;
+  recordStat('dagFold', df.sites);
+  gotoReport({ event: 'structure', label: name, cls: 'dagFold', sites: df.sites });
+  return updateNode(cur, { statements: kept });
+}
+
+/**
+ * The rewrites that read a goto as part of a test, before the handlers: a compare tree's
+ * default edges and a goto that only finishes a condition. A copying handler would
+ * otherwise take the label's block to each site first.
+ */
+export function foldConditions(body: CompoundStmt, ctx: StructureContext): CompoundStmt | null {
+  let cur = body;
+  let changed = false;
+  for (let sweep = 0; sweep < 64; sweep++) {
+    let progressed = false;
+    for (const name of labelNames(cur)) {
+      const t = trySwitchTree(cur, name, ctx);
+      if (t) { cur = t; changed = progressed = true; continue; }
+      const f = tryFold(cur, name, ctx);
+      if (f) { cur = f; changed = progressed = true; }
+    }
+    if (!progressed) break;
+  }
+  return changed ? cur : null;
+}
+
 export function structureBody(body: CompoundStmt, ctx: StructureContext): CompoundStmt | null {
   let cur = body;
   let changed = false;
@@ -488,6 +533,10 @@ export function structureBody(body: CompoundStmt, ctx: StructureContext): Compou
         break;
       }
       if (looped) continue;
+      const switched = trySwitchTree(cur, name, ctx);
+      if (switched) { cur = switched; changed = progressed = true; continue; }
+      const folded = tryFold(cur, name, ctx);
+      if (folded) { cur = folded; changed = progressed = true; continue; }
       let sk: ReturnType<typeof skipLabel>;
       try { sk = skipLabel(cur, name, ctx); } catch { sk = null; }
       if (sk) {
