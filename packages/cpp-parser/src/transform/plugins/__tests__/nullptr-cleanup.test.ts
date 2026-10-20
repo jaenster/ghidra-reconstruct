@@ -76,17 +76,29 @@ describe('nullptrCleanupPlugin', () => {
   });
 
   describe('small-address DAT_ to cast deref', () => {
-    it('should convert _DAT_00000014 to *(int32_t*)0x14', () => {
+    // CHANGED: the access is volatile - it is a fault the binary takes on purpose - and
+    // has the placeholder's own width (int32_t when the type is unknown).
+    it('should convert _DAT_00000014 to *(volatile int32_t*)0x14', () => {
       const input = `void foo() { _DAT_00000014 = 0xffffffff; }`;
       const output = transformCode(input);
-      assert.ok(output.includes('*(int32_t*)0x14'), `Expected cast deref in: ${output}`);
+      assert.ok(output.includes('*(volatile int32_t*)0x14'), `Expected cast deref in: ${output}`);
       assert.ok(!output.includes('_DAT_00000014'), `Should not contain DAT_ ref in: ${output}`);
     });
 
     it('should convert DAT_00000004 without underscore prefix', () => {
       const input = `void foo() { int x = DAT_00000004; }`;
       const output = transformCode(input);
-      assert.ok(output.includes('*(int32_t*)0x4'), `Expected cast deref in: ${output}`);
+      assert.ok(output.includes('*(volatile int32_t*)0x4'), `Expected cast deref in: ${output}`);
+    });
+
+    it('lowers the null address itself, kernel space and Ram tokens, at their widths (CrashGame, ServerGameLoop)', () => {
+      const output = emit(nullptrCleanupPlugin.createTransformer({ globalTypes: { DAT_c0000001: 'undefined1' } } as never)(
+        parse('void f(int x) { DAT_00000000 = x; DAT_c0000001 = 0; x = uRam00000014 + (int)sRam00000018; if (bRam0000018e) {} p = &DAT_00000000; }')) as AnyNode);
+      assert.match(output, /\*\(volatile int32_t\*\)0x0 = x;/);
+      assert.match(output, /\*\(volatile uint8_t\*\)0xc0000001 = 0;/);
+      assert.match(output, /\*\(volatile uint32_t\*\)0x14 \+ \(int\)\*\(volatile int16_t\*\)0x18/);
+      assert.match(output, /if \(\*\(volatile uint8_t\*\)0x18e\)/);
+      assert.match(output, /p = nullptr;/);
     });
 
     it('should NOT convert addresses >= 0x1000', () => {

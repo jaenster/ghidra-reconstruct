@@ -8,7 +8,7 @@
  * - (Type*)0          →  nullptr
  * - (void*)0x0        →  nullptr
  * - &DAT_00000000     →  nullptr
- * - _DAT_000000NN     →  *(int32_t*)0xNN   (small-address null+offset deref)
+ * - _DAT_000000NN     →  *(volatile T*)0xNN (null-page access, T its width; also 0 and kernel space)
  * - &_DAT_000000NN    →  (void*)0xNN       (the small address itself)
  *
  * And, when the generator asks for it, the reverse for the places Ghidra hands
@@ -90,6 +90,76 @@ function matchSmallAddressDat(node: ASTNode): number | null {
   const addr = parseInt(m[1], 16);
   if (addr === 0 || addr >= 0x1000) return null;
   return addr;
+}
+
+/**
+ * An access the instruction really makes at an address no image maps: the null page
+ * (`MOV [0x0],EAX` in CrashGame, `XOR ECX,ECX; MOV EAX,[ECX+0x60]` after an inlined
+ * accessor returned NULL) or kernel space (`MOV byte ptr [0xc0000001],0`, a
+ * ServerGameLoop debug mode). Ghidra names it `_DAT_000000NN` when a reference exists
+ * and `uRam000000NN` (the prefix is the access type) when none does. Both are a fault
+ * the binary takes ON PURPOSE, so they are lowered to a `volatile` access at that
+ * address of the access's width, which the compiler must perform.
+ */
+const RAM_TOKEN_RE = /^([a-z]{1,3})Ram([0-9a-f]{8})$/;
+const RAM_PREFIX_TYPE: Record<string, string> = {
+  b: 'uint8_t', c: 'char', s: 'int16_t', w: 'uint16_t', i: 'int32_t', u: 'uint32_t', l: 'int32_t',
+  f: 'float', d: 'double', p: 'void*',
+};
+/** Address and element type of an unmapped-address token, or null. */
+function matchUnmappedAccess(node: ASTNode, globalTypes: Record<string, string>): { addr: number; type: string } | null {
+  if (node.kind !== NodeKind.Identifier) return null;
+  const name = (node as Identifier).name;
+  const ram = RAM_TOKEN_RE.exec(name);
+  if (ram) {
+    // `pc` is a char *, `pu` a uint32_t *, a bare `p` or `pp` a void *.
+    const pre = ram[1];
+    const type = pre.startsWith('p')
+      ? (pre.length === 2 && RAM_PREFIX_TYPE[pre[1]] && pre[1] !== 'p' ? `${RAM_PREFIX_TYPE[pre[1]]}*` : 'void*')
+      : RAM_PREFIX_TYPE[pre];
+    return type ? { addr: parseInt(ram[2], 16), type } : null;
+  }
+  const m = SMALL_ADDR_DAT_RE.exec(name);
+  if (!m) return null;
+  const addr = parseInt(m[1], 16);
+  if (!(addr === 0 || addr >= 0x80000000)) return null;
+  return { addr, type: accessTypeOf(globalTypes[name] ?? globalTypes[name.replace(/^_/, '')]) };
+}
+/** The access width Ghidra gave the placeholder, as a fixed-width type; int32_t when unknown. */
+function accessTypeOf(spelling: string | undefined): string {
+  switch ((spelling ?? '').replace(/\s+/g, ' ').trim()) {
+    case 'undefined1': case 'byte': case 'uint8_t': case 'uchar': case 'undefined': return 'uint8_t';
+    case 'char': return 'char';
+    case 'undefined2': case 'ushort': case 'uint16_t': case 'word': return 'uint16_t';
+    case 'short': case 'int16_t': return 'int16_t';
+    case 'undefined4': case 'uint': case 'uint32_t': case 'dword': return 'uint32_t';
+    default: return 'int32_t';
+  }
+}
+/** Every unmapped-address access this pass made, by node, so an `&` above it can undo it. */
+const unmappedDerefs = new WeakMap<ASTNode, number>();
+
+function createVolatileDeref(address: number, type: string, original: ASTNode): UnaryExpr {
+  const isPtr = type.endsWith('*');
+  const base = isPtr ? type.slice(0, -1) : type;
+  let pointee: ASTNode = { kind: NodeKind.BuiltinType, name: base, modifiers: isPtr ? [] : ['volatile'],
+    location: original.location, leadingTrivia: [], trailingTrivia: [] } as BuiltinType;
+  if (isPtr) {
+    pointee = { kind: NodeKind.PointerType, pointee, qualifiers: ['volatile'], location: original.location, leadingTrivia: [], trailingTrivia: [] } as unknown as ASTNode;
+  }
+  const ptrType = { kind: NodeKind.PointerType, pointee, qualifiers: [], location: original.location, leadingTrivia: [], trailingTrivia: [] } as unknown as PointerType;
+  const addrLiteral: IntegerLiteralExpr = {
+    kind: NodeKind.IntegerLiteral, value: BigInt(address), suffix: '', base: 16, raw: '0x' + address.toString(16),
+    location: original.location, leadingTrivia: [], trailingTrivia: [],
+  };
+  const deref = {
+    kind: NodeKind.UnaryExpr, operator: '*',
+    operand: { kind: NodeKind.CStyleCastExpr, type: ptrType, expression: addrLiteral,
+      location: original.location, leadingTrivia: [], trailingTrivia: [] } as CStyleCastExpr,
+    location: original.location, leadingTrivia: original.leadingTrivia || [], trailingTrivia: original.trailingTrivia || [],
+  } as UnaryExpr;
+  unmappedDerefs.set(deref, address);
+  return deref;
 }
 
 /**
@@ -331,6 +401,7 @@ function zeroForReturnedNullptr(node: ASTNode): ASTNode | undefined {
 function createNullptrCleanup(options: NullptrCleanupOptions = {}): Transformer {
   const zeroAssigned = options.zeroForAssignedNullptr ?? false;
   const zeroReturned = options.zeroForReturnedNullptr ?? false;
+  const globalTypes = options.globalTypes ?? {};
 
   return createTransformer({
     visitNode(node) {
@@ -360,7 +431,21 @@ function createNullptrCleanup(options: NullptrCleanupOptions = {}): Transformer 
       // _DAT_000000NN (small address) → *(int32_t*)0xNN
       const smallAddr = matchSmallAddressDat(node);
       if (smallAddr !== null) {
-        return createCastDeref(smallAddr, node);
+        // The null page: a fault the binary takes on purpose, at the access's own width.
+        const name = (node as Identifier).name;
+        return createVolatileDeref(smallAddr, accessTypeOf(globalTypes[name] ?? globalTypes[name.replace(/^_/, '')]), node);
+      }
+
+      // `&` of one: the ADDRESS, with no element type - nullptr at zero, as `&DAT_00000000` always was.
+      if (node.kind === NodeKind.UnaryExpr && (node as UnaryExpr).operator === '&') {
+        const addr = unmappedDerefs.get(unwrapParens((node as UnaryExpr).operand));
+        if (addr !== undefined) return addr === 0 ? createNullptr(node) : createVoidAddress(addr, node);
+      }
+
+      // An access at an address no image maps → *(volatile T*)ADDR (see matchUnmappedAccess)
+      const unmapped = matchUnmappedAccess(node, globalTypes);
+      if (unmapped !== null) {
+        return createVolatileDeref(unmapped.addr, unmapped.type, node);
       }
 
       // `(T*)(void*)0xNN` → `(T*)0xNN`. Ghidra's own pointer cast already says
@@ -453,6 +538,9 @@ export interface NullptrCleanupOptions extends PluginOptions {
 
   /** Rewrite `return nullptr;` to `return 0;` — set when the return type is not a pointer (default: false) */
   zeroForReturnedNullptr?: boolean;
+
+  /** Global name → declared spelling: the access width of an unmapped-address placeholder. */
+  globalTypes?: Record<string, string>;
 }
 
 /**
