@@ -248,17 +248,18 @@ export async function createConnection(
    */
   existingSessionId?: string,
 ): Promise<GhidraConnection> {
-  // Check daemon is reachable
+  // The first RPC is the reachability check. A separate /status probe is not: behind the
+  // hosted daemon's login proxy it redirects through the identity provider, which can take
+  // longer than any short probe timeout, and it says nothing about whether RPC works.
+  let sessions: DaemonSession[];
   try {
-    await fetch(`${daemonUrl}/status`, { signal: AbortSignal.timeout(3000) });
-  } catch {
+    sessions = await rpcCall<DaemonSession[]>(daemonUrl, 'list_sessions', {});
+  } catch (err) {
+    if (!isTransient(err)) throw err;
     throw new Error(
-      `Daemon not running at ${daemonUrl}. Start with: ghidra-mcp start -p 8432 -f`
+      `Daemon not reachable at ${daemonUrl} (${(err as Error).message}). Start with: ghidra-mcp start -p 8432 -f`
     );
   }
-
-  // List sessions and find a matching one
-  const sessions = await rpcCall<DaemonSession[]>(daemonUrl, 'list_sessions', {});
 
   let sessionId: string | undefined;
   if (existingSessionId) {
@@ -335,9 +336,10 @@ export async function closeConnection(connection: GhidraConnection): Promise<voi
  * Check if the daemon is available
  */
 export async function isDaemonAvailable(daemonUrl = 'http://localhost:8432'): Promise<boolean> {
+  // An RPC, not /status: behind a login proxy /status redirects to the identity provider.
   try {
-    const resp = await fetch(`${daemonUrl}/status`, { signal: AbortSignal.timeout(2000) });
-    return resp.ok;
+    await rpcCallOnce(daemonUrl, 'list_sessions', {}, 10000);
+    return true;
   } catch {
     return false;
   }
