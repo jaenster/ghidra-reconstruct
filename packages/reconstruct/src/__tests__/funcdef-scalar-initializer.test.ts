@@ -31,3 +31,12 @@ describe('isUnmappedAddressPlaceholder', () => {
     assert.ok(!isUnmappedAddressPlaceholder('DAT_0074a2a0'));
   });
 });
+
+import { stripFuncDefIndirection } from '../codegen/globals-header.js';
+describe('stripFuncDefIndirection: multi-star', () => {
+  it('CurrentApplication fnAppModeRun * * is fnAppModeRun *', () => {
+    setKnownFuncDefTypedefs(['fnAppModeRun']);
+    assert.strictEqual(stripFuncDefIndirection('fnAppModeRun * *'), 'fnAppModeRun *');
+    assert.strictEqual(stripFuncDefIndirection('fnAppModeRun *'), 'fnAppModeRun');
+  });
+});

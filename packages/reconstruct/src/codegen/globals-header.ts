@@ -2501,6 +2501,11 @@ export function stripFuncDefIndirection(type: string): string {
   if (m && isFuncDefTypedefName(m[1])) {
     return `${m[1]}${m[2]}`;
   }
+  // `F * *` (CurrentApplication, fnAppModeRun * *): the typedef absorbs ONE star.
+  const mm = type.match(/^(\w+)\s*\*((?:\s*\*)+)\s*$/);
+  if (mm && isFuncDefTypedefName(mm[1])) {
+    return `${mm[1]} ${mm[2].replace(/\s+/g, '')}`;
+  }
   return type;
 }
 
