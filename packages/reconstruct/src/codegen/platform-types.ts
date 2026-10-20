@@ -556,8 +556,14 @@ export function collapseFuncPtrTypedef(
   type: string,
   isFuncDefTypedef: (name: string) => boolean
 ): string {
-  const m = type.trim().match(/^(\w+)\s*\*$/);
-  return m && isFuncDefTypedef(m[1]) ? m[1] : type;
+  // The typedef is already the pointer, so it absorbs ONE level: `F *` -> `F`, and
+  // `F * *` (AppModeLauncherInit returns the address of a function-pointer global,
+  // Ghidra `fnAppModeRun * *`) -> `F *`. Left at one star only, the `**` return
+  // spelled three levels and `return &PTR_fAPPMODE_...` did not convert.
+  const m = type.trim().match(/^(\w+)\s*\*((?:\s*\*)*)\s*$/);
+  if (!m || !isFuncDefTypedef(m[1])) return type;
+  const rest = m[2].replace(/\s+/g, '');
+  return rest ? `${m[1]} ${rest}` : m[1];
 }
 
 // =============================================================================
