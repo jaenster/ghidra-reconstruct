@@ -515,3 +515,13 @@ describe('AST Factory', () => {
     });
   });
 });
+
+describe('Expr.stringLiteral spells its text as C', () => {
+  it('escapes quote, backslash, control characters and other bytes', () => {
+    const E = Expr;
+    assert.strictEqual(E.stringLiteral('a\nb\t"c"\\d').raw, '"a\\nb\\t\\"c\\"\\\\d"');
+    assert.strictEqual(E.stringLiteral('\x01\x7f\xe9').raw, '"\\001\\177\\351"');
+    assert.strictEqual(E.stringLiteral('plain ;)').raw, '"plain ;)"');
+    assert.strictEqual(E.stringLiteral('\n').value, '\n');
+  });
+});
