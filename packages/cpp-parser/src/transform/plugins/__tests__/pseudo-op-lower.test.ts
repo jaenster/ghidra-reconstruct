@@ -549,3 +549,45 @@ describe('pseudo-op-lower: a register input stored into an array element', () =>
     assert.match(out, /in_ECX/);
   });
 });
+
+describe('pseudo-op-lower: CPU flags carried to a shared conditional tail', () => {
+  // CallCollisionFunction @00641bxx (v1105), trimmed: three paths set OF/SF/ZF and jump
+  // to one `jle` tail.
+  const SRC = `int f(int nKind, int n, int nPosY, int iVar1) {
+    bool bZF; bool bSF; bool bOF;
+    switch (nKind) {
+    case 1:
+      bOF = SBORROW4(n,1); bSF = n + -1 < 0; bZF = n == 1;
+      goto LAB_00641c18;
+    case 2:
+LAB_00641c16:
+      bOF = SBORROW4(nPosY,iVar1); bSF = nPosY - iVar1 < 0; bZF = nPosY == iVar1;
+      goto LAB_00641c18;
+    case 4:
+      bOF = SBORROW4(n,2); bSF = n + -2 < 0; bZF = n == 2;
+LAB_00641c18:
+      if (bZF || bOF != bSF) { return 1; }
+    }
+    return 0; }`;
+  it('every triple becomes the signed <= it encodes, and no flag variable remains', () => {
+    const out = transform(SRC);
+    assert.ok(!/\bb[OSZ]F\b|SBORROW/.test(out), out);
+    assert.match(out, /bSignedLessOrEqual = \(int32_t\)n <= \(int32_t\)1;/);
+    assert.match(out, /LAB_00641c16:\s*bSignedLessOrEqual = \(int32_t\)nPosY <= \(int32_t\)iVar1;/);
+    assert.match(out, /if \(bSignedLessOrEqual\)/);
+  });
+  it('a flag read anywhere else leaves the triple alone', () => {
+    const out = transform(SRC.replace('return 0; }', 'return bOF; }'));
+    assert.match(out, /\bbOF\b/);
+  });
+  it('the lowered compare equals ZF || OF != SF at the overflow edges', { skip: !hasNativeGpp() }, () => {
+    const lowered = transform(`int f(int n, int m) { bool bZF; bool bSF; bool bOF;
+      bOF = SBORROW4(n,m); bSF = n - m < 0; bZF = n == m;
+      if (bZF || bOF != bSF) { return 1; } return 0; }`);
+    const out = compileAndRun(`${PRELUDE}\n${lowered}\nstatic int ref(int n, int m) { int64_t d = (int64_t)n - m; bool zf = (int32_t)d == 0; bool sf = (int32_t)(uint32_t)((uint32_t)n - (uint32_t)m) < 0; bool of = d < INT32_MIN || d > INT32_MAX; return zf || of != sf; }`,
+      `int v[] = {INT32_MIN, INT32_MIN + 1, -2, -1, 0, 1, 2, INT32_MAX - 1, INT32_MAX}; int bad = 0;
+       for (int a : v) for (int b : v) if (f(a, b) != ref(a, b)) bad++;
+       printf("%d\\n", bad);`);
+    assert.strictEqual(out.trim(), '0');
+  });
+});

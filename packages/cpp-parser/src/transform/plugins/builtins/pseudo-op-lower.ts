@@ -1041,6 +1041,184 @@ function refCount(e: unknown, name: string): number {
   return n;
 }
 
+/**
+ * CPU flags carried in variables to a shared conditional tail.
+ *
+ * Where several paths jump into one conditional branch, the decompiler keeps the x86
+ * flags as variables and sets all three on each path (CallCollisionFunction 0x641c18):
+ *
+ *   bOF = SBORROW4(n, 1);  bSF = n + -1 < 0;  bZF = n == 1;  goto LAB_00641c18;
+ *   ...
+ *   LAB_00641c18: if (bZF || bOF != bSF) { ... }
+ *
+ * `ZF || OF != SF` is the definition of signed `<=` on the subtraction that set them
+ * (`jle`); `!ZF && OF == SF` is `>`, `OF != SF` is `<`, `OF == SF` is `>=`. When every
+ * assignment to the three names is such a triple and every other reference is one
+ * condition of a single kind, each triple becomes `bCond = (intN)a <= (intN)b` and the
+ * condition becomes `bCond`: the same boolean on every path, and no flag remains.
+ */
+type FlagCond = 'le' | 'gt' | 'lt' | 'ge';
+const FLAG_COND_OP: Record<FlagCond, string> = { le: '<=', gt: '>', lt: '<', ge: '>=' };
+const FLAG_COND_NAME: Record<FlagCond, string> = {
+  le: 'bSignedLessOrEqual', gt: 'bSignedGreater', lt: 'bSignedLess', ge: 'bSignedGreaterOrEqual',
+};
+
+function lowerFlagTriples(body: ASTNode, ctx: Ctx): ASTNode {
+  const identName = (e: Expression | undefined): string | null => {
+    const x = e ? unwrapParens(e) : undefined;
+    return x && x.kind === NodeKind.Identifier ? (x as Identifier).name : null;
+  };
+  /** The statement under any case/default/label wrappers. */
+  const inner = (st: ASTNode | undefined): ASTNode | undefined => {
+    let x = st;
+    while (x && (x.kind === NodeKind.CaseStmt || x.kind === NodeKind.DefaultStmt || x.kind === NodeKind.LabelStmt)) {
+      x = (x as unknown as { statement: ASTNode }).statement;
+    }
+    return x;
+  };
+  /** `st` with the statement under its wrappers replaced. */
+  const rewrap = (st: ASTNode, replacement: ASTNode): ASTNode => {
+    if (st.kind === NodeKind.CaseStmt || st.kind === NodeKind.DefaultStmt || st.kind === NodeKind.LabelStmt) {
+      const w = st as unknown as { statement: ASTNode };
+      return { ...(st as object), statement: rewrap(w.statement, replacement) } as unknown as ASTNode;
+    }
+    return replacement;
+  };
+  /**
+   * A triple starting at stmts[i]: O = SBORROWn(a,b); S = sign(a - b); Z = a == b. The
+   * first may carry a case label or a goto label (paths enter there); the other two may
+   * not, or a path could enter between them.
+   */
+  const tripleAt = (stmts: ASTNode[], i: number) => {
+    const o = assignOf(inner(stmts[i]));
+    const sg = assignOf(stmts[i + 1]);
+    const z = assignOf(stmts[i + 2]);
+    if (!o || !sg || !z) return null;
+    const O = identName(o.left), S = identName(sg.left), Z = identName(z.left);
+    if (!O || !S || !Z || O === S || S === Z || O === Z) return null;
+    const sb = sborrowCall(o.right);
+    if (!sb || !isPure(sb.a) || !isPure(sb.b)) return null;
+    if (!isSignOfDifference(sg.right, sb.n, sb.a, sb.b, ctx)) return null;
+    const eq = unwrapParens(z.right);
+    if (eq.kind !== NodeKind.BinaryExpr || (eq as BinaryExpr).operator !== '==') return null;
+    if (!sameAst((eq as BinaryExpr).left, sb.a) || !sameAst((eq as BinaryExpr).right, sb.b)) return null;
+    return { O, S, Z, n: sb.n, a: sb.a, b: sb.b };
+  };
+  /** The condition kind `e` is over (O, S, Z), else null. */
+  const condOf = (e: Expression, O: string, S: string, Z: string): FlagCond | null => {
+    const x = unwrapParens(e);
+    const pairIs = (y: Expression, op: string) => {
+      const p = unwrapParens(y);
+      if (p.kind !== NodeKind.BinaryExpr || (p as BinaryExpr).operator !== op) return false;
+      const l = identName((p as BinaryExpr).left), r = identName((p as BinaryExpr).right);
+      return (l === O && r === S) || (l === S && r === O);
+    };
+    const isZ = (y: Expression) => identName(y) === Z;
+    const isNotZ = (y: Expression) => {
+      const p = unwrapParens(y);
+      return p.kind === NodeKind.UnaryExpr && (p as UnaryExpr).operator === '!' && identName((p as UnaryExpr).operand) === Z;
+    };
+    if (x.kind === NodeKind.BinaryExpr) {
+      const be = x as BinaryExpr;
+      if (be.operator === '||' && ((isZ(be.left) && pairIs(be.right, '!=')) || (isZ(be.right) && pairIs(be.left, '!=')))) return 'le';
+      if (be.operator === '&&' && ((isNotZ(be.left) && pairIs(be.right, '==')) || (isNotZ(be.right) && pairIs(be.left, '==')))) return 'gt';
+      if (pairIs(x, '!=')) return 'lt';
+      if (pairIs(x, '==')) return 'ge';
+    }
+    return null;
+  };
+
+  // 1. Every triple, grouped by its three names.
+  const groups = new Map<string, { O: string; S: string; Z: string; triples: number }>();
+  for (const cs of findNodesByKind(body, NodeKind.CompoundStmt)) {
+    const stmts = (cs as unknown as { statements: ASTNode[] }).statements;
+    for (let i = 0; i + 2 < stmts.length; i++) {
+      const t = tripleAt(stmts, i);
+      if (!t) continue;
+      const key = `${t.O}|${t.S}|${t.Z}`;
+      const g = groups.get(key) ?? { O: t.O, S: t.S, Z: t.Z, triples: 0 };
+      g.triples++;
+      groups.set(key, g);
+      i += 2;
+    }
+  }
+  if (groups.size === 0) return body;
+
+  let out = body;
+  const declared = new Set(findNodesByKind(body, NodeKind.VariableDecl).map(d => (d as VariableDecl).name.name));
+  for (const g of groups.values()) {
+    // 2. Every other reference is one condition, all of one kind.
+    let kind: FlagCond | null = null;
+    let condRefs = 0;
+    let mixed = false;
+    // `OF != SF` inside `ZF || OF != SF` is part of the `<=`, not a `<` of its own.
+    const inside = new Set<ASTNode>();
+    for (const be of findNodesByKind(out, NodeKind.BinaryExpr)) {
+      const k = condOf(be as Expression, g.O, g.S, g.Z);
+      if (k === 'le' || k === 'gt') {
+        for (const sub of findNodesByKind((be as BinaryExpr).left, NodeKind.BinaryExpr)) inside.add(sub);
+        for (const sub of findNodesByKind((be as BinaryExpr).right, NodeKind.BinaryExpr)) inside.add(sub);
+      }
+    }
+    for (const be of findNodesByKind(out, NodeKind.BinaryExpr)) {
+      if (inside.has(be)) continue;
+      const k = condOf(be as Expression, g.O, g.S, g.Z);
+      if (!k) continue;
+      if (kind && kind !== k) mixed = true;
+      kind = kind ?? k;
+      condRefs += refCount(be, g.O) + refCount(be, g.S) + refCount(be, g.Z);
+    }
+    if (!kind || mixed) continue;
+    const total = refCount(out, g.O) + refCount(out, g.S) + refCount(out, g.Z);
+    if (total !== g.triples * 3 + condRefs) continue;
+    let name = FLAG_COND_NAME[kind];
+    for (let k = 2; declared.has(name); k++) name = `${FLAG_COND_NAME[kind]}${k}`;
+    declared.add(name);
+    const cond = kind;
+    let declPlaced = false;
+    out = createTransformer({
+      visitCompoundStmt(node) {
+        const stmts = node.statements as ASTNode[];
+        const next: ASTNode[] = [];
+        let changed = false;
+        for (let i = 0; i < stmts.length; i++) {
+          const t = tripleAt(stmts, i);
+          if (t && t.O === g.O && t.S === g.S && t.Z === g.Z) {
+            const S = sType(t.n);
+            const assign = fromTemplate(`__R = (${S})__A ${FLAG_COND_OP[cond]} (${S})__B`,
+              { __R: Expr.identifier(name), __A: t.a, __B: t.b });
+            const first = inner(stmts[i])!;
+            next.push(rewrap(stmts[i], { ...(first as object), expression: assign } as unknown as ASTNode));
+            i += 2;
+            changed = true;
+            continue;
+          }
+          // The three flag declarations become the one condition's.
+          if (stmts[i].kind === NodeKind.DeclStmt) {
+            const ds = (stmts[i] as unknown as { declarations: VariableDecl[] }).declarations;
+            if (ds.length === 1 && !ds[0].initializer && [g.O, g.S, g.Z].includes(ds[0].name.name)) {
+              if (!declPlaced) {
+                declPlaced = true;
+                next.push({ ...(stmts[i] as object), declarations: [{ ...ds[0], name: { ...ds[0].name, name } }] } as unknown as ASTNode);
+              }
+              changed = true;
+              continue;
+            }
+          }
+          next.push(stmts[i]);
+        }
+        return changed ? ({ ...node, statements: next } as ASTNode) : undefined;
+      },
+      visitNode(node: ASTNode): ASTNode | undefined {
+        if (node.kind !== NodeKind.BinaryExpr) return undefined;
+        if (condOf(node as Expression, g.O, g.S, g.Z) !== cond) return undefined;
+        return { ...Expr.identifier(name), leadingTrivia: node.leadingTrivia, trailingTrivia: node.trailingTrivia } as ASTNode;
+      },
+    })(out);
+  }
+  return out;
+}
+
 /** Register inputs the decompiler names but no instruction in the function defines. */
 const REGISTER_INPUT = /^(in_[A-Z][A-Z0-9_]*|in_register_[0-9a-f]+)$/;
 
@@ -1376,7 +1554,7 @@ function createPseudoOpLowerTransformer(options: PseudoOpLowerOptions = {}): Tra
         if (/^in_stack_[0-9a-f]+$/.test(name)) swiTemps.add(name);
       }
     }
-    const retired = retireIndeterminateRegisters(body, swiTemps);
+    const retired = lowerFlagTriples(retireIndeterminateRegisters(body, swiTemps), ctx);
     return dropUnusedDecls(statements(lower(deadHigh(fold(['==', '!='])(fold(['||', '&&'])(retired))))), swiTemps);
   };
 
