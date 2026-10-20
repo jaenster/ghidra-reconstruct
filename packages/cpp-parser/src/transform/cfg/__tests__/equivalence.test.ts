@@ -326,6 +326,23 @@ describe('isUnfolding: mutation testing against the compiled skeleton', () => {
   });
 });
 
+describe('control skeleton: a binary that does not finish', () => {
+  it('is killed at its time limit; pairs it did not report are unproven, not agreement', { skip: !gpp }, () => {
+    const t0 = Date.now();
+    const res = runSkeletons([
+      { name: 'fine', before: body(fn(`if (a) x(); y();`)), after: body(fn(`if (!a) { y(); return; } x(); y();`)) },
+      // An empty infinite loop calls no T/D/S, so the step budget never stops it.
+      { name: 'spins', before: body(fn(`x(); for (;;) { }`)), after: body(fn(`x(); for (;;) { }`)) },
+    ], { noreturn: NORET, runSeconds: 1 });
+    const secs = (Date.now() - t0) / 1000;
+    assert.ok(secs < 30, `took ${secs}s`);
+    assert.equal(res[0].ok, true);
+    assert.equal(res[0].timedOut, undefined);
+    assert.equal(res[1].ok, false);
+    assert.equal(res[1].timedOut, true);
+  });
+});
+
 describe('control skeleton: region mode', () => {
   it('a fabricated return is told apart when the region does not end the function', { skip: !gpp }, () => {
     const [r] = runSkeletons([{

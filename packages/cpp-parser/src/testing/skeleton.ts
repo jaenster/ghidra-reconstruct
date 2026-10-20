@@ -27,7 +27,7 @@
  * for all streams implies equivalence for the real ones.
  */
 
-import { execFileSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -71,6 +71,8 @@ function strip(e: Expression): Expression {
 
 export interface SkeletonOptions {
   noreturn?: ReadonlySet<string>;
+  /** Wall-clock limit per compiled binary, seconds (DEFAULT_RUN_SECONDS). */
+  runSeconds?: number;
 }
 
 /**
@@ -266,13 +268,39 @@ export interface SkeletonResult {
   ok: boolean;
   /** First stream that told them apart, when not ok. */
   detail?: string;
+  /**
+   * The run was killed at its time limit before this pair reported: UNPROVEN, neither same
+   * nor different. `ok` is false so that a caller that only reads `ok` never counts it as
+   * agreement.
+   */
+  timedOut?: boolean;
 }
+
+/** Wall-clock limit for one compiled skeleton binary (all pairs of a batch, one level). */
+export const DEFAULT_RUN_SECONDS = 120;
+const COMPILE_SECONDS = 300;
 
 const PRELUDE = String.raw`
 #include <cstdint>
 #include <cstdio>
 #include <csetjmp>
 #include <cstring>
+#include <csignal>
+#include <unistd.h>
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
+// The binary bounds itself, so it cannot outlive the harness: it dies with its parent
+// (Linux), and on its own alarm whatever happens to the parent.
+static void guard(unsigned seconds) {
+#ifdef __linux__
+  prctl(PR_SET_PDEATHSIG, SIGKILL);
+  if (getppid() == 1) _exit(125);
+#endif
+  signal(SIGALRM, SIG_DFL);
+  alarm(seconds);
+  setvbuf(stdout, nullptr, _IOLBF, 0);
+}
 static uint64_t g_state; static int g_exhaustive; static uint64_t g_bits; static int g_pos;
 static uint32_t g_trace[4096]; static int g_len; static int g_steps; static jmp_buf g_jmp;
 static const int BUDGET = 3000;
@@ -355,26 +383,35 @@ export function runSkeletons(pairs: SkeletonPair[], opts: SkeletonOptions = {}):
     fns.push(`static void before_${i}() ${before}\nstatic void after_${i}() ${after}`);
     calls.push(`{ int bad = compare("${i}", before_${i}, after_${i}, 0);`
       + (Math.max(eb.decisions, ea.decisions) <= 12 ? ` if (!bad) bad = compare("${i}", before_${i}, after_${i}, 1);` : '')
-      + ` printf("%s ${i}\\n", bad ? "FAIL" : "PASS"); }`);
+      + ` printf("%s ${i}\\n", bad ? "FAIL" : "PASS"); fflush(stdout); }`);
   });
   const caseCount = new Map<string, number>();
   for (const [scrut, m] of keys.caseValues) caseCount.set(String(keys.id(scrut)), m.size);
   const body = fns.join('\n').replace(/@@CASES:(\d+)@@/g, (_, k) => String(caseCount.get(k) ?? 0));
-  const src = `${PRELUDE}\n${body}\nint main() {\n${calls.join('\n')}\nreturn 0;\n}\n`;
+  const runLimit = Math.max(1, Math.ceil((opts.runSeconds ?? DEFAULT_RUN_SECONDS)));
+  const src = `${PRELUDE}\n${body}\nint main() {\nguard(${runLimit});\n${calls.join('\n')}\nreturn 0;\n}\n`;
   const dir = mkdtempSync(join(tmpdir(), 'skeleton-'));
   try {
     const file = join(dir, 's.cpp');
     writeFileSync(file, src);
     const verdicts = new Map<string, { ok: boolean; detail: string[] }>();
+    const timedOut = new Set<string>();
     for (const level of ['-O0', '-O2']) {
       const exe = join(dir, `s${level}`);
-      try {
-        execFileSync('g++', ['-std=c++17', level, '-w', file, '-o', exe], { stdio: 'pipe' });
-      } catch (e) {
-        const err = (e as { stderr?: Buffer }).stderr?.toString() ?? String(e);
-        throw new Error(`skeleton does not compile (${level}):\n${err.slice(0, 2000)}\n--- source ---\n${src.slice(0, 4000)}`);
+      const cc = spawnSync('g++', ['-std=c++17', level, '-w', file, '-o', exe], {
+        stdio: 'pipe', timeout: COMPILE_SECONDS * 1000, killSignal: 'SIGKILL',
+      });
+      if (cc.status !== 0) {
+        const why = cc.error ? String(cc.error) : cc.stderr?.toString() ?? '';
+        throw new Error(`skeleton does not compile (${level}):\n${why.slice(0, 2000)}\n--- source ---\n${src.slice(0, 4000)}`);
       }
-      const out = execFileSync(exe, [], { encoding: 'utf8', maxBuffer: 64 << 20 });
+      // A hard limit from outside as well as the binary's own alarm: SIGKILL at the limit
+      // plus a grace second. What it printed before then still counts.
+      const run = spawnSync(exe, [], {
+        encoding: 'utf8', maxBuffer: 64 << 20, timeout: (runLimit + 1) * 1000, killSignal: 'SIGKILL',
+      });
+      const out = run.stdout ?? '';
+      const killed = run.status !== 0;
       for (const line of out.split('\n')) {
         const m = /^(PASS|FAIL) (.*)$/.exec(line);
         if (m) {
@@ -388,9 +425,18 @@ export function runSkeletons(pairs: SkeletonPair[], opts: SkeletonOptions = {}):
           verdicts.set(name, v);
         }
       }
+      if (killed) {
+        // Every pair this level did not finish is unproven at this level.
+        const reported = new Set(out.split('\n').map(l => /^(?:PASS|FAIL) (.*)$/.exec(l)?.[1]).filter(Boolean) as string[]);
+        pairs.forEach((_, i) => { if (!reported.has(String(i))) timedOut.add(String(i)); });
+      }
     }
     return pairs.map((p, i) => {
       const v = verdicts.get(String(i));
+      if (timedOut.has(String(i)) && v?.ok !== false) {
+        // A FAIL seen at the other level stands; otherwise nothing was shown.
+        return { name: p.name, ok: false, timedOut: true, detail: 'killed at the time limit (or crashed) before reporting: unproven' };
+      }
       return { name: p.name, ok: v?.ok ?? false, detail: v?.detail.join('; ') };
     });
   } finally {

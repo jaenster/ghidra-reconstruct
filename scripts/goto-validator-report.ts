@@ -93,7 +93,13 @@ if (doSkeleton) {
     const run = (ps: SkeletonPair[], os: Any[]): void => {
       try {
         const res = runSkeletons(ps, { noreturn });
-        res.forEach((r, j) => skeletonVerdict.set(os[j], r.ok ? 'same' : 'differs'));
+        // A batch killed at its time limit leaves its unreported pairs unproven; they are
+        // retried alone (a single slow pair cannot hold the rest hostage) and, if one alone
+        // still times out, reported as `timeout` - never as `same`.
+        const slow: number[] = [];
+        res.forEach((r, j) => { if (r.timedOut) slow.push(j); else skeletonVerdict.set(os[j], r.ok ? 'same' : 'differs'); });
+        if (slow.length === 1 && ps.length === 1) { skeletonVerdict.set(os[0], 'timeout'); return; }
+        for (const j of slow) run([ps[j]], [os[j]]);
       } catch (err) {
         // One pair the compiler rejects would sink the batch: bisect down to it.
         if (ps.length === 1) { broken++; skeletonVerdict.set(os[0], 'no-compile'); return; }
@@ -112,6 +118,9 @@ if (doSkeleton) {
     return t;
   };
   console.log(`\nskeleton: proved ${JSON.stringify(tally(proved))}; refused ${JSON.stringify(tally(refused))}; unparsable ${unparsable}, no-compile ${broken}`);
+  const unproven = proved.filter(e => skeletonVerdict.get(e) === 'timeout');
+  console.log(`  proved but the skeleton timed out (unchecked, not agreement): ${unproven.length}`);
+  for (const e of unproven) console.log(`    TIMEOUT ${e.fn} ${e.handler}`);
   const holes = proved.filter(e => skeletonVerdict.get(e) === 'differs');
   for (const e of holes) console.log(`  VALIDATOR HOLE ${e.fn} ${e.handler}`);
   const defects = refused.filter(e => skeletonVerdict.get(e) === 'differs');
