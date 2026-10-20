@@ -14,6 +14,8 @@ const emptyStats = (): GotoCleanupStats => ({
   stackCase: 0,
   rotatedEntry: 0,
   ifFalseArm: 0,
+  structureArm: 0,
+  structureSkip: 0,
   switchCaseGoto: 0,
   backwardToLoop: 0,
   forwardCascade: 0,

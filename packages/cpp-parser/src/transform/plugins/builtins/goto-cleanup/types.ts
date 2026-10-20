@@ -23,6 +23,10 @@ export interface GotoCleanupStats {
   stackCase: number;
   rotatedEntry: number;
   ifFalseArm: number;
+  /** Gotos the structurer (structure.ts) replaced by the block they jumped to. */
+  structureArm: number;
+  /** Gotos that only skipped the rest of their block, now `if (!c) { rest }` (structure.ts). */
+  structureSkip: number;
   switchCaseGoto: number;
   backwardToLoop: number;
   forwardCascade: number;

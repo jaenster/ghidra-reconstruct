@@ -116,8 +116,10 @@ LAB_0061bf1a:
   return nTicks;
 }`;
 
-  it('0061bee0 shape: never more gotos than the input', () => {
-    assert.ok(gotos(pipeline(NESTED)) <= 1);
+  it('0061bee0 shape: the join is sunk into both arms (E6), the goto skips, the late run nests', () => {
+    const out = pipeline(NESTED);
+    assert.equal(gotos(out), 0, out);
+    assert.match(out, /nTicks = nTicks \+ 0xf;\s*\*p = nTicks;\s*\} else \{\s*if \(X\(a\) == 2\) \{\s*\*p = X\(nTicks \+ 1\);\s*if \(b == 2\) \{\s*nTicks = nTicks \+ 9;\s*\*p = nTicks;/, out);
   });
 
   it('0061bee0 shape: compiled, same behaviour', { skip: !hasNativeGpp() }, () => {

@@ -24,6 +24,7 @@
  */
 
 import type { Statement } from '../../../../ast/nodes.js';
+import { NodeKind } from '../../../../ast/kinds.js';
 import type { RequiredGotoCleanupOptions } from './types.js';
 import { recordStat } from './stats.js';
 import { collectIdentifierNames } from './helpers.js';
@@ -53,7 +54,7 @@ export function setGotoCleanupVetoReporter(fn: ((handler: string, lost: string[]
  * The whole-function goto counts decide which labels are entry points of this region, so
  * both graphs are built with the same ones.
  */
-function accept(
+export function accept(
   before: Statement[],
   candidate: Statement[] | null,
   handler: string,
@@ -155,6 +156,13 @@ export function processCompound(
       const freshTotal = freshGotoCounts.get(labelInfo.name) ?? 0;
       const freshAccounted = freshGotos.reduce((sum, g) => sum + (g.gotoCount ?? 1), 0);
       if (freshTotal !== freshAccounted) continue;
+
+      // A span holding a case label of the switch this list is the body of is other arms:
+      // wrapping it in `if (!c) { ... }` would put those case labels inside an if - legal C,
+      // but a shape no source has (Ghidra never prints one). A goto into another arm is
+      // the structurer's (structure.ts), as an arm crossing.
+      const firstGoto = Math.min(...freshGotos.map(g => g.index));
+      if (current.slice(firstGoto + 1, freshLabel.index).some(s => s.kind === NodeKind.CaseStmt || s.kind === NodeKind.DefaultStmt)) continue;
 
       const freshContexts = new Set(freshGotos.map(g => g.context));
       const usedNames = collectIdentifierNames(current);

@@ -11,7 +11,11 @@
  *   TXT_ParseDataAndPutIntoStructure 006bd780  five halt sites cross-jumped to one tail
  *   QUEST_OnPlayerJoinGame 00546270          a rotated loop entered at its body
  *   AUTOMAP_RevealUnitsInRoom 00458dc0       15 jumps to a latch that does work (for-loop
- *                                            recovery is step 7; pinned as kept)
+ *                                            recovery is step 7; pinned as kept); one arm
+ *                                            crossing (E6) structured in step 6
+ *   MakeMissile 004cd540                     the first arm-crossing fixture (step 6):
+ *                                            LAB_004cd678 `v <<= 8` into the else arm (E6);
+ *                                            LAB_004cd774 (9 work nodes, no evidence) kept
  */
 
 import { describe, it } from 'node:test';
@@ -30,10 +34,11 @@ import { isUnfolding, countGotoTargets } from '../../cfg/index.js';
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'gotos');
 
 const CASES: { file: string; raw: number; after: number }[] = [
-  { file: 'ITEM_DeserializeFromBitBuffer_0062cbe0', raw: 35, after: 32 },
+  { file: 'ITEM_DeserializeFromBitBuffer_0062cbe0', raw: 35, after: 28 },
   { file: 'TXT_ParseDataAndPutIntoStructure_006bd780', raw: 24, after: 24 },
   { file: 'QUEST_OnPlayerJoinGame_00546270', raw: 12, after: 6 },
-  { file: 'AUTOMAP_RevealUnitsInRoom_00458dc0', raw: 6, after: 6 },
+  { file: 'AUTOMAP_RevealUnitsInRoom_00458dc0', raw: 6, after: 5 },
+  { file: 'MakeMissile_004cd540', raw: 3, after: 1 },
 ];
 
 function body(root: ASTNode): Statement[] {

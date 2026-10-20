@@ -162,7 +162,12 @@ export function copyIsFaithful(tail: Statement[], facts: CopyFacts): EvidenceCla
 }
 
 function stmtKey(s: Statement): string | null {
-  if (s.kind === NodeKind.LabelStmt || s.kind === NodeKind.CaseStmt || s.kind === NodeKind.DefaultStmt) return null;
+  // A label (goto or case) is scaffolding: what precedes the next statement is the work it
+  // labels.
+  while (s.kind === NodeKind.LabelStmt || s.kind === NodeKind.CaseStmt || s.kind === NodeKind.DefaultStmt) {
+    s = (s as unknown as { statement: Statement }).statement;
+  }
+  if (s.kind === NodeKind.NullStmt) return null;
   return 's:' + text(s);
 }
 

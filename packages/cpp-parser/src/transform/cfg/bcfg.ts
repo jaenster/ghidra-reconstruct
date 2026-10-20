@@ -217,7 +217,7 @@ function calleeName(e: Expression): string | null {
   return null;
 }
 
-function isNoreturnStmt(s: Statement, names: ReadonlySet<string> | undefined): boolean {
+export function isNoreturnStmt(s: Statement, names: ReadonlySet<string> | undefined): boolean {
   if (s.kind !== NodeKind.ExprStmt) return false;
   for (const t of s.leadingTrivia ?? []) {
     if ((t.kind === TriviaKind.BlockComment || t.kind === TriviaKind.LineComment) && t.text.includes(NORETURN_WARNING)) return true;

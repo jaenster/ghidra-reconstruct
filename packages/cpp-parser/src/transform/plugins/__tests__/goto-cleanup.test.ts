@@ -2009,9 +2009,12 @@ LAB_X:
     assert.ok(!/\breturn\s*;/.test(output),
       `Must not fabricate a return that skips more() in:\n${output}`);
     assert.ok(output.includes('more();'), `Expected more() to survive in:\n${output}`);
-    // Only one cleanup() call: the goto is preserved rather than the tail duplicated.
-    assert.strictEqual((output.match(/cleanup\(\);/g) ?? []).length, 1,
-      `Expected the goto to be preserved, not the tail inlined, in:\n${output}`);
+    // The structurer (step 6) un-merges the one-statement tail into the arm that jumped
+    // to it (E6: two entries, prefixes `y` and `!x` differ). The copy must continue at
+    // more(), like the original: `if (y) { cleanup(); } else { other(); }`.
+    assert.match(output, /if \(y\) \{\s*cleanup\(\);\s*\} else \{\s*other\(\);\s*\}/,
+      `Expected the tail in the arm that jumped to it, in:\n${output}`);
+    assert.strictEqual((output.match(/\bgoto\b/g) ?? []).length, 0, output);
   });
 
   // ======================================
