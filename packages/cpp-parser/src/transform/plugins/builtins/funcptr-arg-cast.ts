@@ -23,6 +23,7 @@
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
+import { findNodesByKind } from '../../../ast/visitor.js';
 import type {
   ASTNode,
   AssignExpr,
@@ -336,13 +337,58 @@ function buildTransformer(options: FuncPtrArgCastOptions): Transformer {
     return scopedLookup(functionSignatures, fn, enclosingSegments);
   };
 
+  /**
+   * `pfnChatCallback = CHAT_DeliverWhisper;` / `pfnDraw = Src::Draw;` - the same store
+   * into a LOCAL declared with a funcdef typedef. The slot holds callbacks that differ
+   * by design (ForEachClient's `void *` context, each form's own Draw over its derived
+   * control), so the cast is the original source's. Decided like a field slot.
+   */
+  const castIntoFuncdefSlot = (typedefName: string, value: Expression): Expression | null => {
+    const target = funcdefSignatures[typedefName];
+    if (target === undefined) return null;
+    const fnName = functionArgName(value);
+    if (!fnName) return null;
+    const actual = signatureFor(fnName, modelArgName(value));
+    if (actual === undefined || actual === target) return null;
+    if (arityOf(actual) !== arityOf(target)) { noteArityMismatch(typedefName, fnName, actual, target); return null; }
+    return castTo(typedefName, value);
+  };
+
+  return (root: ASTNode) => {
+    // Locals declared with a funcdef typedef, by name; a name declared with
+    // different types anywhere in the unit is left out.
+    const localFuncdef = new Map<string, string | null>();
+    for (const d of findNodesByKind(root, NodeKind.VariableDecl)) {
+      const v = d as unknown as { name: { name: string }; type: { kind: NodeKind; name?: { name?: string } } };
+      const t = v.type.kind === NodeKind.TypedefType ? v.type.name?.name : undefined;
+      const fd = t && funcdefSignatures[t] !== undefined ? t : null;
+      const seen = localFuncdef.get(v.name.name);
+      localFuncdef.set(v.name.name, seen === undefined ? fd : seen === fd ? fd : null);
+    }
+    return transformer(root, localFuncdef);
+  };
+
+  function transformer(root: ASTNode, localFuncdef: Map<string, string | null>): ASTNode {
   return createTransformer({
     visitNode(n: ASTNode): ASTNode | undefined {
+      if (n.kind === NodeKind.VariableDecl) {
+        const v = n as unknown as { name: { name: string }; initializer?: Expression | null };
+        const fd = localFuncdef.get(v.name.name);
+        if (!fd || !v.initializer) return undefined;
+        const cast = castIntoFuncdefSlot(fd, v.initializer);
+        return cast ? ({ ...n, initializer: cast } as ASTNode) : undefined;
+      }
       // `pTable[i].fpLinker = DATATBLS_LookupStringId;` — a function address
       // stored into a `void*` field. Same invariance rule as the argument case.
       if (n.kind === NodeKind.AssignExpr) {
         const assign = n as AssignExpr;
         if (assign.operator !== '=') return undefined;
+        if (assign.left.kind === NodeKind.Identifier) {
+          const fd = localFuncdef.get((assign.left as Identifier).name);
+          if (!fd) return undefined;
+          const cast = castIntoFuncdefSlot(fd, assign.right);
+          return cast ? updateNode(assign, { right: cast } as Partial<AssignExpr>) : undefined;
+        }
         if (assign.left.kind !== NodeKind.MemberExpr) return undefined;
         const member = (assign.left as MemberExpr).member;
         if (member.kind !== NodeKind.Identifier) return undefined;
@@ -495,7 +541,8 @@ function buildTransformer(options: FuncPtrArgCastOptions): Transformer {
       if (!changed) return undefined;
       return updateNode(call, { arguments: args } as Partial<CallExpr>);
     },
-  });
+  })(root);
+  }
 }
 
 import { createPlugin } from '../registry.js';
