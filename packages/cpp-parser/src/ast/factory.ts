@@ -255,6 +255,27 @@ export const Type = {
 // EXPRESSION FACTORY
 // ============================================
 
+/**
+ * The C spelling of decoded string text: quote, backslash and control characters
+ * escaped, anything else outside printable ASCII as a three-digit octal escape (an octal
+ * escape stops after three digits, so a following digit cannot extend it, unlike \x).
+ */
+export function escapeCString(text: string): string {
+  let out = '';
+  for (const ch of text) {
+    const c = ch.codePointAt(0)!;
+    if (ch === '"') out += '\\"';
+    else if (ch === '\\') out += '\\\\';
+    else if (ch === '\n') out += '\\n';
+    else if (ch === '\t') out += '\\t';
+    else if (ch === '\r') out += '\\r';
+    else if (c >= 0x20 && c < 0x7f) out += ch;
+    else if (c < 0x100) out += '\\' + c.toString(8).padStart(3, '0');
+    else out += ch;
+  }
+  return out;
+}
+
 export const Expr = {
   identifier(name: string): Identifier {
     return withDefaults({
@@ -305,13 +326,14 @@ export const Expr = {
     }) as FloatingLiteralExpr;
   },
 
+  /** A string literal of the decoded text `value`; `raw` is its escaped C spelling. */
   stringLiteral(value: string, prefix: string = ''): StringLiteralExpr {
     return withDefaults({
       kind: NodeKind.StringLiteral,
       value,
       prefix,
       isRaw: false,
-      raw: `${prefix}"${value}"`,
+      raw: `${prefix}"${escapeCString(value)}"`,
     }) as StringLiteralExpr;
   },
 

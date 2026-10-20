@@ -39,6 +39,24 @@ describe('callArgCastPlugin', () => {
     assert.ok(!out.includes('(int*)p'), out);
   });
 
+  it('a root-qualified parameter type is the same type as the bare spelling (C3-14)', () => {
+    // D2WINTEXTBOX_SetTextW's parameter is written ::D2WinTextBox * because the namespace
+    // D2Win::Src::D2WinTextBox hides the type; the global's table spelling is the bare one.
+    const out = run(`void f() { SetTextW(gpChatCommandsTextBox, 0); }`, {
+      functionParamTypes: { SetTextW: ['::D2WinTextBox *', 'int'] },
+      globalTypes: { gpChatCommandsTextBox: 'D2WinTextBox *' },
+    });
+    assert.ok(out.includes('SetTextW(gpChatCommandsTextBox, 0)'), out);
+  });
+
+  it('a root-qualified parameter type still casts a different type', () => {
+    const out = run(`void f() { SetTextW(gpOther, 0); }`, {
+      functionParamTypes: { SetTextW: ['::D2WinTextBox *', 'int'] },
+      globalTypes: { gpOther: 'D2WinButton *' },
+    });
+    assert.ok(out.includes('SetTextW((::D2WinTextBox*)gpOther, 0)'), out);
+  });
+
   it('leaves an integer-to-integer mismatch alone', () => {
     const out = run(`void f() { int n; Callee(n); }`, {
       functionParamTypes: { Callee: ['uint8_t'] },

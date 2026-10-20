@@ -60,6 +60,7 @@ import type {
   VariableDecl,
   MemberExpr,
   ParameterDecl,
+  Statement,
 } from '../../../ast/nodes.js';
 import { Expr } from '../../../ast/factory.js';
 import { parse } from '../../../parser/index.js';
@@ -70,6 +71,9 @@ import { findNodesByKind } from '../../../ast/visitor.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { createExprShape, type ExprShapeTables } from './expr-shape.js';
 import { calleeName, unwrapParens, type TypeShape } from './call-arg-cast.js';
+import { lowerFlagConditions, lowerNegTestConditions } from './flag-conditions.js';
+import { lowerCarryChains, lowerWholeConcat, lowerWholeZeroTest } from './carry-chains.js';
+import { lowerStringIntrinsics, localArraysOf } from './string-intrinsics.js';
 
 // ============================================
 // REPORTING
@@ -106,6 +110,12 @@ export interface PseudoOpLowerOptions extends PluginOptions {
   typedefTargets?: Record<string, string>;
   /** The function's stack frame: name, frame offset and size of each slot. */
   stackSlots?: ReadonlyArray<{ name: string; offset: number; size: number }>;
+  /** Aggregates that are unions: their members overlap. */
+  unionNames?: readonly string[];
+  /** Aggregate name -> field name -> byte offset. */
+  structFieldOffsets?: Record<string, Record<string, number>>;
+  /** Aggregate name -> size in bytes. */
+  aggregateSizes?: Record<string, number>;
 }
 
 // ============================================
@@ -158,7 +168,8 @@ const maskLiteral = (n: number) => `0x${((1n << BigInt(n * 8)) - 1n).toString(16
 // ============================================
 
 export type Operand =
-  | { kind: 'int'; width: number }
+  /** `signed`: the C type is a signed integer, so `x < 0` is a sign test. Unset when not known. */
+  | { kind: 'int'; width: number; signed?: boolean }
   | { kind: 'ptr' }
   | { kind: 'float'; width: number }
   | { kind: 'unknown'; why: string };
@@ -187,6 +198,12 @@ const FLOAT_WIDTHS: Record<string, number> = {
 /** Ghidra's 3-byte integer types: a cast to one truncates to 24 bits. */
 const THREE_BYTE_TYPES = new Set(['int3', 'uint3', 'undefined3']);
 
+/** Canonical bases of the SIGNED integer types (everything else in INT_WIDTHS is unsigned). */
+const SIGNED_BASES = new Set([
+  'char', 'signed char', 'short', 'int', 'long', 'long long', '__int64', 'LONGLONG',
+  'int3', 'int5', 'int6', 'int7', 'intptr_t', 'ssize_t', 'ptrdiff_t', 'HRESULT', 'LRESULT', 'LPARAM',
+]);
+
 function typeName(t: TypeNode): string | undefined {
   const n = (t as { name?: unknown }).name;
   if (typeof n === 'string') return n;
@@ -198,10 +215,36 @@ function classOfShape(s: TypeShape | null): Operand {
   if (!s) return { kind: 'unknown', why: 'type not known' };
   if (s.stars > 0) return { kind: 'ptr' };
   const iw = INT_WIDTHS[s.base];
-  if (iw !== undefined) return { kind: 'int', width: iw };
+  if (iw !== undefined) return { kind: 'int', width: iw, signed: SIGNED_BASES.has(s.base) };
   const fw = FLOAT_WIDTHS[s.base];
   if (fw !== undefined) return { kind: 'float', width: fw };
   return { kind: 'unknown', why: `type ${s.base} is not a scalar this pass knows` };
+}
+
+/**
+ * Signedness after integer promotion: anything narrower than int becomes a signed int.
+ * Undefined when the operand's own signedness is not known.
+ */
+function promotedSigned(o: { width: number; signed?: boolean }): boolean | undefined {
+  return o.width < 4 ? true : o.signed;
+}
+
+/**
+ * Signedness of `l op r` under the usual arithmetic conversions, for operands of at most
+ * 8 bytes: the wider type wins, and at equal width an unsigned operand makes it unsigned.
+ */
+function arithmeticSigned(l: { width: number; signed?: boolean }, r: { width: number; signed?: boolean }): boolean | undefined {
+  const lw = Math.max(4, l.width), rw = Math.max(4, r.width);
+  const ls = promotedSigned(l), rs = promotedSigned(r);
+  if (lw !== rw) {
+    const wide = lw > rw ? ls : rs;
+    const narrow = lw > rw ? rs : ls;
+    // A wider signed type holds every value of the narrower one, signed or not.
+    if (wide === true) return narrow === undefined ? undefined : true;
+    return wide;
+  }
+  if (ls === undefined || rs === undefined) return ls === false || rs === false ? false : undefined;
+  return ls && rs;
 }
 
 const ARITH = new Set(['+', '-', '*', '/', '%', '&', '|', '^']);
@@ -587,6 +630,9 @@ function lowerFlag(ctx: Ctx, op: 'CARRY' | 'SCARRY' | 'SBORROW', n: number, args
   for (const a of args) {
     if (!isPure(a)) throw new Unlowerable(`${op}${n} names an operand with a side effect twice`);
   }
+  // a - a never overflows: SBORROWn(a, a) is false whatever a is (CMP r, r; JL in
+  // NPCMENU_ConfigureMenuOption 004b64b6, where the compiler folded both operands to ESI).
+  if (op === 'SBORROW' && sameAst(args[0], args[1])) return Expr.boolLiteral(false);
   const U = uType(n);
   const S = sType(n);
   const a = raw(ctx, args[0], n, n);
@@ -1041,184 +1087,6 @@ function refCount(e: unknown, name: string): number {
   return n;
 }
 
-/**
- * CPU flags carried in variables to a shared conditional tail.
- *
- * Where several paths jump into one conditional branch, the decompiler keeps the x86
- * flags as variables and sets all three on each path (CallCollisionFunction 0x641c18):
- *
- *   bOF = SBORROW4(n, 1);  bSF = n + -1 < 0;  bZF = n == 1;  goto LAB_00641c18;
- *   ...
- *   LAB_00641c18: if (bZF || bOF != bSF) { ... }
- *
- * `ZF || OF != SF` is the definition of signed `<=` on the subtraction that set them
- * (`jle`); `!ZF && OF == SF` is `>`, `OF != SF` is `<`, `OF == SF` is `>=`. When every
- * assignment to the three names is such a triple and every other reference is one
- * condition of a single kind, each triple becomes `bCond = (intN)a <= (intN)b` and the
- * condition becomes `bCond`: the same boolean on every path, and no flag remains.
- */
-type FlagCond = 'le' | 'gt' | 'lt' | 'ge';
-const FLAG_COND_OP: Record<FlagCond, string> = { le: '<=', gt: '>', lt: '<', ge: '>=' };
-const FLAG_COND_NAME: Record<FlagCond, string> = {
-  le: 'bSignedLessOrEqual', gt: 'bSignedGreater', lt: 'bSignedLess', ge: 'bSignedGreaterOrEqual',
-};
-
-function lowerFlagTriples(body: ASTNode, ctx: Ctx): ASTNode {
-  const identName = (e: Expression | undefined): string | null => {
-    const x = e ? unwrapParens(e) : undefined;
-    return x && x.kind === NodeKind.Identifier ? (x as Identifier).name : null;
-  };
-  /** The statement under any case/default/label wrappers. */
-  const inner = (st: ASTNode | undefined): ASTNode | undefined => {
-    let x = st;
-    while (x && (x.kind === NodeKind.CaseStmt || x.kind === NodeKind.DefaultStmt || x.kind === NodeKind.LabelStmt)) {
-      x = (x as unknown as { statement: ASTNode }).statement;
-    }
-    return x;
-  };
-  /** `st` with the statement under its wrappers replaced. */
-  const rewrap = (st: ASTNode, replacement: ASTNode): ASTNode => {
-    if (st.kind === NodeKind.CaseStmt || st.kind === NodeKind.DefaultStmt || st.kind === NodeKind.LabelStmt) {
-      const w = st as unknown as { statement: ASTNode };
-      return { ...(st as object), statement: rewrap(w.statement, replacement) } as unknown as ASTNode;
-    }
-    return replacement;
-  };
-  /**
-   * A triple starting at stmts[i]: O = SBORROWn(a,b); S = sign(a - b); Z = a == b. The
-   * first may carry a case label or a goto label (paths enter there); the other two may
-   * not, or a path could enter between them.
-   */
-  const tripleAt = (stmts: ASTNode[], i: number) => {
-    const o = assignOf(inner(stmts[i]));
-    const sg = assignOf(stmts[i + 1]);
-    const z = assignOf(stmts[i + 2]);
-    if (!o || !sg || !z) return null;
-    const O = identName(o.left), S = identName(sg.left), Z = identName(z.left);
-    if (!O || !S || !Z || O === S || S === Z || O === Z) return null;
-    const sb = sborrowCall(o.right);
-    if (!sb || !isPure(sb.a) || !isPure(sb.b)) return null;
-    if (!isSignOfDifference(sg.right, sb.n, sb.a, sb.b, ctx)) return null;
-    const eq = unwrapParens(z.right);
-    if (eq.kind !== NodeKind.BinaryExpr || (eq as BinaryExpr).operator !== '==') return null;
-    if (!sameAst((eq as BinaryExpr).left, sb.a) || !sameAst((eq as BinaryExpr).right, sb.b)) return null;
-    return { O, S, Z, n: sb.n, a: sb.a, b: sb.b };
-  };
-  /** The condition kind `e` is over (O, S, Z), else null. */
-  const condOf = (e: Expression, O: string, S: string, Z: string): FlagCond | null => {
-    const x = unwrapParens(e);
-    const pairIs = (y: Expression, op: string) => {
-      const p = unwrapParens(y);
-      if (p.kind !== NodeKind.BinaryExpr || (p as BinaryExpr).operator !== op) return false;
-      const l = identName((p as BinaryExpr).left), r = identName((p as BinaryExpr).right);
-      return (l === O && r === S) || (l === S && r === O);
-    };
-    const isZ = (y: Expression) => identName(y) === Z;
-    const isNotZ = (y: Expression) => {
-      const p = unwrapParens(y);
-      return p.kind === NodeKind.UnaryExpr && (p as UnaryExpr).operator === '!' && identName((p as UnaryExpr).operand) === Z;
-    };
-    if (x.kind === NodeKind.BinaryExpr) {
-      const be = x as BinaryExpr;
-      if (be.operator === '||' && ((isZ(be.left) && pairIs(be.right, '!=')) || (isZ(be.right) && pairIs(be.left, '!=')))) return 'le';
-      if (be.operator === '&&' && ((isNotZ(be.left) && pairIs(be.right, '==')) || (isNotZ(be.right) && pairIs(be.left, '==')))) return 'gt';
-      if (pairIs(x, '!=')) return 'lt';
-      if (pairIs(x, '==')) return 'ge';
-    }
-    return null;
-  };
-
-  // 1. Every triple, grouped by its three names.
-  const groups = new Map<string, { O: string; S: string; Z: string; triples: number }>();
-  for (const cs of findNodesByKind(body, NodeKind.CompoundStmt)) {
-    const stmts = (cs as unknown as { statements: ASTNode[] }).statements;
-    for (let i = 0; i + 2 < stmts.length; i++) {
-      const t = tripleAt(stmts, i);
-      if (!t) continue;
-      const key = `${t.O}|${t.S}|${t.Z}`;
-      const g = groups.get(key) ?? { O: t.O, S: t.S, Z: t.Z, triples: 0 };
-      g.triples++;
-      groups.set(key, g);
-      i += 2;
-    }
-  }
-  if (groups.size === 0) return body;
-
-  let out = body;
-  const declared = new Set(findNodesByKind(body, NodeKind.VariableDecl).map(d => (d as VariableDecl).name.name));
-  for (const g of groups.values()) {
-    // 2. Every other reference is one condition, all of one kind.
-    let kind: FlagCond | null = null;
-    let condRefs = 0;
-    let mixed = false;
-    // `OF != SF` inside `ZF || OF != SF` is part of the `<=`, not a `<` of its own.
-    const inside = new Set<ASTNode>();
-    for (const be of findNodesByKind(out, NodeKind.BinaryExpr)) {
-      const k = condOf(be as Expression, g.O, g.S, g.Z);
-      if (k === 'le' || k === 'gt') {
-        for (const sub of findNodesByKind((be as BinaryExpr).left, NodeKind.BinaryExpr)) inside.add(sub);
-        for (const sub of findNodesByKind((be as BinaryExpr).right, NodeKind.BinaryExpr)) inside.add(sub);
-      }
-    }
-    for (const be of findNodesByKind(out, NodeKind.BinaryExpr)) {
-      if (inside.has(be)) continue;
-      const k = condOf(be as Expression, g.O, g.S, g.Z);
-      if (!k) continue;
-      if (kind && kind !== k) mixed = true;
-      kind = kind ?? k;
-      condRefs += refCount(be, g.O) + refCount(be, g.S) + refCount(be, g.Z);
-    }
-    if (!kind || mixed) continue;
-    const total = refCount(out, g.O) + refCount(out, g.S) + refCount(out, g.Z);
-    if (total !== g.triples * 3 + condRefs) continue;
-    let name = FLAG_COND_NAME[kind];
-    for (let k = 2; declared.has(name); k++) name = `${FLAG_COND_NAME[kind]}${k}`;
-    declared.add(name);
-    const cond = kind;
-    let declPlaced = false;
-    out = createTransformer({
-      visitCompoundStmt(node) {
-        const stmts = node.statements as ASTNode[];
-        const next: ASTNode[] = [];
-        let changed = false;
-        for (let i = 0; i < stmts.length; i++) {
-          const t = tripleAt(stmts, i);
-          if (t && t.O === g.O && t.S === g.S && t.Z === g.Z) {
-            const S = sType(t.n);
-            const assign = fromTemplate(`__R = (${S})__A ${FLAG_COND_OP[cond]} (${S})__B`,
-              { __R: Expr.identifier(name), __A: t.a, __B: t.b });
-            const first = inner(stmts[i])!;
-            next.push(rewrap(stmts[i], { ...(first as object), expression: assign } as unknown as ASTNode));
-            i += 2;
-            changed = true;
-            continue;
-          }
-          // The three flag declarations become the one condition's.
-          if (stmts[i].kind === NodeKind.DeclStmt) {
-            const ds = (stmts[i] as unknown as { declarations: VariableDecl[] }).declarations;
-            if (ds.length === 1 && !ds[0].initializer && [g.O, g.S, g.Z].includes(ds[0].name.name)) {
-              if (!declPlaced) {
-                declPlaced = true;
-                next.push({ ...(stmts[i] as object), declarations: [{ ...ds[0], name: { ...ds[0].name, name } }] } as unknown as ASTNode);
-              }
-              changed = true;
-              continue;
-            }
-          }
-          next.push(stmts[i]);
-        }
-        return changed ? ({ ...node, statements: next } as ASTNode) : undefined;
-      },
-      visitNode(node: ASTNode): ASTNode | undefined {
-        if (node.kind !== NodeKind.BinaryExpr) return undefined;
-        if (condOf(node as Expression, g.O, g.S, g.Z) !== cond) return undefined;
-        return { ...Expr.identifier(name), leadingTrivia: node.leadingTrivia, trailingTrivia: node.trailingTrivia } as ASTNode;
-      },
-    })(out);
-  }
-  return out;
-}
-
 /** Register inputs the decompiler names but no instruction in the function defines. */
 const REGISTER_INPUT = /^(in_[A-Z][A-Z0-9_]*|in_register_[0-9a-f]+)$/;
 
@@ -1393,7 +1261,11 @@ function createPseudoOpLowerTransformer(options: PseudoOpLowerOptions = {}): Tra
       switch (x.kind) {
         case NodeKind.IntegerLiteral: {
           const v = (x as IntegerLiteralExpr).value;
-          return { kind: 'int', width: v >= -(1n << 31n) && v < (1n << 32n) ? 4 : 8 };
+          const unsignedSuffix = /u/i.test(String((x as unknown as { suffix?: string }).suffix ?? ''));
+          return {
+            kind: 'int', width: v >= -(1n << 31n) && v < (1n << 32n) ? 4 : 8,
+            signed: unsignedSuffix ? false : v < (1n << 31n) ? true : undefined,
+          };
         }
         case NodeKind.CharLiteral:
         case NodeKind.BoolLiteral:
@@ -1407,7 +1279,7 @@ function createPseudoOpLowerTransformer(options: PseudoOpLowerOptions = {}): Tra
           if (u.operator === '!') return { kind: 'int', width: 1 };
           if (u.operator === '-' || u.operator === '~' || u.operator === '+') {
             const inner = classify(u.operand);
-            return inner.kind === 'int' ? { kind: 'int', width: Math.max(4, inner.width) } : inner;
+            return inner.kind === 'int' ? { kind: 'int', width: Math.max(4, inner.width), signed: promotedSigned(inner) } : inner;
           }
           break;
         }
@@ -1416,11 +1288,13 @@ function createPseudoOpLowerTransformer(options: PseudoOpLowerOptions = {}): Tra
           if (COMPARE.has(b.operator)) return { kind: 'int', width: 1 };
           const l = classify(b.left);
           if (SHIFT.has(b.operator)) {
-            return l.kind === 'int' ? { kind: 'int', width: Math.max(4, l.width) } : { kind: 'unknown', why: 'shift of a non-integer' };
+            return l.kind === 'int' ? { kind: 'int', width: Math.max(4, l.width), signed: promotedSigned(l) } : { kind: 'unknown', why: 'shift of a non-integer' };
           }
           if (ARITH.has(b.operator)) {
             const r = classify(b.right);
-            if (l.kind === 'int' && r.kind === 'int') return { kind: 'int', width: Math.max(4, l.width, r.width) };
+            if (l.kind === 'int' && r.kind === 'int') {
+              return { kind: 'int', width: Math.max(4, l.width, r.width), signed: arithmeticSigned(l, r) };
+            }
             if (l.kind === 'ptr' && r.kind === 'int' && (b.operator === '+' || b.operator === '-')) return l;
             if (r.kind === 'ptr' && l.kind === 'int' && b.operator === '+') return r;
             if (l.kind === 'ptr' && r.kind === 'ptr' && b.operator === '-') return { kind: 'int', width: 4 };
@@ -1465,6 +1339,10 @@ function createPseudoOpLowerTransformer(options: PseudoOpLowerOptions = {}): Tra
     };
     const shapeOf = (t: TypeNode) => shape(Expr.cast(t, Expr.identifier('__x')));
     const ctx: Ctx = { classify, isLocal: (n: string) => localTypes.has(n), stackSlots: options.stackSlots };
+    const unions = new Set(options.unionNames ?? []);
+    const carryDeps = {
+      shape: (e: Expression) => shape(e), isPure, locals: new Set(localTypes.keys()), isUnion: (n: string) => unions.has(n),
+    };
 
     // The fold has to see the SBORROW calls before they are lowered, and the `||`/`&&`
     // forms before their inner `!=` is folded on its own: the traversal is bottom-up, so
@@ -1472,6 +1350,10 @@ function createPseudoOpLowerTransformer(options: PseudoOpLowerOptions = {}): Tra
     const fold = (ops: readonly string[]) => createTransformer({
       visitBinaryExpr(node: BinaryExpr): ASTNode | undefined {
         if (!ops.includes(node.operator)) return undefined;
+        if (node.operator === '&&' || node.operator === '||') {
+          const whole = lowerWholeZeroTest(node, carryDeps);
+          if (whole) return { ...whole, leadingTrivia: node.leadingTrivia, trailingTrivia: node.trailingTrivia } as ASTNode;
+        }
         try {
           return foldSborrow(node, ctx) ?? undefined;
         } catch (e) {
@@ -1481,9 +1363,23 @@ function createPseudoOpLowerTransformer(options: PseudoOpLowerOptions = {}): Tra
       },
     });
     const lower = createTransformer({
+      // `!SBORROWn(a, a)` lowers to `!false`: say `true` (the traversal is bottom-up, so
+      // the operand is already lowered here).
+      visitUnaryExpr(node: UnaryExpr): ASTNode | undefined {
+        if (node.operator !== '!') return undefined;
+        const inner = unwrapParens(node.operand);
+        if (inner.kind !== NodeKind.BoolLiteral) return undefined;
+        const v = (inner as unknown as { value: boolean }).value;
+        return { ...Expr.boolLiteral(!v), leadingTrivia: node.leadingTrivia, trailingTrivia: node.trailingTrivia } as ASTNode;
+      },
       visitCallExpr(call: CallExpr): ASTNode | undefined {
         if (call.callee.kind !== NodeKind.Identifier) return undefined;
         const name = (call.callee as Identifier).name;
+        if (name === 'CONCAT44') {
+          // Both halves of one 8-byte object: that object's value, not a reassembly.
+          const whole = lowerWholeConcat(call, carryDeps);
+          if (whole) return { ...whole, leadingTrivia: call.leadingTrivia, trailingTrivia: call.trailingTrivia } as Expression;
+        }
         const renamed = RENAMES[name];
         if (renamed) return updateNode(call, { callee: Expr.identifier(renamed) } as Partial<CallExpr>);
         const std = STD_SPELLINGS[name];
@@ -1554,7 +1450,23 @@ function createPseudoOpLowerTransformer(options: PseudoOpLowerOptions = {}): Tra
         if (/^in_stack_[0-9a-f]+$/.test(name)) swiTemps.add(name);
       }
     }
-    const retired = lowerFlagTriples(retireIndeterminateRegisters(body, swiTemps), ctx);
+    // Flag conditions first: they need the SBORROW calls the exact lowering would expand.
+    const registersRetired = retireIndeterminateRegisters(body, swiTemps);
+    const retired = registersRetired.kind === NodeKind.CompoundStmt
+      ? (() => {
+        const list = (registersRetired as unknown as { statements: Statement[] }).statements;
+        const deps = { classify, isPure, locals: new Set(localTypes.keys()) };
+        const stringDeps = {
+          shape: (e: Expression) => shape(e), isPure, locals: deps.locals,
+          localArrays: localArraysOf(body),
+          stackSlots: options.stackSlots, fieldOffsets: options.structFieldOffsets,
+          structFields: options.structFields, aggregateSizes: options.aggregateSizes,
+        };
+        const next = lowerStringIntrinsics(
+          lowerCarryChains(lowerNegTestConditions(lowerFlagConditions(list, deps), deps), carryDeps), stringDeps);
+        return next === list ? registersRetired : ({ ...(registersRetired as object), statements: next } as unknown as ASTNode);
+      })()
+      : registersRetired;
     return dropUnusedDecls(statements(lower(deadHigh(fold(['==', '!='])(fold(['||', '&&'])(retired))))), swiTemps);
   };
 

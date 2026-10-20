@@ -492,7 +492,17 @@ export function isBareStringLiteral(e: Expression): boolean {
   return unwrapParens(e).kind === NodeKind.StringLiteral;
 }
 
-export const sameShape = (a: TypeShape, b: TypeShape) => a.stars === b.stars && a.base === b.base;
+/**
+ * A base with a leading `::` removed. `::D2WinTextBox` (written by shadowed-type-qualify
+ * where a namespace `D2Win::Src::D2WinTextBox` hides the type) and the table spelling
+ * `D2WinTextBox` name the same type: every type the generator emits is a root type
+ * (Ghidra types have categories, not namespaces), so a bare table spelling is never a
+ * namespaced type. Only comparisons use this; a cast is still spelled from its slot, so
+ * the qualifier stays wherever it is needed.
+ */
+const rootBase = (base: string) => (base.startsWith('::') ? base.slice(2) : base);
+
+export const sameShape = (a: TypeShape, b: TypeShape) => a.stars === b.stars && rootBase(a.base) === rootBase(b.base);
 export const isVoid = (s: TypeShape) => s.base === 'void';
 
 /**

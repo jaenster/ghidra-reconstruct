@@ -242,7 +242,8 @@ describe('pseudo-op-lower: SBORROW folded to a signed compare', native, () => {
 
   it('folds the constant form a + -c < 0 at 32 bits', () => {
     const out = transform('void fn(int32_t n) { if (SBORROW4(n, 5) != n + -5 < 0) { r = 1; } }');
-    assert.ok(out.includes('if ((int32_t)n < (int32_t)5)') || out.includes('if ((int32_t)n < 5)'), out);
+    // n is already int32_t: no cast is needed to read it signed.
+    assert.ok(out.includes('if (n < 5)'), out);
   });
 
   it('does not fold the shape where Ghidra substituted a value into the companion', () => {
@@ -572,8 +573,8 @@ LAB_00641c18:
   it('every triple becomes the signed <= it encodes, and no flag variable remains', () => {
     const out = transform(SRC);
     assert.ok(!/\bb[OSZ]F\b|SBORROW/.test(out), out);
-    assert.match(out, /bSignedLessOrEqual = \(int32_t\)n <= \(int32_t\)1;/);
-    assert.match(out, /LAB_00641c16:\s*bSignedLessOrEqual = \(int32_t\)nPosY <= \(int32_t\)iVar1;/);
+    assert.match(out, /bSignedLessOrEqual = n <= 1;/);
+    assert.match(out, /LAB_00641c16:\s*bSignedLessOrEqual = nPosY <= iVar1;/);
     assert.match(out, /if \(bSignedLessOrEqual\)/);
   });
   it('a flag read anywhere else leaves the triple alone', () => {

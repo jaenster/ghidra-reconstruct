@@ -222,6 +222,12 @@ export interface ExtractedGlobal {
   ifdef?: string;
   /** PLATE comment on the data symbol — how the name/type was established */
   comment?: string;
+  /**
+   * `LIBRARY::symbol` when the data is an import address table slot: a pointer whose
+   * reference is EXTERNAL (Ghidra's `->KERNEL32.DLL::SetEvent`). The loader writes the
+   * import's address there; the image holds only a hint/name RVA.
+   */
+  importSlot?: string;
 }
 
 /**
@@ -259,6 +265,8 @@ export interface AnalyzedDataSymbol extends ExtractedGlobal {
   ownerStructType?: string;
   /** If struct-colocated, the header file that owns it (e.g., "D2Game/GameData/D2GameStrc.h") */
   ownerStructHeader?: string;
+  /** An import slot (`importSlot`) no function's decompiled body names: not program data. */
+  importSlotUnnamed?: boolean;
 }
 
 /**

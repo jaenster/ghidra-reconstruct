@@ -192,7 +192,58 @@ export async function extractAllGlobals(
     // leave globals uncommented
   }
 
+  // Import address table slots. Same rule: a failure leaves the field unset, which is
+  // what an older snapshot looks like too.
+  try {
+    const slots = await extractImportSlots(connection);
+    for (const g of allGlobals) {
+      const slot = slots.get(normalizeAddress(g.address));
+      if (slot) g.importSlot = slot;
+    }
+  } catch (err) {
+    console.warn(`  Import slots unavailable: ${(err as Error).message}`);
+  }
+
   return allGlobals;
+}
+
+/**
+ * Every pointer whose reference is external: the IAT slots. Java, no imports (the
+ * script body runs inside GhidraScript.run()).
+ */
+const IMPORT_SLOT_SCRIPT = `
+ghidra.program.model.symbol.ReferenceIterator it = currentProgram.getReferenceManager().getExternalReferences();
+StringBuilder sb = new StringBuilder();
+while (it.hasNext()) {
+  ghidra.program.model.symbol.Reference r = it.next();
+  ghidra.program.model.listing.Data d = currentProgram.getListing().getDataAt(r.getFromAddress());
+  if (d == null || !d.isPointer()) continue;
+  ghidra.program.model.symbol.ExternalLocation loc = ((ghidra.program.model.symbol.ExternalReference) r).getExternalLocation();
+  sb.append(r.getFromAddress()).append('\\t').append(loc.getLibraryName()).append("::").append(loc.getLabel()).append('\\n');
+}
+println(sb.toString());
+`;
+
+/** Address -> `LIBRARY::symbol` for each import slot. */
+export async function extractImportSlots(connection: GhidraConnection): Promise<Map<string, string>> {
+  const result = await connection.sendCommand<{ success?: boolean; output?: string; error?: string }>(
+    'execute_script',
+    { language: 'java', code: IMPORT_SLOT_SCRIPT, scriptTimeout: 120, _commandTimeout: 180000 }
+  );
+  if (result.success === false || typeof result.output !== 'string') {
+    throw new Error(result.error ?? 'no output');
+  }
+  return parseImportSlots(result.output);
+}
+
+/** Parse the script's `address<TAB>LIB::symbol` rows. */
+export function parseImportSlots(output: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const line of output.split('\n')) {
+    const [addr, slot] = line.split('\t').map(c => c?.trim());
+    if (addr && slot && slot.includes('::')) out.set(normalizeAddress(addr), slot);
+  }
+  return out;
 }
 
 /**
