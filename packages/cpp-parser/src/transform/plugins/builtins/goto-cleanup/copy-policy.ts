@@ -380,7 +380,72 @@ function isCrossJumpTail(tail: Statement[], facts: CopyFacts): 'evidenced' | 'un
   if (caseOnlySite(facts)) return null;
   const evidence = (!facts.sunkJoin && instructionEvidence(facts.label)) || endIsShared(facts);
   if (!terminates(tail, facts) && !evidence) return null;
+  // The 2026-10-20 sample review of unproven copies (design 12, before step 11): a site
+  // that would reach the tail anyway by falling through - a guard skipping code, a search
+  // loop's exit, a case running on into the switch's follow - is a jump to a JOIN, which the
+  // source wrote once. Only a site that cannot fall into the tail is a cross-jump.
+  if (!evidence && someSiteFallsToLabel(facts)) return null;
   return evidence ? 'evidenced' : 'unproven';
+}
+
+/** Rebuild `root` with the object `from` replaced by `to`; untouched subtrees keep their identity. */
+function replaceNode<T>(root: T, from: object, to: object): T {
+  const go = (n: unknown): unknown => {
+    if (n === from) return to;
+    if (!n || typeof n !== 'object') return n;
+    if (Array.isArray(n)) {
+      let changed = false;
+      const out = n.map(x => { const y = go(x); if (y !== x) changed = true; return y; });
+      return changed ? out : n;
+    }
+    const o = n as Record<string, unknown>;
+    if (typeof o.kind !== 'string') return n;
+    let copy: Record<string, unknown> | null = null;
+    for (const k of Object.keys(o)) {
+      if (k === 'location' || k === 'leadingTrivia' || k === 'trailingTrivia') continue;
+      const v = o[k];
+      if (!v || typeof v !== 'object') continue;
+      const w = go(v);
+      if (w !== v) { copy ??= { ...o }; copy[k] = w; }
+    }
+    return copy ?? n;
+  };
+  return go(root) as T;
+}
+
+/**
+ * Some goto to the label, were it not there, would fall through to the label: with that goto
+ * replaced by a probe statement, the label is reachable from the probe in the region's graph.
+ */
+function someSiteFallsToLabel(facts: CopyFacts): boolean {
+  const region = facts.region, label = facts.label;
+  if (!region || !label || facts.sunkJoin) return false;
+  const gotos: GotoStmt[] = [];
+  for (const s of region) for (const n of traverseAST(s as ASTNode)) {
+    if (n.kind === NodeKind.GotoStmt && (n as GotoStmt).label.name === label) gotos.push(n as GotoStmt);
+  }
+  for (const g of gotos) {
+    const probe = { kind: NodeKind.ExprStmt, expression: { kind: NodeKind.Identifier, name: '__fall_probe__', leadingTrivia: [], trailingTrivia: [] }, leadingTrivia: [], trailingTrivia: [] } as unknown as Statement;
+    const r2 = replaceNode(region, g, probe);
+    let cfg;
+    try { cfg = buildCfg(r2, { noreturn: facts.noreturn, externalGotoCounts: countGotoTargets(r2) }); } catch { continue; }
+    const start = cfg.nodes.find(n => n.stmt === probe);
+    const target = cfg.nodes.find(n => n.stmt?.kind === NodeKind.LabelStmt && (n.stmt as unknown as { label: { name: string } }).label.name === label);
+    if (!start || !target) continue;
+    const seen = new Set<number>([start.id]);
+    const todo = [...start.succ];
+    while (todo.length) {
+      const id = todo.pop()!;
+      if (id === target.id) return true;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      // Through the other jumps to the label is not falling into it.
+      const st = cfg.nodes[id].stmt;
+      if (st?.kind === NodeKind.GotoStmt && (st as GotoStmt).label.name === label) continue;
+      todo.push(...cfg.nodes[id].succ);
+    }
+  }
+  return false;
 }
 
 /**

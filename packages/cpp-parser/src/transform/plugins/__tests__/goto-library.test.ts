@@ -74,3 +74,25 @@ describe('E1: the copy is the block the evidence describes', () => {
     assert.equal(copyIsFaithful(stmts('s->status = 0x49;'), facts('LAB_00429052', true)), 'E1');
   });
 });
+
+describe('E6 without evidence: a jump to a join is not a cross-jump (step-11 review)', () => {
+  const region = (code: string) => stmts(code);
+  const judge = (code: string, tail: string, label: string) => {
+    const r = region(code);
+    return copyIsFaithful(stmts(tail), {
+      sites: [{ prefix: 's:a' }], hasFallthrough: true, fallthroughPrefix: 's:b', noreturn: new Set<string>(), label, region: r, tailInRegion: stmts(tail),
+    });
+  };
+  it('refused: a search loop exit that falls into the same tail when nothing is found (SetPlayerRelationship 0055b3a0)', () => {
+    const code = `for (p = list; p != 0; p = p->next) { if (p->id == id) goto LAB_1; } p = 0; LAB_1: if (p != 0) p->rel = r; return;`;
+    assert.equal(judge(code, `if (p != 0) p->rel = r; return;`, 'LAB_1'), null);
+  });
+  it('refused: a guard that skips code falling on into the tail', () => {
+    const code = `if (u == 0) goto LAB_1; pkt.guid = u->guid; LAB_1: Send(pkt); return;`;
+    assert.equal(judge(code, `Send(pkt); return;`, 'LAB_1'), null);
+  });
+  it('kept: an arm end that cannot fall into the tail (the arm returns otherwise)', () => {
+    const code = `if (a) { x(); if (b) goto LAB_1; y(); return; } z(); LAB_1: Done(q); return;`;
+    assert.equal(judge(code, `Done(q); return;`, 'LAB_1'), 'E6');
+  });
+});
