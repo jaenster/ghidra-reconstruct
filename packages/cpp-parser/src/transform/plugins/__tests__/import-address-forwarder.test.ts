@@ -10,7 +10,7 @@ const t = (c: string) => emit(importAddressForwarderPlugin.createTransformer({})
 
 describe('import-address-forwarder', () => {
   it('respells only the address-taken use', () => {
-    const out = t('void f(LONG *p) { fnInterlockedCompareExchange pfn; pfn = InterlockedCompareExchange; InterlockedCompareExchange(p, 0, 0); s.InterlockedCompareExchange = 0; }');
+    const out = t('void f(LONG *p) { fnInterlockedCompareExchange pfn; pfn = InterlockedCompareExchange_exref; InterlockedCompareExchange(p, 0, 0); s.InterlockedCompareExchange = 0; }');
     assert.match(out, /pfn = d2_InterlockedCompareExchange;/);
     assert.match(out, /\n\s*InterlockedCompareExchange\(p, 0, 0\);/);
     assert.match(out, /s\.InterlockedCompareExchange = 0;/);

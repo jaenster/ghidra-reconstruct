@@ -48,7 +48,8 @@ function createImportAddressForwarderTransformer(): Transformer {
         return r ? ({ ...node, member: r } as ASTNode) : undefined;
       }
       if (node.kind !== NodeKind.Identifier) return undefined;
-      const fwd = IMPORT_ADDRESS_FORWARDERS[(node as Identifier).name];
+      // Ghidra spells a reference to the import's external symbol `<name>_exref`.
+      const fwd = IMPORT_ADDRESS_FORWARDERS[(node as Identifier).name.replace(/_exref$/, '')];
       return fwd ? ({ ...(node as Identifier), name: fwd } as ASTNode) : undefined;
     },
   });
