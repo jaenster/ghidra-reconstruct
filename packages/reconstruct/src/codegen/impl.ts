@@ -2588,7 +2588,11 @@ function transformDecompiledCode(
     // whenever the wrapper carries a signature; a caller that parses a bare body
     // without one still has to say so, or a fabricated bare `return;` at the tail
     // of a non-void function would drop the value the caller reads.
-    if (!sig) perPluginOptions['goto-cleanup'] = { enclosingReturnsVoid: enclosing?.returnsVoid === true };
+    // `functionAddress` only attributes the pass's reported events (GHIDRA_GOTO_REPORT_DIR).
+    perPluginOptions['goto-cleanup'] = {
+      ...(sig ? {} : { enclosingReturnsVoid: enclosing?.returnsVoid === true }),
+      functionAddress: funcAddress,
+    };
 
     // `x = nullptr` / `return nullptr` where an integer is meant does not compile
     // ("cannot convert nullptr_t to uint32_t"); `0` is valid for both pointers and

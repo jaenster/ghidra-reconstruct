@@ -31,6 +31,14 @@ export interface GotoCleanupStats {
    * deleting live code somewhere.
    */
   vetoedUnsafe: number;
+  /** Candidates the translation validator proved equivalent (validate.ts). */
+  cfVerified: number;
+  /**
+   * Candidates the validator could NOT prove. In log mode they are still applied - each one
+   * is a rewrite whose correctness nothing has established, reported with its function.
+   * In enforce mode they are dropped and the goto stays.
+   */
+  cfVerifyFail: number;
   total: number;
 }
 

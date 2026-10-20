@@ -44,6 +44,8 @@ import type { TransformPlugin } from '../../types.js';
 import type { RequiredGotoCleanupOptions } from './types.js';
 import { DEFAULT_MAX_NESTING, MAX_FIXPOINT_PASSES, MAX_WHOLE_AST_PASSES } from './types.js';
 import { processCompound } from './process.js';
+import { setExactGotoCounts } from './validate.js';
+import { setCurrentGotoFunction } from './report.js';
 import { countGotosInStatements } from './analysis.js';
 import {
   setGlobalGotoCounts,
@@ -59,6 +61,8 @@ export { getGotoCleanupStats, resetGotoCleanupStats } from './stats.js';
 // Diagnostics for a non-zero `vetoedUnsafe`: which handler produced an unsafe candidate,
 // and which reachable keys or edges it would have dropped.
 export { setGotoCleanupVetoReporter } from './process.js';
+export { setGotoValidatorMode, gotoValidatorMode, type GotoValidatorMode } from './validate.js';
+export { setCurrentGotoFunction } from './report.js';
 
 /**
  * Pre-compute global goto counts for every function body in the AST.
@@ -95,6 +99,7 @@ function preComputeGlobalGotoCounts(root: ASTNode, enclosingReturnsVoid: boolean
   }
 
   setGlobalGotoCounts(allCounts);
+  setExactGotoCounts(new Map(allCounts));
 }
 
 /** True for `void` (and only `void` — not `void*`, not a typedef of unknown shape). */
@@ -168,6 +173,8 @@ function markFallthroughReturns(stmt: Statement, reachesEnd: boolean): void {
 
 function createGotoCleanupTransformer(pluginOptions?: Record<string, unknown>) {
   const enclosingReturnsVoid = pluginOptions?.enclosingReturnsVoid as boolean | undefined;
+  // Only for attributing reported events (report.ts); never changes the output.
+  const functionAddress = (pluginOptions?.functionAddress as string | undefined) ?? null;
   const options: RequiredGotoCleanupOptions = {
     maxNestingDepth: (pluginOptions?.maxNestingDepth as number) ?? DEFAULT_MAX_NESTING,
     noreturnFunctions: (pluginOptions?.noreturnFunctions as string[]) ?? [],
@@ -207,6 +214,7 @@ function createGotoCleanupTransformer(pluginOptions?: Record<string, unknown>) {
   // Finally sweep each function body for orphaned gotos (targeting labels that no longer
   // exist) and remove them.
   return (node: ASTNode): ASTNode => {
+    setCurrentGotoFunction(functionAddress);
     let result = node;
     for (let round = 0; round < MAX_WHOLE_AST_PASSES; round++) {
       preComputeGlobalGotoCounts(result, enclosingReturnsVoid);
@@ -215,6 +223,7 @@ function createGotoCleanupTransformer(pluginOptions?: Record<string, unknown>) {
         next = baseTransformer(result);
       } finally {
         clearGlobalGotoCounts();
+        setExactGotoCounts(null);
       }
       if (next === result) break;
       result = next;

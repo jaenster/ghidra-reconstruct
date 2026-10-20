@@ -35,6 +35,8 @@ import { buildGeneralizedCascade, handleUnconditionalGoto, handleLoopBodyGoto } 
 import { processCleanupTailInlining } from './tail-inline.js';
 import { processNestedTailInlining, getGlobalGotoCounts } from './nested-inline.js';
 import { preservesReachableWork } from '../../../cfg/index.js';
+import { validateCandidate, noteRewrite, type ValidateContext } from './validate.js';
+import { DEFAULT_NORETURN_FUNCTIONS } from './types.js';
 
 /** Set by the caller to see which handlers are being vetoed and why. */
 let onVeto: ((handler: string, lost: string[]) => void) | null = null;
@@ -53,14 +55,21 @@ function accept(
   before: Statement[],
   candidate: Statement[] | null,
   handler: string,
+  vctx: ValidateContext,
 ): Statement[] | null {
   if (!candidate) return null;
   const opts = { externalGotoCounts: getGlobalGotoCounts() };
   const check = preservesReachableWork(before, candidate, opts);
-  if (check.ok) return candidate;
-  recordStat('vetoedUnsafe');
-  onVeto?.(handler, [...check.lostKeys, ...check.lostEdges]);
-  return null;
+  if (!check.ok) {
+    recordStat('vetoedUnsafe');
+    onVeto?.(handler, [...check.lostKeys, ...check.lostEdges]);
+    return null;
+  }
+  // The proof of equivalence (validate.ts). In log mode a refusal is reported and the
+  // candidate kept; in enforce mode it is dropped and the goto stays.
+  if (!validateCandidate(before, candidate, handler, vctx)) return null;
+  noteRewrite(before, candidate);
+  return candidate;
 }
 
 /**
@@ -78,20 +87,24 @@ export function processCompound(
 ): Statement[] | null {
   const labels = analyzeLabels(stmts, options);
   const gotoCounts = countGotosInStatements(stmts);
+  const vctx: ValidateContext = {
+    followIsExit: fallthroughMeansReturn,
+    noreturn: new Set([...DEFAULT_NORETURN_FUNCTIONS, ...options.noreturnFunctions]),
+  };
 
   if (labels.size > 0) {
     // Switch goto-to-break: replace goto-to-label-after-switch with break
-    const switchResult = accept(stmts, handleSwitchGotoToBreak(stmts, labels, gotoCounts), 'switchGotoToBreak');
+    const switchResult = accept(stmts, handleSwitchGotoToBreak(stmts, labels, gotoCounts), 'switchGotoToBreak', vctx);
     if (switchResult) { recordStat('switchGotoToBreak'); return switchResult; }
   }
 
   // Switch case-to-case: inline goto switchD_xxx_caseD_N within the same switch
-  const switchCaseResult = accept(stmts, handleSwitchCaseGoto(stmts, gotoCounts), 'switchCaseGoto');
+  const switchCaseResult = accept(stmts, handleSwitchCaseGoto(stmts, gotoCounts), 'switchCaseGoto', vctx);
   if (switchCaseResult) { recordStat('switchCaseGoto'); return switchCaseResult; }
 
   if (labels.size > 0) {
     // Backward goto → loop: converts backward gotos (including nested) to loops
-    const backwardResult = accept(stmts, processBackwardGotos(stmts, labels, gotoCounts), 'backwardToLoop');
+    const backwardResult = accept(stmts, processBackwardGotos(stmts, labels, gotoCounts), 'backwardToLoop', vctx);
     if (backwardResult) { recordStat('backwardToLoop'); return backwardResult; }
 
     // Forward goto analysis and cascading
@@ -166,7 +179,7 @@ export function processCompound(
       }
 
       const ctx = freshGotos[0].context;
-      const checked = accept(current, result, ctx);
+      const checked = accept(current, result, ctx, vctx);
       if (checked) {
         if (ctx === 'unconditional') recordStat('unconditionalGoto');
         else if (ctx === 'loop-body') recordStat('loopBodyGoto');
@@ -183,6 +196,7 @@ export function processCompound(
       stmts,
       processCleanupTailInlining(stmts, labels, gotoCounts, options, fallthroughMeansReturn),
       'cleanupTailInline',
+      vctx,
     );
     if (inlineResult) { recordStat('cleanupTailInline'); return inlineResult; }
   }
@@ -193,6 +207,7 @@ export function processCompound(
     stmts,
     processNestedTailInlining(stmts, labels, gotoCounts, options, fallthroughMeansReturn),
     'nestedTailInline',
+    vctx,
   );
   if (nestedResult) { recordStat('nestedTailInline'); return nestedResult; }
 

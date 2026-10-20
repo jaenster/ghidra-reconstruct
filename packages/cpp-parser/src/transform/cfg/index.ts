@@ -7,3 +7,5 @@ export {
   spanIsEnterable,
 } from './labels.js';
 export type { Cfg, CfgNode, CfgNodeRole, BuildCfgOptions } from './types.js';
+export { buildBcfg, resolver, Unsupported, type Bcfg, type BNode, type BcfgOptions } from './bcfg.js';
+export { isUnfolding, compareBcfg, type ValidationResult } from './equivalence.js';
