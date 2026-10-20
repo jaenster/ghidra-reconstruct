@@ -1864,6 +1864,24 @@ export function getAggregateTypeNames(): Set<string> | undefined {
 }
 
 /**
+ * Does a declared type name an AGGREGATE object (a struct or union, by name or
+ * through a typedef chain)? Answered from the data types, not from the spelling.
+ *
+ * `isStructType` guesses from the spelling and says no to every platform type,
+ * because a platform name is usually a scalar or a pointer (`HANDLE`, `DWORD`).
+ * Some are not: `LARGE_INTEGER` is a typedef
+ * of the union `_LARGE_INTEGER`, and `static LARGE_INTEGER g = 0;` has no
+ * conversion at all. The typedef walk in `setAggregateTypeNames` already knows
+ * which platform names end at an aggregate, so this asks it as well.
+ */
+export function isAggregateObjectType(type: string): boolean {
+  const t = type.trim();
+  if (!t || /[*&\[]/.test(t)) return false;
+  const base = t.replace(/\b(const|volatile|struct|union)\b/g, '').trim();
+  return aggregateTypeNames?.has(base) ?? false;
+}
+
+/**
  * SDK functions whose declared return type is `void *`.
  *
  * Ghidra has no `Function` record for `VirtualAlloc`, `HeapAlloc` or `malloc` -

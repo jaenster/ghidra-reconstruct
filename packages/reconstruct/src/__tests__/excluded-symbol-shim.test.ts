@@ -30,6 +30,8 @@ describe('excluded-namespace symbol declarations', () => {
       // 006b42f0, 006b59a0), 'DirectDrawEnumerateA' is not a member of '_Wrappers' (006b4c90).
       'DirectDrawCreate', '_Wrappers::DirectDrawEnumerateA',
       '_SmackOpen_12', '_BinkCopyToBuffer_28',
+      // Referenced only from DATA: the pfnInit slots of __lc_category (006f3168).
+      '___init_ctype', '___init_monetary', '___init_numeric', '___init_time',
       // No GLIDEDLL_* here: every one of them is a DATA symbol in Ghidra (an
       // import slot filled by GetProcAddress), so globals.h owns the
       // declaration and the shim must not also claim the name.

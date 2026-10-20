@@ -492,6 +492,20 @@ const MSVC_RUNTIME_DECLS: ExcludedSymbolDecl[] = [
   // __stdcall_noclobber
   { emitted: '__NLG_Notify', real: '_NLG_Notify', source: 'ghidra',
     decl: 'extern "C" void __NLG_Notify(unsigned long nCode, uint32_t pTarget, void* pFrame);' },
+  // The locale category initialisers __lc_category[] (gaCrtLocaleCategoryTable,
+  // 006f3168) points at. No body calls them; the table's `pfnInit` slots do, so
+  // they are referenced from DATA only, and globals.cpp names them as `&___init_*`.
+  // Ghidra (v1234), VS2005 CRT, __cdecl, each: int (threadlocinfo *_LocInfo)
+  // ___init_ctype @ 0069e425, ___init_monetary @ 0069e161, ___init_numeric @ 0069dedd,
+  // ___init_time @ 0069ddf7. `threadlocinfo` is the CRT's own type (corecrt.h), so Win32 only.
+  { emitted: '___init_ctype', real: '__init_ctype', source: 'ghidra',
+    decl: 'extern "C" int ___init_ctype(threadlocinfo* _LocInfo);', win32Only: true },
+  { emitted: '___init_monetary', real: '__init_monetary', source: 'ghidra',
+    decl: 'extern "C" int ___init_monetary(threadlocinfo* _LocInfo);', win32Only: true },
+  { emitted: '___init_numeric', real: '__init_numeric', source: 'ghidra',
+    decl: 'extern "C" int ___init_numeric(threadlocinfo* _LocInfo);', win32Only: true },
+  { emitted: '___init_time', real: '__init_time', source: 'ghidra',
+    decl: 'extern "C" int ___init_time(threadlocinfo* _LocInfo);', win32Only: true },
   // __ValidateEH3RN @ 00698170 — Ghidra: undefined4 (void*)
   { emitted: '__ValidateEH3RN', real: '_ValidateEH3RN', source: 'ghidra',
     decl: 'extern "C" uint32_t __ValidateEH3RN(void* pRegistration);' },

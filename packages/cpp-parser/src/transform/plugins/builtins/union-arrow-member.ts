@@ -19,18 +19,49 @@
  *
  * Nothing happens when the object is not a union by value, when no member
  * fits, or when more than one does - a guess would read the wrong struct.
+ *
+ * The same missing member shows up on the other side of an assignment. A
+ * union-typed field is stored from a scalar whose declared type is not the
+ * union - `SMsgDispatchMessage` (00420b00) builds a `D2UIMouseMsgStrc` with
+ *
+ *   hMsgWnd.uLParam = dwLParam;           // uLParam: union { int32_t nLParam;
+ *                                         //   D2UIMsgMousePosStrc sMousePos; }
+ *                                         // dwLParam: uint32_t (the prototype)
+ *
+ * The decompiler typed its own copy of the parameter as the union, so it
+ * printed a whole-union copy; the emitted prototype is the database's
+ * `undefined4`, and C++ has no conversion from `uint32_t` to the union. The
+ * store the machine did is four bytes into the union's storage, so the faithful
+ * spelling names the one member that holds those four bytes as that kind of
+ * value:
+ *
+ *   U = E   →   U.m = E   when U is a union by value and E is not, and m is
+ *                         the one member of E's exact type, else the one
+ *                         integer member exactly as wide as an integer E
+ *
+ * Integer to integer of one width (signedness aside) carries every bit; nothing
+ * crosses between integer, floating and aggregate members, and two candidates
+ * leave the store alone.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
-  ASTNode, FunctionDecl, MemberExpr, ParameterDecl, VariableDecl, TypeNode,
+  ASTNode, AssignExpr, FunctionDecl, MemberExpr, ParameterDecl, VariableDecl, TypeNode,
 } from '../../../ast/nodes.js';
 import { findNodesByKind } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { Expr } from '../../../ast/factory.js';
 import { createExprShape } from './expr-shape.js';
-import { shapeOfSpelling, type TypedefResolver } from './call-arg-cast.js';
+import { shapeOfSpelling, type TypeShape, type TypedefResolver } from './call-arg-cast.js';
+
+/** Byte width of each canonical integer base (`canonicalBase` spellings). */
+const INTEGER_WIDTH: Record<string, number> = {
+  'char': 1, 'signed char': 1, 'unsigned char': 1,
+  'short': 2, 'unsigned short': 2, 'wchar_t': 2,
+  'int': 4, 'unsigned int': 4, 'long': 4, 'unsigned long': 4,
+  'long long': 8, 'unsigned long long': 8,
+};
 
 export interface UnionArrowMemberOptions extends PluginOptions {
   /** Names of the aggregates that are unions. */
@@ -76,6 +107,26 @@ function createUnionArrowMemberTransformer(options: UnionArrowMemberOptions = {}
     return hits.length === 1 ? hits[0] : undefined;
   };
 
+  /**
+   * The member of `union` a store of a `value`-shaped scalar lands in, if the
+   * answer is unique: the exact type first, then a same-width integer.
+   */
+  const memberForStore = (union: string, value: TypeShape): string | undefined => {
+    const fields = structFields[union];
+    if (!fields) return undefined;
+    const members = Object.entries(fields)
+      .map(([name, spelling]) => ({ name, shape: shapeOfSpelling(spelling, resolve) }))
+      .filter((m): m is { name: string; shape: TypeShape } => !!m.shape);
+    const exact = members.filter(m => m.shape.base === value.base && m.shape.stars === value.stars);
+    if (exact.length === 1) return exact[0].name;
+    if (exact.length > 1) return undefined;
+    if (value.stars !== 0) return undefined;
+    const width = INTEGER_WIDTH[value.base];
+    if (width === undefined) return undefined;
+    const sameWidth = members.filter(m => m.shape.stars === 0 && INTEGER_WIDTH[m.shape.base] === width);
+    return sameWidth.length === 1 ? sameWidth[0].name : undefined;
+  };
+
   return createTransformer({
     visitFunctionDecl(node: FunctionDecl): ASTNode | undefined {
       if (!node.body) return undefined;
@@ -93,6 +144,20 @@ function createUnionArrowMemberTransformer(options: UnionArrowMemberOptions = {}
 
       const sub = createTransformer({
         visitNode(n: ASTNode): ASTNode | undefined {
+          if (n.kind === NodeKind.AssignExpr) {
+            const a = n as AssignExpr;
+            if (a.operator !== '=') return undefined;
+            const target = shape(a.left);
+            if (!target || target.stars !== 0 || !unions.has(target.base)) return undefined;
+            const value = shape(a.right);
+            if (!value || (value.stars === 0 && (unions.has(value.base) || aggregateMembers[value.base]))) {
+              return undefined;
+            }
+            const via = memberForStore(target.base, value);
+            if (!via) return undefined;
+            const rewritten: AssignExpr = { ...a, left: Expr.member(a.left, via, false) };
+            return rewritten;
+          }
           if (n.kind !== NodeKind.MemberExpr) return undefined;
           const m = n as MemberExpr;
           if (!m.isArrow) return undefined;
@@ -116,7 +181,7 @@ export const unionArrowMemberPlugin: TransformPlugin = {
   id: 'union-arrow-member',
   name: 'Union-Arrow Member',
   description:
-    'Restore the union member Ghidra drops when it prints `U->f` on a union of pointers held by value',
+    'Restore the union member Ghidra drops: `U->f` on a union of pointers held by value, and a scalar stored into a union',
   version: '1.0.0',
   defaultEnabled: true,
   // After struct-field (50), before bitfield-alias-lower (55), so the passes
