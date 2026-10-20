@@ -19,11 +19,12 @@ import type {
 } from '../../../../ast/nodes.js';
 import { updateNode } from '../../../transformer.js';
 import { traverseAST } from '../../../../ast/visitor.js';
-import { MAX_INLINE_TAIL_SIZE } from './types.js';
+import { DEFAULT_NORETURN_FUNCTIONS } from './types.js';
+import { announceCopy, gotoSitesFor, judgeCopy, labelFallthrough } from './copy-policy.js';
 import { deepCloneStatements, isSimpleLabelName } from './helpers.js';
 import { countGotosToLabel } from './cross-scope.js';
-import { inlineGotoInNestedStmt } from './tail-inline.js';
-import { holdsLabelOrCase, workNodes } from './copy-safety.js';
+import { inlineGotoInNestedStmt, canFallThrough } from './tail-inline.js';
+import { holdsLabelOrCase } from './copy-safety.js';
 
 /**
  * Check if a label name is a switch-case label (switchD_xxx_caseD_N).
@@ -178,7 +179,7 @@ function processSingleSwitch(sw: SwitchStmt): SwitchStmt | null {
     if (!extracted) continue;
 
     const { tail, endsWithBreak, endsWithReturn } = extracted;
-    if (tail.length === 0 || workNodes(tail) > MAX_INLINE_TAIL_SIZE) continue;
+    if (tail.length === 0) continue;
     // Never copy a label or a case label (copy-safety.ts).
     if (holdsLabelOrCase(tail)) continue;
 
@@ -193,6 +194,16 @@ function processSingleSwitch(sw: SwitchStmt): SwitchStmt | null {
     }
     const hasEscapingGoto = [...tailGotos].some(g => !tailLabels.has(g));
     if (hasEscapingGoto) continue;
+
+    // The evidence that the source wrote this case tail at every site (copy-policy.ts).
+    const lf = labelFallthrough(bodyStmts, labelName, canFallThrough);
+    const cls = judgeCopy(tail, {
+      sites: gotoSitesFor(bodyStmts, labelName),
+      hasFallthrough: lf.hasFallthrough,
+      fallthroughPrefix: lf.prefix,
+      noreturn: DEFAULT_NORETURN_FUNCTIONS,
+    });
+    if (!cls) continue;
 
     // Inline all gotos to this label in the switch body
     let newStmts: Statement[] = [];
@@ -225,6 +236,7 @@ function processSingleSwitch(sw: SwitchStmt): SwitchStmt | null {
     newStmts = stripLabelFromSwitchBody(newStmts, labelName);
 
     const newBody = updateNode(sw.body as CompoundStmt, { statements: newStmts });
+    announceCopy('switchCaseGoto', labelName, cls, tail, switchGotoCount);
     return updateNode(sw, { body: newBody });
   }
 

@@ -36,6 +36,7 @@ import { processCleanupTailInlining } from './tail-inline.js';
 import { processNestedTailInlining, getGlobalGotoCounts } from './nested-inline.js';
 import { preservesReachableWork } from '../../../cfg/index.js';
 import { validateCandidate, noteRewrite, type ValidateContext } from './validate.js';
+import { takeCopies, commitCopies } from './copy-policy.js';
 import { DEFAULT_NORETURN_FUNCTIONS } from './types.js';
 
 /** Set by the caller to see which handlers are being vetoed and why. */
@@ -57,8 +58,10 @@ function accept(
   handler: string,
   vctx: ValidateContext,
 ): Statement[] | null {
+  // The copies the handler announced belong to this candidate only.
+  const copies = takeCopies();
   if (!candidate) return null;
-  const opts = { externalGotoCounts: getGlobalGotoCounts() };
+  const opts = { externalGotoCounts: getGlobalGotoCounts(), noreturn: vctx.noreturn };
   const check = preservesReachableWork(before, candidate, opts);
   if (!check.ok) {
     recordStat('vetoedUnsafe');
@@ -69,6 +72,7 @@ function accept(
   // candidate kept; in enforce mode it is dropped and the goto stays.
   if (!validateCandidate(before, candidate, handler, vctx)) return null;
   noteRewrite(before, candidate);
+  commitCopies(copies);
   return candidate;
 }
 

@@ -88,7 +88,9 @@ export function validateCandidate(before: Statement[], candidate: Statement[], h
   const mode = gotoValidatorMode();
   if (mode === 'off') return true;
   const counts = exactGotoCounts() ?? countGotosInStatements(before);
-  const r = isUnfolding(before, candidate, { externalGotoCounts: counts, followIsExit: ctx.followIsExit, noreturn: ctx.noreturn });
+  const r = isUnfolding(before, candidate, {
+    externalGotoCounts: counts, followIsExit: ctx.followIsExit, noreturn: ctx.noreturn, haltException: true,
+  });
   if (r.ok) {
     recordStat('cfVerified');
     if (gotoReportPairs()) {

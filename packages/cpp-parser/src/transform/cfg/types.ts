@@ -62,4 +62,10 @@ export interface BuildCfgOptions {
    * region is treated as externally targeted, which is the safe answer.
    */
   externalGotoCounts?: Map<string, number> | null;
+  /**
+   * Calls that do not return. Such a call's only successor is the exit - the same belief the
+   * goto handlers act on when they copy a halt tail. Without it a copied halt reads as
+   * falling into whatever follows its copy.
+   */
+  noreturn?: ReadonlySet<string>;
 }

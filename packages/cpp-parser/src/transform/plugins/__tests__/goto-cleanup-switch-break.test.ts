@@ -8,12 +8,13 @@
  * runs the whole default pipeline rather than the goto plugin alone.
  */
 
-import { describe, it } from 'node:test';
+import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
 import { parse } from '../../../parser/index.js';
 import { emit } from '../../../emit/index.js';
 import type { AnyNode } from '../../../ast/nodes.js';
 import { allBuiltinPlugins } from '../index.js';
+import { setCopyPolicyMode } from '../builtins/goto-cleanup/copy-policy.js';
 
 function runPipeline(code: string): string {
   let ast: AnyNode = parse(code) as AnyNode;
@@ -62,6 +63,10 @@ LAB_2046:
 `;
 
 describe('goto cleanup — a case tail whose break binds to the switch', () => {
+  // Mechanics of the break-binding rule, on tails with no copy evidence: policy in log mode.
+  before(() => setCopyPolicyMode('log'));
+  after(() => setCopyPolicyMode(null));
+
   it('keeps the goto rather than copying the break out of the switch', () => {
     const out = runPipeline(withTail('break;'));
     assert.ok(out.includes('goto switchD_caseD_192;'), `goto eliminated:\n${out}`);

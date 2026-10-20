@@ -82,6 +82,7 @@ interface Builder {
   regionCaseEntries: number[];
   external: number;
   exit: number;
+  noreturn: ReadonlySet<string> | null;
 }
 
 function addNode(b: Builder, stmt: Statement | null, role: CfgNode['role']): number {
@@ -246,7 +247,7 @@ function emitStmt(b: Builder, s: Statement, next: number, ctx: Ctx): number {
 
     default: {
       const id = addNode(b, s, 'stmt');
-      b.nodes[id].succ = [next];
+      b.nodes[id].succ = [b.noreturn && isNoreturnCall(s, b.noreturn) ? b.exit : next];
       return id;
     }
   }
@@ -260,6 +261,7 @@ export function buildCfg(stmts: Statement[], options: BuildCfgOptions = {}): Cfg
     regionCaseEntries: [],
     external: -1,
     exit: -1,
+    noreturn: options.noreturn ?? null,
   };
   const entry = addNode(b, null, 'entry');
   b.exit = addNode(b, null, 'exit');
@@ -285,4 +287,15 @@ export function buildCfg(stmts: Statement[], options: BuildCfgOptions = {}): Cfg
     if (!outer || (outer.get(name) ?? 0) > (inside.get(name) ?? 0)) extraEntries.push(id);
   }
   return { nodes: b.nodes, entry, exit: b.exit, external: b.external, extraEntries };
+}
+
+function isNoreturnCall(s: Statement, names: ReadonlySet<string>): boolean {
+  if (s.kind !== NodeKind.ExprStmt) return false;
+  let e = (s as unknown as { expression: { kind: string; callee?: unknown; expression?: unknown } }).expression;
+  while (e.kind === NodeKind.ParenExpr) e = e.expression as typeof e;
+  if (e.kind !== NodeKind.CallExpr) return false;
+  const c = e.callee as { kind: string; name?: unknown };
+  const name = c.kind === NodeKind.Identifier ? c.name as string
+    : c.kind === NodeKind.QualifiedId ? ((c.name as { name?: string })?.name ?? '') : '';
+  return names.has(name);
 }

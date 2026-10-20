@@ -605,8 +605,10 @@ export function isHaltStep(s: Statement | null, noreturn?: ReadonlySet<string>):
   if (!s || s.kind !== NodeKind.ExprStmt) return false;
   let e = stripParens((s as unknown as { expression: Expression }).expression);
   if (e.kind === NodeKind.AssignExpr) {
-    const right = stripParens((e as unknown as { right: Expression }).right);
+    let right = stripParens((e as unknown as { right: Expression }).right);
     if (isConstantExpr(right)) return true;
+    // `p = (char*)GetInstructionPointer()` - Ghidra casts it to whatever the slot is typed.
+    while (right.kind === NodeKind.CStyleCastExpr) right = stripParens((right as unknown as { expression: Expression }).expression);
     e = right;
   }
   const name = calleeName(e);

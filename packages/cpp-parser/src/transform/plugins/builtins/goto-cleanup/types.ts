@@ -43,6 +43,15 @@ export interface GotoCleanupStats {
   passLimitHit: number;
   /** Gotos left pointing at a label no handler kept. Must be 0. */
   orphanGoto: number;
+  /** Copies kept, per evidence class (copy-policy.ts); copyNone only in log mode. */
+  copyE3: number;
+  copyE4: number;
+  copyE6: number;
+  copyNone: number;
+  /** Work nodes those copies added. */
+  copiedWorkNodes: number;
+  /** Blocks moved to their only goto site (no copy: nothing else reached them). */
+  movedBlocks: number;
   total: number;
 }
 
@@ -126,8 +135,6 @@ export const MAX_FIXPOINT_PASSES = 50;
  * the walk lets those be structured too, instead of leaving a goto behind.
  */
 export const MAX_WHOLE_AST_PASSES = 4;
-
-export const MAX_INLINE_TAIL_SIZE = 20;
 
 export const DEFAULT_NORETURN_FUNCTIONS = new Set([
   'exit', '_exit', '_Exit', 'abort', '__halt', 'halt_baddata',

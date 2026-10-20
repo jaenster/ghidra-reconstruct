@@ -4,14 +4,21 @@
  * Every test verifies the exact output, not just the absence of gotos.
  */
 
-import { describe, it } from 'node:test';
+import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
 import { parse } from '../../../parser/index.js';
 import { emit } from '../../../emit/index.js';
 import type { AnyNode } from '../../../ast/nodes.js';
 import { gotoCleanupPlugin, getGotoCleanupStats, resetGotoCleanupStats } from '../builtins/goto-cleanup/index.js';
+import { setCopyPolicyMode } from '../builtins/goto-cleanup/copy-policy.js';
 
 describe('gotoCleanupPlugin', () => {
+  // These tests pin the handlers' MECHANICS on synthetic tails that carry no evidence the
+  // source wrote them twice, so the copy policy runs in log mode here (copies are made and
+  // classified). The policy itself is tested in copy-policy.test.ts.
+  before(() => setCopyPolicyMode('log'));
+  after(() => setCopyPolicyMode(null));
+
   function transformCode(code: string): string {
     const ast = parse(code);
     const transformer = gotoCleanupPlugin.createTransformer();

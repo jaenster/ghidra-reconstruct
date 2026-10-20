@@ -80,6 +80,7 @@ describe('goto-cleanup keeps every jump target (v1131 defects)', () => {
         externalGotoCounts: countGotoTargets(before),
         followIsExit: false,
         noreturn: DEFAULT_NORETURN_FUNCTIONS,
+        haltException: true,
       });
       assert.ok(proof.ok, proof.reason);
     });

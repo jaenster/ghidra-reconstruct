@@ -24,10 +24,11 @@ import type {
 import { updateNode } from '../../../transformer.js';
 import { traverseAST } from '../../../../ast/visitor.js';
 import type { LabelInfo, RequiredGotoCleanupOptions } from './types.js';
-import { MAX_INLINE_TAIL_SIZE } from './types.js';
+import { DEFAULT_NORETURN_FUNCTIONS } from './types.js';
+import { announceCopy, gotoSitesFor, judgeCopy, labelFallthrough } from './copy-policy.js';
 import { discoverNestedLabels, countGotosInStatements } from './analysis.js';
 import { deepCloneStatements } from './helpers.js';
-import { holdsLabelOrCase, workNodes } from './copy-safety.js';
+import { holdsLabelOrCase } from './copy-safety.js';
 import { inlineGotoInNestedStmt, createReturnStmt, canFallThrough } from './tail-inline.js';
 
 // ============================================
@@ -291,9 +292,9 @@ export function processNestedTailInlining(
     }
 
     const tail = info.tailStatements;
-    // Size in work nodes, recursively; and never a tail holding a label or case label
-    // (copy-safety.ts) - copying one is where every `__dupN` label came from.
-    if (tail.length === 0 || workNodes(tail) > MAX_INLINE_TAIL_SIZE) continue;
+    // Never a tail holding a label or case label (copy-safety.ts) - copying one is where
+    // every `__dupN` label came from. Size is the copy policy's business (copy-policy.ts).
+    if (tail.length === 0) continue;
     if (holdsLabelOrCase(tail)) continue;
 
     // Safety: only return/noreturn/cleanup-fallthrough tails for nested labels
@@ -340,6 +341,16 @@ export function processNestedTailInlining(
     const hasEscapingGoto = [...tailGotos].some(g => !tailLabels.has(g));
     if (hasEscapingGoto) continue;
 
+    // The evidence that the source wrote this tail at every site (copy-policy.ts).
+    const lf = labelFallthrough(stmts, name, canFallThrough);
+    const cls = judgeCopy(effectiveTail, {
+      sites: gotoSitesFor(stmts, name),
+      hasFallthrough: lf.hasFallthrough,
+      fallthroughPrefix: lf.prefix,
+      noreturn: new Set([...DEFAULT_NORETURN_FUNCTIONS, ...options.noreturnFunctions]),
+    });
+    if (!cls) continue;
+
     // Inline all gotos to this label across all scopes.
     // When the return is fabricated for a cleanup-fallthrough label, pass the flag so
     // loop bodies are not entered: inlining a fabricated return inside a loop would
@@ -376,6 +387,7 @@ export function processNestedTailInlining(
       finalStmts.push(result.stmt);
     }
 
+    announceCopy('nestedTailInline', name, cls, effectiveTail, localGotos);
     return finalStmts;
   }
 

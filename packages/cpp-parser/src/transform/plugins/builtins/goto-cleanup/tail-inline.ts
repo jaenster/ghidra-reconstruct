@@ -24,10 +24,11 @@ import type {
 import { updateNode } from '../../../transformer.js';
 import { traverseAST } from '../../../../ast/visitor.js';
 import type { LabelInfo, LabelKind, RequiredGotoCleanupOptions } from './types.js';
-import { MAX_INLINE_TAIL_SIZE } from './types.js';
+import { DEFAULT_NORETURN_FUNCTIONS } from './types.js';
+import { announceCopy, gotoSitesFor, judgeCopy, labelFallthrough } from './copy-policy.js';
 import { deepCloneStatement, deepCloneStatements } from './helpers.js';
 import { countGotosInStatements, classifyLabelTail } from './analysis.js';
-import { cutAtCase, holdsLabelOrCase, workNodes } from './copy-safety.js';
+import { cutAtCase, holdsLabelOrCase } from './copy-safety.js';
 
 /**
  * Check if a statement can fall through to the next one
@@ -69,7 +70,7 @@ export function createReturnStmt(anchor: Statement): Statement {
  * Inline short cleanup/error tails at every goto site.
  *
  * Only inlines when:
- * - Tail is short (≤ MAX_INLINE_TAIL_SIZE work nodes, counted recursively)
+ * - the copy policy finds evidence the source wrote the tail at each site (copy-policy.ts)
  * - Tail ends with return or noreturn call
  * - Tail contains no gotos or labels itself
  */
@@ -96,7 +97,7 @@ export function processCleanupTailInlining(
 
     // Check tail is inlineable: short, ends with return/noreturn, and holds no label or
     // case label (a copied label is a second definition; a copied case a second arm).
-    if (tail.length === 0 || workNodes(tail) > MAX_INLINE_TAIL_SIZE) continue;
+    if (tail.length === 0) continue;
     if (holdsLabelOrCase(tail)) continue;
     if (kind !== 'exit-return' && kind !== 'cleanup-return'
         && kind !== 'exit-noreturn' && kind !== 'cleanup-fallthrough') continue;
@@ -127,9 +128,27 @@ export function processCleanupTailInlining(
     const hasEscapingGoto = [...tailGotos].some(g => !tailLabels.has(g));
     if (hasEscapingGoto) continue;
 
+    // The evidence that the source wrote this tail at every site (copy-policy.ts). The
+    // copy judged is the one nested sites receive: with the fabricated `return` when the
+    // tail's fall-off is the void function's end.
+    const effective = kind === 'cleanup-fallthrough' && !noImplicitReturn
+      ? [...tail, createReturnStmt(tail[tail.length - 1])]
+      : tail;
+    const lf = labelFallthrough(stmts, labelInfo.name, canFallThrough);
+    const cls = judgeCopy(effective, {
+      sites: gotoSitesFor(stmts, labelInfo.name),
+      hasFallthrough: lf.hasFallthrough,
+      fallthroughPrefix: lf.prefix,
+      noreturn: new Set([...DEFAULT_NORETURN_FUNCTIONS, ...options.noreturnFunctions]),
+    });
+    if (!cls) continue;
+
     // Try to inline all gotos to this label
     const result = inlineAllGotosToLabel(stmts, labelInfo.name, tail, labelInfo.index, kind, noImplicitReturn);
-    if (result) return result;
+    if (result) {
+      announceCopy('cleanupTailInline', labelInfo.name, cls, effective, totalGotos);
+      return result;
+    }
   }
 
   return null;
