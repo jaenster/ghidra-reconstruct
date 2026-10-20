@@ -610,6 +610,10 @@ export {
   WARNING_TEMPLATES, TERMINAL_CALLEES, type WarningFact, type WarningTemplate, type WarningClass,
 } from './builtins/ghidra-warning-facts.js';
 export { frameGroupLocalsPlugin, frameTypeLayout, type FrameGroupLocalsOptions } from './builtins/frame-group-locals.js';
+import { stridedAccessPlugin } from './builtins/strided-access.js';
+import { reusedParamSlotPlugin } from './builtins/reused-param-slot.js';
+export { reusedParamSlotPlugin, splitReusedParameterSlots, type ReusedParamSlotOptions } from './builtins/reused-param-slot.js';
+export { stridedAccessPlugin, rewriteStridedAccesses, type StridedAccessOptions, type StructLayoutField } from './builtins/strided-access.js';
 import type { TransformPlugin } from './types.js';
 
 /**
@@ -619,6 +623,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   indirectCallCleanupPlugin, // Cleanup: strip jumptable warnings, clean fn-ptr casts (priority 5)
   ...ghidraCleanupPlugins,
   biasedTableIndexPlugin,      // Correctness: *(byte*)((int)A + C + i) below the next table → Next[i - bias] (priority 12)
+  reusedParamSlotPlugin,       // Correctness: a dead parameter slot reused for a function pointer -> a funcdef local (priority 14)
   threeByteAccessPlugin,       // Correctness: *(uint3 *)p → d2_load24(p), exactly three bytes (priority 14)
   typeNormalizePlugin,         // Cleanup: uint → uint32_t, undefined4 → auto/uint32_t (priority 15)
   pointerCastNormalizePlugin, // Cleanup: (int)&expr → (uintptr_t)&expr (priority 16)
@@ -673,6 +678,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   funcPtrLiteralPlugin,        // Cleanup: 0x5011f0 → FunctionName (priority 95)
   globalAddressLiteralPlugin,  // Correctness: a folded global address (incl. ~&g) → the symbol (priority 68)
   addressRunBoundPlugin,  // Correctness: a loop bound that is another global's address → a distance from the one being walked (priority 69)
+  stridedAccessPlugin,    // Correctness: a strength-reduced byte offset / n*sizeof(T) interior constant -> T[i].f (priority 69.5)
   prngTransformPlugin,        // Pattern detection: PRNG (priority 80)
   prngTempCollapsePlugin,     // Cleanup: collapse PRNG temp variables (priority 85)
   voidReturnCleanupPlugin,    // Cleanup: trailing return; in void functions (priority 90)

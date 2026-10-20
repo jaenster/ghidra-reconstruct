@@ -672,6 +672,14 @@ export interface FuncPtrArgCastTables {
   }>>;
   /** Funcdef typedef name → its normalized signature key */
   funcdefSignatures: Record<string, string>;
+  /** Funcdef name -> Ghidra's calling convention. */
+  funcdefConventions?: Record<string, string>;
+  /** Function name (qualified and bare) -> Ghidra's calling convention. */
+  functionGhidraConventions?: Record<string, string>;
+  /** Function name (qualified and bare) -> the funcdefs it is stored as elsewhere. */
+  functionStoredAs?: Record<string, string[]>;
+  /** auto_proto `dt_xxxxxxxx` -> the one named funcdef with the same contract. */
+  autoProtoAliases?: Record<string, string>;
   /** Function name (bare AND qualified) → its own normalized signature key */
   functionSignatures: Record<string, string>;
   /** Data-symbol names — a name that denotes data is never cast as a function */
@@ -772,6 +780,8 @@ export interface FuncPtrArgCastTables {
   structFieldOffsets?: Record<string, Record<string, number>>;
   /** Aggregate name -> size in bytes. */
   aggregateSizes?: Record<string, number>;
+  /** Aggregate name -> every field's offset, size and Ghidra type, in offset order. */
+  structLayouts?: Record<string, Array<{ name: string; offset: number; size: number; type: string; bitSize?: number }>>;
   /**
    * Funcdef name → the return and parameter spellings the funcdef declares. A
    * call made THROUGH a function-pointer field or variable has no callee name
@@ -2410,6 +2420,26 @@ function transformDecompiledCode(
         rootQualifiedTypedefs: context.funcPtrArgCasts.rootQualifiedTypedefs,
         enclosingVarTypes,
       };
+      perPluginOptions['reused-param-slot'] = {
+        functionSignatures: context.funcPtrArgCasts.functionSignatures,
+        functionConventions: context.funcPtrArgCasts.functionGhidraConventions,
+        funcdefSignatures: context.funcPtrArgCasts.funcdefSignatures,
+        funcdefConventions: context.funcPtrArgCasts.funcdefConventions,
+        functionStoredAs: context.funcPtrArgCasts.functionStoredAs,
+      };
+      perPluginOptions['strided-access'] = {
+        structLayouts: context.funcPtrArgCasts.structLayouts,
+        aggregateSizes: context.funcPtrArgCasts.aggregateSizes,
+        aggregateMembers: context.funcPtrArgCasts.aggregateMembers,
+        unionNames: context.funcPtrArgCasts.unionNames,
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        structFields: context.funcPtrArgCasts.structFields,
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        typedefTargets: context.funcPtrArgCasts.typedefTargets,
+        funcdefNames: Object.keys(context.funcPtrArgCasts.funcdefSignatures ?? {}),
+        enclosingVarTypes,
+      };
       perPluginOptions['union-arrow-member'] = {
         unionNames: context.funcPtrArgCasts.unionNames,
         aggregateMembers: context.funcPtrArgCasts.aggregateMembers,
@@ -2454,7 +2484,9 @@ function transformDecompiledCode(
       };
       perPluginOptions['call-site-override-cast'] = {
         // Only funcdefs the run can declare: the cast spells the typedef by name.
-        overrides: (enclosing?.callSiteOverrides ?? []).filter(o => o.funcdef in (context.funcPtrArgCasts.funcdefSignatures ?? {})),
+        overrides: (enclosing?.callSiteOverrides ?? [])
+          .filter(o => o.funcdef in (context.funcPtrArgCasts.funcdefSignatures ?? {}))
+          .map(o => ({ ...o, funcdef: context.funcPtrArgCasts!.autoProtoAliases?.[o.funcdef] ?? o.funcdef })),
         usedTypedefs: overrideCastTypedefs,
         functionNames: declaredCalleeNames(context.funcPtrArgCasts.functionNames),
         globalTypes: context.funcPtrArgCasts.globalTypes,

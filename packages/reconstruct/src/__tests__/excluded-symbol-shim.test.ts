@@ -32,6 +32,8 @@ describe('excluded-namespace symbol declarations', () => {
       '_SmackOpen_12', '_BinkCopyToBuffer_28',
       // Referenced only from DATA: the pfnInit slots of __lc_category (006f3168).
       '___init_ctype', '___init_monetary', '___init_numeric', '___init_time',
+      // The SEH3 personality, for when 006878a0 is compiler::_except_handler3.
+      '_except_handler3',
       // No GLIDEDLL_* here: every one of them is a DATA symbol in Ghidra (an
       // import slot filled by GetProcAddress), so globals.h owns the
       // declaration and the shim must not also claim the name.

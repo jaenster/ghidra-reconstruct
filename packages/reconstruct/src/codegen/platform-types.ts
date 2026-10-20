@@ -1966,6 +1966,25 @@ export function oddWidthTypesSpelled(typeSpellings: Iterable<string | undefined>
  * a comment or a string is not a use. The platform header's own typedef of a name is
  * not a use of it; anything else there (a row typedef over `byte`) is.
  */
+/**
+ * A placeholder's spelling used as a NAME, not as the type: a member access (`p->code`,
+ * `t.code`), or a declarator (`char code[4];`, `int code;` - an identifier right before
+ * it, and `[`, `;`, `=`, `,` or `:` after). `ItemTbls.h` and `PlrSkills.h` have fields
+ * called `code`; they are no reason to keep `typedef int code(...)`.
+ */
+function isNameNotType(tokens: ReadonlyArray<{ kind: TokenKind; text: string }>, i: number): boolean {
+  const prev = tokens[i - 1];
+  const next = tokens[i + 1];
+  if (prev && (prev.kind === TokenKind.Dot || prev.kind === TokenKind.Arrow)) return true;
+  const declaratorEnd = next && (next.kind === TokenKind.LeftBracket || next.kind === TokenKind.Semicolon
+    || next.kind === TokenKind.Equal || next.kind === TokenKind.Comma || next.text === ':');
+  const afterType = prev && (prev.kind === TokenKind.Identifier || prev.kind === TokenKind.Star || isTypeKeyword(prev.text));
+  return !!(declaratorEnd && afterType);
+}
+
+const TYPE_KEYWORDS = new Set(['int', 'char', 'short', 'long', 'unsigned', 'signed', 'float', 'double', 'bool', 'void', 'auto']);
+function isTypeKeyword(text: string): boolean { return TYPE_KEYWORDS.has(text); }
+
 export function placeholderTypesUsedIn(
   files: Iterable<{ path: string; content: string }>,
   platformPath = 'd2_platform.h',
@@ -1982,9 +2001,13 @@ export function placeholderTypesUsedIn(
     }
     const isPlatform = f.path === platformPath;
     const seen = new Map<string, number>();
-    for (const t of tokens) {
+    for (let i = 0; i < tokens.length; i++) {
+      const t = tokens[i];
       if (t.kind !== TokenKind.Identifier || !names.has(t.text)) continue;
-      if (!isPlatform) { used.add(t.text); continue; }
+      if (!isPlatform) {
+        if (!isNameNotType(tokens, i)) used.add(t.text);
+        continue;
+      }
       seen.set(t.text, (seen.get(t.text) ?? 0) + 1);
     }
     // Each placeholder is DEFINED exactly once in the platform header.

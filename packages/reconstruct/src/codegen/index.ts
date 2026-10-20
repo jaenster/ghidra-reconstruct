@@ -61,6 +61,7 @@ import {
   ADDRESS_LITERAL_COMPLEMENT_FLOOR,
   type FuncPtrTarget,
 } from '@ghidra-mcp/cpp-parser';
+import { Lexer, TokenKind } from '@ghidra-mcp/cpp-parser';
 
 import { buildVtableDispatch } from './vtable-dispatch.js';
 import { fieldDeclSpelling, emittedMemberNames, generateHeader, generateFunctionDeclaration, setKnownFuncDefs, setConstructorBearingStructs, sigType, getIntegerConversionType, emittedFunctionName, returnSigType } from './header.js';
@@ -4659,6 +4660,103 @@ export function resolveProgramNamespaces(
   });
 }
 
+/**
+ * Function -> the funcdefs it is STORED AS somewhere in the program: assigned to a
+ * local Ghidra types `Fn *`, or held in a global table whose element type is `Fn *`.
+ *
+ * Several funcdefs can share one signature and convention (`fpGameMechanicQuest`,
+ * `fpTimerFunction`, `fnD2DropHandlerFn3` and `PFN_ObjectOperateCallback` are all
+ * `void __fastcall (D2GameStrc *, D2UnitStrc *)`), so a signature alone does not say
+ * which type a function pointer had. Where the same function is stored under one of
+ * them elsewhere, that is the program's own answer.
+ *
+ * Read off the token stream of the bodies that declare such a local - `name = A::B::F ;`
+ * - and off the initialized data of the tables; never a text match.
+ */
+export function buildFunctionStoredAs(
+  functions: ReadonlyArray<{ decompiled?: string; localVariables?: ReadonlyArray<{ name: string; dataType?: string }> }>,
+  globals: ReadonlyArray<{ dataType?: string; suggestedType?: string; initializedData?: import('../types.js').DataValue }>,
+  funcdefNames: ReadonlySet<string>,
+): Record<string, string[]> {
+  const out = new Map<string, Set<string>>();
+  const record = (fn: string, funcdef: string) => {
+    for (const key of [fn, fn.slice(fn.lastIndexOf('::') + 2)]) {
+      let set = out.get(key);
+      if (!set) { set = new Set(); out.set(key, set); }
+      set.add(funcdef);
+    }
+  };
+  const funcdefOf = (spelling: string | undefined): string | undefined => {
+    const m = /^\s*([A-Za-z_]\w*)\s*\*\s*$/.exec(spelling ?? '');
+    return m && funcdefNames.has(m[1]) ? m[1] : undefined;
+  };
+  for (const f of functions) {
+    if (!f.decompiled) continue;
+    const locals = new Map<string, string>();
+    for (const v of f.localVariables ?? []) {
+      const fd = funcdefOf(v.dataType);
+      if (fd) locals.set(v.name, fd);
+    }
+    if (locals.size === 0) continue;
+    let tokens;
+    try { tokens = new Lexer(f.decompiled, { preserveTrivia: false }).tokenize(); } catch { continue; }
+    for (let i = 0; i + 3 < tokens.length; i++) {
+      if (tokens[i].kind !== TokenKind.Identifier || tokens[i + 1].kind !== TokenKind.Equal) continue;
+      const fd = locals.get(tokens[i].text);
+      if (!fd) continue;
+      const parts: string[] = [];
+      let j = i + 2;
+      while (tokens[j]?.kind === TokenKind.Identifier) {
+        parts.push(tokens[j].text);
+        if (tokens[j + 1]?.kind === TokenKind.ColonColon) j += 2; else { j++; break; }
+      }
+      if (parts.length > 0 && tokens[j]?.kind === TokenKind.Semicolon) record(parts.join('::'), fd);
+    }
+  }
+  for (const g of globals) {
+    const m = /^\s*([A-Za-z_]\w*)\s*\*\s*\[\d+\]\s*$/.exec(g.suggestedType || g.dataType || '');
+    if (!m || !funcdefNames.has(m[1]) || g.initializedData?.kind !== 'array') continue;
+    for (const e of g.initializedData.elements ?? []) {
+      if (e.kind === 'pointer' && e.value && /^[A-Za-z_]/.test(e.value) && !/^(?:DAT|LAB|PTR)_/.test(e.value)) record(e.value, m[1]);
+    }
+  }
+  const result: Record<string, string[]> = {};
+  for (const [k, v] of out) result[k] = [...v].sort();
+  return result;
+}
+
+/**
+ * `/auto_proto/dt_xxxxxxxx` -> the one named funcdef with the same contract.
+ *
+ * A call-site override points at an anonymous funcdef Ghidra made for that one CALL
+ * (`dt_eb7b2831` at LoadDataForGame 0044da0c). Where a named funcdef already states
+ * exactly that contract - return, parameters, calling convention, varargs - the cast is
+ * spelled with the name the program uses for it (`fpServerInitFunctions`). Two or more
+ * named candidates leave the anonymous one: a signature does not say which it was.
+ */
+export function autoProtoAliases(
+  funcDefs: ReadonlyArray<{ name: string; callingConvention?: string; hasVarArgs?: boolean }>,
+  funcdefSignatures: Record<string, string>,
+): Record<string, string> {
+  const AUTO = /^dt_[0-9a-f]{8}$/;
+  const contract = (fd: { name: string; callingConvention?: string; hasVarArgs?: boolean }) =>
+    `${fd.callingConvention ?? ''}|${fd.hasVarArgs ? 'va' : ''}|${funcdefSignatures[fd.name] ?? '?'}`;
+  const named = new Map<string, string[]>();
+  for (const fd of funcDefs) {
+    if (!fd.name || AUTO.test(fd.name) || funcdefSignatures[fd.name] === undefined) continue;
+    const key = contract(fd);
+    const list = named.get(key);
+    if (list) list.push(fd.name); else named.set(key, [fd.name]);
+  }
+  const out: Record<string, string> = {};
+  for (const fd of funcDefs) {
+    if (!fd.name || !AUTO.test(fd.name)) continue;
+    const hits = named.get(contract(fd)) ?? [];
+    if (hits.length === 1) out[fd.name] = hits[0];
+  }
+  return out;
+}
+
 export function buildFuncPtrArgCastTables(
   functions: ExtractedFunction[],
   globals: AnalyzedDataSymbol[],
@@ -4667,7 +4765,12 @@ export function buildFuncPtrArgCastTables(
   strings: ReadonlyArray<ExtractedString> = [],
 ): FuncPtrArgCastTables {
   const funcdefSignatures: Record<string, string> = {};
+  // Each funcdef's calling convention as GHIDRA records it. Not the emitted keyword:
+  // the emitter spells `__fastcall` as nothing, and a pass comparing contracts must
+  // still tell `__fastcall` from `__cdecl`.
+  const funcdefConventions: Record<string, string> = {};
   for (const fd of funcDefs) {
+    funcdefConventions[fd.name] = fd.callingConvention ?? '';
     funcdefSignatures[fd.name] = signatureKey(
       fd.returnType,
       [...(fd.parameters ?? [])].sort((a, b) => a.ordinal - b.ordinal).map(p => p.dataType),
@@ -4700,6 +4803,9 @@ export function buildFuncPtrArgCastTables(
   const rootQualifiedTypedefs = Object.keys(funcdefSignatures).filter(n => bareFunctionNames.has(n));
 
   const functionSignatures: Record<string, string> = {};
+  // Ghidra's calling convention per function, keyed like functionSignatures.
+  const functionGhidraConventions: Record<string, string> = {};
+  const ambiguousConv = new Set<string>();
   const paramFuncdefs: Record<string, Record<number, string>> = {};
   const ambiguousSig = new Set<string>();
   const ambiguousSlots = new Set<string>();
@@ -4716,6 +4822,11 @@ export function buildFuncPtrArgCastTables(
     indexBothSpellings(
       functionSignatures, ambiguousSig, qualified, fn.name,
       signature, sameString,
+      normalizeQualifiedReference(qualified),
+    );
+    indexBothSpellings(
+      functionGhidraConventions, ambiguousConv, qualified, fn.name,
+      fn.callingConvention ?? '', sameString,
       normalizeQualifiedReference(qualified),
     );
     // A name that is not an identifier (`~EditBoxImplementation`) reaches an
@@ -4842,13 +4953,24 @@ export function buildFuncPtrArgCastTables(
   // through a member (`p->szName + 1`) is, for the passes that compare addresses.
   const structFieldOffsets: Record<string, Record<string, number>> = {};
   const aggregateSizes: Record<string, number> = {};
+  // The whole layout, for a pass that has to say which field a byte offset lands
+  // in (`strided-access`): offset, size and Ghidra's type of every member.
+  const structLayouts: Record<string, Array<{ name: string; offset: number; size: number; type: string; bitSize?: number }>> = {};
   for (const dt of dataTypes) {
     if ((dt.kind !== 'STRUCTURE' && dt.kind !== 'UNION') || !dt.name || !('fields' in dt)) continue;
     if (typeof dt.size === 'number') aggregateSizes[dt.name] = dt.size;
     const into: Record<string, number> = structFieldOffsets[dt.name] ?? (structFieldOffsets[dt.name] = {});
+    const layout: Array<{ name: string; offset: number; size: number; type: string; bitSize?: number }> = [];
     for (const f of (dt as import('../types.js').ExtractedStruct).fields ?? []) {
       if (f.name && typeof f.offset === 'number') into[f.name] = f.offset;
+      if (typeof f.offset !== 'number' || typeof f.size !== 'number' || !f.dataType) continue;
+      const bits = (f as { bitSize?: number }).bitSize;
+      layout.push({
+        name: f.name ?? '', offset: f.offset, size: f.size, type: f.dataType,
+        ...(bits !== undefined || f.dataType.includes(':') ? { bitSize: bits ?? 0 } : {}),
+      });
     }
+    structLayouts[dt.name] = layout;
   }
 
   // Which fields hold a FUNCTION POINTER, and which funcdef declares its
@@ -5234,7 +5356,11 @@ export function buildFuncPtrArgCastTables(
     zeroArityCallbackSlots: WIN32_ZERO_ARITY_CALLBACK_SLOTS,
     zeroArityCallbackCasts: WIN32_ZERO_ARITY_CALLBACK_CASTS,
     funcdefSignatures,
+    funcdefConventions,
     functionSignatures,
+    functionGhidraConventions,
+    functionStoredAs: buildFunctionStoredAs(functions, globals, new Set(Object.keys(funcdefSignatures))),
+    autoProtoAliases: autoProtoAliases(funcDefs, funcdefSignatures),
     variableNames,
     voidPointerFunctions: [...voidPointerFunctions],
     rootQualifiedTypedefs,
@@ -5267,6 +5393,7 @@ export function buildFuncPtrArgCastTables(
     unionNames,
     structFieldOffsets,
     aggregateSizes,
+    structLayouts,
     funcdefDecls,
     structFieldFuncdefs,
     fieldFuncdefs,

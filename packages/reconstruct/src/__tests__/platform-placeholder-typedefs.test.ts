@@ -21,6 +21,22 @@ describe('placeholderTypesUsedIn', () => {
   });
 });
 
+describe('placeholderTypesUsedIn: names are not types', () => {
+  it('a member or a declarator called `code` is not a use of the code type', () => {
+    const used = placeholderTypesUsedIn([
+      { path: 'a.h', content: 'struct T { char code[4]; int code2; };\nstruct U { int code; };' },
+      { path: 'b.cpp', content: 'int f(T *p, U u) { return p->code[0] + u.code; }\nconst char *s = "code";' },
+    ]);
+    assert.ok(!used.has('code'), [...used].join(','));
+  });
+
+  it('a cast or a declaration through it still is', () => {
+    for (const content of ['void f(void *p) { (*(code *)p)(); }', 'code *pfn;', 'code **pp = 0;']) {
+      assert.ok(placeholderTypesUsedIn([{ path: 'a.cpp', content }]).has('code'), content);
+    }
+  });
+});
+
 describe('generatePlatformHeader: placeholder gating', () => {
   it('emits exactly the used placeholders', () => {
     const h = generatePlatformHeader({ placeholderTypesUsed: new Set(['byte', 'code']) });
