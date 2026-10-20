@@ -27,7 +27,7 @@ export function hasNativeGpp(): boolean {
  * Build `prelude` + `int main() { body }` and return what the program prints. The prelude
  * already has <cstdint>, <cstring>, <cmath> and <cstdio>.
  */
-export function compileAndRun(prelude: string, body: string, opts: { optimize?: boolean } = {}): string {
+export function compileAndRun(prelude: string, body: string, opts: { optimize?: boolean; flags?: string[] } = {}): string {
   const dir = mkdtempSync(join(tmpdir(), 'native-cpp-'));
   try {
     const src = join(dir, 't.cpp');
@@ -38,7 +38,9 @@ export function compileAndRun(prelude: string, body: string, opts: { optimize?: 
     ].join('\n'));
     // -fsigned-char: the target (MSVC and mingw on x86) has a signed `char`, an ARM host does not.
     // -O2 on request, for a test whose subject is what the optimiser may do (inlining).
-    execFileSync('g++', ['-std=c++17', opts.optimize ? '-O2' : '-O0', '-w', '-fsigned-char', src, '-o', exe], { stdio: 'pipe' });
+    // `flags`: e.g. -fwrapv, for a reference that spells the machine's wrapping arithmetic
+    // in signed C (GCC folds `x * -2 < 0` to `x > 0` even at -O0 without it).
+    execFileSync('g++', ['-std=c++17', opts.optimize ? '-O2' : '-O0', '-w', '-fsigned-char', ...(opts.flags ?? []), src, '-o', exe], { stdio: 'pipe' });
     return execFileSync(exe, [], { encoding: 'utf8' });
   } finally {
     rmSync(dir, { recursive: true, force: true });
