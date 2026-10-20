@@ -17,7 +17,7 @@
  * one bespoke predicate per pass.
  */
 
-import type { Statement } from '../../ast/nodes.js';
+import type { Expression, Statement } from '../../ast/nodes.js';
 
 /** What a node stands for. Only `Stmt` nodes carry a statement. */
 export type CfgNodeRole = 'entry' | 'exit' | 'external' | 'stmt';
@@ -36,6 +36,11 @@ export interface CfgNode {
    */
   key: string | null;
   succ: number[];
+  /**
+   * The expression a statement-less node evaluates: a `for` loop's increment, which has
+   * no statement of its own. Dataflow over the graph needs it; reachability does not.
+   */
+  expr?: Expression;
 }
 
 export interface Cfg {

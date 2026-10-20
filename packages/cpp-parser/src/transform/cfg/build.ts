@@ -216,6 +216,7 @@ function emitStmt(b: Builder, s: Statement, next: number, ctx: Ctx): number {
       const condId = addNode(b, s, 'stmt');
       const incrId = addNode(b, null, 'stmt');
       b.nodes[incrId].succ = [condId];
+      if (n.increment) b.nodes[incrId].expr = n.increment;
       const bodyEntry = emitStmt(b, n.body, incrId, {
         ...ctx, breakTarget: next, continueTarget: incrId,
       });
