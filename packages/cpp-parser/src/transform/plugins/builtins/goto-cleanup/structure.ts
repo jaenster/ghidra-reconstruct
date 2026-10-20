@@ -62,6 +62,7 @@ const LOOP_REWRITES: ((body: CompoundStmt, name: string, ctx: StructureContext) 
 import { gotoReport } from './report.js';
 import { dagFold } from './conds.js';
 import { switchTree } from './switchtree.js';
+import { rethread } from './rethread.js';
 
 
 export interface StructureContext {
@@ -98,6 +99,18 @@ function placeAt(body: ASTNode, site: Path, block: Statement[], endsAt: Cont | n
     return j ? [...block, j] : null;
   };
 
+  // `if (c) { X; goto L; }` (the goto ending a longer then-branch) with no else: the same
+  // move of R into an else, with T after X - `if (c) { X; T } else { R }`.
+  let thenPrefix: Statement[] = [];
+  if (!ifPath && parent.kind === NodeKind.CompoundStmt && pp.length > 0 && pp[pp.length - 1].f === 'thenBranch'
+    && last.f === 'statements' && last.i === (parent as CompoundStmt).statements.length - 1 && last.i! > 0) {
+    const gp = getAt(body, pp.slice(0, -1));
+    if (gp.kind === NodeKind.IfStmt && !(gp as IfStmt).elseBranch) {
+      ifPath = pp.slice(0, -1);
+      thenPrefix = (parent as CompoundStmt).statements.slice(0, -1);
+    }
+  }
+
   if (ifPath && ifPath.length > 0 && ifPath[ifPath.length - 1].f === 'statements') {
     const listPath = ifPath.slice(0, -1);
     const j = ifPath[ifPath.length - 1].i!;
@@ -107,6 +120,13 @@ function placeAt(body: ASTNode, site: Path, block: Statement[], endsAt: Cont | n
     // if (c) { T } else { R }: T and R both continue where the list does.
     if (endsAt && R.length && !holdsFreeCase(R)
       && contKey(endsAt) === contKey(after(body, listPath)) && contKey(after(body, ifPath)) !== contKey(endsAt)) {
+      if (thenPrefix.length) {
+        const then = updateNode(parent as CompoundStmt, { statements: [...thenPrefix, ...block] });
+        const els = Stmt.compound(R);
+        els.location = R[0].location;
+        const nif = updateNode(ifs, { thenBranch: then, elseBranch: els });
+        return setList(body, listPath, [...list.slice(0, j), nif]);
+      }
       if (block.length === 0) {
         // Nothing to put there: the goto only skipped R.
         const els = Stmt.compound(R);
@@ -130,7 +150,7 @@ function placeAt(body: ASTNode, site: Path, block: Statement[], endsAt: Cont | n
     // A bare goto in a list: the block takes its place.
     const list = (parent as CompoundStmt).statements;
     const placed = withJump(site, after(body, site));
-    if (!placed || (placed.length === 0 && ifPath)) return null;
+    if (!placed || (placed.length === 0 && ifPath && !thenPrefix.length)) return null;
     if (placed.length && trivia.length) placed[0] = { ...placed[0], leadingTrivia: [...trivia, ...(placed[0].leadingTrivia ?? [])] } as Statement;
     return setList(body, pp, [...list.slice(0, last.i!), ...placed, ...list.slice(last.i! + 1)]);
   }
@@ -144,12 +164,21 @@ function placeAt(body: ASTNode, site: Path, block: Statement[], endsAt: Cont | n
   return setAt(body, site, blk);
 }
 
-/** Try to structure every goto to `name`. Returns the new body or null. */
-function structureLabel(body: CompoundStmt, name: string, ctx: StructureContext): { body: CompoundStmt; cls: EvidenceClass; sites: number; tail: Statement[] } | null {
+/**
+ * Try to structure every goto to `name`. Returns the new body or null.
+ *
+ * `rebind`: a `break` in T may bind, at a site inside a loop or switch nested in T's own
+ * breakable, to that inner statement - MSVC's threaded error break (`mode = BAD; break;`
+ * out of a loop whose follow re-tests `mode == BAD` and breaks again: the binary jumps
+ * straight to the outer exit). Only the validator's threaded-test facts (A4) can prove such
+ * a copy; without `rebind` those sites are left alone.
+ */
+function structureLabel(body: CompoundStmt, name: string, ctx: StructureContext, rebind = false): { body: CompoundStmt; cls: EvidenceClass; sites: number; tail: Statement[]; rebound: number } | null {
   const slot = findLabel(body, name);
   if (!slot) return null;
-  const sites = gotoPaths(body, name);
+  let sites = gotoPaths(body, name);
   if (sites.length === 0) return null;
+  const totalSites = sites.length;
   // A goto from inside its own tail is a loop, not an arm crossing; one from the list that
   // holds the label (or from inside an earlier statement of it) is a forward skip, which
   // the forward handlers own - neither is a crossing.
@@ -172,13 +201,26 @@ function structureLabel(body: CompoundStmt, name: string, ctx: StructureContext)
   if (endsAt && cutByCase) return null;
   // A break/continue in T must bind to the same statement at every site.
   const fj = freeJumps(T);
+  let rebound = 0;
   if (fj.brk || fj.cont) {
     const here = binders(body as ASTNode, [...slot.list, { f: 'statements', i: slot.k }]);
+    const keep: Path[] = [];
+    let skipped = 0;
     for (const s of sites) {
       const there = binders(body as ASTNode, s);
-      if (fj.brk && !sameBinder(here.breakable, there.breakable)) return null;
       if (fj.cont && !sameBinder(here.loop, there.loop)) return null;
+      if (fj.brk && !sameBinder(here.breakable, there.breakable)) {
+        // Nested inside T's breakable: a rebinding the validator may prove (A4).
+        const nested = here.breakable !== null && there.breakable !== null && isPrefix(here.breakable, there.breakable);
+        if (!nested) return null;
+        if (!rebind) { skipped++; continue; }
+        rebound++;
+      }
+      keep.push(s);
     }
+    if (!keep.length) return null;
+    // Some sites left for a rebinding attempt: this is a partial structuring, never a move.
+    if (skipped) sites = keep;
   }
 
   const hasCase = slot.wrappers.some(w => isCaseLike(w as ASTNode));
@@ -186,7 +228,7 @@ function structureLabel(body: CompoundStmt, name: string, ctx: StructureContext)
   const hasFallthrough = lf.hasFallthrough || hasCase;
   // Nothing to copy (an empty tail), or one goto and nothing falling in: the block ends up
   // in one place either way - a retarget or a MOVE, no evidence needed.
-  const isMove = T.length === 0 || (sites.length === 1 && !hasFallthrough);
+  const isMove = T.length === 0 || (totalSites === 1 && !hasFallthrough);
 
   let cls: EvidenceClass;
   if (isMove) {
@@ -243,7 +285,7 @@ function structureLabel(body: CompoundStmt, name: string, ctx: StructureContext)
   } else if (isMove && T.length) {
     return null;
   }
-  return { body: cur as CompoundStmt, cls, sites: placed, tail: T };
+  return { body: cur as CompoundStmt, cls, sites: placed, tail: T, rebound };
 }
 
 /** A loop or switch body lies between the list at `listPath` and `site`. */
@@ -412,7 +454,7 @@ function skipLabel(body: CompoundStmt, name: string, ctx: StructureContext): { b
     if (sameList && j > s.k) continue;
     const end = sameList ? s.k : list.length;
     const R = list.slice(j + 1, end);
-    if (R.length === 0 || holdsFreeCase(R)) continue;
+    if (holdsFreeCase(R)) continue;
     if (sameList && R.some(x => x.kind === NodeKind.DeclStmt)) continue;
     if (!sameList && contKey(after(cur, listPath)) !== target) {
       // Statements between the goto's block and the label: sink them into the arms first.
@@ -434,6 +476,7 @@ function skipLabel(body: CompoundStmt, name: string, ctx: StructureContext): { b
       done++;
       break;
     }
+    if (R.length === 0) continue;
     const ifs = parent as IfStmt;
     const blk = Stmt.compound(R);
     blk.location = R[0].location;
@@ -515,6 +558,19 @@ export function structureBody(body: CompoundStmt, ctx: StructureContext): Compou
   for (let sweep = 0; sweep < 64; sweep++) {
     let progressed = false;
     for (const name of labelNames(cur)) {
+      // A threaded test the library source writes twice (E1 only, rethread.ts).
+      let rt: CompoundStmt | null = null;
+      try { rt = rethread(cur, name, ctx.noreturn); } catch { rt = null; }
+      if (rt) {
+        const kept = ctx.accept(cur.statements, rt.statements, 'structure:rethread');
+        if (kept) {
+          recordStat('rethread', 1);
+          gotoReport({ event: 'structure', label: name, cls: 'rethread', sites: 1 });
+          cur = updateNode(cur, { statements: kept });
+          changed = progressed = true;
+          continue;
+        }
+      }
       // A loop's own control first (loops.ts): a jump to its head, its increment, or past
       // the exit MSVC laid out after it.
       let looped = false;
@@ -549,13 +605,21 @@ export function structureBody(body: CompoundStmt, ctx: StructureContext): Compou
           changed = progressed = true;
         }
       }
-      let r: ReturnType<typeof structureLabel>;
-      try { r = structureLabel(cur, name, ctx); } catch { r = null; }
-      if (!r) continue;
-      if (r.cls !== 'move') announceCopy('structure', name, r.cls, r.tail, r.sites);
-      else if (r.tail.length) announceCopy('structure', name, 'move', r.tail, 1);
-      const kept = ctx.accept(cur.statements, r.body.statements, `structure:${r.cls}`);
-      if (!kept) continue;
+      // With rebinding first (every site), then without (the sites whose break already
+      // binds the same way): a rebinding the validator refuses must not cost the others.
+      let r: ReturnType<typeof structureLabel> = null;
+      let kept: Statement[] | null = null;
+      for (const rebind of [true, false]) {
+        try { r = structureLabel(cur, name, ctx, rebind); } catch { r = null; }
+        if (!r || (!rebind && r.rebound)) { r = null; continue; }
+        if (r.cls !== 'move') announceCopy('structure', name, r.cls, r.tail, r.sites);
+        else if (r.tail.length) announceCopy('structure', name, 'move', r.tail, 1);
+        kept = ctx.accept(cur.statements, r.body.statements, `structure:${r.cls}${r.rebound ? '+rebind' : ''}`);
+        if (kept) break;
+        if (!r.rebound) break;
+      }
+      if (!r || !kept) continue;
+      if (r.rebound) recordStat('rebindBreak', r.rebound);
       recordStat('structureArm', r.sites);
       gotoReport({ event: 'structure', label: name, cls: r.cls, sites: r.sites });
       cur = updateNode(cur, { statements: kept });

@@ -19,8 +19,12 @@
  *       (sites - 1) x tail <= 8. Accepted by the owner with these limits (design 11);
  *       counted on its own so it can be reviewed or reverted as a class.
  *
- * E1 (library source) and E2 (the Mac partner) need oracles this pass does not have; they
- * arrive with steps 9 and 7.4. E5 (condition-only blocks) is a fold, not a copy.
+ *   E1  library source: the label's block is one the library's own source writes at every
+ *       jump's site (library-evidence.ts, zlib 1.2.8, each entry citing its lines). No
+ *       ceiling: the source is the evidence.
+ *
+ * E2 (the Mac partner) needs an oracle this pass does not have. E5 (condition-only blocks)
+ * is a fold, not a copy.
  *
  * A tail that matches no class is not copied: the goto stays, to be structured some other
  * way or kept and named. Labels and case labels are never copied at all (copy-safety.ts),
@@ -37,12 +41,13 @@ import { workNodes, holdsLabelOrCase } from './copy-safety.js';
 import { isHaltStep } from '../../../cfg/bcfg.js';
 import { recordStat } from './stats.js';
 import { gotoReport } from './report.js';
+import { libraryLabel } from './library-evidence.js';
 
 /**
  * `move` is not a copy at all: one goto and nothing falling into the label, so the block
  * ends up in one place either way - the MOVE primitive (design 3.1). It needs no evidence.
  */
-export type EvidenceClass = 'move' | 'E3' | 'E4' | 'E6';
+export type EvidenceClass = 'move' | 'E1' | 'E3' | 'E4' | 'E6';
 
 export interface SiteInfo {
   /**
@@ -378,10 +383,23 @@ function isCrossJumpTail(tail: Statement[], facts: CopyFacts): 'evidenced' | 'un
   return evidence ? 'evidenced' : 'unproven';
 }
 
+/**
+ * E1: the library source writes this block (or, for a sunk join, these statements) at
+ * every site, and the tail is exactly the size the evidence describes - the entry licenses
+ * that block, not whatever else a handler's tail happens to run to.
+ */
+function libraryCopy(tail: Statement[], facts: CopyFacts): boolean {
+  const f = libraryLabel(facts.label);
+  if (!f || f.work === undefined) return false;
+  if (!(facts.sunkJoin ? f.join : f.copied)) return false;
+  return workNodes(tail) === f.work;
+}
+
 /** The strongest evidence class the copy has, or null when it has none. */
 export function copyIsFaithful(tail: Statement[], facts: CopyFacts): EvidenceClass | null {
   if (tail.length === 0 || holdsLabelOrCase(tail)) return null;
   if (facts.sites.length === 1 && !facts.hasFallthrough) return 'move';
+  if (libraryCopy(tail, facts)) return 'E1';
   if (isHaltTail(tail, facts.noreturn)) return 'E3';
   if (isTerminatorTail(tail, facts.noreturn)) return 'E4';
   const e6 = isCrossJumpTail(tail, facts);
@@ -539,7 +557,7 @@ export function commitCopies(copies: PendingCopy[]): void {
       gotoReport({ event: 'move', handler: c.handler, label: c.label, workNodes: c.work });
       continue;
     }
-    recordStat(c.cls === 'none' ? 'copyNone' : (`copy${c.cls}` as 'copyE3' | 'copyE4' | 'copyE6'), c.copies);
+    recordStat(c.cls === 'none' ? 'copyNone' : (`copy${c.cls}` as 'copyE1' | 'copyE3' | 'copyE4' | 'copyE6'), c.copies);
     if (c.cls === 'E6') recordStat(c.e6 === 'evidenced' ? 'copyE6Evidenced' : 'copyE6Unproven', c.copies);
     recordStat('copiedWorkNodes', c.work * c.copies);
     gotoReport({ event: 'copy', handler: c.handler, label: c.label, cls: c.cls, copies: c.copies, workNodes: c.work, ...(c.e6 ? { e6: c.e6 } : {}) });

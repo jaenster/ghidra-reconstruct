@@ -40,6 +40,34 @@ import { emit } from '../emit/index.js';
 import { TriviaKind } from '../lexer/trivia.js';
 import { canonicalComparison, isPureExpr } from '../transform/cfg/bcfg.js';
 
+function literalValue(e: Expression): bigint | null {
+  e = strip(e);
+  if (e.kind === NodeKind.IntegerLiteral) return (e as unknown as { value: bigint }).value;
+  if (e.kind === NodeKind.BoolLiteral) return (e as unknown as { value: boolean }).value ? 1n : 0n;
+  return null;
+}
+
+/** `L = K` with K a literal 0..127 and L pure: [text of L, K] (the validator's storeOf). */
+function storeOf(e: Expression): [string, bigint] | null {
+  const x = strip(e);
+  if (x.kind !== NodeKind.AssignExpr || (x as unknown as { operator: string }).operator !== '=') return null;
+  const a = x as unknown as { left: Expression; right: Expression };
+  const k = literalValue(a.right);
+  if (k === null || k < 0n || k > 127n || !isPureExpr(a.left)) return null;
+  return [text(a.left), k];
+}
+
+/** `L == K` (either order), K a literal: [text of L, K]. */
+function eqLiteralText(e: Expression): [string, bigint] | null {
+  const x = strip(e);
+  if (x.kind !== NodeKind.BinaryExpr || (x as unknown as { operator: string }).operator !== '==') return null;
+  const b = x as unknown as { left: Expression; right: Expression };
+  const r = literalValue(b.right), l = literalValue(b.left);
+  if (r !== null && l === null) return [text(b.left), r];
+  if (l !== null && r === null) return [text(b.right), l];
+  return null;
+}
+
 export class KeyTable {
   private ids = new Map<string, number>();
   /** scrutinee key -> case value key -> small int (1-based; 0 means "no case") */
@@ -137,6 +165,9 @@ export class SkeletonEmitter {
     const key = s.kind === NodeKind.ExprStmt
       ? 'e:' + text((s as unknown as { expression: Expression }).expression)
       : (s.kind === NodeKind.DeclStmt ? 'd:' : `s:${s.kind}:`) + text(s);
+    const st = s.kind === NodeKind.ExprStmt ? storeOf((s as unknown as { expression: Expression }).expression) : null;
+    // A store of a small literal: its value decides `L == K` until the next work (A4).
+    if (st) return `TS(${this.keys.id(key)}, ${this.keys.id('lv:' + st[0])}, ${st[1]});`;
     return `T(${this.keys.id(key)});`;
   }
 
@@ -179,8 +210,13 @@ export class SkeletonEmitter {
     // A pure atom's value is a function of the program state, and only work changes the
     // state: model it as a hash of (stream, atom, work done so far), untraced. Evaluating
     // it twice between the same two statements gives the same answer, and not evaluating
-    // it at all leaves no trace - exactly what "no side effect" means.
-    return isPureExpr(e) ? `P(${this.keys.id(text(e))})` : `D(${this.keys.id(text(e))})`;
+    // it at all leaves no trace - exactly what "no side effect" means. Right after a store
+    // `L = K`, `L == K2` and `L` read the stored value (the validator's A4).
+    if (!isPureExpr(e)) return `D(${this.keys.id(text(e))})`;
+    const k = this.keys.id(text(e));
+    const eq = eqLiteralText(e);
+    if (eq) return `Q(${k}, ${this.keys.id('lv:' + eq[0])}, ${eq[1]})`;
+    return `QT(${k}, ${this.keys.id('lv:' + text(e))})`;
   }
 
   stmt(s: Statement): string {
@@ -335,11 +371,15 @@ static bool P(int k) {
 }
 static bool D(int k) { step(); unsigned b = bit(); rec(0x20000000u | ((uint32_t)k << 1) | b); return b != 0; }
 static int S(int k, int n) { step(); unsigned v = 0; for (int i = 0; i < 4; i++) v = (v << 1) | bit(); int r = (int)(v % (unsigned)(n + 1)); rec(0x30000000u | ((uint32_t)k << 8) | (uint32_t)r); return r; }
+static int g_slid = -1; static long long g_sval; static uint32_t g_swork;
+static void TS(int k, int lid, long long v) { T(k); g_slid = lid; g_sval = v; g_swork = g_work; }
+static bool Q(int k, int lid, long long v) { if (g_slid == lid && g_swork == g_work) { step(); return g_sval == v; } return P(k); }
+static bool QT(int k, int lid) { if (g_slid == lid && g_swork == g_work) { step(); return g_sval != 0; } return P(k); }
 [[noreturn]] static void NR() { longjmp(g_jmp, 3); }
 static int E(int k, const int* vals, int n) { step(); unsigned v = 0; for (int i = 0; i < 4; i++) v = (v << 1) | bit(); int r = vals[v % (unsigned)n]; rec(0x40000000u | ((uint32_t)k << 12) | (uint32_t)r); return r; }
 typedef void (*Fn)();
 static int run(Fn f, uint64_t seed, int exhaustive, uint32_t* out, int* outLen) {
-  g_seed = seed; g_work = 0; g_state = seed * 0x9E3779B97F4A7C15ull + 1; g_exhaustive = exhaustive; g_bits = seed; g_pos = 0; g_len = 0; g_steps = 0;
+  g_seed = seed; g_work = 0; g_slid = -1; g_state = seed * 0x9E3779B97F4A7C15ull + 1; g_exhaustive = exhaustive; g_bits = seed; g_pos = 0; g_len = 0; g_steps = 0;
   int end = setjmp(g_jmp);
   if (end == 0) { f(); end = 1; }
   memcpy(out, g_trace, sizeof(uint32_t) * g_len); *outLen = g_len; return end;

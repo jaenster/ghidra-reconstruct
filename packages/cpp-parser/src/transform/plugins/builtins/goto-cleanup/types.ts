@@ -68,6 +68,11 @@ export interface GotoCleanupStats {
   /** Gotos left pointing at a label no handler kept. Must be 0. */
   orphanGoto: number;
   /** Copies kept, per evidence class (copy-policy.ts); copyNone only in log mode. */
+  copyE1: number;
+  /** Copies whose `break` binds to a loop inside the original's breakable, proven through threaded tests (A4). */
+  rebindBreak: number;
+  /** Threaded tests restored where the library source writes them twice (rethread.ts, E1). */
+  rethread: number;
   copyE3: number;
   copyE4: number;
   copyE6: number;

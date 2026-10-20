@@ -20,6 +20,18 @@
  *   MakeMissile 004cd540                     the first arm-crossing fixture (step 6):
  *                                            LAB_004cd678 `v <<= 8` into the else arm (E6);
  *                                            LAB_004cd774 (9 work nodes, no evidence) kept
+ *   zlib 1.2.8 (step 9, E1 evidence from the library source, library-evidence.ts):
+ *   deflate 00428c60                         four `s->status = NEXT_STATE` joins sunk into
+ *                                            both arms; the FINISH_STATE test rethreaded
+ *                                            (deflate.c 893/899); 0 gotos, as the source
+ *   inflateSetDictionary 0042b220            `if (wrap && mode != DICT) return; if (mode ==
+ *                                            DICT) {..}` rethreaded
+ *   send_tree 0042be10                       send_bits()'s `bi_valid += len` per expansion
+ *   _tr_flush_block 0042d250                 `opt_lenb = static_lenb` in both arms
+ *   inflate 00429bb0                         `state->mode = BAD; break;` at each of 14
+ *                                            sites, 4 of them breaking a loop whose follow
+ *                                            re-tests the mode (A4); inf_leave x32 and the
+ *                                            case-entry gotos remain
  */
 
 import { describe, it } from 'node:test';
@@ -43,6 +55,11 @@ const CASES: { file: string; raw: number; after: number }[] = [
   { file: 'QUEST_OnPlayerJoinGame_00546270', raw: 12, after: 6 },
   { file: 'AUTOMAP_RevealUnitsInRoom_00458dc0', raw: 6, after: 2 },
   { file: 'MakeMissile_004cd540', raw: 3, after: 1 },
+  { file: 'deflate_00428c60', raw: 6, after: 0 },
+  { file: 'inflateSetDictionary_0042b220', raw: 1, after: 0 },
+  { file: 'send_tree_0042be10', raw: 2, after: 0 },
+  { file: '_tr_flush_block_0042d250', raw: 1, after: 0 },
+  { file: 'inflate_00429bb0', raw: 70, after: 52 },
 ];
 
 function body(root: ASTNode): Statement[] {

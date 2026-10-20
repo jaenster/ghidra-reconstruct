@@ -111,6 +111,12 @@ const ACCEPT: [string, string, string][] = [
   ['two copies of the same work merged (cross-jump) is still an unfolding',
     `if (a) { x(); y(); } else { z(); y(); } w();`,
     `if (a) { x(); } else { z(); } y(); w();`],
+  ['A4: a stored constant decides the re-test after a loop (an error break restored)',
+    `switch (a) { case 1: while (b) { if (p->x) goto LAB_1; w(); } if (p->mode != 29) { v(); } break; LAB_1: p->mode = 29; break; case 2: z(); }`,
+    `switch (a) { case 1: while (b) { if (p->x) { p->mode = 29; break; } w(); } if (p->mode != 29) { v(); } break; case 2: z(); }`],
+  ['A4: a re-evaluated pure atom (a threaded second test restored)',
+    `if (p->s == 5) { if (p->i) { t(); return; } LAB_1: if (!p->k) goto LAB_2; } else if (!p->i) goto LAB_1; w(); LAB_2: e();`,
+    `if (p->s == 5 && p->i) { t(); return; } if (p->i || p->k) { w(); } e();`],
 ];
 
 // ---------------------------------------------------------------------------------------
@@ -366,5 +372,51 @@ describe('control skeleton: region mode', () => {
     // ...and the same region with the case-3 arm lost, or LAB_2 dropped, is told apart.
     assert.equal(runSkeletons([pair(`case 1: x(); case 2: y(); break;`)])[0].ok, false);
     assert.equal(runSkeletons([pair(`case 1: x(); case 2: y(); break; case 3: if (a) goto LAB_9; z(); break;`)])[0].ok, false);
+  });
+});
+
+// ---------------------------------------------------------------------------------------
+// A4: threaded tests (a test the candidate repeats where the binary threaded past it)
+// ---------------------------------------------------------------------------------------
+
+describe('A4: threaded tests', () => {
+  // zlib inflate's error break: the binary jumps from inside the loop straight to the
+  // switch exit; the source breaks the loop and re-tests the mode it just stored.
+  const LOOP_BEFORE = `switch (a) { case 1: while (b) { if (p->x) { p->mode = 29; break; } w(); } if (p->mode != 29) { v(); } break; case 2: z(); }`;
+  const LOOP_BEFORE_THREADED = `switch (a) { case 1: while (b) { if (p->x) goto LAB_1; w(); } if (p->mode != 29) { v(); } break; LAB_1: p->mode = 29; break; case 2: z(); }`;
+  // deflate.c 893/899: `if (S && I) T; if (I || K) W;` threaded to test I once on the S path.
+  const RETEST_BEFORE = `if (p->s == 5) { if (p->i) { t(); return; } LAB_1: if (!p->k) goto LAB_2; } else if (!p->i) goto LAB_1; w(); LAB_2: e();`;
+  const RETEST_AFTER = `if (p->s == 5 && p->i) { t(); return; } if (p->i || p->k) { w(); } e();`;
+
+  it('a stored constant decides the re-test after the loop', () => {
+    accepted(LOOP_BEFORE_THREADED, LOOP_BEFORE);
+  });
+  it('a re-evaluated pure atom with nothing in between is decided by its first outcome', () => {
+    accepted(RETEST_BEFORE, RETEST_AFTER);
+  });
+  it('refused: a work statement between the store and the re-test', () => {
+    refused(LOOP_BEFORE_THREADED, LOOP_BEFORE.replace('p->mode = 29; break;', 'p->mode = 29; u(); break;'));
+  });
+  it('refused: the stored value does not decide the test', () => {
+    refused(LOOP_BEFORE_THREADED.replace('LAB_1: p->mode = 29;', 'LAB_1: p->mode = 28;'), LOOP_BEFORE.replace('p->mode = 29; break;', 'p->mode = 28; break;'));
+  });
+  it('refused: a re-test of an impure atom', () => {
+    refused(RETEST_BEFORE.replace(/p->i/g, 'g()'), RETEST_AFTER.replace(/p->i/g, 'g()'));
+  });
+  it('refused: a work statement between the two evaluations', () => {
+    refused(RETEST_BEFORE, RETEST_AFTER.replace('{ t(); return; } if', '{ t(); return; } u(); if'));
+  });
+  it('refused: a store too wide to survive every integer type', () => {
+    refused(LOOP_BEFORE_THREADED.replace(/29/g, '300'), LOOP_BEFORE.replace(/29/g, '300'));
+  });
+  it('the original never gains a test it did not have', () => {
+    // The threaded form is not an unfolding of the source form: the direction matters.
+    refused(RETEST_AFTER, RETEST_BEFORE);
+  });
+  it('the skeleton agrees on the accepted pairs and tells the broken ones apart', { skip: !gpp }, () => {
+    assert.equal(skeletonSame(LOOP_BEFORE_THREADED, LOOP_BEFORE), true);
+    assert.equal(skeletonSame(RETEST_BEFORE, RETEST_AFTER), true);
+    assert.equal(skeletonSame(LOOP_BEFORE_THREADED.replace('LAB_1: p->mode = 29;', 'LAB_1: p->mode = 28;'), LOOP_BEFORE.replace('p->mode = 29; break;', 'p->mode = 28; break;')), false);
+    assert.equal(skeletonSame(RETEST_BEFORE, RETEST_AFTER.replace('p->i || p->k', 'p->k')), false);
   });
 });
