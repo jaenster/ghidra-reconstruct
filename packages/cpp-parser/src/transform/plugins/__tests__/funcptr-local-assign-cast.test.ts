@@ -40,3 +40,10 @@ describe('funcptr-arg-cast: a store into a funcdef-typed local', () => {
     assert.match(out, /p = TooMany;/);
   });
 });
+
+describe('funcptr-arg-cast: a root-qualified funcdef local', () => {
+  it('`::Draw pfnDraw;` is still the Draw slot (D2WinEditBox, v1126)', () => {
+    const out = run('void f(void) { ::Draw pfnDraw; pfnDraw = Draw; }');
+    assert.match(out, /pfnDraw = \(Draw\)\(BOOL \(\*\)\(D2WinEditBox ?\*\)\)Draw;/, out);
+  });
+});

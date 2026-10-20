@@ -359,8 +359,12 @@ function buildTransformer(options: FuncPtrArgCastOptions): Transformer {
     // different types anywhere in the unit is left out.
     const localFuncdef = new Map<string, string | null>();
     for (const d of findNodesByKind(root, NodeKind.VariableDecl)) {
-      const v = d as unknown as { name: { name: string }; type: { kind: NodeKind; name?: { name?: string } } };
-      const t = v.type.kind === NodeKind.TypedefType ? v.type.name?.name : undefined;
+      const v = d as unknown as { name: { name: string }; type: { kind: NodeKind; name?: { kind: NodeKind; name?: unknown } } };
+      // `::Draw pfnDraw;` - the typedef root-qualified because a function hides it.
+      const tn = v.type.kind === NodeKind.TypedefType ? v.type.name : undefined;
+      const t = !tn ? undefined
+        : tn.kind === NodeKind.Identifier ? (tn.name as string)
+        : ((tn.name as { name?: string } | undefined)?.name);
       const fd = t && funcdefSignatures[t] !== undefined ? t : null;
       const seen = localFuncdef.get(v.name.name);
       localFuncdef.set(v.name.name, seen === undefined ? fd : seen === fd ? fd : null);
