@@ -46,6 +46,7 @@ import { FunctionCache, type CacheOptions } from '../cache.js';
 import { extractAllFunctions } from './functions.js';
 import { extractDataTypes, hydrateDataTypeDetails } from './types.js';
 import { extractAllGlobals, analyzeDataSymbols, fetchInitializedData } from './globals.js';
+import { extractLabelFlow } from './label-flow.js';
 import { extractAllStrings } from './strings.js';
 import { extractAllNamespaces } from './namespaces.js';
 import type { AnalyzedDataSymbol } from '../types.js';
@@ -191,6 +192,16 @@ export async function extractAll(
       onProgress?.('functions', current, total);
     },
   });
+
+  // How control enters each label (read-only; see label-flow.ts). A failure leaves the field
+  // unset, which is what an older snapshot looks like too.
+  if (decompile) {
+    try {
+      await extractLabelFlow(connection, functions);
+    } catch (err) {
+      console.warn(`  Label flow unavailable: ${(err as Error).message}`);
+    }
+  }
 
   onProgress?.('extraction', 5, 5);
 

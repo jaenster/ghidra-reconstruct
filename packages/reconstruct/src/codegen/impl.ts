@@ -1452,6 +1452,7 @@ export function generateFunctionImplementation(
           stackSlots: frameSlots(func),
           registerAliases: registerAliases(func),
           callSiteOverrides: func.callSiteOverrides,
+          labelFlow: func.labelFlow,
         },
       );
       body = func.name ? rewriteQuestUnionMembers(transformed.code, func.name, context?.sourceFileName, [...(func.parameters ?? []), ...(func.localVariables ?? [])]) : transformed.code;
@@ -2220,6 +2221,8 @@ function transformDecompiledCode(
     registerAliases?: Record<string, { param: string; type: string }>;
     /** Ghidra's prototype overrides on this function's indirect calls. */
     callSiteOverrides?: { funcdef: string; arity: number }[];
+    /** How control enters each label, from the instructions (extract/label-flow.ts). */
+    labelFlow?: Record<string, { back: number; first: string; pushedArgs: boolean }>;
   },
 ): TransformDecompiledResult {
   try {
@@ -2599,6 +2602,9 @@ function transformDecompiledCode(
     perPluginOptions['goto-cleanup'] = {
       ...(sig ? {} : { enclosingReturnsVoid: enclosing?.returnsVoid === true }),
       functionAddress: funcAddress,
+      // Instruction evidence for the copy policy's E6 rule (copy-policy.ts); absent in a
+      // snapshot that predates the field, which leaves E6 without A1/A3.
+      labelFlow: enclosing?.labelFlow,
     };
 
     // `x = nullptr` / `return nullptr` where an integer is meant does not compile

@@ -31,6 +31,8 @@ const emptyStats = (): GotoCleanupStats => ({
   copyE3: 0,
   copyE4: 0,
   copyE6: 0,
+  copyE6Evidenced: 0,
+  copyE6Unproven: 0,
   copyNone: 0,
   copiedWorkNodes: 0,
   movedBlocks: 0,

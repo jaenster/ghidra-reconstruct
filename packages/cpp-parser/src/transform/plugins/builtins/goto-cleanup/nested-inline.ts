@@ -344,6 +344,7 @@ export function processNestedTailInlining(
     // The evidence that the source wrote this tail at every site (copy-policy.ts).
     const lf = labelFallthrough(stmts, name, canFallThrough);
     const cls = judgeCopy(effectiveTail, {
+      label: name, region: stmts, tailInRegion: tail, fabricatedReturn: !!fabricateReturn,
       sites: gotoSitesFor(stmts, name),
       hasFallthrough: lf.hasFallthrough,
       fallthroughPrefix: lf.prefix,

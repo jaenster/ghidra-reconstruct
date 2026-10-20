@@ -445,7 +445,10 @@ function structureLabel(body: CompoundStmt, name: string, ctx: StructureContext)
     if (cutByCase && T.some(s => s.kind === NodeKind.DeclStmt)) return null;
     cls = 'move';
   } else {
-    const judged = judgeCopy(T, { sites: gotoSitesFor(body.statements, name), hasFallthrough, fallthroughPrefix: lf.prefix, noreturn: ctx.noreturn });
+    const judged = judgeCopy(T, {
+      sites: gotoSitesFor(body.statements, name), hasFallthrough, fallthroughPrefix: lf.prefix, noreturn: ctx.noreturn,
+      label: name, region: body.statements, tailInRegion: T,
+    });
     if (judged === null || judged === 'none' || judged === 'move') return null;
     // A copied goto is one more goto; a copied top-level declaration is a second definition.
     if (anyStmt(T, n => n.kind === NodeKind.GotoStmt || n.kind === NodeKind.LabelStmt)) return null;
@@ -510,7 +513,7 @@ interface Sunk { cls: EvidenceClass; tail: Statement[]; copies: number }
  * arm ends being the sites. Returns null when a level crosses a loop or switch body (falling
  * off it does not reach what follows), or the policy declines.
  */
-function sinkToLabel(body: ASTNode, from: Path, slot: LabelSlot, ctx: StructureContext): { body: ASTNode; sunk: Sunk[] } | null {
+function sinkToLabel(body: ASTNode, from: Path, slot: LabelSlot, name: string, ctx: StructureContext): { body: ASTNode; sunk: Sunk[] } | null {
   let cur = body;
   let at = from;
   const sunk: Sunk[] = [];
@@ -555,7 +558,12 @@ function sinkToLabel(body: ASTNode, from: Path, slot: LabelSlot, ctx: StructureC
         cls = 'move';
       } else {
         const prefixes = falling.map(a => a.get === null ? `f:${a.prefix}` : armPrefix(a.get));
-        const judged = judgeCopy(J, { sites: prefixes.map(prefix => ({ prefix })), hasFallthrough: false, noreturn: ctx.noreturn });
+        // The join's end is the label the skip jumps to: those gotos are the jumps being
+        // structured, so they never count as another way into it (copy-policy A2).
+        const judged = judgeCopy(J, {
+          sites: prefixes.map(prefix => ({ prefix })), hasFallthrough: false, noreturn: ctx.noreturn,
+          label: name, region: (cur as CompoundStmt).statements, tailInRegion: J, sunkJoin: true,
+        });
         if (judged === null || judged === 'none' || judged === 'move') return null;
         if (anyStmt(J, n => n.kind === NodeKind.GotoStmt || n.kind === NodeKind.LabelStmt)) return null;
         if (J.some(x => x.kind === NodeKind.DeclStmt)) return null;
@@ -650,7 +658,7 @@ function skipLabel(body: CompoundStmt, name: string, ctx: StructureContext): { b
       // Statements between the goto's block and the label: sink them into the arms first.
       // One site per candidate - the sinking is judged and proven with the skip it enables.
       if (done || sunk.length) continue;
-      const r = sinkToLabel(cur, listPath, s, ctx);
+      const r = sinkToLabel(cur, listPath, s, name, ctx);
       if (!r || !r.sunk.length) continue;
       const list2 = (getAt(r.body, listPath) as CompoundStmt).statements;
       const s3 = findLabel(r.body as CompoundStmt, name);

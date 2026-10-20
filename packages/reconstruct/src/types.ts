@@ -13,7 +13,24 @@ export type { ProjectConfig, TypeOwnershipEntry, CrossPlatformLink } from './con
 /**
  * A function extracted from Ghidra
  */
+/** How control enters one label of a decompile (extract/label-flow.ts). */
+export interface LabelFlow {
+  address: string;
+  fallIn: boolean;
+  back: number;
+  condFwd: number;
+  uncondFwd: number;
+  computed: number;
+  first: string;
+  pushedArgs: boolean;
+}
+
 export interface ExtractedFunction {
+  /**
+   * Per label of `decompiled`: how control enters it, read from the instructions. Unset in
+   * snapshots older than the field (and when the script failed).
+   */
+  labelFlow?: Record<string, LabelFlow>;
   name: string;
   address: string;
   signature: string;

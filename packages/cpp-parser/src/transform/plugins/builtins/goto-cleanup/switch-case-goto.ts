@@ -198,6 +198,7 @@ function processSingleSwitch(sw: SwitchStmt): SwitchStmt | null {
     // The evidence that the source wrote this case tail at every site (copy-policy.ts).
     const lf = labelFallthrough(bodyStmts, labelName, canFallThrough);
     const cls = judgeCopy(tail, {
+      label: labelName, region: bodyStmts, tailInRegion: tail,
       sites: gotoSitesFor(bodyStmts, labelName),
       hasFallthrough: lf.hasFallthrough,
       fallthroughPrefix: lf.prefix,

@@ -51,6 +51,7 @@ import { setCurrentGotoFunction, gotoReport } from './report.js';
 import { recordStat } from './stats.js';
 import { isSimpleLabelName } from './helpers.js';
 import { countGotosInStatements } from './analysis.js';
+import { setGotoLabelFlow, type LabelFlowFacts } from './copy-policy.js';
 import {
   setGlobalGotoCounts,
   clearGlobalGotoCounts,
@@ -278,13 +279,22 @@ function createGotoCleanupTransformer(pluginOptions?: Record<string, unknown>) {
     },
   });
 
+  const labelFlow = (pluginOptions?.labelFlow as Record<string, LabelFlowFacts> | undefined) ?? null;
   return (node: ASTNode): ASTNode => {
     setCurrentGotoFunction(functionAddress);
+    setGotoLabelFlow(labelFlow);
+    try {
+      return run(node);
+    } finally {
+      setGotoLabelFlow(null);
+    }
+  };
+  function run(node: ASTNode): ASTNode {
     let hasFunction = false;
     for (const n of traverseAST(node)) if (n.kind === NodeKind.FunctionDecl) { hasFunction = true; break; }
     const result = hasFunction ? perFunction(node) : runRounds(node);
     return reportOrphanedGotos(result);
-  };
+  }
 }
 
 /**

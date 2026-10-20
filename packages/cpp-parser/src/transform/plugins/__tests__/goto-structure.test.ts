@@ -15,9 +15,9 @@ import type { AnyNode } from '../../../ast/nodes.js';
 import { gotoCleanupPlugin, getGotoCleanupStats, resetGotoCleanupStats } from '../builtins/goto-cleanup/index.js';
 import { compileAndRun, hasNativeGpp } from '../../../testing/native-cpp.js';
 
-function run(src: string): { out: string; arm: number; copies: number; moves: number } {
+function run(src: string, labelFlow?: Record<string, { back: number; first: string; pushedArgs: boolean }>): { out: string; arm: number; copies: number; moves: number } {
   resetGotoCleanupStats();
-  const out = emit(gotoCleanupPlugin.createTransformer()(parse(src)) as AnyNode);
+  const out = emit(gotoCleanupPlugin.createTransformer(labelFlow ? { labelFlow } : undefined)(parse(src)) as AnyNode);
   const st = getGotoCleanupStats();
   assert.equal(st.vetoedUnsafe, 0);
   assert.equal(st.orphanGoto, 0);
@@ -128,14 +128,24 @@ LAB_1:
 }
 int f(int a, int b, int c) { g(a, b, c); return 0; }`;
 
+  // W(2) does not end in a jump the source wrote, so E6 needs instruction evidence for it
+  // (copy-policy rule 1): here a jump into LAB_1 from a higher address (A1).
+  const RET_FLOW = { LAB_1: { back: 1, first: 'PUSH', pushedArgs: false } };
+
   it('a jump reaches the place the tail continued to: return; at the end of a void function', () => {
-    const r = run(RET);
+    const r = run(RET, RET_FLOW);
     assert.equal(gotos(r.out), 0, r.out);
     assert.match(r.out, /W\(3\);\s*W\(2\);\s*return;/);
   });
 
   it('return; jump: compiled, same behaviour', { skip: !hasNativeGpp() }, () => {
-    assert.equal(same(RET, run(RET).out), '0');
+    assert.equal(same(RET, run(RET, RET_FLOW).out), '0');
+  });
+
+  it('the same tail with no instruction evidence keeps its goto (E6 rule 1)', () => {
+    const r = run(RET);
+    assert.equal(gotos(r.out), 1, r.out);
+    assert.equal(r.copies, 0);
   });
 
   // A tail of five calls reached by a goto and by falling in: nothing says the source wrote
@@ -306,8 +316,10 @@ LAB_1:
     assert.equal(same(SINKMOVE, run(SINKMOVE).out), '0');
   });
 
-  // The join is reached from both arms: it is copied into each only with evidence (E6 here,
-  // one statement, the arms end differently).
+  // The join is reached from both arms. It would be copied into each only with evidence, and
+  // a one-statement join the skip jumps past is the class the 2026-10-20 audit refuted (the
+  // source wrote `if (!b) { v += W(3); } W(v);` once): nothing else enters its end, so no
+  // A2, and a sunk join has no instruction facts of its own - the goto stays.
   const SINKCOPY = `int f(int a, int b, int c) {
   int v = 0;
   if (a) {
@@ -327,14 +339,19 @@ LAB_1:
   return v;
 }`;
 
-  it('sink (E6 copy): the one-statement join goes into both arms', () => {
+  it('sink: a one-statement join with no evidence is not copied (E6 rule 1)', () => {
     const r = run(SINKCOPY);
-    assert.equal(gotos(r.out), 0, r.out);
-    assert.equal(r.copies, 2);
-    assert.equal((r.out.match(/W\(v\);/g) ?? []).length, 2);
+    assert.equal(gotos(r.out), 1, r.out);
+    assert.equal(r.copies, 0);
+    assert.equal((r.out.match(/W\(v\);/g) ?? []).length, 1);
   });
 
-  it('sink (E6 copy): compiled, same behaviour', { skip: !hasNativeGpp() }, () => {
+  it('sink: even with instruction facts for the label (they describe the skip, not the join)', () => {
+    const r = run(SINKCOPY, { LAB_1: { back: 1, first: 'JZ', pushedArgs: false } });
+    assert.equal(r.copies, 0);
+  });
+
+  it('sink: compiled, same behaviour', { skip: !hasNativeGpp() }, () => {
     assert.equal(same(SINKCOPY, run(SINKCOPY).out), '0');
   });
 

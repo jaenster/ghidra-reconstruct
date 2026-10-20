@@ -57,6 +57,9 @@ export interface GotoCleanupStats {
   copyE3: number;
   copyE4: number;
   copyE6: number;
+  /** E6 copies with instruction or join evidence (A1-A3), and those without (terminating tails only). */
+  copyE6Evidenced: number;
+  copyE6Unproven: number;
   copyNone: number;
   /** Work nodes those copies added. */
   copiedWorkNodes: number;

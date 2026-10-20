@@ -136,6 +136,7 @@ export function processCleanupTailInlining(
       : tail;
     const lf = labelFallthrough(stmts, labelInfo.name, canFallThrough);
     const cls = judgeCopy(effective, {
+      label: labelInfo.name, region: stmts, tailInRegion: tail, fabricatedReturn: effective !== tail,
       sites: gotoSitesFor(stmts, labelInfo.name),
       hasFallthrough: lf.hasFallthrough,
       fallthroughPrefix: lf.prefix,

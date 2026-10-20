@@ -7,7 +7,9 @@
  *
  *   ITEM_DeserializeFromBitBuffer 0062cbe0   Ghidra's if (false) arm holding the default
  *                                            handler; 21 extra gotos from copied labelled
- *                                            loops before step 3
+ *                                            loops before step 3; one E6 copy of a tail
+ *                                            with no instruction evidence kept since the
+ *                                            2026-10-20 E6 rules (28 -> 29)
  *   TXT_ParseDataAndPutIntoStructure 006bd780  five halt sites cross-jumped to one tail
  *   QUEST_OnPlayerJoinGame 00546270          a rotated loop entered at its body
  *   AUTOMAP_RevealUnitsInRoom 00458dc0       15 jumps to a latch that does work (for-loop
@@ -34,7 +36,7 @@ import { isUnfolding, countGotoTargets } from '../../cfg/index.js';
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'gotos');
 
 const CASES: { file: string; raw: number; after: number }[] = [
-  { file: 'ITEM_DeserializeFromBitBuffer_0062cbe0', raw: 35, after: 28 },
+  { file: 'ITEM_DeserializeFromBitBuffer_0062cbe0', raw: 35, after: 29 },
   { file: 'TXT_ParseDataAndPutIntoStructure_006bd780', raw: 24, after: 24 },
   { file: 'QUEST_OnPlayerJoinGame_00546270', raw: 12, after: 6 },
   { file: 'AUTOMAP_RevealUnitsInRoom_00458dc0', raw: 6, after: 5 },
