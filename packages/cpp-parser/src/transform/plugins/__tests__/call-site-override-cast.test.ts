@@ -46,3 +46,12 @@ describe('call-site-override-cast', () => {
     assert.ok(!out.includes('dt_a'), out);
   });
 });
+
+describe('call-site-override-cast: the decompiler\'s code * cast', () => {
+  it('is replaced by the override\'s cast, not stacked under it (LRUCACHE_ForEach)', () => {
+    const out = transform('int f(void *pfnCallback, void *pEntry, int d) { return (*(code *)pfnCallback)(pEntry, d); }',
+      [{ funcdef: 'dt_43f4227c', arity: 2 }]);
+    assert.match(out, /\(\(dt_43f4227c\)pfnCallback\)\(pEntry, d\)/, out);
+    assert.ok(!out.includes('code'), out);
+  });
+});

@@ -103,6 +103,17 @@ export function createCallSiteOverrideCastTransformer(options?: PluginOptions): 
           if (!shape || shape.stars !== 1 || !UNTYPED_CALLEE.has(shape.base)) return undefined;
           changed = true;
           o.usedTypedefs?.add(funcdef);
+          // `(*(code *)p)(...)`: the decompiler's own cast to its untyped `code *` says
+          // nothing the override does not, so the override's cast replaces it rather than
+          // stacking on it (`(dt_X)(code *)p`).
+          while (target.kind === NodeKind.CStyleCastExpr) {
+            const ct = (target as CStyleCastExpr).type as TypeNode;
+            if (ct.kind !== NodeKind.PointerType) break;
+            const pointee = (ct as unknown as { pointee: ASTNode & { name?: { name?: string } | string } }).pointee;
+            const pn = typeof pointee.name === 'string' ? pointee.name : pointee.name?.name;
+            if (!pn || !UNTYPED_CALLEE.has(pn)) break;
+            target = unwrapParens((target as CStyleCastExpr).expression);
+          }
           const cast: CStyleCastExpr = {
             kind: NodeKind.CStyleCastExpr,
             type: {
