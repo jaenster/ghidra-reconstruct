@@ -6,7 +6,7 @@
  */
 
 import type { AnalyzedDataSymbol, ReconstructOptions, DataValue, ExtractedDataType, ExtractedStruct, ExtractedUnion, ExtractedFunctionDefinition, ExtractedFunction } from '../types.js';
-import { GLIDE_UNSIGNED_ENUM_TYPEDEFS, PLATFORM_STRUCT_FIELD_TYPES, getAggregateTypeNames, isPlatformOrBuiltinType, isLibraryType, isStructType, castPointerInitializer, normalizeDataValue, isCharacterValueType, isMsvcEhInternal, normalizeWideCharType, normalizeListingBuiltinType, listingBuiltinElementType, imageArtifactElementType, isVoidPointerSpelling, resolveTypedefSpelling, rootQualifyShadowedType, platformDeclaredFunctionNames } from './platform-types.js';
+import { GLIDE_UNSIGNED_ENUM_TYPEDEFS, PLATFORM_STRUCT_FIELD_TYPES, isAggregateObjectType, getAggregateTypeNames, isPlatformOrBuiltinType, isLibraryType, isStructType, castPointerInitializer, normalizeDataValue, isCharacterValueType, isMsvcEhInternal, normalizeWideCharType, normalizeListingBuiltinType, listingBuiltinElementType, imageArtifactElementType, isVoidPointerSpelling, resolveTypedefSpelling, rootQualifyShadowedType, platformDeclaredFunctionNames } from './platform-types.js';
 import { generateStructDeclaration, generateUnionDeclaration, generateFunctionDefinitionDeclaration, ghidraDefaultFieldName } from './header.js';
 import { normalizeQualifiedReference } from './namespace.js';
 import { namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
@@ -1686,6 +1686,11 @@ function emitPointerToSymbol(rawValue: string, expectedType?: string): string {
       const named = pointerSlotAddressReference(literal, slotType);
       if (named) return named;
       if (pointerCast) return `(${pointerCast})${literal}`;
+      // A funcdef slot carries its indirection in the typedef, so it has no `*` for
+      // the pointer test above; the address still converts only through the slot's
+      // own type, exactly as the raw-hex path below spells it. (`LAB_00691b68` in
+      // __lc_category's `pfnInit`: code Ghidra has no function at.)
+      if (slotType && isFuncDefTypedefName(slotType)) return `(${rootQualifyShadowedType(slotType)})${literal}`;
       // Only a slot whose type is NAMED as an integer takes the bare value; a
       // pointer spelled through a typedef (`pointer`, `LPVOID`, `HANDLE`) has no
       // `*` to test for, so anything else gets the `void*` cast.
@@ -2266,6 +2271,10 @@ export function emitDataValue(dv: DataValue, indent = 0, expectedType?: string):
       const bitPattern = unsignedSlotBitPattern(dv.value, expectedType);
       if (bitPattern !== undefined) return bitPattern;
       const val = normalizeDataValue(dv.value ?? '0');
+      // A zero word in an AGGREGATE slot (`LARGE_INTEGER`, a union) is the
+      // value-initialised object. `= 0` converts to no struct or union type; `{}`
+      // is exactly the all-zero bytes the datum holds.
+      if ((val === '0' || val === '0x0') && expectedType && isAggregateObjectType(expectedType)) return '{}';
       // A single character is a CHARACTER, and a digit is no exception: Ghidra
       // renders a character slot's byte as the character, and renders a NUMERIC
       // byte `0x`-prefixed, so a bare `6` in a `char` slot is 0x36. Reading it
@@ -2375,7 +2384,14 @@ export function emitDataValue(dv: DataValue, indent = 0, expectedType?: string):
 
     case 'struct': {
       if (!dv.fields || dv.fields.length === 0) return '{}';
-      const layout = baseExpected ? structFieldTypes.get(baseExpected) : undefined;
+      // The slot may name the aggregate through a typedef: `FILE` is Ghidra's
+      // `typedef _iobuf FILE`, and the layout is keyed on `_iobuf`. Without the
+      // walk every field of `gaCrtFileHandleTable[20]` was typed as nothing, and
+      // `&DAT_00993c80` (a `uint8_t`) went into `char * _ptr` uncast.
+      const layout = baseExpected
+        ? structFieldTypes.get(baseExpected)
+          ?? structFieldTypes.get(baseTypeName(resolveTypedefSpelling(baseExpected)))
+        : undefined;
       const fieldLines = dv.fields.map((f, i) => {
         const v = emitDataValue(f.value, indent + 1, layout?.get(f.name));
         const comma = i < dv.fields!.length - 1 ? ',' : '';
@@ -3137,7 +3153,7 @@ export function renderGlobalScalarInitializer(
   const sentinel = sentinelSpelling(rawValue, declaredType);
   if (sentinel !== undefined) return sentinel;
   let value = normalizeDataValue(rawValue ?? '0');
-  if ((value === '0' || value === '0x0') && isStructType(declaredType)) return '{}';
+  if ((value === '0' || value === '0x0') && (isStructType(declaredType) || isAggregateObjectType(declaredType))) return '{}';
   // A funcdef typedef carries its own indirection in this tree, so Ghidra's
   // `pfnD2CmdHandler *` is spelled `pfnD2CmdHandler` here — which is what every
   // declaration printer this renderer is paired with already prints. Without

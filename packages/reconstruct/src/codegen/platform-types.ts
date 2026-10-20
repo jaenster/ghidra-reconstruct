@@ -267,7 +267,44 @@ export function isLibraryType(name: string, category: string): boolean {
  */
 const PLATFORM_DEFINED_TYPES = new Set<string>([
   'IUnknown',
+  // MSVC's SEH3 frame ABI (Ghidra /CRT/SEH, v1268). The category is excluded with the
+  // CRT, but kept bodies declare locals of these types (the registration and scope-table
+  // locals of SOUNDUTIL_ReadVersionResource and WARDEN_DecryptModule) and the scope
+  // tables are globals of them, so d2_platform.h defines them - see MSVC_SEH3_TYPE_LINES.
+  'EH3_EXCEPTION_REGISTRATION', 'EH3_SCOPETABLE_ENTRY', 'EH3_FILTER', 'EH3_HANDLER',
+  'fnDestructExceptionObject',
 ]);
+
+/**
+ * The function-definition names d2_platform.h itself defines. They follow the tree's
+ * funcdef convention - a POINTER typedef, so Ghidra's `EH3_FILTER *` is peeled to
+ * `EH3_FILTER` like every other funcdef - and are registered as known funcdefs even
+ * when the model does not carry them (their category is excluded).
+ */
+export const PLATFORM_FUNCDEF_NAMES: readonly string[] = ['EH3_FILTER', 'EH3_HANDLER', 'fnDestructExceptionObject'];
+
+/**
+ * The /CRT/SEH types, spelled from Ghidra's records (v1268) - the layout is the MSVC
+ * EXSUP.INC one, fixed by the ABI.
+ */
+const MSVC_SEH3_TYPE_LINES: readonly string[] = [
+  '// MSVC SEH3 frame types (Ghidra /CRT/SEH; EXSUP.INC layout)',
+  'typedef int32_t (*EH3_FILTER)(void);  // EXCEPTION_EXECUTE_HANDLER (1), CONTINUE_SEARCH (0) or CONTINUE_EXECUTION (-1)',
+  'typedef void (*EH3_HANDLER)(void);    // an __except block (does not return) or a __finally funclet (returns)',
+  'typedef void (*fnDestructExceptionObject)(struct _EXCEPTION_RECORD* pExceptionRecord, int32_t fThrowNotAllowed);',
+  'struct EH3_SCOPETABLE_ENTRY {',
+  '    int32_t EnclosingLevel;      // try level to continue with, -1 = none',
+  '    EH3_FILTER FilterFunc;       // NULL = __finally entry',
+  '    EH3_HANDLER HandlerFunc;     // __except block or __finally funclet',
+  '};',
+  'struct EH3_EXCEPTION_REGISTRATION {',
+  '    EH3_EXCEPTION_REGISTRATION* Next;  // fs:[0] chain',
+  '    void* ExceptionHandler;            // _except_handler3',
+  '    EH3_SCOPETABLE_ENTRY* ScopeTable;',
+  '    int32_t TryLevel;                  // index into ScopeTable, -1 = outside any __try',
+  '};',
+  'static_assert(sizeof(void*) != 4 || (sizeof(EH3_SCOPETABLE_ENTRY) == 12 && sizeof(EH3_EXCEPTION_REGISTRATION) == 16), "SEH3 layout");',
+];
 
 /**
  * Check if a type name is a platform, standard, or Ghidra artifact type
@@ -920,6 +957,14 @@ export const PLATFORM_STRUCT_FIELD_TYPES: ReadonlyMap<string, ReadonlyMap<string
     ['OwningThread', 'void*'], ['LockSemaphore', 'void*'], ['SpinCount', 'unsigned long'],
   ])],
   ['POINT', new Map([['x', 'long'], ['y', 'long']])],
+  // MSVC_SEH3_TYPE_LINES: the scope tables are initialised data of this type.
+  ['EH3_SCOPETABLE_ENTRY', new Map([
+    ['EnclosingLevel', 'int32_t'], ['FilterFunc', 'EH3_FILTER *'], ['HandlerFunc', 'EH3_HANDLER *'],
+  ])],
+  ['EH3_EXCEPTION_REGISTRATION', new Map([
+    ['Next', 'EH3_EXCEPTION_REGISTRATION *'], ['ExceptionHandler', 'void *'],
+    ['ScopeTable', 'EH3_SCOPETABLE_ENTRY *'], ['TryLevel', 'int32_t'],
+  ])],
   ['RECT', new Map([['left', 'long'], ['top', 'long'], ['right', 'long'], ['bottom', 'long']])],
   ['FILETIME', new Map([['dwLowDateTime', 'DWORD'], ['dwHighDateTime', 'DWORD']])],
   ['GUID', new Map([
@@ -1547,6 +1592,8 @@ export function generatePlatformHeader(
   lines.push('typedef uint32_t PFN_ExceptHandler4(int* pnParam, void* pParam, uint32_t dwParam);');
   lines.push('typedef void PFN_CrtExceptionFilter(EHExceptionRecord* pExceptionRecord, EHRegistrationNode* pRegistrationNode, CONTEXT* pContext, void* pParam);');
   lines.push('');
+  lines.push(...MSVC_SEH3_TYPE_LINES);
+  lines.push('');
 
   // Declarations for the Ghidra namespaces run.ts excludes from emission.
   lines.push(...generateExcludedSymbolDecls());
@@ -1864,6 +1911,24 @@ export function getAggregateTypeNames(): Set<string> | undefined {
 }
 
 /**
+ * Does a declared type name an AGGREGATE object (a struct or union, by name or
+ * through a typedef chain)? Answered from the data types, not from the spelling.
+ *
+ * `isStructType` guesses from the spelling and says no to every platform type,
+ * because a platform name is usually a scalar or a pointer (`HANDLE`, `DWORD`).
+ * Some are not: `LARGE_INTEGER` is a typedef
+ * of the union `_LARGE_INTEGER`, and `static LARGE_INTEGER g = 0;` has no
+ * conversion at all. The typedef walk in `setAggregateTypeNames` already knows
+ * which platform names end at an aggregate, so this asks it as well.
+ */
+export function isAggregateObjectType(type: string): boolean {
+  const t = type.trim();
+  if (!t || /[*&\[]/.test(t)) return false;
+  const base = t.replace(/\b(const|volatile|struct|union)\b/g, '').trim();
+  return aggregateTypeNames?.has(base) ?? false;
+}
+
+/**
  * SDK functions whose declared return type is `void *`.
  *
  * Ghidra has no `Function` record for `VirtualAlloc`, `HeapAlloc` or `malloc` -
@@ -1948,6 +2013,25 @@ export function oddWidthTypesSpelled(typeSpellings: Iterable<string | undefined>
  * a comment or a string is not a use. The platform header's own typedef of a name is
  * not a use of it; anything else there (a row typedef over `byte`) is.
  */
+/**
+ * A placeholder's spelling used as a NAME, not as the type: a member access (`p->code`,
+ * `t.code`), or a declarator (`char code[4];`, `int code;` - an identifier right before
+ * it, and `[`, `;`, `=`, `,` or `:` after). `ItemTbls.h` and `PlrSkills.h` have fields
+ * called `code`; they are no reason to keep `typedef int code(...)`.
+ */
+function isNameNotType(tokens: ReadonlyArray<{ kind: TokenKind; text: string }>, i: number): boolean {
+  const prev = tokens[i - 1];
+  const next = tokens[i + 1];
+  if (prev && (prev.kind === TokenKind.Dot || prev.kind === TokenKind.Arrow)) return true;
+  const declaratorEnd = next && (next.kind === TokenKind.LeftBracket || next.kind === TokenKind.Semicolon
+    || next.kind === TokenKind.Equal || next.kind === TokenKind.Comma || next.text === ':');
+  const afterType = prev && (prev.kind === TokenKind.Identifier || prev.kind === TokenKind.Star || isTypeKeyword(prev.text));
+  return !!(declaratorEnd && afterType);
+}
+
+const TYPE_KEYWORDS = new Set(['int', 'char', 'short', 'long', 'unsigned', 'signed', 'float', 'double', 'bool', 'void', 'auto']);
+function isTypeKeyword(text: string): boolean { return TYPE_KEYWORDS.has(text); }
+
 export function placeholderTypesUsedIn(
   files: Iterable<{ path: string; content: string }>,
   platformPath = 'd2_platform.h',
@@ -1964,9 +2048,13 @@ export function placeholderTypesUsedIn(
     }
     const isPlatform = f.path === platformPath;
     const seen = new Map<string, number>();
-    for (const t of tokens) {
+    for (let i = 0; i < tokens.length; i++) {
+      const t = tokens[i];
       if (t.kind !== TokenKind.Identifier || !names.has(t.text)) continue;
-      if (!isPlatform) { used.add(t.text); continue; }
+      if (!isPlatform) {
+        if (!isNameNotType(tokens, i)) used.add(t.text);
+        continue;
+      }
       seen.set(t.text, (seen.get(t.text) ?? 0) + 1);
     }
     // Each placeholder is DEFINED exactly once in the platform header.

@@ -49,6 +49,16 @@ describe('small struct globals', () => {
     assert.ok(g.initializedData, 'its bytes must be attached to the symbol');
   });
 
+  it('fetches a one-element pointer array and a 4-byte array', async () => {
+    // gCmdLineOptionTable @0x6d5be0 (fnCmdLineOptionInit *[1]) and
+    // gaSFileSignatureRsaExponent @0x6cf078 (byte[4]): no scalar value from Ghidra.
+    const asked: string[] = [];
+    const a = symbol({ name: 'gCmdLineOptionTable', address: '0x6d5be0', dataType: 'fnCmdLineOptionInit *[1]', size: 4 });
+    const b = symbol({ name: 'gaSFileSignatureRsaExponent', address: '0x6cf078', dataType: 'byte[4]', size: 4 });
+    await fetchInitializedData(recordingConnection(asked), [a, b]);
+    assert.deepEqual(asked, ['0x6d5be0', '0x6cf078']);
+  });
+
   it('still skips a genuinely tiny SCALAR, whose value Ghidra already gives', async () => {
     const asked: string[] = [];
     const g = symbol({ name: 'gnCount', dataType: 'int', size: 4, value: '0x5' });

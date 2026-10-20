@@ -13,18 +13,24 @@ const OPTS = {
   pluginOptions: {
     pluginOptions: {
       'union-arrow-member': {
-        unionNames: ['D2MonStatsExTxtSlot', 'AmbiguousSlot'],
+        unionNames: ['D2MonStatsExTxtSlot', 'AmbiguousSlot', 'D2UIMsgLParamUnion', 'TwoWords'],
         aggregateMembers: {
           D2MonStatsExTxtSlot: ['pMonPropTxt', 'pMonStats2Txt'],
           AmbiguousSlot: ['pA', 'pB'],
           D2MonPropTxt: ['Id', 'entry', 'chance'],
           D2MonStats2Txt: ['Id', 'revive', 'isAtt', 'isSmall'],
           PlainStruct: ['pMonStats2Txt'],
+          D2UIMsgLParamUnion: ['nLParam', 'sMousePos'],
+          D2UIMsgMousePosStrc: ['nX', 'nY'],
+          D2UIMouseMsgStrc: ['hWnd', 'uLParam'],
         },
         structFields: {
           D2MonStatsExTxtSlot: { pMonPropTxt: 'D2MonPropTxt *', pMonStats2Txt: 'D2MonStats2Txt *' },
           AmbiguousSlot: { pA: 'D2MonPropTxt *', pB: 'D2MonStats2Txt *' },
           PlainStruct: { pMonStats2Txt: 'D2MonStats2Txt *' },
+          D2UIMsgLParamUnion: { nLParam: 'int32_t', sMousePos: 'D2UIMsgMousePosStrc' },
+          TwoWords: { nA: 'int32_t', nB: 'uint32_t', fC: 'float' },
+          D2UIMouseMsgStrc: { hWnd: 'uint32_t', uLParam: 'D2UIMsgLParamUnion' },
         },
       },
     },
@@ -69,5 +75,39 @@ describe('union-arrow-member', () => {
     assert.ok(r.success, r.error);
     assert.ok(r.code.includes('u.pMonStats2Txt->isAtt'), r.code);
     assert.ok(!r.code.includes('pMonStats2Txt.pMonStats2Txt'), r.code);
+  });
+
+  // SMsgDispatchMessage 00420b00: the prototype's `undefined4 dwLParam` stored into
+  // the D2UIMsgLParamUnion field. The store is four bytes; nLParam is the only
+  // four-byte integer member.
+  it('stores a scalar into the union member of its width', () => {
+    const r = run(`void f(uint32_t dwLParam) { D2UIMouseMsgStrc hMsgWnd; hMsgWnd.uLParam = dwLParam; }`);
+    assert.ok(r.success, r.error);
+    assert.match(r.code, /hMsgWnd\.uLParam\.nLParam = dwLParam;/, r.code);
+  });
+
+  it('prefers the member of the exact type', () => {
+    const r = run(`void f(uint32_t v) { TwoWords u; u = v; float g; u = g; }`);
+    assert.ok(r.success, r.error);
+    assert.match(r.code, /u\.nB = v;/, r.code);
+    assert.match(r.code, /u\.fC = g;/, r.code);
+  });
+
+  it('leaves a store with two same-width candidates alone', () => {
+    const r = run(`void f(uint16_t v) { TwoWords u; u = (long)v; }`);
+    assert.ok(r.success, r.error);
+    assert.doesNotMatch(r.code, /u\.n[AB]/, r.code);
+  });
+
+  it('leaves a whole-union copy alone', () => {
+    const r = run(`void f(D2UIMsgLParamUnion v) { D2UIMouseMsgStrc m; m.uLParam = v; }`);
+    assert.ok(r.success, r.error);
+    assert.match(r.code, /m\.uLParam = v;/, r.code);
+  });
+
+  it('never stores an integer into a floating or narrower member', () => {
+    const r = run(`void f(uint8_t b) { D2UIMouseMsgStrc m; m.uLParam = b; }`);
+    assert.ok(r.success, r.error);
+    assert.match(r.code, /m\.uLParam = b;/, r.code);
   });
 });

@@ -377,10 +377,11 @@ function frameAddressValue(from: ASTNode): Expression {
  * The refusal is over NEGATIVE and unknown offsets, which is all the `Item.cpp`
  * evidence covers. A CONSTANT offset of `+8` or more is different in kind: on
  * i386 with a frame pointer, `[fp+8]` and up are the incoming stack arguments,
- * at positions the ABI fixes rather than the compiler chooses. MSVC's
- * `_except_handler3` at `D2Sound/D2SoundUntil.cpp` reads exactly those — `+8`
- * is its own `pRecord` and `+0xc` its own `pRegistrationFrame` — and the
- * builtin is what forces GCC to keep the frame pointer that makes them correct.
+ * at positions the ABI fixes rather than the compiler chooses: `+8` is the first
+ * argument and `+0xc` the second, whatever the function. (MSVC's SEH3 handler
+ * 006878a0, `SehHandler_6878a0` while it is still emitted, reads exactly those as
+ * its `pRecord` and `pRegistrationFrame`.) The builtin is what forces GCC to keep
+ * the frame pointer that makes them correct.
  * A non-constant offset, a `-`, or a compound `+=`/`-=` (which moves the base,
  * so every later offset means something else) still refuses the body.
  */

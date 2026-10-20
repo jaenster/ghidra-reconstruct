@@ -482,6 +482,18 @@ const MSVC_RUNTIME_DECLS: ExcludedSymbolDecl[] = [
   // __except_handler4 @ 00684f50 — Ghidra: undefined4 (int*, PVOID, undefined4)
   { emitted: '__except_handler4', real: '_except_handler4', source: 'ghidra',
     decl: 'extern "C" uint32_t __except_handler4(int* pRecord, void* pRegistration, uint32_t dwContext);' },
+  // _except_handler3 @ 006878a0 (compiler::, v1268) - MSVC's SEH3 frame handler
+  // (exsup3.obj), the personality the inline `push -1; push scopetable; push handler;
+  // push fs:[0]` prologs install (SOUNDUTIL_ReadVersionResource, WARDEN_DecryptModule).
+  // msvcrt exports it. Ghidra (v1268): _EXCEPTION_DISPOSITION __cdecl (_EXCEPTION_RECORD*,
+  // EH3_EXCEPTION_REGISTRATION*, _CONTEXT*, void*). The return is spelled `int`:
+  // `_EXCEPTION_DISPOSITION` is d2_enums.h's `typedef int`, which this header precedes;
+  // EH3_EXCEPTION_REGISTRATION is the platform header's own (MSVC_SEH3_TYPE_LINES). Only a
+  // declaration: the rebuild's `ExceptionList` is an ordinary global, so no registration
+  // ever reaches it.
+  { emitted: '_except_handler3', real: '_except_handler3', source: 'ghidra',
+    decl: 'extern "C" int _except_handler3(struct _EXCEPTION_RECORD* pExceptionRecord, EH3_EXCEPTION_REGISTRATION* pRegistration, CONTEXT* pContext, void* pDispatcherContext);',
+    win32Only: true },
   // __global_unwind2 @ 00697f74 — Ghidra: undefined (PVOID)
   { emitted: '__global_unwind2', real: '_global_unwind2', source: 'ghidra',
     decl: 'extern "C" void __global_unwind2(void* pRegistration);' },
@@ -492,6 +504,20 @@ const MSVC_RUNTIME_DECLS: ExcludedSymbolDecl[] = [
   // __stdcall_noclobber
   { emitted: '__NLG_Notify', real: '_NLG_Notify', source: 'ghidra',
     decl: 'extern "C" void __NLG_Notify(unsigned long nCode, uint32_t pTarget, void* pFrame);' },
+  // The locale category initialisers __lc_category[] (gaCrtLocaleCategoryTable,
+  // 006f3168) points at. No body calls them; the table's `pfnInit` slots do, so
+  // they are referenced from DATA only, and globals.cpp names them as `&___init_*`.
+  // Ghidra (v1234), VS2005 CRT, __cdecl, each: int (threadlocinfo *_LocInfo)
+  // ___init_ctype @ 0069e425, ___init_monetary @ 0069e161, ___init_numeric @ 0069dedd,
+  // ___init_time @ 0069ddf7. `threadlocinfo` is the CRT's own type (corecrt.h), so Win32 only.
+  { emitted: '___init_ctype', real: '__init_ctype', source: 'ghidra',
+    decl: 'extern "C" int ___init_ctype(threadlocinfo* _LocInfo);', win32Only: true },
+  { emitted: '___init_monetary', real: '__init_monetary', source: 'ghidra',
+    decl: 'extern "C" int ___init_monetary(threadlocinfo* _LocInfo);', win32Only: true },
+  { emitted: '___init_numeric', real: '__init_numeric', source: 'ghidra',
+    decl: 'extern "C" int ___init_numeric(threadlocinfo* _LocInfo);', win32Only: true },
+  { emitted: '___init_time', real: '__init_time', source: 'ghidra',
+    decl: 'extern "C" int ___init_time(threadlocinfo* _LocInfo);', win32Only: true },
   // __ValidateEH3RN @ 00698170 — Ghidra: undefined4 (void*)
   { emitted: '__ValidateEH3RN', real: '_ValidateEH3RN', source: 'ghidra',
     decl: 'extern "C" uint32_t __ValidateEH3RN(void* pRegistration);' },
