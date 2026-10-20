@@ -18,7 +18,9 @@
  *  - each funclet's first instructions, following one fall-through or jump, and
  *    whether each lies inside the parent function (a handler's continuation does);
  *  - how often the function stores each try level, so a store the decompiler printed
- *    once is known to be the only one.
+ *    once is known to be the only one;
+ *  - what the parent does after each try-level store, up to its deregistration: a
+ *    `__finally`'s normal path calls the termination handler's body there.
  *
  * Read-only: one execute_script for the program, no transaction. A failure leaves the
  * field unset, which is what an older snapshot looks like too.
@@ -50,8 +52,25 @@ export interface SehFrameFacts {
   /** The registration's handler symbol (`_except_handler3`, `__except_handler4`). */
   handlerSymbol: string;
   entries: SehScopeEntry[];
-  /** Try level -> how many `mov [ebp-4],level` stores the function holds. */
+  /**
+   * Try level -> how many `mov [ebp-4],level` stores the function holds; `reg` counts
+   * the stores of a register (`mov [ebp-4],ebx` with EBX zeroed), whose level the
+   * instruction does not say.
+   */
   tryLevelStores: Record<string, number>;
+  /**
+   * Per try-level store (by its address): the instructions that follow it by
+   * fall-through, up to and including the `mov fs:[0],reg` deregistration (at most 8).
+   * Absent in snapshots that predate the field.
+   */
+  afterStores?: Record<string, { level: string; code: SehAfterInstruction[] }>;
+}
+
+export interface SehAfterInstruction {
+  address: string;
+  text: string;
+  /** A CALL's target. */
+  callTarget?: string;
 }
 
 /** Java, no imports (the body runs inside GhidraScript.run()). */
@@ -80,14 +99,37 @@ for (ghidra.program.model.listing.Function f : currentProgram.getFunctionManager
   ghidra.program.model.address.Address ta = toAddr(table);
   sb.append("F\\t").append(f.getEntryPoint()).append('\\t').append(eh4 ? "eh4" : "eh3").append('\\t').append(ta).append('\\t').append(hsym).append('\\n');
   java.util.TreeMap<Long, Integer> levels = new java.util.TreeMap<>();
+  int regStores = 0;
+  StringBuilder after = new StringBuilder();
   for (ghidra.program.model.listing.Instruction x : L.getInstructions(f.getBody(), true)) {
     String t = x.toString();
-    if (t.startsWith("MOV dword ptr [EBP + -0x4],") && x.getScalar(1) != null) {
+    if (!t.startsWith("MOV dword ptr [EBP + -0x4],")) continue;
+    String lvText;
+    if (x.getScalar(1) != null) {
       long lv = (int) x.getScalar(1).getValue();
       levels.put(lv, levels.getOrDefault(lv, 0) + 1);
+      lvText = String.valueOf(lv);
+    } else {
+      regStores++;
+      lvText = "reg";
+    }
+    // What the parent does after the store, up to its deregistration: a __finally's
+    // normal path calls the termination handler's body here.
+    ghidra.program.model.listing.Instruction y = x;
+    for (int k = 0; k < 8; k++) {
+      ghidra.program.model.address.Address ft = y.getFallThrough();
+      if (ft == null) break;
+      y = L.getInstructionAt(ft);
+      if (y == null) break;
+      ghidra.program.model.address.Address[] fl = y.getFlows();
+      after.append("X\\t").append(x.getAddress()).append('\\t').append(lvText).append('\\t').append(y.getAddress()).append('\\t')
+        .append(y.getFlowType().isCall() && fl.length == 1 ? fl[0].toString() : "-").append('\\t').append(y.toString()).append('\\n');
+      if (y.toString().startsWith("MOV dword ptr FS:[0x0],")) break;
     }
   }
   for (java.util.Map.Entry<Long, Integer> e : levels.entrySet()) sb.append("L\\t").append(e.getKey()).append('\\t').append(e.getValue()).append('\\n');
+  if (regStores > 0) sb.append("L\\treg\\t").append(regStores).append('\\n');
+  sb.append(after);
   int off = eh4 ? 16 : 0;
   for (int e = 0; e < 64; e++) {
     ghidra.program.model.address.Address ea = ta.add(off + e * 12);
@@ -144,8 +186,16 @@ export function parseSehFrames(output: string): Map<string, SehFrameFacts> {
         break;
       }
       case 'L':
-        if (cur && cols.length >= 3) cur.tryLevelStores[String(Number(cols[1]))] = Number(cols[2]);
+        if (cur && cols.length >= 3) cur.tryLevelStores[cols[1] === 'reg' ? 'reg' : String(Number(cols[1]))] = Number(cols[2]);
         break;
+      case 'X': {
+        if (!cur || cols.length < 6) break;
+        const at = addressKey(cols[1]);
+        cur.afterStores ??= {};
+        const rec = (cur.afterStores[at] ??= { level: cols[2] === 'reg' ? 'reg' : String(Number(cols[2])), code: [] });
+        rec.code.push({ address: addressKey(cols[3]), text: cols.slice(5).join('\t'), ...(cols[4] !== '-' ? { callTarget: addressKey(cols[4]) } : {}) });
+        break;
+      }
       case 'E':
         if (cur && cols.length >= 5) {
           cur.entries.push({
