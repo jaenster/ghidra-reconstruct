@@ -24,8 +24,8 @@ import type {
 import { updateNode } from '../../../transformer.js';
 import { traverseAST } from '../../../../ast/visitor.js';
 import type { LabelInfo, LabelKind, RequiredGotoCleanupOptions } from './types.js';
-import { MAX_INLINE_TAIL_SIZE } from './types.js';
-import { deepCloneStatement, deepCloneStatements } from './helpers.js';
+import { MAX_INLINE_TAIL_NODES, MAX_INLINE_TAIL_SIZE } from './types.js';
+import { countTailNodes, deepCloneStatement, deepCloneStatements } from './helpers.js';
 import { countGotosInStatements } from './analysis.js';
 
 /**
@@ -91,7 +91,7 @@ export function processCleanupTailInlining(
     const tail = labelInfo.tailStatements;
 
     // Check tail is inlineable: short and ends with return/noreturn
-    if (tail.length === 0 || tail.length > MAX_INLINE_TAIL_SIZE) continue;
+    if (tail.length === 0 || tail.length > MAX_INLINE_TAIL_SIZE || countTailNodes(tail) > MAX_INLINE_TAIL_NODES) continue;
     if (labelInfo.kind !== 'exit-return' && labelInfo.kind !== 'cleanup-return'
         && labelInfo.kind !== 'exit-noreturn' && labelInfo.kind !== 'cleanup-fallthrough') continue;
 

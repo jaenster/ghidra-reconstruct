@@ -115,6 +115,16 @@ export const MAX_FIXPOINT_PASSES = 50;
  */
 export const MAX_WHOLE_AST_PASSES = 4;
 export const MAX_INLINE_TAIL_SIZE = 20;
+/**
+ * The same bound in AST nodes, every statement and expression of the tail counted. The
+ * statement count alone lets a tail of ten statements that each hold an already-inlined
+ * copy of the next tail through, and the fixpoint then copies it again: the 8 blocks of
+ * UI_SetMultipleButtonKeyBindings 00453640 (126 lines) grew to 4,377 lines, its tails
+ * 91, 258, 592, ... 10,664 nodes. Measured over the v1131 tree: the median inlined tail is
+ * 24 nodes and the 90th percentile 191; 200 is the "20 short statements" the statement
+ * bound meant, and stops the doubling at its second step.
+ */
+export const MAX_INLINE_TAIL_NODES = 200;
 
 export const DEFAULT_NORETURN_FUNCTIONS = new Set([
   'exit', '_exit', '_Exit', 'abort', '__halt', 'halt_baddata',

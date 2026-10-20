@@ -19,8 +19,8 @@ import type {
 } from '../../../../ast/nodes.js';
 import { updateNode } from '../../../transformer.js';
 import { traverseAST } from '../../../../ast/visitor.js';
-import { MAX_INLINE_TAIL_SIZE } from './types.js';
-import { deepCloneStatements, isSimpleLabelName } from './helpers.js';
+import { MAX_INLINE_TAIL_NODES, MAX_INLINE_TAIL_SIZE } from './types.js';
+import { countTailNodes, deepCloneStatements, isSimpleLabelName } from './helpers.js';
 import { countGotosToLabel } from './cross-scope.js';
 import { inlineGotoInNestedStmt } from './tail-inline.js';
 
@@ -177,7 +177,7 @@ function processSingleSwitch(sw: SwitchStmt): SwitchStmt | null {
     if (!extracted) continue;
 
     const { tail, endsWithBreak, endsWithReturn } = extracted;
-    if (tail.length === 0 || tail.length > MAX_INLINE_TAIL_SIZE) continue;
+    if (tail.length === 0 || tail.length > MAX_INLINE_TAIL_SIZE || countTailNodes(tail) > MAX_INLINE_TAIL_NODES) continue;
 
     // Check tail doesn't contain escaping gotos
     const tailLabels = new Set<string>();

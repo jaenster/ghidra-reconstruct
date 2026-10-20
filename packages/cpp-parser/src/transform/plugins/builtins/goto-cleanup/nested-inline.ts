@@ -24,9 +24,9 @@ import type {
 import { updateNode } from '../../../transformer.js';
 import { traverseAST } from '../../../../ast/visitor.js';
 import type { LabelInfo, RequiredGotoCleanupOptions } from './types.js';
-import { MAX_INLINE_TAIL_SIZE } from './types.js';
+import { MAX_INLINE_TAIL_NODES, MAX_INLINE_TAIL_SIZE } from './types.js';
 import { discoverNestedLabels, countGotosInStatements } from './analysis.js';
-import { deepCloneStatements } from './helpers.js';
+import { countTailNodes, deepCloneStatements } from './helpers.js';
 import { inlineGotoInNestedStmt, createReturnStmt, canFallThrough } from './tail-inline.js';
 
 // ============================================
@@ -290,7 +290,7 @@ export function processNestedTailInlining(
     }
 
     const tail = info.tailStatements;
-    if (tail.length === 0 || tail.length > MAX_INLINE_TAIL_SIZE) continue;
+    if (tail.length === 0 || tail.length > MAX_INLINE_TAIL_SIZE || countTailNodes(tail) > MAX_INLINE_TAIL_NODES) continue;
 
     // Safety: only return/noreturn/cleanup-fallthrough tails for nested labels
     if (info.kind !== 'exit-return' && info.kind !== 'cleanup-return'

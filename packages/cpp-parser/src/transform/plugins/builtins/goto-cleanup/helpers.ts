@@ -254,3 +254,10 @@ export function deepCloneStatements(stmts: Statement[]): Statement[] {
 export function deepCloneStatement(stmt: Statement): Statement {
   return structuredClone(stmt);
 }
+
+/** Every AST node in the statements: what copying them costs. */
+export function countTailNodes(stmts: readonly Statement[]): number {
+  let n = 0;
+  for (const s of stmts) for (const _ of traverseAST(s as unknown as ASTNode)) n++;
+  return n;
+}
