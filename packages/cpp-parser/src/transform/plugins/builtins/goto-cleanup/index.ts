@@ -52,6 +52,7 @@ import { recordStat } from './stats.js';
 import { isSimpleLabelName } from './helpers.js';
 import { countGotosInStatements } from './analysis.js';
 import { setGotoLabelFlow, type LabelFlowFacts } from './copy-policy.js';
+import { canonicalLabels } from '../label-canonical.js';
 import {
   setGlobalGotoCounts,
   clearGlobalGotoCounts,
@@ -280,7 +281,13 @@ function createGotoCleanupTransformer(pluginOptions?: Record<string, unknown>) {
     },
   });
 
-  const labelFlow = (pluginOptions?.labelFlow as Record<string, LabelFlowFacts> | undefined) ?? null;
+  const flowByName = (pluginOptions?.labelFlow as Record<string, LabelFlowFacts> | undefined) ?? null;
+  // The passes see a Ghidra-named label under its default spelling (label-canonical.ts).
+  let labelFlow = flowByName;
+  if (flowByName) {
+    labelFlow = { ...flowByName };
+    for (const [name, canon] of canonicalLabels(flowByName as never)) labelFlow[canon] = flowByName[name];
+  }
   return (node: ASTNode): ASTNode => {
     setCurrentGotoFunction(functionAddress);
     setGotoLabelFlow(labelFlow);

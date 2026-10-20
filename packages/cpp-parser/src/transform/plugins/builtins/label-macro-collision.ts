@@ -28,6 +28,11 @@ function renamed(name: string): string | null {
   return RESERVED_MACROS.has(name) ? `${name}_lbl` : null;
 }
 
+/** The spelling a label named `name` must have to survive the platform headers. */
+export function macroSafeLabel(name: string): string {
+  return renamed(name) ?? name;
+}
+
 /**
  * A name this pass produced. The rename happens at priority 41, long before the
  * passes that reason about labels, so by the time one of them asks "is this a

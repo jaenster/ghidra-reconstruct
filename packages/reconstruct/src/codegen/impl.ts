@@ -2232,7 +2232,7 @@ function transformDecompiledCode(
     /** Ghidra's prototype overrides on this function's indirect calls. */
     callSiteOverrides?: { funcdef: string; arity: number }[];
     /** How control enters each label, from the instructions (extract/label-flow.ts). */
-    labelFlow?: Record<string, { back: number; first: string; pushedArgs: boolean }>;
+    labelFlow?: Record<string, { back: number; first: string; pushedArgs: boolean; address?: string; computed?: number }>;
   },
 ): TransformDecompiledResult {
   try {
@@ -2631,6 +2631,10 @@ function transformDecompiledCode(
     // without one still has to say so, or a fabricated bare `return;` at the tail
     // of a non-void function would drop the value the caller reads.
     // `functionAddress` only attributes the pass's reported events (GHIDRA_GOTO_REPORT_DIR).
+    // Labels Ghidra prints under a name are spelled as its default labels while the goto
+    // passes run, and get the name back after (label-canonical.ts): a name is not structure.
+    perPluginOptions['goto-label-canonical'] = { labelFlow: enclosing?.labelFlow };
+    perPluginOptions['goto-label-restore'] = { labelFlow: enclosing?.labelFlow };
     perPluginOptions['goto-cleanup'] = {
       ...(sig ? {} : { enclosingReturnsVoid: enclosing?.returnsVoid === true }),
       functionAddress: funcAddress,
