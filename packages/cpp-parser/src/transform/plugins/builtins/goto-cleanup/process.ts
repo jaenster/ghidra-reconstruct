@@ -62,12 +62,15 @@ export function accept(
   // The before side the validator proves against, when a lemma pass applied its lemma to it
   // (design 3.1). The reachability net and the goto accounting still read the real before.
   proofBefore?: Statement[],
+  // A rewrite that merges a duplicated block back into the one it copies (switchtree.ts):
+  // work may lose copies, never its last one; the validator proves the paths equal.
+  merge = false,
 ): Statement[] | null {
   // The copies the handler announced belong to this candidate only.
   const copies = takeCopies();
   if (!candidate) return null;
   const opts = { externalGotoCounts: getGlobalGotoCounts(), noreturn: vctx.noreturn };
-  const check = preservesReachableWork(before, candidate, opts);
+  const check = preservesReachableWork(before, candidate, { ...opts, allowMerge: merge });
   if (!check.ok) {
     recordStat('vetoedUnsafe');
     onVeto?.(handler, [...check.lostKeys, ...check.lostEdges]);

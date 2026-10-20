@@ -44,7 +44,7 @@ import type { TransformPlugin } from '../../types.js';
 import type { RequiredGotoCleanupOptions } from './types.js';
 import { DEFAULT_MAX_NESTING, MAX_FIXPOINT_PASSES, MAX_WHOLE_AST_PASSES } from './types.js';
 import { processCompound, accept } from './process.js';
-import { structureBody } from './structure.js';
+import { foldConditions, structureBody } from './structure.js';
 import { DEFAULT_NORETURN_FUNCTIONS } from './types.js';
 import { setExactGotoCounts } from './validate.js';
 import { setCurrentGotoFunction, gotoReport } from './report.js';
@@ -250,22 +250,22 @@ function createGotoCleanupTransformer(pluginOptions?: Record<string, unknown>) {
   // know. Each pass of it strictly lowers the goto count, so this converges; the bound is
   // reported like the round limit.
   const noreturn = new Set([...DEFAULT_NORETURN_FUNCTIONS, ...options.noreturnFunctions]);
-  const structureFn = (fn: FunctionDecl): FunctionDecl | null => {
+  const structureFn = (fn: FunctionDecl, foldOnly = false): FunctionDecl | null => {
     if (!fn.body || fn.body.kind !== NodeKind.CompoundStmt) return null;
     const body = fn.body as CompoundStmt;
     if (!hasGoto(body)) return null;
     const voidFn = enclosingReturnsVoid ?? returnsVoid(fn.returnType);
     const vctx = { followIsExit: true, noreturn };
     const params = new Set(fn.parameters.map(p => p.name?.name).filter((n): n is string => !!n));
-    const next = structureBody(body, {
+    const next = (foldOnly ? foldConditions : structureBody)(body, {
       noreturn, voidFn, params,
-      accept: (before, after, handler, proofBefore) => accept(before, after, handler, vctx, proofBefore),
+      accept: (before, after, handler, proofBefore, merge) => accept(before, after, handler, vctx, proofBefore, merge),
     });
     return next ? updateNode(fn, { body: next }) : null;
   };
   const perFunction = createTransformer({
     visitFunctionDecl(fn) {
-      let r = runRounds(fn) as FunctionDecl;
+      let r = runRounds(structureFn(fn, true) ?? fn) as FunctionDecl;
       for (let pass = 0; ; pass++) {
         if (pass === MAX_WHOLE_AST_PASSES) {
           recordStat('passLimitHit');

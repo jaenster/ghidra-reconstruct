@@ -41,6 +41,11 @@ export interface CfgNode {
    * no statement of its own. Dataflow over the graph needs it; reachability does not.
    */
   expr?: Expression;
+  /**
+   * The if/loop whose comma condition this statement-less node is a part of (build.ts
+   * `emitCond`). It carries none of the condition's facts; it says where the node sits.
+   */
+  owner?: Statement;
 }
 
 export interface Cfg {
@@ -73,4 +78,10 @@ export interface BuildCfgOptions {
    * falling into whatever follows its copy.
    */
   noreturn?: ReadonlySet<string>;
+  /**
+   * Model a condition holding a comma as short-circuit nodes, its comma operands keyed as
+   * work (build.ts `emitCond`). For the reachability net and the copy policy, which must
+   * see work moved between a statement and a condition; dataflow keeps one node per test.
+   */
+  commaConditions?: boolean;
 }

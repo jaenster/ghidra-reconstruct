@@ -234,11 +234,13 @@ function endIsShared(facts: CopyFacts): boolean {
   let cfg;
   // Labels are entry points only for the gotos the region itself holds: an entry from
   // outside it is not known here, and not knowing means no evidence.
-  try { cfg = buildCfg(region, { noreturn: facts.noreturn, externalGotoCounts: countGotoTargets(region) }); } catch { return false; }
+  try { cfg = buildCfg(region, { noreturn: facts.noreturn, externalGotoCounts: countGotoTargets(region), commaConditions: true }); } catch { return false; }
   const inTail = new Set<object>();
   for (const s of tail) for (const n of traverseAST(s as ASTNode)) inTail.add(n);
   const tailNodes = new Set<number>();
-  for (const nd of cfg.nodes) if (nd.stmt && inTail.has(nd.stmt as object)) tailNodes.add(nd.id);
+  // A node of a comma condition stands for the if or loop it belongs to.
+  const at = (nd: { stmt: Statement | null; owner?: Statement }) => nd.stmt ?? nd.owner ?? null;
+  for (const nd of cfg.nodes) { const s = at(nd); if (s && inTail.has(s as object)) tailNodes.add(nd.id); }
   if (!tailNodes.size) return false;
   const JUMPS = new Set<string>([NodeKind.GotoStmt, NodeKind.ReturnStmt, NodeKind.BreakStmt, NodeKind.ContinueStmt]);
   const ends = new Set<number>();
@@ -272,7 +274,8 @@ function endIsShared(facts: CopyFacts): boolean {
     for (const nd of cfg.nodes) {
       if (tailNodes.has(nd.id) || chain.has(nd.id) || !nd.succ.includes(p)) continue;
       if (nd.stmt?.kind === NodeKind.GotoStmt && facts.label && (nd.stmt as GotoStmt).label.name === facts.label) continue;
-      if (!nd.stmt || (scope && !scope.has(nd.stmt as object))) continue;
+      const s = at(nd);
+      if (!s || (scope && !scope.has(s as object))) continue;
       return true;
     }
   }

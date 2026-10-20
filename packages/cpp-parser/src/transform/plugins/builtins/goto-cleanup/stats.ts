@@ -24,6 +24,8 @@ const emptyStats = (): GotoCleanupStats => ({
   exitMove: 0,
   exitHoist: 0,
   rotateEntry: 0,
+  dagFold: 0,
+  switchTree: 0,
   switchCaseGoto: 0,
   backwardToLoop: 0,
   forwardCascade: 0,
