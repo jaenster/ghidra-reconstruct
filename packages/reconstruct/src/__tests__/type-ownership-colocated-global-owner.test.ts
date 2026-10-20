@@ -86,3 +86,14 @@ describe('computeTypeOwnership: struct-colocated globals', () => {
     }
   });
 });
+
+describe('computeTypeOwnership: a stale ownership override', () => {
+  it('places nothing for a type the program does not have (no empty header)', () => {
+    const { typeOwnerMap, extraHeaderTypes } = computeTypeOwnership({
+      organized: new Map(), classes: [], dataTypes: [], globals: [], unitHeaderPaths: new Map(),
+      typeOwnershipOverrides: new Map([['switchD_0046b678', 'D2Client/switchD_0046b678.h']]),
+    });
+    assert.strictEqual(typeOwnerMap.has('switchD_0046b678'), false);
+    assert.strictEqual(extraHeaderTypes.has('D2Client/switchD_0046b678.h'), false);
+  });
+});

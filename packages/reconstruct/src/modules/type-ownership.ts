@@ -383,7 +383,15 @@ export function computeTypeOwnership(input: TypeOwnershipInput): TypeOwnershipRe
   }
 
   // ── Phase 4: Explicit overrides ─────────────────────────────────────
+  const knownTypeNames = new Set(dataTypes.map(d => d.name));
   for (const [typeName, headerPath] of typeOwnershipOverrides) {
+    // An override for a type the program no longer has (project.json still places
+    // `switchD_0046b678`, a type renamed away in Ghidra) would claim a header nothing
+    // fills: an empty D2Client/switchD_0046b678.h in the tree and its CMake list.
+    if (!knownTypeNames.has(typeName) && !unitHeaderPaths.has(typeName)) {
+      console.warn(`[type-ownership] project.json places '${typeName}', which the program has no type of; ignored`);
+      continue;
+    }
     typeOwnerMap.set(typeName, headerPath);
     if (unitHeaderPaths.has(typeName)) {
       unitHeaderPaths.set(typeName, headerPath);
