@@ -79,6 +79,12 @@ export interface ExtractedFunction {
    * call-site-override-cast). Absent when the snapshot predates them.
    */
   callSiteOverrides?: { callAddress: string; funcdef: string; arity: number }[];
+  /**
+   * The MSVC EH3/EH4 registration the function opens with, its scope table and the
+   * funclets' first instructions (extract/seh-frames.ts). Absent when the function has
+   * none or the snapshot predates the field.
+   */
+  sehFrame?: import('./extract/seh-frames.js').SehFrameFacts;
 }
 
 /**

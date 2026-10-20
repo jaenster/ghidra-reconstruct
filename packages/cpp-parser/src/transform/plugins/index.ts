@@ -597,6 +597,8 @@ import { shadowedTypeQualifyPlugin } from './builtins/shadowed-type-qualify.js';
 export { shadowedTypeQualifyPlugin, type ShadowedTypeQualifyOptions } from './builtins/shadowed-type-qualify.js';
 import { functionShadowedGlobalPlugin } from './builtins/function-shadowed-global.js';
 import { globalAliasResolvePlugin } from './builtins/global-alias-resolve.js';
+import { sehLoweringPlugin } from './builtins/seh-lowering.js';
+export { sehLoweringPlugin, type SehLoweringOptions, type SehLoweringScope } from './builtins/seh-lowering.js';
 export { globalAliasResolvePlugin, type GlobalAliasResolveOptions } from './builtins/global-alias-resolve.js';
 export { functionShadowedGlobalPlugin, type FunctionShadowedGlobalOptions } from './builtins/function-shadowed-global.js';
 import { arrayGlobalAddressOfPlugin } from './builtins/array-global-address-of.js';
@@ -711,6 +713,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   enclosingNamespaceStripPlugin, // Cleanup: drop the enclosing namespace prefix from a reference (priority 900, last)
   functionNameReconcilePlugin, // Cleanup: respell a reference with the declaration's name+namespace (priority 20)
   globalAliasResolvePlugin,   // Cleanup: respell a secondary Ghidra label with its address's primary label (priority 19)
+  sehLoweringPlugin,          // Correctness: an EH3 __try/__except frame -> a D2SehScope on fs:[0] (priority 680)
   thisParamRewritePlugin,     // Cleanup: __thiscall `this` → the free function's param name (priority 46)
   stackFrameAddressPlugin,    // Cleanup: `&stack0xNNNN` → the frame slot that owns it (priority 520)
   shadowedTypeQualifyPlugin,  // Cleanup: (Draw**)x → (::Draw**)x when a same-named namespace shadows the type (priority 47)
