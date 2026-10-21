@@ -109,6 +109,18 @@ function identName(e: ASTNode | null | undefined): string | undefined {
   return undefined;
 }
 
+/**
+ * `(EH3_EXCEPTION_REGISTRATION*)ExceptionList`: the cast `assign-cast` writes where C
+ * converted the TEB's `void*` into the typed link implicitly. It is the same load.
+ */
+function withoutCast(e: Expression): Expression {
+  let cur = e;
+  while (cur.kind === NodeKind.CStyleCastExpr || cur.kind === NodeKind.ParenExpr) {
+    cur = (cur as unknown as { expression: Expression }).expression;
+  }
+  return cur;
+}
+
 function constValue(e: Expression): number | undefined {
   switch (e.kind) {
     case NodeKind.IntegerLiteral: {
@@ -245,7 +257,7 @@ function lower(fn: FunctionDecl, scopes: SehLoweringScope[], refuse: (r: string)
   for (const [s, u] of uses) {
     if (u.kind !== 'field' || u.field === 'TryLevel') continue;
     if (!['ScopeTable', 'ExceptionHandler', 'Next'].includes(u.field)) return refuse(`a store to ${frame}.${u.field}`), false;
-    if (u.field === 'Next' && identName(u.value) !== LIST) return refuse(`${frame}.Next is not ExceptionList`), false;
+    if (u.field === 'Next' && identName(withoutCast(u.value)) !== LIST) return refuse(`${frame}.Next is not ExceptionList`), false;
     const k = at(s);
     if (k < 0 || k > i0) return refuse(`${frame}.${u.field} is set inside the region`), false;
   }

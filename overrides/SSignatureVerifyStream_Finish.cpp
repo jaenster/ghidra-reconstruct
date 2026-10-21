@@ -39,7 +39,7 @@ if (pContext->nBytesBuffered == pContext->nBufferSize &&     // 0041d6e4 / 0041d
 
   SSystem::SMemFill(pHash, nSigLen, 0xbb);             // 0041d710-0041d717
   pHash[pContext->nDataLen - 1] = 0x0b;                      // 0041d71c / 0041d722
-  Sha1_Finalize((int32_t)pHash, pContext->sha1State + 1);    // 0041d71e-0041d727
+  Sha1_Finalize(pHash, &pContext->sSha1);                    // 0041d71e-0041d727  LEA ECX,[ESI+0x18]: the SHA-1 context
 
   uint8_t* pSig = (uint8_t*)__builtin_alloca(pContext->nDataLen); // 0041d72c-0041d735
 

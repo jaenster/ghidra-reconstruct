@@ -179,14 +179,17 @@ export function buildModuleGraph(input: BuildModuleGraphInput): ModuleGraph {
       }
     }
 
-    // Add deps from file-local globals
+    // Add deps from file-local globals. A file-local global is DEFINED in the
+    // implementation file and declared nowhere else, so its type - even by value
+    // - is the .cpp's dependency, never the header's (`by-pointer` is the graph's
+    // impl-level strength). Charging it to the header made `Fog/Memory.h` include
+    // `D2MemoryManagerStrc.h` for the interior labels of `pGlobalPoolSystem`, which
+    // closed an include cycle through `D2PoolManagerStrc.h` back to `Fog/Memory.h`.
     for (const g of globals) {
       if (g.scope === 'file-local' && g.ownerFile === mod.implPath) {
         const stripped = stripTypeName(g.dataType);
         if (stripped && !isPlatformOrBuiltinType(stripped) && !ownedTypeNames.has(stripped)) {
-          const strength: DepStrength = (g.dataType.includes('*') || g.dataType.includes('&'))
-            ? 'by-pointer' : 'by-value';
-          graph.addDependency(headerPath, stripped, strength);
+          graph.addDependency(headerPath, stripped, 'by-pointer');
         }
         mod.globals.push(g);
       }

@@ -7,10 +7,10 @@ import assert from 'node:assert/strict';
 import { parse } from '../../../parser/index.js';
 import { emit } from '../../../emit/index.js';
 import type { ASTNode } from '../../../ast/nodes.js';
-import { gotoLabelCanonicalPlugin, gotoLabelRestorePlugin, canonicalLabels } from '../builtins/label-canonical.js';
+import { gotoLabelCanonicalPlugin, gotoLabelRestorePlugin, canonicalLabels, joinedLabelNames } from '../builtins/label-canonical.js';
 import { gotoCleanupPlugin } from '../builtins/goto-cleanup/index.js';
 
-const run = (code: string, flow: Record<string, { address: string; computed?: number }>) => {
+const run = (code: string, flow: Record<string, { address: string; computed?: number; symbol?: string }>) => {
   let ast = parse(code) as ASTNode;
   ast = gotoLabelCanonicalPlugin.createTransformer({ labelFlow: flow } as never)(ast);
   ast = gotoCleanupPlugin.createTransformer({ labelFlow: flow } as never)(ast);
@@ -36,5 +36,21 @@ describe('label-canonical', () => {
     assert.match(out, /goto ERROR_lbl;/);
     assert.match(out, /ERROR_lbl:/);
     assert.doesNotMatch(out, /LAB_00558dd4/);
+  });
+  it('a joined block takes the name Ghidra gives its address (inflate case_TIME @00429e3b)', () => {
+    const flow = {
+      joined_r0x00429e3b: { address: '00429e3b', symbol: 'case_TIME' },
+      joined_r0x00429eb3: { address: '00429eb3', symbol: 'case_OS' },
+      joined_r0x00401000: { address: '00401000' },
+    };
+    assert.deepEqual([...joinedLabelNames(flow)], [['joined_r0x00429e3b', 'case_TIME'], ['joined_r0x00429eb3', 'case_OS']]);
+    const src = `int f(int a, int b) { while (a) { if (b) goto joined_r0x00429e3b; a = g(a); if (a < 0) goto joined_r0x00429e3b; } use(a); return 1; joined_r0x00429e3b: Release(a); Release(b); Log(a); Log(b); return 0; }`;
+    const out = run(src, flow);
+    assert.match(out, /goto case_TIME;/);
+    assert.match(out, /case_TIME:/);
+    assert.doesNotMatch(out, /joined_r0x/);
+  });
+  it('a joined block keeps its spelling when the name is already a label of the function', () => {
+    assert.deepEqual([...joinedLabelNames({ case_TIME: { address: '00429e38' }, joined_r0x00429e3b: { address: '00429e3b', symbol: 'case_TIME' } })], []);
   });
 });

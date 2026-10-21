@@ -273,6 +273,10 @@ const PLATFORM_DEFINED_TYPES = new Set<string>([
   // tables are globals of them, so d2_platform.h defines them - see MSVC_SEH3_TYPE_LINES.
   'EH3_EXCEPTION_REGISTRATION', 'EH3_SCOPETABLE_ENTRY', 'EH3_FILTER', 'EH3_HANDLER',
   'fnDestructExceptionObject',
+  // The EH4 registration (Ghidra /CRT/SEH, typed in round O2, v1405): the frame local
+  // of DebugThread, DEBUG_EnumerateModulesViaPEB, DEBUG_UnwindStackFrames and
+  // EnqueueFormattedLogMessage.
+  'EH4_EXCEPTION_REGISTRATION', 'EH4_EXCEPT_HANDLER',
 ]);
 
 /**
@@ -281,7 +285,7 @@ const PLATFORM_DEFINED_TYPES = new Set<string>([
  * `EH3_FILTER` like every other funcdef - and are registered as known funcdefs even
  * when the model does not carry them (their category is excluded).
  */
-export const PLATFORM_FUNCDEF_NAMES: readonly string[] = ['EH3_FILTER', 'EH3_HANDLER', 'fnDestructExceptionObject'];
+export const PLATFORM_FUNCDEF_NAMES: readonly string[] = ['EH3_FILTER', 'EH3_HANDLER', 'fnDestructExceptionObject', 'EH4_EXCEPT_HANDLER'];
 
 /**
  * The /CRT/SEH types, spelled from Ghidra's records (v1268) - the layout is the MSVC
@@ -304,6 +308,16 @@ const MSVC_SEH3_TYPE_LINES: readonly string[] = [
   '    int32_t TryLevel;                  // index into ScopeTable, -1 = outside any __try',
   '};',
   'static_assert(sizeof(void*) != 4 || (sizeof(EH3_SCOPETABLE_ENTRY) == 12 && sizeof(EH3_EXCEPTION_REGISTRATION) == 16), "SEH3 layout");',
+  '// MSVC EH4 registration (Ghidra /CRT/SEH): the part linked on fs:[0]; the frame pointer EBP is at +0x10',
+  'struct EH4_EXCEPTION_REGISTRATION;',
+  'typedef int (*EH4_EXCEPT_HANDLER)(struct _EXCEPTION_RECORD* pExceptionRecord, EH4_EXCEPTION_REGISTRATION* pRegistration, CONTEXT* pContext, void* pDispatcherContext);',
+  'struct EH4_EXCEPTION_REGISTRATION {',
+  '    EH4_EXCEPTION_REGISTRATION* Next;   // fs:[0] chain',
+  '    EH4_EXCEPT_HANDLER ExceptionHandler; // __except_handler4',
+  '    uint32_t EncodedScopeTable;          // scope table address XOR __security_cookie',
+  '    int32_t TryLevel;                    // index into the scope table, -2 = outside any __try',
+  '};',
+  'static_assert(sizeof(void*) != 4 || sizeof(EH4_EXCEPTION_REGISTRATION) == 16, "EH4 layout");',
 ];
 
 /**
@@ -1049,6 +1063,10 @@ export const PLATFORM_STRUCT_FIELD_TYPES: ReadonlyMap<string, ReadonlyMap<string
     ['Next', 'EH3_EXCEPTION_REGISTRATION *'], ['ExceptionHandler', 'void *'],
     ['ScopeTable', 'EH3_SCOPETABLE_ENTRY *'], ['TryLevel', 'int32_t'],
   ])],
+  ['EH4_EXCEPTION_REGISTRATION', new Map([
+    ['Next', 'EH4_EXCEPTION_REGISTRATION *'], ['ExceptionHandler', 'EH4_EXCEPT_HANDLER *'],
+    ['EncodedScopeTable', 'uint32_t'], ['TryLevel', 'int32_t'],
+  ])],
   ['RECT', new Map([['left', 'long'], ['top', 'long'], ['right', 'long'], ['bottom', 'long']])],
   ['FILETIME', new Map([['dwLowDateTime', 'DWORD'], ['dwHighDateTime', 'DWORD']])],
   ['GUID', new Map([
@@ -1669,9 +1687,10 @@ export function generatePlatformHeader(
   // declares is `PFN_X *`, so the typedef has to name the function itself for
   // that to be one pointer, not two. Signatures are Ghidra's own record —
   // `undefined4(int *, PVOID, undefined4)` and
-  // `void(EHExceptionRecord *, EHRegistrationNode *, _CONTEXT *, void *)` — which
-  // agree exactly with the `__except_handler4` and `_Wrappers::CRT_ExceptionFilterN`
-  // declarations this header already writes, so the assignment needs no cast.
+  // `void(EHExceptionRecord *, EHRegistrationNode *, _CONTEXT *, void *)`. The first is
+  // the 3-argument record `__except_handler4` itself still carried at v1096; that
+  // function is now declared with the 4-argument EH4_EXCEPT_HANDLER funcdef its frames
+  // store it as, and no body declares a PFN_ExceptHandler4 local any more.
   lines.push('// Function-signature types from the excluded `_Wrappers` category (Ghidra: /_Wrappers)');
   lines.push('typedef uint32_t PFN_ExceptHandler4(int* pnParam, void* pParam, uint32_t dwParam);');
   lines.push('typedef void PFN_CrtExceptionFilter(EHExceptionRecord* pExceptionRecord, EHRegistrationNode* pRegistrationNode, CONTEXT* pContext, void* pParam);');

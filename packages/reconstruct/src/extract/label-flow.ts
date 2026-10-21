@@ -16,6 +16,11 @@
  *   computed    computed references (switch tables)
  *   first       the mnemonic of the label's first instruction
  *   pushedArgs  every way in (fallthrough and each jump) is preceded by a PUSH
+ *   symbol      the name Ghidra gives the label's address, where the decompile could not
+ *               print it: a JOINED block is always printed `joined_r0x<addr>`, so a name
+ *               put there (`case_TIME` @00429e3b in zlib's inflate) never reaches the
+ *               pseudo-C. The name is read at the label's address, or at the start of the
+ *               basic block holding it (the case's own first instruction, 00429e38).
  *
  * Read-only: one execute_script per batch, no transaction. A failure leaves the field unset,
  * which is also what an older snapshot looks like; the policy then has no A1/A3 evidence.
@@ -86,9 +91,21 @@ for (String it : items.split(";")) {
     if (q == null || !q.getMnemonicString().equals("PUSH")) pushed = false;
   }
   String as = A.toString();
+  String sym = "-";
+  if (f != null && (a[1].startsWith("joined_r0x") || a[1].startsWith("code_r0x"))) {
+    ghidra.program.model.symbol.Symbol ps = st.getPrimarySymbol(A);
+    if (ps == null || ps.getSource() == ghidra.program.model.symbol.SourceType.DEFAULT) {
+      ghidra.program.model.block.CodeBlock cb = new ghidra.program.model.block.BasicBlockModel(currentProgram).getFirstCodeBlockContaining(A, monitor);
+      ps = cb == null ? null : st.getPrimarySymbol(cb.getFirstStartAddress());
+    }
+    if (ps != null && ps.getSource() != ghidra.program.model.symbol.SourceType.DEFAULT
+        && ps.getSymbolType() == ghidra.program.model.symbol.SymbolType.LABEL
+        && f.getBody().contains(ps.getAddress()) && ps.getName().matches("[A-Za-z_][A-Za-z0-9_]*")) sym = ps.getName();
+  }
   sb.append(compact ? String.valueOf(idx) : it).append('\\t').append(compact && a[1].endsWith(as) ? "=" : as).append('\\t').append(fall ? 1 : 0).append('\\t').append(back)
     .append('\\t').append(cf).append('\\t').append(uf).append('\\t').append(comp)
-    .append('\\t').append(at == null ? "-" : at.getMnemonicString()).append('\\t').append(pushed ? 1 : 0).append('\\n');
+    .append('\\t').append(at == null ? "-" : at.getMnemonicString()).append('\\t').append(pushed ? 1 : 0)
+    .append('\\t').append(sym).append('\\n');
 }
 println(sb.toString());
 `;
@@ -121,7 +138,7 @@ export function parseLabelFlow(output: string, batch?: string[]): Map<string, Re
     const c = line.trim().split('\t');
     if (c.length < 9) continue;
     let [item, address] = c;
-    const [, , fall, back, cf, uf, comp, first, pushed] = c;
+    const [, , fall, back, cf, uf, comp, first, pushed, symbol] = c;
     if (batch && /^\d+$/.test(item)) item = batch[Number(item)];
     if (!item) continue;
     if (address === '=') address = item.slice(item.length - 8);
@@ -133,6 +150,7 @@ export function parseLabelFlow(output: string, batch?: string[]): Map<string, Re
     rec[label] = {
       address: normalize(address), fallIn: fall === '1', back: Number(back), condFwd: Number(cf),
       uncondFwd: Number(uf), computed: Number(comp), first, pushedArgs: pushed === '1',
+      ...(symbol && symbol !== '-' ? { symbol } : {}),
     };
   }
   return out;

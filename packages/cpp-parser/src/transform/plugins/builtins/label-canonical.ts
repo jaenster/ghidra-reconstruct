@@ -17,6 +17,12 @@
  *
  * The names stay Ghidra's: nothing here invents one. A label without a located address (a
  * snapshot without the field, a label Ghidra prints with a namespace) is left as written.
+ *
+ * A JOINED block is the one label the decompiler prints under its default spelling even
+ * when Ghidra has a name for it (`joined_r0x00429e3b` is `case_TIME` in zlib's inflate).
+ * The extraction reads that name (labelFlow `symbol`); the passes see the default spelling
+ * they always saw, and the restore gives the label the name - unless the function already
+ * has a label of that name.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -25,7 +31,7 @@ import { createTransformer, updateNode, type Transformer } from '../../transform
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { macroSafeLabel } from './label-macro-collision.js';
 
-interface Flow { address?: string; computed?: number }
+interface Flow { address?: string; computed?: number; symbol?: string }
 export interface LabelCanonicalOptions extends PluginOptions { labelFlow?: Record<string, Flow> | null }
 
 const DEFAULT = /^(LAB_[0-9a-f]{8}|switchD_\w+|caseD_\w+|joined_r0x[0-9a-f]{8}|code_r0x[0-9a-f]{8}|override_jmp_\w+)$/i;
@@ -38,6 +44,20 @@ export function canonicalLabels(flow: Record<string, Flow> | null | undefined): 
     if (DEFAULT.test(name) || !f?.address || !/^[0-9a-f]{8}$/i.test(f.address)) continue;
     const a = f.address.toLowerCase();
     out.set(name, (f.computed ?? 0) > 0 ? `switchD_${a}_caseD_${a}` : `LAB_${a}`);
+  }
+  return out;
+}
+
+/** default spelling -> Ghidra's name, for the labels the decompile cannot print named. */
+export function joinedLabelNames(flow: Record<string, Flow> | null | undefined): Map<string, string> {
+  const out = new Map<string, string>();
+  if (!flow) return out;
+  const taken = new Set(Object.keys(flow).filter(n => !DEFAULT.test(n)));
+  for (const [name, f] of Object.entries(flow)) {
+    if (!/^(joined|code)_r0x[0-9a-f]{8}$/i.test(name) || !f?.symbol || !/^[A-Za-z_]\w*$/.test(f.symbol)) continue;
+    if (taken.has(f.symbol)) continue;
+    taken.add(f.symbol);
+    out.set(name, f.symbol);
   }
   return out;
 }
@@ -75,6 +95,7 @@ export const gotoLabelRestorePlugin: TransformPlugin = {
   createTransformer: (o?: LabelCanonicalOptions) => {
     const back = new Map<string, string>();
     for (const [name, c] of canonicalLabels(o?.labelFlow)) back.set(c, macroSafeLabel(name));
+    for (const [name, symbol] of joinedLabelNames(o?.labelFlow)) back.set(name, macroSafeLabel(symbol));
     return renamer(back);
   },
 };

@@ -184,6 +184,8 @@ interface GhidraFunctionInfo {
     size: number;
     ordinal: number;
     storage?: string;
+    /** The type the decompiler resolved for an `undefined` slot (newer daemons send it as its own key). */
+    resolvedType?: string | null;
   }>;
   localVariables?: Array<{
     name: string;
@@ -192,6 +194,7 @@ interface GhidraFunctionInfo {
     storage: string;
     stackOffset?: number;
     register?: string;
+    resolvedType?: string | null;
   }>;
   callingConvention: string;
   size: number;
@@ -937,10 +940,21 @@ function mapFunctionInfo(info: GhidraFunctionInfo): ExtractedFunction {
   };
 }
 
+/**
+ * The daemon's separate `resolvedType` key, folded by the same rule as the inline
+ * `/* resolvedType: *\/` annotation (`resolveAnnotatedType`): it replaces only an
+ * `undefined` placeholder. Dropped on the floor, every uncurated slot reached codegen
+ * as `undefined4` while the body had been decompiled against the resolved type.
+ */
+export function withResolvedType(dataType: string, resolvedType: string | null | undefined): string {
+  if (!resolvedType || !resolvedType.trim()) return dataType;
+  return /^undefined\d*(\[\d+\])?$/.test(dataType.trim()) ? resolvedType.trim() : dataType;
+}
+
 function mapParameter(param: NonNullable<GhidraFunctionInfo['parameters']>[0]): ExtractedParameter {
   return {
     name: param.name,
-    dataType: param.dataType,
+    dataType: withResolvedType(param.dataType, param.resolvedType),
     size: param.size,
     ordinal: param.ordinal,
     storage: param.storage,
@@ -950,7 +964,7 @@ function mapParameter(param: NonNullable<GhidraFunctionInfo['parameters']>[0]): 
 function mapVariable(variable: NonNullable<GhidraFunctionInfo['localVariables']>[0]): ExtractedVariable {
   return {
     name: variable.name,
-    dataType: variable.dataType,
+    dataType: withResolvedType(variable.dataType, variable.resolvedType),
     size: variable.size,
     storage: variable.storage,
     stackOffset: variable.stackOffset,

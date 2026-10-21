@@ -293,6 +293,30 @@ describe('ModuleGraph', () => {
       assert.strictEqual(cycles[0].length, 2);
     });
 
+    it('resolve() cuts an edge that is really in the cycle (a component is a set, not a path)', () => {
+      // A -> B -> C -> A, all by value. Tarjan pops C, B, A; "last member to the
+      // first" is A -> C, which is not an edge, and the old breaker removed nothing.
+      const g = createTestGraph();
+      makeModule(g, 'A.h', 'A');
+      makeModule(g, 'B.h', 'B');
+      makeModule(g, 'C.h', 'C');
+      g.exportSymbol('A.h', 'TypeA', 'struct');
+      g.exportSymbol('B.h', 'TypeB', 'struct');
+      g.exportSymbol('C.h', 'TypeC', 'struct');
+      g.addDependency('A.h', 'TypeB', 'by-value');
+      g.addDependency('B.h', 'TypeC', 'by-value');
+      g.addDependency('C.h', 'TypeA', 'type-ref');
+
+      const resolved = g.resolve();
+      assert.deepStrictEqual(g.findHeaderCycles(resolved), [], 'no header cycle may survive resolve()');
+      // The type-ref edge is the one a forward declaration satisfies, so it is the one cut.
+      assert.deepStrictEqual(resolved.get('C.h')!.headerIncludes, []);
+      assert.deepStrictEqual(resolved.get('C.h')!.implIncludes, ['A.h']);
+      assert.deepStrictEqual(resolved.get('C.h')!.forwardDecls, ['TypeA']);
+      assert.deepStrictEqual(resolved.get('A.h')!.headerIncludes, ['B.h']);
+      assert.deepStrictEqual(resolved.get('B.h')!.headerIncludes, ['C.h']);
+    });
+
     it('resolve() breaks cycles with forward decls', () => {
       const g = createTestGraph();
       makeModule(g, 'A.h', 'A');
