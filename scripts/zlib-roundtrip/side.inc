@@ -40,6 +40,10 @@ int SIDE(inflate)(const unsigned char* in, unsigned inLen, unsigned char* out, u
   msg[0] = 0;
   int r = (int)INFLATE_INIT2(&s, windowBits, (char*)"1.2.8", (int)sizeof s);
   if (r) return r;
+  // A raw stream (windowBits < 0) has no header, so it never names a dictionary and inflate
+  // never returns Z_NEED_DICT for it: the dictionary is set before the first inflate call.
+  // A zlib stream asks for it (Z_NEED_DICT, below) and only accepts it then.
+  if (dict && windowBits < 0 && (r = (int)INFLATE_SETDICT(&s, (unsigned char*)dict, dictLen))) { INFLATE_END(&s); return r; }
   unsigned pos = 0, opos = 0;
   int guard = 0;
   for (;;) {
