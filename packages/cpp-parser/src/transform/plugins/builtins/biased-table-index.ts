@@ -20,12 +20,17 @@
  * B's, biased: `B[X + (A + C - B)]`. Here that is `TXT_ParseFieldTypeCaseIndex[eType - 1]`,
  * the same byte for every eType. Held to a 1-byte access and a 1-byte-element B, and
  * to a bias of at most 8 below B - an address INSIDE A plus a small constant is A's own.
+ *
+ * When A is a byte array the decompiler subscripts it instead (`A[X + C]`). That shape
+ * is held tighter, to the 1-based idiom exactly (C is A's last byte, the address is
+ * B - 1): a small byte array subscripted with a small or no constant sits just as close
+ * to the next table and is A's own read (`gaPanelStatColors[nIndex]`).
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, BinaryExpr, CStyleCastExpr, Expression, Identifier, IntegerLiteralExpr, ParenExpr,
-  PointerType, QualifiedId, TypedefType, UnaryExpr, BuiltinType,
+  PointerType, QualifiedId, TypedefType, UnaryExpr, BuiltinType, SubscriptExpr,
 } from '../../../ast/nodes.js';
 import { Expr } from '../../../ast/factory.js';
 import { createTransformer, type Transformer } from '../../transformer.js';
@@ -124,6 +129,36 @@ export function createBiasedTableIndexTransformer(options?: PluginOptions): Tran
   }
   if (byAddress.size === 0) return (n: ASTNode) => n;
 
+  /**
+   * `A + C + X` (A a global named by `sym`, C the constant terms, X the rest) read
+   * one byte at a time: B[X - bias] when A + C lies at most MAX_BIAS below the
+   * byte table B that starts where A ends.
+   */
+  function rebias(
+    sym: { name: string; node: Identifier | QualifiedId },
+    constant: number,
+    index: Expression[],
+    node: ASTNode,
+  ): ASTNode | undefined {
+    if (index.length === 0) return undefined;
+    const base = addresses[sym.name];
+    const size = sizes[sym.name];
+    if (size === undefined) return undefined;
+    const nextName = byAddress.get(base + size);
+    if (!nextName || elementSizes[nextName] !== 1) return undefined;
+    const bias = base + constant - (base + size);
+    if (bias >= 0 || bias < -MAX_BIAS) return undefined;
+
+    let idx: Expression = index.reduce((a, b) => Expr.binary(a, '+', b));
+    idx = Expr.binary(idx, '-', Expr.intLiteral(-bias));
+    // The neighbour is spelled with the same qualifier the symbol was.
+    const nextRef: Expression = sym.node.kind === NodeKind.QualifiedId
+      ? { ...(sym.node as QualifiedId), name: { ...Expr.identifier(nextName) } } as QualifiedId
+      : Expr.identifier(nextName);
+    return { ...Expr.subscript(nextRef, idx), location: node.location,
+      leadingTrivia: node.leadingTrivia, trailingTrivia: node.trailingTrivia };
+  }
+
   return createTransformer({
     visitUnaryExpr(node: UnaryExpr): ASTNode | undefined {
       if (node.operator !== '*') return undefined;
@@ -153,23 +188,34 @@ export function createBiasedTableIndexTransformer(options?: PluginOptions): Tran
         if (v !== null) { constant += v; continue; }
         index.push(t);
       }
-      if (!sym || index.length === 0) return undefined;
-      const base = addresses[sym.name];
+      if (!sym) return undefined;
+      return rebias(sym, constant, index, node);
+    },
+    // The same read when A is itself a byte array: the decompiler subscripts it,
+    // `gaItemPaletteTransformData[byPrimaryColor + 0x3b0ff]` for
+    // `MOV AL,[EDX + 0x87d80f]` (D2COMP_LoadGuildEmblemIcon @00505425), A being
+    // 0x3b100 bytes, so the read is gaGlideEmblemPrimaryColorTableEntries[byPrimaryColor - 1].
+    visitNode(node: ASTNode): ASTNode | undefined {
+      if (node.kind !== NodeKind.SubscriptExpr) return undefined;
+      const sub = node as SubscriptExpr;
+      const sym = symbolName(unwrap(sub.array));
+      if (!sym || addresses[sym.name] === undefined || elementSizes[sym.name] !== 1) return undefined;
+      const parts: Expression[] = [];
+      terms(sub.index, parts);
+      let constant = 0;
+      const index: Expression[] = [];
+      for (const t of parts) {
+        const v = constValue(t, enumValues);
+        if (v !== null) { constant += v; continue; }
+        index.push(t);
+      }
+      // Held to the 1-based idiom exactly: the constant is A's last byte, so the
+      // address is `B - 1`. A subscript of a SMALL byte array with a small or no
+      // constant (`gaPanelStatColors[nIndex]`, 4 bytes) is just as close to the next
+      // table and is A's own read; only the folded `table - 1` is evidence.
       const size = sizes[sym.name];
-      if (size === undefined) return undefined;
-      const nextName = byAddress.get(base + size);
-      if (!nextName || elementSizes[nextName] !== 1) return undefined;
-      const bias = base + constant - (base + size);
-      if (bias >= 0 || bias < -MAX_BIAS) return undefined;
-
-      let idx: Expression = index.reduce((a, b) => Expr.binary(a, '+', b));
-      idx = Expr.binary(idx, '-', Expr.intLiteral(-bias));
-      // The neighbour is spelled with the same qualifier the symbol was.
-      const nextRef: Expression = sym.node.kind === NodeKind.QualifiedId
-        ? { ...(sym.node as QualifiedId), name: { ...Expr.identifier(nextName) } } as QualifiedId
-        : Expr.identifier(nextName);
-      return { ...Expr.subscript(nextRef, idx), location: node.location,
-        leadingTrivia: node.leadingTrivia, trailingTrivia: node.trailingTrivia };
+      if (size === undefined || constant !== size - 1 || constant <= 0) return undefined;
+      return rebias(sym, constant, index, node);
     },
   });
 }

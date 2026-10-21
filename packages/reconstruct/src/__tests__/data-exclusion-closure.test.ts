@@ -57,6 +57,56 @@ describe('data exclusion closure', () => {
     assert.deepStrictEqual(r.excluded.map(x => x.name), ['gaCrtLocaleCategoryTable']);
   });
 
+  it('a datum only a runtime datum points at goes with it (v1489: the __lc_time_data day names)', () => {
+    const timeInfo = g('gaCrtLocaleTimeInfoStart', '0074afd0', {
+      referencingFunctions: ['compiler::___init_time'], xrefCount: 2,
+      initializedData: { kind: 'struct', fields: [
+        { name: 'wday_abbr', value: { kind: 'array', elements: [{ kind: 'pointer', value: 'DAT_006f9a80' }] } },
+        { name: 'ww_timefmt', value: { kind: 'pointer', value: 'DAT_006f9988' } },
+      ] },
+    });
+    const sun = g('DAT_006f9a80', '006f9a80', { size: 1, xrefCount: 1 });
+    const fmt = g('DAT_006f9988', '006f9988', { size: 1, xrefCount: 1 });
+    // A second reference the initializers do not show (an instruction outside any
+    // function): not decided by this rule.
+    const alsoElsewhere = g('DAT_006f9990', '006f9990', { size: 1, xrefCount: 2 });
+    const timeInfo2 = g('gaCrtOther', '0074b100', {
+      referencingFunctions: ['compiler::___init_time'], xrefCount: 1,
+      initializedData: { kind: 'pointer', value: 'DAT_006f9990' },
+    });
+    // Pointed at by a runtime datum AND by a kept one: kept.
+    const shared = g('DAT_006f9a00', '006f9a00', { size: 1, xrefCount: 2 });
+    const runtimeToShared = g('gaCrtThird', '0074b200', {
+      referencingFunctions: ['compiler::___init_time'], xrefCount: 1,
+      initializedData: { kind: 'pointer', value: 'DAT_006f9a00' },
+    });
+    const gameToShared = g('gaGameTable', '00710000', {
+      referencingFunctions: ['D2Game::f'], xrefCount: 1,
+      initializedData: { kind: 'pointer', value: 'DAT_006f9a00' },
+    });
+    // Nothing points at it and no code reads it: not the runtime's by any record.
+    const orphan = g('DAT_00731008', '00731008', { size: 4, xrefCount: 1 });
+    const r = selectDataExclusions({
+      globals: [timeInfo, sun, fmt, alsoElsewhere, timeInfo2, shared, runtimeToShared, gameToShared, orphan],
+      keptFunctions: [kept('f', 'D2Game')], isExcludedNamespace,
+    });
+    assert.deepStrictEqual(r.excluded.map(x => x.name).sort(),
+      ['DAT_006f9988', 'DAT_006f9a80', 'gaCrtLocaleTimeInfoStart', 'gaCrtOther', 'gaCrtThird']);
+  });
+
+  it('a runtime string table survives when kept code revives the table', () => {
+    const table = g('gaCrtNames', '0074b000', {
+      referencingFunctions: ['compiler::___init_time'], xrefCount: 2,
+      initializedData: { kind: 'pointer', value: 'DAT_006f9a80' },
+    });
+    const sun = g('DAT_006f9a80', '006f9a80', { size: 1, xrefCount: 1 });
+    const r = selectDataExclusions({
+      globals: [table, sun],
+      keptFunctions: [kept('f', 'D2Game', { decompiled: 'return gaCrtNames;' })], isExcludedNamespace,
+    });
+    assert.deepStrictEqual(r.excluded, []);
+  });
+
   it('kept operands into the extent, a unique name in a kept body, or a kept initializer revive it', () => {
     const byOperand = g('gaPow10', '0074b358', { size: 348, referencingFunctions: ['compiler::CRT_StrToD_L'] });
     const byName = g('gaCtypeTable', '006f9280', { referencingFunctions: ['compiler::_isspace'] });

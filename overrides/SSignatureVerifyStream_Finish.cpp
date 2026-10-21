@@ -27,7 +27,7 @@
 //
 // The /GS cookie (0041d6d6, 0041d6bc) and the __security_check_cookie tail call
 // are compiler-emitted prologue/epilogue, not source, and are omitted.
-uint32_t* rsaPair[2];
+BigData*  rsaPair[2];   // SSIG_InitRSAPair's two SBigNew handles: rsaPair[0], rsaPair[1]
 uint32_t  bVerified   = 0;                                  // 0041d6e8  XOR EDI,EDI
 int32_t   nKeyIdSaved = nKeyId;                             // 0041d6ed  MOV [EBP-0x8],EDX
 
@@ -45,7 +45,7 @@ if (pContext->nBytesBuffered == pContext->nBufferSize &&     // 0041d6e4 / 0041d
 
   SSystem::SMemCopy(pSig, (void*)((int)pContext->pDataBuffer + 4),
                         pContext->nDataLen);                 // 0041d733-0041d740
-  SSIG_InitRSAPair((uint32_t*)rsaPair);                      // 0041d745 / 0041d748
+  SSIG_InitRSAPair(rsaPair);                                 // 0041d745 / 0041d748
   CryptRSA_Prepare(nKeyIdSaved, pContext->nDataLen, pModulus,
                    pContext->nFlags, rsaPair);               // 0041d74d-0041d75f
   CryptRSA_Process(pSig, pContext->nDataLen, rsaPair);       // 0041d764-0041d76b

@@ -63,7 +63,7 @@ import {
   ADDRESS_LITERAL_COMPLEMENT_FLOOR,
   type FuncPtrTarget,
 } from '@ghidra-mcp/cpp-parser';
-import { Lexer, TokenKind } from '@ghidra-mcp/cpp-parser';
+import { Lexer, TokenKind, parse, biasedTableIndexPlugin, findNodesByKind, NodeKind } from '@ghidra-mcp/cpp-parser';
 
 import { buildVtableDispatch } from './vtable-dispatch.js';
 import { fieldDeclSpelling, emittedMemberNames, generateHeader, generateFunctionDeclaration, setKnownFuncDefs, setConstructorBearingStructs, sigType, getIntegerConversionType, emittedFunctionName, returnSigType } from './header.js';
@@ -75,7 +75,7 @@ import { generateReadme } from './readme.js';
 import { conventionKeyword } from './calling-convention.js';
 import { organizeByNamespace, getFilePath, setModuleNames, setNamespaceCollisionTypes, normalizeQualifiedReference } from './namespace.js';
 import { buildNamespaceResolution, namespaceResolution, renderNamespace } from './namespace-resolution.js';
-import { setInteriorLabelSymbols, resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, setDeclarationClosureDataContent, getDeclarationClosureReport, isUnreferenceableArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, wasGlobalClaimed, findDuplicateLinkageNames, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, setInitializerAddressTable, setInitializerFunctionAddresses, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType, emittedNamespaceOf, getDeclaredNames, initializerAddressReferences, addInitializerAddressReferences, markUnnamedImportSlots } from './globals-header.js';
+import { setInteriorLabelSymbols, resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, setDeclarationClosureDataContent, getDeclarationClosureReport, isUnreferenceableArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, wasGlobalClaimed, findDuplicateLinkageNames, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, setInitializerAddressTable, setInitializerFunctionAddresses, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType, emittedNamespaceOf, getDeclaredNames, initializerAddressReferences, addInitializerAddressReferences, markUnnamedImportSlots, setInitializerEnumConstants } from './globals-header.js';
 import { normalizeDataAddress, stringDefinition } from './declaration-closure.js';
 import { harvestAnnotatedParameterTypes } from './win32-signatures.js';
 import { PLATFORM_FUNCDEF_NAMES, PLATFORM_STRUCT_FIELD_TYPES, isPlatformOrBuiltinType, isLibraryType, generatePlatformHeader, oddWidthTypesSpelled, placeholderTypesUsedIn, normalizeDataValue, arrayRowTypedefLines, arrayRowReturn, arrayRowSpelling, GHIDRA_PSEUDO_OP_RESULT_TYPES, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, platformDefinedFunctionNames, platformVoidPointerFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
@@ -1171,6 +1171,9 @@ export function generateProjectStage1(
     context._enumMembers = Object.fromEntries(
       emittedEnums.map(e => [e.name, e.values.map(v => v.name.trim()).filter(Boolean)])
     );
+    // Initializers print a datum's enumerator by name too, and need the same
+    // qualification a body's comparison gets.
+    setInitializerEnumConstants(ambiguousConstants, context._enumMembers);
 
     for (const e of emittedEnums) {
       enumLines.push(enumTypedefLine(e.name, e));
@@ -2416,6 +2419,77 @@ function buildFuncToImplPathMap(
  * The demotion stays where it is provably safe: a static-local whose name only
  * one function mentions and whose address no other function takes.
  */
+/** The bias `biased-table-index` accepts below a table (its MAX_BIAS). */
+const BIASED_TABLE_MAX_BIAS = 8;
+
+/**
+ * (function, candidate name) for every body `biased-table-index` would respell to
+ * name a candidate byte table it does not name in the decompile. Only bodies with an
+ * encoded operand at most BIASED_TABLE_MAX_BIAS below the table, inside the datum that
+ * ends where the table starts, are parsed; the pass then decides on the expression.
+ */
+export function biasedTableReaders(
+  candidates: ReadonlyMap<string, AnalyzedDataSymbol[]>,
+  analyzedGlobals: readonly AnalyzedDataSymbol[],
+  functions: readonly ExtractedFunction[],
+): Array<[string, string]> {
+  const hex = (a: string | number | undefined): number =>
+    typeof a === 'number' ? a : Number.parseInt(String(a ?? '').replace(/^.*:/, '').replace(/^0x/i, ''), 16);
+  const stride = (g: AnalyzedDataSymbol): number | null => {
+    const count = declaredElementCount(g.suggestedType || g.dataType);
+    const size = Number(g.size);
+    return count !== null && Number.isSafeInteger(size) && size > 0 && size % count === 0 ? size / count : null;
+  };
+  // Byte tables among the candidates, by start; and every datum by its end.
+  const tables = new Map<number, { name: string; g: AnalyzedDataSymbol }>();
+  for (const [name, list] of candidates) {
+    for (const g of list) if (stride(g) === 1 && Number.isFinite(hex(g.address))) tables.set(hex(g.address), { name, g });
+  }
+  if (tables.size === 0) return [];
+  const endingAt = new Map<number, AnalyzedDataSymbol | null>();
+  for (const g of analyzedGlobals) {
+    const start = hex(g.address);
+    const size = Number(g.size);
+    if (!Number.isFinite(start) || !Number.isSafeInteger(size) || size <= 0) continue;
+    const end = start + size;
+    if (!tables.has(end)) continue;
+    endingAt.set(end, endingAt.has(end) ? null : g);
+  }
+  const out: Array<[string, string]> = [];
+  for (const func of functions) {
+    if (!func.decompiled) continue;
+    const pairs = new Map<number, AnalyzedDataSymbol>();
+    for (const r of func.operandRefs?.refs ?? []) {
+      if (!r.encoded) continue;
+      const t = hex(r.to);
+      for (let b = t + 1; b <= t + BIASED_TABLE_MAX_BIAS; b++) {
+        const before = endingAt.get(b);
+        const table = tables.get(b);
+        if (!before || !table || t < hex(before.address)) continue;
+        if (table.g.ownerFunction === func.name) continue;
+        pairs.set(b, before);
+      }
+    }
+    if (pairs.size === 0) continue;
+    let ast: ReturnType<typeof parse> | undefined;
+    try { ast = parse(func.decompiled); } catch { continue; }
+    for (const [b, before] of pairs) {
+      const table = tables.get(b)!;
+      const aName = before.name;
+      const bName = table.g.name;
+      const aStride = stride(before);
+      const rewritten = biasedTableIndexPlugin.createTransformer!({
+        globalAddresses: { [aName]: hex(before.address), [bName]: b },
+        globalSizes: { [aName]: Number(before.size), [bName]: Number(table.g.size) },
+        globalElementSizes: { [bName]: 1, ...(aStride !== null ? { [aName]: aStride } : {}) },
+      })(ast);
+      const names = findNodesByKind(rewritten, NodeKind.Identifier).some(n => (n as unknown as { name: string }).name === bName);
+      if (names) out.push([func.name, table.name]);
+    }
+  }
+  return out;
+}
+
 export function reconcileStaticScopeWithBodyReferences(
   analyzedGlobals: AnalyzedDataSymbol[],
   functions: ExtractedFunction[],
@@ -2507,6 +2581,23 @@ export function reconcileStaticScopeWithBodyReferences(
         fns.add(func.name);
       }
     }
+  }
+
+  // A BIASED read: MSVC indexes a 1-based byte table through `table - 1`
+  // (`MOV AL,[EDX + 0x87e82b]` for gaGlideEmblemSecondaryColorTableEntries @0087e82c
+  // in D2COMP_LoadGuildEmblemIcon). The operand addresses the last byte of the datum
+  // BEFORE the table, so Ghidra's xref - and with it the static-local scoping - goes
+  // to that neighbour, and the decompile spells the read against it too; the
+  // `biased-table-index` pass then respells it against the table, from a body that
+  // is not the table's owner. Which bodies that pass rewrites is decided by the pass
+  // itself, run here on exactly the bodies whose instructions carry the evidence (an
+  // encoded operand within its bias below a byte table that starts where the operand's
+  // datum ends) - the layout alone matches dozens of ordinary reads of a neighbour's
+  // last field.
+  for (const [func, name] of biasedTableReaders(candidates, analyzedGlobals, functions)) {
+    let fns = literalFunctions.get(name);
+    if (!fns) { fns = new Set(); literalFunctions.set(name, fns); }
+    fns.add(func);
   }
 
   // The third reference class, and the one no body carries: a DATA INITIALIZER.

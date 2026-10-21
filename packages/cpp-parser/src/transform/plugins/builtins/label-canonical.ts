@@ -22,7 +22,8 @@
  * when Ghidra has a name for it (`joined_r0x00429e3b` is `case_TIME` in zlib's inflate).
  * The extraction reads that name (labelFlow `symbol`); the passes see the default spelling
  * they always saw, and the restore gives the label the name - unless the function already
- * has a label of that name.
+ * has a label of that name, or the name is itself one of Ghidra's default spellings (a
+ * switch's `caseD_N`, which the extraction used to report as a name).
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -55,6 +56,11 @@ export function joinedLabelNames(flow: Record<string, Flow> | null | undefined):
   const taken = new Set(Object.keys(flow).filter(n => !DEFAULT.test(n)));
   for (const [name, f] of Object.entries(flow)) {
     if (!/^(joined|code)_r0x[0-9a-f]{8}$/i.test(name) || !f?.symbol || !/^[A-Za-z_]\w*$/.test(f.symbol)) continue;
+    // A switch's own case label (`caseD_5` in namespace `switchD_0041bf3a`) is a name
+    // Ghidra's analysis made, not one anybody gave the block: the bare name has lost the
+    // namespace that says which switch it belongs to, and the block-start fallback can
+    // borrow it from a different address than the label's. Only a given name restores.
+    if (DEFAULT.test(f.symbol)) continue;
     if (taken.has(f.symbol)) continue;
     taken.add(f.symbol);
     out.set(name, f.symbol);

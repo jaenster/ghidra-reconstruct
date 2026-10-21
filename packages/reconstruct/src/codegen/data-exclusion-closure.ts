@@ -23,6 +23,10 @@
  *  - a datum no code reads at all is runtime data when its INITIALIZER points into
  *    the runtime and at no kept function (`gaCrtLocaleCategoryTable`'s `pfnInit`s, the
  *    `Thank_you` vftable holding `CRT_EmptyFunction`);
+ *  - the same edge read the other way: a datum no code reads is runtime data when
+ *    every reference Ghidra has to it is a runtime datum's initializer pointing at it
+ *    (the day and month strings `gaCrtLocaleTimeInfoStart`, a `__lc_time_data`, points
+ *    at; Ghidra left seven of them as bare `undefined` bytes, emitted as `DAT_`);
  *  - and either is revived when a kept function's instruction operands reach into its
  *    extent (`operandRefs`, the folded and derived addresses included), when a kept
  *    body names it (a name only one datum carries - `vftable` names dozens), or when
@@ -40,6 +44,8 @@ export interface DataClosureCandidate {
   namespace?: string | null;
   suggestedName?: string;
   referencingFunctions?: string[];
+  /** Every Ghidra reference to the datum, code and data alike. */
+  xrefCount?: number;
   initializedData?: DataValue;
 }
 
@@ -141,6 +147,30 @@ export function selectDataExclusions<G extends DataClosureCandidate>(input: Data
       else if ((byName.get(t) ?? []).some(x => candidates.has(x))) intoRuntime = true;
     }
     if (intoRuntime && !intoKeptCode) candidates.add(g);
+  }
+  // Seed 3: no code reads it, and every reference to it is a runtime datum's
+  // initializer pointing at it - to a fixpoint, so a runtime table of pointers to
+  // tables takes the whole run. Ghidra's `xrefCount` counts the references the
+  // initializers do not show (an instruction outside any function, a pointer in an
+  // untyped run); a datum with one of those is not decided here.
+  const pointedAtBy = new Map<G, G[]>();
+  for (const g of globals) {
+    const targets: string[] = [];
+    pointerTargets(g.initializedData, targets);
+    for (const t of targets) {
+      for (const x of byName.get(t) ?? []) {
+        const list = pointedAtBy.get(x);
+        if (list) list.push(g); else pointedAtBy.set(x, [g]);
+      }
+    }
+  }
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const [g, from] of pointedAtBy) {
+      if (candidates.has(g) || (g.referencingFunctions ?? []).length > 0) continue;
+      if (from.length < (g.xrefCount ?? Infinity)) continue;
+      if (from.every(x => candidates.has(x))) { candidates.add(g); changed = true; }
+    }
   }
   if (candidates.size === 0) return { excluded: [], kept: [...globals] };
 

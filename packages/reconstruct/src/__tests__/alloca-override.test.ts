@@ -103,6 +103,21 @@ describe('SSignature alloca overrides', () => {
     assert.match(body, /Sha1_Finalize\(pHash, &pContext->sSha1\);/);
   });
 
+  it('types each RSA pair as the BigData*[2] SSIG_InitRSAPair fills', () => {
+    // SSIG_InitRSAPair (0041d4d0) is SBigNew(p); SBigNew(p + 1) - two
+    // BigData handles - and its Ghidra prototype, like CryptRSA_Prepare's and
+    // CryptRSA_Process's, takes BigData **. The pair is passed to all three
+    // without a cast; a uint32_t* pair does not convert (Storm round S/T).
+    for (const [f, pairs] of [[FINISH, ['rsaPair']], [GENERATE, ['rsaPair1', 'rsaPair2']]] as const) {
+      const body = code(read(f));
+      for (const p of pairs) {
+        assert.match(body, new RegExp(`BigData\\*\\s+${p}\\[2\\];`), `${f}: ${p} must be BigData*[2]`);
+        assert.match(body, new RegExp(`SSIG_InitRSAPair\\(${p}\\);`), `${f}: ${p} passed uncast`);
+        assert.match(body, new RegExp(`CryptRSA_Process\\([^;]*, ${p}\\);`), `${f}: ${p} passed uncast`);
+      }
+    }
+  });
+
   it('binds Generate\'s three allocations in allocation order', () => {
     const body = code(read(GENERATE));
     const order = ['pHash', 'pSig1', 'pSig2'].map(n =>

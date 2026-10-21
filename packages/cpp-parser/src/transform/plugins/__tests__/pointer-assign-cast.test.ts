@@ -192,3 +192,43 @@ describe('pointerAssignCastPlugin: a store through a const base', () => {
     assert.ok(!raw.includes('(void*)p'), raw);
   });
 });
+
+// dWallPass (004df1c0): `pWallTile = ((D2Wall2DrawEntryStrc*)pWallNode)->pData;`
+// reads a `void *` member (a unit OR a tile) into a typed local. Ghidra prints C,
+// where that converts implicitly; the C++ original had to write the cast.
+describe('pointerAssignCastPlugin: void* member on the right', () => {
+  const structFields = {
+    D2Wall2DrawEntryStrc: { pData: 'void *', pNext: 'D2Wall2DrawEntryStrc *', nX: 'int' },
+    D2HolderStrc: { pEntry: 'D2Wall2DrawEntryStrc *', sEntry: 'D2Wall2DrawEntryStrc' },
+    D2TypedStrc: { pData: 'D2DrawWallStrc *' },
+  };
+  const transformer = pointerAssignCastPlugin.createTransformer({ structFields });
+  const transform = (code: string): string =>
+    emit(transformer(parse(code)) as AnyNode).replace(/\s+/g, ' ').trim();
+
+  it('casts a void* member read through a cast base', () => {
+    const out = transform(`void f(void* p) { D2DrawWallStrc* t; t = ((D2Wall2DrawEntryStrc*)p)->pData; }`);
+    assert.ok(out.includes('t = (D2DrawWallStrc*)((D2Wall2DrawEntryStrc*)p)->pData'), out);
+  });
+
+  it('casts a void* member read through a typed local, and in an initializer', () => {
+    const out = transform(`void f(D2Wall2DrawEntryStrc* e) { D2DrawWallStrc* t = e->pData; }`);
+    assert.ok(out.includes('D2DrawWallStrc* t = (D2DrawWallStrc*)e->pData'), out);
+  });
+
+  it('follows a member chain through declared field types', () => {
+    const out = transform(`void f(D2HolderStrc* h) { D2DrawWallStrc* t; t = h->pEntry->pData; t = h->sEntry.pData; }`);
+    assert.ok(out.includes('t = (D2DrawWallStrc*)h->pEntry->pData'), out);
+    assert.ok(out.includes('t = (D2DrawWallStrc*)h->sEntry.pData'), out);
+  });
+
+  it('does not guess from the field name: a typed pData is left alone', () => {
+    const out = transform(`void f(D2TypedStrc* s) { D2DrawWallStrc* t; t = s->pData; }`);
+    assert.ok(out.includes('t = s->pData'), out);
+  });
+
+  it('leaves a void* member stored into a void* local alone', () => {
+    const out = transform(`void f(D2Wall2DrawEntryStrc* e) { void* t; t = e->pData; }`);
+    assert.ok(out.includes('t = e->pData'), out);
+  });
+});

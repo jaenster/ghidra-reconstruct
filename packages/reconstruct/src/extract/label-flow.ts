@@ -20,7 +20,8 @@
  *               print it: a JOINED block is always printed `joined_r0x<addr>`, so a name
  *               put there (`case_TIME` @00429e3b in zlib's inflate) never reaches the
  *               pseudo-C. The name is read at the label's address, or at the start of the
- *               basic block holding it (the case's own first instruction, 00429e38).
+ *               basic block holding it (the case's own first instruction, 00429e38). A
+ *               name analysis made (a switch's `caseD_5`) is not one: it is skipped.
  *
  * Read-only: one execute_script per batch, no transaction. A failure leaves the field unset,
  * which is also what an older snapshot looks like; the policy then has no A1/A3 evidence.
@@ -99,6 +100,7 @@ for (String it : items.split(";")) {
       ps = cb == null ? null : st.getPrimarySymbol(cb.getFirstStartAddress());
     }
     if (ps != null && ps.getSource() != ghidra.program.model.symbol.SourceType.DEFAULT
+        && ps.getSource() != ghidra.program.model.symbol.SourceType.ANALYSIS
         && ps.getSymbolType() == ghidra.program.model.symbol.SymbolType.LABEL
         && f.getBody().contains(ps.getAddress()) && ps.getName().matches("[A-Za-z_][A-Za-z0-9_]*")) sym = ps.getName();
   }

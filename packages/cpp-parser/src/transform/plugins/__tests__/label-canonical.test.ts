@@ -50,6 +50,17 @@ describe('label-canonical', () => {
     assert.match(out, /case_TIME:/);
     assert.doesNotMatch(out, /joined_r0x/);
   });
+  it('a switch case label is not a name: SSYSTEM_GetSystemOption @0041bf7d, TXT_ParseDataAndPutIntoStructure @006bd8ff', () => {
+    // v1489 printed `caseD_5:` / `caseD_a:` - the analysis-made case label with its
+    // `switchD_` namespace stripped, borrowed from the case's first instruction.
+    const flow = {
+      joined_r0x0041bf7d: { address: '0041bf7d', symbol: 'caseD_5' },
+      switchD_0041bf3a_caseD_5: { address: '0041bf8c', computed: 1 },
+      joined_r0x006bdc2d: { address: '006bdc2d', symbol: 'case_2' },
+    };
+    assert.deepEqual([...joinedLabelNames(flow)], [['joined_r0x006bdc2d', 'case_2']]);
+  });
+
   it('a joined block keeps its spelling when the name is already a label of the function', () => {
     assert.deepEqual([...joinedLabelNames({ case_TIME: { address: '00429e38' }, joined_r0x00429e3b: { address: '00429e3b', symbol: 'case_TIME' } })], []);
   });

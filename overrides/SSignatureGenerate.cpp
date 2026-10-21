@@ -22,8 +22,8 @@
 // written below. No caller of this exported function exists in Game.exe.
 //
 // The /GS cookie (0041d596, 0041d6bc) is compiler-emitted and omitted.
-uint32_t* rsaPair1[2];
-uint32_t* rsaPair2[2];
+BigData*  rsaPair1[2];   // SSIG_InitRSAPair's two SBigNew handles: rsaPair1[0], rsaPair1[1]
+BigData*  rsaPair2[2];   // SSIG_InitRSAPair's two SBigNew handles: rsaPair2[0], rsaPair2[1]
 int       nMarkerOffset;
 
 uint8_t*  pDataBytes = (uint8_t*)pData;                      // 0041d5a6  MOV [EBP-0xc],ECX
@@ -42,13 +42,13 @@ SSIG_HashData((uint32_t)nMarkerOffset, pDataBytes, (int32_t)pHash); // 0041d5d5-
 
 uint8_t* pSig1 = (uint8_t*)__builtin_alloca(nKeySize);       // 0041d5e6-0041d5ed
 SSystem::SMemCopy(pSig1, pHash, nKeySize);               // 0041d5ef-0041d5f2
-SSIG_InitRSAPair((uint32_t*)rsaPair1);                       // 0041d5f7 / 0041d5fa
+SSIG_InitRSAPair(rsaPair1);                                  // 0041d5f7 / 0041d5fa
 CryptRSA_Prepare(nKeyId, nKeySize, pModulus1, nModulus1Len, rsaPair1); // 0041d5ff-0041d60f
 CryptRSA_Process(pSig1, nKeySize, rsaPair1);                 // 0041d614-0041d619
 
 uint8_t* pSig2 = (uint8_t*)__builtin_alloca(nKeySize);       // 0041d61e-0041d625
 SSystem::SMemCopy(pSig2, pSig1, nKeySize);               // 0041d627-0041d62d
-SSIG_InitRSAPair((uint32_t*)rsaPair2);                       // 0041d632 / 0041d635
+SSIG_InitRSAPair(rsaPair2);                                  // 0041d632 / 0041d635
 CryptRSA_Prepare(nKeyId, nKeySize, pModulus2, nModulus2Len, rsaPair2); // 0041d63a-0041d64a
 CryptRSA_Process(pSig2, nKeySize, rsaPair2);                 // 0041d64f-0041d657
 

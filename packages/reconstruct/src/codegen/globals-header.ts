@@ -2381,7 +2381,7 @@ export function emitDataValue(dv: DataValue, indent = 0, expectedType?: string):
       // has to come from the declared type; without it there is no rewrite.
       const sentinel = sentinelSpelling(dv.value, expectedType);
       if (sentinel !== undefined) return sentinel;
-      return dv.value ?? '0';
+      return qualifiedEnumInitializer(dv.value, baseExpected) ?? dv.value ?? '0';
     }
 
     case 'array': {
@@ -2616,6 +2616,42 @@ const knownEnumConstants = new Set<string>();
 export function setKnownEnumConstants(names: Iterable<string>): void {
   knownEnumConstants.clear();
   for (const n of names) knownEnumConstants.add(n);
+}
+
+/**
+ * The enumerator spelling an initializer needs. `d2_enums.h` declares every
+ * member inside `namespace <Enum>_ns` and exports a member at global scope only
+ * where every enum declaring that name gives it the same value. A member several
+ * enums number differently (`Neutral`, `Cast`, `GetHit` in both the monster and
+ * the player anim-mode enums) is exported by none of them, so the bare name
+ * Ghidra prints for the datum names nothing; the slot's declared enum says which
+ * one is meant, exactly as the controlling type does for `enum-constant-qualify`
+ * in a body. Set from the same computation that writes `d2_enums.h`.
+ */
+const initializerEnumMembers = new Map<string, ReadonlySet<string>>();
+const initializerAmbiguousEnumConstants = new Set<string>();
+
+export function setInitializerEnumConstants(
+  ambiguous: Iterable<string>,
+  members: Record<string, readonly string[]>,
+): void {
+  initializerAmbiguousEnumConstants.clear();
+  for (const n of ambiguous) initializerAmbiguousEnumConstants.add(n);
+  initializerEnumMembers.clear();
+  for (const [e, names] of Object.entries(members)) initializerEnumMembers.set(e, new Set(names));
+}
+
+/**
+ * `<Enum>_ns::Name` for an enum datum whose bare name is not exported, when the
+ * slot's enum declares it; undefined otherwise (the bare spelling stands). A
+ * name the slot's enum does not declare is left alone rather than guessed.
+ */
+function qualifiedEnumInitializer(value: string | undefined, slotType: string | undefined): string | undefined {
+  const name = value?.trim();
+  if (!name || !slotType || !initializerAmbiguousEnumConstants.has(name)) return undefined;
+  const owner = [slotType, baseTypeName(resolveTypedefSpelling(slotType))]
+    .find(t => initializerEnumMembers.get(t)?.has(name));
+  return owner ? `${owner}_ns::${name}` : undefined;
 }
 
 /** The registered enumerator names (for the switch-reconstruct plugin). */
