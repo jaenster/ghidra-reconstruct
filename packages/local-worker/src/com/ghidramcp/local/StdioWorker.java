@@ -7,8 +7,12 @@ import com.ghidramcp.logging.Logger;
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import ghidra.GhidraApplicationLayout;
+import ghidra.framework.Application;
+import ghidra.framework.HeadlessGhidraApplicationConfiguration;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.FileOutputStream;
 import java.io.FileDescriptor;
 import java.io.InputStreamReader;
@@ -38,6 +42,7 @@ import java.util.concurrent.Future;
  * Usage: StdioWorker --ghidra-server host:port --repo R --program /path --server-user U
  *                    --project DIR
  * The password is read from GHIDRA_SERVER_PASSWORD, as the daemon's worker does.
+ * GHIDRA_HOME names the Ghidra install the classpath comes from.
  */
 public final class StdioWorker {
     private static final Gson gson = new Gson();
@@ -70,6 +75,21 @@ public final class StdioWorker {
             System.err.println("GHIDRA_SERVER_PASSWORD is not set");
             System.exit(2);
         }
+
+        // The worker's own init tries GhidraJarApplicationLayout first, which on a plain
+        // lib/* classpath finds no module data dirs and so no *.serial.filter files: the
+        // client serial filter then rejects every class the server sends on connect.
+        // Initialise from the install layout before the worker gets the chance.
+        // The login name is the user.name Ghidra caches at init, so set it first: the
+        // worker's own setProperty comes too late and the server sees the OS user.
+        System.setProperty("user.name", user);
+        String ghidraHome = System.getenv("GHIDRA_HOME");
+        if (ghidraHome == null || ghidraHome.isEmpty()) {
+            System.err.println("GHIDRA_HOME is not set");
+            System.exit(2);
+        }
+        Application.initializeApplication(new GhidraApplicationLayout(new File(ghidraHome)),
+                                          new HeadlessGhidraApplicationConfiguration());
 
         Logger log = Logger.create("StdioWorker", "local", "local");
         GhidraEngine engine = new GhidraEngine(project, log.child("GhidraEngine"));

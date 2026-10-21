@@ -16,13 +16,15 @@
  *   JAVA_HOME                      a JDK 21 (default: java on PATH)
  *   GHIDRA_SERVER_USER             the Ghidra Server account (read-only is enough)
  *   GHIDRA_SERVER_PASSWORD_FILE    file holding its password (default ~/.ghidra-export-password)
- *   GHIDRA_LOCAL_WORKER_PROJECT    local project dir (default ~/.cache/ghidra-local-worker)
+ *   GHIDRA_LOCAL_WORKER_PROJECT    local project dir (default ~/Library/Caches/ghidra-local-worker on macOS,
+ *                                  <tmpdir>/ghidra-local-worker elsewhere; Ghidra rejects a path element
+ *                                  that starts with '.', so ~/.cache cannot hold it)
  *   GHIDRA_MCP_DECOMPILER_THREADS  decompiler pool size (default: CPU count)
  *   GHIDRA_LOCAL_WORKER_XMX        JVM heap (default 8g)
  */
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { readFileSync, mkdirSync, existsSync } from 'node:fs';
-import { cpus, homedir } from 'node:os';
+import { cpus, homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
@@ -121,6 +123,8 @@ class StdioWorkerProcess {
   private readonly pending = new Map<number, Pending>();
   private nextId = 1;
   private exited: Error | null = null;
+  /** False while the program is still opening: the loop must stay alive for the ready line. */
+  private opened = false;
   readonly ready: Promise<{ openMs: number }>;
 
   constructor(serverHostPort: string, repo: string, program: string) {
@@ -135,7 +139,9 @@ class StdioWorkerProcess {
     if (!user) throw new Error('GHIDRA_SERVER_USER is not set (the Ghidra Server account for the local worker)');
     const pwFile = process.env.GHIDRA_SERVER_PASSWORD_FILE ?? path.join(homedir(), '.ghidra-export-password');
     const password = readFileSync(pwFile, 'utf8').replace(/\r?\n$/, '');
-    const project = process.env.GHIDRA_LOCAL_WORKER_PROJECT ?? path.join(homedir(), '.cache', 'ghidra-local-worker');
+    const project = process.env.GHIDRA_LOCAL_WORKER_PROJECT ?? (process.platform === 'darwin'
+      ? path.join(homedir(), 'Library', 'Caches', 'ghidra-local-worker')
+      : path.join(tmpdir(), 'ghidra-local-worker'));
     mkdirSync(project, { recursive: true });
     const java = process.env.JAVA_HOME ? path.join(process.env.JAVA_HOME, 'bin', 'java') : 'java';
     const threads = process.env.GHIDRA_MCP_DECOMPILER_THREADS ?? String(cpus().length);
@@ -168,7 +174,7 @@ class StdioWorkerProcess {
     const lines = createInterface({ input: this.child.stdout });
     lines.on('line', line => {
       const msg = JSON.parse(line) as { ready?: boolean; openMs?: number; id?: number; success?: boolean; result?: unknown; error?: string };
-      if (msg.ready) { onReady({ openMs: msg.openMs ?? 0 }); return; }
+      if (msg.ready) { this.opened = true; this.updateRef(); onReady({ openMs: msg.openMs ?? 0 }); return; }
       const p = this.pending.get(msg.id!);
       if (!p) return;
       this.pending.delete(msg.id!);
@@ -182,6 +188,7 @@ class StdioWorkerProcess {
 
     this.child.on('exit', (code, signal) => {
       this.exited = new Error(`local Ghidra worker exited (${signal ?? `code ${code}`}); set GHIDRA_LOCAL_WORKER_LOG=1 to see its log`);
+      this.opened = true;
       onFail(this.exited);
       for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(this.exited); }
       this.pending.clear();
@@ -192,7 +199,7 @@ class StdioWorkerProcess {
 
   /** Hold the event loop open only while a command is in flight. */
   private updateRef(): void {
-    const busy = this.pending.size > 0;
+    const busy = !this.opened || this.pending.size > 0;
     for (const s of [this.child, this.child.stdout, this.child.stderr, this.child.stdin] as unknown as Array<{ ref(): void; unref(): void }>) {
       if (busy) s.ref(); else s.unref();
     }
