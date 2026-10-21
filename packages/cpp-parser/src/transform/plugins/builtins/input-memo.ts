@@ -34,9 +34,22 @@ export function memoOnInputs<R>(slot: MemoSlot<R>, inputs: readonly unknown[], b
   return value;
 }
 
-/** `Object.keys(o).length > 0` without allocating the key array. */
+const nonEmpty = new WeakMap<object, boolean>();
+
+/**
+ * `Object.keys(o).length > 0`, answered once per table object.
+ *
+ * Neither `Object.keys` nor `for...in` is cheap on a 14k-key table: V8 builds the
+ * whole key list before yielding the first key, so even an early-exit loop costs
+ * a full enumeration. Like the derivations above, this assumes the table is not
+ * written once generation has started.
+ */
 export function hasOwnKeys(o: object | null | undefined): boolean {
   if (!o) return false;
-  for (const k in o) if (Object.prototype.hasOwnProperty.call(o, k)) return true;
-  return false;
+  let hit = nonEmpty.get(o);
+  if (hit === undefined) {
+    hit = Object.keys(o).length > 0;
+    nonEmpty.set(o, hit);
+  }
+  return hit;
 }
