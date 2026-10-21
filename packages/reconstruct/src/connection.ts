@@ -6,6 +6,7 @@
  */
 
 import type { GhidraConnection } from './types.js';
+import { localWorkerEnabled, createLocalWorkerConnection } from './local-worker.js';
 
 /**
  * Optional bearer auth for an OAuth-protected daemon.
@@ -86,7 +87,7 @@ export function resetRpcStats(): void {
   rpcStats.byTool.clear();
 }
 
-function recordRpc(tool: string, bytesIn: number, ms: number): void {
+export function recordRpc(tool: string, bytesIn: number, ms: number): void {
   rpcStats.calls++;
   rpcStats.bytesIn += bytesIn;
   rpcStats.ms += ms;
@@ -248,6 +249,9 @@ export async function createConnection(
    */
   existingSessionId?: string,
 ): Promise<GhidraConnection> {
+  // GHIDRA_LOCAL_WORKER=1: the same worker code, run here over stdio (local-worker.ts).
+  if (localWorkerEnabled()) return createLocalWorkerConnection(projectPath, programPath);
+
   // The first RPC is the reachability check. A separate /status probe is not: behind the
   // hosted daemon's login proxy it redirects through the identity provider, which can take
   // longer than any short probe timeout, and it says nothing about whether RPC works.

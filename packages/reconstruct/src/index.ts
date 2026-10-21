@@ -176,6 +176,7 @@ import { analyzeAll, type AnalysisResult } from './analysis/index.js';
 import { generateProject, writeProject, getParseErrorLogPath as parseErrorLogPath } from './codegen/index.js';
 import { generateProjectParallel } from './codegen-parallel.js';
 import { createConnection, closeConnection, getCacheVersion, summarizeRpcStats, resetRpcStats } from './connection.js';
+import { shutdownLocalWorkers } from './local-worker.js';
 import { timePhase, timePhaseSync, formatTimings, resetTimings, recordPhase, formatBytes } from './timing.js';
 import {
   DEFAULT_SNAPSHOT_DIRNAME,
@@ -1033,6 +1034,10 @@ export async function reconstruct(
         console.warn(`WARNING: could not write snapshot: ${msg}`);
       }
     }
+
+    // Generation reads only the model built above. A local worker's JVM holds its
+    // multi-GB heap for as long as it runs, which is memory the generation shards need.
+    shutdownLocalWorkers();
 
     if (extractOnly) {
       if (!snapshotWritten) throw new Error('extract-only run wrote no snapshot');

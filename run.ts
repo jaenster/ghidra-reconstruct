@@ -126,7 +126,8 @@ try { writeFileSync(ERROR_LOG_PATH, `# Parse errors\n`); } catch { /* ok */ }
 configureCodegen(ERROR_LOG_PATH);
 
 async function main() {
-  if (!CODEGEN_ONLY && !process.env.GHIDRA_MCP_TOKEN) {
+  const LOCAL_WORKER = process.env.GHIDRA_LOCAL_WORKER === '1';
+  if (!CODEGEN_ONLY && !LOCAL_WORKER && !process.env.GHIDRA_MCP_TOKEN) {
     console.error('error: GHIDRA_MCP_TOKEN not set (run oauth-login and export it)');
     process.exit(2);
   }
@@ -138,7 +139,9 @@ async function main() {
     console.log('Mode:    codegen-only (no daemon, no extraction, no analysis)');
   } else {
     console.log(`Project: ${PROJECT_PATH}`);
-    console.log(`Daemon:  ${DAEMON_URL}`);
+    console.log(LOCAL_WORKER
+      ? 'Worker:  local (GHIDRA_LOCAL_WORKER=1, read-only from the Ghidra Server)'
+      : `Daemon:  ${DAEMON_URL}`);
   }
   console.log(`Output:  ${OUTPUT_DIR}`);
 
