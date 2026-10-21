@@ -3281,6 +3281,22 @@ export function buildBitfieldCatalog(dataTypes: ExtractedDataType[]): Map<string
   return catalog;
 }
 
+/**
+ * Every namespace path the emitted tree opens, with each of its prefixes: those of
+ * the functions and the globals it emits, and nothing Ghidra merely lists.
+ */
+export function emittedNamespacePaths(
+  functions: ReadonlyArray<{ namespace?: string }>,
+  globals: ReadonlyArray<{ namespace?: string }>,
+): Set<string> {
+  const paths = new Set<string>();
+  for (const owner of [...functions, ...globals]) {
+    const segs = (owner.namespace ?? '').split('::').filter(Boolean);
+    for (let i = 1; i <= segs.length; i++) paths.add(segs.slice(0, i).join('::'));
+  }
+  return paths;
+}
+
 function generateFilesForFunctions(
   functions: ExtractedFunction[],
   classes: DetectedClass[],
@@ -3565,16 +3581,14 @@ function generateFilesForFunctions(
   // Build the set of all namespace paths so body-qualifier stripping can avoid
   // creating ambiguous references (e.g. shortening D2Common::Path::DynamicPath::Fn
   // to Path::DynamicPath::Fn when a sibling D2Common::Unit::Path also exists).
-  const knownNamespaces = new Set<string>();
-  const registerNamespacePath = (full: string | undefined) => {
-    if (!full) return;
-    const segs = full.split('::').filter(Boolean);
-    for (let i = 1; i <= segs.length; i++) {
-      knownNamespaces.add(segs.slice(0, i).join('::'));
-    }
-  };
-  for (const ns of namespaces) registerNamespacePath(ns.fullPath ?? ns.name);
-  for (const func of functions) registerNamespacePath(func.namespace);
+  //
+  // Only namespaces the tree OPENS can make a qualifier ambiguous or hide a type:
+  // those of the emitted functions and globals. Ghidra also keeps namespaces that
+  // hold nothing - class namespaces left behind by edits, `D2Common::D2UnitStrc`
+  // and `D2Game::D2GameStrc` among them - and registering every one Ghidra lists
+  // made `D2UnitStrc` a shadowed type: every use was respelled `::D2UnitStrc`, and
+  // the passes that look a type up by its spelling stopped recognising it.
+  const knownNamespaces = emittedNamespacePaths(functions, analyzedGlobals);
   context.knownNamespaces = knownNamespaces;
   // Data initializers are emitted from strings, not an AST — the globals emitter
   // needs the same table to spot a shadowed qualifier.
