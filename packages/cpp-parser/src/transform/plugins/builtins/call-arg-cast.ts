@@ -100,6 +100,8 @@ export interface CallArgCastOptions extends PluginOptions {
   structFieldFuncdefs?: Record<string, Record<string, string>>;
   /** Field name → funcdef, where every aggregate declaring that name agrees */
   fieldFuncdefs?: Record<string, string>;
+  /** Every enum type name (`d2_enums.h` spells each `typedef <int> <Enum>`). */
+  enumTypes?: string[];
 }
 
 /**
@@ -682,6 +684,7 @@ export function createCallArgCastTransformer(options?: PluginOptions): Transform
   const globalTypes = o.globalTypes ?? {};
   const varArgs = cachedSet(o.varArgFunctions);
   const funcdefNames = cachedSet(o.funcdefNames);
+  const enumSet = cachedSet(o.enumTypes);
   const enclosingVarTypes = o.enclosingVarTypes ?? {};
   const fieldTypes = o.fieldTypes ?? {};
   const typedefTargets = o.typedefTargets ?? {};
@@ -723,6 +726,18 @@ export function createCallArgCastTransformer(options?: PluginOptions): Transform
         { globalTypes, enclosingVarTypes, structFields, fieldTypes, returnTypes, resolve },
         (callee) => funcdefReturn?.(callee),
       );
+
+      /** `(uint)x` with x an unsigned byte or word: x (the zero-extension's operand). */
+      const zeroExtensionOperand = (e: Expression): Expression | null => {
+        const c = unwrapParens(e);
+        if (c.kind !== NodeKind.CStyleCastExpr) return null;
+        const to = shapeOfNode((c as CStyleCastExpr).type, 0, resolve);
+        if (!to || to.stars !== 0 || (to.base !== 'unsigned int' && to.base !== 'unsigned long')) return null;
+        const inner = (c as CStyleCastExpr).expression;
+        const from = argShape(inner);
+        if (!from || from.stars !== 0 || !['unsigned char', 'unsigned short', 'bool'].includes(from.base)) return null;
+        return inner;
+      };
 
       /** The funcdef a call through a function pointer is made under. */
       const funcdefOfCallee = createFuncdefCalleeResolver(funcdefTables, argShape);
@@ -809,6 +824,17 @@ export function createCallArgCastTransformer(options?: PluginOptions): Transform
           const newArgs = call.arguments.map((arg, i) => {
             const spelling = declared[i];
             if (!spelling) return arg;
+            // A zero-extension Ghidra spells as a cast to an unsigned word, into a slot
+            // the callee declares as an enum: `CLIENT_GetLevelNameByLevelId((uint)
+            // pObj->nShrineId)` (DRAW_UnitUnderMouse 00454f30) passes a byte as an
+            // eD2LevelId. The widening is the conversion the call makes anyway; the value
+            // the callee gets is the enum's, so the cast says that. Byte and word values
+            // are exactly representable, so nothing changes but the spelling.
+            const zext = enumSet.has(spelling.trim()) ? zeroExtensionOperand(arg as Expression) : null;
+            if (zext) {
+              const enumType = typeFromSpelling(spelling.trim());
+              if (enumType) { anyCast = true; return Expr.cast(enumType, zext); }
+            }
             const bareParam = spelling.replace(/[*\s]/g, '');
             if (funcdefNames.has(bareParam)) {
               // `funcptr-arg-cast` owns this slot because it can compare the two

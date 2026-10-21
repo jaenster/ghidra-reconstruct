@@ -332,3 +332,21 @@ describe('callArgCastPlugin — calls through a function pointer', () => {
     assert.strictEqual(twice, once);
   });
 });
+
+describe('callArgCastPlugin: a zero-extension into an enum slot is spelled as the enum (round 13)', () => {
+  const run = (code: string, options: Record<string, unknown>): string =>
+    emit(callArgCastPlugin.createTransformer(options)(parse(code)) as AnyNode).replace(/\s+/g, ' ').trim();
+  const options = {
+    functionParamTypes: { CLIENT_GetLevelNameByLevelId: ['eD2LevelId'], Takes: ['int'] },
+    enumTypes: ['eD2LevelId'],
+    structFields: { D2UnitDataObjectStrc: { nShrineId: 'uint8_t' } },
+  };
+  it("DRAW_UnitUnderMouse 00454f30: (uint)pObj->nShrineId into eD2LevelId", () => {
+    const out = run(`void f(D2UnitDataObjectStrc *pObj) { CLIENT_GetLevelNameByLevelId((uint32_t)pObj->nShrineId); }`, options);
+    assert.match(out, /CLIENT_GetLevelNameByLevelId\(\(eD2LevelId\)pObj->nShrineId\)/);
+  });
+  it('leaves a widening into a plain integer slot, and a cast from a 32-bit value, alone', () => {
+    assert.match(run(`void f(D2UnitDataObjectStrc *pObj) { Takes((uint32_t)pObj->nShrineId); }`, options), /Takes\(\(uint32_t\)pObj->nShrineId\)/);
+    assert.match(run(`void f(int n) { CLIENT_GetLevelNameByLevelId((uint32_t)n); }`, options), /\(uint32_t\)n/);
+  });
+});
