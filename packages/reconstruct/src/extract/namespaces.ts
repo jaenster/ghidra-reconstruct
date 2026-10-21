@@ -3,6 +3,7 @@
  */
 
 import type { GhidraConnection, ExtractedNamespace } from '../types.js';
+import { listingPageSize } from './pool.js';
 
 /**
  * Options for namespace extraction
@@ -66,7 +67,7 @@ export async function extractAllNamespaces(
   options: Omit<NamespaceExtractionOptions, 'limit' | 'offset'> = {}
 ): Promise<ExtractedNamespace[]> {
   const allNamespaces: ExtractedNamespace[] = [];
-  const pageSize = 100;
+  const pageSize = listingPageSize(connection, 100);
   let offset = 0;
 
   // Paginate until a SHORT page. `list_namespaces` reports `total` as the size of

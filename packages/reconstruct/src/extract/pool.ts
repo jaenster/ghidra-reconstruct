@@ -10,6 +10,8 @@
  * a caller that applies them in a loop afterwards applies them exactly as the
  * flight version did - the order of the output never depends on the network.
  */
+
+import type { GhidraConnection } from '../types.js';
 export async function mapWindowed<T, R>(
   items: readonly T[],
   limit: number,
@@ -31,6 +33,18 @@ export async function mapWindowed<T, R>(
   };
   await Promise.all(Array.from({ length: width }, lane));
   return results;
+}
+
+/**
+ * The worker's own int ceiling. Asked for as a limit, every listing returns its
+ * whole set in one walk: a page is a slice of the same walk at the same position,
+ * so one call yields the rows, in the order, that the pages concatenated.
+ */
+const UNPAGED_LIMIT = 2_147_483_647;
+
+/** The page size for a whole-set listing: `paged`, or one call where the transport allows it. */
+export function listingPageSize(connection: GhidraConnection, paged: number): number {
+  return connection.unpaged ? UNPAGED_LIMIT : paged;
 }
 
 /** A positive integer from the environment, or the default. */

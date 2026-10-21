@@ -612,6 +612,14 @@ export interface GhidraConnection {
   /** Session ID */
   sessionId: string;
 
+  /**
+   * The transport puts no bound on one response, so a whole-set listing is one
+   * call (`listingPageSize`). The worker's listings are stateless: every page
+   * repeats the full walk of the program and keeps only its own slice, so N pages
+   * cost N walks. The daemon pages because of HTTP; a local worker need not.
+   */
+  readonly unpaged?: boolean;
+
   /** Close the connection */
   close(): Promise<void>;
 }

@@ -3,6 +3,7 @@
  */
 
 import type { GhidraConnection, ExtractedString } from '../types.js';
+import { listingPageSize } from './pool.js';
 
 /**
  * Options for string extraction
@@ -70,7 +71,7 @@ export async function extractAllStrings(
   options: Omit<StringExtractionOptions, 'limit' | 'offset'> = {}
 ): Promise<ExtractedString[]> {
   const allStrings: ExtractedString[] = [];
-  const pageSize = 500;
+  const pageSize = listingPageSize(connection, 500);
   let offset = 0;
 
   // Paginate until a SHORT page, rather than until `offset` reaches `total`.

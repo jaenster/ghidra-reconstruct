@@ -6,7 +6,7 @@
  * determine if a symbol should be a true global or a static local.
  */
 
-import { mapWindowed, envConcurrency } from './pool.js';
+import { mapWindowed, envConcurrency, listingPageSize } from './pool.js';
 import type { GhidraConnection, ExtractedGlobal, AnalyzedDataSymbol, DataSymbolScope, DataValue } from '../types.js';
 import { isStructType } from '../codegen/platform-types.js';
 
@@ -117,7 +117,7 @@ async function extractPlateComments(
   connection: GhidraConnection
 ): Promise<Map<string, string>> {
   const byAddress = new Map<string, string>();
-  const pageSize = 500;
+  const pageSize = listingPageSize(connection, 500);
   let offset = 0;
 
   // Until a SHORT page: `list_comments` reports `total` as the size of the page it
@@ -155,7 +155,7 @@ export async function extractAllGlobals(
   onProgress?: (fetched: number, total: number) => void
 ): Promise<ExtractedGlobal[]> {
   const allGlobals: ExtractedGlobal[] = [];
-  const pageSize = 500; // Larger page size for efficiency
+  const pageSize = listingPageSize(connection, 500);
   let offset = 0;
   let total = 0;
 

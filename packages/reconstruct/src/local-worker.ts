@@ -255,6 +255,7 @@ export async function createLocalWorkerConnection(projectPath: string, programPa
   const w = worker;
   return {
     sessionId: `local:${key}`,
+    unpaged: true,
     async sendCommand<T = unknown>(command: string, params: Params = {}): Promise<T> {
       const timeout = (params._commandTimeout as number) || 30000;
       const workerParams = { ...params };

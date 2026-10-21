@@ -9,17 +9,23 @@ import assert from 'node:assert';
 
 import { extractAllNamespaces } from './namespaces.js';
 import { extractAllGlobals } from './globals.js';
+import { extractAllStrings } from './strings.js';
 import type { GhidraConnection } from '../types.js';
 
-function pagedAsTheWorker(handler: (command: string, off: number, lim: number) => Record<string, unknown[]> | undefined): GhidraConnection {
+/** The size of the whole set, for the listing that reports it. */
+const wholeSize = new Map<string, number>();
+
+function pagedAsTheWorker(handler: (command: string, off: number, lim: number) => Record<string, unknown[]> | undefined, unpaged = false): GhidraConnection {
   return {
     sessionId: 'test',
+    unpaged,
     async close() {},
     async sendCommand<T>(command: string, params: Record<string, unknown> = {}): Promise<T> {
       const res = handler(command, Number(params.offset ?? 0), Number(params.limit ?? 100));
       if (!res) throw new Error(`unexpected ${command}`);
       const [key, rows] = Object.entries(res)[0];
-      return { [key]: rows, total: rows.length } as T;
+      // list_data_symbols is the one listing whose total is the whole set's.
+      return { [key]: rows, total: command === 'list_data_symbols' ? wholeSize.get(command) ?? rows.length : rows.length } as T;
     },
   };
 }
@@ -52,12 +58,43 @@ describe('listings whose total is the page size', () => {
       ...globals.map(g => ({ address: g.address, comment: `about ${g.name}` })),
     ];
     const conn = pagedAsTheWorker((command, off, lim) => {
-      if (command === 'list_data_symbols') return { globals: globals.slice(off, off + lim) };
+      if (command === 'list_data_symbols') { wholeSize.set(command, globals.length); return { globals: globals.slice(off, off + lim) }; }
       if (command === 'list_comments') return { comments: comments.slice(off, off + lim) };
       if (command === 'execute_script') return undefined;
       return undefined;
     });
     const got = await extractAllGlobals(conn);
     assert.deepEqual(got.map(g => g.comment), globals.map(g => `about ${g.name}`));
+  });
+});
+
+describe('an unpaged transport', () => {
+  // The same fake as above, which slices exactly as the worker does; only the
+  // page size differs. Every listing must come back whole from ONE call, with
+  // the rows the paged walk assembled, in its order.
+  const namespaces = Array.from({ length: 1234 }, (_, i) => ({ name: `N${i}`, fullPath: `M::N${i}`, isClass: false, functionCount: 0 }));
+  const strings = Array.from({ length: 2345 }, (_, i) => ({ address: (0x6e0000 + i * 8).toString(16), value: `s${i}`, length: 2 }));
+  const globals = Array.from({ length: 3456 }, (_, i) => ({ name: `g${i}`, address: (0x6f0000 + i * 4).toString(16), dataType: 'int', size: 4 }));
+  const comments = globals.map(g => ({ address: g.address, comment: `about ${g.name}` }));
+  const handler = (calls: Map<string, number>) => (command: string, off: number, lim: number) => {
+    calls.set(command, (calls.get(command) ?? 0) + 1);
+    if (command === 'list_namespaces') return { namespaces: namespaces.slice(off, off + lim) };
+    if (command === 'list_strings') return { strings: strings.slice(off, off + lim) };
+    if (command === 'list_data_symbols') { wholeSize.set(command, globals.length); return { globals: globals.slice(off, off + lim) }; }
+    if (command === 'list_comments') return { comments: comments.slice(off, off + lim) };
+    return undefined;
+  };
+
+  it('reads each listing in one call, row for row what the pages gave', async () => {
+    const pagedCalls = new Map<string, number>(), oneCalls = new Map<string, number>();
+    const paged = pagedAsTheWorker(handler(pagedCalls));
+    const whole = pagedAsTheWorker(handler(oneCalls), true);
+    assert.deepEqual(await extractAllNamespaces(whole), await extractAllNamespaces(paged));
+    assert.deepEqual(await extractAllStrings(whole), await extractAllStrings(paged));
+    assert.deepEqual(await extractAllGlobals(whole), await extractAllGlobals(paged));
+    for (const c of ['list_namespaces', 'list_strings', 'list_data_symbols', 'list_comments']) {
+      assert.equal(oneCalls.get(c), 1, c);
+      assert.ok((pagedCalls.get(c) ?? 0) > 1, c);
+    }
   });
 });
