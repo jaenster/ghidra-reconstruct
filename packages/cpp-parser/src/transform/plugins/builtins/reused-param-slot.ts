@@ -521,7 +521,7 @@ export function splitReusedValueSlots(fn: FunctionDecl, o: ReusedParamSlotOption
       // second range, whose type is not that enum: the number it stands for.
       const xu = unwrapParens(x);
       if (xu.kind === NodeKind.Identifier && enumConstants.has((xu as Identifier).name) && !localTypes.has((xu as Identifier).name)
-          && targetClass === 'int' && o.enumValues && (xu as Identifier).name in o.enumValues) {
+          && paramClass === 'enum' && o.enumValues && (xu as Identifier).name in o.enumValues) {
         x = Expr.intLiteral(BigInt(o.enumValues[(xu as Identifier).name])) as unknown as Expression;
       }
       const t = evidentType(x, o, localTypes);
