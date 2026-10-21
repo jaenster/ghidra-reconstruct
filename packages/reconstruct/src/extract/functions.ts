@@ -4,6 +4,7 @@
 
 import { attachSehFrames } from './seh-frames.js';
 import { attachOperandRefs } from './operand-refs.js';
+import { attachPrologueSlots } from './prologue-slots.js';
 import type {
   GhidraConnection,
   ExtractedFunction,
@@ -415,6 +416,17 @@ export async function extractAllFunctions(
       `${label}extract/seh-frames`,
       async () => { attached = await attachSehFrames(connection, allFunctions); },
       () => `${attached} SEH frame(s)`
+    );
+  }
+
+  // The prologue's PUSH-reg slot reservations (MSVC's `PUSH ECX` for `SUB ESP,4`), whose
+  // incidental store the decompiler prints as an assignment. One script for the program.
+  {
+    let attached = 0;
+    await timePhase(
+      `${label}extract/prologue-slots`,
+      async () => { attached = await attachPrologueSlots(connection, allFunctions); },
+      () => `prologue PUSH slots in ${attached} function(s)`
     );
   }
 

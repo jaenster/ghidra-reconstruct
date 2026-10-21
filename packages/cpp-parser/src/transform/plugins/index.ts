@@ -559,6 +559,10 @@ import { labelMacroCollisionPlugin } from './builtins/label-macro-collision.js';
 export { labelMacroCollisionPlugin } from './builtins/label-macro-collision.js';
 import { gotoLabelCanonicalPlugin, gotoLabelRestorePlugin } from './builtins/label-canonical.js';
 import { labelUnreferencedDropPlugin } from './builtins/label-unreferenced-drop.js';
+import { deadOutSlotStorePlugin } from './builtins/dead-out-slot-store.js';
+import { adjShiftedPointerPlugin } from './builtins/adj-shifted-pointer.js';
+export { adjShiftedPointerPlugin, type AdjShiftedPointerOptions } from './builtins/adj-shifted-pointer.js';
+export { deadOutSlotStorePlugin, getDeadOutSlotStoresDropped, resetDeadOutSlotStoresDropped, type DeadOutSlotStoreOptions } from './builtins/dead-out-slot-store.js';
 export { labelUnreferencedDropPlugin, getUnreferencedLabelsDropped, resetUnreferencedLabelsDropped } from './builtins/label-unreferenced-drop.js';
 export { gotoLabelCanonicalPlugin, gotoLabelRestorePlugin, canonicalLabels } from './builtins/label-canonical.js';
 import { funcdefCastCollapsePlugin } from './builtins/funcdef-cast-collapse.js';
@@ -634,6 +638,8 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   ...ghidraCleanupPlugins,
   biasedTableIndexPlugin,      // Correctness: *(byte*)((int)A + C + i) below the next table → Next[i - bias] (priority 12)
   foldedAddressRebasePlugin,   // Correctness: a folded MOV X; SUB d address respelled X - n, from the instruction refs (priority 13)
+  adjShiftedPointerPlugin,     // Correctness: ADJ(p) on a shifted pointer -> (Container*)((char*)p - k), its containing record (priority 11)
+  deadOutSlotStorePlugin,      // Correctness: a PUSH-reg slot store the next call overwrites through &local before any read -> dropped (priority 12.5)
   reusedParamSlotPlugin,       // Correctness: a dead parameter slot reused for a function pointer -> a funcdef local (priority 14)
   threeByteAccessPlugin,       // Correctness: *(uint3 *)p → d2_load24(p), exactly three bytes (priority 14)
   typeNormalizePlugin,         // Cleanup: uint → uint32_t, undefined4 → auto/uint32_t (priority 15)

@@ -557,6 +557,8 @@ export interface ImplGenContext {
   _ambiguousEnumConstants?: string[];
   /** Enum name → the member names it declares, un-deduplicated. */
   _enumMembers?: Record<string, string[]>;
+  /** Enum name → member name → value. */
+  _enumMemberValues?: Record<string, Record<string, number>>;
   /**
    * Full set of namespace paths that exist in the project (e.g.
    * "D2Common::Unit::Path", "D2Common::Path::DynamicPath"). Used to make
@@ -651,6 +653,10 @@ function funcPtrArgCastsForScope(
 
 /** @see ImplGenContext.funcPtrArgCasts */
 export interface FuncPtrArgCastTables {
+  /** Shifted pointer typedef -> its container, offset and member (shifted-pointers.ts). */
+  shiftedPointers?: Record<string, { container: string; offset: number; member?: string }>;
+  /** Out-parameter facts read from each callee's own body, on demand (out-params.ts). */
+  outParams?: import('./out-params.js').OutParamOracle;
   /** Every enum type name. */
   enumTypes?: string[];
   /** Enums with no negative member: unsigned in Ghidra's type system. */
@@ -1470,6 +1476,7 @@ export function generateFunctionImplementation(
           labelFlow: func.labelFlow,
           sehLowering: sehLoweringDecision(func),
           foldedAddresses: foldedAddressFacts(func),
+          pushSlotInits: pushSlotInits(func),
         },
       );
       body = func.name ? rewriteQuestUnionMembers(transformed.code, func.name, context?.sourceFileName, [...(func.parameters ?? []), ...(func.localVariables ?? [])]) : transformed.code;
@@ -1785,6 +1792,29 @@ type FrameSlot = { name: string; offset: number; size: number; isParameter?: boo
 /** Ghidra spells an array slot `undefined1[260]`, `char[250]`, `int16_t[3]`. */
 function isArrayTypeName(dataType: string | undefined): boolean {
   return !!dataType && /\[\s*\d+\s*\]\s*$/.test(dataType);
+}
+
+/**
+ * The locals whose stack slot the prologue reserved with `PUSH reg` while that register
+ * held a parameter: the decompiler prints `local = param;` for the push (prologue-slots.ts).
+ */
+function pushSlotInits(func: ExtractedFunction): Array<{ local: string; value: string }> {
+  const out: Array<{ local: string; value: string }> = [];
+  if (!func.pushSlots?.length) return out;
+  const byReg = new Map<string, string>();
+  for (const p of func.parameters ?? []) {
+    const m = /^([A-Z]{3}):4$/.exec((p.storage ?? '').trim());
+    if (m && p.name) byReg.set(m[1], p.name);
+  }
+  for (const v of func.localVariables ?? []) {
+    const m = /^Stack\[(-?0x[0-9a-f]+)\]:4$/i.exec((v.storage ?? '').trim());
+    if (!m || !v.name) continue;
+    const off = parseInt(m[1], 16);
+    const slot = func.pushSlots.find(s => s.offset === off);
+    const value = slot && byReg.get(slot.reg);
+    if (value) out.push({ local: v.name, value });
+  }
+  return out;
 }
 
 function frameSlots(func: ExtractedFunction): FrameSlot[] {
@@ -2252,6 +2282,8 @@ function transformDecompiledCode(
     sehLowering?: SehLoweringDecision;
     /** Addresses the instructions derive from a global's start (codegen/folded-address-spec.ts). */
     foldedAddresses?: FoldedAddressFact[];
+    /** Locals in a prologue `PUSH reg` slot, with the register parameter the push stored. */
+    pushSlotInits?: Array<{ local: string; value: string }>;
   },
 ): TransformDecompiledResult {
   try {
@@ -2457,6 +2489,11 @@ function transformDecompiledCode(
         // 4-byte stack slot, and the return types that say what a store holds.
         stackParameters: (enclosing?.stackSlots ?? []).filter(s => s.isParameter && s.size === 4).map(s => s.name),
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        structFields: context.funcPtrArgCasts.structFields,
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        enumConstants: context.funcPtrArgCasts.enumConstantNames,
+        enumValues: context.funcPtrArgCasts.enumValues,
       };
       perPluginOptions['strided-access'] = {
         structLayouts: context.funcPtrArgCasts.structLayouts,
@@ -2519,6 +2556,29 @@ function transformDecompiledCode(
           onRefusal: (reason: string) => console.warn(`[fold] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: left as printed: ${reason}`),
         };
       }
+      if (context.funcPtrArgCasts.shiftedPointers && Object.keys(context.funcPtrArgCasts.shiftedPointers).length > 0) {
+        perPluginOptions['adj-shifted-pointer'] = {
+          shiftedPointers: context.funcPtrArgCasts.shiftedPointers,
+          globalTypes: context.funcPtrArgCasts.globalTypes,
+          structFields: context.funcPtrArgCasts.structFields,
+          fieldTypes: context.funcPtrArgCasts.fieldTypes,
+          returnTypes: context.funcPtrArgCasts.functionReturnTypes,
+          enclosingVarTypes,
+        };
+      }
+      if (context.funcPtrArgCasts.outParams) {
+        const oracle = context.funcPtrArgCasts.outParams;
+        perPluginOptions['dead-out-slot-store'] = {
+          outParamWidth: (callee: string, index: number) => oracle.outParamWidth(callee, index),
+          typeSize: (spelling: string) => oracle.typeSize(spelling),
+          pushSlotInits: enclosing?.pushSlotInits ?? [],
+        };
+      }
+      perPluginOptions['branchless-select'] = {
+        enumValues: context.funcPtrArgCasts.enumValues,
+        enumMemberValues: context._enumMemberValues,
+        ambiguousConstants: context._ambiguousEnumConstants,
+      };
       perPluginOptions['biased-table-index'] = {
         globalAddresses: context.funcPtrArgCasts.globalAddresses,
         globalSizes: context.funcPtrArgCasts.globalSizes,
@@ -2613,6 +2673,7 @@ function transformDecompiledCode(
         funcdefDecls: context.funcPtrArgCasts.funcdefDecls,
         structFieldFuncdefs: context.funcPtrArgCasts.structFieldFuncdefs,
         fieldFuncdefs: context.funcPtrArgCasts.fieldFuncdefs,
+        enumTypes: context.funcPtrArgCasts.enumTypes,
         enclosingVarTypes,
       };
     }
