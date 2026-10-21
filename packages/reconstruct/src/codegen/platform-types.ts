@@ -234,8 +234,28 @@ const ROOT_CATEGORY_WINSOCK_TYPES = new Set<string>([
   'sockaddr_in',
 ]);
 
+/**
+ * SDK headers the platform header deliberately does NOT include, so a type Ghidra files
+ * under one of them is ours to define on every platform, not the SDK's.
+ *
+ * The DirectX headers: Ghidra models their COM interfaces in the C shape (`IDirectSound`
+ * as `{ IDirectSoundVtbl* lpVtbl; }`, called `p->lpVtbl->CreateSoundBuffer(p, ...)`), and
+ * those structs are emitted from the database. In C++ the SDK headers define the same
+ * names as interface classes, so including one is a redefinition of every interface the
+ * tree models (`IDirectSound3DBuffer`, `IKsPropertySet`, ... for <dsound.h>). The records
+ * are also the layouts the binary was built against, which the current SDK has outgrown:
+ * Ghidra's `DSBUFFERDESC` (/dsound.h, v1531) is the 20-byte DirectX 6 one the code fills
+ * with `dwSize = 0x14`; <dsound.h> at its default DIRECTSOUND_VERSION is 36 bytes.
+ *
+ * The test is per header, never per type name: every type filed under one of these is
+ * emitted as written, unguarded, and may be forward-declared and spelled `struct X`.
+ */
+const SDK_HEADERS_NOT_INCLUDED = new Set<string>([
+  'dsound.h', 'ddraw.h', 'd3d.h', 'd3dtypes.h', 'd3dcaps.h', 'dinput.h', 'dplay.h', 'dplobby.h',
+]);
+
 export function isLibraryType(name: string, category: string): boolean {
-  if (SYSTEM_HEADER_CATEGORY_RE.test(category)) return true;
+  if (SYSTEM_HEADER_CATEGORY_RE.test(category)) return !SDK_HEADERS_NOT_INCLUDED.has(category.slice(1).toLowerCase());
   if (EH_INTERNAL_TYPES.has(name)) return true;
   if (ROOT_CATEGORY_WINSOCK_TYPES.has(name)) return true;
   return false;
