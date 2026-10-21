@@ -558,6 +558,8 @@ export { underscoreStorageAliasPlugin, type UnderscoreStorageAliasOptions } from
 import { labelMacroCollisionPlugin } from './builtins/label-macro-collision.js';
 export { labelMacroCollisionPlugin } from './builtins/label-macro-collision.js';
 import { gotoLabelCanonicalPlugin, gotoLabelRestorePlugin } from './builtins/label-canonical.js';
+import { labelUnreferencedDropPlugin } from './builtins/label-unreferenced-drop.js';
+export { labelUnreferencedDropPlugin, getUnreferencedLabelsDropped, resetUnreferencedLabelsDropped } from './builtins/label-unreferenced-drop.js';
 export { gotoLabelCanonicalPlugin, gotoLabelRestorePlugin, canonicalLabels } from './builtins/label-canonical.js';
 import { funcdefCastCollapsePlugin } from './builtins/funcdef-cast-collapse.js';
 export { funcdefCastCollapsePlugin } from './builtins/funcdef-cast-collapse.js';
@@ -702,6 +704,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   labelMacroCollisionPlugin, // Cleanup: rename goto labels colliding with Win32/CRT macros — ERROR/DELETE/… (priority 41)
   gotoLabelCanonicalPlugin,  // Control-flow: Ghidra-named labels spelled as default labels while the goto passes run (priority 1)
   gotoLabelRestorePlugin,    // Control-flow: the labels left standing get their Ghidra names back (priority 985)
+  labelUnreferencedDropPlugin, // Control-flow: drop every label no goto of its function targets, after all goto passes (priority 986)
   funcdefCastCollapsePlugin,  // Type: collapse (Funcdef*) casts to (Funcdef) (priority 70)
   funcPtrArgCastPlugin,       // Type: cast a function address passed to a differing funcdef param (priority 71)
   pointerAssignCastPlugin,    // Type: insert reinterpret cast on pointer-to-pointer assignments (priority 600)

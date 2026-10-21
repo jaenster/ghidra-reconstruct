@@ -323,9 +323,13 @@ function ifFalseArm(stmts: Statement[], total: GotoTotal): Statement[] | null {
     const swBody = (sw as SwitchStmt).body as CompoundStmt;
     if (!thenLabels.every(L => gotoCount(swBody.statements, L) === total(L) && total(L) > 0)) continue;
 
-    const wrapLabels = (inner: Statement): Statement =>
-      thenLabels.reduceRight<Statement>((acc, L) => Stmt.label(L, acc), inner);
-    const arm = [wrapLabels(X[0]), ...X.slice(1), ...(canFallThrough(X[X.length - 1]) ? [Stmt.break_()] : [])];
+    // The arm keeps the labels a goto still names. The `default: goto L` this block replaces
+    // is one of L's gotos; when it was the only one, `L:` would be left naming nothing.
+    const arm = (consumed: string | null): Statement[] => {
+      const kept = thenLabels.filter(L => total(L) - (L === consumed ? 1 : 0) > 0);
+      const head = kept.reduceRight<Statement>((acc, L) => Stmt.label(L, acc), X[0]);
+      return [head, ...X.slice(1), ...(canFallThrough(X[X.length - 1]) ? [Stmt.break_()] : [])];
+    };
 
     const list = swBody.statements;
     let newList: Statement[] | null = null;
@@ -335,13 +339,15 @@ function ifFalseArm(stmts: Statement[], total: GotoTotal): Statement[] | null {
       const g = armEndGoto(list, di);
       const closes = di + 1 >= list.length || isArmStart(list[di + 1]);
       if (g && thenLabels.includes(g.label) && closes && (list[di] as DefaultStmt).statement.kind === NodeKind.GotoStmt) {
-        newList = [...list.slice(0, di), updateNode(list[di] as DefaultStmt, { statement: arm[0] }), ...arm.slice(1), ...list.slice(di + 1)];
+        const a = arm(g.label);
+        newList = [...list.slice(0, di), updateNode(list[di] as DefaultStmt, { statement: a[0] }), ...a.slice(1), ...list.slice(di + 1)];
       }
     }
     if (!newList) {
+      const a = arm(null);
       // Otherwise an arm reached only by its labels, after a last arm that cannot fall into it.
       const tail = list.length && canFallThrough(list[list.length - 1]) ? [Stmt.break_()] : [];
-      newList = [...list, ...tail, ...arm];
+      newList = [...list, ...tail, ...a];
     }
     const newSwitch = updateNode(sw as SwitchStmt, { body: updateNode(swBody, { statements: newList }) });
     const replacement = [...elseList.slice(0, -1), newSwitch];

@@ -1965,6 +1965,8 @@ export class CppEmitter {
       this.write(this.indent());
       this.emitNode(stmt);
       if (this.needsSemicolon(stmt)) this.write(';');
+      // An empty body is `;`: printed as nothing, `if (a) ;` took the next statement as its body.
+      else if (stmt.kind === NodeKind.NullStmt) this.write(';');
       this.indentLevel--;
     }
   }
@@ -2143,6 +2145,9 @@ export class CppEmitter {
     this.write(this.indent());
     this.emitNode(node.statement);
     if (this.needsSemicolon(node.statement)) this.write(';');
+    // A label needs its statement: printed as nothing, `L: ;` would label whatever
+    // follows (or end a block, which C++17 rejects).
+    else if (node.statement.kind === NodeKind.NullStmt) this.write(';');
   }
 
   private emitTryStmt(node: TryStmt): void {
