@@ -80,7 +80,7 @@ import { buildNamespaceResolution, namespaceResolution, renderNamespace } from '
 import { setInteriorLabelSymbols, resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, setDeclarationClosureDataContent, getDeclarationClosureReport, isUnreferenceableArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, wasGlobalClaimed, findDuplicateLinkageNames, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, setInitializerAddressTable, setInitializerFunctionAddresses, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType, emittedNamespaceOf, getDeclaredNames, initializerAddressReferences, addInitializerAddressReferences, markUnnamedImportSlots, setInitializerEnumConstants } from './globals-header.js';
 import { normalizeDataAddress, stringDefinition } from './declaration-closure.js';
 import { harvestAnnotatedParameterTypes } from './win32-signatures.js';
-import { PLATFORM_FUNCDEF_NAMES, PLATFORM_STRUCT_FIELD_TYPES, isPlatformOrBuiltinType, isLibraryType, generatePlatformHeader, oddWidthTypesSpelled, placeholderTypesUsedIn, normalizeDataValue, arrayRowTypedefLines, arrayRowReturn, arrayRowSpelling, GHIDRA_PSEUDO_OP_RESULT_TYPES, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, platformDefinedFunctionNames, platformVoidPointerFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
+import { PLATFORM_FUNCDEF_NAMES, PLATFORM_STRUCT_FIELD_TYPES, isPlatformOrBuiltinType, isLibraryType, sdkLayoutMismatches, sdkHeaderOf, unprobedTypeNames, generatePlatformHeader, oddWidthTypesSpelled, placeholderTypesUsedIn, normalizeDataValue, arrayRowTypedefLines, arrayRowReturn, arrayRowSpelling, GHIDRA_PSEUDO_OP_RESULT_TYPES, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, platformDefinedFunctionNames, platformVoidPointerFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
 import { createOverrideRegistry } from '../overrides/index.js';
 import { alignPathCase, assertNoCaseCollidingFiles } from './path-case.js';
 import { createLibraryRegistry } from '../library/index.js';
@@ -1652,6 +1652,7 @@ export function generateProjectStage2(state: GenerationState): ReconstructedProj
   reportCaseCollidingOutputPaths(project);
   reportGlobalsTakingATypeName();
   reportDeclarationClosure();
+  reportSdkTypes(dataTypes);
   reportFuncPtrArityMismatches(state.extraArityMismatches, state.extraInitializerArityMismatches);
 
   return project;
@@ -1689,6 +1690,30 @@ function reportFuncPtrArityMismatches(
   console.log(`Funcdef arity disagreements: ${bodies.length} in bodies (no cast attempted — a cast cannot change a call's arity), ${initializers} in data initializers (cast to the slot type — a store can)`);
   for (const m of [...bodies].sort((a, b) => a.slot.localeCompare(b.slot) || a.callee.localeCompare(b.callee))) {
     console.log(`  ${m.slot} takes ${m.slotArity}, ${m.callee} takes ${m.actualArity}`);
+  }
+}
+
+/**
+ * The SDK-type decision's two worklists: Ghidra records of an SDK type whose layout is not
+ * the SDK's (Ghidra rows - the tree compiles against the SDK's), and system-header type
+ * names the SDK manifest never probed (re-run scripts/sdk-types.ts).
+ */
+function reportSdkTypes(dataTypes: readonly ExtractedDataType[]): void {
+  const seen = new Set<string>();
+  const rows: string[] = [];
+  for (const dt of dataTypes) {
+    if (seen.has(dt.name) || (dt.kind !== 'STRUCTURE' && dt.kind !== 'UNION')) continue;
+    seen.add(dt.name);
+    const diffs = sdkLayoutMismatches(dt);
+    if (diffs.length > 0) rows.push(`  ${dt.name} (${dt.category ?? '?'}; the SDK's is ${sdkHeaderOf(dt.name)}): ${diffs.join('; ')}`);
+  }
+  if (rows.length > 0) {
+    console.log(`SDK types: ${rows.length} Ghidra record(s) differ from the SDK definition the tree compiles against (Ghidra rows):`);
+    for (const r of rows) console.log(r);
+  }
+  const unprobed = unprobedTypeNames();
+  if (unprobed.length > 0) {
+    console.log(`SDK types: ${unprobed.length} system-header type name(s) the SDK manifest never probed - re-run scripts/sdk-types.ts: ${unprobed.slice(0, 12).join(', ')}${unprobed.length > 12 ? ', ...' : ''}`);
   }
 }
 
@@ -4002,12 +4027,22 @@ function generateFilesForFunctions(
         for (const m of implContent.matchAll(/\b([A-Za-z_]\w*)\s*\*?\s*([A-Za-z_]\w*)\s*[=;]/g)) {
           if (structFieldTypes.has(m[1]) || structUnionEnumNames.has(m[1])) addVar(m[2], m[1]);
         }
+        // A global the body dereferences - `&gpChatDlgInputEditBox->sControl` (v1623 typed
+        // it D2WinEditBox *) - reaches its pointee by value exactly as a local does. Added
+        // last: a parameter or local of the same name shadows it.
+        const globalTypes = context.funcPtrArgCasts?.globalTypes ?? {};
+        const typeOf = (name: string): string | undefined => {
+          const local = varType.get(name);
+          if (local) return local;
+          const g = Object.prototype.hasOwnProperty.call(globalTypes, name) ? globalTypes[name] : undefined;
+          return g ? g.replace(/\bconst\b/g, '').replace(/[*&]/g, '').replace(/\[[^\]]*\]/g, '').trim() || undefined : undefined;
+        };
         // A chain mixes both accessors - `pUnit->pUnitData.pUnitDataMonster->pMonStatsTxt`
         // reaches the union BY VALUE and then dereferences again. Matching only `->`
         // stopped at the first `.` and left every type past it incomplete, so both
         // spellings advance the walk; the field's base type is the same either way.
         for (const cm of implContent.matchAll(/\b([A-Za-z_]\w*)((?:\s*(?:->|\.)\s*[A-Za-z_]\w*)+)/g)) {
-          let curType = varType.get(cm[1]);
+          let curType = typeOf(cm[1]);
           if (!curType) continue;
           for (const fm of cm[2].matchAll(/(?:->|\.)\s*([A-Za-z_]\w*)/g)) {
             const owner = typeOwnerMap.get(curType);

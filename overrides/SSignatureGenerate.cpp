@@ -43,26 +43,24 @@ SSIG_HashData((uint32_t)nMarkerOffset, pDataBytes, (int32_t)pHash); // 0041d5d5-
 uint8_t* pSig1 = (uint8_t*)__builtin_alloca(nKeySize);       // 0041d5e6-0041d5ed
 SSystem::SMemCopy(pSig1, pHash, nKeySize);               // 0041d5ef-0041d5f2
 SSIG_InitRSAPair(rsaPair1);                                  // 0041d5f7 / 0041d5fa
-CryptRSA_Prepare(nKeyId, nKeySize, pModulus1, nModulus1Len, rsaPair1); // 0041d5ff-0041d60f
+CryptRSA_Prepare(pModulusBytes, nKeySize, pPrivateExponent, nPrivateExponentLen, rsaPair1); // 0041d5ff-0041d60f
 CryptRSA_Process(pSig1, nKeySize, rsaPair1);                 // 0041d614-0041d619
 
 uint8_t* pSig2 = (uint8_t*)__builtin_alloca(nKeySize);       // 0041d61e-0041d625
 SSystem::SMemCopy(pSig2, pSig1, nKeySize);               // 0041d627-0041d62d
 SSIG_InitRSAPair(rsaPair2);                                  // 0041d632 / 0041d635
-CryptRSA_Prepare(nKeyId, nKeySize, pModulus2, nModulus2Len, rsaPair2); // 0041d63a-0041d64a
+CryptRSA_Prepare(pModulusBytes, nKeySize, pPublicExponent, nPublicExponentLen, rsaPair2); // 0041d63a-0041d64a
 CryptRSA_Process(pSig2, nKeySize, rsaPair2);                 // 0041d64f-0041d657
 
-if (SSystem::SSYSTEM_MemCompare((int*)pSig2,
-                                (D2QServerClientConnectionStrc*)pHash,
-                                nKeySize) == 0) {            // 0041d65c-0041d669
+if (SSystem::SSYSTEM_MemCompare(pSig2, pHash, nKeySize) == 0) { // 0041d65c-0041d669
   *(uint32_t*)(pDataBytes + nMarkerOffset) = 0x5349474e;     // 0041d686  'SIGN'
   SSystem::SMemCopy(pDataBytes + nMarkerOffset + 4, pSig1, nKeySize); // 0041d685-0041d693
   *pnDataLen = (uint32_t)(nMarkerOffset + nKeySize + 4);     // 0041d69b / 0041d69f
-  SSIG_FreeRSAPair((void**)rsaPair2);                        // 0041d6a1 / 0041d6a4
-  SSIG_FreeRSAPair((void**)rsaPair1);                        // 0041d6a9 / 0041d6ac
+  SSIG_FreeRSAPair(rsaPair2);                        // 0041d6a1 / 0041d6a4
+  SSIG_FreeRSAPair(rsaPair1);                        // 0041d6a9 / 0041d6ac
   return 1;                                                  // 0041d6b1  MOV EAX,0x1
 } else {
-  SSIG_FreeRSAPair((void**)rsaPair2);                        // 0041d66b / 0041d66e
-  SSIG_FreeRSAPair((void**)rsaPair1);                        // 0041d673 / 0041d676
+  SSIG_FreeRSAPair(rsaPair2);                        // 0041d66b / 0041d66e
+  SSIG_FreeRSAPair(rsaPair1);                        // 0041d673 / 0041d676
   return 0;                                                  // 0041d67b  XOR EAX,EAX
 }

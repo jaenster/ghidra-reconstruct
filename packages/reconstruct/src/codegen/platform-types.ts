@@ -10,6 +10,7 @@
 // =============================================================================
 
 /** Standard C/C++ types from <cstdint>, <cstddef>, and language primitives */
+import { SDK_PROBED_NAMES, SDK_DEFINED_TYPES, SDK_TYPEDEF_NAMES, PLATFORM_HEADER_DECLARED_TYPES, SDK_LAYOUTS } from './sdk-types.generated.js';
 import { ARTIFACT_SUPPORT_LINES, Lexer, TokenKind } from '@ghidra-mcp/cpp-parser';
 import {
   generateExcludedSymbolDecls, EXTRA_WIN32_SDK_HEADERS,
@@ -235,30 +236,81 @@ const ROOT_CATEGORY_WINSOCK_TYPES = new Set<string>([
 ]);
 
 /**
- * SDK headers the platform header deliberately does NOT include, so a type Ghidra files
- * under one of them is ours to define on every platform, not the SDK's.
+ * Which type names the platform's SDK headers define, and how they lay them out, read off
+ * the headers by `scripts/sdk-types.ts` (sdk-types.generated.ts). `<windows.h>` and the
+ * other SDK headers `d2_platform.h` includes are the authority, not Ghidra's category path:
+ * FPO_DATA is filed under /DbgHelp and winnt.h defines it (`typedef struct _FPO_DATA
+ * {...} FPO_DATA`), so a second `struct FPO_DATA` is "using typedef-name after struct" in
+ * every TU; DSBUFFERDESC is filed under /dsound.h and no included header defines it, so
+ * it is ours to emit.
  *
- * The DirectX headers: Ghidra models their COM interfaces in the C shape (`IDirectSound`
- * as `{ IDirectSoundVtbl* lpVtbl; }`, called `p->lpVtbl->CreateSoundBuffer(p, ...)`), and
- * those structs are emitted from the database. In C++ the SDK headers define the same
- * names as interface classes, so including one is a redefinition of every interface the
- * tree models (`IDirectSound3DBuffer`, `IKsPropertySet`, ... for <dsound.h>). The records
- * are also the layouts the binary was built against, which the current SDK has outgrown:
- * Ghidra's `DSBUFFERDESC` (/dsound.h, v1531) is the 20-byte DirectX 6 one the code fills
- * with `dwSize = 0x14`; <dsound.h> at its default DIRECTSOUND_VERSION is 36 bytes.
- *
- * The test is per header, never per type name: every type filed under one of these is
- * emitted as written, unguarded, and may be forward-declared and spelled `struct X`.
+ * The rule, in order:
+ *  1. an MSVC EH/RTTI internal (above) - the platform header handles those;
+ *  2. a system header the platform includes declares the name: the SDK's, never emitted
+ *     on Windows (its layout is checked against Ghidra's - `sdkLayoutMismatches`);
+ *  3. the name was probed and nothing in the SDK declares it: ours;
+ *  4. d2_platform.h itself declares it, or the name was not probed (a derived spelling, or
+ *     a type Ghidra added after the manifest was written - `unprobedTypeNames` collects
+ *     those for the run's report): Ghidra's category path decides, as it did before the
+ *     manifest, together with the root-category winsock name above.
  */
-const SDK_HEADERS_NOT_INCLUDED = new Set<string>([
-  'dsound.h', 'ddraw.h', 'd3d.h', 'd3dtypes.h', 'd3dcaps.h', 'dinput.h', 'dplay.h', 'dplobby.h',
-]);
+const SDK_PROBED = new Set<string>(SDK_PROBED_NAMES);
+const PLATFORM_HEADER_DECLARED = new Set<string>(PLATFORM_HEADER_DECLARED_TYPES);
+const unprobed = new Set<string>();
 
 export function isLibraryType(name: string, category: string): boolean {
-  if (SYSTEM_HEADER_CATEGORY_RE.test(category)) return !SDK_HEADERS_NOT_INCLUDED.has(category.slice(1).toLowerCase());
   if (EH_INTERNAL_TYPES.has(name)) return true;
+  if (Object.prototype.hasOwnProperty.call(SDK_DEFINED_TYPES, name)) return true;
+  if (SDK_PROBED.has(name) && !PLATFORM_HEADER_DECLARED.has(name)) return false;
+  if (!SDK_PROBED.has(name) && /^[A-Za-z_]\w*$/.test(name) && SYSTEM_HEADER_CATEGORY_RE.test(category)) unprobed.add(name);
+  if (SYSTEM_HEADER_CATEGORY_RE.test(category)) return true;
   if (ROOT_CATEGORY_WINSOCK_TYPES.has(name)) return true;
   return false;
+}
+
+/** System-header-filed type names this run met that the SDK manifest never probed. */
+export function unprobedTypeNames(): string[] {
+  return [...unprobed].sort();
+}
+
+/**
+ * How Ghidra's record of an SDK type differs from the SDK's definition the tree compiles
+ * against: size, and each named field's offset and size (a field the SDK lacks, or has as
+ * a bit-field, included). Empty when they agree, or when the type is not the SDK's. Each
+ * line is a Ghidra row: the tree uses the SDK's type, so a body that names Ghidra's field
+ * does not compile, and a size that differs moves everything after it.
+ */
+export function sdkLayoutMismatches(dt: { name: string; size?: number; fields?: ReadonlyArray<{ name?: string | null; offset: number; size: number }> }): string[] {
+  const sdk = SDK_LAYOUTS[dt.name];
+  if (!sdk) return [];
+  const out: string[] = [];
+  if (dt.size !== undefined && sdk.size >= 0 && sdk.size !== dt.size) out.push(`size ${dt.size}, SDK ${sdk.size}`);
+  for (const f of dt.fields ?? []) {
+    if (!f.name) continue;
+    const s = sdk.fields[f.name];
+    if (s === undefined) continue;
+    if (s === 'missing') out.push(`${f.name} (+0x${f.offset.toString(16)}, ${f.size}): no such member in the SDK's type`);
+    else if (s === 'bitfield') out.push(`${f.name} (+0x${f.offset.toString(16)}, ${f.size}): a bit-field in the SDK's type`);
+    else if (s[0] !== f.offset || s[1] !== f.size) out.push(`${f.name}: +0x${f.offset.toString(16)}/${f.size}, SDK +0x${s[0].toString(16)}/${s[1]}`);
+  }
+  return out;
+}
+
+const SDK_TYPEDEFS = new Set<string>(SDK_TYPEDEF_NAMES);
+
+/**
+ * The SDK declares `name` as a tag the tree may spell `struct name`: `IUnknown` (unknwnbase.h
+ * `typedef struct IUnknown IUnknown`, the same tag) or `tagRECT`. A typedef name for a
+ * differently named tag (`FPO_DATA`, winnt.h's `typedef struct _FPO_DATA FPO_DATA`) has no
+ * elaborated form. False for a name the SDK does not define.
+ */
+export function sdkTypeHasElaboratedForm(name: string): boolean {
+  return Object.prototype.hasOwnProperty.call(SDK_DEFINED_TYPES, name) && !SDK_TYPEDEFS.has(name);
+}
+
+/** The SDK header (include-relative) that defines `name`, if one does. */
+export function sdkHeaderOf(name: string): string | undefined {
+  return Object.prototype.hasOwnProperty.call(SDK_DEFINED_TYPES, name) ? SDK_DEFINED_TYPES[name] : undefined;
 }
 
 // =============================================================================

@@ -22,7 +22,7 @@ import type { MethodConversionRegistry } from '../methods/index.js';
 import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js';
 import { namespaceResolution, renderNamespace } from './namespace-resolution.js';
 import { isGhidraGeneratedName, suggestBetterName, type FuncPtrTarget } from '@ghidra-mcp/cpp-parser';
-import { isPlatformOrBuiltinType, isLibraryType, normalizeSignatureType, normalizeWideCharType, collapseFuncPtrTypedef, rootQualifyShadowedType, emittedParameterName, arrayRowReturn, WINDOWS_STRUCTS, platformDeclaredFunctionNames } from './platform-types.js';
+import { isPlatformOrBuiltinType, isLibraryType, sdkTypeHasElaboratedForm, normalizeSignatureType, normalizeWideCharType, collapseFuncPtrTypedef, rootQualifyShadowedType, emittedParameterName, arrayRowReturn, WINDOWS_STRUCTS, platformDeclaredFunctionNames } from './platform-types.js';
 import { generateExternDeclaration, isFuncDefTypedefName, sanitizeSymbolName, orderForwardDeclarations, type ForwardDeclaration } from './globals-header.js';
 import { declarationHead, pointerConvention } from './calling-convention.js';
 import { enumTypedefLine } from './enum-width.js';
@@ -325,42 +325,35 @@ export function generateHeader(
 
   if (typesToEmit.length > 0) {
     lines.push('// Data types');
-    // Partition into normal vs library types. Library types (CRT / Win32 / MSVC-EH
-    // internals Ghidra pulled in from the statically-linked CRT) get their full
-    // DEFINITIONS guarded behind #ifndef _WIN32, because the real SDK / CRT that
-    // d2_platform.h includes provides them on Windows — re-emitting collides.
-    // Topological ordering is preserved within each partition (stable filter of
-    // the already-sorted list); forward declarations above stay unguarded.
-    const normalTypes = typesToEmit.filter(t => !isLibraryType(t.name, t.category));
-    const libraryTypes = typesToEmit.filter(t => isLibraryType(t.name, t.category));
-
+    // Library types (the SDK's - isLibraryType) get their DEFINITIONS guarded behind
+    // #ifndef _WIN32: the SDK that d2_platform.h includes provides them on Windows, and
+    // re-emitting collides. They stay at their place in the topological order, each run
+    // of them in its own guard, so the no-SDK build still sees every type before its use:
+    // Ghidra's STACKFRAME (ours) holds an FPO_DATA * (winnt.h's), and moving every SDK
+    // type to the end of the header left the no-SDK build using FPO_DATA before it was
+    // declared. On Windows the guarded copies are absent and the SDK's come first.
     let currentIfdef: string | undefined;
-    for (const type of normalTypes) {
-      // Wrap platform-specific types in #ifdef guards
-      if (type.ifdef !== currentIfdef) {
+    let inSdk = false;
+    const closeSdk = () => { if (inSdk) { lines.push(SDK_BLOCK_CLOSE); lines.push(''); inSdk = false; } };
+    for (const type of typesToEmit) {
+      const library = isLibraryType(type.name, type.category);
+      const ifdef = library ? undefined : type.ifdef;
+      if (ifdef !== currentIfdef || (library && currentIfdef)) {
+        closeSdk();
         if (currentIfdef) {
           lines.push(`#endif // ${currentIfdef}`);
           lines.push('');
         }
-        if (type.ifdef) {
-          lines.push(`#ifdef ${type.ifdef}`);
-        }
-        currentIfdef = type.ifdef;
+        if (ifdef) lines.push(`#ifdef ${ifdef}`);
+        currentIfdef = ifdef;
       }
+      if (library && !inSdk) { lines.push(SDK_BLOCK_OPEN); lines.push(''); inSdk = true; }
+      if (!library) closeSdk();
       if (emitTypeDefinition(type, lines)) classEmittedInTopoSort = true;
     }
+    closeSdk();
     if (currentIfdef) {
       lines.push(`#endif // ${currentIfdef}`);
-      lines.push('');
-    }
-
-    if (libraryTypes.length > 0) {
-      lines.push(SDK_BLOCK_OPEN);
-      lines.push('');
-      for (const type of libraryTypes) {
-        if (emitTypeDefinition(type, lines)) classEmittedInTopoSort = true;
-      }
-      lines.push(SDK_BLOCK_CLOSE);
       lines.push('');
     }
   }
@@ -579,7 +572,9 @@ export function generateHeader(
     // elaborated form (`void f(struct WAVEFORMATEX *)` is an error under <mmsystem.h>).
     // Inside a `#ifndef _WIN32` block - the no-SDK build, where every type is ours -
     // the SDK types keep the elaborated form too.
-    const elaborateOutsideSdkBlocks = new Set([...forwardDeclaredStructs].filter(n => !sdkTypeNames.has(n)));
+    // An SDK type that is a TAG of that name (`IUnknown`) keeps the elaborated form: it is
+    // valid against the SDK, and it is what declares the type in the no-SDK build.
+    const elaborateOutsideSdkBlocks = new Set([...forwardDeclaredStructs].filter(n => !sdkTypeNames.has(n) || sdkTypeHasElaboratedForm(n)));
     const elaborateInSdkBlocks = forwardDeclaredStructs;
     let inSdkBlock = false;
     // Always qualify forward-declared structs with 'struct' keyword in function signatures.
