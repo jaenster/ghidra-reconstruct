@@ -111,3 +111,16 @@ describe('without a registered model the shape test still answers', () => {
     assert.equal(isInteriorLabel('gnPrimaryClickState'), false);
   });
 });
+
+describe('an element label is no container either (v1531: gaPaletteBlendEntries[52], no member path)', () => {
+  const V1531 = [
+    sym('gaPaletteBlendEntries[52]', '007d5528', 'BYTE *[72]', 288, { scope: 'static-local' }),
+    sym('MPQ_d2kfixup.mpq', '007d5620', 'D2FogArchiveStrc *', 4),
+  ];
+  beforeEach(() => setInteriorLabelSymbols(V1531));
+  afterEach(() => resetInteriorLabelSymbols());
+  it('MPQ_d2kfixup.mpq @007d5620 is a datum of its own: declared and defined', () => {
+    assert.strictEqual(isInteriorLabel('MPQ_d2kfixup.mpq'), false);
+    assert.match(generateExternDeclaration(V1531[1], false), /MPQ_d2kfixup_mpq/);
+  });
+});
