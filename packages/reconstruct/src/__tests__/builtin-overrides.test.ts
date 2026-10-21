@@ -5,7 +5,7 @@
  * Before, a run without that file - a fresh checkout, a worktree, the Linux container -
  * emitted the decompiler's own body for these functions: `stack0x` frame arithmetic for the
  * two SSignature functions, an `unaff_ECX` compare in GuardStack, an `unaff_retaddr` read in
- * GetInstructionPointer, an `unaff_EBX` comparand in AtomicExchange64. And an override whose
+ * GetInstructionPointer, an `unaff_EBX` comparand in Atomic64Load. And an override whose
  * file was missing emitted an EMPTY body with a warning nobody read.
  *
  * The bodies themselves are compiled and run here, against what the binary does.
@@ -29,7 +29,7 @@ const SHIPPED: Record<string, string> = {
   '0041d6d0': 'SSignatureVerifyStream_Finish',
   '00681a48': 'GuardStack',
   '00408090': 'GetInstructionPointer',
-  '004107d0': 'AtomicExchange64',
+  '004107d0': 'Atomic64Load',
 };
 
 const body = (name: string) => fs.readFileSync(path.join(BUILTIN_OVERRIDES_DIR, `${name}.cpp`), 'utf-8');
@@ -86,14 +86,14 @@ describe('repository overrides: registration', () => {
 const native = { skip: !hasNativeGpp() };
 
 describe('repository overrides: the bodies do what the binary does', native, () => {
-  it('AtomicExchange64 reads the target atomically and leaves it unchanged', () => {
-    const fn = `void AtomicExchange64(int64_t* pdwResult, int64_t* pllTarget) {\n${body('AtomicExchange64')}\n}`;
+  it('Atomic64Load reads the source atomically and leaves it unchanged', () => {
+    const fn = `void Atomic64Load(int64_t* pllResult, int64_t* pllSource) {\n${body('Atomic64Load')}\n}`;
     const out = compileAndRun(fn, [
       // 0: the comparand stand-in matches, so the locked write puts back the same value.
       'const int64_t values[] = {0, 0x29a, -1, 0x123456789abcdefLL};',
       'for (int64_t v : values) {',
       '  int64_t target = v, result = 0x5555;',
-      '  AtomicExchange64(&result, &target);',
+      '  Atomic64Load(&result, &target);',
       '  printf("%d", result == v && target == v);',
       '}',
     ].join('\n'));

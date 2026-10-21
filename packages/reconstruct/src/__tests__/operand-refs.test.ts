@@ -9,6 +9,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { OPERAND_REF_SCRIPT, operandRefScript, parseOperandRefs, applyOperandRefs } from '../extract/operand-refs.js';
 import { foldedAddressFacts } from '../codegen/folded-address-spec.js';
+import { immediateConstantFacts, dataAtAddress } from '../codegen/immediate-constant-spec.js';
 import type { ExtractedFunction } from '../types.js';
 
 const ZLIB_OUTPUT = [
@@ -78,5 +79,58 @@ describe('foldedAddressFacts', () => {
 
   it('nothing without the field (an older snapshot)', () => {
     assert.deepStrictEqual(foldedAddressFacts({}), []);
+  });
+});
+
+/**
+ * S rows: OPERAND_REF_SCRIPT's own output for DecodeCpuModelName (0040e300), read read-only
+ * from the live program at v1623 on 2026-10-21 (one R row kept, the rest elided).
+ */
+const CPU_OUTPUT = [
+  'F\t0040e300',
+  'S\t0040e386\t1\t006d5847\ti',
+  'R\t0040e303\t1\t006ce068\tREAD\t1',
+  '',
+].join('\n');
+
+describe('unreferenced scalar operands (S rows)', () => {
+  it('the script emits them, and they parse', () => {
+    assert.ok(OPERAND_REF_SCRIPT.includes('sb.append("S\\t")'));
+    const f = parseOperandRefs(CPU_OUTPUT).get('0040e300')!;
+    assert.deepStrictEqual(f.scalars, [{ ins: '0040e386', op: 1, value: '006d5847', immediate: true }]);
+    assert.strictEqual(f.refs.length, 1);
+  });
+
+  it('an unreferenced immediate nothing else addresses is a constant', () => {
+    const facts = parseOperandRefs(CPU_OUTPUT).get('0040e300')!;
+    assert.deepStrictEqual(immediateConstantFacts({ operandRefs: facts }), [{ value: 0x6d5847, ins: '0040e386' }]);
+  });
+
+  it('a value the function also references, derives or uses as a displacement is not', () => {
+    const base = 'F\t00401000\nS\t00401010\t1\t006d5847\ti\n';
+    const cases = [
+      'R\t00401020\t1\t006d5847\tREAD\t1\n',
+      'R\t00401020\t1\t006d5850\tREAD\t1\t006d5847\n',
+      'R\t00401020\t1\t006d5000\tDATA\t1\nA\t00401020\t006d5000\t006d5847\t00401025\n',
+      'S\t00401030\t0\t006d5847\td\n',
+    ];
+    for (const extra of cases) {
+      const facts = parseOperandRefs(base + extra).get('00401000')!;
+      assert.deepStrictEqual(immediateConstantFacts({ operandRefs: facts }), [], extra);
+    }
+  });
+
+  it('a snapshot from before the rows existed says nothing', () => {
+    assert.deepStrictEqual(immediateConstantFacts({ operandRefs: { refs: [], derived: [] } }), []);
+    assert.deepStrictEqual(immediateConstantFacts({}), []);
+  });
+
+  it('dataAtAddress finds a covering extent, nested or not', () => {
+    const ex: Array<[number, number, string]> = [[0x100, 0x200, 'big'], [0x110, 0x114, 'inner'], [0x300, 0x304, 'after']];
+    assert.strictEqual(dataAtAddress(ex, 0x112), 'inner');
+    assert.strictEqual(dataAtAddress(ex, 0x150), 'big');
+    assert.strictEqual(dataAtAddress(ex, 0x250), null);
+    assert.strictEqual(dataAtAddress(ex, 0x303), 'after');
+    assert.strictEqual(dataAtAddress(ex, 0x50), null);
   });
 });

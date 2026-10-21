@@ -96,7 +96,7 @@ describe('SSignature alloca overrides', () => {
     }
 
     // MemCompare(EBX, EDI, len) — pSig first, pHash second (0041d774/0041d773).
-    assert.match(body, /SSYSTEM_MemCompare\(\s*\(int\*\)pSig,\s*\(D2QServerClientConnectionStrc\*\)pHash/);
+    assert.match(body, /SSYSTEM_MemCompare\(\s*pSig,\s*pHash/);
 
     // Only Sha1_Finalize and the Memset touch pHash.
     assert.match(body, /SMemFill\(pHash,/);
@@ -132,7 +132,7 @@ describe('SSignature alloca overrides', () => {
     // wrong would emit a valid-looking but unverifiable signature.
     assert.match(body, /SMemCopy\(pSig1, pHash, nKeySize\)/);
     assert.match(body, /SMemCopy\(pSig2, pSig1, nKeySize\)/);
-    assert.match(body, /SSYSTEM_MemCompare\(\(int\*\)pSig2,/);
+    assert.match(body, /SSYSTEM_MemCompare\(pSig2, pHash,/);
     assert.match(body, /SMemCopy\(pDataBytes \+ nMarkerOffset \+ 4, pSig1, nKeySize\)/);
   });
 });

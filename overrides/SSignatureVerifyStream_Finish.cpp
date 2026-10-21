@@ -18,9 +18,9 @@
 // Every statement below cites the instruction it comes from, so the buffer
 // binding is checkable against the disassembly. The two allocations are:
 //
-//   0041d709  CALL __alloca_probe_16   size = EAX = EBX = [ESI] = nDataLen
+//   0041d709  CALL __alloca_probe_16   size = EAX = EBX = [ESI] = pContext->nModulusLen
 //   0041d70e  MOV  EDI,ESP             -> pHash   (allocated FIRST, higher)
-//   0041d72e  CALL __alloca_probe_16   size = EAX = [ESI] = nDataLen
+//   0041d72e  CALL __alloca_probe_16   size = EAX = [ESI] = pContext->nModulusLen
 //   0041d735  MOV  EBX,ESP             -> pSig    (allocated SECOND, lower)
 //
 // so pSig < pHash. Ghidra's output has the inequality the other way round.
@@ -29,31 +29,29 @@
 // are compiler-emitted prologue/epilogue, not source, and are omitted.
 BigData*  rsaPair[2];   // SSIG_InitRSAPair's two SBigNew handles: rsaPair[0], rsaPair[1]
 uint32_t  bVerified   = 0;                                  // 0041d6e8  XOR EDI,EDI
-int32_t   nKeyIdSaved = nKeyId;                             // 0041d6ed  MOV [EBP-0x8],EDX
+void*     pModulusSaved = pModulusBytes;                    // 0041d6ed  MOV [EBP-0x8],EDX
 
 if (pContext->nBytesBuffered == pContext->nBufferSize &&     // 0041d6e4 / 0041d6ea
     *(int*)pContext->pDataBuffer == 0x5349474e) {            // 0041d6f6 / 0041d6f9  'SIGN'
 
-  uint32_t nSigLen = pContext->nDataLen;                     // 0041d705  MOV EBX,[ESI]
+  uint32_t nSigLen = pContext->nModulusLen;                     // 0041d705  MOV EBX,[ESI]
   uint8_t* pHash   = (uint8_t*)__builtin_alloca(nSigLen);    // 0041d709 / 0041d70e
 
   SSystem::SMemFill(pHash, nSigLen, 0xbb);             // 0041d710-0041d717
-  pHash[pContext->nDataLen - 1] = 0x0b;                      // 0041d71c / 0041d722
+  pHash[pContext->nModulusLen - 1] = 0x0b;                      // 0041d71c / 0041d722
   Sha1_Finalize(pHash, &pContext->sSha1);                    // 0041d71e-0041d727  LEA ECX,[ESI+0x18]: the SHA-1 context
 
-  uint8_t* pSig = (uint8_t*)__builtin_alloca(pContext->nDataLen); // 0041d72c-0041d735
+  uint8_t* pSig = (uint8_t*)__builtin_alloca(pContext->nModulusLen); // 0041d72c-0041d735
 
-  SSystem::SMemCopy(pSig, (void*)((int)pContext->pDataBuffer + 4),
-                        pContext->nDataLen);                 // 0041d733-0041d740
+  SSystem::SMemCopy(pSig, pContext->pDataBuffer + 4,
+                        pContext->nModulusLen);                 // 0041d733-0041d740
   SSIG_InitRSAPair(rsaPair);                                 // 0041d745 / 0041d748
-  CryptRSA_Prepare(nKeyIdSaved, pContext->nDataLen, pModulus,
-                   pContext->nFlags, rsaPair);               // 0041d74d-0041d75f
-  CryptRSA_Process(pSig, pContext->nDataLen, rsaPair);       // 0041d764-0041d76b
-  bVerified = (SSystem::SSYSTEM_MemCompare(
-                   (int*)pSig,
-                   (D2QServerClientConnectionStrc*)pHash,
-                   pContext->nDataLen) == 0);                // 0041d770-0041d783
-  SSIG_FreeRSAPair((void**)rsaPair);                         // 0041d780 / 0041d786
+  CryptRSA_Prepare(pModulusSaved, pContext->nModulusLen, pExponentBytes,
+                   pContext->nExponentLen, rsaPair);         // 0041d74d-0041d75f
+  CryptRSA_Process(pSig, pContext->nModulusLen, rsaPair);       // 0041d764-0041d76b
+  bVerified = (SSystem::SSYSTEM_MemCompare(pSig, pHash,
+                   pContext->nModulusLen) == 0);             // 0041d770-0041d783
+  SSIG_FreeRSAPair(rsaPair);                         // 0041d780 / 0041d786
 }
 
 SMem::SMemFree(pContext->pDataBuffer, ".\\SOURCE\\SSignature.cpp", 0xd0, 0); // 0041d78b-0041d79b

@@ -25,6 +25,16 @@
  *                                  instruction that writes the register otherwise or
  *                                  that another path jumps to (a loop's step is not a
  *                                  fold)
+ *   S  ins  op  value  kind        an operand of `ins` that is a 32-bit scalar whose value
+ *                                  lies in a memory block of the image, while `ins` carries
+ *                                  NO reference to that address from any operand (any
+ *                                  reference type, flow included); `kind` is `i` for an
+ *                                  immediate operand, `d` for a displacement inside a memory
+ *                                  operand. The positive evidence that an address-shaped
+ *                                  constant is a constant: `MOV dword ptr [EDI],0x6d5847`
+ *                                  @0040e386 stores the four bytes "GXm\0", and the
+ *                                  decompiler, which prints any mapped value in a pointer
+ *                                  slot as one, writes `&UNK_006d5847`
  *
  * so a pass can match a folded constant in the decompile to the instruction pair that
  * made it, rather than infer it from proximity. Read-only: one execute_script, no
@@ -58,9 +68,22 @@ export interface DerivedAddress {
   at: string;
 }
 
+/**
+ * A 32-bit scalar operand of `ins` whose value is a mapped address, while `ins` has no
+ * reference to that address. `immediate` false: a displacement in a memory operand.
+ */
+export interface UnreferencedScalar {
+  ins: string;
+  op: number;
+  value: string;
+  immediate: boolean;
+}
+
 export interface OperandRefFacts {
   refs: OperandRef[];
   derived: DerivedAddress[];
+  /** Absent in a snapshot extracted before the rows existed: nothing is known then. */
+  scalars?: UnreferencedScalar[];
 }
 
 /**
@@ -87,6 +110,27 @@ for (ghidra.program.model.listing.Function f : fns) {
   if (f.isThunk() || f.isExternal()) continue;
   boolean head = false;
   for (ghidra.program.model.listing.Instruction x : L.getInstructions(f.getBody(), true)) {
+    // Address-shaped scalars the instruction holds no reference for (S rows).
+    java.util.Set<Long> refd = new java.util.HashSet<>();
+    for (ghidra.program.model.symbol.Reference r : x.getReferencesFrom()) {
+      if (r.getToAddress().isMemoryAddress()) refd.add(r.getToAddress().getOffset());
+    }
+    for (int oi = 0; oi < x.getNumOperands(); oi++) {
+      int ot = x.getOperandType(oi);
+      for (Object o : x.getOpObjects(oi)) {
+        if (!(o instanceof ghidra.program.model.scalar.Scalar)) continue;
+        ghidra.program.model.scalar.Scalar sc = (ghidra.program.model.scalar.Scalar) o;
+        if (sc.bitLength() < 32) continue;
+        long v = sc.getUnsignedValue() & 0xffffffffL;
+        if (refd.contains(v)) continue;
+        ghidra.program.model.address.Address va;
+        try { va = sp.getAddress(v); } catch (Exception e) { continue; }
+        if (M.getBlock(va) == null) continue;
+        boolean imm = ghidra.program.model.lang.OperandType.isScalar(ot) && !ghidra.program.model.lang.OperandType.isDynamic(ot);
+        if (!head) { sb.append("F\\t").append(f.getEntryPoint()).append('\\n'); head = true; }
+        sb.append("S\\t").append(x.getAddress()).append('\\t').append(oi).append('\\t').append(va).append('\\t').append(imm ? "i" : "d").append('\\n');
+      }
+    }
     for (ghidra.program.model.symbol.Reference r : x.getReferencesFrom()) {
       ghidra.program.model.address.Address to = r.getToAddress();
       ghidra.program.model.symbol.RefType rt = r.getReferenceType();
@@ -174,7 +218,7 @@ export function parseOperandRefs(output: string): Map<string, OperandRefFacts> {
     switch (c[0]) {
       case 'F':
         if (c.length < 2) { cur = undefined; break; }
-        cur = { refs: [], derived: [] };
+        cur = { refs: [], derived: [], scalars: [] };
         out.set(addressKey(c[1]), cur);
         break;
       case 'R':
@@ -187,6 +231,10 @@ export function parseOperandRefs(output: string): Map<string, OperandRefFacts> {
       case 'A':
         if (!cur || c.length < 5) break;
         cur.derived.push({ ins: addressKey(c[1]), to: addressKey(c[2]), value: addressKey(c[3]), at: addressKey(c[4]) });
+        break;
+      case 'S':
+        if (!cur || c.length < 5) break;
+        cur.scalars!.push({ ins: addressKey(c[1]), op: Number(c[2]), value: addressKey(c[3]), immediate: c[4] === 'i' });
         break;
     }
   }

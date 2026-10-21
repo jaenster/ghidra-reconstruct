@@ -6,7 +6,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 
-import { isLibraryType } from '../codegen/platform-types.js';
+import { isLibraryType, sdkHeaderOf, sdkLayoutMismatches, sdkTypeHasElaboratedForm } from '../codegen/platform-types.js';
 import { generateHeader } from '../codegen/header.js';
 import type {
   ExtractedDataType,
@@ -91,7 +91,7 @@ describe('library type guarding in generateHeader', () => {
     assert.ok(libPos > guardStart && libPos < guardEnd, `in_addr def must be inside the guard:\n${header}`);
 
     const gamePos = header.indexOf('struct D2GameStrc {');
-    assert.ok(gamePos < guardStart, `D2GameStrc def must be OUTSIDE/before the guard:\n${header}`);
+    assert.ok(gamePos >= 0 && (gamePos < guardStart || gamePos > guardEnd), `D2GameStrc def must be OUTSIDE the guard:\n${header}`);
   });
 });
 
@@ -148,5 +148,50 @@ describe('SDK types are the SDK\'s: never forward-declared or elaborated as stru
     });
     const fwd = lines.findIndex(l => l === 'struct WAVEFORMATEX;');
     assert.ok(fwd >= 0 && fwd < def, `the no-SDK build still sees WAVEFORMATEX declared before its use:\n${header}`);
+  });
+});
+
+// ── The SDK decision is the SDK headers' (sdk-types.generated.ts) ─────
+
+describe('which types are the SDK\'s is decided by what the included SDK headers define', () => {
+  it('FPO_DATA is winnt.h\'s whatever Ghidra files it under; DSBUFFERDESC is ours', () => {
+    assert.strictEqual(sdkHeaderOf('FPO_DATA'), 'winnt.h');
+    assert.strictEqual(isLibraryType('FPO_DATA', '/DbgHelp'), true);
+    assert.strictEqual(isLibraryType('DSBUFFERDESC', '/dsound.h'), false);
+    // A game enum Ghidra filed under a header-shaped category is not the SDK's.
+    assert.strictEqual(isLibraryType('eMissilesId', '/eMissilesId.h'), false);
+  });
+
+  it('knows a typedef name (no `struct X` form) from a tag of that name', () => {
+    assert.strictEqual(sdkTypeHasElaboratedForm('FPO_DATA'), false);   // typedef struct _FPO_DATA FPO_DATA
+    assert.strictEqual(sdkTypeHasElaboratedForm('IUnknown'), true);    // typedef struct IUnknown IUnknown
+    assert.strictEqual(sdkTypeHasElaboratedForm('D2UnitStrc'), false); // not the SDK's
+  });
+
+  it('reports where Ghidra\'s record differs from the SDK layout the tree compiles against', () => {
+    const fpo = {
+      name: 'FPO_DATA', size: 16, fields: [
+        { name: 'ulOffStart', offset: 0, size: 4 }, { name: 'cbProcSize', offset: 4, size: 4 },
+        { name: 'cdwLocals', offset: 8, size: 4 }, { name: 'cdwParams', offset: 12, size: 2 },
+        { name: 'wAttributes', offset: 14, size: 2 },
+      ],
+    };
+    assert.deepStrictEqual(sdkLayoutMismatches(fpo), ["wAttributes (+0xe, 2): no such member in the SDK's type"]);
+    assert.deepStrictEqual(sdkLayoutMismatches({ ...fpo, fields: fpo.fields.slice(0, 4) }), []);
+    assert.deepStrictEqual(sdkLayoutMismatches({ name: 'D2UnitStrc', size: 4, fields: [] }), []);
+  });
+
+  it('keeps an SDK type at its place in the topological order, guarded, so the no-SDK build sees it first', () => {
+    const fpo: ExtractedStruct = { name: 'FPO_DATA', category: '/DbgHelp', size: 4, kind: 'STRUCTURE',
+      fields: [{ name: 'ulOffStart', dataType: 'DWORD', offset: 0, size: 4 }] };
+    const frame: ExtractedStruct = { name: 'STACKFRAME', category: '/DbgHelp', size: 4, kind: 'STRUCTURE',
+      fields: [{ name: 'FuncTableEntry', dataType: 'FPO_DATA *', offset: 0, size: 4 }] };
+    const header = generateHeader('Debug', [], undefined, [fpo, frame], [], defaultOptions,
+      undefined, undefined, new Set(['FPO_DATA', 'STACKFRAME']));
+    const def = header.indexOf('struct FPO_DATA {');
+    const use = header.indexOf('FPO_DATA * FuncTableEntry');
+    assert.ok(def >= 0 && use > def, `FPO_DATA is defined (guarded) before STACKFRAME uses it:\n${header}`);
+    assert.ok(!header.includes('struct FPO_DATA * FuncTableEntry'), `never elaborated, winnt.h's is a typedef:\n${header}`);
+    assert.ok(header.lastIndexOf('#ifndef _WIN32', def) > header.lastIndexOf('#endif', def), `the definition is inside the SDK guard:\n${header}`);
   });
 });
