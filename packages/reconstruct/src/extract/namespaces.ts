@@ -68,9 +68,13 @@ export async function extractAllNamespaces(
   const allNamespaces: ExtractedNamespace[] = [];
   const pageSize = 100;
   let offset = 0;
-  let total = 0;
 
-  do {
+  // Paginate until a SHORT page. `list_namespaces` reports `total` as the size of
+  // the page it returned, so `offset < total` ended the walk after the first full
+  // page: Game.exe has over a thousand namespaces, and the first hundred the tree
+  // walk reaches are switchD_ jump-table scopes, so not one module or class
+  // namespace ever reached the snapshot. Same defect, same fix, as list_strings.
+  for (;;) {
     const result = await extractNamespaces(connection, {
       ...options,
       limit: pageSize,
@@ -78,9 +82,9 @@ export async function extractAllNamespaces(
     });
 
     allNamespaces.push(...result.namespaces);
-    total = result.total;
+    if (result.namespaces.length < pageSize) break;
     offset += pageSize;
-  } while (offset < total);
+  }
 
   return allNamespaces;
 }

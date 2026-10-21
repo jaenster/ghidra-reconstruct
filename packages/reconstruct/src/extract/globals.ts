@@ -119,20 +119,23 @@ async function extractPlateComments(
   const byAddress = new Map<string, string>();
   const pageSize = 500;
   let offset = 0;
-  let total = 0;
 
-  do {
+  // Until a SHORT page: `list_comments` reports `total` as the size of the page it
+  // returned, so `offset < total` stopped after the first 500 PLATE comments, which
+  // on Game.exe end at 00417040, a few pages into .text: every data symbol lost its comment.
+  for (;;) {
     const result = await connection.sendCommand<{
       comments: Array<{ address: string; comment: string }>;
       total: number;
     }>('list_comments', { type: 'PLATE', limit: pageSize, offset, _commandTimeout: 300000 });
 
-    for (const c of result.comments ?? []) {
+    const comments = result.comments ?? [];
+    for (const c of comments) {
       if (c.address && c.comment) byAddress.set(normalizeAddress(c.address), c.comment);
     }
-    total = result.total ?? 0;
+    if (comments.length < pageSize) break;
     offset += pageSize;
-  } while (offset < total);
+  }
 
   return byAddress;
 }
