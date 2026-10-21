@@ -149,6 +149,12 @@ describe('ghidra-artifact: not artifacts', () => {
   it('exit, _exit, ExitProcess, ExitThread', () => {
     assert.deepStrictEqual(lint(body('exit(-1); _exit(1); ExitProcess(0); ExitThread(0);\nreturn 0;')), []);
   });
+  it('a call to a function the tree declares as a template, or as a member specialization', () => {
+    assert.deepStrictEqual(lint({
+      'r.h': 'template<class T> T ROUND(T v);\ntemplate<> int ABS<int>(int v) { return v < 0 ? -v : v; }\n',
+      'a.cpp': 'int f(int a) { return ROUND(a) + ABS(a); }\n',
+    }), []);
+  });
   it('ABS_* and ROUND_* macro-style names and LOCKFILE are not the pseudo-op calls', () => {
     assert.deepStrictEqual(lint(body('x = ABS_MAX + ROUND_UP(a) + LOCKFILE(a) + LOCK_Get(a);\nreturn 0;')), []);
   });

@@ -110,10 +110,11 @@ function declaredFunctionNames(files: SourceFile[]): Set<string> {
       const n: any = stack.pop();
       if (!n || typeof n !== 'object') continue;
       if (n.kind === NodeKind.FunctionDecl) {
-        const nm = n.name;
-        const leaf = typeof nm === 'string' ? nm
+        // `f`, `ns::f`, and a specialization `f<int>` or `C<A>::f`: the name declared is `f`.
+        const leafOf = (nm: any): unknown => typeof nm === 'string' ? nm
           : nm?.kind === NodeKind.Identifier ? nm.name
-          : nm?.kind === NodeKind.QualifiedId ? nm.name?.name : null;
+          : nm?.kind === NodeKind.QualifiedId || nm?.kind === NodeKind.TemplateType ? leafOf(nm.name) : null;
+        const leaf = leafOf(n.name);
         if (typeof leaf === 'string') out.add(leaf);
         continue;
       }
@@ -121,6 +122,8 @@ function declaredFunctionNames(files: SourceFile[]): Set<string> {
       if (n.kind === NodeKind.TranslationUnit || n.kind === NodeKind.NamespaceDecl ||
           n.kind === NodeKind.LinkageSpec) {
         for (const d of n.declarations ?? []) stack.push(d);
+      } else if (n.kind === NodeKind.TemplateDecl) {
+        stack.push(n.declaration);
       } else if (n.kind === NodeKind.StructDecl || n.kind === NodeKind.ClassDecl) {
         for (const m of n.members ?? []) stack.push(m);
       }

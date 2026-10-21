@@ -11,6 +11,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import {
   NodeKind,
+  emit,
   parse,
   type ASTNode,
   type FunctionDecl,
@@ -80,12 +81,18 @@ function namespaceName(ns: any): string {
   return ns?.name?.name ?? '';
 }
 
+/** One segment of a name as written: `N`, or a template-id `TSHashTable<CELLIST, HASHKEY_NONE>`. */
+function segmentText(n: any): string {
+  if (!n) return '';
+  return n.kind === NodeKind.TemplateType ? emit(n) : n.name;
+}
+
 function fnName(fn: any): string {
   const n = fn.name;
   if (!n) return '?';
   if (n.kind === NodeKind.Identifier) return n.name;
   if (n.kind === NodeKind.QualifiedId) {
-    return [...(n.qualifier ?? []).map((q: any) => q?.name?.name ?? q?.name), n.name?.name].join('::');
+    return [...(n.qualifier ?? []).map(segmentText), segmentText(n.name)].join('::');
   }
   return '?';
 }
@@ -100,10 +107,13 @@ export function collectFunctions(file: SourceFile): FunctionInfo[] {
         rec(d.declarations, [...prefix, namespaceName(d)]);
       } else if (d.kind === NodeKind.LinkageSpec) {
         rec(d.declarations, prefix);
+      } else if (d.kind === NodeKind.TemplateDecl) {
+        // `template<> R C<A>::f() { ... }` - a member specialization is a function like any other.
+        rec([d.declaration], prefix);
       } else if (d.kind === NodeKind.FunctionDecl && d.body) {
         out.push(makeFn(file, d, [...prefix, fnName(d)].filter(Boolean).join('::')));
       } else if (d.kind === NodeKind.StructDecl || d.kind === NodeKind.ClassDecl) {
-        const sn = d.name?.name;
+        const sn = segmentText(d.name);
         for (const m of d.members ?? []) {
           if (m?.kind === NodeKind.FunctionDecl && m.body) {
             out.push(makeFn(file, m, [...prefix, sn, fnName(m)].filter(Boolean).join('::')));

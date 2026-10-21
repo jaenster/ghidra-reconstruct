@@ -18,6 +18,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
+import { NodeKind, emit, parse } from '@ghidra-mcp/cpp-parser';
 import type { Check, Finding, LintContext } from '../context.js';
 import type { SnapshotStruct } from '../snapshot.js';
 import { SKIP_DIRS } from '../tree.js';
@@ -26,14 +27,40 @@ export const CXX = process.env.D2_LINT_CXX ?? 'i686-w64-mingw32-g++';
 
 const BAD_IDENT = /^\s*$|[^A-Za-z_0-9]/;
 
+/**
+ * A Ghidra struct name that is a class template instantiation, `TSHashTable<CELLIST,HASHKEY_NONE>`,
+ * as C++ spells it - or null when the name is not exactly one template-id. The parser decides,
+ * so nested and negative arguments (`TSExplicitList<CELLIST,-572662307>`) are read as C++ reads them.
+ */
+export function templateIdSpelling(name: string): string | null {
+  if (!name.includes('<')) return null;
+  let tu: any;
+  try { tu = parse(`typedef ${name} __layout_name;`); } catch { return null; }
+  const [d, ...rest] = tu.declarations;
+  if (rest.length || d?.kind !== NodeKind.TypedefDecl || d.name?.name !== '__layout_name') return null;
+  // A template-id type is a TypedefType named by the TemplateType.
+  return d.type?.kind === NodeKind.TypedefType && d.type.name?.kind === NodeKind.TemplateType ? emit(d.type) : null;
+}
+
+export interface AssertableStruct {
+  /** Ghidra's name, which the assert messages carry. */
+  name: string;
+  /** The type as the TU names it: the name itself, or a template-id's C++ spelling. */
+  spelling: string;
+  size: number | null;
+  fields: SnapshotStruct['fields'];
+}
+
 /** The structs worth asserting, with Ghidra's size (null when Ghidra's size is its own artifact). */
-export function assertableStructs(structs: SnapshotStruct[]): Array<{ name: string; size: number | null; fields: SnapshotStruct['fields'] }> {
-  const out: Array<{ name: string; size: number | null; fields: SnapshotStruct['fields'] }> = [];
+export function assertableStructs(structs: SnapshotStruct[]): AssertableStruct[] {
+  const out: AssertableStruct[] = [];
   for (const d of structs) {
     const { name, fields } = d;
     let size: number | null = d.size;
     if (!name || !(size > 0) || !fields?.length) continue;
-    if (BAD_IDENT.test(name) || name.startsWith('_')) continue;
+    if (name.startsWith('_')) continue;
+    const spelling = BAD_IDENT.test(name) ? templateIdSpelling(name) : name;
+    if (spelling === null) continue;
     // Compiler and CRT internals are not the program's structs and are not in the tree.
     if (/\/(compiler|visualstudio|crt|std|demangler)/i.test(d.category ?? '')) continue;
     // Ghidra records alignment 8 and pads past the last field; the compiler is right there.
@@ -42,7 +69,7 @@ export function assertableStructs(structs: SnapshotStruct[]): Array<{ name: stri
       const last = named.reduce((a, b) => (b.offset! > a.offset! ? b : a));
       if (size > last.offset! + (last.size ?? 0)) size = null;
     }
-    out.push({ name, size, fields });
+    out.push({ name, spelling, size, fields });
   }
   return out;
 }
@@ -90,13 +117,21 @@ export function compilerLayout(root: string, structs: SnapshotStruct[]):
     const lines: string[] = ['#include "d2_platform.h"'];
     for (const h of headersOf(root)) lines.push(`#include "${h}"`);
     lines.push('#include <cstddef>', '');
-    for (const { name, size, fields } of items) {
-      if (size !== null) lines.push(`static_assert(sizeof(${name}) == ${size}, "SIZE ${name}");`);
+    items.forEach(({ name, spelling, size, fields }, i) => {
+      // offsetof is a macro: a template-id's commas would split its first argument, so the
+      // type goes through an alias. A class with bases or virtuals is not standard-layout,
+      // and offsetof on it is only a -Winvalid-offsetof warning, which -w silences.
+      let type = name;
+      if (spelling !== name) {
+        type = `__layout_${i}`;
+        lines.push(`typedef ${spelling} ${type};`);
+      }
+      if (size !== null) lines.push(`static_assert(sizeof(${type}) == ${size}, "SIZE ${name}");`);
       for (const f of fields) {
         if (!f.name || typeof f.offset !== 'number' || BAD_IDENT.test(f.name)) continue;
-        lines.push(`static_assert(offsetof(${name}, ${f.name}) == ${f.offset}, "OFF ${name}.${f.name}");`);
+        lines.push(`static_assert(offsetof(${type}, ${f.name}) == ${f.offset}, "OFF ${name}.${f.name}");`);
       }
-    }
+    });
     const tu = join(dir, 'layout_check.cpp');
     writeFileSync(tu, lines.join('\n') + '\n');
     const rsp = join(dir, 'incdirs.rsp');

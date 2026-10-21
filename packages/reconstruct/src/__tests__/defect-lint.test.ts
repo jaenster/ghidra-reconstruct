@@ -12,7 +12,10 @@ import {
   type Finding,
 } from '../lint/index.js';
 import { renderedLength } from '../lint/checks/buffers.js';
-import { assertableStructs, simulatedLayout } from '../lint/checks/layout.js';
+import { assertableStructs, compilerAvailable, compilerLayout, simulatedLayout } from '../lint/checks/layout.js';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { SnapshotGlobal } from '../lint/snapshot.js';
 
 interface Fixture {
@@ -480,6 +483,77 @@ describe('defect lint: struct-packing-mismatch', () => {
     const a = assertableStructs(structs as any);
     assert.deepStrictEqual(a.map(s => [s.name, s.size]), [['D2TblHeader', 21], ['Vt', null]]);
     assert.match(simulatedLayout(structs as any).get('D2TblHeader')!, /nCount.*0x4.*0x2/);
+  });
+
+  // Ghidra names one struct per Storm template instantiation; the TU must spell each as C++ does.
+  it('asserts template-id structs under their C++ spelling, and nothing that is not one template-id', () => {
+    const f = [{ name: 'x', dataType: 'int', offset: 0, size: 4 }];
+    const a = assertableStructs([
+      { name: 'TSHashTable<CELLIST,HASHKEY_NONE>', size: 40, fields: f },
+      { name: 'TSExplicitList<CELLIST,-572662307>', size: 12, fields: f },
+      { name: 'TSList<TCELENTRY,TSGetLink<TCELENTRY>>', size: 12, fields: f },
+      { name: 'TSExportTableSync<SGAMEDATA,HSGAMEDATA__*,HSGAMEDATALOCK__*,CCritSect,0>', size: 104, fields: f },
+      { name: 'A<B>;int y', size: 4, fields: f },
+      { name: 'A<B', size: 4, fields: f },
+      { name: 'A<B>*', size: 4, fields: f },
+      { name: '_Tmpl<int>', size: 4, fields: f },
+    ] as any);
+    assert.deepStrictEqual(a.map(s => [s.name, s.spelling]), [
+      ['TSHashTable<CELLIST,HASHKEY_NONE>', 'TSHashTable<CELLIST, HASHKEY_NONE>'],
+      ['TSExplicitList<CELLIST,-572662307>', 'TSExplicitList<CELLIST, -572662307>'],
+      ['TSList<TCELENTRY,TSGetLink<TCELENTRY>>', 'TSList<TCELENTRY, TSGetLink<TCELENTRY>>'],
+      ['TSExportTableSync<SGAMEDATA,HSGAMEDATA__*,HSGAMEDATALOCK__*,CCritSect,0>',
+        'TSExportTableSync<SGAMEDATA, HSGAMEDATA__*, HSGAMEDATALOCK__*, CCritSect, 0>'],
+    ]);
+  });
+
+  it('the compiler judges a template-id struct: a base, a vptr, offsetof through an alias', { skip: !compilerAvailable() }, () => {
+    const root = mkdtempSync(join(tmpdir(), 'layout-tmpl-'));
+    try {
+      writeFileSync(join(root, 'd2_platform.h'), '#pragma once\n#include <stdint.h>\n');
+      writeFileSync(join(root, 'stpl.h'), `#pragma once
+struct CELLIST { uint32_t dwFlags; };
+class HASHKEY_NONE { };
+template<class T> class TSLink { public: TSLink<T>* m_prevlink; int32_t m_next; };
+template<class T, int OFFSET> class TSExplicitList { public: int32_t m_linkoffset; TSLink<T> m_terminator; };
+template<class T, class TKey> class TSHashTable {
+public:
+  virtual void InternalDelete(T* p);
+  TSExplicitList<T, -572662307> m_fulllist;
+  uint32_t m_fullness;
+};
+template<class T, class TKey, int N> class TSHashTableReuse : public TSHashTable<T, TKey> { public: uint32_t m_chunksize; };
+`);
+      const r = compilerLayout(root, [
+        { name: 'TSHashTable<CELLIST,HASHKEY_NONE>', size: 20, fields: [
+          { name: 'm_fulllist', offset: 4, size: 12 }, { name: 'm_fullness', offset: 16, size: 4 }] },
+        { name: 'TSExplicitList<CELLIST,-572662307>', size: 12, fields: [
+          { name: 'm_linkoffset', offset: 0, size: 4 }, { name: 'm_terminator', offset: 8, size: 8 }] },
+        { name: 'TSHashTableReuse<CELLIST,HASHKEY_NONE,0>', size: 28, fields: [
+          { name: 'm_fullness', offset: 16, size: 4 }, { name: 'm_chunksize', offset: 20, size: 4 }] },
+      ]);
+      assert.ok(r);
+      assert.deepStrictEqual(r.uncheckable, []);
+      assert.deepStrictEqual(r.sizeBad, ['TSHashTableReuse<CELLIST,HASHKEY_NONE,0>']);
+      assert.deepStrictEqual(r.offBad, ['TSExplicitList<CELLIST,-572662307>.m_terminator']);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('defect lint: functions inside template declarations', () => {
+  it('a member specialization is a checked function, named by its full template-id', () => {
+    const files = [parseSource('Storm/H/stpl_CELLIST.cpp', `
+template<> CELLIST* TSHashTable<CELLIST, HASHKEY_NONE>::Ptr(TSHashTable<CELLIST, HASHKEY_NONE>* pThis, uint32_t h) { return 0; }
+template<> SGAMEDATA* TSHashTable<SGAMEDATA, HASHKEY_NONE>::Ptr(TSHashTable<SGAMEDATA, HASHKEY_NONE>* pThis, uint32_t h) { return 0; }
+template<> struct W<true> { int f() { return 1; } };
+`)];
+    assert.deepStrictEqual(files[0].parseErrors, []);
+    const t = treeFromFiles('/nonexistent', files);
+    assert.deepStrictEqual(t.functions.map(f => f.qualifiedName), [
+      'TSHashTable<CELLIST, HASHKEY_NONE>::Ptr', 'TSHashTable<SGAMEDATA, HASHKEY_NONE>::Ptr', 'W<true>::f',
+    ]);
   });
 });
 
