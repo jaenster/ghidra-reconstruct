@@ -52,6 +52,7 @@ import type { TransformPlugin, PluginOptions } from '../types.js';
 import { buildFunctionFlow, ENTRY_DEF } from '../../cfg/index.js';
 import { calleeName, bareName, unwrapParens, typeFromSpelling } from './call-arg-cast.js';
 import { emit } from '../../../emit/index.js';
+import { createExprShape } from './expr-shape.js';
 
 export interface ReusedParamSlotOptions extends PluginOptions {
   /** Function name (qualified and bare) → signature key. */
@@ -77,6 +78,16 @@ export interface ReusedParamSlotOptions extends PluginOptions {
   stackParameters?: readonly string[];
   /** Callable name (bare AND qualified) -> declared return type, for a store's value type. */
   functionReturnTypes?: Record<string, string>;
+  /** Aggregate -> field -> declared spelling, for a store of a member (`pPath->nPosX`). */
+  structFields?: Record<string, Record<string, string>>;
+  /** Field name -> spelling, where every aggregate declaring it agrees. */
+  fieldTypes?: Record<string, string>;
+  /** Global name -> declared spelling. */
+  globalTypes?: Record<string, string>;
+  /** Every enum constant name: a store of one is a constant, like a literal. */
+  enumConstants?: readonly string[];
+  /** Unambiguous enum constant -> value. */
+  enumValues?: Record<string, number>;
 }
 
 /** Anonymous call-site override funcdefs: never the source's type. */
@@ -299,6 +310,12 @@ function wordClass(spelling: string): 'ptr' | 'int' | 'enum' | null {
   return null;
 }
 
+/** A 32-bit integer spelling's family (`int32_t` and `int` are one), else the spelling. */
+function canonicalWord(t: string): string {
+  const c = WORD_INTEGERS[t];
+  return c ? `word:${c}` : t;
+}
+
 function sameType(a: string, b: string): boolean {
   if (a === b) return true;
   const ca = WORD_INTEGERS[a], cb = WORD_INTEGERS[b];
@@ -324,7 +341,26 @@ function evidentType(e: Expression, o: ReusedParamSlotOptions, localTypes: Reado
     const rt = name ? lookup(o.functionReturnTypes, name) : undefined;
     return rt ? typeFromSpelling(rt) : null;
   }
+  // Anything else the declared types settle: a member read (`pUnit->pPath.pStaticPath->nPosX`),
+  // a dereference, an element, a global.
+  if (o.structFields || o.fieldTypes || o.globalTypes) {
+    const s = createExprShape(localTypes, { structFields: o.structFields, fieldTypes: o.fieldTypes, globalTypes: o.globalTypes, returnTypes: o.functionReturnTypes })(x);
+    if (!s) return null;
+    return typeFromSpelling(`${s.base}${'*'.repeat(s.stars)}`);
+  }
   return null;
+}
+
+/**
+ * A constant (`0`, `(T *)0x0` once the cast to the parameter is off, or an enum constant:
+ * Ghidra prints a 0 stored into an enum-typed parameter's slot as `MISSILE_Arrow`): it votes
+ * for no type.
+ */
+function isConstantStore(e: Expression, enumConstants: ReadonlySet<string>, localTypes: ReadonlyMap<string, TypeNode>): boolean {
+  let x = unwrapParens(e);
+  if (x.kind === NodeKind.UnaryExpr && (x as UnaryExpr).operator === '-') x = unwrapParens((x as UnaryExpr).operand);
+  if (x.kind === NodeKind.IntegerLiteral) return true;
+  return x.kind === NodeKind.Identifier && enumConstants.has((x as Identifier).name) && !localTypes.has((x as Identifier).name);
 }
 
 /**
@@ -346,6 +382,7 @@ export function splitReusedValueSlots(fn: FunctionDecl, o: ReusedParamSlotOption
   const body = fn.body as CompoundStmt | undefined;
   if (!body || !o.stackParameters || o.stackParameters.length === 0) return null;
   const stackParams = new Set(o.stackParameters);
+  const enumConstants = new Set(o.enumConstants ?? []);
   const params = fn.parameters.map(p => p as ParameterDecl).filter(p => p.name);
   const declared = new Set<string>(params.map(p => p.name!.name));
   const localTypes = new Map<string, TypeNode>();
@@ -431,9 +468,12 @@ export function splitReusedValueSlots(fn: FunctionDecl, o: ReusedParamSlotOption
     if (readCasts.every(c => c !== null) && new Set(readCasts).size === 1) {
       target = occurrences[0].cast!.type;
     } else {
-      const evident = [...stores.values()].map(s => evidentType(storedValue(s.value, paramType), o, localTypes));
+      // A literal store (`p = (T *)0x0`) holds a value of whichever type the others say;
+      // the second range's type is what every other store agrees on.
+      const values = [...stores.values()].map(s => storedValue(s.value, paramType)).filter(v => !isConstantStore(v, enumConstants, localTypes));
+      const evident = values.map(v => evidentType(v, o, localTypes));
       const spelled = evident.map(t => t ? spellingOf(t) : null);
-      if (spelled.every(t => t !== null) && new Set(spelled).size === 1) target = evident[0];
+      if (evident.length > 0 && spelled.every(t => t !== null) && new Set(spelled.map(t => canonicalWord(t!))).size === 1) target = evident[0];
     }
     if (!target) { o.onRefused?.(fnName, `${p}: the reused slot's second type is not evident`); continue; }
     const targetType = spellingOf(target);
@@ -476,7 +516,14 @@ export function splitReusedValueSlots(fn: FunctionDecl, o: ReusedParamSlotOption
       return (castReads.has(unwrapParens(b.left)) && lit(b.right)) || (lit(b.left) && castReads.has(unwrapParens(b.right)));
     };
     for (const s of stores.values()) {
-      const x = storedValue(s.value, paramType);
+      let x = storedValue(s.value, paramType);
+      // An enum constant Ghidra printed for the PARAMETER's enum type is a number in the
+      // second range, whose type is not that enum: the number it stands for.
+      const xu = unwrapParens(x);
+      if (xu.kind === NodeKind.Identifier && enumConstants.has((xu as Identifier).name) && !localTypes.has((xu as Identifier).name)
+          && targetClass === 'int' && o.enumValues && (xu as Identifier).name in o.enumValues) {
+        x = Expr.intLiteral(BigInt(o.enumValues[(xu as Identifier).name])) as unknown as Expression;
+      }
       const t = evidentType(x, o, localTypes);
       const fits = (t && sameType(spellingOf(t), targetType))
         || (targetClass === 'int' && plainInteger(x))

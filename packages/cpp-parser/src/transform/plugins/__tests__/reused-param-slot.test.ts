@@ -190,3 +190,42 @@ describe('reused-param-slot: a second value in a dead stack-argument slot', () =
     assert.strictEqual(compileAndRun(prelude + split, call), compileAndRun(prelude + fn, call));
   });
 });
+
+describe('reused-param-slot: the second value typed by member reads, with constant stores voting for nothing (round 13)', () => {
+  const V: ReusedParamSlotOptions = {
+    stackParameters: ['pTarget', 'eSkill'],
+    functionReturnTypes: { 'D2Common::PATH::DynamicPath::GetXPos': 'int32_t', GetXPos: 'int32_t' },
+    structFields: { D2UnitStrc: { pPath: 'D2PathUnion' }, D2PathUnion: { pStaticPath: 'D2StaticPathStrc *', pDynamicPath: 'D2DynamicPathStrc *' }, D2StaticPathStrc: { nPosX: 'int' } },
+    enumConstants: ['MISSILE_Arrow'],
+    enumValues: { MISSILE_Arrow: 0 },
+  };
+  it("MoveAndCastSkill @005de4e0: pTarget's slot holds the caster's X once pTarget is dead", () => {
+    const out = run(`int f(D2UnitStrc *pUnit, D2UnitStrc *pTarget, int nXOffset) {
+      int nDist;
+      nDist = GetDistance(pUnit, pTarget);
+      if (pUnit->eUnitType == 2) {
+        pTarget = (D2UnitStrc *)((pUnit->pPath).pStaticPath)->nPosX;
+      }
+      else if ((pUnit->pPath).pDynamicPath == (D2DynamicPathStrc *)0x0) {
+        pTarget = (D2UnitStrc *)0x0;
+      }
+      else {
+        pTarget = (D2UnitStrc *)D2Common::PATH::DynamicPath::GetXPos((pUnit->pPath).pDynamicPath);
+      }
+      return nXOffset - (int)pTarget + nDist;
+    }`, V);
+    assert.match(out, /int nTarget;/);
+    assert.match(out, /nTarget = pUnit->pPath\.pStaticPath->nPosX;/);
+    assert.match(out, /nTarget = 0x0;|nTarget = 0;/);
+    assert.match(out, /return nXOffset - nTarget \+ nDist;/);
+    assert.match(out, /GetDistance\(pUnit, pTarget\)/);
+  });
+  it('without the member tables the second type is still not evident', () => {
+    const out = run(`int f(D2UnitStrc *pUnit, D2UnitStrc *pTarget) {
+      g(pTarget);
+      if (pUnit) pTarget = (D2UnitStrc *)((pUnit->pPath).pStaticPath)->nPosX; else pTarget = (D2UnitStrc *)0x0;
+      return h(pTarget);
+    }`, { stackParameters: ['pTarget'] });
+    assert.doesNotMatch(out, /nTarget/);
+  });
+});
