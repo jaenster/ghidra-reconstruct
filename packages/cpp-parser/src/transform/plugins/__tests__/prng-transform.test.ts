@@ -69,6 +69,14 @@ describe('prngTransformPlugin', () => {
         `Expected D2_SEED_NEXT_VAL(DVar1) in: ${output}`);
     });
 
+    it('replaces the value form with the unsigned low-dword mask signed-literal now keeps', () => {
+      const input = `void f() {
+        D2SeedStrc x = (D2SeedStrc)((seed64 & 0xffffffff) * 0x6ac690c5 + (seed64 >> 0x20));
+      }`;
+      const output = transformCode(input);
+      assert.ok(output.includes('D2_SEED_NEXT_VAL(seed64)'), `Expected D2_SEED_NEXT_VAL(seed64) in: ${output}`);
+    });
+
     it('handles mixed form (local low, member high)', () => {
       const input = `void f() {
         D2SeedStrc x = (D2SeedStrc)((uint64_t)nRandom * 0x6ac690c5 + (uint64_t)(uint32_t)pRoomEx->sSeed.nSeedHigh);

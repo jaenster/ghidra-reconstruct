@@ -2006,7 +2006,7 @@ export function replacePrngWithMacro(code: string): string {
 
     // Pattern 2: value form — ((uint64_t)DVar1 & -1) * 0x6ac690c5 + ((uint64_t)DVar1 >> 0x20)
     const valueFormMatch = innerExpr.match(
-      /\((?:uint64_t|ulonglong)\)\s*(\w+)\s*&\s*-1\)\s*\*\s*0x6ac690c5/
+      /\((?:uint64_t|ulonglong)\)\s*(\w+)\s*&\s*(?:-1|0xffffffff)\)\s*\*\s*0x6ac690c5/
     );
     if (valueFormMatch) {
       result += `D2_SEED_NEXT_VAL(${valueFormMatch[1]})`;

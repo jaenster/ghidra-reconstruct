@@ -19,10 +19,21 @@
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode,
+  AssignExpr,
+  BinaryExpr,
+  CStyleCastExpr,
+  Expression,
+  FunctionDecl,
+  Identifier,
   IntegerLiteralExpr,
+  ParameterDecl,
   ParenExpr,
+  TypeNode,
   UnaryExpr,
+  VariableDecl,
 } from '../../../ast/nodes.js';
+import { findNodesByKind } from '../../../ast/visitor.js';
+import { emit } from '../../../emit/index.js';
 import { createTransformer, type Transformer } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 
@@ -244,14 +255,94 @@ function foldReSignedNegation(
 /**
  * Create the signed literal cleanup transformer
  */
+const WIDE_TYPES = /^(unsigned )?(long long( int)?|__int64)$|^(u?int64_t|ulonglong|longlong|QWORD|ULONGLONG|LONGLONG|DWORD64|ULONG64|LONG64|UINT64|INT64|undefined8)$/;
+
+/** A 64-bit integer type, by spelling. */
+function isWideType(t: TypeNode | undefined): boolean {
+  if (!t) return false;
+  try { return WIDE_TYPES.test(emit(t as never).replace(/\s+/g, ' ').trim()); } catch { return false; }
+}
+
+/**
+ * The 32-bit pattern literals (0xffffffff, ...) whose other operand is 64 bits wide.
+ *
+ * `-1` is not `0xffffffff` there: the int converts to the 64-bit all-ones, so a mask
+ * `(uint64_t)x & 0xffffffff` - Ghidra's low dword of a 64-bit value - written `& -1` masks
+ * nothing, and `(uSeedProduct & 0xffffffff) / 7` (DRLG's seed step, Drlg.cpp) divides
+ * the whole product. Such a literal keeps its hex spelling, and its unsigned type.
+ * Width comes from what the expression says: a cast to a 64-bit type, a local or
+ * parameter declared 64-bit, arithmetic on either.
+ */
+function wideContextLiterals(root: ASTNode): WeakSet<object> {
+  // Keyed by the literal's source location: the transformer copies nodes on its way down.
+  const keep = new WeakSet<object>();
+  const mark = (n: ASTNode) => { const loc = (n as { location?: object }).location; if (loc && typeof loc === 'object') keep.add(loc); };
+  for (const fn of findNodesByKind(root, NodeKind.FunctionDecl)) {
+    const f = fn as FunctionDecl;
+    const wide = new Set<string>();
+    for (const p of f.parameters ?? []) {
+      const pd = p as ParameterDecl;
+      if (pd.name && isWideType(pd.type)) wide.add(pd.name.name);
+    }
+    if (f.body) for (const d of findNodesByKind(f.body, NodeKind.VariableDecl)) {
+      const v = d as VariableDecl;
+      if (isWideType(v.type)) wide.add(v.name.name);
+    }
+    const isWide = (e: Expression): boolean => {
+      switch (e.kind) {
+        case NodeKind.ParenExpr: return isWide((e as ParenExpr).expression);
+        case NodeKind.CStyleCastExpr: return isWideType((e as CStyleCastExpr).type);
+        case NodeKind.Identifier: return wide.has((e as Identifier).name);
+        case NodeKind.UnaryExpr: return ['-', '~', '+'].includes((e as UnaryExpr).operator) && isWide((e as UnaryExpr).operand);
+        case NodeKind.BinaryExpr: {
+          const b = e as BinaryExpr;
+          if (['<<', '>>'].includes(b.operator)) return isWide(b.left);
+          return ['+', '-', '*', '/', '%', '&', '|', '^'].includes(b.operator) && (isWide(b.left) || isWide(b.right));
+        }
+        case NodeKind.ConditionalExpr: {
+          const c = e as unknown as { thenExpr: Expression; elseExpr: Expression };
+          return isWide(c.thenExpr) || isWide(c.elseExpr);
+        }
+        case NodeKind.AssignExpr: return isWide((e as AssignExpr).left);
+        default: return false;
+      }
+    };
+    const lit = (e: Expression): ASTNode | null => {
+      let x = e;
+      while (x.kind === NodeKind.ParenExpr) x = (x as ParenExpr).expression;
+      return x.kind === NodeKind.IntegerLiteral && (x as IntegerLiteralExpr).value <= 0xffffffffn ? x : null;
+    };
+    const scope = f.body ?? f;
+    for (const n of findNodesByKind(scope, NodeKind.BinaryExpr)) {
+      const b = n as BinaryExpr;
+      if (b.operator === '&&' || b.operator === '||' || b.operator === '<<' || b.operator === '>>') continue;
+      const l = lit(b.left), r = lit(b.right);
+      if (r && isWide(b.left)) mark(r);
+      if (l && isWide(b.right)) mark(l);
+    }
+    for (const n of findNodesByKind(scope, NodeKind.AssignExpr)) {
+      const a = n as AssignExpr;
+      const r = lit(a.right);
+      if (r && isWide(a.left)) mark(r);
+    }
+    for (const n of findNodesByKind(scope, NodeKind.VariableDecl)) {
+      const v = n as VariableDecl;
+      const r = v.initializer ? lit(v.initializer as Expression) : null;
+      if (r && isWideType(v.type)) mark(r);
+    }
+  }
+  return keep;
+}
+
 function createSignedLiteralCleanup(options: SignedLiteralOptions): Transformer {
   const threshold = options.conversionThreshold ?? 0xf0000000n;
   const onlyKnown = options.onlyKnownValues ?? false;
   // Nodes this pass re-signed, against the unsigned value they were written
   // with. Lets the enclosing minus, visited afterwards, recover the original.
   const reSigned = new WeakMap<ASTNode, { value: bigint; bits: 32 | 64 }>();
+  let keep = new WeakSet<object>();
 
-  return createTransformer({
+  const inner = createTransformer({
     visitNode(node) {
       const folded = foldReSignedNegation(node, reSigned);
       if (folded) {
@@ -270,6 +361,8 @@ function createSignedLiteralCleanup(options: SignedLiteralOptions): Transformer 
 
       const literal = node as IntegerLiteralExpr;
       const value = literal.value;
+      const at = (node as { location?: object }).location;
+      if (at && typeof at === 'object' && keep.has(at)) return undefined;
 
       // An explicit unsigned suffix says the literal is already the value it
       // means. Re-signing `0xffffffffu` to `-1` changes what a mask does.
@@ -303,6 +396,10 @@ function createSignedLiteralCleanup(options: SignedLiteralOptions): Transformer 
       return negated;
     },
   });
+  return (root: ASTNode) => {
+    keep = wideContextLiterals(root);
+    return inner(root);
+  };
 }
 
 // ============================================

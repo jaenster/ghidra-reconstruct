@@ -172,3 +172,23 @@ describe('signedLiteralPlugin', () => {
     });
   });
 });
+
+describe('signedLiteralPlugin: a 32-bit mask next to a 64-bit value stays unsigned (round 13)', () => {
+  const tx = (code: string) =>
+    emit(signedLiteralPlugin.createTransformer({})(parse(code)) as AnyNode).replace(/\s+/g, ' ').trim();
+  it("Ghidra's low dword of a 64-bit value keeps 0xffffffff (UNIT_GetModuloFromSeed 0045c390)", () => {
+    const out = tx('uint f(D2SeedStrc s, uint n) { return (uint)(((ulonglong)s & 0xffffffff) % (ulonglong)n); }');
+    assert.match(out, /& 0xffffffff\)/);
+  });
+  it('a 64-bit local: (uSeedProduct & 0xffffffff) / 7 is the low dword divided (Drlg.cpp)', () => {
+    const out = tx('int f(uint64_t uSeedProduct) { uint64_t u = uSeedProduct * 3; return (int)((u & 0xffffffff) / 7); }');
+    assert.match(out, /u & 0xffffffff/);
+  });
+  it('a 32-bit operand still reads -1', () => {
+    const out = tx('int f(int x) { return x + 0xffffffff; }');
+    assert.match(out, /x \+ -1|x - 1/);
+  });
+  it('an initializer of a 64-bit local keeps the 32-bit pattern', () => {
+    assert.match(tx('void f() { uint64_t u = 0xffffffff; use(u); }'), /= 0xffffffff;/);
+  });
+});
