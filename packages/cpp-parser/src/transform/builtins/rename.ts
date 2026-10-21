@@ -27,12 +27,22 @@ import type {
   LabelStmt,
   EnumeratorDecl,
   MemberExpr,
+  TemplateType,
 } from '../../ast/nodes.js';
 import {
   type Transformer,
   createTransformer,
   updateNode,
 } from '../transformer.js';
+
+/**
+ * The identifier a class declaration declares: its own, or for a specialization
+ * `struct S<A> { ... }` the template's, `S`.
+ */
+function declaredClassIdentifier(name: Identifier | TemplateType): Identifier | null {
+  if (name.kind === NodeKind.Identifier) return name;
+  return name.name.kind === NodeKind.Identifier ? name.name as Identifier : null;
+}
 
 // ============================================
 // TYPES
@@ -252,9 +262,11 @@ export function createRenameTransformer(
         return undefined;
       }
 
-      const renamed = renameIdentifier(node.name, 'class');
+      const id = declaredClassIdentifier(node.name);
+      const renamed = id && renameIdentifier(id, 'class');
       if (renamed) {
-        return updateNode(node, { name: renamed } as Partial<ClassDecl>);
+        const name = node.name.kind === NodeKind.TemplateType ? updateNode(node.name, { name: renamed }) : renamed;
+        return updateNode(node, { name } as Partial<ClassDecl>);
       }
       return undefined;
     },
@@ -264,9 +276,11 @@ export function createRenameTransformer(
         return undefined;
       }
 
-      const renamed = renameIdentifier(node.name, 'class');
+      const id = declaredClassIdentifier(node.name);
+      const renamed = id && renameIdentifier(id, 'class');
       if (renamed) {
-        return updateNode(node, { name: renamed } as Partial<StructDecl>);
+        const name = node.name.kind === NodeKind.TemplateType ? updateNode(node.name, { name: renamed }) : renamed;
+        return updateNode(node, { name } as Partial<StructDecl>);
       }
       return undefined;
     },
@@ -473,8 +487,9 @@ export function extractRenameableIdentifiers(
       }
     } else if (node.kind === NodeKind.ClassDecl || node.kind === NodeKind.StructDecl) {
       const cls = node as ClassDecl | StructDecl;
-      if (cls.name) {
-        record(cls.name.name, 'class');
+      const id = cls.name && declaredClassIdentifier(cls.name);
+      if (id) {
+        record(id.name, 'class');
       }
     } else if (node.kind === NodeKind.EnumDecl) {
       const en = node as EnumDecl;

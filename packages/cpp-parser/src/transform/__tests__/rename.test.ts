@@ -13,6 +13,7 @@ import {
 import { NodeKind } from '../../ast/kinds.js';
 import { AST, Type, Expr, Stmt, Decl } from '../../ast/factory.js';
 import { TriviaKind } from '../../lexer/trivia.js';
+import { parse } from '../../parser/index.js';
 import type {
   Identifier,
   BinaryExpr,
@@ -264,6 +265,22 @@ describe('Rename Transformer', () => {
       const param = Expr.identifier('param_1');
       const paramResult = transformer(param) as Identifier;
       assert.strictEqual(paramResult.name, 'arg1');
+    });
+  });
+
+  describe('class specializations', () => {
+    // `template<> struct S<int>` declares S; the rename and the record go to the template's name.
+    const spec = () => (parse('template<> struct S<int> { int a; };').declarations[0] as any).declaration;
+
+    it('renames the template name of a specialization, keeping its arguments', () => {
+      const out = createRenameTransformer({ S: 'T' }, { contexts: ['class'] })(spec()) as any;
+      assert.strictEqual(out.name.kind, NodeKind.TemplateType);
+      assert.strictEqual(out.name.name.name, 'T');
+      assert.strictEqual(out.name.arguments.length, 1);
+    });
+
+    it('records a specialization under the template name', () => {
+      assert.ok(extractRenameableIdentifiers(spec()).get('S')?.contexts.has('class'));
     });
   });
 

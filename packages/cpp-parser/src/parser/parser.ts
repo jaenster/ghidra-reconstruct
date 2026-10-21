@@ -69,6 +69,12 @@ import {
   type ArrayType,
   type QualifiedType,
   type TemplateType,
+  type TemplateDecl,
+  type TemplateParameter,
+  type TemplateTypeParam,
+  type TemplateNonTypeParam,
+  type TemplateTemplateParam,
+  type BaseSpecifier,
   type TypeTemplateArg,
   type ExprTemplateArg,
   type BinaryOperator,
@@ -231,6 +237,12 @@ export class Parser {
       return this.node(NodeKind.EmptyDecl, loc, {}, leadingTrivia) as Declaration;
     }
 
+    if (this.check(TokenKind.Template)) {
+      const decl = this.parseTemplateDecl();
+      decl.leadingTrivia = leadingTrivia;
+      return decl;
+    }
+
     if (this.check(TokenKind.Using)) {
       const decl = this.parseUsing();
       decl.leadingTrivia = leadingTrivia;
@@ -299,6 +311,8 @@ export class Parser {
       }
       if (this.check(TokenKind.Identifier)) {
         this.advance(); // skip name
+        // `struct S<A, B> {` - a specialization, named by its template-id.
+        if (this.check(TokenKind.Less) && this.looksLikeTemplateArgs()) this.skipTemplateArgs();
         if (this.check(TokenKind.LeftBrace) || this.check(TokenKind.Semicolon) || this.check(TokenKind.Colon)) {
           // Named definition, forward declaration, or has base classes
           this.pos = saved;
@@ -469,7 +483,13 @@ export class Parser {
       this.parseGnuAttribute();
       if (this.tokens.slice(at, this.pos).some(t => t.token.text === 'packed')) packed = true;
     }
-    const name = this.check(TokenKind.Identifier) ? this.parseIdentifier() : null;
+    let name: Identifier | TemplateType | null = null;
+    if (this.check(TokenKind.Identifier)) {
+      const id = this.parseIdentifier();
+      name = this.check(TokenKind.Less) && this.looksLikeTemplateArgs() ? this.parseTemplateType(id) : id;
+    }
+    // A specialization's constructor is spelled with the template's own name: `S<A> { S(); }`.
+    const selfName = name?.kind === NodeKind.TemplateType ? (name.name as Identifier).name : name?.name;
 
     // Check for forward declaration
     if (this.check(TokenKind.Semicolon)) {
@@ -481,22 +501,29 @@ export class Parser {
         members: [],
         isFinal: false,
         attributes: [],
+        isForwardDeclaration: true,
       }) as ClassDecl | StructDecl;
     }
 
-    // Parse base classes if present
-    const bases: any[] = [];
-    if (this.check(TokenKind.Colon)) {
-      this.advance();
-      // TODO: Parse base specifiers
+    const bases: BaseSpecifier[] = [];
+    if (this.match(TokenKind.Colon)) {
+      do { bases.push(this.parseBaseSpecifier()); } while (this.match(TokenKind.Comma));
     }
 
     this.expect(TokenKind.LeftBrace);
 
     const members: any[] = [];
     while (!this.check(TokenKind.RightBrace) && !this.isAtEnd()) {
+      if ((this.check(TokenKind.Public) || this.check(TokenKind.Protected) || this.check(TokenKind.Private)) &&
+          this.checkAhead(1, TokenKind.Colon)) {
+        const loc = this.currentLocation();
+        const access = this.advance().token.text;
+        this.advance(); // :
+        members.push(this.node(NodeKind.AccessSpecifier, loc, { access }));
+        continue;
+      }
       // `Name(...)` / `~Name(...)` inside the class body: a constructor or destructor.
-      if (name && ((this.check(TokenKind.Identifier) && this.current().token.text === name.name) ||
+      if (name && ((this.check(TokenKind.Identifier) && this.current().token.text === selfName) ||
                    (this.check(TokenKind.Tilde) && this.checkAhead(1, TokenKind.Identifier))) &&
           this.checkAhead(this.check(TokenKind.Tilde) ? 2 : 1, TokenKind.LeftParen)) {
         const loc = this.currentLocation();
@@ -535,6 +562,185 @@ export class Parser {
       attributes: [],
       ...(packed ? { packed: true } : {}),
     }) as ClassDecl | StructDecl;
+  }
+
+  /** `[virtual] [public|protected|private] [virtual] Base[...]` in a class head. */
+  private parseBaseSpecifier(): BaseSpecifier {
+    const startLoc = this.currentLocation();
+    let isVirtual = this.match(TokenKind.Virtual);
+    let access: BaseSpecifier['access'] = null;
+    if (this.check(TokenKind.Public) || this.check(TokenKind.Protected) || this.check(TokenKind.Private)) {
+      access = this.advance().token.text as BaseSpecifier['access'];
+    }
+    if (!isVirtual) isVirtual = this.match(TokenKind.Virtual);
+    const type = this.parseType();
+    const isPackExpansion = this.match(TokenKind.Ellipsis);
+    return this.node(NodeKind.BaseSpecifier, startLoc, { type, access, isVirtual, isPackExpansion }) as BaseSpecifier;
+  }
+
+  /**
+   * `template<parameters> declaration`. An empty list is an explicit specialization,
+   * `template<> R C<A>::f() { ... }`. The declaration is whatever may follow at this scope:
+   * a class template or a class specialization, a member defined out of its class, a
+   * function or alias template, or another template header (a member template).
+   */
+  private parseTemplateDecl(): TemplateDecl {
+    const startLoc = this.currentLocation();
+    this.expect(TokenKind.Template);
+    const parameters = this.parseTemplateParameterList();
+    const declaration = this.parseDeclaration();
+    if (!declaration) throw new ParserError('Expected a declaration after the template header', this.currentLocation());
+    return this.node(NodeKind.TemplateDecl, startLoc, { parameters, declaration }) as TemplateDecl;
+  }
+
+  /** `<P1, P2, ...>` or `<>`. */
+  private parseTemplateParameterList(): TemplateParameter[] {
+    this.expect(TokenKind.Less);
+    const parameters: TemplateParameter[] = [];
+    if (!this.check(TokenKind.Greater) && !this.check(TokenKind.GreaterGreater)) {
+      do { parameters.push(this.parseTemplateParameter()); } while (this.match(TokenKind.Comma));
+    }
+    this.closeAngle();
+    return parameters;
+  }
+
+  /**
+   * One template parameter: a type (`class T`, `typename... Ts`, `class K = HASHKEY_NONE`),
+   * a template (`template<class> class TT`) or a value (`int N`, `int OFFSET = -1`).
+   */
+  private parseTemplateParameter(): TemplateParameter {
+    const startLoc = this.currentLocation();
+    if (this.check(TokenKind.Template)) {
+      this.advance();
+      const parameters = this.parseTemplateParameterList();
+      const keyword = this.check(TokenKind.Class) ? 'class' : 'typename';
+      if (!this.match(TokenKind.Class)) this.expect(TokenKind.Typename);
+      const isVariadic = this.match(TokenKind.Ellipsis);
+      const name = this.check(TokenKind.Identifier) ? this.parseIdentifier() : null;
+      const defaultTemplate = this.match(TokenKind.Equal) ? this.parseIdentifierOrQualified() : undefined;
+      return this.node(NodeKind.TemplateTemplateParam, startLoc, {
+        name, keyword, parameters, isVariadic, ...(defaultTemplate ? { defaultTemplate } : {}),
+      }) as TemplateTemplateParam;
+    }
+    if ((this.check(TokenKind.Class) || this.check(TokenKind.Typename)) && this.isTypeParameterHead()) {
+      const keyword = this.advance().token.text as 'class' | 'typename';
+      const isVariadic = this.match(TokenKind.Ellipsis);
+      const name = this.check(TokenKind.Identifier) ? this.parseIdentifier() : null;
+      const defaultType = this.match(TokenKind.Equal) ? this.parseType() : undefined;
+      return this.node(NodeKind.TemplateTypeParam, startLoc, {
+        name, keyword, isVariadic, ...(defaultType ? { defaultType } : {}),
+      }) as TemplateTypeParam;
+    }
+    const type = this.parseType();
+    const isVariadic = this.match(TokenKind.Ellipsis);
+    const name = this.check(TokenKind.Identifier) ? this.parseIdentifier() : null;
+    const defaultValue = this.match(TokenKind.Equal) ? this.parseTemplateArgumentExpression() : undefined;
+    return this.node(NodeKind.TemplateNonTypeParam, startLoc, {
+      name, type, isVariadic, ...(defaultValue ? { defaultValue } : {}),
+    }) as TemplateNonTypeParam;
+  }
+
+  /**
+   * At `class`/`typename`: does a type parameter follow (`class T,` `typename... Ts>`
+   * `class = X`), rather than a value parameter of an elaborated type (`class C* p`)?
+   */
+  private isTypeParameterHead(): boolean {
+    let i = 1;
+    if (this.checkAhead(i, TokenKind.Ellipsis)) i++;
+    if (this.checkAhead(i, TokenKind.Identifier)) i++;
+    return [TokenKind.Comma, TokenKind.Greater, TokenKind.GreaterGreater, TokenKind.Equal]
+      .some(k => this.checkAhead(i, k));
+  }
+
+  /**
+   * An expression that ends at the first `,` or `>` outside brackets - a template argument
+   * or a value parameter's default, where `>` closes the list instead of comparing. The
+   * closing token stands in as end-of-input while the expression is parsed, so no operator
+   * can run past the list.
+   */
+  private parseTemplateArgumentExpression(): Expression {
+    const end = this.templateArgumentEnd();
+    const closer = this.tokens[end];
+    const eof: TokenWithTrivia = {
+      leadingTrivia: [], token: { ...closer.token, kind: TokenKind.EOF, text: '' }, trailingTrivia: [],
+    };
+    this.tokens[end] = eof;
+    try {
+      const expression = this.parseConditionalExpression();
+      if (!this.isAtEnd()) {
+        throw new ParserError(`Unexpected token in a template argument: ${this.current().token.text}`, this.currentLocation());
+      }
+      return expression;
+    } finally {
+      // A `]]` split inside the argument inserts a token, so the stand-in may have moved.
+      let i = end;
+      while (this.tokens[i] !== eof) i++;
+      this.tokens[i] = closer;
+    }
+  }
+
+  /**
+   * Does a template argument start here that is a value, not a type: a literal, a
+   * parenthesised or unary expression? An identifier is read as a type, as it always was.
+   */
+  private startsValueTemplateArgument(): boolean {
+    const k = this.current().token.kind;
+    return k === TokenKind.IntegerLiteral || k === TokenKind.FloatingLiteral || k === TokenKind.CharLiteral ||
+      k === TokenKind.True || k === TokenKind.False || k === TokenKind.Nullptr ||
+      k === TokenKind.LeftParen || k === TokenKind.Sizeof || this.checkUnaryOperator();
+  }
+
+  /** Index of the `,` or `>` (or `>>`) that ends the template argument starting here. */
+  private templateArgumentEnd(): number {
+    const saved = this.pos;
+    try {
+      let depth = 0;
+      for (let i = this.pos; i < this.tokens.length; i++) {
+        const k = this.tokens[i].token.kind;
+        if (k === TokenKind.EOF) return i;
+        if (k === TokenKind.LeftParen || k === TokenKind.LeftBracket || k === TokenKind.LeftBrace) {
+          depth++;
+        } else if (k === TokenKind.RightParen || k === TokenKind.RightBracket || k === TokenKind.RightBrace) {
+          if (depth === 0) return i;
+          depth--;
+        } else if (depth === 0 && (k === TokenKind.Comma || k === TokenKind.Greater ||
+                                   k === TokenKind.GreaterGreater || k === TokenKind.Semicolon)) {
+          return i;
+        } else if (depth === 0 && k === TokenKind.Less && i > 0 &&
+                   this.tokens[i - 1].token.kind === TokenKind.Identifier) {
+          // A template-id inside the argument, `A<1>::value`: its `>` is its own.
+          this.pos = i;
+          if (this.looksLikeTemplateArgs()) {
+            this.skipTemplateArgs();
+            i = this.pos - 1;
+          }
+        }
+      }
+      return this.tokens.length - 1;
+    } finally {
+      this.pos = saved;
+    }
+  }
+
+  /** Step over a balanced `<...>`; `>>` closes two levels. */
+  private skipTemplateArgs(): void {
+    let depth = 0;
+    do {
+      if (this.check(TokenKind.Less)) depth++;
+      else if (this.check(TokenKind.Greater)) depth--;
+      else if (this.check(TokenKind.GreaterGreater)) depth -= 2;
+      this.advance();
+    } while (depth > 0 && !this.isAtEnd());
+  }
+
+  /** Close a `<...>` list. `>>` closes this one and leaves a `>` for the enclosing list. */
+  private closeAngle(): void {
+    if (this.check(TokenKind.GreaterGreater)) {
+      const tok = this.current();
+      tok.token = { ...tok.token, kind: TokenKind.Greater, text: '>' };
+    } else {
+      this.expect(TokenKind.Greater);
+    }
   }
 
   /**
@@ -992,10 +1198,9 @@ export class Parser {
     if (!this.check(TokenKind.Greater) && !this.check(TokenKind.GreaterGreater)) {
       do {
         const argStart = this.currentLocation();
-        // Non-type template parameter: integer literal or unary expression like -1
-        if (this.check(TokenKind.IntegerLiteral) ||
-            (this.check(TokenKind.Minus) && this.checkAhead(1, TokenKind.IntegerLiteral))) {
-          const expression = this.parseUnaryExpression();
+        // A value argument: `-572662307`, `true`, `(sizeof(T) > 4)`.
+        if (this.startsValueTemplateArgument()) {
+          const expression = this.parseTemplateArgumentExpression();
           args.push(this.node(NodeKind.ExprTemplateArg, argStart, { expression }) as ExprTemplateArg);
         } else {
           const type = this.parseType();
@@ -1004,14 +1209,7 @@ export class Parser {
       } while (this.match(TokenKind.Comma));
     }
 
-    // Handle >> as two >
-    if (this.check(TokenKind.GreaterGreater)) {
-      // Consume one > by creating a synthetic token
-      const tok = this.current();
-      tok.token = { ...tok.token, kind: TokenKind.Greater, text: '>' };
-    } else {
-      this.expect(TokenKind.Greater);
-    }
+    this.closeAngle();
 
     return this.node(NodeKind.TemplateType, startLoc, {
       name,
@@ -1799,12 +1997,7 @@ export class Parser {
       this.advance();
       this.expect(TokenKind.Less);
       const type = this.parseType();
-      if (this.check(TokenKind.GreaterGreater)) {
-        const tok = this.current();
-        tok.token = { ...tok.token, kind: TokenKind.Greater, text: '>' };
-      } else {
-        this.expect(TokenKind.Greater);
-      }
+      this.closeAngle();
       this.expect(TokenKind.LeftParen);
       const expression = this.parseExpression();
       this.expect(TokenKind.RightParen);

@@ -297,22 +297,28 @@ export type VariableSpecifier =
 
 export interface ClassDecl extends ASTNode {
   kind: NodeKind.ClassDecl;
-  name: Identifier | null;  // null for anonymous classes
+  /** null for an anonymous class; a template-id for a specialization, `class C<A, B> { ... }`. */
+  name: Identifier | TemplateType | null;
   bases: BaseSpecifier[];
   members: ClassMember[];
   isFinal: boolean;
   attributes: Attribute[];
+  /** `class C;` - a declaration only, not a class with no members. */
+  isForwardDeclaration?: boolean;
 }
 
 export interface StructDecl extends ASTNode {
   kind: NodeKind.StructDecl;
-  name: Identifier | null;
+  /** null for an anonymous struct; a template-id for a specialization, `struct S<A> { ... }`. */
+  name: Identifier | TemplateType | null;
   bases: BaseSpecifier[];
   members: ClassMember[];
   isFinal: boolean;
   attributes: Attribute[];
   /** `struct __attribute__((packed)) X` */
   packed?: boolean;
+  /** `struct S;` - a declaration only, not a struct with no members. */
+  isForwardDeclaration?: boolean;
 }
 
 export interface UnionDecl extends ASTNode {
@@ -496,6 +502,8 @@ export type TemplateParameter =
 export interface TemplateTypeParam extends ASTNode {
   kind: NodeKind.TemplateTypeParam;
   name: Identifier | null;
+  /** The keyword written, `class T` or `typename T`; the two mean the same, `typename` when absent. */
+  keyword?: 'class' | 'typename';
   constraint?: TypeNode | ConceptConstraint;
   defaultType?: TypeNode;
   isVariadic: boolean;  // typename... T
@@ -517,6 +525,8 @@ export interface TemplateNonTypeParam extends ASTNode {
 export interface TemplateTemplateParam extends ASTNode {
   kind: NodeKind.TemplateTemplateParam;
   name: Identifier | null;
+  /** `template<class> class TT` or `... typename TT`; `typename` when absent. */
+  keyword?: 'class' | 'typename';
   parameters: TemplateParameter[];
   defaultTemplate?: QualifiedId | Identifier;
   isVariadic: boolean;

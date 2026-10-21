@@ -964,7 +964,7 @@ export class CppEmitter {
         this.emitTypeNode((arg as TypeTemplateArg).type);
         break;
       case NodeKind.ExprTemplateArg:
-        this.emitNode((arg as ExprTemplateArg).expression);
+        this.emitTemplateValue((arg as ExprTemplateArg).expression);
         break;
       case NodeKind.TemplateTemplateArg:
         this.emitNode((arg as TemplateTemplateArg).name);
@@ -1144,7 +1144,13 @@ export class CppEmitter {
 
     if (node.name) {
       this.write(' ');
-      this.emitIdentifier(node.name);
+      if (node.name.kind === NodeKind.TemplateType) this.emitTemplateType(node.name);
+      else this.emitIdentifier(node.name);
+    }
+
+    if (node.isForwardDeclaration) {
+      this.write(';');
+      return;
     }
 
     if (node.isFinal) {
@@ -1394,7 +1400,7 @@ export class CppEmitter {
         }
       }
     } else {
-      this.write('typename');
+      this.write(param.keyword ?? 'typename');
     }
 
     if (param.isVariadic) {
@@ -1431,8 +1437,32 @@ export class CppEmitter {
       } else {
         this.write('=');
       }
-      this.emitNode(param.defaultValue);
+      this.emitTemplateValue(param.defaultValue);
     }
+  }
+
+  /**
+   * A value inside `<...>`. The first unbracketed `>` there closes the list, so an
+   * expression that would print one is parenthesised: `L<(sizeof(T) > 4)>`.
+   */
+  private emitTemplateValue(expr: Expression): void {
+    const bare = (e: any): boolean => {
+      switch (e?.kind) {
+        case NodeKind.ParenExpr: return bare(e.expression);
+        case NodeKind.BinaryExpr: return e.operator === '>' || e.operator === '>>' || bare(e.left) || bare(e.right);
+        case NodeKind.UnaryExpr: return bare(e.operand);
+        case NodeKind.CStyleCastExpr: return bare(e.expression);
+        case NodeKind.ConditionalExpr: return bare(e.condition) || bare(e.thenExpr) || bare(e.elseExpr);
+        default: return false;
+      }
+    };
+    if (!bare(expr)) {
+      this.emitNode(expr);
+      return;
+    }
+    this.write('(');
+    this.emitNode(expr);
+    this.write(')');
   }
 
   private emitTemplateTemplateParam(param: TemplateTemplateParam): void {
@@ -1446,10 +1476,9 @@ export class CppEmitter {
     }
     this.write('> ');
 
+    this.write(param.keyword ?? 'typename');
     if (param.isVariadic) {
-      this.write('typename...');
-    } else {
-      this.write('typename');
+      this.write('...');
     }
 
     if (param.name) {

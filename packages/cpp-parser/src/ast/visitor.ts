@@ -540,7 +540,25 @@ export function getChildren(node: ASTNode): ASTNode[] {
     case NodeKind.ClassDecl:
     case NodeKind.StructDecl: {
       const cls = node as any;
+      children.push(...(cls.bases ?? []));
       children.push(...(cls.members ?? []));
+      break;
+    }
+
+    case NodeKind.BaseSpecifier:
+      children.push((node as any).type);
+      break;
+
+    case NodeKind.TemplateTypeParam: {
+      const tp = node as any;
+      if (tp.defaultType) children.push(tp.defaultType);
+      break;
+    }
+
+    case NodeKind.TemplateNonTypeParam: {
+      const tp = node as any;
+      children.push(tp.type);
+      if (tp.defaultValue) children.push(tp.defaultValue);
       break;
     }
 
@@ -909,7 +927,27 @@ function transformChildren<N extends ASTNode>(
     case NodeKind.StructDecl: {
       const cls = copy as any;
       if (cls.name) cls.name = transformAST(cls.name, visitor);
+      cls.bases = (cls.bases ?? []).map((b: any) => transformAST(b, visitor));
       cls.members = cls.members.map((m: any) => transformAST(m, visitor));
+      break;
+    }
+
+    case NodeKind.BaseSpecifier: {
+      const b = copy as any;
+      b.type = transformAST(b.type, visitor);
+      break;
+    }
+
+    case NodeKind.TemplateTypeParam: {
+      const tp = copy as any;
+      if (tp.defaultType) tp.defaultType = transformAST(tp.defaultType, visitor);
+      break;
+    }
+
+    case NodeKind.TemplateNonTypeParam: {
+      const tp = copy as any;
+      tp.type = transformAST(tp.type, visitor);
+      if (tp.defaultValue) tp.defaultValue = transformAST(tp.defaultValue, visitor);
       break;
     }
 
