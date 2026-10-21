@@ -29,6 +29,8 @@ export {
   isSwitchTableSymbol,
 } from './globals-header.js';
 
+import { createOutParamOracle } from './out-params.js';
+import { lowerShiftedPointerTypedefs, shiftedPointerSpecs } from './shifted-pointers.js';
 import { respellPlaceholderTypes, respellPlaceholderType } from './placeholder-types.js';
 import { sehSubsumedSymbols, normaliseAddress } from './seh-subsumed.js';
 import { selectDataExclusions, type DataClosureCandidate } from './data-exclusion-closure.js';
@@ -681,6 +683,12 @@ export function generateProjectStage1(
     }
   }
 
+  // Shifted pointers: a pointer to the member at the offset (codegen/shifted-pointers.ts).
+  {
+    const lowered = lowerShiftedPointerTypedefs(dataTypes);
+    if (lowered > 0) console.log(`Declared ${lowered} shifted pointer typedef(s) as pointers to their member`);
+  }
+
   // Flatten Ghidra's demangled template spellings (`TSHashTable<struct_CELLIST,
   // class_HASHKEY_NONE>`) across the WHOLE model before anything is emitted, so
   // the declaration side and every reference side share one identifier.
@@ -1170,6 +1178,10 @@ export function generateProjectStage1(
     context._ambiguousEnumConstants = ambiguousConstants;
     context._enumMembers = Object.fromEntries(
       emittedEnums.map(e => [e.name, e.values.map(v => v.name.trim()).filter(Boolean)])
+    );
+    context._enumMemberValues = Object.fromEntries(
+      emittedEnums.map(e => [e.name, Object.fromEntries(
+        e.values.filter(v => v.name.trim() && Number.isFinite(Number(v.value))).map(v => [v.name.trim(), Number(v.value)]))])
     );
     // Initializers print a datum's enumerator by name too, and need the same
     // qualification a body's comparison gets.
@@ -4836,6 +4848,12 @@ export function resolveProgramNamespaces(
   buildNamespaceResolution(structUnionEnumNames, [...functions, ...globals], {
     symbols: globals,
     nameOf: g => sanitizeSymbolName(g.suggestedName || g.name),
+  }, {
+    symbols: functions as ReadonlyArray<{ address?: string; namespace?: string | null; name?: string }>,
+    // What the linker tells two definitions apart by: the parameter types.
+    signatureOf: fn => ((fn as { parameters?: { dataType?: string; ordinal?: number }[] }).parameters ?? [])
+      .slice().sort((a, b) => (a.ordinal ?? 0) - (b.ordinal ?? 0))
+      .map(p => (p.dataType ?? '').replace(/\s+/g, '')).join(','),
   });
 }
 
@@ -5328,6 +5346,9 @@ export function buildFuncPtrArgCastTables(
   // reason the declaration closure already refuses them. They stay in
   // `functionNames`: the identifier does denote a function either way.
   const headerOwned = platformDeclaredFunctionNames();
+  // Every call-site spelling -> the one function it denotes (null once two disagree), for
+  // the out-parameter oracle: the same keys, the same rule as the parameter tables.
+  const functionByKey = new Map<string, ExtractedFunction | null>();
   for (const fn of functions) {
     if (!fn.name) continue;
     const params = [...(fn.parameters ?? [])].sort((a, b) => a.ordinal - b.ordinal);
@@ -5346,6 +5367,8 @@ export function buildFuncPtrArgCastTables(
     for (const key of keys) {
       functionNames.add(key);
       if (!headerOwned.has(key) && !fn.platform) {
+        const seenFn = functionByKey.get(key);
+        functionByKey.set(key, seenFn === undefined ? fn : seenFn && seenFn.address === fn.address ? seenFn : null);
         claim(functionParamTypes, paramTypeClaims, key, paramSpellings, paramSpellings.join('|'));
         claim(functionReturnTypes, returnTypeClaims, key, returnSpelling, returnSpelling);
         claim(functionConventions, conventionClaims, key, conventionSpelling, conventionSpelling);
@@ -5606,6 +5629,9 @@ export function buildFuncPtrArgCastTables(
     vtableDispatch: buildVtableDispatch(dataTypes, funcDefs, emittedMemberNames),
     enumValues: buildEnumValues(dataTypes),
     ...buildEnumSignedness(dataTypes),
+    shiftedPointers: shiftedPointerSpecs(dataTypes),
+    outParams: createOutParamOracle(
+      new Map([...functionByKey].filter((e): e is [string, ExtractedFunction] => e[1] !== null)), dataTypes),
   };
 }
 

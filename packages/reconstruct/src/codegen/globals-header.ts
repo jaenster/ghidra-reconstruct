@@ -976,6 +976,12 @@ export function setInteriorLabelSymbols(globals: readonly AnalyzedDataSymbol[]):
   for (const g of globals) {
     const name = g.suggestedName || g.name;
     if (looksLikeMemberPath(name)) continue;
+    // An element label (`gaPaletteBlendEntries[52]` @007d5528) is no container: Ghidra
+    // gives it the whole array's type and size (288 bytes), so its "range" ran 0x120 past
+    // its own element, over MPQ_d2xmusic..MPQ_d2exp, and made `MPQ_d2kfixup.mpq` @007d5620
+    // - a datum of its own - an interior label: declared by nothing, defined by nothing,
+    // used by D2WinArchive.cpp. The array itself is the container.
+    if (/\[\d+\]$/.test(name)) continue;
     const start = parseInt(g.address, 16);
     if (!Number.isFinite(start) || !(g.size > 1)) continue;
     starts.push(start);

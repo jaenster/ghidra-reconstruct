@@ -179,6 +179,33 @@ describe("exact: Ghidra's if (false) arm moved into its switch", () => {
     assert.match(out, /default:\s*(LAB_9:\s*)?handle\(a\);\s*break;/);
     assert.equal(stats.ifFalseArm, 1);
   });
+  it('drops the label when the default was its only goto (SKILLS_ValidateAnimModeForMonster 00645190)', () => {
+    const { out, stats } = run(`int f(uint32_t u) {
+  while (check(u)) {
+    if (false) {
+switchD_0064520d_caseD_2:
+      u = 1;
+    }
+    else {
+      switch(u) {
+      case 1:
+        goto switchD_0064520d_caseD_1;
+      default:
+        goto switchD_0064520d_caseD_2;
+      case 5:
+      case 7:
+        u = 4;
+        break;
+      }
+    }
+  }
+switchD_0064520d_caseD_1:
+  return u;
+}`);
+    assert.equal(stats.ifFalseArm, 1);
+    assert.match(out, /default:\s*u = 1;\s*break;/);
+    assert.doesNotMatch(out, /switchD_0064520d_caseD_2/);
+  });
   it('declines when the block is entered from outside the switch', () => {
     const { stats } = run(`void f(int a) {
   if (a > 9) goto LAB_9;

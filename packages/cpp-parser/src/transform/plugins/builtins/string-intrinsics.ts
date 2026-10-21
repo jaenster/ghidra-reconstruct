@@ -68,6 +68,13 @@ export interface StringIntrinsicDeps {
   locals: ReadonlySet<string>;
   /** Locals whose declared type is an array, with their element size. */
   localArrays: ReadonlyMap<string, { elem: number; isChar?: boolean }>;
+  /**
+   * Locals declared as a pointer to an array, `T (*p)[N]`: the element size and the row
+   * size N * elem. The shape model flattens the type to `T **`, which would make `*p` a
+   * load and `p + 1` four bytes; `*p` is the row (it decays to p's own value) and `p + 1`
+   * is the next row.
+   */
+  localArrayPointers?: ReadonlyMap<string, { elem: number; row: number }>;
   /** The frame: name -> offset, size. */
   stackSlots?: ReadonlyArray<{ name: string; offset: number; size: number }>;
   fieldOffsets?: Record<string, Record<string, number>>;
@@ -155,6 +162,13 @@ function makeAddress(deps: StringIntrinsicDeps, env: Map<string, Addr>, outer?: 
     const sp = deps.structFields?.[aggregate.replace(/^::/, '')]?.[field];
     return !!sp && /\[\d*\]\s*$/.test(sp);
   };
+  /** `*p` with p a `T (*p)[N]` local: that local's row sizes. */
+  const arrayRowOf = (x: Expression): { p: Expression; elem: number; row: number } | null => {
+    if (x.kind !== NodeKind.UnaryExpr || (x as UnaryExpr).operator !== '*') return null;
+    const p = unwrapParens((x as UnaryExpr).operand);
+    const rows = p.kind === NodeKind.Identifier ? deps.localArrayPointers?.get((p as Identifier).name) : undefined;
+    return rows ? { p, ...rows } : null;
+  };
   /** Address of an lvalue (the object itself). */
   const lvalue = (e: Expression): Addr | null => {
     const x = unwrapParens(e);
@@ -189,7 +203,12 @@ function makeAddress(deps: StringIntrinsicDeps, env: Map<string, Addr>, outer?: 
     if (x.kind === NodeKind.Identifier) {
       const arr = deps.localArrays.get((x as Identifier).name);
       if (arr) return arr.elem;
+      const rows = deps.localArrayPointers?.get((x as Identifier).name);
+      if (rows) return rows.row;
     }
+    // `*p` of a `T (*p)[N]`: the row, an array of T.
+    const row = arrayRowOf(x);
+    if (row) return row.elem;
     // An array field: its element type from the struct's spelling (`char[16]`).
     if (x.kind === NodeKind.MemberExpr) {
       const m = x as MemberExpr;
@@ -227,6 +246,8 @@ function makeAddress(deps: StringIntrinsicDeps, env: Map<string, Addr>, outer?: 
       case NodeKind.UnaryExpr: {
         const u = x as UnaryExpr;
         if (u.operator === '&') return lvalue(u.operand);
+        // The row `*p` is an array: it decays to its address, which is p's value.
+        { const row = arrayRowOf(x); if (row) return value(row.p); }
         if (u.operator === '-') { const v = value(u.operand); return v && scale(v, -1n); }
         return null;
       }
@@ -1085,6 +1106,39 @@ function replaceList(body: Statement[], orig: Statement[], edited: Statement[]):
     return copy ?? x;
   };
   return go(body) as Statement[];
+}
+
+/** For the plugin: the locals declared `T (*p)[N]`, with the element and row sizes. */
+export function localArrayPointersOf(body: ASTNode): Map<string, { elem: number; row: number }> {
+  const out = new Map<string, { elem: number; row: number }>();
+  const walk = (x: unknown): void => {
+    if (Array.isArray(x)) { x.forEach(walk); return; }
+    if (!x || typeof x !== 'object') return;
+    const o = x as Record<string, unknown>;
+    if (o.kind === NodeKind.VariableDecl) {
+      const v = o as unknown as VariableDecl;
+      const t = v.type as unknown as { kind: NodeKind; pointee?: { kind: NodeKind; elementType?: TypeNode; size?: Expression | null } };
+      const arr = t.kind === NodeKind.PointerType ? t.pointee : undefined;
+      const n = arr && arr.kind === NodeKind.ArrayType && arr.size ? literalOf(arr.size) : null;
+      const elem = arr && arr.elementType ? scalarSize(arr.elementType) : null;
+      if (n !== null && n > 0n && elem) out.set(v.name.name, { elem, row: Number(n) * elem });
+    }
+    for (const [k, val] of Object.entries(o)) {
+      if (k === 'location' || k === 'leadingTrivia' || k === 'trailingTrivia') continue;
+      if (val && typeof val === 'object') walk(val);
+    }
+  };
+  walk(body);
+  return out;
+}
+
+/** Byte size of a scalar element type by its spelling, or null. */
+function scalarSize(t: TypeNode): number | null {
+  const name = emit(t as unknown as AnyNode).replace(/\s+/g, ' ').trim();
+  if (/^(char|byte|uchar|uint8_t|int8_t|BYTE|CHAR|undefined1|undefined|bool)$/.test(name)) return 1;
+  if (/^(WCHAR|wchar_t|short|ushort|uint16_t|int16_t|wchar16|WORD)$/.test(name)) return 2;
+  if (/^(int|uint|uint32_t|int32_t|DWORD|undefined4)$/.test(name)) return 4;
+  return null;
 }
 
 /** For the plugin: the locals declared as arrays, with their element size. */

@@ -73,7 +73,7 @@ import { createExprShape, type ExprShapeTables } from './expr-shape.js';
 import { calleeName, unwrapParens, type TypeShape } from './call-arg-cast.js';
 import { lowerFlagConditions, lowerNegTestConditions } from './flag-conditions.js';
 import { lowerCarryChains, lowerWholeConcat, lowerWholeZeroTest } from './carry-chains.js';
-import { lowerStringIntrinsics, localArraysOf } from './string-intrinsics.js';
+import { lowerStringIntrinsics, localArraysOf, localArrayPointersOf } from './string-intrinsics.js';
 
 // ============================================
 // REPORTING
@@ -1458,7 +1458,7 @@ function createPseudoOpLowerTransformer(options: PseudoOpLowerOptions = {}): Tra
         const deps = { classify, isPure, locals: new Set(localTypes.keys()) };
         const stringDeps = {
           shape: (e: Expression) => shape(e), isPure, locals: deps.locals,
-          localArrays: localArraysOf(body),
+          localArrays: localArraysOf(body), localArrayPointers: localArrayPointersOf(body),
           stackSlots: options.stackSlots, fieldOffsets: options.structFieldOffsets,
           structFields: options.structFields, aggregateSizes: options.aggregateSizes,
         };

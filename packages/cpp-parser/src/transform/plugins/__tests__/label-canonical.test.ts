@@ -61,6 +61,20 @@ describe('label-canonical', () => {
     assert.deepEqual([...joinedLabelNames(flow)], [['joined_r0x006bdc2d', 'case_2']]);
   });
 
+  it('a manual switch override target takes the name Ghidra gives its address (PLRMODES_CanInterruptCurrentMode 0057edd0)', () => {
+    // The target addresses and the name are illustrative: no user label exists there at v1531.
+    const flow = {
+      override_jmp_0057ee01_case_1: { address: '0057ee10', symbol: 'check_anim_mode' },
+      override_jmp_0057ee01_case_0: { address: '0057ee08' },
+    };
+    assert.deepEqual([...joinedLabelNames(flow)], [['override_jmp_0057ee01_case_1', 'check_anim_mode']]);
+    const src = `int f(int a, int b) { if (a) { if (b > 0x11) goto override_jmp_0057ee01_case_1; } else if (b != 0x11) return 0; switch (t[b]) { case 0: return 1; } override_jmp_0057ee01_case_1: if (g(a)) return 0; return 1; }`;
+    const out = run(src, flow);
+    assert.match(out, /goto check_anim_mode;/);
+    assert.match(out, /check_anim_mode:/);
+    assert.doesNotMatch(out, /override_jmp_/);
+  });
+
   it('a joined block keeps its spelling when the name is already a label of the function', () => {
     assert.deepEqual([...joinedLabelNames({ case_TIME: { address: '00429e38' }, joined_r0x00429e3b: { address: '00429e3b', symbol: 'case_TIME' } })], []);
   });

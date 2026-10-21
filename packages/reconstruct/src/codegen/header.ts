@@ -37,6 +37,10 @@ import { requiresPacking, adoptGhidraLayout } from './struct-packing.js';
  *  `D2GFX_SetPaletteTable(LPPALETTEENTRY (*)[72])` is the case — flattened, its
  *  `nfpSetPaletteTable(*pPaletteTable)` handed the renderer the first palette
  *  pointer instead of the 72-entry table, which compiles and paints nothing. */
+/** The guard around what the SDK provides on Windows: definitions and forward declarations of SDK types. */
+const SDK_BLOCK_OPEN = '#ifndef _WIN32  // provided by the Win32 SDK / CRT on Windows';
+const SDK_BLOCK_CLOSE = '#endif // _WIN32';
+
 export function sigType(type: string): string {
   const row = arrayRowReturn(type);
   if (row) return `${row.typedefName} *`;
@@ -181,14 +185,31 @@ export function generateHeader(
   const alreadyDefined = new Set<string>([...(includedTypes ?? [])]);
   const funcDefReferencedTypes = new Set<string>();
   const funcDefTypedefDeps = new Map<string, Set<string>>();
+  // Types the platform header gets from the SDK (isLibraryType), by name.
+  const sdkTypeNames = new Set<string>(
+    (dataTypes ?? []).filter(t => isLibraryType(t.name, t.category ?? '')).map(t => t.name));
+  const sdkProvidedForward = (decl: string): boolean => {
+    const m = decl.match(/^(?:struct|union) (\w+);$/);
+    return !!m && sdkTypeNames.has(m[1]);
+  };
   const forwardDecls = collectForwardDeclarations(functions, classInfo, dataTypes, classNames, alreadyDefined, ownedTypes, allClasses, allFunctions, funcDefReferencedTypes, funcDefTypedefDeps);
   if (forwardDecls.length > 0) {
     lines.push('// Forward declarations');
     // A function-pointer typedef names struct types in its signature, so every
     // plain forward declaration has to precede the typedef block that uses one.
     const isTypedefBlock = (d: string) => d.startsWith('#ifndef RECON_FPTD_');
-    for (const decl of forwardDecls.filter(d => !isTypedefBlock(d))) {
+    // A type the SDK provides is the SDK's to declare: <mmsystem.h> spells WAVEFORMATEX as
+    // a typedef of `struct tWAVEFORMATEX`, and `struct WAVEFORMATEX;` is then "using
+    // typedef-name after struct". Its forward declaration serves the no-SDK build only,
+    // like its definition below.
+    const sdkForwards = forwardDecls.filter(d => !isTypedefBlock(d) && sdkProvidedForward(d));
+    for (const decl of forwardDecls.filter(d => !isTypedefBlock(d) && !sdkProvidedForward(d))) {
       lines.push(decl);
+    }
+    if (sdkForwards.length > 0) {
+      lines.push(SDK_BLOCK_OPEN);
+      for (const decl of sdkForwards) lines.push(decl);
+      lines.push(SDK_BLOCK_CLOSE);
     }
     // A struct this header DEFINES is defined BELOW the typedef block, so the
     // typedef still needs its own forward declaration of it.
@@ -200,7 +221,9 @@ export function generateHeader(
       if (dt.kind === 'STRUCTURE') ownedAhead.push(`struct ${name};`);
       else if (dt.kind === 'UNION') ownedAhead.push(`union ${name};`);
     }
-    for (const decl of ownedAhead.sort()) lines.push(decl);
+    for (const decl of ownedAhead.sort()) {
+      lines.push(sdkProvidedForward(decl) ? `${SDK_BLOCK_OPEN}\n${decl}\n${SDK_BLOCK_CLOSE}` : decl);
+    }
     for (const decl of orderTypedefBlocks(forwardDecls.filter(isTypedefBlock), funcDefTypedefDeps)) {
       lines.push(decl);
     }
@@ -241,8 +264,14 @@ export function generateHeader(
         }
       }
     }
+    const intraSdk = [...intraForwardDecls].filter(sdkProvidedForward);
     for (const decl of intraForwardDecls) {
-      lines.push(decl);
+      if (!sdkProvidedForward(decl)) lines.push(decl);
+    }
+    if (intraSdk.length > 0) {
+      lines.push(SDK_BLOCK_OPEN);
+      for (const decl of intraSdk) lines.push(decl);
+      lines.push(SDK_BLOCK_CLOSE);
     }
     if (intraForwardDecls.size > 0) lines.push('');
   }
@@ -326,12 +355,12 @@ export function generateHeader(
     }
 
     if (libraryTypes.length > 0) {
-      lines.push('#ifndef _WIN32  // provided by the Win32 SDK / CRT on Windows');
+      lines.push(SDK_BLOCK_OPEN);
       lines.push('');
       for (const type of libraryTypes) {
         if (emitTypeDefinition(type, lines)) classEmittedInTopoSort = true;
       }
-      lines.push('#endif // _WIN32');
+      lines.push(SDK_BLOCK_CLOSE);
       lines.push('');
     }
   }
@@ -546,15 +575,24 @@ export function generateHeader(
         if (dt.kind === 'STRUCTURE') forwardDeclaredStructs.add(dt.name);
       }
     }
+    // Never an SDK type: the SDK may declare the name as a typedef, which has no
+    // elaborated form (`void f(struct WAVEFORMATEX *)` is an error under <mmsystem.h>).
+    // Inside a `#ifndef _WIN32` block - the no-SDK build, where every type is ours -
+    // the SDK types keep the elaborated form too.
+    const elaborateOutsideSdkBlocks = new Set([...forwardDeclaredStructs].filter(n => !sdkTypeNames.has(n)));
+    const elaborateInSdkBlocks = forwardDeclaredStructs;
+    let inSdkBlock = false;
     // Always qualify forward-declared structs with 'struct' keyword in function signatures.
     // This prevents shadowing from namespace names that match struct names.
     // Note: lines[] entries can be multi-line (comment block + signature), so we must
     // process individual lines within each entry.
     for (let i = 0; i < lines.length; i++) {
-      if (!lines[i].includes('*')) continue;
       const sublines = lines[i].split('\n');
       for (let j = 0; j < sublines.length; j++) {
         const sl = sublines[j];
+        if (sl === SDK_BLOCK_OPEN) { inSdkBlock = true; continue; }
+        if (sl === SDK_BLOCK_CLOSE) { inSdkBlock = false; continue; }
+        const forwardDeclaredStructs = inSdkBlock ? elaborateInSdkBlocks : elaborateOutsideSdkBlocks;
         if (!sl.includes('*')) continue;
         if (sl.startsWith('//')) continue;
         if (sl.startsWith('struct ') || sl.startsWith('class ') || sl.startsWith('union ')) continue;

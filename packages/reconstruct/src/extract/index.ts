@@ -32,6 +32,7 @@ export { extractStrings, extractAllStrings } from './strings.js';
 export { extractNamespaces, extractAllNamespaces } from './namespaces.js';
 export { extractIncremental, type IncrementalResult } from './incremental.js';
 
+import { attachShiftedPointers } from './shifted-pointers.js';
 import type {
   GhidraConnection,
   ExtractedFunction,
@@ -164,6 +165,17 @@ export async function extractAll(
     () => hydrateDataTypeDetails(connection, dataTypes),
     r => `${r.fetched} details${r.recovered > 0 ? `, ${r.recovered} recovered on retry` : ''}`
   );
+
+  // Pointer-typedefs with a component offset (shifted pointers): the container-of
+  // accesses the decompiler prints as ADJ(p)->field. Read-only; a failure leaves none.
+  {
+    let attached = 0;
+    await timePhase(
+      `${label}extract/shifted-pointers`,
+      async () => { attached = await attachShiftedPointers(connection, dataTypes); },
+      () => `${attached} shifted pointer typedef(s)`
+    );
+  }
 
   // Fetch initialized data values for non-trivial globals (arrays, structs, tables)
   let initializedDataCount = 0;

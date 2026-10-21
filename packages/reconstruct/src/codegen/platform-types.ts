@@ -234,8 +234,28 @@ const ROOT_CATEGORY_WINSOCK_TYPES = new Set<string>([
   'sockaddr_in',
 ]);
 
+/**
+ * SDK headers the platform header deliberately does NOT include, so a type Ghidra files
+ * under one of them is ours to define on every platform, not the SDK's.
+ *
+ * The DirectX headers: Ghidra models their COM interfaces in the C shape (`IDirectSound`
+ * as `{ IDirectSoundVtbl* lpVtbl; }`, called `p->lpVtbl->CreateSoundBuffer(p, ...)`), and
+ * those structs are emitted from the database. In C++ the SDK headers define the same
+ * names as interface classes, so including one is a redefinition of every interface the
+ * tree models (`IDirectSound3DBuffer`, `IKsPropertySet`, ... for <dsound.h>). The records
+ * are also the layouts the binary was built against, which the current SDK has outgrown:
+ * Ghidra's `DSBUFFERDESC` (/dsound.h, v1531) is the 20-byte DirectX 6 one the code fills
+ * with `dwSize = 0x14`; <dsound.h> at its default DIRECTSOUND_VERSION is 36 bytes.
+ *
+ * The test is per header, never per type name: every type filed under one of these is
+ * emitted as written, unguarded, and may be forward-declared and spelled `struct X`.
+ */
+const SDK_HEADERS_NOT_INCLUDED = new Set<string>([
+  'dsound.h', 'ddraw.h', 'd3d.h', 'd3dtypes.h', 'd3dcaps.h', 'dinput.h', 'dplay.h', 'dplobby.h',
+]);
+
 export function isLibraryType(name: string, category: string): boolean {
-  if (SYSTEM_HEADER_CATEGORY_RE.test(category)) return true;
+  if (SYSTEM_HEADER_CATEGORY_RE.test(category)) return !SDK_HEADERS_NOT_INCLUDED.has(category.slice(1).toLowerCase());
   if (EH_INTERNAL_TYPES.has(name)) return true;
   if (ROOT_CATEGORY_WINSOCK_TYPES.has(name)) return true;
   return false;
@@ -1658,7 +1678,13 @@ export function generatePlatformHeader(
   lines.push('static inline uintptr_t d2_bits_of(float fValue) { uintptr_t nBits = 0; memcpy(&nBits, &fValue, sizeof(float)); return nBits; }');
   lines.push('static inline uintptr_t d2_bits_of(double dValue) { return d2_bits_of((float)dValue); }');
   lines.push('static inline uintptr_t d2_bits_of(long double dValue) { return d2_bits_of((float)dValue); }');
-  lines.push('template <class T> static inline uintptr_t d2_bits_of(const T& tValue) { uintptr_t nBits = 0; memcpy(&nBits, &tValue, sizeof(T) < sizeof(uintptr_t) ? sizeof(T) : sizeof(uintptr_t)); return nBits; }');
+  // An aggregate's bits in an integer AS WIDE AS IT, up to 8 bytes: Ghidra's
+  // `(ulonglong)sSeed` reads both dwords of a D2SeedStrc, and the seed step takes the
+  // high one with `>> 0x20` (DRLG, UNIT_GetModuloFromSeed). A 4-byte word here
+  // zeroed it.
+  lines.push('template <bool bWide> struct d2_bits_word { typedef uintptr_t type; };');
+  lines.push('template <> struct d2_bits_word<true> { typedef uint64_t type; };');
+  lines.push('template <class T> static inline typename d2_bits_word<(sizeof(T) > sizeof(uintptr_t))>::type d2_bits_of(const T& tValue) { typename d2_bits_word<(sizeof(T) > sizeof(uintptr_t))>::type nBits = 0; memcpy(&nBits, &tValue, sizeof(T) < sizeof(nBits) ? sizeof(T) : sizeof(nBits)); return nBits; }');
   lines.push('template <class T> static inline float d2_bits_to_float(const T& tValue) { float fValue = 0.0f; memcpy(&fValue, &tValue, sizeof(T) < sizeof(float) ? sizeof(T) : sizeof(float)); return fValue; }');
   // The same move in the other direction: a machine word read back AS an
   // aggregate. `(uD2UnitMode)pUnit` and `(FILETIME)0x0` are stores into a slot

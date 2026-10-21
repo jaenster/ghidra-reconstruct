@@ -91,6 +91,12 @@ export interface ExtractedFunction {
    */
   sehFrame?: import('./extract/seh-frames.js').SehFrameFacts;
   /**
+   * The stack slots the prologue reserves with `PUSH reg` (MSVC's `PUSH ECX` for
+   * `SUB ESP,4`), in Ghidra's stack offsets, with the register pushed
+   * (extract/prologue-slots.ts). Absent when there are none or the snapshot predates it.
+   */
+  pushSlots?: Array<{ offset: number; reg: string }>;
+  /**
    * Data references from instruction operands, and the addresses the code derives from
    * them by ADD/SUB/LEA (extract/operand-refs.ts). Absent when the function has none or
    * the snapshot predates the field.
@@ -215,6 +221,11 @@ export interface EnumValue {
 export interface ExtractedTypedef extends ExtractedDataType {
   kind: 'TYPEDEF';
   underlyingType: string;
+  /**
+   * A shifted pointer (a pointer-typedef with a component offset): the pointer holds
+   * `base`'s address plus `offset` (extract/shifted-pointers.ts).
+   */
+  shifted?: { base: string; baseCategory?: string; offset: number };
 }
 
 export interface ExtractedUnion extends ExtractedDataType {

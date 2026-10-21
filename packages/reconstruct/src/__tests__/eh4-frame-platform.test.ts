@@ -68,3 +68,16 @@ describe('EH4 frames', () => {
     assert.deepStrictEqual(d, { lower: false, reason: 'eh4 frames are not lowered' });
   });
 });
+
+describe('d2_bits_of: an aggregate read as an integer keeps all of its bytes (round 13)', () => {
+  it('an 8-byte D2SeedStrc yields both dwords; a 4-byte one a word', { skip: !hasNativeGppForBits() }, () => {
+    const h = generatePlatformHeader({} as never);
+    const lines = h.split('\n').filter(l => /d2_bits_word|d2_bits_of\(const T&/.test(l));
+    assert.equal(lines.length, 3, lines.join('\n'));
+    const out = compileAndRunBits(`#include <cstdint>\n#include <cstring>\n#include <cstdio>\n${lines.join('\n')}`,
+      'struct Seed { uint32_t lo, hi; } s = { 0x11111111u, 0x22222222u }; struct W { uint16_t a, b; } w = { 1, 2 };\n' +
+      'printf("%llx %llx %x\\n", (unsigned long long)((uint64_t)d2_bits_of(s) >> 0x20), (unsigned long long)((uint64_t)d2_bits_of(s) & 0xffffffff), (unsigned)d2_bits_of(w));');
+    assert.equal(out.trim(), '22222222 11111111 20001');
+  });
+});
+import { compileAndRun as compileAndRunBits, hasNativeGpp as hasNativeGppForBits } from '@ghidra-mcp/cpp-parser/testing/native-cpp';

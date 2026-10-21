@@ -19,11 +19,26 @@
  *
  * `C` must be a comparison (< > <= >= == !=) or `!expr` so we never rewrite a
  * genuine bitmask on a non-boolean value.
+ *
+ * Where the arithmetic runs in an enum's type Ghidra spells the 1 with the enum's name
+ * (`((int)eSkill < 1) - SKILL_Kick`, SKILL_Kick = 1): the constant is read by its value.
+ * A non-constant mask is selected the same way when it is pure - `E & ((C) - 1)` is
+ * `C ? 0 : E`, and `X &= (C) - 1` is `X = C ? 0 : X` (MISSILE_ClampSkillLevel's
+ * `eSkill & ((int)eSkill < 1) - SKILL_Kick`, a clamp to 0) - since E is then read once
+ * either way.
+ *
+ * SETcc + ADD over an enum: `(C) + K` and `K - (C)`, K an enum constant, is the select
+ * `C ? K+1 : K` / `C ? K-1 : K` between two members of that enum (GAMBLE's
+ * `(set + unique <= roll) + QUALITY_SET` is QUALITY_RARE or QUALITY_SET; zlib's
+ * `(avail_out != 0) + finish_started` is finish_done or finish_started). Rewritten only
+ * where exactly one member of K's enum has the neighbouring value, and spelled with it.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode,
+  AssignExpr,
+  Identifier,
   Expression,
   BinaryExpr,
   UnaryExpr,
@@ -33,6 +48,7 @@ import type {
 } from '../../../ast/nodes.js';
 import { createTransformer, type Transformer } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
+import { isPure } from './pseudo-op-lower.js';
 
 const CMP_OPS = new Set(['<', '>', '<=', '>=', '==', '!=']);
 
@@ -42,6 +58,9 @@ function unwrapParens(expr: Expression): Expression {
   }
   return expr;
 }
+
+/** Unambiguous enum constant name -> value (the select reads a named 1 as a 1). */
+let enumValueOf: ReadonlyMap<string, bigint> = new Map();
 
 /** Integer value of a literal or +/- unary-wrapped literal, else null. */
 function intVal(expr: Expression): bigint | null {
@@ -58,6 +77,17 @@ function intVal(expr: Expression): bigint | null {
   return null;
 }
 
+/** A comparison, `!x`, or a `&&`/`||` of them: a 0/1 value. */
+function isBoolean(expr: Expression): boolean {
+  const e = unwrapParens(expr);
+  if (isComparison(e)) return true;
+  if (e.kind === NodeKind.BinaryExpr) {
+    const b = e as BinaryExpr;
+    return (b.operator === '&&' || b.operator === '||') && isBoolean(b.left) && isBoolean(b.right);
+  }
+  return false;
+}
+
 /** True if `expr` is a boolean-valued comparison (so the idiom is a select). */
 function isComparison(expr: Expression): boolean {
   const e = unwrapParens(expr);
@@ -66,13 +96,21 @@ function isComparison(expr: Expression): boolean {
   return false;
 }
 
+/** A literal's value, or an enum constant's. */
+function constVal(expr: Expression): bigint | null {
+  const v = intVal(expr);
+  if (v !== null) return v;
+  const e = unwrapParens(expr);
+  return e.kind === NodeKind.Identifier ? enumValueOf.get((e as Identifier).name) ?? null : null;
+}
+
 /** Match `(C) - 1` where C is a comparison; return C. */
 function matchCondMinusOne(expr: Expression): Expression | null {
   const e = unwrapParens(expr);
   if (e.kind !== NodeKind.BinaryExpr) return null;
   const sub = e as BinaryExpr;
   if (sub.operator !== '-') return null;
-  if (intVal(sub.right) !== 1n) return null;
+  if (constVal(sub.right) !== 1n) return null;
   const cond = unwrapParens(sub.left);
   return isComparison(cond) ? cond : null;
 }
@@ -125,9 +163,51 @@ function makeConditional(
   };
 }
 
-function createBranchlessSelectTransformer(): Transformer {
+interface EnumTables {
+  /** Enum -> member -> value. */
+  members: ReadonlyMap<string, ReadonlyMap<string, bigint>>;
+  /** Member -> the enums declaring it. */
+  owners: ReadonlyMap<string, readonly string[]>;
+  /** Names several enums give different values: no unqualified spelling exists. */
+  ambiguous: ReadonlySet<string>;
+}
+
+/**
+ * The member of K's enum one step from K (`delta` = +1 / -1): the one name every enum
+ * declaring K agrees on, or null.
+ */
+function neighbourMember(k: string, delta: bigint, t: EnumTables): string | null {
+  if (t.ambiguous.has(k)) return null;
+  const owners = t.owners.get(k);
+  if (!owners?.length) return null;
+  let found: string | null = null;
+  for (const e of owners) {
+    const m = t.members.get(e);
+    const v = m?.get(k);
+    if (!m || v === undefined) return null;
+    const hits = [...m].filter(([, x]) => x === v + delta).map(([n]) => n);
+    if (hits.length !== 1) return null;
+    if (found !== null && found !== hits[0]) return null;
+    found = hits[0];
+  }
+  return found && !t.ambiguous.has(found) ? found : null;
+}
+
+function makeIdent(src: ASTNode, name: string): Identifier {
+  return { kind: NodeKind.Identifier, name, location: src.location, leadingTrivia: [], trailingTrivia: [] } as Identifier;
+}
+
+function createBranchlessSelectTransformer(enumTables: EnumTables | null): Transformer {
   return createTransformer({
     visitNode(node: ASTNode): ASTNode | undefined {
+      // X &= (C) - 1  →  X = C ? 0 : X, for a pure X.
+      if (node.kind === NodeKind.AssignExpr) {
+        const a = node as AssignExpr;
+        if (a.operator !== '&=' || !isPure(a.left)) return undefined;
+        const cond = matchCondMinusOne(a.right);
+        if (!cond) return undefined;
+        return { ...a, operator: '=', right: makeConditional(a.right, cond, makeLit(node, 0n), a.left) } as AssignExpr;
+      }
       if (node.kind !== NodeKind.BinaryExpr) return undefined;
       const bin = node as BinaryExpr;
 
@@ -137,7 +217,29 @@ function createBranchlessSelectTransformer(): Transformer {
         if (m) {
           return makeConditional(node, m.cond, makeLit(node, 0n), makeLit(node, m.mask));
         }
+        // A pure, non-constant M: read once on either path.
+        for (const [sel, val] of [[bin.left, bin.right], [bin.right, bin.left]] as const) {
+          const cond = matchCondMinusOne(sel);
+          if (cond && constVal(val) === null && isPure(val)) {
+            return makeConditional(node, cond, makeLit(node, 0n), val);
+          }
+        }
         return undefined;
+      }
+
+      // SETcc + ADD over an enum: (C) + K → C ? K+1 : K; K - (C) → C ? K-1 : K.
+      if (enumTables && (bin.operator === '+' || bin.operator === '-')) {
+        const tries: Array<[Expression, Expression, bigint]> = bin.operator === '+'
+          ? [[bin.left, bin.right, 1n], [bin.right, bin.left, 1n]]
+          : [[bin.right, bin.left, -1n]];
+        for (const [c, k, delta] of tries) {
+          const cond = unwrapParens(c);
+          const kk = unwrapParens(k);
+          if (!isBoolean(cond) || kk.kind !== NodeKind.Identifier) continue;
+          const other = neighbourMember((kk as Identifier).name, delta, enumTables);
+          if (!other) continue;
+          return makeConditional(node, cond, makeIdent(node, other), kk);
+        }
       }
 
       // Offset fold (bottom-up: the & was already rewritten to `C ? 0 : M`):
@@ -162,7 +264,30 @@ function createBranchlessSelectTransformer(): Transformer {
 }
 
 export interface BranchlessSelectOptions extends PluginOptions {
-  // Reserved for future options
+  /** Unambiguous enum constant name -> value. */
+  enumValues?: Record<string, number>;
+  /** Enum -> member -> value, every emitted enum. */
+  enumMemberValues?: Record<string, Record<string, number>>;
+  /** Names enums give different values (exported by none). */
+  ambiguousConstants?: string[];
+}
+
+function enumTablesOf(o: BranchlessSelectOptions | undefined): EnumTables | null {
+  if (!o?.enumMemberValues) return null;
+  const members = new Map<string, Map<string, bigint>>();
+  const owners = new Map<string, string[]>();
+  for (const [e, vals] of Object.entries(o.enumMemberValues)) {
+    const m = new Map<string, bigint>();
+    for (const [n, v] of Object.entries(vals)) {
+      if (!Number.isFinite(v)) continue;
+      m.set(n, BigInt(v));
+      const list = owners.get(n) ?? [];
+      if (!list.length) owners.set(n, list);
+      list.push(e);
+    }
+    members.set(e, m);
+  }
+  return { members, owners, ambiguous: new Set(o.ambiguousConstants ?? []) };
 }
 
 /**
@@ -181,7 +306,14 @@ export const branchlessSelectPlugin: TransformPlugin = {
   priority: 43, // after sbb-branchless (42), before ternary-simplify (55)
   tags: ['core', 'cleanup', 'x86', 'branchless'],
 
-  createTransformer(_options?: BranchlessSelectOptions) {
-    return createBranchlessSelectTransformer();
+  createTransformer(options?: BranchlessSelectOptions) {
+    const values = new Map<string, bigint>();
+    for (const [n, v] of Object.entries(options?.enumValues ?? {})) if (Number.isFinite(v)) values.set(n, BigInt(v));
+    const inner = createBranchlessSelectTransformer(enumTablesOf(options));
+    return (node: ASTNode) => {
+      const saved = enumValueOf;
+      enumValueOf = values;
+      try { return inner(node); } finally { enumValueOf = saved; }
+    };
   },
 };

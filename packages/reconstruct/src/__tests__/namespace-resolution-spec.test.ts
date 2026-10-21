@@ -252,3 +252,33 @@ describe('namespace rendering: segments become text exactly once', () => {
     );
   });
 });
+
+describe('namespace resolution: a dropped leaf never merges two functions of one signature (round 13)', () => {
+  const types = new Set(['D2WinButton', 'D2WinList', 'D2WinTimer']);
+  const fns = [
+    { address: '00501090', namespace: 'D2Win::Src::D2WinButton', name: 'Push', sig: 'D2ControlMsg*' },
+    { address: '00501290', namespace: 'D2Win::Src::D2WinButton', name: 'D2WinButton', sig: 'int' },
+    { address: '005072f0', namespace: 'D2Win::Src::D2WinList', name: 'Push', sig: 'D2ControlMsg*' },
+    { address: '00507420', namespace: 'D2Win::Src::D2WinList', name: 'Key', sig: 'D2ControlMsg*' },
+    { address: '004fd970', namespace: 'D2Win::Src::D2WinTimer', name: 'Key', sig: 'D2ControlMsg*' },
+    { address: '00500000', namespace: 'D2Win::Src::D2WinTimer', name: 'Draw', sig: 'int' },
+    { address: '00600000', namespace: 'D2Win::Src::D2WinTimer', name: 'Draw2', sig: 'int' },
+  ];
+  it('the colliding D2Win control callbacks keep their control namespace, with every sibling in their file', () => {
+    const r = buildNamespaceResolution(types, fns, undefined, { symbols: fns, signatureOf: f => (f as { sig: string }).sig });
+    assert.equal(r.render({ address: '00501090' }), 'D2Win::Src::D2WinButton');
+    assert.equal(r.render({ address: '005072f0' }), 'D2Win::Src::D2WinList');
+    assert.equal(r.render({ address: '00501290' }), 'D2Win::Src::D2WinButton', 'the file stays one namespace');
+    assert.equal(r.render({ address: '004fd970' }), 'D2Win::Src::D2WinTimer');
+    assert.equal(renderNamespace(r.resolveReference('D2Win::Src::D2WinButton', 'Push')), 'D2Win::Src::D2WinButton');
+  });
+  it('functions that differ in signature still drop the leaf: they overload apart', () => {
+    const distinct = [
+      { address: '1', namespace: 'D2Win::Src::D2WinButton', name: 'Push', sig: 'D2WinButton*' },
+      { address: '2', namespace: 'D2Win::Src::D2WinList', name: 'Push', sig: 'D2WinList*' },
+    ];
+    const r = buildNamespaceResolution(types, distinct, undefined, { symbols: distinct, signatureOf: f => (f as { sig: string }).sig });
+    assert.equal(r.render({ address: '1' }), 'D2Win::Src');
+    assert.equal(r.render({ address: '2' }), 'D2Win::Src');
+  });
+});

@@ -11,7 +11,7 @@
  *   D2_SEED_NEXT(obj->sSeed)     — when nSeedLow/nSeedHigh member accesses found
  *   D2_SEED_NEXT(*this)          — when this->nSeedLow accessed
  *   D2_SEED_NEXT(*pSeed)         — when pSeed->nSeedLow (direct pointer to seed)
- *   D2_SEED_NEXT_VAL(DVar1)      — when operand is (val & -1) * mult + (val >> 32)
+ *   D2_SEED_NEXT_VAL(DVar1)      — when operand is (val & 0xffffffff) * mult + (val >> 32)
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -137,13 +137,13 @@ function matchValueForm(addition: BinaryExpr): Identifier | null {
     const band = otherSide as BinaryExpr;
     if (band.operator === '&') {
       const rhs = unwrapCasts(band.right);
-      // -1 appears as UnaryExpr('-', 1)
-      if (rhs.kind === NodeKind.UnaryExpr) {
-        const unary = rhs as UnaryExpr;
-        if (unary.operator === '-' && isLiteral(unary.operand, 1n)) {
-          const ident = unwrapCasts(band.left);
-          if (ident.kind === NodeKind.Identifier) return ident as Identifier;
-        }
+      // The low-dword mask: Ghidra's `0xffffffff`, which signed-literal keeps in a
+      // 64-bit context; `-1` (UnaryExpr('-', 1)) where an older pass re-signed it.
+      const lowMask = isLiteral(rhs, 0xffffffffn)
+        || (rhs.kind === NodeKind.UnaryExpr && (rhs as UnaryExpr).operator === '-' && isLiteral((rhs as UnaryExpr).operand, 1n));
+      if (lowMask) {
+        const ident = unwrapCasts(band.left);
+        if (ident.kind === NodeKind.Identifier) return ident as Identifier;
       }
     }
   }

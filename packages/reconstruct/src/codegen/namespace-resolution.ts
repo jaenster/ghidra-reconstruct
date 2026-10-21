@@ -184,6 +184,55 @@ export class NamespaceResolution {
     return this.keptByReference.get(`${full.join('::')}::${name}`) ?? resolved;
   }
 
+  /**
+   * Keep the type-named leaf of every Ghidra path whose drop would give two FUNCTIONS one
+   * emitted qualified name and one signature.
+   *
+   * Rule 2 trusted that a function moved beside a same-named sibling stays apart as an
+   * overload. Ghidra's D2Win control callbacks disproved it: v1531 types all of them
+   * `BOOL Push(D2ControlMsg *)`, and `D2Win::Src::D2WinButton::Push`,
+   * `D2Win::Src::D2WinList::Push`, ... (eleven Push/Key) all landed in `D2Win::Src` as one
+   * function defined nine times - no TU sees it, the link does. The whole PATH keeps its
+   * segment (every symbol homed there moves with it, so a file's functions stay in one
+   * namespace), and the reference side keeps the qualifier for each of them. Returns the
+   * Ghidra paths kept.
+   */
+  keepLeafOfCollidingFunctions(
+    functions: Iterable<{ address?: string; namespace?: string | null; name?: string }>,
+    signatureOf: (fn: { address?: string; namespace?: string | null; name?: string }) => string,
+  ): string[] {
+    const groups = new Map<string, { raw: string; dropped: boolean }[]>();
+    const all: { address?: string; namespace?: string | null; name?: string }[] = [];
+    for (const fn of functions) {
+      if (!fn.name || !fn.namespace) continue;
+      all.push(fn);
+      const resolved = this.resolvePath(fn.namespace);
+      const full = collapseSegments(resolved.ghidraSegments);
+      const key = `${resolved.segments.join('::')}::${fn.name}(${signatureOf(fn)})`;
+      let group = groups.get(key);
+      if (!group) groups.set(key, (group = []));
+      group.push({ raw: fn.namespace, dropped: full.length > resolved.segments.length });
+    }
+    const keep = new Set<string>();
+    for (const group of groups.values()) {
+      if (group.length < 2) continue;
+      if (new Set(group.map(m => m.raw)).size < 2) continue;
+      for (const m of group) if (m.dropped) keep.add(m.raw);
+    }
+    if (keep.size === 0) return [];
+    for (const raw of keep) {
+      const resolved = this.resolvePath(raw);
+      this.byPath.set(raw, { ghidraSegments: resolved.ghidraSegments, segments: collapseSegments(resolved.ghidraSegments) });
+    }
+    for (const fn of all) {
+      if (!keep.has(fn.namespace!)) continue;
+      const own = this.byPath.get(fn.namespace!)!;
+      if (fn.address) this.byAddr.set(fn.address, own);
+      this.keptByReference.set(`${own.segments.join('::')}::${fn.name}`, own);
+    }
+    return [...keep];
+  }
+
   /** Root-scope classes the resolution homed under ROOT_CLASS_SCOPE (Ghidra spellings). */
   rootClassNames(): string[] {
     return [...this.rootClasses];
@@ -244,9 +293,15 @@ export function namespaceResolution(): NamespaceResolution {
 export function buildNamespaceResolution<T extends DataSymbol>(
   typeNames: ReadonlySet<string>,
   symbols: Iterable<{ address?: string; namespace?: string | null }>,
-  data?: { symbols: Iterable<T>; nameOf: (symbol: T) => string }
+  data?: { symbols: Iterable<T>; nameOf: (symbol: T) => string },
+  functions?: {
+    symbols: Iterable<{ address?: string; namespace?: string | null; name?: string }>;
+    signatureOf: (fn: { address?: string; namespace?: string | null; name?: string }) => string;
+  },
 ): NamespaceResolution {
   const resolution = new NamespaceResolution(typeNames);
+  // Paths first: a kept leaf has to be in place before any symbol is bound to its path.
+  if (functions) resolution.keepLeafOfCollidingFunctions(functions.symbols, functions.signatureOf);
   for (const s of symbols) resolution.claim(s.address, s.namespace);
   if (data) resolution.keepClassSegmentsOfMergedData(data.symbols, data.nameOf);
   setNamespaceResolution(resolution);

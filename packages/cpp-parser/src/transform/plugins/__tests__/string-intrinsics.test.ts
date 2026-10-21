@@ -241,6 +241,36 @@ LAB_004055a5:
 /** SOUND_PlaySoundEffect 00514ec0: the head label on the region's first statement. */
 const F2_HEAD = F2.replace('LAB_00405585:\n  do {\n    byEntryChar = *pbEntry;', '  do {\nLAB_00405585:\n    byEntryChar = *pbEntry;');
 
+/** LVLTBLS_GetAutomapLevelId 0061fc10, as Ghidra prints it: Q is the row `*pTableEntry`. */
+const F2_ROW = `int f(byte *pA, byte *pB) {
+  byte *pbScan; int nCmp; uint8_t (*pTableEntry) [16]; bool bIsLess; byte byCharA;
+  pTableEntry = (uint8_t (*) [16])pB;
+  pbScan = pA;
+LAB_0061fc24:
+  do {
+    byCharA = *pbScan;
+    bIsLess = byCharA < (*pTableEntry)[0];
+    if (byCharA == (*pTableEntry)[0]) {
+      if (byCharA != 0) {
+        byCharA = pbScan[1];
+        bIsLess = byCharA < *(uint8_t *)((int)pTableEntry + 1);
+        if (byCharA != *(uint8_t *)((int)pTableEntry + 1)) goto LAB_0061fc44;
+        pTableEntry = (uint8_t (*) [16])((int)pTableEntry + 2);
+        pbScan = pbScan + 2;
+        if (byCharA != 0) goto LAB_0061fc24;
+      }
+      nCmp = 0;
+    }
+    else {
+LAB_0061fc44:
+      nCmp = (1 - (uint)bIsLess) - (uint)(bIsLess != 0);
+    }
+    if (nCmp < 0) return 1;
+    if (nCmp == 0) return 2;
+    return 3;
+  } while (true);
+}`;
+
 /** Every pair of strings up to length 4 over {1, 2, 0x80, 0xff}: ref::f and low::f agree. */
 function strcmpAgrees(ref: string, low: string): string {
   const prelude = `typedef unsigned char byte; typedef unsigned int uint;\nnamespace ref {\n${ref}\n}\nnamespace low {\n${low}\n}`;
@@ -262,6 +292,23 @@ function strcmpAgrees(ref: string, low: string): string {
 }
 
 describe('string-intrinsics: the inline strcmp loop is strcmp', () => {
+  it('LVLTBLS_GetAutomapLevelId 0061fc10: one side is the row of a `uint8_t (*)[16]` table cursor', () => {
+    const out = lower(F2_ROW, {});
+    assert.match(out, /nCmp = strcmp\(\(char\*\)pbScan, \(char\*\)pTableEntry\);/, out);
+    assert.doesNotMatch(out, /goto|LAB_|bIsLess|byCharA/, out);
+  });
+  it('the row cursor: compiled, agrees with the loop on every pair of strings', native, () => {
+    // The native check runs on the host, where a pointer does not fit an `int`.
+    const src = F2_ROW.split('(int)').join('(intptr_t)');
+    const out = lower(src, {});
+    assert.match(out, /strcmp/, out);
+    assert.strictEqual(strcmpAgrees(src, out), '0');
+  });
+  it('a row cursor advanced by rows (p + 1) is not a two-byte step', () => {
+    const src = F2_ROW.replace('pTableEntry = (uint8_t (*) [16])((int)pTableEntry + 2);', 'pTableEntry = pTableEntry + 2;');
+    assert.notStrictEqual(src, F2_ROW);
+    assert.doesNotMatch(lower(src, {}), /strcmp/);
+  });
   it('F1 (do-while, break, exit label): R = strcmp(A, B), the cursors and the labels gone', () => {
     const out = lower(F1(SIGN_USE), {});
     assert.match(out, /nCmp = strcmp\(\(char\*\)pA, \(char\*\)pB\);/, out);
