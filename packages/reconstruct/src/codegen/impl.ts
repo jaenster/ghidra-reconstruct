@@ -2423,6 +2423,8 @@ function transformDecompiledCode(
       perPluginOptions['address-run-bound'] = {
         globalAddresses: context.funcPtrArgCasts.globalAddresses,
         globalNamespaces: context.funcPtrArgCasts.globalNamespaces,
+        globalSizes: context.funcPtrArgCasts.globalSizes,
+        globalElementSizes: context.funcPtrArgCasts.globalElementSizes,
       };
       perPluginOptions['assign-cast'] = {
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
@@ -2450,6 +2452,10 @@ function transformDecompiledCode(
         funcdefSignatures: context.funcPtrArgCasts.funcdefSignatures,
         funcdefConventions: context.funcPtrArgCasts.funcdefConventions,
         functionStoredAs: context.funcPtrArgCasts.functionStoredAs,
+        // The value split (a reused stack-argument slot): which parameters have a
+        // 4-byte stack slot, and the return types that say what a store holds.
+        stackParameters: (enclosing?.stackSlots ?? []).filter(s => s.isParameter && s.size === 4).map(s => s.name),
+        functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
       };
       perPluginOptions['strided-access'] = {
         structLayouts: context.funcPtrArgCasts.structLayouts,

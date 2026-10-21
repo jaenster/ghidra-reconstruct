@@ -479,9 +479,14 @@ const MSVC_RUNTIME_DECLS: ExcludedSymbolDecl[] = [
   // handler body passes it.
   { emitted: 'FID_conflict____CxxFrameHandler3', real: '__CxxFrameHandler3', source: 'ghidra',
     decl: 'extern "C" uint32_t FID_conflict____CxxFrameHandler3(EHExceptionRecord* pExceptionRecord, EHRegistrationNode* pRegistrationNode, CONTEXT* pContext, void* pDispatcherContext, struct _s_FuncInfo* pFuncInfo);' },
-  // __except_handler4 @ 00684f50 — Ghidra: undefined4 (int*, PVOID, undefined4)
+  // __except_handler4 @ 00684f50 - MSVC's EH4 frame handler, the one the EH4 frames
+  // install (`tSehFrame.ExceptionHandler = __except_handler4`). Declared with the
+  // signature of the field it is stored in, Ghidra's /CRT/SEH funcdef EH4_EXCEPT_HANDLER
+  // (_EXCEPTION_DISPOSITION (_EXCEPTION_RECORD*, EH4_EXCEPTION_REGISTRATION*, _CONTEXT*,
+  // void*)) - the MSVC prototype. The function record itself still reads
+  // `(int*, PVOID, undefined4)`, one argument short (a Ghidra-side defect, row r12).
   { emitted: '__except_handler4', real: '_except_handler4', source: 'ghidra',
-    decl: 'extern "C" uint32_t __except_handler4(int* pRecord, void* pRegistration, uint32_t dwContext);' },
+    decl: 'extern "C" int __except_handler4(struct _EXCEPTION_RECORD* pExceptionRecord, EH4_EXCEPTION_REGISTRATION* pRegistration, CONTEXT* pContext, void* pDispatcherContext);' },
   // _except_handler3 @ 006878a0 (compiler::, v1268) - MSVC's SEH3 frame handler
   // (exsup3.obj), the personality the inline `push -1; push scopetable; push handler;
   // push fs:[0]` prologs install (SOUNDUTIL_ReadVersionResource, WARDEN_DecryptModule).

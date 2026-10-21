@@ -30,6 +30,8 @@ export {
 } from './globals-header.js';
 
 import { respellPlaceholderTypes, respellPlaceholderType } from './placeholder-types.js';
+import { sehSubsumedSymbols, normaliseAddress } from './seh-subsumed.js';
+import { selectDataExclusions, type DataClosureCandidate } from './data-exclusion-closure.js';
 import { isMainThread } from 'worker_threads';
 import * as fs from 'node:fs/promises';
 import * as nodeFs from 'node:fs';
@@ -76,7 +78,7 @@ import { buildNamespaceResolution, namespaceResolution, renderNamespace } from '
 import { setInteriorLabelSymbols, resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, setDeclarationClosureDataContent, getDeclarationClosureReport, isUnreferenceableArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, wasGlobalClaimed, findDuplicateLinkageNames, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, setInitializerAddressTable, setInitializerFunctionAddresses, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType, emittedNamespaceOf, getDeclaredNames, initializerAddressReferences, addInitializerAddressReferences, markUnnamedImportSlots } from './globals-header.js';
 import { normalizeDataAddress, stringDefinition } from './declaration-closure.js';
 import { harvestAnnotatedParameterTypes } from './win32-signatures.js';
-import { PLATFORM_FUNCDEF_NAMES, isPlatformOrBuiltinType, isLibraryType, generatePlatformHeader, oddWidthTypesSpelled, placeholderTypesUsedIn, normalizeDataValue, arrayRowTypedefLines, arrayRowReturn, arrayRowSpelling, GHIDRA_PSEUDO_OP_RESULT_TYPES, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, platformDefinedFunctionNames, platformVoidPointerFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
+import { PLATFORM_FUNCDEF_NAMES, PLATFORM_STRUCT_FIELD_TYPES, isPlatformOrBuiltinType, isLibraryType, generatePlatformHeader, oddWidthTypesSpelled, placeholderTypesUsedIn, normalizeDataValue, arrayRowTypedefLines, arrayRowReturn, arrayRowSpelling, GHIDRA_PSEUDO_OP_RESULT_TYPES, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, platformDefinedFunctionNames, platformVoidPointerFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
 import { createOverrideRegistry } from '../overrides/index.js';
 import { alignPathCase, assertNoCaseCollidingFiles } from './path-case.js';
 import { createLibraryRegistry } from '../library/index.js';
@@ -708,6 +710,9 @@ export function generateProjectStage1(
   // always wins: `undefined` is the only case where there is nothing to override.
   reconcileUncuratedParameters(functions);
   reconcileUndefinedReturnTypes(functions);
+  reconcileUndefinedParameterTypes(functions, new Set(
+    dataTypes.filter(dt => dt.kind === 'STRUCTURE' || dt.kind === 'UNION').map(dt => dt.name),
+  ));
 
   // Register every function-pointer typedef name (FUNCTION_DEFINITION datatypes)
   // so stripFuncDefIndirection / struct-field stripping recognise all-caps and
@@ -871,6 +876,20 @@ export function generateProjectStage1(
     globals = (globals as Array<{ namespace?: string }>).filter(
       g => !nsMatches(g.namespace)
     ) as typeof globals;
+    // The runtime's data follows its code (data-exclusion-closure.ts): a datum only
+    // excluded code uses is excluded with it, and revived the moment kept code or
+    // kept data reaches it.
+    {
+      const data = selectDataExclusions({
+        globals: globals as unknown as DataClosureCandidate[],
+        keptFunctions: functions,
+        isExcludedNamespace: (ns: string) => nsMatches(ns),
+      });
+      if (data.excluded.length > 0) {
+        globals = data.kept as unknown as typeof globals;
+        console.log(`Data exclusion closure: ${data.excluded.length} runtime datum/data excluded with the code that alone uses it`);
+      }
+    }
     // A namespace that still owns a body has to keep its record, or the file
     // generator has nowhere to put the function it just kept.
     namespaces = namespaces.filter(
@@ -897,6 +916,22 @@ export function generateProjectStage1(
       for (const f of selection.duplicates) {
         console.log(`  dupe  ${f.namespace}::${f.name} @${f.address} — same emitted name as an earlier body`);
       }
+    }
+  }
+
+  // A lowered SEH frame replaces its `__finally` block's function and its scope
+  // table (see seh-subsumed.ts): neither is emitted beside the D2SehScope.
+  {
+    const subsumed = sehSubsumedSymbols(functions);
+    if (subsumed.finallyBodies.size > 0 || subsumed.scopeTables.size > 0) {
+      const fnBefore = functions.length;
+      functions = functions.filter(f => !subsumed.finallyBodies.has(normaliseAddress(f.address)));
+      const gBefore = globals.length;
+      globals = (globals as Array<{ address?: string }>).filter(
+        g => !g.address || !subsumed.scopeTables.has(normaliseAddress(g.address))
+      ) as typeof globals;
+      console.log(`SEH lowering subsumes ${fnBefore - functions.length} __finally function(s)`
+        + ` and ${gBefore - globals.length} scope-table symbol(s)`);
     }
   }
 
@@ -4981,6 +5016,19 @@ export function buildFuncPtrArgCastTables(
       if (spelled) into[f.name] = spelled;
     }
   }
+  // The aggregates d2_platform.h defines itself have no record in the model (their
+  // category is excluded) but bodies still assign into them - `tSehFrame.Next =
+  // ExceptionList` stores the TEB's `void*` into an EH4_EXCEPTION_REGISTRATION*, which
+  // C converts implicitly and C++ only with the cast. Their declared fields are the
+  // contract the header writes (PLATFORM_STRUCT_FIELD_TYPES).
+  for (const [name, fields] of PLATFORM_STRUCT_FIELD_TYPES) {
+    if (structFields[name]) continue;
+    const into: Record<string, string> = structFields[name] = {};
+    for (const [field, type] of fields) {
+      const spelled = fieldDeclSpelling(type, 4);
+      if (spelled) into[field] = spelled;
+    }
+  }
 
   // The aggregates whose EMITTED declaration carries a converting constructor -
   // the small integer-only structs the header gives `T(uint32_t)` to, plus the
@@ -5545,6 +5593,56 @@ function parameterSize(dataType: string): number {
   if (/^(longlong|ulonglong|double|undefined8|u?int64_t|qword)$/.test(t)) return 8;
   return 4;
 }
+
+/**
+ * Give an uncurated (`undefinedN`) parameter the type the decompiler resolved for it.
+ *
+ * The emitter declares a parameter from the database field and writes the body the
+ * decompiler produced - and the decompiler TYPES an `undefined4` slot from its uses
+ * (`get_function_info` reports it as `resolvedType`). The body is written against
+ * that type, so declaring the raw field changes what the body means:
+ * `SOUNDSMP_LogVolumeToLinear(undefined4 dwVolume)` @00516570 decompiles as `float dwVolume`
+ * and its `log((long double)dwVolume)` converts the float's BIT PATTERN as an integer
+ * once the slot is a `uint32_t`; `DRLGROOMTILE_SetupWarpTile` @0066e260 reads
+ * `dwParam2->nPosX` off a slot the decompiler typed `D2DrlgTileDataStrc *` and the
+ * emitted `uint32_t` cannot compile.
+ *
+ * Extraction folds the daemon's `resolvedType` in where it is sent (see
+ * `applyResolvedTypes`); a snapshot taken without it still carries the decompiler's
+ * own prototype at the top of the body, and that is read here. Only a bare
+ * `undefinedN` field is replaced - anything else is a curated answer - and only when
+ * the prototype lists the same number of parameters and the resolved spelling has
+ * the slot's size, so no argument can move.
+ *
+ * A struct or union BY VALUE is not taken. That resolution is the decompiler
+ * propagating the type of the field the slot is stored into, not the slot's own:
+ * `SMsgDispatchMessage` @00420b00 resolves its LPARAM as `D2UIMsgLParamUnion`
+ * because it stores it into `D2UIMouseMsgStrc.uLParam`, and every caller passes an
+ * LPARAM - which C++ (and C) cannot convert to a union. The store is written into
+ * the union's member by the body passes, as it always was.
+ */
+function reconcileUndefinedParameterTypes(functions: ExtractedFunction[], aggregateNames: ReadonlySet<string>): void {
+  for (const fn of functions) {
+    const stored = fn.parameters ?? [];
+    if (!stored.some(p => UNCURATED_PARAMETER_TYPE.test((p.dataType ?? '').trim()))) continue;
+    const decompiled = decompiledParameters(fn.decompiled);
+    if (!decompiled || decompiled.length !== stored.length) continue;
+    const byOrdinal = [...stored].sort((a, b) => a.ordinal - b.ordinal);
+    byOrdinal.forEach((p, i) => {
+      const m = UNCURATED_PARAMETER_TYPE.exec((p.dataType ?? '').trim());
+      if (!m) return;
+      const resolved = decompiled[i].dataType;
+      if (UNCURATED_PARAMETER_TYPE.test(resolved) || /^undefined\d*\b/.test(resolved)) return;
+      const slotSize = m[1] ? Number(m[1]) : (p.size ?? 1);
+      if (parameterSize(resolved) !== slotSize) return;
+      if (!resolved.includes('*') && aggregateNames.has(resolved.replace(/^(?:struct|union)\s+/, '').trim())) return;
+      p.dataType = respellPlaceholderType(resolved);
+    });
+  }
+}
+
+/** A database parameter field nobody curated: `undefined`, `undefined4`. */
+const UNCURATED_PARAMETER_TYPE = /^undefined(\d*)$/;
 
 /** Ghidra's "no information" return types — see reconcileUndefinedReturnTypes. */
 const UNCURATED_RETURN_TYPES = new Set([

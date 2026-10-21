@@ -23,6 +23,11 @@ export interface LabelFlow {
   computed: number;
   first: string;
   pushedArgs: boolean;
+  /**
+   * Ghidra's name for a label the decompile printed under its default spelling only
+   * (a joined block, `joined_r0x<addr>`); absent where there is none. See label-flow.ts.
+   */
+  symbol?: string;
 }
 
 export interface ExtractedFunction {

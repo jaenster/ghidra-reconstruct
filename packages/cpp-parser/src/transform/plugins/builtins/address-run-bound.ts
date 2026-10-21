@@ -31,6 +31,15 @@
  * which is relocation-proof, needs no adjacency, and is the same ten iterations
  * on any layout.
  *
+ * Where the anchor is an ARRAY and the distance lands on an element boundary inside
+ * it (one past the end included), the distance is that element, and it is written
+ * as one: `MISSILE_CltDoFn64_BaalFxControl` @004d7930 walks the 12-byte rows of
+ * `gaBaalFxSpiritSpawnSchedule[5]` and stops at 0x6db938, which is
+ *
+ *   while ((int)pSpreadEntry < (uintptr_t)&gaBaalFxSpiritSpawnSchedule[4]);
+ *
+ * - the same address, but the row the compiler folded rather than a byte count.
+ *
  * The bound arrives either as `&sym` or, when no symbol sits at that address, as the
  * raw integer the machine compared. Both are handled the same way; the integer form is
  * what remains once an interior label - a folded field offset that Ghidra had named as
@@ -66,6 +75,10 @@ export interface AddressRunBoundOptions extends PluginOptions {
    * shape matches `global-address-literal`'s, which feeds this pass its table.
    */
   globalNamespaces?: Record<string, readonly string[]>;
+  /** Global name → its extent in bytes (with `globalElementSizes`, the array's length). */
+  globalSizes?: Record<string, number>;
+  /** Global name → the stride of one element, for the globals Ghidra typed as arrays. */
+  globalElementSizes?: Record<string, number>;
 }
 
 /** Only an ORDERING comparison can carry a bound. `==` / `!=` is a sentinel test. */
@@ -122,6 +135,8 @@ function walkerRoot(e: Expression): string | undefined {
 export function createAddressRunBoundTransformer(options?: PluginOptions): Transformer {
   const o = (options ?? {}) as AddressRunBoundOptions;
   const addresses = o.globalAddresses ?? {};
+  const sizes = o.globalSizes ?? {};
+  const strides = o.globalElementSizes ?? {};
   if (Object.keys(addresses).length === 0) return (unit: ASTNode) => unit;
 
   return createTransformer({
@@ -204,6 +219,13 @@ export function createAddressRunBoundTransformer(options?: PluginOptions): Trans
             // The anchor is spelled with the identifier the function already
             // uses, so the reference resolves in exactly the scope the walk's
             // own reference does.
+            const stride = strides[anchor];
+            const extent = sizes[anchor];
+            if (stride !== undefined && extent !== undefined && stride > 0
+              && delta % stride === 0 && delta <= extent) {
+              return Expr.cast(Type.typedef('uintptr_t'), Expr.unary('&',
+                Expr.subscript(Expr.identifier(anchor), Expr.intLiteral(delta / stride))));
+            }
             return Expr.paren(Expr.binary(
               Expr.cast(Type.typedef('uintptr_t'), Expr.unary('&', Expr.identifier(anchor))),
               '+',

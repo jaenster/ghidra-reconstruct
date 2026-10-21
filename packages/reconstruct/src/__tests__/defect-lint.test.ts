@@ -342,6 +342,21 @@ describe('defect lint: unassigned-local-read', () => {
 });
 
 describe('defect lint: argless-indirect-call', () => {
+  it('counts the code* type, not the word: a comment, a string, a field named code (round R)', () => {
+    // A plate comment saying "code-page locks" once read as a `code` token to a counter
+    // over text; the checks read the AST, where only a TYPE named code is Ghidra's.
+    const fs = lint('argless-indirect-call', { files: {
+      'a.cpp': `// locale and code-page locks (__freefls); (**(code **)x)() in a comment
+/* code */
+void f(D2ItemTypesTxt* p, int i) {
+    int n = p->code;
+    Log("(**(code **)x)()");
+    g(n, gsItemsTable.pItems[p[i].code].dwGemOffset);
+}`,
+    } });
+    assert.deepStrictEqual(fs, []);
+  });
+
   it('reports both code* spellings, across lines, and names a typed table', () => {
     const fs = lint('argless-indirect-call', { files: {
       'globals.h': 'extern fpServerInitFunctions gaInitTable[52];\n',

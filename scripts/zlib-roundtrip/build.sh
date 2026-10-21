@@ -13,7 +13,10 @@ for f in Storm/3rdparty/zlib/deflate.cpp Storm/3rdparty/zlib/trees.cpp Storm/3rd
   $CXX -c "$f" -o $B/$(echo $f | tr / _).o &
 done
 $CXX -I$H -c $H/tree_side.cpp -o $B/tree_side.o &
-for f in adler32 crc32 deflate inflate inffast inftrees trees zutil; do i686-linux-gnu-gcc -O1 -w -DZ_PREFIX -Dz_errmsg=ref_z_errmsg -ffunction-sections -fdata-sections -c $Z/$f.c -o $B/ref_$f.o & done
+# The reference is configured as the original was built: for Win32, whose OS_CODE (zutil.h)
+# is 0x0b. Built for Linux it writes 0x03 in byte 9 of every gzip header, and all W31 cases
+# then "differ" in that one byte.
+for f in adler32 crc32 deflate inflate inffast inftrees trees zutil; do i686-linux-gnu-gcc -O1 -w -DZ_PREFIX -DOS_CODE=0x0b -Dz_errmsg=ref_z_errmsg -ffunction-sections -fdata-sections -c $Z/$f.c -o $B/ref_$f.o & done
 i686-linux-gnu-g++ -O1 -w -DZ_PREFIX -I$Z -I$H -c $H/ref_side.cpp -o $B/ref_side.o &
 i686-linux-gnu-g++ -O1 -w -I$H -c $H/main.cpp -o $B/main.o &
 wait

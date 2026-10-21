@@ -179,6 +179,37 @@ describe('buildModuleGraph', () => {
     );
   });
 
+  it('a file-local global, even by value, is the implementation\'s dependency (no header include)', () => {
+    // Fog/Memory.h at v1410: the interior labels of `pGlobalPoolSystem` are
+    // file-local globals typed by value with `D2MemoryManagerStrc`. Charged to the
+    // header they closed Memory.h -> D2MemoryManagerStrc.h -> D2PoolManagerStrc.h
+    // -> Memory.h, and D2PoolStrc was undefined in every translation unit.
+    const manager = makeStruct('ManagerStrc', [{ name: 'n', dataType: 'int', offset: 0 }]);
+    const organized = new Map<string, ExtractedFunction[]>();
+    organized.set('Memory', [makeFunc('Memory_Init', 'Memory')]);
+    organized.set('Manager', [makeFunc('Manager_Init', 'Manager')]);
+    const unitHeaderPaths = new Map<string, string>([['Memory', 'Fog/Memory.h'], ['Manager', 'Fog/Manager.h']]);
+    const typeOwnerMap = new Map<string, string>([['ManagerStrc', 'Fog/Manager.h']]);
+    const g = {
+      name: 'gManager', address: '00401000', dataType: 'ManagerStrc', size: 4,
+      scope: 'file-local', ownerFile: 'Fog/Memory.cpp', referencingFunctions: ['Memory_Init'],
+    } as unknown as AnalyzedDataSymbol;
+    const graph = buildModuleGraph({
+      organized,
+      classes: [],
+      dataTypes: [manager],
+      globals: [g],
+      unitHeaderPaths,
+      ownership: { typeOwnerMap, structsWithOwnUnit: new Set(), extraHeaderTypes: new Map() },
+      options: defaultOptions,
+      funcNameToHeaderPath: new Map(),
+      platformHeaders: new Set(),
+    });
+    const memory = graph.resolve().get('Fog/Memory.h')!;
+    assert.ok(!memory.headerIncludes.includes('Fog/Manager.h'), 'the header must not include it');
+    assert.ok(memory.implIncludes.includes('Fog/Manager.h'), 'the .cpp that defines the global must');
+  });
+
   it('function call deps go to implIncludes', () => {
     const funcA = makeFunc('FuncA', 'ModA');
     funcA.calledFunctions = ['FuncB'];

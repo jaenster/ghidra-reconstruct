@@ -25,8 +25,15 @@
  *
  * Each level must be stored exactly once (the decompiler's one printed store is then
  * that instruction); a store of a register (`mov [ebp-4],ebx`) counts, its value is the
- * one the decompiler prints. EH4 frames are recognised by extraction but their
- * registration is not typed in Ghidra, so nothing here lowers them.
+ * one the decompiler prints.
+ *
+ * EH4 frames (`__except_handler4`, a cookie-encoded scope table, -2 = outside) are
+ * typed in Ghidra since round O2 (EH4_EXCEPTION_REGISTRATION, d2_platform.h defines
+ * it) but are not lowered: in two of the four (DebugThread, DEBUG_EnumerateModulesViaPEB)
+ * the decompiler drops the `TryLevel = -2` store that leaves the scope as dead, so the
+ * region has no end in the decompile, and the other two have `__except` blocks of
+ * their own (EnqueueFormattedLogMessage, DEBUG_UnwindStackFrames) that no flow the
+ * decompiler follows reaches. They compile, with the registration stores as printed.
  */
 
 import type { ExtractedFunction } from '../types.js';
@@ -78,7 +85,7 @@ export function handlerResume(code: SehInstruction[], enclosingLevel: number): s
 export function sehLoweringDecision(func: Pick<ExtractedFunction, 'sehFrame'>): SehLoweringDecision | undefined {
   const frame = func.sehFrame;
   if (!frame) return undefined;
-  if (frame.kind !== 'eh3') return { lower: false, reason: `${frame.kind} frames are not typed in Ghidra` };
+  if (frame.kind !== 'eh3') return { lower: false, reason: `${frame.kind} frames are not lowered` };
   if (frame.entries.length !== 1) return { lower: false, reason: `${frame.entries.length} scope table entries` };
   const e = frame.entries[0];
   if (e.level !== 0 || e.enclosingLevel !== -1) return { lower: false, reason: 'a nested scope' };

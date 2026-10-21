@@ -199,32 +199,75 @@ export class ModuleGraph {
       });
     }
 
-    // Phase 3: detect cycles in header includes and break them
-    const cycles = this.findHeaderCycles(result);
-    for (const cycle of cycles) {
-      if (cycle.length < 2) continue;
-      // Break by converting the last edge to a forward decl
-      const from = cycle[cycle.length - 1];
-      const to = cycle[0];
-      const resolved = result.get(from);
-      if (!resolved) continue;
-
-      resolved.headerIncludes = resolved.headerIncludes.filter(h => h !== to);
-      if (!resolved.implIncludes.includes(to)) {
-        resolved.implIncludes.push(to);
-        resolved.implIncludes.sort();
+    // Phase 3: detect cycles in header includes and break them.
+    //
+    // A strongly connected component is a SET, not a path: Tarjan hands its
+    // members back in stack-pop order, so "the last member to the first" is an
+    // edge only by luck. Breaking that pair dropped nothing whenever it was not
+    // one, and the cycle went to the compiler intact - `Fog/Memory.h` ->
+    // `D2MemoryManagerStrc.h` -> `D2PoolManagerStrc.h` -> `Fog/Memory.h` left
+    // `D2PoolStrc` undefined where `D2PoolManagerStrc` embeds forty of them, in
+    // every one of the 531 translation units. So an edge is chosen from the
+    // edges that really join two members, and the graph is re-examined until
+    // no component is left.
+    //
+    // Which edge matters too. A `type-ref` dependency (a by-value parameter or
+    // return type in a function declaration) is satisfied by a forward
+    // declaration; a `by-value` one (a struct field, a file-scope object) needs
+    // the complete type. An edge carrying only the former is cut first.
+    for (let guard = 0; guard < 1000; guard++) {
+      const cycles = this.findHeaderCycles(result);
+      if (cycles.length === 0) break;
+      let broke = false;
+      for (const cycle of cycles) {
+        const edge = this.chooseCycleEdge(cycle, result);
+        if (!edge) continue;
+        this.breakHeaderEdge(edge.from, edge.to, result);
+        broke = true;
       }
-
-      // Collect forward decl names from the broken edge
-      const fromMod = this.modules.get(from)!;
-      for (const dep of fromMod.deps) {
-        if (dep.targetModule === to && (dep.strength === 'by-value' || dep.strength === 'by-pointer' || dep.strength === 'type-ref')) {
-          resolved.forwardDecls.push(dep.symbol);
-        }
-      }
+      if (!broke) break;
     }
 
     return result;
+  }
+
+  /**
+   * The header-include edge to cut in one strongly connected component: an edge
+   * between two of its members, preferring one whose dependencies a forward
+   * declaration satisfies (no `by-value` dependency rides on it). Ties go to the
+   * first in sorted order, so the choice does not depend on traversal order.
+   */
+  chooseCycleEdge(scc: string[], resolved: Map<string, ResolvedModule>): { from: string; to: string } | undefined {
+    const members = new Set(scc);
+    const edges: { from: string; to: string; needsComplete: boolean }[] = [];
+    for (const from of [...scc].sort()) {
+      const res = resolved.get(from);
+      if (!res) continue;
+      const mod = this.modules.get(from);
+      for (const to of res.headerIncludes) {
+        if (!members.has(to)) continue;
+        const needsComplete = (mod?.deps ?? []).some(d => d.targetModule === to && d.strength === 'by-value');
+        edges.push({ from, to, needsComplete });
+      }
+    }
+    return edges.find(e => !e.needsComplete) ?? edges[0];
+  }
+
+  /** Move one header include to the implementation and forward-declare what it carried. */
+  breakHeaderEdge(from: string, to: string, resolved: Map<string, ResolvedModule>): void {
+    const res = resolved.get(from);
+    if (!res) return;
+    res.headerIncludes = res.headerIncludes.filter(h => h !== to);
+    if (!res.implIncludes.includes(to)) {
+      res.implIncludes.push(to);
+      res.implIncludes.sort();
+    }
+    const fromMod = this.modules.get(from)!;
+    for (const dep of fromMod.deps) {
+      if (dep.targetModule === to && (dep.strength === 'by-value' || dep.strength === 'by-pointer' || dep.strength === 'type-ref')) {
+        res.forwardDecls.push(dep.symbol);
+      }
+    }
   }
 
   /**

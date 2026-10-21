@@ -50,4 +50,16 @@ describe('label flow', () => {
     assert.equal(rec.switchD_00401020_caseD_1.address, '0040103c');
     assert.equal(rec.ERROR, undefined, 'an unresolved label has no record');
   });
+
+  it('reads the name Ghidra gives a joined block (the tenth column, `-` for none)', () => {
+    // execute_script on Game.exe v1455, inflate @00429bb0 (read-only).
+    const rec = parseLabelFlow([
+      '00429bb0:joined_r0x00429e3b\t00429e3b\t1\t0\t0\t0\t0\tJNC\t0\tcase_TIME',
+      '00429bb0:case_EXLEN\t00429f29\t1\t0\t0\t0\t1\tTEST\t0\t-',
+    ].join('\n')).get('00429bb0')!;
+    assert.equal(rec.joined_r0x00429e3b.symbol, 'case_TIME');
+    assert.equal('symbol' in rec.case_EXLEN, false);
+    assert.match(labelFlowScript(['00429bb0:joined_r0x00429e3b']), /getFirstCodeBlockContaining/);
+  });
 });
+

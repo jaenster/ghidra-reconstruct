@@ -46,6 +46,38 @@ describe('addressRunBoundPlugin', () => {
     assert.ok(!out.includes('gbCompItemEmblemColorTableTemp4'), out);
   });
 
+  it('spells a distance on an element boundary of an array anchor as that element (004d7930)', () => {
+    const opts: AddressRunBoundOptions = {
+      globalAddresses: { gaBaalFxSpiritSpawnSchedule: 0x6db908 },
+      globalSizes: { gaBaalFxSpiritSpawnSchedule: 60 },
+      globalElementSizes: { gaBaalFxSpiritSpawnSchedule: 12 },
+    };
+    const out = run(`
+      void f() {
+        D2BaalFxSpreadStrc* p = gaBaalFxSpiritSpawnSchedule;
+        do {
+          p = p + 1;
+        } while ((int)p < 0x6db938);
+      }
+    `, opts);
+    assert.ok(out.includes('(uintptr_t)&gaBaalFxSpiritSpawnSchedule[4]'), out);
+    // Off an element boundary, or past the end, it stays a byte distance.
+    const odd = run(`
+      void f() {
+        D2BaalFxSpreadStrc* p = gaBaalFxSpiritSpawnSchedule;
+        do { p = p + 1; } while ((int)p < 0x6db93a);
+      }
+    `, opts);
+    assert.ok(odd.includes('(uintptr_t)&gaBaalFxSpiritSpawnSchedule + 50'), odd);
+    const past = run(`
+      void f() {
+        D2BaalFxSpreadStrc* p = gaBaalFxSpiritSpawnSchedule;
+        do { p = p + 1; } while ((int)p < 0x6db950);
+      }
+    `, opts);
+    assert.ok(past.includes('(uintptr_t)&gaBaalFxSpiritSpawnSchedule + 72'), past);
+  });
+
   it('picks each loop\'s own anchor when one variable walks two tables', () => {
     const out = run(`
       void f() {

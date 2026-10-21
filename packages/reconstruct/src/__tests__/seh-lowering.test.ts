@@ -169,7 +169,7 @@ describe('sehLoweringDecision', () => {
   });
 
   it('refuses EH4 frames', () => {
-    assert.deepStrictEqual(sehLoweringDecision({ sehFrame: frames.get('00401a70') }), { lower: false, reason: 'eh4 frames are not typed in Ghidra' });
+    assert.deepStrictEqual(sehLoweringDecision({ sehFrame: frames.get('00401a70') }), { lower: false, reason: 'eh4 frames are not lowered' });
     assert.strictEqual(sehLoweringDecision({}), undefined);
   });
 
@@ -254,6 +254,14 @@ LAB_004e0980:
     // bFailed = 1 runs before the __try, bFailed = 0 inside it.
     assert.ok(out.indexOf('bFailed = 1') < out.indexOf('__seh0{1}'), out);
     assert.ok(out.indexOf('bFailed = 0') > out.indexOf('Enter()'), out);
+  });
+
+  it('reads through the cast assign-cast writes on the void* ExceptionList', () => {
+    const refusals: string[] = [];
+    const out = run(SMALL.replace('tSehFrame.Next = ExceptionList;', 'tSehFrame.Next = (EH3_EXCEPTION_REGISTRATION*)ExceptionList;'), refusals);
+    assert.deepStrictEqual(refusals, []);
+    assert.ok(/D2SehScope __seh0\{1\};/.test(out), out);
+    assert.ok(!/ExceptionList/.test(out), out);
   });
 
   it('refuses a goto into the region', () => {

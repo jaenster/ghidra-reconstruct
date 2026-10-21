@@ -100,7 +100,7 @@ describe('SSignature alloca overrides', () => {
 
     // Only Sha1_Finalize and the Memset touch pHash.
     assert.match(body, /SMemFill\(pHash,/);
-    assert.match(body, /Sha1_Finalize\(\(int32_t\)pHash,/);
+    assert.match(body, /Sha1_Finalize\(pHash, &pContext->sSha1\);/);
   });
 
   it('binds Generate\'s three allocations in allocation order', () => {

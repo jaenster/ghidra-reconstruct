@@ -109,3 +109,84 @@ describe('reused-param-slot', () => {
       /\(\*\(code\*\)pAiParam\)/);
   });
 });
+
+describe('reused-param-slot: a second value in a dead stack-argument slot', () => {
+  const V: ReusedParamSlotOptions = {
+    stackParameters: ['nVelocity', 'pUnit', 'pProperty'],
+    functionReturnTypes: { 'D2Common::Units::Units::UNITS_GetRoom': 'D2RoomStrc *', UNITS_GetRoom: 'D2RoomStrc *' },
+  };
+
+  it('HirelingFollowOwnerAction @005e3930: the room kept in nVelocity\'s slot gets a local of its own', () => {
+    const out = run(`int f(D2UnitStrc *pOwner, int nVelocity) {
+      g(nVelocity);
+      nVelocity = (int)D2Common::Units::Units::UNITS_GetRoom(pOwner);
+      h((D2RoomStrc *)nVelocity, 1);
+      return 0;
+    }`, V);
+    assert.ok(/D2RoomStrc\s*\*\s*pRoom;/.test(out), out);
+    assert.ok(/pRoom = D2Common::Units::Units::UNITS_GetRoom\(pOwner\);/.test(out), out);
+    assert.ok(/h\(pRoom, 1\);/.test(out), out);
+    assert.ok(/g\(nVelocity\);/.test(out), out);
+  });
+
+  it('ITEM_RollSocketCount @0062bcb0: an integer in a pointer slot, typed by the reads', () => {
+    const out = run(`void f(D2UnitStrc *pUnit, uint n) {
+      if (pUnit != (D2UnitStrc *)0x0) {
+        pUnit = (D2UnitStrc *)((uint)n << 0x18);
+        n = ((uint)pUnit >> 0x18) * 2;
+        k((uint)pUnit);
+      }
+    }`, V);
+    assert.ok(/uint nUnit;/.test(out), out);
+    assert.ok(/nUnit = \(uint\)\(\(uint\)n << 0x18\);/.test(out), out);
+    assert.ok(/n = \(nUnit >> 0x18\) \* 2;/.test(out), out);
+    assert.ok(/k\(nUnit\);/.test(out), out);
+    assert.ok(/pUnit != \(D2UnitStrc\s*\*\)0x0/.test(out), out);
+  });
+
+  it('a bare read of the second value keeps its bits through the parameter type', () => {
+    const out = run(`int f(D2UnitStrc *pOwner, int nVelocity) {
+      int bWalked;
+      g(nVelocity);
+      nVelocity = (int)D2Common::Units::Units::UNITS_GetRoom(pOwner);
+      bWalked = nVelocity;
+      return h((D2RoomStrc *)nVelocity, bWalked);
+    }`, V);
+    assert.ok(/bWalked = \(int\)pRoom;/.test(out), out);
+    assert.ok(/h\(pRoom, bWalked\)/.test(out), out);
+  });
+
+  it('leaves a slot one read sees with both values (a loop around the store)', () => {
+    const src = `void f(D2UnitStrc *pOwner, int nVelocity) {
+      while (g(nVelocity)) {
+        nVelocity = (int)D2Common::Units::Units::UNITS_GetRoom(pOwner);
+      }
+    }`;
+    assert.strictEqual(run(src, V).replace(/\s+/g, ' '), run(src, {}).replace(/\s+/g, ' '));
+  });
+
+  it('leaves a register parameter, an integer reused as an integer, and a type nothing says', () => {
+    const reg = `int f(D2UnitStrc *pOwner, int nScratch) { nScratch = (int)D2Common::Units::Units::UNITS_GetRoom(pOwner); return h((D2RoomStrc *)nScratch); }`;
+    assert.ok(!/pRoom/.test(run(reg, V)), 'not a stack parameter');
+    const ints = `int f(int nVelocity) { g(nVelocity); nVelocity = q(); return (int)nVelocity; }`;
+    assert.strictEqual(run(ints, V).replace(/\s+/g, ' '), run(ints, {}).replace(/\s+/g, ' '));
+    const unknown = `int f(int nVelocity) { g(nVelocity); nVelocity = q(); return h(nVelocity); }`;
+    assert.strictEqual(run(unknown, V).replace(/\s+/g, ' '), run(unknown, {}).replace(/\s+/g, ' '));
+  });
+
+  it('computes what the slot computed (a pointer slot carries an integer)', native, () => {
+    const prelude = `
+      struct D2UnitStrc { int nId; };
+      static int g(D2UnitStrc *p) { return p ? p->nId : -1; }`;
+    const fn = `int f(D2UnitStrc *pUnit, int n) {
+        int a = g(pUnit);
+        pUnit = (D2UnitStrc *)(intptr_t)(n << 4);
+        return a + (int)(intptr_t)pUnit + 1;
+      }`;
+    const o: ReusedParamSlotOptions = { stackParameters: ['pUnit'] };
+    const split = run(fn, o);
+    assert.ok(/intptr_t nUnit;/.test(split), split);
+    const call = 'D2UnitStrc u = { 7 }; printf("%d\\n", f(&u, 3));';
+    assert.strictEqual(compileAndRun(prelude + split, call), compileAndRun(prelude + fn, call));
+  });
+});
