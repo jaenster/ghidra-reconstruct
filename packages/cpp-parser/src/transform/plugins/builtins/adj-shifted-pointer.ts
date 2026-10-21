@@ -17,7 +17,7 @@
 
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
-  ASTNode, CallExpr, Expression, FunctionDecl, Identifier, ParameterDecl, TypeNode, VariableDecl,
+  ASTNode, CallExpr, Expression, FunctionDecl, Identifier, MemberExpr, ParameterDecl, TypeNode, VariableDecl,
 } from '../../../ast/nodes.js';
 import { Expr, Type } from '../../../ast/factory.js';
 import { findNodesByKind } from '../../../ast/visitor.js';
@@ -61,21 +61,39 @@ function createAdjTransformer(o: AdjShiftedPointerOptions): Transformer {
       }
       const shape = createExprShape(localTypes, tables);
       let changed = false;
+      // (Container *)((char *)p - k) for an ADJ(p) whose p is a known shifted pointer.
+      // The transformer visits children first, so a member's ADJ object may already be lowered.
+      const produced = new WeakSet<object>();
+      const container = (n: ASTNode): Expression | undefined => {
+        if (n.kind !== NodeKind.CallExpr) return undefined;
+        const c = n as CallExpr;
+        const callee = unwrapParens(c.callee);
+        if (callee.kind !== NodeKind.Identifier || (callee as Identifier).name !== 'ADJ' || c.arguments.length !== 1) return undefined;
+        const arg = c.arguments[0];
+        const s = shape(arg);
+        const spec = s && s.stars === 0 ? specs[s.base.replace(/^::/, '')] : undefined;
+        if (!spec) return undefined;
+        const bytes = Expr.cast(Type.pointer(Type.char()), Expr.paren(arg));
+        const moved = spec.offset === 0 ? bytes : Expr.binary(bytes, spec.offset > 0 ? '-' : '+', hex(spec.offset));
+        const out = Expr.paren(Expr.cast(Type.pointer(Type.typedef(spec.container)), Expr.paren(moved)));
+        produced.add(out);
+        return out;
+      };
       const lower = createTransformer({
         visitNode(n: ASTNode): ASTNode | undefined {
-          if (n.kind !== NodeKind.CallExpr) return undefined;
-          const c = n as CallExpr;
-          const callee = unwrapParens(c.callee);
-          if (callee.kind !== NodeKind.Identifier || (callee as Identifier).name !== 'ADJ' || c.arguments.length !== 1) return undefined;
-          const arg = c.arguments[0];
-          const s = shape(arg);
-          const spec = s && s.stars === 0 ? specs[s.base.replace(/^::/, '')] : undefined;
-          if (!spec) return undefined;
+          // Ghidra prints the container's offset-0 member as `ADJ(p).f` (it reads *ADJ(p)); the
+          // address is the same as `ADJ(p)->f`, and on the lowered pointer only `->` is C.
+          if (n.kind === NodeKind.MemberExpr && !(n as MemberExpr).isArrow) {
+            const m = n as MemberExpr;
+            const lowered = produced.has(m.object) ? m.object : container(unwrapParens(m.object));
+            if (!lowered) return undefined;
+            changed = true;
+            return { ...m, object: lowered, isArrow: true } as ASTNode;
+          }
+          const lowered = container(n);
+          if (!lowered) return undefined;
           changed = true;
-          // (Container *)((char *)p - k)
-          const bytes = Expr.cast(Type.pointer(Type.char()), Expr.paren(arg));
-          const moved = spec.offset === 0 ? bytes : Expr.binary(bytes, spec.offset > 0 ? '-' : '+', hex(spec.offset));
-          return Expr.paren(Expr.cast(Type.pointer(Type.typedef(spec.container)), Expr.paren(moved)));
+          return lowered;
         },
       });
       const body = lower(fn.body);

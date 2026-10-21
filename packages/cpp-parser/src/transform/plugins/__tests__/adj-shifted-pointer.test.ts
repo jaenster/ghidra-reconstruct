@@ -25,6 +25,11 @@ describe('adj-shifted-pointer', () => {
     assert.doesNotMatch(run(`int f(PD2TaskQueueSlotLink p) { return ADJ(p)->nSlotIndex; }`), /ADJ/);
     assert.doesNotMatch(run(`int f(void) { return ADJ(gpLink)->nSlotIndex; }`, { globalTypes: { gpLink: 'PD2TaskQueueSlotLink' } }), /ADJ/);
   });
+  it('ADJ(p).f, Ghidra\'s print of the offset-0 member, is the container\'s member through ->', () => {
+    const out = run(`int f(PD2TaskQueueSlotLink p) { return ADJ(p).nSlotIndex + ADJ(p)->nTaskCount; }`);
+    assert.match(out, /\(\(D2TaskQueueSlotStrc\*\)\(\(char\*\)p - 0x10\)\)->nSlotIndex \+ \(\(D2TaskQueueSlotStrc\*\)\(\(char\*\)p - 0x10\)\)->nTaskCount/);
+    assert.doesNotMatch(out, /ADJ|\)\.nSlotIndex/);
+  });
   it('an ADJ whose argument is not a known shifted pointer stays as printed', () => {
     assert.match(run(`int f(D2LinkNodeStrc *p) { return ADJ(p)->nSlotIndex; }`), /ADJ\(p\)/);
   });
