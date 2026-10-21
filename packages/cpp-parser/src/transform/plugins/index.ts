@@ -429,6 +429,7 @@ export { threeByteAccessPlugin } from './builtins/three-byte-access.js';
 export { comIUnknownCallPlugin } from './builtins/com-iunknown-call.js';
 export { biasedTableIndexPlugin } from './builtins/biased-table-index.js';
 export { foldedAddressRebasePlugin, type FoldedAddress, type FoldedAddressRebaseOptions } from './builtins/folded-address-rebase.js';
+export { immediateNotAddressPlugin, type ImmediateNotAddressOptions } from './builtins/immediate-not-address.js';
 export { importAddressForwarderPlugin, IMPORT_ADDRESS_FORWARDERS } from './builtins/import-address-forwarder.js';
 export { unsignedRangeComparePlugin } from './builtins/unsigned-range-compare.js';
 export { callSiteOverrideCastPlugin, type CallSiteOverride } from './builtins/call-site-override-cast.js';
@@ -513,6 +514,7 @@ import { threeByteAccessPlugin } from './builtins/three-byte-access.js';
 import { comIUnknownCallPlugin } from './builtins/com-iunknown-call.js';
 import { biasedTableIndexPlugin } from './builtins/biased-table-index.js';
 import { foldedAddressRebasePlugin } from './builtins/folded-address-rebase.js';
+import { immediateNotAddressPlugin } from './builtins/immediate-not-address.js';
 import { importAddressForwarderPlugin } from './builtins/import-address-forwarder.js';
 import { unsignedRangeComparePlugin } from './builtins/unsigned-range-compare.js';
 import { callSiteOverrideCastPlugin } from './builtins/call-site-override-cast.js';
@@ -635,6 +637,7 @@ import type { TransformPlugin } from './types.js';
  */
 export const allBuiltinPlugins: TransformPlugin[] = [
   indirectCallCleanupPlugin, // Cleanup: strip jumptable warnings, clean fn-ptr casts (priority 5)
+  immediateNotAddressPlugin,   // Correctness: &UNK_v for an unreferenced immediate v -> the constant v (priority 9)
   ...ghidraCleanupPlugins,
   biasedTableIndexPlugin,      // Correctness: *(byte*)((int)A + C + i) below the next table → Next[i - bias] (priority 12)
   foldedAddressRebasePlugin,   // Correctness: a folded MOV X; SUB d address respelled X - n, from the instruction refs (priority 13)

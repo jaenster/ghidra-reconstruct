@@ -26,6 +26,7 @@ import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js
 import { getGlobalReferenceAliases, globalAliasComment } from './global-aliases.js';
 import { sehLoweringDecision, type SehLoweringDecision } from './seh-lowering-spec.js';
 import { foldedAddressFacts, type FoldedAddressFact } from './folded-address-spec.js';
+import { immediateConstantFacts, dataAtAddress, type ImmediateConstantFact } from './immediate-constant-spec.js';
 import { ROOT_CLASS_SCOPE, namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 import { cleanFunctionComment, guardedFuncDefTypedef, emittedFunctionName, returnSigType, sigType } from './header.js';
 import { declarationHead } from './calling-convention.js';
@@ -752,6 +753,11 @@ export interface FuncPtrArgCastTables {
    */
   globalElementSizes?: Record<string, number>;
   /**
+   * Every global and string Ghidra holds as [start, end, name], sorted by start, with no
+   * name filtering: whether anything at all is at an address (`immediate-not-address`).
+   */
+  dataExtents?: Array<[number, number, string]>;
+  /**
    * The entries of `globalAddresses` that are STRING CONSTANTS — `char[N]`
    * objects the declaration closure declares and defines from Ghidra's bytes.
    * A reference to one is the BARE NAME, which decays to `char*`; `&name` would
@@ -1476,6 +1482,7 @@ export function generateFunctionImplementation(
           labelFlow: func.labelFlow,
           sehLowering: sehLoweringDecision(func),
           foldedAddresses: foldedAddressFacts(func),
+          immediateConstants: immediateConstantFacts(func),
           pushSlotInits: pushSlotInits(func),
         },
       );
@@ -2282,6 +2289,8 @@ function transformDecompiledCode(
     sehLowering?: SehLoweringDecision;
     /** Addresses the instructions derive from a global's start (codegen/folded-address-spec.ts). */
     foldedAddresses?: FoldedAddressFact[];
+    /** Immediates the instructions hold as constants, not addresses (codegen/immediate-constant-spec.ts). */
+    immediateConstants?: ImmediateConstantFact[];
     /** Locals in a prologue `PUSH reg` slot, with the register parameter the push stored. */
     pushSlotInits?: Array<{ local: string; value: string }>;
   },
@@ -2544,6 +2553,17 @@ function transformDecompiledCode(
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         enclosingVarTypes,
       };
+      if (enclosing?.immediateConstants && enclosing.immediateConstants.length > 0) {
+        const extents = context.funcPtrArgCasts.dataExtents ?? [];
+        perPluginOptions['immediate-not-address'] = {
+          constants: enclosing.immediateConstants,
+          globalNames: Object.keys(context.funcPtrArgCasts.globalAddresses ?? {}),
+          dataAt: (v: number) => dataAtAddress(extents, v),
+          onRewrite: (r: { name: string; value: number; ins: string; form: string }) =>
+            console.warn(`[immediate] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: &${r.name} -> the constant 0x${r.value.toString(16)} (${r.form}; ins ${r.ins}, a scalar with no reference)`),
+          onRefusal: (reason: string) => console.warn(`[immediate] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: left as printed: ${reason}`),
+        };
+      }
       if (enclosing?.foldedAddresses && enclosing.foldedAddresses.length > 0) {
         perPluginOptions['folded-address-rebase'] = {
           rebases: enclosing.foldedAddresses,

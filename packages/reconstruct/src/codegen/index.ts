@@ -5478,6 +5478,19 @@ export function buildFuncPtrArgCastTables(
   const { globalAddresses, globalSizes, globalElementSizes, stringConstantNames } =
     buildGlobalAddressExtentTables(globals, strings);
 
+  // Every symbol or datum Ghidra holds, by extent, unfiltered: the address tables above
+  // drop a name two records share, and `immediate-not-address` must know that SOMETHING
+  // is at an address, whatever it is called.
+  const dataExtents: Array<[number, number, string]> = [];
+  for (const g of globals) {
+    const address = Number.parseInt(String(g.address ?? '').replace(/^0x/i, ''), 16);
+    if (!Number.isSafeInteger(address)) continue;
+    const size = Number(g.size);
+    dataExtents.push([address, address + (Number.isSafeInteger(size) && size > 0 ? size : 1), g.name || g.suggestedName || '?']);
+  }
+  for (const { name, address, size } of stringConstantExtents(strings)) dataExtents.push([address, address + Math.max(size, 1), name]);
+  dataExtents.sort((a, b) => a[0] - b[0]);
+
   // Global name → the namespace segments its DEFINITION is emitted in. A literal
   // address is folded into a body anywhere — a table in one module pointing into
   // another module's data — so a reference resolved from one has to name the
@@ -5610,6 +5623,7 @@ export function buildFuncPtrArgCastTables(
     globalAddresses,
     globalSizes,
     globalElementSizes,
+    dataExtents,
     globalNamespaces,
     ambiguousGlobalNames: [...ambiguousGlobalNames],
     stringConstantNames,
