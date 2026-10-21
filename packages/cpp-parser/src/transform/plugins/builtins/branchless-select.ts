@@ -49,6 +49,7 @@ import type {
 import { createTransformer, type Transformer } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { isPure } from './pseudo-op-lower.js';
+import { memoOnInputs, type MemoSlot } from './input-memo.js';
 
 const CMP_OPS = new Set(['<', '>', '<=', '>=', '==', '!=']);
 
@@ -272,11 +273,22 @@ export interface BranchlessSelectOptions extends PluginOptions {
   ambiguousConstants?: string[];
 }
 
+const enumTablesMemo: MemoSlot<EnumTables> = {};
+const enumValuesMemo: MemoSlot<Map<string, bigint>> = {};
+
+/** The enum tables, built once per run; the result is shared and read-only. */
 function enumTablesOf(o: BranchlessSelectOptions | undefined): EnumTables | null {
   if (!o?.enumMemberValues) return null;
+  return memoOnInputs(enumTablesMemo, [o.enumMemberValues, o.ambiguousConstants], () => buildEnumTables(o.enumMemberValues!, o.ambiguousConstants));
+}
+
+function buildEnumTables(
+  enumMemberValues: Record<string, Record<string, number>>,
+  ambiguousConstants: string[] | undefined,
+): EnumTables {
   const members = new Map<string, Map<string, bigint>>();
   const owners = new Map<string, string[]>();
-  for (const [e, vals] of Object.entries(o.enumMemberValues)) {
+  for (const [e, vals] of Object.entries(enumMemberValues)) {
     const m = new Map<string, bigint>();
     for (const [n, v] of Object.entries(vals)) {
       if (!Number.isFinite(v)) continue;
@@ -287,7 +299,7 @@ function enumTablesOf(o: BranchlessSelectOptions | undefined): EnumTables | null
     }
     members.set(e, m);
   }
-  return { members, owners, ambiguous: new Set(o.ambiguousConstants ?? []) };
+  return { members, owners, ambiguous: new Set(ambiguousConstants ?? []) };
 }
 
 /**
@@ -307,8 +319,11 @@ export const branchlessSelectPlugin: TransformPlugin = {
   tags: ['core', 'cleanup', 'x86', 'branchless'],
 
   createTransformer(options?: BranchlessSelectOptions) {
-    const values = new Map<string, bigint>();
-    for (const [n, v] of Object.entries(options?.enumValues ?? {})) if (Number.isFinite(v)) values.set(n, BigInt(v));
+    const values = memoOnInputs(enumValuesMemo, [options?.enumValues], () => {
+      const m = new Map<string, bigint>();
+      for (const [n, v] of Object.entries(options?.enumValues ?? {})) if (Number.isFinite(v)) m.set(n, BigInt(v));
+      return m;
+    });
     const inner = createBranchlessSelectTransformer(enumTablesOf(options));
     return (node: ASTNode) => {
       const saved = enumValueOf;

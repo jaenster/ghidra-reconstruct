@@ -98,6 +98,7 @@ import { createKindTransformer, createTransformer, sequence, updateNode, type Tr
 import { typeNodeName } from './call-arg-cast.js';
 import { createPlugin } from '../registry.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
+import { memoOnInputs, hasOwnKeys, type MemoSlot } from './input-memo.js';
 
 /** One entry of Ghidra's stack frame: a named variable at a signed byte offset. */
 export interface StackSlot {
@@ -662,6 +663,9 @@ function walkedPointer(expr: Expression, pointerNames: Set<string>): Expression 
   return pointerNames.has((e as Identifier).name) ? e : null;
 }
 
+/** Global name -> its position in the address table. Read-only once built. */
+const globalOrderMemo: MemoSlot<Map<string, number>> = {};
+
 function createFoldedGlobalAddressTransformer(
   slots: StackSlot[],
   globalAddresses: Record<string, number>,
@@ -670,9 +674,14 @@ function createFoldedGlobalAddressTransformer(
     const declared = declaredNames(root);
     const referenced = referencedNames(root);
     const slotNames = new Set(slots.map(s => s.name));
+    // The referenced globals, in the table's own order (the order a scan of the
+    // whole table visits them in), without scanning the whole table.
+    const order = memoOnInputs(globalOrderMemo, [globalAddresses], () =>
+      new Map(Object.keys(globalAddresses).map((name, i) => [name, i])));
     const candidates: { name: string; address: number }[] = [];
-    for (const [name, address] of Object.entries(globalAddresses)) {
-      if (!referenced.has(name) || slotNames.has(name)) continue;
+    for (const name of [...referenced].filter(n => order.has(n)).sort((a, b) => order.get(a)! - order.get(b)!)) {
+      const address = globalAddresses[name];
+      if (slotNames.has(name)) continue;
       if (!Number.isSafeInteger(address)) continue;
       candidates.push({ name, address });
     }
@@ -979,7 +988,7 @@ function createStackFrameAddressTransformer(options: StackFrameAddressOptions = 
     // Only what the frame could NOT account for reaches the fold solver, which
     // is what makes "no slot owns this offset" evidence of a fold rather than a
     // rule that has not run yet.
-    slots.length > 0 && Object.keys(globalAddresses).length > 0
+    slots.length > 0 && hasOwnKeys(globalAddresses)
       ? createFoldedGlobalAddressTransformer(slots, globalAddresses)
       : ((node: ASTNode) => node),
     // Last of the resolving rules: the frame BASE, which no slot can own, so it

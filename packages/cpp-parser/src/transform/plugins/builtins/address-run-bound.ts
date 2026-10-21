@@ -64,6 +64,7 @@ import { findNodesByKind } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
 import { Type, Expr } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
+import { hasOwnKeys } from './input-memo.js';
 
 export interface AddressRunBoundOptions extends PluginOptions {
   /** Global variable name (as emitted) → its address in the image. */
@@ -137,7 +138,7 @@ export function createAddressRunBoundTransformer(options?: PluginOptions): Trans
   const addresses = o.globalAddresses ?? {};
   const sizes = o.globalSizes ?? {};
   const strides = o.globalElementSizes ?? {};
-  if (Object.keys(addresses).length === 0) return (unit: ASTNode) => unit;
+  if (!hasOwnKeys(addresses)) return (unit: ASTNode) => unit;
 
   return createTransformer({
     visitFunctionDecl(node: FunctionDecl): ASTNode | undefined {

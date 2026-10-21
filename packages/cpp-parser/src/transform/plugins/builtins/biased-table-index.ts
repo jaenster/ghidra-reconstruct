@@ -36,6 +36,7 @@ import { Expr } from '../../../ast/factory.js';
 import { createTransformer, type Transformer } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { createPlugin } from '../registry.js';
+import { memoOnInputs, type MemoSlot } from './input-memo.js';
 
 export interface BiasedTableIndexOptions extends PluginOptions {
   /** Global name → address. */
@@ -117,16 +118,22 @@ function constValue(e: Expression, enumValues: Record<string, number>): number |
   return null;
 }
 
+/** Address -> the one global based there ('' when several are). Read-only once built. */
+const byAddressMemo: MemoSlot<Map<number, string>> = {};
+
 export function createBiasedTableIndexTransformer(options?: PluginOptions): Transformer {
   const o = (options ?? {}) as BiasedTableIndexOptions;
   const addresses = o.globalAddresses ?? {};
   const sizes = o.globalSizes ?? {};
   const elementSizes = o.globalElementSizes ?? {};
   const enumValues = o.enumValues ?? {};
-  const byAddress = new Map<number, string>();
-  for (const [name, addr] of Object.entries(addresses)) {
-    if (byAddress.has(addr)) byAddress.set(addr, ''); else byAddress.set(addr, name);
-  }
+  const byAddress = memoOnInputs(byAddressMemo, [o.globalAddresses], () => {
+    const m = new Map<number, string>();
+    for (const [name, addr] of Object.entries(addresses)) {
+      if (m.has(addr)) m.set(addr, ''); else m.set(addr, name);
+    }
+    return m;
+  });
   if (byAddress.size === 0) return (n: ASTNode) => n;
 
   /**

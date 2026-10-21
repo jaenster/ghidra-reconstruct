@@ -36,6 +36,7 @@ import { findNodesByKind } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
 import { Expr } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
+import { memoOnInputs, type MemoSlot } from './input-memo.js';
 
 export interface UnderscoreStorageAliasOptions extends PluginOptions {
   /** Names of program globals visible to this unit. */
@@ -46,9 +47,13 @@ export interface UnderscoreStorageAliasOptions extends PluginOptions {
   varTypes?: Record<string, string>;
 }
 
+/** The name sets, built once per run from the shared name lists. Read-only. */
+const globalsMemo: MemoSlot<Set<string>> = {};
+const crtMemo: MemoSlot<Set<string>> = {};
+
 function createUnderscoreStorageAliasTransformer(options: UnderscoreStorageAliasOptions = {}): Transformer {
-  const globals = new Set(options.globalNames ?? []);
-  const crt = new Set(options.crtFunctionNames ?? []);
+  const globals = memoOnInputs(globalsMemo, [options.globalNames], () => new Set(options.globalNames ?? []));
+  const crt = memoOnInputs(crtMemo, [options.crtFunctionNames], () => new Set(options.crtFunctionNames ?? []));
   if (globals.size === 0 && crt.size === 0) return (n: ASTNode) => n;
 
   return createTransformer({

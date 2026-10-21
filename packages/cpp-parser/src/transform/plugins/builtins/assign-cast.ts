@@ -56,6 +56,7 @@ import {
   createFuncdefCalleeResolver, type FuncdefDecl, type FuncdefCalleeTables,
   functionPointerTypeFromSpellings, scopedLookup,
 } from './call-arg-cast.js';
+import { hasOwnKeys } from './input-memo.js';
 
 export interface AssignCastOptions extends PluginOptions {
   /** Callable name (bare AND qualified) → declared return type spelling */
@@ -213,11 +214,11 @@ export function createAssignCastTransformer(options?: PluginOptions): Transforme
   };
 
   const haveTables =
-    Object.keys(globalTypes).length > 0 ||
-    Object.keys(enclosingVarTypes).length > 0 ||
-    Object.keys(fieldTypes).length > 0 ||
-    Object.keys(returnTypes).length > 0 ||
-    Object.keys(o.structFields ?? {}).length > 0;
+    hasOwnKeys(globalTypes) ||
+    hasOwnKeys(enclosingVarTypes) ||
+    hasOwnKeys(fieldTypes) ||
+    hasOwnKeys(returnTypes) ||
+    hasOwnKeys(o.structFields);
   if (!haveTables) return createTransformer({});
 
   return createTransformer({

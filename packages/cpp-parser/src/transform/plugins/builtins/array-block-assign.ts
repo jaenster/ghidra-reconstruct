@@ -49,6 +49,7 @@ import { findNodesByKind } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
 import { Expr, Type } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
+import { memoOnInputs, type MemoSlot } from './input-memo.js';
 
 export interface ArrayBlockAssignOptions extends PluginOptions {
   /** Global name → its emitted declaration type spelling. */
@@ -68,16 +69,22 @@ function isZeroLiteral(e: Expression): boolean {
   return u.kind === NodeKind.IntegerLiteral && (u as IntegerLiteralExpr).value === 0n;
 }
 
+/** Globals declared as arrays. Read-only once built: each body copies it. */
+const arrayGlobalsMemo: MemoSlot<Set<string>> = {};
+
 function createArrayBlockAssignTransformer(options: PluginOptions = {}): Transformer {
   const o = options as ArrayBlockAssignOptions;
   // A GLOBAL declared as an array is assignable no more than a local one is, and
   // the block operation is the same. `gnQuestScrollLine = *(ushort (*)[2])(p+3)`
   // is the four-byte packet field copy; it reached here only because the array
   // names this pass knew came from body declarations alone.
-  const arrayGlobals = new Set<string>();
-  for (const [name, spelling] of Object.entries(o.globalTypes ?? {})) {
-    if (isArraySpelling(spelling)) arrayGlobals.add(name);
-  }
+  const arrayGlobals = memoOnInputs(arrayGlobalsMemo, [o.globalTypes], () => {
+    const names = new Set<string>();
+    for (const [name, spelling] of Object.entries(o.globalTypes ?? {})) {
+      if (isArraySpelling(spelling)) names.add(name);
+    }
+    return names;
+  });
   return createTransformer({
     visitFunctionDecl(node: FunctionDecl): ASTNode | undefined {
       if (!node.body) return undefined;

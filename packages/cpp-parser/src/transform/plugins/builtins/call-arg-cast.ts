@@ -40,6 +40,7 @@ import { createTransformer, updateNode, type Transformer } from '../../transform
 import { Type, Expr } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { createExprShape } from './expr-shape.js';
+import { hasOwnKeys } from './input-memo.js';
 
 export interface CallArgCastOptions extends PluginOptions {
   /** Callable name (bare AND qualified) → declared parameter type spellings */
@@ -697,7 +698,7 @@ export function createCallArgCastTransformer(options?: PluginOptions): Transform
     structFieldFuncdefs: o.structFieldFuncdefs,
     fieldFuncdefs: o.fieldFuncdefs,
   };
-  if (!paramTypes || Object.keys(paramTypes).length === 0) {
+  if (!hasOwnKeys(paramTypes)) {
     return createTransformer({});
   }
 

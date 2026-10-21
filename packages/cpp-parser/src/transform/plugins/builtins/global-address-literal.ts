@@ -176,6 +176,7 @@ import type {
 } from '../../../ast/nodes.js';
 import { createTransformer, type Transformer } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
+import { memoOnInputs, type MemoSlot } from './input-memo.js';
 
 // Operators where an integer literal is a numeric operand, not an address
 const ARITHMETIC_OPS = new Set(['+', '-', '*', '/', '%', '&', '|', '^', '<<', '>>']);
@@ -702,25 +703,19 @@ function isReturnValueCarrier(callee: Expression): boolean {
   return false;
 }
 
-function createGlobalAddressLiteralTransformer(
-  options: GlobalAddressLiteralOptions,
-): Transformer {
-  const addresses = options.globalAddresses ?? {};
-  const sizes = options.globalSizes ?? {};
-  const namespaces = options.globalNamespaces ?? {};
-  const elementSizes = options.globalElementSizes ?? {};
-  const stringConstants = new Set(options.stringConstantNames ?? []);
-  const floor = effectiveAddressFloor(options.imageBase);
-  const returnTarget = integralReturnTarget(options.enclosingReturnType);
-  /**
-   * Nothing a program references lives AT the image base — Ghidra labels the
-   * PE header there. `uCodepoint < 0x400000`, a Unicode range test, came out as
-   * `(uintptr_t)&IMAGE_DOS_HEADER__00400000`, and two DRLG flag assignments
-   * with it. A round constant collides with the base of the image far more
-   * often than anything points at it.
-   */
-  const imageBaseAddress = parseImageBase(options.imageBase);
+/** Every global the pass may resolve a literal to, and the same by name. Read-only once built. */
+interface CandidateTables { candidates: readonly Candidate[]; byName: ReadonlyMap<string, Candidate> }
+const candidateMemo: MemoSlot<CandidateTables> = {};
 
+function buildCandidates(
+  addresses: Record<string, number>,
+  sizes: Record<string, number>,
+  namespaces: Record<string, readonly string[]>,
+  elementSizes: Record<string, number>,
+  stringConstants: Set<string>,
+  floor: number,
+  imageBaseAddress: number | null,
+): CandidateTables {
   const candidates: Candidate[] = [];
   for (const [name, address] of Object.entries(addresses)) {
     if (!Number.isSafeInteger(address) || address < floor || address >= ADDRESS_CEILING) {
@@ -740,13 +735,39 @@ function createGlobalAddressLiteralTransformer(
       stringConstant: stringConstants.has(name),
     });
   }
-  if (candidates.length === 0) return createTransformer({});
 
   /** By emitted name, for the derivation scan below. */
   const byName = new Map<string, Candidate>();
   for (const c of candidates) {
     if (!byName.has(c.name)) byName.set(c.name, c);
   }
+  return { candidates, byName };
+}
+
+function createGlobalAddressLiteralTransformer(
+  options: GlobalAddressLiteralOptions,
+): Transformer {
+  const addresses = options.globalAddresses ?? {};
+  const sizes = options.globalSizes ?? {};
+  const namespaces = options.globalNamespaces ?? {};
+  const elementSizes = options.globalElementSizes ?? {};
+  const floor = effectiveAddressFloor(options.imageBase);
+  const returnTarget = integralReturnTarget(options.enclosingReturnType);
+  /**
+   * Nothing a program references lives AT the image base — Ghidra labels the
+   * PE header there. `uCodepoint < 0x400000`, a Unicode range test, came out as
+   * `(uintptr_t)&IMAGE_DOS_HEADER__00400000`, and two DRLG flag assignments
+   * with it. A round constant collides with the base of the image far more
+   * often than anything points at it.
+   */
+  const imageBaseAddress = parseImageBase(options.imageBase);
+
+  const { candidates, byName } = memoOnInputs(candidateMemo, [
+    options.globalAddresses, options.globalSizes, options.globalNamespaces,
+    options.globalElementSizes, options.stringConstantNames, options.imageBase,
+  ], () => buildCandidates(addresses, sizes, namespaces, elementSizes,
+                           new Set(options.stringConstantNames ?? []), floor, imageBaseAddress));
+  if (candidates.length === 0) return createTransformer({});
 
   // ============================================
   // WHERE A POINTER CAME FROM
