@@ -4848,6 +4848,12 @@ export function resolveProgramNamespaces(
   buildNamespaceResolution(structUnionEnumNames, [...functions, ...globals], {
     symbols: globals,
     nameOf: g => sanitizeSymbolName(g.suggestedName || g.name),
+  }, {
+    symbols: functions as ReadonlyArray<{ address?: string; namespace?: string | null; name?: string }>,
+    // What the linker tells two definitions apart by: the parameter types.
+    signatureOf: fn => ((fn as { parameters?: { dataType?: string; ordinal?: number }[] }).parameters ?? [])
+      .slice().sort((a, b) => (a.ordinal ?? 0) - (b.ordinal ?? 0))
+      .map(p => (p.dataType ?? '').replace(/\s+/g, '')).join(','),
   });
 }
 
