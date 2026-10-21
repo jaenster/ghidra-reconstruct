@@ -19,7 +19,10 @@
  *   symbol      the name Ghidra gives the label's address, where the decompile could not
  *               print it: a JOINED block is always printed `joined_r0x<addr>`, so a name
  *               put there (`case_TIME` @00429e3b in zlib's inflate) never reaches the
- *               pseudo-C. The name is read at the label's address, or at the start of the
+ *               pseudo-C. The same for a manual switch override's target, printed
+ *               `override_jmp_<switch>_case_<n>` from the override's own `case_<n>` label
+ *               (which is not the name: a label in an override namespace is skipped).
+ *               The name is read at the label's address, or at the start of the
  *               basic block holding it (the case's own first instruction, 00429e38). A
  *               name analysis made (a switch's `caseD_5`) is not one: it is skipped.
  *
@@ -65,6 +68,10 @@ for (String it : items.split(";")) {
   String nm = a[1]; String ns = null;
   int k = nm.indexOf("_caseD_");
   if (nm.startsWith("switchD_") && k > 0) { ns = nm.substring(0, k); nm = nm.substring(k + 1); }
+  // A manual switch override keeps its targets as labels \`case_N\` in namespace
+  // \`override::jmp_<addr>\`; the decompile prints them \`override_jmp_<addr>_case_N\`.
+  int kc = nm.lastIndexOf("_case_");
+  if (nm.startsWith("override_jmp_") && kc > 0) { ns = nm.substring(9, kc); nm = nm.substring(kc + 1); }
   if (f != null) {
     for (ghidra.program.model.symbol.Symbol s : st.getSymbols(nm)) {
       if (f.getBody().contains(s.getAddress()) && (ns == null || s.getParentNamespace().getName().equals(ns))) A = s.getAddress();
@@ -93,7 +100,7 @@ for (String it : items.split(";")) {
   }
   String as = A.toString();
   String sym = "-";
-  if (f != null && (a[1].startsWith("joined_r0x") || a[1].startsWith("code_r0x"))) {
+  if (f != null && (a[1].startsWith("joined_r0x") || a[1].startsWith("code_r0x") || a[1].startsWith("override_jmp_"))) {
     ghidra.program.model.symbol.Symbol ps = st.getPrimarySymbol(A);
     if (ps == null || ps.getSource() == ghidra.program.model.symbol.SourceType.DEFAULT) {
       ghidra.program.model.block.CodeBlock cb = new ghidra.program.model.block.BasicBlockModel(currentProgram).getFirstCodeBlockContaining(A, monitor);
@@ -102,6 +109,7 @@ for (String it : items.split(";")) {
     if (ps != null && ps.getSource() != ghidra.program.model.symbol.SourceType.DEFAULT
         && ps.getSource() != ghidra.program.model.symbol.SourceType.ANALYSIS
         && ps.getSymbolType() == ghidra.program.model.symbol.SymbolType.LABEL
+        && !ps.getParentNamespace().getName().startsWith("jmp_")
         && f.getBody().contains(ps.getAddress()) && ps.getName().matches("[A-Za-z_][A-Za-z0-9_]*")) sym = ps.getName();
   }
   sb.append(compact ? String.valueOf(idx) : it).append('\\t').append(compact && a[1].endsWith(as) ? "=" : as).append('\\t').append(fall ? 1 : 0).append('\\t').append(back)

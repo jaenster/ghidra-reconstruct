@@ -51,6 +51,18 @@ describe('label flow', () => {
     assert.equal(rec.ERROR, undefined, 'an unresolved label has no record');
   });
 
+  it('resolves a manual switch override target through its override namespace and reads its name', () => {
+    const script = labelFlowScript(['0057edd0:override_jmp_0057ee01_case_1']);
+    // `case_1` in namespace `jmp_0057ee01`, never the override's own label as the name.
+    // The row's address and name are illustrative: no user label exists there at v1531.
+    assert.ok(script.includes('nm.startsWith("override_jmp_")'));
+    assert.ok(script.includes('a[1].startsWith("override_jmp_")'));
+    assert.ok(script.includes('!ps.getParentNamespace().getName().startsWith("jmp_")'));
+    const rec = parseLabelFlow('0057edd0:override_jmp_0057ee01_case_1\t0057ee10\t1\t0\t1\t0\t0\tMOV\t0\tcheck_anim_mode').get('0057edd0')!;
+    assert.equal(rec.override_jmp_0057ee01_case_1.address, '0057ee10');
+    assert.equal(rec.override_jmp_0057ee01_case_1.symbol, 'check_anim_mode');
+  });
+
   it('reads the name Ghidra gives a joined block (the tenth column, `-` for none)', () => {
     // execute_script on Game.exe v1455, inflate @00429bb0 (read-only).
     const rec = parseLabelFlow([

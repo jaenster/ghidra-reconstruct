@@ -19,7 +19,8 @@
  * snapshot without the field, a label Ghidra prints with a namespace) is left as written.
  *
  * A JOINED block is the one label the decompiler prints under its default spelling even
- * when Ghidra has a name for it (`joined_r0x00429e3b` is `case_TIME` in zlib's inflate).
+ * when Ghidra has a name for it (`joined_r0x00429e3b` is `case_TIME` in zlib's inflate);
+ * a manual switch override's target is another (`override_jmp_0057ee01_case_1`).
  * The extraction reads that name (labelFlow `symbol`); the passes see the default spelling
  * they always saw, and the restore gives the label the name - unless the function already
  * has a label of that name, or the name is itself one of Ghidra's default spellings (a
@@ -55,7 +56,7 @@ export function joinedLabelNames(flow: Record<string, Flow> | null | undefined):
   if (!flow) return out;
   const taken = new Set(Object.keys(flow).filter(n => !DEFAULT.test(n)));
   for (const [name, f] of Object.entries(flow)) {
-    if (!/^(joined|code)_r0x[0-9a-f]{8}$/i.test(name) || !f?.symbol || !/^[A-Za-z_]\w*$/.test(f.symbol)) continue;
+    if (!/^((joined|code)_r0x[0-9a-f]{8}|override_jmp_[0-9a-f]{8}_case_\w+)$/i.test(name) || !f?.symbol || !/^[A-Za-z_]\w*$/.test(f.symbol)) continue;
     // A switch's own case label (`caseD_5` in namespace `switchD_0041bf3a`) is a name
     // Ghidra's analysis made, not one anybody gave the block: the bare name has lost the
     // namespace that says which switch it belongs to, and the block-start fallback can
