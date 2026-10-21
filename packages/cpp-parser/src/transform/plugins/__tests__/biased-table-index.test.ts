@@ -48,3 +48,54 @@ describe('biased-table-index', () => {
     ]) assert.ok(!transform(src).includes('CaseIndex'), src);
   });
 });
+
+// D2COMP_LoadGuildEmblemIcon (005053a0): `MOV AL,[EDX + 0x87d80f]` and `[EDX + 0x87e82b]`
+// read the two 1-based emblem colour tables; the decompiler names each address by the
+// object before it, subscripting the byte array and offsetting the other.
+describe('biased-table-index: the guild emblem colour tables', () => {
+  const EMBLEM = {
+    globalAddresses: {
+      gaItemPaletteTransformData: 0x842710, gaGlideEmblemPrimaryColorTableEntries: 0x87d810,
+      gaCompTwoHandedWeaponClass: 0x87e430, gaGlideEmblemSecondaryColorTableEntries: 0x87e82c,
+    },
+    globalSizes: {
+      gaItemPaletteTransformData: 241920, gaGlideEmblemPrimaryColorTableEntries: 12,
+      gaCompTwoHandedWeaponClass: 0x3fc, gaGlideEmblemSecondaryColorTableEntries: 12,
+    },
+    globalElementSizes: {
+      gaItemPaletteTransformData: 1, gaGlideEmblemPrimaryColorTableEntries: 1,
+      gaCompTwoHandedWeaponClass: 4, gaGlideEmblemSecondaryColorTableEntries: 1,
+    },
+  };
+  const run = (code: string) => emit(createBiasedTableIndexTransformer(EMBLEM)(parse(code)) as AnyNode).trim();
+
+  it('a subscripted byte array: primary[byPrimaryColor - 1]', () => {
+    const out = run(`void f(int p, byte byPrimaryColor) { *(byte *)(p + 0xc0) = gaItemPaletteTransformData[byPrimaryColor + 0x3b0ff]; }`);
+    assert.match(out, /= gaGlideEmblemPrimaryColorTableEntries\[byPrimaryColor - 1\];/, out);
+    assert.strictEqual(0x842710 + 0x3b0ff, 0x87d80f);
+  });
+
+  it('the offset form: secondary[bySecondaryColor - 1]', () => {
+    const out = run(`void f(int p, byte bySecondaryColor) { *(undefined1 *)(p + 0xc1) = *(undefined1 *)((int)gaCompTwoHandedWeaponClass + bySecondaryColor + 0x3fb); }`);
+    assert.match(out, /= gaGlideEmblemSecondaryColorTableEntries\[bySecondaryColor - 1\];/, out);
+  });
+
+  it('a subscript inside the byte array stays its own', () => {
+    const out = run(`void f(int i) { g = gaItemPaletteTransformData[i + 0x3b0f0]; h = gaItemPaletteTransformData[i + 0x100]; }`);
+    assert.match(out, /gaItemPaletteTransformData\[i \+ 0x3b0f0\]/, out);
+    assert.match(out, /gaItemPaletteTransformData\[i \+ 0x100\]/, out);
+  });
+
+  it('a small byte array subscripted with no or a small constant stays its own (gaPanelStatColors[nIndex])', () => {
+    const SMALL = {
+      globalAddresses: { gaPanelStatColors: 0x7befac, gaPanelBeltArrowsNeeded: 0x7befb0 },
+      globalSizes: { gaPanelStatColors: 4, gaPanelBeltArrowsNeeded: 6 },
+      globalElementSizes: { gaPanelStatColors: 1, gaPanelBeltArrowsNeeded: 1 },
+    };
+    const out = emit(createBiasedTableIndexTransformer(SMALL)(parse(
+      `void f(int nIndex) { gaPanelStatColors[nIndex] = 1; gaPanelStatColors[nIndex + 1] = 2; }`)) as AnyNode).trim();
+    assert.match(out, /gaPanelStatColors\[nIndex\] = 1/, out);
+    assert.match(out, /gaPanelStatColors\[nIndex \+ 1\] = 2/, out);
+    assert.ok(!out.includes('gaPanelBeltArrowsNeeded'), out);
+  });
+});

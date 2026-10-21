@@ -109,3 +109,33 @@ describe('folded-address-rebase', () => {
     assert.strictEqual(refusals.length, 2, refusals.join('\n'));
   });
 });
+
+// ___getlocaleinfo (0068a2bb): `CMP EDI,0x96de98` ends the walk over the 4-wchar digit
+// buffer; Ghidra carries it as an offset reference gawCrtLocaleDigitBuf + 8, but the JL
+// makes the compare an int compare and the decompile prints the bare 0x96de98 - which is
+// also where gpfnPurecallHandler starts.
+describe('folded-address-rebase: a bare literal compared against an address', () => {
+  const DIGITS = {
+    globalAddresses: { gawCrtLocaleDigitBuf: 0x96de90, gpfnPurecallHandler: 0x96de98 },
+    globalSizes: { gawCrtLocaleDigitBuf: 8, gpfnPurecallHandler: 4 },
+    globalElementSizes: { gawCrtLocaleDigitBuf: 2 },
+  };
+  const BOUND: FoldedAddress[] = [{ value: 0x96de98, base: 0x96de90, ins: '0068a2bb' }];
+
+  it('respells the loop bound against the buffer, in its elements, keeping the int compare', () => {
+    const { out, rewrites } = run(`void f(wchar_t *pwVar7) { while ((int)pwVar7 < 0x96de98) { pwVar7 = pwVar7 + 1; } }`, BOUND, DIGITS);
+    assert.match(out, /\(int\)pwVar7 < \(int\)\(gawCrtLocaleDigitBuf \+ 4\)/, out);
+    assert.strictEqual(rewrites.length, 1);
+  });
+
+  it('spells it uintptr_t when the other side carries no integer cast, on either side', () => {
+    const { out } = run(`int f(uint n) { return 0x96de98 != n; }`, BOUND, DIGITS);
+    assert.match(out, /\(uintptr_t\)\(gawCrtLocaleDigitBuf \+ 4\) != n/, out);
+  });
+
+  it('leaves a literal no fact of this function names, and arithmetic, alone', () => {
+    const { out } = run(`int f(int n) { return n < 0x96de9a || n + 0x96de98 > 0; }`, BOUND, DIGITS);
+    assert.match(out, /n < 0x96de9a/, out);
+    assert.match(out, /n \+ 0x96de98/, out);
+  });
+});

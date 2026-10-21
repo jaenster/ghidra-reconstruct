@@ -2402,6 +2402,7 @@ function transformDecompiledCode(
       );
       perPluginOptions['pointer-assign-cast'] = {
         voidPointerFunctions: context.funcPtrArgCasts.voidPointerFunctions,
+        structFields: context.funcPtrArgCasts.structFields,
       };
       perPluginOptions['global-address-literal'] = {
         globalAddresses: context.funcPtrArgCasts.globalAddresses,

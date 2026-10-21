@@ -10,7 +10,10 @@ struct _SERVICE_STATUS { uint32_t a[7]; };
 typedef void* SERVICE_STATUS_HANDLE;
 struct _SYSTEM_INFO { uint32_t a[9]; };
 typedef void* HACCEL;
-typedef void* LPCANDIDATELIST;
+// The tree spells these through their struct tags (v1489: `typedef tagCANDIDATELIST *
+// LPCANDIDATELIST;`, `typedef tagWNDCLASSA WNDCLASSA;`), so the tags are what is supplied.
+struct tagCANDIDATELIST;
+struct tagWNDCLASSA { uint32_t a[10]; };
 struct RGBQUAD { uint8_t b, g, r, x; };
 struct _devicemodeA { uint8_t a[156]; };
 struct _FLOATING_SAVE_AREA { uint32_t ControlWord, StatusWord, TagWord, ErrorOffset, ErrorSelector, DataOffset, DataSelector; uint8_t RegisterArea[80]; uint32_t Cr0NpxState; };

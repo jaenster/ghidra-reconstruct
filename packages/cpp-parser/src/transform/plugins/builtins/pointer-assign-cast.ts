@@ -22,7 +22,7 @@ import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, FunctionDecl, VariableDecl, ParameterDecl, Identifier, TypeNode,
   PointerType, BuiltinType, TypedefType, ElaboratedType, Expression,
-  CStyleCastExpr, UnaryExpr, ParenExpr, AssignExpr, CallExpr, QualifiedId, BinaryExpr,
+  CStyleCastExpr, UnaryExpr, ParenExpr, AssignExpr, CallExpr, QualifiedId, BinaryExpr, MemberExpr,
   ArrayType, IntegerLiteralExpr, SubscriptExpr,
 } from '../../../ast/nodes.js';
 import { findNodesByKind } from '../../../ast/visitor.js';
@@ -42,6 +42,11 @@ export interface PointerAssignCastOptions extends PluginOptions {
    * cover for an undetermined type.
    */
   voidPointerFunctions?: string[];
+  /**
+   * Aggregate → field → declared type spelling. Read only to find a `void *`
+   * member on the right of an assignment (see `isVoidPointerField`).
+   */
+  structFields?: Record<string, Record<string, string>>;
 }
 
 /**
@@ -117,9 +122,10 @@ function calleeName(expr: Expression): string | undefined {
 function rhsPointerType(
   expr: Expression,
   typeByName: Map<string, TypeNode>,
-  voidPointerFunctions?: Set<string>,
+  model?: RhsModel,
 ): TypeNode | null {
   const e = unwrapParens(expr);
+  const voidPointerFunctions = model?.voidPointerFunctions;
   // A call to a function the model says returns `void*`.
   if (e.kind === NodeKind.CallExpr && voidPointerFunctions && voidPointerFunctions.size > 0) {
     const name = calleeName((e as CallExpr).callee);
@@ -140,7 +146,7 @@ function rhsPointerType(
   if (e.kind === NodeKind.UnaryExpr && (e as UnaryExpr).operator === '&') {
     const inner = unwrapParens((e as UnaryExpr).operand);
     if (inner.kind === NodeKind.UnaryExpr && (inner as UnaryExpr).operator === '*') {
-      return rhsPointerType((inner as UnaryExpr).operand, typeByName, voidPointerFunctions);
+      return rhsPointerType((inner as UnaryExpr).operand, typeByName, model);
     }
     return null;
   }
@@ -149,7 +155,87 @@ function rhsPointerType(
     const t = typeByName.get((e as Identifier).name);
     return t && t.kind === NodeKind.PointerType ? t : null;
   }
+  // `pEntry->pData` where the aggregate declares pData `void *`.
+  if (e.kind === NodeKind.MemberExpr && model?.structFields) {
+    return isVoidPointerField(e as MemberExpr, typeByName, model.structFields)
+      ? Type.pointer(Type.void()) : null;
+  }
   return null;
+}
+
+/**
+ * What `rhsPointerType` may consult beyond the function's own declarations.
+ */
+interface RhsModel {
+  voidPointerFunctions?: Set<string>;
+  /** Aggregate → field → declared type spelling (the emitted header's). */
+  structFields?: Record<string, Record<string, string>>;
+}
+
+/** `void *` spelled any of the ways a field declaration writes it. Not `const void *`. */
+const VOID_POINTER_SPELLING = /^(?:void\s*\*|LPVOID|PVOID)$/;
+
+/** The aggregate name a pointer/aggregate type spelling names, `struct ` and stars stripped. */
+function aggregateOfSpelling(spelling: string, viaArrow: boolean): string | undefined {
+  const m = /^(?:struct\s+|union\s+)?([A-Za-z_][\w:]*)\s*(\**)$/.exec(spelling.trim());
+  if (!m) return undefined;
+  const stars = m[2].length;
+  if (stars !== (viaArrow ? 1 : 0)) return undefined;
+  return m[1].includes('::') ? m[1].slice(m[1].lastIndexOf('::') + 2) : m[1];
+}
+
+/**
+ * The aggregate a member access walks, when the expression says it: a cast
+ * (`((S *)p)->f`), a declared local or parameter (`p->f`, `s.f`), or a member
+ * whose own declared type names it (`a.b->f`). Undefined otherwise; nothing is
+ * guessed from the field name alone, because `pData` is `void *` in one struct
+ * and typed in the next.
+ */
+function memberObjectAggregate(
+  m: MemberExpr,
+  typeByName: Map<string, TypeNode>,
+  structFields: Record<string, Record<string, string>>,
+): string | undefined {
+  const obj = unwrapParens(m.object);
+  let pointee: TypeNode | undefined;
+  if (obj.kind === NodeKind.CStyleCastExpr) {
+    const ct = (obj as CStyleCastExpr).type;
+    if (!m.isArrow) return undefined;
+    pointee = ct.kind === NodeKind.PointerType ? (ct as PointerType).pointee : undefined;
+  } else if (obj.kind === NodeKind.Identifier) {
+    const t = typeByName.get((obj as Identifier).name);
+    if (!t) return undefined;
+    if (m.isArrow) pointee = t.kind === NodeKind.PointerType ? (t as PointerType).pointee : undefined;
+    else pointee = t;
+  } else if (obj.kind === NodeKind.MemberExpr) {
+    const om = obj as MemberExpr;
+    if (om.member.kind !== NodeKind.Identifier) return undefined;
+    const outer = memberObjectAggregate(om, typeByName, structFields);
+    const spelling = outer ? structFields[outer]?.[(om.member as Identifier).name] : undefined;
+    return spelling ? aggregateOfSpelling(spelling, m.isArrow) : undefined;
+  }
+  if (!pointee) return undefined;
+  if (pointee.kind === NodeKind.TypedefType) return typeNodeName((pointee as TypedefType).name);
+  if (pointee.kind === NodeKind.ElaboratedType) return typeNodeName((pointee as ElaboratedType).name);
+  return undefined;
+}
+
+/**
+ * Ghidra's decompiler emits C, where a `void *` member converts to any object
+ * pointer implicitly; C++ has never allowed that, so an original C++ source that
+ * read a `void *` member (`pEntry->pData`, a unit OR a tile) into a typed pointer
+ * had to write the cast. The member's own type is right, so the cast is
+ * reconstructed, as it is for an allocator returning `void *`.
+ */
+function isVoidPointerField(
+  m: MemberExpr,
+  typeByName: Map<string, TypeNode>,
+  structFields: Record<string, Record<string, string>>,
+): boolean {
+  if (m.member.kind !== NodeKind.Identifier) return false;
+  const agg = memberObjectAggregate(m, typeByName, structFields);
+  const spelling = agg ? structFields[agg]?.[(m.member as Identifier).name] : undefined;
+  return spelling !== undefined && VOID_POINTER_SPELLING.test(spelling.trim());
 }
 
 /**
@@ -285,7 +371,7 @@ function isNamedObject(expr: Expression): boolean {
 function isPointerValued(
   expr: Expression,
   typeByName: Map<string, TypeNode>,
-  voidPointerFunctions?: Set<string>,
+  model?: RhsModel,
 ): boolean {
   const e = unwrapParens(expr);
   if (e.kind === NodeKind.UnaryExpr && (e as UnaryExpr).operator === '&') return true;
@@ -299,12 +385,12 @@ function isPointerValued(
   if (e.kind === NodeKind.BinaryExpr) {
     const b = e as BinaryExpr;
     if (b.operator === '+' || b.operator === '-') {
-      return isPointerValued(b.left, typeByName, voidPointerFunctions)
-        !== isPointerValued(b.right, typeByName, voidPointerFunctions);
+      return isPointerValued(b.left, typeByName, model)
+        !== isPointerValued(b.right, typeByName, model);
     }
     return false;
   }
-  return rhsPointerType(e, typeByName, voidPointerFunctions) !== null;
+  return rhsPointerType(e, typeByName, model) !== null;
 }
 
 /**
@@ -410,10 +496,10 @@ function needsCast(
   lhsType: TypeNode,
   rhs: Expression,
   typeByName: Map<string, TypeNode>,
-  voidPointerFunctions?: Set<string>,
+  model?: RhsModel,
 ): boolean {
   if (lhsType.kind !== NodeKind.PointerType) return false;
-  const rt = rhsPointerType(rhs, typeByName, voidPointerFunctions);
+  const rt = rhsPointerType(rhs, typeByName, model);
   if (!rt) return false;
   const lk = typeKey(lhsType), rk = typeKey(rt);
   if (lk === null || rk === null) return false;
@@ -421,9 +507,11 @@ function needsCast(
 }
 
 function createPointerAssignCastTransformer(options?: PluginOptions): Transformer {
-  const voidPointerFunctions = new Set(
-    (options as PointerAssignCastOptions | undefined)?.voidPointerFunctions ?? [],
-  );
+  const opts = options as PointerAssignCastOptions | undefined;
+  const model: RhsModel = {
+    voidPointerFunctions: new Set(opts?.voidPointerFunctions ?? []),
+    structFields: opts?.structFields,
+  };
   return createTransformer({
     visitFunctionDecl(node: FunctionDecl): ASTNode | undefined {
       if (!node.body) return undefined;
@@ -475,7 +563,7 @@ function createPointerAssignCastTransformer(options?: PluginOptions): Transforme
             if (a.operator !== '=') return undefined;
             if (a.left.kind === NodeKind.Identifier) {
               const lt = typeByName.get((a.left as Identifier).name);
-              if (lt && needsCast(lt, a.right, typeByName, voidPointerFunctions)) {
+              if (lt && needsCast(lt, a.right, typeByName, model)) {
                 changed = true;
                 return updateNode(a, { right: Expr.cast(lt, a.right) } as Partial<AssignExpr>);
               }
@@ -491,7 +579,7 @@ function createPointerAssignCastTransformer(options?: PluginOptions): Transforme
             // identical cast, put there by Ghidra itself.
             const ptrTarget = pointerToArrayAssignTarget(a.left);
             if (ptrTarget && isNamedObject(a.right)) {
-              const rt = rhsPointerType(a.right, typeByName, voidPointerFunctions);
+              const rt = rhsPointerType(a.right, typeByName, model);
               const lk = typeKey(ptrTarget);
               const rk = rt ? typeKey(rt) : null;
               // A determinable RHS of the very same type needs nothing. An
@@ -502,7 +590,7 @@ function createPointerAssignCastTransformer(options?: PluginOptions): Transforme
               }
             }
             const intTarget = integerAssignTarget(a.left, typeByName);
-            if (intTarget && isPointerValued(a.right, typeByName, voidPointerFunctions)) {
+            if (intTarget && isPointerValued(a.right, typeByName, model)) {
               changed = true;
               const widened = Expr.cast(Type.typedef('uintptr_t'), a.right);
               return updateNode(a, { right: Expr.cast(intTarget, widened) } as Partial<AssignExpr>);
@@ -518,7 +606,7 @@ function createPointerAssignCastTransformer(options?: PluginOptions): Transforme
             const operand = unwrapParens(c.expression);
             // Already widened by a previous run — `(short)(uintptr_t)p`.
             if (operand.kind === NodeKind.CStyleCastExpr) return undefined;
-            if (!isPointerValued(operand, typeByName, voidPointerFunctions)) return undefined;
+            if (!isPointerValued(operand, typeByName, model)) return undefined;
             changed = true;
             return updateNode(c, {
               expression: Expr.cast(Type.typedef('uintptr_t'), c.expression),
@@ -529,7 +617,7 @@ function createPointerAssignCastTransformer(options?: PluginOptions): Transforme
             const v = n as VariableDecl;
             const init = v.initializer;
             if (!init || init.kind === NodeKind.InitListExpr) return undefined;
-            if (!needsCast(v.type, init as Expression, typeByName, voidPointerFunctions)) return undefined;
+            if (!needsCast(v.type, init as Expression, typeByName, model)) return undefined;
             changed = true;
             return updateNode(v, { initializer: Expr.cast(v.type, init as Expression) } as Partial<VariableDecl>);
           }

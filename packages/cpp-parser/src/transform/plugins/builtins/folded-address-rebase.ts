@@ -43,6 +43,9 @@
  *    literal, and `+`/`-` of literal byte (or element, for an uncast array) distances.
  *  - Only under a pointer cast: the cast keeps the expression's type, so the rewrite
  *    changes the spelling of the address and nothing else.
+ *  - Or a bare literal V that is an operand of a comparison (a loop bound,
+ *    `(int)pwVar7 < 0x96de98`): respelled `(int)(X + d)` in the other side's integer
+ *    type (`uintptr_t` when that side carries none), so the comparison's type is kept.
  *
  * An address expression that evaluates to V in any other shape is reported, not
  * rewritten.
@@ -230,8 +233,44 @@ export function createFoldedAddressRebaseTransformer(options?: PluginOptions): T
   }
 
   const used = new Set<number>();
+  const COMPARISONS = new Set(['<', '<=', '>', '>=', '==', '!=']);
+  /**
+   * A bare literal V compared against an address: `(int)pwVar7 < 0x96de98`. The
+   * instruction (`CMP EDI,0x96de98` @0068a2bb) encodes V and Ghidra's offset reference
+   * says it is X + d, so the literal is an address, spelled in the comparison's integer
+   * type. Respelled `(int)(X + d)`: the cast is the other side's (the decompiler's
+   * signed compare, MSVC's JL), so the comparison keeps its type and only the object
+   * the address is spelled against changes.
+   */
+  function rebasedOperand(lit: Expression, other: Expression): Expression | null {
+    const k = unwrap(lit);
+    if (k.kind !== NodeKind.IntegerLiteral) return null;
+    const value = (k as IntegerLiteralExpr).value;
+    if (value < 0n || value >= BigInt(WORD)) return null;
+    const r = byValue.get(Number(value));
+    if (!r) return null;
+    const x = byAddress.get(r.base);
+    if (!x) {
+      o.onRefusal?.(`0x${r.value.toString(16)}: no single global starts at 0x${r.base.toString(16)}`);
+      return null;
+    }
+    used.add(r.value);
+    const ot = unwrap(other);
+    const tn = ot.kind === NodeKind.CStyleCastExpr ? typeName((ot as CStyleCastExpr).type) : undefined;
+    const intType = tn && INT_CASTS.has(tn) ? (ot as CStyleCastExpr).type : Type.typedef('uintptr_t');
+    o.onRewrite?.({ value: r.value, from: spell(lit), to: `${x} ${r.value < r.base ? '-' : '+'} ${Math.abs(r.value - r.base)}B`, ins: r.ins });
+    return Expr.cast(intType, rebased(r, x));
+  }
   const inner = createTransformer({
     visitNode(n: ASTNode): ASTNode | undefined {
+      if (n.kind === NodeKind.BinaryExpr && COMPARISONS.has((n as BinaryExpr).operator)) {
+        const b = n as BinaryExpr;
+        const right = rebasedOperand(b.right, b.left);
+        if (right) return { ...b, right } as BinaryExpr;
+        const left = rebasedOperand(b.left, b.right);
+        if (left) return { ...b, left } as BinaryExpr;
+        return undefined;
+      }
       if (n.kind !== NodeKind.CStyleCastExpr) return undefined;
       const node = n as CStyleCastExpr;
       if (node.type.kind !== NodeKind.PointerType) return undefined;
