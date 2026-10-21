@@ -13,6 +13,8 @@ import {
 } from '../visitor.js';
 import { AST, Type, Expr, Stmt, Decl } from '../factory.js';
 import { NodeKind } from '../kinds.js';
+import { parse } from '../../parser/index.js';
+import { emit } from '../../emit/index.js';
 import type { Identifier, BinaryExpr, FunctionDecl } from '../nodes.js';
 
 describe('AST Visitor', () => {
@@ -198,6 +200,33 @@ describe('AST Visitor', () => {
 
       assert.strictEqual((transformed.left as Identifier).name, 'A');
       assert.strictEqual((transformed.right as Identifier).name, 'B');
+    });
+
+    it('reaches a base class and template parameter defaults', () => {
+      // A rename has to follow a type into a base-specifier and into a template
+      // parameter's default, type and value alike, or the declaration keeps the old name.
+      const renames: Record<string, string> = { Base: 'Root', Def: 'Dflt', Width: 'Extent', kSize: 'kCount' };
+      const tu = parse('template<class T = Def, Width N = kSize> struct S : Base { int x; };');
+      // Types are renamed as passes rename them (shadowed-type-qualify): on the TypedefType
+      // node; a value is an Identifier.
+      const out = emit(transformAST(tu, {
+        visitNode(node) {
+          if (node.kind === NodeKind.TypedefType) {
+            const t = node as unknown as { name: Identifier };
+            if (t.name.kind === NodeKind.Identifier && t.name.name in renames) {
+              return { ...node, name: { ...t.name, name: renames[t.name.name] } } as never;
+            }
+          }
+          if (node.kind === NodeKind.Identifier && (node as Identifier).name in renames) {
+            return { ...node, name: renames[(node as Identifier).name] } as never;
+          }
+          return undefined;
+        },
+      }) as never);
+      assert.match(out, /:\s*(public\s+)?Root\b/, out);
+      assert.match(out, /class T = Dflt\b/, out);
+      assert.match(out, /Extent N = kCount\b/, out);
+      assert.doesNotMatch(out, /\b(Base|Def|Width|kSize)\b/, out);
     });
 
     it('preserves untransformed nodes', () => {
