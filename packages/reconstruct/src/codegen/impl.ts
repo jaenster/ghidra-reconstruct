@@ -4,7 +4,7 @@
  * Generates .cpp files with function implementations
  */
 
-import { platformDeclaredFunctionNames } from './platform-types.js';
+import { platformDeclaredFunctionNames, rootQualifyShadowedArguments } from './platform-types.js';
 import { isMsvcEhHandlerStub } from './eh-handler-stub.js';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -29,6 +29,7 @@ import { foldedAddressFacts, type FoldedAddressFact } from './folded-address-spe
 import { immediateConstantFacts, dataAtAddress, type ImmediateConstantFact } from './immediate-constant-spec.js';
 import { ROOT_CLASS_SCOPE, namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 import { cleanFunctionComment, guardedFuncDefTypedef, emittedFunctionName, returnSigType, sigType } from './header.js';
+import { classScopeOf, memberDefinitionScope, orphanMarker } from './templates/index.js';
 import { declarationHead } from './calling-convention.js';
 import { emittedParameterName, getAggregateTypeNames } from './platform-types.js';
 import { generateStaticLocalsBlock, emitDataValue, setInitializerOwnerAddress, inferArrayDeclaration, isWideTextDatum, normalizeArrayDeclaration, braceArrayInitializer, isFuncDefTypedefName, getKnownFuncDefTypedefs, getKnownEnumConstants, setInitializerNamespace, renderGlobalScalarInitializer, recordDeclaredName } from './globals-header.js';
@@ -920,8 +921,10 @@ export function generateImplementation(
     : undefined;
   let namespace = renderNamespace(resolvedNamespace);
 
-  // Only emit namespace block if it's a valid C++ namespace (not a template instantiation)
-  const useNamespace = namespace && options.organization === 'namespace' && isValidNamespace(namespace);
+  // Only emit namespace block if it's a valid C++ namespace (not a template instantiation,
+  // not a class the template header defines: its members are qualified by it)
+  const useNamespace = namespace && !resolvedNamespace?.classScope
+    && options.organization === 'namespace' && isValidNamespace(namespace);
 
 
   // Funcdef typedefs the body casts to must be declared at ROOT scope, before
@@ -1334,6 +1337,9 @@ export function generateFunctionImplementation(
     }
   }
 
+  const orphan = orphanMarker(func);
+  if (orphan) lines.push(orphan);
+
   // Add address comment — with cross-platform reference if available
   {
     const stripAddr = (a: string) => a.includes(':') ? a.slice(a.lastIndexOf(':') + 1) : a;
@@ -1450,12 +1456,12 @@ export function generateFunctionImplementation(
       const slotVarTypes: Record<string, string> = {};
       for (const p of func.parameters ?? []) {
         const n = cleanParamName(p.name);
-        if (n && p.dataType) slotVarTypes[n] = p.dataType;
+        if (n && p.dataType) slotVarTypes[n] = rootQualifyShadowedArguments(p.dataType);
       }
       for (const v of func.localVariables ?? []) {
         if (!v.name || !v.dataType) continue;
         const n = emittedParameterName(v.name, sigType(v.dataType));
-        if (!(n in slotVarTypes)) slotVarTypes[n] = v.dataType;
+        if (!(n in slotVarTypes)) slotVarTypes[n] = rootQualifyShadowedArguments(v.dataType);
       }
       const transformed = transformDecompiledCode(
         func.decompiled, options, func.name, func.address, context, slotVarTypes,
@@ -1732,7 +1738,9 @@ export function generateThunkForwarder(
     .join(', ');
 
   const stripAddr = (a: string) => (a.includes(':') ? a.slice(a.lastIndexOf(':') + 1) : a);
+  const orphan = orphanMarker(func);
   return [
+    ...(orphan ? [orphan] : []),
     `// 1.14d: ${stripAddr(func.address)} — JMP thunk`,
     `${generateFunctionSignature(func)} {`,
     `    ${returnsVoid ? '' : 'return '}${forward.qualified}(${args});`,
@@ -1745,7 +1753,8 @@ function generateFunctionSignature(func: ExtractedFunction): string {
   // The declaration side spells the name with the SAME function, so a definition
   // and its declaration cannot legalize a Ghidra name differently.
   const cleanName = emittedFunctionName(func, returnSigType(func.returnType));
-  return `${declarationHead(returnSigType(func.returnType), func.callingConvention)}${cleanName}(${params})`;
+  const member = memberDefinitionScope(func);
+  return `${member?.prefix ?? ''}${declarationHead(returnSigType(func.returnType), func.callingConvention)}${member?.qualifier ?? ''}${cleanName}(${params})`;
 }
 
 /**
@@ -2115,7 +2124,10 @@ function collectRootScopeSymbols(context?: ImplGenContext): RootScopeSymbolTable
     const name = g.suggestedName || g.name;
     if (!name || !/^[A-Za-z_]\w*$/.test(name)) continue;
     const ns = g.namespace ? collapseConsecutiveDuplicates(g.namespace) : undefined;
-    if (ns && !/[<>,*]/.test(ns)) scopedSymbols.add(`${ns}::${name}`);
+    // A static data member of a class the template header defines is that class's.
+    const classScope = classScopeOf(g);
+    if (classScope) scopedSymbols.add(`${classScope}::${name}`);
+    else if (ns && !/[<>,*]/.test(ns)) scopedSymbols.add(`${ns}::${name}`);
     else rootScopeSymbols.add(name);
   }
 

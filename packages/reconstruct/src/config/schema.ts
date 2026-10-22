@@ -27,6 +27,43 @@ export interface ProjectConfig {
   additionalSources?: AdditionalSource[];
   /** Pre-computed address links between binaries (populated by sync-names.ts) */
   crossPlatformLinks?: CrossPlatformLink[];
+  /** Class templates the tree defines for real instead of flattening their instantiations */
+  templates?: TemplatesConfig;
+}
+
+// =============================================================================
+// Class templates
+// =============================================================================
+
+export interface TemplatesConfig {
+  /** The one header that defines every registered template and key class (`Storm/H/stpl.h`). */
+  header: string;
+  /** File-name prefix of the units that hold the member definitions (`stpl_`). */
+  implPrefix?: string;
+  /** Family name -> its parameters. The binary keeps no parameter names; these are ours. */
+  families: Record<string, TemplateFamilyConfig>;
+  /** Non-template classes the header defines beside the templates (stpl.h's hash keys). */
+  classes?: string[];
+  /**
+   * Register only these instantiations (any spelling of each); absent means every
+   * instantiation of a registered family. An instantiation's template-id arguments
+   * must be listed too.
+   */
+  instantiations?: string[];
+  /**
+   * Names Ghidra gives a COMDAT copy that no member of its class owns
+   * (`Destructor_Unreferenced`, `thunk_Destructor`), as `*`-globs. Such a copy is
+   * emitted as a free function beside the members, never as a member.
+   */
+  orphans?: string[];
+}
+
+export interface TemplateFamilyConfig {
+  /** The class key, as the RTTI descriptor's `.?AV`/`.?AU` says. */
+  key: 'class' | 'struct';
+  params: Array<{ name: string; kind: 'type' | 'int' }>;
+  /** The base class, spelled over the family's own parameters (`TSHashTable<T, TKey>`). */
+  base?: string;
 }
 
 // =============================================================================

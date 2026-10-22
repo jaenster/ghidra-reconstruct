@@ -77,7 +77,7 @@ import { generateReadme } from './readme.js';
 import { conventionKeyword } from './calling-convention.js';
 import { organizeByNamespace, getFilePath, setModuleNames, setNamespaceCollisionTypes, normalizeQualifiedReference } from './namespace.js';
 import { buildNamespaceResolution, namespaceResolution, renderNamespace } from './namespace-resolution.js';
-import { setInteriorLabelSymbols, resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, setDeclarationClosureDataContent, getDeclarationClosureReport, isUnreferenceableArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, wasGlobalClaimed, findDuplicateLinkageNames, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, setInitializerAddressTable, setInitializerFunctionAddresses, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType, emittedNamespaceOf, getDeclaredNames, initializerAddressReferences, addInitializerAddressReferences, markUnnamedImportSlots, setInitializerEnumConstants } from './globals-header.js';
+import { setInteriorLabelSymbols, resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, setDeclarationClosureDataContent, getDeclarationClosureReport, isUnreferenceableArtifact, isEmittableGlobal, isDataArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, wasGlobalClaimed, findDuplicateLinkageNames, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, setInitializerAddressTable, setInitializerFunctionAddresses, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType, emittedNamespaceOf, getDeclaredNames, initializerAddressReferences, addInitializerAddressReferences, markUnnamedImportSlots, setInitializerEnumConstants } from './globals-header.js';
 import { normalizeDataAddress, stringDefinition } from './declaration-closure.js';
 import { harvestAnnotatedParameterTypes } from './win32-signatures.js';
 import { PLATFORM_FUNCDEF_NAMES, PLATFORM_STRUCT_FIELD_TYPES, isPlatformOrBuiltinType, isLibraryType, sdkLayoutMismatches, sdkHeaderOf, unprobedTypeNames, generatePlatformHeader, oddWidthTypesSpelled, placeholderTypesUsedIn, normalizeDataValue, arrayRowTypedefLines, arrayRowReturn, arrayRowSpelling, GHIDRA_PSEUDO_OP_RESULT_TYPES, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, platformDefinedFunctionNames, platformVoidPointerFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
@@ -94,6 +94,10 @@ import { collectCrtHeaders, EXCLUDED_SYMBOL_DECLS, declaredIdentifier, WIN32_ZER
 import { selectExclusionEmissions, setPlatformDefinedNames, setPlatformDeclaredNames, collectReferencedNames, mayReferenceNamespaces } from './exclusion-closure.js';
 import { normalizePointerSizeSpellings } from './pointer-size-spelling.js';
 import { flattenTemplateNames } from './template-names.js';
+import { buildTemplateRegistry, classScopeOf, templateDataDefinitions, templateHeaderTypes } from './templates/index.js';
+import { placeTemplateMembers } from './templates/placement.js';
+import { generateTemplateHeader } from './templates/emit-header.js';
+import { setTemplateRegistry, templateRegistry } from './templates/registry.js';
 import { retypeVtableLocals, retypeVtableLocalsByAssignment, vtableMembersByType } from '../modules/vtable-types.js';
 import { NeedleIndex, scanReferences } from './needle-index.js';
 import { foldGlobalAliases, setGlobalReferenceAliases } from './global-aliases.js';
@@ -692,7 +696,10 @@ export function generateProjectStage1(
   // Flatten Ghidra's demangled template spellings (`TSHashTable<struct_CELLIST,
   // class_HASHKEY_NONE>`) across the WHOLE model before anything is emitted, so
   // the declaration side and every reference side share one identifier.
-  flattenTemplateNames(dataTypes, functions, globals as Array<{ name?: string; dataType?: string; suggestedType?: string; suggestedName?: string; namespace?: string | null }>);
+  // Registered class templates keep their spelling instead (codegen/templates).
+  const templates = buildTemplateRegistry(options.projectConfig?.templates, dataTypes, functions, globals as Array<{ namespace?: string | null }>, strings);
+  setTemplateRegistry(templates);
+  flattenTemplateNames(dataTypes, functions, globals as Array<{ name?: string; dataType?: string; suggestedType?: string; suggestedName?: string; namespace?: string | null }>, templates);
 
   // Ghidra types a body's vtable LOCALS with the bare `vtable *`, which can only
   // be rendered `void *` — so `pListHead->FUN_004503f0` is a member access on
@@ -958,6 +965,8 @@ export function generateProjectStage1(
   // Initialize namespace collapsing with module names from project config
   const modules = options.projectConfig?.modules ?? {};
   setModuleNames(Object.keys(modules));
+  templates?.setPlacement(placeTemplateMembers(templates, functions, new Set(Object.keys(modules))));
+  templates?.findOrphans(functions);
 
   // Build registries from project config
   // Override files live in projectDir (not outputDir) so they survive regeneration
@@ -3343,6 +3352,21 @@ function generateFilesForFunctions(
     unitHeaderPaths.set(unitName, headerPath);
   }
 
+  // The members of the template header's classes are declared in that header and
+  // defined in their own units (templates/placement.ts): one header, many units.
+  const templates = templateRegistry();
+  const templateHeaderPath = templates ? (dirPrefix ? `${dirPrefix}/${templates.header}` : templates.header) : undefined;
+  const templateUnitImplPaths = new Map<string, string>();
+  if (templates && templateHeaderPath) {
+    for (const [unitName, unitFunctions] of organized) {
+      if (!unitFunctions.every(f => templates.unitOf(f.address) === unitName)) continue;
+      const implPath = getFilePath(unitName, 'impl', options);
+      templateUnitImplPaths.set(unitName, dirPrefix ? `${dirPrefix}/${implPath}` : implPath);
+      unitHeaderPaths.set(unitName, templateHeaderPath);
+    }
+    for (const typeName of templateHeaderTypes(templates, dataTypes)) typeOwnershipOverrides.set(typeName, templateHeaderPath);
+  }
+
   // Apply typeOwnership overrides to unitHeaderPaths BEFORE scoring
   for (const [typeName, headerPath] of typeOwnershipOverrides) {
     if (unitHeaderPaths.has(typeName)) {
@@ -3354,10 +3378,14 @@ function generateFilesForFunctions(
   const analyzedGlobals = (globals as AnalyzedDataSymbol[]).filter(g => 'scope' in g);
   const allAnalyzedGlobalNames = new Set(analyzedGlobals.map(g => g.suggestedName || g.name));
 
+  // A template member names its element everywhere; it is not where the element lives.
+  const scoredUnits = templateUnitImplPaths.size > 0
+    ? new Map([...organized].filter(([unitName]) => !templateUnitImplPaths.has(unitName)))
+    : organized;
   // The run's namespace resolution is built once, over the whole model, in
   // generateProject — before any target is generated.
   const { typeOwnerMap, structsWithOwnUnit, extraHeaderTypes } = computeTypeOwnership({
-    organized,
+    organized: scoredUnits,
     classes,
     dataTypes,
     globals: analyzedGlobals,
@@ -3706,6 +3734,7 @@ function generateFilesForFunctions(
     platformHeaders,
     sharedEnumTypes: context._sharedEnumTypes,
     globalsHeaderPath,
+    templateHeaderPath,
   });
   const resolvedModules = moduleGraph.resolve();
 
@@ -3724,12 +3753,43 @@ function generateFilesForFunctions(
 
   // One index over every name the per-file include feedback below asks about,
   // so each generated .cpp is scanned once instead of ~20,000 times.
+  // A template-id is no single token; its template's name is, and it lives in one header.
+  const templateNames = templates
+    ? [...templates.families().map(f => f.name), ...templates.keyClasses]
+    : [];
   const dependencyNeedles = new NeedleIndex([
     ...(context.functionAddressMap ? [...context.functionAddressMap.values()].map(t => t.name) : []),
     ...typeOwnerMap.keys(),
+    ...templateNames,
   ]);
 
   if (GEN_TIMING) genAdd('units/setup', Date.now() - gffT0);
+
+  // The template header's static data members, each defined in the unit of its
+  // class's first member. Claimed here, so globals.h/globals.cpp leave them alone.
+  const templateData: AnalyzedDataSymbol[] = [];
+  const templateDataUnit = new Map<AnalyzedDataSymbol, string>();
+  if (templates && templateUnitImplPaths.size > 0) {
+    const members = [...organized]
+      .filter(([unitName]) => templateUnitImplPaths.has(unitName))
+      .flatMap(([unitName, unitFunctions]) => unitFunctions.map(f => ({ unitName, f })))
+      .sort((a, b) => parseInt(a.f.address, 16) - parseInt(b.f.address, 16));
+    const firstUnitOfScope = new Map<string, string>();
+    for (const { unitName, f } of members) {
+      const scope = classScopeOf(f)!;
+      if (!firstUnitOfScope.has(scope)) firstUnitOfScope.set(scope, unitName);
+    }
+    for (const g of analyzedGlobals) {
+      if (g.scope !== 'global' || !isEmittableGlobal(g) || isDataArtifact(g, allAnalyzedGlobalNames)) continue;
+      const scope = classScopeOf(g);
+      const unit = scope ? firstUnitOfScope.get(scope) : undefined;
+      if (!unit) continue;
+      templateData.push(g);
+      templateDataUnit.set(g, unit);
+    }
+    markGlobalsClaimed(templateData);
+    shardRecordClaims(templateData);
+  }
 
   // ── Pass 2: Generate files using graph-resolved includes ──────────
   loadUnitIdentCache();
@@ -3740,17 +3800,19 @@ function generateFilesForFunctions(
 
     const headerPath = unitHeaderPaths.get(unitName)!;
     const implExt = options.format === 'c' ? '.c' : '.cpp';
-    let implPath = headerPath.replace(/\.h$/, implExt);
+    // A template member unit shares the template header, written once below.
+    const templateImplPath = templateUnitImplPaths.get(unitName);
+    let implPath = templateImplPath ?? headerPath.replace(/\.h$/, implExt);
 
     // The shard decision is taken for every unit in every process, in this same
     // order, so all shards agree on the partition without talking to each other.
     if (!shardOwnsNext(unitCost(unitFunctions))) {
-      shardPlaceholder(files, headerPath, 'header');
+      if (!templateImplPath) shardPlaceholder(files, headerPath, 'header');
       shardPlaceholder(files, implPath, 'implementation');
       if (options.generateSourceMaps) shardPlaceholderMap(sourceMaps, `${implPath}.map`);
       continue;
     }
-    shardRecordEmitted(headerPath);
+    if (!templateImplPath) shardRecordEmitted(headerPath);
     shardRecordEmitted(implPath);
 
     // Get graph-resolved includes for this module
@@ -3777,35 +3839,38 @@ function generateFilesForFunctions(
       }
     }
 
-    // Generate header — no funcIncludes to avoid circular include chains
-    const headerContent = genMark('units/header', () => generateHeader(
-      unitName,
-      unitFunctions,
-      classInfo,
-      dataTypes,
-      globals,
-      options,
-      context.methodConversions,
-      sortedTypeIncludes,
-      ownedTypeNames,
-      undefined,  // no publicFunctions filter — declare all functions
-      allClassNames,
-      includedTypeNames,
-      headerPath,
-      undefined,  // no funcIncludes
-      functions,  // allFunctions for cross-module method lookup
-      classes     // allClasses so cross-namespace method structs get method declarations
-    ));
+    // Generate header — no funcIncludes to avoid circular include chains. A template
+    // member unit has none of its own: the template header declares its members.
+    if (!templateImplPath) {
+      const headerContent = genMark('units/header', () => generateHeader(
+        unitName,
+        unitFunctions,
+        classInfo,
+        dataTypes,
+        globals,
+        options,
+        context.methodConversions,
+        sortedTypeIncludes,
+        ownedTypeNames,
+        undefined,  // no publicFunctions filter — declare all functions
+        allClassNames,
+        includedTypeNames,
+        headerPath,
+        undefined,  // no funcIncludes
+        functions,  // allFunctions for cross-module method lookup
+        classes     // allClasses so cross-namespace method structs get method declarations
+      ));
 
-    files.set(headerPath, {
-      path: headerPath,
-      content: headerContent,
-      type: 'header',
-      namespace: namespace?.fullPath,
-      className: classInfo?.name,
-      functions: unitFunctions.map(f => f.name),
-      includes: sortedAllIncludes,
-    });
+      files.set(headerPath, {
+        path: headerPath,
+        content: headerContent,
+        type: 'header',
+        namespace: namespace?.fullPath,
+        className: classInfo?.name,
+        functions: unitFunctions.map(f => f.name),
+        includes: sortedAllIncludes,
+      });
+    }
 
     // Generate implementation (impl includes own header + cross-file headers + globals)
     // Reset preamble accumulator per output file to avoid cross-file leakage.
@@ -3898,6 +3963,13 @@ function generateFilesForFunctions(
     context.fileLocalGlobals = prevFileLocals;
     context._preambles = prevPreambles;
 
+
+    // The static data members of the template header's classes (their vftables)
+    // are defined beside the members, for the same scan below.
+    if (templateImplPath && reusedImpl === undefined) {
+      const own = templateData.filter(g => templateDataUnit.get(g) === unitName);
+      if (own.length > 0) implContent = `${implContent}\n${templateDataDefinitions(own)}`;
+    }
 
     // Co-located global definitions belong to this .cpp's content BEFORE the
     // dependency scan below runs. Appending them afterwards means their type and
@@ -4012,6 +4084,10 @@ function generateFilesForFunctions(
         }
       }
 
+      if (templateHeaderPath && templateNames.some(name => mentioned.has(name))) {
+        addInclude(templateHeaderPath);
+      }
+
       // Scan for type references in bodies (casts, local vars, etc.)
       for (const [typeName, ownerPath] of typeOwnerMap) {
         if (existingIncludes.has(ownerPath)) continue;
@@ -4124,6 +4200,38 @@ function generateFilesForFunctions(
 
   if (GEN_TIMING) genAdd('units/loop-total', Date.now() - unitsT0);
   saveUnitIdentCache();
+
+  // ── The template header: the class templates and every member's declaration ──
+  if (templates && templateHeaderPath && templateUnitImplPaths.size > 0) {
+    const header = templateHeaderPath;
+    const members = [...organized].filter(([unitName]) => templateUnitImplPaths.has(unitName)).flatMap(([, fs]) => fs);
+    if (shardOwnsNext(unitCost(members))) {
+      shardRecordEmitted(header);
+      const headerTypes = templateHeaderTypes(templates, dataTypes);
+      // Whatever else the ownership placed here (a type only the templates hold),
+      // rendered as any header renders its types.
+      const owned = new Set<string>();
+      for (const [typeName, ownerPath] of typeOwnerMap) {
+        if (ownerPath === header && !headerTypes.has(typeName)) owned.add(typeName);
+      }
+      const base = generateHeader(
+        header.replace(/\.[^/.]+$/, ''), [], undefined, dataTypes, globals, options, context.methodConversions,
+        [], owned, undefined, undefined, new Set<string>(), header, undefined, functions, classes,
+      );
+      files.set(header, {
+        path: header,
+        content: generateTemplateHeader({
+          registry: templates, dataTypes, members, data: templateData, base,
+          ownerOf: typeName => typeOwnerMap.get(typeName), options,
+        }),
+        type: 'header',
+        functions: members.map(f => f.name),
+        includes: [],
+      });
+    } else {
+      shardPlaceholder(files, header, 'header');
+    }
+  }
 
   // ── Pass 3: Generate type-only headers (if any) ────────────────────
   const extraT0 = Date.now();
@@ -5586,8 +5694,10 @@ export function buildFuncPtrArgCastTables(
       if (!name || /[^A-Za-z0-9_]/.test(name)) continue;
       if (ambiguous.has(name)) continue;
       if (g.scope !== 'global') continue;
-      const segments = emittedNamespaceOf(g).segments;
-      if (segments.length > 0 && blockableLeadSegments.has(segments[0])) continue;
+      const resolved = emittedNamespaceOf(g);
+      const segments = resolved.segments;
+      // A class the template header defines is no namespace a same-named type could block.
+      if (segments.length > 0 && !resolved.classScope && blockableLeadSegments.has(segments[0])) continue;
       const existing = globalNamespaces[name];
       if (existing !== undefined && existing.join('::') !== segments.join('::')) {
         ambiguous.add(name);

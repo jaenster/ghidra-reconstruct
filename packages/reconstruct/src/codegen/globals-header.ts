@@ -16,6 +16,9 @@ import { allOnesSentinel, negativeBytePatternInUnsignedSlot, negativeInUnsignedS
 import { enumTypedefLine } from './enum-width.js';
 import { addressLiteralFloor, ADDRESS_LITERAL_CEILING } from '@ghidra-mcp/cpp-parser';
 import { scanReferences } from './needle-index.js';
+import { classScopedReference } from './templates/index.js';
+import { templateRegistry } from './templates/registry.js';
+import { isFiller } from './templates/layout.js';
 
 /**
  * Exact Win32 SDK typedef names (not `LP`/`IMAGE_` prefixed) seen as
@@ -92,7 +95,7 @@ function makeLibraryTypeSkipPredicate(
  * co-located blocks in struct .cpp files) must agree on this, or globals.cpp
  * defines symbols whose type no TU can see.
  */
-function isEmittableGlobal(g: AnalyzedDataSymbol): boolean {
+export function isEmittableGlobal(g: AnalyzedDataSymbol): boolean {
   // An import slot no body names is not program data (markUnnamedImportSlots), and
   // neither is a placeholder at an unmapped address: bodies lower those to volatile
   // accesses at the address, and the definitions already drop them.
@@ -541,6 +544,14 @@ export function generateGlobalsHeader(
     for (const inc of byValueIncludes) {
       lines.push(`#include "${inc}"`);
     }
+  }
+  // A template-id cannot be forward-declared: a global typed by one needs the template header.
+  const templates = templateRegistry();
+  if (templates && globals.some(g => {
+    const type = g.suggestedType || g.dataType;
+    return type?.includes('<') && templates.isTreeType(type.trim());
+  }) && !byValueIncludes.includes(templates.header)) {
+    lines.push(`#include "${templates.header}"`);
   }
   lines.push('');
 
@@ -1144,16 +1155,7 @@ export function generateExternDeclaration(
   const wideText = isWideTextDatum(global, type) ? inferArrayDeclaration(global) : null;
   if (wideText) type = `${wideText.type}[${wideText.count}]`;
 
-  // Evidence comment, same convention as functions: how the name was established.
-  let evidence = '';
-  if (global.comment) {
-    const lines = global.comment
-      .replace(/\\n/g, '\n')
-      .split('\n')
-      .map(l => l.trim())
-      .filter(l => l.length > 0 && !/^@(date|author|function|address|description|params|calling)\b/i.test(l));
-    if (lines.length > 0) evidence = lines.map(l => `// ${l}`).join('\n') + '\n';
-  }
+  const evidence = globalEvidenceComment(global);
 
   recordDeclaredName(name);
   let declaration = `${evidence}extern ${normalizeArrayDeclaration(type, name)};`;
@@ -1168,6 +1170,17 @@ export function generateExternDeclaration(
   }
 
   return declaration;
+}
+
+/** Evidence comment, same convention as functions: how the name was established. */
+export function globalEvidenceComment(global: AnalyzedDataSymbol): string {
+  if (!global.comment) return '';
+  const lines = global.comment
+    .replace(/\\n/g, '\n')
+    .split('\n')
+    .map(l => l.trim())
+    .filter(l => l.length > 0 && !/^@(date|author|function|address|description|params|calling)\b/i.test(l));
+  return lines.length > 0 ? lines.map(l => `// ${l}`).join('\n') + '\n' : '';
 }
 
 /**
@@ -1634,6 +1647,9 @@ function functionAddressSpelling(
 function emitPointerToSymbol(rawValue: string, expectedType?: string): string {
   // Drop the CRT-helper namespace prefixes (compiler/VisualStudio are not emitted).
   const stripped = rawValue.replace(/\b(?:compiler|VisualStudio)::/g, '');
+  // A member of a class the template header defines is spelled through that
+  // class, whose name is no identifier.
+  const classMember = classScopedReference(stripped);
   // Ghidra also hands back INTERIOR references — `Tbl[14].pField`, `DAT_x+1`.
   // Those are already legal C++ expressions and must survive intact; only names
   // that are not legal C++ go through the sanitizer.
@@ -1645,11 +1661,11 @@ function emitPointerToSymbol(rawValue: string, expectedType?: string): string {
   // the raw symbol path (`D2Game::Quests::Quests::A1Q6::Fn`); the declaration is
   // emitted into the collapsed namespace, so the raw path names a scope that does
   // not exist. Same collapse function both sides — one source of truth.
-  const value = normalizeQualifiedReference(legalized);
+  const value = classMember ?? normalizeQualifiedReference(legalized);
   // The name the lookups below use is the unqualified one; the SPELLING may need
   // a root qualifier to survive the namespace block it lands in.
-  const spelled = shadowQualifyReference(value);
-  const bare = value.match(/^[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*$/) ? value : undefined;
+  const spelled = classMember ?? shadowQualifyReference(value);
+  const bare = classMember ?? (value.match(/^[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*$/) ? value : undefined);
   const slotType = expectedType ? stripFuncDefIndirection(expectedType.trim()) : undefined;
   // Asked of what the slot STANDS FOR: `typedef void* pointer` has no star to
   // find, and without this a `pointer` slot got no pointee and fell back to a
@@ -2399,17 +2415,31 @@ export function emitDataValue(dv: DataValue, indent = 0, expectedType?: string):
 
     case 'struct': {
       if (!dv.fields || dv.fields.length === 0) return '{}';
+      // A class template instantiation is named as a whole; its arguments may hold `*`.
+      const instantiation = expectedType ? templateRegistry()?.instantiation(expectedType.trim())?.spelling : undefined;
       // The slot may name the aggregate through a typedef: `FILE` is Ghidra's
       // `typedef _iobuf FILE`, and the layout is keyed on `_iobuf`. Without the
       // walk every field of `gaCrtFileHandleTable[20]` was typed as nothing, and
       // `&DAT_00993c80` (a `uint8_t`) went into `char * _ptr` uncast.
-      const layout = baseExpected
+      const layout = instantiation
+        ? structFieldTypes.get(instantiation)
+        : baseExpected
         ? structFieldTypes.get(baseExpected)
           ?? structFieldTypes.get(baseTypeName(resolveTypedefSpelling(baseExpected)))
         : undefined;
-      const fieldLines = dv.fields.map((f, i) => {
+      // The class template declares no member for Ghidra's filler bytes, so their
+      // values are no member's; they must be the zero the compiler pads with.
+      const fillers = instantiation ? templateFillerNames.get(instantiation) : undefined;
+      const members = dv.fields.filter(f => {
+        if (!fillers?.has(f.name)) return true;
+        if (!isZeroDataValue(f.value)) {
+          throw new Error(`[templates] ${instantiation}: filler ${f.name} is initialized non-zero; it has no member to hold it`);
+        }
+        return false;
+      });
+      const fieldLines = members.map((f, i) => {
         const v = emitDataValue(f.value, indent + 1, layout?.get(f.name));
-        const comma = i < dv.fields!.length - 1 ? ',' : '';
+        const comma = i < members.length - 1 ? ',' : '';
         // Use positional init (field names may be auto-generated)
         const isAutoName = /^field_\d+$/.test(f.name);
         if (isAutoName) {
@@ -2801,6 +2831,16 @@ function functionInitializerCast(name: string, expectedType?: string): string | 
 
 /** Field name → field type, per STRUCTURE/UNION, for typing struct initializers. */
 const structFieldTypes = new Map<string, Map<string, string>>();
+/** A registered instantiation -> the auto-names of Ghidra's filler bytes in it. */
+const templateFillerNames = new Map<string, Set<string>>();
+
+/** Every byte of the value is zero. */
+function isZeroDataValue(dv: DataValue): boolean {
+  if (dv.kind === 'struct') return (dv.fields ?? []).every(f => isZeroDataValue(f.value));
+  if (dv.kind === 'array') return (dv.elements ?? []).every(isZeroDataValue);
+  const v = (dv.value ?? '0').trim();
+  return /^(?:0x)?0+$/i.test(v) || v === 'nullptr' || v === 'NULL';
+}
 
 /** Names of STRUCTURE/UNION data types (for the elaborated-specifier rule). */
 const structOrUnionTypeNames = new Set<string>();
@@ -2870,6 +2910,7 @@ export function setMultidimArrayGlobals(
  */
 export function setGlobalInitializerTypes(dataTypes: ExtractedDataType[] | undefined): void {
   structFieldTypes.clear();
+  templateFillerNames.clear();
   structOrUnionTypeNames.clear();
   enumTypeNames.clear();
   // The platform structs this generator declares itself. Ghidra reports them as
@@ -2900,6 +2941,11 @@ export function setGlobalInitializerTypes(dataTypes: ExtractedDataType[] | undef
       byName.set(f.name || ghidraDefaultFieldName(isUnion, i, f.offset), f.dataType);
     });
     structFieldTypes.set(dt.name, byName);
+    if (templateRegistry()?.instantiation(dt.name)) {
+      const fillers = new Set<string>();
+      fields.forEach((f, i) => { if (isFiller(f)) fillers.add(ghidraDefaultFieldName(isUnion, i, f.offset)); });
+      if (fillers.size > 0) templateFillerNames.set(dt.name, fillers);
+    }
   }
 }
 
@@ -3362,17 +3408,9 @@ export function generateGlobalsImpl(
     if (undeclared.length === 0) continue;
     if (namespace) lines.push(`namespace ${namespace} {`);
     emitGlobalDefsWithIfdef(lines, undeclared, false, (global, ls) => {
-      const type = normalizeGlobalDeclType(global.suggestedType || global.dataType);
       const name = sanitizeSymbolName(global.suggestedName || global.name);
-      const arrayInfo = inferArrayDeclaration(global);
-      if (arrayInfo && (!global.initializedData || global.initializedData.kind === 'array'
-                        || isWideTextDatum(global, type))) {
-        recordDeclaredName(name);
-        ls.push(`extern ${arrayInfo.type} ${name}[${arrayInfo.count}];`);
-      } else {
-        recordDeclaredName(name);
-        ls.push(`extern ${normalizeArrayDeclaration(type, name)};`);
-      }
+      recordDeclaredName(name);
+      ls.push(`extern ${globalDeclarator(global, name)};`);
     });
     if (namespace) lines.push(`} // namespace ${namespace}`);
   }
@@ -3405,24 +3443,13 @@ export function generateGlobalsImpl(
       lines.push('');
 
       emitGlobalDefsWithIfdef(lines, withData, options.includeAddressComments, (global, ls) => {
-        const type = normalizeGlobalDeclType(global.suggestedType || global.dataType);
         const name = sanitizeSymbolName(global.suggestedName || global.name);
 
         if (options.includeAddressComments) {
           ls.push(`// @${global.address}`);
         }
 
-        // Check if this should be an array declaration
-        const arrayInfo = inferArrayDeclaration(global);
-        setInitializerOwnerAddress(global.address);
-        const initializer = emitDataValue(global.initializedData!, 0, type);
-        setInitializerOwnerAddress(undefined);
-
-        if (arrayInfo && (global.initializedData!.kind === 'array' || isWideTextDatum(global, type))) {
-          ls.push(`${arrayInfo.type} ${name}[${arrayInfo.count}] = ${initializer};`);
-        } else {
-          ls.push(`${normalizeArrayDeclaration(type, name)} = ${braceArrayInitializer(type, initializer)};`);
-        }
+        ls.push(globalDefinition(global, name));
         ls.push('');
       });
     }
@@ -3435,22 +3462,13 @@ export function generateGlobalsImpl(
       lines.push('');
 
       emitGlobalDefsWithIfdef(lines, withoutData, options.includeAddressComments, (global, ls) => {
-        const type = normalizeGlobalDeclType(global.suggestedType || global.dataType);
         const name = sanitizeSymbolName(global.suggestedName || global.name);
 
         if (options.includeAddressComments) {
           ls.push(`// @${global.address}`);
         }
 
-        const arrayInfo = inferArrayDeclaration(global);
-        setInitializerOwnerAddress(global.address);
-        const value = renderGlobalScalarInitializer(global.value, type, arrayInfo?.count);
-        setInitializerOwnerAddress(undefined);
-        if (arrayInfo) {
-          ls.push(`${arrayInfo.type} ${name}[${arrayInfo.count}] = { ${value} };`);
-        } else {
-          ls.push(`${normalizeArrayDeclaration(type, name)} = ${braceArrayInitializer(type, value)};`);
-        }
+        ls.push(globalDefinition(global, name));
       });
       lines.push('');
     }
@@ -3463,19 +3481,13 @@ export function generateGlobalsImpl(
       lines.push('');
 
       emitGlobalDefsWithIfdef(lines, uninitialized, options.includeAddressComments, (global, ls) => {
-        const type = normalizeGlobalDeclType(global.suggestedType || global.dataType);
         const name = sanitizeSymbolName(global.suggestedName || global.name);
 
         if (options.includeAddressComments) {
           ls.push(`// @${global.address}`);
         }
 
-        const arrayInfo = inferArrayDeclaration(global);
-        if (arrayInfo) {
-          ls.push(`${arrayInfo.type} ${name}[${arrayInfo.count}];`);
-        } else {
-          ls.push(`${normalizeArrayDeclaration(type, name)};`);
-        }
+        ls.push(globalDefinition(global, name));
       });
       lines.push('');
     }
@@ -3489,6 +3501,49 @@ export function generateGlobalsImpl(
   }
 
   return lines.join('\n');
+}
+
+/**
+ * The declarator a datum is declared with, under the name it is spelled by: the
+ * `extern` side of {@link globalDefinition}, array-shaped exactly when the
+ * definition is.
+ */
+export function globalDeclarator(global: AnalyzedDataSymbol, name: string): string {
+  const type = normalizeGlobalDeclType(global.suggestedType || global.dataType);
+  const arrayInfo = inferArrayDeclaration(global);
+  if (arrayInfo && (!global.initializedData || global.initializedData.kind === 'array'
+                    || isWideTextDatum(global, type))) {
+    return `${arrayInfo.type} ${name}[${arrayInfo.count}]`;
+  }
+  return normalizeArrayDeclaration(type, name);
+}
+
+/**
+ * A datum's definition under the name it is spelled by: its structured value,
+ * its scalar value, or none (BSS). One rendering for globals.cpp and for the
+ * static data members of the template header's classes.
+ */
+export function globalDefinition(global: AnalyzedDataSymbol, name: string): string {
+  const type = normalizeGlobalDeclType(global.suggestedType || global.dataType);
+  const arrayInfo = inferArrayDeclaration(global);
+  if (global.initializedData) {
+    setInitializerOwnerAddress(global.address);
+    const initializer = emitDataValue(global.initializedData, 0, type);
+    setInitializerOwnerAddress(undefined);
+    if (arrayInfo && (global.initializedData.kind === 'array' || isWideTextDatum(global, type))) {
+      return `${arrayInfo.type} ${name}[${arrayInfo.count}] = ${initializer};`;
+    }
+    return `${normalizeArrayDeclaration(type, name)} = ${braceArrayInitializer(type, initializer)};`;
+  }
+  if (global.isInitialized) {
+    setInitializerOwnerAddress(global.address);
+    const value = renderGlobalScalarInitializer(global.value, type, arrayInfo?.count);
+    setInitializerOwnerAddress(undefined);
+    if (arrayInfo) return `${arrayInfo.type} ${name}[${arrayInfo.count}] = { ${value} };`;
+    return `${normalizeArrayDeclaration(type, name)} = ${braceArrayInitializer(type, value)};`;
+  }
+  if (arrayInfo) return `${arrayInfo.type} ${name}[${arrayInfo.count}];`;
+  return `${normalizeArrayDeclaration(type, name)};`;
 }
 
 /**
@@ -4016,23 +4071,13 @@ export function generateColocatedGlobalsImpl(
       lines.push('');
 
       emitGlobalDefsWithIfdef(lines, withData, options.includeAddressComments, (global, ls) => {
-        const type = normalizeGlobalDeclType(global.suggestedType || global.dataType);
         const name = sanitizeSymbolName(global.suggestedName || global.name);
 
         if (options.includeAddressComments) {
           ls.push(`// @${global.address}`);
         }
 
-        const arrayInfo = inferArrayDeclaration(global);
-        setInitializerOwnerAddress(global.address);
-        const initializer = emitDataValue(global.initializedData!, 0, type);
-        setInitializerOwnerAddress(undefined);
-
-        if (arrayInfo && (global.initializedData!.kind === 'array' || isWideTextDatum(global, type))) {
-          ls.push(`${arrayInfo.type} ${name}[${arrayInfo.count}] = ${initializer};`);
-        } else {
-          ls.push(`${normalizeArrayDeclaration(type, name)} = ${braceArrayInitializer(type, initializer)};`);
-        }
+        ls.push(globalDefinition(global, name));
         ls.push('');
       });
     }
@@ -4043,22 +4088,13 @@ export function generateColocatedGlobalsImpl(
       lines.push('');
 
       emitGlobalDefsWithIfdef(lines, withoutData, options.includeAddressComments, (global, ls) => {
-        const type = normalizeGlobalDeclType(global.suggestedType || global.dataType);
         const name = sanitizeSymbolName(global.suggestedName || global.name);
 
         if (options.includeAddressComments) {
           ls.push(`// @${global.address}`);
         }
 
-        const arrayInfo = inferArrayDeclaration(global);
-        setInitializerOwnerAddress(global.address);
-        const value = renderGlobalScalarInitializer(global.value, type, arrayInfo?.count);
-        setInitializerOwnerAddress(undefined);
-        if (arrayInfo) {
-          ls.push(`${arrayInfo.type} ${name}[${arrayInfo.count}] = { ${value} };`);
-        } else {
-          ls.push(`${normalizeArrayDeclaration(type, name)} = ${braceArrayInitializer(type, value)};`);
-        }
+        ls.push(globalDefinition(global, name));
       });
       lines.push('');
     }
@@ -4069,19 +4105,13 @@ export function generateColocatedGlobalsImpl(
       lines.push('');
 
       emitGlobalDefsWithIfdef(lines, uninitialized, options.includeAddressComments, (global, ls) => {
-        const type = normalizeGlobalDeclType(global.suggestedType || global.dataType);
         const name = sanitizeSymbolName(global.suggestedName || global.name);
 
         if (options.includeAddressComments) {
           ls.push(`// @${global.address}`);
         }
 
-        const arrayInfo = inferArrayDeclaration(global);
-        if (arrayInfo) {
-          ls.push(`${arrayInfo.type} ${name}[${arrayInfo.count}];`);
-        } else {
-          ls.push(`${normalizeArrayDeclaration(type, name)};`);
-        }
+        ls.push(globalDefinition(global, name));
       });
       lines.push('');
     }

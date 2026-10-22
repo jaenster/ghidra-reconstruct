@@ -12,6 +12,8 @@
 /** Standard C/C++ types from <cstdint>, <cstddef>, and language primitives */
 import { SDK_PROBED_NAMES, SDK_DEFINED_TYPES, SDK_TYPEDEF_NAMES, PLATFORM_HEADER_DECLARED_TYPES, SDK_LAYOUTS } from './sdk-types.generated.js';
 import { ARTIFACT_SUPPORT_LINES, Lexer, TokenKind } from '@ghidra-mcp/cpp-parser';
+import { templateRegistry } from './templates/registry.js';
+import { rootQualifyTemplateArguments } from './templates/identity.js';
 import {
   generateExcludedSymbolDecls, EXTRA_WIN32_SDK_HEADERS,
   EXCLUDED_SYMBOL_DECLS, CRT_DECLARED_FUNCTION_NAMES, declaredIdentifier,
@@ -725,7 +727,8 @@ function normalizeSignatureTypeInner(type: string): string {
 
   // Replace Ghidra template instantiations with void: "TSHashTable<A,B,0> *" → "void *"
   // Template params like struct_CELLIST, class_HASHKEY_NONE are Ghidra internal names.
-  if (trimmed.includes('<')) {
+  // A registered class template's instantiations are real types in the tree.
+  if (trimmed.includes('<') && !templateRegistry()?.isTreeType(trimmed)) {
     const stars = trimmed.match(/(\s*[*&]+\s*)$/);
     return stars ? `void ${stars[1].trim()}` : 'void';
   }
@@ -1859,6 +1862,7 @@ export function getShadowedTypeNames(): Set<string> | undefined {
  */
 export function rootQualifyShadowedType(type: string): string {
   if (!shadowedTypeNames || !type) return type;
+  if (type.includes('<')) return rootQualifyShadowedArguments(type);
   if (type.includes('::')) return type;
   const m = type.match(
     /^(\s*(?:(?:const|volatile)\s+)*(?:(?:struct|class|union|enum)\s+)?)([A-Za-z_]\w*)\b([\s\S]*)$/
@@ -1868,6 +1872,16 @@ export function rootQualifyShadowedType(type: string): string {
   return `${m[1]}::${m[2]}${m[3]}`;
 }
 
+
+/**
+ * The same, for the arguments of a registered template-id, which a namespace can
+ * shadow wherever the template-id is spelled: `TSHashTable<::StringEntryNode, HASHKEY_STRI>`.
+ * Every other spelling is returned as it is.
+ */
+export function rootQualifyShadowedArguments(type: string): string {
+  if (!shadowedTypeNames || !type.includes('<') || !templateRegistry()?.isTreeType(type.trim())) return type;
+  return rootQualifyTemplateArguments(type, shadowedTypeNames) ?? type;
+}
 
 /**
  * Ghidra's spellings for a `void`-pointer slot. `pointer` is its own alias

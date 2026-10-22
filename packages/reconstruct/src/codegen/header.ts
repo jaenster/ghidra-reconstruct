@@ -22,11 +22,12 @@ import type { MethodConversionRegistry } from '../methods/index.js';
 import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js';
 import { namespaceResolution, renderNamespace } from './namespace-resolution.js';
 import { isGhidraGeneratedName, suggestBetterName, type FuncPtrTarget } from '@ghidra-mcp/cpp-parser';
-import { isPlatformOrBuiltinType, isLibraryType, sdkTypeHasElaboratedForm, normalizeSignatureType, normalizeWideCharType, collapseFuncPtrTypedef, rootQualifyShadowedType, emittedParameterName, arrayRowReturn, WINDOWS_STRUCTS, platformDeclaredFunctionNames } from './platform-types.js';
+import { isPlatformOrBuiltinType, isLibraryType, sdkTypeHasElaboratedForm, normalizeSignatureType, normalizeWideCharType, collapseFuncPtrTypedef, rootQualifyShadowedType, rootQualifyShadowedArguments, emittedParameterName, arrayRowReturn, WINDOWS_STRUCTS, platformDeclaredFunctionNames } from './platform-types.js';
 import { generateExternDeclaration, isFuncDefTypedefName, sanitizeSymbolName, orderForwardDeclarations, type ForwardDeclaration } from './globals-header.js';
 import { declarationHead, pointerConvention } from './calling-convention.js';
 import { enumTypedefLine } from './enum-width.js';
 import { requiresPacking, adoptGhidraLayout } from './struct-packing.js';
+import { memberDefinitionScope } from './templates/index.js';
 
 /** normalizeSignatureType + fn-ptr-typedef double-indirection collapse, for
  *  emitting function parameter and return types ("fpFoo *" → "fpFoo").
@@ -849,6 +850,15 @@ export function emittedFunctionName(func: ExtractedFunction, returnType: string)
   return cleanName;
 }
 
+/** A function's parameters as its declaration spells them: signature type and legal name. */
+export function declaredParameters(func: ExtractedFunction): Array<{ type: string; name: string }> {
+  return renumberParams(func.parameters).map(p => {
+    const type = sigType(p.dataType);
+    // Avoid param name shadowing its own type (e.g., "eD2ItemFlag eD2ItemFlag")
+    return { type, name: emittedParameterName(p.name, type) };
+  });
+}
+
 export function generateFunctionDeclaration(
   func: ExtractedFunction,
   options: ReconstructOptions,
@@ -861,13 +871,7 @@ export function generateFunctionDeclaration(
       commentBlock = cleaned.split('\n').map(l => `// ${l}`).join('\n') + '\n';
     }
   }
-  let params = renumberParams(func.parameters)
-    .map(p => {
-      const type = sigType(p.dataType);
-      // Avoid param name shadowing its own type (e.g., "eD2ItemFlag eD2ItemFlag")
-      return `${type} ${emittedParameterName(p.name, type)}`;
-    })
-    .join(', ');
+  let params = declaredParameters(func).map(p => `${p.type} ${p.name}`).join(', ');
   if (func.hasVarArgs) params = params ? `${params}, ...` : '...';
 
   const stripAddr = (a: string) => a.includes(':') ? a.slice(a.lastIndexOf(':') + 1) : a;
@@ -886,8 +890,9 @@ export function generateFunctionDeclaration(
   }
 
   const cleanName = emittedFunctionName(func, returnSigType(func.returnType));
+  const member = memberDefinitionScope(func);
 
-  return `${commentBlock}${declarationHead(returnSigType(func.returnType), func.callingConvention)}${cleanName}(${params});${addressComment}`;
+  return `${commentBlock}${member?.prefix ?? ''}${declarationHead(returnSigType(func.returnType), func.callingConvention)}${member?.qualifier ?? ''}${cleanName}(${params});${addressComment}`;
 }
 
 /**
@@ -968,7 +973,7 @@ function generateDataTypeDeclaration(
  */
 const MAX_NAMED_FILLER_BYTES = 4096;
 
-function emitFieldLines(
+export function emitFieldLines(
   fields: StructField[],
   lines: string[],
   isUnion = false,
@@ -1532,6 +1537,12 @@ export function emittedFieldType(dataType: string, size: number): string | null 
  * this widens what can be reasoned about without widening what can be written.
  */
 export function fieldDeclSpelling(dataType: string, size: number): string | null {
+  const spelling = fieldDeclSpellingUnqualified(dataType, size);
+  // Spelled where a body is: inside a namespace that may shadow a template argument.
+  return spelling === null ? null : rootQualifyShadowedArguments(spelling);
+}
+
+function fieldDeclSpellingUnqualified(dataType: string, size: number): string | null {
   const direct = emittedFieldType(dataType, size);
   if (direct !== null) return direct;
   const raw = normalizeUndefinedType(dataType ?? '', size);

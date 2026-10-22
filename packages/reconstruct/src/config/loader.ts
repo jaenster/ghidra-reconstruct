@@ -181,6 +181,39 @@ function validate(config: ProjectConfig, source: string): void {
     }
   }
 
+  // Validate templates
+  if (config.templates) {
+    const t = config.templates;
+    if (typeof t.header !== 'string' || !t.header) {
+      throw new Error(`${source}: templates.header must name a header`);
+    }
+    if (!t.families || typeof t.families !== 'object' || Array.isArray(t.families)) {
+      throw new Error(`${source}: templates.families must be an object`);
+    }
+    for (const [name, family] of Object.entries(t.families)) {
+      if (family.key !== 'class' && family.key !== 'struct') {
+        throw new Error(`${source}: templates.families.${name}.key must be "class" or "struct"`);
+      }
+      if (!Array.isArray(family.params) || family.params.length === 0) {
+        throw new Error(`${source}: templates.families.${name}.params must be a non-empty array`);
+      }
+      for (const p of family.params) {
+        if (!p?.name || (p.kind !== 'type' && p.kind !== 'int')) {
+          throw new Error(`${source}: templates.families.${name}: every parameter needs a name and a kind "type" or "int"`);
+        }
+      }
+    }
+    if (t.classes !== undefined && !Array.isArray(t.classes)) {
+      throw new Error(`${source}: templates.classes must be an array`);
+    }
+    if (t.instantiations !== undefined && !Array.isArray(t.instantiations)) {
+      throw new Error(`${source}: templates.instantiations must be an array`);
+    }
+    if (t.orphans !== undefined && (!Array.isArray(t.orphans) || t.orphans.some(o => typeof o !== 'string' || !o))) {
+      throw new Error(`${source}: templates.orphans must be an array of name patterns`);
+    }
+  }
+
   // Validate modules
   if (config.modules) {
     if (typeof config.modules !== 'object' || Array.isArray(config.modules)) {

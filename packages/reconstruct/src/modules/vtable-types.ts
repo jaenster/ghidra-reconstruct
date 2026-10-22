@@ -24,7 +24,7 @@ import type { ExtractedDataType, ExtractedStruct, ExtractedFunction } from '../t
  * matches the owning struct's own `name`, and template flattening has not run at
  * this point.
  */
-function ownerOfCategory(category: string | undefined): string | undefined {
+export function ownerOfCategory(category: string | undefined): string | undefined {
   if (!category) return undefined;
   const segments = category.split('/').filter(Boolean);
   const last = segments[segments.length - 1];
@@ -45,7 +45,7 @@ function ownerOfCategory(category: string | undefined): string | undefined {
  * Flattened with the same `[^A-Za-z0-9_] -> _` rule the template pass uses, so
  * `<Owner>Vtable` lines up with the class name the rest of the tree gets.
  */
-function vtableTypeName(owner: string): string {
+export function vtableTypeName(owner: string): string {
   const flat = owner.replace(/[^A-Za-z0-9_]/g, '_');
   return `${/^\d/.test(flat) ? `_${flat}` : flat}Vtable`;
 }

@@ -15,6 +15,7 @@ import {
   collectReferencedTypeNamesFromTypes,
 } from './type-ownership.js';
 import { parseTypeString, isBuiltinType } from '../analysis/references.js';
+import { templateRegistry } from '../codegen/templates/registry.js';
 import { collectCrtHeaders } from '../codegen/crt-mapping.js';
 import type {
   ExtractedFunction,
@@ -42,7 +43,12 @@ export interface BuildModuleGraphInput {
   sharedEnumTypes?: Set<string>;
   /** Globals header path (if any) */
   globalsHeaderPath?: string;
+  /** The template header (codegen/templates), when the project registers templates */
+  templateHeaderPath?: string;
 }
+
+/** Stands for "a registered template-id": all of them are defined by the one template header. */
+const TEMPLATE_HEADER_SENTINEL = '_template_header_sentinel';
 
 /**
  * Build a fully populated ModuleGraph from extracted data.
@@ -64,7 +70,14 @@ export function buildModuleGraph(input: BuildModuleGraphInput): ModuleGraph {
     platformHeaders,
     sharedEnumTypes,
     globalsHeaderPath,
+    templateHeaderPath,
   } = input;
+
+  // A template-id cannot be forward-declared, and its spelling is no type name a
+  // module exports: any use of one needs the template header itself.
+  const registry = templateHeaderPath ? templateRegistry() : undefined;
+  const namesTemplate = (typeStr: string): boolean =>
+    !!registry && typeStr.includes('<') && registry.isTreeType(typeStr.trim());
 
   const { typeOwnerMap, structsWithOwnUnit, extraHeaderTypes } = ownership;
   const graph = new ModuleGraph();
@@ -96,6 +109,7 @@ export function buildModuleGraph(input: BuildModuleGraphInput): ModuleGraph {
   if (globalsHeaderPath) {
     graph.createModule({ id: globalsHeaderPath, implPath: globalsHeaderPath.replace(/\.h$/, implExt), unitName: '_globals' });
   }
+  if (templateHeaderPath) graph.registerGlobalSymbol(TEMPLATE_HEADER_SENTINEL, templateHeaderPath);
 
   // Create a module for each organized unit
   for (const [unitName, unitFunctions] of organized) {
@@ -142,6 +156,10 @@ export function buildModuleGraph(input: BuildModuleGraphInput): ModuleGraph {
       const struct = dt as ExtractedStruct;
       if (!struct.fields) continue;
       for (const field of struct.fields) {
+        if (namesTemplate(field.dataType)) {
+          graph.addDependency(headerPath, TEMPLATE_HEADER_SENTINEL, 'by-value');
+          continue;
+        }
         const stripped = stripTypeName(field.dataType);
         if (!stripped || isPlatformOrBuiltinType(stripped)) continue;
         if (ownedTypeNames.has(stripped)) continue;
@@ -153,6 +171,9 @@ export function buildModuleGraph(input: BuildModuleGraphInput): ModuleGraph {
 
     // Add deps from function signatures
     for (const func of unitFunctions) {
+      for (const t of [func.returnType, ...func.parameters.map(p => p.dataType)]) {
+        if (namesTemplate(t)) graph.addDependency(headerPath, TEMPLATE_HEADER_SENTINEL, 'by-value');
+      }
       // Return type
       const retParsed = parseTypeString(func.returnType);
       if (!isBuiltinType(retParsed.name) && !ownedTypeNames.has(retParsed.name)) {
@@ -218,6 +239,7 @@ export function buildModuleGraph(input: BuildModuleGraphInput): ModuleGraph {
       // `packet.field` use. Impl-include the local's own struct type, and feed it
       // into the pointer-field closure below.
       for (const lv of func.localVariables ?? []) {
+        if (namesTemplate(lv.dataType)) graph.addDependency(headerPath, TEMPLATE_HEADER_SENTINEL, 'by-pointer');
         const ln = stripTypeName(lv.dataType);
         if (ln && structByName.has(ln) && !ownedTypeNames.has(ln)) {
           graph.addDependency(headerPath, ln, 'by-pointer');
@@ -285,6 +307,10 @@ export function buildModuleGraph(input: BuildModuleGraphInput): ModuleGraph {
       const struct = dt as ExtractedStruct;
       if (!struct.fields) continue;
       for (const field of struct.fields) {
+        if (namesTemplate(field.dataType)) {
+          graph.addDependency(headerPath, TEMPLATE_HEADER_SENTINEL, 'by-value');
+          continue;
+        }
         const stripped = stripTypeName(field.dataType);
         if (!stripped || isPlatformOrBuiltinType(stripped)) continue;
         if (typeNames.has(stripped)) continue;

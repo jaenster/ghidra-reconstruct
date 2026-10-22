@@ -50,12 +50,19 @@
  * (`shadowedTypeNames`, fed from Ghidra's raw paths).
  */
 
+import { templateRegistry } from './templates/registry.js';
+
 /** A resolved namespace. Segments, never a joined string in flight. */
 export interface ResolvedNamespace {
   /** Ghidra's `Module::Folder::File` path, split once, kept for provenance. */
   readonly ghidraSegments: readonly string[];
   /** The segments actually emitted. Empty means root scope. */
   readonly segments: readonly string[];
+  /**
+   * The one segment is a CLASS the template header defines (`TSHashTable<CELLIST, HASHKEY_NONE>`),
+   * not a namespace: its members are qualified by it and never enclosed in a block.
+   */
+  readonly classScope?: boolean;
 }
 
 const ROOT: ResolvedNamespace = { ghidraSegments: [], segments: [] };
@@ -111,6 +118,15 @@ export class NamespaceResolution {
     if (!rawNamespace) return ROOT;
     const hit = this.byPath.get(rawNamespace);
     if (hit) return hit;
+
+    // A class the template header defines is its own scope, spelled as the tree
+    // spells it. Not split: a template-id can hold `::` in an argument.
+    const classScope = templateRegistry()?.scopeSpelling(rawNamespace);
+    if (classScope) {
+      const resolved: ResolvedNamespace = { ghidraSegments: [rawNamespace], segments: [classScope], classScope: true };
+      this.byPath.set(rawNamespace, resolved);
+      return resolved;
+    }
 
     // The one and only split of Ghidra's path.
     const ghidraSegments = rawNamespace.split('::').filter(s => s.length > 0);
@@ -245,7 +261,9 @@ export class NamespaceResolution {
 
   /** Bind a symbol's address to its resolved namespace. */
   claim(address: string | undefined, rawNamespace: string | null | undefined): ResolvedNamespace {
-    const resolved = this.resolvePath(rawNamespace);
+    // An orphan copy in a class the template header defines is no member of it:
+    // it is a free function at root scope (templates/registry.ts).
+    const resolved = templateRegistry()?.isOrphan(address) ? ROOT : this.resolvePath(rawNamespace);
     if (address) this.byAddr.set(address, resolved);
     return resolved;
   }

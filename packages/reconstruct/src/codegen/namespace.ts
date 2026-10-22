@@ -1,4 +1,5 @@
 import { NamespaceResolution, namespaceResolution, renderNamespace, setNamespaceResolution } from './namespace-resolution.js';
+import { templateRegistry } from './templates/registry.js';
 /**
  * Namespace and directory management
  *
@@ -293,7 +294,10 @@ export function organizeByNamespace(
     // belongs to Core::Core::Cmd. Only fall back to the class/_unnamespaced
     // when the function has no namespace of its own.
     const className = classMethodMap.get(func.address);
-    if (func.namespace) {
+    const templateUnit = templateRegistry()?.unitOf(func.address);
+    if (templateUnit) {
+      unitName = templateUnit;
+    } else if (func.namespace) {
       unitName = normalizeUnitName(func.namespace);
     } else if (className) {
       unitName = normalizeUnitName(className);
