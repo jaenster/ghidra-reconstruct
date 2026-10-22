@@ -17,7 +17,7 @@ import { enumTypedefLine } from './enum-width.js';
 import { addressLiteralFloor, ADDRESS_LITERAL_CEILING } from '@ghidra-mcp/cpp-parser';
 import { scanReferences } from './needle-index.js';
 import { classScopedReference } from './templates/index.js';
-import { templateRegistry } from './templates/registry.js';
+import { classKeyOf, templateRegistry } from './templates/registry.js';
 import { isFiller } from './templates/layout.js';
 
 /**
@@ -892,7 +892,7 @@ export function generateGlobalsHeader(
           if (isSkippableLibraryType(base)) return null;
           if (!forwardDeclarableTypeNames.has(base)) return null;
           if (!/[*&]/.test(type)) return null;
-          forwards.push(`struct ${base};`);
+          forwards.push(`${classKeyOf(base)} ${base};`);
         }
         const arrayInfo = inferArrayDeclaration(symbol);
         const decl = arrayInfo
@@ -4020,7 +4020,7 @@ function emitFallbackForwardDecl(name: string): string {
   if (/^fn[A-Z]/.test(name) || /^fp[A-Z]/.test(name) || /Proc[A-Z]?$/.test(name) || /Callback$/.test(name) || /Handler$/.test(name)) {
     return `typedef void (*${name})();`;
   }
-  return `struct ${name};`;
+  return `${classKeyOf(name)} ${name};`;
 }
 
 /**

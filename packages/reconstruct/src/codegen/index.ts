@@ -97,7 +97,7 @@ import { flattenTemplateNames } from './template-names.js';
 import { buildTemplateRegistry, classScopeOf, templateDataDefinitions, templateHeaderTypes } from './templates/index.js';
 import { placeTemplateMembers } from './templates/placement.js';
 import { generateTemplateHeader } from './templates/emit-header.js';
-import { setTemplateRegistry, templateRegistry } from './templates/registry.js';
+import { classKeyOf, setTemplateRegistry, templateRegistry } from './templates/registry.js';
 import { retypeVtableLocals, retypeVtableLocalsByAssignment, vtableMembersByType } from '../modules/vtable-types.js';
 import { NeedleIndex, scanReferences } from './needle-index.js';
 import { foldGlobalAliases, setGlobalReferenceAliases } from './global-aliases.js';
@@ -965,7 +965,7 @@ export function generateProjectStage1(
   // Initialize namespace collapsing with module names from project config
   const modules = options.projectConfig?.modules ?? {};
   setModuleNames(Object.keys(modules));
-  templates?.setPlacement(placeTemplateMembers(templates, functions, new Set(Object.keys(modules))));
+  templates?.setPlacement(placeTemplateMembers(templates, functions, modules, options.projectConfig?.moduleRuns ?? []));
   templates?.findOrphans(functions);
 
   // Build registries from project config
@@ -1826,7 +1826,7 @@ function makeClosurePrototypeRenderer(
       // Only by pointer — an aggregate passed or returned by value needs the
       // layout, and a forward declaration cannot supply it.
       if (!/[*&]/.test(type)) return null;
-      forwards.push(`struct ${base};`);
+      forwards.push(`${classKeyOf(base)} ${base};`);
     }
     const decl = generateFunctionDeclaration(func, options);
     // `generateFunctionDeclaration` prefixes Ghidra's comment block; the closure

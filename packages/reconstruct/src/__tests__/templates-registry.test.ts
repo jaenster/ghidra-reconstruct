@@ -7,7 +7,7 @@
 import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert';
 
-import { TemplateRegistry, demangleRttiTemplate, setTemplateRegistry } from '../codegen/templates/registry.js';
+import { TemplateRegistry, classKeyOf, demangleRttiClass, demangleRttiTemplate, setTemplateRegistry } from '../codegen/templates/registry.js';
 import { parseTypeSpelling, rootQualifyTemplateArguments, spellType, substituteType } from '../codegen/templates/identity.js';
 import { deriveFamilyLayouts, genericSpelling } from '../codegen/templates/layout.js';
 import { placeTemplateMembers } from '../codegen/templates/placement.js';
@@ -33,7 +33,7 @@ const CONFIG: TemplatesConfig = {
     TSHashTable: { key: 'class', params: [{ name: 'T', kind: 'type' }, { name: 'TKey', kind: 'type' }] },
     TSHashTableReuse: { key: 'class', params: [{ name: 'T', kind: 'type' }, { name: 'TKey', kind: 'type' }, { name: 'N', kind: 'int' }], base: 'TSHashTable<T, TKey>' },
   },
-  classes: ['HASHKEY_NONE'],
+  classes: { HASHKEY_NONE: { key: 'class' } },
   orphans: ['*_Unreferenced'],
 };
 
@@ -45,10 +45,62 @@ const struct = (name: string, size: number, fields: Array<[string | null, string
 describe('RTTI demangling', () => {
   it('reads class and struct arguments, pointers, nested template-ids and integer values', () => {
     assert.deepStrictEqual(demangleRttiTemplate('.?AV?$TSExplicitList@UCELLIST@@$0?CCCCCCCD@@@'),
-      { key: 'class', family: 'TSExplicitList', args: [{ kind: 'type', spelling: 'CELLIST' }, { kind: 'value', spelling: '-572662307' }], spelling: 'TSExplicitList<CELLIST,-572662307>' });
+      { key: 'class', family: 'TSExplicitList', args: [{ kind: 'type', spelling: 'CELLIST', className: 'CELLIST', classKey: 'struct' }, { kind: 'value', spelling: '-572662307' }], spelling: 'TSExplicitList<CELLIST,-572662307>' });
     assert.strictEqual(demangleRttiTemplate('.?AV?$TSExportTableSimple@UCELLIST@@PAUHCELLIST__@@$0A@@@')?.spelling, 'TSExportTableSimple<CELLIST,HCELLIST__*,0>');
     assert.strictEqual(demangleRttiTemplate('.?AV?$X@V?$TSHashObjectChunk@UCELLIST@@VHASHKEY_NONE@@@@$0BA@@@')?.spelling, 'X<TSHashObjectChunk<CELLIST,HASHKEY_NONE>,16>');
     assert.strictEqual(demangleRttiTemplate('.?AUCELLIST@@'), undefined);
+  });
+
+  it('keeps the class key each argument records, through pointers and nested template-ids', () => {
+    const d = demangleRttiTemplate('.?AV?$TSExportTableSync@USGAMEDATA@@PAUHSGAMEDATA__@@PAUHSGAMEDATALOCK__@@VCCritSect@@$0A@@@')!;
+    assert.deepStrictEqual(d.args.map(a => [a.className, a.classKey]),
+      [['SGAMEDATA', 'struct'], ['HSGAMEDATA__', 'struct'], ['HSGAMEDATALOCK__', 'struct'], ['CCritSect', 'class'], [undefined, undefined]]);
+    const nested = demangleRttiTemplate('.?AV?$X@V?$TSHashObjectChunk@UCELLIST@@VHASHKEY_NONE@@@@$0BA@@@')!.args[0];
+    assert.deepStrictEqual([nested.className, nested.classKey], ['TSHashObjectChunk<CELLIST,HASHKEY_NONE>', 'class']);
+    assert.deepStrictEqual(nested.nested?.map(a => [a.className, a.classKey]), [['CELLIST', 'struct'], ['HASHKEY_NONE', 'class']]);
+    assert.deepStrictEqual(demangleRttiClass('.?AVCCritSect@@'), { key: 'class', name: 'CCritSect' });
+    assert.strictEqual(demangleRttiClass('.?AV?$TSLink@UCELLIST@@@@'), undefined);
+  });
+});
+
+describe('RTTI class keys of the arguments', () => {
+  const SYNC: TemplatesConfig = {
+    ...CONFIG,
+    families: { ...CONFIG.families, TSExportTableSync: { key: 'class', params: [{ name: 'T', kind: 'type' }, { name: 'THandle', kind: 'type' }, { name: 'TLockedHandle', kind: 'type' }, { name: 'TSync', kind: 'type' }, { name: 'N', kind: 'int' }] } },
+  };
+  const sync = '.?AV?$TSExportTableSync@UCELLIST@@PAUHCELLIST__@@PAUHLOCKEDCELLIST__@@VCCritSect@@$0A@@@';
+  const table = '.?AV?$TSHashTable@UCELLIST@@VHASHKEY_NONE@@@@';
+
+  it('declares every argument class with the key its descriptors record', () => {
+    const r = TemplateRegistry.build(SYNC, [], [sync, table, '.?AUCELLIST@@']);
+    assert.strictEqual(r.classKey('CCritSect'), 'class');
+    assert.strictEqual(r.classKey('CELLIST'), 'struct');
+    assert.strictEqual(r.classKey('HCELLIST__'), 'struct');
+    assert.strictEqual(r.classKey('HASHKEY_NONE'), 'class');
+    assert.strictEqual(r.classKey('IgnoreList'), undefined);
+    setTemplateRegistry(r);
+    assert.strictEqual(classKeyOf('CCritSect'), 'class');
+    assert.strictEqual(classKeyOf('D2UnitStrc'), 'struct');
+  });
+
+  it('refuses a key class whose project.json key disagrees with the descriptors', () => {
+    assert.throws(() => TemplateRegistry.build({ ...SYNC, classes: { HASHKEY_NONE: { key: 'struct' } } }, [], [table]),
+      /RTTI \.\?AV\?\$TSHashTable@UCELLIST@@VHASHKEY_NONE@@@@: HASHKEY_NONE is a class, project.json says struct/);
+    // Its own descriptor counts too, even where no template names it.
+    assert.throws(() => TemplateRegistry.build({ ...SYNC, classes: { HASHKEY_NONE: { key: 'struct' } } }, [], ['.?AVHASHKEY_NONE@@']),
+      /HASHKEY_NONE is a class, project.json says struct/);
+  });
+
+  it('refuses a class two descriptors give different keys', () => {
+    assert.throws(() => TemplateRegistry.build(SYNC, [], [sync, '.?AUCCritSect@@']),
+      /RTTI \.\?AUCCritSect@@: CCritSect is a struct, RTTI .*TSExportTableSync.* says class/);
+  });
+
+  it('refuses a nested template-id argument whose key disagrees with its family', () => {
+    assert.throws(() => TemplateRegistry.build(CONFIG, [], ['.?AV?$TSExplicitList@U?$TSHashTable@UCELLIST@@VHASHKEY_NONE@@@@$0BA@@@']),
+      /TSHashTable is a struct, project.json says class/);
+    assert.throws(() => TemplateRegistry.build(CONFIG, [], ['.?AV?$TSExplicitList@V?$TSHashTable@UCELLIST@@UHASHKEY_NONE@@@@$0BA@@@']),
+      /HASHKEY_NONE is a struct, project.json says class/);
   });
 });
 
@@ -169,18 +221,48 @@ describe('the primary template layout', () => {
 });
 
 describe('placement and scope', () => {
+  const MODULES = { D2CMP: { namespaces: ['D2CMP'] }, D2Common: { namespaces: ['D2Common'] }, D2Client: { namespaces: ['D2Client'] } };
+  const fn = (address: string, namespace: string) => ({ address, namespace, name: 'f' }) as ExtractedFunction;
+
   it('defines a member beside the module function below it, per element', () => {
     const r = TemplateRegistry.build(CONFIG, ['TSLink<CELLIST>', 'TSLink<SGAMEDATA>']);
-    const fn = (address: string, namespace: string) => ({ address, namespace, name: 'f' }) as ExtractedFunction;
     const placed = placeTemplateMembers(r, [
       fn('00601000', 'D2CMP::SRC::CelCmp'), fn('00601100', 'CELLIST'), fn('00601200', 'TSLink<CELLIST>'),
       fn('00450000', 'D2Client::GAME::Game'), fn('00450100', 'TSLink<SGAMEDATA>'),
-      fn('00440000', 'HASHKEY_NONE'),
-    ], new Set(['D2CMP', 'D2Client']));
+    ], MODULES, [{ module: 'D2Client', start: '00440000', end: '00460000' }, { module: 'D2CMP', start: '005fde10', end: '0060dc70' }]);
     assert.strictEqual(placed.get('00601200'), 'D2CMP::SRC::stpl_CELLIST');
     assert.strictEqual(placed.get('00450100'), 'D2Client::GAME::stpl_SGAMEDATA');
-    // Nothing below it in a module: the template header's own directory.
-    assert.strictEqual(placed.get('00440000'), 'Storm::H::stpl_HASHKEY_NONE');
+  });
+
+  it('never looks below the start of the member\'s own module run', () => {
+    // D2CMP ends where D2Common starts; the key class's members open the D2Common run.
+    const r = TemplateRegistry.build({ ...CONFIG, classes: { HASHKEY_STRI: { key: 'class' } } }, ['TSLink<StringEntryNode>']);
+    const runs = [{ module: 'D2CMP', start: '005fde10', end: '0060dc70' }, { module: 'D2Common', start: '0060dc70', end: '00681f6a' }];
+    const placed = placeTemplateMembers(r, [
+      fn('0060db60', 'D2CMP::SRC::CelCmp'),
+      fn('0060dc70', 'HASHKEY_STRI'), fn('0060dd00', 'HASHKEY_STRI'),
+      fn('0060dd50', 'ChatIgnoreList'),
+      fn('0060ddb0', 'D2Common::Chat::Ignorelist'),
+      fn('0060e130', 'HASHKEY_STRI'), fn('0060e170', 'TSLink<StringEntryNode>'),
+    ], MODULES, runs);
+    // Nothing of D2Common below them in their run: the run's module directory.
+    assert.strictEqual(placed.get('0060dc70'), 'D2Common::stpl_HASHKEY_STRI');
+    assert.strictEqual(placed.get('0060dd00'), 'D2Common::stpl_HASHKEY_STRI');
+    assert.strictEqual(placed.get('0060e130'), 'D2Common::Chat::stpl_HASHKEY_STRI');
+    assert.strictEqual(placed.get('0060e170'), 'D2Common::Chat::stpl_StringEntryNode');
+  });
+
+  it('passes over a function homed in another module than its run\'s', () => {
+    const r = TemplateRegistry.build(CONFIG, ['TSLink<CELLIST>']);
+    const placed = placeTemplateMembers(r, [
+      fn('00601000', 'D2CMP::SRC::CelCmp'), fn('00601100', 'D2Common::Misfiled'), fn('00601200', 'TSLink<CELLIST>'),
+    ], MODULES, [{ module: 'd2cmp', start: '00600000', end: '00610000' }]);
+    assert.strictEqual(placed.get('00601200'), 'D2CMP::SRC::stpl_CELLIST');
+  });
+
+  it('refuses a member that lies in no module run', () => {
+    const r = TemplateRegistry.build(CONFIG, ['TSLink<CELLIST>']);
+    assert.throws(() => placeTemplateMembers(r, [fn('00601200', 'TSLink<CELLIST>')], MODULES, []), /00601200 .* lies in no module run/);
   });
 
   it('resolves a registered scope to the class, not to a namespace, and an orphan to root', () => {
@@ -226,11 +308,11 @@ describe('data initializers', () => {
 });
 
 describe('project.json templates', () => {
-  async function load(templates: unknown) {
+  async function load(templates: unknown, moduleRuns?: unknown) {
     const dir = mkdtempSync(join(tmpdir(), 'tmplcfg-'));
     try {
       const file = join(dir, 'project.json');
-      writeFileSync(file, JSON.stringify({ version: 1, project: 't', templates }));
+      writeFileSync(file, JSON.stringify({ version: 1, project: 't', templates, moduleRuns }));
       return await loadProjectConfigFromFile(file);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -246,5 +328,15 @@ describe('project.json templates', () => {
     await assert.rejects(load({ header: 'h', families: { A: { key: 'class', params: [{ name: 'T' }] } } }), /a kind "type" or "int"/);
     await assert.rejects(load({ header: 'h', families: {}, orphans: [''] }), /templates.orphans/);
     await assert.rejects(load({ families: {} }), /templates.header/);
+    await assert.rejects(load({ header: 'h', families: {}, classes: ['KEY'] }), /templates.classes must be an object/);
+    await assert.rejects(load({ header: 'h', families: {}, classes: { KEY: {} } }), /templates.classes.KEY.key/);
+  });
+
+  it('reads module runs, and refuses a run without a module, an empty run and overlapping runs', async () => {
+    const runs = [{ module: 'D2CMP', start: '005fde10', end: '0060dc70' }, { module: 'D2Common', start: '0060dc70', end: '00681f6a' }];
+    assert.deepStrictEqual((await load(CONFIG, runs))?.moduleRuns, runs);
+    await assert.rejects(load(CONFIG, [{ start: '1', end: '2' }]), /moduleRuns\[0\] needs a "module"/);
+    await assert.rejects(load(CONFIG, [{ module: 'A', start: '2', end: '2' }]), /moduleRuns\[0\] ends before it starts/);
+    await assert.rejects(load(CONFIG, [{ module: 'A', start: '10', end: '20' }, { module: 'B', start: '1f', end: '30' }]), /moduleRuns\[1\] overlaps moduleRuns\[0\]/);
   });
 });

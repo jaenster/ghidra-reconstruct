@@ -8,7 +8,9 @@
  * is found in the model (a namespace or type spelled `Family<args>`), and each
  * one the binary carries an RTTI type descriptor for (`.?AV?$TSHashTable@...`)
  * is checked against it: the class key, the family and every argument must be
- * what the descriptor says, or the run stops.
+ * what the descriptor says, or the run stops. The class key of every class an
+ * argument names is the descriptor's too, and the tree declares the class with
+ * it (classKeyOf).
  */
 
 import type { TemplatesConfig } from '../../config/schema.js';
@@ -42,6 +44,9 @@ export class TemplateRegistry {
   readonly header: string;
   readonly implPrefix: string;
   readonly keyClasses: ReadonlySet<string>;
+  private readonly keyClassKeys: ReadonlyMap<string, ClassKey>;
+  /** The class key of every class a registered family's descriptor names as an argument. */
+  private readonly argumentClassKeys = new Map<string, ClassKey>();
   private readonly familyByName: ReadonlyMap<string, TemplateFamily>;
   private readonly bySpelling = new Map<string, TemplateInstantiation>();
   private readonly ordered: TemplateInstantiation[] = [];
@@ -54,7 +59,8 @@ export class TemplateRegistry {
       new RegExp(`^${glob.split('*').map(part => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*')}$`));
     this.header = config.header;
     this.implPrefix = config.implPrefix ?? '';
-    this.keyClasses = new Set(config.classes ?? []);
+    this.keyClassKeys = new Map(Object.entries(config.classes ?? {}).map(([name, c]) => [name, c.key]));
+    this.keyClasses = new Set(this.keyClassKeys.keys());
     const families = new Map<string, TemplateFamily>();
     for (const [name, f] of Object.entries(config.families)) {
       families.set(name, { name, key: f.key, params: f.params.map(p => ({ name: p.name, kind: p.kind })), base: f.base });
@@ -158,6 +164,15 @@ export class TemplateRegistry {
     return ok;
   }
 
+  /**
+   * The class key the tree declares a plain class name with: project.json's for a
+   * key class, else the RTTI descriptors' for a class they name as a template
+   * argument. Undefined for any other name.
+   */
+  classKey(name: string): ClassKey | undefined {
+    return this.keyClassKeys.get(name) ?? this.argumentClassKeys.get(name);
+  }
+
   /** The tree's spelling of a registered class scope. */
   scopeSpelling(namespace: string): string | undefined {
     return this.bySpelling.get(namespace)?.spelling ?? (this.keyClasses.has(namespace) ? namespace : undefined);
@@ -211,9 +226,38 @@ export class TemplateRegistry {
     return inst;
   }
 
-  /** Every descriptor of a registered family must agree with the instantiation it names. */
+  /**
+   * Every descriptor of a registered family must agree with the instantiation it
+   * names, and every class its arguments name must have one class key: the one
+   * project.json gives a family or key class, and the one any other descriptor of
+   * that class (`.?AVCCritSect@@`) records.
+   */
   private checkRtti(rttiNames: Iterable<string>): void {
-    for (const raw of rttiNames) {
+    const names = [...rttiNames];
+    const seen = new Map<string, { key: ClassKey; raw: string }>();
+    const record = (name: string, key: ClassKey, raw: string): void => {
+      const held = seen.get(name);
+      if (held && held.key !== key) {
+        throw new Error(`[templates] RTTI ${raw}: ${name} is a ${key}, RTTI ${held.raw} says ${held.key}`);
+      }
+      seen.set(name, { key, raw });
+      const id = name.includes('<') ? templateIdOf(parseTypeSpelling(name)) : undefined;
+      const familyName = id ? templateName(id) : undefined;
+      const family = familyName ? this.familyByName.get(familyName) : undefined;
+      const configured = id ? family?.key : this.keyClassKeys.get(name);
+      if (configured !== undefined && configured !== key) {
+        throw new Error(`[templates] RTTI ${raw}: ${family?.name ?? name} is a ${key}, project.json says ${configured}`);
+      }
+      if (!id && configured === undefined) this.argumentClassKeys.set(name, key);
+    };
+    const visitArguments = (args: DemangledTemplate['args'], raw: string): void => {
+      for (const a of args) {
+        if (a.kind !== 'type' || !a.classKey || !a.className) continue;
+        record(a.className, a.classKey, raw);
+        if (a.nested) visitArguments(a.nested, raw);
+      }
+    };
+    for (const raw of names) {
       const d = demangleRttiTemplate(raw);
       if (!d) continue;
       const family = this.familyByName.get(d.family);
@@ -229,6 +273,7 @@ export class TemplateRegistry {
           throw new Error(`[templates] RTTI ${raw}: argument ${i + 1} kind disagrees with ${family.params[i].name}`);
         }
       });
+      visitArguments(d.args, raw);
       const spelling = spellType(parseTypeSpelling(d.spelling)!);
       const inst = this.bySpelling.get(spelling);
       // A descriptor for an instantiation the allowlist leaves out is not checked.
@@ -237,16 +282,39 @@ export class TemplateRegistry {
         throw new Error(`[templates] RTTI ${raw} names ${spelling}, the model has ${inst.spelling}`);
       }
     }
+    // A class's own descriptor, and a key class nothing names as an argument.
+    for (const raw of names) {
+      const plain = demangleRttiClass(raw);
+      if (plain && (seen.has(plain.name) || this.keyClassKeys.has(plain.name))) record(plain.name, plain.key, raw);
+    }
   }
 }
 
+export type ClassKey = 'class' | 'struct';
+
 /** A demangled `.?AV?$Name@args@@` RTTI type descriptor name. */
 export interface DemangledTemplate {
-  key: 'class' | 'struct';
+  key: ClassKey;
   family: string;
-  args: Array<{ kind: 'type' | 'value'; spelling: string }>;
+  args: DemangledArgument[];
   /** `Name<args>`, the arguments spelled as C++ spells them. */
   spelling: string;
+}
+
+export interface DemangledArgument {
+  kind: 'type' | 'value';
+  spelling: string;
+  /** A class argument, or a pointer to one: the class's name and the key its code records (`U` struct, `V` class). */
+  className?: string;
+  classKey?: ClassKey;
+  /** The arguments of a class argument that is itself a template-id. */
+  nested?: DemangledArgument[];
+}
+
+/** A demangled `.?AVName@@` / `.?AUName@@` descriptor of a plain, unqualified class. */
+export function demangleRttiClass(raw: string): { key: ClassKey; name: string } | undefined {
+  const m = /^\.\?A([UV])([A-Za-z_]\w*)@@$/.exec(raw);
+  return m ? { key: m[1] === 'U' ? 'struct' : 'class', name: m[2] } : undefined;
 }
 
 /**
@@ -286,31 +354,35 @@ function readIdentifier(c: Cursor): string {
 }
 
 /** `?$Name@<args>@` */
-function readTemplateName(c: Cursor): { family: string; args: DemangledTemplate['args']; spelling: string } {
+function readTemplateName(c: Cursor): { family: string; args: DemangledArgument[]; spelling: string } {
   expect(c, '?$');
   const family = readIdentifier(c);
-  const args: DemangledTemplate['args'] = [];
+  const args: DemangledArgument[] = [];
   while (c.s[c.i] !== '@') args.push(readArgument(c));
   c.i++;
   return { family, args, spelling: `${family}<${args.map(a => a.spelling).join(',')}>` };
 }
 
 /** A qualified class name ending in `@`: `CELLIST@@`, or `?$T@args@@`. */
-function readClassName(c: Cursor): string {
-  const name = c.s.startsWith('?$', c.i) ? readTemplateName(c).spelling : readIdentifier(c);
+function readClassName(c: Cursor): { name: string; nested?: DemangledArgument[] } {
+  const t = c.s.startsWith('?$', c.i) ? readTemplateName(c) : undefined;
+  const name = t ? t.spelling : readIdentifier(c);
   expect(c, '@');
-  return name;
+  return { name, nested: t?.args };
 }
 
-function readArgument(c: Cursor): DemangledTemplate['args'][number] {
+function readArgument(c: Cursor): DemangledArgument {
   const ch = c.s[c.i];
   if (ch === 'U' || ch === 'V') {
     c.i++;
-    return { kind: 'type', spelling: readClassName(c) };
+    const { name, nested } = readClassName(c);
+    return { kind: 'type', spelling: name, className: name, classKey: ch === 'U' ? 'struct' : 'class', ...(nested && { nested }) };
   }
   if (c.s.startsWith('PAU', c.i) || c.s.startsWith('PAV', c.i)) {
+    const classKey: ClassKey = c.s[c.i + 2] === 'U' ? 'struct' : 'class';
     c.i += 3;
-    return { kind: 'type', spelling: `${readClassName(c)}*` };
+    const { name, nested } = readClassName(c);
+    return { kind: 'type', spelling: `${name}*`, className: name, classKey, ...(nested && { nested }) };
   }
   if (c.s.startsWith('$0', c.i)) {
     c.i += 2;
@@ -349,4 +421,13 @@ export function setTemplateRegistry(registry: TemplateRegistry | undefined): voi
 
 export function templateRegistry(): TemplateRegistry | undefined {
   return current;
+}
+
+/**
+ * The class key a declaration of the plain class `name` is written with, here
+ * and in every other header: what the run's registry knows (classKey), else
+ * `struct`, the key every other Ghidra structure is emitted with.
+ */
+export function classKeyOf(name: string): ClassKey {
+  return current?.classKey(name) ?? 'struct';
 }

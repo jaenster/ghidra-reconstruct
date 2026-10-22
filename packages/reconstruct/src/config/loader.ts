@@ -203,14 +203,45 @@ function validate(config: ProjectConfig, source: string): void {
         }
       }
     }
-    if (t.classes !== undefined && !Array.isArray(t.classes)) {
-      throw new Error(`${source}: templates.classes must be an array`);
+    if (t.classes !== undefined) {
+      if (!t.classes || typeof t.classes !== 'object' || Array.isArray(t.classes)) {
+        throw new Error(`${source}: templates.classes must be an object`);
+      }
+      for (const [name, cls] of Object.entries(t.classes)) {
+        if (cls?.key !== 'class' && cls?.key !== 'struct') {
+          throw new Error(`${source}: templates.classes.${name}.key must be "class" or "struct"`);
+        }
+      }
     }
     if (t.instantiations !== undefined && !Array.isArray(t.instantiations)) {
       throw new Error(`${source}: templates.instantiations must be an array`);
     }
     if (t.orphans !== undefined && (!Array.isArray(t.orphans) || t.orphans.some(o => typeof o !== 'string' || !o))) {
       throw new Error(`${source}: templates.orphans must be an array of name patterns`);
+    }
+  }
+
+  // Validate module runs
+  if (config.moduleRuns !== undefined) {
+    if (!Array.isArray(config.moduleRuns)) {
+      throw new Error(`${source}: "moduleRuns" must be an array`);
+    }
+    const hex = /^(0x)?[0-9a-fA-F]+$/;
+    const spans: Array<[number, number, number]> = [];
+    config.moduleRuns.forEach((run, i) => {
+      if (!run?.module || !hex.test(run.start ?? '') || !hex.test(run.end ?? '')) {
+        throw new Error(`${source}: moduleRuns[${i}] needs a "module" and hex "start" and "end"`);
+      }
+      const start = parseInt(run.start, 16);
+      const end = parseInt(run.end, 16);
+      if (end <= start) throw new Error(`${source}: moduleRuns[${i}] ends before it starts`);
+      spans.push([start, end, i]);
+    });
+    spans.sort((a, b) => a[0] - b[0]);
+    for (let k = 1; k < spans.length; k++) {
+      if (spans[k][0] < spans[k - 1][1]) {
+        throw new Error(`${source}: moduleRuns[${spans[k][2]}] overlaps moduleRuns[${spans[k - 1][2]}]`);
+      }
     }
   }
 

@@ -29,6 +29,18 @@ export interface ProjectConfig {
   crossPlatformLinks?: CrossPlatformLink[];
   /** Class templates the tree defines for real instead of flattening their instantiations */
   templates?: TemplatesConfig;
+  /**
+   * The binary's address runs, each linked from one module (docs/data/runs-v2.tsv).
+   * Template members are defined beside the module code of their own run.
+   */
+  moduleRuns?: ModuleRun[];
+}
+
+/** A half-open address run `[start, end)` the linker filled from one module. */
+export interface ModuleRun {
+  module: string;
+  start: string;
+  end: string;
 }
 
 // =============================================================================
@@ -42,8 +54,8 @@ export interface TemplatesConfig {
   implPrefix?: string;
   /** Family name -> its parameters. The binary keeps no parameter names; these are ours. */
   families: Record<string, TemplateFamilyConfig>;
-  /** Non-template classes the header defines beside the templates (stpl.h's hash keys). */
-  classes?: string[];
+  /** Non-template classes the header defines beside the templates (stpl.h's hash keys), by name. */
+  classes?: Record<string, TemplateClassConfig>;
   /**
    * Register only these instantiations (any spelling of each); absent means every
    * instantiation of a registered family. An instantiation's template-id arguments
@@ -56,6 +68,11 @@ export interface TemplatesConfig {
    * emitted as a free function beside the members, never as a member.
    */
   orphans?: string[];
+}
+
+export interface TemplateClassConfig {
+  /** The class key, as the RTTI descriptors that name the class say (`V` class, `U` struct). */
+  key: 'class' | 'struct';
 }
 
 export interface TemplateFamilyConfig {

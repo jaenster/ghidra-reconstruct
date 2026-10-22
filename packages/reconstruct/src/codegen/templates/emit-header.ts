@@ -19,13 +19,13 @@ import { NodeKind } from '@ghidra-mcp/cpp-parser';
 import type { ASTNode, Identifier, TemplateType, TypeNode } from '@ghidra-mcp/cpp-parser';
 import type { AnalyzedDataSymbol, ExtractedDataType, ExtractedFunction, ExtractedStruct, ReconstructOptions, StructField } from '../../types.js';
 import { conventionKeyword } from '../calling-convention.js';
-import { declaredParameters, emitFieldLines, emittedFunctionName, generateFunctionDeclaration, guardedFuncDefTypedef, returnSigType } from '../header.js';
+import { classHead, declaredParameters, emitFieldLines, emittedFunctionName, generateFunctionDeclaration, guardedFuncDefTypedef, returnSigType } from '../header.js';
 import { globalDeclarator, globalEvidenceComment, sanitizeSymbolName } from '../globals-header.js';
 import { namespaceResolution } from '../namespace-resolution.js';
 import { orphanMarker } from './index.js';
 import { parseTypeSpelling, templateIdOf, templateName } from './identity.js';
 import { deriveFamilyLayouts, genericSpelling, VTABLE_MEMBER_TYPE, type FamilyLayout } from './layout.js';
-import type { TemplateFamily, TemplateInstantiation, TemplateRegistry } from './registry.js';
+import { classKeyOf, type TemplateFamily, type TemplateInstantiation, type TemplateRegistry } from './registry.js';
 
 export interface TemplateHeaderInput {
   registry: TemplateRegistry;
@@ -225,7 +225,7 @@ function renderKeyClass(
   members: readonly ExtractedFunction[],
   mentioned: Set<string>,
 ): string {
-  const lines: string[] = [`struct ${struct.name} {`];
+  const lines: string[] = classHead(struct.name);
   emitFieldLines(struct.fields, lines);
   for (const f of struct.fields) plainTypeNames(f.dataType, mentioned);
   const own = members.filter(f => scopeOf(f) === struct.name);
@@ -305,22 +305,12 @@ export function generateTemplateHeader(input: TemplateHeaderInput): string {
   // What the templates name without defining: element structs by pointer, and a
   // funcdef typedef or two in a signature.
   const params = new Set(registry.families().flatMap(f => f.params.map(p => p.name)));
-  const forward: string[] = [];
-  const typedefs: string[] = [];
-  const includes = new Set<string>();
   const kinds = new Map(dataTypes.map(dt => [dt.name, dt.kind]));
-  for (const name of [...mentioned].sort()) {
-    if (params.has(name) || registry.keyClasses.has(name) || name === VTABLE_MEMBER_TYPE) continue;
-    const kind = kinds.get(name);
-    if (kind === 'STRUCTURE') forward.push(`struct ${name};`);
-    else if (kind === 'UNION') forward.push(`union ${name};`);
-    else if (kind === 'FUNCTION_DEFINITION') {
-      const typedef = guardedFuncDefTypedef(name);
-      if (typedef) typedefs.push(typedef);
-    } else if (kind === 'TYPEDEF') {
-      const owner = input.ownerOf(name);
-      if (owner) includes.add(owner);
-    }
+  const named = [...mentioned].sort().filter(name => !params.has(name) && !registry.keyClasses.has(name) && name !== VTABLE_MEMBER_TYPE);
+  const includes = new Set<string>();
+  for (const name of named) {
+    const owner = kinds.get(name) === 'TYPEDEF' ? input.ownerOf(name) : undefined;
+    if (owner) includes.add(owner);
   }
   // An argument a template holds by value has to be complete where the instantiation is.
   for (const inst of registry.instantiations()) {
@@ -334,7 +324,20 @@ export function generateTemplateHeader(input: TemplateHeaderInput): string {
       if (owner) includes.add(owner);
     });
   }
-
+  const forward: string[] = [];
+  const typedefs: string[] = [];
+  for (const name of named) {
+    const kind = kinds.get(name);
+    // A class an included header defines needs no declaration of its own.
+    const owner = input.ownerOf(name);
+    if ((kind === 'STRUCTURE' || kind === 'UNION') && owner && includes.has(owner)) continue;
+    if (kind === 'STRUCTURE') forward.push(`${classKeyOf(name)} ${name};`);
+    else if (kind === 'UNION') forward.push(`union ${name};`);
+    else if (kind === 'FUNCTION_DEFINITION') {
+      const typedef = guardedFuncDefTypedef(name);
+      if (typedef) typedefs.push(typedef);
+    }
+  }
   const out: string[] = [input.base.trimEnd(), ''];
   for (const inc of [...includes].sort()) out.push(`#include "${inc}"`);
   if (includes.size > 0) out.push('');

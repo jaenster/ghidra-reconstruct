@@ -13,7 +13,15 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
-import { generateProject } from '../codegen/index.js';
+import {
+  assertNoShardPlaceholders,
+  generateProject,
+  generateProjectStage1,
+  generateProjectStage2,
+  mergeShardOutput,
+  takeShardOutput,
+  type ShardOutput,
+} from '../codegen/index.js';
 import { setTemplateRegistry } from '../codegen/templates/registry.js';
 import type {
   AnalyzedDataSymbol,
@@ -42,8 +50,9 @@ export const TEMPLATES: TemplatesConfig = {
   families: {
     TSLink: { key: 'class', params: [{ name: 'T', kind: 'type' }] },
     TSExplicitList: { key: 'class', params: [{ name: 'T', kind: 'type' }, { name: 'OFFSET', kind: 'int' }] },
+    TSSync: { key: 'class', params: [{ name: 'T', kind: 'type' }, { name: 'TSync', kind: 'type' }] },
   },
-  classes: ['KEY'],
+  classes: { KEY: { key: 'class' } },
   orphans: ['*_Unreferenced'],
 };
 
@@ -51,8 +60,13 @@ function options(templates: TemplatesConfig | undefined): ReconstructOptions {
   return {
     outputDir: './out', format: 'cpp', organization: 'namespace', generateCMake: false,
     generateSourceMaps: false, transformPreset: 'full', includeAddressComments: false,
-    promoteStaticGlobals: false,
-    projectConfig: { version: 1, project: 't', modules: { Mod: { namespaces: ['Mod'] } }, templates } as never,
+    promoteStaticGlobals: false, excludeNamespaces: ['Ext'],
+    projectConfig: {
+      version: 1, project: 't', modules: { Mod: { namespaces: ['Mod'] } }, templates,
+      moduleRuns: [{ module: 'Mod', start: '00401000', end: '00402000' }],
+      // A class a template holds by value, in a header of its own.
+      typeOwnership: [{ type: 'SYNC', header: 'Lib/SYNC.h' }, { type: 'AWAITER', header: 'Lib/SYNC.h' }],
+    } as never,
   } as ReconstructOptions;
 }
 
@@ -77,6 +91,31 @@ function model() {
     { kind: 'STRUCTURE', name: 'KEY', category: '/', size: 4, fields: [
       { name: 'szString', dataType: 'char *', offset: 0, size: 4 },
     ] } as ExtractedDataType,
+    { kind: 'STRUCTURE', name: 'SYNC', category: '/', size: 12, fields: [
+      { name: 'm_lock', dataType: 'int', offset: 0, size: 4 },
+      { name: 'm_waiter', dataType: 'AWAITER', offset: 4, size: 4 },
+      { name: 'pfnWake', dataType: 'fpWake', offset: 8, size: 4 },
+    ] } as ExtractedDataType,
+    // Beside SYNC in its header: held by it, so defined first, and naming it by pointer.
+    { kind: 'STRUCTURE', name: 'AWAITER', category: '/', size: 4, fields: [
+      { name: 'pSync', dataType: 'SYNC *', offset: 0, size: 4 },
+    ] } as ExtractedDataType,
+    // A callback type over SYNC that SYNC's header uses.
+    { kind: 'FUNCTION_DEFINITION', name: 'fpWake', category: '/', size: 4, returnType: 'void',
+      parameters: [{ name: 'pSync', dataType: 'SYNC *', ordinal: 0 }] } as ExtractedDataType,
+    // A class element: RTTI records `class PEER`.
+    { kind: 'STRUCTURE', name: 'PEER', category: '/', size: 8, fields: [
+      { name: 'm_link', dataType: 'TSLink<PEER>', offset: 0, size: 8 },
+    ] } as ExtractedDataType,
+    { kind: 'STRUCTURE', name: 'TSLink<PEER>', category: '/', size: 8, fields: [
+      { name: 'm_prevlink', dataType: 'TSLink<PEER> *', offset: 0, size: 4 },
+      { name: 'm_next', dataType: 'int', offset: 4, size: 4 },
+    ] } as ExtractedDataType,
+    // Held by two instantiations, as CCritSect is: no one container claims it.
+    ...['ELEM', 'OTHER'].map(el => ({ kind: 'STRUCTURE', name: `TSSync<${el},SYNC>`, category: '/', size: 16, fields: [
+      { name: 'm_count', dataType: 'int', offset: 0, size: 4 },
+      { name: 'm_sync', dataType: 'SYNC', offset: 4, size: 12 },
+    ] }) as ExtractedDataType),
     { kind: 'STRUCTURE', name: 'OTHER', category: '/', size: 8, fields: [
       { name: 'm_link', dataType: 'TSLink<OTHER>', offset: 0, size: 8 },
     ] } as ExtractedDataType,
@@ -122,14 +161,57 @@ function model() {
       size: 0x10, isThunk: false, isExternal: false, hasVarArgs: false, calledFunctions: [],
       decompiled: 'void ELEM::Release(void)\n\n{\n  return;\n}\n',
     } as ExtractedFunction,
+    {
+      // A class by pointer, in a header that does not define it.
+      name: 'UseSync', address: '004010a0', namespace: 'Mod::Third', returnType: 'void',
+      signature: 'void UseSync(SYNC * pSync)', localVariables: [], callingConvention: '__cdecl',
+      parameters: [{ name: 'pSync', dataType: 'SYNC *', size: 4, ordinal: 0, storage: 'Stack[0x4]:4' }],
+      size: 0x10, isThunk: false, isExternal: false, hasVarArgs: false, calledFunctions: [],
+      decompiled: 'void Mod::Third::UseSync(SYNC *pSync)\n\n{\n  pSync->m_lock = 0;\n  SyncWait(pSync);\n  gSync_cur = pSync;\n  gpExtSync = pSync;\n  return;\n}\n',
+    } as ExtractedFunction,
+    {
+      name: 'GetSync', address: '004010b0', namespace: 'Mod::Third', returnType: 'SYNC *',
+      signature: 'SYNC * GetSync(NOSTRUCT * pOpaque)', localVariables: [], callingConvention: '__cdecl',
+      // A class RTTI names that the program has no structure for.
+      parameters: [{ name: 'pOpaque', dataType: 'NOSTRUCT *', size: 4, ordinal: 0, storage: 'Stack[0x4]:4' }],
+      size: 0x10, isThunk: false, isExternal: false, hasVarArgs: false, calledFunctions: [],
+      decompiled: 'SYNC * Mod::Third::GetSync(NOSTRUCT *pOpaque)\n\n{\n  return (SYNC *)0x0;\n}\n',
+    } as ExtractedFunction,
+    {
+      // In a namespace the build excludes: its callers get a declaration only.
+      name: 'SyncWait', address: '00403000', namespace: 'Ext', returnType: 'void',
+      signature: 'void SyncWait(SYNC * pSync)', localVariables: [], callingConvention: '__cdecl',
+      parameters: [{ name: 'pSync', dataType: 'SYNC *', size: 4, ordinal: 0, storage: 'Stack[0x4]:4' }],
+      size: 0x10, isThunk: false, isExternal: false, hasVarArgs: false, calledFunctions: [],
+      decompiled: 'void Ext::SyncWait(SYNC *pSync)\n\n{\n  return;\n}\n',
+    } as ExtractedFunction,
+    {
+      name: 'Release', address: '004010c0', namespace: 'PEER', returnType: 'void',
+      signature: 'void Release(void)', parameters: [], localVariables: [], callingConvention: '__cdecl',
+      size: 0x10, isThunk: false, isExternal: false, hasVarArgs: false, calledFunctions: [],
+      decompiled: 'void PEER::Release(void)\n\n{\n  return;\n}\n',
+    } as ExtractedFunction,
+    thiscall('TSLink<PEER>', 'Clear', '00401240', '  this->m_next = 0;\n  return;'),
     thiscall(list('ELEM'), 'UnlinkAll', '00401100', body('ELEM')),
     thiscall(list('ELEM'), 'UnlinkAll_Unreferenced', '00401140', body('ELEM')),
     thiscall(list('OTHER'), 'UnlinkAll', '00401180', body('OTHER')),
     thiscall('KEY', 'Clear', '004011c0', '  this->szString = (char *)0x0;\n  return;'),
+    thiscall('TSSync<ELEM,SYNC>', 'Lock', '00401200', '  this->m_count = 1;\n  return;'),
   ];
   const globals = [{
     name: 'gList', address: '00500000', dataType: list('ELEM'), size: 12, namespace: 'Mod::File',
     isInitialized: false, xrefCount: 1, referencingFunctions: ['Mod::File::Caller'], scope: 'global',
+  }, {
+    name: 'gpSync', address: '00500010', dataType: 'SYNC *', size: 4, namespace: null,
+    isInitialized: false, xrefCount: 1, referencingFunctions: ['Mod::Third::UseSync'], scope: 'global',
+  }, {
+    // A name globals.h cannot spell: declared by the closure under the body's spelling.
+    name: 'gSync.cur', address: '00500020', dataType: 'SYNC *', size: 4, namespace: null,
+    isInitialized: false, xrefCount: 1, referencingFunctions: ['Mod::Third::UseSync'], scope: 'global',
+  }, {
+    // Data of the excluded namespace a kept body uses: declared by the closure.
+    name: 'gpExtSync', address: '00500030', dataType: 'SYNC *', size: 4, namespace: 'Ext',
+    isInitialized: false, xrefCount: 1, referencingFunctions: ['Mod::Third::UseSync'], scope: 'global',
   }, {
     // A class's datum in its scope: a static data member, initialized with a member's address.
     name: 'vftable', address: '00500100', dataType: 'pointer[1]', size: 4, namespace: list('ELEM'),
@@ -144,9 +226,15 @@ function model() {
     { name: list('ELEM'), fullPath: list('ELEM'), isClass: false, functionCount: 2 },
     { name: list('OTHER'), fullPath: list('OTHER'), isClass: false, functionCount: 1 },
     { name: 'KEY', fullPath: 'KEY', isClass: true, functionCount: 1 },
+    { name: 'PEER', fullPath: 'PEER', isClass: true, functionCount: 1 },
+    { name: 'TSLink<PEER>', fullPath: 'TSLink<PEER>', isClass: false, functionCount: 1 },
+    { name: 'TSSync<ELEM,SYNC>', fullPath: 'TSSync<ELEM,SYNC>', isClass: false, functionCount: 1 },
   ];
   const strings: ExtractedString[] = [
     { address: '00600000', value: '.?AV?$TSExplicitList@UELEM@@$0?CCCCCCCD@@@', length: 40, encoding: 'char', xrefCount: 0 },
+    { address: '00600040', value: '.?AV?$TSSync@UELEM@@VSYNC@@@@', length: 28, encoding: 'char', xrefCount: 0 },
+    { address: '00600060', value: '.?AV?$TSLink@VPEER@@@@', length: 22, encoding: 'char', xrefCount: 0 },
+    { address: '00600080', value: '.?AV?$TSSync@UOTHER@@VNOSTRUCT@@@@', length: 33, encoding: 'char', xrefCount: 0 },
   ];
   return { dataTypes, functions, globals, namespaces, strings };
 }
@@ -177,10 +265,37 @@ describe('registered class templates', () => {
   });
 
   it('defines a key class in the template header, its members static in it and qualified by it', () => {
-    assert.match(file('Storm/H/stpl.h'), /struct KEY \{\n[^}]*char \* szString;\n\n    static void Clear\(::KEY \* pThis\);\n\};/);
+    assert.match(file('Storm/H/stpl.h'), /\nclass KEY \{\npublic:\n[^}]*char \* szString;\n\n    static void Clear\(::KEY \* pThis\);\n\};/);
     const impl = file('Mod/stpl_KEY.cpp');
     assert.match(impl, /\nvoid KEY::Clear\(::KEY \* pThis\) \{/);
     assert.doesNotMatch(impl, /namespace KEY/);
+  });
+
+  it('includes the header of a class a template holds by value, which declares it with its RTTI class key', () => {
+    const stpl = file('Storm/H/stpl.h');
+    assert.match(stpl, /#include "Lib\/SYNC.h"/);
+    assert.doesNotMatch(stpl, /(struct|class) SYNC( \{|;)/);
+    assert.match(stpl, /template<> void TSSync<ELEM, SYNC>::Lock\(/);
+    assert.match(stpl, /TSync m_sync;/);
+    assert.match(file('Lib/SYNC.h'), /\nclass SYNC \{\npublic:\n[\s\S]*?\/\* 0x00 \*\/ int m_lock;/);
+    assert.doesNotMatch(file('Lib/SYNC.h'), /stpl\.h/);
+    // Every other declaration of it says `class` too.
+    assert.match(file('Mod/Third.h'), /^class SYNC;$/m);
+    assert.match(file('Mod/Third.h'), /void UseSync\(class SYNC \* pSync\);/);
+    assert.match(file('Mod/Third.h'), /^class SYNC \* GetSync\(class NOSTRUCT \* pOpaque\);/m);
+    assert.match(file('Mod/Third.h'), /^class NOSTRUCT;$/m);
+    assert.match(file('globals.h'), /\/\/ Declaration closure[\s\S]*\nclass SYNC;\nvoid SyncWait\(SYNC \* pSync\);/);
+    assert.match(file('globals.h'), /\/\/ Declaration closure[\s\S]*\nclass SYNC;\nextern SYNC \* gpExtSync;/);
+    assert.match(file('Lib/SYNC.h'), /^class SYNC;\n[\s\S]*struct AWAITER \{[\s\S]*class SYNC \{/m);
+    assert.match(file('Lib/SYNC.h'), /\/\/ Forward declarations\nclass SYNC;\n#ifndef RECON_FPTD_fpWake\n/);
+    assert.match(file('globals.h'), /^class SYNC;$/m);
+    const all = [...project.files.values()].map(f => f.content).join('\n');
+    assert.doesNotMatch(all, /struct SYNC\b/);
+  });
+
+  it('declares a class element where the template header names it, with its RTTI class key', () => {
+    assert.match(file('Storm/H/stpl.h'), /^class PEER;$/m);
+    assert.match(file('PEER/PEER.h'), /^class PEER \{\npublic:\n/m);
   });
 
   it('makes a class datum a static data member, defined beside the members', () => {
@@ -246,5 +361,43 @@ describe('registered class templates', () => {
     const all = [...flat.files.values()].map(f => f.content).join('\n');
     assert.match(all, /TSExplicitList_ELEM__572662307_/);
     assert.ok(!flat.files.has('Storm/H/stpl.h'));
+  });
+});
+
+describe('registered class templates across generation shards', () => {
+  // Each shard is its own worker in a real run; here they run one after the
+  // other, the workers first and the coordinator last, as the merge needs.
+  function sharded(count: number): { project: ReturnType<typeof generateProject>; fromWorkers: string[] } {
+    const outputs: ShardOutput[] = [];
+    try {
+      for (let index = 1; index < count; index++) {
+        const m = model();
+        outputs.push(takeShardOutput(generateProjectStage1('t', m.functions, [], m.dataTypes, m.globals, m.namespaces,
+          options(TEMPLATES), programInfo, m.strings, { index, count })));
+      }
+      const m = model();
+      const state = generateProjectStage1('t', m.functions, [], m.dataTypes, m.globals, m.namespaces,
+        options(TEMPLATES), programInfo, m.strings, { index: 0, count });
+      for (const out of outputs) mergeShardOutput(state, out);
+      assertNoShardPlaceholders(state);
+      return { project: generateProjectStage2(state), fromWorkers: outputs.flatMap(o => o.files.map(([path]) => path)) };
+    } finally {
+      setTemplateRegistry(undefined);
+    }
+  }
+
+  it('emits the template header and the member units byte-identical to a serial run', () => {
+    const serial = generate(TEMPLATES);
+    const emitted = new Set<string>();
+    // 8 is run-regen's default; at 8 a shard other than the coordinator writes the header.
+    for (const count of [2, 8]) {
+      const { project, fromWorkers } = sharded(count);
+      fromWorkers.forEach(path => emitted.add(path));
+      assert.deepStrictEqual([...project.files.keys()], [...serial.files.keys()], `${count} shards`);
+      for (const [path, f] of serial.files) assert.strictEqual(project.files.get(path)?.content, f.content, `${path}, ${count} shards`);
+    }
+    // The template pieces really were written by shards other than the coordinator.
+    assert.ok(emitted.has('Storm/H/stpl.h'), [...emitted].join(', '));
+    assert.ok([...emitted].some(path => /\/stpl_\w+\.cpp$/.test(path)), [...emitted].join(', '));
   });
 });

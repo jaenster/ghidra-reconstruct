@@ -28,6 +28,7 @@ import { declarationHead, pointerConvention } from './calling-convention.js';
 import { enumTypedefLine } from './enum-width.js';
 import { requiresPacking, adoptGhidraLayout } from './struct-packing.js';
 import { memberDefinitionScope } from './templates/index.js';
+import { classKeyOf } from './templates/registry.js';
 
 /** normalizeSignatureType + fn-ptr-typedef double-indirection collapse, for
  *  emitting function parameter and return types ("fpFoo *" → "fpFoo").
@@ -219,7 +220,7 @@ export function generateHeader(
       if (!ownedTypes?.has(name)) continue;
       const dt = dataTypes?.find(t => t.name === name);
       if (!dt) continue;
-      if (dt.kind === 'STRUCTURE') ownedAhead.push(`struct ${name};`);
+      if (dt.kind === 'STRUCTURE') ownedAhead.push(`${classKeyOf(name)} ${name};`);
       else if (dt.kind === 'UNION') ownedAhead.push(`union ${name};`);
     }
     for (const decl of ownedAhead.sort()) {
@@ -261,7 +262,7 @@ export function generateHeader(
         if (!field.dataType.includes('*')) continue;
         const ref = extractBaseTypeName(field.dataType);
         if (ref && emitOrder.has(ref) && emitOrder.get(ref)! > emitOrder.get(t.name)!) {
-          intraForwardDecls.add(`struct ${ref};`);
+          intraForwardDecls.add(`${classKeyOf(ref)} ${ref};`);
         }
       }
     }
@@ -560,7 +561,7 @@ export function generateHeader(
     // Collect all struct type names from forward declarations we emitted
     const forwardDeclaredStructs = new Set<string>();
     for (const decl of forwardDecls) {
-      const m = decl.match(/^struct (\w+);$/);
+      const m = decl.match(/^(?:struct|class) (\w+);$/);
       if (m) forwardDeclaredStructs.add(m[1]);
     }
     // Also include struct types from data types (for types defined in this file)
@@ -599,13 +600,13 @@ export function generateHeader(
           // would produce `::struct QServer *`.
           if (pre === ':') return full;
           if (forwardDeclaredStructs.has(name) && !full.startsWith('struct ')) {
-            return `${pre}struct ${name}${post}`;
+            return `${pre}${classKeyOf(name)} ${name}${post}`;
           }
           return full;
         });
         sublines[j] = sublines[j].replace(/^([A-Z_]\w+)(\s*\*)/, (full, name, post) => {
           if (forwardDeclaredStructs.has(name)) {
-            return `struct ${name}${post}`;
+            return `${classKeyOf(name)} ${name}${post}`;
           }
           return full;
         });
@@ -1560,6 +1561,16 @@ function fieldDeclSpellingUnqualified(dataType: string, size: number): string | 
 }
 
 /**
+ * The opening lines of an aggregate's definition, with the class key its
+ * declarations everywhere use (classKeyOf). A `class` opens public, as the
+ * binary records no access and public cannot fail to compile.
+ */
+export function classHead(name: string, attributes = ''): string[] {
+  const key = classKeyOf(name);
+  return key === 'class' ? [`class ${attributes}${name} {`, 'public:'] : [`struct ${attributes}${name} {`];
+}
+
+/**
  * Generate struct declaration
  */
 export function generateStructDeclaration(struct: ExtractedStruct): string {
@@ -1582,7 +1593,7 @@ export function generateStructDeclaration(struct: ExtractedStruct): string {
   const pragmaPack = needsPacking && hasConstructorBearingMember(struct.fields);
   const packed = needsPacking && !pragmaPack ? '__attribute__((packed)) ' : '';
   if (pragmaPack) lines.push('#pragma pack(push, 1)');
-  lines.push(`struct ${packed}${struct.name} {`);
+  lines.push(...classHead(struct.name, packed));
 
   // Add integer conversion operators for small integer-only structs
   const intConversionType = getIntegerConversionType(struct.fields);
@@ -2131,7 +2142,7 @@ function addForwardDeclaration(
   if (unionNames.has(type)) {
     declarations.add(`union ${type};`);
   } else if (classNames?.has(type) || structNames.has(type) || WINDOWS_STRUCTS.has(type)) {
-    declarations.add(`struct ${type};`);
+    declarations.add(`${classKeyOf(type)} ${type};`);
   } else if (/^fn[A-Z]/.test(type) || /^fp[A-Z]/.test(type) || funcDefNames.has(type)) {
     const funcDef = funcDefMap.get(type);
     // The typedef spells its parameter and return types by name, so those need
@@ -2179,7 +2190,7 @@ function addForwardDeclaration(
       : `typedef void (*${type})();`;
     declarations.add(`#ifndef ${guard}\n#define ${guard}\n${body}\n#endif`);
   } else {
-    declarations.add(`struct ${type};`);
+    declarations.add(`${classKeyOf(type)} ${type};`);
   }
 }
 
