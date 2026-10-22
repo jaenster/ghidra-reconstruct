@@ -216,8 +216,9 @@ function validate(config: ProjectConfig, source: string): void {
     if (t.instantiations !== undefined && !Array.isArray(t.instantiations)) {
       throw new Error(`${source}: templates.instantiations must be an array`);
     }
-    if (t.orphans !== undefined && (!Array.isArray(t.orphans) || t.orphans.some(o => typeof o !== 'string' || !o))) {
-      throw new Error(`${source}: templates.orphans must be an array of name patterns`);
+    // Orphan copies are Ghidra's to mark (the ORPHAN_COPY function tag), not the config's.
+    if ((t as { orphans?: unknown }).orphans !== undefined) {
+      throw new Error(`${source}: templates.orphans is not read: Ghidra tags each orphan copy ORPHAN_COPY`);
     }
   }
 

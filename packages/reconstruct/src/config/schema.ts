@@ -62,12 +62,6 @@ export interface TemplatesConfig {
    * must be listed too.
    */
   instantiations?: string[];
-  /**
-   * Names Ghidra gives a COMDAT copy that no member of its class owns
-   * (`Destructor_Unreferenced`, `thunk_Destructor`), as `*`-globs. Such a copy is
-   * emitted as a free function beside the members, never as a member.
-   */
-  orphans?: string[];
 }
 
 export interface TemplateClassConfig {

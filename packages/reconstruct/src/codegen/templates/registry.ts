@@ -40,6 +40,9 @@ export interface TemplateInstantiation {
   element: string;
 }
 
+/** The Ghidra function tag that marks a COMDAT copy no member owns. */
+export const ORPHAN_COPY_TAG = 'ORPHAN_COPY';
+
 export class TemplateRegistry {
   readonly header: string;
   readonly implPrefix: string;
@@ -51,12 +54,9 @@ export class TemplateRegistry {
   private readonly bySpelling = new Map<string, TemplateInstantiation>();
   private readonly ordered: TemplateInstantiation[] = [];
 
-  private readonly orphanNames: RegExp[];
   private readonly orphanAddresses = new Set<string>();
 
   private constructor(config: TemplatesConfig) {
-    this.orphanNames = (config.orphans ?? []).map(glob =>
-      new RegExp(`^${glob.split('*').map(part => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*')}$`));
     this.header = config.header;
     this.implPrefix = config.implPrefix ?? '';
     this.keyClassKeys = new Map(Object.entries(config.classes ?? {}).map(([name, c]) => [name, c.key]));
@@ -118,13 +118,22 @@ export class TemplateRegistry {
   private placement: ReadonlyMap<string, string> = new Map();
 
   /**
-   * Record which functions of the registered classes are orphan copies: a name
-   * matching project.json's `orphans`, in a registered class scope.
+   * Record which functions are orphan copies: Ghidra tags each one ORPHAN_COPY.
+   * Every tagged function sits in a registered class or in the element class an
+   * instantiation is over (`CELLIST::Destructor_Unreferenced`); a tag anywhere
+   * else stops the run.
    */
-  findOrphans(functions: Iterable<{ address: string; name: string; namespace?: string | null }>): void {
+  findOrphans(functions: Iterable<{ address: string; name: string; namespace?: string | null; tags?: ReadonlyArray<{ type: string }> }>): void {
     this.orphanAddresses.clear();
+    const elements = new Set(this.ordered.map(inst => inst.element));
+    const stray: string[] = [];
     for (const f of functions) {
-      if (this.isClassScope(f.namespace) && this.orphanNames.some(re => re.test(f.name))) this.orphanAddresses.add(f.address);
+      if (!f.tags?.some(t => t.type === ORPHAN_COPY_TAG)) continue;
+      if (this.isClassScope(f.namespace) || (f.namespace && elements.has(f.namespace))) this.orphanAddresses.add(f.address);
+      else stray.push(`${f.address} ${f.namespace ? `${f.namespace}::` : ''}${f.name}`);
+    }
+    if (stray.length > 0) {
+      throw new Error(`[templates] tagged ${ORPHAN_COPY_TAG} outside every registered class and element: ${stray.join(', ')}`);
     }
   }
 

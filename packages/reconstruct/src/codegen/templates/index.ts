@@ -110,5 +110,5 @@ export function classScopedReference(raw: string): string | undefined {
 export function orphanMarker(func: { address?: string; namespace?: string | null }): string | undefined {
   const registry = templateRegistry();
   if (!registry?.isOrphan(func.address)) return undefined;
-  return `// stpl-orphan: a COMDAT copy in ${registry.scopeSpelling(func.namespace!)} that no member owns`;
+  return `// stpl-orphan: a COMDAT copy in ${registry.scopeSpelling(func.namespace!) ?? func.namespace} that no member owns`;
 }

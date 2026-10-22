@@ -53,7 +53,6 @@ export const TEMPLATES: TemplatesConfig = {
     TSSync: { key: 'class', params: [{ name: 'T', kind: 'type' }, { name: 'TSync', kind: 'type' }] },
   },
   classes: { KEY: { key: 'class' } },
-  orphans: ['*_Unreferenced'],
 };
 
 function options(templates: TemplatesConfig | undefined): ReconstructOptions {
@@ -193,10 +192,15 @@ function model() {
     } as ExtractedFunction,
     thiscall('TSLink<PEER>', 'Clear', '00401240', '  this->m_next = 0;\n  return;'),
     thiscall(list('ELEM'), 'UnlinkAll', '00401100', body('ELEM')),
-    thiscall(list('ELEM'), 'UnlinkAll_Unreferenced', '00401140', body('ELEM')),
+    // Ghidra tags a COMDAT copy no member owns.
+    { ...thiscall(list('ELEM'), 'UnlinkAll_Unreferenced', '00401140', body('ELEM')), tags: [{ type: 'ORPHAN_COPY' }] },
+    // Named like one, but untagged: a member like any other.
+    thiscall(list('OTHER'), 'UnlinkAll_Unreferenced', '004011a0', body('OTHER')),
     thiscall(list('OTHER'), 'UnlinkAll', '00401180', body('OTHER')),
     thiscall('KEY', 'Clear', '004011c0', '  this->szString = (char *)0x0;\n  return;'),
     thiscall('TSSync<ELEM,SYNC>', 'Lock', '00401200', '  this->m_count = 1;\n  return;'),
+    // An element's orphan copy: no member of the element, a free function beside the members.
+    { ...thiscall('ELEM', 'Release_Unreferenced', '004013f0', '  return;'), tags: [{ type: 'ORPHAN_COPY' }] },
   ];
   const globals = [{
     name: 'gList', address: '00500000', dataType: list('ELEM'), size: 12, namespace: 'Mod::File',
@@ -260,8 +264,8 @@ describe('registered class templates', () => {
     assert.match(stpl, /template<> void TSExplicitList<ELEM, -572662307>::UnlinkAll\(/);
     assert.match(stpl, /template<> void TSExplicitList<OTHER, -572662307>::UnlinkAll\(/);
     // An orphan copy is no member: a free function behind its marker.
-    assert.doesNotMatch(stpl, /static void UnlinkAll_Unreferenced/);
-    assert.match(stpl, /\/\/ stpl-orphan: [^\n]*\nvoid UnlinkAll_Unreferenced\(/);
+    assert.doesNotMatch(stpl, /TSExplicitList<ELEM, -572662307>::UnlinkAll_Unreferenced/);
+    assert.match(stpl, /\/\/ stpl-orphan: [^\n]*\nvoid UnlinkAll_Unreferenced\(TSExplicitList<::ELEM, -572662307>\* pThis\);/);
   });
 
   it('defines a key class in the template header, its members static in it and qualified by it', () => {
@@ -344,6 +348,14 @@ describe('registered class templates', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('emits an element\'s orphan copy as a free function with the members, not in the element\'s namespace', () => {
+    assert.match(file('Storm/H/stpl.h'), /\/\/ stpl-orphan: a COMDAT copy in ELEM that no member owns\nvoid Release_Unreferenced\(::ELEM \* pThis\);/);
+    assert.match(file('Mod/stpl_ELEM.cpp'), /\/\/ stpl-orphan: a COMDAT copy in ELEM that no member owns\n\/\/ 1\.14d: 004013f0\nvoid Release_Unreferenced\(::ELEM \* pThis\) \{/);
+    assert.doesNotMatch(file('ELEM/ELEM.h'), /Release_Unreferenced/);
+    // Ghidra's name alone makes no orphan.
+    assert.match(file('Storm/H/stpl.h'), /template<> void TSExplicitList<OTHER, -572662307>::UnlinkAll_Unreferenced\(/);
   });
 
   it('refuses an RTTI descriptor whose class key disagrees with project.json', () => {

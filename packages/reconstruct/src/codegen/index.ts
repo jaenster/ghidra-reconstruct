@@ -965,8 +965,9 @@ export function generateProjectStage1(
   // Initialize namespace collapsing with module names from project config
   const modules = options.projectConfig?.modules ?? {};
   setModuleNames(Object.keys(modules));
-  templates?.setPlacement(placeTemplateMembers(templates, functions, modules, options.projectConfig?.moduleRuns ?? []));
+  // Orphans first: an element's orphan copy is placed with the members.
   templates?.findOrphans(functions);
+  templates?.setPlacement(placeTemplateMembers(templates, functions, modules, options.projectConfig?.moduleRuns ?? []));
 
   // Build registries from project config
   // Override files live in projectDir (not outputDir) so they survive regeneration

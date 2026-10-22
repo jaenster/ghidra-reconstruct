@@ -34,7 +34,6 @@ const CONFIG: TemplatesConfig = {
     TSHashTableReuse: { key: 'class', params: [{ name: 'T', kind: 'type' }, { name: 'TKey', kind: 'type' }, { name: 'N', kind: 'int' }], base: 'TSHashTable<T, TKey>' },
   },
   classes: { HASHKEY_NONE: { key: 'class' } },
-  orphans: ['*_Unreferenced'],
 };
 
 afterEach(() => setTemplateRegistry(undefined));
@@ -135,14 +134,22 @@ describe('the registry', () => {
       [], ['.?AV?$TSLink@UCELLIST@@@@']), /argument 1 kind disagrees/);
   });
 
-  it('marks orphan copies by name, in registered scopes only', () => {
+  it('marks the orphan copies Ghidra tags, in a registered class or an element, and no others', () => {
     const r = TemplateRegistry.build(CONFIG, ['TSLink<CELLIST>']);
+    const orphan = [{ type: 'ORPHAN_COPY' }];
     r.findOrphans([
-      { address: '1', name: 'NextLink_Unreferenced', namespace: 'TSLink<CELLIST>' },
-      { address: '2', name: 'NextLink', namespace: 'TSLink<CELLIST>' },
-      { address: '3', name: 'Foo_Unreferenced', namespace: 'D2Common' },
+      { address: '1', name: 'NextLink_Unreferenced', namespace: 'TSLink<CELLIST>', tags: orphan },
+      { address: '2', name: 'NextLink_Unreferenced2', namespace: 'TSLink<CELLIST>' },
+      { address: '3', name: 'Destructor_Unreferenced', namespace: 'CELLIST', tags: [{ type: 'llm-typed' }, ...orphan] },
+      { address: '4', name: 'NextLink', namespace: 'TSLink<CELLIST>', tags: [{ type: 'llm-typed' }] },
     ]);
-    assert.deepStrictEqual(['1', '2', '3'].map(a => r.isOrphan(a)), [true, false, false]);
+    assert.deepStrictEqual(['1', '2', '3', '4'].map(a => r.isOrphan(a)), [true, false, true, false]);
+  });
+
+  it('refuses an orphan tag outside every registered class and element', () => {
+    const r = TemplateRegistry.build(CONFIG, ['TSLink<CELLIST>']);
+    assert.throws(() => r.findOrphans([{ address: '00500000', name: 'Foo', namespace: 'D2Common', tags: [{ type: 'ORPHAN_COPY' }] }]),
+      /tagged ORPHAN_COPY outside every registered class and element: 00500000 D2Common::Foo/);
   });
 });
 
@@ -255,6 +262,18 @@ describe('placement and scope', () => {
     assert.strictEqual(placed.get('0060e170'), 'D2Common::Chat::stpl_StringEntryNode');
   });
 
+  it('places an element\'s orphan copy with the members, and passes over the element\'s own code', () => {
+    const r = TemplateRegistry.build(CONFIG, ['TSLink<CELLIST>']);
+    const functions = [
+      fn('00601000', 'D2CMP::SRC::CelCmp'), fn('00601100', 'CELLIST'),
+      { ...fn('00601200', 'CELLIST'), name: 'Destructor_Unreferenced', tags: [{ type: 'ORPHAN_COPY' }] } as ExtractedFunction,
+    ];
+    r.findOrphans(functions);
+    const placed = placeTemplateMembers(r, functions, MODULES, [{ module: 'D2CMP', start: '00600000', end: '00610000' }]);
+    assert.strictEqual(placed.get('00601200'), 'D2CMP::SRC::stpl_CELLIST');
+    assert.strictEqual(placed.get('00601100'), undefined);
+  });
+
   it('places a run with no module function at all in the module directory', () => {
     const r = TemplateRegistry.build(CONFIG, ['TSLink<CELLIST>']);
     const placed = placeTemplateMembers(r, [fn('00601200', 'TSLink<CELLIST>'), fn('00601300', 'TSLink<CELLIST>')],
@@ -284,7 +303,7 @@ describe('placement and scope', () => {
 
   it('resolves a registered scope to the class, not to a namespace, and an orphan to root', () => {
     const r = TemplateRegistry.build(CONFIG, ['TSLink<CELLIST>']);
-    r.findOrphans([{ address: '2', name: 'NextLink_Unreferenced', namespace: 'TSLink<CELLIST>' }]);
+    r.findOrphans([{ address: '2', name: 'NextLink_Unreferenced', namespace: 'TSLink<CELLIST>', tags: [{ type: 'ORPHAN_COPY' }] }]);
     setTemplateRegistry(r);
     const res = new NamespaceResolution(new Set(['TSLink<CELLIST>', 'IgnoreList']));
     assert.deepStrictEqual(res.claim('1', 'TSLink<CELLIST>'), { ghidraSegments: ['TSLink<CELLIST>'], segments: ['TSLink<CELLIST>'], classScope: true });
@@ -340,10 +359,10 @@ describe('project.json templates', () => {
     assert.deepStrictEqual((await load(CONFIG))?.templates, CONFIG);
   });
 
-  it('refuses a family without a class key, a parameter without a kind, and a bad orphan pattern', async () => {
+  it('refuses a family without a class key, a parameter without a kind, and orphan patterns', async () => {
     await assert.rejects(load({ header: 'h', families: { A: { params: [{ name: 'T', kind: 'type' }] } } }), /families.A.key/);
     await assert.rejects(load({ header: 'h', families: { A: { key: 'class', params: [{ name: 'T' }] } } }), /a kind "type" or "int"/);
-    await assert.rejects(load({ header: 'h', families: {}, orphans: [''] }), /templates.orphans/);
+    await assert.rejects(load({ header: 'h', families: {}, orphans: ['*_Unreferenced'] }), /templates.orphans is not read: Ghidra tags each orphan copy ORPHAN_COPY/);
     await assert.rejects(load({ families: {} }), /templates.header/);
     await assert.rejects(load({ header: 'h', families: {}, classes: ['KEY'] }), /templates.classes must be an object/);
     await assert.rejects(load({ header: 'h', families: {}, classes: { KEY: {} } }), /templates.classes.KEY.key/);
@@ -357,3 +376,4 @@ describe('project.json templates', () => {
     await assert.rejects(load(CONFIG, [{ module: 'A', start: '10', end: '20' }, { module: 'B', start: '1f', end: '30' }]), /moduleRuns\[1\] overlaps moduleRuns\[0\]/);
   });
 });
+

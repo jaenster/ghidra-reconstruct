@@ -15,7 +15,9 @@
  * A run with neither is placed in the module's directory. A member in a run whose
  * module the project does not configure cannot be placed and stops the regen.
  * Class members (an element's own dtor, IgnoreList's methods) are not module
- * code and are passed over; their namespace names no module.
+ * code and are passed over; their namespace names no module. An element's orphan
+ * copy (`CELLIST::Destructor_Unreferenced`) is placed like a member: it is a
+ * COMDAT the module linked, not the element's own code.
  */
 
 import type { ModuleConfig, ModuleRun } from '../../config/schema.js';
@@ -73,7 +75,7 @@ export function placeTemplateMembers(
       moduleDir = undefined;
     }
     const ns = f.namespace ?? undefined;
-    if (ns && registry.isClassScope(ns)) {
+    if (ns && (registry.isClassScope(ns) || registry.isOrphan(f.address))) {
       if (!run) {
         throw new Error(`template member ${f.address} ${ns}::${f.name} lies in no module run (project.json moduleRuns)`);
       }
