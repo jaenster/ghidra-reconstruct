@@ -95,7 +95,6 @@ export function ownGenericSpelling(inst: TemplateInstantiation): string {
   return genericSpelling(inst.spelling, { ...inst, spelling: inst.spelling });
 }
 
-
 /**
  * Derive every family's layout. Throws, listing each disagreement, when the
  * instantiations of a family do not agree.

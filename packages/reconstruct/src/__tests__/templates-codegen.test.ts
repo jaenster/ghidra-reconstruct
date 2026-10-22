@@ -234,6 +234,12 @@ function model() {
     // A JMP thunk Ghidra left beside the members, forwarding to one.
     { ...thiscall('TSTable<NODE>', 'thunk_Clear', '00401370', ''), isThunk: true, decompiled: '', tags: [{ type: 'ORPHAN_COPY' }],
       thunkTarget: { address: '00401340', name: 'Clear', namespace: 'TSTable<NODE>', isExternal: false } },
+    // A thunk on the derived class to the base's Count, which the derived class's own Count hides.
+    { ...thiscall('TSTableEx<NODE>', 'thunk_Count', '00401374', ''), isThunk: true, decompiled: '', tags: [{ type: 'ORPHAN_COPY' }],
+      thunkTarget: { address: '00401350', name: 'Count', namespace: 'TSTable<NODE>', isExternal: false } },
+    // A thunk that is a member itself: its receiver is its `this`.
+    { ...thiscall('TSTable<NODE>', 'CountThunk', '00401378', ''), isThunk: true, decompiled: '',
+      thunkTarget: { address: '00401350', name: 'Count', namespace: 'TSTable<NODE>', isExternal: false } },
     // Ghidra reaches the base through its component, and casts the receiver to it.
     thiscall('TSTableEx<NODE>', 'Reset', '00401380',
       '  TSTable<NODE>::Clear((TSTable<NODE> *)this);\n  (this->super_TSTable).m_count = 1;\n  this->m_extra = 2;\n  TSTableEx<NODE>::Count(this);\n  return;'),
@@ -370,6 +376,13 @@ describe('registered class templates', () => {
 
   it('forwards a thunk to a non-static member by calling it on the thunk\'s receiver', () => {
     assert.match(file('Mod/stpl_NODE.cpp'), /JMP thunk\nvoid thunk_Clear\(TSTable<::NODE>\* pThis\) \{\n    pThis->Clear\(\);\n\}/);
+  });
+
+  it('names the target\'s class in a thunk where the receiver\'s class hides the name, and calls a member thunk\'s target on `this`', () => {
+    const unit = file('Mod/stpl_NODE.cpp');
+    // TSTableEx declares a Count of its own: unqualified, the thunk would call that one.
+    assert.match(unit, /JMP thunk\nvoid thunk_Count\(TSTableEx<::NODE>\* pThis\) \{\n    pThis->TSTable<NODE>::Count\(\);\n\}/);
+    assert.match(unit, /JMP thunk\ntemplate<> void TSTable<NODE>::CountThunk\(\) \{\n    this->Count\(\);\n\}/);
   });
 
   it('includes the header of a class a template holds by value, which declares it with its RTTI class key', () => {

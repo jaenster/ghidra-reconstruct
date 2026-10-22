@@ -12,8 +12,8 @@ import { parseTypeSpelling, rootQualifyTemplateArguments, spellType, substituteT
 import { deriveFamilyLayouts, genericSpelling } from '../codegen/templates/layout.js';
 import { placeTemplateMembers } from '../codegen/templates/placement.js';
 import { baseComponentOf, baseComponentNamed, baseModel } from '../codegen/templates/bases.js';
-import { memberModel } from '../codegen/templates/members.js';
-import { classScopedReference, templateHeaderTypes } from '../codegen/templates/index.js';
+import { memberModel, pointeeClass } from '../codegen/templates/members.js';
+import { classScopedReference, memberCallModel, templateHeaderTypes } from '../codegen/templates/index.js';
 import { flattenTemplateNames } from '../codegen/template-names.js';
 import { NamespaceResolution } from '../codegen/namespace-resolution.js';
 import { normalizeSignatureType } from '../codegen/platform-types.js';
@@ -510,6 +510,37 @@ describe('member functions', () => {
     const m = memberModel(build(), functions, held);
     assert.ok(!m.instanceAddresses.has('00401000') && !m.instanceAddresses.has('00401010'));
     assert.ok(m.instanceAddresses.has('00401020'));
+  });
+
+  it('finds a held address in a struct initializer\'s fields, at any depth', () => {
+    const inStruct = [{ initializedData: { kind: 'struct' as const, fields: [
+      { name: 'nCount', value: { kind: 'scalar' as const, value: '0' } },
+      { name: 'tVtable', value: { kind: 'struct' as const, fields: [
+        { name: 'pfnPtr', value: { kind: 'pointer' as const, value: 'TSHashTable<CELLIST,HASHKEY_NONE>::Ptr' } },
+      ] } },
+    ] } }];
+    const m = memberModel(build(), functions, inStruct);
+    assert.ok(!m.instanceAddresses.has('00401030'));
+    assert.ok(m.instanceAddresses.has('00401000'));
+  });
+
+  it('reads a receiver\'s class from a pointer spelling only', () => {
+    assert.strictEqual(pointeeClass('TSHashTable<::CELLIST, HASHKEY_NONE> *'), 'TSHashTable<CELLIST, HASHKEY_NONE>');
+    assert.strictEqual(pointeeClass('TSHashTable<CELLIST,HASHKEY_NONE>'), undefined);
+    const byValue = [...functions, fn('004010a0', 'TSHashTable<CELLIST,HASHKEY_NONE>', 'Next', 'TSHashTable<CELLIST,HASHKEY_NONE>')];
+    assert.throws(() => memberModel(build(), byValue, globals), /004010a0 TSHashTable<CELLIST, HASHKEY_NONE>::Next: its receiver is TSHashTable<CELLIST,HASHKEY_NONE>, not a pointer to TSHashTable<CELLIST, HASHKEY_NONE>/);
+  });
+
+  it('answers member calls from the registry in force, also after it is replaced', () => {
+    const first = build();
+    first.setMembers(memberModel(first, functions, globals));
+    const hash = 'TSHashTable<CELLIST, HASHKEY_NONE>';
+    assert.ok(memberCallModel()!.isInstanceMember(hash, 'Ptr'));
+    // A second run in the same process (the resident daemon): Ptr's address is now held.
+    const second = build();
+    second.setMembers(memberModel(second, functions, [{ initializedData: { kind: 'pointer' as const, value: 'TSHashTable<CELLIST,HASHKEY_NONE>::Ptr' } }]));
+    assert.ok(!memberCallModel()!.isInstanceMember(hash, 'Ptr'));
+    assert.ok(memberCallModel()!.isInstanceMember('TSExplicitList<CELLIST, -572662307>', 'UnlinkAll'));
   });
 
   it('refuses a family whose instantiations disagree on the receiver, and a receiver of another class', () => {

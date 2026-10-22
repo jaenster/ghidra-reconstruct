@@ -1,5 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { transformGhidraCode } from '../../../index.js';
 import { memberCallPlugin, memberCalls } from '../builtins/member-call.js';
 import { baseClassAccessPlugin } from '../builtins/base-class-access.js';
@@ -130,6 +132,53 @@ describe('member-call', () => {
     assert.ok(code.includes('pThis->InternalClear(0);'), code);
   });
 
+  it('keeps a local copy of a receiver the body takes the address of, or steps either way', () => {
+    for (const write of ['g(&pThis);', 'pThis++;', 'pThis--;', '++pThis;', '--pThis;']) {
+      const code = run(`void f(${TABLE} *pThis) {
+        ${write}
+        ${TABLE}::InternalClear(pThis, 0);
+      }`, { receiver: 'pThis' });
+      assert.match(code, /\{\s*TSHashTable<CELLIST, HASHKEY_NONE>\s*\*\s*pThis = this;/, `${write}\n${code}`);
+      assert.ok(code.includes(write) && code.includes('pThis->InternalClear(0);') && !code.includes('this->InternalClear'), `${write}\n${code}`);
+    }
+  });
+
+  it('leaves a class qualifier spelled like the receiver a qualifier', () => {
+    const code = run(`void f(${TABLE} *pThis) { pThis->nSlotMask = pThis::Size(1); }`, { receiver: 'pThis' });
+    assert.ok(code.includes('this->nSlotMask = pThis::Size(1);'), code);
+  });
+
+  it('touches no body that has no parameter or local of the receiver\'s name', () => {
+    const code = run(`void f(${TABLE} *pOther) { pThis->nSlotMask = 1; ${TABLE}::InternalClear(pOther, 0); }`, { receiver: 'pThis' });
+    assert.ok(code.includes('pThis->nSlotMask = 1;'), code);
+    assert.ok(code.includes('pOther->InternalClear(0);'), code);
+    assert.ok(!code.includes('this->nSlotMask'), code);
+  });
+
+  it('names the member in its class when the receiver is no pointer to a class', () => {
+    const code = run(`void f(${SYNC} **ppSync, ${SYNC} *pSync) {
+      ${TABLE}::Unlink(ppSync, 0);
+      ${TABLE}::Unlink(pSync, 0);
+    }`);
+    assert.ok(code.includes(`ppSync->${TABLE}::Unlink(0);`), code);
+    assert.ok(code.includes('pSync->Unlink(0);'), code);
+  });
+
+  it('spells a member named from the global scope without the root qualifier', () => {
+    const code = run(`void f(void) { ::${TABLE}::Unlink(pUnknown, 0); }`);
+    assert.ok(code.includes(`pUnknown->${TABLE}::Unlink(0);`), code);
+    assert.ok(!code.includes('->::'), code);
+  });
+
+  it('leaves a callee with more than one qualifier, and a call with no receiver, alone', () => {
+    const code = run(`void f(${TABLE} *pTable) {
+      ${LIST}::Outer::UnlinkAll(pTable, 1);
+      ${TABLE}::Unlink();
+    }`);
+    assert.ok(code.includes(`${LIST}::Outer::UnlinkAll(pTable, 1);`), code);
+    assert.ok(code.includes(`${TABLE}::Unlink();`), code);
+  });
+
   it('runs after the passes that read the receiver as a parameter and `&local` as an escape', () => {
     assert.ok(memberCallPlugin.priority! > baseClassAccessPlugin.priority!);
     assert.ok(memberCallPlugin.priority! > frameGroupLocalsPlugin.priority!);
@@ -159,6 +208,25 @@ describe('memberCalls', () => {
   it('qualifies a receiver of unknown or unrelated class', () => {
     assert.strictEqual(calls.needsQualifier(undefined, cls(TABLE), 'Unlink'), true);
     assert.strictEqual(calls.needsQualifier(cls(LIST), cls(TABLE), 'Unlink'), true);
+  });
+
+  it('reads a class from a class spelling only, not from a pointer to one', () => {
+    assert.strictEqual(calls.classOf(TABLE), 'TSHashTable<CELLIST, HASHKEY_NONE>');
+    assert.strictEqual(calls.classOf(`${TABLE} *`), undefined);
+    // A model keyed by a pointer spelling names no class.
+    const byPointer = memberCalls({ instanceMembers: { [`${TABLE} *`]: ['Unlink'] } });
+    assert.ok(!byPointer.isInstanceMember(cls(TABLE), 'Unlink'));
+  });
+
+  it('ends the walk up the bases at a cycle', () => {
+    // Run apart, so a walk that never ends fails the test instead of hanging the suite.
+    const src = fileURLToPath(new URL('../builtins/member-call.ts', import.meta.url));
+    const script = `import { memberCalls } from ${JSON.stringify(src)};
+      const c = memberCalls({ bases: [['A', 'B'], ['B', 'A']] });
+      console.log(JSON.stringify([c.needsQualifier('A', 'C', 'Fn'), c.needsQualifier('B', 'A', 'Fn')]));`;
+    const r = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script], { encoding: 'utf8', timeout: 20000 });
+    assert.strictEqual(r.signal, null, `the walk did not end: ${r.stderr}`);
+    assert.deepStrictEqual(JSON.parse(r.stdout), [true, false], r.stderr);
   });
 
   it('knows a member by the class spelled with or without root qualifiers', () => {
