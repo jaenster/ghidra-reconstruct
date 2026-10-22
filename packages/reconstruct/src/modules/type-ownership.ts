@@ -512,8 +512,12 @@ export function computeTypeOwnership(input: TypeOwnershipInput): TypeOwnershipRe
       dt.name === structTypeName && (dt.kind === 'STRUCTURE' || dt.kind === 'UNION')
     );
     if (!isStruct) continue;
+    // A type owned by a type-only header (no unit) has no namespace to match.
+    // Comparing would pair it with every root-level global (namespace also
+    // undefined) and demote that global before the initializer address table is
+    // built, so a pointer initializer naming it comes out as a raw address.
     const structNs = structTypeToNamespace.get(structTypeName);
-    if (global.namespace === structNs) {
+    if (structNs !== undefined && global.namespace === structNs) {
       global.scope = 'struct-colocated';
       global.ownerStructType = structTypeName;
       global.ownerStructHeader = typeOwnerMap.get(structTypeName);

@@ -2892,6 +2892,29 @@ function declaredElementCount(dataType: string | undefined): number | null {
   return Number.isSafeInteger(count) && count > 0 ? count : null;
 }
 
+/**
+ * The names a data initializer may spell a reference with: every string
+ * constant, and every `scope === 'global'` symbol. A file-local or static-local
+ * is emitted `static` inside one .cpp, and a struct-colocated one is declared in
+ * a header the initializer's file need not include.
+ *
+ * Read once, when the initializer address table is built, so a global whose
+ * scope is wrong at that moment keeps its raw address in every initializer that
+ * points at it even if a later pass restores the scope.
+ */
+export function initializerReferenceableNames(
+  globals: readonly AnalyzedDataSymbol[],
+  stringConstantNames: readonly string[],
+): Set<string> {
+  const names = new Set<string>(stringConstantNames);
+  for (const g of globals) {
+    if (g.scope !== 'global') continue;
+    const name = g.suggestedName || g.name;
+    if (name) names.add(name);
+  }
+  return names;
+}
+
 export function buildGlobalAddressExtentTables(
   globals: AnalyzedDataSymbol[],
   strings: ReadonlyArray<ExtractedString> = []
@@ -3713,12 +3736,8 @@ function generateFilesForFunctions(
   // for demotion at this point: `computeFileLocalGlobals` ran before this
   // function was called, and everything after it only promotes.
   {
-    const referenceableNames = new Set<string>(context.funcPtrArgCasts.stringConstantNames);
-    for (const g of analyzedGlobals) {
-      if (g.scope !== 'global') continue;
-      const name = g.suggestedName || g.name;
-      if (name) referenceableNames.add(name);
-    }
+    const referenceableNames = initializerReferenceableNames(
+      analyzedGlobals, context.funcPtrArgCasts.stringConstantNames);
     setInitializerAddressTable({
       globalAddresses: context.funcPtrArgCasts.globalAddresses,
       stringConstantNames: context.funcPtrArgCasts.stringConstantNames,

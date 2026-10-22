@@ -806,3 +806,52 @@ describe('defect lint: untyped-virtual-call', () => {
     assert.deepStrictEqual(fs, []);
   });
 });
+
+describe('defect lint: raw-address-initializer', () => {
+  const snap = [
+    { name: 'gsAutoMapSeed', address: 0x96c8c8, size: 8 },
+    { name: 'psDataTableSeed', address: 0x96c8d0, size: 4 },
+    { name: 'gAncientsCloudSeed', address: 0x7b5680, size: 8 },
+    { name: 'gpAncientsCloudSeed', address: 0x7b5688, size: 4 },
+    { name: 'gaSeedTable', address: 0x7b5690, size: 8 },
+    { name: 'RTTI_Complete_Object_Locator', address: 0x6fffc0, size: 20 },
+    { name: 'RTTI_Complete_Object_Locator', address: 0x700008, size: 20 },
+    { name: 'vftable_meta_ptr', address: 0x700100, size: 4 },
+    { name: 'gnCount', address: 0x700200, size: 4 },
+    { name: 'gNotEmitted', address: 0x700300, size: 4 },
+  ];
+  const globalsH = 'extern D2SeedStrc gsAutoMapSeed;\nextern D2SeedStrc gAncientsCloudSeed;\n';
+
+  it('reports a cast literal in globals*.cpp, a bare literal in a pointer array, and a static local', () => {
+    const fs = lint('raw-address-initializer', { globals: snap, files: {
+      'globals.h': globalsH,
+      'globals.D2Common.cpp': 'D2SeedStrc gsAutoMapSeed;\nD2SeedStrc * psDataTableSeed = (D2SeedStrc *)0x0096c8c8;\n' +
+        'D2SeedStrc * gaSeedTable[2] = { 0x007b5680, 0 };\n',
+      'globals.cpp': 'D2SeedStrc gAncientsCloudSeed;\n',
+      'D2Client/View.cpp': 'void f() {\n    static D2SeedStrc * gpAncientsCloudSeed = (D2SeedStrc *)0x007b5680;\n}\n',
+    } });
+    assert.deepStrictEqual(subjects(fs), ['gaSeedTable', 'gpAncientsCloudSeed', 'psDataTableSeed']);
+    assert.match(fs.find(f => f.subject === 'psDataTableSeed')!.detail, /&gsAutoMapSeed/);
+  });
+
+  it('ignores a resolved reference, a shared name, an interior address, an integer slot, a non-symbol owner and a symbol the tree lacks', () => {
+    assert.deepStrictEqual(lint('raw-address-initializer', { globals: snap, files: {
+      'globals.h': globalsH,
+      'globals.cpp': 'D2SeedStrc gsAutoMapSeed;\nD2SeedStrc gAncientsCloudSeed;\n' +
+        'D2SeedStrc * psDataTableSeed = (D2SeedStrc *)&gsAutoMapSeed;\n' +
+        'namespace A { void* vftable_meta_ptr = (void*)0x006fffc0; }\n' +
+        'D2SeedStrc * gpAncientsCloudSeed = (D2SeedStrc *)0x007b5684;\n' +
+        'int gnCount = 0x0096c8c8;\n' +
+        'void * PTR_DAT_00396304 = (void*)0x0096c8c8;\n',
+      'globals.Fog.cpp': 'D2SeedStrc * gaSeedTable[1] = { (D2SeedStrc *)0x00700300 };\n',
+    } }), []);
+  });
+
+  it('only looks at globals*.cpp and static locals', () => {
+    assert.deepStrictEqual(lint('raw-address-initializer', { globals: snap, files: {
+      'globals.h': globalsH + 'extern D2SeedStrc * psDataTableSeed;\n',
+      'globals.cpp': 'D2SeedStrc gsAutoMapSeed;\nD2SeedStrc gAncientsCloudSeed;\n',
+      'D2Client/View.cpp': 'void f() {\n    D2SeedStrc * gpAncientsCloudSeed = (D2SeedStrc *)0x007b5680;\n}\n',
+    } }), []);
+  });
+});

@@ -18,6 +18,7 @@ import { arglessIndirectCall, untypedVirtualCall } from './checks/calls.js';
 import { structPackingMismatch } from './checks/layout.js';
 import { arrayIndexRange } from './checks/ranges.js';
 import { ghidraArtifact } from './checks/artifacts.js';
+import { rawAddressInitializer } from './checks/initializers.js';
 
 export type { Check, Finding } from './context.js';
 export { LintContext } from './context.js';
@@ -46,6 +47,7 @@ export const ALL_CHECKS: Check[] = [
   oobLocalAccess,
   arrayIndexRange,
   untypedVirtualCall,
+  rawAddressInitializer,
   ghidraArtifact,
 ];
 
