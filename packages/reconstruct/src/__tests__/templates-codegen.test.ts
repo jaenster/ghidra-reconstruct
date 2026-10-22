@@ -51,6 +51,10 @@ export const TEMPLATES: TemplatesConfig = {
     TSLink: { key: 'class', params: [{ name: 'T', kind: 'type' }] },
     TSExplicitList: { key: 'class', params: [{ name: 'T', kind: 'type' }, { name: 'OFFSET', kind: 'int' }] },
     TSSync: { key: 'class', params: [{ name: 'T', kind: 'type' }, { name: 'TSync', kind: 'type' }] },
+    // An element's base, and a class with a base, as Storm's TSHashObject and TSHashTableReuse.
+    TSObject: { key: 'class', params: [{ name: 'T', kind: 'type' }] },
+    TSTable: { key: 'class', params: [{ name: 'T', kind: 'type' }] },
+    TSTableEx: { key: 'class', params: [{ name: 'T', kind: 'type' }], base: 'TSTable<T>' },
   },
   classes: { KEY: { key: 'class' } },
 };
@@ -115,6 +119,27 @@ function model() {
       { name: 'm_count', dataType: 'int', offset: 0, size: 4 },
       { name: 'm_sync', dataType: 'SYNC', offset: 4, size: 12 },
     ] }) as ExtractedDataType),
+    // NODE derives from TSObject<NODE>; TSTableEx<NODE> from TSTable<NODE>. Ghidra models
+    // each base as the first member, `super_<Class>`.
+    { kind: 'STRUCTURE', name: 'NODE', category: '/', size: 12, fields: [
+      { name: 'super_TSObject', dataType: 'TSObject<NODE>', offset: 0, size: 8 },
+      { name: 'nValue', dataType: 'int', offset: 8, size: 4 },
+    ] } as ExtractedDataType,
+    { kind: 'STRUCTURE', name: 'TSObject<NODE>', category: '/', size: 8, fields: [
+      { name: 'm_hashval', dataType: 'uint', offset: 0, size: 4 },
+      { name: 'm_link', dataType: 'TSLink<NODE>', offset: 4, size: 8 },
+    ] } as ExtractedDataType,
+    { kind: 'STRUCTURE', name: 'TSLink<NODE>', category: '/', size: 8, fields: [
+      { name: 'm_prevlink', dataType: 'TSLink<NODE> *', offset: 0, size: 4 },
+      { name: 'm_next', dataType: 'int', offset: 4, size: 4 },
+    ] } as ExtractedDataType,
+    { kind: 'STRUCTURE', name: 'TSTable<NODE>', category: '/', size: 4, fields: [
+      { name: 'm_count', dataType: 'int', offset: 0, size: 4 },
+    ] } as ExtractedDataType,
+    { kind: 'STRUCTURE', name: 'TSTableEx<NODE>', category: '/', size: 8, fields: [
+      { name: 'super_TSTable', dataType: 'TSTable<NODE>', offset: 0, size: 4 },
+      { name: 'm_extra', dataType: 'int', offset: 4, size: 4 },
+    ] } as ExtractedDataType,
     { kind: 'STRUCTURE', name: 'OTHER', category: '/', size: 8, fields: [
       { name: 'm_link', dataType: 'TSLink<OTHER>', offset: 0, size: 8 },
     ] } as ExtractedDataType,
@@ -199,6 +224,18 @@ function model() {
     thiscall(list('OTHER'), 'UnlinkAll', '00401180', body('OTHER')),
     thiscall('KEY', 'Clear', '004011c0', '  this->szString = (char *)0x0;\n  return;'),
     thiscall('TSSync<ELEM,SYNC>', 'Lock', '00401200', '  this->m_count = 1;\n  return;'),
+    thiscall('TSObject<NODE>', 'Destroy', '00401300', '  this->m_hashval = 0;\n  return;'),
+    thiscall('TSTable<NODE>', 'Clear', '00401340', '  this->m_count = 0;\n  return;'),
+    // Ghidra reaches the base through its component, and casts the receiver to it.
+    thiscall('TSTableEx<NODE>', 'Reset', '00401380',
+      '  TSTable<NODE>::Clear((TSTable<NODE> *)this);\n  (this->super_TSTable).m_count = 1;\n  this->m_extra = 2;\n  return;'),
+    {
+      name: 'UseNode', address: '004013c0', namespace: 'Mod::Third', returnType: 'void',
+      signature: 'void UseNode(NODE * pNode)', localVariables: [], callingConvention: '__cdecl',
+      parameters: [{ name: 'pNode', dataType: 'NODE *', size: 4, ordinal: 0, storage: 'Stack[0x4]:4' }],
+      size: 0x10, isThunk: false, isExternal: false, hasVarArgs: false, calledFunctions: ['Destroy'],
+      decompiled: 'void Mod::Third::UseNode(NODE *pNode)\n\n{\n  TSObject<NODE>::Destroy(&pNode->super_TSObject);\n  (pNode->super_TSObject).m_hashval = 3;\n  TSTable<NODE>::Clear((TSTable<NODE> *)&gTable);\n  return;\n}\n',
+    } as ExtractedFunction,
     // An element's orphan copy: no member of the element, a free function beside the members.
     { ...thiscall('ELEM', 'Release_Unreferenced', '004013f0', '  return;'), tags: [{ type: 'ORPHAN_COPY' }] },
   ];
@@ -221,6 +258,14 @@ function model() {
     name: 'vftable', address: '00500100', dataType: 'pointer[1]', size: 4, namespace: list('ELEM'),
     isInitialized: true, xrefCount: 0, referencingFunctions: [], scope: 'global',
     initializedData: { kind: 'array', elements: [{ kind: 'pointer', value: `${list('ELEM')}::UnlinkAll` }] },
+  }, {
+    // A class with a base, initialized: the base subobject comes first.
+    name: 'gTable', address: '00500200', dataType: 'TSTableEx<NODE>', size: 8, namespace: 'Mod::Third',
+    isInitialized: true, xrefCount: 1, referencingFunctions: ['Mod::Third::UseNode'], scope: 'global',
+    initializedData: { kind: 'struct', fields: [
+      { name: 'super_TSTable', value: { kind: 'struct', fields: [{ name: 'm_count', value: { kind: 'scalar', value: '4' } }] } },
+      { name: 'm_extra', value: { kind: 'scalar', value: '5' } },
+    ] },
   }] as unknown as AnalyzedDataSymbol[];
   const namespaces: ExtractedNamespace[] = [
     { name: 'File', fullPath: 'Mod::File', isClass: false, functionCount: 1 },
@@ -233,6 +278,10 @@ function model() {
     { name: 'PEER', fullPath: 'PEER', isClass: true, functionCount: 1 },
     { name: 'TSLink<PEER>', fullPath: 'TSLink<PEER>', isClass: false, functionCount: 1 },
     { name: 'TSSync<ELEM,SYNC>', fullPath: 'TSSync<ELEM,SYNC>', isClass: false, functionCount: 1 },
+    { name: 'NODE', fullPath: 'NODE', isClass: true, functionCount: 0 },
+    { name: 'TSObject<NODE>', fullPath: 'TSObject<NODE>', isClass: false, functionCount: 1 },
+    { name: 'TSTable<NODE>', fullPath: 'TSTable<NODE>', isClass: false, functionCount: 1 },
+    { name: 'TSTableEx<NODE>', fullPath: 'TSTableEx<NODE>', isClass: false, functionCount: 1 },
   ];
   const strings: ExtractedString[] = [
     { address: '00600000', value: '.?AV?$TSExplicitList@UELEM@@$0?CCCCCCCD@@@', length: 40, encoding: 'char', xrefCount: 0 },
@@ -348,6 +397,26 @@ describe('registered class templates', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('declares a registered base for real: the template\'s and the element\'s', () => {
+    const stpl = file('Storm/H/stpl.h');
+    assert.match(stpl, /template<class T>\nclass TSTableEx : public TSTable<T> \{\npublic:\n    \/\* 0x04 \*\/ int m_extra;\n/);
+    assert.doesNotMatch(stpl, /super_/);
+    assert.match(file('Mod/Third.h'), /\nstruct NODE : public TSObject<NODE> \{\n    \/\* 0x08 \*\/ int nValue;\n\};/);
+  });
+
+  it('reads inherited members and passes derived pointers where Ghidra went through the base component', () => {
+    const reset = file('Mod/stpl_NODE.cpp');
+    assert.match(reset, /TSTable<NODE>::Clear\(pThis\);\n    pThis->m_count = 1;\n    pThis->m_extra = 2;/);
+    const use = file('Mod/Third.cpp');
+    assert.match(use, /TSObject<NODE>::Destroy\(pNode\);\n    pNode->m_hashval = 3;\n    TSTable<NODE>::Clear\(&gTable\);/);
+    const all = [...project.files.values()].map(f => f.content).join('\n');
+    assert.doesNotMatch(all, /super_TS/);
+  });
+
+  it('initializes the base subobject first, without a member designator', () => {
+    assert.match(file('globals.Mod.cpp'), /TSTableEx<NODE> gTable = \{\n    \/\* base TSTable<NODE> \*\/ \{\n        \/\* \.m_count = \*\/ 4\n    \},\n    \/\* \.m_extra = \*\/ 5\n\};/);
   });
 
   it('emits an element\'s orphan copy as a free function with the members, not in the element\'s namespace', () => {

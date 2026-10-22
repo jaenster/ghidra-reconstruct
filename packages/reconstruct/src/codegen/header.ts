@@ -28,7 +28,8 @@ import { declarationHead, pointerConvention } from './calling-convention.js';
 import { enumTypedefLine } from './enum-width.js';
 import { requiresPacking, adoptGhidraLayout } from './struct-packing.js';
 import { memberDefinitionScope } from './templates/index.js';
-import { classKeyOf } from './templates/registry.js';
+import { classKeyOf, templateRegistry } from './templates/registry.js';
+import { baseComponentOf, ownFields } from './templates/bases.js';
 
 /** normalizeSignatureType + fn-ptr-typedef double-indirection collapse, for
  *  emitting function parameter and return types ("fpFoo *" → "fpFoo").
@@ -1565,9 +1566,23 @@ function fieldDeclSpellingUnqualified(dataType: string, size: number): string | 
  * declarations everywhere use (classKeyOf). A `class` opens public, as the
  * binary records no access and public cannot fail to compile.
  */
-export function classHead(name: string, attributes = ''): string[] {
+export function classHead(name: string, attributes = '', base?: string): string[] {
   const key = classKeyOf(name);
-  return key === 'class' ? [`class ${attributes}${name} {`, 'public:'] : [`struct ${attributes}${name} {`];
+  const bases = base ? ` : public ${base}` : '';
+  return key === 'class' ? [`class ${attributes}${name}${bases} {`, 'public:'] : [`struct ${attributes}${name}${bases} {`];
+}
+
+/**
+ * The base class a struct is declared with (templates/bases.ts), as its
+ * component's type is spelled, and the members it declares itself.
+ */
+function structBase(struct: ExtractedStruct): { base?: string; fields: StructField[] } {
+  const registry = templateRegistry();
+  const base = registry ? baseComponentOf(registry, struct.fields) : undefined;
+  if (!base) return { fields: struct.fields };
+  const spelling = fieldDeclSpellingUnqualified(base.type, base.field.size);
+  if (!spelling) throw new Error(`[templates] ${struct.name}: cannot spell the base ${base.type}`);
+  return { base: spelling, fields: ownFields(registry!, struct.fields) };
 }
 
 /**
@@ -1593,7 +1608,8 @@ export function generateStructDeclaration(struct: ExtractedStruct): string {
   const pragmaPack = needsPacking && hasConstructorBearingMember(struct.fields);
   const packed = needsPacking && !pragmaPack ? '__attribute__((packed)) ' : '';
   if (pragmaPack) lines.push('#pragma pack(push, 1)');
-  lines.push(...classHead(struct.name, packed));
+  const { base, fields } = structBase(struct);
+  lines.push(...classHead(struct.name, packed, base));
 
   // Add integer conversion operators for small integer-only structs
   const intConversionType = getIntegerConversionType(struct.fields);
@@ -1619,7 +1635,7 @@ export function generateStructDeclaration(struct: ExtractedStruct): string {
     lines.push('');
   }
 
-  emitFieldLines(struct.fields, lines);
+  emitFieldLines(fields, lines);
 
   lines.push('};');
   if (pragmaPack) lines.push('#pragma pack(pop)');

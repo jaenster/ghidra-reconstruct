@@ -42,6 +42,60 @@ export function templateIdSpelling(name: string): string | null {
   return d.type?.kind === NodeKind.TypedefType && d.type.name?.kind === NodeKind.TemplateType ? emit(d.type) : null;
 }
 
+/** The template name of a struct name that is exactly one template-id (`TSHashTableReuse`), else the name itself. */
+function classNameOf(name: string): string {
+  if (!name.includes('<')) return name;
+  let tu: any;
+  try { tu = parse(`typedef ${name} __layout_name;`); } catch { return name; }
+  const id = tu.declarations[0]?.type?.name;
+  return id?.kind === NodeKind.TemplateType && id.name?.kind === NodeKind.Identifier ? id.name.name : name;
+}
+
+/**
+ * The classes the tree declares with a base class: a class by its name, a class
+ * template by its template name. Ghidra models each such base as the struct's
+ * `super_<Class>` component, which the tree has no member for.
+ */
+export function classesWithBases(files: ReadonlyArray<{ tu: { declarations: unknown[] } }>): Set<string> {
+  const out = new Set<string>();
+  const rec = (decls: any[]) => {
+    for (const d of decls ?? []) {
+      if (!d) continue;
+      if (d.kind === NodeKind.NamespaceDecl || d.kind === NodeKind.LinkageSpec) rec(d.declarations);
+      else if (d.kind === NodeKind.TemplateDecl) rec([d.declaration]);
+      else if ((d.kind === NodeKind.StructDecl || d.kind === NodeKind.ClassDecl) && d.bases?.length) {
+        const n = d.name?.kind === NodeKind.TemplateType ? d.name.name : d.name;
+        if (n?.kind === NodeKind.Identifier) out.add(n.name);
+      }
+    }
+  };
+  for (const f of files) rec(f.tu.declarations);
+  return out;
+}
+
+/**
+ * Each member's offset as the TU can name it: a field by its name, and - where
+ * the tree declares the struct with a base - every member of the `super_`
+ * component's struct through the derived class, at the component's offset plus
+ * its own. That is what proves the base subobject sits where Ghidra puts it.
+ */
+function memberOffsets(
+  struct: Pick<SnapshotStruct, 'name' | 'fields'>,
+  byName: ReadonlyMap<string, SnapshotStruct>,
+  derived: ReadonlySet<string>,
+  at = 0,
+  path = '',
+): Array<{ name: string; path: string; offset: number }> {
+  const out: Array<{ name: string; path: string; offset: number }> = [];
+  for (const f of struct.fields) {
+    if (!f.name || typeof f.offset !== 'number' || BAD_IDENT.test(f.name)) continue;
+    const base = f.name.startsWith('super_') && derived.has(classNameOf(struct.name)) ? byName.get(f.dataType ?? '') : undefined;
+    if (base) out.push(...memberOffsets(base, byName, derived, at + f.offset, `${path}${f.name}.`));
+    else out.push({ name: f.name, path: `${path}${f.name}`, offset: at + f.offset });
+  }
+  return out;
+}
+
 export interface AssertableStruct {
   /** Ghidra's name, which the assert messages carry. */
   name: string;
@@ -107,11 +161,12 @@ export function compilerAvailable(): boolean {
 }
 
 /** Compile the assert TU; SIZE/OFF failures by struct, or null without a compiler. */
-export function compilerLayout(root: string, structs: SnapshotStruct[]):
+export function compilerLayout(root: string, structs: SnapshotStruct[], derived: ReadonlySet<string> = new Set()):
     { sizeBad: string[]; offBad: string[]; uncheckable: string[] } | null {
   if (!compilerAvailable()) return null;
   const items = assertableStructs(structs);
   if (!items.length) return null;
+  const byName = new Map(structs.map(s => [s.name, s]));
   const dir = mkdtempSync(join(tmpdir(), 'defect-lint-layout-'));
   try {
     const lines: string[] = ['#include "d2_platform.h"'];
@@ -127,9 +182,8 @@ export function compilerLayout(root: string, structs: SnapshotStruct[]):
         lines.push(`typedef ${spelling} ${type};`);
       }
       if (size !== null) lines.push(`static_assert(sizeof(${type}) == ${size}, "SIZE ${name}");`);
-      for (const f of fields) {
-        if (!f.name || typeof f.offset !== 'number' || BAD_IDENT.test(f.name)) continue;
-        lines.push(`static_assert(offsetof(${type}, ${f.name}) == ${f.offset}, "OFF ${name}.${f.name}");`);
+      for (const m of memberOffsets({ name, fields }, byName, derived)) {
+        lines.push(`static_assert(offsetof(${type}, ${m.name}) == ${m.offset}, "OFF ${name}.${m.path}");`);
       }
     });
     const tu = join(dir, 'layout_check.cpp');
@@ -188,7 +242,7 @@ export const structPackingMismatch: Check = {
   run(ctx: LintContext) {
     const structs = ctx.snapshot?.structs ?? [];
     if (!structs.length) return [];
-    const r = compilerLayout(ctx.tree.root, structs);
+    const r = compilerLayout(ctx.tree.root, structs, classesWithBases(ctx.tree.files));
     const out: Finding[] = [];
     if (!r) {
       for (const [name, why] of simulatedLayout(structs)) {

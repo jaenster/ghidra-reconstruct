@@ -26,6 +26,7 @@ import { orphanMarker } from './index.js';
 import { parseTypeSpelling, templateIdOf, templateName } from './identity.js';
 import { deriveFamilyLayouts, genericSpelling, VTABLE_MEMBER_TYPE, type FamilyLayout } from './layout.js';
 import { classKeyOf, type TemplateFamily, type TemplateInstantiation, type TemplateRegistry } from './registry.js';
+import { baseComponentOf, ownFields } from './bases.js';
 
 export interface TemplateHeaderInput {
   registry: TemplateRegistry;
@@ -184,7 +185,17 @@ function renderPrimary(
   mentioned: Set<string>,
 ): string {
   const { family } = layout;
-  const lines: string[] = [templateHead(family), `${family.key} ${family.name} {`, 'public:'];
+  const all: StructField[] = layout.fields.map(f => ({
+    name: f.name,
+    dataType: f.dataType,
+    offset: f.offset,
+    size: 0,
+    comment: f.comment ?? null,
+  } as unknown as StructField));
+  // The layout check (layout.ts) already holds the base to project.json's.
+  const base = baseComponentOf(registry, all);
+  const fields = ownFields(registry, all);
+  const lines: string[] = [templateHead(family), `${family.key} ${family.name}${base ? ` : public ${base.type}` : ''} {`, 'public:'];
   if (layout.vtable) {
     lines.push(`    struct ${VTABLE_MEMBER_TYPE} {`);
     const hexWidth = Math.max(2, Math.max(...layout.vtable.map(s => s.offset)).toString(16).length);
@@ -198,13 +209,6 @@ function renderPrimary(
     lines.push('    };');
     lines.push('');
   }
-  const fields: StructField[] = layout.fields.map(f => ({
-    name: f.name,
-    dataType: f.dataType,
-    offset: f.offset,
-    size: 0,
-    comment: f.comment ?? null,
-  } as unknown as StructField));
   for (const f of layout.fields) plainTypeNames(f.dataType, mentioned);
   emitFieldLines(fields, lines);
   const statics = [...genericData(family, data, registry, problems), ...genericMembers(family, members, registry, problems, mentioned)];

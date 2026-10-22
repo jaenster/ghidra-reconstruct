@@ -2445,6 +2445,12 @@ export function emitDataValue(dv: DataValue, indent = 0, expectedType?: string):
         if (isAutoName) {
           return `${innerPad}${v}${comma}`;
         }
+        // A base-class component is the base subobject, which C++17 aggregate
+        // initialization fills first and positionally (templates/bases.ts).
+        if (templateRegistry()?.isBaseComponent(f.name)) {
+          const base = layout?.get(f.name);
+          return `${innerPad}/* base${base ? ` ${base}` : ''} */ ${v}${comma}`;
+        }
         return `${innerPad}/* .${f.name} = */ ${v}${comma}`;
       });
       return `{\n${fieldLines.join('\n')}\n${pad}}`;

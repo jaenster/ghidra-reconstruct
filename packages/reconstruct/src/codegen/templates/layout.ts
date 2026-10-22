@@ -22,6 +22,7 @@ import type { ASTNode, Identifier, QualifiedId, TypeNode, TypedefType } from '@g
 import { parseTypeSpelling, spellType, substituteType, templateIdOf } from './identity.js';
 import { returnSigType, sigType } from '../header.js';
 import type { TemplateFamily, TemplateInstantiation, TemplateRegistry } from './registry.js';
+import { baseComponentOf } from './bases.js';
 
 /**
  * The member type a registered class's vtable struct is emitted under: the
@@ -139,13 +140,18 @@ export function deriveFamilyLayouts(registry: TemplateRegistry, dataTypes: reado
         problems.push(`${familyName}: ${ref.inst.ghidra} {${a.join(', ')}} vs ${other.inst.ghidra} {${b.join(', ')}}`);
       }
     }
+    // The base project.json registers is the one Ghidra models: the first
+    // member, `super_<Family>` at offset 0 (templates/bases.ts).
+    const component = baseComponentOf(registry, ref.fields as unknown as StructField[]);
     if (family.base) {
       const first = ref.fields[0];
       const base = parseTypeSpelling(family.base);
       const baseSpelling = base ? spellType(base) : family.base;
-      if (!first || first.dataType !== baseSpelling) {
-        problems.push(`${familyName}: project.json gives the base ${baseSpelling}, the first member is ${first ? `${first.name}: ${first.dataType}` : 'missing'}`);
+      if (!component || component.type !== baseSpelling) {
+        problems.push(`${familyName}: project.json gives the base ${baseSpelling}, the first member is ${first ? `${first.name}@${first.offset}: ${first.dataType}` : 'missing'}`);
       }
+    } else if (component) {
+      problems.push(`${familyName}: Ghidra models the base ${component.type} (${component.field.name}), project.json registers none`);
     }
     const fields = ref.fields.map((f, i) => ({
       ...f,

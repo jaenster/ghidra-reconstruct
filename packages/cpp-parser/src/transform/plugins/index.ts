@@ -610,6 +610,8 @@ export { shadowedTypeQualifyPlugin, type ShadowedTypeQualifyOptions } from './bu
 import { functionShadowedGlobalPlugin } from './builtins/function-shadowed-global.js';
 import { globalAliasResolvePlugin } from './builtins/global-alias-resolve.js';
 import { sehLoweringPlugin } from './builtins/seh-lowering.js';
+import { baseClassAccessPlugin } from './builtins/base-class-access.js';
+export { baseClassAccessPlugin, type BaseClassAccessOptions } from './builtins/base-class-access.js';
 export { sehLoweringPlugin, type SehLoweringOptions, type SehLoweringScope } from './builtins/seh-lowering.js';
 export { globalAliasResolvePlugin, type GlobalAliasResolveOptions } from './builtins/global-alias-resolve.js';
 export { functionShadowedGlobalPlugin, type FunctionShadowedGlobalOptions } from './builtins/function-shadowed-global.js';
@@ -724,6 +726,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   narrowCastThroughUintptrPlugin, // Type: route a pointer->narrow-integer cast through uintptr_t (priority 620)
   assignCastPlugin,           // Type: cast an assigned value to its slot's declared type (priority 615)
   unprototypedCallCastPlugin, // Type: give a FARPROC call the parameter list C left unspecified (priority 622)
+  baseClassAccessPlugin,      // Structs: p->super_B.m -> p->m, &p->super_B -> p, f((B*)derived) -> f(derived) for real base classes (priority 625)
   charArrayDwordAssignPlugin, // Type: charArray = scalar -> *(uint32_t*)charArray = scalar (priority 75)
   reservedFieldRenamePlugin,  // Cleanup: ->int → ->int_ for header-renamed keyword fields (priority 47)
   rootScopeQualifyPlugin,     // Cleanup: crashy::vftable → ::vftable for root-scope symbols (priority 48)

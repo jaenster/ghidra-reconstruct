@@ -14,6 +14,7 @@
  */
 
 import type { TemplatesConfig } from '../../config/schema.js';
+import type { BaseModel } from './bases.js';
 import { parseTypeSpelling, spellType, stripRootQualifiers, templateArguments, templateIdOf, templateIdsIn, templateName, type TemplateArgValue } from './identity.js';
 
 export interface TemplateParam {
@@ -116,6 +117,22 @@ export class TemplateRegistry {
   }
 
   private placement: ReadonlyMap<string, string> = new Map();
+  private baseInfo: BaseModel | undefined;
+
+  /** Record the model's base relations (templates/bases.ts). */
+  setBases(model: BaseModel): void {
+    this.baseInfo = model;
+  }
+
+  /** The model's base relations, once recorded. */
+  bases(): BaseModel | undefined {
+    return this.baseInfo;
+  }
+
+  /** A member name that is a base-class component (`super_TSHashTable`), which the tree declares as a base. */
+  isBaseComponent(name: string | null | undefined): boolean {
+    return !!name && !!this.baseInfo?.componentNames.includes(name);
+  }
 
   /**
    * Record which functions are orphan copies: Ghidra tags each one ORPHAN_COPY.

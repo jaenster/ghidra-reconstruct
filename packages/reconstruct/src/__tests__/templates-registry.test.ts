@@ -11,6 +11,7 @@ import { TemplateRegistry, classKeyOf, demangleRttiClass, demangleRttiTemplate, 
 import { parseTypeSpelling, rootQualifyTemplateArguments, spellType, substituteType } from '../codegen/templates/identity.js';
 import { deriveFamilyLayouts, genericSpelling } from '../codegen/templates/layout.js';
 import { placeTemplateMembers } from '../codegen/templates/placement.js';
+import { baseComponentOf, baseModel } from '../codegen/templates/bases.js';
 import { classScopedReference, templateHeaderTypes } from '../codegen/templates/index.js';
 import { flattenTemplateNames } from '../codegen/template-names.js';
 import { NamespaceResolution } from '../codegen/namespace-resolution.js';
@@ -221,6 +222,16 @@ describe('the primary template layout', () => {
     assert.doesNotThrow(() => deriveFamilyLayouts(r, types));
     const wrong = [struct('TSHashTableReuse<CELLIST, HASHKEY_NONE, 0>', 4, [['first', 'int', 0, 4]])];
     assert.throws(() => deriveFamilyLayouts(r, wrong), /gives the base TSHashTable<T, TKey>/);
+    // The base's type in a member Ghidra did not model as the base component.
+    const unnamed = [struct('TSHashTableReuse<CELLIST, HASHKEY_NONE, 0>', 4, [['m_table', 'TSHashTable<CELLIST,HASHKEY_NONE>', 0, 4]])];
+    assert.throws(() => deriveFamilyLayouts(r, unnamed), /gives the base TSHashTable<T, TKey>, the first member is m_table@0/);
+  });
+
+  it('refuses a base Ghidra models that project.json does not register', () => {
+    const config = { ...CONFIG, families: { ...CONFIG.families, TSHashTableReuse: { ...CONFIG.families.TSHashTableReuse, base: undefined } } };
+    const r = TemplateRegistry.build(config, ['TSHashTableReuse<CELLIST,HASHKEY_NONE,0>']);
+    const types = [struct('TSHashTableReuse<CELLIST, HASHKEY_NONE, 0>', 4, [['super_TSHashTable', 'TSHashTable<CELLIST,HASHKEY_NONE>', 0, 4]])];
+    assert.throws(() => deriveFamilyLayouts(r, types), /TSHashTableReuse: Ghidra models the base TSHashTable<T, TKey> \(super_TSHashTable\), project.json registers none/);
   });
 
   it('spells a value argument over its parameter', () => {
@@ -377,3 +388,53 @@ describe('project.json templates', () => {
   });
 });
 
+describe('base classes', () => {
+  const insts = ['TSHashTableReuse<CELLIST,HASHKEY_NONE,0>', 'TSHashTable<CELLIST,HASHKEY_NONE>', 'TSHashObject<CELLIST,HASHKEY_NONE>'];
+  const model = () => [
+    struct('CELLIST', 0x20, [['super_TSHashObject', 'TSHashObject<CELLIST,HASHKEY_NONE>', 0, 0x18], ['dwFlags', 'uint32_t', 0x18, 4]]),
+    struct('TSHashObject<CELLIST,HASHKEY_NONE>', 0x18, [['m_hashval', 'uint32_t', 0, 4], ['m_key', 'HASHKEY_NONE', 0x14, 1]]),
+    struct('TSHashTable<CELLIST,HASHKEY_NONE>', 8, [['pVtable', 'void *', 0, 4], ['nSlotMask', 'uint32_t', 4, 4]]),
+    struct('TSHashTableReuse<CELLIST,HASHKEY_NONE,0>', 12, [['super_TSHashTable', 'TSHashTable<CELLIST,HASHKEY_NONE>', 0, 8], ['nChunkSize', 'uint32_t', 8, 4]]),
+    // A component that only looks like a base: an unregistered family.
+    struct('OTHER', 8, [['super_Unregistered', 'Unregistered<int>', 0, 8]]),
+  ];
+
+  it('takes the first member, at offset 0, named for a registered family and typed as it, as the base', () => {
+    const r = TemplateRegistry.build(CONFIG, insts);
+    const [cellist, , , reuse, other] = model() as unknown as Array<{ fields: never[] }>;
+    assert.strictEqual(baseComponentOf(r, cellist.fields)?.type, 'TSHashObject<CELLIST,HASHKEY_NONE>');
+    assert.strictEqual(baseComponentOf(r, reuse.fields)?.family.name, 'TSHashTable');
+    assert.strictEqual(baseComponentOf(r, other.fields), undefined);
+    const f = (name: string, dataType: string, offset: number) => [{ name, dataType, offset, size: 4 }] as never;
+    assert.strictEqual(baseComponentOf(r, f('super_TSHashTable', 'TSHashObject<CELLIST,HASHKEY_NONE>', 0)), undefined);
+    assert.strictEqual(baseComponentOf(r, f('super_TSHashTable', 'TSHashTable<CELLIST,HASHKEY_NONE>', 4)), undefined);
+  });
+
+  it('lists every base component, every class with its direct base in the tree\'s spelling, and the members a derived class hides', () => {
+    const r = TemplateRegistry.build(CONFIG, insts);
+    const m = baseModel(r, model(), [
+      { name: 'Destructor', namespace: 'TSHashTable<CELLIST,HASHKEY_NONE>' },
+      { name: 'Destructor', namespace: 'TSHashTableReuse<CELLIST,HASHKEY_NONE,0>' },
+      { name: 'Constructor', namespace: 'TSHashTableReuse<CELLIST,HASHKEY_NONE,0>' },
+    ]);
+    assert.deepStrictEqual(m.componentNames, ['super_TSHashObject', 'super_TSHashTable']);
+    assert.deepStrictEqual(m.bases, [
+      ['CELLIST', 'TSHashObject<CELLIST, HASHKEY_NONE>'],
+      ['TSHashTableReuse<CELLIST, HASHKEY_NONE, 0>', 'TSHashTable<CELLIST, HASHKEY_NONE>'],
+    ]);
+    assert.deepStrictEqual(m.hiddenMembers, ['Destructor']);
+  });
+
+  it('refuses a component named as a base that is not the struct\'s base', () => {
+    const r = TemplateRegistry.build(CONFIG, insts);
+    const misplaced = [...model(), struct('HOLDER', 0x1c, [['nCount', 'int', 0, 4], ['super_TSHashObject', 'TSHashObject<CELLIST,HASHKEY_NONE>', 4, 0x18]])];
+    assert.throws(() => baseModel(r, misplaced, []), /HOLDER\.super_TSHashObject \(\+0x4, TSHashObject<CELLIST,HASHKEY_NONE>\) is named as a base/);
+  });
+
+  it('refuses a derived class that declares a data member of its base again', () => {
+    const r = TemplateRegistry.build(CONFIG, insts);
+    const types = model();
+    (types[0] as unknown as { fields: unknown[] }).fields.push({ name: 'm_hashval', dataType: 'uint32_t', offset: 0x1c, size: 4 });
+    assert.throws(() => baseModel(r, types, []), /CELLIST declares m_hashval, which hides the data member of its base TSHashObject<CELLIST, HASHKEY_NONE>/);
+  });
+});

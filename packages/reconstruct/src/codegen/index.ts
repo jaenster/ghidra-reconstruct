@@ -96,6 +96,7 @@ import { normalizePointerSizeSpellings } from './pointer-size-spelling.js';
 import { flattenTemplateNames } from './template-names.js';
 import { buildTemplateRegistry, classScopeOf, templateDataDefinitions, templateHeaderTypes } from './templates/index.js';
 import { placeTemplateMembers } from './templates/placement.js';
+import { baseModel } from './templates/bases.js';
 import { generateTemplateHeader } from './templates/emit-header.js';
 import { classKeyOf, setTemplateRegistry, templateRegistry } from './templates/registry.js';
 import { retypeVtableLocals, retypeVtableLocalsByAssignment, vtableMembersByType } from '../modules/vtable-types.js';
@@ -700,6 +701,10 @@ export function generateProjectStage1(
   const templates = buildTemplateRegistry(options.projectConfig?.templates, dataTypes, functions, globals as Array<{ namespace?: string | null }>, strings);
   setTemplateRegistry(templates);
   flattenTemplateNames(dataTypes, functions, globals as Array<{ name?: string; dataType?: string; suggestedType?: string; suggestedName?: string; namespace?: string | null }>, templates);
+  templates?.setBases(baseModel(templates, dataTypes, [
+    ...functions,
+    ...(globals as Array<{ name: string; suggestedName?: string; namespace?: string | null }>).map(g => ({ name: g.suggestedName || g.name, namespace: g.namespace })),
+  ]));
 
   // Ghidra types a body's vtable LOCALS with the bare `vtable *`, which can only
   // be rendered `void *` — so `pListHead->FUN_004503f0` is a member access on

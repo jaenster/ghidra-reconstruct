@@ -30,6 +30,7 @@ import { immediateConstantFacts, dataAtAddress, type ImmediateConstantFact } fro
 import { ROOT_CLASS_SCOPE, namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 import { cleanFunctionComment, guardedFuncDefTypedef, emittedFunctionName, returnSigType, sigType } from './header.js';
 import { classScopeOf, memberDefinitionScope, orphanMarker } from './templates/index.js';
+import { templateRegistry } from './templates/registry.js';
 import { declarationHead } from './calling-convention.js';
 import { emittedParameterName, getAggregateTypeNames } from './platform-types.js';
 import { generateStaticLocalsBlock, emitDataValue, setInitializerOwnerAddress, inferArrayDeclaration, isWideTextDatum, normalizeArrayDeclaration, braceArrayInitializer, isFuncDefTypedefName, getKnownFuncDefTypedefs, getKnownEnumConstants, setInitializerNamespace, renderGlobalScalarInitializer, recordDeclaredName } from './globals-header.js';
@@ -2853,6 +2854,23 @@ function transformDecompiledCode(
     // Ghidra never said and nothing declares.
     const structFieldOptions = structFieldPluginOptions();
     if (structFieldOptions) perPluginOptions['struct-field'] = structFieldOptions;
+
+    // A base class the tree declares for real (templates/bases.ts): bodies read
+    // the inherited member, not Ghidra's `super_` component of it.
+    const bases = templateRegistry()?.bases();
+    if (bases && bases.componentNames.length > 0) {
+      perPluginOptions['base-class-access'] = {
+        baseComponents: bases.componentNames,
+        hiddenMembers: bases.hiddenMembers,
+        bases: bases.bases,
+        globalTypes: context?.funcPtrArgCasts?.globalTypes,
+        structFields: context?.funcPtrArgCasts?.structFields,
+        fieldTypes: context?.funcPtrArgCasts?.fieldTypes,
+        functionReturnTypes: context?.funcPtrArgCasts?.functionReturnTypes,
+        typedefTargets: context?.funcPtrArgCasts?.typedefTargets,
+        enclosingVarTypes,
+      };
+    }
 
     const funcdefTypedefs = getKnownFuncDefTypedefs();
     if (funcdefTypedefs.length > 0) {
