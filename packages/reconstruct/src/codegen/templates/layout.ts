@@ -22,7 +22,7 @@ import type { ASTNode, Identifier, QualifiedId, TypeNode, TypedefType } from '@g
 import { parseTypeSpelling, spellType, substituteType, templateIdOf } from './identity.js';
 import { returnSigType, sigType } from '../header.js';
 import type { TemplateFamily, TemplateInstantiation, TemplateRegistry } from './registry.js';
-import { baseComponentOf } from './bases.js';
+import { baseComponentOf, isFiller } from './bases.js';
 
 /**
  * The member type a registered class's vtable struct is emitted under: the
@@ -95,11 +95,6 @@ export function ownGenericSpelling(inst: TemplateInstantiation): string {
   return genericSpelling(inst.spelling, { ...inst, spelling: inst.spelling });
 }
 
-/** Ghidra's filler byte: an unnamed `undefined` component. The class template has none. */
-export function isFiller(f: StructField): boolean {
-  const t = (f.dataType ?? '').trim();
-  return !f.name && /^undefined\d?$/.test(t);
-}
 
 /**
  * Derive every family's layout. Throws, listing each disagreement, when the

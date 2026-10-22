@@ -11,7 +11,8 @@ import { TemplateRegistry, classKeyOf, demangleRttiClass, demangleRttiTemplate, 
 import { parseTypeSpelling, rootQualifyTemplateArguments, spellType, substituteType } from '../codegen/templates/identity.js';
 import { deriveFamilyLayouts, genericSpelling } from '../codegen/templates/layout.js';
 import { placeTemplateMembers } from '../codegen/templates/placement.js';
-import { baseComponentOf, baseModel } from '../codegen/templates/bases.js';
+import { baseComponentOf, baseComponentNamed, baseModel } from '../codegen/templates/bases.js';
+import { memberModel } from '../codegen/templates/members.js';
 import { classScopedReference, templateHeaderTypes } from '../codegen/templates/index.js';
 import { flattenTemplateNames } from '../codegen/template-names.js';
 import { NamespaceResolution } from '../codegen/namespace-resolution.js';
@@ -410,6 +411,15 @@ describe('base classes', () => {
     assert.strictEqual(baseComponentOf(r, f('super_TSHashTable', 'TSHashTable<CELLIST,HASHKEY_NONE>', 4)), undefined);
   });
 
+  it('applies the one base rule to whatever names the bases', () => {
+    const fields = [{ name: 'super_TSHashTable', dataType: 'TSHashTable<CELLIST,HASHKEY_NONE>', offset: 0 }, { name: 'n', dataType: 'int', offset: 0x28 }];
+    assert.strictEqual(baseComponentNamed(fields, n => (n === 'TSHashTable' ? 1 : undefined))?.field, fields[0]);
+    assert.strictEqual(baseComponentNamed(fields, () => undefined), undefined);
+    // Leading filler is skipped; a component away from offset 0 is no base.
+    assert.ok(baseComponentNamed([{ dataType: 'undefined', offset: 0 }, { ...fields[0] }], () => 1));
+    assert.strictEqual(baseComponentNamed([{ ...fields[0], offset: 4 }], () => 1), undefined);
+  });
+
   it('lists every base component, every class with its direct base in the tree\'s spelling, and the members a derived class hides', () => {
     const r = TemplateRegistry.build(CONFIG, insts);
     const m = baseModel(r, model(), [
@@ -431,10 +441,81 @@ describe('base classes', () => {
     assert.throws(() => baseModel(r, misplaced, []), /HOLDER\.super_TSHashObject \(\+0x4, TSHashObject<CELLIST,HASHKEY_NONE>\) is named as a base/);
   });
 
+  it('counts what an element\'s own namespace and a whole family declare, but not an orphan copy', () => {
+    const r = TemplateRegistry.build(CONFIG, [...insts, 'TSHashTable<OTHER,HASHKEY_NONE>']);
+    r.findOrphans([{ address: '00400010', name: 'Release_Unreferenced', namespace: 'CELLIST', tags: [{ type: 'ORPHAN_COPY' }] }]);
+    const m = baseModel(r, model(), [
+      // The element's namespace is its class scope: its Destructor hides the base's.
+      { name: 'Destructor', namespace: 'CELLIST', address: '00400000' },
+      { name: 'Destructor', namespace: 'TSHashObject<CELLIST,HASHKEY_NONE>', address: '00400020' },
+      { name: 'Release_Unreferenced', namespace: 'CELLIST', address: '00400010' },
+      // Declared by the primary template for every instantiation, this one included.
+      { name: 'Grow', namespace: 'TSHashTable<OTHER,HASHKEY_NONE>', address: '00400030' },
+      { name: 'Grow', namespace: 'TSHashTableReuse<CELLIST,HASHKEY_NONE,0>', address: '00400040' },
+    ]);
+    assert.deepStrictEqual(m.hiddenMembers, ['Destructor', 'Grow']);
+    assert.deepStrictEqual(m.declaredNames['CELLIST'], ['Destructor', 'dwFlags']);
+    assert.deepStrictEqual(m.declaredNames['TSHashTable<CELLIST, HASHKEY_NONE>'], ['Grow', 'nSlotMask', 'pVtable']);
+    assert.deepStrictEqual(m.declaredNames['TSHashTableReuse<CELLIST, HASHKEY_NONE, 0>'], ['Grow', 'nChunkSize']);
+  });
+
   it('refuses a derived class that declares a data member of its base again', () => {
     const r = TemplateRegistry.build(CONFIG, insts);
     const types = model();
     (types[0] as unknown as { fields: unknown[] }).fields.push({ name: 'm_hashval', dataType: 'uint32_t', offset: 0x1c, size: 4 });
     assert.throws(() => baseModel(r, types, []), /CELLIST declares m_hashval, which hides the data member of its base TSHashObject<CELLIST, HASHKEY_NONE>/);
+  });
+});
+
+describe('member functions', () => {
+  const insts = ['TSExplicitList<CELLIST,-572662307>', 'TSExplicitList<OTHER,-572662307>', 'TSHashTable<CELLIST,HASHKEY_NONE>'];
+  const fn = (address: string, ns: string, name: string, receiver: string | null, extra: object = {}): ExtractedFunction => ({
+    address, name, namespace: ns, returnType: 'void', callingConvention: receiver ? '__thiscall' : '__stdcall',
+    parameters: receiver ? [{ name: 'this', dataType: receiver, ordinal: 0 }] : [{ name: 'nValue', dataType: 'uint32_t', ordinal: 0 }],
+    ...extra,
+  }) as unknown as ExtractedFunction;
+  const build = () => {
+    const r = TemplateRegistry.build(CONFIG, insts);
+    setTemplateRegistry(r);
+    r.findOrphans([{ address: '00401050', name: 'Link_Unreferenced', namespace: 'TSExplicitList<CELLIST,-572662307>', tags: [{ type: 'ORPHAN_COPY' }] }]);
+    return r;
+  };
+  const functions = [
+    fn('00401000', 'TSExplicitList<CELLIST,-572662307>', 'UnlinkAll', 'TSExplicitList<CELLIST,-572662307> *'),
+    fn('00401010', 'TSExplicitList<OTHER,-572662307>', 'UnlinkAll', 'TSExplicitList<OTHER,-572662307> *'),
+    fn('00401020', 'TSHashTable<CELLIST,HASHKEY_NONE>', 'InternalDelete', 'TSHashTable<CELLIST,HASHKEY_NONE> *'),
+    fn('00401030', 'TSHashTable<CELLIST,HASHKEY_NONE>', 'Ptr', 'TSHashTable<CELLIST,HASHKEY_NONE> *'),
+    fn('00401040', 'TSExplicitList<CELLIST,-572662307>', 'RoundToMultiple', null),
+    fn('00401050', 'TSExplicitList<CELLIST,-572662307>', 'Link_Unreferenced', 'TSExplicitList<CELLIST,-572662307> *'),
+    fn('00401060', 'HASHKEY_NONE', 'Equals', 'HASHKEY_NONE *'),
+    // An element's own function is no registered member.
+    fn('00401070', 'CELLIST', 'Destructor', 'CELLIST *'),
+  ];
+  // The vtable holds InternalDelete's address as a plain pointer.
+  const globals = [{ initializedData: { kind: 'array' as const, elements: [{ kind: 'pointer' as const, value: 'TSHashTable<CELLIST,HASHKEY_NONE>::InternalDelete' }] } }];
+
+  it('makes a member with a receiver non-static, unless the program holds its address or it has no receiver', () => {
+    const m = memberModel(build(), functions, globals);
+    assert.deepStrictEqual([...m.instanceAddresses].sort(), ['00401000', '00401010', '00401030', '00401060']);
+    assert.deepStrictEqual(m.instanceMembers, {
+      'TSExplicitList<CELLIST, -572662307>': ['UnlinkAll'],
+      'TSExplicitList<OTHER, -572662307>': ['UnlinkAll'],
+      'TSHashTable<CELLIST, HASHKEY_NONE>': ['Ptr'],
+      HASHKEY_NONE: ['Equals'],
+    });
+  });
+
+  it('decides per member name of a family: a held address keeps every instantiation\'s static', () => {
+    const held = [{ initializedData: { kind: 'pointer' as const, value: 'TSExplicitList<OTHER,-572662307>::UnlinkAll' } }];
+    const m = memberModel(build(), functions, held);
+    assert.ok(!m.instanceAddresses.has('00401000') && !m.instanceAddresses.has('00401010'));
+    assert.ok(m.instanceAddresses.has('00401020'));
+  });
+
+  it('refuses a family whose instantiations disagree on the receiver, and a receiver of another class', () => {
+    const mixed = [...functions, fn('00401080', 'TSExplicitList<OTHER,-572662307>', 'RoundToMultiple', 'TSExplicitList<OTHER,-572662307> *')];
+    assert.throws(() => memberModel(build(), mixed, globals), /TSExplicitList::RoundToMultiple: some instantiations have a receiver and some have none/);
+    const stray = [...functions, fn('00401090', 'TSHashTable<CELLIST,HASHKEY_NONE>', 'Next', 'CELLIST *')];
+    assert.throws(() => memberModel(build(), stray, globals), /00401090 TSHashTable<CELLIST, HASHKEY_NONE>::Next: its receiver is CELLIST \*, not a pointer to TSHashTable<CELLIST, HASHKEY_NONE>/);
   });
 });

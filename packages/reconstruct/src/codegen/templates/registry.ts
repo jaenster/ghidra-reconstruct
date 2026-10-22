@@ -15,6 +15,7 @@
 
 import type { TemplatesConfig } from '../../config/schema.js';
 import type { BaseModel } from './bases.js';
+import type { MemberModel } from './members.js';
 import { parseTypeSpelling, spellType, stripRootQualifiers, templateArguments, templateIdOf, templateIdsIn, templateName, type TemplateArgValue } from './identity.js';
 
 export interface TemplateParam {
@@ -127,6 +128,23 @@ export class TemplateRegistry {
   /** The model's base relations, once recorded. */
   bases(): BaseModel | undefined {
     return this.baseInfo;
+  }
+
+  private memberInfo: MemberModel | undefined;
+
+  /** Record which members are non-static (templates/members.ts). */
+  setMembers(model: MemberModel): void {
+    this.memberInfo = model;
+  }
+
+  /** The non-static members, once recorded. */
+  members(): MemberModel | undefined {
+    return this.memberInfo;
+  }
+
+  /** A non-static member function: declared without its receiver, which its body calls `this`. */
+  isInstanceMember(address: string | undefined): boolean {
+    return !!address && !!this.memberInfo?.instanceAddresses.has(address);
   }
 
   /** A member name that is a base-class component (`super_TSHashTable`), which the tree declares as a base. */

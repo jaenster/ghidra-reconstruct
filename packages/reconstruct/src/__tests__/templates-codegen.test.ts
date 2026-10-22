@@ -216,6 +216,8 @@ function model() {
       decompiled: 'void PEER::Release(void)\n\n{\n  return;\n}\n',
     } as ExtractedFunction,
     thiscall('TSLink<PEER>', 'Clear', '00401240', '  this->m_next = 0;\n  return;'),
+    // A body that reseats its receiver, as Ghidra's register reuse writes it.
+    thiscall('TSLink<PEER>', 'Reseat', '00401260', '  this->m_next = 1;\n  this = this->m_prevlink;\n  this->m_next = 2;\n  return;'),
     thiscall(list('ELEM'), 'UnlinkAll', '00401100', body('ELEM')),
     // Ghidra tags a COMDAT copy no member owns.
     { ...thiscall(list('ELEM'), 'UnlinkAll_Unreferenced', '00401140', body('ELEM')), tags: [{ type: 'ORPHAN_COPY' }] },
@@ -226,16 +228,24 @@ function model() {
     thiscall('TSSync<ELEM,SYNC>', 'Lock', '00401200', '  this->m_count = 1;\n  return;'),
     thiscall('TSObject<NODE>', 'Destroy', '00401300', '  this->m_hashval = 0;\n  return;'),
     thiscall('TSTable<NODE>', 'Clear', '00401340', '  this->m_count = 0;\n  return;'),
+    thiscall('TSTable<NODE>', 'Count', '00401350', '  this->m_count = this->m_count + 1;\n  return;'),
+    // The derived class's own Count hides the base's.
+    thiscall('TSTableEx<NODE>', 'Count', '00401360', '  TSTable<NODE>::Count((TSTable<NODE> *)this);\n  return;'),
+    // A JMP thunk Ghidra left beside the members, forwarding to one.
+    { ...thiscall('TSTable<NODE>', 'thunk_Clear', '00401370', ''), isThunk: true, decompiled: '', tags: [{ type: 'ORPHAN_COPY' }],
+      thunkTarget: { address: '00401340', name: 'Clear', namespace: 'TSTable<NODE>', isExternal: false } },
     // Ghidra reaches the base through its component, and casts the receiver to it.
     thiscall('TSTableEx<NODE>', 'Reset', '00401380',
-      '  TSTable<NODE>::Clear((TSTable<NODE> *)this);\n  (this->super_TSTable).m_count = 1;\n  this->m_extra = 2;\n  return;'),
+      '  TSTable<NODE>::Clear((TSTable<NODE> *)this);\n  (this->super_TSTable).m_count = 1;\n  this->m_extra = 2;\n  TSTableEx<NODE>::Count(this);\n  return;'),
     {
       name: 'UseNode', address: '004013c0', namespace: 'Mod::Third', returnType: 'void',
       signature: 'void UseNode(NODE * pNode)', localVariables: [], callingConvention: '__cdecl',
       parameters: [{ name: 'pNode', dataType: 'NODE *', size: 4, ordinal: 0, storage: 'Stack[0x4]:4' }],
       size: 0x10, isThunk: false, isExternal: false, hasVarArgs: false, calledFunctions: ['Destroy'],
-      decompiled: 'void Mod::Third::UseNode(NODE *pNode)\n\n{\n  TSObject<NODE>::Destroy(&pNode->super_TSObject);\n  (pNode->super_TSObject).m_hashval = 3;\n  TSTable<NODE>::Clear((TSTable<NODE> *)&gTable);\n  return;\n}\n',
+      decompiled: 'void Mod::Third::UseNode(NODE *pNode)\n\n{\n  TSObject<NODE>::Destroy(&pNode->super_TSObject);\n  (pNode->super_TSObject).m_hashval = 3;\n  TSTable<NODE>::Clear((TSTable<NODE> *)&gTable);\n  TSTable<NODE>::Count((TSTable<NODE> *)&gTable);\n  TSObject<NODE>::Destroy((TSObject<NODE> *)gpNode);\n  return;\n}\n',
     } as ExtractedFunction,
+    // The element's own namespace declares a Destroy: it hides the base's.
+    thiscall('NODE', 'Destroy', '004013e0', '  return;'),
     // An element's orphan copy: no member of the element, a free function beside the members.
     { ...thiscall('ELEM', 'Release_Unreferenced', '004013f0', '  return;'), tags: [{ type: 'ORPHAN_COPY' }] },
   ];
@@ -259,6 +269,9 @@ function model() {
     isInitialized: true, xrefCount: 0, referencingFunctions: [], scope: 'global',
     initializedData: { kind: 'array', elements: [{ kind: 'pointer', value: `${list('ELEM')}::UnlinkAll` }] },
   }, {
+    name: 'gpNode', address: '00500040', dataType: 'NODE *', size: 4, namespace: 'Mod::Third',
+    isInitialized: false, xrefCount: 1, referencingFunctions: ['Mod::Third::UseNode'], scope: 'global',
+  }, {
     // A class with a base, initialized: the base subobject comes first.
     name: 'gTable', address: '00500200', dataType: 'TSTableEx<NODE>', size: 8, namespace: 'Mod::Third',
     isInitialized: true, xrefCount: 1, referencingFunctions: ['Mod::Third::UseNode'], scope: 'global',
@@ -278,7 +291,7 @@ function model() {
     { name: 'PEER', fullPath: 'PEER', isClass: true, functionCount: 1 },
     { name: 'TSLink<PEER>', fullPath: 'TSLink<PEER>', isClass: false, functionCount: 1 },
     { name: 'TSSync<ELEM,SYNC>', fullPath: 'TSSync<ELEM,SYNC>', isClass: false, functionCount: 1 },
-    { name: 'NODE', fullPath: 'NODE', isClass: true, functionCount: 0 },
+    { name: 'NODE', fullPath: 'NODE', isClass: true, functionCount: 1 },
     { name: 'TSObject<NODE>', fullPath: 'TSObject<NODE>', isClass: false, functionCount: 1 },
     { name: 'TSTable<NODE>', fullPath: 'TSTable<NODE>', isClass: false, functionCount: 1 },
     { name: 'TSTableEx<NODE>', fullPath: 'TSTableEx<NODE>', isClass: false, functionCount: 1 },
@@ -317,11 +330,46 @@ describe('registered class templates', () => {
     assert.match(stpl, /\/\/ stpl-orphan: [^\n]*\nvoid UnlinkAll_Unreferenced\(TSExplicitList<::ELEM, -572662307>\* pThis\);/);
   });
 
-  it('defines a key class in the template header, its members static in it and qualified by it', () => {
-    assert.match(file('Storm/H/stpl.h'), /\nclass KEY \{\npublic:\n[^}]*char \* szString;\n\n    static void Clear\(::KEY \* pThis\);\n\};/);
+  it('defines a key class in the template header, its members declared in it and qualified by it', () => {
+    assert.match(file('Storm/H/stpl.h'), /\nclass KEY \{\npublic:\n[^}]*char \* szString;\n\n    void Clear\(\);\n\};/);
     const impl = file('Mod/stpl_KEY.cpp');
-    assert.match(impl, /\nvoid KEY::Clear\(::KEY \* pThis\) \{/);
+    assert.match(impl, /\nvoid KEY::Clear\(\) \{\n    this->szString = 0;/);
     assert.doesNotMatch(impl, /namespace KEY/);
+  });
+
+  it('makes a member with a receiver a non-static member: declared and defined without it, its body saying `this`', () => {
+    const stpl = file('Storm/H/stpl.h');
+    assert.match(stpl, /class TSLink \{\npublic:\n[^}]*\n    void Clear\(\);\n    void Reseat\(\);\n\};/);
+    assert.match(stpl, /\ntemplate<> void TSLink<PEER>::Clear\(\); \/\/ 1\.14d: 00401240/);
+    assert.match(file('Mod/stpl_PEER.cpp'), /\ntemplate<> void TSLink<PEER>::Clear\(\) \{\n    this->m_next = 0;\n\}/);
+    // The element named only by the class a specialization is qualified by is still declared.
+    assert.match(stpl, /^class PEER;$/m);
+  });
+
+  it('keeps a member static while the program holds its address as a plain pointer, for every instantiation', () => {
+    const stpl = file('Storm/H/stpl.h');
+    // The vftable holds TSExplicitList<ELEM,..>::UnlinkAll; OTHER's is the same member of the template.
+    assert.match(stpl, /\n    static void UnlinkAll\(TSExplicitList<T, OFFSET>\* pThis\);\n    void UnlinkAll_Unreferenced\(\);\n/);
+    assert.match(stpl, /template<> void TSExplicitList<OTHER, -572662307>::UnlinkAll\(TSExplicitList<OTHER, -572662307> \* pThis\);/);
+    assert.match(file('Mod/File.cpp'), /TSExplicitList<::ELEM, -572662307>::UnlinkAll\(&gList\);/);
+  });
+
+  it('keeps a receiver the body reseats as a local copy of `this`', () => {
+    assert.match(file('Mod/stpl_PEER.cpp'), /TSLink<PEER>::Reseat\(\) \{\n    TSLink<::PEER>\* pThis = this;\n    pThis->m_next = 1;\n    pThis = pThis->m_prevlink;/);
+  });
+
+  it('calls a member on its object, naming its class where the receiver\'s class or one between declares the name', () => {
+    const use = file('Mod/Third.cpp');
+    // NODE's own namespace declares a Destroy; TSTableEx declares a Count of its own.
+    assert.match(use, /void UseNode\(::NODE \* pNode\) \{\n    pNode->TSObject<::NODE>::Destroy\(\);\n    pNode->m_hashval = 3;\n    gTable\.Clear\(\);\n    gTable\.TSTable<::NODE>::Count\(\);\n    gpNode->TSObject<::NODE>::Destroy\(\);\n\}/);
+    const own = file('Mod/stpl_NODE.cpp');
+    // Within the class: its own Count is this one, the base's is named.
+    assert.match(own, /TSTableEx<NODE>::Count\(\) \{\n    this->TSTable<::NODE>::Count\(\);\n\}/);
+    assert.match(own, /TSTableEx<NODE>::Reset\(\) \{\n    this->Clear\(\);\n    this->m_count = 1;\n    this->m_extra = 2;\n    this->Count\(\);\n\}/);
+  });
+
+  it('forwards a thunk to a non-static member by calling it on the thunk\'s receiver', () => {
+    assert.match(file('Mod/stpl_NODE.cpp'), /JMP thunk\nvoid thunk_Clear\(TSTable<::NODE>\* pThis\) \{\n    pThis->Clear\(\);\n\}/);
   });
 
   it('includes the header of a class a template holds by value, which declares it with its RTTI class key', () => {
@@ -403,14 +451,14 @@ describe('registered class templates', () => {
     const stpl = file('Storm/H/stpl.h');
     assert.match(stpl, /template<class T>\nclass TSTableEx : public TSTable<T> \{\npublic:\n    \/\* 0x04 \*\/ int m_extra;\n/);
     assert.doesNotMatch(stpl, /super_/);
-    assert.match(file('Mod/Third.h'), /\nstruct NODE : public TSObject<NODE> \{\n    \/\* 0x08 \*\/ int nValue;\n\};/);
+    assert.match(file('NODE/NODE.h'), /\nstruct NODE : public TSObject<NODE> \{\n    \/\* 0x08 \*\/ int nValue;\n\};/);
   });
 
   it('reads inherited members and passes derived pointers where Ghidra went through the base component', () => {
     const reset = file('Mod/stpl_NODE.cpp');
-    assert.match(reset, /TSTable<NODE>::Clear\(pThis\);\n    pThis->m_count = 1;\n    pThis->m_extra = 2;/);
+    assert.match(reset, /this->Clear\(\);\n    this->m_count = 1;\n    this->m_extra = 2;/);
     const use = file('Mod/Third.cpp');
-    assert.match(use, /TSObject<NODE>::Destroy\(pNode\);\n    pNode->m_hashval = 3;\n    TSTable<NODE>::Clear\(&gTable\);/);
+    assert.match(use, /pNode->TSObject<::NODE>::Destroy\(\);\n    pNode->m_hashval = 3;\n    gTable\.Clear\(\);/);
     const all = [...project.files.values()].map(f => f.content).join('\n');
     assert.doesNotMatch(all, /super_TS/);
   });
@@ -470,8 +518,8 @@ describe('registered class templates across generation shards', () => {
   it('emits the template header and the member units byte-identical to a serial run', () => {
     const serial = generate(TEMPLATES);
     const emitted = new Set<string>();
-    // 8 is run-regen's default; at 8 a shard other than the coordinator writes the header.
-    for (const count of [2, 8]) {
+    // 8 is run-regen's default; at 4 a shard other than the coordinator writes the header.
+    for (const count of [2, 4, 8]) {
       const { project, fromWorkers } = sharded(count);
       fromWorkers.forEach(path => emitted.add(path));
       assert.deepStrictEqual([...project.files.keys()], [...serial.files.keys()], `${count} shards`);

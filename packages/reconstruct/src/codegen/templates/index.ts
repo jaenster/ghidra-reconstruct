@@ -8,6 +8,7 @@ import { globalDefinition, sanitizeSymbolName, setInitializerNamespace } from '.
 import { collectTemplateNames } from '../template-names.js';
 import { namespaceResolution } from '../namespace-resolution.js';
 import { TemplateRegistry, templateRegistry } from './registry.js';
+import { memberCalls, type MemberCalls } from '@ghidra-mcp/cpp-parser';
 
 /**
  * The run's registry, from the model as Ghidra delivered it: every template
@@ -58,6 +59,32 @@ export function templateHeaderTypes(registry: TemplateRegistry, dataTypes: reado
   return out;
 }
 
+/**
+ * The parameters a function's declaration lists: all of Ghidra's, except a
+ * non-static member's receiver, which is its `this`.
+ */
+export function signatureParameters<P>(func: { address?: string; parameters: P[] }): P[] {
+  return templateRegistry()?.isInstanceMember(func.address) ? func.parameters.slice(1) : func.parameters;
+}
+
+let callsFor: { registry: TemplateRegistry; calls: MemberCalls } | undefined;
+
+/**
+ * The run's member calls (cpp-parser `memberCalls`, the rule the `member-call`
+ * pass applies): which members are non-static and where a call must name the
+ * member's class. Undefined before the member model is recorded.
+ */
+export function memberCallModel(): MemberCalls | undefined {
+  const registry = templateRegistry();
+  const members = registry?.members();
+  if (!registry || !members) return undefined;
+  if (callsFor?.registry !== registry) {
+    const bases = registry.bases();
+    callsFor = { registry, calls: memberCalls({ instanceMembers: members.instanceMembers, declaredNames: bases?.declaredNames, bases: bases?.bases }) };
+  }
+  return callsFor.calls;
+}
+
 /** The registered class scope a symbol is a member of, as the tree spells it. */
 export function classScopeOf(symbol: { address?: string; namespace?: string | null }): string | undefined {
   const resolved = namespaceResolution().of(symbol);
@@ -86,8 +113,7 @@ export function templateDataDefinitions(globals: readonly AnalyzedDataSymbol[]):
  * in a vftable's initializer), respelled as the tree spells that class. Undefined
  * for any other reference.
  */
-export function classScopedReference(raw: string): string | undefined {
-  const registry = templateRegistry();
+export function classScopedReference(raw: string, registry: TemplateRegistry | undefined = templateRegistry()): string | undefined {
   if (!registry) return undefined;
   let depth = 0;
   let split = -1;

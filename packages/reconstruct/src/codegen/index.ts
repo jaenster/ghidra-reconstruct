@@ -97,6 +97,7 @@ import { flattenTemplateNames } from './template-names.js';
 import { buildTemplateRegistry, classScopeOf, templateDataDefinitions, templateHeaderTypes } from './templates/index.js';
 import { placeTemplateMembers } from './templates/placement.js';
 import { baseModel } from './templates/bases.js';
+import { memberModel } from './templates/members.js';
 import { generateTemplateHeader } from './templates/emit-header.js';
 import { classKeyOf, setTemplateRegistry, templateRegistry } from './templates/registry.js';
 import { retypeVtableLocals, retypeVtableLocalsByAssignment, vtableMembersByType } from '../modules/vtable-types.js';
@@ -701,10 +702,13 @@ export function generateProjectStage1(
   const templates = buildTemplateRegistry(options.projectConfig?.templates, dataTypes, functions, globals as Array<{ namespace?: string | null }>, strings);
   setTemplateRegistry(templates);
   flattenTemplateNames(dataTypes, functions, globals as Array<{ name?: string; dataType?: string; suggestedType?: string; suggestedName?: string; namespace?: string | null }>, templates);
+  // Orphans first: they are no member of the class they sit in, so they declare nothing in it.
+  templates?.findOrphans(functions);
   templates?.setBases(baseModel(templates, dataTypes, [
     ...functions,
     ...(globals as Array<{ name: string; suggestedName?: string; namespace?: string | null }>).map(g => ({ name: g.suggestedName || g.name, namespace: g.namespace })),
   ]));
+  templates?.setMembers(memberModel(templates, functions, globals as Array<{ initializedData?: DataValue }>));
 
   // Ghidra types a body's vtable LOCALS with the bare `vtable *`, which can only
   // be rendered `void *` — so `pListHead->FUN_004503f0` is a member access on
@@ -970,8 +974,7 @@ export function generateProjectStage1(
   // Initialize namespace collapsing with module names from project config
   const modules = options.projectConfig?.modules ?? {};
   setModuleNames(Object.keys(modules));
-  // Orphans first: an element's orphan copy is placed with the members.
-  templates?.findOrphans(functions);
+  // An element's orphan copy is placed with the members (findOrphans ran with the registry).
   templates?.setPlacement(placeTemplateMembers(templates, functions, modules, options.projectConfig?.moduleRuns ?? []));
 
   // Build registries from project config
@@ -1387,10 +1390,12 @@ export function generateProjectStage1(
         ? [targetFunc.parentClass]
         : [...namespaceResolution().resolvePath(targetFunc.namespace).segments];
       const leaf = emittedFunctionName(targetFunc, targetReturn);
+      const memberOf = templates?.isInstanceMember(targetFunc.address) ? classScopeOf(targetFunc) : undefined;
       thunkForwards.set(func.address, {
         qualified: ['', ...segments, leaf].join('::'),
         returnType: targetReturn,
         parameterCount: targetFunc.parameters.length,
+        ...(memberOf ? { member: { cls: memberOf, name: leaf } } : {}),
       });
     }
     if (thunkForwards.size > 0) context.thunkForwards = thunkForwards;

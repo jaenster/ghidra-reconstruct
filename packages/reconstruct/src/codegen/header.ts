@@ -27,7 +27,7 @@ import { generateExternDeclaration, isFuncDefTypedefName, sanitizeSymbolName, or
 import { declarationHead, pointerConvention } from './calling-convention.js';
 import { enumTypedefLine } from './enum-width.js';
 import { requiresPacking, adoptGhidraLayout } from './struct-packing.js';
-import { memberDefinitionScope } from './templates/index.js';
+import { memberDefinitionScope, signatureParameters } from './templates/index.js';
 import { classKeyOf, templateRegistry } from './templates/registry.js';
 import { baseComponentOf, ownFields } from './templates/bases.js';
 
@@ -852,9 +852,12 @@ export function emittedFunctionName(func: ExtractedFunction, returnType: string)
   return cleanName;
 }
 
-/** A function's parameters as its declaration spells them: signature type and legal name. */
+/**
+ * A function's parameters as its declaration spells them: signature type and
+ * legal name. A non-static member's receiver is its `this`, not a parameter.
+ */
 export function declaredParameters(func: ExtractedFunction): Array<{ type: string; name: string }> {
-  return renumberParams(func.parameters).map(p => {
+  return renumberParams(signatureParameters(func)).map(p => {
     const type = sigType(p.dataType);
     // Avoid param name shadowing its own type (e.g., "eD2ItemFlag eD2ItemFlag")
     return { type, name: emittedParameterName(p.name, type) };

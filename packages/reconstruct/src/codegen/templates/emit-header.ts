@@ -10,9 +10,9 @@
  * translation unit, and the one header every user of a template-id includes is
  * the one that defines the template, so they are all declared here.
  *
- * Members are `static` and keep the receiver as an explicit `pThis`: the body is
- * still Ghidra's, which names the receiver as a parameter, and the explicit
- * vtable's slots are plain function pointers.
+ * A member with a receiver is a non-static member function (templates/members.ts).
+ * The vtable slots stay `static` and keep the receiver as an explicit `pThis`:
+ * the explicit vtable's slots are plain function pointers.
  */
 
 import { NodeKind } from '@ghidra-mcp/cpp-parser';
@@ -115,6 +115,11 @@ function plainTypeNames(spelling: string, into: Set<string>): void {
   visit(type);
 }
 
+/** `static ` for a member that takes its receiver explicitly (templates/members.ts), else nothing. */
+function memberStorage(registry: TemplateRegistry, func: ExtractedFunction): string {
+  return registry.isInstanceMember(func.address) ? '' : 'static ';
+}
+
 interface MemberDecl {
   key: string;
   returnType: string;
@@ -142,7 +147,7 @@ function genericMembers(
     const convention = conventionKeyword(func.callingConvention);
     let list = params.map(p => `${p.type} ${p.name}`).join(', ');
     if (func.hasVarArgs) list = list ? `${list}, ...` : '...';
-    const line = `    static ${returnType} ${convention ? `${convention} ` : ''}${name}(${list});`;
+    const line = `    ${memberStorage(registry, func)}${returnType} ${convention ? `${convention} ` : ''}${name}(${list});`;
     const held = decls.get(key);
     if (!held) {
       decls.set(key, { key, returnType, line });
@@ -222,9 +227,10 @@ function renderPrimary(
 
 /**
  * A key class (a non-template class the header defines, `HASHKEY_STRI`): its
- * Ghidra struct, with its members declared static inside it.
+ * Ghidra struct, with its members declared inside it.
  */
 function renderKeyClass(
+  registry: TemplateRegistry,
   struct: ExtractedStruct,
   members: readonly ExtractedFunction[],
   mentioned: Set<string>,
@@ -246,7 +252,7 @@ function renderKeyClass(
     if (seen.has(key)) continue;
     seen.add(key);
     const convention = conventionKeyword(func.callingConvention);
-    decls.push(`    static ${ret} ${convention ? `${convention} ` : ''}${name}(${list});`);
+    decls.push(`    ${memberStorage(registry, func)}${ret} ${convention ? `${convention} ` : ''}${name}(${list});`);
   }
   if (decls.length > 0) {
     lines.push('');
@@ -270,7 +276,7 @@ export function generateTemplateHeader(input: TemplateHeaderInput): string {
   const keyClasses = [...registry.keyClasses].sort().map(name => {
     const struct = structs.get(name);
     if (!struct) throw new Error(`[templates] key class ${name} has no struct in the program`);
-    return renderKeyClass(struct, members, mentioned);
+    return renderKeyClass(registry, struct, members, mentioned);
   });
   const primaries = definitionOrder(registry, layouts).map(layout => renderPrimary(layout, members, data, registry, problems, mentioned));
 
@@ -280,6 +286,8 @@ export function generateTemplateHeader(input: TemplateHeaderInput): string {
     const own = members.filter(f => scopeOf(f) === inst.spelling);
     const ownData = data.filter(g => scopeOf(g) === inst.spelling);
     if (own.length === 0 && ownData.length === 0) continue;
+    // The class each specialization is qualified by names its arguments.
+    plainTypeNames(inst.spelling, mentioned);
     specializations.push(`// ${inst.spelling}`);
     for (const g of ownData) {
       const name = `${inst.spelling}::${sanitizeSymbolName(g.suggestedName || g.name)}`;

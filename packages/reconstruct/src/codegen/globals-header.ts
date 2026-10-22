@@ -18,7 +18,7 @@ import { addressLiteralFloor, ADDRESS_LITERAL_CEILING } from '@ghidra-mcp/cpp-pa
 import { scanReferences } from './needle-index.js';
 import { classScopedReference } from './templates/index.js';
 import { classKeyOf, templateRegistry } from './templates/registry.js';
-import { isFiller } from './templates/layout.js';
+import { isFiller } from './templates/bases.js';
 
 /**
  * Exact Win32 SDK typedef names (not `LP`/`IMAGE_` prefixed) seen as

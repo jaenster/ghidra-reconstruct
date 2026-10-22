@@ -29,7 +29,8 @@ import { foldedAddressFacts, type FoldedAddressFact } from './folded-address-spe
 import { immediateConstantFacts, dataAtAddress, type ImmediateConstantFact } from './immediate-constant-spec.js';
 import { ROOT_CLASS_SCOPE, namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 import { cleanFunctionComment, guardedFuncDefTypedef, emittedFunctionName, returnSigType, sigType } from './header.js';
-import { classScopeOf, memberDefinitionScope, orphanMarker } from './templates/index.js';
+import { classScopeOf, memberCallModel, memberDefinitionScope, orphanMarker, signatureParameters } from './templates/index.js';
+import { pointeeClass } from './templates/members.js';
 import { templateRegistry } from './templates/registry.js';
 import { declarationHead } from './calling-convention.js';
 import { emittedParameterName, getAggregateTypeNames } from './platform-types.js';
@@ -506,6 +507,12 @@ export interface ThunkForward {
   returnType: string;
   /** Declared parameter count of the target, excluding varargs. */
   parameterCount: number;
+  /**
+   * When the target is a non-static member (templates/members.ts): its class as
+   * the tree spells it and its name. The forwarder calls it on its own first
+   * argument.
+   */
+  member?: { cls: string; name: string };
 }
 
 export interface ImplGenContext {
@@ -1468,6 +1475,8 @@ export function generateFunctionImplementation(
         func.decompiled, options, func.name, func.address, context, slotVarTypes,
         {
           thisName,
+          // A non-static member's body names its receiver `this` (templates/members.ts).
+          receiver: templateRegistry()?.isInstanceMember(func.address) ? thisName : undefined,
           returnsNonPointer: !!func.returnType && !func.returnType.includes('*'),
           returnsVoid: (func.returnType ?? '').replace(/\bconst\b/g, '').trim() === 'void',
           // The wrapper the body is parsed inside carries the definition's own
@@ -1660,8 +1669,13 @@ export async function resolveOverridePlaceholders(
 /**
  * Generate function signature for standalone function
  */
-function signatureParameterList(func: ExtractedFunction): string {
-  let params = renumberParams(func.parameters)
+/**
+ * The parameter list of the definition (`declared`: without a non-static member's
+ * receiver, as the declaration spells it), or of the wrapper the body is parsed
+ * in, which declares every parameter the body names, the receiver included.
+ */
+function signatureParameterList(func: ExtractedFunction, which: 'declared' | 'body'): string {
+  let params = renumberParams(which === 'declared' ? signatureParameters(func) : func.parameters)
     .map(p => {
       const type = sigType(p.dataType);
       // Avoid param name shadowing its own type
@@ -1684,7 +1698,7 @@ const VTABLE_CALLS_FREE_FUNCTION = Object.freeze({ thisIsClassInstance: false })
 function wrapperSignature(func: ExtractedFunction): { returnType: string; params: string } | undefined {
   const returnType = returnSigType(func.returnType).trim();
   if (!returnType) return undefined;
-  return { returnType, params: signatureParameterList(func) };
+  return { returnType, params: signatureParameterList(func, 'body') };
 }
 
 /**
@@ -1734,9 +1748,19 @@ export function generateThunkForwarder(
     return undefined;
   }
 
-  const args = renumberParams(func.parameters)
-    .map(p => emittedParameterName(p.name, sigType(p.dataType)))
-    .join(', ');
+  const names = renumberParams(func.parameters).map(p => emittedParameterName(p.name, sigType(p.dataType)));
+  // A thunk that is a non-static member itself was handed its receiver as `this`.
+  if (templateRegistry()?.isInstanceMember(func.address)) names[0] = 'this';
+  let call = `${forward.qualified}(${names.join(', ')})`;
+  if (forward.member) {
+    // A non-static member is called on the receiver the thunk was handed.
+    if (names.length === 0) return undefined;
+    const { cls, name } = forward.member;
+    const calls = memberCallModel();
+    const own = pointeeClass(func.parameters[0].dataType);
+    const qualify = !calls || calls.needsQualifier(own && calls.classOf(own), calls.classOf(cls) ?? cls, name);
+    call = `${names[0]}->${qualify ? `${cls}::` : ''}${name}(${names.slice(1).join(', ')})`;
+  }
 
   const stripAddr = (a: string) => (a.includes(':') ? a.slice(a.lastIndexOf(':') + 1) : a);
   const orphan = orphanMarker(func);
@@ -1744,13 +1768,13 @@ export function generateThunkForwarder(
     ...(orphan ? [orphan] : []),
     `// 1.14d: ${stripAddr(func.address)} — JMP thunk`,
     `${generateFunctionSignature(func)} {`,
-    `    ${returnsVoid ? '' : 'return '}${forward.qualified}(${args});`,
+    `    ${returnsVoid ? '' : 'return '}${call};`,
     `}`,
   ].join('\n');
 }
 
 function generateFunctionSignature(func: ExtractedFunction): string {
-  const params = signatureParameterList(func);
+  const params = signatureParameterList(func, 'declared');
   // The declaration side spells the name with the SAME function, so a definition
   // and its declaration cannot legalize a Ghidra name differently.
   const cleanName = emittedFunctionName(func, returnSigType(func.returnType));
@@ -2266,6 +2290,8 @@ function transformDecompiledCode(
   // the body is parsed on its own inside a `void dummy()` wrapper.
   enclosing?: {
     thisName?: string;
+    /** The receiver parameter of a non-static member's body, spelled `this` once every pass has read it. */
+    receiver?: string;
     returnsNonPointer?: boolean;
     /**
      * The function's own signature, spelled exactly as the emitted definition
@@ -2863,6 +2889,24 @@ function transformDecompiledCode(
         baseComponents: bases.componentNames,
         hiddenMembers: bases.hiddenMembers,
         bases: bases.bases,
+        globalTypes: context?.funcPtrArgCasts?.globalTypes,
+        structFields: context?.funcPtrArgCasts?.structFields,
+        fieldTypes: context?.funcPtrArgCasts?.fieldTypes,
+        functionReturnTypes: context?.funcPtrArgCasts?.functionReturnTypes,
+        typedefTargets: context?.funcPtrArgCasts?.typedefTargets,
+        enclosingVarTypes,
+      };
+    }
+
+    // A non-static member of a class the tree defines is called on its object
+    // (templates/members.ts); inside one, the receiver is `this`.
+    const members = templateRegistry()?.members();
+    if (members && Object.keys(members.instanceMembers).length > 0) {
+      perPluginOptions['member-call'] = {
+        instanceMembers: members.instanceMembers,
+        declaredNames: bases?.declaredNames,
+        bases: bases?.bases,
+        receiver: enclosing?.receiver,
         globalTypes: context?.funcPtrArgCasts?.globalTypes,
         structFields: context?.funcPtrArgCasts?.structFields,
         fieldTypes: context?.funcPtrArgCasts?.fieldTypes,
