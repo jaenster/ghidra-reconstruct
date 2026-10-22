@@ -97,6 +97,40 @@ function collectDeclaredNames(root: ASTNode, thisParamName?: string): Set<string
   return names;
 }
 
+/** A null-like receiver: nullptr, NULL, 0, 0x0, (Type*)0x0. No member call can be made on it. */
+export function isNullLike(expr: Expression): boolean {
+  if (expr.kind === NodeKind.NullptrLiteral) return true;
+  if (expr.kind === NodeKind.Identifier && ['NULL', 'nullptr'].includes((expr as Identifier).name)) return true;
+  if (expr.kind === NodeKind.IntegerLiteral && (expr as IntegerLiteralExpr).value === 0n) return true;
+  if (expr.kind === NodeKind.CStyleCastExpr) {
+    const cast = expr as CStyleCastExpr;
+    return isNullLike(cast.expression);
+  }
+  // Unwrap parens: (0), ((Type*)0x0)
+  if (expr.kind === NodeKind.ParenExpr) {
+    return isNullLike((expr as ParenExpr).expression);
+  }
+  return false;
+}
+
+/**
+ * The object a receiver pointer names, and how a member is reached from it:
+ * `&obj` is `obj.`, any other pointer `p->`.
+ */
+export function unwrapAddressOf(expr: Expression): { object: Expression; useArrow: boolean } {
+  let current: Expression = expr;
+  while (current.kind === NodeKind.ParenExpr) {
+    current = (current as ParenExpr).expression;
+  }
+  if (current.kind === NodeKind.UnaryExpr) {
+    const unary = current as UnaryExpr;
+    if (unary.operator === '&') {
+      return { object: unary.operand, useArrow: false };
+    }
+  }
+  return { object: expr, useArrow: true };
+}
+
 function createMethodCallRewriteTransformer(options?: MethodCallRewriteOptions): Transformer {
   const mappings = options?.methodMappings ?? {};
   const currentFn = options?.currentFunction;
@@ -131,36 +165,6 @@ function createMethodCallRewriteTransformer(options?: MethodCallRewriteOptions):
       return { unqualified };
     }
     return null;
-  };
-
-  /** Detect null-like this-args: nullptr, NULL, 0, 0x0, (Type*)0x0 */
-  const isNullLike = (expr: Expression): boolean => {
-    if (expr.kind === NodeKind.NullptrLiteral) return true;
-    if (expr.kind === NodeKind.Identifier && (expr as Identifier).name === 'NULL') return true;
-    if (expr.kind === NodeKind.IntegerLiteral && (expr as IntegerLiteralExpr).value === 0n) return true;
-    if (expr.kind === NodeKind.CStyleCastExpr) {
-      const cast = expr as CStyleCastExpr;
-      return isNullLike(cast.expression);
-    }
-    // Unwrap parens: (0), ((Type*)0x0)
-    if (expr.kind === NodeKind.ParenExpr) {
-      return isNullLike((expr as ParenExpr).expression);
-    }
-    return false;
-  };
-
-  const unwrapAddressOf = (expr: Expression): { object: Expression; useArrow: boolean } => {
-    let current: Expression = expr;
-    while (current.kind === NodeKind.ParenExpr) {
-      current = (current as ParenExpr).expression;
-    }
-    if (current.kind === NodeKind.UnaryExpr) {
-      const unary = current as UnaryExpr;
-      if (unary.operator === '&') {
-        return { object: unary.operand, useArrow: false };
-      }
-    }
-    return { object: expr, useArrow: true };
   };
 
   return createTransformer({

@@ -1937,6 +1937,28 @@ export class Parser {
       }
     }
 
+    // A member named in a base class: `obj.Base::f`, `p->Base<T>::f`.
+    if (this.check(TokenKind.ColonColon)) {
+      const startLoc = member.location;
+      const parts: (Identifier | TemplateType)[] = [member];
+      while (this.match(TokenKind.ColonColon)) {
+        if (this.check(TokenKind.Tilde)) {
+          parts.push(this.parseDestructorName());
+        } else if (this.check(TokenKind.Operator)) {
+          parts.push(this.parseOperatorName());
+        } else {
+          const id = this.parseIdentifier();
+          parts.push(this.check(TokenKind.Less) && this.looksLikeTemplateArgs() ? this.parseTemplateType(id) : id);
+        }
+      }
+      const name = parts.pop()!;
+      return this.node(NodeKind.MemberExpr, object.location, {
+        object,
+        member: this.node(NodeKind.QualifiedId, startLoc, { qualifier: parts, name, isGlobal: false }) as QualifiedId,
+        isArrow,
+      }) as MemberExpr;
+    }
+
     return this.node(NodeKind.MemberExpr, object.location, {
       object,
       member: member as Identifier,

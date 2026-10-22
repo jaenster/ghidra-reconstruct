@@ -612,6 +612,8 @@ import { globalAliasResolvePlugin } from './builtins/global-alias-resolve.js';
 import { sehLoweringPlugin } from './builtins/seh-lowering.js';
 import { baseClassAccessPlugin } from './builtins/base-class-access.js';
 export { baseClassAccessPlugin, type BaseClassAccessOptions } from './builtins/base-class-access.js';
+import { memberCallPlugin } from './builtins/member-call.js';
+export { memberCallPlugin, memberCalls, type MemberCallOptions, type MemberCallModel, type MemberCalls } from './builtins/member-call.js';
 export { sehLoweringPlugin, type SehLoweringOptions, type SehLoweringScope } from './builtins/seh-lowering.js';
 export { globalAliasResolvePlugin, type GlobalAliasResolveOptions } from './builtins/global-alias-resolve.js';
 export { functionShadowedGlobalPlugin, type FunctionShadowedGlobalOptions } from './builtins/function-shadowed-global.js';
@@ -727,6 +729,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   assignCastPlugin,           // Type: cast an assigned value to its slot's declared type (priority 615)
   unprototypedCallCastPlugin, // Type: give a FARPROC call the parameter list C left unspecified (priority 622)
   baseClassAccessPlugin,      // Structs: p->super_B.m -> p->m, &p->super_B -> p, f((B*)derived) -> f(derived) for real base classes (priority 625)
+  memberCallPlugin,           // C++: C::Fn(&obj, a) -> obj.Fn(a) for a non-static member, the receiver param -> this (priority 960)
   charArrayDwordAssignPlugin, // Type: charArray = scalar -> *(uint32_t*)charArray = scalar (priority 75)
   reservedFieldRenamePlugin,  // Cleanup: ->int → ->int_ for header-renamed keyword fields (priority 47)
   rootScopeQualifyPlugin,     // Cleanup: crashy::vftable → ::vftable for root-scope symbols (priority 48)

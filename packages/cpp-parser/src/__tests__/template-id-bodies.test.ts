@@ -78,6 +78,25 @@ describe('template-ids in bodies', () => {
     assert.match(out, /CCritSect,0> \*self;/);
   });
 
+  it('parses a member named in a base class, through a template-id', () => {
+    const tu: any = parse('void f() { g.TSHashTable<::CELLIST, HASHKEY_NONE>::Ptr(h, &g.m_key); p->A::B::f(); q->X<1>::~X(); s.N::Y<int>::g(); r = c ? a.b : d; }');
+    const calls = tu.declarations[0].body.statements.slice(0, 4).map((st: any) => st.expression.callee);
+    for (const m of calls) {
+      assert.strictEqual(m.kind, NodeKind.MemberExpr);
+      assert.strictEqual(m.member.kind, NodeKind.QualifiedId);
+    }
+    assert.strictEqual(calls[0].member.qualifier[0].kind, NodeKind.TemplateType);
+    assert.strictEqual(calls[0].member.name.name, 'Ptr');
+    assert.deepStrictEqual(calls[1].member.qualifier.map((q: any) => q.name), ['A', 'B']);
+    assert.strictEqual(calls[3].member.qualifier[1].kind, NodeKind.TemplateType);
+    const out = emit(tu);
+    assert.match(out, /g\.TSHashTable<::CELLIST, HASHKEY_NONE>::Ptr\(h, &g\.m_key\);/);
+    assert.match(out, /p->A::B::f\(\);/);
+    assert.match(out, /q->X<1>::~X\(\);/);
+    assert.match(out, /s\.N::Y<int>::g\(\);/);
+    assert.match(out, /r = c \? a\.b : d;/);
+  });
+
   it('reads a template-id as a type base in the cast passes, root qualifiers aside', () => {
     assert.deepStrictEqual(shapeOfSpelling('TSExplicitList<CELLIST, -572662307> *'),
       { base: 'TSExplicitList<CELLIST, -572662307>', stars: 1, isConst: false });

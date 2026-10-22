@@ -879,7 +879,8 @@ export interface CommaExpr extends ASTNode {
 export interface MemberExpr extends ASTNode {
   kind: NodeKind.MemberExpr;
   object: Expression;
-  member: Identifier | TemplateType;
+  /** A qualified member names it in a base class: `obj.Base::f`, `p->Base<T>::f`. */
+  member: Identifier | TemplateType | QualifiedId;
   isArrow: boolean;  // -> vs .
 }
 
