@@ -145,12 +145,11 @@ export class OverrideRegistry {
       return { body: originalBody, warnings: [] };
     }
 
-    const result = applyPatches(originalBody, entry.patches);
-    const warnings = result.warnings.map(
-      w => `Override at ${entry.address}: ${w}`
-    );
-
-    return { body: result.code, warnings };
+    try {
+      return { body: applyPatches(originalBody, entry.patches).code, warnings: [] };
+    } catch (err) {
+      throw new Error(`Override at ${entry.address}: ${(err as Error).message}`);
+    }
   }
 }
 

@@ -1533,9 +1533,13 @@ export function generateFunctionImplementation(
     }
 
     // Apply patches if override is a "patch" type
+    // A patch that no longer matches exactly once stops the regen (patches.ts).
     if (override?.action === 'patch' && override.patches) {
-      const result = applyPatches(body, override.patches);
-      body = result.code;
+      try {
+        body = applyPatches(body, override.patches).code;
+      } catch (err) {
+        throw new Error(`override ${override.address}${override.name ? ` ${override.name}` : ''}: ${(err as Error).message}`);
+      }
       overrideApplied = true;
     }
   }

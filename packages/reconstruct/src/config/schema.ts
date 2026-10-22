@@ -144,9 +144,14 @@ export interface OverrideEntry {
   address: string;
   name?: string;
   action: OverrideAction;
+  /**
+   * Why the body differs from the decompiler's: what the entry fixes, and one line of
+   * the evidence (the asm it follows). Not emitted; it is the entry's justification.
+   */
+  reason?: string;
   /** For action: "replace" — path to .cpp file with the replacement body */
   sourceFile?: string;
-  /** For action: "patch" — sequential find/replace patches */
+  /** For action: "patch" — sequential find/replace patches, each find matching exactly once */
   patches?: PatchEntry[];
   /**
    * For action: "replace" — GCC function attributes the definition needs for the
