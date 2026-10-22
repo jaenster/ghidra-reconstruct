@@ -19,6 +19,8 @@ import { mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { NodeKind, emit, parse } from '@ghidra-mcp/cpp-parser';
+import { BASE_COMPONENT_PREFIX, baseComponentNamed } from '../../codegen/templates/bases.js';
+import { parseTypeSpelling, templateIdOf, templateName } from '../../codegen/templates/identity.js';
 import type { Check, Finding, LintContext } from '../context.js';
 import type { SnapshotStruct } from '../snapshot.js';
 import { SKIP_DIRS } from '../tree.js';
@@ -45,27 +47,36 @@ export function templateIdSpelling(name: string): string | null {
 /** The template name of a struct name that is exactly one template-id (`TSHashTableReuse`), else the name itself. */
 function classNameOf(name: string): string {
   if (!name.includes('<')) return name;
-  let tu: any;
-  try { tu = parse(`typedef ${name} __layout_name;`); } catch { return name; }
-  const id = tu.declarations[0]?.type?.name;
-  return id?.kind === NodeKind.TemplateType && id.name?.kind === NodeKind.Identifier ? id.name.name : name;
+  const id = templateIdOf(parseTypeSpelling(name));
+  return (id && templateName(id)) ?? name;
 }
 
 /**
- * The classes the tree declares with a base class: a class by its name, a class
- * template by its template name. Ghidra models each such base as the struct's
+ * The classes the tree declares with a base class, each with the names of its
+ * direct bases: a class by its name, a class template and a template-id base by
+ * the template's name. Ghidra models each such base as the struct's
  * `super_<Class>` component, which the tree has no member for.
  */
-export function classesWithBases(files: ReadonlyArray<{ tu: { declarations: unknown[] } }>): Set<string> {
-  const out = new Set<string>();
+export function classesWithBases(files: ReadonlyArray<{ tu: { declarations: unknown[] } }>): Map<string, Set<string>> {
+  const out = new Map<string, Set<string>>();
+  const nameOf = (n: any): string | undefined => {
+    const id = n?.kind === NodeKind.TemplateType ? n.name : n;
+    return id?.kind === NodeKind.Identifier ? id.name : undefined;
+  };
   const rec = (decls: any[]) => {
     for (const d of decls ?? []) {
       if (!d) continue;
       if (d.kind === NodeKind.NamespaceDecl || d.kind === NodeKind.LinkageSpec) rec(d.declarations);
       else if (d.kind === NodeKind.TemplateDecl) rec([d.declaration]);
       else if ((d.kind === NodeKind.StructDecl || d.kind === NodeKind.ClassDecl) && d.bases?.length) {
-        const n = d.name?.kind === NodeKind.TemplateType ? d.name.name : d.name;
-        if (n?.kind === NodeKind.Identifier) out.add(n.name);
+        const n = nameOf(d.name);
+        if (n === undefined) continue;
+        const bases = out.get(n) ?? new Set<string>();
+        for (const b of d.bases) {
+          const bn = b?.type?.kind === NodeKind.TypedefType ? nameOf(b.type.name) : undefined;
+          if (bn !== undefined) bases.add(bn);
+        }
+        out.set(n, bases);
       }
     }
   };
@@ -74,26 +85,59 @@ export function classesWithBases(files: ReadonlyArray<{ tu: { declarations: unkn
 }
 
 /**
+ * The struct's base component by the generator's rule (templates/bases.ts) over
+ * the bases the tree declares for it, or undefined.
+ */
+function treeBaseComponent(
+  struct: Pick<SnapshotStruct, 'name' | 'fields'>,
+  bases: ReadonlyMap<string, ReadonlySet<string>>,
+): SnapshotStruct['fields'][number] | undefined {
+  const declared = bases.get(classNameOf(struct.name));
+  return declared ? baseComponentNamed(struct.fields, n => (declared.has(n) ? n : undefined))?.field : undefined;
+}
+
+/**
  * Each member's offset as the TU can name it: a field by its name, and - where
- * the tree declares the struct with a base - every member of the `super_`
- * component's struct through the derived class, at the component's offset plus
- * its own. That is what proves the base subobject sits where Ghidra puts it.
+ * the tree declares the struct with a base - every member of the base
+ * component's struct through the derived class, at its own offset, since a base
+ * sits at offset 0. That is what proves the base subobject sits where Ghidra
+ * puts it.
  */
 function memberOffsets(
   struct: Pick<SnapshotStruct, 'name' | 'fields'>,
   byName: ReadonlyMap<string, SnapshotStruct>,
-  derived: ReadonlySet<string>,
-  at = 0,
+  bases: ReadonlyMap<string, ReadonlySet<string>>,
   path = '',
 ): Array<{ name: string; path: string; offset: number }> {
   const out: Array<{ name: string; path: string; offset: number }> = [];
+  const component = treeBaseComponent(struct, bases);
+  const misplaced = new Set(misplacedBases(struct, bases));
   for (const f of struct.fields) {
     if (!f.name || typeof f.offset !== 'number' || BAD_IDENT.test(f.name)) continue;
-    const base = f.name.startsWith('super_') && derived.has(classNameOf(struct.name)) ? byName.get(f.dataType ?? '') : undefined;
-    if (base) out.push(...memberOffsets(base, byName, derived, at + f.offset, `${path}${f.name}.`));
-    else out.push({ name: f.name, path: `${path}${f.name}`, offset: at + f.offset });
+    // The tree has no member for it: misplacedBases reports it.
+    if (misplaced.has(`${struct.name}.${f.name}`)) continue;
+    const base = f === component ? byName.get(f.dataType ?? '') : undefined;
+    if (base) out.push(...memberOffsets(base, byName, bases, `${path}${f.name}.`));
+    else out.push({ name: f.name, path: `${path}${f.name}`, offset: f.offset });
   }
   return out;
+}
+
+/**
+ * The `super_<B>` components of a struct the tree declares as derived from B
+ * that are not its base by the rule: away from offset 0, or behind another
+ * member. The tree's base and Ghidra's component disagree on where B is.
+ */
+function misplacedBases(
+  struct: Pick<SnapshotStruct, 'name' | 'fields'>,
+  bases: ReadonlyMap<string, ReadonlySet<string>>,
+): string[] {
+  const declared = bases.get(classNameOf(struct.name));
+  if (!declared) return [];
+  const component = treeBaseComponent(struct, bases);
+  return struct.fields
+    .filter(f => f !== component && f.name?.startsWith(BASE_COMPONENT_PREFIX) && declared.has(f.name.slice(BASE_COMPONENT_PREFIX.length)))
+    .map(f => `${struct.name}.${f.name}`);
 }
 
 export interface AssertableStruct {
@@ -161,7 +205,7 @@ export function compilerAvailable(): boolean {
 }
 
 /** Compile the assert TU; SIZE/OFF failures by struct, or null without a compiler. */
-export function compilerLayout(root: string, structs: SnapshotStruct[], derived: ReadonlySet<string> = new Set()):
+export function compilerLayout(root: string, structs: SnapshotStruct[], bases: ReadonlyMap<string, ReadonlySet<string>> = new Map()):
     { sizeBad: string[]; offBad: string[]; uncheckable: string[] } | null {
   if (!compilerAvailable()) return null;
   const items = assertableStructs(structs);
@@ -182,7 +226,7 @@ export function compilerLayout(root: string, structs: SnapshotStruct[], derived:
         lines.push(`typedef ${spelling} ${type};`);
       }
       if (size !== null) lines.push(`static_assert(sizeof(${type}) == ${size}, "SIZE ${name}");`);
-      for (const m of memberOffsets({ name, fields }, byName, derived)) {
+      for (const m of memberOffsets({ name, fields }, byName, bases)) {
         lines.push(`static_assert(offsetof(${type}, ${m.name}) == ${m.offset}, "OFF ${name}.${m.path}");`);
       }
     });
@@ -195,7 +239,10 @@ export function compilerLayout(root: string, structs: SnapshotStruct[], derived:
       { encoding: 'utf8', cwd: root, maxBuffer: 256 * 1024 * 1024 });
     const text = (r.stdout ?? '') + (r.stderr ?? '');
     const sizeBad = [...text.matchAll(/static assertion failed: SIZE (\S+)/g)].map(m => m[1]);
-    const offBad = [...text.matchAll(/static assertion failed: OFF (\S+)/g)].map(m => m[1]);
+    const offBad = [
+      ...items.flatMap(it => misplacedBases(it, bases)),
+      ...[...text.matchAll(/static assertion failed: OFF (\S+)/g)].map(m => m[1]),
+    ];
     const uncheckable = text.split('\n').filter(l => l.includes(' error:') &&
       !l.includes('static assertion failed') && !l.includes('address of bit-field'));
     return { sizeBad, offBad, uncheckable };

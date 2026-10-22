@@ -553,10 +553,11 @@ struct __attribute__((packed)) CELLIST : public TSHashObject<CELLIST, HASHKEY_NO
 struct HOLDER { TSHashTable<CELLIST, HASHKEY_NONE> super_TSHashTable; uint32_t n; };
 `;
 
-  it('finds the classes the tree declares with a base, a template by its name', () => {
+  it('finds the classes the tree declares with a base, and their bases, a template by its name', () => {
     const files = [parseSource('stpl.h', header)];
     assert.deepStrictEqual(files[0].parseErrors, []);
-    assert.deepStrictEqual([...classesWithBases(files)].sort(), ['CELLIST', 'TSHashTableReuse']);
+    assert.deepStrictEqual([...classesWithBases(files)].map(([d, b]) => [d, [...b]]).sort(),
+      [['CELLIST', ['TSHashObject']], ['TSHashTableReuse', ['TSHashTable']]]);
   });
 
   it('asserts a base component\'s members through the derived class, a plain super_ member as a member', { skip: !compilerAvailable() }, () => {
@@ -568,24 +569,34 @@ struct HOLDER { TSHashTable<CELLIST, HASHKEY_NONE> super_TSHashTable; uint32_t n
         { name: 'm_hashval', offset: 0, size: 4 }, { name: 'm_linktoslot', offset: 4, size: 8 }, { name: 'm_key', offset: 12, size: 1 }] };
       const table = { name: 'TSHashTable<CELLIST,HASHKEY_NONE>', size: 8, fields: [
         { name: 'pVtable', offset: 0, size: 4 }, { name: 'nSlotMask', offset: 4, size: 4 }] };
-      const derived = classesWithBases([parseSource('stpl.h', header)]);
+      const bases = classesWithBases([parseSource('stpl.h', header)]);
+      const reuse = (baseAt: number, chunkAt: number) => ({ name: 'TSHashTableReuse<CELLIST,HASHKEY_NONE,0>', size: 12, fields: [
+        { name: 'super_TSHashTable', dataType: table.name, offset: baseAt, size: 8 }, { name: 'nChunkSize', offset: chunkAt, size: 4 }] });
       const r = compilerLayout(root, [
-        object, table,
+        // The element: its base's members are named through it, wherever they sit in the base.
+        { ...object, fields: [...object.fields.slice(0, 2), { name: 'm_key', offset: 13, size: 1 }] }, table,
         { name: 'CELLIST', size: 0x14, fields: [
           { name: 'super_TSHashObject', dataType: object.name, offset: 0, size: 0x10 }, { name: 'dwFlags', offset: 0x10, size: 4 }] },
-        // Ghidra's base offsets wrong by 4: every member of the base reads as misplaced.
-        { name: 'TSHashTableReuse<CELLIST,HASHKEY_NONE,0>', size: 12, fields: [
-          { name: 'super_TSHashTable', dataType: table.name, offset: 4, size: 8 }, { name: 'nChunkSize', offset: 8, size: 4 }] },
+        // Ghidra puts the derived class's own member 4 bytes late.
+        reuse(0, 12),
         { name: 'HOLDER', size: 12, fields: [
           { name: 'super_TSHashTable', dataType: table.name, offset: 0, size: 8 }, { name: 'n', offset: 8, size: 4 }] },
-      ], derived);
+      ], bases);
       assert.ok(r);
       assert.deepStrictEqual(r.uncheckable, []);
       assert.deepStrictEqual(r.sizeBad, []);
       assert.deepStrictEqual(r.offBad, [
-        'TSHashTableReuse<CELLIST,HASHKEY_NONE,0>.super_TSHashTable.pVtable',
-        'TSHashTableReuse<CELLIST,HASHKEY_NONE,0>.super_TSHashTable.nSlotMask',
+        'TSHashObject<CELLIST,HASHKEY_NONE>.m_key',
+        'CELLIST.super_TSHashObject.m_key',
+        'TSHashTableReuse<CELLIST,HASHKEY_NONE,0>.nChunkSize',
       ]);
+      // A base Ghidra puts anywhere but offset 0 is no base by the rule: the tree's base and
+      // Ghidra's component disagree, and that is the finding - not its members, which the
+      // derived class does not have under that name.
+      const moved = compilerLayout(root, [table, reuse(4, 8)], bases);
+      assert.ok(moved);
+      assert.deepStrictEqual(moved.uncheckable, []);
+      assert.deepStrictEqual(moved.offBad, ['TSHashTableReuse<CELLIST,HASHKEY_NONE,0>.super_TSHashTable']);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -606,13 +617,13 @@ struct CELLIST : public TSHashTable<CELLIST> { uint32_t dwFlags; };
       const snap = buildSnapshot('', [], [
         { kind: 'STRUCTURE', name: 'TSHashTable<CELLIST>', size: 8, fields: [
           { name: 'pVtable', offset: 0, size: 4 }, { name: 'nSlotMask', offset: 4, size: 4 }] },
-        // Ghidra puts the base 4 bytes in: every member of it is misplaced through CELLIST.
+        // Ghidra puts the base 4 bytes in: the tree's base is not where Ghidra's component is.
         { kind: 'STRUCTURE', name: 'CELLIST', size: 12, fields: [
           { name: 'super_TSHashTable', dataType: 'TSHashTable<CELLIST>', offset: 4, size: 8 }, { name: 'dwFlags', offset: 8, size: 4 }] },
       ]);
       const r = runChecks(tree, snap, ALL_CHECKS.filter(c => c.id === 'struct-packing-mismatch'));
       assert.deepStrictEqual(r.findings.map(f => `${f.subject}: ${f.detail}`), [
-        "CELLIST: field 'super_TSHashTable.pVtable' is not where Ghidra puts it",
+        "CELLIST: field 'super_TSHashTable' is not where Ghidra puts it",
       ]);
     } finally {
       rmSync(root, { recursive: true, force: true });
