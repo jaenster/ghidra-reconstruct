@@ -55,6 +55,8 @@ describe('RTTI demangling', () => {
     const d = demangleRttiTemplate('.?AV?$TSExportTableSync@USGAMEDATA@@PAUHSGAMEDATA__@@PAUHSGAMEDATALOCK__@@VCCritSect@@$0A@@@')!;
     assert.deepStrictEqual(d.args.map(a => [a.className, a.classKey]),
       [['SGAMEDATA', 'struct'], ['HSGAMEDATA__', 'struct'], ['HSGAMEDATALOCK__', 'struct'], ['CCritSect', 'class'], [undefined, undefined]]);
+    // A pointer to a class (PAV) keeps `class`, as a pointer to a struct (PAU) keeps `struct`.
+    assert.deepStrictEqual(demangleRttiTemplate('.?AV?$X@PAVCCritSect@@@@')!.args.map(a => [a.spelling, a.classKey]), [['CCritSect*', 'class']]);
     const nested = demangleRttiTemplate('.?AV?$X@V?$TSHashObjectChunk@UCELLIST@@VHASHKEY_NONE@@@@$0BA@@@')!.args[0];
     assert.deepStrictEqual([nested.className, nested.classKey], ['TSHashObjectChunk<CELLIST,HASHKEY_NONE>', 'class']);
     assert.deepStrictEqual(nested.nested?.map(a => [a.className, a.classKey]), [['CELLIST', 'struct'], ['HASHKEY_NONE', 'class']]);
@@ -245,11 +247,26 @@ describe('placement and scope', () => {
       fn('0060ddb0', 'D2Common::Chat::Ignorelist'),
       fn('0060e130', 'HASHKEY_STRI'), fn('0060e170', 'TSLink<StringEntryNode>'),
     ], MODULES, runs);
-    // Nothing of D2Common below them in their run: the run's module directory.
-    assert.strictEqual(placed.get('0060dc70'), 'D2Common::stpl_HASHKEY_STRI');
-    assert.strictEqual(placed.get('0060dd00'), 'D2Common::stpl_HASHKEY_STRI');
+    // Nothing of D2Common below them in their run: beside the D2Common code above them,
+    // the object their COMDATs were linked ahead of - one unit with 0060e130.
+    assert.strictEqual(placed.get('0060dc70'), 'D2Common::Chat::stpl_HASHKEY_STRI');
+    assert.strictEqual(placed.get('0060dd00'), 'D2Common::Chat::stpl_HASHKEY_STRI');
     assert.strictEqual(placed.get('0060e130'), 'D2Common::Chat::stpl_HASHKEY_STRI');
     assert.strictEqual(placed.get('0060e170'), 'D2Common::Chat::stpl_StringEntryNode');
+  });
+
+  it('places a run with no module function at all in the module directory', () => {
+    const r = TemplateRegistry.build(CONFIG, ['TSLink<CELLIST>']);
+    const placed = placeTemplateMembers(r, [fn('00601200', 'TSLink<CELLIST>'), fn('00601300', 'TSLink<CELLIST>')],
+      MODULES, [{ module: 'D2CMP', start: '00600000', end: '00610000' }]);
+    assert.strictEqual(placed.get('00601200'), 'D2CMP::stpl_CELLIST');
+    assert.strictEqual(placed.get('00601300'), 'D2CMP::stpl_CELLIST');
+  });
+
+  it('refuses a member in the run of a module the project does not configure', () => {
+    const r = TemplateRegistry.build(CONFIG, ['TSLink<CELLIST>']);
+    assert.throws(() => placeTemplateMembers(r, [fn('00601200', 'TSLink<CELLIST>')], MODULES,
+      [{ module: 'D2gfx', start: '00600000', end: '00610000' }]), /00601200 .* D2gfx run, a module project.json does not configure/);
   });
 
   it('passes over a function homed in another module than its run\'s', () => {

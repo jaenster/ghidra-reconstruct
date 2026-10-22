@@ -8,7 +8,12 @@
  * of the nearest function below it in the same module run (project.json
  * `moduleRuns`) that belongs to the run's module, in a unit named for the
  * element the instantiation is over (`D2CMP/SRC/stpl_CELLIST.cpp`). A member
- * with no such function below it in its run goes in the run's module directory.
+ * with no such function below it - one at the start of its run - goes beside the
+ * nearest such function above it: an object's template COMDATs are linked next to
+ * that object's own code, so they belong to the unit that follows them (the
+ * HASHKEY_STRI members at 0060dc70.. open D2Common's run, ahead of IgnoreList).
+ * A run with neither is placed in the module's directory. A member in a run whose
+ * module the project does not configure cannot be placed and stops the regen.
  * Class members (an element's own dtor, IgnoreList's methods) are not module
  * code and are passed over; their namespace names no module.
  */
@@ -48,10 +53,22 @@ export function placeTemplateMembers(
   const placement = new Map<string, string>();
   let run: (typeof spans)[number] | undefined;
   let moduleDir: string | undefined;
+  // Members met before any module function of their run, waiting for the one above.
+  let pending: { address: string; element: string }[] = [];
+  const settle = (dir: string) => {
+    for (const m of pending) placement.set(m.address, `${dir}::${registry.implPrefix}${m.element}`);
+    pending = [];
+  };
+  const closeRun = () => {
+    if (pending.length === 0 || !run) return;
+    const module = configuredModule(run.module, modules)!;
+    settle(normalizeUnitName(modules[module].namespaces[0]));
+  };
   for (const f of ordered) {
     const address = addressValue(f.address);
     const here = runOf(address);
     if (here !== run) {
+      closeRun();
       run = here;
       moduleDir = undefined;
     }
@@ -61,9 +78,11 @@ export function placeTemplateMembers(
         throw new Error(`template member ${f.address} ${ns}::${f.name} lies in no module run (project.json moduleRuns)`);
       }
       const element = registry.instantiation(ns)?.element ?? ns;
-      const module = configuredModule(run.module, modules);
-      const dir = moduleDir ?? (module ? normalizeUnitName(modules[module].namespaces[0]) : run.module);
-      placement.set(f.address, `${dir}::${registry.implPrefix}${element}`);
+      if (!configuredModule(run.module, modules)) {
+        throw new Error(`template member ${f.address} ${ns}::${f.name} lies in the ${run.module} run, a module project.json does not configure`);
+      }
+      if (moduleDir) placement.set(f.address, `${moduleDir}::${registry.implPrefix}${element}`);
+      else pending.push({ address: f.address, element });
       continue;
     }
     if (!ns || !run) continue;
@@ -72,6 +91,8 @@ export function placeTemplateMembers(
     const segments = normalizeUnitName(ns).split('::');
     if (segments[0] !== configuredModule(run.module, modules)) continue;
     moduleDir = segments.length > 1 ? segments.slice(0, -1).join('::') : segments[0];
+    settle(moduleDir);
   }
+  closeRun();
   return placement;
 }
