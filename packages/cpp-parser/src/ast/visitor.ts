@@ -636,6 +636,19 @@ export function getChildren(node: ASTNode): ASTNode[] {
       break;
     }
 
+    case NodeKind.TypedefType: {
+      // A plain type name is a leaf; a template-id, or a member of one, holds
+      // the argument types it is spelled with.
+      const name = (node as any).name;
+      if (namesTemplateId(name)) children.push(name);
+      break;
+    }
+
+    case NodeKind.TypeTemplateArg: {
+      children.push((node as any).type);
+      break;
+    }
+
     case NodeKind.CoReturnStmt: {
       const cr = node as any;
       if (cr.value) children.push(cr.value);
@@ -644,7 +657,8 @@ export function getChildren(node: ASTNode): ASTNode[] {
 
     // Leaf nodes: Identifier, IntegerLiteral, FloatingLiteral, CharLiteral,
     // StringLiteral, BoolLiteral, NullptrLiteral, ThisExpr, BreakStmt,
-    // ContinueStmt, NullStmt, BuiltinType, AutoType, Error, TypedefType
+    // ContinueStmt, NullStmt, BuiltinType, AutoType, Error, a plain-named
+    // TypedefType, and a value template argument (a literal, never rewritten)
     default:
       break;
   }
@@ -679,6 +693,13 @@ export function findIdentifiers(node: ASTNode, name: string): Identifier[] {
   return findNodes(node, n =>
     n.kind === NodeKind.Identifier && (n as Identifier).name === name
   ) as Identifier[];
+}
+
+/** A TypedefType name that is a template-id, or a name qualified by one. */
+function namesTemplateId(name: any): boolean {
+  if (!name) return false;
+  if (name.kind === NodeKind.TemplateType) return true;
+  return name.kind === NodeKind.QualifiedId && name.qualifier.some((q: any) => q.kind === NodeKind.TemplateType);
 }
 
 /**
@@ -1165,6 +1186,18 @@ function transformChildren<N extends ASTNode>(
       const qi = copy as any;
       qi.qualifier = qi.qualifier.map((q: any) => transformAST(q, visitor));
       qi.name = transformAST(qi.name, visitor);
+      break;
+    }
+
+    case NodeKind.TypedefType: {
+      const tt = copy as any;
+      if (namesTemplateId(tt.name)) tt.name = transformAST(tt.name, visitor);
+      break;
+    }
+
+    case NodeKind.TypeTemplateArg: {
+      const ta = copy as any;
+      ta.type = transformAST(ta.type, visitor);
       break;
     }
 

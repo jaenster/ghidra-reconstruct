@@ -189,7 +189,8 @@ describe('the visitor reaches into template headers and class heads', () => {
     const tu = parse('template<class T, int N = 4, class K = HASHKEY_NONE> class R : public TSHashTable<T, K> { };');
     const names = findNodesByKind(tu, NodeKind.TypedefType)
       .map((t: any) => t.name.kind === NodeKind.TemplateType ? t.name.name.name : t.name.name).sort();
-    assert.deepStrictEqual(names, ['HASHKEY_NONE', 'TSHashTable']);
+    // The base's template-id holds its argument types as children too.
+    assert.deepStrictEqual(names, ['HASHKEY_NONE', 'K', 'T', 'TSHashTable']);
     assert.strictEqual(findNodesByKind(tu, NodeKind.IntegerLiteral).length, 1);
   });
 });

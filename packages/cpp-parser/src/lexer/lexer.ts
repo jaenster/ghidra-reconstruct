@@ -421,6 +421,11 @@ export class Lexer {
           if (this.match('>')) return this.makeToken(TokenKind.Spaceship, '<=>');
           return this.makeToken(TokenKind.LessEqual, '<=');
         }
+        // `<::` is `<` then `::` unless a `:` or `>` follows ([lex.pptoken]/3.2):
+        // `TSHashTable<::CELLIST, HASHKEY_NONE>` opens a template argument list.
+        if (this.peek() === ':' && this.peek(1) === ':' && this.peek(2) !== ':' && this.peek(2) !== '>') {
+          return this.makeToken(TokenKind.Less, char);
+        }
         if (this.match(':')) return this.makeToken(TokenKind.DiLeftBracket, '<:');
         if (this.match('%')) return this.makeToken(TokenKind.DiLeftBrace, '<%');
         return this.makeToken(TokenKind.Less, char);

@@ -41,6 +41,7 @@ import { Type, Expr } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { createExprShape } from './expr-shape.js';
 import { hasOwnKeys } from './input-memo.js';
+import { templateBaseName, templateTypeFromSpelling } from './template-type.js';
 
 export interface CallArgCastOptions extends PluginOptions {
   /** Callable name (bare AND qualified) → declared parameter type spellings */
@@ -287,6 +288,8 @@ export function bareName(name: string): string {
 export function typeNodeName(name: unknown): string | undefined {
   const n = name as { kind?: string; name?: unknown } | undefined | null;
   if (!n || typeof n !== 'object') return undefined;
+  const template = templateBaseName(n);
+  if (template !== undefined) return template;
   if (typeof n.name === 'string') return n.name;
   if (n.kind === NodeKind.QualifiedId) {
     const tail = n.name as { name?: unknown } | undefined;
@@ -426,7 +429,10 @@ export function shapeOfSpelling(
   const array = /^(.*?)\s*\[[^\[\]]*\]$/.exec(s);
   let arrayStars = 0;
   if (array) { s = array[1].trim(); arrayStars = 1; }
-  // Function pointers, templates, references and further dimensions are out of scope.
+  // A class template instantiation is a base like any other (template-type.ts).
+  const template = templateTypeFromSpelling(s);
+  if (template) return shapeOfNode(template, arrayStars, resolve);
+  // Function pointers, references and further dimensions are out of scope.
   if (/[()<>&\[\]]/.test(s)) return null;
   let stars = arrayStars;
   while (s.endsWith('*')) { stars++; s = s.slice(0, -1).trim(); }
@@ -668,6 +674,8 @@ export function functionPointerTypeFromSpellings(
 
 export function typeFromSpelling(spelling: string): TypeNode | null {
   let s = spelling.trim();
+  const template = templateTypeFromSpelling(s);
+  if (template) return template;
   if (!s || /[()<>&\[\]]/.test(s)) return null;
   let stars = 0;
   while (s.endsWith('*')) { stars++; s = s.slice(0, -1).trim(); }

@@ -2334,7 +2334,17 @@ export class CppEmitter {
 
   private emitBinaryExpr(node: BinaryExpr): void {
     const precedence = OPERATOR_PRECEDENCE[node.operator] ?? 20;
-    this.emitExprWithPrecedence(node.left, precedence);
+    // `(a < b) > c` printed as `a < b > c` is the same comparison only while `a`
+    // names no template; where it does, the `>` closes a template argument list.
+    // A `<` comparison on the left of an operator that starts with `>` keeps its
+    // parentheses.
+    if (node.operator.startsWith('>') && this.isLessThanComparison(node.left)) {
+      this.write('(');
+      this.emitNode(node.left);
+      this.write(')');
+    } else {
+      this.emitExprWithPrecedence(node.left, precedence);
+    }
     if (this.style.spaceAroundOperators) {
       this.write(' ' + node.operator + ' ');
     } else {
@@ -2345,6 +2355,12 @@ export class CppEmitter {
     // associative operator, parens are unnecessary (e.g. a && b && c).
     const rightPrec = this.rightChildSameAssociativeOp(node) ? precedence : precedence - 1;
     this.emitExprWithPrecedence(node.right, rightPrec);
+  }
+
+  /** A `<` comparison, looking through ParenExpr. */
+  private isLessThanComparison(expr: Expression): boolean {
+    while (expr.kind === NodeKind.ParenExpr) expr = (expr as ParenExpr).expression;
+    return expr.kind === NodeKind.BinaryExpr && (expr as BinaryExpr).operator === '<';
   }
 
   /** Check if right child (looking through ParenExpr) is the same associative operator */

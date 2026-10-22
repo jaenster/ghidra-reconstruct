@@ -74,7 +74,8 @@ export function preprocessGhidraCode(code: string): string {
   // `this-param-rewrite`, so every pass between it and the final rename map saw an
   // undeclared `self` - `return-cast` could not read its type and a `void *pThis`
   // returned from a typed-pointer function reached the tree uncast (26 strict errors).
-  result = result.replace(/(\w+\s*\*\s*)this\b/g, '$1self');
+  // A class template instantiation's pointer declares one too: `TSHashTable<CELLIST,HASHKEY_NONE> *this;`.
+  result = result.replace(/((?:\w+|>)\s*\*\s*)this\b/g, '$1self');
   result = result.replace(/(\w+)\s+this\b/g, (m, word: string) =>
     EXPRESSION_KEYWORDS.has(word) ? m : `${word} self`);
 
