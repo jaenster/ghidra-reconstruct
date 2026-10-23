@@ -253,7 +253,7 @@ describe('namespace rendering: segments become text exactly once', () => {
   });
 });
 
-describe('namespace resolution: a dropped leaf never merges two functions of one signature (round 13)', () => {
+describe('namespace resolution: a dropped leaf never merges two functions of one name', () => {
   const types = new Set(['D2WinButton', 'D2WinList', 'D2WinTimer']);
   const fns = [
     { address: '00501090', namespace: 'D2Win::Src::D2WinButton', name: 'Push', sig: 'D2ControlMsg*' },
@@ -265,19 +265,52 @@ describe('namespace resolution: a dropped leaf never merges two functions of one
     { address: '00600000', namespace: 'D2Win::Src::D2WinTimer', name: 'Draw2', sig: 'int' },
   ];
   it('the colliding D2Win control callbacks keep their control namespace, with every sibling in their file', () => {
-    const r = buildNamespaceResolution(types, fns, undefined, { symbols: fns, signatureOf: f => (f as { sig: string }).sig });
+    const r = buildNamespaceResolution(types, fns, undefined, fns);
     assert.equal(r.render({ address: '00501090' }), 'D2Win::Src::D2WinButton');
     assert.equal(r.render({ address: '005072f0' }), 'D2Win::Src::D2WinList');
     assert.equal(r.render({ address: '00501290' }), 'D2Win::Src::D2WinButton', 'the file stays one namespace');
     assert.equal(r.render({ address: '004fd970' }), 'D2Win::Src::D2WinTimer');
     assert.equal(renderNamespace(r.resolveReference('D2Win::Src::D2WinButton', 'Push')), 'D2Win::Src::D2WinButton');
   });
-  it('functions that differ in signature still drop the leaf: they overload apart', () => {
+  it('functions that differ only in their this type keep the leaf too: an address-of has no overload context', () => {
+    // v1698: `(void*)&D2Common::Chat::Ignorelist::ScalarDeletingDestructor` in two vftable
+    // initializers was ambiguous between the IgnoreList and ChatIgnoreList overloads.
+    const classes = new Set(['IgnoreList', 'ChatIgnoreList']);
     const distinct = [
-      { address: '1', namespace: 'D2Win::Src::D2WinButton', name: 'Push', sig: 'D2WinButton*' },
-      { address: '2', namespace: 'D2Win::Src::D2WinList', name: 'Push', sig: 'D2WinList*' },
+      { address: '00610d30', namespace: 'D2Common::Chat::Ignorelist::IgnoreList', name: 'ScalarDeletingDestructor', sig: 'IgnoreList*,uint' },
+      { address: '0060dd60', namespace: 'D2Common::Chat::Ignorelist::ChatIgnoreList', name: 'ScalarDeletingDestructor', sig: 'ChatIgnoreList*,uint' },
+      { address: '00610000', namespace: 'D2Common::Chat::Ignorelist::IgnoreList', name: 'CheckIgnored', sig: 'IgnoreList*,char*' },
     ];
-    const r = buildNamespaceResolution(types, distinct, undefined, { symbols: distinct, signatureOf: f => (f as { sig: string }).sig });
+    const r = buildNamespaceResolution(classes, distinct, undefined, distinct);
+    assert.equal(r.render({ address: '00610d30' }), 'D2Common::Chat::Ignorelist::IgnoreList');
+    assert.equal(r.render({ address: '0060dd60' }), 'D2Common::Chat::Ignorelist::ChatIgnoreList');
+    assert.equal(r.render({ address: '00610000' }), 'D2Common::Chat::Ignorelist::IgnoreList', 'the class stays one namespace');
+    assert.equal(
+      renderNamespace(r.resolveReference('D2Common::Chat::Ignorelist::ChatIgnoreList', 'ScalarDeletingDestructor')),
+      'D2Common::Chat::Ignorelist::ChatIgnoreList',
+    );
+  });
+  it('a datum in a class whose leaf the functions kept keeps its class qualifier on the reference side', () => {
+    const classes = new Set(['ButtonImplementation', 'ButtonWrapper']);
+    const fns = [
+      { address: '004bafd0', namespace: 'D2Client::UI::Button::ButtonImplementation', name: 'Draw' },
+      { address: '004bae30', namespace: 'D2Client::UI::Button::ButtonWrapper', name: 'Draw' },
+    ];
+    const data = [
+      { address: '0072a000', namespace: 'D2Client::UI::Button::ButtonImplementation', name: 'vftable' },
+      { address: '0072a100', namespace: 'D2Client::UI::Button::ButtonWrapper', name: 'vftable' },
+    ];
+    const r = buildNamespaceResolution(classes, [...fns, ...data], { symbols: data, nameOf: d => d.name }, fns);
+    assert.equal(r.render({ address: '0072a100' }), 'D2Client::UI::Button::ButtonWrapper');
+    assert.ok(r.keptReferenceNames().includes('D2Client::UI::Button::ButtonWrapper::vftable'));
+    assert.ok(r.keptReferenceNames().includes('D2Client::UI::Button::ButtonImplementation::vftable'));
+  });
+  it('a nested class with no colliding member name still drops the leaf', () => {
+    const lone = [
+      { address: '1', namespace: 'D2Win::Src::D2WinButton', name: 'Push' },
+      { address: '2', namespace: 'D2Win::Src::D2WinList', name: 'Scroll' },
+    ];
+    const r = buildNamespaceResolution(types, lone, undefined, lone);
     assert.equal(r.render({ address: '1' }), 'D2Win::Src');
     assert.equal(r.render({ address: '2' }), 'D2Win::Src');
   });
