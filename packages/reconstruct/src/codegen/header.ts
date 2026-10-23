@@ -30,6 +30,7 @@ import { requiresPacking, adoptGhidraLayout } from './struct-packing.js';
 import { memberDefinitionScope, signatureParameters } from './templates/index.js';
 import { classKeyOf, templateRegistry } from './templates/registry.js';
 import { baseComponentOf, ownFields } from './templates/bases.js';
+import { stripPlateTemplate } from './plate-comment.js';
 
 /** normalizeSignatureType + fn-ptr-typedef double-indirection collapse, for
  *  emitting function parameter and return types ("fpFoo *" → "fpFoo").
@@ -762,42 +763,15 @@ function cleanInlineComment(comment: string): string {
 }
 
 /**
- * Strip Ghidra metadata lines from a function comment.
- * Removes register annotations, custom-register warnings, plate comment metadata, and URLs.
+ * A function's plate as the emitted comment: template and metadata lines dropped
+ * (see plate-comment.ts for the rules), the text a person wrote kept.
  */
 export function cleanFunctionComment(
   comment: string,
   functionAddressMap?: Map<bigint, FuncPtrTarget>,
 ): string {
   // Convert literal \n sequences to actual newlines
-  const rawLines = comment.replace(/\\n/g, '\n').split('\n');
-  // Ghidra's batch_rename rewrites plate comments into an @function/@address/@date/
-  // @calling/@description template and buries the original text inside @description.
-  // That text is the source-file attribution, so unwrap it rather than dropping it
-  // with the tag.
-  const lines = rawLines.map(line => {
-    const described = line.match(/^\s*@description\s+(.*)$/i);
-    return described ? described[1] : line;
-  });
-  const cleaned = lines.filter(line => {
-    const trimmed = line.trim();
-    if (!trimmed) return false;
-    // Register annotations: [type param@REG:size]
-    if (/^\[.*@.*:\d+\]$/.test(trimmed)) return false;
-    // Custom register warning
-    if (trimmed === 'Function uses custom registers for function arguments!') return false;
-    // Plate comment metadata tags (case-insensitive, with or without colon)
-    // (@description is unwrapped above, so a bare tag with no payload falls through here.)
-    // @calling is redundant — the emitted signature already carries the convention.
-    if (/^@(date|author|function|address|description|params|calling)\b/i.test(trimmed)) return false;
-    // Param lines inside @params block (e.g. "  param_1: ECX:4 (int32_t)")
-    if (/^\s*param_\d+\s*:/.test(trimmed)) return false;
-    // Bare URLs
-    if (/^https?:\/\//.test(trimmed)) return false;
-    // Standalone FUN_ metadata lines: "Function: FUN_XXXXXXXX" or "Called from FUN_XXXXXXXX"
-    if (/^(Function|Called from)\s*:?\s*FUN_[0-9a-fA-F]+$/i.test(trimmed)) return false;
-    return true;
-  });
+  const cleaned = stripPlateTemplate(comment.replace(/\\n/g, '\n').split('\n'));
 
   // Evidence lines quote debug strings verbatim, and those strings often embed a
   // newline — which would otherwise split the quote across two comment lines

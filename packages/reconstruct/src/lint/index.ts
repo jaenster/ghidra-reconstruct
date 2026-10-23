@@ -21,6 +21,7 @@ import { ghidraArtifact } from './checks/artifacts.js';
 import { rawAddressInitializer } from './checks/initializers.js';
 import { rawAddressArgument } from './checks/addresses.js';
 import { undersizedGlobalArgument } from './checks/arguments.js';
+import { plateTemplateComment, PLATE_TEMPLATE_CHECK_ID } from './checks/comments.js';
 
 export type { Check, Finding } from './context.js';
 export { LintContext } from './context.js';
@@ -31,6 +32,7 @@ export {
   ghidraArtifact, artifactGate, GHIDRA_ARTIFACT_CHECK_ID, GHIDRA_ARTIFACT_RULES,
   type ArtifactAllowlist, type ArtifactGateRow,
 } from './checks/artifacts.js';
+export { plateTemplateComment, PLATE_TEMPLATE_CHECK_ID, PLATE_TEMPLATE_MARKERS } from './checks/comments.js';
 
 /** In the order lint.py reported them. */
 export const ALL_CHECKS: Check[] = [
@@ -53,6 +55,7 @@ export const ALL_CHECKS: Check[] = [
   rawAddressInitializer,
   rawAddressArgument,
   ghidraArtifact,
+  plateTemplateComment,
 ];
 
 /**
@@ -61,6 +64,13 @@ export const ALL_CHECKS: Check[] = [
  * baseline: an accepted artifact is a number that must shrink, not a site to forget.
  */
 export const COUNTED_CHECKS = new Set<string>(['ghidra-artifact']);
+
+/**
+ * Checks whose every finding fails the run (exit 3). They run in the default sweep, are never
+ * written to the baseline and cannot be accepted: what they find must not be in a tree that
+ * is published at all.
+ */
+export const ZERO_TOLERANCE_CHECKS = new Set<string>([PLATE_TEMPLATE_CHECK_ID]);
 
 export interface RunResult {
   findings: Finding[];
