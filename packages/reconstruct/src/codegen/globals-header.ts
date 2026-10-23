@@ -2757,14 +2757,20 @@ function emitterDeclaresFunction(name: string): boolean {
 
 let initializerFunctionSignatures: Record<string, string> = {};
 let initializerFuncdefSignatures: Record<string, string> = {};
+let initializerFunctionConventions: Record<string, string> = {};
+let initializerFuncdefConventions: Record<string, string> = {};
 let initializerFuncPtrArityMismatches = 0;
 
 export function setInitializerSignatureTables(
   functionSignatures: Record<string, string>,
   funcdefSignatures: Record<string, string>,
+  functionConventions: Record<string, string> = {},
+  funcdefConventions: Record<string, string> = {},
 ): void {
   initializerFunctionSignatures = functionSignatures;
   initializerFuncdefSignatures = funcdefSignatures;
+  initializerFunctionConventions = functionConventions;
+  initializerFuncdefConventions = funcdefConventions;
   initializerFuncPtrArityMismatches = 0;
 }
 
@@ -2830,6 +2836,17 @@ function functionInitializerCast(name: string, expectedType?: string): string | 
     return undecorated && INTEGER_SLOT_TYPES.has(slot.toLowerCase()) ? slot : undefined;
   }
   if (target === actual) return undefined;
+  // A store across a calling-convention disagreement is refused, unlike one
+  // across an arity disagreement: the slot's callers place the arguments in
+  // registers the function does not read (or the reverse), so the cast would
+  // compile a call that cannot work (a parameterless function has nothing to
+  // misplace, so there only the spelling differs). Left uncast, the initializer fails to
+  // compile, which is where a funcdef/function disagreement in the database
+  // belongs.
+  const slotConvention = initializerFuncdefConventions[slot];
+  const ownConvention = initializerFunctionConventions[name] ?? initializerFunctionConventions[bare];
+  if (slotConvention !== undefined && ownConvention !== undefined && slotConvention !== ownConvention
+    && signatureArity(actual) !== 0) return undefined;
   // Counted, not refused — see the note on `initializerFunctionSignatures`.
   if (signatureArity(actual) !== signatureArity(target)) initializerFuncPtrArityMismatches++;
   return slot;

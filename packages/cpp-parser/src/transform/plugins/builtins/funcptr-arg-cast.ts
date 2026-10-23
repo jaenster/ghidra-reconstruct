@@ -139,6 +139,13 @@ export interface FuncPtrArgCastOptions extends PluginOptions {
    * names a type no overload has and selects nothing.
    */
   functionConventions?: Record<string, string>;
+  /**
+   * Funcdef typedef name → the calling convention its emitted typedef carries,
+   * spelled the way `functionConventions` spells a function's ('' for none).
+   * A cast between two function-pointer types that disagree here changes how
+   * the arguments travel, not just how they are typed, so it is never written.
+   */
+  funcdefConventionKeywords?: Record<string, string>;
 }
 
 /** Slot marker for a parameter/field declared plain `void*` rather than a funcdef. */
@@ -306,7 +313,29 @@ function buildTransformer(options: FuncPtrArgCastOptions): Transformer {
     return exact ? (Expr.cast(exact, value) as Expression) : value;
   };
 
+  const funcdefConventionKeywords = options.funcdefConventionKeywords ?? {};
+  /**
+   * The function's emitted convention disagrees with the slot's, and it takes
+   * parameters, so the disagreement is about where they travel. Such a store
+   * is a register-versus-stack disagreement no cast reconciles - the callee
+   * would read its arguments from where the caller never put them - so it
+   * stays uncast and fails to compile where the database disagrees with itself.
+   */
+  const conventionDisagrees = (typedefName: string, value: Expression): boolean => {
+    const slot = funcdefConventionKeywords[typedefName];
+    const fnName = functionArgName(value);
+    if (slot === undefined || !fnName) return false;
+    // With no parameters every convention is one ABI - nothing placed, nothing
+    // popped - and only the spelling differs, which is what a cast is for.
+    const sig = signatureFor(fnName, modelArgName(value));
+    if (sig === undefined || arityOf(sig) === 0) return false;
+    const own = scopedLookup(functionConventions, modelArgName(value) ?? fnName, enclosingSegments)
+      ?? scopedLookup(functionConventions, fnName, enclosingSegments);
+    return own !== undefined && own !== slot;
+  };
+
   const castTo = (typedefName: string, value: Expression): Expression => {
+    if (conventionDisagrees(typedefName, value)) return value;
     usedTypedefs.add(typedefName);
     const castType = rootQualified.has(typedefName)
       ? Type.typedefAt(typedefName, true)
