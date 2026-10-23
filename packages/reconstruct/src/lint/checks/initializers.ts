@@ -13,8 +13,11 @@ import { fileScopeVars, type SourceFile } from '../tree.js';
 const IMAGE_FLOOR = 0x400000;
 const IMAGE_CEILING = 0x80000000;
 
+/** Whether a value lies inside the Windows image window. */
+export const inImage = (v: number) => v >= IMAGE_FLOOR && v < IMAGE_CEILING;
+
 /** An integer literal through parentheses only - a cast is the slot, not the value. */
-function literalValue(e: any): number | null {
+export function literalValue(e: any): number | null {
   const s = unparen(e);
   if (s?.kind !== NodeKind.IntegerLiteral) return null;
   const v = s.value;
@@ -60,7 +63,7 @@ function* initializerSlots(init: any, type: any): Generator<{ node: any; slotIsP
 }
 
 /** Every name the tree defines as data: namespace/file scope in any file, and static locals. */
-function definedDataNames(ctx: LintContext): Set<string> {
+export function definedDataNames(ctx: LintContext): Set<string> {
   const out = new Set<string>();
   for (const f of ctx.tree.files) for (const n of fileScopeVars(f).keys()) out.add(n);
   for (const fn of ctx.tree.functions) {
@@ -72,6 +75,31 @@ function definedDataNames(ctx: LintContext): Set<string> {
     }
   }
   return out;
+}
+
+/**
+ * The global a raw value names: the one Windows symbol starting at that address, provided its
+ * name is carried by no other Windows symbol and the tree defines it. Null otherwise - an
+ * interior address, an address two symbols share, or a name the generator cannot qualify.
+ */
+export function addressTargetResolver(ctx: LintContext): (v: number) => string | null {
+  const snap = ctx.snapshot;
+  if (!snap) return () => null;
+  const byAddress = new Map<number, string[]>();
+  const nameCount = new Map<string, number>();
+  for (const g of snap.globals) {
+    const l = byAddress.get(g.address);
+    if (l) l.push(g.name); else byAddress.set(g.address, [g.name]);
+    nameCount.set(g.name, (nameCount.get(g.name) ?? 0) + 1);
+  }
+  const defined = definedDataNames(ctx);
+  return (v: number) => {
+    if (!inImage(v)) return null;
+    const names = byAddress.get(v);
+    if (!names || names.length !== 1) return null;
+    const target = names[0];
+    return nameCount.get(target) === 1 && defined.has(target) ? target : null;
+  };
 }
 
 /** `globals.cpp` / `globals.<Module>.cpp` at the tree root: the central data definitions. */
@@ -106,15 +134,7 @@ export const rawAddressInitializer: Check = {
     const snap = ctx.snapshot;
     if (!snap) return out;
 
-    const byAddress = new Map<number, string[]>();
-    const nameCount = new Map<string, number>();
-    for (const g of snap.globals) {
-      const l = byAddress.get(g.address);
-      if (l) l.push(g.name); else byAddress.set(g.address, [g.name]);
-      nameCount.set(g.name, (nameCount.get(g.name) ?? 0) + 1);
-    }
-    const defined = definedDataNames(ctx);
-    const inImage = (v: number) => v >= IMAGE_FLOOR && v < IMAGE_CEILING;
+    const targetOf = addressTargetResolver(ctx);
 
     const check = (file: SourceFile, fnName: string | undefined, decl: any) => {
       if ((decl.specifiers ?? []).includes('extern') || !decl.initializer) return;
@@ -124,11 +144,9 @@ export const rawAddressInitializer: Check = {
       if (!ownerSym || !inImage(ownerSym.address)) return;
       for (const { node, slotIsPointer } of initializerSlots(decl.initializer, decl.type)) {
         const v = pointerSlotLiteral(node, slotIsPointer);
-        if (v === null || !inImage(v)) continue;
-        const names = byAddress.get(v);
-        if (!names || names.length !== 1) continue;
-        const target = names[0];
-        if (nameCount.get(target) !== 1 || !defined.has(target)) continue;
+        if (v === null) continue;
+        const target = targetOf(v);
+        if (!target) continue;
         out.push({
           check: this.id, file: file.path, line: line(node), fn: fnName, subject: owner,
           detail: `holds 0x${v.toString(16).padStart(8, '0')}, the original address of '${target}' - should be &${target}`,

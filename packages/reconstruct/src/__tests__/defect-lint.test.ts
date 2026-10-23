@@ -935,3 +935,43 @@ describe('defect lint: raw-address-initializer', () => {
     } }), []);
   });
 });
+
+describe('defect lint: raw-address-argument', () => {
+  const snap = [
+    { name: 'gStormCmdListHeadSlash', address: 0x74c498, size: 12 },
+    { name: 'gLogMessageQueueHead', address: 0x75e868, size: 12 },
+    { name: 'gMpqArchiveList', address: 0x708354, size: 12 },
+    { name: 'RTTI_Complete_Object_Locator', address: 0x6fffc0, size: 20 },
+    { name: 'RTTI_Complete_Object_Locator', address: 0x700008, size: 20 },
+    { name: 'gNotEmitted', address: 0x700300, size: 4 },
+    { name: 'gnCurrentTimestamp', address: 0x989680, size: 4 },
+  ];
+  const globalsH = 'extern D2StormListHead gStormCmdListHeadSlash;\nextern D2StormListHead gLogMessageQueueHead;\n' +
+    'extern D2StormListHead gMpqArchiveList;\n';
+  const globalsCpp = 'D2StormListHead gStormCmdListHeadSlash;\nD2StormListHead gLogMessageQueueHead;\nD2StormListHead gMpqArchiveList;\n' +
+    'int gnCurrentTimestamp;\n';
+
+  it('reports a literal argument, a cast literal argument once, and a pointer cast outside a call', () => {
+    const fs = lint('raw-address-argument', { globals: snap, files: {
+      'globals.h': globalsH,
+      'globals.cpp': globalsCpp,
+      'Global/Global.cpp': 'void StaticFini_gStormCmdListSlash() {\n    SCMD_ClearList(0x74c498);\n}\n' +
+        'void StaticFini_gLogMessageQueueHead() {\n    TeardownListFull((D2StormListHead *)(0x75e868));\n}\n' +
+        'void f() {\n    D2StormListHead * p = (D2StormListHead *)0x00708354;\n}\n',
+    } });
+    assert.deepStrictEqual(subjects(fs), ['gLogMessageQueueHead', 'gMpqArchiveList', 'gStormCmdListHeadSlash']);
+    assert.match(fs.find(f => f.subject === 'gStormCmdListHeadSlash')!.detail, /passes 0x0074c498.*&gStormCmdListHeadSlash/);
+    assert.match(fs.find(f => f.subject === 'gMpqArchiveList')!.detail, /casts 0x00708354/);
+  });
+
+  it('ignores &name, an interior address, a shared name, a symbol the tree lacks, a decimal count, a plain integer and a header', () => {
+    assert.deepStrictEqual(lint('raw-address-argument', { globals: snap, files: {
+      'globals.h': globalsH,
+      'globals.cpp': globalsCpp,
+      'Global/Global.cpp': 'void f() {\n    SCMD_ClearList(&gStormCmdListHeadSlash);\n    g(0x74c49c);\n' +
+        '    h((void *)0x006fffc0);\n    k(0x700300);\n    int n = 0x74c498;\n    m(5, 0x400);\n' +
+        '    __aulldiv(t, 0, 10000000, 0);\n}\n',
+      'Global/Inline.h': 'inline void g2() { SCMD_ClearList(0x74c498); }\n',
+    } }), []);
+  });
+});

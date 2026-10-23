@@ -19,6 +19,7 @@ import { structPackingMismatch } from './checks/layout.js';
 import { arrayIndexRange } from './checks/ranges.js';
 import { ghidraArtifact } from './checks/artifacts.js';
 import { rawAddressInitializer } from './checks/initializers.js';
+import { rawAddressArgument } from './checks/addresses.js';
 import { undersizedGlobalArgument } from './checks/arguments.js';
 
 export type { Check, Finding } from './context.js';
@@ -50,6 +51,7 @@ export const ALL_CHECKS: Check[] = [
   arrayIndexRange,
   untypedVirtualCall,
   rawAddressInitializer,
+  rawAddressArgument,
   ghidraArtifact,
 ];
 
