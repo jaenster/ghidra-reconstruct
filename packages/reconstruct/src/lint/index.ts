@@ -19,6 +19,7 @@ import { structPackingMismatch } from './checks/layout.js';
 import { arrayIndexRange } from './checks/ranges.js';
 import { ghidraArtifact } from './checks/artifacts.js';
 import { rawAddressInitializer } from './checks/initializers.js';
+import { undersizedGlobalArgument } from './checks/arguments.js';
 
 export type { Check, Finding } from './context.js';
 export { LintContext } from './context.js';
@@ -34,6 +35,7 @@ export {
 export const ALL_CHECKS: Check[] = [
   indexedScalarGlobal,
   oversizedGlobalWrite,
+  undersizedGlobalArgument,
   undersizedStackBuffer,
   truncatedStringGlobal,
   structPackingMismatch,

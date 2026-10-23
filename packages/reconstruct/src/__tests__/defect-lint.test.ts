@@ -95,6 +95,86 @@ describe('defect lint: oversized-global-write', () => {
   });
 });
 
+describe('defect lint: undersized-global-argument', () => {
+  const types = [
+    { name: 'D2LRUCacheStrc', kind: 'STRUCTURE', size: 0x34, fields: [] },
+    { name: 'D2SmallStrc', kind: 'STRUCTURE', size: 8, fields: [] },
+  ];
+  const globalsH = [
+    'extern uint8_t gcsErrorHandlerList;', 'extern CRITICAL_SECTION gcsGood;', 'extern uint8_t gPad[0x40];',
+    'extern uint8_t gCache;', 'extern uint8_t* gpBuf;', 'extern uint8_t gGuid;', 'extern unsigned int grcText;',
+    'extern D2SmallStrc gSmall;', 'extern uint8_t gRow[24];',
+  ].join('\n') + '\n';
+
+  it('reports a one-byte global handed to InitializeCriticalSection, once per global with every site counted', () => {
+    const fs = lint('undersized-global-argument', { types, files: {
+      'globals.h': globalsH,
+      'a.cpp': `void f() {
+    InitializeCriticalSection((LPCRITICAL_SECTION)&gcsErrorHandlerList);
+    EnterCriticalSection(
+        (LPCRITICAL_SECTION)&gcsErrorHandlerList);
+}`,
+    } });
+    assert.deepStrictEqual(subjects(fs), ['gcsErrorHandlerList']);
+    assert.match(fs[0].detail, /_RTL_CRITICAL_SECTION is 24 bytes, gcsErrorHandlerList is 1-byte uint8_t/);
+    assert.match(fs[0].detail, /2 sites/);
+  });
+
+  it('sizes SDK objects without a snapshot, through raw pointer casts and vtable calls', () => {
+    const fs = lint('undersized-global-argument', { files: {
+      'globals.h': globalsH,
+      'a.cpp': `void f(IUnknown* p, void** out) {
+    SetRect((LPRECT)&grcText, 0, 0, 1, 1);
+    p->lpVtbl->QueryInterface(p, (GUID*)&gGuid, out);
+}`,
+    } });
+    assert.deepStrictEqual(subjects(fs), ['gGuid', 'grcText']);
+  });
+
+  it('takes the pointee from the callee prototype when the argument is not cast', () => {
+    const fs = lint('undersized-global-argument', { types, files: {
+      'globals.h': globalsH,
+      'cache.h': 'void CACHE_Init(D2LRUCacheStrc* pCache);\n',
+      'a.cpp': 'void f() { CACHE_Init(&gCache); }',
+    } });
+    assert.deepStrictEqual(subjects(fs), ['gCache']);
+    assert.match(fs[0].detail, /52 bytes, gCache is 1-byte/);
+  });
+
+  it('measures &g[k] from the element it starts at', () => {
+    const fs = lint('undersized-global-argument', { types, files: {
+      'globals.h': globalsH,
+      'a.cpp': 'void f() { InitializeCriticalSection((LPCRITICAL_SECTION)&gRow[0]); GetSystemTime((LPSYSTEMTIME)&gRow[16]); }',
+    } });
+    assert.deepStrictEqual(subjects(fs), ['gRow']);
+    assert.match(fs[0].detail, /16 bytes, gRow is 8-byte/);
+  });
+
+  it('says to suspect the parameter when the global is a typed struct', () => {
+    const fs = lint('undersized-global-argument', { types, files: {
+      'globals.h': globalsH,
+      'a.cpp': 'void f() { SRP_ClientKeyExchange((D2LRUCacheStrc*)&gSmall); }',
+    } });
+    assert.deepStrictEqual(subjects(fs), ['gSmall']);
+    assert.match(fs[0].detail, /suspect the parameter type/);
+  });
+
+  it('ignores a right-sized global, a big enough array, byte and void views, a pointer passed by value, and a shadowing local', () => {
+    assert.deepStrictEqual(lint('undersized-global-argument', { types, files: {
+      'globals.h': globalsH,
+      'a.cpp': `void f() {
+    InitializeCriticalSection(&gcsGood);
+    InitializeCriticalSection((LPCRITICAL_SECTION)gPad);
+    ReadFile(h, (LPVOID)&gCache, 0x10, 0, 0);
+    SStrCopy((char*)&gCache, src, 8);
+    InitializeCriticalSection((LPCRITICAL_SECTION)gpBuf);
+    PCRITICAL_SECTION p = (PCRITICAL_SECTION)&gCache;
+}
+void g() { CRITICAL_SECTION gcsErrorHandlerList; InitializeCriticalSection((LPCRITICAL_SECTION)&gcsErrorHandlerList); }`,
+    } }), []);
+  });
+});
+
 describe('defect lint: undersized-stack-buffer', () => {
   it('measures a format by its specification, and resolves the buffer per function', () => {
     assert.strictEqual(renderedLength('%02d', []).need, 3);
