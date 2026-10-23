@@ -82,7 +82,7 @@ import { normalizeDataAddress, stringDefinition } from './declaration-closure.js
 import { harvestAnnotatedParameterTypes } from './win32-signatures.js';
 import { PLATFORM_FUNCDEF_NAMES, PLATFORM_STRUCT_FIELD_TYPES, isPlatformOrBuiltinType, isLibraryType, sdkLayoutMismatches, sdkHeaderOf, unprobedTypeNames, generatePlatformHeader, oddWidthTypesSpelled, placeholderTypesUsedIn, normalizeDataValue, arrayRowTypedefLines, arrayRowReturn, arrayRowSpelling, GHIDRA_PSEUDO_OP_RESULT_TYPES, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, platformDefinedFunctionNames, platformVoidPointerFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
 import { createOverrideRegistry } from '../overrides/index.js';
-import { alignPathCase, assertNoCaseCollidingFiles } from './path-case.js';
+import { alignPathCase, assertNoCaseCollidingFiles, canonicalizeProjectPathCase, quotedIncludePath, resolveQuotedInclude } from './path-case.js';
 import { createLibraryRegistry } from '../library/index.js';
 import { createMethodConversionRegistry, getOrCreateRegistry, applyMethodConversions, detectMethodConversionsFromTags, type MethodCallMapping, type MethodConversionRegistry } from '../methods/index.js';
 import type { MethodConversionEntry, ModuleConfig, AutoMethodConversionConfig, TypeOwnershipEntry } from '../config/schema.js';
@@ -1668,6 +1668,14 @@ export function generateProjectStage2(state: GenerationState): ReconstructedProj
   if (GEN_TIMING) genAdd('project/total', Date.now() - genT0);
   genReport();
 
+  // One spelling per directory: two namespaces differing only in case would otherwise be two
+  // directories here and one on a case-insensitive disk, and the includes of one of them
+  // would not resolve on a case-sensitive checkout.
+  const caseMoves = canonicalizeProjectPathCase(project);
+  if (caseMoves.length > 0) {
+    console.warn(`warning: ${caseMoves.length} emitted path(s) moved to their directory's one spelling (namespaces differing only in case):`);
+    for (const m of caseMoves.slice(0, 10)) console.warn(`  ${m}`);
+  }
   reportUnresolvableIncludes(project);
   reportCaseCollidingOutputPaths(project);
   reportGlobalsTakingATypeName();
@@ -1865,52 +1873,16 @@ export function findUnresolvableIncludes(
   const emitted = new Set(project.files.keys());
   const unresolved = new Map<string, string[]>();
   for (const [filePath, file] of project.files) {
-    const dir = filePath.includes('/') ? filePath.slice(0, filePath.lastIndexOf('/')) : '';
-    for (const included of collectQuotedIncludes(file.content)) {
-      // An include is resolved the way the compiler resolves it: first beside
-      // the including file, then from the tree root (every directory is on the
-      // include path).
-      const beside = dir ? normalizeRelativePath(`${dir}/${included}`) : included;
-      if (emitted.has(beside) || emitted.has(included)) continue;
-      const referrers = unresolved.get(included) ?? [];
+    for (const line of file.content.split('\n')) {
+      const inc = quotedIncludePath(line);
+      if (!inc) continue;
+      if (resolveQuotedInclude(filePath, inc.path, p => emitted.has(p))) continue;
+      const referrers = unresolved.get(inc.path) ?? [];
       referrers.push(filePath);
-      unresolved.set(included, referrers);
+      unresolved.set(inc.path, referrers);
     }
   }
   return unresolved;
-}
-
-/**
- * The `#include "..."` lines of a generated file.
- *
- * A line scan, not a regex over emitted code: this reads the text the generator
- * is about to write, and the only thing it needs from it is which quoted paths
- * appear on `#include` lines.
- */
-function collectQuotedIncludes(content: string): string[] {
-  const out: string[] = [];
-  for (const raw of content.split('\n')) {
-    const line = raw.trim();
-    if (!line.startsWith('#include')) continue;
-    const open = line.indexOf('"');
-    if (open < 0) continue; // <system> include
-    const close = line.indexOf('"', open + 1);
-    if (close < 0) continue;
-    const p = line.slice(open + 1, close);
-    if (p.length > 0) out.push(p);
-  }
-  return out;
-}
-
-/** Collapse `a/./b` and `a/b/../c` in a generated (always forward-slash) path. */
-function normalizeRelativePath(p: string): string {
-  const out: string[] = [];
-  for (const seg of p.split('/')) {
-    if (seg === '' || seg === '.') continue;
-    if (seg === '..') { out.pop(); continue; }
-    out.push(seg);
-  }
-  return out.join('/');
 }
 
 function reportUnresolvableIncludes(project: ReconstructedProject): void {

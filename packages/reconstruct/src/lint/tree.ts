@@ -7,10 +7,13 @@
  * CLI prints every unparsed declaration.
  */
 
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import {
+  Lexer,
   NodeKind,
+  TriviaKind,
   emit,
   parse,
   type ASTNode,
@@ -18,6 +21,7 @@ import {
   type TranslationUnit,
 } from '@ghidra-mcp/cpp-parser';
 import { declName, functionScope, walk, type ScopeEntry } from './ast.js';
+import { quotedIncludePath } from '../codegen/path-case.js';
 
 export interface SourceFile {
   /** Path relative to the tree root, forward slashes. */
@@ -25,6 +29,8 @@ export interface SourceFile {
   isHeader: boolean;
   tu: TranslationUnit;
   parseErrors: Array<{ line: number; message: string }>;
+  /** Every `#include "..."` directive, read from the lexer's directive trivia. */
+  includes: Array<{ line: number; path: string }>;
 }
 
 export interface FunctionInfo {
@@ -48,6 +54,14 @@ export interface Tree {
   functions: FunctionInfo[];
   /** `extern` declarations in globals.h, by name. */
   globals: Map<string, GlobalDecl>;
+  /**
+   * Every file of the tree, any extension, relative and forward-slashed, as a checkout gets
+   * it: git's index when the root is a repository (on a case-insensitive disk the index can
+   * hold a spelling the disk no longer has, and the index is what a clone writes), else the
+   * disk.
+   */
+  paths: string[];
+  pathSource: 'git-index' | 'disk';
 }
 
 /** Directories that are not part of the program: VCS, build output, measurements, vendored ABI stubs. */
@@ -68,13 +82,53 @@ export function listSources(root: string): string[] {
   return out;
 }
 
+/** Every file under `root` outside SKIP_DIRS, relative and forward-slashed. */
+export function listPaths(root: string): string[] {
+  const out: string[] = [];
+  const rec = (dir: string, rel: string) => {
+    for (const e of readdirSync(dir).sort()) {
+      if (SKIP_DIRS.has(e)) continue;
+      const p = join(dir, e);
+      const r = rel ? `${rel}/${e}` : e;
+      if (statSync(p).isDirectory()) rec(p, r);
+      else out.push(r);
+    }
+  };
+  rec(root, '');
+  return out;
+}
+
+/** The tree's files as git's index spells them, when `root` is the top of a repository. */
+export function gitIndexPaths(root: string): string[] | null {
+  if (!existsSync(join(root, '.git'))) return null;
+  try {
+    const out = execFileSync('git', ['-C', root, 'ls-files', '-z'], { encoding: 'utf8', maxBuffer: 256 << 20 });
+    return out.split('\0').filter(p => p && !p.split('/').some(seg => SKIP_DIRS.has(seg)));
+  } catch {
+    return null;
+  }
+}
+
+/** The quoted includes of a source text, from the lexer's directive trivia (EOF's included). */
+export function sourceIncludes(path: string, text: string): Array<{ line: number; path: string }> {
+  const out: Array<{ line: number; path: string }> = [];
+  for (const t of new Lexer(text, { filename: path }).tokenizeWithTrivia()) {
+    for (const tr of [...t.leadingTrivia, ...t.trailingTrivia]) {
+      if (tr.kind !== TriviaKind.Directive) continue;
+      const inc = quotedIncludePath(tr.text);
+      if (inc) out.push({ line: tr.location.start.line, path: inc.path });
+    }
+  }
+  return out;
+}
+
 export function parseSource(path: string, text: string): SourceFile {
   const tu = parse(text, { filename: path, recover: true });
   const parseErrors = (tu.parseErrors ?? []).map((e: any) => ({
     line: e.location?.start?.line ?? 0,
     message: String(e.message).replace(/^.*?:\d+:\d+: /, ''),
   }));
-  return { path, isHeader: path.endsWith('.h'), tu, parseErrors };
+  return { path, isHeader: path.endsWith('.h'), tu, parseErrors, includes: sourceIncludes(path, text) };
 }
 
 function namespaceName(ns: any): string {
@@ -155,14 +209,19 @@ export function loadTree(root: string, opts: LoadOptions = {}): Tree {
     if (opts.only && !opts.only(rel)) continue;
     files.push(parseSource(rel, readFileSync(abs, 'utf8')));
   }
-  return treeFromFiles(root, files);
+  const index = opts.only ? null : gitIndexPaths(root);
+  return treeFromFiles(root, files, index ?? (opts.only ? files.map(f => f.path) : listPaths(root)),
+    index ? 'git-index' : 'disk');
 }
 
-export function treeFromFiles(root: string, files: SourceFile[]): Tree {
+export function treeFromFiles(
+  root: string, files: SourceFile[], paths: string[] = files.map(f => f.path),
+  pathSource: Tree['pathSource'] = 'disk',
+): Tree {
   const functions = files.flatMap(collectFunctions);
   const g = files.find(f => f.path === 'globals.h');
   const globals = g ? collectGlobals(g) : new Map<string, GlobalDecl>();
-  return { root, files, functions, globals };
+  return { root, files, functions, globals, paths, pathSource };
 }
 
 /**

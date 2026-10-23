@@ -18,7 +18,7 @@
  * Counted checks (ghidra-artifact) run only when named by --check or --fail-on, are judged
  * by a per-rule count rather than the baseline, and are never written to the baseline.
  *
- * Zero-tolerance checks (plate-template-comment) run in the default sweep, are never baselined,
+ * Zero-tolerance checks (plate-template-comment, include-path-case) run in the default sweep, are never baselined,
  * and fail the run on any finding.
  *
  * Exit code: 0 clean, 1 when there are NEW findings (candidates to judge, not a failed run),
