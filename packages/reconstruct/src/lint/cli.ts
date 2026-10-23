@@ -18,15 +18,19 @@
  * Counted checks (ghidra-artifact) run only when named by --check or --fail-on, are judged
  * by a per-rule count rather than the baseline, and are never written to the baseline.
  *
+ * Zero-tolerance checks (plate-template-comment) run in the default sweep, are never baselined,
+ * and fail the run on any finding.
+ *
  * Exit code: 0 clean, 1 when there are NEW findings (candidates to judge, not a failed run),
- * 2 on a usage error, 3 when a --fail-on check is over its allowlist.
+ * 2 on a usage error, 3 when a --fail-on check is over its allowlist or a zero-tolerance
+ * check found anything.
  */
 
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  ALL_CHECKS, COUNTED_CHECKS, GHIDRA_ARTIFACT_CHECK_ID, artifactGate, goneFindings, keyFindings,
+  ALL_CHECKS, COUNTED_CHECKS, GHIDRA_ARTIFACT_CHECK_ID, ZERO_TOLERANCE_CHECKS, artifactGate, goneFindings, keyFindings,
   loadBaseline, loadSnapshot, loadTree, newFindings, runChecks, saveBaseline, toBaseline,
   type ArtifactAllowlist,
 } from './index.js';
@@ -80,9 +84,10 @@ export function main(argv = process.argv.slice(2)): number {
   const { findings, errors } = runChecks(t, snap, checks);
   const keyed = keyFindings(findings);
   const base = loadBaseline(baselinePath);
-  const fresh = newFindings(keyed, base).filter(f => !COUNTED_CHECKS.has(f.check));
+  const unbaselined = (id: string) => COUNTED_CHECKS.has(id) || ZERO_TOLERANCE_CHECKS.has(id);
+  const fresh = newFindings(keyed, base).filter(f => !unbaselined(f.check));
   const gone = goneFindings(keyed, base)
-    .filter(g => checks.some(c => c.id === g.check) && !COUNTED_CHECKS.has(g.check));
+    .filter(g => checks.some(c => c.id === g.check) && !unbaselined(g.check));
 
   const unparsed = t.files.flatMap(f => f.parseErrors.map(e => ({ file: f.path, ...e })));
   console.log(`tree ${root}: ${t.files.length} files, ${t.functions.length} functions, ` +
@@ -94,13 +99,13 @@ export function main(argv = process.argv.slice(2)): number {
     const err = errors.find(e => e.check === c.id);
     if (err) { console.log(`${c.id.padEnd(26)} ${'ERR'.padStart(6)} ${'-'.padStart(5)}  ${err.error}`); continue; }
     const n = keyed.filter(f => f.check === c.id).length;
-    const nn = COUNTED_CHECKS.has(c.id) ? '-' : String(fresh.filter(f => f.check === c.id).length);
+    const nn = unbaselined(c.id) ? '-' : String(fresh.filter(f => f.check === c.id).length);
     console.log(`${c.id.padEnd(26)} ${String(n).padStart(6)} ${nn.padStart(5)}  ${c.blurb}`);
   }
 
   const details = argv.includes('--details');
   for (const c of checks) {
-    const rows = (details ? keyed : fresh).filter(f => f.check === c.id);
+    const rows = (details || ZERO_TOLERANCE_CHECKS.has(c.id) ? keyed : fresh).filter(f => f.check === c.id);
     if (!rows.length) continue;
     console.log(`\n--- ${c.id} (${details ? 'all' : 'new'}) ---`);
     for (const f of rows) {
@@ -137,12 +142,20 @@ export function main(argv = process.argv.slice(2)): number {
     }
   }
 
+  for (const c of checks) {
+    if (!ZERO_TOLERANCE_CHECKS.has(c.id)) continue;
+    const n = keyed.filter(f => f.check === c.id).length;
+    if (!n) continue;
+    gateFailed = true;
+    console.log(`\n${c.id}: ${n} finding(s) and the allowance is 0. Fix the generator rule or the Ghidra comment.`);
+  }
+
   if (argv.includes('--update-baseline')) {
-    const merged = toBaseline(keyed.filter(f => !COUNTED_CHECKS.has(f.check)),
-      checks.map(c => c.id).filter(id => !COUNTED_CHECKS.has(id)));
-    // Checks not run this time keep their accepted state; counted checks are never baselined.
+    const merged = toBaseline(keyed.filter(f => !unbaselined(f.check)),
+      checks.map(c => c.id).filter(id => !unbaselined(id)));
+    // Checks not run this time keep their accepted state; counted and zero-tolerance checks are never baselined.
     if (base) for (const [id, keys] of Object.entries(base.checks)) if (!(id in merged.checks)) merged.checks[id] = keys;
-    for (const id of COUNTED_CHECKS) delete merged.checks[id];
+    for (const id of [...COUNTED_CHECKS, ...ZERO_TOLERANCE_CHECKS]) delete merged.checks[id];
     saveBaseline(baselinePath, merged);
     console.log(`\nbaseline updated: ${baselinePath}`);
     return gateFailed ? 3 : 0;
