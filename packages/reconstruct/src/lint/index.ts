@@ -22,17 +22,19 @@ import { rawAddressInitializer } from './checks/initializers.js';
 import { rawAddressArgument } from './checks/addresses.js';
 import { undersizedGlobalArgument } from './checks/arguments.js';
 import { plateTemplateComment, PLATE_TEMPLATE_CHECK_ID } from './checks/comments.js';
+import { includePathCase, INCLUDE_PATH_CASE_CHECK_ID } from './checks/include-case.js';
 
 export type { Check, Finding } from './context.js';
 export { LintContext } from './context.js';
 export * from './baseline.js';
-export { loadTree, treeFromFiles, parseSource } from './tree.js';
+export { loadTree, treeFromFiles, parseSource, listPaths, gitIndexPaths } from './tree.js';
 export { loadSnapshot, buildSnapshot } from './snapshot.js';
 export {
   ghidraArtifact, artifactGate, GHIDRA_ARTIFACT_CHECK_ID, GHIDRA_ARTIFACT_RULES,
   type ArtifactAllowlist, type ArtifactGateRow,
 } from './checks/artifacts.js';
 export { plateTemplateComment, PLATE_TEMPLATE_CHECK_ID, PLATE_TEMPLATE_MARKERS } from './checks/comments.js';
+export { includePathCase, INCLUDE_PATH_CASE_CHECK_ID } from './checks/include-case.js';
 
 /** In the order lint.py reported them. */
 export const ALL_CHECKS: Check[] = [
@@ -56,6 +58,7 @@ export const ALL_CHECKS: Check[] = [
   rawAddressArgument,
   ghidraArtifact,
   plateTemplateComment,
+  includePathCase,
 ];
 
 /**
@@ -70,7 +73,7 @@ export const COUNTED_CHECKS = new Set<string>(['ghidra-artifact']);
  * written to the baseline and cannot be accepted: what they find must not be in a tree that
  * is published at all.
  */
-export const ZERO_TOLERANCE_CHECKS = new Set<string>([PLATE_TEMPLATE_CHECK_ID]);
+export const ZERO_TOLERANCE_CHECKS = new Set<string>([PLATE_TEMPLATE_CHECK_ID, INCLUDE_PATH_CASE_CHECK_ID]);
 
 export interface RunResult {
   findings: Finding[];
