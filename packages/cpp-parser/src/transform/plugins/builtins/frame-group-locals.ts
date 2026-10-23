@@ -274,6 +274,25 @@ export interface RunTruncation {
   reachEnd: number | null;
   /** Whether the run still made a group (two or more declared members before the cut). */
   grouped: boolean;
+  /** The cut local's type name, arrays and qualifiers stripped, when it has one. */
+  typeName?: string;
+}
+
+/** The name a declared type is spelled with, under any qualifiers and array bounds. */
+function declaredTypeName(type: TypeNode | undefined): string | undefined {
+  let t = type;
+  while (t && (t.kind === NodeKind.QualifiedType || t.kind === NodeKind.ArrayType)) {
+    t = t.kind === NodeKind.QualifiedType ? (t as QualifiedType).type : (t as ArrayType).elementType;
+  }
+  if (!t) return undefined;
+  if (t.kind === NodeKind.PointerType) return 'pointer';
+  if (t.kind === NodeKind.BuiltinType) return (t as BuiltinType).name;
+  if (t.kind === NodeKind.TypedefType) return typeNodeName((t as TypedefType).name);
+  if (t.kind === NodeKind.ElaboratedType) {
+    const e = t as ElaboratedType;
+    return `${e.keyword} ${typeNodeName(e.name) ?? '?'}`;
+  }
+  return undefined;
 }
 
 /** One `&local` call argument and what the run rule made of it. */
@@ -1235,13 +1254,21 @@ function createFrameGroupLocalsTransformer(options: FrameGroupLocalsOptions = {}
       if (locals.length === 0) return undefined;
 
       const movable = movableLocals(body, options.aggregateLayout);
+      // An aggregate the type table sizes may JOIN a run, but its own escaping
+      // address does not START one: `GetClientRect(h, &rc)` is the ordinary
+      // whole-object out-param, and grouping its neighbours would freeze a
+      // layout the original never depended on. Only the locals that were
+      // movable without the table can seed an escape run.
+      const scalarMovable = options.aggregateLayout ? movableLocals(body) : movable;
       const declaredNames = new Set<string>();
       /** Declared locals whose type has no size here, as opposed to an unmovable declaration. */
       const unsized = new Set<string>();
+      const declTypes = new Map<string, TypeNode | undefined>();
       for (const d of findNodesByKind(body, NodeKind.VariableDecl)) {
         const name = (d as VariableDecl).name?.name;
         if (!name) continue;
         declaredNames.add(name);
+        declTypes.set(name, (d as VariableDecl).type);
         if (!frameTypeLayout((d as VariableDecl).type, options.aggregateLayout)) unsized.add(name);
       }
       const stuck = new Set([...declaredNames].filter(n => !movable.has(n)));
@@ -1308,7 +1335,7 @@ function createFrameGroupLocalsTransformer(options: FrameGroupLocalsOptions = {}
         const isSplit = splits.has(slot.name);
         const isBaseFold = baseFoldSeed.has(slot.name);
         if (!isSplit && !isBaseFold
-            && (!escaping.has(slot.name) || !movable.has(slot.name))) continue;
+            && (!escaping.has(slot.name) || !scalarMovable.has(slot.name))) continue;
 
         let cut: { local: string; at: number; why: 'width' | 'stuck' } | undefined;
         const run = planRun(locals, i, movable, stuck, splits, blocked, isBaseFold,
@@ -1323,6 +1350,7 @@ function createFrameGroupLocalsTransformer(options: FrameGroupLocalsOptions = {}
             // No argReach, or an escape that is not a call argument: unknown.
             reachEnd: options.argReach ? (reachEnd.get(slot.name) ?? null) : null,
             grouped: run !== null,
+            typeName: declaredTypeName(declTypes.get(cut.local)),
           });
         }
         if (!run) continue;

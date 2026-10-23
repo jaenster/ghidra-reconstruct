@@ -2824,7 +2824,7 @@ function transformDecompiledCode(
         // object a free local. Only a known reach that stops before the cut is quiet.
         onTruncated: (e: RunTruncation) => {
           if (e.reachEnd !== null && e.reachEnd <= e.at) return;
-          console.warn(`[frame-group] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: run from ${e.seed} cut at ${e.local} (+${e.at}, ${e.why}), reach ${e.reachEnd === null ? 'unknown' : `+${e.reachEnd}`}${e.grouped ? '' : ', not grouped'}`);
+          console.warn(`[frame-group] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: run from ${e.seed} cut at ${e.local}${e.typeName ? ` (${e.typeName})` : ''} (+${e.at}, ${e.why}), reach ${e.reachEnd === null ? 'unknown' : `+${e.reachEnd}`}${e.grouped ? '' : ', not grouped'}`);
           frameGroupReport({ fn: funcAddress, name: funcName, kind: 'truncated', ...e });
         },
       };

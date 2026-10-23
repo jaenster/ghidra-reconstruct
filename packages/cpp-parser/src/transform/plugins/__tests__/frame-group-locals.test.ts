@@ -743,7 +743,7 @@ describe('frameGroupLocalsPlugin', () => {
     assert.ok(/sizeof\(__frame0_t\)\s*==\s*12/.test(out), out);
     assert.deepStrictEqual(cuts, [{
       seed: 'nLayer', reason: 'escape', local: 'AutomapUnknown', at: 12,
-      why: 'unsized', reachEnd: 44, grouped: true,
+      why: 'unsized', reachEnd: 44, grouped: true, typeName: 'D2AutomapUnknown',
     }]);
   });
 
@@ -765,6 +765,19 @@ describe('frameGroupLocalsPlugin', () => {
       onTruncated: (e: RunTruncation) => cuts.push(e),
     });
     assert.strictEqual(cuts[0]?.why, 'unsized');
+  });
+
+  it('does not start a run at a struct local whose own address escapes', () => {
+    const out = runWith(
+      `void f() { D2AutomapUnknown sRect; int a; int b; GetRect(&sRect); h(a, b); }`,
+      [
+        { name: 'sRect', offset: -40, size: 32 },
+        { name: 'a', offset: -8, size: 4 },
+        { name: 'b', offset: -4, size: 4 },
+      ],
+      { aggregateLayout: (n: string) => automapAggregates[n] ?? null },
+    );
+    assert.ok(!/__frame\d/.test(out), `a whole-object out-param is not a frame group:\n${out}`);
   });
 
   it('does not report a run that ends at a hole', () => {
