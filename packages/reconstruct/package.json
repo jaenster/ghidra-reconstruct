@@ -25,8 +25,8 @@
     "test": "tsx --test src/**/*.test.ts"
   },
   "dependencies": {
-    "@ghidra-mcp/shared": "*",
-    "@ghidra-mcp/cpp-parser": "*",
+    "@ghidra-mcp/shared": "workspace:*",
+    "@ghidra-mcp/cpp-parser": "workspace:*",
     "commander": "^12.0.0"
   },
   "devDependencies": {

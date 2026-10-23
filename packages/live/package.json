@@ -21,8 +21,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@ghidra-mcp/reconstruct": "*",
-    "@ghidra-mcp/shared": "*",
+    "@ghidra-mcp/reconstruct": "workspace:*",
+    "@ghidra-mcp/shared": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.29.0"
   },
   "devDependencies": {
