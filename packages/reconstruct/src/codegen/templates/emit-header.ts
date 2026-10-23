@@ -144,7 +144,7 @@ function genericMembers(
     for (const s of [returnType, ...params.map(p => p.type)]) plainTypeNames(s, mentioned);
     const name = emittedFunctionName(func, ret);
     const key = `${name}(${params.map(p => p.type).join(',')}${func.hasVarArgs ? ',...' : ''})`;
-    const convention = conventionKeyword(func.callingConvention);
+    const convention = conventionKeyword(func);
     let list = params.map(p => `${p.type} ${p.name}`).join(', ');
     if (func.hasVarArgs) list = list ? `${list}, ...` : '...';
     const line = `    ${memberStorage(registry, func)}${returnType} ${convention ? `${convention} ` : ''}${name}(${list});`;
@@ -207,7 +207,7 @@ function renderPrimary(
     for (const slot of layout.vtable) {
       for (const s of [slot.returnType, ...slot.params]) plainTypeNames(s, mentioned);
       const off = `0x${slot.offset.toString(16).toUpperCase().padStart(hexWidth, '0')}`;
-      const convention = conventionKeyword(slot.callingConvention);
+      const convention = conventionKeyword({ callingConvention: slot.callingConvention, parameters: slot.params });
       const comment = slot.comment ? ` // ${slot.comment.replace(/\s*\n\s*/g, ' ')}` : '';
       lines.push(`        /* ${off} */ ${slot.returnType} (${convention ? `${convention} ` : ''}*${slot.name})(${slot.params.join(', ')});${comment}`);
     }
@@ -251,7 +251,7 @@ function renderKeyClass(
     const key = `${name}(${list})`;
     if (seen.has(key)) continue;
     seen.add(key);
-    const convention = conventionKeyword(func.callingConvention);
+    const convention = conventionKeyword(func);
     decls.push(`    ${memberStorage(registry, func)}${ret} ${convention ? `${convention} ` : ''}${name}(${list});`);
   }
   if (decls.length > 0) {

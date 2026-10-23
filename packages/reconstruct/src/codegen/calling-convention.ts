@@ -4,63 +4,68 @@
  * On this ABI the convention is part of a function's TYPE, not a hint about it.
  * A `__stdcall` procedure emitted with no convention is a `__cdecl` procedure,
  * and no conversion exists from one to the other — which is why a thread entry
- * point will not convert to `LPTHREAD_START_ROUTINE`, a window procedure will
- * not convert to `WNDPROC`, and a service handler will not convert to
- * `LPHANDLER_FUNCTION`. Ghidra records the convention at every address; the
- * emitter's job here is only to spell it.
+ * point will not convert to `LPTHREAD_START_ROUTINE` and a window procedure will
+ * not convert to `WNDPROC`. The same holds for `__fastcall`: a callback the
+ * binary calls with ECX/EDX loaded (`ForEachClient`, 0052df26: ECX = client,
+ * EDX = context, `CALL EDI`) has to be declared `__fastcall` on both sides, the
+ * function and the funcdef it is stored as, or the rebuild passes its arguments
+ * on the stack and the callee reads whatever the registers held. Ghidra records
+ * the convention at every address and on every funcdef; the emitter's job here
+ * is only to spell it, and every declaration, definition, funcdef typedef,
+ * function-pointer field and vtable slot asks this module how.
  *
- * What is deliberately NOT spelled:
+ * Spelled: `__stdcall` and `__fastcall`, as the bare keyword — what
+ * `d2_platform.h` already uses for the Smack/Bink imports and what the
+ * entry-point forwarder in `impl.ts` writes. mingw takes them as
+ * `__attribute__((stdcall))` / `__attribute__((fastcall))`; clang on a non-x86
+ * host parses and ignores them, so the Mac path still compiles.
+ *
+ * Not spelled:
  *
  * - `__thiscall`. The emitter writes those as free functions carrying an
  *   explicit receiver parameter, and gcc rejects the attribute on a non-member,
  *   so spelling it would trade a silent ABI difference for a hard error.
- * - `__cdecl`. It is the target default; emitting it changes nothing and adds a
- *   keyword to every declaration in the tree.
+ * - `__cdecl`. It is the target default; emitting it changes nothing.
  * - `unknown`. That is Ghidra saying it has no answer, which is not evidence for
  *   one.
- *
- * The spelling is the bare `__stdcall` / `__fastcall` keyword, which is what
- * `d2_platform.h` already uses for the Smack/Bink imports and for the
- * `__beginthreadex` shim, and what the entry-point forwarder in `impl.ts`
- * already writes. mingw takes it as `__attribute__((stdcall))`; clang on a
- * non-x86 host parses it and ignores it, so the Mac path still compiles.
+ * - `__fastcall` on a callable with NO parameters and no varargs. `__fastcall`
+ *   differs from `__cdecl` only in where the first two arguments travel (ECX,
+ *   EDX) and in the callee popping the rest; with no parameters neither exists,
+ *   and the two are one ABI: a plain `RET`, the result in EAX. C++ still treats
+ *   the spellings as distinct types, so `UIAction_ResetKeyBindingsToDefaults`
+ *   (`__fastcall`, no parameters) would not convert to `pfnUIConfigTabAction`
+ *   (`__cdecl`, no parameters) although the binary stores one in the other.
+ *   Both sides take the `__cdecl` spelling instead. A parameterless `__stdcall`
+ *   keeps its keyword although it is the same ABI too: the SDK spells `WINAPI`
+ *   on parameterless functions (`GetTickCount`, `GetCurrentThread`), and the
+ *   funcdefs that hold them have to match the header, not the other way round.
  */
+const SPELLED: ReadonlySet<string> = new Set(['__stdcall', '__fastcall']);
 
-/**
- * `__fastcall` is measured, not overlooked. Spelling it as well costs **+42
- * strict errors and +12 failing files** on the whole tree (810/204 against
- * 768/192 at v726) and clears nothing, and the reason is structural: no Win32
- * or CRT entry point takes a `__fastcall` callback, so the only counterparties
- * are D2's own funcdef typedefs — and while no convention is spelled anywhere,
- * every one of those pairs agrees trivially at `__cdecl`. Spelling one half
- * breaks the tie the wrong way. `PFN_StatExpireCallback` alone (an
- * `unknown`-convention funcdef assigned `__fastcall` functions) accounts for
- * ~30 of the 42.
- *
- * `__stdcall` pays because its counterparty is the Win32 SDK header, which is
- * already right: `LPTHREAD_START_ROUTINE`, `WNDPROC`, `LPHANDLER_FUNCTION`,
- * `LPTOP_LEVEL_EXCEPTION_FILTER`.
- *
- * So the rule is not "spell what Ghidra knows" — it is "spell what has a
- * correct counterparty". Adding `__fastcall` here needs the funcdef-vs-function
- * disagreements fixed in Ghidra first.
- */
-const SPELLED: ReadonlySet<string> = new Set(['__stdcall']);
+/** The parts of a function or funcdef that decide how its convention is spelled. */
+export interface ConventionBearer {
+  callingConvention?: string;
+  /** The declared parameters; only their number matters here. */
+  parameters?: ReadonlyArray<unknown>;
+  hasVarArgs?: boolean;
+}
 
 /**
  * The convention keyword for a declaration, or '' when there is nothing to say.
  */
-export function conventionKeyword(convention: string | undefined): string {
-  if (!convention) return '';
-  return SPELLED.has(convention) ? convention : '';
+export function conventionKeyword(callable: ConventionBearer): string {
+  const convention = callable.callingConvention;
+  if (!convention || !SPELLED.has(convention)) return '';
+  if (convention === '__fastcall' && (callable.parameters?.length ?? 0) === 0 && !callable.hasVarArgs) return '';
+  return convention;
 }
 
 /**
  * `<returnType> ` or `<returnType> <convention> ` — the head of a function
  * declaration or definition, with the trailing space the name needs.
  */
-export function declarationHead(returnType: string, convention: string | undefined): string {
-  const keyword = conventionKeyword(convention);
+export function declarationHead(returnType: string, callable: ConventionBearer): string {
+  const keyword = conventionKeyword(callable);
   return keyword ? `${returnType} ${keyword} ` : `${returnType} `;
 }
 
@@ -68,7 +73,7 @@ export function declarationHead(returnType: string, convention: string | undefin
  * `` or `<convention> ` — what precedes the `*` inside a function-pointer
  * declarator, as in `R (__stdcall *name)(args)`.
  */
-export function pointerConvention(convention: string | undefined): string {
-  const keyword = conventionKeyword(convention);
+export function pointerConvention(callable: ConventionBearer): string {
+  const keyword = conventionKeyword(callable);
   return keyword ? `${keyword} ` : '';
 }

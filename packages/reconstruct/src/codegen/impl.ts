@@ -693,6 +693,11 @@ export interface FuncPtrArgCastTables {
   funcdefSignatures: Record<string, string>;
   /** Funcdef name -> Ghidra's calling convention. */
   funcdefConventions?: Record<string, string>;
+  /**
+   * Funcdef name -> the convention keyword its emitted typedef carries ('' for
+   * none), comparable with `functionConventions`.
+   */
+  funcdefConventionKeywords?: Record<string, string>;
   /** Function name (qualified and bare) -> Ghidra's calling convention. */
   functionGhidraConventions?: Record<string, string>;
   /** Function name (qualified and bare) -> the funcdefs it is stored as elsewhere. */
@@ -1797,7 +1802,7 @@ function generateFunctionSignature(func: ExtractedFunction): string {
   // and its declaration cannot legalize a Ghidra name differently.
   const cleanName = emittedFunctionName(func, returnSigType(func.returnType));
   const member = memberDefinitionScope(func);
-  return `${member?.prefix ?? ''}${declarationHead(returnSigType(func.returnType), func.callingConvention)}${member?.qualifier ?? ''}${cleanName}(${params})`;
+  return `${member?.prefix ?? ''}${declarationHead(returnSigType(func.returnType), func)}${member?.qualifier ?? ''}${cleanName}(${params})`;
 }
 
 /**

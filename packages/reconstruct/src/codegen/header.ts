@@ -897,7 +897,7 @@ export function generateFunctionDeclaration(
   const cleanName = emittedFunctionName(func, returnSigType(func.returnType));
   const member = memberDefinitionScope(func);
 
-  return `${commentBlock}${member?.prefix ?? ''}${declarationHead(returnSigType(func.returnType), func.callingConvention)}${member?.qualifier ?? ''}${cleanName}(${params});${addressComment}`;
+  return `${commentBlock}${member?.prefix ?? ''}${declarationHead(returnSigType(func.returnType), func)}${member?.qualifier ?? ''}${cleanName}(${params});${addressComment}`;
 }
 
 /**
@@ -1176,7 +1176,7 @@ export function emitFieldLines(
       const fdVarArgs = fd.hasVarArgs ? (fdParams ? ', ...' : '...') : '';
       // The return goes through returnSigType like the typedef's own: `fnAppModeRun * *`
       // (D2AppModeBootstrapStrc.pfnInit) is `fnAppModeRun *` here too.
-      lines.push(`    /* ${offsetHex} */ ${returnSigType(fd.returnType)} (${pointerConvention(fd.callingConvention)}*${name})(${fdParams}${fdVarArgs});${comment}`);
+      lines.push(`    /* ${offsetHex} */ ${returnSigType(fd.returnType)} (${pointerConvention(fd)}*${name})(${fdParams}${fdVarArgs});${comment}`);
       i++;
       continue;
     }
@@ -1832,7 +1832,7 @@ export function generateFunctionDefinitionDeclaration(type: ExtractedFunctionDef
 
   // The return type goes through the same spelling the parameters do: `fnAppModeRun * *`
   // (D2AppModeInitFunc) is `fnAppModeRun *` once the funcdef typedef carries one level.
-  return `typedef ${returnSigType(type.returnType)} (${pointerConvention(type.callingConvention)}*${type.name})(${params}${varArgs});`;
+  return `typedef ${returnSigType(type.returnType)} (${pointerConvention(type)}*${type.name})(${params}${varArgs});`;
 }
 
 /**

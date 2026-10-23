@@ -3718,6 +3718,8 @@ function generateFilesForFunctions(
   setInitializerSignatureTables(
     context.funcPtrArgCasts.functionSignatures,
     context.funcPtrArgCasts.funcdefSignatures,
+    context.funcPtrArgCasts.functionConventions,
+    context.funcPtrArgCasts.funcdefConventionKeywords,
   );
 
   // The address table those initializers resolve against — the SAME one
@@ -5150,12 +5152,15 @@ export function buildFuncPtrArgCastTables(
   platformDeclaredModelFunctions: ReadonlyArray<ExtractedFunction> = [],
 ): FuncPtrArgCastTables {
   const funcdefSignatures: Record<string, string> = {};
-  // Each funcdef's calling convention as GHIDRA records it. Not the emitted keyword:
-  // the emitter spells `__fastcall` as nothing, and a pass comparing contracts must
-  // still tell `__fastcall` from `__cdecl`.
+  // Each funcdef's calling convention as GHIDRA records it, and separately the
+  // keyword its emitted typedef carries. They differ: the emitter spells neither
+  // `__thiscall` nor any convention on a parameterless type, and a pass comparing
+  // register contracts must still tell those apart.
   const funcdefConventions: Record<string, string> = {};
+  const funcdefConventionKeywords: Record<string, string> = {};
   for (const fd of funcDefs) {
     funcdefConventions[fd.name] = fd.callingConvention ?? '';
+    funcdefConventionKeywords[fd.name] = conventionKeyword(fd);
     funcdefSignatures[fd.name] = signatureKey(
       fd.returnType,
       [...(fd.parameters ?? [])].sort((a, b) => a.ordinal - b.ordinal).map(p => p.dataType),
@@ -5542,7 +5547,7 @@ export function buildFuncPtrArgCastTables(
     const qualified = fn.namespace ? `${fn.namespace}::${fn.name}` : fn.name;
     const paramSpellings = params.map(p => sigType(p.dataType ?? ''));
     const returnSpelling = sigType(fn.returnType ?? 'void');
-    const conventionSpelling = conventionKeyword(fn.callingConvention);
+    const conventionSpelling = conventionKeyword(fn);
     let owners = bareNameOwners.get(fn.name);
     if (!owners) { owners = new Set(); bareNameOwners.set(fn.name, owners); }
     owners.add(qualified);
@@ -5788,6 +5793,7 @@ export function buildFuncPtrArgCastTables(
     zeroArityCallbackCasts: WIN32_ZERO_ARITY_CALLBACK_CASTS,
     funcdefSignatures,
     funcdefConventions,
+    funcdefConventionKeywords,
     functionSignatures,
     functionGhidraConventions,
     functionStoredAs: buildFunctionStoredAs(functions, globals, new Set(Object.keys(funcdefSignatures))),
