@@ -107,6 +107,36 @@ describe('paramReaches', () => {
   });
 });
 
+describe('paramReaches options', () => {
+  const body = (code: string) => {
+    const tu = parse(code) as unknown as { declarations: FunctionDecl[] };
+    return tu.declarations.find(d => d.kind === NodeKind.FunctionDecl)!.body!;
+  };
+  const ctx: ParamReachContext = {
+    typeSize: s => (s.endsWith('*') ? 4 : SIZES[s] ?? null),
+    field: (a, m) => FIELDS[a]?.[m] ?? null,
+    calleeReach: () => null,
+  };
+
+  it('partial skips an unfollowable use instead of answering unknown, and reports each use', () => {
+    const b = body('void f(int *p) { p[2] = 1; g(p); gx = (int)p; p += 3; }');
+    assert.deepStrictEqual(paramReaches(b, [{ name: 'p', type: 'int *' }], ctx), [null]);
+    const seen: Reach[] = [];
+    const r = paramReaches(b, [{ name: 'p', type: 'int *' }], ctx, { partial: true, onUse: (_u, x) => seen.push(x) });
+    assert.deepStrictEqual(r, [{ lo: 8, hi: 12 }]);
+    assert.deepStrictEqual(seen, [{ lo: 8, hi: 12 }, null, null, null]);
+  });
+
+  it('include leaves the excluded mentions out entirely', () => {
+    const b = body('void f(int *p) { p = 0; p[1] = 1; }');
+    let n = 0;
+    const r = paramReaches(b, [{ name: 'p', type: 'int *' }], ctx, {
+      include: u => (n++ > 0),
+    });
+    assert.deepStrictEqual(r, [{ lo: 4, hi: 8 }]);
+  });
+});
+
 describe('countedSinkReach', () => {
   it('reads the literal count and ignores other positions', () => {
     const tu = parse('void f() { memcpy(a, b, 8); fread(a, 4, 3, h); }') as unknown as { declarations: FunctionDecl[] };

@@ -172,10 +172,32 @@ const COMPARISON = new Set(['==', '!=', '<', '>', '<=', '>=', '&&', '||']);
 class Unknown extends Error {}
 
 /**
+ * How `paramReaches` treats the uses of a name. The defaults answer the caller's question
+ * about a parameter; the options turn the same machinery on a local POINTER whose value
+ * the caller tracks itself (the alias-reach lint: `p = aBuf; ... p += 3; p[2] = x`).
+ */
+export interface ReachOptions {
+  /**
+   * Only the uses this accepts are followed; every other mention of the name is ignored,
+   * neither touched nor unknown. The caller excludes the assignments and steps it models.
+   */
+  include?: (use: ASTNode) => boolean;
+  /**
+   * An unfollowable use is skipped instead of making the whole reach unknown, so the
+   * answer is a LOWER bound: what the followed uses are known to touch.
+   */
+  partial?: boolean;
+  /** Each followed use with the range that use alone touches; null when it cannot be followed. */
+  onUse?: (use: ASTNode, reach: Reach) => void;
+}
+
+/**
  * Per parameter, the byte range the body reaches through it. `body` is the function body
  * (or any node containing it); the parameters are matched by name.
  */
-export function paramReaches(body: ASTNode, params: readonly ReachParam[], ctx: ParamReachContext): Reach[] {
+export function paramReaches(
+  body: ASTNode, params: readonly ReachParam[], ctx: ParamReachContext, opts: ReachOptions = {},
+): Reach[] {
   const parents = new Map<ASTNode, ASTNode>();
   for (const node of traverseAST(body)) for (const ch of getChildren(node)) parents.set(ch, node);
 
@@ -200,10 +222,14 @@ export function paramReaches(body: ASTNode, params: readonly ReachParam[], ctx: 
   return params.map(param => {
     let lo = Infinity;
     let hi = -Infinity;
+    let useLo = Infinity;
+    let useHi = -Infinity;
     const touch = (from: number, to: number) => {
       if (to <= from) return;
       lo = Math.min(lo, from);
       hi = Math.max(hi, to);
+      useLo = Math.min(useLo, from);
+      useHi = Math.max(useHi, to);
     };
 
     /** An object at `place`, reached through `node`: what its context does with it. */
@@ -356,18 +382,28 @@ export function paramReaches(body: ASTNode, params: readonly ReachParam[], ctx: 
           : node.kind === NodeKind.Identifier && (node as Identifier).name === param.name;
         if (!isUse) continue;
         const parent = parentOf(node);
-        // Its own declaration (a body that redeclares the name) is not a use.
-        if (parent && (parent.kind === NodeKind.VariableDecl || parent.kind === NodeKind.ParameterDecl)
-            && (parent as unknown as { name?: unknown }).name === node) throw new Unknown();
         // A member NAME spelled like the parameter (`q->pUnit`) is not a use.
         if (parent && parent.kind === NodeKind.MemberExpr && (parent as MemberExpr).member === node) continue;
-        if (parent && parent.kind === NodeKind.AssignExpr && (parent as unknown as { left: ASTNode }).left === node) throw new Unknown();
-        if (parent && (parent.kind === NodeKind.PostfixExpr
-            || (parent.kind === NodeKind.UnaryExpr && ['++', '--', '&'].includes((parent as UnaryExpr).operator)))) {
-          throw new Unknown();
+        if (opts.include && !opts.include(node)) continue;
+        useLo = Infinity;
+        useHi = -Infinity;
+        try {
+          // Its own declaration (a body that redeclares the name) is not a use.
+          if (parent && (parent.kind === NodeKind.VariableDecl || parent.kind === NodeKind.ParameterDecl)
+              && (parent as unknown as { name?: unknown }).name === node) throw new Unknown();
+          if (parent && parent.kind === NodeKind.AssignExpr && (parent as unknown as { left: ASTNode }).left === node) throw new Unknown();
+          if (parent && (parent.kind === NodeKind.PostfixExpr
+              || (parent.kind === NodeKind.UnaryExpr && ['++', '--', '&'].includes((parent as UnaryExpr).operator)))) {
+            throw new Unknown();
+          }
+          if (!initial) throw new Unknown();
+          climb(node, initial);
+        } catch (e) {
+          if (!(e instanceof Unknown) || !opts.partial) throw e;
+          opts.onUse?.(node, null);
+          continue;
         }
-        if (!initial) throw new Unknown();
-        climb(node, initial);
+        opts.onUse?.(node, useLo === Infinity ? { ...NO_REACH } : { lo: useLo, hi: useHi });
       }
     } catch (e) {
       if (e instanceof Unknown) return null;

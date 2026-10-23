@@ -186,7 +186,12 @@ export function primitiveName(t: any): string | null {
   if (u.kind === NodeKind.BuiltinType) {
     const mods = (u.modifiers ?? []).filter((m: string) => m !== 'signed' || u.name === 'char');
     const spelled = [...mods, u.name].join(' ');
-    return PRIMITIVE_WIDTH[spelled] !== undefined ? spelled : u.name;
+    if (PRIMITIVE_WIDTH[spelled] !== undefined) return spelled;
+    // `short int`, `unsigned long int`: the parser keeps `int` as the name and the size
+    // words as modifiers; without them a `short int` would size as an int.
+    const bare = spelled.replace(/ int$/, '');
+    if (bare !== spelled && PRIMITIVE_WIDTH[bare] !== undefined) return bare;
+    return u.name;
   }
   const n = typeRefName(u);
   return n && PRIMITIVE_WIDTH[n] !== undefined ? n : null;

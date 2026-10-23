@@ -23,6 +23,7 @@ import { rawAddressArgument } from './checks/addresses.js';
 import { undersizedGlobalArgument } from './checks/arguments.js';
 import { plateTemplateComment, PLATE_TEMPLATE_CHECK_ID } from './checks/comments.js';
 import { includePathCase, INCLUDE_PATH_CASE_CHECK_ID } from './checks/include-case.js';
+import { aliasReach } from './checks/alias-reach.js';
 
 export type { Check, Finding } from './context.js';
 export { LintContext } from './context.js';
@@ -35,6 +36,7 @@ export {
 } from './checks/artifacts.js';
 export { plateTemplateComment, PLATE_TEMPLATE_CHECK_ID, PLATE_TEMPLATE_MARKERS } from './checks/comments.js';
 export { includePathCase, INCLUDE_PATH_CASE_CHECK_ID } from './checks/include-case.js';
+export { aliasReach, ALIAS_REACH_CHECK_ID, spelledSize } from './checks/alias-reach.js';
 
 /** In the order lint.py reported them. */
 export const ALL_CHECKS: Check[] = [
@@ -52,6 +54,7 @@ export const ALL_CHECKS: Check[] = [
   uninitialisedSendBuffer,
   oversizedFormattedWrite,
   oobLocalAccess,
+  aliasReach,
   arrayIndexRange,
   untypedVirtualCall,
   rawAddressInitializer,
