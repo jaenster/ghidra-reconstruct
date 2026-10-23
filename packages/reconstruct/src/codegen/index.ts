@@ -82,6 +82,7 @@ import { normalizeDataAddress, stringDefinition } from './declaration-closure.js
 import { harvestAnnotatedParameterTypes } from './win32-signatures.js';
 import { PLATFORM_FUNCDEF_NAMES, PLATFORM_STRUCT_FIELD_TYPES, isPlatformOrBuiltinType, isLibraryType, sdkLayoutMismatches, sdkHeaderOf, unprobedTypeNames, generatePlatformHeader, oddWidthTypesSpelled, placeholderTypesUsedIn, normalizeDataValue, arrayRowTypedefLines, arrayRowReturn, arrayRowSpelling, GHIDRA_PSEUDO_OP_RESULT_TYPES, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, platformDefinedFunctionNames, platformVoidPointerFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
 import { createOverrideRegistry } from '../overrides/index.js';
+import { GLOBALS_HEADER, globalsHeaderPathUnder, globalsUnitPath, isGlobalsHeaderPath } from './globals-layout.js';
 import { alignPathCase, assertNoCaseCollidingFiles, canonicalizeProjectPathCase, quotedIncludePath, resolveQuotedInclude } from './path-case.js';
 import { createLibraryRegistry } from '../library/index.js';
 import { createMethodConversionRegistry, getOrCreateRegistry, applyMethodConversions, detectMethodConversionsFromTags, type MethodCallMapping, type MethodConversionRegistry } from '../methods/index.js';
@@ -1472,7 +1473,7 @@ export function generateProjectStage1(
     const coreTarget = Object.entries(targetConfigs!).find(([, c]) => c.type === 'interface');
     const coreDir = coreTarget ? getTargetDirectory(coreTarget[0]) : '';
     const globalsPath = analyzedGlobals.length > 0
-      ? (coreDir ? `${coreDir}/globals.h` : 'globals.h')
+      ? globalsHeaderPathUnder(coreDir)
       : undefined;
 
     // Generate files per target (classification happens here)
@@ -1523,7 +1524,7 @@ export function generateProjectStage1(
     }
 
     // Calculate globals path (needed for generateFilesForFunctions includes)
-    const flatGlobalsPath = analyzedGlobals.length > 0 ? 'globals.h' : undefined;
+    const flatGlobalsPath = analyzedGlobals.length > 0 ? GLOBALS_HEADER : undefined;
 
     // Generate files (classification happens here)
     const flatTypeOwnerMap = generateFilesForFunctions(
@@ -1934,7 +1935,7 @@ function computeGlobalsExtraIncludes(
     if (!type.includes('*') && !type.includes('&')) {
       const stripped = stripTypeName(type);
       const ownerHeader = stripped ? typeOwnerMap.get(stripped) : undefined;
-      if (ownerHeader && ownerHeader !== 'globals.h') {
+      if (ownerHeader && !isGlobalsHeaderPath(ownerHeader)) {
         includes.add(ownerHeader);
       }
     }
@@ -1946,7 +1947,7 @@ function computeGlobalsExtraIncludes(
     if (g.initializedData && functionNameCandidates) {
       for (const ref of collectInitializerSymbolRefs(g.initializedData)) {
         const header = resolveSymbolReferenceHeader(ref, functionNameCandidates);
-        if (header && header !== 'globals.h') includes.add(header);
+        if (header && !isGlobalsHeaderPath(header)) includes.add(header);
       }
     }
   }
@@ -2020,22 +2021,23 @@ function emitCentralGlobalsUnits(
   functionNameCandidates: Map<string, { qualified: string; header: string }[]> | undefined,
 ): void {
   const implExt = options.format === 'c' ? '.c' : '.cpp';
-  const headerName = globalsHeaderPath.split('/').pop()!;
-  const implDir = globalsHeaderPath.includes('/')
-    ? globalsHeaderPath.slice(0, globalsHeaderPath.lastIndexOf('/') + 1)
-    : '';
-  const implBase = headerName.replace(/\.h$/, '');
 
-  const { partitions, shared } = partitionGlobalsByModule(
-    centralGlobals, buildFunctionModuleMap(functions));
+  const partitioned = partitionGlobalsByModule(centralGlobals, buildFunctionModuleMap(functions));
+  // A module named like the shared unit itself would be written over it; its
+  // definitions stay shared, the direction the partition already falls back to.
+  const partitions = partitioned.partitions.filter(p => globalsUnitPath(globalsHeaderPath, p.module, implExt) !== undefined);
+  const shared = [
+    ...partitioned.shared,
+    ...partitioned.partitions.filter(p => !partitions.includes(p)).flatMap(p => p.members),
+  ];
 
   // The shared remainder is first, and it is the unit that owns the closure
   // definitions: they belong to no module, and emitting them from every unit
   // would be as many duplicate definitions as there are units.
   const units: { path: string; members: ReadonlySet<AnalyzedDataSymbol> | undefined; ownsClosure: boolean }[] = [
-    { path: `${implDir}${implBase}${implExt}`, members: new Set(shared), ownsClosure: true },
+    { path: globalsUnitPath(globalsHeaderPath, undefined, implExt)!, members: new Set(shared), ownsClosure: true },
     ...partitions.map(p => ({
-      path: `${implDir}${implBase}.${p.module}${implExt}`,
+      path: globalsUnitPath(globalsHeaderPath, p.module, implExt)!,
       members: new Set(p.members) as ReadonlySet<AnalyzedDataSymbol>,
       ownsClosure: false,
     })),
@@ -2044,7 +2046,7 @@ function emitCentralGlobalsUnits(
   for (const unit of units) {
     setCentralInitializerScope(true);
     const content = generateGlobalsImpl(
-      centralGlobals, options, headerName, undefined, unit.members, unit.ownsClosure);
+      centralGlobals, options, globalsHeaderPath, undefined, unit.members, unit.ownsClosure);
     setCentralInitializerScope(false);
     files.set(unit.path, {
       path: unit.path,
@@ -2076,10 +2078,9 @@ function patchGlobalsExtraIncludes(
   if (extraIncludes.length === 0) return;
 
   const includeLines = extraIncludes.map(inc => `#include "${inc}"`).join('\n');
-  const headerName = globalsHeaderPath.split('/').pop();
   globalsFile.content = globalsFile.content.replace(
-    `#include "${headerName}"`,
-    `#include "${headerName}"\n${includeLines}`
+    `#include "${globalsHeaderPath}"`,
+    `#include "${globalsHeaderPath}"\n${includeLines}`
   );
   globalsFile.includes.push(...extraIncludes);
 }

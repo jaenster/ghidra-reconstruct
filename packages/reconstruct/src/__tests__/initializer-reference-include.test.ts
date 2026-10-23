@@ -127,7 +127,7 @@ describe('initializer-only references pull in their declaring headers', () => {
     options,
     programInfo
   );
-  const globalsImpl = project.files.get('globals.cpp');
+  const globalsImpl = project.files.get('globals/globals.cpp');
 
   it('generates globals.cpp with the table', () => {
     assert.ok(globalsImpl, 'globals.cpp was not generated');

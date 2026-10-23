@@ -8,6 +8,7 @@ import {
 } from '../ast.js';
 import type { Check, Finding, LintContext } from '../context.js';
 import { fileScopeVars, type SourceFile } from '../tree.js';
+import { isGlobalsUnitPath } from '../../codegen/globals-layout.js';
 
 /** The Windows image window: below the image base is a Ghidra placeholder, above 2 GB is unmapped. */
 const IMAGE_FLOOR = 0x400000;
@@ -102,8 +103,8 @@ export function addressTargetResolver(ctx: LintContext): (v: number) => string |
   };
 }
 
-/** `globals.cpp` / `globals.<Module>.cpp` at the tree root: the central data definitions. */
-const isGlobalsImpl = (path: string) => /^globals(\.[^/]+)?\.cpp$/.test(path);
+/** `globals/globals.cpp` / `globals/<Module>.cpp`: the central data definitions. */
+const isGlobalsImpl = isGlobalsUnitPath;
 
 /**
  * A pointer initializer holding the ORIGINAL ADDRESS of a global the tree itself defines.
@@ -115,7 +116,7 @@ const isGlobalsImpl = (path: string) => /^globals(\.[^/]+)?\.cpp$/.test(path);
  * initializer table is built, so a target whose scope was wrong at that moment comes out raw
  * even when it ends up defined.
  *
- * Sites: every non-extern definition outside a function in `globals*.cpp`, and every static
+ * Sites: every non-extern definition outside a function in a globals unit, and every static
  * local. The value must be the start address of exactly one Windows symbol in the snapshot,
  * that symbol's name must be unique among Windows symbols and defined somewhere in the tree,
  * and the object being initialised must itself be a Windows symbol in the image - a Mac

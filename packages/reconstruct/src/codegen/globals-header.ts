@@ -19,6 +19,7 @@ import { scanReferences } from './needle-index.js';
 import { classScopedReference } from './templates/index.js';
 import { classKeyOf, templateRegistry } from './templates/registry.js';
 import { isFiller } from './templates/bases.js';
+import { GLOBALS_HEADER, isGlobalsHeaderPath } from './globals-layout.js';
 
 /**
  * Exact Win32 SDK typedef names (not `LP`/`IMAGE_` prefixed) seen as
@@ -3326,7 +3327,7 @@ function escapeStringForC(s: string): string {
 export function generateGlobalsImpl(
   globals: AnalyzedDataSymbol[],
   options: ReconstructOptions & { projectName?: string; binaryName?: string },
-  globalsHeaderPath = 'globals.h',
+  globalsHeaderPath = GLOBALS_HEADER,
   extraIncludes?: string[],
   partition?: ReadonlySet<AnalyzedDataSymbol>,
   emitClosureDefinitions = false
@@ -3811,7 +3812,7 @@ function collectGlobalForwardDeclarations(
   // Emit full definitions in topological order, but prefer #include for types with an owning header
   for (const name of sorted) {
     const ownerHeader = typeOwnerMap?.get(name);
-    if (ownerHeader && ownerHeader !== 'globals.h') {
+    if (ownerHeader && !isGlobalsHeaderPath(ownerHeader)) {
       // Type has its own header — include it instead of duplicating the definition
       extraIncludes.add(ownerHeader);
       continue;

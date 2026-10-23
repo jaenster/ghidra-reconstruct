@@ -65,17 +65,18 @@ game_unnamespaced() {
   fi
 }
 
-cp "$GAME/globals.h"          "$PUB/globals.h"
+mkdir -p "$PUB/globals"
+cp "$GAME/globals/globals.h"  "$PUB/globals/globals.h"
 cp "$(game_unnamespaced .h)"  "$PUB/_unnamespaced.h"
 cp "$GAME/d2_enums.h"         "$PUB/enums.h"
 cp "$GAME/d2_platform.h"      "$PUB/platform.h"
 
 # Unplaceable translation units, prefixed by which binary they came from.
 mkdir -p "$PUB/_unattributed"
-cp "$GAME/globals.cpp"        "$PUB/_unattributed/engine_globals.cpp"
+cp "$GAME/globals/globals.cpp" "$PUB/_unattributed/engine_globals.cpp"
 cp "$(game_unnamespaced .cpp)" "$PUB/_unattributed/engine_unattributed.cpp"
-cp "$MENU/globals.h"          "$PUB/_unattributed/menu_globals.h"
-cp "$MENU/globals.cpp"        "$PUB/_unattributed/menu_globals.cpp"
+cp "$MENU/globals/globals.h"  "$PUB/_unattributed/menu_globals.h"
+cp "$MENU/globals/globals.cpp" "$PUB/_unattributed/menu_globals.cpp"
 cp "$MENU/_unnamespaced.h"    "$PUB/_unattributed/menu__unnamespaced.h"
 cp "$MENU/_unnamespaced.cpp"  "$PUB/_unattributed/menu_unattributed.cpp"
 

@@ -9,7 +9,7 @@ H=$(cd "$(dirname "$0")" && pwd); T=$(cd "$1" && pwd); OUT=$(realpath -m "$2"); 
 B=$(mktemp -d); trap "rm -rf $B" EXIT
 cd "$T"; find . -type d ! -path '*/.git*' | sed "s|^\.|-I$T|" > $B/inc.rsp
 CXX="i686-linux-gnu-g++ -std=c++17 -O1 -w -fms-extensions -fpermissive -ffunction-sections -fdata-sections -D_FILE_DEFINED -D__stdcall=__attribute__((stdcall)) -D__cdecl=__attribute__((cdecl)) -D__fastcall=__attribute__((fastcall)) -D__thiscall=__attribute__((thiscall)) -include $H/linux_compat.h @$B/inc.rsp"
-for f in Storm/3rdparty/zlib/deflate.cpp Storm/3rdparty/zlib/trees.cpp Storm/3rdparty/zlib/inflate.cpp Storm/3rdparty/zlib/crc32.cpp Storm/3rdparty/zlib/zutil.cpp D2Client/Source/SSComp.cpp globals.Storm.cpp globals.cpp; do
+for f in Storm/3rdparty/zlib/deflate.cpp Storm/3rdparty/zlib/trees.cpp Storm/3rdparty/zlib/inflate.cpp Storm/3rdparty/zlib/crc32.cpp Storm/3rdparty/zlib/zutil.cpp D2Client/Source/SSComp.cpp globals/Storm.cpp globals/globals.cpp; do
   $CXX -c "$f" -o $B/$(echo $f | tr / _).o &
 done
 $CXX -I$H -c $H/tree_side.cpp -o $B/tree_side.o &
