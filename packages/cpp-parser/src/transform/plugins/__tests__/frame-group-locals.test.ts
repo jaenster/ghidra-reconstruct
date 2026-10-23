@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import { parse } from '../../../parser/index.js';
 import { emit } from '../../../emit/index.js';
 import type { AnyNode } from '../../../ast/nodes.js';
-import { frameGroupLocalsPlugin } from '../builtins/frame-group-locals.js';
+import { frameGroupLocalsPlugin, type RunTruncation, type TypeLayout } from '../builtins/frame-group-locals.js';
 import type { StackSlot } from '../builtins/stack-frame-address.js';
 
 describe('frameGroupLocalsPlugin', () => {
@@ -675,5 +675,103 @@ describe('frameGroupLocalsPlugin', () => {
     ]);
     assert.ok(out.includes('stack0x00000000'), out);
   });
-});
 
+  /**
+   * `AUTOMAP_SaveCurrentLayer` @0x004584c0 as Ghidra typed it before the
+   * database fix: three ints, then a 32-byte struct local, with
+   * `AUTOMAP_SaveLayerToFile(&nLayer)` reading all 44 bytes. The run used to stop
+   * at the struct, leaving the callee to read the saved registers.
+   */
+  const automapSlots: StackSlot[] = [
+    { name: 'nLayer', offset: -48, size: 4 },
+    { name: 'fSaved', offset: -44, size: 4 },
+    { name: 'nMapType', offset: -40, size: 4 },
+    { name: 'AutomapUnknown', offset: -36, size: 32 },
+  ];
+  const automapBody = `void f() {
+    int nLayer;
+    int fSaved;
+    int nMapType;
+    D2AutomapUnknown AutomapUnknown;
+    AutomapUnknown.nFloorsSize = 0;
+    nLayer = 1;
+    fSaved = 0;
+    nMapType = 2;
+    AUTOMAP_SaveLayerToFile(&nLayer);
+    FreeClientMemory(AutomapUnknown.pFloors);
+  }`;
+  const automapAggregates: Record<string, TypeLayout> = { D2AutomapUnknown: { size: 32, align: 4 } };
+
+  function runWith(code: string, slots: StackSlot[], extra: Record<string, unknown>): string {
+    const transformer = frameGroupLocalsPlugin.createTransformer({ slots, ...extra });
+    return emit(transformer(parse(code)) as AnyNode);
+  }
+
+  it('continues a reaching run across a struct local the type table sizes', () => {
+    const cuts: RunTruncation[] = [];
+    const out = runWith(automapBody, automapSlots, {
+      aggregateLayout: (n: string) => automapAggregates[n] ?? null,
+      onTruncated: (e: RunTruncation) => cuts.push(e),
+    });
+    const struct = /struct\s+__frame0_t\s*\{([\s\S]*?)\}\s*;/.exec(out);
+    assert.ok(struct, `expected a group struct in:\n${out}`);
+    const fields = [...struct[1].matchAll(/(\w+)\s+(\w+)(\[\d+\])?\s*;/g)].map(m => m[2]);
+    assert.deepStrictEqual(fields, ['nLayer', 'fSaved', 'nMapType', 'AutomapUnknown'], out);
+    assert.ok(
+      /static_assert\(sizeof\(void\s*\*\)\s*!=\s*4\s*\|\|\s*sizeof\(__frame0_t\)\s*==\s*44\s*,/.test(out),
+      `expected the whole 44-byte record asserted in:\n${out}`,
+    );
+    assert.ok(/__frame0\.AutomapUnknown\.nFloorsSize\s*=\s*0/.test(out), out);
+    assert.ok(/__frame0\.AutomapUnknown\.pFloors/.test(out), out);
+    assert.deepStrictEqual(cuts, [], 'nothing was cut');
+  });
+
+  it('sizes an elaborated struct spelling the same way', () => {
+    const out = runWith(automapBody.replace('D2AutomapUnknown AutomapUnknown', 'struct D2AutomapUnknown AutomapUnknown'),
+      automapSlots, { aggregateLayout: (n: string) => automapAggregates[n] ?? null });
+    assert.ok(/sizeof\(__frame0_t\)\s*==\s*44/.test(out), out);
+  });
+
+  it('reports a run cut at a struct local it cannot size', () => {
+    const cuts: RunTruncation[] = [];
+    const out = runWith(automapBody, automapSlots, {
+      onTruncated: (e: RunTruncation) => cuts.push(e),
+      // The callee reads 44 bytes through its parameter.
+      argReach: () => ({ lo: 0, hi: 44 }),
+    });
+    // The prefix still groups, exactly as before; the cut is reported.
+    assert.ok(/sizeof\(__frame0_t\)\s*==\s*12/.test(out), out);
+    assert.deepStrictEqual(cuts, [{
+      seed: 'nLayer', reason: 'escape', local: 'AutomapUnknown', at: 12,
+      why: 'unsized', reachEnd: 44, grouped: true,
+    }]);
+  });
+
+  it('reports a struct whose table size disagrees with the frame slot', () => {
+    const cuts: RunTruncation[] = [];
+    runWith(automapBody, automapSlots, {
+      aggregateLayout: () => ({ size: 28, align: 4 }),
+      onTruncated: (e: RunTruncation) => cuts.push(e),
+    });
+    assert.strictEqual(cuts.length, 1);
+    assert.strictEqual(cuts[0].why, 'width');
+    assert.strictEqual(cuts[0].reachEnd, null, 'no argReach: the reach is unknown');
+  });
+
+  it('refuses a table layout no declaration could have', () => {
+    const cuts: RunTruncation[] = [];
+    runWith(automapBody, automapSlots, {
+      aggregateLayout: () => ({ size: 30, align: 4 }),
+      onTruncated: (e: RunTruncation) => cuts.push(e),
+    });
+    assert.strictEqual(cuts[0]?.why, 'unsized');
+  });
+
+  it('does not report a run that ends at a hole', () => {
+    const cuts: RunTruncation[] = [];
+    runWith(dispatchBody, [...dispatchSlots, { name: 'zFar', offset: 100, size: 4 }], {
+      onTruncated: (e: RunTruncation) => cuts.push(e),
+    });
+    assert.deepStrictEqual(cuts, []);
+  });
+});

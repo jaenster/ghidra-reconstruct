@@ -22,7 +22,7 @@ import { crtFunctionNames, EXTERNAL_IMPORT_REFERENCE_RENAMES } from './crt-mappi
 import { CPP_KEYWORDS } from './header.js';
 
 // Import cpp-parser for code transformation
-import { transformGhidraCode, preprocessGhidraCode, isGhidraGeneratedName, suggestBetterName, takeFuncPtrArgCastTypedefs, type TransformResult, type FuncPtrTarget, type ArtifactMode, type ArtifactRecord } from '@ghidra-mcp/cpp-parser';
+import { transformGhidraCode, preprocessGhidraCode, isGhidraGeneratedName, suggestBetterName, takeFuncPtrArgCastTypedefs, type TransformResult, type FuncPtrTarget, type ArtifactMode, type ArtifactRecord, type RunTruncation } from '@ghidra-mcp/cpp-parser';
 import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js';
 import { getGlobalReferenceAliases, globalAliasComment } from './global-aliases.js';
 import { sehLoweringDecision, type SehLoweringDecision } from './seh-lowering-spec.js';
@@ -812,6 +812,8 @@ export interface FuncPtrArgCastTables {
   structFieldOffsets?: Record<string, Record<string, number>>;
   /** Aggregate name -> size in bytes. */
   aggregateSizes?: Record<string, number>;
+  /** Aggregate name -> size and alignment as the emitted declaration lays it out. */
+  aggregateLayouts?: Record<string, { size: number; align: number }>;
   /** Aggregate name -> every field's offset, size and Ghidra type, in offset order. */
   structLayouts?: Record<string, Array<{ name: string; offset: number; size: number; type: string; bitSize?: number }>>;
   /**
@@ -2809,12 +2811,22 @@ function transformDecompiledCode(
       // kept as ONE object on the stack, addressed through the first slot.
       // A call-argument escape groups only when the callee reaches past the local.
       const reach = context?.funcPtrArgCasts?.paramReach;
+      // A struct local joins a run at the size and alignment its declaration has.
+      const aggregateLayouts = context?.funcPtrArgCasts?.aggregateLayouts;
       perPluginOptions['frame-group-locals'] = {
         slots: enclosing.stackSlots,
         ...(reach ? { argReach: (callee: string, index: number, argCount: number) => reach.argReach(callee, index, argCount) } : {}),
+        ...(aggregateLayouts ? { aggregateLayout: (name: string) => aggregateLayouts[name] ?? null } : {}),
         ...(process.env.GHIDRA_FRAME_GROUP_REPORT_DIR
           ? { onEscape: (e: object) => frameGroupReport({ fn: funcAddress, name: funcName, ...e }) }
           : {}),
+        // A run cut inside the object its seed stands for leaves the rest of the
+        // object a free local. Only a known reach that stops before the cut is quiet.
+        onTruncated: (e: RunTruncation) => {
+          if (e.reachEnd !== null && e.reachEnd <= e.at) return;
+          console.warn(`[frame-group] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: run from ${e.seed} cut at ${e.local} (+${e.at}, ${e.why}), reach ${e.reachEnd === null ? 'unknown' : `+${e.reachEnd}`}${e.grouped ? '' : ', not grouped'}`);
+          frameGroupReport({ fn: funcAddress, name: funcName, kind: 'truncated', ...e });
+        },
       };
     }
 

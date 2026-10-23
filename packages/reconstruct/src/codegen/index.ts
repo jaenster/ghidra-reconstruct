@@ -105,6 +105,7 @@ import { classKeyOf, setTemplateRegistry, templateRegistry } from './templates/r
 import { retypeVtableLocals, retypeVtableLocalsByAssignment, vtableMembersByType } from '../modules/vtable-types.js';
 import { NeedleIndex, scanReferences } from './needle-index.js';
 import { foldGlobalAliases, setGlobalReferenceAliases } from './global-aliases.js';
+import { buildAggregateLayouts } from './aggregate-layout.js';
 import {
   computeTypeOwnership,
   stripTypeName,
@@ -5799,6 +5800,7 @@ export function buildFuncPtrArgCastTables(
     unionNames,
     structFieldOffsets,
     aggregateSizes,
+    aggregateLayouts: buildAggregateLayouts(dataTypes, typedefTargets),
     structLayouts,
     funcdefDecls,
     structFieldFuncdefs,
