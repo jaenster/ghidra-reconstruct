@@ -117,6 +117,20 @@ export class TemplateRegistry {
     return this.bySpelling.has(namespace) || this.keyClasses.has(namespace);
   }
 
+  /**
+   * The element class a namespace is, when it is one: an instantiation names its
+   * element by the class's own name (`TSHashTable<CELLIST,...>`), and the class
+   * keeps that name wherever Ghidra nests it (`D2CMP::SRC::CelCmp::CELLIST`).
+   */
+  elementOf(namespace: string | null | undefined): string | undefined {
+    if (!namespace) return undefined;
+    const elements = new Set(this.ordered.map(inst => inst.element));
+    if (elements.has(namespace)) return namespace;
+    const sep = namespace.lastIndexOf('::');
+    const last = sep < 0 ? namespace : namespace.slice(sep + 2);
+    return elements.has(last) ? last : undefined;
+  }
+
   private placement: ReadonlyMap<string, string> = new Map();
   private baseInfo: BaseModel | undefined;
 
@@ -160,11 +174,10 @@ export class TemplateRegistry {
    */
   findOrphans(functions: Iterable<{ address: string; name: string; namespace?: string | null; tags?: ReadonlyArray<{ type: string }> }>): void {
     this.orphanAddresses.clear();
-    const elements = new Set(this.ordered.map(inst => inst.element));
     const stray: string[] = [];
     for (const f of functions) {
       if (!f.tags?.some(t => t.type === ORPHAN_COPY_TAG)) continue;
-      if (this.isClassScope(f.namespace) || (f.namespace && elements.has(f.namespace))) this.orphanAddresses.add(f.address);
+      if (this.isClassScope(f.namespace) || this.elementOf(f.namespace)) this.orphanAddresses.add(f.address);
       else stray.push(`${f.address} ${f.namespace ? `${f.namespace}::` : ''}${f.name}`);
     }
     if (stray.length > 0) {

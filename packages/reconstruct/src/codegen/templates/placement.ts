@@ -79,7 +79,7 @@ export function placeTemplateMembers(
       if (!run) {
         throw new Error(`template member ${f.address} ${ns}::${f.name} lies in no module run (project.json moduleRuns)`);
       }
-      const element = registry.instantiation(ns)?.element ?? ns;
+      const element = registry.instantiation(ns)?.element ?? registry.elementOf(ns) ?? ns;
       if (!configuredModule(run.module, modules)) {
         throw new Error(`template member ${f.address} ${ns}::${f.name} lies in the ${run.module} run, a module project.json does not configure`);
       }

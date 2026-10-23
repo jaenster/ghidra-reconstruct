@@ -286,6 +286,18 @@ describe('placement and scope', () => {
     assert.strictEqual(placed.get('00601100'), undefined);
   });
 
+  it('knows an element class nested under its module by the class name', () => {
+    const r = TemplateRegistry.build(CONFIG, ['TSLink<CELLIST>']);
+    const functions = [
+      fn('00601000', 'D2CMP::SRC::CelCmp'),
+      { ...fn('00601200', 'D2CMP::SRC::CelCmp::CELLIST'), name: 'Destructor_Unreferenced', tags: [{ type: 'ORPHAN_COPY' }] } as ExtractedFunction,
+    ];
+    r.findOrphans(functions);
+    assert.strictEqual(r.isOrphan('00601200'), true);
+    const placed = placeTemplateMembers(r, functions, MODULES, [{ module: 'D2CMP', start: '00600000', end: '00610000' }]);
+    assert.strictEqual(placed.get('00601200'), 'D2CMP::SRC::stpl_CELLIST');
+  });
+
   it('places a run with no module function at all in the module directory', () => {
     const r = TemplateRegistry.build(CONFIG, ['TSLink<CELLIST>']);
     const placed = placeTemplateMembers(r, [fn('00601200', 'TSLink<CELLIST>'), fn('00601300', 'TSLink<CELLIST>')],
