@@ -629,7 +629,7 @@ export {
   warningCommentStripPlugin, collectWarningFacts, classifyWarning, isWarningComment,
   WARNING_TEMPLATES, TERMINAL_CALLEES, type WarningFact, type WarningTemplate, type WarningClass,
 } from './builtins/ghidra-warning-facts.js';
-export { frameGroupLocalsPlugin, frameTypeLayout, type FrameGroupLocalsOptions } from './builtins/frame-group-locals.js';
+export { frameGroupLocalsPlugin, frameTypeLayout, type FrameGroupLocalsOptions, type EscapeDecision } from './builtins/frame-group-locals.js';
 import { stridedAccessPlugin } from './builtins/strided-access.js';
 import { reusedParamSlotPlugin } from './builtins/reused-param-slot.js';
 export { reusedParamSlotPlugin, splitReusedParameterSlots, type ReusedParamSlotOptions } from './builtins/reused-param-slot.js';

@@ -30,6 +30,7 @@ export {
 } from './globals-header.js';
 
 import { createOutParamOracle } from './out-params.js';
+import { createParamReachOracle } from './param-reach.js';
 import { lowerShiftedPointerTypedefs, shiftedPointerSpecs } from './shifted-pointers.js';
 import { respellPlaceholderTypes, respellPlaceholderType } from './placeholder-types.js';
 import { sehSubsumedSymbols, normaliseAddress } from './seh-subsumed.js';
@@ -5807,6 +5808,8 @@ export function buildFuncPtrArgCastTables(
     ...buildEnumSignedness(dataTypes),
     shiftedPointers: shiftedPointerSpecs(dataTypes),
     outParams: createOutParamOracle(
+      new Map([...functionByKey].filter((e): e is [string, ExtractedFunction] => e[1] !== null)), dataTypes),
+    paramReach: createParamReachOracle(
       new Map([...functionByKey].filter((e): e is [string, ExtractedFunction] => e[1] !== null)), dataTypes),
   };
 }

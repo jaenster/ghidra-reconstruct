@@ -38,6 +38,17 @@
  *   - a slot the emitted body does not DECLARE becomes padding. Ghidra lists
  *     frame variables the emitter drops, and their bytes still have to be
  *     reserved or every later offset shifts;
+ *   - the escape has to NEED it. A local handed to a call is only one object with its
+ *     neighbours when the callee reaches past it: `GetPair(&nX, &nY)` storing one word
+ *     through each pointer touches nothing beyond either local, and grouping the two
+ *     would freeze a layout the original never depended on. So when the codegen
+ *     supplies `argReach` - each callee's reach through each pointer parameter, read
+ *     from its BODY (cfg/param-reach.ts), because a callee typed `int *` still reads
+ *     `p[1]` - a call-argument escape starts a run only when that reach exceeds the
+ *     local's own size, starts before it, or is unknown. An indirect call, an external
+ *     callee, a body the analysis cannot follow, recursion: all unknown, all grouped as
+ *     before. An address stored or used as an initialiser is always unknown. Without
+ *     `argReach` every escape counts, as it always did;
  *   - it needs at least TWO declared members. A local with no contiguous named
  *     neighbour is not this defect — it is the ordinary single-word out-param,
  *     `SRegLoadValue(&nValue)` and `SFILE_OpenFileEx(&hFile)`, which is correct
@@ -196,12 +207,32 @@ import { Decl, Expr, Stmt, Type } from '../../../ast/factory.js';
 import { TriviaKind } from '../../../lexer/trivia.js';
 import { typeNodeName, builtinBase } from './call-arg-cast.js';
 import { stackNameOffset, type StackSlot } from './stack-frame-address.js';
+import { calleeSpelling } from '../../cfg/out-param.js';
+import { countedSinkReach, type Reach } from '../../cfg/param-reach.js';
 import { createPlugin } from '../registry.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 
 export interface FrameGroupLocalsOptions extends PluginOptions {
   /** The enclosing function's frame, from Ghidra's own local-variable list. */
   slots?: StackSlot[];
+  /**
+   * The reach of `callee`'s parameter `index` for a call with `argCount` arguments, as a
+   * byte range from the passed address, or null when it is unknown. Absent: every
+   * escaping address starts a run.
+   */
+  argReach?: (callee: string, index: number, argCount: number) => Reach;
+  /** Told every call-argument escape `argReach` judged, for an offline audit. No effect on output. */
+  onEscape?: (event: EscapeDecision) => void;
+}
+
+/** One `&local` call argument and what the run rule made of it. */
+export interface EscapeDecision {
+  local: string;
+  size: number | undefined;
+  callee: string | null;
+  index: number;
+  reach: Reach | undefined;
+  needsFrame: boolean;
 }
 
 /**
@@ -365,11 +396,47 @@ function parentMap(root: ASTNode): Map<ASTNode, ASTNode> {
 }
 
 /**
- * Locals whose ADDRESS leaves the frame: handed to a call, stored through an
- * assignment, or used to initialise something. `*&x` and `&x == p` keep the
- * address inside the expression and prove nothing about layout.
+ * Whether passing `&local` as argument `index` of `call` needs the frame around the
+ * local kept: the callee reaches outside `[0, sizeof local)`, or nobody can say.
  */
-function escapingLocals(body: CompoundStmt): Set<string> {
+function callNeedsFrame(
+  call: CallExpr,
+  index: number,
+  local: string,
+  argReach?: (callee: string, index: number, argCount: number) => Reach,
+  sizeOf?: (name: string) => number | undefined,
+  onEscape?: (event: EscapeDecision) => void,
+): boolean {
+  if (!argReach) return true;
+  const size = sizeOf?.(local);
+  const callee = calleeSpelling(call);
+  let reach: Reach | undefined;
+  if (size !== undefined && callee) {
+    const counted = countedSinkReach(callee, index, call.arguments);
+    reach = counted !== undefined ? counted : argReach(callee, index, call.arguments.length);
+  }
+  // No size, a computed callee, an unknown reach: all keep the frame.
+  const needsFrame = size === undefined || !reach || reach.lo < 0 || reach.hi > size;
+  onEscape?.({ local, size, callee, index, reach, needsFrame });
+  return needsFrame;
+}
+
+/**
+ * Locals whose ADDRESS leaves the frame in a way that needs the frame kept: handed
+ * to a call, stored through an assignment, or used to initialise something.
+ * `*&x` and `&x == p` keep the address inside the expression and prove nothing
+ * about layout.
+ *
+ * With `argReach`, a call argument counts only when the callee's reach through
+ * that parameter is unknown or leaves `[0, sizeof x)`; `sizeOf` gives the local's
+ * size (a local without one always counts). Every other escape counts.
+ */
+function escapingLocals(
+  body: CompoundStmt,
+  argReach?: (callee: string, index: number, argCount: number) => Reach,
+  sizeOf?: (name: string) => number | undefined,
+  onEscape?: (event: EscapeDecision) => void,
+): Set<string> {
   const parents = parentMap(body);
   const escaping = new Set<string>();
 
@@ -392,7 +459,10 @@ function escapingLocals(body: CompoundStmt): Set<string> {
 
     let escapes = false;
     if (parent.kind === NodeKind.CallExpr) {
-      escapes = (parent as CallExpr).arguments.includes(child as Expression);
+      const call = parent as CallExpr;
+      const index = call.arguments.indexOf(child as Expression);
+      escapes = index >= 0
+        && callNeedsFrame(call, index, (target as Identifier).name, argReach, sizeOf, onEscape);
     } else if (parent.kind === NodeKind.AssignExpr) {
       escapes = (parent as AssignExpr).right === child;
     } else if (parent.kind === NodeKind.VariableDecl) {
@@ -1079,7 +1149,8 @@ function createFrameGroupLocalsTransformer(options: FrameGroupLocalsOptions = {}
       // A variable Ghidra models as one and the decompiler printed as several is
       // mis-laid-out on its own evidence; nothing has to escape for that.
       const splits = splitSlotPieces(locals, movable, declaredNames);
-      const escaping = escapingLocals(body);
+      const escaping = escapingLocals(
+        body, options.argReach, name => movable.get(name)?.layout.size, options.onEscape);
       // A call with a literal byte count STATES the extent; the other two rules
       // only infer it.
       const writes = knownCountWrites(body, movable);
@@ -1301,6 +1372,6 @@ export const frameGroupLocalsPlugin: TransformPlugin = createPlugin(
     priority: 950,
     defaultEnabled: true,
     tags: ['correctness', 'declaration'],
-    version: '1.1.0',
+    version: '1.2.0',
   }
 );

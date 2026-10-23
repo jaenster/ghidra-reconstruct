@@ -8,6 +8,7 @@ import { platformDeclaredFunctionNames, rootQualifyShadowedArguments } from './p
 import { isMsvcEhHandlerStub } from './eh-handler-stub.js';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { threadId } from 'node:worker_threads';
 
 import type {
   ExtractedFunction,
@@ -667,6 +668,8 @@ export interface FuncPtrArgCastTables {
   shiftedPointers?: Record<string, { container: string; offset: number; member?: string }>;
   /** Out-parameter facts read from each callee's own body, on demand (out-params.ts). */
   outParams?: import('./out-params.js').OutParamOracle;
+  /** Each callee's reach through each pointer parameter, read from its own body (param-reach.ts). */
+  paramReach?: import('./param-reach.js').ParamReachOracle;
   /** Every enum type name. */
   enumTypes?: string[];
   /** Enums with no negative member: unsigned in Ghidra's type system. */
@@ -2804,7 +2807,15 @@ function transformDecompiledCode(
       };
       // The same frame, read for a different question: which locals the original
       // kept as ONE object on the stack, addressed through the first slot.
-      perPluginOptions['frame-group-locals'] = { slots: enclosing.stackSlots };
+      // A call-argument escape groups only when the callee reaches past the local.
+      const reach = context?.funcPtrArgCasts?.paramReach;
+      perPluginOptions['frame-group-locals'] = {
+        slots: enclosing.stackSlots,
+        ...(reach ? { argReach: (callee: string, index: number, argCount: number) => reach.argReach(callee, index, argCount) } : {}),
+        ...(process.env.GHIDRA_FRAME_GROUP_REPORT_DIR
+          ? { onEscape: (e: object) => frameGroupReport({ fn: funcAddress, name: funcName, ...e }) }
+          : {}),
+      };
     }
 
     const shadowedTypes = shadowedTypeQualifyOptions(context);
@@ -3130,4 +3141,17 @@ export function generateClassImplementation(
   }
 
   return lines.join('\n');
+}
+
+/**
+ * One line per call-argument escape the frame-group run rule judged, appended to
+ * `$GHIDRA_FRAME_GROUP_REPORT_DIR/escapes-<pid>-<thread>.ndjson` (generation runs in
+ * worker threads, each writes its own file). Unset, nothing is written; the output
+ * never depends on it.
+ */
+function frameGroupReport(event: Record<string, unknown>): void {
+  const dir = process.env.GHIDRA_FRAME_GROUP_REPORT_DIR;
+  if (!dir) return;
+  mkdirSync(dir, { recursive: true });
+  appendFileSync(join(dir, `escapes-${process.pid}-${threadId}.ndjson`), JSON.stringify(event) + '\n');
 }
