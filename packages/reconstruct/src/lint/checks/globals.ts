@@ -10,6 +10,7 @@ import {
 } from '../ast.js';
 import type { Check, Finding, LintContext, Resolved } from '../context.js';
 import type { FunctionInfo, SourceFile } from '../tree.js';
+import { isGlobalsHeaderPath } from '../../codegen/globals-layout.js';
 
 /**
  * Every node of the given kinds across the tree - inside functions AND at file scope (a
@@ -22,7 +23,7 @@ function* sitesInTree(ctx: LintContext, kinds: Set<string>, opts: { headers?: bo
   for (const f of ctx.tree.functions) fnByNode.set(f.node as ASTNode, f);
   for (const file of ctx.tree.files) {
     if (file.isHeader && !opts.headers) continue;
-    if (opts.skipGlobalsH && file.path === 'globals.h') continue;
+    if (opts.skipGlobalsH && isGlobalsHeaderPath(file.path)) continue;
     const stack: Array<[any, FunctionInfo | null]> = [[file.tu, null]];
     while (stack.length) {
       const [n, outer] = stack.pop()!;

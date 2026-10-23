@@ -9,7 +9,7 @@
  *   - a path listed in SOURCES that was never written - configure dies on a
  *     missing source, so nothing builds at all;
  *   - a written .cpp missing from SOURCES - it builds, and then links with
- *     everything that file defined undefined. The per-module `globals.*.cpp`
+ *     everything that file defined undefined. The per-module `globals/<Module>.cpp`
  *     units are exactly this shape: they carry the global DEFINITIONS, so
  *     omitting them produces a tree that compiles clean and links to nothing.
  *
@@ -46,7 +46,7 @@ function file(p: string, type: SourceFile['type']): [string, SourceFile] {
 
 /**
  * A project shaped like the real output: module sub-directories, the central
- * `globals.cpp` plus its per-module split, a root header, and a Mac-only module.
+ * `globals/globals.cpp` plus its per-module split, the globals header, and a Mac-only module.
  */
 function makeProject(): ReconstructedProject {
   const files = new Map<string, SourceFile>([
@@ -54,11 +54,11 @@ function makeProject(): ReconstructedProject {
     file('Fog/Alloc.h', 'header'),
     file('Storm/Replicator.h', 'header'),
     file('D2Client/Game/Draw.cpp', 'implementation'),
-    file('globals.cpp', 'implementation'),
-    file('globals.Fog.cpp', 'implementation'),
-    file('globals.Storm.cpp', 'implementation'),
-    file('globals.D2Client.cpp', 'implementation'),
-    file('globals.h', 'header'),
+    file('globals/globals.cpp', 'implementation'),
+    file('globals/Fog.cpp', 'implementation'),
+    file('globals/Storm.cpp', 'implementation'),
+    file('globals/D2Client.cpp', 'implementation'),
+    file('globals/globals.h', 'header'),
     file('MacSpecific/MacMain.cpp', 'implementation'),
     file('StormMac/SMemMac.cpp', 'implementation'),
     file('StormMac/SMemMac.h', 'header'),
@@ -128,7 +128,7 @@ describe('CMake source list matches the written tree', () => {
     const project = makeProject();
     const sources = cmakeList(generateCMakeLists(project, options), 'SOURCES');
 
-    for (const unit of ['globals.cpp', 'globals.Fog.cpp', 'globals.Storm.cpp', 'globals.D2Client.cpp']) {
+    for (const unit of ['globals/globals.cpp', 'globals/Fog.cpp', 'globals/Storm.cpp', 'globals/D2Client.cpp']) {
       assert.ok(sources.includes(unit), `${unit} defines globals and must be compiled`);
     }
   });
@@ -147,11 +147,11 @@ describe('CMake source list matches the written tree', () => {
     // the file map and then did not reach the tree. Whatever removes it must
     // remove it from the build list too, because it is the same map.
     const project = makeProject();
-    project.files.delete('globals.Fog.cpp');
+    project.files.delete('globals/Fog.cpp');
 
     const sources = cmakeList(generateCMakeLists(project, options), 'SOURCES');
-    assert.ok(!sources.includes('globals.Fog.cpp'));
-    assert.ok(sources.includes('globals.Storm.cpp'));
+    assert.ok(!sources.includes('globals/Fog.cpp'));
+    assert.ok(sources.includes('globals/Storm.cpp'));
   });
 
   it('excludes the Mac-only modules from every emitter', () => {

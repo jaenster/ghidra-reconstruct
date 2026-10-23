@@ -398,11 +398,11 @@ describe('registered class templates', () => {
     assert.match(file('Mod/Third.h'), /void UseSync\(class SYNC \* pSync\);/);
     assert.match(file('Mod/Third.h'), /^class SYNC \* GetSync\(class NOSTRUCT \* pOpaque\);/m);
     assert.match(file('Mod/Third.h'), /^class NOSTRUCT;$/m);
-    assert.match(file('globals.h'), /\/\/ Declaration closure[\s\S]*\nclass SYNC;\nvoid SyncWait\(SYNC \* pSync\);/);
-    assert.match(file('globals.h'), /\/\/ Declaration closure[\s\S]*\nclass SYNC;\nextern SYNC \* gpExtSync;/);
+    assert.match(file('globals/globals.h'), /\/\/ Declaration closure[\s\S]*\nclass SYNC;\nvoid SyncWait\(SYNC \* pSync\);/);
+    assert.match(file('globals/globals.h'), /\/\/ Declaration closure[\s\S]*\nclass SYNC;\nextern SYNC \* gpExtSync;/);
     assert.match(file('Lib/SYNC.h'), /^class SYNC;\n[\s\S]*struct AWAITER \{[\s\S]*class SYNC \{/m);
     assert.match(file('Lib/SYNC.h'), /\/\/ Forward declarations\nclass SYNC;\n#ifndef RECON_FPTD_fpWake\n/);
-    assert.match(file('globals.h'), /^class SYNC;$/m);
+    assert.match(file('globals/globals.h'), /^class SYNC;$/m);
     const all = [...project.files.values()].map(f => f.content).join('\n');
     assert.doesNotMatch(all, /struct SYNC\b/);
   });
@@ -419,7 +419,7 @@ describe('registered class templates', () => {
 
   it('includes the template header wherever a template-id is named', () => {
     assert.match(file('Mod/File.h'), /#include "Storm\/H\/stpl.h"/);
-    assert.match(file('globals.h'), /#include "Storm\/H\/stpl.h"/);
+    assert.match(file('globals/globals.h'), /#include "Storm\/H\/stpl.h"/);
     assert.match(file('Mod/Other.cpp'), /#include "Storm\/H\/stpl.h"/);
     assert.match(file('Mod/Other.cpp'), /\(\(TSExplicitList<::ELEM, -572662307>\*\)0x10\)->m_linkoffset = 0;/);
     // An address the body holds of a class's datum is spelled through the class.
@@ -477,7 +477,7 @@ describe('registered class templates', () => {
   });
 
   it('initializes the base subobject first, without a member designator', () => {
-    assert.match(file('globals.Mod.cpp'), /TSTableEx<NODE> gTable = \{\n    \/\* base TSTable<NODE> \*\/ \{\n        \/\* \.m_count = \*\/ 4\n    \},\n    \/\* \.m_extra = \*\/ 5\n\};/);
+    assert.match(file('globals/Mod.cpp'), /TSTableEx<NODE> gTable = \{\n    \/\* base TSTable<NODE> \*\/ \{\n        \/\* \.m_count = \*\/ 4\n    \},\n    \/\* \.m_extra = \*\/ 5\n\};/);
   });
 
   it('emits an element\'s orphan copy as a free function with the members, not in the element\'s namespace', () => {

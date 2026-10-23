@@ -22,6 +22,7 @@ import {
 } from '@ghidra-mcp/cpp-parser';
 import { declName, functionScope, walk, type ScopeEntry } from './ast.js';
 import { quotedIncludePath } from '../codegen/path-case.js';
+import { isGlobalsHeaderPath } from '../codegen/globals-layout.js';
 
 export interface SourceFile {
   /** Path relative to the tree root, forward slashes. */
@@ -52,7 +53,7 @@ export interface Tree {
   root: string;
   files: SourceFile[];
   functions: FunctionInfo[];
-  /** `extern` declarations in globals.h, by name. */
+  /** `extern` declarations in the globals header, by name. */
   globals: Map<string, GlobalDecl>;
   /**
    * Every file of the tree, any extension, relative and forward-slashed, as a checkout gets
@@ -219,7 +220,7 @@ export function treeFromFiles(
   pathSource: Tree['pathSource'] = 'disk',
 ): Tree {
   const functions = files.flatMap(collectFunctions);
-  const g = files.find(f => f.path === 'globals.h');
+  const g = files.find(f => isGlobalsHeaderPath(f.path));
   const globals = g ? collectGlobals(g) : new Map<string, GlobalDecl>();
   return { root, files, functions, globals, paths, pathSource };
 }
