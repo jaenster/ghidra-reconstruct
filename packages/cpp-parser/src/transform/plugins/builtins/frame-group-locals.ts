@@ -57,13 +57,27 @@
  *
  * The run is cut short — never mis-laid-out — the moment an offset cannot be
  * reproduced: a member whose emitted C++ type has no size this pass can name
- * (an opaque typedef, an enum, an aggregate), a member whose type size disagrees
+ * (an opaque typedef, an enum, an aggregate the type table does not describe),
+ * a member whose type size disagrees
  * with the size Ghidra committed to the slot, a member whose natural alignment
  * would push it past its frame offset, a slot that overlaps its predecessor, or
  * a declaration this pass cannot move (declared twice, sharing a
  * declaration-statement with another variable, or `static`). Truncating keeps
  * the prefix exact; the group is dropped entirely if fewer than two declared
  * members survive. A silently wrong struct is worse than the status quo.
+ *
+ * Truncating is NOT harmless when the callee reaches past the cut: the bytes it
+ * walks are then a free local the compiler places anywhere.
+ * `AUTOMAP_SaveCurrentLayer` @0x004584c0 proved it. Its frame was `nLayer,
+ * fSaved, nMapType` followed directly by a `D2AutomapUnknown` struct local, and
+ * `AUTOMAP_SaveLayerToFile(&nLayer)` reads all 44 bytes (sizes at +12..+24,
+ * buffers at +28..+40). The run stopped at the struct, so the callee read the
+ * saved registers and the return address as sizes and buffer pointers, and every
+ * automap file the rebuild wrote was garbage. So an aggregate is sized from the
+ * type table (`aggregateLayout`: Ghidra's committed size, and the alignment the
+ * emitted declaration has), and a run that is still cut at a contiguous local
+ * this pass cannot place is REPORTED through `onTruncated` rather than dropped
+ * silently.
  *
  * A single `static_assert` per group checks the total size against the frame
  * span, so a wrong entry in the size table below fails at compile time instead
@@ -223,6 +237,62 @@ export interface FrameGroupLocalsOptions extends PluginOptions {
   argReach?: (callee: string, index: number, argCount: number) => Reach;
   /** Told every call-argument escape `argReach` judged, for an offline audit. No effect on output. */
   onEscape?: (event: EscapeDecision) => void;
+  /**
+   * Size and alignment of an aggregate (struct or union) by its bare name, as the
+   * emitted declaration lays it out, or null when that is not known. Absent: an
+   * aggregate local has no size and ends any run that reaches it.
+   */
+  aggregateLayout?: (name: string) => TypeLayout | null;
+  /** Told every run that stopped at a contiguous local it could not place. No effect on output. */
+  onTruncated?: (event: RunTruncation) => void;
+}
+
+/**
+ * A run cut at a local that sits inside it - contiguous with the run, so the
+ * object the seed's address stands for may well continue through it.
+ */
+export interface RunTruncation {
+  /** The local whose address seeded the run. */
+  seed: string;
+  /** Why the run exists. */
+  reason: GroupReason;
+  /** The local the run stopped at. */
+  local: string;
+  /** Its byte offset from the seed. */
+  at: number;
+  /**
+   * `unsized`: its emitted type has no size this pass can name. `width`: that
+   * size disagrees with the bytes Ghidra committed to the slot. `immovable`: the
+   * declaration cannot be moved (declared twice, shares a statement, `static`).
+   */
+  why: 'unsized' | 'width' | 'immovable';
+  /**
+   * How far the seed's escaping address is known to reach, in bytes from the
+   * seed, or null when no callee's reach is known. A reach past `at` means the
+   * cut loses bytes the callee uses.
+   */
+  reachEnd: number | null;
+  /** Whether the run still made a group (two or more declared members before the cut). */
+  grouped: boolean;
+  /** The cut local's type name, arrays and qualifiers stripped, when it has one. */
+  typeName?: string;
+}
+
+/** The name a declared type is spelled with, under any qualifiers and array bounds. */
+function declaredTypeName(type: TypeNode | undefined): string | undefined {
+  let t = type;
+  while (t && (t.kind === NodeKind.QualifiedType || t.kind === NodeKind.ArrayType)) {
+    t = t.kind === NodeKind.QualifiedType ? (t as QualifiedType).type : (t as ArrayType).elementType;
+  }
+  if (!t) return undefined;
+  if (t.kind === NodeKind.PointerType) return 'pointer';
+  if (t.kind === NodeKind.BuiltinType) return (t as BuiltinType).name;
+  if (t.kind === NodeKind.TypedefType) return typeNodeName((t as TypedefType).name);
+  if (t.kind === NodeKind.ElaboratedType) {
+    const e = t as ElaboratedType;
+    return `${e.keyword} ${typeNodeName(e.name) ?? '?'}`;
+  }
+  return undefined;
 }
 
 /** One `&local` call argument and what the run rule made of it. */
@@ -338,19 +408,27 @@ const SCALAR_SIZE: Readonly<Record<string, number>> = {
   DWORD: 4, LONG: 4, ULONG: 4, UINT: 4, INT: 4, BOOL: 4, COLORREF: 4, FLOAT: 4,
 };
 
-interface TypeLayout {
+export interface TypeLayout {
   size: number;
   align: number;
 }
 
-/** Size and alignment of an emitted type, or null when this pass cannot say. */
-export function frameTypeLayout(type: TypeNode | undefined): TypeLayout | null {
+/**
+ * Size and alignment of an emitted type, or null when this pass cannot say.
+ *
+ * `aggregate` sizes a struct or union named by the type; without it, or when it
+ * does not know the name, an aggregate has no size here.
+ */
+export function frameTypeLayout(
+  type: TypeNode | undefined,
+  aggregate?: (name: string) => TypeLayout | null,
+): TypeLayout | null {
   if (!type) return null;
   switch (type.kind) {
     case NodeKind.PointerType:
       return { size: POINTER_SIZE, align: POINTER_SIZE };
     case NodeKind.QualifiedType:
-      return frameTypeLayout((type as QualifiedType).type);
+      return frameTypeLayout((type as QualifiedType).type, aggregate);
     case NodeKind.BuiltinType: {
       const b = type as BuiltinType;
       const size = SCALAR_SIZE[builtinBase(b.name, b.modifiers)];
@@ -360,11 +438,19 @@ export function frameTypeLayout(type: TypeNode | undefined): TypeLayout | null {
       const name = typeNodeName((type as TypedefType).name);
       if (name === undefined) return null;
       const size = SCALAR_SIZE[name];
-      return size === undefined ? null : { size, align: size };
+      if (size !== undefined) return { size, align: size };
+      return aggregateLayoutOf(name, aggregate);
+    }
+    case NodeKind.ElaboratedType: {
+      const e = type as ElaboratedType;
+      // An enum's width is the emitter's business, not the type table's.
+      if (e.keyword === 'enum') return null;
+      const name = typeNodeName(e.name);
+      return name === undefined ? null : aggregateLayoutOf(name, aggregate);
     }
     case NodeKind.ArrayType: {
       const arr = type as ArrayType;
-      const element = frameTypeLayout(arr.elementType);
+      const element = frameTypeLayout(arr.elementType, aggregate);
       if (!element) return null;
       if (!arr.size || arr.size.kind !== NodeKind.IntegerLiteral) return null;
       const count = Number((arr.size as IntegerLiteralExpr).value);
@@ -374,6 +460,22 @@ export function frameTypeLayout(type: TypeNode | undefined): TypeLayout | null {
     default:
       return null;
   }
+}
+
+/** A struct or union's layout from the type table, checked for sanity. */
+function aggregateLayoutOf(
+  name: string,
+  aggregate: ((name: string) => TypeLayout | null) | undefined,
+): TypeLayout | null {
+  const layout = aggregate?.(name);
+  if (!layout) return null;
+  const { size, align } = layout;
+  if (!Number.isSafeInteger(size) || size <= 0) return null;
+  if (align !== 1 && align !== 2 && align !== 4 && align !== 8) return null;
+  // sizeof is always a multiple of the alignment; a table that says otherwise
+  // describes no declaration the compiler would emit.
+  if (size % align !== 0) return null;
+  return { size, align };
 }
 
 function alignUp(value: number, align: number): number {
@@ -486,7 +588,10 @@ interface MovableLocal {
  * declaration-statement, with no storage specifier, and of a type whose size is
  * known. Anything else stays where it is — and ends any run that reaches it.
  */
-function movableLocals(body: CompoundStmt): Map<string, MovableLocal> {
+function movableLocals(
+  body: CompoundStmt,
+  aggregate?: (name: string) => TypeLayout | null,
+): Map<string, MovableLocal> {
   const declCount = new Map<string, number>();
   for (const d of findNodesByKind(body, NodeKind.VariableDecl)) {
     const name = (d as VariableDecl).name?.name;
@@ -503,7 +608,7 @@ function movableLocals(body: CompoundStmt): Map<string, MovableLocal> {
     const name = v.name?.name;
     if (!name || declCount.get(name) !== 1) continue;
     if (v.specifiers && v.specifiers.length > 0) continue;
-    const layout = frameTypeLayout(v.type);
+    const layout = frameTypeLayout(v.type, aggregate);
     if (!layout) continue;
     movable.set(name, { decl: v, stmt, layout });
   }
@@ -775,6 +880,12 @@ function planRun(
    * objects in different structs and the fold unanchorable.
    */
   absorbSplits = false,
+  /**
+   * Told where the run stopped when it stopped at a contiguous declared local it
+   * could not place, and why. Not called for a hole, a split or a claimed slot:
+   * those are boundaries of the object, not failures to lay it out.
+   */
+  onCut?: (local: string, at: number, why: 'width' | 'stuck') => void,
 ): GroupMember[] | null {
   const base = slots[start].offset;
   const members: GroupMember[] = [];
@@ -838,7 +949,10 @@ function planRun(
       // A declared slot whose emitted type disagrees with the width Ghidra
       // committed to the frame cannot be placed: one of the two is wrong, and
       // guessing which moves every later member.
-      if (local.layout.size !== slot.size) break;
+      if (local.layout.size !== slot.size) {
+        onCut?.(slot.name, rel, 'width');
+        break;
+      }
       if (declared === MAX_MEMBERS) break;
       const padded: GroupMember[] = [];
       let at = cursor;
@@ -872,6 +986,7 @@ function planRun(
       // Declared, but this pass cannot move the declaration. Its bytes could be
       // reserved, but the local itself would stay outside the group and keep
       // floating, so the run ends here.
+      onCut?.(slot.name, rel, 'stuck');
       break;
     }
     // A slot the body does not declare at all (the emitter drops some) reserves
@@ -1138,19 +1253,42 @@ function createFrameGroupLocalsTransformer(options: FrameGroupLocalsOptions = {}
         .filter((s, i, all) => i === 0 || all[i - 1].offset !== s.offset);
       if (locals.length === 0) return undefined;
 
-      const movable = movableLocals(body);
+      const movable = movableLocals(body, options.aggregateLayout);
+      // An aggregate the type table sizes may JOIN a run, but its own escaping
+      // address does not START one: `GetClientRect(h, &rc)` is the ordinary
+      // whole-object out-param, and grouping its neighbours would freeze a
+      // layout the original never depended on. Only the locals that were
+      // movable without the table can seed an escape run.
+      const scalarMovable = options.aggregateLayout ? movableLocals(body) : movable;
       const declaredNames = new Set<string>();
+      /** Declared locals whose type has no size here, as opposed to an unmovable declaration. */
+      const unsized = new Set<string>();
+      const declTypes = new Map<string, TypeNode | undefined>();
       for (const d of findNodesByKind(body, NodeKind.VariableDecl)) {
         const name = (d as VariableDecl).name?.name;
-        if (name) declaredNames.add(name);
+        if (!name) continue;
+        declaredNames.add(name);
+        declTypes.set(name, (d as VariableDecl).type);
+        if (!frameTypeLayout((d as VariableDecl).type, options.aggregateLayout)) unsized.add(name);
       }
       const stuck = new Set([...declaredNames].filter(n => !movable.has(n)));
 
       // A variable Ghidra models as one and the decompiler printed as several is
       // mis-laid-out on its own evidence; nothing has to escape for that.
       const splits = splitSlotPieces(locals, movable, declaredNames);
+      // How far each escaping address is known to reach (bytes from the local),
+      // null once any escape of it has an unknown reach. Only the truncation
+      // report reads it.
+      const reachEnd = new Map<string, number | null>();
+      const onEscape = (e: EscapeDecision): void => {
+        options.onEscape?.(e);
+        if (!e.needsFrame) return;
+        const prev = reachEnd.get(e.local);
+        if (prev === null) return;
+        reachEnd.set(e.local, e.reach ? Math.max(prev ?? 0, e.reach.hi) : null);
+      };
       const escaping = escapingLocals(
-        body, options.argReach, name => movable.get(name)?.layout.size, options.onEscape);
+        body, options.argReach, name => movable.get(name)?.layout.size, onEscape);
       // A call with a literal byte count STATES the extent; the other two rules
       // only infer it.
       const writes = knownCountWrites(body, movable);
@@ -1197,9 +1335,24 @@ function createFrameGroupLocalsTransformer(options: FrameGroupLocalsOptions = {}
         const isSplit = splits.has(slot.name);
         const isBaseFold = baseFoldSeed.has(slot.name);
         if (!isSplit && !isBaseFold
-            && (!escaping.has(slot.name) || !movable.has(slot.name))) continue;
+            && (!escaping.has(slot.name) || !scalarMovable.has(slot.name))) continue;
 
-        const run = planRun(locals, i, movable, stuck, splits, blocked, isBaseFold);
+        let cut: { local: string; at: number; why: 'width' | 'stuck' } | undefined;
+        const run = planRun(locals, i, movable, stuck, splits, blocked, isBaseFold,
+          (local, at, why) => { cut = { local, at, why }; });
+        if (cut && options.onTruncated) {
+          options.onTruncated({
+            seed: slot.name,
+            reason: isSplit ? 'split' : isBaseFold ? 'base-fold' : 'escape',
+            local: cut.local,
+            at: cut.at,
+            why: cut.why === 'width' ? 'width' : unsized.has(cut.local) ? 'unsized' : 'immovable',
+            // No argReach, or an escape that is not a call argument: unknown.
+            reachEnd: options.argReach ? (reachEnd.get(slot.name) ?? null) : null,
+            grouped: run !== null,
+            typeName: declaredTypeName(declTypes.get(cut.local)),
+          });
+        }
         if (!run) continue;
 
         const declared = run.filter(m => m.name !== null);
