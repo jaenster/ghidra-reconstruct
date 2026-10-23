@@ -996,16 +996,6 @@ export function generateImplementation(
       continue;
     }
 
-    // A compiler-generated C++ EH handler stub is a runtime entry: its header
-    // declaration stays (SEH frames take its address), its body does not (see
-    // eh-handler-stub.ts). The symbol is resolved at link, not here.
-    if (context?.funcPtrArgCasts && isMsvcEhHandlerStub(func, context.funcPtrArgCasts.globalTypes ?? {})) {
-      const hexAddr = func.address.includes(':') ? func.address.slice(func.address.lastIndexOf(':') + 1) : func.address;
-      lines.push(`// 1.14d: ${hexAddr} ${func.name}: compiler-generated C++ EH handler stub, declared only (link stage)`);
-      lines.push('');
-      continue;
-    }
-
     // Group consecutive functions with the same ifdef under one guard
     if (func.ifdef !== currentIfdef) {
       if (currentIfdef) {
@@ -1020,6 +1010,13 @@ export function generateImplementation(
 
     const isInternal = internalFunctions?.has(func.name) ?? false;
     let impl: string;
+    // A compiler-generated C++ EH handler stub gets the body of a frame that
+    // handles nothing (see eh-handler-stub.ts), not its decompiled one.
+    if (context?.funcPtrArgCasts && isMsvcEhHandlerStub(func, context.funcPtrArgCasts.globalTypes ?? {})) {
+      lines.push(generateEhHandlerDefinition(func));
+      lines.push('');
+      continue;
+    }
     try {
       impl = generateFunctionImplementation(func, classInfo, options, context, isInternal, useNamespace ? resolvedNamespace : undefined);
     } catch (err) {
@@ -1773,6 +1770,23 @@ export function generateThunkForwarder(
     `// 1.14d: ${stripAddr(func.address)} — JMP thunk`,
     `${generateFunctionSignature(func)} {`,
     `    ${returnsVoid ? '' : 'return '}${call};`,
+    `}`,
+  ].join('\n');
+}
+
+/**
+ * A compiler-generated C++ EH handler stub's definition: it returns
+ * ExceptionContinueSearch, the answer of a frame that handles nothing.
+ *
+ * The decompiled frames that install one chain through the `ExceptionList`
+ * global, not fs:[0], so the OS never calls it; only its address is taken.
+ */
+export function generateEhHandlerDefinition(func: ExtractedFunction): string {
+  const hexAddr = func.address.includes(':') ? func.address.slice(func.address.lastIndexOf(':') + 1) : func.address;
+  return [
+    `// 1.14d: ${hexAddr} — compiler-generated C++ EH handler; its frame is never registered with the OS`,
+    `${generateFunctionSignature(func)} {`,
+    `    return ExceptionContinueSearch;`,
     `}`,
   ].join('\n');
 }

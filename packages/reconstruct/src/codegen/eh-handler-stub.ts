@@ -1,5 +1,5 @@
 /**
- * MSVC C++ exception-handler stubs: declared, never defined.
+ * MSVC C++ exception-handler stubs: defined as a frame that handles nothing.
  *
  * For every function with a C++ EH frame, MSVC emits a compiler-generated
  * `__ehhandler$` stub that loads the function's FuncInfo and jumps to the
@@ -17,11 +17,12 @@
  * that address the parent frame through EBP) that the tree does not and cannot
  * reconstruct, and the EH metadata globals are dropped by `isMsvcEhInternal`.
  *
- * Owner decision (2026-10-19): they are runtime entries like `__CxxFrameHandler3`
- * itself. The header keeps the declaration, so the kept functions that install
- * one in their SEH frame still take its address; no body is emitted, so each is
- * an undefined symbol at the LINK stage, where an MSVC personality routine could
- * not run under mingw anyway.
+ * The decompiled body is never emitted. The kept functions that install one in
+ * their SEH frame take its address, but they chain that frame through the
+ * `ExceptionList` global, not fs:[0], so the OS never calls it. Each stub is
+ * defined to return ExceptionContinueSearch (impl.ts generateEhHandlerDefinition),
+ * which is what a frame with no handler for the exception answers, and the
+ * tree links with no symbol left to supply by hand.
  *
  * Recognised by shape, not by name or address: the body calls the C++ frame
  * handler with the address of a global whose type is an MSVC EH internal, and
