@@ -634,6 +634,12 @@ import { stridedAccessPlugin } from './builtins/strided-access.js';
 import { reusedParamSlotPlugin } from './builtins/reused-param-slot.js';
 export { reusedParamSlotPlugin, splitReusedParameterSlots, type ReusedParamSlotOptions } from './builtins/reused-param-slot.js';
 export { stridedAccessPlugin, rewriteStridedAccesses, type StridedAccessOptions, type StructLayoutField } from './builtins/strided-access.js';
+import { allocMacrosPlugin } from './builtins/alloc-macros.js';
+export {
+  allocMacrosPlugin, getAllocMacroStats, resetAllocMacroStats, allocMacroPreamble,
+  allocMacroDefinition, allocNewSizeAssert, AllocMacroUse,
+  type AllocMacrosOptions, type AllocMacroStats, type AllocUntouchedReason,
+} from './builtins/alloc-macros.js';
 import type { TransformPlugin } from './types.js';
 
 /**
@@ -687,6 +693,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   declScopeSinkPlugin,        // Cleanup: sink decls into single-use scope (priority 62)
   phiNodeTernaryPlugin,       // Cleanup: int x; if(c){x=a;}else{x=b;} → int x = c?a:b; (priority 63)
   boilerplateCleanupPlugin,   // Cleanup: Remove security cookies, simplify ERROR assertions (priority 500)
+  allocMacrosPlugin,          // Cleanup: Fog allocator calls with a literal file/line -> D2_ALLOC/D2_FREE/D2_NEW macros (priority 880)
   vtableCallPlugin,           // C++ vtable patterns (early)
   switchReconstructPlugin,    // Control flow reconstruction
   magicDivisionPlugin,        // Compiler optimizations

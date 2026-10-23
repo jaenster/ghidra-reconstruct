@@ -56,7 +56,7 @@ interface RangeCheckInfo {
  * Extract the fully qualified name from a callee expression
  * Handles: Identifier, QualifiedId, MemberExpr
  */
-function extractCalleeName(expr: Expression): string {
+export function extractCalleeName(expr: Expression): string {
   if (expr.kind === NodeKind.Identifier) {
     return (expr as Identifier).name;
   }
@@ -349,12 +349,16 @@ function createNegation(expr: Expression, original: ASTNode): UnaryExpr {
  * Create a macro call statement
  * Example: D2_ASSERT(!(condition))
  */
-function createMacroCallStmt(
+/**
+ * A function-like macro invocation, `NAME(args)`, as a call expression. The
+ * macro passes share it so every injected macro reaches the emitter the same way.
+ */
+export function createMacroCall(
   macroName: string,
   args: Expression[],
   original: ASTNode
-): ExprStmt {
-  const callExpr: CallExpr = {
+): CallExpr {
+  return {
     kind: NodeKind.CallExpr,
     callee: {
       kind: NodeKind.Identifier,
@@ -368,6 +372,14 @@ function createMacroCallStmt(
     leadingTrivia: [],
     trailingTrivia: [],
   };
+}
+
+function createMacroCallStmt(
+  macroName: string,
+  args: Expression[],
+  original: ASTNode
+): ExprStmt {
+  const callExpr = createMacroCall(macroName, args, original);
 
   return {
     kind: NodeKind.ExprStmt,

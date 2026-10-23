@@ -2582,6 +2582,14 @@ function transformDecompiledCode(
         funcdefNames: Object.keys(context.funcPtrArgCasts.funcdefSignatures ?? {}),
         enclosingVarTypes,
       };
+      // D2_NEW(T) folds an allocation only when the literal size is Ghidra's size
+      // for the struct the result is cast to; the sizes and the typedefs that name
+      // a struct come from the same type tables `strided-access` reads.
+      perPluginOptions['alloc-macros'] = {
+        aggregateSizes: context.funcPtrArgCasts.aggregateSizes,
+        unionNames: context.funcPtrArgCasts.unionNames,
+        typedefTargets: context.funcPtrArgCasts.typedefTargets,
+      };
       perPluginOptions['union-arrow-member'] = {
         unionNames: context.funcPtrArgCasts.unionNames,
         aggregateMembers: context.funcPtrArgCasts.aggregateMembers,
