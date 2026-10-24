@@ -856,7 +856,10 @@ class FunctionPass {
       case NodeKind.SubscriptExpr: {
         const s = x as SubscriptExpr;
         const a = this.lin(s.array, node);
-        const w = this.pointeeSize(s.array);
+        const outer = this.arrayTypeOf(s.array);
+        const outerArr = outer ? arraySpelling(outer) : null;
+        const elemSize = outerArr ? sizeOf(this.ctx, outerArr.elem) : null;
+        const w = outerArr ? (elemSize ? BigInt(elemSize) : null) : this.pointeeSize(s.array);
         const i = this.lin(s.index, node);
         if (!a || !w || !i || i.base) return null;
         const scaled = linScale(i, w);
@@ -988,6 +991,10 @@ class FunctionPass {
         const q = calleeName(x) ?? '';
         return this.globalLin(x, this.o.globalTypes?.[q] !== undefined ? q : bareName(q));
       }
+      case NodeKind.SubscriptExpr:
+        // A row of a multi-dimensional array (`g[0]` of `char g[20][260]`) decays to its address.
+        if (this.arrayTypeOf(x)) return this.laddr(x, node);
+        return this.opaque(x);
       case NodeKind.MemberExpr: {
         const m = x as MemberExpr;
         const s = this.shape(x);
@@ -1007,6 +1014,37 @@ class FunctionPass {
       default:
         return this.opaque(x);
     }
+  }
+
+  /**
+   * The array type of an array-valued lvalue - a global array, a row of one, or an
+   * array field - as a spelling (`char[260]`), or null when the expression is not an array.
+   */
+  private arrayTypeOf(e: Expression): string | null {
+    const x = unwrapParens(e);
+    switch (x.kind) {
+      case NodeKind.Identifier:
+      case NodeKind.QualifiedId: {
+        const name = x.kind === NodeKind.Identifier ? (x as Identifier).name : bareName(calleeName(x) ?? '');
+        if (this.localTypes.has(name)) return null;
+        const g = this.o.globalTypes?.[name] ?? (x.kind === NodeKind.QualifiedId ? this.o.globalTypes?.[calleeName(x) ?? ''] : undefined);
+        return g && arraySpelling(g) ? g : null;
+      }
+      case NodeKind.SubscriptExpr: {
+        const outer = this.arrayTypeOf((x as SubscriptExpr).array);
+        const arr = outer ? arraySpelling(outer) : null;
+        return arr && arraySpelling(arr.elem) ? arr.elem : null;
+      }
+      default:
+        return null;
+    }
+  }
+
+  /** The element shape of a subscript into an array row the shape model does not see (`g[0][i]`). */
+  private rowElementShape(array: Expression): TypeShape | null {
+    const row = this.arrayTypeOf(array);
+    const arr = row ? arraySpelling(row) : null;
+    return arr && !arraySpelling(arr.elem) ? shapeOfSpelling(arr.elem, this.ctx.resolve) : null;
   }
 
   private globalLin(x: Expression, name: string): Lin | null {
@@ -1073,7 +1111,10 @@ class FunctionPass {
     const named = res.steps.some(st => st.kind === 'field');
     // A whole element: only the strength-reduced walk itself (a rescaled byte offset,
     // one element per step) of a table of more than bytes, or a function slot.
-    const elementWalk = res.steps.length === 0 && (sizeOf(this.ctx, res.base.elem) ?? 0) > 1
+    // A row walk of a multi-dimensional array (`g[i][0]`, one row per step) is the same
+    // walk with a constant subscript into the row.
+    const constSteps = res.steps.every(st => st.kind === 'index' && st.terms.length === 0);
+    const elementWalk = constSteps && (sizeOf(this.ctx, res.base.elem) ?? 0) > 1
       && res.index0.terms.some(t => t.rel === 'rescale');
     // `&T[i]` as a `T *`: the element itself, which is what the callbacks are handed.
     const element = res.steps.length === 0 && !!wholeElement?.(res.type);
@@ -1253,7 +1294,7 @@ class FunctionPass {
       }
       case NodeKind.SubscriptExpr: {
         const sub = x as SubscriptExpr;
-        const s = this.shape(x);
+        const s = this.shape(x) ?? this.rowElementShape(sub.array);
         if (s && role !== 'addr') {
           const addr = Expr.binary(sub.array, '+', sub.index);
           const folded = this.foldAccess(addr, s, role === 'store' ? 'store' : role === 'modify' ? 'modify' : 'read', node, sub.array);

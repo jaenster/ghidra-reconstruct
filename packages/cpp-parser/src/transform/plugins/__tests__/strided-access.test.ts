@@ -51,7 +51,7 @@ const OPTIONS: StridedAccessOptions = {
     Item: Object.fromEntries(ITEM.map(x => [x.name, x.type])),
     Row: Object.fromEntries(ROW.map(x => [x.name, x.type])),
   },
-  globalTypes: { gaTable: 'uint[52]', gpItems: 'Item *', gaRows: 'Row[48]' },
+  globalTypes: { gaTable: 'uint[52]', gpItems: 'Item *', gaRows: 'Row[48]', gaPaths: 'char[20][260]' },
   typedefTargets: {},
   funcdefNames: [],
 };
@@ -85,6 +85,16 @@ const G8 = `uint f(void) {
     initIndex = initIndex + 4;
   } while (initIndex < 0xd0);
   return sum;
+}`;
+
+/** StartLogWriterThread 0040f9d0: a byte offset stepping one row of a char[20][260], printed through row 0. */
+const G_ROWS = `void f(void) {
+  uint nByteOffset;
+  nByteOffset = 0;
+  do {
+    gaPaths[0][nByteOffset] = '\\0';
+    nByteOffset = nByteOffset + 0x104;
+  } while (nByteOffset < 0x1450);
 }`;
 
 /** DRAW_EscMenu 0047e3d0: a byte offset beside a counter, the base re-read from a global. */
@@ -153,6 +163,14 @@ describe('strided-access: the rewrites', () => {
     assert.match(out, /initIndex\+\+;/, out);
     assert.match(out, /while \(initIndex < 52\)/, out);
     assert.doesNotMatch(out, /\(int\)gaTable|0xd0|\+ 4;/, out);
+  });
+
+  it('G_ROWS: a byte offset through row 0 of a 2-D array is the row index (StartLogWriterThread)', () => {
+    const out = rewrite(G_ROWS);
+    assert.match(out, /gaPaths\[nByteOffset\]\[0\] = '\\0';/, out);
+    assert.match(out, /nByteOffset\+\+;/, out);
+    assert.match(out, /while \(nByteOffset < 20\)/, out);
+    assert.doesNotMatch(out, /0x104|0x1450|\[0\]\[nByteOffset\]/, out);
   });
 
   it('G5: a byte offset beside the counter is the counter (DRAW_EscMenu)', () => {
@@ -251,6 +269,17 @@ describe('strided-access: compiled, the same memory and the same results', () =>
     const { out, lowered } = run(G5_POINTER, 'f(gItems + (seed % 2))');
     assert.strictEqual(out, '0', lowered);
   });
+  it('G_ROWS', native, () => {
+    const lowered = rewrite(G_ROWS);
+    const prelude = [PRELUDE, 'char gaPaths[20][260];', `namespace ref { ${asRef(G_ROWS)} }`, `namespace low { ${lowered} }`].join('\n');
+    const body = [
+      'static char a[20][260], b[20][260];',
+      'memset(gaPaths, 0x41, sizeof gaPaths); ref::f(); memcpy(a, gaPaths, sizeof a);',
+      'memset(gaPaths, 0x41, sizeof gaPaths); low::f(); memcpy(b, gaPaths, sizeof b);',
+      'printf("%d\\n", memcmp(a, b, sizeof a) != 0);',
+    ].join('\n');
+    assert.strictEqual(compileAndRun(prelude, body).trim(), '0', lowered);
+  });
   it('G10 over every row and option slot', native, () => {
     const lowered = rewrite(G10);
     const prelude = [PRELUDE, 'Row gaRows[48];', `namespace ref { ${asRef(G10)} }`, `namespace low { ${lowered} }`].join('\n');
@@ -310,6 +339,12 @@ describe('strided-access: what is left alone', () => {
     const out = rewrite(code);
     assert.match(out, /W\[nRound\]/, out);
     assert.match(out, /nRound < 0x28/, out);
+  });
+
+  it('a row walk that also steps inside the row is left as it is', () => {
+    const code = `void f(void) { uint off; off = 0;
+      do { gaPaths[0][off + 3] = 'x'; off = off + 0x105; } while (off < 0x1450); }`;
+    assert.match(rewrite(code), /gaPaths\[0\]\[off \+ 3\]/);
   });
 
   it('a byte table is never the base of a fold', () => {
