@@ -9,7 +9,8 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export interface SnapshotGlobal {
   name: string;
@@ -42,8 +43,9 @@ export interface Snapshot {
   typeSize: Map<string, number | null>;
 }
 
+/** The snapshot of the checkout this file lives in, not of some other checkout. */
 export const DEFAULT_SNAPSHOT_DIR = join(
-  process.env.HOME ?? '', 'code/ts/ghidra-reconstruct/project/.ghidra-mcp/codegen-snapshot',
+  dirname(fileURLToPath(import.meta.url)), '../../../../project/.ghidra-mcp/codegen-snapshot',
 );
 
 function ndjson(path: string): any[] {

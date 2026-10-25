@@ -13,7 +13,8 @@
  */
 
 import { readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { NodeKind } from '../../packages/cpp-parser/src/ast/kinds.js';
 import type { ASTNode, FunctionDecl } from '../../packages/cpp-parser/src/ast/nodes.js';
 import { findNodesByKind } from '../../packages/cpp-parser/src/ast/visitor.js';
@@ -23,8 +24,7 @@ import { defaultRegistry } from '../../packages/cpp-parser/src/transform/plugins
 import { ALL_CHECKS, type Finding } from './checks.js';
 
 const SNAPSHOT = join(
-  process.env.HOME!,
-  'code/ts/ghidra-reconstruct/project/.ghidra-mcp/codegen-snapshot/functions.ndjson',
+  dirname(fileURLToPath(import.meta.url)), '../../project/.ghidra-mcp/codegen-snapshot/functions.ndjson',
 );
 
 function main() {
