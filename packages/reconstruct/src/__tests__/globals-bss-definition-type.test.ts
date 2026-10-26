@@ -100,7 +100,7 @@ const PTR32_BSS: AnalyzedDataSymbol = {
 describe('BSS global definitions normalize their type like the extern does', () => {
   it('emits a one-byte slot for `undefined`, keeping the width', () => {
     const out = generateGlobalsImpl([UNDEFINED_BSS], options);
-    assert.match(out, /^uint8_t\s+pTradePage2GridScreenCoordinates;$/m);
+    assert.match(out, /^uint8_t\s+pTradePage2GridScreenCoordinates;(?: D2_\w+_GUARD\w*\(\w+, "[^"]*"\);)?$/m);
     // The pre-446a700 answer widened a 1-byte slot to a 4-byte pointer.
     assert.doesNotMatch(out, /^void\*\s+pTradePage2GridScreenCoordinates;$/m);
   });
@@ -110,26 +110,26 @@ describe('BSS global definitions normalize their type like the extern does', () 
     // `auto x;` with no initializer is "declaration of variable with deduced
     // type requires an initializer" - it must not survive to the output.
     assert.doesNotMatch(out, /^auto\s+pLegacyAutoSlot;$/m);
-    assert.match(out, /^uint8_t\s+pLegacyAutoSlot;$/m);
+    assert.match(out, /^uint8_t\s+pLegacyAutoSlot;(?: D2_\w+_GUARD\w*\(\w+, "[^"]*"\);)?$/m);
   });
 
   it('leaves bare `undefined`, which d2_platform.h typedefs to uint8_t', () => {
     const out = generateGlobalsImpl([BARE_UNDEFINED], options);
-    assert.match(out, /^undefined\s+pBareUndefinedSlot;$/m);
+    assert.match(out, /^undefined\s+pBareUndefinedSlot;(?: D2_\w+_GUARD\w*\(\w+, "[^"]*"\);)?$/m);
     assert.doesNotMatch(out, /^void\*\s+pBareUndefinedSlot;$/m);
   });
 
   it('strips the Ghidra pointer-size annotation from a BSS definition', () => {
     const out = generateGlobalsImpl([PTR32_BSS], options);
     assert.doesNotMatch(out, /void\s*\*\s*32\s+ExceptionList;/);
-    assert.match(out, /^void\*\s+ExceptionList;$/m);
+    assert.match(out, /^void\*\s+ExceptionList;(?: D2_\w+_GUARD\w*\(\w+, "[^"]*"\);)?$/m);
   });
 
   it('applies the same normalization in the co-located BSS block', () => {
     const out = generateColocatedGlobalsImpl([UNDEFINED_BSS, PTR32_BSS], options);
     assert.doesNotMatch(out, /void\s*\*\s*32\s+ExceptionList;/);
-    assert.match(out, /^uint8_t\s+pTradePage2GridScreenCoordinates;$/m);
-    assert.match(out, /^void\*\s+ExceptionList;$/m);
+    assert.match(out, /^uint8_t\s+pTradePage2GridScreenCoordinates;(?: D2_\w+_GUARD\w*\(\w+, "[^"]*"\);)?$/m);
+    assert.match(out, /^void\*\s+ExceptionList;(?: D2_\w+_GUARD\w*\(\w+, "[^"]*"\);)?$/m);
   });
 
   it('the definition agrees with the extern declaration it must match', () => {

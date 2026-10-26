@@ -103,6 +103,15 @@ const CALLING_CONVENTIONS = new Set<TokenKind>([
   TokenKind.CallingConvThiscall, TokenKind.CallingConvVectorcall, TokenKind.CallingConvClrcall,
 ]);
 
+/**
+ * Macros the generator emits in declaration position, `NAME(args);` at namespace
+ * scope, where C++ has no expression statement to parse them as. Each expands to
+ * declarations or to nothing (the guard zones of the loud build, d2_platform.h).
+ */
+export const DECLARATION_MACROS: ReadonlySet<string> = new Set([
+  'D2_GLOBAL_GUARD', 'D2_GLOBAL_GUARD_BSS', 'D2_STATIC_GUARD', 'D2_STATIC_GUARD_BSS',
+]);
+
 export class ParserError extends Error {
   constructor(
     message: string,
@@ -253,6 +262,14 @@ export class Parser {
       const decl = this.parseStaticAssertDecl();
       decl.leadingTrivia = leadingTrivia;
       return decl;
+    }
+
+    if (this.check(TokenKind.Identifier) && DECLARATION_MACROS.has(this.current().token.text)
+        && this.checkAhead(1, TokenKind.LeftParen)) {
+      const loc = this.currentLocation();
+      const call = this.parseCallExpression(this.parseIdentifier());
+      this.expect(TokenKind.Semicolon);
+      return this.node(NodeKind.MacroDecl, loc, { call }, leadingTrivia) as Declaration;
     }
 
     // extern "C" { ... } or extern "C" <declaration>

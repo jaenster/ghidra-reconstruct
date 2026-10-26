@@ -10,6 +10,7 @@
 // =============================================================================
 
 /** Standard C/C++ types from <cstdint>, <cstddef>, and language primitives */
+import { globalGuardMacroLines } from './global-guards.js';
 import { SDK_PROBED_NAMES, SDK_DEFINED_TYPES, SDK_TYPEDEF_NAMES, PLATFORM_HEADER_DECLARED_TYPES, SDK_LAYOUTS } from './sdk-types.generated.js';
 import { ARTIFACT_SUPPORT_LINES, Lexer, TokenKind } from '@ghidra-mcp/cpp-parser';
 import { templateRegistry } from './templates/registry.js';
@@ -1277,6 +1278,8 @@ export function generatePlatformHeader(
   // macro, which turns `NAN(x)` into a float constant applied to an argument.
   lines.push('// Ghidra decompiler pseudo-operations (no instruction-level C spelling)');
   lines.push('static inline bool D2_IsNaN(double x) { return x != x; }');
+  lines.push('');
+  lines.push(...globalGuardMacroLines());
   lines.push('');
   // CPUID: Ghidra models the instruction as a pseudo-op per leaf, each returning
   // a POINTER to the four result registers — every body reads them back as

@@ -57,6 +57,7 @@ import type {
   NamespaceAlias,
   AsmDecl,
   EmptyDecl,
+  MacroDecl,
   BaseSpecifier,
   MemberInitializer,
   TemplateParameter,
@@ -465,6 +466,11 @@ export class CppEmitter {
         this.emitAsmDecl(node as AsmDecl);
         break;
       case NodeKind.EmptyDecl:
+        this.write(';');
+        break;
+      case NodeKind.MacroDecl:
+        this.write(this.indent());
+        this.emitNode((node as MacroDecl).call);
         this.write(';');
         break;
 

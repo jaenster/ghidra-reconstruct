@@ -99,7 +99,7 @@ describe('a global that no output file claimed goes back into globals.h/cpp', ()
     reconcileOrphanedGlobals([g]);
 
     assert.match(generateGlobalsHeader([g], options), /extern bool gbNpcMenuTransactionConfirmed;/);
-    assert.match(generateGlobalsImpl([g], options), /^bool gbNpcMenuTransactionConfirmed = 0;$/m);
+    assert.match(generateGlobalsImpl([g], options), /^bool gbNpcMenuTransactionConfirmed = 0;(?: D2_\w+_GUARD\w*\(\w+, "[^"]*"\);)?$/m);
   });
 
   it('never touches a genuinely global symbol', () => {

@@ -87,7 +87,7 @@ describe('EH-internal globals are dropped by the definition side too', () => {
     assert.doesNotMatch(cpp, /UnwindMapEntry/);
     assert.doesNotMatch(cpp, /FuncInfo/);
     // The real global still gets its definition.
-    assert.match(cpp, /^uint32_t gnGameSeed;$/m);
+    assert.match(cpp, /^uint32_t gnGameSeed;(?: D2_\w+_GUARD\w*\(\w+, "[^"]*"\);)?$/m);
   });
 
   it('the co-located block drops them as well', () => {

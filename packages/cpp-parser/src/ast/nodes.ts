@@ -222,7 +222,8 @@ export type Declaration =
   | LinkageSpec
   | NamespaceAlias
   | AsmDecl
-  | EmptyDecl;
+  | EmptyDecl
+  | MacroDecl;
 
 export interface FunctionDecl extends ASTNode {
   kind: NodeKind.FunctionDecl;
@@ -564,6 +565,16 @@ export interface AsmDecl extends ASTNode {
 
 export interface EmptyDecl extends ASTNode {
   kind: NodeKind.EmptyDecl;
+}
+
+/**
+ * A declaration-position macro invocation, `NAME(args);`, for a name in
+ * DECLARATION_MACROS: the generator's own macros that expand to declarations
+ * (or to nothing). Kept as a call so its arguments are ordinary expressions.
+ */
+export interface MacroDecl extends ASTNode {
+  kind: NodeKind.MacroDecl;
+  call: CallExpr;
 }
 
 // ============================================

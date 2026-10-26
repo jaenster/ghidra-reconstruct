@@ -23,6 +23,7 @@
  */
 
 import type { AnalyzedDataSymbol, ExtractedFunction } from '../types.js';
+import { globalGuardLine } from './global-guards.js';
 
 export type ClosureOrigin =
   /** A function Ghidra has that no emitted file defines. */
@@ -372,7 +373,8 @@ export function renderClosureDefinitionBlock(
   lines.push('// content and agrees with it only by accident.');
   lines.push('// =============================================================================');
   lines.push('');
-  for (const d of defined) lines.push(d.def!);
+  // Every closure definition is an initialized `char name[]` at root scope.
+  for (const d of defined) lines.push(`${d.def!} ${globalGuardLine(d.name, d.name, 'external', true)}`);
   lines.push('');
   return lines;
 }

@@ -84,8 +84,8 @@ describe('character data whose value Ghidra renders as text', () => {
         dataType: 'char[4]', suggestedType: 'char[4]', size: 4,
       }),
     ], options);
-    assert.match(impl, /^char CHAR_C_006ed5b4 = 'C';$/m);
-    assert.match(impl, /^char gTxtCompilationMemPool\[4\] = \{ 'e', 'n', 'd', 0 \};$/m);
+    assert.match(impl, /^char CHAR_C_006ed5b4 = 'C';(?: D2_\w+_GUARD\w*\(\w+, "[^"]*"\);)?$/m);
+    assert.match(impl, /^char gTxtCompilationMemPool\[4\] = \{ 'e', 'n', 'd', 0 \};(?: D2_\w+_GUARD\w*\(\w+, "[^"]*"\);)?$/m);
   });
 });
 

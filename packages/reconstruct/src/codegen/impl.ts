@@ -25,6 +25,7 @@ import { CPP_KEYWORDS } from './header.js';
 import { transformGhidraCode, preprocessGhidraCode, isGhidraGeneratedName, suggestBetterName, takeFuncPtrArgCastTypedefs, type TransformResult, type FuncPtrTarget, type ArtifactMode, type ArtifactRecord, type RunTruncation } from '@ghidra-mcp/cpp-parser';
 import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js';
 import { getGlobalReferenceAliases, globalAliasComment } from './global-aliases.js';
+import { globalGuardLine, guardQualifiedName, hasDefinitionInitializer } from './global-guards.js';
 import { sehLoweringDecision, type SehLoweringDecision } from './seh-lowering-spec.js';
 import { foldedAddressFacts, type FoldedAddressFact } from './folded-address-spec.js';
 import { immediateConstantFacts, dataAtAddress, type ImmediateConstantFact } from './immediate-constant-spec.js';
@@ -1086,6 +1087,8 @@ export function generateImplementation(
       // conflicting declaration in this TU and a phantom symbol in every other.
       recordDeclaredName(name);
 
+      const guardLine = globalGuardLine(name, guardQualifiedName(useNamespace ? namespace : undefined, name),
+        'static', hasDefinitionInitializer(global));
       if (global.initializedData) {
         const arrayInfo = inferArrayDeclaration(global);
         // The declared type must travel with the value: without it the walk has
@@ -1128,6 +1131,7 @@ export function generateImplementation(
           fileLocalLines.push(`static ${normalizeArrayDeclaration(type, name)};`);
         }
       }
+      fileLocalLines[fileLocalLines.length - 1] += ` ${guardLine}`;
     }
 
     setInitializerNamespace(undefined);
@@ -1579,7 +1583,8 @@ export function generateFunctionImplementation(
     // initializers resolve from in there — same shadowing rule as the bodies.
     setInitializerNamespace(context._enclosingResolvedNamespace);
     const block = generateStaticLocalsBlock(
-      context.analyzedGlobals, func.name, options.includeAddressComments, bodyIdentifiers
+      context.analyzedGlobals, func.name, options.includeAddressComments, bodyIdentifiers,
+      guardQualifiedName(context._enclosingNamespace, func.name)
     );
     setInitializerNamespace(undefined);
     // Drop spurious `&` on Ghidra array globals (`&X_ARRAY_<hex>` is `T(*)[N]`, but

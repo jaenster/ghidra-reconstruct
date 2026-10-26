@@ -137,7 +137,7 @@ describe('a string a globals UNIT resolves is declared by the header before it',
 
   it('defines it exactly once, in the unit that owns the closure', () => {
     const { owner, partition } = emitInProductionOrder();
-    assert.match(owner, new RegExp(`^char ${LNG_LABEL}\\[\\] = "D2\\.LNG";$`, 'm'));
+    assert.match(owner, new RegExp(`^char ${LNG_LABEL}\\[\\] = "D2\\.LNG";(?: D2_\\w+_GUARD\\w*\\(\\w+, "[^"]*"\\);)?$`, 'm'));
     assert.doesNotMatch(partition, new RegExp(`char ${LNG_LABEL}\\[\\] =`));
   });
 

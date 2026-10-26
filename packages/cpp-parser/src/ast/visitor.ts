@@ -569,6 +569,10 @@ export function getChildren(node: ASTNode): ASTNode[] {
       break;
     }
 
+    case NodeKind.MacroDecl:
+      children.push((node as any).call);
+      break;
+
     case NodeKind.PointerType: {
       const pt = node as any;
       children.push(pt.pointee);
@@ -1119,6 +1123,12 @@ function transformChildren<N extends ASTNode>(
       const sa = copy as any;
       sa.condition = transformAST(sa.condition, visitor);
       if (sa.message) sa.message = transformAST(sa.message, visitor);
+      break;
+    }
+
+    case NodeKind.MacroDecl: {
+      const md = copy as any;
+      md.call = transformAST(md.call, visitor);
       break;
     }
 

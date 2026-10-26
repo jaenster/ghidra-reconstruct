@@ -20,6 +20,7 @@ import { classScopedReference } from './templates/index.js';
 import { classKeyOf, templateRegistry } from './templates/registry.js';
 import { isFiller } from './templates/bases.js';
 import { GLOBALS_HEADER, isGlobalsHeaderPath } from './globals-layout.js';
+import { globalGuardLine, guardQualifiedName, hasDefinitionInitializer } from './global-guards.js';
 
 /**
  * Exact Win32 SDK typedef names (not `LP`/`IMAGE_` prefixed) seen as
@@ -1191,7 +1192,8 @@ export function globalEvidenceComment(global: AnalyzedDataSymbol): string {
  */
 export function generateStaticLocalDeclaration(
   symbol: AnalyzedDataSymbol,
-  includeAddressComment = false
+  includeAddressComment = false,
+  guardScope?: string
 ): string | null {
   if (symbol.scope !== 'static-local') {
     return null;
@@ -1219,7 +1221,8 @@ export function generateStaticLocalDeclaration(
     setInitializerOwnerAddress(undefined);
     if (arrayInfo && symbol.initializedData.kind === 'array') {
       const aliasLine = globalAliasComment(symbol);
-      return `${aliasLine ? aliasLine + '\n' : ''}static ${arrayInfo.type} ${name}[${arrayInfo.count}] = ${init};`;
+      return `${aliasLine ? aliasLine + '\n' : ''}static ${arrayInfo.type} ${name}[${arrayInfo.count}] = ${init};`
+        + staticLocalGuard(name, guardScope, true);
     }
     initializer = ` = ${init}`;
   } else if (symbol.value !== undefined && symbol.value !== null) {
@@ -1244,11 +1247,18 @@ export function generateStaticLocalDeclaration(
   const aliasLine = globalAliasComment(symbol);
   let declaration = `${aliasLine ? aliasLine + '\n' : ''}static ${normalizeArrayDeclaration(type, name)}${initializer};`;
 
+  declaration += staticLocalGuard(name, guardScope, initializer !== '');
   if (includeAddressComment) {
     declaration += ` // Originally: ${symbol.name} @${symbol.address}`;
   }
 
   return declaration;
+}
+
+/** The guard after a function-local static, on the same line; none without a scope. */
+function staticLocalGuard(name: string, guardScope: string | undefined, initialized: boolean): string {
+  if (!guardScope) return '';
+  return ` ${globalGuardLine(name, guardQualifiedName(guardScope, name), 'static', initialized)}`;
 }
 
 /**
@@ -1258,7 +1268,8 @@ export function generateStaticLocalsBlock(
   symbols: AnalyzedDataSymbol[],
   functionName: string,
   includeAddressComments = false,
-  bodyIdentifiers?: Set<string>
+  bodyIdentifiers?: Set<string>,
+  guardScope?: string
 ): string | null {
   let statics = symbols.filter(
     s => s.scope === 'static-local' && s.ownerFunction === functionName
@@ -1290,7 +1301,7 @@ export function generateStaticLocalsBlock(
   lines.push('    // Static local variables (originally global data)');
 
   for (const sym of statics) {
-    const decl = generateStaticLocalDeclaration(sym, includeAddressComments);
+    const decl = generateStaticLocalDeclaration(sym, includeAddressComments, guardScope ?? functionName);
     if (decl) {
       lines.push(`    ${decl}`);
     }
@@ -3473,7 +3484,7 @@ export function generateGlobalsImpl(
           ls.push(`// @${global.address}`);
         }
 
-        ls.push(globalDefinition(global, name));
+        ls.push(`${globalDefinition(global, name)} ${globalGuardLine(name, guardQualifiedName(namespace, name), 'external', hasDefinitionInitializer(global))}`);
         ls.push('');
       });
     }
@@ -3492,7 +3503,7 @@ export function generateGlobalsImpl(
           ls.push(`// @${global.address}`);
         }
 
-        ls.push(globalDefinition(global, name));
+        ls.push(`${globalDefinition(global, name)} ${globalGuardLine(name, guardQualifiedName(namespace, name), 'external', hasDefinitionInitializer(global))}`);
       });
       lines.push('');
     }
@@ -3511,7 +3522,7 @@ export function generateGlobalsImpl(
           ls.push(`// @${global.address}`);
         }
 
-        ls.push(globalDefinition(global, name));
+        ls.push(`${globalDefinition(global, name)} ${globalGuardLine(name, guardQualifiedName(namespace, name), 'external', hasDefinitionInitializer(global))}`);
       });
       lines.push('');
     }
@@ -4101,7 +4112,7 @@ export function generateColocatedGlobalsImpl(
           ls.push(`// @${global.address}`);
         }
 
-        ls.push(globalDefinition(global, name));
+        ls.push(`${globalDefinition(global, name)} ${globalGuardLine(name, guardQualifiedName(namespace, name), 'external', hasDefinitionInitializer(global))}`);
         ls.push('');
       });
     }
@@ -4118,7 +4129,7 @@ export function generateColocatedGlobalsImpl(
           ls.push(`// @${global.address}`);
         }
 
-        ls.push(globalDefinition(global, name));
+        ls.push(`${globalDefinition(global, name)} ${globalGuardLine(name, guardQualifiedName(namespace, name), 'external', hasDefinitionInitializer(global))}`);
       });
       lines.push('');
     }
@@ -4135,7 +4146,7 @@ export function generateColocatedGlobalsImpl(
           ls.push(`// @${global.address}`);
         }
 
-        ls.push(globalDefinition(global, name));
+        ls.push(`${globalDefinition(global, name)} ${globalGuardLine(name, guardQualifiedName(namespace, name), 'external', hasDefinitionInitializer(global))}`);
       });
       lines.push('');
     }

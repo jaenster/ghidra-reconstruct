@@ -172,7 +172,7 @@ describe('closure string definitions', () => {
     ]);
     assert.deepStrictEqual(
       block.filter(l => !l.startsWith('//') && l.length > 0),
-      ['char s_block_006e1730[] = "block";'],
+      ['char s_block_006e1730[] = "block"; D2_GLOBAL_GUARD(s_block_006e1730, "s_block_006e1730");'],
     );
   });
 
@@ -244,7 +244,7 @@ describe('globals.h declares and exactly one globals unit defines', () => {
     assert.match(header, /^extern char s_207_82_87_133_0070f130\[\];$/m);
 
     const owner = generateGlobalsImpl([GAME_GLOBAL], options, 'globals.h', undefined, undefined, true);
-    assert.match(owner, /^char s_207_82_87_133_0070f130\[\] = "207\.82\.87\.133";$/m);
+    assert.match(owner, /^char s_207_82_87_133_0070f130\[\] = "207\.82\.87\.133"; D2_GLOBAL_GUARD\(s_207_82_87_133_0070f130, "s_207_82_87_133_0070f130"\);$/m);
 
     // Only the owning unit. Every other globals unit declares the same header
     // and would otherwise carry a duplicate definition of the same symbol.
@@ -296,7 +296,7 @@ describe('globals.h declares and exactly one globals unit defines', () => {
       [GAME_GLOBAL], options, [], undefined, undefined, new Map([['UNK_006da48c', 1]]));
     assert.match(header, /^extern char s_modstate0_006cc928\[\];$/m);
     const owner = generateGlobalsImpl([GAME_GLOBAL], options, 'globals.h', undefined, undefined, true);
-    assert.match(owner, /^char s_modstate0_006cc928\[\] = "modstate0";$/m);
+    assert.match(owner, /^char s_modstate0_006cc928\[\] = "modstate0"; D2_GLOBAL_GUARD\(s_modstate0_006cc928, "s_modstate0_006cc928"\);$/m);
 
     setInitializerAddressTable();
   });
@@ -310,6 +310,6 @@ describe('globals.h declares and exactly one globals unit defines', () => {
     generateGlobalsHeader([GAME_GLOBAL], options, [], undefined, undefined, referenced);
     const empty = generateGlobalsImpl(
       [GAME_GLOBAL], options, 'globals.h', undefined, new Set<AnalyzedDataSymbol>(), true);
-    assert.match(empty, /^char s_207_82_87_133_0070f130\[\] = "207\.82\.87\.133";$/m);
+    assert.match(empty, /^char s_207_82_87_133_0070f130\[\] = "207\.82\.87\.133"; D2_GLOBAL_GUARD\(s_207_82_87_133_0070f130, "s_207_82_87_133_0070f130"\);$/m);
   });
 });

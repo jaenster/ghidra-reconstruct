@@ -85,7 +85,7 @@ describe('globals.h and globals.cpp agree on type and on membership', () => {
     );
     const impl = generateGlobalsImpl([DOS_HEADER], options);
     assert.doesNotMatch(impl, /^IMAGE_DOS_HEADER\s+IMAGE_DOS_HEADER__00400000/m);
-    assert.match(impl, /^uint8_t IMAGE_DOS_HEADER__00400000 = 0;$/m);
+    assert.match(impl, /^uint8_t IMAGE_DOS_HEADER__00400000 = 0;(?: D2_\w+_GUARD\w*\(\w+, "[^"]*"\);)?$/m);
   });
 
   it('does not DEFINE alignment padding that globals.h refuses to declare', () => {

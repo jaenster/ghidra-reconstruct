@@ -41,6 +41,7 @@ export enum NodeKind {
   NamespaceAlias = 'NamespaceAlias',     // namespace foo = bar::baz
   AsmDecl = 'AsmDecl',                   // asm("...")
   EmptyDecl = 'EmptyDecl',               // ;
+  MacroDecl = 'MacroDecl',               // NAME(args); a known declaration macro
 
   // ============================================
   // STATEMENTS
@@ -208,6 +209,7 @@ const DECLARATION_KINDS = new Set([
   NodeKind.NamespaceAlias,
   NodeKind.AsmDecl,
   NodeKind.EmptyDecl,
+  NodeKind.MacroDecl,
 ]);
 
 const STATEMENT_KINDS = new Set([
