@@ -5,4 +5,4 @@
 //
 // The address of the instruction after the call in the caller. Declared noinline: inlined,
 // __builtin_return_address(0) would be the CALLER's return address instead.
-return (int32_t)(uintptr_t)__builtin_return_address(0);
+return __builtin_return_address(0);
