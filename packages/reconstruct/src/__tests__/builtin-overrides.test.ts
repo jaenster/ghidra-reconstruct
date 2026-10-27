@@ -103,14 +103,14 @@ describe('repository overrides: the bodies do what the binary does', native, () 
   it('GetInstructionPointer returns an address inside its caller, inlined or not', () => {
     // The definition the generator emits: the attribute prefix, then the shipped body.
     const def = (prefix: string, name: string) =>
-      `${prefix}static int32_t ${name}() {\n${body('GetInstructionPointer')}\n}`;
+      `${prefix}static void* ${name}() {\n${body('GetInstructionPointer')}\n}`;
     const prelude = [
       def(overrideAttributePrefix(entry('00408090')), 'GetIp'),
       def('', 'GetIpInlinable'),
       'volatile int g_sink;',
       // Work after the call, so the call is not a tail jump.
-      '__attribute__((noinline)) int32_t Caller() { int32_t r = GetIp(); g_sink++; return r; }',
-      '__attribute__((noinline)) int32_t CallerInlinable() { int32_t r = GetIpInlinable(); g_sink++; return r; }',
+      '__attribute__((noinline)) int32_t Caller() { int32_t r = (int32_t)(uintptr_t)GetIp(); g_sink++; return r; }',
+      '__attribute__((noinline)) int32_t CallerInlinable() { int32_t r = (int32_t)(uintptr_t)GetIpInlinable(); g_sink++; return r; }',
       'static int inside(int32_t r, void* fn) { uint32_t a = (uint32_t)(uintptr_t)fn; return (uint32_t)r - a < 256u; }',
     ].join('\n');
     const out = compileAndRun(prelude,
