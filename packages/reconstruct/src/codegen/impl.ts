@@ -2679,6 +2679,16 @@ function transformDecompiledCode(
         enumMemberValues: context._enumMemberValues,
         ambiguousConstants: context._ambiguousEnumConstants,
       };
+      // A default label used only as a scaled index base a stride below a global:
+      // respelled against that global, or the label becomes a private static.
+      perPluginOptions['index-base-before-object'] = {
+        globalAddresses: context.funcPtrArgCasts.globalAddresses,
+        globalSizes: context.funcPtrArgCasts.globalSizes,
+        globalNamespaces: context.funcPtrArgCasts.globalNamespaces,
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        onRewrite: (r: { label: string; target: string; distance: number }) =>
+          console.warn(`[index-base] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: &${r.label} -> ${r.target} - 0x${r.distance.toString(16)}`),
+      };
       perPluginOptions['biased-table-index'] = {
         globalAddresses: context.funcPtrArgCasts.globalAddresses,
         globalSizes: context.funcPtrArgCasts.globalSizes,

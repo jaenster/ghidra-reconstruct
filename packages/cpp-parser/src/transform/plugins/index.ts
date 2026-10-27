@@ -428,6 +428,7 @@ export {
 export { threeByteAccessPlugin } from './builtins/three-byte-access.js';
 export { comIUnknownCallPlugin } from './builtins/com-iunknown-call.js';
 export { biasedTableIndexPlugin } from './builtins/biased-table-index.js';
+export { indexBaseBeforeObjectPlugin, createIndexBaseBeforeObjectTransformer } from './builtins/index-base-before-object.js';
 export { foldedAddressRebasePlugin, type FoldedAddress, type FoldedAddressRebaseOptions } from './builtins/folded-address-rebase.js';
 export { immediateNotAddressPlugin, type ImmediateNotAddressOptions } from './builtins/immediate-not-address.js';
 export { importAddressForwarderPlugin, IMPORT_ADDRESS_FORWARDERS } from './builtins/import-address-forwarder.js';
@@ -513,6 +514,7 @@ import { subpieceAccessPlugin } from './builtins/subpiece-access.js';
 import { threeByteAccessPlugin } from './builtins/three-byte-access.js';
 import { comIUnknownCallPlugin } from './builtins/com-iunknown-call.js';
 import { biasedTableIndexPlugin } from './builtins/biased-table-index.js';
+import { indexBaseBeforeObjectPlugin } from './builtins/index-base-before-object.js';
 import { foldedAddressRebasePlugin } from './builtins/folded-address-rebase.js';
 import { immediateNotAddressPlugin } from './builtins/immediate-not-address.js';
 import { importAddressForwarderPlugin } from './builtins/import-address-forwarder.js';
@@ -650,6 +652,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   immediateNotAddressPlugin,   // Correctness: &UNK_v for an unreferenced immediate v -> the constant v (priority 9)
   ...ghidraCleanupPlugins,
   biasedTableIndexPlugin,      // Correctness: *(byte*)((int)A + C + i) below the next table → Next[i - bias] (priority 12)
+  indexBaseBeforeObjectPlugin, // Correctness: &DAT_x + i*C just below a global G → (uint8_t*)&G - d + i*C (priority 12)
   foldedAddressRebasePlugin,   // Correctness: a folded MOV X; SUB d address respelled X - n, from the instruction refs (priority 13)
   adjShiftedPointerPlugin,     // Correctness: ADJ(p) on a shifted pointer -> (Container*)((char*)p - k), its containing record (priority 11)
   deadOutSlotStorePlugin,      // Correctness: a PUSH-reg slot store the next call overwrites through &local before any read -> dropped (priority 12.5)
