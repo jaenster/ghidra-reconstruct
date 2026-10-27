@@ -1689,7 +1689,10 @@ function emitPointerToSymbol(rawValue: string, expectedType?: string): string {
   // What the slot STANDS FOR, so a typedef's pointee is the typedef's pointee
   // and not the typedef itself: `pointer` is `void*`, whose pointee is `void`.
   const standsFor = expectsPointer ? slotStandsFor(slotType!) : undefined;
-  const pointeeBare = standsFor ? baseTypeName(standsFor.replace(/\*\s*$/, '')) : undefined;
+  // Exactly ONE level comes off: the pointee of `DC6 **` is `DC6*`, not `DC6`.
+  // Stripping every star made a `DC6*` symbol look mismatched and cast its
+  // address to `(DC6*)`, one level short of the slot.
+  const pointeeBare = standsFor ? pointerDepthAwareName(standsFor.replace(/\*\s*$/, '')) : undefined;
   const pointee = pointeeBare ? rootQualifyShadowedType(pointeeBare) : undefined;
   // The CAST is the slot's own spelling. A star-less pointer typedef already
   // carries its indirection, so `(pointer)` is the slot's type and `(pointer*)`
@@ -1758,7 +1761,7 @@ function emitPointerToSymbol(rawValue: string, expectedType?: string): string {
     const elem = arrayGlobals.get(bare);
     if (elem) {
       // 1-D array: decay. Cast only when Ghidra's element type is not the slot's.
-      if (pointerCast && baseTypeName(elem) !== pointeeBare) return `(${pointerCast})${spelled}`;
+      if (pointerCast && pointerDepthAwareName(elem) !== pointeeBare) return `(${pointerCast})${spelled}`;
       return value;
     }
     const declared = globalDeclaredTypes.get(bare);
@@ -2224,7 +2227,7 @@ function pointerSlotAddressReference(
   // priority 46 — before the address passes — so it would never be cleaned up.
   // Every other pairing takes the slot's own type, which carries the address
   // across unchanged and narrows nothing.
-  if (entry.stringConstant && baseTypeName(slot.replace(/\*\s*$/, '')) === 'char') {
+  if (entry.stringConstant && pointerDepthAwareName(slot.replace(/\*\s*$/, '')) === 'char') {
     return reference;
   }
   return `(${rootQualifyShadowedType(slot.replace(/\s+/g, ' '))})${reference}`;
