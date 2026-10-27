@@ -975,3 +975,40 @@ describe('defect lint: raw-address-argument', () => {
     } }), []);
   });
 });
+
+describe('defect lint: raw-address-arithmetic', () => {
+  const snap = [
+    { name: 'g_szMCPGameName', address: 0x799294, size: 16, dataType: 'char[16]' },
+    { name: 'gbLanGameListEntryNamePadding2', address: 0x77bdc8, size: 59000, dataType: 'D2GameListEntryStrc[1000]' },
+    { name: 'gnFlag', address: 0x700300, size: 4 },
+    { name: 'gNotEmitted', address: 0x700400, size: 64 },
+  ];
+  const globalsCpp = 'char g_szMCPGameName[16];\nD2GameListEntryStrc gbLanGameListEntryNamePadding2[1000];\nint gnFlag;\n';
+
+  it('reports the folded dst - src shapes: right of -, left of -, an interior addend and +=', () => {
+    const fs = lint('raw-address-arithmetic', { globals: snap, files: {
+      'globals.cpp': globalsCpp,
+      'D2MCPClient/McpConnect.cpp': 'void f(int32_t pGameNameOut) {\n    pSrc[pGameNameOut - 0x799294] = ch;\n' +
+        '    n = 0x799294 - (int)pszSrc;\n    nIndex = n * 0x3b + 0x77bdc9 - (int)pszSrc;\n    k += 0x77bdd9;\n}\n',
+    } });
+    assert.deepStrictEqual(fs.map(f => f.line), [2, 3, 4, 5]);
+    assert.match(fs[2]!.detail, /0x0077bdc9, the original address of gbLanGameListEntryNamePadding2 \+ 1/);
+  });
+
+  it('reports a negated operand and a biased base one below a symbol', () => {
+    const fs = lint('raw-address-arithmetic', { globals: snap, files: {
+      'globals.cpp': globalsCpp,
+      'D2Lang/StrTable/strtable.cpp': 'void f(char* e) {\n    n = (int)(p + (-0x799294 - (int)q));\n    m = e - 0x799293;\n}\n',
+    } });
+    assert.deepStrictEqual(fs.map(f => f.line), [2, 3]);
+    assert.match(fs[1]!.detail, /g_szMCPGameName - 1/);
+  });
+
+  it('ignores the spelled form, a decimal, a non-data address, a word scalar interior, a symbol the tree lacks and other operators', () => {
+    assert.deepStrictEqual(lint('raw-address-arithmetic', { globals: snap, files: {
+      'globals.cpp': globalsCpp,
+      'D2MCPClient/McpConnect.cpp': 'void f(int32_t p) {\n    q[p - (intptr_t)&g_szMCPGameName] = c;\n    n = p - 10064532;\n' +
+        '    n = p + 0x400000;\n    n = p + 0x700301;\n    n = p + 0x700404;\n    n = p & 0x799294;\n    n = 0x10 + 0x799294;\n}\n',
+    } }), []);
+  });
+});

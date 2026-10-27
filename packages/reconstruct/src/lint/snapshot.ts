@@ -41,6 +41,8 @@ export interface Snapshot {
   structs: SnapshotStruct[];
   /** Struct/union/typedef size by name; null when the name is ambiguous. */
   typeSize: Map<string, number | null>;
+  /** The image's data blocks as [start, end), from the manifest; absent in an older snapshot. */
+  dataSections?: Array<[number, number]>;
 }
 
 /** The snapshot of the checkout this file lives in, not of some other checkout. */
@@ -74,7 +76,12 @@ export function loadSnapshot(dir: string = DEFAULT_SNAPSHOT_DIR): Snapshot | nul
       value: d.isInitialized && /^-?0x[0-9a-f]+$|^-?\d+$/i.test(String(d.value ?? '')) ? Number(BigInt(String(d.value).replace(/^-/, '')) * (String(d.value).startsWith('-') ? -1n : 1n)) : null,
     });
   }
-  return buildSnapshot(dir, globals, ndjson(join(dir, 'dataTypes.ndjson')), all);
+  const snap = buildSnapshot(dir, globals, ndjson(join(dir, 'dataTypes.ndjson')), all);
+  try {
+    const sections = JSON.parse(readFileSync(join(dir, 'manifest.json'), 'utf8'))?.provenance?.programInfo?.dataSections;
+    if (Array.isArray(sections)) snap.dataSections = sections;
+  } catch { /* no manifest: no sections */ }
+  return snap;
 }
 
 /**

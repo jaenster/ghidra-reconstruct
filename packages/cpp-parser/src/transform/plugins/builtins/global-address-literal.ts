@@ -107,6 +107,20 @@
  * stride of four the same respelling would silently divide the offset by four.
  * See `byteDisplacement`.
  *
+ * **An address in a data block under integer `+`/`-` is the third.** A copy
+ * loop's `dst - src` folds the source buffer into the constant
+ * (`pSrc[pGameNameOut - 0x799294]`). When the image's data blocks are known, a
+ * hex, non-mask literal operand of `+` or `-` inside one, owned by exactly one
+ * global, is spelled as the integer it is: `(intptr_t)&member` for the innermost
+ * member or element it starts, `((intptr_t)&member + n)` where none starts there.
+ * A negated operand (`-0x7a0520 - (int)pbSrc`) is spelled `-(intptr_t)&name`,
+ * and an address in no extent one byte below a global's start - the biased
+ * source of a byte copy - `((intptr_t)&name - 1)`. String constants are not
+ * taken: their rebuilt names can differ from the body's.
+ * The type is the literal's own, so nothing around it changes. Code addresses,
+ * sizes and flags outside the data blocks keep the withdrawal. See
+ * `arithmeticAddress`.
+ *
  * **A literal shaped like a mask is not an address.** One set bit, or one bit
  * short of a power of two, whatever it collides with — see `isMaskShaped`.
  *
@@ -663,6 +677,41 @@ function edgeOfExtent(anchor: Candidate, k: number): Expression {
     ? displaced(Expr.binary(base, '+', Expr.sizeof(designator(), false)), k - anchor.size)
     : displaced(base, k);
   return Expr.paren(form);
+}
+
+/** Whether `v` lies in one of the image's data blocks, each [start, end). */
+function inDataSection(v: number, sections: ReadonlyArray<readonly [number, number]>): boolean {
+  for (const [start, end] of sections) {
+    if (v >= start && v < end) return true;
+  }
+  return false;
+}
+
+/**
+ * A declared type spelling read as an element name and its array dimensions, outermost
+ * first: `D2GameListEntryStrc[1000]` -> D2GameListEntryStrc, [1000]; `char[16]` -> char,
+ * [16]. Null for a pointer or a function type, whose bytes hold no member to name.
+ */
+function typeShape(spelling: string): { base: string; dims: number[] } | null {
+  if (/[*&(]/.test(spelling)) return null;
+  const bracket = spelling.indexOf('[');
+  const head = (bracket < 0 ? spelling : spelling.slice(0, bracket)).trim();
+  const dims: number[] = [];
+  if (bracket >= 0) {
+    const tail = spelling.slice(bracket);
+    const dim = /\[\s*(\d+)\s*\]/g;
+    let consumed = '';
+    let m: RegExpExecArray | null;
+    while ((m = dim.exec(tail)) !== null) {
+      dims.push(Number(m[1]));
+      consumed += m[0];
+    }
+    if (consumed.replace(/\s/g, '') !== tail.replace(/\s/g, '')) return null;
+  }
+  const words = head.split(/\s+/).filter(w => !['const', 'volatile', 'struct', 'union', 'enum', 'class'].includes(w));
+  if (words.length !== 1) return null;
+  const segments = words[0]!.split('::');
+  return { base: segments[segments.length - 1]!, dims };
 }
 
 // ============================================
@@ -1338,6 +1387,167 @@ function createGlobalAddressLiteralTransformer(
     return ref;
   }
 
+  const dataSections = options.dataSections ?? [];
+  const globalTypes = options.globalTypes ?? {};
+  const structLayouts = options.structLayouts ?? {};
+  const aggregateMembers = options.aggregateMembers ?? {};
+  const unions = new Set(options.unionNames ?? []);
+
+  /**
+   * The integer forms `arithmeticAddress` wrote, against the literal each replaced (in
+   * `produced`). Not pointer forms: they are integers already, so no call argument, return
+   * or arithmetic withdrawal has anything to undo.
+   */
+  const arithmeticForms = new Set<ASTNode>();
+
+  /**
+   * The innermost member or element of `owner` that byte `offset` starts, and what is left
+   * over where none starts there: `gbLanGameListEntryNamePadding2` + 1 is
+   * `gbLanGameListEntryNamePadding2[0].szName`, + 4 is `...[0].szName[3]`.
+   *
+   * Arrays by their declared dimensions, structures by Ghidra's layout, and only through a
+   * member the emitted declaration carries under the same name. The walk stops - leaving a
+   * byte remainder - at a union, a bitfield, a pointer, a type it has no layout for, or an
+   * extent the dimensions do not divide.
+   */
+  function memberPath(owner: Candidate, offset: number): { designator: Expression; rest: number } {
+    let designator: Expression = owner.segments.length === 0
+      ? Expr.identifier(owner.name)
+      : Expr.qualifiedId([...owner.segments, owner.name]);
+    let rest = offset;
+    let size = owner.size;
+    let spelling: string | undefined = globalTypes[owner.name];
+    while (rest > 0 && spelling !== undefined) {
+      const shape = typeShape(spelling);
+      if (!shape) break;
+      if (shape.dims.length > 0) {
+        const count = shape.dims[0]!;
+        if (!(count > 0) || size % count !== 0) break;
+        const stride = size / count;
+        const index = Math.floor(rest / stride);
+        if (stride <= 0 || index >= count) break;
+        designator = Expr.subscript(designator, Expr.intLiteral(index));
+        rest -= index * stride;
+        size = stride;
+        spelling = shape.base + shape.dims.slice(1).map(d => `[${d}]`).join('');
+        continue;
+      }
+      if (unions.has(shape.base)) break;
+      const layout = structLayouts[shape.base];
+      if (!layout) break;
+      const hits = layout.filter(f =>
+        f.bitSize === undefined && f.size > 0 && f.offset <= rest && rest < f.offset + f.size);
+      if (hits.length !== 1) break;
+      const field = hits[0]!;
+      if (!field.name || !aggregateMembers[shape.base]?.includes(field.name)) break;
+      designator = Expr.member(designator, field.name);
+      rest -= field.offset;
+      size = field.size;
+      spelling = field.type;
+    }
+    return { designator, rest };
+  }
+
+  /**
+   * A literal operand of integer `+`/`-` that is an address in a data block, as the integer
+   * it is: `(intptr_t)&member`, or `((intptr_t)&member + n)` where no member starts there.
+   *
+   * `MCPCONNECT_GetGameNameAndPassword` copies a string with one cursor and the distance
+   * between the buffers, `pSrc[pGameNameOut - (int)pSrc_start]`; the decompiler folds the
+   * source buffer's address into the constant and the tree read
+   * `pSrc[pGameNameOut - 0x799294]`. Relinked, `g_szMCPGameName` is somewhere else, the
+   * distance is wrong and the copy writes to a dead address. Spelled against the buffer it
+   * is the same integer in the image and the right one in the rebuild.
+   *
+   * The arithmetic withdrawal stays the rule everywhere else; this takes only what it can
+   * prove: a HEX literal (Ghidra's spelling of an address; a decimal count that collides is
+   * left), not mask-shaped, inside a data block, owned by exactly one global's extent, with
+   * the other operand not a literal too. The form is an integer of the literal's own
+   * signedness (`uintptr_t` for a `u` suffix), so the expression keeps its type: on the
+   * 32-bit target `intptr_t` is the `int` the literal was.
+   */
+  function arithmeticAddress(side: Expression): Expression | null {
+    // `-0x730520 - (int)pbSrc`: the negated address is the same operand, sign outside.
+    if (side.kind === NodeKind.UnaryExpr && (side as UnaryExpr).operator === '-') {
+      const operand = (side as UnaryExpr).operand;
+      const literal = literalBehind(operand);
+      const form = literal ? addressAsInteger(literal) : null;
+      if (!literal || !form) return null;
+      const ref = replacing(side, Expr.unary('-', form));
+      produced.set(ref, { ...(side as UnaryExpr), operand: literal } as UnaryExpr);
+      arithmeticForms.add(ref);
+      return ref as Expression;
+    }
+    const literal = literalBehind(side);
+    const form = literal ? addressAsInteger(literal) : null;
+    if (!literal || !form) return null;
+    const ref = replacing(literal, form);
+    produced.set(ref, literal);
+    arithmeticForms.add(ref);
+    return ref as Expression;
+  }
+
+  /**
+   * The global an address in a data block belongs to: the one whose extent holds it, or -
+   * where it is in no extent at all - the one that starts the byte after it. That second
+   * reading is the biased base of a byte copy, `end - (src - 1)`: `0x73051f` is one below
+   * the string at 0x730520 and inside nothing, so it is `(intptr_t)str - 1`.
+   */
+  function dataOwner(v: number): { candidate: Candidate; offset: number } | null {
+    const owned = ownerOfAddress(v, candidates);
+    if (owned) return owned;
+    if (candidates.some(c => c.size > 0 && v >= c.address && v < c.address + c.size)) return null;
+    const next = candidates.filter(c => c.address === v + 1);
+    return next.length === 1 ? { candidate: next[0]!, offset: -1 } : null;
+  }
+
+  /** `(intptr_t)&member`, `((intptr_t)&member + n)` or `((intptr_t)&global - 1)`; see above. */
+  function addressAsInteger(literal: IntegerLiteralExpr): Expression | null {
+    if (literal.base !== 16 || /ll/i.test(literal.suffix ?? '')) return null;
+    if (literal.value <= 0n || literal.value >= BigInt(ADDRESS_CEILING)) return null;
+    const v = Number(literal.value);
+    if (!inDataSection(v, dataSections) || isMaskShaped(v)) return null;
+    const owned = dataOwner(v);
+    if (!owned) return null;
+    const owner = owned.candidate;
+    // A string constant's name here is rebuilt from its text, and where that differs from
+    // Ghidra's label (a leading blank: `s___not_xlated_...` against `s_-not_xlated_...`)
+    // the body's own references name a second copy. A distance taken from one copy and
+    // applied to the other is the wild write this rule exists to remove.
+    if (owner.stringConstant) return null;
+    const width = Type.typedef(/u/i.test(literal.suffix ?? '') ? 'uintptr_t' : 'intptr_t');
+    let address: Expression;
+    let rest: number;
+    if (owned.offset < 0) {
+      address = Expr.unary('&', owner.segments.length === 0
+        ? Expr.identifier(owner.name)
+        : Expr.qualifiedId([...owner.segments, owner.name]));
+      rest = owned.offset;
+    } else {
+      const path = memberPath(owner, owned.offset);
+      address = Expr.unary('&', path.designator);
+      rest = path.rest;
+    }
+    const asInteger = Expr.cast(width, address);
+    if (rest === 0) return asInteger;
+    return Expr.paren(Expr.binary(asInteger, rest > 0 ? '+' : '-', Expr.intLiteral(Math.abs(rest))));
+  }
+
+  /** `a + b` / `a - b` with each address literal operand spelled by `arithmeticAddress`. */
+  function arithmeticAddresses(node: BinaryExpr): BinaryExpr | null {
+    if (node.operator !== '+' && node.operator !== '-') return null;
+    if (dataSections.length === 0) return null;
+    if (literalBehind(node.left) && literalBehind(node.right)) return null;
+    const left = arithmeticAddress(node.left);
+    const right = arithmeticAddress(node.right);
+    if (!left && !right) return null;
+    return {
+      ...node,
+      left: left ?? ((produced.get(node.left) ?? node.left) as Expression),
+      right: right ?? ((produced.get(node.right) ?? node.right) as Expression),
+    };
+  }
+
   /**
    * The addends of an expression a POINTER CAST is applied to.
    *
@@ -1363,6 +1573,8 @@ function createGlobalAddressLiteralTransformer(
    * the whole array.
    */
   function addendsUnderPointerCast(expr: Expression): Expression | null {
+    // Under a pointer cast the addend is respelled by this rule's own spelling.
+    if (arithmeticForms.has(expr)) expr = produced.get(expr) as Expression;
     if (expr.kind === NodeKind.ParenExpr) {
       const paren = expr as ParenExpr;
       const inner = addendsUnderPointerCast(paren.expression);
@@ -1502,7 +1714,7 @@ function createGlobalAddressLiteralTransformer(
     // byte in the image and different objects once the linker has placed them.
     visitBinaryExpr(node: BinaryExpr) {
       if (ARITHMETIC_OPS.has(node.operator)) {
-        return byteDisplacement(node) ?? withOperandsRestored(node);
+        return byteDisplacement(node) ?? arithmeticAddresses(node) ?? withOperandsRestored(node);
       }
       if (!RELATIONAL_OPS.has(node.operator)) return undefined;
 
@@ -1605,6 +1817,20 @@ export interface GlobalAddressLiteralOptions extends PluginOptions {
    * judged and the bare form stands.
    */
   enclosingReturnType?: string;
+  /**
+   * The image's data blocks as [start, end). A literal inside one that is an operand of
+   * integer `+` or `-` is an address in arithmetic - the folded `dst - src` of a copy loop -
+   * and is spelled `(intptr_t)&member`; see `arithmeticAddress`. Absent: that rule is off.
+   */
+  dataSections?: ReadonlyArray<readonly [number, number]>;
+  /** Global name (as emitted) -> its declared type spelling, for the member walk. */
+  globalTypes?: Record<string, string>;
+  /** Aggregate name -> every field's offset, size and Ghidra type, in offset order. */
+  structLayouts?: Record<string, ReadonlyArray<{ name: string; offset: number; size: number; type: string; bitSize?: number }>>;
+  /** Aggregate name -> every member name its emitted declaration carries. */
+  aggregateMembers?: Record<string, readonly string[]>;
+  /** The aggregates that are unions: a byte inside one names no single member. */
+  unionNames?: readonly string[];
 }
 
 export const globalAddressLiteralPlugin: TransformPlugin = {

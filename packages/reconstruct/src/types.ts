@@ -440,6 +440,12 @@ export interface ProgramInfo {
   languageId: string;
   endianness: 'big' | 'little';
   pointerSize: number;
+  /**
+   * The image's data blocks as [start, end) - readable, not executable, not the headers.
+   * Where an integer in arithmetic can be an address at all; absent when the extraction
+   * predates it or the server could not list memory blocks.
+   */
+  dataSections?: Array<[number, number]>;
 }
 
 /**

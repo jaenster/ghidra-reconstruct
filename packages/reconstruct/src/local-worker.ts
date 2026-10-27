@@ -78,6 +78,8 @@ export function buildWorkerCommand(tool: string, params: Params): WorkerCommand 
       return { command: 'list_data_types', params: pick(params, ['offset', 'limit', 'filter', 'regex', 'category']) };
     case 'get_data_type':
       return { command: 'get_data_type', params: pick(params, ['name', 'category']) };
+    case 'list_segments':
+      return { command: 'list_segments', params: {} };
     case 'list_strings':
       return { command: 'list_strings', params: pick(params, ['offset', 'limit', 'minLength', 'filter', 'regex']) };
     case 'list_namespaces':

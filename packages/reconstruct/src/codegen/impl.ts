@@ -539,6 +539,11 @@ export interface ImplGenContext {
    * clears the 64KB platform reserve and is still a byte count.
    */
   imageBase?: string;
+  /**
+   * The image's data blocks, [start, end) (`ProgramInfo.dataSections`). Only an address
+   * inside one is taken as an address when it is an operand of integer `+`/`-`.
+   */
+  dataSections?: ReadonlyArray<readonly [number, number]>;
   /** File-local globals for the current impl file */
   fileLocalGlobals?: AnalyzedDataSymbol[];
   /** Struct/union/enum names, for the qualified-name cleanup on reference sites. */
@@ -2524,6 +2529,13 @@ function transformDecompiledCode(
         globalNamespaces: context.funcPtrArgCasts.globalNamespaces,
         stringConstantNames: context.funcPtrArgCasts.stringConstantNames,
         imageBase: context.imageBase,
+        // An operand of integer `+`/`-` inside a data block is spelled against the
+        // member it lands in: the types say which member that is.
+        dataSections: context.dataSections,
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        structLayouts: context.funcPtrArgCasts.structLayouts,
+        aggregateMembers: context.funcPtrArgCasts.aggregateMembers,
+        unionNames: context.funcPtrArgCasts.unionNames,
         // `&global` is pointer-typed and does not convert to an integer return,
         // so it is spelled `(T)(uintptr_t)&global` there rather than withdrawn.
         // The T is the wrapper's own return type — the same spelling the emitted

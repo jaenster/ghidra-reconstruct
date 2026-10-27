@@ -19,7 +19,7 @@ import { structPackingMismatch } from './checks/layout.js';
 import { arrayIndexRange } from './checks/ranges.js';
 import { ghidraArtifact } from './checks/artifacts.js';
 import { rawAddressInitializer } from './checks/initializers.js';
-import { rawAddressArgument } from './checks/addresses.js';
+import { rawAddressArgument, rawAddressArithmetic } from './checks/addresses.js';
 import { undersizedGlobalArgument } from './checks/arguments.js';
 import { plateTemplateComment, PLATE_TEMPLATE_CHECK_ID } from './checks/comments.js';
 import { includePathCase, INCLUDE_PATH_CASE_CHECK_ID } from './checks/include-case.js';
@@ -59,6 +59,7 @@ export const ALL_CHECKS: Check[] = [
   untypedVirtualCall,
   rawAddressInitializer,
   rawAddressArgument,
+  rawAddressArithmetic,
   ghidraArtifact,
   plateTemplateComment,
   includePathCase,

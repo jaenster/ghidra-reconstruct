@@ -1374,4 +1374,140 @@ describe('globalAddressLiteralPlugin', () => {
         .includes('(char*)&gaPalette + 2'));
     });
   });
+
+  describe('an address literal in integer + / - inside a data block', () => {
+    // 1.14d: .rdata/.data/bss run 0x6cc000..0x994ca4; .text below.
+    const MCP: GlobalAddressLiteralOptions = {
+      globalAddresses: {
+        g_szMCPGameName: 0x799294,
+        g_szMCPGamePassword: 0x798f60,
+        gbLanGameListEntryNamePadding2: 0x77bdc8,
+        gPaletteAct1: 0x7d0000,
+        gCode: 0x500100,
+      },
+      globalSizes: {
+        g_szMCPGameName: 16, g_szMCPGamePassword: 24,
+        gbLanGameListEntryNamePadding2: 59000, gPaletteAct1: 0x40000, gCode: 64,
+      },
+      globalElementSizes: { gbLanGameListEntryNamePadding2: 59, gCode: 4 },
+      globalTypes: {
+        g_szMCPGameName: 'char[16]', g_szMCPGamePassword: 'char[24]',
+        gbLanGameListEntryNamePadding2: 'D2GameListEntryStrc[1000]',
+        gPaletteAct1: 'uint8_t[262144]', gCode: 'int[16]',
+      },
+      structLayouts: {
+        D2GameListEntryStrc: [
+          { name: 'unk0x00', offset: 0, size: 1, type: 'byte' },
+          { name: 'szName', offset: 1, size: 16, type: 'char[16]' },
+          { name: 'szDescription', offset: 17, size: 32, type: 'char[32]' },
+          { name: 'wDisplayedCount', offset: 49, size: 2, type: 'word' },
+          { name: 'nJoinId', offset: 51, size: 2, type: 'word' },
+          { name: 'unk0x35', offset: 53, size: 2, type: 'word' },
+          { name: 'dwIpAddr', offset: 55, size: 4, type: 'uint' },
+        ],
+      },
+      aggregateMembers: {
+        D2GameListEntryStrc: ['unk0x00', 'szName', 'szDescription', 'wDisplayedCount', 'nJoinId', 'unk0x35', 'dwIpAddr'],
+      },
+      dataSections: [[0x6cc000, 0x705000], [0x705000, 0x74d000], [0x74d000, 0x994ca4]],
+    };
+
+    it('spells a cursor distance against the source buffer (McpConnect game name)', () => {
+      const out = run(`void f(int32_t pGameNameOut) { pSrc[pGameNameOut - 0x799294] = ch; }`, MCP);
+      assert.ok(out.includes('pSrc[pGameNameOut - (intptr_t)&g_szMCPGameName]'), out);
+      assert.ok(!out.includes('0x799294'), out);
+    });
+
+    it('spells the password copy the same way', () => {
+      const out = run(`void f(int32_t pPasswordOut) { pSrc[pPasswordOut - 0x798f60] = ch; }`, MCP);
+      assert.ok(out.includes('pSrc[pPasswordOut - (intptr_t)&g_szMCPGamePassword]'), out);
+    });
+
+    it('names the member an interior address starts (game list name)', () => {
+      const out = run(
+        `void f() { nIndex = nGameListDifficultyFilter * 0x3b + 0x77bdc9 - (int)pszSrc; }`, MCP);
+      assert.ok(out.includes(
+        'nGameListDifficultyFilter * 0x3b + (intptr_t)&gbLanGameListEntryNamePadding2[0].szName - (int)pszSrc'), out);
+    });
+
+    it('names the member an interior address starts (game list description)', () => {
+      const out = run(
+        `void f() { nIndex = nGameListDifficultyFilter * 0x3b + 0x77bdd9 - (int)pszSrc; }`, MCP);
+      assert.ok(out.includes('(intptr_t)&gbLanGameListEntryNamePadding2[0].szDescription - (int)pszSrc'), out);
+    });
+
+    it('takes the literal on the left of a subtraction too', () => {
+      const out = run(`void f() { n = 0x799294 - (int)pszSrc; }`, MCP);
+      assert.ok(out.includes('n = (intptr_t)&g_szMCPGameName - (int)pszSrc'), out);
+    });
+
+    it('walks into an array member and keeps a byte remainder where no member starts', () => {
+      assert.ok(run(`void f() { n = x + 0x77bdcc; }`, MCP)
+        .includes('x + (intptr_t)&gbLanGameListEntryNamePadding2[0].szName[3]'));
+      // Byte 56 of row 1 is inside dwIpAddr (55..59), which is no array.
+      assert.ok(run(`void f() { n = x - 0x77be3b; }`, MCP)
+        .includes('x - ((intptr_t)&gbLanGameListEntryNamePadding2[1].dwIpAddr + 1)'));
+    });
+
+    it('keeps the unsigned signedness of a u-suffixed literal', () => {
+      assert.ok(run(`void f() { n = x - 0x799294U; }`, MCP).includes('x - (uintptr_t)&g_szMCPGameName'));
+    });
+
+    it('leaves an address outside the data blocks', () => {
+      const out = run(`void f() { n = x - 0x500104; }`, MCP);
+      assert.ok(out.includes('0x500104'), out);
+    });
+
+    it('leaves a decimal count, a mask and a literal-only sum', () => {
+      assert.ok(run(`void f() { n = x - 7967380; }`, MCP).includes('7967380'));
+      assert.ok(run(`void f() { n = x + 0x7fffff; }`, MCP).includes('0x7fffff'));
+      assert.ok(run(`void f() { n = 0x10 + 0x799294; }`, MCP).includes('0x799294'));
+    });
+
+    it('leaves other arithmetic operators alone', () => {
+      assert.ok(run(`void f() { n = x & 0x799295; }`, MCP).includes('0x799295'));
+      assert.ok(run(`void f() { n = x * 0x799295; }`, MCP).includes('0x799295'));
+    });
+
+    it('does nothing without data blocks', () => {
+      const out = run(`void f(int32_t p) { q[p - 0x799294] = c; }`, { ...MCP, dataSections: undefined });
+      assert.ok(out.includes('0x799294'), out);
+    });
+
+    // A 24-byte buffer at 0x7a0520 after a 2-byte symbol that ends at 0x7a051e;
+    // 0x7a051f is in no extent. And the same layout as a string constant.
+    const BIAS: GlobalAddressLiteralOptions = {
+      ...MCP,
+      globalAddresses: { ...MCP.globalAddresses, gnShort: 0x7a051c, gszSuffix: 0x7a0520, s_not_xlated_00730520: 0x730520 },
+      globalSizes: { ...MCP.globalSizes, gnShort: 2, gszSuffix: 24, s_not_xlated_00730520: 24 },
+      stringConstantNames: ['s_not_xlated_00730520'],
+    };
+
+    it('spells a negated address operand with the sign outside', () => {
+      const out = run(`void f() { n = pcKeyEnd + (int)(pbKeyCopy + (-0x7a0520 - (int)pbSrc)); }`, BIAS);
+      assert.ok(out.includes('(-(intptr_t)&gszSuffix - (int)pbSrc)'), out);
+    });
+
+    it('reads an address in no extent one below a global as its biased base', () => {
+      const out = run(`void f(char* pcSuffixEnd) { n = (uint32_t)(pcSuffixEnd - 0x7a051f) >> 2; }`, BIAS);
+      assert.ok(out.includes('pcSuffixEnd - ((intptr_t)&gszSuffix - 1)'), out);
+    });
+
+    it('does not take a bias inside another extent', () => {
+      // Inside the 2-byte scalar, which has no addressable interior: left alone.
+      const out = run(`void f() { n = x - 0x7a051d; }`, BIAS);
+      assert.ok(out.includes('x - 0x7a051d'), out);
+    });
+
+    it('leaves a string constant, whose rebuilt name may not be the body\'s', () => {
+      assert.ok(run(`void f() { n = x - 0x73051f; }`, BIAS).includes('x - 0x73051f'));
+      assert.ok(run(`void f() { n = (-0x730520 - p); }`, BIAS).includes('-0x730520'));
+    });
+
+    it('keeps the pointer-cast spelling for an addend under a pointer cast', () => {
+      const out = run(`void f() { y = *(int*)(i * 8 + 0x77bdcc); }`, MCP);
+      assert.ok(out.includes('(char*)&gbLanGameListEntryNamePadding2 + 4'), out);
+    });
+  });
 });
+

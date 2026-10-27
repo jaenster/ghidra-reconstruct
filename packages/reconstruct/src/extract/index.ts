@@ -78,6 +78,12 @@ export interface ProgramInfo {
   languageId: string;
   endianness: 'big' | 'little';
   pointerSize: number;
+  /**
+   * The image's data blocks as [start, end) - readable, not executable, not the headers.
+   * Where an integer in arithmetic can be an address at all; absent when the extraction
+   * predates it or the server could not list memory blocks.
+   */
+  dataSections?: Array<[number, number]>;
 }
 
 /**
@@ -141,6 +147,8 @@ export async function extractAll(
 
   // Get program info first
   const programInfo = await connection.sendCommand<ProgramInfo>('get_program_info');
+  const dataSections = await extractDataSections(connection, programInfo.imageBase);
+  if (dataSections) programInfo.dataSections = dataSections;
 
   // Extract in parallel where possible
   const [namespaces, dataTypesList, analyzedGlobals, strings] = await timePhase(
@@ -225,4 +233,48 @@ export async function extractAll(
     namespaces,
     programInfo,
   };
+}
+
+interface MemoryBlockRecord {
+  name?: string;
+  start?: string;
+  end?: string;
+  permissions?: string;
+  isVolatile?: boolean;
+}
+
+/**
+ * The image's data blocks, [start, end): every memory block that is not executable, not
+ * volatile and not the PE headers (the block the image base sits in), below the top of the
+ * user address space. `.rdata`, `.data` and the uninitialised tail of `.data` qualify;
+ * `.text` does not.
+ *
+ * Null when the server cannot list blocks: the passes that read this then do nothing.
+ */
+export async function extractDataSections(
+  connection: GhidraConnection,
+  imageBase: string | undefined,
+): Promise<Array<[number, number]> | null> {
+  let blocks: MemoryBlockRecord[];
+  try {
+    const listed = await connection.sendCommand<{ segments?: MemoryBlockRecord[] }>('list_segments', { limit: 1000 });
+    blocks = listed?.segments ?? [];
+  } catch {
+    return null;
+  }
+  const hex = (text: string | undefined) =>
+    text && /^\s*(0x)?[0-9a-f]+\s*$/i.test(text) ? Number.parseInt(text.trim().replace(/^0x/i, ''), 16) : NaN;
+  const base = hex(imageBase);
+  const out: Array<[number, number]> = [];
+  for (const b of blocks) {
+    const start = hex(b.start);
+    const end = hex(b.end);
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || end < start) continue;
+    if (start >= 0x80000000) continue;
+    if ((b.permissions ?? '').includes('x') || b.isVolatile) continue;
+    if (Number.isSafeInteger(base) && start <= base && base <= end) continue;
+    out.push([start, end + 1]);
+  }
+  out.sort((a, b) => a[0] - b[0]);
+  return out.length > 0 ? out : null;
 }

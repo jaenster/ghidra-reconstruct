@@ -1054,6 +1054,7 @@ export function generateProjectStage1(
     libraries,
     methodConversions,
     imageBase: programInfo?.imageBase,
+    dataSections: programInfo?.dataSections,
     methodMappings: Object.keys(mergedMappings).length > 0 ? mergedMappings : undefined,
     bitfieldCatalog: bitfieldCatalog.size > 0 ? bitfieldCatalog : undefined,
   };
