@@ -386,3 +386,61 @@ describe('stack-frame-address: frame base', () => {
     assert.ok(out.includes('stack0x00000000'), out);
   });
 });
+
+// DRLGPATH_ExtractPathFromResult (0067a9f0): the copy source is one past the end of
+// aWaypointStack minus n; in Ghidra's frame that end is pWaypointDst.
+describe('stack-frame-address: an address below the local an array ends at', () => {
+  const PATH_SLOTS = [
+    { name: 'pWaypointStack', offset: -8, size: 4 },
+    { name: 'nPrevDY', offset: -12, size: 4 },
+    { name: 'pParentNode', offset: -16, size: 4 },
+    { name: 'pWaypointDst', offset: -20, size: 4 },
+    { name: 'aWaypointStack', offset: -332, size: 312, isArray: true },
+  ];
+  const BODY = (expr: string) => `int f(int nWaypointCount) { uint32_t aWaypointStack[78]; void *pWaypointDst; int pParentNode;
+    memcpy(pWaypointDst, ${expr}, nWaypointCount * 4); return nWaypointCount; }`;
+
+  it('respells the v1743 copy source against the array end', () => {
+    const out = run(BODY('&pWaypointDst + -nWaypointCount'), PATH_SLOTS);
+    assert.ok(out.includes('memcpy(pWaypointDst, (void**)(aWaypointStack + 78) + -nWaypointCount,'), out);
+  });
+
+  it('respells the subtracted form too', () => {
+    const out = run(BODY('&pWaypointDst - nWaypointCount'), PATH_SLOTS);
+    assert.ok(out.includes('(void**)(aWaypointStack + 78) - nWaypointCount'), out);
+  });
+
+  it('respells a constant step that stays inside the array', () => {
+    const out = run(BODY('&pWaypointDst - 3'), PATH_SLOTS);
+    assert.ok(out.includes('(void**)(aWaypointStack + 78) - 3'), out);
+  });
+
+  it('leaves a constant step that would run past the array', () => {
+    const out = run(BODY('&pWaypointDst - 79'), PATH_SLOTS);
+    assert.ok(out.includes('&pWaypointDst - 79'), out);
+  });
+
+  it('leaves an upward step: that is not the array', () => {
+    const out = run(BODY('&pWaypointDst + nWaypointCount'), PATH_SLOTS);
+    assert.ok(out.includes('&pWaypointDst + nWaypointCount'), out);
+  });
+
+  it('leaves a pointer difference', () => {
+    const out = run('int f(int *p) { uint32_t aWaypointStack[78]; void *pWaypointDst; return &pWaypointDst - p; }', PATH_SLOTS);
+    assert.ok(out.includes('&pWaypointDst - p'), out);
+  });
+
+  it('leaves a local no array ends at', () => {
+    const out = run(BODY('&pParentNode - nWaypointCount'), PATH_SLOTS);
+    assert.ok(out.includes('&pParentNode - nWaypointCount'), out);
+  });
+
+  it('reads the same words as the machine for every count', () => {
+    // Frame offsets: the array spans -332..-20, pWaypointDst is at -20.
+    for (let n = 2; n <= 77; n++) {
+      const machine = -20 - n * 4;                 // &pWaypointDst - n
+      const rebuilt = -332 + (78 - n) * 4;         // aWaypointStack + 78 - n
+      assert.strictEqual(rebuilt, machine);
+    }
+  });
+});

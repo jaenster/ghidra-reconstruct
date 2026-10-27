@@ -99,6 +99,7 @@ import { typeNodeName } from './call-arg-cast.js';
 import { createPlugin } from '../registry.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { memoOnInputs, hasOwnKeys, type MemoSlot } from './input-memo.js';
+import { Expr, Type } from '../../../ast/factory.js';
 
 /** One entry of Ghidra's stack frame: a named variable at a signed byte offset. */
 export interface StackSlot {
@@ -975,6 +976,142 @@ function createDeadFrameStoreTransformer(): Transformer {
   };
 }
 
+/**
+ * An address BELOW a scalar local that an array ends at: `&X - n`.
+ *
+ * MSVC addresses the end of a frame array as the address of whatever follows it.
+ * `DRLGPATH_ExtractPathFromResult` @0067a9f0 fills `uint32_t aWaypointStack[78]`
+ * (-0x14c) from the top down and copies the last `n` words out from one past
+ * the array's end, minus n. In Ghidra's
+ * frame that end IS `pWaypointDst` (-0x14), so the decompiler prints
+ *
+ *     memcpy(pWaypointDst, &pWaypointDst + -nWaypointCount, nWaypointCount * 4);
+ *
+ * In the rebuild the two are separate locals, and the copy reads whatever the
+ * compiler put below `pWaypointDst`. The address is respelled against the array:
+ *
+ *     &pWaypointDst + -nWaypointCount  ->  (void **)(aWaypointStack + 78) + -nWaypointCount
+ *
+ * The same address in the image and the same pointer type, on the object that
+ * owns the storage. Held to: X a declared, non-array local slot; an array slot,
+ * declared with a known element size, that ends exactly at X's offset; the step
+ * provably downward (a negated or subtracted operand, a constant one bounded by
+ * the array). Nothing else is touched.
+ */
+function createArrayEndAddressTransformer(slots: StackSlot[]): Transformer {
+  return (root: ASTNode) => {
+    const elementSizes = arrayElementSizes(root, slots);
+    if (elementSizes.size === 0) return root;
+    // Arrays by the offset they end at; two ending at one offset is no answer.
+    const arrayEndingAt = new Map<number, StackSlot | null>();
+    for (const s of slots) {
+      if (!s.isArray || !elementSizes.has(s.name)) continue;
+      const end = s.offset + s.size;
+      arrayEndingAt.set(end, arrayEndingAt.has(end) ? null : s);
+    }
+    if (arrayEndingAt.size === 0) return root;
+
+    // Declared scalar locals: name -> the declaration's type. Declared twice is refused.
+    const declTypes = new Map<string, TypeNode | null>();
+    for (const n of traverseAST(root)) {
+      if (n.kind !== NodeKind.VariableDecl && n.kind !== NodeKind.ParameterDecl) continue;
+      const d = n as VariableDecl | ParameterDecl;
+      const name = d.name?.name;
+      if (!name || !d.type) continue;
+      declTypes.set(name, declTypes.has(name) ? null : d.type);
+    }
+    const scalarSlots = new Map<string, StackSlot | null>();
+    for (const s of slots) {
+      if (s.isArray || s.isParameter) continue;
+      scalarSlots.set(s.name, scalarSlots.has(s.name) ? null : s);
+    }
+
+    /** An integer-valued operand: a literal, an integer local or parameter, arithmetic of those. */
+    function isIntegerOperand(e: Expression): boolean {
+      const x = unwrapParens(e);
+      if (x.kind === NodeKind.IntegerLiteral) return true;
+      if (x.kind === NodeKind.Identifier) {
+        const t = declTypes.get((x as Identifier).name);
+        return !!t && isIntegerType(t);
+      }
+      if (x.kind === NodeKind.CStyleCastExpr) return isIntegerType((x as CStyleCastExpr).type);
+      if (x.kind === NodeKind.UnaryExpr && (x as UnaryExpr).operator === '-') return isIntegerOperand((x as UnaryExpr).operand);
+      if (x.kind === NodeKind.BinaryExpr && ['*', '+', '-', '<<'].includes((x as BinaryExpr).operator)) {
+        return isIntegerOperand((x as BinaryExpr).left) && isIntegerOperand((x as BinaryExpr).right);
+      }
+      return false;
+    }
+
+    /** The array whose end `&X` is, with X's declared type; null when `e` is not that. */
+    function arrayEnd(e: Expression): { array: StackSlot; type: TypeNode; x: StackSlot } | null {
+      const u = unwrapParens(e);
+      if (u.kind !== NodeKind.UnaryExpr || (u as UnaryExpr).operator !== '&') return null;
+      const operand = unwrapParens((u as UnaryExpr).operand);
+      if (operand.kind !== NodeKind.Identifier) return null;
+      const x = scalarSlots.get((operand as Identifier).name);
+      if (!x) return null;
+      const type = declTypes.get(x.name);
+      if (!type || type.kind === NodeKind.ArrayType) return null;
+      const array = arrayEndingAt.get(x.offset);
+      if (!array) return null;
+      return { array, type, x };
+    }
+
+    /**
+     * How many X-sized steps DOWN `step` goes when added: a constant negative
+     * count, `'unbounded'` for a negated variable, or null when it is not provably
+     * downward.
+     */
+    function downward(step: Expression, subtracted: boolean): number | 'unbounded' | null {
+      const s = unwrapParens(step);
+      const negated = s.kind === NodeKind.UnaryExpr && (s as UnaryExpr).operator === '-';
+      if (subtracted === negated) return null;
+      const magnitude = unwrapParens(negated ? (s as UnaryExpr).operand : s);
+      if (magnitude.kind === NodeKind.IntegerLiteral) {
+        const k = Number((magnitude as IntegerLiteralExpr).value);
+        return k > 0 ? k : null;
+      }
+      if (magnitude.kind === NodeKind.UnaryExpr && (magnitude as UnaryExpr).operator === '-') return null;
+      return isIntegerOperand(magnitude) ? 'unbounded' : null;
+    }
+
+    function respelled(at: { array: StackSlot; type: TypeNode }, from: ASTNode): Expression {
+      const count = at.array.size / elementSizes.get(at.array.name)!;
+      const end = Expr.paren(Expr.binary(Expr.identifier(at.array.name), '+', Expr.intLiteral(count)));
+      const cast = Expr.cast(Type.pointer(at.type), end);
+      return { ...Expr.paren(cast), location: from.location,
+        leadingTrivia: from.leadingTrivia ?? [], trailingTrivia: from.trailingTrivia ?? [] } as Expression;
+    }
+
+    function inBounds(steps: number | 'unbounded', at: { array: StackSlot; x: StackSlot }): boolean {
+      return steps === 'unbounded' || steps * at.x.size <= at.array.size;
+    }
+
+    return createTransformer({
+      visitNode(node: ASTNode): ASTNode | undefined {
+        if (node.kind === NodeKind.BinaryExpr) {
+          const b = node as BinaryExpr;
+          if (b.operator !== '+' && b.operator !== '-') return undefined;
+          const at = arrayEnd(b.left);
+          if (!at) return undefined;
+          const steps = downward(b.right, b.operator === '-');
+          if (steps === null || !inBounds(steps, at)) return undefined;
+          return { ...b, left: respelled(at, b.left) } as BinaryExpr;
+        }
+        if (node.kind === NodeKind.SubscriptExpr) {
+          const s = node as SubscriptExpr;
+          const at = arrayEnd(s.array);
+          if (!at) return undefined;
+          const steps = downward(s.index, false);
+          if (steps === null || !inBounds(steps, at)) return undefined;
+          return { ...s, array: respelled(at, s.array) } as SubscriptExpr;
+        }
+        return undefined;
+      },
+    })(root);
+  };
+}
+
 function createStackFrameAddressTransformer(options: StackFrameAddressOptions = {}): Transformer {
   const slots = options.slots ?? [];
   const globalAddresses = options.globalAddresses ?? {};
@@ -994,6 +1131,9 @@ function createStackFrameAddressTransformer(options: StackFrameAddressOptions = 
     // Last of the resolving rules: the frame BASE, which no slot can own, so it
     // only ever reaches here.
     slots.length > 0 ? createFrameBaseAnchorTransformer(slots) : ((node: ASTNode) => node),
+    // Independent of the `stack0x` rules: a NAMED local whose address is the end of
+    // the array below it.
+    slots.length > 0 ? createArrayEndAddressTransformer(slots) : ((node: ASTNode) => node),
     createDeadFrameStoreTransformer(),
   );
 }
