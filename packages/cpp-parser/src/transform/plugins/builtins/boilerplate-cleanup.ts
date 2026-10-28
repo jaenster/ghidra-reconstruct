@@ -164,28 +164,26 @@ function isSecurityCookieDecl(decl: VariableDecl): boolean {
 
 /**
  * Check if an expression statement is a GuardStack call
- * Pattern: Fog::Debug::GuardStack(...) with 1 or 2 arguments
+ * Pattern: Fog::Debug::GuardStack(...) with 0 to 2 arguments
+ *
+ * `Fog::Debug::GuardStack` is 1.14d's `__security_check_cookie` (00681a48). Every
+ * site is the /GS epilogue `MOV ECX,[EBP-4]; XOR ECX,EBP; CALL 00681a48`, which
+ * the compiler writes from the frame, not from the source, and the call reads
+ * nothing but ECX, so the statement carries no value of its own. Up to two
+ * arguments are accepted for a prototype that passes EAX through.
  */
 function isGuardStackCall(stmt: ExprStmt): boolean {
-  // Check expression is a call
   if (stmt.expression.kind !== NodeKind.CallExpr) return false;
   const call = stmt.expression as CallExpr;
 
-  // Extract callee name
-  const calleeName = extractCalleeName(call.callee);
-
-  // Check function name contains GuardStack
-  if (!calleeName.includes('GuardStack')) return false;
+  // The symbol itself, not any name containing it.
+  const namespaceParts = extractCalleeName(call.callee).split('::');
+  if (namespaceParts[namespaceParts.length - 1] !== 'GuardStack') return false;
 
   // Check it's in Fog::Debug namespace (or any namespace ending with Debug)
-  const namespaceParts = calleeName.split('::');
-  const hasDebugNamespace = namespaceParts.some(part => part === 'Debug');
-  if (!hasDebugNamespace) return false;
+  if (!namespaceParts.slice(0, -1).some(part => part === 'Debug')) return false;
 
-  // Accept 1 or 2 arguments (reconstructed code varies)
-  if (call.arguments.length < 1 || call.arguments.length > 2) return false;
-
-  return true;
+  return call.arguments.length <= 2;
 }
 
 /**
@@ -412,20 +410,26 @@ function createSecurityCookieRemover(): Transformer {
 /**
  * Remove GuardStack calls
  * Pattern: Fog::Debug::GuardStack(...)
+ *
+ * A call statement in a block is dropped. A label or an unbraced branch still
+ * needs a statement, so there it becomes the empty statement `;`.
  */
 function createGuardStackRemover(): Transformer {
+  // The empty statements this pass made, so a block drops only those.
+  const removed = new WeakSet<ASTNode>();
   return createTransformer({
     visitNode(node: ASTNode): ASTNode | undefined {
-      // Only handle expression statements
-      if (node.kind !== NodeKind.ExprStmt) {
-        return undefined;
+      if (node.kind === NodeKind.ExprStmt && isGuardStackCall(node as ExprStmt)) {
+        const empty: ASTNode = { kind: NodeKind.NullStmt, location: node.location, leadingTrivia: [], trailingTrivia: [] };
+        removed.add(empty);
+        return empty;
       }
-
-      const stmt = node as ExprStmt;
-      if (isGuardStackCall(stmt)) {
-        return undefined; // Remove this statement
+      if (node.kind === NodeKind.CompoundStmt) {
+        const block = node as CompoundStmt;
+        if (!block.statements.some(s => removed.has(s))) return undefined;
+        return { ...block, statements: block.statements.filter(s => !removed.has(s)) } as CompoundStmt;
       }
-      return undefined; // Keep unchanged
+      return undefined;
     },
   });
 }

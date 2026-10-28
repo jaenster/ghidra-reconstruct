@@ -110,3 +110,72 @@ describe('boilerplateCleanupPlugin D2_ASSERT injection', () => {
     );
   });
 });
+
+function runCleanup(code: string): string {
+  const transformer = boilerplateCleanupPlugin.createTransformer();
+  return emit(transformer(parse(code) as ASTNode) as AnyNode).trim();
+}
+
+describe('boilerplateCleanupPlugin GuardStack removal', () => {
+  it('drops the /GS epilogue call from every return path', () => {
+    const output = runCleanup(`int f(int a) {
+      if (a) {
+        Fog::Debug::GuardStack();
+        return 1;
+      }
+      Fog::Debug::GuardStack();
+      return 0;
+    }`);
+    assert.ok(!output.includes('GuardStack'), output);
+    assert.ok(output.includes('return 1;') && output.includes('return 0;'), output);
+    assert.ok(!/^\s*;\s*$/m.test(output), `no stray empty statement in a block: ${output}`);
+  });
+
+  it('keeps a label that named the call, as an empty statement', () => {
+    const output = runCleanup(`void f(int a) {
+      if (a) goto LAB_1;
+      g();
+    LAB_1:
+      Fog::Debug::GuardStack();
+    }`);
+    assert.ok(!output.includes('GuardStack'), output);
+    assert.ok(/LAB_1:\s*;/.test(output), output);
+  });
+
+  it('leaves an unbraced branch a statement to own', () => {
+    const output = runCleanup(`void f(int a) {
+      if (a) Fog::Debug::GuardStack();
+      g();
+    }`);
+    assert.ok(!output.includes('GuardStack'), output);
+    assert.ok(output.includes('g();'), output);
+  });
+
+  it('still drops the older one- and two-argument forms', () => {
+    const output = runCleanup(`void f(int a) {
+      Fog::Debug::GuardStack(a);
+      Fog::Debug::GuardStack(a, 0);
+    }`);
+    assert.ok(!output.includes('GuardStack'), output);
+  });
+
+  it('keeps a call whose value is used', () => {
+    const output = runCleanup(`int f(int a) {
+      int r;
+      r = Fog::Debug::GuardStack(a);
+      return r;
+    }`);
+    assert.ok(output.includes('Fog::Debug::GuardStack(a)'), output);
+  });
+
+  it('keeps calls that are not Fog::Debug::GuardStack', () => {
+    const output = runCleanup(`void f() {
+      GuardStack();
+      Other::GuardStack();
+      Fog::Debug::GuardStackDepth();
+    }`);
+    assert.ok(output.includes('GuardStack();'), output);
+    assert.ok(output.includes('Other::GuardStack();'), output);
+    assert.ok(output.includes('Fog::Debug::GuardStackDepth();'), output);
+  });
+});
