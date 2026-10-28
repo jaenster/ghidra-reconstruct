@@ -57,6 +57,11 @@ export interface CommitResult {
   sha?: string;
 }
 
+export interface CommitOptions {
+  /** `Name <email>` for the author line. Absent: git's own identity, as always. */
+  author?: string;
+}
+
 /**
  * Stage everything and commit.
  *
@@ -64,7 +69,11 @@ export interface CommitResult {
  * on a regen that changed nothing, and treating it as failure would abort a
  * loop that is in fact working correctly.
  */
-export async function commitRegen(dir: string, message: string): Promise<CommitResult> {
+export async function commitRegen(
+  dir: string,
+  message: string,
+  opts?: CommitOptions,
+): Promise<CommitResult> {
   await git(dir, ['add', '-A']);
 
   const staged = await git(dir, ['diff', '--cached', '--name-only']);
@@ -72,7 +81,10 @@ export async function commitRegen(dir: string, message: string): Promise<CommitR
     return { committed: false };
   }
 
-  const commit = await git(dir, ['commit', '-m', message]);
+  // `--author` only: the committer stays whoever owns the regen worktree, so a
+  // contributed commit still says who landed it.
+  const args = opts?.author ? ['commit', '--author', opts.author, '-m', message] : ['commit', '-m', message];
+  const commit = await git(dir, args);
   if (commit.code !== null) {
     throw new Error(`git commit failed in ${dir}: ${commit.stderr.trim() || commit.stdout.trim()}`);
   }
@@ -154,4 +166,28 @@ export async function assertNotBranch(dir: string, branch: string): Promise<void
   if (on === branch) {
     throw new Error(`${dir} is on '${branch}'; refusing to write there.`);
   }
+}
+
+/** True when the worktree has nothing staged, modified or untracked. */
+export async function isClean(dir: string): Promise<boolean> {
+  const status = await git(dir, ['status', '--porcelain']);
+  if (status.code !== null) {
+    throw new Error(`git status failed in ${dir}: ${status.stderr.trim()}`);
+  }
+  return status.stdout.trim().length === 0;
+}
+
+/**
+ * The newest commit on HEAD whose message carries `line` as a whole line, or null.
+ *
+ * Used to make a proposal commit idempotent: a caller that retries after a lost
+ * response gets the commit that already landed instead of a second one.
+ */
+export async function findCommitWithLine(dir: string, line: string): Promise<string | null> {
+  const pattern = `^${line.replace(/[.[\]\\*^$]/g, m => `\\${m}`)}$`;
+  const result = await git(dir, ['log', '-1', '--format=%H', `--grep=${pattern}`, 'HEAD']);
+  if (result.code !== null) {
+    throw new Error(`git log failed in ${dir}: ${result.stderr.trim()}`);
+  }
+  return result.stdout.trim() || null;
 }

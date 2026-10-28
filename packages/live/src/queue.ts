@@ -22,7 +22,7 @@
  * batch that follows.
  */
 
-export type TaskKind = 'apply' | 'rebuild' | 'merge' | 'full-regen' | 'measure';
+export type TaskKind = 'apply' | 'rebuild' | 'merge' | 'full-regen' | 'measure' | 'proposal';
 
 export interface Task<T = unknown> {
   kind: TaskKind;
