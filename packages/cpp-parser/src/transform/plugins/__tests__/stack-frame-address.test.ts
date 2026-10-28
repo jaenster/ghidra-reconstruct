@@ -444,3 +444,56 @@ describe('stack-frame-address: an address below the local an array ends at', () 
     }
   });
 });
+
+describe('stack-frame-address: varargs list via va_start', () => {
+  // `UNICODE_FormatWideString(int32_t nMaxChars, WCHAR *wszDst, WCHAR *wszFmt, ...)`
+  // @0x005269d0: `MOV ECX,[EBP+0x14]` reads the first unnamed argument and
+  // `LEA EDX,[EBP+0x14]` takes the list's address.
+  const FMT_SLOTS = [
+    { name: 'nMaxChars', offset: 4, size: 4, isParameter: true },
+    { name: 'wszDst', offset: 8, size: 4, isParameter: true },
+    { name: 'wszFmt', offset: 12, size: 4, isParameter: true },
+  ];
+
+  it('opens the body with va_start and stores the list into the walking local', () => {
+    const out = run(
+      'void f(int nMaxChars, uint16_t *wszDst, uint16_t *wszFmt, ...) { uint16_t *in_stack_00000010; uint16_t **ppArgCur; uint16_t *pArgSave; pArgSave = in_stack_00000010; ppArgCur = &stack0x00000010; ppArgCur = ppArgCur + 1; }',
+      FMT_SLOTS);
+    assert.ok(/\{ va_list __va; va_start\(__va, wszFmt\);/.test(out), out);
+    assert.ok(/ppArgCur = \(uint16_t\s*\*\s*\*\)__va;/.test(out), out);
+    assert.ok(/pArgSave = \(?\*\(uint16_t\s*\*\s*\*\)__va\)?;/.test(out), out);
+    assert.ok(!out.includes('in_stack_'), out);
+    assert.ok(!out.includes('stack0x'), out);
+  });
+
+  it('passes the list bare to a v-printf, whose parameter is already va_list', () => {
+    const out = run('void f(char *szFormat, ...) { vsprintf(buf, szFormat, &stack0x00000008); }');
+    assert.ok(/va_start\(__va, szFormat\);/.test(out), out);
+    assert.ok(/vsprintf\(buf, szFormat, __va\)/.test(out), out);
+  });
+
+  it('reads a later variadic word at its distance from the list', () => {
+    const out = run('void f(char *szFormat, ...) { int in_stack_0000000c; x = in_stack_0000000c; }');
+    assert.ok(/x = \(?\*\(int\s*\*\)\(__va \+ 4\)\)?;/.test(out), out);
+  });
+
+  it('starts the list one whole word past a narrow last parameter', () => {
+    // A `char` still takes a 4-byte argument slot.
+    const out = run('void f(char c, ...) { vf(&stack0x00000008); }',
+      [{ name: 'c', offset: 4, size: 1, isParameter: true }]);
+    assert.ok(/va_start\(__va, c\);/.test(out), out);
+    assert.ok(/vf\(__va\)/.test(out), out);
+  });
+
+  it('leaves a function that is not variadic to the slot rules', () => {
+    const out = run('void f(char *szFormat) { vsprintf(buf, szFormat, &stack0x00000008); }');
+    assert.ok(!out.includes('va_start'), out);
+    assert.ok(/\(va_list\)\s*\(\(uint8_t\s*\*\)&szFormat \+ 4\)/.test(out), out);
+  });
+
+  it('does not touch an in_stack_ word below the variadic area', () => {
+    const out = run('void f(char *szFormat, ...) { int in_stack_00000004; x = in_stack_00000004; }');
+    assert.ok(!out.includes('va_start'), out);
+    assert.ok(out.includes('in_stack_00000004'), out);
+  });
+});
