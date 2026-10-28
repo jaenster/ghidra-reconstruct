@@ -216,7 +216,7 @@ import type {
   StringLiteralExpr,
 } from '../../../ast/nodes.js';
 import { traverseAST, getChildren, findNodesByKind } from '../../../ast/visitor.js';
-import { createTransformer, createKindTransformer, updateNode, identity, type Transformer } from '../../transformer.js';
+import { createTransformer, createKindTransformer, updateNode, identity, sequence, type Transformer } from '../../transformer.js';
 import { Decl, Expr, Stmt, Type } from '../../../ast/factory.js';
 import { TriviaKind } from '../../../lexer/trivia.js';
 import { typeNodeName, builtinBase } from './call-arg-cast.js';
@@ -1232,6 +1232,82 @@ function unwrapGroupAccess(node: unknown, groupVars: Set<string>): Identifier | 
   return n.member.kind === NodeKind.Identifier ? (n.member as Identifier) : null;
 }
 
+/**
+ * The locals `boilerplate-cleanup` marked as the /GS cookie slot that the body
+ * still never references. A later pass can bind a frame address to the slot
+ * (`&stack0xfffffffc` is the cookie's own address), and then it is a local like
+ * any other.
+ */
+function securityCookieLocals(body: ASTNode): Set<string> {
+  const names = new Set<string>();
+  const declNames = new Set<ASTNode>();
+  for (const d of findNodesByKind(body, NodeKind.VariableDecl)) {
+    const v = d as VariableDecl;
+    if (!v.name) continue;
+    declNames.add(v.name);
+    if (v.ghidraInfo?.securityCookie) names.add(v.name.name);
+  }
+  if (names.size === 0) return names;
+  for (const n of traverseAST(body)) {
+    if (n.kind === NodeKind.Identifier && !declNames.has(n)) names.delete((n as Identifier).name);
+  }
+  return names;
+}
+
+/**
+ * A run with its trailing /GS cookie member dropped, or the run unchanged.
+ *
+ * Nothing writes the cookie slot but the compiler's own prologue: a callee that
+ * reached it would fail the epilogue check. So a run that only includes the
+ * cookie because it is contiguous loses nothing by ending before it, and every
+ * other member keeps its offset. The member stays wherever dropping it would
+ * change more than the run's end: in the middle of the run (an EH frame puts the
+ * cookie below the registration node), after a hole the cookie's bytes were
+ * holding open, or where fewer than two declared members would be left.
+ */
+function trimCookieTail(run: GroupMember[], cookies: ReadonlySet<string>): GroupMember[] {
+  const last = run[run.length - 1];
+  if (!last || last.name === null || !cookies.has(last.name)) return run;
+  const prev = run[run.length - 2];
+  if (!prev || prev.name === null || prev.at + prev.size !== last.at) return run;
+  if (run.filter(m => m.name !== null).length - 1 < 2) return run;
+  return run.slice(0, -1);
+}
+
+/**
+ * The marked cookie declarations no group kept. Their store is gone and nothing
+ * references them, so they declare a local that is never used.
+ */
+function createCookieDeclRemover(): Transformer {
+  return createTransformer({
+    visitFunctionDecl(node: FunctionDecl): ASTNode | undefined {
+      if (!node.body) return undefined;
+      const cookies = securityCookieLocals(node.body);
+      if (cookies.size === 0) return undefined;
+      const isCookie = (d: unknown): boolean =>
+        (d as ASTNode).kind === NodeKind.VariableDecl && cookies.has((d as VariableDecl).name?.name ?? '');
+      const dropped = new Set<ASTNode>();
+      const body = createKindTransformer([NodeKind.DeclStmt, NodeKind.CompoundStmt], (n) => {
+        if (n.kind === NodeKind.DeclStmt) {
+          const stmt = n as DeclStmt;
+          const kept = stmt.declarations.filter(d => !isCookie(d));
+          if (kept.length === stmt.declarations.length) return undefined;
+          if (kept.length > 0) return updateNode(stmt, { declarations: kept } as Partial<DeclStmt>);
+          const gone = Stmt.null_();
+          dropped.add(gone);
+          return gone;
+        }
+        const block = n as CompoundStmt;
+        if (!block.statements.some(st => dropped.has(st))) return undefined;
+        return updateNode(block, {
+          statements: block.statements.filter(st => !dropped.has(st)),
+        } as Partial<CompoundStmt>);
+      })(node.body);
+      return updateNode(node, { body } as Partial<FunctionDecl>);
+    },
+  });
+}
+
 function createFrameGroupLocalsTransformer(options: FrameGroupLocalsOptions = {}): Transformer {
   const slots = options.slots ?? [];
   if (slots.length === 0) return identity;
@@ -1272,6 +1348,7 @@ function createFrameGroupLocalsTransformer(options: FrameGroupLocalsOptions = {}
         if (!frameTypeLayout((d as VariableDecl).type, options.aggregateLayout)) unsized.add(name);
       }
       const stuck = new Set([...declaredNames].filter(n => !movable.has(n)));
+      const cookies = securityCookieLocals(body);
 
       // A variable Ghidra models as one and the decompiler printed as several is
       // mis-laid-out on its own evidence; nothing has to escape for that.
@@ -1354,13 +1431,14 @@ function createFrameGroupLocalsTransformer(options: FrameGroupLocalsOptions = {}
           });
         }
         if (!run) continue;
+        const members = isSplit || isBaseFold || frameBases.size > 0 ? run : trimCookieTail(run, cookies);
 
-        const declared = run.filter(m => m.name !== null);
+        const declared = members.filter(m => m.name !== null);
         const maxAlign = declared.reduce((a, m) => Math.max(a, m.align), 1);
-        const span = run.reduce((end, m) => Math.max(end, m.at + m.size), 0);
-        const isPacked = run.some(m => m.align > 1 && m.at % m.align !== 0);
+        const span = members.reduce((end, m) => Math.max(end, m.at + m.size), 0);
+        const isPacked = members.some(m => m.align > 1 && m.at % m.align !== 0);
         plans.push({
-          members: run,
+          members,
           baseOffset: slot.offset,
           packed: isPacked,
           expectedSize: isPacked ? span : alignUp(span, maxAlign),
@@ -1517,8 +1595,10 @@ export const frameGroupLocalsPlugin: TransformPlugin = createPlugin(
   'frame-group-locals',
   'Frame-Group Locals',
   'Emits a frame object the decompiler scattered across several locals as one struct-typed local - a run whose first address escapes, a Ghidra variable printed in pieces, or the span a call writes a literal byte count into - so the callee\'s byte offsets survive compilation',
-  (options?: PluginOptions) =>
+  (options?: PluginOptions) => sequence(
     createFrameGroupLocalsTransformer(options as FrameGroupLocalsOptions),
+    createCookieDeclRemover(),
+  ),
   {
     // Last. Every type pass resolves a local by name against the body's
     // VariableDecls; grouping earlier hides the members from all of them.

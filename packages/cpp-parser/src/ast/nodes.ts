@@ -30,6 +30,12 @@ export interface GhidraMetadata {
    * that resolve a signature by name.
    */
   modelQualifiedName?: string;
+  /**
+   * The local is the MSVC /GS cookie slot and nothing in the body references it:
+   * `boilerplate-cleanup` dropped the compiler's seed store. `frame-group-locals`
+   * keeps it only as a struct member that holds a neighbour's offset.
+   */
+  securityCookie?: boolean;
   decompilerWarnings?: string[];
   addressRanges?: AddressRange[];  // Which binary addresses this code covers
 }

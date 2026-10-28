@@ -5,6 +5,7 @@ import { emit } from '../../../emit/index.js';
 import type { AnyNode } from '../../../ast/nodes.js';
 import { frameGroupLocalsPlugin, type RunTruncation, type TypeLayout } from '../builtins/frame-group-locals.js';
 import type { StackSlot } from '../builtins/stack-frame-address.js';
+import { boilerplateCleanupPlugin } from '../builtins/boilerplate-cleanup.js';
 
 describe('frameGroupLocalsPlugin', () => {
   function run(code: string, slots: StackSlot[]): string {
@@ -786,5 +787,86 @@ describe('frameGroupLocalsPlugin', () => {
       onTruncated: (e: RunTruncation) => cuts.push(e),
     });
     assert.deepStrictEqual(cuts, []);
+  });
+});
+
+describe('frameGroupLocalsPlugin and the /GS cookie slot', () => {
+  function run(code: string, slots: StackSlot[]): string {
+    const cleaned = boilerplateCleanupPlugin.createTransformer()(parse(code));
+    return emit(frameGroupLocalsPlugin.createTransformer({ slots })(cleaned) as AnyNode);
+  }
+  function fields(out: string): string[] {
+    const struct = /struct\s+__frame0_t\s*\{([\s\S]*?)\}\s*;/.exec(out);
+    assert.ok(struct, `expected a group struct in:\n${out}`);
+    return [...struct[1].matchAll(/(\w+)(\[\d+\])?\s*;/g)].map(m => m[1]);
+  }
+
+  it('ends a run before a trailing cookie, every other offset unchanged', () => {
+    const out = run(`int f() {
+      uint32_t a; uint32_t b; uint32_t c; uint32_t dwStackCookie;
+      dwStackCookie = DEFAULT_SECURITY_COOKIE ^ (uintptr_t)&stack0xfffffffc;
+      g(&a);
+      return a + b + c;
+    }`, [
+      { name: 'a', offset: -16, size: 4 },
+      { name: 'b', offset: -12, size: 4 },
+      { name: 'c', offset: -8, size: 4 },
+      { name: 'dwStackCookie', offset: -4, size: 4 },
+    ]);
+    assert.deepStrictEqual(fields(out), ['a', 'b', 'c'], out);
+    assert.ok(/sizeof\(__frame0_t\)\s*==\s*12\s*,/.test(out), out);
+    assert.ok(!/dwStackCookie|DEFAULT_SECURITY_COOKIE/.test(out), out);
+  });
+
+  it('keeps a cookie in the middle of a run, as the EH frame lays it out', () => {
+    const out = run(`int f() {
+      uint32_t a; uint32_t b; uint32_t local_14; void *pPrevExceptionList;
+      local_14 = DEFAULT_SECURITY_COOKIE ^ (uintptr_t)&stack0xfffffffc;
+      g(&a);
+      return a + b + (int)pPrevExceptionList;
+    }`, [
+      { name: 'a', offset: -24, size: 4 },
+      { name: 'b', offset: -20, size: 4 },
+      { name: 'local_14', offset: -16, size: 4 },
+      { name: 'pPrevExceptionList', offset: -12, size: 4 },
+    ]);
+    assert.deepStrictEqual(fields(out), ['a', 'b', 'local_14', 'pPrevExceptionList'], out);
+    assert.ok(!out.includes('DEFAULT_SECURITY_COOKIE'), out);
+  });
+
+  it('keeps a trailing cookie whose bytes hold a hole open', () => {
+    const out = run(`int f() {
+      uint32_t a; uint32_t b; uint32_t dwStackCookie;
+      dwStackCookie = DEFAULT_SECURITY_COOKIE ^ (uintptr_t)&stack0xfffffffc;
+      g(&a);
+      return a + b;
+    }`, [
+      { name: 'a', offset: -16, size: 4 },
+      { name: 'b', offset: -12, size: 4 },
+      { name: 'dwStackCookie', offset: -4, size: 4 },
+    ]);
+    assert.deepStrictEqual(fields(out), ['a', 'b', '__pad8', 'dwStackCookie'], out);
+  });
+
+  it('keeps a cookie that is one of only two members', () => {
+    const out = run(`int f() {
+      uint32_t a; uint32_t dwStackCookie;
+      dwStackCookie = DEFAULT_SECURITY_COOKIE ^ (uintptr_t)&stack0xfffffffc;
+      g(&a);
+      return a;
+    }`, [
+      { name: 'a', offset: -8, size: 4 },
+      { name: 'dwStackCookie', offset: -4, size: 4 },
+    ]);
+    assert.deepStrictEqual(fields(out), ['a', 'dwStackCookie'], out);
+  });
+
+  it('removes a cookie slot no group holds', () => {
+    const out = run(`int f(int x) {
+      uint32_t dwStackCookie;
+      dwStackCookie = DEFAULT_SECURITY_COOKIE ^ (uintptr_t)&stack0xfffffffc;
+      return g(x);
+    }`, []);
+    assert.ok(!/dwStackCookie|DEFAULT_SECURITY_COOKIE/.test(out), out);
   });
 });

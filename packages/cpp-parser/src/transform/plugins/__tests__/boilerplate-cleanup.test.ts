@@ -14,7 +14,9 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { parse } from '../../../parser/index.js';
 import { emit } from '../../../emit/index.js';
-import type { AnyNode, ASTNode } from '../../../ast/nodes.js';
+import type { AnyNode, ASTNode, VariableDecl } from '../../../ast/nodes.js';
+import { NodeKind } from '../../../ast/kinds.js';
+import { findNodesByKind } from '../../../ast/visitor.js';
 import { boilerplateCleanupPlugin } from '../builtins/boilerplate-cleanup.js';
 import { InjectionCollector } from '../injection.js';
 
@@ -177,5 +179,67 @@ describe('boilerplateCleanupPlugin GuardStack removal', () => {
     assert.ok(output.includes('GuardStack();'), output);
     assert.ok(output.includes('Other::GuardStack();'), output);
     assert.ok(output.includes('Fog::Debug::GuardStackDepth();'), output);
+  });
+});
+
+describe('boilerplateCleanupPlugin /GS cookie seed', () => {
+  function cookieDecls(code: string): VariableDecl[] {
+    const out = boilerplateCleanupPlugin.createTransformer()(parse(code) as ASTNode);
+    return findNodesByKind(out, NodeKind.VariableDecl) as VariableDecl[];
+  }
+
+  it('drops the seed store and marks the slot it seeded', () => {
+    const code = `int f(int a) {
+      uint dwSecurityCookie;
+      dwSecurityCookie = DEFAULT_SECURITY_COOKIE ^ (uint)&stack0xfffffffc;
+      return g(a);
+    }`;
+    const output = runCleanup(code);
+    assert.ok(!output.includes('DEFAULT_SECURITY_COOKIE'), output);
+    const decl = cookieDecls(code).find(d => d.name.name === 'dwSecurityCookie');
+    assert.strictEqual(decl?.ghidraInfo?.securityCookie, true);
+  });
+
+  it('drops a seed written as the initializer', () => {
+    const code = `int f(int a) {
+      uint32_t local_8 = DEFAULT_SECURITY_COOKIE ^ (uintptr_t)0;
+      return g(a);
+    }`;
+    const output = runCleanup(code);
+    assert.ok(!output.includes('DEFAULT_SECURITY_COOKIE'), output);
+    const decl = cookieDecls(code).find(d => d.name.name === 'local_8');
+    assert.strictEqual(decl?.initializer, null);
+    assert.strictEqual(decl?.ghidraInfo?.securityCookie, true);
+  });
+
+  it('keeps a slot whose address is a buffer end, unmarked', () => {
+    const code = `int f(char *p) {
+      uint32_t nEnd;
+      nEnd = DEFAULT_SECURITY_COOKIE ^ (uintptr_t)0;
+      return g(p, (uintptr_t)&nEnd);
+    }`;
+    const output = runCleanup(code);
+    assert.ok(!output.includes('DEFAULT_SECURITY_COOKIE'), output);
+    assert.ok(output.includes('&nEnd'), output);
+    const decl = cookieDecls(code).find(d => d.name.name === 'nEnd');
+    assert.ok(decl && !decl.ghidraInfo?.securityCookie, 'an addressed slot is a local like any other');
+  });
+
+  it('keeps the store when the value is read, so the read stays initialised', () => {
+    const output = runCleanup(`uint32_t f(int a) {
+      uint32_t uVar1 = DEFAULT_SECURITY_COOKIE ^ (uintptr_t)0;
+      if (a) uVar1 = 0;
+      return uVar1 & -256;
+    }`);
+    assert.ok(output.includes('DEFAULT_SECURITY_COOKIE'), output);
+  });
+
+  it('leaves an XOR with the cookie that is not a seed', () => {
+    const output = runCleanup(`uint32_t f(uint32_t a) {
+      uint32_t x;
+      x = DEFAULT_SECURITY_COOKIE ^ g(a);
+      return 0;
+    }`);
+    assert.ok(output.includes('DEFAULT_SECURITY_COOKIE ^ g(a)'), output);
   });
 });

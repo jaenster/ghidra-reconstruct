@@ -26,9 +26,10 @@ import type {
   UnaryExpr,
   Identifier,
   QualifiedId,
-  BuiltinType,
   IntegerLiteralExpr,
+  FunctionDecl,
 } from '../../../ast/nodes.js';
+import { traverseAST } from '../../../ast/visitor.js';
 import { createTransformer, sequence, type Transformer } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions, InjectionContext } from '../types.js';
 
@@ -114,52 +115,50 @@ function unwrapParens(expr: Expression): Expression {
 }
 
 /**
- * Check if a variable declaration is a security cookie initialization
- * Pattern: uint32_t local_X = DEFAULT_SECURITY_COOKIE ^ (uint32_t)&stack0xfffffffc
+ * Whether `expr` is the /GS cookie seed: `DEFAULT_SECURITY_COOKIE ^ <frame address>`.
+ *
+ * The seed is MSVC's own prologue, `MOV EAX,[__security_cookie]; XOR EAX,EBP;
+ * MOV [EBP-4],EAX` (1.14d 00517e69..00517e70, 00518856..0051885d), which Ghidra
+ * prints as `DEFAULT_SECURITY_COOKIE ^ (uint)&stack0xfffffffc`. The frame
+ * operand is EBP under casts, or whatever a pass has already rebound it to.
  */
-function isSecurityCookieDecl(decl: VariableDecl): boolean {
-  // Check type is uint32_t
-  if (decl.type.kind !== NodeKind.BuiltinType) return false;
-  const type = decl.type as BuiltinType;
-  if (type.name !== 'uint32_t') return false;
-
-  // Check has initializer
-  if (!decl.initializer) return false;
-
-  // Check initializer is XOR expression
-  if (decl.initializer.kind !== NodeKind.BinaryExpr) return false;
-  const binary = decl.initializer as BinaryExpr;
-  if (binary.operator !== '^') return false;
-
-  // Check left is DEFAULT_SECURITY_COOKIE
-  if (binary.left.kind !== NodeKind.Identifier) return false;
-  if ((binary.left as Identifier).name !== 'DEFAULT_SECURITY_COOKIE') return false;
-
-  // Check right side involves a stack variable
-  // (could be cast, address-of, etc. - we'll be lenient here)
-  let right = unwrapParens(binary.right);
-
-  // Unwrap cast if present
-  if (right.kind === NodeKind.CStyleCastExpr) {
-    right = (right as any).expression;
-  }
-
-  // Check for address-of operator
-  if (right.kind === NodeKind.UnaryExpr) {
-    const unary = right as UnaryExpr;
-    if (unary.operator === '&') {
-      const operand = unwrapParens(unary.operand);
-      if (operand.kind === NodeKind.Identifier) {
-        const varName = (operand as Identifier).name;
-        // Stack variables start with "stack0x" or "local_"
-        if (varName.startsWith('stack0x') || varName.startsWith('local_')) {
-          return true;
-        }
-      }
-    }
-  }
-
+function isSecurityCookieSeed(expr: Expression): boolean {
+  const binary = unwrapParens(expr);
+  if (binary.kind !== NodeKind.BinaryExpr || (binary as BinaryExpr).operator !== '^') return false;
+  const { left, right } = binary as BinaryExpr;
+  const isCookie = (e: Expression): boolean => {
+    const u = unwrapParens(e);
+    return u.kind === NodeKind.Identifier && (u as Identifier).name === 'DEFAULT_SECURITY_COOKIE';
+  };
+  if (isCookie(left)) return isFrameOperand(right);
+  if (isCookie(right)) return isFrameOperand(left);
   return false;
+}
+
+/** A frame address under casts and parentheses, or the literal a pass folded it to. */
+function isFrameOperand(expr: Expression): boolean {
+  let e = unwrapParens(expr);
+  while (e.kind === NodeKind.CStyleCastExpr) e = unwrapParens((e as any).expression);
+  if (e.kind === NodeKind.IntegerLiteral) return true;
+  if (e.kind !== NodeKind.UnaryExpr || (e as UnaryExpr).operator !== '&') return false;
+  return unwrapParens((e as UnaryExpr).operand).kind === NodeKind.Identifier;
+}
+
+/** The local a statement seeds the cookie into: `x = DEFAULT_SECURITY_COOKIE ^ ...;`. */
+function cookieStoreTarget(stmt: Statement): string | null {
+  if (stmt.kind !== NodeKind.ExprStmt) return null;
+  const e = (stmt as ExprStmt).expression;
+  if (e.kind !== NodeKind.AssignExpr) return null;
+  const assign = e as AssignExpr;
+  if (assign.operator !== '=' || assign.left.kind !== NodeKind.Identifier) return null;
+  return isSecurityCookieSeed(assign.right) ? (assign.left as Identifier).name : null;
+}
+
+/** The local a declaration seeds the cookie into: `uint32_t x = DEFAULT_SECURITY_COOKIE ^ ...;`. */
+function cookieDeclTarget(decl: VariableDecl): string | null {
+  const init = decl.initializer;
+  if (!init || init.kind === NodeKind.InitListExpr || !decl.name) return null;
+  return isSecurityCookieSeed(init as Expression) ? decl.name.name : null;
 }
 
 /**
@@ -393,16 +392,106 @@ function createMacroCallStmt(
 // ============================================
 
 /**
- * Remove security cookie declarations
- * Pattern: uint32_t local_X = DEFAULT_SECURITY_COOKIE ^ ...
+ * Remove the /GS cookie seed.
+ *
+ * The compiler writes the seed into its own slot from the frame, so the store is
+ * not source, and nothing in the body reads it: the check that does is the
+ * `GuardStack` call removed below. What becomes of the slot depends on the other
+ * references to it:
+ *
+ *   - none: the store goes, and the declaration stays marked `securityCookie`.
+ *     `frame-group-locals` keeps it as a member where dropping it would move a
+ *     neighbour and removes it everywhere else;
+ *   - only its address (`&nItemsTempEnd` as a buffer's end, 00569bda
+ *     `LEA EAX,[EBP-0x4]`): the store goes and the local stays, unmarked;
+ *   - its value: the decompiler merged the slot with another variable, or read
+ *     the register the seed was built in. Both store and local stay - dropping
+ *     the store would turn that read into an uninitialised one.
  */
 function createSecurityCookieRemover(): Transformer {
   return createTransformer({
-    visitVariableDecl(decl: VariableDecl): VariableDecl | undefined {
-      if (isSecurityCookieDecl(decl)) {
-        return undefined; // Remove this declaration
+    visitFunctionDecl(fn: FunctionDecl): ASTNode | undefined {
+      if (!fn.body) return undefined;
+      const body = fn.body;
+
+      const targets = new Set<string>();
+      for (const n of traverseAST(body)) {
+        if (n.kind === NodeKind.VariableDecl) {
+          const name = cookieDeclTarget(n as VariableDecl);
+          if (name) targets.add(name);
+        } else if (n.kind === NodeKind.ExprStmt) {
+          const name = cookieStoreTarget(n as Statement);
+          if (name) targets.add(name);
+        }
       }
-      return undefined; // Keep unchanged
+      if (targets.size === 0) return undefined;
+
+      // Every other reference to each target: is its value read anywhere?
+      const seedTargets = new Set<ASTNode>();
+      for (const n of traverseAST(body)) {
+        if (n.kind === NodeKind.ExprStmt && cookieStoreTarget(n as Statement)) {
+          seedTargets.add(((n as ExprStmt).expression as AssignExpr).left);
+        } else if (n.kind === NodeKind.VariableDecl && cookieDeclTarget(n as VariableDecl)) {
+          seedTargets.add((n as VariableDecl).name);
+        }
+      }
+      const addressed = new Set<ASTNode>();
+      for (const n of traverseAST(body)) {
+        if (n.kind === NodeKind.UnaryExpr && (n as UnaryExpr).operator === '&') {
+          addressed.add(unwrapParens((n as UnaryExpr).operand));
+        }
+      }
+      // A declaration's own name is an Identifier too; it is not a reference.
+      const declNames = new Set<ASTNode>();
+      for (const n of traverseAST(body)) {
+        if (n.kind === NodeKind.VariableDecl && (n as VariableDecl).name) declNames.add((n as VariableDecl).name);
+      }
+      const read = new Set<string>();
+      const referenced = new Set<string>();
+      for (const n of traverseAST(body)) {
+        if (n.kind !== NodeKind.Identifier || seedTargets.has(n) || declNames.has(n)) continue;
+        const name = (n as Identifier).name;
+        if (!targets.has(name)) continue;
+        if (addressed.has(n)) referenced.add(name);
+        else read.add(name);
+      }
+      const removable = new Set([...targets].filter(t => !read.has(t)));
+      if (removable.size === 0) return undefined;
+
+      const removed = new WeakSet<ASTNode>();
+      const strip = createTransformer({
+        visitNode(node: ASTNode): ASTNode | undefined {
+          if (node.kind === NodeKind.ExprStmt) {
+            const name = cookieStoreTarget(node as Statement);
+            if (!name || !removable.has(name)) return undefined;
+            const empty: ASTNode = {
+              kind: NodeKind.NullStmt, location: node.location, leadingTrivia: [], trailingTrivia: [],
+            };
+            removed.add(empty);
+            return empty;
+          }
+          if (node.kind === NodeKind.VariableDecl) {
+            const decl = node as VariableDecl;
+            const name = decl.name?.name;
+            if (!name || !removable.has(name)) return undefined;
+            const seeded = cookieDeclTarget(decl) !== null;
+            const unused = !referenced.has(name);
+            if (!seeded && !unused) return undefined;
+            return {
+              ...decl,
+              initializer: seeded ? null : decl.initializer,
+              ...(unused ? { ghidraInfo: { ...decl.ghidraInfo, securityCookie: true } } : {}),
+            } as VariableDecl;
+          }
+          if (node.kind === NodeKind.CompoundStmt) {
+            const block = node as CompoundStmt;
+            if (!block.statements.some(s => removed.has(s))) return undefined;
+            return { ...block, statements: block.statements.filter(s => !removed.has(s)) } as CompoundStmt;
+          }
+          return undefined;
+        },
+      });
+      return { ...fn, body: strip(body) as CompoundStmt } as FunctionDecl;
     },
   });
 }
