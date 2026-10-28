@@ -35,6 +35,7 @@ import { classScopeOf, memberCallModel, memberDefinitionScope, orphanMarker, sig
 import { pointeeClass } from './templates/members.js';
 import { templateRegistry } from './templates/registry.js';
 import { declarationHead } from './calling-convention.js';
+import { fileStaticKey } from './file-static-functions.js';
 import { emittedParameterName, getAggregateTypeNames } from './platform-types.js';
 import { generateStaticLocalsBlock, emitDataValue, setInitializerOwnerAddress, inferArrayDeclaration, isWideTextDatum, normalizeArrayDeclaration, braceArrayInitializer, isFuncDefTypedefName, getKnownFuncDefTypedefs, getKnownEnumConstants, setInitializerNamespace, renderGlobalScalarInitializer, recordDeclaredName } from './globals-header.js';
 
@@ -527,6 +528,11 @@ export interface ImplGenContext {
   overrides?: OverrideRegistry | null;
   libraries?: LibraryRegistry | null;
   methodConversions?: MethodConversionRegistry | null;
+  /**
+   * Functions defined `static` in their unit (file-static-functions.ts), by address
+   * key, with the functions of that unit that reference them.
+   */
+  fileStaticFunctions?: ReadonlyMap<string, { unit: string; referrers: ReadonlySet<string> }>;
   /** Optional precomputed method mappings for call-site rewriting */
   methodMappings?: Record<string, MethodCallMapping>;
   /** Analyzed globals for static-local injection into function bodies */
@@ -969,6 +975,23 @@ export function generateImplementation(
     context._enclosingResolvedNamespace = useNamespace ? resolvedNamespace : undefined;
   }
 
+  // A static function has no declaration in the header; one a function above its
+  // definition references is declared here.
+  const fileStatic = (func: ExtractedFunction) =>
+    context?.fileStaticFunctions?.get(fileStaticKey(func.address));
+  {
+    const forward: string[] = [];
+    const seen = new Set<string>();
+    for (const func of functions) {
+      const entry = fileStatic(func);
+      if (entry && [...entry.referrers].some(r => seen.has(r))) {
+        forward.push(`static ${generateFunctionSignature(func)};`);
+      }
+      seen.add(fileStaticKey(func.address));
+    }
+    if (forward.length > 0) lines.push(...forward, '');
+  }
+
   // File-local globals are deferred until after function bodies are generated,
   // so we can filter out globals whose names don't appear in any function body.
   const fileLocalInsertIndex = lines.length;
@@ -1024,7 +1047,7 @@ export function generateImplementation(
       currentIfdef = func.ifdef;
     }
 
-    const isInternal = internalFunctions?.has(func.name) ?? false;
+    const isInternal = (internalFunctions?.has(func.name) ?? false) || fileStatic(func) !== undefined;
     let impl: string;
     // A compiler-generated C++ EH handler stub gets the body of a frame that
     // handles nothing (see eh-handler-stub.ts), not its decompiled one.
