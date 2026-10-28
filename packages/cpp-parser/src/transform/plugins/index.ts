@@ -696,7 +696,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   declScopeSinkPlugin,        // Cleanup: sink decls into single-use scope (priority 62)
   phiNodeTernaryPlugin,       // Cleanup: int x; if(c){x=a;}else{x=b;} → int x = c?a:b; (priority 63)
   boilerplateCleanupPlugin,   // Cleanup: Remove security cookies, simplify ERROR assertions (priority 500)
-  allocMacrosPlugin,          // Cleanup: Fog allocator calls with a literal file/line -> D2_ALLOC/D2_FREE/D2_NEW macros (priority 880)
+  allocMacrosPlugin,          // Cleanup: Fog allocator calls with a literal file/line -> D2_ALLOC_AT/D2_FREE_AT/D2_NEW_AT macros (priority 880)
   vtableCallPlugin,           // C++ vtable patterns (early)
   switchReconstructPlugin,    // Control flow reconstruction
   magicDivisionPlugin,        // Compiler optimizations

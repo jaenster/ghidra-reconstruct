@@ -9,7 +9,7 @@
  *   int gnMonsterHealthBarRow = 0; D2_GLOBAL_GUARD(gnMonsterHealthBarRow, "gnMonsterHealthBarRow");
  *
  * The guard goes on the definition's last line, so no line of the tree moves:
- * __LINE__ (D2_ALLOC, D2_FREE) and the debug line table stay what they were.
+ * __LINE__ and the debug line table stay what they were.
  *
  * In a normal build every guard macro expands to nothing - the line is an empty
  * declaration or statement - so the tree compiles to the same objects as without

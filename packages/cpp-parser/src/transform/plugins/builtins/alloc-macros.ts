@@ -7,28 +7,31 @@
  *     Fog::Memory::AllocClientMemory(0x12c, ".\\BnMessQueue.cpp", 0x37, 0)
  *     Fog::Memory::FreeServerMemory(pPool, pUnit, ".\\SUnit.cpp", 0x2f1, 0)
  *
- * The file and line are the macro's own arguments, not the programmer's, so the
- * call is folded back to a macro that supplies them again:
+ * The call is folded to a macro that names the allocator and supplies the
+ * trailing 0, keeping the original's file string and line constant as written:
  *
- *     AllocClientMemory(n, file, line, 0)          -> D2_ALLOC(n)
- *     FreeClientMemory(p, file, line, 0)           -> D2_FREE(p)
- *     ReAllocClientMemory(p, n, file, line, 0)     -> D2_REALLOC(p, n)
- *     AllocServerMemory(pool, n, file, line, 0)    -> D2_ALLOC_POOL(pool, n)
- *     FreeServerMemory(pool, p, file, line, 0)     -> D2_FREE_POOL(pool, p)
- *     ReAllocServerMemory(pool, p, n, ...)         -> D2_REALLOC_POOL(pool, p, n)
+ *     AllocClientMemory(n, file, line, 0)          -> D2_ALLOC_AT(n, file, line)
+ *     FreeClientMemory(p, file, line, 0)           -> D2_FREE_AT(p, file, line)
+ *     ReAllocClientMemory(p, n, file, line, 0)     -> D2_REALLOC_AT(p, n, file, line)
+ *     AllocServerMemory(pool, n, file, line, 0)    -> D2_ALLOC_POOL_AT(pool, n, file, line)
+ *     FreeServerMemory(pool, p, file, line, 0)     -> D2_FREE_POOL_AT(pool, p, file, line)
+ *     ReAllocServerMemory(pool, p, n, ...)         -> D2_REALLOC_POOL_AT(pool, p, n, file, line)
  *
- * and an allocation cast to a struct whose Ghidra size is exactly the literal size
- * becomes `D2_NEW(T)` / `D2_NEW_POOL(pool, T)`. That fold is a claim about the
- * layout, so each type it is made for gets a static_assert beside the macros:
- * on a 32-bit build sizeof(T) must still be the size the binary allocated. The
- * guard on the pointer size is deliberate - a 64-bit build changes struct sizes
- * and the macro is then the CORRECT spelling, where the literal would not be.
+ * Each macro expands to exactly the call the original makes: the same arguments
+ * in the same order, the file and line being the binary's values (the
+ * reconstruction's own `__FILE__`/`__LINE__` would change what is pushed).
  *
- * The macros pass `__FILE__` and `__LINE__`, so the arguments that change are the
- * file (now the tree path) and the line (now the tree line); the original line
- * numbers stay in Ghidra. A pool argument is kept as written, `nullptr` included:
- * a null pool is the client allocator chosen explicitly, and folding it away would
- * hide which allocator the original called.
+ * An allocation cast to a struct whose Ghidra size is exactly the literal size
+ * becomes `D2_NEW_AT(T, file, line)` / `D2_NEW_POOL_AT(pool, T, file, line)`. That
+ * fold is a claim about the layout, so each type it is made for gets a
+ * static_assert beside the macros: on a 32-bit build sizeof(T) must still be the
+ * size the binary allocated. The guard on the pointer size is deliberate - a
+ * 64-bit build changes struct sizes and the macro is then the CORRECT spelling,
+ * where the literal would not be.
+ *
+ * A pool argument is kept as written, `nullptr` included: a null pool is the
+ * client allocator chosen explicitly, and folding it away would hide which
+ * allocator the original called.
  *
  * Only a site whose file is a string literal, whose line is an integer literal and
  * whose trailing argument is literal 0 is folded. Anything else - a computed file,
@@ -55,34 +58,36 @@ import { createMacroCall } from './boilerplate-cleanup.js';
 export interface AllocMacrosOptions extends PluginOptions {
   /** Fold allocation calls into the D2_* macros (default: true). */
   allocationMacros?: boolean;
-  /** Aggregate name -> Ghidra size in bytes. Without it no site becomes D2_NEW. */
+  /** Aggregate name -> Ghidra size in bytes. Without it no site becomes D2_NEW_AT. */
   aggregateSizes?: Record<string, number>;
-  /** The aggregates that are unions; D2_NEW is for structs only. */
+  /** The aggregates that are unions; D2_NEW_AT is for structs only. */
   unionNames?: readonly string[];
   /** Typedef name -> its target spelling, to see through `typedef struct X X_t`. */
   typedefTargets?: Record<string, string>;
 }
 
-type AllocMacro = 'D2_ALLOC' | 'D2_FREE' | 'D2_REALLOC' | 'D2_ALLOC_POOL' | 'D2_FREE_POOL' | 'D2_REALLOC_POOL';
+type AllocMacro =
+  | 'D2_ALLOC_AT' | 'D2_FREE_AT' | 'D2_REALLOC_AT'
+  | 'D2_ALLOC_POOL_AT' | 'D2_FREE_POOL_AT' | 'D2_REALLOC_POOL_AT';
 
 interface AllocCallee {
   macro: AllocMacro;
-  /** Arguments the macro keeps; the file, line and trailing 0 follow them. */
+  /** Arguments before the file, line and trailing 0. */
   kept: number;
-  /** Index of the size argument, for the D2_NEW fold. */
+  /** Index of the size argument, for the D2_NEW_AT fold. */
   sizeIndex?: number;
-  /** Parameter names of the macro, in order. */
+  /** Parameter names of the macro before the file and line, in order. */
   params: string[];
 }
 
 /** Keyed by the callee's own name; the namespace is checked separately. */
 const ALLOC_CALLEES: Record<string, AllocCallee> = {
-  AllocClientMemory: { macro: 'D2_ALLOC', kept: 1, sizeIndex: 0, params: ['size'] },
-  FreeClientMemory: { macro: 'D2_FREE', kept: 1, params: ['p'] },
-  ReAllocClientMemory: { macro: 'D2_REALLOC', kept: 2, params: ['p', 'size'] },
-  AllocServerMemory: { macro: 'D2_ALLOC_POOL', kept: 2, sizeIndex: 1, params: ['pPool', 'size'] },
-  FreeServerMemory: { macro: 'D2_FREE_POOL', kept: 2, params: ['pPool', 'p'] },
-  ReAllocServerMemory: { macro: 'D2_REALLOC_POOL', kept: 3, params: ['pPool', 'p', 'size'] },
+  AllocClientMemory: { macro: 'D2_ALLOC_AT', kept: 1, sizeIndex: 0, params: ['size'] },
+  FreeClientMemory: { macro: 'D2_FREE_AT', kept: 1, params: ['p'] },
+  ReAllocClientMemory: { macro: 'D2_REALLOC_AT', kept: 2, params: ['p', 'size'] },
+  AllocServerMemory: { macro: 'D2_ALLOC_POOL_AT', kept: 2, sizeIndex: 1, params: ['pPool', 'size'] },
+  FreeServerMemory: { macro: 'D2_FREE_POOL_AT', kept: 2, params: ['pPool', 'p'] },
+  ReAllocServerMemory: { macro: 'D2_REALLOC_POOL_AT', kept: 3, params: ['pPool', 'p', 'size'] },
 };
 
 /** Why a call to an allocator was left alone. */
@@ -95,7 +100,7 @@ export type AllocUntouchedReason =
 
 /** Counts of what the pass did, read by the tests and the dry-run census. */
 export interface AllocMacroStats {
-  /** Folded sites per macro, D2_NEW and D2_NEW_POOL included. */
+  /** Folded sites per macro, D2_NEW_AT and D2_NEW_POOL_AT included. */
   folded: Record<string, number>;
   /** Allocator calls left as they were, by reason. */
   untouched: Record<AllocUntouchedReason, number>;
@@ -235,7 +240,7 @@ function structSize(name: string, opts: AllocMacrosOptions): number | undefined 
 // TRANSFORMER
 // ============================================
 
-/** What one body folded: the callee each macro names, and the D2_NEW types. */
+/** What one body folded: the callee each macro names, and the D2_NEW_AT types. */
 export class AllocMacroUse {
   readonly callees = new Map<AllocMacro, string>();
   readonly newTypes = new Map<string, number>();
@@ -253,11 +258,13 @@ interface FoldedAlloc {
   macro: AllocMacro;
   size: Expression;
   pool?: Expression;
+  file: Expression;
+  line: Expression;
 }
 
 function createAllocTransformer(opts: AllocMacrosOptions, use: AllocMacroUse): Transformer {
   // The macro calls this pass made from an allocation, so the cast above one
-  // (visited after it - the walk is post-order) can turn it into D2_NEW.
+  // (visited after it - the walk is post-order) can turn it into D2_NEW_AT.
   const folded = new WeakMap<ASTNode, FoldedAlloc>();
 
   return createTransformer({
@@ -279,14 +286,18 @@ function createAllocTransformer(opts: AllocMacrosOptions, use: AllocMacroUse): T
         }
         use.callees.set(callee.macro, spelling);
         bump(callee.macro);
-        const macroCall = createMacroCall(callee.macro, kept, call);
+        const file = args[callee.kept];
+        const line = args[callee.kept + 1];
+        const macroCall = createMacroCall(callee.macro, [...kept, file, line], call);
         macroCall.leadingTrivia = call.leadingTrivia ?? [];
         macroCall.trailingTrivia = call.trailingTrivia ?? [];
         if (callee.sizeIndex !== undefined) {
           folded.set(macroCall, {
             macro: callee.macro,
             size: kept[callee.sizeIndex],
-            pool: callee.macro === 'D2_ALLOC_POOL' ? kept[0] : undefined,
+            pool: callee.macro === 'D2_ALLOC_POOL_AT' ? kept[0] : undefined,
+            file,
+            line,
           });
         }
         return macroCall;
@@ -302,14 +313,17 @@ function createAllocTransformer(opts: AllocMacrosOptions, use: AllocMacroUse): T
         const size = structSize(target.name, opts);
         if (size === undefined) return undefined;
         if (integerLiteral(alloc.size) !== BigInt(size)) { stats.newSizeMismatch++; return undefined; }
-        const isPool = alloc.macro === 'D2_ALLOC_POOL';
-        const macro = isPool ? 'D2_NEW_POOL' : 'D2_NEW';
+        const isPool = alloc.macro === 'D2_ALLOC_POOL_AT';
+        const macro = isPool ? 'D2_NEW_POOL_AT' : 'D2_NEW_AT';
         bump(alloc.macro, -1);
         bump(macro);
         if (isPool) use.newPoolUsed = true; else use.newUsed = true;
         use.newTypes.set(target.name, size);
         const typeArg = target.node as unknown as Expression;
-        const result = createMacroCall(macro, isPool ? [alloc.pool!, typeArg] : [typeArg], cast);
+        const macroArgs = isPool
+          ? [alloc.pool!, typeArg, alloc.file, alloc.line]
+          : [typeArg, alloc.file, alloc.line];
+        const result = createMacroCall(macro, macroArgs, cast);
         result.leadingTrivia = cast.leadingTrivia ?? [];
         result.trailingTrivia = cast.trailingTrivia ?? [];
         return result;
@@ -324,7 +338,7 @@ function createAllocTransformer(opts: AllocMacrosOptions, use: AllocMacroUse): T
 // ============================================
 
 const MACRO_ORDER: AllocMacro[] = [
-  'D2_ALLOC', 'D2_FREE', 'D2_REALLOC', 'D2_ALLOC_POOL', 'D2_FREE_POOL', 'D2_REALLOC_POOL',
+  'D2_ALLOC_AT', 'D2_FREE_AT', 'D2_REALLOC_AT', 'D2_ALLOC_POOL_AT', 'D2_FREE_POOL_AT', 'D2_REALLOC_POOL_AT',
 ];
 
 const PARAMS: Record<AllocMacro, string[]> = Object.fromEntries(
@@ -333,36 +347,36 @@ const PARAMS: Record<AllocMacro, string[]> = Object.fromEntries(
 
 /** One guarded macro naming `callee`; a block of its own so units merge it by text. */
 export function allocMacroDefinition(macro: AllocMacro, callee: string): string {
-  const params = PARAMS[macro];
+  const params = [...PARAMS[macro], 'szFile', 'nLine'];
   const passed = params.map((p) => `(${p})`).join(', ');
   return `
 #ifndef ${macro}
-#define ${macro}(${params.join(', ')}) ${callee}(${passed}, __FILE__, __LINE__, 0)
+#define ${macro}(${params.join(', ')}) ${callee}(${passed}, 0)
 #endif
 `;
 }
 
 const NEW_DEFINITIONS = {
-  D2_NEW: `
-#ifndef D2_NEW
-#define D2_NEW(T) ((T*)D2_ALLOC(sizeof(T)))
+  D2_NEW_AT: `
+#ifndef D2_NEW_AT
+#define D2_NEW_AT(T, szFile, nLine) ((T*)D2_ALLOC_AT(sizeof(T), (szFile), (nLine)))
 #endif
 `,
-  D2_NEW_POOL: `
-#ifndef D2_NEW_POOL
-#define D2_NEW_POOL(pPool, T) ((T*)D2_ALLOC_POOL((pPool), sizeof(T)))
+  D2_NEW_POOL_AT: `
+#ifndef D2_NEW_POOL_AT
+#define D2_NEW_POOL_AT(pPool, T, szFile, nLine) ((T*)D2_ALLOC_POOL_AT((pPool), sizeof(T), (szFile), (nLine)))
 #endif
 `,
 };
 
 /**
- * The layout claim behind a D2_NEW(T): the binary allocated exactly Ghidra's size
+ * The layout claim behind a D2_NEW_AT(T, ...): the binary allocated exactly Ghidra's size
  * for T. Checked on 32-bit only; a 64-bit build is allowed to differ.
  */
 export function allocNewSizeAssert(typeName: string, size: number): string {
   const hex = `0x${size.toString(16)}`;
   return `
-static_assert(sizeof(void*) != 4 || sizeof(::${typeName}) == ${hex}, "D2_NEW(${typeName}): the 32-bit layout must be the ${hex} bytes 1.14d allocates");
+static_assert(sizeof(void*) != 4 || sizeof(::${typeName}) == ${hex}, "D2_NEW_AT(${typeName}): the 32-bit layout must be the ${hex} bytes 1.14d allocates");
 `;
 }
 
@@ -373,8 +387,8 @@ export function allocMacroPreamble(use: AllocMacroUse): string[] {
     const callee = use.callees.get(macro);
     if (callee) blocks.push(allocMacroDefinition(macro, callee));
   }
-  if (use.newUsed) blocks.push(NEW_DEFINITIONS.D2_NEW);
-  if (use.newPoolUsed) blocks.push(NEW_DEFINITIONS.D2_NEW_POOL);
+  if (use.newUsed) blocks.push(NEW_DEFINITIONS.D2_NEW_AT);
+  if (use.newPoolUsed) blocks.push(NEW_DEFINITIONS.D2_NEW_POOL_AT);
   for (const [name, size] of [...use.newTypes].sort(([a], [b]) => a.localeCompare(b))) {
     blocks.push(allocNewSizeAssert(name, size));
   }
@@ -389,7 +403,7 @@ export const allocMacrosPlugin: TransformPlugin = {
   id: 'alloc-macros',
   name: 'Allocation Macros',
   description:
-    'Fold Fog allocator calls carrying a literal file/line into D2_ALLOC/D2_FREE/D2_NEW macros',
+    'Fold Fog allocator calls carrying a literal file/line into D2_ALLOC_AT/D2_FREE_AT/D2_NEW_AT macros',
   version: '1.0.0',
   defaultEnabled: true,
   // After the type passes (600-700) settled every cast on these calls, before
