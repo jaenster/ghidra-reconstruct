@@ -57,26 +57,112 @@
  *   receiver goes on the stack and the caller pops — and gcc compiles a
  *   variadic `__thiscall` the same way, so the keyword would name a convention
  *   the code does not have.
+
+ *
+ * Prototype models the program defines itself — `__stdcall_edxsafe`,
+ * `__fastcall_ecxsafe`, `__stdcall_ecxedxsafe`, `__stdcall_x87safe` and the
+ * like — are spelled as the stock convention they extend. Such a model differs
+ * from its base only in which registers a call leaves intact (EDX moved from
+ * killed-by-call to unaffected, say), so the decompiler stops losing a value a
+ * caller keeps in that register across the call (0055f240, 006711a0, 0064f0f5).
+ * That is a fact about the original's register allocation, already spent in
+ * the C the decompiler produced: the caller's source names the value it reuses,
+ * and the compiler that builds the rebuild keeps it alive in whatever register
+ * it likes. Nothing in the emitted text can say "this call leaves EDX alone",
+ * and nothing needs to. What the source does need is where the arguments
+ * travel and who pops them, and an unrecognised name used to answer "nowhere
+ * special": all such functions came out `__cdecl`.
+ *
+ * Which base applies is read from the parameter storage when that storage is
+ * all-stack or exactly the `__fastcall` registers, because a custom model is
+ * always applied with custom storage and the storage is what the callers in the
+ * binary honour. `GetItemQuality` (00627e70) carries `__fastcall_ecxsafe` with
+ * its one argument at `Stack[0x4]` and returns with `RET 4`: a `__stdcall`
+ * function. `SKILLS_PopValue` (006c0ba0) carries `__stdcall_ecxedxsafe` with its
+ * argument in ECX and a plain `RET`: a `__fastcall` one. Both conventions pop
+ * their own stack arguments, so the storage settles which of the two it is.
+ * Storage in any other register (EAX, ESI, ST0 — a file-static function's own
+ * convention, see `file-static-functions.ts`) fits neither and keeps the base
+ * the model is named after.
  */
 import { templateRegistry } from './templates/registry.js';
 
 const SPELLED: ReadonlySet<string> = new Set(['__stdcall', '__fastcall', '__thiscall']);
+
+/** A program-defined prototype model: a stock name, `_`, and what it changes. */
+const CUSTOM_MODEL = /^(__cdecl|__stdcall|__fastcall|__thiscall)_[A-Za-z0-9_]+$/;
 
 /** The parts of a function or funcdef that decide how its convention is spelled. */
 export interface ConventionBearer {
   callingConvention?: string;
   /** The function's address; a funcdef has none. Says whether it is a non-static member. */
   address?: string;
-  /** The declared parameters; only their number matters here. */
+  /**
+   * The declared parameters. Their number matters everywhere; their storage
+   * only for a program-defined model (see the module note).
+   */
   parameters?: ReadonlyArray<unknown>;
   hasVarArgs?: boolean;
+}
+
+/** The register a storage piece names, by its full 32-bit register, or 'stack'. */
+function storageHome(piece: string): string | undefined {
+  const loc = piece.trim().replace(/:\d+$/, '').toUpperCase();
+  if (loc.startsWith('STACK[')) return 'stack';
+  if (['ECX', 'CX', 'CL'].includes(loc)) return 'ECX';
+  if (['EDX', 'DX', 'DL'].includes(loc)) return 'EDX';
+  return loc || undefined;
+}
+
+/**
+ * `__stdcall` or `__fastcall` when the parameter storage is exactly what that
+ * convention does — every argument on the stack, or the first in ECX, the
+ * second (if any) in EDX and the rest on the stack — and undefined when it is
+ * neither, or when there is no storage to read.
+ */
+function calleePopConventionFromStorage(parameters: ReadonlyArray<unknown> | undefined): string | undefined {
+  const params = [...(parameters ?? [])]
+    .map(p => p as { storage?: unknown; ordinal?: unknown })
+    .sort((a, b) => Number(a.ordinal ?? 0) - Number(b.ordinal ?? 0));
+  if (params.length === 0) return undefined;
+  const homes: string[] = [];
+  for (const p of params) {
+    if (typeof p.storage !== 'string' || p.storage.includes(',')) return undefined;
+    const home = storageHome(p.storage);
+    if (!home) return undefined;
+    homes.push(home);
+  }
+  if (homes.every(h => h === 'stack')) return '__stdcall';
+  const registers = homes.findIndex(h => h === 'stack');
+  const registerPrefix = registers === -1 ? homes : homes.slice(0, registers);
+  if (registers !== -1 && homes.slice(registers).some(h => h !== 'stack')) return undefined;
+  const fastcallOrder = ['ECX', 'EDX'];
+  if (registerPrefix.length <= 2 && registerPrefix.every((h, i) => h === fastcallOrder[i])) return '__fastcall';
+  return undefined;
+}
+
+/**
+ * The stock convention a callable's code follows: Ghidra's own for a stock
+ * name, and for a program-defined model the base it extends, chosen between
+ * `__stdcall` and `__fastcall` by the parameter storage where that storage is
+ * one of the two (see the module note). Undefined, '' and `unknown` pass
+ * through unchanged.
+ */
+export function abiConvention(callable: ConventionBearer): string | undefined {
+  const convention = callable.callingConvention;
+  const custom = convention ? CUSTOM_MODEL.exec(convention) : null;
+  if (!custom) return convention;
+  const base = custom[1];
+  if (base !== '__stdcall' && base !== '__fastcall') return base;
+  if (callable.hasVarArgs) return base;
+  return calleePopConventionFromStorage(callable.parameters) ?? base;
 }
 
 /**
  * The convention keyword for a declaration, or '' when there is nothing to say.
  */
 export function conventionKeyword(callable: ConventionBearer): string {
-  const convention = callable.callingConvention;
+  const convention = abiConvention(callable);
   if (!convention || !SPELLED.has(convention)) return '';
   const registerPassed = convention === '__fastcall' || convention === '__thiscall';
   if (registerPassed && (callable.parameters?.length ?? 0) === 0 && !callable.hasVarArgs) return '';

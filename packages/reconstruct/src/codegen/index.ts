@@ -75,7 +75,7 @@ import { generateImplementation, setQuestStructLayouts, setStructFieldRenames, d
 import { generateCMakeLists, generateTopLevelCMake, generateTargetCMake, generateUnsortedCMake } from './cmake.js';
 import { generateSourceMap } from './sourcemap.js';
 import { generateReadme } from './readme.js';
-import { conventionKeyword } from './calling-convention.js';
+import { abiConvention, conventionKeyword } from './calling-convention.js';
 import { organizeByNamespace, getFilePath, setModuleNames, setNamespaceCollisionTypes, normalizeQualifiedReference } from './namespace.js';
 import { buildNamespaceResolution, namespaceResolution, renderNamespace } from './namespace-resolution.js';
 import { setInteriorLabelSymbols, resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, setDeclarationClosureDataContent, getDeclarationClosureReport, isUnreferenceableArtifact, isEmittableGlobal, isDataArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, wasGlobalClaimed, findDuplicateLinkageNames, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, setInitializerAddressTable, setInitializerFunctionAddresses, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType, emittedNamespaceOf, getDeclaredNames, initializerAddressReferences, addInitializerAddressReferences, markUnnamedImportSlots, setInitializerEnumConstants } from './globals-header.js';
@@ -5246,7 +5246,9 @@ export function buildFuncPtrArgCastTables(
   const rootQualifiedTypedefs = Object.keys(funcdefSignatures).filter(n => bareFunctionNames.has(n));
 
   const functionSignatures: Record<string, string> = {};
-  // Ghidra's calling convention per function, keyed like functionSignatures.
+  // Ghidra's calling convention per function, keyed like functionSignatures. A
+  // program-defined model (`__stdcall_edxsafe`) is recorded as the stock
+  // convention it follows, the only thing a funcdef can be compared with.
   const functionGhidraConventions: Record<string, string> = {};
   const ambiguousConv = new Set<string>();
   const paramFuncdefs: Record<string, Record<number, string>> = {};
@@ -5266,7 +5268,7 @@ export function buildFuncPtrArgCastTables(
     const qualified = fn.namespace ? `${fn.namespace}::${bare}` : bare;
     indexBothSpellings(functionSignatures, ambiguousSig, qualified, bare,
       signatureKey(fn.returnType ?? 'void', params.map(p => p.dataType)), sameString);
-    indexBothSpellings(functionGhidraConventions, ambiguousConv, qualified, bare, fn.callingConvention ?? '', sameString);
+    indexBothSpellings(functionGhidraConventions, ambiguousConv, qualified, bare, abiConvention(fn) ?? '', sameString);
   }
 
   for (const fn of functions) {
@@ -5282,7 +5284,7 @@ export function buildFuncPtrArgCastTables(
     );
     indexBothSpellings(
       functionGhidraConventions, ambiguousConv, qualified, fn.name,
-      fn.callingConvention ?? '', sameString,
+      abiConvention(fn) ?? '', sameString,
       normalizeQualifiedReference(qualified),
     );
     // A name that is not an identifier (`~EditBoxImplementation`) reaches an
