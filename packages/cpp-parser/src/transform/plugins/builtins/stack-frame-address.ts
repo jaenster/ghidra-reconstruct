@@ -91,6 +91,8 @@ import type {
   CompoundStmt,
   ExprStmt,
   Statement,
+  FunctionDecl,
+  DeclStmt,
 } from '../../../ast/nodes.js';
 import type { Trivia } from '../../../lexer/trivia.js';
 import { traverseAST } from '../../../ast/visitor.js';
@@ -99,7 +101,7 @@ import { typeNodeName } from './call-arg-cast.js';
 import { createPlugin } from '../registry.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { memoOnInputs, hasOwnKeys, type MemoSlot } from './input-memo.js';
-import { Expr, Type } from '../../../ast/factory.js';
+import { Expr, Type, Stmt, Decl } from '../../../ast/factory.js';
 
 /** One entry of Ghidra's stack frame: a named variable at a signed byte offset. */
 export interface StackSlot {
@@ -1112,6 +1114,145 @@ function createArrayEndAddressTransformer(slots: StackSlot[]): Transformer {
   };
 }
 
+/** The local every rewritten varargs reference reads: `va_list __va; va_start(__va, last);`. */
+const VA_LIST_NAME = '__va';
+
+const IN_STACK_RE = /^in_stack_([0-9a-fA-F]+)$/;
+
+/** cdecl pushes every argument as at least one 4-byte word. */
+function argumentWords(size: number): number {
+  return Math.max(4, Math.ceil(size / 4) * 4);
+}
+
+/**
+ * A varargs function's own argument list, spelled `va_start`.
+ *
+ * In a function declared `(..., last, ...)` the decompiler names the variadic
+ * area by frame offset: `&stack0xN` is the ADDRESS of the first unnamed
+ * argument and `in_stack_N` its VALUE, where N is the byte just past `last`.
+ * The cdecl ABI fixes that adjacency, and `va_start(ap, last)` is the C spelling
+ * of exactly that address, so:
+ *
+ *   - the body opens with `va_list __va; va_start(__va, last);`;
+ *   - `&stack0xN` becomes `__va` - cast to the declared type when it is stored
+ *     into a pointer local the body then walks (`ppArgCur = (uint16_t **)__va;`),
+ *     and passed bare to a `v`-printf, whose parameter is already `va_list`;
+ *   - `in_stack_(N + k)` becomes `*(T *)(__va + k)`, the word the machine reads,
+ *     and its declaration goes. Only word-aligned offsets inside the variadic
+ *     area are taken; anything else is not an argument of this function.
+ *
+ * Without this, a varargs body that reads its first unnamed argument cannot be
+ * declared faithfully: Ghidra needs a fake named parameter for it, and every
+ * caller that passes no variadic arguments (`UNICODE_FormatWideString(0x132,
+ * dst, fmt)`) stops compiling.
+ *
+ * `va_end` is not emitted. On i386 it is a no-op, and the original never had one
+ * to recover: MSVC's own expands to `ap = 0`, which the optimiser dropped.
+ */
+function createVaStartTransformer(slots: StackSlot[]): Transformer {
+  return createKindTransformer(NodeKind.FunctionDecl, (node) => {
+    const fn = node as FunctionDecl;
+    if (!fn.isVariadic || !fn.body || fn.parameters.length === 0) return undefined;
+    const lastName = fn.parameters[fn.parameters.length - 1].name?.name;
+    if (!lastName) return undefined;
+    const last = slots.find((s) => s.isParameter && s.name === lastName);
+    if (!last) return undefined;
+    const start = last.offset + argumentWords(last.size);
+
+    const declared = declaredNames(fn.body);
+    if (declared.has(VA_LIST_NAME)) return undefined;
+
+    const isVaAddress = (expr: Expression | null | undefined): boolean =>
+      !!expr && frameAddressOffset(expr) === start;
+    const vaDelta = (name: string): number | null => {
+      const m = IN_STACK_RE.exec(name);
+      if (!m) return null;
+      const delta = Number.parseInt(m[1], 16) - start;
+      return delta >= 0 && delta % 4 === 0 ? delta : null;
+    };
+
+    // The variadic `in_stack_` declarations: their types say what each word is.
+    const inStackTypes = new Map<string, TypeNode>();
+    // Pointer locals, by declared type, for the cast a stored list address needs.
+    const localTypes = new Map<string, TypeNode>();
+    for (const n of traverseAST(fn.body)) {
+      if (n.kind !== NodeKind.VariableDecl) continue;
+      const v = n as VariableDecl;
+      if (!v.name?.name) continue;
+      if (vaDelta(v.name.name) !== null) inStackTypes.set(v.name.name, v.type);
+      else localTypes.set(v.name.name, v.type);
+    }
+
+    let used = false;
+    const vaRef = (from: ASTNode): Identifier => makeIdentifier(VA_LIST_NAME, from);
+    const isVaListType = (t: TypeNode): boolean =>
+      t.kind === NodeKind.TypedefType && typeNodeName((t as TypedefType).name) === 'va_list';
+    const storedAs = (t: TypeNode | undefined, from: ASTNode): Expression => {
+      used = true;
+      if (!t || t.kind !== NodeKind.PointerType) return vaRef(from);
+      return Expr.cast(t, vaRef(from));
+    };
+
+    const rewritten = sequence(
+      // A stored list address takes the type of the local that walks it.
+      createKindTransformer([NodeKind.AssignExpr, NodeKind.VariableDecl], (n) => {
+        if (n.kind === NodeKind.AssignExpr) {
+          const a = n as AssignExpr;
+          if (a.operator !== '=' || !isVaAddress(a.right)) return undefined;
+          const left = unwrapParens(a.left);
+          const t = left.kind === NodeKind.Identifier ? localTypes.get((left as Identifier).name) : undefined;
+          if (t && isVaListType(t)) return undefined;
+          return { ...a, right: storedAs(t, a.right) } as AssignExpr;
+        }
+        const v = n as VariableDecl;
+        if (!isVaAddress(v.initializer as Expression | null)) return undefined;
+        if (isVaListType(v.type)) return undefined;
+        return { ...v, initializer: storedAs(v.type, v.initializer as Expression) } as VariableDecl;
+      }),
+      // Declarations of the variadic words go - first, so the name a declaration
+      // carries is never mistaken for a read below.
+      createKindTransformer(NodeKind.CompoundStmt, (n) => {
+        const block = n as CompoundStmt;
+        let changed = false;
+        const statements: Statement[] = [];
+        for (const st of block.statements) {
+          if (st.kind !== NodeKind.DeclStmt) { statements.push(st); continue; }
+          const d = st as DeclStmt;
+          const kept = d.declarations.filter((x) =>
+            !(x.kind === NodeKind.VariableDecl && inStackTypes.has((x as VariableDecl).name?.name ?? '')));
+          if (kept.length === d.declarations.length) { statements.push(st); continue; }
+          changed = true;
+          if (kept.length > 0) statements.push({ ...d, declarations: kept } as DeclStmt);
+        }
+        return changed ? ({ ...block, statements } as CompoundStmt) : undefined;
+      }),
+      createKindTransformer([NodeKind.UnaryExpr, NodeKind.Identifier], (n) => {
+        if (n.kind === NodeKind.UnaryExpr) {
+          if (!isVaAddress(n as Expression)) return undefined;
+          used = true;
+          return vaRef(n);
+        }
+        const name = (n as Identifier).name;
+        const type = inStackTypes.get(name);
+        const delta = vaDelta(name);
+        if (!type || delta === null) return undefined;
+        used = true;
+        const at: Expression = delta === 0
+          ? vaRef(n)
+          : Expr.paren(Expr.add(vaRef(n), Expr.intLiteral(delta)));
+        return Expr.paren(Expr.deref(Expr.cast(Type.pointer(type), at)));
+      }),
+    )(fn.body) as CompoundStmt;
+
+    if (!used) return undefined;
+    const prologue: Statement[] = [
+      Stmt.declStmt([Decl.variable(VA_LIST_NAME, Type.typedef('va_list'))]),
+      Stmt.expr(Expr.call('va_start', [vaRef(fn), makeIdentifier(lastName, fn)])),
+    ];
+    return { ...fn, body: { ...rewritten, statements: [...prologue, ...rewritten.statements] } } as FunctionDecl;
+  });
+}
+
 function createStackFrameAddressTransformer(options: StackFrameAddressOptions = {}): Transformer {
   const slots = options.slots ?? [];
   const globalAddresses = options.globalAddresses ?? {};
@@ -1121,6 +1262,9 @@ function createStackFrameAddressTransformer(options: StackFrameAddressOptions = 
   // for this address", which is only true of what survives the two passes above.
   return sequence(
     createFrameIdentityTransformer(),
+    // Before the slot rules: in a varargs function the address past the last
+    // parameter is the argument list, and `va_start` is what spells it.
+    slots.length > 0 ? createVaStartTransformer(slots) : ((node: ASTNode) => node),
     slots.length > 0 ? createFrameSlotTransformer(slots) : ((node: ASTNode) => node),
     // Only what the frame could NOT account for reaches the fold solver, which
     // is what makes "no slot owns this offset" evidence of a fold rather than a
