@@ -25,6 +25,15 @@
  *     every end leaves;
  *   - no label inside the then-block is the target of a goto outside it, and the block holds
  *     no case label of an enclosing switch.
+ *
+ * One shape is left as it is although it qualifies: the triple ends the function body, its halt
+ * is the function's only halt, and the then-block holds no loop or switch. Measured against the
+ * original binary, VC8 laid those out with the halt after the return, the order the decompiler
+ * already gives (GetQuestControlSeed 005438b0, StartListening 006be350, CLIENT_GetUnitAct
+ * 0045c960); with a loop or switch in the guarded block the halt was inline in front
+ * (OOGUTIL_GetStringEnd 00442ae0, UNITSND_GetHitSound 004ca810). A triple with code after it,
+ * or one behind an earlier assertion, follows the inline layout. This is an observed split of
+ * the tree's sites, not a compiler rule: the source text of both layouts decompiles the same.
  * A then-block that declares names at its top level keeps its braces, so the names keep
  * their scope. The condition is negated by dropping a `!`, flipping `==`/`!=`, or else
  * wrapping it in `!(...)`; relational operators are not flipped (NaN).
@@ -169,6 +178,38 @@ interface Ctx {
   gotos: ReadonlyMap<string, number>;
 }
 
+const BRANCHY = new Set<string>([
+  NodeKind.WhileStmt, NodeKind.DoWhileStmt, NodeKind.ForStmt, NodeKind.ForRangeStmt, NodeKind.SwitchStmt,
+]);
+
+function holdsLoopOrSwitch(root: ASTNode): boolean {
+  for (const n of traverseAST(root)) if (BRANCHY.has(n.kind)) return true;
+  return false;
+}
+
+function haltCount(root: ASTNode): number {
+  let c = 0;
+  for (const n of traverseAST(root)) {
+    if (n.kind === NodeKind.CallExpr) {
+      const name = calleeTail((n as CallExpr).callee);
+      if (name !== null && HALT_CALLEES.has(name)) c++;
+    }
+  }
+  return c;
+}
+
+/**
+ * The function ends in `if (c) { straight-line } Halt; exit;` and that halt is its only one.
+ * Being the only halt, that triple is the only site the pass could rewrite.
+ */
+function endsInSoleStraightAssert(body: CompoundStmt): boolean {
+  const l = body.statements;
+  if (l.length < 3) return false;
+  const ifs = l[l.length - 3];
+  if (ifs.kind !== NodeKind.IfStmt || !isHaltStmt(l[l.length - 2]) || !isExitStmt(l[l.length - 1])) return false;
+  return haltCount(body) === 1 && !holdsLoopOrSwitch((ifs as IfStmt).thenBranch);
+}
+
 /** The statements that replace `stmts[i..i+2]`, or null when the shape there does not qualify. */
 function rewriteAt(stmts: readonly Statement[], i: number, ctx: Ctx): Statement[] | null {
   if (i + 2 >= stmts.length || stmts[i].kind !== NodeKind.IfStmt) return null;
@@ -216,7 +257,7 @@ function rewriteList(stmts: readonly Statement[], ctx: Ctx): { stmts: Statement[
 }
 
 function rewriteFunction(fn: FunctionDecl, noreturn: ReadonlySet<string>, stats: { reordered: number }): FunctionDecl | undefined {
-  if (!fn.body) return undefined;
+  if (!fn.body || endsInSoleStraightAssert(fn.body)) return undefined;
   const ctx: Ctx = { noreturn, gotos: gotoCounts([fn.body]) };
   let n = 0;
   const t = createTransformer({

@@ -9,6 +9,8 @@ import { defaultRegistry } from '../index.js';
 const HALT = 'Fog::Src::ErrorManager::ERROR_UnrecoverableInternalError_Halt';
 const IP = 'Fog::Src::ErrorManager::GetInstructionPointer';
 const H = `${HALT}("", ${IP}(), 0x272);`;
+/** An earlier assertion: the sites under test are then not the function's only halt. */
+const G = `if (!q) { ${HALT}("", ${IP}(), 0x271); exit(-1); }`;
 
 function run(code: string): string {
   const ast = parse(code);
@@ -27,24 +29,35 @@ function same(code: string): void {
 
 describe('assertOrderPlugin - puts the halt back in front', () => {
   it('reorders the ASYNCDATA_GetReadSize shape', () => {
-    const out = run(`int f(int* p) {
-  if (p != nullptr) {
-    return *p;
-  }
-  ${H}
-  exit(-1);
-}`);
-    assert.strictEqual(flat(out), flat(`int f(int* p) {
-  if (p == nullptr) {
+    const out = run(`int f(int* q, int* p) {
+  if (!q) {
+    ${HALT}("", ${IP}(), 0x271);
+    exit(-1);
+  } else {
+    if (p != nullptr) {
+      return *p;
+    }
     ${H}
     exit(-1);
   }
-  return *p;
+}`);
+    assert.strictEqual(flat(out), flat(`int f(int* q, int* p) {
+  if (!q) {
+    ${HALT}("", ${IP}(), 0x271);
+    exit(-1);
+  } else {
+    if (p == nullptr) {
+      ${H}
+      exit(-1);
+    }
+    return *p;
+  }
 }`));
   });
 
   it('drops a leading ! and keeps every guarded statement in order', () => {
-    const out = run(`void f(int* p) {
+    const out = run(`void f(int* q, int* p) {
+  ${G}
   if (!g(p)) {
     h(1);
     h(2);
@@ -53,7 +66,8 @@ describe('assertOrderPlugin - puts the halt back in front', () => {
   ${H}
   exit(-1);
 }`);
-    assert.strictEqual(flat(out), flat(`void f(int* p) {
+    assert.strictEqual(flat(out), flat(`void f(int* q, int* p) {
+  ${G}
   if (g(p)) {
     ${H}
     exit(-1);
@@ -65,15 +79,17 @@ describe('assertOrderPlugin - puts the halt back in front', () => {
   });
 
   it('wraps a compound condition and does not flip relational operators', () => {
-    const out = run(`int f(int a, int b) {
+    const out = run(`int f(int* q, int a, int b) {
+  ${G}
   if (a < b && b != 0) {
     return a;
   }
   ${H}
   exit(-1);
 }`);
-    assert.ok(flat(out).startsWith(flat(`int f(int a, int b) { if (!(a < b && b != 0)) {`)), out);
-    const lt = run(`int f(float a, float b) {
+    assert.ok(flat(out).includes(flat(`if (!(a < b && b != 0)) {`)), out);
+    const lt = run(`int f(int* q, float a, float b) {
+  ${G}
   if (a < b) {
     return 1;
   }
@@ -102,16 +118,18 @@ out:
   });
 
   it('handles a then-branch without braces and the _exit spelling', () => {
-    const out = run(`int f(int c) {
+    const out = run(`int f(int* q, int c) {
+  ${G}
   if (c) return 1;
   ${H}
   _exit(-1);
 }`);
-    assert.strictEqual(flat(out), flat(`int f(int c) { if (!c) { ${H} _exit(-1); } return 1; }`));
+    assert.strictEqual(flat(out), flat(`int f(int* q, int c) { ${G} if (!c) { ${H} _exit(-1); } return 1; }`));
   });
 
   it('keeps the braces when the guarded block declares a name', () => {
-    const out = run(`int f(int c) {
+    const out = run(`int f(int* q, int c) {
+  ${G}
   if (c) {
     int x = g(c);
     return x;
@@ -119,7 +137,34 @@ out:
   ${H}
   exit(-1);
 }`);
-    assert.strictEqual(flat(out), flat(`int f(int c) { if (!c) { ${H} exit(-1); } { int x = g(c); return x; } }`));
+    assert.strictEqual(flat(out), flat(`int f(int* q, int c) { ${G} if (!c) { ${H} exit(-1); } { int x = g(c); return x; } }`));
+  });
+
+  it('reorders a sole function-ending assert whose guarded block loops or switches (OOGUTIL_GetStringEnd)', () => {
+    const out = run(`char* f(char* s) {
+  if (s) {
+    while (*s != 0) {
+      s++;
+    }
+    return s + 1;
+  }
+  ${H}
+  exit(-1);
+}`);
+    assert.strictEqual(flat(out), flat(`char* f(char* s) {
+  if (!s) { ${H} exit(-1); }
+  while (*s != 0) { s++; }
+  return s + 1;
+}`));
+    const sw = run(`int f(int* t, int m) {
+  if (t) {
+    switch (m) { case 1: return 2; }
+    return 0;
+  }
+  ${H}
+  exit(-1);
+}`);
+    assert.ok(flat(sw).startsWith(flat(`int f(int* t, int m) { if (!t) {`)), sw);
   });
 
   it('reorders nested shapes and keeps what follows the exit', () => {
@@ -158,6 +203,30 @@ describe('assertOrderPlugin - refuses what is not the same program', () => {
     if (c == 2) {
       return;
     }
+  }
+  ${H}
+  exit(-1);
+}`);
+  });
+
+  it('a function-ending assert that is the only halt and guards straight-line code', () => {
+    // GetQuestControlSeed 005438b0
+    same(`int* f(int* p) {
+  if (p) {
+    return p + 6;
+  }
+  ${H}
+  exit(-1);
+}`);
+    // A1Q6::Objects_InitFn04 00595a00: an inner leaving if is still straight-line
+    same(`void f(int* p) {
+  int* d = g(p);
+  if (d) {
+    if (d[2]) {
+      return;
+    }
+    h(3);
+    return;
   }
   ${H}
   exit(-1);
@@ -242,9 +311,10 @@ describe('assertOrderPlugin - in the default pipeline', () => {
   it('runs in the full preset, after halt-site-fold has folded the line temporaries', () => {
     const ids = defaultRegistry.getEnabledIds({ preset: 'full' });
     assert.ok(ids.indexOf('halt-site-fold') < ids.indexOf('assert-order'), ids.join(','));
-    const ast = parse(`int f(int* p) {
+    const ast = parse(`int f(int* q, int* p) {
   int32_t nAddress;
   int32_t nLine;
+  ${G}
   if (p != nullptr) {
     return *p;
   }
