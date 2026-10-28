@@ -606,6 +606,8 @@ export type Statement =
   | LabelStmt
   | NullStmt
   | TryStmt
+  | SehTryStmt
+  | PpConditionalStmt
   | CoReturnStmt;
 
 export interface CompoundStmt extends ASTNode {
@@ -710,6 +712,31 @@ export interface TryStmt extends ASTNode {
   kind: NodeKind.TryStmt;
   body: CompoundStmt;
   handlers: CatchClause[];
+}
+
+/**
+ * MSVC structured exception handling: `__try { body } __except (filter) { handler }`
+ * or `__try { body } __finally { handler }`.
+ */
+export interface SehTryStmt extends ASTNode {
+  kind: NodeKind.SehTryStmt;
+  body: CompoundStmt;
+  handlerKind: 'except' | 'finally';
+  /** The `__except` filter expression; null for `__finally`. */
+  filter: Expression | null;
+  handler: CompoundStmt;
+}
+
+/**
+ * Statements under a preprocessor conditional: `#if condition`, the `then`
+ * statements, optionally `#else` and the `otherwise` statements, `#endif`. The
+ * condition is the directive's text after `#if`.
+ */
+export interface PpConditionalStmt extends ASTNode {
+  kind: NodeKind.PpConditionalStmt;
+  condition: string;
+  thenStatements: Statement[];
+  elseStatements: Statement[] | null;
 }
 
 export interface CatchClause extends ASTNode {

@@ -312,6 +312,21 @@ export function getChildren(node: ASTNode): ASTNode[] {
       break;
     }
 
+    case NodeKind.SehTryStmt: {
+      const st = node as any;
+      children.push(st.body);
+      if (st.filter) children.push(st.filter);
+      children.push(st.handler);
+      break;
+    }
+
+    case NodeKind.PpConditionalStmt: {
+      const pc = node as any;
+      children.push(...pc.thenStatements);
+      if (pc.elseStatements) children.push(...pc.elseStatements);
+      break;
+    }
+
     case NodeKind.CatchClause: {
       const cc = node as any;
       if (cc.parameter) children.push(cc.parameter);
@@ -924,6 +939,21 @@ function transformChildren<N extends ASTNode>(
       const ts = copy as any;
       ts.body = transformAST(ts.body, visitor);
       ts.handlers = ts.handlers.map((h: any) => transformAST(h, visitor));
+      break;
+    }
+
+    case NodeKind.SehTryStmt: {
+      const st = copy as any;
+      st.body = transformAST(st.body, visitor);
+      if (st.filter) st.filter = transformAST(st.filter, visitor);
+      st.handler = transformAST(st.handler, visitor);
+      break;
+    }
+
+    case NodeKind.PpConditionalStmt: {
+      const pc = copy as any;
+      pc.thenStatements = pc.thenStatements.map((s: any) => transformAST(s, visitor));
+      if (pc.elseStatements) pc.elseStatements = pc.elseStatements.map((s: any) => transformAST(s, visitor));
       break;
     }
 

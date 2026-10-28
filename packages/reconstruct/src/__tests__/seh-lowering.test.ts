@@ -619,6 +619,10 @@ describe('WARDEN_DecryptModule end to end', () => {
     assert.ok(label > body.indexOf('} else {'), body);
     assert.ok(body.indexOf('WARDEN_FreeModuleLibraries', label) > label, body);
     assert.ok(body.indexOf('bFailed = 1') < body.indexOf('D2SehScope __seh0'), body);
+    // MSVC gets the original construct, the lowering stays GCC's.
+    assert.match(body, /#if defined\(_MSC_VER\)\s*__try \{/, body);
+    assert.match(body, /\} __except \(1\) \{\}\s*#else\s*D2SehScope __seh0\{1\};/, body);
+    assert.ok(body.indexOf('#endif') < label, body);
   });
 
   it('SOUNDUTIL_ReadVersionResource comes out as a __try/__finally', () => {
@@ -641,7 +645,11 @@ describe('WARDEN_DecryptModule end to end', () => {
     if (process.env.SHOW_SEH) console.log(body);
     assert.match(body, /auto __finally0 = \[&\]/, body);
     assert.match(body, /D2SehScope __seh0\{__finally0\};/, body);
-    assert.match(body, /__finally0\(\);\s*return bSuccess;/, body);
+    assert.match(body, /__finally0\(\);\s*#endif\s*return bSuccess;/, body);
+    // MSVC gets the original construct: no lambda, no normal-path call, no fences.
+    const native = body.slice(body.indexOf('#if defined(_MSC_VER)'), body.indexOf('#else'));
+    assert.match(native, /__try \{[\s\S]*\} __finally \{\s*DWORD dwErrCode = GetLastError\(\);/, native);
+    assert.ok(!/__finally0|D2_SEH_FENCE|D2SehScope/.test(native), native);
     assert.ok(!/ExceptionList|\.TryLevel|\.ScopeTable/.test(body), body);
   });
 });

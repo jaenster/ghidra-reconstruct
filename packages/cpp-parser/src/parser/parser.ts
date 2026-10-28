@@ -31,6 +31,7 @@ import {
   type CompoundStmt,
   type ExprStmt,
   type IfStmt,
+  type SehTryStmt,
   type WhileStmt,
   type DoWhileStmt,
   type ForStmt,
@@ -1377,6 +1378,11 @@ export class Parser {
       stmt.leadingTrivia = leadingTrivia;
       return stmt;
     }
+    if (this.checkIdentifierText('__try') && this.checkAhead(1, TokenKind.LeftBrace)) {
+      const stmt = this.parseSehTryStatement();
+      stmt.leadingTrivia = leadingTrivia;
+      return stmt;
+    }
     if (this.check(TokenKind.Case)) {
       const stmt = this.parseCaseStatement();
       stmt.leadingTrivia = leadingTrivia;
@@ -1483,6 +1489,34 @@ export class Parser {
       elseBranch,
       isConstexpr,
     }) as IfStmt;
+  }
+
+  /**
+   * Parse an MSVC structured exception handler:
+   * `__try { } __except (filter) { }` or `__try { } __finally { }`.
+   */
+  private parseSehTryStatement(): SehTryStmt {
+    const startLoc = this.currentLocation();
+    this.advance(); // __try
+    const body = this.parseCompoundStatement();
+    if (this.checkIdentifierText('__finally')) {
+      this.advance();
+      const handler = this.parseCompoundStatement();
+      return this.node(NodeKind.SehTryStmt, startLoc, { body, handlerKind: 'finally', filter: null, handler }) as SehTryStmt;
+    }
+    if (!this.checkIdentifierText('__except')) {
+      throw new ParserError(`Expected __except or __finally, got ${this.current().token.text}`, this.currentLocation());
+    }
+    this.advance();
+    this.expect(TokenKind.LeftParen);
+    const filter = this.parseExpression();
+    this.expect(TokenKind.RightParen);
+    const handler = this.parseCompoundStatement();
+    return this.node(NodeKind.SehTryStmt, startLoc, { body, handlerKind: 'except', filter, handler }) as SehTryStmt;
+  }
+
+  private checkIdentifierText(text: string): boolean {
+    return this.check(TokenKind.Identifier) && this.current().token.text === text;
   }
 
   /**

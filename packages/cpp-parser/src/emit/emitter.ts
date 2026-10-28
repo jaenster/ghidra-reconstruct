@@ -85,6 +85,8 @@ import type {
   LabelStmt,
   NullStmt,
   TryStmt,
+  SehTryStmt,
+  PpConditionalStmt,
   CatchClause,
   CoReturnStmt,
 
@@ -528,6 +530,12 @@ export class CppEmitter {
         break;
       case NodeKind.TryStmt:
         this.emitTryStmt(node as TryStmt);
+        break;
+      case NodeKind.SehTryStmt:
+        this.emitSehTryStmt(node as SehTryStmt);
+        break;
+      case NodeKind.PpConditionalStmt:
+        this.emitPpConditionalStmt(node as PpConditionalStmt);
         break;
       case NodeKind.CatchClause:
         this.emitCatchClause(node as CatchClause);
@@ -1810,6 +1818,7 @@ export class CppEmitter {
       case NodeKind.DoWhileStmt:
       case NodeKind.SwitchStmt:
       case NodeKind.TryStmt:
+      case NodeKind.SehTryStmt:
         return true;
       default:
         return false;
@@ -1841,6 +1850,8 @@ export class CppEmitter {
       case NodeKind.ForStmt:
       case NodeKind.ForRangeStmt:
       case NodeKind.TryStmt:
+      case NodeKind.SehTryStmt:
+      case NodeKind.PpConditionalStmt:
       case NodeKind.LabelStmt:
       case NodeKind.NullStmt:
       case NodeKind.CaseStmt:
@@ -2183,6 +2194,50 @@ export class CppEmitter {
     // A label needs its statement: printed as nothing, `L: ;` would label whatever
     // follows (or end a block, which C++17 rejects).
     else if (node.statement.kind === NodeKind.NullStmt) this.write(';');
+  }
+
+  private emitSehTryStmt(node: SehTryStmt): void {
+    this.write('__try ');
+    this.emitCompoundStmt(node.body);
+    if (this.style.braceStyle === 'stroustrup' || this.style.braceStyle === 'k&r') {
+      this.write(' ');
+    } else {
+      this.newline();
+      this.write(this.indent());
+    }
+    if (node.handlerKind === 'finally') {
+      this.write('__finally ');
+    } else {
+      this.write('__except');
+      if (this.style.spaceAfterKeyword) this.write(' ');
+      this.write('(');
+      if (node.filter) this.emitNode(node.filter);
+      this.write(') ');
+    }
+    this.emitCompoundStmt(node.handler);
+  }
+
+  /** `#if` / `#else` / `#endif` around statements, at the statements' own indent. */
+  private emitPpConditionalStmt(node: PpConditionalStmt): void {
+    const branch = (stmts: Statement[]) => {
+      for (const stmt of stmts) {
+        this.newline();
+        this.write(this.indent());
+        this.emitNode(stmt);
+        if (this.needsSemicolon(stmt)) this.write(';');
+      }
+    };
+    this.write(`#if ${node.condition}`);
+    branch(node.thenStatements);
+    if (node.elseStatements) {
+      this.newline();
+      this.write(this.indent());
+      this.write('#else');
+      branch(node.elseStatements);
+    }
+    this.newline();
+    this.write(this.indent());
+    this.write('#endif');
   }
 
   private emitTryStmt(node: TryStmt): void {

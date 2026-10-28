@@ -64,6 +64,8 @@ export enum NodeKind {
   LabelStmt = 'LabelStmt',
   NullStmt = 'NullStmt',                 // ;
   TryStmt = 'TryStmt',
+  SehTryStmt = 'SehTryStmt',         // __try { } __except (f) { } / __finally { }
+  PpConditionalStmt = 'PpConditionalStmt', // #if C / statements / #else / statements / #endif
   CatchClause = 'CatchClause',
   ThrowExpr = 'ThrowExpr',
 
@@ -231,6 +233,8 @@ const STATEMENT_KINDS = new Set([
   NodeKind.LabelStmt,
   NodeKind.NullStmt,
   NodeKind.TryStmt,
+  NodeKind.SehTryStmt,
+  NodeKind.PpConditionalStmt,
   NodeKind.CatchClause,
   NodeKind.ThrowExpr,
   NodeKind.CoReturnStmt,
