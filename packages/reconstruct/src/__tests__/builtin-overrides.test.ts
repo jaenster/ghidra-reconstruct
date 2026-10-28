@@ -18,6 +18,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { compileAndRun, hasNativeGpp } from '@ghidra-mcp/cpp-parser/testing/native-cpp';
+import { ARTIFACT_SUPPORT_LINES } from '@ghidra-mcp/cpp-parser';
 import {
   BUILTIN_OVERRIDES_DIR, OverrideRegistry, createOverrideRegistry, loadBuiltinOverrides,
 } from '../overrides/index.js';
@@ -51,7 +52,7 @@ describe('repository overrides: registration', () => {
     assert.ok(registry, 'no registry without project.json: the shipped bodies are not applied');
     for (const address of Object.keys(SHIPPED)) assert.ok(registry!.has(address), address);
     const applied = await registry!.applyOverride('004107d0', '/* decompiled */');
-    assert.match(applied!.body, /__atomic_compare_exchange_n/);
+    assert.match(applied!.body, /D2_AtomicCompareExchange/);
   });
 
   it('a project entry for the same address replaces the shipped one', () => {
@@ -87,7 +88,8 @@ const native = { skip: !hasNativeGpp() };
 
 describe('repository overrides: the bodies do what the binary does', native, () => {
   it('Atomic64Load reads the source atomically and leaves it unchanged', () => {
-    const fn = `void Atomic64Load(int64_t* pllResult, int64_t* pllSource) {\n${body('Atomic64Load')}\n}`;
+    // The helper the body calls, as the platform header carries it.
+    const fn = `${ARTIFACT_SUPPORT_LINES.join('\n')}\nvoid Atomic64Load(int64_t* pllResult, int64_t* pllSource) {\n${body('Atomic64Load')}\n}`;
     const out = compileAndRun(fn, [
       // 0: the comparand stand-in matches, so the locked write puts back the same value.
       'const int64_t values[] = {0, 0x29a, -1, 0x123456789abcdefLL};',

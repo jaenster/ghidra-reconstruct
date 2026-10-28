@@ -41,7 +41,7 @@ relative to `project/`; the `patch` entries below live there.
 |-|-|-|
 |`GuardStack.cpp`|00681a48|MSVC `__security_check_cookie`: compares ECX, which the caller loads from its own cookie slot. The rebuilt callers have no slot and pass nothing; the body is the intact-frame path, `return`.|
 |`GetInstructionPointer.cpp`|00408090|`MOV EAX,[ESP]; RET`: its own return address. `__builtin_return_address(0)`, under `noinline`.|
-|`Atomic64Load.cpp`|004107d0|`LOCK CMPXCHG8B` with comparand = new value = ECX:EBX, a don't-care: an atomic 64-bit read. `__atomic_compare_exchange_n` with 0 on both sides.|
+|`Atomic64Load.cpp`|004107d0|`LOCK CMPXCHG8B` with comparand = new value = ECX:EBX, a don't-care: an atomic 64-bit read. `D2_AtomicCompareExchange` with 0 on both sides.|
 
 `packages/reconstruct/src/__tests__/builtin-overrides.test.ts` compiles and runs them.
 

@@ -8,7 +8,7 @@
 // writes back what is there, otherwise it loads it, so EDX:EAX is *pllSource either way and
 // the target never changes - an atomic 64-bit read. The comparand (EBX, ECX) is a
 // don't-care; 0 stands in for it, on both sides, so a match still writes back the same value.
+// D2_AtomicCompareExchange is the sequentially consistent compare-exchange (d2_platform.h).
 int64_t llValue = 0;
-__atomic_compare_exchange_n((int64_t*)pllSource, &llValue, (int64_t)0, false,
-                            __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); // 004107d8
+D2_AtomicCompareExchange((int64_t*)pllSource, &llValue, (int64_t)0); // 004107d8
 *(int64_t*)pllResult = llValue;                                  // 004107dc / 004107de

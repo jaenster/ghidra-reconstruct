@@ -39,7 +39,7 @@
  * The instruction-like ops get the spelling of the instruction: ROUND -> std::nearbyint,
  * ABS -> std::fabs, rdtsc -> __rdtsc, cpuid_<leaf> -> D2_Cpuid, builtin_strncpy -> memcpy,
  * ZPULL/SPULL -> shift and mask, `(code*)swi(3)` called -> __debugbreak, and a LOCK/UNLOCK
- * compare-exchange region -> __atomic_compare_exchange_n.
+ * compare-exchange region -> D2_AtomicCompareExchange (d2_platform.h).
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -960,10 +960,12 @@ const stmt = (expression: Expression): ASTNode =>
 /**
  * `LOCK(); T = *P; [B =] X == T; if (B) { *P = N; ... } else { ... } UNLOCK();` is
  * CMPXCHG8B: compare EDX:EAX (X) with *P and store ECX:EBX (N) if equal, else load *P.
- * T holds the old *P afterwards on both paths. That is __atomic_compare_exchange_n with
- * T as the expected value, which also leaves the old value in T when it fails:
+ * T holds the old *P afterwards on both paths. That is a sequentially consistent
+ * compare-exchange with T as the expected value, which also leaves the old value in T
+ * when it fails - `D2_AtomicCompareExchange` (d2_platform.h: GCC's
+ * __atomic_compare_exchange_n, MSVC's _InterlockedCompareExchange[64]):
  *
- *   T = X; [B =] __atomic_compare_exchange_n(P, &T, N, false, SEQ_CST, SEQ_CST);
+ *   T = X; [B =] D2_AtomicCompareExchange(P, &T, N);
  *   if (B) { ... } else { ... }
  *
  * Without the builtin the rebuild's region is not atomic at all (LOCK was empty).
@@ -1010,7 +1012,7 @@ function lowerLockRegion(region: ASTNode[]): ASTNode[] | null {
   const N = store.right;
   if (!isPure(N) || mentions(N, tName)) return null;
 
-  const cas = fromTemplate('__atomic_compare_exchange_n(__P, &__T, __N, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)',
+  const cas = fromTemplate('D2_AtomicCompareExchange(__P, &__T, __N)',
     { __P: P, __T: T, __N: N });
   const restThen = { ...(ifSt.thenBranch.kind === NodeKind.CompoundStmt ? ifSt.thenBranch : {
     kind: NodeKind.CompoundStmt, location: ifSt.thenBranch.location, leadingTrivia: [], trailingTrivia: [] }),

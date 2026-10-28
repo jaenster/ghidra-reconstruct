@@ -318,7 +318,7 @@ describe('pseudo-op-lower: instruction-like ops', () => {
     assert.ok(out.includes('__debugbreak();'), out);
     assert.ok(!out.includes('pcVar1') && !out.includes('swi'), out);
   });
-  it('a LOCK/UNLOCK compare-exchange region is __atomic_compare_exchange_n', { skip: !hasNativeGpp() }, () => {
+  it('a LOCK/UNLOCK compare-exchange region is D2_AtomicCompareExchange', { skip: !hasNativeGpp() }, () => {
     // AtomicCompareExchange64 @004107b0, CONCAT44 already lowered by this pass.
     const src = `void AtomicCompareExchange64(longlong *pllParam1, longlong *pllParam2) {
       uint dwCompareLo; uint dwExpectedHi; bool bMatched; longlong llNewValue; longlong llCurrent;
@@ -341,7 +341,7 @@ describe('pseudo-op-lower: instruction-like ops', () => {
       return;
     }`;
     const out = transform(src);
-    assert.ok(out.includes('__atomic_compare_exchange_n(pllParam1, &llCurrent, llNewValue'), out);
+    assert.ok(out.includes('D2_AtomicCompareExchange(pllParam1, &llCurrent, llNewValue)'), out);
     assert.ok(!out.includes('LOCK'), out);
     const fn = out.replace('(int)pllParam1', '(intptr_t)pllParam1');
     const run = compileAndRun(PRELUDE + '\n' + fn, [
