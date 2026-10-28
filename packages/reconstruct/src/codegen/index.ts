@@ -96,7 +96,8 @@ import { collectCrtHeaders, EXCLUDED_SYMBOL_DECLS, declaredIdentifier, WIN32_ZER
 import { selectExclusionEmissions, setPlatformDefinedNames, setPlatformDeclaredNames, collectReferencedNames, mayReferenceNamespaces } from './exclusion-closure.js';
 import { normalizePointerSizeSpellings } from './pointer-size-spelling.js';
 import { flattenTemplateNames } from './template-names.js';
-import { buildTemplateRegistry, classScopeOf, templateDataDefinitions, templateHeaderTypes } from './templates/index.js';
+import { buildTemplateRegistry, classScopeOf, memberDefinitionScope, templateDataDefinitions, templateHeaderTypes } from './templates/index.js';
+import { fileStaticKey, selectFileStaticFunctions } from './file-static-functions.js';
 import { placeTemplateMembers } from './templates/placement.js';
 import { baseModel } from './templates/bases.js';
 import { memberModel } from './templates/members.js';
@@ -262,6 +263,12 @@ interface UnitEmitRecord {
    * looks unreferenced, which flips it between claimed and orphaned.
    */
   initRefs: string[];
+  /**
+   * Address keys of the functions this unit's text defines `static`. A caller added
+   * in another unit makes one extern again without touching this unit's inputs, so
+   * text written under a different set is never reused. Absent: none.
+   */
+  statics?: string[];
 }
 const unitIdentifierCounts = new Map<string, UnitEmitRecord>();
 let unitIdentCachePath: string | null = process.env.RECON_UNIT_IDENT_CACHE ?? null;
@@ -824,6 +831,9 @@ export function generateProjectStage1(
   // about that changes what is emitted.
   resetDeclaredNames();
   setDeclarationClosureModel(functions, globals as AnalyzedDataSymbol[]);
+  // Linkage is decided over the same unfiltered model: a reference from excluded
+  // code is a reference from another translation unit.
+  const fileStaticModel = { functions, globals: globals as AnalyzedDataSymbol[] };
   // The bytes behind the data the closure declares. Keyed on address inside the
   // setter, because a Ghidra string LABEL is a lossy rendering of its content
   // and only the address in it is exact.
@@ -1479,6 +1489,13 @@ export function generateProjectStage1(
       ? globalsHeaderPathUnder(coreDir)
       : undefined;
 
+    installFileStaticFunctions(context, fileStaticModel, classes, namespaces,
+      [...resolution.targets]
+        .filter(([, target]) => target.config.type !== 'interface')
+        .map(([targetName, target]) => ({ prefix: getTargetDirectory(targetName), functions: target.functions }))
+        .concat(resolution.unsorted.length > 0 ? [{ prefix: 'unsorted', functions: resolution.unsorted }] : []),
+      !shard || shard.index === 0);
+
     // Generate files per target (classification happens here)
     const mergedTypeOwnerMap = new Map<string, string>();
     for (const [targetName, target] of resolution.targets) {
@@ -1528,6 +1545,9 @@ export function generateProjectStage1(
 
     // Calculate globals path (needed for generateFilesForFunctions includes)
     const flatGlobalsPath = analyzedGlobals.length > 0 ? GLOBALS_HEADER : undefined;
+
+    installFileStaticFunctions(context, fileStaticModel, classes, namespaces,
+      [{ prefix: '', functions }], !shard || shard.index === 0);
 
     // Generate files (classification happens here)
     const flatTypeOwnerMap = generateFilesForFunctions(
@@ -2378,6 +2398,58 @@ function buildAutoMethodMappings(
  * Build a map of function name → impl file path for file-scoped statics computation.
  * This maps functions to their output impl file based on namespace organization.
  */
+/**
+ * Decide which emitted functions are defined `static` (file-static-functions.ts) and
+ * hand the answer to the emitters on `context`. `parts` are the function sets the unit
+ * files are generated from, each under its directory prefix: a unit is identified by
+ * both, as its file is.
+ */
+function installFileStaticFunctions(
+  context: ImplGenContext,
+  model: { functions: ExtractedFunction[]; globals: AnalyzedDataSymbol[] },
+  classes: DetectedClass[],
+  namespaces: ExtractedNamespace[],
+  parts: Array<{ prefix: string; functions: ExtractedFunction[] }>,
+  report: boolean,
+): void {
+  const unitOf = new Map<string, string>();
+  for (const part of parts) {
+    for (const [unitName, unitFunctions] of organizeByNamespace(part.functions, classes, namespaces)) {
+      for (const f of unitFunctions) unitOf.set(fileStaticKey(f.address), `${part.prefix}/${unitName}`);
+    }
+  }
+  const classMethods = new Set<string>();
+  for (const cls of classes) for (const m of cls.methods) classMethods.add(fileStaticKey(m.address));
+  // The platform header declares these names extern in every unit.
+  const platformDeclared = platformDeclaredFunctionNames();
+  const selection = selectFileStaticFunctions({
+    allFunctions: model.functions,
+    unitOf,
+    globals: model.globals,
+    keepExtern: f => classMethods.has(fileStaticKey(f.address))
+      || Boolean(context.methodConversions?.has(f.address))
+      || templateRegistry()?.unitOf(f.address) !== undefined
+      || memberDefinitionScope(f) !== undefined
+      || platformDeclared.has(f.name),
+    // A replaced body or a patch is emitted code that can name any function.
+    extraReferenceText: f => {
+      const override = context.overrides?.get(f.address);
+      if (!override) return undefined;
+      if (override.action === 'patch') return (override.patches ?? []).map(p => p.replace).join('\n');
+      if (override.sourceFile) return nodeFs.readFileSync(context.overrides!.resolveSource(override.sourceFile), 'utf-8');
+      return undefined;
+    },
+  });
+  context.fileStaticFunctions = selection.selected;
+  if (report) {
+    const refused = [...selection.refused].map(([why, names]) => `${names.length} ${why}`).join(', ');
+    console.log(
+      `File-static functions: ${selection.selected.size} of ${selection.candidates} with parameters in ` +
+      `registers their convention does not use${refused ? ` (kept extern: ${refused})` : ''}`
+    );
+  }
+}
+
 function buildFuncToImplPathMap(
   functions: ExtractedFunction[],
   classes: DetectedClass[],
@@ -3866,7 +3938,8 @@ function generateFilesForFunctions(
         headerPath,
         undefined,  // no funcIncludes
         functions,  // allFunctions for cross-module method lookup
-        classes     // allClasses so cross-namespace method structs get method declarations
+        classes,    // allClasses so cross-namespace method structs get method declarations
+        f => context.fileStaticFunctions?.has(fileStaticKey(f.address)) ?? false,
       ));
 
       files.set(headerPath, {
@@ -3917,7 +3990,14 @@ function generateFilesForFunctions(
     //
     // The dep-scan below then runs over the reused text, so its include set is
     // derived the same way it was derived when the text was written.
-    const reusedImpl = reuseUnitImpl(unitName, implPath);
+    const unitStatics = unitFunctions
+      .map(f => fileStaticKey(f.address))
+      .filter(k => context.fileStaticFunctions?.has(k))
+      .sort();
+    const previousStatics = unitIdentifierCounts.get(unitName)?.statics ?? [];
+    const reusedImpl = previousStatics.join(',') === unitStatics.join(',')
+      ? reuseUnitImpl(unitName, implPath)
+      : undefined;
     // Snapshot the tally before emitting so this unit's contribution can be
     // isolated: the map is cumulative across units, so the delta is the only way
     // to say which identifiers came from here.
@@ -4183,7 +4263,7 @@ function generateFilesForFunctions(
       for (const name of initializerAddressReferences()) {
         if (!initRefsBefore.has(name)) initRefs.push(name);
       }
-      unitIdentifierCounts.set(unitName, { idents, declared, initRefs });
+      unitIdentifierCounts.set(unitName, { idents, declared, initRefs, statics: unitStatics });
     }
 
     files.set(implPath, {

@@ -145,7 +145,9 @@ export function generateHeader(
   headerPath?: string,
   funcIncludes?: string[],
   allFunctions?: ExtractedFunction[],
-  allClasses?: DetectedClass[]
+  allClasses?: DetectedClass[],
+  /** Whether a function is defined `static` in its unit, and so not declared here. */
+  isFileStatic?: (func: ExtractedFunction) => boolean
 ): string {
   const lines: string[] = [];
 
@@ -509,9 +511,9 @@ export function generateHeader(
     );
 
     // When publicFunctions is provided, only declare externally-visible functions
-    const declaredFunctions = publicFunctions
+    const declaredFunctions = (publicFunctions
       ? nonLibraryFunctions.filter(f => publicFunctions.has(f.name))
-      : nonLibraryFunctions;
+      : nonLibraryFunctions).filter(f => !isFileStatic?.(f));
     const internalCount = nonLibraryFunctions.length - declaredFunctions.length;
 
     if (declaredFunctions.length > 0) {
