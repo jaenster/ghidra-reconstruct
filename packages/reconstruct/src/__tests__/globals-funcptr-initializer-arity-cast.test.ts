@@ -228,7 +228,8 @@ describe('a function address stored in a differing function-pointer slot', () =>
   });
 
   it('leaves a null codec slot as nullptr', () => {
-    const out = emitDataValue(entry('0x0', '0x0'), 0, 'SCompCodecEntryStrc');
+    // a non-zero mask keeps the entry from being value-initialized as a whole
+    const out = emitDataValue(entry('0x40', '0x0'), 0, 'SCompCodecEntryStrc');
     assert.ok(out.includes('nullptr'), `expected nullptr in: ${out}`);
     assert.ok(!out.includes('(pfnSCompCodec)'), `a null slot takes no cast: ${out}`);
   });

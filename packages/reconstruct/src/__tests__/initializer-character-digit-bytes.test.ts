@@ -115,8 +115,9 @@ describe('a digit in a character initializer keeps its byte', () => {
     // szCustomSymbolSearchPath is 32768 uninitialised bytes, every one rendered
     // `0`. Read as the character, that is 0x30 thirty-two thousand times.
     const dv = scalars('0', '0', '0', '0');
-    assert.deepStrictEqual(bytesOf(emitDataValue(dv, 0, 'char[4]')), [0, 0, 0, 0]);
-    assert.deepStrictEqual(bytesOf(emitDataValue(dv, 0, 'uint8_t[4]')), [0, 0, 0, 0]);
+    // all zero, so value-initialized
+    assert.strictEqual(emitDataValue(dv, 0, 'char[4]'), '{}');
+    assert.strictEqual(emitDataValue(dv, 0, 'uint8_t[4]'), '{}');
   });
 
   it('leaves a numeric slot numeric', () => {

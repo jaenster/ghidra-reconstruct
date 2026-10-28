@@ -2423,6 +2423,10 @@ export function emitDataValue(dv: DataValue, indent = 0, expectedType?: string):
 
     case 'array': {
       if (!dv.elements || dv.elements.length === 0) return '{}';
+      // An all-zero aggregate is value-initialized: spelling out every member of a
+      // 1000-row table added 59k lines, and a positional list breaks on a system
+      // struct whose member order differs per target (WSADATA on x64).
+      if (isZeroDataValue(dv)) return '{}';
       // The element type is the declared type minus its outermost dimension.
       const elemType = expectedType ? stripOuterArrayDimension(expectedType) : undefined;
       return emitArrayElements(dv, indent, elemType, pad, innerPad);
@@ -2430,6 +2434,7 @@ export function emitDataValue(dv: DataValue, indent = 0, expectedType?: string):
 
     case 'struct': {
       if (!dv.fields || dv.fields.length === 0) return '{}';
+      if (isZeroDataValue(dv)) return '{}';
       // A class template instantiation is named as a whole; its arguments may hold `*`.
       const instantiation = expectedType ? templateRegistry()?.instantiation(expectedType.trim())?.spelling : undefined;
       // The slot may name the aggregate through a typedef: `FILE` is Ghidra's
