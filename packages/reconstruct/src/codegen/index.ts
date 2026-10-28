@@ -97,7 +97,7 @@ import { selectExclusionEmissions, setPlatformDefinedNames, setPlatformDeclaredN
 import { normalizePointerSizeSpellings } from './pointer-size-spelling.js';
 import { flattenTemplateNames } from './template-names.js';
 import { buildTemplateRegistry, classScopeOf, memberDefinitionScope, templateDataDefinitions, templateHeaderTypes } from './templates/index.js';
-import { fileStaticKey, selectFileStaticFunctions } from './file-static-functions.js';
+import { fileStaticKey, readForeignSources, selectFileStaticFunctions, type ForeignSource } from './file-static-functions.js';
 import { placeTemplateMembers } from './templates/placement.js';
 import { baseModel } from './templates/bases.js';
 import { memberModel } from './templates/members.js';
@@ -994,6 +994,7 @@ export function generateProjectStage1(
   // Override files live in projectDir (not outputDir) so they survive regeneration
   const projectDir = options.projectDir ?? options.outputDir;
   const overrides = createOverrideRegistry(options.projectConfig, projectDir);
+  const foreignSources = readForeignSources(options.projectConfig?.foreignReferences ?? [], projectDir);
   const libraries = createLibraryRegistry(options.projectConfig);
   let methodConversions = createMethodConversionRegistry(options.projectConfig);
 
@@ -1489,7 +1490,7 @@ export function generateProjectStage1(
       ? globalsHeaderPathUnder(coreDir)
       : undefined;
 
-    installFileStaticFunctions(context, fileStaticModel, classes, namespaces,
+    installFileStaticFunctions(context, fileStaticModel, classes, namespaces, foreignSources,
       [...resolution.targets]
         .filter(([, target]) => target.config.type !== 'interface')
         .map(([targetName, target]) => ({ prefix: getTargetDirectory(targetName), functions: target.functions }))
@@ -1546,7 +1547,7 @@ export function generateProjectStage1(
     // Calculate globals path (needed for generateFilesForFunctions includes)
     const flatGlobalsPath = analyzedGlobals.length > 0 ? GLOBALS_HEADER : undefined;
 
-    installFileStaticFunctions(context, fileStaticModel, classes, namespaces,
+    installFileStaticFunctions(context, fileStaticModel, classes, namespaces, foreignSources,
       [{ prefix: '', functions }], !shard || shard.index === 0);
 
     // Generate files (classification happens here)
@@ -2409,6 +2410,7 @@ function installFileStaticFunctions(
   model: { functions: ExtractedFunction[]; globals: AnalyzedDataSymbol[] },
   classes: DetectedClass[],
   namespaces: ExtractedNamespace[],
+  foreignSources: ReadonlyArray<ForeignSource>,
   parts: Array<{ prefix: string; functions: ExtractedFunction[] }>,
   report: boolean,
 ): void {
@@ -2426,6 +2428,7 @@ function installFileStaticFunctions(
     allFunctions: model.functions,
     unitOf,
     globals: model.globals,
+    foreignSources,
     keepExtern: f => classMethods.has(fileStaticKey(f.address))
       || Boolean(context.methodConversions?.has(f.address))
       || templateRegistry()?.unitOf(f.address) !== undefined

@@ -15,6 +15,8 @@
  *  - every reference to it - a call, its name used as a value, its address as a
  *    literal, a thunk forwarding to it - is in a function of its own emitted unit;
  *  - no data initializer names it (a function table, a vtable, a callback slot);
+ *  - no foreign source names it: source outside the generated tree (hand-written
+ *    files built beside it, a binder that imports by address) counts as another unit;
  *  - at least one other function of that unit calls it: VC8 drops a static that
  *    nothing calls;
  *  - it is a plain free function: not a method, not a template member, not a thunk,
@@ -24,6 +26,10 @@
  * References are read from every function Ghidra has, including the ones codegen
  * excludes: a caller in excluded code is a caller in another translation unit.
  */
+
+import * as nodeFs from 'node:fs';
+import * as nodeOs from 'node:os';
+import * as nodePath from 'node:path';
 
 import { Lexer, TokenKind } from '@ghidra-mcp/cpp-parser';
 import type { DataValue, ExtractedFunction } from '../types.js';
@@ -77,6 +83,86 @@ export interface FileStaticInputs {
   keepExtern?: (func: ExtractedFunction) => boolean;
   /** Code emitted for a function besides its decompile: an override's body or patches. */
   extraReferenceText?: (func: ExtractedFunction) => string | undefined;
+  /**
+   * Source outside the generated tree. Every identifier in it (comments and strings
+   * aside) is a reference by name; every integer literal plus `addressBase` is a
+   * reference by address.
+   */
+  foreignSources?: ReadonlyArray<ForeignSource>;
+}
+
+export interface ForeignSource {
+  /** Where the text came from, for messages. */
+  path: string;
+  text: string;
+  /** Added to each integer literal to give an address; absent: literals are not addresses. */
+  addressBase?: number;
+}
+
+/** File extensions read from a foreign-reference directory. */
+const FOREIGN_SOURCE_EXTENSIONS = new Set(['.c', '.cc', '.cpp', '.cxx', '.h', '.hh', '.hpp', '.hxx', '.inl', '.s', '.S', '.asm']);
+
+/**
+ * Read the files a `foreignReferences` entry names: a file as given, a directory
+ * recursively (C, C++ and assembly sources), in sorted order. A path is absolute,
+ * `~/`-relative, or relative to `baseDir`. A path that does not exist is an error.
+ */
+export function readForeignSources(
+  entries: ReadonlyArray<{ path: string; addressBase?: string | number }>,
+  baseDir: string,
+): ForeignSource[] {
+  const out: ForeignSource[] = [];
+  for (const entry of entries) {
+    const raw = entry.path.startsWith('~/') ? nodePath.join(nodeOs.homedir(), entry.path.slice(2)) : entry.path;
+    const root = nodePath.resolve(baseDir, raw);
+    const base = entry.addressBase === undefined ? undefined
+      : typeof entry.addressBase === 'number' ? entry.addressBase
+      : Number.parseInt(entry.addressBase, /^0[xX]/.test(entry.addressBase) ? 16 : 10);
+    if (base !== undefined && !Number.isFinite(base)) {
+      throw new Error(`foreignReferences: addressBase ${entry.addressBase} of ${entry.path} is not a number`);
+    }
+    const files: string[] = [];
+    const walk = (p: string): void => {
+      const st = nodeFs.statSync(p);
+      if (st.isDirectory()) {
+        for (const name of nodeFs.readdirSync(p).sort()) {
+          const child = nodePath.join(p, name);
+          if (nodeFs.statSync(child).isDirectory() || FOREIGN_SOURCE_EXTENSIONS.has(nodePath.extname(name))) walk(child);
+        }
+      } else {
+        files.push(p);
+      }
+    };
+    if (!nodeFs.existsSync(root)) throw new Error(`foreignReferences: ${root} does not exist`);
+    walk(root);
+    for (const f of files) out.push({ path: f, text: nodeFs.readFileSync(f, 'utf-8'), addressBase: base });
+  }
+  return out;
+}
+
+/**
+ * The source names an Itanium-mangled symbol (`_ZN8D2Client9DoThingEv`) carries,
+ * as length-prefixed runs. Parameter type names come out too, which only keeps more
+ * extern.
+ */
+function mangledSourceNames(symbol: string): string[] {
+  const m = /^_+Z/.exec(symbol);
+  if (!m) return [];
+  const names: string[] = [];
+  let i = m[0].length;
+  while (i < symbol.length) {
+    const digits = /^\d+/.exec(symbol.slice(i));
+    if (!digits) { i++; continue; }
+    const len = Number(digits[0]);
+    const start = i + digits[0].length;
+    if (len > 0 && start + len <= symbol.length) {
+      names.push(symbol.slice(start, start + len));
+      i = start + len;
+    } else {
+      i = start;
+    }
+  }
+  return names;
 }
 
 export type FileStaticRefusal =
@@ -85,6 +171,7 @@ export type FileStaticRefusal =
   | 'referenced from another unit'
   | 'referenced from excluded code'
   | 'named by a data initializer'
+  | 'named by foreign source'
   | 'no caller in its unit';
 
 export interface FileStaticSelection {
@@ -246,11 +333,31 @@ export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticS
     }
   }
 
+  // Foreign source that names a candidate, by symbol or by address.
+  const foreignReferenced = new Set<string>();
+  if (candidates.size > 0) {
+    for (const src of inputs.foreignSources ?? []) {
+      const byNameOrLabel = (name: string): void => {
+        const target = byName.get(name) ?? GHIDRA_DEFAULT_LABEL.exec(name)?.[1].toLowerCase();
+        if (target && candidates.has(target)) foreignReferenced.add(target);
+      };
+      scanReferences(src.text, name => {
+        byNameOrLabel(name);
+        for (const part of mangledSourceNames(name)) byNameOrLabel(part);
+      }, value => {
+        if (src.addressBase === undefined) return;
+        const k = (value + src.addressBase).toString(16).padStart(8, '0');
+        if (candidates.has(k)) foreignReferenced.add(k);
+      });
+    }
+  }
+
   const selected = new Map<string, { unit: string; referrers: Set<string> }>();
   for (const [key, func] of candidates) {
     const unit = inputs.unitOf.get(key)!;
     const refs = referrers.get(key) ?? [];
     if (dataReferenced.has(key)) { refuse('named by a data initializer', func); continue; }
+    if (foreignReferenced.has(key)) { refuse('named by foreign source', func); continue; }
     if (refs.some(r => r.unit === undefined)) { refuse('referenced from excluded code', func); continue; }
     if (refs.some(r => r.unit !== unit)) { refuse('referenced from another unit', func); continue; }
     if (!refs.some(r => r.call)) { refuse('no caller in its unit', func); continue; }

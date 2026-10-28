@@ -6,7 +6,11 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 
-import { foreignParameterRegisters, selectFileStaticFunctions } from '../codegen/file-static-functions.js';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+
+import { foreignParameterRegisters, readForeignSources, selectFileStaticFunctions } from '../codegen/file-static-functions.js';
 import { generateProject } from '../codegen/index.js';
 import type {
   AnalyzedDataSymbol,
@@ -153,6 +157,65 @@ describe('selectFileStaticFunctions', () => {
       extraReferenceText: f => (f.name === 'Other' ? 'return A::Helper(9);' : undefined),
     });
     assert.deepStrictEqual(sel.refused.get('referenced from another unit'), ['Helper']);
+  });
+
+  it('keeps it extern when hand-written source names it by qualified name', () => {
+    const all = [helper, caller];
+    const sel = selectFileStaticFunctions({
+      allFunctions: all, unitOf: unitsOf(all), globals: [],
+      foreignSources: [{ path: 'support/hand.cpp', text: 'int Hook() { return A::Helper(7); }' }],
+    });
+    assert.strictEqual(sel.selected.size, 0);
+    assert.deepStrictEqual(sel.refused.get('named by foreign source'), ['Helper']);
+  });
+
+  it('does not count a foreign mention in a comment or a string', () => {
+    const all = [helper, caller];
+    const sel = selectFileStaticFunctions({
+      allFunctions: all, unitOf: unitsOf(all), globals: [],
+      foreignSources: [{ path: 'support/hand.cpp', text: '// Helper(1)\nconst char *s = "Helper";' }],
+    });
+    assert.deepStrictEqual([...sel.selected.keys()], ['00401000']);
+  });
+
+  it('reads the names out of a mangled symbol in foreign assembly', () => {
+    const all = [helper, caller];
+    const sel = selectFileStaticFunctions({
+      allFunctions: all, unitOf: unitsOf(all), globals: [],
+      foreignSources: [{ path: 'support/link.s', text: '\t.globl\t__ZN1A6HelperEi\n\tjmp\t__ZN1A6HelperEi\n' }],
+    });
+    assert.deepStrictEqual(sel.refused.get('named by foreign source'), ['Helper']);
+  });
+
+  it('reads foreign integer literals as addresses only with an address base', () => {
+    const all = [helper, caller];
+    const text = 'inline GameAsmFunc ClickHelper_I{0x1000};';
+    const without = selectFileStaticFunctions({
+      allFunctions: all, unitOf: unitsOf(all), globals: [], foreignSources: [{ path: 'imports.h', text }],
+    });
+    assert.deepStrictEqual([...without.selected.keys()], ['00401000']);
+    const withBase = selectFileStaticFunctions({
+      allFunctions: all, unitOf: unitsOf(all), globals: [],
+      foreignSources: [{ path: 'imports.h', text, addressBase: 0x400000 }],
+    });
+    assert.deepStrictEqual(withBase.refused.get('named by foreign source'), ['Helper']);
+  });
+
+  it('reads a foreign directory recursively, sources only, in sorted order', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'foreign-'));
+    try {
+      fs.mkdirSync(path.join(dir, 'sub'));
+      fs.writeFileSync(path.join(dir, 'b.cpp'), 'B();');
+      fs.writeFileSync(path.join(dir, 'a.h'), 'A();');
+      fs.writeFileSync(path.join(dir, 'README.md'), 'Helper');
+      fs.writeFileSync(path.join(dir, 'sub', 'c.s'), 'call C');
+      const read = readForeignSources([{ path: path.basename(dir) }, { path: path.join(dir, 'b.cpp'), addressBase: '0x400000' }], path.dirname(dir));
+      assert.deepStrictEqual(read.map(r => path.relative(dir, r.path)), ['a.h', 'b.cpp', path.join('sub', 'c.s'), 'b.cpp']);
+      assert.deepStrictEqual(read.map(r => r.addressBase), [undefined, undefined, undefined, 0x400000]);
+      assert.throws(() => readForeignSources([{ path: path.join(dir, 'missing') }], dir), /does not exist/);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('ignores a function with only stack and convention registers', () => {

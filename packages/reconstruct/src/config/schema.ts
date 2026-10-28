@@ -34,6 +34,24 @@ export interface ProjectConfig {
    * Template members are defined beside the module code of their own run.
    */
   moduleRuns?: ModuleRun[];
+  /**
+   * Source outside the generated tree that references generated functions: the
+   * hand-written files built beside it, a binder that imports by address. A function
+   * it names keeps external linkage (codegen/file-static-functions.ts).
+   */
+  foreignReferences?: ForeignReferenceEntry[];
+}
+
+/**
+ * A file, or a directory read recursively for C, C++ and assembly sources. `path` is
+ * absolute, `~/`-relative, or relative to the project dir. Every identifier in it
+ * (comments and strings aside, mangled symbols split into their names) is a reference
+ * by name. With `addressBase`, every integer literal plus it is a reference by address.
+ */
+export interface ForeignReferenceEntry {
+  path: string;
+  /** e.g. "0x400000" for offsets from the image base, 0 for absolute addresses. */
+  addressBase?: string | number;
 }
 
 /** A half-open address run `[start, end)` the linker filled from one module. */

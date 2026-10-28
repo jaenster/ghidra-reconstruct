@@ -246,6 +246,23 @@ function validate(config: ProjectConfig, source: string): void {
     }
   }
 
+  // Validate foreign references
+  if (config.foreignReferences !== undefined) {
+    if (!Array.isArray(config.foreignReferences)) {
+      throw new Error(`${source}: "foreignReferences" must be an array`);
+    }
+    config.foreignReferences.forEach((entry, i) => {
+      if (typeof entry?.path !== 'string' || entry.path === '') {
+        throw new Error(`${source}: foreignReferences[${i}] needs a "path"`);
+      }
+      const base = entry.addressBase;
+      if (base !== undefined && !(typeof base === 'number' ? Number.isInteger(base) && base >= 0
+        : typeof base === 'string' && /^(0x[0-9a-fA-F]+|\d+)$/.test(base))) {
+        throw new Error(`${source}: foreignReferences[${i}].addressBase must be a non-negative integer or a hex string`);
+      }
+    });
+  }
+
   // Validate modules
   if (config.modules) {
     if (typeof config.modules !== 'object' || Array.isArray(config.modules)) {
