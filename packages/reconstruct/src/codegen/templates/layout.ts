@@ -45,6 +45,7 @@ export interface GenericSlot {
   returnType: string;
   params: string[];
   callingConvention?: string;
+  hasVarArgs?: boolean;
   comment?: string;
 }
 
@@ -199,6 +200,7 @@ function deriveVtable(
         returnType: genericSpelling(returnSigType(fd.returnType), inst),
         params: fd.parameters.map(p => genericSpelling(sigType(p.dataType), inst)),
         callingConvention: fd.callingConvention,
+        hasVarArgs: fd.hasVarArgs,
         comment: f.comment ?? undefined,
       });
     }

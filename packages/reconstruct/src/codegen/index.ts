@@ -5124,8 +5124,8 @@ export function buildFuncPtrArgCastTables(
   const funcdefSignatures: Record<string, string> = {};
   // Each funcdef's calling convention as GHIDRA records it, and separately the
   // keyword its emitted typedef carries. They differ: the emitter spells neither
-  // `__thiscall` nor any convention on a parameterless type, and a pass comparing
-  // register contracts must still tell those apart.
+  // `__cdecl` nor a register convention on a parameterless type, and a pass
+  // comparing register contracts must still tell those apart.
   const funcdefConventions: Record<string, string> = {};
   const funcdefConventionKeywords: Record<string, string> = {};
   for (const fd of funcDefs) {

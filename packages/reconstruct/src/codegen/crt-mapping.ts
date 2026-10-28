@@ -539,10 +539,11 @@ const MSVC_RUNTIME_DECLS: ExcludedSymbolDecl[] = [
   // `eh_vector_constructor_iterator' @ 006869fc — Ghidra:
   //   void __stdcall (void*, uint, int, void(__thiscall*)(void*), void(__thiscall*)(void*))
   // The element callbacks are `__thiscall` with only the receiver: ECX = element,
-  // no stack arguments, nothing to pop. That is exactly `__fastcall` with one
-  // parameter, which is how Ghidra types every function the binary hands in
-  // (LINKEDLIST_NodeDestructor, TSFixedArray_Ui_Destructor, ...), and the
-  // spelling gcc accepts on a free function pointer.
+  // no stack arguments, nothing to pop. That is the same ABI as `__fastcall` with
+  // one parameter, which is how Ghidra types every function the binary hands in
+  // (LINKEDLIST_NodeDestructor, TSFixedArray_Ui_Destructor, ...). The slot takes
+  // the callees' spelling: C++ keeps the two conventions distinct types, so a
+  // `__thiscall` slot would not accept a `__fastcall` function without a cast.
   { emitted: '_eh_vector_constructor_iterator_', real: "`eh vector constructor iterator'", source: 'ghidra',
     decl: 'extern "C" void _eh_vector_constructor_iterator_(void* pArray, uint32_t nElementSize, int nCount, void (__fastcall *pfnConstructor)(void*), void (__fastcall *pfnDestructor)(void*));' },
   // `eh_vector_destructor_iterator' @ 00686ad1 — Ghidra:

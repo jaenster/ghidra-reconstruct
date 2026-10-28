@@ -8,8 +8,8 @@
  * the convention at every address; dropping it in the emitter is what made those
  * conversions impossible.
  *
- * `__stdcall` and `__fastcall` are spelled. `__thiscall` and `__cdecl` are
- * deliberately NOT — see `codegen/calling-convention.ts` for why — so both are
+ * `__stdcall`, `__fastcall` and `__thiscall` are spelled. `__cdecl` and
+ * `unknown` are not — see `codegen/calling-convention.ts` for why — so both are
  * asserted absent.
  */
 
@@ -65,8 +65,8 @@ describe('calling conventions in emitted declarations', () => {
     assert.match(decl, /DWORD __stdcall GetDnsResults\(void \* lpThreadParam\);/);
   });
 
-  it('leaves __cdecl, __thiscall and unknown unspelled', () => {
-    for (const cc of ['__cdecl', '__thiscall', 'unknown']) {
+  it('leaves __cdecl and unknown unspelled', () => {
+    for (const cc of ['__cdecl', 'unknown']) {
       const decl = generateFunctionDeclaration(threadProc(cc), options);
       assert.match(decl, /DWORD GetDnsResults\(/, `convention ${cc} should not be spelled`);
       assert.doesNotMatch(decl, /__cdecl|__thiscall|unknown/);
@@ -201,5 +201,105 @@ describe('__fastcall is spelled on functions and funcdefs alike', () => {
       generateFunctionDeclaration({ ...noArgs, name: 'GetTickCountThunk', callingConvention: '__stdcall' }, options),
       /void __stdcall GetTickCountThunk\(/
     );
+  });
+});
+
+/**
+ * A `__thiscall` function is emitted free with its receiver as the first
+ * parameter; the keyword is what puts that receiver in ECX. The funcdef a
+ * vtable slot is declared with carries the same keyword, so the function
+ * converts to the slot with no cast and a call through the slot loads ECX.
+ */
+function listBoxDestructor(): ExtractedFunction {
+  return {
+    name: 'LISTBOX_Destroy',
+    address: '0x00000000',
+    signature: 'void * __thiscall LISTBOX_Destroy(D2ListBoxStrc * this, int bFree)',
+    returnType: 'void *',
+    parameters: [
+      { name: 'this', dataType: 'D2ListBoxStrc *', size: 4, ordinal: 0, storage: 'ECX:4' },
+      { name: 'bFree', dataType: 'int', size: 4, ordinal: 1, storage: 'Stack[0x4]:4' },
+    ],
+    localVariables: [],
+    callingConvention: '__thiscall',
+    size: 32,
+    isThunk: false,
+    isExternal: false,
+    hasVarArgs: false,
+  };
+}
+
+const destructorSlot: ExtractedFunctionDefinition = {
+  name: 'fpListBoxDestroy',
+  category: '/Diablo2/D2Win',
+  kind: 'FUNCTION_DEFINITION',
+  size: 4,
+  returnType: 'void *',
+  parameters: [
+    { name: 'this', dataType: 'D2ListBoxStrc *', ordinal: 0 },
+    { name: 'bFree', dataType: 'int', ordinal: 1 },
+  ],
+  callingConvention: '__thiscall',
+};
+
+describe('__thiscall is spelled on functions and funcdefs alike', () => {
+  it('spells __thiscall on a declaration and on a definition head', () => {
+    const decl = generateFunctionDeclaration(listBoxDestructor(), options);
+    assert.match(decl, /void \* __thiscall LISTBOX_Destroy\(D2ListBoxStrc \* pThis, int bFree\);/);
+    const def = generateEhHandlerDefinition(listBoxDestructor());
+    assert.match(def, /void \* __thiscall LISTBOX_Destroy\(D2ListBoxStrc \* pThis, int bFree\) \{/);
+  });
+
+  it('spells __thiscall inside the funcdef typedef declarator', () => {
+    assert.strictEqual(
+      generateFunctionDefinitionDeclaration(destructorSlot),
+      'typedef void * (__thiscall *fpListBoxDestroy)(D2ListBoxStrc * pThis, int bFree);'
+    );
+  });
+
+  it('spells __thiscall in a cast to a pointer to a function type carrying it', () => {
+    const type = Type.pointer(
+      Type.function(Type.pointer(Type.typedef('void')), [Type.pointer(Type.typedef('D2ListBoxStrc')), Type.typedef('int')], false, '__thiscall')
+    );
+    assert.strictEqual(emit(type), 'void* (__thiscall *)(D2ListBoxStrc*, int)');
+  });
+
+  it('leaves a parameterless or variadic __thiscall unspelled on both sides', () => {
+    const noArgs: ExtractedFunction = { ...listBoxDestructor(), name: 'LISTBOX_Reset', returnType: 'void', parameters: [] };
+    assert.match(generateFunctionDeclaration(noArgs, options), /^void LISTBOX_Reset\(\);/m);
+    assert.strictEqual(
+      generateFunctionDefinitionDeclaration({ ...destructorSlot, name: 'fpReset', returnType: 'void', parameters: [] }),
+      'typedef void (*fpReset)();'
+    );
+    const variadic: ExtractedFunction = { ...listBoxDestructor(), name: 'LISTBOX_Printf', hasVarArgs: true };
+    assert.match(generateFunctionDeclaration(variadic, options), /^void \* LISTBOX_Printf\(D2ListBoxStrc \* pThis, int bFree, \.\.\.\);/m);
+    assert.strictEqual(
+      generateFunctionDefinitionDeclaration({ ...destructorSlot, name: 'fpPrintf', hasVarArgs: true }),
+      'typedef void * (*fpPrintf)(D2ListBoxStrc * pThis, int bFree, ...);'
+    );
+  });
+
+  it('stores a __thiscall function in its __thiscall slot with no cast, and passes the receiver in ECX', { skip: !hasGpp() }, () => {
+    const src = [
+      'struct D2ListBoxStrc { int nCount; };',
+      generateFunctionDefinitionDeclaration(destructorSlot),
+      'struct D2ListBoxVtable { fpListBoxDestroy pfnDestroy; };',
+      generateFunctionDeclaration(listBoxDestructor(), options),
+      generateEhHandlerDefinition(listBoxDestructor()).replace(/\{[\s\S]*\}/, '{ pThis->nCount = bFree; return pThis; }'),
+      'void Install(D2ListBoxVtable * pVtable) { pVtable->pfnDestroy = LISTBOX_Destroy; }',
+    ].join('\n');
+    const dir = mkdtempSync(join(tmpdir(), 'thiscall-'));
+    const file = join(dir, 'listbox.cpp');
+    writeFileSync(file, src);
+    execFileSync('i686-w64-mingw32-g++', ['-std=c++17', '-O2', '-c', file, '-o', join(dir, 'listbox.o')], { stdio: 'pipe' });
+    const asm = execFileSync('i686-w64-mingw32-objdump', ['-d', join(dir, 'listbox.o')], { encoding: 'utf8' });
+    // The receiver arrives in ECX; the one stack argument is popped by the callee.
+    const body = asm.slice(asm.indexOf('LISTBOX_Destroy'));
+    assert.match(body, /%ecx/);
+    assert.match(body, /ret\s+\$0x4/);
+
+    // A __cdecl function in that slot is a type error: the ABI must agree.
+    writeFileSync(file, src.replace('void * __thiscall LISTBOX_Destroy', 'void * LISTBOX_Destroy'));
+    assert.throws(() => execFileSync('i686-w64-mingw32-g++', ['-std=c++17', '-fsyntax-only', file], { stdio: 'pipe' }));
   });
 });

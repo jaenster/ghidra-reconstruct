@@ -328,12 +328,12 @@ describe('registered class templates', () => {
     const stpl = file('Storm/H/stpl.h');
     assert.match(stpl, /template<class T, int OFFSET>\nclass TSExplicitList \{\npublic:/);
     assert.match(stpl, /TSLink<T> m_terminator;/);
-    assert.match(stpl, /static void UnlinkAll\(TSExplicitList<T, OFFSET>\* pThis\);/);
-    assert.match(stpl, /template<> void TSExplicitList<ELEM, -572662307>::UnlinkAll\(/);
-    assert.match(stpl, /template<> void TSExplicitList<OTHER, -572662307>::UnlinkAll\(/);
+    assert.match(stpl, /static void __thiscall UnlinkAll\(TSExplicitList<T, OFFSET>\* pThis\);/);
+    assert.match(stpl, /template<> void __thiscall TSExplicitList<ELEM, -572662307>::UnlinkAll\(/);
+    assert.match(stpl, /template<> void __thiscall TSExplicitList<OTHER, -572662307>::UnlinkAll\(/);
     // An orphan copy is no member: a free function behind its marker.
     assert.doesNotMatch(stpl, /TSExplicitList<ELEM, -572662307>::UnlinkAll_Unreferenced/);
-    assert.match(stpl, /\/\/ stpl-orphan: [^\n]*\nvoid UnlinkAll_Unreferenced\(TSExplicitList<::ELEM, -572662307>\* pThis\);/);
+    assert.match(stpl, /\/\/ stpl-orphan: [^\n]*\nvoid __thiscall UnlinkAll_Unreferenced\(TSExplicitList<::ELEM, -572662307>\* pThis\);/);
   });
 
   it('defines a key class in the template header, its members declared in it and qualified by it', () => {
@@ -355,8 +355,8 @@ describe('registered class templates', () => {
   it('keeps a member static while the program holds its address as a plain pointer, for every instantiation', () => {
     const stpl = file('Storm/H/stpl.h');
     // The vftable holds TSExplicitList<ELEM,..>::UnlinkAll; OTHER's is the same member of the template.
-    assert.match(stpl, /\n    static void UnlinkAll\(TSExplicitList<T, OFFSET>\* pThis\);\n    void UnlinkAll_Unreferenced\(\);\n/);
-    assert.match(stpl, /template<> void TSExplicitList<OTHER, -572662307>::UnlinkAll\(TSExplicitList<OTHER, -572662307> \* pThis\);/);
+    assert.match(stpl, /\n    static void __thiscall UnlinkAll\(TSExplicitList<T, OFFSET>\* pThis\);\n    void UnlinkAll_Unreferenced\(\);\n/);
+    assert.match(stpl, /template<> void __thiscall TSExplicitList<OTHER, -572662307>::UnlinkAll\(TSExplicitList<OTHER, -572662307> \* pThis\);/);
     assert.match(file('Mod/File.cpp'), /TSExplicitList<::ELEM, -572662307>::UnlinkAll\(&gList\);/);
   });
 
@@ -375,13 +375,13 @@ describe('registered class templates', () => {
   });
 
   it('forwards a thunk to a non-static member by calling it on the thunk\'s receiver', () => {
-    assert.match(file('Mod/stpl_NODE.cpp'), /JMP thunk\nvoid thunk_Clear\(TSTable<::NODE>\* pThis\) \{\n    pThis->Clear\(\);\n\}/);
+    assert.match(file('Mod/stpl_NODE.cpp'), /JMP thunk\nvoid __thiscall thunk_Clear\(TSTable<::NODE>\* pThis\) \{\n    pThis->Clear\(\);\n\}/);
   });
 
   it('names the target\'s class in a thunk where the receiver\'s class hides the name, and calls a member thunk\'s target on `this`', () => {
     const unit = file('Mod/stpl_NODE.cpp');
     // TSTableEx declares a Count of its own: unqualified, the thunk would call that one.
-    assert.match(unit, /JMP thunk\nvoid thunk_Count\(TSTableEx<::NODE>\* pThis\) \{\n    pThis->TSTable<NODE>::Count\(\);\n\}/);
+    assert.match(unit, /JMP thunk\nvoid __thiscall thunk_Count\(TSTableEx<::NODE>\* pThis\) \{\n    pThis->TSTable<NODE>::Count\(\);\n\}/);
     assert.match(unit, /JMP thunk\ntemplate<> void TSTable<NODE>::CountThunk\(\) \{\n    this->Count\(\);\n\}/);
   });
 
@@ -428,8 +428,8 @@ describe('registered class templates', () => {
 
   it('defines the members beside the module code below them, not in a unit per instantiation', () => {
     const impl = file('Mod/stpl_ELEM.cpp');
-    assert.match(impl, /template<> void TSExplicitList<ELEM, -572662307>::UnlinkAll\(TSExplicitList<::ELEM, -572662307>\* pThis\) \{/);
-    assert.match(impl, /\nvoid UnlinkAll_Unreferenced\(/);
+    assert.match(impl, /template<> void __thiscall TSExplicitList<ELEM, -572662307>::UnlinkAll\(TSExplicitList<::ELEM, -572662307>\* pThis\) \{/);
+    assert.match(impl, /\nvoid __thiscall UnlinkAll_Unreferenced\(/);
     assert.ok(project.files.has('Mod/stpl_OTHER.cpp'));
     for (const path of project.files.keys()) assert.doesNotMatch(path, /TSExplicitList|stpl\//, path);
   });
@@ -481,8 +481,8 @@ describe('registered class templates', () => {
   });
 
   it('emits an element\'s orphan copy as a free function with the members, not in the element\'s namespace', () => {
-    assert.match(file('Storm/H/stpl.h'), /\/\/ stpl-orphan: a COMDAT copy in ELEM that no member owns\nvoid Release_Unreferenced\(::ELEM \* pThis\);/);
-    assert.match(file('Mod/stpl_ELEM.cpp'), /\/\/ stpl-orphan: a COMDAT copy in ELEM that no member owns\n\/\/ 1\.14d: 004013f0\nvoid Release_Unreferenced\(::ELEM \* pThis\) \{/);
+    assert.match(file('Storm/H/stpl.h'), /\/\/ stpl-orphan: a COMDAT copy in ELEM that no member owns\nvoid __thiscall Release_Unreferenced\(::ELEM \* pThis\);/);
+    assert.match(file('Mod/stpl_ELEM.cpp'), /\/\/ stpl-orphan: a COMDAT copy in ELEM that no member owns\n\/\/ 1\.14d: 004013f0\nvoid __thiscall Release_Unreferenced\(::ELEM \* pThis\) \{/);
     assert.doesNotMatch(file('ELEM/ELEM.h'), /Release_Unreferenced/);
     // Ghidra's name alone makes no orphan.
     assert.match(file('Storm/H/stpl.h'), /template<> void TSExplicitList<OTHER, -572662307>::UnlinkAll_Unreferenced\(/);
