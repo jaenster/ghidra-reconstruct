@@ -8,7 +8,7 @@
 import { globalAliasComment } from './global-aliases.js';
 import type { AnalyzedDataSymbol, ReconstructOptions, DataValue, ExtractedDataType, ExtractedStruct, ExtractedUnion, ExtractedFunctionDefinition, ExtractedFunction } from '../types.js';
 import { GLIDE_UNSIGNED_ENUM_TYPEDEFS, PLATFORM_STRUCT_FIELD_TYPES, isAggregateObjectType, getAggregateTypeNames, isPlatformOrBuiltinType, isLibraryType, isStructType, castPointerInitializer, normalizeDataValue, isCharacterValueType, isMsvcEhInternal, normalizeWideCharType, normalizeListingBuiltinType, listingBuiltinElementType, imageArtifactElementType, isVoidPointerSpelling, resolveTypedefSpelling, rootQualifyShadowedType, platformDeclaredFunctionNames } from './platform-types.js';
-import { generateStructDeclaration, generateUnionDeclaration, generateFunctionDefinitionDeclaration, ghidraDefaultFieldName } from './header.js';
+import { generateStructDeclaration, generateUnionDeclaration, generateFunctionDefinitionDeclaration, ghidraDefaultFieldName, constructorFields } from './header.js';
 import { normalizeQualifiedReference } from './namespace.js';
 import { namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 import { computeDeclarationClosure, renderClosureBlock, renderClosureDefinitionBlock, normalizeDataAddress, type ClosureResult, type ClosureStringContent } from './declaration-closure.js';
@@ -2433,6 +2433,8 @@ export function emitDataValue(dv: DataValue, indent = 0, expectedType?: string):
     }
 
     case 'struct': {
+      const constructed = constructorCallInitializer(dv, baseExpected, indent);
+      if (constructed !== undefined) return constructed;
       if (!dv.fields || dv.fields.length === 0) return '{}';
       if (isZeroDataValue(dv)) return '{}';
       // A class template instantiation is named as a whole; its arguments may hold `*`.
@@ -2479,6 +2481,38 @@ export function emitDataValue(dv: DataValue, indent = 0, expectedType?: string):
     default:
       return dv.value ?? '0';
   }
+}
+
+/**
+ * A struct the emitter gives constructors (header.ts, `constructorFields`) is not
+ * an aggregate, so its brace list `{a, b}` is a call of its field-wise
+ * constructor in C++11 and ill-formed in C++03 (MSVC C2552), at any depth of an
+ * initializer. The call is spelled out instead - `T(a, b)`, `T(v)` for the
+ * one-field conversion constructor, `T()` for all zero - which selects the same
+ * constructor with the same arguments in either language, so layout and values
+ * are unchanged. Undefined for every other type, or when a non-zero value sits
+ * in a member the constructor does not take.
+ */
+function constructorCallInitializer(dv: DataValue, baseExpected: string | undefined, indent: number): string | undefined {
+  if (!baseExpected || templateRegistry()?.instantiation(baseExpected)) return undefined;
+  const resolved = baseTypeName(resolveTypedefSpelling(baseExpected));
+  const name = constructorFields(baseExpected) ? baseExpected : constructorFields(resolved) ? resolved : undefined;
+  if (!name) return undefined;
+  const params = constructorFields(name)!;
+  const spelling = rootQualifyShadowedType(baseExpected);
+  const fields = dv.fields ?? [];
+  if (fields.length === 0 || isZeroDataValue(dv)) return `${spelling}()`;
+  const byName = new Map(fields.map(f => [f.name, f]));
+  if (fields.some(f => !params.includes(f.name) && !isZeroDataValue(f.value))) return undefined;
+  if (params.some(p => !byName.has(p))) return undefined;
+  const layout = structFieldTypes.get(name);
+  const pad = '    '.repeat(indent);
+  const innerPad = '    '.repeat(indent + 1);
+  const args = params.map((p, i) => {
+    const v = emitDataValue(byName.get(p)!.value, indent + 1, layout?.get(p));
+    return `${innerPad}/* .${p} = */ ${v}${i < params.length - 1 ? ',' : ''}`;
+  });
+  return `${spelling}(\n${args.join('\n')}\n${pad})`;
 }
 
 /** The body of an array initializer, once the datum's rendering is settled. */
@@ -3573,6 +3607,7 @@ export function globalDefinition(global: AnalyzedDataSymbol, name: string): stri
     setInitializerOwnerAddress(global.address);
     const initializer = emitDataValue(global.initializedData, 0, type);
     setInitializerOwnerAddress(undefined);
+    if (initializer === '{}' && derivedTemplateInstance(type)) return `${normalizeArrayDeclaration(type, name)};`;
     if (arrayInfo && (global.initializedData.kind === 'array' || isWideTextDatum(global, type))) {
       return `${arrayInfo.type} ${name}[${arrayInfo.count}] = ${initializer};`;
     }
@@ -3582,11 +3617,26 @@ export function globalDefinition(global: AnalyzedDataSymbol, name: string): stri
     setInitializerOwnerAddress(global.address);
     const value = renderGlobalScalarInitializer(global.value, type, arrayInfo?.count);
     setInitializerOwnerAddress(undefined);
+    if (!arrayInfo && value === '{}' && derivedTemplateInstance(type)) return `${normalizeArrayDeclaration(type, name)};`;
     if (arrayInfo) return `${arrayInfo.type} ${name}[${arrayInfo.count}] = { ${value} };`;
     return `${normalizeArrayDeclaration(type, name)} = ${braceArrayInitializer(type, value)};`;
   }
   if (arrayInfo) return `${arrayInfo.type} ${name}[${arrayInfo.count}];`;
   return `${normalizeArrayDeclaration(type, name)};`;
+}
+
+/**
+ * A class template instantiation whose family derives from a base. C++17 counts
+ * it an aggregate, so `T g = {};` is aggregate initialization; C++03 does not
+ * (MSVC C2552, "types with a base are not aggregate"). For an object of static
+ * storage duration the empty list adds nothing to the zero-initialization every
+ * such object gets first - the families declare no constructors - so the
+ * definition is written without one, which both languages accept and which
+ * leaves the same zero bytes.
+ */
+function derivedTemplateInstance(type: string): boolean {
+  if (/\bconst\b/.test(type)) return false;
+  return !!templateRegistry()?.instantiation(type.trim())?.family.base;
 }
 
 /**

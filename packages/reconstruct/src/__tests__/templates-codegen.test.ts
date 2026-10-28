@@ -285,6 +285,14 @@ function model() {
       { name: 'super_TSTable', value: { kind: 'struct', fields: [{ name: 'm_count', value: { kind: 'scalar', value: '4' } }] } },
       { name: 'm_extra', value: { kind: 'scalar', value: '5' } },
     ] },
+  }, {
+    // A class with a base, all zero: C++03 has no list initialization for it.
+    name: 'gTableZero', address: '00500300', dataType: 'TSTableEx<NODE>', size: 8, namespace: 'Mod::Third',
+    isInitialized: true, xrefCount: 1, referencingFunctions: ['Mod::Third::UseNode'], scope: 'global',
+    initializedData: { kind: 'struct', fields: [
+      { name: 'super_TSTable', value: { kind: 'struct', fields: [{ name: 'm_count', value: { kind: 'scalar', value: '0' } }] } },
+      { name: 'm_extra', value: { kind: 'scalar', value: '0' } },
+    ] },
   }] as unknown as AnalyzedDataSymbol[];
   const namespaces: ExtractedNamespace[] = [
     { name: 'File', fullPath: 'Mod::File', isClass: false, functionCount: 1 },
@@ -478,6 +486,9 @@ describe('registered class templates', () => {
 
   it('initializes the base subobject first, without a member designator', () => {
     assert.match(file('globals/Mod.cpp'), /TSTableEx<NODE> gTable = \{\n    \/\* base TSTable<NODE> \*\/ \{\n        \/\* \.m_count = \*\/ 4\n    \},\n    \/\* \.m_extra = \*\/ 5\n\};/);
+    // All zero: no initializer, which C++03 accepts for a class with a base and which
+    // leaves the same zero bytes as the C++17 `= {}`.
+    assert.match(file('globals/Mod.cpp'), /^TSTableEx<NODE> gTableZero;/m);
   });
 
   it('emits an element\'s orphan copy as a free function with the members, not in the element\'s namespace', () => {

@@ -69,7 +69,7 @@ import {
 import { Lexer, TokenKind, parse, biasedTableIndexPlugin, findNodesByKind, NodeKind } from '@ghidra-mcp/cpp-parser';
 
 import { buildVtableDispatch } from './vtable-dispatch.js';
-import { fieldDeclSpelling, emittedMemberNames, generateHeader, generateFunctionDeclaration, setKnownFuncDefs, setConstructorBearingStructs, sigType, getIntegerConversionType, emittedFunctionName, returnSigType } from './header.js';
+import { fieldDeclSpelling, emittedMemberNames, generateHeader, generateFunctionDeclaration, setKnownFuncDefs, setConstructorBearingStructs, hasConvertingConstructor, sigType, getIntegerConversionType, emittedFunctionName, returnSigType } from './header.js';
 import { enumTypedefLine, registerEnumTypedefTargets, setKnownEnumWidths } from './enum-width.js';
 import { generateImplementation, setQuestStructLayouts, setStructFieldRenames, decompiledReturnType, decompiledFunctionName, decompiledParameters, type ImplGenContext, type FuncPtrArgCastTables, type ThunkForward } from './impl.js';
 import { generateCMakeLists, generateTopLevelCMake, generateTargetCMake, generateUnsortedCMake } from './cmake.js';
@@ -5400,7 +5400,7 @@ export function buildFuncPtrArgCastTables(
     // integer-only and would otherwise be claimed as converting.
     if (isLibraryType(dt.name, dt.category ?? '')) continue;
     const fields = (dt as import('../types.js').ExtractedStruct).fields ?? [];
-    if (getIntegerConversionType(fields)) convertingAggregates.add(dt.name);
+    if (hasConvertingConstructor(dt.name, fields)) convertingAggregates.add(dt.name);
   }
   for (const name of buildWinsockInAddrClaim(dataTypes).converting) convertingAggregates.add(name);
 

@@ -714,8 +714,10 @@ export function generateClassDeclaration(
   // their integer equivalent (uint64_t). C++ requires explicit conversion operators.
   const intConversionType = getIntegerConversionType(classInfo.fields);
   if (intConversionType) {
-    lines.push(`    ${classInfo.name}() = default;`);
-    lines.push(`    ${classInfo.name}(${intConversionType} v) { *reinterpret_cast<${intConversionType}*>(this) = v; }`);
+    if (!unionHeldStructs.has(classInfo.name)) {
+      lines.push(`    ${classInfo.name}() = default;`);
+      lines.push(`    ${classInfo.name}(${intConversionType} v) { *reinterpret_cast<${intConversionType}*>(this) = v; }`);
+    }
     lines.push(`    operator ${intConversionType}() const { return *reinterpret_cast<const ${intConversionType}*>(this); }`);
     lines.push('');
   }
@@ -1592,7 +1594,13 @@ export function generateStructDeclaration(struct: ExtractedStruct): string {
 
   // Add integer conversion operators for small integer-only structs
   const intConversionType = getIntegerConversionType(struct.fields);
-  if (intConversionType) {
+  if (intConversionType && unionHeldStructs.has(struct.name)) {
+    // A union member may have no constructor in C++03 (MSVC C2620), so only the
+    // conversion to the integer is given; a cast from one is spelled as the bit
+    // move (see hasConvertingConstructor).
+    lines.push(`    operator ${intConversionType}() const { return *reinterpret_cast<const ${intConversionType}*>(this); }`);
+    lines.push('');
+  } else if (intConversionType) {
     lines.push(`    ${struct.name}() = default;`);
     lines.push(`    ${struct.name}(${intConversionType} v) { *reinterpret_cast<${intConversionType}*>(this) = v; }`);
     lines.push(`    operator ${intConversionType}() const { return *reinterpret_cast<const ${intConversionType}*>(this); }`);
@@ -1627,16 +1635,56 @@ export function generateStructDeclaration(struct: ExtractedStruct): string {
  * conversion set, see `getIntegerConversionType`. Registered from the whole model
  * before emission, because a struct's layout depends on its MEMBERS' types.
  */
-const constructorBearingStructs = new Set<string>();
+const constructorBearingStructs = new Map<string, string[]>();
+
+/**
+ * Aggregates some union holds BY VALUE. C++03 forbids a union member with a
+ * constructor (MSVC C2620), so these get the integer conversion operator only.
+ */
+const unionHeldStructs = new Set<string>();
 
 export function setConstructorBearingStructs(
   dataTypes: Iterable<{ name: string; kind?: string; fields?: StructField[] }>,
 ): void {
   constructorBearingStructs.clear();
-  for (const dt of dataTypes) {
-    if (dt.kind !== 'STRUCTURE' || !dt.name || !dt.fields) continue;
-    if (getIntegerConversionType(dt.fields)) constructorBearingStructs.add(dt.name);
+  unionHeldStructs.clear();
+  const all = [...dataTypes];
+  for (const dt of all) {
+    if (dt.kind !== 'UNION' || !dt.fields) continue;
+    for (const f of dt.fields) {
+      const t = (f.dataType ?? '').replace(/\b(struct|union|const|volatile)\b/g, '').replace(/\[[^\]]*\]/g, '').trim();
+      if (t && !t.includes('*')) unionHeldStructs.add(t);
+    }
   }
+  for (const dt of all) {
+    if (dt.kind !== 'STRUCTURE' || !dt.name || !dt.fields) continue;
+    if (hasConvertingConstructor(dt.name, dt.fields)) constructorBearingStructs.set(dt.name, constructorFieldNames(dt.fields));
+  }
+}
+
+/**
+ * Whether the emitted declaration gives this struct its constructors: the integer
+ * conversion set (`getIntegerConversionType`), except a struct a union holds by
+ * value. Valid once `setConstructorBearingStructs` has seen the model.
+ */
+export function hasConvertingConstructor(name: string, fields: StructField[]): boolean {
+  return !!getIntegerConversionType(fields) && !unionHeldStructs.has(name);
+}
+
+/** The fields the field-wise constructor takes, in parameter order (see generateStructDeclaration). */
+function constructorFieldNames(fields: StructField[]): string[] {
+  return fields.filter(f => f.name && !f.name.startsWith('_pad_')).map(f => f.name!);
+}
+
+/**
+ * For a struct `generateStructDeclaration` gives constructors: the field names its
+ * constructor takes, in order (one name: the integer conversion constructor, two
+ * or more: the field-wise one). Undefined for every other type. Such a struct is
+ * no aggregate, so a brace list is a constructor call in C++11 and an error in
+ * C++03; a data initializer spells the call itself.
+ */
+export function constructorFields(name: string): readonly string[] | undefined {
+  return constructorBearingStructs.get(name);
 }
 
 /** Does a field hold a constructor-bearing struct BY VALUE (itself or as an array)? */

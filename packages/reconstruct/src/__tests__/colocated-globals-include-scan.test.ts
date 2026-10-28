@@ -143,7 +143,8 @@ describe('co-located globals participate in the impl dependency scan', () => {
 
   it('emits the co-located definition', () => {
     assert.ok(renderer, 'D2Client/Renderer.cpp was not generated');
-    assert.match(renderer!.content, /D2GlideStateStrc gGlideState = \{/);
+    // An integer-only struct the header gives constructors is initialized by its constructor.
+    assert.match(renderer!.content, /D2GlideStateStrc gGlideState = D2GlideStateStrc\(/);
   });
 
   it('includes the header owning a type named only in the co-located block', () => {
