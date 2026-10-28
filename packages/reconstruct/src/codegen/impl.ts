@@ -2657,6 +2657,16 @@ function transformDecompiledCode(
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         enclosingVarTypes,
       };
+      perPluginOptions['sizeless-pointer-arith'] = {
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        structFields: context.funcPtrArgCasts.structFields,
+        typedefTargets: context.funcPtrArgCasts.typedefTargets,
+        functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        funcdefNames: Object.keys(context.funcPtrArgCasts.funcdefSignatures ?? {}),
+        rootQualifiedTypedefs: context.funcPtrArgCasts.rootQualifiedTypedefs,
+        enclosingVarTypes,
+      };
       perPluginOptions['unsigned-range-compare'] = {
         unsignedEnums: context.funcPtrArgCasts.unsignedEnums,
         enumTypes: context.funcPtrArgCasts.enumTypes,

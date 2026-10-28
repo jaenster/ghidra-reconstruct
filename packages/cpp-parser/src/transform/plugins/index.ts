@@ -582,6 +582,7 @@ import { pointerAssignCastPlugin } from './builtins/pointer-assign-cast.js';
 export { pointerAssignCastPlugin } from './builtins/pointer-assign-cast.js';
 import { callArgCastPlugin } from './builtins/call-arg-cast.js';
 import { pointerCompareCastPlugin } from './builtins/pointer-compare-cast.js';
+import { sizelessPointerArithPlugin } from './builtins/sizeless-pointer-arith.js';
 import { returnCastPlugin } from './builtins/return-cast.js';
 export { returnCastPlugin, type ReturnCastOptions } from './builtins/return-cast.js';
 import { floatPointerBitcastPlugin } from './builtins/float-pointer-bitcast.js';
@@ -590,6 +591,7 @@ import { assignCastPlugin } from './builtins/assign-cast.js';
 import { unprototypedCallCastPlugin } from './builtins/unprototyped-call-cast.js';
 export { callArgCastPlugin } from './builtins/call-arg-cast.js';
 export { pointerCompareCastPlugin } from './builtins/pointer-compare-cast.js';
+export { sizelessPointerArithPlugin, type SizelessPointerArithOptions } from './builtins/sizeless-pointer-arith.js';
 export { floatPointerBitcastPlugin } from './builtins/float-pointer-bitcast.js';
 export { narrowCastThroughUintptrPlugin } from './builtins/narrow-cast-through-uintptr.js';
 export { assignCastPlugin } from './builtins/assign-cast.js';
@@ -746,6 +748,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   narrowCastThroughUintptrPlugin, // Type: route a pointer->narrow-integer cast through uintptr_t (priority 620)
   assignCastPlugin,           // Type: cast an assigned value to its slot's declared type (priority 615)
   unprototypedCallCastPlugin, // Type: give a FARPROC call the parameter list C left unspecified (priority 622)
+  sizelessPointerArithPlugin, // Type: void*/function-pointer arithmetic as byte arithmetic on uint8_t* (priority 626)
   baseClassAccessPlugin,      // Structs: p->super_B.m -> p->m, &p->super_B -> p, f((B*)derived) -> f(derived) for real base classes (priority 625)
   memberCallPlugin,           // C++: C::Fn(&obj, a) -> obj.Fn(a) for a non-static member, the receiver param -> this (priority 960)
   charArrayDwordAssignPlugin, // Type: charArray = scalar -> *(uint32_t*)charArray = scalar (priority 75)
