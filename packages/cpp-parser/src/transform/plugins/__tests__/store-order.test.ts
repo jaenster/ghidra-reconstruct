@@ -1,0 +1,235 @@
+import { describe, it } from 'node:test';
+import assert from 'node:assert';
+import { parse } from '../../../parser/index.js';
+import { emit } from '../../../emit/index.js';
+import type { AnyNode } from '../../../ast/nodes.js';
+import { hasNativeGpp, compileAndRun } from '../../../testing/native-cpp.js';
+import { storeOrderPlugin, type StoreOrderOptions } from '../builtins/store-order.js';
+import type { AccessOrderEvidence, StoreFact } from '../builtins/access-order-evidence.js';
+
+/** One statement per line; `[@at]` or `[@at/8h]` tags the line's store. */
+function fixture(lines: string[]): { code: string; ev: AccessOrderEvidence } {
+  const text: string[] = [];
+  const stores = new Map<number, StoreFact[]>();
+  lines.forEach((l, i) => {
+    const m = l.match(/^\s*\[@(0x[0-9a-f]+|\?)(?:\/(\d+)([hl]))?\]\s?(.*)$/);
+    if (!m) { text.push(l); return; }
+    stores.set(i + 1, [{
+      ord: 0, at: m[1] === '?' ? null : Number(m[1]), size: m[2] ? Number(m[2]) : 4, half: (m[3] as 'h' | 'l') ?? null,
+    }]);
+    text.push(m[4]);
+  });
+  return { code: text.join('\n'), ev: { args: new Map(), stores } };
+}
+
+const flat = (s: string) => s.replace(/\s+/g, ' ').trim();
+
+const PRELUDE = [
+  'struct Node { int nId; Node *pPrev; Node *pNext; };',
+  'struct Seed { unsigned int nLow; unsigned int nHigh; };',
+  'struct Gfx { void *pDC6; int nFrame; int nDir; };',
+].join('\n');
+
+const TABLES: Partial<StoreOrderOptions> = {
+  structFields: {
+    Node: { nId: 'int', pPrev: 'Node *', pNext: 'Node *' },
+    Seed: { nLow: 'unsigned int', nHigh: 'unsigned int' },
+    Gfx: { pDC6: 'void *', nFrame: 'int', nDir: 'int' },
+  },
+  structLayouts: {
+    Node: [{ name: 'nId', offset: 0, size: 4, type: 'int' }, { name: 'pPrev', offset: 4, size: 4, type: 'Node *' }, { name: 'pNext', offset: 8, size: 4, type: 'Node *' }],
+    Seed: [{ name: 'nLow', offset: 0, size: 4, type: 'uint' }, { name: 'nHigh', offset: 4, size: 4, type: 'uint' }],
+    Gfx: [{ name: 'pDC6', offset: 0, size: 4, type: 'void *' }, { name: 'nFrame', offset: 4, size: 4, type: 'int' }, { name: 'nDir', offset: 8, size: 4, type: 'int' }],
+  },
+  globalTypes: { gA: 'int', gB: 'int', gC: 'int' },
+};
+
+function run(lines: string[], opts: Partial<StoreOrderOptions> = {}): { out: string; sites: string[] } {
+  const { code, ev } = fixture(lines);
+  const sites: string[] = [];
+  const t = storeOrderPlugin.createTransformer({
+    accessOrder: ev, onSite: e => sites.push(`${e.kind}${e.count}`), ...TABLES, ...opts,
+  } as StoreOrderOptions);
+  return { out: flat(emit(t(parse(code)) as AnyNode)), sites };
+}
+
+describe('storeOrderPlugin', () => {
+  // GLSUBTILE_RemoveNodeFromHead, 0050ef80: `mov [eax + 0xc], esi; mov [eax + 0x10], esi`.
+  it('writes two fields of one object in the original order', () => {
+    const { out, sites } = run([
+      'Node *f(Node *p) {',
+      '[@0x1e] p->pNext = 0;',
+      '[@0x1b] p->pPrev = 0;',
+      '  return p;',
+      '}',
+    ]);
+    assert.deepStrictEqual(sites, ['order2']);
+    assert.ok(out.includes('p->pPrev = 0; p->pNext = 0;'), out);
+  });
+
+  it('leaves the same field written twice', () => {
+    const { sites } = run([
+      'void f(Node *p, Node *q) {',
+      '[@0x1e] p->pNext = q;',
+      '[@0x1b] p->pNext = 0;',
+      '}',
+    ]);
+    assert.deepStrictEqual(sites, []);
+  });
+
+  it('leaves stores through two pointers that may meet', () => {
+    const { sites } = run([
+      'void f(Node *p, Node *q) {',
+      '[@0x1e] p->pNext = 0;',
+      '[@0x1b] q->pPrev = 0;',
+      '}',
+    ]);
+    assert.deepStrictEqual(sites, []);
+  });
+
+  it('leaves a store whose value the other overwrites', () => {
+    const { sites } = run([
+      'void f(Node *p) {',
+      '[@0x1e] p->pNext = p->pPrev;',
+      '[@0x1b] p->pPrev = 0;',
+      '}',
+    ]);
+    assert.deepStrictEqual(sites, []);
+  });
+
+  it('reorders globals and local fields', () => {
+    const { out } = run([
+      'void f(int a, int b, int c) {',
+      '  Gfx g;',
+      '[@0x2b] gB = b;',
+      '[@0x30] gC = c;',
+      '[@0x25] gA = a;',
+      '  Use(&g);',
+      '}',
+    ]);
+    assert.ok(out.includes('gA = a; gB = b; gC = c;'), out);
+  });
+
+  // CLIENT_BossDeath_Andariel, 0046ba50: the fields of an argument block, its address passed on.
+  it('orders the fields of a local whose address is taken', () => {
+    const { out, sites } = run([
+      'void f(void *pDC6, int nFrame) {',
+      '  Gfx g;',
+      '[@0x20] g.nFrame = nFrame;',
+      '[@0x1a] g.pDC6 = pDC6;',
+      '  Use(&g);',
+      '}',
+    ]);
+    assert.deepStrictEqual(sites, ['order2']);
+    assert.ok(out.includes('g.pDC6 = pDC6; g.nFrame = nFrame;'), out);
+  });
+
+  it('leaves scalar locals where they are', () => {
+    const { sites } = run([
+      'int f(int a, int b) {',
+      '  int x;',
+      '  int y;',
+      '[@0x20] x = a + 1;',
+      '[@0x1a] y = b + 1;',
+      '  return Use2(x, y);',
+      '}',
+    ]);
+    assert.deepStrictEqual(sites, []);
+  });
+
+  it('leaves a global store beside one through a pointer', () => {
+    const { sites } = run([
+      'void f(Node *p, int a) {',
+      '[@0x2b] p->nId = a;',
+      '[@0x25] gA = a;',
+      '}',
+    ]);
+    assert.deepStrictEqual(sites, []);
+  });
+
+  it('leaves a run with an unknown store', () => {
+    const { sites } = run([
+      'void f(int a, int b) {',
+      '[@0x2b] gB = b;',
+      '[@?] gA = a;',
+      '}',
+    ]);
+    assert.deepStrictEqual(sites, []);
+  });
+
+  it('leaves a store whose value is a call', () => {
+    const { sites } = run([
+      'void f(int a) {',
+      '[@0x2b] gB = Get();',
+      '[@0x25] gA = a;',
+      '}',
+    ]);
+    assert.deepStrictEqual(sites, []);
+  });
+
+  // RollRandomSeed, 0045c370: `mov [ecx + 4], edx; mov [ecx], eax`.
+  it('writes an 8-byte copy high half first where the original did', () => {
+    const { out, sites } = run([
+      'unsigned int f(Seed *pSeed) {',
+      '  Seed s;',
+      '  s = Next(*pSeed);',
+      '[@0x15/8h] *pSeed = s;',
+      '  return s.nLow;',
+      '}',
+    ]);
+    assert.deepStrictEqual(sites, ['split2']);
+    assert.ok(out.includes('pSeed->nHigh = s.nHigh; pSeed->nLow = s.nLow;'), out);
+  });
+
+  it('leaves an 8-byte copy written low half first', () => {
+    const { sites } = run([
+      'void f(Seed *pSeed, Seed s) {',
+      '[@0x15/8l] *pSeed = s;',
+      '}',
+    ]);
+    assert.deepStrictEqual(sites, []);
+  });
+
+  it('changes nothing without facts', () => {
+    const { code } = fixture(['void f(Node *p) {', '[@0x1e] p->pNext = 0;', '[@0x1b] p->pPrev = 0;', '}']);
+    const out = flat(emit(storeOrderPlugin.createTransformer({ ...TABLES })(parse(code)) as AnyNode));
+    assert.ok(out.includes('p->pNext = 0; p->pPrev = 0;'), out);
+  });
+
+  it('stores what the original stored (compiled)', { skip: !hasNativeGpp() }, () => {
+    const lines = [
+      'unsigned int f(Seed *pSeed, Node *p, int a, int b) {',
+      '  Seed s;',
+      '  s.nLow = pSeed->nLow * 3u + 1u;',
+      '  s.nHigh = pSeed->nHigh ^ 0x55u;',
+      '[@0x15/8h] *pSeed = s;',
+      '[@0x1e] p->pNext = p->pPrev;',
+      '[@0x1b] p->nId = a;',
+      '[@0x2b] gB = b;',
+      '[@0x25] gA = a + b;',
+      '  return s.nLow + (unsigned int)gA * 7u + (unsigned int)gB;',
+      '}',
+    ];
+    const { code } = fixture(lines);
+    const { out, sites } = run(lines);
+    assert.deepStrictEqual(sites, ['split2', 'order4']);
+    const prelude = [
+      PRELUDE, 'int gA, gB, gC;',
+      code.replace('unsigned int f(', 'unsigned int before('),
+      out.replace('unsigned int f(', 'unsigned int after('),
+    ].join('\n');
+    const r = compileAndRun(prelude, [
+      'for (int k = 0; k < 5; k++) {',
+      '  Node n1 = {k, 0, 0}, n2 = {k, &n1, 0}; Seed s1 = {(unsigned)k, 9u}, s2 = s1;',
+      '  unsigned int x = before(&s1, &n2, k, 2 * k); int a1 = gA, b1 = gB;',
+      '  Node m2 = {k, &n1, 0};',
+      '  unsigned int y = after(&s2, &m2, k, 2 * k);',
+      '  printf("%u/%u/%u/%d/%d/%p/%d %u/%u/%u/%d/%d/%p/%d\\n", x, s1.nLow, s1.nHigh, a1, b1, (void*)n2.pNext, n2.nId, y, s2.nLow, s2.nHigh, gA, gB, (void*)m2.pNext, m2.nId);',
+      '}',
+    ].join('\n'));
+    for (const row of r.trim().split('\n')) {
+      const [a, b] = row.split(' ');
+      assert.strictEqual(a, b, r);
+    }
+  });
+});

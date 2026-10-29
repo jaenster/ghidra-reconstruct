@@ -53,6 +53,12 @@ export interface ExtractedFunction {
    */
   callOrder?: import('./extract/call-order.js').CallOrderFacts;
   /**
+   * Per line of `decompiled`: call arguments the original loaded into the register their
+   * address came through, and the instruction behind each `=` (extract/access-order.ts).
+   * Unset in snapshots older than the field.
+   */
+  accessOrder?: import('./extract/access-order.js').AccessOrderFacts;
+  /**
    * The line each way into a halt pushes, and the return addresses a stack probe's CALL
    * leaves in the frame (extract/halt-lines.ts). Unset in snapshots older than the field.
    */
