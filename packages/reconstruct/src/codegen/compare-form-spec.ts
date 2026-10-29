@@ -130,7 +130,7 @@ export function compareFormDecision(site: CompareSite): CompareFormOutcome {
     if (F.has(rel) && k0 === b0) {
       return swap
         ? { decision: { ...base, op: rel, swap, delta: 0, k } }
-        : { decision: { ...base, keep: true } };
+        : { decision: { ...base, keep: true, k } };
     }
     return { reason: `${rel} ${k0} against ${[...F].join('/')} ${b0}` };
   }

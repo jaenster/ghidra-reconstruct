@@ -33,7 +33,7 @@
 
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
-  ASTNode, BinaryExpr, BinaryOperator, CharLiteralExpr, CStyleCastExpr, Expression, FunctionDecl, Identifier,
+  ASTNode, BinaryExpr, BinaryOperator, BoolLiteralExpr, CharLiteralExpr, CStyleCastExpr, Expression, FunctionDecl, Identifier,
   IntegerLiteralExpr, MemberExpr, ParameterDecl, ParenExpr, SubscriptExpr, TypeNode, TypedefType, UnaryExpr, VariableDecl,
 } from '../../../ast/nodes.js';
 import { findNodesByKind } from '../../../ast/visitor.js';
@@ -131,6 +131,7 @@ export function compareFingerprint(e: Expression, size: number): string {
   const mod = (v: bigint) => ((v % (1n << bits)) + (1n << bits)) % (1n << bits);
   if (lit) return `c:${mod(lit.value).toString(16)}`;
   if (x.kind === NodeKind.CharLiteral) return `c:${mod(BigInt((x as CharLiteralExpr).value)).toString(16)}`;
+  if (x.kind === NodeKind.BoolLiteral) return (x as BoolLiteralExpr).value ? 'c:1' : 'c:0';
   const n = nameOf(x);
   return n ? `v:${n}` : 'e';
 }
@@ -303,7 +304,12 @@ export function createCompareFormTransformer(options?: PluginOptions): Transform
         visitBinaryExpr(be: BinaryExpr): ASTNode | undefined {
           const key = keyOf(be);
           const d = key ? tied.get(key) : undefined;
-          if (!d || d.keep || !d.op) return undefined;
+          if (d?.keep) {
+            const out = byteCompareWithOne(be, d);
+            if (out) rewritten++;
+            return out ?? undefined;
+          }
+          if (!d || !d.op) return undefined;
           const out = rewrite(be, d, sizeOf(d.ord), shapeOf);
           if (out) rewritten++;
           return out ?? undefined;
@@ -314,6 +320,25 @@ export function createCompareFormTransformer(options?: PluginOptions): Transform
       return rewritten > 0 ? updateNode(node, { body } as Partial<FunctionDecl>) : undefined;
     },
   });
+}
+
+/**
+ * `b == true` / `b != true` where the instruction is `CMP <byte>, 1`: the constant is written
+ * `1`. Both compare the promoted byte with 1, so the value is the same; written `true`,
+ * boolean-cleanup folds it to `b` / `!b`, which VC8 compiles as `CMP <byte>, 0` with the
+ * branch inverted - the same test only while the byte holds 0 or 1, and not the original's
+ * instruction. Q06_SequenceFilter 005968e0 compares one flag of a struct with 1 and the next
+ * with 0 in one condition, so this follows the instruction at each site, never the type.
+ */
+function byteCompareWithOne(be: BinaryExpr, d: CompareFormDecision): BinaryExpr | null {
+  if (d.width !== 1 || d.k !== 1 || (be.operator !== '==' && be.operator !== '!=')) return null;
+  const r = unwrapParens(be.right);
+  if (r.kind !== NodeKind.BoolLiteral || !(r as BoolLiteralExpr).value) return null;
+  const one: IntegerLiteralExpr = {
+    kind: NodeKind.IntegerLiteral, value: 1n, suffix: '', base: 10, raw: '1',
+    location: be.right.location, leadingTrivia: be.right.leadingTrivia, trailingTrivia: be.right.trailingTrivia,
+  } as IntegerLiteralExpr;
+  return updateNode(be, { right: one, ghidraInfo: { ...(be.ghidraInfo ?? {}), originalAddress: `0x${d.address}` } } as Partial<BinaryExpr>);
 }
 
 /** The rewritten comparison, or null when a check fails. */
