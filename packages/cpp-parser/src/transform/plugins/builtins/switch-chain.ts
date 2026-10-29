@@ -41,7 +41,7 @@ import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, CompoundStmt, IfStmt, Statement, Expression, BinaryExpr, UnaryExpr, ParenExpr,
   Identifier, IntegerLiteralExpr, CharLiteralExpr, FunctionDecl, SwitchStmt, CaseStmt, DefaultStmt,
-  MemberExpr, SubscriptExpr, CStyleCastExpr,
+  MemberExpr, SubscriptExpr, CStyleCastExpr, VariableDecl,
 } from '../../../ast/nodes.js';
 import { traverseAST, getChildren } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
@@ -58,6 +58,14 @@ export interface SwitchChainOptions extends PluginOptions {
   branchLayout?: BranchLayoutEvidence | null;
   /** Enumerator names: the only identifiers a case label may be. */
   enumConstants?: string[];
+  /** Declared types of parameters and globals by name (locals are read off the body). */
+  varTypes?: Record<string, string>;
+  /** Field name -> declared type, where every aggregate declaring it agrees. */
+  fieldTypes?: Record<string, string>;
+  /** Typedef name -> the spelling it stands for. */
+  typedefTargets?: Record<string, string>;
+  /** Every enum type name. */
+  enumTypes?: string[];
   /** Further callees that never return, by unqualified name. */
   noreturnFunctions?: string[];
   /** Called once per decision rewritten, and per decision on subtraction tests left. */
@@ -216,7 +224,48 @@ function freeBreakOrCase(stmts: Statement[]): boolean {
   return freeJumps(stmts).brk || holdsFreeCase(stmts);
 }
 
+const INTEGRAL = new Set([
+  'char', 'signed char', 'unsigned char', 'short', 'unsigned short', 'int', 'unsigned int', 'unsigned',
+  'long', 'unsigned long', 'long long', 'unsigned long long', 'bool', 'wchar_t',
+  'int8_t', 'int16_t', 'int32_t', 'int64_t', 'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t',
+  'byte', 'uchar', 'ushort', 'uint', 'ulong', 'sbyte', 'word', 'dword', 'qword',
+  'BYTE', 'WORD', 'DWORD', 'QWORD', 'UINT', 'INT', 'LONG', 'ULONG', 'SHORT', 'USHORT', 'CHAR', 'UCHAR',
+  'BOOL', 'BOOLEAN', 'WPARAM', 'LPARAM', 'size_t', 'ptrdiff_t', 'intptr_t', 'uintptr_t',
+  'undefined1', 'undefined2', 'undefined4', 'undefined8', '__int8', '__int16', '__int32', '__int64',
+]);
+
+/** A declared type spelling is an integer or an enum (through typedefs); unknown is not. */
+function integralType(spelled: string | undefined, opts: SwitchChainOptions, enums: ReadonlySet<string>, depth = 0): boolean {
+  if (!spelled || depth > 8) return false;
+  const t = spelled.replace(/\b(const|volatile|struct|enum|class|union)\b/g, '').replace(/\s+/g, ' ').trim();
+  if (/[*&\[(]/.test(t)) return false;
+  if (INTEGRAL.has(t)) return true;
+  const bare = t.replace(/^.*::/, '');
+  if (enums.has(t) || enums.has(bare)) return true;
+  const target = opts.typedefTargets?.[t] ?? opts.typedefTargets?.[bare];
+  return target !== undefined && integralType(target, opts, enums, depth + 1);
+}
+
+/** Locals declared in the body, name -> type as printed. */
+function localTypes(body: ASTNode): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const n of traverseAST(body)) {
+    if (n.kind !== NodeKind.VariableDecl) continue;
+    const d = n as VariableDecl;
+    const name = typeof d.name === 'string' ? d.name : (d.name as Identifier | undefined)?.name;
+    if (!name) continue;
+    try {
+      const t = emit(d.type as never);
+      // Two declarations of one name with different types: unknown.
+      out.set(name, out.has(name) && out.get(name) !== t ? '?' : t);
+    } catch { out.set(name, '?'); }
+  }
+  return out;
+}
+
 interface Ctx {
+  /** The switch operand's type is an integer or an enum. */
+  integral: (v: Expression) => boolean;
   reader: LayoutReader;
   enums: ReadonlySet<string>;
   noreturn: ReadonlySet<string>;
@@ -377,6 +426,7 @@ function decisionAt(list: readonly Statement[], i: number, ctx: Ctx, inBlock = t
   d.scan(region);
   if (d.why) return left(d.why, d.nodes.size);
   if (ctx.split.get(line)?.has(emit(t.v as never))) return left('split', d.nodes.size);
+  if (!ctx.integral(t.v)) return left('type', d.nodes.size);
 
   // The tests are one whole countdown run.
   const nodes = [...d.nodes.values()];
@@ -561,7 +611,27 @@ function rewriteList(list: readonly Statement[], ctx: Ctx): Statement[] | null {
 
 function rewriteFunction(fn: FunctionDecl, ev: BranchLayoutEvidence, opts: SwitchChainOptions): FunctionDecl | undefined {
   if (!fn.body || !ev.tests || ev.tests.size === 0) return undefined;
+  const locals = localTypes(fn.body);
+  const enums = new Set(opts.enumTypes ?? []);
+  for (const p of fn.parameters ?? []) {
+    const name = (p as { name?: Identifier | string }).name;
+    const pn = typeof name === 'string' ? name : name?.name;
+    if (pn && !locals.has(pn)) { try { locals.set(pn, emit(p.type as never)); } catch { /* unknown */ } }
+  }
+  const typeOf = (v: Expression): string | undefined => {
+    const e = unwrap(v);
+    if (e.kind === NodeKind.Identifier) {
+      const n = (e as Identifier).name;
+      return locals.get(n) ?? opts.varTypes?.[n];
+    }
+    if (e.kind === NodeKind.MemberExpr) {
+      const m = (e as MemberExpr).member as Identifier | string;
+      return opts.fieldTypes?.[typeof m === 'string' ? m : m.name];
+    }
+    return undefined;
+  };
   const ctx: Ctx = {
+    integral: v => integralType(typeOf(v), opts, enums),
     reader: new LayoutReader(ev, fn.body),
     enums: new Set(opts.enumConstants ?? []),
     noreturn: new Set([...DEFAULT_NORETURN_FUNCTIONS, ...(opts.noreturnFunctions ?? [])]),
