@@ -335,6 +335,11 @@ export {
   type BranchLayoutOptions,
 } from './builtins/branch-layout/index.js';
 
+export {
+  switchChainPlugin,
+  type SwitchChainOptions,
+} from './builtins/switch-chain.js';
+
 // ============================================
 // BUILT-IN PLUGINS: DECLARATION SCOPE SINK
 // ============================================
@@ -544,6 +549,7 @@ import { gotoCrossesInitPlugin } from './builtins/goto-crosses-init.js';
 import { haltSiteFoldPlugin } from './builtins/halt-site-fold.js';
 import { assertOrderPlugin } from './builtins/assert-order.js';
 import { branchLayoutPlugin } from './builtins/branch-layout/index.js';
+import { switchChainPlugin } from './builtins/switch-chain.js';
 import { declOrderFixPlugin } from './builtins/decl-order-fix.js';
 import { declScopeSinkPlugin } from './builtins/decl-scope-sink.js';
 import { phiNodeTernaryPlugin } from './builtins/phi-node-ternary.js';
@@ -715,6 +721,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   haltSiteFoldPlugin,         // Cleanup: fold nLine/nAddress temporaries into the halt call, copy a shared halt tail to its jumps (priority 930)
   assertOrderPlugin,          // Control-flow: if (c) { ..; return; } Halt; exit; -> if (!c) { Halt; exit; } ..; return; (priority 987)
   branchLayoutPlugin,         // Control-flow: if arms ordered as the original's addresses show (priority 988)
+  switchChainPlugin,          // Control-flow: if-chain the original counts down by subtraction -> switch (priority 44)
   declOrderFixPlugin,         // Cleanup: reorder merged decls to respect initializer deps (priority 61)
   declScopeSinkPlugin,        // Cleanup: sink decls into single-use scope (priority 62)
   phiNodeTernaryPlugin,       // Cleanup: int x; if(c){x=a;}else{x=b;} → int x = c?a:b; (priority 63)
