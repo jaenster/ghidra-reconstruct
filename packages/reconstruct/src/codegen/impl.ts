@@ -2813,6 +2813,17 @@ function transformDecompiledCode(
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         enclosingVarTypes,
       };
+      perPluginOptions['arith-idioms'] = {
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        structFields: context.funcPtrArgCasts.structFields,
+        structFieldOffsets: context.funcPtrArgCasts.structFieldOffsets,
+        aggregateSizes: context.funcPtrArgCasts.aggregateSizes,
+        unionNames: context.funcPtrArgCasts.unionNames,
+        typedefTargets: context.funcPtrArgCasts.typedefTargets,
+        functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        enclosingVarTypes,
+      };
       perPluginOptions['pseudo-op-lower'] = {
         stackSlots: enclosing?.stackSlots,
         unionNames: context.funcPtrArgCasts.unionNames,
