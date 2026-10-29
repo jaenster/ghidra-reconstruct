@@ -235,3 +235,49 @@ describe('commaExpandPlugin', () => {
     );
   });
 });
+
+describe('commaExpandPlugin - an || guard laid out after the rest (inflateSyncPoint)', () => {
+  /** `[offsets] text` per line, `[if cb offsets] text` for an if line. */
+  function run(lines: string[]): string {
+    const text: string[] = [];
+    const ev = { lines: new Map<number, number[]>(), ifs: new Map<number, number>() };
+    lines.forEach((l, i) => {
+      const m = l.match(/^\s*\[(if\s+)?([0-9a-fx, ]*)\]\s?(.*)$/);
+      if (!m) { text.push(l); return; }
+      const nums = m[2].split(/[ ,]+/).filter(Boolean).map(n => Number(n));
+      if (m[1]) ev.ifs.set(i + 1, nums[0]);
+      ev.lines.set(i + 1, nums);
+      text.push(m[3]);
+    });
+    const t = commaExpandPlugin.createTransformer({ branchLayout: ev });
+    return emit(t(parse(text.join('\n'))) as AnyNode).replace(/\s+/g, ' ').trim();
+  }
+  const site = (ret: string, rest: string) => [
+    'int f(S* s) {',
+    '  int* p;',
+    '[if 0x9 0x0,0x4,0x7,0x9] if (s == 0 || (p = s->state, p == 0)) {',
+    `[${ret}] return -2;`,
+    '  }',
+    `[${rest}] if (*p == 13) {`,
+    '[0x16] return 1;',
+    '  }',
+    '[0x1c,0x1e] return 0;',
+    '}',
+  ];
+
+  it('nests the rest when the return lies after it', () => {
+    const out = run(site('0x1f,0x24', '0xb,0x10'));
+    assert.ok(out.includes('if (s != 0) { p = s->state; if (p != 0) { if (*p == 13) { return 1; } return 0; } } return -2;'), out);
+  });
+
+  it('splits the guards when the return lies first', () => {
+    const out = run(site('0xb,0x10', '0x1f,0x24'));
+    assert.ok(out.includes('if (s == 0) return -2; p = s->state; if (p == 0) return -2;'), out);
+  });
+
+  it('splits the guards inside a loop', () => {
+    const lines = site('0x1f,0x24', '0xb,0x10');
+    const out = run([lines[0], lines[1], 'while (g) {', ...lines.slice(2, -1), '}', 'return 5;', '}']);
+    assert.ok(out.includes('if (s == 0) return -2;'), out);
+  });
+});
