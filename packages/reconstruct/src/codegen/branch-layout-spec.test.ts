@@ -62,6 +62,21 @@ describe('branch layout facts', () => {
     assert.ok(wrapped[8 - 1].includes('FindClose'));
   });
 
+  it('parses the equality tests and keys them by line of the parsed wrapper', () => {
+    const row = ROW.replace('\n', '\t13:!=,SUB,EAX,1,4294967295,4,4b;13:==,DEC,ECX,1,0,4,50\n');
+    const facts = parseBranchLayout(row).get('00430bc0')!;
+    assert.deepStrictEqual(facts.tests, [
+      [13, { op: '!=', mnemonic: 'SUB', reg: 'EAX', delta: 1, k: 0xffffffff, size: 4, at: 0x4b }],
+      [13, { op: '==', mnemonic: 'DEC', reg: 'ECX', delta: 1, k: 0, size: 4, at: 0x50 }],
+    ]);
+    const { brace, body } = split(DECOMPILED);
+    const lay = branchLayoutLines(facts, DECOMPILED, brace, body, body, 'BOOL dummy() {')!;
+    assert.deepStrictEqual(lay.tests?.get(7)?.map(t => t.mnemonic), ['SUB', 'DEC']);
+    // Facts from before the column carry no tests.
+    assert.strictEqual(parseBranchLayout(ROW).get('00430bc0')!.tests, undefined);
+    assert.strictEqual(branchLayoutLines(parseBranchLayout(ROW).get('00430bc0'), DECOMPILED, brace, body, body, 'BOOL dummy() {')!.tests, undefined);
+  });
+
   it('drops facts from another text', () => {
     const { brace, body } = split(DECOMPILED);
     const facts = parseBranchLayout(ROW).get('00430bc0')!;
