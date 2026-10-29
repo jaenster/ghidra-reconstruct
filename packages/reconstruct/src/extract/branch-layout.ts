@@ -159,16 +159,21 @@ export function branchLayoutScript(batch: string[], threads = 8, timeout = 60): 
     .replace('__TIMEOUT__', String(timeout));
 }
 
-/** Whether a decompile prints an `if`: the functions the script reads. */
+/** Whether a decompile prints an `if`. */
 export function printsIf(decompiled: string): boolean {
   return /\bif\s*\(/.test(decompiled);
 }
 
-/** Entries of every decompiled function that prints an `if`, in batches. */
+/** Whether a decompile prints an `if` or a `switch` (case-layout orders its cases): the functions the script reads. */
+export function printsBranch(decompiled: string): boolean {
+  return printsIf(decompiled) || /\bswitch\s*\(/.test(decompiled);
+}
+
+/** Entries of every decompiled function that prints an `if` or a `switch`, in batches. */
 export function branchLayoutBatches(functions: Pick<ExtractedFunction, 'address' | 'decompiled'>[], batchSize = 400): string[][] {
   const items: string[] = [];
   for (const f of functions) {
-    if (f.decompiled && printsIf(f.decompiled)) items.push(normalize(f.address));
+    if (f.decompiled && printsBranch(f.decompiled)) items.push(normalize(f.address));
   }
   const out: string[][] = [];
   for (let i = 0; i < items.length; i += batchSize) out.push(items.slice(i, i + batchSize));
@@ -221,7 +226,7 @@ function normalize(a: string): string {
   return a.replace(/^0x/i, '').toLowerCase().padStart(8, '0');
 }
 
-/** Run the script over every decompiled function that has an `if` and attach `branchLayout`. */
+/** Run the script over every decompiled function that has an `if` or a `switch` and attach `branchLayout`. */
 export async function extractBranchLayout(connection: GhidraConnection, functions: ExtractedFunction[]): Promise<number> {
   let n = 0;
   const byAddr = new Map(functions.map(f => [normalize(f.address), f]));

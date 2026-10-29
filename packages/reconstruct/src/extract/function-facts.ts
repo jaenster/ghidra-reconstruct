@@ -30,7 +30,7 @@
 import type { GhidraConnection, ExtractedFunction } from '../types.js';
 import { STAMPER_JAVA, functionStampsScript, parseFunctionStamps, normalizeEntry, type TypeStamp } from './function-stamps.js';
 import { printsComparison, javaStringHash, parseCompareSiteOutput } from './compare-sites.js';
-import { printsIf, parseBranchLayout } from './branch-layout.js';
+import { printsBranch, parseBranchLayout } from './branch-layout.js';
 import { printsCallTemporary, parseCallOrder } from './call-order.js';
 import { printsHaltOrProbe, parseHaltLines, HALT_NAME, IP_NAME, PROBE_NAMES } from './halt-lines.js';
 import { STRING_OPS_JAVA, printsRepLoop, parseStringOpRow } from './string-ops.js';
@@ -446,7 +446,7 @@ println(sb.toString());
  */
 export const FACT_SCRIPT_VERSION = createHash('sha1')
   .update(FUNCTION_FACTS_SCRIPT).update(LABEL_FLOW_SCRIPT).update(functionStampsScript([], []))
-  .update('facts-1')
+  .update('facts-2')
   .digest('hex').slice(0, 16);
 
 export function functionFactsScript(batch: string[], threads = 8, timeout = 60): string {
@@ -540,7 +540,7 @@ export function selectFacts(text: string, entry: string, row: FunctionFactRow, c
     ).get(entry);
     if (block?.rows) facts.compareSites = block.rows;
   }
-  if (printsIf(text) && row.branchRow) {
+  if (printsBranch(text) && row.branchRow) {
     const b = parseBranchLayout(row.branchRow).get(entry);
     if (b) facts.branchLayout = b;
   }
@@ -612,7 +612,7 @@ export async function extractFunctionFacts(
   const byEntry = new Map<string, ExtractedFunction>();
   for (const f of functions) {
     if (!f.decompiled || f.isThunk || f.isExternal) continue;
-    if (!(printsComparison(f.decompiled) || printsIf(f.decompiled) || printsCallTemporary(f.decompiled)
+    if (!(printsComparison(f.decompiled) || printsBranch(f.decompiled) || printsCallTemporary(f.decompiled)
         || printsHaltOrProbe(f.decompiled) || printsRepLoop(f.decompiled) || labelsOf(f.decompiled).length > 0)) continue;
     byEntry.set(normalizeEntry(f.address), f);
   }

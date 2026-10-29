@@ -20,7 +20,7 @@
  */
 
 import { NodeKind } from '../../../../ast/kinds.js';
-import type { ASTNode, IfStmt, Statement, Expression } from '../../../../ast/nodes.js';
+import type { ASTNode, IfStmt, Statement, Expression, SwitchStmt } from '../../../../ast/nodes.js';
 import { getChildren } from '../../../../ast/visitor.js';
 
 export interface BranchLayoutEvidence {
@@ -94,6 +94,7 @@ export class LayoutReader {
   /** Offset -> the untainted lines that print it. */
   private readonly printers = new Map<number, Set<number>>();
   private readonly ifLines = new Map<number, number>();
+  private readonly switchLines = new Map<number, number>();
   /** Line -> how many statement ranges claim it. */
   private readonly claims = new Map<number, number>();
 
@@ -126,6 +127,10 @@ export class LayoutReader {
       if (n.kind === NodeKind.IfStmt && placed(n)) {
         const l = n.location.start.line;
         this.ifLines.set(l, (this.ifLines.get(l) ?? 0) + 1);
+      }
+      if (n.kind === NodeKind.SwitchStmt && placed(n)) {
+        const l = n.location.start.line;
+        this.switchLines.set(l, (this.switchLines.get(l) ?? 0) + 1);
       }
       for (const k of getChildren(n)) if (isStatement(k)) visit(k);
     };
@@ -167,6 +172,19 @@ export class LayoutReader {
     let claimed = 0;
     ownedRanges(ifs, (from, to) => { if (from <= l && l <= to) claimed++; });
     return inside === total && claimed === this.claims.get(l) ? this.ev.ifs.get(l) ?? null : null;
+  }
+
+  /**
+   * The offset of a jump-table switch's indirect jump: the highest offset its line prints
+   * (the `switch` keyword carries the BRANCHIND, its operand the loads before it). Null for
+   * a switch a pass built from ifs (its line is an `if` line), a copied one, or an unknown line.
+   */
+  switchBranch(sw: SwitchStmt): number | null {
+    if (!placed(sw)) return null;
+    const l = sw.location.start.line;
+    if (this.switchLines.get(l) !== 1 || this.ifLines.has(l) || this.ev.ifs.has(l) || this.tainted.has(l)) return null;
+    const offs = this.ev.lines.get(l);
+    return offs && offs.length > 0 ? offs[offs.length - 1] : null;
   }
 
   /**

@@ -3007,12 +3007,14 @@ function transformDecompiledCode(
     // Labels Ghidra prints under a name are spelled as its default labels while the goto
     // passes run, and get the name back after (label-canonical.ts): a name is not structure.
     // Arm order from the original's addresses: `early-return` makes a guard only where the
-    // binary has one, `branch-layout` reorders arms the layout contradicts, `comma-expand`
-    // nests an `||` guard with a side effect where its return lies after the rest. Without
-    // the facts (an older snapshot) early-return keeps its unconditional behaviour.
+    // binary has one, `branch-layout` reorders arms the layout contradicts, `case-layout`
+    // prints a jump-table switch's cases in the order of their bodies, and `comma-expand`
+    // nests an `||` guard with a side effect where its return lies after the rest. Without the
+    // facts (an older snapshot) early-return keeps its unconditional behaviour.
     if (layout) {
       perPluginOptions['early-return'] = { ...(perPluginOptions['early-return'] as object | undefined), branchLayout: layout };
       perPluginOptions['branch-layout'] = { branchLayout: layout };
+      perPluginOptions['case-layout'] = { branchLayout: layout };
       perPluginOptions['comma-expand'] = { ...(perPluginOptions['comma-expand'] as object | undefined), branchLayout: layout };
     }
     // A temporary goes back into the argument list where the original evaluated the
