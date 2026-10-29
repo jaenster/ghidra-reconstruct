@@ -11,7 +11,9 @@
  * A function is selected when all of these hold:
  *
  *  - one of its parameters is stored in EAX, EBX, ESI or EDI, or in ECX/EDX when its
- *    convention is neither fastcall (ECX, EDX) nor thiscall (ECX);
+ *    convention is neither fastcall (ECX, EDX) nor thiscall (ECX), or in EDX when
+ *    it is a fastcall with no parameter in ECX: declared extern, the rebuild would
+ *    pass that parameter in ECX;
  *  - every reference to it - a call, its name used as a value, its address as a
  *    literal, a thunk forwarding to it - is in a function of its own emitted unit;
  *  - no data initializer names it (a function table, a vtable, a callback slot);
@@ -56,20 +58,24 @@ function conventionRegisters(callingConvention: string): Set<string> | undefined
 
 /**
  * The registers this function's parameters are stored in that its declared
- * convention does not pass arguments in, or [] when there are none. A convention
+ * convention does not pass arguments in, or [] when there are none. A fastcall
+ * passes its second argument in EDX only after its first in ECX: one with a
+ * parameter in EDX and none in ECX (`init_block`, 0042b9e0) has VC8's own
+ * convention for a static function, and EDX counts as foreign. A convention
  * Ghidra could not name gives nothing to compare against, so it gives [].
  */
 export function foreignParameterRegisters(func: Pick<ExtractedFunction, 'callingConvention' | 'parameters'>): string[] {
   const allowed = conventionRegisters(func.callingConvention ?? '');
   if (!allowed) return [];
-  const out = new Set<string>();
+  const used = new Set<string>();
   for (const p of func.parameters ?? []) {
     for (const piece of (p.storage ?? '').split(',')) {
       const reg = REGISTER_FAMILY[piece.trim().replace(/:\d+$/, '').toUpperCase()];
-      if (reg && !allowed.has(reg)) out.add(reg);
+      if (reg) used.add(reg);
     }
   }
-  return [...out].sort();
+  if (allowed.has('EDX') && !used.has('ECX')) allowed.delete('EDX');
+  return [...used].filter(r => !allowed.has(r)).sort();
 }
 
 export interface FileStaticInputs {

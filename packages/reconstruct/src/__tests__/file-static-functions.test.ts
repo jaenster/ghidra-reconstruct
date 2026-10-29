@@ -74,13 +74,54 @@ describe('foreignParameterRegisters', () => {
       parameters: [
         { name: 'a', dataType: 'int', size: 4, ordinal: 0, storage: 'ECX:4' },
         { name: 'b', dataType: 'short', size: 2, ordinal: 1, storage: 'DX:2' },
-        onStack('c'),
+        { ...onStack('c'), ordinal: 2 },
       ],
     }), []);
     assert.deepStrictEqual(foreignParameterRegisters({
       callingConvention: '__fastcall_edxsafe',
       parameters: [{ name: 'a', dataType: 'int', size: 4, ordinal: 0, storage: 'ESI:4' }],
     }), ['ESI']);
+    assert.deepStrictEqual(foreignParameterRegisters({
+      callingConvention: '__thiscall',
+      parameters: [{ name: 'this', dataType: 'Obj *', size: 4, ordinal: 0, storage: 'ECX:4' }, { ...onStack('b'), ordinal: 1 }],
+    }), []);
+  });
+
+  it('names EDX in a fastcall that passes nothing in ECX', () => {
+    // init_block (0042b9e0): __fastcall, its one parameter in EDX.
+    assert.deepStrictEqual(foreignParameterRegisters({
+      callingConvention: '__fastcall',
+      parameters: [{ name: 's', dataType: 'deflate_state *', size: 4, ordinal: 0, storage: 'EDX:4' }],
+    }), ['EDX']);
+    assert.deepStrictEqual(foreignParameterRegisters({
+      callingConvention: '__fastcall',
+      parameters: [
+        { name: 'b', dataType: 'uint8_t', size: 1, ordinal: 0, storage: 'DL:1' },
+        { name: 'q', dataType: 'void *', size: 4, ordinal: 1, storage: 'Stack[0x4]:4' },
+      ],
+    }), ['EDX']);
+  });
+
+  it('leaves a fastcall alone that uses ECX, whatever order Ghidra lists its parameters in', () => {
+    // A receiver in ECX listed last is the thiscall shape, not a convention of its own.
+    assert.deepStrictEqual(foreignParameterRegisters({
+      callingConvention: '__fastcall',
+      parameters: [
+        { name: 'a', dataType: 'int', size: 4, ordinal: 0, storage: 'Stack[0x4]:4' },
+        { name: 'node', dataType: 'void *', size: 4, ordinal: 1, storage: 'ECX:4' },
+      ],
+    }), []);
+    assert.deepStrictEqual(foreignParameterRegisters({
+      callingConvention: '__fastcall',
+      parameters: [
+        { name: 'a', dataType: 'int', size: 4, ordinal: 0, storage: 'EDX:4' },
+        { name: 'b', dataType: 'int', size: 4, ordinal: 1, storage: 'ECX:4' },
+      ],
+    }), []);
+    assert.deepStrictEqual(foreignParameterRegisters({
+      callingConvention: '__thiscall',
+      parameters: [{ name: 'p', dataType: 'int', size: 4, ordinal: 0, storage: 'EDX:4' }],
+    }), ['EDX']);
   });
 });
 
@@ -93,6 +134,19 @@ describe('selectFileStaticFunctions', () => {
     const sel = selectFileStaticFunctions({ allFunctions: all, unitOf: unitsOf(all), globals: [] });
     assert.deepStrictEqual([...sel.selected.keys()], ['00401000']);
     assert.deepStrictEqual([...sel.selected.get('00401000')!.referrers], ['00401100']);
+  });
+
+  it('selects a fastcall function whose one parameter is in EDX, and not one in ECX', () => {
+    const inEdx = fn('InEdx', '00401200', 'A', '  return p != 0;', {
+      conv: '__fastcall', params: [{ name: 'p', dataType: 'int', size: 4, ordinal: 0, storage: 'EDX:4' }],
+    });
+    const inEcx = fn('InEcx', '00401300', 'A', '  return p != 0;', {
+      conv: '__fastcall', params: [{ name: 'p', dataType: 'int', size: 4, ordinal: 0, storage: 'ECX:4' }],
+    });
+    const user = fn('User', '00401400', 'A', '  return InEdx(1) + InEcx(2);');
+    const all = [inEdx, inEcx, user];
+    const sel = selectFileStaticFunctions({ allFunctions: all, unitOf: unitsOf(all), globals: [] });
+    assert.deepStrictEqual([...sel.selected.keys()], ['00401200']);
   });
 
   it('keeps it extern when a function of another unit calls it', () => {
