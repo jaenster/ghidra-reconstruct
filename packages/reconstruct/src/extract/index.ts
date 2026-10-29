@@ -50,6 +50,7 @@ import { extractAllGlobals, analyzeDataSymbols, fetchInitializedData } from './g
 import { extractLabelFlow } from './label-flow.js';
 import { extractCompareSites } from './compare-sites.js';
 import { extractBranchLayout } from './branch-layout.js';
+import { extractCallOrder } from './call-order.js';
 import { extractAllStrings } from './strings.js';
 import { extractAllNamespaces } from './namespaces.js';
 import type { AnalyzedDataSymbol } from '../types.js';
@@ -247,6 +248,12 @@ export async function extractAll(
       await extractBranchLayout(connection, functions);
     } catch (err) {
       console.warn(`  Branch layout unavailable: ${(err as Error).message}`);
+    }
+    // Where each call lies and what was pushed before it (read-only; see call-order.ts).
+    try {
+      await extractCallOrder(connection, functions);
+    } catch (err) {
+      console.warn(`  Call order unavailable: ${(err as Error).message}`);
     }
   }
 

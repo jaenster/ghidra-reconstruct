@@ -47,6 +47,11 @@ export interface ExtractedFunction {
    * Unset in snapshots older than the field (and when the script failed).
    */
   branchLayout?: import('./extract/branch-layout.js').BranchLayoutFacts;
+  /**
+   * Direct calls per line of `decompiled`, with the pushes before each (extract/call-order.ts).
+   * Unset in snapshots older than the field (and when the script failed).
+   */
+  callOrder?: import('./extract/call-order.js').CallOrderFacts;
   name: string;
   address: string;
   signature: string;
