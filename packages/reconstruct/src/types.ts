@@ -42,6 +42,11 @@ export interface ExtractedFunction {
    * same text; unset in older snapshots and when the script failed.
    */
   compareSites?: string;
+  /**
+   * Code offsets per line of `decompiled` and per `if` keyword (extract/branch-layout.ts).
+   * Unset in snapshots older than the field (and when the script failed).
+   */
+  branchLayout?: import('./extract/branch-layout.js').BranchLayoutFacts;
   name: string;
   address: string;
   signature: string;
