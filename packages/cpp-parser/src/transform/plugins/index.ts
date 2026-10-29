@@ -349,6 +349,22 @@ export {
 } from './builtins/nest-call.js';
 
 export {
+  baseRegisterLoadPlugin,
+  type BaseRegisterLoadOptions,
+} from './builtins/base-register-load.js';
+
+export {
+  storeOrderPlugin,
+  type StoreOrderOptions,
+} from './builtins/store-order.js';
+
+export type {
+  AccessOrderEvidence,
+  ArgLoadFact,
+  StoreFact,
+} from './builtins/access-order-evidence.js';
+
+export {
   branchLayoutPlugin,
   LayoutReader,
   type BranchLayoutEvidence,
@@ -572,6 +588,8 @@ import { probeReturnStorePlugin } from './builtins/probe-return-store.js';
 import { assertOrderPlugin } from './builtins/assert-order.js';
 import { branchLayoutPlugin } from './builtins/branch-layout/index.js';
 import { nestCallPlugin } from './builtins/nest-call.js';
+import { baseRegisterLoadPlugin } from './builtins/base-register-load.js';
+import { storeOrderPlugin } from './builtins/store-order.js';
 import { switchChainPlugin } from './builtins/switch-chain.js';
 import { declOrderFixPlugin } from './builtins/decl-order-fix.js';
 import { declScopeSinkPlugin } from './builtins/decl-scope-sink.js';
@@ -734,6 +752,8 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   commaExpandPlugin,          // Readability: lower comma/short-circuit side effects into statements + guards (priority 13)
   commaExpandLatePlugin,      // Readability: the same, on what goto structuring left (priority 59)
   nestCallPlugin,             // Matching: a temporary back into the argument list the original evaluated it in (priority 59.5)
+  baseRegisterLoadPlugin,     // Matching: a call argument loaded into its own base register gets its local (priority 59.6)
+  storeOrderPlugin,           // Matching: independent stores in the original's instruction order (priority 59.7)
   arrayFillCollapsePlugin,    // Cleanup: collapse arr[i]=0 runs into memset (priority 50)
   gotoCleanupPlugin,          // Cleanup: if (cond) goto L; ... L: stmt; → if (!cond) { ... } stmt;
   redundantParenCleanupPlugin, // Cleanup: if((x)) → if(x) (priority 56)

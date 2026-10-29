@@ -24,8 +24,10 @@ import { CPP_KEYWORDS } from './header.js';
 // Import cpp-parser for code transformation
 import { branchLayoutLines } from './branch-layout-spec.js';
 import { callOrderLines } from './call-order-spec.js';
+import { accessOrderLines } from './access-order-spec.js';
 import type { BranchLayoutFacts } from '../extract/branch-layout.js';
 import type { CallOrderFacts } from '../extract/call-order.js';
+import type { AccessOrderFacts } from '../extract/access-order.js';
 import type { HaltLineFacts } from '../extract/halt-lines.js';
 import { transformGhidraCode, preprocessGhidraCode, isGhidraGeneratedName, suggestBetterName, takeFuncPtrArgCastTypedefs, type TransformResult, type FuncPtrTarget, type ArtifactMode, type ArtifactRecord, type RunTruncation } from '@ghidra-mcp/cpp-parser';
 import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js';
@@ -1543,6 +1545,8 @@ export function generateFunctionImplementation(
           labelFlow: func.labelFlow,
           branchLayout: func.branchLayout,
           callOrder: func.callOrder,
+          // A text patch anchors on the statements as Ghidra printed them.
+          accessOrder: override?.action === 'patch' ? undefined : func.accessOrder,
           haltLines: func.haltLines,
           sehLowering: sehLoweringDecision(func),
           foldedAddresses: foldedAddressFacts(func),
@@ -2400,6 +2404,8 @@ function transformDecompiledCode(
     branchLayout?: BranchLayoutFacts;
     /** Direct calls per decompile line and the pushes before each (extract/call-order.ts). */
     callOrder?: CallOrderFacts;
+    /** Argument loads and store instructions per decompile line (extract/access-order.ts). */
+    accessOrder?: AccessOrderFacts;
     /** The line each way into a halt pushes; stack-probe return addresses (extract/halt-lines.ts). */
     haltLines?: HaltLineFacts;
     /** The function's EH3 frame as `seh-lowering` needs it (codegen/seh-lowering-spec.ts). */
@@ -2464,6 +2470,11 @@ function transformDecompiledCode(
     // The original's call order, keyed by line of `wrapped` (call-order-spec.ts).
     const callOrder = funcBodyMatch && funcBodyMatch.index !== undefined
       ? callOrderLines(enclosing?.callOrder, decompiled, funcBodyMatch.index + funcBodyMatch[0].indexOf('{'), body, preprocessedBody, wrapperPrefix)
+      : undefined;
+
+    // The original's argument loads and store order, keyed by line of `wrapped` (access-order-spec.ts).
+    const accessOrder = funcBodyMatch && funcBodyMatch.index !== undefined
+      ? accessOrderLines(enclosing?.accessOrder, decompiled, funcBodyMatch.index + funcBodyMatch[0].indexOf('{'), body, preprocessedBody, wrapperPrefix)
       : undefined;
 
     // Build plugin options for method-call-rewrite when mappings or current context exist
@@ -3009,6 +3020,35 @@ function transformDecompiledCode(
         enclosingSegments: enclosing?.ghidraNamespaceSegments ?? enclosing?.namespaceSegments,
         onSite: (e: { line: number; temps: number }) =>
           console.warn(`[nest] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.temps} temporar${e.temps === 1 ? 'y' : 'ies'} into the call on line ${e.line}`),
+      };
+    }
+
+    // A call argument the original loaded into its own base register gets a local
+    // (base-register-load.ts); independent stores go in the original's instruction order
+    // (store-order.ts). Without the facts nothing changes.
+    if (accessOrder) {
+      const tables = {
+        functionReturnTypes: context?.funcPtrArgCasts?.functionReturnTypes,
+        globalTypes: context?.funcPtrArgCasts?.globalTypes,
+        typedefTargets: context?.funcPtrArgCasts?.typedefTargets,
+        structFields: context?.funcPtrArgCasts?.structFields,
+        fieldTypes: context?.funcPtrArgCasts?.fieldTypes,
+        enclosingVarTypes,
+      };
+      perPluginOptions['base-register-load'] = {
+        accessOrder,
+        ...tables,
+        shadowedTypeNames: shadowedTypeQualifyOptions(context)?.shadowedTypeNames,
+        enclosingSegments: enclosing?.ghidraNamespaceSegments ?? enclosing?.namespaceSegments,
+        onSite: (e: { line: number; name: string; folded: boolean }) =>
+          console.warn(`[base-load] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.name} on line ${e.line}${e.folded ? ' (folded)' : ''}`),
+      };
+      perPluginOptions['store-order'] = {
+        accessOrder,
+        ...tables,
+        structLayouts: context?.funcPtrArgCasts?.structLayouts,
+        onSite: (e: { line: number; kind: string; count: number }) =>
+          console.warn(`[store-order] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.kind} ${e.count} on line ${e.line}`),
       };
     }
 
