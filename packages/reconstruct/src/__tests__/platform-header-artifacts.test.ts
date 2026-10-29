@@ -71,7 +71,7 @@ describe('platform header: compiles against both CRT flavours', { skip: !hasMing
   for (const [flavour, flags] of Object.entries(CRT_FLAVOURS)) {
     it(`${flavour}: the header and its time, CPUID and INT3 helpers`, () => {
       assert.deepStrictEqual(compileWithHeader(
-        '__time64_t t = __time64(nullptr); (void)t; (void)FID_conflict___time32(nullptr);\n' +
+        '__time64_t t = _time64(nullptr); (void)t; (void)FID_conflict___time32(nullptr);\n' +
         '(void)D2_Cpuid(0); __debugbreak(); (void)__rdtsc();', flags), []);
     });
     it(`${flavour}: a surviving pseudo-op or Ghidra type does not compile`, () => {

@@ -177,7 +177,11 @@ function isGuardStackCall(stmt: ExprStmt): boolean {
 
   // The symbol itself, not any name containing it.
   const namespaceParts = extractCalleeName(call.callee).split('::');
-  if (namespaceParts[namespaceParts.length - 1] !== 'GuardStack') return false;
+  const leaf = namespaceParts[namespaceParts.length - 1];
+  // The database names it for what it is, libcmt's `__security_check_cookie`, in
+  // the runtime namespace; `Fog::Debug::GuardStack` is its earlier name.
+  if (leaf === '__security_check_cookie') return call.arguments.length <= 2;
+  if (leaf !== 'GuardStack') return false;
 
   // Check it's in Fog::Debug namespace (or any namespace ending with Debug)
   if (!namespaceParts.slice(0, -1).some(part => part === 'Debug')) return false;

@@ -8,7 +8,7 @@
  * disagree. That left no way to state the DECLARATION's own answer either, so
  * two live sites got no conversion at all:
  *
- *   Fog/Debug.cpp:2731    CRT_Encode_Secure_Pointer(HandleExceptionWithStackDump)
+ *   Fog/Debug.cpp:2731    _set_se_translator(HandleExceptionWithStackDump)
  *   Fog/Source/SFile.cpp  FloatToLong(nJulianDay, pYear)
  *
  * These pin that each stated name really is header-owned (otherwise the table is
@@ -37,13 +37,13 @@ describe('HEADER_DECLARED_SIGNATURES', () => {
     }
   });
 
-  it('spells CRT_Encode_Secure_Pointer the way the header declares it', () => {
-    const sig = HEADER_DECLARED_SIGNATURES.CRT_Encode_Secure_Pointer;
+  it('spells _set_se_translator the way the header declares it', () => {
+    const sig = HEADER_DECLARED_SIGNATURES._set_se_translator;
     assert.deepEqual(sig.paramTypes, ['void *']);
     assert.equal(sig.returnType, 'void *');
-    assert.ok(header.includes('void* CRT_Encode_Secure_Pointer(void* pPointer);'), 'decl moved');
-    // Not an overload set: taking its address never has to name a member.
-    assert.ok(!sig.overloaded);
+    assert.ok(header.includes('static inline void* _set_se_translator(void* pfnTranslator)'), 'decl moved');
+    // An overload set: <eh.h> declares the CRT's own beside it.
+    assert.ok(sig.overloaded);
   });
 
   it('spells the two-word FloatToLong the way the header declares it', () => {

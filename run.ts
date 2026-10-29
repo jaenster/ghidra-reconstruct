@@ -176,7 +176,7 @@ async function main() {
       decompileAllSecondary: MAC_DECOMPILE_ALL,
       generationWorkers: GENERATION_WORKERS,
       excludePatterns: [
-        /^compiler$/,
+        /^compiler(::.*)?$/,
         /^VisualStudio$/,
         /^CRT$/,
         /^_Wrappers$/,

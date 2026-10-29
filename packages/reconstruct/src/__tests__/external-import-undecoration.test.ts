@@ -121,7 +121,7 @@ describe('external stdcall imports are declared undecorated', () => {
 
   it('leaves the CRT and _Wrappers entries alone', () => {
     for (const name of [
-      '__strnicmp', '__vsnprintf', '__purecall', '__ftol2', 'CRT_Pow10',
+      '_wfopen', '_set_se_translator', '_purecall', '__ftol2', 'CRT_Pow10',
       'FID_conflict____CxxFrameHandler3', '_Wrappers::accept', '_Wrappers::WSASetLastError',
     ]) {
       const d = EXCLUDED_SYMBOL_DECLS.find(x => x.emitted === name);

@@ -168,11 +168,11 @@ export function isHaltTail(stmts: Statement[], noreturn: ReadonlySet<string>): b
   return f.every(s => isHaltStep(s, noreturn));
 }
 
-/** Fog's stack-cookie check, `Fog::Debug::GuardStack()`: the epilogue MSVC emits before a return. */
+/** The /GS stack-cookie check, `__security_check_cookie()` (once `Fog::Debug::GuardStack`): the epilogue MSVC emits before a return. */
 function isGuardStack(s: Statement): boolean {
   if (s.kind !== NodeKind.ExprStmt) return false;
   const e = strip((s as unknown as { expression: Expression }).expression);
-  return e.kind === NodeKind.CallExpr && calleeName(s) === 'GuardStack'
+  return e.kind === NodeKind.CallExpr && (calleeName(s) === 'GuardStack' || calleeName(s) === '__security_check_cookie')
     && ((e as unknown as { arguments: Expression[] }).arguments ?? []).length === 0;
 }
 

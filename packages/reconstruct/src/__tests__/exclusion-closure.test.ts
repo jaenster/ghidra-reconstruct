@@ -266,8 +266,9 @@ describe('selectExclusionEmissions', () => {
       ['CRT_CILog', '00687ac0'], ['CRT_CILog10', '00687ea0'], ['CRT_ReturnValue', '006b1a30'],
       ['_eh_vector_constructor_iterator_', '006869fc'],
       ['_eh_vector_destructor_iterator_', '00686ad1'],
-      ['CRT_Strchr', '00687740'], ['CRT_Floor', '00683080'], ['__except_handler4', '00684f50'],
-      ['__strrev', '00687860'],
+      ['strchr', '00687740'], ['CRT_Floor', '00683080'], ['_except_handler4', '00684f50'],
+      ['_strrev', '00687860'], ['fputc', '00682058'], ['strncpy_s', '006859d2'],
+      ['_beginthreadex', '00688103'], ['__security_check_cookie', '00681a48'],
     ];
     const selection = select(
       names.map(([name, address]) => candidate({ name, address, decompiled: body })),

@@ -54,7 +54,7 @@ export interface HaltLineFacts {
 
 export const HALT_NAME = 'ERROR_UnrecoverableInternalError_Halt';
 export const IP_NAME = 'GetInstructionPointer';
-export const PROBE_NAMES = ['__alloca_probe', '__SEH_prolog4'];
+export const PROBE_NAMES = ['_chkstk', '_SEH_prolog4', '__alloca_probe', '__SEH_prolog4'];
 
 /** Java, no imports. `__ITEMS__` is `;`-separated function entries. */
 export const HALT_LINES_SCRIPT = `

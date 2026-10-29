@@ -34,6 +34,7 @@ const CRT_TABLE: Record<string, string> = {
   _strdup: '<cstring>',
   _strrev: '<cstring>',
   strerror: '<cstring>',
+  strncpy_s: '<cstring>',
 
   // <cstdlib>
   malloc: '<cstdlib>',
@@ -64,7 +65,11 @@ const CRT_TABLE: Record<string, string> = {
   _ltoa: '<cstdlib>',
   _ultoa: '<cstdlib>',
   _rotl: '<cstdlib>',
+  _i64toa: '<cstdlib>',
+  _ui64toa: '<cstdlib>',
+  _fullpath: '<cstdlib>',
   _rotr: '<cstdlib>',
+  _errno: '<cstdlib>',
 
   // <cstdio>
   printf: '<cstdio>',
@@ -95,6 +100,8 @@ const CRT_TABLE: Record<string, string> = {
   vsnprintf: '<cstdio>',
   _vsnprintf: '<cstdio>',
   vfprintf: '<cstdio>',
+  fputc: '<cstdio>',
+  _wfopen: '<cstdio>',
   puts: '<cstdio>',
   getc: '<cstdio>',
   putc: '<cstdio>',
@@ -168,6 +175,12 @@ const CRT_TABLE: Record<string, string> = {
   localtime: '<ctime>',
   gmtime: '<ctime>',
   strftime: '<ctime>',
+
+  // <process.h>
+  _beginthreadex: '<process.h>',
+  _time32: '<ctime>',
+  _time64: '<ctime>',
+  _localtime64_s: '<ctime>',
 
   // <windows.h> — Win32 API (provided by d2_platform.h, not emitted as include)
   EnterCriticalSection: '<windows.h>',
@@ -414,56 +427,35 @@ export function declaredIdentifier(d: ExcludedSymbolDecl): string {
 
 /** MSVC CRT entry points that a real libc / mingw CRT header already declares. */
 const CRT_FORWARDERS: ExcludedSymbolDecl[] = [
-  { emitted: '__strnicmp', real: '_strnicmp', source: 'crt',
-    decl: 'static inline int __strnicmp(const char* a, const char* b, size_t n) { return _strnicmp(a, b, n); }',
-    win32Only: true },
-  { emitted: '__strlwr', real: '_strlwr', source: 'crt',
-    decl: 'static inline char* __strlwr(char* s) { return _strlwr(s); }', win32Only: true },
-  { emitted: '__strupr', real: '_strupr', source: 'crt',
-    decl: 'static inline char* __strupr(char* s) { return _strupr(s); }', win32Only: true },
-  { emitted: '__itoa', real: '_itoa', source: 'crt',
-    decl: 'static inline char* __itoa(int v, char* buf, int radix) { return _itoa(v, buf, radix); }',
-    win32Only: true },
-  { emitted: '__ultoa', real: '_ultoa', source: 'crt',
-    decl: 'static inline char* __ultoa(unsigned long v, char* buf, int radix) { return _ultoa(v, buf, radix); }',
-    win32Only: true },
-  { emitted: '__i64toa', real: '_i64toa', source: 'crt',
-    decl: 'static inline char* __i64toa(long long v, char* buf, int radix) { return _i64toa(v, buf, radix); }',
-    win32Only: true },
-  { emitted: '__ui64toa', real: '_ui64toa', source: 'crt',
-    decl: 'static inline char* __ui64toa(unsigned long long v, char* buf, int radix) { return _ui64toa(v, buf, radix); }',
-    win32Only: true },
-  { emitted: '__vsnprintf', real: '_vsnprintf', source: 'crt',
-    decl: 'static inline int __vsnprintf(char* buf, size_t n, const char* fmt, va_list ap) { return _vsnprintf(buf, n, fmt, ap); }' },
-  { emitted: '__fullpath', real: '_fullpath', source: 'crt',
-    decl: 'static inline char* __fullpath(char* absPath, const char* relPath, size_t maxLength) { return _fullpath(absPath, relPath, maxLength); }',
-    win32Only: true },
-  // The second overload is not a convenience. D2 spells every wide string as
+  // An overload beside the C library's own `_wfopen`, not a convenience. D2 spells every wide string as
   // `uint16_t*` — Ghidra's own width for the type, and what `normalizeWideCharType`
   // unifies the tree on — while `_wfopen` takes `wchar_t*`, a DISTINCT type on
   // this target even though it is the same 16 bits. Both call sites in
   // `Fog/File.cpp` build their buffers with `MultiByteToWideChar` and hand them
   // straight over, so without this the two spellings of one UTF-16 string do not
   // convert.
-  { emitted: '__wfopen', real: '_wfopen', source: 'crt',
-    decl: 'static inline FILE* __wfopen(const wchar_t* filename, const wchar_t* mode) { return _wfopen(filename, mode); }\n'
-        + 'static inline FILE* __wfopen(const uint16_t* filename, const uint16_t* mode) { return _wfopen((const wchar_t*)filename, (const wchar_t*)mode); }',
-    win32Only: true },
-  { emitted: '__time64', real: '_time64', source: 'crt',
-    decl: 'static inline __time64_t __time64(__time64_t* destTime) { return _time64(destTime); }',
+  { emitted: '_wfopen', real: '_wfopen', source: 'crt',
+    decl: 'static inline FILE* _wfopen(const uint16_t* filename, const uint16_t* mode) { return _wfopen((const wchar_t*)filename, (const wchar_t*)mode); }',
     win32Only: true },
   { emitted: 'FID_conflict___time32', real: '_time32', source: 'crt',
     decl: 'static inline __time32_t FID_conflict___time32(__time32_t* destTime) { return _time32(destTime); }',
     win32Only: true },
-  { emitted: '__beginthreadex', real: '_beginthreadex', source: 'crt',
-    decl: 'static inline uintptr_t __beginthreadex(void* security, unsigned stackSize, unsigned (__stdcall* startAddress)(void*), void* arglist, unsigned initflag, unsigned* thrdaddr) { return _beginthreadex(security, stackSize, startAddress, arglist, initflag, thrdaddr); }',
+  // 00684af3, libcmt's _set_se_translator. Ghidra types its parameter and result
+  // `void*` where the CRT's are `_se_translator_function`, and the one call site
+  // (Fog/Debug.cpp, the crash-handler installer) passes a `void*`; this overload
+  // converts and calls the library's own. mingw's msvcrt import library has no
+  // `_set_se_translator` (its <eh.h> declares one nothing exports), so there the
+  // translator slot is support/d2_crt_support.cpp's.
+  { emitted: '_set_se_translator', real: '_set_se_translator', source: 'crt',
+    decl: '#ifdef _MSC_VER\n'
+        + 'static inline void* _set_se_translator(void* pfnTranslator) { return (void*)::_set_se_translator((_se_translator_function)pfnTranslator); }\n'
+        + '#else\n'
+        + 'extern "C" void* D2_SetSeTranslator(void* pfnTranslator);\n'
+        + 'static inline void* _set_se_translator(void* pfnTranslator) { return D2_SetSeTranslator(pfnTranslator); }\n'
+        + '#endif',
     win32Only: true },
   { emitted: 'builtin_wcsncpy', real: 'wcsncpy', source: 'crt',
     decl: 'static inline wchar_t* builtin_wcsncpy(wchar_t* dst, const wchar_t* src, size_t n) { return wcsncpy(dst, src, n); }' },
-  // sscanf is genuinely variadic — a pack forwarder keeps every argument's real
-  // type, unlike a `...` redeclaration.
-  { emitted: 'FID_conflict__sscanf', real: 'sscanf', source: 'crt',
-    decl: 'template <typename... Args> static inline int FID_conflict__sscanf(const char* src, const char* fmt, Args... args) { return sscanf(src, fmt, args...); }' },
 ];
 
 /**
@@ -479,14 +471,14 @@ const MSVC_RUNTIME_DECLS: ExcludedSymbolDecl[] = [
   // handler body passes it.
   { emitted: 'FID_conflict____CxxFrameHandler3', real: '__CxxFrameHandler3', source: 'ghidra',
     decl: 'extern "C" uint32_t FID_conflict____CxxFrameHandler3(EHExceptionRecord* pExceptionRecord, EHRegistrationNode* pRegistrationNode, CONTEXT* pContext, void* pDispatcherContext, struct _s_FuncInfo* pFuncInfo);' },
-  // __except_handler4 @ 00684f50 - MSVC's EH4 frame handler, the one the EH4 frames
+  // _except_handler4 @ 00684f50 - MSVC's EH4 frame handler, the one the EH4 frames
   // install (`tSehFrame.ExceptionHandler = __except_handler4`). Declared with the
   // signature of the field it is stored in, Ghidra's /CRT/SEH funcdef EH4_EXCEPT_HANDLER
   // (_EXCEPTION_DISPOSITION (_EXCEPTION_RECORD*, EH4_EXCEPTION_REGISTRATION*, _CONTEXT*,
   // void*)) - the MSVC prototype. The function record itself still reads
   // `(int*, PVOID, undefined4)`, one argument short (a Ghidra-side defect, row r12).
-  { emitted: '__except_handler4', real: '_except_handler4', source: 'ghidra',
-    decl: 'extern "C" int __except_handler4(struct _EXCEPTION_RECORD* pExceptionRecord, EH4_EXCEPTION_REGISTRATION* pRegistration, CONTEXT* pContext, void* pDispatcherContext);' },
+  { emitted: '_except_handler4', real: '_except_handler4', source: 'ghidra',
+    decl: 'extern "C" int _except_handler4(struct _EXCEPTION_RECORD* pExceptionRecord, EH4_EXCEPTION_REGISTRATION* pRegistration, CONTEXT* pContext, void* pDispatcherContext);' },
   // _except_handler3 @ 006878a0 (compiler::, v1268) - MSVC's SEH3 frame handler
   // (exsup3.obj), the personality the inline `push -1; push scopetable; push handler;
   // push fs:[0]` prologs install (SOUNDUTIL_ReadVersionResource, WARDEN_DecryptModule).
@@ -499,16 +491,16 @@ const MSVC_RUNTIME_DECLS: ExcludedSymbolDecl[] = [
   { emitted: '_except_handler3', real: '_except_handler3', source: 'ghidra',
     decl: 'extern "C" int _except_handler3(struct _EXCEPTION_RECORD* pExceptionRecord, EH3_EXCEPTION_REGISTRATION* pRegistration, CONTEXT* pContext, void* pDispatcherContext);',
     win32Only: true },
-  // __global_unwind2 @ 00697f74 — Ghidra: undefined (PVOID)
-  { emitted: '__global_unwind2', real: '_global_unwind2', source: 'ghidra',
-    decl: 'extern "C" void __global_unwind2(void* pRegistration);' },
-  // __local_unwind2 @ 00697fd9 — Ghidra (v1096): void (int, uint, void* pFrame)
-  { emitted: '__local_unwind2', real: '_local_unwind2', source: 'ghidra',
-    decl: 'extern "C" void __local_unwind2(int nRegistration, uint32_t nStop, void* pFrame);' },
-  // __NLG_Notify @ 00698089 — Ghidra (v1096): void (ulong, undefined4 pTarget, void* pFrame),
+  // _global_unwind2 @ 00697f74 — Ghidra: undefined (PVOID)
+  { emitted: '_global_unwind2', real: '_global_unwind2', source: 'ghidra',
+    decl: 'extern "C" void _global_unwind2(void* pRegistration);' },
+  // _local_unwind2 @ 00697fd9 — Ghidra (v1096): void (int, uint, void* pFrame)
+  { emitted: '_local_unwind2', real: '_local_unwind2', source: 'ghidra',
+    decl: 'extern "C" void _local_unwind2(int nRegistration, uint32_t nStop, void* pFrame);' },
+  // _NLG_Notify @ 00698089 — Ghidra (v1096): void (ulong, undefined4 pTarget, void* pFrame),
   // __stdcall_noclobber
-  { emitted: '__NLG_Notify', real: '_NLG_Notify', source: 'ghidra',
-    decl: 'extern "C" void __NLG_Notify(unsigned long nCode, uint32_t pTarget, void* pFrame);' },
+  { emitted: '_NLG_Notify', real: '_NLG_Notify', source: 'ghidra',
+    decl: 'extern "C" void _NLG_Notify(unsigned long nCode, uint32_t pTarget, void* pFrame);' },
   // The locale category initialisers __lc_category[] (gaCrtLocaleCategoryTable,
   // 006f3168) points at. No body calls them; the table's `pfnInit` slots do, so
   // they are referenced from DATA only, and globals.cpp names them as `&___init_*`.
@@ -523,19 +515,25 @@ const MSVC_RUNTIME_DECLS: ExcludedSymbolDecl[] = [
     decl: 'extern "C" int ___init_numeric(threadlocinfo* _LocInfo);', win32Only: true },
   { emitted: '___init_time', real: '__init_time', source: 'ghidra',
     decl: 'extern "C" int ___init_time(threadlocinfo* _LocInfo);', win32Only: true },
-  // __ValidateEH3RN @ 00698170 — Ghidra: undefined4 (void*)
-  { emitted: '__ValidateEH3RN', real: '_ValidateEH3RN', source: 'ghidra',
-    decl: 'extern "C" uint32_t __ValidateEH3RN(void* pRegistration);' },
+  // _ValidateEH3RN @ 00698170 — Ghidra: undefined4 (void*)
+  { emitted: '_ValidateEH3RN', real: '_ValidateEH3RN', source: 'ghidra',
+    decl: 'extern "C" uint32_t _ValidateEH3RN(void* pRegistration);' },
+  // __security_check_cookie @ 00681a48 - libcmt's /GS epilogue check (secchk.obj), the
+  // cookie in ECX. Its call sites are the compiler's, not the source's, and the
+  // boilerplate pass removes them; the declaration is the CRT's own prototype.
+  { emitted: '__security_check_cookie', real: '__security_check_cookie', source: 'crt',
+    decl: 'extern "C" void __fastcall __security_check_cookie(uintptr_t nCookie);' },
   // ___report_gsfailure @ 006889d6 — Ghidra: void (void)
   { emitted: '___report_gsfailure', real: '__report_gsfailure', source: 'ghidra',
     decl: 'extern "C" void ___report_gsfailure(void);' },
-  // _CallDestructExceptionObject @ 00697f3d — Ghidra: undefined (int*)
-  { emitted: '_CallDestructExceptionObject', real: '_CallDestructExceptionObject', source: 'ghidra',
-    decl: 'extern "C" void _CallDestructExceptionObject(int* pExceptionObject);' },
-  // __purecall @ 006877fe — Ghidra: undefined (void). The real CRT entry point is
-  // `_purecall`; on i686 MSVC its decorated name is the `__purecall` Ghidra shows.
-  { emitted: '__purecall', real: '_purecall', source: 'ghidra',
-    decl: 'extern "C" void __purecall(void);' },
+  // CallDestructExceptionObject @ 00697f3d — Ghidra: undefined (int*)
+  { emitted: 'CallDestructExceptionObject', real: '_CallDestructExceptionObject', source: 'ghidra',
+    decl: 'extern "C" void CallDestructExceptionObject(int* pExceptionObject);' },
+  // _purecall @ 006877fe — int __cdecl (void), the CRT's own prototype (<stdlib.h>
+  // on Visual C++; mingw declares none). Referenced from vftable slots; msvcrt and
+  // libcmt both export it.
+  { emitted: '_purecall', real: '_purecall', source: 'crt',
+    decl: 'extern "C" int _purecall(void);' },
   // `eh_vector_constructor_iterator' @ 006869fc — Ghidra:
   //   void __stdcall (void*, uint, int, void(__thiscall*)(void*), void(__thiscall*)(void*))
   // The element callbacks are `__thiscall` with only the receiver: ECX = element,
@@ -563,11 +561,11 @@ const MSVC_RUNTIME_DECLS: ExcludedSymbolDecl[] = [
   // float10 x), __cdecl. Superseded the earlier (int, uint) reading; no kept code calls it.
   { emitted: '__sqrt_common', real: '_sqrt_common', source: 'ghidra',
     decl: 'extern "C" long double __sqrt_common(double dArg, bool bSpecial, long double x);' },
-  // __aulldvrm @ 00686b60 — Ghidra (v1096): LLDVRM_RESULT (uint, uint, uint, uint). Unsigned
+  // _aulldvrm @ 00686b60 — Ghidra (v1096): LLDVRM_RESULT (uint, uint, uint, uint). Unsigned
   // 64/64 divide AND remainder: the quotient in EDX:EAX, the remainder in EBX:ECX, which
   // Ghidra models as the two-field LLDVRM_RESULT (defined with the 64-bit intrinsics).
-  { emitted: '__aulldvrm', real: '_aulldvrm', source: 'ghidra',
-    decl: 'static inline LLDVRM_RESULT __aulldvrm(uint32_t lo1, uint32_t hi1, uint32_t lo2, uint32_t hi2) { uint64_t a = lo1 | ((uint64_t)hi1 << 32), b = lo2 | ((uint64_t)hi2 << 32); LLDVRM_RESULT r; r.qwQuotient = a / b; r.qwRemainder = a % b; return r; }' },
+  { emitted: '_aulldvrm', real: '_aulldvrm', source: 'ghidra',
+    decl: 'static inline LLDVRM_RESULT _aulldvrm(uint32_t lo1, uint32_t hi1, uint32_t lo2, uint32_t hi2) { uint64_t a = lo1 | ((uint64_t)hi1 << 32), b = lo2 | ((uint64_t)hi2 << 32); LLDVRM_RESULT r; r.qwQuotient = a / b; r.qwRemainder = a % b; return r; }' },
   // CRT_Pow @ 00683080 — Ghidra: float10 (double)
   { emitted: 'CRT_Pow', real: 'pow', source: 'ghidra',
     decl: 'extern "C" long double CRT_Pow(double x);' },
@@ -596,27 +594,6 @@ const MSVC_RUNTIME_DECLS: ExcludedSymbolDecl[] = [
     decl: 'extern "C" long double CRT_CISin(long double x);' },
   { emitted: 'CRT_CICos', real: '_CIcos', source: 'ghidra',
     decl: 'extern "C" long double CRT_CICos(long double x);' },
-  // CRT_Srand @ 00687454 — Ghidra: undefined (ulong)
-  { emitted: 'CRT_Srand', real: 'srand', source: 'ghidra',
-    decl: 'static inline void CRT_Srand(unsigned long nSeed) { srand((unsigned int)nSeed); }' },
-  // 00684c94 is `compiler::_fprintf` — Ghidra: int (FILE*, char*, ...). It needs no
-  // entry here: the call sites spell `_fprintf`, which the platform header's macro
-  // aliases hand to the variadic <cstdio> fprintf, as it does `_sprintf`.
-  // CRT_Fgets @ 00688271 — Ghidra: char* (char*, int, FILE*)
-  { emitted: 'CRT_Fgets', real: 'fgets', source: 'ghidra',
-    decl: 'static inline char* CRT_Fgets(char* szText, int nMax, FILE* pFile) { return fgets(szText, nMax, pFile); }' },
-  // CRT_Fputc @ 00682058 — Ghidra: uint (uint, FILE*)
-  { emitted: 'CRT_Fputc', real: 'fputc', source: 'ghidra',
-    decl: 'static inline unsigned int CRT_Fputc(unsigned int nChar, FILE* pFile) { return (unsigned int)fputc((int)nChar, pFile); }' },
-  // CRT_LocalTime_S @ 006856e9 — Ghidra: errno_t (tm*, uint*)
-  { emitted: 'CRT_LocalTime_S', real: '_localtime32_s', source: 'ghidra',
-    decl: 'extern "C" int CRT_LocalTime_S(struct tm* pTm, unsigned int* pnTime);' },
-  // CRT_Vsprintf_L @ 00685637 — Ghidra: undefined (FILE*, int, undefined4)
-  { emitted: 'CRT_Vsprintf_L', real: '_vsprintf_l', source: 'ghidra',
-    decl: 'extern "C" int CRT_Vsprintf_L(FILE* pFile, int nParam, void* pArgList);' },
-  // CRT_Encode_Secure_Pointer @ 00684af3 — Ghidra: void* (void*)
-  { emitted: 'CRT_Encode_Secure_Pointer', real: 'EncodePointer', source: 'ghidra',
-    decl: 'extern "C" void* CRT_Encode_Secure_Pointer(void* pPointer);' },
   // CRT_ReturnValue @ 006b1a30 — Ghidra: undefined (undefined4), __stdcall
   { emitted: 'CRT_ReturnValue', real: 'unidentified CRT helper', source: 'ghidra',
     decl: 'extern "C" uint32_t CRT_ReturnValue(uint32_t dwValue);' },
@@ -904,11 +881,11 @@ export const WIN32_OVERLOADED_INTRINSICS: Record<string, {
  * there was no way to state the DECLARATION's own answer either, so an argument
  * that needs a conversion the header requires got none:
  *
- *   - `CRT_Encode_Secure_Pointer(HandleExceptionWithStackDump)` — the header
- *     takes `void *`, and a function designator does not convert to it in C++.
- *     `d2_platform.h` writes `extern "C" void* CRT_Encode_Secure_Pointer(void*)`,
- *     which is `EncodePointer`'s real prototype; the original source carried the
- *     cast the emitter now writes.
+ *   - `_set_se_translator(HandleExceptionWithStackDump)` — Ghidra types the
+ *     parameter `void *`, and a function designator does not convert to it in C++.
+ *     `d2_platform.h` adds `void* _set_se_translator(void*)` beside `<eh.h>`'s
+ *     `_se_translator_function` one; the `void*` cast picks the platform's, which
+ *     mingw can link (its msvcrt import library exports no `_set_se_translator`).
  *   - `FloatToLong(nJulianDay, pYear)` — MSVC's `_ftol2_sse`, whose argument
  *     really arrives as the two halves of a double. `d2_platform.h` spells the
  *     shim `static inline uint32_t FloatToLong(int32_t lo, int32_t hi)`, so a
@@ -918,8 +895,8 @@ export const WIN32_OVERLOADED_INTRINSICS: Record<string, {
  * standing as `WIN32_OVERLOADED_INTRINSICS` and `WIN32_GENERIC_HANDLE_RETURNS`.
  * `overloaded` marks a name the target headers make a genuine overload SET, so
  * that taking its address has to spell the exact type; `FloatToLong` is one
- * (`d2_platform.h` declares a `float` overload beside the two-word one),
- * `CRT_Encode_Secure_Pointer` is not.
+ * (`d2_platform.h` declares a `float` overload beside the two-word one), and so
+ * is `_set_se_translator`.
  *
  * Arity is what keeps a stated signature off the wrong overload: `call-arg-cast`
  * refuses a call whose argument count differs from the stated one, so the
@@ -928,10 +905,11 @@ export const WIN32_OVERLOADED_INTRINSICS: Record<string, {
 export const HEADER_DECLARED_SIGNATURES: Record<string, {
   returnType: string; paramTypes: string[]; convention: string; overloaded?: boolean;
 }> = {
-  CRT_Encode_Secure_Pointer: {
+  _set_se_translator: {
     returnType: 'void *',
     paramTypes: ['void *'],
     convention: '__cdecl',
+    overloaded: true,
   },
   FloatToLong: {
     returnType: 'uint32_t',
@@ -971,6 +949,7 @@ export const WIN32_GENERIC_HANDLE_RETURNS: Record<string, string> = {
  */
 export const EXTRA_WIN32_SDK_HEADERS: readonly string[] = [
   '<process.h>',    // _beginthreadex
+  '<eh.h>',         // _set_se_translator
   '<shlobj.h>',     // SHGetFolderPathA
   '<shellapi.h>',   // ShellExecuteA, SHAppBarMessage
   '<tlhelp32.h>',   // CreateToolhelp32Snapshot, Process32/Thread32/Module32*

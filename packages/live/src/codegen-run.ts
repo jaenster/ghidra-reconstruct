@@ -34,7 +34,7 @@ import { configureCodegen } from '@ghidra-mcp/reconstruct/codegen-defaults';
  * matching and nothing reports it until a `full_regen` diff is run.
  */
 const EXCLUDE_PATTERNS: RegExp[] = [
-  /^compiler$/,
+  /^compiler(::.*)?$/,
   /^VisualStudio$/,
   /^CRT$/,
   /^_Wrappers$/,

@@ -1,7 +1,7 @@
 /**
  * EH4 frames (Ghidra round O2 typed their registration EH4_EXCEPTION_REGISTRATION,
  * category /CRT/SEH, which the CRT exclusion filters): d2_platform.h defines the type,
- * `__except_handler4` is declared with the handler type the frame stores, and the
+ * `_except_handler4` is declared with the handler type the frame stores, and the
  * TEB's `void*` ExceptionList is cast into the typed `Next` link, as C converted it.
  * v1410: 8 errors in Fog/Debug.cpp, Fog/Engine/Application.cpp and Fog/Src/LogManager.cpp.
  */
@@ -29,7 +29,7 @@ void Fog::Debug::DebugThread(void)
   EH4_EXCEPTION_REGISTRATION tSehFrame;
   
   tSehFrame.TryLevel = -2;
-  tSehFrame.ExceptionHandler = compiler::__except_handler4;
+  tSehFrame.ExceptionHandler = compiler::_except_handler4;
   tSehFrame.Next = ExceptionList;
   ExceptionList = &tSehFrame;
   tSehFrame.TryLevel = 0;
@@ -43,7 +43,7 @@ describe('EH4 frames', () => {
     const h = generatePlatformHeader({} as never);
     assert.match(h, /struct EH4_EXCEPTION_REGISTRATION \{/);
     assert.match(h, /EH4_EXCEPT_HANDLER ExceptionHandler;/);
-    assert.match(h, /extern "C" int __except_handler4\(struct _EXCEPTION_RECORD\* pExceptionRecord, EH4_EXCEPTION_REGISTRATION\* pRegistration, CONTEXT\* pContext, void\* pDispatcherContext\);/);
+    assert.match(h, /extern "C" int _except_handler4\(struct _EXCEPTION_RECORD\* pExceptionRecord, EH4_EXCEPTION_REGISTRATION\* pRegistration, CONTEXT\* pContext, void\* pDispatcherContext\);/);
   });
 
   it('the void* ExceptionList is cast into the typed Next link', () => {
@@ -64,7 +64,7 @@ describe('EH4 frames', () => {
   });
 
   it('is reported, not lowered', () => {
-    const d = sehLoweringDecision({ sehFrame: { kind: 'eh4', scopeTable: '00702290', handlerSymbol: '__except_handler4', entries: [], tryLevelStores: {} } as never });
+    const d = sehLoweringDecision({ sehFrame: { kind: 'eh4', scopeTable: '00702290', handlerSymbol: '_except_handler4', entries: [], tryLevelStores: {} } as never });
     assert.deepStrictEqual(d, { lower: false, reason: 'eh4 frames are not lowered' });
   });
 });

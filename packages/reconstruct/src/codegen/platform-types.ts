@@ -965,10 +965,7 @@ const WIN32_UI_STUBS: readonly PlatformFunctionDecl[] = [
 const CRT_EXTERN_STUBS: readonly PlatformFunctionDecl[] = [
   { name: "CRT_Floor", decl: "double CRT_Floor(...);" },
   { name: "CRT_Ceil", decl: "double CRT_Ceil(...);" },
-  { name: "CRT_Strchr", decl: "char* CRT_Strchr(...);" },
-  { name: "CRT_ClearFP", decl: "unsigned int CRT_ClearFP(...);" },
   { name: "_strrev", decl: "char* _strrev(char*);" },
-  { name: "__strrev", decl: "char* __strrev(char*);" },
 ];
 const WIN32_SYNC_FALLBACK_STUBS: readonly PlatformFunctionDecl[] = [
   { name: "CreateEventW", decl: "HANDLE CreateEventW(LPSECURITY_ATTRIBUTES lpEventAttributes, BOOL bManualReset, BOOL bInitialState, LPCWSTR lpName);" },
@@ -1005,8 +1002,8 @@ const PLATFORM_INLINE_FORWARDERS: readonly string[] = [
   'InterlockedCompareExchange',
   'MultiByteToWideChar', 'WideCharToMultiByte',
   'FloatToLong', 'LongToFloat',
-  '__alldiv', '__allmul', '__allrem', '__alldvrm', '__allshr', '__allshl',
-  '__aulldiv', '__aullrem', '__aullshr',
+  '_alldiv', '_allmul', '_allrem', '_alldvrm', '_allshr', '__allshl',
+  '_aulldiv', '__aullrem', '_aullshr',
   '_strncpy_s',
 ];
 
@@ -1611,24 +1608,24 @@ export function generatePlatformHeader(
 
   // MSVC 64-bit integer intrinsics (compiler builtins on x86)
   lines.push('// MSVC 64-bit integer intrinsics');
-  lines.push('static inline int64_t __alldiv(int64_t a, int64_t b) { return a / b; }');
-  lines.push('static inline int64_t __alldiv(uint32_t lo1, uint32_t hi1, uint32_t lo2, int hi2) { return (int64_t)(lo1 | ((uint64_t)hi1 << 32)) / (int64_t)(lo2 | ((uint64_t)(uint32_t)hi2 << 32)); }');
-  lines.push('static inline int64_t __allmul(int64_t a, int64_t b) { return a * b; }');
-  lines.push('static inline int64_t __allmul(uint32_t lo1, uint32_t hi1, uint32_t lo2, uint32_t hi2) { return (int64_t)(lo1 | ((uint64_t)hi1 << 32)) * (int64_t)(lo2 | ((uint64_t)hi2 << 32)); }');
-  lines.push('static inline int64_t __allrem(int64_t a, int64_t b) { return a % b; }');
-  lines.push('static inline int64_t __allrem(uint32_t lo1, uint32_t hi1, uint32_t lo2, int hi2) { return (int64_t)(lo1 | ((uint64_t)hi1 << 32)) % (int64_t)(lo2 | ((uint64_t)(uint32_t)hi2 << 32)); }');
-  // __alldvrm / __aulldvrm return quotient AND remainder (EDX:EAX and EBX:ECX); Ghidra's
+  lines.push('static inline int64_t _alldiv(int64_t a, int64_t b) { return a / b; }');
+  lines.push('static inline int64_t _alldiv(uint32_t lo1, uint32_t hi1, uint32_t lo2, int hi2) { return (int64_t)(lo1 | ((uint64_t)hi1 << 32)) / (int64_t)(lo2 | ((uint64_t)(uint32_t)hi2 << 32)); }');
+  lines.push('static inline int64_t _allmul(int64_t a, int64_t b) { return a * b; }');
+  lines.push('static inline int64_t _allmul(uint32_t lo1, uint32_t hi1, uint32_t lo2, uint32_t hi2) { return (int64_t)(lo1 | ((uint64_t)hi1 << 32)) * (int64_t)(lo2 | ((uint64_t)hi2 << 32)); }');
+  lines.push('static inline int64_t _allrem(int64_t a, int64_t b) { return a % b; }');
+  lines.push('static inline int64_t _allrem(uint32_t lo1, uint32_t hi1, uint32_t lo2, int hi2) { return (int64_t)(lo1 | ((uint64_t)hi1 << 32)) % (int64_t)(lo2 | ((uint64_t)(uint32_t)hi2 << 32)); }');
+  // _alldvrm / __aulldvrm return quotient AND remainder (EDX:EAX and EBX:ECX); Ghidra's
   // /compiler/LLDVRM_RESULT is that pair. The /compiler category is not extracted, so the
   // type the two helpers return is defined here, beside them.
   lines.push('struct LLDVRM_RESULT { uint64_t qwQuotient; uint64_t qwRemainder; };');
-  lines.push('static inline LLDVRM_RESULT __alldvrm(uint32_t lo1, uint32_t hi1, uint32_t lo2, uint32_t hi2) { int64_t a = (int64_t)(lo1 | ((uint64_t)hi1 << 32)), b = (int64_t)(lo2 | ((uint64_t)hi2 << 32)); LLDVRM_RESULT r; r.qwQuotient = (uint64_t)(a / b); r.qwRemainder = (uint64_t)(a % b); return r; }');
-  lines.push('static inline int64_t __allshr(int64_t a, int n) { return a >> n; }');
+  lines.push('static inline LLDVRM_RESULT _alldvrm(uint32_t lo1, uint32_t hi1, uint32_t lo2, uint32_t hi2) { int64_t a = (int64_t)(lo1 | ((uint64_t)hi1 << 32)), b = (int64_t)(lo2 | ((uint64_t)hi2 << 32)); LLDVRM_RESULT r; r.qwQuotient = (uint64_t)(a / b); r.qwRemainder = (uint64_t)(a % b); return r; }');
+  lines.push('static inline int64_t _allshr(int64_t a, int n) { return a >> n; }');
   lines.push('static inline int64_t __allshl(int64_t a, int n) { return a << n; }');
-  lines.push('static inline uint64_t __aulldiv(uint64_t a, uint64_t b) { return a / b; }');
-  lines.push('static inline uint64_t __aulldiv(uint32_t lo1, uint32_t hi1, uint32_t lo2, uint32_t hi2) { return (lo1 | ((uint64_t)hi1 << 32)) / (lo2 | ((uint64_t)hi2 << 32)); }');
+  lines.push('static inline uint64_t _aulldiv(uint64_t a, uint64_t b) { return a / b; }');
+  lines.push('static inline uint64_t _aulldiv(uint32_t lo1, uint32_t hi1, uint32_t lo2, uint32_t hi2) { return (lo1 | ((uint64_t)hi1 << 32)) / (lo2 | ((uint64_t)hi2 << 32)); }');
   lines.push('static inline uint64_t __aullrem(uint64_t a, uint64_t b) { return a % b; }');
   lines.push('static inline uint64_t __aullrem(uint32_t lo1, uint32_t hi1, uint32_t lo2, uint32_t hi2) { return (lo1 | ((uint64_t)hi1 << 32)) % (lo2 | ((uint64_t)hi2 << 32)); }');
-  lines.push('static inline uint64_t __aullshr(uint64_t a, unsigned int n) { return a >> n; }');
+  lines.push('static inline uint64_t _aullshr(uint64_t a, unsigned int n) { return a >> n; }');
   lines.push('');
 
   // Additional Win32 APIs and Interlocked functions

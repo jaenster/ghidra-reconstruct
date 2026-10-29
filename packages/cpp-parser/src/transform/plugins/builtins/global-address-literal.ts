@@ -736,7 +736,7 @@ function typeShape(spelling: string): { base: string; dims: number[] } | null {
  * pass-through is documented at the definition and is why `d2_hand.h` implements
  * `GuardStack` as an identity.
  */
-const RETURN_VALUE_CARRIERS = new Set(['GuardStack']);
+const RETURN_VALUE_CARRIERS = new Set(['GuardStack', '__security_check_cookie']);
 
 function isReturnValueCarrier(callee: Expression): boolean {
   if (callee.kind === NodeKind.Identifier) {

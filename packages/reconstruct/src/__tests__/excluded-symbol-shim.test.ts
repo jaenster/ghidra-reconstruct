@@ -20,10 +20,10 @@ describe('excluded-namespace symbol declarations', () => {
     const declared = new Set(EXCLUDED_SYMBOL_DECLS.map(d => d.emitted));
     // One representative from each family that appeared in the error corpus.
     for (const name of [
-      '__strnicmp', '__vsnprintf', '__itoa', '__strlwr',
-      'FID_conflict____CxxFrameHandler3', 'FID_conflict___time32', 'FID_conflict__sscanf',
-      '__purecall', '__except_handler4', '__ftol2', '__sqrt_common',
-      'CRT_Pow10', 'CRT_Srand', 'CRT_Fgets',
+      '_wfopen', '_set_se_translator', '__security_check_cookie',
+      'FID_conflict____CxxFrameHandler3', 'FID_conflict___time32',
+      '_purecall', '_except_handler4', '__ftol2', '__sqrt_common',
+      'CRT_Pow10',
       '_eh_vector_constructor_iterator_', '_eh_vector_destructor_iterator_',
       '_Wrappers::accept', '_Wrappers::bind', '_Wrappers::listen', '_Wrappers::WSASetLastError',
       // DDRAW.DLL imports: 'DirectDrawCreate' was not declared in this scope (00511ce0,
