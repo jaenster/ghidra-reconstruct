@@ -47,7 +47,7 @@ import type {
 } from '../../../../ast/nodes.js';
 import { traverseAST, getChildren } from '../../../../ast/visitor.js';
 import { createTransformer, updateNode, cloneNode, type Transformer } from '../../../transformer.js';
-import { Stmt } from '../../../../ast/factory.js';
+import { Stmt, Expr } from '../../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../../types.js';
 import { DEFAULT_NORETURN_FUNCTIONS } from '../goto-cleanup/types.js';
 import { holdsFreeCase } from '../goto-cleanup/paths.js';
@@ -63,7 +63,7 @@ export interface BranchLayoutOptions extends PluginOptions {
   /** Further callees that never return, by unqualified name. */
   noreturnFunctions?: string[];
   /** Called once per rewrite and per site left for want of a source form. */
-  onSite?: (e: { rule: 'swap' | 'nest' | 'split' | 'left'; line: number; why?: string }) => void;
+  onSite?: (e: { rule: 'swap' | 'nest' | 'split' | 'getter' | 'left'; line: number; why?: string }) => void;
 }
 
 function unwrapParens(e: Expression): Expression {
@@ -305,7 +305,8 @@ function nestAt(stmts: readonly Statement[], i: number, cb: number, ctx: Ctx): S
   const then = ifs.thenBranch;
   if (!leaves(then, ctx.noreturn) || ctx.loopIfs.has(lineOf(ifs))) return null;
   const shape = conditionShape(ifs.condition);
-  if (shape.kind === 'or' || shape.kind === 'other') return null;
+  if (shape.kind === 'or') return orGuardAt(stmts, i, cb, ctx);
+  if (shape.kind === 'other') return null;
 
   if (shape.kind === 'and') {
     const low = ctx.reader.conditionLow(ifs);
@@ -347,6 +348,110 @@ function nestAt(stmts: readonly Statement[], i: number, cb: number, ctx: Ctx): S
   const inner = rewriteList(rest, ctx) ?? rest;
   const nested = updateNode(ifs, { condition: negate(ifs.condition), thenBranch: Stmt.compound(inner), elseBranch: null } as Partial<IfStmt>);
   return [nested, ...spliced(then, bodyOf(then), stmts.slice(0, i), [])];
+}
+
+/**
+ * The two tests of a two-operand `||` condition, each as the condition that takes the
+ * leaving arm: `a || b` gives a and b, `!(a && b)` gives !a and !b. Null for anything else
+ * (three or more operands: which test the arm follows is not known from the layout).
+ */
+function orTests(cond: Expression): [Expression, Expression] | null {
+  let e = unwrapParens(cond);
+  let negated = false;
+  if (e.kind === NodeKind.UnaryExpr && (e as UnaryExpr).operator === '!') {
+    negated = true;
+    e = unwrapParens((e as UnaryExpr).operand);
+  }
+  if (e.kind !== NodeKind.BinaryExpr) return null;
+  const b = e as BinaryExpr;
+  if (b.operator !== (negated ? '&&' : '||')) return null;
+  const same = (x: Expression): boolean => {
+    const u = unwrapParens(x);
+    return u.kind === NodeKind.BinaryExpr && (u as BinaryExpr).operator === b.operator;
+  };
+  if (same(b.left) || same(b.right)) return null;
+  return negated ? [negate(b.left), negate(b.right)] : [b.left, b.right];
+}
+
+/** A value tested for nonzero, not a comparison: a name, a field, an element, a dereference. */
+function valueOperand(e: Expression): boolean {
+  const u = unwrapParens(e);
+  switch (u.kind) {
+    case NodeKind.Identifier: case NodeKind.QualifiedId: case NodeKind.MemberExpr: case NodeKind.SubscriptExpr:
+      return true;
+    case NodeKind.UnaryExpr:
+      return (u as UnaryExpr).operator === '*';
+    default:
+      return false;
+  }
+}
+
+/**
+ * `if (!(P && x)) T; rest...` where the layout puts T straight after the last test, ahead
+ * of the rest: the source tested the value of `P ? x : 0` (an inlined getter), which VC8
+ * lays out with every failing test of P falling into T's one copy. `!(P && x)` would put
+ * T after the rest. Null when the condition is not that shape.
+ */
+function getterCondition(cond: Expression): Expression | null {
+  const u = unwrapParens(cond);
+  if (u.kind !== NodeKind.UnaryExpr || (u as UnaryExpr).operator !== '!') return null;
+  const inner = unwrapParens((u as UnaryExpr).operand);
+  if (inner.kind !== NodeKind.BinaryExpr || (inner as BinaryExpr).operator !== '&&') return null;
+  const { left, right } = inner as BinaryExpr;
+  if (!valueOperand(right) || branches(right)) return null;
+  const zero = Expr.intLiteral(0);
+  const pick = Expr.conditional(Expr.paren(left), right, zero);
+  return { ...u, operand: Expr.paren(pick), leadingTrivia: [], trailingTrivia: [] } as UnaryExpr;
+}
+
+/**
+ * `if (a || b) T; rest...` (or `!(x && y)`), T short leaving code. VC8 puts T after the rest
+ * for that form; where the original has it elsewhere, the source was another form:
+ *
+ *   T between the two tests: one guard per test, `if (a) T; if (b) T; rest`, the later
+ *   copy cross-jumped into the first.
+ *   T right after the last test, ahead of the rest, and the condition `!(P && x)` with x a
+ *   value: `if (!(P ? x : 0)) T; rest`.
+ */
+function orGuardAt(stmts: readonly Statement[], i: number, cb: number, ctx: Ctx): Statement[] | null {
+  const ifs = stmts[i] as IfStmt;
+  const rest = stmts.slice(i + 1);
+  const then = ifs.thenBranch;
+  if (bareReturn(then)) return null;
+  const low = ctx.reader.conditionLow(ifs);
+  if (low === null || low >= cb) return null;
+  const tE = ctx.reader.entry([then], low);
+  if (tE === null) return null;
+  if (jumpedLabels([then, ...rest], ctx.gotos) || holdsFreeCase([then, ...rest])) return null;
+
+  if (tE < cb) {
+    const tests = orTests(ifs.condition);
+    if (!tests) {
+      ctx.onSite?.({ rule: 'left', line: lineOf(ifs), why: 'leaving arm among the tests, not a two-test `||`' });
+      return null;
+    }
+    const tail = bodyOf(then);
+    if (!copyableTail(tail, ctx.noreturn)) {
+      ctx.onSite?.({ rule: 'left', line: lineOf(ifs), why: 'leaving arm among the tests, arm not copyable' });
+      return null;
+    }
+    ctx.onSite?.({ rule: 'split', line: lineOf(ifs) });
+    const first = updateNode(ifs, { condition: tests[0], elseBranch: null } as Partial<IfStmt>);
+    const copy = tail.map(s => ({ ...cloneNode(s), leadingTrivia: [] }) as Statement);
+    ctx.reader.taint(tail);
+    const second = Stmt.if_(tests[1], Stmt.compound(copy));
+    return [first, second, ...rest];
+  }
+
+  const rE = armEntry(rest[0], cb, ctx);
+  if (rE === null || rE <= tE) return null;
+  const cond = getterCondition(ifs.condition);
+  if (!cond) {
+    ctx.onSite?.({ rule: 'left', line: lineOf(ifs), why: 'leaving arm after the last test, not `!(P && value)`' });
+    return null;
+  }
+  ctx.onSite?.({ rule: 'getter', line: lineOf(ifs) });
+  return [updateNode(ifs, { condition: cond } as Partial<IfStmt>), ...rest];
 }
 
 function rewriteList(stmts: readonly Statement[], ctx: Ctx): Statement[] | null {
