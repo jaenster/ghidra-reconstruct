@@ -123,6 +123,12 @@ export interface ExtractedFunction {
    * the snapshot predates the field.
    */
   operandRefs?: import('./extract/operand-refs.js').OperandRefFacts;
+  /**
+   * The REP STOS/MOVS instructions, with the ECX/EAX they start from and the variables the
+   * decompile prints on them (extract/string-ops.ts). Absent when there are none or the
+   * snapshot predates the field.
+   */
+  stringOps?: import('./extract/string-ops.js').StringOpFacts;
 }
 
 /**

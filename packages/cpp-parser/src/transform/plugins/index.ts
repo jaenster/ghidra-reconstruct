@@ -360,6 +360,11 @@ export {
   type SwitchChainOptions,
 } from './builtins/switch-chain.js';
 
+export {
+  caseLayoutPlugin,
+  type CaseLayoutOptions,
+} from './builtins/case-layout.js';
+
 // ============================================
 // BUILT-IN PLUGINS: DECLARATION SCOPE SINK
 // ============================================
@@ -464,6 +469,7 @@ export { immediateNotAddressPlugin, type ImmediateNotAddressOptions } from './bu
 export { importAddressForwarderPlugin, IMPORT_ADDRESS_FORWARDERS } from './builtins/import-address-forwarder.js';
 export { unsignedRangeComparePlugin } from './builtins/unsigned-range-compare.js';
 export { compareFormPlugin, type CompareFormDecision, type CompareFormOptions } from './builtins/compare-form.js';
+export { repStringFormPlugin, createRepStringFormTransformer, type RepStringOp, type RepStringFormOptions } from './builtins/rep-string-form.js';
 export { compareSignednessPlugin } from './builtins/compare-signedness.js';
 export { callSiteOverrideCastPlugin, type CallSiteOverride } from './builtins/call-site-override-cast.js';
 export { ARTIFACT_SUPPORT_LINES } from './builtins/artifact-support.js';
@@ -551,6 +557,7 @@ import { immediateNotAddressPlugin } from './builtins/immediate-not-address.js';
 import { importAddressForwarderPlugin } from './builtins/import-address-forwarder.js';
 import { unsignedRangeComparePlugin } from './builtins/unsigned-range-compare.js';
 import { compareFormPlugin } from './builtins/compare-form.js';
+import { repStringFormPlugin } from './builtins/rep-string-form.js';
 import { compareSignednessPlugin } from './builtins/compare-signedness.js';
 import { callSiteOverrideCastPlugin } from './builtins/call-site-override-cast.js';
 import { arrayCastAssignPlugin } from './builtins/array-cast-assign.js';
@@ -573,6 +580,7 @@ import { assertOrderPlugin } from './builtins/assert-order.js';
 import { branchLayoutPlugin } from './builtins/branch-layout/index.js';
 import { nestCallPlugin } from './builtins/nest-call.js';
 import { switchChainPlugin } from './builtins/switch-chain.js';
+import { caseLayoutPlugin } from './builtins/case-layout.js';
 import { declOrderFixPlugin } from './builtins/decl-order-fix.js';
 import { declScopeSinkPlugin } from './builtins/decl-scope-sink.js';
 import { phiNodeTernaryPlugin } from './builtins/phi-node-ternary.js';
@@ -719,6 +727,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   callSiteOverrideCastPlugin, // Correctness: call through void*/code* → cast to the call-site override (priority 614)
   unsignedRangeComparePlugin, // Correctness: (x - lo) < n on an unsigned narrow/enum stays unsigned (priority 617)
   compareFormPlugin,          // Fidelity: a comparison in the form its CMP/TEST and Jcc show (priority 3)
+  repStringFormPlugin,        // Fidelity: a REP STOS fill as an index loop, a REP MOVS copy as memcpy, from the instruction (priority 4)
   compareSignednessPlugin,    // Correctness: a comparison compare-form made unsigned stays unsigned (priority 619)
   importAddressForwarderPlugin, // Platform: &InterlockedCompareExchange -> __stdcall forwarder (priority 31)
   comIUnknownCallPlugin,      // Platform: p->lpVtbl->Release(p) on IUnknown* → p->Release() (priority 616)
@@ -747,6 +756,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   probeReturnStorePlugin,     // Fidelity: drop the stack probe's return address stored into the frame's top local (priority 12)
   assertOrderPlugin,          // Control-flow: if (c) { ..; return; } Halt; exit; -> if (!c) { Halt; exit; } ..; return; (priority 987)
   branchLayoutPlugin,         // Control-flow: if arms ordered as the original's addresses show (priority 988)
+  caseLayoutPlugin,           // Control-flow: jump-table case groups ordered as the original's addresses show (priority 989)
   switchChainPlugin,          // Control-flow: if-chain the original counts down by subtraction -> switch (priority 44)
   declOrderFixPlugin,         // Cleanup: reorder merged decls to respect initializer deps (priority 61)
   declScopeSinkPlugin,        // Cleanup: sink decls into single-use scope (priority 62)

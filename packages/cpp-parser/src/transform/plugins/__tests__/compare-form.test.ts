@@ -18,6 +18,7 @@ import {
   createCompareFormTransformer, steppedConstant, type CompareFormDecision, type CompareFormOptions,
 } from '../builtins/compare-form.js';
 import { createCompareSignednessTransformer } from '../builtins/compare-signedness.js';
+import { booleanCleanupPlugin } from '../builtins/boolean-cleanup.js';
 import { compileAndRun, hasNativeGpp } from '../../../testing/native-cpp.js';
 
 type Site = { text: string; fp: [string, string]; size?: number };
@@ -151,6 +152,50 @@ describe('compare-form', () => {
        dec({ ord: 2, text: '<', fp: ['v:b', 'c:7'], op: '<=', delta: -1, k: 7 })]);
     assert.match(out, /a <= 2/);
     assert.match(out, /b <= 6/);
+  });
+});
+
+describe('compare-form: a byte compared with 1', () => {
+  // Q06_SequenceFilter 005968e0: `cmp byte ptr [ecx+0xc], 0` then `cmp byte ptr [ecx+9], 1`.
+  const Q06 = `bool f(D2QuestDataStrc *pQuestData) {
+  if ((pQuestData->nStateFlag == false) && (pQuestData->bIsNotIntroduction == true)) {
+    g();
+  }
+  return true;
+}`;
+  const SITES: Site[] = [
+    { text: '==', fp: ['e', 'c:0'], size: 1 },
+    { text: '==', fp: ['e', 'c:1'], size: 1 },
+  ];
+  const withCleanup = (code: string) =>
+    emit(booleanCleanupPlugin.createTransformer({})(parse(code)) as AnyNode).trim();
+
+  it('Q06_SequenceFilter: the compare with 1 is written `== 1`, the compare with 0 stays a truth test', () => {
+    const decisions = [
+      dec({ ord: 0, ...SITES[0], width: 1, keep: true, k: 0 }),
+      dec({ ord: 1, ...SITES[1], width: 1, keep: true, k: 1 }),
+    ];
+    const out = run(Q06, SITES, decisions);
+    assert.match(out, /bIsNotIntroduction == 1\)/);
+    assert.match(out, /nStateFlag == false &&/);
+    const cleaned = withCleanup(out);
+    assert.match(cleaned, /bIsNotIntroduction == 1/);
+    assert.match(cleaned, /!pQuestData->nStateFlag/);
+    // Without the instruction the bool test folds to the bare flag.
+    assert.doesNotMatch(withCleanup(Q06), /== 1/);
+  });
+
+  it('only for a one-byte CMP with 1', () => {
+    const wide = [dec({ ord: 1, ...SITES[1], width: 4, keep: true, k: 1 })];
+    assert.match(run(Q06, SITES, wide), /bIsNotIntroduction == true/);
+    const noK = [dec({ ord: 1, ...SITES[1], width: 1, keep: true })];
+    assert.match(run(Q06, SITES, noK), /bIsNotIntroduction == true/);
+  });
+
+  it('`!= true` as well', () => {
+    const code = 'void f(bool *p) { if (*p != true) { g(); } }';
+    const out = run(code, [{ text: '!=', fp: ['e', 'c:1'], size: 1 }], [dec({ ord: 0, text: '!=', fp: ['e', 'c:1'], width: 1, keep: true, k: 1 })]);
+    assert.match(out, /\*p != 1/);
   });
 });
 

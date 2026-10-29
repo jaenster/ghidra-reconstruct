@@ -46,6 +46,12 @@ export interface GhidraMetadata {
    * width (`compare-form`); `compare-signedness` keeps it signed under the final types.
    */
   signedCompareWidth?: number;
+  /**
+   * The loop is the source form its instructions show - a REP STOS fill (`rep-string-form`),
+   * an unrolled fill of more than 32 bytes (`array-fill-collapse`) - and VC8 compiles it back
+   * to them; `memory-patterns` must not fold it into a memset call.
+   */
+  sourceLoop?: boolean;
   decompilerWarnings?: string[];
   addressRanges?: AddressRange[];  // Which binary addresses this code covers
 }

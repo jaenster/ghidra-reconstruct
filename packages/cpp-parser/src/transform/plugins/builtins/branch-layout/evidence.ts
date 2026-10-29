@@ -13,12 +13,14 @@
  * copied to each jump site) gives no evidence: which copy sits at that address is unknown.
  * Nor does an offset that the lines of two statements print: two identical tails the
  * compiler cross-jumped (`return 0;` written twice, one copy of the code) both print the
- * survivor's address, which is where neither statement was written. A statement a pass
+ * survivor's address, which is where neither statement was written. Asked about a run of
+ * statements, an offset printed only by statements of that run still counts: a tail call
+ * prints its one `jmp` on the call and on the `return` of its value. A statement a pass
  * built from nothing has no source line and gives no evidence either.
  */
 
 import { NodeKind } from '../../../../ast/kinds.js';
-import type { ASTNode, IfStmt, Statement, Expression } from '../../../../ast/nodes.js';
+import type { ASTNode, IfStmt, Statement, Expression, SwitchStmt } from '../../../../ast/nodes.js';
 import { getChildren } from '../../../../ast/visitor.js';
 
 export interface BranchLayoutEvidence {
@@ -55,6 +57,12 @@ function isStatement(n: ASTNode): boolean {
   return String(n.kind).endsWith('Stmt');
 }
 
+/** `n` and every statement below it. */
+function* traverseStatements(n: ASTNode): Generator<ASTNode> {
+  yield n;
+  for (const k of getChildren(n)) if (isStatement(k)) yield* traverseStatements(k);
+}
+
 /** A node the parser placed: a pass that builds a node from nothing gives it no file. */
 function placed(n: ASTNode): boolean {
   return !!n.location && n.location.file !== '<generated>' && n.location.start.line > 0;
@@ -83,7 +91,12 @@ function ownedRanges(s: ASTNode, out: (from: number, to: number, visit: number) 
 export class LayoutReader {
   private readonly tainted = new Set<number>();
   private readonly shared = new Set<number>();
+  /** Offset -> the untainted lines that print it. */
+  private readonly printers = new Map<number, Set<number>>();
   private readonly ifLines = new Map<number, number>();
+  private readonly switchLines = new Map<number, number>();
+  /** Line -> how many statement ranges claim it. */
+  private readonly claims = new Map<number, number>();
 
   /** `root`: the function body as it is now, after the passes that ran before. */
   constructor(private readonly ev: BranchLayoutEvidence, root: ASTNode) {
@@ -92,6 +105,7 @@ export class LayoutReader {
     const owners = new Map<number, number>();
     ownedRanges(root, (from, to, visit) => {
       for (let l = from; l <= to; l++) {
+        this.claims.set(l, (this.claims.get(l) ?? 0) + 1);
         const o = owners.get(l);
         if (o !== undefined && o !== visit) this.tainted.add(l);
         else owners.set(l, visit);
@@ -104,12 +118,19 @@ export class LayoutReader {
         const o = printedBy.get(off);
         if (o !== undefined && o !== owner) this.shared.add(off);
         else printedBy.set(off, owner);
+        let p = this.printers.get(off);
+        if (!p) this.printers.set(off, p = new Set());
+        p.add(l);
       }
     }
     const visit = (n: ASTNode): void => {
       if (n.kind === NodeKind.IfStmt && placed(n)) {
         const l = n.location.start.line;
         this.ifLines.set(l, (this.ifLines.get(l) ?? 0) + 1);
+      }
+      if (n.kind === NodeKind.SwitchStmt && placed(n)) {
+        const l = n.location.start.line;
+        this.switchLines.set(l, (this.switchLines.get(l) ?? 0) + 1);
       }
       for (const k of getChildren(n)) if (isStatement(k)) visit(k);
     };
@@ -127,6 +148,43 @@ export class LayoutReader {
     const l = ifs.location.start.line;
     if (this.ifLines.get(l) !== 1 || this.tainted.has(l)) return null;
     return this.ev.ifs.get(l) ?? null;
+  }
+
+  /**
+   * The branch of an if that a pass split off the decompile's one `if`: a short-circuit
+   * condition with an assignment in it (`if (a && (x = e, x)) B`) becomes nested ifs on
+   * the `if`'s line. The outermost of them takes that line's branch offset, which is the
+   * last test's: the code of every arm it holds lies after it. Null unless every if on the
+   * line, and every statement that claims the line (the assignments split out with them),
+   * sits inside this one.
+   */
+  chainBranch(ifs: IfStmt): number | null {
+    const own = this.cbranch(ifs);
+    if (own !== null) return own;
+    if (!placed(ifs)) return null;
+    const l = ifs.location.start.line;
+    const total = this.ifLines.get(l) ?? 0;
+    if (total < 2) return null;
+    let inside = 0;
+    for (const n of traverseStatements(ifs)) {
+      if (n.kind === NodeKind.IfStmt && placed(n) && n.location.start.line === l) inside++;
+    }
+    let claimed = 0;
+    ownedRanges(ifs, (from, to) => { if (from <= l && l <= to) claimed++; });
+    return inside === total && claimed === this.claims.get(l) ? this.ev.ifs.get(l) ?? null : null;
+  }
+
+  /**
+   * The offset of a jump-table switch's indirect jump: the highest offset its line prints
+   * (the `switch` keyword carries the BRANCHIND, its operand the loads before it). Null for
+   * a switch a pass built from ifs (its line is an `if` line), a copied one, or an unknown line.
+   */
+  switchBranch(sw: SwitchStmt): number | null {
+    if (!placed(sw)) return null;
+    const l = sw.location.start.line;
+    if (this.switchLines.get(l) !== 1 || this.ifLines.has(l) || this.ev.ifs.has(l) || this.tainted.has(l)) return null;
+    const offs = this.ev.lines.get(l);
+    return offs && offs.length > 0 ? offs[offs.length - 1] : null;
   }
 
   /**
@@ -157,18 +215,24 @@ export class LayoutReader {
     return low;
   }
 
-  /** The lowest offset above `after` on the lines `stmts` own now; null when none. */
+  /**
+   * The lowest offset above `after` on the lines `stmts` own now; null when none. An offset
+   * other statements print as well counts only when all of them are among `stmts`.
+   */
   entry(stmts: readonly Statement[], after: number): number | null {
-    let best: number | null = null;
+    const own = new Set<number>();
     for (const s of stmts) {
       ownedRanges(s, (from, to) => {
-        for (let l = from; l <= to; l++) {
-          if (this.tainted.has(l)) continue;
-          for (const o of this.ev.lines.get(l) ?? []) {
-            if (o > after && !this.shared.has(o) && (best === null || o < best)) best = o;
-          }
-        }
+        for (let l = from; l <= to; l++) if (!this.tainted.has(l)) own.add(l);
       });
+    }
+    let best: number | null = null;
+    for (const l of own) {
+      for (const o of this.ev.lines.get(l) ?? []) {
+        if (o <= after || (best !== null && o >= best)) continue;
+        if (this.shared.has(o) && ![...(this.printers.get(o) ?? [])].every(p => own.has(p))) continue;
+        best = o;
+      }
     }
     return best;
   }

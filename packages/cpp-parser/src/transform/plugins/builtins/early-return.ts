@@ -25,12 +25,16 @@
  * it operates on already-cleaned conditions.
  *
  * With the original's addresses (`branchLayout`, see branch-layout/evidence.ts) a guard
- * with a value is not made where the binary contradicts it: a simple condition outside a
- * loop whose BODY's code lies before the return's. VC8 puts a leaving then-arm inline, so
- * there the nest is the form whose layout matches. Where the layout cannot tell the two
- * forms apart (an `&&`/`||` condition is the same control flow either way, an if inside a
- * loop, an arm without code of its own, a BODY that falls through into a copy of the
- * return, a void function's implicit end) the guard is made as before.
+ * with a value is not made where the binary contradicts it: a simple or `&&` condition
+ * outside a loop whose leaving BODY's code lies before the return's. VC8 lays `if (C) BODY`
+ * out with BODY as the fall-through of the tests, while the guard puts the return there
+ * (checked with the VC8 oracle: TEXT_GetOverheadSpeakerUnit, GetAnimOrSeqMode's `&&`,
+ * deflateTune's two tests). An if a pass split off one decompiled `&&` (`if (a && (x = e,
+ * x))` -> `if (a) { x = e; if (x) ... }`) takes that line's branch, and its BODY, which
+ * runs on only through the split ifs, counts as leaving. Where the layout cannot tell (an `||` condition, whose
+ * BODY VC8 moves out of line, an if inside a loop, an arm without code of its own, a BODY
+ * that falls through into a copy of the return, a void function's implicit end) the guard
+ * is made as before.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -215,6 +219,20 @@ function loopIfLines(root: ASTNode): Set<number> {
   return out;
 }
 
+/**
+ * `s` is an if split off the same decompiled condition (on `line`, no else) whose arm
+ * leaves, directly or through a further such if.
+ */
+function chainLeaves(s: Statement, line: number): boolean {
+  if (s.kind !== NodeKind.IfStmt) return false;
+  const i = s as IfStmt;
+  if (i.elseBranch || i.location?.start.line !== line) return false;
+  const arm = i.thenBranch.kind === NodeKind.CompoundStmt ? (i.thenBranch as CompoundStmt).statements : [i.thenBranch];
+  if (arm.length === 0) return false;
+  const last = arm[arm.length - 1];
+  return isTerminator(last) || chainLeaves(last, line);
+}
+
 /** The gate for one function, read from its body before any guard is made. */
 function layoutGate(ev: BranchLayoutEvidence, body: CompoundStmt): GuardGate {
   const reader = new LayoutReader(ev, body);
@@ -222,13 +240,17 @@ function layoutGate(ev: BranchLayoutEvidence, body: CompoundStmt): GuardGate {
   return (ifs, stmts, ret) => {
     // A bare `return;` has no code of its own: no evidence either way, as in case B.
     if (!ret.value) return true;
-    // BODY falling through takes a copy of the return; VC8 merges the two identical tails,
-    // and which copy keeps the code is not the layout's to say.
-    if (!isTerminator(stmts[stmts.length - 1])) return true;
-    // `&&`/`||` guards have the nest's control flow (De Morgan), and a leaving arm in a
-    // loop is laid out apart from either form: the layout cannot tell them apart.
-    if (conditionShape(ifs.condition).kind !== 'simple' || inLoop.has(ifs.location.start.line)) return true;
-    const cb = reader.cbranch(ifs);
+    // BODY falling through takes a copy of the return; which copy keeps the code (VC8
+    // emits one per path or merges them) is not the layout's to say. Except where BODY
+    // runs on only through the ifs a pass split off this one decompiled condition: the
+    // decompiler's BODY left.
+    if (!isTerminator(stmts[stmts.length - 1]) && !chainLeaves(stmts[stmts.length - 1], ifs.location.start.line)) return true;
+    // An `||` condition puts a leaving BODY out of line after what follows, so the nest's
+    // layout is not BODY first either; a leaving arm in a loop is laid out apart from
+    // either form.
+    const shape = conditionShape(ifs.condition).kind;
+    if ((shape !== 'simple' && shape !== 'and') || inLoop.has(ifs.location.start.line)) return true;
+    const cb = reader.chainBranch(ifs);
     if (cb === null) return true;
     const r = reader.entry([ret], cb), b = reader.entry(stmts, cb);
     return r === null || b === null || r < b;

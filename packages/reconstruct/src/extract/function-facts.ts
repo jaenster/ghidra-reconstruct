@@ -9,6 +9,7 @@
  *   branchLayout  branch-layout.ts
  *   callOrder     call-order.ts
  *   haltLines     halt-lines.ts      (listing only)
+ *   stringOps     string-ops.ts
  *   labelFlow     label-flow.ts      (listing only; its own script, labels come from the text)
  *
  * Each extractor decompiled every function again; this script decompiles a function once
@@ -29,9 +30,10 @@
 import type { GhidraConnection, ExtractedFunction } from '../types.js';
 import { STAMPER_JAVA, functionStampsScript, parseFunctionStamps, normalizeEntry, type TypeStamp } from './function-stamps.js';
 import { printsComparison, javaStringHash, parseCompareSiteOutput } from './compare-sites.js';
-import { printsIf, parseBranchLayout } from './branch-layout.js';
+import { printsBranch, parseBranchLayout } from './branch-layout.js';
 import { printsCallTemporary, parseCallOrder } from './call-order.js';
 import { printsHaltOrProbe, parseHaltLines, HALT_NAME, IP_NAME, PROBE_NAMES } from './halt-lines.js';
+import { STRING_OPS_JAVA, printsRepLoop, parseStringOpRow } from './string-ops.js';
 import { labelsOf, labelFlowItems, labelFlowScript, parseLabelFlow, LABEL_FLOW_SCRIPT } from './label-flow.js';
 import { FactCache, type CachedFacts, type FactEntry } from './fact-cache.js';
 import { createHash } from 'node:crypto';
@@ -45,6 +47,7 @@ import { createHash } from 'node:crypto';
  *   B  ...   the branch-layout row
  *   O  ...   the call-order row
  *   H  ...   the halt-lines row, when it has halts or probes
+ *   R  ...   the string-ops row, when it has REP STOS/MOVS instructions
  *   D  id,full,shape;...   the types the markup named
  */
 export const FUNCTION_FACTS_SCRIPT = `
@@ -312,6 +315,8 @@ for (int ti = 0; ti < nThreads; ti++) {
               first = false;
             }
           }
+          // string-ops
+${STRING_OPS_JAVA}
           // halt-lines (listing only)
           StringBuilder hrow = new StringBuilder();
           StringBuilder probes = new StringBuilder();
@@ -413,6 +418,7 @@ for (int ti = 0; ti < nThreads; ti++) {
           out.append("B\\t").append(a).append('\\t').append(count).append('\\t').append(ls).append('\\t').append(is).append('\\t').append(es).append('\\n');
           out.append("O\\t").append(a).append('\\t').append(count).append('\\t').append(cs).append('\\n');
           if (hrow.length() > 0 || probes.length() > 0) out.append("H\\t").append(a).append('\\t').append(hrow).append('\\t').append(probes).append('\\n');
+          if (rrow.length() > 0) out.append("R\\t").append(a).append('\\t').append(rrow).append('\\n');
           out.append("D\\t").append(ds).append('\\n');
           rows.put(a, out.toString());
         } catch (Exception e) { rows.put(a, "F\\t" + a + "\\terror\\tfail\\n"); }
@@ -440,7 +446,7 @@ println(sb.toString());
  */
 export const FACT_SCRIPT_VERSION = createHash('sha1')
   .update(FUNCTION_FACTS_SCRIPT).update(LABEL_FLOW_SCRIPT).update(functionStampsScript([], []))
-  .update('facts-1')
+  .update('facts-2')
   .digest('hex').slice(0, 16);
 
 export function functionFactsScript(batch: string[], threads = 8, timeout = 60): string {
@@ -464,6 +470,8 @@ export interface FunctionFactRow {
   branchRow?: string;
   callRow?: string;
   haltRow?: string;
+  /** The string-ops row, untagged and without the entry. */
+  stringRow?: string;
   deps: Record<string, TypeStamp>;
 }
 
@@ -505,6 +513,7 @@ export function parseFunctionFacts(output: string): FunctionFactOutput {
     else if (tag === 'B') cur.branchRow = rest;
     else if (tag === 'O') cur.callRow = rest;
     else if (tag === 'H') cur.haltRow = rest;
+    else if (tag === 'R') cur.stringRow = rest.slice(rest.indexOf('\t') + 1);
     else if (tag === 'D') {
       for (const part of rest ? rest.split(';') : []) {
         const [id, full, shape] = part.split(',');
@@ -531,7 +540,7 @@ export function selectFacts(text: string, entry: string, row: FunctionFactRow, c
     ).get(entry);
     if (block?.rows) facts.compareSites = block.rows;
   }
-  if (printsIf(text) && row.branchRow) {
+  if (printsBranch(text) && row.branchRow) {
     const b = parseBranchLayout(row.branchRow).get(entry);
     if (b) facts.branchLayout = b;
   }
@@ -542,6 +551,10 @@ export function selectFacts(text: string, entry: string, row: FunctionFactRow, c
   if (printsHaltOrProbe(text) && row.haltRow) {
     const h = parseHaltLines(row.haltRow).get(entry);
     if (h) facts.haltLines = h;
+  }
+  if (printsRepLoop(text) && row.stringRow) {
+    const ops = parseStringOpRow(row.stringRow);
+    if (ops.length > 0) facts.stringOps = ops;
   }
   return facts;
 }
@@ -578,7 +591,7 @@ export interface FunctionFactStats {
   labelMs: number;
 }
 
-const FACT_KEYS = ['compareSites', 'branchLayout', 'callOrder', 'haltLines', 'labelFlow'] as const;
+const FACT_KEYS = ['compareSites', 'branchLayout', 'callOrder', 'haltLines', 'stringOps', 'labelFlow'] as const;
 
 /**
  * Attach every per-function fact to the decompiled functions, from the cache where the
@@ -599,8 +612,8 @@ export async function extractFunctionFacts(
   const byEntry = new Map<string, ExtractedFunction>();
   for (const f of functions) {
     if (!f.decompiled || f.isThunk || f.isExternal) continue;
-    if (!(printsComparison(f.decompiled) || printsIf(f.decompiled) || printsCallTemporary(f.decompiled)
-        || printsHaltOrProbe(f.decompiled) || labelsOf(f.decompiled).length > 0)) continue;
+    if (!(printsComparison(f.decompiled) || printsBranch(f.decompiled) || printsCallTemporary(f.decompiled)
+        || printsHaltOrProbe(f.decompiled) || printsRepLoop(f.decompiled) || labelsOf(f.decompiled).length > 0)) continue;
     byEntry.set(normalizeEntry(f.address), f);
   }
   stats.candidates = byEntry.size;
@@ -736,6 +749,7 @@ function attach(f: ExtractedFunction, facts: CachedFacts): void {
   if (facts.branchLayout !== undefined) f.branchLayout = facts.branchLayout;
   if (facts.callOrder !== undefined) f.callOrder = facts.callOrder;
   if (facts.haltLines !== undefined) f.haltLines = facts.haltLines;
+  if (facts.stringOps !== undefined) f.stringOps = facts.stringOps;
   if (facts.labelFlow !== undefined) f.labelFlow = { ...(f.labelFlow ?? {}), ...facts.labelFlow };
 }
 

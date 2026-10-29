@@ -7,6 +7,12 @@
  * - memset loops (zero-fill or fill with constant)
  * - memcpy loops (copy from source to dest)
  * - strlen loops (count until null terminator)
+ *
+ * memset and memcpy count BYTES, the loops count elements: a loop is rewritten only where
+ * every array it indexes is declared in the function with one-byte elements, so the two
+ * counts are the same number. `for (i = 0; i < 100; i++) wszText[i] = 0;` over a
+ * `uint16_t wszText[100]` is left alone - as `memset(wszText, 0, 100)` it would clear half
+ * the array (and VC8 compiles the loop itself to the original's `rep stosd`).
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -28,7 +34,12 @@ import type {
   CallExpr,
   DeclStmt,
   VariableDecl,
+  FunctionDecl,
+  ArrayType,
+  PointerType,
 } from '../../../ast/nodes.js';
+import { localTypesOf } from './compare-form.js';
+import { scalarTypeSize } from './rep-string-form.js';
 import {
   createTransformer,
   updateNode,
@@ -126,7 +137,8 @@ function extractLoopBound(
   if (condition.kind !== NodeKind.BinaryExpr) return null;
 
   const binary = condition as BinaryExpr;
-  if (binary.operator !== '<' && binary.operator !== '<=') return null;
+  // `i <= n` runs n + 1 times; only `i < n` has the count n.
+  if (binary.operator !== '<') return null;
 
   const leftName = getIdentifierName(binary.left);
   if (leftName !== loopVar) return null;
@@ -286,11 +298,12 @@ function createMemsetCall(
 /**
  * Transform memset loops to memset calls
  */
-function createMemsetTransformer(addComment: boolean): Transformer {
+function createMemsetTransformer(addComment: boolean, isByteArray: (e: Expression) => boolean): Transformer {
   return createTransformer({
     visitForStmt(forStmt) {
+      if (forStmt.ghidraInfo?.sourceLoop) return undefined;
       const pattern = detectMemsetInFor(forStmt);
-      if (!pattern) return undefined;
+      if (!pattern || !isByteArray(pattern.destination)) return undefined;
 
       // Only transform if filling with a constant
       if (
@@ -444,10 +457,12 @@ function createMemcpyCall(
 /**
  * Transform memcpy loops to memcpy calls
  */
-function createMemcpyTransformer(): Transformer {
+function createMemcpyTransformer(isByteArray: (e: Expression) => boolean): Transformer {
   return createTransformer({
     visitForStmt(forStmt) {
+      if (forStmt.ghidraInfo?.sourceLoop) return undefined;
       const pattern = detectMemcpyInFor(forStmt);
+      if (pattern && (!isByteArray(pattern.destination) || !isByteArray(pattern.source))) return undefined;
       if (!pattern) return undefined;
 
       const memcpyCall = createMemcpyCall(
@@ -617,6 +632,17 @@ function createStrlenTransformer(): Transformer {
   });
 }
 
+/** The arrays and pointers the function declares with one-byte elements. */
+function byteArraysOf(fn: FunctionDecl): Set<string> {
+  const out = new Set<string>();
+  for (const [name, t] of localTypesOf(fn)) {
+    const elem = t.kind === NodeKind.ArrayType ? (t as ArrayType).elementType
+      : t.kind === NodeKind.PointerType ? (t as PointerType).pointee : null;
+    if (elem && elem.kind !== NodeKind.ArrayType && elem.kind !== NodeKind.PointerType && scalarTypeSize(elem) === 1) out.add(name);
+  }
+  return out;
+}
+
 // ============================================
 // PLUGIN DEFINITION
 // ============================================
@@ -653,20 +679,31 @@ export const memoryPatternsPlugin: TransformPlugin = {
 
   createTransformer(options?: MemoryPatternsOptions) {
     const opts = options ?? {};
-    const transforms: Transformer[] = [];
-
-    if (opts.memset !== false) {
-      transforms.push(createMemsetTransformer(opts.addOriginalComment ?? false));
-    }
-
-    if (opts.memcpy !== false) {
-      transforms.push(createMemcpyTransformer());
-    }
-
-    if (opts.strlen !== false) {
-      transforms.push(createStrlenTransformer());
-    }
-
-    return sequence(...transforms);
+    const pipeline = (isByteArray: (e: Expression) => boolean): Transformer => {
+      const transforms: Transformer[] = [];
+      if (opts.memset !== false) {
+        transforms.push(createMemsetTransformer(opts.addOriginalComment ?? false, isByteArray));
+      }
+      if (opts.memcpy !== false) {
+        transforms.push(createMemcpyTransformer(isByteArray));
+      }
+      if (opts.strlen !== false) {
+        transforms.push(createStrlenTransformer());
+      }
+      return sequence(...transforms);
+    };
+    return createTransformer({
+      visitFunctionDecl(fn: FunctionDecl) {
+        if (!fn.body) return undefined;
+        const bytes = byteArraysOf(fn);
+        const isByteArray = (e: Expression) => {
+          let x = e;
+          while (x.kind === NodeKind.ParenExpr) x = (x as unknown as { expression: Expression }).expression;
+          return x.kind === NodeKind.Identifier && bytes.has((x as Identifier).name);
+        };
+        const body = pipeline(isByteArray)(fn.body);
+        return updateNode(fn, { body } as Partial<FunctionDecl>);
+      },
+    });
   },
 };

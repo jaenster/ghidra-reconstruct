@@ -29,6 +29,13 @@
  *            x = e; if (!x) return R;
  *            if (B) return R;
  *
+ *     With the original's addresses (`branchLayout`), a guard returning a value whose
+ *     return VC8 laid out after the rest of the block - as it lays out every `||`
+ *     guard's exit - nests the rest instead (outside a loop, the rest leaving):
+ *       if (A || (x = e, !x)) return R; REST
+ *         →  if (!A) { x = e; if (x) { REST } } return R;
+ *     The split guards would each put a copy of the return inline, ahead of REST.
+ *
  *  3. While-condition with side effects (`&&` chain containing a comma) — turn
  *     the loop into `while (true)` with the condition re-expressed as break
  *     guards at the top of the body (preserves continue: it re-runs the guards):
@@ -67,6 +74,12 @@ import type {
 } from '../../../ast/nodes.js';
 import { createTransformer, cloneNode, updateNode, type Transformer } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
+import { LayoutReader, isLoop, type BranchLayoutEvidence } from './branch-layout/evidence.js';
+import { leaves } from './assert-order.js';
+import { DEFAULT_NORETURN_FUNCTIONS } from './goto-cleanup/types.js';
+import { holdsFreeCase } from './goto-cleanup/paths.js';
+import { getChildren, traverseAST } from '../../../ast/visitor.js';
+import type { FunctionDecl } from '../../../ast/nodes.js';
 
 const FLIP: Record<string, BinaryExpr['operator']> = {
   '==': '!=', '!=': '==', '<': '>=', '>': '<=', '<=': '>', '>=': '<',
@@ -183,13 +196,16 @@ function asEarlyExit(s: Statement): Statement | null {
  *       if (!A) { <B assigns> if (!B) E; }
  *   - AND-chain        `if (A && B) BODY;` (negate=false, body = then-branch):
  *       if (A) { <B assigns> if (B) BODY }
- * invert() collapses the !-of-! so `!(!nParam)` renders as `nParam`.
+ * invert() collapses the !-of-! so `!(!nParam)` renders as `nParam`. Each if keeps the
+ * source if's position: they are its conditional branches, and the layout evidence
+ * (branch-layout/evidence.ts) reads an if's branch by the line of its keyword.
  */
 function buildNestedChain(
   ops: Expression[],
   body: Statement,
   leadingTrivia: ASTNode['leadingTrivia'],
   negate: boolean,
+  location: ASTNode['location'],
 ): Statement[] {
   const { assigns, cond } = splitComma(ops[0]);
   const guardCond = negate ? invert(cond) : cond;
@@ -199,7 +215,7 @@ function buildNestedChain(
       ? cloneNode(body)
       : ({
           kind: NodeKind.CompoundStmt,
-          statements: buildNestedChain(ops.slice(1), body, [], negate),
+          statements: buildNestedChain(ops.slice(1), body, [], negate, location),
           location: body.location,
           leadingTrivia: [],
           trailingTrivia: [],
@@ -210,7 +226,7 @@ function buildNestedChain(
     thenBranch,
     elseBranch: null,
     isConstexpr: false,
-    location: body.location,
+    location,
     leadingTrivia: leadingTrivia || [],
     trailingTrivia: [],
   } as IfStmt);
@@ -255,14 +271,14 @@ function expandStatement(s: Statement): Statement[] | null {
       if (neg.kind === NodeKind.UnaryExpr && (neg as UnaryExpr).operator === '!') {
         const negOps = flattenChain((neg as UnaryExpr).operand, '||');
         if (negOps.length >= 2 && hasCommaOperand(negOps)) {
-          return buildNestedChain(negOps, exit ?? ifs.thenBranch, ifs.leadingTrivia, true);
+          return buildNestedChain(negOps, exit ?? ifs.thenBranch, ifs.leadingTrivia, true, ifs.location);
         }
       }
       // Pattern 2c: AND-chain with a comma side effect  if (A && (v=X, B)) BODY;
       // (any then-branch; no else, so nesting can't duplicate a branch)
       const andOps = flattenChain(ifs.condition, '&&');
       if (andOps.length >= 2 && hasCommaOperand(andOps)) {
-        return buildNestedChain(andOps, ifs.thenBranch, ifs.leadingTrivia, false);
+        return buildNestedChain(andOps, ifs.thenBranch, ifs.leadingTrivia, false, ifs.location);
       }
     }
     // Pattern 1d: if ((a, b, c)) — whole condition is a comma (unconditional)
@@ -302,10 +318,53 @@ function expandStatement(s: Statement): Statement[] | null {
   return null;
 }
 
-function expandBlock(block: CompoundStmt): CompoundStmt | null {
+/** The original's layout for the function being expanded (early run only). */
+interface LayoutCtx {
+  reader: LayoutReader;
+  /** Lines of the ifs inside a loop. */
+  loopIfs: Set<number>;
+}
+
+function labelsIn(stmts: readonly Statement[]): boolean {
+  for (const s of stmts) for (const n of traverseAST(s)) if (n.kind === NodeKind.LabelStmt) return true;
+  return false;
+}
+
+/**
+ * `if (A || (x = e, B)) return R; REST` where the return lies after REST in the original:
+ * `if (!A) { x = e; if (!B) { REST } } return R;`, or null.
+ */
+function nestOrGuard(ifs: IfStmt, rest: readonly Statement[], ctx: LayoutCtx): Statement[] | null {
+  if (rest.length === 0 || ifs.elseBranch || ifs.init) return null;
+  const exit = asEarlyExit(ifs.thenBranch);
+  if (!exit || exit.kind !== NodeKind.ReturnStmt || !(exit as ReturnStmt).value) return null;
+  const ops = flattenChain(ifs.condition, '||');
+  if (ops.length < 2 || !hasCommaOperand(ops)) return null;
+  const line = ifs.location?.start.line ?? 0;
+  if (ctx.loopIfs.has(line)) return null;
+  if (!leaves(rest[rest.length - 1], new Set(DEFAULT_NORETURN_FUNCTIONS))) return null;
+  if (labelsIn(rest) || holdsFreeCase([...rest])) return null;
+  const cb = ctx.reader.cbranch(ifs);
+  if (cb === null) return null;
+  const r = ctx.reader.entry([exit], cb), b = ctx.reader.entry(rest, cb);
+  if (r === null || b === null || r < b) return null;
+  const body: CompoundStmt = { kind: NodeKind.CompoundStmt, statements: [...rest], location: rest[0].location, leadingTrivia: [], trailingTrivia: [] };
+  return [...buildNestedChain(ops, body, ifs.leadingTrivia, true, ifs.location), exit];
+}
+
+function expandBlock(block: CompoundStmt, layout: LayoutCtx | null = null): CompoundStmt | null {
   const out: Statement[] = [];
   let changed = false;
-  for (const s of block.statements) {
+  for (let i = 0; i < block.statements.length; i++) {
+    const s = block.statements[i];
+    if (layout && s.kind === NodeKind.IfStmt) {
+      const nested = nestOrGuard(s as IfStmt, block.statements.slice(i + 1), layout);
+      if (nested) {
+        out.push(...nested);
+        changed = true;
+        break;
+      }
+    }
     const repl = expandStatement(s);
     if (repl) {
       out.push(...repl);
@@ -353,14 +412,15 @@ function expandWhile(w: WhileStmt): WhileStmt | null {
   return updateNode(w, { condition: trueLit, body: newBody });
 }
 
-function createCommaExpandTransformer(): Transformer {
+function createCommaExpandTransformer(ev: BranchLayoutEvidence | null = null): Transformer {
+  let layout: LayoutCtx | null = null;
   // A single bottom-up pass. `onChange` fires whenever a node is rewritten so
   // the caller can iterate to a fixpoint.
   const onePass = (root: ASTNode, onChange: () => void): ASTNode =>
     createTransformer({
       visitNode(node: ASTNode): ASTNode | undefined {
         if (node.kind === NodeKind.CompoundStmt) {
-          const r = expandBlock(node as CompoundStmt);
+          const r = expandBlock(node as CompoundStmt, layout);
           if (r) { onChange(); return r; }
           return undefined;
         }
@@ -375,7 +435,7 @@ function createCommaExpandTransformer(): Transformer {
 
   // Re-run until a pass finds no more comma/short-circuit messes to lower, so
   // cases revealed by an earlier expansion are also caught. Bounded for safety.
-  return (root: ASTNode): ASTNode => {
+  const fixpoint = (root: ASTNode): ASTNode => {
     let cur = root;
     for (let pass = 0; pass < 16; pass++) {
       let changed = false;
@@ -384,10 +444,31 @@ function createCommaExpandTransformer(): Transformer {
     }
     return cur;
   };
+  if (!ev) return fixpoint;
+  // With the layout, each function is expanded with a reader of its body as it came in.
+  return createTransformer({
+    visitFunctionDecl(fn: FunctionDecl): ASTNode | undefined {
+      if (!fn.body) return undefined;
+      const loopIfs = new Set<number>();
+      const go = (n: ASTNode, inLoop: boolean): void => {
+        if (n.kind === NodeKind.IfStmt && inLoop && n.location) loopIfs.add(n.location.start.line);
+        for (const k of getChildren(n)) go(k, inLoop || isLoop(n));
+      };
+      go(fn.body, false);
+      layout = { reader: new LayoutReader(ev, fn.body), loopIfs };
+      try {
+        const body = fixpoint(fn.body);
+        return body === fn.body ? undefined : updateNode(fn, { body } as Partial<FunctionDecl>);
+      } finally {
+        layout = null;
+      }
+    },
+  });
 }
 
 export interface CommaExpandOptions extends PluginOptions {
-  // Reserved for future options
+  /** The original's addresses (branch-layout/evidence.ts); absent: every `||` guard is split. */
+  branchLayout?: BranchLayoutEvidence | null;
 }
 
 /**
@@ -406,8 +487,8 @@ export const commaExpandPlugin: TransformPlugin = {
   priority: 13, // early: so later passes see flattened single-purpose statements
   tags: ['core', 'readability', 'control-flow'],
 
-  createTransformer(_options?: CommaExpandOptions) {
-    return createCommaExpandTransformer();
+  createTransformer(options?: CommaExpandOptions) {
+    return createCommaExpandTransformer(options?.branchLayout ?? null);
   },
 };
 

@@ -52,6 +52,7 @@ import { extractCompareSites } from './compare-sites.js';
 import { extractBranchLayout } from './branch-layout.js';
 import { extractCallOrder } from './call-order.js';
 import { extractHaltLines } from './halt-lines.js';
+import { extractStringOps } from './string-ops.js';
 import { extractFunctionFacts, FACT_SCRIPT_VERSION, type FunctionFactStats } from './function-facts.js';
 import { FactCache } from './fact-cache.js';
 import { extractAllStrings } from './strings.js';
@@ -308,6 +309,11 @@ async function extractFactsSeparately(
     await extractHaltLines(connection, functions);
   } catch (err) {
     console.warn(`  Halt lines unavailable: ${(err as Error).message}`);
+  }
+  try {
+    await extractStringOps(connection, functions);
+  } catch (err) {
+    console.warn(`  String ops unavailable: ${(err as Error).message}`);
   }
 }
 
