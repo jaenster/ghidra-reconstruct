@@ -52,6 +52,8 @@ import { extractCompareSites } from './compare-sites.js';
 import { extractBranchLayout } from './branch-layout.js';
 import { extractCallOrder } from './call-order.js';
 import { extractHaltLines } from './halt-lines.js';
+import { extractFunctionFacts, FACT_SCRIPT_VERSION, type FunctionFactStats } from './function-facts.js';
+import { FactCache } from './fact-cache.js';
 import { extractAllStrings } from './strings.js';
 import { extractAllNamespaces } from './namespaces.js';
 import type { AnalyzedDataSymbol } from '../types.js';
@@ -217,51 +219,42 @@ export async function extractAll(
     },
   });
 
-  // How control enters each label (read-only; see label-flow.ts). A failure leaves the field
-  // unset, which is what an older snapshot looks like too.
+  // The per-function facts read off the decompiler and the listing: label flow, compare
+  // sites, branch layout, call order, halt lines (read-only; see function-facts.ts). One
+  // decompile per function, and only for functions the fact cache cannot vouch for.
+  // GHIDRA_FACT_SCRIPTS=separate runs the five extractors one after the other instead.
+  // A failure leaves the fields unset, which is what an older snapshot looks like too.
   if (decompile) {
-    try {
-      await extractLabelFlow(connection, functions);
-    } catch (err) {
-      console.warn(`  Label flow unavailable: ${(err as Error).message}`);
-    }
-    // Each comparison tied to its CMP/TEST and Jcc (read-only; see compare-sites.ts). It
-    // decompiles every function that prints a comparison again; GHIDRA_COMPARE_SITES=0 skips it.
-    // The source forms it recovers are VC8's, so only a PE image is read.
-    if (process.env.GHIDRA_COMPARE_SITES !== '0' && /Portable Executable|\bPE\b/i.test(programInfo.format ?? '')) {
+    // The compare-site source forms are VC8's, so only a PE image gets them.
+    const compareSites = process.env.GHIDRA_COMPARE_SITES !== '0' && /Portable Executable|\bPE\b/i.test(programInfo.format ?? '');
+    if (process.env.GHIDRA_FACT_SCRIPTS === 'separate') {
+      await extractFactsSeparately(connection, functions, compareSites, label);
+    } else {
       try {
-        let tied = 0;
+        const cache = process.env.GHIDRA_FACT_CACHE === '0'
+          ? undefined
+          : new FactCache(programInfo.path || programInfo.name, FACT_SCRIPT_VERSION);
+        const verifyEnv = process.env.GHIDRA_FACT_VERIFY;
+        const verify = verifyEnv === 'all' ? 'all' as const : verifyEnv ? Number(verifyEnv) || undefined : undefined;
+        let stats: FunctionFactStats | undefined;
         await timePhase(
-          `${label}extract/compare-sites`,
-          async () => { tied = await extractCompareSites(connection, functions); },
-          () => `comparison sites in ${tied} function(s)`
+          `${label}extract/function-facts`,
+          async () => {
+            stats = await extractFunctionFacts(connection, functions, { compareSites, cache, verify });
+            cache?.save();
+          },
+          () => stats
+            ? `${stats.hits} cached, ${stats.extracted} extracted of ${stats.candidates}` +
+              (Object.keys(stats.reasons).length ? ` (missed: ${Object.entries(stats.reasons).map(([k, v]) => `${k} ${v}`).join(', ')})` : '') +
+              (stats.verified ? `, ${stats.verified} verified, ${stats.verifyMismatches.length} mismatched` : '')
+            : 'failed',
         );
+        if (stats && stats.verifyMismatches.length > 0) {
+          console.warn(`  Fact cache: ${stats.verifyMismatches.length} cached function(s) differed from a fresh extraction: ${stats.verifyMismatches.slice(0, 20).join(' ')}`);
+        }
       } catch (err) {
-        console.warn(`  Compare sites unavailable: ${(err as Error).message}`);
+        console.warn(`  Function facts unavailable: ${(err as Error).message}`);
       }
-    }
-  }
-
-  // Where each decompile line lies in the binary (read-only; see branch-layout.ts). A
-  // failure leaves the field unset, and the passes that read it change nothing.
-  if (decompile) {
-    try {
-      await extractBranchLayout(connection, functions);
-    } catch (err) {
-      console.warn(`  Branch layout unavailable: ${(err as Error).message}`);
-    }
-    // Where each call lies and what was pushed before it (read-only; see call-order.ts).
-    try {
-      await extractCallOrder(connection, functions);
-    } catch (err) {
-      console.warn(`  Call order unavailable: ${(err as Error).message}`);
-    }
-    // The line each way into a halt pushes, and the return addresses a stack probe leaves
-    // in the frame (read-only; see halt-lines.ts).
-    try {
-      await extractHaltLines(connection, functions);
-    } catch (err) {
-      console.warn(`  Halt lines unavailable: ${(err as Error).message}`);
     }
   }
 
@@ -275,6 +268,47 @@ export async function extractAll(
     namespaces,
     programInfo,
   };
+}
+
+/** The five fact extractors one after the other, each decompiling on its own. */
+async function extractFactsSeparately(
+  connection: GhidraConnection,
+  functions: ExtractedFunction[],
+  compareSites: boolean,
+  label: string,
+): Promise<void> {
+  try {
+    await extractLabelFlow(connection, functions);
+  } catch (err) {
+    console.warn(`  Label flow unavailable: ${(err as Error).message}`);
+  }
+  if (compareSites) {
+    try {
+      let tied = 0;
+      await timePhase(
+        `${label}extract/compare-sites`,
+        async () => { tied = await extractCompareSites(connection, functions); },
+        () => `comparison sites in ${tied} function(s)`
+      );
+    } catch (err) {
+      console.warn(`  Compare sites unavailable: ${(err as Error).message}`);
+    }
+  }
+  try {
+    await extractBranchLayout(connection, functions);
+  } catch (err) {
+    console.warn(`  Branch layout unavailable: ${(err as Error).message}`);
+  }
+  try {
+    await extractCallOrder(connection, functions);
+  } catch (err) {
+    console.warn(`  Call order unavailable: ${(err as Error).message}`);
+  }
+  try {
+    await extractHaltLines(connection, functions);
+  } catch (err) {
+    console.warn(`  Halt lines unavailable: ${(err as Error).message}`);
+  }
 }
 
 interface MemoryBlockRecord {

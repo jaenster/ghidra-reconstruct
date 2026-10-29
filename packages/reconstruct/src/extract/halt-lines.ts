@@ -52,9 +52,9 @@ export interface HaltLineFacts {
   probeReturns?: number[];
 }
 
-const HALT_NAME = 'ERROR_UnrecoverableInternalError_Halt';
-const IP_NAME = 'GetInstructionPointer';
-const PROBE_NAMES = ['__alloca_probe', '__SEH_prolog4'];
+export const HALT_NAME = 'ERROR_UnrecoverableInternalError_Halt';
+export const IP_NAME = 'GetInstructionPointer';
+export const PROBE_NAMES = ['__alloca_probe', '__SEH_prolog4'];
 
 /** Java, no imports. `__ITEMS__` is `;`-separated function entries. */
 export const HALT_LINES_SCRIPT = `
@@ -145,11 +145,16 @@ export function haltLinesScript(batch: string[]): string {
 /** A store of a code-sized constant: what a probe's return address prints as. */
 const CODE_CONSTANT_STORE = /=\s*(?:\([^;()]*\)\s*)?0x[0-9a-fA-F]{6,8}\s*;/;
 
+/** Whether a decompile prints a halt or a code-sized constant store: the functions the script reads. */
+export function printsHaltOrProbe(decompiled: string): boolean {
+  return decompiled.includes(HALT_NAME) || CODE_CONSTANT_STORE.test(decompiled);
+}
+
 /** Entries of every decompiled function that prints a halt or a code-sized constant store, in batches. */
 export function haltLinesBatches(functions: Pick<ExtractedFunction, 'address' | 'decompiled'>[], batchSize = 800): string[][] {
   const items: string[] = [];
   for (const f of functions) {
-    if (f.decompiled && (f.decompiled.includes(HALT_NAME) || CODE_CONSTANT_STORE.test(f.decompiled))) {
+    if (f.decompiled && printsHaltOrProbe(f.decompiled)) {
       items.push(normalize(f.address));
     }
   }

@@ -244,10 +244,15 @@ export function javaStringHash(text: string): number {
 
 const COMPARISON = /[<>]=?|[=!]=/;
 
+/** Whether a decompile prints a comparison at all: the functions the script reads. */
+export function printsComparison(decompiled: string): boolean {
+  return COMPARISON.test(decompiled);
+}
+
 /** Addresses of the decompiled functions that print a comparison at all, in batches. */
 export function compareSiteBatches(functions: Pick<ExtractedFunction, 'address' | 'decompiled'>[], batchSize = 150): string[][] {
   const items: string[] = [];
-  for (const f of functions) if (f.decompiled && COMPARISON.test(f.decompiled)) items.push(normalize(f.address));
+  for (const f of functions) if (f.decompiled && printsComparison(f.decompiled)) items.push(normalize(f.address));
   const out: string[][] = [];
   for (let i = 0; i < items.length; i += batchSize) out.push(items.slice(i, i + batchSize));
   return out;
