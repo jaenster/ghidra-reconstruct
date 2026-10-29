@@ -46,6 +46,25 @@ LAB_00598e57:
     assert.ok(!out.includes('goto'), out);
   });
 
+  it('passes the instruction pointer uncast when its temporary was cast', () => {
+    const { out } = run(`void f(int a, int b) {
+  int32_t nLine;
+  int32_t nIp;
+  if (a) {
+    if (b) {
+      return;
+    }
+    nLine = 0x3e3;
+  }
+  nIp = (int32_t)${IP}();
+  ${HALT}("", nIp, nLine);
+  exit(-1);
+}`, [{ line: 0x3e2, guard: 1 }, { line: 0x3e3, guard: 2 }]);
+    // The copy for the repaired way takes the bare call, whatever its parameter's type.
+    assert.ok(out.includes(halt('0x3e2')), out);
+    assert.ok(!out.includes(`(int32_t)${IP}(), 0x3e2`), out);
+  });
+
   it('gives the fall-through of an if without else its line (the Alloc shape)', () => {
     const { out } = run(`void *f(int a, int b) {
   int32_t nLine = 0x40a10d;
