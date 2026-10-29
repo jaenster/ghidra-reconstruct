@@ -31,6 +31,7 @@ import { STAMPER_JAVA, functionStampsScript, parseFunctionStamps, normalizeEntry
 import { printsComparison, javaStringHash, parseCompareSiteOutput } from './compare-sites.js';
 import { printsIf, parseBranchLayout } from './branch-layout.js';
 import { printsCallTemporary, parseCallOrder } from './call-order.js';
+import { ACCESS_ORDER_TOKEN_JAVA, parseAccessOrderRow, printsAccess } from './access-order.js';
 import { printsHaltOrProbe, parseHaltLines, HALT_NAME, IP_NAME, PROBE_NAMES } from './halt-lines.js';
 import { labelsOf, labelFlowItems, labelFlowScript, parseLabelFlow, LABEL_FLOW_SCRIPT } from './label-flow.js';
 import { FactCache, type CachedFacts, type FactEntry } from './fact-cache.js';
@@ -44,6 +45,7 @@ import { createHash } from 'node:crypto';
  *   S  ...   the compare-sites row, as compare-sites.ts prints it (decompile completed only)
  *   B  ...   the branch-layout row
  *   O  ...   the call-order row
+ *   A  ...   the access-order row (access-order.ts)
  *   H  ...   the halt-lines row, when it has halts or probes
  *   D  id,full,shape;...   the types the markup named
  */
@@ -224,14 +226,17 @@ for (int ti = 0; ti < nThreads; ti++) {
           }
           // branch-layout and call-order, over the same lines
           StringBuilder ls = new StringBuilder(), is = new StringBuilder(), es = new StringBuilder(), cs = new StringBuilder();
+          StringBuilder argRow = new StringBuilder(), storeRow = new StringBuilder();
           int count = 0;
           for (ghidra.app.decompiler.ClangLine l : ghidra.app.decompiler.component.DecompilerUtils.toLines(r.getCCodeMarkup())) {
             count++;
             java.util.TreeSet<Long> offs = new java.util.TreeSet<>();
             StringBuilder one = new StringBuilder();
+            StringBuilder oneArg = new StringBuilder(), oneSt = new StringBuilder();
+            int storeOrd = 0;
             for (ghidra.app.decompiler.ClangToken t : l.getAllTokens()) {
               if (t instanceof ghidra.app.decompiler.ClangCommentToken) continue;
-              ghidra.program.model.address.Address x = t.getMinAddress();
+${ACCESS_ORDER_TOKEN_JAVA}              ghidra.program.model.address.Address x = t.getMinAddress();
               if (x != null) {
                 long off = x.getOffset() - base;
                 offs.add(off);
@@ -303,6 +308,8 @@ for (int ti = 0; ti < nThreads; ti++) {
                 .append(prev).append(',').append(pushes).append(',').append(slots);
             }
             if (one.length() > 0) cs.append(cs.length() > 0 ? ";" : "").append(l.getLineNumber()).append(':').append(one);
+            if (oneArg.length() > 0) argRow.append(argRow.length() > 0 ? ";" : "").append(l.getLineNumber()).append(':').append(oneArg);
+            if (oneSt.length() > 0) storeRow.append(storeRow.length() > 0 ? ";" : "").append(l.getLineNumber()).append(':').append(oneSt);
             if (offs.isEmpty()) continue;
             ls.append(ls.length() > 0 ? ";" : "").append(l.getLineNumber()).append(':');
             boolean first = true;
@@ -412,6 +419,7 @@ for (int ti = 0; ti < nThreads; ti++) {
           out.append(sRows);
           out.append("B\\t").append(a).append('\\t').append(count).append('\\t').append(ls).append('\\t').append(is).append('\\t').append(es).append('\\n');
           out.append("O\\t").append(a).append('\\t').append(count).append('\\t').append(cs).append('\\n');
+          out.append("A\\t").append(a).append('\\t').append(count).append('\\t').append(argRow).append('\\t').append(storeRow).append('\\n');
           if (hrow.length() > 0 || probes.length() > 0) out.append("H\\t").append(a).append('\\t').append(hrow).append('\\t').append(probes).append('\\n');
           out.append("D\\t").append(ds).append('\\n');
           rows.put(a, out.toString());
@@ -440,7 +448,7 @@ println(sb.toString());
  */
 export const FACT_SCRIPT_VERSION = createHash('sha1')
   .update(FUNCTION_FACTS_SCRIPT).update(LABEL_FLOW_SCRIPT).update(functionStampsScript([], []))
-  .update('facts-1')
+  .update('facts-2')
   .digest('hex').slice(0, 16);
 
 export function functionFactsScript(batch: string[], threads = 8, timeout = 60): string {
@@ -463,6 +471,7 @@ export interface FunctionFactRow {
   /** The branch-layout and call-order rows, as their scripts print them. */
   branchRow?: string;
   callRow?: string;
+  accessRow?: string;
   haltRow?: string;
   deps: Record<string, TypeStamp>;
 }
@@ -504,6 +513,7 @@ export function parseFunctionFacts(output: string): FunctionFactOutput {
     if (tag === 'S') compare.push(rest);
     else if (tag === 'B') cur.branchRow = rest;
     else if (tag === 'O') cur.callRow = rest;
+    else if (tag === 'A') cur.accessRow = rest;
     else if (tag === 'H') cur.haltRow = rest;
     else if (tag === 'D') {
       for (const part of rest ? rest.split(';') : []) {
@@ -538,6 +548,10 @@ export function selectFacts(text: string, entry: string, row: FunctionFactRow, c
   if (printsCallTemporary(text) && row.callRow) {
     const c = parseCallOrder(row.callRow).get(entry);
     if (c) facts.callOrder = c;
+  }
+  if (printsAccess(text) && row.accessRow) {
+    const a = parseAccessOrderRow(row.accessRow);
+    if (a && a.entry === entry) facts.accessOrder = a.facts;
   }
   if (printsHaltOrProbe(text) && row.haltRow) {
     const h = parseHaltLines(row.haltRow).get(entry);
@@ -578,7 +592,7 @@ export interface FunctionFactStats {
   labelMs: number;
 }
 
-const FACT_KEYS = ['compareSites', 'branchLayout', 'callOrder', 'haltLines', 'labelFlow'] as const;
+const FACT_KEYS = ['compareSites', 'branchLayout', 'callOrder', 'accessOrder', 'haltLines', 'labelFlow'] as const;
 
 /**
  * Attach every per-function fact to the decompiled functions, from the cache where the
@@ -600,7 +614,7 @@ export async function extractFunctionFacts(
   for (const f of functions) {
     if (!f.decompiled || f.isThunk || f.isExternal) continue;
     if (!(printsComparison(f.decompiled) || printsIf(f.decompiled) || printsCallTemporary(f.decompiled)
-        || printsHaltOrProbe(f.decompiled) || labelsOf(f.decompiled).length > 0)) continue;
+        || printsAccess(f.decompiled) || printsHaltOrProbe(f.decompiled) || labelsOf(f.decompiled).length > 0)) continue;
     byEntry.set(normalizeEntry(f.address), f);
   }
   stats.candidates = byEntry.size;
@@ -735,6 +749,7 @@ function attach(f: ExtractedFunction, facts: CachedFacts): void {
   if (facts.compareSites !== undefined) f.compareSites = facts.compareSites;
   if (facts.branchLayout !== undefined) f.branchLayout = facts.branchLayout;
   if (facts.callOrder !== undefined) f.callOrder = facts.callOrder;
+  if (facts.accessOrder !== undefined) f.accessOrder = facts.accessOrder;
   if (facts.haltLines !== undefined) f.haltLines = facts.haltLines;
   if (facts.labelFlow !== undefined) f.labelFlow = { ...(f.labelFlow ?? {}), ...facts.labelFlow };
 }

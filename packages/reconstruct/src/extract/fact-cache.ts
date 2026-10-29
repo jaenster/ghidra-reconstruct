@@ -23,6 +23,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import path from 'node:path';
 import type { BranchLayoutFacts } from './branch-layout.js';
 import type { CallOrderFacts } from './call-order.js';
+import type { AccessOrderFacts } from './access-order.js';
 import type { HaltLineFacts } from './halt-lines.js';
 import type { LabelFlow } from '../types.js';
 import type { TypeStamp, FunctionStamps } from './function-stamps.js';
@@ -32,6 +33,7 @@ export interface CachedFacts {
   compareSites?: string;
   branchLayout?: BranchLayoutFacts;
   callOrder?: CallOrderFacts;
+  accessOrder?: AccessOrderFacts;
   haltLines?: HaltLineFacts;
   labelFlow?: Record<string, LabelFlow>;
 }
