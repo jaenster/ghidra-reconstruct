@@ -20,7 +20,11 @@
  *  - no foreign source names it: source outside the generated tree (hand-written
  *    files built beside it, a binder that imports by address) counts as another unit;
  *  - at least one other function of that unit calls it: VC8 drops a static that
- *    nothing calls;
+ *    nothing calls. A function nothing references at all still had a caller: VC8
+ *    emits a static's copy, in its own convention, for a call it then inlined. Where
+ *    the decompiler printed such a call as the body (`inlinedCalls`, see
+ *    inlined-calls.ts), the function is selected with those sites as its callers and
+ *    defined `inline`, so the restored calls are inlined again;
  *  - it is a plain free function: not a method, not a template member, not a thunk,
  *    library or platform-guarded function, and no other symbol shares its name, so
  *    every mention of the name is a mention of it.
@@ -87,6 +91,11 @@ export interface FileStaticInputs {
   globals: ReadonlyArray<{ name?: string; suggestedName?: string; initializedData?: DataValue }>;
   /** Free functions that must keep external linkage (methods, template members). */
   keepExtern?: (func: ExtractedFunction) => boolean;
+  /**
+   * The functions of its unit that hold an inlined copy of each candidate nothing
+   * references, by the candidate's address key (inlined-calls.ts).
+   */
+  inlinedCalls?: (unreferenced: ReadonlyArray<{ key: string; func: ExtractedFunction; unit: string }>) => ReadonlyMap<string, ReadonlySet<string>>;
   /** Code emitted for a function besides its decompile: an override's body or patches. */
   extraReferenceText?: (func: ExtractedFunction) => string | undefined;
   /**
@@ -181,8 +190,11 @@ export type FileStaticRefusal =
   | 'no caller in its unit';
 
 export interface FileStaticSelection {
-  /** address -> the unit it is static in, and the functions of that unit naming it. */
-  selected: Map<string, { unit: string; referrers: Set<string> }>;
+  /**
+   * address -> the unit it is static in, and the functions of that unit naming it;
+   * `inline` when those are inlined calls the rebuild writes back.
+   */
+  selected: Map<string, { unit: string; referrers: Set<string>; inline?: boolean }>;
   /** Candidates (foreign register storage) kept extern, per reason. */
   refused: Map<FileStaticRefusal, string[]>;
   /** Functions with parameter storage in a register their convention does not use. */
@@ -358,7 +370,8 @@ export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticS
     }
   }
 
-  const selected = new Map<string, { unit: string; referrers: Set<string> }>();
+  const selected = new Map<string, { unit: string; referrers: Set<string>; inline?: boolean }>();
+  const unreferenced: Array<{ key: string; func: ExtractedFunction; unit: string }> = [];
   for (const [key, func] of candidates) {
     const unit = inputs.unitOf.get(key)!;
     const refs = referrers.get(key) ?? [];
@@ -366,8 +379,17 @@ export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticS
     if (foreignReferenced.has(key)) { refuse('named by foreign source', func); continue; }
     if (refs.some(r => r.unit === undefined)) { refuse('referenced from excluded code', func); continue; }
     if (refs.some(r => r.unit !== unit)) { refuse('referenced from another unit', func); continue; }
+    if (refs.length === 0 && inputs.inlinedCalls) { unreferenced.push({ key, func, unit }); continue; }
     if (!refs.some(r => r.call)) { refuse('no caller in its unit', func); continue; }
     selected.set(key, { unit, referrers: new Set(refs.map(r => r.from)) });
+  }
+  if (unreferenced.length > 0) {
+    const sites = inputs.inlinedCalls!(unreferenced);
+    for (const { key, func, unit } of unreferenced) {
+      const from = [...(sites.get(key) ?? [])].filter(f => f !== key && inputs.unitOf.get(f) === unit);
+      if (from.length === 0) { refuse('no caller in its unit', func); continue; }
+      selected.set(key, { unit, referrers: new Set(from), inline: true });
+    }
   }
   return { selected, refused, candidates: candidateCount };
 }

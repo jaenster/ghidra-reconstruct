@@ -179,6 +179,44 @@ describe('selectFileStaticFunctions', () => {
     assert.deepStrictEqual(sel.refused.get('no caller in its unit'), ['Lone']);
   });
 
+  it('selects a function nothing references when its unit holds its body inlined, and defines it inline', () => {
+    const lone = fn('Lone', '00401200', 'A', '  return nValue;', { params: [inEax()] });
+    const all = [lone, caller];
+    const asked: string[] = [];
+    const sel = selectFileStaticFunctions({
+      allFunctions: all, unitOf: unitsOf(all), globals: [],
+      inlinedCalls: unreferenced => {
+        asked.push(...unreferenced.map(u => `${u.func.name}@${u.unit}`));
+        return new Map([['00401200', new Set(['00401100'])]]);
+      },
+    });
+    assert.deepStrictEqual(asked, ['Lone@A']);
+    assert.deepStrictEqual(sel.selected.get('00401200'), { unit: 'A', referrers: new Set(['00401100']), inline: true });
+  });
+
+  it('keeps it extern when the inlined copies are all in other units', () => {
+    const lone = fn('Lone', '00401200', 'A', '  return nValue;', { params: [inEax()] });
+    const elsewhere = fn('Elsewhere', '00402000', 'B', '  return 1;');
+    const all = [lone, caller, elsewhere];
+    const sel = selectFileStaticFunctions({
+      allFunctions: all, unitOf: unitsOf(all), globals: [],
+      inlinedCalls: () => new Map([['00401200', new Set(['00402000'])]]),
+    });
+    assert.strictEqual(sel.selected.size, 0);
+    assert.deepStrictEqual(sel.refused.get('no caller in its unit'), ['Lone']);
+  });
+
+  it('asks only about functions nothing references', () => {
+    const all = [helper, caller];
+    const asked: string[] = [];
+    const sel = selectFileStaticFunctions({
+      allFunctions: all, unitOf: unitsOf(all), globals: [],
+      inlinedCalls: unreferenced => { asked.push(...unreferenced.map(u => u.func.name)); return new Map(); },
+    });
+    assert.deepStrictEqual(asked, []);
+    assert.strictEqual(sel.selected.get('00401000')!.inline, undefined);
+  });
+
   it('does not count a mention in a comment or a string as a call', () => {
     const mentioner = fn('Mentioner', '00401100', 'A', '  /* Helper(1) */\n  Log("Helper(2)");\n  return 0;');
     const all = [helper, mentioner];
@@ -324,5 +362,35 @@ describe('file-static emission', () => {
     assert.ok(definition >= 0, `static definition missing:\n${impl}`);
     assert.ok(forward < caller && caller < definition, 'declared before its first caller, defined after it');
     assert.ok(!/static[^\n]*SharedHelper/.test(impl), 'SharedHelper keeps external linkage');
+  });
+
+  // DRLGGRID_GetCellAddress (0067c4d0) and AlterGridFlag (0067c4f0): no call, the body inlined.
+  it('writes the inlined call back and defines the callee static inline', () => {
+    const cell = fn('GetCell', '00401000', 'Alpha', '  return gaTable[nY] + nX;', {
+      params: [
+        { name: 'nY', dataType: 'int', size: 4, ordinal: 0, storage: 'EAX:4' },
+        { name: 'nX', dataType: 'int', size: 4, ordinal: 1, storage: 'Stack[0x4]:4' },
+      ],
+    });
+    const alter = fn('Alter', '00401040', 'Alpha', '  return gaTable[a] + b + 1;', {
+      params: [
+        { name: 'a', dataType: 'int', size: 4, ordinal: 0, storage: 'Stack[0x4]:4' },
+        { name: 'b', dataType: 'int', size: 4, ordinal: 1, storage: 'Stack[0x8]:4' },
+      ],
+    });
+    const other = fn('Other', '00401080', 'Alpha', '  return gaTable[a] - b;', {
+      params: [
+        { name: 'a', dataType: 'int', size: 4, ordinal: 0, storage: 'Stack[0x4]:4' },
+        { name: 'b', dataType: 'int', size: 4, ordinal: 1, storage: 'Stack[0x8]:4' },
+      ],
+    });
+    const namespaces: ExtractedNamespace[] = [{ name: 'Alpha', fullPath: 'Alpha', functionCount: 3, isClass: false }];
+    const project = generateProject('inlined', [cell, alter, other], [], [], [], namespaces, options, programInfo);
+    const file = (suffix: string) => [...project.files.values()].find(f => f.path.endsWith(suffix))!.content;
+    const impl = file('Alpha.cpp');
+    assert.ok(/^static inline int __stdcall GetCell\(int nY, int nX\) \{$/m.test(impl), `static inline definition missing:\n${impl}`);
+    assert.ok(/return GetCell\(a, b\) \+ 1;/.test(impl), `call not restored:\n${impl}`);
+    assert.ok(/return gaTable\[a\] - b;/.test(impl), `an unrelated body must stay:\n${impl}`);
+    assert.ok(!/\bGetCell\s*\(/.test(file('Alpha.h')), 'a static is not declared in the header');
   });
 });
