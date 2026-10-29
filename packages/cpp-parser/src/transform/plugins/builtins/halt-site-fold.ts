@@ -30,6 +30,11 @@
  * Anything with another live effect in the tail, a definition that is not adjacent, or
  * a value that is not a plain temporary is left exactly as it was.
  *
+ * Before either shape, with the instructions' facts (`haltLines`), every way into a shared
+ * halt whose printed line is not the one its PUSH chose gets its own halt with that line
+ * (see "Shape 0" below): the decompiler reads the line at one stack depth for ways that
+ * arrive at different depths.
+ *
  * A halt that takes the place of code keeps that code's source position: a folded halt
  * spans from its first definition, a copy sits where the jump or the definition it
  * replaces was. `branch-layout` reads a statement's position as where its code lies in
@@ -41,15 +46,48 @@ import type { SourceLocation } from '../../../lexer/index.js';
 import type {
   ASTNode, FunctionDecl, CompoundStmt, ExprStmt, DeclStmt, VariableDecl,
   LabelStmt, GotoStmt, IfStmt, Statement, Expression, CallExpr, AssignExpr,
-  Identifier, QualifiedId, UnaryExpr, ParenExpr, CStyleCastExpr,
+  Identifier, QualifiedId, UnaryExpr, ParenExpr, CStyleCastExpr, IntegerLiteralExpr, BinaryExpr,
 } from '../../../ast/nodes.js';
 import { traverseAST } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
-import { Stmt } from '../../../ast/factory.js';
+import { Stmt, Expr } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { gotoReport } from './goto-cleanup/report.js';
+import { negateCondition } from './assert-order.js';
+import { storeIsDead } from './store-liveness.js';
 
-export interface HaltSiteFoldOptions extends PluginOptions {}
+/** One way into a halt as the instructions show it (reconstruct's extract/halt-lines.ts). */
+export interface HaltLinePath {
+  /** The line the PUSH right before this way pushes; null when it is not a `push imm`. */
+  line: number | null;
+  /** Offset of the conditional branch that selects this way; null when there is none. */
+  guard: number | null;
+}
+
+/** A halt CALL of the function and every way into the `call GetInstructionPointer` before it. */
+export interface HaltLineSite {
+  at: number;
+  ip: number;
+  paths: HaltLinePath[];
+}
+
+/** What the line repair did for one function, or why it left the function as printed. */
+export interface HaltLineRepairEvent {
+  entries: number;
+  lines: number[];
+  refused?: string;
+}
+
+export interface HaltSiteFoldOptions extends PluginOptions {
+  /**
+   * The function's halts as the instructions show them. With them, every way into a shared
+   * halt gets the line its own PUSH chose before anything is folded (see `repairHaltLines`).
+   */
+  haltLines?: readonly HaltLineSite[];
+  /** The original's conditional-branch offset per `if` line of the parsed text. */
+  branchLayout?: { ifs: ReadonlyMap<number, number> };
+  onRepair?: (e: HaltLineRepairEvent) => void;
+}
 
 const HALT_CALLEES = new Set(['ERROR_UnrecoverableInternalError_Halt']);
 const IP_CALLEES = new Set(['GetInstructionPointer']);
@@ -66,6 +104,8 @@ export interface HaltSiteFoldStats {
   /** Joins whose line is chosen per branch: halt copies written into the branches. */
   joined: number;
   joinLeaves: number;
+  /** Ways into a shared halt given the line the instructions pushed on them. */
+  linesRepaired: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -669,6 +709,538 @@ function joinHalt(stmts: readonly Statement[]): { stmts: Statement[]; leaves: nu
 }
 
 // ---------------------------------------------------------------------------
+// Shape 0: give every way into a shared halt the line its own PUSH chose
+// ---------------------------------------------------------------------------
+//
+// MSVC tail-merges a function's assertions: each failing branch pushes its own line and
+// jumps to one shared `call GetInstructionPointer`, and the branches may arrive there at
+// different stack depths. The decompiler reads the line at one depth for all of them, so a
+// way that arrives one slot off prints whatever sits in that slot: a CALL's return address
+// (`nErrorLine = 0x598e36;`), a parameter, an unrelated local. The instructions say which
+// line each way pushed; this step gives each way the halt it was written as,
+// `Halt("", GetInstructionPointer(), LINE); exit(-1);`, where the printed value is wrong,
+// and leaves every way that already carries one of the pushed lines alone. The shapes
+// below then fold and dissolve the tail as usual.
+//
+// A way is matched to a pushed line only when that is forced: the ways the decompile
+// prints must be exactly as many as the instructions have, the lines already printed
+// must all be pushed lines, and what is left must pair up one to one - a single way and a
+// single line, or each way under an `if` whose conditional branch is the one that selects
+// a pushed line. Anything else leaves the function as printed and says why.
+
+/** The integer a literal argument holds, through casts and parentheses. */
+function constValue(e: Expression): number | null {
+  let cur = e;
+  while (cur.kind === NodeKind.ParenExpr || cur.kind === NodeKind.CStyleCastExpr) {
+    cur = cur.kind === NodeKind.ParenExpr
+      ? (cur as ParenExpr).expression
+      : (cur as CStyleCastExpr).expression;
+  }
+  if (cur.kind === NodeKind.IntegerLiteral) return Number((cur as IntegerLiteralExpr).value);
+  return null;
+}
+
+const MAX_REPAIR_ENTRIES = 32;
+
+type Way =
+  /** a `goto` to the tail; `def` is the definition of the line right before it */
+  | { kind: 'goto'; stmt: Statement; def: Statement | null; value: number | null; guard: IfStmt | null; parts?: Expression[] }
+  /** control falls into the tail from the start of its block */
+  | { kind: 'before'; stmt: Statement; value: number | null; guard: IfStmt | null; parts?: Expression[] }
+  /** control leaves `stmt` and reaches the tail; `def` when `stmt` defines the line */
+  | { kind: 'after'; stmt: Statement; def: boolean; value: number | null }
+  /** the false side of an `if` without an else reaches the tail */
+  | { kind: 'else'; stmt: IfStmt; value: number | null; parts?: Expression[] }
+  /** another printed copy of the halt; `def` the definition of its line right before it */
+  | { kind: 'copy'; stmt: Statement; def: Statement | null; value: number | null };
+
+interface HaltPrint {
+  /** The block holding it, and its index there (the halt statement, labels included). */
+  list: readonly Statement[];
+  owner: CompoundStmt;
+  index: number;
+  call: CallExpr;
+  halt: ExprStmt;
+  exit: Statement;
+}
+
+/** Statement-valued fields a statement node can hold. */
+const STMT_FIELDS = ['statements', 'thenBranch', 'elseBranch', 'body', 'statement', 'init'] as const;
+
+function isStatementNode(v: unknown): v is Statement {
+  return !!v && typeof v === 'object' && typeof (v as ASTNode).kind === 'string'
+    && ((v as ASTNode).kind as string).endsWith('Stmt');
+}
+
+/** Visit every statement under `root`, with the statement it sits in. */
+function walkStatements(root: Statement, visit: (s: Statement, parent: Statement | null) => void): void {
+  const go = (s: Statement, parent: Statement | null): void => {
+    visit(s, parent);
+    for (const f of STMT_FIELDS) {
+      const v = (s as unknown as Record<string, unknown>)[f];
+      if (Array.isArray(v)) { for (const c of v) if (isStatementNode(c)) go(c, s); }
+      else if (isStatementNode(v)) go(v, s);
+    }
+  };
+  go(root, null);
+}
+
+/**
+ * Rebuild `root` with each statement in `replace` swapped for its sequence (spliced into a
+ * block, wrapped in one where the statement stands alone) and each `if` in `addElse` given
+ * that else branch. Identity-keyed: the maps hold nodes of `root` itself.
+ */
+function rebuildStatements(
+  root: Statement,
+  replace: ReadonlyMap<Statement, Statement[]>,
+  addElse: ReadonlyMap<IfStmt, Statement[]>,
+): Statement {
+  // A replacement may hold statements of `root` (the one it replaces, or ones it moves):
+  // those are rebuilt too.
+  const expand = (s: Statement): Statement[] => {
+    const r = replace.get(s);
+    return r ? r.flatMap(x => (x === s ? [inner(s)] : expand(x))) : [inner(s)];
+  };
+  const one = (s: Statement): Statement => {
+    const parts = expand(s);
+    return parts.length === 1 ? parts[0] : Stmt.compound(parts);
+  };
+  const inner = (s: Statement): Statement => {
+    let changed = false;
+    const patch: Record<string, unknown> = {};
+    for (const f of STMT_FIELDS) {
+      const v = (s as unknown as Record<string, unknown>)[f];
+      if (Array.isArray(v)) {
+        const out: unknown[] = [];
+        let c = false;
+        for (const x of v) {
+          if (!isStatementNode(x)) { out.push(x); continue; }
+          const ys = expand(x);
+          if (ys.length !== 1 || ys[0] !== x) c = true;
+          out.push(...ys);
+        }
+        if (c) { patch[f] = out; changed = true; }
+      } else if (isStatementNode(v)) {
+        const y = one(v);
+        if (y !== v) { patch[f] = y; changed = true; }
+      }
+    }
+    if (s.kind === NodeKind.IfStmt && addElse.has(s as IfStmt)) {
+      patch.elseBranch = Stmt.compound(addElse.get(s as IfStmt)!);
+      changed = true;
+    }
+    return changed ? updateNode(s, patch as Partial<Statement>) : s;
+  };
+  return one(root);
+}
+
+/** The operands of a chain of `op` at the top of `e`, left to right, through parentheses. */
+function operands(e: Expression, op: '&&' | '||'): Expression[] {
+  let cur = e;
+  while (cur.kind === NodeKind.ParenExpr) cur = (cur as ParenExpr).expression;
+  if (cur.kind === NodeKind.BinaryExpr && (cur as BinaryExpr).operator === op) {
+    return [...operands((cur as BinaryExpr).left, op), ...operands((cur as BinaryExpr).right, op)];
+  }
+  return [e];
+}
+
+/** A declaration in `s` (not nested deeper) of a name `body` declares more than once. */
+function declaresElsewhere(body: CompoundStmt, s: Statement): boolean {
+  if (s.kind !== NodeKind.DeclStmt) return false;
+  for (const d of (s as DeclStmt).declarations) {
+    if (d.kind !== NodeKind.VariableDecl) return true;
+    let n = 0;
+    for (const x of traverseAST(body)) {
+      if (x.kind === NodeKind.VariableDecl && (x as VariableDecl).name.name === (d as VariableDecl).name.name) n++;
+    }
+    if (n > 1) return true;
+  }
+  return false;
+}
+
+/**
+ * Give each way into the function's shared halt the line the instructions pushed on it.
+ * Null when nothing changed; `report` hears what was done or refused.
+ */
+function repairHaltLines(
+  body: CompoundStmt,
+  sites: readonly HaltLineSite[],
+  ifs: ReadonlyMap<number, number> | undefined,
+  report: ((e: HaltLineRepairEvent) => void) | undefined,
+): { body: CompoundStmt; repaired: string[] } | null {
+  // One halt CALL in the function, so every printed halt is a copy of it.
+  if (sites.length !== 1 || sites[0].paths.length < 2) return null;
+  const site = sites[0];
+  const refuse = (why: string): null => { report?.({ entries: 0, lines: [], refused: why }); return null; };
+  if (site.paths.some(p => p.line === null)) return refuse('a way into the halt pushes no immediate line');
+
+  // Every printed halt, with the block it sits in.
+  const parents = new Map<Statement, Statement | null>();
+  const prints: HaltPrint[] = [];
+  walkStatements(body, (s, parent) => {
+    parents.set(s, parent);
+    if (s.kind !== NodeKind.CompoundStmt) return;
+    const list = (s as CompoundStmt).statements;
+    for (let i = 0; i + 1 < list.length; i++) {
+      const p = peel(list[i]);
+      const call = haltCall(p.inner);
+      if (call && isExitStmt(list[i + 1])) {
+        prints.push({ list, owner: s as CompoundStmt, index: i, call, halt: p.inner as ExprStmt, exit: list[i + 1] });
+      }
+    }
+  });
+  if (prints.length === 0) return null;
+
+  // Each printed halt with the definitions right before it that feed it: the instruction
+  // pointer's and the line's (`nLine = 0x1ef; nAddress = GetInstructionPointer(); Halt(..)`).
+  interface Run { print: HaltPrint; start: number; lineDef: Statement | null; value: number | null; open: boolean; ip: Expression | null; ways: Way[] }
+  const runOf = (p: HaltPrint): Run | null => {
+    const ipName = argIdent(p.call.arguments[1]);
+    const lineName = argIdent(p.call.arguments[2]);
+    let ip: Expression | null = isIpCall(p.call.arguments[1]) ? p.call.arguments[1] : null;
+    let lineDef: Statement | null = null;
+    let lineRhs: Expression | null = null;
+    let start = p.index;
+    // A plain store to another local may sit in between (the compiler interleaves them).
+    for (let j = p.index - 1, skipped = 0; j >= 0 && (ip === null || (lineName !== null && lineDef === null)); j--) {
+      const d = asDef(p.list[j]);
+      if (!d) break;
+      if (ip === null && d.name === ipName && isIpCall(d.rhs)) ip = d.rhs;
+      else if (lineDef === null && lineName !== null && d.name === lineName && !carriesComment(d.stmt)) { lineDef = p.list[j]; lineRhs = d.rhs; }
+      else if (!d.isDecl && d.name !== ipName && d.name !== lineName && !mayHaveSideEffects(d.rhs) && ++skipped <= 4) { /* step over */ }
+      else break;
+      start = j;
+    }
+    for (let j = start + 1; j <= p.index; j++) if (peel(p.list[j]).labels.length > 0) return null;
+    const value = lineRhs !== null ? constValue(lineRhs) : constValue(p.call.arguments[2]);
+    return { print: p, start, lineDef, value, open: lineRhs === null && value === null, ip, ways: [] };
+  };
+  const runs: Run[] = [];
+  for (const p of prints) {
+    const r = runOf(p);
+    if (!r) return refuse('a label inside a halt');
+    runs.push(r);
+  }
+
+  // A tail several ways meet in is a copy whose line comes from further up, or one a jump
+  // reaches. Every other copy is a way of its own, and its line claims a pushed line.
+  const jumpedTo = (r: Run): boolean => peel(r.print.list[r.start]).labels.length > 0;
+  const tails = runs.filter(r => r.open || jumpedTo(r));
+  const ways: Way[] = runs
+    .filter(r => !tails.includes(r))
+    .map(r => ({ kind: 'copy', stmt: r.print.list[r.print.index], def: r.lineDef, value: r.value }));
+  const ipCall: Expression | null = runs.find(r => r.ip !== null)?.ip ?? null;
+  if (!ipCall) return refuse('no instruction pointer to copy');
+
+  const lineVars: string[] = [];
+  for (const tailRun of tails) {
+    const tail = tailRun.print;
+    const before = ways.length;
+    const lineArg = tail.call.arguments[2];
+    const lineVar = argIdent(lineArg);
+    if (lineVar !== null) lineVars.push(lineVar);
+    const fixed = tailRun.value;
+    const list = tail.list;
+    const k = tailRun.start;
+    const labels = new Set(peel(list[k]).labels.map(l => l.label.name));
+    const defValue = (s: Statement | undefined): { stmt: Statement; value: number | null } | null => {
+      if (!s || lineVar === null) return null;
+      const dd = asDef(s);
+      if (!dd || dd.isDecl || dd.name !== lineVar || dd.labels.length > 0 || carriesComment(dd.stmt)) return null;
+      return { stmt: s, value: constValue(dd.rhs) };
+    };
+    const ifOf = (s: Statement): IfStmt | null => {
+      let p = parents.get(s) ?? null;
+      if (p && p.kind === NodeKind.CompoundStmt) {
+        const c = p as CompoundStmt;
+        if (c.statements[0] !== s && !(c.statements.length >= 2 && defValue(c.statements[0]) && c.statements[1] === s)) return null;
+        p = parents.get(p) ?? null;
+      }
+      return p && p.kind === NodeKind.IfStmt ? p as IfStmt : null;
+    };
+
+    // `if (A || B) { <the way> }` with nothing else in the branch: the compiler gave each
+    // operand its own jump, so each is a way of its own.
+    const orParts = (guard: IfStmt | null, s: Statement): Expression[] | undefined => {
+      if (!guard || guard.elseBranch || guard.init) return undefined;
+      const t = guard.thenBranch;
+      if (t !== s && !(t.kind === NodeKind.CompoundStmt && (t as CompoundStmt).statements[0] === s
+          && (s.kind !== NodeKind.GotoStmt || (t as CompoundStmt).statements.length === 1))) return undefined;
+      const parts = operands(guard.condition, '||');
+      return parts.length > 1 ? parts : undefined;
+    };
+
+    // Jumps into the tail.
+    let bad: string | null = null;
+    walkStatements(body, s => {
+      if (s.kind !== NodeKind.CompoundStmt && s.kind !== NodeKind.IfStmt) return;
+      const visitList = (stmts: readonly Statement[]) => {
+        stmts.forEach((g, i) => {
+          const p = peel(g);
+          if (p.inner.kind !== NodeKind.GotoStmt || !labels.has((p.inner as GotoStmt).label.name)) return;
+          if (p.labels.length > 0) { bad = 'a labelled jump into the halt'; return; }
+          const dv = i > 0 ? defValue(stmts[i - 1]) : null;
+          const guard = ifOf(g);
+          ways.push({ kind: 'goto', stmt: g, def: dv?.stmt ?? null, value: dv ? dv.value : fixed, guard, parts: dv ? undefined : orParts(guard, g) });
+        });
+      };
+      if (s.kind === NodeKind.CompoundStmt) visitList((s as CompoundStmt).statements);
+      else for (const b of [(s as IfStmt).thenBranch, (s as IfStmt).elseBranch]) {
+        if (b && b.kind === NodeKind.GotoStmt && labels.has((b as GotoStmt).label.name)) {
+          ways.push({ kind: 'goto', stmt: b, def: null, value: fixed, guard: s as IfStmt, parts: orParts(s as IfStmt, b) });
+        }
+      }
+    });
+    if (bad) return refuse(bad);
+
+    // Falling into the tail: thread through the statement before it.
+    const thread = (s: Statement): boolean => {
+      if (ways.length > MAX_REPAIR_ENTRIES) return false;
+      const inner = peel(s).inner;
+      if (terminates(inner) || inner.kind === NodeKind.BreakStmt || inner.kind === NodeKind.ContinueStmt) return true;
+      const dv = defValue(inner);
+      if (dv) { ways.push({ kind: 'after', stmt: s, def: true, value: dv.value }); return true; }
+      if (inner.kind === NodeKind.IfStmt) {
+        const i = inner as IfStmt;
+        if (i.init) return false;
+        if (!thread(i.thenBranch)) return false;
+        if (i.elseBranch) return thread(i.elseBranch);
+        const parts = operands(i.condition, '&&');
+        ways.push({ kind: 'else', stmt: i, value: fixed, parts: parts.length > 1 ? parts : undefined });
+        return true;
+      }
+      if (inner.kind === NodeKind.CompoundStmt) {
+        const c = inner as CompoundStmt;
+        if (c.statements.length === 0) return false;
+        return thread(c.statements[c.statements.length - 1]);
+      }
+      ways.push({ kind: 'after', stmt: s, def: false, value: fixed });
+      return true;
+    };
+    if (k === 0) {
+      const guard = ifOf(list[0]);
+      ways.push({ kind: 'before', stmt: list[0], value: fixed, guard, parts: orParts(guard, list[0]) });
+    }
+    else if (!thread(list[k - 1])) return refuse('cannot follow the way that falls into the halt');
+    if (ways.length > MAX_REPAIR_ENTRIES) return refuse('too many ways into the halt');
+    tailRun.ways = ways.slice(before);
+  }
+
+  // Pair the ways with the pushed lines. A way split over the operands of its condition
+  // takes one line per operand.
+  const weight = (w: Way): number => ('parts' in w && w.parts ? w.parts.length : 1);
+  const total = ways.reduce((n, w) => n + weight(w), 0);
+  if (total !== site.paths.length) {
+    return refuse(`${total} printed way${total === 1 ? '' : 's'} for ${site.paths.length} pushed lines`);
+  }
+  const left = [...site.paths];
+  const wrong: Way[] = [];
+  for (const w of ways) {
+    const at = w.value === null ? -1 : left.findIndex(p => p.line === w.value);
+    if (at >= 0 && weight(w) === 1) left.splice(at, 1);
+    else wrong.push(w);
+  }
+  if (wrong.length === 0) return null;
+  if (wrong.reduce((n, w) => n + weight(w), 0) !== left.length) return refuse('the printed lines are not a subset of the pushed lines');
+
+  const assign = new Map<Way, number[]>();
+  const ifLine = new Map<number, number>();
+  walkStatements(body, s => {
+    if (s.kind === NodeKind.IfStmt && s.location && s.location.start.line > 0) {
+      ifLine.set(s.location.start.line, (ifLine.get(s.location.start.line) ?? 0) + 1);
+    }
+  });
+  const cbranch = (i: IfStmt | null): number | null => {
+    if (!i || !ifs || !i.location || ifLine.get(i.location.start.line) !== 1) return null;
+    return ifs.get(i.location.start.line) ?? null;
+  };
+  const split = wrong.filter(w => weight(w) > 1);
+  const single = wrong.filter(w => weight(w) === 1);
+  if (split.length > 1) return refuse('several split ways with a wrong line');
+  if (split.length === 0 && new Set(left.map(p => p.line)).size === 1) {
+    for (const w of wrong) assign.set(w, [left[0].line as number]);
+  } else if (split.length === 0 && single.length === 1) {
+    assign.set(single[0], [left[0].line as number]);
+  } else {
+    // Each single way under an `if` whose conditional branch selects exactly one leftover
+    // line; a split way takes what is left.
+    const pool = [...left];
+    for (const w of single) {
+      const g = cbranch(w.kind === 'goto' || w.kind === 'before' ? w.guard : w.kind === 'else' ? w.stmt : null);
+      const hit = g === null ? [] : pool.filter(p => p.guard === g);
+      if (hit.length !== 1) return refuse(`${wrong.length} ways with a wrong line and no branch that tells them apart`);
+      assign.set(w, [hit[0].line as number]);
+      pool.splice(pool.indexOf(hit[0]), 1);
+    }
+    if (split.length === 1) {
+      // The operands take the rest in operand order: each operand's test and jump come
+      // before the next one's, so their branches ascend.
+      if (pool.length !== weight(split[0])) return refuse('the split way does not take what is left');
+      if (pool.some(p => p.guard === null) || new Set(pool.map(p => p.guard)).size !== pool.length) {
+        return refuse('the operands of a split way have no branches to order them by');
+      }
+      assign.set(split[0], [...pool].sort((a, b) => (a.guard as number) - (b.guard as number)).map(p => p.line as number));
+    } else if (pool.length !== 0) {
+      return refuse('the branches do not pair the ways with the leftover lines');
+    }
+  }
+
+  // Rewrite.
+  const model = prints[0];
+  // A definition `v = rhs;` or `T v = rhs;` with another right-hand side, labels kept.
+  const withRhs = (stmt: Statement, rhs: Expression): Statement => {
+    const p = peel(stmt);
+    if (p.inner.kind === NodeKind.ExprStmt) {
+      const a = (p.inner as ExprStmt).expression as AssignExpr;
+      return relabel(p.labels, updateNode(p.inner as ExprStmt, { expression: updateNode(a, { right: rhs } as Partial<AssignExpr>) } as Partial<ExprStmt>));
+    }
+    const d = p.inner as DeclStmt;
+    const v = d.declarations[0] as VariableDecl;
+    return relabel(p.labels, updateNode(d, { declarations: [updateNode(v, { initializer: rhs } as Partial<VariableDecl>)] } as Partial<DeclStmt>));
+  };
+  const copyWith = (line: number, at: Statement): Statement[] => {
+    const call = updateNode(model.call, {
+      arguments: [model.call.arguments[0], ipCall as Expression, Expr.intLiteral(line, 16)],
+    } as Partial<CallExpr>);
+    // A node of its own: the rewrite below keys statements by identity.
+    return [placedAt(updateNode(model.halt, { expression: call } as Partial<ExprStmt>), at), { ...model.exit }];
+  };
+  const replace = new Map<Statement, Statement[]>();
+  const addElse = new Map<IfStmt, Statement[]>();
+  const put = (k: Statement, v: Statement[]): boolean => {
+    if (replace.has(k)) return false;
+    replace.set(k, v);
+    return true;
+  };
+  // `if (p1) {halt l1} .. if (pn) <last>`: the split of `guard`, each operand its own halt.
+  const splitIf = (guard: IfStmt, parts: Expression[], lines: number[], last: Statement): Statement[] => {
+    const out: Statement[] = [];
+    parts.forEach((cond, i) => {
+      const then = i === parts.length - 1 ? last : Stmt.compound(copyWith(lines[i], guard));
+      const keep = i === 0 ? {} : { leadingTrivia: [], trailingTrivia: [] };
+      out.push(updateNode(guard, { condition: cond, thenBranch: then, elseBranch: null, ...keep } as Partial<IfStmt>));
+    });
+    return out;
+  };
+  let clash = false;
+  for (const [w, lines] of assign) {
+    const line = lines[0];
+    switch (w.kind) {
+      case 'copy': {
+        if (w.def) {
+          clash ||= !put(w.def, [withRhs(w.def, Expr.intLiteral(line, 16))]);
+          break;
+        }
+        const p = peel(w.stmt);
+        const call = haltCall(p.inner)!;
+        const fixedCall = updateNode(call, {
+          arguments: [call.arguments[0], call.arguments[1], Expr.intLiteral(line, 16)],
+        } as Partial<CallExpr>);
+        clash ||= !put(w.stmt, [relabel(p.labels, updateNode(p.inner as ExprStmt, { expression: fixedCall } as Partial<ExprStmt>))]);
+        break;
+      }
+      case 'goto':
+        if (w.parts && w.guard) {
+          const last = Stmt.compound(copyWith(lines[lines.length - 1], w.stmt));
+          clash ||= !put(w.guard, splitIf(w.guard, w.parts, lines, last));
+          break;
+        }
+        if (w.def) clash ||= !put(w.def, []);
+        clash ||= !put(w.stmt, copyWith(line, w.def ?? w.stmt));
+        break;
+      case 'before':
+        if (w.parts && w.guard) {
+          const t = w.guard.thenBranch;
+          const rest = t.kind === NodeKind.CompoundStmt ? [...(t as CompoundStmt).statements] : [t];
+          const last = updateNode(t.kind === NodeKind.CompoundStmt ? t as CompoundStmt : Stmt.compound([t]),
+            { statements: [...copyWith(lines[lines.length - 1], w.stmt), ...rest] } as Partial<CompoundStmt>);
+          clash ||= !put(w.guard, splitIf(w.guard, w.parts, lines, last));
+          break;
+        }
+        clash ||= !put(w.stmt, [...copyWith(line, w.stmt), w.stmt]);
+        break;
+      case 'after': {
+        if (!w.def) { clash ||= !put(w.stmt, [w.stmt, ...copyWith(line, w.stmt)]); break; }
+        // The definition gives way to the halt; a jump that landed on it lands on the halt.
+        const [h, x] = copyWith(line, w.stmt);
+        clash ||= !put(w.stmt, [relabel(peel(w.stmt).labels, h), x]);
+        break;
+      }
+      case 'else':
+        if (w.parts) {
+          // `if (A && B) T` falling into the halt: each operand that fails halts with its
+          // own line, then T runs where the condition held.
+          const t = w.stmt.thenBranch;
+          const rest = t.kind === NodeKind.CompoundStmt ? [...(t as CompoundStmt).statements] : [t];
+          if (rest.some(r => declaresElsewhere(body, r))) return refuse('the branch declares a name the function declares again');
+          const halts = w.parts.map((cond, i) => updateNode(w.stmt, {
+            condition: negateCondition(cond), thenBranch: Stmt.compound(copyWith(lines[i], w.stmt)), elseBranch: null,
+            ...(i === 0 ? {} : { leadingTrivia: [], trailingTrivia: [] }),
+          } as Partial<IfStmt>));
+          clash ||= !put(w.stmt, [...halts, ...rest]);
+          break;
+        }
+        addElse.set(w.stmt, copyWith(line, w.stmt));
+        break;
+    }
+  }
+  if (clash) return refuse('two ways rewrite the same statement');
+
+  // A tail every way of which now has its own halt is dead: it goes, with the definitions
+  // that fed it.
+  for (const t of tails) {
+    if (!t.ways.every(w => assign.has(w))) continue;
+    const p = t.print;
+    for (let j = t.start; j <= p.index + 1; j++) {
+      const st = p.list[j];
+      const r = replace.get(st);
+      replace.set(st, r ? r.filter(x => x !== st) : []);
+    }
+  }
+  report?.({ entries: [...assign.values()].reduce((n, l) => n + l.length, 0), lines: [...assign.values()].flat() });
+  return {
+    body: rebuildStatements(body, replace, addElse) as CompoundStmt,
+    repaired: lineVars,
+  };
+}
+
+/**
+ * Remove the stores of literals to `names` that nothing reads any more: after the repair,
+ * the value a wrong way carried has no reader. A variable nothing reads at all loses its
+ * declaration too.
+ */
+function dropDeadConstStores(body: CompoundStmt, names: ReadonlySet<string>): CompoundStmt {
+  const replace = new Map<Statement, Statement[]>();
+  for (const name of names) {
+    walkStatements(body, (block) => {
+      if (block.kind !== NodeKind.CompoundStmt) return;
+      (block as CompoundStmt).statements.forEach((s, i) => {
+        if (carriesComment(s)) return;
+        if (s.kind === NodeKind.ExprStmt) {
+          const e = (s as ExprStmt).expression;
+          if (e.kind !== NodeKind.AssignExpr || (e as AssignExpr).operator !== '='
+              || (e as AssignExpr).left.kind !== NodeKind.Identifier
+              || ((e as AssignExpr).left as Identifier).name !== name
+              || constValue((e as AssignExpr).right) === null) return;
+          if (storeIsDead(body, block as CompoundStmt, i, name)) replace.set(s, []);
+        } else if (s.kind === NodeKind.DeclStmt) {
+          const d = s as DeclStmt;
+          if (d.declarations.length !== 1 || d.declarations[0].kind !== NodeKind.VariableDecl) return;
+          const v = d.declarations[0] as VariableDecl;
+          if (v.name.name !== name || !v.initializer || v.initializer.kind === NodeKind.InitListExpr
+              || constValue(v.initializer as Expression) === null) return;
+          if (storeIsDead(body, block as CompoundStmt, i, name)) {
+            replace.set(s, [updateNode(d, { declarations: [updateNode(v, { initializer: undefined } as Partial<VariableDecl>)] } as Partial<DeclStmt>)]);
+          }
+        }
+      });
+    });
+  }
+  const out = replace.size > 0 ? rebuildStatements(body, replace, new Map()) as CompoundStmt : body;
+  return dropDeadDecls(out, names);
+}
+
+// ---------------------------------------------------------------------------
 // Declarations nobody reads any more
 // ---------------------------------------------------------------------------
 
@@ -712,16 +1284,32 @@ function dropDeadDecls(body: CompoundStmt, names: ReadonlySet<string>): Compound
 // The plugin
 // ---------------------------------------------------------------------------
 
-export function foldHaltSites_forTest(fn: FunctionDecl): { fn: FunctionDecl; stats: HaltSiteFoldStats } {
-  const stats: HaltSiteFoldStats = { folded: 0, tailsInlined: 0, gotosReplaced: 0, joined: 0, joinLeaves: 0 };
-  const out = rewriteFunction(fn, stats);
+export function foldHaltSites_forTest(
+  fn: FunctionDecl,
+  options: HaltSiteFoldOptions = {},
+): { fn: FunctionDecl; stats: HaltSiteFoldStats } {
+  const stats: HaltSiteFoldStats = { folded: 0, tailsInlined: 0, gotosReplaced: 0, joined: 0, joinLeaves: 0, linesRepaired: 0 };
+  const out = rewriteFunction(fn, stats, options);
   return { fn: out ?? fn, stats };
 }
 
-function rewriteFunction(node: FunctionDecl, stats: HaltSiteFoldStats): FunctionDecl | undefined {
+function rewriteFunction(node: FunctionDecl, stats: HaltSiteFoldStats, options: HaltSiteFoldOptions = {}): FunctionDecl | undefined {
   if (!node.body) return undefined;
   let body: CompoundStmt = node.body;
   const touched = new Set<string>();
+
+  // 0. every way into a shared halt gets the line its own PUSH chose
+  const repairedVars = new Set<string>();
+  if (options.haltLines) {
+    const r = repairHaltLines(body, options.haltLines, options.branchLayout?.ifs, (e) => {
+      if (!e.refused) stats.linesRepaired += e.entries;
+      options.onRepair?.(e);
+    });
+    if (r) {
+      body = r.body;
+      for (const v of r.repaired) repairedVars.add(v);
+    }
+  }
 
   // 1. fold the definitions in front of each halt
   const fold = createTransformer({
@@ -788,14 +1376,15 @@ function rewriteFunction(node: FunctionDecl, stats: HaltSiteFoldStats): Function
   }
 
   if (touched.size > 0) body = dropDeadDecls(body, touched);
-  if (stats.folded === 0 && stats.gotosReplaced === 0 && stats.joined === 0) return undefined;
+  if (repairedVars.size > 0) body = dropDeadConstStores(body, repairedVars);
+  if (stats.folded === 0 && stats.gotosReplaced === 0 && stats.joined === 0 && stats.linesRepaired === 0) return undefined;
   return updateNode(node, { body } as Partial<FunctionDecl>);
 }
 
-function createHaltSiteFoldTransformer(_options: HaltSiteFoldOptions = {}): Transformer {
+function createHaltSiteFoldTransformer(options: HaltSiteFoldOptions = {}): Transformer {
   return createTransformer({
     visitFunctionDecl(node: FunctionDecl): ASTNode | undefined {
-      return rewriteFunction(node, { folded: 0, tailsInlined: 0, gotosReplaced: 0, joined: 0, joinLeaves: 0 });
+      return rewriteFunction(node, { folded: 0, tailsInlined: 0, gotosReplaced: 0, joined: 0, joinLeaves: 0, linesRepaired: 0 }, options);
     },
   });
 }

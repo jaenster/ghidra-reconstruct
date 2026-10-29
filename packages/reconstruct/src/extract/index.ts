@@ -51,6 +51,7 @@ import { extractLabelFlow } from './label-flow.js';
 import { extractCompareSites } from './compare-sites.js';
 import { extractBranchLayout } from './branch-layout.js';
 import { extractCallOrder } from './call-order.js';
+import { extractHaltLines } from './halt-lines.js';
 import { extractAllStrings } from './strings.js';
 import { extractAllNamespaces } from './namespaces.js';
 import type { AnalyzedDataSymbol } from '../types.js';
@@ -254,6 +255,13 @@ export async function extractAll(
       await extractCallOrder(connection, functions);
     } catch (err) {
       console.warn(`  Call order unavailable: ${(err as Error).message}`);
+    }
+    // The line each way into a halt pushes, and the return addresses a stack probe leaves
+    // in the frame (read-only; see halt-lines.ts).
+    try {
+      await extractHaltLines(connection, functions);
+    } catch (err) {
+      console.warn(`  Halt lines unavailable: ${(err as Error).message}`);
     }
   }
 

@@ -325,7 +325,15 @@ export {
 export {
   haltSiteFoldPlugin,
   type HaltSiteFoldOptions,
+  type HaltLineSite,
+  type HaltLinePath,
+  type HaltLineRepairEvent,
 } from './builtins/halt-site-fold.js';
+
+export {
+  probeReturnStorePlugin,
+  type ProbeReturnStoreOptions,
+} from './builtins/probe-return-store.js';
 
 export {
   assertOrderPlugin,
@@ -560,6 +568,7 @@ import { deadBranchCleanupPlugin } from './builtins/dead-branch-cleanup.js';
 import { declInitMergePlugin } from './builtins/decl-init-merge.js';
 import { gotoCrossesInitPlugin } from './builtins/goto-crosses-init.js';
 import { haltSiteFoldPlugin } from './builtins/halt-site-fold.js';
+import { probeReturnStorePlugin } from './builtins/probe-return-store.js';
 import { assertOrderPlugin } from './builtins/assert-order.js';
 import { branchLayoutPlugin } from './builtins/branch-layout/index.js';
 import { nestCallPlugin } from './builtins/nest-call.js';
@@ -735,6 +744,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   declInitMergePlugin,        // Cleanup: int x; x = expr; → int x = expr; (priority 60)
   gotoCrossesInitPlugin,      // Late: split T x=e; → T x; x=e; for goto-crossed locals (priority 700)
   haltSiteFoldPlugin,         // Cleanup: fold nLine/nAddress temporaries into the halt call, copy a shared halt tail to its jumps (priority 930)
+  probeReturnStorePlugin,     // Fidelity: drop the stack probe's return address stored into the frame's top local (priority 12)
   assertOrderPlugin,          // Control-flow: if (c) { ..; return; } Halt; exit; -> if (!c) { Halt; exit; } ..; return; (priority 987)
   branchLayoutPlugin,         // Control-flow: if arms ordered as the original's addresses show (priority 988)
   switchChainPlugin,          // Control-flow: if-chain the original counts down by subtraction -> switch (priority 44)

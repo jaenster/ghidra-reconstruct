@@ -26,6 +26,7 @@ import { branchLayoutLines } from './branch-layout-spec.js';
 import { callOrderLines } from './call-order-spec.js';
 import type { BranchLayoutFacts } from '../extract/branch-layout.js';
 import type { CallOrderFacts } from '../extract/call-order.js';
+import type { HaltLineFacts } from '../extract/halt-lines.js';
 import { transformGhidraCode, preprocessGhidraCode, isGhidraGeneratedName, suggestBetterName, takeFuncPtrArgCastTypedefs, type TransformResult, type FuncPtrTarget, type ArtifactMode, type ArtifactRecord, type RunTruncation } from '@ghidra-mcp/cpp-parser';
 import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js';
 import { getGlobalReferenceAliases, globalAliasComment } from './global-aliases.js';
@@ -1542,6 +1543,7 @@ export function generateFunctionImplementation(
           labelFlow: func.labelFlow,
           branchLayout: func.branchLayout,
           callOrder: func.callOrder,
+          haltLines: func.haltLines,
           sehLowering: sehLoweringDecision(func),
           foldedAddresses: foldedAddressFacts(func),
           immediateConstants: immediateConstantFacts(func),
@@ -2398,6 +2400,8 @@ function transformDecompiledCode(
     branchLayout?: BranchLayoutFacts;
     /** Direct calls per decompile line and the pushes before each (extract/call-order.ts). */
     callOrder?: CallOrderFacts;
+    /** The line each way into a halt pushes; stack-probe return addresses (extract/halt-lines.ts). */
+    haltLines?: HaltLineFacts;
     /** The function's EH3 frame as `seh-lowering` needs it (codegen/seh-lowering-spec.ts). */
     sehLowering?: SehLoweringDecision;
     /** Addresses the instructions derive from a global's start (codegen/folded-address-spec.ts). */
@@ -3006,6 +3010,26 @@ function transformDecompiledCode(
         onSite: (e: { line: number; temps: number }) =>
           console.warn(`[nest] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.temps} temporar${e.temps === 1 ? 'y' : 'ies'} into the call on line ${e.line}`),
       };
+    }
+
+    // Each way into a shared halt gets the line its own PUSH chose (halt-site-fold.ts); a
+    // stack probe's return address stored into a local is dropped (probe-return-store.ts).
+    if (enclosing?.haltLines) {
+      const facts = enclosing.haltLines;
+      perPluginOptions['halt-site-fold'] = {
+        haltLines: facts.halts,
+        branchLayout: layout,
+        onRepair: (e: { entries: number; lines: number[]; refused?: string }) => e.refused
+          ? console.warn(`[halt-lines] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: left as printed: ${e.refused}`)
+          : console.warn(`[halt-lines] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.entries} way${e.entries === 1 ? '' : 's'} given line ${e.lines.map(l => '0x' + l.toString(16)).join(', ')}`),
+      };
+      if (facts.probeReturns && facts.probeReturns.length > 0) {
+        perPluginOptions['probe-return-store'] = {
+          returnAddresses: facts.probeReturns,
+          onSite: (e: { value: number; kept?: string }) => console.warn(
+            `[probe-return] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: 0x${e.value.toString(16)} ${e.kept ? `kept: ${e.kept}` : 'dropped'}`),
+        };
+      }
     }
 
     perPluginOptions['goto-label-canonical'] = { labelFlow: enclosing?.labelFlow };
