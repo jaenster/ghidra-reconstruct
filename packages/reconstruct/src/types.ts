@@ -52,6 +52,11 @@ export interface ExtractedFunction {
    * Unset in snapshots older than the field (and when the script failed).
    */
   callOrder?: import('./extract/call-order.js').CallOrderFacts;
+  /**
+   * The line each way into a halt pushes, and the return addresses a stack probe's CALL
+   * leaves in the frame (extract/halt-lines.ts). Unset in snapshots older than the field.
+   */
+  haltLines?: import('./extract/halt-lines.js').HaltLineFacts;
   name: string;
   address: string;
   signature: string;
