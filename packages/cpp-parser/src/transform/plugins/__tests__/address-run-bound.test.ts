@@ -40,7 +40,7 @@ describe('addressRunBoundPlugin', () => {
       }
     `, EMBLEM);
     assert.ok(
-      out.includes('(uintptr_t)&gbD2CompColorInitR + 31'),
+      out.includes('(intptr_t)&gbD2CompColorInitR + 31'),
       `expected a distance from the walked table, got:\n${out}`,
     );
     assert.ok(!out.includes('gbCompItemEmblemColorTableTemp4'), out);
@@ -60,7 +60,7 @@ describe('addressRunBoundPlugin', () => {
         } while ((int)p < 0x6db938);
       }
     `, opts);
-    assert.ok(out.includes('(uintptr_t)&gaBaalFxSpiritSpawnSchedule[4]'), out);
+    assert.ok(out.includes('(intptr_t)&gaBaalFxSpiritSpawnSchedule[4]'), out);
     // Off an element boundary, or past the end, it stays a byte distance.
     const odd = run(`
       void f() {
@@ -68,14 +68,14 @@ describe('addressRunBoundPlugin', () => {
         do { p = p + 1; } while ((int)p < 0x6db93a);
       }
     `, opts);
-    assert.ok(odd.includes('(uintptr_t)&gaBaalFxSpiritSpawnSchedule + 50'), odd);
+    assert.ok(odd.includes('(intptr_t)&gaBaalFxSpiritSpawnSchedule + 50'), odd);
     const past = run(`
       void f() {
         D2BaalFxSpreadStrc* p = gaBaalFxSpiritSpawnSchedule;
         do { p = p + 1; } while ((int)p < 0x6db950);
       }
     `, opts);
-    assert.ok(past.includes('(uintptr_t)&gaBaalFxSpiritSpawnSchedule + 72'), past);
+    assert.ok(past.includes('(intptr_t)&gaBaalFxSpiritSpawnSchedule + 72'), past);
   });
 
   it('picks each loop\'s own anchor when one variable walks two tables', () => {
@@ -91,8 +91,8 @@ describe('addressRunBoundPlugin', () => {
         } while ((int)p < (uintptr_t)&gbCompItemEmblemColorTableEnable);
       }
     `, EMBLEM);
-    assert.ok(out.includes('(uintptr_t)&gbD2CompColorInitR + 31'), out);
-    assert.ok(out.includes('(uintptr_t)&gbCompItemEmblemColorTableTemp3 + 31'), out);
+    assert.ok(out.includes('(intptr_t)&gbD2CompColorInitR + 31'), out);
+    assert.ok(out.includes('(intptr_t)&gbCompItemEmblemColorTableTemp3 + 31'), out);
   });
 
   it('leaves a bound alone when nothing in the walk names a global below it', () => {
@@ -157,7 +157,7 @@ describe('addressRunBoundPlugin - raw address literals', () => {
     const out = run(
       'void f(void) { D2KeyBindStrc *p = g_KeyBindingsTable;'
       + ' do { p++; } while ((int)p <= 0x7a7403); }', KEYBIND);
-    assert.match(out, /\(uintptr_t\)&g_KeyBindingsTable \+ 1139/);
+    assert.match(out, /\(intptr_t\)&g_KeyBindingsTable \+ 1139/);
     assert.ok(!out.includes('0x7a7403'), `absolute address must be gone, got: ${out}`);
   });
 
@@ -166,7 +166,7 @@ describe('addressRunBoundPlugin - raw address literals', () => {
       'void f(void) { D2KeyBindStrc *p = g_KeyBindingsTable;'
       + ' do { p++; } while ((int)p <= 114); }', KEYBIND);
     assert.ok(out.includes('114'), `count must survive, got: ${out}`);
-    assert.ok(!out.includes('uintptr_t'), 'must not respell a count');
+    assert.ok(!out.includes('intptr_t'), 'must not respell a count');
   });
 
   it('leaves a literal alone when no global flows into the walker', () => {
@@ -174,5 +174,20 @@ describe('addressRunBoundPlugin - raw address literals', () => {
       'void f(void) { D2KeyBindStrc *p = pSomethingElse;'
       + ' do { p++; } while ((int)p <= 0x7a7403); }', KEYBIND);
     assert.ok(out.includes('0x7a7403'), `no anchor, so no rewrite: ${out}`);
+  });
+});
+
+describe('addressRunBoundPlugin - signedness', () => {
+  it('spells the bound through uintptr_t when the walker is cast unsigned', () => {
+    const ast = parse(`
+      void f() {
+        byte* p = gbD2CompColorInitR + 1;
+        do { p += 3; } while ((unsigned int)p < (uintptr_t)&gbCompItemEmblemColorTableTemp4);
+      }
+    `);
+    const out = emit(addressRunBoundPlugin.createTransformer({
+      globalAddresses: { gbD2CompColorInitR: 0x72e19c, gbCompItemEmblemColorTableTemp4: 0x72e1bb },
+    })(ast) as AnyNode).trim();
+    assert.ok(out.includes('(uintptr_t)&gbD2CompColorInitR + 31'), out);
   });
 });

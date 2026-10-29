@@ -92,6 +92,29 @@ const ORDERINGS = new Set(['<', '<=', '>', '>=']);
  */
 const MAX_RUN_BYTES = 0x20000;
 
+const SIGNED_WORD_NAMES = new Set(['int', 'long', 'intptr_t', 'int32_t', 'INT', 'LONG', 'ssize_t']);
+
+/**
+ * Whether the walking side is cast to a SIGNED word - `(int)pEntry`, the decompiler's
+ * INT_SLESS, MSVC's JL. The bound is then spelled through `intptr_t`, so the
+ * comparison stays signed; through `uintptr_t` it would convert both sides to
+ * unsigned and compile to JB.
+ */
+function signedWalker(e: Expression): boolean {
+  let cur = e;
+  while (cur.kind === NodeKind.ParenExpr) cur = (cur as ParenExpr).expression as Expression;
+  if (cur.kind !== NodeKind.CStyleCastExpr) return false;
+  const t = (cur as CStyleCastExpr).type as unknown as { kind: NodeKind; name?: unknown; modifiers?: string[] };
+  if (t.kind === NodeKind.BuiltinType) {
+    return typeof t.name === 'string' && SIGNED_WORD_NAMES.has(t.name) && !(t.modifiers ?? []).includes('unsigned');
+  }
+  if (t.kind === NodeKind.TypedefType) {
+    const n = t.name as { kind: NodeKind; name?: string } | undefined;
+    return !!n && n.kind === NodeKind.Identifier && SIGNED_WORD_NAMES.has(n.name ?? '');
+  }
+  return false;
+}
+
 function unwrap(e: Expression): Expression {
   let cur = e;
   for (;;) {
@@ -220,15 +243,16 @@ export function createAddressRunBoundTransformer(options?: PluginOptions): Trans
             // The anchor is spelled with the identifier the function already
             // uses, so the reference resolves in exactly the scope the walk's
             // own reference does.
+            const word = signedWalker(walker) ? 'intptr_t' : 'uintptr_t';
             const stride = strides[anchor];
             const extent = sizes[anchor];
             if (stride !== undefined && extent !== undefined && stride > 0
               && delta % stride === 0 && delta <= extent) {
-              return Expr.cast(Type.typedef('uintptr_t'), Expr.unary('&',
+              return Expr.cast(Type.typedef(word), Expr.unary('&',
                 Expr.subscript(Expr.identifier(anchor), Expr.intLiteral(delta / stride))));
             }
             return Expr.paren(Expr.binary(
-              Expr.cast(Type.typedef('uintptr_t'), Expr.unary('&', Expr.identifier(anchor))),
+              Expr.cast(Type.typedef(word), Expr.unary('&', Expr.identifier(anchor))),
               '+',
               Expr.intLiteral(delta),
             ));
