@@ -3042,6 +3042,20 @@ function transformDecompiledCode(
       };
     }
 
+    // An inlined record getter's guard gets its pointer local back, and the reads after
+    // it go through it (record-getter-guard.ts). Needs only the declarations.
+    perPluginOptions['record-getter-guard'] = {
+      functionReturnTypes: context?.funcPtrArgCasts?.functionReturnTypes,
+      globalTypes: context?.funcPtrArgCasts?.globalTypes,
+      typedefTargets: context?.funcPtrArgCasts?.typedefTargets,
+      structFields: context?.funcPtrArgCasts?.structFields,
+      fieldTypes: context?.funcPtrArgCasts?.fieldTypes,
+      enclosingVarTypes,
+      shadowedTypeNames: shadowedTypeQualifyOptions(context)?.shadowedTypeNames,
+      onSite: (e: { line: number; name: string; reads: number; negated: boolean }) =>
+        console.warn(`[record-guard] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.name} on line ${e.line}, ${e.reads} read${e.reads === 1 ? '' : 's'}${e.negated ? ' (after the guard)' : ''}`),
+    };
+
     // A call argument the original loaded into its own base register gets a local
     // (base-register-load.ts); independent stores go in the original's instruction order
     // (store-order.ts). Without the facts nothing changes.
