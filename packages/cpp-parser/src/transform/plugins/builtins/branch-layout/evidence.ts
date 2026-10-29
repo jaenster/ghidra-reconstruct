@@ -26,6 +26,23 @@ export interface BranchLayoutEvidence {
   lines: ReadonlyMap<number, readonly number[]>;
   /** Parsed-text line of an `if` keyword -> the offset of its conditional branch. */
   ifs: ReadonlyMap<number, number>;
+  /** Parsed-text line -> its `==`/`!=` tokens in text order, with the instruction behind each. */
+  tests?: ReadonlyMap<number, readonly EqualityTest[]>;
+}
+
+/** An equality token of the decompile and the instruction its p-code op sits on. */
+export interface EqualityTest {
+  op: '==' | '!=';
+  mnemonic: string;
+  /** First operand when a register, else `-`. */
+  reg: string;
+  /** What a SUB/ADD/DEC/INC takes off the register (ADD/INC negated). */
+  delta?: number;
+  /** The constant compared against, unsigned, `size` bytes. */
+  k?: number;
+  size: number;
+  /** The instruction's offset from the function entry. */
+  at: number;
 }
 
 const LOOPS = new Set<string>([NodeKind.WhileStmt, NodeKind.DoWhileStmt, NodeKind.ForStmt, NodeKind.ForRangeStmt]);
@@ -110,6 +127,22 @@ export class LayoutReader {
     const l = ifs.location.start.line;
     if (this.ifLines.get(l) !== 1 || this.tainted.has(l)) return null;
     return this.ev.ifs.get(l) ?? null;
+  }
+
+  /**
+   * The equality tokens printed on the lines from the `if` keyword to the end of its
+   * condition, in text order; null when the facts have none or the if is not alone on its
+   * line (a copied if, another if there). A one-line `if (c) stmt;` shares its line with its
+   * arm, so the arm's tokens count too; the caller checks the number it expects.
+   */
+  conditionTests(ifs: IfStmt): readonly EqualityTest[] | null {
+    const c: Expression = ifs.condition;
+    if (!this.ev.tests || !placed(ifs) || !placed(c)) return null;
+    const first = ifs.location.start.line;
+    if (this.ifLines.get(first) !== 1) return null;
+    const out: EqualityTest[] = [];
+    for (let l = first; l <= c.location.end.line; l++) out.push(...(this.ev.tests.get(l) ?? []));
+    return out;
   }
 
   /** Lowest offset printed by the condition's lines; null when unknown. */

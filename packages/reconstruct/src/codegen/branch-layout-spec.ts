@@ -9,11 +9,13 @@
  * body's line count.
  */
 
-import type { BranchLayoutFacts } from '../extract/branch-layout.js';
+import type { BranchLayoutFacts, EqualityTest } from '../extract/branch-layout.js';
 
 export interface BranchLayoutLines {
   lines: Map<number, number[]>;
   ifs: Map<number, number>;
+  /** Equality tokens per line, in text order; absent when the facts predate them. */
+  tests?: Map<number, EqualityTest[]>;
 }
 
 const IF_LINE = /^\s*(?:\}\s*)?(?:else\s+)?if\s*\(/;
@@ -56,5 +58,13 @@ export function branchLayoutLines(
     if (line <= braceLine || line > bodyEnd) continue;
     lines.set(line - braceLine + 1, offs);
   }
-  return { lines, ifs };
+  if (!facts.tests) return { lines, ifs };
+  const tests = new Map<number, EqualityTest[]>();
+  for (const [line, t] of facts.tests) {
+    if (line <= braceLine || line > bodyEnd) continue;
+    const l = line - braceLine + 1;
+    const list = tests.get(l);
+    if (list) list.push(t); else tests.set(l, [t]);
+  }
+  return { lines, ifs, tests };
 }

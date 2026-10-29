@@ -3126,6 +3126,17 @@ function transformDecompiledCode(
     if (enumConstants.length > 0) {
       perPluginOptions['switch-reconstruct'] = { enumConstants };
     }
+    // An if-chain the original tests by running subtractions is the source's switch.
+    if (layout?.tests) {
+      perPluginOptions['switch-chain'] = {
+        branchLayout: layout,
+        enumConstants,
+        ...(process.env.GHIDRA_SWITCH_CHAIN_REPORT ? {
+          onSite: (e: { rule: string; line: number; cases: number; why?: string }) =>
+            console.warn(`[switch-chain] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.rule} ${e.cases} case(s) at line ${e.line}${e.why ? ` (${e.why})` : ''}`),
+        } : {}),
+      };
+    }
 
     // A constant name several enums number differently is exported by none of
     // them, so the only spelling that resolves is the qualified one. Which enum

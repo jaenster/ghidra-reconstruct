@@ -11,6 +11,12 @@
  *           its tokens print, comments excluded
  *   ifs     decompile line of an `if` keyword -> the offset of its conditional branch
  *           (the keyword token carries the CBRANCH's address)
+ *   tests   decompile line -> each `==`/`!=` token on it, with the instruction its p-code op
+ *           sits on: mnemonic, first register operand, the amount a SUB/ADD/DEC/INC takes
+ *           off the register, the constant compared against, the operand size and the
+ *           instruction's offset. VC8 lowers a short switch to running subtractions
+ *           (`sub ecx, 1; je; sub ecx, 3; je`) and an if-chain to CMPs; the decompiler
+ *           prints both as equality tests, so this is what tells them apart.
  *
  * Lines are numbered as `DecompilerUtils.toLines` numbers them, which is the line order of
  * the decompile text the snapshot holds, provided the decompiler runs with the options the
@@ -30,6 +36,23 @@ export interface BranchLayoutFacts {
   lines: [number, number[]][];
   /** [line, conditional-branch offset] per `if` keyword. */
   ifs: [number, number][];
+  /** [line, test] per `==`/`!=` token tied to an instruction, in text order. Absent in older facts. */
+  tests?: [number, EqualityTest][];
+}
+
+/** One equality token of the decompile and the instruction that compiled it. */
+export interface EqualityTest {
+  op: '==' | '!=';
+  mnemonic: string;
+  /** The instruction's first operand when it is a register, else `-`. */
+  reg: string;
+  /** What a SUB/ADD/DEC/INC takes off the register (ADD/INC negated); absent for others. */
+  delta?: number;
+  /** The constant the op compares against, as an unsigned `size`-byte value. */
+  k?: number;
+  size: number;
+  /** Offset of the instruction from the function entry. */
+  at: number;
 }
 
 /**
@@ -70,7 +93,7 @@ for (int ti = 0; ti < nThreads; ti++) {
           ghidra.app.decompiler.DecompileResults r = di.decompileFunction(fn, __TIMEOUT__, mon);
           if (r == null || r.getCCodeMarkup() == null) continue;
           long base = fn.getEntryPoint().getOffset();
-          StringBuilder ls = new StringBuilder(), is = new StringBuilder();
+          StringBuilder ls = new StringBuilder(), is = new StringBuilder(), cs = new StringBuilder();
           int count = 0;
           for (ghidra.app.decompiler.ClangLine l : ghidra.app.decompiler.component.DecompilerUtils.toLines(r.getCCodeMarkup())) {
             count++;
@@ -81,6 +104,24 @@ for (int ti = 0; ti < nThreads; ti++) {
               if (x == null) continue;
               long off = x.getOffset() - base;
               offs.add(off);
+              if (t instanceof ghidra.app.decompiler.ClangOpToken && (t.getText().equals("==") || t.getText().equals("!="))) {
+                ghidra.program.model.pcode.PcodeOp op = ((ghidra.app.decompiler.ClangOpToken) t).getPcodeOp();
+                ghidra.program.model.listing.Instruction in = op == null ? null : prog.getListing().getInstructionAt(op.getSeqnum().getTarget());
+                if (in != null) {
+                  String m = in.getMnemonicString();
+                  String reg = "-", d = "-", k = "-";
+                  if (in.getNumOperands() >= 1 && ghidra.program.model.lang.OperandType.isRegister(in.getOperandType(0)) && in.getRegister(0) != null) reg = in.getRegister(0).getName();
+                  if ((m.equals("SUB") || m.equals("ADD")) && in.getNumOperands() == 2 && ghidra.program.model.lang.OperandType.isScalar(in.getOperandType(1)) && in.getScalar(1) != null) {
+                    long v = in.getScalar(1).getSignedValue();
+                    d = Long.toString(m.equals("SUB") ? v : -v);
+                  } else if (m.equals("DEC")) d = "1";
+                  else if (m.equals("INC")) d = "-1";
+                  for (int ii = 0; ii < op.getNumInputs(); ii++) if (op.getInput(ii).isConstant()) k = Long.toString(op.getInput(ii).getOffset());
+                  long ioff = in.getAddress().getOffset() - base;
+                  cs.append(cs.length() > 0 ? ";" : "").append(l.getLineNumber()).append(':').append(t.getText()).append(',').append(m).append(',').append(reg)
+                    .append(',').append(d).append(',').append(k).append(',').append(op.getInput(0).getSize()).append(',').append(ioff < 0 ? "-" + Long.toHexString(-ioff) : Long.toHexString(ioff));
+                }
+              }
               if (t.getText().equals("if")) {
                 is.append(is.length() > 0 ? ";" : "").append(l.getLineNumber()).append(':').append(off < 0 ? "-" + Long.toHexString(-off) : Long.toHexString(off));
               }
@@ -94,7 +135,7 @@ for (int ti = 0; ti < nThreads; ti++) {
               first = false;
             }
           }
-          rows.put(a, a + "\\t" + count + "\\t" + ls + "\\t" + is);
+          rows.put(a, a + "\\t" + count + "\\t" + ls + "\\t" + is + "\\t" + cs);
         } catch (Exception e) { }
       }
     } finally {
@@ -151,7 +192,22 @@ export function parseBranchLayout(output: string): Map<string, BranchLayoutFacts
       const i = part.indexOf(':');
       ifs.push([Number(part.slice(0, i)), offset(part.slice(i + 1))]);
     }
-    out.set(normalize(c[0]), { lineCount, lines, ifs });
+    const tests: [number, EqualityTest][] = [];
+    for (const part of c[4] ? c[4].split(';') : []) {
+      const i = part.indexOf(':');
+      const f = part.slice(i + 1).split(',');
+      if (i < 0 || f.length < 7 || (f[0] !== '==' && f[0] !== '!=')) continue;
+      const num = (x: string) => (/^-?\d+$/.test(x) ? Number(x) : undefined);
+      const delta = num(f[3]);
+      const k = num(f[4]);
+      tests.push([Number(part.slice(0, i)), {
+        op: f[0], mnemonic: f[1], reg: f[2],
+        ...(delta !== undefined ? { delta } : {}),
+        ...(k !== undefined ? { k } : {}),
+        size: Number(f[5]), at: offset(f[6]),
+      }]);
+    }
+    out.set(normalize(c[0]), c.length > 4 ? { lineCount, lines, ifs, tests } : { lineCount, lines, ifs });
   }
   return out;
 }
