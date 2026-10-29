@@ -18,6 +18,9 @@
  * also rejects. There the pointer side goes through `uintptr_t`: that is the
  * machine's own operation - a `cmp` of two 32-bit words - it is width-exact,
  * and `uintptr_t` is spellable everywhere, where the pointee type may not be.
+ * An ordering against a SIGNED word (`(int)p < &end`, the decompiler's INT_SLESS,
+ * MSVC's JL) goes through `intptr_t` instead: `int < uintptr_t` converts both to
+ * unsigned and would turn the signed compare into an unsigned one (JB).
  * Only a MACHINE-WORD integer qualifies; a narrower one would mean the model
  * disagrees about the width somewhere else, and that stays visible. The pointer
  * side is recognised by its shape, or — where no table types the operand, as
@@ -76,6 +79,20 @@ const WORD_INTEGER_BASES = new Set([
 ]);
 
 const isWordInteger = (s: TypeShape) => s.stars === 0 && WORD_INTEGER_BASES.has(s.base);
+
+/** The signed machine words: an ordering against one of these is a signed compare. */
+const SIGNED_WORD_BASES = new Set(['int', 'long', 'intptr_t', 'ssize_t']);
+const ORDERINGS = new Set(['<', '<=', '>', '>=']);
+
+/**
+ * The integer type the pointer side of a word comparison is cast through: the
+ * other side's signedness for an ordering, so the compare keeps the decompiler's
+ * signed/unsigned choice; `uintptr_t` otherwise (equality reads the same either way).
+ */
+export function wordCastFor(operator: string, other: TypeShape | null): string {
+  return ORDERINGS.has(operator) && !!other && other.stars === 0 && SIGNED_WORD_BASES.has(other.base)
+    ? 'intptr_t' : 'uintptr_t';
+}
 
 /**
  * An integer LITERAL compared against a pointer. `expr-shape` deliberately has
@@ -223,13 +240,13 @@ export function createPointerCompareCastTransformer(options?: PluginOptions): Tr
           if (wordCompare(left, right, b.right as Expression, b.left as Expression)) {
             changed = true;
             return updateNode(b, {
-              left: Expr.cast(Type.typedef('uintptr_t'), b.left as Expression),
+              left: Expr.cast(Type.typedef(wordCastFor(b.operator, right)), b.left as Expression),
             } as Partial<BinaryExpr>);
           }
           if (wordCompare(right, left, b.left as Expression, b.right as Expression)) {
             changed = true;
             return updateNode(b, {
-              right: Expr.cast(Type.typedef('uintptr_t'), b.right as Expression),
+              right: Expr.cast(Type.typedef(wordCastFor(b.operator, left)), b.right as Expression),
             } as Partial<BinaryExpr>);
           }
           if (!left || !right) return undefined;

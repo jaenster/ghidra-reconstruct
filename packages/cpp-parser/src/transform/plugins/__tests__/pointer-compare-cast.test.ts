@@ -66,7 +66,7 @@ describe('pointerCompareCastPlugin', () => {
       } while ((int)pCollisionCell < &gnLightmapInterpDirX);
     }`);
     assert.ok(
-      out.includes('(uintptr_t)&gnLightmapInterpDirX'),
+      out.includes('(intptr_t)&gnLightmapInterpDirX'),
       `The address-of side goes through uintptr_t: ${out}`,
     );
   });
@@ -77,19 +77,19 @@ describe('pointerCompareCastPlugin', () => {
       if (((char*)&gAnchor + 3) < (int)nVar) {}
     }`);
     assert.ok(
-      out.includes('(uintptr_t)((char*)&gAnchor + 3)'),
+      out.includes('(intptr_t)((char*)&gAnchor + 3)'),
       `The address expression goes through uintptr_t: ${out}`,
     );
   });
 
   it('leaves an address-of compared against something of unknown type alone', () => {
     const out = transform(`void f() { if (&gAnchor < pSomething) {} }`);
-    assert.ok(!out.includes('uintptr_t'), `No evidence of a word comparison: ${out}`);
+    assert.ok(!out.includes('intptr_t'), `No evidence of a word comparison: ${out}`);
   });
 
   it('leaves an address-of null comparison alone', () => {
     const out = transform(`void f() { if (&gAnchor == 0) {} }`);
-    assert.ok(!out.includes('uintptr_t'), `A null comparison is already legal: ${out}`);
+    assert.ok(!out.includes('intptr_t'), `A null comparison is already legal: ${out}`);
   });
   // The same gap one shape further along. A folded interior address now resolves
   // to a STRING CONSTANT's interior — `s_label + 8` — and the pass declined it
@@ -106,7 +106,7 @@ describe('pointerCompareCastPlugin', () => {
         } while ((int)pElemStatTable < s___UI_SkillDesc_cpp_006dbf24 + 8);
       }`);
       assert.ok(
-        out.includes('(uintptr_t)(s___UI_SkillDesc_cpp_006dbf24 + 8)'),
+        out.includes('(intptr_t)(s___UI_SkillDesc_cpp_006dbf24 + 8)'),
         `The offset stays inside the cast: ${out}`,
       );
     });
@@ -117,7 +117,7 @@ describe('pointerCompareCastPlugin', () => {
         if (s___not_xlated_call_ken_w_00730520 + 4 < (int)nVar) {}
       }`);
       assert.ok(
-        out.includes('(uintptr_t)(s___not_xlated_call_ken_w_00730520 + 4)'),
+        out.includes('(intptr_t)(s___not_xlated_call_ken_w_00730520 + 4)'),
         `The label side goes through uintptr_t: ${out}`,
       );
     });
@@ -127,7 +127,7 @@ describe('pointerCompareCastPlugin', () => {
         int nVar;
         if ((int)nVar < (s___UI_SkillDesc_cpp_006dbf24 + 8)) {}
       }`);
-      assert.ok(out.includes('uintptr_t'), `A paren is not a conversion: ${out}`);
+      assert.ok(out.includes('intptr_t'), `A paren is not a conversion: ${out}`);
     });
 
     it('still casts the bare label with no offset', () => {
@@ -136,7 +136,7 @@ describe('pointerCompareCastPlugin', () => {
         if ((int)nVar < s___UI_SkillDesc_cpp_006dbf24) {}
       }`);
       assert.ok(
-        out.includes('(uintptr_t)s___UI_SkillDesc_cpp_006dbf24'),
+        out.includes('(intptr_t)s___UI_SkillDesc_cpp_006dbf24'),
         `The bare form must keep working: ${out}`,
       );
     });
@@ -148,12 +148,12 @@ describe('pointerCompareCastPlugin', () => {
         int nVar;
         if ((int)nVar < gaTable + 8) {}
       }`, { globalTypes: { gaTable: 'char[74]' } });
-      assert.ok(out.includes('(uintptr_t)(gaTable + 8)'), `A modeled array decays: ${out}`);
+      assert.ok(out.includes('(intptr_t)(gaTable + 8)'), `A modeled array decays: ${out}`);
     });
 
     it('leaves an offset onto something no table and no convention names alone', () => {
       const out = transform(`void f() { int nVar; if ((int)nVar < nSomething + 8) {} }`);
-      assert.ok(!out.includes('uintptr_t'), `No evidence of a pointer: ${out}`);
+      assert.ok(!out.includes('intptr_t'), `No evidence of a pointer: ${out}`);
     });
 
     // The shape is admitted in the two-pointer branch as well, not only the
@@ -175,7 +175,32 @@ describe('pointerCompareCastPlugin', () => {
         int nVar;
         if ((int)nVar < s_a_006dbf24 - s_b_00730520) {}
       }`);
-      assert.ok(!out.includes('uintptr_t'), `A pointer difference is an integer: ${out}`);
+      assert.ok(!out.includes('intptr_t'), `A pointer difference is an integer: ${out}`);
     });
+  });
+});
+
+describe('pointerCompareCastPlugin - signedness of a word comparison', () => {
+  function transform(code: string): string {
+    const ast = parse(code);
+    return emit(pointerCompareCastPlugin.createTransformer({})(ast) as AnyNode).trim();
+  }
+
+  // 00544fa0 / 0040f8a0: `(int)p < &end` is the decompiler's INT_SLESS and the
+  // original's JL. Through `uintptr_t` the int side converts to unsigned and the
+  // rebuild compiled JB.
+  it('keeps an ordering against a signed word signed', () => {
+    const out = transform(`void f() { int32_t* p; do { p++; } while ((int)p < &gEnd); }`);
+    assert.ok(out.includes('(int)p < (intptr_t)&gEnd'), out);
+  });
+
+  it('keeps an ordering against an unsigned word unsigned', () => {
+    const out = transform(`void f() { int32_t* p; do { p++; } while ((unsigned int)p < &gEnd); }`);
+    assert.ok(out.includes('(uintptr_t)&gEnd'), out);
+  });
+
+  it('spells an equality through uintptr_t whatever the other side', () => {
+    const out = transform(`void f() { int32_t* p; if ((int)p == &gEnd) {} }`);
+    assert.ok(out.includes('(uintptr_t)&gEnd'), out);
   });
 });
