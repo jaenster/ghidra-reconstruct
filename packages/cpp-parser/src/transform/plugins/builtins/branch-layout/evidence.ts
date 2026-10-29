@@ -1,0 +1,142 @@
+/**
+ * Where an `if`'s arms lie in the original binary, read from the decompiler's markup.
+ *
+ * The extraction (reconstruct extract/branch-layout.ts) records, per line of the decompile,
+ * the code offsets its tokens print, and per `if` keyword the offset of its conditional
+ * branch. The caller hands both over keyed by the line of the PARSED text. Statements keep
+ * their parse location through every pass (a moved or rebuilt statement copies it), so the
+ * evidence travels with the code: an arm's entry is the lowest offset printed on the lines
+ * of the statements it holds now, above the if's branch (a load the compiler hoisted above
+ * the branch prints on an arm's line, but is not where the arm starts).
+ *
+ * A line that two statements claim (a pass copied one: a duplicated return, a halt tail
+ * copied to each jump site) gives no evidence: which copy sits at that address is unknown.
+ * Nor does an offset that the lines of two statements print: two identical tails the
+ * compiler cross-jumped (`return 0;` written twice, one copy of the code) both print the
+ * survivor's address, which is where neither statement was written. A statement a pass
+ * built from nothing has no source line and gives no evidence either.
+ */
+
+import { NodeKind } from '../../../../ast/kinds.js';
+import type { ASTNode, IfStmt, Statement, Expression } from '../../../../ast/nodes.js';
+import { getChildren } from '../../../../ast/visitor.js';
+
+export interface BranchLayoutEvidence {
+  /** Parsed-text line -> code offsets (from the function entry) its tokens print, ascending. */
+  lines: ReadonlyMap<number, readonly number[]>;
+  /** Parsed-text line of an `if` keyword -> the offset of its conditional branch. */
+  ifs: ReadonlyMap<number, number>;
+}
+
+const LOOPS = new Set<string>([NodeKind.WhileStmt, NodeKind.DoWhileStmt, NodeKind.ForStmt, NodeKind.ForRangeStmt]);
+
+export function isLoop(n: ASTNode): boolean {
+  return LOOPS.has(n.kind);
+}
+
+function isStatement(n: ASTNode): boolean {
+  return String(n.kind).endsWith('Stmt');
+}
+
+/** A node the parser placed: a pass that builds a node from nothing gives it no file. */
+function placed(n: ASTNode): boolean {
+  return !!n.location && n.location.file !== '<generated>' && n.location.start.line > 0;
+}
+
+/**
+ * The lines a statement owns: a statement holding no statements owns its whole range; one
+ * holding statements owns the ranges of its own expressions (a condition, a for header) and
+ * passes the rest down.
+ */
+function ownedRanges(s: ASTNode, out: (from: number, to: number, visit: number) => void, seq = { n: 0 }): void {
+  const visit = seq.n++;
+  const kids = getChildren(s);
+  if (!kids.some(isStatement)) {
+    if (placed(s)) out(s.location.start.line, s.location.end.line, visit);
+    return;
+  }
+  // A label or case label prints no code of its own: its line is the statement's it labels.
+  const labelLike = s.kind === NodeKind.LabelStmt || s.kind === NodeKind.CaseStmt || s.kind === NodeKind.DefaultStmt;
+  for (const k of kids) {
+    if (isStatement(k)) ownedRanges(k, out, seq);
+    else if (!labelLike && placed(k)) out(k.location.start.line, k.location.end.line, visit);
+  }
+}
+
+export class LayoutReader {
+  private readonly tainted = new Set<number>();
+  private readonly shared = new Set<number>();
+  private readonly ifLines = new Map<number, number>();
+
+  /** `root`: the function body as it is now, after the passes that ran before. */
+  constructor(private readonly ev: BranchLayoutEvidence, root: ASTNode) {
+    // Each visit of a statement is one owner: the same node object reached twice (a pass
+    // that shared it between two sites) claims its lines twice.
+    const owners = new Map<number, number>();
+    ownedRanges(root, (from, to, visit) => {
+      for (let l = from; l <= to; l++) {
+        const o = owners.get(l);
+        if (o !== undefined && o !== visit) this.tainted.add(l);
+        else owners.set(l, visit);
+      }
+    });
+    const printedBy = new Map<number, number>();
+    for (const [l, owner] of owners) {
+      if (this.tainted.has(l)) continue;
+      for (const off of ev.lines.get(l) ?? []) {
+        const o = printedBy.get(off);
+        if (o !== undefined && o !== owner) this.shared.add(off);
+        else printedBy.set(off, owner);
+      }
+    }
+    const visit = (n: ASTNode): void => {
+      if (n.kind === NodeKind.IfStmt && placed(n)) {
+        const l = n.location.start.line;
+        this.ifLines.set(l, (this.ifLines.get(l) ?? 0) + 1);
+      }
+      for (const k of getChildren(n)) if (isStatement(k)) visit(k);
+    };
+    visit(root);
+  }
+
+  /** Drop the evidence of the lines `stmts` own: a pass copied them. */
+  taint(stmts: readonly Statement[]): void {
+    for (const s of stmts) ownedRanges(s, (from, to) => { for (let l = from; l <= to; l++) this.tainted.add(l); });
+  }
+
+  /** The offset of the if's conditional branch; null when unknown or shared. */
+  cbranch(ifs: IfStmt): number | null {
+    if (!placed(ifs)) return null;
+    const l = ifs.location.start.line;
+    if (this.ifLines.get(l) !== 1 || this.tainted.has(l)) return null;
+    return this.ev.ifs.get(l) ?? null;
+  }
+
+  /** Lowest offset printed by the condition's lines; null when unknown. */
+  conditionLow(ifs: IfStmt): number | null {
+    const c: Expression = ifs.condition;
+    if (!placed(ifs) || !placed(c)) return null;
+    let low: number | null = null;
+    for (let l = ifs.location.start.line; l <= c.location.end.line; l++) {
+      if (this.tainted.has(l)) return null;
+      for (const o of this.ev.lines.get(l) ?? []) if (low === null || o < low) low = o;
+    }
+    return low;
+  }
+
+  /** The lowest offset above `after` on the lines `stmts` own now; null when none. */
+  entry(stmts: readonly Statement[], after: number): number | null {
+    let best: number | null = null;
+    for (const s of stmts) {
+      ownedRanges(s, (from, to) => {
+        for (let l = from; l <= to; l++) {
+          if (this.tainted.has(l)) continue;
+          for (const o of this.ev.lines.get(l) ?? []) {
+            if (o > after && !this.shared.has(o) && (best === null || o < best)) best = o;
+          }
+        }
+      });
+    }
+    return best;
+  }
+}

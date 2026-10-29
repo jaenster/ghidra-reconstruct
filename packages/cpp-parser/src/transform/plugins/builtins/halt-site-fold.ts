@@ -29,9 +29,15 @@
  *
  * Anything with another live effect in the tail, a definition that is not adjacent, or
  * a value that is not a plain temporary is left exactly as it was.
+ *
+ * A halt that takes the place of code keeps that code's source position: a folded halt
+ * spans from its first definition, a copy sits where the jump or the definition it
+ * replaces was. `branch-layout` reads a statement's position as where its code lies in
+ * the binary; the copy's code is the jump site's, not the shared tail's.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
+import type { SourceLocation } from '../../../lexer/index.js';
 import type {
   ASTNode, FunctionDecl, CompoundStmt, ExprStmt, DeclStmt, VariableDecl,
   LabelStmt, GotoStmt, IfStmt, Statement, Expression, CallExpr, AssignExpr,
@@ -368,7 +374,8 @@ function foldHaltSites(stmts: readonly Statement[]): FoldResult | null {
     const newCall = updateNode(call, {
       arguments: [call.arguments[0], substInArg(call.arguments[1], byName), substInArg(call.arguments[2], byName)],
     } as Partial<CallExpr>);
-    const newHalt = updateNode(here.inner as ExprStmt, { expression: newCall } as Partial<ExprStmt>);
+    const newHalt = placedAt(updateNode(here.inner as ExprStmt, { expression: newCall } as Partial<ExprStmt>),
+      out[earliest], true);
 
     const drop = new Set(chainIdx);
     const kept = out.filter((_, j) => !drop.has(j));
@@ -443,7 +450,19 @@ function leadingChain(list: readonly Statement[], end: number, vars: readonly st
   return chain;
 }
 
-function copyOfTail(tail: Tail, chain: readonly Def[]): Statement[] {
+/** `s` placed at `site`: from the start of `site` to the end of `s` when `span`, else at `site`. */
+function placedAt<S extends Statement>(s: S, site: Statement | undefined, span = false): S {
+  if (!site) return s;
+  const location: SourceLocation = span ? { ...s.location, start: site.location.start } : site.location;
+  return { ...s, location };
+}
+
+/** The statement the copy at a jump replaces first: the earliest definition, else the jump. */
+function siteOf(chain: readonly Def[], jump: Statement): Statement {
+  return chain.length > 0 ? chain[chain.length - 1].stmt : jump;
+}
+
+function copyOfTail(tail: Tail, chain: readonly Def[], site?: Statement): Statement[] {
   const byName = new Map(chain.map(d => [d.name, d.rhs] as const));
   const call = updateNode(tail.call, {
     arguments: [
@@ -452,7 +471,7 @@ function copyOfTail(tail: Tail, chain: readonly Def[]): Statement[] {
       substInArg(tail.call.arguments[2], byName),
     ],
   } as Partial<CallExpr>);
-  return [updateNode(tail.halt, { expression: call } as Partial<ExprStmt>), tail.exit];
+  return [placedAt(updateNode(tail.halt, { expression: call } as Partial<ExprStmt>), site), tail.exit];
 }
 
 interface TailPlan {
@@ -479,7 +498,7 @@ function inlineJumps(
         // A label on the goto means "enter after the definitions": the copy would not honour that.
         if (chain && (chain.length === 0 || p.labels.length === 0)) {
           out.length -= chain.length;
-          const copy = copyOfTail(plan.tail, chain);
+          const copy = copyOfTail(plan.tail, chain, siteOf(chain, p.inner));
           out.push(relabel(p.labels, copy[0]), copy[1]);
           counter.n++;
           changed = true;
@@ -502,7 +521,7 @@ function inlineBranch(
   const plan = plans.get((branch as GotoStmt).label.name);
   if (!plan || plan.tail.vars.length !== 0) return null;
   counter.n++;
-  return Stmt.compound(copyOfTail(plan.tail, []));
+  return Stmt.compound(copyOfTail(plan.tail, [], branch));
 }
 
 /**
@@ -567,7 +586,7 @@ function dissolveTails(list: readonly Statement[], plans: ReadonlyMap<string, Ta
     if (prev && terminates(prev)) return [...prefix];
     const chain = leadingChain(prefix, prefix.length, t.tail.vars);
     if (chain) {
-      const copy = copyOfTail(t.tail, chain);
+      const copy = copyOfTail(t.tail, chain, chain.length > 0 ? siteOf(chain, list[k]) : undefined);
       return [...prefix.slice(0, prefix.length - chain.length), ...copy];
     }
     return null;
@@ -604,7 +623,7 @@ function threadHalt(s: Statement, ctx: JoinCtx): Statement[] | null {
       arguments: [ctx.call.arguments[0], ctx.call.arguments[1],
         substInArg(ctx.call.arguments[2], new Map([[ctx.line, d.rhs]]))],
     } as Partial<CallExpr>);
-    return [updateNode(ctx.halt, { expression: call } as Partial<ExprStmt>), ctx.exit];
+    return [placedAt(updateNode(ctx.halt, { expression: call } as Partial<ExprStmt>), s), ctx.exit];
   }
   if (s.kind === NodeKind.CompoundStmt) {
     const c = s as CompoundStmt;

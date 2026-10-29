@@ -22,6 +22,8 @@ import { crtFunctionNames, EXTERNAL_IMPORT_REFERENCE_RENAMES } from './crt-mappi
 import { CPP_KEYWORDS } from './header.js';
 
 // Import cpp-parser for code transformation
+import { branchLayoutLines } from './branch-layout-spec.js';
+import type { BranchLayoutFacts } from '../extract/branch-layout.js';
 import { transformGhidraCode, preprocessGhidraCode, isGhidraGeneratedName, suggestBetterName, takeFuncPtrArgCastTypedefs, type TransformResult, type FuncPtrTarget, type ArtifactMode, type ArtifactRecord, type RunTruncation } from '@ghidra-mcp/cpp-parser';
 import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js';
 import { getGlobalReferenceAliases, globalAliasComment } from './global-aliases.js';
@@ -1535,6 +1537,7 @@ export function generateFunctionImplementation(
           registerAliases: registerAliases(func),
           callSiteOverrides: func.callSiteOverrides,
           labelFlow: func.labelFlow,
+          branchLayout: func.branchLayout,
           sehLowering: sehLoweringDecision(func),
           foldedAddresses: foldedAddressFacts(func),
           immediateConstants: immediateConstantFacts(func),
@@ -2385,6 +2388,8 @@ function transformDecompiledCode(
     callSiteOverrides?: { funcdef: string; arity: number }[];
     /** How control enters each label, from the instructions (extract/label-flow.ts). */
     labelFlow?: Record<string, { back: number; first: string; pushedArgs: boolean; address?: string; computed?: number }>;
+    /** Code offsets per decompile line and per `if` (extract/branch-layout.ts). */
+    branchLayout?: BranchLayoutFacts;
     /** The function's EH3 frame as `seh-lowering` needs it (codegen/seh-lowering-spec.ts). */
     sehLowering?: SehLoweringDecision;
     /** Addresses the instructions derive from a global's start (codegen/folded-address-spec.ts). */
@@ -2436,9 +2441,12 @@ function transformDecompiledCode(
     // about both: it told `goto-cleanup` every function returned void, and it
     // hid every parameter from the type environment.
     const sig = enclosing?.signature;
-    const wrapped = sig
-      ? `${sig.returnType} dummy(${sig.params}) {${preprocessedBody}}`
-      : `void dummy() {${preprocessedBody}}`;
+    const wrapperPrefix = sig ? `${sig.returnType} dummy(${sig.params}) {` : `void dummy() {`;
+    const wrapped = `${wrapperPrefix}${preprocessedBody}}`;
+    // The original's addresses for the ifs, keyed by line of `wrapped` (branch-layout-spec.ts).
+    const layout = funcBodyMatch && funcBodyMatch.index !== undefined
+      ? branchLayoutLines(enclosing?.branchLayout, decompiled, funcBodyMatch.index + funcBodyMatch[0].indexOf('{'), body, preprocessedBody, wrapperPrefix)
+      : undefined;
 
     // Build plugin options for method-call-rewrite when mappings or current context exist
     let pluginOptions: Record<string, unknown> | undefined;
@@ -2924,6 +2932,14 @@ function transformDecompiledCode(
     // `functionAddress` only attributes the pass's reported events (GHIDRA_GOTO_REPORT_DIR).
     // Labels Ghidra prints under a name are spelled as its default labels while the goto
     // passes run, and get the name back after (label-canonical.ts): a name is not structure.
+    // Arm order from the original's addresses: `early-return` makes a guard only where the
+    // binary has one, `branch-layout` reorders arms the layout contradicts. Without the
+    // facts (an older snapshot) early-return keeps its unconditional behaviour.
+    if (layout) {
+      perPluginOptions['early-return'] = { branchLayout: layout };
+      perPluginOptions['branch-layout'] = { branchLayout: layout };
+    }
+
     perPluginOptions['goto-label-canonical'] = { labelFlow: enclosing?.labelFlow };
     perPluginOptions['goto-label-restore'] = { labelFlow: enclosing?.labelFlow };
     perPluginOptions['goto-cleanup'] = {

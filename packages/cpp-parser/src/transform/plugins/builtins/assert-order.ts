@@ -76,12 +76,12 @@ function calledName(s: Statement): string | null {
   return e.kind === NodeKind.CallExpr ? calleeTail((e as CallExpr).callee) : null;
 }
 
-function isHaltStmt(s: Statement): boolean {
+export function isHaltStmt(s: Statement): boolean {
   const n = calledName(s);
   return n !== null && HALT_CALLEES.has(n);
 }
 
-function isExitStmt(s: Statement): boolean {
+export function isExitStmt(s: Statement): boolean {
   const n = calledName(s);
   return n !== null && EXIT_CALLEES.has(n)
     && ((s as ExprStmt).expression as CallExpr).arguments.length === 1;
@@ -91,7 +91,7 @@ function isExitStmt(s: Statement): boolean {
  * Control certainly does not continue past `s`. Only the callee's name counts for a call;
  * a decompiler warning that a call does not return is not trusted.
  */
-function leaves(s: Statement, noreturn: ReadonlySet<string>): boolean {
+export function leaves(s: Statement, noreturn: ReadonlySet<string>): boolean {
   switch (s.kind) {
     case NodeKind.ReturnStmt: case NodeKind.BreakStmt: case NodeKind.ContinueStmt: case NodeKind.GotoStmt:
       return true;
