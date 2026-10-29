@@ -159,11 +159,16 @@ export function branchLayoutScript(batch: string[], threads = 8, timeout = 60): 
     .replace('__TIMEOUT__', String(timeout));
 }
 
+/** Whether a decompile prints an `if`: the functions the script reads. */
+export function printsIf(decompiled: string): boolean {
+  return /\bif\s*\(/.test(decompiled);
+}
+
 /** Entries of every decompiled function that prints an `if`, in batches. */
 export function branchLayoutBatches(functions: Pick<ExtractedFunction, 'address' | 'decompiled'>[], batchSize = 400): string[][] {
   const items: string[] = [];
   for (const f of functions) {
-    if (f.decompiled && /\bif\s*\(/.test(f.decompiled)) items.push(normalize(f.address));
+    if (f.decompiled && printsIf(f.decompiled)) items.push(normalize(f.address));
   }
   const out: string[][] = [];
   for (let i = 0; i < items.length; i += batchSize) out.push(items.slice(i, i + batchSize));

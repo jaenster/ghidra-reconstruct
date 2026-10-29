@@ -166,15 +166,22 @@ export function callOrderScript(batch: string[], threads = 8, timeout = 60): str
     .replace('__TIMEOUT__', String(timeout));
 }
 
+/** A line assigning a value that holds a call (a cast in front included). */
+const CALL_TEMPORARY = /^\s*[A-Za-z_]\w*\s*=[^=;][^;]*\b[A-Za-z_][\w:]*\s*\(/m;
+
+/** Whether a call's result could feed a later call in this decompile: the functions the script reads. */
+export function printsCallTemporary(decompiled: string): boolean {
+  return CALL_TEMPORARY.test(decompiled);
+}
+
 /**
  * Entries of every decompiled function where a call's result could feed a later call, in
  * batches: a line assigning a value that holds a call (a cast in front included).
  */
 export function callOrderBatches(functions: Pick<ExtractedFunction, 'address' | 'decompiled'>[], batchSize = 400): string[][] {
   const items: string[] = [];
-  const temp = /^\s*[A-Za-z_]\w*\s*=[^=;][^;]*\b[A-Za-z_][\w:]*\s*\(/m;
   for (const f of functions) {
-    if (f.decompiled && temp.test(f.decompiled)) items.push(normalize(f.address));
+    if (f.decompiled && printsCallTemporary(f.decompiled)) items.push(normalize(f.address));
   }
   const out: string[][] = [];
   for (let i = 0; i < items.length; i += batchSize) out.push(items.slice(i, i + batchSize));
