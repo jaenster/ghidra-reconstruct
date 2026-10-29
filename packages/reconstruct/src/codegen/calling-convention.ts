@@ -73,17 +73,30 @@
  * travel and who pops them, and an unrecognised name used to answer "nowhere
  * special": all such functions came out `__cdecl`.
  *
- * Which base applies is read from the parameter storage when that storage is
- * all-stack or exactly the `__fastcall` registers, because a custom model is
- * always applied with custom storage and the storage is what the callers in the
- * binary honour. `GetItemQuality` (00627e70) carries `__fastcall_ecxsafe` with
- * its one argument at `Stack[0x4]` and returns with `RET 4`: a `__stdcall`
- * function. `SKILLS_PopValue` (006c0ba0) carries `__stdcall_ecxedxsafe` with its
- * argument in ECX and a plain `RET`: a `__fastcall` one. Both conventions pop
- * their own stack arguments, so the storage settles which of the two it is.
- * Storage in any other register (EAX, ESI, ST0 — a file-static function's own
- * convention, see `file-static-functions.ts`) fits neither and keeps the base
- * the model is named after.
+ * Which callee-pops convention applies is read from the parameter storage,
+ * for a program-defined model and for a stock name alike, because storage is
+ * what the callers in the binary honour and a model or stock name applied with
+ * custom storage no longer says where the arguments travel. `GetItemQuality`
+ * (00627e70) carries `__fastcall_ecxsafe` with its one argument at
+ * `Stack[0x4]` and returns with `RET 4`: a `__stdcall` function.
+ * `SKILLS_PopValue` (006c0ba0) carries `__stdcall_ecxedxsafe` with its argument
+ * in ECX and a plain `RET`: a `__fastcall` one. `SFILE_CalculateBufferOffset`
+ * (004072a0) is stock `__fastcall` with its first argument in ECX and its
+ * second at `Stack[0x4]`, read as `[EBP+8]` and popped by `RET 4`: the
+ * `__thiscall` placement. Spelled `__fastcall`, the rebuild would read that
+ * second argument from EDX, which no caller in the original loads. All three
+ * conventions pop their own stack arguments, so the storage settles which one
+ * it is; the named one is kept whenever it fits. A float, a double or anything
+ * wider than four bytes travels on the stack under all three and leaves the
+ * register for the next argument that fits.
+ *
+ * Storage none of the three describes keeps the named convention: a register
+ * a stock convention never passes in (EAX, EBX, ESI, EDI, ST0 - VC8's own
+ * convention for a file-static function, see `file-static-functions.ts`, which
+ * the compiler re-derives itself whatever the keyword), or ECX on a parameter
+ * that is not the first eligible one, which no keyword can say without
+ * reordering the parameters. `__cdecl` never changes: no convention passes
+ * arguments in registers and leaves the stack to the caller.
  */
 import { templateRegistry } from './templates/registry.js';
 
@@ -99,7 +112,7 @@ export interface ConventionBearer {
   address?: string;
   /**
    * The declared parameters. Their number matters everywhere; their storage
-   * only for a program-defined model (see the module note).
+   * and type for a callee-pops convention (see the module note).
    */
   parameters?: ReadonlyArray<unknown>;
   hasVarArgs?: boolean;
@@ -107,22 +120,46 @@ export interface ConventionBearer {
 
 /** The register a storage piece names, by its full 32-bit register, or 'stack'. */
 function storageHome(piece: string): string | undefined {
-  const loc = piece.trim().replace(/:\d+$/, '').toUpperCase();
+  const loc = piece.trim().replace(/\s*\(auto\)$/i, '').replace(/:\d+$/, '').toUpperCase();
   if (loc.startsWith('STACK[')) return 'stack';
   if (['ECX', 'CX', 'CL'].includes(loc)) return 'ECX';
   if (['EDX', 'DX', 'DL'].includes(loc)) return 'EDX';
   return loc || undefined;
 }
 
+interface StoredParameter { storage?: unknown; ordinal?: unknown; size?: unknown; dataType?: unknown }
+
 /**
- * `__stdcall` or `__fastcall` when the parameter storage is exactly what that
- * convention does — every argument on the stack, or the first in ECX, the
- * second (if any) in EDX and the rest on the stack — and undefined when it is
- * neither, or when there is no storage to read.
+ * Whether a convention that passes arguments in registers may put this one in
+ * ECX or EDX: an integer or pointer of at most four bytes. A float, a double or
+ * anything wider travels on the stack and leaves the register for the next
+ * argument that fits (MSVC's `__fastcall` rule, which Ghidra's model follows).
  */
-function calleePopConventionFromStorage(parameters: ReadonlyArray<unknown> | undefined): string | undefined {
+function registerEligible(p: StoredParameter): boolean {
+  const size = Number(p.size ?? 4);
+  if (!(size > 0 && size <= 4)) return false;
+  return !/^(float|double|long double|float10)\b/.test(String(p.dataType ?? ''));
+}
+
+/** Where `convention` puts each parameter: a register in order of use, else 'stack'. */
+function homesUnder(convention: '__stdcall' | '__fastcall' | '__thiscall', params: ReadonlyArray<StoredParameter>): string[] {
+  const registers = convention === '__fastcall' ? ['ECX', 'EDX'] : convention === '__thiscall' ? ['ECX'] : [];
+  let next = 0;
+  return params.map(p => (next < registers.length && registerEligible(p) ? registers[next++] : 'stack'));
+}
+
+const CALLEE_POPS = ['__stdcall', '__fastcall', '__thiscall'] as const;
+type CalleePops = typeof CALLEE_POPS[number];
+
+/**
+ * The callee-pops convention whose argument placement is exactly the parameter
+ * storage: `base` when it fits, else the first of `__stdcall`, `__fastcall`,
+ * `__thiscall` that does. Undefined when none does, when a parameter is split
+ * over several pieces, or when there is no storage to read.
+ */
+function calleePopConventionFromStorage(base: CalleePops, parameters: ReadonlyArray<unknown> | undefined): CalleePops | undefined {
   const params = [...(parameters ?? [])]
-    .map(p => p as { storage?: unknown; ordinal?: unknown })
+    .map(p => p as StoredParameter)
     .sort((a, b) => Number(a.ordinal ?? 0) - Number(b.ordinal ?? 0));
   if (params.length === 0) return undefined;
   const homes: string[] = [];
@@ -132,30 +169,27 @@ function calleePopConventionFromStorage(parameters: ReadonlyArray<unknown> | und
     if (!home) return undefined;
     homes.push(home);
   }
-  if (homes.every(h => h === 'stack')) return '__stdcall';
-  const registers = homes.findIndex(h => h === 'stack');
-  const registerPrefix = registers === -1 ? homes : homes.slice(0, registers);
-  if (registers !== -1 && homes.slice(registers).some(h => h !== 'stack')) return undefined;
-  const fastcallOrder = ['ECX', 'EDX'];
-  if (registerPrefix.length <= 2 && registerPrefix.every((h, i) => h === fastcallOrder[i])) return '__fastcall';
-  return undefined;
+  const fits = (c: CalleePops) => homesUnder(c, params).every((h, i) => h === homes[i]);
+  if (fits(base)) return base;
+  return CALLEE_POPS.find(fits);
 }
 
 /**
- * The stock convention a callable's code follows: Ghidra's own for a stock
- * name, and for a program-defined model the base it extends, chosen between
- * `__stdcall` and `__fastcall` by the parameter storage where that storage is
- * one of the two (see the module note). Undefined, '' and `unknown` pass
- * through unchanged.
+ * The stock convention a callable's code follows. For `__cdecl`, `unknown`
+ * and a model with a caller-pops base, Ghidra's own answer. For a callee-pops
+ * convention, stock or program-defined, the one of `__stdcall`, `__fastcall`
+ * and `__thiscall` whose argument placement is the parameter storage, keeping
+ * the named base when it fits or when none does (see the module note).
+ * Undefined, '' and `unknown` pass through unchanged.
  */
 export function abiConvention(callable: ConventionBearer): string | undefined {
   const convention = callable.callingConvention;
-  const custom = convention ? CUSTOM_MODEL.exec(convention) : null;
-  if (!custom) return convention;
-  const base = custom[1];
-  if (base !== '__stdcall' && base !== '__fastcall') return base;
+  if (!convention) return convention;
+  const custom = CUSTOM_MODEL.exec(convention);
+  const base = custom ? custom[1] : convention;
+  if (!(CALLEE_POPS as readonly string[]).includes(base)) return base;
   if (callable.hasVarArgs) return base;
-  return calleePopConventionFromStorage(callable.parameters) ?? base;
+  return calleePopConventionFromStorage(base as CalleePops, callable.parameters) ?? base;
 }
 
 /**
