@@ -100,13 +100,36 @@ describe('program-defined prototype models are spelled as the stock convention t
     assert.strictEqual(conventionKeyword(fn('GetMouseClickFlags', '__stdcall_ecxedxsafe', [])), '__stdcall');
   });
 
-  it('leaves stock conventions exactly as before, whatever their storage', () => {
-    assert.strictEqual(abiConvention(fn('A', '__fastcall', ['Stack[0x4]:4'])), '__fastcall');
-    assert.strictEqual(abiConvention(fn('B', '__stdcall', ['ECX:4'])), '__stdcall');
-    assert.strictEqual(abiConvention(fn('C', '__cdecl', ['Stack[0x4]:4'])), '__cdecl');
+  it('leaves stock conventions whose storage they describe, and __cdecl, as they are', () => {
+    assert.strictEqual(abiConvention(fn('A', '__fastcall', ['ECX:4', 'EDX:4', 'Stack[0x4]:4'])), '__fastcall');
+    assert.strictEqual(abiConvention(fn('B', '__stdcall', ['Stack[0x4]:4'])), '__stdcall');
+    assert.strictEqual(abiConvention(fn('C', '__cdecl', ['ECX:4', 'Stack[0x4]:4'])), '__cdecl');
+    assert.strictEqual(abiConvention(fn('T', '__thiscall', ['ECX:4 (auto)', 'Stack[0x4]:4'])), '__thiscall');
     assert.strictEqual(abiConvention(fn('D', 'unknown', [])), 'unknown');
     assert.strictEqual(abiConvention({}), undefined);
     assert.strictEqual(conventionKeyword(fn('E', '__cdecl_x87safe', ['Stack[0x4]:4'])), '');
+  });
+
+  it('reads a stock callee-pops convention from custom storage', () => {
+    // 004072a0: ECX, then [EBP+8], RET 4 - the __thiscall placement under a __fastcall name.
+    assert.strictEqual(conventionKeyword(fn('SFILE_CalculateBufferOffset', '__fastcall', ['ECX:4', 'Stack[0x4]:4'])), '__thiscall');
+    assert.strictEqual(conventionKeyword(fn('ASYNCDATA_SetResult', '__fastcall', ['ECX:4', 'Stack[0x4]:4', 'Stack[0x8]:4'])), '__thiscall');
+    assert.strictEqual(conventionKeyword(fn('OneInEcx', '__stdcall', ['ECX:4'])), '__fastcall');
+    assert.strictEqual(conventionKeyword(fn('TwoInRegs', '__stdcall', ['ECX:4', 'EDX:4', 'Stack[0x4]:4'])), '__fastcall');
+    assert.strictEqual(conventionKeyword(fn('AllStack', '__fastcall', ['Stack[0x4]:4'])), '__stdcall');
+    // A receiver later in the list, or a register no stock convention uses, keeps the name.
+    assert.strictEqual(conventionKeyword(fn('Late', '__fastcall', ['Stack[0x4]:4', 'ECX:4'])), '__fastcall');
+    assert.strictEqual(conventionKeyword(fn('LAUNCHER_ShowOogErrorDialog_ForEnterEmail', '__fastcall', ['EAX:4', 'ECX:4'])), '__fastcall');
+  });
+
+  it('lets a float or wide argument travel on the stack without spending a register', () => {
+    const f = fn('WithFloat', '__fastcall', ['ECX:4', 'Stack[0x4]:4', 'EDX:4']);
+    f.parameters[1].dataType = 'float';
+    assert.strictEqual(abiConvention(f), '__fastcall');
+    const g = fn('WithDouble', '__fastcall', ['ECX:4', 'Stack[0x4]:8']);
+    g.parameters[1].dataType = 'double';
+    g.parameters[1].size = 8;
+    assert.strictEqual(abiConvention(g), '__fastcall');
   });
 
   it('records the resolved convention where a function is matched against a funcdef', () => {
