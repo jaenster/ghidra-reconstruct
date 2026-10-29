@@ -16,7 +16,9 @@ import {
   type CompareSite,
 } from '../extract/compare-sites.js';
 import { generateFunctionImplementation } from '../codegen/impl.js';
-import type { ExtractedFunction, ReconstructOptions } from '../types.js';
+import type { ExtractedFunction, ReconstructOptions, ProjectConfig } from '../types.js';
+import { OverrideRegistry } from '../overrides/index.js';
+import os from 'node:os';
 
 const INIT_LOG = [
   '0\t!=\tINT_NOTEQUAL\t4\t1\t0\tv:nCount\tc:0\t0040eb92\t0040eb94\tJBE\t0040eb92\tTEST\t4\tr\tz\t0\t1',
@@ -202,5 +204,14 @@ describe('compare-form in codegen', () => {
     assert.match(out, /nCount (> 0|<= 0)/);
     const plain = generateFunctionImplementation(fn(), undefined, options);
     assert.match(plain, /0x144f < nByteOffset/);
+  });
+
+  it('leaves a function with a text patch as Ghidra printed it, so the patch still anchors', () => {
+    const config = { overrides: [{ address: '0040eb90', action: 'patch',
+      patches: [{ find: 'if (0x144f < nByteOffset) {', replace: 'if (0x144f < nByteOffset /* patched */) {' }] }] } as ProjectConfig;
+    const overrides = new OverrideRegistry(config, os.tmpdir(), []);
+    const out = generateFunctionImplementation(fn(INIT_LOG), undefined, options, { overrides } as never);
+    assert.match(out, /0x144f < nByteOffset \/\* patched \*\//);
+    assert.doesNotMatch(out, /0x1450/);
   });
 });

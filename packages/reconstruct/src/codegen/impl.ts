@@ -1540,7 +1540,8 @@ export function generateFunctionImplementation(
           foldedAddresses: foldedAddressFacts(func),
           immediateConstants: immediateConstantFacts(func),
           pushSlotInits: pushSlotInits(func),
-          compareForm: compareFormSpec(func) ?? undefined,
+          // A text patch anchors on the comparisons as Ghidra printed them.
+          compareForm: override?.action === 'patch' ? undefined : compareFormSpec(func) ?? undefined,
         },
       );
       body = func.name ? rewriteQuestUnionMembers(transformed.code, func.name, context?.sourceFileName, [...(func.parameters ?? []), ...(func.localVariables ?? [])]) : transformed.code;
