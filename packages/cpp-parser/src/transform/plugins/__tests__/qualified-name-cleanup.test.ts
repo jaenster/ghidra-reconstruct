@@ -23,6 +23,18 @@ describe('qualifiedNameCleanupPlugin', () => {
     assert.ok(!/Drlg::Drlg/.test(out), out);
   });
 
+  it('emits a static local of this function bare when Ghidra qualified it by its own namespace', () => {
+    const out = transformCode(
+      'void f() { if (!GfxInfo::gbInit) { GfxInfo::gbInit = 1; Other::gbInit = 2; ::gbInit = 3; } }',
+      { functionStaticLocals: { gbInit: 'GfxInfo' } },
+    );
+    assert.ok(/!gbInit\)/.test(out), out);
+    assert.ok(/^\s*gbInit = 1;/m.test(out), out);
+    assert.ok(/Other::gbInit = 2/.test(out), out);
+    assert.ok(/::gbInit = 3/.test(out), out);
+    assert.ok(!/GfxInfo::/.test(out), out);
+  });
+
   it('collapses only ADJACENT duplicates, leaving A::B::A alone', () => {
     const out = transformCode('void f() { Path::Room::Path::GetYPos(p); }');
     assert.ok(/Path::Room::Path::GetYPos/.test(out), out);

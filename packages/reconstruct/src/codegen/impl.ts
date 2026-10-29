@@ -3173,6 +3173,15 @@ function transformDecompiledCode(
     // this unit.
     const collisionTypeNames = context?._namespaceCollisionTypeNames;
     const keptTypeQualifiedNames = context?._keptTypeQualifiedNames;
+    // The data this function's static block declares (globals-header.ts,
+    // generateStaticLocalsBlock): a reference Ghidra qualified by the datum's own
+    // namespace must name the static local, not a namespace that no longer holds it.
+    let functionStaticLocals: Record<string, string> | undefined;
+    for (const g of context?.analyzedGlobals ?? []) {
+      if (g.scope !== 'static-local' || g.ownerFunction !== funcName) continue;
+      const segments = namespaceResolution().of(g).ghidraSegments;
+      if (segments.length > 0) (functionStaticLocals ??= {})[g.name] = segments[segments.length - 1];
+    }
     perPluginOptions['qualified-name-cleanup'] = {
       importRenames: EXTERNAL_IMPORT_REFERENCE_RENAMES,
       ...(collisionTypeNames && collisionTypeNames.length > 0
@@ -3184,6 +3193,7 @@ function transformDecompiledCode(
       ...(context?._rootClassQualifiers && context._rootClassQualifiers.length > 0
         ? { rootClassQualifiers: context._rootClassQualifiers, rootClassScope: ROOT_CLASS_SCOPE }
         : {}),
+      ...(functionStaticLocals ? { functionStaticLocals } : {}),
     };
 
     // Which pointee types have members. Without it `struct-field` reads a Win32
