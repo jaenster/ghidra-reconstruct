@@ -239,6 +239,11 @@ export {
 export {
   loopRotationUndoPlugin,
 } from './builtins/loop-rotation-undo.js';
+export {
+  rotatedForLoopPlugin,
+  createRotatedForLoopTransformer,
+  type RotatedForLoopOptions,
+} from './builtins/rotated-for-loop.js';
 
 // ============================================
 // BUILT-IN PLUGINS: REDUNDANT PAREN CLEANUP
@@ -536,6 +541,7 @@ import { methodCallRewritePlugin } from './builtins/method-call-rewrite.js';
 import { pointerCastNormalizePlugin } from './builtins/pointer-cast-normalize.js';
 import { gotoCleanupPlugin, getGotoCleanupStats, resetGotoCleanupStats } from './builtins/goto-cleanup/index.js';
 import { loopRotationUndoPlugin } from './builtins/loop-rotation-undo.js';
+import { rotatedForLoopPlugin } from './builtins/rotated-for-loop.js';
 import { redundantParenCleanupPlugin } from './builtins/redundant-paren-cleanup.js';
 import { shortCircuitFoldPlugin } from './builtins/short-circuit-fold.js';
 import { deadBranchCleanupPlugin } from './builtins/dead-branch-cleanup.js';
@@ -708,6 +714,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   gotoCleanupPlugin,          // Cleanup: if (cond) goto L; ... L: stmt; → if (!cond) { ... } stmt;
   redundantParenCleanupPlugin, // Cleanup: if((x)) → if(x) (priority 56)
   loopRotationUndoPlugin,     // Cleanup: if(C){do{...}while(C)} → while(C){...} (priority 56)
+  rotatedForLoopPlugin,       // Fidelity: if(C@X){i=X;do{...;step}while(C)} → for(i=X;C;step){...} (priority 56)
   shortCircuitFoldPlugin,     // Cleanup: if(a){if(b){...}} → if(a&&b){...} (priority 57)
   deadBranchCleanupPlugin,    // Cleanup: if(true)/if(false) dead branch elimination (priority 58)
   declInitMergePlugin,        // Cleanup: int x; x = expr; → int x = expr; (priority 60)

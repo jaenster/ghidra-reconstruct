@@ -2700,6 +2700,15 @@ function transformDecompiledCode(
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         enclosingVarTypes,
       };
+      perPluginOptions['early-return'] = perPluginOptions['rotated-for-loop'] = {
+        enumTypes: context.funcPtrArgCasts.enumTypes,
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        structFields: context.funcPtrArgCasts.structFields,
+        typedefTargets: context.funcPtrArgCasts.typedefTargets,
+        functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        enclosingVarTypes,
+      };
       if (enclosing?.immediateConstants && enclosing.immediateConstants.length > 0) {
         const extents = context.funcPtrArgCasts.dataExtents ?? [];
         perPluginOptions['immediate-not-address'] = {
@@ -2973,7 +2982,7 @@ function transformDecompiledCode(
     // binary has one, `branch-layout` reorders arms the layout contradicts. Without the
     // facts (an older snapshot) early-return keeps its unconditional behaviour.
     if (layout) {
-      perPluginOptions['early-return'] = { branchLayout: layout };
+      perPluginOptions['early-return'] = { ...(perPluginOptions['early-return'] as object | undefined), branchLayout: layout };
       perPluginOptions['branch-layout'] = { branchLayout: layout };
     }
 
