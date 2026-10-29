@@ -368,10 +368,36 @@ describe('earlyReturnPlugin - gated by the layout', () => {
     assert.ok(/if \(h == -1\)\s*return 0;/.test(out), out);
   });
 
-  it('makes the guard for an && condition, whose layout cannot tell', () => {
+  it('keeps the nest for an && condition whose body lies before the return (GetAnimOrSeqMode)', () => {
     const out = er([
       'int f(int h, int g) {',
       '[if 0x4b 0x40,0x48,0x4b] if (h != -1 && g) {',
+      '[0x4e] G(h);',
+      '[0x54] return 1;',
+      '}',
+      '[0x5d,0x62] return 0;',
+      '}',
+    ]);
+    assert.ok(out.includes('if (h != -1 && g) { G(h); return 1; } return 0;'), out);
+  });
+
+  it('makes the guard for an && condition whose return lies first', () => {
+    const out = er([
+      'int f(int h, int g) {',
+      '[if 0x4b 0x40,0x48,0x4b] if (h != -1 && g) {',
+      '[0x5d] G(h);',
+      '[0x62] return 1;',
+      '}',
+      '[0x4e,0x54] return 0;',
+      '}',
+    ]);
+    assert.ok(out.includes('return 0; G(h); return 1;'), out);
+  });
+
+  it('makes the guard for an || condition, whose body VC8 moves out of line', () => {
+    const out = er([
+      'int f(int h, int g) {',
+      '[if 0x4b 0x40,0x48,0x4b] if (h != -1 || g) {',
       '[0x4e] G(h);',
       '[0x54] return 1;',
       '}',
@@ -382,6 +408,8 @@ describe('earlyReturnPlugin - gated by the layout', () => {
   });
 
   it('makes the guard when the body falls through into a copy of the return', () => {
+    // Which copy of the return keeps the code is not the layout's to say: VC8 emits one per
+    // path for some sources (SPELLSEL_FindChargedSkill1) and one for both for others.
     const out = er([
       'int f(int h) {',
       '[if 0x4b 0x48,0x4b] if (h == 2) {',
@@ -391,6 +419,63 @@ describe('earlyReturnPlugin - gated by the layout', () => {
       '}',
     ]);
     assert.ok(/if \(h != 2\)\s*return 1;/.test(out), out);
+  });
+
+  it('reads a tail call printed on the call and on the return as the body\'s (TEXT_GetOverheadSpeakerUnit)', () => {
+    const out = er([
+      'int f(int h) {',
+      '[if 0x20 0x19,0x20] if (h) {',
+      '[0x2d] int r = G(h);',
+      '[0x2d] return r;',
+      '}',
+      '[0x32,0x34] return 0;',
+      '}',
+    ]);
+    assert.ok(out.includes('if (h) { int r = G(h); return r; } return 0;'), out);
+  });
+
+  it('still drops an address two returns in different arms print (cross-jumped tails)', () => {
+    const out = er([
+      'int f(int h, int k) {',
+      '[if 0x8 0x6,0x8] if (h) {',
+      '[0x10] if (k) {',
+      '[0x30] return 0;',
+      '}',
+      '[0x12] G(h);',
+      '[0x18] return 1;',
+      '}',
+      '[0x30] return 0;',
+      '}',
+    ]);
+    // The outer if's body entry is 0x10; the trailing return's only address is shared.
+    assert.ok(/if \(!h\)\s*return 0;/.test(out), out);
+  });
+
+  it('reads the branch of an && a pass split into nested ifs on one line (deflateTune)', () => {
+    // comma-expand turns `if (s && (t = s->p, t)) {..}` into nested ifs on the if's line.
+    const { code, ev } = fixture([
+      'int f(S* s) {',
+      '[if 0xc 0x3,0x7,0xa,0xc] if (s) { t = s->p; if (t) {',
+      '[0x11] t->a = 1;',
+      '[0x2c,0x2f] return 0;',
+      '} }',
+      '[0x32,0x38] return -2;',
+      '}',
+    ]);
+    const out = flat(emit(earlyReturnPlugin.createTransformer({ branchLayout: ev })(parse(code)) as AnyNode));
+    assert.ok(out.includes('if (s) { t = s->p; if (t) { t->a = 1; return 0; } } return -2;'), out);
+    // Without the line's branch (another if on it) the guard is made as before.
+    const other = fixture([
+      'int f(S* s) {',
+      'if (s) { t = s->p; if (t) {',
+      '[0x11] t->a = 1;',
+      '[0x2c,0x2f] return 0;',
+      '} }',
+      '[0x32,0x38] return -2;',
+      '}',
+    ]);
+    const out2 = flat(emit(earlyReturnPlugin.createTransformer({ branchLayout: other.ev })(parse(other.code)) as AnyNode));
+    assert.ok(/if \(!s\)\s*return -2;/.test(out2), out2);
   });
 });
 

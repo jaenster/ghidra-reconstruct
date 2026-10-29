@@ -183,13 +183,16 @@ function asEarlyExit(s: Statement): Statement | null {
  *       if (!A) { <B assigns> if (!B) E; }
  *   - AND-chain        `if (A && B) BODY;` (negate=false, body = then-branch):
  *       if (A) { <B assigns> if (B) BODY }
- * invert() collapses the !-of-! so `!(!nParam)` renders as `nParam`.
+ * invert() collapses the !-of-! so `!(!nParam)` renders as `nParam`. Each if keeps the
+ * source if's position: they are its conditional branches, and the layout evidence
+ * (branch-layout/evidence.ts) reads an if's branch by the line of its keyword.
  */
 function buildNestedChain(
   ops: Expression[],
   body: Statement,
   leadingTrivia: ASTNode['leadingTrivia'],
   negate: boolean,
+  location: ASTNode['location'],
 ): Statement[] {
   const { assigns, cond } = splitComma(ops[0]);
   const guardCond = negate ? invert(cond) : cond;
@@ -199,7 +202,7 @@ function buildNestedChain(
       ? cloneNode(body)
       : ({
           kind: NodeKind.CompoundStmt,
-          statements: buildNestedChain(ops.slice(1), body, [], negate),
+          statements: buildNestedChain(ops.slice(1), body, [], negate, location),
           location: body.location,
           leadingTrivia: [],
           trailingTrivia: [],
@@ -210,7 +213,7 @@ function buildNestedChain(
     thenBranch,
     elseBranch: null,
     isConstexpr: false,
-    location: body.location,
+    location,
     leadingTrivia: leadingTrivia || [],
     trailingTrivia: [],
   } as IfStmt);
@@ -255,14 +258,14 @@ function expandStatement(s: Statement): Statement[] | null {
       if (neg.kind === NodeKind.UnaryExpr && (neg as UnaryExpr).operator === '!') {
         const negOps = flattenChain((neg as UnaryExpr).operand, '||');
         if (negOps.length >= 2 && hasCommaOperand(negOps)) {
-          return buildNestedChain(negOps, exit ?? ifs.thenBranch, ifs.leadingTrivia, true);
+          return buildNestedChain(negOps, exit ?? ifs.thenBranch, ifs.leadingTrivia, true, ifs.location);
         }
       }
       // Pattern 2c: AND-chain with a comma side effect  if (A && (v=X, B)) BODY;
       // (any then-branch; no else, so nesting can't duplicate a branch)
       const andOps = flattenChain(ifs.condition, '&&');
       if (andOps.length >= 2 && hasCommaOperand(andOps)) {
-        return buildNestedChain(andOps, ifs.thenBranch, ifs.leadingTrivia, false);
+        return buildNestedChain(andOps, ifs.thenBranch, ifs.leadingTrivia, false, ifs.location);
       }
     }
     // Pattern 1d: if ((a, b, c)) — whole condition is a comma (unconditional)
