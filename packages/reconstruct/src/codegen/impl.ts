@@ -29,7 +29,7 @@ import type { BranchLayoutFacts } from '../extract/branch-layout.js';
 import type { CallOrderFacts } from '../extract/call-order.js';
 import type { AccessOrderFacts } from '../extract/access-order.js';
 import type { HaltLineFacts } from '../extract/halt-lines.js';
-import { transformGhidraCode, preprocessGhidraCode, isGhidraGeneratedName, suggestBetterName, takeFuncPtrArgCastTypedefs, type TransformResult, type FuncPtrTarget, type ArtifactMode, type ArtifactRecord, type RunTruncation } from '@ghidra-mcp/cpp-parser';
+import { transformGhidraCode, preprocessGhidraCode, type InlinedCallee, type InlinedCallTables, isGhidraGeneratedName, suggestBetterName, takeFuncPtrArgCastTypedefs, type TransformResult, type FuncPtrTarget, type ArtifactMode, type ArtifactRecord, type RunTruncation } from '@ghidra-mcp/cpp-parser';
 import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js';
 import { getGlobalReferenceAliases, globalAliasComment } from './global-aliases.js';
 import { globalGuardLine, guardQualifiedName, hasDefinitionInitializer } from './global-guards.js';
@@ -542,7 +542,13 @@ export interface ImplGenContext {
    * Functions defined `static` in their unit (file-static-functions.ts), by address
    * key, with the functions of that unit that reference them.
    */
-  fileStaticFunctions?: ReadonlyMap<string, { unit: string; referrers: ReadonlySet<string> }>;
+  fileStaticFunctions?: ReadonlyMap<string, { unit: string; referrers: ReadonlySet<string>; inline?: boolean }>;
+  /**
+   * Calls the original made and VC8 inlined (inlined-calls.ts): per site function's
+   * address key, the callees the `inlined-call-restore` pass writes calls to there,
+   * and the declarations their arguments are typed from.
+   */
+  inlinedCalls?: { calleesBySite: ReadonlyMap<string, InlinedCallee[]>; tables: InlinedCallTables };
   /** Optional precomputed method mappings for call-site rewriting */
   methodMappings?: Record<string, MethodCallMapping>;
   /** Analyzed globals for static-local injection into function bodies */
@@ -1058,6 +1064,7 @@ export function generateImplementation(
     }
 
     const isInternal = (internalFunctions?.has(func.name) ?? false) || fileStatic(func) !== undefined;
+    const isInline = fileStatic(func)?.inline === true;
     let impl: string;
     // A compiler-generated C++ EH handler stub gets the body of a frame that
     // handles nothing (see eh-handler-stub.ts), not its decompiled one.
@@ -1067,7 +1074,7 @@ export function generateImplementation(
       continue;
     }
     try {
-      impl = generateFunctionImplementation(func, classInfo, options, context, isInternal, useNamespace ? resolvedNamespace : undefined);
+      impl = generateFunctionImplementation(func, classInfo, options, context, isInternal, useNamespace ? resolvedNamespace : undefined, isInline);
     } catch (err) {
       if (err instanceof RangeError && /call stack|stack size/i.test(String(err.message))) {
         parseErrorCount++;
@@ -1381,6 +1388,8 @@ export function generateFunctionImplementation(
    * namespace block must not have anything shortened.
    */
   enclosingNamespace?: ResolvedNamespace,
+  /** Defined `inline`: the original inlined every call to it (inlined-calls.ts). */
+  isInline?: boolean,
 ): string {
   const lines: string[] = [];
 
@@ -1618,7 +1627,7 @@ export function generateFunctionImplementation(
     lines.push(signature + ' {');
   } else {
     // Standalone function — prefix with `static` if internal to this unit
-    const staticPrefix = isInternal ? 'static ' : '';
+    const staticPrefix = isInternal ? (isInline ? 'static inline ' : 'static ') : '';
     const signature = generateFunctionSignature(func);
     lines.push(overrideAttributePrefix(override) + staticPrefix + signature + ' {');
   }
@@ -1757,7 +1766,7 @@ function signatureParameterList(func: ExtractedFunction, which: 'declared' | 'bo
 /** One shared options object, so the plugin's transformer cache (keyed on it) still hits. */
 const VTABLE_CALLS_FREE_FUNCTION = Object.freeze({ thisIsClassInstance: false });
 
-function wrapperSignature(func: ExtractedFunction): { returnType: string; params: string } | undefined {
+export function wrapperSignature(func: ExtractedFunction): { returnType: string; params: string } | undefined {
   const returnType = returnSigType(func.returnType).trim();
   if (!returnType) return undefined;
   return { returnType, params: signatureParameterList(func, 'body') };
@@ -2355,6 +2364,26 @@ function globalAliasResolveOptions(aliases: Record<string, string>): { globalAli
   return o;
 }
 
+/**
+ * A decompile's body, between its braces, and the signature match it was found by
+ * (null when only the brace fallback found it).
+ *
+ * Matched from the signature's closing paren, so a `{field:size}` in a plate
+ * comment is never taken for the body; without a signature, the last `{` before
+ * the last `}`.
+ */
+export function splitDecompiledBody(decompiled: string): { body: string; funcBodyMatch: RegExpMatchArray | null } | undefined {
+  // This handles both "func(...) {" and "func(...)\n{"
+  const funcBodyMatch = decompiled.match(/\)[\s\n]*\{([\s\S]*)\}[\s\S]*$/);
+  if (funcBodyMatch) return { body: funcBodyMatch[1], funcBodyMatch };
+  const lastBraceIndex = decompiled.lastIndexOf('}');
+  if (lastBraceIndex === -1) return undefined;
+  const beforeLastBrace = decompiled.substring(0, lastBraceIndex);
+  const lastOpenBraceIndex = beforeLastBrace.lastIndexOf('{');
+  if (lastOpenBraceIndex === -1) return undefined;
+  return { body: decompiled.substring(lastOpenBraceIndex + 1, lastBraceIndex), funcBodyMatch: null };
+}
+
 function transformDecompiledCode(
   decompiled: string,
   options: ReconstructOptions,
@@ -2426,36 +2455,11 @@ function transformDecompiledCode(
   },
 ): TransformDecompiledResult {
   try {
-    // Extract just the function body (remove signature and braces)
-    // CRITICAL: Match from the LAST opening paren to avoid matching { inside comments
-    // Strategy: Find the function signature's closing paren, then match the next { ... }
-    // This avoids false matches on {field:size} notation in PLATE comments
-    let bodyMatch: RegExpMatchArray | null = null;
-
-    // Try to match: function signature ending with ) followed by {body}
-    // This handles both "func(...) {" and "func(...)\n{"
-    const funcBodyMatch = decompiled.match(/\)[\s\n]*\{([\s\S]*)\}[\s\S]*$/);
-    if (funcBodyMatch) {
-      bodyMatch = funcBodyMatch;
-    } else {
-      // Fallback: Try to find the LAST { before the LAST }
-      // This handles cases where there's no function signature
-      const lastBraceIndex = decompiled.lastIndexOf('}');
-      if (lastBraceIndex !== -1) {
-        const beforeLastBrace = decompiled.substring(0, lastBraceIndex);
-        const lastOpenBraceIndex = beforeLastBrace.lastIndexOf('{');
-        if (lastOpenBraceIndex !== -1) {
-          const body = decompiled.substring(lastOpenBraceIndex + 1, lastBraceIndex);
-          bodyMatch = [decompiled, body] as RegExpMatchArray;
-        }
-      }
-    }
-
-    if (!bodyMatch) {
+    const split = splitDecompiledBody(decompiled);
+    if (!split) {
       return { code: unparsedBody(indentCode(decompiled, 4), funcName, funcAddress, 'no function body found') };
     }
-
-    const body = bodyMatch[1];
+    const { body, funcBodyMatch } = split;
 
     // Pre-process Ghidra quirks before parsing
     const preprocessedBody = preprocessGhidraCode(body);
@@ -3039,6 +3043,18 @@ function transformDecompiledCode(
         enclosingSegments: enclosing?.ghidraNamespaceSegments ?? enclosing?.namespaceSegments,
         onSite: (e: { line: number; temps: number }) =>
           console.warn(`[nest] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.temps} temporar${e.temps === 1 ? 'y' : 'ies'} into the call on line ${e.line}`),
+      };
+    }
+
+    // A call the original made and VC8 inlined is written back where the decompiler
+    // printed the callee's body (inlined-call-restore.ts, codegen/inlined-calls.ts).
+    const inlinedCallees = funcAddress ? context?.inlinedCalls?.calleesBySite.get(fileStaticKey(funcAddress)) : undefined;
+    if (inlinedCallees && context?.inlinedCalls) {
+      perPluginOptions['inlined-call-restore'] = {
+        callees: inlinedCallees,
+        ...context.inlinedCalls.tables,
+        onSite: (e: { line: number; callee: string; form: string }) =>
+          console.warn(`[inlined-call] ${funcAddress} ${funcName ?? '<unknown>'}: ${e.callee} (${e.form}) on line ${e.line}`),
       };
     }
 

@@ -66,7 +66,7 @@ import {
   ADDRESS_LITERAL_COMPLEMENT_FLOOR,
   type FuncPtrTarget,
 } from '@ghidra-mcp/cpp-parser';
-import { Lexer, TokenKind, parse, biasedTableIndexPlugin, findNodesByKind, NodeKind } from '@ghidra-mcp/cpp-parser';
+import { Lexer, TokenKind, parse, biasedTableIndexPlugin, findNodesByKind, NodeKind, type InlinedCallee, type InlinedCallTables } from '@ghidra-mcp/cpp-parser';
 
 import { buildVtableDispatch } from './vtable-dispatch.js';
 import { fieldDeclSpelling, emittedMemberNames, generateHeader, generateFunctionDeclaration, setKnownFuncDefs, setConstructorBearingStructs, hasConvertingConstructor, sigType, getIntegerConversionType, emittedFunctionName, returnSigType } from './header.js';
@@ -98,6 +98,7 @@ import { normalizePointerSizeSpellings } from './pointer-size-spelling.js';
 import { flattenTemplateNames } from './template-names.js';
 import { buildTemplateRegistry, classScopeOf, memberDefinitionScope, templateDataDefinitions, templateHeaderTypes } from './templates/index.js';
 import { fileStaticKey, readForeignSources, selectFileStaticFunctions, type ForeignSource } from './file-static-functions.js';
+import { planInlinedCalls, type InlinedCallPlan } from './inlined-calls.js';
 import { placeTemplateMembers } from './templates/placement.js';
 import { baseModel } from './templates/bases.js';
 import { memberModel } from './templates/members.js';
@@ -1495,7 +1496,8 @@ export function generateProjectStage1(
         .filter(([, target]) => target.config.type !== 'interface')
         .map(([targetName, target]) => ({ prefix: getTargetDirectory(targetName), functions: target.functions }))
         .concat(resolution.unsorted.length > 0 ? [{ prefix: 'unsorted', functions: resolution.unsorted }] : []),
-      !shard || shard.index === 0);
+      !shard || shard.index === 0,
+      () => inlinedCallTablesOf(functions, analyzedGlobals, dataTypes, strings ?? []));
 
     // Generate files per target (classification happens here)
     const mergedTypeOwnerMap = new Map<string, string>();
@@ -1548,7 +1550,8 @@ export function generateProjectStage1(
     const flatGlobalsPath = analyzedGlobals.length > 0 ? GLOBALS_HEADER : undefined;
 
     installFileStaticFunctions(context, fileStaticModel, classes, namespaces, foreignSources,
-      [{ prefix: '', functions }], !shard || shard.index === 0);
+      [{ prefix: '', functions }], !shard || shard.index === 0,
+      () => inlinedCallTablesOf(functions, analyzedGlobals, dataTypes, strings ?? []));
 
     // Generate files (classification happens here)
     const flatTypeOwnerMap = generateFilesForFunctions(
@@ -2413,13 +2416,23 @@ function installFileStaticFunctions(
   foreignSources: ReadonlyArray<ForeignSource>,
   parts: Array<{ prefix: string; functions: ExtractedFunction[] }>,
   report: boolean,
+  /** The declarations an inlined call's arguments are typed from (inlined-calls.ts). */
+  inlinedCallTables?: () => InlinedCallTables,
 ): void {
   const unitOf = new Map<string, string>();
+  const unitFunctionsOf = new Map<string, Array<{ key: string; func: ExtractedFunction }>>();
   for (const part of parts) {
     for (const [unitName, unitFunctions] of organizeByNamespace(part.functions, classes, namespaces)) {
-      for (const f of unitFunctions) unitOf.set(fileStaticKey(f.address), `${part.prefix}/${unitName}`);
+      const unit = `${part.prefix}/${unitName}`;
+      const list = unitFunctionsOf.get(unit) ?? [];
+      unitFunctionsOf.set(unit, list);
+      for (const f of unitFunctions) {
+        unitOf.set(fileStaticKey(f.address), unit);
+        list.push({ key: fileStaticKey(f.address), func: f });
+      }
     }
   }
+  let inlinedCallPlan: InlinedCallPlan | undefined;
   const classMethods = new Set<string>();
   for (const cls of classes) for (const m of cls.methods) classMethods.add(fileStaticKey(m.address));
   // The platform header declares these names extern in every unit.
@@ -2434,6 +2447,17 @@ function installFileStaticFunctions(
       || templateRegistry()?.unitOf(f.address) !== undefined
       || memberDefinitionScope(f) !== undefined
       || platformDeclared.has(f.name),
+    // A function nothing references whose body its unit's functions hold inlined.
+    inlinedCalls: inlinedCallTables && (unreferenced => {
+      const hasOverride = (f: ExtractedFunction) => context.overrides?.get(f.address) !== undefined;
+      inlinedCallPlan = planInlinedCalls(
+        unreferenced.filter(u => !hasOverride(u.func)),
+        unit => unitFunctionsOf.get(unit) ?? [],
+        inlinedCallTables(),
+        hasOverride,
+      );
+      return inlinedCallPlan.sitesByCallee;
+    }),
     // A replaced body or a patch is emitted code that can name any function.
     extraReferenceText: f => {
       const override = context.overrides?.get(f.address);
@@ -2444,13 +2468,47 @@ function installFileStaticFunctions(
     },
   });
   context.fileStaticFunctions = selection.selected;
+  // Only the sites of a callee that was selected get their call back: a callee kept
+  // extern would be called and never inlined.
+  if (inlinedCallPlan) {
+    const calleesBySite = new Map<string, InlinedCallee[]>();
+    const selectedCallNames = new Set<string>();
+    for (const [key, entry] of selection.selected) {
+      const callee = entry.inline ? inlinedCallPlan.calleeByKey.get(key) : undefined;
+      if (callee) selectedCallNames.add(callee.callName);
+    }
+    for (const [site, callees] of inlinedCallPlan.calleesBySite) {
+      const kept = callees.filter(c => selectedCallNames.has(c.callName));
+      if (kept.length > 0) calleesBySite.set(site, kept);
+    }
+    context.inlinedCalls = { calleesBySite, tables: inlinedCallPlan.tables };
+  } else {
+    context.inlinedCalls = undefined;
+  }
   if (report) {
     const refused = [...selection.refused].map(([why, names]) => `${names.length} ${why}`).join(', ');
     console.log(
       `File-static functions: ${selection.selected.size} of ${selection.candidates} with parameters in ` +
       `registers their convention does not use${refused ? ` (kept extern: ${refused})` : ''}`
     );
+    if (context.inlinedCalls) {
+      const inline = [...selection.selected.values()].filter(e => e.inline).length;
+      const sites = [...context.inlinedCalls.calleesBySite.values()].reduce((n, c) => n + c.length, 0);
+      console.log(`Inlined calls restored: ${inline} static inline functions, called again from ${context.inlinedCalls.calleesBySite.size} functions (${sites} callee-site pairs)`);
+    }
   }
+}
+
+/** The member, global and typedef declarations an inlined call's arguments are typed from. */
+function inlinedCallTablesOf(
+  functions: ExtractedFunction[],
+  globals: AnalyzedDataSymbol[],
+  dataTypes: ExtractedDataType[],
+  strings: ReadonlyArray<ExtractedString>,
+): InlinedCallTables {
+  const funcDefs = dataTypes.filter(dt => dt.kind === 'FUNCTION_DEFINITION') as import('../types.js').ExtractedFunctionDefinition[];
+  const t = buildFuncPtrArgCastTables(functions, globals, funcDefs, dataTypes, strings, platformDeclaredModelFunctions);
+  return { globalTypes: t.globalTypes, structFields: t.structFields, fieldTypes: t.fieldTypes, typedefTargets: t.typedefTargets };
 }
 
 function buildFuncToImplPathMap(
