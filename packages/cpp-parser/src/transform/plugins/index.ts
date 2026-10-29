@@ -119,14 +119,6 @@ export {
   type MemoryPatternsOptions,
 } from './builtins/memory-patterns.js';
 
-// ============================================
-// BUILT-IN PLUGINS: MAGIC DIVISION
-// ============================================
-
-export {
-  magicDivisionPlugin,
-  type MagicDivisionOptions,
-} from './builtins/magic-division.js';
 
 // ============================================
 // BUILT-IN PLUGINS: TERNARY SIMPLIFICATION
@@ -490,7 +482,6 @@ export { bitfieldAliasLowerPlugin } from './builtins/bitfield-alias-lower.js';
 import { enumConstantQualifyPlugin } from './builtins/enum-constant-qualify.js';
 export { enumConstantQualifyPlugin } from './builtins/enum-constant-qualify.js';
 import { memoryPatternsPlugin } from './builtins/memory-patterns.js';
-import { magicDivisionPlugin } from './builtins/magic-division.js';
 import { ternarySimplifyPlugin } from './builtins/ternary-simplify.js';
 import { vtableCallPlugin } from './builtins/vtable-calls.js';
 import { switchReconstructPlugin } from './builtins/switch-reconstruct.js';
@@ -587,6 +578,11 @@ import { sehNativePlugin } from './builtins/seh-native.js';
 import { returnCastPlugin } from './builtins/return-cast.js';
 export { returnCastPlugin, type ReturnCastOptions } from './builtins/return-cast.js';
 import { floatPointerBitcastPlugin } from './builtins/float-pointer-bitcast.js';
+import { arithIdiomsPlugin } from './builtins/arith-idioms.js';
+export {
+  arithIdiomsPlugin, createArithIdiomsTransformer, getArithIdiomStats, resetArithIdiomStats,
+  type ArithIdiomsOptions, type ArithIdiom,
+} from './builtins/arith-idioms.js';
 import { narrowCastThroughUintptrPlugin } from './builtins/narrow-cast-through-uintptr.js';
 import { assignCastPlugin } from './builtins/assign-cast.js';
 import { unprototypedCallCastPlugin } from './builtins/unprototyped-call-cast.js';
@@ -711,7 +707,6 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   allocMacrosPlugin,          // Cleanup: Fog allocator calls with a literal file/line -> D2_ALLOC_AT/D2_FREE_AT/D2_NEW_AT macros (priority 880)
   vtableCallPlugin,           // C++ vtable patterns (early)
   switchReconstructPlugin,    // Control flow reconstruction
-  magicDivisionPlugin,        // Compiler optimizations
   loopCanonicalizePlugin,
   arrayAccessPlugin,
   structFieldPlugin,
@@ -747,6 +742,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   pointerCompareCastPlugin,   // Type: cast one side of a distinct-pointer comparison (priority 615)
   returnCastPlugin,           // Type: cast a returned pointer to the declared return type (priority 616)
   floatPointerBitcastPlugin,  // Type: reinterpret the four bytes a float/pointer cast moves (priority 618)
+  arithIdiomsPlugin,          // Matching: division/remainder/64-bit helper idioms -> the operator (priority 619)
   narrowCastThroughUintptrPlugin, // Type: route a pointer->narrow-integer cast through uintptr_t (priority 620)
   assignCastPlugin,           // Type: cast an assigned value to its slot's declared type (priority 615)
   unprototypedCallCastPlugin, // Type: give a FARPROC call the parameter list C left unspecified (priority 622)
