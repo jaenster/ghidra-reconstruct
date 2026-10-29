@@ -334,6 +334,13 @@ export {
 } from './builtins/assert-order.js';
 
 export {
+  nestCallPlugin,
+  type CallOrderEvidence,
+  type CallSiteFact,
+  type NestCallOptions,
+} from './builtins/nest-call.js';
+
+export {
   branchLayoutPlugin,
   LayoutReader,
   type BranchLayoutEvidence,
@@ -550,6 +557,7 @@ import { gotoCrossesInitPlugin } from './builtins/goto-crosses-init.js';
 import { haltSiteFoldPlugin } from './builtins/halt-site-fold.js';
 import { assertOrderPlugin } from './builtins/assert-order.js';
 import { branchLayoutPlugin } from './builtins/branch-layout/index.js';
+import { nestCallPlugin } from './builtins/nest-call.js';
 import { declOrderFixPlugin } from './builtins/decl-order-fix.js';
 import { declScopeSinkPlugin } from './builtins/decl-scope-sink.js';
 import { phiNodeTernaryPlugin } from './builtins/phi-node-ternary.js';
@@ -710,6 +718,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   earlyReturnPlugin,          // Readability: flatten nested if(C){...}return X; → if(!C)return X; ... (priority 60)
   commaExpandPlugin,          // Readability: lower comma/short-circuit side effects into statements + guards (priority 13)
   commaExpandLatePlugin,      // Readability: the same, on what goto structuring left (priority 59)
+  nestCallPlugin,             // Matching: a temporary back into the argument list the original evaluated it in (priority 59.5)
   arrayFillCollapsePlugin,    // Cleanup: collapse arr[i]=0 runs into memset (priority 50)
   gotoCleanupPlugin,          // Cleanup: if (cond) goto L; ... L: stmt; → if (!cond) { ... } stmt;
   redundantParenCleanupPlugin, // Cleanup: if((x)) → if(x) (priority 56)
