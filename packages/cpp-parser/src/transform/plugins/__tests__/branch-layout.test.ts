@@ -305,6 +305,69 @@ describe('branchLayoutPlugin - && guard with a tail written per test', () => {
   });
 });
 
+describe('branchLayoutPlugin - || guard whose arm the original placed elsewhere', () => {
+  const amid = [
+    'void* f(S* p) {',
+    '[if 0xc 0x0,0x2,0x9,0xc] if (!(p && p->m == 0x1020304)) {',
+    '[0x4,0x6] return 0;',
+    '}',
+    '[0xe] return p->v;',
+    '}',
+  ];
+
+  it('writes one guard per test where the arm lies between the tests', () => {
+    const { out, sites } = run(amid);
+    assert.deepStrictEqual(sites, ['split']);
+    assert.ok(out.includes('if (!p) { return 0; } if (p->m != 0x1020304) { return 0; } return p->v; }'), out);
+  });
+
+  it('does the same for a written ||', () => {
+    const { out, sites } = run(amid.map(l => l.replace('!(p && p->m == 0x1020304)', 'a == b || c > d')));
+    assert.deepStrictEqual(sites, ['split']);
+    assert.ok(out.includes('if (a == b) { return 0; } if (c > d) { return 0; }'), out);
+  });
+
+  it('is idempotent', () => {
+    const { first, second } = twice(amid);
+    assert.strictEqual(second, first);
+  });
+
+  it('leaves three tests: which one the arm follows is unknown', () => {
+    const { sites } = run(amid.map(l => l.replace('!(p && p->m == 0x1020304)', '!(p && p->t == 1 && p->d)')));
+    assert.deepStrictEqual(sites, ['left']);
+  });
+
+  it('leaves an arm that lies after the rest, as VC8 places it', () => {
+    const { sites } = run(amid.map(l => l.replace('[0x4,0x6] return 0', '[0x14,0x16] return 0')));
+    assert.deepStrictEqual(sites, []);
+  });
+
+  const getter = [
+    'void* f(S* p) {',
+    '[if 0xe 0x0,0x2,0x4,0x7,0x9,0xc,0xe] if (!(p && p->t == 1 && p->d)) {',
+    '[0x10] return 0;',
+    '}',
+    '[0x13] return p->d->v;',
+    '}',
+  ];
+
+  it('tests the value of an inlined getter where the arm follows the last test', () => {
+    const { out, sites } = run(getter);
+    assert.deepStrictEqual(sites, ['getter']);
+    assert.ok(out.includes('if (!(p && p->t == 1 ? p->d : 0)) { return 0; } return p->d->v;'), out);
+  });
+
+  it('is idempotent on the getter form', () => {
+    const { first, second } = twice(getter);
+    assert.strictEqual(second, first);
+  });
+
+  it('leaves a last test that is a comparison', () => {
+    const { sites } = run(getter.map(l => l.replace('p->t == 1 && p->d', 'p->t == 1')));
+    assert.deepStrictEqual(sites, ['left']);
+  });
+});
+
 describe('branchLayoutPlugin - without evidence', () => {
   it('changes nothing', () => {
     const { code } = fixture(['int f(int h) {', 'if (h == -1) { return 0; }', 'G(h);', 'return 1;', '}']);
