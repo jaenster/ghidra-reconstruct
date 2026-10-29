@@ -58,4 +58,49 @@ describe('earlyReturnPlugin', () => {
     const out = tx(`int f(int a) { if (a) { big(); } }`);
     assert.ok(!out.includes('return'), out); // unsafe (unknown fall-through value) → left alone
   });
+
+  it('flips an ordering between integers', () => {
+    const out = tx(`int f(int n) { if (n < 5) { side(); } return 0; }`);
+    assert.ok(/if \(n >= 5\)\s*return 0;/.test(out), out);
+    const cast = tx(`int f(int n, unsigned int m) { if (n <= (int)m) { side(); } return 0; }`);
+    assert.ok(/if \(n > \(int\)m\)\s*return 0;/.test(cast), cast);
+  });
+
+  it('flips an ordering between pointers', () => {
+    const out = tx(`int f(char* p, char* e) { if (p < e) { side(); } return 0; }`);
+    assert.ok(/if \(p >= e\)\s*return 0;/.test(out), out);
+  });
+
+  it('wraps an ordering with a float operand in !(...): NaN makes the flip wrong', () => {
+    const out = tx(`int f(float a, float b) { if (a < b) { side(); } return 0; }`);
+    assert.ok(/if \(!\(a < b\)\)\s*return 0;/.test(out), out);
+    assert.ok(!out.includes('a >= b'), out);
+  });
+
+  it('wraps an ordering against a double literal', () => {
+    const out = tx(`int f(double d) { if (d > 0.5) { side(); } return 0; }`);
+    assert.ok(/if \(!\(d > 0\.5\)\)\s*return 0;/.test(out), out);
+  });
+
+  it('wraps an ordering whose operand type is unknown', () => {
+    const out = tx(`int f(Thing* t) { if (t->x < 5) { side(); } return 0; }`);
+    assert.ok(/if \(!\(t->x < 5\)\)\s*return 0;/.test(out), out);
+  });
+
+  it('flips an ordering whose member type the tables give', () => {
+    const ast = parse(`int f(Thing* t) { if (t->x < 5) { side(); } return 0; }`);
+    const out = emit(earlyReturnPlugin.createTransformer({ structFields: { Thing: { x: 'int' } } })(ast) as AnyNode).trim();
+    assert.ok(/if \(t->x >= 5\)\s*return 0;/.test(out), out);
+  });
+
+  it('wraps an ordering on a float global the tables give', () => {
+    const ast = parse(`int f() { if (gfScale >= 1) { side(); } return 0; }`);
+    const out = emit(earlyReturnPlugin.createTransformer({ globalTypes: { gfScale: 'float' } })(ast) as AnyNode).trim();
+    assert.ok(/if \(!\(gfScale >= 1\)\)\s*return 0;/.test(out), out);
+  });
+
+  it('flips equality whatever the operand types', () => {
+    const out = tx(`int f(float a) { if (a == 1.0f) { side(); } return 0; }`);
+    assert.ok(/if \(a != 1\.0f\)\s*return 0;/.test(out), out);
+  });
 });

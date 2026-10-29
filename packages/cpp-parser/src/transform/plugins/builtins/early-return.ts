@@ -54,6 +54,9 @@ import type { TransformPlugin, PluginOptions } from '../types.js';
 import { getChildren } from '../../../ast/visitor.js';
 import { LayoutReader, isLoop, type BranchLayoutEvidence } from './branch-layout/evidence.js';
 import { conditionShape } from './branch-layout/index.js';
+import { createExprShape, type ExprShape } from './expr-shape.js';
+import { localTypesOf } from './compare-form.js';
+import type { TypedefResolver } from './call-arg-cast.js';
 
 const FLIP: Record<string, BinaryExpr['operator']> = {
   '==': '!=', '!=': '==', '<': '>=', '>': '<=', '<=': '>', '>=': '<',
@@ -64,13 +67,41 @@ function unwrapParens(e: Expression): Expression {
   return e;
 }
 
-/** Logical negation, simplified: flip relational ops, drop a leading `!`, else wrap `!(...)`. */
-function invert(e: Expression): Expression {
+/** Whether an operand of a comparison is an integer or a pointer, as far as the types say. */
+type IsIntegral = (e: Expression) => boolean;
+
+const INTEGRAL_BASES = new Set([
+  'int', 'long', 'short', 'char', 'signed char', 'long long', 'bool', 'wchar_t',
+  'unsigned int', 'unsigned long', 'unsigned short', 'unsigned char', 'unsigned long long',
+  'intptr_t', 'uintptr_t', 'size_t', 'ssize_t', 'pointer32',
+]);
+
+function integralByTypes(shapeOf: ExprShape | null, enumTypes: ReadonlySet<string>): IsIntegral {
+  return (e) => {
+    let u = unwrapParens(e);
+    if (u.kind === NodeKind.UnaryExpr && ['-', '~', '+'].includes((u as UnaryExpr).operator)) u = unwrapParens((u as UnaryExpr).operand);
+    if (u.kind === NodeKind.IntegerLiteral || u.kind === NodeKind.CharLiteral || u.kind === NodeKind.BoolLiteral) return true;
+    if (u.kind === NodeKind.NullptrLiteral) return true;
+    const s = shapeOf ? shapeOf(u) : null;
+    if (!s) return false;
+    return s.stars > 0 || INTEGRAL_BASES.has(s.base) || enumTypes.has(s.base);
+  };
+}
+
+/**
+ * Logical negation, simplified: flip `==`/`!=`, drop a leading `!`, else wrap `!(...)`.
+ * An ordering (`<`, `<=`, `>`, `>=`) is flipped only between integers or pointers: with a
+ * floating-point operand, NaN makes `!(a < b)` true where `a >= b` is false.
+ */
+function invert(e: Expression, integral: IsIntegral): Expression {
   const u = unwrapParens(e);
   if (u.kind === NodeKind.BinaryExpr) {
     const b = u as BinaryExpr;
     const flipped = FLIP[b.operator];
-    if (flipped) return { ...b, operator: flipped, leadingTrivia: [], trailingTrivia: [] };
+    const ordering = b.operator !== '==' && b.operator !== '!=';
+    if (flipped && (!ordering || (integral(b.left) && integral(b.right)))) {
+      return { ...b, operator: flipped, leadingTrivia: [], trailingTrivia: [] };
+    }
   }
   if (u.kind === NodeKind.UnaryExpr && (u as UnaryExpr).operator === '!') {
     return (u as UnaryExpr).operand;
@@ -101,10 +132,10 @@ function matchGuardIf(s: Statement): { ifs: IfStmt; cond: Expression; body: Stat
   return { ifs, cond: ifs.condition, body };
 }
 
-function makeGuard(srcIf: IfStmt, cond: Expression, ret: ReturnStmt): IfStmt {
+function makeGuard(srcIf: IfStmt, cond: Expression, ret: ReturnStmt, integral: IsIntegral): IfStmt {
   return {
     kind: NodeKind.IfStmt,
-    condition: invert(cond),
+    condition: invert(cond, integral),
     thenBranch: cloneNode(ret),
     elseBranch: null,
     isConstexpr: false,
@@ -122,7 +153,7 @@ type GuardGate = (ifs: IfStmt, body: Statement[], ret: ReturnStmt) => boolean;
  *   A) `... if (C) { BODY } return X;`          → `... if (!C) return X; BODY [return X]`
  *   B) `... if (C) { BODY }`  (voidContext)     → `... if (!C) return; BODY`   (implicit void end)
  */
-function flattenOnce(block: CompoundStmt, voidContext: boolean, gate: GuardGate | null): CompoundStmt | null {
+function flattenOnce(block: CompoundStmt, voidContext: boolean, gate: GuardGate | null, integral: IsIntegral): CompoundStmt | null {
   const s = block.statements;
   const n = s.length;
   if (n < 1) return null;
@@ -133,7 +164,7 @@ function flattenOnce(block: CompoundStmt, voidContext: boolean, gate: GuardGate 
     const g = matchGuardIf(s[n - 2]);
     if (g && (!gate || gate(g.ifs, g.body, last as ReturnStmt))) {
       const ret = last as ReturnStmt;
-      const guard = makeGuard(g.ifs, g.cond, ret);
+      const guard = makeGuard(g.ifs, g.cond, ret, integral);
       const bodyFallsThrough = !isTerminator(g.body[g.body.length - 1]);
       const tail: Statement[] = bodyFallsThrough ? [cloneNode(ret)] : [];
       return { ...block, statements: [...s.slice(0, n - 2), guard, ...g.body, ...tail] };
@@ -147,7 +178,7 @@ function flattenOnce(block: CompoundStmt, voidContext: boolean, gate: GuardGate 
       const voidRet: ReturnStmt = {
         kind: NodeKind.ReturnStmt, value: null, location: last.location, leadingTrivia: [], trailingTrivia: [],
       };
-      const guard = makeGuard(g.ifs, g.cond, voidRet);
+      const guard = makeGuard(g.ifs, g.cond, voidRet, integral);
       // no terminal return appended — the function falls off its (void) end
       return { ...block, statements: [...s.slice(0, n - 1), guard, ...g.body] };
     }
@@ -156,11 +187,11 @@ function flattenOnce(block: CompoundStmt, voidContext: boolean, gate: GuardGate 
   return null;
 }
 
-function flattenBody(block: CompoundStmt, voidContext: boolean, gate: GuardGate | null): CompoundStmt | null {
+function flattenBody(block: CompoundStmt, voidContext: boolean, gate: GuardGate | null, integral: IsIntegral): CompoundStmt | null {
   let cur = block;
   let changed = false;
   for (let i = 0; i < 256; i++) {
-    const next = flattenOnce(cur, voidContext, gate);
+    const next = flattenOnce(cur, voidContext, gate, integral);
     if (!next) break;
     cur = next;
     changed = true;
@@ -204,18 +235,18 @@ function layoutGate(ev: BranchLayoutEvidence, body: CompoundStmt): GuardGate {
   };
 }
 
-function createEarlyReturnTransformer(gate: GuardGate | null): Transformer {
+function createEarlyReturnTransformer(gate: GuardGate | null, integral: IsIntegral): Transformer {
   return createTransformer({
     visitNode(node: ASTNode): ASTNode | undefined {
       // Any block: flatten explicit-trailing-return guards (Case A).
       if (node.kind === NodeKind.CompoundStmt) {
-        return flattenBody(node as CompoundStmt, false, gate) ?? undefined;
+        return flattenBody(node as CompoundStmt, false, gate, integral) ?? undefined;
       }
       // Function/method bodies: if void-returning, also flatten the implicit-end guard (Case B).
       if (node.kind === NodeKind.FunctionDecl || node.kind === NodeKind.MethodDecl) {
         const fn = node as FunctionDecl | MethodDecl;
         if (fn.body && isVoidReturn(fn.returnType)) {
-          const nb = flattenBody(fn.body, true, gate);
+          const nb = flattenBody(fn.body, true, gate, integral);
           if (nb) return updateNode(fn, { body: nb });
         }
       }
@@ -224,14 +255,30 @@ function createEarlyReturnTransformer(gate: GuardGate | null): Transformer {
   });
 }
 
-/** Per function: the gate is read from the body as the passes before left it. */
-function createGatedTransformer(ev: BranchLayoutEvidence): Transformer {
+/**
+ * Per function: the gate is read from the body as the passes before left it, and the
+ * operand types from its parameters and locals plus the tables the caller passes.
+ */
+function createPerFunctionTransformer(o: EarlyReturnOptions): Transformer {
+  const ev = o.branchLayout ?? null;
+  const enumTypes = new Set(o.enumTypes ?? []);
+  const typedefTargets = o.typedefTargets ?? {};
+  const resolve: TypedefResolver = name => (enumTypes.has(name) ? undefined : typedefTargets[name]);
   return createTransformer({
     visitNode(node: ASTNode): ASTNode | undefined {
       if (node.kind !== NodeKind.FunctionDecl && node.kind !== NodeKind.MethodDecl) return undefined;
       const fn = node as FunctionDecl | MethodDecl;
       if (!fn.body) return undefined;
-      return createEarlyReturnTransformer(layoutGate(ev, fn.body))(fn);
+      const shapeOf = createExprShape(localTypesOf(fn as FunctionDecl), {
+        globalTypes: o.globalTypes ?? {},
+        enclosingVarTypes: o.enclosingVarTypes ?? {},
+        structFields: o.structFields ?? {},
+        fieldTypes: o.fieldTypes ?? {},
+        returnTypes: o.functionReturnTypes ?? {},
+        resolve,
+      });
+      const integral = integralByTypes(shapeOf, enumTypes);
+      return createEarlyReturnTransformer(ev ? layoutGate(ev, fn.body) : null, integral)(fn);
     },
   });
 }
@@ -239,6 +286,14 @@ function createGatedTransformer(ev: BranchLayoutEvidence): Transformer {
 export interface EarlyReturnOptions extends PluginOptions {
   /** The original's addresses (branch-layout/evidence.ts); absent: every guard is made. */
   branchLayout?: BranchLayoutEvidence | null;
+  /** Type tables for the operands of a negated ordering (see `invert`). */
+  enumTypes?: string[];
+  globalTypes?: Record<string, string>;
+  enclosingVarTypes?: Record<string, string>;
+  structFields?: Record<string, Record<string, string>>;
+  fieldTypes?: Record<string, string>;
+  functionReturnTypes?: Record<string, string>;
+  typedefTargets?: Record<string, string>;
 }
 
 /**
@@ -257,7 +312,6 @@ export const earlyReturnPlugin: TransformPlugin = {
   tags: ['core', 'readability', 'control-flow'],
 
   createTransformer(options?: EarlyReturnOptions) {
-    const ev = options?.branchLayout;
-    return ev ? createGatedTransformer(ev) : createEarlyReturnTransformer(null);
+    return createPerFunctionTransformer(options ?? {});
   },
 };
