@@ -45,7 +45,10 @@ import {
 } from './snapshot-model.js';
 import { ChangeStream, type ChangeEvent } from './events.js';
 import { rebuild, type RebuildResult } from './rebuild.js';
-import { commitRegen, mergeIntoModified, assertNotBranch, currentBranch, type MergeResult } from './git.js';
+import {
+  commitRegen, mergeIntoModified, assertNotBranch, currentBranch, isClean, findCommitWithLine,
+  type MergeResult, type CommitResult,
+} from './git.js';
 import { WorkQueue } from './queue.js';
 import { verifyResume } from './events.js';
 import { buildFingerprint, checkBuild } from './build-fingerprint.js';
@@ -56,6 +59,16 @@ import {
   type SymbolHashCache,
 } from './dirty-units.js';
 import { NEVER_TOUCH, isNeverTouch } from './paths.js';
+import {
+  ProposalBoundary,
+  parseIdentity,
+  predictUnits,
+  proposalTrailer,
+  ProposalError,
+  type BoundaryHost,
+  type PublishOutcome,
+} from './proposal.js';
+import { splitDataTypeKey } from './model.js';
 
 const run = promisify(execFile);
 
@@ -199,6 +212,23 @@ export class LiveLoop {
   private buildId: string | null = null;
   /** Set while a rebuild is in flight, so `status` can say what it is doing. */
   private phase = 'idle';
+
+  /**
+   * The per-proposal commit boundary. Inert until `proposal_begin` is called:
+   * with no hold and no proposal ever committed, every path below behaves as if
+   * it did not exist.
+   */
+  private readonly proposals = new ProposalBoundary(this.boundaryHost());
+  /**
+   * Highest seq a proposal commit consumed straight from the journal. The change
+   * stream still holds those events and will hand them over again; they are
+   * dropped rather than applied twice. Null until a proposal has been committed.
+   */
+  private consumedThrough: number | null = null;
+  /** Set by `pause`; a proposal hold ending must not undo an operator's pause. */
+  private operatorPaused = false;
+  /** What the last `commitRegen` in `rebuildAndPublish` returned. */
+  private lastCommitResult: CommitResult | null = null;
 
   constructor(cfg: Config) {
     this.cfg = cfg;
@@ -423,44 +453,57 @@ export class LiveLoop {
   private async applyAndRebuild(batch: ChangeEvent[]): Promise<void> {
     try {
       this.phase = 'applying';
-      this.log(`batch of ${batch.length} event(s), seq ${batch[0].seq}..${batch[batch.length - 1].seq}`);
-
-      batch = this.dropEventsAlreadyInSnapshot(batch);
-      if (batch.length === 0) return;
-
-      const result = await applyEvents(
-        this.model,
-        this.indices,
-        batch as unknown as ModelChangeEvent[],
-        this.connection,
-        m => this.log(`  ${m}`),
-      );
-
-      for (const e of batch) {
-        this.applied.push({
-          seq: e.seq, kind: e.kind, target: e.target, key: e.key,
-          name: e.newName ?? e.oldName, at: new Date(e.ts || Date.now()).toISOString(),
-        });
+      if (this.consumedThrough !== null) {
+        const through = this.consumedThrough;
+        batch = batch.filter(e => e.seq > through);
+        if (batch.length === 0) return;
       }
-      // Bounded: this is a status aid, not a journal. The daemon's journal is
-      // the journal.
-      while (this.applied.length > 500) this.applied.shift();
-
-      if (result.needsFullResync) {
-        this.onTruncated({ since: this.model.seq, head: this.model.seq });
-        return;
-      }
-
-      this.log(
-        `applied: ${result.touchedFunctions.length} functions, ` +
-        `${result.touchedGlobals.length} globals, ${result.touchedDataTypes.length} types` +
-        (result.escalatedToFullDecompile ? ' (escalated to a full decompile)' : ''),
-      );
-
+      if (!(await this.applyBatch(batch))) return;
       await this.rebuildAndPublish();
     } finally {
       this.phase = 'idle';
     }
+  }
+
+  /**
+   * Fold a batch into the model. False when there is nothing to rebuild: every
+   * event was already in the seeded snapshot, or the batch stopped the loop.
+   */
+  private async applyBatch(batch: ChangeEvent[]): Promise<boolean> {
+    this.log(`batch of ${batch.length} event(s), seq ${batch[0].seq}..${batch[batch.length - 1].seq}`);
+
+    batch = this.dropEventsAlreadyInSnapshot(batch);
+    if (batch.length === 0) return false;
+
+    const result = await applyEvents(
+      this.model,
+      this.indices,
+      batch as unknown as ModelChangeEvent[],
+      this.connection,
+      m => this.log(`  ${m}`),
+    );
+
+    for (const e of batch) {
+      this.applied.push({
+        seq: e.seq, kind: e.kind, target: e.target, key: e.key,
+        name: e.newName ?? e.oldName, at: new Date(e.ts || Date.now()).toISOString(),
+      });
+    }
+    // Bounded: this is a status aid, not a journal. The daemon's journal is
+    // the journal.
+    while (this.applied.length > 500) this.applied.shift();
+
+    if (result.needsFullResync) {
+      this.onTruncated({ since: this.model.seq, head: this.model.seq });
+      return false;
+    }
+
+    this.log(
+      `applied: ${result.touchedFunctions.length} functions, ` +
+      `${result.touchedGlobals.length} globals, ${result.touchedDataTypes.length} types` +
+      (result.escalatedToFullDecompile ? ' (escalated to a full decompile)' : ''),
+    );
+    return true;
   }
 
   /**
@@ -486,7 +529,10 @@ export class LiveLoop {
     }
   }
 
-  private async rebuildAndPublish(): Promise<RebuildResult> {
+  private async rebuildAndPublish(
+    /** A proposal's message and author. Absent: the ordinary batch commit. */
+    attributed?: { message: string; author: string },
+  ): Promise<RebuildResult> {
     // A generator rebuilt since the cached output was produced invalidates every
     // reusable unit, so this must run BEFORE the dirty set is chosen.
     await this.guardBuild();
@@ -556,8 +602,11 @@ export class LiveLoop {
     await syncTree(this.cfg.stagingDir, this.cfg.regenDir);
 
     this.phase = 'committing';
-    const commit = await commitRegen(this.cfg.regenDir, this.commitMessage(result));
+    const commit = attributed
+      ? await commitRegen(this.cfg.regenDir, attributed.message, { author: attributed.author })
+      : await commitRegen(this.cfg.regenDir, this.commitMessage(result));
     this.lastCommit = commit.sha ?? null;
+    this.lastCommitResult = commit;
     this.log(commit.committed ? `committed ${commit.sha}` : 'nothing changed in the tree');
 
     // Only now: the tree that corresponds to this seq is on disk and in git.
@@ -640,6 +689,7 @@ export class LiveLoop {
       lastCommit: this.lastCommit,
       merge: this.lastMerge,
       dirs: { regen: this.cfg.regenDir, modified: this.cfg.modifiedDir, staging: this.cfg.stagingDir },
+      ...(this.proposals.holding ? { proposal: this.proposals.status() } : {}),
     };
   }
 
@@ -724,11 +774,18 @@ export class LiveLoop {
   }
 
   private async doRebuildNow(): Promise<unknown> {
+    if (this.proposals.unattributedProposal !== null) {
+      // The model holds a proposal whose commit failed. A plain rebuild would
+      // commit its output under the owner's name.
+      throw new ProposalError('busy',
+        `proposal #${this.proposals.unattributedProposal} is applied but uncommitted; ` +
+        'retry it with proposal_commit or give it up with proposal_abort first');
+    }
     try {
       if (this.needsFullResync) {
         this.log('operator forced a rebuild; clearing the full-resync stop');
         this.needsFullResync = null;
-        this.stream.resume();
+        if (!this.proposals.holding) this.stream.resume();
       }
       const result = await this.rebuildAndPublish();
       return { started: true, ok: result.ok, durationMs: result.durationMs, filesWritten: result.filesWritten };
@@ -863,6 +920,7 @@ export class LiveLoop {
   }
 
   pause(): unknown {
+    this.operatorPaused = true;
     this.stream.pause();
     this.log('paused by operator');
     return { paused: true, queued: this.stream.queuedCount };
@@ -872,9 +930,140 @@ export class LiveLoop {
     if (this.needsFullResync) {
       return { paused: true, refused: true, reason: this.needsFullResync };
     }
+    if (this.proposals.holding) {
+      // Resuming here would release the proposal's events into an ordinary
+      // commit. The operator's intent is recorded and honoured when it ends.
+      this.operatorPaused = false;
+      return {
+        paused: true, refused: true,
+        reason: 'a proposal holds the change stream; it resumes when that proposal commits or is aborted',
+        proposal: this.proposals.status(),
+      };
+    }
+    this.operatorPaused = false;
     this.stream.resume();
     this.log('resumed by operator');
     return { paused: false, queued: this.stream.queuedCount };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Proposal commits. See proposal.ts for the protocol.
+  // ---------------------------------------------------------------------------
+
+  async proposalBegin(args: Record<string, unknown>): Promise<unknown> {
+    if (this.needsFullResync) throw new ProposalError('failed', `the loop is stopped: ${this.needsFullResync}`);
+    const holdMs = args.holdMs === undefined ? undefined : Number(args.holdMs);
+    return this.proposals.begin(args.proposal as number, holdMs);
+  }
+
+  async proposalCommit(args: Record<string, unknown>): Promise<unknown> {
+    const optionalInt = (v: unknown, name: string): number | undefined => {
+      if (v === undefined) return undefined;
+      if (typeof v !== 'number' || !Number.isSafeInteger(v) || v < 0) {
+        throw new ProposalError('invalid', `'${name}' must be a non-negative integer`);
+      }
+      return v;
+    };
+    return this.proposals.commit({
+      identity: parseIdentity(args),
+      ghidraVersion: args.ghidraVersion as number,
+      sinceSeq: optionalInt(args.sinceSeq, 'sinceSeq'),
+      untilSeq: optionalInt(args.untilSeq, 'untilSeq'),
+      timeoutMs: optionalInt(args.timeoutMs, 'timeoutMs'),
+      expectTxDescription: typeof args.expectTxDescription === 'string' ? args.expectTxDescription : undefined,
+      dryRun: args.dryRun === true,
+    });
+  }
+
+  proposalAbort(args: Record<string, unknown>): unknown {
+    return this.proposals.abort(args.proposal as number);
+  }
+
+  private boundaryHost(): BoundaryHost {
+    // A field initializer calls this before the constructor has set `cfg`, so
+    // nothing here may read it eagerly.
+    const cfg = (): Config => this.cfg;
+    return {
+      get programPath() { return cfg().programPath; },
+      journal: (since, limit) =>
+        this.connection.sendCommand<{ events?: ChangeEvent[]; head?: number }>('get_changes', { since, limit })
+          .then(r => ({ events: r.events ?? [], head: r.head ?? 0 })),
+      committedSeq: () => this.model.seq,
+      holdStream: () => this.stream.pause(),
+      releaseStream: () => { if (!this.operatorPaused && !this.needsFullResync) this.stream.resume(); },
+      exclusive: (describe, run) => this.queue.submit({ kind: 'proposal', describe, run }),
+      publish: (events, commit) => this.publishSegment(events, commit),
+      existingCommit: proposal => findCommitWithLine(this.cfg.regenDir, proposalTrailer(proposal)),
+      treeClean: () => isClean(this.cfg.regenDir),
+      predict: events => this.predict(events),
+      consumed: seq => {
+        this.consumedThrough = Math.max(this.consumedThrough ?? 0, seq);
+        this.stream.markApplied(seq);
+      },
+      log: m => this.log(m),
+    };
+  }
+
+  /** Apply one segment and run the ordinary rebuild, reporting what it committed. */
+  private async publishSegment(
+    events: ChangeEvent[],
+    attributed: { message: string; author: string } | null,
+  ): Promise<PublishOutcome> {
+    try {
+      this.phase = 'applying';
+      if (events.length > 0 && !(await this.applyBatch(events))) {
+        if (this.needsFullResync) {
+          return { ok: false, applied: true, committed: false, reason: this.needsFullResync };
+        }
+        // Every event predated the seeded snapshot: nothing to rebuild, and the
+        // committed tree already holds them.
+        return { ok: true, applied: true, committed: false };
+      }
+      this.lastCommitResult = null;
+      const result = await this.rebuildAndPublish(attributed ?? undefined);
+      if (!result.ok) {
+        return {
+          ok: false, applied: events.length > 0, committed: false,
+          reason: `generation failed; see ${result.logPath}`,
+        };
+      }
+      const commit = this.lastCommitResult as CommitResult | null;
+      return {
+        ok: true, applied: true,
+        committed: commit?.committed ?? false,
+        sha: commit?.sha,
+        merge: this.lastMerge,
+      };
+    } finally {
+      this.phase = 'idle';
+    }
+  }
+
+  private async predict(events: ChangeEvent[]): Promise<ReturnType<typeof predictUnits>> {
+    const names: string[] = [];
+    const typeNames: string[] = [];
+    for (const e of events) {
+      if (e.newName) names.push(e.newName);
+      if (e.oldName) names.push(e.oldName);
+      if (e.target === 'function') {
+        const fn = this.indices.fnByAddr.get(normalizeAddress(e.key));
+        if (fn) names.push(fn.name);
+      } else if (e.target === 'global') {
+        const g = this.indices.globalByAddr.get(normalizeAddress(e.key));
+        if (g) names.push(g.suggestedName || g.name);
+      } else if (e.target === 'datatype') {
+        for (const k of [e.key, e.oldName, e.newName]) {
+          if (!k) continue;
+          const bare = splitDataTypeKey(k).name;
+          names.push(bare);
+          typeNames.push(bare);
+        }
+      }
+    }
+    return predictUnits(
+      await loadBuildInfo(join(this.cfg.projectDir, '.ghidra-mcp', 'buildinfo.json')),
+      names, typeNames, this.model.primary.dataTypes,
+    );
   }
 }
 

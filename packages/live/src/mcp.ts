@@ -5,7 +5,9 @@
  * Every tool here is read-mostly except `rebuild`, `full_regen`, `retry_merge`,
  * `pause` and `resume`, and those five are the whole point: the live loop is
  * allowed to run unattended precisely because an operator can interrogate what
- * it did and stop it without reading a log file.
+ * it did and stop it without reading a log file. The `proposal_*` tools are the
+ * opt-in per-proposal commit boundary (see proposal.ts); nothing calls them on
+ * the ordinary path.
  *
  * This module knows nothing about snapshots, git or codegen. It talks to a
  * `LiveController` that `main.ts` implements, so the transport and the loop can
@@ -34,6 +36,9 @@ export interface LiveController {
   retryMerge(): Promise<unknown>;
   pause(): Promise<unknown> | unknown;
   resume(): Promise<unknown> | unknown;
+  proposalBegin(args: Record<string, unknown>): Promise<unknown>;
+  proposalCommit(args: Record<string, unknown>): Promise<unknown>;
+  proposalAbort(args: Record<string, unknown>): Promise<unknown> | unknown;
 }
 
 const TOOLS: Tool[] = [
@@ -115,6 +120,65 @@ const TOOLS: Tool[] = [
     description: 'Release batches again, starting with everything that queued while paused.',
     inputSchema: { type: 'object', properties: {} },
   },
+  {
+    name: 'proposal_begin',
+    description:
+      'Call BEFORE applying a community proposal to Ghidra. Holds change batches back and records ' +
+      'the journal head, so the proposal\'s changes can later be committed on their own. Returns ' +
+      '{proposal, since, startedAt, expiresAt}. One proposal at a time; the hold ends on ' +
+      'proposal_commit, proposal_abort or expiry, after which ordinary batching resumes.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        proposal: { type: 'number', description: 'Proposal number.' },
+        holdMs: { type: 'number', description: 'How long to hold before giving up. Default 900000 (15 min), max 3600000.' },
+      },
+      required: ['proposal'],
+    },
+  },
+  {
+    name: 'proposal_commit',
+    description:
+      'Call AFTER the proposal was applied as one transaction and checked in to Ghidra. Waits for the ' +
+      'check-in in the journal, commits any earlier pending changes as an ordinary batch, then commits ' +
+      'the regen output of exactly the proposal\'s changes, authored by the contributor with ' +
+      'Proposal/Reviewed-by/Approved-by trailers. Returns {sha, batchCommit, window, transaction, merge}. ' +
+      'Refuses (nothing attributed) when the window holds another writer\'s transaction. Idempotent: ' +
+      'a proposal already committed returns its sha with alreadyCommitted. dryRun reports the window, ' +
+      'the isolation verdict and the predicted units/files without changing anything.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        proposal: { type: 'number', description: 'Proposal number; becomes the "Proposal: #<n>" trailer.' },
+        login: { type: 'string', description: 'Contributor GitHub login.' },
+        userId: { type: 'number', description: 'Contributor GitHub numeric user id (noreply address).' },
+        ghidraVersion: { type: 'number', description: 'The Ghidra version the proposal was checked in as.' },
+        title: { type: 'string', description: 'One-line proposal title for the subject. Optional.' },
+        reviewedBy: {
+          oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }],
+          description: 'Reviewed-by trailer value(s). Optional.',
+        },
+        approvedBy: { type: 'string', description: 'Approved-by trailer. Default "jaenster".' },
+        sinceSeq: { type: 'number', description: 'Window start (exclusive). Default: the seq proposal_begin recorded.' },
+        untilSeq: { type: 'number', description: 'Window end (inclusive). Default: the first check-in after sinceSeq.' },
+        timeoutMs: { type: 'number', description: 'How long to wait for the check-in. Default 120000.' },
+        expectTxDescription: { type: 'string', description: 'Refuse unless the window\'s transaction has this name.' },
+        dryRun: { type: 'boolean', description: 'Report what would be committed; change nothing.' },
+      },
+      required: ['proposal', 'login', 'userId', 'ghidraVersion'],
+    },
+  },
+  {
+    name: 'proposal_abort',
+    description:
+      'Give up on a proposal: release the hold so ordinary batching resumes. Its changes, if any, ' +
+      'then land in the next ordinary batch commit.',
+    inputSchema: {
+      type: 'object',
+      properties: { proposal: { type: 'number', description: 'Proposal number.' } },
+      required: ['proposal'],
+    },
+  },
 ];
 
 type ToolArgs = Record<string, unknown>;
@@ -131,6 +195,9 @@ async function dispatch(controller: LiveController, name: string, args: ToolArgs
     case 'retry_merge': return controller.retryMerge();
     case 'pause': return controller.pause();
     case 'resume': return controller.resume();
+    case 'proposal_begin': return controller.proposalBegin(args);
+    case 'proposal_commit': return controller.proposalCommit(args);
+    case 'proposal_abort': return controller.proposalAbort(args);
     default: throw new Error(`Unknown tool: ${name}`);
   }
 }
@@ -152,6 +219,15 @@ function asContent(payload: unknown): { content: { type: 'text'; text: string }[
 }
 
 function asError(e: unknown): { content: { type: 'text'; text: string }[]; isError: true } {
+  // A refused proposal is an expected answer with a machine-readable reason, not
+  // a crash: hand back the code and the sentence, not a stack trace.
+  if (e instanceof Error && e.name === 'ProposalError') {
+    const code = (e as Error & { code?: string }).code;
+    return {
+      content: [{ type: 'text', text: JSON.stringify({ ok: false, code, error: e.message }, null, 2) }],
+      isError: true,
+    };
+  }
   return {
     content: [{ type: 'text', text: e instanceof Error ? (e.stack ?? e.message) : String(e) }],
     isError: true,
