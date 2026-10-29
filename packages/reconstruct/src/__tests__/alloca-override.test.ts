@@ -86,21 +86,18 @@ describe('SSignature alloca overrides', () => {
 
     // EBX == pSig is the operand of all three of these (0041d73f, 0041d767,
     // 0041d774). Ghidra put the first buffer's base there instead.
-    for (const [call, arg] of [
-      ['SMemCopy', 'pSig'],
-      ['CryptRSA_Process', 'pSig'],
-    ] as const) {
-      const m = new RegExp(`${call}\\(\\s*([A-Za-z_][A-Za-z0-9_]*)`).exec(body);
-      assert.ok(m, `${call} not found`);
-      assert.strictEqual(m![1], arg, `${call} must receive ${arg} (the second alloca)`);
-    }
+    const m = /SMemCopy\(\s*([A-Za-z_][A-Za-z0-9_]*)/.exec(body);
+    assert.ok(m, 'SMemCopy not found');
+    assert.strictEqual(m![1], 'pSig', 'SMemCopy must receive pSig (the second alloca)');
+    // CryptRSA_Process takes the key pair in ECX first, the buffer second.
+    assert.match(body, /CryptRSA_Process\(\s*rsaPair,\s*pSig,/, 'CryptRSA_Process must receive pSig (the second alloca)');
 
     // MemCompare(EBX, EDI, len) — pSig first, pHash second (0041d774/0041d773).
     assert.match(body, /SSYSTEM_MemCompare\(\s*pSig,\s*pHash/);
 
     // Only Sha1_Finalize and the Memset touch pHash.
     assert.match(body, /SMemFill\(pHash,/);
-    assert.match(body, /Sha1_Finalize\(pHash, &pContext->sSha1\);/);
+    assert.match(body, /Sha1_Finalize\(&pContext->sSha1, pHash\);/);
   });
 
   it('types each RSA pair as the BigData*[2] SSIG_InitRSAPair fills', () => {
@@ -113,7 +110,7 @@ describe('SSignature alloca overrides', () => {
       for (const p of pairs) {
         assert.match(body, new RegExp(`BigData\\*\\s+${p}\\[2\\];`), `${f}: ${p} must be BigData*[2]`);
         assert.match(body, new RegExp(`SSIG_InitRSAPair\\(${p}\\);`), `${f}: ${p} passed uncast`);
-        assert.match(body, new RegExp(`CryptRSA_Process\\([^;]*, ${p}\\);`), `${f}: ${p} passed uncast`);
+        assert.match(body, new RegExp(`CryptRSA_Process\\(${p},`), `${f}: ${p} passed uncast`);
       }
     }
   });
