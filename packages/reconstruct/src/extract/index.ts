@@ -48,6 +48,7 @@ import { extractAllFunctions } from './functions.js';
 import { extractDataTypes, hydrateDataTypeDetails } from './types.js';
 import { extractAllGlobals, analyzeDataSymbols, fetchInitializedData } from './globals.js';
 import { extractLabelFlow } from './label-flow.js';
+import { extractCompareSites } from './compare-sites.js';
 import { extractAllStrings } from './strings.js';
 import { extractAllNamespaces } from './namespaces.js';
 import type { AnalyzedDataSymbol } from '../types.js';
@@ -220,6 +221,21 @@ export async function extractAll(
       await extractLabelFlow(connection, functions);
     } catch (err) {
       console.warn(`  Label flow unavailable: ${(err as Error).message}`);
+    }
+    // Each comparison tied to its CMP/TEST and Jcc (read-only; see compare-sites.ts). It
+    // decompiles every function that prints a comparison again; GHIDRA_COMPARE_SITES=0 skips it.
+    // The source forms it recovers are VC8's, so only a PE image is read.
+    if (process.env.GHIDRA_COMPARE_SITES !== '0' && /Portable Executable|\bPE\b/i.test(programInfo.format ?? '')) {
+      try {
+        let tied = 0;
+        await timePhase(
+          `${label}extract/compare-sites`,
+          async () => { tied = await extractCompareSites(connection, functions); },
+          () => `comparison sites in ${tied} function(s)`
+        );
+      } catch (err) {
+        console.warn(`  Compare sites unavailable: ${(err as Error).message}`);
+      }
     }
   }
 

@@ -36,6 +36,12 @@ export interface ExtractedFunction {
    * snapshots older than the field (and when the script failed).
    */
   labelFlow?: Record<string, LabelFlow>;
+  /**
+   * Each comparison token of `decompiled`, tied to the CMP/TEST and Jcc/SETcc that compiled
+   * it, as the script's rows (extract/compare-sites.ts). Set only when the script read the
+   * same text; unset in older snapshots and when the script failed.
+   */
+  compareSites?: string;
   name: string;
   address: string;
   signature: string;
