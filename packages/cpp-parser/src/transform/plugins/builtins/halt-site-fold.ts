@@ -728,6 +728,17 @@ function joinHalt(stmts: readonly Statement[]): { stmts: Statement[]; leaves: nu
 // single line, or each way under an `if` whose conditional branch is the one that selects
 // a pushed line. Anything else leaves the function as printed and says why.
 
+/** `e` without the casts and parentheses around it. */
+function bareCall(e: Expression | null): Expression | null {
+  let cur = e;
+  while (cur && (cur.kind === NodeKind.ParenExpr || cur.kind === NodeKind.CStyleCastExpr)) {
+    cur = cur.kind === NodeKind.ParenExpr
+      ? (cur as ParenExpr).expression
+      : (cur as CStyleCastExpr).expression;
+  }
+  return cur;
+}
+
 /** The integer a literal argument holds, through casts and parentheses. */
 function constValue(e: Expression): number | null {
   let cur = e;
@@ -929,7 +940,9 @@ function repairHaltLines(
   const ways: Way[] = runs
     .filter(r => !tails.includes(r))
     .map(r => ({ kind: 'copy', stmt: r.print.list[r.print.index], def: r.lineDef, value: r.value }));
-  const ipCall: Expression | null = runs.find(r => r.ip !== null)?.ip ?? null;
+  // The bare call: a cast the decompiler put on a temporary's definition (`nIp = (int32_t)
+  // GetInstructionPointer()`) belongs to the temporary, not to the halt's parameter.
+  const ipCall: Expression | null = bareCall(runs.find(r => r.ip !== null)?.ip ?? null);
   if (!ipCall) return refuse('no instruction pointer to copy');
 
   const lineVars: string[] = [];
