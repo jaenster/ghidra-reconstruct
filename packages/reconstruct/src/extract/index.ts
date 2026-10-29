@@ -48,6 +48,7 @@ import { extractAllFunctions } from './functions.js';
 import { extractDataTypes, hydrateDataTypeDetails } from './types.js';
 import { extractAllGlobals, analyzeDataSymbols, fetchInitializedData } from './globals.js';
 import { extractLabelFlow } from './label-flow.js';
+import { extractBranchLayout } from './branch-layout.js';
 import { extractAllStrings } from './strings.js';
 import { extractAllNamespaces } from './namespaces.js';
 import type { AnalyzedDataSymbol } from '../types.js';
@@ -220,6 +221,16 @@ export async function extractAll(
       await extractLabelFlow(connection, functions);
     } catch (err) {
       console.warn(`  Label flow unavailable: ${(err as Error).message}`);
+    }
+  }
+
+  // Where each decompile line lies in the binary (read-only; see branch-layout.ts). A
+  // failure leaves the field unset, and the passes that read it change nothing.
+  if (decompile) {
+    try {
+      await extractBranchLayout(connection, functions);
+    } catch (err) {
+      console.warn(`  Branch layout unavailable: ${(err as Error).message}`);
     }
   }
 

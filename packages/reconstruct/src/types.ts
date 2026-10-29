@@ -36,6 +36,11 @@ export interface ExtractedFunction {
    * snapshots older than the field (and when the script failed).
    */
   labelFlow?: Record<string, LabelFlow>;
+  /**
+   * Code offsets per line of `decompiled` and per `if` keyword (extract/branch-layout.ts).
+   * Unset in snapshots older than the field (and when the script failed).
+   */
+  branchLayout?: import('./extract/branch-layout.js').BranchLayoutFacts;
   name: string;
   address: string;
   signature: string;
