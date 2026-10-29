@@ -422,6 +422,43 @@ describe('switchChainPlugin', () => {
     assert.ok(out.includes('switch (v) { case 0x4f: { A(); break; } case 0x50: { B(); break; } case 0x51: { C(); break; } }'), out);
   });
 
+  it('leaves a pointer operand (a merged local typed as a pointer)', () => {
+    // SUnitInactive: `D2ObjectsTxt* pObjTxtLine` also holds eUnitType; a switch on it is ill-formed.
+    const { out, sites } = run([
+      'void f(int n) {',
+      'D2ObjectsTxt* p;',
+      '<SUB EAX 0 0 0x10> if (p == 0) {',
+      '[0x30] A();',
+      '}',
+      '<SUB EAX 2 2 0x15> else if (p == 2) {',
+      '[0x40] B();',
+      '}',
+      '}',
+    ]);
+    assert.deepStrictEqual(sites, ['left:type']);
+    assert.ok(!out.includes('switch'), out);
+  });
+
+  it('takes typedef and enum operands, leaves floats and unknown types', () => {
+    const lines = (decl: string, v: string) => [
+      'void f() {',
+      decl,
+      `<SUB EAX 1 1 0x10> if (${v} == 1) {`,
+      '[0x30] A();',
+      '}',
+      '}',
+    ];
+    assert.ok(run(lines('MyCount c;', 'c'), { typedefTargets: { MyCount: 'unsigned int' } }).out.includes('switch (c)'));
+    assert.ok(run(lines('eD2UnitType t;', 't'), { enumTypes: ['eD2UnitType'] }).out.includes('switch (t)'));
+    assert.ok(run(lines('uint32_t u;', 'u')).out.includes('switch (u)'));
+    assert.ok(!run(lines('float x;', 'x')).out.includes('switch'));
+    assert.ok(!run(lines('Opaque o;', 'o')).out.includes('switch'));
+    assert.ok(!run(lines('int a;', 'g')).out.includes('switch'));
+    assert.ok(run(lines('int a;', 'g'), { varTypes: { g: 'int' } }).out.includes('switch (g)'));
+    assert.ok(run(lines('int a;', 'q->n'), { fieldTypes: { n: 'BYTE' } }).out.includes('switch (q->n)'));
+    assert.ok(!run(lines('int a;', 'q->m')).out.includes('switch'));
+  });
+
   it('changes nothing without evidence', () => {
     const { code } = fixture([
       'void f(int v) {',

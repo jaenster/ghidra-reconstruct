@@ -3100,6 +3100,11 @@ function transformDecompiledCode(
       perPluginOptions['switch-chain'] = {
         branchLayout: layout,
         enumConstants,
+        // A switch needs an integral or enum operand: the operand's declared type decides.
+        varTypes: { ...(context?.funcPtrArgCasts?.globalTypes ?? {}), ...enclosingVarTypes },
+        fieldTypes: context?.funcPtrArgCasts?.fieldTypes,
+        typedefTargets: context?.funcPtrArgCasts?.typedefTargets,
+        enumTypes: context?.funcPtrArgCasts?.enumTypes,
         ...(process.env.GHIDRA_SWITCH_CHAIN_REPORT ? {
           onSite: (e: { rule: string; line: number; cases: number; why?: string }) =>
             console.warn(`[switch-chain] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.rule} ${e.cases} case(s) at line ${e.line}${e.why ? ` (${e.why})` : ''}`),
