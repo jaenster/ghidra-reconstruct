@@ -23,7 +23,9 @@ import { CPP_KEYWORDS } from './header.js';
 
 // Import cpp-parser for code transformation
 import { branchLayoutLines } from './branch-layout-spec.js';
+import { callOrderLines } from './call-order-spec.js';
 import type { BranchLayoutFacts } from '../extract/branch-layout.js';
+import type { CallOrderFacts } from '../extract/call-order.js';
 import { transformGhidraCode, preprocessGhidraCode, isGhidraGeneratedName, suggestBetterName, takeFuncPtrArgCastTypedefs, type TransformResult, type FuncPtrTarget, type ArtifactMode, type ArtifactRecord, type RunTruncation } from '@ghidra-mcp/cpp-parser';
 import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js';
 import { getGlobalReferenceAliases, globalAliasComment } from './global-aliases.js';
@@ -1539,6 +1541,7 @@ export function generateFunctionImplementation(
           callSiteOverrides: func.callSiteOverrides,
           labelFlow: func.labelFlow,
           branchLayout: func.branchLayout,
+          callOrder: func.callOrder,
           sehLowering: sehLoweringDecision(func),
           foldedAddresses: foldedAddressFacts(func),
           immediateConstants: immediateConstantFacts(func),
@@ -2393,6 +2396,8 @@ function transformDecompiledCode(
     labelFlow?: Record<string, { back: number; first: string; pushedArgs: boolean; address?: string; computed?: number }>;
     /** Code offsets per decompile line and per `if` (extract/branch-layout.ts). */
     branchLayout?: BranchLayoutFacts;
+    /** Direct calls per decompile line and the pushes before each (extract/call-order.ts). */
+    callOrder?: CallOrderFacts;
     /** The function's EH3 frame as `seh-lowering` needs it (codegen/seh-lowering-spec.ts). */
     sehLowering?: SehLoweringDecision;
     /** Addresses the instructions derive from a global's start (codegen/folded-address-spec.ts). */
@@ -2451,6 +2456,10 @@ function transformDecompiledCode(
     // The original's addresses for the ifs, keyed by line of `wrapped` (branch-layout-spec.ts).
     const layout = funcBodyMatch && funcBodyMatch.index !== undefined
       ? branchLayoutLines(enclosing?.branchLayout, decompiled, funcBodyMatch.index + funcBodyMatch[0].indexOf('{'), body, preprocessedBody, wrapperPrefix)
+      : undefined;
+    // The original's call order, keyed by line of `wrapped` (call-order-spec.ts).
+    const callOrder = funcBodyMatch && funcBodyMatch.index !== undefined
+      ? callOrderLines(enclosing?.callOrder, decompiled, funcBodyMatch.index + funcBodyMatch[0].indexOf('{'), body, preprocessedBody, wrapperPrefix)
       : undefined;
 
     // Build plugin options for method-call-rewrite when mappings or current context exist
@@ -2975,6 +2984,19 @@ function transformDecompiledCode(
     if (layout) {
       perPluginOptions['early-return'] = { branchLayout: layout };
       perPluginOptions['branch-layout'] = { branchLayout: layout };
+    }
+    // A temporary goes back into the argument list where the original evaluated the
+    // arguments right of it first (nest-call.ts); without the facts nothing changes.
+    if (callOrder) {
+      perPluginOptions['nest-call'] = {
+        callOrder,
+        functionReturnTypes: context?.funcPtrArgCasts?.functionReturnTypes,
+        globalTypes: context?.funcPtrArgCasts?.globalTypes,
+        typedefTargets: context?.funcPtrArgCasts?.typedefTargets,
+        enclosingSegments: enclosing?.ghidraNamespaceSegments ?? enclosing?.namespaceSegments,
+        onSite: (e: { line: number; temps: number }) =>
+          console.warn(`[nest] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.temps} temporar${e.temps === 1 ? 'y' : 'ies'} into the call on line ${e.line}`),
+      };
     }
 
     perPluginOptions['goto-label-canonical'] = { labelFlow: enclosing?.labelFlow };
