@@ -45,6 +45,12 @@
  *    every definition in the unit moved to a namespace its header never
  *    declared. Deciding it on the QualifiedId node cannot reach a declaration,
  *    a comment or a string literal.
+ *
+ *  - The qualifier on a datum the emitter declares as a static local of THIS
+ *    function. Ghidra prints the datum's own namespace (`GfxInfo::gbFlag`) when
+ *    it differs from the function's, but the declaration is the function's
+ *    `static` block, which no namespace reaches. Dropped only when the last
+ *    qualifier segment is the datum's own namespace (`functionStaticLocals`).
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -86,6 +92,12 @@ export interface QualifiedNameCleanupOptions extends PluginOptions {
    */
   rootClassQualifiers?: string[];
   rootClassScope?: string;
+  /**
+   * Data the emitter declares as static locals of the function being transformed:
+   * Ghidra name → the last segment of the datum's Ghidra namespace. A reference
+   * qualified by exactly that segment names the static local and is emitted bare.
+   */
+  functionStaticLocals?: Record<string, string>;
 }
 
 const DEFAULT_DROPPED_QUALIFIERS = ['VisualStudio', 'compiler'];
@@ -160,6 +172,7 @@ function createQualifiedNameCleanupTransformer(
   const keptQualified = new Set(options.keepTypeQualifierOf ?? []);
   const rootClasses = new Set(options.rootClassQualifiers ?? []);
   const rootClassScope = options.rootClassScope;
+  const staticLocals = options.functionStaticLocals ?? {};
 
   return createTransformer({
     visitNode(n: ASTNode): ASTNode | undefined {
@@ -183,6 +196,21 @@ function createQualifiedNameCleanupTransformer(
       if (q.qualifier.length === 0) return undefined;
 
       const refName = q.name.kind === NodeKind.Identifier ? (q.name as Identifier).name : undefined;
+
+      // A static local of this function: its declaration sits in no namespace.
+      const ownNamespace = refName !== undefined ? staticLocals[refName] : undefined;
+      if (ownNamespace !== undefined && !q.isGlobal
+          && segmentName(q.qualifier[q.qualifier.length - 1]) === ownNamespace) {
+        const name = q.name as Identifier;
+        const info = modelName(q) === undefined || q.ghidraInfo?.modelQualifiedName !== undefined
+          ? q.ghidraInfo
+          : { ...q.ghidraInfo, modelQualifiedName: modelName(q)! };
+        return updateNode(name, {
+          ghidraInfo: info ?? name.ghidraInfo,
+          leadingTrivia: [...(q.leadingTrivia ?? []), ...(name.leadingTrivia ?? [])],
+          trailingTrivia: [...(name.trailingTrivia ?? []), ...(q.trailingTrivia ?? [])],
+        } as Partial<Identifier>);
+      }
       const keepTypeQualifier = (kept: (Identifier | TemplateType)[]): boolean => {
         if (keptQualified.size === 0 || refName === undefined) return false;
         const parts: string[] = [];
