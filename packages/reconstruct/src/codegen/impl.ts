@@ -35,6 +35,8 @@ import { sehLoweringDecision, type SehLoweringDecision } from './seh-lowering-sp
 import { foldedAddressFacts, type FoldedAddressFact } from './folded-address-spec.js';
 import { immediateConstantFacts, dataAtAddress, type ImmediateConstantFact } from './immediate-constant-spec.js';
 import { compareFormSpec, type CompareFormSpec } from './compare-form-spec.js';
+import { repStringOps } from './rep-string-spec.js';
+import type { RepStringOp } from '@ghidra-mcp/cpp-parser';
 import { ROOT_CLASS_SCOPE, namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 import { cleanFunctionComment, guardedFuncDefTypedef, emittedFunctionName, returnSigType, sigType } from './header.js';
 import { classScopeOf, memberCallModel, memberDefinitionScope, orphanMarker, signatureParameters } from './templates/index.js';
@@ -1550,6 +1552,7 @@ export function generateFunctionImplementation(
           pushSlotInits: pushSlotInits(func),
           // A text patch anchors on the comparisons as Ghidra printed them.
           compareForm: override?.action === 'patch' ? undefined : compareFormSpec(func) ?? undefined,
+          repStringOps: override?.action === 'patch' ? undefined : repStringOps(func),
         },
       );
       body = func.name ? rewriteQuestUnionMembers(transformed.code, func.name, context?.sourceFileName, [...(func.parameters ?? []), ...(func.localVariables ?? [])]) : transformed.code;
@@ -2412,6 +2415,8 @@ function transformDecompiledCode(
     pushSlotInits?: Array<{ local: string; value: string }>;
     /** Each comparison's source form, from its CMP/TEST and Jcc (codegen/compare-form-spec.ts). */
     compareForm?: CompareFormSpec;
+    /** The REP STOS/MOVS instructions with a constant count (codegen/rep-string-spec.ts). */
+    repStringOps?: RepStringOp[];
   },
 ): TransformDecompiledResult {
   try {
@@ -2890,6 +2895,16 @@ function transformDecompiledCode(
 
     // Comparisons in the form their instructions show. A tie that falls back from the
     // position zip, or leaves decisions untied, is reported.
+    if (context?.funcPtrArgCasts?.globalElementSizes) {
+      perPluginOptions['array-fill-collapse'] = { globalElementSizes: context.funcPtrArgCasts.globalElementSizes };
+    }
+    if (enclosing?.repStringOps?.length) {
+      perPluginOptions['rep-string-form'] = {
+        ops: enclosing.repStringOps,
+        globalSizes: context?.funcPtrArgCasts?.globalSizes,
+        globalElementSizes: context?.funcPtrArgCasts?.globalElementSizes,
+      };
+    }
     if (enclosing?.compareForm) {
       perPluginOptions['compare-form'] = {
         sites: enclosing.compareForm.sites,

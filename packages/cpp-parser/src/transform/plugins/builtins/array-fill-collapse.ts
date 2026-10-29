@@ -18,6 +18,18 @@
  * cases memset can represent. The base must be side-effect-free (an lvalue, no
  * calls) so evaluating it once is equivalent to N times. Partial runs
  * (`arr[3]..arr[9]`) become `memset(arr + 3, 0, 7 * sizeof(arr[0]))`.
+ *
+ * A run of more than 32 bytes is written as an index loop instead, where the element size is
+ * known (a local array the function declares, or a global array): VC8 SP1 /O2 does not
+ * inline a memset of more than 32 bytes, so the memset becomes a call the original does not
+ * have, while the index loop compiles back to the original's unrolled stores
+ * (HELP_DrawHelpButtonTooltip 00495030 clears `uint16_t wszKeyLine[30]` with fifteen
+ * `mov dword ptr [ebp-x], eax`):
+ *
+ *   for (int i = 0; i < 30; i++) wszKeyLine[i] = 0;
+ *
+ * The loop stores the same zeros to the same elements; its counter is a new name, declared
+ * in the loop.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -35,7 +47,11 @@ import type {
   IntegerLiteralExpr,
 } from '../../../ast/nodes.js';
 import { createTransformer, cloneNode, updateNode, nodesEqual, type Transformer } from '../../transformer.js';
-import { Expr } from '../../../ast/factory.js';
+import { Expr, Stmt, Decl, Type } from '../../../ast/factory.js';
+import type { FunctionDecl, VariableDecl, ArrayType, Identifier } from '../../../ast/nodes.js';
+import { findNodesByKind } from '../../../ast/visitor.js';
+import { emit } from '../../../emit/index.js';
+import type { AnyNode } from '../../../ast/nodes.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 
 const THRESHOLD = 4;
@@ -116,7 +132,36 @@ function makeMemset(base: Expression, startIdx: number, count: number, model: St
   };
 }
 
-function collapseBlock(block: CompoundStmt): CompoundStmt | null {
+/** The bytes above which VC8 SP1 /O2 calls memset instead of expanding it. */
+const MEMSET_INLINE_MAX = 32;
+
+/** Element size of a scalar spelling, or null. */
+function scalarSize(name: string): number | null {
+  if (/^(char|signed char|unsigned char|byte|uchar|uint8_t|int8_t|BYTE|CHAR|UCHAR|undefined1|bool)$/.test(name)) return 1;
+  if (/^(WCHAR|wchar_t|short|ushort|unsigned short|uint16_t|int16_t|WORD|SHORT|USHORT|undefined2)$/.test(name)) return 2;
+  if (/^(int|uint|unsigned|unsigned int|long|ulong|uint32_t|int32_t|DWORD|LONG|ULONG|UINT|INT|BOOL|undefined4|float)$/.test(name) || /\*$/.test(name)) return 4;
+  return null;
+}
+
+/** What a function knows about the arrays it can fill: element sizes and the names in use. */
+interface FillScope {
+  elemSize(base: Expression): number | null;
+  freshName(): string;
+}
+
+/** for (int i = start; i < start + count; i++) base[i] = value; */
+function makeLoop(base: Expression, startIdx: number, count: number, value: Expression, counter: string, model: Statement): Statement {
+  const i = () => Expr.identifier(counter);
+  const loop = Stmt.for_(
+    Stmt.declStmt([Decl.variable(counter, Type.int(), Expr.intLiteral(startIdx))]),
+    Expr.binary(i(), '<', Expr.intLiteral(startIdx + count)),
+    Expr.postfix(i(), '++'),
+    Stmt.compound([Stmt.expr(Expr.assign(Expr.subscript(cloneNode(base), i()), cloneNode(value)))]),
+  );
+  return { ...loop, location: model.location, leadingTrivia: model.leadingTrivia || [], trailingTrivia: [], ghidraInfo: { sourceLoop: true } };
+}
+
+function collapseBlock(block: CompoundStmt, scope?: FillScope): CompoundStmt | null {
   const s = block.statements;
   const out: Statement[] = [];
   let changed = false;
@@ -135,7 +180,13 @@ function collapseBlock(block: CompoundStmt): CompoundStmt | null {
       }
       const count = j - i;
       if (count >= THRESHOLD) {
-        out.push(makeMemset(m.base, m.idx, count, s[i]));
+        const elem = scope?.elemSize(m.base) ?? null;
+        if (elem !== null && count * elem > MEMSET_INLINE_MAX) {
+          const value = ((s[i] as ExprStmt).expression as AssignExpr).right;
+          out.push(makeLoop(m.base, m.idx, count, unwrap(value), scope!.freshName(), s[i]));
+        } else {
+          out.push(makeMemset(m.base, m.idx, count, s[i]));
+        }
         changed = true;
         i = j;
         continue;
@@ -147,19 +198,60 @@ function collapseBlock(block: CompoundStmt): CompoundStmt | null {
   return changed ? updateNode(block, { statements: out }) : null;
 }
 
-function createArrayFillTransformer(): Transformer {
-  return createTransformer({
+function fillScope(fn: FunctionDecl, options: ArrayFillCollapseOptions): FillScope {
+  const locals = new Map<string, number | null>();
+  const names = new Set<string>();
+  for (const p of fn.parameters) if ((p as { name?: Identifier }).name) { names.add((p as { name: Identifier }).name.name); locals.set((p as { name: Identifier }).name.name, null); }
+  for (const n of findNodesByKind(fn, NodeKind.Identifier)) names.add((n as Identifier).name);
+  for (const d of findNodesByKind(fn, NodeKind.VariableDecl)) {
+    const v = d as VariableDecl;
+    names.add(v.name.name);
+    if (v.type.kind === NodeKind.ArrayType && (v.type as ArrayType).elementType.kind !== NodeKind.ArrayType) {
+      locals.set(v.name.name, scalarSize(emit((v.type as ArrayType).elementType as unknown as AnyNode).replace(/\s+/g, ' ').trim()));
+    } else {
+      locals.set(v.name.name, null);
+    }
+  }
+  const globalElementSizes = options.globalElementSizes ?? {};
+  return {
+    elemSize(base: Expression): number | null {
+      const b = unwrap(base);
+      if (b.kind !== NodeKind.Identifier) return null;
+      const name = (b as Identifier).name;
+      if (locals.has(name)) return locals.get(name) ?? null;
+      const e = globalElementSizes[name];
+      return e === 1 || e === 2 || e === 4 ? e : null;
+    },
+    freshName(): string {
+      for (let k = 0; ; k++) {
+        const n = k === 0 ? 'iFill' : `iFill${k + 1}`;
+        if (!names.has(n)) { names.add(n); return n; }
+      }
+    },
+  };
+}
+
+function createArrayFillTransformer(options: ArrayFillCollapseOptions = {}): Transformer {
+  const blocks = (scope?: FillScope) => createTransformer({
     visitNode(node: ASTNode): ASTNode | undefined {
       if (node.kind === NodeKind.CompoundStmt) {
-        return collapseBlock(node as CompoundStmt) ?? undefined;
+        return collapseBlock(node as CompoundStmt, scope) ?? undefined;
       }
       return undefined;
+    },
+  });
+  return createTransformer({
+    visitFunctionDecl(fn: FunctionDecl): ASTNode | undefined {
+      if (!fn.body) return undefined;
+      const body = blocks(fillScope(fn, options))(fn.body);
+      return body !== fn.body ? updateNode(fn, { body } as Partial<FunctionDecl>) : undefined;
     },
   });
 }
 
 export interface ArrayFillCollapseOptions extends PluginOptions {
-  // Reserved for future options
+  /** Global name -> the stride of one element, for globals Ghidra typed as arrays. */
+  globalElementSizes?: Record<string, number>;
 }
 
 /**
@@ -176,7 +268,7 @@ export const arrayFillCollapsePlugin: TransformPlugin = {
   priority: 50,
   tags: ['core', 'readability', 'cleanup'],
 
-  createTransformer(_options?: ArrayFillCollapseOptions) {
-    return createArrayFillTransformer();
+  createTransformer(options?: ArrayFillCollapseOptions) {
+    return createArrayFillTransformer(options ?? {});
   },
 };

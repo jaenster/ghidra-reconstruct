@@ -464,6 +464,7 @@ export { immediateNotAddressPlugin, type ImmediateNotAddressOptions } from './bu
 export { importAddressForwarderPlugin, IMPORT_ADDRESS_FORWARDERS } from './builtins/import-address-forwarder.js';
 export { unsignedRangeComparePlugin } from './builtins/unsigned-range-compare.js';
 export { compareFormPlugin, type CompareFormDecision, type CompareFormOptions } from './builtins/compare-form.js';
+export { repStringFormPlugin, createRepStringFormTransformer, type RepStringOp, type RepStringFormOptions } from './builtins/rep-string-form.js';
 export { compareSignednessPlugin } from './builtins/compare-signedness.js';
 export { callSiteOverrideCastPlugin, type CallSiteOverride } from './builtins/call-site-override-cast.js';
 export { ARTIFACT_SUPPORT_LINES } from './builtins/artifact-support.js';
@@ -551,6 +552,7 @@ import { immediateNotAddressPlugin } from './builtins/immediate-not-address.js';
 import { importAddressForwarderPlugin } from './builtins/import-address-forwarder.js';
 import { unsignedRangeComparePlugin } from './builtins/unsigned-range-compare.js';
 import { compareFormPlugin } from './builtins/compare-form.js';
+import { repStringFormPlugin } from './builtins/rep-string-form.js';
 import { compareSignednessPlugin } from './builtins/compare-signedness.js';
 import { callSiteOverrideCastPlugin } from './builtins/call-site-override-cast.js';
 import { arrayCastAssignPlugin } from './builtins/array-cast-assign.js';
@@ -719,6 +721,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   callSiteOverrideCastPlugin, // Correctness: call through void*/code* → cast to the call-site override (priority 614)
   unsignedRangeComparePlugin, // Correctness: (x - lo) < n on an unsigned narrow/enum stays unsigned (priority 617)
   compareFormPlugin,          // Fidelity: a comparison in the form its CMP/TEST and Jcc show (priority 3)
+  repStringFormPlugin,        // Fidelity: a REP STOS fill as an index loop, a REP MOVS copy as memcpy, from the instruction (priority 4)
   compareSignednessPlugin,    // Correctness: a comparison compare-form made unsigned stays unsigned (priority 619)
   importAddressForwarderPlugin, // Platform: &InterlockedCompareExchange -> __stdcall forwarder (priority 31)
   comIUnknownCallPlugin,      // Platform: p->lpVtbl->Release(p) on IUnknown* → p->Release() (priority 616)
