@@ -29,6 +29,7 @@ import { globalGuardLine, guardQualifiedName, hasDefinitionInitializer } from '.
 import { sehLoweringDecision, type SehLoweringDecision } from './seh-lowering-spec.js';
 import { foldedAddressFacts, type FoldedAddressFact } from './folded-address-spec.js';
 import { immediateConstantFacts, dataAtAddress, type ImmediateConstantFact } from './immediate-constant-spec.js';
+import { compareFormSpec, type CompareFormSpec } from './compare-form-spec.js';
 import { ROOT_CLASS_SCOPE, namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 import { cleanFunctionComment, guardedFuncDefTypedef, emittedFunctionName, returnSigType, sigType } from './header.js';
 import { classScopeOf, memberCallModel, memberDefinitionScope, orphanMarker, signatureParameters } from './templates/index.js';
@@ -1539,6 +1540,7 @@ export function generateFunctionImplementation(
           foldedAddresses: foldedAddressFacts(func),
           immediateConstants: immediateConstantFacts(func),
           pushSlotInits: pushSlotInits(func),
+          compareForm: compareFormSpec(func) ?? undefined,
         },
       );
       body = func.name ? rewriteQuestUnionMembers(transformed.code, func.name, context?.sourceFileName, [...(func.parameters ?? []), ...(func.localVariables ?? [])]) : transformed.code;
@@ -2393,6 +2395,8 @@ function transformDecompiledCode(
     immediateConstants?: ImmediateConstantFact[];
     /** Locals in a prologue `PUSH reg` slot, with the register parameter the push stored. */
     pushSlotInits?: Array<{ local: string; value: string }>;
+    /** Each comparison's source form, from its CMP/TEST and Jcc (codegen/compare-form-spec.ts). */
+    compareForm?: CompareFormSpec;
   },
 ): TransformDecompiledResult {
   try {
@@ -2678,6 +2682,15 @@ function transformDecompiledCode(
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         enclosingVarTypes,
       };
+      perPluginOptions['compare-signedness'] = {
+        enumTypes: context.funcPtrArgCasts.enumTypes,
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        structFields: context.funcPtrArgCasts.structFields,
+        typedefTargets: context.funcPtrArgCasts.typedefTargets,
+        functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        enclosingVarTypes,
+      };
       if (enclosing?.immediateConstants && enclosing.immediateConstants.length > 0) {
         const extents = context.funcPtrArgCasts.dataExtents ?? [];
         perPluginOptions['immediate-not-address'] = {
@@ -2830,6 +2843,18 @@ function transformDecompiledCode(
         fieldFuncdefs: context.funcPtrArgCasts.fieldFuncdefs,
         enumTypes: context.funcPtrArgCasts.enumTypes,
         enclosingVarTypes,
+      };
+    }
+
+    // Comparisons in the form their instructions show. A tie that falls back from the
+    // position zip, or leaves decisions untied, is reported.
+    if (enclosing?.compareForm) {
+      perPluginOptions['compare-form'] = {
+        sites: enclosing.compareForm.sites,
+        decisions: enclosing.compareForm.decisions,
+        onCensus: (c: { tied: number; rewritten: number; untied: number; zipped: boolean }) => {
+          if (c.untied > 0) console.warn(`[cmp-form] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: untied ${c.untied} of ${c.tied + c.untied}${c.zipped ? '' : ' (comparisons differ from the decompile)'}`);
+        },
       };
     }
 

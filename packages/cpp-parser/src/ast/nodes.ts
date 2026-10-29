@@ -36,6 +36,16 @@ export interface GhidraMetadata {
    * keeps it only as a struct member that holds a neighbour's offset.
    */
   securityCookie?: boolean;
+  /**
+   * The comparison was rewritten from its CMP/TEST and Jcc as an unsigned compare of this
+   * width (`compare-form`); `compare-signedness` keeps it unsigned under the final types.
+   */
+  unsignedCompareWidth?: number;
+  /**
+   * The comparison's constant crossed zero on the strength of a signed compare of this
+   * width (`compare-form`); `compare-signedness` keeps it signed under the final types.
+   */
+  signedCompareWidth?: number;
   decompilerWarnings?: string[];
   addressRanges?: AddressRange[];  // Which binary addresses this code covers
 }
