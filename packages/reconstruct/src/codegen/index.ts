@@ -2508,7 +2508,10 @@ function inlinedCallTablesOf(
 ): InlinedCallTables {
   const funcDefs = dataTypes.filter(dt => dt.kind === 'FUNCTION_DEFINITION') as import('../types.js').ExtractedFunctionDefinition[];
   const t = buildFuncPtrArgCastTables(functions, globals, funcDefs, dataTypes, strings, platformDeclaredModelFunctions);
-  return { globalTypes: t.globalTypes, structFields: t.structFields, fieldTypes: t.fieldTypes, typedefTargets: t.typedefTargets };
+  return {
+    globalTypes: t.globalTypes, structFields: t.structFields, fieldTypes: t.fieldTypes, typedefTargets: t.typedefTargets,
+    enumValues: buildEnumValues(dataTypes),
+  };
 }
 
 function buildFuncToImplPathMap(

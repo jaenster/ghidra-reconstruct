@@ -3053,6 +3053,9 @@ function transformDecompiledCode(
       perPluginOptions['inlined-call-restore'] = {
         callees: inlinedCallees,
         ...context.inlinedCalls.tables,
+        // The plan admitted a callee whose body names only its parameters where its site
+        // is the one copy in the unit, and lists only the callees planned for this site.
+        unanchored: true,
         onSite: (e: { line: number; callee: string; form: string }) =>
           console.warn(`[inlined-call] ${funcAddress} ${funcName ?? '<unknown>'}: ${e.callee} (${e.form}) on line ${e.line}`),
       };
