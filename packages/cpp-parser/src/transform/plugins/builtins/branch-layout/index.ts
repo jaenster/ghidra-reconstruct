@@ -30,6 +30,13 @@
  *             block, short leaving code, laid out between the two tests (the source
  *             wrote the failure tail once per test and VC8 merged the copies):
  *             `if (!a) T; if (!b) T; X`.
+ *   or-guard  `if (a || b || ...) T; rest...` (or `!(x && y && ...)`), T short leaving
+ *             code, laid out elsewhere than after the rest. The per-operand branch facts
+ *             say which test T follows: after the first, one guard per test; after the
+ *             second of `P && P->f == K && ...`, the getter compared once,
+ *             `(P ? P->f : D) != K`, then one guard per further test; after the last, the
+ *             getter `!(P ? x : 0)` or `(P ? P->f : D) != K`. Where T is a return the
+ *             original merged into an earlier guard's copy, one guard per test.
  *
  * Every arm keeps its statements; a negated condition is exact: a `!` is dropped, `==`/`!=`
  * flipped, a relational operator flipped only against an integer literal (a floating-point
@@ -43,8 +50,10 @@ import { NodeKind } from '../../../../ast/kinds.js';
 import type {
   ASTNode, CompoundStmt, ExprStmt, IfStmt, LabelStmt, GotoStmt, Statement, Expression,
   CallExpr, UnaryExpr, BinaryExpr, ParenExpr, ReturnStmt, CStyleCastExpr, FunctionDecl, IntegerLiteralExpr,
-  DeclStmt, VariableDecl, Identifier,
+  DeclStmt, VariableDecl, Identifier, AnyNode,
 } from '../../../../ast/nodes.js';
+import { emit } from '../../../../emit/index.js';
+import { sameExpr } from '../rotated-for-loop.js';
 import { traverseAST, getChildren } from '../../../../ast/visitor.js';
 import { createTransformer, updateNode, cloneNode, type Transformer } from '../../../transformer.js';
 import { Stmt, Expr } from '../../../../ast/factory.js';
@@ -265,6 +274,20 @@ function armEntry(s: Statement, cb: number, ctx: Ctx): number | null {
   return bareReturn(s) ? null : ctx.reader.entry([s], cb);
 }
 
+/**
+ * Where the original's one copy of an arm that is only `return v;` (v a constant or a
+ * name) lies, when the passes copied that return to several paths or the decompile printed
+ * it more than once: the arm's lines then give no evidence of their own (see `entry`), but
+ * the return facts place the merged copy. Null for any other arm.
+ */
+function sharedReturn(s: Statement, ctx: Ctx): number | null {
+  const l = bodyOf(s);
+  if (l.length !== 1 || l[0].kind !== NodeKind.ReturnStmt) return null;
+  const v = (l[0] as ReturnStmt).value;
+  if (!v || !plainOperand(v)) return null;
+  return ctx.reader.returnCopy(l[0] as ReturnStmt);
+}
+
 function endsInHalt(stmts: readonly Statement[]): boolean {
   return stmts.length >= 2 && isHaltStmt(stmts[stmts.length - 2]) && isExitStmt(stmts[stmts.length - 1]);
 }
@@ -351,11 +374,12 @@ function nestAt(stmts: readonly Statement[], i: number, cb: number, ctx: Ctx): S
 }
 
 /**
- * The two tests of a two-operand `||` condition, each as the condition that takes the
- * leaving arm: `a || b` gives a and b, `!(a && b)` gives !a and !b. Null for anything else
- * (three or more operands: which test the arm follows is not known from the layout).
+ * The operands of a guard condition that takes the arm, flattened over its one operator:
+ * `a || b || c` gives the tests a, b, c (each takes the arm) and the conjuncts !a, !b, !c;
+ * `!(x && y && z)` gives the tests !x, !y, !z and the conjuncts x, y, z. Null for anything
+ * else.
  */
-function orTests(cond: Expression): [Expression, Expression] | null {
+function guardOperands(cond: Expression): { tests: Expression[]; conj: Expression[] } | null {
   let e = unwrapParens(cond);
   let negated = false;
   if (e.kind === NodeKind.UnaryExpr && (e as UnaryExpr).operator === '!') {
@@ -363,14 +387,54 @@ function orTests(cond: Expression): [Expression, Expression] | null {
     e = unwrapParens((e as UnaryExpr).operand);
   }
   if (e.kind !== NodeKind.BinaryExpr) return null;
-  const b = e as BinaryExpr;
-  if (b.operator !== (negated ? '&&' : '||')) return null;
-  const same = (x: Expression): boolean => {
+  const op = negated ? '&&' : '||';
+  if ((e as BinaryExpr).operator !== op) return null;
+  const flat: Expression[] = [];
+  const collect = (x: Expression): void => {
     const u = unwrapParens(x);
-    return u.kind === NodeKind.BinaryExpr && (u as BinaryExpr).operator === b.operator;
+    if (u.kind === NodeKind.BinaryExpr && (u as BinaryExpr).operator === op) {
+      collect((u as BinaryExpr).left);
+      collect((u as BinaryExpr).right);
+    } else flat.push(x);
   };
-  if (same(b.left) || same(b.right)) return null;
-  return negated ? [negate(b.left), negate(b.right)] : [b.left, b.right];
+  collect(e);
+  return negated ? { tests: flat.map(negate), conj: flat } : { tests: flat, conj: flat.map(negate) };
+}
+
+/** Leaf operands of the `&&`/`||` operators in `e`, as the extraction counts them. */
+function leafCount(e: Expression): number {
+  let n = 1;
+  for (const x of traverseAST(e)) {
+    if (x.kind === NodeKind.BinaryExpr && ((x as BinaryExpr).operator === '&&' || (x as BinaryExpr).operator === '||')) n++;
+  }
+  return n;
+}
+
+/**
+ * Which operand of the guard the leaving arm's code follows: k when it lies after every
+ * branch of operand k and before the first of operand k+1 (the last index: after them all).
+ * Null without per-operand facts, when the facts do not fit the operands, or when the arm
+ * lies among one operand's own branches.
+ */
+function armAfterOperand(ifs: IfStmt, operands: readonly Expression[], armEntry: number, ctx: Ctx): number | null {
+  const counts = operands.map(leafCount);
+  const facts = ctx.reader.operandBranches(ifs, counts.reduce((a, b) => a + b, 0));
+  if (!facts) return null;
+  if (counts.reduce((a, b) => a + b, 0) !== facts.length) return null;
+  const ranges: [number, number][] = [];
+  let at = 0;
+  for (const c of counts) {
+    const segs = facts.slice(at, at + c);
+    at += c;
+    if (segs.some(sg => sg.length === 0)) return null;
+    const all = segs.flat();
+    ranges.push([Math.min(...all), Math.max(...all)]);
+  }
+  for (let k = 1; k < ranges.length; k++) if (ranges[k][0] <= ranges[k - 1][1]) return null;
+  for (let k = 0; k < ranges.length; k++) {
+    if (armEntry > ranges[k][1] && (k === ranges.length - 1 || armEntry < ranges[k + 1][0])) return k;
+  }
+  return null;
 }
 
 /** A value tested for nonzero, not a comparison: a name, a field, an element, a dereference. */
@@ -404,30 +468,152 @@ function getterCondition(cond: Expression): Expression | null {
   return { ...u, operand: Expr.paren(pick), leadingTrivia: [], trailingTrivia: [] } as UnaryExpr;
 }
 
+/** A constant a comparison may be folded against: an integer literal or a capitalised name (an enumerator). */
+function constantOperand(e: Expression): 'literal' | 'name' | null {
+  let u = unwrapParens(e);
+  while (u.kind === NodeKind.CStyleCastExpr) u = unwrapParens((u as CStyleCastExpr).expression);
+  if (isIntegerLiteral(u)) return 'literal';
+  if (u.kind === NodeKind.Identifier) return /^[A-Z]/.test((u as Identifier).name) ? 'name' : null;
+  if (u.kind === NodeKind.QualifiedId) {
+    const last = emit(u as AnyNode).trim().split('::').pop() ?? '';
+    return /^[A-Z]/.test(last) ? 'name' : null;
+  }
+  return null;
+}
+
+function literalValue(e: Expression): bigint | null {
+  let u = unwrapParens(e);
+  while (u.kind === NodeKind.CStyleCastExpr) u = unwrapParens((u as CStyleCastExpr).expression);
+  let neg = false;
+  if (u.kind === NodeKind.UnaryExpr && (u as UnaryExpr).operator === '-') { neg = true; u = unwrapParens((u as UnaryExpr).operand); }
+  if (u.kind !== NodeKind.IntegerLiteral || typeof (u as IntegerLiteralExpr).value !== 'bigint') return null;
+  const v = (u as IntegerLiteralExpr).value as bigint;
+  return neg ? -v : v;
+}
+
+function hasCallOrWrite(e: Expression): boolean {
+  for (const n of traverseAST(e)) {
+    if (n.kind === NodeKind.CallExpr || n.kind === NodeKind.AssignExpr || n.kind === NodeKind.PostfixExpr) return true;
+    if (n.kind === NodeKind.UnaryExpr && ['++', '--'].includes((n as UnaryExpr).operator)) return true;
+  }
+  return false;
+}
+
+function mentions(e: Expression, sub: Expression): boolean {
+  for (const n of traverseAST(e)) if (sameExpr(n, sub)) return true;
+  return false;
+}
+
 /**
- * `if (a || b) T; rest...` (or `!(x && y)`), T short leaving code. VC8 puts T after the rest
- * for that form; where the original has it elsewhere, the source was another form:
+ * `!(P && f == K)`, P a value and f read through it, as the source's inlined getter of f
+ * compared once: `(P ? f : D) != K` with D a constant other than K, so a failing P runs
+ * into the arm without a test of its own (`!(P && f != K)` is `(P ? f : K) == K`). VC8
+ * lays that out with the arm after the comparison, where `!P || f != K` puts it after the
+ * rest. Null for any other shape.
+ */
+function compareGetter(p: Expression, q: Expression): Expression | null {
+  if (!valueOperand(p) || branches(p) || hasCallOrWrite(p)) return null;
+  const c = unwrapParens(q);
+  if (c.kind !== NodeKind.BinaryExpr) return null;
+  const b = c as BinaryExpr;
+  if (b.operator !== '==' && b.operator !== '!=') return null;
+  const kind = constantOperand(b.right);
+  if (!kind || constantOperand(b.left) || branches(b.left) || hasCallOrWrite(b.left) || !mentions(b.left, unwrapParens(p))) return null;
+  const k = b.right;
+  let other: Expression;
+  if (b.operator === '==') {
+    const v = kind === 'literal' ? literalValue(k) : null;
+    other = v !== null ? Expr.intLiteral(v === 0n ? 1 : 0) : Expr.unary('~', Expr.paren(cloneNode(k) as Expression));
+  } else other = cloneNode(k) as Expression;
+  const pick = Expr.paren(Expr.conditional(cloneNode(p) as Expression, b.left, other));
+  return Expr.binary(pick, b.operator === '==' ? '!=' : '==', k);
+}
+
+/**
+ * The rest is only `return K;` and T `return K2;`, both literals. Split where T's one copy
+ * lies before the tests, VC8 folds the last guard and that return into a SETcc
+ * (`return !c2;`, UI_IsMouseOnStatButton) where the original branches to the earlier copy.
+ */
+function constantTail(then: Statement, rest: readonly Statement[]): boolean {
+  const lit = (s: Statement): boolean => {
+    if (s.kind !== NodeKind.ReturnStmt || !(s as ReturnStmt).value) return false;
+    let v = unwrapParens((s as ReturnStmt).value!);
+    while (v.kind === NodeKind.CStyleCastExpr) v = unwrapParens((v as CStyleCastExpr).expression);
+    return v.kind === NodeKind.IntegerLiteral || v.kind === NodeKind.BoolLiteral || v.kind === NodeKind.NullptrLiteral;
+  };
+  const t = bodyOf(then);
+  return rest.length === 1 && lit(rest[0]) && t.length === 1 && lit(t[0]);
+}
+
+/** `if (g1) T; if (g2) T; ... rest`: the first guard keeps the if, the others get copies of T. */
+function splitGuards(ifs: IfStmt, guards: Expression[], rest: Statement[], ctx: Ctx): Statement[] {
+  const tail = bodyOf(ifs.thenBranch);
+  const first = updateNode(ifs, { condition: guards[0], elseBranch: null } as Partial<IfStmt>);
+  const copies = guards.slice(1).map(g =>
+    Stmt.if_(g, Stmt.compound(tail.map(s => ({ ...cloneNode(s), leadingTrivia: [] }) as Statement))));
+  ctx.reader.taint(tail);
+  return [first, ...copies, ...rest];
+}
+
+/**
+ * `if (a || b || ...) T; rest...` (or `!(x && y && ...)`), T short leaving code. VC8 puts T
+ * after the rest for that form; where the original has it elsewhere, the source was another
+ * form. Which test T follows is read from the per-operand branch offsets (without them, a
+ * two-test condition with T among its tests is taken to follow the first):
  *
- *   T between the two tests: one guard per test, `if (a) T; if (b) T; rest`, the later
- *   copy cross-jumped into the first.
- *   T right after the last test, ahead of the rest, and the condition `!(P && x)` with x a
- *   value: `if (!(P ? x : 0)) T; rest`.
+ *   T after the first test: one guard per test, `if (a) T; if (b) T; ... rest`, the later
+ *   copies cross-jumped into the first.
+ *   T after the second of three or more, the first two `P && f == K` with f read through
+ *   P: the getter compared once, then one guard per further test:
+ *   `if ((P ? f : D) != K) T; if (!z) T; ... rest`.
+ *   T right after the last test, ahead of the rest: `if (!(P ? x : 0)) T; rest` for
+ *   `!(P && x)` with x a value, `if ((P ? f : D) != K) T; rest` for `!(P && f == K)`.
  */
 function orGuardAt(stmts: readonly Statement[], i: number, cb: number, ctx: Ctx): Statement[] | null {
   const ifs = stmts[i] as IfStmt;
   const rest = stmts.slice(i + 1);
   const then = ifs.thenBranch;
   if (bareReturn(then)) return null;
-  const low = ctx.reader.conditionLow(ifs);
+  // The first if of a condition a pass split (see rewriteList) has no line of its own: its
+  // tests are bounded by its operands' branches.
+  const prefix = ctx.reader.cbranch(ifs) === null;
+  const pre = prefix ? ctx.reader.operandBranches(ifs, leafCount(ifs.condition)) : null;
+  const low = prefix ? (pre ? Math.min(...pre.flat()) - 1 : null) : ctx.reader.conditionLow(ifs);
   if (low === null || low >= cb) return null;
-  const tE = ctx.reader.entry([then], low);
+  const own = ctx.reader.entry([then], low);
+  const shared = own === null ? sharedReturn(then, ctx) : null;
+  const tE = own ?? shared;
   if (tE === null) return null;
   if (jumpedLabels([then, ...rest], ctx.gotos) || holdsFreeCase([then, ...rest])) return null;
+  const ops = guardOperands(ifs.condition);
+
+  if (shared !== null && shared < low) {
+    // The arm's one copy is an earlier guard's: VC8 merged this guard's copy into it. This
+    // form would put a copy after the rest, and VC8 keeps that one; one guard per test
+    // keeps every copy inline, where the earlier one absorbs them.
+    if (!ops || !copyableTail(bodyOf(then), ctx.noreturn) || constantTail(then, rest)) {
+      ctx.onSite?.({ rule: 'left', line: lineOf(ifs), why: 'merged return before the tests, not a flat `||` guard with a copyable arm and a rest that is not a constant return' });
+      return null;
+    }
+    ctx.onSite?.({ rule: 'split', line: lineOf(ifs), why: 'merged return before the tests' });
+    return splitGuards(ifs, ops.tests, rest, ctx);
+  }
 
   if (tE < cb) {
-    const tests = orTests(ifs.condition);
-    if (!tests) {
-      ctx.onSite?.({ rule: 'left', line: lineOf(ifs), why: 'leaving arm among the tests, not a two-test `||`' });
+    if (!ops) {
+      ctx.onSite?.({ rule: 'left', line: lineOf(ifs), why: 'leaving arm among the tests, not a flat `||` guard' });
+      return null;
+    }
+    const leaves = ops.tests.map(leafCount).reduce((a, b) => a + b, 0);
+    const k = ctx.reader.operandBranches(ifs, leaves) ? armAfterOperand(ifs, ops.tests, tE, ctx) : (ops.tests.length === 2 ? 0 : null);
+    let guards: Expression[] | null = null;
+    if (k === 0) guards = ops.tests;
+    else if (k === 1 && ops.tests.length >= 3) {
+      const g = compareGetter(ops.conj[0], ops.conj[1]);
+      if (g) guards = [g, ...ops.tests.slice(2)];
+    }
+    if (!guards) {
+      ctx.onSite?.({ rule: 'left', line: lineOf(ifs), why: `leaving arm among the tests, after operand ${k ?? '?'} of ${ops.tests.length}` });
       return null;
     }
     const tail = bodyOf(then);
@@ -435,22 +621,20 @@ function orGuardAt(stmts: readonly Statement[], i: number, cb: number, ctx: Ctx)
       ctx.onSite?.({ rule: 'left', line: lineOf(ifs), why: 'leaving arm among the tests, arm not copyable' });
       return null;
     }
-    ctx.onSite?.({ rule: 'split', line: lineOf(ifs) });
-    const first = updateNode(ifs, { condition: tests[0], elseBranch: null } as Partial<IfStmt>);
-    const copy = tail.map(s => ({ ...cloneNode(s), leadingTrivia: [] }) as Statement);
-    ctx.reader.taint(tail);
-    const second = Stmt.if_(tests[1], Stmt.compound(copy));
-    return [first, second, ...rest];
+    ctx.onSite?.({ rule: k === 0 ? 'split' : 'getter', line: lineOf(ifs), why: `arm after operand ${k} of ${ops.tests.length}${shared !== null ? ', merged return' : ''}` });
+    return splitGuards(ifs, guards, rest, ctx);
   }
 
+  if (prefix) return null;
   const rE = armEntry(rest[0], cb, ctx);
   if (rE === null || rE <= tE) return null;
-  const cond = getterCondition(ifs.condition);
+  let cond = getterCondition(ifs.condition);
+  if (!cond && ops && ops.conj.length === 2) cond = compareGetter(ops.conj[0], ops.conj[1]);
   if (!cond) {
-    ctx.onSite?.({ rule: 'left', line: lineOf(ifs), why: 'leaving arm after the last test, not `!(P && value)`' });
+    ctx.onSite?.({ rule: 'left', line: lineOf(ifs), why: 'leaving arm after the last test, not `!(P && value)` or `!(P && f == K)`' });
     return null;
   }
-  ctx.onSite?.({ rule: 'getter', line: lineOf(ifs) });
+  ctx.onSite?.({ rule: 'getter', line: lineOf(ifs), why: 'arm after the last test' });
   return [updateNode(ifs, { condition: cond } as Partial<IfStmt>), ...rest];
 }
 
@@ -462,7 +646,9 @@ function rewriteList(stmts: readonly Statement[], ctx: Ctx): Statement[] | null 
     if (s.kind !== NodeKind.IfStmt) continue;
     const ifs = s as IfStmt;
     if (ifs.init || ifs.isConstexpr) continue;
-    const cb = ctx.reader.cbranch(ifs);
+    // The first if of a condition a pass split takes its own last branch from the operands.
+    const cb = ctx.reader.cbranch(ifs)
+      ?? (!ifs.elseBranch && conditionShape(ifs.condition).kind === 'or' ? ctx.reader.prefixBranch(ifs, leafCount(ifs.condition)) : null);
     if (cb === null) continue;
     if (ifs.elseBranch) {
       const r = swapAt(ifs, cb, ctx, { before: cur.slice(0, i), after: cur.slice(i + 1) });

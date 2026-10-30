@@ -62,6 +62,24 @@ describe('branch layout facts', () => {
     assert.ok(wrapped[8 - 1].includes('FindClose'));
   });
 
+  it('parses the per-operand branches and the return copies, keyed by line of the parsed wrapper', () => {
+    const row = ROW.replace('\n', '\t\t13:2e|36.44|-\t30:33:OR/EAX.RET;58:5d:POP/ESI.POP/EBP.RET\n');
+    const facts = parseBranchLayout(row).get('00430bc0')!;
+    assert.deepStrictEqual(facts.operands, [[13, [[0x2e], [0x36, 0x44], []]]]);
+    assert.deepStrictEqual(facts.returns, [
+      { start: 0x30, ret: 0x33, insns: ['OR/EAX', 'RET'] },
+      { start: 0x58, ret: 0x5d, insns: ['POP/ESI', 'POP/EBP', 'RET'] },
+    ]);
+    const { brace, body } = split(DECOMPILED);
+    const lay = branchLayoutLines(facts, DECOMPILED, brace, body, body, 'BOOL dummy() {')!;
+    assert.deepStrictEqual([...lay.operands!], [[7, [[0x2e], [0x36, 0x44], []]]]);
+    assert.strictEqual(lay.returns?.length, 2);
+    // Rows from before the columns carry neither.
+    const old = parseBranchLayout(ROW).get('00430bc0')!;
+    assert.strictEqual(old.operands, undefined);
+    assert.strictEqual(old.returns, undefined);
+  });
+
   it('parses the equality tests and keys them by line of the parsed wrapper', () => {
     const row = ROW.replace('\n', '\t13:!=,SUB,EAX,1,4294967295,4,4b;13:==,DEC,ECX,1,0,4,50\n');
     const facts = parseBranchLayout(row).get('00430bc0')!;

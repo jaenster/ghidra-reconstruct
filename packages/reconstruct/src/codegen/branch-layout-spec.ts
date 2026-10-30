@@ -9,13 +9,17 @@
  * body's line count.
  */
 
-import type { BranchLayoutFacts, EqualityTest } from '../extract/branch-layout.js';
+import type { BranchLayoutFacts, EqualityTest, ReturnCopy } from '../extract/branch-layout.js';
 
 export interface BranchLayoutLines {
   lines: Map<number, number[]>;
   ifs: Map<number, number>;
   /** Equality tokens per line, in text order; absent when the facts predate them. */
   tests?: Map<number, EqualityTest[]>;
+  /** Per short-circuit `if` line, each operand's branch offsets; absent in older facts. */
+  operands?: Map<number, number[][]>;
+  /** The function's return copies; absent in older facts. */
+  returns?: ReturnCopy[];
 }
 
 const IF_LINE = /^\s*(?:\}\s*)?(?:else\s+)?if\s*\(/;
@@ -58,7 +62,17 @@ export function branchLayoutLines(
     if (line <= braceLine || line > bodyEnd) continue;
     lines.set(line - braceLine + 1, offs);
   }
-  if (!facts.tests) return { lines, ifs };
+  const extra: Pick<BranchLayoutLines, 'operands' | 'returns'> = {};
+  if (facts.operands) {
+    const operands = new Map<number, number[][]>();
+    for (const [line, segs] of facts.operands) {
+      if (line <= braceLine || line > bodyEnd) continue;
+      operands.set(line - braceLine + 1, segs);
+    }
+    extra.operands = operands;
+  }
+  if (facts.returns) extra.returns = facts.returns;
+  if (!facts.tests) return { lines, ifs, ...extra };
   const tests = new Map<number, EqualityTest[]>();
   for (const [line, t] of facts.tests) {
     if (line <= braceLine || line > bodyEnd) continue;
@@ -66,5 +80,5 @@ export function branchLayoutLines(
     const list = tests.get(l);
     if (list) list.push(t); else tests.set(l, [t]);
   }
-  return { lines, ifs, tests };
+  return { lines, ifs, tests, ...extra };
 }
