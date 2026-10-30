@@ -3829,6 +3829,7 @@ function generateFilesForFunctions(
     context.funcPtrArgCasts.funcdefSignatures,
     context.funcPtrArgCasts.functionConventions,
     context.funcPtrArgCasts.funcdefConventionKeywords,
+    context.funcPtrArgCasts.pinnableOverloads,
   );
 
   // The address table those initializers resolve against — the SAME one
@@ -5691,6 +5692,52 @@ export function buildFuncPtrArgCastTables(
       claim(functionParamTypes, paramTypeClaims, `${fn.name}#${params.length}`, paramSpellings, `${qualified}|${paramSpellings.join('|')}`);
     }
   }
+  // Functions that share their WHOLE qualified name - namespace and leaf - at
+  // different addresses. Every table above dropped that name, and the decompile
+  // spells each member identically, so a body that takes one's address names an
+  // overload set with nothing left to select from. The address the instruction
+  // holds does say which: each member's own entries are kept here by address, for
+  // the bodies that take it (see `pinnedOverloadTables` in impl.ts).
+  const pinnableOverloads: Record<string, import('./impl.js').PinnableOverload> = {};
+  // Their leaves: an overload set wherever the name is spelled, owners or not.
+  const sharedQualifiedLeaves = new Set<string>();
+  {
+    const byQualified = new Map<string, ExtractedFunction[]>();
+    for (const fn of functions) {
+      // A thunk carries its target's name by nature; it is a forwarder, not a member.
+      if (!fn.name || fn.platform || fn.isThunk || fn.isExternal || headerOwned.has(fn.name)) continue;
+      const qualified = fn.namespace ? `${fn.namespace}::${fn.name}` : fn.name;
+      let members = byQualified.get(qualified);
+      if (!members) { members = []; byQualified.set(qualified, members); }
+      if (!members.some(m => m.address === fn.address)) members.push(fn);
+    }
+    for (const [qualified, members] of byQualified) {
+      if (members.length < 2) continue;
+      // Members C++ cannot tell apart by their parameters are a redefinition, not an
+      // overload set, and no type selects between them.
+      const parameterLists = new Set(members.map(fn =>
+        [...(fn.parameters ?? [])].sort((a, b) => a.ordinal - b.ordinal).map(p => sigType(p.dataType ?? '')).join(',')));
+      if (parameterLists.size !== members.length) continue;
+      sharedQualifiedLeaves.add(members[0].name);
+      const keys = new Set([qualified, normalizeQualifiedReference(qualified)]);
+      if (!/^[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*$/.test(qualified)) {
+        const legal = sanitizeQualifiedReference(qualified);
+        keys.add(legal).add(normalizeQualifiedReference(legal));
+      }
+      for (const fn of members) {
+        const params = [...(fn.parameters ?? [])].sort((a, b) => a.ordinal - b.ordinal);
+        pinnableOverloads[fn.address.replace(/^.*:/, '').toLowerCase().padStart(8, '0')] = {
+          keys: [...keys],
+          signature: signatureKey(fn.returnType ?? 'void', params.map(p => p.dataType)),
+          ghidraConvention: abiConvention(fn) ?? '',
+          paramTypes: params.map(p => sigType(p.dataType ?? '')),
+          returnType: sigType(fn.returnType ?? 'void'),
+          convention: conventionKeyword(fn),
+        };
+      }
+    }
+  }
+
   // A Win32 name the target headers make an overload set. The model has no
   // record of an import thunk, so these tables miss it however it is spelled;
   // without the exact type the overload set cannot be reduced and the address
@@ -5920,8 +5967,10 @@ export function buildFuncPtrArgCastTables(
     functionReturnTypes,
     functionConventions,
     functionNames: [...functionNames],
+    pinnableOverloads,
     overloadedFunctionNames: [...new Set([
       ...[...bareNameOwners].filter(([, o]) => o.size > 1).map(([n]) => n),
+      ...sharedQualifiedLeaves,
       // Overloaded by the TARGET headers rather than by the model - the set has
       // one member here and several there, and the cast has to say which.
       ...Object.keys(WIN32_OVERLOADED_INTRINSICS),

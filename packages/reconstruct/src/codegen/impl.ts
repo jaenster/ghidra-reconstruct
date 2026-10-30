@@ -691,7 +691,37 @@ function funcPtrArgCastsForScope(
 }
 
 /** @see ImplGenContext.funcPtrArgCasts */
+/**
+ * One member of a set of functions that share their whole qualified name - the
+ * same namespace AND the same leaf, at different addresses (`D2Win::Src::
+ * D2WinImage::Draw` at 004fd1f0 and at 004fd470). Every name-keyed table drops
+ * such a name as ambiguous, and the decompile spells both the same, so only the
+ * address the code takes (`operandRefs.functions`) says which one a body means.
+ * These are the entries the tables would hold for this member alone.
+ */
+export interface PinnableOverload {
+  /** The spellings a reference to the set carries: the Ghidra path and its emitted forms. */
+  keys: string[];
+  /** `functionSignatures`' comparison key. */
+  signature: string;
+  /** `functionGhidraConventions`' value. */
+  ghidraConvention: string;
+  /** `functionParamTypes`' value. */
+  paramTypes: string[];
+  /** `functionReturnTypes`' value. */
+  returnType: string;
+  /** `functionConventions`' value. */
+  convention: string;
+}
+
 export interface FuncPtrArgCastTables {
+  /** Function address -> its entries, for each function whose qualified name another shares. */
+  pinnableOverloads?: Record<string, PinnableOverload>;
+  /**
+   * Set only for ONE body: each spelling of a shared qualified name whose member the body's
+   * instructions identify, with that member's exact type (see `pinnedOverloadTables`).
+   */
+  pinnedFunctions?: Record<string, { returnType: string; paramTypes: string[]; convention: string }>;
   /** Shifted pointer typedef -> its container, offset and member (shifted-pointers.ts). */
   shiftedPointers?: Record<string, { container: string; offset: number; member?: string }>;
   /** Out-parameter facts read from each callee's own body, on demand (out-params.ts). */
@@ -1529,8 +1559,14 @@ export function generateFunctionImplementation(
         const n = emittedParameterName(v.name, sigType(v.dataType));
         if (!(n in slotVarTypes)) slotVarTypes[n] = rootQualifyShadowedArguments(v.dataType);
       }
+      // A body that takes the address of one member of a shared qualified name is
+      // transformed against tables that hold that member under the name. The cast
+      // typedefs it records still have to reach the unit, so the set is shared.
+      const pinnedTables = pinnedOverloadTables(context?.funcPtrArgCasts, func.operandRefs?.functions);
+      if (pinnedTables && context) context._castTypedefs ??= new Set();
+      const bodyContext = pinnedTables && context ? { ...context, funcPtrArgCasts: pinnedTables } : context;
       const transformed = transformDecompiledCode(
-        func.decompiled, options, func.name, func.address, context, slotVarTypes,
+        func.decompiled, options, func.name, func.address, bodyContext, slotVarTypes,
         {
           thisName,
           // A non-static member's body names its receiver `this` (templates/members.ts).
@@ -2384,6 +2420,57 @@ export function splitDecompiledBody(decompiled: string): { body: string; funcBod
   return { body: decompiled.substring(lastOpenBraceIndex + 1, lastBraceIndex), funcBodyMatch: null };
 }
 
+/**
+ * The cast tables for a body whose instructions take the address of a function that
+ * shares its whole qualified name with another (`PinnableOverload`), or undefined when
+ * the body takes none.
+ *
+ * The tables dropped the shared name because it is ambiguous program-wide. Within this
+ * body it is not: the operand that loads `0x4fd1f0` says which `D2WinImage::Draw` the
+ * printed name stands for. That member's entries are put back under the name, so the
+ * slot casts are decided against its signature, and `pinnedFunctions` lets
+ * `overload-pin-cast` spell its exact type wherever the name is not called. A body that
+ * takes the address of two members of one set says nothing about which reference is
+ * which, and that set stays unresolved.
+ */
+export function pinnedOverloadTables(
+  tables: FuncPtrArgCastTables | undefined,
+  functionRefs: ReadonlyArray<{ to: string }> | undefined,
+): FuncPtrArgCastTables | undefined {
+  const pinnable = tables?.pinnableOverloads;
+  if (!tables || !pinnable || !functionRefs || functionRefs.length === 0) return undefined;
+  const byKey = new Map<string, PinnableOverload | null>();
+  for (const ref of functionRefs) {
+    const member = pinnable[ref.to];
+    if (!member) continue;
+    for (const key of member.keys) {
+      const seen = byKey.get(key);
+      byKey.set(key, seen === undefined || seen === member ? member : null);
+    }
+  }
+  const pinned = [...byKey].filter((e): e is [string, PinnableOverload] => e[1] !== null);
+  if (pinned.length === 0) return undefined;
+  const functionSignatures = { ...tables.functionSignatures };
+  const functionGhidraConventions = { ...tables.functionGhidraConventions };
+  const functionParamTypes = { ...tables.functionParamTypes };
+  const functionReturnTypes = { ...tables.functionReturnTypes };
+  const functionConventions = { ...tables.functionConventions };
+  const pinnedFunctions: NonNullable<FuncPtrArgCastTables['pinnedFunctions']> = {};
+  for (const [key, m] of pinned) {
+    functionSignatures[key] = m.signature;
+    functionGhidraConventions[key] = m.ghidraConvention;
+    functionParamTypes[key] = m.paramTypes;
+    functionReturnTypes[key] = m.returnType;
+    functionConventions[key] = m.convention;
+    pinnedFunctions[key] = { returnType: m.returnType, paramTypes: m.paramTypes, convention: m.convention };
+  }
+  return {
+    ...tables,
+    functionSignatures, functionGhidraConventions, functionParamTypes,
+    functionReturnTypes, functionConventions, pinnedFunctions,
+  };
+}
+
 function transformDecompiledCode(
   decompiled: string,
   options: ReconstructOptions,
@@ -2515,6 +2602,9 @@ function transformDecompiledCode(
 
     if (context?.functionAddressMap && context.functionAddressMap.size > 0) {
       perPluginOptions['func-ptr-literal'] = { functionAddressMap: context.functionAddressMap };
+    }
+    if (context?.funcPtrArgCasts?.pinnedFunctions) {
+      perPluginOptions['overload-pin-cast'] = { pinnedFunctions: context.funcPtrArgCasts.pinnedFunctions };
     }
 
     const globalAliases = getGlobalReferenceAliases();

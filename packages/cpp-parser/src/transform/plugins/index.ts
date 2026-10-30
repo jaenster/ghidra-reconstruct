@@ -434,6 +434,12 @@ export {
   type FuncPtrTarget,
 } from './builtins/func-ptr-literal.js';
 
+export {
+  overloadPinCastPlugin,
+  type OverloadPinCastOptions,
+  type PinnedFunction,
+} from './builtins/overload-pin-cast.js';
+
 // ============================================
 // BUILT-IN PLUGINS: GLOBAL ADDRESS LITERAL
 // ============================================
@@ -574,6 +580,7 @@ import { earlyReturnPlugin } from './builtins/early-return.js';
 import { commaExpandPlugin, commaExpandLatePlugin } from './builtins/comma-expand.js';
 import { arrayFillCollapsePlugin } from './builtins/array-fill-collapse.js';
 import { funcPtrLiteralPlugin } from './builtins/func-ptr-literal.js';
+import { overloadPinCastPlugin } from './builtins/overload-pin-cast.js';
 import { globalAddressLiteralPlugin } from './builtins/global-address-literal.js';
 import { addressRunBoundPlugin } from './builtins/address-run-bound.js';
 import { prngTransformPlugin } from './builtins/prng-transform.js';
@@ -843,6 +850,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   arithIdiomsPlugin,          // Matching: division/remainder/64-bit helper idioms -> the operator (priority 619)
   narrowCastThroughUintptrPlugin, // Type: route a pointer->narrow-integer cast through uintptr_t (priority 620)
   assignCastPlugin,           // Type: cast an assigned value to its slot's declared type (priority 615)
+  overloadPinCastPlugin,      // Type: exact type of the shared-name member whose address the body takes (priority 627)
   unprototypedCallCastPlugin, // Type: give a FARPROC call the parameter list C left unspecified (priority 622)
   sehNativePlugin,            // SEH: native __try/__except/__finally beside each D2SehScope lowering, under _MSC_VER (priority 989)
   sizelessPointerArithPlugin, // Type: void*/function-pointer arithmetic as byte arithmetic on uint8_t* (priority 626)
