@@ -1643,17 +1643,23 @@ function dottedNameIsNotAMemberAccess(expr: string): boolean {
 function functionAddressSpelling(
   name: string,
   spelled: string,
-  slotType?: string
+  slotType?: string,
+  word?: number,
 ): string | null {
-  const castTo = functionInitializerCast(name, slotType);
-  if (!castTo) return null;
+  // The address names one member of a set sharing the whole qualified name: the
+  // name alone selects nothing, so its own exact type is spelled first, and the
+  // slot's cast (if any) is decided against that member's signature.
+  const pinned = word === undefined ? undefined : initializerPinnedFunctions.get(word);
+  const castTo = functionInitializerCast(name, slotType, pinned);
+  const reference = pinned ? `(${pinned.exactType})&${spelled}` : `&${spelled}`;
+  if (!castTo) return pinned ? reference : null;
   const cast = `(${rootQualifyShadowedType(castTo)})`;
   // An INTEGER slot takes no pointer of any kind, so the address goes through
   // `uintptr_t` first and is then spelled at the slot's own width — the same
   // two-step a string address in an integral slot already takes.
   return INTEGER_SLOT_TYPES.has(castTo.toLowerCase())
-    ? `${cast}(uintptr_t)&${spelled}`
-    : `${cast}&${spelled}`;
+    ? `${cast}(uintptr_t)${reference}`
+    : `${cast}${reference}`;
 }
 
 function emitPointerToSymbol(rawValue: string, expectedType?: string): string {
@@ -2216,7 +2222,7 @@ function pointerSlotAddressReference(
     const func = initializerFunctionAt(word);
     if (!func) return null;
     const spelled = shadowQualifyReference(func);
-    return functionAddressSpelling(func, spelled, slot) ?? `&${spelled}`;
+    return functionAddressSpelling(func, spelled, slot, word) ?? `&${spelled}`;
   }
   const reference = shadowQualifyReference(
     entry.stringConstant ? entry.name : `&${entry.name}`);
@@ -2238,7 +2244,7 @@ function functionElementSpelling(word: number, elemType: string | undefined): st
   const func = initializerFunctionAt(word);
   if (!func) return null;
   const spelled = shadowQualifyReference(func);
-  return functionAddressSpelling(func, spelled, elemType) ?? `&${spelled}`;
+  return functionAddressSpelling(func, spelled, elemType, word) ?? `&${spelled}`;
 }
 
 /**
@@ -2815,17 +2821,43 @@ let initializerFunctionConventions: Record<string, string> = {};
 let initializerFuncdefConventions: Record<string, string> = {};
 let initializerFuncPtrArityMismatches = 0;
 
+/** A function whose qualified name another shares: its own signature and exact type. */
+interface InitializerPinnedFunction {
+  signature: string;
+  convention: string;
+  /** `ret (conv *)(params)`, the type that selects this member of the set. */
+  exactType: string;
+}
+
+/**
+ * Address -> the member of a shared qualified name defined there. An initializer
+ * holds the ADDRESS, so unlike a body it always knows which member it names.
+ */
+let initializerPinnedFunctions = new Map<number, InitializerPinnedFunction>();
+
 export function setInitializerSignatureTables(
   functionSignatures: Record<string, string>,
   funcdefSignatures: Record<string, string>,
   functionConventions: Record<string, string> = {},
   funcdefConventions: Record<string, string> = {},
+  pinnableOverloads: Record<string, { signature: string; paramTypes: string[]; returnType: string; convention: string }> = {},
 ): void {
   initializerFunctionSignatures = functionSignatures;
   initializerFuncdefSignatures = funcdefSignatures;
   initializerFunctionConventions = functionConventions;
   initializerFuncdefConventions = funcdefConventions;
   initializerFuncPtrArityMismatches = 0;
+  initializerPinnedFunctions = new Map();
+  for (const [address, m] of Object.entries(pinnableOverloads)) {
+    const word = Number.parseInt(address, 16);
+    if (!Number.isSafeInteger(word)) continue;
+    const params = m.paramTypes.length > 0 ? m.paramTypes.map(rootQualifyShadowedType).join(', ') : 'void';
+    initializerPinnedFunctions.set(word, {
+      signature: m.signature,
+      convention: m.convention,
+      exactType: `${rootQualifyShadowedType(m.returnType)} (${m.convention ? `${m.convention} ` : ''}*)(${params})`,
+    });
+  }
 }
 
 /** How many function-address initializers were cast across an arity disagreement. */
@@ -2853,13 +2885,15 @@ function signatureArity(sig: string): number {
  * The cast a function-address initializer needs to land in `expectedType`, or
  * undefined when none is needed (or when a cast cannot honestly fix it).
  */
-function functionInitializerCast(name: string, expectedType?: string): string | undefined {
+function functionInitializerCast(
+  name: string, expectedType?: string, pinned?: InitializerPinnedFunction,
+): string | undefined {
   if (!expectedType) return undefined;
   // A name that also denotes DATA is not proof of a function.
   if (globalDeclaredTypes.has(name) || globalVariableNames.has(name)) return undefined;
   const bare = name.includes('::') ? name.slice(name.lastIndexOf('::') + 2) : name;
   if (globalDeclaredTypes.has(bare) || globalVariableNames.has(bare)) return undefined;
-  const actual = initializerFunctionSignatures[name] ?? initializerFunctionSignatures[bare];
+  const actual = pinned?.signature ?? initializerFunctionSignatures[name] ?? initializerFunctionSignatures[bare];
   if (actual === undefined) {
     // A callee the EMITTER declares has no model prototype to compare, but it is
     // still a function, and a function address reaches `void*` through a cast or
@@ -2898,7 +2932,7 @@ function functionInitializerCast(name: string, expectedType?: string): string | 
   // compile, which is where a funcdef/function disagreement in the database
   // belongs.
   const slotConvention = initializerFuncdefConventions[slot];
-  const ownConvention = initializerFunctionConventions[name] ?? initializerFunctionConventions[bare];
+  const ownConvention = pinned?.convention ?? initializerFunctionConventions[name] ?? initializerFunctionConventions[bare];
   if (slotConvention !== undefined && ownConvention !== undefined && slotConvention !== ownConvention
     && signatureArity(actual) !== 0) return undefined;
   // Counted, not refused — see the note on `initializerFunctionSignatures`.
@@ -3344,7 +3378,7 @@ export function renderGlobalScalarInitializer(
     const func = word ? initializerFunctionAt(word) : undefined;
     if (func) {
       const spelled = shadowQualifyReference(func);
-      return functionAddressSpelling(func, spelled, slotType) ?? `&${spelled}`;
+      return functionAddressSpelling(func, spelled, slotType, word) ?? `&${spelled}`;
     }
     return `(${rootQualifyShadowedType(slotType)})${ensureHexPrefix(value, declaredType)}`;
   }

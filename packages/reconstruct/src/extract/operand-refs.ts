@@ -25,6 +25,12 @@
  *                                  instruction that writes the register otherwise or
  *                                  that another path jumps to (a loop's step is not a
  *                                  fold)
+ *   C  ins  op  to                 a non-flow reference from operand `op` of `ins` to the
+ *                                  ENTRY of a function: the code takes that function's
+ *                                  address (`MOV [ESI+0x14],0x4fd1f0`, `PUSH 0x4fd1f0`). The
+ *                                  decompile prints the target by name only, and where two
+ *                                  functions share that name this is the one record of
+ *                                  which of them the code means
  *   S  ins  op  value  kind        an operand of `ins` that is a 32-bit scalar whose value
  *                                  lies in a memory block of the image, while `ins` carries
  *                                  NO reference to that address from any operand (any
@@ -68,6 +74,13 @@ export interface DerivedAddress {
   at: string;
 }
 
+/** A reference from operand `op` of `ins` to the entry point `to` of a function. */
+export interface FunctionOperandRef {
+  ins: string;
+  op: number;
+  to: string;
+}
+
 /**
  * A 32-bit scalar operand of `ins` whose value is a mapped address, while `ins` has no
  * reference to that address. `immediate` false: a displacement in a memory operand.
@@ -84,6 +97,8 @@ export interface OperandRefFacts {
   derived: DerivedAddress[];
   /** Absent in a snapshot extracted before the rows existed: nothing is known then. */
   scalars?: UnreferencedScalar[];
+  /** The function addresses the code takes. Absent in an older snapshot, as above. */
+  functions?: FunctionOperandRef[];
 }
 
 /**
@@ -136,7 +151,14 @@ for (ghidra.program.model.listing.Function f : fns) {
       ghidra.program.model.symbol.RefType rt = r.getReferenceType();
       if (!to.isMemoryAddress() || rt.isFlow() || r.getOperandIndex() < 0) continue;
       ghidra.program.model.mem.MemoryBlock b = M.getBlock(to);
-      if (b == null || b.isExecute()) continue;
+      if (b == null) continue;
+      if (b.isExecute()) {
+        // The address of a function, taken rather than called.
+        if (getFunctionAt(to) == null) continue;
+        if (!head) { sb.append("F\\t").append(f.getEntryPoint()).append('\\n'); head = true; }
+        sb.append("C\\t").append(x.getAddress()).append('\\t').append(r.getOperandIndex()).append('\\t').append(to).append('\\n');
+        continue;
+      }
       if (!head) { sb.append("F\\t").append(f.getEntryPoint()).append('\\n'); head = true; }
       // Does the operand ENCODE the address (an immediate or a displacement), or did
       // analysis propagate it there (a store of a register holding a folded value)?
@@ -218,7 +240,7 @@ export function parseOperandRefs(output: string): Map<string, OperandRefFacts> {
     switch (c[0]) {
       case 'F':
         if (c.length < 2) { cur = undefined; break; }
-        cur = { refs: [], derived: [], scalars: [] };
+        cur = { refs: [], derived: [], scalars: [], functions: [] };
         out.set(addressKey(c[1]), cur);
         break;
       case 'R':
@@ -231,6 +253,10 @@ export function parseOperandRefs(output: string): Map<string, OperandRefFacts> {
       case 'A':
         if (!cur || c.length < 5) break;
         cur.derived.push({ ins: addressKey(c[1]), to: addressKey(c[2]), value: addressKey(c[3]), at: addressKey(c[4]) });
+        break;
+      case 'C':
+        if (!cur || c.length < 4) break;
+        cur.functions!.push({ ins: addressKey(c[1]), op: Number(c[2]), to: addressKey(c[3]) });
         break;
       case 'S':
         if (!cur || c.length < 5) break;
