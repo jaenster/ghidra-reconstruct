@@ -144,6 +144,12 @@ export function enumUnderlyingFor(
   return fallback ? enumUnderlyingType(fallback) : DEFAULT_ENUM_UNDERLYING;
 }
 
+/** Whether the integer an enum name is emitted as is unsigned. */
+export function enumIsUnsigned(name: string): boolean {
+  const spelling = enumUnderlyingFor(name);
+  return [...UNSIGNED_BY_SIZE.values()].includes(spelling);
+}
+
 /** The one-line typedef every emission site writes for an enum name. */
 export function enumTypedefLine(
   name: string,

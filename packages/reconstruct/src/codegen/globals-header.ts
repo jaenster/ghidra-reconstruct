@@ -13,7 +13,7 @@ import { normalizeQualifiedReference } from './namespace.js';
 import { namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 import { computeDeclarationClosure, renderClosureBlock, renderClosureDefinitionBlock, normalizeDataAddress, type ClosureResult, type ClosureStringContent } from './declaration-closure.js';
 import { allOnesSentinel, negativeBytePatternInUnsignedSlot, negativeInUnsignedSlot } from './sentinel-literal.js';
-import { enumTypedefLine } from './enum-width.js';
+import { enumIsUnsigned, enumTypedefLine } from './enum-width.js';
 import { addressLiteralFloor, ADDRESS_LITERAL_CEILING } from '@ghidra-mcp/cpp-parser';
 import { scanReferences } from './needle-index.js';
 import { classScopedReference } from './templates/index.js';
@@ -1859,6 +1859,7 @@ function isUnsignedByteSlotType(base: string): boolean {
 function sentinelContext() {
   return {
     isEnumType: (n: string) => enumTypeNames.has(n),
+    isUnsignedEnumType: enumIsUnsigned,
     isFuncDefTypedef: isFuncDefTypedefName,
     isUnsignedSlot: (n: string) => GLIDE_UNSIGNED_SLOTS.has(n),
     // Collapse `void *` to `void*`: the same spelling castPointerInitializer
