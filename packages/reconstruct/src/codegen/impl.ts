@@ -3014,6 +3014,15 @@ function transformDecompiledCode(
       perPluginOptions['compare-form'] = {
         sites: enclosing.compareForm.sites,
         decisions: enclosing.compareForm.decisions,
+        ...(context?.funcPtrArgCasts ? {
+          enumTypes: context.funcPtrArgCasts.enumTypes,
+          globalTypes: context.funcPtrArgCasts.globalTypes,
+          fieldTypes: context.funcPtrArgCasts.fieldTypes,
+          structFields: context.funcPtrArgCasts.structFields,
+          typedefTargets: context.funcPtrArgCasts.typedefTargets,
+          functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        } : {}),
+        enclosingVarTypes,
         onCensus: (c: { tied: number; rewritten: number; untied: number; zipped: boolean }) => {
           if (c.untied > 0) console.warn(`[cmp-form] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: untied ${c.untied} of ${c.tied + c.untied}${c.zipped ? '' : ' (comparisons differ from the decompile)'}`);
         },

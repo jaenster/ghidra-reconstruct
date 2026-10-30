@@ -159,6 +159,25 @@ describe('compare-form derivation', () => {
     assert.strictEqual(decide(site({ text: '!=', opcode: 'INT_NOTEQUAL', k: 1n, bValue: 1n, user: 'JBE' })), null);
   });
 
+  it('X == 0 / X != 0 under CMP X,1; JB/JAE become unsigned X < 1 / X >= 1', () => {
+    // A2Q3: `cmp byte ptr [eax+0xd], 1; jb` printed `pDVar3->nStateFlag != 0`.
+    let d = decide(site({ text: '!=', opcode: 'INT_NOTEQUAL', size: 1, width: 1, k: 0n, bValue: 1n, user: 'JC' }))!;
+    assert.deepStrictEqual([d.op, d.delta, d.k, d.unsigned, d.swap], ['>=', 1, 0, true, false]);
+    d = decide(site({ text: '==', opcode: 'INT_EQUAL', k: 0n, bValue: 1n, user: 'JNC' }))!;
+    assert.deepStrictEqual([d.op, d.delta, d.unsigned], ['<', 1, true]);
+    // The constant printed first: the operands swap.
+    d = decide(site({ text: '==', opcode: 'INT_EQUAL', constSide: 0, fp: ['c:0', 'v:x'], k: 0n, bValue: 1n, user: 'JAE' }))!;
+    assert.deepStrictEqual([d.op, d.swap, d.delta], ['<', true, 1]);
+    // A signed JL/JGE against 1 also takes the negatives: not this equality.
+    assert.strictEqual(decide(site({ text: '==', opcode: 'INT_EQUAL', k: 0n, bValue: 1n, user: 'JL' })), null);
+    assert.strictEqual(decide(site({ text: '!=', opcode: 'INT_NOTEQUAL', k: 0n, bValue: 1n, user: 'JGE' })), null);
+    // Only 0 against 1, and only under JB/JAE.
+    assert.strictEqual(decide(site({ text: '==', opcode: 'INT_EQUAL', k: 0n, bValue: 2n, user: 'JC' })), null);
+    assert.strictEqual(decide(site({ text: '==', opcode: 'INT_EQUAL', k: 1n, bValue: 2n, user: 'JC' })), null);
+    assert.strictEqual(decide(site({ text: '==', opcode: 'INT_EQUAL', k: 0n, bValue: 1n, user: 'JBE' })), null);
+    assert.strictEqual(decide(site({ text: '==', opcode: 'INT_EQUAL', k: 0n, bValue: 1n, user: 'JZ' })), null);
+  });
+
   it('two variables: kept when rel is in F, mirrored when only MIR(rel) is', () => {
     const vv = { constSide: -1, k: undefined, fp: ['v:p', 'v:q'] as [string, string], bKind: 'r' };
     assert.strictEqual(decide(site({ ...vv, text: '<', opcode: 'INT_LESS', user: 'JC' }))?.keep, true);

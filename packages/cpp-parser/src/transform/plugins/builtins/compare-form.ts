@@ -27,7 +27,14 @@
  *  - `X == 0`/`X != 0` becomes `X <= 0`/`X > 0` only as an unsigned compare: X is cast to
  *    the unsigned type of the compare's width unless its declared type already is one. A
  *    pointer operand is left alone. The node is tagged, and `compare-signedness` checks the
- *    operand again against the final types.
+ *    operand again against the final types;
+ *  - `X == 0`/`X != 0` becomes `X < 1`/`X >= 1` (`CMP X,1; JB/JAE`) only where X is declared
+ *    unsigned: no cast is written, since a signed X would mean the type is wrong, not the
+ *    compare. The node is tagged the same way;
+ *  - a character literal steps like an integer one while it stays within 0..0x7f, where its
+ *    value is the same whether char is signed or not; the stepped value is written as a
+ *    character where it is a printable one, else as a decimal integer, which compares the
+ *    same after promotion (`c == '\0'` -> `c < 1`, `'/' < c` -> `c >= '0'`).
  * A constant side that is not a bare literal (an enum member, a cast pointer) only swaps.
  */
 
@@ -40,7 +47,7 @@ import { findNodesByKind } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { createPlugin } from '../registry.js';
-import { createExprShape, type ExprShape } from './expr-shape.js';
+import { createExprShape, type ExprShape, type ExprShapeTables } from './expr-shape.js';
 import { unwrapParens } from './call-arg-cast.js';
 import { Expr } from '../../../ast/factory.js';
 
@@ -72,6 +79,14 @@ export interface CompareFormDecision {
 }
 
 export interface CompareFormOptions extends PluginOptions {
+  /** The type tables an operand's declared signedness is read from (as compare-signedness). */
+  enumTypes?: string[];
+  globalTypes?: Record<string, string>;
+  enclosingVarTypes?: Record<string, string>;
+  structFields?: Record<string, Record<string, string>>;
+  fieldTypes?: Record<string, string>;
+  functionReturnTypes?: Record<string, string>;
+  typedefTargets?: Record<string, string>;
   /** Every comparison token of the decompile, in text order. */
   sites?: Array<{ text: string; fp: [string, string]; size?: number }>;
   decisions?: CompareFormDecision[];
@@ -103,10 +118,20 @@ function unwrapCasts(e: Expression): Expression {
   return x;
 }
 
-/** A bare literal, or `-literal`, as its signed value; null otherwise. */
-function literalOf(e: Expression): { value: bigint; lit: IntegerLiteralExpr } | null {
+/**
+ * A bare literal, or `-literal`, as its signed value; null otherwise. A plain character
+ * literal of 0..0x7f counts, as an unsuffixed decimal of its value with `char` set: its
+ * value is the same whether char is signed or not.
+ */
+function literalOf(e: Expression): { value: bigint; lit: IntegerLiteralExpr; char?: CharLiteralExpr } | null {
   const x = unwrapParens(e);
   if (x.kind === NodeKind.IntegerLiteral) return { value: (x as IntegerLiteralExpr).value, lit: x as IntegerLiteralExpr };
+  if (x.kind === NodeKind.CharLiteral) {
+    const c = x as CharLiteralExpr;
+    if (c.prefix || c.value < 0 || c.value > 0x7f) return null;
+    const lit = { kind: NodeKind.IntegerLiteral, value: BigInt(c.value), raw: String(c.value), base: 10, suffix: '', location: c.location } as IntegerLiteralExpr;
+    return { value: BigInt(c.value), lit, char: c };
+  }
   if (x.kind === NodeKind.UnaryExpr && (x as UnaryExpr).operator === '-') {
     const o = unwrapParens((x as UnaryExpr).operand);
     if (o.kind === NodeKind.IntegerLiteral) return { value: -(o as IntegerLiteralExpr).value, lit: o as IntegerLiteralExpr };
@@ -160,6 +185,20 @@ export function fitsFingerprint(e: Expression, fp: string, size: number, declare
   if (fp.startsWith('v:')) return rootName(e) === fp.slice(2);
   if (fp.startsWith('c:') && mine.startsWith('v:')) return !declared.has(mine.slice(2));
   return false;
+}
+
+/**
+ * A character value 0..0x7f as a literal: a character literal where it prints as itself,
+ * else a decimal integer, which compares the same after promotion.
+ */
+export function spellCharValue(value: bigint, at: ASTNode): Expression {
+  const loc = { location: at.location, leadingTrivia: [], trailingTrivia: [] };
+  if (value >= 0x20n && value <= 0x7en) {
+    const ch = String.fromCharCode(Number(value));
+    const raw = ch === "'" || ch === '\\' ? `'\\${ch}'` : `'${ch}'`;
+    return { kind: NodeKind.CharLiteral, value: Number(value), prefix: '', raw, ...loc } as CharLiteralExpr;
+  }
+  return { kind: NodeKind.IntegerLiteral, value, raw: value.toString(10), base: 10, suffix: '', ...loc } as IntegerLiteralExpr;
 }
 
 /** A literal spelled like `like`, with value `value` (which may be negative). */
@@ -258,6 +297,17 @@ export function createCompareFormTransformer(options?: PluginOptions): Transform
   const o = (options ?? {}) as CompareFormOptions;
   const sites = o.sites ?? [];
   const decisions = o.decisions ?? [];
+  const enumTypes = new Set(o.enumTypes ?? []);
+  const typedefTargets = o.typedefTargets ?? {};
+  const tables: ExprShapeTables = {
+    globalTypes: o.globalTypes ?? {},
+    enclosingVarTypes: o.enclosingVarTypes ?? {},
+    structFields: o.structFields ?? {},
+    fieldTypes: o.fieldTypes ?? {},
+    returnTypes: o.functionReturnTypes ?? {},
+    // An enum is not unsigned whatever it is spelled with.
+    resolve: name => (enumTypes.has(name) ? undefined : typedefTargets[name]),
+  };
 
   return createTransformer({
     visitFunctionDecl(node: FunctionDecl): ASTNode | undefined {
@@ -299,7 +349,7 @@ export function createCompareFormTransformer(options?: PluginOptions): Transform
       }
 
       let rewritten = 0;
-      const shapeOf = createExprShape(localTypes, {});
+      const shapeOf = createExprShape(localTypes, tables);
       const inner = createTransformer({
         visitBinaryExpr(be: BinaryExpr): ASTNode | undefined {
           const key = keyOf(be);
@@ -362,16 +412,27 @@ function rewrite(be: BinaryExpr, d: CompareFormDecision, size: number, shapeOf: 
         if (next !== null) crossed = true;
       }
       if (next === null) return null;
-      right = spellLiteral(c.lit, next, right);
+      if (c.char) {
+        if (next < 0n || next > 0x7fn) return null;
+        right = spellCharValue(next, right);
+      } else {
+        right = spellLiteral(c.lit, next, right);
+      }
     }
   }
   const info = { ...(be.ghidraInfo ?? {}), originalAddress: `0x${d.address}` };
   if (crossed) info.signedCompareWidth = d.width;
   if (d.unsigned) {
-    if (literalOf(right)?.value !== 0n) return null;
     const s = operandSignedness(left, shapeOf);
     if (s === 'pointer') return null;
-    if (s !== 'unsigned') left = compareCast(left, d.width);
+    if (delta === 0) {
+      // `X <= 0` / `X > 0`.
+      if (literalOf(right)?.value !== 0n) return null;
+      if (s !== 'unsigned') left = compareCast(left, d.width);
+    } else {
+      // `X < 1` / `X >= 1`: the operand must already be unsigned.
+      if (delta !== 1 || literalOf(right)?.value !== 1n || s !== 'unsigned') return null;
+    }
     info.unsignedCompareWidth = d.width;
   }
   // Swapped operands leave their trivia behind: it belonged to the position.

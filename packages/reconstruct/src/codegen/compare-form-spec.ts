@@ -16,6 +16,7 @@
  *   X > k                >=            k+1        X >= k+1
  *   X >= k               >             k-1        X > k-1
  *   X == 0 / X != 0      cc in {be,a}  0          X <= 0 / X > 0, an unsigned compare
+ *   X == 0 / X != 0      cc in {b,ae}  1          X < 1 / X >= 1, an unsigned compare
  *   P rel Q              rel                      unchanged
  *   P rel Q              MIR(rel)                 Q MIR(rel) P
  *
@@ -126,6 +127,11 @@ export function compareFormDecision(site: CompareSite): CompareFormOutcome {
     const k0 = inDomain(site.k, w, false), b0 = inDomain(B, w, false);
     if (k0 === 0n && b0 === 0n && (cc === 'BE' || cc === 'NA' || cc === 'A' || cc === 'NBE')) {
       return { decision: { ...base, op: rel === '==' ? '<=' : '>', swap, delta: 0, k, unsigned: true } };
+    }
+    // `CMP X,1; JB/JAE`: an unsigned X is below 1 exactly when it is 0. A signed JL/JGE
+    // against 1 also takes the negatives, so it is not this equality and gets no decision.
+    if (k0 === 0n && b0 === 1n && UNSIGNED_CC.has(cc) && (ccRel === '<' || ccRel === '>=')) {
+      return { decision: { ...base, op: rel === '==' ? '<' : '>=', swap, delta: 1, k, unsigned: true } };
     }
     if (F.has(rel) && k0 === b0) {
       return swap

@@ -155,6 +155,59 @@ describe('compare-form', () => {
   });
 });
 
+describe('compare-form: the constant the instruction compares with', () => {
+  it('X != 0 / X == 0 under CMP X,1; JB/JAE: X >= 1 / X < 1 on an unsigned operand only', () => {
+    const d = (text: string, fp0: string, op: string, width = 4) =>
+      dec({ ord: 0, text, fp: [fp0, 'c:0'], width, op, delta: 1, k: 0, unsigned: true });
+    assert.match(run('void f(uint n) { if (n != 0) {} }', [{ text: '!=', fp: ['v:n', 'c:0'] }], [d('!=', 'v:n', '>=')]), /n >= 1/);
+    assert.match(run('void f(byte b) { if (b == 0) {} }', [{ text: '==', fp: ['v:b', 'c:0'] }], [d('==', 'v:b', '<', 1)]), /b < 1/);
+    // A signed or unknown operand: the type is suspect, not the compare. Nothing is cast.
+    assert.match(run('void f(int n) { if (n != 0) {} }', [{ text: '!=', fp: ['v:n', 'c:0'] }], [d('!=', 'v:n', '>=')]), /n != 0/);
+    assert.match(run('void f(T n) { if (n != 0) {} }', [{ text: '!=', fp: ['v:n', 'c:0'] }], [d('!=', 'v:n', '>=')]), /n != 0/);
+    assert.match(run('void f(uint *p) { if (p != 0) {} }', [{ text: '!=', fp: ['v:p', 'c:0'] }], [d('!=', 'v:p', '>=')]), /p != 0/);
+  });
+
+  it('`== \'\\0\'` on an unsigned byte member is `< 1`, the member typed from the struct tables', () => {
+    // ITEMS: `cmp byte ptr [eax+0x112], 1; jb` printed `pItemsTxt->bQuest == '\0'`.
+    const code = "void f(D2ItemsTxt *pItemsTxt) { if (pItemsTxt->bQuest == '\\0') {} }";
+    const sites: Site[] = [{ text: '==', fp: ['e', 'c:0'], size: 1 }];
+    const decisions = [dec({ ord: 0, text: '==', fp: ['e', 'c:0'], width: 1, op: '<', delta: 1, k: 0, unsigned: true })];
+    assert.match(run(code, sites, decisions), /bQuest == '\\0'/);
+    const typed = emit(createCompareFormTransformer({ sites, decisions, structFields: { D2ItemsTxt: { bQuest: 'uchar' } } } as CompareFormOptions)(parse(code)) as AnyNode);
+    assert.match(typed, /pItemsTxt->bQuest < 1\)/);
+  });
+
+  it('a signed member crosses zero once the struct tables say it is signed', () => {
+    const code = 'void f(D2MissilesTxt *pMissileTxt) { if (-1 < pMissileTxt->CltSubMissile1) {} }';
+    const sites: Site[] = [{ text: '<', fp: ['c:ffff', 'e'], size: 2 }];
+    const decisions = [dec({ ord: 0, text: '<', fp: ['c:ffff', 'e'], width: 2, op: '>=', swap: true, delta: 1, k: 0xffff, signed: true })];
+    assert.match(run(code, sites, decisions), /-1 < pMissileTxt->CltSubMissile1/);
+    const typed = (t: string) => emit(createCompareFormTransformer({ sites, decisions, structFields: { D2MissilesTxt: { CltSubMissile1: t } } } as CompareFormOptions)(parse(code)) as AnyNode);
+    assert.match(typed('short'), /pMissileTxt->CltSubMissile1 >= 0\)/);
+    assert.match(typed('ushort'), /-1 < pMissileTxt->CltSubMissile1/);
+  });
+
+  it('a character literal steps as a character, or as a decimal where it does not print', () => {
+    const code = "void f(char *s) { if (('/' < *s) && (*s < ':')) {} }";
+    const sites: Site[] = [{ text: '<', fp: ['c:2f', 'e'], size: 1 }, { text: '<', fp: ['e', 'c:3a'], size: 1 }];
+    const out = run(code, sites, [
+      dec({ ord: 0, ...sites[0], width: 1, op: '>=', swap: true, delta: 1, k: 0x2f, signed: true }),
+      dec({ ord: 1, ...sites[1], width: 1, op: '<=', delta: -1, k: 0x3a, signed: true }),
+    ]);
+    assert.match(out, /\*s >= '0'\)? && \(?\*s <= '9'/);
+    // Quote and backslash are escaped; 0x7f does not print.
+    const one = (lit: string, k: number, delta: 1 | -1, op: string) => run(`void f(char c) { if (c < ${lit}) {} }`,
+      [{ text: '<', fp: ['v:c', `c:${k.toString(16)}`], size: 1 }],
+      [dec({ ord: 0, text: '<', fp: ['v:c', `c:${k.toString(16)}`], width: 1, op, delta, k, signed: true })]);
+    assert.match(one("'('", 0x28, -1, '<='), /c <= '\\''/);
+    assert.match(one("']'", 0x5d, -1, '<='), /c <= '\\\\'/);
+    assert.match(one("'~'", 0x7e, 1, '<'), /c < 127\b/);
+    // Never past 0x7f nor below 0, where a plain char's value depends on its signedness.
+    assert.match(one("'\\x7f'", 0x7f, 1, '<'), /c < '\\x7f'/);
+    assert.match(one("'\\0'", 0, -1, '<='), /c < '\\0'/);
+  });
+});
+
 describe('compare-form: a byte compared with 1', () => {
   // Q06_SequenceFilter 005968e0: `cmp byte ptr [ecx+0xc], 0` then `cmp byte ptr [ecx+9], 1`.
   const Q06 = `bool f(D2QuestDataStrc *pQuestData) {
@@ -260,11 +313,35 @@ describe('compare-form keeps the value', { skip: !hasNativeGpp() }, () => {
     ]);
   });
 
+  it('the constant of CMP X,1 and of a character compare, every value', () => {
+    check('uint8_t', all(0, 255), [
+      { printed: 'x == 0', d: dec({ ord: 0, text: '==', fp: ['v:x', 'c:0'], width: 1, op: '<', delta: 1, k: 0, unsigned: true }) },
+      { printed: 'x != 0', d: dec({ ord: 0, text: '!=', fp: ['v:x', 'c:0'], width: 1, op: '>=', delta: 1, k: 0, unsigned: true }) },
+      { printed: "x == '\\0'", d: dec({ ord: 0, text: '==', fp: ['v:x', 'c:0'], width: 1, op: '<', delta: 1, k: 0, unsigned: true }) },
+      { printed: "0 != x", d: dec({ ord: 0, text: '!=', fp: ['c:0', 'v:x'], width: 1, op: '>=', swap: true, delta: 1, k: 0, unsigned: true }) },
+      { printed: "x < '~'", d: dec({ ord: 0, text: '<', fp: ['v:x', 'c:7e'], width: 1, op: '<=', delta: -1, k: 0x7e }) },
+    ]);
+    check('uint16_t', all(0, 65535), [
+      { printed: 'x != 0', d: dec({ ord: 0, text: '!=', fp: ['v:x', 'c:0'], width: 2, op: '>=', delta: 1, k: 0, unsigned: true }) },
+    ]);
+    for (const type of ['char', 'int8_t', 'uint8_t']) {
+      check(type, all(-128, 255), [
+        { printed: "'/' < x", d: dec({ ord: 0, text: '<', fp: ['c:2f', 'v:x'], width: 1, op: '>=', swap: true, delta: 1, k: 0x2f, signed: true }) },
+        { printed: "x < ':'", d: dec({ ord: 0, text: '<', fp: ['v:x', 'c:3a'], width: 1, op: '<=', delta: -1, k: 0x3a, signed: true }) },
+        { printed: "x <= '~'", d: dec({ ord: 0, text: '<=', fp: ['v:x', 'c:7e'], width: 1, op: '<', delta: 1, k: 0x7e, signed: true }) },
+        { printed: "'\\0' < x", d: dec({ ord: 0, text: '<', fp: ['c:0', 'v:x'], width: 1, op: '>=', swap: true, delta: 1, k: 0, signed: true }) },
+      ]);
+    }
+  });
+
   it('32-bit operands at the edges', () => {
     check('uint', edges32, [
       { printed: '0x144f < x', d: dec({ ord: 0, text: '<', fp: ['c:144f', 'v:x'], op: '>=', swap: true, delta: 1, k: 0x144f }) },
       { printed: 'x <= 0x7ffffffe', d: dec({ ord: 0, text: '<=', fp: ['v:x', 'c:7ffffffe'], op: '<', delta: 1, k: 0x7ffffffe }) },
       { printed: 'x != 0', d: dec({ ord: 0, text: '!=', fp: ['v:x', 'c:0'], op: '>', delta: 0, k: 0, unsigned: true }) },
+      { printed: 'x != 0', d: dec({ ord: 0, text: '!=', fp: ['v:x', 'c:0'], op: '>=', delta: 1, k: 0, unsigned: true }) },
+      { printed: '0 == x', d: dec({ ord: 0, text: '==', fp: ['c:0', 'v:x'], op: '<', swap: true, delta: 1, k: 0, unsigned: true }) },
+      { printed: 'x < 0x80000000U', d: dec({ ord: 0, text: '<', fp: ['v:x', 'c:80000000'], op: '<=', delta: -1, k: 0x80000000 }) },
     ]);
     check('int', edges32, [
       { printed: '-1 < x', d: dec({ ord: 0, text: '<', fp: ['c:ffffffff', 'v:x'], op: '>=', swap: true, delta: 1, k: 0xffffffff, signed: true }) },
