@@ -18,7 +18,7 @@
  */
 
 import {
-  NodeKind, parse, preprocessGhidraCode, restoreInlinedCalls,
+  NodeKind, parse, preprocessGhidraCode, restoreInlinedCalls, compileInlinedCallee,
   type FunctionDecl, type InlinedCallee, type InlinedCallTables,
 } from '@ghidra-mcp/cpp-parser';
 import type { ExtractedFunction } from '../types.js';
@@ -89,6 +89,9 @@ export function planInlinedCalls(
     if (!list) byUnit.set(c.unit, (list = []));
     list.push({ key: c.key, callee });
   }
+  const pairs: Array<{ site: string; callee: { key: string; callee: InlinedCallee } }> = [];
+  /** Sites per callee name, in every function of its unit. */
+  const siteCount = new Map<string, number>();
   for (const [unit, unitCallees] of byUnit) {
     for (const site of functionsOf(unit)) {
       if (skipSite?.(site.func)) continue;
@@ -96,17 +99,26 @@ export function planInlinedCalls(
       if (others.length === 0) continue;
       const fn = pipelineFunction(site.func);
       if (!fn) continue;
-      const { sites } = restoreInlinedCalls(fn, others.map(c => c.callee), tables);
-      if (sites.length === 0) continue;
+      const { sites } = restoreInlinedCalls(fn, others.map(c => c.callee), tables, true);
+      for (const s of sites) siteCount.set(s.callee, (siteCount.get(s.callee) ?? 0) + 1);
       const hit = new Set(sites.map(s => s.callee));
-      const used = others.filter(c => hit.has(c.callee.callName));
-      calleesBySite.set(site.key, used.map(c => c.callee));
-      for (const c of used) {
-        let set = sitesByCallee.get(c.key);
-        if (!set) sitesByCallee.set(c.key, (set = new Set()));
-        set.add(site.key);
-      }
+      for (const c of others) if (hit.has(c.callee.callName)) pairs.push({ site: site.key, callee: c });
     }
+  }
+  const pairKeys = new Set(pairs.map(p => `${p.site}\u0000${p.callee.key}`));
+  for (const { site, callee } of pairs) {
+    // A body that names nothing but its parameters is a call only where it is the one
+    // copy in the unit: VC8 emitted the function for a call, and this is the only
+    // place it can have been.
+    if (!compileInlinedCallee(callee.callee)?.anchored && siteCount.get(callee.callee.callName) !== 1) continue;
+    // Two functions that are each other's copy are duplicates, not caller and callee.
+    if (pairKeys.has(`${callee.key}\u0000${site}`)) continue;
+    const list = calleesBySite.get(site) ?? [];
+    calleesBySite.set(site, list);
+    list.push(callee.callee);
+    let set = sitesByCallee.get(callee.key);
+    if (!set) sitesByCallee.set(callee.key, (set = new Set()));
+    set.add(site);
   }
   return { calleesBySite, sitesByCallee, calleeByKey, tables };
 }
