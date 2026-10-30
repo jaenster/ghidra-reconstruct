@@ -101,8 +101,10 @@ const POINTER_SHAPED_TYPEDEFS = new Set([
 ]);
 
 export interface SentinelSlotContext {
-  /** Is this type name a Ghidra enum? Enums are emitted with an `int` base. */
+  /** Is this type name a Ghidra enum? */
   isEnumType?(name: string): boolean;
+  /** Is this enum emitted as an unsigned integer (enum-width.ts)? Absent: signed. */
+  isUnsignedEnumType?(name: string): boolean;
   /**
    * Is this type name spelled UNSIGNED by the header that declares it? Asked
    * only of the emitted spelling, which is not always what Ghidra modelled -
@@ -198,9 +200,13 @@ export function allOnesSentinel(
 
   const base = withoutArrayDimensions(declaredType);
 
-  // A Ghidra enum is emitted as a plain `enum`, whose base gcc reports as `int`.
+  // A 4-byte enum with a negative member is emitted as `int`, where all ones is
+  // `-1`. One emitted unsigned keeps the sentinel legible through the conversion
+  // the original performed implicitly, as `negativeInUnsignedSlot` spells it: a
+  // bare `-1` would narrow inside a braced initializer.
   if (ctx.isEnumType?.(base) === true) {
-    return value === allOnes(4) ? '-1' : undefined;
+    if (value !== allOnes(4)) return undefined;
+    return ctx.isUnsignedEnumType?.(base) === true ? `(${spell(base)})-1` : '-1';
   }
 
   if (SIGNED_POINTER_WIDTH.has(base)) {

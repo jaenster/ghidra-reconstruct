@@ -50,6 +50,14 @@ describe('allOnesSentinel', () => {
       assert.strictEqual(allOnesSentinel('4294967295', 'eD2UnitStat', ctx), '-1');
     });
 
+    it('casts all ones into an enum emitted unsigned, where a bare -1 would narrow', () => {
+      const unsignedCtx = { ...ctx, isUnsignedEnumType: (n: string) => n === 'eD2UnitStat' };
+      assert.strictEqual(allOnesSentinel('4294967295', 'eD2UnitStat', unsignedCtx), '(eD2UnitStat)-1');
+      assert.strictEqual(allOnesSentinel('4294967295', 'eD2UnitStat[6]', unsignedCtx), '(eD2UnitStat)-1');
+      assert.strictEqual(allOnesSentinel('4294967295', 'eD2Sounds', unsignedCtx), '-1');
+      assert.strictEqual(allOnesSentinel('65535', 'eD2UnitStat', unsignedCtx), undefined);
+    });
+
     it('generalises down the widths, because the argument does', () => {
       assert.strictEqual(allOnesSentinel('0xffff', 'int16_t', ctx), '-1');
       assert.strictEqual(allOnesSentinel('0xff', 'int8_t', ctx), '-1');

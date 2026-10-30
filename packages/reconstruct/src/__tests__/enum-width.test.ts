@@ -11,7 +11,7 @@
  * Every fixture here is the real Ghidra record, sizes taken from the live
  * program (1.14d Game.exe, /windows/lod/): eCollisionFlags is 2 with
  * alignment 2, eD2PlayerClassID is 1, eD2PlayerStatus is 2, eD2MonsterAnimMode
- * is 4.
+ * is 4 (non-negative, so unsigned, as Ghidra's decompiler models it).
  */
 
 import { describe, it, beforeEach } from 'node:test';
@@ -89,8 +89,27 @@ describe('enum width follows the size Ghidra models', () => {
     assert.strictEqual(enumUnderlyingType(PLAYER_CLASS_ID), 'uint8_t');
   });
 
-  it('a 4-byte enum is UNCHANGED - still plain int', () => {
-    assert.strictEqual(enumUnderlyingType(MONSTER_ANIM_MODE), 'int');
+  // Ghidra hands the decompiler `enum_uint` for a non-negative enum, so a bare
+  // `eMonAnimMode < 0x10` in the decompilation is the unsigned JAE at 004ae1df.
+  it('a non-negative 4-byte enum is uint32_t, as the decompiler models it', () => {
+    assert.strictEqual(enumUnderlyingType(MONSTER_ANIM_MODE), 'uint32_t');
+  });
+
+  it('a 4-byte enum with a negative member stays signed int', () => {
+    // eD2ItemFlag carries ITEMFLAG_UNKNOWN = -0x80000000.
+    const itemFlag: ExtractedEnum = {
+      name: 'eD2ItemFlag', category: '/Diablo2/UNIT/Union_0x14/ITEM', size: 4, kind: 'ENUM',
+      values: [{ name: 'ITEMFLAG_NEWITEM', value: 1 }, { name: 'ITEMFLAG_UNKNOWN', value: -2147483648 }],
+    };
+    assert.strictEqual(enumUnderlyingType(itemFlag), 'int');
+  });
+
+  it('a 4-byte flag enum whose top bit is a member is uint32_t', () => {
+    const unitFlags: ExtractedEnum = {
+      name: 'eD2UnitFlags', category: '/Diablo2/UNIT', size: 4, kind: 'ENUM',
+      values: [{ name: 'UNITFLAG_DOUPDATE', value: 1 }, { name: 'UNITFLAG_UNK31', value: 2147483648 }],
+    };
+    assert.strictEqual(enumUnderlyingType(unitFlags), 'uint32_t');
   });
 
   it('an enum with no size keeps int rather than guessing from its members', () => {
@@ -117,9 +136,10 @@ describe('the enum declaration carries the width', () => {
     assert.ok(!out.includes('typedef int eCollisionFlags;'));
   });
 
-  it('still emits typedef int for a 4-byte enum', () => {
+  it('emits typedef uint32_t for a non-negative 4-byte enum', () => {
     const out = generateEnumDeclaration(MONSTER_ANIM_MODE);
-    assert.ok(out.includes('typedef int eD2MonsterAnimMode;'), out);
+    assert.ok(out.includes('typedef uint32_t eD2MonsterAnimMode;'), out);
+    assert.ok(out.includes('constexpr eD2MonsterAnimMode MONSTER_MODE_NEUTRAL = 1;'), out);
   });
 
   it('keeps the member constants, typed by the enum name', () => {
@@ -134,7 +154,7 @@ describe('the registry keeps every spelling of one name identical', () => {
   it('a forward declaration by NAME matches the definition', () => {
     setKnownEnumWidths([COLLISION_FLAGS, MONSTER_ANIM_MODE]);
     assert.strictEqual(enumTypedefLine('eCollisionFlags'), 'typedef uint16_t eCollisionFlags;');
-    assert.strictEqual(enumTypedefLine('eD2MonsterAnimMode'), 'typedef int eD2MonsterAnimMode;');
+    assert.strictEqual(enumTypedefLine('eD2MonsterAnimMode'), 'typedef uint32_t eD2MonsterAnimMode;');
   });
 
   it('an unregistered name falls back to int', () => {
@@ -294,11 +314,12 @@ describe('enums are registered in typedefTargets as the integer they emit as', (
     assert.ok(enumTypedefLine('eInventoryPage', PAGE).includes('uint8_t'));
   });
 
-  it('maps a 4-byte enum to int, the status quo', () => {
+  it('maps a non-negative 4-byte enum to uint32_t, as d2_enums.h writes it', () => {
     setKnownEnumWidths([QUALITY]);
     const map: Record<string, string> = {};
     registerEnumTypedefTargets([QUALITY], map);
-    assert.strictEqual(map.eD2ItemQuality, 'int');
+    assert.strictEqual(map.eD2ItemQuality, 'uint32_t');
+    assert.ok(enumTypedefLine('eD2ItemQuality', QUALITY).includes('uint32_t'));
   });
 
   it('ignores a non-enum data type', () => {

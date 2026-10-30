@@ -139,6 +139,51 @@ describe('nestCallPlugin', () => {
     assert.deepStrictEqual(sites, []);
   });
 
+  // UNITSND_GetSkillCastSound returns `int`, the temporary and SOUND_PlaySound's parameter
+  // are `eD2Sounds` (`uint32_t`): int -> uint32_t -> uint32_t stores the bits int -> uint32_t does.
+  describe('a temporary that differs from its call in sign only', () => {
+    const sound = (param: string, use = 'nSoundId') => [
+      'int f(Unit *pUnit) {',
+      '  eD2Sounds nSoundId;',
+      '[GetSound@0x56<,1,0] nSoundId = GetSound(pUnit);',
+      `[Play@0x5f<0x56,0,0.0.1] return Play(${use}, pUnit, 5);`,
+      '}',
+    ];
+    const opts = (param: string): Partial<NestCallOptions> => ({
+      functionReturnTypes: { ...TYPES.functionReturnTypes, GetSound: 'int', Play: 'int' },
+      functionParamTypes: { Play: [param, 'Unit *', 'int'] },
+      typedefTargets: { eD2Sounds: 'uint32_t', uint32_t: 'unsigned int', int64_t: 'long long' },
+    });
+
+    it('nests it into a 32-bit integer parameter', () => {
+      const { out, sites } = run(sound('eD2Sounds'), opts('eD2Sounds'));
+      assert.deepStrictEqual(sites, [1]);
+      assert.ok(out.includes('return Play(GetSound(pUnit), pUnit, 5);'), out);
+    });
+
+    it('leaves it for a 64-bit parameter, where the sign decides the extension', () => {
+      const { sites } = run(sound('int64_t'), opts('int64_t'));
+      assert.deepStrictEqual(sites, []);
+    });
+
+    it('leaves it for a floating parameter', () => {
+      const { sites } = run(sound('double'), opts('double'));
+      assert.deepStrictEqual(sites, []);
+    });
+
+    it('leaves it when the argument computes with the temporary', () => {
+      const { sites } = run(sound('eD2Sounds', 'nSoundId / 2'), opts('eD2Sounds'));
+      assert.deepStrictEqual(sites, []);
+    });
+
+    it('leaves it without the callee\'s parameter types', () => {
+      const o = opts('eD2Sounds');
+      delete o.functionParamTypes;
+      const { sites } = run(sound('eD2Sounds'), o);
+      assert.deepStrictEqual(sites, []);
+    });
+  });
+
   it('keeps an explicit cast with the call', () => {
     const { out, sites } = run([
       'int f(Unit *pUnit) {',

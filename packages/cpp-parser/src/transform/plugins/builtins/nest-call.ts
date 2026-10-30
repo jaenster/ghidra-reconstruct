@@ -34,7 +34,11 @@
  *   - the arguments right of the leftmost such temporary call and change nothing, and
  *     the statement assigns nothing inside the argument list;
  *   - each call temporary's value has the temporary's type (its callee's return type, or
- *     an explicit cast), so nesting it converts nothing;
+ *     an explicit cast), so nesting it converts nothing - or the two differ only in the
+ *     sign of a 32-bit integer and the temporary is the whole argument of a parameter
+ *     declared as an integer no wider than 32 bits: `int` to `eD2Sounds` (`uint32_t`) to
+ *     the parameter leaves the same bits as `int` straight to it
+ *     (UNITSND_GetSkillCastSound's `int` into SOUND_PlaySound's `eD2Sounds`);
  *   - the original shows the nested evaluation: before each inner CALL, the pushes of its
  *     own arguments and of the outer arguments right of it (up to the previous inner
  *     call's argument, which must hold at least one stack slot: otherwise both forms
@@ -78,6 +82,8 @@ export interface NestCallOptions extends PluginOptions {
   callOrder?: CallOrderEvidence | null;
   /** Callable name (bare and qualified) -> declared return type spelling. */
   functionReturnTypes?: Record<string, string>;
+  /** Callable name (bare and qualified) -> declared parameter type spellings. */
+  functionParamTypes?: Record<string, string[]>;
   /** Global name -> declared type spelling. */
   globalTypes?: Record<string, string>;
   /** Typedef name -> the spelling it stands for. */
@@ -279,8 +285,39 @@ function declShape(l: Local, ctx: Ctx): TypeShape | null {
   return shapeOfNode(l.decl.type, 0, ctx.resolve);
 }
 
+/** The 32-bit integers of this target, which differ from each other in sign only. */
+const WORD_INTEGERS = new Set(['int', 'unsigned int', 'long', 'unsigned long']);
+
+/** Integers no wider than 32 bits: a conversion into one keeps only the low bits. */
+const NARROW_INTEGERS = new Set([
+  'char', 'signed char', 'unsigned char', 'short', 'unsigned short', 'wchar_t', 'bool',
+  ...WORD_INTEGERS,
+]);
+
+/**
+ * Whether a call returning `from` may stand in an argument where the decompile stored it
+ * in a temporary of type `to` first: the two are 32-bit integers that differ in sign
+ * only, the temporary is the argument itself, and the parameter takes at most 32 bits,
+ * so `from` -> `to` -> parameter and `from` -> parameter store the same bits.
+ */
+function signOnlyIntoNarrowParam(from: TypeShape, to: TypeShape, site: { call: CallExpr; arg: number; use: Identifier }, ctx: Ctx): boolean {
+  if (from.stars !== 0 || to.stars !== 0) return false;
+  if (!WORD_INTEGERS.has(from.base) || !WORD_INTEGERS.has(to.base)) return false;
+  if (unwrap(site.call.arguments[site.arg]) !== site.use) return false;
+  const name = calleeName(site.call.callee);
+  if (!name) return false;
+  const params = scopedLookup(ctx.opts.functionParamTypes ?? {}, name, ctx.opts.enclosingSegments ?? []);
+  const spelling = params?.[site.arg];
+  if (!spelling || params!.length !== site.call.arguments.length) return false;
+  const p = shapeOfSpelling(spelling, ctx.resolve);
+  return !!p && p.stars === 0 && NARROW_INTEGERS.has(p.base);
+}
+
 /** The value class of a temporary, or null when nesting it could convert or reorder it. */
-function classify(t: { value: Expression; local: Local }, ctx: Ctx): { kind: Temp['kind']; call?: CallExpr } | null {
+function classify(
+  t: { value: Expression; local: Local }, ctx: Ctx,
+  site: { call: CallExpr; arg: number; use: Identifier },
+): { kind: Temp['kind']; call?: CallExpr } | null {
   const shape = declShape(t.local, ctx);
   if (!shape) return null;
   const v = unwrap(t.value);
@@ -294,7 +331,7 @@ function classify(t: { value: Expression; local: Local }, ctx: Ctx): { kind: Tem
       if (!to || !sameShape(to, shape)) return null;
     } else {
       const r = returnShape(call, ctx);
-      if (!r || !sameShape(r, shape)) return null;
+      if (!r || !(sameShape(r, shape) || signOnlyIntoNarrowParam(r, shape, site, ctx))) return null;
     }
     if (!calleeName(call.callee)) return null;
     return { kind: 'call', call };
@@ -379,7 +416,7 @@ function siteAt(stmts: Statement[], b: number, path: Path, guarded: boolean, ctx
     if (uses.length !== 1) break;
     const arg = argumentOf(call, uses[0]);
     if (arg < 0) break;
-    const c = classify(t, ctx);
+    const c = classify(t, ctx, { call, arg, use: uses[0] });
     if (!c) break;
     names.add(t.name);
     collected.push({ stmt: t.stmt, name: t.name, value: t.value, use: uses[0], arg, kind: c.kind, call: c.call });

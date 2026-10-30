@@ -21,6 +21,16 @@
  * Signedness is derived from the members, which is the same rule Ghidra uses:
  * an enum with no negative member is unsigned. It matters at 2 bytes —
  * `eCollisionFlags` runs 0..32768, which does NOT fit in `int16_t`.
+ *
+ * It matters at 4 bytes too, and there for the compares rather than the
+ * layout. Ghidra's `Enum.isSigned()` is true only when a member is negative,
+ * and `PcodeDataTypeManager.encodeEnum` hands the decompiler `enum_uint`
+ * otherwise, so the decompiler reasons about every non-negative enum as
+ * unsigned: an unsigned `CMP`/`JA` on one prints as a bare `e < 6`, and only a
+ * signed one gets a cast. Spelled `int` in the tree, that bare compare
+ * compiles to `JGE`, and a logical `SHR` on a flag word becomes `SAR`
+ * (`D2UnitStrc::eUnitFlagsEx`, `MONSTEREVENT_DefaultCallback`'s timer-type
+ * bound). So a 4-byte enum is `uint32_t` unless it has a negative member.
  */
 
 import type { ExtractedEnum, EnumValue } from '../types.js';
@@ -29,22 +39,31 @@ import type { ExtractedEnum, EnumValue } from '../types.js';
 const UNSIGNED_BY_SIZE: ReadonlyMap<number, string> = new Map([
   [1, 'uint8_t'],
   [2, 'uint16_t'],
+  [4, 'uint32_t'],
   [8, 'uint64_t'],
 ]);
 
 const SIGNED_BY_SIZE: ReadonlyMap<number, string> = new Map([
   [1, 'int8_t'],
   [2, 'int16_t'],
+  [4, 'int'],
   [8, 'int64_t'],
 ]);
 
 /**
- * The status-quo spelling: what every enum was emitted as before widths were
- * carried, and what an enum of unknown or non-standard size still gets.
- * 4 is deliberately not in the tables above — a 4-byte enum keeps `int` so the
- * change moves only the enums whose width is actually wrong.
+ * The spelling for an enum whose width cannot be trusted: an unknown or
+ * non-standard size, or a name Ghidra models at two different sizes. A signed
+ * 4-byte enum is spelled the same, which keeps its declarations unchanged.
  */
 export const DEFAULT_ENUM_UNDERLYING = 'int';
+
+/**
+ * Enums the platform SDK itself declares as a C `enum`, whose type every
+ * translation unit already sees as `int` through the SDK headers: `<excpt.h>`'s
+ * `EXCEPTION_DISPOSITION` is what the SEH handlers in `crt-mapping.ts` return,
+ * and those declarations have to agree with ours.
+ */
+const SDK_INT_ENUMS: ReadonlySet<string> = new Set(['_EXCEPTION_DISPOSITION']);
 
 /**
  * The underlying integer type for one enum, from the size Ghidra models and
@@ -56,8 +75,9 @@ export const DEFAULT_ENUM_UNDERLYING = 'int';
  * largest member is 0xFFFF would be narrowed to 2. Unknown stays `int`.
  */
 export function enumUnderlyingType(
-  enumType: { size?: number; values?: readonly EnumValue[] }
+  enumType: { name?: string; size?: number; values?: readonly EnumValue[] }
 ): string {
+  if (enumType.name !== undefined && SDK_INT_ENUMS.has(enumType.name)) return DEFAULT_ENUM_UNDERLYING;
   const size = enumType.size;
   if (typeof size !== 'number' || !Number.isFinite(size)) return DEFAULT_ENUM_UNDERLYING;
   const signed = (enumType.values ?? []).some(v => Number(v.value) < 0);
@@ -117,17 +137,23 @@ export function clearKnownEnumWidths(): void {
  */
 export function enumUnderlyingFor(
   name: string,
-  fallback?: { size?: number; values?: readonly EnumValue[] }
+  fallback?: { name?: string; size?: number; values?: readonly EnumValue[] }
 ): string {
   const known = knownEnumUnderlying.get(name);
   if (known !== undefined) return known;
   return fallback ? enumUnderlyingType(fallback) : DEFAULT_ENUM_UNDERLYING;
 }
 
+/** Whether the integer an enum name is emitted as is unsigned. */
+export function enumIsUnsigned(name: string): boolean {
+  const spelling = enumUnderlyingFor(name);
+  return [...UNSIGNED_BY_SIZE.values()].includes(spelling);
+}
+
 /** The one-line typedef every emission site writes for an enum name. */
 export function enumTypedefLine(
   name: string,
-  fallback?: { size?: number; values?: readonly EnumValue[] }
+  fallback?: { name?: string; size?: number; values?: readonly EnumValue[] }
 ): string {
   return `typedef ${enumUnderlyingFor(name, fallback)} ${name};`;
 }
@@ -156,6 +182,6 @@ export function registerEnumTypedefTargets(
   for (const dt of dataTypes) {
     if (dt.kind !== 'ENUM' || !dt.name) continue;
     typedefTargets[dt.name] = enumUnderlyingFor(
-      dt.name, dt as { size?: number; values?: readonly EnumValue[] });
+      dt.name, dt as { name?: string; size?: number; values?: readonly EnumValue[] });
   }
 }
