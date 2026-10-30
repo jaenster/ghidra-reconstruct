@@ -3134,6 +3134,7 @@ function transformDecompiledCode(
       perPluginOptions['nest-call'] = {
         callOrder,
         functionReturnTypes: context?.funcPtrArgCasts?.functionReturnTypes,
+        functionParamTypes: context?.funcPtrArgCasts?.functionParamTypes,
         globalTypes: context?.funcPtrArgCasts?.globalTypes,
         typedefTargets: context?.funcPtrArgCasts?.typedefTargets,
         enclosingSegments: enclosing?.ghidraNamespaceSegments ?? enclosing?.namespaceSegments,
