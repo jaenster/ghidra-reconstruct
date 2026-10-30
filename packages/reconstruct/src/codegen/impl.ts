@@ -3028,7 +3028,13 @@ function transformDecompiledCode(
     // facts (an older snapshot) early-return keeps its unconditional behaviour.
     if (layout) {
       perPluginOptions['early-return'] = { ...(perPluginOptions['early-return'] as object | undefined), branchLayout: layout };
-      perPluginOptions['branch-layout'] = { branchLayout: layout };
+      perPluginOptions['branch-layout'] = {
+        branchLayout: layout,
+        ...(process.env.GHIDRA_BRANCH_LAYOUT_REPORT ? {
+          onSite: (e: { rule: string; line: number; why?: string }) =>
+            console.warn(`[branch-layout] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.rule} at line ${e.line}${e.why ? ` (${e.why})` : ''}`),
+        } : {}),
+      };
       perPluginOptions['case-layout'] = { branchLayout: layout };
       perPluginOptions['comma-expand'] = { ...(perPluginOptions['comma-expand'] as object | undefined), branchLayout: layout };
     }

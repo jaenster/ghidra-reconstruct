@@ -17,6 +17,16 @@
  *           instruction's offset. VC8 lowers a short switch to running subtractions
  *           (`sub ecx, 1; je; sub ecx, 3; je`) and an if-chain to CMPs; the decompiler
  *           prints both as equality tests, so this is what tells them apart.
+ *   operands decompile line of an `if` whose condition is a short-circuit chain -> per
+ *           leaf operand of its `&&`/`||` operators at any depth (text order), the offsets
+ *           of the conditional branches its tokens feed. The `if` keyword carries only the last test's branch;
+ *           this says where each test jumps from, so a leaving arm laid out among the tests
+ *           can be placed after a particular one.
+ *   returns every RET of the function with the run of instructions that reaches it only by
+ *           falling through (the return copy): its start, the RET's offset and the copy's
+ *           mnemonics. Where several returns of one value were merged into one copy the
+ *           decompile prints one offset for all of them; the copy's own code tells a bare
+ *           `xor eax, eax; ret` from one that also pops a frame.
  *
  * Lines are numbered as `DecompilerUtils.toLines` numbers them, which is the line order of
  * the decompile text the snapshot holds, provided the decompiler runs with the options the
@@ -38,6 +48,20 @@ export interface BranchLayoutFacts {
   ifs: [number, number][];
   /** [line, test] per `==`/`!=` token tied to an instruction, in text order. Absent in older facts. */
   tests?: [number, EqualityTest][];
+  /** [line, per leaf operand of the `&&`/`||` chain the branch offsets it feeds] per short-circuit `if`. Absent in older facts. */
+  operands?: [number, number[][]][];
+  /** Every return copy of the function, by start. Absent in older facts. */
+  returns?: ReturnCopy[];
+}
+
+/** A RET and the instructions that reach it only by falling through. */
+export interface ReturnCopy {
+  /** Offset of the copy's first instruction: a jump target, or the instruction after a call or jump. */
+  start: number;
+  /** Offset of the RET. */
+  ret: number;
+  /** Mnemonics from start to the RET, each with its first register operand when it has one (`XOR/EAX`). */
+  insns: string[];
 }
 
 /** One equality token of the decompile and the instruction that compiled it. */
@@ -54,6 +78,93 @@ export interface EqualityTest {
   /** Offset of the instruction from the function entry. */
   at: number;
 }
+
+/**
+ * Java for the per-line token loop: declares the state of the operand walk. Needs `base`.
+ */
+export const IF_OPERANDS_DECL_JAVA = `
+          StringBuilder opsRow = new StringBuilder();
+          int ifDepth = -1;
+          int ifLine = 0;
+          java.util.List<java.util.TreeSet<Long>> ifSegs = new java.util.ArrayList<>();
+`;
+
+/**
+ * Java run for every token \`t\` of line \`l\` (comments excluded): follows an \`if\`'s
+ * condition from the keyword to its closing paren, splits it at every \`&&\`/\`||\` token and collects, per operand, the CBRANCHes its tokens' values reach (directly, or
+ * through a BOOL_NEGATE or COPY).
+ */
+export const IF_OPERANDS_TOKEN_JAVA = `
+              {
+                String tx = t.getText();
+                if (ifDepth < 0) {
+                  if (tx.equals("if")) { ifDepth = 0; ifLine = l.getLineNumber(); ifSegs.clear(); ifSegs.add(new java.util.TreeSet<Long>()); }
+                } else if (tx.equals("(")) ifDepth++;
+                else if (tx.equals(")")) {
+                  ifDepth--;
+                  if (ifDepth == 0) {
+                    if (ifSegs.size() >= 2) {
+                      opsRow.append(opsRow.length() > 0 ? ";" : "").append(ifLine).append(':');
+                      for (int si = 0; si < ifSegs.size(); si++) {
+                        if (si > 0) opsRow.append('|');
+                        if (ifSegs.get(si).isEmpty()) { opsRow.append('-'); continue; }
+                        boolean f1 = true;
+                        for (Long bo : ifSegs.get(si)) { if (!f1) opsRow.append('.'); opsRow.append(bo < 0 ? "-" + Long.toHexString(-bo) : Long.toHexString(bo)); f1 = false; }
+                      }
+                    }
+                    ifDepth = -1;
+                  }
+                } else if (ifDepth >= 1 && (tx.equals("&&") || tx.equals("||"))) ifSegs.add(new java.util.TreeSet<Long>());
+                else if (ifDepth >= 1) {
+                  java.util.List<ghidra.program.model.pcode.Varnode> vs = new java.util.ArrayList<>();
+                  ghidra.program.model.pcode.PcodeOp top = t.getPcodeOp();
+                  if (top != null && top.getOutput() != null) vs.add(top.getOutput());
+                  if (t instanceof ghidra.app.decompiler.ClangVariableToken && ((ghidra.app.decompiler.ClangVariableToken) t).getVarnode() != null) vs.add(((ghidra.app.decompiler.ClangVariableToken) t).getVarnode());
+                  for (int vi = 0; vi < vs.size() && vi < 8; vi++) {
+                    java.util.Iterator<ghidra.program.model.pcode.PcodeOp> dit = vs.get(vi).getDescendants();
+                    while (dit != null && dit.hasNext()) {
+                      ghidra.program.model.pcode.PcodeOp dop = dit.next();
+                      int oc = dop.getOpcode();
+                      if (oc == ghidra.program.model.pcode.PcodeOp.CBRANCH) ifSegs.get(ifSegs.size() - 1).add(dop.getSeqnum().getTarget().getOffset() - base);
+                      else if ((oc == ghidra.program.model.pcode.PcodeOp.BOOL_NEGATE || oc == ghidra.program.model.pcode.PcodeOp.COPY) && dop.getOutput() != null) vs.add(dop.getOutput());
+                    }
+                  }
+                }
+              }
+`;
+
+/**
+ * Java, after the line loop: every RET of \`fn\` with the instructions that reach it only by
+ * falling through, into \`retRow\`. Needs \`prog\`, \`fn\`, \`base\`.
+ */
+export const RETURN_COPIES_JAVA = `
+          StringBuilder retRow = new StringBuilder();
+          {
+            ghidra.program.model.listing.Listing RL = prog.getListing();
+            ghidra.program.model.symbol.ReferenceManager RM = prog.getReferenceManager();
+            ghidra.program.model.listing.InstructionIterator rit = RL.getInstructions(fn.getBody(), true);
+            while (rit.hasNext()) {
+              ghidra.program.model.listing.Instruction ri = rit.next();
+              if (!ri.getMnemonicString().equals("RET")) continue;
+              java.util.LinkedList<String> ins = new java.util.LinkedList<>();
+              ghidra.program.model.listing.Instruction cur = ri;
+              for (int g = 0; g < 16; g++) {
+                String rn = cur.getNumOperands() >= 1 && ghidra.program.model.lang.OperandType.isRegister(cur.getOperandType(0)) && cur.getRegister(0) != null ? "/" + cur.getRegister(0).getName() : "";
+                ins.addFirst(cur.getMnemonicString() + rn);
+                boolean entered = cur.getAddress().equals(fn.getEntryPoint());
+                for (ghidra.program.model.symbol.Reference rf : RM.getReferencesTo(cur.getAddress())) if (rf.getReferenceType().isFlow()) entered = true;
+                if (entered) break;
+                ghidra.program.model.listing.Instruction p = RL.getInstructionBefore(cur.getAddress());
+                if (p == null || !fn.getBody().contains(p.getAddress()) || p.getFallThrough() == null || !p.getFallThrough().equals(cur.getAddress())) break;
+                if (p.getFlowType().isCall() || p.getFlowType().isJump()) break;
+                cur = p;
+              }
+              long so = cur.getAddress().getOffset() - base, ro = ri.getAddress().getOffset() - base;
+              retRow.append(retRow.length() > 0 ? ";" : "").append(so < 0 ? "-" + Long.toHexString(-so) : Long.toHexString(so))
+                .append(':').append(ro < 0 ? "-" + Long.toHexString(-ro) : Long.toHexString(ro)).append(':').append(String.join(".", ins));
+            }
+          }
+`;
 
 /**
  * Java, no imports. `__ITEMS__` is `;`-separated function entries. The functions are
@@ -95,12 +206,12 @@ for (int ti = 0; ti < nThreads; ti++) {
           long base = fn.getEntryPoint().getOffset();
           StringBuilder ls = new StringBuilder(), is = new StringBuilder(), cs = new StringBuilder();
           int count = 0;
-          for (ghidra.app.decompiler.ClangLine l : ghidra.app.decompiler.component.DecompilerUtils.toLines(r.getCCodeMarkup())) {
+${IF_OPERANDS_DECL_JAVA}          for (ghidra.app.decompiler.ClangLine l : ghidra.app.decompiler.component.DecompilerUtils.toLines(r.getCCodeMarkup())) {
             count++;
             java.util.TreeSet<Long> offs = new java.util.TreeSet<>();
             for (ghidra.app.decompiler.ClangToken t : l.getAllTokens()) {
               if (t instanceof ghidra.app.decompiler.ClangCommentToken) continue;
-              ghidra.program.model.address.Address x = t.getMinAddress();
+${IF_OPERANDS_TOKEN_JAVA}              ghidra.program.model.address.Address x = t.getMinAddress();
               if (x == null) continue;
               long off = x.getOffset() - base;
               offs.add(off);
@@ -135,7 +246,7 @@ for (int ti = 0; ti < nThreads; ti++) {
               first = false;
             }
           }
-          rows.put(a, a + "\\t" + count + "\\t" + ls + "\\t" + is + "\\t" + cs);
+${RETURN_COPIES_JAVA}          rows.put(a, a + "\\t" + count + "\\t" + ls + "\\t" + is + "\\t" + cs + "\\t" + opsRow + "\\t" + retRow);
         } catch (Exception e) { }
       }
     } finally {
@@ -217,7 +328,35 @@ export function parseBranchLayout(output: string): Map<string, BranchLayoutFacts
         size: Number(f[5]), at: offset(f[6]),
       }]);
     }
-    out.set(normalize(c[0]), c.length > 4 ? { lineCount, lines, ifs, tests } : { lineCount, lines, ifs });
+    const facts: BranchLayoutFacts = c.length > 4 ? { lineCount, lines, ifs, tests } : { lineCount, lines, ifs };
+    if (c.length > 6) {
+      facts.operands = parseOperands(c[5]);
+      facts.returns = parseReturns(c[6]);
+    }
+    out.set(normalize(c[0]), facts);
+  }
+  return out;
+}
+
+/** `line:o.o|o|-;...` -> [line, per operand its branch offsets]. */
+function parseOperands(col: string): [number, number[][]][] {
+  const out: [number, number[][]][] = [];
+  for (const part of col ? col.split(';') : []) {
+    const i = part.indexOf(':');
+    if (i < 0) continue;
+    const segs = part.slice(i + 1).split('|').map(seg => (seg === '-' || seg === '' ? [] : seg.split('.').map(offset)));
+    out.push([Number(part.slice(0, i)), segs]);
+  }
+  return out;
+}
+
+/** `start:ret:M.M/R;...` -> the return copies. */
+function parseReturns(col: string): ReturnCopy[] {
+  const out: ReturnCopy[] = [];
+  for (const part of col ? col.split(';') : []) {
+    const f = part.split(':');
+    if (f.length < 3) continue;
+    out.push({ start: offset(f[0]), ret: offset(f[1]), insns: f[2] ? f[2].split('.') : [] });
   }
   return out;
 }
