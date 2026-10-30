@@ -20,7 +20,8 @@
  */
 
 import { NodeKind } from '../../../../ast/kinds.js';
-import type { ASTNode, IfStmt, Statement, Expression, SwitchStmt } from '../../../../ast/nodes.js';
+import type { ASTNode, AnyNode, IfStmt, Statement, Expression, SwitchStmt, ReturnStmt } from '../../../../ast/nodes.js';
+import { emit } from '../../../../emit/index.js';
 import { getChildren } from '../../../../ast/visitor.js';
 
 export interface BranchLayoutEvidence {
@@ -30,6 +31,22 @@ export interface BranchLayoutEvidence {
   ifs: ReadonlyMap<number, number>;
   /** Parsed-text line -> its `==`/`!=` tokens in text order, with the instruction behind each. */
   tests?: ReadonlyMap<number, readonly EqualityTest[]>;
+  /**
+   * Parsed-text line of an `if` whose condition is a short-circuit chain -> per leaf operand
+   * of its `&&`/`||` operators at any depth, in text order, the offsets of the conditional
+   * branches it feeds.
+   */
+  operands?: ReadonlyMap<number, readonly (readonly number[])[]>;
+  /** Every RET of the function with the instructions that reach it only by falling through. */
+  returns?: readonly ReturnCopy[];
+}
+
+/** A return copy of the original: its first instruction, its RET, and their mnemonics. */
+export interface ReturnCopy {
+  start: number;
+  ret: number;
+  /** Mnemonic per instruction, with `/REG` when the first operand is a register. */
+  insns: readonly string[];
 }
 
 /** An equality token of the decompile and the instruction its p-code op sits on. */
@@ -94,6 +111,11 @@ export class LayoutReader {
   /** Offset -> the untainted lines that print it. */
   private readonly printers = new Map<number, Set<number>>();
   private readonly ifLines = new Map<number, number>();
+  /**
+   * Line -> the text of the first if's condition on it, in pre-order: the leftmost piece of
+   * a split condition. By text: the transformer rebuilds the nodes it walks.
+   */
+  private readonly firstIf = new Map<number, string>();
   private readonly switchLines = new Map<number, number>();
   /** Line -> how many statement ranges claim it. */
   private readonly claims = new Map<number, number>();
@@ -127,6 +149,7 @@ export class LayoutReader {
       if (n.kind === NodeKind.IfStmt && placed(n)) {
         const l = n.location.start.line;
         this.ifLines.set(l, (this.ifLines.get(l) ?? 0) + 1);
+        if (!this.firstIf.has(l)) this.firstIf.set(l, emit((n as IfStmt).condition as AnyNode));
       }
       if (n.kind === NodeKind.SwitchStmt && placed(n)) {
         const l = n.location.start.line;
@@ -201,6 +224,54 @@ export class LayoutReader {
     const out: EqualityTest[] = [];
     for (let l = first; l <= c.location.end.line; l++) out.push(...(this.ev.tests.get(l) ?? []));
     return out;
+  }
+
+  /**
+   * Per leaf operand of the if's `&&`/`||` chain, in text order, the offsets of the
+   * conditional branches it feeds; null when the facts have none, the if is not alone on
+   * its line, or its line was copied.
+   */
+  operandBranches(ifs: IfStmt, leaves?: number): readonly (readonly number[])[] | null {
+    if (!this.ev.operands || !placed(ifs)) return null;
+    const l = ifs.location.start.line;
+    const all = this.ev.operands.get(l);
+    if (!all) return null;
+    if (this.ifLines.get(l) === 1) return this.tainted.has(l) ? null : all;
+    // A pass split the decompile's one condition into several ifs on its line (comma-expand
+    // at a `(x = e, x)` operand): the first of them, in pre-order, holds its leading operands.
+    // The line is claimed by every piece, so it reads as copied; the operands are not.
+    if (leaves === undefined || leaves >= all.length || this.firstIf.get(l) !== emit(ifs.condition as AnyNode)) return null;
+    return all.slice(0, leaves);
+  }
+
+  /**
+   * The conditional branch of the first if a pass split off a short-circuit condition:
+   * the last branch its own leading operands feed. Null unless `operandBranches` gives
+   * them, each with a branch.
+   */
+  prefixBranch(ifs: IfStmt, leaves: number): number | null {
+    const own = this.operandBranches(ifs, leaves);
+    if (!own || this.ifLines.get(ifs.location.start.line) === 1 || own.some(b => b.length === 0)) return null;
+    return Math.max(...own.flat());
+  }
+
+  /**
+   * Where the original's one copy of a `return` lies, for a return a pass copied or the
+   * decompile printed more than once: the lowest offset its line prints, when that offset
+   * and every other the line prints fall in one return copy of the facts (the run that
+   * falls through into a RET). The passes copy a merged return to every path that reaches
+   * it, so its line is claimed several times and `entry` gives no evidence; but the
+   * original holds one copy, and this is where it is. Null without return facts, for a
+   * line that prints nothing, or one whose offsets span more than one copy.
+   */
+  returnCopy(ret: ReturnStmt): number | null {
+    if (!this.ev.returns || !placed(ret)) return null;
+    const offs: number[] = [];
+    for (let l = ret.location.start.line; l <= ret.location.end.line; l++) offs.push(...(this.ev.lines.get(l) ?? []));
+    if (offs.length === 0) return null;
+    const lo = Math.min(...offs), hi = Math.max(...offs);
+    const copy = this.ev.returns.find(c => c.start <= lo && lo <= c.ret);
+    return copy && hi <= copy.ret ? lo : null;
   }
 
   /** Lowest offset printed by the condition's lines; null when unknown. */

@@ -3,11 +3,12 @@ import assert from 'node:assert';
 import { parse } from '../../../parser/index.js';
 import { emit } from '../../../emit/index.js';
 import type { AnyNode } from '../../../ast/nodes.js';
-import { branchLayoutPlugin, conditionShape, negate, type BranchLayoutOptions } from '../builtins/branch-layout/index.js';
+import { branchLayoutPlugin, conditionShape, negate, LayoutReader, type BranchLayoutOptions } from '../builtins/branch-layout/index.js';
 import { earlyReturnPlugin } from '../builtins/early-return.js';
 import { haltSiteFoldPlugin } from '../builtins/halt-site-fold.js';
 import type { BranchLayoutEvidence } from '../builtins/branch-layout/evidence.js';
-import type { ExprStmt } from '../../../ast/nodes.js';
+import type { ExprStmt, IfStmt, FunctionDecl, ASTNode } from '../../../ast/nodes.js';
+import { traverseAST } from '../../../ast/visitor.js';
 
 const HALT = 'ERROR_UnrecoverableInternalError_Halt';
 
@@ -362,9 +363,192 @@ describe('branchLayoutPlugin - || guard whose arm the original placed elsewhere'
     assert.strictEqual(second, first);
   });
 
-  it('leaves a last test that is a comparison', () => {
-    const { sites } = run(getter.map(l => l.replace('p->t == 1 && p->d', 'p->t == 1')));
+  it('compares an inlined getter once where the last test is a comparison against a constant', () => {
+    const { out, sites } = run(getter.map(l => l.replace('p->t == 1 && p->d', 'p->t == 1')));
+    assert.deepStrictEqual(sites, ['getter']);
+    assert.ok(out.includes('if ((p ? p->t : 0) != 1) { return 0; } return p->d->v;'), out);
+  });
+
+  it('defaults a getter compared against an enumerator to its complement', () => {
+    const { out } = run(getter.map(l => l.replace('!(p && p->t == 1 && p->d)', '!p || p->eType != UNIT_MONSTER')));
+    assert.ok(out.includes('if ((p ? p->eType : ~UNIT_MONSTER) != UNIT_MONSTER) { return 0; }'), out);
+  });
+
+  it('defaults a getter tested for inequality to the constant itself', () => {
+    const { out } = run(getter.map(l => l.replace('p->t == 1 && p->d', 'p->t != 3')));
+    assert.ok(out.includes('if ((p ? p->t : 3) == 3) { return 0; }'), out);
+  });
+
+  it('leaves a comparison against a variable', () => {
+    const { sites } = run(getter.map(l => l.replace('p->t == 1 && p->d', 'p->t == nType')));
     assert.deepStrictEqual(sites, ['left']);
+  });
+
+  it('leaves a comparison that does not read through the tested pointer', () => {
+    const { sites } = run(getter.map(l => l.replace('p->t == 1 && p->d', 'q->t == 1')));
+    assert.deepStrictEqual(sites, ['left']);
+  });
+});
+
+describe('branchLayoutPlugin - || guard of three or more tests, by per-operand branches', () => {
+  const three = [
+    'int f(S* p) {',
+    '[if 0x14 0x0,0x2,0x9,0x10,0x14] if (!(p && p->t == 1 && p->d)) {',
+    '[0x4,0x6] return 0;',
+    '}',
+    '[0x16] return p->d->v;',
+    '}',
+  ];
+  function runOps(lines: string[], ops: number[][], opts: Partial<BranchLayoutOptions> = {}): { out: string; sites: string[] } {
+    const { code, ev } = fixture(lines);
+    const sites: string[] = [];
+    const operands = new Map([[2, ops]]);
+    const t = branchLayoutPlugin.createTransformer({ branchLayout: { ...ev, operands }, onSite: e => sites.push(e.rule), ...opts });
+    return { out: flat(emit(t(parse(code)) as AnyNode)), sites };
+  }
+
+  it('writes one guard per test where the arm follows the first', () => {
+    const { out, sites } = runOps(three, [[0x2], [0xb], [0x14]]);
+    assert.deepStrictEqual(sites, ['split']);
+    assert.ok(out.includes('if (!p) { return 0; } if (p->t != 1) { return 0; } if (!p->d) { return 0; } return p->d->v;'), out);
+  });
+
+  it('does the same for a written || of four tests', () => {
+    const { out, sites } = runOps(three.map(l => l.replace('!(p && p->t == 1 && p->d)', 'a || b < 0 || c || d')), [[0x2], [0x9], [0x10], [0x14]]);
+    assert.deepStrictEqual(sites, ['split']);
+    assert.ok(out.includes('if (a) { return 0; } if (b < 0) { return 0; } if (c) { return 0; } if (d) { return 0; }'), out);
+  });
+
+  it('compares the getter once and guards the rest where the arm follows the second', () => {
+    const lines = three.map(l => l.replace('[0x4,0x6] return 0', '[0xb,0xd] return 0'));
+    const { out, sites } = runOps(lines, [[0x2], [0x9], [0x14]]);
+    assert.deepStrictEqual(sites, ['getter']);
+    assert.ok(out.includes('if ((p ? p->t : 0) != 1) { return 0; } if (!p->d) { return 0; } return p->d->v;'), out);
+  });
+
+  it('is idempotent', () => {
+    const { code, ev } = fixture(three);
+    const t = branchLayoutPlugin.createTransformer({ branchLayout: { ...ev, operands: new Map([[2, [[0x2], [0xb], [0x14]]]]) } });
+    const once = t(parse(code));
+    assert.strictEqual(flat(emit(t(once) as AnyNode)), flat(emit(once as AnyNode)));
+  });
+
+  it('leaves the arm after the second where the first two are no getter', () => {
+    const lines = three.map(l => l.replace('[0x4,0x6] return 0', '[0xb,0xd] return 0').replace('p->t == 1', 'q'));
+    const { sites } = runOps(lines, [[0x2], [0x9], [0x14]]);
+    assert.deepStrictEqual(sites, ['left']);
+  });
+
+  it('places the arm by top-level operand: one with a nested || counts its tests', () => {
+    const lines = three.map(l => l.replace('!(p && p->t == 1 && p->d)', '!(p && (p->t == 1 || p->t == 2) && p->d)'));
+    const { out, sites } = runOps(lines, [[0x2], [0x9], [0xe], [0x14]]);
+    assert.deepStrictEqual(sites, ['split']);
+    assert.ok(out.includes('if (!p) { return 0; } if (!(p->t == 1 || p->t == 2)) { return 0; } if (!p->d) { return 0; }'), out);
+  });
+
+  it('leaves an arm among the tests of one operand', () => {
+    const lines = three.map(l => l.replace('!(p && p->t == 1 && p->d)', '!(p && (p->t == 1 || p->t == 2) && p->d)').replace('[0x4,0x6] return 0', '[0xb,0xd] return 0'));
+    const { sites } = runOps(lines, [[0x2], [0x9], [0xe], [0x14]]);
+    assert.deepStrictEqual(sites, ['left']);
+  });
+
+  it('leaves the facts when their operand count disagrees with the condition', () => {
+    const { sites } = runOps(three, [[0x2], [0xb]]);
+    assert.deepStrictEqual(sites, ['left']);
+  });
+
+  it('leaves a two-test guard whose arm the facts put after its second test', () => {
+    const lines = three.map(l => l.replace('!(p && p->t == 1 && p->d)', '!(p && q)'));
+    const { sites } = runOps(lines, [[0x2], [0x3]]);
+    assert.deepStrictEqual(sites, ['left']);
+  });
+});
+
+describe('branchLayoutPlugin - guards whose returns the original merged into one copy', () => {
+  function runRet(lines: string[], returns: { start: number; ret: number; insns: string[] }[] | undefined): { out: string; sites: string[] } {
+    const { code, ev } = fixture(lines);
+    const sites: string[] = [];
+    const t = branchLayoutPlugin.createTransformer({ branchLayout: { ...ev, returns }, onSite: e => sites.push(e.rule) });
+    return { out: flat(emit(t(parse(code)) as AnyNode)), sites };
+  }
+  const atEnd = [
+    'int f(S* p) {',
+    '[if 0x2 0x0,0x2] if (!p) {',
+    '[0x30] return 0;',
+    '}',
+    '[0x4] g(p);',
+    '[if 0x10 0x9,0x10] if (p->v) {',
+    '[0x12] return 1;',
+    '}',
+    '[0x30] return 0;',
+    '}',
+  ];
+  const copies = [
+    { start: 0x12, ret: 0x17, insns: ['MOV/EAX', 'RET'] },
+    { start: 0x30, ret: 0x32, insns: ['XOR/EAX', 'RET'] },
+  ];
+
+  it('leaves a guard whose merged return lies after the rest: VC8 keeps the first copy or the last by its own choice', () => {
+    const { out, sites } = runRet(atEnd, copies);
+    assert.deepStrictEqual(sites, []);
+    assert.ok(out.includes('if (!p) { return 0; } g(p);'), out);
+  });
+
+  const before = [
+    'int f(S* p, S* q) {',
+    '[if 0x2 0x0,0x2] if (!p) {',
+    '[0x4] return 0;',
+    '}',
+    '[if 0x10 0x8,0xa,0x10] if (!(q && q->t)) {',
+    '[0x4] return 0;',
+    '}',
+    '[0x12] return q->v;',
+    '}',
+  ];
+
+  it('writes one guard per test where the merged return lies before the tests', () => {
+    const { out, sites } = runRet(before, [{ start: 0x4, ret: 0x6, insns: ['XOR/EAX', 'RET'] }, copies[0]]);
+    assert.deepStrictEqual(sites, ['split']);
+    assert.ok(out.includes('if (!p) { return 0; } if (!q) { return 0; } if (!q->t) { return 0; } return q->v; }'), out);
+  });
+
+  it('leaves the guards whose rest is a constant return, which VC8 would fold into a SETcc', () => {
+    const lit = before.map(l => l.replace('[0x12] return q->v;', '[0x12] return 1;'));
+    assert.deepStrictEqual(runRet(lit, [{ start: 0x4, ret: 0x6, insns: ['XOR/EAX', 'RET'] }, copies[0]]).sites, ['left']);
+  });
+
+  it('reads nothing from a return printed twice without return facts', () => {
+    const { sites } = runRet(before, undefined);
+    assert.deepStrictEqual(sites, []);
+  });
+
+  it('reads nothing from a line whose offsets fall in no return copy', () => {
+    const { sites } = runRet(before, [copies[0]]);
+    assert.deepStrictEqual(sites, []);
+  });
+});
+
+describe('LayoutReader - operands of a condition a pass split into several ifs on one line', () => {
+  const code = 'int f(S* p) {\nif (!(p && p->t == 1)) { return 0; } int x = g(p); if (!x) { return 0; }\nreturn x;\n}';
+  const root = parse(code);
+  const ifs = [...traverseAST(root as ASTNode)].filter(n => n.kind === 'IfStmt') as IfStmt[];
+  const body = ([...traverseAST(root as ASTNode)].find(n => n.kind === 'FunctionDecl') as FunctionDecl).body!;
+  const ev: BranchLayoutEvidence = {
+    lines: new Map([[2, [0x0, 0x2, 0x8, 0x10, 0x18]]]),
+    ifs: new Map([[2, 0x18]]),
+    operands: new Map([[2, [[0x2], [0x8], [0x18]]]]),
+  };
+  const reader = new LayoutReader(ev, body);
+
+  it('gives the first if its leading operands and its own last branch', () => {
+    assert.strictEqual(reader.cbranch(ifs[0]), null);
+    assert.deepStrictEqual(reader.operandBranches(ifs[0], 2), [[0x2], [0x8]]);
+    assert.strictEqual(reader.prefixBranch(ifs[0], 2), 0x8);
+  });
+
+  it('gives nothing to a later piece, or for as many operands as the line has', () => {
+    assert.strictEqual(reader.operandBranches(ifs[1], 1), null);
+    assert.strictEqual(reader.operandBranches(ifs[0], 3), null);
   });
 });
 
