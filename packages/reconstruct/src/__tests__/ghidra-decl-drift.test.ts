@@ -19,7 +19,7 @@ describe('ghidraDeclDrift', () => {
       { name: '__local_unwind2', address: '00697fd9', parameters: p(3) },
       { name: '__NLG_Notify', address: '00698089', parameters: p(3) },
       { name: 'FID_conflict:___CxxFrameHandler3', address: '0068333c', parameters: p(5) },
-      { name: '__aulldvrm', address: '00686b60', parameters: p(4) },
+      { name: '_aulldvrm', address: '00686b60', parameters: p(4) },
       { name: '___report_gsfailure', address: '006889d6', parameters: [] },
       { name: '__sqrt_common', address: '006879dd', parameters: p(3) },
     ]), []);
@@ -37,7 +37,7 @@ describe('ghidraDeclDrift', () => {
   });
 
   it('the LLDVRM helpers return the quotient/remainder pair Ghidra types them with', () => {
-    const d = EXCLUDED_SYMBOL_DECLS.find(x => x.emitted === '__aulldvrm');
-    assert.ok(d && /^static inline LLDVRM_RESULT __aulldvrm\(/.test(d.decl), d?.decl);
+    const d = EXCLUDED_SYMBOL_DECLS.find(x => x.emitted === '_aulldvrm');
+    assert.ok(d && /^static inline LLDVRM_RESULT _aulldvrm\(/.test(d.decl), d?.decl);
   });
 });
