@@ -402,6 +402,12 @@ export {
   type CaseLayoutOptions,
 } from './builtins/case-layout.js';
 
+export {
+  jumpTableCasePlugin,
+  type JumpTableCaseOptions,
+  type JumpTableFact,
+} from './builtins/jump-table-case.js';
+
 // ============================================
 // BUILT-IN PLUGINS: DECLARATION SCOPE SINK
 // ============================================
@@ -632,6 +638,7 @@ import { recordGetterGuardPlugin } from './builtins/record-getter-guard.js';
 import { inlinedCallRestorePlugin } from './builtins/inlined-call-restore.js';
 import { switchChainPlugin } from './builtins/switch-chain.js';
 import { caseLayoutPlugin } from './builtins/case-layout.js';
+import { jumpTableCasePlugin } from './builtins/jump-table-case.js';
 import { declOrderFixPlugin } from './builtins/decl-order-fix.js';
 import { declScopeSinkPlugin } from './builtins/decl-scope-sink.js';
 import { phiNodeTernaryPlugin } from './builtins/phi-node-ternary.js';
@@ -814,6 +821,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   assertOrderPlugin,          // Control-flow: if (c) { ..; return; } Halt; exit; -> if (!c) { Halt; exit; } ..; return; (priority 987)
   branchLayoutPlugin,         // Control-flow: if arms ordered as the original's addresses show (priority 988)
   caseLayoutPlugin,           // Control-flow: jump-table case groups ordered as the original's addresses show (priority 989)
+  jumpTableCasePlugin,        // Matching: a jump table's last case the decompiler folded into the code after the switch (priority 989.5)
   switchChainPlugin,          // Control-flow: if-chain the original counts down by subtraction -> switch (priority 44)
   declOrderFixPlugin,         // Cleanup: reorder merged decls to respect initializer deps (priority 61)
   declScopeSinkPlugin,        // Cleanup: sink decls into single-use scope (priority 62)

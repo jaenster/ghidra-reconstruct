@@ -3153,6 +3153,14 @@ function transformDecompiledCode(
         } : {}),
       };
       perPluginOptions['case-layout'] = { branchLayout: layout };
+      if (enclosing?.jumpTables) {
+        perPluginOptions['jump-table-case'] = {
+          branchLayout: layout,
+          jumpTables: enclosing.jumpTables,
+          onSite: (e: { rule: string; line: number; value?: number; why?: string }) =>
+            console.warn(`[jump-table-case] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.rule === 'case' ? `case ${e.value} restored` : `left: ${e.why}`} at line ${e.line}`),
+        };
+      }
       perPluginOptions['comma-expand'] = { ...(perPluginOptions['comma-expand'] as object | undefined), branchLayout: layout };
     }
     // A temporary goes back into the argument list where the original evaluated the
