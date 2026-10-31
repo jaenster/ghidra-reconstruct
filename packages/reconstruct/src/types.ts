@@ -135,6 +135,17 @@ export interface ExtractedFunction {
    * snapshot predates the field.
    */
   stringOps?: import('./extract/string-ops.js').StringOpFacts;
+  /**
+   * The decompiler's jump tables with the bound check's fallback (extract/jump-tables.ts).
+   * Absent when there are none or the snapshot predates the field.
+   */
+  jumpTables?: import('./extract/jump-tables.js').JumpTableFacts;
+  /**
+   * Per struct-typed stack local, the bytes the original's opening stores write with zero and
+   * with anything else (extract/zero-stores.ts). Absent when there are none or the snapshot
+   * predates the field.
+   */
+  zeroStores?: import('./extract/zero-stores.js').ZeroStoreFacts;
 }
 
 /**

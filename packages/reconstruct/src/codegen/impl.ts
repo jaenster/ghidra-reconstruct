@@ -1595,6 +1595,8 @@ export function generateFunctionImplementation(
           // A text patch anchors on the statements as Ghidra printed them.
           accessOrder: override?.action === 'patch' ? undefined : func.accessOrder,
           haltLines: func.haltLines,
+          jumpTables: func.jumpTables,
+          zeroStores: func.zeroStores,
           sehLowering: sehLoweringDecision(func),
           foldedAddresses: foldedAddressFacts(func),
           immediateConstants: immediateConstantFacts(func),
@@ -2527,6 +2529,10 @@ function transformDecompiledCode(
     accessOrder?: AccessOrderFacts;
     /** The line each way into a halt pushes; stack-probe return addresses (extract/halt-lines.ts). */
     haltLines?: HaltLineFacts;
+    /** The decompiler's jump tables and their bound checks' fallbacks (extract/jump-tables.ts). */
+    jumpTables?: import('../extract/jump-tables.js').JumpTableFacts;
+    /** Per struct-typed stack local, what the original's opening stores write (extract/zero-stores.ts). */
+    zeroStores?: import('../extract/zero-stores.js').ZeroStoreFacts;
     /** The function's EH3 frame as `seh-lowering` needs it (codegen/seh-lowering-spec.ts). */
     sehLowering?: SehLoweringDecision;
     /** Addresses the instructions derive from a global's start (codegen/folded-address-spec.ts). */
