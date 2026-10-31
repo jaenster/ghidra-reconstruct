@@ -305,6 +305,8 @@ export interface VariableDecl extends ASTNode {
   attributes: Attribute[];
   /** `T x(a, b);` - the initializer list holds the constructor arguments. */
   directInit?: boolean;
+  /** `T x = {a, b};` - copy-list-initialisation, the only list form C++03 has. */
+  copyListInit?: boolean;
   /** `T x : 3;` - a bit-field member declared with the variable grammar. */
   bitWidth?: Expression;
 }

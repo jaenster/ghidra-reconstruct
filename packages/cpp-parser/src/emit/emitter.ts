@@ -1126,6 +1126,7 @@ export class CppEmitter {
 
     if (node.initializer) {
       if (node.initializer.kind === NodeKind.InitListExpr) {
+        if (node.copyListInit) this.write(this.style.spaceAroundOperators ? ' = ' : '=');
         this.emitInitListExpr(node.initializer as InitListExpr);
       } else {
         if (this.style.spaceAroundOperators) {
@@ -1910,6 +1911,7 @@ export class CppEmitter {
           this.emitPointerToArrayDecl(v.type, v.name);
           if (v.initializer) {
             if ((v.initializer as ASTNode).kind === NodeKind.InitListExpr) {
+              if (v.copyListInit) this.write(this.style.spaceAroundOperators ? ' = ' : '=');
               this.emitInitListExpr(v.initializer as InitListExpr);
             } else {
               this.write(this.style.spaceAroundOperators ? ' = ' : '=');
@@ -1931,6 +1933,7 @@ export class CppEmitter {
         this.emitArrayDimensions(arraySizes);
         if (v.initializer) {
           if ((v.initializer as ASTNode).kind === NodeKind.InitListExpr) {
+            if (v.copyListInit) this.write(this.style.spaceAroundOperators ? ' = ' : '=');
             this.emitInitListExpr(v.initializer as InitListExpr);
           } else {
             if (this.style.spaceAroundOperators) {

@@ -2752,6 +2752,13 @@ function transformDecompiledCode(
         enumConstants: context.funcPtrArgCasts.enumConstantNames,
         enumValues: context.funcPtrArgCasts.enumValues,
       };
+      perPluginOptions['aggregate-zero-init'] = {
+        structLayouts: context.funcPtrArgCasts.structLayouts,
+        aggregateSizes: context.funcPtrArgCasts.aggregateSizes,
+        typedefTargets: context.funcPtrArgCasts.typedefTargets,
+        enumValues: context.funcPtrArgCasts.enumValues,
+        convertingAggregates: context.funcPtrArgCasts.convertingAggregates,
+      };
       perPluginOptions['strided-access'] = {
         structLayouts: context.funcPtrArgCasts.structLayouts,
         aggregateSizes: context.funcPtrArgCasts.aggregateSizes,
