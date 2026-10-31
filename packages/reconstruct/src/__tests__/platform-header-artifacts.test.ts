@@ -20,7 +20,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { hasNativeGpp } from '@ghidra-mcp/cpp-parser/testing/native-cpp';
+import { hasNativeGpp, testCxx } from '@ghidra-mcp/cpp-parser/testing/native-cpp';
 import { generatePlatformHeader } from '../codegen/platform-types.js';
 
 const PSEUDO_OPS = /^#\s*define\s+(CONCAT|SUB|ZEXT|SEXT|CARRY|SCARRY|SBORROW)\d+\b|^#\s*define\s+(ZPULL|SPULL|ROUND|ABS|LOCK|UNLOCK|rdtsc|swi)\b/m;
@@ -89,8 +89,9 @@ describe('platform header: artifact support', { skip: !hasNativeGpp() }, () => {
     try {
       const src = join(dir, 't.cpp');
       writeFileSync(src, ['#include <cstdint>', ...ARTIFACT_SUPPORT_LINES, 'int main(){}'].join('\n'));
-      execFileSync('g++', ['-std=c++17', '-fsyntax-only', src], { stdio: 'pipe' });
-      assert.throws(() => execFileSync('g++', ['-std=c++17', '-ffast-math', '-fsyntax-only', src], { stdio: 'pipe' }));
+      const [cxx, ...pre] = testCxx();
+      execFileSync(cxx, [...pre, '-std=c++17', '-fsyntax-only', src], { stdio: 'pipe' });
+      assert.throws(() => execFileSync(cxx, [...pre, '-std=c++17', '-ffast-math', '-fsyntax-only', src], { stdio: 'pipe' }));
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

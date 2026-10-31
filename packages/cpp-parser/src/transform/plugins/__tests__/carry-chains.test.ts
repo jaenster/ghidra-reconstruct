@@ -30,13 +30,17 @@ function lower(code: string): string {
   return emit(pseudoOpLowerPlugin.createTransformer(TABLES)(parse(code)) as AnyNode).trim();
 }
 
+// On a Windows target the artifact support pulls in <windows.h>, whose winnt.h already has
+// these with the same layout and member names; it comes first, as the platform header does.
 const PRELUDE = [
-  'typedef unsigned int uint;', 'typedef unsigned int DWORD;', 'typedef int LONG;', 'typedef long long LONGLONG;',
-  'typedef long long longlong;',
+  ...ARTIFACT_SUPPORT_LINES,
+  'typedef unsigned int uint;', 'typedef long long longlong;',
+  '#ifndef _WIN32',
+  'typedef unsigned int DWORD;', 'typedef int LONG;', 'typedef long long LONGLONG;',
   'struct _struct_20 { DWORD LowPart; LONG HighPart; };',
   'typedef union _LARGE_INTEGER { _struct_20 u; LONGLONG QuadPart; } LARGE_INTEGER;',
+  '#endif',
   'struct WorkerStats { LARGE_INTEGER qpcStart; LARGE_INTEGER qpcEnd; LARGE_INTEGER qpcAccum; };',
-  ...ARTIFACT_SUPPORT_LINES,
   'static bool CARRY4(uint32_t a, uint32_t b) { return (uint64_t)a + b > 0xffffffffull; }',
   'static inline unsigned long long CONCAT44(uint32_t hi, uint32_t lo) { return (unsigned long long)hi << 32 | lo; }',
 ].join('\n');

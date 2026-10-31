@@ -27,7 +27,7 @@
  * for all streams implies equivalence for the real ones.
  */
 
-import { spawnSync } from 'node:child_process';
+import { compileTo, exePath, runExe } from './native-cpp.js';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -337,19 +337,26 @@ const PRELUDE = String.raw`
 #include <csetjmp>
 #include <cstring>
 #include <csignal>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 #ifdef __linux__
 #include <sys/prctl.h>
 #endif
 // The binary bounds itself, so it cannot outlive the harness: it dies with its parent
-// (Linux), and on its own alarm whatever happens to the parent.
+// (Linux), and on its own alarm whatever happens to the parent. Windows has no alarm: the
+// harness's own kill at the limit is the bound there.
 static void guard(unsigned seconds) {
 #ifdef __linux__
   prctl(PR_SET_PDEATHSIG, SIGKILL);
   if (getppid() == 1) _exit(125);
 #endif
+#ifndef _WIN32
   signal(SIGALRM, SIG_DFL);
   alarm(seconds);
+#else
+  (void)seconds;
+#endif
   setvbuf(stdout, nullptr, _IOLBF, 0);
 }
 static uint64_t g_state; static int g_exhaustive; static uint64_t g_bits; static int g_pos;
@@ -400,7 +407,7 @@ static int compare(const char* name, Fn a, Fn b, int exhaustive) {
 `;
 
 /**
- * Compile every pair at -O0 and -O2 with the host g++ and compare their traces. Returns one
+ * Compile every pair at -O0 and -O2 with the test toolchain (native-cpp) and compare their traces. Returns one
  * result per pair. Throws when the compiler rejects the skeleton (that is a harness bug, or
  * a rewrite that produced C++ no compiler accepts).
  */
@@ -452,19 +459,15 @@ export function runSkeletons(pairs: SkeletonPair[], opts: SkeletonOptions = {}):
     const verdicts = new Map<string, { ok: boolean; detail: string[] }>();
     const timedOut = new Set<string>();
     for (const level of ['-O0', '-O2']) {
-      const exe = join(dir, `s${level}`);
-      const cc = spawnSync('g++', ['-std=c++17', level, '-w', file, '-o', exe], {
-        stdio: 'pipe', timeout: COMPILE_SECONDS * 1000, killSignal: 'SIGKILL',
-      });
+      const exe = exePath(join(dir, `s${level}`));
+      const cc = compileTo(file, exe, ['-std=c++17', level, '-w'], { timeoutMs: COMPILE_SECONDS * 1000 });
       if (cc.status !== 0) {
         const why = cc.error ? String(cc.error) : cc.stderr?.toString() ?? '';
         throw new Error(`skeleton does not compile (${level}):\n${why.slice(0, 2000)}\n--- source ---\n${src.slice(0, 4000)}`);
       }
       // A hard limit from outside as well as the binary's own alarm: SIGKILL at the limit
       // plus a grace second. What it printed before then still counts.
-      const run = spawnSync(exe, [], {
-        encoding: 'utf8', maxBuffer: 64 << 20, timeout: (runLimit + 1) * 1000, killSignal: 'SIGKILL',
-      });
+      const run = runExe(exe, { timeoutMs: (runLimit + 1) * 1000 });
       const out = run.stdout ?? '';
       const killed = run.status !== 0;
       for (const line of out.split('\n')) {

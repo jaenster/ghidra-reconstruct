@@ -8,8 +8,8 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { compileTo, exePath, hasNativeGpp, runExe } from '../../../testing/native-cpp.js';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from '../../../parser/index.js';
@@ -265,21 +265,7 @@ describe('arith-idioms', () => {
  * with -fwrapv.
  */
 describe('arith-idioms values', () => {
-  // The first toolchain that can build and link a program here.
-  const cc = (() => {
-    const dir = mkdtempSync(join(tmpdir(), 'arith-idioms-cc-'));
-    writeFileSync(join(dir, 't.c'), 'int main(void) { return 0; }\n');
-    for (const argv of [['cc'], ['zig', 'cc'], ['clang'], ['gcc']]) {
-      try {
-        execFileSync(argv[0], [...argv.slice(1), '-o', join(dir, 't'), join(dir, 't.c')], { stdio: 'ignore' });
-        execFileSync(join(dir, 't'), { stdio: 'ignore' });
-        return argv;
-      } catch { /* the next one */ }
-    }
-    return null;
-  })();
-
-  it('every fold has the value of what it replaces', { skip: !cc ? 'no C compiler' : false }, () => {
+  it('every fold has the value of what it replaces', { skip: !hasNativeGpp() }, () => {
     const cases: Array<{ decls: string; body: string; values: string }> = [
       { decls: 'uint32_t u, uint32_t r', body: 'r = u + (int)(u / 0x23) * -0x23;', values: 'U' },
       { decls: 'uint32_t u, uint32_t r', body: 'r = u - u / 7 * 7;', values: 'U' },
@@ -332,8 +318,15 @@ describe('arith-idioms values', () => {
     // Division by zero cannot happen: every divisor above is a constant or forced odd.
     const dir = mkdtempSync(join(tmpdir(), 'arith-idioms-'));
     writeFileSync(join(dir, 'check.c'), src + main);
-    execFileSync(cc![0], [...cc!.slice(1), '-O0', '-w', '-fwrapv', '-o', join(dir, 'check'), join(dir, 'check.c')]);
-    const out = execFileSync(join(dir, 'check'), { encoding: 'utf8' });
-    assert.strictEqual(out, '');
+    try {
+      const exe = exePath(join(dir, 'check'));
+      const cc = compileTo(join(dir, 'check.c'), exe, ['-O0', '-w', '-fwrapv']);
+      assert.strictEqual(cc.status, 0, String(cc.error ?? cc.stderr));
+      const run = runExe(exe);
+      assert.strictEqual(run.stdout, '');
+      assert.strictEqual(run.status, 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
