@@ -6,11 +6,12 @@
  * comparisons, `cmp ecx, 1; je`. The decompiler prints both as equality tests on the
  * variable, so the source's switch comes back as ifs on the variable: an else-if chain,
  * consecutive ifs whose arms leave, `if (v != K) { leave }` guards with K's code after them,
- * nested `!=` tests whose arms fall into each other, or one `sub ecx, K; je`.
+ * nested `!=` tests whose arms fall into each other, or one `sub ecx, K; je`. Cases sharing
+ * code come back as one test of several constants, `v == A || v == B` or `v != A && v != B`.
  *
  * Where the original's instructions (branch-layout evidence, `tests`) show every test as one
  * of those subtractions, the ifs are written back as the switch. The evidence: each test's
- * condition prints exactly one equality token, its instruction is SUB/ADD/DEC/INC, and the
+ * condition prints one equality token per constant, each instruction is SUB/ADD/DEC/INC, and the
  * tests are one whole countdown run - one register, each subtraction a few bytes after the
  * last, the running total equal to each compared constant. A fragment of a run (a test
  * printed elsewhere, a binary-search split) is left.
@@ -136,20 +137,25 @@ function caseConstant(e: Expression, enums: ReadonlySet<string>): { value: bigin
   }
 }
 
-interface Test {
-  v: Expression;
+interface Operand {
   label: Expression;
   value: bigint | null;
-  /** `v != K`: true when the variable is not K. */
+}
+
+interface Test {
+  v: Expression;
+  /** The constants compared, in text order: one, or the operands of a `||`/`&&` chain. */
+  ops: Operand[];
+  /** `v != K`: true when the variable is none of the constants. */
   neg: boolean;
 }
 
 /** `v == K`, `K == v`, `!v`, or the same with `!=`, on a pure lvalue. */
-function equality(cond: Expression, enums: ReadonlySet<string>): Test | null {
+function equalityOperand(cond: Expression, enums: ReadonlySet<string>): { v: Expression; op: Operand; neg: boolean } | null {
   const c = unwrap(cond);
   if (c.kind === NodeKind.UnaryExpr && (c as UnaryExpr).operator === '!') {
     const v = unwrap((c as UnaryExpr).operand);
-    return pureLvalue(v) ? { v, label: zeroAt(c), value: 0n, neg: false } : null;
+    return pureLvalue(v) ? { v, op: { label: zeroAt(c), value: 0n }, neg: false } : null;
   }
   if (c.kind !== NodeKind.BinaryExpr) return null;
   const b = c as BinaryExpr;
@@ -157,10 +163,46 @@ function equality(cond: Expression, enums: ReadonlySet<string>): Test | null {
   for (const [v, k] of [[b.left, b.right], [b.right, b.left]] as const) {
     const kc = caseConstant(k, enums);
     if (kc && pureLvalue(v) && caseConstant(v, enums) === undefined) {
-      return { v: unwrap(v), label: unwrap(k), value: kc.value, neg: b.operator === '!=' };
+      return { v: unwrap(v), op: { label: unwrap(k), value: kc.value }, neg: b.operator === '!=' };
     }
   }
   return null;
+}
+
+/**
+ * One equality test, or a short-circuit chain of them on one variable that asks one
+ * question: `v == A || v == B` (v is one of them) or `v != A && v != B` (v is none of
+ * them). A switch with shared labels compiles to that: `sub; je L; sub; je L`. The
+ * operands read only the variable, so evaluating them all or stopping early gives the
+ * same answer. Mixed senses, another variable or a repeated constant are not one test.
+ */
+function equality(cond: Expression, enums: ReadonlySet<string>): Test | null {
+  const c = unwrap(cond);
+  const join = c.kind === NodeKind.BinaryExpr ? (c as BinaryExpr).operator : '';
+  if (join !== '||' && join !== '&&') {
+    const one = equalityOperand(c, enums);
+    return one ? { v: one.v, ops: [one.op], neg: one.neg } : null;
+  }
+  const leaves: Expression[] = [];
+  const flatten = (e: Expression): void => {
+    const u = unwrap(e);
+    if (u.kind === NodeKind.BinaryExpr && (u as BinaryExpr).operator === join) {
+      flatten((u as BinaryExpr).left);
+      flatten((u as BinaryExpr).right);
+    } else leaves.push(u);
+  };
+  flatten(c);
+  const parts = leaves.map(l => equalityOperand(l, enums));
+  if (parts.some(p => !p)) return null;
+  const first = parts[0]!;
+  // `||` asks "is it one of these" with `==`; `&&` asks "is it none of these" with `!=`.
+  const neg = join === '&&';
+  if (parts.some(p => p!.neg !== neg || !same(p!.v, first.v))) return null;
+  const ops = parts.map(p => p!.op);
+  const known = ops.filter(o => o.value !== null).map(o => o.value);
+  if (new Set(known).size !== known.length) return null;
+  if (new Set(ops.map(o => emit(o.label as never))).size !== ops.length) return null;
+  return { v: first.v, ops, neg };
 }
 
 function zeroAt(at: ASTNode): Expression {
@@ -277,13 +319,14 @@ interface Ctx {
   n: number;
 }
 
-/** A test of the decision: its if, the parsed test and the instruction behind it. */
+/** A test of the decision: its if, the parsed test and the instructions behind it. */
 interface Node {
   ifs: IfStmt;
   test: Test;
-  ev: EqualityTest;
-  /** The compared constant, unsigned at the instruction's size. */
-  k: bigint;
+  /** Per operand of the test, in text order. */
+  ev: EqualityTest[];
+  /** Per operand, the compared constant, unsigned at the instruction's size. */
+  k: bigint[];
 }
 
 /**
@@ -315,13 +358,19 @@ class Decision {
     if (known) return known;
     const ev = this.ctx.reader.conditionTests(ifs);
     if (!ev) { this.why = this.why ?? 'no-evidence'; return null; }
-    if (ev.length !== 1) { this.why = this.why ?? 'tokens'; return null; }
-    const e = ev[0];
-    if (!SUBTRACTS.has(e.mnemonic) || e.k === undefined || e.delta === undefined) { this.why = this.why ?? 'compare'; return null; }
-    const mask = (1n << BigInt(8 * e.size)) - 1n;
-    const k = BigInt(e.k) & mask;
-    if (t.value !== null && (t.value & mask) !== k) { this.why = this.why ?? 'value'; return null; }
-    const n: Node = { ifs, test: t, ev: e, k };
+    if (ev.length !== t.ops.length) { this.why = this.why ?? 'tokens'; return null; }
+    const ks: bigint[] = [];
+    for (let j = 0; j < ev.length; j++) {
+      const e = ev[j];
+      if (!SUBTRACTS.has(e.mnemonic) || e.k === undefined || e.delta === undefined) { this.why = this.why ?? 'compare'; return null; }
+      const mask = (1n << BigInt(8 * e.size)) - 1n;
+      const k = BigInt(e.k) & mask;
+      const value = t.ops[j].value;
+      if (value !== null && (value & mask) !== k) { this.why = this.why ?? 'value'; return null; }
+      ks.push(k);
+    }
+    if (new Set(ks).size !== ks.length) { this.why = this.why ?? 'value'; return null; }
+    const n: Node = { ifs, test: t, ev: [...ev], k: ks };
     this.nodes.set(ifs, n);
     return n;
   }
@@ -346,7 +395,7 @@ class Decision {
     for (let i = 0; i < list.length; i++) {
       const n = this.nodes.get(list[i] as IfStmt);
       if (!n) return { leaf: { list, at: i }, path };
-      const eq = val !== null && val === n.k;
+      const eq = val !== null && n.k.includes(val);
       const arm = eq !== n.test.neg ? n.ifs.thenBranch : n.ifs.elseBranch;
       if (!arm) continue;
       const r = this.follow(asList(arm), val, [...path, { list, at: i }]);
@@ -430,13 +479,13 @@ function decisionAt(list: readonly Statement[], i: number, ctx: Ctx, inBlock = t
 
   // The tests are one whole countdown run.
   const nodes = [...d.nodes.values()];
-  const ats = new Set(nodes.map(n => n.ev.at));
-  const run = ctx.runs.get(nodes[0].ev.at);
+  const ats = new Set(nodes.flatMap(n => n.ev.map(e => e.at)));
+  const run = ctx.runs.get(nodes[0].ev[0].at);
   if (!run) return left('sum', nodes.length);
   if (run.length !== ats.size || run.some(a => !ats.has(a))) return left('partial', nodes.length);
 
   // Where each value goes, and where each leaf's code goes after it.
-  const values = [...new Set(nodes.map(n => n.k))].sort((a, b) => (a < b ? -1 : 1));
+  const values = [...new Set(nodes.flatMap(n => n.k))].sort((a, b) => (a < b ? -1 : 1));
   const valuesOf = new Map<Leaf | null, (bigint | null)[]>();
   const nextOf = new Map<Leaf, Leaf | null | 'leaves'>();
   const visit = (leaf: Leaf, path: Frame[]): string | null => {
@@ -481,7 +530,11 @@ function decisionAt(list: readonly Statement[], i: number, ctx: Ctx, inBlock = t
   const endGroup = fallOut.length > 0 && !fallOut.includes(null);
   const moveTail = endGroup && inBlock && intoEnd <= 1;
   const tail = moveTail ? (list.slice(end) as Statement[]) : [];
-  const labelFor = (val: bigint | null): Expression | null => (val === null ? null : nodes.find(n => n.k === val)!.test.label);
+  const labelFor = (val: bigint | null): Expression | null => {
+    if (val === null) return null;
+    const n = nodes.find(x => x.k.includes(val))!;
+    return n.test.ops[n.k.indexOf(val)].label;
+  };
 
   const groups = new Map<Leaf | null, Group>();
   for (const l of d.leaves) {
@@ -506,7 +559,7 @@ function decisionAt(list: readonly Statement[], i: number, ctx: Ctx, inBlock = t
   // Chains of groups that run into each other, highest code address first (the bodies lie in
   // reverse source order); printed order where unknown.
   const heads = all.filter(g => !incoming.has(g));
-  const after = Math.max(...nodes.map(n => n.ev.at));
+  const after = Math.max(...nodes.flatMap(n => n.ev.map(e => e.at)));
   const entries = heads.map(g => ctx.reader.entry(g.body, after));
   const known = entries.every(e => e !== null) && new Set(entries).size === entries.length;
   const orderedHeads = known ? heads.map((g, k) => ({ g, e: entries[k]! })).sort((x, y) => y.e - x.e).map(x => x.g) : heads;

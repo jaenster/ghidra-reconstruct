@@ -459,6 +459,124 @@ describe('switchChainPlugin', () => {
     assert.ok(!run(lines('int a;', 'q->m')).out.includes('switch'));
   });
 
+  it('takes `v != A && v != B` as one test: the two constants share a case', () => {
+    // ITEMMODE_IsSkillUsableCheck (0055c4d0, matching as the switch): sub eax,2; je; sub eax,5; je.
+    const { out, sites } = run([
+      'int f(int v) {',
+      '<SUB EAX 2 2 0x10> <SUB EAX 5 7 0x15> if (v != 2 && v != 7) {',
+      '[0x40] return 1;',
+      '}',
+      '[0x30] return 0;',
+      '}',
+    ]);
+    assert.deepStrictEqual(sites, ['switch']);
+    assert.ok(out.includes('switch (v) { case 2: case 7: { return 0; } default: { return 1; } }'), out);
+  });
+
+  it('takes `v == A || v == B || v == C` as one case of three constants', () => {
+    const { out, sites } = run([
+      'void f(int v) {',
+      '<SUB EAX 1 1 0x10> <SUB EAX 3 4 0x15> <SUB EAX 2 6 0x1a> if (v == 1 || (v == 4 || v == 6)) {',
+      '[0x30] A();',
+      '}',
+      'else {',
+      '[0x40] B();',
+      '}',
+      '}',
+    ]);
+    assert.deepStrictEqual(sites, ['switch']);
+    assert.ok(out.includes('switch (v) { case 1: case 4: case 6: { A(); break; } default: { B(); } }'), out);
+  });
+
+  it('joins a chained test with single tests on the same countdown', () => {
+    const { out, sites } = run([
+      'void f(int v) {',
+      '<SUB EAX 0 0 0x10> if (!v) {',
+      '[0x30] return;',
+      '}',
+      '<SUB EAX 2 2 0x15> <SUB EAX 1 3 0x1a> if (v == 2 || v == 3) {',
+      '[0x40] A();',
+      '}',
+      '}',
+    ]);
+    assert.deepStrictEqual(sites, ['switch']);
+    assert.ok(out.includes('switch (v) { case 0: { return; } case 2: case 3: { A(); break; } }'), out);
+  });
+
+  it('leaves a chain of mixed senses, two variables or a repeated constant', () => {
+    const mixed = run([
+      'void f(int v) {',
+      '<SUB EAX 2 2 0x10> <SUB EAX 5 7 0x15> if (v != 2 || v == 7) {',
+      '[0x30] A();',
+      '}',
+      '}',
+    ]);
+    assert.ok(!mixed.out.includes('switch'), mixed.out);
+    const andEq = run([
+      'void f(int v) {',
+      '<SUB EAX 2 2 0x10> <SUB EAX 5 7 0x15> if (v == 2 && v == 7) {',
+      '[0x30] A();',
+      '}',
+      '}',
+    ]);
+    assert.ok(!andEq.out.includes('switch'), andEq.out);
+    const two = run([
+      'void f(int v, int w) {',
+      '<SUB EAX 2 2 0x10> <SUB EAX 5 7 0x15> if (v == 2 || w == 7) {',
+      '[0x30] A();',
+      '}',
+      '}',
+    ]);
+    assert.ok(!two.out.includes('switch'), two.out);
+    const again = run([
+      'void f(int v) {',
+      '<SUB EAX 2 2 0x10> <SUB EAX 0 2 0x15> if (v == 2 || v == 2) {',
+      '[0x30] A();',
+      '}',
+      '}',
+    ]);
+    assert.ok(!again.out.includes('switch'), again.out);
+  });
+
+  it('leaves a chained test the original compiles with CMP, or with a token missing', () => {
+    const cmp = run([
+      'void f(int v) {',
+      '<CMP EAX - 2 0x10> <CMP EAX - 7 0x15> if (v == 2 || v == 7) {',
+      '[0x30] A();',
+      '}',
+      '}',
+    ]);
+    assert.deepStrictEqual(cmp.sites, ['left:compare']);
+    assert.ok(!cmp.out.includes('switch'), cmp.out);
+    const short = run([
+      'void f(int v) {',
+      '<SUB EAX 2 2 0x10> if (v == 2 || v == 7) {',
+      '[0x30] A();',
+      '}',
+      '}',
+    ]);
+    assert.ok(!short.out.includes('switch'), short.out);
+    const wrong = run([
+      'void f(int v) {',
+      '<SUB EAX 2 2 0x10> <SUB EAX 5 7 0x15> if (v == 2 || v == 8) {',
+      '[0x30] A();',
+      '}',
+      '}',
+    ]);
+    assert.ok(!wrong.out.includes('switch'), wrong.out);
+  });
+
+  it('leaves a chained operand that is not a plain read', () => {
+    const { out } = run([
+      'void f(int v) {',
+      '<SUB EAX 2 2 0x10> <SUB EAX 5 7 0x15> if (g() == 2 || g() == 7) {',
+      '[0x30] A();',
+      '}',
+      '}',
+    ]);
+    assert.ok(!out.includes('switch'), out);
+  });
+
   it('changes nothing without evidence', () => {
     const { code } = fixture([
       'void f(int v) {',
