@@ -49,19 +49,36 @@ import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, FunctionDecl, CompoundStmt, VariableDecl, ParameterDecl, Identifier, TypeNode,
   Expression, ParenExpr, UnaryExpr, CStyleCastExpr, AssignExpr, PointerType, BuiltinType,
-  TypedefType, ElaboratedType, ArrayType, IntegerLiteralExpr,
+  TypedefType, ElaboratedType, ArrayType, IntegerLiteralExpr, CallExpr,
 } from '../../../ast/nodes.js';
 import { findNodesByKind } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
 import { Decl, Expr, Stmt, Type } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
-import { typeNodeName, builtinBase } from './call-arg-cast.js';
+import {
+  typeNodeName, builtinBase, calleeName, scopedLookup, shapeOfNode,
+  type TypedefResolver,
+} from './call-arg-cast.js';
 
 export interface UnderscoreSlotLocalOptions extends PluginOptions {
   /** name → Ghidra type string for params/locals not visible in the transform AST
    *  (the body is wrapped as a param-less `void dummy(){...}`). */
   varTypes?: Record<string, string>;
+  /** Callable name (bare AND qualified) → declared return type spelling */
+  functionReturnTypes?: Record<string, string>;
+  /** Namespace segments the function sits in, for resolving an unqualified callee */
+  enclosingSegments?: string[];
+  /** Typedef name → the spelling it stands for */
+  typedefTargets?: Record<string, string>;
 }
+
+/** Byte width of each canonical integer base; anything else is not an integer we widen to. */
+const INTEGER_WIDTH: Record<string, number> = {
+  'bool': 1, 'char': 1, 'signed char': 1, 'unsigned char': 1,
+  'short': 2, 'unsigned short': 2, 'wchar_t': 2,
+  'int': 4, 'unsigned int': 4, 'long': 4, 'unsigned long': 4,
+  'long long': 8, 'unsigned long long': 8,
+};
 
 /** Minimal Ghidra type-string → TypeNode: base name + trailing pointer levels. */
 function buildTypeFromString(s: string): TypeNode {
@@ -137,6 +154,13 @@ function exprType(e: Expression, typeByName: Map<string, TypeNode>): TypeNode | 
   return undefined;
 }
 
+/** Byte width of an integer type, undefined for anything that is not a plain integer. */
+function integerWidth(t: TypeNode, resolve: TypedefResolver): number | undefined {
+  const shape = shapeOfNode(t, 0, resolve);
+  if (!shape || shape.stars !== 0) return undefined;
+  return INTEGER_WIDTH[shape.base];
+}
+
 /** `(*(T *)&base)` — the slot reinterpreted at `T`. */
 function slotDeref(base: string, type: TypeNode): Expression {
   return Expr.paren(
@@ -163,6 +187,10 @@ interface AliasRewrite { base: string; type: TypeNode }
 
 function createUnderscoreSlotLocalTransformer(options: UnderscoreSlotLocalOptions = {}): Transformer {
   const varTypes = options.varTypes ?? {};
+  const returnTypes = options.functionReturnTypes ?? {};
+  const enclosingSegments = options.enclosingSegments ?? [];
+  const typedefTargets = options.typedefTargets ?? {};
+  const resolve: TypedefResolver = name => typedefTargets[name];
   return createTransformer({
     visitFunctionDecl(node: FunctionDecl): ASTNode | undefined {
       if (!node.body) return undefined;
@@ -201,6 +229,18 @@ function createUnderscoreSlotLocalTransformer(options: UnderscoreSlotLocalOption
       // Split the aliases: one whose uses prove a type OTHER than the base's is a
       // width alias on one slot and becomes `*(T *)&base`; the rest are same-width
       // slot reuse and keep the synthesized declaration.
+      // The type a stored value carries: its spelled cast or variable, or the
+      // declared return type of the function it calls.
+      const valueType = (e: Expression): TypeNode | undefined => {
+        const x = unwrapParens(e);
+        if (x.kind === NodeKind.CallExpr) {
+          const cn = calleeName((x as CallExpr).callee);
+          const rt = cn !== undefined ? scopedLookup(returnTypes, cn, enclosingSegments) : undefined;
+          return rt ? buildTypeFromString(rt) : undefined;
+        }
+        return exprType(x, typeByName);
+      };
+
       const rewrites = new Map<string, AliasRewrite>();
       const assigns = findNodesByKind(node.body, NodeKind.AssignExpr) as AssignExpr[];
       for (const [name, baseType] of aliases) {
@@ -226,7 +266,28 @@ function createUnderscoreSlotLocalTransformer(options: UnderscoreSlotLocalOption
           const key = typeKey(cand);
           if (key !== null && key !== baseKey) { wide = cand; break; }
         }
-        if (wide) rewrites.set(name, { base: name.slice(1), type: wide });
+        if (wide) { rewrites.set(name, { base: name.slice(1), type: wide }); continue; }
+
+        // Same-slot reuse at an integer type WIDER than the base: Ghidra commits
+        // `bool bQuestState` to the low byte of EAX and names the whole register
+        // `_bQuestState`, which is what `_bQuestState = GetQuestState(...)` writes
+        // and what `_bQuestState == 1` compares. Declaring the alias with the base's
+        // narrow type truncates the value the machine kept (`bool b = 2; b == 1` is
+        // true, the original's dword compare is false), so the alias takes the type
+        // of the widest value stored into it. Never narrower than the base.
+        const baseWidth = integerWidth(baseType, resolve);
+        if (baseWidth === undefined) continue;
+        let widest: TypeNode | undefined;
+        let widestWidth = baseWidth;
+        for (const a of assigns) {
+          if (a.operator !== '=') continue;
+          const left = unwrapParens(a.left);
+          if (left.kind !== NodeKind.Identifier || (left as Identifier).name !== name) continue;
+          const t = valueType(a.right);
+          const w = t ? integerWidth(t, resolve) : undefined;
+          if (t && w !== undefined && w > widestWidth) { widest = t; widestWidth = w; }
+        }
+        if (widest) aliases.set(name, widest);
       }
 
       const rewriteBases = new Set([...rewrites.values()].map(r => r.base));

@@ -69,4 +69,67 @@ describe('underscoreSlotLocalPlugin', () => {
     assert.match(out, /bool\s+_bDone\s*;/);
     assert.ok(!/\*\(bool\*\)&bDone/.test(out), `no reinterpret for a same-width alias:\n${out}`);
   });
+
+  describe('integer alias wider than the base', () => {
+    const returnTypes = {
+      'D2Common::QuestRecord::GetQuestState': 'BOOL',
+      'IsTown': 'bool',
+      'GetByte': 'uint8_t',
+      'GetMode': 'eD2PlayerMode',
+      'Inner::GetCount': 'int',
+    };
+    function run(code: string, extra: Record<string, unknown> = {}): string {
+      const ast = parse(code);
+      const transformer = underscoreSlotLocalPlugin.createTransformer({ functionReturnTypes: returnTypes, ...extra });
+      return emit(transformer(ast) as AnyNode);
+    }
+
+    it('declares the alias with the BOOL a call stores into it, not the base bool', () => {
+      // A5Q6::SetCannotComplete: `bool bQuestState` is AL, `_bQuestState` is EAX.
+      // As a bool, a GetQuestState result of 2 would compare equal to 1.
+      const out = run('int f(D2BitBufferStrc *p) { bool bQuestState;'
+        + ' _bQuestState = D2Common::QuestRecord::GetQuestState(p, 0x24, 0);'
+        + ' if (_bQuestState == 1) { return 0; } return 1; }');
+      assert.match(out, /\bBOOL\s+_bQuestState\s*;/);
+      assert.match(out, /\bbool\s+bQuestState\s*;/);
+      assert.ok(!/bool\s+_bQuestState/.test(out), out);
+    });
+
+    it('resolves an unqualified callee through the enclosing namespace', () => {
+      const out = run('void f() { uint8_t nCount; _nCount = GetCount(); g(_nCount); }',
+        { enclosingSegments: ['Inner'] });
+      assert.match(out, /\bint\s+_nCount\s*;/);
+    });
+
+    it('takes the widest of several stores', () => {
+      const out = run('void f(short s) { bool bX; _bX = s; _bX = (int)s; g(_bX); }');
+      assert.match(out, /\bint\s+_bX\s*;/);
+    });
+
+    it('keeps the base type when the stored value is the same width', () => {
+      const out = run('void f() { bool bTown; _bTown = IsTown(); g(_bTown); }');
+      assert.match(out, /\bbool\s+_bTown\s*;/);
+    });
+
+    it('never narrows: a byte stored into a word slot keeps the word', () => {
+      const out = run('void f() { uint16_t nId; _nId = GetByte(); g(_nId); }');
+      assert.match(out, /\buint16_t\s+_nId\s*;/);
+    });
+
+    it('does not widen to an enum or from an untyped value', () => {
+      const out = run('void f() { bool bMode; _bMode = GetMode(); _bMode = Unknown(); _bMode = 2; g(_bMode); }');
+      assert.match(out, /\bbool\s+_bMode\s*;/);
+    });
+
+    it('ignores compound assignment, which is not the value the slot receives', () => {
+      const out = run('void f(int n) { uint8_t nFlags; _nFlags = 0; _nFlags |= n; g(_nFlags); }');
+      assert.match(out, /\buint8_t\s+_nFlags\s*;/);
+    });
+
+    it('widens through a typedef the tables resolve', () => {
+      const out = run('void f(D2BOOL v) { bool bOk; _bOk = v; g(_bOk); }',
+        { typedefTargets: { D2BOOL: 'int' } });
+      assert.match(out, /\bD2BOOL\s+_bOk\s*;/);
+    });
+  });
 });

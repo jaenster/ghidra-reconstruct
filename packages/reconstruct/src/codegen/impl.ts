@@ -2620,8 +2620,13 @@ function transformDecompiledCode(
       perPluginOptions['bitfield-access'] = { bitfieldCatalog: context.bitfieldCatalog };
     }
 
-    if (varTypes && Object.keys(varTypes).length > 0) {
-      perPluginOptions['underscore-slot-local'] = { varTypes };
+    if ((varTypes && Object.keys(varTypes).length > 0) || context?.funcPtrArgCasts) {
+      perPluginOptions['underscore-slot-local'] = {
+        varTypes: varTypes ?? {},
+        functionReturnTypes: context?.funcPtrArgCasts?.functionReturnTypes,
+        enclosingSegments: enclosing?.ghidraNamespaceSegments ?? enclosing?.namespaceSegments,
+        typedefTargets: context?.funcPtrArgCasts?.typedefTargets,
+      };
     }
 
     // The two `_<name>` aliases that are NOT a stack slot: a global's reused slot
