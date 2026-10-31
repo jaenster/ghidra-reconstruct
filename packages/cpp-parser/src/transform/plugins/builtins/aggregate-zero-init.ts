@@ -37,6 +37,12 @@
  *  - no label and no case label of an enclosing switch follows in the block: a
  *    jump past an initialised declaration into its scope is ill-formed (C2362).
  *
+ * The decompile alone cannot tell the initialiser from members cleared one by one and then
+ * assigned (`RECT r; r.left = 0; r.top = 0; r.right = w; r.bottom = h;` in ClearScreen
+ * 006b7f70), since it drops every zero store a later one overwrites. The instructions keep
+ * them: the rewrite is only made where the original's opening stores to the local write zero
+ * to every member byte (`zeroStores`).
+ *
  * The zero run is replaced by the initialised declaration; every later store is
  * kept, so each member holds the same value at its first read as before.
  */
@@ -65,6 +71,12 @@ export interface AggregateZeroInitOptions extends PluginOptions {
   enumValues?: Record<string, number>;
   /** Aggregates with a converting constructor: not aggregates to an initialiser list. */
   convertingAggregates?: string[];
+  /**
+   * Per struct-typed stack local, the bytes the original's opening stores write with zero
+   * (reconstruct's extract/zero-stores.ts). The evidence the rewrite needs: absent, or a
+   * local without an entry, changes nothing.
+   */
+  zeroStores?: ReadonlyArray<{ name: string; size: number; zero: ReadonlyArray<readonly [number, number]> }>;
 }
 
 const MIN_RUN = 2;
@@ -88,7 +100,17 @@ function createAggregateZeroInitTransformer(options: AggregateZeroInitOptions = 
   const typedefTargets = options.typedefTargets ?? {};
   const enumValues = options.enumValues ?? {};
   const converting = cachedSet(options.convertingAggregates);
-  if (!hasOwnKeys(layouts)) return createTransformer({});
+  const zeroStores = options.zeroStores;
+  if (!hasOwnKeys(layouts) || !zeroStores || zeroStores.length === 0) return createTransformer({});
+  /** Whether the original stores zero to every byte of `required` in the local `name` of `size` bytes. */
+  const originalZeroes = (name: string, size: number, required: ReadonlyArray<[number, number]>): boolean => {
+    const facts = zeroStores.filter(z => z.name === name);
+    if (facts.length !== 1 || facts[0].size !== size) return false;
+    return required.every(([lo, hi]) => {
+      for (let b = lo; b < hi; b++) if (!facts[0].zero.some(([a, e]) => b >= a && b < e)) return false;
+      return true;
+    });
+  };
 
   /** The aggregate a type spelling names, through typedefs; undefined for anything else. */
   const aggregateOf = (spelling: string): string | undefined => {
@@ -281,6 +303,7 @@ function createAggregateZeroInitTransformer(options: AggregateZeroInitOptions = 
 
     const required: Array<[number, number]> = [];
     if (!requiredBytes(agg, 0, required) || required.length === 0) return null;
+    if (!originalZeroes(name, sizes[agg], required)) return null;
     const bytes = new Set<number>();
     for (const [lo, hi] of covered) for (let b = lo; b < hi; b++) bytes.add(b);
     for (const [lo, hi] of required) for (let b = lo; b < hi; b++) if (!bytes.has(b)) return null;

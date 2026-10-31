@@ -2764,6 +2764,7 @@ function transformDecompiledCode(
         typedefTargets: context.funcPtrArgCasts.typedefTargets,
         enumValues: context.funcPtrArgCasts.enumValues,
         convertingAggregates: context.funcPtrArgCasts.convertingAggregates,
+        zeroStores: enclosing?.zeroStores,
       };
       perPluginOptions['strided-access'] = {
         structLayouts: context.funcPtrArgCasts.structLayouts,

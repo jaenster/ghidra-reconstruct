@@ -30,9 +30,17 @@ const tables = {
   enumValues: { STATE_none: 0, STATE_poison: 2 },
 };
 
+/** The original zeroing every byte of every aggregate local the code declares. */
+function zeroedWhole(code: string): Array<{ name: string; size: number; zero: [number, number][] }> {
+  const sizes: Record<string, number> = { ...tables.aggregateSizes, D2PairAlias: 8 };
+  return [...code.matchAll(/\b(\w+) (\w+);/g)]
+    .filter(m => sizes[m[1]] !== undefined)
+    .map(m => ({ name: m[2], size: sizes[m[1]], zero: [[0, sizes[m[1]]]] }));
+}
+
 function run(code: string, extra: Record<string, unknown> = {}): string {
   const ast = parse(code);
-  const transformer = aggregateZeroInitPlugin.createTransformer({ ...tables, ...extra });
+  const transformer = aggregateZeroInitPlugin.createTransformer({ ...tables, zeroStores: zeroedWhole(code), ...extra });
   return emit(transformer(ast) as AnyNode).replace(/\s+/g, ' ');
 }
 
@@ -157,5 +165,31 @@ describe('aggregateZeroInitPlugin', () => {
   it('declares the initialiser with `=`, which C++03 needs', () => {
     const out = run('void f() { D2Pair s; s.a = 0; s.b = 0; g(&s); }');
     assert.ok(!/s\{/.test(out), out);
+  });
+  // ClearScreen 006b7f70: the original zeroes left and top only; right and bottom take
+  // their values directly, so the source cleared members one by one.
+  const viewport = `void f(int w, int h) { D2Rect r;
+      r.left = 0; r.top = 0; r.right = w; r.bottom = h;
+      clear(&r); }`;
+  const rectTables = {
+    structLayouts: { D2Rect: [f('left', 0, 4, 'int'), f('top', 4, 4, 'int'), f('right', 8, 4, 'int'), f('bottom', 0xc, 4, 'int')] },
+    aggregateSizes: { D2Rect: 16 },
+  };
+
+  it('restores the initialiser where the original zeroes every member byte', () => {
+    const out = run(viewport, { ...rectTables, zeroStores: [{ name: 'r', size: 16, zero: [[0, 16]] }] });
+    assert.match(out, /D2Rect r = \{ ?0 ?\}; r\.right = w; r\.bottom = h;/);
+  });
+
+  it('leaves members cleared one by one where the original zeroes only some of them', () => {
+    const out = run(viewport, { ...rectTables, zeroStores: [{ name: 'r', size: 16, zero: [[0, 8]] }] });
+    assert.match(out, /D2Rect r; r\.left = 0; r\.top = 0;/);
+  });
+
+  it('changes nothing without the instructions behind the local', () => {
+    for (const zeroStores of [undefined, [], [{ name: 'q', size: 16, zero: [[0, 16]] }], [{ name: 'r', size: 12, zero: [[0, 16]] }]]) {
+      const out = run(viewport, { ...rectTables, zeroStores });
+      assert.match(out, /D2Rect r; r\.left = 0;/, JSON.stringify(zeroStores));
+    }
   });
 });
