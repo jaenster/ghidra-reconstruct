@@ -517,6 +517,8 @@ export { foldedAddressRebasePlugin, type FoldedAddress, type FoldedAddressRebase
 export { immediateNotAddressPlugin, type ImmediateNotAddressOptions } from './builtins/immediate-not-address.js';
 export { importAddressForwarderPlugin, IMPORT_ADDRESS_FORWARDERS } from './builtins/import-address-forwarder.js';
 export { unsignedRangeComparePlugin } from './builtins/unsigned-range-compare.js';
+export { shiftCountMaskPlugin, createShiftCountMaskTransformer, type ShiftCountMaskOptions } from './builtins/shift-count-mask.js';
+export { createFunctionRanges, type ValueRange, type FunctionRanges } from './builtins/value-range.js';
 export { compareFormPlugin, type CompareFormDecision, type CompareFormOptions } from './builtins/compare-form.js';
 export { repStringFormPlugin, createRepStringFormTransformer, type RepStringOp, type RepStringFormOptions } from './builtins/rep-string-form.js';
 export { compareSignednessPlugin } from './builtins/compare-signedness.js';
@@ -609,6 +611,7 @@ import { foldedAddressRebasePlugin } from './builtins/folded-address-rebase.js';
 import { immediateNotAddressPlugin } from './builtins/immediate-not-address.js';
 import { importAddressForwarderPlugin } from './builtins/import-address-forwarder.js';
 import { unsignedRangeComparePlugin } from './builtins/unsigned-range-compare.js';
+import { shiftCountMaskPlugin } from './builtins/shift-count-mask.js';
 import { compareFormPlugin } from './builtins/compare-form.js';
 import { repStringFormPlugin } from './builtins/rep-string-form.js';
 import { compareSignednessPlugin } from './builtins/compare-signedness.js';
@@ -785,6 +788,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   bitfieldAccessPlugin,       // Cleanup: field_0xNN & MASK → bitfieldName (priority 45)
   callSiteOverrideCastPlugin, // Correctness: call through void*/code* → cast to the call-site override (priority 614)
   unsignedRangeComparePlugin, // Correctness: (x - lo) < n on an unsigned narrow/enum stays unsigned (priority 617)
+  shiftCountMaskPlugin,       // Matching: x << (n & 0x1f) -> x << n where n is proven to lie in [0, 31] (priority 621)
   compareFormPlugin,          // Fidelity: a comparison in the form its CMP/TEST and Jcc show (priority 3)
   repStringFormPlugin,        // Fidelity: a REP STOS fill as an index loop, a REP MOVS copy as memcpy, from the instruction (priority 4)
   compareSignednessPlugin,    // Correctness: a comparison compare-form made unsigned stays unsigned (priority 619)
