@@ -8,11 +8,11 @@ import { haltSiteFoldPlugin, type HaltLineSite, type HaltLineRepairEvent } from 
 const HALT = 'ERROR_UnrecoverableInternalError_Halt';
 const IP = 'GetInstructionPointer';
 
-function run(code: string, paths: HaltLineSite['paths'], ifs?: Map<number, number>): { out: string; events: HaltLineRepairEvent[] } {
+function run(code: string, paths: HaltLineSite['paths'], ifs?: Map<number, number>, operands?: Map<number, number[][]>): { out: string; events: HaltLineRepairEvent[] } {
   const events: HaltLineRepairEvent[] = [];
   const t = haltSiteFoldPlugin.createTransformer({
     haltLines: [{ at: 0x100, ip: 0xf0, paths }],
-    branchLayout: ifs ? { ifs } : undefined,
+    branchLayout: ifs ? { ifs, operands } : undefined,
     onRepair: (e: HaltLineRepairEvent) => events.push(e),
   } as never);
   return { out: emit(t(parse(code)) as AnyNode).trim(), events };
@@ -153,6 +153,45 @@ LAB_00598e57:
     assert.deepStrictEqual(events.map(e => ({ ...e, lines: [...e.lines].sort((a, b) => a - b) })), [{ entries: 2, lines: [0x102, 0x106] }]);
     assert.ok(/if \(a\) \{[\s\S]*\} else \{\s*ERROR_UnrecoverableInternalError_Halt\("", GetInstructionPointer\(\), 0x102\);/.test(out), out);
     assert.ok(/if \(b\) \{[\s\S]*\} else \{\s*ERROR_UnrecoverableInternalError_Halt\("", GetInstructionPointer\(\), 0x106\);/.test(out), out);
+  });
+
+  // STRTABLE_GetStringByIndex 00524930: `if ((int)i < n && (p = .., p < end))` printed on
+  // one line, split by comma-expand into two nested ifs that keep that line. The line's
+  // operand branches (0x28, 0x59) tell the two false sides apart.
+  const splitChain = `int f(int i, int n, char *p, char *end, int *t) {
+  int32_t nLine;
+  if (i < n) { p = p + i; if (p < end) {
+      if (*p != 1) {
+        nLine = 0x107;
+      } else {
+        if (t[i]) {
+          return t[i];
+        }
+        nLine = 0x109;
+      }
+    }
+  }
+  ${HALT}("", ${IP}(), nLine);
+  exit(-1);
+}`;
+  const splitPaths = [{ line: 0x102, guard: 0x28 }, { line: 0x106, guard: 0x59 }, { line: 0x107, guard: 0x67 }, { line: 0x109, guard: 0x74 }];
+
+  it('tells the split operands of one short-circuit line apart by their branches', () => {
+    const { out, events } = run(splitChain, splitPaths, new Map([[3, 0x59], [4, 0x67], [7, 0x74]]), new Map([[3, [[0x28], [0x59]]]]));
+    assert.deepStrictEqual(events.map(e => ({ ...e, lines: [...e.lines].sort((a, b) => a - b) })), [{ entries: 2, lines: [0x102, 0x106] }]);
+    assert.ok(/if \(i < n\) \{[\s\S]*\} else \{\s*ERROR_UnrecoverableInternalError_Halt\("", GetInstructionPointer\(\), 0x102\);/.test(out), out);
+    assert.ok(/if \(p < end\) \{[\s\S]*\} else \{\s*ERROR_UnrecoverableInternalError_Halt\("", GetInstructionPointer\(\), 0x106\);/.test(out), out);
+    assert.ok(!out.includes('nLine'), out);
+  });
+
+  it('leaves a shared line alone when its ifs and operands do not pair up', () => {
+    // Three operands for two ifs: no operand is forced onto either.
+    const r = run(splitChain, splitPaths, new Map([[3, 0x59]]), new Map([[3, [[0x28], [0x40], [0x59]]]]));
+    assert.ok(r.events[0]?.refused?.includes('no branch that tells them apart'), JSON.stringify(r.events));
+    assert.ok(!r.out.includes('0x102'), r.out);
+    // Without the operand facts the shared line says nothing.
+    const blind = run(splitChain, splitPaths, new Map([[3, 0x59]]));
+    assert.ok(blind.events[0]?.refused, JSON.stringify(blind.events));
   });
 
   it('changes nothing when every way already prints a pushed line', () => {

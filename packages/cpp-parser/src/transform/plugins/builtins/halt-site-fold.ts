@@ -84,8 +84,11 @@ export interface HaltSiteFoldOptions extends PluginOptions {
    * halt gets the line its own PUSH chose before anything is folded (see `repairHaltLines`).
    */
   haltLines?: readonly HaltLineSite[];
-  /** The original's conditional-branch offset per `if` line of the parsed text. */
-  branchLayout?: { ifs: ReadonlyMap<number, number> };
+  /**
+   * The original's conditional-branch offset per `if` line of the parsed text, and per leaf
+   * operand of a short-circuit `if` line the branches that operand feeds.
+   */
+  branchLayout?: { ifs: ReadonlyMap<number, number>; operands?: ReadonlyMap<number, number[][]> };
   onRepair?: (e: HaltLineRepairEvent) => void;
 }
 
@@ -878,6 +881,7 @@ function repairHaltLines(
   sites: readonly HaltLineSite[],
   ifs: ReadonlyMap<number, number> | undefined,
   report: ((e: HaltLineRepairEvent) => void) | undefined,
+  operandBranches?: ReadonlyMap<number, number[][]>,
 ): { body: CompoundStmt; repaired: string[] } | null {
   // One halt CALL in the function, so every printed halt is a copy of it.
   if (sites.length !== 1 || sites[0].paths.length < 2) return null;
@@ -1057,15 +1061,37 @@ function repairHaltLines(
   if (wrong.reduce((n, w) => n + weight(w), 0) !== left.length) return refuse('the printed lines are not a subset of the pushed lines');
 
   const assign = new Map<Way, number[]>();
-  const ifLine = new Map<number, number>();
+  // The `if`s of each decompile line, outermost first. One `if` of a short-circuit line
+  // that was split into nested ones (`if (A && (s, B))` -> `if (A) { s; if (B) .. }`)
+  // stands for one operand of the chain: the k-th of the line, when each nests in the
+  // one before and there are as many as the chain has operands.
+  const ifsOnLine = new Map<number, IfStmt[]>();
   walkStatements(body, s => {
     if (s.kind === NodeKind.IfStmt && s.location && s.location.start.line > 0) {
-      ifLine.set(s.location.start.line, (ifLine.get(s.location.start.line) ?? 0) + 1);
+      const l = s.location.start.line;
+      ifsOnLine.set(l, [...(ifsOnLine.get(l) ?? []), s as IfStmt]);
     }
   });
-  const cbranch = (i: IfStmt | null): number | null => {
-    if (!i || !ifs || !i.location || ifLine.get(i.location.start.line) !== 1) return null;
-    return ifs.get(i.location.start.line) ?? null;
+  const nestsIn = (inner: IfStmt, outer: IfStmt): boolean => {
+    for (let p = parents.get(inner) ?? null; p; p = parents.get(p) ?? null) {
+      if (p === outer) return p.kind === NodeKind.IfStmt;
+    }
+    return false;
+  };
+  /** The conditional branches that leave `i` for its false side. */
+  const cbranches = (i: IfStmt | null): number[] | null => {
+    if (!i || !ifs || !i.location) return null;
+    const line = i.location.start.line;
+    const all = ifsOnLine.get(line) ?? [];
+    if (all.length === 1) {
+      const b = ifs.get(line);
+      return b === undefined ? null : [b];
+    }
+    const segs = operandBranches?.get(line);
+    if (!segs || segs.length !== all.length) return null;
+    for (let k = 1; k < all.length; k++) if (!nestsIn(all[k], all[k - 1])) return null;
+    const k = all.indexOf(i);
+    return k < 0 ? null : segs[k];
   };
   const split = wrong.filter(w => weight(w) > 1);
   const single = wrong.filter(w => weight(w) === 1);
@@ -1079,8 +1105,8 @@ function repairHaltLines(
     // line; a split way takes what is left.
     const pool = [...left];
     for (const w of single) {
-      const g = cbranch(w.kind === 'goto' || w.kind === 'before' ? w.guard : w.kind === 'else' ? w.stmt : null);
-      const hit = g === null ? [] : pool.filter(p => p.guard === g);
+      const g = cbranches(w.kind === 'goto' || w.kind === 'before' ? w.guard : w.kind === 'else' ? w.stmt : null);
+      const hit = g === null ? [] : pool.filter(p => p.guard !== null && g.includes(p.guard));
       if (hit.length !== 1) return refuse(`${wrong.length} ways with a wrong line and no branch that tells them apart`);
       assign.set(w, [hit[0].line as number]);
       pool.splice(pool.indexOf(hit[0]), 1);
@@ -1317,7 +1343,7 @@ function rewriteFunction(node: FunctionDecl, stats: HaltSiteFoldStats, options: 
     const r = repairHaltLines(body, options.haltLines, options.branchLayout?.ifs, (e) => {
       if (!e.refused) stats.linesRepaired += e.entries;
       options.onRepair?.(e);
-    });
+    }, options.branchLayout?.operands);
     if (r) {
       body = r.body;
       for (const v of r.repaired) repairedVars.add(v);
