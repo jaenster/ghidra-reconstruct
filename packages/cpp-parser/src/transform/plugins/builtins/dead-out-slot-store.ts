@@ -29,6 +29,15 @@
  *     reading through it.
  * Then the value e put in x is never read: the call overwrites all of x first. Nothing
  * else changes.
+ *
+ * The call need not be the next statement when nothing but such calls ever reads x: every
+ * mention of x in the function other than the store is `&x` passed at an out-parameter
+ * position of width >= w (the other arguments pure). The slot then only ever reaches
+ * callees that write it before they read it, wherever and however often they run:
+ *
+ *     pOperationArg = pOperation;          // OBJOP_A3Q2_KhalimsRelicPortalDrop1 005b8860
+ *     ...                                  // PUSH ECX
+ *     do { ITEM_RewardItemToDrop(..., (int32_t*)&pOperationArg, ...); } while (...);
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -138,12 +147,59 @@ function createDeadOutSlotStoreTransformer(options: DeadOutSlotStoreOptions): Tr
         const o = unparen(ux.operand);
         if (o.kind === NodeKind.Identifier) addressTaken.set((o as Identifier).name, (addressTaken.get((o as Identifier).name) ?? 0) + 1);
       }
+      // Locals nothing reads but the callees they are passed to: every mention other than
+      // the push's store is `&x` as an argument at an out-parameter position of width >= w,
+      // with the other arguments of that call pure. Whatever the order of the calls and
+      // whichever runs, each one writes all of x before it reads it, and nothing else
+      // reads x, so the value the push put there is never observed.
+      const onlyOutArgs = new Set<string>();
+      {
+        const outArgs = new Map<string, number>();
+        const refused = new Set<string>();
+        for (const c of findNodesByKind(fn.body, NodeKind.CallExpr)) {
+          const call = c as CallExpr;
+          call.arguments.forEach((arg, at) => {
+            const x = addressOf(arg);
+            if (!x || !pushed.has(x)) return;
+            const w = localSize.get(x);
+            const callee = calleeSpelling(call);
+            const width = callee ? outParamWidth(callee, at) : null;
+            if (w === undefined || w === null || width === null || width < w
+              || call.arguments.some((other, k) => k !== at && !isPure(other))) {
+              refused.add(x);
+              return;
+            }
+            outArgs.set(x, (outArgs.get(x) ?? 0) + 1);
+          });
+        }
+        for (const [x, n] of outArgs) {
+          // The store's own target is the one mention that is not an argument or a
+          // declaration of x.
+          const declared = findNodesByKind(fn.body, NodeKind.VariableDecl).filter(d => (d as VariableDecl).name.name === x).length;
+          if (!refused.has(x) && addressTaken.get(x) === n && mentions(fn.body, x) === n + 1 + declared) onlyOutArgs.add(x);
+        }
+      }
+      /** The callee when `next` is a call that overwrites all of x first, else null. */
+      const overwrittenByNext = (next: Statement | undefined, x: string, w: number): string | null => {
+        const call = next ? leadingCall(next) : null;
+        const callee = call && calleeSpelling(call);
+        if (!call || !callee) return null;
+        const at = call.arguments.findIndex(arg => addressOf(arg) === x);
+        if (at < 0 || mentions(next!, x) !== 1) return null;
+        // Nothing can hold x's address but this argument (so neither the other
+        // arguments nor the callee reach x another way), and the other arguments
+        // call nothing.
+        if (addressTaken.get(x) !== 1) return null;
+        if (call.arguments.some((arg, k) => k !== at && !isPure(arg))) return null;
+        const width = outParamWidth(callee, at);
+        return width === null || width < w ? null : callee;
+      };
       let changed = false;
       const rewriteBlock = createTransformer({
         visitCompoundStmt(block: CompoundStmt): ASTNode | undefined {
           const st = block.statements;
           let out: Statement[] | null = null;
-          for (let i = 0; i + 1 < st.length; i++) {
+          for (let i = 0; i < st.length; i++) {
             const s = st[i];
             if (s.kind !== NodeKind.ExprStmt) continue;
             const a = unparen((s as ExprStmt).expression);
@@ -156,19 +212,8 @@ function createDeadOutSlotStoreTransformer(options: DeadOutSlotStoreOptions): Tr
             // Only the push's own store: the register's parameter into the pushed slot.
             const value = uncast((a as AssignExpr).right);
             if (value.kind !== NodeKind.Identifier || pushed.get(x) !== (value as Identifier).name) continue;
-            const next = st[i + 1];
-            const call = leadingCall(next);
-            const callee = call && calleeSpelling(call);
-            if (!call || !callee) continue;
-            const at = call.arguments.findIndex(arg => addressOf(arg) === x);
-            if (at < 0 || mentions(next, x) !== 1) continue;
-            // Nothing can hold x's address but this argument (so neither the other
-            // arguments nor the callee reach x another way), and the other arguments
-            // call nothing.
-            if (addressTaken.get(x) !== 1) continue;
-            if (call.arguments.some((arg, k) => k !== at && !isPure(arg))) continue;
-            const width = outParamWidth(callee, at);
-            if (width === null || width < w) continue;
+            const callee = overwrittenByNext(st[i + 1], x, w) ?? (onlyOutArgs.has(x) ? 'out-argument' : null);
+            if (!callee) continue;
             out ??= [...st];
             out[i] = null as unknown as Statement;
             STATS.dropped++;
