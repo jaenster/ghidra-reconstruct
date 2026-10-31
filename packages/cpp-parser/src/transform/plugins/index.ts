@@ -586,6 +586,8 @@ import { addressRunBoundPlugin } from './builtins/address-run-bound.js';
 import { prngTransformPlugin } from './builtins/prng-transform.js';
 import { prngTempCollapsePlugin } from './builtins/prng-temp-collapse.js';
 import { bitfieldAccessPlugin } from './builtins/bitfield-access.js';
+import { scalarPieceArithmeticPlugin } from './builtins/scalar-piece-arithmetic.js';
+export { scalarPieceArithmeticPlugin } from './builtins/scalar-piece-arithmetic.js';
 import { subpieceAccessPlugin } from './builtins/subpiece-access.js';
 import { threeByteAccessPlugin } from './builtins/three-byte-access.js';
 import { comIUnknownCallPlugin } from './builtins/com-iunknown-call.js';
@@ -757,6 +759,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   deadOutSlotStorePlugin,      // Correctness: a PUSH-reg slot store the next call overwrites through &local before any read -> dropped (priority 12.5)
   reusedParamSlotPlugin,       // Correctness: a dead parameter slot reused for a function pointer -> a funcdef local (priority 14)
   threeByteAccessPlugin,       // Correctness: *(uint3 *)p → d2_load24(p), exactly three bytes (priority 14)
+  scalarPieceArithmeticPlugin, // Matching: a scalar local's x._N_M_ pieces as shifts and masks on the local (priority 14.5)
   typeNormalizePlugin,         // Cleanup: uint → uint32_t, undefined4 → auto/uint32_t (priority 15)
   pointerCastNormalizePlugin, // Cleanup: (int)&expr → (uintptr_t)&expr (priority 16)
   pseudoOpLowerPlugin,        // Cleanup: SUB/CONCAT/ZEXT/SEXT/CARRY/SBORROW → exact C++ (priority 20)
