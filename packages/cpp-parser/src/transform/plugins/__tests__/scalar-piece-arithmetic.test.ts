@@ -1,0 +1,124 @@
+/**
+ * scalar-piece-arithmetic: a scalar local's SUBPIECE members as arithmetic on the local.
+ *
+ * Shapes from 1.14d: STATLIST_BinarySearchStatInfoArray 00624c10 (two halves, then read
+ * whole), InitHighResTimer 004109d0 (constant halves of a longlong), DrawShadowTile
+ * 006b86f0 and ButtonWrapper::Constructor 004bb0f0 (CONCAT31 over an initialised local).
+ */
+
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+import { parse } from '../../../parser/index.js';
+import { emit } from '../../../emit/index.js';
+import type { AnyNode } from '../../../ast/nodes.js';
+import { scalarPieceArithmeticPlugin } from '../builtins/scalar-piece-arithmetic.js';
+import { subpieceAccessPlugin } from '../builtins/subpiece-access.js';
+import { pseudoOpLowerPlugin } from '../builtins/pseudo-op-lower.js';
+import { ARTIFACT_SUPPORT_LINES } from '../builtins/artifact-support.js';
+import { compileAndRun, hasNativeGpp } from '../../../testing/native-cpp.js';
+
+function run(src: string): string {
+  const ast = scalarPieceArithmeticPlugin.createTransformer({})(parse(src) as never);
+  return emit(ast as AnyNode).replace(/\s+/g, ' ').trim();
+}
+
+/** The pass, then the passes that lower what it leaves, in pipeline order. */
+function lowered(src: string, withPass: boolean): string {
+  let ast = parse(src) as unknown as AnyNode;
+  if (withPass) ast = scalarPieceArithmeticPlugin.createTransformer({})(ast as never) as unknown as AnyNode;
+  ast = pseudoOpLowerPlugin.createTransformer({})(ast as never) as unknown as AnyNode;
+  ast = subpieceAccessPlugin.createTransformer({})(ast as never) as unknown as AnyNode;
+  return emit(ast);
+}
+
+describe('scalar-piece-arithmetic', () => {
+  it('STATLIST_BinarySearchStatInfoArray: halves that cover the local are one store', () => {
+    const out = run(`int f(int nParam, S *p, int nMid) { int nKey; nKey._0_2_ = p[nMid].wSubIndex; nKey._2_2_ = p[nMid].wStatIndex; if (nKey < nParam) return 1; return 0; }`);
+    assert.match(out, /nKey = \(int\)\(\(uint32_t\)\(uint16_t\)p\[nMid\]\.wSubIndex \| \(uint32_t\)\(uint16_t\)p\[nMid\]\.wStatIndex << 16\);/);
+    assert.doesNotMatch(out, /_0_2_|_2_2_/);
+  });
+
+  it('InitHighResTimer: constant halves fold to one constant, the address use stays', () => {
+    const out = run(`void f(void) { longlong q; longlong r; q._0_4_ = 0; q._4_4_ = 0; r._0_4_ = -1; r._4_4_ = -1; Load(&r, &q); if (r._4_4_ == 0) g(); }`);
+    assert.match(out, /q = 0;/);
+    assert.match(out, /r = \(longlong\)0xffffffffffffffffull;/);
+    // r's address is taken: its read keeps the memory form for subpiece-access.
+    assert.match(out, /r\._4_4_ == 0/);
+  });
+
+  it('a covering run in byte order or not, and a three-piece one', () => {
+    const out = run(`int f(R *p) { int h; h._2_2_ = p->pad; h._0_1_ = p->a; h._1_1_ = p->b; return h; }`);
+    assert.match(out, /h = \(int\)\(\(uint32_t\)\(uint16_t\)p->pad << 16 \| \(uint32_t\)\(uint8_t\)p->a \| \(uint32_t\)\(uint8_t\)p->b << 8\);/);
+  });
+
+  it('no run when a value has an effect, reads the local, or the pieces overlap or leave a gap', () => {
+    assert.match(run(`int f(void) { int h; h._0_2_ = g(); h._2_2_ = 1; return h; }`), /h\._0_2_ = g\(\);/);
+    assert.match(run(`int f(int a) { int h; h = a; h._0_2_ = 1; h._2_2_ = h._0_2_; return h; }`), /h = a; h = \(int\)\(\(uint32_t\)h & 0xffff0000u \| 1u\); h = \(int\)\(\(uint32_t\)h & 0xffffu \| \(uint32_t\)\(uint16_t\)\(uint32_t\)h << 16\);/);
+    assert.match(run(`int f(void) { int h; h._0_2_ = 1; h._1_2_ = 2; h._3_1_ = 0; return h; }`), /h\._0_2_ = 1;/);
+    assert.match(run(`int f(void) { int h; h._0_2_ = 1; return h; }`), /h\._0_2_ = 1;/);
+  });
+
+  it('DrawShadowTile: a piece store and CONCAT31 over an initialised local are arithmetic on it', () => {
+    const out = run(`int f(int pTile, int b) { undefined4 nAlpha; nAlpha = pTile; nAlpha._1_3_ = (undefined3)((uint)pTile >> 8); nAlpha = CONCAT31(nAlpha._1_3_,0xff); return Draw(nAlpha); }`);
+    assert.match(out, /nAlpha = \(undefined4\)\(\(uint32_t\)nAlpha & 0xffu \| \(\(uint32_t\)\(\(uint\)pTile >> 8\) & 0xffffffu\) << 8\);/);
+    assert.match(out, /CONCAT31\(\(uint32_t\)\(\(uint32_t\)nAlpha >> 8 & 0xffffffu\), 0xff\)/);
+  });
+
+  it('ButtonWrapper::Constructor: an initialiser counts; a compound store keeps the other bytes', () => {
+    const out = run(`void f(void) { int32_t s = 0; s = CONCAT31(s._1_3_,1); s._0_1_ += 2; use(s); }`);
+    assert.match(out, /CONCAT31\(\(uint32_t\)\(\(uint32_t\)s >> 8 & 0xffffffu\), 1\)/);
+    assert.match(out, /s = \(int32_t\)\(\(uint32_t\)s & 0xffffff00u \| \(uint32_t\)\(uint8_t\)\(\(uint8_t\)\(uint32_t\)s \+ 2\)\);/);
+  });
+
+  it('nothing on a local that is not certainly initialised, or whose address is taken', () => {
+    // Q19_Callback04_ItemPickedUp 005b8210: a byte written into an uninitialised int.
+    assert.match(run(`void f(void) { int32_t n; n._0_1_ = 1; Send((uint8_t)n); }`), /n\._0_1_ = 1;/);
+    // Assigned only on one arm: not certain after the if.
+    assert.match(run(`void f(int c) { int n; if (c) { n = 5; } n._0_1_ = 1; use(n); }`), /n\._0_1_ = 1;/);
+    // A label between the store and the use: it can be entered without the store.
+    assert.match(run(`void f(int c) { int n; n = 5; if (c) goto L; n = 6; L: n._0_1_ = 1; use(n); }`), /n\._0_1_ = 1;/);
+    assert.match(run(`void f(void) { int n; n = 5; n._0_1_ = 1; g(&n); }`), /n\._0_1_ = 1;/);
+    assert.match(run(`void f(void) { int n; n = 5; n._0_1_++; g(n); }`), /n\._0_1_\+\+/);
+  });
+
+  it('an assignment earlier in the block covers a loop and a branch after it', () => {
+    const out = run(`void f(int c) { uint n; n = 0; while (c) { n._0_1_ = c; c--; } if (c) use(n._1_1_); }`);
+    assert.match(out, /n = \(uint\)\(\(uint32_t\)n & 0xffffff00u \| \(uint32_t\)\(uint8_t\)c\);/);
+    assert.match(out, /use\(\(uint8_t\)\(\(uint32_t\)n >> 8\)\)/);
+  });
+
+  it('parameters, globals, struct locals and pointer locals are left alone', () => {
+    assert.match(run(`void f(int p) { p._0_2_ = 1; p._2_2_ = 2; use(p); }`), /p\._0_2_ = 1;/);
+    assert.match(run(`void f(void) { S s; s._0_2_ = 1; s._2_2_ = 2; use(s); }`), /s\._0_2_ = 1;/);
+    assert.match(run(`void f(void) { char *q; q._0_2_ = 1; q._2_2_ = 2; use(q); }`), /q\._0_2_ = 1;/);
+  });
+});
+
+describe('scalar-piece-arithmetic, compiled and run', { skip: !hasNativeGpp() }, () => {
+  const prelude = [
+    'typedef unsigned int uint;', 'typedef uint8_t byte;', 'typedef uint32_t undefined4;', 'typedef uint8_t undefined3;',
+    'typedef long long longlong;', ...ARTIFACT_SUPPORT_LINES,
+    'struct R { uint8_t a; uint8_t b; uint16_t pad; };',
+  ].join('\n');
+  // Each function, with the pass and without it, must compute the same value.
+  const fns = [
+    'int halves(R *p) { int h; h._2_2_ = p->pad; h._0_1_ = p->a; h._1_1_ = p->b; return h; }',
+    'longlong konst() { longlong r; r._0_4_ = -1; r._4_4_ = 0x7f; return r; }',
+    'uint alpha(uint t, int on) { undefined4 n; n = t; n._1_3_ = (undefined3)(t >> 4); n = CONCAT31(n._1_3_, 0xff); if (on) n = CONCAT31(n._1_3_, 0xc0); return n; }',
+    'int rmw(int v, int c) { int n; n = v; n._2_2_ = c; n._0_1_ += 3; n._1_1_ ^= n._3_1_; return n; }',
+    'short sh(short v) { short n; n = v; n._1_1_ = 0x80; return n; }',
+  ];
+  const calls = [
+    'R r = {0x81, 0x7f, 0xfedc}; printf("%08x\\n", (unsigned)halves(&r));',
+    'printf("%016llx\\n", (unsigned long long)konst());',
+    'printf("%08x %08x\\n", alpha(0x89abcdefu, 0), alpha(0x89abcdefu, 1));',
+    'printf("%08x %08x\\n", (unsigned)rmw(0x7ffffffe, 0x8001), (unsigned)rmw(-2, -1));',
+    'printf("%04x\\n", (unsigned)(uint16_t)sh(-1));',
+  ].join('\n');
+  it('the same values as the memory form', () => {
+    const before = compileAndRun(`${prelude}\n${lowered(fns.join('\n'), false)}`, calls);
+    const after = compileAndRun(`${prelude}\n${lowered(fns.join('\n'), true)}`, calls);
+    assert.equal(after, before);
+    assert.match(before, /^fedc7f81\n0000007fffffffff\n/);
+  });
+});

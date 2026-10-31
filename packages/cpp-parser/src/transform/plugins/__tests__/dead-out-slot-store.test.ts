@@ -79,6 +79,22 @@ describe('dead-out-slot-store', () => {
     assert.match(run(`BigData * f(void *pData) { BigData *pNewBigInt; pNewBigInt = pData; Storm::Source::SBig::SBigNew(&pNewBigInt); return pNewBigInt; }`, undefined, []),
       /pNewBigInt = pData;/);
   });
+  it('OBJOP_A3Q2_KhalimsRelicPortalDrop1 005b8860: a later out-call in a loop, and nothing else reads the slot', () => {
+    const out = run(`int f(D2GameStrc *pGame) { int n; int k; n = (int)pGame; k = Spawn(pGame); if (k) { do { GetFrames(pGame, 0, (int *)&n); k--; } while (k); } return 0; }`);
+    assert.doesNotMatch(out, /n = \(int\)pGame/);
+    assert.match(out, /int n; int k; k = Spawn\(pGame\);/);
+  });
+  it('several out-calls: dropped only when every one writes first', () => {
+    assert.doesNotMatch(run(`void f(D2GameStrc *pGame) { int n; n = (int)pGame; g(pGame); GetFrames(pGame, 0, &n); GetFrames(pGame, 1, &n); }`), /n = \(int\)pGame/);
+    assert.match(run(`void f(D2GameStrc *pGame) { int n; n = (int)pGame; g(pGame); GetFrames(pGame, 0, &n); Unknown(&n); }`), /n = \(int\)pGame;/);
+  });
+  it('a later out-call keeps the store when x is read anywhere, or an argument calls something', () => {
+    // NET_SID_CLIENT_Send_0x41 0051abb0 shape: the slot is the parameter's home and is sent.
+    assert.match(run(`void f(D2GameStrc *pGame) { int n; n = (int)pGame; g(pGame); GetFrames(pGame, 0, &n); use(n); }`), /n = \(int\)pGame;/);
+    assert.match(run(`void f(D2GameStrc *pGame) { int n; n = (int)pGame; g(n); GetFrames(pGame, 0, &n); }`), /n = \(int\)pGame;/);
+    assert.match(run(`void f(D2GameStrc *pGame) { int n; n = (int)pGame; g(pGame); GetFrames(h(), 0, &n); }`), /n = \(int\)pGame;/);
+    assert.match(run(`void f(D2GameStrc *pGame) { int n; int *p; n = (int)pGame; p = &n; GetFrames(pGame, 0, &n); }`), /n = \(int\)pGame;/);
+  });
   it('the call may be the value of an assignment or an initializer', () => {
     const out = run(`void f(D2UnitStrc *pUnit, D2GameStrc *pGame) { int n; int r; n = (int)pGame; r = GetFrames(pUnit, 0, &n); use(n, r); }`);
     assert.doesNotMatch(out, /n = \(int\)pGame/);

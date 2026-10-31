@@ -168,7 +168,7 @@ function makeBinary(
 // ============================================
 
 /** `_<offset>_<size>_` of a member access, or null. */
-function subpieceOf(node: ASTNode): { offset: number; size: number; member: MemberExpr } | null {
+export function subpieceOf(node: ASTNode): { offset: number; size: number; member: MemberExpr } | null {
   if (node.kind !== NodeKind.MemberExpr) return null;
   const member = node as MemberExpr;
   if (member.member.kind !== NodeKind.Identifier) return null;
@@ -187,7 +187,7 @@ function pieceAddress(member: MemberExpr, offset: number): Expression {
 /** Ghidra's 3-byte integer types. A cast to one is a truncation to 24 bits. */
 const THREE_BYTE_TYPES = new Set(['undefined3', 'int3', 'uint3']);
 
-function stripThreeByteCast(e: Expression): Expression {
+export function stripThreeByteCast(e: Expression): Expression {
   let x: Expression = e;
   while (x.kind === NodeKind.ParenExpr) x = (x as ParenExpr).expression;
   if (x.kind !== NodeKind.CStyleCastExpr) return e;
