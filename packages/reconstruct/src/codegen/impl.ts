@@ -2819,6 +2819,16 @@ function transformDecompiledCode(
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         enclosingVarTypes,
       };
+      perPluginOptions['shift-count-mask'] = {
+        enumTypes: context.funcPtrArgCasts.enumTypes,
+        enumValues: context.funcPtrArgCasts.enumValues,
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        structFields: context.funcPtrArgCasts.structFields,
+        typedefTargets: context.funcPtrArgCasts.typedefTargets,
+        functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        enclosingVarTypes,
+      };
       perPluginOptions['compare-signedness'] = {
         enumTypes: context.funcPtrArgCasts.enumTypes,
         globalTypes: context.funcPtrArgCasts.globalTypes,
