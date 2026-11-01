@@ -103,18 +103,143 @@ describe('nestCallPlugin', () => {
     assert.deepStrictEqual(sites, []);
   });
 
-  it('leaves a site inside a loop when the temporary is mentioned again', () => {
+  const loop = (body: string[], after: string[] = []) => [
+    'void f(Unit *pUnit) {',
+    '  Game *pGame;',
+    '  while (pUnit) {',
+    ...body,
+    '  }',
+    ...after,
+    '}',
+  ];
+  const site = [
+    '[GetGamePointer@0x56<,1,0] pGame = GetGamePointer(pUnit);',
+    '[HasQuestItem@0x5f<0x56,0,0.0.1] HasQuestItem(pGame, pUnit, 5);',
+  ];
+
+  it('nests inside a loop when every path writes the temporary again before reading it', () => {
+    const { out, sites } = run(loop([...site, '    pGame = 0;', '    Use(pGame);']));
+    assert.deepStrictEqual(sites, [1]);
+    assert.ok(out.includes('HasQuestItem(GetGamePointer(pUnit), pUnit, 5);'), out);
+  });
+
+  it('leaves a site inside a loop whose next round reads the temporary first', () => {
+    const { sites } = run(loop(['    if (pGame) { Use(pGame); }', ...site]));
+    assert.deepStrictEqual(sites, []);
+  });
+
+  it('leaves a site inside a loop when the temporary is read after the loop', () => {
+    const { sites } = run(loop(site, ['  Use(pGame);']));
+    assert.deepStrictEqual(sites, []);
+  });
+
+  it('nests in a function with labels when no path reads the value', () => {
     const { sites } = run([
       'void f(Unit *pUnit) {',
       '  Game *pGame;',
-      '  while (pUnit) {',
-      '[GetGamePointer@0x56<,1,0] pGame = GetGamePointer(pUnit);',
-      '[HasQuestItem@0x5f<0x56,0,0.0.1] HasQuestItem(pGame, pUnit, 5);',
-      '    pGame = 0;',
+      'again:',
+      '  Other();',
+      ...site,
+      '  pGame = 0;',
+      '  if (pUnit) goto again;',
+      '  Use(pGame);',
+      '}',
+    ]);
+    assert.deepStrictEqual(sites, [1]);
+  });
+
+  it('leaves it when a goto leads to a read of the value', () => {
+    const { sites } = run([
+      'void f(Unit *pUnit) {',
+      '  Game *pGame;',
+      '  pGame = 0;',
+      'again:',
+      '  Use(pGame);',
+      ...site,
+      '  if (pUnit) goto again;',
+      '}',
+    ]);
+    assert.deepStrictEqual(sites, []);
+  });
+
+  it('leaves it when a case falls through to a read of the value', () => {
+    const { sites } = run([
+      'void f(Unit *pUnit, int n) {',
+      '  Game *pGame;',
+      '  switch (n) {',
+      '  case 1:',
+      '    Other();',
+      ...site,
+      '  case 2:',
+      '    Use(pGame);',
+      '    break;',
       '  }',
       '}',
     ]);
     assert.deepStrictEqual(sites, []);
+  });
+
+  it('nests in a case that breaks before any read', () => {
+    const { sites } = run([
+      'void f(Unit *pUnit, int n) {',
+      '  Game *pGame;',
+      '  switch (n) {',
+      '  case 1:',
+      '    Other();',
+      ...site,
+      '    break;',
+      '  case 2:',
+      '    pGame = 0;',
+      '    Use(pGame);',
+      '    break;',
+      '  }',
+      '}',
+    ]);
+    assert.deepStrictEqual(sites, [1]);
+  });
+
+  it('nests a temporary declared with the call as its value', () => {
+    const { out, sites } = run([
+      'int f(Unit *pUnit) {',
+      '[GetGamePointer@0x56<,1,0] Game *pGame = GetGamePointer(pUnit);',
+      '[HasQuestItem@0x5f<0x56,0,0.0.1] return HasQuestItem(pGame, pUnit, 0x20736b62);',
+      '}',
+    ]);
+    assert.deepStrictEqual(sites, [1]);
+    assert.ok(out.includes('return HasQuestItem(GetGamePointer(pUnit), pUnit, 0x20736b62);'), out);
+    assert.ok(!out.includes('pGame'), out);
+  });
+
+  it('keeps a bare declaration for a declared temporary written again later', () => {
+    const { out, sites } = run([
+      'int f(Unit *pUnit) {',
+      '[GetGamePointer@0x56<,1,0] Game *pGame = GetGamePointer(pUnit);',
+      '[HasQuestItem@0x5f<0x56,0,0.0.1] HasQuestItem(pGame, pUnit, 0x20736b62);',
+      '  pGame = 0;',
+      '  return Use(pGame);',
+      '}',
+    ]);
+    assert.deepStrictEqual(sites, [1]);
+    assert.ok(out.includes('Game* pGame; HasQuestItem(GetGamePointer(pUnit), pUnit, 0x20736b62);'), out);
+  });
+
+  it('reads a field of the same name as no mention of the temporary', () => {
+    const { out, sites } = run(quest(0, ['  Use(pQuest->pGame);']));
+    assert.deepStrictEqual(sites, [1]);
+    assert.ok(!out.includes('Game* pGame'), out);
+    assert.ok(out.includes('Use(pQuest->pGame);'), out);
+  });
+
+  it('leaves a const or static temporary in its declaration', () => {
+    for (const decl of ['Game *const pGame', 'static Game *pGame']) {
+      const { sites } = run([
+        'int f(Unit *pUnit) {',
+        `[GetGamePointer@0x56<,1,0] ${decl} = GetGamePointer(pUnit);`,
+        '[HasQuestItem@0x5f<0x56,0,0.0.1] return HasQuestItem(pGame, pUnit, 0x20736b62);',
+        '}',
+      ]);
+      assert.deepStrictEqual(sites, [], decl);
+    }
   });
 
   it('leaves it when an argument right of it calls something', () => {
@@ -624,6 +749,55 @@ describe('nestCallPlugin', () => {
   });
 
   // Before and after must agree under GCC, whose argument order is not VC8's.
+  it('computes the same through loops, cases and gotos (compiled)', { skip: !hasNativeGpp() }, () => {
+    const lines = [
+      'int f(int n, int k) {',
+      '  int nWidth = 0;',
+      '  int r = 0;',
+      '  int t;',
+      '  int i = 0;',
+      '  while (i < n) {',
+      '    r = r + 1;',
+      '[DRAW_text0@0xb6<,3,0] nWidth = DRAW_text0(i);',
+      '[DRAW_text@0xcb<0xb6,0,0.0.1.1.1] t = DRAW_text(i, nWidth, k, 4, 0);',
+      '    nWidth = (r + t) & 7;',
+      '    r = r + t + nWidth;',
+      '    i = i + 1;',
+      '  }',
+      '  switch (k & 3) {',
+      '  case 1: {',
+      '    r = r * 3;',
+      '[DRAW_text0@0xd6<,3,0] int nCase = DRAW_text0(r);',
+      '[DRAW_text@0xdb<0xd6,0,0.0.1.1.1] t = DRAW_text(k, nCase, r, 4, 0);',
+      '    r = r + t;',
+      '    break;',
+      '  }',
+      '  case 2:',
+      '    r = r - 1;',
+      '  }',
+      '  if (r < 100) goto out;',
+      '  r = r / 2;',
+      'out:',
+      '  return r + nWidth;',
+      '}',
+    ];
+    const { code } = fixture(lines);
+    const { out, sites } = run(lines);
+    assert.deepStrictEqual(sites, [1, 1]);
+    const prelude = [
+      'int calls = 0;',
+      'int DRAW_text0(int w) { calls++; return w * 3 + calls; }',
+      'int DRAW_text(int w, int x, int y, int c, int m) { return ((w * 31 + x) * 31 + y) * 31 + c * 7 + m + calls * 1000; }',
+      code.replace('int f(', 'int before('),
+      out.replace('int f(', 'int after('),
+    ].join('\n');
+    const r = compileAndRun(prelude, 'for (int n = 0; n < 4; n++) for (int k = -2; k < 6; k++) { calls = 0; int a = before(n, k); calls = 0; printf("%d %d\\n", a, after(n, k)); }');
+    for (const row of r.trim().split('\n')) {
+      const [a, b] = row.split(' ');
+      assert.strictEqual(a, b, r);
+    }
+  });
+
   it('computes what the temporaries computed (compiled)', { skip: !hasNativeGpp() }, () => {
     const lines = [
       'int f(int wsz, int nX) {',

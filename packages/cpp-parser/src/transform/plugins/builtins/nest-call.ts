@@ -23,11 +23,13 @@
  * AUTOMAP_TextHeightOffset; nTextWidth = DRAW_text0(wsz); DRAW_text(wsz, WindowSizeX -
  * nTextWidth - 0x10, nY, dwColor, bMultiLineCenter);`). The rewrite is made only when:
  *
- *   - each temporary is a local assigned one value, named exactly once in the statement,
- *     inside an argument of its top call, as a value (not an lvalue, not its address);
- *   - it is dead after the statement: no other mention, or (outside any loop or switch,
- *     in a function without labels) the next mention is a plain assignment that every
- *     path from the statement reaches;
+ *   - each temporary is a local assigned one value (`x = v;`, or declared with it, `T x =
+ *     v;`, which leaves `T x;` when x is written again later), named exactly once in the
+ *     statement, inside an argument of its top call, as a value (not an lvalue, not its
+ *     address); a member named like it (`p->x`) is no mention;
+ *   - it is dead after the statement: on the function's control flow (loops, switches and
+ *     gotos included, cfg/dataflow.ts) its value reaches that one read and no other, and
+ *     no other value of it reaches the statement;
  *   - a temporary holding a call or a memory read stands where VC8 evaluates it: the
  *     earliest in the argument furthest right; one holding a constant or a local whose
  *     address is never taken may stand anywhere;
@@ -60,8 +62,9 @@
  * each when each is a 32-bit-or-narrower integer or a pointer, and the push counts below
  * confirm it.
  *
- * Liveness after the statement is followed through ifs and blocks: the temporary is dead
- * when every path writes it or returns before reading it.
+ * Where the control flow is not modelled in full (a try, a range for), liveness is followed
+ * through ifs and blocks only, outside loops and switches in a function without labels: the
+ * temporary is dead when every path writes it or returns before reading it.
  *
  * An assertion halt is left to halt-site-fold, which folds its temporaries itself. When in
  * doubt, nothing changes; without the facts nothing changes.
@@ -82,6 +85,7 @@ import {
 import { isHaltStmt } from './assert-order.js';
 import type { WriteEffect } from './write-effects.js';
 import { Regions, regionOf, typeOf, type AggregateModel, type TypingEnv } from './memory-regions.js';
+import { buildFunctionFlow, type FunctionFlow } from '../../cfg/dataflow.js';
 
 /** One direct call the decompile prints on a line (extract/call-order.ts). */
 export interface CallSiteFact {
@@ -133,6 +137,17 @@ function unwrapCasts(e: Expression): Expression {
   e = unwrap(e);
   while (e.kind === NodeKind.CStyleCastExpr) e = unwrap((e as CStyleCastExpr).expression);
   return e;
+}
+
+/** The identifiers in `n` that name variables: a member's name after `.` or `->` does not. */
+function namesIn(n: ASTNode): Identifier[] {
+  const members = new Set<ASTNode>();
+  const out: Identifier[] = [];
+  for (const m of traverseAST(n)) {
+    if (m.kind === NodeKind.MemberExpr) members.add((m as unknown as { member: ASTNode }).member);
+    else if (m.kind === NodeKind.Identifier && !members.has(m)) out.push(m as Identifier);
+  }
+  return out;
 }
 
 function placed(n: ASTNode): boolean {
@@ -198,7 +213,10 @@ interface Local {
 }
 
 interface Temp {
-  stmt: ExprStmt;
+  /** `x = value;`, or `T x = value;` declaring it. */
+  stmt: ExprStmt | DeclStmt;
+  /** The identifier the statement writes it with. */
+  def: Identifier;
   name: string;
   value: Expression;
   /** The identifier the statement names it with. */
@@ -224,6 +242,8 @@ interface Ctx {
   regions: Regions | null;
   typing: TypingEnv;
   body: CompoundStmt;
+  /** The body's dataflow, built when first asked for and dropped on every rewrite. */
+  flow?: FunctionFlow | null;
 }
 
 function collectLocals(fn: FunctionDecl): Map<string, Local> | null {
@@ -383,8 +403,34 @@ function returnShape(call: CallExpr, ctx: Ctx): TypeShape | null {
   return spelling ? shapeOfSpelling(spelling, ctx.resolve) : null;
 }
 
-/** `x = value;` with x a local whose value the statement can take over; else null. */
-function tempOf(s: Statement, ctx: Ctx): { stmt: ExprStmt; name: string; value: Expression; local: Local } | null {
+/** Whether a declared type is const, volatile or a reference at its top: its declaration then cannot lose the initializer. */
+function boundAtDeclaration(t: ASTNode): boolean {
+  switch (t.kind) {
+    case NodeKind.ReferenceType: case NodeKind.RValueReferenceType: return true;
+    case NodeKind.QualifiedType: return (t as unknown as { qualifiers: string[] }).qualifiers.some(q => q === 'const' || q === 'volatile');
+    case NodeKind.PointerType: return (t as unknown as { qualifiers: string[] }).qualifiers.some(q => q === 'const' || q === 'volatile');
+    case NodeKind.BuiltinType: return (t as unknown as { modifiers: string[] }).modifiers.some(q => q === 'const' || q === 'volatile');
+    default: return false;
+  }
+}
+
+/**
+ * `x = value;` or `T x = value;` (one plain local, copy-initialised with an expression)
+ * with x a local whose value the statement can take over; else null.
+ */
+function tempOf(s: Statement, ctx: Ctx): { stmt: ExprStmt | DeclStmt; def: Identifier; name: string; value: Expression; local: Local } | null {
+  if (s.kind === NodeKind.DeclStmt) {
+    const ds = s as DeclStmt;
+    if (ds.declarations.length !== 1 || ds.declarations[0].kind !== NodeKind.VariableDecl) return null;
+    const v = ds.declarations[0] as VariableDecl;
+    const init = v.initializer;
+    if (!init || v.directInit || v.copyListInit || v.bitWidth || v.specifiers.length
+      || init.kind === NodeKind.InitListExpr || boundAtDeclaration(v.type)) return null;
+    const local = ctx.locals.get(v.name.name);
+    if (!local || local.decl !== v || local.addressed || local.array) return null;
+    if (effects(init as Expression).writes) return null;
+    return { stmt: ds, def: v.name, name: v.name.name, value: init as Expression, local };
+  }
   if (s.kind !== NodeKind.ExprStmt) return null;
   const e = unwrap((s as ExprStmt).expression);
   if (e.kind !== NodeKind.AssignExpr || (e as AssignExpr).operator !== '=') return null;
@@ -394,7 +440,7 @@ function tempOf(s: Statement, ctx: Ctx): { stmt: ExprStmt; name: string; value: 
   const local = ctx.locals.get(name);
   if (!local || local.param || local.addressed || local.array) return null;
   if (effects(a.right).writes) return null;
-  return { stmt: s as ExprStmt, name, value: a.right, local };
+  return { stmt: s as ExprStmt, def: a.left as Identifier, name, value: a.right, local };
 }
 
 function declShape(l: Local, ctx: Ctx): TypeShape | null {
@@ -785,8 +831,48 @@ function deadAfter(name: string, allowed: Set<Identifier>, path: Path, guarded: 
   return true;
 }
 
+/** Statements the dataflow models in full: anything else may read what it does not report. */
+const MODELLED = new Set<string>([
+  NodeKind.CompoundStmt, NodeKind.ExprStmt, NodeKind.DeclStmt, NodeKind.IfStmt, NodeKind.SwitchStmt,
+  NodeKind.CaseStmt, NodeKind.DefaultStmt, NodeKind.LabelStmt, NodeKind.GotoStmt, NodeKind.ReturnStmt,
+  NodeKind.BreakStmt, NodeKind.ContinueStmt, NodeKind.WhileStmt, NodeKind.DoWhileStmt, NodeKind.ForStmt,
+  NodeKind.NullStmt,
+]);
+
+function flowOfBody(ctx: Ctx): FunctionFlow | null {
+  if (ctx.flow !== undefined) return ctx.flow;
+  const names = new Set<string>();
+  let modelled = true;
+  for (const n of traverseAST(ctx.body)) {
+    if (n.kind === NodeKind.VariableDecl) names.add((n as VariableDecl).name.name);
+    else if (n.kind.endsWith('Stmt') && !MODELLED.has(n.kind)) modelled = false;
+  }
+  for (const l of ctx.locals.values()) if (l.param) names.add(l.decl.name.name);
+  ctx.flow = modelled ? buildFunctionFlow(ctx.body.statements, names) : null;
+  return ctx.flow;
+}
+
+/**
+ * Whether, on the function's control flow, the temporary's value reaches no read but the
+ * statement's, and the statement reads no other value of it: loops, switches and gotos
+ * included. Taking the write and the read away then leaves every other read with the
+ * value it had, since each path from the write to one passes another write first.
+ */
+function onlyUseFlows(t: Temp, at: { block: CompoundStmt; index: number }, ctx: Ctx): boolean {
+  const flow = flowOfBody(ctx);
+  if (!flow) return false;
+  const def = flow.nodeOf(t.stmt);
+  const use = flow.nodeOf(at.block.statements[at.index]);
+  if (def === undefined || use === undefined) return false;
+  if (!flow.definition(def, t.name)?.killing) return false;
+  const reaching = flow.reaching(use, t.name);
+  if (reaching.size !== 1 || !reaching.has(def)) return false;
+  const uses = flow.usesOf(def, t.name);
+  return uses.length === 1 && uses[0] === use;
+}
+
 const mentionsName = (n: ASTNode, name: string) =>
-  [...traverseAST(n)].some(m => m.kind === NodeKind.Identifier && (m as Identifier).name === name);
+  namesIn(n).some(m => m.name === name);
 
 /**
  * What running `s` does to `name`: 'read' when some path may read it before writing it,
@@ -845,16 +931,16 @@ function siteAt(stmts: Statement[], b: number, path: Path, guarded: boolean, ctx
     const t = tempOf(stmts[j], ctx);
     if (!t || names.has(t.name)) break;
     // A later temporary's value must not read this one, nor assign anything it reads.
-    if (collected.some(u => [...traverseAST(u.value)].some(n => n.kind === NodeKind.Identifier && (n as Identifier).name === t.name))) break;
-    if (collected.some(u => [...traverseAST(t.value)].some(n => n.kind === NodeKind.Identifier && (n as Identifier).name === u.name))) break;
-    const uses = [...traverseAST(s)].filter(n => n.kind === NodeKind.Identifier && (n as Identifier).name === t.name) as Identifier[];
+    if (collected.some(u => namesIn(u.value).some(n => n.name === t.name))) break;
+    if (collected.some(u => namesIn(t.value).some(n => n.name === u.name))) break;
+    const uses = namesIn(s).filter(n => n.name === t.name);
     if (uses.length !== 1) break;
     const arg = argumentOf(call, uses[0]);
     if (arg < 0) break;
     const c = classify(t, ctx, { call, arg, use: uses[0] });
     if (!c) break;
     names.add(t.name);
-    collected.push({ stmt: t.stmt, name: t.name, value: t.value, use: uses[0], arg, kind: c.kind, call: c.call });
+    collected.push({ stmt: t.stmt, def: t.def, name: t.name, value: t.value, use: uses[0], arg, kind: c.kind, call: c.call });
   }
   collected.reverse();
 
@@ -873,6 +959,31 @@ function siteAt(stmts: Statement[], b: number, path: Path, guarded: boolean, ctx
     if (validRun(temps, call, outer, target, path, guarded, ctx)) return { temps, call };
   }
   return null;
+}
+
+/**
+ * Whether the original's instructions show the nested evaluation of `calls` (the
+ * temporaries holding calls, in textual order) in `call`. Call by call in evaluation order: before each inner CALL the pushes of the arguments
+ * right of it (up to the previous inner call's) and its own; the outer CALL right after
+ * the last with the pushes of the arguments up to it.
+ */
+function evidenceShows(calls: Temp[], call: CallExpr, outer: CallSiteFact, ctx: Ctx): boolean {
+  const facts: CallSiteFact[] = [];
+  const n = call.arguments.length;
+  for (let j = 0; j < calls.length; j++) {
+    const c = calls[j];
+    const f = factFor(c.stmt, calleeName(c.call!.callee)!, ctx);
+    if (!f || !f.slots || f.slots.length !== c.call!.arguments.length) return false;
+    const between = argSlots(outer, c.arg + 1, j === 0 ? n - 1 : calls[j - 1].arg);
+    if (between === 0) return false;
+    if (f.pushes !== between + argSlots(f, 0, f.slots.length - 1)) return false;
+    if (j > 0 && f.prev !== facts[j - 1].at) return false;
+    facts.push(f);
+  }
+  const last = calls[calls.length - 1];
+  if (outer.prev !== facts[facts.length - 1].at) return false;
+  if (outer.pushes !== argSlots(outer, 0, last.arg)) return false;
+  return true;
 }
 
 function validRun(temps: Temp[], call: CallExpr, outer: CallSiteFact, target: Expression | null, path: Path, guarded: boolean, ctx: Ctx): boolean {
@@ -900,29 +1011,11 @@ function validRun(temps: Temp[], call: CallExpr, outer: CallSiteFact, target: Ex
     units.push(t);
   }
   if (!independent(units, ctx.regions)) return false;
-  // Evidence, call by call in evaluation order: before each inner CALL the pushes of the
-  // arguments right of it (up to the previous inner call's) and its own; the outer CALL
-  // right after the last with the pushes of the arguments up to it.
-  const facts: CallSiteFact[] = [];
-  const n = call.arguments.length;
-  for (let j = 0; j < calls.length; j++) {
-    const c = calls[j];
-    const f = factFor(c.stmt, calleeName(c.call!.callee)!, ctx);
-    if (!f || !f.slots || f.slots.length !== c.call!.arguments.length) return false;
-    const between = argSlots(outer, c.arg + 1, j === 0 ? n - 1 : calls[j - 1].arg);
-    if (between === 0) return false;
-    if (f.pushes !== between + argSlots(f, 0, f.slots.length - 1)) return false;
-    if (j > 0 && f.prev !== facts[j - 1].at) return false;
-    facts.push(f);
-  }
-  const last = calls[calls.length - 1];
-  if (outer.prev !== facts[facts.length - 1].at) return false;
-  if (outer.pushes !== argSlots(outer, 0, last.arg)) return false;
+  if (!evidenceShows(calls, call, outer, ctx)) return false;
   // Each temporary dead after the statement.
   for (const t of temps) {
-    const allowed = new Set<Identifier>([t.use, (unwrap(t.stmt.expression) as AssignExpr).left as Identifier,
-      ctx.locals.get(t.name)!.decl.name]);
-    if (!deadAfter(t.name, allowed, path, guarded, ctx)) return false;
+    const allowed = new Set<Identifier>([t.use, t.def, ctx.locals.get(t.name)!.decl.name]);
+    if (!deadAfter(t.name, allowed, path, guarded, ctx) && !onlyUseFlows(t, path[path.length - 1], ctx)) return false;
   }
   return true;
 }
@@ -953,7 +1046,7 @@ function rewriteFunction(fn: FunctionDecl, ev: CallOrderEvidence, opts: NestCall
   };
   ctx.typing = typingOf(ctx);
   const reindex = () => {
-    ctx.idents = [...traverseAST(body)].filter(n => n.kind === NodeKind.Identifier) as Identifier[];
+    ctx.idents = namesIn(body);
     ctx.identIndex = new Map(ctx.idents.map((n, i) => [n, i]));
   };
   reindex();
@@ -976,12 +1069,21 @@ function rewriteFunction(fn: FunctionDecl, ev: CallOrderEvidence, opts: NestCall
         const start = b - temps.length;
         // Comments on the temporaries' lines stay, above the statement.
         s.leadingTrivia = [...temps.flatMap(t => t.stmt.leadingTrivia ?? []), ...(s.leadingTrivia ?? [])];
-        block.statements.splice(start, temps.length);
+        // A temporary declared with its value keeps a bare declaration, which the sweep
+        // below drops when nothing else names it.
+        const kept = temps.filter(t => t.stmt.kind === NodeKind.DeclStmt).map(t => {
+          const v = (t.stmt as DeclStmt).declarations[0] as VariableDecl;
+          v.initializer = null;
+          t.stmt.leadingTrivia = [];
+          return t.stmt;
+        });
+        block.statements.splice(start, temps.length, ...kept);
         b = start;
         for (const t of temps) removedDecls.add(t.name);
         changed++;
         opts.onSite?.({ line: s.location?.start.line ?? 0, temps: temps.length });
         reindex();
+        ctx.flow = undefined;
       }
       return;
     }
