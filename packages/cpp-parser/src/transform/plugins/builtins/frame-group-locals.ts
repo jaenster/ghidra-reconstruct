@@ -45,10 +45,13 @@
  *     supplies `argReach` - each callee's reach through each pointer parameter, read
  *     from its BODY (cfg/param-reach.ts), because a callee typed `int *` still reads
  *     `p[1]` - a call-argument escape starts a run only when that reach exceeds the
- *     local's own size, starts before it, or is unknown. An indirect call, an external
- *     callee, a body the analysis cannot follow, recursion: all unknown, all grouped as
- *     before. An address stored or used as an initialiser is always unknown. Without
- *     `argReach` every escape counts, as it always did;
+ *     local's own size, starts before it, or is unknown. A platform call is answered by
+ *     its contract (`knownSinkReach`: a literal count, a documented one-object
+ *     out-parameter, a literal `scanf` format); an indirect call by `computedArgReach`,
+ *     which knows a call through a function table the image initialises. Any other
+ *     indirect or external callee, a body the analysis cannot follow, recursion: all
+ *     unknown, all grouped as before. An address stored or used as an initialiser is
+ *     always unknown. Without `argReach` every escape counts, as it always did;
  *   - it needs at least TWO declared members. A local with no contiguous named
  *     neighbour is not this defect — it is the ordinary single-word out-param,
  *     `SRegLoadValue(&nValue)` and `SFILE_OpenFileEx(&hFile)`, which is correct
@@ -222,7 +225,7 @@ import { TriviaKind } from '../../../lexer/trivia.js';
 import { typeNodeName, builtinBase } from './call-arg-cast.js';
 import { stackNameOffset, type StackSlot } from './stack-frame-address.js';
 import { calleeSpelling } from '../../cfg/out-param.js';
-import { countedSinkReach, type Reach } from '../../cfg/param-reach.js';
+import { knownSinkReach, type Reach } from '../../cfg/param-reach.js';
 import { createPlugin } from '../registry.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 
@@ -235,6 +238,11 @@ export interface FrameGroupLocalsOptions extends PluginOptions {
    * escaping address starts a run.
    */
   argReach?: (callee: string, index: number, argCount: number) => Reach;
+  /**
+   * The same for a call through a computed callee (`(*gaTable[i])(&x)`), or null when the
+   * functions it can denote are not all known. Absent: such an escape keeps the frame.
+   */
+  computedArgReach?: (callee: Expression, index: number, argCount: number) => Reach;
   /** Told every call-argument escape `argReach` judged, for an offline audit. No effect on output. */
   onEscape?: (event: EscapeDecision) => void;
   /**
@@ -508,14 +516,17 @@ function callNeedsFrame(
   argReach?: (callee: string, index: number, argCount: number) => Reach,
   sizeOf?: (name: string) => number | undefined,
   onEscape?: (event: EscapeDecision) => void,
+  computedArgReach?: (callee: Expression, index: number, argCount: number) => Reach,
 ): boolean {
   if (!argReach) return true;
   const size = sizeOf?.(local);
   const callee = calleeSpelling(call);
   let reach: Reach | undefined;
   if (size !== undefined && callee) {
-    const counted = countedSinkReach(callee, index, call.arguments);
-    reach = counted !== undefined ? counted : argReach(callee, index, call.arguments.length);
+    const known = knownSinkReach(callee, index, call.arguments);
+    reach = known !== undefined ? known : argReach(callee, index, call.arguments.length);
+  } else if (size !== undefined && computedArgReach) {
+    reach = computedArgReach(call.callee, index, call.arguments.length);
   }
   // No size, a computed callee, an unknown reach: all keep the frame.
   const needsFrame = size === undefined || !reach || reach.lo < 0 || reach.hi > size;
@@ -538,6 +549,7 @@ function escapingLocals(
   argReach?: (callee: string, index: number, argCount: number) => Reach,
   sizeOf?: (name: string) => number | undefined,
   onEscape?: (event: EscapeDecision) => void,
+  computedArgReach?: (callee: Expression, index: number, argCount: number) => Reach,
 ): Set<string> {
   const parents = parentMap(body);
   const escaping = new Set<string>();
@@ -564,7 +576,7 @@ function escapingLocals(
       const call = parent as CallExpr;
       const index = call.arguments.indexOf(child as Expression);
       escapes = index >= 0
-        && callNeedsFrame(call, index, (target as Identifier).name, argReach, sizeOf, onEscape);
+        && callNeedsFrame(call, index, (target as Identifier).name, argReach, sizeOf, onEscape, computedArgReach);
     } else if (parent.kind === NodeKind.AssignExpr) {
       escapes = (parent as AssignExpr).right === child;
     } else if (parent.kind === NodeKind.VariableDecl) {
@@ -1365,7 +1377,7 @@ function createFrameGroupLocalsTransformer(options: FrameGroupLocalsOptions = {}
         reachEnd.set(e.local, e.reach ? Math.max(prev ?? 0, e.reach.hi) : null);
       };
       const escaping = escapingLocals(
-        body, options.argReach, name => movable.get(name)?.layout.size, onEscape);
+        body, options.argReach, name => movable.get(name)?.layout.size, onEscape, options.computedArgReach);
       // A call with a literal byte count STATES the extent; the other two rules
       // only infer it.
       const writes = knownCountWrites(body, movable);

@@ -6008,7 +6008,7 @@ export function buildFuncPtrArgCastTables(
     outParams: createOutParamOracle(
       new Map([...functionByKey].filter((e): e is [string, ExtractedFunction] => e[1] !== null)), dataTypes),
     paramReach: createParamReachOracle(
-      new Map([...functionByKey].filter((e): e is [string, ExtractedFunction] => e[1] !== null)), dataTypes),
+      new Map([...functionByKey].filter((e): e is [string, ExtractedFunction] => e[1] !== null)), dataTypes, globals),
   };
 }
 

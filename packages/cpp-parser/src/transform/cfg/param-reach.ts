@@ -24,7 +24,8 @@
  *     nothing about);
  *   - passed as an argument, the callee's own reach at that position applies, shifted by
  *     the offset - asked through the context, which resolves names, recurses and decides
- *     what an unknown or recursive callee answers. A computed callee is unknown;
+ *     what an unknown or recursive callee answers. A computed callee is unknown unless the
+ *     context can name every function it denotes;
  *   - compared, tested, or discarded: nothing is touched.
  * A parameter that is reassigned, incremented or has its own address taken is unknown.
  *
@@ -35,7 +36,7 @@
 import { NodeKind } from '../../ast/kinds.js';
 import type {
   ASTNode, BinaryExpr, CallExpr, CommaExpr, ConditionalExpr, Expression, Identifier,
-  IntegerLiteralExpr, MemberExpr, SubscriptExpr, UnaryExpr, TypeNode,
+  IntegerLiteralExpr, MemberExpr, StringLiteralExpr, SubscriptExpr, UnaryExpr, TypeNode,
 } from '../../ast/nodes.js';
 import { emit } from '../../emit/index.js';
 import { traverseAST, getChildren } from '../../ast/visitor.js';
@@ -63,6 +64,12 @@ export interface ParamReachContext {
    * when it is not known. Counted sinks (`memset(p, 0, 16)`) are answered before this is asked.
    */
   calleeReach: (callee: string, index: number, argCount: number) => Reach;
+  /**
+   * The same question for a call through a computed callee (`(*g->pfn)(p)`, `(*gaTable[i])(p)`):
+   * the reach every function that expression can denote has at that position. Absent, or
+   * null: unknown.
+   */
+  computedCalleeReach?: (callee: Expression, index: number, argCount: number) => Reach;
 }
 
 export interface ReachParam {
@@ -99,6 +106,121 @@ const COUNTED_REACH: Readonly<Record<string, { args: number[]; count: number; ti
   fwrite: { args: [0], count: 1, times: 2 },
 };
 
+/** Counted sinks among the platform's calls, matched on the bare name only (see FIXED_REACH). */
+const PLATFORM_COUNTED_REACH: Readonly<Record<string, { args: number[]; count: number }>> = {
+  ReadFile: { args: [1], count: 2 },
+  WriteFile: { args: [1], count: 2 },
+  VirtualQuery: { args: [1], count: 2 },
+  RegSetValueExA: { args: [4], count: 5 },
+  send: { args: [1], count: 2 },
+  recv: { args: [1], count: 2 },
+  connect: { args: [1], count: 2 },
+  bind: { args: [1], count: 2 },
+  setsockopt: { args: [3], count: 4 },
+};
+
+/**
+ * Win32 and CRT calls whose pointer argument at a position addresses exactly ONE object of
+ * a size the SDK documents: `GetClientRect(h, &rc)` writes one RECT, `WriteFile`'s
+ * `lpNumberOfBytesWritten` one DWORD. Sizes are the 32-bit SDK's `sizeof`. Only positions
+ * whose extent the contract fixes are listed: a string, a buffer sized by another argument
+ * that is not a literal, or a struct the callee sizes from its own first field
+ * (`GetVersionExA`) stays unknown. Matched on the bare name only, the spelling an import
+ * call has; a namespaced callee is the model's own function and is read from its body.
+ */
+const FIXED_REACH: Readonly<Record<string, Readonly<Record<number, number>>>> = {
+  // fileapi / minwinbase
+  ReadFile: { 3: 4 },
+  WriteFile: { 3: 4 },
+  GetFileSize: { 1: 4 },
+  GetDiskFreeSpaceA: { 1: 4, 2: 4, 3: 4, 4: 4 },
+  FindFirstFileA: { 1: 320 },
+  FindNextFileA: { 1: 320 },
+  GetFileTime: { 1: 8, 2: 8, 3: 8 },
+  SetFileTime: { 1: 8, 2: 8, 3: 8 },
+  CompareFileTime: { 0: 8, 1: 8 },
+  FileTimeToSystemTime: { 0: 8, 1: 16 },
+  FileTimeToLocalFileTime: { 0: 8, 1: 8 },
+  SystemTimeToFileTime: { 0: 16, 1: 8 },
+  GetSystemTimeAsFileTime: { 0: 8 },
+  GetLocalTime: { 0: 16 },
+  GetSystemTime: { 0: 16 },
+  GetTimeZoneInformation: { 0: 172 },
+  QueryPerformanceCounter: { 0: 8 },
+  QueryPerformanceFrequency: { 0: 8 },
+  // processes and threads
+  CreateThread: { 5: 4 },
+  _beginthreadex: { 5: 4 },
+  GetExitCodeThread: { 1: 4 },
+  GetExitCodeProcess: { 1: 4 },
+  CreateProcessA: { 8: 68, 9: 16 },
+  GetComputerNameA: { 1: 4 },
+  GetUserNameA: { 1: 4 },
+  InitializeCriticalSection: { 0: 24 },
+  DeleteCriticalSection: { 0: 24 },
+  EnterCriticalSection: { 0: 24 },
+  LeaveCriticalSection: { 0: 24 },
+  InterlockedIncrement: { 0: 4 },
+  InterlockedDecrement: { 0: 4 },
+  InterlockedExchange: { 0: 4 },
+  InterlockedExchangeAdd: { 0: 4 },
+  InterlockedCompareExchange: { 0: 4 },
+  GetThreadContext: { 1: 716 },
+  RtlCaptureContext: { 0: 716 },
+  Thread32First: { 1: 28 },
+  Thread32Next: { 1: 28 },
+  Process32FirstW: { 1: 556 },
+  Process32NextW: { 1: 556 },
+  Module32FirstW: { 1: 1064 },
+  Module32NextW: { 1: 1064 },
+  // registry
+  RegOpenKeyA: { 2: 4 },
+  RegCreateKeyA: { 2: 4 },
+  RegOpenKeyExA: { 4: 4 },
+  RegCreateKeyExA: { 7: 4, 8: 4 },
+  RegQueryValueExA: { 3: 4, 5: 4 },
+  RegEnumValueA: { 3: 4, 5: 4, 7: 4 },
+  // user32
+  GetClientRect: { 1: 16 },
+  GetWindowRect: { 1: 16 },
+  SetRect: { 0: 16 },
+  SetRectEmpty: { 0: 16 },
+  CopyRect: { 0: 16, 1: 16 },
+  OffsetRect: { 0: 16 },
+  InflateRect: { 0: 16 },
+  IntersectRect: { 0: 16, 1: 16, 2: 16 },
+  UnionRect: { 0: 16, 1: 16, 2: 16 },
+  PtInRect: { 0: 16 },
+  AdjustWindowRect: { 0: 16 },
+  AdjustWindowRectEx: { 0: 16 },
+  ClipCursor: { 0: 16 },
+  GetCursorPos: { 0: 8 },
+  ClientToScreen: { 1: 8 },
+  ScreenToClient: { 1: 8 },
+  DrawTextA: { 3: 16 },
+  PeekMessageA: { 0: 28 },
+  GetMessageA: { 0: 28 },
+  TranslateMessage: { 0: 28 },
+  DispatchMessageA: { 0: 28 },
+  ImmGetConversionStatus: { 1: 4, 2: 4 },
+  // winsock
+  WSAStartup: { 1: 400 },
+  select: { 1: 260, 2: 260, 3: 260, 4: 8 },
+  __WSAFDIsSet: { 1: 260 },
+  getsockname: { 2: 4 },
+  getpeername: { 2: 4 },
+  getsockopt: { 4: 4 },
+  ioctlsocket: { 2: 4 },
+  // crt
+  strtol: { 1: 4 },
+  strtoul: { 1: 4 },
+  strtod: { 1: 4 },
+  _localtime64_s: { 0: 36, 1: 8 },
+  _time64: { 0: 8 },
+  // ddraw
+  DirectDrawCreate: { 1: 4 },
+};
+
 const MAX_COUNT = 0x100000;
 
 function literalValue(e: Expression | undefined): number | null {
@@ -125,6 +247,12 @@ function literalValue(e: Expression | undefined): number | null {
 export function countedSinkReach(name: string, index: number, args: readonly Expression[]): Reach | undefined {
   const base = name.split('::').pop() ?? name;
   const sink = COUNTED_REACH[base] ?? (base.startsWith('_') ? COUNTED_REACH[base.slice(1)] : undefined);
+  return sinkCount(sink, index, args);
+}
+
+function sinkCount(
+  sink: { args: number[]; count: number; times?: number } | undefined, index: number, args: readonly Expression[],
+): Reach | undefined {
   if (!sink || !sink.args.includes(index)) return undefined;
   let count = literalValue(args[sink.count]);
   if (count === null || count < 0) return null;
@@ -135,6 +263,97 @@ export function countedSinkReach(name: string, index: number, args: readonly Exp
   }
   if (!Number.isSafeInteger(count) || count > MAX_COUNT) return null;
   return { lo: 0, hi: count };
+}
+
+/**
+ * The bytes one `scanf` conversion stores, by length modifier and conversion character;
+ * null for a conversion whose extent the format does not fix (`%s`, `%[`, `%c` without a
+ * width is one char, with one it is that many).
+ */
+function scanConversionSize(length: string, conversion: string, width: number | null): number | null {
+  switch (conversion) {
+    case 'd': case 'i': case 'u': case 'x': case 'X': case 'o': case 'n':
+      if (length === 'hh') return 1;
+      if (length === 'h') return 2;
+      if (length === 'll' || length === 'I64') return 8;
+      if (length === '' || length === 'l' || length === 'I32') return 4;
+      return null;
+    case 'e': case 'E': case 'f': case 'g': case 'G': case 'a':
+      if (length === '') return 4;
+      if (length === 'l') return 8;
+      return null;
+    case 'p':
+      return length === '' ? 4 : null;
+    case 'c':
+      return length === '' ? (width ?? 1) : null;
+    default:
+      return null;
+  }
+}
+
+/**
+ * The bytes each pointer argument after a literal `scanf` format receives, in order; null
+ * when the format is not one string literal or holds a conversion that sizes nothing.
+ * A `%*` conversion is matched and assigned nowhere, `%%` matches a percent sign.
+ */
+function scanFormatSizes(format: Expression | undefined): number[] | null {
+  let x = format;
+  while (x && x.kind === NodeKind.ParenExpr) x = (x as unknown as { expression: Expression }).expression;
+  if (!x || x.kind !== NodeKind.StringLiteral || (x as StringLiteralExpr).prefix !== '') return null;
+  const text = (x as StringLiteralExpr).value;
+  const sizes: number[] = [];
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== '%') continue;
+    i++;
+    if (text[i] === '%') continue;
+    const suppressed = text[i] === '*';
+    if (suppressed) i++;
+    let digits = '';
+    while (i < text.length && text[i] >= '0' && text[i] <= '9') digits += text[i++];
+    let length = '';
+    for (const m of ['hh', 'h', 'll', 'l', 'I64', 'I32', 'L', 'j', 'z', 't']) {
+      if (text.startsWith(m, i)) { length = m; i += m.length; break; }
+    }
+    const conversion = text[i];
+    if (conversion === undefined) return null;
+    if (suppressed) {
+      if (conversion === '[') return null;
+      continue;
+    }
+    const size = scanConversionSize(length, conversion, digits ? Number(digits) : null);
+    if (size === null) return null;
+    sizes.push(size);
+  }
+  return sizes;
+}
+
+/** `scanf`-family calls: the position of the format argument. */
+const SCAN_FORMAT: Readonly<Record<string, number>> = { sscanf: 1, scanf: 0, fscanf: 1 };
+
+/**
+ * The reach of a call whose contract fixes it, `undefined` when `name` is no such call,
+ * null when it is one but this call's arguments leave the extent open: a counted sink
+ * (`memset(p, 0, 16)`), a documented single-object out-parameter (`GetClientRect(h, &rc)`),
+ * or a `scanf` argument whose literal format conversion sizes it (`"%d"` stores 4 bytes).
+ */
+export function knownSinkReach(name: string, index: number, args: readonly Expression[]): Reach | undefined {
+  const counted = countedSinkReach(name, index, args);
+  if (counted !== undefined) return counted;
+  const bare = name.startsWith('::') ? name.slice(2) : name;
+  if (bare.includes('::')) return undefined;
+  const platformCounted = sinkCount(PLATFORM_COUNTED_REACH[bare], index, args);
+  if (platformCounted !== undefined) return platformCounted;
+  const fixed = FIXED_REACH[bare];
+  if (fixed && Object.prototype.hasOwnProperty.call(fixed, index)) return { lo: 0, hi: fixed[index] };
+  const formatAt = SCAN_FORMAT[bare];
+  if (formatAt !== undefined && index > formatAt) {
+    const sizes = scanFormatSizes(args[formatAt]);
+    if (!sizes) return null;
+    const size = sizes[index - formatAt - 1];
+    // An argument the format assigns nothing to is never written.
+    return size === undefined ? { ...NO_REACH } : { lo: 0, hi: size };
+  }
+  return undefined;
 }
 
 /** The type spelling a cast or declaration carries, normalised. */
@@ -338,9 +557,14 @@ export function paramReaches(
             const index = c.arguments.indexOf(cur as Expression);
             if (index < 0) throw new Unknown();            // called through, or a callee expression
             const name = calleeSpelling(c);
-            if (!name) throw new Unknown();
-            const counted = countedSinkReach(name, index, c.arguments);
-            const r = counted !== undefined ? counted : ctx.calleeReach(name, index, c.arguments.length);
+            let r: Reach;
+            if (!name) {
+              if (!ctx.computedCalleeReach) throw new Unknown();
+              r = ctx.computedCalleeReach(c.callee, index, c.arguments.length);
+            } else {
+              const known = knownSinkReach(name, index, c.arguments);
+              r = known !== undefined ? known : ctx.calleeReach(name, index, c.arguments.length);
+            }
             if (r === null) throw new Unknown();
             touch(d.off + r.lo, d.off + r.hi);
             return;
