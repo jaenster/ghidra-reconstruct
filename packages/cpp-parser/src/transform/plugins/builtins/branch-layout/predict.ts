@@ -64,6 +64,8 @@ export interface LayoutScore {
   rules: string[];
   /** The ifs with a fact that no rule predicts, by position, with the reason. */
   abstained: { line: number; column: number; rule: string }[];
+  /** The positions (`line:column`) of the ifs predicted against a fact. */
+  scored: Set<string>;
 }
 
 function unwrap(e: Expression): Expression {
@@ -303,7 +305,7 @@ export function predictFall(ifs: IfStmt, place: Place, ctx: PredictContext): Pre
 /** Score every if of `body` that has a fact. */
 export function scoreBody(body: CompoundStmt, reader: LayoutReader, noreturn: ReadonlySet<string>): LayoutScore {
   const ctx = predictContext(body, noreturn);
-  const out: LayoutScore = { objective: 0, sites: 0, mismatches: [], rules: [], abstained: [] };
+  const out: LayoutScore = { objective: 0, sites: 0, mismatches: [], rules: [], abstained: [], scored: new Set() };
   const visit = (n: ASTNode, place: Place): void => {
     if (n.kind === NodeKind.IfStmt) {
       const ifs = n as IfStmt;
@@ -315,6 +317,7 @@ export function scoreBody(body: CompoundStmt, reader: LayoutReader, noreturn: Re
       }
       if (fact && p && p.fall !== null) {
         out.sites++;
+        out.scored.add(`${ifs.location?.start.line ?? 0}:${ifs.location?.start.column ?? 0}`);
         out.rules.push(`${p.rule}=${p.fall === fact ? 1 : 0}`);
         if (p.fall !== fact) {
           out.objective++;

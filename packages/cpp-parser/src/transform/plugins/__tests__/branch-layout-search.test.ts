@@ -260,3 +260,71 @@ describe('branch-layout predict', () => {
     assert.notStrictEqual(new LayoutReader(one, b).edge(b.statements[0] as IfStmt), null);
   });
 });
+
+describe('branch-layout search - swap and nest', () => {
+  const ifElse = [
+    'int f(int* p) {',              // 1
+    '  if (!p) {',                  // 2
+    '    return 0;',                // 3
+    '  }',                          // 4
+    '  if (p[0] == 0) {',           // 5
+    '    p[1] = H(p);',             // 6
+    '  } else {',                   // 7
+    '    p[1] = 5;',                // 8
+    '  }',                          // 9
+    '  return p[1];',               // 10
+    '}',
+  ].join('\n');
+  // The second if falls into the else-arm: the source tested the other way round.
+  const elseFirst = [edge(2, 0x02, 0x40, 0x04, [3], [5]), edge(5, 0x06, 0x20, 0x08, [8], [6])];
+
+  it('swaps an if/else whose jump falls into the else-arm', () => {
+    const { out, sites } = run(ifElse, elseFirst);
+    assert.deepStrictEqual(sites, ['swap']);
+    assert.ok(out.includes('if (p[0] != 0) { p[1] = 5; } else { p[1] = H(p); }'), out);
+  });
+
+  it('keeps the values and side effects of the swap', native, () => {
+    sameValues(ifElse, run(ifElse, elseFirst).out, INPUTS);
+  });
+
+  it('leaves an if/else whose jump falls into the then-arm', () => {
+    assert.deepStrictEqual(run(ifElse, [edge(2, 0x02, 0x40, 0x04, [3], [5]), edge(5, 0x06, 0x20, 0x08, [6], [8])]).sites, []);
+  });
+
+  it('leaves an if/else whose arm holds a label something jumps to: the predictor abstains there', () => {
+    const labelled = ifElse.replace('    p[1] = 5;', '  L:\n    p[1] = 5;').replace('  if (!p) {', '  if (!p) {\n    goto L;').replace('    return 0;\n', '');
+    // Lines: 2 if(!p), 3 goto, 4 }, 5 if, 6 then, 7 else, 8 label, 9 p[1]=5.
+    const e = [edge(5, 0x06, 0x20, 0x08, [9], [6])];
+    assert.ok(!run(labelled, e).sites.includes('swap'));
+  });
+
+  const guard = [
+    'int f(int* p) {',              // 1
+    '  if (!p) {',                  // 2
+    '    return 0;',                // 3
+    '  }',                          // 4
+    '  if (p[0] == 0) {',           // 5
+    '    return 7;',                // 6
+    '  }',                          // 7
+    '  p[1] = H(p);',               // 8
+    '  return p[1] + 1;',           // 9
+    '}',
+  ].join('\n');
+  // The guard's jump goes to its own arm, after the rest: the source nested the rest.
+  const nested = [edge(2, 0x02, 0x40, 0x04, [3], [5]), edge(5, 0x06, 0x20, 0x08, [8], [6])];
+
+  it('nests the rest under a guard whose own arm the original laid out after it', () => {
+    const { out, sites } = run(guard, nested);
+    assert.deepStrictEqual(sites, ['nest']);
+    assert.ok(out.includes('if (p[0] != 0) { p[1] = H(p); return p[1] + 1; } return 7;'), out);
+  });
+
+  it('keeps the values and side effects of the nest', native, () => {
+    sameValues(guard, run(guard, nested).out, INPUTS);
+  });
+
+  it('leaves a guard whose arm the original laid out inline', () => {
+    assert.deepStrictEqual(run(guard, [edge(2, 0x02, 0x40, 0x04, [3], [5]), edge(5, 0x06, 0x20, 0x08, [6], [8])]).sites, []);
+  });
+});

@@ -15,6 +15,14 @@
  *                 (`T x2 = x1 ? e(x1) : 0;`), and VC8 threads the jump through the known
  *                 value. One more definition may sit before x2's (`t = e0;`); it moves into
  *                 the ternary's arm as a comma operand.
+ *   swap          `if (c) A else B` -> `if (!c) B else A` (with B an assertion halt outside a
+ *                 loop, the sequential `if (!c) { B } A`).
+ *   nest          `if (c) X; Y...` -> `if (!c) { Y... } X`, X and Y... leaving, outside a loop.
+ *
+ * swap and nest have no pattern of their own: the edges decide them, so each is kept only
+ * where the predictor scores every if it moves, before and after, and the rewritten if
+ * itself. The local rewrites of index.ts leave an if one of them settled.
+ * GHIDRA_BRANCH_LAYOUT_W1=0 leaves swap and nest out.
  */
 
 import { NodeKind } from '../../../../ast/kinds.js';
@@ -28,8 +36,9 @@ import { updateNode } from '../../../transformer.js';
 import { Stmt, Expr } from '../../../../ast/factory.js';
 import { holdsFreeCase } from '../goto-cleanup/paths.js';
 import { LayoutReader, isLoop, type BranchLayoutEvidence } from './evidence.js';
-import { scoreBody, returnKey } from './predict.js';
-import { negate, jumpedLabels, gotoCounts, declaredNames, mentionsAny } from './index.js';
+import { scoreBody, returnKey, type LayoutScore } from './predict.js';
+import { negate, jumpedLabels, gotoCounts, declaredNames, mentionsAny, spliced, asBlock } from './index.js';
+import { leaves, isHaltStmt, isExitStmt } from '../assert-order.js';
 
 export interface SearchOptions {
   noreturn: ReadonlySet<string>;
@@ -39,14 +48,23 @@ export interface SearchOptions {
   voidResult: boolean;
   /** Names of the enum types, unqualified. */
   enumTypes: ReadonlySet<string>;
-  onSite?: (e: { rule: 'return-merge' | 'propagate'; line: number; why?: string }) => void;
+  onSite?: (e: { rule: Rule; line: number; why?: string }) => void;
+  /** Filled with the positions (`line:column`) of the ifs a swap or nest settled, for the local rewrites to leave. */
+  fixed?: Set<string>;
 }
 
+type Rule = 'return-merge' | 'propagate' | 'swap' | 'nest';
+
 interface Candidate {
-  rule: 'return-merge' | 'propagate';
+  rule: Rule;
   line: number;
   list: CompoundStmt;
   replacement: Statement[];
+  /**
+   * The statements the rewrite moves (swap, nest): it is kept only when the predictor
+   * scores every if among them, before and after, and the rewritten if itself.
+   */
+  region?: { before: Statement[]; main: IfStmt };
 }
 
 function bodyOf(s: Statement): Statement[] {
@@ -331,6 +349,87 @@ function propagate(entry: { list: CompoundStmt }, i: number, reader: LayoutReade
   };
 }
 
+function endsInHalt(stmts: readonly Statement[]): boolean {
+  return stmts.length >= 2 && isHaltStmt(stmts[stmts.length - 2]) && isExitStmt(stmts[stmts.length - 1]);
+}
+
+function placedIf(ifs: IfStmt): boolean {
+  return !!ifs.location && ifs.location.file !== '<generated>' && ifs.location.start.line > 0;
+}
+
+/**
+ * `if (c) A else B` -> `if (!c) B else A`; with B an assertion halt outside a loop, the
+ * sequential assertion `if (!c) { B } A...`. The negation is exact; the arms keep their
+ * statements. Which form the original wrote, the objective decides.
+ */
+function swapIf(entry: { list: CompoundStmt; inLoop: boolean }, i: number, gotos: ReadonlyMap<string, number>): Candidate | null {
+  const stmts = entry.list.statements;
+  const ifs = stmts[i] as IfStmt;
+  if (!ifs.elseBranch || ifs.init || ifs.isConstexpr || !placedIf(ifs)) return null;
+  if (jumpedLabels([ifs], gotos) || holdsFreeCase([ifs])) return null;
+  const then = ifs.thenBranch, other = ifs.elseBranch;
+  const cond = negate(ifs.condition);
+  let repl: Statement[];
+  if (endsInHalt(bodyOf(other)) && !entry.inLoop) {
+    const guard = updateNode(ifs, { condition: cond, thenBranch: asBlock([other]), elseBranch: null } as Partial<IfStmt>);
+    repl = [guard, ...spliced(then, bodyOf(then), stmts.slice(0, i), stmts.slice(i + 1))];
+  } else {
+    // An else-if moved into the then-arm is braced, or the old then-arm would bind to it.
+    const thenArm = other.kind === NodeKind.IfStmt ? Stmt.compound([other]) : other;
+    repl = [updateNode(ifs, { condition: cond, thenBranch: thenArm, elseBranch: then } as Partial<IfStmt>)];
+  }
+  return {
+    rule: 'swap', line: ifs.location.start.line, list: entry.list,
+    replacement: [...stmts.slice(0, i), ...repl, ...stmts.slice(i + 1)],
+    region: { before: [ifs], main: ifs },
+  };
+}
+
+/**
+ * `if (c) X; Y...` where X leaves and Y..., the rest of the block, ends leaving, outside a
+ * loop: `if (!c) { Y... } X`. Both directions of guard <-> nest are this one rewrite.
+ */
+function nestIf(entry: { list: CompoundStmt; inLoop: boolean }, i: number, gotos: ReadonlyMap<string, number>, opts: SearchOptions): Candidate | null {
+  const stmts = entry.list.statements;
+  const ifs = stmts[i] as IfStmt;
+  if (ifs.elseBranch || ifs.init || ifs.isConstexpr || entry.inLoop || !placedIf(ifs)) return null;
+  const rest = stmts.slice(i + 1);
+  if (rest.length === 0) return null;
+  const then = ifs.thenBranch;
+  if (!leaves(then, opts.noreturn) || !leaves(rest[rest.length - 1], opts.noreturn)) return null;
+  if (!movable([then, ...rest], gotos)) return null;
+  const nested = updateNode(ifs, { condition: negate(ifs.condition), thenBranch: Stmt.compound(rest), elseBranch: null } as Partial<IfStmt>);
+  return {
+    rule: 'nest', line: ifs.location.start.line, list: entry.list,
+    replacement: [...stmts.slice(0, i), nested, ...spliced(then, bodyOf(then), stmts.slice(0, i), [])],
+    region: { before: [ifs, ...rest], main: ifs },
+  };
+}
+
+/** The positions of the placed ifs in `roots`. */
+function ifPositions(roots: readonly ASTNode[]): Set<string> {
+  const out = new Set<string>();
+  for (const r of roots) {
+    for (const n of traverseAST(r)) {
+      if (n.kind === NodeKind.IfStmt && placedIf(n as IfStmt)) out.add(`${n.location.start.line}:${n.location.start.column}`);
+    }
+  }
+  return out;
+}
+
+/**
+ * The predictor is confident over the region: no if in it abstains, before or after, and the
+ * rewritten if is scored after.
+ */
+function confident(c: Candidate, before: LayoutScore, after: LayoutScore): boolean {
+  if (!c.region) return true;
+  const where = ifPositions([...c.region.before, ...c.replacement.filter(s => !c.list.statements.includes(s))]);
+  const hit = (s: LayoutScore) => s.abstained.some(a => where.has(`${a.line}:${a.column}`));
+  if (hit(before) || hit(after)) return false;
+  const m = c.region.main.location.start;
+  return after.scored.has(`${m.line}:${m.column}`);
+}
+
 function candidates(body: CompoundStmt, reader: LayoutReader, opts: SearchOptions): Candidate[] {
   const gotos = gotoCounts(body);
   const out: Candidate[] = [];
@@ -342,6 +441,10 @@ function candidates(body: CompoundStmt, reader: LayoutReader, opts: SearchOption
       if (a) out.push(a);
       const b = propagate(entry, i, reader, opts);
       if (b) out.push(b);
+      const c = swapIf(entry, i, gotos);
+      if (c) out.push(c);
+      const d = nestIf(entry, i, gotos, opts);
+      if (d) out.push(d);
     }
   }
   return out;
@@ -351,20 +454,26 @@ function candidates(body: CompoundStmt, reader: LayoutReader, opts: SearchOption
 export function layoutSearch(body: CompoundStmt, ev: BranchLayoutEvidence, opts: SearchOptions): CompoundStmt {
   if (!ev.edges) return body;
   let cur = body;
-  let score = scoreBody(cur, new LayoutReader(ev, cur), opts.noreturn).objective;
+  let full = scoreBody(cur, new LayoutReader(ev, cur), opts.noreturn);
+  let score = full.objective;
+  const w1 = process.env.GHIDRA_BRANCH_LAYOUT_W1 !== '0';
   for (let round = 0; round < 8 && score > 0; round++) {
     const reader = new LayoutReader(ev, cur);
-    let best: { body: CompoundStmt; score: number; c: Candidate } | null = null;
+    let best: { body: CompoundStmt; score: number; full: LayoutScore; c: Candidate } | null = null;
     for (const c of candidates(cur, reader, opts)) {
+      if (c.region && !w1) continue;
       const list = updateNode(c.list, { statements: c.replacement } as Partial<CompoundStmt>);
       const next = rebuild(cur, c.list, list) as CompoundStmt;
-      const s = scoreBody(next, new LayoutReader(ev, next), opts.noreturn).objective;
-      if (s < (best?.score ?? score)) best = { body: next, score: s, c };
+      const sc = scoreBody(next, new LayoutReader(ev, next), opts.noreturn);
+      const s = sc.objective;
+      if (s < (best?.score ?? score) && confident(c, full, sc)) best = { body: next, score: s, full: sc, c };
     }
     if (!best) break;
     opts.onSite?.({ rule: best.c.rule, line: best.c.line, why: `objective ${score} -> ${best.score}` });
     cur = best.body;
     score = best.score;
+    full = best.full;
+    if (best.c.region) opts.fixed?.add(`${best.c.region.main.location.start.line}:${best.c.region.main.location.start.column}`);
   }
   return cur;
 }

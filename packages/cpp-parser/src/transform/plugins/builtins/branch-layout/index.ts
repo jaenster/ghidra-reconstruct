@@ -209,7 +209,7 @@ export function mentionsAny(roots: readonly ASTNode[], names: ReadonlySet<string
  * `after`. Braced when a name it declares is declared in `before` (a redeclaration) or
  * read in `after` (it would now see the inner one), or is not a plain variable.
  */
-function spliced(original: Statement, stmts: Statement[], before: readonly Statement[], after: readonly Statement[]): Statement[] {
+export function spliced(original: Statement, stmts: Statement[], before: readonly Statement[], after: readonly Statement[]): Statement[] {
   const names = declaredNames(stmts);
   if (names.size === 0) return stmts;
   const clash = names.has('\0') || mentionsAny(after, names)
@@ -218,7 +218,7 @@ function spliced(original: Statement, stmts: Statement[], before: readonly State
   return [original.kind === NodeKind.CompoundStmt ? original : Stmt.compound(stmts)];
 }
 
-function asBlock(stmts: Statement[]): Statement {
+export function asBlock(stmts: Statement[]): Statement {
   return stmts.length === 1 && stmts[0].kind === NodeKind.CompoundStmt ? stmts[0] : Stmt.compound(stmts);
 }
 
@@ -288,6 +288,12 @@ interface Ctx {
   enumValues: Readonly<Record<string, number>>;
   /** Declared type of each parameter and local of the function. */
   localTypes: ReadonlyMap<string, TypeNode>;
+  /** The ifs (`line:column`) the whole-function search settled: left as they are. */
+  fixed: ReadonlySet<string>;
+}
+
+function positionOf(s: Statement): string {
+  return `${s.location?.start.line ?? 0}:${s.location?.start.column ?? 0}`;
 }
 
 function lineOf(s: Statement): number {
@@ -709,7 +715,7 @@ function rewriteList(stmts: readonly Statement[], ctx: Ctx): Statement[] | null 
     const s = cur[i];
     if (s.kind !== NodeKind.IfStmt) continue;
     const ifs = s as IfStmt;
-    if (ifs.init || ifs.isConstexpr) continue;
+    if (ifs.init || ifs.isConstexpr || ctx.fixed.has(positionOf(ifs))) continue;
     // The first if of a condition a pass split takes its own last branch from the operands.
     const cb = ctx.reader.cbranch(ifs)
       ?? (!ifs.elseBranch && conditionShape(ifs.condition).kind === 'or' ? ctx.reader.prefixBranch(ifs, leafCount(ifs.condition)) : null);
@@ -741,7 +747,9 @@ function rewriteFunction(fn0: FunctionDecl, ev: BranchLayoutEvidence, opts: Bran
   const noreturn = new Set([...DEFAULT_NORETURN_FUNCTIONS, ...(opts.noreturnFunctions ?? [])]);
   // The whole-function rewrites first (search.ts); the local ones below see their result.
   // GHIDRA_BRANCH_LAYOUT_SEARCH=0 leaves them out.
+  const fixed = new Set<string>();
   const searched = process.env.GHIDRA_BRANCH_LAYOUT_SEARCH === '0' ? fn0.body : layoutSearch(fn0.body, ev, {
+    fixed,
     noreturn,
     localTypes: localTypesOf(fn0),
     voidResult: isVoidFunction(fn0),
@@ -759,6 +767,7 @@ function rewriteFunction(fn0: FunctionDecl, ev: BranchLayoutEvidence, opts: Bran
     nullGetters: opts.nullGetters ?? {},
     enumValues: opts.enumValues ?? {},
     localTypes: localTypesOf(fn),
+    fixed,
   };
   let n = 0;
   const t = createTransformer({
@@ -767,7 +776,7 @@ function rewriteFunction(fn0: FunctionDecl, ev: BranchLayoutEvidence, opts: Bran
       const inner = node.elseBranch;
       if (!inner || inner.kind !== NodeKind.IfStmt) return undefined;
       const e = inner as IfStmt;
-      if (!e.elseBranch || e.init || e.isConstexpr) return undefined;
+      if (!e.elseBranch || e.init || e.isConstexpr || ctx.fixed.has(positionOf(e))) return undefined;
       const cb = ctx.reader.cbranch(e);
       if (cb === null) return undefined;
       const r = swapAt(e, cb, ctx, null);
