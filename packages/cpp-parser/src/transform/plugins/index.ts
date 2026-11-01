@@ -366,6 +366,8 @@ export {
   type WriteEffectOptions,
 } from './builtins/write-effects.js';
 
+export { type AggregateModel, type AggregateField } from './builtins/memory-regions.js';
+
 export {
   baseRegisterLoadPlugin,
   type BaseRegisterLoadOptions,

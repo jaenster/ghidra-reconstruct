@@ -5990,7 +5990,9 @@ export function buildFuncPtrArgCastTables(
     ambiguousGlobalNames: [...ambiguousGlobalNames],
     stringConstantNames,
     varArgFunctions: [...varArgFunctions],
-    writeEffects: buildWriteEffects(functions, globalTypes),
+    writeEffects: buildWriteEffects(functions, globalTypes, undefined, {
+      globals, aggregates: { layouts: structLayouts, unions: unionNames, sizes: aggregateSizes, typedefs: typedefTargets },
+    }),
     fieldTypes,
     typedefTargets,
     structFields,

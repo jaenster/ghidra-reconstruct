@@ -38,7 +38,10 @@
  *     side; two rolls of one seed (`SOUND_PlayEnvironmentSound(n,
  *     RollBetweenMinAndMax(pSeed, ..), RollBetweenMinAndMax(pSeed, ..), 0)`) do not, nor
  *     does a global read beside a call that writes it. A run of temporaries that may not
- *     all nest nests its later ones (DRAW_UI_HelpXpac, 00495410);
+ *     all nest nests its later ones (DRAW_UI_HelpXpac, 00495410). Memory reached through
+ *     typed pointers is apart when the regions are (memory-regions.ts): RollRandomNumerUp-
+ *     ToArgument stores only a D2SeedStrc, so `pMonSoundsLine->Flee` beside it reads the
+ *     same either way (UNITSND_PlayFleeSound);
  *   - a constant held in a narrow temporary fits it, and the temporary is the whole
  *     argument (casts aside), so the constant reaches the parameter with the same value;
  *   - each call temporary's value has the temporary's type (its callee's return type, or
@@ -78,6 +81,7 @@ import {
 } from './call-arg-cast.js';
 import { isHaltStmt } from './assert-order.js';
 import type { WriteEffect } from './write-effects.js';
+import { Regions, regionOf, typeOf, type AggregateModel, type TypingEnv } from './memory-regions.js';
 
 /** One direct call the decompile prints on a line (extract/call-order.ts). */
 export interface CallSiteFact {
@@ -110,6 +114,8 @@ export interface NestCallOptions extends PluginOptions {
   writeEffects?: Record<string, WriteEffect>;
   /** Typedef name -> the spelling it stands for. */
   typedefTargets?: Record<string, string>;
+  /** The aggregates, for the regions an access through a typed pointer reaches. */
+  aggregates?: AggregateModel;
   /** The enclosing function's namespace, innermost last, for unqualified callee lookup. */
   enclosingSegments?: string[];
   /** Called once per rewritten statement, with the number of temporaries nested. */
@@ -185,7 +191,11 @@ function topCall(s: Statement): CallExpr | null {
   return c.kind === NodeKind.CallExpr ? c as CallExpr : null;
 }
 
-interface Local { decl: VariableDecl; shape: TypeShape | null; addressed: boolean; param: boolean; array: boolean }
+interface Local {
+  decl: VariableDecl; shape: TypeShape | null; addressed: boolean; param: boolean; array: boolean;
+  /** No assignment converts a value into it with a cast, and its address is not taken. */
+  trusted: boolean;
+}
 
 interface Temp {
   stmt: ExprStmt;
@@ -211,6 +221,9 @@ interface Ctx {
   ev: CallOrderEvidence;
   resolve: TypedefResolver;
   opts: NestCallOptions;
+  regions: Regions | null;
+  typing: TypingEnv;
+  body: CompoundStmt;
 }
 
 function collectLocals(fn: FunctionDecl): Map<string, Local> | null {
@@ -218,7 +231,7 @@ function collectLocals(fn: FunctionDecl): Map<string, Local> | null {
   const dup = new Set<string>();
   const add = (name: string, decl: VariableDecl, shape: TypeShape | null, param: boolean) => {
     if (out.has(name)) dup.add(name);
-    out.set(name, { decl, shape, addressed: false, param, array: decl.type?.kind === NodeKind.ArrayType });
+    out.set(name, { decl, shape, addressed: false, param, array: decl.type?.kind === NodeKind.ArrayType, trusted: true });
   };
   for (const p of fn.parameters as ParameterDecl[]) {
     const n = (p as unknown as { name?: Identifier | null }).name;
@@ -237,12 +250,86 @@ function collectLocals(fn: FunctionDecl): Map<string, Local> | null {
       for (const m of traverseAST((n as UnaryExpr).operand)) {
         if (m.kind === NodeKind.Identifier) {
           const l = out.get((m as Identifier).name);
-          if (l) l.addressed = true;
+          if (l) { l.addressed = true; l.trusted = false; }
         }
       }
     }
+    if (n.kind === NodeKind.AssignExpr && (n as AssignExpr).operator === '=') {
+      const left = unwrap((n as AssignExpr).left);
+      const l = left.kind === NodeKind.Identifier ? out.get((left as Identifier).name) : undefined;
+      if (l && convertsByCast((n as AssignExpr).right)) l.trusted = false;
+    }
   }
+  for (const l of out.values()) if (l.decl.initializer && convertsByCast(l.decl.initializer as Expression)) l.trusted = false;
   return out;
+}
+
+/** Whether a value is converted into its variable by a cast (a null constant aside). */
+function convertsByCast(e: Expression): boolean {
+  const u = unwrap(e);
+  if (u.kind !== NodeKind.CStyleCastExpr) return false;
+  const inner = unwrapCasts(u);
+  return !(inner.kind === NodeKind.IntegerLiteral && (inner as unknown as { value: bigint }).value === 0n) && !isNullName(inner);
+}
+
+/** The typing the region rules read: trusted locals and parameters, globals, fields. */
+function typingOf(ctx: Ctx): TypingEnv {
+  return {
+    nameType(e: Expression): TypeShape | null {
+      const name = nameOf(e);
+      if (!name) return null;
+      const l = e.kind === NodeKind.Identifier ? ctx.locals.get(name) : undefined;
+      if (l) return l.trusted && !l.array ? declShape(l, ctx) : null;
+      const g = globalSpelling(name, ctx);
+      return g ? shapeOfSpelling(g, ctx.resolve) : null;
+    },
+    pointerHeld: id => pointerHeld(id, ctx),
+  };
+}
+
+/**
+ * For an integer local the body assigns once, `x = (int)p;` at its top level before any
+ * other mention, in a function without labels: `p`. Every read of `x` then holds the
+ * address `p` held.
+ */
+function pointerHeld(id: Identifier, ctx: Ctx): Expression | null {
+  const l = ctx.locals.get(id.name);
+  if (!l || l.param || l.addressed || l.array || ctx.labels || !ctx.regions) return null;
+  const shape = declShape(l, ctx);
+  if (!shape || !isWordIntegerShape(shape)) return null;
+  let value: Expression | null = null;
+  let at: Identifier | null = null;
+  if (l.decl.initializer) {
+    const d = ctx.body.statements.find(st => st.kind === NodeKind.DeclStmt && (st as DeclStmt).declarations.includes(l.decl));
+    if (!d) return null;
+    value = l.decl.initializer as Expression;
+    at = l.decl.name;
+  }
+  for (const n of traverseAST(ctx.body)) {
+    const writes = n.kind === NodeKind.AssignExpr ? (n as AssignExpr).left
+      : n.kind === NodeKind.PostfixExpr || (n.kind === NodeKind.UnaryExpr && ['++', '--'].includes((n as UnaryExpr).operator))
+        ? (n as unknown as { operand: Expression }).operand : null;
+    if (!writes || unwrap(writes).kind !== NodeKind.Identifier || (unwrap(writes) as Identifier).name !== id.name) continue;
+    if (value || n.kind !== NodeKind.AssignExpr || (n as AssignExpr).operator !== '=') return null;
+    if (!ctx.body.statements.some(st => st.kind === NodeKind.ExprStmt && unwrap((st as ExprStmt).expression) === n)) return null;
+    value = (n as AssignExpr).right;
+    at = unwrap((n as AssignExpr).left) as Identifier;
+  }
+  if (!value || !at) return null;
+  const from = ctx.identIndex.get(at);
+  if (from === undefined) return null;
+  // Every other mention comes after the assignment and outside its value.
+  const inValue = new Set([...traverseAST(value)]);
+  for (const m of ctx.idents) {
+    if (m.name !== id.name || m === at || m === l.decl.name) continue;
+    if ((ctx.identIndex.get(m) ?? -1) <= from || inValue.has(m)) return null;
+  }
+  const v = unwrap(value);
+  if (v.kind !== NodeKind.CStyleCastExpr) return null;
+  const to = shapeOfNode((v as CStyleCastExpr).type, 0, ctx.resolve);
+  if (!to || !isWordIntegerShape(to)) return null;
+  const p = (v as CStyleCastExpr).expression;
+  return ctx.regions.pointee(typeOf(p, ctx.typing, ctx.regions)) ? p : null;
 }
 
 /** The facts for a call named `name` printed on `s`'s lines; null unless exactly one. */
@@ -427,15 +514,31 @@ function nameOf(e: Expression): string | null {
   return null;
 }
 
-/** What evaluating an expression may read or write, beyond the caller's private locals. */
-interface Eff { unknown: boolean; memory: boolean; globals: Set<string> }
+/**
+ * What evaluating an expression may read or write, beyond the caller's private locals.
+ * With `memory`, `regions` are the only typed regions it reaches; null: anything.
+ */
+interface Eff { unknown: boolean; memory: boolean; regions: Set<string> | null; globals: Set<string> }
 
-const noEff = (): Eff => ({ unknown: false, memory: false, globals: new Set() });
+const noEff = (): Eff => ({ unknown: false, memory: false, regions: new Set(), globals: new Set() });
 
-function addEff(into: Eff, e: { unknown?: boolean; memory?: boolean; globals?: Iterable<string>; params?: readonly number[] } | undefined): void {
+function addMemory(into: Eff, r: Set<string> | null): void {
+  if (!into.memory) into.regions = r === null ? null : new Set(r);
+  else if (into.regions !== null) {
+    if (r === null) into.regions = null;
+    else for (const x of r) into.regions.add(x);
+  }
+  into.memory = true;
+}
+
+function addEff(into: Eff, e: Omit<WriteEffect, 'reads'> | undefined): void {
   if (!e || e.unknown) { into.unknown = true; return; }
+  if (e.memory) addMemory(into, e.regions ? new Set(e.regions) : null);
   // A write or read through a pointer argument is memory, as the caller sees it.
-  if (e.memory || (e.params && e.params.length)) into.memory = true;
+  for (const p of e.params ?? []) {
+    const r = e.paramRegions?.[String(p)];
+    addMemory(into, r ? new Set(r) : null);
+  }
   for (const g of e.globals ?? []) into.globals.add(g);
 }
 
@@ -452,11 +555,13 @@ function sameGlobal(a: string, b: string): boolean {
 }
 
 /** Whether something `w` writes may be what `x` reads or writes. */
-function interferes(w: Eff, x: Eff): boolean {
+function interferes(w: Eff, x: Eff, regions: Regions | null): boolean {
   if (isEmpty(w) || isEmpty(x)) return false;
-  if (w.unknown || x.unknown || w.memory) return true;
+  if (w.unknown || x.unknown) return true;
   // Memory behind a pointer may be any global.
-  if (x.memory) return true;
+  if ((w.memory && x.globals.size) || (x.memory && w.globals.size)) return true;
+  // Two typed accesses are apart when their regions are.
+  if (w.memory && x.memory && (!regions || regions.overlapAny(w.regions, x.regions))) return true;
   for (const g of w.globals) for (const h of x.globals) if (sameGlobal(g, h)) return true;
   return false;
 }
@@ -478,6 +583,11 @@ function unitOf(e: ASTNode, ctx: Ctx, free: ReadonlySet<ASTNode>): Unit {
       u.r.globals.add(bareName(name));
     }
   };
+  /** A read through a pointer, of the region the access reaches where it can be told. */
+  const through = (n: ASTNode): void => {
+    const at = ctx.regions ? regionOf(n as Expression, ctx.typing, ctx.regions) : null;
+    addMemory(u.r, at === null ? null : new Set([at]));
+  };
   /** An object's storage read or reached: `local`, `global`, or through a pointer. */
   const object = (o: Expression): void => {
     const x = unwrap(o);
@@ -485,7 +595,7 @@ function unitOf(e: ASTNode, ctx: Ctx, free: ReadonlySet<ASTNode>): Unit {
     if (name) {
       if (isNullName(x)) return;
       const l = x.kind === NodeKind.Identifier ? ctx.locals.get(name) : undefined;
-      if (l) { if (l.addressed || l.array) u.r.memory = true; return; }
+      if (l) { if (l.addressed || l.array) addMemory(u.r, null); return; }
       const g = globalSpelling(name, ctx);
       if (g !== undefined) { u.r.globals.add(bareName(name)); return; }
       u.r.unknown = true;
@@ -531,7 +641,7 @@ function unitOf(e: ASTNode, ctx: Ctx, free: ReadonlySet<ASTNode>): Unit {
         if (!name) { u.r.unknown = true; return; }
         if (isNullName(n as Expression)) return;
         const l = n.kind === NodeKind.Identifier ? ctx.locals.get(name) : undefined;
-        if (l) { if (l.addressed && !l.array) u.r.memory = true; return; }
+        if (l) { if (l.addressed && !l.array) addMemory(u.r, null); return; }
         readGlobal(name);
         return;
       }
@@ -539,13 +649,13 @@ function unitOf(e: ASTNode, ctx: Ctx, free: ReadonlySet<ASTNode>): Unit {
         const x = n as UnaryExpr;
         if (x.operator === '&') { address(x.operand); return; }
         if (x.operator === '++' || x.operator === '--') { u.w.unknown = true; return; }
-        if (x.operator === '*') u.r.memory = true;
+        if (x.operator === '*') through(n);
         value(x.operand);
         return;
       }
       case NodeKind.MemberExpr: {
         const m = n as unknown as { object: Expression; isArrow: boolean };
-        if (m.isArrow) { u.r.memory = true; value(m.object); } else object(m.object);
+        if (m.isArrow) { through(n); value(m.object); } else object(m.object);
         return;
       }
       case NodeKind.SubscriptExpr: {
@@ -554,9 +664,9 @@ function unitOf(e: ASTNode, ctx: Ctx, free: ReadonlySet<ASTNode>): Unit {
         const base = unwrap(sub.array);
         const name = nameOf(base);
         const local = name && base.kind === NodeKind.Identifier ? ctx.locals.get(name) : undefined;
-        if (local?.array) { u.r.memory = true; return; }
+        if (local?.array) { addMemory(u.r, null); return; }
         if (name && !local && (globalSpelling(name, ctx) ?? '').includes('[')) { u.r.globals.add(bareName(name)); return; }
-        u.r.memory = true;
+        through(n);
         value(sub.array);
         return;
       }
@@ -586,11 +696,11 @@ function unitOf(e: ASTNode, ctx: Ctx, free: ReadonlySet<ASTNode>): Unit {
  * Whether the units give the same result in any order: none writes what another reads or
  * writes. Two calls that write nothing are independent whatever they read.
  */
-function independent(units: Unit[]): boolean {
+function independent(units: Unit[], regions: Regions | null): boolean {
   for (let i = 0; i < units.length; i++) {
     for (let j = i + 1; j < units.length; j++) {
       const a = units[i], b = units[j];
-      if (interferes(a.w, b.r) || interferes(a.w, b.w) || interferes(b.w, a.r)) return false;
+      if (interferes(a.w, b.r, regions) || interferes(a.w, b.w, regions) || interferes(b.w, a.r, regions)) return false;
     }
   }
   return true;
@@ -789,7 +899,7 @@ function validRun(temps: Temp[], call: CallExpr, outer: CallSiteFact, target: Ex
     t.r = tu.r;
     units.push(t);
   }
-  if (!independent(units)) return false;
+  if (!independent(units, ctx.regions)) return false;
   // Evidence, call by call in evaluation order: before each inner CALL the pushes of the
   // arguments right of it (up to the previous inner call's) and its own; the outer CALL
   // right after the last with the pushes of the arguments up to it.
@@ -839,8 +949,9 @@ function rewriteFunction(fn: FunctionDecl, ev: CallOrderEvidence, opts: NestCall
   for (const n of opts.enumConstants ?? []) enums[n] = true;
   const ctx: Ctx = {
     locals, idents: [], identIndex: new Map(), labels, varArgs, enums, lineOwners, ev,
-    resolve: name => typedefTargets[name], opts,
+    resolve: name => typedefTargets[name], opts, regions: regionsFor(opts), typing: { nameType: () => null }, body,
   };
+  ctx.typing = typingOf(ctx);
   const reindex = () => {
     ctx.idents = [...traverseAST(body)].filter(n => n.kind === NodeKind.Identifier) as Identifier[];
     ctx.identIndex = new Map(ctx.idents.map((n, i) => [n, i]));
@@ -889,6 +1000,16 @@ function rewriteFunction(fn: FunctionDecl, ev: CallOrderEvidence, opts: NestCall
     dropDecl(body, decl);
   }
   return updateNode(fn, { body } as Partial<FunctionDecl>);
+}
+
+const regionModels = new WeakMap<AggregateModel, Regions>();
+
+function regionsFor(opts: NestCallOptions): Regions | null {
+  const m = opts.aggregates;
+  if (!m) return null;
+  let r = regionModels.get(m);
+  if (!r) regionModels.set(m, r = new Regions(m));
+  return r;
 }
 
 function parentOf(root: ASTNode, target: ASTNode): ASTNode | null {

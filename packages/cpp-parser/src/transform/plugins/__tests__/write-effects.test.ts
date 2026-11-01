@@ -1,8 +1,10 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { parse } from '../../../parser/index.js';
+import { emit } from '../../../emit/index.js';
 import type { CompoundStmt, FunctionDecl, Identifier } from '../../../ast/nodes.js';
 import { summarizeWriteEffects, type EffectFunction, type WriteEffectOptions } from '../builtins/write-effects.js';
+import type { AggregateModel } from '../builtins/memory-regions.js';
 
 /** Every function of `src`, keyed by its name. */
 function summarize(src: string, opts: WriteEffectOptions = {}) {
@@ -10,6 +12,7 @@ function summarize(src: string, opts: WriteEffectOptions = {}) {
   const fns: EffectFunction[] = tu.declarations.filter(d => d.body).map(d => ({
     keys: [(d.name as unknown as Identifier).name],
     params: d.parameters.map(p => (p as unknown as { name?: Identifier }).name?.name ?? ''),
+    paramTypes: d.parameters.map(p => emit((p as unknown as { type: never }).type)),
     body: d.body as CompoundStmt,
   }));
   return summarizeWriteEffects(fns, opts);
@@ -150,5 +153,113 @@ describe('summarizeWriteEffects reads', () => {
   it('an indirect call reads anything', () => {
     const r = summarizeReads('int f(int (*fp)(void)) { return fp(); }', G);
     assert.deepStrictEqual(r.f, { unknown: true });
+  });
+});
+
+const AGG: AggregateModel = {
+  layouts: {
+    Unit: [
+      { name: 'nId', offset: 0, size: 4, type: 'int' },
+      { name: 'pSeed', offset: 4, size: 4, type: 'Seed *' },
+      { name: 'tSeed', offset: 8, size: 8, type: 'Seed' },
+    ],
+    Seed: [{ name: 'nLow', offset: 0, size: 4, type: 'uint' }, { name: 'nHigh', offset: 4, size: 4, type: 'uint' }],
+  },
+  sizes: { Unit: 16, Seed: 8 },
+};
+
+describe('summarizeWriteEffects regions', () => {
+  const R = { aggregates: AGG };
+
+  it('records the region a write through a typed pointer reaches', () => {
+    const s = summarizeWrites([
+      'void field(Seed *p) { p->nLow = 1; }',
+      'void whole(Seed *p, Seed v) { *p = v; }',
+      'void nested(Unit *u) { u->tSeed.nHigh = 2; }',
+      'void local(Unit *u) { Seed *s; s = &u->tSeed; s->nLow = 0; }',
+    ].join('\n'), R);
+    assert.deepStrictEqual(s.field, { params: [0], paramRegions: { 0: ['Seed.nLow'] } });
+    assert.deepStrictEqual(s.whole, { params: [0], paramRegions: { 0: ['Seed'] } });
+    assert.deepStrictEqual(s.nested, { params: [0], paramRegions: { 0: ['Unit.tSeed'] } });
+    assert.deepStrictEqual(s.local, { memory: true, regions: ['Seed.nLow'] });
+  });
+
+  it('a write through a cast, a scalar pointer or an untrusted local is untyped', () => {
+    const s = summarizeWrites([
+      'void cast(Unit *u) { *(int *)((int)u + 4) = 0; }',
+      'void scalar(int *p) { *p = 0; }',
+      'void converted(int a) { Seed *s; s = (Seed *)a; s->nLow = 0; }',
+      'void addressed(Unit *u) { Seed *s; s = u->pSeed; Load(&s); s->nLow = 0; }',
+      'void Load(Seed **pp) { }',
+      'void mixed(Unit *u, int *p) { u->nId = 1; *(int *)u->pSeed = 2; }',
+    ].join('\n'), R);
+    assert.deepStrictEqual(s.cast, { params: [0] });
+    assert.deepStrictEqual(s.scalar, { params: [0] });
+    assert.deepStrictEqual(s.converted, { memory: true });
+    assert.deepStrictEqual(s.addressed, { memory: true });
+    assert.deepStrictEqual(s.mixed, { memory: true, params: [0], paramRegions: { 0: ['Unit.nId'] } });
+  });
+
+  it('carries a callee\'s regions to what the caller passed', () => {
+    const s = summarizeWrites([
+      'void set(Seed *p) { p->nLow = 1; }',
+      'void viaField(Unit *u) { set(u->pSeed); }',
+      'void viaParam(Seed *q) { set(q); }',
+      'void viaOwn() { Seed t; set(&t); }',
+    ].join('\n'), R);
+    assert.deepStrictEqual(s.viaField, { memory: true, regions: ['Seed.nLow'] });
+    assert.deepStrictEqual(s.viaParam, { params: [0], paramRegions: { 0: ['Seed.nLow'] } });
+    assert.deepStrictEqual(s.viaOwn, {});
+  });
+
+  it('records no regions without the aggregates', () => {
+    const s = summarizeWrites('void field(Seed *p) { p->nLow = 1; }');
+    assert.deepStrictEqual(s.field, { params: [0] });
+  });
+
+  it('types reads the same way', () => {
+    const r = summarizeReads('int get(Unit *u) { return u->nId; }', R);
+    assert.deepStrictEqual(r.get, { params: [0], paramRegions: { 0: ['Unit.nId'] } });
+  });
+});
+
+describe('summarizeWriteEffects through a global function pointer', () => {
+  const src = [
+    'void cbA() { }',
+    'void cbB() { gX = 1; }',
+    'void init(int k) { gpfn = cbA; if (k) { gpfn = &cbB; } gpfn = 0; }',
+    'void use() { (*gpfn)(); }',
+    'void bare() { gpfn(); }',
+  ];
+
+  it('is a call to each function it can hold', () => {
+    const s = summarizeWrites(src.join('\n'), { globalInitialTargets: { gpfn: [] } });
+    assert.deepStrictEqual(s.use, { globals: ['gX'] });
+    assert.deepStrictEqual(s.bare, { globals: ['gX'] });
+  });
+
+  it('counts the initial value', () => {
+    const s = summarizeWrites([...src, 'void cbC() { gY = 1; }'].join('\n'), { globalInitialTargets: { gpfn: ['cbC'] } });
+    assert.deepStrictEqual(s.use, { globals: ['gX', 'gY'] });
+  });
+
+  it('is unknown when the pointer may hold anything else', () => {
+    const unknown = { unknown: true };
+    // No initial value known.
+    assert.deepStrictEqual(summarizeWrites(src.join('\n')).use, unknown);
+    assert.deepStrictEqual(summarizeWrites(src.join('\n'), { globalInitialTargets: { gpfn: null } }).use, unknown);
+    // An initial value that is not a function of the model.
+    assert.deepStrictEqual(summarizeWrites(src.join('\n'), { globalInitialTargets: { gpfn: ['Elsewhere'] } }).use, unknown);
+    const with_ = (line: string, opts: WriteEffectOptions = {}) =>
+      summarizeWrites([...src, line].join('\n'), { globalInitialTargets: { gpfn: [] }, ...opts }).use;
+    // A value that is not a function, its address taken, a compound store.
+    assert.deepStrictEqual(with_('void other(int a) { gpfn = a; }'), unknown);
+    assert.deepStrictEqual(with_('void other() { Set(&gpfn); }'), unknown);
+    assert.deepStrictEqual(with_('void other() { gpfn += 4; }'), unknown);
+    assert.deepStrictEqual(with_('void other() { gpfn++; }'), unknown);
+    // A table is written by element, not by name.
+    assert.deepStrictEqual(with_('', { globalArrays: new Set(['gpfn']) }), unknown);
+    // A target with an unknown effect.
+    assert.deepStrictEqual(with_('void cbD() { Mystery(); } void more() { gpfn = cbD; }'), unknown);
   });
 });

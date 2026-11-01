@@ -26,6 +26,16 @@
  *
  * The statements of a block that ends the process (`exit`, `abort`, ...) from which no
  * path leaves the block another way contribute nothing: no caller runs after them.
+ *
+ * Memory and parameter writes carry the typed regions they reach where the access says
+ * (memory-regions.ts): RollRandomNumerUpToArgument stores only a D2SeedStrc, so a read of a
+ * D2MonSoundsTxt field beside it reads the same either way. A region is the callee's own
+ * access, so it holds whatever pointer the caller passed.
+ *
+ * A call through a global function pointer is a call to one of the functions it can hold:
+ * its initial value and every function a body stores into it, when nothing else is ever
+ * stored there and its address is never taken (D2WINFONT_GetStringPixelWidth's
+ * `(*gpfnFontGetCharWidth)(c)` is FONT_GetCharWidthCallback or D2WINFONT_LookupGlyphEntry).
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -34,7 +44,8 @@ import type {
   SubscriptExpr, UnaryExpr, VariableDecl, CStyleCastExpr, BinaryExpr,
 } from '../../../ast/nodes.js';
 import { traverseAST, getChildren } from '../../../ast/visitor.js';
-import { calleeName, bareName } from './call-arg-cast.js';
+import { calleeName, bareName, shapeOfNode, shapeOfSpelling, type TypeShape } from './call-arg-cast.js';
+import { Regions, regionOf, type AggregateModel, type TypingEnv } from './memory-regions.js';
 
 export interface WriteEffect {
   unknown?: true;
@@ -43,6 +54,10 @@ export interface WriteEffect {
   globals?: string[];
   /** Indices of pointer parameters whose pointees are written. */
   params?: number[];
+  /** With `memory`: the only regions it writes (memory-regions.ts); absent: any. */
+  regions?: string[];
+  /** Parameter index -> the only regions written through it; absent: any. */
+  paramRegions?: Record<string, string[]>;
   /** What a call may read, in the same terms (absent: anything). */
   reads?: Omit<WriteEffect, 'reads'>;
 }
@@ -53,6 +68,8 @@ export interface EffectFunction {
   keys: readonly string[];
   /** Parameter names in order. */
   params: readonly string[];
+  /** Declared parameter type spellings, in the same order. */
+  paramTypes?: readonly (string | undefined)[];
   body: CompoundStmt | null;
 }
 
@@ -68,6 +85,13 @@ export interface WriteEffectOptions {
   contracts?: Record<string, WriteEffect>;
   /** Rounds before an unsettled recursion is declared unknown. */
   maxRounds?: number;
+  /** The aggregates, for the regions a write through a typed pointer reaches. */
+  aggregates?: AggregateModel;
+  /** Global (leaf spelling) -> declared type spelling. */
+  globalTypes?: Record<string, string>;
+  /** Global (leaf spelling) -> the functions its initial value may name ([] for null); null
+   *  or absent: not known, so a call through it is not resolved. */
+  globalInitialTargets?: Record<string, readonly string[] | null>;
 }
 
 /** Callees the model has no body for, whose writes the C library or Win32 documents. */
@@ -112,11 +136,40 @@ const PSEUDO_OP = /^(ADJ|LOCK|UNLOCK|CONCAT\d+|SUB\d+|ZEXT\d+|SEXT\d+|CARRY\d|SC
 
 type Prov = { kind: 'own' } | { kind: 'param'; index: number } | { kind: 'global'; name: string } | { kind: 'memory' };
 
-interface Local { array: boolean; param: number }
+interface Local { array: boolean; param: number; decl?: VariableDecl; trusted: boolean }
 
-interface CallSite { name: string | null; args: Prov[] }
+/** A call; `via`: the global a call through a function pointer reads it from. */
+interface CallSite { name: string | null; via?: string; args: Prov[] }
 
-interface Direct { unknown: boolean; memory: boolean; globals: Set<string>; params: Set<number>; calls: CallSite[] }
+/** Regions: null is untyped (anything). */
+type RegionSet = Set<string> | null;
+
+interface Sum {
+  unknown: boolean; memory: boolean; regions: RegionSet; globals: Set<string>;
+  params: Set<number>; paramRegions: Map<number, RegionSet>;
+}
+
+interface Direct extends Sum { calls: CallSite[] }
+
+/** Functions stored into globals by name; `poisoned`: anything else stored, or its address taken. */
+interface PointerStores { stored: Map<string, Set<string>>; poisoned: Set<string> }
+
+function unionRegions(a: RegionSet, b: RegionSet): RegionSet {
+  if (a === null || b === null) return null;
+  const out = new Set(a);
+  for (const r of b) out.add(r);
+  return out;
+}
+
+function addMemory(s: Sum, r: RegionSet): void {
+  s.regions = s.memory ? unionRegions(s.regions, r) : r === null ? null : new Set(r);
+  s.memory = true;
+}
+
+function addParam(s: Sum, i: number, r: RegionSet): void {
+  s.params.add(i);
+  s.paramRegions.set(i, s.paramRegions.has(i) ? unionRegions(s.paramRegions.get(i)!, r) : r === null ? null : new Set(r));
+}
 
 function unwrap(e: Expression): Expression {
   for (;;) {
@@ -133,6 +186,29 @@ function leafOf(e: Expression): string | null {
     return n ? bareName(n) : null;
   }
   return null;
+}
+
+/** Whether a value is converted into its variable by a cast (a null constant aside). */
+function convertsByCast(e: Expression): boolean {
+  let u = e;
+  while (u.kind === NodeKind.ParenExpr) u = (u as ParenExpr).expression;
+  if (u.kind !== NodeKind.CStyleCastExpr) return false;
+  const inner = unwrap(u);
+  return !(inner.kind === NodeKind.IntegerLiteral && (inner as unknown as { value: bigint }).value === 0n);
+}
+
+/**
+ * The function a store of `e` puts in a function pointer: its name, null for a null
+ * pointer, undefined for anything else.
+ */
+function storedFunction(e: Expression): string | null | undefined {
+  let u = unwrap(e);
+  if (u.kind === NodeKind.IntegerLiteral) return (u as unknown as { value: bigint }).value === 0n ? null : undefined;
+  if (u.kind === NodeKind.NullptrLiteral) return null;
+  if (u.kind === NodeKind.Identifier && ((u as Identifier).name === 'NULL' || (u as Identifier).name === 'nullptr')) return null;
+  if (u.kind === NodeKind.UnaryExpr && (u as UnaryExpr).operator === '&') u = unwrap((u as UnaryExpr).operand);
+  if (u.kind === NodeKind.Identifier || u.kind === NodeKind.QualifiedId) return calleeName(u) ?? undefined;
+  return undefined;
 }
 
 /** Statements that leave a block other than by falling off its end. */
@@ -162,19 +238,83 @@ function deadTail(block: CompoundStmt): number {
 }
 
 /** What the body writes, and what it reads, on its own; both carry its calls. */
-function analyse(fn: EffectFunction, opts: WriteEffectOptions): { w: Direct; r: Direct } {
-  const d: Direct = { unknown: false, memory: false, globals: new Set(), params: new Set(), calls: [] };
-  const r: Direct = { unknown: false, memory: false, globals: new Set(), params: new Set(), calls: d.calls };
+function analyse(fn: EffectFunction, opts: WriteEffectOptions, regions: Regions | null, stores: PointerStores): { w: Direct; r: Direct } {
+  const d: Direct = { ...bottom(), calls: [] };
+  const r: Direct = { ...bottom(), calls: d.calls };
   if (!fn.body) { d.unknown = true; r.unknown = true; return { w: d, r }; }
   const locals = new Map<string, Local>();
-  fn.params.forEach((p, i) => locals.set(p, { array: false, param: i }));
+  fn.params.forEach((p, i) => locals.set(p, { array: false, param: i, trusted: true }));
   for (const n of traverseAST(fn.body)) {
     if (n.kind === NodeKind.VariableDecl) {
       const v = n as VariableDecl;
-      locals.set(v.name.name, { array: v.type?.kind === NodeKind.ArrayType, param: -1 });
+      const casts = !!v.initializer && convertsByCast(v.initializer as Expression);
+      locals.set(v.name.name, { array: v.type?.kind === NodeKind.ArrayType, param: -1, decl: v, trusted: !casts });
     }
   }
   const arrays = opts.globalArrays ?? new Set<string>();
+  const isGlobalName = (u: Expression, name: string): boolean => {
+    if (u.kind === NodeKind.Identifier && locals.has(name)) return false;
+    if (u.kind === NodeKind.Identifier && (/^(in_|unaff_|extraout_)/.test(name)
+      || (opts.globalNames && !opts.globalNames.has(name)))) return false;
+    return true;
+  };
+  // A pointer a cast converted into its variable, or whose address is taken, is not
+  // trusted to hold what its declared type says.
+  for (const n of traverseAST(fn.body)) {
+    if (n.kind === NodeKind.AssignExpr) {
+      const a = n as AssignExpr;
+      const l = unwrap(a.left);
+      if (l.kind === NodeKind.Identifier) {
+        const local = locals.get((l as Identifier).name);
+        if (local && a.operator === '=' && convertsByCast(a.right)) local.trusted = false;
+      }
+      const name = leafOf(l);
+      if (name !== null && isGlobalName(l, name)) {
+        const target = a.operator === '=' ? storedFunction(a.right) : undefined;
+        if (target === undefined) stores.poisoned.add(name);
+        else if (target !== null) {
+          let s = stores.stored.get(name);
+          if (!s) stores.stored.set(name, s = new Set());
+          s.add(target);
+        }
+      }
+    } else if (n.kind === NodeKind.UnaryExpr || n.kind === NodeKind.PostfixExpr) {
+      const op = (n as unknown as { operator: string }).operator;
+      const operand = (n as unknown as { operand: Expression }).operand;
+      if (op !== '&' && op !== '++' && op !== '--') continue;
+      for (const m of traverseAST(operand)) {
+        if (m.kind !== NodeKind.Identifier && m.kind !== NodeKind.QualifiedId) continue;
+        const name = leafOf(m as Expression);
+        if (name === null) continue;
+        const local = m.kind === NodeKind.Identifier ? locals.get(name) : undefined;
+        if (local) { if (op === '&') local.trusted = false; }
+        else if (isGlobalName(m as Expression, name)) stores.poisoned.add(name);
+        if (op !== '&') break;
+      }
+    }
+  }
+  const env: TypingEnv = {
+    nameType(e: Expression): TypeShape | null {
+      const name = leafOf(e);
+      if (name === null) return null;
+      const l = e.kind === NodeKind.Identifier ? locals.get(name) : undefined;
+      if (l) {
+        if (!l.trusted || l.array) return null;
+        if (l.param >= 0) {
+          const t = fn.paramTypes?.[l.param];
+          return t && regions ? shapeOfSpelling(t, regions.resolve) : null;
+        }
+        return l.decl?.type && regions ? shapeOfNode(l.decl.type, 0, regions.resolve) : null;
+      }
+      if (!isGlobalName(e, name)) return null;
+      const g = opts.globalTypes?.[name];
+      return g && regions ? shapeOfSpelling(g, regions.resolve) : null;
+    },
+  };
+  const regionOfAccess = (e: Expression): RegionSet => {
+    const at = regions ? regionOf(e, env, regions) : null;
+    return at === null ? null : new Set([at]);
+  };
 
   /** Where the pointer value `e` points. */
   const pointee = (e: Expression): Prov => {
@@ -227,13 +367,14 @@ function analyse(fn: EffectFunction, opts: WriteEffectOptions): { w: Direct; r: 
     }
   };
 
-  const add = (into: Direct, p: Prov) => {
+  /** `p` as the access `at` reaches it. */
+  const add = (into: Direct, p: Prov, at: Expression) => {
     if (p.kind === 'global') into.globals.add(p.name);
-    else if (p.kind === 'param') into.params.add(p.index);
-    else if (p.kind === 'memory') into.memory = true;
+    else if (p.kind === 'param') addParam(into, p.index, regionOfAccess(at));
+    else if (p.kind === 'memory') addMemory(into, regionOfAccess(at));
   };
-  const write = (p: Prov) => add(d, p);
-  const read = (p: Prov) => add(r, p);
+  const write = (at: Expression) => add(d, root(at), at);
+  const read = (p: Prov, at: Expression) => add(r, p, at);
   const callees = new Set<ASTNode>();
   for (const n of traverseAST(fn.body)) {
     if (n.kind === NodeKind.CallExpr) callees.add(unwrap((n as CallExpr).callee));
@@ -251,25 +392,29 @@ function analyse(fn: EffectFunction, opts: WriteEffectOptions): { w: Direct; r: 
     }
     switch (n.kind) {
       case NodeKind.AssignExpr:
-        write(root((n as AssignExpr).left));
+        write((n as AssignExpr).left);
         break;
       case NodeKind.PostfixExpr:
-        write(root((n as unknown as { operand: Expression }).operand));
+        write((n as unknown as { operand: Expression }).operand);
         break;
       case NodeKind.UnaryExpr: {
         const op = (n as UnaryExpr).operator;
-        if (op === '++' || op === '--') write(root((n as UnaryExpr).operand));
+        if (op === '++' || op === '--') write((n as UnaryExpr).operand);
         break;
       }
       case NodeKind.CallExpr: {
         const c = n as CallExpr;
-        const callee = unwrap(c.callee);
+        let callee = unwrap(c.callee);
+        // `(*pfn)(..)` calls what `pfn` holds, as `pfn(..)` does.
+        const deref = callee.kind === NodeKind.UnaryExpr && (callee as UnaryExpr).operator === '*';
+        if (deref) callee = unwrap((callee as UnaryExpr).operand);
         const name = callee.kind === NodeKind.Identifier || callee.kind === NodeKind.QualifiedId ? calleeName(callee) ?? null : null;
         const leaf = name ? bareName(name) : null;
         if (leaf && PSEUDO_OP.test(leaf)) break;
         // A name that is a variable holds a function pointer: an indirect call.
         const variable = !!leaf && callee.kind === NodeKind.Identifier && locals.has(leaf);
-        d.calls.push({ name: variable ? null : name, args: c.arguments.map(a => pointee(a as Expression)) });
+        const via = !variable && leaf !== null && isGlobalName(callee, leaf) ? leaf : undefined;
+        d.calls.push({ name: variable || deref ? null : name, via, args: c.arguments.map(a => pointee(a as Expression)) });
         break;
       }
       case NodeKind.NewExpr: case NodeKind.DeleteExpr:
@@ -288,53 +433,82 @@ function analyse(fn: EffectFunction, opts: WriteEffectOptions): { w: Direct; r: 
         break;
       }
       case NodeKind.MemberExpr:
-        if ((n as MemberExpr).isArrow) read(pointee((n as MemberExpr).object));
+        if ((n as MemberExpr).isArrow) read(pointee((n as MemberExpr).object), n as Expression);
         break;
       case NodeKind.SubscriptExpr: {
         const sub = n as SubscriptExpr;
         const base = unwrap(sub.array);
         const bn = leafOf(base);
         const local = bn !== null && base.kind === NodeKind.Identifier ? locals.get(bn) : undefined;
-        if (!(local && local.array) && !(bn !== null && !local && arrays.has(bn))) read(pointee(sub.array));
+        if (!(local && local.array) && !(bn !== null && !local && arrays.has(bn))) read(pointee(sub.array), n as Expression);
         break;
       }
     }
-    if (n.kind === NodeKind.UnaryExpr && (n as UnaryExpr).operator === '*') read(pointee((n as UnaryExpr).operand));
+    if (n.kind === NodeKind.UnaryExpr && (n as UnaryExpr).operator === '*') read(pointee((n as UnaryExpr).operand), n as Expression);
     for (const k of getChildren(n)) visit(k);
   };
   visit(fn.body);
   return { w: d, r };
 }
 
-interface Sum { unknown: boolean; memory: boolean; globals: Set<string>; params: Set<number> }
-
-const bottom = (): Sum => ({ unknown: false, memory: false, globals: new Set(), params: new Set() });
+function bottom(): Sum {
+  return { unknown: false, memory: false, regions: new Set(), globals: new Set(), params: new Set(), paramRegions: new Map() };
+}
 
 function fromEffect(w: Omit<WriteEffect, 'reads'>): Sum {
-  return { unknown: !!w.unknown, memory: !!w.memory, globals: new Set(w.globals ?? []), params: new Set(w.params ?? []) };
+  const s = bottom();
+  s.unknown = !!w.unknown;
+  if (w.memory) addMemory(s, w.regions ? new Set(w.regions) : null);
+  for (const g of w.globals ?? []) s.globals.add(g);
+  for (const p of w.params ?? []) {
+    const r = w.paramRegions?.[String(p)];
+    addParam(s, p, r ? new Set(r) : null);
+  }
+  return s;
 }
 
 function toEffect(s: Sum): Omit<WriteEffect, 'reads'> {
   if (s.unknown) return { unknown: true };
   const out: Omit<WriteEffect, 'reads'> = {};
-  if (s.memory) out.memory = true;
+  if (s.memory) {
+    out.memory = true;
+    if (s.regions !== null) out.regions = [...s.regions].sort();
+  }
   if (s.globals.size) out.globals = [...s.globals].sort();
-  if (s.params.size) out.params = [...s.params].sort((a, b) => a - b);
+  if (s.params.size) {
+    out.params = [...s.params].sort((a, b) => a - b);
+    const typed: Record<string, string[]> = {};
+    for (const p of out.params) {
+      const r = s.paramRegions.get(p);
+      if (r) typed[String(p)] = [...r].sort();
+    }
+    if (Object.keys(typed).length) out.paramRegions = typed;
+  }
   return out;
+}
+
+function sameRegions(a: RegionSet | undefined, b: RegionSet | undefined): boolean {
+  if (a === null || b === null || a === undefined || b === undefined) return a === b;
+  if (a.size !== b.size) return false;
+  for (const r of a) if (!b.has(r)) return false;
+  return true;
 }
 
 function same(a: Sum, b: Sum): boolean {
   if (a.unknown && b.unknown) return true;
   if (a.unknown !== b.unknown || a.memory !== b.memory || a.globals.size !== b.globals.size || a.params.size !== b.params.size) return false;
+  if (a.memory && !sameRegions(a.regions, b.regions)) return false;
   for (const g of a.globals) if (!b.globals.has(g)) return false;
-  for (const p of a.params) if (!b.params.has(p)) return false;
+  for (const p of a.params) if (!b.params.has(p) || !sameRegions(a.paramRegions.get(p), b.paramRegions.get(p))) return false;
   return true;
 }
 
 /** The summaries, keyed by every spelling of every function (joined where spellings collide). */
 export function summarizeWriteEffects(fns: readonly EffectFunction[], opts: WriteEffectOptions = {}): Record<string, WriteEffect> {
   const contracts = opts.contracts ?? WRITE_CONTRACTS;
-  const both = fns.map(f => analyse(f, opts));
+  const regions = opts.aggregates ? new Regions(opts.aggregates) : null;
+  const stores: PointerStores = { stored: new Map(), poisoned: new Set() };
+  const both = fns.map(f => analyse(f, opts, regions, stores));
   const byKey = new Map<string, number[]>();
   fns.forEach((f, i) => {
     for (const k of f.keys) {
@@ -343,6 +517,22 @@ export function summarizeWriteEffects(fns: readonly EffectFunction[], opts: Writ
       l.push(i);
     }
   });
+  const isFunction = (name: string) => byKey.has(name) || byKey.has(bareName(name)) || NO_RETURN.has(bareName(name))
+    || !!contracts[bareName(name)];
+  /** The functions a global function pointer may hold, or null when that is not known. */
+  const targetsCache = new Map<string, string[] | null>();
+  const targetsOf = (global: string): string[] | null => {
+    if (targetsCache.has(global)) return targetsCache.get(global)!;
+    let out: string[] | null = null;
+    const initial = opts.globalInitialTargets?.[global];
+    if (initial && !stores.poisoned.has(global) && !(opts.globalArrays?.has(global))
+      && (!opts.globalNames || opts.globalNames.has(global)) && !isFunction(global)) {
+      const all = [...new Set([...initial, ...(stores.stored.get(global) ?? [])])];
+      out = all.every(isFunction) ? all : null;
+    }
+    targetsCache.set(global, out);
+    return out;
+  };
   const writes = settle(both.map(b => b.w), name => {
     const c = contracts[name];
     return c ? fromEffect(c) : null;
@@ -365,8 +555,7 @@ export function summarizeWriteEffects(fns: readonly EffectFunction[], opts: Writ
   function settle(direct: Direct[], contract: (name: string) => Sum | null, onUnknown?: (key: string, why: string) => void): Sum[] {
   let sums = fns.map(() => bottom());
 
-  const calleeSum = (name: string | null, cur: Sum[]): Sum | null => {
-    if (!name) return null;
+  const named = (name: string, cur: Sum[]): Sum | null => {
     const owners = byKey.get(name) ?? byKey.get(bareName(name));
     if (owners) {
       const s = bottom();
@@ -377,23 +566,40 @@ export function summarizeWriteEffects(fns: readonly EffectFunction[], opts: Writ
     return contract(bareName(name));
   };
 
+  const calleeSum = (call: CallSite, cur: Sum[]): Sum | null => {
+    if (call.name && (isFunction(call.name) || !call.via)) return named(call.name, cur);
+    if (call.via && isFunction(call.via)) return named(call.via, cur);
+    const targets = call.via ? targetsOf(call.via) : null;
+    if (!targets) return null;
+    // A call through a null pointer does not return.
+    const s = bottom();
+    for (const t of targets) {
+      const c = named(t, cur);
+      if (!c) return null;
+      join(s, c);
+    }
+    return s;
+  };
+
   const step = (i: number, cur: Sum[]): Sum => {
     const d = direct[i];
-    const s: Sum = { unknown: d.unknown, memory: d.memory, globals: new Set(d.globals), params: new Set(d.params) };
+    const s = bottom();
+    join(s, d);
     for (const call of d.calls) {
       if (s.unknown) break;
-      const c = calleeSum(call.name, cur);
+      const c = calleeSum(call, cur);
       if (!c || c.unknown) {
         s.unknown = true;
-        if (onUnknown && (!c || direct[i].unknown)) onUnknown(fns[i].keys[0], call.name ? `calls ${call.name}` : 'indirect call');
+        if (onUnknown && (!c || direct[i].unknown)) onUnknown(fns[i].keys[0], call.name ? `calls ${call.name}` : call.via ? `calls through ${call.via}` : 'indirect call');
         break;
       }
-      if (c.memory) s.memory = true;
+      if (c.memory) addMemory(s, c.regions);
       for (const g of c.globals) s.globals.add(g);
       for (const p of c.params) {
         const a = call.args[p];
-        if (!a || a.kind === 'memory') s.memory = true;
-        else if (a.kind === 'param') s.params.add(a.index);
+        const r = c.paramRegions.has(p) ? c.paramRegions.get(p)! : null;
+        if (!a || a.kind === 'memory') addMemory(s, r);
+        else if (a.kind === 'param') addParam(s, a.index, r);
         else if (a.kind === 'global') s.globals.add(a.name);
       }
     }
@@ -432,7 +638,7 @@ export function summarizeWriteEffects(fns: readonly EffectFunction[], opts: Writ
 
 function join(into: Sum, s: Sum): void {
   if (s.unknown) into.unknown = true;
-  if (s.memory) into.memory = true;
+  if (s.memory) addMemory(into, s.regions);
   for (const g of s.globals) into.globals.add(g);
-  for (const p of s.params) into.params.add(p);
+  for (const p of s.params) addParam(into, p, s.paramRegions.has(p) ? s.paramRegions.get(p)! : null);
 }

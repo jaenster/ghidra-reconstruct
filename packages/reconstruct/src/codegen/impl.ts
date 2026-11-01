@@ -53,6 +53,19 @@ import { generateStaticLocalsBlock, emitDataValue, setInitializerOwnerAddress, i
 /**
  * Clean a parameter name: apply the same renaming the body transform does
  */
+const aggregateModels = new WeakMap<FuncPtrArgCastTables, import('@ghidra-mcp/cpp-parser').AggregateModel>();
+
+/** The aggregates as nest-call's region rules read them, one object per table set. */
+function nestCallAggregates(t: FuncPtrArgCastTables | undefined): import('@ghidra-mcp/cpp-parser').AggregateModel | undefined {
+  if (!t?.structLayouts) return undefined;
+  let m = aggregateModels.get(t);
+  if (!m) {
+    m = { layouts: t.structLayouts, unions: t.unionNames, sizes: t.aggregateSizes, typedefs: t.typedefTargets };
+    aggregateModels.set(t, m);
+  }
+  return m;
+}
+
 function cleanParamName(name: string): string {
   if (name === 'this') return 'pThis';
   if (!isGhidraGeneratedName(name)) return name;
@@ -3217,6 +3230,7 @@ function transformDecompiledCode(
         enumConstants: context?.funcPtrArgCasts?.enumConstantNames,
         writeEffects: context?.funcPtrArgCasts?.writeEffects,
         typedefTargets: context?.funcPtrArgCasts?.typedefTargets,
+        aggregates: nestCallAggregates(context?.funcPtrArgCasts),
         enclosingSegments: enclosing?.ghidraNamespaceSegments ?? enclosing?.namespaceSegments,
         onSite: (e: { line: number; temps: number }) =>
           console.warn(`[nest] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.temps} temporar${e.temps === 1 ? 'y' : 'ies'} into the call on line ${e.line}`),

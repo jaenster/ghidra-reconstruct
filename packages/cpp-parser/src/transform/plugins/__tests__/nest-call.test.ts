@@ -289,6 +289,94 @@ describe('nestCallPlugin', () => {
       assert.deepStrictEqual(field({ GetGamePointer: { unknown: true } }).sites, []);
     });
 
+    describe('typed regions', () => {
+      const aggregates = {
+        layouts: {
+          Unit: [
+            { name: 'nId', offset: 0, size: 4, type: 'int' },
+            { name: 'pStats', offset: 4, size: 4, type: 'Stats *' },
+            { name: 'tSeed', offset: 8, size: 8, type: 'Seed' },
+            { name: 'pMix', offset: 16, size: 4, type: 'Mix *' },
+          ],
+          Seed: [{ name: 'nLow', offset: 0, size: 4, type: 'uint' }, { name: 'nHigh', offset: 4, size: 4, type: 'uint' }],
+          Stats: [{ name: 'nLevel', offset: 0, size: 2, type: 'short' }, { name: 'nFlee', offset: 2, size: 2, type: 'short' }],
+          Mix: [{ name: 'a', offset: 0, size: 4, type: 'int' }, { name: 'b', offset: 0, size: 4, type: 'Seed *' }],
+        },
+        sizes: { Unit: 20, Seed: 8, Stats: 4, Mix: 4 },
+        unions: ['Mix'],
+      };
+      /** The quest fixture with `arg` as the last argument and `pre` lines above the inner call. */
+      const typed = (effects: NestCallOptions['writeEffects'], arg: string, pre: string[] = [], opts: Partial<NestCallOptions> = {}) => {
+        const lines = quest(0).map(l => l.replace('HasQuestItem(pGame, pUnit, 0x20736b62)', `HasQuestItem(pGame, pUnit, ${arg})`));
+        const at = lines.findIndex(l => l.includes('GetGamePointer@'));
+        lines.splice(at, 0, ...pre);
+        return run(lines, { writeEffects: effects, aggregates, ...opts });
+      };
+      const seed = { GetGamePointer: { memory: true as const, regions: ['Seed'] } };
+
+      // UNITSND_PlayFleeSound: the roll stores only its seed; the line is a sounds record.
+      it('nests beside a read of a region the call cannot write', () => {
+        const { out, sites } = typed(seed, 'pUnit->pStats->nFlee');
+        assert.deepStrictEqual(sites, [1]);
+        assert.ok(out.includes('r = HasQuestItem(GetGamePointer(pUnit), pUnit, pUnit->pStats->nFlee);'), out);
+        assert.deepStrictEqual(typed(seed, 'pUnit->nId').sites, [1]);
+      });
+
+      it('leaves a read of the region, or of an aggregate holding it at that field', () => {
+        assert.deepStrictEqual(typed(seed, 'pUnit->tSeed.nLow').sites, []);
+        assert.deepStrictEqual(typed({ GetGamePointer: { memory: true, regions: ['Unit.nId'] } }, 'pUnit->nId').sites, []);
+        assert.deepStrictEqual(typed({ GetGamePointer: { memory: true, regions: ['Unit'] } }, 'pUnit->nId').sites, []);
+      });
+
+      it('tells fields of one aggregate apart by offset, and a union\'s members not at all', () => {
+        assert.deepStrictEqual(typed({ GetGamePointer: { memory: true, regions: ['Unit.pStats'] } }, 'pUnit->nId').sites, [1]);
+        assert.deepStrictEqual(typed({ GetGamePointer: { memory: true, regions: ['Mix.a'] } }, 'pUnit->pMix->b').sites, []);
+      });
+
+      // CheckClientTimeouts: GetControlUnit writes pClient->pPlayer, GetCharName reads szCharName.
+      it('reads a parameter write\'s regions', () => {
+        assert.deepStrictEqual(typed({ GetGamePointer: { params: [0], paramRegions: { 0: ['Unit.pStats'] } } }, 'pUnit->nId').sites, [1]);
+        assert.deepStrictEqual(typed({ GetGamePointer: { params: [0], paramRegions: { 0: ['Unit.nId'] } } }, 'pUnit->nId').sites, []);
+        assert.deepStrictEqual(typed({ GetGamePointer: { params: [0] } }, 'pUnit->nId').sites, []);
+      });
+
+      it('leaves an untyped write, an untyped read, or no aggregates', () => {
+        assert.deepStrictEqual(typed({ GetGamePointer: { memory: true } }, 'pUnit->nId').sites, []);
+        assert.deepStrictEqual(typed(seed, '*(int *)pUnit').sites, []);
+        assert.deepStrictEqual(typed(seed, 'pUnit->nId', [], { aggregates: undefined }).sites, []);
+        // A memory write may still be any global.
+        assert.deepStrictEqual(typed(seed, 'gCounter').sites, []);
+      });
+
+      it('distrusts a pointer a cast converted into its variable', () => {
+        const pre = ['  Stats *pS;', '  pS = (Stats *)pUnit->nId;'];
+        assert.deepStrictEqual(typed(seed, 'pS->nFlee', pre).sites, []);
+        assert.deepStrictEqual(typed({ GetGamePointer: {} }, 'pS->nFlee', pre).sites, [1]);
+        const plain = ['  Stats *pS;', '  pS = pUnit->pStats;'];
+        assert.deepStrictEqual(typed(seed, 'pS->nFlee', plain).sites, [1]);
+      });
+
+      // SandMaggotAi_CastDelayedSkill: `nMonStatsPtr = (int)pAiParam->pMonStats;` then
+      // `*(short *)(nMonStatsPtr + 0x170)`.
+      it('reads an integer holding a typed pointer as that aggregate, within its size', () => {
+        const pre = ['  int nStats;', '  nStats = (int)pUnit->pStats;'];
+        assert.deepStrictEqual(typed(seed, '*(short *)(nStats + 2)', pre).sites, [1]);
+        assert.deepStrictEqual(typed({ GetGamePointer: { memory: true, regions: ['Stats.nLevel'] } }, '*(short *)(nStats + 2)', pre).sites, []);
+        // Past the end, assigned twice, read before the assignment, or assigned in a branch;
+        // each nests beside a call that writes nothing.
+        const refused: [string, string[]][] = [
+          ['*(short *)(nStats + 4)', pre],
+          ['*(short *)(nStats + 2)', [...pre, '  nStats = (int)pUnit->pMix;']],
+          ['*(short *)(nStats + 2)', ['  int nStats;', '  gCounter = nStats;', '  nStats = (int)pUnit->pStats;']],
+          ['*(short *)(nStats + 2)', ['  int nStats;', '  if (gCounter) {', '  nStats = (int)pUnit->pStats;', '  }']],
+        ];
+        for (const [arg, lines] of refused) {
+          assert.deepStrictEqual(typed(seed, arg, lines).sites, [], arg + ' ' + lines.join(' '));
+          assert.deepStrictEqual(typed({ GetGamePointer: {} }, arg, lines).sites, [1], arg + ' ' + lines.join(' '));
+        }
+      });
+    });
+
     it('counts the calls inside the nested call\'s arguments', () => {
       const { sites } = run(quest(0).map(l => l
         .replace('pGame = GetGamePointer(pUnit);', 'pGame = GetGamePointer(Rand());')
