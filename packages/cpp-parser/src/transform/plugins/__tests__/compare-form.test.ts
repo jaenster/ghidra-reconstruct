@@ -269,6 +269,46 @@ describe('steppedConstant', () => {
   });
 });
 
+describe('compare-form: value forms the flag readers show', () => {
+  // CheckModule 00480020: TEST EAX,EAX; SETNE AL.
+  it('a bool function returns x where SETNE sets the result', () => {
+    const sites: Site[] = [{ text: '!=', fp: ['v:bResult', 'c:0'] }];
+    const out = run('bool f(int bResult) { return bResult != 0; }', sites,
+      [dec({ ord: 0, ...sites[0], keep: true, k: 0, set: true })]);
+    assert.strictEqual(out.replace(/\s+/g, ' '), 'bool f(int bResult) { return bResult; }');
+  });
+
+  it('keeps x != 0 under a Jcc, in a function not returning bool, and for a float', () => {
+    const sites: Site[] = [{ text: '!=', fp: ['v:x', 'c:0'] }];
+    const jcc = run('bool f(int x) { return x != 0; }', sites, [dec({ ord: 0, ...sites[0], keep: true, k: 0 })]);
+    assert.match(jcc, /return x != 0;/);
+    const intRet = run('int f(int x) { return x != 0; }', sites, [dec({ ord: 0, ...sites[0], keep: true, k: 0, set: true })]);
+    assert.match(intRet, /return x != 0;/);
+    const flt = run('bool f(float x) { return x != 0; }', sites, [dec({ ord: 0, ...sites[0], keep: true, k: 0, set: true })]);
+    assert.match(flt, /return x != 0;/);
+  });
+
+  // SBMP_ValidateTGAHeader 006c50d0.
+  it('a zero-extended uint16 sum under a signed Jcc loses its casts: a + b <= 0x100', () => {
+    const sites: Site[] = [{ text: '<', fp: ['e', 'c:101'] }];
+    const d = [dec({ ord: 0, ...sites[0], op: '<=', delta: -1, k: 0x101, signed: true, zextSum: true })];
+    const opts = { sites, decisions: d, structFields: { H: { a: 'uint16_t', b: 'uint16_t', c: 'uint32_t' } } } as CompareFormOptions;
+    const go = (code: string) => emit(createCompareFormTransformer(opts)(parse(code)) as AnyNode).replace(/\s+/g, ' ');
+    assert.match(go('int f(H* h) { return (uint)h->a + (uint)h->b < 0x101; }'), /return h->a \+ h->b <= 0x100;/);
+    // A 32-bit addend could be negative as an int: left as printed.
+    assert.match(go('int f(H* h) { return (uint)h->a + (uint)h->c < 0x101; }'), /< 0x101/);
+  });
+
+  it('computes what the printed form computed', { skip: !hasNativeGpp() }, () => {
+    const rsites: Site[] = [{ text: '!=', fp: ['v:b', 'c:0'] }];
+    const ret = run('bool h(int b) { return b != 0; }', rsites, [dec({ ord: 0, ...rsites[0], keep: true, k: 0, set: true })]);
+    assert.ok(!ret.includes('!='), ret);
+    const out = compileAndRun(`#include <cstdio>\nbool ph(int b) { return b != 0; }\n${ret}`,
+      'int bad = 0; const int v[] = {0, 1, -1, 2, 0x7fffffff, (int)0x80000000}; for (int b : v) { if (ph(b) != h(b)) bad++; } printf("%d\\n", bad);');
+    assert.strictEqual(out.trim(), '0');
+  });
+});
+
 describe('compare-signedness', () => {
   it('casts a tagged unsigned compare whose operand is now signed, and leaves an unsigned one', () => {
     const tagged = run('void f(uint n) { if (n != 0) {} }', [{ text: '!=', fp: ['v:n', 'c:0'] }],

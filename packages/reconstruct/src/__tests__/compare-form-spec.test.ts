@@ -154,7 +154,8 @@ describe('compare-form derivation', () => {
   });
 
   it('refuses an opcode the Jcc disagrees with, a larger step, and a width mismatch', () => {
-    assert.strictEqual(decide(site({ text: '<', opcode: 'INT_LESS', k: 4n, bValue: 3n, user: 'JLE' })), null);
+    // An unsigned op under a signed Jcc is only decided for the pass to prove a narrow sum.
+    assert.strictEqual(decide(site({ text: '<', opcode: 'INT_LESS', k: 4n, bValue: 3n, user: 'JLE' }))!.zextSum, true);
     assert.strictEqual(decide(site({ text: '<', opcode: 'INT_SLESS', k: 4n, bValue: 3n, user: 'JBE' })), null);
     assert.strictEqual(decide(site({ text: '<', opcode: 'INT_SLESS', k: 5n, bValue: 3n, user: 'JLE' })), null);
     assert.strictEqual(decide(site({ text: '<', opcode: 'INT_SLESS', k: 4n, bValue: 3n, width: 1, user: 'JLE' })), null);
@@ -164,7 +165,37 @@ describe('compare-form derivation', () => {
     assert.strictEqual(decide(site({ text: '<', opcode: 'INT_SLESS', k: 4n, bValue: 3n, user: 'JLE', onPair: false })), null);
     assert.strictEqual(decide(site({ text: '!=', opcode: 'INT_NOTEQUAL', k: 0n, bKind: 'bit', user: 'JZ' })), null);
     assert.strictEqual(decide(site({ text: '==', opcode: 'INT_EQUAL', k: 1n, bKind: 'r', user: 'JZ' })), null);
-    assert.strictEqual(decide(site({ text: '<', opcode: 'INT_SLESS', k: 0n, bKind: 'z', bValue: 0n, user: 'JNS' })), null);
+    assert.strictEqual(decide(site({ text: '<', opcode: 'INT_SLESS', k: 0n, bKind: 'i', bValue: 0n, user: 'JNS' })), null);
+  });
+
+  it('marks a SETcc reader', () => {
+    // CheckModule 00480020: TEST EAX,EAX; SETNZ AL.
+    let d = decide(site({ text: '!=', opcode: 'INT_NOTEQUAL', k: 0n, bKind: 'z', bValue: 0n, setter: { at: '00401000', mnemonic: 'TEST' }, user: 'SETNZ' }))!;
+    assert.deepStrictEqual([d.keep, d.set], [true, true]);
+    d = decide(site({ text: '!=', opcode: 'INT_NOTEQUAL', k: 0n, bKind: 'z', bValue: 0n, setter: { at: '00401000', mnemonic: 'TEST' }, user: 'JNZ' }))!;
+    assert.strictEqual(d.set, undefined);
+  });
+
+  it('an unsigned op read by a signed Jcc is decided signed, for the pass to prove', () => {
+    // SBMP_ValidateTGAHeader 006c50d0: `(uint)a + (uint)b < 0x101` from CMP EAX,0x100; JG.
+    const d = decide(site({ text: '<', opcode: 'INT_LESS', k: 0x101n, bValue: 0x100n, user: 'JG' }))!;
+    assert.deepStrictEqual([d.op, d.delta, d.signed, d.zextSum], ['<=', -1, true, true]);
+    assert.strictEqual(decide(site({ text: '<', opcode: 'INT_LESS', k: 0x80000001n, bValue: 0x80000000n, user: 'JG' })), null);
+    assert.strictEqual(decide(site({ text: '<', opcode: 'INT_LESS', k: 0x101n, bValue: 0x100n, width: 2, size: 2, user: 'JG' })), null);
+  });
+
+  it('a sign-flag branch is a signed compare against 0: -1 < n -> n >= 0, n < 0 kept', () => {
+    // 005daa40: `-1 < n` read by JS straight after the SUB that computed n (no CMP/TEST).
+    let d = decide(site({ text: '<', opcode: 'INT_SLESS', constSide: 0, k: 0xffffffffn, setter: undefined, width: 0, onPair: false, user: 'JS' }))!;
+    assert.deepStrictEqual([d.op, d.delta, d.swap, d.signed, d.width], ['>=', 1, true, true, 4]);
+    d = decide(site({ text: '<', opcode: 'INT_SLESS', k: 0n, bKind: 'z', bValue: 0n, setter: { at: '00401000', mnemonic: 'TEST' }, user: 'JNS' }))!;
+    assert.strictEqual(d.keep, true);
+    d = decide(site({ text: '<', opcode: 'INT_SLESS', size: 2, width: 2, constSide: 0, k: 0xffffn, bKind: 'z', setter: { at: '00401000', mnemonic: 'TEST' }, user: 'JS' }))!;
+    assert.deepStrictEqual([d.op, d.delta, d.swap], ['>=', 1, true]);
+    // An unsigned opcode, a CMP setter, a constant away from zero: no decision.
+    assert.strictEqual(decide(site({ text: '<', opcode: 'INT_LESS', constSide: 0, k: 0xffffffffn, setter: undefined, user: 'JS' })), null);
+    assert.strictEqual(decide(site({ text: '<', opcode: 'INT_SLESS', k: 0n, bKind: 'i', bValue: 0n, user: 'JS' })), null);
+    assert.strictEqual(decide(site({ text: '<', opcode: 'INT_SLESS', constSide: 0, k: 1n, setter: undefined, user: 'JNS' })), null);
   });
 
   it('X == 0 / X != 0 under JBE/JA become unsigned X <= 0 / X > 0; under JZ/JNZ they stay', () => {

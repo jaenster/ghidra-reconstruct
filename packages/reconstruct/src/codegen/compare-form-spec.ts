@@ -85,6 +85,8 @@ export function compareFormDecision(site: CompareSite): CompareFormOutcome {
   const form = OPCODE[site.opcode];
   if (!form) return { reason: `opcode ${site.opcode}` };
   if (form.text !== site.text) return { reason: `printed ${site.text} for ${site.opcode}` };
+  const sign = signTest(site, form);
+  if (sign) return sign;
   if (!site.user || !site.setter || !site.onPair) return { reason: 'no CMP/TEST and Jcc pair' };
   if (site.width !== site.size || ![1, 2, 4].includes(site.width)) return { reason: `width ${site.width} for a ${site.size}-byte op` };
   const cc = conditionCode(site.user.mnemonic);
@@ -94,11 +96,18 @@ export function compareFormDecision(site: CompareSite): CompareFormOutcome {
   const w = site.width;
   const base = {
     ord: site.ord, text: site.text, fp: site.fp, width: w, address: site.setter.at,
+    ...(cc && site.user.mnemonic.toUpperCase().startsWith('SET') ? { set: true } : {}),
   };
   const ordered = form.signed !== undefined;
+  // An unsigned op read by a signed Jcc: Ghidra typed the operand unsigned where the machine
+  // compares signed. Decided as signed, and `zextSum` asks the pass to prove the operand is
+  // a sum of zero-extended narrow values, which no compare can tell from a signed one.
+  let zextSum = false;
   if (ordered) {
     const ccSigned = SIGNED_CC.has(cc) ? true : UNSIGNED_CC.has(cc) ? false : undefined;
-    if (ccSigned !== form.signed) return { reason: `${site.opcode} read by ${site.user.mnemonic}` };
+    if (ccSigned === true && form.signed === false && site.width === 4
+      && (site.constSide === 0 || site.constSide === 1) && site.bKind === 'i') zextSum = true;
+    else if (ccSigned !== form.signed) return { reason: `${site.opcode} read by ${site.user.mnemonic}` };
   }
 
   if (site.constSide === 0 || site.constSide === 1) {
@@ -111,6 +120,16 @@ export function compareFormDecision(site: CompareSite): CompareFormOutcome {
     // G with the non-constant operand on the left.
     const rel = swap ? MIRROR[site.text] : site.text;
     const k = Number(site.k & 0xffffffffn);
+    if (zextSum) {
+      // Both domains agree only on constants in 0..0x7fffffff.
+      if (site.k > 0x7fffffffn || B > 0x7fffffffn) return { reason: 'constant outside both domains' };
+      const step = STEP[rel];
+      if (F.has(rel) && site.k === B) return { decision: { ...base, op: rel, swap, delta: 0, k, signed: true, zextSum } };
+      if (step && F.has(step.op) && site.k + BigInt(step.delta) === B) {
+        return { decision: { ...base, op: step.op, swap, delta: step.delta, k, signed: true, zextSum } };
+      }
+      return { reason: `${rel} ${site.k} against ${[...F].join('/')} ${B}` };
+    }
     if (ordered) {
       const signed = form.signed!;
       const kv = inDomain(site.k, w, signed), bv = inDomain(B, w, signed);
@@ -179,6 +198,50 @@ function heldZero(site: CompareSite, F: ReadonlySet<string>, base: Omit<CompareF
     return { decision: { ...base, op: step.op, swap, delta: step.delta, k, signed } };
   }
   return { reason: `${rel} ${kv} against ${[...F].join('/')} in a register` };
+}
+
+/**
+ * A signed compare against zero read off the sign flag: `JS`/`JNS` after `TEST r,r`, or
+ * straight after the arithmetic that computed the operand (`SUB`, `DEC`: Ghidra ties the
+ * compare to that instruction, and the branch reads its result, so the flags are the
+ * operand's own). JS is `x < 0`, JNS `x >= 0`, so F = {<, >=} against 0, decided as a signed
+ * `TEST x,x; JL/JGE` would be: `-1 < x` -> `x >= 0`, `x < 0` kept (UseQuanityAndDurability
+ * 005daa40: `-1 < n` after a SUB and JS). Any other setter (a CMP, a bit test), or an
+ * unsigned opcode, gets no decision.
+ */
+function signTest(site: CompareSite, form: { text: string; signed?: boolean }): CompareFormOutcome | null {
+  const um = site.user?.mnemonic.toUpperCase();
+  if (um !== 'JS' && um !== 'JNS') return null;
+  if (form.signed !== true) return { reason: `${site.opcode} read by ${um}` };
+  if (site.constSide !== 0 && site.constSide !== 1) return { reason: `variables against ${um}` };
+  if (site.k === undefined) return { reason: 'no constant' };
+  let width: number;
+  if (site.setter) {
+    if (site.setter.mnemonic.toUpperCase() !== 'TEST' || site.bKind !== 'z' || !site.onPair) {
+      return { reason: `${site.setter.mnemonic} ${site.bKind} read by ${um}` };
+    }
+    if (site.width !== site.size) return { reason: `width ${site.width} for a ${site.size}-byte op` };
+    width = site.width;
+  } else {
+    width = site.size;
+  }
+  if (![1, 2, 4].includes(width)) return { reason: `width ${width}` };
+  const F = new Set(['<', '>=']);
+  const base = { ord: site.ord, text: site.text, fp: site.fp, width, address: site.user!.at };
+  const swap = site.constSide === 0;
+  const rel = swap ? MIRROR[site.text] : site.text;
+  const k = Number(site.k & 0xffffffffn);
+  const kv = inDomain(site.k, width, true);
+  if (F.has(rel) && kv === 0n) {
+    return swap
+      ? { decision: { ...base, op: rel, swap, delta: 0, k, signed: true } }
+      : { decision: { ...base, keep: true } };
+  }
+  const step = STEP[rel];
+  if (step && F.has(step.op) && kv + BigInt(step.delta) === 0n) {
+    return { decision: { ...base, op: step.op, swap, delta: step.delta, k, signed: true } };
+  }
+  return { reason: `${rel} ${kv} against ${um} 0` };
 }
 
 export interface CompareFormSpec {

@@ -40,7 +40,7 @@
 
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
-  ASTNode, BinaryExpr, BinaryOperator, BoolLiteralExpr, CharLiteralExpr, CStyleCastExpr, Expression, FunctionDecl, Identifier,
+  ASTNode, BinaryExpr, BinaryOperator, BoolLiteralExpr, BuiltinType, ReturnStmt, CharLiteralExpr, CStyleCastExpr, Expression, FunctionDecl, Identifier,
   IntegerLiteralExpr, MemberExpr, ParameterDecl, ParenExpr, SubscriptExpr, TypeNode, TypedefType, UnaryExpr, VariableDecl,
 } from '../../../ast/nodes.js';
 import { findNodesByKind } from '../../../ast/visitor.js';
@@ -76,6 +76,13 @@ export interface CompareFormDecision {
   unsigned?: boolean;
   /** The machine compares signed (an ordered compare read by JL/JLE/JG/JGE). */
   signed?: boolean;
+  /**
+   * An unsigned op read by a signed Jcc: written only where the operand is a sum of values
+   * zero-extended from 8 or 16 bits, so it is non-negative and the two compares agree.
+   */
+  zextSum?: boolean;
+  /** The flags are read by a SETcc: the compare's 0/1 is a value, not a branch. */
+  set?: boolean;
 }
 
 export interface CompareFormOptions extends PluginOptions {
@@ -350,7 +357,16 @@ export function createCompareFormTransformer(options?: PluginOptions): Transform
 
       let rewritten = 0;
       const shapeOf = createExprShape(localTypes, tables);
+      const boolReturn = node.returnType.kind === NodeKind.BuiltinType
+        && (node.returnType as BuiltinType).name === 'bool' && (node.returnType as BuiltinType).modifiers.length === 0;
       const inner = createTransformer({
+        visitReturnStmt(rs: ReturnStmt): ASTNode | undefined {
+          if (!boolReturn || !rs.value) return undefined;
+          const out = setReturn(rs.value, tied, shapeOf);
+          if (!out) return undefined;
+          rewritten++;
+          return updateNode(rs, { value: out } as Partial<ReturnStmt>);
+        },
         visitBinaryExpr(be: BinaryExpr): ASTNode | undefined {
           const key = keyOf(be);
           const d = key ? tied.get(key) : undefined;
@@ -373,6 +389,28 @@ export function createCompareFormTransformer(options?: PluginOptions): Transform
 }
 
 /**
+ * `return x != 0;` in a function returning `bool`, where the instructions set the result
+ * with `TEST x,x; SETNE`: the source returned `x` and let the conversion to bool test it
+ * (CheckModule 00480020). Written `x != 0`, VC8 computes the 0/1 with NEG/SBB/NEG instead.
+ * `bool(x)` is `x != 0` for an integer or a pointer, so the value is the same; a floating
+ * operand, or one whose type is unknown, is left alone.
+ */
+function setReturn(value: Expression, tied: Map<string, CompareFormDecision>, shapeOf: ExprShape): Expression | null {
+  const be = unwrapParens(value);
+  if (be.kind !== NodeKind.BinaryExpr) return null;
+  const b = be as BinaryExpr;
+  const key = keyOf(b);
+  const d = key ? tied.get(key) : undefined;
+  if (!d || !d.keep || !d.set || d.k !== 0 || b.operator !== '!=') return null;
+  const lit = literalOf(b.right);
+  if (!lit || lit.value !== 0n || lit.char) return null;
+  const shape = shapeOf(unwrapParens(b.left));
+  if (!shape) return null;
+  if (shape.stars === 0 && !/^(?:u?int(?:8|16|32)_t|BOOL|BYTE|WORD|DWORD|UINT|uint|int|char|short|long|bool|unsigned|unsigned int|unsigned char|unsigned short|ushort|uchar|ulong|byte|word|dword|LONG|SHORT|USHORT|UCHAR|ULONG)$/.test(shape.base)) return null;
+  return { ...b.left, leadingTrivia: value.leadingTrivia, trailingTrivia: value.trailingTrivia } as Expression;
+}
+
+/**
  * `b == true` / `b != true` where the instruction is `CMP <byte>, 1`: the constant is written
  * `1`. Both compare the promoted byte with 1, so the value is the same; written `true`,
  * boolean-cleanup folds it to `b` / `!b`, which VC8 compiles as `CMP <byte>, 0` with the
@@ -392,9 +430,37 @@ function byteCompareWithOne(be: BinaryExpr, d: CompareFormDecision): BinaryExpr 
 }
 
 /** The rewritten comparison, or null when a check fails. */
+/**
+ * `(uint)a + (uint)b` with a and b of 8- or 16-bit unsigned types, as `a + b`: the sum then
+ * is an int in 0..0x1fffe, the same value, so a signed compare of it with a constant in
+ * 0..0x7fffffff is the unsigned one. Null for anything else.
+ */
+function narrowZextSum(e: Expression, shapeOf: ExprShape): Expression | null {
+  const s = unwrapParens(e);
+  if (s.kind !== NodeKind.BinaryExpr || (s as BinaryExpr).operator !== '+') return null;
+  const NARROW = /^(?:uint8_t|uint16_t|BYTE|WORD|byte|word|uchar|ushort|USHORT|UCHAR|unsigned char|unsigned short)$/;
+  const strip = (x: Expression): Expression | null => {
+    const c = unwrapParens(x);
+    if (c.kind !== NodeKind.CStyleCastExpr) return null;
+    const inner = (c as CStyleCastExpr).expression;
+    const shape = shapeOf(unwrapParens(inner));
+    if (!shape || shape.stars !== 0 || !NARROW.test(shape.base)) return null;
+    return inner;
+  };
+  const a = strip((s as BinaryExpr).left), b = strip((s as BinaryExpr).right);
+  if (!a || !b) return null;
+  return Expr.binary(a, '+', b);
+}
+
 function rewrite(be: BinaryExpr, d: CompareFormDecision, size: number, shapeOf: ExprShape): BinaryExpr | null {
   let left = d.swap ? be.right : be.left;
   let right = d.swap ? be.left : be.right;
+  if (d.zextSum) {
+    const sum = narrowZextSum(left, shapeOf);
+    const c = literalOf(right);
+    if (!sum || !c || c.value < 0n || c.value > 0x7fffffffn || c.lit.suffix) return null;
+    left = sum;
+  }
   const delta = d.delta ?? 0;
   let crossed = false;
   if (d.k !== undefined && (delta !== 0 || d.unsigned)) {
