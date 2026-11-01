@@ -3294,6 +3294,13 @@ function transformDecompiledCode(
         };
       }
       perPluginOptions['comma-expand'] = { ...(perPluginOptions['comma-expand'] as object | undefined), branchLayout: layout };
+      // A record getter whose range tests and null test were split apart is written back
+      // as one conditional pointer where the original left them through one block.
+      perPluginOptions['record-getter-split'] = {
+        branchLayout: layout,
+        onSite: (e: { line: number; name: string; form: string; tests: number }) =>
+          console.warn(`[record-split] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.name} (${e.form}, ${e.tests} test${e.tests === 1 ? '' : 's'}) on line ${e.line}`),
+      };
     }
     // A temporary goes back into the argument list where the original evaluated the
     // arguments right of it first (nest-call.ts); without the facts nothing changes.

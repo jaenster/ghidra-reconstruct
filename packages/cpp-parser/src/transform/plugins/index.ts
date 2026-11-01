@@ -384,6 +384,11 @@ export {
 } from './builtins/record-getter-guard.js';
 
 export {
+  recordGetterSplitPlugin,
+  type RecordGetterSplitOptions,
+} from './builtins/record-getter-split.js';
+
+export {
   fieldPointerFoldPlugin,
   type FieldPointerFoldOptions,
 } from './builtins/field-pointer-fold.js';
@@ -686,6 +691,7 @@ import { nestCallPlugin } from './builtins/nest-call.js';
 import { baseRegisterLoadPlugin } from './builtins/base-register-load.js';
 import { storeOrderPlugin } from './builtins/store-order.js';
 import { recordGetterGuardPlugin } from './builtins/record-getter-guard.js';
+import { recordGetterSplitPlugin } from './builtins/record-getter-split.js';
 import { fieldPointerFoldPlugin } from './builtins/field-pointer-fold.js';
 import { newResultTempPlugin } from './builtins/new-result-temp.js';
 import { inlinedCallRestorePlugin } from './builtins/inlined-call-restore.js';
@@ -872,6 +878,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   deadBranchCleanupPlugin,    // Cleanup: if(true)/if(false) dead branch elimination (priority 58)
   declInitMergePlugin,        // Cleanup: int x; x = expr; → int x = expr; (priority 60)
   recordGetterGuardPlugin,    // Matching: an inlined record getter's guard gets its pointer local, read through (priority 60.5)
+  recordGetterSplitPlugin,    // Matching: a record getter's split range tests and null test become one conditional pointer again (priority 60.55)
   fieldPointerFoldPlugin,     // Matching: a field-pointer temporary goes; the field updated in place or the record held (priority 62.5)
   newResultTempPlugin,        // Matching: an allocation constructed in place gets a temporary; the result assigned after (priority 62.6)
   inlinedCallRestorePlugin,   // Matching: a call where the decompiler printed an inlined helper's body (priority 0.5)
