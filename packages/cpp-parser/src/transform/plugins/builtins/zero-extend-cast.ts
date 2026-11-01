@@ -32,11 +32,19 @@
  *
  * A mask whose E is 64-bit or of a type the pass cannot tell stays, except in a value-only
  * position. A mask an AND computed stays everywhere.
+ *
+ * The MOVZX tells the spellings apart only where VC8 compiles the mask to an AND. It does not
+ * for `x >> 8 & 0xff` (a MOVZX of the second byte already), nor where the shift leaves nothing
+ * to clear, so those keep the mask (DRLGOUTDOOR_ValidateSecondaryBorderCell @0067e080 matches
+ * only with it). Nor does a store into a name the body also merges a low part into
+ * (`v = v & 0xffff0000 | w`, the decompiler's model of a write to AX): VC8 already copies the
+ * mask with a MOVZX there, and the cast reshapes the function (RollPrefixes @005c1e80, which
+ * RollingItem @005c21a0 calls, matches only with the mask).
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
-  ASTNode, AssignExpr, BinaryExpr, CStyleCastExpr, Expression, FunctionDecl, IntegerLiteralExpr,
+  ASTNode, AssignExpr, BinaryExpr, CStyleCastExpr, Expression, FunctionDecl, Identifier, IntegerLiteralExpr,
   ParenExpr, VariableDecl,
 } from '../../../ast/nodes.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
@@ -185,6 +193,35 @@ function replaceNodes(root: ASTNode, map: Map<ASTNode, ASTNode>): ASTNode {
 // ---------------------------------------------------------------------------------------
 // zero-extend-cast
 
+/** Constants that keep the upper part of a register and clear the low byte or word. */
+const KEEP_HIGH = new Set([0xffff0000n, 0xffffff00n]);
+
+function stripCasts(e: Expression): Expression {
+  let x = unwrapParens(e);
+  while (x.kind === NodeKind.CStyleCastExpr) x = unwrapParens((x as CStyleCastExpr).expression);
+  return x;
+}
+
+/**
+ * Why the mask and the cast compile to the same instructions, so the MOVZX does not tell
+ * the two spellings apart; null when they differ. VC8 (probed):
+ *
+ *   x >> 8 & 0xff       movzx r, ah  /  movzx r, byte ptr [m + 1]   - the mask already
+ *                       zero-extends the second byte; the cast is shr + movzx
+ *   x >> 24 & 0xff      shr only, either spelling: the mask clears nothing
+ *   x >> 16 & 0xffff    shr only, either spelling
+ */
+function sameInstruction(value: Expression, k: number): string | null {
+  const v = unwrapParens(value);
+  if (v.kind !== NodeKind.BinaryExpr || (v as BinaryExpr).operator !== '>>') return null;
+  const c = unwrapParens((v as BinaryExpr).right);
+  if (c.kind !== NodeKind.IntegerLiteral) return null;
+  const n = (c as IntegerLiteralExpr).value;
+  if (k === 0xff && n === 8n) return 'second byte: the mask compiles to the MOVZX';
+  if (k === 0xff && n === 24n || k === 0xffff && n === 16n) return 'the shift leaves nothing to clear';
+  return null;
+}
+
 const VALUE_BINARY = new Set(['==', '!=', '&&', '||']);
 const ABSORBING_BINARY = new Set(['+', '-', '*', '/', '%', '&', '|', '^', '<', '>', '<=', '>=']);
 const CONDITION_KINDS = new Set<string>([NodeKind.IfStmt, NodeKind.WhileStmt, NodeKind.DoWhileStmt, NodeKind.ForStmt, NodeKind.SwitchStmt]);
@@ -265,6 +302,32 @@ export function createZeroExtendCastTransformer(options?: PluginOptions): Transf
         }
       };
 
+      // Names whose upper part the body keeps while it replaces the low one:
+      // `v = v & 0xffff0000 | w` is the decompiler's model of a write to AX or AL.
+      const merged = new Set<string>();
+      const findMerges = (n: ASTNode) => {
+        if (n.kind === NodeKind.BinaryExpr && (n as BinaryExpr).operator === '&') {
+          const b = n as BinaryExpr;
+          for (const [v, k] of [[b.left, b.right], [b.right, b.left]] as const) {
+            const kk = unwrapParens(k), vv = unwrapParens(stripCasts(v));
+            if (kk.kind === NodeKind.IntegerLiteral && KEEP_HIGH.has((kk as IntegerLiteralExpr).value) && vv.kind === NodeKind.Identifier) {
+              merged.add((vv as Identifier).name);
+            }
+          }
+        }
+        for (const c of children(n)) findMerges(c);
+      };
+      findMerges(node.body);
+      /** The mask is stored whole into one of those names. */
+      const mergedRegister = (x: ASTNode, p: ASTNode | undefined): boolean => {
+        if (p?.kind === NodeKind.AssignExpr && (p as AssignExpr).right === x) {
+          const l = unwrapParens((p as AssignExpr).left);
+          return l.kind === NodeKind.Identifier && merged.has((l as Identifier).name);
+        }
+        if (p?.kind === NodeKind.VariableDecl && (p as VariableDecl).initializer === x) return merged.has((p as VariableDecl).name.name);
+        return false;
+      };
+
       const replace = new Map<ASTNode, ASTNode>();
       for (const be of masks) {
         const m = maskOf(be);
@@ -279,6 +342,9 @@ export function createZeroExtendCastTransformer(options?: PluginOptions): Transf
           p.kind === NodeKind.SubscriptExpr && (p as unknown as { array: ASTNode }).array === x
           || p.kind === NodeKind.MemberExpr || p.kind === NodeKind.PostfixExpr
           || p.kind === NodeKind.CallExpr && (p as unknown as { callee: ASTNode }).callee === x);
+        const same = sameInstruction(m.value, m.k);
+        if (same) { o.onSite?.({ line, rewritten: false, reason: same }); continue; }
+        if (mergedRegister(x, p)) { o.onSite?.({ line, rewritten: false, reason: 'stored into a register the code merges a part into' }); continue; }
         const r = ranges.rangeAt(m.value);
         const unsuffixed = !/u/i.test(m.lit.suffix ?? '');
         let reason: string;

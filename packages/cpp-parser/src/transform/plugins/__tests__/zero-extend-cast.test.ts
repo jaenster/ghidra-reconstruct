@@ -189,6 +189,28 @@ describe('zero-extend-cast', () => {
     assert.match(rewrite(src).code, /\(uint16_t\)\(a \+ b\)/);
   });
 
+  it('a shift whose mask compiles to the same MOVZX keeps the mask (DRLGOUTDOOR_ValidateSecondaryBorderCell)', () => {
+    const src = `int f(uint32_t nGridFlags, int a) { return G(nGridFlags >> 0x14 & 0x3f, nGridFlags >> 8 & 0xff, nGridFlags >> 0x18 & 0xff, nGridFlags >> 0x10 & 0xffff, nGridFlags >> 0x10 & 0xff); }`;
+    const { code, reasons } = rewrite(src);
+    assert.match(code, /nGridFlags >> 8 & 0xff, nGridFlags >> 0x18 & 0xff, nGridFlags >> 0x10 & 0xffff, \(uint8_t\)\(nGridFlags >> 0x10\)/);
+    assert.strictEqual(reasons.filter(r => r === 'value' || r === 'int').length, 1, reasons.join(','));
+  });
+
+  it('a store into a register the code merges a low part into keeps the mask (RollPrefixes)', () => {
+    const src = `uint32_t f(uint32_t pRolledAffixIdx, uint32_t b) {
+      uint32_t nRolledAffixMasked;
+      uint32_t uVar1;
+      nRolledAffixMasked = pRolledAffixIdx & 0xffff;
+      uVar1 = nRolledAffixMasked;
+      nRolledAffixMasked = (uint32_t)((uint32_t)nRolledAffixMasked & 0xffff0000u | (uint32_t)(uint16_t)b);
+      uint32_t w = b & 0xffff;
+      return nRolledAffixMasked + uVar1 + w;
+    }`;
+    const { code } = rewrite(src);
+    assert.match(code, /nRolledAffixMasked = pRolledAffixIdx & 0xffff;/);
+    assert.match(code, /uint32_t w = \(uint16_t\)b;/);
+  });
+
   it('no facts, no change', () => {
     const src = `uint32_t f(uint32_t a) { return a & 0xffff; }`;
     const out = createZeroExtendCastTransformer({})(createZeroExtendSiteTransformer({})(parse(src)) as AnyNode) as AnyNode;
