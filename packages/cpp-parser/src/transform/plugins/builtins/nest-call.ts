@@ -357,6 +357,13 @@ function factFor(s: Statement, name: string, ctx: Ctx): CallSiteFact | null {
   if (!placed(s)) return null;
   const bare = bareName(name);
   let found: CallSiteFact | null = null;
+  // A copy of a call the original makes once carries its fact (ghidraInfo.callSite).
+  for (const n of traverseAST(s)) {
+    if (n.kind !== NodeKind.CallExpr || !n.ghidraInfo?.callSite || bareName(calleeName((n as CallExpr).callee) ?? '') !== bare) continue;
+    if (found) return null;
+    found = n.ghidraInfo.callSite;
+  }
+  if (found) return found;
   for (let l = s.location.start.line; l <= s.location.end.line; l++) {
     if ((ctx.lineOwners.get(l) ?? 0) > 1) return null;
     for (const f of ctx.ev.lines.get(l) ?? []) {

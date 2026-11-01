@@ -53,6 +53,13 @@ export interface GhidraMetadata {
    */
   nullGetter?: boolean;
   /**
+   * The call is one of the copies a pass made of a call the original evaluates once, after
+   * a join (`arm-constant-call`): its call-order fact as the original reaches it on this
+   * copy's path, the pushes made before the join counted in. `nest-call` reads it where
+   * the line's fact, claimed by every copy, gives none.
+   */
+  callSite?: { name: string; at: number; prev: number | null; pushes: number; slots: readonly number[] | null };
+  /**
    * The byte/word mask was a MOVZX of this source width in the original (`zero-extend-site`);
    * `zero-extend-cast` writes it as the cast to the unsigned type of that width.
    */

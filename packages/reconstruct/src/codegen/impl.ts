@@ -3294,6 +3294,18 @@ function transformDecompiledCode(
         };
       }
       perPluginOptions['comma-expand'] = { ...(perPluginOptions['comma-expand'] as object | undefined), branchLayout: layout };
+      // A call taking a constant chosen per arm goes back into each arm where the original
+      // pushes it per arm and jumps to the call the arms share.
+      if (layout.pushes) {
+        perPluginOptions['arm-constant-call'] = {
+          branchLayout: layout,
+          callOrder,
+          enumValues: context?.nullGetterEnums,
+          globalNames: addressConstantNames(context),
+          onSite: (e: { line: number; locals: string[]; arms: number; statements: number }) =>
+            console.warn(`[arm-call] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.locals.join(', ')} into ${e.arms} arms (${e.statements} statement${e.statements === 1 ? '' : 's'}) at line ${e.line}`),
+        };
+      }
       // A record getter whose range tests and null test were split apart is written back
       // as one conditional pointer where the original left them through one block.
       perPluginOptions['record-getter-split'] = {
@@ -3769,4 +3781,22 @@ function frameGroupReport(event: Record<string, unknown>): void {
   if (!dir) return;
   mkdirSync(dir, { recursive: true });
   appendFileSync(join(dir, `escapes-${process.pid}-${threadId}.ndjson`), JSON.stringify(event) + '\n');
+}
+
+const addressConstantNamesCache = new WeakMap<object, string[]>();
+
+/** Every global and function name, bare and qualified: what `&name` makes a constant of. */
+function addressConstantNames(context: { funcPtrArgCasts?: { globalTypes?: Record<string, string>; functionReturnTypes?: Record<string, string> } } | undefined): string[] {
+  const casts = context?.funcPtrArgCasts;
+  if (!casts) return [];
+  const hit = addressConstantNamesCache.get(casts);
+  if (hit) return hit;
+  const names = new Set<string>();
+  for (const k of [...Object.keys(casts.globalTypes ?? {}), ...Object.keys(casts.functionReturnTypes ?? {})]) {
+    names.add(k);
+    names.add(k.split('::').pop()!);
+  }
+  const out = [...names];
+  addressConstantNamesCache.set(casts, out);
+  return out;
 }

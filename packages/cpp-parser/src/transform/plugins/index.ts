@@ -384,6 +384,11 @@ export {
 } from './builtins/record-getter-guard.js';
 
 export {
+  armConstantCallPlugin,
+  type ArmConstantCallOptions,
+} from './builtins/arm-constant-call.js';
+
+export {
   recordGetterSplitPlugin,
   type RecordGetterSplitOptions,
 } from './builtins/record-getter-split.js';
@@ -692,6 +697,7 @@ import { baseRegisterLoadPlugin } from './builtins/base-register-load.js';
 import { storeOrderPlugin } from './builtins/store-order.js';
 import { recordGetterGuardPlugin } from './builtins/record-getter-guard.js';
 import { recordGetterSplitPlugin } from './builtins/record-getter-split.js';
+import { armConstantCallPlugin } from './builtins/arm-constant-call.js';
 import { fieldPointerFoldPlugin } from './builtins/field-pointer-fold.js';
 import { newResultTempPlugin } from './builtins/new-result-temp.js';
 import { inlinedCallRestorePlugin } from './builtins/inlined-call-restore.js';
@@ -864,6 +870,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   earlyReturnPlugin,          // Readability: flatten nested if(C){...}return X; → if(!C)return X; ... (priority 60)
   commaExpandPlugin,          // Readability: lower comma/short-circuit side effects into statements + guards (priority 13)
   commaExpandLatePlugin,      // Readability: the same, on what goto structuring left (priority 59)
+  armConstantCallPlugin,      // Matching: a call taking a constant chosen per if/else arm goes back into each arm (priority 59.4)
   nestCallPlugin,             // Matching: a temporary back into the argument list the original evaluated it in (priority 59.5)
   baseRegisterLoadPlugin,     // Matching: a call argument loaded into its own base register gets its local (priority 59.6)
   storeOrderPlugin,           // Matching: independent stores in the original's instruction order (priority 59.7)
