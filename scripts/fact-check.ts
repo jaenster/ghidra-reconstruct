@@ -86,7 +86,7 @@ const EXPECT: Expect[] = [
     address: '006b7f70', name: 'ClearScreen',
     check: f => {
       const z = f.zeroStores?.find((x: any) => x.name === 'nViewportLeft');
-      return z && z.offset === -0x14 && z.size === 16 && sameJson(z.zero, [[0, 8]]) && sameJson(z.other, [[8, 16]])
+      return z && z.offset === -0x14 && z.size === 16 && sameJson(z.zero, [[0, 8]]) && sameJson(z.other, [[12, 16]])
         ? null : `zeroStores ${JSON.stringify(f.zeroStores)}`;
     },
   },
@@ -102,8 +102,11 @@ const EXPECT: Expect[] = [
   {
     address: '00404210', name: 'FILETOOLS_StartApplicationWithCommandLine_UTF8',
     check: f => {
+      // memset(&startupInfo + 4, 0, 0x40) after cb = 0x44; four stores of a zeroed EAX into processInfo.
+      const s = f.zeroStores?.find((x: any) => x.name === 'startupInfo');
       const z = f.zeroStores?.find((x: any) => x.name === 'processInfo');
-      return z && z.offset === -0x10818 && z.size === 16 && sameJson(z.zero, [[0, 16]]) && sameJson(z.other, [])
+      return s && s.offset === -0x1085c && sameJson(s.zero, [[4, 0x44]]) && sameJson(s.other, [[0, 4]])
+        && z && z.offset === -0x10818 && z.size === 16 && sameJson(z.zero, [[0, 16]]) && sameJson(z.other, [])
         ? null : `zeroStores ${JSON.stringify(f.zeroStores)}`;
     },
   },
