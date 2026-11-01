@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import { parse } from '../../../parser/index.js';
 import { NodeKind } from '../../../ast/kinds.js';
 import type { FunctionDecl } from '../../../ast/nodes.js';
-import { paramReaches, countedSinkReach, type Reach, type ParamReachContext, type ReachField } from '../param-reach.js';
+import { paramReaches, countedSinkReach, knownSinkReach, type Reach, type ParamReachContext, type ReachField } from '../param-reach.js';
 
 const SIZES: Record<string, number> = {
   char: 1, undefined1: 1, short: 2, int: 4, uint: 4, undefined4: 4, DWORD: 4, POINT: 8, RECT: 16, Pair: 8,
@@ -14,13 +14,15 @@ const FIELDS: Record<string, Record<string, ReachField>> = {
   Box: { name: { offset: 4, type: 'char[16]' } },
 };
 
-function reach(code: string, params: { name: string; type: string }[], callee: (n: string, i: number, c: number) => Reach = () => null): Reach[] {
+function reach(code: string, params: { name: string; type: string }[], callee: (n: string, i: number, c: number) => Reach = () => null,
+  computed?: ParamReachContext['computedCalleeReach']): Reach[] {
   const tu = parse(code) as unknown as { declarations: FunctionDecl[] };
   const f = tu.declarations.find(d => d.kind === NodeKind.FunctionDecl)!;
   const ctx: ParamReachContext = {
     typeSize: s => (s.endsWith('*') ? 4 : SIZES[s] ?? null),
     field: (a, m) => FIELDS[a]?.[m] ?? null,
     calleeReach: callee,
+    ...(computed ? { computedCalleeReach: computed } : {}),
   };
   return paramReaches(f.body!, params, ctx);
 }
@@ -147,5 +149,63 @@ describe('countedSinkReach', () => {
     assert.strictEqual(countedSinkReach('memcpy', 2, calls[0].arguments), undefined);
     assert.deepStrictEqual(countedSinkReach('_fread', 0, calls[1].arguments), { lo: 0, hi: 12 });
     assert.strictEqual(countedSinkReach('GetCursorPos', 0, calls[1].arguments), undefined);
+  });
+});
+
+describe('knownSinkReach', () => {
+  const callsOf = (code: string): { arguments: never[] }[] => {
+    const tu = parse(`void f() { ${code} }`) as unknown as { declarations: FunctionDecl[] };
+    const body = (tu.declarations[0] as FunctionDecl).body as unknown as { statements: { expression: { arguments: never[] } }[] };
+    return body.statements.map(s => s.expression);
+  };
+
+  it('a documented out-parameter is its object, other positions are not known sinks', () => {
+    const [c] = callsOf('GetClientRect(hWnd, &rc);');
+    assert.deepStrictEqual(knownSinkReach('GetClientRect', 1, c.arguments), { lo: 0, hi: 16 });
+    assert.deepStrictEqual(knownSinkReach('::GetClientRect', 1, c.arguments), { lo: 0, hi: 16 });
+    assert.strictEqual(knownSinkReach('GetClientRect', 0, c.arguments), undefined);
+  });
+
+  it('only the bare spelling is the platform call', () => {
+    const [c] = callsOf('Ui::GetClientRect(hWnd, &rc);');
+    assert.strictEqual(knownSinkReach('Ui::GetClientRect', 1, c.arguments), undefined);
+  });
+
+  it('ReadFile: the buffer by its literal count, the byte count as one word', () => {
+    const [lit, open] = callsOf('ReadFile(h, &x, 8, &n, 0); ReadFile(h, &x, nLen, &n, 0);');
+    assert.deepStrictEqual(knownSinkReach('ReadFile', 1, lit.arguments), { lo: 0, hi: 8 });
+    assert.deepStrictEqual(knownSinkReach('ReadFile', 3, lit.arguments), { lo: 0, hi: 4 });
+    assert.strictEqual(knownSinkReach('ReadFile', 1, open.arguments), null);
+  });
+
+  it('scanf: each argument by its conversion', () => {
+    const [c] = callsOf('sscanf(s, "%d-%hd %*d%%%lf %3c", &a, &b, &c, &d);');
+    assert.deepStrictEqual(knownSinkReach('sscanf', 2, c.arguments), { lo: 0, hi: 4 });
+    assert.deepStrictEqual(knownSinkReach('sscanf', 3, c.arguments), { lo: 0, hi: 2 });
+    assert.deepStrictEqual(knownSinkReach('sscanf', 4, c.arguments), { lo: 0, hi: 8 });
+    assert.deepStrictEqual(knownSinkReach('sscanf', 5, c.arguments), { lo: 0, hi: 3 });
+    assert.strictEqual(knownSinkReach('sscanf', 0, c.arguments), undefined);
+  });
+
+  it('scanf: a string conversion or a format that is not a literal is unknown', () => {
+    const [str, open] = callsOf('sscanf(s, "%d %s", &a, b); sscanf(s, pszFormat, &a);');
+    assert.strictEqual(knownSinkReach('sscanf', 2, str.arguments), null);
+    assert.strictEqual(knownSinkReach('sscanf', 2, open.arguments), null);
+  });
+});
+
+describe('paramReaches through a computed callee', () => {
+  it('asks the context for the expression', () => {
+    const seen: string[] = [];
+    const r = reach('void f(int *p) { (*gTable->pfn)(p); }', [{ name: 'p', type: 'int *' }], () => null,
+      (callee, i, n) => { seen.push(`${callee.kind}:${i}/${n}`); return { lo: 0, hi: 4 }; });
+    assert.deepStrictEqual(r, [{ lo: 0, hi: 4 }]);
+    assert.strictEqual(seen.length, 1);
+  });
+
+  it('is unknown without a context answer', () => {
+    const p = [{ name: 'p', type: 'int *' }];
+    assert.deepStrictEqual(reach('void f(int *p) { (*gTable->pfn)(p); }', p), [null]);
+    assert.deepStrictEqual(reach('void f(int *p) { (*gTable->pfn)(p); }', p, () => null, () => null), [null]);
   });
 });

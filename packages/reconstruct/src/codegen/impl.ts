@@ -38,7 +38,7 @@ import { foldedAddressFacts, type FoldedAddressFact } from './folded-address-spe
 import { immediateConstantFacts, dataAtAddress, type ImmediateConstantFact } from './immediate-constant-spec.js';
 import { compareFormSpec, type CompareFormSpec } from './compare-form-spec.js';
 import { repStringOps } from './rep-string-spec.js';
-import type { RepStringOp } from '@ghidra-mcp/cpp-parser';
+import type { RepStringOp, Expression } from '@ghidra-mcp/cpp-parser';
 import { ROOT_CLASS_SCOPE, namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 import { cleanFunctionComment, guardedFuncDefTypedef, emittedFunctionName, returnSigType, sigType } from './header.js';
 import { classScopeOf, memberCallModel, memberDefinitionScope, orphanMarker, signatureParameters } from './templates/index.js';
@@ -3126,7 +3126,10 @@ function transformDecompiledCode(
       const aggregateLayouts = context?.funcPtrArgCasts?.aggregateLayouts;
       perPluginOptions['frame-group-locals'] = {
         slots: enclosing.stackSlots,
-        ...(reach ? { argReach: (callee: string, index: number, argCount: number) => reach.argReach(callee, index, argCount) } : {}),
+        ...(reach ? {
+          argReach: (callee: string, index: number, argCount: number) => reach.argReach(callee, index, argCount),
+          computedArgReach: (callee: Expression, index: number, argCount: number) => reach.argReachThrough(callee, index, argCount),
+        } : {}),
         ...(aggregateLayouts ? { aggregateLayout: (name: string) => aggregateLayouts[name] ?? null } : {}),
         ...(process.env.GHIDRA_FRAME_GROUP_REPORT_DIR
           ? { onEscape: (e: object) => frameGroupReport({ fn: funcAddress, name: funcName, ...e }) }
