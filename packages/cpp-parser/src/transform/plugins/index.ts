@@ -517,6 +517,7 @@ export { foldedAddressRebasePlugin, type FoldedAddress, type FoldedAddressRebase
 export { immediateNotAddressPlugin, type ImmediateNotAddressOptions } from './builtins/immediate-not-address.js';
 export { importAddressForwarderPlugin, IMPORT_ADDRESS_FORWARDERS } from './builtins/import-address-forwarder.js';
 export { unsignedRangeComparePlugin } from './builtins/unsigned-range-compare.js';
+export { zeroExtendSitePlugin, zeroExtendCastPlugin, createZeroExtendSiteTransformer, createZeroExtendCastTransformer, type ZeroExtendMaskSite, type ZeroExtendSiteOptions, type ZeroExtendCastOptions } from './builtins/zero-extend-cast.js';
 export { shiftCountMaskPlugin, createShiftCountMaskTransformer, type ShiftCountMaskOptions } from './builtins/shift-count-mask.js';
 export { createFunctionRanges, type ValueRange, type FunctionRanges } from './builtins/value-range.js';
 export { compareFormPlugin, type CompareFormDecision, type CompareFormOptions } from './builtins/compare-form.js';
@@ -612,6 +613,7 @@ import { immediateNotAddressPlugin } from './builtins/immediate-not-address.js';
 import { importAddressForwarderPlugin } from './builtins/import-address-forwarder.js';
 import { unsignedRangeComparePlugin } from './builtins/unsigned-range-compare.js';
 import { shiftCountMaskPlugin } from './builtins/shift-count-mask.js';
+import { zeroExtendSitePlugin, zeroExtendCastPlugin } from './builtins/zero-extend-cast.js';
 import { compareFormPlugin } from './builtins/compare-form.js';
 import { repStringFormPlugin } from './builtins/rep-string-form.js';
 import { compareSignednessPlugin } from './builtins/compare-signedness.js';
@@ -789,6 +791,8 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   callSiteOverrideCastPlugin, // Correctness: call through void*/code* → cast to the call-site override (priority 614)
   unsignedRangeComparePlugin, // Correctness: (x - lo) < n on an unsigned narrow/enum stays unsigned (priority 617)
   shiftCountMaskPlugin,       // Matching: x << (n & 0x1f) -> x << n where n is proven to lie in [0, 31] (priority 621)
+  zeroExtendSitePlugin,       // Matching: tag each byte/word mask a MOVZX computed (priority 3)
+  zeroExtendCastPlugin,       // Matching: a tagged x & 0xffff -> (uint16_t)x where value and type are kept (priority 622)
   compareFormPlugin,          // Fidelity: a comparison in the form its CMP/TEST and Jcc show (priority 3)
   repStringFormPlugin,        // Fidelity: a REP STOS fill as an index loop, a REP MOVS copy as memcpy, from the instruction (priority 4)
   compareSignednessPlugin,    // Correctness: a comparison compare-form made unsigned stays unsigned (priority 619)
