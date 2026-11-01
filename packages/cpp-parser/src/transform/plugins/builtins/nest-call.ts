@@ -31,19 +31,14 @@
  *   - a temporary holding a call or a memory read stands where VC8 evaluates it: the
  *     earliest in the argument furthest right; one holding a constant or a local whose
  *     address is never taken may stand anywhere;
- *   - exactly one temporary holds a call, and no other argument calls anything (the
- *     statement assigns nothing inside the argument list): VC8 evaluates arguments right
- *     to left, GCC in an unspecified order, and two calls side by side could run in
- *     either (`SOUND_PlayEnvironmentSound(n, RollBetweenMinAndMax(pSeed, ..),
- *     RollBetweenMinAndMax(pSeed, ..), 0)` would swap its rolls). A run of two call
- *     temporaries nests the later one only (DRAW_UI_HelpXpac, 00495410: `pStr =
- *     CMD_GetKeyNameForCommand(..); pFormat = GetLocaleString(..);
- *     UNICODE_FormatWideString(100, wszBuf4, pFormat, pStr);`);
- *   - nothing beside the call, nor the statement's target, reads what the call could
- *     write: every other argument and temporary is a constant, an enumerator, an
- *     address, a local whose address is never taken, or arithmetic on those. A global
- *     or a field read beside the call could be read before it under GCC and after it
- *     under VC8;
+ *   - the nested calls, the other temporaries and the other arguments (and the statement's
+ *     target) give the same result in any order: VC8 evaluates arguments right to left,
+ *     GCC in an order of its own, so none may write what another reads or writes, by the
+ *     callees' summaries (write-effects.ts). Two getters that write nothing nest side by
+ *     side; two rolls of one seed (`SOUND_PlayEnvironmentSound(n,
+ *     RollBetweenMinAndMax(pSeed, ..), RollBetweenMinAndMax(pSeed, ..), 0)`) do not, nor
+ *     does a global read beside a call that writes it. A run of temporaries that may not
+ *     all nest nests its later ones (DRAW_UI_HelpXpac, 00495410);
  *   - a constant held in a narrow temporary fits it, and the temporary is the whole
  *     argument (casts aside), so the constant reaches the parameter with the same value;
  *   - each call temporary's value has the temporary's type (its callee's return type, or
@@ -432,229 +427,173 @@ function nameOf(e: Expression): string | null {
   return null;
 }
 
-/**
- * Whether evaluating `e` reads nothing a call could change and changes nothing: constants,
- * locals whose address is never taken, addresses, and arithmetic on them. `free` names
- * the identifiers that stand for the temporaries being nested.
- */
-function orderFree(e: ASTNode, ctx: Ctx, free: ReadonlySet<ASTNode>): boolean {
-  if (free.has(e)) return true;
-  switch (e.kind) {
-    case NodeKind.IntegerLiteral: case NodeKind.CharLiteral: case NodeKind.BoolLiteral:
-    case NodeKind.NullptrLiteral: case NodeKind.FloatingLiteral: case NodeKind.StringLiteral:
-    case NodeKind.SizeofExpr: case NodeKind.AlignofExpr:
-      return true;
-    case NodeKind.Identifier: case NodeKind.QualifiedId: {
-      const name = nameOf(e as Expression);
-      if (!name) return false;
-      if (isNullName(e as Expression)) return true;
-      const l = e.kind === NodeKind.Identifier ? ctx.locals.get(name) : undefined;
-      if (l) return l.array || !l.addressed;
-      // A global array is its address; any other global is memory a call may write.
-      const g = globalSpelling(name, ctx);
-      if (g !== undefined) return g.includes('[');
-      // An enumerator is a constant and a function designates its address; anything else
-      // unknown is not trusted.
-      const segs = ctx.opts.enclosingSegments ?? [];
-      return scopedLookup(ctx.enums, name, segs) !== undefined
-        || scopedLookup(ctx.opts.functionReturnTypes ?? {}, name, segs) !== undefined;
-    }
-    case NodeKind.ParenExpr:
-      return orderFree((e as ParenExpr).expression, ctx, free);
-    case NodeKind.CStyleCastExpr: case NodeKind.StaticCastExpr: case NodeKind.ReinterpretCastExpr:
-    case NodeKind.ConstCastExpr:
-      return orderFree((e as unknown as { expression: Expression }).expression, ctx, free);
-    case NodeKind.FunctionalCastExpr:
-      return (e as unknown as { arguments: Expression[] }).arguments.every(a => orderFree(a, ctx, free));
-    case NodeKind.UnaryExpr: {
-      const u = e as UnaryExpr;
-      if (u.operator === '&') return addressFree(u.operand, ctx, free);
-      if (u.operator === '*' || u.operator === '++' || u.operator === '--') return false;
-      return orderFree(u.operand, ctx, free);
-    }
-    case NodeKind.BinaryExpr: {
-      const b = e as unknown as { left: Expression; right: Expression };
-      return orderFree(b.left, ctx, free) && orderFree(b.right, ctx, free);
-    }
-    case NodeKind.ConditionalExpr: {
-      const c = e as unknown as { condition: Expression; thenExpr: Expression; elseExpr: Expression };
-      return orderFree(c.condition, ctx, free) && orderFree(c.thenExpr, ctx, free) && orderFree(c.elseExpr, ctx, free);
-    }
-    case NodeKind.MemberExpr: {
-      // A field of a local struct nothing else can reach.
-      const m = e as unknown as { object: Expression; isArrow: boolean };
-      if (m.isArrow) return false;
-      const o = unwrap(m.object);
-      if (o.kind !== NodeKind.Identifier) return false;
-      const l = ctx.locals.get((o as Identifier).name);
-      return !!l && !l.addressed && !l.array;
-    }
-    default:
-      return false;
-  }
+/** What evaluating an expression may read or write, beyond the caller's private locals. */
+interface Eff { unknown: boolean; memory: boolean; globals: Set<string> }
+
+const noEff = (): Eff => ({ unknown: false, memory: false, globals: new Set() });
+
+function addEff(into: Eff, e: { unknown?: boolean; memory?: boolean; globals?: Iterable<string>; params?: readonly number[] } | undefined): void {
+  if (!e || e.unknown) { into.unknown = true; return; }
+  // A write or read through a pointer argument is memory, as the caller sees it.
+  if (e.memory || (e.params && e.params.length)) into.memory = true;
+  for (const g of e.globals ?? []) into.globals.add(g);
 }
 
-/** Whether computing the address of the lvalue `e` reads nothing a call could change. */
-function addressFree(e: Expression, ctx: Ctx, free: ReadonlySet<ASTNode>): boolean {
-  const u = unwrap(e);
-  switch (u.kind) {
-    case NodeKind.Identifier: case NodeKind.QualifiedId:
-      return true;
-    case NodeKind.MemberExpr: {
-      const m = u as unknown as { object: Expression; isArrow: boolean };
-      return m.isArrow ? orderFree(m.object, ctx, free) : addressFree(m.object, ctx, free);
-    }
-    case NodeKind.SubscriptExpr: {
-      const s = u as unknown as { array: Expression; index: Expression };
-      const base = unwrap(s.array);
-      const name = nameOf(base);
-      const arrayBase = !!name && (ctx.locals.get(name)?.array || (globalSpelling(name, ctx) ?? '').includes('['));
-      return (arrayBase || orderFree(s.array, ctx, free)) && orderFree(s.index, ctx, free);
-    }
-    case NodeKind.UnaryExpr:
-      return (u as UnaryExpr).operator === '*' && orderFree((u as UnaryExpr).operand, ctx, free);
-    default:
-      return false;
-  }
-}
-
-/** What a call may write, as the arguments beside it see it. */
-interface Writes { unknown: boolean; memory: boolean; globals: Set<string> }
+const isEmpty = (e: Eff) => !e.unknown && !e.memory && e.globals.size === 0;
 
 /**
- * What evaluating `call` may write: its callee's summary and those of the calls in its
- * arguments. A write through a pointer argument is memory.
+ * Whether a global the effect names is `name`. The summary names globals as the database
+ * does; the emitter splits a table into pieces named after it
+ * (`gaAct5SceneryPresetTable_0_0__1_`), so a name that extends one, or that one extends,
+ * is the same storage.
  */
-function callWrites(call: CallExpr, ctx: Ctx): Writes {
-  const w: Writes = { unknown: false, memory: false, globals: new Set() };
-  for (const n of traverseAST(call)) {
-    if (n.kind !== NodeKind.CallExpr) continue;
-    const name = calleeName((n as CallExpr).callee);
-    if (name === 'sizeof') continue;
-    const e = name ? scopedLookup(ctx.opts.writeEffects ?? {}, name, ctx.opts.enclosingSegments ?? []) : undefined;
-    if (!e || e.unknown) { w.unknown = true; return w; }
-    if (e.memory || e.params?.length) w.memory = true;
-    for (const g of e.globals ?? []) w.globals.add(g);
-  }
-  return w;
+function sameGlobal(a: string, b: string): boolean {
+  return a === b || a.startsWith(b + '_') || b.startsWith(a + '_');
 }
 
-/**
- * Whether the call may write the global spelled `name` here. The summary names globals as
- * the database does; the emitter splits a table into pieces named after it
- * (`gaAct5SceneryPresetTable_0_0__1_`), so a name that extends a written one, or that a
- * written one extends, counts as written.
- */
-function writesGlobal(w: Writes, name: string): boolean {
-  const leaf = bareName(name);
-  for (const g of w.globals) if (g === leaf || leaf.startsWith(g + '_') || g.startsWith(leaf + '_')) return true;
+/** Whether something `w` writes may be what `x` reads or writes. */
+function interferes(w: Eff, x: Eff): boolean {
+  if (isEmpty(w) || isEmpty(x)) return false;
+  if (w.unknown || x.unknown || w.memory) return true;
+  // Memory behind a pointer may be any global.
+  if (x.memory) return true;
+  for (const g of w.globals) for (const h of x.globals) if (sameGlobal(g, h)) return true;
   return false;
 }
 
-/**
- * Whether `e` reads the same beside a call that writes `w`, in any order: it calls and
- * changes nothing, and reads no global the call writes, no memory behind a pointer when
- * the call writes memory or any global (a pointer may hold a global's address), and no
- * local whose address escaped when the call writes memory. Without the call's summary,
- * only what nothing can write (orderFree).
- */
-function beside(e: ASTNode, w: Writes, ctx: Ctx, free: ReadonlySet<ASTNode>): boolean {
-  if (w.unknown) return orderFree(e, ctx, free);
-  if (free.has(e)) return true;
-  const throughPointer = !w.memory && w.globals.size === 0;
-  switch (e.kind) {
-    case NodeKind.IntegerLiteral: case NodeKind.CharLiteral: case NodeKind.BoolLiteral:
-    case NodeKind.NullptrLiteral: case NodeKind.FloatingLiteral: case NodeKind.StringLiteral:
-    case NodeKind.SizeofExpr: case NodeKind.AlignofExpr:
-      return true;
-    case NodeKind.Identifier: case NodeKind.QualifiedId: {
-      const name = nameOf(e as Expression);
-      if (!name) return false;
-      if (isNullName(e as Expression)) return true;
-      const l = e.kind === NodeKind.Identifier ? ctx.locals.get(name) : undefined;
-      if (l) return l.array || !l.addressed || !w.memory;
+/** One unit evaluated in an order the compilers do not agree on: what it writes and reads. */
+interface Unit { w: Eff; r: Eff }
+
+/** Reads and writes of evaluating `e`; the identifiers in `free` are units of their own. */
+function unitOf(e: ASTNode, ctx: Ctx, free: ReadonlySet<ASTNode>): Unit {
+  const u: Unit = { w: noEff(), r: noEff() };
+  const effects = ctx.opts.writeEffects ?? {};
+  const segs = ctx.opts.enclosingSegments ?? [];
+  const readGlobal = (name: string) => {
+    const g = globalSpelling(name, ctx);
+    if (g === undefined) {
+      if (scopedLookup(ctx.enums, name, segs) === undefined
+        && scopedLookup(ctx.opts.functionReturnTypes ?? {}, name, segs) === undefined) u.r.unknown = true;
+    } else if (!g.includes('[')) {
+      u.r.globals.add(bareName(name));
+    }
+  };
+  /** An object's storage read or reached: `local`, `global`, or through a pointer. */
+  const object = (o: Expression): void => {
+    const x = unwrap(o);
+    const name = nameOf(x);
+    if (name) {
+      if (isNullName(x)) return;
+      const l = x.kind === NodeKind.Identifier ? ctx.locals.get(name) : undefined;
+      if (l) { if (l.addressed || l.array) u.r.memory = true; return; }
       const g = globalSpelling(name, ctx);
-      if (g !== undefined) return g.includes('[') || (!w.memory && !writesGlobal(w, name));
-      return orderFree(e, ctx, free);
+      if (g !== undefined) { u.r.globals.add(bareName(name)); return; }
+      u.r.unknown = true;
+      return;
     }
-    case NodeKind.ParenExpr:
-      return beside((e as ParenExpr).expression, w, ctx, free);
-    case NodeKind.CStyleCastExpr: case NodeKind.StaticCastExpr: case NodeKind.ReinterpretCastExpr:
-    case NodeKind.ConstCastExpr:
-      return beside((e as unknown as { expression: Expression }).expression, w, ctx, free);
-    case NodeKind.FunctionalCastExpr:
-      return (e as unknown as { arguments: Expression[] }).arguments.every(a => beside(a, w, ctx, free));
-    case NodeKind.UnaryExpr: {
-      const u = e as UnaryExpr;
-      if (u.operator === '&') return besideAddress(u.operand, w, ctx, free);
-      if (u.operator === '++' || u.operator === '--') return false;
-      if (u.operator === '*') return throughPointer && beside(u.operand, w, ctx, free);
-      return beside(u.operand, w, ctx, free);
+    value(x);
+  };
+  const address = (o: Expression): void => {
+    const x = unwrap(o);
+    switch (x.kind) {
+      case NodeKind.Identifier: case NodeKind.QualifiedId: return;
+      case NodeKind.MemberExpr: {
+        const m = x as unknown as { object: Expression; isArrow: boolean };
+        if (m.isArrow) value(m.object); else address(m.object);
+        return;
+      }
+      case NodeKind.SubscriptExpr: {
+        const sub = x as unknown as { array: Expression; index: Expression };
+        const base = unwrap(sub.array);
+        const name = nameOf(base);
+        const arrayBase = !!name && (ctx.locals.get(name)?.array || (globalSpelling(name, ctx) ?? '').includes('['));
+        if (!arrayBase) value(sub.array);
+        value(sub.index);
+        return;
+      }
+      case NodeKind.UnaryExpr:
+        if ((x as UnaryExpr).operator === '*') { value((x as UnaryExpr).operand); return; }
+        u.r.unknown = true;
+        return;
+      default:
+        value(x);
     }
-    case NodeKind.BinaryExpr: {
-      const b = e as unknown as { left: Expression; right: Expression };
-      return beside(b.left, w, ctx, free) && beside(b.right, w, ctx, free);
+  };
+  const value = (n: ASTNode): void => {
+    if (free.has(n)) return;
+    switch (n.kind) {
+      case NodeKind.IntegerLiteral: case NodeKind.CharLiteral: case NodeKind.BoolLiteral:
+      case NodeKind.NullptrLiteral: case NodeKind.FloatingLiteral: case NodeKind.StringLiteral:
+      case NodeKind.SizeofExpr: case NodeKind.AlignofExpr:
+        return;
+      case NodeKind.Identifier: case NodeKind.QualifiedId: {
+        const name = nameOf(n as Expression);
+        if (!name) { u.r.unknown = true; return; }
+        if (isNullName(n as Expression)) return;
+        const l = n.kind === NodeKind.Identifier ? ctx.locals.get(name) : undefined;
+        if (l) { if (l.addressed && !l.array) u.r.memory = true; return; }
+        readGlobal(name);
+        return;
+      }
+      case NodeKind.UnaryExpr: {
+        const x = n as UnaryExpr;
+        if (x.operator === '&') { address(x.operand); return; }
+        if (x.operator === '++' || x.operator === '--') { u.w.unknown = true; return; }
+        if (x.operator === '*') u.r.memory = true;
+        value(x.operand);
+        return;
+      }
+      case NodeKind.MemberExpr: {
+        const m = n as unknown as { object: Expression; isArrow: boolean };
+        if (m.isArrow) { u.r.memory = true; value(m.object); } else object(m.object);
+        return;
+      }
+      case NodeKind.SubscriptExpr: {
+        const sub = n as unknown as { array: Expression; index: Expression };
+        value(sub.index);
+        const base = unwrap(sub.array);
+        const name = nameOf(base);
+        const local = name && base.kind === NodeKind.Identifier ? ctx.locals.get(name) : undefined;
+        if (local?.array) { u.r.memory = true; return; }
+        if (name && !local && (globalSpelling(name, ctx) ?? '').includes('[')) { u.r.globals.add(bareName(name)); return; }
+        u.r.memory = true;
+        value(sub.array);
+        return;
+      }
+      case NodeKind.CallExpr: {
+        const c = n as CallExpr;
+        const name = calleeName(c.callee);
+        if (name === 'sizeof') return;
+        const e = name ? scopedLookup(effects, name, segs) : undefined;
+        addEff(u.w, e);
+        addEff(u.r, e?.reads);
+        if (!name) value(c.callee);
+        for (const a of c.arguments) value(a);
+        return;
+      }
+      case NodeKind.AssignExpr: case NodeKind.PostfixExpr: case NodeKind.NewExpr: case NodeKind.DeleteExpr:
+        u.w.unknown = true;
+        return;
+      default:
+        for (const k of getChildren(n)) value(k);
     }
-    case NodeKind.ConditionalExpr: {
-      const c = e as unknown as { condition: Expression; thenExpr: Expression; elseExpr: Expression };
-      return beside(c.condition, w, ctx, free) && beside(c.thenExpr, w, ctx, free) && beside(c.elseExpr, w, ctx, free);
-    }
-    case NodeKind.MemberExpr: {
-      const m = e as unknown as { object: Expression; isArrow: boolean };
-      if (m.isArrow) return throughPointer && beside(m.object, w, ctx, free);
-      return besideObject(m.object, w, ctx, free);
-    }
-    case NodeKind.SubscriptExpr: {
-      const s = e as unknown as { array: Expression; index: Expression };
-      if (!beside(s.index, w, ctx, free)) return false;
-      const base = unwrap(s.array);
-      const name = nameOf(base);
-      const local = name && base.kind === NodeKind.Identifier ? ctx.locals.get(name) : undefined;
-      if (local?.array) return !w.memory;
-      if (name && !local && (globalSpelling(name, ctx) ?? '').includes('[')) return !w.memory && !writesGlobal(w, name);
-      return throughPointer && beside(s.array, w, ctx, free);
-    }
-    default:
-      return false;
-  }
+  };
+  value(e);
+  return u;
 }
 
-/** Whether the object `e` (an lvalue whose field is read) holds the same value beside the call. */
-function besideObject(e: Expression, w: Writes, ctx: Ctx, free: ReadonlySet<ASTNode>): boolean {
-  const u = unwrap(e);
-  const name = nameOf(u);
-  if (name) {
-    const l = u.kind === NodeKind.Identifier ? ctx.locals.get(name) : undefined;
-    if (l) return !w.memory || (!l.addressed && !l.array);
-    if (globalSpelling(name, ctx) !== undefined) return !w.memory && !writesGlobal(w, name);
-    return false;
-  }
-  return beside(u, w, ctx, free);
-}
-
-/** Whether computing the address of the lvalue `e` reads the same beside the call. */
-function besideAddress(e: Expression, w: Writes, ctx: Ctx, free: ReadonlySet<ASTNode>): boolean {
-  if (w.unknown) return addressFree(e, ctx, free);
-  const u = unwrap(e);
-  switch (u.kind) {
-    case NodeKind.Identifier: case NodeKind.QualifiedId:
-      return true;
-    case NodeKind.MemberExpr: {
-      const m = u as unknown as { object: Expression; isArrow: boolean };
-      return m.isArrow ? beside(m.object, w, ctx, free) : besideAddress(m.object, w, ctx, free);
+/**
+ * Whether the units give the same result in any order: none writes what another reads or
+ * writes. Two calls that write nothing are independent whatever they read.
+ */
+function independent(units: Unit[]): boolean {
+  for (let i = 0; i < units.length; i++) {
+    for (let j = i + 1; j < units.length; j++) {
+      const a = units[i], b = units[j];
+      if (interferes(a.w, b.r) || interferes(a.w, b.w) || interferes(b.w, a.r)) return false;
     }
-    case NodeKind.SubscriptExpr: {
-      const s = u as unknown as { array: Expression; index: Expression };
-      const base = unwrap(s.array);
-      const name = nameOf(base);
-      const arrayBase = !!name && (ctx.locals.get(name)?.array || (globalSpelling(name, ctx) ?? '').includes('['));
-      return (arrayBase || beside(s.array, w, ctx, free)) && beside(s.index, w, ctx, free);
-    }
-    case NodeKind.UnaryExpr:
-      return (u as UnaryExpr).operator === '*' && beside((u as UnaryExpr).operand, w, ctx, free);
-    default:
-      return false;
   }
+  return true;
 }
 
 /** Stack slots of a value of shape `s` passed as an argument: 32 bits or narrower, or a pointer. */
@@ -828,20 +767,29 @@ function siteAt(stmts: Statement[], b: number, path: Path, guarded: boolean, ctx
 
 function validRun(temps: Temp[], call: CallExpr, outer: CallSiteFact, target: Expression | null, path: Path, guarded: boolean, ctx: Ctx): boolean {
   const calls = temps.filter(t => t.kind === 'call');
-  // One call, beside arguments that call and change nothing: VC8 evaluates them right to
-  // left, GCC in an order of its own, and either order runs the same side effects.
-  if (calls.length !== 1) return false;
+  if (calls.length === 0) return false;
   // Calls and reads in VC8's order: the earliest in the argument furthest right.
   const ordered = temps.filter(t => t.kind !== 'pure');
   for (let i = 0; i + 1 < ordered.length; i++) if (ordered[i].arg <= ordered[i + 1].arg) return false;
-  // Nor may anything beside it read what the call could write: a global, a field, memory
-  // behind a pointer, a local whose address escaped. GCC may read it before the call
-  // where VC8 reads it after.
-  const writes = callWrites(calls[0].call!, ctx);
-  if (temps.some(t => t.kind === 'read' && !beside(t.value, writes, ctx, new Set()))) return false;
+  const leftmost = ordered[ordered.length - 1].arg;
+  const tempArgs = new Set(temps.map(t => t.arg));
+  for (let i = leftmost; i < call.arguments.length; i++) {
+    // Nothing else in an argument holding a temporary, nor right of the leftmost, calls.
+    if ((i > leftmost || tempArgs.has(i)) && effects(call.arguments[i]).calls) return false;
+  }
+  // VC8 evaluates the arguments right to left, GCC in an order of its own. Nested, the
+  // temporaries' values and the other arguments are evaluated in either order, so none
+  // may write what another reads or writes (write-effects.ts says what each call may).
   const free = new Set<ASTNode>(temps.map(t => t.use));
-  for (const a of call.arguments) if (!beside(a, writes, ctx, free)) return false;
-  if (target && !besideAddress(target, writes, ctx, new Set())) return false;
+  const units: Unit[] = temps.filter(t => t.kind !== 'pure').map(t => unitOf(t.value, ctx, new Set()));
+  for (const a of call.arguments) units.push(unitOf(a, ctx, free));
+  if (target) {
+    const t: Unit = { w: noEff(), r: noEff() };
+    const tu = unitOf({ kind: NodeKind.UnaryExpr, operator: '&', operand: target } as unknown as ASTNode, ctx, new Set());
+    t.r = tu.r;
+    units.push(t);
+  }
+  if (!independent(units)) return false;
   // Evidence, call by call in evaluation order: before each inner CALL the pushes of the
   // arguments right of it (up to the previous inner call's) and its own; the outer CALL
   // right after the last with the pushes of the arguments up to it.

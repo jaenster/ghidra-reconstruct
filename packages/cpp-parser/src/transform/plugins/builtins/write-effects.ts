@@ -43,6 +43,8 @@ export interface WriteEffect {
   globals?: string[];
   /** Indices of pointer parameters whose pointees are written. */
   params?: number[];
+  /** What a call may read, in the same terms (absent: anything). */
+  reads?: Omit<WriteEffect, 'reads'>;
 }
 
 /** One function as the summary reads it. `body` null: it could not be read (unknown). */
@@ -62,7 +64,7 @@ export interface WriteEffectOptions {
   globalNames?: ReadonlySet<string>;
   /** Called for each function found unknown on its own, with why. */
   onUnknown?: (key: string, why: string) => void;
-  /** Callees without a body: name -> what a call may write. */
+  /** Callees without a body: name -> what a call may write and read. */
   contracts?: Record<string, WriteEffect>;
   /** Rounds before an unsettled recursion is declared unknown. */
   maxRounds?: number;
@@ -92,6 +94,13 @@ export const WRITE_CONTRACTS: Record<string, WriteEffect> = (() => {
   out.WideCharToMultiByte = { params: [4, 7] };
   out.WriteFile = { params: [3] };
   out.ReadFile = { params: [1, 3] };
+  // What they read: the system's own state for these, memory for the rest.
+  const system = new Set(['abs', 'labs', 'toupper', 'tolower', 'isalpha', 'isdigit', 'isspace', 'isalnum',
+    'GetTickCount', 'GetCurrentThreadId', 'GetCurrentProcessId', 'GetCurrentProcess', 'GetCurrentThread',
+    'GetModuleHandleA', 'GetKeyState', 'GetAsyncKeyState', 'CloseHandle', 'WaitForSingleObject', 'CreateEventA',
+    'SetEvent', 'ResetEvent', 'VirtualAlloc', 'VirtualFree', 'Sleep', 'GetLastError', 'SetLastError',
+    'QueryPerformanceCounter', 'QueryPerformanceFrequency', 'GetLocalTime', 'GetSystemTime', 'GetCursorPos']);
+  for (const [n, e] of Object.entries(out)) out[n] = { ...e, reads: system.has(n) ? {} : { memory: true } };
   return out;
 })();
 
@@ -152,9 +161,11 @@ function deadTail(block: CompoundStmt): number {
   return from;
 }
 
-function analyse(fn: EffectFunction, opts: WriteEffectOptions): Direct {
+/** What the body writes, and what it reads, on its own; both carry its calls. */
+function analyse(fn: EffectFunction, opts: WriteEffectOptions): { w: Direct; r: Direct } {
   const d: Direct = { unknown: false, memory: false, globals: new Set(), params: new Set(), calls: [] };
-  if (!fn.body) { d.unknown = true; return d; }
+  const r: Direct = { unknown: false, memory: false, globals: new Set(), params: new Set(), calls: d.calls };
+  if (!fn.body) { d.unknown = true; r.unknown = true; return { w: d, r }; }
   const locals = new Map<string, Local>();
   fn.params.forEach((p, i) => locals.set(p, { array: false, param: i }));
   for (const n of traverseAST(fn.body)) {
@@ -216,11 +227,19 @@ function analyse(fn: EffectFunction, opts: WriteEffectOptions): Direct {
     }
   };
 
-  const write = (p: Prov) => {
-    if (p.kind === 'global') d.globals.add(p.name);
-    else if (p.kind === 'param') d.params.add(p.index);
-    else if (p.kind === 'memory') d.memory = true;
+  const add = (into: Direct, p: Prov) => {
+    if (p.kind === 'global') into.globals.add(p.name);
+    else if (p.kind === 'param') into.params.add(p.index);
+    else if (p.kind === 'memory') into.memory = true;
   };
+  const write = (p: Prov) => add(d, p);
+  const read = (p: Prov) => add(r, p);
+  const callees = new Set<ASTNode>();
+  for (const n of traverseAST(fn.body)) {
+    if (n.kind === NodeKind.CallExpr) callees.add(unwrap((n as CallExpr).callee));
+    // A member's name is not a variable.
+    if (n.kind === NodeKind.MemberExpr) callees.add((n as MemberExpr).member);
+  }
 
   const visit = (n: ASTNode): void => {
     if (n.kind === NodeKind.CompoundStmt) {
@@ -255,25 +274,49 @@ function analyse(fn: EffectFunction, opts: WriteEffectOptions): Direct {
       }
       case NodeKind.NewExpr: case NodeKind.DeleteExpr:
         d.unknown = true;
+        r.unknown = true;
         break;
+      // Reads: a global by name, and memory behind a pointer. A write's target counts as
+      // read too, which only ever adds.
+      case NodeKind.Identifier: case NodeKind.QualifiedId: {
+        if (callees.has(n)) break;
+        const name = leafOf(n as Expression);
+        if (!name || (n.kind === NodeKind.Identifier && locals.has(name))) break;
+        if (n.kind === NodeKind.Identifier && (/^(in_|unaff_|extraout_)/.test(name)
+          || (opts.globalNames && !opts.globalNames.has(name)))) break;
+        r.globals.add(name);
+        break;
+      }
+      case NodeKind.MemberExpr:
+        if ((n as MemberExpr).isArrow) read(pointee((n as MemberExpr).object));
+        break;
+      case NodeKind.SubscriptExpr: {
+        const sub = n as SubscriptExpr;
+        const base = unwrap(sub.array);
+        const bn = leafOf(base);
+        const local = bn !== null && base.kind === NodeKind.Identifier ? locals.get(bn) : undefined;
+        if (!(local && local.array) && !(bn !== null && !local && arrays.has(bn))) read(pointee(sub.array));
+        break;
+      }
     }
+    if (n.kind === NodeKind.UnaryExpr && (n as UnaryExpr).operator === '*') read(pointee((n as UnaryExpr).operand));
     for (const k of getChildren(n)) visit(k);
   };
   visit(fn.body);
-  return d;
+  return { w: d, r };
 }
 
 interface Sum { unknown: boolean; memory: boolean; globals: Set<string>; params: Set<number> }
 
 const bottom = (): Sum => ({ unknown: false, memory: false, globals: new Set(), params: new Set() });
 
-function fromEffect(w: WriteEffect): Sum {
+function fromEffect(w: Omit<WriteEffect, 'reads'>): Sum {
   return { unknown: !!w.unknown, memory: !!w.memory, globals: new Set(w.globals ?? []), params: new Set(w.params ?? []) };
 }
 
-function toEffect(s: Sum): WriteEffect {
+function toEffect(s: Sum): Omit<WriteEffect, 'reads'> {
   if (s.unknown) return { unknown: true };
-  const out: WriteEffect = {};
+  const out: Omit<WriteEffect, 'reads'> = {};
   if (s.memory) out.memory = true;
   if (s.globals.size) out.globals = [...s.globals].sort();
   if (s.params.size) out.params = [...s.params].sort((a, b) => a - b);
@@ -291,7 +334,7 @@ function same(a: Sum, b: Sum): boolean {
 /** The summaries, keyed by every spelling of every function (joined where spellings collide). */
 export function summarizeWriteEffects(fns: readonly EffectFunction[], opts: WriteEffectOptions = {}): Record<string, WriteEffect> {
   const contracts = opts.contracts ?? WRITE_CONTRACTS;
-  const direct = fns.map(f => analyse(f, opts));
+  const both = fns.map(f => analyse(f, opts));
   const byKey = new Map<string, number[]>();
   fns.forEach((f, i) => {
     for (const k of f.keys) {
@@ -300,6 +343,26 @@ export function summarizeWriteEffects(fns: readonly EffectFunction[], opts: Writ
       l.push(i);
     }
   });
+  const writes = settle(both.map(b => b.w), name => {
+    const c = contracts[name];
+    return c ? fromEffect(c) : null;
+  }, opts.onUnknown);
+  const reads = settle(both.map(b => b.r), name => {
+    const c = contracts[name];
+    return c ? (c.reads ? fromEffect(c.reads) : { ...bottom(), unknown: true }) : null;
+  });
+
+  const out: Record<string, WriteEffect> = {};
+  for (const [k, owners] of byKey) {
+    const w = bottom();
+    const r = bottom();
+    for (const i of owners) { join(w, writes[i]); join(r, reads[i]); }
+    out[k] = { ...toEffect(w), reads: toEffect(r) };
+  }
+  return out;
+
+  /** One summary per function from its own part and its callees', to a fixpoint. */
+  function settle(direct: Direct[], contract: (name: string) => Sum | null, onUnknown?: (key: string, why: string) => void): Sum[] {
   let sums = fns.map(() => bottom());
 
   const calleeSum = (name: string | null, cur: Sum[]): Sum | null => {
@@ -311,8 +374,7 @@ export function summarizeWriteEffects(fns: readonly EffectFunction[], opts: Writ
       return s;
     }
     if (NO_RETURN.has(bareName(name))) return bottom();
-    const c = contracts[bareName(name)];
-    return c ? fromEffect(c) : null;
+    return contract(bareName(name));
   };
 
   const step = (i: number, cur: Sum[]): Sum => {
@@ -323,7 +385,7 @@ export function summarizeWriteEffects(fns: readonly EffectFunction[], opts: Writ
       const c = calleeSum(call.name, cur);
       if (!c || c.unknown) {
         s.unknown = true;
-        if (opts.onUnknown && (!c || direct[i].unknown)) opts.onUnknown(fns[i].keys[0], call.name ? `calls ${call.name}` : 'indirect call');
+        if (onUnknown && (!c || direct[i].unknown)) onUnknown(fns[i].keys[0], call.name ? `calls ${call.name}` : 'indirect call');
         break;
       }
       if (c.memory) s.memory = true;
@@ -364,13 +426,8 @@ export function summarizeWriteEffects(fns: readonly EffectFunction[], opts: Writ
     }
   }
 
-  const out: Record<string, WriteEffect> = {};
-  for (const [k, owners] of byKey) {
-    const s = bottom();
-    for (const i of owners) join(s, sums[i]);
-    out[k] = toEffect(s);
+  return sums;
   }
-  return out;
 }
 
 function join(into: Sum, s: Sum): void {

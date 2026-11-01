@@ -331,6 +331,41 @@ describe('nestCallPlugin', () => {
     assert.ok(out.includes('x = F(a); y = G(); return H(y, x, 7);'), out);
   });
 
+  describe('two calls in one argument list', () => {
+    // H(G(), F(a), 7): push 7; push a; call F; push eax; call G; push eax; call H.
+    const two = [
+      'int f(int a) {',
+      '  int x;',
+      '  int y;',
+      '[F@0x10<,2,1] x = F(a);',
+      '[G@0x18<0x10,1,-] y = G();',
+      '[H@0x20<0x18,1,1.1.1] return H(y, x, 7);',
+      '}',
+    ];
+    const types = { F: 'int', G: 'int' };
+
+    // UnusedDebug(.., GetXPosFromDynamicPathUnit(pItem), GetYPosFromDynamicPathUnit(pItem), ..).
+    it('nests two getters that write nothing, whatever they read', () => {
+      const { out, sites } = run(two, { functionReturnTypes: types,
+        writeEffects: { F: { reads: { memory: true, params: [0] } }, G: { reads: { unknown: true } } } });
+      assert.deepStrictEqual(sites, [2]);
+      assert.ok(out.includes('return H(G(), F(a), 7);'), out);
+    });
+
+    it('leaves two calls that write what the other reads', () => {
+      const w = (writeEffects: NestCallOptions['writeEffects']) => run(two, { functionReturnTypes: types, writeEffects }).sites;
+      assert.deepStrictEqual(w({ F: { params: [0], reads: { params: [0] } }, G: { reads: { memory: true } } }), []);
+      assert.deepStrictEqual(w({ F: { globals: ['gSeed'], reads: {} }, G: { globals: ['gSeed'], reads: {} } }), []);
+      assert.deepStrictEqual(w({ F: { globals: ['gSeed'], reads: {} }, G: { reads: { globals: ['gSeed'] } } }), []);
+    });
+
+    it('nests two calls whose writes and reads are apart', () => {
+      const { sites } = run(two, { functionReturnTypes: types,
+        writeEffects: { F: { globals: ['gA'], reads: { globals: ['gA'] } }, G: { globals: ['gB'], reads: { globals: ['gB'] } } } });
+      assert.deepStrictEqual(sites, [2]);
+    });
+  });
+
   it('nests the later of two calls when the earlier is the rightmost argument', () => {
     // H(7, G(), F(a)): push a; call F; push eax; call G; push eax; push 7; call H.
     const { out, sites } = run([
@@ -587,6 +622,54 @@ describe('nestCallPlugin', () => {
       out.replace('int f(', 'int after('),
     ].join('\n');
     const r = compileAndRun(prelude, 'for (int a = -2; a < 3; a++) { gCounter = 0; int b = before(a); gCounter = 0; printf("%d %d\\n", b, after(a)); }');
+    for (const row of r.trim().split('\n')) {
+      const [a, b] = row.split(' ');
+      assert.strictEqual(a, b, r);
+    }
+  });
+  // Two rolls of one seed nested side by side would swap under some argument order; two
+  // getters would not. The pass keeps the first as temporaries and nests the second.
+  it('rolls stay temporaries, getters nest (compiled)', { skip: !hasNativeGpp() }, () => {
+    const lines = [
+      'int f(int a) {',
+      '  int x;',
+      '  int y;',
+      '  int u;',
+      '  int v;',
+      '  int r;',
+      '  int r2;',
+      '[Roll@0x10<,2,1] x = Roll(a);',
+      '[Roll@0x18<0x10,1,1] y = Roll(a);',
+      '[Play@0x20<0x18,1,1.1.1] r = Play(y, x, a);',
+      '[GetX@0x30<,2,1] u = GetX(a);',
+      '[GetY@0x38<0x30,2,1] v = GetY(a);',
+      '[Play@0x40<0x38,1,1.1.1] r2 = Play(v, u, a);',
+      '  return r * 7919 + r2;',
+      '}',
+    ];
+    const opts: Partial<NestCallOptions> = {
+      functionReturnTypes: { ...TYPES.functionReturnTypes, Roll: 'int', GetX: 'int', GetY: 'int' },
+      writeEffects: {
+        Roll: { globals: ['gSeed'], reads: { globals: ['gSeed'] } },
+        GetX: { reads: { globals: ['gPos'] } }, GetY: { reads: { globals: ['gPos'] } },
+        Play: { reads: {} },
+      },
+    };
+    const { code } = fixture(lines);
+    const { out, sites } = run(lines, opts);
+    assert.ok(out.includes('x = Roll(a); y = Roll(a); r = Play(y, x, a);'), out);
+    assert.ok(out.includes('r2 = Play(GetY(a), GetX(a), a);'), out);
+    assert.deepStrictEqual(sites, [2]);
+    const prelude = [
+      'unsigned gSeed = 1; int gPos[2] = { 3, 5 };',
+      'int Roll(int a) { gSeed = gSeed * 1103515245u + 12345u; return (int)(gSeed >> 16) % (a + 9); }',
+      'int GetX(int a) { return gPos[0] + a; }',
+      'int GetY(int a) { return gPos[1] - a; }',
+      'int Play(int p, int q, int a) { return p * 131 + q * 17 + a; }',
+      code.replace('int f(', 'int before('),
+      out.replace('int f(', 'int after('),
+    ].join('\n');
+    const r = compileAndRun(prelude, 'for (int a = 0; a < 5; a++) { gSeed = 1; int b = before(a); gSeed = 1; printf("%d %d\\n", b, after(a)); }');
     for (const row of r.trim().split('\n')) {
       const [a, b] = row.split(' ');
       assert.strictEqual(a, b, r);
