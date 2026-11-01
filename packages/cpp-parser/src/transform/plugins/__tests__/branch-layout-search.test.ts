@@ -7,7 +7,7 @@ import { traverseAST } from '../../../ast/visitor.js';
 import { NodeKind } from '../../../ast/kinds.js';
 import { branchLayoutPlugin } from '../builtins/branch-layout/index.js';
 import { LayoutReader, type BranchLayoutEvidence, type BranchEdge } from '../builtins/branch-layout/evidence.js';
-import { scoreBody, predictFall, returnOrder } from '../builtins/branch-layout/predict.js';
+import { scoreBody, predictFall, predictContext } from '../builtins/branch-layout/predict.js';
 import { compileAndRun, hasNativeGpp } from '../../../testing/native-cpp.js';
 
 const native = { skip: !hasNativeGpp() };
@@ -209,7 +209,7 @@ describe('branch-layout predict', () => {
 
   it('a bare return and a bare goto are taken', () => {
     const b = body('void f(int a) {\n  if (a) {\n    return;\n  }\n  if (a > 2) goto L;\n  g();\n  L: h();\n}');
-    const ctx = { noreturn: new Set<string>(), returns: returnOrder(b) };
+    const ctx = predictContext(b, new Set<string>());
     const ifs = b.statements.filter(s => s.kind === NodeKind.IfStmt) as IfStmt[];
     assert.strictEqual(predictFall(ifs[0], { list: b.statements, index: 0, inLoop: false }, ctx)?.fall, 'other');
     assert.strictEqual(predictFall(ifs[1], { list: b.statements, index: 1, inLoop: false }, ctx)?.fall, 'other');
@@ -226,5 +226,37 @@ describe('branch-layout predict', () => {
     assert.strictEqual(at(sunk, [edge(3, 5, 0x30, 7, [6], [4])]).objective, 0);
     const last = 'int f(int* p) {\n  while (*p) {\n    p++;\n    if (p[1]) {\n      return 1;\n    }\n  }\n  return 0;\n}';
     assert.strictEqual(at(last, [edge(4, 5, 0x30, 7, [5], [3])]).sites, 0);
+  });
+
+  it('the last test of an endless loop is its bottom test: it falls into the arm (0040f470)', () => {
+    const code = 'void f(int* p) {\n  int i = 0;\n  do {\n    p[i] = 0;\n    i++;\n    if (7 < i) {\n      return;\n    }\n  } while (true);\n}';
+    const s = at(code, [edge(6, 6, 0x10, 7, [7], [4, 5, 6])]);
+    assert.deepStrictEqual([s.sites, s.objective], [1, 0]);
+    assert.strictEqual(at(code, [edge(6, 6, 0x10, 7, [4], [7])]).objective, 1);
+  });
+
+  it('an arm holding a label something jumps to is not predicted (004e9870)', () => {
+    const code = 'void f(int a) {\n  if (a > 9) goto L;\n  if (a < 6) {\n  L:\n    g(1);\n  } else {\n    g(2);\n  }\n  h();\n}';
+    const s = at(code, [edge(3, 3, 0x20, 4, [7], [5])]);
+    assert.strictEqual(s.objective, 0);
+    assert.ok(s.abstained.some(x => x.line === 3 && x.rule === 'jumped label'));
+  });
+
+  it('two arms with the same code and the same successor are one tail: not predicted (0054a510)', () => {
+    const code = 'void f(int a, int b) {\n  if (a) {\n    g(1);\n    return;\n  }\n  if (b) {\n    g(1);\n    return;\n  }\n  h();\n}';
+    const s = at(code, [edge(2, 2, 0x20, 3, [3, 4], [6]), edge(6, 6, 0x3, 7, [10], [7, 8])]);
+    assert.deepStrictEqual([s.sites, s.objective, s.abstained.length], [0, 0, 2]);
+    // The same code going to different places is two tails: predicted.
+    const apart = 'void f(int a, int b) {\n  if (a) {\n    g(1);\n  }\n  h();\n  if (b) {\n    g(1);\n  }\n  k();\n}';
+    assert.strictEqual(at(apart, [edge(2, 2, 0x20, 3, [3], [5]), edge(6, 6, 0x30, 7, [7], [9])]).sites, 2);
+  });
+
+  it('an if a pass split off a short-circuit condition does not own its line\'s jump (00416160)', () => {
+    const code = 'int f(int a, int* p) {\n  if (!a) {\n    g(0);\n    return 0;\n  }\n  g(1);\n  return p[0];\n}';
+    const ev = { ...evidence(code, [edge(2, 2, 0x20, 3, [6, 7], [3, 4])]), operands: new Map([[2, [[2], [2]]]]) };
+    const b = body(code);
+    assert.strictEqual(new LayoutReader(ev, b).edge(b.statements[0] as IfStmt), null);
+    const one = { ...ev, operands: new Map([[2, [[2]]]]) };
+    assert.notStrictEqual(new LayoutReader(one, b).edge(b.statements[0] as IfStmt), null);
   });
 });

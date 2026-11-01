@@ -20,9 +20,9 @@
  */
 
 import { NodeKind } from '../../../../ast/kinds.js';
-import type { ASTNode, AnyNode, IfStmt, Statement, Expression, SwitchStmt, ReturnStmt } from '../../../../ast/nodes.js';
+import type { ASTNode, AnyNode, IfStmt, Statement, Expression, SwitchStmt, ReturnStmt, BinaryExpr } from '../../../../ast/nodes.js';
 import { emit } from '../../../../emit/index.js';
-import { getChildren } from '../../../../ast/visitor.js';
+import { getChildren, traverseAST } from '../../../../ast/visitor.js';
 
 export interface BranchLayoutEvidence {
   /** Parsed-text line -> code offsets (from the function entry) its tokens print, ascending. */
@@ -90,6 +90,16 @@ const LOOPS = new Set<string>([NodeKind.WhileStmt, NodeKind.DoWhileStmt, NodeKin
 
 export function isLoop(n: ASTNode): boolean {
   return LOOPS.has(n.kind);
+}
+
+/** The leaf operands of a short-circuit condition: one per `&&`/`||` plus one, a null-guarded getter counting as two. */
+function leafOperands(e: Expression): number {
+  let n = 1;
+  for (const x of traverseAST(e)) {
+    if (x.kind === NodeKind.BinaryExpr && ((x as BinaryExpr).operator === '&&' || (x as BinaryExpr).operator === '||')) n++;
+    else if (x.kind === NodeKind.ConditionalExpr && x.ghidraInfo?.nullGetter) n++;
+  }
+  return n;
 }
 
 function isStatement(n: ASTNode): boolean {
@@ -200,7 +210,14 @@ export class LayoutReader {
     const k = ours.indexOf(ifs);
     // The transformer rebuilds the nodes it walks: an if not found by identity is found by its column.
     const at = k >= 0 ? k : ours.findIndex(o => o.location.start.column === ifs.location.start.column);
-    return at < 0 ? null : facts[at];
+    if (at < 0) return null;
+    // The jump is the last test's: an if holding fewer of the decompile condition's operands
+    // (a pass split `if (a && b)` into one if per test) is not the one that ends on it.
+    if (this.ev.operands && ours.length === 1) {
+      const segs = this.ev.operands.get(l);
+      if ((segs ? segs.length : 1) !== leafOperands(ifs.condition)) return null;
+    }
+    return facts[at];
   }
 
   /**
