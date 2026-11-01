@@ -113,3 +113,39 @@ describe('jump-table-case', () => {
     assert.deepStrictEqual(run(loop, [t]).sites, ['left: what follows the switch is not a return']);
   });
 });
+
+describe('jump-table-case: a void function that ends in a short run after the switch', () => {
+  // NET_MCP_CLIENT_HandleCharCreation 00435e10, cut down: entry 3 goes where the run after the switch starts.
+  const lines = [
+    'void f(int n) {',
+    '[0x4,0x9] switch (n) {',
+    'case 0:',
+    '[0x10] g(1);',
+    '[0x15] return;',
+    'case 1:',
+    'case 2:',
+    '[0x20] g(2);',
+    '[0x25] return;',
+    '}',
+    '[0x40] wId = 0x145c;',
+    '[0x45] show(get(wId), 1);',
+    '}',
+  ];
+  const t = (): JumpTableFact => ({
+    at: 0x9, fallback: 0x40, bound: 3, labelled: true,
+    entries: [[0, 0x10], [1, 0x20], [2, 0x20], [3, 0x40]].map(([value, target]) => ({ value, target })),
+  });
+  it('restores the entry with a copy of the run and a return', () => {
+    const { out, sites } = run(lines, [t()]);
+    assert.ok(out.includes('case 3: { wId = 0x145c; show(get(wId), 1); return; } } wId = 0x145c; show(get(wId), 1); }'), out);
+    assert.deepStrictEqual(sites, ['case 3']);
+  });
+  it('leaves a run that does not start at the fallback', () => {
+    const { sites } = run(lines, [{ ...t(), fallback: 0x30, entries: t().entries.map(e => e.value === 3 ? { ...e, target: 0x30 } : e) }]);
+    assert.deepStrictEqual(sites, ['left: the code after the switch is not the fallback']);
+  });
+  it('leaves a function that returns a value', () => {
+    const { sites } = run(lines.map(l => l.replace('void f', 'int f')), [t()]);
+    assert.deepStrictEqual(sites, ['left: what follows the switch is not a return']);
+  });
+});

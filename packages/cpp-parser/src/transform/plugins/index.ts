@@ -504,6 +504,11 @@ export {
   prngTempCollapsePlugin,
 } from './builtins/prng-temp-collapse.js';
 
+export {
+  seedProductFoldPlugin,
+  foldSeedProducts,
+} from './builtins/seed-product-fold.js';
+
 // ============================================
 // BUILT-IN PLUGINS: BITFIELD ACCESS
 // ============================================
@@ -613,6 +618,7 @@ import { overloadPinCastPlugin } from './builtins/overload-pin-cast.js';
 import { globalAddressLiteralPlugin } from './builtins/global-address-literal.js';
 import { addressRunBoundPlugin } from './builtins/address-run-bound.js';
 import { prngTransformPlugin } from './builtins/prng-transform.js';
+import { seedProductFoldPlugin } from './builtins/seed-product-fold.js';
 import { prngTempCollapsePlugin } from './builtins/prng-temp-collapse.js';
 import { bitfieldAccessPlugin } from './builtins/bitfield-access.js';
 import { scalarPieceArithmeticPlugin } from './builtins/scalar-piece-arithmetic.js';
@@ -866,6 +872,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   globalAddressLiteralPlugin,  // Correctness: a folded global address (incl. ~&g) → the symbol (priority 68)
   addressRunBoundPlugin,  // Correctness: a loop bound that is another global's address → a distance from the one being walked (priority 69)
   stridedAccessPlugin,    // Correctness: a strength-reduced byte offset / n*sizeof(T) interior constant -> T[i].f (priority 69.5)
+  seedProductFoldPlugin,      // A seed step printed as a named product (priority 79)
   prngTransformPlugin,        // Pattern detection: PRNG (priority 80)
   prngTempCollapsePlugin,     // Cleanup: collapse PRNG temp variables (priority 85)
   voidReturnCleanupPlugin,    // Cleanup: trailing return; in void functions (priority 90)
