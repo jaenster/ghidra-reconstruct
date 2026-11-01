@@ -21,6 +21,11 @@
  *  - without a `default:`, after the last group, with a copy of what follows the switch,
  *    which must be a `return` of a constant (or a bare `return;`) whose code holds the
  *    fallback. `case 5: break;` would not do: VC8 drops an empty case from the table;
+ *  - without a `default:`, where the switch is the last statement but a short run of plain
+ *    statements of a void function's body (NET_MCP_CLIENT_HandleCharCreation 00435e10:
+ *    the entry for 0x47 goes to the error popup after the switch), with a copy of that run
+ *    and a `return;`: the case runs the same statements and leaves as the run does. VC8
+ *    cross-jumps the copy back onto the run, so the table entry and the run share code;
  *  - with a `default:`, as one more label on it.
  *
  * Only a jump-table switch the decompiler printed (its line prints the indirect jump), whose
@@ -31,10 +36,11 @@
 
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
-  ASTNode, CompoundStmt, FunctionDecl, ReturnStmt, Statement, SwitchStmt, CaseStmt, DefaultStmt, Expression,
-  IfStmt, CStyleCastExpr, ParenExpr, UnaryExpr,
+  ASTNode, AnyNode, AssignExpr, CallExpr, CompoundStmt, ExprStmt, FunctionDecl, ReturnStmt, Statement, SwitchStmt, CaseStmt,
+  DefaultStmt, Expression, IfStmt, CStyleCastExpr, ParenExpr, UnaryExpr,
 } from '../../../ast/nodes.js';
-import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
+import { emit } from '../../../emit/index.js';
+import { cloneNode, createTransformer, updateNode, type Transformer } from '../../transformer.js';
 import { Expr, Stmt } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { LayoutReader, type BranchLayoutEvidence } from './branch-layout/evidence.js';
@@ -148,9 +154,45 @@ function after(s: Statement, parents: ReadonlyMap<Statement, Statement>): Statem
   return null;
 }
 
+/** A call or an assignment to a name, on plain operands: code a copy runs exactly as the original. */
+function plainStatement(s: Statement): boolean {
+  if (s.kind !== NodeKind.ExprStmt) return false;
+  const e = (s as ExprStmt).expression;
+  const plain = (x: Expression): boolean => {
+    switch (x.kind) {
+      case NodeKind.Identifier: case NodeKind.QualifiedId: case NodeKind.IntegerLiteral: case NodeKind.StringLiteral:
+      case NodeKind.CharLiteral: case NodeKind.NullptrLiteral: case NodeKind.BoolLiteral:
+        return true;
+      case NodeKind.ParenExpr: return plain((x as ParenExpr).expression);
+      case NodeKind.CStyleCastExpr: return plain((x as CStyleCastExpr).expression);
+      case NodeKind.UnaryExpr: return ['-', '&', '~'].includes((x as UnaryExpr).operator) && plain((x as UnaryExpr).operand);
+      case NodeKind.CallExpr: return plain((x as CallExpr).callee) && (x as CallExpr).arguments.every(plain);
+      default: return false;
+    }
+  };
+  if (e.kind === NodeKind.AssignExpr) {
+    const a = e as AssignExpr;
+    return a.operator === '=' && a.left.kind === NodeKind.Identifier && plain(a.right);
+  }
+  return e.kind === NodeKind.CallExpr && plain(e);
+}
+
+/**
+ * The copy of the run that ends a void function's body after its switch, closed by
+ * `return;`, or why there is none: at most four plain statements, the first of which holds
+ * the table's fallback.
+ */
+function tailCopy(run: readonly Statement[], ev: BranchLayoutEvidence, fallback: number): Statement[] | string {
+  if (run.length === 0 || run.length > 4 || !run.every(plainStatement)) return 'the code after the switch is not a short plain run';
+  const first = run[0].location?.start.line ?? 0;
+  if (!(ev.lines.get(first) ?? []).includes(fallback)) return 'the code after the switch is not the fallback';
+  return [...run.map(s => ({ ...cloneNode(s), leadingTrivia: [], trailingTrivia: [] }) as Statement), Stmt.return_(null)];
+}
+
 function rewriteSwitch(
   sw: SwitchStmt, reader: LayoutReader, ev: BranchLayoutEvidence, tables: readonly JumpTableFact[],
   parents: ReadonlyMap<Statement, Statement>, opts: JumpTableCaseOptions,
+  tail: readonly Statement[] | null = null,
 ): SwitchStmt | null {
   const line = sw.location?.start.line ?? 0;
   const left = (why: string): null => { opts.onSite?.({ rule: 'left', line, why }); return null; };
@@ -182,6 +224,14 @@ function rewriteSwitch(
     return updateNode(sw, { body: updateNode(sw.body as CompoundStmt, { statements: out } as Partial<CompoundStmt>) } as Partial<SwitchStmt>);
   }
 
+  if (tail && tail.length > 0 && !tail.some(t => t.kind === NodeKind.ReturnStmt)) {
+    const copy = tailCopy(tail, ev, table.fallback);
+    if (typeof copy === 'string') return left(copy);
+    opts.onSite?.({ rule: 'case', line, value: top.value });
+    return updateNode(sw, {
+      body: updateNode(sw.body as CompoundStmt, { statements: [...body, caseLabel(top.value, Stmt.compound(copy))] } as Partial<CompoundStmt>),
+    } as Partial<SwitchStmt>);
+  }
   const next = after(sw, parents);
   if (!next || next.kind !== NodeKind.ReturnStmt) return left('what follows the switch is not a return');
   const ret = next as ReturnStmt;
@@ -200,9 +250,16 @@ function rewriteFunction(fn: FunctionDecl, ev: BranchLayoutEvidence, tables: rea
   const reader = new LayoutReader(ev, fn.body);
   const parents = parentsOf(fn.body);
   const done = new Map<SwitchStmt, SwitchStmt>();
+  // The statements after a switch of a void function's own body, which the function ends after.
+  const isVoid = !!fn.returnType && emit(fn.returnType as unknown as AnyNode).trim() === 'void';
+  const top = fn.body.statements;
+  const tailOf = (sw: SwitchStmt): Statement[] | null => {
+    const i = top.indexOf(sw);
+    return isVoid && i >= 0 ? top.slice(i + 1) : null;
+  };
   const visit = (s: Statement): void => {
     if (s.kind === NodeKind.SwitchStmt) {
-      const r = rewriteSwitch(s as SwitchStmt, reader, ev, tables, parents, opts);
+      const r = rewriteSwitch(s as SwitchStmt, reader, ev, tables, parents, opts, tailOf(s as SwitchStmt));
       if (r) done.set(s as SwitchStmt, r);
     }
     for (const f of STMT_FIELDS) {
