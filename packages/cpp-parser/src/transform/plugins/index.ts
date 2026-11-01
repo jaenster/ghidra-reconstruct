@@ -318,6 +318,11 @@ export {
   type AggregateZeroInitOptions,
 } from './builtins/aggregate-zero-init.js';
 
+export {
+  aggregateTableInitPlugin,
+  type AggregateTableInitOptions,
+} from './builtins/aggregate-table-init.js';
+
 // ============================================
 // BUILT-IN PLUGINS: DECLARATION-INITIALIZATION MERGE
 // ============================================
@@ -594,6 +599,7 @@ import { earlyReturnPlugin } from './builtins/early-return.js';
 import { commaExpandPlugin, commaExpandLatePlugin } from './builtins/comma-expand.js';
 import { arrayFillCollapsePlugin } from './builtins/array-fill-collapse.js';
 import { aggregateZeroInitPlugin } from './builtins/aggregate-zero-init.js';
+import { aggregateTableInitPlugin } from './builtins/aggregate-table-init.js';
 import { funcPtrLiteralPlugin } from './builtins/func-ptr-literal.js';
 import { overloadPinCastPlugin } from './builtins/overload-pin-cast.js';
 import { globalAddressLiteralPlugin } from './builtins/global-address-literal.js';
@@ -814,6 +820,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   storeOrderPlugin,           // Matching: independent stores in the original's instruction order (priority 59.7)
   arrayFillCollapsePlugin,    // Cleanup: collapse arr[i]=0 runs into memset (priority 50)
   aggregateZeroInitPlugin,    // Matching: zero member stores that write a whole local become `T s = {0};` (priority 955)
+  aggregateTableInitPlugin,   // Matching: constant stores that fill a local record array become one initialiser (priority 956)
   gotoCleanupPlugin,          // Cleanup: if (cond) goto L; ... L: stmt; → if (!cond) { ... } stmt;
   redundantParenCleanupPlugin, // Cleanup: if((x)) → if(x) (priority 56)
   loopRotationUndoPlugin,     // Cleanup: if(C){do{...}while(C)} → while(C){...} (priority 56)

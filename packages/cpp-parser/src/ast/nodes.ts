@@ -1077,6 +1077,8 @@ export interface FoldExpr extends ASTNode {
 export interface InitListExpr extends ASTNode {
   kind: NodeKind.InitListExpr;
   elements: (Expression | DesignatedInitExpr)[];
+  /** One element per line, indented one level: a table of rows reads as one. */
+  multiline?: boolean;
 }
 
 export interface DesignatedInitExpr extends ASTNode {

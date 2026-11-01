@@ -2797,6 +2797,20 @@ export class CppEmitter {
   }
 
   private emitInitListExpr(node: InitListExpr): void {
+    if (node.multiline && node.elements.length > 0) {
+      this.write('{');
+      this.newline();
+      this.indentLevel++;
+      node.elements.forEach((e, i) => {
+        this.write(this.indent());
+        this.emitNode(e);
+        if (i < node.elements.length - 1) this.write(',');
+        this.newline();
+      });
+      this.indentLevel--;
+      this.write(this.indent() + '}');
+      return;
+    }
     this.write('{');
     for (let i = 0; i < node.elements.length; i++) {
       if (i > 0) {

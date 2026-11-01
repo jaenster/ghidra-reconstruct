@@ -2770,6 +2770,14 @@ function transformDecompiledCode(
         convertingAggregates: context.funcPtrArgCasts.convertingAggregates,
         zeroStores: enclosing?.zeroStores,
       };
+      perPluginOptions['aggregate-table-init'] = {
+        structLayouts: context.funcPtrArgCasts.structLayouts,
+        aggregateSizes: context.funcPtrArgCasts.aggregateSizes,
+        typedefTargets: context.funcPtrArgCasts.typedefTargets,
+        enumValues: context.funcPtrArgCasts.enumValues,
+        convertingAggregates: context.funcPtrArgCasts.convertingAggregates,
+        functionNames: context.funcPtrArgCasts.functionNames,
+      };
       perPluginOptions['strided-access'] = {
         structLayouts: context.funcPtrArgCasts.structLayouts,
         aggregateSizes: context.funcPtrArgCasts.aggregateSizes,
