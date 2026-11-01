@@ -67,7 +67,7 @@ import { holdsFreeCase } from '../goto-cleanup/paths.js';
 import { leaves, isHaltStmt, isExitStmt, negateCondition } from '../assert-order.js';
 import { LayoutReader, isLoop, type BranchLayoutEvidence } from './evidence.js';
 import { scoreBody, type LayoutScore } from './predict.js';
-import { layoutSearch } from './search.js';
+import { layoutSearch, isVoidFunction } from './search.js';
 import { appendFileSync } from 'node:fs';
 
 export type { BranchLayoutEvidence } from './evidence.js';
@@ -79,7 +79,7 @@ export interface BranchLayoutOptions extends PluginOptions {
   /** Further callees that never return, by unqualified name. */
   noreturnFunctions?: string[];
   /** Called once per rewrite and per site left for want of a source form. */
-  onSite?: (e: { rule: 'swap' | 'nest' | 'split' | 'getter' | 'left' | 'propagate'; line: number; why?: string }) => void;
+  onSite?: (e: { rule: 'swap' | 'nest' | 'split' | 'getter' | 'left' | 'return-merge' | 'propagate'; line: number; why?: string }) => void;
   /**
    * The null default of each field read through a null-guarded getter (`null-getter.ts`),
    * keyed `<pointee type>|<member path>`; without it no getter comparison is written.
@@ -744,6 +744,7 @@ function rewriteFunction(fn0: FunctionDecl, ev: BranchLayoutEvidence, opts: Bran
   const searched = process.env.GHIDRA_BRANCH_LAYOUT_SEARCH === '0' ? fn0.body : layoutSearch(fn0.body, ev, {
     noreturn,
     localTypes: localTypesOf(fn0),
+    voidResult: isVoidFunction(fn0),
     enumTypes: new Set(opts.enumTypes ?? []),
     onSite: opts.onSite ? e => opts.onSite!({ rule: e.rule, line: e.line, why: e.why }) : undefined,
   });

@@ -4,6 +4,11 @@
  * function (predict.ts) strictly drops. A greedy search: per round every candidate is tried
  * on the function, the best one is kept, at most eight rounds.
  *
+ *   return-merge  `if (G) return K; S...; return K;` where G's jump goes to the copy of K
+ *                 after S and falls into S: `if (!G) { S... } return K;`, the form whose
+ *                 layout the objective says the original has (a guard that is not the last
+ *                 one before the final return keeps a copy of its own where VC8 can merge
+ *                 it). In a void function the body's end may stand for the `return;`.
  *   propagate     `if (!x1) return K; T x2 = e(x1); if (!x2) return K; ...` where the earlier
  *                 guards' jumps go forward into the inline copy of the last one: the source
  *                 tested a value it had set to the failing constant on the null path
@@ -15,27 +20,30 @@
 import { NodeKind } from '../../../../ast/kinds.js';
 import type {
   ASTNode, CompoundStmt, IfStmt, Statement, ReturnStmt, Expression, ExprStmt, DeclStmt, VariableDecl,
-  Identifier, UnaryExpr, BinaryExpr, AssignExpr, ParenExpr, TypeNode, AnyNode,
+  Identifier, UnaryExpr, BinaryExpr, AssignExpr, ParenExpr, TypeNode, AnyNode, FunctionDecl,
 } from '../../../../ast/nodes.js';
 import { emit } from '../../../../emit/index.js';
 import { getChildren, traverseAST } from '../../../../ast/visitor.js';
 import { updateNode } from '../../../transformer.js';
 import { Stmt, Expr } from '../../../../ast/factory.js';
+import { holdsFreeCase } from '../goto-cleanup/paths.js';
 import { LayoutReader, isLoop, type BranchLayoutEvidence } from './evidence.js';
 import { scoreBody, returnKey } from './predict.js';
-import { negate } from './index.js';
+import { negate, jumpedLabels, gotoCounts, declaredNames, mentionsAny } from './index.js';
 
 export interface SearchOptions {
   noreturn: ReadonlySet<string>;
   /** Declared type of each parameter and local. */
   localTypes: ReadonlyMap<string, TypeNode>;
+  /** The function returns void: a body may end without a return. */
+  voidResult: boolean;
   /** Names of the enum types, unqualified. */
   enumTypes: ReadonlySet<string>;
-  onSite?: (e: { rule: 'propagate'; line: number; why?: string }) => void;
+  onSite?: (e: { rule: 'return-merge' | 'propagate'; line: number; why?: string }) => void;
 }
 
 interface Candidate {
-  rule: 'propagate';
+  rule: 'return-merge' | 'propagate';
   line: number;
   list: CompoundStmt;
   replacement: Statement[];
@@ -57,6 +65,10 @@ function guardReturn(s: Statement): ReturnStmt | null {
   if (ifs.elseBranch || ifs.init || ifs.isConstexpr) return null;
   const arm = bodyOf(ifs.thenBranch);
   return arm.length === 1 && arm[0].kind === NodeKind.ReturnStmt ? arm[0] as ReturnStmt : null;
+}
+
+function overlaps(a: readonly number[], b: ReadonlySet<number>): boolean {
+  return a.some(l => b.has(l));
 }
 
 /** `root` with `target` (found by identity) replaced; the spine above it shallow-copied. */
@@ -86,16 +98,48 @@ function rebuild(root: ASTNode, target: ASTNode, repl: ASTNode): ASTNode {
   return (out as unknown as ASTNode) ?? root;
 }
 
-/** Every statement list of the body, with whether a loop encloses it. */
-function lists(body: CompoundStmt): { list: CompoundStmt; inLoop: boolean }[] {
-  const out: { list: CompoundStmt; inLoop: boolean }[] = [];
+/** Every statement list of the body, with whether a loop encloses it and whether it is the body itself. */
+function lists(body: CompoundStmt): { list: CompoundStmt; inLoop: boolean; top: boolean }[] {
+  const out: { list: CompoundStmt; inLoop: boolean; top: boolean }[] = [];
   const go = (n: ASTNode, inLoop: boolean): void => {
-    if (n.kind === NodeKind.CompoundStmt) out.push({ list: n as CompoundStmt, inLoop });
+    if (n.kind === NodeKind.CompoundStmt) out.push({ list: n as CompoundStmt, inLoop, top: n === body });
     const loop = inLoop || isLoop(n);
     for (const k of getChildren(n)) go(k, loop);
   };
   go(body, false);
   return out;
+}
+
+/** S may be moved into a block: no label anything jumps to, no case label of an enclosing switch. */
+function movable(stmts: Statement[], gotos: ReadonlyMap<string, number>): boolean {
+  return !jumpedLabels(stmts, gotos) && !holdsFreeCase(stmts);
+}
+
+function returnMerge(entry: { list: CompoundStmt; top: boolean }, i: number, reader: LayoutReader, gotos: ReadonlyMap<string, number>, opts: SearchOptions): Candidate | null {
+  const stmts = entry.list.statements;
+  const ifs = stmts[i] as IfStmt;
+  const ret = guardReturn(ifs);
+  if (!ret) return null;
+  const key = returnKey(ret);
+  if (key === null) return null;
+  const last = stmts[stmts.length - 1];
+  const explicit = last.kind === NodeKind.ReturnStmt && last !== stmts[i] && returnKey(last as ReturnStmt) === key
+    && emit((last as ReturnStmt).value as AnyNode ?? Expr.intLiteral(0)) === emit(ret.value as AnyNode ?? Expr.intLiteral(0));
+  // A void function's body may end on S: its end is the return.
+  const atEnd = !explicit && key === '' && entry.top && opts.voidResult;
+  if (!explicit && !atEnd) return null;
+  const s = stmts.slice(i + 1, explicit ? stmts.length - 1 : stmts.length);
+  if (s.length === 0 || !movable(s, gotos)) return null;
+  // K is evaluated where it stands in both forms; it must not name what S declares.
+  if (explicit && mentionsAny([last], declaredNames(s))) return null;
+  const e = reader.edge(ifs);
+  if (!e || reader.fallInto(ifs) !== 'other' || !overlaps(e.fallLines, reader.linesOf(s))) return null;
+  if (explicit ? !overlaps(e.takenLines, reader.linesOf([last])) : overlaps(e.takenLines, reader.linesOf(s))) return null;
+  const nested = updateNode(ifs, { condition: negate(ifs.condition), thenBranch: Stmt.compound(s), elseBranch: null } as Partial<IfStmt>);
+  return {
+    rule: 'return-merge', line: ifs.location?.start.line ?? 0, list: entry.list,
+    replacement: [...stmts.slice(0, i), nested, ...(explicit ? [last] : [])],
+  };
 }
 
 /** The name a guard condition tests for its failing value, and that value's form. */
@@ -288,11 +332,14 @@ function propagate(entry: { list: CompoundStmt }, i: number, reader: LayoutReade
 }
 
 function candidates(body: CompoundStmt, reader: LayoutReader, opts: SearchOptions): Candidate[] {
+  const gotos = gotoCounts(body);
   const out: Candidate[] = [];
   for (const entry of lists(body)) {
     const stmts = entry.list.statements;
     for (let i = 0; i < stmts.length; i++) {
       if (stmts[i].kind !== NodeKind.IfStmt) continue;
+      const a = returnMerge(entry, i, reader, gotos, opts);
+      if (a) out.push(a);
       const b = propagate(entry, i, reader, opts);
       if (b) out.push(b);
     }
@@ -320,4 +367,9 @@ export function layoutSearch(body: CompoundStmt, ev: BranchLayoutEvidence, opts:
     score = best.score;
   }
   return cur;
+}
+
+export function isVoidFunction(fn: FunctionDecl): boolean {
+  const t = fn.returnType;
+  return t.kind === NodeKind.BuiltinType && emit(t as unknown as AnyNode).trim() === 'void';
 }

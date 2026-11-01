@@ -154,6 +154,47 @@ describe('branch-layout search - propagate', () => {
   });
 });
 
+describe('branch-layout search - return-merge', () => {
+  const guard = [
+    'int f(int n, int* p) {',      // 1
+    '  if (n != 5) {',             // 2
+    '    return 0;',               // 3
+    '  }',                         // 4
+    '  if (!p) {',                 // 5
+    '    return 0;',               // 6
+    '  }',                         // 7
+    '  p[0] = 3;',                 // 8
+    '  return 0;',                 // 9
+    '}',
+  ].join('\n');
+  // The first guard falls into the second test and jumps to the final copy; the second
+  // guard keeps an inline copy of its own.
+  const nested = [edge(2, 0x05, 0x30, 0x07, [5], [9]), edge(5, 0x10, 0x18, 0x12, [6], [8])];
+
+  it('nests the rest under the inverted guard', () => {
+    const { out, sites } = run(guard, nested, [3]);
+    assert.deepStrictEqual(sites, ['return-merge']);
+    assert.ok(out.includes('if (n == 5) { if (!p) { return 0; } p[0] = 3; } return 0;'), out);
+  });
+
+  it('keeps the values and side effects', native, () => {
+    const { out } = run(guard, nested, [3]);
+    const f = (n: number, arr: string) => `f(${n}, ${arr})`;
+    sameValues(guard.replace('p[0] = 3;', 'p[0] = 3; gCalls++;'), out.replace('p[0] = 3;', 'p[0] = 3; gCalls++;'),
+      [f(5, 'nullptr'), f(4, 'nullptr'), f(5, '([]{ static int a[] = {1}; return a; })()')]);
+  });
+
+  it('leaves the guard when its jump lands elsewhere than the final copy', () => {
+    const other = [edge(2, 0x05, 0x12, 0x07, [5], [6]), nested[1]];
+    assert.deepStrictEqual(run(guard, other, [3]).sites, []);
+  });
+
+  it('leaves a guard whose rest holds a label something jumps to', () => {
+    const labelled = guard.replace('  p[0] = 3;', '  L: p[0] = 3;').replace('int f(int n, int* p) {', 'int f(int n, int* p) { if (n == 9) goto L;');
+    assert.deepStrictEqual(run(labelled, nested, [3]).sites.filter(s => s === 'return-merge'), []);
+  });
+});
+
 describe('branch-layout predict', () => {
   const at = (code: string, edges: BranchEdge[]) => {
     const b = body(code);
