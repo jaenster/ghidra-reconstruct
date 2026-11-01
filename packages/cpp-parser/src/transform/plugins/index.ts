@@ -405,6 +405,18 @@ export {
   type InlinedCallTables,
 } from './builtins/inlined-call-restore.js';
 
+export {
+  guardedCallRestorePlugin,
+  restoreGuardedCalls,
+  compileGuardedCallee,
+  haltGuardLine,
+  type GuardedCallee,
+  type GuardedCallForm,
+  type GuardedCallSite,
+  type GuardedCallRestoreOptions,
+  type GuardedCallTables,
+} from './builtins/guarded-call-restore.js';
+
 export type {
   AccessOrderEvidence,
   ArgLoadFact,
@@ -677,6 +689,7 @@ import { recordGetterGuardPlugin } from './builtins/record-getter-guard.js';
 import { fieldPointerFoldPlugin } from './builtins/field-pointer-fold.js';
 import { newResultTempPlugin } from './builtins/new-result-temp.js';
 import { inlinedCallRestorePlugin } from './builtins/inlined-call-restore.js';
+import { guardedCallRestorePlugin } from './builtins/guarded-call-restore.js';
 import { switchChainPlugin } from './builtins/switch-chain.js';
 import { caseLayoutPlugin } from './builtins/case-layout.js';
 import { jumpTableCasePlugin } from './builtins/jump-table-case.js';
@@ -866,6 +879,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   haltSiteFoldPlugin,         // Cleanup: fold nLine/nAddress temporaries into the halt call, copy a shared halt tail to its jumps (priority 930)
   probeReturnStorePlugin,     // Fidelity: drop the stack probe's return address stored into the frame's top local (priority 12)
   assertOrderPlugin,          // Control-flow: if (c) { ..; return; } Halt; exit; -> if (!c) { Halt; exit; } ..; return; (priority 987)
+  guardedCallRestorePlugin,   // Matching: a call where an inlined helper left its assertion and its value (priority 987.5)
   branchLayoutPlugin,         // Control-flow: if arms ordered as the original's addresses show (priority 988)
   caseLayoutPlugin,           // Control-flow: jump-table case groups ordered as the original's addresses show (priority 989)
   jumpTableCasePlugin,        // Matching: a jump table's last case the decompiler folded into the code after the switch (priority 989.5)

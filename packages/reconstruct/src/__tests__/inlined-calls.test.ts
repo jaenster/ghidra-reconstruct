@@ -5,7 +5,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 
-import { planInlinedCalls } from '../codegen/inlined-calls.js';
+import { planInlinedCalls, planGuardedCalls } from '../codegen/inlined-calls.js';
+import { parse, restoreGuardedCalls, NodeKind, type FunctionDecl } from '@ghidra-mcp/cpp-parser';
 import type { ExtractedFunction, ExtractedParameter } from '../types.js';
 
 function fn(name: string, address: string, body: string, params: ExtractedParameter[] = []): ExtractedFunction {
@@ -62,5 +63,48 @@ describe('planInlinedCalls', () => {
     // Either alone is a call in the other.
     assert.deepStrictEqual([...plan([a], [b]).sitesByCallee.get('00521b40') ?? []], ['00522bb0']);
     assert.strictEqual(plan([a, b], []).sitesByCallee.size, 0);
+  });
+});
+
+describe('planGuardedCalls', () => {
+  const HALT = (line: number) => `{ ERROR_UnrecoverableInternalError_Halt("", GetInstructionPointer(), ${line}); exit(-1); }`;
+  const halts = (...lines: number[]) => ({ halts: lines.map((line, i) => ({ at: i, ip: i, paths: [{ line, guard: null }] })) });
+  /** A function and the tree the pipeline would give it at the pass. */
+  const folded = new Map<string, string>();
+  function guarded(name: string, address: string, tree: string, lines: number[]): ExtractedFunction {
+    const f = { ...fn(name, address, '  return 0;', [{ ...param('pGame', 0), dataType: 'Game *' }]), haltLines: halts(...lines) };
+    folded.set(address, tree);
+    return f;
+  }
+  const probed: string[] = [];
+  const probe = (func: ExtractedFunction, callees: Parameters<typeof restoreGuardedCalls>[1]) => {
+    probed.push(func.address);
+    const fnDecl = parse(folded.get(func.address)!).declarations.find(d => d.kind === NodeKind.FunctionDecl) as FunctionDecl;
+    return { fn: fnDecl, sites: restoreGuardedCalls(fnDecl, callees, { structFields: { Game: { pCtrl: 'Ctrl *' }, Ctrl: { nRecord: 'int' } } }).sites };
+  };
+  const getter = guarded('GetRecord', '0053f600', `int dummy(Game * pGame) { if (!pGame->pCtrl) ${HALT(108)} return pGame->pCtrl->nRecord; }`, [108]);
+  const site = (address: string, line: number, lines = [line]) => guarded('Kill', address,
+    `void dummy(Game * pGame) { int n; if (!pGame->pCtrl) ${HALT(line)} n = Lookup(pGame->pCtrl->nRecord); Use(n); }`, lines);
+  const plan = (others: ExtractedFunction[]) => {
+    probed.length = 0;
+    const all = [getter, ...others].map(f => ({ key: f.address, func: f }));
+    return planGuardedCalls([{ key: getter.address, func: getter, unit: 'Unit' }], () => all, probe);
+  };
+
+  it('takes a function halting with the callee\'s line that holds its guards and value', () => {
+    const p = plan([site('0053f720', 108)]);
+    assert.deepStrictEqual([...p.sitesByCallee.get('0053f600') ?? []], ['0053f720']);
+    assert.strictEqual(p.calleesBySite.get('0053f720')?.[0].callName, 'Unit::GetRecord');
+  });
+
+  it('never reads a function whose halts do not push the line', () => {
+    const p = plan([site('0053f720', 108, [109])]);
+    assert.strictEqual(p.sitesByCallee.size, 0);
+    assert.deepStrictEqual(probed, ['0053f600']);
+  });
+
+  it('refuses a function with the line whose guard is another', () => {
+    const p = plan([site('0053f720', 109, [108, 109])]);
+    assert.strictEqual(p.sitesByCallee.size, 0);
   });
 });

@@ -29,7 +29,7 @@ import type { BranchLayoutFacts } from '../extract/branch-layout.js';
 import type { CallOrderFacts } from '../extract/call-order.js';
 import type { AccessOrderFacts } from '../extract/access-order.js';
 import type { HaltLineFacts } from '../extract/halt-lines.js';
-import { transformGhidraCode, preprocessGhidraCode, type InlinedCallee, type InlinedCallTables, isGhidraGeneratedName, suggestBetterName, takeFuncPtrArgCastTypedefs, type TransformResult, type FuncPtrTarget, type ArtifactMode, type ArtifactRecord, type RunTruncation } from '@ghidra-mcp/cpp-parser';
+import { transformGhidraCode, preprocessGhidraCode, enclosingNamespaceStripPlugin, type InlinedCallee, type InlinedCallTables, type GuardedCallee, type GuardedCallTables, type GuardedCallSite, type CallExpr, type FunctionDecl, isGhidraGeneratedName, suggestBetterName, takeFuncPtrArgCastTypedefs, type TransformResult, type FuncPtrTarget, type ArtifactMode, type ArtifactRecord, type RunTruncation } from '@ghidra-mcp/cpp-parser';
 import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js';
 import { getGlobalReferenceAliases, globalAliasComment } from './global-aliases.js';
 import { globalGuardLine, guardQualifiedName, hasDefinitionInitializer } from './global-guards.js';
@@ -562,6 +562,16 @@ export interface ImplGenContext {
    * and the declarations their arguments are typed from.
    */
   inlinedCalls?: { calleesBySite: ReadonlyMap<string, InlinedCallee[]>; tables: InlinedCallTables };
+  /**
+   * The guarded form of `inlinedCalls` (guarded-call-restore.ts): per site function's
+   * address key, the guarded callees whose calls are written back there. `probe` is set
+   * only while the plan reads functions as the pipeline has them at that pass.
+   */
+  guardedCalls?: {
+    calleesBySite: ReadonlyMap<string, GuardedCallee[]>;
+    tables: GuardedCallTables;
+    probe?: { capture: (fn: FunctionDecl) => void; onSite: (e: GuardedCallSite) => void };
+  };
   /**
    * The null default of each field the original reads through a null-guarded getter
    * (null-getters.ts), keyed `<pointee type>|<member path>`, for `compare-form` and
@@ -1418,6 +1428,59 @@ export function generateImplementation(
   }
 
   return output;
+}
+
+/**
+ * One function as the transform pipeline has it where `guarded-call-restore` runs, and
+ * the calls that pass writes in it to `callees`. The body is generated exactly as its
+ * unit generates it, inside the namespace block the unit opens, and the text is
+ * discarded; nothing the generation records reaches `context`, and what it prints is
+ * dropped.
+ */
+export function probeGuardedCalls(
+  func: ExtractedFunction,
+  options: ReconstructOptions,
+  context: ImplGenContext,
+  callees: GuardedCallee[],
+  tables: GuardedCallTables,
+): { fn: FunctionDecl | undefined; sites: GuardedCallSite[] } {
+  const sites: GuardedCallSite[] = [];
+  let fn: FunctionDecl | undefined;
+  if (!func.decompiled || func.parentClass) return { fn, sites };
+  const resolved = namespaceResolution().of(func);
+  const namespace = renderNamespace(resolved);
+  const useNamespace = !!namespace && !resolved?.classScope && options.organization === 'namespace' && isValidNamespace(namespace);
+  const probe: ImplGenContext = {
+    ...context,
+    _fileIdentifiers: undefined,
+    _castTypedefs: undefined,
+    _preambles: undefined,
+    bodyIdentifierFnCounts: new Map(),
+    // Tables memoised on this array would be built before the unit generation fills
+    // in what they read (functionNameToHeader); a copy keeps them out of the cache.
+    analyzedGlobals: context.analyzedGlobals ? [...context.analyzedGlobals] : undefined,
+    _enclosingNamespace: useNamespace ? namespace : undefined,
+    _enclosingResolvedNamespace: useNamespace ? resolved : undefined,
+    guardedCalls: {
+      calleesBySite: new Map([[fileStaticKey(func.address), callees]]),
+      tables,
+      probe: { capture: f => { fn = f; }, onSite: s => { sites.push(s); } },
+    },
+  };
+  const quiet = { log: console.log, warn: console.warn, error: console.error };
+  const errors = { path: parseErrorLogPath, count: parseErrorCount };
+  console.log = console.warn = console.error = () => {};
+  parseErrorLogPath = null;
+  try {
+    generateFunctionImplementation(func, undefined, options, probe, false, useNamespace ? resolved : undefined);
+  } catch {
+    return { fn: undefined, sites: [] };
+  } finally {
+    Object.assign(console, quiet);
+    parseErrorLogPath = errors.path;
+    parseErrorCount = errors.count;
+  }
+  return { fn, sites };
 }
 
 /**
@@ -3260,6 +3323,24 @@ function transformDecompiledCode(
         unanchored: true,
         onSite: (e: { line: number; callee: string; form: string }) =>
           console.warn(`[inlined-call] ${funcAddress} ${funcName ?? '<unknown>'}: ${e.callee} (${e.form}) on line ${e.line}`),
+      };
+    }
+
+    // The guarded form, once the halts are folded (guarded-call-restore.ts): the call is
+    // spelled as the namespace strip has spelled the body's other references by then.
+    const guarded = context?.guardedCalls;
+    const guardedCallees = funcAddress ? guarded?.calleesBySite.get(fileStaticKey(funcAddress)) : undefined;
+    if (guarded && (guardedCallees || guarded.probe)) {
+      perPluginOptions['guarded-call-restore'] = {
+        callees: guardedCallees ?? [],
+        ...guarded.tables,
+        capture: guarded.probe?.capture,
+        spellCall: (call: CallExpr) => {
+          const strip = perPluginOptions['enclosing-namespace-strip'];
+          return strip ? enclosingNamespaceStripPlugin.createTransformer(strip as Record<string, unknown>)(call) as Expression : call;
+        },
+        onSite: guarded.probe?.onSite ?? ((e: GuardedCallSite) =>
+          console.warn(`[guarded-call] ${funcAddress} ${funcName ?? '<unknown>'}: ${e.callee} (${e.form}) on line ${e.line}`)),
       };
     }
 

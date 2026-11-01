@@ -68,12 +68,12 @@ import {
   ADDRESS_LITERAL_COMPLEMENT_FLOOR,
   type FuncPtrTarget,
 } from '@ghidra-mcp/cpp-parser';
-import { Lexer, TokenKind, parse, biasedTableIndexPlugin, findNodesByKind, NodeKind, type InlinedCallee, type InlinedCallTables } from '@ghidra-mcp/cpp-parser';
+import { Lexer, TokenKind, parse, biasedTableIndexPlugin, findNodesByKind, NodeKind, type InlinedCallee, type InlinedCallTables, type GuardedCallee, type GuardedCallTables } from '@ghidra-mcp/cpp-parser';
 
 import { buildVtableDispatch } from './vtable-dispatch.js';
 import { fieldDeclSpelling, emittedMemberNames, generateHeader, generateFunctionDeclaration, setKnownFuncDefs, setConstructorBearingStructs, hasConvertingConstructor, sigType, getIntegerConversionType, emittedFunctionName, returnSigType } from './header.js';
 import { enumTypedefLine, registerEnumTypedefTargets, setKnownEnumWidths } from './enum-width.js';
-import { generateImplementation, setQuestStructLayouts, setStructFieldRenames, decompiledReturnType, decompiledFunctionName, decompiledParameters, type ImplGenContext, type FuncPtrArgCastTables, type ThunkForward } from './impl.js';
+import { generateImplementation, probeGuardedCalls, setQuestStructLayouts, setStructFieldRenames, decompiledReturnType, decompiledFunctionName, decompiledParameters, type ImplGenContext, type FuncPtrArgCastTables, type ThunkForward } from './impl.js';
 import { generateCMakeLists, generateTopLevelCMake, generateTargetCMake, generateUnsortedCMake } from './cmake.js';
 import { generateSourceMap } from './sourcemap.js';
 import { generateReadme } from './readme.js';
@@ -100,7 +100,7 @@ import { normalizePointerSizeSpellings } from './pointer-size-spelling.js';
 import { flattenTemplateNames } from './template-names.js';
 import { buildTemplateRegistry, classScopeOf, memberDefinitionScope, templateDataDefinitions, templateHeaderTypes } from './templates/index.js';
 import { fileStaticKey, readForeignSources, selectFileStaticFunctions, type ForeignSource } from './file-static-functions.js';
-import { planInlinedCalls, type InlinedCallPlan } from './inlined-calls.js';
+import { planInlinedCalls, planGuardedCalls, type InlinedCallPlan, type GuardedCallPlan } from './inlined-calls.js';
 import { nullGetterDefaults } from './null-getters.js';
 import { placeTemplateMembers } from './templates/placement.js';
 import { baseModel } from './templates/bases.js';
@@ -1494,14 +1494,15 @@ export function generateProjectStage1(
       ? globalsHeaderPathUnder(coreDir)
       : undefined;
 
-    installFileStaticFunctions(context, fileStaticModel, classes, namespaces, foreignSources,
+    // Before the file-static plan: it reads bodies through the pipeline, which reads these.
+    installNullGetters(context, functions, dataTypes, !shard || shard.index === 0);
+    installFileStaticFunctions(context, options, fileStaticModel, classes, namespaces, foreignSources,
       [...resolution.targets]
         .filter(([, target]) => target.config.type !== 'interface')
         .map(([targetName, target]) => ({ prefix: getTargetDirectory(targetName), functions: target.functions }))
         .concat(resolution.unsorted.length > 0 ? [{ prefix: 'unsorted', functions: resolution.unsorted }] : []),
       !shard || shard.index === 0,
       () => inlinedCallTablesOf(functions, analyzedGlobals, dataTypes, strings ?? []));
-    installNullGetters(context, functions, dataTypes, !shard || shard.index === 0);
 
     // Generate files per target (classification happens here)
     const mergedTypeOwnerMap = new Map<string, string>();
@@ -1553,10 +1554,10 @@ export function generateProjectStage1(
     // Calculate globals path (needed for generateFilesForFunctions includes)
     const flatGlobalsPath = analyzedGlobals.length > 0 ? GLOBALS_HEADER : undefined;
 
-    installFileStaticFunctions(context, fileStaticModel, classes, namespaces, foreignSources,
+    installNullGetters(context, functions, dataTypes, !shard || shard.index === 0);
+    installFileStaticFunctions(context, options, fileStaticModel, classes, namespaces, foreignSources,
       [{ prefix: '', functions }], !shard || shard.index === 0,
       () => inlinedCallTablesOf(functions, analyzedGlobals, dataTypes, strings ?? []));
-    installNullGetters(context, functions, dataTypes, !shard || shard.index === 0);
 
     // Generate files (classification happens here)
     const flatTypeOwnerMap = generateFilesForFunctions(
@@ -2415,6 +2416,7 @@ function buildAutoMethodMappings(
  */
 function installFileStaticFunctions(
   context: ImplGenContext,
+  options: ReconstructOptions,
   model: { functions: ExtractedFunction[]; globals: AnalyzedDataSymbol[] },
   classes: DetectedClass[],
   namespaces: ExtractedNamespace[],
@@ -2422,7 +2424,7 @@ function installFileStaticFunctions(
   parts: Array<{ prefix: string; functions: ExtractedFunction[] }>,
   report: boolean,
   /** The declarations an inlined call's arguments are typed from (inlined-calls.ts). */
-  inlinedCallTables?: () => InlinedCallTables,
+  inlinedCallTables?: () => GuardedCallTables,
 ): void {
   const unitOf = new Map<string, string>();
   const unitFunctionsOf = new Map<string, Array<{ key: string; func: ExtractedFunction }>>();
@@ -2438,6 +2440,8 @@ function installFileStaticFunctions(
     }
   }
   let inlinedCallPlan: InlinedCallPlan | undefined;
+  let guardedCallPlan: GuardedCallPlan | undefined;
+  let callTables: GuardedCallTables | undefined;
   const classMethods = new Set<string>();
   for (const cls of classes) for (const m of cls.methods) classMethods.add(fileStaticKey(m.address));
   // The platform header declares these names extern in every unit.
@@ -2455,13 +2459,26 @@ function installFileStaticFunctions(
     // A function nothing references whose body its unit's functions hold inlined.
     inlinedCalls: inlinedCallTables && (unreferenced => {
       const hasOverride = (f: ExtractedFunction) => context.overrides?.get(f.address) !== undefined;
+      callTables = inlinedCallTables();
+      const tables = callTables;
       inlinedCallPlan = planInlinedCalls(
         unreferenced.filter(u => !hasOverride(u.func)),
         unit => unitFunctionsOf.get(unit) ?? [],
-        inlinedCallTables(),
+        tables,
         hasOverride,
       );
-      return inlinedCallPlan.sitesByCallee;
+      // The guarded form is matched on bodies as the pipeline has them once the halts
+      // are folded, with the calls above already written back.
+      const probeContext: ImplGenContext = { ...context, inlinedCalls: { calleesBySite: inlinedCallPlan.calleesBySite, tables } };
+      guardedCallPlan = planGuardedCalls(
+        unreferenced.filter(u => !hasOverride(u.func) && !inlinedCallPlan!.sitesByCallee.has(u.key)),
+        unit => unitFunctionsOf.get(unit) ?? [],
+        (func, callees) => probeGuardedCalls(func, options, probeContext, callees, tables),
+        hasOverride,
+      );
+      const sites = new Map(inlinedCallPlan.sitesByCallee);
+      for (const [k, s] of guardedCallPlan.sitesByCallee) sites.set(k, new Set([...(sites.get(k) ?? []), ...s]));
+      return sites;
     }),
     // A replaced body or a patch is emitted code that can name any function.
     extraReferenceText: f => {
@@ -2490,6 +2507,21 @@ function installFileStaticFunctions(
   } else {
     context.inlinedCalls = undefined;
   }
+  if (guardedCallPlan && callTables) {
+    const calleesBySite = new Map<string, GuardedCallee[]>();
+    const selectedCallees = new Set<GuardedCallee>();
+    for (const [key, entry] of selection.selected) {
+      const callee = entry.inline ? guardedCallPlan.calleeByKey.get(key) : undefined;
+      if (callee) selectedCallees.add(callee);
+    }
+    for (const [site, callees] of guardedCallPlan.calleesBySite) {
+      const kept = callees.filter(c => selectedCallees.has(c));
+      if (kept.length > 0) calleesBySite.set(site, kept);
+    }
+    context.guardedCalls = { calleesBySite, tables: callTables };
+  } else {
+    context.guardedCalls = undefined;
+  }
   if (report) {
     const refused = [...selection.refused].map(([why, names]) => `${names.length} ${why}`).join(', ');
     console.log(
@@ -2500,6 +2532,11 @@ function installFileStaticFunctions(
       const inline = [...selection.selected.values()].filter(e => e.inline).length;
       const sites = [...context.inlinedCalls.calleesBySite.values()].reduce((n, c) => n + c.length, 0);
       console.log(`Inlined calls restored: ${inline} static inline functions, called again from ${context.inlinedCalls.calleesBySite.size} functions (${sites} callee-site pairs)`);
+    }
+    if (context.guardedCalls) {
+      const callees = new Set([...context.guardedCalls.calleesBySite.values()].flat()).size;
+      const sites = [...context.guardedCalls.calleesBySite.values()].reduce((n, c) => n + c.length, 0);
+      console.log(`Guarded inlined calls restored: ${callees} static inline functions, called again from ${context.guardedCalls.calleesBySite.size} functions (${sites} callee-site pairs)`);
     }
   }
 }
@@ -2521,13 +2558,38 @@ function inlinedCallTablesOf(
   globals: AnalyzedDataSymbol[],
   dataTypes: ExtractedDataType[],
   strings: ReadonlyArray<ExtractedString>,
-): InlinedCallTables {
+): GuardedCallTables {
   const funcDefs = dataTypes.filter(dt => dt.kind === 'FUNCTION_DEFINITION') as import('../types.js').ExtractedFunctionDefinition[];
   const t = buildFuncPtrArgCastTables(functions, globals, funcDefs, dataTypes, strings, platformDeclaredModelFunctions);
   return {
     globalTypes: t.globalTypes, structFields: t.structFields, fieldTypes: t.fieldTypes, typedefTargets: t.typedefTargets,
     enumValues: buildEnumValues(dataTypes),
+    fieldOffsets: fieldOffsetsOf(dataTypes),
   };
+}
+
+/**
+ * Aggregate -> member -> byte offset, from the declarations. A member two declarations
+ * of one name place differently, and a bitfield, have none.
+ */
+export function fieldOffsetsOf(dataTypes: readonly ExtractedDataType[]): Record<string, Record<string, number>> {
+  const out: Record<string, Record<string, number>> = {};
+  const clash = new Set<string>();
+  for (const dt of dataTypes) {
+    if ((dt.kind !== 'STRUCTURE' && dt.kind !== 'UNION') || !dt.name || !('fields' in dt)) continue;
+    const into = out[dt.name] ?? (out[dt.name] = {});
+    for (const f of (dt as import('../types.js').ExtractedStruct).fields ?? []) {
+      if (!f.name || typeof f.offset !== 'number' || (f as { bitSize?: number }).bitSize !== undefined) continue;
+      const key = `${dt.name}\u0000${f.name}`;
+      if (into[f.name] !== undefined && into[f.name] !== f.offset) clash.add(key);
+      into[f.name] = f.offset;
+    }
+  }
+  for (const key of clash) {
+    const [agg, field] = key.split('\u0000');
+    delete out[agg][field];
+  }
+  return out;
 }
 
 function buildFuncToImplPathMap(

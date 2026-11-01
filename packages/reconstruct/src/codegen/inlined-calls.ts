@@ -18,8 +18,8 @@
  */
 
 import {
-  NodeKind, parse, preprocessGhidraCode, restoreInlinedCalls, compileInlinedCallee,
-  type FunctionDecl, type InlinedCallee, type InlinedCallTables,
+  NodeKind, parse, preprocessGhidraCode, restoreInlinedCalls, compileInlinedCallee, compileGuardedCallee,
+  type FunctionDecl, type InlinedCallee, type InlinedCallTables, type GuardedCallee, type GuardedCallSite,
 } from '@ghidra-mcp/cpp-parser';
 import type { ExtractedFunction } from '../types.js';
 import { decompiledFunctionName, decompiledParameterNames, splitDecompiledBody, wrapperSignature } from './impl.js';
@@ -121,4 +121,83 @@ export function planInlinedCalls(
     set.add(site);
   }
   return { calleesBySite, sitesByCallee, calleeByKey, tables };
+}
+
+export interface GuardedCallPlan {
+  /** Site function address key -> the guarded callees whose calls the pipeline writes back in it. */
+  calleesBySite: Map<string, GuardedCallee[]>;
+  /** Callee address key -> the site functions holding its guards and value. */
+  sitesByCallee: Map<string, Set<string>>;
+  /** Callee address key -> the callee as the sites call it. */
+  calleeByKey: Map<string, GuardedCallee>;
+}
+
+/**
+ * Reads one function as the pipeline has it where `guarded-call-restore` runs, with the
+ * calls that pass writes there to `callees` (impl.ts `probeGuardedCalls`).
+ */
+export type GuardedCallProbe = (func: ExtractedFunction, callees: GuardedCallee[]) => { fn: FunctionDecl | undefined; sites: GuardedCallSite[] };
+
+/** The lines a function's halts push, from the instructions. */
+function haltLinesOf(func: ExtractedFunction): Set<number> {
+  const lines = new Set<number>();
+  for (const h of func.haltLines?.halts ?? []) for (const p of h.paths) if (p.line !== null) lines.add(p.line);
+  return lines;
+}
+
+/**
+ * The sites of each guarded callee in the functions of its unit: a function there that
+ * halts with every line the callee's own guards halt with, the original's `__LINE__`
+ * recurring where the helper was inlined, and in which the pass then finds the guards
+ * followed by the value. Both callee and site are read as the pipeline has them at the
+ * pass, so the plan and the generation see the same trees.
+ */
+export function planGuardedCalls(
+  callees: ReadonlyArray<{ key: string; func: ExtractedFunction; unit: string }>,
+  functionsOf: (unit: string) => ReadonlyArray<{ key: string; func: ExtractedFunction }>,
+  probe: GuardedCallProbe,
+  skipSite?: (func: ExtractedFunction) => boolean,
+): GuardedCallPlan {
+  const calleesBySite = new Map<string, GuardedCallee[]>();
+  const sitesByCallee = new Map<string, Set<string>>();
+  const calleeByKey = new Map<string, GuardedCallee>();
+  const byUnit = new Map<string, Array<{ key: string; func: ExtractedFunction; callee: GuardedCallee; lines: number[] }>>();
+  for (const c of callees) {
+    if (!c.func.decompiled || c.func.hasVarArgs || haltLinesOf(c.func).size === 0) continue;
+    const { fn } = probe(c.func, []);
+    if (!fn) continue;
+    const callee: GuardedCallee = { callName: decompiledFunctionName(c.func.decompiled) ?? c.func.name, fn };
+    const pattern = compileGuardedCallee(callee);
+    if (!pattern) continue;
+    calleeByKey.set(c.key, callee);
+    let list = byUnit.get(c.unit);
+    if (!list) byUnit.set(c.unit, (list = []));
+    list.push({ key: c.key, func: c.func, callee, lines: pattern.lines });
+  }
+  const pairs: Array<{ site: string; callee: { key: string; callee: GuardedCallee } }> = [];
+  for (const [unit, unitCallees] of byUnit) {
+    for (const site of functionsOf(unit)) {
+      if (!site.func.decompiled || skipSite?.(site.func)) continue;
+      const lines = haltLinesOf(site.func);
+      // The callee's own namespace: the call is spelled as the site spells its neighbours.
+      const others = unitCallees.filter(c => c.key !== site.key && c.func.namespace === site.func.namespace
+        && c.lines.every(l => lines.has(l)));
+      if (others.length === 0) continue;
+      const { sites } = probe(site.func, others.map(c => c.callee));
+      const hit = new Set(sites.map(s => s.callee));
+      for (const c of others) if (hit.has(c.callee.callName)) pairs.push({ site: site.key, callee: c });
+    }
+  }
+  const pairKeys = new Set(pairs.map(p => `${p.site}\u0000${p.callee.key}`));
+  for (const { site, callee } of pairs) {
+    // Two functions that are each other's copy are duplicates, not caller and callee.
+    if (pairKeys.has(`${callee.key}\u0000${site}`)) continue;
+    const list = calleesBySite.get(site) ?? [];
+    calleesBySite.set(site, list);
+    list.push(callee.callee);
+    let set = sitesByCallee.get(callee.key);
+    if (!set) sitesByCallee.set(callee.key, (set = new Set()));
+    set.add(site);
+  }
+  return { calleesBySite, sitesByCallee, calleeByKey };
 }

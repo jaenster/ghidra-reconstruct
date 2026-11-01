@@ -131,6 +131,9 @@ export interface InlinedCallRestoreOptions extends PluginOptions, InlinedCallTab
 
 export type InlinedCallForm = 'expression' | 'subscript' | 'select' | 'run' | 'fold';
 
+/** A callee parameter; `neutral` when no use of it can tell an integer's sign. */
+export interface PatternParam { name: string; type: TypeNode; neutral: boolean }
+
 interface Pattern {
   callee: InlinedCallee;
   /**
@@ -139,7 +142,7 @@ interface Pattern {
    * site, as the codegen does for one with a single site in its unit.
    */
   anchored: boolean;
-  params: Array<{ name: string; type: TypeNode; neutral: boolean }>;
+  params: PatternParam[];
   returnType: TypeNode;
   /** `return E;` */
   expr?: Expression;
@@ -168,17 +171,17 @@ function parseWrapped(returnType: string, params: string, body: string): Functio
   }
 }
 
-function paramName(p: ParameterDecl): string | undefined {
+export function paramName(p: ParameterDecl): string | undefined {
   const n = (p as unknown as { name?: Identifier | null }).name;
   return n && n.kind === NodeKind.Identifier ? n.name : undefined;
 }
 
 /** Statements that compile to something: comments and empty statements dropped. */
-function realStatements(block: CompoundStmt): Statement[] {
+export function realStatements(block: CompoundStmt): Statement[] {
   return block.statements.filter(s => s.kind !== NodeKind.NullStmt);
 }
 
-function onlyStatement(s: Statement): Statement {
+export function onlyStatement(s: Statement): Statement {
   if (s.kind === NodeKind.CompoundStmt) {
     const inner = realStatements(s as CompoundStmt);
     if (inner.length === 1) return onlyStatement(inner[0]);
@@ -213,7 +216,7 @@ function isLvalueRoot(e: Expression): boolean {
 }
 
 /** Whether the body names something besides its parameters, locals and small constants. */
-function hasAnchor(nodes: ASTNode[], params: ReadonlySet<string>): boolean {
+export function hasAnchor(nodes: ASTNode[], params: ReadonlySet<string>): boolean {
   for (const root of nodes) {
     for (const n of traverseAST(root)) {
       switch (n.kind) {
@@ -261,7 +264,7 @@ function integerStoreType(e: Expression, resolve?: TypedefResolver): IntType | u
  * either sign: an operand of `==`/`!=` whose other side is a literal or a 32-bit
  * integer parameter, or the value stored through a 32-bit integer pointer.
  */
-function signNeutral(roots: ASTNode[], name: string, params: ReadonlyMap<string, TypeNode>): boolean {
+export function signNeutral(roots: ASTNode[], name: string, params: ReadonlyMap<string, TypeNode>): boolean {
   const thirtyTwo = (e: Expression): boolean => {
     const u = unwrapParens(e);
     if (u.kind === NodeKind.IntegerLiteral) return true;
@@ -437,10 +440,10 @@ function compileUncached(callee: InlinedCallee): Pattern | null {
   return pattern;
 }
 
-type Bindings = Map<string, Expression>;
+export type Bindings = Map<string, Expression>;
 
 /** What matching needs beyond the two trees. */
-interface UnifyEnv {
+export interface UnifyEnv {
   enumValues: Readonly<Record<string, number>>;
   resolve?: TypedefResolver;
 }
@@ -448,7 +451,7 @@ interface UnifyEnv {
 const NO_ENV: UnifyEnv = { enumValues: {} };
 
 /** Exact structural equality of two subtrees, parentheses aside. */
-function same(a: ASTNode, b: ASTNode, env: UnifyEnv = NO_ENV): boolean {
+export function same(a: ASTNode, b: ASTNode, env: UnifyEnv = NO_ENV): boolean {
   return unify(a, b, undefined, new Map(), env);
 }
 
@@ -472,7 +475,7 @@ function intConstant(e: ASTNode, env: UnifyEnv): bigint | undefined {
  * Whether `site` is `pat` with each parameter in `params` replaced by one expression
  * (recorded in `bound`). Node kinds this does not know never match.
  */
-function unify(pat: ASTNode, site: ASTNode, params: ReadonlySet<string> | undefined, bound: Bindings, env: UnifyEnv): boolean {
+export function unify(pat: ASTNode, site: ASTNode, params: ReadonlySet<string> | undefined, bound: Bindings, env: UnifyEnv): boolean {
   const p = isExpressionKind(pat) ? unwrapParens(pat as Expression) : pat;
   const s = isExpressionKind(site) ? unwrapParens(site as Expression) : site;
   if (p.kind === NodeKind.Identifier && params?.has((p as Identifier).name)) {
@@ -570,11 +573,11 @@ const EXPRESSION_KINDS = new Set<NodeKind>([
 ]);
 const isExpressionKind = (n: ASTNode): boolean => EXPRESSION_KINDS.has(n.kind);
 
-const isIntegral = (s: TypeShape | null): boolean => !!s && s.stars === 0
+export const isIntegral = (s: TypeShape | null): boolean => !!s && s.stars === 0
   && /^(?:(?:unsigned |signed )?(?:char|short|int|long|long long)|bool|u?int(?:8|16|32|64)_t|uint|ushort|uchar|byte|word|dword|undefined[124]?|BYTE|WORD|DWORD|BOOL|UINT|INT|LONG|ULONG)$/.test(s.base);
 
 /** The call arguments the bindings give, or undefined when one is not provably the parameter's type. */
-function argumentsFor(pattern: Pattern, bound: Bindings, shapeOf: ExprShape, env: UnifyEnv): Expression[] | undefined {
+export function argumentsFor(pattern: { params: ReadonlyArray<PatternParam> }, bound: Bindings, shapeOf: ExprShape, env: UnifyEnv): Expression[] | undefined {
   const args: Expression[] = [];
   for (const p of pattern.params) {
     const arg = bound.get(p.name);
@@ -600,7 +603,7 @@ function argumentsFor(pattern: Pattern, bound: Bindings, shapeOf: ExprShape, env
   return args;
 }
 
-function callOf(pattern: Pattern, args: Expression[]): CallExpr {
+export function callOf(pattern: { callee: { callName: string } }, args: Expression[]): CallExpr {
   const parts = pattern.callee.callName.split('::').filter(Boolean);
   const callee = parts.length > 1 ? Expr.qualifiedId(parts) : Expr.identifier(parts[0]);
   return Expr.call(callee, args);
