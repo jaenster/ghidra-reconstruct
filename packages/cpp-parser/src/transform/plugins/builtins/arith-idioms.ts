@@ -30,8 +30,8 @@
  *                for an unsigned x): a negative x is biased by 2^n-1 so the
  *                arithmetic shift rounds toward zero, as `/` does. Without the
  *                `(int)` the sum must itself be a signed int.
- *   long helpers `__alldiv(lo, hi, lo2, hi2)` (and `__aulldiv`, `__allrem`,
- *                `__aullrem`, `__allmul`) whose dword pairs are recognisably one
+ *   long helpers `_alldiv(lo, hi, lo2, hi2)` (and `_aulldiv`, `_allrem`,
+ *                `_aullrem`, `_allmul`, or their `__` spellings) whose dword pairs are recognisably one
  *                value - `((uint32_t)E, (uint32_t)((uint64_t)E >> 0x20))` is E,
  *                `(n, (int)n >> 0x1f)` is n sign-extended, `(n, 0)` n
  *                zero-extended - are the operator on `(int64_t)` / `(uint64_t)`.
@@ -514,6 +514,29 @@ function createFolder(shapeOf: ExprShape, o: ArithIdiomsOptions, resolve: Typede
    * The one value a dword pair holds, as an expression whose integer conversion
    * to a 64-bit type gives exactly the bits `lo | (uint64_t)hi << 32`.
    */
+  /** E for `*(T*)((char*)&E + 4)` (or `(uintptr_t)&E + 4`) with T a 32-bit integer. */
+  const highDwordOf = (hi: Expression): Expression | null => {
+    const d = unwrapParens(hi);
+    if (d.kind !== NodeKind.UnaryExpr || (d as UnaryExpr).operator !== '*') return null;
+    const p = unwrapParens((d as UnaryExpr).operand as Expression);
+    const pc = p.kind === NodeKind.CStyleCastExpr ? p as CStyleCastExpr : null;
+    if (!pc || pc.type.kind !== NodeKind.PointerType) return null;
+    const pointee = shapeOfNode(pc.type, 0, resolve);
+    if (!pointee || pointee.stars !== 1 || INT_BASES[pointee.base]?.bits !== 32) return null;
+    const sum = unwrapParens(pc.expression as Expression);
+    if (sum.kind !== NodeKind.BinaryExpr || (sum as BinaryExpr).operator !== '+'
+        || intLiteral((sum as BinaryExpr).right as Expression) !== 4n) return null;
+    const base = unwrapParens((sum as BinaryExpr).left as Expression);
+    if (base.kind !== NodeKind.CStyleCastExpr) return null;
+    const bt = shapeOfNode((base as CStyleCastExpr).type, 0, resolve);
+    const bytePointer = bt && bt.stars === 1 && (bt.base === 'char' || bt.base === 'unsigned char' || bt.base === 'signed char');
+    const address = bt && bt.stars === 0 && (bt.base === 'uintptr_t' || INT_BASES[bt.base]?.bits === 32);
+    if (!bytePointer && !address) return null;
+    const amp = unwrapParens((base as CStyleCastExpr).expression as Expression);
+    if (amp.kind !== NodeKind.UnaryExpr || (amp as UnaryExpr).operator !== '&') return null;
+    return (amp as UnaryExpr).operand as Expression;
+  };
+
   const pairValue = (lo: Expression, hi: Expression): Expression | null => {
     // ((uint32_t)E, (uint32_t)((uint64_t)E >> 0x20)) is E itself.
     const loCast = castOf(lo);
@@ -527,7 +550,20 @@ function createFolder(shapeOf: ExprShape, o: ArithIdiomsOptions, resolve: Typede
             && isPure(loCast.inner) && typeOf(loCast.inner)) {
           return loCast.inner;
         }
+        // ((uint32_t)E, (uint32_t)(E >> 0x20)) with E 64 bits wide: either shift leaves
+        // the high dword in the low 32 bits.
+        const left = (sh as BinaryExpr).left as Expression;
+        if (!castOf(left) && sameExpr(left, loCast.inner) && isPure(left) && typeOf(left)?.bits === 64) {
+          return loCast.inner;
+        }
       }
+    }
+    // ((uint32_t)E, *(uint32_t*)((char*)&E + 4)) with E a 64-bit lvalue: the high dword
+    // read from memory, little-endian.
+    if (loCast && loCast.type.bits === 32 && !loCast.type.signed) {
+      const e = loCast.inner;
+      const at = highDwordOf(hi);
+      if (at && sameExpr(at, e) && isPure(e) && typeOf(e)?.bits === 64) return e;
     }
     const lt = typeOf(lo);
     if (!lt) return null;
@@ -549,13 +585,16 @@ function createFolder(shapeOf: ExprShape, o: ArithIdiomsOptions, resolve: Typede
     return null;
   };
 
-  const HELPERS: Record<string, { op: '/' | '%' | '*'; signed: boolean }> = {
-    '__alldiv': { op: '/', signed: true },
-    '__aulldiv': { op: '/', signed: false },
-    '__allrem': { op: '%', signed: true },
-    '__aullrem': { op: '%', signed: false },
-    '__allmul': { op: '*', signed: true },
-  };
+  // The CRT names them `_alldiv`; an older database spelled them `__alldiv`.
+  const HELPERS: Record<string, { op: '/' | '%' | '*'; signed: boolean }> = {};
+  for (const [name, h] of [
+    ['alldiv', { op: '/', signed: true }], ['aulldiv', { op: '/', signed: false }],
+    ['allrem', { op: '%', signed: true }], ['aullrem', { op: '%', signed: false }],
+    ['allmul', { op: '*', signed: true }],
+  ] as const) {
+    HELPERS[`_${name}`] = h;
+    HELPERS[`__${name}`] = h;
+  }
 
   const foldLongHelper = (e: Expression): Expression | null => {
     if (e.kind !== NodeKind.CallExpr) return null;

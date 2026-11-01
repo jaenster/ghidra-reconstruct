@@ -359,6 +359,14 @@ export {
 } from './builtins/nest-call.js';
 
 export {
+  summarizeWriteEffects,
+  WRITE_CONTRACTS,
+  type WriteEffect,
+  type EffectFunction,
+  type WriteEffectOptions,
+} from './builtins/write-effects.js';
+
+export {
   baseRegisterLoadPlugin,
   type BaseRegisterLoadOptions,
 } from './builtins/base-register-load.js';

@@ -240,6 +240,30 @@ describe('arith-idioms', () => {
         'r = a % (int64_t)gqwTotal;');
     });
 
+    // MakeMissile, 004cd540: the CRT's own spelling, `_alldiv`.
+    it('folds the CRT spelling of the helpers', () => {
+      assert.strictEqual(run('r = _allmul(n, (int)n >> 0x1f, 0x4b, 0);', 'int n, int64_t r'), 'r = (int64_t)n * 0x4b;');
+      assert.strictEqual(run('r = _allmul(u, 0, m, 0);', 'uint32_t u, uint32_t m, int64_t r'), 'r = (int64_t)u * m;');
+      assert.strictEqual(run('l = _alldiv((uint32_t)l, (uint32_t)((uint64_t)l >> 0x20), 100, 0);', 'int64_t l'), 'l = l / 100;');
+      assert.strictEqual(run('r = _aulldiv((uint32_t)q, (uint32_t)((uint64_t)q >> 0x20), 10, 0);', 'uint64_t q, uint64_t r'), 'r = q / 10;');
+      assert.strictEqual(run('r = _allrem(n, (int)n >> 0x1f, 7, 0);', 'int n, int64_t r'), 'r = (int64_t)n % 7;');
+    });
+
+    it('reads the high dword through a 64-bit shift or from memory', () => {
+      assert.strictEqual(run('r = _alldiv((uint32_t)q, (uint32_t)(q >> 0x20), 0x400, 0);', 'int64_t q, int64_t r'), 'r = q / 0x400;');
+      assert.strictEqual(run('r = _allmul((uint32_t)q, *(uint32_t*)((char*)&q + 4), 0x21, 0);', 'uint64_t q, int64_t r'),
+        'r = (int64_t)q * 0x21;');
+      assert.strictEqual(run('r = _allmul(n, 0, (uint32_t)q, *(int*)((uintptr_t)&q + 4));', 'uint32_t n, uint64_t q, int64_t r'),
+        'r = (int64_t)n * (int64_t)q;');
+    });
+
+    it('refuses a high dword read from another value or a narrow one', () => {
+      const other = 'r = _allmul((uint32_t)q, *(uint32_t*)((char*)&p + 4), 0x21, 0);';
+      assert.strictEqual(run(other, 'uint64_t q, uint64_t p, int64_t r'), other);
+      const narrow = 'r = _allmul((uint32_t)n, *(uint32_t*)((char*)&n + 4), 0x21, 0);';
+      assert.strictEqual(run(narrow, 'int n, int64_t r'), narrow);
+    });
+
     it('refuses halves that are not one value', () => {
       const body = 'r = __alldiv(a - b, c - d - (uint32_t)(a < b), 600000000, 0);';
       assert.strictEqual(run(body, 'uint32_t a, uint32_t b, uint32_t c, uint32_t d, int64_t r'),
@@ -289,6 +313,14 @@ describe('arith-idioms values', () => {
       { decls: 'int n, int64_t r', body: 'r = __allmul(n, (int)n >> 0x1f, 0x3c, 0);', values: 'S' },
       { decls: 'int64_t q, uint64_t r', body: 'r = __aulldiv((uint32_t)q, (uint32_t)((uint64_t)q >> 0x20), 0xfffffff1, 0);', values: 'Q' },
       { decls: 'int64_t q, uint64_t r', body: 'r = __aullrem((uint32_t)q, (uint32_t)((uint64_t)q >> 0x20), (uint32_t)q | 1, (int)((uint32_t)q | 1) >> 0x1f);', values: 'Q' },
+      { decls: 'int n, int64_t r', body: 'r = _allmul(n, (int)n >> 0x1f, 0x4b, 0);', values: 'S' },
+      { decls: 'uint32_t u, int64_t r', body: 'r = _allmul(u, 0, 0x3b9aca07, 0);', values: 'U' },
+      { decls: 'int n, int64_t r', body: 'r = _alldiv((uint32_t)((int64_t)n * 0x4b), (uint32_t)((uint64_t)((int64_t)n * 0x4b) >> 0x20), 100, 0);', values: 'S' },
+      { decls: 'int n, int64_t r', body: 'r = _allrem(n, (int)n >> 0x1f, 7, 0);', values: 'S' },
+      { decls: 'int64_t q, uint64_t r', body: 'r = _aulldiv((uint32_t)q, (uint32_t)((uint64_t)q >> 0x20), 10, 0);', values: 'Q' },
+      { decls: 'int64_t q, int64_t r', body: 'r = _alldiv((uint32_t)q, (uint32_t)(q >> 0x20), 0x400, 0);', values: 'Q' },
+      { decls: 'int64_t q, int64_t r', body: 'r = _allmul((uint32_t)q, *(uint32_t*)((char*)&q + 4), 0x21, 0);', values: 'Q' },
+      { decls: 'uint64_t q, int64_t r', body: 'r = _allmul(0x1234567u, 0, (uint32_t)q, *(int*)((uintptr_t)&q + 4));', values: 'Q' },
     ];
     const VALUES: Record<string, string> = {
       U: '0u, 1u, 2u, 3u, 6u, 7u, 9u, 10u, 34u, 35u, 36u, 0x7fffffffu, 0x80000000u, 0x80000001u, 0xfffffffeu, 0xffffffffu, 123456789u',
@@ -301,6 +333,7 @@ describe('arith-idioms values', () => {
       + 'static inline int64_t __allrem(uint32_t lo1, uint32_t hi1, uint32_t lo2, int hi2) { return (int64_t)(lo1 | ((uint64_t)hi1 << 32)) % (int64_t)(lo2 | ((uint64_t)(uint32_t)hi2 << 32)); }\n'
       + 'static inline uint64_t __aulldiv(uint32_t lo1, uint32_t hi1, uint32_t lo2, uint32_t hi2) { return (lo1 | ((uint64_t)hi1 << 32)) / (lo2 | ((uint64_t)hi2 << 32)); }\n'
       + 'static inline uint64_t __aullrem(uint32_t lo1, uint32_t hi1, uint32_t lo2, uint32_t hi2) { return (lo1 | ((uint64_t)hi1 << 32)) % (lo2 | ((uint64_t)hi2 << 32)); }\n'
+      + '#define _alldiv __alldiv\n#define _allmul __allmul\n#define _allrem __allrem\n#define _aulldiv __aulldiv\n'
       + 'static int failures = 0;\n';
     let main = 'int main(void) {\n';
     cases.forEach((c, i) => {

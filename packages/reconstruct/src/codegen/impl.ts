@@ -715,6 +715,8 @@ export interface PinnableOverload {
 }
 
 export interface FuncPtrArgCastTables {
+  /** Callable spelling -> what a call to it may write (codegen/write-effects-table.ts). */
+  writeEffects?: Record<string, import('@ghidra-mcp/cpp-parser').WriteEffect>;
   /** Function address -> its entries, for each function whose qualified name another shares. */
   pinnableOverloads?: Record<string, PinnableOverload>;
   /**
@@ -3211,6 +3213,9 @@ function transformDecompiledCode(
         functionReturnTypes: context?.funcPtrArgCasts?.functionReturnTypes,
         functionParamTypes: context?.funcPtrArgCasts?.functionParamTypes,
         globalTypes: context?.funcPtrArgCasts?.globalTypes,
+        varArgFunctions: context?.funcPtrArgCasts?.varArgFunctions,
+        enumConstants: context?.funcPtrArgCasts?.enumConstantNames,
+        writeEffects: context?.funcPtrArgCasts?.writeEffects,
         typedefTargets: context?.funcPtrArgCasts?.typedefTargets,
         enclosingSegments: enclosing?.ghidraNamespaceSegments ?? enclosing?.namespaceSegments,
         onSite: (e: { line: number; temps: number }) =>
