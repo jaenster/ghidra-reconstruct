@@ -24,8 +24,8 @@
  * a global's address: that global; anything else: memory). Recursion starts from nothing
  * and grows; a cycle that has not settled after the round limit is unknown.
  *
- * A block that ends the process (`exit`, `abort`, ...) with no way out of it contributes
- * nothing: no caller runs after it.
+ * The statements of a block that ends the process (`exit`, `abort`, ...) from which no
+ * path leaves the block another way contribute nothing: no caller runs after them.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -57,6 +57,11 @@ export interface EffectFunction {
 export interface WriteEffectOptions {
   /** Names of globals declared as arrays: the name is the array's address. */
   globalArrays?: ReadonlySet<string>;
+  /** Every global's name (leaf spelling). A name written that is neither a local nor one
+   *  of these is a register value or alias the decompiler did not declare: the function's own. */
+  globalNames?: ReadonlySet<string>;
+  /** Called for each function found unknown on its own, with why. */
+  onUnknown?: (key: string, why: string) => void;
   /** Callees without a body: name -> what a call may write. */
   contracts?: Record<string, WriteEffect>;
   /** Rounds before an unsettled recursion is declared unknown. */
@@ -71,10 +76,22 @@ export const WRITE_CONTRACTS: Record<string, WriteEffect> = (() => {
   for (const n of ['strlen', 'wcslen', 'strcmp', 'wcscmp', 'strncmp', 'wcsncmp', '_stricmp', 'stricmp', '_strcmpi',
     'strcmpi', '_strnicmp', '_wcsicmp', 'memcmp', 'strchr', 'strrchr', 'wcschr', 'strstr', 'abs', 'labs', 'atoi',
     'atol', 'toupper', 'tolower', 'isalpha', 'isdigit', 'isspace', 'isalnum', 'lstrlenA', 'lstrlenW', 'lstrcmpA',
-    'lstrcmpiA', 'GetTickCount', 'GetCurrentThreadId', 'GetCurrentProcessId']) out[n] = none;
+    'lstrcmpiA', 'GetTickCount', 'GetCurrentThreadId', 'GetCurrentProcessId', 'GetCurrentProcess', 'GetCurrentThread',
+    'IsBadCodePtr', 'IsBadReadPtr', 'IsBadWritePtr', 'IsBadStringPtrA', 'GetModuleHandleA', 'GetKeyState',
+    'GetAsyncKeyState', 'CloseHandle', 'WaitForSingleObject', 'CreateEventA', 'SetEvent', 'ResetEvent', 'CreateFileA',
+    'VirtualAlloc', 'VirtualFree', 'Sleep', 'GetLastError', 'SetLastError']) out[n] = none;
   for (const n of ['memcpy', 'memmove', 'memset', 'strcpy', 'strncpy', 'strcat', 'strncat', 'wcscpy', 'wcsncpy',
     'wcscat', 'sprintf', 'vsprintf', '_snprintf', '_vsnprintf', 'swprintf', 'wsprintfA', 'wsprintfW', 'wvsprintfA',
-    'lstrcpyA', 'lstrcpynA', 'lstrcatA', 'ZeroMemory', 'RtlZeroMemory', 'RtlMoveMemory', 'CopyMemory']) out[n] = first;
+    'lstrcpyA', 'lstrcpynA', 'lstrcatA', 'ZeroMemory', 'RtlZeroMemory', 'RtlMoveMemory', 'CopyMemory', 'builtin_strncpy',
+    'builtin_memcpy', 'builtin_memset', 'EnterCriticalSection', 'LeaveCriticalSection', 'InitializeCriticalSection',
+    'DeleteCriticalSection', 'InterlockedIncrement', 'InterlockedDecrement', 'InterlockedExchange',
+    'InterlockedCompareExchange', 'InterlockedExchangeAdd', 'QueryPerformanceCounter', 'QueryPerformanceFrequency',
+    'GetLocalTime', 'GetSystemTime', 'SetRect', 'SetRectEmpty', 'OffsetRect', 'GetCursorPos']) out[n] = first;
+  // Win32 out-parameters other than the first.
+  out.MultiByteToWideChar = { params: [4] };
+  out.WideCharToMultiByte = { params: [4, 7] };
+  out.WriteFile = { params: [3] };
+  out.ReadFile = { params: [1, 3] };
   return out;
 })();
 
@@ -82,7 +99,7 @@ export const WRITE_CONTRACTS: Record<string, WriteEffect> = (() => {
 const NO_RETURN = new Set(['exit', '_exit', 'abort', 'ExitProcess', 'FatalAppExitA', '_amsg_exit']);
 
 /** Ghidra's p-code operators printed as calls: they compute and write nothing. */
-const PSEUDO_OP = /^(CONCAT\d+|SUB\d+|ZEXT\d+|SEXT\d+|CARRY\d|SCARRY\d|SBORROW\d|POPCOUNT|LZCOUNT|ABS|SQRT|NAN|ROUND|TRUNC|FLOOR|CEIL|INT_\w+)$/;
+const PSEUDO_OP = /^(ADJ|LOCK|UNLOCK|CONCAT\d+|SUB\d+|ZEXT\d+|SEXT\d+|CARRY\d|SCARRY\d|SBORROW\d|POPCOUNT|LZCOUNT|ABS|SQRT|NAN|ROUND|TRUNC|FLOOR|CEIL|INT_\w+)$/;
 
 type Prov = { kind: 'own' } | { kind: 'param'; index: number } | { kind: 'global'; name: string } | { kind: 'memory' };
 
@@ -118,13 +135,21 @@ function leaves(n: ASTNode): boolean {
   return false;
 }
 
-function endsProcess(block: CompoundStmt): boolean {
+/**
+ * For a block that ends the process: the index of the first statement from which no path
+ * leaves the block other than through that end, else -1. What runs from there on is never
+ * seen by a caller.
+ */
+function deadTail(block: CompoundStmt): number {
   const last = block.statements[block.statements.length - 1];
-  if (!last || last.kind !== NodeKind.ExprStmt) return false;
+  if (!last || last.kind !== NodeKind.ExprStmt) return -1;
   const e = unwrap((last as unknown as { expression: Expression }).expression);
-  if (e.kind !== NodeKind.CallExpr) return false;
+  if (e.kind !== NodeKind.CallExpr) return -1;
   const name = calleeName((e as CallExpr).callee);
-  return !!name && NO_RETURN.has(bareName(name)) && !leaves(block);
+  if (!name || !NO_RETURN.has(bareName(name))) return -1;
+  let from = block.statements.length - 1;
+  while (from > 0 && !leaves(block.statements[from - 1])) from--;
+  return from;
 }
 
 function analyse(fn: EffectFunction, opts: WriteEffectOptions): Direct {
@@ -163,8 +188,9 @@ function analyse(fn: EffectFunction, opts: WriteEffectOptions): Direct {
     if (name !== null) {
       const l = u.kind === NodeKind.Identifier ? locals.get(name) : undefined;
       if (l) return { kind: 'own' };
-      // A register value Ghidra could not tie to a variable is the function's own.
-      if (/^(in_|unaff_|extraout_)/.test(name) && u.kind === NodeKind.Identifier) {
+      // A register value or alias Ghidra did not declare is the function's own.
+      if (u.kind === NodeKind.Identifier && (/^(in_|unaff_|extraout_)/.test(name)
+        || (opts.globalNames && !opts.globalNames.has(name)))) {
         return { kind: 'own' };
       }
       return { kind: 'global', name };
@@ -197,7 +223,13 @@ function analyse(fn: EffectFunction, opts: WriteEffectOptions): Direct {
   };
 
   const visit = (n: ASTNode): void => {
-    if (n.kind === NodeKind.CompoundStmt && endsProcess(n as CompoundStmt)) return;
+    if (n.kind === NodeKind.CompoundStmt) {
+      const tail = deadTail(n as CompoundStmt);
+      if (tail >= 0) {
+        for (const k of (n as CompoundStmt).statements.slice(0, tail)) visit(k);
+        return;
+      }
+    }
     switch (n.kind) {
       case NodeKind.AssignExpr:
         write(root((n as AssignExpr).left));
@@ -289,7 +321,11 @@ export function summarizeWriteEffects(fns: readonly EffectFunction[], opts: Writ
     for (const call of d.calls) {
       if (s.unknown) break;
       const c = calleeSum(call.name, cur);
-      if (!c || c.unknown) { s.unknown = true; break; }
+      if (!c || c.unknown) {
+        s.unknown = true;
+        if (opts.onUnknown && (!c || direct[i].unknown)) opts.onUnknown(fns[i].keys[0], call.name ? `calls ${call.name}` : 'indirect call');
+        break;
+      }
       if (c.memory) s.memory = true;
       for (const g of c.globals) s.globals.add(g);
       for (const p of c.params) {

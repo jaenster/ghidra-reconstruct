@@ -95,6 +95,12 @@ describe('summarizeWriteEffects', () => {
     assert.deepStrictEqual(s.f, { globals: ['gErr'] });
   });
 
+  // GetLocaleString, 00524a30: early returns, then the halt and exit at the function's end.
+  it('drops the halt at the end of a body that returned earlier', () => {
+    const s = summarize('int f(int n) { if (n) { return Lookup(n); } nLine = 0x246; Halt(nLine); exit(-1); } int Lookup(int n) { return n; }');
+    assert.deepStrictEqual(s.f, {});
+  });
+
   it('declares an unsettled cycle unknown', () => {
     const s = summarize('void a(int *p) { b(p); gA = 1; } void b(int *p) { a(p); }', { maxRounds: 1 });
     assert.deepStrictEqual(s.a, { unknown: true });

@@ -539,7 +539,17 @@ function callWrites(call: CallExpr, ctx: Ctx): Writes {
   return w;
 }
 
-const leaf = (name: string) => bareName(name);
+/**
+ * Whether the call may write the global spelled `name` here. The summary names globals as
+ * the database does; the emitter splits a table into pieces named after it
+ * (`gaAct5SceneryPresetTable_0_0__1_`), so a name that extends a written one, or that a
+ * written one extends, counts as written.
+ */
+function writesGlobal(w: Writes, name: string): boolean {
+  const leaf = bareName(name);
+  for (const g of w.globals) if (g === leaf || leaf.startsWith(g + '_') || g.startsWith(leaf + '_')) return true;
+  return false;
+}
 
 /**
  * Whether `e` reads the same beside a call that writes `w`, in any order: it calls and
@@ -564,7 +574,7 @@ function beside(e: ASTNode, w: Writes, ctx: Ctx, free: ReadonlySet<ASTNode>): bo
       const l = e.kind === NodeKind.Identifier ? ctx.locals.get(name) : undefined;
       if (l) return l.array || !l.addressed || !w.memory;
       const g = globalSpelling(name, ctx);
-      if (g !== undefined) return g.includes('[') || (!w.memory && !w.globals.has(leaf(name)));
+      if (g !== undefined) return g.includes('[') || (!w.memory && !writesGlobal(w, name));
       return orderFree(e, ctx, free);
     }
     case NodeKind.ParenExpr:
@@ -601,7 +611,7 @@ function beside(e: ASTNode, w: Writes, ctx: Ctx, free: ReadonlySet<ASTNode>): bo
       const name = nameOf(base);
       const local = name && base.kind === NodeKind.Identifier ? ctx.locals.get(name) : undefined;
       if (local?.array) return !w.memory;
-      if (name && !local && (globalSpelling(name, ctx) ?? '').includes('[')) return !w.memory && !w.globals.has(leaf(name));
+      if (name && !local && (globalSpelling(name, ctx) ?? '').includes('[')) return !w.memory && !writesGlobal(w, name);
       return throughPointer && beside(s.array, w, ctx, free);
     }
     default:
@@ -616,7 +626,7 @@ function besideObject(e: Expression, w: Writes, ctx: Ctx, free: ReadonlySet<ASTN
   if (name) {
     const l = u.kind === NodeKind.Identifier ? ctx.locals.get(name) : undefined;
     if (l) return !w.memory || (!l.addressed && !l.array);
-    if (globalSpelling(name, ctx) !== undefined) return !w.memory && !w.globals.has(leaf(name));
+    if (globalSpelling(name, ctx) !== undefined) return !w.memory && !writesGlobal(w, name);
     return false;
   }
   return beside(u, w, ctx, free);

@@ -33,11 +33,17 @@ function bodyOf(fn: ExtractedFunction, params: string[]): CompoundStmt | null {
   }
 }
 
-/** Global names declared as arrays: the name is an address, not a pointer variable. */
-export function buildWriteEffects(functions: readonly ExtractedFunction[], globalTypes: Record<string, string>): Record<string, WriteEffect> {
+/** `globalTypes`: every global's spelling; an array's name is an address, not a pointer variable. */
+export function buildWriteEffects(
+  functions: readonly ExtractedFunction[], globalTypes: Record<string, string>,
+  onUnknown?: (key: string, why: string) => void,
+): Record<string, WriteEffect> {
   const globalArrays = new Set<string>();
+  const globalNames = new Set<string>();
   for (const [name, spelling] of Object.entries(globalTypes)) {
-    if (spelling.includes('[')) globalArrays.add(name.slice(name.lastIndexOf(':') + 1));
+    const leaf = name.slice(name.lastIndexOf(':') + 1);
+    globalNames.add(leaf);
+    if (spelling.includes('[')) globalArrays.add(leaf);
   }
   const fns: EffectFunction[] = [];
   for (const fn of functions) {
@@ -47,5 +53,5 @@ export function buildWriteEffects(functions: readonly ExtractedFunction[], globa
     const qualified = fn.namespace ? `${fn.namespace}::${fn.name}` : fn.name;
     fns.push({ keys: suffixes(qualified), params, body: bodyOf(fn, params) });
   }
-  return summarizeWriteEffects(fns, { globalArrays });
+  return summarizeWriteEffects(fns, { globalArrays, globalNames, onUnknown });
 }

@@ -262,7 +262,7 @@ describe('nestCallPlugin', () => {
   describe('with the callees\' write effects', () => {
     const field = (effects: NestCallOptions['writeEffects'], arg = 'pUnit->nId') =>
       run(quest(0).map(l => l.replace('HasQuestItem(pGame, pUnit, 0x20736b62)', `HasQuestItem(pGame, pUnit, ${arg})`)),
-        { writeEffects: effects });
+        { writeEffects: effects, globalTypes: { ...TYPES.globalTypes, gCount_1_: 'int' } });
 
     it('nests beside a field read when the call writes nothing', () => {
       const { out, sites } = field({ GetGamePointer: {} });
@@ -280,6 +280,8 @@ describe('nestCallPlugin', () => {
       assert.deepStrictEqual(field({ GetGamePointer: { globals: ['WindowSizeX'] } }, 'gCounter').sites, [1]);
       assert.deepStrictEqual(field({ GetGamePointer: { globals: ['gCounter'] } }, 'gCounter').sites, []);
       assert.deepStrictEqual(field({ GetGamePointer: { memory: true } }, 'gCounter').sites, []);
+      // A table the emitter split keeps its name as a prefix of each piece.
+      assert.deepStrictEqual(field({ GetGamePointer: { globals: ['gCount'] } }, 'gCount_1_').sites, []);
     });
 
     it('leaves it when the callee has no summary, or an unknown one', () => {
