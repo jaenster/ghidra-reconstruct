@@ -33,6 +33,8 @@
  *     address is never taken may stand anywhere;
  *   - the arguments right of the leftmost such temporary call and change nothing, and
  *     the statement assigns nothing inside the argument list;
+ *   - a constant held in a narrow temporary fits it, and the temporary is the whole
+ *     argument (casts aside), so the constant reaches the parameter with the same value;
  *   - each call temporary's value has the temporary's type (its callee's return type, or
  *     an explicit cast), so nesting it converts nothing - or the two differ only in the
  *     sign of a 32-bit integer and the temporary is the whole argument of a parameter
@@ -45,6 +47,13 @@
  *     push alike); each inner CALL straight after the previous one; the outer CALL
  *     straight after the last, with exactly the pushes of the arguments up to it.
  *
+ * A varargs callee has no stack slots in the facts; its arguments then count one slot
+ * each when each is a 32-bit-or-narrower integer or a pointer, and the push counts below
+ * confirm it.
+ *
+ * Liveness after the statement is followed through ifs and blocks: the temporary is dead
+ * when every path writes it or returns before reading it.
+ *
  * An assertion halt is left to halt-site-fold, which folds its temporaries itself. When in
  * doubt, nothing changes; without the facts nothing changes.
  */
@@ -52,7 +61,7 @@
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, AssignExpr, CallExpr, CompoundStmt, DeclStmt, Expression, ExprStmt, FunctionDecl,
-  Identifier, ParenExpr, ReturnStmt, Statement, UnaryExpr, VariableDecl, CStyleCastExpr, ParameterDecl,
+  Identifier, IfStmt, ParenExpr, ReturnStmt, Statement, UnaryExpr, VariableDecl, CStyleCastExpr, ParameterDecl,
 } from '../../../ast/nodes.js';
 import { traverseAST, getChildren } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, cloneNode, type Transformer } from '../../transformer.js';
@@ -86,6 +95,8 @@ export interface NestCallOptions extends PluginOptions {
   functionParamTypes?: Record<string, string[]>;
   /** Global name -> declared type spelling. */
   globalTypes?: Record<string, string>;
+  /** Callable names (bare and qualified) declared with a `...` tail. */
+  varArgFunctions?: readonly string[];
   /** Typedef name -> the spelling it stands for. */
   typedefTargets?: Record<string, string>;
   /** The enclosing function's namespace, innermost last, for unqualified callee lookup. */
@@ -129,10 +140,15 @@ function effects(e: ASTNode): { calls: boolean; writes: boolean } {
   return { calls, writes };
 }
 
+/** `nullptr` or `NULL` as the parser leaves them: a plain name. */
+function isNullName(e: Expression): boolean {
+  return e.kind === NodeKind.Identifier && ((e as Identifier).name === 'nullptr' || (e as Identifier).name === 'NULL');
+}
+
 function isConstant(e: Expression): boolean {
   const u = unwrap(e);
   if (u.kind === NodeKind.IntegerLiteral || u.kind === NodeKind.CharLiteral
-    || u.kind === NodeKind.NullptrLiteral || u.kind === NodeKind.BoolLiteral) return true;
+    || u.kind === NodeKind.NullptrLiteral || u.kind === NodeKind.BoolLiteral || isNullName(u)) return true;
   if (u.kind === NodeKind.UnaryExpr && (u as UnaryExpr).operator === '-') {
     return unwrap((u as UnaryExpr).operand).kind === NodeKind.IntegerLiteral;
   }
@@ -158,7 +174,7 @@ function topCall(s: Statement): CallExpr | null {
   return c.kind === NodeKind.CallExpr ? c as CallExpr : null;
 }
 
-interface Local { decl: VariableDecl; shape: TypeShape | null; addressed: boolean; param: boolean }
+interface Local { decl: VariableDecl; shape: TypeShape | null; addressed: boolean; param: boolean; array: boolean }
 
 interface Temp {
   stmt: ExprStmt;
@@ -177,6 +193,7 @@ interface Ctx {
   idents: Identifier[];
   identIndex: Map<Identifier, number>;
   labels: boolean;
+  varArgs: Record<string, true>;
   /** Start line -> statements starting there that print code. */
   lineOwners: Map<number, number>;
   ev: CallOrderEvidence;
@@ -189,7 +206,7 @@ function collectLocals(fn: FunctionDecl): Map<string, Local> | null {
   const dup = new Set<string>();
   const add = (name: string, decl: VariableDecl, shape: TypeShape | null, param: boolean) => {
     if (out.has(name)) dup.add(name);
-    out.set(name, { decl, shape, addressed: false, param });
+    out.set(name, { decl, shape, addressed: false, param, array: decl.type?.kind === NodeKind.ArrayType });
   };
   for (const p of fn.parameters as ParameterDecl[]) {
     const n = (p as unknown as { name?: Identifier | null }).name;
@@ -276,7 +293,7 @@ function tempOf(s: Statement, ctx: Ctx): { stmt: ExprStmt; name: string; value: 
   if (a.left.kind !== NodeKind.Identifier) return null;
   const name = (a.left as Identifier).name;
   const local = ctx.locals.get(name);
-  if (!local || local.param || local.addressed || local.decl.initializer) return null;
+  if (!local || local.param || local.addressed || local.array) return null;
   if (effects(a.right).writes) return null;
   return { stmt: s as ExprStmt, name, value: a.right, local };
 }
@@ -338,7 +355,7 @@ function classify(
   }
   if (fx.calls) return null;
   const word = isWordIntegerShape(shape) || shape.stars > 0;
-  if (isConstant(v)) return word ? { kind: 'pure' } : null;
+  if (isConstant(v)) return word || fitsNarrow(v, shape, site) ? { kind: 'pure' } : null;
   if (v.kind === NodeKind.Identifier) {
     const name = (v as Identifier).name;
     const l = ctx.locals.get(name);
@@ -354,6 +371,97 @@ function classify(
   return null;
 }
 
+/** Value range of the integers narrower than 32 bits. */
+const NARROW_RANGES: Record<string, [bigint, bigint]> = {
+  'bool': [0n, 1n],
+  'char': [-128n, 127n], 'signed char': [-128n, 127n], 'unsigned char': [0n, 255n],
+  'short': [-32768n, 32767n], 'unsigned short': [0n, 65535n], 'wchar_t': [0n, 65535n],
+};
+
+function constantValue(e: Expression): bigint | null {
+  const u = unwrap(e);
+  switch (u.kind) {
+    case NodeKind.IntegerLiteral: return (u as unknown as { value: bigint }).value;
+    case NodeKind.CharLiteral: return BigInt((u as unknown as { value: number }).value);
+    case NodeKind.BoolLiteral: return (u as unknown as { value: boolean }).value ? 1n : 0n;
+    case NodeKind.UnaryExpr: {
+      const x = (u as UnaryExpr).operator === '-' ? constantValue((u as UnaryExpr).operand) : null;
+      return x === null ? null : -x;
+    }
+    default: return null;
+  }
+}
+
+/**
+ * A constant in a narrow temporary that the temporary holds unchanged, standing as the
+ * whole argument (casts aside): the parameter then receives the same value either way.
+ */
+function fitsNarrow(v: Expression, shape: TypeShape, site: { call: CallExpr; arg: number; use: Identifier }): boolean {
+  if (shape.stars !== 0) return false;
+  const range = NARROW_RANGES[shape.base];
+  const x = constantValue(v);
+  if (!range || x === null || x < range[0] || x > range[1]) return false;
+  return unwrapCasts(site.call.arguments[site.arg]) === site.use;
+}
+
+function globalSpelling(name: string, ctx: Ctx): string | undefined {
+  return scopedLookup(ctx.opts.globalTypes ?? {}, name, ctx.opts.enclosingSegments ?? []);
+}
+
+/** Stack slots of a value of shape `s` passed as an argument: 32 bits or narrower, or a pointer. */
+function slotOfShape(s: TypeShape | null): number | null {
+  if (!s) return null;
+  if (s.stars > 0) return 1;
+  return NARROW_INTEGERS.has(s.base) ? 1 : null;
+}
+
+/** Stack slots of an argument expression, where its type can be told; else null. */
+function slotOfArg(e: Expression, temps: ReadonlyMap<ASTNode, Local>, ctx: Ctx): number | null {
+  const u = unwrap(e);
+  const t = temps.get(u);
+  if (t) return slotOfShape(declShape(t, ctx));
+  switch (u.kind) {
+    case NodeKind.IntegerLiteral:
+      return /ll/i.test((u as unknown as { suffix: string }).suffix ?? '') ? null : 1;
+    case NodeKind.CharLiteral: case NodeKind.StringLiteral: case NodeKind.NullptrLiteral: case NodeKind.BoolLiteral:
+      return 1;
+    case NodeKind.UnaryExpr:
+      return (u as UnaryExpr).operator === '&' ? 1 : null;
+    case NodeKind.CStyleCastExpr:
+      return slotOfShape(shapeOfNode((u as CStyleCastExpr).type, 0, ctx.resolve));
+    case NodeKind.CallExpr:
+      return slotOfShape(returnShape(u as CallExpr, ctx));
+    case NodeKind.Identifier: {
+      const name = (u as Identifier).name;
+      const l = ctx.locals.get(name);
+      if (l) return l.param ? null : slotOfShape(declShape(l, ctx));
+      const g = globalSpelling(name, ctx);
+      return g ? slotOfShape(shapeOfSpelling(g, ctx.resolve)) : null;
+    }
+    default:
+      return null;
+  }
+}
+
+/**
+ * The facts' stack slots for `call`, or for a varargs callee (which the facts leave
+ * without) one slot per argument whose width can be told; null otherwise.
+ */
+function outerSlots(fact: CallSiteFact, call: CallExpr, temps: ReadonlyMap<ASTNode, Local>, ctx: Ctx): readonly number[] | null {
+  if (fact.slots) return fact.slots.length === call.arguments.length ? fact.slots : null;
+  const name = calleeName(call.callee);
+  if (!name || !scopedLookup(ctx.varArgs, name, ctx.opts.enclosingSegments ?? [])) return null;
+  const fixed = scopedLookup(ctx.opts.functionParamTypes ?? {}, name, ctx.opts.enclosingSegments ?? []);
+  if (!fixed || fixed.length > call.arguments.length) return null;
+  const out: number[] = [];
+  for (let i = 0; i < call.arguments.length; i++) {
+    const n = i < fixed.length ? slotOfShape(shapeOfSpelling(fixed[i], ctx.resolve)) : slotOfArg(call.arguments[i], temps, ctx);
+    if (n === null) return null;
+    out.push(n);
+  }
+  return out;
+}
+
 /** Statement-list path of a statement: [block, index] from the body down. */
 type Path = { block: CompoundStmt; index: number }[];
 
@@ -367,26 +475,55 @@ function deadAfter(name: string, allowed: Set<Identifier>, path: Path, guarded: 
   if (mentions.length === 0) return true;
   if (guarded || ctx.labels) return false;
   const last = Math.max(...[...allowed].map(i => ctx.identIndex.get(i) ?? -1));
-  const next = mentions.find(i => (ctx.identIndex.get(i) ?? -1) > last);
-  if (!next) return true;
+  if (!mentions.some(i => (ctx.identIndex.get(i) ?? -1) > last)) return true;
   for (let d = path.length - 1; d >= 0; d--) {
     const { block, index } = path[d];
     for (let j = index + 1; j < block.statements.length; j++) {
-      const w = block.statements[j];
-      const has = [...traverseAST(w)].some(n => n === next);
-      if (!has) {
-        if ([...traverseAST(w)].some(n => n.kind === NodeKind.Identifier && (n as Identifier).name === name)) return false;
-        continue;
-      }
-      if (w.kind !== NodeKind.ExprStmt) return false;
-      const e = unwrap((w as ExprStmt).expression);
-      if (e.kind !== NodeKind.AssignExpr || (e as AssignExpr).operator !== '=') return false;
-      const a = e as AssignExpr;
-      if (a.left !== next) return false;
-      return ![...traverseAST(a.right)].some(n => n.kind === NodeKind.Identifier && (n as Identifier).name === name);
+      const r = flowOf(block.statements[j], name);
+      if (r === 'read') return false;
+      if (r === 'kill') return true;
     }
   }
-  return false;
+  return true;
+}
+
+const mentionsName = (n: ASTNode, name: string) =>
+  [...traverseAST(n)].some(m => m.kind === NodeKind.Identifier && (m as Identifier).name === name);
+
+/**
+ * What running `s` does to `name`: 'read' when some path may read it before writing it,
+ * 'kill' when every path writes it (or returns) first, 'pass' otherwise. Anything but an
+ * expression, a return, an if or a block counts as a read when it names it.
+ */
+function flowOf(s: Statement, name: string): 'read' | 'kill' | 'pass' {
+  switch (s.kind) {
+    case NodeKind.ExprStmt: {
+      const e = unwrap((s as ExprStmt).expression);
+      if (e.kind === NodeKind.AssignExpr && (e as AssignExpr).operator === '='
+        && (e as AssignExpr).left.kind === NodeKind.Identifier && ((e as AssignExpr).left as Identifier).name === name) {
+        return mentionsName((e as AssignExpr).right, name) ? 'read' : 'kill';
+      }
+      return mentionsName(s, name) ? 'read' : 'pass';
+    }
+    case NodeKind.ReturnStmt:
+      return mentionsName(s, name) ? 'read' : 'kill';
+    case NodeKind.CompoundStmt:
+      for (const k of (s as CompoundStmt).statements) {
+        const r = flowOf(k, name);
+        if (r !== 'pass') return r;
+      }
+      return 'pass';
+    case NodeKind.IfStmt: {
+      const i = s as IfStmt;
+      if (i.init || mentionsName(i.condition, name)) return 'read';
+      const a = flowOf(i.thenBranch, name);
+      const b = i.elseBranch ? flowOf(i.elseBranch, name) : 'pass';
+      if (a === 'read' || b === 'read') return 'read';
+      return a === 'kill' && b === 'kill' ? 'kill' : 'pass';
+    }
+    default:
+      return mentionsName(s, name) ? 'read' : 'pass';
+  }
 }
 
 /**
@@ -423,8 +560,12 @@ function siteAt(stmts: Statement[], b: number, path: Path, guarded: boolean, ctx
   }
   collected.reverse();
 
-  const outer = factFor(s, outerName, ctx);
-  if (!outer || !outer.slots || outer.slots.length !== call.arguments.length) return null;
+  const fact = factFor(s, outerName, ctx);
+  if (!fact) return null;
+  const tempLocals = new Map<ASTNode, Local>(collected.map(t => [t.use, ctx.locals.get(t.name)!]));
+  const slots = outerSlots(fact, call, tempLocals, ctx);
+  if (!slots) return null;
+  const outer: CallSiteFact = { ...fact, slots };
 
   for (let first = 0; first < collected.length; first++) {
     const temps = collected.slice(first);
@@ -489,8 +630,10 @@ function rewriteFunction(fn: FunctionDecl, ev: CallOrderEvidence, opts: NestCall
       lineOwners.set(l, (lineOwners.get(l) ?? 0) + 1);
     }
   }
+  const varArgs: Record<string, true> = {};
+  for (const n of opts.varArgFunctions ?? []) varArgs[n] = true;
   const ctx: Ctx = {
-    locals, idents: [], identIndex: new Map(), labels, lineOwners, ev,
+    locals, idents: [], identIndex: new Map(), labels, varArgs, lineOwners, ev,
     resolve: name => typedefTargets[name], opts,
   };
   const reindex = () => {
@@ -536,6 +679,8 @@ function rewriteFunction(fn: FunctionDecl, ev: CallOrderEvidence, opts: NestCall
   for (const name of removedDecls) {
     const decl = ctx.locals.get(name)!.decl;
     if (ctx.idents.some(i => i.name === name && i !== decl.name)) continue;
+    // A declaration whose initializer calls or assigns stays: only its name is unused.
+    if (decl.initializer && (effects(decl.initializer).calls || effects(decl.initializer).writes)) continue;
     dropDecl(body, decl);
   }
   return updateNode(fn, { body } as Partial<FunctionDecl>);

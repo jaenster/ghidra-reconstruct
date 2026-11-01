@@ -3203,6 +3203,7 @@ function transformDecompiledCode(
         functionReturnTypes: context?.funcPtrArgCasts?.functionReturnTypes,
         functionParamTypes: context?.funcPtrArgCasts?.functionParamTypes,
         globalTypes: context?.funcPtrArgCasts?.globalTypes,
+        varArgFunctions: context?.funcPtrArgCasts?.varArgFunctions,
         typedefTargets: context?.funcPtrArgCasts?.typedefTargets,
         enclosingSegments: enclosing?.ghidraNamespaceSegments ?? enclosing?.namespaceSegments,
         onSite: (e: { line: number; temps: number }) =>
