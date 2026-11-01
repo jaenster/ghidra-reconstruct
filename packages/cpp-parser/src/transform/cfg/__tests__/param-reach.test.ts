@@ -88,6 +88,18 @@ describe('paramReaches', () => {
     assert.deepStrictEqual(reach('int *f(int *p) { return p; }', [{ name: 'p', type: 'int *' }]), [null]);
   });
 
+  it('an address masked to its high half touches nothing, even returned', () => {
+    const r = reach('uint f(int **pp) { *pp = 0; return (uint)pp & 0xffff0000; }', [{ name: 'pp', type: 'int * *' }]);
+    assert.deepStrictEqual(r, [{ lo: 0, hi: 4 }]);
+    const neg = reach('uint f(int **pp) { return (uint)pp & -65536; }', [{ name: 'pp', type: 'int * *' }]);
+    assert.deepStrictEqual(neg, [{ lo: 0, hi: 0 }]);
+  });
+
+  it('an address masked below 64 KiB is still unknown', () => {
+    const r = reach('uint f(int **pp) { return (uint)pp & 0xfffffffc; }', [{ name: 'pp', type: 'int * *' }]);
+    assert.deepStrictEqual(r, [null]);
+  });
+
   it('comparisons and tests touch nothing', () => {
     const r = reach('void f(int *p) { if (p != 0) { if (!p) return; } }', [{ name: 'p', type: 'int *' }]);
     assert.deepStrictEqual(r, [{ lo: 0, hi: 0 }]);

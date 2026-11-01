@@ -26,7 +26,9 @@
  *     the offset - asked through the context, which resolves names, recurses and decides
  *     what an unknown or recursive callee answers. A computed callee is unknown unless the
  *     context can name every function it denotes;
- *   - compared, tested, or discarded: nothing is touched.
+ *   - compared, tested, or discarded: nothing is touched. Nor is anything touched by an
+ *     integer copy masked to its high half (`(uint)p & 0xffff0000`), wherever it goes:
+ *     it names no byte near the address;
  * A parameter that is reassigned, incremented or has its own address taken is unknown.
  *
  * Unknown is the safe answer everywhere: it means "reaches everything", which keeps the
@@ -356,6 +358,17 @@ export function knownSinkReach(name: string, index: number, args: readonly Expre
   return undefined;
 }
 
+/**
+ * A literal mask that clears at least the low 16 bits of a 32-bit value. Ghidra prints
+ * one where a function returns a 16-bit value in AX and declares a 32-bit return: the
+ * upper half of EAX is whatever the register last held, often a parameter's address
+ * (`return (uint)ppwszText & 0xffff0000;` in `STRTABLE_LookupString`).
+ */
+function highHalfMask(e: Expression): boolean {
+  const k = literalValue(e);
+  return k !== null && k !== 0 && (k & 0xffff) === 0;
+}
+
 /** The type spelling a cast or declaration carries, normalised. */
 function spell(type: TypeNode): string {
   return emit(type as never).replace(/\s+/g, ' ').trim();
@@ -522,6 +535,10 @@ export function paramReaches(
               cur = p;
               continue;
             }
+            // The address's high half: no byte within 64 KiB of it can be named from
+            // what is left without the address itself, so whatever the value does next
+            // reaches nothing through the parameter.
+            if (b.operator === '&' && d.pointee === null && highHalfMask(other)) return;
             throw new Unknown();
           }
           case NodeKind.UnaryExpr: {
