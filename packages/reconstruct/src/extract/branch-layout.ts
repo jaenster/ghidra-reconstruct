@@ -29,6 +29,12 @@
  *           `xor eax, eax; ret` from one that also pops a frame. Each copy also lists
  *           how it is entered: the offsets of the jumps that land on its start, and
  *           whether the instruction before falls into it.
+ *   pushes  every PUSH of an immediate: its offset, the value, and the straight run of code
+ *           it sits in (no call, branch or jump target inside): where the run goes on (an
+ *           unconditional jump's target, or the jump target it falls into) and how many
+ *           PUSHes it holds. VC8 pushes a call's arguments in each arm of an if and jumps
+ *           to the call the arms share; the decompiler prints a local set per arm and read
+ *           once after the join.
  *   edges   per `if`/`while` keyword whose p-code op is a CBRANCH, keyed by line and by the
  *           keyword's index among such keywords on its line: the conditional jump, its
  *           target and its fall-through instruction, and the decompile lines whose tokens
@@ -62,6 +68,26 @@ export interface BranchLayoutFacts {
   returns?: ReturnCopy[];
   /** Every conditional branch a keyword prints, in text order. Absent in older facts. */
   edges?: BranchEdge[];
+  /** Every PUSH of an immediate, by offset. Absent in older facts. */
+  pushes?: PushImmediate[];
+}
+
+/** A PUSH of an immediate and what follows it. */
+export interface PushImmediate {
+  /** Offset of the PUSH. */
+  at: number;
+  /** The value pushed, as the operand's signed value. */
+  value: number;
+  /**
+   * Where the straight run holding the PUSH goes on: the target of the unconditional jump
+   * ending it, or the jump target it falls into. Absent when a call, a conditional branch
+   * or a return ends it first.
+   */
+  reach?: number;
+  /** Whether the run ends in a jump (else it falls into `reach`). */
+  jumps?: boolean;
+  /** PUSHes in the run, from its start (after a call, a branch or a jump target) to `reach`. */
+  run?: number;
 }
 
 /** A keyword's conditional jump and the lines each of its two edges leads to. */
@@ -275,6 +301,64 @@ export const RETURN_COPIES_JAVA = `
 `;
 
 /**
+ * Java, after the line loop: every PUSH of an immediate in \`fn\` with the instruction it
+ * falls into and, when that jumps unconditionally, the jump's target, into \`pushRow\`.
+ * Needs \`prog\`, \`fn\`, \`base\`.
+ */
+export const PUSHES_JAVA = `
+          StringBuilder pushRow = new StringBuilder();
+          {
+            ghidra.program.model.listing.Listing PL = prog.getListing();
+            ghidra.program.model.symbol.ReferenceManager PRM = prog.getReferenceManager();
+            java.util.function.Predicate<ghidra.program.model.listing.Instruction> target = q -> {
+              for (ghidra.program.model.symbol.Reference rf : PRM.getReferencesTo(q.getAddress())) if (rf.getReferenceType().isJump()) return true;
+              return false;
+            };
+            ghidra.program.model.listing.InstructionIterator pit = PL.getInstructions(fn.getBody(), true);
+            while (pit.hasNext()) {
+              ghidra.program.model.listing.Instruction pi = pit.next();
+              if (!pi.getMnemonicString().equals("PUSH") || pi.getNumOperands() != 1) continue;
+              if (!ghidra.program.model.lang.OperandType.isScalar(pi.getOperandType(0)) || pi.getScalar(0) == null) continue;
+              long po = pi.getAddress().getOffset() - base;
+              long pv = pi.getScalar(0).getSignedValue();
+              // The run's start: back over instructions that fall in, no call before, no jump target.
+              ghidra.program.model.listing.Instruction rs = pi;
+              for (int g = 0; g < 64 && !target.test(rs); g++) {
+                ghidra.program.model.listing.Instruction pr = PL.getInstructionBefore(rs.getAddress());
+                if (pr == null || !fn.getBody().contains(pr.getAddress()) || pr.getFallThrough() == null || !pr.getFallThrough().equals(rs.getAddress())) break;
+                if (pr.getFlowType().isCall() || pr.getFlowType().isJump() || pr.getFlowType().isTerminal()) break;
+                rs = pr;
+              }
+              String reach = "-", how = "-";
+              int run = 0;
+              ghidra.program.model.listing.Instruction cur = rs;
+              for (int g = 0; g < 128 && cur != null; g++) {
+                if (cur.getMnemonicString().equals("PUSH")) run++;
+                ghidra.program.model.symbol.FlowType ft = cur.getFlowType();
+                if (ft.isJump() && ft.isUnConditional() && !ft.isComputed() && cur.getFlows().length == 1) {
+                  long jo = cur.getFlows()[0].getOffset() - base;
+                  reach = jo < 0 ? "-" + Long.toHexString(-jo) : Long.toHexString(jo);
+                  how = "j";
+                  break;
+                }
+                if (ft.isCall() || ft.isJump() || ft.isTerminal() || cur.getFallThrough() == null) break;
+                ghidra.program.model.listing.Instruction nx = PL.getInstructionAt(cur.getFallThrough());
+                if (nx == null || !fn.getBody().contains(nx.getAddress())) break;
+                if (target.test(nx)) {
+                  long no = nx.getAddress().getOffset() - base;
+                  reach = no < 0 ? "-" + Long.toHexString(-no) : Long.toHexString(no);
+                  how = "f";
+                  break;
+                }
+                cur = nx;
+              }
+              pushRow.append(pushRow.length() > 0 ? ";" : "").append(po < 0 ? "-" + Long.toHexString(-po) : Long.toHexString(po))
+                .append(':').append(pv).append(':').append(reach).append(':').append(how).append(':').append(how.equals("-") ? 0 : run);
+            }
+          }
+`;
+
+/**
  * Java, no imports. `__ITEMS__` is `;`-separated function entries. The functions are
  * decompiled on a small thread pool, one decompiler per thread.
  */
@@ -354,7 +438,7 @@ ${IF_OPERANDS_TOKEN_JAVA}${EDGES_TOKEN_JAVA}              ghidra.program.model.a
               first = false;
             }
           }
-${RETURN_COPIES_JAVA}${EDGES_AFTER_JAVA}          rows.put(a, a + "\\t" + count + "\\t" + ls + "\\t" + is + "\\t" + cs + "\\t" + opsRow + "\\t" + retRow + "\\t" + edgeRow);
+${RETURN_COPIES_JAVA}${EDGES_AFTER_JAVA}${PUSHES_JAVA}          rows.put(a, a + "\\t" + count + "\\t" + ls + "\\t" + is + "\\t" + cs + "\\t" + opsRow + "\\t" + retRow + "\\t" + edgeRow + "\\t" + pushRow);
         } catch (Exception e) { }
       }
     } finally {
@@ -442,6 +526,7 @@ export function parseBranchLayout(output: string): Map<string, BranchLayoutFacts
       facts.returns = parseReturns(c[6]);
     }
     if (c.length > 7) facts.edges = parseEdges(c[7]);
+    if (c.length > 8) facts.pushes = parsePushes(c[8]);
     out.set(normalize(c[0]), facts);
   }
   return out;
@@ -489,6 +574,23 @@ function parseEdges(col: string): BranchEdge[] {
       line, ord, keyword: f[1], jcc: offset(f[2]), target: offset(f[3]), fall: offset(f[4]),
       fallLines: lines(f[5]), takenLines: lines(f[6]),
     });
+  }
+  return out;
+}
+
+/** `at:value:reach:j|f|-:run;...` -> the pushes. */
+export function parsePushes(col: string): PushImmediate[] {
+  const out: PushImmediate[] = [];
+  for (const part of col ? col.split(';') : []) {
+    const f = part.split(':');
+    if (f.length < 5 || !/^-?\d+$/.test(f[1])) continue;
+    const p: PushImmediate = { at: offset(f[0]), value: Number(f[1]) };
+    if (f[3] === 'j' || f[3] === 'f') {
+      p.reach = offset(f[2]);
+      p.jumps = f[3] === 'j';
+      p.run = Number(f[4]);
+    }
+    out.push(p);
   }
   return out;
 }

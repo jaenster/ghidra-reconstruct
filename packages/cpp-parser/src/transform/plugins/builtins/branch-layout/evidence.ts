@@ -45,6 +45,21 @@ export interface BranchLayoutEvidence {
    * its two edges leads to.
    */
   edges?: readonly BranchEdge[];
+  /** Every PUSH of an immediate, with the straight run of code it sits in (extract/branch-layout.ts). */
+  pushes?: readonly PushImmediate[];
+}
+
+/**
+ * A PUSH of an immediate. `reach`: where its straight run (no call, branch or jump target
+ * inside) goes on, by a jump (`jumps`) or by falling into a jump target; `run`: the PUSHes
+ * in that run.
+ */
+export interface PushImmediate {
+  at: number;
+  value: number;
+  reach?: number;
+  jumps?: boolean;
+  run?: number;
 }
 
 /** A keyword's conditional jump: where it goes, where it falls, and the lines each leads to. */

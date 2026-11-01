@@ -9,7 +9,7 @@
  * body's line count.
  */
 
-import type { BranchLayoutFacts, BranchEdge, EqualityTest, ReturnCopy } from '../extract/branch-layout.js';
+import type { BranchLayoutFacts, BranchEdge, EqualityTest, PushImmediate, ReturnCopy } from '../extract/branch-layout.js';
 
 export interface BranchLayoutLines {
   lines: Map<number, number[]>;
@@ -22,6 +22,8 @@ export interface BranchLayoutLines {
   returns?: ReturnCopy[];
   /** The conditional jumps of the body's keywords, their lines mapped like the others; absent in older facts. */
   edges?: BranchEdge[];
+  /** Every PUSH of an immediate, by offset; absent in older facts. */
+  pushes?: PushImmediate[];
 }
 
 const IF_LINE = /^\s*(?:\}\s*)?(?:else\s+)?if\s*\(/;
@@ -64,7 +66,8 @@ export function branchLayoutLines(
     if (line <= braceLine || line > bodyEnd) continue;
     lines.set(line - braceLine + 1, offs);
   }
-  const extra: Pick<BranchLayoutLines, 'operands' | 'returns' | 'edges'> = {};
+  const extra: Pick<BranchLayoutLines, 'operands' | 'returns' | 'edges' | 'pushes'> = {};
+  if (facts.pushes) extra.pushes = facts.pushes;
   if (facts.edges) {
     const inBody = (l: number) => l > braceLine && l <= bodyEnd;
     const map = (ls: number[]) => ls.filter(inBody).map(l => l - braceLine + 1);
