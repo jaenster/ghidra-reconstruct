@@ -3,25 +3,31 @@
  *
  * VC8 compiles `for (i = X; C; step) { B }` as the initialisation, a test of C, and a
  * loop that tests at its bottom. Ghidra prints that back rotated, with the
- * initialisation inside the test:
+ * initialisation inside the test or as the statement ahead of it:
  *
  *   if (G) { i = X; do { B; step; } while (C); }   ->   for (i = X; C; step) { B }
+ *   i = X; if (G) { do { B; step; } while (C); }   ->   for (i = X; C; step) { B }
  *
  * Compiled again, the rotated form puts the test first and the initialisation after it,
  * where the original has it before (InitPal, 00476ea0). The for loop is laid out as the
- * original. A loop whose initialisation already stands before the `if` compiles the same
- * either way and is left alone.
+ * original. An initialisation ahead of the `if` would compile as the original does, but
+ * it does not stay there: when only the loop reads the counter, decl-scope-sink (62) sinks
+ * it into the guarded block, which is the first form again. Ghidra prints InitPal itself
+ * that way, so both forms become the for loop here.
  *
  * The two mean the same only when all of this holds, so each is checked:
- *   - the `if` has no else, and its block holds the initialisation and the do-while only;
+ *   - the `if` has no else, and its block holds the do-while only, after the
+ *     initialisation unless that stands ahead of the `if`;
  *   - G is C with X in place of i (operands of a comparison may be swapped, `(&a)->m` is
  *     `a.m`, `a[0].m` is `a->m`), and X and C
  *     have no side effects, C no `&&`/`||`/`?:` - so X is read by G wherever the for loop
  *     reads it, and the first test of the for loop is G;
  *   - X has i's type, or is an integer constant whose value and conversions i keeps
  *     (an `unsigned int` i only against an unsigned bound);
- *   - i is a local or parameter read nowhere outside the `if`, unless the initialisation
- *     declares it - the for loop assigns it even when the loop does not run;
+ *   - i is a local or parameter. An assignment inside the test is read nowhere outside
+ *     the `if` - the for loop assigns it even when the loop does not run; ahead of the
+ *     test it runs either way. A declaration ahead of the test moves into the for, so i
+ *     is then read nowhere outside the `if` either;
  *   - the do-while body ends in the step, an assignment or increment of i, and has no
  *     `continue` of its own (in a for loop that would run the step);
  *   - no goto outside the loop jumps into its body.
@@ -343,35 +349,62 @@ function ifKey(n: ASTNode): string | null {
   return s && typeof s.offset === 'number' ? `${s.offset}:${s.line}` : null;
 }
 
-interface Site { v: string }
+/** A rotated loop's counter, and whether its initialisation stands ahead of the `if`. */
+interface Site { v: string; ahead: boolean }
+
+/**
+ * The initialisation and the do-while of a rotated loop: both in the `if` block, or the
+ * initialisation as the statement `ahead` of an `if` whose block holds the do-while only.
+ */
+function loopParts(ifs: IfStmt, ahead: Statement | null): { init: Statement; loop: DoWhileStmt; ahead: boolean } | null {
+  if (ifs.thenBranch.kind !== NodeKind.CompoundStmt) return null;
+  const stmts = (ifs.thenBranch as CompoundStmt).statements;
+  if (stmts.length === 2 && stmts[1].kind === NodeKind.DoWhileStmt) {
+    return { init: stmts[0], loop: stmts[1] as DoWhileStmt, ahead: false };
+  }
+  if (stmts.length === 1 && stmts[0].kind === NodeKind.DoWhileStmt && ahead) {
+    return { init: ahead, loop: stmts[0] as DoWhileStmt, ahead: true };
+  }
+  return null;
+}
 
 /** The rotated loops of one function body, keyed by the `if`'s position. */
 function findSites(body: CompoundStmt, shapeOf: ExprShape, locals: ReadonlySet<string>): Map<string, Site> {
   const sites = new Map<string, Site>();
   const seen = new Map<string, number>();
-  const visit = (n: ASTNode): void => {
+  // `ahead` is the statement before `n` in its block, where it has one.
+  const visit = (n: ASTNode, ahead: Statement | null): void => {
     if (n.kind === NodeKind.IfStmt) {
       const k = ifKey(n);
       if (k) seen.set(k, (seen.get(k) ?? 0) + 1);
-      const site = matchSite(n as IfStmt, body, shapeOf, locals);
+      const site = matchSite(n as IfStmt, ahead, body, shapeOf, locals);
       if (site && k) sites.set(k, site);
     }
-    for (const c of getChildren(n)) visit(c);
+    if (n.kind === NodeKind.CompoundStmt) {
+      const stmts = (n as CompoundStmt).statements;
+      stmts.forEach((s, i) => visit(s, i > 0 ? stmts[i - 1] : null));
+      return;
+    }
+    for (const c of getChildren(n)) visit(c, null);
   };
-  visit(body);
+  visit(body, null);
   for (const [k, count] of seen) if (count > 1) sites.delete(k);
   return sites;
 }
 
-function matchSite(ifs: IfStmt, body: CompoundStmt, shapeOf: ExprShape, locals: ReadonlySet<string>): Site | null {
+function matchSite(
+  ifs: IfStmt, ahead: Statement | null, body: CompoundStmt, shapeOf: ExprShape, locals: ReadonlySet<string>,
+): Site | null {
   if (ifs.elseBranch !== null || ifs.isConstexpr || ifs.init) return null;
-  if (ifs.thenBranch.kind !== NodeKind.CompoundStmt) return null;
-  const stmts = (ifs.thenBranch as CompoundStmt).statements;
-  if (stmts.length !== 2 || stmts[1].kind !== NodeKind.DoWhileStmt) return null;
-  const init = initOf(stmts[0]);
-  if (!init || hasComment(stmts[0]) || hasComment(stmts[1])) return null;
+  const parts = loopParts(ifs, ahead);
+  if (!parts) return null;
+  const init = initOf(parts.init);
+  if (!init || hasComment(parts.init) || hasComment(parts.loop)) return null;
+  // Ahead of the `if`, the for loop takes the initialisation's place: a comment on the
+  // `if` would have to move with it.
+  if (parts.ahead && hasComment(ifs)) return null;
   const { v, x, declares } = init;
-  const loop = stmts[1] as DoWhileStmt;
+  const loop = parts.loop;
   const c = loop.condition;
 
   if (!declares && !locals.has(v)) return null;
@@ -380,7 +413,7 @@ function matchSite(ifs: IfStmt, body: CompoundStmt, shapeOf: ExprShape, locals: 
   if (!guardIsFirstTest(ifs.condition, c, v, x)) return null;
   if (!declares && !initKeepsConversions(v, x, c, shapeOf)) return null;
   if (declares) {
-    const vd = (stmts[0] as DeclStmt).declarations[0] as VariableDecl;
+    const vd = (parts.init as DeclStmt).declarations[0] as VariableDecl;
     const local = createExprShape(new Map([[v, vd.type]]), {});
     if (!initKeepsConversions(v, x, c, (e) => (e.kind === NodeKind.Identifier && (e as Identifier).name === v ? local(e) : shapeOf(e)))) return null;
   }
@@ -392,22 +425,24 @@ function matchSite(ifs: IfStmt, body: CompoundStmt, shapeOf: ExprShape, locals: 
   if (!stepOf(last, v) || hasComment(last)) return null;
   if (hasOwnContinue(loop.body)) return null;
 
-  // Read after the loop, `v` would hold X where the guard was false.
-  if (!declares && countRefs(body, v) !== countRefs(ifs, v)) return null;
+  // Read after the loop, an assignment inside the test would leave `v` holding X where
+  // the guard was false; ahead of the test it runs either way. A declaration ahead of the
+  // test moves into the for, out of reach of the rest of its block.
+  if ((parts.ahead ? declares : !declares) && countRefs(body, v) !== countRefs(ifs, v)) return null;
 
   const labels = labelsIn(loop.body, new Set());
   if (labels.size > 0) {
     const from = gotoTargets(body, loop.body, new Set());
     for (const l of labels) if (from.has(l)) return null;
   }
-  return { v };
+  return { v, ahead: parts.ahead };
 }
 
-function rewrite(ifs: IfStmt, site: Site): ForStmt | null {
-  if (ifs.thenBranch.kind !== NodeKind.CompoundStmt) return null;
-  const stmts = (ifs.thenBranch as CompoundStmt).statements;
-  if (stmts.length !== 2 || stmts[1].kind !== NodeKind.DoWhileStmt) return null;
-  const loop = stmts[1] as DoWhileStmt;
+/** The for loop of a site; `ahead` is the statement before the `if`, for a site that has its initialisation there. */
+function rewrite(ifs: IfStmt, site: Site, ahead: Statement | null = null): ForStmt | null {
+  const parts = loopParts(ifs, ahead);
+  if (!parts || parts.ahead !== site.ahead) return null;
+  const loop = parts.loop;
   const bodyStmt = loop.body;
   const inner = bodyStmt.kind === NodeKind.CompoundStmt ? (bodyStmt as CompoundStmt).statements : [bodyStmt];
   const step = inner.length > 0 ? stepOf(inner[inner.length - 1], site.v) : null;
@@ -416,15 +451,16 @@ function rewrite(ifs: IfStmt, site: Site): ForStmt | null {
   const newBody: CompoundStmt = bodyStmt.kind === NodeKind.CompoundStmt
     ? updateNode(bodyStmt as CompoundStmt, { statements: rest })
     : { kind: NodeKind.CompoundStmt, statements: rest, location: bodyStmt.location, leadingTrivia: [], trailingTrivia: [] } as CompoundStmt;
-  const init: Statement = { ...stmts[0], leadingTrivia: [], trailingTrivia: [] };
+  const init: Statement = { ...parts.init, leadingTrivia: [], trailingTrivia: [] };
+  const first = parts.ahead ? parts.init : ifs;
   return {
     kind: NodeKind.ForStmt,
     init,
     condition: loop.condition,
     increment: { ...step, leadingTrivia: [], trailingTrivia: [] } as Expression,
     body: newBody,
-    location: ifs.location,
-    leadingTrivia: ifs.leadingTrivia ?? [],
+    location: first.location,
+    leadingTrivia: first.leadingTrivia ?? [],
     trailingTrivia: ifs.trailingTrivia ?? [],
   } as ForStmt;
 }
@@ -462,7 +498,26 @@ export function createRotatedForLoopTransformer(options?: PluginOptions): Transf
       visitIfStmt(node: IfStmt): ASTNode | undefined {
         const k = ifKey(node);
         const site = k ? sites.get(k) : undefined;
-        return site ? rewrite(node, site) ?? undefined : undefined;
+        return site && !site.ahead ? rewrite(node, site) ?? undefined : undefined;
+      },
+      // A loop whose initialisation stands ahead of the `if` takes the place of both.
+      visitCompoundStmt(node: CompoundStmt): ASTNode | undefined {
+        const stmts = node.statements;
+        let out: Statement[] | null = null;
+        for (let i = 0; i < stmts.length; i++) {
+          const next = stmts[i + 1];
+          const k = next?.kind === NodeKind.IfStmt ? ifKey(next) : null;
+          const site = k ? sites.get(k) : undefined;
+          const loop = site?.ahead ? rewrite(next as IfStmt, site, stmts[i]) : null;
+          if (loop) {
+            out ??= stmts.slice(0, i);
+            out.push(loop);
+            i++;
+            continue;
+          }
+          out?.push(stmts[i]);
+        }
+        return out ? updateNode(node, { statements: out }) : undefined;
       },
     })(fn.body) as CompoundStmt;
     return updateNode(fn, { body } as Partial<FunctionDecl>);
@@ -477,14 +532,14 @@ export function createRotatedForLoopTransformer(options?: PluginOptions): Transf
 /**
  * Rotated For Loop Plugin
  *
- * `if (G) { i = X; do { B; step; } while (C); }` -> `for (i = X; C; step) { B }` where
- * G is the loop's first test.
+ * `if (G) { i = X; do { B; step; } while (C); }` and `i = X; if (G) { do { B; step; } while (C); }`
+ * -> `for (i = X; C; step) { B }` where G is the loop's first test.
  */
 export const rotatedForLoopPlugin: TransformPlugin = {
   id: 'rotated-for-loop',
   name: 'Rotated For Loop',
-  description: 'if (G) { i = X; do { B; step; } while (C); } -> for (i = X; C; step) { B } where G is C at i = X',
-  version: '1.0.0',
+  description: 'if (G) { i = X; do { B; step; } while (C); }, or i = X; ahead of the if -> for (i = X; C; step) { B } where G is C at i = X',
+  version: '1.1.0',
   defaultEnabled: true,
   priority: 56, // after goto-cleanup (55), before short-circuit-fold (57) merges the guard away
   tags: ['cleanup', 'control-flow', 'loops'],
