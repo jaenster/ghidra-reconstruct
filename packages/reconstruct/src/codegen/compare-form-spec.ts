@@ -24,8 +24,9 @@
  * must agree with the pcode opcode, at the CMP's width): k and B are read there as integers
  * and must differ by exactly the step, so a wrap never matches. Anything else - an opcode the
  * Jcc disagrees with, a step larger than one (strength reduction), a bit test, a constant the
- * instructions hold in a register, two non-constant operands compared for equality (the
- * relation does not say which side is the CMP's first) - gets no decision. The C++ side
+ * instructions hold in a register (except an ordered compare against 0, `heldZero`), two
+ * non-constant operands compared for equality (the relation does not say which side is the
+ * CMP's first) - gets no decision. The C++ side
  * (literal spelling, the 32-bit domains, the operand's type) is checked by the pass, which
  * sees the printed literal.
  */
@@ -102,6 +103,7 @@ export function compareFormDecision(site: CompareSite): CompareFormOutcome {
 
   if (site.constSide === 0 || site.constSide === 1) {
     if (site.k === undefined) return { reason: 'no constant' };
+    if (site.bKind === 'r' && ordered) return heldZero(site, F, base, form.signed!);
     if (site.bKind !== 'i' && site.bKind !== 'z') return { reason: `constant against ${site.bKind}` };
     const B = site.bKind === 'z' ? 0n : site.bValue;
     if (B === undefined) return { reason: 'no immediate' };
@@ -148,6 +150,35 @@ export function compareFormDecision(site: CompareSite): CompareFormOutcome {
   if (inF && !mirInF) return { decision: { ...base, keep: true } };
   if (mirInF && !inF) return { decision: { ...base, op: MIRROR[site.text], swap: true, delta: 0 } };
   return { reason: `${site.text} against ${[...F].join('/')}` };
+}
+
+/**
+ * An ordered compare against a register the extraction did not see zeroed in the CMP's own
+ * block (`z` is block-local), but which Ghidra proved constant and printed one step from 0:
+ * `CMP AX,SI; JL` with SI the zero VC8 keeps for the whole function, printed `-1 < set`
+ * (TXT_AllocTxt_setitems 00634dc0), or `CMP EAX,EBX; SETLE` printed `n < 1`
+ * (TXT_AllocTxt_pettype 00618d90). It is decided as `z` would be: only where the member of F
+ * it takes compares against 0. A register holding any other constant is not this: VC8
+ * itself moves a constant by one to share a register it already holds (`0x1ff < n` against
+ * a register of 0x200 that the next store writes, TXT_AllocTxt_superuniques 006552e0), so
+ * the register's value says nothing about the source's spelling.
+ */
+function heldZero(site: CompareSite, F: ReadonlySet<string>, base: Omit<CompareFormDecision, 'op'>,
+  signed: boolean): CompareFormOutcome {
+  const swap = site.constSide === 0;
+  const rel = swap ? MIRROR[site.text] : site.text;
+  const k = Number(site.k! & 0xffffffffn);
+  const kv = inDomain(site.k!, site.width, signed);
+  if (F.has(rel) && kv === 0n) {
+    return swap
+      ? { decision: { ...base, op: rel, swap, delta: 0, k, signed } }
+      : { decision: { ...base, keep: true } };
+  }
+  const step = STEP[rel];
+  if (step && F.has(step.op) && kv + BigInt(step.delta) === 0n) {
+    return { decision: { ...base, op: step.op, swap, delta: step.delta, k, signed } };
+  }
+  return { reason: `${rel} ${kv} against ${[...F].join('/')} in a register` };
 }
 
 export interface CompareFormSpec {

@@ -119,6 +119,24 @@ describe('compare-form derivation', () => {
     assert.deepStrictEqual([d.op, d.delta, d.swap, d.signed], ['>=', 1, true, true]);
   });
 
+  it('an ordered compare against a register Ghidra proved zero is decided as against 0', () => {
+    // setitems: `-1 < set` from CMP AX,SI; JL with SI zeroed far above is `set >= 0`.
+    let d = decide(site({ text: '<', opcode: 'INT_SLESS', size: 2, width: 2, constSide: 0, k: 0xffffn, bKind: 'r', user: 'JL' }))!;
+    assert.deepStrictEqual([d.op, d.delta, d.swap, d.signed], ['>=', 1, true, true]);
+    // pettype: `n < 1` from CMP EAX,EBX; SETLE is `n <= 0`.
+    d = decide(site({ text: '<', opcode: 'INT_SLESS', k: 1n, bKind: 'r', user: 'SETLE' }))!;
+    assert.deepStrictEqual([d.op, d.delta, d.swap], ['<=', -1, false]);
+    // `0 < n` from CMP n,ESI; JLE: only swapped.
+    d = decide(site({ text: '<', opcode: 'INT_SLESS', constSide: 0, k: 0n, bKind: 'r', user: 'JLE' }))!;
+    assert.deepStrictEqual([d.op, d.delta, d.swap], ['>', 0, true]);
+  });
+
+  it('leaves a register holding another constant, and a Jcc that disagrees on signedness', () => {
+    // superuniques: `0x1ff < n` against a register of 0x200 that VC8 shares with a store.
+    assert.strictEqual(decide(site({ text: '<', opcode: 'INT_SLESS', constSide: 0, k: 0x1ffn, bKind: 'r', user: 'JL' })), null);
+    assert.strictEqual(decide(site({ text: '<', opcode: 'INT_SLESS', constSide: 0, k: 0n, bKind: 'r', user: 'JBE' })), null);
+  });
+
   it('never matches across a wrap of the machine domain', () => {
     // unsigned x < 0 against CMP x,0xffffffff: modulo 2^32 they are one apart, as integers not.
     assert.strictEqual(decide(site({ text: '<', opcode: 'INT_LESS', k: 0n, bValue: 0xffffffffn, user: 'JBE' })), null);
@@ -142,7 +160,7 @@ describe('compare-form derivation', () => {
     assert.strictEqual(decide(site({ text: '<', opcode: 'INT_SLESS', k: 4n, bValue: 3n, width: 1, user: 'JLE' })), null);
   });
 
-  it('refuses without the instruction pair, with a bit test, or a constant held in a register', () => {
+  it('refuses without the instruction pair, with a bit test, or an equality against a constant held in a register', () => {
     assert.strictEqual(decide(site({ text: '<', opcode: 'INT_SLESS', k: 4n, bValue: 3n, user: 'JLE', onPair: false })), null);
     assert.strictEqual(decide(site({ text: '!=', opcode: 'INT_NOTEQUAL', k: 0n, bKind: 'bit', user: 'JZ' })), null);
     assert.strictEqual(decide(site({ text: '==', opcode: 'INT_EQUAL', k: 1n, bKind: 'r', user: 'JZ' })), null);
