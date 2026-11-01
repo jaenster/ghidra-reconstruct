@@ -1597,6 +1597,8 @@ export function generateFunctionImplementation(
           haltLines: func.haltLines,
           jumpTables: func.jumpTables,
           zeroStores: func.zeroStores,
+          // A text patch anchors on the masks as Ghidra printed them.
+          maskSites: override?.action === 'patch' ? undefined : func.maskSites,
           sehLowering: sehLoweringDecision(func),
           foldedAddresses: foldedAddressFacts(func),
           immediateConstants: immediateConstantFacts(func),
@@ -2533,6 +2535,8 @@ function transformDecompiledCode(
     jumpTables?: import('../extract/jump-tables.js').JumpTableFacts;
     /** Per struct-typed stack local, what the original's opening stores write (extract/zero-stores.ts). */
     zeroStores?: import('../extract/zero-stores.js').ZeroStoreFacts;
+    /** The decompile's byte/word masks and the instruction behind each (extract/mask-sites.ts). */
+    maskSites?: import('../extract/mask-sites.js').MaskSiteFacts;
     /** The function's EH3 frame as `seh-lowering` needs it (codegen/seh-lowering-spec.ts). */
     sehLowering?: SehLoweringDecision;
     /** Addresses the instructions derive from a global's start (codegen/folded-address-spec.ts). */
@@ -2843,6 +2847,16 @@ function transformDecompiledCode(
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         enclosingVarTypes,
       };
+      perPluginOptions['zero-extend-cast'] = {
+        enumTypes: context.funcPtrArgCasts.enumTypes,
+        enumValues: context.funcPtrArgCasts.enumValues,
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        structFields: context.funcPtrArgCasts.structFields,
+        typedefTargets: context.funcPtrArgCasts.typedefTargets,
+        functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        enclosingVarTypes,
+      };
       perPluginOptions['compare-signedness'] = {
         enumTypes: context.funcPtrArgCasts.enumTypes,
         globalTypes: context.funcPtrArgCasts.globalTypes,
@@ -3038,6 +3052,10 @@ function transformDecompiledCode(
         globalSizes: context?.funcPtrArgCasts?.globalSizes,
         globalElementSizes: context?.funcPtrArgCasts?.globalElementSizes,
       };
+    }
+    // Masks a MOVZX computed, tagged before any pass reshapes the printed `&`.
+    if (enclosing?.maskSites) {
+      perPluginOptions['zero-extend-site'] = { count: enclosing.maskSites.count, sites: enclosing.maskSites.sites };
     }
     if (enclosing?.compareForm) {
       perPluginOptions['compare-form'] = {

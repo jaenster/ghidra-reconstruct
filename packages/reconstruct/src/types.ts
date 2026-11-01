@@ -146,6 +146,12 @@ export interface ExtractedFunction {
    * predates the field.
    */
   zeroStores?: import('./extract/zero-stores.js').ZeroStoreFacts;
+  /**
+   * The decompile's byte and word masks with the instruction behind each one
+   * (extract/mask-sites.ts). Absent when there are none, the text changed since, or the
+   * snapshot predates the field.
+   */
+  maskSites?: import('./extract/mask-sites.js').MaskSiteFacts;
 }
 
 /**

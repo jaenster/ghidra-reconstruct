@@ -110,6 +110,13 @@ const EXPECT: Expect[] = [
         ? null : `zeroStores ${JSON.stringify(f.zeroStores)}`;
     },
   },
+  // maskSites: movzx ecx, cx at 0067bbd9 and movzx edx, dx at 0067bbdc print as `& 0xffff`.
+  {
+    address: '0067bbc0', name: 'DRLGPATH_GetDirectionLookupFromPacked',
+    check: f => sameJson(f.maskSites, { count: 2, sites: [
+      { ord: 0, k: 0xffff, mnemonic: 'MOVZX', width: 2 }, { ord: 1, k: 0xffff, mnemonic: 'MOVZX', width: 2 },
+    ] }) ? null : `maskSites ${JSON.stringify(f.maskSites)}`,
+  },
 ];
 
 async function main(): Promise<void> {

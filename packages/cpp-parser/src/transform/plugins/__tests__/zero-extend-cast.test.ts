@@ -1,0 +1,197 @@
+/**
+ * zero-extend-site / zero-extend-cast: a byte/word mask the original computed with a MOVZX
+ * becomes the cast, where value and type are kept. Each case is checked by EXECUTION over
+ * an input grid: the masked original against the rewrite, with every result widened to
+ * 64 bits so a changed type (int against unsigned int) shows as a changed value.
+ */
+
+import { describe, it } from 'node:test';
+import assert from 'node:assert';
+import { parse } from '../../../parser/index.js';
+import { emit } from '../../../emit/index.js';
+import { NodeKind } from '../../../ast/kinds.js';
+import type { AnyNode, ASTNode, BinaryExpr } from '../../../ast/nodes.js';
+import {
+  createZeroExtendCastTransformer, createZeroExtendSiteTransformer, type ZeroExtendMaskSite,
+} from '../builtins/zero-extend-cast.js';
+import { compileAndRun, hasNativeGpp } from '../../../testing/native-cpp.js';
+
+const native = { skip: !hasNativeGpp() };
+
+/** Every binary `&` of the source, in text order, as the facts script would list them. */
+function factsFor(code: string, mnemonic: (ord: number) => string = () => 'MOVZX') {
+  const ands: BinaryExpr[] = [];
+  const visit = (n: ASTNode) => {
+    if (n.kind === NodeKind.BinaryExpr && (n as BinaryExpr).operator === '&') ands.push(n as BinaryExpr);
+    for (const v of Object.values(n)) {
+      if (Array.isArray(v)) v.forEach(x => x && typeof x === 'object' && typeof x.kind === 'string' && visit(x));
+      else if (v && typeof v === 'object' && typeof (v as ASTNode).kind === 'string') visit(v as ASTNode);
+    }
+  };
+  visit(parse(code) as ASTNode);
+  ands.sort((a, b) => a.right.location!.start!.offset! - b.right.location!.start!.offset!);
+  const sites: ZeroExtendMaskSite[] = [];
+  ands.forEach((a, ord) => {
+    const r = a.right as unknown as { kind: string; value?: bigint };
+    if (r.kind === NodeKind.IntegerLiteral && (r.value === 0xffn || r.value === 0xffffn)) {
+      const mn = mnemonic(ord);
+      sites.push({ ord, k: Number(r.value), mnemonic: mn, width: mn === 'MOVZX' ? (r.value === 0xffn ? 1 : 2) : 0 });
+    }
+  });
+  return { count: ands.length, sites };
+}
+
+function rewrite(code: string, mnemonic?: (ord: number) => string, count?: number) {
+  const f = factsFor(code, mnemonic);
+  const reasons: string[] = [];
+  const tagged = createZeroExtendSiteTransformer({ count: count ?? f.count, sites: f.sites })(parse(code)) as AnyNode;
+  const out = createZeroExtendCastTransformer({
+    onSite: s => reasons.push(s.rewritten ? s.reason : `kept:${s.reason}`),
+  })(tagged) as AnyNode;
+  return { code: emit(out).trim(), reasons };
+}
+
+const GRID = '{0, 1, 2, 0x7f, 0x80, 0xff, 0x100, 0x7fff, 0x8000, 0xfffe, 0xffff, 0x10000, 0x12345, 0x7fffffff, (int)0x80000000, -1, -2, -0x100, -0x8000, -0x10000, 1000, -1000}';
+
+/** Run ref::f (masked) and low::f (rewritten) over the (a, b) grid; mismatches. */
+function run(src: string, low: string): string {
+  const prelude = [`namespace ref {\n${src}\n}`, `namespace low {\n${low}\n}`].join('\n');
+  const body = [
+    `const int V[] = ${GRID}; long diff = 0;`,
+    'for (int a : V) for (int b : V) {',
+    '  if (ref::f(a, b) != low::f(a, b)) diff++;',
+    '}',
+    'printf("%ld\\n", diff);',
+  ].join('\n');
+  return compileAndRun(prelude, body).trim();
+}
+
+const CASES: { name: string; src: string; casts: number; expect?: RegExp }[] = [
+  {
+    name: 'packed coordinates indexing a table (DRLGPATH_GetDirectionLookupFromPacked)',
+    src: `
+    int64_t f(int a, int b) {
+      static const int t[0x80000] = {0};
+      uint32_t nSrcPacked = (uint32_t)a, nDstPacked = (uint32_t)b;
+      uint32_t i = ((nDstPacked >> 0x10) - (nSrcPacked >> 0x10)) * 3 - (nSrcPacked & 0xffff) + (nDstPacked & 0xffff);
+      return (int64_t)i + t[i & 0x7ffff];
+    }`,
+    casts: 2,
+    expect: /- \(uint16_t\)nSrcPacked \+ \(uint16_t\)nDstPacked/,
+  },
+  {
+    name: 'an int operand: the cast has the mask\'s type everywhere',
+    src: `
+    int64_t f(int a, int b) {
+      int n = (a & 0xff) - b;
+      return (int64_t)((a & 0xffff) < b) + n + ((a & 0xff) - 300) / 7 + (int64_t)((b & 0xffff) >> 3);
+    }`,
+    casts: 4,
+  },
+  {
+    name: 'an unsigned operand compared signed-sensitively stays a mask',
+    src: `
+    int64_t f(int a, int b) {
+      uint32_t u = (uint32_t)a;
+      int64_t r = 0;
+      if ((u & 0xffff) < b) r += 1;
+      r += (int64_t)((u & 0xff) - 1);
+      r += (int64_t)(-(u & 0xff));
+      return r;
+    }`,
+    casts: 0,
+  },
+  {
+    name: 'an unsigned operand in value-only positions',
+    src: `
+    int64_t f(int a, int b) {
+      uint32_t u = (uint32_t)a, v = (uint32_t)b;
+      int64_t r = 0;
+      int64_t w = u & 0xffff;
+      r = w;
+      if (u & 0xff) r += 3;
+      if ((u & 0xffff) == (uint32_t)b) r += 5;
+      if ((u & 0xff) != -1) r += 7;
+      r += (int64_t)(v + (u & 0xffff));
+      r += (int64_t)(v - (u & 0xff)) * 2;
+      r += (int64_t)((u & 0xffff) / (v | 1) + 1 > 0);
+      r += 1 << (u & 0xff & 7);
+      return r + (int64_t)(uint8_t)(u & 0xff);
+    }`,
+    casts: 8,
+  },
+  {
+    name: 'a 64-bit operand only where the value alone is read',
+    src: `
+    int64_t f(int a, int b) {
+      int64_t q = (int64_t)a * 0x10001;
+      int64_t r = q & 0xffff;
+      r += (q & 0xff) << 40;
+      return r;
+    }`,
+    casts: 1,
+  },
+  {
+    name: 'a U-suffixed mask of an int is unsigned: kept in a typed position',
+    src: `
+    int64_t f(int a, int b) {
+      int64_t r = (int64_t)((a & 0xffU) - 1);
+      int s = a & 0xffU;
+      return r + s;
+    }`,
+    casts: 1,
+  },
+  {
+    name: 'a compound assignment into an unsigned int',
+    src: `
+    int64_t f(int a, int b) {
+      uint32_t acc = (uint32_t)b;
+      acc -= (uint32_t)a & 0xff;
+      acc /= ((uint32_t)a & 0xff) | 1;
+      int s = b;
+      s -= (uint32_t)a & 0xffff;
+      return (int64_t)acc + s;
+    }`,
+    casts: 1,
+  },
+];
+
+describe('zero-extend-cast', () => {
+  for (const c of CASES) {
+    it(`${c.name}: rewrites ${c.casts}`, native, () => {
+      const { code, reasons } = rewrite(c.src);
+      assert.strictEqual(reasons.filter(r => !r.startsWith('kept')).length, c.casts, `${reasons.join(',')}\n${code}`);
+      if (c.expect) assert.match(code, c.expect);
+      assert.strictEqual(run(c.src, code), '0', code);
+    });
+  }
+
+  it('an AND in the original keeps the mask', () => {
+    const src = `uint32_t f(uint32_t a, uint32_t b) { return (a & 0xffff) + (b & 0xffff); }`;
+    const { code } = rewrite(src, ord => (ord === 0 ? 'AND' : 'MOVZX'));
+    assert.match(code, /\(a & 0xffff\) \+ \(uint16_t\)b/);
+  });
+
+  it('positions that do not zip tie only a constant every fact agrees on', () => {
+    const src = `uint32_t f(uint32_t a, uint32_t b) { return (a & 0xffff) + (b & 0xff) + (a & b); }`;
+    // One `&` more in the body than the facts saw: 0xffff and 0xff each tie by constant.
+    const mixed = rewrite(src, ord => (ord === 1 ? 'AND' : 'MOVZX'), 2);
+    assert.match(mixed.code, /\(uint16_t\)a \+ \(b & 0xff\)/);
+  });
+
+  it('a postfix operand keeps its parentheses', () => {
+    const src = `int f(int a, int *p) { return (a & 0xff)[p]; }`;
+    assert.match(rewrite(src).code, /\(\(uint8_t\)a\)\[p\]/);
+  });
+
+  it('a compound operand is parenthesised', () => {
+    const src = `int f(int a, int b) { return a + b & 0xffff; }`;
+    assert.match(rewrite(src).code, /\(uint16_t\)\(a \+ b\)/);
+  });
+
+  it('no facts, no change', () => {
+    const src = `uint32_t f(uint32_t a) { return a & 0xffff; }`;
+    const out = createZeroExtendCastTransformer({})(createZeroExtendSiteTransformer({})(parse(src)) as AnyNode) as AnyNode;
+    assert.match(emit(out), /a & 0xffff/);
+  });
+});

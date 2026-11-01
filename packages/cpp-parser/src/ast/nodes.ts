@@ -47,6 +47,11 @@ export interface GhidraMetadata {
    */
   signedCompareWidth?: number;
   /**
+   * The byte/word mask was a MOVZX of this source width in the original (`zero-extend-site`);
+   * `zero-extend-cast` writes it as the cast to the unsigned type of that width.
+   */
+  zeroExtendWidth?: number;
+  /**
    * The loop is the source form its instructions show - a REP STOS fill (`rep-string-form`),
    * an unrolled fill of more than 32 bytes (`array-fill-collapse`) - and VC8 compiles it back
    * to them; `memory-patterns` must not fold it into a memset call.
