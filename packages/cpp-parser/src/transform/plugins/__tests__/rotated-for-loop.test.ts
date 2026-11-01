@@ -200,4 +200,71 @@ describe('rotatedForLoopPlugin', () => {
   it('leaves a guard on another member', () => {
     same(`void f(Block ctx) { Block* p; if (ctx.pPrev) { p = &ctx; do { use(p); p = p->pNext; } while (p->pNext); } }`);
   });
+
+  // ---- the initialisation ahead of the test ----
+
+  it('rewrites the counted loop with its initialisation ahead of the test (InitPal as Ghidra prints it)', () => {
+    const out = tx(`void f(int n, int* p) {
+  int i;
+  i = 0;
+  if (0 < n) {
+    do {
+      p[i] = i;
+      i++;
+    } while (i < n);
+  }
+  h();
+}`);
+    assert.strictEqual(out, `void f(int n, int* p) {
+  int i;
+  for (i = 0; i < n; i++) {
+    p[i] = i;
+  }
+  h();
+}`);
+  });
+
+  it('rewrites an initialisation ahead of the test whose counter is read after the loop', () => {
+    // The assignment runs whether the guard holds or not, before and after.
+    const out = tx(`int f(int n) { int i; i = 0; if (n > 0) { do { g(i); i++; } while (i < n); } return i; }`);
+    assert.ok(out.includes('for (i = 0; i < n; i++) {'), out);
+    assert.ok(out.includes('return i;'), out);
+  });
+
+  it('moves a declaring initialisation ahead of the test into the for', () => {
+    const out = tx(`void f(int n) { int i = 0; if (0 < n) { do { g(i); ++i; } while (i < n); } }`);
+    assert.ok(out.includes('for (int i = 0; i < n; ++i) {'), out);
+  });
+
+  it('rewrites a pointer walk with its initialisation ahead of the test', () => {
+    const out = tx(`void f(Node* list) { Node* p; p = list; if (list != nullptr) { do { use(p); p = p->next; } while (p != nullptr); } }`);
+    assert.ok(out.includes('for (p = list; p != nullptr; p = p->next) {'), out);
+  });
+
+  it('leaves a declaration ahead of the test whose counter is read after the loop', () => {
+    same(`int f(int n) { int i = 0; if (0 < n) { do { g(i); i++; } while (i < n); } return i; }`);
+  });
+
+  it('leaves an initialisation that is not the statement just ahead of the if', () => {
+    same(`void f(int n) { int i; i = 0; h(); if (0 < n) { do { g(i); i++; } while (i < n); } }`);
+  });
+
+  it('leaves an if block ahead of which the initialisation stands, holding more than the loop', () => {
+    same(`void f(int n) { int i; i = 0; if (0 < n) { h(); do { g(i); i++; } while (i < n); } }`);
+  });
+
+  it('leaves the ahead form with a continue of its own, a narrow counter or a global counter', () => {
+    same(`void f(int n) { int i; i = 0; if (0 < n) { do { if (g(i)) { i++; continue; } i++; } while (i < n); } }`);
+    same(`void f(int n, int s) { short i; i = s; if (s < n) { do { g(i); i++; } while (i < n); } }`);
+    same(`void f(int n) { g_i = 0; if (0 < n) { do { g(g_i); g_i++; } while (g_i < n); } }`);
+  });
+
+  it('leaves the ahead form when the initialisation or the if carries a comment', () => {
+    same(`void f(int n) { int i;
+  // first slot
+  i = 0; if (0 < n) { do { g(i); i++; } while (i < n); } }`);
+    same(`void f(int n) { int i; i = 0;
+  // the slots
+  if (0 < n) { do { g(i); i++; } while (i < n); } }`);
+  });
 });
