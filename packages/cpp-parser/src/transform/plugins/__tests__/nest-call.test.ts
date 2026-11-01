@@ -219,7 +219,8 @@ describe('nestCallPlugin', () => {
   });
 
   // AUTOMAP_DrawGamePassword, 00459e90: push 0; push 4; push [offset]; call DRAW_text0; ... call DRAW_text.
-  it('nests a run: constants, a global read and the call, in the order VC8 evaluates them', () => {
+  // VC8 reads TextHeight and WindowSizeX after calling DRAW_text0, GCC may read them first.
+  it('leaves a run when a global read stands beside the call', () => {
     const { out, sites } = run([
       'void f(wchar_t *wsz) {',
       '  int bCenter;',
@@ -233,8 +234,8 @@ describe('nestCallPlugin', () => {
       '[DRAW_text@0xcb<0xb6,0,0.0.1.1.1] DRAW_text(wsz, WindowSizeX - nWidth - 0x10, nY, dwColor, bCenter);',
       '}',
     ]);
-    assert.deepStrictEqual(sites, [4]);
-    assert.ok(out.includes('DRAW_text(wsz, WindowSizeX - DRAW_text0(wsz) - 0x10, TextHeight, 4, 0);'), out);
+    assert.deepStrictEqual(sites, []);
+    assert.ok(out.includes('nWidth = DRAW_text0(wsz);'), out);
   });
 
   it('nests a run of constants and the call beside parameters', () => {
@@ -253,10 +254,27 @@ describe('nestCallPlugin', () => {
     assert.ok(out.includes('DRAW_text(wsz, nX - DRAW_text0(wsz) - 0x10, nX, 4, 0);'), out);
   });
 
-  it('nests beside an argument that only reads memory', () => {
-    const { out, sites } = run(quest(0).map(l => l.replace('HasQuestItem(pGame, pUnit, 0x20736b62)', 'HasQuestItem(pGame, pUnit, pUnit->nId)')));
+  it('leaves a call beside a field read through a pointer', () => {
+    const { sites } = run(quest(0).map(l => l.replace('HasQuestItem(pGame, pUnit, 0x20736b62)', 'HasQuestItem(pGame, pUnit, pUnit->nId)')));
+    assert.deepStrictEqual(sites, []);
+  });
+
+  it('nests beside an enumerator and a local array', () => {
+    const { out, sites } = run(quest(0).map(l => l.replace('HasQuestItem(pGame, pUnit, 0x20736b62)', 'HasQuestItem(pGame, pUnit, QUEST_A)')),
+      { enumConstants: ['QUEST_A'] });
     assert.deepStrictEqual(sites, [1]);
-    assert.ok(out.includes('r = HasQuestItem(GetGamePointer(pUnit), pUnit, pUnit->nId);'), out);
+    assert.ok(out.includes('r = HasQuestItem(GetGamePointer(pUnit), pUnit, QUEST_A);'), out);
+  });
+
+  it('leaves a call assigned through a global pointer', () => {
+    const { sites } = run([
+      'void f(Unit *pUnit) {',
+      '  Game *pGame;',
+      '[GetGamePointer@0x56<,1,0] pGame = GetGamePointer(pUnit);',
+      '[HasQuestItem@0x5f<0x56,0,0.0.1] gpOut->n = HasQuestItem(pGame, pUnit, 5);',
+      '}',
+    ], { globalTypes: { ...TYPES.globalTypes, gpOut: 'Out *' } });
+    assert.deepStrictEqual(sites, []);
   });
 
   it('leaves two calls in one argument list: GCC may call them in either order', () => {
@@ -492,6 +510,41 @@ describe('nestCallPlugin', () => {
       out.replace('int f(', 'int after('),
     ].join('\n');
     const r = compileAndRun(prelude, 'for (int w = -3; w < 4; w++) for (int x = -2; x < 3; x++) { calls = 0; int a = before(w, x); calls = 0; printf("%d %d\\n", a, after(w, x)); }');
+    for (const row of r.trim().split('\n')) {
+      const [a, b] = row.split(' ');
+      assert.strictEqual(a, b, r);
+    }
+  });
+  // A callee that writes the global a sibling argument reads: nested, GCC may read it on
+  // either side of the call. The pass leaves that site and nests the safe one beside it.
+  it('keeps a global read on the side of the call it was read on (compiled)', { skip: !hasNativeGpp() }, () => {
+    const lines = [
+      'int f(int a) {',
+      '  int x;',
+      '  int y;',
+      '  int r;',
+      '  int r2;',
+      '[Bump@0x10<,2,1] x = Bump(a);',
+      '[Take@0x18<0x10,2,1.1.1] r = Take(gCounter, x, a);',
+      '[Bump@0x20<,2,1] y = Bump(a);',
+      '[Take@0x28<0x20,2,1.1.1] r2 = Take(7, y, a);',
+      '  return r * 1000 + r2;',
+      '}',
+    ];
+    const opts: Partial<NestCallOptions> = { functionReturnTypes: { ...TYPES.functionReturnTypes, Bump: 'int' } };
+    const { code } = fixture(lines);
+    const { out, sites } = run(lines, opts);
+    assert.ok(out.includes('x = Bump(a); r = Take(gCounter, x, a);'), out);
+    assert.ok(out.includes('r2 = Take(7, Bump(a), a);'), out);
+    assert.deepStrictEqual(sites, [1]);
+    const prelude = [
+      'int gCounter = 0;',
+      'int Bump(int a) { gCounter += 100; return a * 3; }',
+      'int Take(int g, int x, int a) { return g * 7 + a * 3 + x; }',
+      code.replace('int f(', 'int before('),
+      out.replace('int f(', 'int after('),
+    ].join('\n');
+    const r = compileAndRun(prelude, 'for (int a = -2; a < 3; a++) { gCounter = 0; int b = before(a); gCounter = 0; printf("%d %d\\n", b, after(a)); }');
     for (const row of r.trim().split('\n')) {
       const [a, b] = row.split(' ');
       assert.strictEqual(a, b, r);

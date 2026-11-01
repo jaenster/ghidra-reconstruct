@@ -38,9 +38,12 @@
  *     RollBetweenMinAndMax(pSeed, ..), 0)` would swap its rolls). A run of two call
  *     temporaries nests the later one only (DRAW_UI_HelpXpac, 00495410: `pStr =
  *     CMD_GetKeyNameForCommand(..); pFormat = GetLocaleString(..);
- *     UNICODE_FormatWideString(100, wszBuf4, pFormat, pStr);`). An argument that only
- *     reads memory may stand beside the call: the call's value is the same either way,
- *     and the read sees another value only where the call writes what it reads;
+ *     UNICODE_FormatWideString(100, wszBuf4, pFormat, pStr);`);
+ *   - nothing beside the call, nor the statement's target, reads what the call could
+ *     write: every other argument and temporary is a constant, an enumerator, an
+ *     address, a local whose address is never taken, or arithmetic on those. A global
+ *     or a field read beside the call could be read before it under GCC and after it
+ *     under VC8;
  *   - a constant held in a narrow temporary fits it, and the temporary is the whole
  *     argument (casts aside), so the constant reaches the parameter with the same value;
  *   - each call temporary's value has the temporary's type (its callee's return type, or
@@ -105,6 +108,8 @@ export interface NestCallOptions extends PluginOptions {
   globalTypes?: Record<string, string>;
   /** Callable names (bare and qualified) declared with a `...` tail. */
   varArgFunctions?: readonly string[];
+  /** Enumerator names (bare and qualified): constants, whatever a call does. */
+  enumConstants?: readonly string[];
   /** Typedef name -> the spelling it stands for. */
   typedefTargets?: Record<string, string>;
   /** The enclosing function's namespace, innermost last, for unqualified callee lookup. */
@@ -202,6 +207,7 @@ interface Ctx {
   identIndex: Map<Identifier, number>;
   labels: boolean;
   varArgs: Record<string, true>;
+  enums: Record<string, true>;
   /** Start line -> statements starting there that print code. */
   lineOwners: Map<number, number>;
   ev: CallOrderEvidence;
@@ -416,6 +422,99 @@ function globalSpelling(name: string, ctx: Ctx): string | undefined {
   return scopedLookup(ctx.opts.globalTypes ?? {}, name, ctx.opts.enclosingSegments ?? []);
 }
 
+/** A name as an expression: a qualified name's spelling, or null. */
+function nameOf(e: Expression): string | null {
+  if (e.kind === NodeKind.Identifier) return (e as Identifier).name;
+  if (e.kind === NodeKind.QualifiedId) return calleeName(e) ?? null;
+  return null;
+}
+
+/**
+ * Whether evaluating `e` reads nothing a call could change and changes nothing: constants,
+ * locals whose address is never taken, addresses, and arithmetic on them. `free` names
+ * the identifiers that stand for the temporaries being nested.
+ */
+function orderFree(e: ASTNode, ctx: Ctx, free: ReadonlySet<ASTNode>): boolean {
+  if (free.has(e)) return true;
+  switch (e.kind) {
+    case NodeKind.IntegerLiteral: case NodeKind.CharLiteral: case NodeKind.BoolLiteral:
+    case NodeKind.NullptrLiteral: case NodeKind.FloatingLiteral: case NodeKind.StringLiteral:
+    case NodeKind.SizeofExpr: case NodeKind.AlignofExpr:
+      return true;
+    case NodeKind.Identifier: case NodeKind.QualifiedId: {
+      const name = nameOf(e as Expression);
+      if (!name) return false;
+      if (isNullName(e as Expression)) return true;
+      const l = e.kind === NodeKind.Identifier ? ctx.locals.get(name) : undefined;
+      if (l) return l.array || !l.addressed;
+      // A global array is its address; any other global is memory a call may write.
+      const g = globalSpelling(name, ctx);
+      if (g !== undefined) return g.includes('[');
+      // An enumerator is a constant and a function designates its address; anything else
+      // unknown is not trusted.
+      const segs = ctx.opts.enclosingSegments ?? [];
+      return scopedLookup(ctx.enums, name, segs) !== undefined
+        || scopedLookup(ctx.opts.functionReturnTypes ?? {}, name, segs) !== undefined;
+    }
+    case NodeKind.ParenExpr:
+      return orderFree((e as ParenExpr).expression, ctx, free);
+    case NodeKind.CStyleCastExpr: case NodeKind.StaticCastExpr: case NodeKind.ReinterpretCastExpr:
+    case NodeKind.ConstCastExpr:
+      return orderFree((e as unknown as { expression: Expression }).expression, ctx, free);
+    case NodeKind.FunctionalCastExpr:
+      return (e as unknown as { arguments: Expression[] }).arguments.every(a => orderFree(a, ctx, free));
+    case NodeKind.UnaryExpr: {
+      const u = e as UnaryExpr;
+      if (u.operator === '&') return addressFree(u.operand, ctx, free);
+      if (u.operator === '*' || u.operator === '++' || u.operator === '--') return false;
+      return orderFree(u.operand, ctx, free);
+    }
+    case NodeKind.BinaryExpr: {
+      const b = e as unknown as { left: Expression; right: Expression };
+      return orderFree(b.left, ctx, free) && orderFree(b.right, ctx, free);
+    }
+    case NodeKind.ConditionalExpr: {
+      const c = e as unknown as { condition: Expression; thenExpr: Expression; elseExpr: Expression };
+      return orderFree(c.condition, ctx, free) && orderFree(c.thenExpr, ctx, free) && orderFree(c.elseExpr, ctx, free);
+    }
+    case NodeKind.MemberExpr: {
+      // A field of a local struct nothing else can reach.
+      const m = e as unknown as { object: Expression; isArrow: boolean };
+      if (m.isArrow) return false;
+      const o = unwrap(m.object);
+      if (o.kind !== NodeKind.Identifier) return false;
+      const l = ctx.locals.get((o as Identifier).name);
+      return !!l && !l.addressed && !l.array;
+    }
+    default:
+      return false;
+  }
+}
+
+/** Whether computing the address of the lvalue `e` reads nothing a call could change. */
+function addressFree(e: Expression, ctx: Ctx, free: ReadonlySet<ASTNode>): boolean {
+  const u = unwrap(e);
+  switch (u.kind) {
+    case NodeKind.Identifier: case NodeKind.QualifiedId:
+      return true;
+    case NodeKind.MemberExpr: {
+      const m = u as unknown as { object: Expression; isArrow: boolean };
+      return m.isArrow ? orderFree(m.object, ctx, free) : addressFree(m.object, ctx, free);
+    }
+    case NodeKind.SubscriptExpr: {
+      const s = u as unknown as { array: Expression; index: Expression };
+      const base = unwrap(s.array);
+      const name = nameOf(base);
+      const arrayBase = !!name && (ctx.locals.get(name)?.array || (globalSpelling(name, ctx) ?? '').includes('['));
+      return (arrayBase || orderFree(s.array, ctx, free)) && orderFree(s.index, ctx, free);
+    }
+    case NodeKind.UnaryExpr:
+      return (u as UnaryExpr).operator === '*' && orderFree((u as UnaryExpr).operand, ctx, free);
+    default:
+      return false;
+  }
+}
+
 /** Stack slots of a value of shape `s` passed as an argument: 32 bits or narrower, or a pointer. */
 function slotOfShape(s: TypeShape | null): number | null {
   if (!s) return null;
@@ -574,6 +673,10 @@ function siteAt(stmts: Statement[], b: number, path: Path, guarded: boolean, ctx
   const slots = outerSlots(fact, call, tempLocals, ctx);
   if (!slots) return null;
   const outer: CallSiteFact = { ...fact, slots };
+  // The statement's target is evaluated beside the arguments as well.
+  const target = s.kind === NodeKind.ExprStmt && unwrap((s as ExprStmt).expression).kind === NodeKind.AssignExpr
+    ? (unwrap((s as ExprStmt).expression) as AssignExpr).left : null;
+  if (target && !addressFree(target, ctx, new Set())) return null;
 
   for (let first = 0; first < collected.length; first++) {
     const temps = collected.slice(first);
@@ -590,7 +693,12 @@ function validRun(temps: Temp[], call: CallExpr, outer: CallSiteFact, path: Path
   // Calls and reads in VC8's order: the earliest in the argument furthest right.
   const ordered = temps.filter(t => t.kind !== 'pure');
   for (let i = 0; i + 1 < ordered.length; i++) if (ordered[i].arg <= ordered[i + 1].arg) return false;
-  for (const a of call.arguments) if (effects(a).calls) return false;
+  // Nor may anything beside it read what the call could write: a global, a field, memory
+  // behind a pointer, a local whose address escaped. GCC may read it before the call
+  // where VC8 reads it after.
+  if (temps.some(t => t.kind === 'read')) return false;
+  const free = new Set<ASTNode>(temps.map(t => t.use));
+  for (const a of call.arguments) if (!orderFree(a, ctx, free)) return false;
   // Evidence, call by call in evaluation order: before each inner CALL the pushes of the
   // arguments right of it (up to the previous inner call's) and its own; the outer CALL
   // right after the last with the pushes of the arguments up to it.
@@ -636,8 +744,10 @@ function rewriteFunction(fn: FunctionDecl, ev: CallOrderEvidence, opts: NestCall
   }
   const varArgs: Record<string, true> = {};
   for (const n of opts.varArgFunctions ?? []) varArgs[n] = true;
+  const enums: Record<string, true> = {};
+  for (const n of opts.enumConstants ?? []) enums[n] = true;
   const ctx: Ctx = {
-    locals, idents: [], identIndex: new Map(), labels, varArgs, lineOwners, ev,
+    locals, idents: [], identIndex: new Map(), labels, varArgs, enums, lineOwners, ev,
     resolve: name => typedefTargets[name], opts,
   };
   const reindex = () => {

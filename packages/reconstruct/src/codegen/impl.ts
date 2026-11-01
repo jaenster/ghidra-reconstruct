@@ -3204,6 +3204,7 @@ function transformDecompiledCode(
         functionParamTypes: context?.funcPtrArgCasts?.functionParamTypes,
         globalTypes: context?.funcPtrArgCasts?.globalTypes,
         varArgFunctions: context?.funcPtrArgCasts?.varArgFunctions,
+        enumConstants: context?.funcPtrArgCasts?.enumConstantNames,
         typedefTargets: context?.funcPtrArgCasts?.typedefTargets,
         enclosingSegments: enclosing?.ghidraNamespaceSegments ?? enclosing?.namespaceSegments,
         onSite: (e: { line: number; temps: number }) =>
