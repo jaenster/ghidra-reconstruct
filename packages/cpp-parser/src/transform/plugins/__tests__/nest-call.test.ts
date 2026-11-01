@@ -259,7 +259,7 @@ describe('nestCallPlugin', () => {
     assert.ok(out.includes('r = HasQuestItem(GetGamePointer(pUnit), pUnit, pUnit->nId);'), out);
   });
 
-  it('nests two calls when each comes straight after the pushes between them', () => {
+  it('leaves two calls in one argument list: GCC may call them in either order', () => {
     // H(G(), F(a), 7): push 7; push a; call F; push eax; call G; push eax; call H.
     const { out, sites } = run([
       'int f(int a) {',
@@ -270,8 +270,8 @@ describe('nestCallPlugin', () => {
       '[H@0x20<0x18,1,1.1.1] return H(y, x, 7);',
       '}',
     ], { functionReturnTypes: { F: 'int', G: 'int' } });
-    assert.deepStrictEqual(sites, [2]);
-    assert.ok(out.includes('return H(G(), F(a), 7);'), out);
+    assert.deepStrictEqual(sites, []);
+    assert.ok(out.includes('x = F(a); y = G(); return H(y, x, 7);'), out);
   });
 
   it('nests the later of two calls when the earlier is the rightmost argument', () => {

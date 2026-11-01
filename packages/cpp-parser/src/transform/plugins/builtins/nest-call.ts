@@ -31,8 +31,16 @@
  *   - a temporary holding a call or a memory read stands where VC8 evaluates it: the
  *     earliest in the argument furthest right; one holding a constant or a local whose
  *     address is never taken may stand anywhere;
- *   - the arguments right of the leftmost such temporary call and change nothing, and
- *     the statement assigns nothing inside the argument list;
+ *   - exactly one temporary holds a call, and no other argument calls anything (the
+ *     statement assigns nothing inside the argument list): VC8 evaluates arguments right
+ *     to left, GCC in an unspecified order, and two calls side by side could run in
+ *     either (`SOUND_PlayEnvironmentSound(n, RollBetweenMinAndMax(pSeed, ..),
+ *     RollBetweenMinAndMax(pSeed, ..), 0)` would swap its rolls). A run of two call
+ *     temporaries nests the later one only (DRAW_UI_HelpXpac, 00495410: `pStr =
+ *     CMD_GetKeyNameForCommand(..); pFormat = GetLocaleString(..);
+ *     UNICODE_FormatWideString(100, wszBuf4, pFormat, pStr);`). An argument that only
+ *     reads memory may stand beside the call: the call's value is the same either way,
+ *     and the read sees another value only where the call writes what it reads;
  *   - a constant held in a narrow temporary fits it, and the temporary is the whole
  *     argument (casts aside), so the constant reaches the parameter with the same value;
  *   - each call temporary's value has the temporary's type (its callee's return type, or
@@ -576,17 +584,13 @@ function siteAt(stmts: Statement[], b: number, path: Path, guarded: boolean, ctx
 
 function validRun(temps: Temp[], call: CallExpr, outer: CallSiteFact, path: Path, guarded: boolean, ctx: Ctx): boolean {
   const calls = temps.filter(t => t.kind === 'call');
-  if (calls.length === 0) return false;
+  // One call, beside arguments that call and change nothing: VC8 evaluates them right to
+  // left, GCC in an order of its own, and either order runs the same side effects.
+  if (calls.length !== 1) return false;
   // Calls and reads in VC8's order: the earliest in the argument furthest right.
   const ordered = temps.filter(t => t.kind !== 'pure');
   for (let i = 0; i + 1 < ordered.length; i++) if (ordered[i].arg <= ordered[i + 1].arg) return false;
-  const leftmost = ordered[ordered.length - 1].arg;
-  const tempArgs = new Set(temps.map(t => t.arg));
-  for (let i = leftmost; i < call.arguments.length; i++) {
-    const a = call.arguments[i];
-    // Nothing else in an argument holding a temporary, nor right of the leftmost, calls.
-    if ((i > leftmost || tempArgs.has(i)) && effects(a).calls) return false;
-  }
+  for (const a of call.arguments) if (effects(a).calls) return false;
   // Evidence, call by call in evaluation order: before each inner CALL the pushes of the
   // arguments right of it (up to the previous inner call's) and its own; the outer CALL
   // right after the last with the pushes of the arguments up to it.
