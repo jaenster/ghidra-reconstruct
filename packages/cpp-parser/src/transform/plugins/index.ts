@@ -389,6 +389,12 @@ export {
 } from './builtins/field-pointer-fold.js';
 
 export {
+  newResultTempPlugin,
+  createNewResultTempTransformer,
+  type NewResultTempOptions,
+} from './builtins/new-result-temp.js';
+
+export {
   inlinedCallRestorePlugin,
   restoreInlinedCalls,
   compileInlinedCallee,
@@ -669,6 +675,7 @@ import { baseRegisterLoadPlugin } from './builtins/base-register-load.js';
 import { storeOrderPlugin } from './builtins/store-order.js';
 import { recordGetterGuardPlugin } from './builtins/record-getter-guard.js';
 import { fieldPointerFoldPlugin } from './builtins/field-pointer-fold.js';
+import { newResultTempPlugin } from './builtins/new-result-temp.js';
 import { inlinedCallRestorePlugin } from './builtins/inlined-call-restore.js';
 import { switchChainPlugin } from './builtins/switch-chain.js';
 import { caseLayoutPlugin } from './builtins/case-layout.js';
@@ -853,6 +860,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   declInitMergePlugin,        // Cleanup: int x; x = expr; → int x = expr; (priority 60)
   recordGetterGuardPlugin,    // Matching: an inlined record getter's guard gets its pointer local, read through (priority 60.5)
   fieldPointerFoldPlugin,     // Matching: a field-pointer temporary goes; the field updated in place or the record held (priority 62.5)
+  newResultTempPlugin,        // Matching: an allocation constructed in place gets a temporary; the result assigned after (priority 62.6)
   inlinedCallRestorePlugin,   // Matching: a call where the decompiler printed an inlined helper's body (priority 0.5)
   gotoCrossesInitPlugin,      // Late: split T x=e; → T x; x=e; for goto-crossed locals (priority 700)
   haltSiteFoldPlugin,         // Cleanup: fold nLine/nAddress temporaries into the halt call, copy a shared halt tail to its jumps (priority 930)
