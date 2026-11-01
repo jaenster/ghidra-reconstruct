@@ -246,7 +246,12 @@ export class LayoutReader {
 
   /** A return copy of the original starts at `offset`. */
   returnCopyAt(offset: number): boolean {
-    return (this.ev.returns ?? []).some(c => c.start === offset);
+    return this.returnCopyStarting(offset) !== null;
+  }
+
+  /** The return copy of the original that starts at `offset`, or null. */
+  returnCopyStarting(offset: number): ReturnCopy | null {
+    return (this.ev.returns ?? []).find(c => c.start === offset) ?? null;
   }
 
   /** Every line `stmts` claim, copied or not. */

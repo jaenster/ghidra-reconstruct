@@ -39,7 +39,7 @@ import type {
 import { emit } from '../../../../emit/index.js';
 import { getChildren, traverseAST } from '../../../../ast/visitor.js';
 import { leaves, isHaltStmt, isExitStmt } from '../assert-order.js';
-import { isLoop, type LayoutReader } from './evidence.js';
+import { isLoop, type LayoutReader, type ReturnCopy } from './evidence.js';
 import { conditionShape, gotoCounts, jumpedLabels } from './index.js';
 import { guardChain, threadedTo } from './search.js';
 
@@ -94,6 +94,59 @@ function bodyOf(s: Statement): Statement[] {
 }
 
 const JUMPS = new Set<string>([NodeKind.GotoStmt, NodeKind.BreakStmt, NodeKind.ContinueStmt]);
+
+/** A literal, through casts and parentheses: a value VC8 materialises with one load. */
+export function constantValue(e: Expression): boolean {
+  const u = unwrap(e);
+  return u.kind === NodeKind.IntegerLiteral || u.kind === NodeKind.NullptrLiteral || u.kind === NodeKind.BoolLiteral || u.kind === NodeKind.CharLiteral;
+}
+
+/** A return copy whose first instruction loads EAX: the value is set inside the copy. */
+export function loadsEax(c: ReturnCopy): boolean {
+  return /^(MOV|MOVZX|MOVSX|XOR|OR|SUB|LEA)\/EAX$/.test(c.insns[0] ?? '');
+}
+
+export function hasLoop(stmts: readonly Statement[]): boolean {
+  return stmts.some(s => [...traverseAST(s)].some(n => isLoop(n)));
+}
+
+export function hasCall(stmts: readonly Statement[]): boolean {
+  return stmts.some(s => [...traverseAST(s)].some(n => n.kind === NodeKind.CallExpr));
+}
+
+function before(a: ASTNode, b: ASTNode): boolean {
+  const x = a.location?.start, y = b.location?.start;
+  return !!x && !!y && (x.line < y.line || (x.line === y.line && x.column < y.column));
+}
+
+/** A return identical to `ret` stands before `at` in source order (`returns`: the function's, in order). */
+export function earlierCopy(returns: readonly ReturnStmt[], at: ASTNode, ret: ReturnStmt): boolean {
+  const k = returnKey(ret);
+  return k !== null && returns.some(r => r !== ret && returnKey(r) === k && before(r, at));
+}
+
+/**
+ * `if (G) return K;` (K a constant) in a block that ends with `return K` after S: VC8 loads K
+ * above the guard's test and jumps past the load when S leaves EAX alone (no call), and
+ * merges the guard into an earlier copy of K when there is one (a simple condition; S straight
+ * code without a call or a loop for the first). Either way the guard's jump
+ * does not land on a copy that starts by loading K; one that does means the source had no
+ * guard (`if (!G) { S } return K;`). Null when neither applies: the two forms compile the same.
+ */
+export function guardLoadsAhead(list: readonly Statement[], i: number, returns: readonly ReturnStmt[]): boolean {
+  const ifs = list[i] as IfStmt;
+  if (ifs.elseBranch) return false;
+  const arm = bodyOf(ifs.thenBranch);
+  if (arm.length !== 1 || arm[0].kind !== NodeKind.ReturnStmt) return false;
+  const r = arm[0] as ReturnStmt;
+  const last = list[list.length - 1];
+  if (!r.value || !constantValue(r.value) || i >= list.length - 1 || last.kind !== NodeKind.ReturnStmt) return false;
+  const k = returnKey(r);
+  if (k === null || returnKey(last as ReturnStmt) !== k) return false;
+  if (conditionShape(ifs.condition).kind !== 'simple') return false;
+  const s = list.slice(i + 1, -1);
+  return (!hasCall(s) && !hasLoop(s)) || earlierCopy(returns, ifs, r);
+}
 
 /** The returns of a function in source order. */
 export function returnOrder(root: ASTNode): ReturnStmt[] {
@@ -336,6 +389,21 @@ export function scoreBody(body: CompoundStmt, reader: LayoutReader, noreturn: Re
       // A chain of guards on values derived one from the other: written as guards, VC8 keeps
       // a copy of K per guard; a jump threaded forward past the later tests into the last
       // copy means the source tested values it had set to the failing constant.
+      // A guard over a copy that loads its value: see guardLoadsAhead.
+      for (let i = 0; i < list.length; i++) {
+        if (list[i].kind !== NodeKind.IfStmt || !guardLoadsAhead(list, i, ctx.returns)) continue;
+        const g = list[i] as IfStmt;
+        const e = reader.edge(g);
+        if (!e || reader.fallInto(g) !== 'other') continue;
+        const copy = reader.returnCopyStarting(e.target);
+        if (!copy) continue;
+        out.sites++;
+        out.rules.push(`guard does not jump onto its value's load=${loadsEax(copy) ? 0 : 1}`);
+        if (loadsEax(copy)) {
+          out.objective++;
+          out.mismatches.push({ line: g.location?.start.line ?? 0, predicted: 'other', fact: 'other', rule: "guard does not jump onto its value's load" });
+        }
+      }
       for (let i = 0; i < list.length; i++) {
         const c = list[i].kind === NodeKind.IfStmt ? guardChain(list, i) : null;
         if (!c) continue;

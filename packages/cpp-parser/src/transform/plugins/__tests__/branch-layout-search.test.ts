@@ -361,3 +361,56 @@ describe('early-return - a guard that jumps back into an earlier copy stays a gu
     sameValues(code, flip(0x40), [...INPUTS, 'f(([]{ static int a[] = {40}; return a; })())', 'f(([]{ static int a[] = {1}; return a; })())', 'f(([]{ static int a[] = {200}; return a; })())']);
   });
 });
+
+describe('a return copy that loads its own value: the source had no guard', () => {
+  const nestedForm = [
+    'int f(int* p) {',              // 1
+    '  if (!p) {',                  // 2
+    '    return 0;',                // 3
+    '  }',                          // 4
+    '  if (p[0] != 0) {',           // 5
+    '    p[1] = 3;',                // 6
+    '  }',                          // 7
+    '  return 1;',                  // 8
+    '}',
+  ].join('\n');
+  const ev = (insns: string[]) => ({
+    ...evidence(nestedForm, [edge(2, 0x02, 0x08, 0x04, [3], [5]), edge(5, 0x12, 0x1e, 0x14, [6], [8])]),
+    returns: [{ start: 0x1e, ret: 0x24, insns }],
+  });
+  const flatten = (insns: string[]) => flat(emit(earlyReturnPlugin.createTransformer({ branchLayout: ev(insns) })(parse(nestedForm)) as AnyNode));
+
+  it('early-return keeps `if (C) { S } return K;` when the jump lands on the load of K (004e1740)', () => {
+    assert.ok(flatten(['MOV/EAX', 'POP/ESI', 'RET']).includes('if (p[0] != 0) { p[1] = 3; } return 1;'), flatten(['MOV/EAX', 'POP/ESI', 'RET']));
+  });
+
+  it('and makes the guard as before when the copy holds no load', () => {
+    assert.ok(flatten(['POP/ESI', 'RET']).includes('if (p[0] == 0) return 1; p[1] = 3; return 1;'), flatten(['POP/ESI', 'RET']));
+  });
+
+  it('the guard keeps the values', native, () => {
+    sameValues(nestedForm, flatten(['POP/ESI', 'RET']), INPUTS);
+  });
+
+  it('the predictor counts a guard whose jump lands on its value\'s load', () => {
+    const guardForm = [
+      'int f(int* p) {',            // 1
+      '  if (!p) {',                // 2
+      '    return 0;',              // 3
+      '  }',                        // 4
+      '  if (p[0] == 0) {',         // 5
+      '    return 1;',              // 6
+      '  }',                        // 7
+      '  p[1] = 3;',                // 8
+      '  return 1;',                // 9
+      '}',
+    ].join('\n');
+    const score = (insns: string[]) => {
+      const b = body(guardForm);
+      const e = { ...evidence(guardForm, [edge(2, 0x02, 0x08, 0x04, [3], [5]), edge(5, 0x12, 0x1e, 0x14, [8], [6, 9])]), returns: [{ start: 0x1e, ret: 0x24, insns }] };
+      return scoreBody(b, new LayoutReader(e, b), new Set()).objective;
+    };
+    assert.strictEqual(score(['MOV/EAX', 'POP/ESI', 'RET']), 1);
+    assert.strictEqual(score(['POP/ESI', 'RET']), 0);
+  });
+});

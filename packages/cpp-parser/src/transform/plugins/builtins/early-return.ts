@@ -58,6 +58,7 @@ import type { TransformPlugin, PluginOptions } from '../types.js';
 import { getChildren } from '../../../ast/visitor.js';
 import { LayoutReader, isLoop, type BranchLayoutEvidence } from './branch-layout/evidence.js';
 import { conditionShape } from './branch-layout/index.js';
+import { returnOrder, constantValue, loadsEax, hasCall, hasLoop, earlierCopy } from './branch-layout/predict.js';
 import { createExprShape, type ExprShape } from './expr-shape.js';
 import { localTypesOf } from './compare-form.js';
 import type { TypedefResolver } from './call-arg-cast.js';
@@ -239,6 +240,14 @@ function backIntoCopy(reader: LayoutReader, ifs: IfStmt): boolean {
   return !!e && e.target < e.jcc && reader.fallInto(ifs) === 'other' && reader.returnCopyAt(e.target);
 }
 
+/** The if falls into its arm and jumps onto the first instruction of a return copy that loads EAX. */
+function jumpsOntoLoad(reader: LayoutReader, ifs: IfStmt): boolean {
+  const e = reader.edge(ifs);
+  if (!e || reader.fallInto(ifs) !== 'then') return false;
+  const c = reader.returnCopyStarting(e.target);
+  return !!c && loadsEax(c);
+}
+
 /** The gate for one function, read from its body before any guard is made. */
 function layoutGate(ev: BranchLayoutEvidence, body: CompoundStmt): GuardGate {
   const reader = new LayoutReader(ev, body);
@@ -250,6 +259,14 @@ function layoutGate(ev: BranchLayoutEvidence, body: CompoundStmt): GuardGate {
     if (stmts.length === 1 && stmts[0].kind === NodeKind.ReturnStmt && backIntoCopy(reader, ifs)) return false;
     // A bare `return;` has no code of its own: no evidence either way, as in case B.
     if (!ret.value) return true;
+    // `if (C) { BODY } return K;`, K a constant, whose jump lands on a copy of the return
+    // that loads K itself: the source had no guard there. A guard `if (!C) return K;` makes
+    // VC8 load K before the test and jump past the load when BODY is straight code that
+    // leaves EAX alone (no call, no loop), and merge the guard into an earlier copy of K
+    // when there is one (a simple condition, BODY falling into the return); otherwise the
+    // two forms compile the same and the guard is made.
+    if (!isTerminator(stmts[stmts.length - 1]) && constantValue(ret.value) && conditionShape(ifs.condition).kind === 'simple'
+      && jumpsOntoLoad(reader, ifs) && ((!hasCall(stmts) && !hasLoop(stmts)) || earlierCopy(returnOrder(body), ifs, ret))) return false;
     // BODY falling through takes a copy of the return; which copy keeps the code (VC8
     // emits one per path or merges them) is not the layout's to say. Except where BODY
     // runs on only through the ifs a pass split off this one decompiled condition: the
