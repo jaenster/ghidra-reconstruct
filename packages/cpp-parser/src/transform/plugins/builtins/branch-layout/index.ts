@@ -35,8 +35,10 @@
  *             say which test T follows: after the first, one guard per test; after the
  *             second of `P && P->f == K && ...`, the getter compared once,
  *             `(P ? P->f : D) != K`, then one guard per further test; after the last, the
- *             getter `!(P ? x : 0)` or `(P ? P->f : D) != K`. Where T is a return the
- *             original merged into an earlier guard's copy, one guard per test.
+ *             getter `!(P ? x : 0)` or `(P ? P->f : D) != K`. D is the field's null
+ *             default from the original's own getters; without one that keeps the value,
+ *             the condition stays as printed. Where T is a return the original merged
+ *             into an earlier guard's copy, one guard per test.
  *
  * Every arm keeps its statements; a negated condition is exact: a `!` is dropped, `==`/`!=`
  * flipped, a relational operator flipped only against an integer literal (a floating-point
@@ -50,7 +52,7 @@ import { NodeKind } from '../../../../ast/kinds.js';
 import type {
   ASTNode, CompoundStmt, ExprStmt, IfStmt, LabelStmt, GotoStmt, Statement, Expression,
   CallExpr, UnaryExpr, BinaryExpr, ParenExpr, ReturnStmt, CStyleCastExpr, FunctionDecl, IntegerLiteralExpr,
-  DeclStmt, VariableDecl, Identifier, AnyNode,
+  DeclStmt, VariableDecl, Identifier, AnyNode, TypeNode,
 } from '../../../../ast/nodes.js';
 import { emit } from '../../../../emit/index.js';
 import { sameExpr } from '../rotated-for-loop.js';
@@ -58,6 +60,8 @@ import { traverseAST, getChildren } from '../../../../ast/visitor.js';
 import { createTransformer, updateNode, cloneNode, type Transformer } from '../../../transformer.js';
 import { Stmt, Expr } from '../../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../../types.js';
+import { constantValue, fieldRead, nullTest, pointeeName, type NullGetterTable } from '../null-getter.js';
+import { localTypesOf } from '../compare-form.js';
 import { DEFAULT_NORETURN_FUNCTIONS } from '../goto-cleanup/types.js';
 import { holdsFreeCase } from '../goto-cleanup/paths.js';
 import { leaves, isHaltStmt, isExitStmt, negateCondition } from '../assert-order.js';
@@ -73,6 +77,13 @@ export interface BranchLayoutOptions extends PluginOptions {
   noreturnFunctions?: string[];
   /** Called once per rewrite and per site left for want of a source form. */
   onSite?: (e: { rule: 'swap' | 'nest' | 'split' | 'getter' | 'left'; line: number; why?: string }) => void;
+  /**
+   * The null default of each field read through a null-guarded getter (`null-getter.ts`),
+   * keyed `<pointee type>|<member path>`; without it no getter comparison is written.
+   */
+  nullGetters?: NullGetterTable;
+  /** Enumerator name -> value, to value the constant a getter is compared with. */
+  enumValues?: Readonly<Record<string, number>>;
 }
 
 function unwrapParens(e: Expression): Expression {
@@ -257,6 +268,10 @@ interface Ctx {
   /** Lines of the ifs that sit inside a loop. */
   loopIfs: ReadonlySet<number>;
   onSite?: BranchLayoutOptions['onSite'];
+  nullGetters: NullGetterTable;
+  enumValues: Readonly<Record<string, number>>;
+  /** Declared type of each parameter and local of the function. */
+  localTypes: ReadonlyMap<string, TypeNode>;
 }
 
 function lineOf(s: Statement): number {
@@ -509,28 +524,45 @@ function mentions(e: Expression, sub: Expression): boolean {
 }
 
 /**
- * `!(P && f == K)`, P a value and f read through it, as the source's inlined getter of f
- * compared once: `(P ? f : D) != K` with D a constant other than K, so a failing P runs
- * into the arm without a test of its own (`!(P && f != K)` is `(P ? f : K) == K`). VC8
- * lays that out with the arm after the comparison, where `!P || f != K` puts it after the
- * rest. Null for any other shape.
+ * `!(P && f == K)`, P a pointer tested for null and f a field read through it, as the
+ * source's inlined getter of f compared once: `(P ? f : D) != K`, so a failing P runs into
+ * the arm without a test of its own. VC8 lays that out with the arm after the comparison,
+ * where `!P || f != K` puts it after the rest. D is the getter's own null default, read off
+ * the original's bodies (`null-getter.ts`); the form keeps the value only when D != K
+ * (`!(P && f != K)` is `(P ? f : D) == K` only when D == K), so a field without a known
+ * default, or whose default fails that, keeps the condition as printed. `why` says which.
  */
-function compareGetter(p: Expression, q: Expression): Expression | null {
+function compareGetter(p: Expression, q: Expression, ctx: Ctx): { cond: Expression } | { why: string } | null {
   if (!valueOperand(p) || branches(p) || hasCallOrWrite(p)) return null;
   const c = unwrapParens(q);
   if (c.kind !== NodeKind.BinaryExpr) return null;
   const b = c as BinaryExpr;
   if (b.operator !== '==' && b.operator !== '!=') return null;
-  const kind = constantOperand(b.right);
-  if (!kind || constantOperand(b.left) || branches(b.left) || hasCallOrWrite(b.left) || !mentions(b.left, unwrapParens(p))) return null;
-  const k = b.right;
-  let other: Expression;
+  if (!constantOperand(b.right) || constantOperand(b.left) || branches(b.left) || hasCallOrWrite(b.left) || !mentions(b.left, unwrapParens(p))) return null;
+  const t = nullTest(p);
+  const r = fieldRead(b.left);
+  if (!t || t.nullWhenTrue || !r || r.p.name !== t.p.name) return { why: 'not a field read through the tested pointer' };
+  const struct = pointeeName(ctx.localTypes.get(t.p.name));
+  const key = struct ? `${struct}|${r.path.join('.')}` : null;
+  const def = key ? ctx.nullGetters[key] : undefined;
+  if (!def) return { why: `no null default known for ${key ?? r.path.join('.')}` };
+  const k = constantValue(b.right, n => ctx.enumValues[n]);
+  if (!k) return { why: 'constant without a value' };
   if (b.operator === '==') {
-    const v = kind === 'literal' ? literalValue(k) : null;
-    other = v !== null ? Expr.intLiteral(v === 0n ? 1 : 0) : Expr.unary('~', Expr.paren(cloneNode(k) as Expression));
-  } else other = cloneNode(k) as Expression;
-  const pick = Expr.paren(Expr.conditional(cloneNode(p) as Expression, b.left, other));
-  return Expr.binary(pick, b.operator === '==' ? '!=' : '==', k);
+    // Distinct 32-bit patterns: the two differ in int, unsigned and any wider type alike.
+    if (def.value === k.value) return { why: `null default ${def.name ?? def.value} equals the constant` };
+  } else {
+    // Equal as written, not only after truncation to 32 bits.
+    const raw = literalValue(b.right);
+    if (def.value !== k.value || (raw !== null && raw !== BigInt(def.value))) {
+      return { why: `null default ${def.name ?? def.value} is not the constant` };
+    }
+  }
+  if (!def.name && def.value === -0x80000000) return { why: 'null default without a literal spelling' };
+  const dflt = def.name ? Expr.identifier(def.name)
+    : def.value < 0 ? Expr.unary('-', Expr.intLiteral(-def.value)) : Expr.intLiteral(def.value);
+  const pick = Expr.paren(Expr.conditional(cloneNode(p) as Expression, b.left, dflt));
+  return { cond: Expr.binary(pick, b.operator === '==' ? '!=' : '==', b.right) };
 }
 
 /**
@@ -613,8 +645,12 @@ function orGuardAt(stmts: readonly Statement[], i: number, cb: number, ctx: Ctx)
     let guards: Expression[] | null = null;
     if (k === 0) guards = ops.tests;
     else if (k === 1 && ops.tests.length >= 3) {
-      const g = compareGetter(ops.conj[0], ops.conj[1]);
-      if (g) guards = [g, ...ops.tests.slice(2)];
+      const g = compareGetter(ops.conj[0], ops.conj[1], ctx);
+      if (g && 'cond' in g) guards = [g.cond, ...ops.tests.slice(2)];
+      else if (g && 'why' in g) {
+        ctx.onSite?.({ rule: 'left', line: lineOf(ifs), why: `getter compare: ${g.why}` });
+        return null;
+      }
     }
     if (!guards) {
       ctx.onSite?.({ rule: 'left', line: lineOf(ifs), why: `leaving arm among the tests, after operand ${k ?? '?'} of ${ops.tests.length}` });
@@ -625,7 +661,7 @@ function orGuardAt(stmts: readonly Statement[], i: number, cb: number, ctx: Ctx)
       ctx.onSite?.({ rule: 'left', line: lineOf(ifs), why: 'leaving arm among the tests, arm not copyable' });
       return null;
     }
-    ctx.onSite?.({ rule: k === 0 ? 'split' : 'getter', line: lineOf(ifs), why: `arm after operand ${k} of ${ops.tests.length}${shared !== null ? ', merged return' : ''}` });
+    ctx.onSite?.({ rule: k === 0 ? 'split' : 'getter', line: lineOf(ifs), why: `${k === 0 ? '' : 'getter compare: '}arm after operand ${k} of ${ops.tests.length}${shared !== null ? ', merged return' : ''}` });
     return splitGuards(ifs, guards, rest, ctx);
   }
 
@@ -633,12 +669,20 @@ function orGuardAt(stmts: readonly Statement[], i: number, cb: number, ctx: Ctx)
   const rE = armEntry(rest[0], cb, ctx);
   if (rE === null || rE <= tE) return null;
   let cond = getterCondition(ifs.condition);
-  if (!cond && ops && ops.conj.length === 2) cond = compareGetter(ops.conj[0], ops.conj[1]);
+  let compared = false;
+  if (!cond && ops && ops.conj.length === 2) {
+    const g = compareGetter(ops.conj[0], ops.conj[1], ctx);
+    if (g && 'why' in g) {
+      ctx.onSite?.({ rule: 'left', line: lineOf(ifs), why: `getter compare: ${g.why}` });
+      return null;
+    }
+    if (g && 'cond' in g) { cond = g.cond; compared = true; }
+  }
   if (!cond) {
     ctx.onSite?.({ rule: 'left', line: lineOf(ifs), why: 'leaving arm after the last test, not `!(P && value)` or `!(P && f == K)`' });
     return null;
   }
-  ctx.onSite?.({ rule: 'getter', line: lineOf(ifs), why: 'arm after the last test' });
+  ctx.onSite?.({ rule: 'getter', line: lineOf(ifs), why: `${compared ? 'getter compare: ' : ''}arm after the last test` });
   return [updateNode(ifs, { condition: cond } as Partial<IfStmt>), ...rest];
 }
 
@@ -684,6 +728,9 @@ function rewriteFunction(fn: FunctionDecl, ev: BranchLayoutEvidence, opts: Branc
     gotos: gotoCounts(fn.body),
     loopIfs: loopIfLines(fn.body),
     onSite: opts.onSite,
+    nullGetters: opts.nullGetters ?? {},
+    enumValues: opts.enumValues ?? {},
+    localTypes: localTypesOf(fn),
   };
   let n = 0;
   const t = createTransformer({

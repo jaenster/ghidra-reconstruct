@@ -363,20 +363,63 @@ describe('branchLayoutPlugin - || guard whose arm the original placed elsewhere'
     assert.strictEqual(second, first);
   });
 
-  it('compares an inlined getter once where the last test is a comparison against a constant', () => {
-    const { out, sites } = run(getter.map(l => l.replace('p->t == 1 && p->d', 'p->t == 1')));
+  // The null defaults the original's own getters give (null-getter.ts).
+  const nullGetters = { 'S|t': { value: -1 }, 'S|eType': { value: 6, name: 'UNIT_COUNT' }, 'S|u': { value: 3 } };
+  const enumValues = { UNIT_PLAYER: 0, UNIT_MONSTER: 1, UNIT_COUNT: 6 };
+  const known = { nullGetters, enumValues };
+
+  it('compares an inlined getter once with its null default where the last test is a comparison against a constant', () => {
+    const { out, sites } = run(getter.map(l => l.replace('p->t == 1 && p->d', 'p->t == 1')), known);
     assert.deepStrictEqual(sites, ['getter']);
-    assert.ok(out.includes('if ((p ? p->t : 0) != 1) { return 0; } return p->d->v;'), out);
+    assert.ok(out.includes('if ((p ? p->t : -1) != 1) { return 0; } return p->d->v;'), out);
   });
 
-  it('defaults a getter compared against an enumerator to its complement', () => {
-    const { out } = run(getter.map(l => l.replace('!(p && p->t == 1 && p->d)', '!p || p->eType != UNIT_MONSTER')));
-    assert.ok(out.includes('if ((p ? p->eType : ~UNIT_MONSTER) != UNIT_MONSTER) { return 0; }'), out);
+  it('spells an enumerator default by its name and values the constant through the enum', () => {
+    const { out } = run(getter.map(l => l.replace('!(p && p->t == 1 && p->d)', '!p || p->eType != UNIT_MONSTER')), known);
+    assert.ok(out.includes('if ((p ? p->eType : UNIT_COUNT) != UNIT_MONSTER) { return 0; }'), out);
   });
 
-  it('defaults a getter tested for inequality to the constant itself', () => {
-    const { out } = run(getter.map(l => l.replace('p->t == 1 && p->d', 'p->t != 3')));
-    assert.ok(out.includes('if ((p ? p->t : 3) == 3) { return 0; }'), out);
+  it('writes a getter tested for inequality where its null default is the constant', () => {
+    const { out, sites } = run(getter.map(l => l.replace('p->t == 1 && p->d', 'p->u != 3')), known);
+    assert.deepStrictEqual(sites, ['getter']);
+    assert.ok(out.includes('if ((p ? p->u : 3) == 3) { return 0; }'), out);
+  });
+
+  it('leaves a getter tested for inequality where its null default is another value', () => {
+    const { out, sites } = run(getter.map(l => l.replace('p->t == 1 && p->d', 'p->t != 3')), known);
+    assert.deepStrictEqual(sites, ['left']);
+    assert.ok(out.includes('if (!(p && p->t != 3))'), out);
+  });
+
+  it('leaves a field without a known null default as printed', () => {
+    const { out, sites } = run(getter.map(l => l.replace('p->t == 1 && p->d', 'p->w == 1')), known);
+    assert.deepStrictEqual(sites, ['left']);
+    assert.ok(out.includes('if (!(p && p->w == 1))') && !out.includes('?'), out);
+  });
+
+  it('writes no getter without the table', () => {
+    const { sites } = run(getter.map(l => l.replace('p->t == 1 && p->d', 'p->t == 1')));
+    assert.deepStrictEqual(sites, ['left']);
+  });
+
+  it('leaves a getter whose null default equals the constant compared for equality', () => {
+    const { sites } = run(getter.map(l => l.replace('p->t == 1 && p->d', 'p->t == -1')), known);
+    assert.deepStrictEqual(sites, ['left']);
+  });
+
+  it('reads the default under 32 bits: 0xffffffff is the default -1', () => {
+    const { sites } = run(getter.map(l => l.replace('p->t == 1 && p->d', 'p->t == 0xffffffff')), known);
+    assert.deepStrictEqual(sites, ['left']);
+  });
+
+  it('leaves a field whose default was read for another type', () => {
+    const { sites } = run(getter.map(l => l.replace('S* p', 'T* p').replace('p->t == 1 && p->d', 'p->t == 1')), known);
+    assert.deepStrictEqual(sites, ['left']);
+  });
+
+  it('leaves an enumerator constant without a value', () => {
+    const { sites } = run(getter.map(l => l.replace('!(p && p->t == 1 && p->d)', '!p || p->eType != UNIT_OBJECT')), known);
+    assert.deepStrictEqual(sites, ['left']);
   });
 
   it('leaves a comparison against a variable', () => {
@@ -421,9 +464,16 @@ describe('branchLayoutPlugin - || guard of three or more tests, by per-operand b
 
   it('compares the getter once and guards the rest where the arm follows the second', () => {
     const lines = three.map(l => l.replace('[0x4,0x6] return 0', '[0xb,0xd] return 0'));
-    const { out, sites } = runOps(lines, [[0x2], [0x9], [0x14]]);
+    const { out, sites } = runOps(lines, [[0x2], [0x9], [0x14]], { nullGetters: { 'S|t': { value: 0 } } });
     assert.deepStrictEqual(sites, ['getter']);
     assert.ok(out.includes('if ((p ? p->t : 0) != 1) { return 0; } if (!p->d) { return 0; } return p->d->v;'), out);
+  });
+
+  it('leaves the arm after the second where the getter has no known null default', () => {
+    const lines = three.map(l => l.replace('[0x4,0x6] return 0', '[0xb,0xd] return 0'));
+    const { out, sites } = runOps(lines, [[0x2], [0x9], [0x14]]);
+    assert.deepStrictEqual(sites, ['left']);
+    assert.ok(!out.includes('?'), out);
   });
 
   it('is idempotent', () => {

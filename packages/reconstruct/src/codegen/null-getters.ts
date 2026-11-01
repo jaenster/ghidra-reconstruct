@@ -1,7 +1,7 @@
 /**
  * The null default of each field the original reads through a null-guarded getter, from the
  * getters it keeps out of line and the copies it inlined (cpp-parser `null-getter.ts`). The
- * `compare-form` pass writes the getter back with this default where a decompiled
+ * `compare-form` and `branch-layout` passes write the getter back with this default where a decompiled
  * `p && p->f == K` was compiled from it.
  */
 
@@ -31,6 +31,8 @@ export interface NullGetterDefaults {
   conflicts: string[];
   /** How many bodies gave evidence. */
   evidence: number;
+  /** Enumerator name -> value, as the evidence was valued. */
+  enums: Record<string, number>;
 }
 
 /** The table over every function with a decompile. */
@@ -44,5 +46,5 @@ export function nullGetterDefaults(functions: readonly ExtractedFunction[], data
     all.push(...nullGetterEvidence(fn, n => enums.get(n)));
   }
   const { table, conflicts } = nullGetterTable(all);
-  return { table, conflicts, evidence: all.length };
+  return { table, conflicts, evidence: all.length, enums: Object.fromEntries(enums) };
 }

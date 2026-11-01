@@ -2508,6 +2508,7 @@ function installFileStaticFunctions(
 function installNullGetters(context: ImplGenContext, functions: ExtractedFunction[], dataTypes: ExtractedDataType[], report: boolean): void {
   const r = nullGetterDefaults(functions, dataTypes);
   context.nullGetters = r.table;
+  context.nullGetterEnums = r.enums;
   if (report) {
     console.log(`Null-guarded getters: ${Object.keys(r.table).length} field defaults from ${r.evidence} reads` +
       (r.conflicts.length ? `, ${r.conflicts.length} fields left without one (disagreeing defaults: ${r.conflicts.join(', ')})` : ''));

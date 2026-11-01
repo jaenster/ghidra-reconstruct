@@ -564,9 +564,12 @@ export interface ImplGenContext {
   inlinedCalls?: { calleesBySite: ReadonlyMap<string, InlinedCallee[]>; tables: InlinedCallTables };
   /**
    * The null default of each field the original reads through a null-guarded getter
-   * (null-getters.ts), keyed `<pointee type>|<member path>`, for `compare-form`.
+   * (null-getters.ts), keyed `<pointee type>|<member path>`, for `compare-form` and
+   * `branch-layout`.
    */
   nullGetters?: NullGetterTable;
+  /** Enumerator name -> value (null-getters.ts), for the constant such a getter is compared with. */
+  nullGetterEnums?: Record<string, number>;
   /** Optional precomputed method mappings for call-site rewriting */
   methodMappings?: Record<string, MethodCallMapping>;
   /** Analyzed globals for static-local injection into function bodies */
@@ -3208,6 +3211,8 @@ function transformDecompiledCode(
       perPluginOptions['early-return'] = { ...(perPluginOptions['early-return'] as object | undefined), branchLayout: layout };
       perPluginOptions['branch-layout'] = {
         branchLayout: layout,
+        nullGetters: context?.nullGetters,
+        enumValues: context?.nullGetterEnums,
         ...(process.env.GHIDRA_BRANCH_LAYOUT_REPORT ? {
           onSite: (e: { rule: string; line: number; why?: string }) =>
             console.warn(`[branch-layout] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.rule} at line ${e.line}${e.why ? ` (${e.why})` : ''}`),
