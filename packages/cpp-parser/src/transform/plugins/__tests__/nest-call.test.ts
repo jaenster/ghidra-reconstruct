@@ -259,6 +259,43 @@ describe('nestCallPlugin', () => {
     assert.deepStrictEqual(sites, []);
   });
 
+  describe('with the callees\' write effects', () => {
+    const field = (effects: NestCallOptions['writeEffects'], arg = 'pUnit->nId') =>
+      run(quest(0).map(l => l.replace('HasQuestItem(pGame, pUnit, 0x20736b62)', `HasQuestItem(pGame, pUnit, ${arg})`)),
+        { writeEffects: effects });
+
+    it('nests beside a field read when the call writes nothing', () => {
+      const { out, sites } = field({ GetGamePointer: {} });
+      assert.deepStrictEqual(sites, [1]);
+      assert.ok(out.includes('r = HasQuestItem(GetGamePointer(pUnit), pUnit, pUnit->nId);'), out);
+    });
+
+    it('leaves a field read beside a call that writes memory or a global', () => {
+      assert.deepStrictEqual(field({ GetGamePointer: { memory: true } }).sites, []);
+      assert.deepStrictEqual(field({ GetGamePointer: { params: [0] } }).sites, []);
+      assert.deepStrictEqual(field({ GetGamePointer: { globals: ['gOther'] } }).sites, []);
+    });
+
+    it('nests beside a global the call does not write, and leaves the one it writes', () => {
+      assert.deepStrictEqual(field({ GetGamePointer: { globals: ['WindowSizeX'] } }, 'gCounter').sites, [1]);
+      assert.deepStrictEqual(field({ GetGamePointer: { globals: ['gCounter'] } }, 'gCounter').sites, []);
+      assert.deepStrictEqual(field({ GetGamePointer: { memory: true } }, 'gCounter').sites, []);
+    });
+
+    it('leaves it when the callee has no summary, or an unknown one', () => {
+      assert.deepStrictEqual(field({}).sites, []);
+      assert.deepStrictEqual(field({ GetGamePointer: { unknown: true } }).sites, []);
+    });
+
+    it('counts the calls inside the nested call\'s arguments', () => {
+      const { sites } = run(quest(0).map(l => l
+        .replace('pGame = GetGamePointer(pUnit);', 'pGame = GetGamePointer(Rand());')
+        .replace('HasQuestItem(pGame, pUnit, 0x20736b62)', 'HasQuestItem(pGame, pUnit, pUnit->nId)')),
+      { writeEffects: { GetGamePointer: {}, Rand: { globals: ['gSeed'] } } });
+      assert.deepStrictEqual(sites, []);
+    });
+  });
+
   it('nests beside an enumerator and a local array', () => {
     const { out, sites } = run(quest(0).map(l => l.replace('HasQuestItem(pGame, pUnit, 0x20736b62)', 'HasQuestItem(pGame, pUnit, QUEST_A)')),
       { enumConstants: ['QUEST_A'] });
@@ -531,7 +568,10 @@ describe('nestCallPlugin', () => {
       '  return r * 1000 + r2;',
       '}',
     ];
-    const opts: Partial<NestCallOptions> = { functionReturnTypes: { ...TYPES.functionReturnTypes, Bump: 'int' } };
+    const opts: Partial<NestCallOptions> = {
+      functionReturnTypes: { ...TYPES.functionReturnTypes, Bump: 'int' },
+      writeEffects: { Bump: { globals: ['gCounter'] }, Take: {} },
+    };
     const { code } = fixture(lines);
     const { out, sites } = run(lines, opts);
     assert.ok(out.includes('x = Bump(a); r = Take(gCounter, x, a);'), out);

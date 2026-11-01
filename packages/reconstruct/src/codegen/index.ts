@@ -57,6 +57,7 @@ import type {
   ExtractedString,
 } from '../types.js';
 import { resolveOverridePlaceholders } from './impl.js';
+import { buildWriteEffects } from './write-effects-table.js';
 import {
   VOID_POINTER_SLOT,
   getFuncPtrArgCastArityMismatchList,
@@ -5988,6 +5989,7 @@ export function buildFuncPtrArgCastTables(
     ambiguousGlobalNames: [...ambiguousGlobalNames],
     stringConstantNames,
     varArgFunctions: [...varArgFunctions],
+    writeEffects: buildWriteEffects(functions, globalTypes),
     fieldTypes,
     typedefTargets,
     structFields,
