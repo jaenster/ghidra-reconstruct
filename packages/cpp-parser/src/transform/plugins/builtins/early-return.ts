@@ -233,11 +233,21 @@ function chainLeaves(s: Statement, line: number): boolean {
   return isTerminator(last) || chainLeaves(last, line);
 }
 
+/** The if's conditional jump goes backward to the start of a return copy of the original. */
+function backIntoCopy(reader: LayoutReader, ifs: IfStmt): boolean {
+  const e = reader.edge(ifs);
+  return !!e && e.target < e.jcc && reader.fallInto(ifs) === 'other' && reader.returnCopyAt(e.target);
+}
+
 /** The gate for one function, read from its body before any guard is made. */
 function layoutGate(ev: BranchLayoutEvidence, body: CompoundStmt): GuardGate {
   const reader = new LayoutReader(ev, body);
   const inLoop = loopIfLines(body);
   return (ifs, stmts, ret) => {
+    // `if (C) { return K; } return X;` whose jump lands back on an earlier copy of K: the
+    // original's guard returns K, merged into the copy written before it. Turned around,
+    // X's test would jump and K's copy would move to the end.
+    if (stmts.length === 1 && stmts[0].kind === NodeKind.ReturnStmt && backIntoCopy(reader, ifs)) return false;
     // A bare `return;` has no code of its own: no evidence either way, as in case B.
     if (!ret.value) return true;
     // BODY falling through takes a copy of the return; which copy keeps the code (VC8

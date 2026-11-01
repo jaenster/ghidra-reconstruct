@@ -6,6 +6,7 @@ import type { AnyNode, CompoundStmt, FunctionDecl, IfStmt, ASTNode } from '../..
 import { traverseAST } from '../../../ast/visitor.js';
 import { NodeKind } from '../../../ast/kinds.js';
 import { branchLayoutPlugin } from '../builtins/branch-layout/index.js';
+import { earlyReturnPlugin } from '../builtins/early-return.js';
 import { LayoutReader, type BranchLayoutEvidence, type BranchEdge } from '../builtins/branch-layout/evidence.js';
 import { scoreBody, predictFall, predictContext } from '../builtins/branch-layout/predict.js';
 import { compileAndRun, hasNativeGpp } from '../../../testing/native-cpp.js';
@@ -326,5 +327,37 @@ describe('branch-layout search - swap and nest', () => {
 
   it('leaves a guard whose arm the original laid out inline', () => {
     assert.deepStrictEqual(run(guard, [edge(2, 0x02, 0x40, 0x04, [3], [5]), edge(5, 0x06, 0x20, 0x08, [6], [8])]).sites, []);
+  });
+});
+
+describe('early-return - a guard that jumps back into an earlier copy stays a guard', () => {
+  const code = [
+    'int f(int* p) {',              // 1
+    '  int c = p ? p[0] : 0;',      // 2
+    '  switch (c) {',               // 3
+    '  case 1:',                    // 4
+    '    return 0;',                // 5
+    '  }',                          // 6
+    '  if (c <= 32) {',             // 7
+    '    return 0;',                // 8
+    '  }',                          // 9
+    '  return c < 127;',            // 10
+    '}',
+  ].join('\n');
+  const flip = (target: number) => {
+    const ev = { ...evidence(code, [edge(7, 0x29, target, 0x2b, [10], [8])]), returns: [{ start: 0x21, ret: 0x24, insns: ['XOR/EAX', 'POP/EBP', 'RET'] }] };
+    return flat(emit(earlyReturnPlugin.createTransformer({ branchLayout: ev })(parse(code)) as AnyNode));
+  };
+
+  it('keeps the decompile\'s guard when its jump lands back on the switch\'s copy (0042fe70)', () => {
+    assert.ok(flip(0x21).includes('if (c <= 32) { return 0; } return c < 127;'), flip(0x21));
+  });
+
+  it('turns it around as before when the jump goes forward', () => {
+    assert.ok(flip(0x40).includes('if (c > 32) return c < 127; return 0;'), flip(0x40));
+  });
+
+  it('the turned-around form keeps the values', native, () => {
+    sameValues(code, flip(0x40), [...INPUTS, 'f(([]{ static int a[] = {40}; return a; })())', 'f(([]{ static int a[] = {1}; return a; })())', 'f(([]{ static int a[] = {200}; return a; })())']);
   });
 });

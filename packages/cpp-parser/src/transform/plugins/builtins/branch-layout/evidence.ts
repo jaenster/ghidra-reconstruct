@@ -244,6 +244,11 @@ export class LayoutReader {
     return (this.ev.edges ?? []).filter(e => e.target === offset);
   }
 
+  /** A return copy of the original starts at `offset`. */
+  returnCopyAt(offset: number): boolean {
+    return (this.ev.returns ?? []).some(c => c.start === offset);
+  }
+
   /** Every line `stmts` claim, copied or not. */
   linesOf(stmts: readonly ASTNode[]): Set<number> {
     const own = new Set<number>();
