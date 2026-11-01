@@ -101,6 +101,7 @@ import { flattenTemplateNames } from './template-names.js';
 import { buildTemplateRegistry, classScopeOf, memberDefinitionScope, templateDataDefinitions, templateHeaderTypes } from './templates/index.js';
 import { fileStaticKey, readForeignSources, selectFileStaticFunctions, type ForeignSource } from './file-static-functions.js';
 import { planInlinedCalls, type InlinedCallPlan } from './inlined-calls.js';
+import { nullGetterDefaults } from './null-getters.js';
 import { placeTemplateMembers } from './templates/placement.js';
 import { baseModel } from './templates/bases.js';
 import { memberModel } from './templates/members.js';
@@ -1500,6 +1501,7 @@ export function generateProjectStage1(
         .concat(resolution.unsorted.length > 0 ? [{ prefix: 'unsorted', functions: resolution.unsorted }] : []),
       !shard || shard.index === 0,
       () => inlinedCallTablesOf(functions, analyzedGlobals, dataTypes, strings ?? []));
+    installNullGetters(context, functions, dataTypes, !shard || shard.index === 0);
 
     // Generate files per target (classification happens here)
     const mergedTypeOwnerMap = new Map<string, string>();
@@ -1554,6 +1556,7 @@ export function generateProjectStage1(
     installFileStaticFunctions(context, fileStaticModel, classes, namespaces, foreignSources,
       [{ prefix: '', functions }], !shard || shard.index === 0,
       () => inlinedCallTablesOf(functions, analyzedGlobals, dataTypes, strings ?? []));
+    installNullGetters(context, functions, dataTypes, !shard || shard.index === 0);
 
     // Generate files (classification happens here)
     const flatTypeOwnerMap = generateFilesForFunctions(
@@ -2498,6 +2501,16 @@ function installFileStaticFunctions(
       const sites = [...context.inlinedCalls.calleesBySite.values()].reduce((n, c) => n + c.length, 0);
       console.log(`Inlined calls restored: ${inline} static inline functions, called again from ${context.inlinedCalls.calleesBySite.size} functions (${sites} callee-site pairs)`);
     }
+  }
+}
+
+/** The null default of each field the original reads through a null-guarded getter (null-getters.ts). */
+function installNullGetters(context: ImplGenContext, functions: ExtractedFunction[], dataTypes: ExtractedDataType[], report: boolean): void {
+  const r = nullGetterDefaults(functions, dataTypes);
+  context.nullGetters = r.table;
+  if (report) {
+    console.log(`Null-guarded getters: ${Object.keys(r.table).length} field defaults from ${r.evidence} reads` +
+      (r.conflicts.length ? `, ${r.conflicts.length} fields left without one (disagreeing defaults: ${r.conflicts.join(', ')})` : ''));
   }
 }
 

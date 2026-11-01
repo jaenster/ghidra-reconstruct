@@ -47,6 +47,12 @@ export interface GhidraMetadata {
    */
   signedCompareWidth?: number;
   /**
+   * The conditional is a null-guarded getter's value that `compare-form` wrote back from the
+   * decompile's `p && p->f == K`: its test of p was an operand of that `&&` of its own, so a
+   * pass counting the decompile's `&&`/`||` operands counts it as one more.
+   */
+  nullGetter?: boolean;
+  /**
    * The byte/word mask was a MOVZX of this source width in the original (`zero-extend-site`);
    * `zero-extend-cast` writes it as the cast to the unsigned type of that width.
    */

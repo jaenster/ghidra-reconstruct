@@ -174,6 +174,27 @@ void f(D2UnitStrc *pUnit) {
     );
   });
 
+  it("qualifies through a conditional: an arm's enum names the other arm and the compare", () => {
+    const output = transformCode(`
+void f(D2UnitStrc *pUnit) {
+  if ((pUnit ? pUnit->eAnimMode.eMonsterMode : Dead) == Neutral) {
+    a();
+  }
+}
+`);
+    assert.ok(output.includes(': eD2MonsterAnimMode_ns::Dead)'), `Expected the monster enum's Dead in: ${output}`);
+    assert.ok(output.includes('== eD2MonsterAnimMode_ns::Neutral'), `Expected the monster enum's Neutral in: ${output}`);
+    // Arms of two different enums say nothing about the compare.
+    const mixed = transformCode(`
+void f(D2UnitStrc *pUnit, int c) {
+  if ((c ? pUnit->eAnimMode.eMonsterMode : pUnit->eAnimMode.ePlayerMode) == Neutral) {
+    a();
+  }
+}
+`);
+    assert.ok(/== Neutral\b/.test(mixed) && !mixed.includes('_ns::Neutral'), `Expected Neutral left alone in: ${mixed}`);
+  });
+
   it('qualifies an assignment from the target', () => {
     const output = transformCode(`
 void f(void) {

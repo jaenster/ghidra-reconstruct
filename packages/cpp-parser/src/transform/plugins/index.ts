@@ -546,6 +546,7 @@ export { zeroExtendSitePlugin, zeroExtendCastPlugin, createZeroExtendSiteTransfo
 export { shiftCountMaskPlugin, createShiftCountMaskTransformer, type ShiftCountMaskOptions } from './builtins/shift-count-mask.js';
 export { createFunctionRanges, type ValueRange, type FunctionRanges } from './builtins/value-range.js';
 export { compareFormPlugin, type CompareFormDecision, type CompareFormOptions } from './builtins/compare-form.js';
+export { nullGetterEvidence, nullGetterTable, type NullGetterDefault, type NullGetterEvidence, type NullGetterTable } from './builtins/null-getter.js';
 export { repStringFormPlugin, createRepStringFormTransformer, type RepStringOp, type RepStringFormOptions } from './builtins/rep-string-form.js';
 export { compareSignednessPlugin } from './builtins/compare-signedness.js';
 export { callSiteOverrideCastPlugin, type CallSiteOverride } from './builtins/call-site-override-cast.js';

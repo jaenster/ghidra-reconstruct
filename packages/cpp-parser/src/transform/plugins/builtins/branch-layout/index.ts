@@ -401,11 +401,15 @@ function guardOperands(cond: Expression): { tests: Expression[]; conj: Expressio
   return negated ? { tests: flat.map(negate), conj: flat } : { tests: flat, conj: flat.map(negate) };
 }
 
-/** Leaf operands of the `&&`/`||` operators in `e`, as the extraction counts them. */
+/**
+ * Leaf operands of the `&&`/`||` operators in `e`, as the extraction counts them. A getter
+ * `compare-form` wrote back from `p && p->f == K` was two of them.
+ */
 function leafCount(e: Expression): number {
   let n = 1;
   for (const x of traverseAST(e)) {
     if (x.kind === NodeKind.BinaryExpr && ((x as BinaryExpr).operator === '&&' || (x as BinaryExpr).operator === '||')) n++;
+    else if (x.kind === NodeKind.ConditionalExpr && x.ghidraInfo?.nullGetter) n++;
   }
   return n;
 }

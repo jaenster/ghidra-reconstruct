@@ -38,7 +38,7 @@ import { foldedAddressFacts, type FoldedAddressFact } from './folded-address-spe
 import { immediateConstantFacts, dataAtAddress, type ImmediateConstantFact } from './immediate-constant-spec.js';
 import { compareFormSpec, type CompareFormSpec } from './compare-form-spec.js';
 import { repStringOps } from './rep-string-spec.js';
-import type { RepStringOp, Expression } from '@ghidra-mcp/cpp-parser';
+import type { RepStringOp, Expression, NullGetterTable } from '@ghidra-mcp/cpp-parser';
 import { ROOT_CLASS_SCOPE, namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 import { cleanFunctionComment, guardedFuncDefTypedef, emittedFunctionName, returnSigType, sigType } from './header.js';
 import { classScopeOf, memberCallModel, memberDefinitionScope, orphanMarker, signatureParameters } from './templates/index.js';
@@ -562,6 +562,11 @@ export interface ImplGenContext {
    * and the declarations their arguments are typed from.
    */
   inlinedCalls?: { calleesBySite: ReadonlyMap<string, InlinedCallee[]>; tables: InlinedCallTables };
+  /**
+   * The null default of each field the original reads through a null-guarded getter
+   * (null-getters.ts), keyed `<pointee type>|<member path>`, for `compare-form`.
+   */
+  nullGetters?: NullGetterTable;
   /** Optional precomputed method mappings for call-site rewriting */
   methodMappings?: Record<string, MethodCallMapping>;
   /** Analyzed globals for static-local injection into function bodies */
@@ -3093,6 +3098,7 @@ function transformDecompiledCode(
           functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         } : {}),
         enclosingVarTypes,
+        nullGetters: context?.nullGetters,
         onCensus: (c: { tied: number; rewritten: number; untied: number; zipped: boolean }) => {
           if (c.untied > 0) console.warn(`[cmp-form] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: untied ${c.untied} of ${c.tied + c.untied}${c.zipped ? '' : ' (comparisons differ from the decompile)'}`);
         },

@@ -155,9 +155,12 @@ export function compareFormDecision(site: CompareSite): CompareFormOutcome {
       return { decision: { ...base, op: rel === '==' ? '<' : '>=', swap, delta: 1, k, unsigned: true } };
     }
     if (F.has(rel) && k0 === b0) {
+      // `MOV r,[X+d]; CMP r,K`: the operand was loaded into a register first, which a field
+      // compared in place (`CMP [X+d],K`) is not.
+      const load = site.aKind === 'r' && site.bKind === 'i' ? { load: true } : {};
       return swap
         ? { decision: { ...base, op: rel, swap, delta: 0, k } }
-        : { decision: { ...base, keep: true, k } };
+        : { decision: { ...base, keep: true, k, ...load } };
     }
     return { reason: `${rel} ${k0} against ${[...F].join('/')} ${b0}` };
   }

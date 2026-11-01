@@ -50,6 +50,7 @@ import { createPlugin } from '../registry.js';
 import { createExprShape, type ExprShape, type ExprShapeTables } from './expr-shape.js';
 import { unwrapParens } from './call-arg-cast.js';
 import { Expr } from '../../../ast/factory.js';
+import { fieldRead, nullTest, pointeeName, type NullGetterTable } from './null-getter.js';
 
 /** One comparison tied to its instructions; `keep` when it already has their form. */
 export interface CompareFormDecision {
@@ -83,6 +84,8 @@ export interface CompareFormDecision {
   zextSum?: boolean;
   /** The flags are read by a SETcc: the compare's 0/1 is a value, not a branch. */
   set?: boolean;
+  /** An equality kept as printed whose operand the instructions loaded into a register before the CMP. */
+  load?: boolean;
 }
 
 export interface CompareFormOptions extends PluginOptions {
@@ -97,6 +100,11 @@ export interface CompareFormOptions extends PluginOptions {
   /** Every comparison token of the decompile, in text order. */
   sites?: Array<{ text: string; fp: [string, string]; size?: number }>;
   decisions?: CompareFormDecision[];
+  /**
+   * The null default of each field read through a null-guarded getter (`null-getter.ts`),
+   * keyed `<pointee type>|<member path>`.
+   */
+  nullGetters?: NullGetterTable;
   /** Called once per body with how many decisions were tied and how many were not. */
   onCensus?: (c: { tied: number; rewritten: number; untied: number; zipped: boolean }) => void;
 }
@@ -368,6 +376,11 @@ export function createCompareFormTransformer(options?: PluginOptions): Transform
           return updateNode(rs, { value: out } as Partial<ReturnStmt>);
         },
         visitBinaryExpr(be: BinaryExpr): ASTNode | undefined {
+          if ((be.operator === '&&' || be.operator === '||') && o.nullGetters) {
+            const out = getterChain(be, tied, o.nullGetters, localTypes);
+            if (out) rewritten++;
+            return out ?? undefined;
+          }
           const key = keyOf(be);
           const d = key ? tied.get(key) : undefined;
           if (d?.keep) {
@@ -386,6 +399,68 @@ export function createCompareFormTransformer(options?: PluginOptions): Transform
       return rewritten > 0 ? updateNode(node, { body } as Partial<FunctionDecl>) : undefined;
     },
   });
+}
+
+/** The operands of a chain of one logical operator, through parentheses. */
+function logicalOperands(e: Expression, op: '&&' | '||'): Expression[] {
+  const u = unwrapParens(e);
+  if (u.kind === NodeKind.BinaryExpr && (u as BinaryExpr).operator === op) {
+    return [...logicalOperands((u as BinaryExpr).left, op), ...logicalOperands((u as BinaryExpr).right, op)];
+  }
+  return [e];
+}
+
+/**
+ * `p && p->f == K` (or `!p || p->f != K`), where the instructions load the field into a
+ * register before the CMP, as the getter the source called: `(p ? p->f : D) == K`, D the
+ * field's null default from the original's own getters (`null-getter.ts`). VC8 compares the
+ * `&&` form against memory (`CMP [p+d],K`); the getter's value goes through a register, and
+ * its null arm, a constant other than K, folds into the test of p. The value is the same
+ * exactly when D != K, so a field without a known default, or whose default is K, is left.
+ * Null when nothing in the chain is that shape.
+ */
+function getterChain(be: BinaryExpr, tied: Map<string, CompareFormDecision>, table: NullGetterTable,
+  localTypes: Map<string, TypeNode>): Expression | null {
+  const op = be.operator as '&&' | '||';
+  const cmpOp = op === '&&' ? '==' : '!=';
+  const list = logicalOperands(be, op);
+  const out: Expression[] = [];
+  let changed = false;
+  for (let i = 0; i < list.length; i++) {
+    const next = i + 1 < list.length ? unwrapParens(list[i + 1]) : null;
+    const t = next ? nullTest(list[i]) : null;
+    if (t && next && t.nullWhenTrue === (op === '||') && next.kind === NodeKind.BinaryExpr && (next as BinaryExpr).operator === cmpOp) {
+      const c = next as BinaryExpr;
+      const key = keyOf(c);
+      const d = key ? tied.get(key) : undefined;
+      const r = fieldRead(c.left);
+      const struct = pointeeName(localTypes.get(t.p.name));
+      const def = struct && r ? table[`${struct}|${r.path.join('.')}`] : undefined;
+      if (d?.keep && d.load && d.k !== undefined && d.fp[1].startsWith('c:') && r && r.p.name === t.p.name && def) {
+        const bits = BigInt(8 * d.width);
+        const dv = Number(((BigInt(def.value) % (1n << bits)) + (1n << bits)) % (1n << bits));
+        if (dv !== d.k) {
+          const dflt = def.name ? Expr.identifier(def.name)
+            : def.value < 0 ? Expr.unary('-', Expr.intLiteral(-def.value)) : Expr.intLiteral(def.value);
+          const pick = Expr.paren({
+            ...Expr.conditional({ ...t.p, leadingTrivia: [], trailingTrivia: [] }, c.left, dflt),
+            ghidraInfo: { nullGetter: true },
+          } as Expression);
+          const cmp = updateNode(c, { left: pick, ghidraInfo: { ...(c.ghidraInfo ?? {}), originalAddress: `0x${d.address}` } } as Partial<BinaryExpr>);
+          out.push(Expr.paren(cmp));
+          i++;
+          changed = true;
+          continue;
+        }
+      }
+    }
+    out.push(list[i]);
+  }
+  if (!changed) return null;
+  if (out.length === 1) return { ...out[0], leadingTrivia: be.leadingTrivia, trailingTrivia: be.trailingTrivia } as Expression;
+  let acc = out[0];
+  for (let k = 1; k < out.length; k++) acc = Expr.binary(acc, op, out[k]);
+  return { ...acc, leadingTrivia: be.leadingTrivia, trailingTrivia: be.trailingTrivia } as Expression;
 }
 
 /**

@@ -31,7 +31,7 @@
 
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
-  ASTNode, AssignExpr, BinaryExpr, CallExpr, CaseStmt, CompoundStmt, DefaultStmt, Expression,
+  ASTNode, AssignExpr, BinaryExpr, CallExpr, CaseStmt, CompoundStmt, ConditionalExpr, DefaultStmt, Expression,
   FunctionDecl, Identifier, IfStmt, LabelStmt, ParameterDecl, ParenExpr, QualifiedId, SwitchStmt,
   TypeNode, VariableDecl,
 } from '../../../ast/nodes.js';
@@ -186,6 +186,12 @@ function createEnumConstantQualifyTransformer(
       const enumOf = (expr: Expression | undefined): string | undefined => {
         if (!expr) return undefined;
         const e = unwrapParens(expr);
+        if (e.kind === NodeKind.ConditionalExpr) {
+          // `p ? p->eMode : Death` has its arms' enum when the arms that state one agree.
+          const c = e as ConditionalExpr;
+          const a = enumOf(c.thenExpr), b = enumOf(c.elseExpr);
+          return a && b ? (a === b ? a : undefined) : a ?? b;
+        }
         const s = shape(e);
         if (s && s.stars === 0 && model.members.has(s.base)) return s.base;
         if (e.kind !== NodeKind.Identifier) return undefined;
@@ -282,6 +288,17 @@ function createEnumConstantQualifyTransformer(
             if (!enumName) return undefined;
             const body = qualifyLabels(s.body, enumName) as SwitchStmt['body'];
             return body === s.body ? undefined : updateNode(s, { body } as Partial<SwitchStmt>);
+          }
+          if (n.kind === NodeKind.ConditionalExpr) {
+            // Both arms are one value: an arm's enum names the other's constant.
+            const c = n as ConditionalExpr;
+            const fromThen = enumOf(c.thenExpr);
+            const elseExpr = fromThen ? qualify(c.elseExpr, fromThen) : undefined;
+            if (elseExpr) return updateNode(c, { elseExpr } as Partial<ConditionalExpr>);
+            const fromElse = enumOf(c.elseExpr);
+            const thenExpr = fromElse ? qualify(c.thenExpr, fromElse) : undefined;
+            if (thenExpr) return updateNode(c, { thenExpr } as Partial<ConditionalExpr>);
+            return undefined;
           }
           if (n.kind === NodeKind.BinaryExpr) {
             const b = n as BinaryExpr;
