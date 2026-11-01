@@ -384,6 +384,11 @@ export {
 } from './builtins/record-getter-guard.js';
 
 export {
+  fieldPointerFoldPlugin,
+  type FieldPointerFoldOptions,
+} from './builtins/field-pointer-fold.js';
+
+export {
   inlinedCallRestorePlugin,
   restoreInlinedCalls,
   compileInlinedCallee,
@@ -662,6 +667,7 @@ import { nestCallPlugin } from './builtins/nest-call.js';
 import { baseRegisterLoadPlugin } from './builtins/base-register-load.js';
 import { storeOrderPlugin } from './builtins/store-order.js';
 import { recordGetterGuardPlugin } from './builtins/record-getter-guard.js';
+import { fieldPointerFoldPlugin } from './builtins/field-pointer-fold.js';
 import { inlinedCallRestorePlugin } from './builtins/inlined-call-restore.js';
 import { switchChainPlugin } from './builtins/switch-chain.js';
 import { caseLayoutPlugin } from './builtins/case-layout.js';
@@ -845,6 +851,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   deadBranchCleanupPlugin,    // Cleanup: if(true)/if(false) dead branch elimination (priority 58)
   declInitMergePlugin,        // Cleanup: int x; x = expr; → int x = expr; (priority 60)
   recordGetterGuardPlugin,    // Matching: an inlined record getter's guard gets its pointer local, read through (priority 60.5)
+  fieldPointerFoldPlugin,     // Matching: a field-pointer temporary goes; the field updated in place or the record held (priority 62.5)
   inlinedCallRestorePlugin,   // Matching: a call where the decompiler printed an inlined helper's body (priority 0.5)
   gotoCrossesInitPlugin,      // Late: split T x=e; → T x; x=e; for goto-crossed locals (priority 700)
   haltSiteFoldPlugin,         // Cleanup: fold nLine/nAddress temporaries into the halt call, copy a shared halt tail to its jumps (priority 930)

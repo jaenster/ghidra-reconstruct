@@ -3266,6 +3266,22 @@ function transformDecompiledCode(
         console.warn(`[record-guard] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.name} on line ${e.line}, ${e.reads} read${e.reads === 1 ? '' : 's'}${e.negated ? ' (after the guard)' : ''}`),
     };
 
+    // A field-pointer temporary goes: the field updated in place, or the record held and
+    // the field addressed at each use (field-pointer-fold.ts). Needs only the declarations.
+    perPluginOptions['field-pointer-fold'] = {
+      functionReturnTypes: context?.funcPtrArgCasts?.functionReturnTypes,
+      globalTypes: context?.funcPtrArgCasts?.globalTypes,
+      typedefTargets: context?.funcPtrArgCasts?.typedefTargets,
+      structFields: context?.funcPtrArgCasts?.structFields,
+      fieldTypes: context?.funcPtrArgCasts?.fieldTypes,
+      enclosingVarTypes,
+      shadowedTypeNames: shadowedTypeQualifyOptions(context)?.shadowedTypeNames,
+      ...(process.env.GHIDRA_FIELD_POINTER_REPORT ? {
+        onSite: (e: { rule: string; line: number; name: string; why?: string }) =>
+          console.warn(`[field-pointer] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.rule} ${e.name} on line ${e.line}${e.why ? ` left: ${e.why}` : ' folded'}`),
+      } : {}),
+    };
+
     // A call argument the original loaded into its own base register gets a local
     // (base-register-load.ts); independent stores go in the original's instruction order
     // (store-order.ts). Without the facts nothing changes.
