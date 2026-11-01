@@ -3274,6 +3274,9 @@ function transformDecompiledCode(
       perPluginOptions['early-return'] = { ...(perPluginOptions['early-return'] as object | undefined), branchLayout: layout };
       perPluginOptions['branch-layout'] = {
         branchLayout: layout,
+        haltLines: enclosing?.haltLines?.halts,
+        functionAddress: funcAddress,
+        enumTypes: context?.funcPtrArgCasts?.enumTypes,
         nullGetters: context?.nullGetters,
         enumValues: context?.nullGetterEnums,
         ...(process.env.GHIDRA_BRANCH_LAYOUT_REPORT ? {

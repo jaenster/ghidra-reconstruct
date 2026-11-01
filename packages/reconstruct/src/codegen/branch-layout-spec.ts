@@ -9,7 +9,7 @@
  * body's line count.
  */
 
-import type { BranchLayoutFacts, EqualityTest, ReturnCopy } from '../extract/branch-layout.js';
+import type { BranchLayoutFacts, BranchEdge, EqualityTest, ReturnCopy } from '../extract/branch-layout.js';
 
 export interface BranchLayoutLines {
   lines: Map<number, number[]>;
@@ -20,6 +20,8 @@ export interface BranchLayoutLines {
   operands?: Map<number, number[][]>;
   /** The function's return copies; absent in older facts. */
   returns?: ReturnCopy[];
+  /** The conditional jumps of the body's keywords, their lines mapped like the others; absent in older facts. */
+  edges?: BranchEdge[];
 }
 
 const IF_LINE = /^\s*(?:\}\s*)?(?:else\s+)?if\s*\(/;
@@ -62,7 +64,13 @@ export function branchLayoutLines(
     if (line <= braceLine || line > bodyEnd) continue;
     lines.set(line - braceLine + 1, offs);
   }
-  const extra: Pick<BranchLayoutLines, 'operands' | 'returns'> = {};
+  const extra: Pick<BranchLayoutLines, 'operands' | 'returns' | 'edges'> = {};
+  if (facts.edges) {
+    const inBody = (l: number) => l > braceLine && l <= bodyEnd;
+    const map = (ls: number[]) => ls.filter(inBody).map(l => l - braceLine + 1);
+    extra.edges = facts.edges.filter(e => inBody(e.line))
+      .map(e => ({ ...e, line: e.line - braceLine + 1, fallLines: map(e.fallLines), takenLines: map(e.takenLines) }));
+  }
   if (facts.operands) {
     const operands = new Map<number, number[][]>();
     for (const [line, segs] of facts.operands) {

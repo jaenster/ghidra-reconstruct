@@ -33,7 +33,7 @@
 import type { GhidraConnection, ExtractedFunction } from '../types.js';
 import { STAMPER_JAVA, functionStampsScript, parseFunctionStamps, normalizeEntry, type TypeStamp } from './function-stamps.js';
 import { printsComparison, javaStringHash, parseCompareSiteOutput } from './compare-sites.js';
-import { printsBranch, parseBranchLayout, IF_OPERANDS_DECL_JAVA, IF_OPERANDS_TOKEN_JAVA, RETURN_COPIES_JAVA } from './branch-layout.js';
+import { printsBranch, parseBranchLayout, IF_OPERANDS_DECL_JAVA, IF_OPERANDS_TOKEN_JAVA, RETURN_COPIES_JAVA, EDGES_DECL_JAVA, EDGES_TOKEN_JAVA, EDGES_AFTER_JAVA } from './branch-layout.js';
 import { printsCallTemporary, parseCallOrder } from './call-order.js';
 import { ACCESS_ORDER_TOKEN_JAVA, parseAccessOrderRow, printsAccess } from './access-order.js';
 import { printsHaltOrProbe, parseHaltLines, HALT_NAME, IP_NAME, PROBE_NAMES } from './halt-lines.js';
@@ -240,7 +240,7 @@ for (int ti = 0; ti < nThreads; ti++) {
           StringBuilder ls = new StringBuilder(), is = new StringBuilder(), es = new StringBuilder(), cs = new StringBuilder();
           StringBuilder argRow = new StringBuilder(), storeRow = new StringBuilder();
           int count = 0;
-${IF_OPERANDS_DECL_JAVA}          for (ghidra.app.decompiler.ClangLine l : ghidra.app.decompiler.component.DecompilerUtils.toLines(r.getCCodeMarkup())) {
+${IF_OPERANDS_DECL_JAVA}${EDGES_DECL_JAVA}          for (ghidra.app.decompiler.ClangLine l : ghidra.app.decompiler.component.DecompilerUtils.toLines(r.getCCodeMarkup())) {
             count++;
             java.util.TreeSet<Long> offs = new java.util.TreeSet<>();
             StringBuilder one = new StringBuilder();
@@ -248,7 +248,7 @@ ${IF_OPERANDS_DECL_JAVA}          for (ghidra.app.decompiler.ClangLine l : ghidr
             int storeOrd = 0;
             for (ghidra.app.decompiler.ClangToken t : l.getAllTokens()) {
               if (t instanceof ghidra.app.decompiler.ClangCommentToken) continue;
-${IF_OPERANDS_TOKEN_JAVA}${ACCESS_ORDER_TOKEN_JAVA}              ghidra.program.model.address.Address x = t.getMinAddress();
+${IF_OPERANDS_TOKEN_JAVA}${EDGES_TOKEN_JAVA}${ACCESS_ORDER_TOKEN_JAVA}              ghidra.program.model.address.Address x = t.getMinAddress();
               if (x != null) {
                 long off = x.getOffset() - base;
                 offs.add(off);
@@ -331,7 +331,7 @@ ${IF_OPERANDS_TOKEN_JAVA}${ACCESS_ORDER_TOKEN_JAVA}              ghidra.program.
               first = false;
             }
           }
-${RETURN_COPIES_JAVA}          // string-ops
+${RETURN_COPIES_JAVA}${EDGES_AFTER_JAVA}          // string-ops
 ${STRING_OPS_JAVA}
           // halt-lines (listing only)
           StringBuilder hrow = new StringBuilder();
@@ -431,7 +431,7 @@ ${JUMP_TABLES_JAVA}${ZERO_STORES_JAVA}${MASK_SITES_JAVA}          // the types t
             .append(ctext == null ? "-" : Integer.toHexString(ctext.hashCode())).append('\\t').append(ctext == null ? 0 : ctext.length())
             .append('\\t').append(stable ? 1 : 0).append('\\n');
           out.append(sRows);
-          out.append("B\\t").append(a).append('\\t').append(count).append('\\t').append(ls).append('\\t').append(is).append('\\t').append(es).append('\\t').append(opsRow).append('\\t').append(retRow).append('\\n');
+          out.append("B\\t").append(a).append('\\t').append(count).append('\\t').append(ls).append('\\t').append(is).append('\\t').append(es).append('\\t').append(opsRow).append('\\t').append(retRow).append('\\t').append(edgeRow).append('\\n');
           out.append("O\\t").append(a).append('\\t').append(count).append('\\t').append(cs).append('\\n');
           out.append("A\\t").append(a).append('\\t').append(count).append('\\t').append(argRow).append('\\t').append(storeRow).append('\\n');
           if (hrow.length() > 0 || probes.length() > 0) out.append("H\\t").append(a).append('\\t').append(hrow).append('\\t').append(probes).append('\\n');
@@ -466,7 +466,7 @@ println(sb.toString());
  */
 export const FACT_SCRIPT_VERSION = createHash('sha1')
   .update(FUNCTION_FACTS_SCRIPT).update(LABEL_FLOW_SCRIPT).update(functionStampsScript([], []))
-  .update('facts-5')
+  .update('facts-6')
   .digest('hex').slice(0, 16);
 
 export function functionFactsScript(batch: string[], threads = 8, timeout = 60): string {

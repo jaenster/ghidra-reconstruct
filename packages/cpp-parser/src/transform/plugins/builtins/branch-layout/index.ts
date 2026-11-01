@@ -66,6 +66,9 @@ import { DEFAULT_NORETURN_FUNCTIONS } from '../goto-cleanup/types.js';
 import { holdsFreeCase } from '../goto-cleanup/paths.js';
 import { leaves, isHaltStmt, isExitStmt, negateCondition } from '../assert-order.js';
 import { LayoutReader, isLoop, type BranchLayoutEvidence } from './evidence.js';
+import { scoreBody, type LayoutScore } from './predict.js';
+import { layoutSearch } from './search.js';
+import { appendFileSync } from 'node:fs';
 
 export type { BranchLayoutEvidence } from './evidence.js';
 export { LayoutReader } from './evidence.js';
@@ -76,7 +79,7 @@ export interface BranchLayoutOptions extends PluginOptions {
   /** Further callees that never return, by unqualified name. */
   noreturnFunctions?: string[];
   /** Called once per rewrite and per site left for want of a source form. */
-  onSite?: (e: { rule: 'swap' | 'nest' | 'split' | 'getter' | 'left'; line: number; why?: string }) => void;
+  onSite?: (e: { rule: 'swap' | 'nest' | 'split' | 'getter' | 'left' | 'propagate'; line: number; why?: string }) => void;
   /**
    * The null default of each field read through a null-guarded getter (`null-getter.ts`),
    * keyed `<pointee type>|<member path>`; without it no getter comparison is written.
@@ -84,6 +87,19 @@ export interface BranchLayoutOptions extends PluginOptions {
   nullGetters?: NullGetterTable;
   /** Enumerator name -> value, to value the constant a getter is compared with. */
   enumValues?: Readonly<Record<string, number>>;
+  /** The original's halts and their ways in (reconstruct extract/halt-lines.ts). */
+  haltLines?: readonly HaltSite[];
+  /** The function's entry, for the score log. */
+  functionAddress?: string;
+  /** Names of the enum types: an enumerator may be stored only into one of them. */
+  enumTypes?: readonly string[];
+}
+
+/** A halt of the original and its ways in; the fallthrough way first (halt-site-fold.ts). */
+export interface HaltSite {
+  at: number;
+  ip: number;
+  paths: { line: number | null; guard: number | null }[];
 }
 
 function unwrapParens(e: Expression): Expression {
@@ -167,7 +183,7 @@ function bodyOf(s: Statement): Statement[] {
   return s.kind === NodeKind.CompoundStmt ? [...(s as CompoundStmt).statements] : [s];
 }
 
-function declaredNames(stmts: readonly Statement[]): Set<string> {
+export function declaredNames(stmts: readonly Statement[]): Set<string> {
   const out = new Set<string>();
   for (const s of stmts) {
     if (s.kind !== NodeKind.DeclStmt) continue;
@@ -179,7 +195,7 @@ function declaredNames(stmts: readonly Statement[]): Set<string> {
   return out;
 }
 
-function mentionsAny(roots: readonly ASTNode[], names: ReadonlySet<string>): boolean {
+export function mentionsAny(roots: readonly ASTNode[], names: ReadonlySet<string>): boolean {
   for (const r of roots) {
     for (const n of traverseAST(r)) {
       if (n.kind === NodeKind.Identifier && names.has((n as Identifier).name)) return true;
@@ -206,7 +222,7 @@ function asBlock(stmts: Statement[]): Statement {
   return stmts.length === 1 && stmts[0].kind === NodeKind.CompoundStmt ? stmts[0] : Stmt.compound(stmts);
 }
 
-function jumpedLabels(roots: readonly ASTNode[], gotos: ReadonlyMap<string, number>): boolean {
+export function jumpedLabels(roots: readonly ASTNode[], gotos: ReadonlyMap<string, number>): boolean {
   for (const r of roots) {
     for (const n of traverseAST(r)) {
       if (n.kind === NodeKind.LabelStmt && (gotos.get((n as LabelStmt).label.name) ?? 0) > 0) return true;
@@ -215,7 +231,7 @@ function jumpedLabels(roots: readonly ASTNode[], gotos: ReadonlyMap<string, numb
   return false;
 }
 
-function gotoCounts(root: ASTNode): Map<string, number> {
+export function gotoCounts(root: ASTNode): Map<string, number> {
   const m = new Map<string, number>();
   for (const n of traverseAST(root)) {
     if (n.kind === NodeKind.GotoStmt) {
@@ -720,13 +736,24 @@ function loopIfLines(body: ASTNode): Set<number> {
   return out;
 }
 
-function rewriteFunction(fn: FunctionDecl, ev: BranchLayoutEvidence, opts: BranchLayoutOptions): FunctionDecl | undefined {
-  if (!fn.body) return undefined;
+function rewriteFunction(fn0: FunctionDecl, ev: BranchLayoutEvidence, opts: BranchLayoutOptions): FunctionDecl | undefined {
+  if (!fn0.body) return undefined;
+  const noreturn = new Set([...DEFAULT_NORETURN_FUNCTIONS, ...(opts.noreturnFunctions ?? [])]);
+  // The whole-function rewrites first (search.ts); the local ones below see their result.
+  // GHIDRA_BRANCH_LAYOUT_SEARCH=0 leaves them out.
+  const searched = process.env.GHIDRA_BRANCH_LAYOUT_SEARCH === '0' ? fn0.body : layoutSearch(fn0.body, ev, {
+    noreturn,
+    localTypes: localTypesOf(fn0),
+    enumTypes: new Set(opts.enumTypes ?? []),
+    onSite: opts.onSite ? e => opts.onSite!({ rule: e.rule, line: e.line, why: e.why }) : undefined,
+  });
+  const fn = searched === fn0.body ? fn0 : updateNode(fn0, { body: searched } as Partial<FunctionDecl>);
+  const fnBody = fn.body!;
   const ctx: Ctx = {
-    reader: new LayoutReader(ev, fn.body),
-    noreturn: new Set([...DEFAULT_NORETURN_FUNCTIONS, ...(opts.noreturnFunctions ?? [])]),
-    gotos: gotoCounts(fn.body),
-    loopIfs: loopIfLines(fn.body),
+    reader: new LayoutReader(ev, fnBody),
+    noreturn,
+    gotos: gotoCounts(fnBody),
+    loopIfs: loopIfLines(fnBody),
     onSite: opts.onSite,
     nullGetters: opts.nullGetters ?? {},
     enumValues: opts.enumValues ?? {},
@@ -754,8 +781,24 @@ function rewriteFunction(fn: FunctionDecl, ev: BranchLayoutEvidence, opts: Branc
       return updateNode(block, { statements: r } as Partial<CompoundStmt>);
     },
   });
-  const body = t(fn.body) as CompoundStmt;
-  return n ? updateNode(fn, { body } as Partial<FunctionDecl>) : undefined;
+  const body = t(fnBody) as CompoundStmt;
+  logScore(opts, ev, body, ctx.noreturn);
+  if (n) return updateNode(fn, { body } as Partial<FunctionDecl>);
+  return fn === fn0 ? undefined : fn;
+}
+
+/**
+ * GHIDRA_BRANCH_LAYOUT_SCORE=<file>: one line per function with edges: its entry, the layout
+ * objective of the body this pass hands on (predict.ts), the sites scored, each contradicted
+ * site and every site's rule with whether it held. The calibration reads it for the
+ * functions that already match.
+ */
+function logScore(opts: BranchLayoutOptions, ev: BranchLayoutEvidence, body: CompoundStmt, noreturn: ReadonlySet<string>): void {
+  const file = process.env.GHIDRA_BRANCH_LAYOUT_SCORE;
+  if (!file || !ev.edges) return;
+  const s: LayoutScore = scoreBody(body, new LayoutReader(ev, body), noreturn);
+  const sites = s.mismatches.map(m => `${m.line}:${m.predicted}/${m.fact}:${m.rule}:${m.detail ?? ''}`).join(';');
+  appendFileSync(file, `${opts.functionAddress ?? '?'}\t${s.objective}\t${s.sites}\t${sites}\t${s.rules.join(';')}\n`);
 }
 
 export function branchLayout_forTest(fn: FunctionDecl, opts: BranchLayoutOptions): FunctionDecl {

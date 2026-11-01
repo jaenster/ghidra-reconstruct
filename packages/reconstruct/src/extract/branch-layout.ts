@@ -26,7 +26,15 @@
  *           falling through (the return copy): its start, the RET's offset and the copy's
  *           mnemonics. Where several returns of one value were merged into one copy the
  *           decompile prints one offset for all of them; the copy's own code tells a bare
- *           `xor eax, eax; ret` from one that also pops a frame.
+ *           `xor eax, eax; ret` from one that also pops a frame. Each copy also lists
+ *           how it is entered: the offsets of the jumps that land on its start, and
+ *           whether the instruction before falls into it.
+ *   edges   per `if`/`while` keyword whose p-code op is a CBRANCH, keyed by line and by the
+ *           keyword's index among such keywords on its line: the conditional jump, its
+ *           target and its fall-through instruction, and the decompile lines whose tokens
+ *           print an op of the block each edge leads to (a block that prints nothing and
+ *           has one successor is followed). The consumer reads which statement the jump
+ *           falls into from the lines, so it needs no offset of an arm's first instruction.
  *
  * Lines are numbered as `DecompilerUtils.toLines` numbers them, which is the line order of
  * the decompile text the snapshot holds, provided the decompiler runs with the options the
@@ -52,6 +60,23 @@ export interface BranchLayoutFacts {
   operands?: [number, number[][]][];
   /** Every return copy of the function, by start. Absent in older facts. */
   returns?: ReturnCopy[];
+  /** Every conditional branch a keyword prints, in text order. Absent in older facts. */
+  edges?: BranchEdge[];
+}
+
+/** A keyword's conditional jump and the lines each of its two edges leads to. */
+export interface BranchEdge {
+  line: number;
+  /** Index of the keyword among the branching keywords of its line. */
+  ord: number;
+  keyword: 'if' | 'while';
+  /** Offsets of the jump, its target and the instruction after it. */
+  jcc: number;
+  target: number;
+  fall: number;
+  /** Decompile lines printing an op of the block the fall-through / the jump leads to, ascending. */
+  fallLines: number[];
+  takenLines: number[];
 }
 
 /** A RET and the instructions that reach it only by falling through. */
@@ -62,6 +87,10 @@ export interface ReturnCopy {
   ret: number;
   /** Mnemonics from start to the RET, each with its first register operand when it has one (`XOR/EAX`). */
   insns: string[];
+  /** Offsets of the jumps that land on `start`. Absent in older facts. */
+  jumpsIn?: number[];
+  /** Whether the instruction before `start` falls into it. Absent in older facts. */
+  fallsIn?: boolean;
 }
 
 /** One equality token of the decompile and the instruction that compiled it. */
@@ -133,6 +162,76 @@ export const IF_OPERANDS_TOKEN_JAVA = `
               }
 `;
 
+/** Java for the per-line token loop: declares the edge walk's state. Needs nothing. */
+export const EDGES_DECL_JAVA = `
+          java.util.Map<Integer, java.util.TreeSet<Integer>> blkLines = new java.util.HashMap<>();
+          java.util.List<Object[]> edgeKw = new java.util.ArrayList<>();
+`;
+
+/**
+ * Java run for every token \`t\` of line \`l\` (comments excluded): the lines each basic
+ * block prints, and the keywords that carry a CBRANCH.
+ */
+export const EDGES_TOKEN_JAVA = `
+              {
+                ghidra.program.model.pcode.PcodeOp eop = t.getPcodeOp();
+                if (eop != null && eop.getParent() != null) {
+                  blkLines.computeIfAbsent(eop.getParent().getIndex(), q -> new java.util.TreeSet<Integer>()).add(l.getLineNumber());
+                  String etx = t.getText();
+                  if ((etx.equals("if") || etx.equals("while")) && eop.getOpcode() == ghidra.program.model.pcode.PcodeOp.CBRANCH) {
+                    int eord = 0;
+                    for (Object[] pk : edgeKw) if ((Integer) pk[0] == l.getLineNumber()) eord++;
+                    edgeKw.add(new Object[] { l.getLineNumber(), eord, etx, eop });
+                  }
+                }
+              }
+`;
+
+/**
+ * Java, after the line loop: per keyword the jump, its two destinations and the lines each
+ * leads to, into \`edgeRow\`. Needs \`prog\`, \`base\`.
+ */
+export const EDGES_AFTER_JAVA = `
+          StringBuilder edgeRow = new StringBuilder();
+          for (Object[] k : edgeKw) {
+            ghidra.program.model.pcode.PcodeOp eop = (ghidra.program.model.pcode.PcodeOp) k[3];
+            ghidra.program.model.listing.Instruction ji = prog.getListing().getInstructionAt(eop.getSeqnum().getTarget());
+            if (ji == null || !ji.getFlowType().isConditional() || ji.getFlows().length != 1 || ji.getFallThrough() == null) continue;
+            ghidra.program.model.address.Address tgt = ji.getFlows()[0], fal = ji.getFallThrough();
+            ghidra.program.model.pcode.PcodeBlock pb = eop.getParent();
+            ghidra.program.model.pcode.PcodeBlock fb = null, tb = null;
+            for (int oi = 0; oi < pb.getOutSize(); oi++) {
+              ghidra.program.model.pcode.PcodeBlock ob = pb.getOut(oi);
+              ghidra.program.model.address.Address os = ob.getStart();
+              if (os != null && os.equals(fal)) fb = ob;
+              else if (os != null && os.equals(tgt)) tb = ob;
+            }
+            if (pb.getOutSize() == 2) {
+              if (fb == null && tb != null) fb = pb.getOut(0) == tb ? pb.getOut(1) : pb.getOut(0);
+              if (tb == null && fb != null) tb = pb.getOut(0) == fb ? pb.getOut(1) : pb.getOut(0);
+            }
+            String[] side = new String[2];
+            for (int si = 0; si < 2; si++) {
+              ghidra.program.model.pcode.PcodeBlock b = si == 0 ? fb : tb;
+              java.util.TreeSet<Integer> ln = null;
+              for (int g = 0; g < 8 && b != null; g++) {
+                ln = blkLines.get(b.getIndex());
+                if (ln != null && !ln.isEmpty()) break;
+                b = b.getOutSize() == 1 ? b.getOut(0) : null;
+              }
+              StringBuilder sl = new StringBuilder();
+              if (ln != null) for (Integer x : ln) sl.append(sl.length() > 0 ? "," : "").append(x);
+              side[si] = sl.length() > 0 ? sl.toString() : "-";
+            }
+            long jo = ji.getAddress().getOffset() - base, to = tgt.getOffset() - base, fo = fal.getOffset() - base;
+            edgeRow.append(edgeRow.length() > 0 ? ";" : "").append(k[0]).append('.').append(k[1]).append(':').append(k[2])
+              .append(':').append(jo < 0 ? "-" + Long.toHexString(-jo) : Long.toHexString(jo))
+              .append(':').append(to < 0 ? "-" + Long.toHexString(-to) : Long.toHexString(to))
+              .append(':').append(fo < 0 ? "-" + Long.toHexString(-fo) : Long.toHexString(fo))
+              .append(':').append(side[0]).append(':').append(side[1]);
+          }
+`;
+
 /**
  * Java, after the line loop: every RET of \`fn\` with the instructions that reach it only by
  * falling through, into \`retRow\`. Needs \`prog\`, \`fn\`, \`base\`.
@@ -160,8 +259,17 @@ export const RETURN_COPIES_JAVA = `
                 cur = p;
               }
               long so = cur.getAddress().getOffset() - base, ro = ri.getAddress().getOffset() - base;
+              StringBuilder rin = new StringBuilder();
+              for (ghidra.program.model.symbol.Reference rf : RM.getReferencesTo(cur.getAddress())) {
+                if (!rf.getReferenceType().isJump()) continue;
+                long fo = rf.getFromAddress().getOffset() - base;
+                rin.append(rin.length() > 0 ? "." : "").append(fo < 0 ? "-" + Long.toHexString(-fo) : Long.toHexString(fo));
+              }
+              ghidra.program.model.listing.Instruction rp = RL.getInstructionBefore(cur.getAddress());
+              boolean rfall = rp != null && fn.getBody().contains(rp.getAddress()) && rp.getFallThrough() != null && rp.getFallThrough().equals(cur.getAddress());
               retRow.append(retRow.length() > 0 ? ";" : "").append(so < 0 ? "-" + Long.toHexString(-so) : Long.toHexString(so))
-                .append(':').append(ro < 0 ? "-" + Long.toHexString(-ro) : Long.toHexString(ro)).append(':').append(String.join(".", ins));
+                .append(':').append(ro < 0 ? "-" + Long.toHexString(-ro) : Long.toHexString(ro)).append(':').append(String.join(".", ins))
+                .append(':').append(rfall ? "f" : "-").append(rin.length() > 0 ? rin.toString() : "-");
             }
           }
 `;
@@ -206,12 +314,12 @@ for (int ti = 0; ti < nThreads; ti++) {
           long base = fn.getEntryPoint().getOffset();
           StringBuilder ls = new StringBuilder(), is = new StringBuilder(), cs = new StringBuilder();
           int count = 0;
-${IF_OPERANDS_DECL_JAVA}          for (ghidra.app.decompiler.ClangLine l : ghidra.app.decompiler.component.DecompilerUtils.toLines(r.getCCodeMarkup())) {
+${IF_OPERANDS_DECL_JAVA}${EDGES_DECL_JAVA}          for (ghidra.app.decompiler.ClangLine l : ghidra.app.decompiler.component.DecompilerUtils.toLines(r.getCCodeMarkup())) {
             count++;
             java.util.TreeSet<Long> offs = new java.util.TreeSet<>();
             for (ghidra.app.decompiler.ClangToken t : l.getAllTokens()) {
               if (t instanceof ghidra.app.decompiler.ClangCommentToken) continue;
-${IF_OPERANDS_TOKEN_JAVA}              ghidra.program.model.address.Address x = t.getMinAddress();
+${IF_OPERANDS_TOKEN_JAVA}${EDGES_TOKEN_JAVA}              ghidra.program.model.address.Address x = t.getMinAddress();
               if (x == null) continue;
               long off = x.getOffset() - base;
               offs.add(off);
@@ -246,7 +354,7 @@ ${IF_OPERANDS_TOKEN_JAVA}              ghidra.program.model.address.Address x = 
               first = false;
             }
           }
-${RETURN_COPIES_JAVA}          rows.put(a, a + "\\t" + count + "\\t" + ls + "\\t" + is + "\\t" + cs + "\\t" + opsRow + "\\t" + retRow);
+${RETURN_COPIES_JAVA}${EDGES_AFTER_JAVA}          rows.put(a, a + "\\t" + count + "\\t" + ls + "\\t" + is + "\\t" + cs + "\\t" + opsRow + "\\t" + retRow + "\\t" + edgeRow);
         } catch (Exception e) { }
       }
     } finally {
@@ -333,6 +441,7 @@ export function parseBranchLayout(output: string): Map<string, BranchLayoutFacts
       facts.operands = parseOperands(c[5]);
       facts.returns = parseReturns(c[6]);
     }
+    if (c.length > 7) facts.edges = parseEdges(c[7]);
     out.set(normalize(c[0]), facts);
   }
   return out;
@@ -356,7 +465,30 @@ function parseReturns(col: string): ReturnCopy[] {
   for (const part of col ? col.split(';') : []) {
     const f = part.split(':');
     if (f.length < 3) continue;
-    out.push({ start: offset(f[0]), ret: offset(f[1]), insns: f[2] ? f[2].split('.') : [] });
+    const copy: ReturnCopy = { start: offset(f[0]), ret: offset(f[1]), insns: f[2] ? f[2].split('.') : [] };
+    if (f.length > 3 && f[3]) {
+      copy.fallsIn = f[3][0] === 'f';
+      const rest = f[3].slice(1);
+      copy.jumpsIn = rest && rest !== '-' ? rest.split('.').map(offset) : [];
+    }
+    out.push(copy);
+  }
+  return out;
+}
+
+/** `line.ord:kw:jcc:target:fall:L,L:L,L;...` -> the edges. */
+function parseEdges(col: string): BranchEdge[] {
+  const out: BranchEdge[] = [];
+  const lines = (x: string) => (x === '-' || x === '' ? [] : x.split(',').map(Number));
+  for (const part of col ? col.split(';') : []) {
+    const f = part.split(':');
+    if (f.length < 7 || (f[1] !== 'if' && f[1] !== 'while')) continue;
+    const [line, ord] = f[0].split('.').map(Number);
+    if (!Number.isInteger(line) || !Number.isInteger(ord)) continue;
+    out.push({
+      line, ord, keyword: f[1], jcc: offset(f[2]), target: offset(f[3]), fall: offset(f[4]),
+      fallLines: lines(f[5]), takenLines: lines(f[6]),
+    });
   }
   return out;
 }

@@ -39,6 +39,24 @@ export interface BranchLayoutEvidence {
   operands?: ReadonlyMap<number, readonly (readonly number[])[]>;
   /** Every RET of the function with the instructions that reach it only by falling through. */
   returns?: readonly ReturnCopy[];
+  /**
+   * Every conditional jump an `if`/`while` keyword prints, keyed by parsed-text line and
+   * the keyword's index among the branching keywords of its line, with the lines each of
+   * its two edges leads to.
+   */
+  edges?: readonly BranchEdge[];
+}
+
+/** A keyword's conditional jump: where it goes, where it falls, and the lines each leads to. */
+export interface BranchEdge {
+  line: number;
+  ord: number;
+  keyword: 'if' | 'while';
+  jcc: number;
+  target: number;
+  fall: number;
+  fallLines: readonly number[];
+  takenLines: readonly number[];
 }
 
 /** A return copy of the original: its first instruction, its RET, and their mnemonics. */
@@ -47,6 +65,10 @@ export interface ReturnCopy {
   ret: number;
   /** Mnemonic per instruction, with `/REG` when the first operand is a register. */
   insns: readonly string[];
+  /** Offsets of the jumps that land on `start`; absent in older facts. */
+  jumpsIn?: readonly number[];
+  /** Whether the instruction before `start` falls into it; absent in older facts. */
+  fallsIn?: boolean;
 }
 
 /** An equality token of the decompile and the instruction its p-code op sits on. */
@@ -117,6 +139,8 @@ export class LayoutReader {
    */
   private readonly firstIf = new Map<number, string>();
   private readonly switchLines = new Map<number, number>();
+  /** Line -> the placed ifs that start on it, in pre-order. */
+  private readonly ifsAt = new Map<number, IfStmt[]>();
   /** Line -> how many statement ranges claim it. */
   private readonly claims = new Map<number, number>();
 
@@ -149,6 +173,8 @@ export class LayoutReader {
       if (n.kind === NodeKind.IfStmt && placed(n)) {
         const l = n.location.start.line;
         this.ifLines.set(l, (this.ifLines.get(l) ?? 0) + 1);
+        const at = this.ifsAt.get(l);
+        if (at) at.push(n as IfStmt); else this.ifsAt.set(l, [n as IfStmt]);
         if (!this.firstIf.has(l)) this.firstIf.set(l, emit((n as IfStmt).condition as AnyNode));
       }
       if (n.kind === NodeKind.SwitchStmt && placed(n)) {
@@ -158,6 +184,54 @@ export class LayoutReader {
       for (const k of getChildren(n)) if (isStatement(k)) visit(k);
     };
     visit(root);
+  }
+
+  /**
+   * The conditional jump of an `if` keyword: the decompile's ifs of the if's line, in
+   * column order, against the AST's placed ifs of that line in pre-order. Null when the
+   * counts differ (a pass split or copied one) or the facts have no edges.
+   */
+  edge(ifs: IfStmt): BranchEdge | null {
+    if (!this.ev.edges || !placed(ifs)) return null;
+    const l = ifs.location.start.line;
+    const facts = this.ev.edges.filter(e => e.line === l && e.keyword === 'if');
+    const ours = this.ifsAt.get(l) ?? [];
+    if (facts.length === 0 || facts.length !== ours.length) return null;
+    const k = ours.indexOf(ifs);
+    // The transformer rebuilds the nodes it walks: an if not found by identity is found by its column.
+    const at = k >= 0 ? k : ours.findIndex(o => o.location.start.column === ifs.location.start.column);
+    return at < 0 ? null : facts[at];
+  }
+
+  /**
+   * Which of an if's successors its conditional jump falls into: `then` when the
+   * fall-through block prints on the then-arm's lines and the jump's target does not,
+   * `other` when the jump's target does and the fall-through does not, or the arm prints
+   * no code at all; null when the facts cannot say (an arm whose lines a pass moved).
+   */
+  fallInto(ifs: IfStmt): 'then' | 'other' | null {
+    const e = this.edge(ifs);
+    if (!e) return null;
+    const own = this.linesOf([ifs.thenBranch]);
+    const fT = e.fallLines.some(l => own.has(l));
+    const tT = e.takenLines.some(l => own.has(l));
+    if (fT && !tT) return 'then';
+    if (!fT && tT) return 'other';
+    // An arm that prints no code (a bare jump or return) is never fallen into.
+    if (!fT && e.fallLines.length > 0 && ![...own].some(l => (this.ev.lines.get(l) ?? []).length > 0)) return 'other';
+    return null;
+  }
+
+  /** Every conditional jump of the function whose target is `offset`. */
+  jumpsTo(offset: number): readonly BranchEdge[] {
+    return (this.ev.edges ?? []).filter(e => e.target === offset);
+  }
+
+  /** Every line `stmts` claim, copied or not. */
+  linesOf(stmts: readonly ASTNode[]): Set<number> {
+    const own = new Set<number>();
+    for (const s of stmts) ownedRanges(s, (from, to) => { for (let l = from; l <= to; l++) own.add(l); });
+    return own;
   }
 
   /** Drop the evidence of the lines `stmts` own: a pass copied them. */
