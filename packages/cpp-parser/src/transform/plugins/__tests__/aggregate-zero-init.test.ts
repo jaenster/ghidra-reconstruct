@@ -4,6 +4,7 @@ import { parse } from '../../../parser/index.js';
 import { emit } from '../../../emit/index.js';
 import type { AnyNode } from '../../../ast/nodes.js';
 import { aggregateZeroInitPlugin } from '../builtins/aggregate-zero-init.js';
+import { frameGroupLocalsPlugin } from '../builtins/frame-group-locals.js';
 
 const f = (name: string, offset: number, size: number, type: string, bitSize?: number) =>
   ({ name, offset, size, type, ...(bitSize !== undefined ? { bitSize } : {}) });
@@ -191,5 +192,25 @@ describe('aggregateZeroInitPlugin', () => {
       const out = run(viewport, { ...rectTables, zeroStores });
       assert.match(out, /D2Rect r; r\.left = 0;/, JSON.stringify(zeroStores));
     }
+  });
+  // NET_SID_CLIENT_Send_0x06_StartVersioning 0051a9c0: sPacket sits in a frame run that
+  // frame-group-locals folds into `__frame0`. An initialiser written ahead of that became
+  // `__frame0.sPacket = {0};`, an assignment from a braced list VC8 rejects.
+  it('never initialises a local frame-group-locals folds into a frame struct', () => {
+    const code = `void f(void) { uint32_t dwExeChecksum; D2Pair sPacket;
+      sPacket.a = 0; sPacket.b = 0;
+      g(&dwExeChecksum);
+      send((char *)&sPacket); }`;
+    const plugins = [aggregateZeroInitPlugin, frameGroupLocalsPlugin].sort((x, y) => (x.priority ?? 0) - (y.priority ?? 0));
+    let ast = parse(code) as AnyNode;
+    for (const p of plugins) {
+      ast = p.createTransformer(p === frameGroupLocalsPlugin
+        ? { slots: [{ name: 'dwExeChecksum', offset: -0xc, size: 4 }, { name: 'sPacket', offset: -8, size: 8 }], aggregateLayout: () => ({ size: 8, align: 4 }) }
+        : { ...tables, zeroStores: zeroedWhole(code) })(ast) as AnyNode;
+    }
+    const out = emit(ast).replace(/\s+/g, ' ');
+    assert.match(out, /__frame0_t __frame0;/, out);
+    assert.ok(!/=\s*\{\s*0\s*\}/.test(out), out);
+    assert.match(out, /__frame0\.sPacket\.a = 0; __frame0\.sPacket\.b = 0;/, out);
   });
 });

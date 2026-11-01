@@ -386,10 +386,14 @@ export const aggregateZeroInitPlugin: TransformPlugin = {
   description: 'A run of zero member stores that, with the stores after it, writes a whole local aggregate becomes `T s = {0};`',
   version: '1.0.0',
   defaultEnabled: true,
-  // After decl-scope-sink (62), which would otherwise move the bare declaration
-  // this pass removes, and after store-order (59.7), whose order the run's
-  // ascending-offset test reads.
-  priority: 62.5,
+  // After frame-group-locals (950): a local it folds into a frame struct has no
+  // declaration of its own left, so the initialiser can only land on a local that
+  // keeps one (`T s = {0};`). Ahead of it, the initialised declaration became the
+  // member assignment `__frame0.s = {0};`, which C++03 rejects. Also after
+  // decl-scope-sink (62), which would otherwise move the bare declaration this pass
+  // removes, and after store-order (59.7), whose order the run's ascending-offset
+  // test reads.
+  priority: 955,
   tags: ['matching', 'declaration'],
   createTransformer: createAggregateZeroInitTransformer,
 };
