@@ -29,6 +29,7 @@ export {
   isSwitchTableSymbol,
 } from './globals-header.js';
 
+import { layoutFieldType } from './layout-field-type.js';
 import { createOutParamOracle } from './out-params.js';
 import { createParamReachOracle } from './param-reach.js';
 import { lowerShiftedPointerTypedefs, shiftedPointerSpecs } from './shifted-pointers.js';
@@ -5500,7 +5501,7 @@ export function buildFuncPtrArgCastTables(
       if (typeof f.offset !== 'number' || typeof f.size !== 'number' || !f.dataType) continue;
       const bits = (f as { bitSize?: number }).bitSize;
       layout.push({
-        name: f.name ?? '', offset: f.offset, size: f.size, type: f.dataType,
+        name: f.name ?? '', offset: f.offset, size: f.size, type: layoutFieldType(f.dataType, f.size),
         ...(bits !== undefined || f.dataType.includes(':') ? { bitSize: bits ?? 0 } : {}),
       });
     }

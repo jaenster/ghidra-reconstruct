@@ -296,6 +296,71 @@ describe('strided-access: compiled, the same memory and the same results', () =>
   });
 });
 
+/** TXT_AllocTxt_lvltypes 0061e520: a row offset beside the counter, read through a row of a 2-D array field. */
+const LVL = [
+  f('File', 0, 0x780, 'char[32][60]'),
+  f('Act', 0x780, 1, 'byte'),
+  f('pad', 0x781, 3, 'byte[3]'),
+  f('Expansion', 0x784, 4, 'int'),
+];
+const LVL_OPTIONS: StridedAccessOptions = {
+  ...OPTIONS,
+  structLayouts: { ...OPTIONS.structLayouts, Lvl: LVL },
+  aggregateSizes: { ...OPTIONS.aggregateSizes, Lvl: 0x788 },
+  aggregateMembers: { ...OPTIONS.aggregateMembers, Lvl: LVL.map(x => x.name) },
+  structFields: { ...OPTIONS.structFields, Lvl: Object.fromEntries(LVL.map(x => [x.name, x.type])) },
+  globalTypes: { ...OPTIONS.globalTypes, gpLvl: 'Lvl *' },
+};
+const G_LVL = `int f(int n) {
+  int i; int j; int acc;
+  acc = 0;
+  i = 0;
+  if (n <= 0) {
+    return 0;
+  }
+  j = 0;
+  do {
+    if (!*(int *)((int)(gpLvl->File + 0x20) + j + 4)) {
+      acc = acc + i;
+    }
+    j += 0x788;
+    i++;
+  } while (i < n);
+  return acc;
+}`;
+/** The same walk with the offset also read on its own: it stays the walk's variable. */
+const G_LVL_KEPT = G_LVL.replace('acc = acc + i;', 'acc = acc + i;\n    }\n    if (j == 0x788) {\n      acc = acc + 2;');
+
+describe('strided-access: an array of arrays decays to a pointer to its row', () => {
+  it('G_LVL: `File + 0x20` steps 0x20 rows of 60, so the address is the Expansion field', () => {
+    const out = rewrite(G_LVL, LVL_OPTIONS);
+    assert.match(out, /gpLvl\[i\]\.Expansion/, out);
+    assert.doesNotMatch(out, /\bj\b/, out);
+  });
+  it('an offset the body still reads on its own is not folded beside it', () => {
+    const out = rewrite(G_LVL_KEPT, LVL_OPTIONS);
+    assert.match(out, /\(int\)\(gpLvl->File \+ 0x20\) \+ j \+ 4/, out);
+  });
+  it('G_LVL compiled', native, () => {
+    const lowered = rewrite(G_LVL, LVL_OPTIONS);
+    const prelude = [PRELUDE,
+      'struct __attribute__((packed)) Lvl { char File[32][60]; byte Act; byte pad[3]; int Expansion; };',
+      'static_assert(sizeof(Lvl) == 0x788, "Lvl layout");',
+      'Lvl gLvl[5]; Lvl *gpLvl = gLvl;',
+      `namespace ref { ${asRef(G_LVL)} }`, `namespace low { ${lowered} }`].join('\n');
+    const body = [
+      'int bad = 0;',
+      'for (int seed = 0; seed < 16; seed++) {',
+      '  byte *p = (byte *)gLvl; for (size_t k = 0; k < sizeof gLvl; k++) p[k] = (byte)(k * 7 + seed);',
+      '  for (int k = 0; k < 5; k++) gLvl[k].Expansion = ((k + seed) % 3) == 0;',
+      '  if (ref::f(5) != low::f(5)) bad++;',
+      '}',
+      'printf("%d\\n", bad);',
+    ].join('\n');
+    assert.strictEqual(compileAndRun(prelude, body).trim(), '0', lowered);
+  });
+});
+
 describe('strided-access: what is left alone', () => {
   it('an offset that is also returned is not rescaled', () => {
     const out = rewrite(G8.replace('  return sum;', '  return sum + initIndex;'));

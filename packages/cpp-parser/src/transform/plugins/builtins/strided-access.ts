@@ -49,7 +49,13 @@
  * cast; anything else keeps the reinterpretation as `*(T *)&path`.
  *
  * A def of a rewritten offset or pointer that no read is left to reach is dead and
- * goes, and so does a `v = n * S` temporary.
+ * goes, and so does a `v = n * S` temporary. An integer offset some read still needs
+ * where the relation holds (`nFileStrOffset = j` beside `*(int *)(base + j + 0x784)`,
+ * TXT_LoadExpansionLvlTbls) is the original's own induction variable: no read of it is
+ * folded, since indexing beside it makes the compiler keep a second one.
+ *
+ * An array-valued operand (a global array, a row of one, an array field) decays to a
+ * pointer to its element, so `p->File + 0x20` of a `char File[32][60]` steps rows of 60.
  *
  * Inner subscripts are written as the source would write them (`F[i]`): the index
  * is the one the machine used, which is in range for the shipped data (verified
@@ -516,6 +522,7 @@ class FunctionPass {
     private localTypes: Map<string, TypeNode>,
     private o: StridedAccessOptions,
     rescalable: Set<string>,
+    private kept: ReadonlySet<string> = new Set(),
   ) {
     this.rescalable = rescalable;
     this.flow = buildFunctionFlow(body, new Set(localTypes.keys()));
@@ -531,6 +538,16 @@ class FunctionPass {
   private localShape(name: string): TypeShape | null {
     const t = this.localTypes.get(name);
     return t ? shapeOfNode(t, 0, this.ctx.resolve) : null;
+  }
+
+  isIntegerLocal(name: string): boolean { return this.isIntLocal(name); }
+
+  /** Some statement other than a def of `v` reads it where it is still a counter's multiple. */
+  readsInRelation(v: string): boolean {
+    for (const n of this.flow.cfg.nodes) {
+      if (this.flow.reads(n.id).has(v) && this.relationAt0(v, n.id)) return true;
+    }
+    return false;
   }
 
   private isIntLocal(name: string): boolean {
@@ -754,7 +771,7 @@ class FunctionPass {
   }
 
   private relationAt0(v: string, node: number): Relation | null {
-    if (node < 0) return null;
+    if (node < 0 || this.kept.has(v)) return null;
     if (this.defsOf(v).has(node)) return null;
     const intV = this.isIntLocal(v);
     const ptrV = !intV && this.isPtrLocal(v);
@@ -817,6 +834,13 @@ class FunctionPass {
   // ---------------- linearization ----------------
 
   private pointeeSize(e: Expression): bigint | null {
+    // An array decays to a pointer to its element, which the shape model does not say
+    // for an array field (`char File[32][60]` decays to `char (*)[60]`).
+    const arr = this.decayedArray(e);
+    if (arr) {
+      const w = sizeOf(this.ctx, arr.elem);
+      return w ? BigInt(w) : null;
+    }
     const s = this.shape(e);
     if (!s || s.stars === 0) return null;
     if (BYTE_POINTEE.has(canonicalBase(s.base)) && s.stars === 1) return 1n;
@@ -825,8 +849,15 @@ class FunctionPass {
   }
 
   private isPointer(e: Expression): boolean {
+    if (this.decayedArray(e)) return true;
     const s = this.shape(e);
     return !!s && s.stars > 0;
+  }
+
+  /** The array an array-valued expression (a global array, a row of one, an array field) decays from. */
+  private decayedArray(e: Expression): { elem: string; count: number } | null {
+    const t = this.arrayTypeOf(e) ?? this.arrayFieldType(e);
+    return t ? arraySpelling(t) : null;
   }
 
   private globalArrayElem(name: string): string | null {
@@ -1038,6 +1069,18 @@ class FunctionPass {
       default:
         return null;
     }
+  }
+
+  /** The layout's array type of a member access that names an array field (`p->szName`), or null. */
+  private arrayFieldType(e: Expression): string | null {
+    const x = unwrapParens(e);
+    if (x.kind !== NodeKind.MemberExpr) return null;
+    const m = x as MemberExpr;
+    const field = (m.member as { name?: string }).name;
+    const objShape = this.shape(m.object);
+    if (typeof field !== 'string' || !objShape || objShape.stars !== (m.isArrow ? 1 : 0)) return null;
+    const f = this.ctx.layouts[resolvedName(this.ctx, objShape.base)]?.find(ff => ff.name === field);
+    return f && f.bitSize === undefined && arraySpelling(f.type) ? f.type : null;
   }
 
   /** The element shape of a subscript into an array row the shape model does not see (`g[0][i]`). */
@@ -1810,8 +1853,10 @@ export function rewriteStridedAccesses(
   // Rescale candidates: every integer local; whittled down until each one left has
   // every read accounted for.
   let rescalable = new Set<string>([...localTypes.keys()]);
+  // Byte offsets a fold may not read: one the rewritten body still reads elsewhere.
+  const kept = new Set<string>();
   for (let round = 0; round < 8; round++) {
-    const pass = new FunctionPass(ctx, statements, localTypes, o, rescalable);
+    const pass = new FunctionPass(ctx, statements, localTypes, o, rescalable, kept);
     const out = statements.map(s => pass.processStmt(s));
     if (!pass.didChange) return null;
     // A rescaled variable must have had every read consumed by a fold or be a
@@ -1839,6 +1884,15 @@ export function rewriteStridedAccesses(
     }
     const locals = new Set(localTypes.keys());
     for (const v of [...pass.relationVars, ...pass.productVars]) next = dropDeadDefs(next, v, locals);
+    // An integer byte offset that outlives its folds is still the original's induction
+    // variable: indexing beside it would make the compiler keep a second one. Its reads
+    // stay as they are.
+    const after = new FunctionPass(ctx, next, localTypes, o, new Set());
+    const outlived = [...pass.relationVars].filter(v => pass.isIntegerLocal(v) && after.readsInRelation(v));
+    if (outlived.length > 0) {
+      for (const v of outlived) kept.add(v);
+      continue;
+    }
     // A pointer-induction base no longer read either (`pMenuItemData`).
     return next;
   }
