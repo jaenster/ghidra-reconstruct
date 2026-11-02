@@ -181,6 +181,19 @@ describe('pow2-remainder: the zero test', () => {
       'b = (int)n % 2 == 0; if (!b) { return; } if (k < 3) { b = (int)n % 16 == 0; if (!b) { return; } } r = 4; g = r;');
   });
 
+  it('keeps a global r: its value outlives the function', () => {
+    const lines = [
+      '  gnStar = n & 0x80000001;',
+      '  b = !gnStar;',
+      '  if ((int)gnStar < 0) {',
+      '    b = (gnStar - 1 | -2) == -1;',
+      '  }',
+      '  gnStar = 4;',
+    ];
+    const out = runLines(lines, 'uint32_t n, bool b', { 3: 5 }, true, { 1: [48], 2: [48] });
+    assert.ok(out.includes('& 0x80000001'), out);
+  });
+
   it('refuses inside a loop where r is mentioned elsewhere', () => {
     const lines = [
       '  while (k) {',

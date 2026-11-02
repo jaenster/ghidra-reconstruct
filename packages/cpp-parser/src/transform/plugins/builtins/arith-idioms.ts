@@ -1068,7 +1068,8 @@ function createFolder(shapeOf: ExprShape, o: ArithIdiomsOptions, resolve: Typede
    * was. S are up to three statements the compiler scheduled between the AND and the JNS
    * (a load, the zero test's flag): plain statements that do not mention r or b - nor, for
    * a global r, call anything. The zero test drops the value the AND leaves in r, so r must
-   * be dead after the `if` (`ctx.deadAfter`). Gated on the original's jump right after the
+   * be a local and dead after the `if` (`ctx.deadAfter`); a global's value outlives the
+   * function. Gated on the original's jump right after the
    * last instruction of the AND and S (`runBranchesRightAfter`).
    */
   const foldRemainderRun = (stmts: Statement[], i: number, ctx: RemainderRunContext): { out: Statement[]; next: number } | null => {
@@ -1108,7 +1109,7 @@ function createFolder(shapeOf: ExprShape, o: ArithIdiomsOptions, resolve: Typede
     const rem = remainder(and.x, xt, and.n);
     if (zero) {
       if (body.length !== 1 || zeroFixupOf(body[0], zero.flag, and.name, and.n) !== zero.op) return null;
-      if (!ctx.deadAfter(and.name, ifs, stmts.slice(i, j + 1))) return null;
+      if (!local || !ctx.deadAfter(and.name, ifs, stmts.slice(i, j + 1))) return null;
       stats['pow2-rem-test']++;
       return { out: [zero.with(Expr.binary(rem, zero.op, Expr.intLiteral(0))), ...between], next: j + 1 };
     }
