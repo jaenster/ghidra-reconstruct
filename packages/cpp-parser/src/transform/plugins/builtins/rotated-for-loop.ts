@@ -7,6 +7,7 @@
  *
  *   if (G) { i = X; do { B; step; } while (C); }   ->   for (i = X; C; step) { B }
  *   i = X; if (G) { do { B; step; } while (C); }   ->   for (i = X; C; step) { B }
+ *   i = X; S; if (G) { do { B; step; } while (C); }   ->   S; for (i = X; C; step) { B }
  *
  * Compiled again, the rotated form puts the test first and the initialisation after it,
  * where the original has it before (InitPal, 00476ea0). The for loop is laid out as the
@@ -14,6 +15,13 @@
  * it does not stay there: when only the loop reads the counter, decl-scope-sink (62) sinks
  * it into the guarded block, which is the first form again. Ghidra prints InitPal itself
  * that way, so both forms become the for loop here.
+ *
+ * Ghidra may print up to three statements S between that initialisation and the `if`
+ * (FreeHireablesList, 00492ec0: `nIconIdx = 0; pMemoryToFree = gpHireablesList; if (...)`).
+ * The initialisation moves past them when each is a plain assignment or declaration of a
+ * variable other than i, with a side-effect-free value that does not mention i, and X
+ * reads only constants and variables none of them writes: then S cannot see i, and X has
+ * the same value after S as before it.
  *
  * The two mean the same only when all of this holds, so each is checked:
  *   - the `if` has no else, and its block holds the do-while only, after the
@@ -50,6 +58,7 @@ import type {
   AssignExpr,
   BinaryExpr,
   CompoundStmt,
+  CStyleCastExpr,
   DeclStmt,
   DoWhileStmt,
   Expression,
@@ -411,8 +420,14 @@ function ifKey(n: ASTNode): string | null {
   return s && typeof s.offset === 'number' ? `${s.offset}:${s.line}` : null;
 }
 
-/** A rotated loop's counter, and whether its initialisation stands ahead of the `if`. */
-interface Site { v: string; ahead: boolean }
+/**
+ * A rotated loop's counter, whether its initialisation stands ahead of the `if`, and how
+ * many statements stand between that initialisation and the `if`.
+ */
+interface Site { v: string; ahead: boolean; gap: number }
+
+/** The most statements an initialisation ahead of the `if` moves past. */
+const MAX_GAP = 3;
 
 /**
  * The initialisation and the do-while of a rotated loop: both in the `if` block, or the
@@ -436,24 +451,77 @@ function findSites(
 ): Map<string, Site> {
   const sites = new Map<string, Site>();
   const seen = new Map<string, number>();
-  // `ahead` is the statement before `n` in its block, where it has one.
-  const visit = (n: ASTNode, ahead: Statement | null): void => {
+  // `before` are the statements before `n` in its block, nearest last.
+  const visit = (n: ASTNode, before: Statement[]): void => {
     if (n.kind === NodeKind.IfStmt) {
       const k = ifKey(n);
       if (k) seen.set(k, (seen.get(k) ?? 0) + 1);
-      const site = matchSite(n as IfStmt, ahead, body, shapeOf, locals, layout);
+      const site = matchSiteBefore(n as IfStmt, before, body, shapeOf, locals, layout);
       if (site && k) sites.set(k, site);
     }
     if (n.kind === NodeKind.CompoundStmt) {
       const stmts = (n as CompoundStmt).statements;
-      stmts.forEach((s, i) => visit(s, i > 0 ? stmts[i - 1] : null));
+      stmts.forEach((s, i) => visit(s, stmts.slice(Math.max(0, i - 1 - MAX_GAP), i)));
       return;
     }
-    for (const c of getChildren(n)) visit(c, null);
+    for (const c of getChildren(n)) visit(c, []);
   };
-  visit(body, null);
+  visit(body, []);
   for (const [k, count] of seen) if (count > 1) sites.delete(k);
   return sites;
+}
+
+/**
+ * The site of an `if` with the statements `before` it: the initialisation in the block,
+ * right before the `if`, or before up to MAX_GAP statements it can move past.
+ */
+function matchSiteBefore(
+  ifs: IfStmt, before: Statement[], body: CompoundStmt, shapeOf: ExprShape, locals: ReadonlySet<string>,
+  layout: BranchLayoutEvidence | null | undefined,
+): Site | null {
+  const first = matchSite(ifs, before.length > 0 ? before[before.length - 1] : null, body, shapeOf, locals, layout);
+  if (first) return first;
+  for (let gap = 1; gap <= MAX_GAP && gap < before.length; gap++) {
+    const ahead = before[before.length - 1 - gap];
+    const site = matchSite(ifs, ahead, body, shapeOf, locals, layout);
+    if (!site || !site.ahead) continue;
+    const init = initOf(ahead)!;
+    if (!before.slice(before.length - gap).every(s => movesPast(s, init.v, init.x))) return null;
+    return { ...site, gap };
+  }
+  return null;
+}
+
+/**
+ * Whether the initialisation `v = x` can move past `s`: `s` assigns or declares a variable
+ * other than `v` with a side-effect-free value that does not mention `v`, and `x` reads
+ * only constants and variables, none of them the one `s` writes.
+ */
+function movesPast(s: Statement, v: string, x: Expression): boolean {
+  if (hasComment(s)) return false;
+  const w = initOf(s);
+  if (!w || w.v === v || !isPlainPure(w.x) || mentions(w.x, v)) return false;
+  return readsOnlyNames(x) && !mentions(x, w.v);
+}
+
+/** Whether `e` is built of literals and plain variable names only - no memory read. */
+function readsOnlyNames(e: ASTNode): boolean {
+  switch (e.kind) {
+    case NodeKind.IntegerLiteral: case NodeKind.CharLiteral: case NodeKind.BoolLiteral: case NodeKind.Identifier:
+      return true;
+    case NodeKind.ParenExpr: return readsOnlyNames((e as ParenExpr).expression);
+    case NodeKind.CStyleCastExpr: return readsOnlyNames((e as CStyleCastExpr).expression);
+    case NodeKind.BinaryExpr: {
+      const b = e as BinaryExpr;
+      return readsOnlyNames(b.left) && readsOnlyNames(b.right);
+    }
+    case NodeKind.UnaryExpr: {
+      const u = e as UnaryExpr;
+      return (u.operator === '-' || u.operator === '~' || u.operator === '!' || u.operator === '+') && readsOnlyNames(u.operand);
+    }
+    default:
+      return false;
+  }
 }
 
 function matchSite(
@@ -503,7 +571,7 @@ function matchSite(
     const from = gotoTargets(body, loop.body, new Set());
     for (const l of labels) if (from.has(l)) return null;
   }
-  return { v, ahead: parts.ahead };
+  return { v, ahead: parts.ahead, gap: 0 };
 }
 
 /** The for loop of a site; `ahead` is the statement before the `if`, for a site that has its initialisation there. */
@@ -570,24 +638,23 @@ export function createRotatedForLoopTransformer(options?: PluginOptions): Transf
         const site = k ? sites.get(k) : undefined;
         return site && !site.ahead ? rewrite(node, site) ?? undefined : undefined;
       },
-      // A loop whose initialisation stands ahead of the `if` takes the place of both.
+      // A loop whose initialisation stands ahead of the `if` takes the place of both; the
+      // statements between them stay ahead of the loop.
       visitCompoundStmt(node: CompoundStmt): ASTNode | undefined {
         const stmts = node.statements;
-        let out: Statement[] | null = null;
-        for (let i = 0; i < stmts.length; i++) {
-          const next = stmts[i + 1];
-          const k = next?.kind === NodeKind.IfStmt ? ifKey(next) : null;
+        const loops = new Map<number, ForStmt>();
+        const moved = new Set<number>();
+        stmts.forEach((s, i) => {
+          const k = s.kind === NodeKind.IfStmt ? ifKey(s) : null;
           const site = k ? sites.get(k) : undefined;
-          const loop = site?.ahead ? rewrite(next as IfStmt, site, stmts[i]) : null;
-          if (loop) {
-            out ??= stmts.slice(0, i);
-            out.push(loop);
-            i++;
-            continue;
-          }
-          out?.push(stmts[i]);
-        }
-        return out ? updateNode(node, { statements: out }) : undefined;
+          const at = i - 1 - (site?.gap ?? 0);
+          if (!site?.ahead || at < 0 || moved.has(at) || loops.has(at)) return;
+          const loop = rewrite(s as IfStmt, site, stmts[at]);
+          if (loop) { loops.set(i, loop); moved.add(at); }
+        });
+        if (loops.size === 0) return undefined;
+        const out = stmts.flatMap((s, i) => moved.has(i) ? [] : [loops.get(i) ?? s]);
+        return updateNode(node, { statements: out });
       },
     })(fn.body) as CompoundStmt;
     return updateNode(fn, { body } as Partial<FunctionDecl>);

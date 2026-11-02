@@ -296,6 +296,47 @@ describe('rotatedForLoopPlugin', () => {
     same(`void f(int n) { int i; i = 0; h(); if (0 < n) { do { g(i); i++; } while (i < n); } }`);
   });
 
+  // FreeHireablesList, 00492ec0: an unrelated assignment between the initialisation and the if.
+  it('moves the initialisation past statements that neither the counter nor its value depend on', () => {
+    const out = tx(`void f(Table* t) {
+  int nCount;
+  int i;
+  Node* p;
+  nCount = t->n * 5;
+  i = 0;
+  p = gpList;
+  if (0 < nCount) {
+    do {
+      g(p, i);
+      i = i + 1;
+    } while (i < nCount);
+  }
+}`);
+    assert.strictEqual(out, `void f(Table* t) {
+  int nCount;
+  int i;
+  Node* p;
+  nCount = t->n * 5;
+  p = gpList;
+  for (i = 0; i < nCount; i = i + 1) {
+    g(p, i);
+  }
+}`);
+    const three = tx(`void f(int n, int a) { int i; int b; int c; int d; i = a; b = 1; c = n; d = *gp; if (a < n) { do { g(i); i++; } while (i < n); } }`);
+    assert.ok(three.replace(/\s+/g, ' ').includes('b = 1; c = n; d = *gp; for (i = a; i < n; i++)'), three);
+  });
+
+  it('leaves the initialisation ahead of a statement it cannot move past', () => {
+    // A call, a write of the counter or of a variable X reads, a value reading the counter,
+    // an X that reads memory, or more than three statements in between.
+    same(`void f(int n) { int i; int b; i = 0; b = h(); if (0 < n) { do { g(i); i++; } while (i < n); } }`);
+    same(`void f(int n, int a) { int i; int b; i = a; a = 2; if (a < n) { do { g(i); i++; } while (i < n); } }`);
+    same(`void f(int n) { int i; int b; i = 0; b = i; if (0 < n) { do { g(i); i++; } while (i < n); } }`);
+    same(`void f(int n, int* p) { int i; int b; i = *p; b = 1; if (*p < n) { do { g(i); i++; } while (i < n); } }`);
+    same(`void f(int n) { int i; int b; i = 0; b = 1; b = 2; b = 3; b = 4; if (0 < n) { do { g(i); i++; } while (i < n); } }`);
+    same(`void f(int n) { int i; int b; i = 0; b++; if (0 < n) { do { g(i); i++; } while (i < n); } }`);
+  });
+
   it('leaves an if block ahead of which the initialisation stands, holding more than the loop', () => {
     same(`void f(int n) { int i; i = 0; if (0 < n) { h(); do { g(i); i++; } while (i < n); } }`);
   });
