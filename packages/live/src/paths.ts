@@ -21,6 +21,8 @@ export const NEVER_TOUCH: string[] = [
   'support/',
   'thirdparty/',
   'sites2.tsv',
+  // Written by the regen and the daemon after the sync, not by the generator.
+  'ghidra_version.cpp',
 ];
 
 /**

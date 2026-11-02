@@ -20,7 +20,7 @@
 
 import { readFileSync } from 'node:fs';
 import { join, relative, dirname } from 'node:path';
-import { readFile, readdir, mkdtemp, rm, cp } from 'node:fs/promises';
+import { readFile, readdir, mkdtemp, rm, cp, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { execFile } from 'node:child_process';
@@ -50,7 +50,8 @@ import {
   type MergeResult, type CommitResult,
 } from './git.js';
 import { WorkQueue } from './queue.js';
-import { verifyResume } from './events.js';
+import { verifyResume, PollingChangeStream, SEQ_PER_VERSION, type ChangeFeed } from './events.js';
+import { localWorkerEnabled } from '@ghidra-mcp/reconstruct/local-worker';
 import { buildFingerprint, checkBuild } from './build-fingerprint.js';
 import {
   selectDirtyUnits,
@@ -173,7 +174,7 @@ export class LiveLoop {
   private model!: LiveSnapshotModel;
   private indices!: ModelIndices;
   private connection!: GhidraConnection;
-  private stream!: ChangeStream;
+  private stream!: ChangeFeed;
 
   private readonly applied: AppliedRecord[] = [];
   private lastRebuild: LastRebuild | null = null;
@@ -284,6 +285,19 @@ export class LiveLoop {
       excludeLibraryCode: false,
     };
 
+    // The local worker's journal is keyed by server version, so a model that has never
+    // applied an event still has a position: the version its snapshot was extracted at.
+    if (state.seq === 0 && localWorkerEnabled()) {
+      const manifest = JSON.parse(await readFile(join(this.cfg.snapshotDir, 'manifest.json'), 'utf8')) as
+        { provenance?: { programVersion?: number } };
+      const version = manifest.provenance?.programVersion;
+      if (typeof version !== 'number' || version <= 0) {
+        throw new Error(`${this.cfg.snapshotDir}/manifest.json records no programVersion; the local journal cannot place it`);
+      }
+      state.seq = version * SEQ_PER_VERSION;
+      this.log(`snapshot is Game.exe v${version}: starting at seq ${state.seq}`);
+    }
+
     this.model = await loadSnapshotModel(this.cfg.snapshotDir, options, state.seq);
     this.indices = indexSnapshotModel(this.model);
     if (state.seq === 0) {
@@ -340,6 +354,19 @@ export class LiveLoop {
 
     const sessionId = this.cfg.sessionId ?? this.connection.sessionId;
     this.log(`subscribed to session ${sessionId}`);
+
+    if (localWorkerEnabled()) {
+      this.stream = new PollingChangeStream({
+        sendCommand: (cmd, params) => this.connection.sendCommand(cmd, params),
+        since: state.seq,
+        intervalMs: Number(process.env.D2_LIVE_POLL_MS ?? '2000'),
+        onBatch: batch => this.onBatch(batch),
+        onTruncated: info => this.onTruncated(info),
+        log: m => this.log(m),
+      });
+      this.stream.start();
+      return;
+    }
 
     this.stream = new ChangeStream({
       daemonUrl: this.cfg.daemonUrl,
@@ -475,6 +502,14 @@ export class LiveLoop {
     batch = this.dropEventsAlreadyInSnapshot(batch);
     if (batch.length === 0) return false;
 
+    // A version-keyed journal's events carry the server version they bring the model to;
+    // the tree and its commit say which version they were generated from.
+    if (localWorkerEnabled()) {
+      const version = Math.max(...batch.map(e => Math.floor(e.seq / SEQ_PER_VERSION)));
+      const provenance = this.model.manifest.provenance as { programVersion?: number };
+      if (!provenance.programVersion || version > provenance.programVersion) provenance.programVersion = version;
+    }
+
     const result = await applyEvents(
       this.model,
       this.indices,
@@ -600,6 +635,7 @@ export class LiveLoop {
 
     this.phase = 'syncing';
     await syncTree(this.cfg.stagingDir, this.cfg.regenDir);
+    await writeVersionFile(this.cfg.regenDir, this.model.manifest.provenance.programVersion);
 
     this.phase = 'committing';
     const commit = attributed
@@ -624,7 +660,7 @@ export class LiveLoop {
     if (this.lastRebuild) this.lastRebuild.commit = commit.sha;
 
     this.phase = 'merging';
-    const merge = await mergeIntoModified(this.cfg.modifiedDir, 'source/regen');
+    const merge = await mergeIntoModified(this.cfg.modifiedDir, await currentBranch(this.cfg.regenDir));
     this.lastMerge = { ...merge, at: new Date().toISOString() };
     if (merge.state === 'conflict') {
       this.log(`merge CONFLICT in ${merge.conflictFiles?.length ?? 0} file(s); markers left in ${this.cfg.modifiedDir}`);
@@ -900,7 +936,7 @@ export class LiveLoop {
   }
 
   private async doRetryMerge(): Promise<unknown> {
-    const merge = await mergeIntoModified(this.cfg.modifiedDir, 'source/regen');
+    const merge = await mergeIntoModified(this.cfg.modifiedDir, await currentBranch(this.cfg.regenDir));
     this.lastMerge = { ...merge, at: new Date().toISOString() };
     // Clearing the block is the whole point of this call, and it was missing:
     // `Queue.unblock()` existed but had no caller anywhere, so a conflict was a
@@ -1081,6 +1117,19 @@ export class LiveLoop {
  * generator output; without them `--delete` removes .gitignore and the whole
  * metrics history on every run.
  */
+/**
+ * The Game.exe Ghidra version the tree was generated from, in the file the batch regen
+ * writes (regen-local.sh, REGEN_VERSION_FILE): the build prints it in its version line.
+ * The generator does not emit it, so without this a daemon commit deletes it.
+ */
+async function writeVersionFile(regenDir: string, version: number | undefined): Promise<void> {
+  if (!version) return;
+  await writeFile(
+    join(regenDir, 'ghidra_version.cpp'),
+    `// The Game.exe Ghidra database version this tree was generated from.\nextern const char g_szGhidraVersion[] = "${version}";\n`,
+  );
+}
+
 async function syncTree(from: string, to: string): Promise<void> {
   const excludes = ['.git', '.idea/', '.DS_Store', ...NEVER_TOUCH]
     .flatMap(entry => ['--exclude', entry]);
