@@ -1508,6 +1508,38 @@ describe('globalAddressLiteralPlugin', () => {
       const out = run(`void f() { y = *(int*)(i * 8 + 0x77bdcc); }`, MCP);
       assert.ok(out.includes('(char*)&gbLanGameListEntryNamePadding2 + 4'), out);
     });
+
+    // SKILLDESC_BuildChargeSkillDesc @0x004e5e90: `MOV EAX,0x72d6cc; SUB EAX,EBX` is the
+    // displacement from the cursor to field +0xc of a 6 x 16-byte table at 0x72d6c0.
+    // Typed as one table, the interior label goes and Ghidra prints the raw constant.
+    const CHARGE: GlobalAddressLiteralOptions = {
+      globalAddresses: { gaChargeDescTable: 0x72d6c0, gnChargeDescCount: 0x72d720 },
+      globalSizes: { gaChargeDescTable: 96, gnChargeDescCount: 4 },
+      globalElementSizes: { gaChargeDescTable: 16 },
+      globalTypes: { gaChargeDescTable: 'D2ChargeDescStrc[6]', gnChargeDescCount: 'uint32_t' },
+      structLayouts: {
+        D2ChargeDescStrc: [
+          { name: 'nFileIndex', offset: 0, size: 4, type: 'int' },
+          { name: 'nType', offset: 4, size: 4, type: 'int' },
+          { name: 'wStrPos', offset: 8, size: 2, type: 'word' },
+          { name: 'wStrNeg', offset: 10, size: 2, type: 'word' },
+          { name: 'nDescFunc', offset: 12, size: 4, type: 'int' },
+        ],
+      },
+      aggregateMembers: { D2ChargeDescStrc: ['nFileIndex', 'nType', 'wStrPos', 'wStrNeg', 'nDescFunc'] },
+      dataSections: MCP.dataSections,
+    };
+
+    it('spells an interior table address minus a cursor through the field it starts', () => {
+      const out = run(`void f(int *pnStatData) { nInitDescOffset = 0x72d6cc - (int)pnStatData; }`, CHARGE);
+      assert.ok(out.includes('nInitDescOffset = (intptr_t)&gaChargeDescTable[0].nDescFunc - (int)pnStatData'), out);
+    });
+
+    it('keeps a byte remainder against an untyped table', () => {
+      const out = run(`void f(int *pnStatData) { nInitDescOffset = 0x72d6cc - (int)pnStatData; }`,
+        { ...CHARGE, globalTypes: { gaChargeDescTable: 'uint8_t[96]' }, globalElementSizes: { gaChargeDescTable: 1 } });
+      assert.ok(/nInitDescOffset = \(?\(intptr_t\)&gaChargeDescTable(\[12\]| \+ 12)\)? - \(int\)pnStatData/.test(out), out);
+    });
   });
 });
 
