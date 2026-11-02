@@ -32,9 +32,11 @@
  * deflateTune's two tests). An if a pass split off one decompiled `&&` (`if (a && (x = e,
  * x))` -> `if (a) { x = e; if (x) ... }`) takes that line's branch, and its BODY, which
  * runs on only through the split ifs, counts as leaving. A BODY that cannot leave at all is
- * Ghidra's single exit and keeps its nest unless the original fell into the return; a BODY
- * ending in `if (x) return K;` before a constant return keeps the nest so the two share the
- * return. Where the layout cannot tell (an `||` condition, whose BODY VC8 moves out of line,
+ * Ghidra's single exit and keeps its nest unless the original fell into the return, the facts
+ * cannot place the if before a constant return, BODY only loads the other value of a
+ * returned variable already in EAX, or a loop in BODY comes before a constant return; a BODY
+ * ending in `if (x) return K;`, x no `||` chain, before a constant return keeps the nest so
+ * the two share the return. Where the layout cannot tell (an `||` condition, whose BODY VC8 moves out of line,
  * an if inside a loop, an arm without code of its own, a void function's implicit end) the
  * guard is made as before.
  */
@@ -47,6 +49,11 @@ import type {
   CompoundStmt,
   IfStmt,
   ReturnStmt,
+  ExprStmt,
+  AssignExpr,
+  Identifier,
+  CStyleCastExpr,
+  CallExpr,
   BinaryExpr,
   UnaryExpr,
   ParenExpr,
@@ -57,7 +64,7 @@ import type {
 } from '../../../ast/nodes.js';
 import { createTransformer, cloneNode, updateNode, type Transformer } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
-import { getChildren } from '../../../ast/visitor.js';
+import { getChildren, traverseAST } from '../../../ast/visitor.js';
 import { LayoutReader, isLoop, type BranchLayoutEvidence } from './branch-layout/evidence.js';
 import { conditionShape } from './branch-layout/index.js';
 import { returnOrder, constantValue, loadsEax, hasCall, hasLoop, earlierCopy } from './branch-layout/predict.js';
@@ -256,8 +263,8 @@ function canLeave(stmts: readonly Statement[]): boolean {
 }
 
 /**
- * `if (x) { return K; }` with no else, K a constant, or a no-else if whose arm falls
- * through only into one: the nest ends in a test that leaves with a constant.
+ * `if (x) { return K; }` with no else, K a constant and x no `||` chain, or a no-else if
+ * whose arm falls through only into one: the nest ends in a test that leaves with a constant.
  */
 function returnsConstantTail(s: Statement): boolean {
   if (s.kind !== NodeKind.IfStmt) return false;
@@ -267,10 +274,49 @@ function returnsConstantTail(s: Statement): boolean {
   if (arm.length === 0) return false;
   const last = arm[arm.length - 1];
   if (arm.length === 1 && last.kind === NodeKind.ReturnStmt) {
+    // An `||` test jumps to the return from each operand and has no flag to fold
+    // (SOUND_Is3DMixerActive 004df980, SKILL_CheckCorpseCanBeConsumed 005d8510).
     const v = (last as ReturnStmt).value;
-    return !!v && constantValue(v);
+    return !!v && constantValue(v) && conditionShape(i.condition).kind !== 'or';
   }
   return returnsConstantTail(last);
+}
+
+/** The variable a return reads, through casts; null for any other value. */
+function returnedVariable(e: Expression): string | null {
+  let u = unwrapParens(e);
+  while (u.kind === NodeKind.CStyleCastExpr) u = unwrapParens((u as CStyleCastExpr).expression);
+  return u.kind === NodeKind.Identifier ? (u as Identifier).name : null;
+}
+
+const EAX_WRITE = /^(MOV|MOVZX|MOVSX|XOR|OR|SUB|ADD|AND|LEA)\/(EAX|AX|AL)$/;
+
+/**
+ * BODY is one plain `x = e;` of the returned variable, `e` without a call and not reading
+ * `x`, and the return copy the if jumps to writes nothing into EAX: x is there at the test.
+ */
+function selectsReturn(stmts: readonly Statement[], ret: ReturnStmt, reader: LayoutReader, ifs: IfStmt): boolean {
+  if (stmts.length !== 1 || stmts[0].kind !== NodeKind.ExprStmt || !ret.value) return false;
+  const x = returnedVariable(ret.value);
+  const a = unwrapParens((stmts[0] as ExprStmt).expression);
+  if (!x || a.kind !== NodeKind.AssignExpr) return false;
+  const as = a as AssignExpr;
+  if (as.operator !== '=' || returnedVariable(as.left) !== x) return false;
+  for (const n of traverseAST(as.right)) {
+    if (n.kind === NodeKind.CallExpr || (n.kind === NodeKind.Identifier && (n as Identifier).name === x)) return false;
+  }
+  const e = reader.edge(ifs);
+  const copy = e ? reader.returnCopyStarting(e.target) : null;
+  return !!copy && !copy.insns.some(i => EAX_WRITE.test(i));
+}
+
+/** A call to `exit` or `abort` in `stmts`: a path that halts. */
+function callsNoReturn(stmts: readonly Statement[]): boolean {
+  return stmts.some(s => [...traverseAST(s)].some(n => {
+    if (n.kind !== NodeKind.CallExpr) return false;
+    const c = (n as CallExpr).callee;
+    return c.kind === NodeKind.Identifier && ['exit', 'abort', '_exit'].includes((c as Identifier).name);
+  }));
 }
 
 /** The if's conditional jump goes backward to the start of a return copy of the original. */
@@ -316,12 +362,33 @@ function layoutGate(ev: BranchLayoutEvidence, body: CompoundStmt): GuardGate {
       // only clones the return, and VC8 lays the clone out where the original had none.
       // Made only where the original fell into the return and jumped to BODY - the guard's
       // own layout, one return copy per path (SPELLSEL_FindChargedSkill1).
-      if (!canLeave(stmts)) return reader.fallInto(ifs) === 'other';
+      const fall = reader.fallInto(ifs);
+      const constant = constantValue(ret.value);
+      if (!canLeave(stmts)) {
+        if (fall === 'other') return true;
+        // Where the facts cannot place the if (Missiles_SrvHitFunc_DispatchSrvDoFunc 005acfc0,
+        // Q22_PlayerCheckKhalimsWillItems 005bb7b0), a constant return is guarded as before:
+        // its copy brings no value into EAX and VC8 shares it with BODY's own exits. A
+        // variable keeps its single exit (CHAR_AddClassToHitFactor 004a7300).
+        if (fall === null) return constant;
+        // `x = A; if (C) { x = B; } return x;` with x in EAX at the test: the original
+        // returns A at once and loads B on the other path (GAMEDATA_GetLadderOrGameType
+        // 0044dca0, StripPathPrefixToRelative 00408000). Nested, VC8 loads B first and
+        // moves A over it.
+        if (selectsReturn(stmts, ret, reader, ifs)) return true;
+        // A constant return after a loop: the loop's exits leave at different depths of
+        // the epilogue's pops, and VC8 shares one tail between them and the guard
+        // (SPELLSEL_FindChargedSkill1 004a9a90, SKILLSEMON_CltSetReviveGfx 004f04f0). Not a
+        // loop that can halt, whose cold path VC8 lays out apart (DRLGROOM_ValidateClientList
+        // 0061a550).
+        if (constant && hasLoop(stmts) && !callsNoReturn(stmts)) return true;
+        return false;
+      }
       // `if (C) { ...; if (x) { return 1; } } return 0;`: the tail test jumps to the return
       // the failing C shares (SKILL_ExecuteSelectProc 004642b0, BNCLIENT_IsSocketConnected
       // 0051ca30). Flattened, `if (x) return 1; return 0;` stands alone and VC8 folds it
       // to NEG/SBB/NEG.
-      if (constantValue(ret.value) && returnsConstantTail(stmts[stmts.length - 1])) return false;
+      if (constant && returnsConstantTail(stmts[stmts.length - 1])) return false;
       return true;
     }
     // An `||` condition puts a leaving BODY out of line after what follows, so the nest's

@@ -706,16 +706,79 @@ describe('earlyReturnPlugin - gated by the layout', () => {
 
   // TSGrowableArray_Ui_RoundToChunk 004210e0: `if (n % m != 0) { n += m - n % m; } return n;`
   // is the original's single exit; the guard would only clone the return.
+  function erWith(lines: string[], extra: Partial<BranchLayoutEvidence>): string {
+    const { code, ev } = fixture(lines);
+    return flat(emit(earlyReturnPlugin.createTransformer({ branchLayout: { ...ev, ...extra } })(parse(code)) as AnyNode));
+  }
+  const singleExit = [
+    'int f(int h) {',
+    '[if 0x4b 0x48,0x4b] if (h == 2) {',
+    '[0x4e] G(h);',
+    '}',
+    '[0x5d,0x62] return 1;',
+    '}',
+  ];
+  const fallsIntoBody = [{ line: 2, ord: 0, keyword: 'if' as const, jcc: 0x4b, target: 0x5d, fall: 0x4e, fallLines: [3], takenLines: [5] }];
+
   it('keeps the nest when the body cannot leave', () => {
-    const lines = [
-      'int f(int h) {',
-      '[if 0x4b 0x48,0x4b] if (h == 2) {',
-      '[0x4e] G(h);',
-      '}',
-      '[0x5d,0x62] return 1;',
-      '}',
-    ];
-    assert.ok(er(lines).includes('if (h == 2) { G(h); } return 1;'), er(lines));
+    const out = erWith(singleExit, { edges: fallsIntoBody });
+    assert.ok(out.includes('if (h == 2) { G(h); } return 1;'), out);
+  });
+
+  // Missiles_SrvHitFunc_DispatchSrvDoFunc 005acfc0, Q22_PlayerCheckKhalimsWillItems 005bb7b0:
+  // an if whose jump the facts cannot place says nothing about the nest.
+  it('makes the guard for a body that cannot leave where the facts have no edge for the if', () => {
+    const out = er(singleExit);
+    assert.ok(/if \(h != 2\)\s*return 1;/.test(out), out);
+  });
+
+  // GAMEDATA_GetLadderOrGameType 0044dca0: `mov eax, [ladder]; ...; jbe ret; mov eax, 1; ret`.
+  const select = [
+    'int f(int h) {',
+    '[0x2] int r = h;',
+    '[if 0x10 0x8,0x10] if (h > 7) {',
+    '[0x12] r = 1;',
+    '}',
+    '[0x17] return r;',
+    '}',
+  ];
+  const selectEdge = [{ line: 3, ord: 0, keyword: 'if' as const, jcc: 0x10, target: 0x17, fall: 0x12, fallLines: [4], takenLines: [6] }];
+
+  it('makes the guard where the body only loads the other value of a variable already in EAX', () => {
+    const out = erWith(select, { edges: selectEdge, returns: [{ start: 0x17, ret: 0x17, insns: ['RET'], jumpsIn: [0x10], fallsIn: true }] });
+    assert.ok(/if \(h <= 7\)\s*return r; r = 1; return r;/.test(out), out);
+  });
+
+  // SKILLS_CalculateSynergyValue_Recursive 00645a90 keeps its nest: the join moves the variable into EAX.
+  it('keeps the nest of a select whose return copy loads EAX', () => {
+    const out = erWith(select, { edges: selectEdge, returns: [{ start: 0x17, ret: 0x1b, insns: ['POP/EDI', 'MOV/EAX', 'RET'], jumpsIn: [0x10], fallsIn: true }] });
+    assert.ok(out.includes('if (h > 7) { r = 1; } return r;'), out);
+  });
+
+  // SPELLSEL_FindChargedSkill1 004a9a90: the loop's exits and the guard share one tail.
+  const loopBody = (halt: boolean) => [
+    'int f(int h) {',
+    '[if 0x5 0x0,0x5] if (h != 0) {',
+    '[0x7] int p = G(h);',
+    '[0x10] while (p != 0) {',
+    halt ? '[0x20] if (p == 3) { exit(-1); }' : '[0x20] H(p);',
+    '[0x30] p = N(p);',
+    '}',
+    '}',
+    '[0x41,0x44] return 0;',
+    '}',
+  ];
+  const loopEdge = [{ line: 2, ord: 0, keyword: 'if' as const, jcc: 0x5, target: 0x41, fall: 0x7, fallLines: [3], takenLines: [9] }];
+
+  it('makes the guard of a constant return after a loop', () => {
+    const out = erWith(loopBody(false), { edges: loopEdge });
+    assert.ok(/if \(h == 0\)\s*return 0;/.test(out), out);
+  });
+
+  // DRLGROOM_ValidateClientList 0061a550: a loop that can halt keeps the nest.
+  it('keeps the nest of a constant return after a loop that can halt', () => {
+    const out = erWith(loopBody(true), { edges: loopEdge });
+    assert.ok(out.includes('if (h != 0) {'), out);
   });
 
   // SPELLSEL_FindChargedSkill1: VC8 emitted one return copy per path, the guard's layout.
@@ -749,6 +812,22 @@ describe('earlyReturnPlugin - gated by the layout', () => {
     ]);
     assert.ok(out.includes('if (r != 0) { return 1; } } return 0;'), out);
     assert.ok(!/return 1; return 0;/.test(out), out);
+  });
+
+  // SOUND_Is3DMixerActive 004df980: an `||` tail has no flag to fold; the guard is made.
+  it('makes the guard of a body ending in an `||` test before a constant return', () => {
+    const out = er([
+      'int f(int h, int g) {',
+      '[if 0x10 0x8,0x10] if (h != 0) {',
+      '[0x20] int r = G(h);',
+      '[if 0x2c 0x26,0x2c] if (r == 1 || r == 2) {',
+      '[0x2e,0x33] return 1;',
+      '}',
+      '}',
+      '[0x34,0x36] return 0;',
+      '}',
+    ]);
+    assert.ok(/if \(h == 0\)\s*return 0;/.test(out), out);
   });
 
   it('reads a tail call printed on the call and on the return as the body\'s (TEXT_GetOverheadSpeakerUnit)', () => {
