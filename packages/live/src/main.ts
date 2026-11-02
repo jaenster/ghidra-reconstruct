@@ -788,16 +788,34 @@ export class LiveLoop {
     }
   }
 
+  /**
+   * What the last publish produced, for callers waiting on a version: the regen and
+   * merge commits and the gate, read from the publish step's own output lines
+   * ("regen HEAD=", "modified HEAD=", "link gate passed" / "LINK GATE FAILED").
+   */
+  private publishSummary(): unknown {
+    const p = this.lastPublish;
+    if (!p) return null;
+    const line = (re: RegExp) => p.tail.split("\n").map(l => re.exec(l)?.[1]).filter(Boolean).pop() ?? null;
+    return {
+      at: p.at,
+      exitCode: p.code,
+      regenHead: p.head ?? line(/regen HEAD=(\S+)/),
+      modifiedHead: line(/modified HEAD=(\S+)/),
+      gate: /link gate passed/.test(p.tail) ? "passed" : /LINK GATE FAILED/.test(p.tail) ? "failed" : p.code === 5 ? "not run: merge tree dirty" : p.code === 3 ? "not run: merge conflict" : null,
+    };
+  }
+
   /** Resolve once a tree at Game.exe `version` or later is committed, or time out. */
   async waitForVersion(version: number, timeoutSec: number): Promise<unknown> {
     const deadline = Date.now() + timeoutSec * 1000;
     while (this.committedVersion < version) {
       if (Date.now() >= deadline) {
-        return { reached: false, version: this.committedVersion, waitedFor: version, phase: this.phase };
+        return { reached: false, version: this.committedVersion, waitedFor: version, phase: this.phase, publish: this.publishSummary() };
       }
       await new Promise(r => setTimeout(r, 1000));
     }
-    return { reached: true, version: this.committedVersion, commit: this.lastCommit };
+    return { reached: true, version: this.committedVersion, commit: this.lastCommit, publish: this.publishSummary() };
   }
 
   private commitMessage(result: RebuildResult): string {
@@ -815,6 +833,9 @@ export class LiveLoop {
   status(): unknown {
     return {
       seq: this.model.seq,
+      committedVersion: this.committedVersion,
+      publishing: Boolean(process.env.LIVE_PUBLISH_CMD),
+      lastPublish: this.publishSummary(),
       lastAppliedSeq: this.stream.lastAppliedSeq,
       counts: countModel(this.model),
       program: {
