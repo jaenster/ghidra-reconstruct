@@ -159,7 +159,24 @@ export interface SymbolHashCache {
    * symbols), so an address-keyed map loses all but the last and then reports the
    * others as changed on every single run.
    */
-  globals: Record<string, { hash: string; name: string }>;
+  globals: Record<string, { hash: string; name: string; aggregate?: string }>;
+}
+
+/**
+ * The struct type whose instances this global's initial value adds to, or
+ * undefined. The generator reads the initial values of every initialised instance
+ * of a struct type (`createParamReachOracle`) to decide what a call through
+ * `p->field` reaches, and such a body names the TYPE, not the global. A changed
+ * value therefore reaches every unit that names the type.
+ */
+export function initialisedAggregate(g: AnalyzedDataSymbol): string | undefined {
+  const d = g.initializedData;
+  if (!d) return undefined;
+  const element = /^(.*?)\s*\[[^\]]*\]\s*$/.exec(g.dataType ?? '');
+  const base = (element ? element[1] : g.dataType ?? '').replace(/\b(const|volatile|struct|union)\b/g, '').trim();
+  if (!base || /[*\[]/.test(base)) return undefined;
+  if (element ? d.kind !== 'array' : d.kind !== 'struct') return undefined;
+  return base;
 }
 
 /** Identity for a global: address plus name, since neither alone is unique. */
@@ -186,7 +203,9 @@ export function computeHashCache(inputs: {
   }
   for (const g of inputs.globals) {
     const name = g.suggestedName || g.name;
-    if (g.address) cache.globals[globalKey(g.address, name)] = { hash: hashGlobal(g), name };
+    if (!g.address) continue;
+    const aggregate = initialisedAggregate(g);
+    cache.globals[globalKey(g.address, name)] = aggregate ? { hash: hashGlobal(g), name, aggregate } : { hash: hashGlobal(g), name };
   }
   return cache;
 }
@@ -251,6 +270,10 @@ export function selectDirtyUnits(inputs: SelectInputs): DirtySelection {
   // Globals are also found by ADDRESS: the unit that defines a file-local global
   // lists it in `globalAddresses` and names it in no dependency edge of its own.
   const changedGlobalAddrs = new Set<string>();
+  // Struct types one of whose initialised instances changed value: see
+  // initialisedAggregate. Matched against dependency edges only - a struct that
+  // contains the type did not change shape, so containment is not followed.
+  const valueTypes = new Set<string>();
 
   for (const f of functions) {
     const before = previous.functions[f.address];
@@ -274,6 +297,9 @@ export function selectDirtyUnits(inputs: SelectInputs): DirtySelection {
     const before = previous.globals[globalKey(g.address, name)];
     if (!before || before.hash !== hashGlobal(g)) {
       changedGlobalAddrs.add(g.address.toLowerCase());
+      const now = initialisedAggregate(g);
+      if (now) valueTypes.add(now);
+      if (before?.aggregate) valueTypes.add(before.aggregate);
       if (name) changed.push(name);
       if (before && before.name && before.name !== name) changed.push(before.name);
     }
@@ -298,6 +324,7 @@ export function selectDirtyUnits(inputs: SelectInputs): DirtySelection {
       disappeared.push(rec.name);
       changed.push(rec.name);
       changedGlobalAddrs.add(key.slice(0, key.indexOf('\u0000')).toLowerCase());
+      if (rec.aggregate) valueTypes.add(rec.aggregate);
     }
   }
   for (const key of Object.keys(previous.types)) {
@@ -346,7 +373,7 @@ export function selectDirtyUnits(inputs: SelectInputs): DirtySelection {
       unknown.push(m.unitName);
       continue;
     }
-    if (deps.some(d => changedSet.has(d.symbol))) dirty.add(m.unitName);
+    if (deps.some(d => changedSet.has(d.symbol) || valueTypes.has(d.symbol))) dirty.add(m.unitName);
   }
 
   // Which changed symbols would have nowhere to be emitted.

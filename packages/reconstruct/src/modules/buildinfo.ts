@@ -90,12 +90,32 @@ export function hashDataType(dt: ExtractedDataType): string {
   return h.digest('hex').slice(0, 16);
 }
 
-/** Hash a global symbol for change detection */
+/** JSON with object keys sorted, so equal values hash equal whatever order built them. */
+function stableJson(v: unknown): string {
+  if (v === null || typeof v !== 'object') return JSON.stringify(v) ?? 'undefined';
+  if (Array.isArray(v)) return `[${v.map(stableJson).join(',')}]`;
+  const o = v as Record<string, unknown>;
+  return `{${Object.keys(o).filter(k => o[k] !== undefined).sort().map(k => `${JSON.stringify(k)}:${stableJson(o[k])}`).join(',')}}`;
+}
+
+/**
+ * Hash a global symbol for change detection.
+ *
+ * Everything its definition is emitted from: the type and placement, and the
+ * initial value. Without the value a global whose bytes changed in Ghidra under
+ * the same type kept its old initializer, and nothing marked it.
+ */
 export function hashGlobal(g: AnalyzedDataSymbol): string {
   const h = createHash('sha256');
-  h.update(g.name);
-  h.update(g.dataType);
-  h.update(g.address);
-  h.update(g.scope ?? '');
+  for (const part of [
+    g.name, g.dataType, g.address, g.scope ?? '',
+    g.suggestedName ?? '', g.suggestedType ?? '', String(g.size ?? ''),
+    g.isInitialized ? '1' : '0', g.value ?? '', stableJson(g.initializedData ?? null),
+    g.namespace ?? '', g.comment ?? '', g.ifdef ?? '', g.platform ?? '', g.importSlot ?? '',
+    g.ownerFile ?? '', g.ownerFunction ?? '', g.ownerStructType ?? '', g.ownerStructHeader ?? '',
+  ]) {
+    h.update(part);
+    h.update('\u0000');
+  }
   return h.digest('hex').slice(0, 16);
 }

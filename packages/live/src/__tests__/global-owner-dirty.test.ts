@@ -65,3 +65,59 @@ test('an unchanged global dirties nothing', () => {
   const r = selectDirtyUnits({ buildInfo, previous, identCacheEmpty: false, functions, dataTypes, globals });
   assert.deepStrictEqual(r.units, []);
 });
+
+/**
+ * The value alone. `hashGlobal` covered name, type, address and scope, so bytes
+ * that changed in Ghidra under the same type changed no hash and re-emitted
+ * nothing: the definition kept its old initializer.
+ */
+const withValue = (value: string): AnalyzedDataSymbol => ({
+  ...global('int', value),
+  initializedData: { kind: 'scalar', value },
+} as unknown as AnalyzedDataSymbol);
+
+test('a global whose value changed under the same type re-emits its definition and its users', () => {
+  const previous = computeHashCache({ functions, dataTypes, globals: [withValue('0x40000000')] });
+  const r = selectDirtyUnits({
+    buildInfo, previous, identCacheEmpty: false, functions, dataTypes, globals: [withValue('0x3f800000')],
+  });
+  assert.deepStrictEqual(r.units, ['D2Sound::Src::D2SoundSmp', 'D2Sound::Src::User']);
+});
+
+test('the same value spelled with keys in another order changes nothing', () => {
+  const a = { ...global('D2RenderStrc', ''), initializedData: { kind: 'struct', fields: [], value: 'x' } } as unknown as AnalyzedDataSymbol;
+  const b = { ...global('D2RenderStrc', ''), initializedData: { value: 'x', fields: [], kind: 'struct' } } as unknown as AnalyzedDataSymbol;
+  const previous = computeHashCache({ functions, dataTypes, globals: [a] });
+  const r = selectDirtyUnits({ buildInfo, previous, identCacheEmpty: false, functions, dataTypes, globals: [b] });
+  assert.deepStrictEqual(r.units, []);
+});
+
+/**
+ * A call through `p->pfnDraw` is resolved from the initial values of every
+ * initialised instance of p's struct type. That body names the type, never the
+ * global, so a changed instance must reach the units that name the type.
+ */
+test('a changed initialised struct instance re-emits the units that name its type', () => {
+  const table = (target: string): AnalyzedDataSymbol => ({
+    name: 'gsRendererGlide', address: '007a0000', dataType: 'D2RenderStrc', size: 8, isInitialized: true,
+    scope: 'global', suggestedType: 'D2RenderStrc', referencingFunctions: [],
+    initializedData: { kind: 'struct', fields: [{ name: 'pfnDraw', value: { kind: 'pointer', value: target } }] },
+  } as unknown as AnalyzedDataSymbol);
+  const withTypeUser = {
+    ...buildInfo,
+    modules: [
+      ...buildInfo.modules,
+      {
+        id: 'D2Gfx/Draw.h', implPath: 'D2Gfx/Draw.cpp', unitName: 'D2Gfx::Draw',
+        functionNames: ['DRAW_Frame'], ownedTypeNames: [], globalAddresses: [],
+        deps: [{ symbol: 'D2RenderStrc', strength: 'by-pointer' }],
+      },
+    ],
+  };
+  const fns = [...functions, fn('00500300', 'DRAW_Frame')];
+  const previous = computeHashCache({ functions: fns, dataTypes, globals: [table('GLIDE_Draw')] });
+  const r = selectDirtyUnits({
+    buildInfo: withTypeUser, previous, identCacheEmpty: false, functions: fns, dataTypes, globals: [table('GLIDE_DrawFast')],
+  });
+  assert.ok(r.units?.includes('D2Gfx::Draw'), `got ${JSON.stringify(r.units)}`);
+});
