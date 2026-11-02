@@ -11,7 +11,8 @@ import * as path from 'node:path';
 
 import { cachedValue, configureStageCache } from '../codegen/stage-cache.js';
 import { warningRows } from '../codegen/warning-facts.js';
-import type { ExtractedFunction } from '../types.js';
+import { nullGetterDefaults } from '../codegen/null-getters.js';
+import type { ExtractedDataType, ExtractedFunction } from '../types.js';
 
 const fn = (name: string, address: string, decompiled: string) =>
   ({ name, namespace: 'D2Game::Units', address, decompiled } as unknown as ExtractedFunction);
@@ -75,6 +76,46 @@ describe('cachedValue', () => {
     const cold = cachedValue('map', () => 'k', make, codec);
     const warm = cachedValue('map', () => 'k', () => { throw new Error('not recomputed'); }, codec);
     assert.deepStrictEqual(warm, cold);
+  });
+});
+
+const getter = (name: string, address: string, field: string, dflt: string) => ({
+  name, namespace: 'D2Common::Units', address,
+  signature: '', returnType: 'int', callingConvention: '__stdcall',
+  parameters: [{ name: 'pUnit', dataType: 'D2UnitStrc *', ordinal: 0, storage: 'Stack[0x4]:4' }],
+  localVariables: [], isThunk: false, isExternal: false, hasVarArgs: false, size: 0x10,
+  decompiled: `int __stdcall ${name}(D2UnitStrc *pUnit)\n{\n  if (pUnit == (D2UnitStrc *)0x0) {\n    return ${dflt};\n  }\n  return pUnit->${field};\n}\n`,
+} as unknown as ExtractedFunction);
+
+const GETTERS = [
+  getter('UNITS_GetType', '00620000', 'dwType', '6'),
+  getter('UNITS_GetMode', '00620100', 'dwAnimMode', 'MODE_NONE'),
+  getter('UNITS_GetClass', '00620200', 'dwClassId', '-1'),
+];
+const MODES = {
+  name: 'eMode', kind: 'ENUM', size: 4, values: [{ name: 'MODE_NONE', value: 12 }],
+} as unknown as ExtractedDataType;
+
+describe('null-getter defaults through the stage cache', () => {
+  it('are the uncached defaults, cold and warm', () => {
+    configureStageCache(null);
+    const uncached = nullGetterDefaults(GETTERS, [MODES]);
+    assert.ok(Object.keys(uncached.table).length === 3, JSON.stringify(uncached));
+    configureStageCache(freshDir());
+    const cold = nullGetterDefaults(GETTERS, [MODES]);
+    assert.ok(fs.readdirSync(dir!).some(f => f.startsWith('null-getter-evidence-')), 'the cold run wrote the cache');
+    const warm = nullGetterDefaults(GETTERS, [MODES]);
+    assert.deepStrictEqual(cold, uncached);
+    assert.deepStrictEqual(warm, uncached);
+  });
+
+  it('do not reuse evidence valued under other enumerators', () => {
+    configureStageCache(freshDir());
+    nullGetterDefaults(GETTERS, [MODES]);
+    const renumbered = { ...MODES, values: [{ name: 'MODE_NONE', value: 13 }] } as unknown as ExtractedDataType;
+    const warm = nullGetterDefaults(GETTERS, [renumbered]);
+    configureStageCache(null);
+    assert.deepStrictEqual(warm, nullGetterDefaults(GETTERS, [renumbered]));
   });
 });
 

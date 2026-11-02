@@ -7,7 +7,10 @@
 
 import { nullGetterEvidence, nullGetterTable, type NullGetterEvidence, type NullGetterTable } from '@ghidra-mcp/cpp-parser';
 import type { ExtractedDataType, ExtractedEnum, ExtractedFunction } from '../types.js';
-import { pipelineFunction } from './inlined-calls.js';
+import { parsePipelineSource, pipelineSource } from './inlined-calls.js';
+import { ItemCache, sha256 } from './stage-cache.js';
+
+const evidenceByBody = new ItemCache<NullGetterEvidence[]>('null-getter-evidence');
 
 /** Enumerator name -> value, for the names every enum that declares them gives one value. */
 export function enumeratorValues(dataTypes: readonly ExtractedDataType[]): Map<string, number> {
@@ -38,13 +41,23 @@ export interface NullGetterDefaults {
 /** The table over every function with a decompile. */
 export function nullGetterDefaults(functions: readonly ExtractedFunction[], dataTypes: readonly ExtractedDataType[]): NullGetterDefaults {
   const enums = enumeratorValues(dataTypes);
+  // A body's evidence is a function of the text it parses and of the enumerator values
+  // a constant is read through: both are its key.
+  const enumsKey = sha256(JSON.stringify([...enums]));
   const all: NullGetterEvidence[] = [];
+  const used: string[] = [];
   for (const f of functions) {
     if (!f.decompiled) continue;
-    const fn = pipelineFunction(f);
-    if (!fn) continue;
-    all.push(...nullGetterEvidence(fn, n => enums.get(n)));
+    const source = pipelineSource(f);
+    if (source === undefined) continue;
+    const key = sha256(enumsKey, source);
+    used.push(key);
+    all.push(...evidenceByBody.get(key, () => {
+      const fn = parsePipelineSource(source);
+      return fn ? nullGetterEvidence(fn, n => enums.get(n)) : [];
+    }));
   }
+  evidenceByBody.save(used);
   const { table, conflicts } = nullGetterTable(all);
   return { table, conflicts, evidence: all.length, enums: Object.fromEntries(enums) };
 }
