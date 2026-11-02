@@ -109,6 +109,66 @@ describe('compare-form', () => {
       [dec({ ord: 0, text: '<', fp: ['c:5', 'v:x'], op: '>', swap: true, delta: 0, k: 5 })]), /x > UNIT_MAX/);
   });
 
+  // MISSILE_CltDoFn43_FollowOwner 004d3070: `CMP [EDI],1; JA` printed `eType < UNIT_OBJECT`.
+  describe('an enum member steps to its neighbour', () => {
+    const UNIT = { UNIT_PLAYER: 0, UNIT_MONSTER: 1, UNIT_OBJECT: 2, UNIT_MISSILE: 3 };
+    const tables: Partial<CompareFormOptions> = {
+      enumConstantTypes: Object.fromEntries(Object.keys(UNIT).map(n => [n, 'eUnitType'])),
+      enumMemberValues: { eUnitType: UNIT },
+    };
+    const runE = (code: string, site: Site, d: CompareFormDecision, extra: Partial<CompareFormOptions> = tables) =>
+      emit(createCompareFormTransformer({ sites: [site], decisions: [d], ...extra })(parse(code)) as AnyNode).trim();
+
+    it('writes the member worth one less', () => {
+      const site: Site = { text: '<', fp: ['v:eType', 'c:2'] };
+      assert.match(runE('void f(eUnitType eType) { if (eType < UNIT_OBJECT) {} }', site,
+        dec({ ord: 0, ...site, op: '<=', delta: -1, k: 2 })), /eType <= UNIT_MONSTER/);
+    });
+
+    it('writes the member worth one more, with the operands swapped', () => {
+      const site: Site = { text: '<', fp: ['c:2', 'v:eType'] };
+      assert.match(runE('void f(eUnitType eType) { if (UNIT_OBJECT < eType) {} }', site,
+        dec({ ord: 0, ...site, op: '>=', swap: true, delta: 1, k: 2 })), /eType >= UNIT_MISSILE/);
+    });
+
+    it('never invents a literal where no member has the value', () => {
+      const site: Site = { text: '<', fp: ['c:3', 'v:eType'] };
+      assert.match(runE('void f(eUnitType eType) { if (UNIT_MISSILE < eType) {} }', site,
+        dec({ ord: 0, ...site, op: '>=', swap: true, delta: 1, k: 3 })), /UNIT_MISSILE < eType/);
+    });
+
+    it('refuses a member two enums declare, or a value two members share', () => {
+      const site: Site = { text: '<', fp: ['v:eType', 'c:2'] };
+      const d = dec({ ord: 0, ...site, op: '<=', delta: -1, k: 2 });
+      const code = 'void f(eUnitType eType) { if (eType < UNIT_OBJECT) {} }';
+      const { UNIT_MONSTER: _m, ...shared } = tables.enumConstantTypes!;
+      assert.match(runE(code, site, d, { ...tables, enumConstantTypes: shared }), /eType < UNIT_OBJECT/);
+      assert.match(runE(code, site, d, { ...tables, enumMemberValues: { eUnitType: { ...UNIT, UNIT_ALIAS: 1 } } }),
+        /eType < UNIT_OBJECT/);
+    });
+
+    it('refuses a member the instructions do not agree with', () => {
+      const site: Site = { text: '<', fp: ['v:eType', 'c:2'] };
+      assert.match(runE('void f(eUnitType eType) { if (eType < UNIT_OBJECT) {} }', site,
+        dec({ ord: 0, ...site, op: '<=', delta: -1, k: 3 })), /eType < UNIT_OBJECT/);
+    });
+
+    it('compares the same over every value (compiled)', { skip: !hasNativeGpp() }, () => {
+      const site: Site = { text: '<', fp: ['v:eType', 'c:2'] };
+      const code = 'int f(eUnitType eType) { if (eType < UNIT_OBJECT) { return 1; } return 0; }';
+      const out = runE(code, site, dec({ ord: 0, ...site, op: '<=', delta: -1, k: 2 }));
+      const prelude = [
+        'typedef unsigned int eUnitType;',
+        'constexpr eUnitType UNIT_PLAYER = 0, UNIT_MONSTER = 1, UNIT_OBJECT = 2, UNIT_MISSILE = 3;',
+        code.replace('int f(', 'int before('), out.replace('int f(', 'int after('),
+      ].join('\n');
+      const r = compileAndRun(prelude,
+        'unsigned v[] = {0u, 1u, 2u, 3u, 4u, 0x7fffffffu, 0x80000000u, 0xffffffffu};\n'
+        + 'for (unsigned x : v) printf("%d%d ", before(x), after(x));');
+      for (const pair of r.trim().split(' ')) assert.strictEqual(pair[0], pair[1], r);
+    });
+  });
+
   it('swaps two variables, mirroring the operator', () => {
     assert.match(run('void f(int p, int q) { if (p <= q) {} }', [{ text: '<=', fp: ['v:p', 'v:q'] }],
       [dec({ ord: 0, text: '<=', fp: ['v:p', 'v:q'], op: '>=', swap: true, delta: 0 })]), /q >= p/);

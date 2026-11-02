@@ -3198,12 +3198,14 @@ function transformDecompiledCode(
         decisions: enclosing.compareForm.decisions,
         ...(context?.funcPtrArgCasts ? {
           enumTypes: context.funcPtrArgCasts.enumTypes,
+          enumConstantTypes: context.funcPtrArgCasts.enumConstantTypes,
           globalTypes: context.funcPtrArgCasts.globalTypes,
           fieldTypes: context.funcPtrArgCasts.fieldTypes,
           structFields: context.funcPtrArgCasts.structFields,
           typedefTargets: context.funcPtrArgCasts.typedefTargets,
           functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         } : {}),
+        enumMemberValues: context?._enumMemberValues,
         enclosingVarTypes,
         nullGetters: context?.nullGetters,
         onCensus: (c: { tied: number; rewritten: number; untied: number; zipped: boolean }) => {

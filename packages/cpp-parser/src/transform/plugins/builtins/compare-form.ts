@@ -35,7 +35,12 @@
  *    value is the same whether char is signed or not; the stepped value is written as a
  *    character where it is a printable one, else as a decimal integer, which compares the
  *    same after promotion (`c == '\0'` -> `c < 1`, `'/' < c` -> `c >= '0'`).
- * A constant side that is not a bare literal (an enum member, a cast pointer) only swaps.
+ *  - an enum member steps to the member of the same enum worth exactly one more or less
+ *    (`eType < UNIT_OBJECT` -> `eType <= UNIT_MONSTER`), when exactly one member has that
+ *    value and its bare name means only it. Both values stay within 0..0x7fffffff, so the
+ *    step wraps in neither domain. No such member, no rewrite: a literal is never invented
+ *    for an enum-typed comparison.
+ * Any other constant side that is not a bare literal (a cast pointer) only swaps.
  *
  * Every tied comparison, rewritten or kept as printed, also carries what its instructions
  * say for the passes that run on the final types: the CMP's width (`compareWidth`), read by
@@ -96,6 +101,10 @@ export interface CompareFormDecision {
 export interface CompareFormOptions extends PluginOptions {
   /** The type tables an operand's declared signedness is read from (as compare-signedness). */
   enumTypes?: string[];
+  /** Enum constant -> the enum declaring it, for names only one enum declares. */
+  enumConstantTypes?: Record<string, string>;
+  /** Enum name -> member name -> value: where a stepped enum constant finds its neighbour. */
+  enumMemberValues?: Record<string, Record<string, number>>;
   globalTypes?: Record<string, string>;
   enclosingVarTypes?: Record<string, string>;
   structFields?: Record<string, Record<string, string>>;
@@ -329,6 +338,8 @@ export function createCompareFormTransformer(options?: PluginOptions): Transform
     resolve: name => (enumTypes.has(name) ? undefined : typedefTargets[name]),
   };
 
+  const enumStep = enumStepper(o.enumConstantTypes ?? {}, o.enumMemberValues ?? {});
+
   return createTransformer({
     visitFunctionDecl(node: FunctionDecl): ASTNode | undefined {
       if (!node.body || sites.length === 0 || decisions.length === 0) return undefined;
@@ -392,7 +403,7 @@ export function createCompareFormTransformer(options?: PluginOptions): Transform
           if (!d) return undefined;
           let out: BinaryExpr | null = null;
           if (d.keep) out = byteCompareWithOne(be, d);
-          else if (d.op) out = rewrite(be, d, sizeOf(d.ord), shapeOf);
+          else if (d.op) out = rewrite(be, d, sizeOf(d.ord), shapeOf, enumStep);
           if (out) rewritten++;
           const facts = withMachineFacts(out ?? be, d);
           if (facts !== (out ?? be)) tagged++;
@@ -548,7 +559,30 @@ function narrowZextSum(e: Expression, shapeOf: ExprShape): Expression | null {
   return Expr.binary(a, '+', b);
 }
 
-function rewrite(be: BinaryExpr, d: CompareFormDecision, size: number, shapeOf: ExprShape): BinaryExpr | null {
+/** An enum constant's neighbour: the member of its enum worth `value + delta`. */
+type EnumStep = (e: Expression, k: number, size: number, delta: number) => Expression | null;
+
+function enumStepper(constantTypes: Record<string, string>, memberValues: Record<string, Record<string, number>>): EnumStep {
+  return (e, k, size, delta) => {
+    const x = unwrapParens(e);
+    if (x.kind !== NodeKind.Identifier) return null;
+    const name = (x as Identifier).name;
+    const owner = constantTypes[name];
+    const members = owner ? memberValues[owner] : undefined;
+    const value = members?.[name];
+    if (value === undefined) return null;
+    const bits = BigInt(8 * size);
+    const mod = ((BigInt(value) % (1n << bits)) + (1n << bits)) % (1n << bits);
+    if (mod !== BigInt(k)) return null;
+    const next = value + delta;
+    if (value < 0 || next < 0 || value > 0x7fffffff || next > 0x7fffffff) return null;
+    const names = Object.entries(members!).filter(([, v]) => v === next).map(([n]) => n);
+    if (names.length !== 1 || constantTypes[names[0]] !== owner) return null;
+    return { ...(x as Identifier), name: names[0], location: e.location, leadingTrivia: [], trailingTrivia: [] } as Identifier;
+  };
+}
+
+function rewrite(be: BinaryExpr, d: CompareFormDecision, size: number, shapeOf: ExprShape, enumStep?: EnumStep): BinaryExpr | null {
   let left = d.swap ? be.right : be.left;
   let right = d.swap ? be.left : be.right;
   if (d.zextSum) {
@@ -561,24 +595,30 @@ function rewrite(be: BinaryExpr, d: CompareFormDecision, size: number, shapeOf: 
   let crossed = false;
   if (d.k !== undefined && (delta !== 0 || d.unsigned)) {
     // The constant is the written right operand; it must be a bare literal the
-    // instructions agree with.
+    // instructions agree with, or an enum member stepping to its neighbour.
     const c = literalOf(right);
-    if (!c) return null;
-    const bits = BigInt(8 * size);
-    const mod = ((c.value % (1n << bits)) + (1n << bits)) % (1n << bits);
-    if (mod !== BigInt(d.k)) return null;
-    if (delta !== 0) {
-      let next = steppedConstant(c.lit, c.value, delta);
-      if (next === null && d.signed && operandSignedness(left, shapeOf) === 'signed') {
-        next = steppedConstant(c.lit, c.value, delta, true);
-        if (next !== null) crossed = true;
-      }
-      if (next === null) return null;
-      if (c.char) {
-        if (next < 0n || next > 0x7fn) return null;
-        right = spellCharValue(next, right);
-      } else {
-        right = spellLiteral(c.lit, next, right);
+    if (!c) {
+      // `X <= 0` / `X < 1` need the literal they write.
+      const stepped = delta !== 0 && !d.unsigned && enumStep ? enumStep(right, d.k, size, delta) : null;
+      if (!stepped) return null;
+      right = stepped;
+    } else {
+      const bits = BigInt(8 * size);
+      const mod = ((c.value % (1n << bits)) + (1n << bits)) % (1n << bits);
+      if (mod !== BigInt(d.k)) return null;
+      if (delta !== 0) {
+        let next = steppedConstant(c.lit, c.value, delta);
+        if (next === null && d.signed && operandSignedness(left, shapeOf) === 'signed') {
+          next = steppedConstant(c.lit, c.value, delta, true);
+          if (next !== null) crossed = true;
+        }
+        if (next === null) return null;
+        if (c.char) {
+          if (next < 0n || next > 0x7fn) return null;
+          right = spellCharValue(next, right);
+        } else {
+          right = spellLiteral(c.lit, next, right);
+        }
       }
     }
   }
