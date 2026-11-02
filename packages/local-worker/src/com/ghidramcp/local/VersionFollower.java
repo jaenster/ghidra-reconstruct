@@ -525,8 +525,10 @@ final class VersionFollower {
     /**
      * Everything about a function that its CALLERS' decompile depends on: its name, the
      * calling convention, return and parameter types and storage, varargs, inline,
-     * no-return, call-fixup and stack purge. Parameter names are deliberately absent: a
-     * call site shows the arguments, not the names the callee gives them.
+     * no-return, call-fixup and stack purge, and the parameter NAMES: the decompiler names
+     * a caller's local after the callee parameter it is passed as (a renamed parameter
+     * turned nSwitchAiMode into nParam in a caller at v1845), so a name is part of what the
+     * call site shows.
      */
     private static String callSignature(Function f) {
         StringBuilder sb = new StringBuilder();
@@ -536,7 +538,7 @@ final class VersionFollower {
         var ret = f.getReturn();
         sb.append(ret.getDataType().getPathName()).append('@').append(ret.getVariableStorage()).append('|');
         for (var param : f.getParameters()) {
-            sb.append(param.getDataType().getPathName()).append('@').append(param.getVariableStorage()).append(',');
+            sb.append(param.getName()).append(':').append(param.getDataType().getPathName()).append('@').append(param.getVariableStorage()).append(',');
         }
         Function thunked = f.getThunkedFunction(false);
         if (thunked != null) sb.append("->").append(thunked.getEntryPoint());
