@@ -12,6 +12,7 @@ import * as path from 'node:path';
 import { cachedValue, configureStageCache } from '../codegen/stage-cache.js';
 import { warningRows } from '../codegen/warning-facts.js';
 import { nullGetterDefaults } from '../codegen/null-getters.js';
+import { buildWriteEffects } from '../codegen/write-effects-table.js';
 import type { ExtractedDataType, ExtractedFunction } from '../types.js';
 
 const fn = (name: string, address: string, decompiled: string) =>
@@ -119,3 +120,54 @@ describe('null-getter defaults through the stage cache', () => {
   });
 });
 
+const body = (name: string, address: string, params: string, text: string) => ({
+  name, namespace: 'D2Game::Units', address,
+  signature: '', returnType: 'void', callingConvention: '__stdcall',
+  parameters: params ? params.split(',').map((p, i) => {
+    const [t, n] = p.trim().split(/\s+(?=\w+$)/);
+    return { name: n, dataType: t, ordinal: i, storage: `Stack[0x${(4 + 4 * i).toString(16)}]:4` };
+  }) : [],
+  localVariables: [], isThunk: false, isExternal: false, hasVarArgs: false, size: 0x10,
+  decompiled: `void __stdcall ${name}(${params})\n{\n${text}\n}\n`,
+} as unknown as ExtractedFunction);
+
+const EFFECT_FUNCTIONS = [
+  body('SetSeed', '00630000', 'D2SeedStrc *pSeed', '  pSeed->nLow = 1;\n  gnCount = gnCount + 1;\n  return;'),
+  body('Init', '00630100', 'int k', '  gpfnCallback = SetSeed;\n  if (k != 0) {\n    gpfnCallback = 0;\n  }\n  return;'),
+  body('Use', '00630200', 'D2UnitStrc *pUnit', '  SetSeed(pUnit->pSeed);\n  (*gpfnCallback)();\n  return;'),
+  body('Broken', '00630300', '', '  if (( {\n  return;'),
+];
+const EFFECT_GLOBAL_TYPES = { gnCount: 'int', gpfnCallback: 'void (*)(void)' };
+const EFFECT_AGGREGATES = {
+  layouts: {
+    D2SeedStrc: [{ name: 'nLow', offset: 0, size: 4, type: 'uint32_t' }, { name: 'nHigh', offset: 4, size: 4, type: 'uint32_t' }],
+    D2UnitStrc: [{ name: 'pSeed', offset: 0, size: 4, type: 'D2SeedStrc *' }],
+  },
+  sizes: { D2SeedStrc: 8, D2UnitStrc: 4 },
+};
+
+describe('write effects through the stage cache', () => {
+  const build = (types: Record<string, string> = EFFECT_GLOBAL_TYPES) =>
+    buildWriteEffects(EFFECT_FUNCTIONS, types, undefined, { aggregates: EFFECT_AGGREGATES });
+
+  it('are the uncached effects, cold and warm', () => {
+    configureStageCache(null);
+    const uncached = build();
+    assert.ok(uncached.SetSeed && uncached.Use && uncached.Broken?.unknown, JSON.stringify(uncached));
+    configureStageCache(freshDir());
+    const cold = build();
+    assert.ok(fs.readdirSync(dir!).some(f => f.startsWith('write-effect-analysis-')), 'the cold run wrote the cache');
+    const warm = build();
+    assert.deepStrictEqual(cold, uncached);
+    assert.deepStrictEqual(warm, uncached);
+  });
+
+  it('do not reuse a body read against other global tables', () => {
+    configureStageCache(freshDir());
+    build();
+    const retyped = { ...EFFECT_GLOBAL_TYPES, gnCount: 'int[4]' };
+    const warm = build(retyped);
+    configureStageCache(null);
+    assert.deepStrictEqual(warm, build(retyped));
+  });
+});

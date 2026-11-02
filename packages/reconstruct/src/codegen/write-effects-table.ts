@@ -9,7 +9,15 @@
  * that does not parse is unknown.
  */
 
-import { parse, preprocessGhidraCode, summarizeWriteEffects, type EffectFunction, type WriteEffect, type CompoundStmt, type FunctionDecl, type AggregateModel } from '@ghidra-mcp/cpp-parser';
+import { parse, preprocessGhidraCode, summarizeWriteEffects, writeEffectAnalyser, type EffectFunction, type WriteEffect, type WriteEffectAnalysis, type CompoundStmt, type FunctionDecl, type AggregateModel } from '@ghidra-mcp/cpp-parser';
+import { ItemCache, sha256 } from './stage-cache.js';
+
+/**
+ * Each body's own part of the summary (cpp-parser `WriteEffectAnalysis`), under the
+ * hash of the text it parses, its parameters and the global and aggregate tables it
+ * is read against: everything `analyse` reads.
+ */
+const analysisByBody = new ItemCache<WriteEffectAnalysis>('write-effect-analysis');
 import type { DataValue, ExtractedFunction, ExtractedGlobal } from '../types.js';
 import { splitDecompiledBody } from './impl.js';
 
@@ -19,12 +27,16 @@ function suffixes(qualified: string): string[] {
   return parts.map((_p, i) => parts.slice(i).join('::'));
 }
 
-function bodyOf(fn: ExtractedFunction, params: string[]): CompoundStmt | null {
+/** The text `bodyOf` parses; the parse is a function of it alone. */
+function bodySource(fn: ExtractedFunction, params: string[]): string | null {
   if (!fn.decompiled || fn.isExternal || fn.isThunk) return null;
   const split = splitDecompiledBody(fn.decompiled);
   if (!split) return null;
+  return `void dummy(${params.map(p => `int ${p}`).join(', ')}) {${preprocessGhidraCode(split.body)}}`;
+}
+
+function parseBody(wrapped: string): CompoundStmt | null {
   try {
-    const wrapped = `void dummy(${params.map(p => `int ${p}`).join(', ')}) {${preprocessGhidraCode(split.body)}}`;
     const tu = parse(wrapped) as unknown as { declarations: FunctionDecl[] };
     const decl = tu.declarations.find(d => d.body);
     return (decl?.body as CompoundStmt | undefined) ?? null;
@@ -118,18 +130,41 @@ export function buildWriteEffects(
   }
   // A leaf two globals share has a type only when they agree.
   for (const [leaf, s] of spellings) if (s.size === 1) leafTypes[leaf] = [...s][0];
+  // What a body's own part is read against, besides the body: its key with the text.
+  const tablesKey = sha256(JSON.stringify([
+    [...globalArrays].sort(), [...globalNames].sort(), leafTypes, model.aggregates ?? null,
+  ]));
+  const analyse = writeEffectAnalyser({ globalArrays, globalNames, globalTypes: leafTypes, aggregates: model.aggregates });
   const fns: EffectFunction[] = [];
   const readable = new Set<string>();
+  const used: string[] = [];
   for (const fn of functions) {
     if (!fn.name || fn.platform) continue;
     const params = [...(fn.parameters ?? [])].sort((a, b) => a.ordinal - b.ordinal)
       .map((p, i) => (p.name === 'this' ? 'self' : p.name) || `param_${i + 1}`);
     const qualified = fn.namespace ? `${fn.namespace}::${fn.name}` : fn.name;
     const paramTypes = [...(fn.parameters ?? [])].sort((a, b) => a.ordinal - b.ordinal).map(p => p.dataType);
-    const body = bodyOf(fn, params);
-    if (body) readable.add(qualified);
-    fns.push({ keys: suffixes(qualified), params, paramTypes, body });
+    const source = bodySource(fn, params);
+    if (source === null) {
+      fns.push({ keys: suffixes(qualified), params, paramTypes, body: null });
+      continue;
+    }
+    // Whether the body parses is part of what is kept: an unreadable body is unknown,
+    // and it decides `readable` below.
+    const key = sha256(tablesKey, source, JSON.stringify(params), JSON.stringify(paramTypes.map(t => t === undefined ? { none: true } : t)));
+    used.push(key);
+    const kept = analysisByBody.get(key, () => {
+      const body = parseBody(source);
+      return body ? analyse({ keys: [], params, paramTypes, body }) : null as unknown as WriteEffectAnalysis;
+    });
+    if (kept) {
+      readable.add(qualified);
+      fns.push({ keys: suffixes(qualified), params, paramTypes, body: null, analysis: kept });
+    } else {
+      fns.push({ keys: suffixes(qualified), params, paramTypes, body: null });
+    }
   }
+  analysisByBody.save(used);
   return summarizeWriteEffects(fns, {
     globalArrays, globalNames, onUnknown, globalTypes: leafTypes, aggregates: model.aggregates,
     globalInitialTargets: model.globals ? initialTargets(model.globals, functions, readable) : undefined,

@@ -71,6 +71,33 @@ export interface EffectFunction {
   /** Declared parameter type spellings, in the same order. */
   paramTypes?: readonly (string | undefined)[];
   body: CompoundStmt | null;
+  /**
+   * This function's own part, already read from `body` by `analyseWriteEffects` under
+   * the same options: used instead of reading the body again. `body` is then unread.
+   */
+  analysis?: WriteEffectAnalysis;
+}
+
+/** One summary as plain data. */
+interface PlainSum {
+  unknown: boolean; memory: boolean; regions: string[] | null; globals: string[];
+  params: number[]; paramRegions: [number, string[] | null][];
+}
+
+/**
+ * What one function contributes to the summary on its own, as plain data: its direct
+ * writes and reads with the calls it makes, and what it stores into global function
+ * pointers. A function of its body, its parameters and the options alone, so it can be
+ * computed once and kept.
+ */
+export interface WriteEffectAnalysis {
+  w: PlainSum;
+  r: PlainSum;
+  calls: CallSite[];
+  /** Global -> functions this body stores into it, in the order it stores them. */
+  stored: [string, string[]][];
+  /** Globals this body stores anything else into, or takes the address of. */
+  poisoned: string[];
 }
 
 export interface WriteEffectOptions {
@@ -127,6 +154,39 @@ export const WRITE_CONTRACTS: Record<string, WriteEffect> = (() => {
   for (const [n, e] of Object.entries(out)) out[n] = { ...e, reads: system.has(n) ? {} : { memory: true } };
   return out;
 })();
+
+function plainSum(s: Sum): PlainSum {
+  return {
+    unknown: s.unknown, memory: s.memory, regions: s.regions === null ? null : [...s.regions],
+    globals: [...s.globals], params: [...s.params],
+    paramRegions: [...s.paramRegions].map(([i, r]) => [i, r === null ? null : [...r]]),
+  };
+}
+
+function sumOf(p: PlainSum): Sum {
+  return {
+    unknown: p.unknown, memory: p.memory, regions: p.regions === null ? null : new Set(p.regions),
+    globals: new Set(p.globals), params: new Set(p.params),
+    paramRegions: new Map(p.paramRegions.map(([i, r]) => [i, r === null ? null : new Set(r)])),
+  };
+}
+
+/**
+ * A reader of one function's own part, for `EffectFunction.analysis`. The options must
+ * be the ones the summary is then made under.
+ */
+export function writeEffectAnalyser(opts: WriteEffectOptions = {}): (fn: EffectFunction) => WriteEffectAnalysis {
+  const regions = opts.aggregates ? new Regions(opts.aggregates) : null;
+  return fn => {
+    const stores: PointerStores = { stored: new Map(), poisoned: new Set() };
+    const { w, r } = analyse(fn, opts, regions, stores);
+    return {
+      w: plainSum(w), r: plainSum(r), calls: w.calls,
+      stored: [...stores.stored].map(([g, t]) => [g, [...t]]),
+      poisoned: [...stores.poisoned],
+    };
+  };
+}
 
 /** Calls that end the process: nothing after them is observed by a caller. */
 const NO_RETURN = new Set(['exit', '_exit', 'abort', 'ExitProcess', 'FatalAppExitA', '_amsg_exit']);
@@ -508,7 +568,18 @@ export function summarizeWriteEffects(fns: readonly EffectFunction[], opts: Writ
   const contracts = opts.contracts ?? WRITE_CONTRACTS;
   const regions = opts.aggregates ? new Regions(opts.aggregates) : null;
   const stores: PointerStores = { stored: new Map(), poisoned: new Set() };
-  const both = fns.map(f => analyse(f, opts, regions, stores));
+  const both = fns.map(f => {
+    if (!f.analysis) return analyse(f, opts, regions, stores);
+    const a = f.analysis;
+    for (const [g, targets] of a.stored) {
+      let into = stores.stored.get(g);
+      if (!into) stores.stored.set(g, into = new Set());
+      for (const t of targets) into.add(t);
+    }
+    for (const g of a.poisoned) stores.poisoned.add(g);
+    const calls = a.calls;
+    return { w: { ...sumOf(a.w), calls }, r: { ...sumOf(a.r), calls } };
+  });
   const byKey = new Map<string, number[]>();
   fns.forEach((f, i) => {
     for (const k of f.keys) {
