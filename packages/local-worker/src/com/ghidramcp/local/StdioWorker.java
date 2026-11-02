@@ -107,9 +107,13 @@ public final class StdioWorker {
         CommandDispatcher dispatcher = new CommandDispatcher(handler, log.child("Dispatcher"));
 
         Writer out = new OutputStreamWriter(protocolOut, StandardCharsets.UTF_8);
+        // The journal this read-only worker can offer: the server's version history.
+        VersionFollower follower = new VersionFollower(engine.getContext(), program,
+            serverVersion(engine, program));
         JsonObject ready = new JsonObject();
         ready.addProperty("ready", true);
         ready.addProperty("openMs", System.currentTimeMillis() - openStart);
+        ready.addProperty("version", follower.openVersion());
         reply(out, ready);
 
         BufferedReader in = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
@@ -122,6 +126,35 @@ public final class StdioWorker {
             JsonObject params = req.has("params") ? req.getAsJsonObject("params") : new JsonObject();
             if ("shutdown".equals(command)) break;
 
+            if ("get_changes".equals(command) || "get_program_version".equals(command)) {
+                // Answered on this thread, with every earlier request finished and no later
+                // one started: get_changes may move the open program to a newer version,
+                // and no read may straddle the swap.
+                awaitIdle();
+                JsonObject resp = new JsonObject();
+                resp.addProperty("id", id);
+                try {
+                    JsonObject result;
+                    if ("get_changes".equals(command)) {
+                        long since = params.has("since") && !params.get("since").isJsonNull() ? params.get("since").getAsLong() : 0;
+                        int limit = params.has("limit") && !params.get("limit").isJsonNull() ? params.get("limit").getAsInt() : 10000;
+                        if (limit <= 0 || limit > 100000) limit = 10000;
+                        result = follower.getChanges(since, limit, m -> System.err.println("[VersionFollower] " + m));
+                    } else {
+                        result = new JsonObject();
+                        result.addProperty("version", follower.openVersion());
+                        result.addProperty("latest", follower.latestVersion());
+                    }
+                    resp.addProperty("success", true);
+                    resp.add("result", result);
+                } catch (Exception e) {
+                    e.printStackTrace(System.err);
+                    resp = failure(id, e);
+                }
+                reply(out, resp);
+                continue;
+            }
+
             Future<JsonObject> future;
             try {
                 future = dispatcher.dispatch(command, params);
@@ -129,6 +162,7 @@ public final class StdioWorker {
                 reply(out, failure(id, e));
                 continue;
             }
+            beginRequest();
             // Reads complete on the dispatcher's pool; answer each as it finishes.
             Thread.ofVirtual().start(() -> {
                 JsonObject resp;
@@ -144,12 +178,34 @@ public final class StdioWorker {
                     resp = failure(id, e);
                 }
                 reply(out, resp);
+                endRequest();
             });
         }
 
         dispatcher.shutdown();
         engine.close(false);
         System.exit(0);
+    }
+
+    private static final Object idle = new Object();
+    private static int inFlight = 0;
+
+    private static void beginRequest() {
+        synchronized (idle) { inFlight++; }
+    }
+
+    private static void endRequest() {
+        synchronized (idle) { if (--inFlight == 0) idle.notifyAll(); }
+    }
+
+    private static void awaitIdle() throws InterruptedException {
+        synchronized (idle) { while (inFlight > 0) idle.wait(); }
+    }
+
+    /** The version the read-only program was opened at: the latest when it opened. */
+    private static int serverVersion(GhidraEngine engine, String programPath) throws Exception {
+        ghidra.framework.model.DomainFile df = engine.getContext().getProjectData().getFile(programPath);
+        return df.getLatestVersion();
     }
 
     private static JsonObject failure(long id, Throwable e) {
