@@ -357,3 +357,53 @@ describe('shift-count-mask: a narrowing cast in a kept count goes', () => {
     assert.strictEqual(compileAndRun(parts.join('\n'), body).trim(), cases.map(() => '0').join(' '));
   });
 });
+
+/** The rewrite with a count macro, as the Diablo II target configures it. */
+const viaMacro = (code: string) =>
+  emit(createShiftCountMaskTransformer({ countMacro: 'D2_SHIFT_COUNT' })(parse(code)) as AnyNode).trim();
+
+describe('shift-count-mask: unproven counts go through the count macro', () => {
+  for (const [name, src] of NEGATIVE) {
+    it(name, () => {
+      const out = viaMacro(src);
+      assert.doesNotMatch(out, /& 0x1fU?\b|0x1fU? &/, out);
+      assert.match(out, /D2_SHIFT_COUNT\(/, out);
+      assert.ok(parse(out));
+    });
+  }
+
+  // GetMinDamage, 0064af20: `mov cl, byte ptr [esi+0x196]; shl edi, cl`.
+  it('a byte field count, the whole count expression, and a compound shift', () => {
+    assert.strictEqual(viaMacro('uint32_t f(Strc* p, int v) { return v << (p->HitShift & 0x1fU); }'),
+      'uint32_t f(Strc* p, int v) {\n  return v << D2_SHIFT_COUNT(p->HitShift);\n}');
+    assert.match(viaMacro('uint32_t f(int a, int b) { return (uint32_t)b >> (0x20U - (uint8_t)a & 0x1f); }'),
+      /b >> D2_SHIFT_COUNT\(0x20U - a\)/);
+    assert.match(viaMacro('uint32_t f(int a, uint32_t b) { b <<= (a & 0x1f); return b; }'), /b <<= D2_SHIFT_COUNT\(a\)/);
+  });
+
+  it('a proven count still loses the mask outright', () => {
+    for (const [, src] of POSITIVE) assert.strictEqual(viaMacro(src), lowered(src));
+  });
+
+  it('without the option the mask stays', () => {
+    for (const [, src] of NEGATIVE) assert.doesNotMatch(lowered(src), /D2_SHIFT_COUNT/);
+  });
+
+  it('with the macro as a C++ build defines it, the rewrite computes what the masked shift did', native, () => {
+    // One program for every case: ref<i>::f is the masked original, mac<i>::f the rewrite.
+    const parts = ['#define D2_SHIFT_COUNT(n) ((n) & 0x1f)'];
+    NEGATIVE.forEach(([, src], i) => {
+      // A callee a case only declares does nothing here; both forms call the same one.
+      const stub = /void g\(int \*p\);/.test(src) ? `void g(int *p) { *p += 29; }\n` : '';
+      parts.push(`namespace ref${i} {\n${stub}${src.replace(/void g\(int \*p\);/, '')}\n}`);
+      parts.push(`namespace mac${i} {\n${stub}${viaMacro(src).replace(/void g\(int \*p\);/, '')}\n}`);
+    });
+    // Bounded inputs: some cases loop up to `a`. Counts still cross 32 both ways.
+    const body = [
+      'const int V[] = {-300, -255, -33, -32, -31, -9, -1, 0, 1, 2, 7, 8, 15, 16, 24, 31, 32, 33, 40, 63, 64, 100, 255, 256, 300};',
+      ...NEGATIVE.map((_, i) => `{ long diff = 0; for (int a : V) for (int b : V) if (ref${i}::f(a, b) != mac${i}::f(a, b)) diff++; printf("%ld ", diff); }`),
+      'printf("\\n");',
+    ].join('\n');
+    assert.strictEqual(compileAndRun(parts.join('\n'), body).trim(), NEGATIVE.map(() => '0').join(' '));
+  });
+});

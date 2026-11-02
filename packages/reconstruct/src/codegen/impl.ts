@@ -3002,6 +3002,7 @@ function transformDecompiledCode(
         enclosingVarTypes,
       };
       perPluginOptions['shift-count-mask'] = {
+        countMacro: 'D2_SHIFT_COUNT',
         enumTypes: context.funcPtrArgCasts.enumTypes,
         enumValues: context.funcPtrArgCasts.enumValues,
         globalTypes: context.funcPtrArgCasts.globalTypes,
