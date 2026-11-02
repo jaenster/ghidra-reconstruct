@@ -2343,9 +2343,10 @@ interface RootScopeSymbolTables {
   rootScopeSymbols: string[];
   scopedSymbols: string[];
   /**
-   * Root-scope data symbols a function of the same name hides. They are NOT in
-   * `rootScopeSymbols` — a qualified reference to one of these names means the
-   * function — but a BARE reference means the global and has to say `::name`.
+   * Root-scope data symbols, and root-scope functions, a namespaced function of the
+   * same name hides. They are NOT in `rootScopeSymbols` — a qualified reference to one
+   * of these names means the namespaced function — but a BARE reference means the
+   * root-scope one and has to say `::name`.
    */
   functionShadowedGlobals: string[];
 }
@@ -2377,9 +2378,18 @@ function collectRootScopeSymbols(context?: ImplGenContext): RootScopeSymbolTable
   // reverse case is the bare spelling, which still means the global.
   const functionShadowedGlobals = new Set<string>();
   if (context?.functionNameToHeader) {
+    // A root-scope FUNCTION is shadowed the same way. Ghidra names a JMP thunk after the
+    // import it forwards to and files it in its module's namespace: Fog::SMem::GetTickCount
+    // (004112b0) beside Win32 GetTickCount. A direct import call is printed bare, a call to
+    // the thunk qualified, and inside `namespace Fog::SMem` the bare spelling bound to the
+    // thunk (SMemResetHeapStats, 00411280, called through the thunk instead of the IAT).
+    // Only header-declared functions qualify: they are at root scope in every build, where a
+    // project function without a Ghidra namespace may still be filed under its directory's.
+    const rootFunctions = platformDeclaredFunctionNames();
     for (const fn of context.functionNameToHeader.keys()) {
       const bare = fn.includes('::') ? fn.slice(fn.lastIndexOf('::') + 2) : fn;
       if (rootScopeSymbols.delete(bare)) functionShadowedGlobals.add(bare);
+      else if (fn !== bare && rootFunctions.has(bare)) functionShadowedGlobals.add(bare);
     }
   }
 
