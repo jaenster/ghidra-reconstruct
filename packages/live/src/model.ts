@@ -314,7 +314,13 @@ export async function applyEvents(
   for (const event of events) {
     if (event.target !== 'datatype') continue;
 
-    const slots = resolveDataTypeSlots(model, event.key);
+    // The model still holds a renamed type under its old path; the version journal keys
+    // the event by the new one. Looked up by the new path only, a rename read as a new
+    // type: the old record stayed, and no body that spells the old name was decompiled.
+    let slots = resolveDataTypeSlots(model, event.key);
+    if (slots.length === 0 && event.oldName && event.oldName !== event.key) {
+      slots = resolveDataTypeSlots(model, event.oldName);
+    }
     // Slots descend so a removal never shifts a slot still to be handled.
     for (const slot of slots.reverse()) {
       const previous = model.primary.dataTypes[slot];
