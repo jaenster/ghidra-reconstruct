@@ -25,6 +25,7 @@ function fakeClient(calls: string[], primary = 'Game.exe.ram:006f3168\tgaLocaleC
         const code = String(params.code);
         if (code.includes('getReferencesFrom')) { calls.push(`oprefs ${code.match(/String only = "([^"]*)"/)![1]}`); return { success: true, output: REFS }; }
         if (code.includes('getPrimarySymbol')) { calls.push('primary'); return { success: true, output: primary }; }
+        if (code.includes('String[] addrs')) { calls.push('labels'); return { success: true, output: '006f3168\tgaCrtLocaleCategoryTable\n006f3168\tgaLocaleCategoryNames\n' }; }
         throw new Error(`unexpected script`);
       }
       calls.push(cmd);

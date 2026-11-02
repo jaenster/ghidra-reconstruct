@@ -29,7 +29,7 @@ import {
   type ReconstructionOptions,
 } from '@ghidra-mcp/reconstruct';
 import { decompileFunction, getFunctionInfo, listFunctionRecord } from '@ghidra-mcp/reconstruct/extract/functions';
-import { fetchInitializedData, inferType, extractPrimaryLabels, markPrimaryLabels } from '@ghidra-mcp/reconstruct/extract/globals';
+import { fetchInitializedData, inferType, extractPrimaryLabels, markPrimaryLabels, analyzeDataSymbol } from '@ghidra-mcp/reconstruct/extract/globals';
 import { attachOperandRefs } from '@ghidra-mcp/reconstruct/extract/operand-refs';
 import { extractFunctionFacts, FACT_KEYS } from '@ghidra-mcp/reconstruct/extract/function-facts';
 import { callEdgeIndex, calleeAddressesOf } from '@ghidra-mcp/reconstruct/analysis/callgraph';
@@ -233,6 +233,73 @@ export function reorderDataTypes(
     .sort((a, b) => (a.r - b.r) || (a.i - b.i))
     .map(x => x.dt);
   dataTypes.splice(0, dataTypes.length, ...ordered);
+}
+
+/** `execute_script` on the worker, Java, returning its printed output. */
+async function javaScript(client: GhidraConnection, code: string, timeoutSec = 120): Promise<string> {
+  const r = await client.sendCommand<{ success?: boolean; output?: string; error?: string }>(
+    'execute_script', { language: 'java', code, scriptTimeout: timeoutSec, _commandTimeout: (timeoutSec + 60) * 1000 },
+  );
+  if (r.success === false || typeof r.output !== 'string') throw new Error(r.error ?? 'no output');
+  return r.output;
+}
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** The label names at each address, as the symbol table holds them now. */
+async function labelsAt(client: GhidraConnection, addrs: readonly string[]): Promise<Map<string, string[]>> {
+  const out = await javaScript(client, `
+String[] addrs = new String[] { ${addrs.map(a => JSON.stringify(a)).join(', ')} };
+ghidra.program.model.symbol.SymbolTable st = currentProgram.getSymbolTable();
+StringBuilder sb = new StringBuilder();
+for (String a : addrs) {
+  ghidra.program.model.address.Address ad = currentProgram.getAddressFactory().getAddress(a);
+  if (ad == null) continue;
+  for (ghidra.program.model.symbol.Symbol s : st.getSymbols(ad)) {
+    if (s.getSymbolType() != ghidra.program.model.symbol.SymbolType.LABEL) continue;
+    sb.append(a).append('\\t').append(s.getName()).append('\\n');
+  }
+}
+println(sb.toString());
+`);
+  const map = new Map<string, string[]>(addrs.map(a => [a, []]));
+  for (const line of out.split('\n')) {
+    const [a, name] = line.replace(/\r$/, '').split('\t');
+    if (!a || !name) continue;
+    map.get(addressKey(a))?.push(name);
+  }
+  return map;
+}
+
+/** Every label in the order the global listing walks them (the symbol table's). */
+async function labelOrder(client: GhidraConnection): Promise<string[]> {
+  const out = await javaScript(client, `
+StringBuilder sb = new StringBuilder();
+for (ghidra.program.model.symbol.Symbol s : currentProgram.getSymbolTable().getAllSymbols(true)) {
+  if (s.getSymbolType() != ghidra.program.model.symbol.SymbolType.LABEL) continue;
+  sb.append(s.getAddress()).append('\\t').append(s.getName()).append('\\n');
+}
+println(sb.toString());
+`, 300);
+  return out.split('\n').map(l => l.replace(/\r$/, '')).filter(l => l.includes('\t'))
+    .map(l => { const [a, n] = l.split('\t'); return `${addressKey(a)}\t${n}`; });
+}
+
+/**
+ * Put the primary binary's globals in the listing's order, in place: address + name
+ * ranked by the label walk. Unranked ones keep their relative order after the ranked;
+ * merged cross-platform records stay at the tail.
+ */
+export function reorderGlobals(globals: AnalyzedDataSymbol[], order: readonly string[]): void {
+  const rank = new Map<string, number>();
+  order.forEach((k, i) => { if (!rank.has(k)) rank.set(k, i); });
+  const primary = globals.map((g, i) => ({ g, i })).filter(x => !x.g.platform)
+    .map(x => ({ ...x, r: rank.get(`${addressKey(x.g.address)}\t${x.g.name}`) ?? Number.POSITIVE_INFINITY }))
+    .sort((a, b) => (a.r - b.r) || (a.i - b.i)).map(x => x.g);
+  const rest = globals.filter(g => g.platform);
+  globals.splice(0, globals.length, ...primary, ...rest);
 }
 
 /** The type names one record refers to: members, typedef target, function definition. */
@@ -552,55 +619,78 @@ export async function applyEvents(
   // Globals. The symbol itself is re-extracted; its readers are re-decompiled,
   // because a rename or retype of a global respells the reader, not the global.
   // ---------------------------------------------------------------------------
-  for (const event of globalEvents) {
-
-    const key = addressKey(event.key);
-    const existing = indices.globalByAddr.get(key)
-      ?? model.primary.globals.find(g => g.name === event.key || g.name === event.oldName);
-    if (!existing) {
-      log(`global ${event.key}: not in the model; skipping`);
-      continue;
-    }
-
-    markReferencingFunctions(existing, nameToFn, affected);
-
-    const slot = model.primary.globals.indexOf(existing);
+  // Globals, reconciled per address: the labels Ghidra has there now against the
+  // records the model has there. A label added in a check-in becomes a record, analysed
+  // as the full pass analyses one, at the place the listing gives it; a label gone takes
+  // its record with it; the rest are re-read. Either way the functions that reference
+  // the address are decompiled again.
+  const globalAddrs: string[] = [];
+  for (const ev of globalEvents) {
+    const byName = model.primary.globals.find(g => g.name === ev.key || g.name === ev.oldName);
+    const key = /^(?:[\w.]+:)?(?:0x)?[0-9a-f]+$/i.test(ev.key) ? addressKey(ev.key) : byName ? addressKey(byName.address) : null;
+    if (!key) { log(`global ${ev.key}: no address and not in the model; skipping`); continue; }
+    if (!globalAddrs.includes(key)) globalAddrs.push(key);
+  }
+  if (globalAddrs.length > 0) {
+    let labels: Map<string, string[]> | null = null;
     try {
-      // `list_data_symbols` is the only route to a single global and it filters
-      // by name, so the page it answers with is matched back by address.
-      const page = await extractGlobals(client, {
-        filter: event.newName ?? existing.name,
-        limit: 25,
-      });
-      // An address can carry several labels, each its own row: the one this record
-      // is, by name, before any other at the address.
-      const atAddress = page.globals.filter(g => addressKey(g.address) === addressKey(existing.address));
-      const wanted = event.newName ?? existing.name;
-      const match = atAddress.find(g => g.name === wanted) ?? (atAddress.length === 1 ? atAddress[0] : undefined);
-      if (!match) {
-        log(`global ${existing.name}: no longer listed at ${existing.address}`);
-        continue;
-      }
-
-      // `analyzeDataSymbols` derives scope for the whole binary in one pass and
-      // its per-symbol helpers are private, so the analysis fields ride along
-      // from the record being replaced rather than being recomputed from a row.
-      const merged: AnalyzedDataSymbol = { ...existing, ...defined(match) };
-      // `suggestedType` is DERIVED from dataType, and codegen prefers it, so a type
-      // that changed in Ghidra has to re-derive it here or the old spelling wins.
-      // Retyping a scalar to the array it really is then emitted an array-sized
-      // initializer against a scalar declaration - and the clear-loop that walks the
-      // array wrote past a four-byte object.
-      if (merged.dataType && merged.dataType !== existing.dataType) {
-        merged.suggestedType = inferType(merged.dataType);
-      }
-      model.primary.globals[slot] = merged;
-      indices.globalByAddr.set(addressKey(merged.address), merged);
-      await fetchInitializedData(client, [merged]);
-      result.touchedGlobals.push(addressKey(merged.address));
-      markReferencingFunctions(merged, nameToFn, affected);
+      labels = await labelsAt(client, globalAddrs);
     } catch (e) {
-      log(`global ${existing.name}: re-extract failed (${(e as Error).message}); keeping previous`);
+      log(`globals: labels at ${globalAddrs.length} address(es) unavailable (${(e as Error).message}); keeping previous records`);
+    }
+    let added = false;
+    for (const addr of labels ? globalAddrs : []) {
+      const names = labels!.get(addr) ?? [];
+      const inModel = model.primary.globals.filter(g => !g.platform && addressKey(g.address) === addr);
+      for (const gone of inModel.filter(g => !names.includes(g.name))) {
+        markReferencingFunctions(gone, nameToFn, affected);
+        model.primary.globals.splice(model.primary.globals.indexOf(gone), 1);
+        result.touchedGlobals.push(addr);
+        log(`global ${gone.name}: no longer at ${gone.address}; removed`);
+      }
+      for (const name of names) {
+        try {
+          const page = await extractGlobals(client, { regex: `^${escapeRegex(name)}$`, limit: 100 });
+          const row = page.globals.find(g => g.name === name && addressKey(g.address) === addr);
+          if (!row) continue; // a label the listing does not report (no data there)
+          const existing = inModel.find(g => g.name === name);
+          let record: AnalyzedDataSymbol;
+          if (existing) {
+            record = { ...existing, ...defined(row) };
+            // `suggestedType` is DERIVED from dataType, and codegen prefers it, so a type
+            // that changed in Ghidra has to re-derive it here or the old spelling wins.
+            // Retyping a scalar to the array it really is then emitted an array-sized
+            // initializer against a scalar declaration - and the clear-loop that walks the
+            // array wrote past a four-byte object.
+            if (record.dataType && record.dataType !== existing.dataType) {
+              record.suggestedType = inferType(record.dataType);
+            }
+            model.primary.globals[model.primary.globals.indexOf(existing)] = record;
+          } else {
+            const analyzed = analyzeDataSymbol(row);
+            if (!analyzed) continue; // a string, which the full pass leaves out too
+            record = analyzed;
+            model.primary.globals.push(record);
+            added = true;
+            log(`global ${name}: new at ${row.address}`);
+          }
+          await fetchInitializedData(client, [record]);
+          result.touchedGlobals.push(addr);
+          markReferencingFunctions(record, nameToFn, affected);
+        } catch (e) {
+          log(`global ${name}: re-extract failed (${(e as Error).message}); keeping previous`);
+        }
+      }
+      const first = model.primary.globals.find(g => !g.platform && addressKey(g.address) === addr);
+      if (first) indices.globalByAddr.set(addr, first); else indices.globalByAddr.delete(addr);
+    }
+    // A new record goes where the full listing puts it: the symbol table's order.
+    if (added) {
+      try {
+        reorderGlobals(model.primary.globals, await labelOrder(client));
+      } catch (e) {
+        log(`global order: unavailable (${(e as Error).message}); new globals stay at the end`);
+      }
     }
   }
 
