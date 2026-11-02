@@ -166,6 +166,9 @@ class StdioWorkerProcess {
       '--program', program,
       '--server-user', user,
       '--project', project,
+      // GHIDRA_LOCAL_WORKER_COPY=1: read a local copy of the version (one bulk transfer)
+      // instead of the server per database buffer. For a resident worker; see VersionFollower.
+      ...(process.env.GHIDRA_LOCAL_WORKER_COPY === '1' ? ['--local-copy'] : []),
     ], {
       env: { ...process.env, GHIDRA_SERVER_PASSWORD: password },
       stdio: ['pipe', 'pipe', 'pipe'],

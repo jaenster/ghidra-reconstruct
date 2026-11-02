@@ -9,6 +9,7 @@ import com.google.gson.JsonObject;
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.framework.client.RepositoryAdapter;
 import ghidra.framework.model.DomainFile;
+import ghidra.framework.model.DomainFolder;
 import ghidra.framework.store.FolderItem;
 import ghidra.framework.store.remote.RemoteFileSystem;
 import ghidra.program.database.ProgramContentHandler;
@@ -35,6 +36,9 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.TreeMap;
 
 /**
  * A change journal for a read-only program, derived from the Ghidra Server's version
@@ -75,6 +79,9 @@ import java.util.Map;
  */
 final class VersionFollower {
     static final long SEQ_PER_VERSION = 1_000_000L;
+
+    /** The folder in the worker's own project that holds its local version copies. */
+    private static final String COPIES = "live-copies";
 
     /** Above this many events, the per-symbol path loses to a resync. */
     private static final int MAX_EVENTS = 200_000;
@@ -163,26 +170,22 @@ final class VersionFollower {
             return compute(from, latestNow, log);
         }
 
-        DomainFile df = ctx.getProjectData().getFile(programPath);
         Program active = ctx.getProgram();
-        Program oldP = openVersion == from ? active
-            : (Program) df.getReadOnlyDomainObject(this, from, TaskMonitor.DUMMY);
+        Program oldP = openVersion == from ? active : openLocal(from, this, log);
         Program newP;
         List<JsonObject> events;
         try {
             long t1 = System.currentTimeMillis();
-            newP = openVersion == to ? active
-                : (Program) df.getReadOnlyDomainObject(ctx, to, TaskMonitor.DUMMY);
-            log.info("  opened v" + to + " in " + (System.currentTimeMillis() - t1) + " ms");
+            newP = openVersion == to ? active : openLocal(to, ctx, log);
             long t2 = System.currentTimeMillis();
             events = translate(cs, oldP, newP, to, log);
             log.info("  translated in " + (System.currentTimeMillis() - t2) + " ms");
         } finally {
-            if (oldP != active) oldP.release(this);
+            if (oldP != active) close(oldP, this);
         }
         if (newP != active) {
             activate(newP, to);
-            active.release(ctx);
+            close(active, ctx);
         }
         log.info("Game.exe v" + from + " -> v" + to + ": " + events.size() + " event(s) in "
             + (System.currentTimeMillis() - t0) + " ms");
@@ -191,12 +194,58 @@ final class VersionFollower {
 
     /** Swap the active program for one at a newer version, with a decompiler of its own. */
     private void moveTo(int version, StdioLog log) throws Exception {
-        DomainFile df = ctx.getProjectData().getFile(programPath);
         Program old = ctx.getProgram();
-        Program fresh = (Program) df.getReadOnlyDomainObject(ctx, version, TaskMonitor.DUMMY);
+        Program fresh = openLocal(version, ctx, log);
         activate(fresh, version);
-        old.release(ctx);
+        close(old, ctx);
         log.info("moved to Game.exe v" + version + " (no changes recorded in between)");
+    }
+
+    /**
+     * Replace the program the worker opened remotely with a local copy of the same
+     * version. Called once, before the first request.
+     */
+    void localize(StdioLog log) throws Exception {
+        Program remote = ctx.getProgram();
+        Program local = openLocal(openVersion, ctx, log);
+        activate(local, openVersion);
+        close(remote, ctx);
+    }
+
+    /**
+     * A private local copy of one version, opened read-only.
+     *
+     * A program opened read-only from the server reads every database buffer over the
+     * network on first touch: mapping a few hundred changed addresses to functions took
+     * 24-29 s that way, and a long-lived handle dies when the server drops the
+     * connection (NoSuchObjectException from the buffer file), which a resident worker
+     * will meet. The copy is one bulk transfer, after which every read is local.
+     */
+    private Program openLocal(int version, Object consumer, StdioLog log) throws Exception {
+        long t0 = System.currentTimeMillis();
+        DomainFile df = ctx.getProjectData().getFile(programPath);
+        DomainFolder root = ctx.getProjectData().getRootFolder();
+        DomainFolder copies = root.getFolder(COPIES);
+        if (copies == null) copies = root.createFolder(COPIES);
+        DomainFile stale = copies.getFile(name + "_v" + version);
+        if (stale != null && !stale.isOpen()) stale.delete();
+        DomainFile copy = df.copyVersionTo(version, copies, TaskMonitor.DUMMY);
+        Program p = (Program) copy.getReadOnlyDomainObject(consumer, DomainFile.DEFAULT_VERSION, TaskMonitor.DUMMY);
+        log.info("  local copy of v" + version + " in " + (System.currentTimeMillis() - t0) + " ms");
+        return p;
+    }
+
+    /** Release a program; a local copy's file goes with it, as it is this worker's cache. */
+    private void close(Program p, Object consumer) {
+        DomainFile f = p.getDomainFile();
+        p.release(consumer);
+        if (f.getParent() != null && COPIES.equals(f.getParent().getName()) && !f.isOpen()) {
+            try {
+                f.delete();
+            } catch (Exception e) {
+                System.err.println("[VersionFollower] could not remove " + f.getPathname() + ": " + e.getMessage());
+            }
+        }
     }
 
     private void activate(Program fresh, int version) {
@@ -228,6 +277,8 @@ final class VersionFollower {
 
     private List<JsonObject> translate(ProgramChangeSet cs, Program oldP, Program newP, int to, StdioLog log) {
         long tt = System.currentTimeMillis();
+        // Functions whose callers decompile exactly as before: what changed is inside them.
+        Set<String> callersUnaffected = new HashSet<>();
         Map<String, String[]> events = new LinkedHashMap<>();   // kind+key -> {kind,target,key,old,new}
 
         // Memory map, language, image base: nothing per symbol describes these.
@@ -238,40 +289,59 @@ final class VersionFollower {
         // Addresses: code, data, comments, references, equates, function records.
         AddressSet changed = memoryOnly(cs.getAddressSet());
         changed.add(memoryOnly(cs.getRegisterAddressSet()));
+        AddressSet outside = new AddressSet(changed);
+        Map<Address, Function> newTouched = new TreeMap<>();
+        Map<Address, Function> oldTouched = new TreeMap<>();
         for (Program p : new Program[] { newP, oldP }) {
-            Program other = p == newP ? oldP : newP;
+            Map<Address, Function> into = p == newP ? newTouched : oldTouched;
             Iterator<Function> it = p.getFunctionManager().getFunctionsOverlapping(changed);
             while (it.hasNext()) {
                 Function f = it.next();
-                Function there = other.getFunctionManager().getFunctionAt(f.getEntryPoint());
-                if (there == null) {
-                    // Appeared or vanished: the consumer's per-function model cannot take it
-                    // in one step, so it resynchronises.
-                    put(events, p == newP ? "function.added" : "function.removed", ChangeJournal.TARGET_PROGRAM, f.getEntryPoint().toString(), null, null);
-                } else if (!f.getBody().equals(there.getBody())) {
-                    put(events, ChangeJournal.KIND_FUNCTION_BODY, ChangeJournal.TARGET_FUNCTION, f.getEntryPoint().toString(), null, null);
-                } else {
-                    put(events, ChangeJournal.KIND_FUNCTION_CHANGED, ChangeJournal.TARGET_FUNCTION, f.getEntryPoint().toString(), null, null);
-                }
+                into.put(f.getEntryPoint(), f);
+                outside.delete(f.getBody());
             }
         }
-        AddressSet outside = new AddressSet(changed);
-        for (Program p : new Program[] { newP, oldP }) {
-            Iterator<Function> it = p.getFunctionManager().getFunctionsOverlapping(changed);
-            while (it.hasNext()) outside.delete(it.next().getBody());
+        log.info("    " + changed.getNumAddressRanges() + " changed range(s) touch " + newTouched.size()
+            + " function(s) in " + (System.currentTimeMillis() - tt) + " ms");
+        for (Function f : newTouched.values()) {
+            Function was = oldTouched.containsKey(f.getEntryPoint()) ? oldTouched.get(f.getEntryPoint())
+                : oldP.getFunctionManager().getFunctionAt(f.getEntryPoint());
+            String key = f.getEntryPoint().toString();
+            if (was == null) {
+                // Appeared: the consumer's per-function model cannot take it in one step,
+                // so it resynchronises.
+                put(events, "function.added", ChangeJournal.TARGET_PROGRAM, key, null, null);
+            } else if (!f.getBody().equals(was.getBody())) {
+                put(events, ChangeJournal.KIND_FUNCTION_BODY, ChangeJournal.TARGET_FUNCTION, key, null, null);
+            } else if (!callSignature(f).equals(callSignature(was))) {
+                put(events, ChangeJournal.KIND_FUNCTION_SIGNATURE, ChangeJournal.TARGET_FUNCTION, key, null, null);
+            } else {
+                put(events, ChangeJournal.KIND_FUNCTION_CHANGED, ChangeJournal.TARGET_FUNCTION, key, null, null);
+                callersUnaffected.add(key);
+            }
         }
+        for (Function f : oldTouched.values()) {
+            if (newTouched.containsKey(f.getEntryPoint())) continue;
+            if (newP.getFunctionManager().getFunctionAt(f.getEntryPoint()) == null) {
+                put(events, "function.removed", ChangeJournal.TARGET_PROGRAM, f.getEntryPoint().toString(), null, null);
+            }
+        }
+        long td = System.currentTimeMillis();
         for (Program p : new Program[] { newP, oldP }) {
             SymbolIterator syms = p.getSymbolTable().getPrimarySymbolIterator(outside, true);
             while (syms.hasNext()) {
                 put(events, ChangeJournal.KIND_DATA_CHANGED, ChangeJournal.TARGET_GLOBAL, syms.next().getAddress().toString(), null, null);
             }
+            var data = p.getListing().getDefinedData(outside, true);
+            while (data.hasNext()) {
+                put(events, ChangeJournal.KIND_DATA_CHANGED, ChangeJournal.TARGET_GLOBAL, data.next().getAddress().toString(), null, null);
+            }
             for (AddressRange r : outside) {
-                Data d = p.getListing().getDataContaining(r.getMinAddress());
-                if (d != null && d.isDefined()) {
-                    put(events, ChangeJournal.KIND_DATA_CHANGED, ChangeJournal.TARGET_GLOBAL, d.getAddress().toString(), null, null);
-                }
+                Data d = p.getListing().getDefinedDataContaining(r.getMinAddress());
+                if (d != null) put(events, ChangeJournal.KIND_DATA_CHANGED, ChangeJournal.TARGET_GLOBAL, d.getAddress().toString(), null, null);
             }
         }
+        log.info("    " + outside.getNumAddressRanges() + " range(s) outside functions in " + (System.currentTimeMillis() - td) + " ms");
 
         log.info("    addresses in " + (System.currentTimeMillis() - tt) + " ms");
         tt = System.currentTimeMillis();
@@ -294,6 +364,19 @@ final class VersionFollower {
             }
             String[] tk = classify(any, any == now ? newP : oldP);
             if (tk == null) continue;
+            if (ChangeJournal.TARGET_FUNCTION.equals(tk[0]) && !events.containsKey(ChangeJournal.KIND_FUNCTION_CHANGED + " " + tk[1])
+                && !events.containsKey(ChangeJournal.KIND_FUNCTION_SIGNATURE + " " + tk[1])
+                && !events.containsKey(ChangeJournal.KIND_FUNCTION_BODY + " " + tk[1])) {
+                // A symbol of a function the address records did not name: compare it here.
+                Function fNew = newP.getFunctionManager().getFunctionAt(newP.getAddressFactory().getAddress(tk[1]));
+                Function fOld = oldP.getFunctionManager().getFunctionAt(oldP.getAddressFactory().getAddress(tk[1]));
+                if (fNew != null && fOld != null && callSignature(fNew).equals(callSignature(fOld))
+                    && fNew.getName(true).equals(fOld.getName(true))) {
+                    callersUnaffected.add(tk[1]);
+                } else {
+                    callersUnaffected.remove(tk[1]);
+                }
+            }
             boolean renamed = now != null && was != null && !now.getName().equals(was.getName())
                 && !(now.getParentNamespace() instanceof Function);
             if (renamed) {
@@ -339,9 +422,17 @@ final class VersionFollower {
             put(events, "too.many.changes", ChangeJournal.TARGET_PROGRAM, "*", null, null);
         }
 
+        // A rename of the function itself arrives as symbol.renamed and reaches its callers
+        // through that event; the flag below speaks only for function.changed.
         List<JsonObject> out = new ArrayList<>(events.size());
         long seq = to * SEQ_PER_VERSION;
-        for (String[] e : events.values()) out.add(event(++seq, to, e[0], e[1], e[2], e[3], e[4]));
+        for (String[] e : events.values()) {
+            JsonObject o = event(++seq, to, e[0], e[1], e[2], e[3], e[4]);
+            if (ChangeJournal.KIND_FUNCTION_CHANGED.equals(e[0]) && callersUnaffected.contains(e[2])) {
+                o.addProperty("callersUnaffected", true);
+            }
+            out.add(o);
+        }
         return out;
     }
 
@@ -357,6 +448,27 @@ final class VersionFollower {
         if (newName != null) o.addProperty("newName", newName);
         o.addProperty("txDescription", "Game.exe v" + to);
         return o;
+    }
+
+    /**
+     * Everything about a function that its CALLERS' decompile depends on: its name, the
+     * calling convention, return and parameter types and storage, varargs, inline,
+     * no-return, call-fixup and stack purge. Parameter names are deliberately absent: a
+     * call site shows the arguments, not the names the callee gives them.
+     */
+    private static String callSignature(Function f) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(f.getName(true)).append('|').append(f.getCallingConventionName()).append('|')
+          .append(f.hasVarArgs()).append(f.isInline()).append(f.hasNoReturn()).append(f.hasCustomVariableStorage())
+          .append('|').append(f.getStackPurgeSize()).append('|').append(f.getCallFixup()).append('|');
+        var ret = f.getReturn();
+        sb.append(ret.getDataType().getPathName()).append('@').append(ret.getVariableStorage()).append('|');
+        for (var param : f.getParameters()) {
+            sb.append(param.getDataType().getPathName()).append('@').append(param.getVariableStorage()).append(',');
+        }
+        Function thunked = f.getThunkedFunction(false);
+        if (thunked != null) sb.append("->").append(thunked.getEntryPoint());
+        return sb.toString();
     }
 
     /** Parameters and locals roll up to their function, as in ChangeJournal.classifySymbol. */
