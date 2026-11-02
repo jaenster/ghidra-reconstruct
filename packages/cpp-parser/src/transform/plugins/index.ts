@@ -405,6 +405,12 @@ export {
 } from './builtins/new-result-temp.js';
 
 export {
+  joinStoreTempPlugin,
+  createJoinStoreTempTransformer,
+  type JoinStoreTempOptions,
+} from './builtins/join-store-temp.js';
+
+export {
   inlinedCallRestorePlugin,
   restoreInlinedCalls,
   compileInlinedCallee,
@@ -704,6 +710,7 @@ import { recordGetterSplitPlugin } from './builtins/record-getter-split.js';
 import { armConstantCallPlugin } from './builtins/arm-constant-call.js';
 import { fieldPointerFoldPlugin } from './builtins/field-pointer-fold.js';
 import { newResultTempPlugin } from './builtins/new-result-temp.js';
+import { joinStoreTempPlugin } from './builtins/join-store-temp.js';
 import { inlinedCallRestorePlugin } from './builtins/inlined-call-restore.js';
 import { guardedCallRestorePlugin } from './builtins/guarded-call-restore.js';
 import { switchChainPlugin } from './builtins/switch-chain.js';
@@ -894,6 +901,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   recordGetterSplitPlugin,    // Matching: a record getter's split range tests and null test become one conditional pointer again (priority 60.55)
   fieldPointerFoldPlugin,     // Matching: a field-pointer temporary goes; the field updated in place or the record held (priority 62.5)
   newResultTempPlugin,        // Matching: an allocation constructed in place gets a temporary; the result assigned after (priority 62.6)
+  joinStoreTempPlugin,        // Matching: a member every arm stores into is stored once after the join, through a temporary (priority 970)
   inlinedCallRestorePlugin,   // Matching: a call where the decompiler printed an inlined helper's body (priority 0.5)
   gotoCrossesInitPlugin,      // Late: split T x=e; → T x; x=e; for goto-crossed locals (priority 700)
   haltSiteFoldPlugin,         // Cleanup: fold nLine/nAddress temporaries into the halt call, copy a shared halt tail to its jumps (priority 930)

@@ -2983,6 +2983,13 @@ function transformDecompiledCode(
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         enclosingVarTypes,
       };
+      perPluginOptions['join-store-temp'] = {
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        structFields: context.funcPtrArgCasts.structFields,
+        functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        enclosingVarTypes,
+      };
       perPluginOptions['early-return'] = perPluginOptions['rotated-for-loop'] = {
         enumTypes: context.funcPtrArgCasts.enumTypes,
         globalTypes: context.funcPtrArgCasts.globalTypes,
