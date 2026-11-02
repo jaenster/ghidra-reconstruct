@@ -40,7 +40,7 @@ import java.util.concurrent.Future;
  * Every log line goes to stderr; stdout carries the protocol only.
  *
  * Usage: StdioWorker --ghidra-server host:port --repo R --program /path --server-user U
- *                    --project DIR
+ *                    --project DIR [--local-copy]
  * The password is read from GHIDRA_SERVER_PASSWORD, as the daemon's worker does.
  * GHIDRA_HOME names the Ghidra install the classpath comes from.
  */
@@ -55,6 +55,7 @@ public final class StdioWorker {
         System.setOut(System.err);
 
         String serverHostPort = null, repo = null, program = null, user = null, project = null;
+        boolean localCopy = false;
         for (int i = 0; i < args.length; i++) {
             switch (args[i]) {
                 case "--ghidra-server": serverHostPort = args[++i]; break;
@@ -62,6 +63,8 @@ public final class StdioWorker {
                 case "--program": program = args[++i]; break;
                 case "--server-user": user = args[++i]; break;
                 case "--project": project = args[++i]; break;
+                // Work on a local copy of the version instead of reading the server per buffer.
+                case "--local-copy": localCopy = true; break;
                 default: throw new IllegalArgumentException("unknown argument " + args[i]);
             }
         }
@@ -110,6 +113,7 @@ public final class StdioWorker {
         // The journal this read-only worker can offer: the server's version history.
         VersionFollower follower = new VersionFollower(engine.getContext(), program,
             serverVersion(engine, program));
+        if (localCopy) follower.localize(m -> System.err.println("[VersionFollower] " + m));
         JsonObject ready = new JsonObject();
         ready.addProperty("ready", true);
         ready.addProperty("openMs", System.currentTimeMillis() - openStart);
