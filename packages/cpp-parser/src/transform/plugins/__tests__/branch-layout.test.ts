@@ -800,3 +800,41 @@ describe('halt-site-fold keeps the jump site as the copy position', () => {
       + `if (i >= 7) { ${HALT}("", GetInstructionPointer(), 0x90); exit(-1); } return t[i]; }`), out);
   });
 });
+
+describe('branchLayoutPlugin - a halt laid out first whose branch a pass copied', () => {
+  // EquipItem 00560cd0: `if (pInventory) { ... } else { Halt; exit; }`, the halt the decompile
+  // merged for two tests, so the if's line is claimed twice; the jump falls into the halt.
+  function runEdge(lines: string[], fallLines: number[], takenLines: number[]): string {
+    const { code, ev } = fixture(lines);
+    const edges = [...ev.ifs].map(([line, jcc]) => ({ line, ord: 0, keyword: 'if' as const, jcc, target: jcc + 9, fall: jcc + 2, fallLines, takenLines }));
+    const t = branchLayoutPlugin.createTransformer({ branchLayout: { ...ev, edges } });
+    const ast = parse(code);
+    // The halt's lines claimed twice, as a pass that copied it leaves them.
+    const fn = [...traverseAST(ast)].find(n => n.kind === 'FunctionDecl') as FunctionDecl;
+    const ifs = [...traverseAST(fn)].find(n => n.kind === 'IfStmt') as IfStmt;
+    (fn.body!.statements as unknown as ASTNode[]).push({ ...(ifs.elseBranch as ASTNode) });
+    return flat(emit(t(ast) as AnyNode));
+  }
+  const lines = [
+    'int f(Inv* pInventory) {',
+    '[if 0x49 0x47,0x49] if (pInventory) {',
+    '[0x53] A(pInventory);',
+    '[0x5d] return 1;',
+    '}',
+    'else {',
+    `[0x4b] ${HALT}("", 0, 0xc4a);`,
+    '[0x16] exit(-1);',
+    '}',
+    '}',
+  ];
+
+  it('makes the halt a leading guard', () => {
+    const out = runEdge(lines, [7, 8], [3, 4]);
+    assert.ok(out.includes(`if (!pInventory) { ${HALT}("", 0, 0xc4a); exit(-1); } A(pInventory); return 1;`), out);
+  });
+
+  it('keeps the if/else when the jump falls into the other arm', () => {
+    const out = runEdge(lines, [3, 4], [7, 8]);
+    assert.ok(out.includes('if (pInventory) { A(pInventory); return 1; } else {'), out);
+  });
+});
