@@ -53,13 +53,26 @@ export function inlinedCallee(func: ExtractedFunction): InlinedCallee | undefine
 
 /** A function's body parsed exactly as `transformDecompiledCode` hands it to the pipeline. */
 export function pipelineFunction(func: ExtractedFunction): FunctionDecl | undefined {
+  const source = pipelineSource(func);
+  return source === undefined ? undefined : parsePipelineSource(source);
+}
+
+/**
+ * The exact text `pipelineFunction` parses. The parse is a function of this text
+ * alone, so the text is what a value derived from the parse is cached under.
+ */
+export function pipelineSource(func: ExtractedFunction): string | undefined {
   if (!func.decompiled) return undefined;
   const split = splitDecompiledBody(func.decompiled);
   if (!split) return undefined;
   const sig = wrapperSignature(func);
   const wrapped = `${sig ? `${sig.returnType} dummy(${sig.params}) {` : 'void dummy() {'}${preprocessGhidraCode(split.body)}}`;
+  return preprocessGhidraCode(wrapped);
+}
+
+export function parsePipelineSource(source: string): FunctionDecl | undefined {
   try {
-    const tu = parse(preprocessGhidraCode(wrapped));
+    const tu = parse(source);
     return tu.declarations.find(d => d.kind === NodeKind.FunctionDecl) as FunctionDecl | undefined;
   } catch {
     return undefined;
