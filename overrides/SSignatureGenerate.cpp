@@ -38,7 +38,7 @@ if (!SSIG_FindSignatureMarker(nKeySize, nDataLen, pData, &nMarkerOffset)) // 004
 uint8_t* pHash = (uint8_t*)__builtin_alloca(nKeySize);       // 0041d5c0-0041d5c7
 SMem::SMemFill(pHash, nKeySize, 0xbb);              // 0041d5c9-0041d5d0
 pHash[nKeySize - 1] = 0x0b;                                  // 0041d5dc
-SSIG_HashData((uint32_t)nMarkerOffset, pDataBytes, (int32_t)pHash); // 0041d5d5-0041d5e1
+SSIG_HashData((uint32_t)nMarkerOffset, pDataBytes, pHash); // 0041d5d5-0041d5e1
 
 uint8_t* pSig1 = (uint8_t*)__builtin_alloca(nKeySize);       // 0041d5e6-0041d5ed
 SMem::SMemCopy(pSig1, pHash, nKeySize);               // 0041d5ef-0041d5f2
