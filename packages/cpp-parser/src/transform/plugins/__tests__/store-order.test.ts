@@ -124,6 +124,21 @@ describe('storeOrderPlugin', () => {
     assert.ok(out.includes('g.pDC6 = pDC6; g.nFrame = nFrame;'), out);
   });
 
+  // NET_D2GS_SERVER_Send_0x0C_UNITCHANGE, 0053b430: the packet id field shares its name with the
+  // parameter, and `&aPacket.nPacketId` takes the address of the field, not of the parameter.
+  it('does not take a member name under & for a variable of that name', () => {
+    const { out, sites } = run([
+      'void f(int nId, Node *pNext) {',
+      '  Node aPacket;',
+      '[@0x20] aPacket.pNext = pNext;',
+      '[@0x1a] aPacket.nId = nId;',
+      '  Use(&aPacket.nId);',
+      '}',
+    ]);
+    assert.deepStrictEqual(sites, ['order2']);
+    assert.ok(out.includes('aPacket.nId = nId; aPacket.pNext = pNext;'), out);
+  });
+
   it('leaves scalar locals where they are', () => {
     const { sites } = run([
       'int f(int a, int b) {',

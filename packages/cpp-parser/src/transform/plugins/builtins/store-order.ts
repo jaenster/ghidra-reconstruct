@@ -176,7 +176,7 @@ function readsOf(e: Expression, ctx: Ctx): Loc[] | null {
     }
     if (n.kind === NodeKind.UnaryExpr && (n as UnaryExpr).operator === '&') {
       // An address read is no memory read, but its index or base expression is.
-      for (const k of getChildren((n as UnaryExpr).operand)) visit(k);
+      for (const k of operandsOf((n as UnaryExpr).operand)) visit(k);
       return;
     }
     if (n.kind === NodeKind.CStyleCastExpr) { visit((n as CStyleCastExpr).expression); return; }
@@ -184,6 +184,17 @@ function readsOf(e: Expression, ctx: Ctx): Loc[] | null {
   };
   visit(e);
   return ok ? out : null;
+}
+
+/** A node's operands; a member access's member name is a field, not a variable. */
+function operandsOf(n: ASTNode): ASTNode[] {
+  return n.kind === NodeKind.MemberExpr ? [(n as MemberExpr).object] : getChildren(n);
+}
+
+/** The variables an expression names: `&a.nId` names `a`, never a variable called `nId`. */
+function namedVariables(n: ASTNode): Identifier[] {
+  if (n.kind === NodeKind.Identifier) return [n as Identifier];
+  return operandsOf(n).flatMap(namedVariables);
 }
 
 /** The reads computing an lvalue's address (not the location itself). */
@@ -298,8 +309,8 @@ function rewriteFunction(fn: FunctionDecl, ev: AccessOrderEvidence, opts: StoreO
   }
   for (const n of traverseAST(body)) {
     if (n.kind === NodeKind.UnaryExpr && (n as UnaryExpr).operator === '&') {
-      for (const m of traverseAST((n as UnaryExpr).operand)) {
-        if (m.kind === NodeKind.Identifier) { const l = locals.get((m as Identifier).name); if (l) l.addressed = true; }
+      for (const m of namedVariables((n as UnaryExpr).operand)) {
+        const l = locals.get(m.name); if (l) l.addressed = true;
       }
     }
   }
