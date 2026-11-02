@@ -51,6 +51,7 @@ import type {
   ReconstructedProject,
 } from './types.js';
 import type { CodegenWorkerData } from './codegen-worker.js';
+import { stageCacheDir } from './codegen/stage-cache.js';
 
 export interface ParallelGenerationOptions {
   /** Total shards, coordinator included. 1 means "generate serially". */
@@ -146,6 +147,7 @@ function startShard(
     projectName,
     bootstrap: opts.bootstrap,
     parseErrorLogPath,
+    stageCacheDir: stageCacheDir(),
   };
   const entry = workerEntry();
   if (entry.stale) {

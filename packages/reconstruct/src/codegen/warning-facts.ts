@@ -13,8 +13,12 @@
  * write the same bytes, since only the coordinator's stage 2 builds it.
  */
 
-import { collectWarningFacts, type WarningClass } from '@ghidra-mcp/cpp-parser';
+import { collectWarningFacts, type WarningClass, type WarningFact } from '@ghidra-mcp/cpp-parser';
 import type { ExtractedFunction } from '../types.js';
+import { ItemCache, sha256 } from './stage-cache.js';
+
+/** A body's facts depend on its text alone, so the text's hash is the whole key. */
+const factsByBody = new ItemCache<WarningFact[]>('warning-facts');
 
 export interface WarningRow {
   address: string;
@@ -33,10 +37,14 @@ export function warningRows(functions: readonly ExtractedFunction[]): WarningRow
     return d !== 0 ? d : a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
   });
   const rows: WarningRow[] = [];
+  const used: string[] = [];
   for (const f of ordered) {
     if (!f.decompiled) continue;
     const name = f.namespace ? `${f.namespace}::${f.name}` : f.name;
-    for (const w of collectWarningFacts(f.decompiled)) {
+    const key = sha256(f.decompiled);
+    used.push(key);
+    const text = f.decompiled;
+    for (const w of factsByBody.get(key, () => collectWarningFacts(text))) {
       rows.push({
         address: f.address,
         function: name,
@@ -46,6 +54,7 @@ export function warningRows(functions: readonly ExtractedFunction[]): WarningRow
       });
     }
   }
+  factsByBody.save(used);
   return rows;
 }
 

@@ -233,7 +233,8 @@ export {
   type SourceCacheCounts,
 } from './source-cache.js';
 
-import { join } from 'path';
+import { dirname, join } from 'path';
+import { configureStageCache } from './codegen/stage-cache.js';
 import { loadProjectConfig as loadConfig } from './config/loader.js';
 import type { AdditionalSource } from './config/schema.js';
 import {
@@ -673,6 +674,9 @@ export async function reconstruct(
 
   const snapshotDir = connectionOptions.snapshotDir
     ?? join(options.projectDir ?? options.outputDir, DEFAULT_SNAPSHOT_DIRNAME);
+  // Values generation derives from the snapshot are kept beside it, each under the
+  // hash of its own inputs (codegen/stage-cache.ts).
+  configureStageCache(process.env.RECON_CODEGEN_CACHE_DIR || join(dirname(snapshotDir), 'codegen-cache'));
   const sourceCacheBaseDir = connectionOptions.sourceCacheDir
     ?? join(options.projectDir ?? options.outputDir, DEFAULT_SOURCE_CACHE_DIRNAME);
 

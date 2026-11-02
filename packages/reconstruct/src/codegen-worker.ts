@@ -21,6 +21,7 @@ import { stripDisabledSources, disabledSourcePlatforms } from './additional-sour
 import { applyResolvedTypes } from './extract/functions.js';
 import { generateProjectStage1, takeShardOutput, shardClaimCount, type ShardSpec } from './codegen/index.js';
 import { configureCodegen } from './codegen-defaults.js';
+import { configureStageCache } from './codegen/stage-cache.js';
 import type { ReconstructOptions } from './types.js';
 
 export interface CodegenWorkerData {
@@ -39,6 +40,8 @@ export interface CodegenWorkerData {
   bootstrap?: string;
   /** Per-worker parse-error log; the coordinator concatenates them in shard order. */
   parseErrorLogPath?: string;
+  /** The coordinator's stage cache directory (codegen/stage-cache.ts); null: none. */
+  stageCacheDir?: string | null;
 }
 
 async function main(): Promise<void> {
@@ -66,6 +69,7 @@ async function main(): Promise<void> {
       configureCodegen(data.parseErrorLogPath);
     }
 
+    configureStageCache(data.stageCacheDir ?? null);
     at('bootstrap done');
     const snapshot = await readSnapshot(data.snapshotDir);
     // Must match the coordinator's replay exactly, or a shard emits a disabled
