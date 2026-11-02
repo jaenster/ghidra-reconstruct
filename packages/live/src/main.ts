@@ -662,7 +662,10 @@ export class LiveLoop {
 
     // Without a modified tree the daemon only commits the generated tree; merging into
     // the hand-patched one is then someone else's step, as after a batch regen.
-    if (!this.cfg.modifiedDir) return;
+    if (!this.cfg.modifiedDir) {
+      this.phase = 'idle';
+      return result;
+    }
 
     this.phase = 'merging';
     const merge = await mergeIntoModified(this.cfg.modifiedDir, await currentBranch(this.cfg.regenDir));
