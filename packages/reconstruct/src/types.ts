@@ -124,6 +124,13 @@ export interface ExtractedFunction {
    */
   pushSlots?: Array<{ offset: number; reg: string }>;
   /**
+   * The bytes the prologue reserves for locals: N of a `SUB ESP,N` directly after
+   * `PUSH EBP; MOV EBP,ESP`, so the locals live in Ghidra stack offsets [-4-N, -4)
+   * (extract/prologue-slots.ts). Absent for any other prologue, or when the snapshot
+   * predates it.
+   */
+  frameReserve?: number;
+  /**
    * Data references from instruction operands, and the addresses the code derives from
    * them by ADD/SUB/LEA (extract/operand-refs.ts). Absent when the function has none or
    * the snapshot predates the field.

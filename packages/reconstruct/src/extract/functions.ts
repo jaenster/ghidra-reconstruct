@@ -422,11 +422,11 @@ export async function extractAllFunctions(
   // The prologue's PUSH-reg slot reservations (MSVC's `PUSH ECX` for `SUB ESP,4`), whose
   // incidental store the decompiler prints as an assignment. One script for the program.
   {
-    let attached = 0;
+    let attached = { pushes: 0, frames: 0 };
     await timePhase(
       `${label}extract/prologue-slots`,
       async () => { attached = await attachPrologueSlots(connection, allFunctions); },
-      () => `prologue PUSH slots in ${attached} function(s)`
+      () => `prologue PUSH slots in ${attached.pushes} function(s), SUB ESP frames in ${attached.frames}`
     );
   }
 

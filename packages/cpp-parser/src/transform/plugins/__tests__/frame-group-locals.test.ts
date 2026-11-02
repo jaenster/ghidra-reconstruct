@@ -870,3 +870,187 @@ describe('frameGroupLocalsPlugin and the /GS cookie slot', () => {
     assert.ok(!/dwStackCookie|DEFAULT_SECURITY_COOKIE/.test(out), out);
   });
 });
+
+describe('frameGroupLocalsPlugin: the whole frame, where the original reserves bytes no local covers', () => {
+  const layouts: Record<string, TypeLayout> = {
+    // Both are emitted packed, so their alignment is 1.
+    D2ObjectOperateFnArg: { size: 20, align: 1 },
+    DDDEVICEIDENTIFIER2: { size: 1068, align: 1 },
+    D2CoordStrc: { size: 8, align: 4 },
+  };
+  function run(code: string, slots: StackSlot[], frameReserve?: number): string {
+    const cleaned = boilerplateCleanupPlugin.createTransformer()(parse(code));
+    return emit(frameGroupLocalsPlugin.createTransformer({
+      slots,
+      aggregateLayout: (n: string) => layouts[n] ?? null,
+      ...(frameReserve !== undefined ? { frameReserve } : {}),
+    })(cleaned) as AnyNode);
+  }
+  function fields(out: string): string[] {
+    const struct = /struct\s+__frame0_t\s*\{([\s\S]*?)\}\s*;/.exec(out);
+    assert.ok(struct, `expected a group struct in:\n${out}`);
+    return [...struct[1].matchAll(/(\w+)(\[\d+\])?\s*;/g)].map(m => m[1] + (m[2] ?? ''));
+  }
+
+  /** `BarbFindItemSkill` @0x005a8000: `SUB ESP,0x20`, one 20-byte local at -36, 12 bytes above it untouched. */
+  const barb = `void __fastcall BarbFindItemSkill(SGAMEDATA *pGame, D2UnitStrc *pUnit, D2UnitStrc *pAttacker, uint32_t dwParam) {
+    D2ObjectOperateFnArg sOpArg;
+    sOpArg.pAttacker = pAttacker;
+    sOpArg.sArg.pVictim = pUnit;
+    SERVER_ITEM_DecideDrops(pGame, pUnit, 1, &sOpArg);
+  }`;
+  const barbSlots: StackSlot[] = [
+    { name: 'pAttacker', offset: 4, size: 4, isParameter: true },
+    { name: 'dwParam', offset: 8, size: 4, isParameter: true },
+    { name: 'sOpArg', offset: -36, size: 20 },
+  ];
+
+  it('BarbFindItemSkill 005a8000: the local and the 12 bytes above it are one 32-byte frame', () => {
+    const out = run(barb, barbSlots, 0x20);
+    assert.deepStrictEqual(fields(out), ['sOpArg', '__pad20[3]'], out);
+    assert.ok(/uint32_t\s+__pad20\[3\]\s*;/.test(out), out);
+    assert.ok(/sizeof\(__frame0_t\)\s*==\s*32\s*,/.test(out), out);
+    assert.ok(/__frame0\.sOpArg\.pAttacker = pAttacker;/.test(out), out);
+    assert.ok(/SERVER_ITEM_DecideDrops\(pGame, pUnit, 1, &__frame0\.sOpArg\)/.test(out), out);
+    assert.ok(/Frame -36\.\.-4 is the whole frame: the original reserves 12 bytes/.test(out), out);
+  });
+
+  it('InitPerspective 006b59a0: 1060 bytes between the two locals, a register local left alone', () => {
+    const out = run(`BOOL __fastcall InitPerspective(D2GfxSettingsStrc *pSettings, D2GfxHelperStrc *pHelpers) {
+      DWORD DVar1;
+      DDDEVICEIDENTIFIER2 ddDeviceIdentifier;
+      IDirectDraw1* lpDD = 0;
+      DVar1 = DirectDrawCreate(0, &lpDD, nullptr);
+      if (DVar1) return 0;
+      DVar1 = g_pDirectDraw7->lpVtbl->GetDeviceIdentifier(g_pDirectDraw7, &ddDeviceIdentifier, 0);
+      lpDD->lpVtbl->Release((IDirectDraw*)lpDD);
+      return 1;
+    }`, [
+      { name: 'ddDeviceIdentifier', offset: -2136, size: 1068 },
+      { name: 'lpDD', offset: -8, size: 4 },
+    ], 0x854);
+    assert.deepStrictEqual(fields(out), ['ddDeviceIdentifier', '__pad1068[265]', 'lpDD'], out);
+    assert.ok(/sizeof\(__frame0_t\)\s*==\s*2132\s*,/.test(out), out);
+    // The initialiser stays where the declaration was.
+    assert.ok(/__frame0_t __frame0;\s*DWORD DVar1;\s*__frame0\.lpDD = 0;/.test(out), out);
+    assert.ok(/DirectDrawCreate\(0, &__frame0\.lpDD, nullptr\)/.test(out), out);
+  });
+
+  it('holes off the word grid take a byte and a halfword, never a byte array', () => {
+    const out = run(`int f() {
+      char sz[6];
+      uint8_t b;
+      int n;
+      g(sz, &b, &n);
+      return n;
+    }`, [
+      { name: 'sz', offset: -24, size: 6 },
+      { name: 'b', offset: -15, size: 1 },
+      { name: 'n', offset: -8, size: 4 },
+    ], 20);
+    // [-24, -4): sz at 0, a halfword at 6, b at 9, then 10..11, 12..15, n at 16.
+    assert.deepStrictEqual(fields(out), ['sz[6]', '__pad6', '__pad8', 'b', '__pad10', '__pad12', 'n'], out);
+    assert.ok(/uint16_t\s+__pad6\s*;/.test(out) && /uint8_t\s+__pad8\s*;/.test(out), out);
+    assert.ok(/uint16_t\s+__pad10\s*;/.test(out) && /uint32_t\s+__pad12\s*;/.test(out), out);
+    assert.ok(!/__pad\d+\[/.test(out), `no byte array may pad the frame:\n${out}`);
+    assert.ok(/sizeof\(__frame0_t\)\s*==\s*20\s*,/.test(out), out);
+  });
+
+  it('an address taken through a member or an element puts the local in memory', () => {
+    const out = run(`int f() {
+      D2CoordStrc sPos;
+      int a[2];
+      g(&sPos.nX, &a[1]);
+      return a[0];
+    }`, [
+      { name: 'sPos', offset: -28, size: 8 },
+      { name: 'a', offset: -20, size: 8 },
+    ], 24);
+    assert.deepStrictEqual(fields(out), ['sPos', 'a[2]', '__pad16[2]'], out);
+    assert.ok(/g\(&__frame0\.sPos\.nX, &__frame0\.a\[1\]\)/.test(out), out);
+  });
+
+  it('leaves the frame alone without the reserve', () => {
+    const out = run(barb, barbSlots);
+    assert.ok(!/__frame0/.test(out), out);
+  });
+
+  it('leaves a frame with no hole alone', () => {
+    const out = run(barb, barbSlots, 20);
+    assert.ok(!/__frame0/.test(out), out);
+  });
+
+  it('leaves a frame alone when one of its variables could live in a register', () => {
+    const out = run(`int f(int x) {
+      D2CoordStrc sPos;
+      int n;
+      n = x * 3;
+      g(&sPos);
+      return n + sPos.nX;
+    }`, [
+      { name: 'sPos', offset: -28, size: 8 },
+      { name: 'n', offset: -12, size: 4 },
+    ], 24);
+    assert.ok(!/__frame0/.test(out), out);
+  });
+
+  it('leaves a frame alone when a local in memory has no frame variable', () => {
+    const out = run(`int f() {
+      D2CoordStrc sPos;
+      int aExtra[4];
+      g(&sPos, aExtra);
+      return 0;
+    }`, [
+      { name: 'sPos', offset: -28, size: 8 },
+    ], 24);
+    assert.ok(!/__frame0/.test(out), out);
+  });
+
+  it('leaves a frame alone when a variable reaches past it or overlaps another', () => {
+    assert.ok(!/__frame0/.test(run(barb, [{ name: 'sOpArg', offset: -20, size: 20 }], 0x20)));
+    const out = run(`int f() {
+      D2CoordStrc sPos;
+      int n;
+      g(&sPos, &n);
+      return n;
+    }`, [
+      { name: 'sPos', offset: -28, size: 8 },
+      { name: 'n', offset: -24, size: 4 },
+    ], 24);
+    assert.ok(!/__frame0/.test(out), out);
+  });
+
+  it('leaves a frame with a /GS cookie to the compiler', () => {
+    const out = run(`int f() {
+      uint8_t aBuf[16];
+      uint32_t dwStackCookie;
+      dwStackCookie = DEFAULT_SECURITY_COOKIE ^ (uintptr_t)&stack0xfffffffc;
+      g(aBuf);
+      return 0;
+    }`, [
+      { name: 'aBuf', offset: -32, size: 16 },
+      { name: 'dwStackCookie', offset: -8, size: 4 },
+    ], 28);
+    assert.ok(!/__frame0/.test(out), out);
+  });
+
+  it("a frame with scalars in it keeps the escape rule's group", () => {
+    const out = run(`uint32_t f(HWND hCur, uint32_t uMsg) {
+      uint32_t hMsgWnd;
+      uint32_t uMsgL;
+      uint32_t nCmdCode;
+      uint32_t dwResult1;
+      hMsgWnd = (uint32_t)hCur;
+      uMsgL = uMsg;
+      SEvtDispatch(1, hCur, uMsg, (uintptr_t)&hMsgWnd);
+      return dwResult1 + nCmdCode;
+    }`, [
+      { name: 'hMsgWnd', offset: -24, size: 4 },
+      { name: 'uMsgL', offset: -20, size: 4 },
+      { name: 'nCmdCode', offset: -16, size: 4 },
+      { name: 'dwResult1', offset: -8, size: 4 },
+    ], 24);
+    assert.deepStrictEqual(fields(out), ['hMsgWnd', 'uMsgL', 'nCmdCode', '__pad12[4]', 'dwResult1'], out);
+    assert.ok(/uint8_t\s+__pad12\[4\]\s*;/.test(out), out);
+  });
+});

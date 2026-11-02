@@ -178,6 +178,42 @@
  * A known-count group takes precedence over both other rules for the slots it
  * covers — its extent is stated, theirs is inferred.
  *
+ * THE FOURTH RULE: SPACE IN THE FRAME THAT NO LOCAL COVERS
+ *
+ * The rules above keep the code correct. This one is about the frame matching the
+ * original byte for byte: the original's frame can be bigger than its locals.
+ * `BarbFindItemSkill` @0x005a8000 opens with `SUB ESP,0x20`. Its one local, the
+ * 20-byte `D2ObjectOperateFnArg sOpArg` at -36, is handed to the callee by address,
+ * and nothing touches the 12 bytes above it. `InitPerspective` @0x006b59a0 reserves
+ * 0x854 bytes. Its locals are `ddDeviceIdentifier` (1068 bytes, at -2136) and `lpDD`
+ * (at -8), with 1060 untouched bytes between them. Recompiled with the locals alone,
+ * each frame is smaller. Every EBP offset into the frame and the `SUB ESP` immediate
+ * then differ, and the instructions are otherwise the same.
+ *
+ * So when the codegen supplies `frameReserve`, the N of a `SUB ESP,N` directly after
+ * `PUSH EBP; MOV EBP,ESP`, and the frame [-4-N, -4) has bytes that no Ghidra frame
+ * variable covers, the whole frame becomes ONE group: every variable at its offset,
+ * and padding for the rest. The rule only fires where the struct cannot cost
+ * anything the original did not pay:
+ *
+ *   - every frame variable is a declared, movable local that LIVES IN MEMORY, an
+ *     array or a local whose address the body takes. Such a local has a frame slot
+ *     whatever the compiler does, so putting it in a struct changes where it sits
+ *     and nothing else. A scalar the compiler could keep in a register is never
+ *     put into the struct, and a frame that has one is left alone;
+ *   - every local that lives in memory is one of those variables. Otherwise the
+ *     compiler adds it outside the struct and the frame grows;
+ *   - sizes as Ghidra has them, alignment at most 4 and honoured at every offset,
+ *     no overlap, no parameter with a home in the frame;
+ *   - no /GS cookie, no split variable, no frame base. The cookie is placed by
+ *     the compiler, and the other two belong to the rules above;
+ *   - the padding is 32-bit words, never a byte array (`wordPadding`): under /GS,
+ *     VC8 gives a local byte array, also one inside a struct, a stack cookie the
+ *     original does not have.
+ *
+ * A whole-frame group owns every slot, so none of the rules above runs beside it.
+ * It places each slot at its own offset, which is what they would do too.
+ *
  * Runs LAST (priority 950). Every type pass — `call-arg-cast`, `assign-cast`,
  * `pointer-assign-cast` — resolves a local's type by looking its NAME up among
  * the body's `VariableDecl`s. Grouping first would hide the members from all of
@@ -210,6 +246,7 @@ import type {
   GotoStmt,
   ElaboratedType,
   UnaryExpr,
+  SubscriptExpr,
   ParenExpr,
   CStyleCastExpr,
   CallExpr,
@@ -253,6 +290,12 @@ export interface FrameGroupLocalsOptions extends PluginOptions {
   aggregateLayout?: (name: string) => TypeLayout | null;
   /** Told every run that stopped at a contiguous local it could not place. No effect on output. */
   onTruncated?: (event: RunTruncation) => void;
+  /**
+   * The bytes the prologue reserves for locals: N of a `SUB ESP,N` that directly follows
+   * `PUSH EBP; MOV EBP,ESP`, so the locals live in Ghidra stack offsets [-4-N, -4).
+   * Absent: the whole-frame rule is off.
+   */
+  frameReserve?: number;
 }
 
 /**
@@ -768,7 +811,7 @@ interface SlotPiece {
  */
 const FRAME_OBJECT_MIN_SIZE = 16;
 
-type GroupReason = 'escape' | 'split' | 'write' | 'base-fold';
+type GroupReason = 'escape' | 'split' | 'write' | 'base-fold' | 'frame';
 
 interface FrameGroup {
   /**
@@ -795,6 +838,117 @@ function paddingMember(at: number, bytes: number, sealed = false): GroupMember {
     align: 1,
     sealed,
   };
+}
+
+/**
+ * Padding for a hole in a whole-frame group: 32-bit words, with single bytes or a
+ * halfword for an unaligned head or tail, and never a byte array.
+ *
+ * Under /GS, VC8 gives a function a stack cookie when a local is an array of one- or
+ * two-byte elements, also when the array is a member of a local struct. The functions
+ * this rule fires on have no cookie in the original. With a `uint8_t[12]` hole,
+ * `BarbFindItemSkill` @0x005a8000 got one: seven instructions more. With `uint32_t[3]`
+ * it is a byte match.
+ */
+function wordPadding(at: number, bytes: number): GroupMember[] {
+  const out: GroupMember[] = [];
+  const end = at + bytes;
+  let p = at;
+  const scalar = (): void => {
+    const size = p % 2 === 0 && end - p >= 2 ? 2 : 1;
+    out.push({ name: null, type: Type.typedef(size === 2 ? 'uint16_t' : 'uint8_t'), at: p, size, align: size });
+    p += size;
+  };
+  while (p < end && p % 4 !== 0) scalar();
+  const words = Math.floor((end - p) / 4);
+  if (words > 0) {
+    const word = Type.typedef('uint32_t');
+    out.push({ name: null, type: words === 1 ? word : Type.array(word, Expr.intLiteral(words)), at: p, size: 4 * words, align: 4 });
+    p += 4 * words;
+  }
+  while (p < end) scalar();
+  return out;
+}
+
+/**
+ * The plain locals (no storage specifier) that live in memory whatever the compiler
+ * does: arrays, and locals whose address the body takes, directly or through a
+ * member or an element (`&s.f`, `&a[i]`).
+ */
+function memoryResidentLocals(body: CompoundStmt): Set<string> {
+  const plain = new Map<string, VariableDecl>();
+  for (const d of findNodesByKind(body, NodeKind.VariableDecl)) {
+    const v = d as VariableDecl;
+    if (v.name && !(v.specifiers && v.specifiers.length > 0)) plain.set(v.name.name, v);
+  }
+  const out = new Set<string>();
+  for (const [name, v] of plain) {
+    let t: TypeNode | undefined = v.type;
+    while (t && t.kind === NodeKind.QualifiedType) t = (t as QualifiedType).type;
+    if (t && t.kind === NodeKind.ArrayType) out.add(name);
+  }
+  for (const n of traverseAST(body)) {
+    if (n.kind !== NodeKind.UnaryExpr || (n as UnaryExpr).operator !== '&') continue;
+    let e = unwrapParens((n as UnaryExpr).operand);
+    for (;;) {
+      if (e.kind === NodeKind.MemberExpr && !(e as MemberExpr).isArrow) {
+        e = unwrapParens((e as MemberExpr).object);
+      } else if (e.kind === NodeKind.SubscriptExpr) {
+        e = unwrapParens((e as SubscriptExpr).array);
+      } else {
+        break;
+      }
+    }
+    if (e.kind === NodeKind.Identifier && plain.has((e as Identifier).name)) out.add((e as Identifier).name);
+  }
+  return out;
+}
+
+/**
+ * The whole frame as one group, or null when the rule does not apply.
+ *
+ * The frame is [-4-reserve, -4). Every frame variable Ghidra lists has to be a
+ * declared, movable local that lives in memory (`memoryResidentLocals`), with the size
+ * Ghidra gives it and an offset its alignment allows (at most 4). Every local that
+ * lives in memory has to be one of them, or the compiler adds it outside the struct.
+ * No two may overlap, and a parameter must not have a home in the frame. The bytes
+ * between them, and those up to either end, are holes. Without a hole the rule has
+ * nothing to add, and it returns null.
+ */
+function planFrame(
+  slots: readonly StackSlot[],
+  paramNames: ReadonlySet<string>,
+  reserve: number,
+  movable: ReadonlyMap<string, MovableLocal>,
+  inMemory: ReadonlySet<string>,
+): GroupMember[] | null {
+  if (!Number.isSafeInteger(reserve) || reserve <= 0 || reserve % 4 !== 0) return null;
+  const bottom = -4 - reserve;
+  const frame = slots.filter(s => !s.isParameter && s.offset < 0).sort((a, b) => a.offset - b.offset);
+  if (frame.length === 0) return null;
+  const names = new Set(frame.map(s => s.name));
+  for (const name of inMemory) if (!names.has(name)) return null;
+  const members: GroupMember[] = [];
+  let at = 0;
+  let holes = 0;
+  for (const s of frame) {
+    if (paramNames.has(s.name) || !inMemory.has(s.name)) return null;
+    const local = movable.get(s.name);
+    if (!local || local.layout.size !== s.size || local.layout.align > 4) return null;
+    const rel = s.offset - bottom;
+    if (rel < at || s.offset + s.size > -4 || rel % local.layout.align !== 0) return null;
+    if (rel > at) {
+      members.push(...wordPadding(at, rel - at));
+      holes += rel - at;
+    }
+    members.push({ name: s.name, type: local.decl.type, at: rel, size: s.size, align: local.layout.align });
+    at = rel + s.size;
+  }
+  if (at < reserve) {
+    members.push(...wordPadding(at, reserve - at));
+    holes += reserve - at;
+  }
+  return holes > 0 ? members : null;
 }
 
 /**
@@ -1143,6 +1297,14 @@ function unresolvedFrameBases(body: ASTNode): Set<string> {
 /** The two comment lines that say why the group exists, ahead of its definition. */
 function explanation(group: FrameGroup): string[] {
   const first = group.members.find(m => m.name)?.name ?? '';
+  if (group.reason === 'frame') {
+    const holes = group.members.filter(m => m.name === null).reduce((n, m) => n + m.size, 0);
+    return [
+      `// Frame ${group.baseOffset}..${group.baseOffset + group.expectedSize} is the whole frame:`
+        + ` the original reserves ${holes} bytes in it that no local covers.`,
+      '// Separate locals let the compiler leave that space out, so the frame is one struct.',
+    ];
+  }
   if (group.reason === 'write') {
     return [
       `// Frame ${group.baseOffset}..${group.baseOffset + group.expectedSize} is ONE object:`
@@ -1388,7 +1550,14 @@ function createFrameGroupLocalsTransformer(options: FrameGroupLocalsOptions = {}
       const frameBases = unresolvedFrameBases(body);
       const baseFoldSeed = new Set<string>();
       if (frameBases.size > 0 && locals.length > 0) baseFoldSeed.add(locals[0].name);
-      if (escaping.size === 0 && splits.size === 0 && writes.size === 0
+      // The whole frame, holes included, where every local in it lives in memory.
+      // Not with a cookie (the compiler places that itself), a split variable or
+      // a frame base: those need the rules below.
+      const frame = options.frameReserve !== undefined
+          && cookies.size === 0 && splits.size === 0 && frameBases.size === 0
+        ? planFrame(slots, paramNames, options.frameReserve, movable, memoryResidentLocals(body))
+        : null;
+      if (!frame && escaping.size === 0 && splits.size === 0 && writes.size === 0
           && baseFoldSeed.size === 0) {
         return undefined;
       }
@@ -1402,6 +1571,13 @@ function createFrameGroupLocalsTransformer(options: FrameGroupLocalsOptions = {}
       const consumedSlots = new Set<string>();
       /** Slot names a known-count group owns: no inferred run may reach them. */
       const blocked = new Set<string>();
+
+      // A whole-frame group places every slot at its own offset, which is all the
+      // other rules want for the slots they group. It owns them all.
+      if (frame) {
+        plans.push({ members: frame, baseOffset: -4 - options.frameReserve!, expectedSize: options.frameReserve!, reason: 'frame' });
+        for (const s of locals) blocked.add(s.name);
+      }
 
       // The stated extents first, so an inferred run can be stopped by one.
       for (let i = 0; i < locals.length; i++) {
@@ -1606,7 +1782,7 @@ function createFrameGroupLocalsTransformer(options: FrameGroupLocalsOptions = {}
 export const frameGroupLocalsPlugin: TransformPlugin = createPlugin(
   'frame-group-locals',
   'Frame-Group Locals',
-  'Emits a frame object the decompiler scattered across several locals as one struct-typed local - a run whose first address escapes, a Ghidra variable printed in pieces, or the span a call writes a literal byte count into - so the callee\'s byte offsets survive compilation',
+  'Emits a frame object the decompiler scattered across several locals as one struct-typed local - a run whose first address escapes, a Ghidra variable printed in pieces, the span a call writes a literal byte count into, or the whole frame where the original reserves bytes no local covers - so the callee\'s byte offsets and the frame survive compilation',
   (options?: PluginOptions) => sequence(
     createFrameGroupLocalsTransformer(options as FrameGroupLocalsOptions),
     createCookieDeclRemover(),
@@ -1617,6 +1793,6 @@ export const frameGroupLocalsPlugin: TransformPlugin = createPlugin(
     priority: 950,
     defaultEnabled: true,
     tags: ['correctness', 'declaration'],
-    version: '1.2.0',
+    version: '1.3.0',
   }
 );

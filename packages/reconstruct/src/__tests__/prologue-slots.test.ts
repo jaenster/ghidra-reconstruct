@@ -5,7 +5,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { parsePrologueSlots, applyPrologueSlots, PROLOGUE_SLOT_SCRIPT } from '../extract/prologue-slots.js';
+import { parsePrologueSlots, applyPrologueSlots, parsePrologueFrames, applyPrologueFrames, PROLOGUE_SLOT_SCRIPT } from '../extract/prologue-slots.js';
 import { createOutParamOracle, makeTypeSize } from '../codegen/out-params.js';
 import type { ExtractedDataType, ExtractedFunction } from '../types.js';
 
@@ -19,6 +19,20 @@ describe('prologue slots', () => {
     const f = { address: '0052a270', name: 'SHA1_FromBigIntBytes' } as ExtractedFunction;
     assert.equal(applyPrologueSlots(slots, [f]), 1);
     assert.deepEqual(f.pushSlots, [{ offset: -8, reg: 'ECX' }, { offset: -12, reg: 'ESI' }, { offset: -16, reg: 'EDI' }]);
+  });
+  it('the script records a SUB ESP,N right after PUSH EBP; MOV EBP,ESP as an F row', () => {
+    assert.ok(PROLOGUE_SLOT_SCRIPT.includes('s0.startsWith("SUB ESP,0x")'));
+    assert.ok(PROLOGUE_SLOT_SCRIPT.includes('sb.append("F\\t")'));
+  });
+  it('BarbFindItemSkill 005a8000 (SUB ESP,0x20) and InitPerspective 006b59a0 (SUB ESP,0x854)', () => {
+    const output = ['F\t005a8000\t32', 'F\t006b59a0\t2132', 'P\t0052a270\t-8\tECX', 'F\t00401000\tx', 'F\t00401010\t0', 'junk'].join('\n');
+    const frames = parsePrologueFrames(output);
+    assert.deepEqual([...frames], [['005a8000', 32], ['006b59a0', 2132]]);
+    const fns = [{ address: '005a8000' }, { address: '0x006B59A0' }, { address: '0052a270' }] as ExtractedFunction[];
+    assert.equal(applyPrologueFrames(frames, fns), 2);
+    assert.deepEqual(fns.map(f => f.frameReserve), [32, 2132, undefined]);
+    // The PUSH slots are read from the same output, and an F row is not one.
+    assert.deepEqual([...parsePrologueSlots(output).keys()], ['0052a270']);
   });
 });
 

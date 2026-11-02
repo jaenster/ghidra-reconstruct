@@ -1675,6 +1675,7 @@ export function generateFunctionImplementation(
           // be resolved against.
           ghidraNamespaceSegments: enclosingNamespace?.ghidraSegments,
           stackSlots: frameSlots(func),
+          frameReserve: func.frameReserve,
           registerAliases: registerAliases(func),
           callSiteOverrides: func.callSiteOverrides,
           labelFlow: func.labelFlow,
@@ -2612,6 +2613,8 @@ function transformDecompiledCode(
      * because the body is parsed without one.
      */
     stackSlots?: FrameSlot[];
+    /** The bytes the prologue's `SUB ESP,N` reserves for locals (extract/prologue-slots.ts). */
+    frameReserve?: number;
     /**
      * local name -> the parameter that shares its register. @see registerAliases.
      * The AST cannot show storage, so the pairing arrives here.
@@ -3264,6 +3267,8 @@ function transformDecompiledCode(
       const aggregateLayouts = context?.funcPtrArgCasts?.aggregateLayouts;
       perPluginOptions['frame-group-locals'] = {
         slots: enclosing.stackSlots,
+        // The frame the original reserved, holes included, for the whole-frame rule.
+        ...(enclosing.frameReserve !== undefined ? { frameReserve: enclosing.frameReserve } : {}),
         ...(reach ? {
           argReach: (callee: string, index: number, argCount: number) => reach.argReach(callee, index, argCount),
           computedArgReach: (callee: Expression, index: number, argCount: number) => reach.argReachThrough(callee, index, argCount),
