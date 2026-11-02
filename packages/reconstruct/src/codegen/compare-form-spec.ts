@@ -88,8 +88,10 @@ export function compareFormDecision(site: CompareSite): CompareFormOutcome {
   const sign = signTest(site, form);
   if (sign) return sign;
   if (!site.user || !site.setter || !site.onPair) return { reason: 'no CMP/TEST and Jcc pair' };
-  if (site.width !== site.size || ![1, 2, 4].includes(site.width)) return { reason: `width ${site.width} for a ${site.size}-byte op` };
   const cc = conditionCode(site.user.mnemonic);
+  if ((site.width !== site.size && !widenedEquality(site, cc)) || ![1, 2, 4].includes(site.width)) {
+    return { reason: `width ${site.width} for a ${site.size}-byte op` };
+  }
   if (!cc) return { reason: `flags read by ${site.user.mnemonic}` };
   const ccRel = RELATION[cc];
   const F = new Set([ccRel, NEGATE[ccRel]]);
@@ -172,6 +174,23 @@ export function compareFormDecision(site: CompareSite): CompareFormOutcome {
   if (inF && !mirInF) return { decision: { ...base, keep: true } };
   if (mirInF && !inF) return { decision: { ...base, op: MIRROR[site.text], swap: true, delta: 0 } };
   return { reason: `${site.text} against ${[...F].join('/')}` };
+}
+
+/**
+ * A narrow operand the instructions compare for equality at four bytes against an
+ * immediate: `MOVSX EAX,word ptr [..]; CMP EAX,0x43; JZ`, where Ghidra prints the op at the
+ * operand's width (PLRSKILLS_CheckSkillWhipAndLeap 004d8520). The relation is the same at
+ * either width; the decision carries the CMP's width, which is how `narrow-local-widen`
+ * learns the source compared an int. Only constants whose top bit at the narrow width is
+ * clear and that the immediate holds unchanged, so the sign and zero extensions agree.
+ */
+function widenedEquality(site: CompareSite, cc: string | undefined): boolean {
+  if (site.width !== 4 || (site.size !== 1 && site.size !== 2)) return false;
+  if (site.opcode !== 'INT_EQUAL' && site.opcode !== 'INT_NOTEQUAL') return false;
+  if (!cc || (RELATION[cc] !== '==' && RELATION[cc] !== '!=')) return false;
+  if ((site.constSide !== 0 && site.constSide !== 1) || site.bKind !== 'i') return false;
+  if (site.k === undefined || site.bValue === undefined) return false;
+  return site.k < 1n << BigInt(8 * site.size - 1) && site.bValue === site.k;
 }
 
 /**

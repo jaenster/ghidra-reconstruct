@@ -161,6 +161,23 @@ describe('compare-form derivation', () => {
     assert.strictEqual(decide(site({ text: '<', opcode: 'INT_SLESS', k: 4n, bValue: 3n, width: 1, user: 'JLE' })), null);
   });
 
+  // PLRSKILLS_CheckSkillWhipAndLeap, 004d8520: `MOVSX EAX,word ptr [..]; CMP EAX,0x43; JZ`.
+  it('a 2-byte equality the CMP compares at 4 bytes against an immediate is kept at width 4', () => {
+    let d = decide(site({ text: '!=', opcode: 'INT_NOTEQUAL', size: 2, width: 4, k: 0x43n, bValue: 0x43n, user: 'JZ' }))!;
+    assert.deepStrictEqual([d.keep, d.width, d.k], [true, 4, 0x43]);
+    d = decide(site({ text: '==', opcode: 'INT_EQUAL', size: 1, width: 4, k: 0x7fn, bValue: 0x7fn, user: 'JNZ' }))!;
+    assert.deepStrictEqual([d.keep, d.width], [true, 4]);
+  });
+
+  it('refuses a widened compare that is ordered, against a register, or whose constant the extensions disagree on', () => {
+    assert.strictEqual(decide(site({ text: '<', opcode: 'INT_SLESS', size: 2, width: 4, k: 0x43n, bValue: 0x43n, user: 'JL' })), null);
+    assert.strictEqual(decide(site({ text: '==', opcode: 'INT_EQUAL', size: 2, width: 4, k: 0x43n, bKind: 'r', user: 'JZ' })), null);
+    assert.strictEqual(decide(site({ text: '==', opcode: 'INT_EQUAL', size: 2, width: 4, k: 0xffffn, bValue: 0xffffffffn, user: 'JZ' })), null);
+    assert.strictEqual(decide(site({ text: '==', opcode: 'INT_EQUAL', size: 2, width: 4, k: 0x8000n, bValue: 0x8000n, user: 'JZ' })), null);
+    assert.strictEqual(decide(site({ text: '==', opcode: 'INT_EQUAL', size: 2, width: 4, k: 0x43n, bValue: 0x44n, user: 'JZ' })), null);
+    assert.strictEqual(decide(site({ text: '==', opcode: 'INT_EQUAL', size: 2, width: 1, k: 0x43n, bValue: 0x43n, user: 'JZ' })), null);
+  });
+
   it('refuses without the instruction pair, with a bit test, or an equality against a constant held in a register', () => {
     assert.strictEqual(decide(site({ text: '<', opcode: 'INT_SLESS', k: 4n, bValue: 3n, user: 'JLE', onPair: false })), null);
     assert.strictEqual(decide(site({ text: '!=', opcode: 'INT_NOTEQUAL', k: 0n, bKind: 'bit', user: 'JZ' })), null);
@@ -272,6 +289,27 @@ describe('compare-form in codegen', () => {
     assert.match(out, /nCount (> 0|<= 0)/);
     const plain = generateFunctionImplementation(fn(), undefined, options);
     assert.match(plain, /0x144f < nByteOffset/);
+  });
+
+  // PLRSKILLS_CheckSkillWhipAndLeap, 004d8520: the short local compared as the register.
+  it('a short local the CMPs compare at four bytes is declared an int', () => {
+    const c = '\n/* @function CheckSkill\n   @address Game.exe.ram:004d8520\n   @calling __stdcall */\n\n'
+      + 'int __stdcall CheckSkill(int nArg)\n\n{\n  short sSrvDoFunc;\n  \n  sSrvDoFunc = (short)nArg;\n'
+      + '  if (sSrvDoFunc != 0x43) {\n    if (sSrvDoFunc == 0x4c) {\n      return 2;\n    }\n    return 0;\n  }\n  return 1;\n}\n\n';
+    const rows = [
+      '0\t!=\tINT_NOTEQUAL\t2\t1\t43\tv:sSrvDoFunc\tc:43\t004d8571\t004d8574\tJZ\t004d8571\tCMP\t4\tr\ti\t43\t1',
+      '1\t==\tINT_EQUAL\t2\t1\t4c\tv:sSrvDoFunc\tc:4c\t004d8576\t004d8579\tJNZ\t004d8576\tCMP\t4\tr\ti\t4c\t1',
+    ].join('\n');
+    const gen = (compareSites?: string) => generateFunctionImplementation({
+      name: 'CheckSkill', address: '004d8520', signature: 'int CheckSkill(int nArg)', returnType: 'int',
+      parameters: [{ name: 'nArg', dataType: 'int', size: 4, ordinal: 0, storage: 'Stack[0x4]' }],
+      localVariables: [], callingConvention: '__stdcall', size: 64, isThunk: false, isExternal: false, hasVarArgs: false,
+      decompiled: c, compareSites,
+    } as ExtractedFunction, undefined, options);
+    assert.match(gen(rows), /int32_t sSrvDoFunc = /);
+    assert.match(gen(), /short int sSrvDoFunc = /);
+    // A CMP at the short's own width keeps it narrow.
+    assert.match(gen(rows.replace(/\tCMP\t4\t/g, '\tCMP\t2\t')), /short int sSrvDoFunc = /);
   });
 
   it('leaves a function with a text patch as Ghidra printed it, so the patch still anchors', () => {
