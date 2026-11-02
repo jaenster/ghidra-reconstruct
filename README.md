@@ -135,6 +135,7 @@ never change a value. Among them:
 | `branch-layout` | if/else arms ordered and nested as the original's block addresses and jump edges show |
 | `rotated-for-loop` | a rotated loop back to `for`; gated to keep the rotated form for a two-exit loop or a bound computed once |
 | `arith-idioms` | division and remainder idioms back to the operator, including the signed reciprocal pair → `x / d` |
+| `pow2-remainder` | VC8's signed remainder by 2^k (`and r, 0x8000000M; jns; dec; or; inc`) → `x % 2^k`: the value, its zero test, a load scheduled before the jump, a fix-up the decompiler dropped; before `early-return` copies the tail |
 | `range-test-form` | `(unsigned)(x - lo) <= k` guarding a branch → `lo <= x && x <= hi` |
 | `aggregate-zero-init` | zero stores that write a whole local → `T s = {0};`, or a memset where a narrow first member is zeroed and overwritten |
 | `arm-constant-call` | a call taking a constant chosen per if/else arm goes back into each arm, using the arm's folded lines as evidence |

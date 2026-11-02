@@ -3132,6 +3132,7 @@ function transformDecompiledCode(
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         enclosingVarTypes,
       };
+      perPluginOptions['pow2-remainder'] = perPluginOptions['arith-idioms'];
       perPluginOptions['pseudo-op-lower'] = {
         stackSlots: enclosing?.stackSlots,
         unionNames: context.funcPtrArgCasts.unionNames,
