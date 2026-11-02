@@ -642,7 +642,7 @@ describe('haltSiteFoldPlugin - a line chosen per branch', () => {
     assert.strictEqual(count(out, `${HALT}(`), 1, out);
   });
 
-  it('leaves a join that something follows or a halt that is a jump target', () => {
+  it('leaves a join whose halt is a jump target', () => {
     const labelled = run(`void f(int a) {
   int32_t nLine;
   if (a) {
@@ -655,18 +655,6 @@ HALTHERE:
   exit(-1);
 }`);
     assert.strictEqual(count(labelled, `${HALT}(`), 1, labelled);
-    const trailing = run(`void f(int a) {
-  int32_t nLine;
-  if (a) {
-    nLine = 5;
-  } else {
-    nLine = 6;
-  }
-  ${HALT}("", ${IP}(), nLine);
-  exit(-1);
-  more();
-}`);
-    assert.strictEqual(count(trailing, `${HALT}(`), 1, trailing);
   });
 
   it('is idempotent', () => {
@@ -681,5 +669,168 @@ HALTHERE:
   exit(-1);
 }`);
     assert.strictEqual(run(once), once);
+  });
+});
+
+describe('haltSiteFoldPlugin - a line chosen per switch case, labelled branch or skipped if', () => {
+  const facts = (...lines: number[]) => [{ at: 40, ip: 30, paths: lines.map(line => ({ line, guard: null })) }];
+  function runWith(code: string, haltLines?: ReturnType<typeof facts>): string {
+    const out = haltSiteFoldPlugin.createTransformer(haltLines ? { haltLines } : {})(parse(code));
+    return emit(out as AnyNode).trim();
+  }
+
+  const SWITCH = `int f(int a, int i) {
+  int32_t nLine;
+  if (!a) {
+    nLine = 0x110;
+  } else {
+    switch (i) {
+      case 0:
+        {
+          if (!a) {
+            nLine = 0x113;
+            break;
+          }
+          return 1;
+        }
+      default:
+        return 0;
+      case 1:
+        nLine = 0x116;
+        break;
+    }
+  }
+  ${HALT}("", ${IP}(), nLine);
+  exit(-1);
+  return 0;
+}`;
+
+  it('writes the halt into each "line = C; break;" of a switch and drops the variable', () => {
+    const out = runWith(SWITCH, facts(0x110, 0x113, 0x116));
+    assert.strictEqual(count(out, `${HALT}(`), 3, out);
+    for (const l of ['0x110', '0x113', '0x116']) assert.ok(out.includes(`${IP}(), ${l});`), out);
+    assert.ok(!out.includes('nLine'), out);
+    assert.ok(!out.includes('break;'), out);
+    // the unreachable statement after the terminator stays
+    assert.ok(out.trimEnd().endsWith('return 0;\n}'), out);
+  });
+
+  it('refuses when the instructions do not push one of the literals', () => {
+    // four ways in the facts against three printed: the line repair leaves it alone too
+    const out = runWith(SWITCH, facts(0x110, 0x113, 0x117, 0x200));
+    assert.strictEqual(count(out, `${HALT}(`), 1, out);
+  });
+
+  it('refuses a switch without default, a bare break, or a line with another use', () => {
+    const noDefault = runWith(`void f(int i) {
+  int32_t nLine;
+  switch (i) {
+    case 0:
+      nLine = 1;
+      break;
+    case 1:
+      nLine = 2;
+      break;
+  }
+  ${HALT}("", ${IP}(), nLine);
+  exit(-1);
+}`);
+    assert.strictEqual(count(noDefault, `${HALT}(`), 1, noDefault);
+    const bareBreak = runWith(`void f(int i) {
+  int32_t nLine;
+  switch (i) {
+    case 0:
+      nLine = 1;
+      break;
+    case 1:
+      break;
+    default:
+      nLine = 2;
+  }
+  ${HALT}("", ${IP}(), nLine);
+  exit(-1);
+}`);
+    assert.strictEqual(count(bareBreak, `${HALT}(`), 1, bareBreak);
+    const otherUse = runWith(`void f(int i) {
+  int32_t nLine;
+  nLine = g();
+  use(nLine);
+  switch (i) {
+    case 0:
+      nLine = 1;
+      break;
+    default:
+      nLine = 2;
+  }
+  ${HALT}("", ${IP}(), nLine);
+  exit(-1);
+}`);
+    assert.strictEqual(count(otherUse, `${HALT}(`), 1, otherUse);
+  });
+
+  it('keeps a label on the leaf it moves the halt onto', () => {
+    const out = runWith(`void f(int a, int b) {
+  int32_t nLine;
+  if (!a) {
+    nLine = 0x4f7;
+  } else {
+    if (b) {
+      return;
+    }
+    LAB:
+    nLine = 0x502;
+  }
+  ${HALT}("", ${IP}(), nLine);
+  exit(-1);
+}`);
+    assert.strictEqual(count(out, `${HALT}(`), 2, out);
+    assert.ok(/LAB:\s*\S*ERROR_UnrecoverableInternalError_Halt\("", [^,]+, 0x502\)/.test(out), out);
+  });
+
+  it('gives the path that skips an if the line defined before it', () => {
+    const out = runWith(`void f(int a) {
+  int32_t nLine;
+  nLine = 7;
+  if (a) {
+    nLine = 8;
+  }
+  ${HALT}("", ${IP}(), nLine);
+  exit(-1);
+}`);
+    assert.strictEqual(count(out, `${HALT}(`), 2, out);
+    assert.ok(out.indexOf(`${IP}(), 8)`) < out.indexOf(`${IP}(), 7)`), out);
+    assert.ok(!out.includes('nLine'), out);
+  });
+
+  it('refuses a leaf that is not a literal once the join goes past if/else', () => {
+    const out = runWith(`void f(int a, int i) {
+  int32_t nLine;
+  switch (i) {
+    case 0:
+      nLine = a;
+      break;
+    default:
+      nLine = 2;
+  }
+  ${HALT}("", ${IP}(), nLine);
+  exit(-1);
+}`);
+    assert.strictEqual(count(out, `${HALT}(`), 1, out);
+  });
+
+  it('folds a definition that carries the case into the halt', () => {
+    const out = runWith(`void f(int i) {
+  int32_t nLine;
+  switch (i) {
+    case 0:
+      return;
+    default:
+      nLine = 0x519;
+      ${HALT}("", ${IP}(), nLine);
+      exit(-1);
+  }
+}`);
+    assert.ok(/default:\s*\S*ERROR_UnrecoverableInternalError_Halt\("", [^,]+, 0x519\)/.test(out), out);
+    assert.ok(!out.includes('nLine'), out);
   });
 });

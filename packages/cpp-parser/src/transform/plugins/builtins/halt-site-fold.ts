@@ -45,7 +45,7 @@ import { NodeKind } from '../../../ast/kinds.js';
 import type { SourceLocation } from '../../../lexer/index.js';
 import type {
   ASTNode, FunctionDecl, CompoundStmt, ExprStmt, DeclStmt, VariableDecl,
-  LabelStmt, GotoStmt, IfStmt, Statement, Expression, CallExpr, AssignExpr,
+  LabelStmt, GotoStmt, IfStmt, SwitchStmt, CaseStmt, DefaultStmt, Statement, Expression, CallExpr, AssignExpr,
   Identifier, QualifiedId, UnaryExpr, ParenExpr, CStyleCastExpr, IntegerLiteralExpr, BinaryExpr,
 } from '../../../ast/nodes.js';
 import { traverseAST } from '../../../ast/visitor.js';
@@ -280,7 +280,7 @@ function peel(s: Statement): Peeled {
 }
 
 /** Put the labels back on a statement, outermost first. */
-function relabel(labels: readonly LabelStmt[], inner: Statement): Statement {
+function relabel(labels: readonly (LabelStmt | CaseStmt | DefaultStmt)[], inner: Statement): Statement {
   let out = inner;
   for (let i = labels.length - 1; i >= 0; i--) {
     out = updateNode(labels[i], { statement: out } as Partial<LabelStmt>);
@@ -298,11 +298,13 @@ interface Def {
   /** `T v = rhs;` consumes the declaration; `v = rhs;` leaves it for the cleanup. */
   isDecl: boolean;
   stmt: Statement;
-  labels: LabelStmt[];
+  /** Labels on the definition, and with `cases` the `case`s and `default`s too. */
+  labels: (LabelStmt | CaseStmt | DefaultStmt)[];
 }
 
-function asDef(s: Statement): Def | null {
-  const { labels, inner } = peel(s);
+function asDef(s: Statement, cases = false): Def | null {
+  const p = peel(s);
+  const { wrappers: labels, inner } = cases ? peelAll(s) : { wrappers: p.labels, inner: p.inner };
   if (inner.kind === NodeKind.ExprStmt) {
     const e = (inner as ExprStmt).expression;
     if (e.kind === NodeKind.AssignExpr) {
@@ -367,12 +369,14 @@ function foldHaltSites(stmts: readonly Statement[]): FoldResult | null {
     const seen = new Set<string>();
     let lastSkip = -1;
     for (let j = out.length - 1; j >= 0 && chain.length < 2 && skipped.length <= 4; j--) {
-      const d = asDef(out[j]);
+      const d = asDef(out[j], true);
       if (d && argNames.has(d.name) && !seen.has(d.name)) {
         if (lastSkip >= 0 && !isConstant(d.rhs)) break;
         seen.add(d.name);
         chain.push(d);
         chainIdx.push(j);
+        // A `case` starts the run: what lies above it belongs to the case before.
+        if (d.labels.some(l => l.kind !== NodeKind.LabelStmt)) break;
         continue;
       }
       if (d && !d.isDecl && d.labels.length === 0 && !argNames.has(d.name)
@@ -390,7 +394,7 @@ function foldHaltSites(stmts: readonly Statement[]): FoldResult | null {
 
     // A jump to the halt itself, or into the middle of the run, would skip definitions
     // that the fold moves into the call: those jumpers set the variables themselves.
-    const labelInside = (j: number) => peel(out[j]).labels.length > 0;
+    const labelInside = (j: number) => peelAll(out[j]).wrappers.length > 0;
     if (here.labels.length > 0
         || [...chainIdx, ...between].some(j => j !== earliest && labelInside(j))) {
       out.push(stmts[h]);
@@ -411,7 +415,7 @@ function foldHaltSites(stmts: readonly Statement[]): FoldResult | null {
     if (!ok) { out.push(stmts[h]); continue; }
 
     // Labels sitting on the earliest removed definition move to the halt: the jump still lands on it.
-    const moved: LabelStmt[] = [];
+    const moved: (LabelStmt | CaseStmt | DefaultStmt)[] = [];
     for (let i = chain.length - 1; i >= 0; i--) moved.push(...chain[i].labels);
     const byName = new Map(chain.map(d => [d.name, d.rhs] as const));
     const newCall = updateNode(call, {
@@ -647,9 +651,60 @@ interface JoinCtx {
   call: CallExpr;
   exit: Statement;
   leaves: number;
+  /** The literal each leaf passed; null for a leaf whose value is not a literal. */
+  values: (number | null)[];
+  /**
+   * Set when a path was taken through anything beyond if/else in last position: a label or
+   * case on the way, an `if` without `else`, a `switch` and its `break`s. Such a join is only
+   * written when the line has no other use and the instructions push every leaf's literal.
+   */
+  wide: boolean;
 }
 
 const MAX_JOIN_LEAVES = 16;
+
+type Wrapper = LabelStmt | CaseStmt | DefaultStmt;
+
+/** `s` without the labels, `case`s and `default`s on it, outermost first. */
+function peelAll(s: Statement): { wrappers: Wrapper[]; inner: Statement } {
+  const wrappers: Wrapper[] = [];
+  let cur = s;
+  while (cur.kind === NodeKind.LabelStmt || cur.kind === NodeKind.CaseStmt || cur.kind === NodeKind.DefaultStmt) {
+    wrappers.push(cur as Wrapper);
+    cur = (cur as Wrapper).statement;
+  }
+  return { wrappers, inner: cur };
+}
+
+function rewrap(wrappers: readonly Wrapper[], inner: Statement): Statement {
+  let out = inner;
+  for (let i = wrappers.length - 1; i >= 0; i--) {
+    out = updateNode(wrappers[i], { statement: out } as Partial<Wrapper>);
+  }
+  return out;
+}
+
+/** A definition of the line as the last thing on a path: the halt with its value, then exit. */
+function haltLeaf(s: Statement, ctx: JoinCtx): Statement[] | null {
+  if (s.kind !== NodeKind.ExprStmt) return null;
+  const d = asDef(s);
+  if (!d || d.isDecl || d.name !== ctx.line || !foldable(d.rhs) || mentions(d.rhs, new Set([ctx.line]))
+      || carriesComment(d.stmt)) return null;
+  ctx.leaves++;
+  ctx.values.push(constValue(d.rhs));
+  const call = updateNode(ctx.call, {
+    arguments: [ctx.call.arguments[0], ctx.call.arguments[1],
+      substInArg(ctx.call.arguments[2], new Map([[ctx.line, d.rhs]]))],
+  } as Partial<CallExpr>);
+  return [placedAt(updateNode(ctx.halt, { expression: call } as Partial<ExprStmt>), s), ctx.exit];
+}
+
+/** The first statement of a rewrite keeps the labels and cases the original carried. */
+function withWrappers(wrappers: readonly Wrapper[], r: Statement[]): Statement[] {
+  return wrappers.length === 0 ? r : [rewrap(wrappers, r[0]), ...r.slice(1)];
+}
+
+const asStmt = (l: Statement[]): Statement => (l.length === 1 ? l[0] : Stmt.compound(l));
 
 /**
  * Rewrite `s` so that every path leaving it through its end runs the halt with the line that
@@ -657,22 +712,31 @@ const MAX_JOIN_LEAVES = 16;
  */
 function threadHalt(s: Statement, ctx: JoinCtx): Statement[] | null {
   if (terminates(s)) return [s];
-  if (s.kind === NodeKind.ExprStmt) {
-    const d = asDef(s);
-    if (!d || d.isDecl || d.name !== ctx.line || !foldable(d.rhs) || mentions(d.rhs, new Set([ctx.line]))
-        || carriesComment(d.stmt)) return null;
-    ctx.leaves++;
-    const call = updateNode(ctx.call, {
-      arguments: [ctx.call.arguments[0], ctx.call.arguments[1],
-        substInArg(ctx.call.arguments[2], new Map([[ctx.line, d.rhs]]))],
-    } as Partial<CallExpr>);
-    return [placedAt(updateNode(ctx.halt, { expression: call } as Partial<ExprStmt>), s), ctx.exit];
+  if (s.kind === NodeKind.LabelStmt || s.kind === NodeKind.CaseStmt || s.kind === NodeKind.DefaultStmt) {
+    // A jump or case that lands here runs the same path, so the halt takes the label along.
+    const { wrappers, inner } = peelAll(s);
+    if (terminates(inner)) return [s];
+    ctx.wide = true;
+    const r = threadHalt(inner, ctx);
+    return r ? withWrappers(wrappers, r) : null;
   }
+  if (s.kind === NodeKind.ExprStmt) return haltLeaf(s, ctx);
   if (s.kind === NodeKind.CompoundStmt) {
     const c = s as CompoundStmt;
-    if (c.statements.length === 0) return null;
-    const last = c.statements[c.statements.length - 1];
-    if (last.kind === NodeKind.LabelStmt) return null;
+    const n = c.statements.length;
+    if (n === 0) return null;
+    const last = c.statements[n - 1];
+    // `line = A; if (c) {.. line = B;}`: the path that skips the `if` carries A.
+    if (last.kind === NodeKind.IfStmt && !(last as IfStmt).elseBranch && n >= 2) {
+      const before = c.statements[n - 2];
+      if (before.kind !== NodeKind.ExprStmt || mentions((last as IfStmt).condition, new Set([ctx.line]))) return null;
+      ctx.wide = true;
+      const t = threadHalt((last as IfStmt).thenBranch, ctx);
+      const skip = t ? haltLeaf(before, ctx) : null;
+      if (!t || !skip) return null;
+      const threaded = updateNode(last as IfStmt, { thenBranch: asStmt(t) } as Partial<IfStmt>);
+      return [updateNode(c, { statements: [...c.statements.slice(0, n - 2), threaded, ...skip] } as Partial<CompoundStmt>)];
+    }
     const r = threadHalt(last, ctx);
     if (!r) return null;
     return [updateNode(c, { statements: [...c.statements.slice(0, -1), ...r] } as Partial<CompoundStmt>)];
@@ -683,32 +747,151 @@ function threadHalt(s: Statement, ctx: JoinCtx): Statement[] | null {
     const t = threadHalt(i.thenBranch, ctx);
     const e = t ? threadHalt(i.elseBranch, ctx) : null;
     if (!t || !e) return null;
-    const asStmt = (l: Statement[]): Statement => (l.length === 1 ? l[0] : Stmt.compound(l));
     return [updateNode(i, { thenBranch: asStmt(t), elseBranch: asStmt(e) } as Partial<IfStmt>)];
   }
+  if (s.kind === NodeKind.SwitchStmt) return threadSwitch(s as SwitchStmt, ctx);
   return null;
 }
 
 /**
- * `if (..) {.. line = A;} else {.. line = B;}  Halt("", ip, line);  exit(-1);` at the end of a
- * block: the halt is copied into the branches, which is how the assertions were written.
+ * A `switch` whose every way out is `line = C; break;` or its end: each such way runs the
+ * halt itself. A `switch` without `default` is refused, since a value no case takes leaves
+ * with whatever the line held before it.
  */
-function joinHalt(stmts: readonly Statement[]): { stmts: Statement[]; leaves: number; line: string } | null {
-  const n = stmts.length;
-  if (n < 3 || !isExitStmt(stmts[n - 1])) return null;
-  const here = peel(stmts[n - 2]);
-  const call = haltCall(here.inner);
-  if (!call || here.labels.length > 0) return null;
-  const line = argIdent(call.arguments[2]);
-  if (line === null || argIdent(call.arguments[1]) === line) return null;
-  if (mentions(call.arguments[0], new Set([line])) || mentions(call.arguments[1], new Set([line]))) return null;
-  const prev = stmts[n - 3];
-  if (prev.kind !== NodeKind.IfStmt) return null;
+function threadSwitch(sw: SwitchStmt, ctx: JoinCtx): Statement[] | null {
+  if (sw.body.kind !== NodeKind.CompoundStmt) return null;
+  const list = (sw.body as CompoundStmt).statements;
+  if (list.length === 0 || mentions(sw.condition, new Set([ctx.line]))) return null;
+  if (!list.some(x => peelAll(x).wrappers.some(w => w.kind === NodeKind.DefaultStmt))) return null;
+  ctx.wide = true;
+  const out = breaksInList(list, ctx);
+  if (!out || out.length === 0) return null;
+  const last = out[out.length - 1];
+  const { inner } = peelAll(last);
+  if (!terminates(inner)) {
+    const r = threadHalt(last, ctx);
+    if (!r) return null;
+    out.splice(out.length - 1, 1, ...r);
+  }
+  return [updateNode(sw, { body: updateNode(sw.body as CompoundStmt, { statements: out } as Partial<CompoundStmt>) } as Partial<SwitchStmt>)];
+}
 
-  const ctx: JoinCtx = { line, halt: here.inner as ExprStmt, call, exit: stmts[n - 1], leaves: 0 };
-  const r = threadHalt(prev, ctx);
-  if (!r || ctx.leaves === 0 || ctx.leaves > MAX_JOIN_LEAVES) return null;
-  return { stmts: [...stmts.slice(0, n - 3), ...r], leaves: ctx.leaves, line };
+/** Each `line = C; break;` of the switch in `list` becomes the halt; any other `break` refuses. */
+function breaksInList(list: readonly Statement[], ctx: JoinCtx): Statement[] | null {
+  const out: Statement[] = [];
+  for (const s of list) {
+    const { wrappers, inner } = peelAll(s);
+    if (inner.kind === NodeKind.BreakStmt) {
+      // A case or label on the break itself enters without the definition.
+      if (wrappers.length > 0 || out.length === 0) return null;
+      const def = peelAll(out[out.length - 1]);
+      const r = haltLeaf(def.inner, ctx);
+      if (!r) return null;
+      out.splice(out.length - 1, 1, ...withWrappers(def.wrappers, r));
+      continue;
+    }
+    const r = breaksIn(inner, ctx);
+    if (!r) return null;
+    out.push(r === inner ? s : rewrap(wrappers, r));
+  }
+  return out;
+}
+
+function breaksIn(s: Statement, ctx: JoinCtx): Statement | null {
+  switch (s.kind) {
+    case NodeKind.BreakStmt:
+      return null;
+    case NodeKind.CompoundStmt: {
+      const r = breaksInList((s as CompoundStmt).statements, ctx);
+      return r ? updateNode(s as CompoundStmt, { statements: r } as Partial<CompoundStmt>) : null;
+    }
+    case NodeKind.IfStmt: {
+      const i = s as IfStmt;
+      const t = breaksIn(i.thenBranch, ctx);
+      const e = i.elseBranch ? breaksIn(i.elseBranch, ctx) : undefined;
+      if (!t || e === null) return null;
+      return t === i.thenBranch && e === i.elseBranch
+        ? s
+        : updateNode(i, { thenBranch: t, elseBranch: e } as Partial<IfStmt>);
+    }
+    case NodeKind.LabelStmt:
+    case NodeKind.CaseStmt:
+    case NodeKind.DefaultStmt: {
+      const { wrappers, inner } = peelAll(s);
+      const r = breaksIn(inner, ctx);
+      return r === null ? null : r === inner ? s : rewrap(wrappers, r);
+    }
+    default:
+      // Loops and nested switches own their breaks; nothing else contains one.
+      return s;
+  }
+}
+
+/** Every literal a PUSH in front of one of the function's halts pushes. */
+function pushedLines(facts: readonly HaltLineSite[] | undefined): Set<number> | null {
+  if (!facts || facts.length === 0) return null;
+  const out = new Set<number>();
+  for (const h of facts) for (const p of h.paths) if (p.line !== null) out.add(p.line);
+  return out;
+}
+
+/**
+ * `if (..) {.. line = A;} else {.. line = B;}  Halt("", ip, line);  exit(-1);`: the halt is
+ * copied into the branches, which is how the assertions were written. The statement in front
+ * of the halt may also be a `switch`, an `if` without `else` after a definition, or carry
+ * labels; then the line may have no other use in `body`, every leaf must be a literal, and
+ * with the instructions' facts every literal must be one a PUSH in front of a halt pushes.
+ * Statements after the terminator are unreachable from the halt and stay where they are.
+ */
+function joinHalt(
+  stmts: readonly Statement[],
+  body: CompoundStmt,
+  pushed: ReadonlySet<number> | null,
+): { stmts: Statement[]; leaves: number; line: string } | null {
+  for (let h = 1; h + 1 < stmts.length; h++) {
+    if (!isExitStmt(stmts[h + 1])) continue;
+    const here = peel(stmts[h]);
+    const call = haltCall(here.inner);
+    if (!call || here.labels.length > 0) continue;
+    const line = argIdent(call.arguments[2]);
+    if (line === null || argIdent(call.arguments[1]) === line) continue;
+    if (mentions(call.arguments[0], new Set([line])) || mentions(call.arguments[1], new Set([line]))) continue;
+    const prev = stmts[h - 1];
+    const prevInner = peelAll(prev).inner;
+    if (prevInner.kind !== NodeKind.IfStmt && prevInner.kind !== NodeKind.SwitchStmt) continue;
+
+    const ctx: JoinCtx = {
+      line, halt: here.inner as ExprStmt, call, exit: stmts[h + 1], leaves: 0, values: [],
+      wide: h + 2 !== stmts.length,
+    };
+    // `line = A; if (c) {..}` right in front of the halt: thread the pair as one block.
+    const pair = prevInner === prev && !(prev as IfStmt).elseBranch && prev.kind === NodeKind.IfStmt && h >= 2;
+    let from = h - 1;
+    let r: Statement[] | null;
+    if (pair) {
+      from = h - 2;
+      const t = threadHalt(Stmt.compound([stmts[h - 2], prev]), ctx);
+      r = t && t.length === 1 && t[0].kind === NodeKind.CompoundStmt ? [...(t[0] as CompoundStmt).statements] : null;
+    } else {
+      r = threadHalt(prev, ctx);
+    }
+    if (!r || ctx.leaves === 0 || ctx.leaves > MAX_JOIN_LEAVES) continue;
+    if (ctx.wide) {
+      if (ctx.values.some(v => v === null)) continue;
+      if (pushed && ctx.values.some(v => !pushed.has(v as number))) continue;
+      // Every mention of the line is a leaf, the halt or a bare declaration.
+      let decls = 0;
+      for (const n of traverseAST(body)) {
+        if (n.kind === NodeKind.VariableDecl && (n as VariableDecl).name.name === line) {
+          if ((n as VariableDecl).initializer) { decls = -1; break; }
+          decls++;
+        }
+      }
+      if (decls < 0 || countIdent([body], line) !== ctx.leaves + 1 + decls) continue;
+    }
+    return { stmts: [...stmts.slice(0, from), ...r, ...stmts.slice(h + 2)], leaves: ctx.leaves, line };
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1363,9 +1546,11 @@ function rewriteFunction(node: FunctionDecl, stats: HaltSiteFoldStats, options: 
   body = fold(body) as CompoundStmt;
 
   // 1b. a halt whose line was chosen per branch: write the halt into the branches
+  const pushed = pushedLines(options.haltLines);
+  const joinFrom = body;
   const join = createTransformer({
     visitCompoundStmt(block: CompoundStmt): ASTNode | undefined {
-      const r = joinHalt(block.statements);
+      const r = joinHalt(block.statements, joinFrom, pushed);
       if (!r) return undefined;
       stats.joined++;
       stats.joinLeaves += r.leaves;
