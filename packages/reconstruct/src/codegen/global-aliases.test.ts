@@ -147,6 +147,13 @@ describe('primary label extraction', () => {
     assert.ok(PRIMARY_LABEL_SCRIPT.includes('getPrimarySymbol'));
   });
 
+  it('the Java source spells its separators as escapes, not raw control characters', () => {
+    // A raw line end inside a Java char literal does not compile.
+    assert.ok(!/'[\t\n]'/.test(PRIMARY_LABEL_SCRIPT));
+    assert.ok(PRIMARY_LABEL_SCRIPT.includes(".append('\\t')"));
+    assert.ok(PRIMARY_LABEL_SCRIPT.includes(".append('\\n')"));
+  });
+
   it('parses rows and flags exactly one label per address', () => {
     const map = parsePrimaryLabels('007c9160\trInitialWindowRect\t\n0070811c\tRTTI_Type_Descriptor\tFog::Logging::Message\nnot a row\n\n');
     assert.deepStrictEqual(map.get('007c9160'), { name: 'rInitialWindowRect' });

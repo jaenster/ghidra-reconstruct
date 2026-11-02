@@ -244,8 +244,8 @@ while (it.hasNext()) {
   ghidra.program.model.symbol.Symbol p = st.getPrimarySymbol(a);
   if (p == null) continue;
   ghidra.program.model.symbol.Namespace ns = p.getParentNamespace();
-  sb.append(a).append('\t').append(p.getName()).append('\t')
-    .append(ns == null || ns.isGlobal() ? "" : ns.getName(true)).append('\n');
+  sb.append(a).append('\\t').append(p.getName()).append('\\t')
+    .append(ns == null || ns.isGlobal() ? "" : ns.getName(true)).append('\\n');
 }
 println(sb.toString());
 `;
