@@ -74,6 +74,24 @@ describe('nestCallPlugin', () => {
     assert.ok(out.includes('pGame = GetGamePointer(pUnit); r = HasQuestItem(pGame, pUnit, 0x20736b62);'), out);
   });
 
+  // Skills_SrvDoFunc_034_ChargeUpStackMelee, 005d3490: the decompiler breaks the line after
+  // `sDamage.wResultFlags =`, so the outer call's fact sits on the line below the statement's.
+  it('finds the outer call on a continuation line of its statement', () => {
+    const { out, sites } = run([
+      'int f(Unit *pUnit, Dmg *pDamage) {',
+      '  int nToHit;',
+      '  int nHitFlags;',
+      '  nHitFlags = 0;',
+      '[Rand@0xa8<0x95,3,1.1] nToHit = Rand(pUnit, 3);',
+      '  pDamage->wResultFlags =',
+      '[HitCheck@0xb6<0xa8,1,0.0.1.1] HitCheck(pUnit, pDamage, nToHit, nHitFlags);',
+      '  return 0;',
+      '}',
+    ]);
+    assert.deepStrictEqual(sites, [2]);
+    assert.ok(out.includes('pDamage->wResultFlags = HitCheck(pUnit, pDamage, Rand(pUnit, 3), 0);'), out);
+  });
+
   it('changes nothing without facts', () => {
     const { code } = fixture(quest(0));
     const out = flat(emit(nestCallPlugin.createTransformer({ ...TYPES })(parse(code)) as AnyNode));

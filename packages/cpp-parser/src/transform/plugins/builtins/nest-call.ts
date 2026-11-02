@@ -364,7 +364,7 @@ function factFor(s: Statement, name: string, ctx: Ctx): CallSiteFact | null {
     found = n.ghidraInfo.callSite;
   }
   if (found) return found;
-  for (let l = s.location.start.line; l <= s.location.end.line; l++) {
+  for (let l = s.location.start.line, end = lastLine(s); l <= end; l++) {
     if ((ctx.lineOwners.get(l) ?? 0) > 1) return null;
     for (const f of ctx.ev.lines.get(l) ?? []) {
       if (bareName(f.name) !== bare) continue;
@@ -373,6 +373,17 @@ function factFor(s: Statement, name: string, ctx: Ctx): CallSiteFact | null {
     }
   }
   return found;
+}
+
+/**
+ * The last line `s` prints on. A statement's own location can end on its first line when
+ * the expression continues on the next (`sDamage.wResultFlags =` above the call), so the
+ * furthest line any of its nodes reaches is taken.
+ */
+function lastLine(s: Statement): number {
+  let end = s.location.end.line;
+  for (const n of traverseAST(s)) if (placed(n) && n.location.end.line > end) end = n.location.end.line;
+  return end;
 }
 
 function argSlots(f: CallSiteFact, from: number, to: number): number {
