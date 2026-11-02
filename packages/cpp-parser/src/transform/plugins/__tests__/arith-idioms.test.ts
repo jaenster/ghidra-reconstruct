@@ -409,6 +409,81 @@ describe('arith-idioms statement pairs', () => {
   });
 });
 
+describe('arith-idioms signed reciprocal', () => {
+  const div = (a: string, b: string, decls = 'int x, int t') => runLines([`  ${a}`, `  ${b}`, '  g(t);'], decls);
+
+  // UIMENU_PleaseReadAfterCreatingAccount, 004325b0: `imul -0x66666667; sar edx, 2; shr; add`.
+  it('writes the high product, shift and sign back as the division', () => {
+    assert.strictEqual(div('int t = (int)((uint64_t)((int64_t)(int)u * -0x66666667) >> 0x20);', 't = (t >> 2) - (t >> 0x1f);', 'uint32_t u'),
+      'int t = (int)u / -10; g(t);');
+    assert.strictEqual(div('t = (int)((uint64_t)((int64_t)x * 0x66666667) >> 0x20);', 't = (t >> 2) - (t >> 0x1f);'), 't = x / 10; g(t);');
+    assert.strictEqual(div('t = (int)((uint64_t)((int64_t)x * 0x55555556) >> 0x20);', 't = t - (t >> 0x1f);'), 't = x / 3; g(t);');
+    assert.strictEqual(div('t = (int)((uint64_t)((int64_t)(x * k) * 0x51eb851f) >> 0x20);', 't = (t >> 5) - (t >> 0x1f);', 'int x, int k, int t'),
+      't = x * k / 100; g(t);');
+  });
+
+  it('takes the corrections: x added back, x subtracted, and an unsigned spelling of M', () => {
+    assert.strictEqual(div('t = (int)((uint64_t)((int64_t)x * -0x6db6db6d) >> 0x20) + x;', 't = (t >> 2) - (t >> 0x1f);'), 't = x / 7; g(t);');
+    assert.strictEqual(div('t = (int)((uint64_t)((int64_t)x * 0x92492493) >> 0x20);', 't = (t >> 2) - (t >> 0x1f);'), 't = x / 7; g(t);');
+    assert.strictEqual(div('t = (int)((uint64_t)((int64_t)(int)(uint32_t)c * 0x55555555) >> 0x20) - (uint32_t)c;', 't = (t >> 1) - (t >> 0x1f);', 'char c, int t'),
+      't = (int)(uint32_t)c / -3; g(t);');
+  });
+
+  it('refuses a constant, shift or correction that is not a reciprocal', () => {
+    for (const [a, b] of [
+      ['t = (int)((uint64_t)((int64_t)x * 0x66666666) >> 0x20);', 't = (t >> 2) - (t >> 0x1f);'],
+      // 2^33 / 6, but not the reciprocal a compiler takes for 6.
+      ['t = (int)((uint64_t)((int64_t)x * 0x55555556) >> 0x20);', 't = (t >> 1) - (t >> 0x1f);'],
+      ['t = (int)((uint64_t)((int64_t)x * 0x66666667) >> 0x20) + x;', 't = (t >> 2) - (t >> 0x1f);'],
+      ['t = (int)((uint64_t)((int64_t)x * 0x24924925) >> 0x20);', 't = (t >> 2) - (t >> 0x1f);'],
+      ['t = (int)((uint64_t)((int64_t)x * 0x66666667) >> 0x20);', 't = t >> 2;'],
+      ['t = (int)((uint64_t)((int64_t)x * 0x66666667) >> 0x20);', 't = (t >> 2) - (x >> 0x1f);'],
+      ['t = (int)((uint64_t)((int64_t)x * 0x66666667) >> 0x20);', 'g(t);'],
+    ]) {
+      assert.ok(div(a, b).includes('>> 0x20'), `${a} ${b}`);
+    }
+    // An unsigned dividend, or an unsigned t, is another operation.
+    assert.ok(div('t = (int)((uint64_t)((int64_t)u * 0x66666667) >> 0x20);', 't = (t >> 2) - (t >> 0x1f);', 'uint32_t u, int t').includes('>> 0x20'));
+    assert.ok(div('t = (int)((uint64_t)((int64_t)x * 0x66666667) >> 0x20);', 't = (t >> 2) - (t >> 0x1f);', 'int x, uint32_t t').includes('>> 0x20'));
+  });
+
+  it('the division has the value of the reciprocal it replaces', { skip: !hasNativeGpp() }, () => {
+    const cases: Array<[string, string]> = [
+      ['t = (int)((uint64_t)((int64_t)x * -0x66666667) >> 0x20);', 't = (t >> 2) - (t >> 0x1f);'],
+      ['t = (int)((uint64_t)((int64_t)x * 0x55555556) >> 0x20);', 't = t - (t >> 0x1f);'],
+      ['t = (int)((uint64_t)((int64_t)x * 0x55555555) >> 0x20) - x;', 't = (t >> 1) - (t >> 0x1f);'],
+      ['t = (int)((uint64_t)((int64_t)x * 0x92492493) >> 0x20);', 't = (t >> 2) - (t >> 0x1f);'],
+      ['t = (int)((uint64_t)((int64_t)x * -0x51eb851f) >> 0x20);', 't = (t >> 5) - (t >> 0x1f);'],
+      ['t = (int)((uint64_t)((int64_t)x * 0x77777777) >> 0x20) - x;', 't = (t >> 3) - (t >> 0x1f);'],
+      ['t = (int)((uint64_t)((int64_t)x * 0x40000001) >> 0x20);', 't = (t >> 29) - (t >> 0x1f);'],
+    ];
+    let src = '#include <stdint.h>\n#include <stdio.h>\nstatic int failures = 0;\n';
+    let main = 'int main(void) {\n';
+    cases.forEach(([a, b], i) => {
+      const folded = div(a, b).replace(' g(t);', '');
+      assert.ok(folded.includes(' / '), folded);
+      src += `static int a${i}(int x) { int t; ${a} ${b} return t; }\n`;
+      src += `static int b${i}(int x) { int t; ${folded} return t; }\n`;
+      // Every 32-bit value near a multiple of the stride, and both ends of the range.
+      main += `  for (int64_t v = -0x80000000LL; v <= 0x7fffffffLL; v += (v > -0x80000000LL + 300 && v < 0x7fffffffLL - 300 && (v < -300 || v > 300)) ? 4093 : 1)`
+        + ` { int x = (int)v; if (a${i}(x) != b${i}(x)) { printf("case ${i} value %d\\n", x); failures++; break; } }\n`;
+    });
+    main += '  return failures ? 1 : 0;\n}\n';
+    const dir = mkdtempSync(join(tmpdir(), 'arith-sdiv-'));
+    writeFileSync(join(dir, 'check.c'), src + main);
+    try {
+      const exe = exePath(join(dir, 'check'));
+      const cc = compileTo(join(dir, 'check.c'), exe, ['-O1', '-w', '-fwrapv']);
+      assert.strictEqual(cc.status, 0, String(cc.error ?? cc.stderr));
+      const res = runExe(exe);
+      assert.strictEqual(res.stdout, '');
+      assert.strictEqual(res.status, 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('arith-idioms values', () => {
   it('every fold has the value of what it replaces', { skip: !hasNativeGpp() }, () => {
     const cases: Array<{ decls: string; body: string; values: string }> = [

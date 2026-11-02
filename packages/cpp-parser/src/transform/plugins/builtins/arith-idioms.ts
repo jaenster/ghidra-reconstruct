@@ -26,6 +26,10 @@
  *                32-bit integer cast or none: in 32-bit wrapping arithmetic the
  *                sum is x - q*N. Kept only where the result type is that of `x % N`.
  *   divides      `x == (C)(x / N) * N` is `x % N == 0`, and `!=` likewise.
+ *   signed div   `t = (int)((uint64_t)((int64_t)x * M) >> 0x20);` (or `... ± x`) followed by
+ *                `t = (t >> S) - (t >> 0x1f);`, x a signed int, is `t = x / d` where M, S
+ *                and the correction are what the signed reciprocal for d is (see
+ *                signedReciprocal): the high product, shifted and rounded toward zero.
  *   pow2 div     `(int)(x + ((int)x >> 0x1f & 2^n-1)) >> n` is `x / 2^n` (`(int)x`
  *                for an unsigned x): a negative x is biased by 2^n-1 so the
  *                arithmetic shift rounds toward zero, as `/` does. Without the
@@ -73,12 +77,12 @@ export interface ArithIdiomsOptions extends PluginOptions {
 }
 
 export type ArithIdiom =
-  | 'low-dword' | 'narrow-div' | 'magic-div' | 'cast-chain' | 'modulo' | 'divides' | 'pow2-div' | 'long-helper'
+  | 'low-dword' | 'narrow-div' | 'magic-div' | 'cast-chain' | 'modulo' | 'divides' | 'pow2-div' | 'long-helper' | 'signed-div'
   | 'setcc-select' | 'pow2-rem' | 'u2f';
 
 const stats: Record<ArithIdiom, number> = {
   'low-dword': 0, 'narrow-div': 0, 'magic-div': 0, 'cast-chain': 0, 'modulo': 0, 'divides': 0,
-  'pow2-div': 0, 'long-helper': 0, 'setcc-select': 0, 'pow2-rem': 0, 'u2f': 0,
+  'pow2-div': 0, 'long-helper': 0, 'signed-div': 0, 'setcc-select': 0, 'pow2-rem': 0, 'u2f': 0,
 };
 
 /** How many times each idiom has been folded since the last reset. */
@@ -212,6 +216,43 @@ export function sameExpr(a: Expression, b: Expression): boolean {
 
 const castNode = (spelling: string, e: Expression): Expression =>
   Expr.cast(spelling === 'int' ? Type.int() : Type.typedef(spelling), e);
+
+// ============================================
+// SIGNED RECIPROCALS
+// ============================================
+
+/**
+ * The multiplier, shift and correction a compiler divides a signed int by d with
+ * (Hacker's Delight 10-1, `magic`; MSVC computes the same): q = mulhs(M, n), plus n
+ * when `add` is 1, minus n when -1, then `q >> s`, then the sign bit added. For
+ * 2 <= |d| < 2^31 that is trunc(n / d) for every 32-bit n. Null for |d| < 2 or a
+ * power of two, which compile to shifts instead.
+ */
+export function signedReciprocal(d: bigint): { m: bigint; s: number; add: -1 | 0 | 1 } | null {
+  const ad = d < 0n ? -d : d;
+  if (ad < 2n || ad >= 1n << 31n || (ad & (ad - 1n)) === 0n) return null;
+  const two31 = 1n << 31n;
+  const mask = (1n << 32n) - 1n;
+  const t = two31 + (d < 0n ? 1n : 0n);
+  const anc = t - 1n - (t % ad);
+  let p = 31;
+  let q1 = two31 / anc, r1 = two31 - q1 * anc;
+  let q2 = two31 / ad, r2 = two31 - q2 * ad;
+  let delta: bigint;
+  do {
+    p++;
+    q1 = (2n * q1) & mask; r1 = (2n * r1) & mask;
+    if (r1 >= anc) { q1 = (q1 + 1n) & mask; r1 = (r1 - anc) & mask; }
+    q2 = (2n * q2) & mask; r2 = (2n * r2) & mask;
+    if (r2 >= ad) { q2 = (q2 + 1n) & mask; r2 = (r2 - ad) & mask; }
+    delta = ad - r2;
+  } while (q1 < delta || (q1 === delta && r1 === 0n));
+  let m = (q2 + 1n) & mask;
+  if (m >= two31) m -= 1n << 32n;
+  if (d < 0n) m = m === -two31 ? m : -m;
+  const add = d > 0n && m < 0n ? 1 : d < 0n && m > 0n ? -1 : 0;
+  return { m, s: p - 32, add };
+}
 
 // ============================================
 // THE FOLDS
@@ -922,9 +963,100 @@ function createFolder(shapeOf: ExprShape, o: ArithIdiomsOptions, resolve: Typede
     return asg.with(updateNode(conv as CStyleCastExpr, { expression: unsignedU } as Partial<CStyleCastExpr>));
   };
 
+  /**
+   * x, the multiplier and the correction of `(int)((uint64_t)((int64_t)x * M) >> 0x20)`,
+   * `... + x` or `... - x`, with x a signed int. The multiplier is reduced to a signed
+   * dword: a literal of 2^31 or more adds x once more to the high half.
+   */
+  const highProductOf = (e: Expression): { x: Expression; m: bigint; add: bigint } | null => {
+    let u = unwrapParens(e);
+    let add = 0n;
+    let other: Expression | null = null;
+    if (u.kind === NodeKind.BinaryExpr && ((u as BinaryExpr).operator === '+' || (u as BinaryExpr).operator === '-')) {
+      add = (u as BinaryExpr).operator === '+' ? 1n : -1n;
+      other = (u as BinaryExpr).right as Expression;
+      u = unwrapParens((u as BinaryExpr).left as Expression);
+    }
+    const hi = castOf(u);
+    if (!hi || !sameType(hi.type, S32)) return null;
+    const sh = unwrapParens(hi.inner);
+    if (sh.kind !== NodeKind.BinaryExpr || (sh as BinaryExpr).operator !== '>>'
+        || intLiteral((sh as BinaryExpr).right as Expression) !== 32n) return null;
+    const wide = castOf((sh as BinaryExpr).left as Expression);
+    if (!wide || wide.type.bits !== 64) return null;
+    const mul = unwrapParens(wide.inner);
+    if (mul.kind !== NodeKind.BinaryExpr || (mul as BinaryExpr).operator !== '*') return null;
+    const sx = castOf((mul as BinaryExpr).left as Expression);
+    const mv = negatedLiteral((mul as BinaryExpr).right as Expression);
+    if (!sx || !sameType(sx.type, S64) || mv === null) return null;
+    // The literal's own type must widen to the product without changing its value.
+    const mt = typeOf((mul as BinaryExpr).right as Expression);
+    if (!mt || mt.bits !== 32 || mv < -(1n << 31n) || mv >= 1n << 32n) return null;
+    const x = sx.inner;
+    if (!sameType(typeOf(x), S32) || !isPure(x)) return null;
+    // x again, through casts that keep its low 32 bits: the sum wraps the same way.
+    if (other && (!sameExpr(strip32(other), strip32(x)) || (typeOf(other)?.bits ?? 0) < 32)) return null;
+    let m = mv;
+    if (m >= 1n << 31n) { m -= 1n << 32n; add += 1n; }
+    return { x, m, add };
+  };
+
+  /** S of `(t >> S) - (t >> 0x1f)`, or 0 for `t - (t >> 0x1f)`. */
+  const roundedShiftOf = (e: Expression, name: string): number | null => {
+    const u = unwrapParens(e);
+    if (u.kind !== NodeKind.BinaryExpr || (u as BinaryExpr).operator !== '-') return null;
+    const sign = unwrapParens((u as BinaryExpr).right as Expression);
+    if (sign.kind !== NodeKind.BinaryExpr || (sign as BinaryExpr).operator !== '>>'
+        || intLiteral((sign as BinaryExpr).right as Expression) !== 31n
+        || identName((sign as BinaryExpr).left as Expression) !== name) return null;
+    const l = unwrapParens((u as BinaryExpr).left as Expression);
+    if (identName(l) === name) return 0;
+    if (l.kind !== NodeKind.BinaryExpr || (l as BinaryExpr).operator !== '>>'
+        || identName((l as BinaryExpr).left as Expression) !== name) return null;
+    const s = intLiteral((l as BinaryExpr).right as Expression);
+    return s !== null && s >= 1n && s <= 31n ? Number(s) : null;
+  };
+
+  /**
+   * `t = (int)((uint64_t)((int64_t)x * M) >> 0x20) [± x]; t = (t >> S) - (t >> 0x1f);`,
+   * t and x signed ints, is `t = x / d`: the high product, its correction and the
+   * shift are exactly the signed reciprocal of d, and subtracting the sign
+   * (`t >> 0x1f` is -1 or 0) rounds the quotient toward zero as `/` does. The
+   * candidates for d are the ones the multiplier approximates 2^(32+S) / d with;
+   * each is checked by computing its reciprocal, so an approximate constant never
+   * folds. t's value between the two statements is read nowhere else.
+   */
+  const foldSignedDiv = (a: Statement, b: Statement): Statement | null => {
+    if (b.kind !== NodeKind.ExprStmt) return null;
+    const asg = assignmentOf(a);
+    if (!asg) return null;
+    const tt = typeOf({ kind: NodeKind.Identifier, name: asg.name } as unknown as Expression);
+    if (!sameType(tt, S32)) return null;
+    const hp = highProductOf(asg.value);
+    if (!hp) return null;
+    const be = unwrapParens((b as ExprStmt).expression);
+    if (be.kind !== NodeKind.AssignExpr || (be as AssignExpr).operator !== '=' || identName((be as AssignExpr).left as Expression) !== asg.name) return null;
+    const s = roundedShiftOf((be as AssignExpr).right as Expression, asg.name);
+    if (s === null || hp.add < -1n || hp.add > 1n) return null;
+    // M + add * 2^32 ~ 2^(32+S) / d.
+    const eff = hp.m + hp.add * (1n << 32n);
+    if (eff === 0n) return null;
+    const approx = (1n << BigInt(32 + s)) / eff;
+    for (const d of [approx - 1n, approx, approx + 1n]) {
+      const r = signedReciprocal(d);
+      if (!r || r.m !== hp.m || r.s !== s || BigInt(r.add) !== hp.add) continue;
+      stats['signed-div']++;
+      const xu = unwrapParens(hp.x);
+      const dividend = xu.kind === NodeKind.BinaryExpr || xu.kind === NodeKind.ConditionalExpr ? Expr.paren(hp.x) : hp.x;
+      const divisor = d < 0n ? Expr.unary('-', Expr.intLiteral(-d)) : Expr.intLiteral(d);
+      return asg.with(Expr.binary(dividend, '/', divisor));
+    }
+    return null;
+  };
+
   /** A statement and the one after it folded into one, or null. */
   const foldPair = (a: Statement, b: Statement, layout: BranchLayoutEvidence | null | undefined): Statement | null =>
-    foldPow2Rem(a, b, layout) ?? foldU2F(a, b, layout);
+    foldPow2Rem(a, b, layout) ?? foldU2F(a, b, layout) ?? foldSignedDiv(a, b);
 
   return { typeOf, fold, foldTruth, foldPair };
 }
