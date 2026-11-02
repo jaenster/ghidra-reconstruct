@@ -49,3 +49,55 @@ test('a renamed type replaces its old record and re-decompiles the bodies that s
   assert.deepStrictEqual(m.primary.dataTypes.map(t => `${t.category}/${t.name}`), ['/D2Game/D2TradeRecordStrc']);
   assert.deepStrictEqual(decompiled, [USER]);
 });
+
+test('a rename reaches the records that refer to it, not the ones that only share a prefix', async () => {
+  const { renameReferrers, baseTypeName } = await import('../model.js');
+  assert.equal(baseTypeName('struct D2UnknownStructure0x18 *[3]'), 'D2UnknownStructure0x18');
+  assert.equal(baseTypeName('const D2UnknownStructure0x18 * const'), 'D2UnknownStructure0x18');
+  const types = [
+    { name: 'D2UnknownStructure0x18', category: '/a', kind: 'STRUCTURE', fields: [] },
+    { name: 'D2UnknownStructure0x18 *', category: '/a', kind: 'POINTER' },
+    // pointer to the renamed struct inside another struct
+    { name: 'D2UnitDataPlayerStrc', category: '/', kind: 'STRUCTURE', fields: [{ name: 'pTrade', dataType: 'D2UnknownStructure0x18 *' }] },
+    // typedef chain: the first link names the renamed type, the second only the first link
+    { name: 'TradeRecordPtr', category: '/', kind: 'TYPEDEF', underlyingType: 'D2UnknownStructure0x18 *' },
+    { name: 'TradeRecordPtrAlias', category: '/', kind: 'TYPEDEF', underlyingType: 'TradeRecordPtr' },
+    // function definition parameter
+    { name: 'pfnTradeCallback', category: '/', kind: 'FUNCTION_DEFINITION', returnType: 'void', parameters: [{ name: 'pRecord', dataType: 'D2UnknownStructure0x18 *' }] },
+    // a longer name with the same prefix is a different type
+    { name: 'D2Other', category: '/', kind: 'STRUCTURE', fields: [{ name: 'p', dataType: 'D2UnknownStructure0x18Ex *' }] },
+  ];
+  const r = renameReferrers(types as never, new Set(['D2UnknownStructure0x18']), new Map([['D2UnknownStructure0x18', 'D2TradeRecordStrc']]));
+  assert.deepStrictEqual(r.typeSlots.map(i => types[i].name), ['D2UnknownStructure0x18 *', 'D2UnitDataPlayerStrc', 'TradeRecordPtr', 'pfnTradeCallback']);
+  assert.equal(r.derivedNames.get(1), 'D2TradeRecordStrc *');
+  assert.ok(r.names.has('D2UnknownStructure0x18 *'));
+});
+
+test('a struct that points at a renamed type is read again, and so is a global of it', async () => {
+  const m = model();
+  m.primary.dataTypes.push({ name: 'D2UnitDataPlayerStrc', category: '/', kind: 'STRUCTURE', size: 4, fields: [{ name: 'pTradeCopyInventory', dataType: 'D2UnknownStructure0x18 *', offset: 0, size: 4 }] } as never);
+  m.primary.globals.push({ name: 'gpTradeRecord', address: '00700000', dataType: 'D2UnknownStructure0x18 *' } as never);
+  const asked: string[] = [];
+  const client = {
+    async sendCommand(cmd: string, params: Record<string, unknown>) {
+      if (cmd === 'get_data_type') {
+        asked.push(String(params.name));
+        if (params.name === 'D2UnitDataPlayerStrc') return { name: 'D2UnitDataPlayerStrc', category: '/', type: 'Structure', size: 4, fields: [{ name: 'pTradeCopyInventory', dataType: 'D2TradeRecordStrc *', offset: 0, length: 4 }] };
+        return { name: params.name, category: params.category, type: 'Structure', size: 24, fields: [] };
+      }
+      if (cmd === 'list_data_symbols') { asked.push(`global:${params.filter}`); return { symbols: [] }; }
+      if (cmd === 'decompile') return { pseudocode: 'void PLAYERTRADE_Accept(D2TradeRecordStrc *pRecord) {}' };
+      if (cmd === 'execute_script') return { success: true, output: '' };
+      return {};
+    },
+  } as never;
+  const ev = {
+    seq: 1, kind: 'datatype.renamed', target: 'datatype',
+    key: '/D2Game/D2TradeRecordStrc', oldName: '/D2Game/D2UnknownStructure0x18', newName: '/D2Game/D2TradeRecordStrc',
+  } as ChangeEvent;
+  await applyEvents(m, buildIndices(m), [ev], client);
+  assert.ok(asked.includes('D2UnitDataPlayerStrc'));
+  assert.ok(asked.includes('global:gpTradeRecord'));
+  const player = m.primary.dataTypes.find(t => t.name === 'D2UnitDataPlayerStrc') as unknown as { fields: { dataType: string }[] };
+  assert.equal(player.fields[0].dataType, 'D2TradeRecordStrc *');
+});
