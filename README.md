@@ -8,7 +8,7 @@ Ghidra's decompiler produces correct-but-ugly pseudo-C: `CONCAT44`, `undefined4`
 reciprocal-multiply division, rotated loops, raw `*(int *)(p + 0x4c)` field access,
 `iVar7`/`uVar3` names, vtable calls as indirect jumps, goto-heavy control flow. This is a
 TypeScript pipeline that pulls that output over the [ghidra-mcp](https://github.com/)
-daemon, parses it into a real C++ AST, runs a suite of ~37 AST transform passes that undo
+daemon, parses it into a real C++ AST, runs about 140 ordered AST transform passes that undo
 those artifacts, optionally merges a second binary (e.g. a Mac build) to attach
 cross-platform address anchors, then emits an organized source tree (per-namespace files,
 header/impl split, a CMake build, and `.cpp.map` source-maps back to the original binary
@@ -34,7 +34,7 @@ flowchart LR
     E[2. Extract<br/>functions · types · globals · strings] --> M
     M[3. Merge additional sources<br/>cross-platform anchors] --> A
     A[4. Analyze<br/>classes · scoping · static promotion] --> T
-    T[5. Transform<br/>~37 AST passes + rename] --> CG
+    T[5. Transform<br/>~140 AST passes + rename] --> CG
     CG[6. Codegen + Write<br/>namespaces · header/impl · CMake · .cpp.map]
   end
 
@@ -52,7 +52,10 @@ The `reconstruct()` entry point (`packages/reconstruct/src/index.ts`) runs these
 2. **Extract** (`extract/`, `connection.ts`) — list functions, batch-decompile them, pull
    data types, globals, strings, and namespaces. A CRT/MSVC library detector flags
    compiler-runtime functions so they are skipped rather than reconstructed. Results are
-   cached (`cache.ts`).
+   cached (`cache.ts`). Per-function machine facts (the CMP/Jcc behind each comparison,
+   branch and call order, jump tables, zero stores, masks) are read from one decompile per
+   function and cached by Ghidra's modification stamps (`extract/function-facts.ts`,
+   `extract/fact-cache.ts`).
 3. **Merge additional sources** — for each configured secondary binary, extract its named
    functions/globals/types and fold them into the primary extraction. Functions present in
    both are annotated with a `crossPlatformAddress` (no body duplication); functions unique
@@ -109,7 +112,7 @@ and `full` (everything).
 | `boilerplate-cleanup` | strip security cookies, simplify `ERROR` asserts |
 | `vtable-calls` | indirect vtable dispatch → `this->vmethod_N(...)` |
 | `switch-reconstruct` | if-else-if chain → `switch` |
-| `magic-division` | reciprocal-multiply → real `/` and `%` |
+| `arith-idioms` | reciprocal-multiply, signed-division and 64-bit helper idioms → `/`, `%` and the operator |
 | `loop-canonicalize` | normalize loop increment/decrement forms |
 | `array-access` | pointer-index patterns → `arr[i]` |
 | `struct-field` | `*(int *)(p + 0x4c)` → `p->field_4c` |
@@ -120,6 +123,24 @@ and `full` (everything).
 | `prng-temp-collapse` | collapse inlined PRNG temp vars |
 | `void-return-cleanup` | strip trailing `return;` in void fns |
 | `memory-patterns` | late memory-shape pattern detection |
+
+The table lists the original cleanup passes. Most passes added since are **matching
+passes**: each reads a fact from the original instructions and writes the source form the
+original compiler (MSVC 8 for the Diablo II binary) turns back into those instructions. They
+never change a value. Among them:
+
+| Pass | What it does |
+|-|-|
+| `compare-form` | a comparison in the form its CMP/TEST and Jcc show |
+| `branch-layout` | if/else arms ordered and nested as the original's block addresses and jump edges show |
+| `rotated-for-loop` | a rotated loop back to `for`; gated to keep the rotated form for a two-exit loop or a bound computed once |
+| `arith-idioms` | division and remainder idioms back to the operator, including the signed reciprocal pair → `x / d` |
+| `range-test-form` | `(unsigned)(x - lo) <= k` guarding a branch → `lo <= x && x <= hi` |
+| `aggregate-zero-init` | zero stores that write a whole local → `T s = {0};`, or a memset where a narrow first member is zeroed and overwritten |
+| `arm-constant-call` | a call taking a constant chosen per if/else arm goes back into each arm, using the arm's folded lines as evidence |
+| `nest-call`, `store-order` | temporaries nested back into the call that evaluated them; independent stores in the original's order |
+| `inlined-call-restore`, `guarded-call-restore` | a call where the decompiler printed an inlined helper's body |
+| `switch-chain`, `jump-table-case`, `case-layout` | switches from subtraction chains and jump tables, cases in body order |
 
 ### Illustrative before → after
 
@@ -141,7 +162,7 @@ condition ? function_address : nullptr
 0x14 < n ? 0x14 : -1
 ```
 
-**`magic-division`** — multiply-shift back to division:
+**`arith-idioms`** — multiply-shift back to division:
 
 ```c
 (x * 0xAAAAAAAB) >> 33    →  x / 3
@@ -272,6 +293,21 @@ this->member            →  member                // strip redundant this->
 
 ---
 
+## The VC8 byte match as an oracle
+
+A matching pass is accepted on measurement, not on how its output reads. The generated
+function is compiled with the original compiler (MSVC 8) in the context of its translation
+unit and compared instruction by instruction with the original binary. Each function gets a
+status: `MATCH` (identical bytes), `INSN_MATCH` (same instructions, different operands),
+`INSN_COUNT_MATCH`, or `OUR±n` (instruction-count difference), plus a similarity score.
+
+A change to the generator is measured on exactly the functions whose generated text it
+changes: generate before and after from the same snapshot (`--codegen-only`), compare the
+two per function, and count gains and losses. Losses are examined before a pass lands. The
+counter itself lives with the target tree it measures, not in this repo.
+
+---
+
 ## Cross-platform anchoring
 
 A second binary (e.g. a Mac build of the same program) can be merged to attach
@@ -324,7 +360,9 @@ aborts (fail-fast) rather than emitting output missing its `mac:` anchors.
 ## Usage
 
 ```bash
-npm install
+pnpm install
+pnpm build      # tsc -b
+pnpm test
 ```
 
 The generic runner is `run.ts` (re-execs itself with `--stack-size=8192` for deeply nested
@@ -351,7 +389,9 @@ npx tsx run.ts
 
 `run.ts` reads `project/project.json`, writes the source tree to `output/`, logs parse
 errors to `project/parser-errors.log`, and enables CMake generation, source maps, and
-static-global promotion.
+static-global promotion. Each run stores a snapshot of what it read from the daemon;
+`--codegen-only` replays a snapshot without touching the daemon (`--snapshot-dir=PATH`),
+and `--gen-workers=N` shards generation over N worker threads.
 
 ---
 
@@ -437,6 +477,7 @@ cd output && mkdir build && cd build && cmake .. && cmake --build .
 - `packages/cpp-parser` — the C++ lexer/parser/AST/emitter and the transform plugins
 - `packages/reconstruct` — extraction, daemon connection, analysis, codegen, module graph
 - `packages/shared` — shared types/utilities
+- `packages/live` — a resident daemon that regenerates only the units a Ghidra edit dirtied
 - `run.ts` — generic env-driven runner
 
 ## Status / caveats
@@ -446,3 +487,8 @@ field layouts must be present in the source Ghidra DB for `struct-field` to full
 `bitfield-access` needs a bitfield catalog; custom/register calling conventions may need
 manual confirmation; CRT/RTTI internals are excluded and provided by the real runtime.
 `method-call-rewrite` is opt-in.
+
+## Contributors
+
+- [jaenster](https://github.com/jaenster) — author and maintainer
+- [Niehztog](https://github.com/Niehztog) — rotated-loop initialisation (`rotated-for-loop`)
