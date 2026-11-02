@@ -1038,3 +1038,56 @@ describe('defect lint: zero-initializer-drops-value', () => {
     } }), []);
   });
 });
+
+describe('defect lint: double-bit-pattern', () => {
+  it('reports a 64-bit integer literal cast to double or float, in a function or an initializer', () => {
+    const fs = lint('double-bit-pattern', { files: {
+      'D2Common/Math.cpp':
+        'double MATH_Scale(int n) {\n    return n * (double)0x3ff0000000000000;\n}\n' +
+        'float gfHalf = (float)0x3FE0000000000000ULL;\n',
+    } });
+    assert.deepStrictEqual(subjects(fs), ['0x3FE0000000000000', '0x3ff0000000000000']);
+  });
+
+  it('ignores a 32-bit literal, a decimal literal, a floating literal and an integer cast', () => {
+    assert.deepStrictEqual(lint('double-bit-pattern', { files: {
+      'D2Common/Math.cpp':
+        'double f(int n) {\n    double a = (double)0x7fffffff;\n    double b = (double)4607182418800017408;\n' +
+        '    double c = (double)1.5;\n    long long d = (long long)0x3ff0000000000000;\n    return a + b + c + d;\n}\n',
+    } }), []);
+  });
+});
+
+describe('defect lint: field-set-then-memset', () => {
+  it('reports a field store a later memset of the same object overwrites', () => {
+    const fs = lint('field-set-then-memset', { files: {
+      'D2Game/Unit.cpp':
+        'void UNIT_Init(D2UnitStrc* pUnit) {\n' +
+        '    D2PacketStrc sPacket;\n' +
+        '    sPacket.nType = 3;\n' +
+        '    g(1);\n' +
+        '    memset(&sPacket, 0, sizeof(sPacket));\n' +
+        '    pUnit->nMode = 1;\n' +
+        '    memset(pUnit, 0, 0x30);\n' +
+        '    send(&sPacket);\n' +
+        '}\n',
+    } });
+    assert.deepStrictEqual(subjects(fs), ['pUnit', 'sPacket']);
+  });
+
+  it('ignores a store read before the memset, a memset in another block, a plain assignment and a store after', () => {
+    assert.deepStrictEqual(lint('field-set-then-memset', { files: {
+      'D2Game/Unit.cpp':
+        'void UNIT_Init(D2UnitStrc* pUnit, int b) {\n' +
+        '    D2PacketStrc sPacket;\n' +
+        '    sPacket.nType = 3;\n' +
+        '    send(&sPacket);\n' +
+        '    memset(&sPacket, 0, sizeof(sPacket));\n' +
+        '    pUnit->nMode = 1;\n' +
+        '    if (b) {\n        memset(pUnit, 0, 0x30);\n    }\n' +
+        '    int n;\n    n = 2;\n    memset(&n, 0, 4);\n' +
+        '    memset(&sPacket, 0, sizeof(sPacket));\n    sPacket.nType = 4;\n    send(&sPacket);\n' +
+        '}\n',
+    } }), []);
+  });
+});

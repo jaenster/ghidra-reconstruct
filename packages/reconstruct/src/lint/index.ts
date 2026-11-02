@@ -24,6 +24,7 @@ import { undersizedGlobalArgument } from './checks/arguments.js';
 import { plateTemplateComment, PLATE_TEMPLATE_CHECK_ID } from './checks/comments.js';
 import { includePathCase, INCLUDE_PATH_CASE_CHECK_ID } from './checks/include-case.js';
 import { aliasReach } from './checks/alias-reach.js';
+import { doubleBitPattern, fieldSetThenMemset } from './checks/stores.js';
 
 export type { Check, Finding } from './context.js';
 export { LintContext } from './context.js';
@@ -38,6 +39,7 @@ export { plateTemplateComment, PLATE_TEMPLATE_CHECK_ID, PLATE_TEMPLATE_MARKERS }
 export { includePathCase, INCLUDE_PATH_CASE_CHECK_ID } from './checks/include-case.js';
 export { aliasReach, ALIAS_REACH_CHECK_ID, spelledSize } from './checks/alias-reach.js';
 export { zeroInitializerDropsValue, nonZeroCommentValue } from './checks/initializers.js';
+export { doubleBitPattern, fieldSetThenMemset } from './checks/stores.js';
 
 /** In the order lint.py reported them. */
 export const ALL_CHECKS: Check[] = [
@@ -60,6 +62,8 @@ export const ALL_CHECKS: Check[] = [
   untypedVirtualCall,
   rawAddressInitializer,
   zeroInitializerDropsValue,
+  doubleBitPattern,
+  fieldSetThenMemset,
   rawAddressArgument,
   rawAddressArithmetic,
   ghidraArtifact,
