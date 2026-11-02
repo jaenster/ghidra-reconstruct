@@ -365,6 +365,13 @@ export class LiveLoop {
         onTruncated: info => this.onTruncated(info),
         log: m => this.log(m),
       });
+      // An operator holding the daemon at a version (a proof against one regen, or
+      // a rebuild before a known check-in): at or past it, nothing new is followed.
+      const hold = Number(process.env.D2_LIVE_HOLD_AT_VERSION ?? '');
+      if (Number.isInteger(hold) && hold > 0 && state.seq >= hold * SEQ_PER_VERSION) {
+        this.log(`holding at Game.exe v${Math.floor(state.seq / SEQ_PER_VERSION)} (D2_LIVE_HOLD_AT_VERSION=${hold}): not following newer versions`);
+        return;
+      }
       this.stream.start();
       return;
     }

@@ -201,6 +201,84 @@ function tokenize(body: string | undefined): Set<string> {
 }
 
 /** The member names a change to this type would respell in a body. */
+/**
+ * The type a spelling refers to: `struct X *[3]` -> `X`. Qualifiers, pointer stars
+ * and array dimensions are stripped; the name itself is kept whole.
+ */
+export function baseTypeName(spelling: string): string {
+  let t = spelling.trim();
+  for (;;) {
+    const next = t
+      .replace(/^(?:const|volatile|struct|union|enum|class)\s+/, '')
+      .replace(/\s*(?:\*|\[\d*\]|\bconst\b|\bvolatile\b)\s*$/, '')
+      .trim();
+    if (next === t) return t;
+    t = next;
+  }
+}
+
+/** The type names one record refers to: members, typedef target, function definition. */
+function referencedTypeNames(dt: ExtractedDataType): string[] {
+  const r = dt as ExtractedDataType & {
+    fields?: { dataType?: string }[];
+    underlyingType?: string;
+    returnType?: string;
+    parameters?: { dataType?: string }[];
+  };
+  const out: string[] = [];
+  for (const f of r.fields ?? []) if (f.dataType) out.push(baseTypeName(f.dataType));
+  if (r.underlyingType) out.push(baseTypeName(r.underlyingType));
+  if (r.returnType) out.push(baseTypeName(r.returnType));
+  for (const p of r.parameters ?? []) if (p.dataType) out.push(baseTypeName(p.dataType));
+  return out;
+}
+
+/**
+ * Which type records must be read again after types were renamed, by reference rather
+ * than by text: a record refers to a name when one of its members, its typedef target,
+ * or its function definition's return or parameter types resolve to it.
+ *
+ * Transitive over the records whose own NAME derives from a renamed one: the pointer
+ * and array records Ghidra keeps beside a type (`X *`, `X[3]`) are renamed with it,
+ * and everything that refers to them spells the old name too. A typedef or struct that
+ * merely refers to a renamed type keeps its own name, so the closure stops there - its
+ * own users spell it, not the renamed type.
+ *
+ * names: every old spelling now stale (renamed types and their derived records), for
+ * globals and bodies. derivedNames: slot -> the name a derived record has now.
+ */
+export function renameReferrers(
+  dataTypes: readonly ExtractedDataType[],
+  renamed: ReadonlySet<string>,
+  renamedTo?: ReadonlyMap<string, string>,
+): { typeSlots: number[]; names: Set<string>; derivedNames: Map<number, string> } {
+  const names = new Set(renamed);
+  const derivedNames = new Map<number, string>();
+  const slots = new Set<number>();
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (let i = 0; i < dataTypes.length; i++) {
+      const dt = dataTypes[i];
+      if (names.has(dt.name)) continue;
+      const base = baseTypeName(dt.name);
+      if (base !== dt.name && names.has(base)) {
+        // A derived record of a renamed type is renamed with it.
+        names.add(dt.name);
+        const to = renamedTo?.get(base);
+        if (to) derivedNames.set(i, to + dt.name.slice(base.length));
+        slots.add(i);
+        grew = true;
+      }
+    }
+  }
+  for (let i = 0; i < dataTypes.length; i++) {
+    if (slots.has(i) || names.has(dataTypes[i].name)) continue;
+    if (referencedTypeNames(dataTypes[i]).some(n => names.has(n))) slots.add(i);
+  }
+  return { typeSlots: [...slots].sort((a, b) => a - b), names, derivedNames };
+}
+
 function memberNames(dt: ExtractedDataType | undefined): Set<string> {
   const names = new Set<string>();
   if (!dt) return names;
@@ -311,6 +389,9 @@ export async function applyEvents(
   // only exists while both the old and the new record are in hand.
   // ---------------------------------------------------------------------------
   const typeTokens = new Set<string>();
+  /** Old names of renamed types: other records still spell them. */
+  const renamedFrom = new Set<string>();
+  const renamedTo = new Map<string, string>();
   for (const event of events) {
     if (event.target !== 'datatype') continue;
 
@@ -356,6 +437,7 @@ export async function applyEvents(
       result.touchedDataTypes.push(dataTypeKey(fresh.name, fresh.category));
 
       typeTokens.add(fresh.name);
+      if (fresh.name !== previous.name) { renamedFrom.add(previous.name); renamedTo.set(previous.name, fresh.name); }
       const newMembers = memberNames(fresh);
       for (const name of oldMembers) if (!newMembers.has(name)) typeTokens.add(name);
       for (const name of newMembers) if (!oldMembers.has(name)) typeTokens.add(name);
@@ -379,6 +461,43 @@ export async function applyEvents(
     }
   }
 
+  // A rename changes the type's own record only: Ghidra's change set names the renamed
+  // type, not the records that refer to it. Their references still carry the old name -
+  // a field `D2UnknownStructure0x18 *` stayed in D2UnitDataPlayerStrc after the struct
+  // became D2TradeRecordStrc, and the emitter then cast every access to it. Re-read them,
+  // as a full extraction would; see renameReferrers for which ones.
+  const globalEvents = events.filter(e => e.target === 'global');
+  if (renamedFrom.size > 0) {
+    const touched = new Set(result.touchedDataTypes);
+    const referrers = renameReferrers(model.primary.dataTypes, renamedFrom, renamedTo);
+    for (const slot of referrers.typeSlots) {
+      const dt = model.primary.dataTypes[slot];
+      const key = dataTypeKey(dt.name, dt.category);
+      if (touched.has(key)) continue;
+      const renamedTo = referrers.derivedNames.get(slot);
+      try {
+        const fresh = await extractDataType(client, renamedTo ?? dt.name, dt.category);
+        model.primary.dataTypes[slot] = fresh;
+        indices.dtByKey.delete(key);
+        indices.dtByKey.set(dataTypeKey(fresh.name, fresh.category), fresh);
+        result.touchedDataTypes.push(dataTypeKey(fresh.name, fresh.category));
+        typeTokens.add(dt.name);
+        typeTokens.add(fresh.name);
+      } catch (e) {
+        log(`datatype ${dt.name}: re-extract after a rename failed (${(e as Error).message}); keeping previous`);
+      }
+    }
+    for (const g of model.primary.globals) {
+      if (g.platform || !g.dataType || !referrers.names.has(baseTypeName(g.dataType))) continue;
+      if (globalEvents.some(e => addressKey(e.key) === addressKey(g.address))) continue;
+      globalEvents.push({ seq: 0, kind: 'data.changed', target: 'global', key: g.address, at: '' } as ChangeEvent);
+    }
+    // Functions whose signature, parameters or locals use one of these types print the
+    // name in their body, so the old names in typeTokens send them to be decompiled and
+    // their records re-read.
+    for (const name of referrers.names) typeTokens.add(name);
+  }
+
   if (typeTokens.size > 0) {
     for (const [addr, tokens] of indices.bodyTokens) {
       for (const token of typeTokens) {
@@ -394,8 +513,7 @@ export async function applyEvents(
   // Globals. The symbol itself is re-extracted; its readers are re-decompiled,
   // because a rename or retype of a global respells the reader, not the global.
   // ---------------------------------------------------------------------------
-  for (const event of events) {
-    if (event.target !== 'global') continue;
+  for (const event of globalEvents) {
 
     const key = addressKey(event.key);
     const existing = indices.globalByAddr.get(key)
