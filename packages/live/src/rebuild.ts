@@ -110,6 +110,10 @@ export async function rebuild(
       RECON_CHILD_OUTPUT_DIR: options.outputDir,
       RECON_CHILD_SNAPSHOT_DIR: model.snapshotDir,
       RECON_CHILD_PROJECT_NAME: options.projectName ?? 'Reconstructed',
+      // Phase timings in every rebuild log: an incremental rebuild that costs more than
+      // a full one (287 s for 198 units against 197 s for all, at v1845) has to show
+      // where. Timers only; the output does not change.
+      RECON_GEN_TIMING: process.env.RECON_GEN_TIMING ?? '1',
       // Incremental emission. Both must be set for reuse to engage: without a
       // reuse directory the generator has nothing to copy from and re-emits
       // everything, which is the safe default rather than an error.

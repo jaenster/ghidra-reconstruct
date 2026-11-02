@@ -97,7 +97,7 @@ test('a struct that points at a renamed type is read again, and so is a global o
   } as ChangeEvent;
   await applyEvents(m, buildIndices(m), [ev], client);
   assert.ok(asked.includes('D2UnitDataPlayerStrc'));
-  assert.ok(asked.includes('global:^gpTradeRecord$'), asked.join(', '));
+  assert.ok(asked.some(a => a.startsWith('global:') && new RegExp(a.slice(7)).test('gpTradeRecord')), asked.join(', '));
   assert.equal(m.primary.globals.find(g => g.name === 'gpTradeRecord')!.dataType, 'D2TradeRecordStrc *');
   const player = m.primary.dataTypes.find(t => t.name === 'D2UnitDataPlayerStrc') as unknown as { fields: { dataType: string }[] };
   assert.equal(player.fields[0].dataType, 'D2TradeRecordStrc *');

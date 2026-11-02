@@ -73,8 +73,10 @@ test('a function rename reaches non-call spellings, referencing globals and poin
   await applyEvents(m, buildIndices(m), [ev], client);
 
   assert.ok(decompiled.includes(USER), 'the body that passes the old name along is decompiled again');
-  assert.ok(listed.includes('^gRef$') && listed.includes('^gTab$'), listed.join(', '));
-  assert.ok(!listed.includes('^gOther$'));
+  const lists = (n: string) => listed.some(r => new RegExp(r).test(n));
+  assert.ok(lists('gRef') && lists('gTab'), listed.join(', '));
+  assert.ok(!lists('gOther'));
+  assert.equal(listed.length, 1, 'one listing call for every name, not one per name');
   const gRef = m.primary.globals.find(g => g.name === 'gRef') as { referencingFunctions: string[]; ownerFunction?: string; comment?: string };
   assert.deepStrictEqual(gRef.referencingFunctions, [`${NS}::${NEW}`]);
   assert.equal(gRef.ownerFunction, NEW);

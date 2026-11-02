@@ -235,6 +235,11 @@ export function reorderDataTypes(
   dataTypes.splice(0, dataTypes.length, ...ordered);
 }
 
+/** Names per global listing call: one regex alternation, well under any length limit. */
+const GLOBAL_LIST_CHUNK = 200;
+
+type ExtractedGlobalRow = Awaited<ReturnType<typeof extractGlobals>>['globals'][number];
+
 /** `execute_script` on the worker, Java, returning its printed output. */
 async function javaScript(client: GhidraConnection, code: string, timeoutSec = 120): Promise<string> {
   const r = await client.sendCommand<{ success?: boolean; output?: string; error?: string }>(
@@ -680,6 +685,22 @@ export async function applyEvents(
       log(`globals: labels at ${globalAddrs.length} address(es) unavailable (${(e as Error).message}); keeping previous records`);
       return;
     }
+    // Every listed row the addresses need, in a few listing calls rather than one per
+    // name: each call walks the whole symbol table, and a names round re-reads hundreds.
+    const rows = new Map<string, ExtractedGlobalRow>();
+    const unreadable = new Set<string>();
+    const wanted = [...new Set(globalAddrs.flatMap(a => labels!.get(a)?.names ?? []))];
+    for (let i = 0; i < wanted.length; i += GLOBAL_LIST_CHUNK) {
+      const chunk = wanted.slice(i, i + GLOBAL_LIST_CHUNK);
+      try {
+        const page = await extractGlobals(client, { regex: `^(?:${chunk.map(escapeRegex).join('|')})$`, limit: 100000 });
+        for (const row of page.globals) rows.set(`${addressKey(row.address)}\t${row.name}`, row);
+      } catch (e) {
+        log(`globals: listing ${chunk.length} name(s) failed (${(e as Error).message}); keeping their previous records`);
+        for (const n of chunk) unreadable.add(n);
+      }
+    }
+    const fresh: AnalyzedDataSymbol[] = [];
     let added = false;
     for (const addr of globalAddrs) {
       const here = labels.get(addr) ?? { names: [] };
@@ -692,9 +713,9 @@ export async function applyEvents(
         log(`global ${gone.name}: no longer at ${gone.address}; removed`);
       }
       for (const name of names) {
+        if (unreadable.has(name)) continue;
         try {
-          const page = await extractGlobals(client, { regex: `^${escapeRegex(name)}$`, limit: 100 });
-          const row = page.globals.find(g => g.name === name && addressKey(g.address) === addr);
+          const row = rows.get(`${addr}\t${name}`);
           const existing = inModel.find(g => g.name === name);
           const analyzed = row ? analyzeDataSymbol(row) : null;
           if (!analyzed) {
@@ -718,7 +739,7 @@ export async function applyEvents(
             added = true;
             log(`global ${name}: new at ${row!.address}`);
           }
-          await fetchInitializedData(client, [record]);
+          fresh.push(record);
           result.touchedGlobals.push(addr);
           if (markUsers) markReferencingFunctions(record, nameToFn, affected);
         } catch (e) {
@@ -727,6 +748,13 @@ export async function applyEvents(
       }
       const first = model.primary.globals.find(g => !g.platform && addressKey(g.address) === addr);
       if (first) indices.globalByAddr.set(addr, first); else indices.globalByAddr.delete(addr);
+    }
+    if (fresh.length > 0) {
+      try {
+        await fetchInitializedData(client, fresh);
+      } catch (e) {
+        log(`globals: initialized data for ${fresh.length} record(s) failed (${(e as Error).message})`);
+      }
     }
     // A new record goes where the full listing puts it: the symbol table's order.
     if (added) {
