@@ -544,9 +544,28 @@ export function isCharacterValueType(type: string): boolean {
 }
 
 /**
+ * The aggregate initializer for a GUID Ghidra values as its canonical string, or null.
+ *
+ * Ghidra's GUID data type renders the registry form: Data1, Data2 and Data3 as the
+ * numbers their little-endian bytes hold, then the eight Data4 bytes in memory order.
+ * So the string maps field for field onto `{Data1, Data2, Data3, {Data4[0..7]}}` with
+ * no byte swapping. The canonical string stays behind as a comment.
+ *
+ * This used to return `{}` with only the comment, a zero GUID: FOLDERID_SavedGames in
+ * PATH_GetKnownFolderPath (0x006cca6c) became GUID_NULL, SHGetKnownFolderPath failed,
+ * and the save migration moved every save to `\Diablo II\Save\` on the current drive.
+ */
+export function guidInitializer(value: string): string | null {
+  const m = /^([0-9a-fA-F]{8})-([0-9a-fA-F]{4})-([0-9a-fA-F]{4})-([0-9a-fA-F]{4})-([0-9a-fA-F]{12})$/.exec(value);
+  if (!m) return null;
+  const data4 = (m[4] + m[5]).toLowerCase().match(/../g)!.map(b => `0x${b}`);
+  return `{0x${m[1].toLowerCase()}, 0x${m[2].toLowerCase()}, 0x${m[3].toLowerCase()}, {${data4.join(', ')}}} /* ${value} */`;
+}
+
+/**
  * Normalize a Ghidra data value for C++ output.
  * - Raw hex strings (e.g. "0030437a") get 0x prefix
- * - GUID strings get wrapped in a comment
+ * - GUID strings become their aggregate initializer (see guidInitializer)
  * - Already-prefixed "0x..." values pass through
  */
 export function normalizeDataValue(value: string): string {
@@ -556,10 +575,8 @@ export function normalizeDataValue(value: string): string {
   if (value === '-Infinity') return '-HUGE_VAL';
   // Already a valid C literal
   if (value === '0' || value === 'nullptr' || value.startsWith('0x') || value.startsWith('-')) return value;
-  // GUID format: 00000000-0000-0000-0000-000000000000
-  if (/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(value)) {
-    return `{} /* ${value} */`;
-  }
+  const guid = guidInitializer(value);
+  if (guid) return guid;
   // Raw hex without 0x prefix: either contains hex letters (a-f) or has leading zeros
   // (Ghidra reports addresses and data values without 0x prefix)
   if (/^[0-9a-fA-F]{4,}$/.test(value) && (/[a-fA-F]/.test(value) || /^0[0-9]/.test(value))) {
