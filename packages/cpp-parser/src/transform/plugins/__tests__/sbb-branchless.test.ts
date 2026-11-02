@@ -11,6 +11,7 @@ import { parse } from '../../../parser/index.js';
 import { emit } from '../../../emit/index.js';
 import type { AnyNode } from '../../../ast/nodes.js';
 import { sbbBranchlessPlugin } from '../builtins/sbb-branchless.js';
+import { hasNativeGpp, compileAndRun } from '../../../testing/native-cpp.js';
 
 describe('sbbBranchlessPlugin', () => {
   const transformer = sbbBranchlessPlugin.createTransformer();
@@ -237,5 +238,33 @@ void f(S* p, uint8_t* q) {
     const result = transform(code);
     assert.ok(result.includes('nullptr'), `expected nullptr arm:\n${result}`);
     assert.ok(!/\(uint\)\s*q/.test(result), `integer cast survived into a pointer ternary:\n${result}`);
+  });
+
+  // SCMD_0x50_DropGold, 0054c800: `neg; sbb eax,eax; and eax,-3; add eax,3`. Ghidra
+  // computes it in one byte and prints the byte mask 0xfd; at int width that is 0x100.
+  describe('byte-wide select', () => {
+    const code = `
+typedef unsigned int uint32_t;
+typedef uint32_t eStatus;
+constexpr eStatus BAD_PARAMS = 3;
+eStatus f(int nResult) {
+  return (-(nResult != 0) & 0xfdU) + BAD_PARAMS;
+}`;
+    it('selects the sign-extended mask', () => {
+      const result = transform(code);
+      assert.ok(result.includes('nResult != 0 ? 0xfffffffdU : 0'), result);
+    });
+    it('keeps the four-byte select as printed', () => {
+      const result = transform('unsigned f(int c) { return (-(unsigned)(c != 0) & 0xfdU) + 3; }');
+      assert.ok(result.includes('c != 0 ? 0x100 : 0x3'), result);
+    });
+    it('folds an unsigned select at 32 bits', () => {
+      const result = transform('unsigned f(int c) { return (-(c != 0) & 0xfdU) + 3U; }');
+      assert.ok(/c != 0 \? 0x0 : 0x3/.test(result), result);
+    });
+    it('returns what the machine returned (compiled)', { skip: !hasNativeGpp() }, () => {
+      const out = compileAndRun(transform(code), 'printf("%x %x\\n", f(1), f(0));');
+      assert.strictEqual(out.trim(), '0 3');
+    });
   });
 });

@@ -125,6 +125,9 @@ function detectSbbPattern(expr: Expression): {
   // Extract condition from inside the negation (strip casts and parens)
   const condition = unwrapCastAndParens(unary.operand);
 
+  const widened = byteMaskAtFullWidth(unwrapParens(unary.operand), addr);
+  if (widened) return { condition, addr: widened, addrTyped: widened };
+
   // Reject trivial cases: -(0) & x or -(1) & x are not this pattern
   if (condition.kind === NodeKind.IntegerLiteral) {
     const lit = condition as IntegerLiteralExpr;
@@ -132,6 +135,32 @@ function detectSbbPattern(expr: Expression): {
   }
 
   return { condition, addr, addrTyped };
+}
+
+const BOOL_OPS = new Set(['==', '!=', '<', '>', '<=', '>=', '&&', '||']);
+
+/**
+ * The mask of a byte-wide select, written at the width the C expression has.
+ *
+ * Ghidra prints a bare negated comparison, `-(c != 0)`, when the select is computed
+ * in one byte: the comparison is its 1-byte bool and no extension is shown (a 4-byte
+ * select prints `-(uint)(c != 0)`). The mask is then a byte constant, `0xfd`, which the
+ * machine's `and r32, imm8` sign-extends to -3. In C the operands are promoted to int
+ * first, so the byte constant selects 0xfd where the machine selected -3, and
+ * `(c ? 0xfdU : 0) + 3` is 0x100 where the original returned 0 (SCMD_0x50_DropGold,
+ * 0054c800). The sign-extended constant has the same low byte and the full register
+ * value. Only 0x80..0xff differs; a smaller byte constant extends to itself.
+ */
+function byteMaskAtFullWidth(negated: Expression, mask: Expression): IntegerLiteralExpr | null {
+  const byteBool =
+    (negated.kind === NodeKind.BinaryExpr && BOOL_OPS.has((negated as BinaryExpr).operator)) ||
+    (negated.kind === NodeKind.UnaryExpr && (negated as UnaryExpr).operator === '!');
+  if (!byteBool || mask.kind !== NodeKind.IntegerLiteral) return null;
+  const lit = mask as IntegerLiteralExpr;
+  if (lit.value < 0x80n || lit.value > 0xffn) return null;
+  const value = lit.value | 0xffffff00n;
+  const suffix = /[uUlL]*$/.exec(lit.raw)![0];
+  return { ...lit, value, base: 16, raw: '0x' + value.toString(16) + suffix } as IntegerLiteralExpr;
 }
 
 // ============================================
@@ -180,8 +209,11 @@ function createSbbBranchlessTransformer(): Transformer {
             if (isZeroElse && ternary.thenExpr.kind === NodeKind.IntegerLiteral) {
               const offset = ternary.thenExpr as IntegerLiteralExpr;
               const isAdd = binary.operator === '+';
-              const trueVal = isAdd ? offset.value + base.value : offset.value - base.value;
-              const falseVal = isAdd ? base.value : -base.value;
+              // An unsigned arm is unsigned int arithmetic: it wraps at 32 bits.
+              const unsigned = /u/i.test(offset.suffix) || /u/i.test(base.suffix);
+              const wrap = (v: bigint): bigint => (unsigned ? BigInt.asUintN(32, v) : v);
+              const trueVal = wrap(isAdd ? offset.value + base.value : offset.value - base.value);
+              const falseVal = wrap(isAdd ? base.value : -base.value);
               // The subtraction branch can go negative, and `BigInt.toString(16)`
               // puts the sign on the digits — `0x-1` is not a literal at all.
               const makeLit = (v: bigint): IntegerLiteralExpr => ({
