@@ -32,6 +32,12 @@ export interface SourceFile {
   parseErrors: Array<{ line: number; message: string }>;
   /** Every `#include "..."` directive, read from the lexer's directive trivia. */
   includes: Array<{ line: number; path: string }>;
+  /**
+   * The comment written right after an initializer, keyed by the initializer's start offset:
+   * `= {} /* 4c5c32ff-... *\/;` records the GUID text under the offset of `{`. The parser keeps
+   * no trivia inside a declaration, so the lexer pass that reads the includes collects these.
+   */
+  initializerComments: Map<number, string>;
 }
 
 export interface FunctionInfo {
@@ -110,15 +116,60 @@ export function gitIndexPaths(root: string): string[] | null {
   }
 }
 
+type LexedToken = ReturnType<Lexer['tokenizeWithTrivia']>[number];
+
 /** The quoted includes of a source text, from the lexer's directive trivia (EOF's included). */
 export function sourceIncludes(path: string, text: string): Array<{ line: number; path: string }> {
+  return includesOf(new Lexer(text, { filename: path }).tokenizeWithTrivia());
+}
+
+function includesOf(tokens: LexedToken[]): Array<{ line: number; path: string }> {
   const out: Array<{ line: number; path: string }> = [];
-  for (const t of new Lexer(text, { filename: path }).tokenizeWithTrivia()) {
+  for (const t of tokens) {
     for (const tr of [...t.leadingTrivia, ...t.trailingTrivia]) {
       if (tr.kind !== TriviaKind.Directive) continue;
       const inc = quotedIncludePath(tr.text);
       if (inc) out.push({ line: tr.location.start.line, path: inc.path });
     }
+  }
+  return out;
+}
+
+/** The first comment between a token and the next one, or null. */
+function commentAfter(tok: LexedToken, next: LexedToken | undefined): string | null {
+  for (const tr of [...tok.trailingTrivia, ...(next?.leadingTrivia ?? [])]) {
+    if (tr.kind === TriviaKind.BlockComment || tr.kind === TriviaKind.LineComment) return tr.text;
+  }
+  return null;
+}
+
+/**
+ * Every initializer followed directly by a comment and then `;` or `,`: `= 0 /* x *\/;` and
+ * `= { ... } /* x *\/;`, keyed by the start offset of the initializer's first token.
+ */
+function initializerCommentsOf(tokens: LexedToken[]): Map<number, string> {
+  const out = new Map<number, string>();
+  for (let i = 0; i + 1 < tokens.length; i++) {
+    if (tokens[i].token.text !== '=') continue;
+    const first = i + 1;
+    let last = first;
+    if (tokens[first].token.text === '{') {
+      let depth = 0;
+      for (; last < tokens.length; last++) {
+        const tx = tokens[last].token.text;
+        if (tx === '{') depth++;
+        else if (tx === '}' && --depth === 0) break;
+      }
+      if (last >= tokens.length) continue;
+    } else {
+      // A one-token initializer only; anything longer is an expression, not a stored value.
+      const after = tokens[first + 1]?.token.text;
+      if (after !== ';' && after !== ',') continue;
+    }
+    const follow = tokens[last + 1]?.token.text;
+    if (follow !== ';' && follow !== ',') continue;
+    const c = commentAfter(tokens[last], tokens[last + 1]);
+    if (c) out.set(tokens[first].token.location.start.offset, c);
   }
   return out;
 }
@@ -129,7 +180,11 @@ export function parseSource(path: string, text: string): SourceFile {
     line: e.location?.start?.line ?? 0,
     message: String(e.message).replace(/^.*?:\d+:\d+: /, ''),
   }));
-  return { path, isHeader: path.endsWith('.h'), tu, parseErrors, includes: sourceIncludes(path, text) };
+  const tokens = new Lexer(text, { filename: path }).tokenizeWithTrivia();
+  return {
+    path, isHeader: path.endsWith('.h'), tu, parseErrors,
+    includes: includesOf(tokens), initializerComments: initializerCommentsOf(tokens),
+  };
 }
 
 function namespaceName(ns: any): string {

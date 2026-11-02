@@ -18,7 +18,7 @@ import { arglessIndirectCall, untypedVirtualCall } from './checks/calls.js';
 import { structPackingMismatch } from './checks/layout.js';
 import { arrayIndexRange } from './checks/ranges.js';
 import { ghidraArtifact } from './checks/artifacts.js';
-import { rawAddressInitializer } from './checks/initializers.js';
+import { rawAddressInitializer, zeroInitializerDropsValue } from './checks/initializers.js';
 import { rawAddressArgument, rawAddressArithmetic } from './checks/addresses.js';
 import { undersizedGlobalArgument } from './checks/arguments.js';
 import { plateTemplateComment, PLATE_TEMPLATE_CHECK_ID } from './checks/comments.js';
@@ -37,6 +37,7 @@ export {
 export { plateTemplateComment, PLATE_TEMPLATE_CHECK_ID, PLATE_TEMPLATE_MARKERS } from './checks/comments.js';
 export { includePathCase, INCLUDE_PATH_CASE_CHECK_ID } from './checks/include-case.js';
 export { aliasReach, ALIAS_REACH_CHECK_ID, spelledSize } from './checks/alias-reach.js';
+export { zeroInitializerDropsValue, nonZeroCommentValue } from './checks/initializers.js';
 
 /** In the order lint.py reported them. */
 export const ALL_CHECKS: Check[] = [
@@ -58,6 +59,7 @@ export const ALL_CHECKS: Check[] = [
   arrayIndexRange,
   untypedVirtualCall,
   rawAddressInitializer,
+  zeroInitializerDropsValue,
   rawAddressArgument,
   rawAddressArithmetic,
   ghidraArtifact,

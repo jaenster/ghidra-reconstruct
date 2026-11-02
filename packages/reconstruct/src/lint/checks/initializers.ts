@@ -174,3 +174,72 @@ export const rawAddressInitializer: Check = {
     return out;
   },
 };
+
+/** Whether an initializer stores only zeros: `0`, `0.0`, `nullptr`, `{}`, `{0}`, `{{0}, {}}`. */
+function zeroFilled(e: any): boolean {
+  const u = unparen(e);
+  if (!u) return false;
+  if (u.kind === NodeKind.InitListExpr) {
+    return (u.elements ?? []).every((raw: any) =>
+      zeroFilled(raw?.kind === NodeKind.DesignatedInitExpr ? (raw.initializer ?? raw.value ?? raw.expression) : raw));
+  }
+  if (u.kind === NodeKind.IntegerLiteral) return literalValue(u) === 0;
+  if (u.kind === NodeKind.FloatingLiteral) return Number(u.value) === 0;
+  return u.kind === NodeKind.NullptrLiteral;
+}
+
+/**
+ * The value a comment states, when the whole comment is one value and that value is not zero:
+ * a GUID (`4c5c32ff-bb9d-43b0-b5b4-2d72e54eaaa4`), a hex or decimal number, or a bare hex run
+ * of four or more digits (Ghidra's spelling of an address). Null for prose, for a field label
+ * like `/* .Data1 = *\/`, and for a zero.
+ */
+export function nonZeroCommentValue(comment: string): string | null {
+  const t = comment.replace(/^\/\*|\*\/$|^\/\//g, '').trim();
+  const value =
+    /^\{?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}?$/.test(t) ? t
+    : /^[-+]?0[xX][0-9a-fA-F]+[uUlL]*$/.test(t) ? t
+    : /^[-+]?\d+(\.\d+)?([eE][-+]?\d+)?[fFuUlL]*$/.test(t) ? t
+    : /^[0-9a-fA-F]{4,}$/.test(t) ? t
+    : null;
+  if (!value) return null;
+  const digits = value.replace(/^[-+]?(0[xX])?/, '').replace(/[eE][-+]?\d+$|[fFuUlL]+$/, '');
+  return /[1-9a-fA-F]/.test(digits) ? value : null;
+}
+
+/**
+ * A zero-filled initializer whose comment states a non-zero value.
+ *
+ * `static GUID GUID_006cca6c = {} /* 4c5c32ff-bb9d-43b0-b5b4-2d72e54eaaa4 *\/;` compiles,
+ * and the object is GUID_NULL. That one was FOLDERID_SavedGames: SHGetKnownFolderPath failed,
+ * the path stayed empty, and the 1.14d save migration moved the player's saves to
+ * `\Diablo II\Save\` on the current drive. The generator knew the value - it wrote it into
+ * the comment - and stored zeros. Any type, any scope: the comment is the evidence that a
+ * value was dropped, and the zeros are what the program runs on.
+ */
+export const zeroInitializerDropsValue: Check = {
+  id: 'zero-initializer-drops-value',
+  blurb: 'zero-filled initializer whose comment states a non-zero value - the value was dropped',
+  run(ctx) {
+    const out: Finding[] = [];
+    for (const file of ctx.tree.files) {
+      if (!file.initializerComments?.size) continue;
+      walk(file.tu as ASTNode, (n: any) => {
+        if (n.kind !== NodeKind.VariableDecl || !n.initializer) return undefined;
+        const offset = n.initializer.location?.start?.offset;
+        const comment = offset === undefined ? undefined : file.initializerComments.get(offset);
+        if (!comment || !zeroFilled(n.initializer)) return undefined;
+        const value = nonZeroCommentValue(comment);
+        if (!value) return undefined;
+        const owner = declName(n) ?? '?';
+        out.push({
+          check: this.id, file: file.path, line: line(n.initializer), subject: owner,
+          detail: `initialized to zero, but its comment holds ${value}`,
+          sig: `${owner} ${value}`,
+        });
+        return undefined;
+      });
+    }
+    return out;
+  },
+};

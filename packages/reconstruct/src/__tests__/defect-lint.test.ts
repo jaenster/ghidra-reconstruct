@@ -1012,3 +1012,29 @@ describe('defect lint: raw-address-arithmetic', () => {
     } }), []);
   });
 });
+
+describe('defect lint: zero-initializer-drops-value', () => {
+  it('reports a zero GUID whose comment holds FOLDERID_SavedGames, a zero scalar and a zero aggregate with a value comment', () => {
+    const fs = lint('zero-initializer-drops-value', { files: {
+      'Fog/Engine/Application.cpp':
+        'void PATH_GetKnownFolderPath() {\n' +
+        '    static GUID GUID_006cca6c = {} /* 4c5c32ff-bb9d-43b0-b5b4-2d72e54eaaa4 */; D2_STATIC_GUARD(GUID_006cca6c, "g");\n' +
+        '}\n',
+      'globals/globals.cpp': 'int gnScale = 0 /* 0x40 */;\nD2PointStrc gsOrigin = { 0, {} } /* 12 */;\n',
+    } });
+    assert.deepStrictEqual(subjects(fs), ['GUID_006cca6c', 'gnScale', 'gsOrigin']);
+    assert.match(fs.find(f => f.subject === 'GUID_006cca6c')!.detail, /4c5c32ff/);
+  });
+
+  it('ignores a zero value comment, a real initializer, a label comment, prose, and a comment after the semicolon', () => {
+    assert.deepStrictEqual(lint('zero-initializer-drops-value', { files: {
+      'globals/globals.cpp':
+        'GUID ActivityId = {} /* 00000000-0000-0000-0000-000000000000 */;\n' +
+        'GUID gIID = {0x4c5c32ff, 0xbb9d, 0x43b0, {0xb5, 0xb4, 0x2d, 0x72, 0xe5, 0x4e, 0xaa, 0xa4}} /* 4c5c32ff-bb9d-43b0-b5b4-2d72e54eaaa4 */;\n' +
+        'GUID gLabel = { /* .Data1 = */ 0 };\n' +
+        'int gnProse = 0 /* set by D2Init */;\n' +
+        'int gnAfter = 0; /* 0x40 */\n' +
+        'int gnExpr = 0 + 1 /* 0x40 */;\n',
+    } }), []);
+  });
+});
