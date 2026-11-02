@@ -20,6 +20,7 @@
 
 import { join } from 'node:path';
 import { writeFileSync } from 'node:fs';
+import { totalmem } from 'node:os';
 
 import { reconstruct } from '@ghidra-mcp/reconstruct';
 import { loadProjectConfig } from '@ghidra-mcp/reconstruct/config/index';
@@ -99,10 +100,11 @@ async function main(): Promise<void> {
       // daemon would start refusing to rebuild a week after the last full run.
       snapshotMaxAgeHours: Number.POSITIVE_INFINITY,
       excludePatterns: EXCLUDE_PATTERNS,
-      // Serial. The parallel shards are only trustworthy because a script diffs
-      // their tree against the serial one; the daemon's whole claim is that its
-      // tree equals the oracle, so it takes the path the oracle takes.
-      generationWorkers: 1,
+      // Shards, as the batch regen runs them (regen-local.sh, GHIDRA_GEN_WORKERS): the
+      // batch tree is the oracle the daemon's tree is compared against, and it is
+      // generated sharded. Each shard ships its per-unit records back, so reuse is
+      // unaffected. D2_LIVE_GEN_WORKERS=1 forces the serial path.
+      generationWorkers: generationWorkers(),
       onProgress: (phase: string, current: number, total: number) => {
         // Line-per-milestone, not a redrawn progress bar: this stdout goes to a
         // log file, where \r would produce one unreadable line.
@@ -129,6 +131,14 @@ async function main(): Promise<void> {
     warnings: result.warnings.length,
     timeMs: result.stats.timeMs,
   })}`);
+}
+
+/** As regen-local.sh sizes it: each shard holds the whole model, about 1.2 GB. */
+function generationWorkers(): number {
+  const forced = Number(process.env.D2_LIVE_GEN_WORKERS ?? '');
+  if (Number.isInteger(forced) && forced > 0) return forced;
+  const gb = Math.floor(totalmem() / 1024 ** 3);
+  return Math.max(1, Math.min(8, Math.floor(((gb - 4) * 10) / 15)));
 }
 
 function requireEnv(name: string): string {

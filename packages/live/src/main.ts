@@ -117,7 +117,8 @@ function loadConfig(): Config {
     // caller and a quiet way to leak where someone's tree lives. The launcher that
     // knows the target supplies them.
     regenDir: requireEnv('D2_REGEN_DIR'),
-    modifiedDir: requireEnv('D2_MODIFIED_DIR'),
+    // Empty: commit the generated tree only and merge nothing.
+    modifiedDir: process.env.D2_MODIFIED_DIR ?? requireEnv('D2_MODIFIED_DIR'),
     daemonUrl: (process.env.GHIDRA_MCP_URL ?? 'http://localhost:8432').replace(/\/+$/, ''),
     // GHIDRA_MCP_TOKEN is what `connection.ts` and run-regen.sh already use, so
     // it is accepted as a fallback rather than making the operator export the
@@ -268,8 +269,8 @@ export class LiveLoop {
     // Before anything reads or writes: `master` is the integration branch and
     // carries no worktree by design. A loop that found itself there would
     // commit generated code onto the branch the two others merge through.
-    await assertNotBranch(this.cfg.modifiedDir, 'master');
-    const modifiedBranch = await currentBranch(this.cfg.modifiedDir);
+    if (this.cfg.modifiedDir) await assertNotBranch(this.cfg.modifiedDir, 'master');
+    const modifiedBranch = this.cfg.modifiedDir ? await currentBranch(this.cfg.modifiedDir) : '(none: no merge)';
     const regenBranch = await currentBranch(this.cfg.regenDir);
     this.log(`regen ${this.cfg.regenDir} on '${regenBranch}', modified ${this.cfg.modifiedDir} on '${modifiedBranch}'`);
 
@@ -659,6 +660,10 @@ export class LiveLoop {
     });
     if (this.lastRebuild) this.lastRebuild.commit = commit.sha;
 
+    // Without a modified tree the daemon only commits the generated tree; merging into
+    // the hand-patched one is then someone else's step, as after a batch regen.
+    if (!this.cfg.modifiedDir) return;
+
     this.phase = 'merging';
     const merge = await mergeIntoModified(this.cfg.modifiedDir, await currentBranch(this.cfg.regenDir));
     this.lastMerge = { ...merge, at: new Date().toISOString() };
@@ -936,6 +941,7 @@ export class LiveLoop {
   }
 
   private async doRetryMerge(): Promise<unknown> {
+    if (!this.cfg.modifiedDir) return { merged: false, reason: 'no modified tree configured (D2_MODIFIED_DIR is empty)' };
     const merge = await mergeIntoModified(this.cfg.modifiedDir, await currentBranch(this.cfg.regenDir));
     this.lastMerge = { ...merge, at: new Date().toISOString() };
     // Clearing the block is the whole point of this call, and it was missing:

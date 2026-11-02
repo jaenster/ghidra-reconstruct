@@ -345,7 +345,10 @@ export async function verifyResume(
   try {
     result = await sendCommand<{ events?: Array<{ seq: number }>; head?: number; version?: number }>(
       'get_changes',
-      { since: seq, limit: 1 },
+      // A version-keyed journal computes a step on first read: Ghidra's change set,
+      // the newer version opened, the records mapped to functions. Minutes for a big
+      // catch-up, which is not a dead worker.
+      { since: seq, limit: 1, _commandTimeout: 600_000 },
     );
   } catch (err) {
     return {
