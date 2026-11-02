@@ -248,6 +248,9 @@ export function selectDirtyUnits(inputs: SelectInputs): DirtySelection {
   // the module symbol lists use. Detection is by address; propagation is by name.
   const changed: string[] = [];
   const changedTypeNames: string[] = [];
+  // Globals are also found by ADDRESS: the unit that defines a file-local global
+  // lists it in `globalAddresses` and names it in no dependency edge of its own.
+  const changedGlobalAddrs = new Set<string>();
 
   for (const f of functions) {
     const before = previous.functions[f.address];
@@ -270,6 +273,7 @@ export function selectDirtyUnits(inputs: SelectInputs): DirtySelection {
     const name = g.suggestedName || g.name;
     const before = previous.globals[globalKey(g.address, name)];
     if (!before || before.hash !== hashGlobal(g)) {
+      changedGlobalAddrs.add(g.address.toLowerCase());
       if (name) changed.push(name);
       if (before && before.name && before.name !== name) changed.push(before.name);
     }
@@ -290,7 +294,11 @@ export function selectDirtyUnits(inputs: SelectInputs): DirtySelection {
     if (!liveFunctionAddrs.has(addr)) { disappeared.push(rec.name); changed.push(rec.name); }
   }
   for (const [key, rec] of Object.entries(previous.globals)) {
-    if (!liveGlobalKeys.has(key)) { disappeared.push(rec.name); changed.push(rec.name); }
+    if (!liveGlobalKeys.has(key)) {
+      disappeared.push(rec.name);
+      changed.push(rec.name);
+      changedGlobalAddrs.add(key.slice(0, key.indexOf('\u0000')).toLowerCase());
+    }
   }
   for (const key of Object.keys(previous.types)) {
     if (!liveTypeKeys.has(key)) {
@@ -313,12 +321,18 @@ export function selectDirtyUnits(inputs: SelectInputs): DirtySelection {
   const dirty = new Set<string>();
   const unknown: string[] = [];
 
-  // A module is dirty when it OWNS a changed symbol...
+  // A module is dirty when it OWNS a changed symbol: a function, a type, or a
+  // global it defines. The last is matched by address. A global's users reach it
+  // through their dependency edges below, but the unit that DEFINES a file-local
+  // global has no edge to it - it is its own symbol - and globals.h/globals.cpp,
+  // which are rewritten every run, never carry a file-local definition. Without
+  // this a retyped static kept its old type and initializer in the defining .cpp.
   const byId = new Map(buildInfo.modules.map(m => [m.id, m]));
   for (const m of buildInfo.modules) {
     const owns =
       (m.functionNames ?? []).some(n => changedSet.has(n)) ||
-      (m.ownedTypeNames ?? []).some(n => changedSet.has(n));
+      (m.ownedTypeNames ?? []).some(n => changedSet.has(n)) ||
+      (m.globalAddresses ?? []).some(a => changedGlobalAddrs.has(a.toLowerCase()));
     if (owns) dirty.add(m.unitName);
   }
 
