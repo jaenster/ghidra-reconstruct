@@ -94,6 +94,9 @@ final class VersionFollower {
     /** The version the active program was opened at. */
     private int openVersion;
 
+    /** Set when the worker follows the server through a checkout of its own. */
+    private CheckoutGuard checkout;
+
     /** The last answer, so a consumer reading it in pages or twice gets the same events. */
     private int cachedFrom = -1;
     private int cachedTo = -1;
@@ -171,12 +174,25 @@ final class VersionFollower {
         }
 
         Program active = ctx.getProgram();
-        Program oldP = openVersion == from ? active : openLocal(from, this, log);
+        Program oldP;
+        if (checkout != null) {
+            // The checkout is about to become the new version: keep the old one as a local
+            // file copy first (a disk copy, no server transfer), unless the step starts
+            // somewhere the checkout is not.
+            oldP = openVersion == from ? copyOfCheckout(log) : openLocal(from, this, log);
+        } else {
+            oldP = openVersion == from ? active : openLocal(from, this, log);
+        }
         Program newP;
         List<JsonObject> events;
         try {
             long t1 = System.currentTimeMillis();
-            newP = openVersion == to ? active : openLocal(to, ctx, log);
+            if (checkout != null) {
+                newP = updateCheckout(to, active, log);
+                active = null;
+            } else {
+                newP = openVersion == to ? active : openLocal(to, ctx, log);
+            }
             long t2 = System.currentTimeMillis();
             events = translate(cs, oldP, newP, to, log);
             log.info("  translated in " + (System.currentTimeMillis() - t2) + " ms");
@@ -185,7 +201,7 @@ final class VersionFollower {
         }
         if (newP != active) {
             activate(newP, to);
-            close(active, ctx);
+            if (active != null) close(active, ctx);
         }
         log.info("Game.exe v" + from + " -> v" + to + ": " + events.size() + " event(s) in "
             + (System.currentTimeMillis() - t0) + " ms");
@@ -195,6 +211,11 @@ final class VersionFollower {
     /** Swap the active program for one at a newer version, with a decompiler of its own. */
     private void moveTo(int version, StdioLog log) throws Exception {
         Program old = ctx.getProgram();
+        if (checkout != null) {
+            activate(updateCheckout(version, old, log), version);
+            log.info("moved to Game.exe v" + version + " (no changes recorded in between)");
+            return;
+        }
         Program fresh = openLocal(version, ctx, log);
         activate(fresh, version);
         close(old, ctx);
@@ -213,6 +234,59 @@ final class VersionFollower {
     }
 
     /**
+     * Follow the server through a non-exclusive checkout of this worker's own, opened
+     * read-only. Each new version is an update of that checkout instead of a fresh copy.
+     * See {@link CheckoutGuard} for what the worker may and may not do with it.
+     */
+    void attachCheckout(StdioLog log) throws Exception {
+        long t0 = System.currentTimeMillis();
+        DomainFile df = ctx.getProjectData().getFile(programPath);
+        checkout = new CheckoutGuard(df);
+        checkout.checkout(TaskMonitor.DUMMY);
+        long t1 = System.currentTimeMillis();
+        int latest = latestVersion();
+        if (df.getVersion() < latest) checkout.update(TaskMonitor.DUMMY);
+        long t2 = System.currentTimeMillis();
+        Program remote = ctx.getProgram();
+        Program local = (Program) df.getReadOnlyDomainObject(ctx, DomainFile.DEFAULT_VERSION, TaskMonitor.DUMMY);
+        activate(local, df.getVersion());
+        close(remote, ctx);
+        log.info("checkout of v" + openVersion + ": taken in " + (t1 - t0) + " ms, updated in " + (t2 - t1) + " ms");
+    }
+
+    /** A local file copy of the checkout as it is now, opened read-only. */
+    private Program copyOfCheckout(StdioLog log) throws Exception {
+        long t0 = System.currentTimeMillis();
+        DomainFolder copies = copiesFolder();
+        DomainFile stale = copies.getFile(name);
+        if (stale != null && !stale.isOpen()) stale.delete();
+        DomainFile copy = checkout.file().copyTo(copies, TaskMonitor.DUMMY);
+        Program p = (Program) copy.getReadOnlyDomainObject(this, DomainFile.DEFAULT_VERSION, TaskMonitor.DUMMY);
+        log.info("  kept v" + openVersion + " as a local copy in " + (System.currentTimeMillis() - t0) + " ms");
+        return p;
+    }
+
+    /** Update the checkout to {@code version} and open it again. The active program is released. */
+    private Program updateCheckout(int version, Program active, StdioLog log) throws Exception {
+        long t0 = System.currentTimeMillis();
+        if (active != null) active.release(ctx);
+        checkout.update(TaskMonitor.DUMMY);
+        DomainFile df = checkout.file();
+        if (df.getVersion() != version) {
+            throw new IllegalStateException("checkout updated to v" + df.getVersion() + ", expected v" + version);
+        }
+        Program p = (Program) df.getReadOnlyDomainObject(ctx, DomainFile.DEFAULT_VERSION, TaskMonitor.DUMMY);
+        log.info("  checkout updated to v" + version + " in " + (System.currentTimeMillis() - t0) + " ms");
+        return p;
+    }
+
+    private DomainFolder copiesFolder() throws Exception {
+        DomainFolder root = ctx.getProjectData().getRootFolder();
+        DomainFolder copies = root.getFolder(COPIES);
+        return copies != null ? copies : root.createFolder(COPIES);
+    }
+
+    /**
      * A private local copy of one version, opened read-only.
      *
      * A program opened read-only from the server reads every database buffer over the
@@ -224,9 +298,7 @@ final class VersionFollower {
     private Program openLocal(int version, Object consumer, StdioLog log) throws Exception {
         long t0 = System.currentTimeMillis();
         DomainFile df = ctx.getProjectData().getFile(programPath);
-        DomainFolder root = ctx.getProjectData().getRootFolder();
-        DomainFolder copies = root.getFolder(COPIES);
-        if (copies == null) copies = root.createFolder(COPIES);
+        DomainFolder copies = copiesFolder();
         DomainFile stale = copies.getFile(name + "_v" + version);
         if (stale != null && !stale.isOpen()) stale.delete();
         DomainFile copy = df.copyVersionTo(version, copies, TaskMonitor.DUMMY);
