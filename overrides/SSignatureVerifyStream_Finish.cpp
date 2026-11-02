@@ -37,19 +37,19 @@ if (pContext->nBytesBuffered == pContext->nBufferSize &&     // 0041d6e4 / 0041d
   uint32_t nSigLen = pContext->nModulusLen;                     // 0041d705  MOV EBX,[ESI]
   uint8_t* pHash   = (uint8_t*)__builtin_alloca(nSigLen);    // 0041d709 / 0041d70e
 
-  SSystem::SMemFill(pHash, nSigLen, 0xbb);             // 0041d710-0041d717
+  SMem::SMemFill(pHash, nSigLen, 0xbb);             // 0041d710-0041d717
   pHash[pContext->nModulusLen - 1] = 0x0b;                      // 0041d71c / 0041d722
   Sha1_Finalize(&pContext->sSha1, pHash);                    // 0041d71e-0041d727  LEA ECX,[ESI+0x18]: the SHA-1 context
 
   uint8_t* pSig = (uint8_t*)__builtin_alloca(pContext->nModulusLen); // 0041d72c-0041d735
 
-  SSystem::SMemCopy(pSig, pContext->pDataBuffer + 4,
+  SMem::SMemCopy(pSig, pContext->pDataBuffer + 4,
                         pContext->nModulusLen);                 // 0041d733-0041d740
   SSIG_InitRSAPair(rsaPair);                                 // 0041d745 / 0041d748
   CryptRSA_Prepare(rsaPair, pModulusSaved, pContext->nModulusLen,
                    pExponentBytes, pContext->nExponentLen);         // 0041d74d-0041d75f
   CryptRSA_Process(rsaPair, pSig, pContext->nModulusLen);       // 0041d764-0041d76b
-  bVerified = (SSystem::SSYSTEM_MemCompare(pSig, pHash,
+  bVerified = (SMem::SMemCmp(pSig, pHash,
                    pContext->nModulusLen) == 0);             // 0041d770-0041d783
   SSIG_FreeRSAPair(rsaPair);                         // 0041d780 / 0041d786
 }
