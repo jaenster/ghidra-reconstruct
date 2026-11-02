@@ -341,9 +341,9 @@ export async function verifyResume(
    */
   hasPersistedModel = false,
 ): Promise<ResumeCheck> {
-  let result: { events?: Array<{ seq: number }>; head?: number };
+  let result: { events?: Array<{ seq: number }>; head?: number; version?: number };
   try {
-    result = await sendCommand<{ events?: Array<{ seq: number }>; head?: number }>(
+    result = await sendCommand<{ events?: Array<{ seq: number }>; head?: number; version?: number }>(
       'get_changes',
       { since: seq, limit: 1 },
     );
@@ -384,6 +384,19 @@ export async function verifyResume(
   if (head === seq) {
     return { resumable: true, reason: 'nothing changed while the daemon was down', head };
   }
+  // A version-keyed journal (the local worker's, see PollingChangeStream) numbers events
+  // by the server version they bring the consumer to, so sequence numbers jump between
+  // versions by design and a version with no recorded change has no events at all. It
+  // can always serve everything after any version up to the latest; a head at or above
+  // the consumer's seq is the whole proof.
+  if (typeof result.version === 'number') {
+    return {
+      resumable: true,
+      reason: `version-keyed journal at Game.exe v${result.version}; ${events.length > 0 ? 'changes' : 'no changes'} to catch up on after ${seq}`,
+      head,
+      firstAvailable: events[0]?.seq,
+    };
+  }
   if (events.length === 0) {
     return {
       resumable: false,
@@ -405,4 +418,135 @@ export async function verifyResume(
     head,
     firstAvailable: events[0]!.seq,
   };
+}
+
+/** What the daemon needs from a change source, whichever transport carries it. */
+export interface ChangeFeed {
+  readonly lastAppliedSeq: number;
+  readonly isPaused: boolean;
+  readonly isConnected: boolean;
+  readonly queuedCount: number;
+  start(): void;
+  stop(): void;
+  pause(): void;
+  resume(): void;
+  markApplied(seq: number): void;
+}
+
+/** Events per version in a version-keyed journal; must match VersionFollower.SEQ_PER_VERSION. */
+export const SEQ_PER_VERSION = 1_000_000;
+
+export interface PollingChangeStreamOptions {
+  sendCommand: <T>(command: string, params?: Record<string, unknown>) => Promise<T>;
+  since: number;
+  /** How often to ask whether the server has a newer version. */
+  intervalMs?: number;
+  onBatch: (events: ChangeEvent[]) => Promise<void> | void;
+  onTruncated: (info: { since: number; head: number }) => void;
+  log?: (message: string) => void;
+}
+
+/**
+ * Follow the local worker's version-keyed journal by polling `get_changes`.
+ *
+ * The local worker has no push channel: it is a child process answering requests over
+ * stdio. Each poll is one cheap server round trip while nothing changes; when a
+ * check-in lands, the same call returns that version's events and moves the worker's
+ * program to it before answering, so the re-extraction that follows reads the version
+ * the events describe.
+ *
+ * One poll in flight at a time, and the next waits for the batch to be applied: a poll
+ * during a rebuild would move the worker's program under the re-extraction.
+ */
+export class PollingChangeStream implements ChangeFeed {
+  private readonly opts: Required<Pick<PollingChangeStreamOptions, 'intervalMs'>> & PollingChangeStreamOptions;
+  private appliedSeq: number;
+  private stopped = true;
+  private paused = false;
+  private connected = false;
+  private queued = 0;
+  private wake: (() => void) | null = null;
+
+  constructor(options: PollingChangeStreamOptions) {
+    this.opts = { intervalMs: 2_000, ...options };
+    this.appliedSeq = options.since;
+  }
+
+  get lastAppliedSeq(): number { return this.appliedSeq; }
+  get isPaused(): boolean { return this.paused; }
+  get isConnected(): boolean { return this.connected; }
+  get queuedCount(): number { return this.queued; }
+
+  start(): void {
+    if (!this.stopped) return;
+    this.stopped = false;
+    void this.loop();
+  }
+
+  stop(): void {
+    this.stopped = true;
+    this.wake?.();
+  }
+
+  pause(): void { this.paused = true; }
+
+  resume(): void {
+    this.paused = false;
+    this.wake?.();
+  }
+
+  markApplied(seq: number): void {
+    this.appliedSeq = Math.max(this.appliedSeq, seq);
+  }
+
+  private log(message: string): void {
+    this.opts.log?.(message);
+  }
+
+  private async loop(): Promise<void> {
+    while (!this.stopped) {
+      if (!this.paused) {
+        try {
+          await this.pollOnce();
+        } catch (e) {
+          this.connected = false;
+          this.log(`change poll failed: ${(e as Error).message}`);
+        }
+      }
+      await new Promise<void>(resolve => {
+        const timer = setTimeout(() => { this.wake = null; resolve(); }, this.opts.intervalMs);
+        this.wake = () => { clearTimeout(timer); this.wake = null; resolve(); };
+      });
+    }
+  }
+
+  private async pollOnce(): Promise<void> {
+    const since = this.appliedSeq;
+    const r = await this.opts.sendCommand<{ events?: ChangeEvent[]; head?: number; version?: number }>(
+      'get_changes', { since, limit: 10_000, _commandTimeout: 600_000 },
+    );
+    this.connected = true;
+    const head = r.head ?? 0;
+    if (head < since) {
+      this.paused = true;
+      this.opts.onTruncated({ since, head });
+      return;
+    }
+    const events = (r.events ?? []).filter(e => e.seq > since);
+    if (events.length === 0) {
+      // A newer version that recorded nothing: the position still moves, or every
+      // later poll would ask the server for the same empty range.
+      if (typeof r.version === 'number') this.markApplied(r.version * SEQ_PER_VERSION);
+      return;
+    }
+    this.queued = events.length;
+    try {
+      await this.opts.onBatch(events);
+      this.markApplied(Math.max(...events.map(e => e.seq)));
+    } catch (e) {
+      this.log(`batch handler failed: ${(e as Error).message}; the batch will be asked for again`);
+    } finally {
+      this.queued = 0;
+    }
+  }
 }
