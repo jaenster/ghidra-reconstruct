@@ -87,7 +87,7 @@ test('a struct that points at a renamed type is read again, and so is a global o
       }
       if (cmd === 'list_data_symbols') { asked.push(`global:${params.regex}`); return { total: 1, globals: [{ name: 'gpTradeRecord', address: '00700000', dataType: 'D2TradeRecordStrc *', size: 4, referencingFunctions: [] }] }; }
       if (cmd === 'decompile') return { pseudocode: 'void PLAYERTRADE_Accept(D2TradeRecordStrc *pRecord) {}' };
-      if (cmd === 'execute_script') return { success: true, output: String(params.code).includes('String[] addrs') ? '00700000\tgpTradeRecord\n' : '' };
+      if (cmd === 'execute_script') return { success: true, output: String(params.code).includes('String[] addrs') ? 'L\t00700000\tgpTradeRecord\n' : '' };
       return {};
     },
   } as never;

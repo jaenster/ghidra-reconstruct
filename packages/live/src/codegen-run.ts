@@ -19,7 +19,7 @@
  */
 
 import { join } from 'node:path';
-import { writeFileSync } from 'node:fs';
+import { writeFileSync, mkdirSync, renameSync } from 'node:fs';
 import { totalmem } from 'node:os';
 
 import { reconstruct } from '@ghidra-mcp/reconstruct';
@@ -118,6 +118,19 @@ async function main(): Promise<void> {
   if (!result.success) {
     console.error(`generation FAILED: ${result.errors.join('\n---\n')}`);
     process.exit(1);
+  }
+
+  // The dependency data the next rebuild selects dirty units by - as run.ts writes it
+  // after a batch generation. Without it every rebuild after a restart emitted
+  // everything, and a worktree that once ran a batch regen kept that run's copy, so a
+  // selection could be computed from another generation's dependencies.
+  if (result.buildInfo) {
+    const path = join(projectDir, '.ghidra-mcp', 'buildinfo.json');
+    mkdirSync(join(projectDir, '.ghidra-mcp'), { recursive: true });
+    writeFileSync(`${path}.tmp`, JSON.stringify(result.buildInfo));
+    renameSync(`${path}.tmp`, path);
+  } else {
+    console.error('warning: the generation returned no buildinfo; the next rebuild re-emits everything');
   }
 
   // The daemon parses this line rather than the human-readable summary: a

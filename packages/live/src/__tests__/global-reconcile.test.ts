@@ -53,7 +53,7 @@ test('a label added in a check-in becomes a global at the listing\'s place, and 
   const m = model();
   const decompiled: string[] = [];
   const ev = { seq: 1, kind: 'data.changed', target: 'global', key: '00700008' } as ChangeEvent;
-  await applyEvents(m, buildIndices(m), [ev], client('00700008\tgB\n', decompiled));
+  await applyEvents(m, buildIndices(m), [ev], client('L\t00700008\tgB\n', decompiled));
   assert.deepStrictEqual(m.primary.globals.map(g => g.name), ['gA', 'gB', 'gC']);
   const gB = m.primary.globals[1] as { scope?: string; suggestedType?: string };
   assert.ok(gB.scope !== undefined && gB.suggestedType !== undefined, 'analysed as the full pass analyses it');

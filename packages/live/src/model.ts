@@ -248,8 +248,11 @@ function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-/** The label names at each address, as the symbol table holds them now. */
-async function labelsAt(client: GhidraConnection, addrs: readonly string[]): Promise<Map<string, string[]>> {
+/**
+ * The label names at each address as the symbol table holds them now, and the plate
+ * comment there (the full extraction joins plate comments onto globals by address).
+ */
+async function labelsAt(client: GhidraConnection, addrs: readonly string[]): Promise<Map<string, { names: string[]; comment?: string }>> {
   const out = await javaScript(client, `
 String[] addrs = new String[] { ${addrs.map(a => JSON.stringify(a)).join(', ')} };
 ghidra.program.model.symbol.SymbolTable st = currentProgram.getSymbolTable();
@@ -259,16 +262,21 @@ for (String a : addrs) {
   if (ad == null) continue;
   for (ghidra.program.model.symbol.Symbol s : st.getSymbols(ad)) {
     if (s.getSymbolType() != ghidra.program.model.symbol.SymbolType.LABEL) continue;
-    sb.append(a).append('\\t').append(s.getName()).append('\\n');
+    sb.append("L\\t").append(a).append('\\t').append(s.getName()).append('\\n');
   }
+  String c = currentProgram.getListing().getComment(ghidra.program.model.listing.CodeUnit.PLATE_COMMENT, ad);
+  if (c != null) sb.append("C\\t").append(a).append('\\t').append(c.replace("\\\\", "\\\\\\\\").replace("\\n", "\\\\n").replace("\\r", "\\\\r").replace("\\t", "\\\\t")).append('\\n');
 }
 println(sb.toString());
 `);
-  const map = new Map<string, string[]>(addrs.map(a => [a, []]));
+  const map = new Map<string, { names: string[]; comment?: string }>(addrs.map(a => [a, { names: [] }]));
   for (const line of out.split('\n')) {
-    const [a, name] = line.replace(/\r$/, '').split('\t');
-    if (!a || !name) continue;
-    map.get(addressKey(a))?.push(name);
+    const [kind, a, value] = line.replace(/\r$/, '').split('\t');
+    if (!kind || !a || value === undefined) continue;
+    const entry = map.get(addressKey(a));
+    if (!entry) continue;
+    if (kind === 'L' && value) entry.names.push(value);
+    if (kind === 'C') entry.comment = value.replace(/\\(\\|n|r|t)/g, (_, c) => (c === 'n' ? '\n' : c === 'r' ? '\r' : c === 't' ? '\t' : '\\'));
   }
   return map;
 }
@@ -300,6 +308,29 @@ export function reorderGlobals(globals: AnalyzedDataSymbol[], order: readonly st
     .sort((a, b) => (a.r - b.r) || (a.i - b.i)).map(x => x.g);
   const rest = globals.filter(g => g.platform);
   globals.splice(0, globals.length, ...primary, ...rest);
+}
+
+/** A function's namespace-qualified name, as Ghidra lists referencing functions. */
+function qualifiedName(fn: ExtractedFunction): string {
+  return fn.namespace ? `${fn.namespace}::${fn.name}` : fn.name;
+}
+
+/** The data addresses a function's instructions reference, from its operand references. */
+function refTargets(fn: ExtractedFunction): Set<string> {
+  const out = new Set<string>();
+  for (const r of fn.operandRefs?.refs ?? []) if (r.to) out.add(addressKey(r.to));
+  return out;
+}
+
+/** Does a global's initialized data hold a pointer spelled as one of these names? */
+function initializedDataNames(g: AnalyzedDataSymbol, names: ReadonlySet<string>): boolean {
+  const walk = (v: unknown): boolean => {
+    if (typeof v === 'string') return names.has(v);
+    if (Array.isArray(v)) return v.some(walk);
+    if (v && typeof v === 'object') return Object.values(v as Record<string, unknown>).some(walk);
+    return false;
+  };
+  return walk((g as { initializedData?: unknown }).initializedData);
 }
 
 /** The type names one record refers to: members, typedef target, function definition. */
@@ -631,19 +662,31 @@ export async function applyEvents(
     if (!key) { log(`global ${ev.key}: no address and not in the model; skipping`); continue; }
     if (!globalAddrs.includes(key)) globalAddrs.push(key);
   }
-  if (globalAddrs.length > 0) {
-    let labels: Map<string, string[]> | null = null;
+  /**
+   * Reconcile the globals at these addresses with the symbol table: a label gone takes
+   * its record with it, a new one is listed, and every listed one is rebuilt from its
+   * row exactly as the full pass builds one (analyzeDataSymbol, the plate comment at
+   * the address, initialized data) - nothing derived is carried over, because what it
+   * was derived from (the functions that reference it, their names) may have moved.
+   * Only the flags other whole-program steps set (primary, import slot) are kept.
+   * markUsers: also send the functions that reference them to be decompiled again.
+   */
+  const reconcileGlobals = async (globalAddrs: readonly string[], markUsers: boolean): Promise<void> => {
+    if (globalAddrs.length === 0) return;
+    let labels: Map<string, { names: string[]; comment?: string }> | null = null;
     try {
       labels = await labelsAt(client, globalAddrs);
     } catch (e) {
       log(`globals: labels at ${globalAddrs.length} address(es) unavailable (${(e as Error).message}); keeping previous records`);
+      return;
     }
     let added = false;
-    for (const addr of labels ? globalAddrs : []) {
-      const names = labels!.get(addr) ?? [];
+    for (const addr of globalAddrs) {
+      const here = labels.get(addr) ?? { names: [] };
+      const names = here.names;
       const inModel = model.primary.globals.filter(g => !g.platform && addressKey(g.address) === addr);
       for (const gone of inModel.filter(g => !names.includes(g.name))) {
-        markReferencingFunctions(gone, nameToFn, affected);
+        if (markUsers) markReferencingFunctions(gone, nameToFn, affected);
         model.primary.globals.splice(model.primary.globals.indexOf(gone), 1);
         result.touchedGlobals.push(addr);
         log(`global ${gone.name}: no longer at ${gone.address}; removed`);
@@ -652,31 +695,32 @@ export async function applyEvents(
         try {
           const page = await extractGlobals(client, { regex: `^${escapeRegex(name)}$`, limit: 100 });
           const row = page.globals.find(g => g.name === name && addressKey(g.address) === addr);
-          if (!row) continue; // a label the listing does not report (no data there)
           const existing = inModel.find(g => g.name === name);
-          let record: AnalyzedDataSymbol;
-          if (existing) {
-            record = { ...existing, ...defined(row) };
-            // `suggestedType` is DERIVED from dataType, and codegen prefers it, so a type
-            // that changed in Ghidra has to re-derive it here or the old spelling wins.
-            // Retyping a scalar to the array it really is then emitted an array-sized
-            // initializer against a scalar declaration - and the clear-loop that walks the
-            // array wrote past a four-byte object.
-            if (record.dataType && record.dataType !== existing.dataType) {
-              record.suggestedType = inferType(record.dataType);
+          const analyzed = row ? analyzeDataSymbol(row) : null;
+          if (!analyzed) {
+            // Not listed (no data there) or a string the full pass leaves out.
+            if (existing) {
+              model.primary.globals.splice(model.primary.globals.indexOf(existing), 1);
+              result.touchedGlobals.push(addr);
             }
+            continue;
+          }
+          const record: AnalyzedDataSymbol = analyzed;
+          if (here.comment) record.comment = here.comment;
+          if (existing) {
+            const keep = existing as AnalyzedDataSymbol & { primary?: boolean; importSlot?: unknown };
+            const out = record as AnalyzedDataSymbol & { primary?: boolean; importSlot?: unknown };
+            if (keep.primary !== undefined) out.primary = keep.primary;
+            if (keep.importSlot !== undefined) out.importSlot = keep.importSlot;
             model.primary.globals[model.primary.globals.indexOf(existing)] = record;
           } else {
-            const analyzed = analyzeDataSymbol(row);
-            if (!analyzed) continue; // a string, which the full pass leaves out too
-            record = analyzed;
             model.primary.globals.push(record);
             added = true;
-            log(`global ${name}: new at ${row.address}`);
+            log(`global ${name}: new at ${row!.address}`);
           }
           await fetchInitializedData(client, [record]);
           result.touchedGlobals.push(addr);
-          markReferencingFunctions(record, nameToFn, affected);
+          if (markUsers) markReferencingFunctions(record, nameToFn, affected);
         } catch (e) {
           log(`global ${name}: re-extract failed (${(e as Error).message}); keeping previous`);
         }
@@ -692,7 +736,8 @@ export async function applyEvents(
         log(`global order: unavailable (${(e as Error).message}); new globals stay at the end`);
       }
     }
-  }
+  };
+  await reconcileGlobals(globalAddrs, true);
 
   // Which label is primary at an address with several. A re-listed global arrives
   // without the flag (`list_data_symbols` does not know it), and a rename can move the
@@ -738,30 +783,90 @@ export async function applyEvents(
 
   // In parallel: the worker answers reads concurrently on its decompiler pool, and one
   // round trip at a time left it idle. Each refresh replaces only its own record, and
-  // the touched list keeps the order of `affected` so what follows is deterministic.
-  const order = [...affected];
-  const replaced = new Array<boolean>(order.length).fill(false);
-  let next = 0;
-  const lanes = Math.max(1, Math.min(REFRESH_CONCURRENCY, order.length));
-  await Promise.all(Array.from({ length: lanes }, async () => {
-    for (let i = next++; i < order.length; i = next++) {
-      replaced[i] = await refreshFunction(model, indices, client, order[i], {
-        // The record too, not only the body: a caller's locals carry the decompiler's
-        // resolved types, and those move with a callee's signature. A full extraction
-        // reads every record fresh, so a carried-over one would disagree with it.
-        reextractInfo: true,
-        timeout,
-        log,
-      });
+  // the touched list keeps the order of the input so what follows is deterministic.
+  const refreshAll = async (addrs: readonly string[]): Promise<string[]> => {
+    const replaced = new Array<boolean>(addrs.length).fill(false);
+    let next = 0;
+    const lanes = Math.max(1, Math.min(REFRESH_CONCURRENCY, addrs.length));
+    await Promise.all(Array.from({ length: lanes }, async () => {
+      for (let i = next++; i < addrs.length; i = next++) {
+        replaced[i] = await refreshFunction(model, indices, client, addrs[i], {
+          // The record too, not only the body: a caller's locals carry the decompiler's
+          // resolved types, and those move with a callee's signature. A full extraction
+          // reads every record fresh, so a carried-over one would disagree with it.
+          reextractInfo: true,
+          timeout,
+          log,
+        });
+      }
+    }));
+    const done = addrs.filter((_, i) => replaced[i]);
+    if (done.length > 0) {
+      recomputeCallEdges(model, indices, done);
+      reindexCallers(model, indices);
+      await refreshOperandRefs(model, client, done, log);
+      await refreshFunctionFacts(model, indices, client, done, log);
     }
-  }));
-  order.forEach((addr, i) => { if (replaced[i]) result.touchedFunctions.push(addr); });
+    return done;
+  };
 
-  if (result.touchedFunctions.length > 0) {
-    recomputeCallEdges(model, indices, result.touchedFunctions);
-    reindexCallers(model, indices);
-    await refreshOperandRefs(model, client, result.touchedFunctions, log);
-    await refreshFunctionFacts(model, indices, client, result.touchedFunctions, log);
+  // What each function was before: its name, and the data it referenced.
+  const before = new Map<string, { name: string; qualified: string; targets: Set<string> }>();
+  const remember = (addr: string) => {
+    const fn = indices.fnByAddr.get(addr);
+    if (fn && !before.has(addr)) before.set(addr, { name: fn.name, qualified: qualifiedName(fn), targets: refTargets(fn) });
+  };
+  const order = [...affected];
+  for (const addr of order) remember(addr);
+  result.touchedFunctions.push(...await refreshAll(order));
+
+  // A renamed function is spelled in more places than its call sites: a body that takes
+  // its address or passes it along, the globals that list it among their referencing
+  // functions, and the tables whose initialized data point at it. A function whose data
+  // references moved changes those globals' lists too. All of them are read again, as
+  // the full extraction reads everything.
+  const renamed: { name: string; qualified: string }[] = [];
+  const globalsToRead = new Set<string>();
+  for (const addr of result.touchedFunctions) {
+    const was = before.get(addr);
+    const fn = indices.fnByAddr.get(addr);
+    if (!was || !fn) continue;
+    const now = refTargets(fn);
+    if (fn.name !== was.name) {
+      renamed.push({ name: was.name, qualified: was.qualified });
+      for (const t of was.targets) globalsToRead.add(t);
+      for (const t of now) globalsToRead.add(t);
+    } else {
+      for (const t of was.targets) if (!now.has(t)) globalsToRead.add(t);
+      for (const t of now) if (!was.targets.has(t)) globalsToRead.add(t);
+    }
+  }
+  if (renamed.length > 0) {
+    const oldNames = new Set(renamed.map(r => r.name));
+    const touched = new Set(result.touchedFunctions);
+    const spelling: string[] = [];
+    for (const [addr, tokens] of indices.bodyTokens) {
+      if (touched.has(addr)) continue;
+      for (const n of oldNames) if (tokens.has(n)) { spelling.push(addr); break; }
+    }
+    if (spelling.length > 0) {
+      for (const addr of spelling) remember(addr);
+      log(`renamed functions: ${renamed.length}; ${spelling.length} more bodies spell an old name`);
+      result.touchedFunctions.push(...await refreshAll(spelling));
+    }
+    const named = new Set<string>();
+    for (const r of renamed) { named.add(r.name); named.add(r.qualified); }
+    for (const g of model.primary.globals) {
+      if (g.platform) continue;
+      if ((g.referencingFunctions ?? []).some(f => named.has(f)) || initializedDataNames(g, named)) {
+        globalsToRead.add(addressKey(g.address));
+      }
+    }
+  }
+  const knownGlobals = [...globalsToRead].filter(a => indices.globalByAddr.has(a));
+  if (knownGlobals.length > 0) {
+    log(`globals whose referencing functions moved: ${knownGlobals.length}`);
+    await reconcileGlobals(knownGlobals, false);
   }
 
   model.seq = Math.max(model.seq, highestSeq);
