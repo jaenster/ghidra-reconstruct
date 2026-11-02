@@ -42,6 +42,11 @@
  *
  * Every operand that the idiom repeats must be free of calls and assignments:
  * the rewrite evaluates it once.
+ *
+ * The signed remainder by 2^k (VC8's `and r, 0x80000000|(2^k-1); jns; dec; or r, -2^k;
+ * inc`) is folded by its own pass, `pow2-remainder` (priority 51), which runs before
+ * `early-return` turns the fix-up's `if` into a guard and copies the tail (see
+ * createPow2RemainderTransformer). `arith-idioms` still folds the plain pair.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -49,7 +54,7 @@ import type {
   ASTNode, AnyNode, Expression, BinaryExpr, CStyleCastExpr, CallExpr, IntegerLiteralExpr,
   UnaryExpr, FunctionDecl, ParameterDecl, VariableDecl, TypeNode, MemberExpr,
   IfStmt, WhileStmt, DoWhileStmt, ForStmt, ConditionalExpr,
-  CharLiteralExpr, FloatingLiteralExpr, Statement, ExprStmt, DeclStmt, CompoundStmt, AssignExpr, Identifier,
+  CharLiteralExpr, FloatingLiteralExpr, Statement, ExprStmt, DeclStmt, CompoundStmt, AssignExpr, Identifier, ParenExpr,
 } from '../../../ast/nodes.js';
 import { findNodesByKind } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
@@ -78,11 +83,12 @@ export interface ArithIdiomsOptions extends PluginOptions {
 
 export type ArithIdiom =
   | 'low-dword' | 'narrow-div' | 'magic-div' | 'cast-chain' | 'modulo' | 'divides' | 'pow2-div' | 'long-helper' | 'signed-div'
-  | 'setcc-select' | 'pow2-rem' | 'u2f';
+  | 'setcc-select' | 'pow2-rem' | 'pow2-rem-test' | 'pow2-rem-mask' | 'u2f';
 
 const stats: Record<ArithIdiom, number> = {
   'low-dword': 0, 'narrow-div': 0, 'magic-div': 0, 'cast-chain': 0, 'modulo': 0, 'divides': 0,
-  'pow2-div': 0, 'long-helper': 0, 'signed-div': 0, 'setcc-select': 0, 'pow2-rem': 0, 'u2f': 0,
+  'pow2-div': 0, 'long-helper': 0, 'signed-div': 0, 'setcc-select': 0, 'pow2-rem': 0, 'pow2-rem-test': 0,
+  'pow2-rem-mask': 0, 'u2f': 0,
 };
 
 /** How many times each idiom has been folded since the last reset. */
@@ -263,6 +269,17 @@ interface Folder {
   fold(e: Expression): Expression | null;
   foldTruth(e: Expression): Expression | null;
   foldPair(a: Statement, b: Statement, layout: BranchLayoutEvidence | null | undefined): Statement | null;
+  foldRemainderRun(stmts: Statement[], i: number, ctx: RemainderRunContext): { out: Statement[]; next: number } | null;
+  foldRemainderMask(value: Expression): Expression | null;
+}
+
+/** What a remainder run may need to know beyond its own statements. */
+export interface RemainderRunContext {
+  layout: BranchLayoutEvidence | null | undefined;
+  /** A parameter or local of the function (not a global another call could change). */
+  isLocal(name: string): boolean;
+  /** The value `name` holds after `stmt` (an `if` of the function) is never read. */
+  deadAfter(name: string, stmt: Statement, run: Statement[]): boolean;
 }
 
 function createFolder(shapeOf: ExprShape, o: ArithIdiomsOptions, resolve: TypedefResolver): Folder {
@@ -914,6 +931,269 @@ function createFolder(shapeOf: ExprShape, o: ArithIdiomsOptions, resolve: Typede
     return asg.with(Expr.binary(dividend, '%', Expr.intLiteral(n)));
   };
 
+  // --- the signed power-of-two remainder, as the decompiler spells it around the jump ---
+
+  const mod32 = (v: bigint): bigint => ((v % 0x100000000n) + 0x100000000n) % 0x100000000n;
+
+  /** 2^k for the mask 0x80000000 | (2^k - 1), 1 <= k <= 30; null for any other value. */
+  const remainderModulus = (mask: bigint | null): bigint | null => {
+    if (mask === null || (mask & 0xffffffffn) !== mask || (mask & 0x80000000n) === 0n) return null;
+    const m = mask ^ 0x80000000n;
+    const n = m + 1n;
+    return n >= 2n && n <= 0x40000000n && (n & m) === 0n ? n : null;
+  };
+
+  /** e in parentheses where a cast in front of it would bind to its first operand only. */
+  const operand = (e: Expression): Expression => {
+    const u = unwrapParens(e);
+    return u.kind === NodeKind.BinaryExpr || u.kind === NodeKind.ConditionalExpr || u.kind === NodeKind.AssignExpr
+      ? Expr.paren(e) : e;
+  };
+
+  /** `x % n`, x cast to int unless it is a signed int already. */
+  const remainder = (x: Expression, xt: IntType, n: bigint): Expression =>
+    Expr.binary(sameType(xt, S32) ? operand(x) : castNode('int', operand(x)), '%', Expr.intLiteral(n));
+
+  /** `(r - 1 | ~(n - 1))` (or `r + -1`): the decrement and the OR of the fix-up. */
+  const isFixupOr = (e: Expression, name: string, n: bigint): boolean => {
+    const or = unwrapParens(e);
+    if (or.kind !== NodeKind.BinaryExpr || (or as BinaryExpr).operator !== '|') return false;
+    const notM = negatedLiteral((or as BinaryExpr).right as Expression);
+    if (notM === null || mod32(notM) !== (0xffffffffn ^ (n - 1n))) return false;
+    const dec = unwrapParens((or as BinaryExpr).left as Expression);
+    if (dec.kind !== NodeKind.BinaryExpr || identName((dec as BinaryExpr).left as Expression) !== name) return false;
+    const op = (dec as BinaryExpr).operator;
+    const step = op === '-' ? intLiteral((dec as BinaryExpr).right as Expression)
+      : op === '+' ? negatedLiteral((dec as BinaryExpr).right as Expression) : null;
+    return (op === '-' && step === 1n) || (op === '+' && step === -1n);
+  };
+
+  /** `r = (r - 1 | ~m) + 1;`: the fix-up that leaves the remainder in r. */
+  const isValueFixup = (s: Statement, name: string, n: bigint): boolean => {
+    const a = s.kind === NodeKind.ExprStmt ? assignmentOf(s) : null;
+    if (!a || a.name !== name) return false;
+    const inc = unwrapParens(a.value);
+    return inc.kind === NodeKind.BinaryExpr && (inc as BinaryExpr).operator === '+'
+      && intLiteral((inc as BinaryExpr).right as Expression) === 1n && isFixupOr((inc as BinaryExpr).left as Expression, name, n);
+  };
+
+  /**
+   * `b = (r - 1 | ~m) == -1;` (or `!=`): where only whether the remainder is 0 is used, the
+   * decompiler keeps the INC's zero flag, `(r - 1 | ~m) + 1 == 0`, as this. The operator.
+   */
+  const zeroFixupOf = (s: Statement, flag: string, name: string, n: bigint): '==' | '!=' | null => {
+    const a = s.kind === NodeKind.ExprStmt ? assignmentOf(s) : null;
+    if (!a || a.name !== flag) return null;
+    const c = unwrapParens(a.value);
+    if (c.kind !== NodeKind.BinaryExpr) return null;
+    const op = (c as BinaryExpr).operator;
+    if (op !== '==' && op !== '!=') return null;
+    const minusOne = negatedLiteral((c as BinaryExpr).right as Expression);
+    if (minusOne === null || mod32(minusOne) !== 0xffffffffn) return null;
+    return isFixupOr((c as BinaryExpr).left as Expression, name, n) ? op : null;
+  };
+
+  /** `b = r == 0;`, `b = !r;`, `b = r != 0;` (or declaring b): the flag, its test and how to set it. */
+  const zeroTestOf = (s: Statement, name: string): { flag: string; op: '==' | '!='; with: (v: Expression) => Statement } | null => {
+    const a = assignmentOf(s);
+    if (!a || a.name === name) return null;
+    const ft = typeOf(Expr.identifier(a.name));
+    if (!ft || (ft.bits !== 1 && ft.bits !== 8 && ft.bits !== 32)) return null;
+    const v = unwrapParens(a.value);
+    if (v.kind === NodeKind.UnaryExpr && (v as UnaryExpr).operator === '!' && identName((v as UnaryExpr).operand as Expression) === name) {
+      return { flag: a.name, op: '==', with: a.with };
+    }
+    if (v.kind === NodeKind.BinaryExpr && ((v as BinaryExpr).operator === '==' || (v as BinaryExpr).operator === '!=')
+        && identName((v as BinaryExpr).left as Expression) === name && intLiteral((v as BinaryExpr).right as Expression) === 0n) {
+      return { flag: a.name, op: (v as BinaryExpr).operator as '==' | '!=', with: a.with };
+    }
+    return null;
+  };
+
+  /** The AND that starts the idiom: `r = x & mask;`, `T r = x & mask;` or `r &= mask;`. */
+  const remainderAndOf = (s: Statement): { name: string; x: Expression; n: bigint; decl: boolean; with: (v: Expression) => Statement } | null => {
+    if (s.kind === NodeKind.ExprStmt) {
+      const e = unwrapParens((s as ExprStmt).expression);
+      if (e.kind === NodeKind.AssignExpr && (e as AssignExpr).operator === '&=') {
+        const a = e as AssignExpr;
+        const name = identName(a.left as Expression);
+        const n = remainderModulus(intLiteral(a.right as Expression));
+        if (!name || n === null) return null;
+        return {
+          name, x: a.left as Expression, n, decl: false,
+          with: v => updateNode(s as ExprStmt, { expression: updateNode(a, { operator: '=', right: v } as Partial<AssignExpr>) } as Partial<ExprStmt>),
+        };
+      }
+    }
+    const asg = assignmentOf(s);
+    if (!asg) return null;
+    const v = unwrapParens(asg.value);
+    if (v.kind !== NodeKind.BinaryExpr || (v as BinaryExpr).operator !== '&') return null;
+    const n = remainderModulus(intLiteral((v as BinaryExpr).right as Expression));
+    if (n === null) return null;
+    return { name: asg.name, x: (v as BinaryExpr).left as Expression, n, decl: s.kind === NodeKind.DeclStmt, with: asg.with };
+  };
+
+  /**
+   * The original branches on the sign right after the last instruction of the statements
+   * on `lines` (the AND, and what the compiler scheduled between it and the JNS): the `if`
+   * on `ifLine` has a conditional jump at most `gap` bytes after it.
+   */
+  const runBranchesRightAfter = (layout: BranchLayoutEvidence | null | undefined, andLine: number | null, lines: (number | null)[], ifLine: number | null, gap: number): boolean => {
+    if (!layout || andLine === null || ifLine === null) return false;
+    const jcc = layout.ifs.get(ifLine);
+    const andOffs = layout.lines.get(andLine);
+    if (jcc === undefined || !andOffs || andOffs.length === 0 || andOffs[andOffs.length - 1] >= jcc) return false;
+    let last = andOffs[andOffs.length - 1];
+    for (const l of lines) {
+      if (l === null) return false;
+      for (const off of layout.lines.get(l) ?? []) if (off < jcc && off > last) last = off;
+    }
+    return jcc - last <= gap;
+  };
+
+  /**
+   * The signed remainder by 2^k, as a run of statements:
+   *
+   *   r = x & (0x80000000 | m); [S...] if ((int)r < 0) { r = (r - 1 | ~m) + 1; [if ((int)r < 0) {...}] }
+   *     -> r = x % 2^k; [S...] [if ((int)r < 0) {...}]
+   *   r = x & (0x80000000 | m); b = r == 0; [S...] if ((int)r < 0) { b = (r - 1 | ~m) == -1; }
+   *     -> b = x % 2^k == 0; [S...]                       (`!r` for `r == 0`, `!=` likewise)
+   *
+   * x is a 32-bit integer (cast to int unless signed), `r &= mask` stands for `r = r & mask`,
+   * and m = 2^k - 1. For x >= 0 the AND leaves x's low k bits; for x < 0 it leaves them with
+   * the sign bit, and the decrement, OR and increment make that low - 2^k, or 0 when the low
+   * bits are 0: the remainder `%` truncates to. A nested `if ((int)r < 0)` after the fix-up
+   * (an absolute value) tests the remainder, which is negative only where the AND's result
+   * was. S are up to three statements the compiler scheduled between the AND and the JNS
+   * (a load, the zero test's flag): plain statements that do not mention r or b - nor, for
+   * a global r, call anything. The zero test drops the value the AND leaves in r, so r must
+   * be dead after the `if` (`ctx.deadAfter`). Gated on the original's jump right after the
+   * last instruction of the AND and S (`runBranchesRightAfter`).
+   */
+  const foldRemainderRun = (stmts: Statement[], i: number, ctx: RemainderRunContext): { out: Statement[]; next: number } | null => {
+    const and = remainderAndOf(stmts[i]);
+    if (!and) return null;
+    const rt = typeOf(Expr.identifier(and.name));
+    if (!rt || rt.bits !== 32) return null;
+    const xt = typeOf(and.x);
+    if (!xt || xt.bits !== 32) return null;
+
+    const local = ctx.isLocal(and.name);
+    let zero: { at: number; flag: string; op: '==' | '!='; with: (v: Expression) => Statement } | null = null;
+    const between: Statement[] = [];
+    let j = i + 1;
+    for (; j < stmts.length && j - i <= 4; j++) {
+      const s = stmts[j];
+      if (s.kind === NodeKind.IfStmt) break;
+      if (j === i + 1 && !and.decl) {
+        const z = zeroTestOf(s, and.name);
+        if (z) { zero = { at: j, ...z }; continue; }
+      }
+      if (s.kind !== NodeKind.ExprStmt && s.kind !== NodeKind.DeclStmt) return null;
+      if (mentionsName(s, and.name) || (zero && mentionsName(s, zero.flag))) return null;
+      if (!local && !isPure(s)) return null;
+      between.push(s);
+      if (between.length > 3) return null;
+    }
+    if (j >= stmts.length || stmts[j].kind !== NodeKind.IfStmt) return null;
+    const ifs = stmts[j] as IfStmt;
+    if (ifs.elseBranch || ifs.init || !signTestOf(ifs.condition, and.name)) return null;
+    const body = ifs.thenBranch.kind === NodeKind.CompoundStmt ? (ifs.thenBranch as CompoundStmt).statements : [ifs.thenBranch];
+    if (body.length === 0) return null;
+
+    const runLines = (zero ? [stmts[zero.at]] : []).concat(between).map(placedLine);
+    if (!runBranchesRightAfter(ctx.layout, placedLine(stmts[i]), runLines, placedLine(ifs), 8)) return null;
+
+    const rem = remainder(and.x, xt, and.n);
+    if (zero) {
+      if (body.length !== 1 || zeroFixupOf(body[0], zero.flag, and.name, and.n) !== zero.op) return null;
+      if (!ctx.deadAfter(and.name, ifs, stmts.slice(i, j + 1))) return null;
+      stats['pow2-rem-test']++;
+      return { out: [zero.with(Expr.binary(rem, zero.op, Expr.intLiteral(0))), ...between], next: j + 1 };
+    }
+    if (!isValueFixup(body[0], and.name, and.n)) return null;
+    const rest = body.slice(1);
+    if (rest.length > 1) return null;
+    if (rest.length === 1) {
+      const nested = rest[0];
+      if (nested.kind !== NodeKind.IfStmt || (nested as IfStmt).elseBranch || !signTestOf((nested as IfStmt).condition, and.name)) return null;
+    }
+    stats['pow2-rem']++;
+    return { out: [and.with(rem), ...between, ...rest], next: j + 1 };
+  };
+
+  /**
+   * `x & (0x80000000 | m)` with the fix-up gone: the decompiler drops the JNS arm where it
+   * knows x is not negative, and prints the AND as it is. Folded to `x % 2^k` where that
+   * has the same value for every x - x zero-extended (an unsigned type narrower than 32
+   * bits, so the sign bit is 0) - or where the value is masked again with `& m'`,
+   * m' + 1 a power of two at most 2^k, after only additions, subtractions and negations
+   * (both are the same modulo 2^k). `value` is the right side of an assignment to a 32-bit
+   * integer, where the result type (int against unsigned int) cannot tell.
+   */
+  const foldRemainderMask = (value: Expression): Expression | null => {
+    const direct = (e: Expression): Expression | null => {
+      const u = unwrapParens(e);
+      if (u.kind !== NodeKind.BinaryExpr || (u as BinaryExpr).operator !== '&') return null;
+      const n = remainderModulus(intLiteral((u as BinaryExpr).right as Expression));
+      if (n === null) return null;
+      const x = (u as BinaryExpr).left as Expression;
+      const xt = typeOf(x);
+      if (!xt || xt.signed || xt.bits >= 32) return null;
+      stats['pow2-rem-mask']++;
+      return remainder(x, xt, n);
+    };
+    const whole = direct(value);
+    if (whole) return whole;
+
+    const u = unwrapParens(value);
+    if (u.kind !== NodeKind.BinaryExpr || (u as BinaryExpr).operator !== '&') return null;
+    const outer = intLiteral((u as BinaryExpr).right as Expression);
+    if (outer === null || outer < 1n || (outer & (outer + 1n)) !== 0n) return null;
+    let changed = false;
+    // e with its innermost node (below any parentheses) replaced.
+    const rewrap = (e: Expression, inner: Expression): Expression =>
+      e.kind === NodeKind.ParenExpr
+        ? updateNode(e as ParenExpr, { expression: rewrap((e as ParenExpr).expression as Expression, inner) } as Partial<ParenExpr>)
+        : inner;
+    // Through + - and unary -, parentheses and 32-bit casts, the AND's value only matters modulo outer + 1.
+    const walk = (e: Expression): Expression => {
+      const w = unwrapParens(e);
+      if (w.kind === NodeKind.BinaryExpr) {
+        const b = w as BinaryExpr;
+        if (b.operator === '&') {
+          const n = remainderModulus(intLiteral(b.right as Expression));
+          const xt = typeOf(b.left as Expression);
+          if (n !== null && n >= outer + 1n && xt && xt.bits === 32) {
+            changed = true;
+            stats['pow2-rem-mask']++;
+            return Expr.paren(remainder(b.left as Expression, xt, n));
+          }
+          return e;
+        }
+        if (b.operator === '+' || b.operator === '-') {
+          const l = walk(b.left as Expression);
+          const r = walk(b.right as Expression);
+          return l === b.left && r === b.right ? e : rewrap(e, updateNode(b, { left: l, right: r } as Partial<BinaryExpr>));
+        }
+        return e;
+      }
+      if (w.kind === NodeKind.UnaryExpr && (w as UnaryExpr).operator === '-') {
+        const o = walk((w as UnaryExpr).operand as Expression);
+        return o === (w as UnaryExpr).operand ? e : rewrap(e, updateNode(w as UnaryExpr, { operand: o } as Partial<UnaryExpr>));
+      }
+      const c = castOf(w);
+      if (c && c.type.bits === 32) {
+        const inner = walk(c.inner);
+        return inner === c.inner ? e : rewrap(e, updateNode(c.node, { expression: inner } as Partial<CStyleCastExpr>));
+      }
+      return e;
+    };
+    const left = walk((u as BinaryExpr).left as Expression);
+    return changed ? updateNode(u as BinaryExpr, { left } as Partial<BinaryExpr>) : null;
+  };
+
   const floatSpelling = (t: TypeNode): 'float' | 'double' | null => {
     const s = shapeOfNode(t, 0, resolve);
     return s && s.stars === 0 && (s.base === 'float' || s.base === 'double') ? s.base : null;
@@ -1058,12 +1338,174 @@ function createFolder(shapeOf: ExprShape, o: ArithIdiomsOptions, resolve: Typede
   const foldPair = (a: Statement, b: Statement, layout: BranchLayoutEvidence | null | undefined): Statement | null =>
     foldPow2Rem(a, b, layout) ?? foldU2F(a, b, layout) ?? foldSignedDiv(a, b);
 
-  return { typeOf, fold, foldTruth, foldPair };
+  return { typeOf, fold, foldTruth, foldPair, foldRemainderRun, foldRemainderMask };
+}
+
+// ============================================
+// WHETHER A VALUE IS READ AGAIN
+// ============================================
+
+/**
+ * Whether `name` occurs in n as a variable. A member name does not count, nor a
+ * qualified name (a global), nor - unless `decls` - the name a declaration declares.
+ * `skip` holds the locations of statements not to look into.
+ */
+function mentionsName(n: unknown, name: string, decls = true, skip?: Set<object>): boolean {
+  let found = false;
+  const visit = (x: unknown): void => {
+    if (found || !x || typeof x !== 'object') return;
+    if (Array.isArray(x)) { x.forEach(visit); return; }
+    const node = x as ASTNode;
+    if (skip && node.location && skip.has(node.location)) return;
+    switch (node.kind) {
+      case NodeKind.Identifier:
+        if ((node as Identifier).name === name) found = true;
+        return;
+      case NodeKind.QualifiedId:
+        return;
+      case NodeKind.MemberExpr:
+        visit((node as MemberExpr).object);
+        return;
+      case NodeKind.VariableDecl: {
+        const v = node as VariableDecl;
+        if (decls && v.name.name === name) { found = true; return; }
+        visit(v.initializer);
+        return;
+      }
+    }
+    for (const [k, v] of Object.entries(node)) {
+      if (k === 'location' || k === 'leadingTrivia' || k === 'trailingTrivia') continue;
+      if (v && typeof v === 'object') visit(v);
+    }
+  };
+  visit(n);
+  return found;
+}
+
+/** A block of statements, the index of one of them, and the statement the block belongs to. */
+interface BlockFrame { stmts: Statement[]; index: number; owner: Statement | null }
+
+const LOOPS = new Set<NodeKind>([NodeKind.WhileStmt, NodeKind.DoWhileStmt, NodeKind.ForStmt, NodeKind.ForRangeStmt]);
+
+/**
+ * Liveness on the function as the decompiler printed it, before this pass changes it. The
+ * transformer copies every node it passes, but a copy keeps its `location` object, so a
+ * statement is found again by that.
+ */
+function createLiveness(body: CompoundStmt): (name: string, after: Statement, run: Statement[]) => boolean {
+  const paths = new Map<object, BlockFrame[]>();
+  let jumps = false;
+  const listOf = (s: Statement): Statement[] => s.kind === NodeKind.CompoundStmt ? (s as CompoundStmt).statements : [s];
+  const walk = (stmts: Statement[], owner: Statement | null, path: BlockFrame[]): void => {
+    stmts.forEach((s, index) => {
+      const frames = [...path, { stmts, index, owner }];
+      if (s.location) paths.set(s.location, frames);
+      switch (s.kind) {
+        case NodeKind.CompoundStmt: walk((s as CompoundStmt).statements, s, frames); break;
+        case NodeKind.IfStmt: {
+          const f = s as IfStmt;
+          walk(listOf(f.thenBranch), s, frames);
+          if (f.elseBranch) walk(listOf(f.elseBranch), s, frames);
+          break;
+        }
+        case NodeKind.WhileStmt: case NodeKind.DoWhileStmt: case NodeKind.ForStmt: case NodeKind.ForRangeStmt:
+          walk(listOf((s as WhileStmt).body), s, frames);
+          break;
+        case NodeKind.GotoStmt: case NodeKind.LabelStmt:
+          jumps = true;
+          break;
+      }
+    });
+  };
+  walk(body.statements, null, []);
+  if (!jumps) jumps = findNodesByKind(body, NodeKind.GotoStmt).length > 0 || findNodesByKind(body, NodeKind.LabelStmt).length > 0;
+
+  type Flow = 'read' | 'kill' | 'none';
+  const flow = (s: Statement, name: string): Flow => {
+    switch (s.kind) {
+      case NodeKind.NullStmt:
+        return 'none';
+      case NodeKind.ExprStmt: {
+        const e = unwrapParens((s as ExprStmt).expression);
+        if (e.kind === NodeKind.AssignExpr && (e as AssignExpr).operator === '='
+            && unwrapParens((e as AssignExpr).left as Expression).kind === NodeKind.Identifier
+            && ((unwrapParens((e as AssignExpr).left as Expression)) as Identifier).name === name
+            && !mentionsName((e as AssignExpr).right, name)) return 'kill';
+        return mentionsName(s, name) ? 'read' : 'none';
+      }
+      case NodeKind.DeclStmt:
+        return mentionsName(s, name) ? 'read' : 'none';
+      case NodeKind.ReturnStmt:
+        return mentionsName(s, name) ? 'read' : 'kill';
+      case NodeKind.CompoundStmt:
+        return seq((s as CompoundStmt).statements, name);
+      case NodeKind.IfStmt: {
+        const f = s as IfStmt;
+        if (f.init || mentionsName(f.condition, name)) return 'read';
+        const t = flow(f.thenBranch, name);
+        const e = f.elseBranch ? flow(f.elseBranch, name) : 'none';
+        if (t === 'read' || e === 'read') return 'read';
+        return t === 'kill' && e === 'kill' ? 'kill' : 'none';
+      }
+      default:
+        // Loops, switches, jumps: followed nowhere; anything that mentions the name reads it.
+        return mentionsName(s, name) || s.kind === NodeKind.BreakStmt || s.kind === NodeKind.ContinueStmt
+          || s.kind === NodeKind.GotoStmt ? 'read' : 'none';
+    }
+  };
+  const seq = (stmts: Statement[], name: string): Flow => {
+    for (const s of stmts) {
+      const f = flow(s, name);
+      if (f !== 'none') return f;
+    }
+    return 'none';
+  };
+
+  return (name, after, run) => {
+    const skip = new Set<object>(run.map(s => s.location).filter((l): l is NonNullable<typeof l> => !!l));
+    if (skip.size !== run.length) return false;
+    if (!mentionsName(body, name, false, skip)) return true;
+    const frames = after.location ? paths.get(after.location) : undefined;
+    if (!frames || jumps) return false;
+    for (let level = frames.length - 1; level >= 0; level--) {
+      const { stmts, index, owner } = frames[level];
+      const f = seq(stmts.slice(index + 1), name);
+      if (f !== 'none') return f === 'kill';
+      // Past the end of this block control goes on after its owner - unless that is a loop.
+      if (owner === null) return true;
+      if (LOOPS.has(owner.kind) || (owner.kind !== NodeKind.IfStmt && owner.kind !== NodeKind.CompoundStmt)) return false;
+    }
+    return true;
+  };
 }
 
 // ============================================
 // TRANSFORMER
 // ============================================
+
+/** The function's parameter and local types, and a folder that types expressions with them. */
+function functionFolder(node: FunctionDecl, o: ArithIdiomsOptions, resolve: TypedefResolver): { localTypes: Map<string, TypeNode>; folder: Folder } {
+  const localTypes = new Map<string, TypeNode>();
+  for (const p of node.parameters) {
+    const pd = p as ParameterDecl;
+    if (pd.name) localTypes.set(pd.name.name, pd.type);
+  }
+  if (node.body) {
+    for (const d of findNodesByKind(node.body, NodeKind.VariableDecl)) {
+      const v = d as VariableDecl;
+      if (!localTypes.has(v.name.name)) localTypes.set(v.name.name, v.type);
+    }
+  }
+  const shapeOf = createExprShape(localTypes, {
+    globalTypes: o.globalTypes ?? {},
+    enclosingVarTypes: o.enclosingVarTypes ?? {},
+    structFields: o.structFields ?? {},
+    fieldTypes: o.fieldTypes ?? {},
+    returnTypes: o.functionReturnTypes ?? {},
+    resolve,
+  });
+  return { localTypes, folder: createFolder(shapeOf, o, resolve) };
+}
 
 export function createArithIdiomsTransformer(options?: PluginOptions): Transformer {
   const o = (options ?? {}) as ArithIdiomsOptions;
@@ -1073,24 +1515,7 @@ export function createArithIdiomsTransformer(options?: PluginOptions): Transform
   return createTransformer({
     visitFunctionDecl(node: FunctionDecl): ASTNode | undefined {
       if (!node.body) return undefined;
-      const localTypes = new Map<string, TypeNode>();
-      for (const p of node.parameters) {
-        const pd = p as ParameterDecl;
-        if (pd.name) localTypes.set(pd.name.name, pd.type);
-      }
-      for (const d of findNodesByKind(node.body, NodeKind.VariableDecl)) {
-        const v = d as VariableDecl;
-        if (!localTypes.has(v.name.name)) localTypes.set(v.name.name, v.type);
-      }
-      const shapeOf = createExprShape(localTypes, {
-        globalTypes: o.globalTypes ?? {},
-        enclosingVarTypes: o.enclosingVarTypes ?? {},
-        structFields: o.structFields ?? {},
-        fieldTypes: o.fieldTypes ?? {},
-        returnTypes: o.functionReturnTypes ?? {},
-        resolve,
-      });
-      const folder = createFolder(shapeOf, o, resolve);
+      const { folder } = functionFolder(node, o, resolve);
 
       let changed = false;
       const truth = <T extends ASTNode>(n: T, key: keyof T): T | undefined => {
@@ -1170,5 +1595,100 @@ export const arithIdiomsPlugin: TransformPlugin = {
 
   createTransformer(options?: PluginOptions) {
     return createArithIdiomsTransformer(options);
+  },
+};
+
+/**
+ * VC8's signed remainder by a power of two, in the shapes the decompiler prints it in,
+ * back to `%` (see foldRemainderRun and foldRemainderMask). Compiled as printed, the
+ * flag of a zero test, a statement scheduled between the AND and its jump, or a fix-up
+ * the decompiler dropped each give other code than the original's `x % 2^k`.
+ */
+export function createPow2RemainderTransformer(options?: PluginOptions): Transformer {
+  const o = (options ?? {}) as ArithIdiomsOptions;
+  const typedefTargets = o.typedefTargets ?? {};
+  const resolve: TypedefResolver = name => typedefTargets[name];
+
+  return createTransformer({
+    visitFunctionDecl(node: FunctionDecl): ASTNode | undefined {
+      if (!node.body) return undefined;
+      const { localTypes, folder } = functionFolder(node, o, resolve);
+      const ctx: RemainderRunContext = {
+        layout: o.branchLayout,
+        isLocal: name => localTypes.has(name),
+        deadAfter: createLiveness(node.body as CompoundStmt),
+      };
+
+      let changed = false;
+      const runs = createTransformer({
+        visitNode(n: ASTNode): ASTNode | undefined {
+          if (n.kind !== NodeKind.CompoundStmt) return undefined;
+          const stmts = (n as CompoundStmt).statements;
+          let out: Statement[] | null = null;
+          for (let i = 0; i < stmts.length;) {
+            const folded = folder.foldRemainderRun(stmts, i, ctx);
+            if (!folded) { out?.push(stmts[i]); i++; continue; }
+            out ??= stmts.slice(0, i);
+            // Comments on the statements the fold drops stay with what replaces them.
+            const kept = new Set<Statement>(folded.out);
+            const trivia = stmts.slice(i, folded.next).filter(s => !kept.has(s))
+              .flatMap(s => [...(s.leadingTrivia ?? []), ...(s.trailingTrivia ?? [])]);
+            const [first, ...others] = folded.out;
+            out.push(trivia.length ? { ...first, leadingTrivia: [...(first.leadingTrivia ?? []), ...trivia] } as Statement : first, ...others);
+            i = folded.next;
+          }
+          if (!out) return undefined;
+          changed = true;
+          return updateNode(n as CompoundStmt, { statements: out } as Partial<CompoundStmt>);
+        },
+      });
+      const masks = createTransformer({
+        visitNode(n: ASTNode): ASTNode | undefined {
+          if (n.kind === NodeKind.AssignExpr && (n as AssignExpr).operator === '=') {
+            const a = n as AssignExpr;
+            if (folder.typeOf(a.left as Expression)?.bits !== 32) return undefined;
+            const v = folder.foldRemainderMask(a.right as Expression);
+            if (!v) return undefined;
+            changed = true;
+            return updateNode(a, { right: v } as Partial<AssignExpr>);
+          }
+          if (n.kind === NodeKind.VariableDecl) {
+            const d = n as VariableDecl;
+            if (!d.initializer || (d.initializer as Expression).kind === NodeKind.InitListExpr) return undefined;
+            if (folder.typeOf(Expr.identifier(d.name.name))?.bits !== 32) return undefined;
+            const v = folder.foldRemainderMask(d.initializer as Expression);
+            if (!v) return undefined;
+            changed = true;
+            return updateNode(d, { initializer: v } as Partial<VariableDecl>);
+          }
+          return undefined;
+        },
+      });
+      const body = masks(runs(node.body) as typeof node.body);
+      return changed ? updateNode(node, { body } as Partial<FunctionDecl>) : undefined;
+    },
+  });
+}
+
+/**
+ * Signed Power-of-Two Remainder Plugin
+ *
+ * Before `early-return` (60): that pass turns `if ((int)r < 0) { fix-up } return E;` into
+ * `if ((int)r >= 0) return E; fix-up; return E;`, which no longer reads as the remainder.
+ * After `signed-literal` (30), `redundant-negation` (40) and `boolean-cleanup` (50); the
+ * folds take the literals and the flag in either spelling.
+ */
+export const pow2RemainderPlugin: TransformPlugin = {
+  id: 'pow2-remainder',
+  name: 'Signed Power-of-Two Remainder',
+  description:
+    "Write VC8's signed remainder by 2^k back as %: r = x & 0x80000003; if ((int)r < 0) r = (r - 1 | -4) + 1; -> r = x % 4, with its zero test, scheduled and fix-up-less spellings",
+  version: '1.0.0',
+  defaultEnabled: true,
+  priority: 51,
+  tags: ['correctness', 'matching'],
+
+  createTransformer(options?: PluginOptions) {
+    return createPow2RemainderTransformer(options);
   },
 };

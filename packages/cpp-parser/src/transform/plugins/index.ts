@@ -762,9 +762,10 @@ import { sehNativePlugin } from './builtins/seh-native.js';
 import { returnCastPlugin } from './builtins/return-cast.js';
 export { returnCastPlugin, type ReturnCastOptions } from './builtins/return-cast.js';
 import { floatPointerBitcastPlugin } from './builtins/float-pointer-bitcast.js';
-import { arithIdiomsPlugin } from './builtins/arith-idioms.js';
+import { arithIdiomsPlugin, pow2RemainderPlugin } from './builtins/arith-idioms.js';
 export {
   arithIdiomsPlugin, createArithIdiomsTransformer, getArithIdiomStats, resetArithIdiomStats,
+  pow2RemainderPlugin, createPow2RemainderTransformer,
   type ArithIdiomsOptions, type ArithIdiom,
 } from './builtins/arith-idioms.js';
 import { narrowCastThroughUintptrPlugin } from './builtins/narrow-cast-through-uintptr.js';
@@ -956,6 +957,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   returnCastPlugin,           // Type: cast a returned pointer to the declared return type (priority 616)
   floatPointerBitcastPlugin,  // Type: reinterpret the four bytes a float/pointer cast moves (priority 618)
   arithIdiomsPlugin,          // Matching: division/remainder/64-bit helper idioms -> the operator (priority 619)
+  pow2RemainderPlugin,        // Matching: VC8's signed remainder by 2^k (and; jns; dec; or; inc) -> x % 2^k (priority 51)
   narrowCastThroughUintptrPlugin, // Type: route a pointer->narrow-integer cast through uintptr_t (priority 620)
   assignCastPlugin,           // Type: cast an assigned value to its slot's declared type (priority 615)
   overloadPinCastPlugin,      // Type: exact type of the shared-name member whose address the body takes (priority 627)
