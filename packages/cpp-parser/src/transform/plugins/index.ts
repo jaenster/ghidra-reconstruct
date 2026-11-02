@@ -577,6 +577,7 @@ export { compareFormPlugin, type CompareFormDecision, type CompareFormOptions } 
 export { nullGetterEvidence, nullGetterTable, type NullGetterDefault, type NullGetterEvidence, type NullGetterTable } from './builtins/null-getter.js';
 export { repStringFormPlugin, createRepStringFormTransformer, type RepStringOp, type RepStringFormOptions } from './builtins/rep-string-form.js';
 export { compareSignednessPlugin } from './builtins/compare-signedness.js';
+export { narrowLocalWidenPlugin } from './builtins/narrow-local-widen.js';
 export { callSiteOverrideCastPlugin, type CallSiteOverride } from './builtins/call-site-override-cast.js';
 export { ARTIFACT_SUPPORT_LINES } from './builtins/artifact-support.js';
 
@@ -673,6 +674,7 @@ import { zeroExtendSitePlugin, zeroExtendCastPlugin } from './builtins/zero-exte
 import { compareFormPlugin } from './builtins/compare-form.js';
 import { repStringFormPlugin } from './builtins/rep-string-form.js';
 import { compareSignednessPlugin } from './builtins/compare-signedness.js';
+import { narrowLocalWidenPlugin } from './builtins/narrow-local-widen.js';
 import { callSiteOverrideCastPlugin } from './builtins/call-site-override-cast.js';
 import { arrayCastAssignPlugin } from './builtins/array-cast-assign.js';
 import { vtableStoreCastPlugin } from './builtins/vtable-store-cast.js';
@@ -856,6 +858,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   zeroExtendCastPlugin,       // Matching: a tagged x & 0xffff -> (uint16_t)x where value and type are kept (priority 622)
   compareFormPlugin,          // Fidelity: a comparison in the form its CMP/TEST and Jcc show (priority 3)
   repStringFormPlugin,        // Fidelity: a REP STOS fill as an index loop, a REP MOVS copy as memcpy, from the instruction (priority 4)
+  narrowLocalWidenPlugin,     // Fidelity: a narrow local the original compares at four bytes is an int (priority 618)
   compareSignednessPlugin,    // Correctness: a comparison keeps the signedness its instructions show (priority 619)
   importAddressForwarderPlugin, // Platform: &InterlockedCompareExchange -> __stdcall forwarder (priority 31)
   comIUnknownCallPlugin,      // Platform: p->lpVtbl->Release(p) on IUnknown* → p->Release() (priority 616)

@@ -2953,6 +2953,16 @@ function transformDecompiledCode(
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         enclosingVarTypes,
       };
+      perPluginOptions['narrow-local-widen'] = {
+        enumTypes: context.funcPtrArgCasts.enumTypes,
+        enumConstantNames: context.funcPtrArgCasts.enumConstantNames,
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        structFields: context.funcPtrArgCasts.structFields,
+        typedefTargets: context.funcPtrArgCasts.typedefTargets,
+        functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        enclosingVarTypes,
+      };
       perPluginOptions['compare-signedness'] = {
         enumTypes: context.funcPtrArgCasts.enumTypes,
         enumConstantTypes: context.funcPtrArgCasts.enumConstantTypes,
