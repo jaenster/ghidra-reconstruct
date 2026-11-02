@@ -39,9 +39,24 @@ export interface LiveController {
   proposalBegin(args: Record<string, unknown>): Promise<unknown>;
   proposalCommit(args: Record<string, unknown>): Promise<unknown>;
   proposalAbort(args: Record<string, unknown>): Promise<unknown> | unknown;
+  waitForVersion(version: number, timeoutSec: number): Promise<unknown>;
 }
 
 const TOOLS: Tool[] = [
+  {
+    name: 'wait_for_version',
+    description:
+      'Wait until a tree generated from Game.exe at this Ghidra version (or a later one) is ' +
+      'committed, or the timeout passes. Answers with the committed version and commit.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        version: { type: 'number', description: 'The Game.exe Ghidra version to wait for.' },
+        timeoutSec: { type: 'number', description: 'How long to wait (default 900).' },
+      },
+      required: ['version'],
+    },
+  },
   {
     name: 'status',
     description:
@@ -185,6 +200,7 @@ type ToolArgs = Record<string, unknown>;
 
 async function dispatch(controller: LiveController, name: string, args: ToolArgs): Promise<unknown> {
   switch (name) {
+    case 'wait_for_version': return controller.waitForVersion(numberArg(args.version, 0), numberArg(args.timeoutSec, 900));
     case 'status': return controller.status();
     case 'get_changes_applied': return controller.changesApplied(numberArg(args.limit, 50));
     case 'impact': return controller.impact(stringArg(args.symbol, 'symbol'));

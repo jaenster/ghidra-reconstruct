@@ -181,6 +181,10 @@ export class LiveLoop {
   private lastRebuild: LastRebuild | null = null;
   private lastMerge: (MergeResult & { at: string }) | null = null;
   private lastCommit: string | null = null;
+  /** The Game.exe version of the last tree committed, for wait_for_version. */
+  private committedVersion = 0;
+  /** What the last publish command reported (LIVE_PUBLISH_CMD). */
+  private lastPublish: { at: string; code: number; head?: string; tail: string } | null = null;
 
   /**
    * Set only while a freshly-seeded model is catching up from the beginning of
@@ -300,6 +304,7 @@ export class LiveLoop {
     }
 
     this.model = await loadSnapshotModel(this.cfg.snapshotDir, options, state.seq);
+    this.committedVersion = Math.floor(state.seq / SEQ_PER_VERSION);
     this.indices = indexSnapshotModel(this.model);
     if (state.seq === 0) {
       // No persisted position, so the stream will replay from the start of the
@@ -645,6 +650,17 @@ export class LiveLoop {
     await syncTree(this.cfg.stagingDir, this.cfg.regenDir);
     await writeVersionFile(this.cfg.regenDir, this.model.manifest.provenance.programVersion);
 
+    // The target's own publish step, when one is configured: it measures, commits,
+    // merges and gates the way that target's batch regen does, so the two produce the
+    // same commits. The daemon then only records where the tree got to.
+    const publishCmd = process.env.LIVE_PUBLISH_CMD;
+    if (publishCmd && !attributed) {
+      await this.publish(publishCmd);
+      if (this.lastRebuild) this.lastRebuild.commit = this.lastCommit ?? undefined;
+      this.phase = 'idle';
+      return result;
+    }
+
     this.phase = 'committing';
     const commit = attributed
       ? await commitRegen(this.cfg.regenDir, attributed.message, { author: attributed.author })
@@ -666,6 +682,7 @@ export class LiveLoop {
       updatedAt: new Date().toISOString(),
     });
     if (this.lastRebuild) this.lastRebuild.commit = commit.sha;
+    this.committedVersion = Math.floor(this.model.seq / SEQ_PER_VERSION);
 
     // Without a modified tree the daemon only commits the generated tree; merging into
     // the hand-patched one is then someone else's step, as after a batch regen.
@@ -699,6 +716,88 @@ export class LiveLoop {
 
     this.phase = 'idle';
     return result;
+  }
+
+  /**
+   * Run the publish command over the synced tree. Exit codes: 0 done (or nothing to
+   * commit), 3 merge conflict, 4 the build gate failed, 5 the merge tree is dirty,
+   * anything else an error. Whatever it returns, a commit that landed is a commit: the
+   * state is saved whenever the regen HEAD moved, so the batch is not applied twice.
+   * A conflict, a failed gate or an error blocks the queue - the next batch must not
+   * land on a tree a person has to look at first.
+   */
+  private async publish(cmd: string): Promise<void> {
+    this.phase = 'publishing';
+    const before = await this.regenHead();
+    const version = this.model.manifest.provenance.programVersion ?? Math.floor(this.model.seq / SEQ_PER_VERSION);
+    const env = {
+      ...process.env,
+      LIVE_REGEN_DIR: this.cfg.regenDir,
+      LIVE_MODIFIED_DIR: this.cfg.modifiedDir ?? '',
+      LIVE_VERSION: String(version),
+      LIVE_SEQ: String(this.model.seq),
+    };
+    let code = 0;
+    let out = '';
+    try {
+      const r = await run('/bin/sh', ['-c', cmd], { env, maxBuffer: 64 * 1024 * 1024 });
+      out = `${r.stdout}${r.stderr}`;
+    } catch (e) {
+      const err = e as { code?: number; stdout?: string; stderr?: string; message: string };
+      code = typeof err.code === 'number' ? err.code : 1;
+      out = `${err.stdout ?? ''}${err.stderr ?? ''}` || err.message;
+    }
+    for (const line of out.trim().split('\n').slice(-12)) this.log(`  publish: ${line}`);
+    const after = await this.regenHead();
+    this.lastPublish = { at: new Date().toISOString(), code, head: after ?? undefined, tail: out.trim().split('\n').slice(-12).join('\n') };
+    if (after && after !== before) {
+      this.lastCommit = after;
+      this.log(`committed ${after}`);
+    } else {
+      this.log('nothing committed');
+    }
+    if (after !== before || code === 0) {
+      await saveLiveState(this.cfg.snapshotDir, {
+        hashCache: this.hashCache,
+        buildId: this.buildId,
+        seq: this.model.seq,
+        programPath: this.cfg.programPath,
+        updatedAt: new Date().toISOString(),
+      });
+      this.committedVersion = Number(version) || this.committedVersion;
+    }
+    if (code === 0 || code === 5) {
+      if (code === 5) this.log('merge skipped: the merge tree has uncommitted changes');
+      return;
+    }
+    const reason = code === 3
+      ? `merge conflict in ${this.cfg.modifiedDir}: markers left, nothing resolved. Resolve and commit there, then call retry_merge.`
+      : code === 4
+        ? `the build gate failed on ${this.cfg.modifiedDir} (see the log). Fix, then call retry_merge.`
+        : `publish failed (exit ${code}); see the log, then call retry_merge.`;
+    this.log(reason);
+    this.queue.block(reason);
+  }
+
+  private async regenHead(): Promise<string | null> {
+    try {
+      const r = await run('git', ['-C', this.cfg.regenDir, 'rev-parse', 'HEAD']);
+      return r.stdout.trim() || null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Resolve once a tree at Game.exe `version` or later is committed, or time out. */
+  async waitForVersion(version: number, timeoutSec: number): Promise<unknown> {
+    const deadline = Date.now() + timeoutSec * 1000;
+    while (this.committedVersion < version) {
+      if (Date.now() >= deadline) {
+        return { reached: false, version: this.committedVersion, waitedFor: version, phase: this.phase };
+      }
+      await new Promise(r => setTimeout(r, 1000));
+    }
+    return { reached: true, version: this.committedVersion, commit: this.lastCommit };
   }
 
   private commitMessage(result: RebuildResult): string {
@@ -951,6 +1050,13 @@ export class LiveLoop {
   }
 
   private async doRetryMerge(): Promise<unknown> {
+    const publishCmd = process.env.LIVE_PUBLISH_CMD;
+    if (publishCmd) {
+      const blocked = this.queue.isBlocked ? this.queue.status() : null;
+      await this.publish(publishCmd);
+      if (this.lastPublish && (this.lastPublish.code === 0 || this.lastPublish.code === 5)) this.queue.unblock();
+      return { publish: this.lastPublish, wasBlocked: blocked ?? null };
+    }
     if (!this.cfg.modifiedDir) return { merged: false, reason: 'no modified tree configured (D2_MODIFIED_DIR is empty)' };
     const merge = await mergeIntoModified(this.cfg.modifiedDir, await currentBranch(this.cfg.regenDir));
     this.lastMerge = { ...merge, at: new Date().toISOString() };
