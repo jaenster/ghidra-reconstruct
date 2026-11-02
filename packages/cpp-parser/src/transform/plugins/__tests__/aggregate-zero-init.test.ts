@@ -23,9 +23,10 @@ const tables = {
     D2Padded: [f('c', 0, 1, 'char'), f('n', 4, 4, 'int')],
     D2Bits: [f('a', 0, 4, 'int'), f('flag', 4, 1, 'int:1', 1)],
     D2Arr: [f('n', 0, 4, 'int'), f('aw', 4, 8, 'int[2]')],
+    D2Pkt6: [f('id', 0, 1, 'uint8_t'), f('q', 1, 1, 'uint8_t'), f('fl', 2, 1, 'uint8_t'), f('a', 3, 1, 'uint8_t'), f('b', 4, 2, 'uint16_t')],
   },
   aggregateSizes: {
-    D2ControlMsg: 0x20, D2UIMsgLParamUnion: 4, D2PosShort: 4, D2Pair: 8, D2Padded: 8, D2Bits: 8, D2Arr: 12,
+    D2ControlMsg: 0x20, D2UIMsgLParamUnion: 4, D2PosShort: 4, D2Pair: 8, D2Padded: 8, D2Bits: 8, D2Arr: 12, D2Pkt6: 6,
   },
   typedefTargets: { D2PairAlias: 'D2Pair' },
   enumValues: { STATE_none: 0, STATE_poison: 2 },
@@ -205,6 +206,26 @@ describe('aggregateZeroInitPlugin', () => {
   it('drops a zero store to bytes the opening run zeroes', () => {
     const out = run('void f(int x) { D2Pair s; s.a = x; s.b = 0; g(&s); }', { zeroStores: [{ name: 's', size: 8, zero: [[0, 8]] }] });
     assert.match(out, /D2Pair s = \{ ?0 ?\}; s\.a = x; g\(&s\);/);
+  });
+
+  // Q33_SendQuestStatePacket 00589070: a dword and a word zero the packet from its start, the
+  // byte opcode is stored after them; `{0}` would clear from byte 1 and drop the opcode's zero.
+  it('clears the whole object with memset where the original zeroes a narrow first member it overwrites', () => {
+    const out = run('void f(int x) { D2Pkt6 s; s.q = 0; s.fl = 0; s.a = 0; s.b = 0; s.id = 0x5d; s.q = 0x21; g(&s); }',
+      { zeroStores: [{ name: 's', size: 6, zero: [[0, 6]] }] });
+    assert.match(out, /D2Pkt6 s; memset\(&s, 0, sizeof\(s\)\); s\.id = 0x5d; s\.q = 0x21; g\(&s\);/);
+  });
+
+  it('writes no memset where the original leaves the overwritten first member unzeroed', () => {
+    const out = run('void f(int x) { D2Pkt6 s; s.q = 0; s.fl = 0; s.a = 0; s.b = 0; s.id = 0x5d; g(&s); }',
+      { zeroStores: [{ name: 's', size: 6, zero: [[1, 6]] }] });
+    assert.ok(!/memset/.test(out), out);
+  });
+
+  it('keeps `{0}` for a dword first member the original zeroes and overwrites', () => {
+    const out = run('void f(int x) { D2Pair s; s.b = 0; s.a = x; g(&s); }', { zeroStores: [{ name: 's', size: 8, zero: [[0, 8]] }] });
+    assert.match(out, /D2Pair s = \{ ?0 ?\};/);
+    assert.ok(!/memset/.test(out), out);
   });
 
   // PLAYER_SendInventoryFullMessage 00549a60: the array-fill pass wrote the zeroed arrays as memsets.

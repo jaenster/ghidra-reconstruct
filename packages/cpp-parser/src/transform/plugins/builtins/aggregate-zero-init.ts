@@ -427,13 +427,38 @@ function createAggregateZeroInitTransformer(options: AggregateZeroInitOptions = 
       }
     }
 
+    // `{0}` initialises the first member and clears the rest from its end; a later store
+    // over the first member makes its zero store dead, and VC8 drops it. A memset of the
+    // whole object clears it from its start, in stores wider than a narrow first member.
+    // Where the first member is overwritten and the original still zeroes its bytes, the
+    // original cleared the whole object: a six-byte packet zeroed by a dword and a word at
+    // its start, its byte opcode stored after them (Q33_SendQuestStatePacket 00589070).
+    // The same zero bytes either way; `= {}` would say it too, but C++03 wants an element.
+    const head = required.find(([lo]) => lo === 0);
+    const facts0 = zeroStores.find(z => z.name === name && z.size === sizes[agg]);
+    const headZeroed = !!head && !!facts0 && (() => {
+      for (let b = head[0]; b < head[1]; b++) if (!facts0.zero.some(([x, e]) => b >= x && b < e)) return false;
+      return true;
+    })();
+    const headOverwritten = !!head && stretch.some(st => st.index >= runEnd && !drop.has(st.index) && st.from <= head[0] && st.to >= head[1]);
+    // Only a first member narrower than a dword: from four bytes on, `{0}` and a memset
+    // clear alike, and a memset of a large object costs VC8 an instruction more.
+    const whole = headZeroed && headOverwritten && head[1] - head[0] < 4;
+
     // Rebuild: the declaration moves to the run, initialised; the run goes.
     const decl = declStmt.declarations[0] as VariableDecl;
     // `= {0}`, not `{0}`: list-initialisation without the `=` is C++11, and VC8 has none.
-    const init = Stmt.declStmt([{
-      ...Decl.variable(decl.name, decl.type, Expr.initList([Expr.intLiteral(0)])),
-      copyListInit: true,
-    } as VariableDecl]);
+    const init: Statement[] = whole
+      ? [
+        Stmt.declStmt([Decl.variable(decl.name, decl.type, null)]),
+        Stmt.expr(Expr.call('memset', [
+          Expr.addressOf(Expr.identifier(name)), Expr.intLiteral(0), Expr.sizeof(Expr.identifier(name)),
+        ])),
+      ]
+      : [Stmt.declStmt([{
+        ...Decl.variable(decl.name, decl.type, Expr.initList([Expr.intLiteral(0)])),
+        copyListInit: true,
+      } as VariableDecl])];
     const target = block;
     const rebuild = (n: ASTNode): ASTNode => {
       if (n.kind === NodeKind.CompoundStmt) {
@@ -443,7 +468,7 @@ function createAggregateZeroInitTransformer(options: AggregateZeroInitOptions = 
           const out: Statement[] = [];
           c.statements.forEach((st, i) => {
             if (st === declStmt) return;
-            if (isTarget && i === start) out.push(init);
+            if (isTarget && i === start) out.push(...init);
             if (isTarget && ((i >= start && i < runEnd) || drop.has(i))) return;
             out.push(isTarget ? st : rebuild(st) as Statement);
           });
