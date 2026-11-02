@@ -1598,6 +1598,10 @@ export function generateProjectStage2(state: GenerationState): ReconstructedProj
     typeOwnerMap, globalsPath, genT0,
   } = state;
 
+  // Persisted here, after every shard's records were merged in: written at the end
+  // of the unit loop, a sharded run saved only the coordinator's own slice.
+  saveUnitIdentCache();
+
   if (analyzedGlobals.length > 0) {
     // A global demoted to file-local / struct-colocated is only actually
     // emitted if the file it was assigned to exists. Restore any that no
@@ -4430,7 +4434,6 @@ function generateFilesForFunctions(
   }
 
   if (GEN_TIMING) genAdd('units/loop-total', Date.now() - unitsT0);
-  saveUnitIdentCache();
 
   // ── The template header: the class templates and every member's declaration ──
   if (templates && templateHeaderPath && templateUnitImplPaths.size > 0) {
