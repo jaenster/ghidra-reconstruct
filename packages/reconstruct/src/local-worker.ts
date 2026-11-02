@@ -80,6 +80,11 @@ export function buildWorkerCommand(tool: string, params: Params): WorkerCommand 
       return { command: 'get_data_type', params: pick(params, ['name', 'category']) };
     case 'list_segments':
       return { command: 'list_segments', params: {} };
+    // The worker's version-keyed change journal (StdioWorker answers these itself).
+    case 'get_changes':
+      return { command: 'get_changes', params: pick(params, ['since', 'limit']) };
+    case 'get_program_version':
+      return { command: 'get_program_version', params: {} };
     case 'list_strings':
       return { command: 'list_strings', params: pick(params, ['offset', 'limit', 'minLength', 'filter', 'regex']) };
     case 'list_namespaces':
