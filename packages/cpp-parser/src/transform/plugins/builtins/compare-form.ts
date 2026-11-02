@@ -36,6 +36,11 @@
  *    character where it is a printable one, else as a decimal integer, which compares the
  *    same after promotion (`c == '\0'` -> `c < 1`, `'/' < c` -> `c >= '0'`).
  * A constant side that is not a bare literal (an enum member, a cast pointer) only swaps.
+ *
+ * Every tied comparison, rewritten or kept as printed, also carries what its instructions
+ * say for the passes that run on the final types: the CMP's width (`compareWidth`), read by
+ * `narrow-local-widen`, and where a signed Jcc reads the flags its width (`signedJccWidth`),
+ * read by `compare-signedness`. Recording them changes nothing in the text.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -364,6 +369,7 @@ export function createCompareFormTransformer(options?: PluginOptions): Transform
       }
 
       let rewritten = 0;
+      let tagged = 0;
       const shapeOf = createExprShape(localTypes, tables);
       const boolReturn = node.returnType.kind === NodeKind.BuiltinType
         && (node.returnType as BuiltinType).name === 'bool' && (node.returnType as BuiltinType).modifiers.length === 0;
@@ -383,20 +389,19 @@ export function createCompareFormTransformer(options?: PluginOptions): Transform
           }
           const key = keyOf(be);
           const d = key ? tied.get(key) : undefined;
-          if (d?.keep) {
-            const out = byteCompareWithOne(be, d);
-            if (out) rewritten++;
-            return out ?? undefined;
-          }
-          if (!d || !d.op) return undefined;
-          const out = rewrite(be, d, sizeOf(d.ord), shapeOf);
+          if (!d) return undefined;
+          let out: BinaryExpr | null = null;
+          if (d.keep) out = byteCompareWithOne(be, d);
+          else if (d.op) out = rewrite(be, d, sizeOf(d.ord), shapeOf);
           if (out) rewritten++;
-          return out ?? undefined;
+          const facts = withMachineFacts(out ?? be, d);
+          if (facts !== (out ?? be)) tagged++;
+          return facts === be ? undefined : facts;
         },
       });
       const body = inner(node.body);
       o.onCensus?.({ tied: tied.size, rewritten, untied: decisions.length - tied.size, zipped });
-      return rewritten > 0 ? updateNode(node, { body } as Partial<FunctionDecl>) : undefined;
+      return rewritten > 0 || tagged > 0 ? updateNode(node, { body } as Partial<FunctionDecl>) : undefined;
     },
   });
 }
@@ -502,6 +507,22 @@ function byteCompareWithOne(be: BinaryExpr, d: CompareFormDecision): BinaryExpr 
     location: be.right.location, leadingTrivia: be.right.leadingTrivia, trailingTrivia: be.right.trailingTrivia,
   } as IntegerLiteralExpr;
   return updateNode(be, { right: one, ghidraInfo: { ...(be.ghidraInfo ?? {}), originalAddress: `0x${d.address}` } } as Partial<BinaryExpr>);
+}
+
+/**
+ * The comparison with what its instructions say about it recorded on the node: the CMP's
+ * width (`compareWidth`) and, where a JL/JLE/JG/JGE reads the flags, the width of that
+ * signed compare (`signedJccWidth`). Later passes judge them against the final types:
+ * `compare-signedness` keeps a signed compare signed, `narrow-local-widen` widens a local
+ * the original compared at a width its declaration does not have. Nothing else changes.
+ */
+function withMachineFacts(be: BinaryExpr, d: CompareFormDecision): BinaryExpr {
+  const info = be.ghidraInfo ?? {};
+  const signed = d.signed ? d.width : undefined;
+  if (info.compareWidth === d.width && info.signedJccWidth === signed) return be;
+  const next = { ...info, compareWidth: d.width } as NonNullable<BinaryExpr['ghidraInfo']>;
+  if (signed !== undefined) next.signedJccWidth = signed;
+  return updateNode(be, { ghidraInfo: next } as Partial<BinaryExpr>);
 }
 
 /** The rewritten comparison, or null when a check fails. */
