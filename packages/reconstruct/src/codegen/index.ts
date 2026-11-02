@@ -2566,7 +2566,10 @@ function inlinedCallTablesOf(
   strings: ReadonlyArray<ExtractedString>,
 ): GuardedCallTables {
   const funcDefs = dataTypes.filter(dt => dt.kind === 'FUNCTION_DEFINITION') as import('../types.js').ExtractedFunctionDefinition[];
-  const t = buildFuncPtrArgCastTables(functions, globals, funcDefs, dataTypes, strings, platformDeclaredModelFunctions);
+  // Only the declaration tables are read from this build. The write-effects table is
+  // the one costly part (a parse of every body) and the unit generator builds it
+  // again from the same bodies, so it is not built here.
+  const t = buildFuncPtrArgCastTables(functions, globals, funcDefs, dataTypes, strings, platformDeclaredModelFunctions, { writeEffects: false });
   return {
     globalTypes: t.globalTypes, structFields: t.structFields, fieldTypes: t.fieldTypes, typedefTargets: t.typedefTargets,
     enumValues: buildEnumValues(dataTypes),
@@ -5348,6 +5351,8 @@ export function buildFuncPtrArgCastTables(
   dataTypes: ExtractedDataType[],
   strings: ReadonlyArray<ExtractedString> = [],
   platformDeclaredModelFunctions: ReadonlyArray<ExtractedFunction> = [],
+  /** `writeEffects: false` leaves out the table of what each call may write, for a caller that never reads it. */
+  build: { writeEffects?: boolean } = {},
 ): FuncPtrArgCastTables {
   const funcdefSignatures: Record<string, string> = {};
   // Each funcdef's calling convention as GHIDRA records it, and separately the
@@ -6071,7 +6076,7 @@ export function buildFuncPtrArgCastTables(
     ambiguousGlobalNames: [...ambiguousGlobalNames],
     stringConstantNames,
     varArgFunctions: [...varArgFunctions],
-    writeEffects: genMark('setup/write-effects', () => buildWriteEffects(functions, globalTypes, undefined, {
+    writeEffects: build.writeEffects === false ? undefined : genMark('setup/write-effects', () => buildWriteEffects(functions, globalTypes, undefined, {
       globals, aggregates: { layouts: structLayouts, unions: unionNames, sizes: aggregateSizes, typedefs: typedefTargets },
     })),
     fieldTypes,
