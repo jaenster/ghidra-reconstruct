@@ -1545,19 +1545,21 @@ export function generateProjectStage1(
 
     // Compute file-scoped statics BEFORE globals.h/cpp generation
     if (options.promoteStaticGlobals && analyzedGlobals.length > 0) {
-      const funcToImpl = buildFuncToImplPathMap(functions, classes, namespaces, options, '');
-      computeFileLocalGlobals(analyzedGlobals, funcToImpl, collectInitializerReferencedNames(analyzedGlobals));
-      reconcileStaticScopeWithBodyReferences(analyzedGlobals, functions, funcToImpl, allDataTypeNames, programInfo?.imageBase, strings ?? []);
-      promoteInitializerReferencedGlobals(analyzedGlobals);
+      genMark('setup/global-scopes', () => {
+        const funcToImpl = buildFuncToImplPathMap(functions, classes, namespaces, options, '');
+        computeFileLocalGlobals(analyzedGlobals, funcToImpl, collectInitializerReferencedNames(analyzedGlobals));
+        reconcileStaticScopeWithBodyReferences(analyzedGlobals, functions, funcToImpl, allDataTypeNames, programInfo?.imageBase, strings ?? []);
+        promoteInitializerReferencedGlobals(analyzedGlobals);
+      });
     }
 
     // Calculate globals path (needed for generateFilesForFunctions includes)
     const flatGlobalsPath = analyzedGlobals.length > 0 ? GLOBALS_HEADER : undefined;
 
-    installNullGetters(context, functions, dataTypes, !shard || shard.index === 0);
-    installFileStaticFunctions(context, options, fileStaticModel, classes, namespaces, foreignSources,
+    genMark('setup/null-getters', () => installNullGetters(context, functions, dataTypes, !shard || shard.index === 0));
+    genMark('setup/file-statics', () => installFileStaticFunctions(context, options, fileStaticModel, classes, namespaces, foreignSources,
       [{ prefix: '', functions }], !shard || shard.index === 0,
-      () => inlinedCallTablesOf(functions, analyzedGlobals, dataTypes, strings ?? []));
+      () => genMark('setup/inlined-call-tables', () => inlinedCallTablesOf(functions, analyzedGlobals, dataTypes, strings ?? []))));
 
     // Generate files (classification happens here)
     const flatTypeOwnerMap = generateFilesForFunctions(
@@ -2470,12 +2472,12 @@ function installFileStaticFunctions(
       // The guarded form is matched on bodies as the pipeline has them once the halts
       // are folded, with the calls above already written back.
       const probeContext: ImplGenContext = { ...context, inlinedCalls: { calleesBySite: inlinedCallPlan.calleesBySite, tables } };
-      guardedCallPlan = planGuardedCalls(
+      guardedCallPlan = genMark('setup/guarded-calls', () => planGuardedCalls(
         unreferenced.filter(u => !hasOverride(u.func) && !inlinedCallPlan!.sitesByCallee.has(u.key)),
         unit => unitFunctionsOf.get(unit) ?? [],
         (func, callees) => probeGuardedCalls(func, options, probeContext, callees, tables),
         hasOverride,
-      );
+      ));
       const sites = new Map(inlinedCallPlan.sitesByCallee);
       for (const [k, s] of guardedCallPlan.sitesByCallee) sites.set(k, new Set([...(sites.get(k) ?? []), ...s]));
       return sites;
@@ -3608,7 +3610,7 @@ function generateFilesForFunctions(
     : organized;
   // The run's namespace resolution is built once, over the whole model, in
   // generateProject — before any target is generated.
-  const { typeOwnerMap, structsWithOwnUnit, extraHeaderTypes } = computeTypeOwnership({
+  const { typeOwnerMap, structsWithOwnUnit, extraHeaderTypes } = genMark('setup/type-ownership', () => computeTypeOwnership({
     organized: scoredUnits,
     classes,
     dataTypes,
@@ -3616,7 +3618,7 @@ function generateFilesForFunctions(
     unitHeaderPaths,
     typeOwnershipOverrides,
     sharedEnumTypes: context._sharedEnumTypes,
-  });
+  }));
   // ── Pass 1b: Function cross-include + visibility analysis ──────────
   // Map each function name to the header that declares it.
   // When Mac and Windows both define a function with the same name (e.g. SFILE_HashString),
@@ -3901,7 +3903,7 @@ function generateFilesForFunctions(
   // are invariant in C++, so the original source had to write a cast there; the
   // `funcptr-arg-cast` transform emits it, but only where the MODEL says the two
   // prototypes actually differ. Build that comparison table here, once.
-  context.funcPtrArgCasts = buildFuncPtrArgCastTables(functions, analyzedGlobals, dataTypes.filter(dt => dt.kind === 'FUNCTION_DEFINITION') as import('../types.js').ExtractedFunctionDefinition[], dataTypes, strings ?? [], platformDeclaredModelFunctions);
+  context.funcPtrArgCasts = genMark('setup/funcptr-tables', () => buildFuncPtrArgCastTables(functions, analyzedGlobals, dataTypes.filter(dt => dt.kind === 'FUNCTION_DEFINITION') as import('../types.js').ExtractedFunctionDefinition[], dataTypes, strings ?? [], platformDeclaredModelFunctions));
   // Data initializers are emitted from strings, not an AST — the globals emitter
   // needs the same prototype tables to decide whether a function address stored
   // in a slot needs the cast C++ has never let it do implicitly.
@@ -6066,9 +6068,9 @@ export function buildFuncPtrArgCastTables(
     ambiguousGlobalNames: [...ambiguousGlobalNames],
     stringConstantNames,
     varArgFunctions: [...varArgFunctions],
-    writeEffects: buildWriteEffects(functions, globalTypes, undefined, {
+    writeEffects: genMark('setup/write-effects', () => buildWriteEffects(functions, globalTypes, undefined, {
       globals, aggregates: { layouts: structLayouts, unions: unionNames, sizes: aggregateSizes, typedefs: typedefTargets },
-    }),
+    })),
     fieldTypes,
     typedefTargets,
     structFields,
