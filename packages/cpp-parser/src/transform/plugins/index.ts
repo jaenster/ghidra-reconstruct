@@ -360,8 +360,10 @@ export {
 
 export {
   summarizeWriteEffects,
+  writeEffectAnalyser,
   WRITE_CONTRACTS,
   type WriteEffect,
+  type WriteEffectAnalysis,
   type EffectFunction,
   type WriteEffectOptions,
 } from './builtins/write-effects.js';

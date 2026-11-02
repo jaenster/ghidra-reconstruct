@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import { parse } from '../../../parser/index.js';
 import { emit } from '../../../emit/index.js';
 import type { CompoundStmt, FunctionDecl, Identifier } from '../../../ast/nodes.js';
-import { summarizeWriteEffects, type EffectFunction, type WriteEffectOptions } from '../builtins/write-effects.js';
+import { summarizeWriteEffects, writeEffectAnalyser, type EffectFunction, type WriteEffectOptions } from '../builtins/write-effects.js';
 import type { AggregateModel } from '../builtins/memory-regions.js';
 
 /** Every function of `src`, keyed by its name. */
@@ -15,7 +15,13 @@ function summarize(src: string, opts: WriteEffectOptions = {}) {
     paramTypes: d.parameters.map(p => emit((p as unknown as { type: never }).type)),
     body: d.body as CompoundStmt,
   }));
-  return summarizeWriteEffects(fns, opts);
+  const direct = summarizeWriteEffects(fns, opts);
+  // Every case again from each function's own part, kept as JSON and read back the way
+  // the generator's cache reads it: the summary must not tell the two apart.
+  const analyse = writeEffectAnalyser(opts);
+  const kept = fns.map(f => ({ ...f, body: null, analysis: JSON.parse(JSON.stringify(analyse(f))) }));
+  assert.deepStrictEqual(summarizeWriteEffects(kept, opts), direct);
+  return direct;
 }
 
 /** The writes of each function, without the reads. */
