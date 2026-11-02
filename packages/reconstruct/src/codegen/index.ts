@@ -273,7 +273,79 @@ interface UnitEmitRecord {
    * text written under a different set is never reused. Absent: none.
    */
   statics?: string[];
+  /**
+   * The include block of this unit's text and the placement facts it was derived
+   * from. Which header a type or function lives in is decided over the whole
+   * program: a new struct that embeds a type by value pulls that type into its own
+   * header, while the type's definition - and so its hash - stays the same. The
+   * text of every unit that names the type then carries an include of a header that
+   * no longer defines it, or no longer exists. Text written under different facts
+   * is never reused. Absent: the record predates this check, so never reused.
+   */
+  includes?: IncludeBasis;
 }
+
+/**
+ * What one unit's `#include` lines were resolved from: the graph-resolved includes
+ * handed to the emitter, and each placement lookup the dependency scan made, as
+ * `[key, answer]`. Keys: `t:<type>` the header owning a type, `f:<function>` the
+ * declaring headers of a name, `c:<type>.<field>` a field's struct type on a deref
+ * chain, `p:` the template header.
+ */
+export interface IncludeBasis {
+  graph: string[];
+  lookups: [string, string][];
+}
+
+/** The answer a placement lookup gives in the current run. */
+export interface PlacementLookup {
+  typeOwner(typeName: string): string | undefined;
+  functionHeaders(name: string): ReadonlyArray<{ qualified: string; header: string }> | undefined;
+  fieldType(typeName: string, field: string): string | undefined;
+  templateHeader: string | undefined;
+}
+
+export function functionHeadersKey(
+  candidates: ReadonlyArray<{ qualified: string; header: string }> | undefined,
+): string {
+  return (candidates ?? []).map(c => `${c.qualified}@${c.header}`).sort().join('|');
+}
+
+/** Answer one recorded lookup key against the current placement. */
+export function answerPlacementLookup(key: string, now: PlacementLookup): string {
+  const colon = key.indexOf(':');
+  const kind = key.slice(0, colon);
+  const subject = key.slice(colon + 1);
+  switch (kind) {
+    case 't': return now.typeOwner(subject) ?? '';
+    case 'f': return functionHeadersKey(now.functionHeaders(subject));
+    case 'c': {
+      const dot = subject.lastIndexOf('.');
+      return now.fieldType(subject.slice(0, dot), subject.slice(dot + 1)) ?? '';
+    }
+    case 'p': return now.templateHeader ?? '';
+    default: return `\u0000unknown lookup ${key}`;
+  }
+}
+
+/**
+ * Whether text emitted under `recorded` still has the include block the current
+ * placement would give it. Missing means no: reuse is only ever an optimisation.
+ */
+export function includeBasisHolds(
+  recorded: IncludeBasis | undefined,
+  graphNow: ReadonlyArray<string>,
+  now: PlacementLookup,
+): boolean {
+  if (!recorded) return false;
+  if (recorded.graph.length !== graphNow.length) return false;
+  for (let i = 0; i < graphNow.length; i++) if (recorded.graph[i] !== graphNow[i]) return false;
+  for (const [key, answer] of recorded.lookups) {
+    if (answerPlacementLookup(key, now) !== answer) return false;
+  }
+  return true;
+}
+
 const unitIdentifierCounts = new Map<string, UnitEmitRecord>();
 let unitIdentCachePath: string | null = process.env.RECON_UNIT_IDENT_CACHE ?? null;
 
@@ -4147,9 +4219,24 @@ function generateFilesForFunctions(
       .filter(k => context.fileStaticFunctions?.has(k))
       .sort();
     const previousStatics = unitIdentifierCounts.get(unitName)?.statics ?? [];
-    const reusedImpl = previousStatics.join(',') === unitStatics.join(',')
+    const placementNow: PlacementLookup = {
+      typeOwner: t => typeOwnerMap.get(t),
+      functionHeaders: n => funcNameCandidates.get(n),
+      fieldType: (t, f) => structFieldTypes.get(t)?.get(f),
+      templateHeader: templateHeaderPath ?? undefined,
+    };
+    const placementHolds = !emitUnitsFilter || emitUnitsFilter.has(unitName)
+      || includeBasisHolds(unitIdentifierCounts.get(unitName)?.includes, implIncludes, placementNow);
+    if (!placementHolds) console.log(`[reuse] ${unitName}: re-emitted, its includes were resolved under another placement`);
+    const reusedImpl = previousStatics.join(',') === unitStatics.join(',') && placementHolds
       ? reuseUnitImpl(unitName, implPath)
       : undefined;
+    // The placement lookups the dependency scan below makes, recorded for the next
+    // run's reuse check. Only an emitted unit records; a reused one keeps its record.
+    const placementLookups = new Map<string, string>();
+    const lookedUp = (key: string): void => {
+      if (!placementLookups.has(key)) placementLookups.set(key, answerPlacementLookup(key, placementNow));
+    };
     // Snapshot the tally before emitting so this unit's contribution can be
     // isolated: the map is cumulative across units, so the delta is the only way
     // to say which identifiers came from here.
@@ -4271,6 +4358,7 @@ function generateFilesForFunctions(
         for (const [, target] of context.functionAddressMap) {
           const funcName = target.name;
           if (!mentioned.has(funcName)) continue;
+          lookedUp(`f:${funcName}`);
           const candidates = funcNameCandidates.get(funcName);
           if (!candidates || candidates.length === 0) continue;
           if (candidates.length === 1) {
@@ -4324,18 +4412,19 @@ function generateFilesForFunctions(
         }
       }
 
-      if (templateHeaderPath && templateNames.some(name => mentioned.has(name))) {
-        addInclude(templateHeaderPath);
+      if (templateNames.some(name => mentioned.has(name))) {
+        lookedUp('p:');
+        if (templateHeaderPath) addInclude(templateHeaderPath);
       }
 
       // Scan for type references in bodies (casts, local vars, etc.)
       for (const [typeName, ownerPath] of typeOwnerMap) {
+        if (!mentioned.has(typeName)) continue;
+        lookedUp(`t:${typeName}`);
         if (existingIncludes.has(ownerPath)) continue;
         if (ownerPath === headerPath) continue;
-        if (mentioned.has(typeName)) {
-          existingIncludes.add(ownerPath);
-          newIncludes.push(ownerPath);
-        }
+        existingIncludes.add(ownerPath);
+        newIncludes.push(ownerPath);
       }
 
       // Deref-chain closure: a body that walks `var->f1->f2->f3` accesses the
@@ -4375,6 +4464,8 @@ function generateFilesForFunctions(
           let curType = typeOf(cm[1]);
           if (!curType) continue;
           for (const fm of cm[2].matchAll(/(?:->|\.)\s*([A-Za-z_]\w*)/g)) {
+            lookedUp(`t:${curType}`);
+            lookedUp(`c:${curType}.${fm[1]}`);
             const owner = typeOwnerMap.get(curType);
             if (owner && !existingIncludes.has(owner) && owner !== headerPath) {
               existingIncludes.add(owner);
@@ -4415,7 +4506,10 @@ function generateFilesForFunctions(
       for (const name of initializerAddressReferences()) {
         if (!initRefsBefore.has(name)) initRefs.push(name);
       }
-      unitIdentifierCounts.set(unitName, { idents, declared, initRefs, statics: unitStatics });
+      unitIdentifierCounts.set(unitName, {
+        idents, declared, initRefs, statics: unitStatics,
+        includes: { graph: [...implIncludes], lookups: [...placementLookups].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)) },
+      });
     }
 
     files.set(implPath, {

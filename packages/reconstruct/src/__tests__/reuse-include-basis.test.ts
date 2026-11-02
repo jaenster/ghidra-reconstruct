@@ -1,0 +1,103 @@
+/**
+ * Incremental emission reuses a unit's previous text only while the include block
+ * of that text still matches the current placement.
+ *
+ * v1852 -> v1855: a new struct embedding D2UnitFindArgStrc and D2UnitFindDataStrc
+ * by value pulled both types out of D2Game/D2UnitFindDataStrc.h (which then
+ * disappeared) and into D2Common/Unit.h and D2Game/SKILLS/SkillsServer.h. Neither
+ * type's definition changed, so no hash moved, and eight reused units kept
+ * `#include "D2Game/D2UnitFindDataStrc.h"` - seven of them then failed to compile.
+ */
+import { test } from 'node:test';
+import assert from 'node:assert';
+import {
+  includeBasisHolds,
+  answerPlacementLookup,
+  type IncludeBasis,
+  type PlacementLookup,
+} from '../codegen/index.js';
+
+function placement(
+  owners: Record<string, string>,
+  functions: Record<string, Array<{ qualified: string; header: string }>> = {},
+  fields: Record<string, Record<string, string>> = {},
+  templateHeader?: string,
+): PlacementLookup {
+  return {
+    typeOwner: t => owners[t],
+    functionHeaders: n => functions[n],
+    fieldType: (t, f) => fields[t]?.[f],
+    templateHeader,
+  };
+}
+
+const v1852 = placement(
+  {
+    D2UnitFindDataStrc: 'D2Game/D2UnitFindDataStrc.h',
+    D2UnitFindArgStrc: 'D2Game/D2UnitFindDataStrc.h',
+    D2UnitStrc: 'D2Common/Unit.h',
+  },
+  { SKILLS_FindUnitsInRange: [{ qualified: 'D2Game::SKILLS::SkillsServer::SKILLS_FindUnitsInRange', header: 'D2Game/SKILLS/SkillsServer.h' }] },
+  { D2UnitFindDataStrc: { pRoom: 'D2RoomStrc' } },
+);
+
+const v1855 = placement(
+  {
+    D2UnitFindDataStrc: 'D2Common/Unit.h',
+    D2UnitFindArgStrc: 'D2Game/SKILLS/SkillsServer.h',
+    D2UnitStrc: 'D2Common/Unit.h',
+  },
+  { SKILLS_FindUnitsInRange: [{ qualified: 'D2Game::SKILLS::SkillsServer::SKILLS_FindUnitsInRange', header: 'D2Game/SKILLS/SkillsServer.h' }] },
+  { D2UnitFindDataStrc: { pRoom: 'D2RoomStrc' } },
+);
+
+/** What the dependency scan records for a unit that names the type and calls the finder. */
+function recorded(now: PlacementLookup, graph: string[], keys: string[]): IncludeBasis {
+  return { graph, lookups: keys.map(k => [k, answerPlacementLookup(k, now)] as [string, string]).sort() };
+}
+
+const GRAPH = ['D2Game/globals.h', 'D2Common/Unit.h'];
+
+test('a type that moved header invalidates text that named it', () => {
+  const basis = recorded(v1852, GRAPH, ['t:D2UnitFindDataStrc', 'f:SKILLS_FindUnitsInRange']);
+  assert.equal(includeBasisHolds(basis, GRAPH, v1852), true);
+  assert.equal(includeBasisHolds(basis, GRAPH, v1855), false);
+});
+
+test('a unit that names neither moved type keeps its text', () => {
+  const basis = recorded(v1852, GRAPH, ['t:D2UnitStrc', 'f:SKILLS_FindUnitsInRange']);
+  assert.equal(includeBasisHolds(basis, GRAPH, v1855), true);
+});
+
+test('a type whose header disappears answers differently, even reached only on a deref chain', () => {
+  const gone = placement({ D2UnitStrc: 'D2Common/Unit.h' }, {}, { D2UnitFindDataStrc: { pRoom: 'D2RoomStrc' } });
+  const basis = recorded(v1852, GRAPH, ['t:D2UnitFindDataStrc', 'c:D2UnitFindDataStrc.pRoom']);
+  assert.equal(includeBasisHolds(basis, GRAPH, gone), false);
+});
+
+test('a changed graph-resolved include list invalidates the text', () => {
+  const basis = recorded(v1852, GRAPH, ['t:D2UnitStrc']);
+  assert.equal(includeBasisHolds(basis, [...GRAPH, 'D2Game/SKILLS/SkillsServer.h'], v1852), false);
+  assert.equal(includeBasisHolds(basis, GRAPH.slice(0, 1), v1852), false);
+});
+
+test('a function that gained a second declaring header invalidates the text', () => {
+  const basis = recorded(v1852, GRAPH, ['f:SKILLS_FindUnitsInRange']);
+  const twice = placement({}, {
+    SKILLS_FindUnitsInRange: [
+      { qualified: 'D2Game::SKILLS::SkillsServer::SKILLS_FindUnitsInRange', header: 'D2Game/SKILLS/SkillsServer.h' },
+      { qualified: 'D2Game::Monster::AI::SKILLS_FindUnitsInRange', header: 'D2Game/Monster/AI/AI.h' },
+    ],
+  });
+  assert.equal(includeBasisHolds(basis, GRAPH, twice), false);
+});
+
+test('a field retyped on a deref chain invalidates the text', () => {
+  const basis = recorded(v1852, GRAPH, ['c:D2UnitFindDataStrc.pRoom']);
+  const retyped = placement({}, {}, { D2UnitFindDataStrc: { pRoom: 'D2ActiveRoomStrc' } });
+  assert.equal(includeBasisHolds(basis, GRAPH, retyped), false);
+});
+
+test('a record without a basis is never reused', () => {
+  assert.equal(includeBasisHolds(undefined, GRAPH, v1852), false);
+});
