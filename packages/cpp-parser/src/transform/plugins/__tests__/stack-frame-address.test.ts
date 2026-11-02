@@ -497,3 +497,88 @@ describe('stack-frame-address: varargs list via va_start', () => {
     assert.ok(out.includes('in_stack_00000004'), out);
   });
 });
+
+describe('stack-frame-address: an address printed against the neighbour of its array', () => {
+  // UIMENU_ShowTermsOfService @0x00433810: a 2-byte slot directly below the line buffer.
+  const TOS = [
+    { name: 'wszLineBuffer', offset: -552, size: 400, isArray: true },
+    { name: 'sStack554', offset: -554, size: 2 },
+  ];
+  const TOS_SRC = (body: string) => `void f() { short sStack554; WCHAR wszLineBuffer[200]; ${body} }`;
+
+  it('re-indexes a scalar subscripted into the array above it', () => {
+    const out = run(TOS_SRC('if (n && (&sStack554)[n] == 0x20) { (&sStack554)[n] = 0; }'), TOS);
+    assert.ok(/wszLineBuffer\[n - 1\] == 0x20/.test(out), out);
+    assert.ok(/wszLineBuffer\[n - 1\] = 0;/.test(out), out);
+    assert.ok(!out.includes('&sStack554'), out);
+  });
+
+  it('keeps the scalar type where the sign could show', () => {
+    const out = run(TOS_SRC('x = (&sStack554)[n] + 1;'), TOS);
+    assert.ok(/\(\(short( int)?\s*\*\)wszLineBuffer\)\[n - 1\]/.test(out), out);
+  });
+
+  it('folds a literal index and leaves index 0, the scalar itself', () => {
+    assert.ok(/wszLineBuffer\[2\] = 0/.test(run(TOS_SRC('(&sStack554)[3] = 0;'), TOS)));
+    assert.ok(run(TOS_SRC('(&sStack554)[0] = 0;'), TOS).includes('(&sStack554)[0]'));
+  });
+
+  it('leaves a scalar that is not directly below, or narrower than the element', () => {
+    const gap = [{ name: 'wszLineBuffer', offset: -552, size: 400, isArray: true }, { name: 'sStack554', offset: -556, size: 2 }];
+    assert.ok(run(TOS_SRC('(&sStack554)[n] = 0;'), gap).includes('(&sStack554)[n]'));
+    const narrow = `void f() { char c; WCHAR wszLineBuffer[200]; (&c)[n] = 0; }`;
+    assert.ok(run(narrow, [{ name: 'wszLineBuffer', offset: -552, size: 400, isArray: true }, { name: 'c', offset: -553, size: 1 }])
+      .includes('(&c)[n]'));
+  });
+
+  // PALSHIFT_LoadMonsterPalShift @0x00477170: the strcat scan starts one byte below szFilePath.
+  const PAL = [
+    { name: 'szFilePath', offset: -276, size: 256, isArray: true },
+    { name: 'iMonIdx', offset: -280, size: 4 },
+  ];
+  const PAL_SRC = (body: string) => `void f() { uint32_t iMonIdx; char szFilePath[256]; ${body} }`;
+
+  it('anchors a byte cursor below a byte array on the array, not the scalar under it', () => {
+    const out = run(PAL_SRC('pSrc = (char *)((int)&iMonIdx + 3);'), PAL);
+    assert.ok(/\(char\s*\*\)\(\(int\)&szFilePath - 1\)/.test(out), out);
+    assert.ok(!out.includes('iMonIdx +'), out);
+  });
+
+  it('leaves the scalar\'s last byte when nothing walks it as bytes', () => {
+    assert.ok(run(PAL_SRC('n = (int)&iMonIdx + 3;'), PAL).includes('(int)&iMonIdx + 3'));
+    assert.ok(run(PAL_SRC('p = (int *)((int)&iMonIdx + 3);'), PAL).includes('(int)&iMonIdx + 3'));
+    assert.ok(run(PAL_SRC('pSrc = (char *)((int)&iMonIdx + 2);'), PAL).includes('(int)&iMonIdx + 2'));
+  });
+
+  it('re-anchors an offset that leaves the scalar on the array that covers it', () => {
+    const out = run(PAL_SRC('n = (int)&iMonIdx + 10;'), PAL);
+    assert.ok(/\(int\)&szFilePath \+ 6/.test(out), out);
+  });
+
+  // AITHINK_Fn1_WillOWisp @0x005f39b0: EBP-0x2f4 + i*4 is aWispPattern (frame -560) minus 200.
+  const WISP = [
+    { name: 'aWispPattern', offset: -560, size: 448, isArray: true },
+    { name: 'nFindFuncAddr', offset: -608, size: 4 },
+  ];
+  const WISP_SRC = (body: string) =>
+    `void f() { int aiStackY_2f8[38]; uint32_t nFindFuncAddr; POINT aWispPattern[56]; ${body} }`;
+
+  it('re-anchors an unlisted below-frame array onto the array it reaches, with a negative offset', () => {
+    const out = run(WISP_SRC('x = a + aiStackY_2f8[(k + j * 4) * 2]; y = b + aiStackY_2f8[(k + j * 4) * 2 + 1];'), WISP);
+    assert.ok(/x = a \+ \(\(int\s*\*\)aWispPattern\)\[\(k \+ j \* 4\) \* 2 - 50\]/.test(out), out);
+    assert.ok(/y = b \+ \(\(int\s*\*\)aWispPattern\)\[\(k \+ j \* 4\) \* 2 - 49\]/.test(out), out);
+    assert.ok(!out.includes('aiStackY_2f8'), out);
+  });
+
+  it('leaves an unlisted array the body writes, or one too far below to reach', () => {
+    assert.ok(run(WISP_SRC('aiStackY_2f8[i] = 1; x = aiStackY_2f8[i];'), WISP).includes('aiStackY_2f8[i] = 1'));
+    const far = `void f() { int aiStackY_5f8[38]; POINT aWispPattern[56]; x = aiStackY_5f8[i]; }`;
+    assert.ok(run(far, WISP).includes('aiStackY_5f8[i]'));
+  });
+
+  it('never reads an offset out of a name the frame lists', () => {
+    const listed = [...WISP, { name: 'aiStack_2f8', offset: -760, size: 152, isArray: true }];
+    const out = run(`void f() { int aiStack_2f8[38]; POINT aWispPattern[56]; x = aiStack_2f8[i]; }`, listed);
+    assert.ok(out.includes('aiStack_2f8[i]'), out);
+  });
+});

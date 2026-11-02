@@ -102,6 +102,8 @@ import { createPlugin } from '../registry.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { memoOnInputs, hasOwnKeys, type MemoSlot } from './input-memo.js';
 import { Expr, Type, Stmt, Decl } from '../../../ast/factory.js';
+import { emit } from '../../../emit/index.js';
+import type { AnyNode } from '../../../ast/nodes.js';
 
 /** One entry of Ghidra's stack frame: a named variable at a signed byte offset. */
 export interface StackSlot {
@@ -1114,6 +1116,329 @@ function createArrayEndAddressTransformer(slots: StackSlot[]): Transformer {
   };
 }
 
+const BYTE_TYPE_RE = /^(?:char|signed char|unsigned char|uint8_t|int8_t|byte|uchar|BYTE|CHAR|UCHAR|undefined1)$/;
+const WORD_TYPE_RE = /^(?:short|short int|unsigned short|unsigned short int|ushort|uint16_t|int16_t|wchar_t|WCHAR|WORD|SHORT|USHORT|undefined2)$/;
+const DWORD_TYPE_RE = /^(?:int|unsigned|unsigned int|uint|long|unsigned long|ulong|int32_t|uint32_t|DWORD|LONG|ULONG|UINT|INT|BOOL|undefined4|float)$/;
+
+function typeSpelling(t: TypeNode): string {
+  return emit(t as unknown as AnyNode).replace(/\s+/g, ' ').trim();
+}
+
+/** The byte size a scalar type's spelling names, or null when it is not one this pass knows. */
+function scalarSpellingSize(t: TypeNode): number | null {
+  if (t.kind === NodeKind.PointerType) return 4;
+  const s = typeSpelling(t);
+  if (BYTE_TYPE_RE.test(s)) return 1;
+  if (WORD_TYPE_RE.test(s)) return 2;
+  if (DWORD_TYPE_RE.test(s)) return 4;
+  return null;
+}
+
+/**
+ * The frame offset an UNLISTED decompiler array name encodes: `aiStackY_2f8` is
+ * frame -0x2f8. Ghidra prints `<prefix>Stack_<hex>` for a position, and adds the
+ * `Y` when the position lies below the frame it modelled. Only names the frame
+ * does not list are read, so a hand-given name never contributes an offset.
+ */
+function unlistedArrayOffset(name: string): number | null {
+  const m = /^[a-z]{1,6}Stack(?:Y)?_([0-9a-fA-F]+)$/.exec(name);
+  if (!m) return null;
+  const magnitude = Number.parseInt(m[1], 16);
+  if (!Number.isSafeInteger(magnitude) || magnitude <= 0) return null;
+  return -magnitude;
+}
+
+/** `i - d`, folding a literal index or a literal tail so `k + 1 - 50` prints `k - 49`. */
+function shiftedIndex(index: Expression, d: number): Expression {
+  if (d === 0) return index;
+  const e = unwrapParens(index);
+  if (e.kind === NodeKind.IntegerLiteral) {
+    const v = Number((e as IntegerLiteralExpr).value) - d;
+    return v < 0 ? Expr.unary('-', Expr.intLiteral(-v)) : Expr.intLiteral(v);
+  }
+  if (e.kind === NodeKind.BinaryExpr) {
+    const b = e as BinaryExpr;
+    const r = unwrapParens(b.right);
+    if ((b.operator === '+' || b.operator === '-') && r.kind === NodeKind.IntegerLiteral) {
+      const k = Number((r as IntegerLiteralExpr).value) * (b.operator === '+' ? 1 : -1) - d;
+      if (k === 0) return b.left;
+      return Expr.binary(b.left, k > 0 ? '+' : '-', Expr.intLiteral(Math.abs(k)));
+    }
+  }
+  return Expr.binary(index, '-', Expr.intLiteral(d));
+}
+
+/**
+ * An address Ghidra printed against the NEIGHBOUR of the object it really
+ * reaches: a named frame local, or a position below the frame, that sits next to
+ * an array, with an offset or index that walks into the array.
+ *
+ * In the image the two are one address. In the rebuild they are separate
+ * locals the compiler places anywhere, so the access reads or writes the wrong
+ * object with no diagnostic. Each is respelled against the array, at the same
+ * address and the same access width:
+ *
+ *  - `(&sStack554)[n]`, a 2-byte scalar directly below `WCHAR wszLineBuffer[200]`
+ *    (`UIMENU_ShowTermsOfService` @0x00433810, trimming a trailing blank):
+ *    `wszLineBuffer[n - 1]`. Held to a declared scalar local immediately below a
+ *    declared array whose element is as wide as the scalar, and an index that is
+ *    not the literal 0 (index 0 is the scalar itself). Where the element types
+ *    are spelled differently the scalar's type is kept with a cast
+ *    (`((short*)wszLineBuffer)[n - 1]`), except as the target of `=` or an
+ *    operand of `==`/`!=` against a literal the narrower sign cannot change.
+ *
+ *  - `(char*)((int)&iMonIdx + 3)`, the byte below `char szFilePath[256]` where
+ *    an inlined `strcat` starts its pre-incremented scan
+ *    (`PALSHIFT_LoadMonsterPalShift` @0x00477170): `(char*)((int)&szFilePath - 1)`.
+ *    That byte is the scalar's own last byte, so the step is only taken when the
+ *    sum is cast to a pointer to a BYTE and the array is a byte array: a read of
+ *    a scalar's high byte prints as `x._3_1_`, never as a `char*` into it. An
+ *    offset that leaves the scalar altogether is re-anchored on the array that
+ *    covers it in any context.
+ *
+ *  - `aiStackY_2f8[i]`, a decompiler array the frame does not list, below a
+ *    declared array (`AITHINK_Fn1_WillOWisp` @0x005f39b0: EBP-0x2f4 + i*4 against
+ *    `POINT aWispPattern[56]` at -0x230): `((int*)aWispPattern)[i - 50]`. Held
+ *    to an alias the body only ever READS by subscript - it is never written,
+ *    so in the rebuild every read is of uninitialised storage - whose element
+ *    divides the array's stride, and a distance that is a whole number of
+ *    elements no further than the array is long (the same reach as the
+ *    `stack0x` rule above). The nearest such array wins. The alias declaration
+ *    goes when nothing references it any more.
+ */
+function createNeighbourAnchorTransformer(slots: StackSlot[]): Transformer {
+  return (root: ASTNode) => {
+    const elementSizes = arrayElementSizes(root, slots);
+    if (elementSizes.size === 0) return root;
+
+    const declTypes = new Map<string, TypeNode | null>();
+    for (const n of traverseAST(root)) {
+      if (n.kind !== NodeKind.VariableDecl) continue;
+      const d = n as VariableDecl;
+      const name = d.name?.name;
+      if (!name || !d.type) continue;
+      declTypes.set(name, declTypes.has(name) ? null : d.type);
+    }
+    const slotByName = new Map<string, StackSlot | null>();
+    for (const s of slots) slotByName.set(s.name, slotByName.has(s.name) ? null : s);
+
+    const arrays = slots.filter((s) => s.isArray && !s.isParameter && elementSizes.has(s.name)
+      && declTypes.get(s.name)?.kind === NodeKind.ArrayType);
+    const elementType = (name: string): TypeNode =>
+      (declTypes.get(name) as ArrayType).elementType;
+
+    /** A declared scalar frame local, by the name `&x` takes. */
+    function scalarSlot(e: Expression): StackSlot | null {
+      const u = unwrapParens(e);
+      if (u.kind !== NodeKind.UnaryExpr || (u as UnaryExpr).operator !== '&') return null;
+      const id = unwrapParens((u as UnaryExpr).operand);
+      if (id.kind !== NodeKind.Identifier) return null;
+      const s = slotByName.get((id as Identifier).name);
+      if (!s || s.isArray || s.isParameter) return null;
+      const t = declTypes.get(s.name);
+      if (!t || t.kind === NodeKind.ArrayType) return null;
+      return s;
+    }
+
+    /** The array directly above `x` whose element is as wide as `x`, or null. */
+    function arrayAbove(x: StackSlot): StackSlot | null {
+      const hits = arrays.filter((a) => a.offset === x.offset + x.size && elementSizes.get(a.name) === x.size);
+      return hits.length === 1 ? hits[0] : null;
+    }
+
+    // ---- `(&x)[i]`: the scalar indexed into the array above it -----------------
+    function scalarRun(s: SubscriptExpr): { x: StackSlot; a: StackSlot } | null {
+      const x = scalarSlot(s.array);
+      if (!x) return null;
+      const idx = unwrapParens(s.index);
+      if (idx.kind === NodeKind.IntegerLiteral && Number((idx as IntegerLiteralExpr).value) <= 0) return null;
+      const a = arrayAbove(x);
+      return a ? { x, a } : null;
+    }
+
+    // A store, or an equality against a literal both signs agree on, cannot see
+    // the element's signedness; record those sites by location before the
+    // bottom-up walk copies the nodes.
+    const signFree = new Set<unknown>();
+    const literalFitsBoth = (e: Expression, size: number): boolean => {
+      const l = unwrapParens(e);
+      if (l.kind !== NodeKind.IntegerLiteral) return false;
+      const v = Number((l as IntegerLiteralExpr).value);
+      return v >= 0 && v < 2 ** (size * 8 - 1);
+    };
+    for (const n of traverseAST(root)) {
+      if (n.kind === NodeKind.AssignExpr && (n as AssignExpr).operator === '=') {
+        const l = unwrapParens((n as AssignExpr).left);
+        if (l.kind === NodeKind.SubscriptExpr) signFree.add(l.location);
+      } else if (n.kind === NodeKind.BinaryExpr && ['==', '!='].includes((n as BinaryExpr).operator)) {
+        const b = n as BinaryExpr;
+        for (const [side, other] of [[b.left, b.right], [b.right, b.left]] as const) {
+          const l = unwrapParens(side);
+          if (l.kind !== NodeKind.SubscriptExpr) continue;
+          const run = scalarRun(l as SubscriptExpr);
+          if (run && literalFitsBoth(other, run.x.size)) signFree.add(l.location);
+        }
+      }
+    }
+
+    function elementBase(a: StackSlot, wanted: TypeNode, keepType: boolean): Expression {
+      const id = Expr.identifier(a.name);
+      if (!keepType || typeSpelling(wanted) === typeSpelling(elementType(a.name))) return id;
+      return Expr.paren(Expr.cast(Type.pointer(wanted), id));
+    }
+
+    // ---- `(T)&x + K` that leaves `x`, or lands on the byte below a byte array --
+    function offsetSum(b: BinaryExpr, bytePointer: boolean): BinaryExpr | Expression | null {
+      if (b.operator !== '+' && b.operator !== '-') return null;
+      const k0 = unwrapParens(b.right);
+      if (k0.kind !== NodeKind.IntegerLiteral) return null;
+      const k = Number((k0 as IntegerLiteralExpr).value) * (b.operator === '+' ? 1 : -1);
+      const left = unwrapParens(b.left);
+      if (left.kind !== NodeKind.CStyleCastExpr) return null;
+      const cast = left as CStyleCastExpr;
+      const castsToInteger = isIntegerType(cast.type);
+      const castsToBytes = cast.type.kind === NodeKind.PointerType
+        && scalarSpellingSize((cast.type as PointerType).pointee) === 1;
+      if (!castsToInteger && !castsToBytes) return null;
+      const x = scalarSlot(cast.expression);
+      if (!x) return null;
+      const t = x.offset + k;
+
+      let target: StackSlot | undefined;
+      if (t < x.offset || t >= x.offset + x.size) {
+        target = arrays.find((a) => t >= a.offset && t < a.offset + a.size);
+        if (!target) {
+          const owned = slots.some((s) => t >= s.offset && t < s.offset + Math.max(s.size, 1));
+          if (!owned) target = arrays.find((a) => a.offset - 1 === t);
+        }
+      } else if (bytePointer && t === x.offset + x.size - 1) {
+        target = arrays.find((a) => a.offset - 1 === t && elementSizes.get(a.name) === 1);
+      }
+      if (!target) return null;
+      const delta = t - target.offset;
+      const anchored: CStyleCastExpr = {
+        ...cast, expression: Expr.unary('&', Expr.identifier(target.name)),
+      };
+      if (delta === 0) return anchored;
+      return { ...b, operator: delta > 0 ? '+' : '-', left: anchored, right: Expr.intLiteral(Math.abs(delta)) } as BinaryExpr;
+    }
+
+    // ---- `aiStackY_2f8[i]`: an unlisted array below a declared one ---------------
+    const aliasTargets = new Map<string, { a: StackSlot; d: number; type: TypeNode }>();
+    {
+      const uses = new Map<string, { reads: number; other: number }>();
+      const count = (name: string, read: boolean) => {
+        const u = uses.get(name) ?? { reads: 0, other: 0 };
+        if (read) u.reads++; else u.other++;
+        uses.set(name, u);
+      };
+      const written = new Set<unknown>();
+      for (const n of traverseAST(root)) {
+        if (n.kind === NodeKind.AssignExpr) written.add(unwrapParens((n as AssignExpr).left).location);
+        if ((n.kind === NodeKind.UnaryExpr && ['&', '++', '--'].includes((n as UnaryExpr).operator))
+          || n.kind === NodeKind.PostfixExpr) {
+          written.add(unwrapParens((n as UnaryExpr).operand).location);
+        }
+      }
+      const subscriptBases = new Set<unknown>();
+      for (const n of traverseAST(root)) {
+        if (n.kind !== NodeKind.SubscriptExpr) continue;
+        const base = unwrapParens((n as SubscriptExpr).array);
+        if (base.kind !== NodeKind.Identifier) continue;
+        subscriptBases.add(base);
+        count((base as Identifier).name, !written.has(n.location));
+      }
+      for (const n of traverseAST(root)) {
+        if (n.kind === NodeKind.Identifier && !subscriptBases.has(n)) count((n as Identifier).name, false);
+      }
+      for (const [name, t] of declTypes) {
+        if (!t || t.kind !== NodeKind.ArrayType || slotByName.has(name)) continue;
+        const o = unlistedArrayOffset(name);
+        if (o === null) continue;
+        if (slots.some((s) => o >= s.offset && o < s.offset + Math.max(s.size, 1))) continue;
+        const u = uses.get(name);
+        // The declaration's own name is the one non-subscript use allowed.
+        if (!u || u.reads === 0 || u.other !== 1) continue;
+        const elem = (t as ArrayType).elementType;
+        const e = scalarSpellingSize(elem);
+        if (!e) continue;
+        let best: StackSlot | undefined;
+        for (const a of arrays) {
+          const dist = a.offset - o;
+          if (dist <= 0 || dist % e !== 0 || dist > a.size) continue;
+          if ((elementSizes.get(a.name)! % e) !== 0) continue;
+          if (!best || a.offset < best.offset) best = a;
+        }
+        if (best) aliasTargets.set(name, { a: best, d: (best.offset - o) / e, type: elem });
+      }
+    }
+
+    const rewritten = createTransformer({
+      visitNode(node: ASTNode): ASTNode | undefined {
+        if (node.kind === NodeKind.SubscriptExpr) {
+          const s = node as SubscriptExpr;
+          const base = unwrapParens(s.array);
+          if (base.kind === NodeKind.Identifier) {
+            const hit = aliasTargets.get((base as Identifier).name);
+            if (!hit) return undefined;
+            return { ...s, array: elementBase(hit.a, hit.type, true), index: shiftedIndex(s.index, hit.d) } as SubscriptExpr;
+          }
+          const run = scalarRun(s);
+          if (!run) return undefined;
+          const d = (run.a.offset - run.x.offset) / run.x.size;
+          const keepType = !signFree.has(s.location);
+          return {
+            ...s,
+            array: elementBase(run.a, declTypes.get(run.x.name)!, keepType),
+            index: shiftedIndex(s.index, d),
+          } as SubscriptExpr;
+        }
+        if (node.kind === NodeKind.BinaryExpr) {
+          return offsetSum(node as BinaryExpr, false) ?? undefined;
+        }
+        if (node.kind === NodeKind.CStyleCastExpr) {
+          const c = node as CStyleCastExpr;
+          if (c.type.kind !== NodeKind.PointerType || scalarSpellingSize((c.type as PointerType).pointee) !== 1) return undefined;
+          const inner = unwrapParens(c.expression);
+          if (inner.kind !== NodeKind.BinaryExpr) return undefined;
+          const sum = offsetSum(inner as BinaryExpr, true);
+          return sum ? { ...c, expression: Expr.paren(sum) } as CStyleCastExpr : undefined;
+        }
+        return undefined;
+      },
+    })(root);
+
+    if (aliasTargets.size === 0) return rewritten;
+    // Drop an alias declaration nothing references any more.
+    const stillUsed = new Set<string>();
+    for (const n of traverseAST(rewritten)) {
+      if (n.kind === NodeKind.Identifier) stillUsed.add((n as Identifier).name);
+    }
+    return createKindTransformer(NodeKind.CompoundStmt, (node) => {
+      const c = node as CompoundStmt;
+      const kept = c.statements.filter((st) => {
+        if (st.kind !== NodeKind.DeclStmt) return true;
+        const decls = (st as DeclStmt).declarations as VariableDecl[];
+        return !(decls.length === 1 && aliasTargets.has(decls[0].name?.name ?? '')
+          && !usedOutsideDecl(rewritten, decls[0].name.name));
+      });
+      return kept.length === c.statements.length ? undefined : { ...c, statements: kept } as CompoundStmt;
+    })(rewritten);
+  };
+}
+
+/** Is `name` referenced anywhere except as the name of its own declaration? */
+function usedOutsideDecl(root: ASTNode, name: string): boolean {
+  const declNames = new Set<unknown>();
+  for (const n of traverseAST(root)) {
+    if (n.kind === NodeKind.VariableDecl) declNames.add((n as VariableDecl).name);
+  }
+  for (const n of traverseAST(root)) {
+    if (n.kind === NodeKind.Identifier && (n as Identifier).name === name && !declNames.has(n)) return true;
+  }
+  return false;
+}
+
 /** The local every rewritten varargs reference reads: `va_list __va; va_start(__va, last);`. */
 const VA_LIST_NAME = '__va';
 
@@ -1278,6 +1603,8 @@ function createStackFrameAddressTransformer(options: StackFrameAddressOptions = 
     // Independent of the `stack0x` rules: a NAMED local whose address is the end of
     // the array below it.
     slots.length > 0 ? createArrayEndAddressTransformer(slots) : ((node: ASTNode) => node),
+    // Its mirror: a named local, or an unlisted position, just BELOW an array.
+    slots.length > 0 ? createNeighbourAnchorTransformer(slots) : ((node: ASTNode) => node),
     createDeadFrameStoreTransformer(),
   );
 }
