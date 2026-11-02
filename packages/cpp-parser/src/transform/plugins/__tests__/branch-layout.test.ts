@@ -704,18 +704,51 @@ describe('earlyReturnPlugin - gated by the layout', () => {
     assert.ok(out.includes('return 0; G(h); return 1;'), out);
   });
 
-  it('makes the guard when the body falls through into a copy of the return', () => {
-    // Which copy of the return keeps the code is not the layout's to say: VC8 emits one per
-    // path for some sources (SPELLSEL_FindChargedSkill1) and one for both for others.
-    const out = er([
+  // TSGrowableArray_Ui_RoundToChunk 004210e0: `if (n % m != 0) { n += m - n % m; } return n;`
+  // is the original's single exit; the guard would only clone the return.
+  it('keeps the nest when the body cannot leave', () => {
+    const lines = [
       'int f(int h) {',
       '[if 0x4b 0x48,0x4b] if (h == 2) {',
       '[0x4e] G(h);',
       '}',
       '[0x5d,0x62] return 1;',
       '}',
+    ];
+    assert.ok(er(lines).includes('if (h == 2) { G(h); } return 1;'), er(lines));
+  });
+
+  // SPELLSEL_FindChargedSkill1: VC8 emitted one return copy per path, the guard's layout.
+  it('makes the guard for a body that cannot leave where the original falls into the return', () => {
+    const { code, ev } = fixture([
+      'int f(int h) {',
+      '[if 0x4b 0x48,0x4b] if (h == 2) {',
+      '[0x5d] G(h);',
+      '}',
+      '[0x4e,0x54] return 1;',
+      '}',
     ]);
+    const edges = [{ line: 2, ord: 0, keyword: 'if' as const, jcc: 0x4b, target: 0x5d, fall: 0x4e, fallLines: [5], takenLines: [3] }];
+    const out = flat(emit(earlyReturnPlugin.createTransformer({ branchLayout: { ...ev, edges } })(parse(code)) as AnyNode));
     assert.ok(/if \(h != 2\)\s*return 1;/.test(out), out);
+  });
+
+  // SKILL_ExecuteSelectProc 004642b0: the tail test jumps to the return the failing outer
+  // condition shares; flattened, `if (r) return 1; return 0;` folds to NEG/SBB/NEG.
+  it('keeps the nest whose body ends in a constant return test before a constant return', () => {
+    const out = er([
+      'int f(int h, int g) {',
+      '[if 0x10 0x8,0x10] if (h != 0 && g < 7) {',
+      '[0x20] int r = G(h);',
+      '[if 0x28 0x26,0x28] if (r != 0) {',
+      '[0x2a,0x2f] return 1;',
+      '}',
+      '}',
+      '[0x30,0x32] return 0;',
+      '}',
+    ]);
+    assert.ok(out.includes('if (r != 0) { return 1; } } return 0;'), out);
+    assert.ok(!/return 1; return 0;/.test(out), out);
   });
 
   it('reads a tail call printed on the call and on the return as the body\'s (TEXT_GetOverheadSpeakerUnit)', () => {

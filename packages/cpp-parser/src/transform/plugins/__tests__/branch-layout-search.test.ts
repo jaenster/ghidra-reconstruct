@@ -384,11 +384,13 @@ describe('a return copy that loads its own value: the source had no guard', () =
     assert.ok(flatten(['MOV/EAX', 'POP/ESI', 'RET']).includes('if (p[0] != 0) { p[1] = 3; } return 1;'), flatten(['MOV/EAX', 'POP/ESI', 'RET']));
   });
 
-  it('and makes the guard as before when the copy holds no load', () => {
-    assert.ok(flatten(['POP/ESI', 'RET']).includes('if (p[0] == 0) return 1; p[1] = 3; return 1;'), flatten(['POP/ESI', 'RET']));
+  // The body cannot leave and the test falls into it: Ghidra's single exit, kept whatever
+  // the copy holds (early-return's gate for a body that cannot leave).
+  it('and keeps the single exit when the copy holds no load', () => {
+    assert.ok(flatten(['POP/ESI', 'RET']).includes('if (p[0] != 0) { p[1] = 3; } return 1;'), flatten(['POP/ESI', 'RET']));
   });
 
-  it('the guard keeps the values', native, () => {
+  it('the kept form keeps the values', native, () => {
     sameValues(nestedForm, flatten(['POP/ESI', 'RET']), INPUTS);
   });
 

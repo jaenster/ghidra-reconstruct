@@ -31,10 +31,12 @@
  * (checked with the VC8 oracle: TEXT_GetOverheadSpeakerUnit, GetAnimOrSeqMode's `&&`,
  * deflateTune's two tests). An if a pass split off one decompiled `&&` (`if (a && (x = e,
  * x))` -> `if (a) { x = e; if (x) ... }`) takes that line's branch, and its BODY, which
- * runs on only through the split ifs, counts as leaving. Where the layout cannot tell (an `||` condition, whose
- * BODY VC8 moves out of line, an if inside a loop, an arm without code of its own, a BODY
- * that falls through into a copy of the return, a void function's implicit end) the guard
- * is made as before.
+ * runs on only through the split ifs, counts as leaving. A BODY that cannot leave at all is
+ * Ghidra's single exit and keeps its nest unless the original fell into the return; a BODY
+ * ending in `if (x) return K;` before a constant return keeps the nest so the two share the
+ * return. Where the layout cannot tell (an `||` condition, whose BODY VC8 moves out of line,
+ * an if inside a loop, an arm without code of its own, a void function's implicit end) the
+ * guard is made as before.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -234,6 +236,43 @@ function chainLeaves(s: Statement, line: number): boolean {
   return isTerminator(last) || chainLeaves(last, line);
 }
 
+/**
+ * Whether control can leave `stmts` other than by falling off their end: a return or goto
+ * anywhere, or a break/continue not caught by a loop or switch inside them.
+ */
+function canLeave(stmts: readonly Statement[]): boolean {
+  const go = (n: ASTNode, inLoop: boolean, inSwitch: boolean): boolean => {
+    switch (n.kind) {
+      case NodeKind.ReturnStmt: case NodeKind.GotoStmt: return true;
+      case NodeKind.BreakStmt: return !inLoop && !inSwitch;
+      case NodeKind.ContinueStmt: return !inLoop;
+      case NodeKind.LambdaExpr: return false;
+    }
+    const loop = inLoop || isLoop(n);
+    const sw = inSwitch || n.kind === NodeKind.SwitchStmt;
+    return getChildren(n).some(k => go(k, loop, sw));
+  };
+  return stmts.some(s => go(s, false, false));
+}
+
+/**
+ * `if (x) { return K; }` with no else, K a constant, or a no-else if whose arm falls
+ * through only into one: the nest ends in a test that leaves with a constant.
+ */
+function returnsConstantTail(s: Statement): boolean {
+  if (s.kind !== NodeKind.IfStmt) return false;
+  const i = s as IfStmt;
+  if (i.elseBranch) return false;
+  const arm = i.thenBranch.kind === NodeKind.CompoundStmt ? (i.thenBranch as CompoundStmt).statements : [i.thenBranch];
+  if (arm.length === 0) return false;
+  const last = arm[arm.length - 1];
+  if (arm.length === 1 && last.kind === NodeKind.ReturnStmt) {
+    const v = (last as ReturnStmt).value;
+    return !!v && constantValue(v);
+  }
+  return returnsConstantTail(last);
+}
+
 /** The if's conditional jump goes backward to the start of a return copy of the original. */
 function backIntoCopy(reader: LayoutReader, ifs: IfStmt): boolean {
   const e = reader.edge(ifs);
@@ -271,7 +310,20 @@ function layoutGate(ev: BranchLayoutEvidence, body: CompoundStmt): GuardGate {
     // emits one per path or merges them) is not the layout's to say. Except where BODY
     // runs on only through the ifs a pass split off this one decompiled condition: the
     // decompiler's BODY left.
-    if (!isTerminator(stmts[stmts.length - 1]) && !chainLeaves(stmts[stmts.length - 1], ifs.location.start.line)) return true;
+    if (!isTerminator(stmts[stmts.length - 1]) && !chainLeaves(stmts[stmts.length - 1], ifs.location.start.line)) {
+      // A BODY that cannot leave is Ghidra's single exit, `if (n % m) { n += ...; } return n;`
+      // (TSGrowableArray_Ui_RoundToChunk 004210e0, Q20_SequenceFilter 005b9610): the guard
+      // only clones the return, and VC8 lays the clone out where the original had none.
+      // Made only where the original fell into the return and jumped to BODY - the guard's
+      // own layout, one return copy per path (SPELLSEL_FindChargedSkill1).
+      if (!canLeave(stmts)) return reader.fallInto(ifs) === 'other';
+      // `if (C) { ...; if (x) { return 1; } } return 0;`: the tail test jumps to the return
+      // the failing C shares (SKILL_ExecuteSelectProc 004642b0, BNCLIENT_IsSocketConnected
+      // 0051ca30). Flattened, `if (x) return 1; return 0;` stands alone and VC8 folds it
+      // to NEG/SBB/NEG.
+      if (constantValue(ret.value) && returnsConstantTail(stmts[stmts.length - 1])) return false;
+      return true;
+    }
     // An `||` condition puts a leaving BODY out of line after what follows, so the nest's
     // layout is not BODY first either; a leaving arm in a loop is laid out apart from
     // either form.
