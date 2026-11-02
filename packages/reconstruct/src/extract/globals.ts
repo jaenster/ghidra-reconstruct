@@ -26,6 +26,9 @@ export interface GlobalExtractionOptions {
   /** Filter by name pattern (supports wildcards) */
   filter?: string;
 
+  /** Filter by a regular expression over the name */
+  regex?: string;
+
   /** Filter by namespace */
   namespace?: string;
 
@@ -66,7 +69,7 @@ export async function extractGlobals(
   globals: ExtractedGlobal[];
   total: number;
 }> {
-  const { filter, namespace, limit = 100, offset = 0 } = options;
+  const { filter, regex, namespace, limit = 100, offset = 0 } = options;
 
   const params: Record<string, unknown> = {
     offset,
@@ -75,6 +78,7 @@ export async function extractGlobals(
   };
 
   if (filter) params.filter = filter;
+  if (regex) params.regex = regex;
 
   const result = await connection.sendCommand<{
     globals: GhidraGlobalVariableInfo[];
@@ -467,19 +471,31 @@ export async function analyzeDataSymbols(
   onProgress?: (fetched: number, total: number) => void
 ): Promise<AnalyzedDataSymbol[]> {
   const globals = await extractAllGlobals(connection, options, onProgress);
+  const out: AnalyzedDataSymbol[] = [];
+  for (const g of globals) {
+    const analyzed = analyzeDataSymbol(g);
+    if (analyzed) out.push(analyzed);
+  }
+  return out;
+}
 
-  return globals
-    .map(g => namedStringAsCharArray(g) ?? g)
-    .filter(g => !isStringType(g.dataType))
-    .map(global => ({
-      ...global,
-      scope: determineScope(global),
-      suggestedName: inferName(global),
-      suggestedType: inferType(global.dataType),
-      ownerFunction: (global.referencingFunctions?.length === 1)
-        ? stripNamespacePrefix(global.referencingFunctions[0])
-        : undefined,
-    }));
+/**
+ * One listed global as analyzeDataSymbols records it, or null for a string it leaves
+ * out. Per symbol: nothing here reads another symbol, so a global added later is
+ * analysed exactly as the full pass would have.
+ */
+export function analyzeDataSymbol(row: ExtractedGlobal): AnalyzedDataSymbol | null {
+  const g = namedStringAsCharArray(row) ?? row;
+  if (isStringType(g.dataType)) return null;
+  return {
+    ...g,
+    scope: determineScope(g),
+    suggestedName: inferName(g),
+    suggestedType: inferType(g.dataType),
+    ownerFunction: (g.referencingFunctions?.length === 1)
+      ? stripNamespacePrefix(g.referencingFunctions[0])
+      : undefined,
+  };
 }
 
 /**

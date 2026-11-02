@@ -85,9 +85,9 @@ test('a struct that points at a renamed type is read again, and so is a global o
         if (params.name === 'D2UnitDataPlayerStrc') return { name: 'D2UnitDataPlayerStrc', category: '/', type: 'Structure', size: 4, fields: [{ name: 'pTradeCopyInventory', dataType: 'D2TradeRecordStrc *', offset: 0, length: 4 }] };
         return { name: params.name, category: params.category, type: 'Structure', size: 24, fields: [] };
       }
-      if (cmd === 'list_data_symbols') { asked.push(`global:${params.filter}`); return { symbols: [] }; }
+      if (cmd === 'list_data_symbols') { asked.push(`global:${params.regex}`); return { total: 1, globals: [{ name: 'gpTradeRecord', address: '00700000', dataType: 'D2TradeRecordStrc *', size: 4, referencingFunctions: [] }] }; }
       if (cmd === 'decompile') return { pseudocode: 'void PLAYERTRADE_Accept(D2TradeRecordStrc *pRecord) {}' };
-      if (cmd === 'execute_script') return { success: true, output: '' };
+      if (cmd === 'execute_script') return { success: true, output: String(params.code).includes('String[] addrs') ? '00700000\tgpTradeRecord\n' : '' };
       return {};
     },
   } as never;
@@ -97,7 +97,8 @@ test('a struct that points at a renamed type is read again, and so is a global o
   } as ChangeEvent;
   await applyEvents(m, buildIndices(m), [ev], client);
   assert.ok(asked.includes('D2UnitDataPlayerStrc'));
-  assert.ok(asked.includes('global:gpTradeRecord'));
+  assert.ok(asked.includes('global:^gpTradeRecord$'), asked.join(', '));
+  assert.equal(m.primary.globals.find(g => g.name === 'gpTradeRecord')!.dataType, 'D2TradeRecordStrc *');
   const player = m.primary.dataTypes.find(t => t.name === 'D2UnitDataPlayerStrc') as unknown as { fields: { dataType: string }[] };
   assert.equal(player.fields[0].dataType, 'D2TradeRecordStrc *');
 });
