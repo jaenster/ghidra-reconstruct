@@ -767,6 +767,8 @@ export interface FuncPtrArgCastTables {
   unsignedEnums?: string[];
   /** Every enum constant name. */
   enumConstantNames?: string[];
+  /** Enum constant -> the enum declaring it, for names only one enum declares. */
+  enumConstantTypes?: Record<string, string>;
   /** Enum constant → value, for constant names unique program-wide. */
   enumValues?: Record<string, number>;
   /** Callable name (bare AND qualified) → param index → funcdef typedef name */
@@ -2953,6 +2955,7 @@ function transformDecompiledCode(
       };
       perPluginOptions['compare-signedness'] = {
         enumTypes: context.funcPtrArgCasts.enumTypes,
+        enumConstantTypes: context.funcPtrArgCasts.enumConstantTypes,
         globalTypes: context.funcPtrArgCasts.globalTypes,
         fieldTypes: context.funcPtrArgCasts.fieldTypes,
         structFields: context.funcPtrArgCasts.structFields,

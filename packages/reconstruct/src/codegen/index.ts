@@ -6097,18 +6097,30 @@ export function buildFuncPtrArgCastTables(
  * Every enum type and constant name, and the enums Ghidra treats as unsigned (no
  * negative member - the rule enum-width.ts documents), for unsigned-range-compare.
  */
-function buildEnumSignedness(dataTypes: ExtractedDataType[]): { enumTypes: string[]; unsignedEnums: string[]; enumConstantNames: string[] } {
+function buildEnumSignedness(dataTypes: ExtractedDataType[]): {
+  enumTypes: string[]; unsignedEnums: string[]; enumConstantNames: string[]; enumConstantTypes: Record<string, string>;
+} {
   const enumTypes: string[] = [];
   const unsignedEnums: string[] = [];
   const constants = new Set<string>();
+  // Constant -> the enum declaring it; a name two enums declare means neither.
+  const constantTypes: Record<string, string> = {};
+  const ambiguous = new Set<string>();
   for (const dt of dataTypes) {
     if (dt.kind !== 'ENUM') continue;
     const values = (dt as import('../types.js').ExtractedEnum).values ?? [];
     enumTypes.push(dt.name);
     if (!values.some(v => Number(v.value) < 0)) unsignedEnums.push(dt.name);
-    for (const v of values) if (v.name) constants.add(v.name.trim());
+    for (const v of values) {
+      if (!v.name) continue;
+      const name = v.name.trim();
+      constants.add(name);
+      if (ambiguous.has(name)) continue;
+      if (name in constantTypes && constantTypes[name] !== dt.name) { ambiguous.add(name); delete constantTypes[name]; continue; }
+      constantTypes[name] = dt.name;
+    }
   }
-  return { enumTypes, unsignedEnums, enumConstantNames: [...constants] };
+  return { enumTypes, unsignedEnums, enumConstantNames: [...constants], enumConstantTypes: constantTypes };
 }
 
 /** Enum constant → value, for every constant name that means one value program-wide. */

@@ -390,3 +390,51 @@ describe('compare-form keeps the value', { skip: !hasNativeGpp() }, () => {
     ]);
   });
 });
+
+describe('compare-signedness keeps a signed 32-bit compare signed', () => {
+  /** compare-form ties the decisions and records the machine's facts; compare-signedness reads them. */
+  function both(code: string, sites: Site[], decisions: CompareFormDecision[], opts: Record<string, unknown> = {}): string {
+    const tagged = createCompareFormTransformer({ sites, decisions } as CompareFormOptions)(parse(code));
+    return emit(createCompareSignednessTransformer(opts)(tagged) as AnyNode).trim();
+  }
+
+  it('casts arithmetic on an unsigned value: AITHINK_Fn1_Mosquito 005f3730, CMP EAX,0x14; JLE', () => {
+    const sites: Site[] = [{ text: '<', fp: ['c:14', 'e'] }];
+    const out = both('void f(uint32_t nSeedLow) { if (0x14 < nSeedLow % 100) {} }', sites,
+      [dec({ ord: 0, ...sites[0], keep: true, signed: true })]);
+    assert.match(out, /0x14 < \(int32_t\)\(nSeedLow % 100\)/);
+  });
+
+  it('casts an enum constant of an unsigned enum: SCMD_0x58_MarkQuestDone 0054c9c0, CMP EDI,0x2a; JGE', () => {
+    const sites: Site[] = [{ text: '<', fp: ['v:nQuest', 'c:2a'] }];
+    const out = both('void f(int32_t nQuest) { if (nQuest < QUEST_ActIntroduced) {} }', sites,
+      [dec({ ord: 0, ...sites[0], keep: true, signed: true })],
+      { typedefTargets: { eD2Quests: 'uint32_t' }, enumConstantTypes: { QUEST_ActIntroduced: 'eD2Quests' }, enumTypes: ['eD2Quests'] });
+    assert.match(out, /nQuest < \(int32_t\)\(?QUEST_ActIntroduced\)?/);
+  });
+
+  it('leaves a compare C++ already makes signed, an unsigned one, a narrow operand and a pointer alone', () => {
+    const cases: Array<[string, Site, Partial<CompareFormDecision>]> = [
+      ['void f(int32_t n) { if (n < 5) {} }', { text: '<', fp: ['v:n', 'c:5'] }, { signed: true }],
+      ['void f(uint32_t n) { if (n < 5) {} }', { text: '<', fp: ['v:n', 'c:5'] }, {}],
+      ['void f(uint16_t w) { if (w < 5) {} }', { text: '<', fp: ['v:w', 'c:5'] }, { signed: true }],
+      ['void f(uint8_t *p, uint8_t *q) { if (p < q) {} }', { text: '<', fp: ['v:p', 'v:q'] }, { signed: true }],
+      ['void f(uint32_t n) { if (n < 5) {} }', { text: '<', fp: ['v:n', 'c:5'] }, { signed: true, width: 2 }],
+    ];
+    for (const [code, site, extra] of cases) {
+      const out = both(code, [site], [dec({ ord: 0, ...site, keep: true, ...extra })]);
+      assert.ok(!out.includes('int32_t)'), out);
+    }
+  });
+
+  it('records the CMP width on a comparison kept as printed, and the signed width only for a signed Jcc', () => {
+    const sites: Site[] = [{ text: '<', fp: ['v:a', 'c:5'] }, { text: '<', fp: ['v:b', 'c:5'] }];
+    const ast = createCompareFormTransformer({ sites, decisions: [
+      dec({ ord: 0, ...sites[0], keep: true, signed: true }),
+      dec({ ord: 1, ...sites[1], keep: true, width: 2 }),
+    ] } as CompareFormOptions)(parse('void f(int a, short b) { if (a < 5) {} if (b < 5) {} }'));
+    const infos = JSON.stringify(ast, (_k, v) => (typeof v === 'bigint' ? Number(v) : v));
+    assert.match(infos, /"compareWidth":4,"signedJccWidth":4/);
+    assert.match(infos, /"compareWidth":2[^,]/);
+  });
+});

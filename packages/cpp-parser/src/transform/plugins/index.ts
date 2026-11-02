@@ -856,7 +856,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   zeroExtendCastPlugin,       // Matching: a tagged x & 0xffff -> (uint16_t)x where value and type are kept (priority 622)
   compareFormPlugin,          // Fidelity: a comparison in the form its CMP/TEST and Jcc show (priority 3)
   repStringFormPlugin,        // Fidelity: a REP STOS fill as an index loop, a REP MOVS copy as memcpy, from the instruction (priority 4)
-  compareSignednessPlugin,    // Correctness: a comparison compare-form made unsigned stays unsigned (priority 619)
+  compareSignednessPlugin,    // Correctness: a comparison keeps the signedness its instructions show (priority 619)
   importAddressForwarderPlugin, // Platform: &InterlockedCompareExchange -> __stdcall forwarder (priority 31)
   comIUnknownCallPlugin,      // Platform: p->lpVtbl->Release(p) on IUnknown* → p->Release() (priority 616)
   subpieceAccessPlugin,       // Cleanup: expr._N_M_ → *(T *)((char *)expr + N) (priority 46)

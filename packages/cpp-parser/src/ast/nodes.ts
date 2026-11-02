@@ -47,6 +47,18 @@ export interface GhidraMetadata {
    */
   signedCompareWidth?: number;
   /**
+   * The width in bytes of the CMP/TEST that compiled this comparison (`compare-form`, on
+   * every comparison it ties to its instructions). `narrow-local-widen` reads it: a local
+   * declared one or two bytes wide that the original compares at four was an int.
+   */
+  compareWidth?: number;
+  /**
+   * The instructions compare signed at this width - the flags are read by JL/JLE/JG/JGE
+   * (`compare-form`, on every comparison it ties to its instructions). At four bytes,
+   * `compare-signedness` casts an operand that would make the C++ comparison unsigned.
+   */
+  signedJccWidth?: number;
+  /**
    * The conditional is a null-guarded getter's value that `compare-form` wrote back from the
    * decompile's `p && p->f == K`: its test of p was an operand of that `&&` of its own, so a
    * pass counting the decompile's `&&`/`||` operands counts it as one more.
