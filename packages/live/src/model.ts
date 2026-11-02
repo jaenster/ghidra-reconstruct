@@ -89,6 +89,13 @@ export interface ChangeEvent {
   newName?: string;
   /** Ghidra's name for the transaction that produced the event. */
   txDescription?: string;
+  /**
+   * Set by a producer that compared the function's call signature (name, convention,
+   * parameter and return types and storage, varargs, inline, no-return, purge, call
+   * fixup) before and after and found it unchanged: the edit is inside the function,
+   * and its callers decompile exactly as before.
+   */
+  callersUnaffected?: boolean;
 }
 
 export interface AppliedResult {
@@ -116,6 +123,9 @@ export type LiveLog = (message: string) => void;
  * full re-run that also fixes anything the event stream failed to mention.
  */
 const FULL_DECOMPILE_FRACTION = 0.3;
+
+/** Function refreshes in flight at once; the local worker's decompiler pool is per core. */
+const REFRESH_CONCURRENCY = Number(process.env.D2_LIVE_REFRESH_CONCURRENCY ?? '16');
 
 /**
  * A body is scanned for identifiers with a plain lexical regex — no parse.
@@ -456,6 +466,7 @@ export async function applyEvents(
     reextract.add(key);
     affected.add(key);
 
+    if (event.callersUnaffected) continue;
     const existing = indices.fnByAddr.get(key);
     for (const alias of [key, existing?.name, event.oldName, event.newName]) {
       if (!alias) continue;
@@ -473,14 +484,23 @@ export async function applyEvents(
     return result;
   }
 
-  for (const addr of affected) {
-    const replaced = await refreshFunction(model, indices, client, addr, {
-      reextractInfo: reextract.has(addr),
-      timeout,
-      log,
-    });
-    if (replaced) result.touchedFunctions.push(addr);
-  }
+  // In parallel: the worker answers reads concurrently on its decompiler pool, and one
+  // round trip at a time left it idle. Each refresh replaces only its own record, and
+  // the touched list keeps the order of `affected` so what follows is deterministic.
+  const order = [...affected];
+  const replaced = new Array<boolean>(order.length).fill(false);
+  let next = 0;
+  const lanes = Math.max(1, Math.min(REFRESH_CONCURRENCY, order.length));
+  await Promise.all(Array.from({ length: lanes }, async () => {
+    for (let i = next++; i < order.length; i = next++) {
+      replaced[i] = await refreshFunction(model, indices, client, order[i], {
+        reextractInfo: reextract.has(order[i]),
+        timeout,
+        log,
+      });
+    }
+  }));
+  order.forEach((addr, i) => { if (replaced[i]) result.touchedFunctions.push(addr); });
 
   if (result.touchedFunctions.length > 0) {
     recomputeCallEdges(model, indices, result.touchedFunctions);
