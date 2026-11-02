@@ -22,7 +22,7 @@
  *   - each function declares exactly as many `__builtin_alloca` buffers as the
  *     binary has `CALL __alloca_probe_16` sites (2 and 3),
  *   - in `Finish`, the buffer handed to SMemCopy / CryptRSA_Process /
- *     SSYSTEM_MemCompare is `pSig` - the SECOND allocation - and never the
+ *     SMemCmp is `pSig` - the SECOND allocation - and never the
  *     first. This is the exact inversion that made a spelling-only fix unsafe.
  */
 
@@ -93,7 +93,7 @@ describe('SSignature alloca overrides', () => {
     assert.match(body, /CryptRSA_Process\(\s*rsaPair,\s*pSig,/, 'CryptRSA_Process must receive pSig (the second alloca)');
 
     // MemCompare(EBX, EDI, len) — pSig first, pHash second (0041d774/0041d773).
-    assert.match(body, /SSYSTEM_MemCompare\(\s*pSig,\s*pHash/);
+    assert.match(body, /SMemCmp\(\s*pSig,\s*pHash/);
 
     // Only Sha1_Finalize and the Memset touch pHash.
     assert.match(body, /SMemFill\(pHash,/);
@@ -129,7 +129,7 @@ describe('SSignature alloca overrides', () => {
     // wrong would emit a valid-looking but unverifiable signature.
     assert.match(body, /SMemCopy\(pSig1, pHash, nKeySize\)/);
     assert.match(body, /SMemCopy\(pSig2, pSig1, nKeySize\)/);
-    assert.match(body, /SSYSTEM_MemCompare\(pSig2, pHash,/);
+    assert.match(body, /SMemCmp\(pSig2, pHash,/);
     assert.match(body, /SMemCopy\(pDataBytes \+ nMarkerOffset \+ 4, pSig1, nKeySize\)/);
   });
 });
