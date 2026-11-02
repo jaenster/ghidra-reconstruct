@@ -237,7 +237,7 @@ function buildNestedChain(
  * Pattern 1 + 2 at statement level. Returns a replacement statement list, or
  * null if the statement is not a comma/short-circuit pattern.
  */
-function expandStatement(s: Statement): Statement[] | null {
+function expandStatement(s: Statement, layout: LayoutCtx | null = null): Statement[] | null {
   // Pattern 2: if (OR-chain with a comma side effect) <early-exit>;
   if (s.kind === NodeKind.IfStmt) {
     const ifs = s as IfStmt;
@@ -254,12 +254,23 @@ function expandStatement(s: Statement): Statement[] | null {
         // without copying anything. A goto that survives structuring keeps its comma.
         if (ops.length >= 2 && hasCommaOperand(ops) && exit.kind !== NodeKind.GotoStmt) {
           const out: Statement[] = [];
+          const together = layout ? sharedGuards(ifs, ops, exit, layout) : null;
+          let pending: Expression[] = [];
+          const flush = (): void => {
+            if (pending.length === 0) return;
+            let cond = pending[0];
+            for (const c of pending.slice(1)) cond = orOf(cond, c);
+            out.push(makeGuard(cond, exit, out.length === 0 ? ifs.leadingTrivia : []));
+            pending = [];
+          };
           ops.forEach((op, i) => {
             const { assigns, cond } = splitComma(op);
+            if (assigns.length > 0) flush();
             for (const a of assigns) out.push(makeExprStmt(a));
-            const guard = makeGuard(cond, exit, i === 0 ? ifs.leadingTrivia : []);
-            out.push(guard);
+            pending.push(cond);
+            if (!together || !together[i]) flush();
           });
+          flush();
           return out;
         }
       }
@@ -318,6 +329,59 @@ function expandStatement(s: Statement): Statement[] | null {
   return null;
 }
 
+/** `a || b`, an operand that binds looser than `||` parenthesised. */
+function orOf(a: Expression, b: Expression): Expression {
+  const wrap = (e: Expression): Expression => {
+    const u = unwrap(e);
+    const op = binOp(u);
+    const loose = u.kind === NodeKind.AssignExpr || u.kind === NodeKind.ConditionalExpr || op === ',';
+    return loose ? ({ kind: NodeKind.ParenExpr, expression: u, location: e.location, leadingTrivia: [], trailingTrivia: [] } as ParenExpr) : e;
+  };
+  return { kind: NodeKind.BinaryExpr, operator: '||', left: wrap(a), right: wrap(b), location: a.location, leadingTrivia: [], trailingTrivia: [] } as BinaryExpr;
+}
+
+/** Leaf operands of the `&&`/`||` operators in `e`, as the branch facts count them. */
+function leafOperandCount(e: Expression): number {
+  let n = 1;
+  for (const x of traverseAST(e)) {
+    if (x.kind === NodeKind.BinaryExpr && ['&&', '||'].includes((x as BinaryExpr).operator)) n++;
+  }
+  return n;
+}
+
+/**
+ * Per operand of `if (o1 || o2 || ...) EXIT` that comma-expand splits, whether its test goes
+ * into one guard with the next operand: the original's exit code lies after both operands'
+ * tests. One guard per test puts each guard's exit right after its own test, and VC8
+ * cross-jumps the copies into one; a leading guard that leaves before the registers the rest
+ * needs are saved keeps a copy of its own, which the original, with a register pushed before
+ * the first test and every test jumping to one return, does not show (ITEMEVENT_LifeTap
+ * 005c6530). Null without per-operand facts or when the exit's place is unknown; an operand
+ * with an assignment always starts a guard of its own.
+ */
+function sharedGuards(ifs: IfStmt, ops: Expression[], exit: Statement, layout: LayoutCtx): boolean[] | null {
+  const line = ifs.location?.start.line ?? 0;
+  if (layout.loopIfs.has(line)) return null;
+  const counts = ops.map(op => leafOperandCount(splitComma(op).cond));
+  const facts = layout.reader.operandBranches(ifs);
+  const cb = layout.reader.cbranch(ifs);
+  if (!facts || cb === null || facts.length !== counts.reduce((a, b) => a + b, 0)) return null;
+  const at = layout.reader.entry([exit], cb) ?? (exit.kind === NodeKind.ReturnStmt ? layout.reader.returnCopy(exit as ReturnStmt) : null);
+  if (at === null) return null;
+  const ranges: [number, number][] = [];
+  let k = 0;
+  for (const c of counts) {
+    const segs = facts.slice(k, k + c).flat();
+    k += c;
+    if (segs.length === 0) return null;
+    ranges.push([Math.min(...segs), Math.max(...segs)]);
+  }
+  // Two tests go into one guard when the exit lies past both: each jumps forward to it, as
+  // the tests of one `||` do. A test after the exit jumps back to it, as a guard of its own
+  // cross-jumped into the earlier copy does.
+  return ops.map((_, i) => i < ops.length - 1 && at > ranges[i + 1][1]);
+}
+
 /** The original's layout for the function being expanded (early run only). */
 interface LayoutCtx {
   reader: LayoutReader;
@@ -365,7 +429,7 @@ function expandBlock(block: CompoundStmt, layout: LayoutCtx | null = null): Comp
         break;
       }
     }
-    const repl = expandStatement(s);
+    const repl = expandStatement(s, layout);
     if (repl) {
       out.push(...repl);
       changed = true;

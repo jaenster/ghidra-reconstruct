@@ -85,35 +85,38 @@ describe('aggregateZeroInitPlugin', () => {
   });
 
   it('refuses when a member is never written before the address escapes', () => {
-    const out = run('void f() { D2ControlMsg sMsg; sMsg.uMsg = 0; sMsg.wParam = 0; g(&sMsg); sMsg.pControl = 0; }');
+    const out = run('void f() { D2ControlMsg sMsg; sMsg.uMsg = 0; sMsg.wParam = 0; g(&sMsg); sMsg.pControl = 0; }',
+      { zeroStores: [{ name: 'sMsg', size: 0x20, zero: [[4, 12]] }] });
     assert.match(out, /D2ControlMsg sMsg;/);
     assert.match(out, /sMsg\.uMsg = 0;/);
   });
 
   it('refuses when a union is written only through its narrower member', () => {
     const out = run(`void f() { D2ControlMsg m; m.pControl = 0; m.uMsg = 0; m.wParam = 0; m.uLParam.sPos.nX = 0;
-      m.nCmdCode = 0; m.dwReserved = 0; m.bHandled = 0; m.dwResult = 0; g(&m); }`);
+      m.nCmdCode = 0; m.dwReserved = 0; m.bHandled = 0; m.dwResult = 0; g(&m); }`,
+      { zeroStores: [{ name: 'm', size: 0x20, zero: [[0, 0xe], [0x10, 0x20]] }] });
     assert.match(out, /D2ControlMsg m;/);
   });
 
   it('refuses a run that is not in ascending offset order', () => {
     // Hand-written clearing, as in MAINMENU_Unused16's frame group: the original matches as is.
     const out = run('void f() { D2Pair s; s.b = 0; s.a = 0; g(&s); }');
+    // The original zeroes every byte, but not in the order an initialiser does.
     assert.match(out, /D2Pair s; s\.b = 0; s\.a = 0;/);
   });
 
   it('refuses when the first store is not zero', () => {
-    const out = run('void f(int x) { D2Pair s; s.a = x; s.b = 0; g(&s); }');
+    const out = run('void f(int x) { D2Pair s; s.a = x; s.b = 0; g(&s); }', { zeroStores: [{ name: 's', size: 8, zero: [[4, 8]] }] });
     assert.match(out, /D2Pair s;/);
   });
 
   it('refuses a single zero store', () => {
-    const out = run('void f(int x) { D2Pair s; s.a = 0; s.b = x; g(&s); }');
+    const out = run('void f(int x) { D2Pair s; s.a = 0; s.b = x; g(&s); }', { zeroStores: [{ name: 's', size: 8, zero: [[0, 4]] }] });
     assert.match(out, /D2Pair s;/);
   });
 
   it('refuses a non-zero enum constant as zero', () => {
-    const out = run('void f() { D2Pair s; s.a = 0; s.b = STATE_poison; g(&s); }');
+    const out = run('void f() { D2Pair s; s.a = 0; s.b = STATE_poison; g(&s); }', { zeroStores: [{ name: 's', size: 8, zero: [[0, 4]] }] });
     assert.ok(!/= \{/.test(out), out);
   });
 
@@ -124,7 +127,8 @@ describe('aggregateZeroInitPlugin', () => {
 
   it('refuses when a store reads the local itself', () => {
     const out = run('void f() { D2ControlMsg m; m.uMsg = 0; m.wParam = 0; m.uLParam.nLParam = 0; m.nCmdCode = 0;'
-      + ' m.dwReserved = 0; m.bHandled = 0; m.dwResult = 0; m.pControl = (D2ControlStrc *)m.uMsg; g(&m); }');
+      + ' m.dwReserved = 0; m.bHandled = 0; m.dwResult = 0; m.pControl = (D2ControlStrc *)m.uMsg; g(&m); }',
+      { zeroStores: [{ name: 'm', size: 0x20, zero: [[4, 0x20]] }] });
     assert.match(out, /D2ControlMsg m;/);
   });
 
@@ -180,6 +184,45 @@ describe('aggregateZeroInitPlugin', () => {
   it('restores the initialiser where the original zeroes every member byte', () => {
     const out = run(viewport, { ...rectTables, zeroStores: [{ name: 'r', size: 16, zero: [[0, 16]] }] });
     assert.match(out, /D2Rect r = \{ ?0 ?\}; r\.right = w; r\.bottom = h;/);
+  });
+
+  // ITEMEVENT_SlowTarget 005c0310: the original zeroes the whole argument, then stores every
+  // member but the last; the decompile drops the zero stores those overwrite, so the run is
+  // one store long and not first. The opening-run fact stops at the `lea` that takes the
+  // address before the last zero store, which the decompile still prints.
+  it('restores the initialiser from the original zeroes and the printed zero stores', () => {
+    const out = run('void f(int x, int y) { D2Pair s; s.b = 0; s.a = x; g(&s); }', { zeroStores: [{ name: 's', size: 8, zero: [[0, 4]] }] });
+    assert.match(out, /D2Pair s = \{ ?0 ?\}; s\.a = x; g\(&s\);/);
+  });
+
+  it('keeps a zero store after the first other store that the opening run does not cover', () => {
+    const out = run('void f(int x) { D2Pair s; s.a = x; s.b = 0; g(&s); }', { zeroStores: [{ name: 's', size: 8, zero: [[0, 4]] }] });
+    assert.match(out, /D2Pair s = \{ ?0 ?\}; s\.a = x; s\.b = 0; g\(&s\);/);
+  });
+
+  // Q33_SendQuestStatePacket 00589070: one dword and one word store zero the six bytes, then
+  // three byte stores; the decompile prints the byte the dword store leaves after them.
+  it('drops a zero store to bytes the opening run zeroes', () => {
+    const out = run('void f(int x) { D2Pair s; s.a = x; s.b = 0; g(&s); }', { zeroStores: [{ name: 's', size: 8, zero: [[0, 8]] }] });
+    assert.match(out, /D2Pair s = \{ ?0 ?\}; s\.a = x; g\(&s\);/);
+  });
+
+  // PLAYER_SendInventoryFullMessage 00549a60: the array-fill pass wrote the zeroed arrays as memsets.
+  it('takes a memset of a member array for its zero stores', () => {
+    const out = run('void f(int x) { D2Arr s; s.n = x; memset(s.aw, 0, 2 * sizeof(s.aw[0])); g(&s); }',
+      { zeroStores: [{ name: 's', size: 12, zero: [[0, 12]] }] });
+    assert.match(out, /D2Arr s = \{ ?0 ?\}; s\.n = x; g\(&s\);/);
+  });
+
+  it('keeps a memset past the bytes the original zeroes', () => {
+    const out = run('void f(int x) { D2Arr s; s.n = 0; memset(s.aw, 0, 2 * sizeof(s.aw[0])); g(&s); }',
+      { zeroStores: [{ name: 's', size: 12, zero: [[0, 4]] }] });
+    assert.match(out, /D2Arr s = \{ ?0 ?\}; memset\(s\.aw, 0, 2 \* sizeof\(s\.aw\[0\]\)\); g\(&s\);/);
+  });
+
+  it('refuses a byte neither the original nor the decompile zeroes', () => {
+    const out = run('void f(int x) { D2Pair s; s.b = 0; s.a = x; g(&s); }', { zeroStores: [{ name: 's', size: 8, zero: [[4, 8]] }] });
+    assert.match(out, /D2Pair s;/);
   });
 
   it('leaves members cleared one by one where the original zeroes only some of them', () => {

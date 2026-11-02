@@ -52,6 +52,7 @@ import type {
   ASTNode, FunctionDecl, CompoundStmt, DeclStmt, VariableDecl, Identifier, Expression,
   Statement, ExprStmt, AssignExpr, MemberExpr, SubscriptExpr, ParenExpr, CStyleCastExpr,
   IntegerLiteralExpr, QualifiedId, TypedefType, ElaboratedType, SwitchStmt,
+  CallExpr, BinaryExpr, UnaryExpr, SizeofExpr,
 } from '../../../ast/nodes.js';
 import { findNodesByKind } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
@@ -81,6 +82,9 @@ export interface AggregateZeroInitOptions extends PluginOptions {
 
 const MIN_RUN = 2;
 
+/** The bytes up to which VC8 SP1 /O2 expands a memset inline (array-fill-collapse.ts). */
+const MEMSET_INLINE_MAX = 32;
+
 interface Place { offset: number; size: number; type: string }
 
 function unwrap(e: Expression): Expression {
@@ -108,6 +112,23 @@ function createAggregateZeroInitTransformer(options: AggregateZeroInitOptions = 
     if (facts.length !== 1 || facts[0].size !== size) return false;
     return required.every(([lo, hi]) => {
       for (let b = lo; b < hi; b++) if (!facts[0].zero.some(([a, e]) => b >= a && b < e)) return false;
+      return true;
+    });
+  };
+
+  /**
+   * Whether every byte of `required` is zero after the opening stores: stored zero by the
+   * original's opening run (at least one member's worth) or by one of `zeroed`.
+   */
+  const originalZeroesWith = (name: string, size: number, required: ReadonlyArray<[number, number]>, zeroed: ReadonlyArray<[number, number]>): boolean => {
+    const facts = zeroStores.filter(z => z.name === name);
+    if (facts.length !== 1 || facts[0].size !== size) return false;
+    const fz = facts[0].zero;
+    if (fz.reduce((n, [a, e]) => n + (e - a), 0) < 4) return false;
+    return required.every(([lo, hi]) => {
+      for (let b = lo; b < hi; b++) {
+        if (!fz.some(([a, e]) => b >= a && b < e) && !zeroed.some(([a, e]) => b >= a && b < e)) return false;
+      }
       return true;
     });
   };
@@ -235,6 +256,58 @@ function createAggregateZeroInitTransformer(options: AggregateZeroInitOptions = 
     return null;
   }
 
+  /**
+   * `memset(m, 0, n * sizeof(m[0]))`, `memset(m + k, 0, n)`, `memset(&m, 0, n)` of a member
+   * of the local (the array-fill pass's spelling of a run of zero stores): the bytes it
+   * zeroes, or null.
+   */
+  function zeroFillOf(st: Statement, name: string, agg: string): { from: number; to: number } | null {
+    if (st.kind !== NodeKind.ExprStmt) return null;
+    const c = unwrap((st as ExprStmt).expression);
+    if (c.kind !== NodeKind.CallExpr) return null;
+    const call = c as CallExpr;
+    const callee = unwrap(call.callee);
+    if (callee.kind !== NodeKind.Identifier || (callee as Identifier).name !== 'memset' || call.arguments.length !== 3) return null;
+    const [dst, val, len] = call.arguments;
+    if (!isZero(val)) return null;
+    let d = unwrap(dst);
+    let k = 0;
+    if (d.kind === NodeKind.BinaryExpr && (d as BinaryExpr).operator === '+') {
+      const r = unwrap((d as BinaryExpr).right);
+      if (r.kind !== NodeKind.IntegerLiteral) return null;
+      k = Number((r as IntegerLiteralExpr).value);
+      d = unwrap((d as BinaryExpr).left);
+    }
+    let p: Place | null;
+    let elem = 1;
+    if (d.kind === NodeKind.UnaryExpr && (d as UnaryExpr).operator === '&') {
+      if (k !== 0) return null;
+      p = placeOf((d as UnaryExpr).operand, name, agg);
+    } else {
+      p = placeOf(d, name, agg);
+      const arr = p ? arraySpelling(p.type) : null;
+      if (!p || !arr || arr.count <= 0 || p.size % arr.count !== 0) return null;
+      elem = p.size / arr.count;
+    }
+    if (!p) return null;
+    const bytes = (e: Expression): number | null => {
+      const x = unwrap(e);
+      if (x.kind === NodeKind.IntegerLiteral) return Number((x as IntegerLiteralExpr).value);
+      if (x.kind === NodeKind.BinaryExpr && (x as BinaryExpr).operator === '*') {
+        const l = unwrap((x as BinaryExpr).left), r = unwrap((x as BinaryExpr).right);
+        if (l.kind !== NodeKind.IntegerLiteral || r.kind !== NodeKind.SizeofExpr || (r as SizeofExpr).isType) return null;
+        const of = unwrap((r as SizeofExpr).operand as Expression);
+        const q = placeOf(of, name, agg);
+        return q ? Number((l as IntegerLiteralExpr).value) * q.size : null;
+      }
+      return null;
+    };
+    const n = bytes(len);
+    const from = p.offset + k * elem;
+    if (n === null || n <= 0 || from + n > p.offset + p.size) return null;
+    return { from, to: from + n };
+  }
+
   function rewriteLocal(body: CompoundStmt, name: string, agg: string): CompoundStmt | null {
     // A member spelled like the local (`s.s`) is not a reference to it.
     const memberNames = new Set<ASTNode>(
@@ -287,26 +360,72 @@ function createAggregateZeroInitTransformer(options: AggregateZeroInitOptions = 
       last = p.offset;
       covered.push([p.offset, p.offset + p.size]);
     }
-    const runEnd = k;
-    if (runEnd - start < MIN_RUN) return null;
+    let runEnd = k;
 
-    // Plain member stores up to the first read or escape.
+    // Plain member stores up to the first read or escape; the bytes they store zero to.
+    const zeroed: Array<[number, number]> = [...covered];
+    const stretch: Array<{ index: number; from: number; to: number; zero: boolean }> = [];
     for (; k < block.statements.length; k++) {
       const st = block.statements[k];
       if (!refersTo(st)) continue;
+      const fill = zeroFillOf(st, name, agg);
+      if (fill) {
+        zeroed.push([fill.from, fill.to]);
+        stretch.push({ index: k, from: fill.from, to: fill.to, zero: true });
+        continue;
+      }
       const a = assignOf(st);
       if (!a || refersTo(a.right)) break;
       const p = placeOf(a.left, name, agg);
       if (!p) break;
       covered.push([p.offset, p.offset + p.size]);
+      if (isZero(a.right)) zeroed.push([p.offset, p.offset + p.size]);
+      stretch.push({ index: k, from: p.offset, to: p.offset + p.size, zero: isZero(a.right) });
     }
+    const drop = new Set<number>();
 
     const required: Array<[number, number]> = [];
     if (!requiredBytes(agg, 0, required) || required.length === 0) return null;
-    if (!originalZeroes(name, sizes[agg], required)) return null;
     const bytes = new Set<number>();
     for (const [lo, hi] of covered) for (let b = lo; b < hi; b++) bytes.add(b);
-    for (const [lo, hi] of required) for (let b = lo; b < hi; b++) if (!bytes.has(b)) return null;
+    const coveredAll = required.every(([lo, hi]) => { for (let b = lo; b < hi; b++) if (!bytes.has(b)) return false; return true; });
+    if (runEnd - start >= MIN_RUN && coveredAll && originalZeroes(name, sizes[agg], required)) {
+      // The decompile kept a run of the initialiser's stores and the rest wrote every member.
+    } else {
+      // The decompile dropped the initialiser's stores a later store overwrites, or printed
+      // them out of order: the original's opening stores zero every member byte that no zero
+      // store of the decompile's opening stretch covers. The initialiser stores those zeros.
+      // A zero store it makes redundant goes: one ahead of the first other store, and one to
+      // bytes the original's opening run zeroes and nothing before it in the stretch wrote
+      // (the decompile prints what is left of a wide zero store after the narrow stores
+      // into it, Q33_SendQuestStatePacket 00589070).
+      if (!originalZeroesWith(name, sizes[agg], required, zeroed)) return null;
+      // VC8 stores the first member and clears the rest as memset does, inline up to 32
+      // bytes and through a call above: a larger rest is a call the original, which stores
+      // every word itself, does not make (PLAYER_SendInventoryFullMessage 00549a60).
+      const head = required.length > 0 ? required[0][1] - required[0][0] : 0;
+      if (sizes[agg] - head > MEMSET_INLINE_MAX) return null;
+      // Those leading stores lie in ascending offset order, as an initialiser stores; a
+      // run in any other order was written member by member (MAINMENU_Unused16).
+      runEnd = start;
+      let prev = -1;
+      while (runEnd < block.statements.length) {
+        const a = assignOf(block.statements[runEnd]);
+        const p = a && isZero(a.right) ? placeOf(a.left, name, agg) : null;
+        if (!p) break;
+        if (p.offset <= prev) return null;
+        prev = p.offset;
+        runEnd++;
+      }
+      const fz = zeroStores.find(z => z.name === name)!.zero;
+      const inFacts = (lo: number, hi: number) => { for (let b = lo; b < hi; b++) if (!fz.some(([x, e]) => b >= x && b < e)) return false; return true; };
+      const written: Array<[number, number]> = [];
+      for (const st of stretch) {
+        const earlier = written.some(([x, e]) => st.from < e && x < st.to);
+        if (st.zero && st.index >= runEnd && !earlier && inFacts(st.from, st.to)) drop.add(st.index);
+        written.push([st.from, st.to]);
+      }
+    }
 
     // Rebuild: the declaration moves to the run, initialised; the run goes.
     const decl = declStmt.declarations[0] as VariableDecl;
@@ -325,7 +444,7 @@ function createAggregateZeroInitTransformer(options: AggregateZeroInitOptions = 
           c.statements.forEach((st, i) => {
             if (st === declStmt) return;
             if (isTarget && i === start) out.push(init);
-            if (isTarget && i >= start && i < runEnd) return;
+            if (isTarget && ((i >= start && i < runEnd) || drop.has(i))) return;
             out.push(isTarget ? st : rebuild(st) as Statement);
           });
           return updateNode(c, { statements: out } as Partial<CompoundStmt>);

@@ -708,6 +708,25 @@ function orGuardAt(stmts: readonly Statement[], i: number, cb: number, ctx: Ctx)
   return [updateNode(ifs, { condition: cond } as Partial<IfStmt>), ...rest];
 }
 
+/**
+ * `if (c) A else { ...; Halt(...); exit(-1); }` whose branch a pass copied (the halt tail the
+ * decompile merged, written once per path), so `cbranch` gives no evidence. The original's
+ * jump still says which successor the test falls into: where it falls into the halt, the
+ * halt was laid out first, as the sequential assertion `if (!c) { Halt; exit; } A` lays it
+ * out. The same control flow: the halt never returns. Outside a loop, in a statement list.
+ */
+function haltElseAt(ifs: IfStmt, ctx: Ctx, list: { before: Statement[]; after: Statement[] }): Statement[] | null {
+  const other = ifs.elseBranch!;
+  if (other.kind === NodeKind.IfStmt || ifs.init || ifs.isConstexpr || ctx.loopIfs.has(lineOf(ifs))) return null;
+  if (!endsInHalt(bodyOf(other)) || endsInHalt(bodyOf(ifs.thenBranch))) return null;
+  if (conditionShape(ifs.condition).kind !== 'simple') return null;
+  if (ctx.reader.fallInto(ifs) !== 'other') return null;
+  if (holdsFreeCase([ifs.thenBranch, other])) return null;
+  ctx.onSite?.({ rule: 'swap', line: lineOf(ifs), why: 'halt laid out first, branch copied' });
+  const guard = updateNode(ifs, { condition: negate(ifs.condition), thenBranch: asBlock([other]), elseBranch: null } as Partial<IfStmt>);
+  return [guard, ...spliced(ifs.thenBranch, bodyOf(ifs.thenBranch), list.before, list.after)];
+}
+
 function rewriteList(stmts: readonly Statement[], ctx: Ctx): Statement[] | null {
   let cur = [...stmts];
   let changed = false;
@@ -719,7 +738,11 @@ function rewriteList(stmts: readonly Statement[], ctx: Ctx): Statement[] | null 
     // The first if of a condition a pass split takes its own last branch from the operands.
     const cb = ctx.reader.cbranch(ifs)
       ?? (!ifs.elseBranch && conditionShape(ifs.condition).kind === 'or' ? ctx.reader.prefixBranch(ifs, leafCount(ifs.condition)) : null);
-    if (cb === null) continue;
+    if (cb === null) {
+      const r = ifs.elseBranch ? haltElseAt(ifs, ctx, { before: cur.slice(0, i), after: cur.slice(i + 1) }) : null;
+      if (r) { cur = [...cur.slice(0, i), ...r, ...cur.slice(i + 1)]; changed = true; }
+      continue;
+    }
     if (ifs.elseBranch) {
       const r = swapAt(ifs, cb, ctx, { before: cur.slice(0, i), after: cur.slice(i + 1) });
       if (r) { cur = [...cur.slice(0, i), ...r, ...cur.slice(i + 1)]; changed = true; }

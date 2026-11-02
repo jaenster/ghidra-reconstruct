@@ -281,3 +281,46 @@ describe('commaExpandPlugin - an || guard laid out after the rest (inflateSyncPo
     assert.ok(out.includes('if (s == 0) return -2;'), out);
   });
 });
+
+describe('commaExpandPlugin - the tests ahead of the exit stay one guard (ITEMEVENT_LifeTap)', () => {
+  /** `[offsets] text` per line, `[if cb offsets] text` for an if line; `ops` per leaf operand of the if. */
+  function run(lines: string[], ops: number[][] | null): string {
+    const text: string[] = [];
+    const ev = { lines: new Map<number, number[]>(), ifs: new Map<number, number>(), operands: new Map<number, number[][]>() };
+    lines.forEach((l, i) => {
+      const m = l.match(/^\s*\[(if\s+)?([0-9a-fx, ]*)\]\s?(.*)$/);
+      if (!m) { text.push(l); return; }
+      const nums = m[2].split(/[ ,]+/).filter(Boolean).map(n => Number(n));
+      if (m[1]) { ev.ifs.set(i + 1, nums[0]); if (ops) ev.operands.set(i + 1, ops); }
+      ev.lines.set(i + 1, nums);
+      text.push(m[3]);
+    });
+    const t = commaExpandPlugin.createTransformer({ branchLayout: ev });
+    return emit(t(parse(text.join('\n'))) as AnyNode).replace(/\s+/g, ' ').trim();
+  }
+  const site = [
+    'int f(U* pUnit, U* pTarget, D* pDamage) {',
+    '  int t;',
+    '[if 0x23 0x3,0xb,0x12,0x18,0x1a,0x1c,0x20,0x23] if (pUnit == 0 || pTarget == 0 || pDamage == 0 || (t = pTarget->type, t != 0 && t != 1)) {',
+    '[0x26,0x2a] return 0;',
+    '  }',
+    '[0x2d] return t;',
+    '}',
+  ];
+  const ops = [[0xb], [0x12], [0x18], [0x1e], [0x23]];
+
+  it('keeps the tests that jump forward to the one return in one guard', () => {
+    const out = run(site, ops);
+    assert.ok(out.includes('if (pUnit == 0 || pTarget == 0 || pDamage == 0) return 0; t = pTarget->type; if (t != 0 && t != 1) return 0;'), out);
+  });
+
+  it('gives a test after the return a guard of its own', () => {
+    const out = run(site, [[0xb], [0x12], [0x30], [0x34], [0x38]]);
+    assert.ok(out.includes('if (pUnit == 0 || pTarget == 0) return 0; if (pDamage == 0) return 0;'), out);
+  });
+
+  it('splits every test without per-operand facts', () => {
+    const out = run(site, null);
+    assert.ok(out.includes('if (pUnit == 0) return 0; if (pTarget == 0) return 0; if (pDamage == 0) return 0;'), out);
+  });
+});
