@@ -3269,10 +3269,13 @@ function transformDecompiledCode(
     // Arm order from the original's addresses: `early-return` makes a guard only where the
     // binary has one, `branch-layout` reorders arms the layout contradicts, `case-layout`
     // prints a jump-table switch's cases in the order of their bodies, and `comma-expand`
-    // nests an `||` guard with a side effect where its return lies after the rest. Without the
+    // nests an `||` guard with a side effect where its return lies after the rest;
+    // `rotated-for-loop` keeps the rotated form of a loop whose computed bound the original
+    // computes once for the guard and the test. Without the
     // facts (an older snapshot) early-return keeps its unconditional behaviour.
     if (layout) {
       perPluginOptions['early-return'] = { ...(perPluginOptions['early-return'] as object | undefined), branchLayout: layout };
+      perPluginOptions['rotated-for-loop'] = { ...(perPluginOptions['rotated-for-loop'] as object | undefined), branchLayout: layout };
       perPluginOptions['branch-layout'] = {
         branchLayout: layout,
         haltLines: enclosing?.haltLines?.halts,

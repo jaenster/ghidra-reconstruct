@@ -31,6 +31,17 @@
  *   - the do-while body ends in the step, an assignment or increment of i, and has no
  *     `continue` of its own (in a for loop that would run the step);
  *   - no goto outside the loop jumps into its body.
+ *
+ * Two loops mean the same as a for loop but did not compile from one, and stay as
+ * they are, which VC8 lays out as the original:
+ *   - a bound computed from other values (`i < n >> 8`, MONSTER_PreloadSequenceAnimations,
+ *     004afb60) that the guard and the test both print from one instruction: the original
+ *     computed it once, into a variable, and the for loop computes it in another order.
+ *     Where the original's offsets show the test computing it again (or there are none
+ *     to show it) the bound is the for loop's own;
+ *   - a body that opens with `if (b) break;` ahead of more statements (zlib's syncsearch,
+ *     0042b300: `while (next < len && got < 4)`). That is a second exit test the
+ *     original has in its condition; the for loop gives the break its own exit.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -66,6 +77,7 @@ import type { TransformPlugin, PluginOptions } from '../types.js';
 import { createExprShape, type ExprShape } from './expr-shape.js';
 import { localTypesOf } from './compare-form.js';
 import type { TypeShape, TypedefResolver } from './call-arg-cast.js';
+import type { BranchLayoutEvidence } from './branch-layout/evidence.js';
 
 const RELATIONAL_MIRROR: Record<string, string> = {
   '<': '>', '>': '<', '<=': '>=', '>=': '<=', '==': '==', '!=': '!=',
@@ -318,6 +330,56 @@ function stepOf(s: Statement, v: string): Expression | null {
 
 const LOOP_KINDS = new Set<NodeKind>([NodeKind.ForStmt, NodeKind.WhileStmt, NodeKind.DoWhileStmt, NodeKind.ForRangeStmt]);
 
+/** A value read as it is: names, constants, members, elements and dereferences, through casts. */
+function isPlainRead(e: Expression): boolean {
+  const u = unwrapParens(e);
+  switch (u.kind) {
+    case NodeKind.Identifier:
+    case NodeKind.IntegerLiteral:
+    case NodeKind.CharLiteral:
+    case NodeKind.NullptrLiteral:
+      return true;
+    case NodeKind.MemberExpr:
+      return isPlainRead((u as MemberExpr).object);
+    case NodeKind.SubscriptExpr:
+      return isPlainRead((u as SubscriptExpr).array) && isPlainRead((u as SubscriptExpr).index);
+    case NodeKind.UnaryExpr:
+      if ((u as UnaryExpr).operator === '-') return intLiteral(u as Expression) !== null;
+      return (u as UnaryExpr).operator === '*' && isPlainRead((u as UnaryExpr).operand);
+    case NodeKind.CStyleCastExpr:
+      return isPlainRead((u as unknown as { expression: Expression }).expression);
+    default:
+      return false;
+  }
+}
+
+/**
+ * Whether the guard and the test print an instruction in common, from the original's
+ * offsets per line; without them, the computed bound is taken to be one value.
+ */
+function computedOnce(ifs: IfStmt, test: Expression, layout: BranchLayoutEvidence | null | undefined): boolean {
+  const line = (n: ASTNode) => (n.location && n.location.file !== '<generated>' && n.location.start.line > 0 ? n.location.start.line : null);
+  const g = line(ifs.condition) ?? line(ifs), t = line(test);
+  if (!layout || g === null || t === null || g === t) return true;
+  const go = layout.lines.get(g), to = layout.lines.get(t);
+  if (!go || !to) return true;
+  return go.some(o => to.includes(o));
+}
+
+/** Whether the body's first statement is `if (b) break;` and more statements follow it. */
+function opensWithBreakTest(inner: Statement[]): boolean {
+  if (inner.length < 2 || inner[0].kind !== NodeKind.IfStmt) return false;
+  const ifs = inner[0] as IfStmt;
+  if (ifs.elseBranch !== null) return false;
+  let th: Statement = ifs.thenBranch;
+  if (th.kind === NodeKind.CompoundStmt) {
+    const st = (th as CompoundStmt).statements;
+    if (st.length !== 1) return false;
+    th = st[0];
+  }
+  return th.kind === NodeKind.BreakStmt;
+}
+
 /** Whether `n` holds a `continue` that belongs to the loop `n` is the body of. */
 function hasOwnContinue(n: ASTNode): boolean {
   if (n.kind === NodeKind.ContinueStmt) return true;
@@ -369,7 +431,9 @@ function loopParts(ifs: IfStmt, ahead: Statement | null): { init: Statement; loo
 }
 
 /** The rotated loops of one function body, keyed by the `if`'s position. */
-function findSites(body: CompoundStmt, shapeOf: ExprShape, locals: ReadonlySet<string>): Map<string, Site> {
+function findSites(
+  body: CompoundStmt, shapeOf: ExprShape, locals: ReadonlySet<string>, layout: BranchLayoutEvidence | null | undefined,
+): Map<string, Site> {
   const sites = new Map<string, Site>();
   const seen = new Map<string, number>();
   // `ahead` is the statement before `n` in its block, where it has one.
@@ -377,7 +441,7 @@ function findSites(body: CompoundStmt, shapeOf: ExprShape, locals: ReadonlySet<s
     if (n.kind === NodeKind.IfStmt) {
       const k = ifKey(n);
       if (k) seen.set(k, (seen.get(k) ?? 0) + 1);
-      const site = matchSite(n as IfStmt, ahead, body, shapeOf, locals);
+      const site = matchSite(n as IfStmt, ahead, body, shapeOf, locals, layout);
       if (site && k) sites.set(k, site);
     }
     if (n.kind === NodeKind.CompoundStmt) {
@@ -394,6 +458,7 @@ function findSites(body: CompoundStmt, shapeOf: ExprShape, locals: ReadonlySet<s
 
 function matchSite(
   ifs: IfStmt, ahead: Statement | null, body: CompoundStmt, shapeOf: ExprShape, locals: ReadonlySet<string>,
+  layout: BranchLayoutEvidence | null | undefined,
 ): Site | null {
   if (ifs.elseBranch !== null || ifs.isConstexpr || ifs.init) return null;
   const parts = loopParts(ifs, ahead);
@@ -424,6 +489,9 @@ function matchSite(
   const last = inner[inner.length - 1];
   if (!stepOf(last, v) || hasComment(last)) return null;
   if (hasOwnContinue(loop.body)) return null;
+  if (opensWithBreakTest(inner.slice(0, -1))) return null;
+  const bound = boundOf(c, v);
+  if (bound && !isPlainRead(bound) && computedOnce(ifs, c, layout)) return null;
 
   // Read after the loop, an assignment inside the test would leave `v` holding X where
   // the guard was false; ahead of the test it runs either way. A declaration ahead of the
@@ -473,6 +541,8 @@ export interface RotatedForLoopOptions extends PluginOptions {
   fieldTypes?: Record<string, string>;
   functionReturnTypes?: Record<string, string>;
   typedefTargets?: Record<string, string>;
+  /** The original's code offsets per line (branch-layout): whether a computed bound is computed once. */
+  branchLayout?: BranchLayoutEvidence | null;
 }
 
 export function createRotatedForLoopTransformer(options?: PluginOptions): Transformer {
@@ -492,7 +562,7 @@ export function createRotatedForLoopTransformer(options?: PluginOptions): Transf
       returnTypes: o.functionReturnTypes ?? {},
       resolve,
     });
-    const sites = findSites(fn.body, shapeOf, new Set(localTypes.keys()));
+    const sites = findSites(fn.body, shapeOf, new Set(localTypes.keys()), o.branchLayout);
     if (sites.size === 0) return undefined;
     const body = createTransformer({
       visitIfStmt(node: IfStmt): ASTNode | undefined {

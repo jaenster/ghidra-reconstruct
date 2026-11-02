@@ -164,6 +164,53 @@ describe('rotatedForLoopPlugin', () => {
     same(`void f(int n, int* p) { int i; if (0 < n && p[0]) { i = 0; do { g(i); i++; } while (i < n && p[i]); } }`);
   });
 
+  // MONSTER_PreloadSequenceAnimations, 004afb60: the original holds n >> 8 in a variable.
+  it('leaves a loop whose bound is computed from other values', () => {
+    same(`void f(int n) { int i; i = 0; if (0 < n >> 8) { do { g(i); i++; } while (i < n >> 8); } }`);
+    same(`void f(int n) { if (0 < n + 1) { int i = 0; do { g(i); i++; } while (i < n + 1); } }`);
+  });
+
+  it('rewrites a computed bound where the original computes it again for the test', () => {
+    const code = [
+      'void f(S* p) {',
+      '  int i;',
+      '  i = 1;',
+      '  if (1 < p->n + -1) {',
+      '    do {',
+      '      g(i);',
+      '      i++;',
+      '    } while (i < p->n + -1);',
+      '  }',
+      '}',
+    ].join('\n');
+    const layout = (guard: number[], test: number[]) => ({
+      branchLayout: { lines: new Map([[4, guard], [6, [0x30]], [7, [0x40]], [8, test]]), ifs: new Map([[4, guard[guard.length - 1]]]) },
+    });
+    // DRLGOUTROOM_FindWarpExitInColumn, 0067fb90: the test loads and decrements again.
+    const out = tx(code, layout([0x7, 0x10, 0x18], [0x64, 0x6a, 0x6f]));
+    assert.ok(out.includes('for (i = 1; i < p->n + -1; i++) {'), out);
+    // MONSTER_PreloadSequenceAnimations, 004afb60: one `sar` printed on both lines.
+    same(code, layout([0x19, 0x20], [0x19, 0x56]));
+  });
+
+  it('rewrites a loop whose bound is read through a cast, a member or an element', () => {
+    for (const bound of ['(int)p->n', 'p->n', 'a[2]', '*q']) {
+      const out = tx(`void f(S* p, int* a, int* q) { int i; i = 0; if (0 < ${bound}) { do { g(i); i++; } while (i < ${bound}); } }`);
+      assert.ok(out.includes(`for (i = 0; i < ${bound}; i++) {`), out);
+    }
+  });
+
+  // syncsearch, 0042b300: `while (next < len && got < 4)`.
+  it('leaves a body that opens with a break test ahead of more statements', () => {
+    same(`unsigned f(unsigned n, unsigned k) { unsigned i; i = 0; if (0 < n) { do { if (k >= 4) break; k = h(k); i++; } while (i < n); } return i; }`);
+    same(`void f(unsigned n, unsigned k) { unsigned i; if (0 < n) { i = 0; do { if (k >= 4) { break; } g(i); i++; } while (i < n); } }`);
+  });
+
+  it('rewrites a body that is only a break test', () => {
+    const out = tx(`void f(unsigned n, char* p) { unsigned i; i = 0; if (0 < n) { do { if (p[i] != 0) break; i++; } while (i < n); } g(i); }`);
+    assert.ok(out.includes('for (i = 0; i < n; i++) {'), out);
+  });
+
   it('leaves a global counter', () => {
     same(`void f(int n) { if (0 < n) { g_i = 0; do { g(g_i); g_i++; } while (g_i < n); } }`);
   });
