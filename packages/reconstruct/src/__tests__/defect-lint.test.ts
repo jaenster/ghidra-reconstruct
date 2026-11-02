@@ -1091,3 +1091,96 @@ describe('defect lint: field-set-then-memset', () => {
     } }), []);
   });
 });
+
+describe('defect lint: store-sunk-past-pointer-read', () => {
+  const fn = (body: string) => ({ files: {
+    'D2Client/Game/PalShift.cpp':
+      'void PALSHIFT_Load(char c0, char c1, int n) {\n' +
+      '    char szPath[32];\n    char szCode[4];\n    char* p;\n    char c;\n    int k;\n' +
+      body +
+      '}\n',
+  } });
+  const sites = (fs: Finding[]) => fs.map(f => `${f.subject}:${f.line}`).sort();
+
+  it('reports the element stores printed after strcat reads the buffer', () => {
+    const fs = lint('store-sunk-past-pointer-read', fn(
+      '    szCode[3] = 0;\n    szCode[2] = 0;\n' +
+      '    memcpy(szPath, "Data", 5);\n' +
+      '    strcat(szPath, szCode);\n' +             // line 10: the read
+      '    szCode[1] = c1;\n    szCode[0] = c0;\n' + // lines 11-12: sunk
+      '    Open(szPath);\n'));
+    assert.deepStrictEqual(sites(fs), ['szCode:11', 'szCode:12']);
+    assert.match(fs[0].detail, /before the read through its address at line 10 \(sunk to a call\)/);
+  });
+
+  it('reports the decompiler shape: a scan loop over a pointer to the buffer', () => {
+    const fs = lint('store-sunk-past-pointer-read', fn(
+      '    szCode[3] = 0;\n' +
+      '    p = szCode;\n' +
+      '    do {\n        c = *p;\n        p = p + 1;\n    } while (c != 0);\n' +
+      '    k = (int)p - (int)szCode;\n' +
+      '    szCode[0] = c0;\n' +                                  // line 14
+      '    Open(szPath);\n'));
+    assert.deepStrictEqual(sites(fs), ['szCode:14']);
+    assert.match(fs[0].detail, /before the read through its address at line 9\b/);
+  });
+
+  it('ignores a store after a callee that may write the buffer, or after strcpy into it', () => {
+    assert.deepStrictEqual(lint('store-sunk-past-pointer-read', fn(
+      '    GetName(szCode);\n    strcat(szPath, szCode);\n    szCode[3] = 0;\n' +
+      '    strcpy(szCode, "ab");\n    strcat(szPath, szCode);\n    szCode[3] = 0;\n' +
+      '    Open(szPath);\n')), []);
+  });
+
+  it('ignores a store whose value changes in between, or whose element is read in between', () => {
+    assert.deepStrictEqual(lint('store-sunk-past-pointer-read', fn(
+      '    strcat(szPath, szCode);\n    c0 = 5;\n    szCode[0] = c0;\n' +
+      '    Open(szPath);\n')), []);
+    assert.deepStrictEqual(lint('store-sunk-past-pointer-read', fn(
+      '    strcat(szPath, szCode);\n    k = szCode[1];\n    szCode[1] = c1;\n' +
+      '    Open(szPath);\n')), []);
+  });
+
+  it('ignores a store through a pointer to the buffer in between', () => {
+    assert.deepStrictEqual(lint('store-sunk-past-pointer-read', fn(
+      '    p = szCode;\n    k = *p;\n    *p = 1;\n    szCode[0] = c0;\n' +
+      '    Open(szPath);\n')), []);
+  });
+
+  it('ignores an address-take with no read before the store - the order is unobservable', () => {
+    assert.deepStrictEqual(lint('store-sunk-past-pointer-read', fn(
+      '    p = szCode;\n    szCode[0] = c0;\n    Open(p);\n')), []);
+  });
+
+  it('ignores a label or a jump out between the read and the store', () => {
+    assert.deepStrictEqual(lint('store-sunk-past-pointer-read', fn(
+      '    strcat(szPath, szCode);\nagain:\n    k = n;\n    szCode[0] = c0;\n' +
+      '    if (n) goto again;\n    Open(szPath);\n')), []);
+    assert.deepStrictEqual(lint('store-sunk-past-pointer-read', fn(
+      '    while (n) {\n        strcat(szPath, szCode);\n        if (k) break;\n        szCode[0] = c0;\n        n--;\n    }\n')), []);
+  });
+
+  it('ignores a store that reads memory a strcat in between may change', () => {
+    assert.deepStrictEqual(lint('store-sunk-past-pointer-read', { files: {
+      'D2Client/Game/PalShift.cpp':
+        'void F(char* pSrc) {\n    char szPath[32];\n    char szCode[4];\n' +
+        '    strcat(szPath, szCode);\n    szCode[0] = *pSrc;\n    Open(szPath);\n}\n',
+    } }), []);
+  });
+
+  it('treats a constant-offset slice of a struct as a direct access, not a pointer read', () => {
+    assert.deepStrictEqual(lint('store-sunk-past-pointer-read', { files: {
+      'D2Common/Drlg/Path.cpp':
+        'void F(int a) {\n    D2PathNodeStrc sNode;\n    int d;\n' +
+        '    d = *(uint32_t*)((char*)&sNode + 8) - a;\n    sNode.nCost = d;\n    Go(*(uint32_t*)((char*)&sNode + 8));\n}\n',
+    } }), []);
+  });
+
+  it('ignores a field store after a memset, the correct order', () => {
+    assert.deepStrictEqual(lint('store-sunk-past-pointer-read', { files: {
+      'D2Game/Unit.cpp':
+        'void F(int a) {\n    D2PacketStrc sPacket;\n' +
+        '    memset(&sPacket, 0, sizeof(sPacket));\n    sPacket.nType = a;\n    Send(&sPacket);\n}\n',
+    } }), []);
+  });
+});
