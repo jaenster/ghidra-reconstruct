@@ -570,6 +570,7 @@ export { foldedAddressRebasePlugin, type FoldedAddress, type FoldedAddressRebase
 export { immediateNotAddressPlugin, type ImmediateNotAddressOptions } from './builtins/immediate-not-address.js';
 export { importAddressForwarderPlugin, IMPORT_ADDRESS_FORWARDERS } from './builtins/import-address-forwarder.js';
 export { unsignedRangeComparePlugin } from './builtins/unsigned-range-compare.js';
+export { rangeTestFormPlugin } from './builtins/range-test-form.js';
 export { zeroExtendSitePlugin, zeroExtendCastPlugin, createZeroExtendSiteTransformer, createZeroExtendCastTransformer, type ZeroExtendMaskSite, type ZeroExtendSiteOptions, type ZeroExtendCastOptions } from './builtins/zero-extend-cast.js';
 export { shiftCountMaskPlugin, createShiftCountMaskTransformer, type ShiftCountMaskOptions } from './builtins/shift-count-mask.js';
 export { createFunctionRanges, type ValueRange, type FunctionRanges } from './builtins/value-range.js';
@@ -668,6 +669,7 @@ import { foldedAddressRebasePlugin } from './builtins/folded-address-rebase.js';
 import { immediateNotAddressPlugin } from './builtins/immediate-not-address.js';
 import { importAddressForwarderPlugin } from './builtins/import-address-forwarder.js';
 import { unsignedRangeComparePlugin } from './builtins/unsigned-range-compare.js';
+import { rangeTestFormPlugin } from './builtins/range-test-form.js';
 import { shiftCountMaskPlugin } from './builtins/shift-count-mask.js';
 import { zeroExtendSitePlugin, zeroExtendCastPlugin } from './builtins/zero-extend-cast.js';
 import { compareFormPlugin } from './builtins/compare-form.js';
@@ -851,6 +853,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   bitfieldAccessPlugin,       // Cleanup: field_0xNN & MASK → bitfieldName (priority 45)
   callSiteOverrideCastPlugin, // Correctness: call through void*/code* → cast to the call-site override (priority 614)
   unsignedRangeComparePlugin, // Correctness: (x - lo) < n on an unsigned narrow/enum stays unsigned (priority 617)
+  rangeTestFormPlugin,        // Matching: (unsigned)(x - lo) <= k guarding a branch -> lo <= x && x <= hi, VC8's ADD x,-lo (priority 989.8)
   shiftCountMaskPlugin,       // Matching: x << (n & 0x1f) -> x << n where n is proven to lie in [0, 31] (priority 621)
   zeroExtendSitePlugin,       // Matching: tag each byte/word mask a MOVZX computed (priority 3)
   zeroExtendCastPlugin,       // Matching: a tagged x & 0xffff -> (uint16_t)x where value and type are kept (priority 622)
