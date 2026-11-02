@@ -18,6 +18,7 @@
 import {
   extractAllFunctions,
   extractDataType,
+  extractDataTypes,
   extractGlobals,
   type AnalyzedDataSymbol,
   type CachedSourceExtraction,
@@ -217,6 +218,23 @@ export function baseTypeName(spelling: string): string {
   }
 }
 
+/**
+ * Put the type list in the listing's order, in place. Types the listing does not name
+ * keep their relative order after the listed ones.
+ */
+export function reorderDataTypes(
+  dataTypes: ExtractedDataType[],
+  listing: readonly { name: string; category?: string }[],
+): void {
+  const rank = new Map<string, number>();
+  listing.forEach((t, i) => { const k = dataTypeKey(t.name, t.category); if (!rank.has(k)) rank.set(k, i); });
+  const ordered = dataTypes
+    .map((dt, i) => ({ dt, i, r: rank.get(dataTypeKey(dt.name, dt.category)) ?? Number.POSITIVE_INFINITY }))
+    .sort((a, b) => (a.r - b.r) || (a.i - b.i))
+    .map(x => x.dt);
+  dataTypes.splice(0, dataTypes.length, ...ordered);
+}
+
 /** The type names one record refers to: members, typedef target, function definition. */
 function referencedTypeNames(dt: ExtractedDataType): string[] {
   const r = dt as ExtractedDataType & {
@@ -389,6 +407,8 @@ export async function applyEvents(
   // only exists while both the old and the new record are in hand.
   // ---------------------------------------------------------------------------
   const typeTokens = new Set<string>();
+  /** A type was renamed or added: its place in the type list moved. */
+  let typeOrderMoved = false;
   /** Old names of renamed types: other records still spell them. */
   const renamedFrom = new Set<string>();
   const renamedTo = new Map<string, string>();
@@ -437,7 +457,11 @@ export async function applyEvents(
       result.touchedDataTypes.push(dataTypeKey(fresh.name, fresh.category));
 
       typeTokens.add(fresh.name);
-      if (fresh.name !== previous.name) { renamedFrom.add(previous.name); renamedTo.set(previous.name, fresh.name); }
+      if (fresh.name !== previous.name) {
+        renamedFrom.add(previous.name);
+        renamedTo.set(previous.name, fresh.name);
+        typeOrderMoved = true;
+      }
       const newMembers = memberNames(fresh);
       for (const name of oldMembers) if (!newMembers.has(name)) typeTokens.add(name);
       for (const name of newMembers) if (!oldMembers.has(name)) typeTokens.add(name);
@@ -452,6 +476,7 @@ export async function applyEvents(
         // No address to sort by, so a new type goes at the end: codegen groups
         // types by category and ownership, not by array position.
         model.primary.dataTypes.push(fresh);
+        typeOrderMoved = true;
         indices.dtByKey.set(dataTypeKey(fresh.name, fresh.category), fresh);
         result.touchedDataTypes.push(dataTypeKey(fresh.name, fresh.category));
         typeTokens.add(fresh.name);
@@ -481,8 +506,9 @@ export async function applyEvents(
         indices.dtByKey.delete(key);
         indices.dtByKey.set(dataTypeKey(fresh.name, fresh.category), fresh);
         result.touchedDataTypes.push(dataTypeKey(fresh.name, fresh.category));
-        typeTokens.add(dt.name);
-        typeTokens.add(fresh.name);
+        // A referrer keeps its name, and bodies spell it as before: only the stale old
+        // names (referrers.names, below) say which bodies moved. A derived record that
+        // was renamed with its type is one of those.
       } catch (e) {
         log(`datatype ${dt.name}: re-extract after a rename failed (${(e as Error).message}); keeping previous`);
       }
@@ -496,6 +522,19 @@ export async function applyEvents(
     // name in their body, so the old names in typeTokens send them to be decompiled and
     // their records re-read.
     for (const name of referrers.names) typeTokens.add(name);
+  }
+
+  // The type list's order is a whole-program input: the emitter lays types out in it.
+  // The full extraction takes it from Ghidra's listing, which is name-ordered, so a
+  // renamed or added type sits where the listing puts it - not in its old slot, and not
+  // at the end. Ask the listing rather than re-implement its comparator.
+  if (typeOrderMoved) {
+    try {
+      const listing = await extractDataTypes(client, { limit: 10000 });
+      reorderDataTypes(model.primary.dataTypes, listing);
+    } catch (e) {
+      log(`type order: listing failed (${(e as Error).message}); renamed or added types keep their slots`);
+    }
   }
 
   if (typeTokens.size > 0) {

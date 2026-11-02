@@ -101,3 +101,32 @@ test('a struct that points at a renamed type is read again, and so is a global o
   const player = m.primary.dataTypes.find(t => t.name === 'D2UnitDataPlayerStrc') as unknown as { fields: { dataType: string }[] };
   assert.equal(player.fields[0].dataType, 'D2TradeRecordStrc *');
 });
+
+test('a renamed type moves to where the listing puts it; a referrer\'s users are not decompiled', async () => {
+  const m = model();
+  m.primary.dataTypes.unshift({ name: 'D2Aaa', category: '/', kind: 'STRUCTURE', size: 4, fields: [] } as never);
+  m.primary.dataTypes.splice(1, 0, { name: 'D2UnitDataPlayerStrc', category: '/', kind: 'STRUCTURE', size: 4, fields: [{ name: 'p', dataType: 'D2UnknownStructure0x18 *', offset: 0, size: 4 }] } as never);
+  // A body that names only the referrer, not the renamed type.
+  m.primary.functions.push({ name: 'PLAYER_GetData', address: '00600000', decompiled: 'D2UnitDataPlayerStrc *PLAYER_GetData(void) {}' } as never);
+  const decompiled: string[] = [];
+  const client = {
+    async sendCommand(cmd: string, params: Record<string, unknown>) {
+      if (cmd === 'get_data_type') return { name: params.name, category: params.category, type: 'Structure', size: 4, fields: [] };
+      if (cmd === 'list_data_types') return { dataTypes: [
+        { name: 'D2Aaa', category: '/', type: 'Structure' },
+        { name: 'D2TradeRecordStrc', category: '/D2Game', type: 'Structure' },
+        { name: 'D2UnitDataPlayerStrc', category: '/', type: 'Structure' },
+      ], total: 3 };
+      if (cmd === 'decompile') { decompiled.push(String(params.address)); return { pseudocode: 'void f(void) {}' }; }
+      if (cmd === 'execute_script') return { success: true, output: '' };
+      return {};
+    },
+  } as never;
+  const ev = {
+    seq: 1, kind: 'datatype.renamed', target: 'datatype',
+    key: '/D2Game/D2TradeRecordStrc', oldName: '/D2Game/D2UnknownStructure0x18', newName: '/D2Game/D2TradeRecordStrc',
+  } as ChangeEvent;
+  await applyEvents(m, buildIndices(m), [ev], client);
+  assert.deepStrictEqual(m.primary.dataTypes.map(t => t.name), ['D2Aaa', 'D2TradeRecordStrc', 'D2UnitDataPlayerStrc']);
+  assert.deepStrictEqual(decompiled, [USER]);
+});
