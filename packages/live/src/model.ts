@@ -27,9 +27,11 @@ import {
   type GhidraConnection,
   type ReconstructionOptions,
 } from '@ghidra-mcp/reconstruct';
-import { decompileFunction, getFunctionInfo } from '@ghidra-mcp/reconstruct/extract/functions';
+import { decompileFunction, getFunctionInfo, listFunctionRecord } from '@ghidra-mcp/reconstruct/extract/functions';
 import { fetchInitializedData, inferType, extractPrimaryLabels, markPrimaryLabels } from '@ghidra-mcp/reconstruct/extract/globals';
 import { attachOperandRefs } from '@ghidra-mcp/reconstruct/extract/operand-refs';
+import { extractFunctionFacts, FACT_KEYS } from '@ghidra-mcp/reconstruct/extract/function-facts';
+import { callEdgeIndex, calleeAddressesOf } from '@ghidra-mcp/reconstruct/analysis/callgraph';
 
 /**
  * The primary binary plus whatever cross-check source was merged into it, and
@@ -303,8 +305,6 @@ export async function applyEvents(
 
   /** Functions that need a fresh body, by address key. */
   const affected = new Set<string>();
-  /** Functions whose Ghidra-side record changed, not just their body text. */
-  const reextract = new Set<string>();
 
   // ---------------------------------------------------------------------------
   // Datatypes first: the field-name diff is what says which bodies moved, and it
@@ -463,7 +463,6 @@ export async function applyEvents(
     if (event.target !== 'function') continue;
 
     const key = addressKey(event.key);
-    reextract.add(key);
     affected.add(key);
 
     if (event.callersUnaffected) continue;
@@ -494,7 +493,10 @@ export async function applyEvents(
   await Promise.all(Array.from({ length: lanes }, async () => {
     for (let i = next++; i < order.length; i = next++) {
       replaced[i] = await refreshFunction(model, indices, client, order[i], {
-        reextractInfo: reextract.has(order[i]),
+        // The record too, not only the body: a caller's locals carry the decompiler's
+        // resolved types, and those move with a callee's signature. A full extraction
+        // reads every record fresh, so a carried-over one would disagree with it.
+        reextractInfo: true,
         timeout,
         log,
       });
@@ -506,6 +508,7 @@ export async function applyEvents(
     recomputeCallEdges(model, indices, result.touchedFunctions);
     reindexCallers(model, indices);
     await refreshOperandRefs(model, client, result.touchedFunctions, log);
+    await refreshFunctionFacts(model, indices, client, result.touchedFunctions, log);
   }
 
   model.seq = Math.max(model.seq, highestSeq);
@@ -581,10 +584,14 @@ async function refreshFunction(
       opts.log(`function ${address}: no longer present in Ghidra`);
       return false;
     }
-    // `get_function_info` answers with the Ghidra-side facts only. Everything
-    // derived later — the body, call edges, platform guards, thunk targets — is
-    // carried forward from the record being replaced.
-    record = existing ? { ...existing, ...defined(info) } : info;
+    // The record itself comes from the listing, as the full extraction reads it;
+    // `get_function_info` only says what the function is called now, which a rename
+    // moved. Everything derived later — the body, call edges, platform guards, thunk
+    // targets — is carried forward from the record being replaced.
+    const listed = await listFunctionRecord(client, info.name, info.address).catch(() => null);
+    if (!listed) opts.log(`function ${info.name}: not listed under its name; using get_function_info`);
+    const fresh = listed ?? info;
+    record = existing ? { ...existing, ...defined(fresh) } : fresh;
   } else {
     record = { ...existing };
   }
@@ -637,23 +644,60 @@ function addressValue(address: string): bigint {
 }
 
 /**
- * Rebuild `calledFunctions` for the given functions by intersecting each fresh
- * body with the known function names.
- *
- * That is the same evidence `buildCallGraph` reads, at name granularity,
- * without re-scanning the 14k bodies that did not move.
+ * Rebuild `calledFunctions` for the given functions, with the batch call graph's own
+ * rule (`calleeAddressesOf`): calls the body prints, in first-occurrence order, its own
+ * name included, then a thunk's target - resolved to names as `populateCalledFunctions`
+ * does. Any other rule leaves a re-extracted function's edges different from a full
+ * extraction's, and they reach the source maps and the include lists.
  */
 function recomputeCallEdges(model: LiveModel, indices: ModelIndices, addrs: readonly string[]): void {
-  const names = new Set<string>();
-  for (const fn of model.primary.functions) names.add(fn.name);
+  const functions = model.primary.functions;
+  const index = callEdgeIndex(functions);
+  const addressToName = new Map<string, string>();
+  for (const fn of functions) addressToName.set(fn.address, fn.name);
   for (const addr of addrs) {
     const fn = indices.fnByAddr.get(addr);
     if (!fn) continue;
     const callees: string[] = [];
-    for (const token of indices.bodyTokens.get(addr) ?? []) {
-      if (token !== fn.name && names.has(token)) callees.push(token);
+    for (const callee of calleeAddressesOf(fn, index)) {
+      const name = addressToName.get(callee);
+      if (name) callees.push(name);
     }
     fn.calledFunctions = callees;
+  }
+}
+
+/**
+ * Read the per-function facts (compare sites, branch layout, call and access order, halt
+ * lines, ...) again for every function whose body was re-decompiled. They are line-keyed
+ * to the body, so facts carried over from the previous record describe a text that is
+ * gone, and codegen then lays out branches and orders stores by the old lines. Cleared
+ * first: a body that no longer prints a construct must not keep its old fact. Read with
+ * no cache, as a full extraction with an empty cache would.
+ */
+async function refreshFunctionFacts(
+  model: LiveModel,
+  indices: ModelIndices,
+  client: GhidraConnection,
+  addrs: readonly string[],
+  log: LiveLog,
+): Promise<void> {
+  const functions: ExtractedFunction[] = [];
+  for (const addr of addrs) {
+    const fn = indices.fnByAddr.get(addr);
+    if (!fn) continue;
+    for (const key of FACT_KEYS) delete fn[key];
+    functions.push(fn);
+  }
+  if (functions.length === 0) return;
+  // As the full extraction decides it: the compare-site forms are VC8's, PE images only.
+  const format = model.primary.programInfo?.format ?? '';
+  const compareSites = process.env.GHIDRA_COMPARE_SITES !== '0' && /Portable Executable|\bPE\b/i.test(format);
+  try {
+    const stats = await extractFunctionFacts(client, functions, { compareSites });
+    log(`facts: ${stats.extracted} of ${stats.candidates} candidate(s) re-read for ${functions.length} refreshed function(s)`);
+  } catch (e) {
+    log(`facts: re-read failed (${(e as Error).message}); the refreshed functions carry none`);
   }
 }
 

@@ -16,7 +16,7 @@ function fakeClient(decompiled: string[]) {
   return {
     async sendCommand(cmd: string, params: Record<string, unknown>) {
       if (cmd === 'decompile') { decompiled.push(String(params.address)); return { pseudocode: 'void f(void) {}' }; }
-      if (cmd === 'get_function_info') return { name: 'GetRosterPartyId', address: CALLEE, signature: 'int f(void)', returnType: 'int', parameters: [], localVariables: [], callingConvention: '__fastcall', size: 10 };
+      if (cmd === 'get_function_info') return { name: params.address === CALLER ? 'PartyPanel' : 'GetRosterPartyId', address: String(params.address), signature: 'int f(void)', returnType: 'int', parameters: [], localVariables: [], callingConvention: '__fastcall', size: 10 };
       if (cmd === 'execute_script') return { success: true, output: '' };
       return {};
     },

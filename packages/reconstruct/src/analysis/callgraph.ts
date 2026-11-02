@@ -35,28 +35,12 @@ export function buildCallGraph(functions: ExtractedFunction[]): CallGraph {
     edges.set(func.address, new Set());
   }
 
-  // Parse decompiled code to find call edges
+  // Call edges: the calls each body prints, then a thunk's single target.
+  const index = callEdgeIndex(functions);
   for (const func of functions) {
-    if (!func.decompiled) continue;
-
-    const callees = extractCallees(func.decompiled, functions);
-    for (const callee of callees) {
-      edges.get(func.address)?.add(callee);
-    }
-  }
-
-  // A thunk has no body to scan, but it calls exactly one function. Without this
-  // edge nothing knows the target is referenced, so its header is not included
-  // where the forwarder is emitted and its declaration is not made public.
-  const byAddressKey = new Map<string, string>();
-  for (const func of functions) byAddressKey.set(addressKey(func.address), func.address);
-  for (const func of functions) {
-    const target = func.thunkTarget;
-    if (!target || target.isExternal) continue;
-    const targetAddress = byAddressKey.get(addressKey(target.address));
-    if (targetAddress && targetAddress !== func.address) {
-      edges.get(func.address)?.add(targetAddress);
-    }
+    const set = edges.get(func.address);
+    if (!set) continue;
+    for (const callee of calleeAddressesOf(func, index)) set.add(callee);
   }
 
   return { nodes, edges };
@@ -70,37 +54,54 @@ function addressKey(address: string): string {
 /**
  * Extract called function addresses from decompiled code
  */
-function extractCallees(
-  decompiled: string,
-  functions: ExtractedFunction[]
-): string[] {
-  const callees: string[] = [];
+/** The lookups call edges are resolved through, built once per function list. */
+export interface CallEdgeIndex {
+  /** Function name -> address; the last function of a name wins. */
+  nameToAddress: Map<string, string>;
+  /** Bare hex address -> the address as the function list spells it. */
+  byAddressKey: Map<string, string>;
+}
 
-  // Build a map of function names to addresses
+export function callEdgeIndex(functions: readonly ExtractedFunction[]): CallEdgeIndex {
   const nameToAddress = new Map<string, string>();
+  const byAddressKey = new Map<string, string>();
   for (const func of functions) {
     nameToAddress.set(func.name, func.address);
+    byAddressKey.set(addressKey(func.address), func.address);
   }
-
-  // Look for function calls in the decompiled code
-  // Pattern: functionName(...)
-  const callPattern = /\b([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
-  let match;
-
-  while ((match = callPattern.exec(decompiled)) !== null) {
-    const funcName = match[1];
-    const address = nameToAddress.get(funcName);
-    if (address) {
-      callees.push(address);
-    }
-  }
-
-  return [...new Set(callees)]; // Deduplicate
+  return { nameToAddress, byAddressKey };
 }
 
 /**
- * Get topological order of functions (for proper declaration order)
+ * The addresses one function calls, in the order the call graph records them: every
+ * known function name the body prints followed by `(`, first occurrence first (the
+ * function's own name counts: its definition line prints it), then a thunk's target.
+ *
+ * A thunk has no body to scan, but it calls exactly one function. Without that edge
+ * nothing knows the target is referenced, so its header is not included where the
+ * forwarder is emitted and its declaration is not made public.
+ *
+ * Shared by the batch call graph and the live daemon's per-function refresh, so the two
+ * cannot disagree about what a body calls.
  */
+export function calleeAddressesOf(func: ExtractedFunction, index: CallEdgeIndex): string[] {
+  const callees = new Set<string>();
+  if (func.decompiled) {
+    const callPattern = /\b([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+    let match;
+    while ((match = callPattern.exec(func.decompiled)) !== null) {
+      const address = index.nameToAddress.get(match[1]);
+      if (address) callees.add(address);
+    }
+  }
+  const target = func.thunkTarget;
+  if (target && !target.isExternal) {
+    const targetAddress = index.byAddressKey.get(addressKey(target.address));
+    if (targetAddress && targetAddress !== func.address) callees.add(targetAddress);
+  }
+  return [...callees];
+}
+
 export function getTopologicalOrder(graph: CallGraph): string[] {
   const visited = new Set<string>();
   const result: string[] = [];

@@ -763,6 +763,28 @@ export async function getFunctionInfo(
 }
 
 /**
+ * One function's record as the full extraction reads it: a `list_functions` row, not
+ * `get_function_info`. The two attach the decompiler's resolved local types by
+ * different rules, so a record refreshed through `get_function_info` disagrees with
+ * the full extraction's for the same program. Matched by address among the functions
+ * of that exact name; null when it is not listed under the name.
+ */
+export async function listFunctionRecord(
+  connection: GhidraConnection,
+  name: string,
+  address: string,
+): Promise<ExtractedFunction | null> {
+  const regex = `^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`;
+  const result = await connection.sendCommand<{ functions: GhidraFunctionInfo[] }>(
+    'list_functions',
+    { regex, offset: 0, limit: 100 },
+  );
+  const want = addressKey(address);
+  const row = (result.functions ?? []).find(f => addressKey(f.address) === want);
+  return row ? mapFunctionInfo(row) : null;
+}
+
+/**
  * The Ghidra-side half of thunk-target resolution.
  *
  * `Function.getThunkedFunction(true)` follows a chain of thunks to the function
