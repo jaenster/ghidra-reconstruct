@@ -53,7 +53,8 @@ import type {
   VariableDecl,
   TypeNode,
 } from '../../../ast/nodes.js';
-import { Expr, Type } from '../../../ast/factory.js';
+import { Expr, Type, Decl, Stmt } from '../../../ast/factory.js';
+import { cloneNode } from '../../transformer.js';
 import { emit } from '../../../emit/index.js';
 import type { AnyNode } from '../../../ast/nodes.js';
 import { buildFunctionFlow, ENTRY_DEF, type FunctionFlow } from '../../cfg/dataflow.js';
@@ -176,6 +177,8 @@ function makeAddress(deps: StringIntrinsicDeps, env: Map<string, Addr>, outer?: 
       const n = (x as Identifier).name;
       const s = slot.get(n);
       if (s) return plus(atom('frame'), BigInt(s.offset));
+      // A local array the frame does not name: an object of its own in the frame.
+      if (deps.localArrays.has(n)) return atom(`frame@${n}`);
       return deps.locals.has(n) ? null : atom(`&g:${n}`);
     }
     if (x.kind === NodeKind.MemberExpr) {
@@ -534,7 +537,7 @@ function lowerOne(body: Statement[], deps: StringIntrinsicDeps): Statement[] | n
   for (const list of lists) {
     for (let i = 0; i < list.length; i++) {
       const r = tryAt(list, i, body, deps, flow) ?? tryStrcmp(list, i, body, deps) ?? tryStrcmpLoop(list, i, body, deps, flow)
-        ?? tryStrlenScan(list, i, body, deps, flow);
+        ?? tryStrlenScan(list, i, body, deps, flow) ?? tryStrlenLength(list, i, body, deps);
       if (r) return r;
     }
   }
@@ -731,6 +734,7 @@ function hasCall(x: unknown): boolean {
 type Event =
   | { kind: 'scan'; index: number; scan: Scan; start: Addr }
   | { kind: 'copy'; index: number; copy: Copy; dst: Addr; src: Addr; length: Addr; env: Map<string, Addr> }
+  | { kind: 'strcpy'; index: number; copy: StrcpyLoop; dst: Addr; src: Addr; env: Map<string, Addr> }
   | { kind: 'assign'; index: number; name: string; pure: boolean }
   | { kind: 'store'; index: number; at: Addr; bytes: bigint[] };
 
@@ -770,6 +774,18 @@ function tryAt(list: Statement[], i: number, body: Statement[], deps: StringIntr
       j++;
       continue;
     }
+    if (st.kind === NodeKind.DoWhileStmt) {
+      const cs = strcpyShape(st, addr, deps);
+      if (!cs) break;
+      const src = env.get(cs.src) ?? addr.value(Expr.identifier(cs.src)) ?? atom(`v:${cs.src}`);
+      const startEnv = new Map<string, Addr>([[cs.src, src]]);
+      if (cs.dstVar) startEnv.set(cs.dstVar, env.get(cs.dstVar) ?? addr.value(Expr.identifier(cs.dstVar)) ?? atom(`v:${cs.dstVar}`));
+      const dst = storeAddress(cs.dstAddress, addr, startEnv);
+      if (!dst) break;
+      events.push({ kind: 'strcpy', index: j, copy: cs, dst, src, env: new Map(env) });
+      for (const v of [cs.src, cs.dstVar, cs.byte]) if (v) env.set(v, atom(`after:${j}:${v}`));
+      continue;
+    }
     if (st.kind !== NodeKind.ExprStmt) break;
     const a = assignOf(st);
     if (!a) break;
@@ -791,13 +807,151 @@ function tryAt(list: Statement[], i: number, body: Statement[], deps: StringIntr
     events.push({ kind: 'store', index: j, at, bytes });
   }
   if (events.length === 0) return null;
-  if (TRACE && events.some(e => e.kind === 'scan')) {
+  if (TRACE && events.some(e => e.kind === 'scan' || e.kind === 'strcpy')) {
     const show = (a: Addr) => [...a.terms].map(([k, v]) => `${v === 1n ? '' : v + '*'}${k}`).join('+') + (a.c ? `+${a.c >= (1n << 31n) ? a.c - MOD : a.c}` : '');
     console.error('[string-intrinsics] window', events.map(e => e.kind === 'scan' ? `scan(${e.scan.kind} ${e.scan.ptr} from ${show(e.start)})`
-      : e.kind === 'copy' ? `copy(${show(e.dst)} <- ${show(e.src)} x ${show(e.length)})` : e.kind === 'store' ? `store(${show(e.at)})` : `${e.name}=`).join('; '));
+      : e.kind === 'copy' ? `copy(${show(e.dst)} <- ${show(e.src)} x ${show(e.length)})` : e.kind === 'store' ? `store(${show(e.at)})` : e.kind === 'strcpy' ? `strcpy(${show(e.dst)} <- ${show(e.src)})` : `${e.name}=`).join('; '));
   }
-  return matchStrcat(list, events, body, deps);
+  return matchStrcat(list, events, body, deps) ?? matchStrcpy(list, events, body, deps);
 }
+
+interface StrcpyLoop {
+  /** The source cursor, advanced one byte per iteration. */
+  src: string;
+  /** The destination cursor, when the loop keeps one (`*Q = c; Q++`). */
+  dstVar: string | null;
+  /** The byte temporary the loop tests. */
+  byte: string;
+  /** The first iteration's store address, in terms of the cursors' start values. */
+  dstAddress: Expression;
+  /** Locals the store address reads besides the cursors (`d` of `P[d]`). */
+  others: string[];
+}
+
+/**
+ * MSVC's inline strcpy, as the decompiler prints it:
+ *
+ *   do { c = *P; *Q = c; P = P + 1; Q = Q + 1; } while (c != 0);     // two cursors
+ *   do { c = *P; P[d] = c; P = P + 1; } while (c != 0);               // d = D - P, fixed
+ *
+ * Each iteration copies the byte at P to the destination and stops after the NUL, so the
+ * loop copies the string at P's start, NUL included, to the first iteration's destination:
+ * `strcpy(D, P)`. P and Q point at one-byte elements, c is a one-byte local, and no other
+ * statement is in the loop; the step statements may come in any order after the store.
+ */
+function strcpyShape(st: Statement, addr: ReturnType<typeof makeAddress>, deps: StringIntrinsicDeps): StrcpyLoop | null {
+  const loop = st as DoWhileStmt;
+  const parts = bodyStatements(loop.body);
+  if (parts.length !== 3 && parts.length !== 4) return null;
+  const read = assignOf(parts[0]);
+  const c = read && identName(read.left);
+  if (!read || !c) return null;
+  const rp = derefOf(read.right);
+  const P = rp && identName(unwrapParens(rp).kind === NodeKind.CStyleCastExpr ? (unwrapParens(rp) as CStyleCastExpr).expression : rp);
+  if (!P || P === c || !byteReadThrough(read.right, P, deps)) return null;
+  const store = assignOf(parts[1]);
+  if (!store || identName(stripByteCast(store.right)) !== c) return null;
+  const target = unwrapParens(store.left);
+  if (storeWidth(target, deps) !== 1) return null;
+  const tested = nonZeroTest(loop.condition);
+  if (!tested || identName(tested) !== c) return null;
+  const cs = deps.shape(Expr.identifier(c));
+  if (!cs || cs.stars !== 0 || !BYTE_BASE.test(cs.base)) return null;
+  const steps = parts.slice(2);
+  let Q: string | null = null;
+  if (steps.length === 2) {
+    const t = derefOf(target);
+    Q = t && identName(t);
+    if (!Q || Q === P || Q === c) return null;
+    const ok = (isByteStep(steps[0], P) && isByteStep(steps[1], Q)) || (isByteStep(steps[0], Q) && isByteStep(steps[1], P));
+    if (!ok) return null;
+  } else if (!isByteStep(steps[0], P)) {
+    return null;
+  }
+  for (const v of Q ? [P, Q] : [P]) {
+    const s = deps.shape(Expr.identifier(v));
+    if (!s || s.stars !== 1 || pointeeSize(s, deps) !== 1) return null;
+  }
+  // The store address as the cursors move: Q itself, or P plus a fixed offset.
+  const p0 = atom(`cp:${P}`), q0 = atom(`cp:${Q ?? ''}`);
+  const env = new Map<string, Addr>([[P, p0]]);
+  if (Q) env.set(Q, q0);
+  const at = storeAddress(target, addr, env);
+  if (!at) return null;
+  const others = new Set<string>();
+  collectNames(store.left, others);
+  others.delete(P);
+  if (Q) others.delete(Q);
+  for (const o of [...others]) if (!deps.locals.has(o) || deps.localArrays.has(o)) others.delete(o);
+  if (others.has(c)) return null;
+  if (Q) {
+    if (!sameAddr(at, q0)) return null;
+  } else {
+    // P + inv: the offset may not move with P.
+    if (at.terms.get(`cp:${P}`) !== 1n) return null;
+    const inv = addAddr(at, p0, -1n);
+    if (inv.terms.has(`cp:${P}`)) return null;
+  }
+  return { src: P, dstVar: Q, byte: c, dstAddress: target, others: [...others] };
+}
+
+/** The address a one-byte store target names: `*p`, `p[k]`, `p[e]` for a byte pointer p. */
+function storeAddress(target: Expression, addr: ReturnType<typeof makeAddress>, env: ReadonlyMap<string, Addr>): Addr | null {
+  const x = unwrapParens(target);
+  if (x.kind === NodeKind.SubscriptExpr) {
+    const s = x as SubscriptExpr;
+    const base = addr.valueWith(env, s.array), off = addr.valueWith(env, s.index);
+    return base && off ? addAddr(base, off) : null;
+  }
+  if (x.kind === NodeKind.UnaryExpr && (x as UnaryExpr).operator === '*') return addr.valueWith(env, (x as UnaryExpr).operand);
+  return null;
+}
+
+/** strcpy(D, S) from an inline copy loop; the copy's cursors, byte and offset are dead after it. */
+function matchStrcpy(list: Statement[], evs: Event[], body: Statement[], deps: StringIntrinsicDeps): Statement[] | null {
+  for (const e of evs) {
+    if (e.kind !== 'strcpy') continue;
+    // strcpy requires the strings not to overlap; the loop with overlap would differ.
+    if (!distinctObjects(e.dst, e.src, deps)) { if (TRACE) console.error('[string-intrinsics] strcpy: not distinct'); continue; }
+    const cp = e.copy;
+    const temps = [cp.src, cp.dstVar, cp.byte, ...cp.others];
+    const tempSet = new Set(temps.filter((t): t is string => !!t));
+    const out = replaceGroup(list, evs, [e.index], temps, body, deps, () => {
+      const dst = spellAddress(e.dst, deps) ?? spellByHolder(e.dst, e.env, tempSet, deps) ?? spellSetup(e.dst, list, evs, e.index, tempSet, deps);
+      const src = spellAddress(e.src, deps) ?? spellByHolder(e.src, e.env, tempSet, deps) ?? spellSetup(e.src, list, evs, e.index, tempSet, deps);
+      if (TRACE) console.error(`[string-intrinsics] strcpy spelled dst=${dst ? emit(dst as unknown as AnyNode) : null} src=${src ? emit(src as unknown as AnyNode) : null}`);
+      return dst && src ? callStmt('strcpy', [dst, src]) : null;
+    }, [e.dst, e.src]);
+    if (out) return out;
+  }
+  return null;
+}
+
+/**
+ * The right side of a temporary's setup in the window (`Q = D2IniData->szSERVERIP;`) when it
+ * holds exactly `a`, spelled as a char pointer. It reads only names that do not change before
+ * the call, which sits where the loop was: the window holds no call and no other store.
+ */
+function spellSetup(a: Addr, list: Statement[], evs: Event[], before: number, temps: ReadonlySet<string>, deps: StringIntrinsicDeps): Expression | null {
+  for (let k = evs.length - 1; k >= 0; k--) {
+    const e = evs[k];
+    if (e.index >= before || e.kind !== 'assign' || !temps.has(e.name)) continue;
+    const a0 = assignOf(list[e.index]);
+    if (!a0 || !deps.isPure(a0.right) || hasCall(a0.right)) continue;
+    // The window gave the temporary this value, or an opaque one of its own (tryAt).
+    const v = makeAddress(deps, new Map()).value(a0.right) ?? atom(`opaque:${e.index}:${e.name}`);
+    if (!sameAddr(v, a)) continue;
+    const names = new Set<string>();
+    collectNames(a0.right, names);
+    if ([...names].some(n => temps.has(n))) continue;
+    if (evs.some(x => x.kind === 'assign' && x.index > e.index && x.index < before && names.has(x.name))) continue;
+    const sh = deps.shape(a0.right);
+    const r = cloneNode(a0.right);
+    return sh && sh.stars === 1 && sh.base === 'char' ? r : asCharPointer(r);
+  }
+  return null;
+}
+
 
 /** Bytes a store writes: the access width from the cast or the pointer's pointee. */
 function storeWidth(target: Expression, deps: StringIntrinsicDeps): number | null {
@@ -827,13 +981,18 @@ function storeWidth(target: Expression, deps: StringIntrinsicDeps): number | nul
  * on entry, so nothing from outside points into it), or two different frame slots.
  */
 function distinctObjects(a: Addr, b: Addr, deps: StringIntrinsicDeps): boolean {
-  const fa = a.terms.has('frame'), fb = b.terms.has('frame');
+  const inFrame = (x: Addr) => [...x.terms.keys()].some(k => k === 'frame' || k.startsWith('frame@'));
+  const fa = inFrame(a), fb = inFrame(b);
   if (fa !== fb) {
     // The non-frame side must not be a pointer computed from the frame (a local holding &buf).
     const other = fa ? b : a;
     return [...other.terms.keys()].every(k => k.startsWith('v:') && !deps.localArrays.has(k.slice(2)) || k.startsWith('&g:'));
   }
   if (!fa) return false;
+  // Two local arrays the frame does not name, each addressed from its own start.
+  const named = (x: Addr) => x.terms.size === 1 && [...x.terms][0][1] === 1n && [...x.terms][0][0].startsWith('frame@') ? [...x.terms][0][0] : null;
+  const na = named(a), nb = named(b);
+  if (na || nb) return !!na && !!nb && na !== nb;
   const slotOf = (x: Addr) => {
     if (x.terms.size !== 1) return null;
     const off = x.c >= (1n << 31n) ? x.c - MOD : x.c;
@@ -1060,6 +1219,12 @@ function spellAddress(a: Addr, deps: StringIntrinsicDeps): Expression | null {
   const [[k, coef]] = [...a.terms];
   if (coef !== 1n) return null;
   const off = a.c >= (1n << 31n) ? a.c - MOD : a.c;
+  if (k.startsWith('frame@')) {
+    const name = k.slice(6);
+    const arr = deps.localArrays.get(name);
+    if (off !== 0n || !arr || arr.elem !== 1) return null;
+    return arr.isChar ? Expr.identifier(name) : asCharPointer(Expr.identifier(name));
+  }
   if (k === 'frame') {
     for (const s of deps.stackSlots ?? []) {
       const rel = off - BigInt(s.offset);
@@ -1806,4 +1971,170 @@ function tryStrlenScan(list: Statement[], i: number, body: Statement[], deps: St
   out[0].leadingTrivia = loop.leadingTrivia ?? [];
   const edited = [...list.slice(0, i), ...out, ...list.slice(i + 1)];
   return replaceList(body, list, edited);
+}
+
+// ============================================
+// The length of a scan kept as a pointer difference
+// ============================================
+
+/**
+ * `P = S; P = P + strlen(P) + 1;` whose every later read is `(int)P - (int)(S + 1)` (or
+ * `P - (S + 1)`) is the length of S, the strlen the source wrote (BuildSymbolSearchPath
+ * 0040c290: `n = strlen(path); if (n) path[n - 1] = 0;`, the original keeps n in a register
+ * and reads it twice). The scan becomes `int nLen; nLen = (int)strlen(S);`, each difference
+ * `nLen`, and P goes. The value is the same: P - (S + 1) is the length, and S is not written
+ * from the scan to the last read. Only where P is read nowhere else, its only definitions are
+ * these two, and the reads follow in the same statement list.
+ */
+function tryStrlenLength(list: Statement[], i: number, body: Statement[], deps: StringIntrinsicDeps): Statement[] | null {
+  const a = assignOf(list[i]);
+  const P = a && identName(a.left);
+  if (!a || !P || !deps.locals.has(P) || deps.localArrays.has(P)) return null;
+  // P + strlen(P) + 1
+  const r = unwrapParens(a.right);
+  if (r.kind !== NodeKind.BinaryExpr || (r as BinaryExpr).operator !== '+' || literalOf((r as BinaryExpr).right) !== 1n) return null;
+  const inner = unwrapParens((r as BinaryExpr).left);
+  if (inner.kind !== NodeKind.BinaryExpr || (inner as BinaryExpr).operator !== '+' || identName((inner as BinaryExpr).left) !== P) return null;
+  const call = unwrapParens((inner as BinaryExpr).right);
+  if (call.kind !== NodeKind.CallExpr || identName((call as CallExprNode).callee) !== 'strlen' || (call as CallExprNode).arguments.length !== 1) return null;
+  if (identName(stripPointerCast((call as CallExprNode).arguments[0])) !== P) return null;
+  // The setup right before: P = S, S a pure expression of names that are not written later.
+  const setup = i > 0 ? assignOf(list[i - 1]) : null;
+  if (!setup || identName(setup.left) !== P || !deps.isPure(setup.right) || hasCall(setup.right)) return null;
+  const S = setup.right;
+  const sNames = new Set<string>();
+  collectNames(S, sNames);
+  if (sNames.has(P)) return null;
+  const ps = deps.shape(Expr.identifier(P));
+  if (!ps || ps.stars !== 1 || pointeeSize(ps, deps) !== 1) return null;
+  const sText = emit(S as unknown as AnyNode).replace(/\s+/g, '');
+  // Every occurrence of P in the function: its declaration, the two definitions, the reads.
+  const isLength = (e: Expression): boolean => {
+    const x = unwrapParens(e);
+    if (x.kind !== NodeKind.BinaryExpr || (x as BinaryExpr).operator !== '-') return false;
+    const b = x as BinaryExpr;
+    if (identName(stripIntCast(b.left)) !== P) return false;
+    const rr = unwrapParens(stripIntCast(b.right));
+    if (rr.kind !== NodeKind.BinaryExpr || (rr as BinaryExpr).operator !== '+' || literalOf((rr as BinaryExpr).right) !== 1n) return false;
+    return emit((rr as BinaryExpr).left as unknown as AnyNode).replace(/\s+/g, '') === sText;
+  };
+  const lengths: Expression[] = [];
+  let other = 0;
+  const allowed = new Set<unknown>([setup.left, a.left, (inner as BinaryExpr).left, stripPointerCast((call as CallExprNode).arguments[0])]);
+  const walk = (x: unknown, inLength: boolean): void => {
+    if (Array.isArray(x)) { x.forEach(y => walk(y, inLength)); return; }
+    if (!x || typeof x !== 'object') return;
+    const o = x as Record<string, unknown>;
+    if (o.kind === NodeKind.VariableDecl && (o.name as Identifier).name === P) { if (o.initializer) other++; return; }
+    if (!inLength && typeof o.kind === 'string' && isLength(o as unknown as Expression)) { lengths.push(o as unknown as Expression); walk(o, true); return; }
+    if (o.kind === NodeKind.Identifier && o.name === P && !inLength && !allowed.has(o)) other++;
+    for (const [k, v] of Object.entries(o)) {
+      if (k === 'location' || k === 'leadingTrivia' || k === 'trailingTrivia') continue;
+      if (v && typeof v === 'object') walk(v, inLength);
+    }
+  };
+  walk(body, false);
+  if (other > 0 || lengths.length === 0) return null;
+  // The reads lie in the statements after the scan, in this list; nothing there writes S's names.
+  const after = list.slice(i + 1);
+  const holds = (e: Expression) => after.some(st => contains(st, e));
+  if (!lengths.every(holds)) return null;
+  const last = Math.max(...lengths.map(e => after.findIndex(st => contains(st, e))));
+  if (writesAny(after.slice(0, last + 1), sNames) || writesAny([list[i - 1], list[i]], new Set([...sNames].filter(n => n !== P)))) return null;
+  if (sNames.size === 0) return null;
+  const lenExpr = () => Expr.cast(Type.int(), Expr.call(Expr.identifier('strlen'), [ps.base === 'char' ? cloneNode(S) : asCharPointer(cloneNode(S))]));
+  // The one read is the whole value the next statement stores (`int n = <length>;`): the
+  // length goes there, evaluated where the scan was, with nothing between.
+  // Declarations without an initialiser between evaluate nothing.
+  let at = 0;
+  while (at < after.length && after[at].kind === NodeKind.DeclStmt
+    && (after[at] as unknown as { declarations: VariableDecl[] }).declarations.every(d => d.kind === NodeKind.VariableDecl && !d.initializer)) at++;
+  if (lengths.length === 1 && at < after.length) {
+    const next = after[at];
+    let whole = false;
+    if (next.kind === NodeKind.DeclStmt) {
+      const ds = (next as unknown as { declarations: VariableDecl[] }).declarations;
+      whole = ds.length === 1 && ds[0].kind === NodeKind.VariableDecl && !!ds[0].initializer && unwrapParens(ds[0].initializer as Expression) === unwrapParens(lengths[0]);
+    } else {
+      const na = assignOf(next);
+      whole = !!na && !!identName(na.left) && unwrapParens(na.right) === unwrapParens(lengths[0]);
+    }
+    if (whole) {
+      const swapOne = (x: unknown): unknown => {
+        if (Array.isArray(x)) {
+          let ch = false;
+          const out = x.map(y => { const z = swapOne(y); if (z !== y) ch = true; return z; });
+          return ch ? out : x;
+        }
+        if (!x || typeof x !== 'object') return x;
+        if (x === lengths[0]) return lenExpr();
+        const o = x as Record<string, unknown>;
+        let copy: Record<string, unknown> | null = null;
+        for (const [k, v] of Object.entries(o)) {
+          if (k === 'location' || k === 'leadingTrivia' || k === 'trailingTrivia' || !v || typeof v !== 'object') continue;
+          const z = swapOne(v);
+          if (z !== v) { copy = copy ?? { ...o }; copy[k] = z; }
+        }
+        return copy ?? x;
+      };
+      const moved = { ...(swapOne(next) as Statement), leadingTrivia: [...(list[i - 1].leadingTrivia ?? []), ...(next.leadingTrivia ?? [])] } as Statement;
+      const edited = [...list.slice(0, i - 1), ...after.slice(0, at), moved, ...after.slice(at + 1)];
+      return dropUnreferencedDecls(replaceList(body, list, edited), new Set([P]));
+    }
+  }
+  // A fresh name.
+  const used = new Set<string>();
+  collectNames(body, used);
+  let name = 'nLen';
+  for (let k = 2; used.has(name); k++) name = `nLen${k}`;
+  const decl = Stmt.declStmt([Decl.variable(name, Type.int())]);
+  const assign = { kind: NodeKind.ExprStmt, expression: Expr.assign(Expr.identifier(name), lenExpr()), location: list[i].location, leadingTrivia: list[i - 1].leadingTrivia ?? [], trailingTrivia: [] } as unknown as Statement;
+  const targets = new Set<unknown>(lengths);
+  const swap = (x: unknown): unknown => {
+    if (Array.isArray(x)) {
+      let ch = false;
+      const out = x.map(y => { const z = swap(y); if (z !== y) ch = true; return z; });
+      return ch ? out : x;
+    }
+    if (!x || typeof x !== 'object') return x;
+    if (targets.has(x)) return Expr.identifier(name);
+    const o = x as Record<string, unknown>;
+    let copy: Record<string, unknown> | null = null;
+    for (const [k, v] of Object.entries(o)) {
+      if (k === 'location' || k === 'leadingTrivia' || k === 'trailingTrivia' || !v || typeof v !== 'object') continue;
+      const z = swap(v);
+      if (z !== v) { copy = copy ?? { ...o }; copy[k] = z; }
+    }
+    return copy ?? x;
+  };
+  const edited = [...list.slice(0, i - 1), decl, assign, ...(swap(after) as Statement[])];
+  return dropUnreferencedDecls(replaceList(body, list, edited), new Set([P]));
+}
+
+type CallExprNode = { callee: Expression; arguments: Expression[] };
+
+function stripPointerCast(e: Expression): Expression {
+  const x = unwrapParens(e);
+  return x.kind === NodeKind.CStyleCastExpr ? unwrapParens((x as CStyleCastExpr).expression) : x;
+}
+
+/** `(int)x`, `(uint)x`, `(intptr_t)x`: x. */
+function stripIntCast(e: Expression): Expression {
+  const x = unwrapParens(e);
+  if (x.kind !== NodeKind.CStyleCastExpr) return x;
+  const t = emit((x as CStyleCastExpr).type as unknown as AnyNode).replace(/\s+/g, ' ').trim();
+  return /^(int|uint|unsigned int|int32_t|uint32_t|intptr_t|uintptr_t|long|DWORD)$/.test(t) ? unwrapParens((x as CStyleCastExpr).expression) : x;
+}
+
+/** Does any statement assign, step or take the address of one of `names`? */
+function writesAny(stmts: readonly unknown[], names: ReadonlySet<string>): boolean {
+  const hit = (e: unknown) => { const n = identName(e as Expression); return !!n && names.has(n); };
+  for (const st of stmts) {
+    for (const n of traverseStatements(st)) {
+      if (n.kind === NodeKind.AssignExpr && hit((n as AssignExpr).left)) return true;
+      if (n.kind === NodeKind.PostfixExpr && hit((n as PostfixExpr).operand)) return true;
+      if (n.kind === NodeKind.UnaryExpr && ['++', '--', '&'].includes((n as UnaryExpr).operator) && hit((n as UnaryExpr).operand)) return true;
+    }
+  }
+  return false;
 }
