@@ -6,6 +6,8 @@
  * value. The literal is re-spelled as the hex escape for the byte Ghidra meant
  * (`'\xb2'`).
  *
+ * Wide literals (`L'þ'`) get the same treatment with their prefix kept (`L'\xfe'`).
+ *
  * The predecessor regex (`'([^'\\])'`) matched any two quotes one character
  * apart, so it also fired inside string literals — `"a'²'b"` would be rewritten
  * mid-string. A CharLiteral node is a char literal by construction.
@@ -21,11 +23,16 @@ function createCharLiteralEscapeTransformer(): Transformer {
     visitNode(n: ASTNode): ASTNode | undefined {
       if (n.kind !== NodeKind.CharLiteral) return undefined;
       const lit = n as CharLiteralExpr;
-      // Wide/UTF literals carry their own encoding — only plain char is remapped.
-      if (lit.prefix) return undefined;
-      if (lit.value <= 0x7f || lit.value > 0xff) return undefined;
+      if (lit.value <= 0x7f) return undefined;
+      // A wide literal is as encoding-dependent as a plain one: a compiler reading the
+      // file in its ANSI codepage sees L'þ' as the UTF-8 bytes c3 be, worth 0xc3.
+      // Its escape carries the code unit itself. u8 is a single UTF-8 code unit.
+      if (lit.prefix === 'u8') return undefined;
+      if (!lit.prefix && lit.value > 0xff) return undefined;
+      if (lit.prefix === 'L' || lit.prefix === 'u') { if (lit.value > 0xffff) return undefined; }
+      else if (lit.prefix && lit.prefix !== 'U') return undefined;
 
-      const raw = `'\\x${lit.value.toString(16)}'`;
+      const raw = `${lit.prefix}'\\x${lit.value.toString(16)}'`;
       if (raw === lit.raw) return undefined;
       return updateNode(lit, { raw } as Partial<CharLiteralExpr>);
     },
