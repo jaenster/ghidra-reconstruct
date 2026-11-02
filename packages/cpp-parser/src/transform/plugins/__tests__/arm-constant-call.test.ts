@@ -6,6 +6,7 @@ import type { AnyNode } from '../../../ast/nodes.js';
 import { hasNativeGpp, compileAndRun } from '../../../testing/native-cpp.js';
 import { armConstantCallPlugin, type ArmConstantCallOptions } from '../builtins/arm-constant-call.js';
 import { nestCallPlugin, type NestCallOptions } from '../builtins/nest-call.js';
+import { branchLayoutPlugin, type BranchLayoutOptions } from '../builtins/branch-layout/index.js';
 import type { BranchLayoutEvidence, PushImmediate } from '../builtins/branch-layout/evidence.js';
 
 const flat = (s: string) => s.replace(/\s+/g, ' ').trim();
@@ -151,5 +152,35 @@ describe('arm-constant-call', () => {
     const after = compileAndRun([prelude, r.out].join('\n'), main);
     assert.ok(before.length > 0);
     assert.strictEqual(after, before);
+  });
+
+  // MISSILE_CltDoFn61_OverseerControl, 004d7690, cut down: the arms are only the stores, so
+  // their copies of the call are all that is left of them. The original tests, pushes the
+  // else arm's constant and jumps to the call, then pushes the then arm's and falls into it:
+  // the source wrote the else arm first.
+  it('keeps the dropped stores as the evidence of where each arm lies', () => {
+    const src = [
+      'void f(unsigned int s, int *p) {', // 1
+      '  int nChoice;',                    // 2
+      '  if ((s & 1) == 0) {',             // 3
+      '    nChoice = 422;',                // 4
+      '  } else {',                        // 5
+      '    nChoice = 416;',                // 6
+      '  }',                               // 7
+      '  Create(p, nChoice);',             // 8
+      '}',
+    ];
+    const ev: BranchLayoutEvidence = {
+      lines: new Map([[3, [0x39, 0x43]], [4, [0x4c]], [6, [0x45]], [8, [0x51]]]),
+      ifs: new Map([[3, 0x43]]),
+      edges: [{ line: 3, ord: 0, keyword: 'if', jcc: 0x43, target: 0x4c, fall: 0x45, fallLines: [6], takenLines: [4] }],
+      pushes: [
+        { at: 0x45, value: 416, reach: 0x51, jumps: true, run: 1 },
+        { at: 0x4c, value: 422, reach: 0x51, jumps: false, run: 1 },
+      ],
+    };
+    const ast = armConstantCallPlugin.createTransformer({ branchLayout: ev } as ArmConstantCallOptions)(parse(src.join('\n')));
+    const out = flat(emit(branchLayoutPlugin.createTransformer({ branchLayout: ev } as BranchLayoutOptions)(ast) as AnyNode));
+    assert.ok(out.includes('if ((s & 1) != 0) { Create(p, 416); } else { Create(p, 422); }'), out);
   });
 });

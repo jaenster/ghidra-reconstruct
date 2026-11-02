@@ -16,7 +16,9 @@
  * survivor's address, which is where neither statement was written. Asked about a run of
  * statements, an offset printed only by statements of that run still counts: a tail call
  * prints its one `jmp` on the call and on the `return` of its value. A statement a pass
- * built from nothing has no source line and gives no evidence either.
+ * built from nothing has no source line and gives no evidence either. A statement owns as
+ * well the lines a pass folded into it (`foldedLines`): a dropped store whose constant the
+ * statement now takes still printed the arm's code.
  */
 
 import { NodeKind } from '../../../../ast/kinds.js';
@@ -139,6 +141,7 @@ function placed(n: ASTNode): boolean {
  */
 function ownedRanges(s: ASTNode, out: (from: number, to: number, visit: number) => void, seq = { n: 0 }): void {
   const visit = seq.n++;
+  for (const l of s.ghidraInfo?.foldedLines ?? []) out(l, l, visit);
   const kids = getChildren(s);
   if (!kids.some(isStatement)) {
     if (placed(s)) out(s.location.start.line, s.location.end.line, visit);

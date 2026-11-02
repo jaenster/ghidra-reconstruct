@@ -22,7 +22,10 @@
  * arm that cannot fall through (return, goto, break, continue, a halt) keeps no copy.
  * In a copy each local is replaced by the constant its arm last stored in it, which is
  * what it holds there: J writes none of them before the call. A local read nowhere else
- * loses its stores and its declaration; one read elsewhere keeps them. Made only when:
+ * loses its stores and its declaration; one read elsewhere keeps them. A lost store's
+ * line goes with its arm's copy of the call (`foldedLines`): it printed the arm's PUSH, and
+ * without it an arm holding only the store would leave branch-layout no evidence of where
+ * it lies. Made only when:
  *   - every arm that falls through ends its writes of each local with `v = K`, K a
  *     literal, an enumerator, or the address of a global or a function;
  *   - J runs from the statement after the if up to the first call statement taking such a
@@ -429,10 +432,13 @@ function rewriteFunction(fn: FunctionDecl, opts: ArmConstantCallOptions): Functi
         // A dropped store's comment goes with the copy that reads its constant.
         const trivia = arm.statements.filter((_, i) => drop.has(i)).flatMap(st => st.leadingTrivia ?? []);
         const at = kept.length;
+        // The dropped stores' lines print the arm's PUSHes: they go with the call that takes the constants.
+        const folded = arm.statements.filter((_, i) => drop.has(i)).flatMap(linesOf);
         for (const st of join) {
           const c = cloneNode(st);
           for (const [n, w] of values) substitute(c, n, w.value);
           if (sites) markCalls(c, sites, armPushes.get(arm)!);
+          if (st === callStmt && folded.length) c.ghidraInfo = { ...c.ghidraInfo, foldedLines: folded };
           kept.push(c);
         }
         if (trivia.length && kept[at]) kept[at].leadingTrivia = [...trivia, ...(kept[at].leadingTrivia ?? [])];

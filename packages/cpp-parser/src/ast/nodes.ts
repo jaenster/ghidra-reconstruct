@@ -60,6 +60,13 @@ export interface GhidraMetadata {
    */
   callSite?: { name: string; at: number; prev: number | null; pushes: number; slots: readonly number[] | null };
   /**
+   * Parsed-text lines of statements a pass folded into this one (`arm-constant-call`: the
+   * arm's `v = K` store, now the constant argument of the arm's copy of the call). Their
+   * code lies on this statement's path in the original - the PUSH of the constant - so
+   * `branch-layout` reads them as lines this statement owns.
+   */
+  foldedLines?: readonly number[];
+  /**
    * The byte/word mask was a MOVZX of this source width in the original (`zero-extend-site`);
    * `zero-extend-cast` writes it as the cast to the unsigned type of that width.
    */
