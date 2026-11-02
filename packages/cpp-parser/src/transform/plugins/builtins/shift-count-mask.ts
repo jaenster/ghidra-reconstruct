@@ -15,7 +15,19 @@
  * value-range.ts): a constant, a byte masked or reduced below 32, a loop counter
  * whose test bounds it, a value an earlier test excludes. There `n & 0x1f == n`, and
  * the shift's type is its left operand's whatever the count's type, so the
- * expression's value and type are unchanged. Anywhere else the mask stays.
+ * expression's value and type are unchanged.
+ *
+ * Anywhere else the mask stays - unless the target names a count macro (`countMacro`,
+ * for Diablo II `D2_SHIFT_COUNT` from d2_platform.h). Then the count goes through it:
+ * `x << D2_SHIFT_COUNT(n)`. The macro is the count as the shift instruction takes it,
+ * its low five bits: `(n) & 0x1f` for a C++ build, where that keeps every count defined,
+ * and `(n)` for MSVC, which compiles the shift to the bare SHL/SHR/SAR by CL whose
+ * hardware masks the count the same way - what the original source wrote. The masked
+ * count compiles differently: VC8 keeps an `and ecx,0x1f`, or loads a byte count with
+ * MOVZX where the original loads CL (`mov cl, byte ptr [esi+0x196]`, GetMinDamage
+ * 0064af20). Of the 551 shifts by CL in Diablo II 1.14d's Game.exe, 4 mask the count
+ * with an AND first, 2 of them in the C runtime, so the bare count is what the source
+ * had almost everywhere.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -23,6 +35,7 @@ import type {
   ASTNode, AssignExpr, BinaryExpr, Expression, FunctionDecl, IntegerLiteralExpr, ParenExpr,
 } from '../../../ast/nodes.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
+import { Expr } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { createPlugin } from '../registry.js';
 import { unwrapParens, type TypedefResolver } from './call-arg-cast.js';
@@ -37,8 +50,14 @@ export interface ShiftCountMaskOptions extends PluginOptions {
   fieldTypes?: Record<string, string>;
   functionReturnTypes?: Record<string, string>;
   typedefTargets?: Record<string, string>;
-  /** Called for each masked count, with the range proven for it (null: none). */
-  onSite?: (site: { line: number; dropped: boolean; range: ValueRange | null; shift: ASTNode; count: Expression }) => void;
+  /**
+   * A function-like macro giving a shift count as the instruction takes it (its low five
+   * bits). A count not proven to lie in [0, 31] goes through it instead of keeping the
+   * decompiler's mask. Unset: the mask stays.
+   */
+  countMacro?: string;
+  /** Called for each masked count, with the range proven for it (null: none) and whether the count macro took it. */
+  onSite?: (site: { line: number; dropped: boolean; wrapped: boolean; range: ValueRange | null; shift: ASTNode; count: Expression }) => void;
 }
 
 const SHIFTS = new Set(['<<', '>>', '<<=', '>>=']);
@@ -133,7 +152,12 @@ export function createShiftCountMaskTransformer(options?: PluginOptions): Transf
       for (const s of sites) {
         const r = ranges.rangeAt(s.count);
         const dropped = !!r && r.lo >= 0 && r.hi <= 31;
-        o.onSite?.({ line: s.shift.location?.start?.line ?? 0, dropped, range: r, shift: s.shift, count: s.count });
+        const wrapped = !dropped && !!o.countMacro;
+        o.onSite?.({ line: s.shift.location?.start?.line ?? 0, dropped, wrapped, range: r, shift: s.shift, count: s.count });
+        if (wrapped) {
+          counts.set(s.shift, Expr.call(o.countMacro!, [unwrapParens(s.count)]) as Expression);
+          continue;
+        }
         if (!dropped) continue;
         const c = unwrapParens(s.count);
         const right: Expression = primary(c) ? c : {
@@ -150,7 +174,7 @@ export function createShiftCountMaskTransformer(options?: PluginOptions): Transf
 export const shiftCountMaskPlugin: TransformPlugin = createPlugin(
   'shift-count-mask',
   'Shift Count Mask',
-  'A shift count the decompiler masked with & 0x1f loses the mask where the count is proven to lie in [0, 31]',
+  'A shift count the decompiler masked with & 0x1f loses the mask where the count is proven to lie in [0, 31], and goes through the target\'s count macro elsewhere',
   (options?: PluginOptions) => createShiftCountMaskTransformer(options),
   {
     priority: 621, // after the cast and compare passes: needs the final local types and loop shapes
