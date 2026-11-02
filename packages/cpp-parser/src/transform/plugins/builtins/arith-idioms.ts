@@ -45,6 +45,7 @@ import type {
   ASTNode, AnyNode, Expression, BinaryExpr, CStyleCastExpr, CallExpr, IntegerLiteralExpr,
   UnaryExpr, FunctionDecl, ParameterDecl, VariableDecl, TypeNode, MemberExpr,
   IfStmt, WhileStmt, DoWhileStmt, ForStmt, ConditionalExpr,
+  CharLiteralExpr, FloatingLiteralExpr, Statement, ExprStmt, DeclStmt, CompoundStmt, AssignExpr, Identifier,
 } from '../../../ast/nodes.js';
 import { findNodesByKind } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
@@ -55,6 +56,7 @@ import { createExprShape, type ExprShape } from './expr-shape.js';
 import {
   bareName, calleeName, shapeOfNode, shapeOfSpelling, unwrapParens, type TypedefResolver,
 } from './call-arg-cast.js';
+import type { BranchLayoutEvidence } from './branch-layout/evidence.js';
 
 export interface ArithIdiomsOptions extends PluginOptions {
   globalTypes?: Record<string, string>;
@@ -66,14 +68,17 @@ export interface ArithIdiomsOptions extends PluginOptions {
   unionNames?: string[];
   functionReturnTypes?: Record<string, string>;
   typedefTargets?: Record<string, string>;
+  /** The original's code offsets per line and per `if` (branch-layout); absent: no statement pair is folded. */
+  branchLayout?: BranchLayoutEvidence | null;
 }
 
 export type ArithIdiom =
-  | 'low-dword' | 'narrow-div' | 'magic-div' | 'cast-chain' | 'modulo' | 'divides' | 'pow2-div' | 'long-helper';
+  | 'low-dword' | 'narrow-div' | 'magic-div' | 'cast-chain' | 'modulo' | 'divides' | 'pow2-div' | 'long-helper'
+  | 'setcc-select' | 'pow2-rem' | 'u2f';
 
 const stats: Record<ArithIdiom, number> = {
   'low-dword': 0, 'narrow-div': 0, 'magic-div': 0, 'cast-chain': 0, 'modulo': 0, 'divides': 0,
-  'pow2-div': 0, 'long-helper': 0,
+  'pow2-div': 0, 'long-helper': 0, 'setcc-select': 0, 'pow2-rem': 0, 'u2f': 0,
 };
 
 /** How many times each idiom has been folded since the last reset. */
@@ -216,6 +221,7 @@ interface Folder {
   typeOf(e: Expression): IntType | null;
   fold(e: Expression): Expression | null;
   foldTruth(e: Expression): Expression | null;
+  foldPair(a: Statement, b: Statement, layout: BranchLayoutEvidence | null | undefined): Statement | null;
 }
 
 function createFolder(shapeOf: ExprShape, o: ArithIdiomsOptions, resolve: TypedefResolver): Folder {
@@ -619,7 +625,105 @@ function createFolder(shapeOf: ExprShape, o: ArithIdiomsOptions, resolve: Typede
     return Expr.paren(Expr.binary(left, h.op, right));
   };
 
-  const RULES = [foldLongHelper, foldLowDword, foldNarrowDiv, foldMagic, foldCastChain, foldPow2Div, foldModulo, foldDivides];
+  // --- arithmetic on a comparison's 0/1 -----------------------------------
+
+  /** A literal's value and type as the usual arithmetic conversions see it, `-N` included. */
+  const literalOf = (e: Expression): { v: bigint; t: IntType; hex: boolean } | null => {
+    const u = unwrapParens(e);
+    if (u.kind === NodeKind.IntegerLiteral) {
+      const lit = u as IntegerLiteralExpr;
+      const lt = literalType(lit);
+      return lt && lt.bits <= 32 ? { v: lit.value, t: promote(lt), hex: lit.base === 16 } : null;
+    }
+    if (u.kind === NodeKind.CharLiteral) {
+      const c = u as CharLiteralExpr;
+      // A plain char literal is a signed char on both compilers of the tree (no /J).
+      if (c.prefix !== '' || c.value < 0 || c.value > 0xff) return null;
+      return { v: BigInt(c.value >= 0x80 ? c.value - 0x100 : c.value), t: S32, hex: false };
+    }
+    if (u.kind === NodeKind.UnaryExpr && (u as UnaryExpr).operator === '-') {
+      const inner = literalOf((u as UnaryExpr).operand as Expression);
+      return inner ? { v: -inner.v, t: inner.t, hex: inner.hex } : null;
+    }
+    return null;
+  };
+
+  /** v as a literal of t (32 bits), or null when t cannot hold it. */
+  const literalIn = (v: bigint, t: IntType, hex: boolean): Expression | null => {
+    if (t.bits !== 32) return null;
+    if (t.signed) {
+      if (v < -0x7fffffffn || v > 0x7fffffffn) return null;
+      return Expr.intLiteral(v, hex ? 16 : 10);
+    }
+    const u = ((v % 0x100000000n) + 0x100000000n) % 0x100000000n;
+    const lit = Expr.intLiteral(u, 16);
+    // A hex literal past INT_MAX is unsigned already; below it the suffix keeps the type.
+    if (u <= 0x7fffffffn) return { ...lit, suffix: 'U', raw: lit.raw + 'U' } as IntegerLiteralExpr;
+    return lit;
+  };
+
+  const COMPARE = new Set(['==', '!=', '<', '>', '<=', '>=']);
+  /** A comparison, or one under a cast to a 32-bit integer (still 0 or 1), with the type it has. */
+  const comparisonOf = (e: Expression): { c: BinaryExpr; t: IntType } | null => {
+    const cast = castOf(e);
+    if (cast) {
+      const inner = cast.type.bits === 32 ? comparisonOf(cast.inner) : null;
+      return inner ? { c: inner.c, t: cast.type } : null;
+    }
+    const u = unwrapParens(e);
+    return u.kind === NodeKind.BinaryExpr && COMPARE.has((u as BinaryExpr).operator) ? { c: u as BinaryExpr, t: S32 } : null;
+  };
+
+  /** `c * K`, `c` a comparison and K a literal: c and K. */
+  const scaledTest = (e: Expression): { c: BinaryExpr; t: IntType; k: { v: bigint; t: IntType; hex: boolean }; bare?: true } | null => {
+    const c = comparisonOf(e);
+    if (c) return { c: c.c, t: c.t, k: { v: 1n, t: S32, hex: false }, bare: true };
+    const u = unwrapParens(e);
+    if (u.kind !== NodeKind.BinaryExpr || (u as BinaryExpr).operator !== '*') return null;
+    const b = u as BinaryExpr;
+    const l = comparisonOf(b.left as Expression), r = comparisonOf(b.right as Expression);
+    const k = l ? literalOf(b.right as Expression) : r ? literalOf(b.left as Expression) : null;
+    if (!k || k.v === 0n) return null;
+    return { c: (l ?? r)!.c, t: (l ?? r)!.t, k };
+  };
+
+  /**
+   * `(c) * K + C`, `C + (c) * K`, `(c) * K - C`, `C - (c) * K`, and the same with K = 1, c a
+   * comparison and K, C literals, is `c ? K+C : C` (`c ? C-K : C`, ...). A comparison is 0
+   * or 1, so both have the value and the type (int, or unsigned int when a literal is) for
+   * every operand. VC8 compiles the select branch-free (`setne cl; lea ecx,[ecx+ecx+0xb]`,
+   * `neg; sbb; add`), and that branch-free code is all the decompiler prints as arithmetic
+   * on a comparison; compiled as printed, VC8 does the arithmetic itself in the byte
+   * (`add cl,cl; add cl,0xb`) or with `setne; sub` instead.
+   */
+  const foldSetccSelect = (e: Expression): Expression | null => {
+    if (e.kind !== NodeKind.BinaryExpr) return null;
+    const b = e as BinaryExpr;
+    if (b.operator !== '+' && b.operator !== '-') return null;
+    let test = scaledTest(b.left as Expression);
+    let other = literalOf(b.right as Expression);
+    let scaledLeft = true;
+    if (!test || !other) {
+      test = scaledTest(b.right as Expression);
+      other = literalOf(b.left as Expression);
+      scaledLeft = false;
+    }
+    if (!test || !other) return null;
+    // `(c) - C` is left: the measured forms are `C + (c)` and `C - (c)`.
+    if (test.bare && b.operator === '-' && scaledLeft) return null;
+    const type = commonType(commonType(test.t, test.k.t), other.t);
+    if (type.bits !== 32) return null;
+    const k = test.k.v, c = other.v;
+    const whenTrue = scaledLeft ? (b.operator === '+' ? k + c : k - c) : (b.operator === '+' ? c + k : c - k);
+    const whenFalse = scaledLeft ? (b.operator === '+' ? c : -c) : c;
+    const hex = test.k.hex || other.hex;
+    const yes = literalIn(whenTrue, type, hex), no = literalIn(whenFalse, type, hex);
+    if (!yes || !no) return null;
+    stats['setcc-select']++;
+    return Expr.conditional(test.c, yes, no);
+  };
+
+  const RULES = [foldLongHelper, foldLowDword, foldNarrowDiv, foldMagic, foldCastChain, foldPow2Div, foldModulo, foldDivides, foldSetccSelect];
 
   /** One idiom at the root of e, its result folded again. */
   const fold = (e: Expression): Expression | null => {
@@ -655,7 +759,174 @@ function createFolder(shapeOf: ExprShape, o: ArithIdiomsOptions, resolve: Typede
     return c.inner;
   };
 
-  return { typeOf, fold, foldTruth };
+  // --- statement pairs -------------------------------------------------
+
+  const identName = (e: Expression | null | undefined): string | null => {
+    const u = e ? unwrapParens(e) : null;
+    return u && u.kind === NodeKind.Identifier ? (u as Identifier).name : null;
+  };
+
+  /** `x = v;` or `T x = v;`: x, v, and how to put another value in v's place. */
+  const assignmentOf = (s: Statement): { name: string; value: Expression; with: (v: Expression) => Statement } | null => {
+    if (s.kind === NodeKind.ExprStmt) {
+      const e = unwrapParens((s as ExprStmt).expression);
+      if (e.kind !== NodeKind.AssignExpr || (e as AssignExpr).operator !== '=') return null;
+      const a = e as AssignExpr;
+      const name = identName(a.left as Expression);
+      if (!name) return null;
+      return { name, value: a.right as Expression, with: v => updateNode(s as ExprStmt, { expression: updateNode(a, { right: v } as Partial<AssignExpr>) } as Partial<ExprStmt>) };
+    }
+    if (s.kind === NodeKind.DeclStmt) {
+      const d = s as DeclStmt;
+      if (d.declarations.length !== 1 || d.declarations[0].kind !== NodeKind.VariableDecl) return null;
+      const v = d.declarations[0] as VariableDecl;
+      if (!v.initializer || (v.initializer as Expression).kind === NodeKind.InitListExpr) return null;
+      return {
+        name: v.name.name, value: v.initializer as Expression,
+        with: x => updateNode(d, { declarations: [updateNode(v, { initializer: x } as Partial<VariableDecl>)] } as Partial<DeclStmt>),
+      };
+    }
+    return null;
+  };
+
+  /** The one statement an `if` without `else` runs. */
+  const onlyStatement = (s: IfStmt): Statement | null => {
+    if (s.elseBranch) return null;
+    const th = s.thenBranch;
+    if (th.kind !== NodeKind.CompoundStmt) return th;
+    const body = (th as CompoundStmt).statements;
+    return body.length === 1 ? body[0] : null;
+  };
+
+  /** `(int)x < 0`, or `x < 0` for a signed 32-bit x. */
+  const signTestOf = (e: Expression, name: string): boolean => {
+    const u = unwrapParens(e);
+    if (u.kind !== NodeKind.BinaryExpr || (u as BinaryExpr).operator !== '<' || intLiteral((u as BinaryExpr).right as Expression) !== 0n) return false;
+    const l = (u as BinaryExpr).left as Expression;
+    const c = castOf(l);
+    if (c) return sameType(c.type, S32) && identName(c.inner) === name && typeOf(c.inner)?.bits === 32;
+    return identName(l) === name && sameType(typeOf(l), S32);
+  };
+
+  const placedLine = (n: ASTNode): number | null =>
+    n.location && n.location.file !== '<generated>' && n.location.start.line > 0 ? n.location.start.line : null;
+
+  /**
+   * The original branches on the sign right after the statement on `line`: the `if` on
+   * `ifLine` has a conditional jump, and it is the instruction after the last one `line`
+   * prints (the AND of a remainder, the FILD of a conversion and its TEST).
+   */
+  const branchesRightAfter = (layout: BranchLayoutEvidence | null | undefined, line: number | null, ifLine: number | null, gap: number): boolean => {
+    if (!layout || line === null || ifLine === null) return false;
+    const jcc = layout.ifs.get(ifLine);
+    const offs = layout.lines.get(line);
+    if (jcc === undefined || !offs || offs.length === 0) return false;
+    const last = offs[offs.length - 1];
+    return jcc > last && jcc - last <= gap;
+  };
+
+  /**
+   * `r = x & (0x80000000 | m); if ((int)r < 0) { r = (r - 1 | ~m) + 1; }`, m = 2^k-1, is
+   * `r = x % 2^k` for a signed 32-bit x: MSVC's `and; jns; dec; or; inc`. For x >= 0 the
+   * AND leaves x's low k bits; for x < 0 it leaves them with the sign bit, and the
+   * decrement, OR and increment turn that into low - 2^k, or 0 when the low bits are 0 -
+   * the remainder `%` truncates to. Gated on the jump right after the AND.
+   */
+  const foldPow2Rem = (a: Statement, b: Statement, layout: BranchLayoutEvidence | null | undefined): Statement | null => {
+    if (b.kind !== NodeKind.IfStmt) return null;
+    const asg = assignmentOf(a);
+    if (!asg) return null;
+    const rt = typeOf({ kind: NodeKind.Identifier, name: asg.name } as unknown as Expression);
+    if (!rt || rt.bits !== 32) return null;
+    const v = unwrapParens(asg.value);
+    if (v.kind !== NodeKind.BinaryExpr || (v as BinaryExpr).operator !== '&') return null;
+    const mask = intLiteral((v as BinaryExpr).right as Expression);
+    if (mask === null || (mask & 0xffffffffn) !== mask || (mask & 0x80000000n) === 0n) return null;
+    const m = mask ^ 0x80000000n;
+    const n = m + 1n;
+    if (n < 2n || n > 0x40000000n || (n & m) !== 0n) return null;
+    const x = (v as BinaryExpr).left as Expression;
+    const xt = typeOf(x);
+    if (!xt || promote(xt).bits !== 32 || xt.bits !== 32) return null;
+
+    const ifs = b as IfStmt;
+    if (!signTestOf(ifs.condition, asg.name)) return null;
+    const fix = onlyStatement(ifs);
+    const fa = fix ? assignmentOf(fix) : null;
+    if (!fa || fa.name !== asg.name || fix!.kind !== NodeKind.ExprStmt) return null;
+    // (r - 1 | ~m) + 1
+    const inc = unwrapParens(fa.value);
+    if (inc.kind !== NodeKind.BinaryExpr || (inc as BinaryExpr).operator !== '+' || intLiteral((inc as BinaryExpr).right as Expression) !== 1n) return null;
+    const or = unwrapParens((inc as BinaryExpr).left as Expression);
+    if (or.kind !== NodeKind.BinaryExpr || (or as BinaryExpr).operator !== '|') return null;
+    const notM = negatedLiteral((or as BinaryExpr).right as Expression);
+    if (notM === null || ((notM % 0x100000000n) + 0x100000000n) % 0x100000000n !== (0xffffffffn ^ m)) return null;
+    const dec = unwrapParens((or as BinaryExpr).left as Expression);
+    if (dec.kind !== NodeKind.BinaryExpr || identName((dec as BinaryExpr).left as Expression) !== asg.name) return null;
+    const step = (dec as BinaryExpr).operator === '-' ? intLiteral((dec as BinaryExpr).right as Expression)
+      : (dec as BinaryExpr).operator === '+' ? negatedLiteral((dec as BinaryExpr).right as Expression) : null;
+    if (!(((dec as BinaryExpr).operator === '-' && step === 1n) || ((dec as BinaryExpr).operator === '+' && step === -1n))) return null;
+
+    if (!branchesRightAfter(layout, placedLine(a), placedLine(b), 8)) return null;
+    stats['pow2-rem']++;
+    const dividend = xt.signed ? x : castNode('int', x);
+    return asg.with(Expr.binary(dividend, '%', Expr.intLiteral(n)));
+  };
+
+  const floatSpelling = (t: TypeNode): 'float' | 'double' | null => {
+    const s = shapeOfNode(t, 0, resolve);
+    return s && s.stars === 0 && (s.base === 'float' || s.base === 'double') ? s.base : null;
+  };
+
+  /**
+   * `f = (F)(int)u; if ((int)u < 0) { f += 2^32; }` (or `f = f + 2^32`), F float or double
+   * and u a 32-bit integer, is `f = (F)(uint32_t)u`: VC8's conversion of an unsigned dword
+   * loads it as a signed one (FILD) and adds 2^32 when the sign was set. The x87 sum is
+   * exact, so the original rounds once, to F, as the conversion does. Gated on the jump
+   * after the load.
+   */
+  const foldU2F = (a: Statement, b: Statement, layout: BranchLayoutEvidence | null | undefined): Statement | null => {
+    if (b.kind !== NodeKind.IfStmt) return null;
+    const asg = assignmentOf(a);
+    if (!asg) return null;
+    const conv = unwrapParens(asg.value);
+    if (conv.kind !== NodeKind.CStyleCastExpr) return null;
+    const ft = floatSpelling((conv as CStyleCastExpr).type);
+    if (!ft) return null;
+    const asInt = castOf((conv as CStyleCastExpr).expression as Expression);
+    if (!asInt || !sameType(asInt.type, S32)) return null;
+    const u = asInt.inner;
+    const uName = identName(u);
+    if (!uName || typeOf(u)?.bits !== 32) return null;
+
+    const ifs = b as IfStmt;
+    if (!signTestOf(ifs.condition, uName)) return null;
+    const fix = onlyStatement(ifs);
+    if (!fix || fix.kind !== NodeKind.ExprStmt) return null;
+    const fe = unwrapParens((fix as ExprStmt).expression);
+    if (fe.kind !== NodeKind.AssignExpr || identName((fe as AssignExpr).left as Expression) !== asg.name) return null;
+    let addend: Expression | null = null;
+    if ((fe as AssignExpr).operator === '+=') addend = (fe as AssignExpr).right as Expression;
+    else if ((fe as AssignExpr).operator === '=') {
+      const s = unwrapParens((fe as AssignExpr).right as Expression);
+      if (s.kind === NodeKind.BinaryExpr && (s as BinaryExpr).operator === '+' && identName((s as BinaryExpr).left as Expression) === asg.name) addend = (s as BinaryExpr).right as Expression;
+    }
+    const k = addend ? unwrapParens(addend) : null;
+    if (!k || k.kind !== NodeKind.FloatingLiteral) return null;
+    // 2^32 as the decompiler prints it: exactly, or the float nearest it to 8 digits.
+    if (Math.abs((k as FloatingLiteralExpr).value - 4294967296) > 4294967296 * 1e-7) return null;
+
+    if (!branchesRightAfter(layout, placedLine(a), placedLine(b), 16)) return null;
+    stats['u2f']++;
+    const unsignedU = sameType(typeOf(u), U32) ? u : castNode('uint32_t', u);
+    return asg.with(updateNode(conv as CStyleCastExpr, { expression: unsignedU } as Partial<CStyleCastExpr>));
+  };
+
+  /** A statement and the one after it folded into one, or null. */
+  const foldPair = (a: Statement, b: Statement, layout: BranchLayoutEvidence | null | undefined): Statement | null =>
+    foldPow2Rem(a, b, layout) ?? foldU2F(a, b, layout);
+
+  return { typeOf, fold, foldTruth, foldPair };
 }
 
 // ============================================
@@ -725,7 +996,25 @@ export function createArithIdiomsTransformer(options?: PluginOptions): Transform
           return out as ASTNode;
         },
       });
-      const body = inner(node.body);
+      const pairs = createTransformer({
+        visitNode(n: ASTNode): ASTNode | undefined {
+          if (n.kind !== NodeKind.CompoundStmt) return undefined;
+          const stmts = (n as CompoundStmt).statements;
+          let out: Statement[] | null = null;
+          for (let i = 0; i < stmts.length; i++) {
+            const folded = i + 1 < stmts.length ? folder.foldPair(stmts[i], stmts[i + 1], o.branchLayout) : null;
+            if (!folded) { out?.push(stmts[i]); continue; }
+            out ??= stmts.slice(0, i);
+            const dropped = stmts[i + 1];
+            out.push({ ...folded, trailingTrivia: [...(folded.trailingTrivia ?? []), ...(dropped.leadingTrivia ?? [])] } as Statement);
+            i++;
+          }
+          if (!out) return undefined;
+          changed = true;
+          return updateNode(n as CompoundStmt, { statements: out } as Partial<CompoundStmt>);
+        },
+      });
+      const body = inner(pairs(node.body) as typeof node.body);
       return changed ? updateNode(node, { body } as Partial<FunctionDecl>) : undefined;
     },
   });

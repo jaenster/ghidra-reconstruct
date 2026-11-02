@@ -3091,6 +3091,7 @@ function transformDecompiledCode(
         enclosingVarTypes,
       };
       perPluginOptions['arith-idioms'] = {
+        branchLayout: layout,
         globalTypes: context.funcPtrArgCasts.globalTypes,
         fieldTypes: context.funcPtrArgCasts.fieldTypes,
         structFields: context.funcPtrArgCasts.structFields,

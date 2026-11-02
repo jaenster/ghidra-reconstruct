@@ -288,6 +288,127 @@ describe('arith-idioms', () => {
  * ORIGINAL forms (`q * -N` on an int) is what MSVC wraps, so the check builds
  * with -fwrapv.
  */
+/**
+ * `body` one statement per line, inside `void f(decls)`. Each line's code sits at 16 * line;
+ * an `if` line given in `jumps` has its conditional branch at `16 * (line - 1) + gap`, gap
+ * bytes after the line above it.
+ */
+function runLines(lines: string[], decls: string, jumps: Record<number, number> = {}, layout = true): string {
+  const src = [`void f(${decls}) {`, ...lines, '}'];
+  const at = new Map<number, number[]>();
+  src.forEach((_, i) => at.set(i + 1, [16 * (i + 1)]));
+  const ifs = new Map<number, number>();
+  for (const [l, gap] of Object.entries(jumps)) ifs.set(Number(l) + 1, 16 * Number(l) + gap);
+  const opts: ArithIdiomsOptions = { ...OPTIONS, branchLayout: layout ? { lines: at, ifs } : undefined };
+  const text = emit(arithIdiomsPlugin.createTransformer(opts)(parse(src.join('\n'))) as AnyNode);
+  const m = /\{([\s\S]*)\}\s*$/.exec(text);
+  return (m ? m[1] : text).replace(/\s+/g, ' ').trim();
+}
+
+describe('arith-idioms on a comparison', () => {
+  // Q20_StatusFilter, 005b8cc0: `setne cl; lea ecx, [ecx+ecx+0xb]`.
+  it('writes a scaled comparison plus a constant as the select', () => {
+    assert.strictEqual(run("c = (b != 0) * '\\x02' + '\\v';", 'int b, char c'), 'c = b != 0 ? 13 : 11;');
+    assert.strictEqual(run('r = (n == 3) * 2 + 0xdf;', 'int n, int r'), 'r = n == 3 ? 0xe1 : 0xdf;');
+    assert.strictEqual(run('r = 5 - (n < 0) * 4;', 'int n, int r'), 'r = n < 0 ? 1 : 5;');
+    assert.strictEqual(run('r = (n != 0) * 2 - 1;', 'int n, int r'), 'r = n != 0 ? 1 : -1;');
+  });
+
+  // MAINMENU_CreateMessageBox, 0042f540: `neg ecx; sbb ecx, ecx; add ecx, 0x11f`.
+  it('writes a constant minus a comparison as the select, in the type of the sum', () => {
+    assert.strictEqual(run('r = 0x11f - (uint32_t)(p != 0);', 'int p, uint32_t r'), 'r = p != 0 ? 0x11eU : 0x11fU;');
+    assert.strictEqual(run('r = (b != 0) + 0x80000001;', 'int b, uint32_t r'), 'r = b != 0 ? 0x80000002 : 0x80000001;');
+  });
+
+  it('leaves arithmetic on anything but a comparison and literals', () => {
+    assert.strictEqual(run('r = (n != 0) * k + 1;', 'int n, int k, int r'), 'r = (n != 0) * k + 1;');
+    assert.strictEqual(run('r = n * 2 + 1;', 'int n, int r'), 'r = n * 2 + 1;');
+    assert.strictEqual(run('r = (n != 0) * 2 + 0x7fffffff;', 'int n, int r'), 'r = (n != 0) * 2 + 0x7fffffff;');
+  });
+});
+
+describe('arith-idioms statement pairs', () => {
+  const rem = (m: string, fix: string, gap = 5) => runLines([
+    `  r = n & ${m};`,
+    '  if ((int)r < 0) {',
+    `    r = ${fix};`,
+    '  }',
+    '  g = r;',
+  ], 'uint32_t n, uint32_t r, uint32_t g', { 2: gap });
+
+  // fpLDE4, 00676450: `and eax, 0x80000003; jns; dec eax; or eax, -4; inc eax`.
+  it('writes the signed power-of-two remainder back as %', () => {
+    assert.strictEqual(rem('0x80000001', '(r - 1 | -2) + 1'), 'r = (int)n % 2; g = r;');
+    assert.strictEqual(rem('0x80000003', '(r - 1 | 0xfffffffc) + 1'), 'r = (int)n % 4; g = r;');
+    assert.strictEqual(rem('0x80000007', '(r + -1 | -8) + 1'), 'r = (int)n % 8; g = r;');
+  });
+
+  it('declares the remainder where the AND was declared', () => {
+    const out = runLines([
+      '  int r = n & 0x8000000f;',
+      '  if (r < 0) {',
+      '    r = (r - 1 | -0x10) + 1;',
+      '  }',
+      '  g = r;',
+    ], 'int n, int g', { 2: 6 });
+    assert.strictEqual(out, 'int r = n % 16; g = r;');
+  });
+
+  it('leaves the remainder without the jump right after the AND, or with a mask it is not', () => {
+    assert.ok(rem('0x80000001', '(r - 1 | -2) + 1', 12).includes('& 0x80000001'));
+    assert.ok(rem('0x80000003', '(r - 1 | -2) + 1').includes('& 0x80000003'));
+    assert.ok(rem('0x80000005', '(r - 1 | -6) + 1').includes('& 0x80000005'));
+    const noFacts = runLines(['  r = n & 0x80000001;', '  if ((int)r < 0) {', '    r = (r - 1 | -2) + 1;', '  }'],
+      'uint32_t n, uint32_t r', { 2: 5 }, false);
+    assert.ok(noFacts.includes('& 0x80000001'), noFacts);
+  });
+
+  // CLIENT_AdjustMemoryBudget, 00457300: `fild dword; test; jge; fadd 2^32`.
+  it('writes the unsigned conversion back', () => {
+    const conv = (fix: string, t = 'float') => runLines([
+      `  f = (${t})(int)u;`,
+      '  if ((int)u < 0) {',
+      `    ${fix};`,
+      '  }',
+    ], `uint32_t u, ${t} f`, { 2: 9 });
+    assert.strictEqual(conv('f = f + 4.2949673e+09'), 'f = (float)u;');
+    assert.strictEqual(conv('f += 4294967296.0', 'double'), 'f = (double)u;');
+    assert.ok(conv('f += 4.0e+09').includes('(int)u'));
+  });
+
+  it('the remainder and the double conversion have the value of what they replace', { skip: !hasNativeGpp() }, () => {
+    const pairs: Array<{ t: string; lines: string[] }> = [];
+    for (const k of [1, 2, 4, 30]) {
+      const m = (1n << BigInt(k)) - 1n;
+      pairs.push({ t: 'uint32_t', lines: [`  r = n & 0x${(0x80000000n | m).toString(16)};`, '  if ((int)r < 0) {', `    r = (r - 1 | -0x${(m + 1n).toString(16)}) + 1;`, '  }'] });
+    }
+    pairs.push({ t: 'double', lines: ['  r = (double)(int)n;', '  if ((int)n < 0) {', '    r += 4294967296.0;', '  }'] });
+    let src = '#include <stdint.h>\n#include <stdio.h>\n#include <string.h>\nstatic int failures = 0;\n';
+    let main = 'int main(void) {\n';
+    pairs.forEach((c, i) => {
+      const folded = runLines(c.lines, `uint32_t n, ${c.t} r`, { 2: 5 });
+      assert.ok(!folded.includes('if'), folded);
+      src += `static ${c.t} a${i}(uint32_t n) { ${c.t} r; ${c.lines.join(' ')} return r; }\n`;
+      src += `static ${c.t} b${i}(uint32_t n) { ${c.t} r; ${folded} return r; }\n`;
+      main += `  { uint32_t v[] = { 0u, 1u, 2u, 3u, 4u, 5u, 7u, 8u, 0x3fffffffu, 0x40000000u, 0x7fffffffu, 0x80000000u, 0x80000001u, 0xbfffffffu, 0xc0000000u, 0xfffffff8u, 0xfffffffdu, 0xfffffffeu, 0xffffffffu };`
+        + ` for (unsigned k = 0; k < sizeof v / sizeof v[0]; k++) { ${c.t} x = a${i}(v[k]), y = b${i}(v[k]); if (memcmp(&x, &y, sizeof x)) { printf("pair ${i} value %u\\n", k); failures++; } } }\n`;
+    });
+    main += '  return failures ? 1 : 0;\n}\n';
+    const dir = mkdtempSync(join(tmpdir(), 'arith-pairs-'));
+    writeFileSync(join(dir, 'check.c'), src + main);
+    try {
+      const exe = exePath(join(dir, 'check'));
+      const cc = compileTo(join(dir, 'check.c'), exe, ['-O0', '-w', '-fwrapv']);
+      assert.strictEqual(cc.status, 0, String(cc.error ?? cc.stderr));
+      const res = runExe(exe);
+      assert.strictEqual(res.stdout, '');
+      assert.strictEqual(res.status, 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('arith-idioms values', () => {
   it('every fold has the value of what it replaces', { skip: !hasNativeGpp() }, () => {
     const cases: Array<{ decls: string; body: string; values: string }> = [
@@ -321,6 +442,11 @@ describe('arith-idioms values', () => {
       { decls: 'int64_t q, int64_t r', body: 'r = _alldiv((uint32_t)q, (uint32_t)(q >> 0x20), 0x400, 0);', values: 'Q' },
       { decls: 'int64_t q, int64_t r', body: 'r = _allmul((uint32_t)q, *(uint32_t*)((char*)&q + 4), 0x21, 0);', values: 'Q' },
       { decls: 'uint64_t q, int64_t r', body: 'r = _allmul(0x1234567u, 0, (uint32_t)q, *(int*)((uintptr_t)&q + 4));', values: 'Q' },
+      { decls: 'int n, int r', body: "r = (n != 0) * '\\x02' + '\\v';", values: 'S' },
+      { decls: 'int n, int r', body: 'r = 5 - (n < 0) * 4;', values: 'S' },
+      { decls: 'int n, uint32_t r', body: 'r = 0x11f - (uint32_t)(n != 0);', values: 'S' },
+      { decls: 'uint32_t u, uint32_t r', body: 'r = (u > 7) + 0x80000001;', values: 'U' },
+      { decls: 'uint32_t u, int r', body: 'r = (u == 0) * 2 - 1;', values: 'U' },
     ];
     const VALUES: Record<string, string> = {
       U: '0u, 1u, 2u, 3u, 6u, 7u, 9u, 10u, 34u, 35u, 36u, 0x7fffffffu, 0x80000000u, 0x80000001u, 0xfffffffeu, 0xffffffffu, 123456789u',
