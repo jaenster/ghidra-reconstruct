@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { applyEvents, buildIndices, fetchFunctionRecord, readGlobalRecords, type ChangeEvent, type LiveModel, type ModelIndices } from '../model.js';
 import { ModelVerifier, shortDiff, verifierConfigFromEnv, type VerifierConfig, type VerifierHost } from '../verifier.js';
 import { computeHashCache } from '../dirty-units.js';
+import { factsScriptOutput } from './fake-facts.js';
 
 /**
  * The verifier reads what Ghidra prints now through the refresh path and compares it with
@@ -56,6 +57,9 @@ function fakeGhidra(
         }
         case 'execute_script': {
           const code = String(params.code);
+          // The combined facts script: one row per entry, no facts (a missing row fails the read).
+          const facts = factsScriptOutput(code);
+          if (facts !== null) return { success: true, output: facts };
           // labelsAt: the labels at the addresses it names.
           if (code.includes('st.getSymbols(ad)')) {
             const asked = [...code.matchAll(/"([0-9a-f]+)"/g)].map(m => m[1]);
