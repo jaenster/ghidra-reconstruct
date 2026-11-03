@@ -416,6 +416,33 @@ export function configureIncrementalEmit(units: Iterable<string> | null, previou
  * A missing previous file means a slower rebuild; guessing at its contents would
  * mean a wrong tree, and the two are not comparable.
  */
+/**
+ * The whole-program decisions a unit's text was written under: the functions it
+ * defines `static`, its extern entries, and the globals it defines `static`
+ * (`G:<address>`). Another TU starting to call such a function or to name such a
+ * global flips the decision without touching this unit's inputs.
+ */
+export function unitStaticKeys(
+  unitFunctions: ReadonlyArray<{ address: string }>,
+  fileStaticFunctions: { has(k: string): boolean } | undefined,
+  externEntries: { has(k: string): boolean } | undefined,
+  fileLocalGlobals: ReadonlyArray<{ address: string }> | undefined,
+): string[] {
+  return unitFunctions
+    .map(f => fileStaticKey(f.address))
+    .flatMap(k => [
+      ...(fileStaticFunctions?.has(k) ? [k] : []),
+      ...(externEntries?.has(k) ? [`${k}${EXTERN_ENTRY_SUFFIX}`] : []),
+    ])
+    .concat((fileLocalGlobals ?? []).map(fileLocalGlobalKey))
+    .sort();
+}
+
+/** Whether text written under `previous` statics may be reused under `now`. */
+export function unitStaticsHold(previous: readonly string[], now: readonly string[]): boolean {
+  return previous.join(',') === now.join(',');
+}
+
 function reuseUnitImpl(unitName: string, implPath: string): string | undefined {
   if (!emitUnitsFilter || !reuseImplDir) return undefined;
   if (emitUnitsFilter.has(unitName)) return undefined;
@@ -4341,17 +4368,7 @@ function generateFilesForFunctions(
     // The dep-scan below then runs over the reused text, so its include set is
     // derived the same way it was derived when the text was written.
     // An extern entry is emitted text too: a unit whose entries changed is re-emitted.
-    const unitStatics = unitFunctions
-      .map(f => fileStaticKey(f.address))
-      .flatMap(k => [
-        ...(context.fileStaticFunctions?.has(k) ? [k] : []),
-        ...(context.externEntries?.has(k) ? [`${k}${EXTERN_ENTRY_SUFFIX}`] : []),
-      ])
-      // The globals this unit defines `static` are a whole-program decision too: a
-      // second TU starting to use one makes it extern again without touching this
-      // unit's inputs, and text written under another set is never reused.
-      .concat((context.fileLocalGlobals ?? []).map(fileLocalGlobalKey))
-      .sort();
+    const unitStatics = unitStaticKeys(unitFunctions, context.fileStaticFunctions, context.externEntries, context.fileLocalGlobals);
     const previousStatics = unitIdentifierCounts.get(unitName)?.statics ?? [];
     const placementNow: PlacementLookup = {
       typeOwner: t => typeOwnerMap.get(t),
@@ -4364,7 +4381,7 @@ function generateFilesForFunctions(
     const placementHolds = !emitUnitsFilter || emitUnitsFilter.has(unitName)
       || includeBasisHolds(unitIdentifierCounts.get(unitName)?.includes, implIncludes, placementNow);
     if (!placementHolds) console.log(`[reuse] ${unitName}: re-emitted, its includes were resolved under another placement`);
-    const reusedImpl = previousStatics.join(',') === unitStatics.join(',') && placementHolds
+    const reusedImpl = unitStaticsHold(previousStatics, unitStatics) && placementHolds
       ? reuseUnitImpl(unitName, implPath)
       : undefined;
     // The placement lookups the dependency scan below makes, recorded for the next

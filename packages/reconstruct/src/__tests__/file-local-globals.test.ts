@@ -14,6 +14,7 @@ import {
   fileLocalGlobalKey,
 } from '../codegen/file-local-globals.js';
 import { generateGlobalsHeader } from '../codegen/globals-header.js';
+import { unitStaticKeys, unitStaticsHold } from '../codegen/index.js';
 import type { AnalyzedDataSymbol, ReconstructOptions } from '../types.js';
 
 function sym(name: string, address: string, o: Partial<AnalyzedDataSymbol> = {}): AnalyzedDataSymbol {
@@ -120,5 +121,21 @@ describe('globals.h', () => {
       new Map([['g_szBuildNumber', 2], ['gnOther', 2]]));
     assert.match(h, /extern int gnOther;/);
     assert.doesNotMatch(h, /g_szBuildNumber/);
+  });
+});
+
+describe('a changed file-local set re-emits the unit', () => {
+  const fns = [{ address: '00401000' }];
+  const none = new Set<string>();
+  it('records the file-locals beside the function statics, sorted', () => {
+    const keys = unitStaticKeys(fns, none, none, [{ address: '0074d880' }, { address: '0074d87c' }]);
+    assert.deepStrictEqual(keys, ['G:0074d87c', 'G:0074d880']);
+  });
+  it('does not reuse text when another TU starts naming one of them', () => {
+    const before = unitStaticKeys(fns, none, none, [{ address: '0074d87c' }, { address: '0074d880' }]);
+    const after = unitStaticKeys(fns, none, none, [{ address: '0074d87c' }]);
+    assert.strictEqual(unitStaticsHold(before, after), false);
+    assert.strictEqual(unitStaticsHold(after, before), false);
+    assert.strictEqual(unitStaticsHold(before, [...before]), true);
   });
 });
