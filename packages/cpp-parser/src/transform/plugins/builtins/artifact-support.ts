@@ -77,10 +77,19 @@ export const ARTIFACT_SUPPORT_LINES: readonly string[] = [
   '  return (int32_t)(d2_load24(p) ^ 0x800000u) - 0x800000;',
   '}',
   'static inline void d2_store24(void* p, uint32_t v) { std::memcpy(p, &v, 3); }',
-  '// A shift count as x86 takes it: SHL/SHR/SAR by CL use its low five bits. shift-count-mask',
-  '// writes `x << D2_SHIFT_COUNT(n)` where it cannot prove n < 32. MSVC gets the bare count,',
-  '// which its shift masks in hardware as the original\'s did; other compilers get the mask,',
-  '// so a count of 32 or more stays defined.',
+];
+
+/**
+ * D2_SHIFT_COUNT, the count shift-count-mask writes where it cannot prove n < 32. Emitted
+ * after the PRNG macros, worded and placed as jaenster/redivivus#82 put it in the tree.
+ */
+export const SHIFT_COUNT_SUPPORT_LINES: readonly string[] = [
+  '// A shift count as x86 takes it: SHL/SHR/SAR by CL use its low five bits. The decompiler',
+  '// prints such a shift as `x << (n & 0x1f)`; the source shifted by n, and VC8 compiles the',
+  '// mask into code the original does not have (an AND, or a MOVZX of a byte count where the',
+  '// original loads CL). The generator writes `x << D2_SHIFT_COUNT(n)` where it cannot prove',
+  '// n < 32. MSVC gets the bare count, which its shift masks in hardware as the original\'s',
+  '// did; other compilers get the mask, so a count of 32 or more stays defined.',
   '#ifdef _MSC_VER',
   '#  define D2_SHIFT_COUNT(n) (n)',
   '#else',

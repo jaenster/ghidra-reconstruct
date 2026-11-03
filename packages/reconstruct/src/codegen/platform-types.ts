@@ -12,7 +12,7 @@
 /** Standard C/C++ types from <cstdint>, <cstddef>, and language primitives */
 import { globalGuardMacroLines } from './global-guards.js';
 import { SDK_PROBED_NAMES, SDK_DEFINED_TYPES, SDK_TYPEDEF_NAMES, PLATFORM_HEADER_DECLARED_TYPES, SDK_LAYOUTS } from './sdk-types.generated.js';
-import { ARTIFACT_SUPPORT_LINES, CHECK_BLOCK_SUPPORT_LINES, Lexer, STORM_LINK_SUPPORT_LINES, TokenKind } from '@ghidra-mcp/cpp-parser';
+import { ARTIFACT_SUPPORT_LINES, CHECK_BLOCK_SUPPORT_LINES, SHIFT_COUNT_SUPPORT_LINES, Lexer, STORM_LINK_SUPPORT_LINES, TokenKind } from '@ghidra-mcp/cpp-parser';
 import { templateRegistry } from './templates/registry.js';
 import { rootQualifyTemplateArguments } from './templates/identity.js';
 import {
@@ -1614,6 +1614,9 @@ export function generatePlatformHeader(
     lines.push('#define D2_SEED_NEXT_VAL(sv) ((D2SeedStrc)((uint64_t)(uint32_t)(sv) * 0x6ac690c5u + ((uint64_t)(sv) >> 32)))');
     lines.push('');
   }
+
+  lines.push(...SHIFT_COUNT_SUPPORT_LINES);
+  lines.push('');
 
   // Ghidra type conversion helpers
   lines.push('// Ghidra type conversion helpers');
