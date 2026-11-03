@@ -225,6 +225,18 @@ describe('compare-form derivation', () => {
     assert.strictEqual(decide(site({ text: '!=', opcode: 'INT_NOTEQUAL', k: 1n, bValue: 1n, user: 'JBE' })), null);
   });
 
+  it('X != 0 against a register Ghidra proved zero, under JBE/JA, is unsigned X > 0', () => {
+    // GAME_CollectNearbyUnitPositions 00537fd0: CMP dword ptr [EBP-0xc],ESI ... JBE, ESI the
+    // function-wide zero, printed `nAdjacentRoomCount != 0` with the op on the JBE.
+    let d = decide(site({ text: '!=', opcode: 'INT_NOTEQUAL', k: 0n, aKind: 'm', bKind: 'r', user: 'JBE' }))!;
+    assert.deepStrictEqual([d.op, d.delta, d.swap, d.unsigned], ['>', 0, false, true]);
+    d = decide(site({ text: '==', opcode: 'INT_EQUAL', constSide: 0, k: 0n, bKind: 'r', user: 'JA' }))!;
+    assert.deepStrictEqual([d.op, d.swap, d.unsigned], ['<=', true, true]);
+    // Under JZ/JNZ, or with a register Ghidra did not prove zero, there is nothing to decide.
+    assert.strictEqual(decide(site({ text: '!=', opcode: 'INT_NOTEQUAL', k: 0n, bKind: 'r', user: 'JNZ' })), null);
+    assert.strictEqual(decide(site({ text: '!=', opcode: 'INT_NOTEQUAL', k: 1n, bKind: 'r', user: 'JBE' })), null);
+  });
+
   it('X == 0 / X != 0 under CMP X,1; JB/JAE become unsigned X < 1 / X >= 1', () => {
     // A2Q3: `cmp byte ptr [eax+0xd], 1; jb` printed `pDVar3->nStateFlag != 0`.
     let d = decide(site({ text: '!=', opcode: 'INT_NOTEQUAL', size: 1, width: 1, k: 0n, bValue: 1n, user: 'JC' }))!;

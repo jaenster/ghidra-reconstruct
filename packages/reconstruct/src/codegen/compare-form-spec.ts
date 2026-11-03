@@ -115,6 +115,7 @@ export function compareFormDecision(site: CompareSite): CompareFormOutcome {
   if (site.constSide === 0 || site.constSide === 1) {
     if (site.k === undefined) return { reason: 'no constant' };
     if (site.bKind === 'r' && ordered) return heldZero(site, F, base, form.signed!);
+    if (site.bKind === 'r') return heldZeroEquality(site, cc, base);
     if (site.bKind !== 'i' && site.bKind !== 'z') return { reason: `constant against ${site.bKind}` };
     const B = site.bKind === 'z' ? 0n : site.bValue;
     if (B === undefined) return { reason: 'no immediate' };
@@ -220,6 +221,23 @@ function heldZero(site: CompareSite, F: ReadonlySet<string>, base: Omit<CompareF
     return { decision: { ...base, op: step.op, swap, delta: step.delta, k, signed } };
   }
   return { reason: `${rel} ${kv} against ${[...F].join('/')} in a register` };
+}
+
+/**
+ * An equality with 0 whose CMP takes the 0 from a register: `CMP dword ptr [EBP-0xc],ESI; JBE`
+ * with ESI the zero VC8 keeps for the whole function, which Ghidra proved and printed
+ * `nAdjacentRoomCount != 0` (GAME_CollectNearbyUnitPositions 00537fd0). Decided as `z` would
+ * be, and only for JBE/JA: an unsigned X is at most 0 exactly when it is 0, so the register's
+ * value is the only thing taken from Ghidra, and it is the constant the op prints.
+ */
+function heldZeroEquality(site: CompareSite, cc: string, base: Omit<CompareFormDecision, 'op'>): CompareFormOutcome {
+  const swap = site.constSide === 0;
+  const rel = swap ? MIRROR[site.text] : site.text;
+  const k = Number(site.k! & 0xffffffffn);
+  if (inDomain(site.k!, site.width, false) === 0n && (cc === 'BE' || cc === 'NA' || cc === 'A' || cc === 'NBE')) {
+    return { decision: { ...base, op: rel === '==' ? '<=' : '>', swap, delta: 0, k, unsigned: true } };
+  }
+  return { reason: `${rel} ${site.k} against a register read by J${cc}` };
 }
 
 /**

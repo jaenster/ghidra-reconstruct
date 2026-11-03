@@ -169,6 +169,48 @@ describe('compare-form', () => {
     });
   });
 
+  // Skills_SrvStFunc_16_ApplyHitAndDamage 005c30a0: `CMP byte ptr [ESI+0x1dc],0; JBE` printed
+  // `pSkillsTxt->EType != ELEMENTAL_NONE`, a member two enums declare, both as 0.
+  describe('an unsigned zero test against an enum member worth 0', () => {
+    const tables: Partial<CompareFormOptions> = {
+      enumTypes: ['eElem', 'eElemDWORD'],
+      enumMemberValues: { eElem: { ELEMENTAL_NONE: 0, ELEMENTAL_FIRE: 1 }, eElemDWORD: { ELEMENTAL_NONE: 0, ELEMENTAL_FIRE: 1 } },
+      structFields: { SkillsTxt: { EType: 'eElem' } },
+    };
+    const site: Site = { text: '!=', fp: ['e', 'c:0'], size: 1 };
+    const d = dec({ ord: 0, ...site, op: '>', delta: 0, k: 0, unsigned: true, width: 1 });
+    const runZ = (code: string, extra: Partial<CompareFormOptions> = tables, dd = d) =>
+      emit(createCompareFormTransformer({ sites: [site], decisions: [dd], ...extra })(parse(code)) as AnyNode).trim();
+    const code = 'void f(SkillsTxt* p) { if (p->EType != ELEMENTAL_NONE) {} }';
+
+    it('keeps the member and compares unsigned at the CMP width', () => {
+      assert.match(runZ(code), /if \(\(uint8_t\)\(?p->EType\)? > ELEMENTAL_NONE\)/);
+      const eq: Site = { ...site, text: '==' };
+      const out = emit(createCompareFormTransformer({
+        sites: [eq], decisions: [dec({ ord: 0, ...eq, op: '<=', delta: 0, k: 0, unsigned: true, width: 1 })], ...tables,
+      })(parse(code.replace('!=', '=='))) as AnyNode).trim();
+      assert.match(out, /if \(\(uint8_t\)\(?p->EType\)? <= ELEMENTAL_NONE\)/);
+    });
+
+    it('refuses a member that is not 0 in every enum declaring it, or no enum at all', () => {
+      assert.match(runZ(code, { ...tables, enumMemberValues: { eElem: { ELEMENTAL_NONE: 0 }, eOther: { ELEMENTAL_NONE: 4 } } }),
+        /p->EType != ELEMENTAL_NONE/);
+      assert.match(runZ(code, { ...tables, enumMemberValues: {} }), /p->EType != ELEMENTAL_NONE/);
+      assert.match(runZ(code.replace('ELEMENTAL_NONE', 'ELEMENTAL_FIRE')), /p->EType != ELEMENTAL_FIRE/);
+    });
+
+    it('compares the same over every byte (compiled)', { skip: !hasNativeGpp() }, () => {
+      const src = 'int f(SkillsTxt* p) { if (p->EType != ELEMENTAL_NONE) { return 1; } return 0; }';
+      const out = runZ(src);
+      const prelude = [
+        'typedef unsigned char eElem;', 'constexpr eElem ELEMENTAL_NONE = 0;', 'struct SkillsTxt { eElem EType; };',
+        src.replace('int f(', 'int before('), out.replace('int f(', 'int after('),
+      ].join('\n');
+      const r = compileAndRun(prelude, 'for (int x = 0; x < 256; x++) { SkillsTxt s; s.EType = (eElem)x; if (before(&s) != after(&s)) printf("%d ", x); }\nprintf("ok");');
+      assert.strictEqual(r.trim(), 'ok');
+    });
+  });
+
   it('swaps two variables, mirroring the operator', () => {
     assert.match(run('void f(int p, int q) { if (p <= q) {} }', [{ text: '<=', fp: ['v:p', 'v:q'] }],
       [dec({ ord: 0, text: '<=', fp: ['v:p', 'v:q'], op: '>=', swap: true, delta: 0 })]), /q >= p/);

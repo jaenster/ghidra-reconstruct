@@ -339,6 +339,7 @@ export function createCompareFormTransformer(options?: PluginOptions): Transform
   };
 
   const enumStep = enumStepper(o.enumConstantTypes ?? {}, o.enumMemberValues ?? {});
+  const zeroEnum = zeroEnumConstant(o.enumMemberValues ?? {});
 
   return createTransformer({
     visitFunctionDecl(node: FunctionDecl): ASTNode | undefined {
@@ -403,7 +404,7 @@ export function createCompareFormTransformer(options?: PluginOptions): Transform
           if (!d) return undefined;
           let out: BinaryExpr | null = null;
           if (d.keep) out = byteCompareWithOne(be, d);
-          else if (d.op) out = rewrite(be, d, sizeOf(d.ord), shapeOf, enumStep);
+          else if (d.op) out = rewrite(be, d, sizeOf(d.ord), shapeOf, enumStep, zeroEnum);
           if (out) rewritten++;
           const facts = withMachineFacts(out ?? be, d);
           if (facts !== (out ?? be)) tagged++;
@@ -559,6 +560,30 @@ function narrowZextSum(e: Expression, shapeOf: ExprShape): Expression | null {
   return Expr.binary(a, '+', b);
 }
 
+/**
+ * Whether `e` is a bare enum member worth 0 in every enum that declares the name, so that
+ * whichever one the name binds to it is 0 (`ELEMENTAL_NONE`, which two enums declare).
+ */
+function zeroEnumConstant(memberValues: Record<string, Record<string, number>>): (e: Expression) => boolean {
+  let values: Map<string, Set<number>> | undefined;
+  return e => {
+    const x = unwrapParens(e);
+    if (x.kind !== NodeKind.Identifier) return false;
+    if (!values) {
+      values = new Map();
+      for (const members of Object.values(memberValues)) {
+        for (const [n, v] of Object.entries(members)) {
+          let set = values.get(n);
+          if (!set) values.set(n, set = new Set());
+          set.add(v);
+        }
+      }
+    }
+    const set = values.get((x as Identifier).name);
+    return !!set && set.size === 1 && set.has(0);
+  };
+}
+
 /** An enum constant's neighbour: the member of its enum worth `value + delta`. */
 type EnumStep = (e: Expression, k: number, size: number, delta: number) => Expression | null;
 
@@ -582,7 +607,8 @@ function enumStepper(constantTypes: Record<string, string>, memberValues: Record
   };
 }
 
-function rewrite(be: BinaryExpr, d: CompareFormDecision, size: number, shapeOf: ExprShape, enumStep?: EnumStep): BinaryExpr | null {
+function rewrite(be: BinaryExpr, d: CompareFormDecision, size: number, shapeOf: ExprShape, enumStep?: EnumStep,
+  zeroEnum?: (e: Expression) => boolean): BinaryExpr | null {
   let left = d.swap ? be.right : be.left;
   let right = d.swap ? be.left : be.right;
   if (d.zextSum) {
@@ -597,7 +623,9 @@ function rewrite(be: BinaryExpr, d: CompareFormDecision, size: number, shapeOf: 
     // The constant is the written right operand; it must be a bare literal the
     // instructions agree with, or an enum member stepping to its neighbour.
     const c = literalOf(right);
-    if (!c) {
+    if (!c && d.unsigned && delta === 0 && d.k === 0 && zeroEnum?.(right)) {
+      // `X <= 0` / `X > 0` against an enum member worth 0 keeps the member.
+    } else if (!c) {
       // `X <= 0` / `X < 1` need the literal they write.
       const stepped = delta !== 0 && !d.unsigned && enumStep ? enumStep(right, d.k, size, delta) : null;
       if (!stepped) return null;
@@ -629,7 +657,7 @@ function rewrite(be: BinaryExpr, d: CompareFormDecision, size: number, shapeOf: 
     if (s === 'pointer') return null;
     if (delta === 0) {
       // `X <= 0` / `X > 0`.
-      if (literalOf(right)?.value !== 0n) return null;
+      if (literalOf(right)?.value !== 0n && !zeroEnum?.(right)) return null;
       if (s !== 'unsigned') left = compareCast(left, d.width);
     } else {
       // `X < 1` / `X >= 1`: the operand must already be unsigned.
