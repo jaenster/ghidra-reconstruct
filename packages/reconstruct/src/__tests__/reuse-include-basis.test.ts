@@ -10,6 +10,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert';
+import { enumMemberFact, recordEnumLookups, zeroEnumMember } from '../codegen/enum-lookups.js';
 import {
   includeBasisHolds,
   answerPlacementLookup,
@@ -116,4 +117,38 @@ test('a struct gaining constructors invalidates text spelled without them', () =
   assert.equal(includeBasisHolds(basis, GRAPH, aggregate), true);
   assert.equal(includeBasisHolds(basis, GRAPH, converting), false);
   assert.equal(includeBasisHolds(recorded(converting, GRAPH, ['k:D2MercWeaponAnimStrc']), GRAPH, aggregate), false);
+});
+
+/**
+ * width-1104: compare-form keeps `X != ELEMENTAL_NONE` when every enum declaring the name
+ * gives it 0. The function names neither enum, so no dependency edge reaches it; a
+ * second enum gaining the name, or a value change, must still re-emit the unit.
+ */
+test('an enum member whose values across all enums change invalidates the text', () => {
+  const v6 = { eElem: { ELEMENTAL_NONE: 0 }, eElemDWORD: { ELEMENTAL_NONE: 0 } };
+  const at = (values: Record<string, Record<string, number>>): PlacementLookup =>
+    ({ ...placement({}), enumMemberFact: n => enumMemberFact(values, n) });
+  const basis = recorded(at(v6), GRAPH, ['e:ELEMENTAL_NONE']);
+  assert.deepStrictEqual(basis.lookups, [['e:ELEMENTAL_NONE', '0']]);
+  assert.equal(includeBasisHolds(basis, GRAPH, at({ ...v6, eOther: { ELEMENTAL_FIRE: 1 } })), true);
+  assert.equal(includeBasisHolds(basis, GRAPH, at({ ...v6, eOther: { ELEMENTAL_NONE: 4 } })), false);
+  assert.equal(includeBasisHolds(basis, GRAPH, at({ eElem: { ELEMENTAL_NONE: 1 }, eElemDWORD: { ELEMENTAL_NONE: 0 } })), false);
+  assert.equal(includeBasisHolds(basis, GRAPH, at({})), false);
+});
+
+test('the zero-enum answer reports each member name it was asked about', () => {
+  const asked: string[] = [];
+  const values = { eElem: { ELEMENTAL_NONE: 0, ELEMENTAL_FIRE: 1 }, eOther: { MODE_NONE: 0, MODE_ALT: 0 } };
+  recordEnumLookups(n => asked.push(n));
+  try {
+    const isZero = zeroEnumMember(values);
+    assert.equal(isZero('ELEMENTAL_NONE'), true);
+    assert.equal(isZero('ELEMENTAL_FIRE'), false);
+    assert.equal(isZero('NOT_DECLARED'), false);
+  } finally {
+    recordEnumLookups(null);
+  }
+  assert.deepStrictEqual(asked, ['ELEMENTAL_NONE', 'ELEMENTAL_FIRE', 'NOT_DECLARED']);
+  assert.equal(zeroEnumMember(values)('MODE_NONE'), true);
+  assert.equal(enumMemberFact({ a: { X: 2 }, b: { X: 0 }, c: { X: 2 } }, 'X'), '0,2');
 });

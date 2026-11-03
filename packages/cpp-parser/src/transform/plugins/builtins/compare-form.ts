@@ -105,6 +105,11 @@ export interface CompareFormOptions extends PluginOptions {
   enumConstantTypes?: Record<string, string>;
   /** Enum name -> member name -> value: where a stepped enum constant finds its neighbour. */
   enumMemberValues?: Record<string, Record<string, number>>;
+  /**
+   * Whether every enum declaring a member name gives it 0. The caller's answer, so it can
+   * record which names a function's text depended on; absent: read from enumMemberValues.
+   */
+  zeroEnumMember?: (name: string) => boolean;
   globalTypes?: Record<string, string>;
   enclosingVarTypes?: Record<string, string>;
   structFields?: Record<string, Record<string, string>>;
@@ -339,7 +344,7 @@ export function createCompareFormTransformer(options?: PluginOptions): Transform
   };
 
   const enumStep = enumStepper(o.enumConstantTypes ?? {}, o.enumMemberValues ?? {});
-  const zeroEnum = zeroEnumConstant(o.enumMemberValues ?? {});
+  const zeroEnum = zeroEnumConstant(o.zeroEnumMember ?? memberIsZeroEverywhere(o.enumMemberValues ?? {}));
 
   return createTransformer({
     visitFunctionDecl(node: FunctionDecl): ASTNode | undefined {
@@ -564,11 +569,17 @@ function narrowZextSum(e: Expression, shapeOf: ExprShape): Expression | null {
  * Whether `e` is a bare enum member worth 0 in every enum that declares the name, so that
  * whichever one the name binds to it is 0 (`ELEMENTAL_NONE`, which two enums declare).
  */
-function zeroEnumConstant(memberValues: Record<string, Record<string, number>>): (e: Expression) => boolean {
-  let values: Map<string, Set<number>> | undefined;
+function zeroEnumConstant(isZero: (name: string) => boolean): (e: Expression) => boolean {
   return e => {
     const x = unwrapParens(e);
-    if (x.kind !== NodeKind.Identifier) return false;
+    return x.kind === NodeKind.Identifier && isZero((x as Identifier).name);
+  };
+}
+
+/** Whether every enum in `memberValues` that declares the name gives it 0. */
+function memberIsZeroEverywhere(memberValues: Record<string, Record<string, number>>): (name: string) => boolean {
+  let values: Map<string, Set<number>> | undefined;
+  return name => {
     if (!values) {
       values = new Map();
       for (const members of Object.values(memberValues)) {
@@ -579,7 +590,7 @@ function zeroEnumConstant(memberValues: Record<string, Record<string, number>>):
         }
       }
     }
-    const set = values.get((x as Identifier).name);
+    const set = values.get(name);
     return !!set && set.size === 1 && set.has(0);
   };
 }

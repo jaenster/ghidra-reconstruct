@@ -4,6 +4,7 @@
  * Generates .cpp files with function implementations
  */
 
+import { zeroEnumMember } from './enum-lookups.js';
 import { platformDeclaredFunctionNames, rootQualifyShadowedArguments } from './platform-types.js';
 import { isMsvcEhHandlerStub } from './eh-handler-stub.js';
 import { appendFileSync, mkdirSync } from 'node:fs';
@@ -3261,6 +3262,8 @@ function transformDecompiledCode(
           functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         } : {}),
         enumMemberValues: context?._enumMemberValues,
+        // Recorded per unit (enum-lookups.ts): the answer reads enums the body never names.
+        zeroEnumMember: zeroEnumMember(context?._enumMemberValues),
         enclosingVarTypes,
         nullGetters: context?.nullGetters,
         onCensus: (c: { tied: number; rewritten: number; untied: number; zipped: boolean }) => {

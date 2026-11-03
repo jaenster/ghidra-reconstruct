@@ -199,6 +199,14 @@ describe('compare-form', () => {
       assert.match(runZ(code.replace('ELEMENTAL_NONE', 'ELEMENTAL_FIRE')), /p->EType != ELEMENTAL_FIRE/);
     });
 
+    it('asks the caller about the member when the caller answers', () => {
+      const asked: string[] = [];
+      const zeroEnumMember = (name: string): boolean => { asked.push(name); return name === 'ELEMENTAL_NONE'; };
+      assert.match(runZ(code, { ...tables, enumMemberValues: {}, zeroEnumMember }), /> ELEMENTAL_NONE/);
+      assert.deepStrictEqual([...new Set(asked)], ['ELEMENTAL_NONE']);
+      assert.match(runZ(code, { ...tables, zeroEnumMember: () => false }), /p->EType != ELEMENTAL_NONE/);
+    });
+
     it('compares the same over every byte (compiled)', { skip: !hasNativeGpp() }, () => {
       const src = 'int f(SkillsTxt* p) { if (p->EType != ELEMENTAL_NONE) { return 1; } return 0; }';
       const out = runZ(src);

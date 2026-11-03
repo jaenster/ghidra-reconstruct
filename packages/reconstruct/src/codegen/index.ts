@@ -29,6 +29,7 @@ export {
   isSwitchTableSymbol,
 } from './globals-header.js';
 
+import { enumMemberFact, recordEnumLookups } from './enum-lookups.js';
 import { layoutFieldType } from './layout-field-type.js';
 import { createOutParamOracle } from './out-params.js';
 import { createParamReachOracle } from './param-reach.js';
@@ -290,7 +291,8 @@ interface UnitEmitRecord {
  * handed to the emitter, and each placement lookup the dependency scan made, as
  * `[key, answer]`. Keys: `t:<type>` the header owning a type, `f:<function>` the
  * declaring headers of a name, `c:<type>.<field>` a field's struct type on a deref
- * chain, `p:` the template header, `k:<struct>` whether a struct has constructors.
+ * chain, `p:` the template header, `k:<struct>` whether a struct has constructors,
+ * `e:<member>` the values every enum declaring a member name gives it (enum-lookups.ts).
  */
 export interface IncludeBasis {
   graph: string[];
@@ -305,6 +307,8 @@ export interface PlacementLookup {
   templateHeader: string | undefined;
   /** Whether a struct is emitted with constructors, and which (header.ts constructorFact). */
   constructorFact(typeName: string): string;
+  /** The values every enum declaring a member name gives it (enum-lookups.ts enumMemberFact). */
+  enumMemberFact?(name: string): string;
 }
 
 export function functionHeadersKey(
@@ -327,6 +331,7 @@ export function answerPlacementLookup(key: string, now: PlacementLookup): string
     }
     case 'p': return now.templateHeader ?? '';
     case 'k': return now.constructorFact(subject);
+    case 'e': return now.enumMemberFact ? now.enumMemberFact(subject) : `\u0000no enum facts`;
     default: return `\u0000unknown lookup ${key}`;
   }
 }
@@ -4277,6 +4282,7 @@ function generateFilesForFunctions(
       fieldType: (t, f) => structFieldTypes.get(t)?.get(f),
       templateHeader: templateHeaderPath ?? undefined,
       constructorFact,
+      enumMemberFact: name => enumMemberFact(context._enumMemberValues, name),
     };
     const placementHolds = !emitUnitsFilter || emitUnitsFilter.has(unitName)
       || includeBasisHolds(unitIdentifierCounts.get(unitName)?.includes, implIncludes, placementNow);
@@ -4329,6 +4335,8 @@ function generateFilesForFunctions(
     // Every struct whose constructors this unit's text is spelled under: its data
     // initializers ask (constructorFields), and so may the body transforms.
     if (reusedImpl === undefined) recordConstructorLookups(name => lookedUp(`k:${name}`));
+    // Every enum member name a body transform asked about across all enums.
+    if (reusedImpl === undefined) recordEnumLookups(name => lookedUp(`e:${name}`));
     let implContent = reusedImpl !== undefined
       ? reusedImpl
       : genMark('units/impl', () => generateImplementation(
@@ -4545,6 +4553,7 @@ function generateFilesForFunctions(
       }
     }
     recordConstructorLookups(null);
+    recordEnumLookups(null);
     if (GEN_TIMING) genAdd('units/dep-scan', Date.now() - depScanT0);
 
     // Everything this unit contributes to the three cross-unit accumulators is in
