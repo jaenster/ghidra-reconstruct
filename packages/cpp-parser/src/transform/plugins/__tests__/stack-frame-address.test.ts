@@ -610,4 +610,38 @@ describe('stack-frame-address: an address printed against the neighbour of its a
     const out = run(`void f() { int aiStack_2f8[38]; POINT aWispPattern[56]; x = aiStack_2f8[i]; }`, listed);
     assert.ok(out.includes('aiStack_2f8[i]'), out);
   });
+
+  // CMD_WriteKeyFile @0x00469780: 00469834 LEA EAX,[szInstallPath]; ADD EAX,-1 - the
+  // inlined strcat starts on the padding byte at -0x115, which the frame does not list.
+  const KEYFILE = [
+    { name: 'szBuffer', offset: -1420, size: 1142, isArray: true },
+    { name: 'szInstallPath', offset: -276, size: 260, isArray: true },
+    { name: 'sKeyFileHeader', offset: -16, size: 6 },
+  ];
+  const KEYFILE_SRC = (body: string) =>
+    `void f() { char* pEnd; char szBuffer[1142]; char cStack_115; char szInstallPath[260]; ${body} }`;
+  const SCAN = 'pDst = &cStack_115; do { pEnd = pDst; pDst = pEnd + 1; } while (pEnd[1] != 0);';
+
+  it('anchors the address of an unlisted byte just below a byte array on the array', () => {
+    const out = run(KEYFILE_SRC(SCAN), KEYFILE);
+    assert.ok(/pDst = szInstallPath - 1;/.test(out), out);
+    assert.ok(!out.includes('cStack_115'), `the declaration goes with its last use: ${out}`);
+  });
+
+  it('leaves the unlisted byte where the body reads or writes it, not only its address', () => {
+    const read = run(KEYFILE_SRC(`${SCAN} x = cStack_115;`), KEYFILE);
+    assert.ok(read.includes('pDst = &cStack_115'), read);
+    // One byte too low for szInstallPath, and owned by nothing else: left alone.
+    const gap = run(`void f() { char cStack_116; char szInstallPath[260]; p = &cStack_116; }`, KEYFILE);
+    assert.ok(gap.includes('p = &cStack_116'), gap);
+    // A name the frame lists is that slot, never a position.
+    const listed = [...KEYFILE, { name: 'cStack_115', offset: -277, size: 1 }];
+    const kept = run(KEYFILE_SRC(SCAN), listed);
+    assert.ok(kept.includes('pDst = &cStack_115'), kept);
+  });
+
+  it('keeps the scalar\'s type where the array spells its element differently', () => {
+    const out = run(`void f() { char cStack_115; uint8_t szInstallPath[260]; p = &cStack_115; }`, KEYFILE);
+    assert.ok(/p = \(char\s*\*\)szInstallPath - 1;/.test(out), out);
+  });
 });

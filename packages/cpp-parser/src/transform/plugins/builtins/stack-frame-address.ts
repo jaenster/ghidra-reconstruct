@@ -1216,6 +1216,16 @@ function shiftedIndex(index: Expression, d: number): Expression {
  *    function body, and nothing jumps), so at the read it holds nothing -
  *    the bytes read are the ones above it. The rules above miss this shape
  *    because they take only a scalar's `&x` and a literal offset.
+ *
+ *  - `&cStack_115`, the address of a decompiler scalar the frame does not list,
+ *    one element directly below a declared array of that element's width
+ *    (`CMD_WriteKeyFile` @0x00469780: `LEA EAX,[szInstallPath]; ADD EAX,-1` at
+ *    00469834 starts an inlined `strcat` at the padding byte under `char
+ *    szInstallPath[260]` at -0x114): `szInstallPath - 1`. The byte belongs to no
+ *    object - it is the cursor's start, one before the array, pre-incremented
+ *    into it - so the respelling is held to a name whose every use is `&name`:
+ *    a read or write of the byte itself would be of storage nothing owns. The
+ *    declaration goes with the last use.
  */
 function createNeighbourAnchorTransformer(slots: StackSlot[]): Transformer {
   return (root: ASTNode) => {
@@ -1384,6 +1394,39 @@ function createNeighbourAnchorTransformer(slots: StackSlot[]): Transformer {
       }
     }
 
+    // ---- `&cStack_115`: an unlisted scalar's address, one element below an array --
+    const belowTargets = new Map<string, { a: StackSlot; type: TypeNode }>();
+    {
+      const addressed = new Map<string, number>();
+      const named = new Map<string, number>();
+      const declNames = new Set<unknown>();
+      for (const n of traverseAST(root)) if (n.kind === NodeKind.VariableDecl) declNames.add((n as VariableDecl).name);
+      for (const n of traverseAST(root)) {
+        if (n.kind === NodeKind.UnaryExpr && (n as UnaryExpr).operator === '&') {
+          const id = unwrapParens((n as UnaryExpr).operand);
+          if (id.kind === NodeKind.Identifier) {
+            const k = (id as Identifier).name;
+            addressed.set(k, (addressed.get(k) ?? 0) + 1);
+          }
+        } else if (n.kind === NodeKind.Identifier && !declNames.has(n)) {
+          const k = (n as Identifier).name;
+          named.set(k, (named.get(k) ?? 0) + 1);
+        }
+      }
+      for (const [name, t] of declTypes) {
+        if (!t || t.kind === NodeKind.ArrayType || slotByName.has(name)) continue;
+        const o = unlistedArrayOffset(name);
+        if (o === null) continue;
+        const size = scalarSpellingSize(t);
+        if (!size) continue;
+        if (slots.some((x) => o < x.offset + Math.max(x.size, 1) && o + size > x.offset)) continue;
+        const uses = named.get(name) ?? 0;
+        if (uses === 0 || addressed.get(name) !== uses) continue;
+        const hits = arrays.filter((a) => a.offset === o + size && elementSizes.get(a.name) === size);
+        if (hits.length === 1) belowTargets.set(name, { a: hits[0], type: t });
+      }
+    }
+
     // ---- `*(char*)((int)arr + i)`: a byte read off an unwritten array, into the one above --
     const unwrittenBelow = new Map<unknown, { a: StackSlot; d: number; type: TypeNode }>();
     for (const fn of [...traverseAST(root)].filter((n) => n.kind === NodeKind.FunctionDecl) as FunctionDecl[]) {
@@ -1438,6 +1481,11 @@ function createNeighbourAnchorTransformer(slots: StackSlot[]): Transformer {
 
     const rewritten = createTransformer({
       visitNode(node: ASTNode): ASTNode | undefined {
+        if (node.kind === NodeKind.UnaryExpr && (node as UnaryExpr).operator === '&') {
+          const id = unwrapParens((node as UnaryExpr).operand);
+          const hit = id.kind === NodeKind.Identifier ? belowTargets.get((id as Identifier).name) : undefined;
+          if (hit) return Expr.paren(Expr.binary(elementBase(hit.a, hit.type, true), '-', Expr.intLiteral(1))) as ASTNode;
+        }
         if (node.kind === NodeKind.UnaryExpr && node.location && unwrittenBelow.has(node.location)) {
           const hit = unwrittenBelow.get(node.location)!;
           const sum = unwrapParens((unwrapParens((node as UnaryExpr).operand) as CStyleCastExpr).expression) as BinaryExpr;
@@ -1476,7 +1524,7 @@ function createNeighbourAnchorTransformer(slots: StackSlot[]): Transformer {
       },
     })(root);
 
-    if (aliasTargets.size === 0) return rewritten;
+    if (aliasTargets.size === 0 && belowTargets.size === 0) return rewritten;
     // Drop an alias declaration nothing references any more.
     const stillUsed = new Set<string>();
     for (const n of traverseAST(rewritten)) {
@@ -1487,8 +1535,9 @@ function createNeighbourAnchorTransformer(slots: StackSlot[]): Transformer {
       const kept = c.statements.filter((st) => {
         if (st.kind !== NodeKind.DeclStmt) return true;
         const decls = (st as DeclStmt).declarations as VariableDecl[];
-        return !(decls.length === 1 && aliasTargets.has(decls[0].name?.name ?? '')
-          && !usedOutsideDecl(rewritten, decls[0].name.name));
+        const declared = decls.length === 1 ? decls[0].name?.name ?? '' : '';
+        return !((aliasTargets.has(declared) || belowTargets.has(declared))
+          && !usedOutsideDecl(rewritten, declared));
       });
       return kept.length === c.statements.length ? undefined : { ...c, statements: kept } as CompoundStmt;
     })(rewritten);
