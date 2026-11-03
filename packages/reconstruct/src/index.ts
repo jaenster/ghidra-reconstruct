@@ -522,7 +522,22 @@ async function fetchProgramVersion(
  * number moves the instant anyone edits the open program. Neither is worth
  * failing a 20-minute run over, so both are best-effort and record their error.
  */
-async function captureProvenance(
+/**
+ * The version the worker actually has open, when it can say (the local worker answers
+ * `get_program_version` with the version it opened and the server's latest). Null when the
+ * transport has no such command. A worker opens one version and reads only that one, so a
+ * check-in landing during a run leaves the server's latest ahead of everything read.
+ */
+export async function openedProgramVersion(connection: GhidraConnection): Promise<number | null> {
+  try {
+    const r = await connection.sendCommand<{ version?: unknown }>('get_program_version', {});
+    return typeof r?.version === 'number' && r.version > 0 ? r.version : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function captureProvenance(
   connection: GhidraConnection,
   projectPath: string,
   programPath: string | undefined,
@@ -539,9 +554,20 @@ async function captureProvenance(
     cacheVersionError = e instanceof Error ? e.message : String(e);
   }
 
+  // The version the reads came from, not the server's latest at the end of the run: a
+  // full extraction labelled "1860" printed eleven functions as they were before v1860's
+  // check-in, and against it a correct daemon model looked stale in all eleven.
+  const opened = await openedProgramVersion(connection);
   const looked = await fetchProgramVersion(connection, projectPath, programPath);
-  programVersion = looked.version;
-  programVersionError = looked.error;
+  if (opened !== null) {
+    programVersion = opened;
+    if (looked.version !== null && looked.version !== opened) {
+      programVersionError = `read from v${opened}; the server was at v${looked.version} when the snapshot was written`;
+    }
+  } else {
+    programVersion = looked.version;
+    programVersionError = looked.error;
+  }
 
   return {
     writtenAt: new Date().toISOString(),
