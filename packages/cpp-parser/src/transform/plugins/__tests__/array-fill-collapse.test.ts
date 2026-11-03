@@ -34,6 +34,26 @@ describe('arrayFillCollapsePlugin', () => {
     );
   });
 
+  it("writes four '\\0' stores as one 32-bit store (PLAYERSAVE_ParseItemFromBuffer)", () => {
+    expectSource(
+      `void f() { p->szCode[0]='\\0'; p->szCode[1]='\\0'; p->szCode[2]='\\0'; p->szCode[3]='\\0'; p->n = -1; }`,
+      `void f() {
+  *(uint32_t*)p->szCode = 0;
+  p->n = -1;
+}`,
+    );
+    expectSource(
+      `void f() { s.a[2]='\\0'; s.a[3]='\\0'; s.a[4]='\\0'; s.a[5]='\\0'; }`,
+      `void f() {
+  *(uint32_t*)(s.a + 2) = 0;
+}`,
+    );
+  });
+
+  it('keeps four integer zero stores a memset: their element size is not known', () => {
+    assert.ok(tx(`void f() { p->w[0]=0; p->w[1]=0; p->w[2]=0; p->w[3]=0; }`).includes('memset(p->w, 0, 4 * sizeof(p->w[0]));'));
+  });
+
   it('handles a partial run not starting at 0', () => {
     expectSource(
       `void f() { a[3]=0; a[4]=0; a[5]=0; a[6]=0; }`,

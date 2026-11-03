@@ -30,6 +30,16 @@
  *
  * The loop stores the same zeros to the same elements; its counter is a new name, declared
  * in the loop.
+ *
+ * A run of exactly four `'\0'` stores clears four bytes, which the original did with one
+ * 32-bit store: the decompiler splits `mov dword ptr [esi+0x44], 0` into a `char[4]`'s
+ * four elements (PLAYERSAVE_ParseItemFromBuffer, 00532f30, whose other paths store the same
+ * field as `*(uint32_t *)szCode`). It is written back as that store,
+ *
+ *   *(uint32_t*)pItem->szCode = 0;
+ *
+ * which writes the same four zero bytes; memset(4) compiles to the same store but scheduled
+ * as an intrinsic, after the code around it.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -132,6 +142,25 @@ function makeMemset(base: Expression, startIdx: number, count: number, model: St
   };
 }
 
+/** `x[k] = '\0';`: a store the decompiler typed as one byte. */
+function isCharZeroStore(st: Statement): boolean {
+  const a = unwrap((st as ExprStmt).expression) as AssignExpr;
+  return unwrap(a.right).kind === NodeKind.CharLiteral;
+}
+
+/** *(uint32_t*)<base>[+start] = 0; */
+function makeDwordStore(base: Expression, startIdx: number, model: Statement): ExprStmt {
+  const at = startIdx === 0 ? cloneNode(base) : Expr.paren(Expr.binary(cloneNode(base), '+', Expr.intLiteral(startIdx)));
+  const target = Expr.unary('*', Expr.cast(Type.pointer(Type.typedef('uint32_t')), at));
+  return {
+    kind: NodeKind.ExprStmt,
+    expression: Expr.assign(target, Expr.intLiteral(0)),
+    location: model.location,
+    leadingTrivia: model.leadingTrivia || [],
+    trailingTrivia: [],
+  };
+}
+
 /** The bytes above which VC8 SP1 /O2 calls memset instead of expanding it. */
 const MEMSET_INLINE_MAX = 32;
 
@@ -179,6 +208,12 @@ function collapseBlock(block: CompoundStmt, scope?: FillScope): CompoundStmt | n
         j++;
       }
       const count = j - i;
+      if (count === 4 && s.slice(i, j).every(isCharZeroStore)) {
+        out.push(makeDwordStore(m.base, m.idx, s[i]));
+        changed = true;
+        i = j;
+        continue;
+      }
       if (count >= THRESHOLD) {
         const elem = scope?.elemSize(m.base) ?? null;
         if (elem !== null && count * elem > MEMSET_INLINE_MAX) {
