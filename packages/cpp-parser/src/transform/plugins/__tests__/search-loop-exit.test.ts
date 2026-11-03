@@ -50,6 +50,26 @@ describe('search-loop-exit', () => {
     assert.deepStrictEqual(run(code).sites, []);
   });
 
+  it('takes an unbraced guard and a braced bottom test as the same exit', () => {
+    // GFX_IsUnitOnScreen, 0045a6c0: the pipeline holds the guard as a bare return and the
+    // bottom test as a block; only the emitter braces both.
+    const code = search('return -1;').replace('  if (!p) { return -1; }', '  if (!p) return -1;');
+    const { out, sites } = run(code);
+    assert.deepStrictEqual(sites, ['f:p']);
+    assert.ok(out.includes('while (p) { if (p->nId == nId) break; p = p->pNext; n++; } if (!p) return -1; return n * 100'), out);
+  });
+
+  it('drops an unbraced copy of the exit test after the loop', () => {
+    const code = search('return -1;', '  if (!p) return -1;').replace('  if (!p) { return -1; }', '  if (!p) return -1;');
+    const { out } = run(code);
+    assert.strictEqual(out.split('if (!p)').length - 1, 1, out);
+  });
+
+  it('needs the same exit when only one side is braced', () => {
+    const code = search('return -1;').replace('  if (!p) { return -1; }', '  if (!p) return -2;');
+    assert.deepStrictEqual(run(code).sites, []);
+  });
+
   it('needs the same exit in the guard and at the bottom', () => {
     const code = search('return -1;').replace('    if (!p) { return -1; }', '    if (!p) { return -2; }');
     assert.deepStrictEqual(run(code).sites, []);

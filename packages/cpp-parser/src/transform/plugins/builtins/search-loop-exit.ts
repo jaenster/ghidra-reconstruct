@@ -82,6 +82,18 @@ function stmts(s: Statement): Statement[] {
   return s.kind === NodeKind.CompoundStmt ? (s as CompoundStmt).statements : [s];
 }
 
+/**
+ * The same exit: equal statement lists, so `return;` and `{ return; }` are one exit. The
+ * pipeline hands the guard over unbraced and the bottom test braced; only the emitter adds
+ * the braces. A block of declarations is never unwrapped, so no scope changes.
+ */
+function sameExit(a: Statement, b: Statement): boolean {
+  const la = stmts(a), lb = stmts(b);
+  if (la.length !== lb.length) return false;
+  if ([...la, ...lb].some(s => s.kind === NodeKind.DeclStmt)) return nodesEqual(a, b);
+  return la.every((s, i) => nodesEqual(s, lb[i]));
+}
+
 /** The statement always leaves the function: a return, or a block whose last statement does. */
 function endsInReturn(s: Statement): boolean {
   const list = stmts(s);
@@ -190,7 +202,7 @@ function rewriteBlock(block: CompoundStmt, facts: FnFacts, report: (v: string) =
     if (!last || last.kind !== NodeKind.IfStmt) continue;
     const bottom = last as IfStmt;
     if (bottom.elseBranch || bottom.init || !nodesEqual(bottom.condition, guard.condition)) continue;
-    if (!nodesEqual(bottom.thenBranch, guard.thenBranch)) continue;
+    if (!sameExit(bottom.thenBranch, guard.thenBranch)) continue;
     if (!isPure(loop.condition) || isShortCircuit(loop.condition)) continue;
     const s = body.slice(0, -1);
     if (hasLoopJump(s)) continue;
@@ -208,7 +220,7 @@ function rewriteBlock(block: CompoundStmt, facts: FnFacts, report: (v: string) =
     let take = 2;
     const after = list[i + 2];
     if (after && after.kind === NodeKind.IfStmt && !(after as IfStmt).elseBranch
-      && nodesEqual((after as IfStmt).condition, guard.condition) && nodesEqual((after as IfStmt).thenBranch, guard.thenBranch)) take = 3;
+      && nodesEqual((after as IfStmt).condition, guard.condition) && sameExit((after as IfStmt).thenBranch, guard.thenBranch)) take = 3;
     list.splice(i, take, newLoop, exit);
     changed = true;
     report(x);
