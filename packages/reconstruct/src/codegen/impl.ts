@@ -3000,6 +3000,16 @@ function transformDecompiledCode(
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         enclosingVarTypes,
       };
+      perPluginOptions['storm-next-link'] = {
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        structFields: context.funcPtrArgCasts.structFields,
+        structFieldOffsets: context.funcPtrArgCasts.structFieldOffsets,
+        aggregateSizes: context.funcPtrArgCasts.aggregateSizes,
+        typedefTargets: context.funcPtrArgCasts.typedefTargets,
+        functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        enclosingVarTypes,
+      };
       perPluginOptions['early-return'] = perPluginOptions['rotated-for-loop'] = {
         enumTypes: context.funcPtrArgCasts.enumTypes,
         globalTypes: context.funcPtrArgCasts.globalTypes,
