@@ -136,9 +136,10 @@ describe('model verifier against the stale v1858 model', { skip }, () => {
     const table = checks.find(c => c.key === '00882b2c')!;
     assert.equal(table.status, 'mismatch');
     assert.ok(table.fields!.includes('gpUnicodeCodeToMapTable.dataType'), table.fields!.join());
-    // Two plate comments the reconcile reads at the address (labelsAt) and the full pass's
-    // list_comments join never attached: a reconcile/batch drift the verifier surfaces,
-    // pinned here so a change on either side shows.
+    // Two plate comments at interior labels: Ghidra holds them, the batch that seeded this
+    // model read comments through list_comments, which skips an address with no code unit
+    // of its own. The full extraction now reads them as the reconcile does; a model seeded
+    // before that still lacks them, and the verifier brings them in.
     const others = checks.filter(c => c.key !== '00882b2c' && c.status !== 'match');
     assert.deepStrictEqual(others.map(c => [c.key, c.fields]), [
       ['0089db90', ['lpCriticalSection_0089db90.comment']],

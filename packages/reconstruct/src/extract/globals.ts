@@ -112,14 +112,68 @@ export async function extractGlobals(
 }
 
 /**
+ * Every PLATE comment outside a function entry, address TAB comment, with backslash, newline,
+ * carriage return and tab escaped. Read with `Listing.getComment` at each comment address,
+ * which answers for any address: an interior one (a label inside a larger data item) has
+ * no code unit of its own, and `list_comments` asks the code unit, so it drops those.
+ */
+export const PLATE_COMMENT_SCRIPT = `
+ghidra.program.model.listing.Listing l = currentProgram.getListing();
+ghidra.program.model.listing.FunctionManager fm = currentProgram.getFunctionManager();
+ghidra.program.model.address.AddressIterator it = l.getCommentAddressIterator(currentProgram.getMemory(), true);
+StringBuilder sb = new StringBuilder();
+while (it.hasNext()) {
+  ghidra.program.model.address.Address a = it.next();
+  if (fm.getFunctionAt(a) != null) continue;
+  String c = l.getComment(ghidra.program.model.listing.CodeUnit.PLATE_COMMENT, a);
+  if (c == null) continue;
+  sb.append(a).append('\\t')
+    .append(c.replace("\\\\", "\\\\\\\\").replace("\\n", "\\\\n").replace("\\r", "\\\\r").replace("\\t", "\\\\t"))
+    .append('\\n');
+}
+println(sb.toString());
+`;
+
+/** Parse the script's `address<TAB>escaped comment` rows. */
+export function parsePlateComments(output: string): Map<string, string> {
+  const byAddress = new Map<string, string>();
+  for (const line of output.split('\n')) {
+    const row = line.replace(/\r$/, '');
+    const tab = row.indexOf('\t');
+    if (tab <= 0) continue;
+    const addr = row.slice(0, tab).trim();
+    if (!/^[0-9a-f]+$/i.test(addr.replace(/^.*:/, ''))) continue;
+    const comment = row.slice(tab + 1)
+      .replace(/\\(\\|n|r|t)/g, (_, c: string) => (c === 'n' ? '\n' : c === 'r' ? '\r' : c === 't' ? '\t' : '\\'));
+    if (comment) byAddress.set(normalizeAddress(addr), comment);
+  }
+  return byAddress;
+}
+
+/**
  * Fetch PLATE comments keyed by address.
  *
  * list_data_symbols does not return comments, so data-symbol evidence has to be
- * pulled separately and joined on address.
+ * pulled separately and joined on address. Read by script (PLATE_COMMENT_SCRIPT), as the
+ * live daemon reads the comment at a global's address: `list_comments` skips every address
+ * without a code unit of its own, and a global labelled inside a larger item lost its
+ * comment in a full extraction while a daemon reconcile attached it. The listing walk stays
+ * as the fallback when the script cannot run.
  */
 async function extractPlateComments(
   connection: GhidraConnection
 ): Promise<Map<string, string>> {
+  try {
+    const result = await connection.sendCommand<{ success?: boolean; output?: unknown; error?: string }>(
+      'execute_script',
+      { language: 'java', code: PLATE_COMMENT_SCRIPT, scriptTimeout: 300, _commandTimeout: 360000 },
+    );
+    if (result.success !== false && typeof result.output === 'string') return parsePlateComments(result.output);
+    console.warn(`  Plate comments by script unavailable (${result.error ?? 'no output'}); walking list_comments`);
+  } catch (e) {
+    console.warn(`  Plate comments by script unavailable (${(e as Error).message}); walking list_comments`);
+  }
+
   const byAddress = new Map<string, string>();
   const pageSize = listingPageSize(connection, 500);
   let offset = 0;
