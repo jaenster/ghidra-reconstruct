@@ -34,6 +34,7 @@ import {
   dataTypeKey,
   fetchFunctionRecord,
   readFunctionFacts,
+  readGlobalRecords,
   type ChangeEvent,
   type LiveLog,
   type LiveModel,
@@ -46,6 +47,8 @@ export interface VerifierConfig {
   batchSize: number;
   /** Types read per step. */
   typeBatchSize: number;
+  /** Global addresses read per step: one label script and one listing call per step. */
+  globalBatchSize: number;
   /** Reads in flight at once within a step. */
   concurrency: number;
   /** Pause between steps. */
@@ -57,7 +60,8 @@ export interface VerifierConfig {
 }
 
 /**
- * Settings from the environment. Defaults: 16 functions or 64 types per step, 4 reads in
+ * Settings from the environment. Defaults: 16 functions, 64 types or 200 global addresses
+ * per step, 4 reads in
  * flight, 2 s between steps, 30 s of quiet first. On by default only against the local
  * worker: there the reads hit a private copy of the program, while a cloud source shares
  * its worker with every other session.
@@ -72,6 +76,7 @@ export function verifierConfigFromEnv(env: NodeJS.ProcessEnv, localWorker: boole
     enabled: flag === undefined || flag === '' ? localWorker : flag !== '0',
     batchSize: num('D2_LIVE_VERIFY_BATCH', 16, 1),
     typeBatchSize: num('D2_LIVE_VERIFY_TYPE_BATCH', 64, 1),
+    globalBatchSize: num('D2_LIVE_VERIFY_GLOBAL_BATCH', 200, 1),
     concurrency: num('D2_LIVE_VERIFY_CONCURRENCY', 4, 1),
     pauseMs: num('D2_LIVE_VERIFY_PAUSE_MS', 2000),
     quietMs: num('D2_LIVE_VERIFY_QUIET_MS', 30000),
@@ -90,12 +95,18 @@ export interface VerifierHost {
    * then an incremental rebuild and publish). Resolves once that ran.
    */
   applyStale(events: ChangeEvent[], describe: string): Promise<void>;
+  /**
+   * Whether the worker reads a different program version than the model is at. Asked
+   * before and after a step's reads: a step whose reads may have seen another version
+   * says nothing about this one. Absent: the source cannot tell, and nothing is checked.
+   */
+  versionMoved?(): Promise<boolean>;
   log: LiveLog;
 }
 
 export interface VerifierMismatch {
   at: string;
-  kind: 'function' | 'datatype';
+  kind: 'function' | 'datatype' | 'global';
   /** Address key, or the type's name + NUL + category. */
   key: string;
   name: string;
@@ -111,7 +122,7 @@ export interface VerifierMismatch {
 
 export interface VerifierCursor {
   /** Which list the sweep is walking. */
-  phase: 'functions' | 'datatypes';
+  phase: 'functions' | 'datatypes' | 'globals';
   /** The last key verified in that list; null at its start. */
   key: string | null;
 }
@@ -146,6 +157,17 @@ export interface TypeCheck {
   key: string;
   name: string;
   status: 'match' | 'mismatch' | 'unverified';
+  fields?: string[];
+  note?: string;
+}
+
+export interface GlobalCheck {
+  /** Address key. */
+  key: string;
+  /** The label names at the address, the model's and Ghidra's. */
+  name: string;
+  status: 'match' | 'mismatch' | 'unverified';
+  /** `label.field` for each differing field; `label (gone)` / `label (new)` for a label. */
   fields?: string[];
   note?: string;
 }
@@ -293,6 +315,64 @@ export async function checkDataTypes(
   return out;
 }
 
+/**
+ * Read the globals at these addresses as a reconcile would (readGlobalRecords) and compare
+ * them with the model's records there: the same labels, and for each the same record.
+ */
+export async function checkGlobals(
+  model: LiveModel,
+  client: GhidraConnection,
+  addrs: readonly string[],
+  opts: { log: LiveLog },
+): Promise<GlobalCheck[]> {
+  const quiet: LiveLog = () => {};
+  const inModel = new Map<string, Array<LiveModel['primary']['globals'][number]>>();
+  const wanted = new Set(addrs);
+  for (const g of model.primary.globals) {
+    if (g.platform) continue;
+    const a = addressKey(g.address);
+    if (!wanted.has(a)) continue;
+    let list = inModel.get(a);
+    if (!list) inModel.set(a, (list = []));
+    list.push(g);
+  }
+  let read;
+  try {
+    read = await readGlobalRecords(model, client, addrs, quiet);
+  } catch (e) {
+    opts.log(`verify globals: read failed (${(e as Error).message})`);
+    read = null;
+  }
+  return addrs.map((key): GlobalCheck => {
+    const have = inModel.get(key) ?? [];
+    const name = have.map(g => g.name).join(', ') || key;
+    if (!read) return { key, name, status: 'unverified', note: 'labels not read' };
+    const names = read.labels.get(key)?.names ?? [];
+    const fields: string[] = [];
+    let unverified: string | null = null;
+    for (const g of have) if (!names.includes(g.name)) fields.push(`${g.name} (gone)`);
+    for (const label of names) {
+      const k = `${key}\t${label}`;
+      const existing = have.find(g => g.name === label);
+      if (!read.records.has(k)) { unverified = `${label} not read`; continue; }
+      const fresh = read.records.get(k)!;
+      if (!fresh) { if (existing) fields.push(`${label} (no record)`); continue; }
+      if (!existing) { fields.push(`${label} (new)`); continue; }
+      const differ = differingFields(existing, fresh, new Set());
+      // read_data_value answers a failure with nothing, the same as no data: bytes the model
+      // has and the read lacks are a failed read, not evidence of a change.
+      if (differ.includes('initializedData') && (read.initializedDataFailed || fresh.initializedData === undefined)) {
+        unverified = `${label} initialized data not read`;
+        differ.splice(differ.indexOf('initializedData'), 1);
+      }
+      for (const f of differ) fields.push(`${label}.${f}`);
+    }
+    if (fields.length > 0) return { key, name, status: 'mismatch', fields };
+    if (unverified) return { key, name, status: 'unverified', note: unverified };
+    return { key, name, status: 'match' };
+  });
+}
+
 /** The change event that sends one stale function through the ordinary update. */
 export function functionEvent(check: FunctionCheck): ChangeEvent {
   return {
@@ -304,6 +384,11 @@ export function functionEvent(check: FunctionCheck): ChangeEvent {
     // Only a body that moved on its own leaves the callers as they were.
     callersUnaffected: !check.signatureMoved,
   };
+}
+
+/** A stale global goes through the reconcile, which also re-decompiles its readers. */
+export function globalEvent(check: GlobalCheck): ChangeEvent {
+  return { seq: 0, kind: 'data.changed', target: 'global', key: check.key, txDescription: 'model verifier' };
 }
 
 export function dataTypeEvent(check: TypeCheck): ChangeEvent {
@@ -416,6 +501,12 @@ export class ModelVerifier {
       const after = key === null ? all : all.filter(k => compareAddressKeys(k, key) > 0);
       return { phase, keys: after.slice(0, this.cfg.batchSize) };
     }
+    if (phase === 'globals') {
+      const all = [...new Set(model.primary.globals.filter(g => !g.platform && g.address).map(g => addressKey(g.address)))]
+        .sort(compareAddressKeys);
+      const after = key === null ? all : all.filter(k => compareAddressKeys(k, key) > 0);
+      return { phase, keys: after.slice(0, this.cfg.globalBatchSize) };
+    }
     const all = model.primary.dataTypes
       .filter(dt => DETAIL_KINDS.has(dt.kind))
       .map(dt => dataTypeKey(dt.name, dt.category))
@@ -449,8 +540,8 @@ export class ModelVerifier {
       }
       const { phase, keys } = this.nextKeys();
       if (keys.length === 0) {
-        if (phase === 'functions') {
-          this.state.cursor = { phase: 'datatypes', key: null };
+        if (phase !== 'globals') {
+          this.state.cursor = { phase: phase === 'functions' ? 'datatypes' : 'globals', key: null };
           await this.save();
           return 'verified';
         }
@@ -458,6 +549,9 @@ export class ModelVerifier {
       }
 
       const interrupted = () => !this.host.idle();
+      // The reads must see the version the model is at; a worker that already followed a
+      // check-in answers for the next one, and its batch is about to arrive.
+      if (await this.host.versionMoved?.()) { this.lastBusyAt = this.now(); this.record('interrupted', 0, t0); return 'interrupted'; }
       const model = this.host.model();
       const events: ChangeEvent[] = [];
       const found: VerifierMismatch[] = [];
@@ -474,6 +568,15 @@ export class ModelVerifier {
           events.push(functionEvent(c));
           found.push(this.mismatch('function', c.key, c.name, c.fields ?? [], c.diff, 'sweep'));
         }
+      } else if (phase === 'globals') {
+        const checks = await checkGlobals(model, this.host.client(), keys, { log: this.host.log });
+        if (interrupted()) { this.lastBusyAt = this.now(); this.record('interrupted', 0, t0); return 'interrupted'; }
+        for (const c of checks) {
+          if (c.status === 'unverified') { unverified++; continue; }
+          if (c.status !== 'mismatch') continue;
+          events.push(globalEvent(c));
+          found.push(this.mismatch('global', c.key, c.name, c.fields ?? [], undefined, 'sweep'));
+        }
       } else {
         const checks = await checkDataTypes(model, this.host.client(), keys,
           { concurrency: this.cfg.concurrency, log: this.host.log, interrupted });
@@ -486,6 +589,7 @@ export class ModelVerifier {
         }
       }
 
+      if (await this.host.versionMoved?.()) { this.lastBusyAt = this.now(); this.record('interrupted', 0, t0); return 'interrupted'; }
       this.state.cursor = { phase, key: keys[keys.length - 1] };
       this.state.sweptThisCycle += keys.length;
       this.state.unverifiedTotal += unverified;
@@ -547,7 +651,7 @@ export class ModelVerifier {
    * Check these function addresses now, whatever the daemon is doing (reads only), and
    * send the stale ones through the ordinary update unless `apply` is false.
    */
-  async verifyNow(addresses: readonly string[], opts: { apply?: boolean; types?: readonly string[] } = {}): Promise<unknown> {
+  async verifyNow(addresses: readonly string[], opts: { apply?: boolean; types?: readonly string[]; globals?: readonly string[] } = {}): Promise<unknown> {
     const run = this.running.then(async () => {
       const keys = addresses.map(addressKey);
       const model = this.host.model();
@@ -562,8 +666,16 @@ export class ModelVerifier {
       const typeChecks = typeKeys.length > 0
         ? await checkDataTypes(model, this.host.client(), typeKeys, { concurrency: this.cfg.concurrency, log: this.host.log })
         : [];
+      const globalChecks = (opts.globals ?? []).length > 0
+        ? await checkGlobals(model, this.host.client(), (opts.globals ?? []).map(addressKey), { log: this.host.log })
+        : [];
       const events: ChangeEvent[] = [];
       const found: VerifierMismatch[] = [];
+      for (const c of globalChecks) {
+        if (c.status !== 'mismatch') continue;
+        events.push(globalEvent(c));
+        found.push(this.mismatch('global', c.key, c.name, c.fields ?? [], undefined, 'verify_now'));
+      }
       for (const c of fnChecks) {
         if (c.status !== 'mismatch') continue;
         events.push(functionEvent(c));
@@ -577,7 +689,7 @@ export class ModelVerifier {
       if (opts.apply === false) for (const m of found) m.applied = 'not applied: apply=false';
       await this.save();
       const applying = opts.apply !== false && events.length > 0 ? this.apply(events, found) : null;
-      return { functions: fnChecks, datatypes: typeChecks, stale: found.length, applying: applying ? 'queued' : 'nothing to apply', _wait: applying };
+      return { functions: fnChecks, datatypes: typeChecks, globals: globalChecks, stale: found.length, applying: applying ? 'queued' : 'nothing to apply', _wait: applying };
     });
     this.running = run.catch(() => {});
     const result = await run;

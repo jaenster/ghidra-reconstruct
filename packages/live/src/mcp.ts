@@ -48,7 +48,7 @@ const TOOLS: Tool[] = [
   {
     name: 'verify_status',
     description:
-      'The rolling model verifier: while the daemon is idle it reads functions and types from Ghidra ' +
+      'The rolling model verifier: while the daemon is idle it reads functions, types and globals from Ghidra ' +
       'again, a few at a time, and compares them with the model. Answers the cursor, how far this ' +
       'cycle got, how long the last full cycle took, and every mismatch found (stale model records, ' +
       'each sent through the ordinary update).',
@@ -57,7 +57,7 @@ const TOOLS: Tool[] = [
   {
     name: 'verify_now',
     description:
-      'Check these functions (and optionally types) against Ghidra now, read-only, and send any ' +
+      'Check these functions (and optionally types and globals) against Ghidra now, read-only, and send any ' +
       'stale record through the ordinary update and incremental re-emit (unless apply is false). ' +
       'Answers per symbol: match, mismatch (with the differing fields and a short diff), unverified.',
     inputSchema: {
@@ -65,6 +65,7 @@ const TOOLS: Tool[] = [
       properties: {
         addresses: { type: 'array', items: { type: 'string' }, description: 'Function entry points, e.g. 005c8980.' },
         types: { type: 'array', items: { type: 'string' }, description: 'Type names or category paths. Optional.' },
+        globals: { type: 'array', items: { type: 'string' }, description: 'Global addresses, e.g. 008a7d1c. Optional.' },
         apply: { type: 'boolean', description: 'Update the model and re-emit for stale records. Default true.' },
       },
     },

@@ -468,6 +468,7 @@ export class LiveLoop {
         client: () => this.connection,
         idle: () => this.isIdle(),
         applyStale: (events, describe) => this.applyStale(events, describe),
+        versionMoved: () => this.workerVersionMoved(),
         log: m => this.log(m),
       },
       verifierConfigFromEnv(process.env, localWorkerEnabled()),
@@ -477,6 +478,22 @@ export class LiveLoop {
     );
     await this.verifier.load();
     this.verifier.start();
+  }
+
+  /**
+   * Whether the worker reads another Game.exe version than the model is at. The local
+   * worker switches its program while answering `get_changes`, before the batch that
+   * describes the switch reaches the queue, so for a moment it answers for a version the
+   * model has not applied. Only the local source can tell; elsewhere this answers false.
+   */
+  private async workerVersionMoved(): Promise<boolean> {
+    if (!localWorkerEnabled()) return false;
+    try {
+      const r = await this.connection.sendCommand<{ version?: number }>('get_program_version', {});
+      return typeof r.version === 'number' && r.version !== Math.floor(this.model.seq / SEQ_PER_VERSION);
+    } catch {
+      return true;   // unknown counts as moved: nothing read now is trusted
+    }
   }
 
   /**
@@ -502,6 +519,15 @@ export class LiveLoop {
             `verifier applied: ${result.touchedFunctions.length} functions, ` +
             `${result.touchedGlobals.length} globals, ${result.touchedDataTypes.length} types`,
           );
+          // The commit is labelled with the model's version. When the worker followed a
+          // check-in while this update read, what it read belongs to the next version:
+          // publishing now would label it with this one. The model keeps the update, and
+          // the batch for that check-in (already on its way) re-emits and publishes it
+          // under the version it was read at.
+          if (await this.workerVersionMoved()) {
+            this.log('verifier: the worker moved to a newer version during the update; publishing with that version\'s batch');
+            return;
+          }
           await this.rebuildAndPublish();
         } finally {
           this.phase = 'idle';
@@ -520,6 +546,7 @@ export class LiveLoop {
     return this.verifier.verifyNow(list(args.addresses ?? args.address), {
       apply: args.apply === undefined ? true : Boolean(args.apply),
       types: list(args.types),
+      globals: list(args.globals),
     });
   }
 

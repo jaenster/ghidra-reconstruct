@@ -5,38 +5,43 @@
  * change record named them. A full codegen of that model reproduced the broken tree, so
  * only Ghidra could say the model was stale.
  *
- * Needs the parked model and a recording of the local worker's answers, which hold
- * decompiled program text and so stay out of the repository:
+ * Needs the parked model and recordings of the local worker's answers, which hold
+ * decompiled program text and so stay out of the repository. D2_LIVE_V1858_FIXTURE names
+ * a directory holding:
  *
- *   D2_LIVE_V1858_SNAPSHOT   the parked daemon live-snapshot directory (v1858, stale)
- *   D2_LIVE_V1858_RECORDING  JSON of {functions, types, calls[{command, params, response}]}
- *                            recorded by running checkFunctions/checkDataTypes through the
- *                            local worker (read-only); execute_script answers are keyed by
- *                            their script timeout, everything else by its arguments
- *   D2_LIVE_V1858_BUILDINFO  optional: that model's buildinfo.json, to also check that the
- *                            update selects the four reader units
+ *   live-snapshot/            the parked daemon model (v1858, stale)
+ *   recording-functions.json  {functions, types, calls[{command, params, response}]}: the
+ *                             worker's answers to checkFunctions/checkDataTypes (read-only)
+ *   recording-globals.json    {addresses, calls}: its answers to checkGlobals (optional)
+ *   buildinfo.json            that model's buildinfo, to check which units the update
+ *                             selects (optional)
  *
- * Skipped when they are not set.
+ * execute_script answers are keyed by their script timeout, everything else by its
+ * arguments. Skipped when the variable is not set.
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 
 import { applyEvents } from '../model.js';
 import { loadSnapshotModel, indexSnapshotModel } from '../snapshot-model.js';
-import { checkFunctions, checkDataTypes, ModelVerifier } from '../verifier.js';
+import { checkFunctions, checkDataTypes, checkGlobals, ModelVerifier } from '../verifier.js';
 import { computeHashCache, loadBuildInfo, selectDirtyUnits } from '../dirty-units.js';
 
-const SNAPSHOT = process.env.D2_LIVE_V1858_SNAPSHOT;
-const RECORDING = process.env.D2_LIVE_V1858_RECORDING;
-const BUILDINFO = process.env.D2_LIVE_V1858_BUILDINFO;
+const FIXTURE = process.env.D2_LIVE_V1858_FIXTURE;
+const SNAPSHOT = FIXTURE && join(FIXTURE, 'live-snapshot');
+const RECORDING = FIXTURE && join(FIXTURE, 'recording-functions.json');
+const GLOBALS = FIXTURE && join(FIXTURE, 'recording-globals.json');
+const BUILDINFO = FIXTURE && join(FIXTURE, 'buildinfo.json');
 const skip = !SNAPSHOT || !RECORDING || !existsSync(SNAPSHOT) || !existsSync(RECORDING)
-  ? 'D2_LIVE_V1858_SNAPSHOT / D2_LIVE_V1858_RECORDING not set' : false;
+  ? 'D2_LIVE_V1858_FIXTURE not set' : false;
 
 interface Recording {
   functions: string[];
   types: string[];
+  addresses?: string[];
   calls: Array<{ command: string; params: Record<string, unknown>; response: unknown }>;
 }
 
@@ -48,6 +53,8 @@ function replay(rec: Recording) {
       case 'get_function_info': case 'decompile': return `${command} ${p.address}`;
       case 'list_functions': return `${command} ${p.regex}`;
       case 'get_data_type': return `${command} ${p.name}\u0000${p.category}`;
+      case 'list_data_symbols': return `${command} ${p.regex}`;
+      case 'read_data_value': return `${command} ${p.address}`;
       case 'execute_script': return `${command} ${p.scriptTimeout}`;
       default: return `${command} ${JSON.stringify(p)}`;
     }
@@ -100,7 +107,7 @@ describe('model verifier against the stale v1858 model', { skip }, () => {
       model: () => model, indices: () => indices, client: () => client, idle: () => true,
       applyStale: events => (applied = applyEvents(model, indices, events, client).then(() => {})),
       log: () => {},
-    }, { enabled: true, batchSize: 16, typeBatchSize: 64, concurrency: 4, pauseMs: 0, quietMs: 0, keepMismatches: 50 }, null);
+    }, { enabled: true, batchSize: 16, typeBatchSize: 64, globalBatchSize: 200, concurrency: 4, pauseMs: 0, quietMs: 0, keepMismatches: 50 }, null);
     const r = await v.verifyNow(rec.functions) as { stale: number };
     await applied;
     assert.equal(r.stale, 5);
@@ -119,5 +126,24 @@ describe('model verifier against the stale v1858 model', { skip }, () => {
         assert.ok(selection.units!.includes(unit), `${unit} selected; got ${selection.units!.join(', ')}`);
       }
     }
+  });
+
+  it('flags the global v1858 untyped (gpUnicodeCodeToMapTable) and matches its neighbours', { skip: !GLOBALS || !existsSync(GLOBALS) ? 'no recording-globals.json' : false }, async () => {
+    const rec = JSON.parse(await readFile(GLOBALS!, 'utf8')) as Recording;
+    const model = await loadSnapshotModel(SNAPSHOT!, {} as never, 0);
+    const { client } = replay(rec);
+    const checks = await checkGlobals(model, client, rec.addresses!, { log: () => {} });
+    const table = checks.find(c => c.key === '00882b2c')!;
+    assert.equal(table.status, 'mismatch');
+    assert.ok(table.fields!.includes('gpUnicodeCodeToMapTable.dataType'), table.fields!.join());
+    // Two plate comments the reconcile reads at the address (labelsAt) and the full pass's
+    // list_comments join never attached: a reconcile/batch drift the verifier surfaces,
+    // pinned here so a change on either side shows.
+    const others = checks.filter(c => c.key !== '00882b2c' && c.status !== 'match');
+    assert.deepStrictEqual(others.map(c => [c.key, c.fields]), [
+      ['0089db90', ['lpCriticalSection_0089db90.comment']],
+      ['008e9430', ['gaColorDistanceLookupTable[256].comment']],
+    ]);
+    assert.equal(checks.filter(c => c.status === 'match').length, rec.addresses!.length - 3);
   });
 });

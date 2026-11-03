@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { applyEvents, buildIndices, fetchFunctionRecord, type ChangeEvent, type LiveModel, type ModelIndices } from '../model.js';
+import { applyEvents, buildIndices, fetchFunctionRecord, readGlobalRecords, type ChangeEvent, type LiveModel, type ModelIndices } from '../model.js';
 import { ModelVerifier, shortDiff, verifierConfigFromEnv, type VerifierConfig, type VerifierHost } from '../verifier.js';
 import { computeHashCache } from '../dirty-units.js';
 
@@ -15,8 +15,16 @@ import { computeHashCache } from '../dirty-units.js';
  */
 
 interface FakeFn { name: string; body: string; signature?: string }
+interface FakeGlobal {
+  name: string; dataType: string; size: number; isInitialized: boolean; referencingFunctions: string[];
+  value?: unknown; data?: unknown; dataFails?: boolean;
+}
 
-function fakeGhidra(fns: Map<string, FakeFn>, types: Map<string, { name: string; category: string; size: number; fields: unknown[] }> = new Map()) {
+function fakeGhidra(
+  fns: Map<string, FakeFn>,
+  types: Map<string, { name: string; category: string; size: number; fields: unknown[] }> = new Map(),
+  globals: Map<string, FakeGlobal> = new Map(),
+) {
   const calls: Array<{ cmd: string; params: Record<string, unknown> }> = [];
   let onCall: ((cmd: string) => void) | null = null;
   const row = (address: string) => {
@@ -46,7 +54,31 @@ function fakeGhidra(fns: Map<string, FakeFn>, types: Map<string, { name: string;
           if (!t) throw new Error('Data type not found');
           return { ...t, type: 'Structure' };
         }
-        case 'execute_script': return { success: true, output: '' };
+        case 'execute_script': {
+          const code = String(params.code);
+          // labelsAt: the labels at the addresses it names.
+          if (code.includes('st.getSymbols(ad)')) {
+            const asked = [...code.matchAll(/"([0-9a-f]+)"/g)].map(m => m[1]);
+            return { success: true, output: asked.filter(a => globals.has(a)).map(a => `L\t${a}\t${globals.get(a)!.name}\n`).join('') };
+          }
+          if (code.includes('getAllSymbols')) {
+            return { success: true, output: [...globals].map(([a, g]) => `${a}\t${g.name}\n`).join('') };
+          }
+          return { success: true, output: '' };
+        }
+        case 'list_data_symbols': {
+          const names = new Set(String(params.regex).replace(/^\^\(\?:|\)\$$/g, '').split('|'));
+          const rows = [...globals].filter(([, g]) => names.has(g.name)).map(([address, g]) => ({
+            name: g.name, address, dataType: g.dataType, size: g.size, value: g.value, isInitialized: g.isInitialized,
+            xrefCount: g.referencingFunctions.length, referencingFunctions: g.referencingFunctions,
+          }));
+          return { globals: rows, total: rows.length };
+        }
+        case 'read_data_value': {
+          const g = globals.get(String(params.address));
+          if (!g || g.dataFails) throw new Error('read failed');
+          return { value: g.data };
+        }
         default: return {};
       }
     },
@@ -56,13 +88,14 @@ function fakeGhidra(fns: Map<string, FakeFn>, types: Map<string, { name: string;
 
 const ADDRS = ['00401000', '00401100', '00401200', '00401300', '00401400', '00401500'];
 
-async function setup(opts: { types?: boolean } = {}) {
+async function setup(opts: { types?: boolean; globals?: Map<string, FakeGlobal> } = {}) {
   const fns = new Map<string, FakeFn>(ADDRS.map((a, i) => [a, { name: `Fn${i}`, body: `void Fn${i}(void)\n{\n  g = ${i};\n  return;\n}\n` }]));
   const types = new Map<string, { name: string; category: string; size: number; fields: unknown[] }>();
   if (opts.types) {
     types.set('S\u0000/D2', { name: 'S', category: '/D2', size: 8, fields: [{ name: 'p', dataType: 'int *', offset: 0, size: 4 }] });
   }
-  const g = fakeGhidra(fns, types);
+  const globalState = opts.globals ?? new Map<string, FakeGlobal>();
+  const g = fakeGhidra(fns, types, globalState);
   const functions = [];
   for (const a of ADDRS) {
     const r = await fetchFunctionRecord(g.client, undefined, a, { reextractInfo: true, timeout: 30, log: () => {} });
@@ -72,9 +105,14 @@ async function setup(opts: { types?: boolean } = {}) {
     ? [{ name: 'S', category: '/D2', kind: 'STRUCTURE', size: 8, description: '', alignment: undefined, fields: [{ name: 'p', dataType: 'int *', offset: 0, size: 4 }] }]
     : [];
   const model = { seq: 5_000_000, options: {}, primary: { functions, globals: [], dataTypes, programInfo: { format: 'Portable Executable (PE)' } } } as unknown as LiveModel;
+  // The globals as a reconcile reads them, so an unchanged one matches.
+  if (globalState.size > 0) {
+    const read = await readGlobalRecords(model, g.client, [...globalState.keys()], () => {});
+    for (const r of read!.records.values()) if (r) model.primary.globals.push(r);
+  }
   const indices = buildIndices(model);
   g.calls.length = 0;
-  return { fns, types, g, model, indices };
+  return { fns, types, globalState, g, model, indices };
 }
 
 function host(model: LiveModel, indices: ModelIndices, client: never, idle: () => boolean = () => true) {
@@ -93,7 +131,7 @@ function host(model: LiveModel, indices: ModelIndices, client: never, idle: () =
 }
 
 const cfg = (over: Partial<VerifierConfig> = {}): VerifierConfig => ({
-  enabled: true, batchSize: 3, typeBatchSize: 8, concurrency: 2, pauseMs: 0, quietMs: 0, keepMismatches: 50, ...over,
+  enabled: true, batchSize: 3, typeBatchSize: 8, globalBatchSize: 200, concurrency: 2, pauseMs: 0, quietMs: 0, keepMismatches: 50, ...over,
 });
 
 describe('model verifier', () => {
@@ -201,21 +239,90 @@ describe('model verifier', () => {
     }
   });
 
-  it('sweeps functions, then types, then closes the cycle', async () => {
+  it('sweeps functions, then types, then globals, then closes the cycle', async () => {
     const { types, g, model, indices } = await setup({ types: true });
     types.get('S\u0000/D2')!.fields = [{ name: 'p', dataType: 'uint16_t *', offset: 0, size: 4 }];
     let now = 0;
     const { h, applied } = host(model, indices, g.client);
     const v = new ModelVerifier(h, cfg({ batchSize: 6 }), null, () => now);
     const outcomes = [];
-    for (let i = 0; i < 4; i++) { now += 1000; outcomes.push(await v.step()); }
-    assert.deepStrictEqual(outcomes, ['verified', 'verified', 'verified', 'cycle-complete']);
+    for (let i = 0; i < 5; i++) { now += 1000; outcomes.push(await v.step()); }
+    assert.deepStrictEqual(outcomes, ['verified', 'verified', 'verified', 'verified', 'cycle-complete']);
     assert.deepStrictEqual(applied.map(b => b.map(e => [e.kind, e.key])), [[['datatype.changed', 'S\u0000/D2']]]);
     assert.equal((model.primary.dataTypes[0] as unknown as { fields: Array<{ dataType: string }> }).fields[0].dataType, 'uint16_t *');
     const s = v.status() as { cycle: number; lastFullCycleMs: number; cursor: unknown; cycleStartedAt: unknown };
-    assert.equal(s.lastFullCycleMs, 3000);
+    assert.equal(s.lastFullCycleMs, 4000);
     assert.deepStrictEqual(s.cursor, { phase: 'functions', key: null });
     assert.equal(s.cycleStartedAt, null);
+  });
+
+  const GLOBALS = () => new Map<string, FakeGlobal>([
+    ['00700000', { name: 'gpStateTable', dataType: 'D2AllStatesDataTbl *', size: 4, isInitialized: false, referencingFunctions: ['Fn1'] }],
+    ['00700010', { name: 'gaDefaults', dataType: 'int[4]', size: 16, isInitialized: true, referencingFunctions: ['Fn2'], data: [1, 2, 3, 4] }],
+    ['00700020', { name: 'gnUnused', dataType: 'int', size: 4, isInitialized: false, referencingFunctions: [] }],
+  ]);
+  const toGlobals = (v: ModelVerifier) => { (v as unknown as { state: { cursor: unknown } }).state.cursor = { phase: 'globals', key: null }; };
+
+  it('finds a global Ghidra retyped and fixes it through the reconcile, readers included', async () => {
+    const { globalState, g, model, indices } = await setup({ globals: GLOBALS() });
+    globalState.get('00700000')!.dataType = 'uint16_t *';
+    const { h, applied } = host(model, indices, g.client);
+    const v = new ModelVerifier(h, cfg(), null);
+    toGlobals(v);
+    g.calls.length = 0;
+
+    assert.equal(await v.step(), 'verified');
+
+    assert.deepStrictEqual(applied.map(b => b.map(e => [e.kind, e.target, e.key, e.seq])), [[['data.changed', 'global', '00700000', 0]]]);
+    assert.equal(model.primary.globals.find(x => x.name === 'gpStateTable')!.dataType, 'uint16_t *');
+    // The reconcile sends the reader to be decompiled again: its text moves with the type.
+    assert.ok(g.calls.some(c => c.cmd === 'decompile' && c.params.address === '00401100'));
+    const s = v.status() as { mismatches: Array<{ kind: string; fields: string[] }>; sweptThisCycle: number };
+    assert.equal(s.mismatches[0].kind, 'global');
+    assert.ok(s.mismatches[0].fields.includes('gpStateTable.dataType'), s.mismatches[0].fields.join());
+    assert.equal(s.sweptThisCycle, 3);
+  });
+
+  it('finds a global whose initialized value moved, and fixes it', async () => {
+    const { globalState, g, model, indices } = await setup({ globals: GLOBALS() });
+    globalState.get('00700010')!.data = [1, 2, 3, 5];
+    const { h, applied } = host(model, indices, g.client);
+    const v = new ModelVerifier(h, cfg(), null);
+    toGlobals(v);
+    await v.step();
+    assert.deepStrictEqual(applied.map(b => b.map(e => e.key)), [['00700010']]);
+    assert.deepStrictEqual(model.primary.globals.find(x => x.name === 'gaDefaults')!.initializedData, [1, 2, 3, 5]);
+    const s = v.status() as { mismatches: Array<{ fields: string[] }> };
+    assert.deepStrictEqual(s.mismatches[0].fields, ['gaDefaults.initializedData']);
+  });
+
+  it('a global label gone or added is a mismatch; a failed value read is not', async () => {
+    const { globalState, g, model, indices } = await setup({ globals: GLOBALS() });
+    globalState.get('00700020')!.name = 'gnRenamed';
+    globalState.get('00700010')!.dataFails = true;
+    const { h, applied } = host(model, indices, g.client);
+    const v = new ModelVerifier(h, cfg(), null);
+    toGlobals(v);
+    await v.step();
+    assert.deepStrictEqual(applied.map(b => b.map(e => e.key)), [['00700020']]);
+    const s = v.status() as { mismatches: Array<{ fields: string[] }>; unverifiedTotal: number };
+    assert.deepStrictEqual(s.mismatches[0].fields, ['gnUnused (gone)', 'gnRenamed (new)']);
+    assert.equal(s.unverifiedTotal, 1, 'the unread value is unverified, never applied as "no data"');
+    assert.ok(model.primary.globals.some(x => x.name === 'gnRenamed'));
+    assert.ok(!model.primary.globals.some(x => x.name === 'gnUnused'));
+  });
+
+  it('a step whose reads may have seen another version is thrown away', async () => {
+    const { fns, g, model, indices } = await setup();
+    fns.get('00401000')!.body = 'void Fn0(void)\n{\n  changed();\n}\n';
+    let checks = 0;
+    const { h, applied } = host(model, indices, g.client);
+    // The worker followed a check-in while the step read.
+    h.versionMoved = async () => ++checks > 1;
+    const v = new ModelVerifier(h, cfg(), null);
+    assert.equal(await v.step(), 'interrupted');
+    assert.equal(applied.length, 0);
+    assert.equal((v.status() as { cursor: { key: string | null } }).cursor.key, null);
   });
 
   it('verify_now checks the named functions whatever the daemon is doing, and can leave the model alone', async () => {
