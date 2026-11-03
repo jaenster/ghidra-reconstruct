@@ -645,8 +645,13 @@ export async function applyEvents(
   }
 
   const timeout = model.options.decompileTimeout ?? 30;
-  const nameToFn = new Map<string, ExtractedFunction>();
-  for (const fn of model.primary.functions) nameToFn.set(fn.name, fn);
+  const readersByName = readerNameIndex(model.primary.functions);
+  let dataRefs: DataRefIndex | null = null;
+  /** The functions whose instructions reference [start, start + extent): built once, on first use. */
+  const markReadersOfRange = (addr: string, extent: number) => {
+    dataRefs ??= dataRefIndex(model.primary.functions);
+    for (const fn of dataRefs.readers(addr, extent)) affected.add(fn);
+  };
 
   /** Functions that need a fresh body, by address key. */
   const affected = new Set<string>();
@@ -855,8 +860,18 @@ export async function applyEvents(
     for (const addr of globalAddrs) {
       const names = read.labels.get(addr)?.names ?? [];
       const inModel = model.primary.globals.filter(g => !g.platform && addressKey(g.address) === addr);
+      if (markUsers) {
+        // Every function whose code references the data, by address, before and after:
+        // the decompiler prints a reader from the data's label, type and contents, so any
+        // change there moves the reader's text - also for data the model keeps no record
+        // of (a string), where there is no referencing-functions list to go by.
+        let extent = 1;
+        for (const g of inModel) extent = Math.max(extent, g.size ?? 1);
+        for (const name of names) extent = Math.max(extent, read.records.get(`${addr}\t${name}`)?.size ?? 1);
+        markReadersOfRange(addr, extent);
+      }
       for (const gone of inModel.filter(g => !names.includes(g.name))) {
-        if (markUsers) markReferencingFunctions(gone, nameToFn, affected);
+        if (markUsers) markReferencingFunctions(gone, readersByName, affected);
         model.primary.globals.splice(model.primary.globals.indexOf(gone), 1);
         result.touchedGlobals.push(addr);
         log(`global ${gone.name}: no longer at ${gone.address}; removed`);
@@ -882,7 +897,7 @@ export async function applyEvents(
           log(`global ${name}: new at ${record.address}`);
         }
         result.touchedGlobals.push(addr);
-        if (markUsers) markReferencingFunctions(record, nameToFn, affected);
+        if (markUsers) markReferencingFunctions(record, readersByName, affected);
       }
       const first = model.primary.globals.find(g => !g.platform && addressKey(g.address) === addr);
       if (first) indices.globalByAddr.set(addr, first); else indices.globalByAddr.delete(addr);
@@ -1052,18 +1067,75 @@ async function refreshOperandRefs(
   log(`operand references: ${n} of ${addrs.length} refreshed function(s) have some`);
 }
 
-/** Every function that reads this global, resolved to an address key. */
+/**
+ * Function address keys under every spelling a `referencingFunctions` entry can have: the
+ * namespace-qualified name and the bare one. Several functions can share either (four are
+ * called DrawGroundTile), so each name maps to all of them.
+ */
+export function readerNameIndex(functions: readonly ExtractedFunction[]): Map<string, Set<string>> {
+  const index = new Map<string, Set<string>>();
+  const add = (name: string, key: string) => {
+    let set = index.get(name);
+    if (!set) index.set(name, (set = new Set()));
+    set.add(key);
+  };
+  for (const fn of functions) {
+    if (fn.platform) continue;
+    const key = addressKey(fn.address);
+    add(fn.name, key);
+    add(qualifiedName(fn), key);
+  }
+  return index;
+}
+
+/**
+ * Every function that reads this global, resolved to address keys. Ghidra lists them
+ * namespace-qualified; a qualified name that matches is the answer, and only a name with no
+ * qualified match falls back to every function of that bare name. Taking one function per
+ * bare name re-decompiled whichever DrawGroundTile came last and left the Direct3D one stale.
+ */
 function markReferencingFunctions(
   global: AnalyzedDataSymbol,
-  nameToFn: Map<string, ExtractedFunction>,
+  byName: Map<string, Set<string>>,
   into: Set<string>,
 ): void {
   for (const caller of global.referencingFunctions ?? []) {
-    // Ghidra lists these namespace-qualified; the model keys functions by the
-    // bare name, so both spellings are tried before giving up.
-    const fn = nameToFn.get(caller) ?? nameToFn.get(caller.split('::').pop() ?? caller);
-    if (fn) into.add(addressKey(fn.address));
+    const hits = byName.get(caller) ?? byName.get(caller.split('::').pop() ?? caller);
+    for (const key of hits ?? []) into.add(key);
   }
+}
+
+/** Functions by the data addresses their instructions reference (operand references). */
+export interface DataRefIndex {
+  /** Address keys of the functions referencing any byte of [addr, addr + extent). */
+  readers(addr: string, extent: number): Set<string>;
+}
+
+export function dataRefIndex(functions: readonly ExtractedFunction[]): DataRefIndex {
+  const entries: Array<{ to: bigint; fn: string }> = [];
+  for (const fn of functions) {
+    if (fn.platform) continue;
+    const key = addressKey(fn.address);
+    for (const r of fn.operandRefs?.refs ?? []) {
+      if (r.to) entries.push({ to: addressValue(r.to), fn: key });
+    }
+  }
+  entries.sort((a, b) => (a.to < b.to ? -1 : a.to > b.to ? 1 : 0));
+  return {
+    readers(addr: string, extent: number): Set<string> {
+      const start = addressValue(addr);
+      const end = start + BigInt(Math.max(1, extent));
+      let lo = 0;
+      let hi = entries.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (entries[mid].to < start) lo = mid + 1; else hi = mid;
+      }
+      const out = new Set<string>();
+      for (let i = lo; i < entries.length && entries[i].to < end; i++) out.add(entries[i].fn);
+      return out;
+    },
+  };
 }
 
 /** Which slots in `dataTypes` an event key names. A bare name may hit several categories. */
