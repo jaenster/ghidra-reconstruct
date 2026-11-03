@@ -827,9 +827,11 @@ export function cleanFunctionComment(
  * all — while every reference to it said `_x44PacketHandler`, one symbol under
  * three spellings.
  *
- * A trailing `()` is a Ghidra artifact and comes off first; a name that equals its
- * own return type is a constructor and becomes `Create_<name>`, so the declaration
- * cannot be read as one.
+ * A trailing `()` is a Ghidra artifact and comes off first. Nothing else changes:
+ * the generator invents no names. A function that shares its name with a type
+ * (`D2WinImageEx`, returning `D2WinImageEx *`) is legal C++ under that name; it is
+ * the TYPE that gets spelled differently, elaborated and root-qualified
+ * (`functionHiddenTypeKeyword` in platform-types.ts).
  */
 /** Suffix of the extern entry hand-written code calls a static function through. */
 export const EXTERN_ENTRY_SUFFIX = '_Extern';
@@ -842,15 +844,11 @@ export const EXTERN_ENTRY_SUFFIX = '_Extern';
 export function externEntryDeclaration(func: ExtractedFunction): string {
   const params = declaredParameters(func).map(p => `${p.type} ${p.name}`).join(', ');
   const ret = returnSigType(func.returnType);
-  return `${declarationHead(ret, func)}${emittedFunctionName(func, ret)}${EXTERN_ENTRY_SUFFIX}(${params})`;
+  return `${declarationHead(ret, func)}${emittedFunctionName(func)}${EXTERN_ENTRY_SUFFIX}(${params})`;
 }
 
-export function emittedFunctionName(func: ExtractedFunction, returnType: string): string {
-  const cleanName = sanitizeSymbolName(func.name.replace(/[()]+$/, ''));
-  if (returnType.startsWith(cleanName + ' ') || returnType === cleanName) {
-    return `Create_${cleanName}`;
-  }
-  return cleanName;
+export function emittedFunctionName(func: ExtractedFunction): string {
+  return sanitizeSymbolName(func.name.replace(/[()]+$/, ''));
 }
 
 /**
@@ -895,7 +893,7 @@ export function generateFunctionDeclaration(
     addressComment = ` // 1.14d: ${stripAddr(func.address)}`;
   }
 
-  const cleanName = emittedFunctionName(func, returnSigType(func.returnType));
+  const cleanName = emittedFunctionName(func);
   const member = memberDefinitionScope(func);
 
   return `${commentBlock}${member?.prefix ?? ''}${declarationHead(returnSigType(func.returnType), func)}${member?.qualifier ?? ''}${cleanName}(${params});${addressComment}`;

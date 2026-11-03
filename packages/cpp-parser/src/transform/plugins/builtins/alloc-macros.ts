@@ -244,6 +244,12 @@ function structSize(name: string, opts: AllocMacrosOptions): number | undefined 
 export class AllocMacroUse {
   readonly callees = new Map<AllocMacro, string>();
   readonly newTypes = new Map<string, number>();
+  /**
+   * The elaborating keyword of a D2_NEW_AT type the body spells `struct ::T`
+   * (a type a same-named function hides): the layout assert has to name it the
+   * same way, or at root scope it names the function.
+   */
+  readonly newTypeKeywords = new Map<string, string>();
   newUsed = false;
   newPoolUsed = false;
 
@@ -319,6 +325,12 @@ function createAllocTransformer(opts: AllocMacrosOptions, use: AllocMacroUse): T
         bump(macro);
         if (isPool) use.newPoolUsed = true; else use.newUsed = true;
         use.newTypes.set(target.name, size);
+        if (target.node.kind === NodeKind.ElaboratedType) {
+          const el = target.node as ElaboratedType;
+          if (el.name.kind === NodeKind.QualifiedId && (el.name as QualifiedId).isGlobal) {
+            use.newTypeKeywords.set(target.name, el.keyword);
+          }
+        }
         const typeArg = target.node as unknown as Expression;
         const macroArgs = isPool
           ? [alloc.pool!, typeArg, alloc.file, alloc.line]
@@ -373,10 +385,10 @@ const NEW_DEFINITIONS = {
  * The layout claim behind a D2_NEW_AT(T, ...): the binary allocated exactly Ghidra's size
  * for T. Checked on 32-bit only; a 64-bit build is allowed to differ.
  */
-export function allocNewSizeAssert(typeName: string, size: number): string {
+export function allocNewSizeAssert(typeName: string, size: number, keyword?: string): string {
   const hex = `0x${size.toString(16)}`;
   return `
-static_assert(sizeof(void*) != 4 || sizeof(::${typeName}) == ${hex}, "D2_NEW_AT(${typeName}): the 32-bit layout must be the ${hex} bytes 1.14d allocates");
+static_assert(sizeof(void*) != 4 || sizeof(${keyword ? `${keyword} ` : ''}::${typeName}) == ${hex}, "D2_NEW_AT(${typeName}): the 32-bit layout must be the ${hex} bytes 1.14d allocates");
 `;
 }
 
@@ -390,7 +402,7 @@ export function allocMacroPreamble(use: AllocMacroUse): string[] {
   if (use.newUsed) blocks.push(NEW_DEFINITIONS.D2_NEW_AT);
   if (use.newPoolUsed) blocks.push(NEW_DEFINITIONS.D2_NEW_POOL_AT);
   for (const [name, size] of [...use.newTypes].sort(([a], [b]) => a.localeCompare(b))) {
-    blocks.push(allocNewSizeAssert(name, size));
+    blocks.push(allocNewSizeAssert(name, size, use.newTypeKeywords.get(name)));
   }
   return blocks;
 }

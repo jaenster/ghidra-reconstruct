@@ -142,7 +142,7 @@ function genericMembers(
     const returnType = genericSpelling(ret, inst);
     const params = declaredParameters(func).map(p => ({ type: genericSpelling(p.type, inst), name: p.name }));
     for (const s of [returnType, ...params.map(p => p.type)]) plainTypeNames(s, mentioned);
-    const name = emittedFunctionName(func, ret);
+    const name = emittedFunctionName(func);
     const key = `${name}(${params.map(p => p.type).join(',')}${func.hasVarArgs ? ',...' : ''})`;
     const convention = conventionKeyword(func);
     let list = params.map(p => `${p.type} ${p.name}`).join(', ');
@@ -245,7 +245,7 @@ function renderKeyClass(
     const ret = returnSigType(func.returnType);
     const params = declaredParameters(func);
     for (const s of [ret, ...params.map(p => p.type)]) plainTypeNames(s, mentioned);
-    const name = emittedFunctionName(func, ret);
+    const name = emittedFunctionName(func);
     let list = params.map(p => `${p.type} ${p.name}`).join(', ');
     if (func.hasVarArgs) list = list ? `${list}, ...` : '...';
     const key = `${name}(${list})`;

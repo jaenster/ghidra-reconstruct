@@ -25,12 +25,19 @@ import type { TransformPlugin, PluginOptions } from '../types.js';
 export interface ShadowedTypeQualifyOptions extends PluginOptions {
   /** Type names that a same-named emitted namespace shadows */
   shadowedTypeNames?: string[];
+  /**
+   * The subset a same-named FUNCTION hides, with the keyword that names each:
+   * `D2WinImageEx *` → `struct ::D2WinImageEx *`. Root qualification alone fails
+   * where the function itself is at root scope; the elaborated specifier never does.
+   */
+  elaboratedKeywords?: Record<string, 'struct' | 'union' | 'enum'>;
 }
 
 function createShadowedTypeQualifyTransformer(
   options: ShadowedTypeQualifyOptions = {},
 ): Transformer {
   const shadowed = new Set(options.shadowedTypeNames ?? []);
+  const elaborated = options.elaboratedKeywords ?? {};
   if (shadowed.size === 0) return (node: ASTNode) => node;
 
   return createTransformer({
@@ -41,15 +48,27 @@ function createShadowedTypeQualifyTransformer(
       const id = t.name as Identifier;
       if (!shadowed.has(id.name)) return undefined;
 
+      const keyword = Object.prototype.hasOwnProperty.call(elaborated, id.name) ? elaborated[id.name] : undefined;
       const qualified: QualifiedId = {
         kind: NodeKind.QualifiedId,
         qualifier: [],
         name: { ...id, leadingTrivia: [], trailingTrivia: [] },
         isGlobal: true,
         location: id.location,
-        leadingTrivia: id.leadingTrivia ?? [],
+        leadingTrivia: keyword ? [] : id.leadingTrivia ?? [],
         trailingTrivia: id.trailingTrivia ?? [],
       };
+      if (keyword) {
+        const node: ElaboratedType = {
+          ...(t as ElaboratedType),
+          kind: NodeKind.ElaboratedType,
+          keyword,
+          name: qualified,
+          leadingTrivia: t.leadingTrivia ?? [],
+          trailingTrivia: t.trailingTrivia ?? [],
+        };
+        return node;
+      }
       return updateNode(t, { name: qualified } as Partial<TypedefType>);
     },
   });

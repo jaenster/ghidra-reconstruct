@@ -1889,11 +1889,77 @@ export function rootQualifyShadowedType(type: string): string {
   if (type.includes('<')) return rootQualifyShadowedArguments(type);
   if (type.includes('::')) return type;
   const m = type.match(
-    /^(\s*(?:(?:const|volatile)\s+)*(?:(?:struct|class|union|enum)\s+)?)([A-Za-z_]\w*)\b([\s\S]*)$/
+    /^(\s*(?:(?:const|volatile)\s+)*)((?:struct|class|union|enum)\s+)?([A-Za-z_]\w*)\b([\s\S]*)$/
   );
   if (!m) return type;
-  if (!shadowedTypeNames.has(m[2])) return type;
-  return `${m[1]}::${m[2]}${m[3]}`;
+  if (!shadowedTypeNames.has(m[3])) return type;
+  const keyword = functionHiddenTypeKeyword(m[3]);
+  return `${m[1]}${keyword ? `${keyword} ` : (m[2] ?? '')}::${m[3]}${m[4]}`;
+}
+
+/**
+ * Aggregates a same-named FUNCTION hides, where root qualification alone does not
+ * reach them, with the keyword that names them.
+ *
+ * A function may share its name with a class: `D2WinImageEx *D2WinImageEx(...)`
+ * is legal C++, and Ghidra names constructor-shaped functions exactly so. Where the
+ * function is visible, a plain `D2WinImageEx` names the FUNCTION. Every type is
+ * emitted at root scope, so `::D2WinImageEx` names the class again - unless the
+ * function is itself at root scope, where `::D2WinImageEx` finds it too. Only
+ * there is the elaborated `struct ::D2WinImageEx` needed; everywhere else the
+ * type joins the root-qualified (shadowed) names. The generator renames nothing:
+ * the function used to become `Create_D2WinImageEx`, a name in no binary that
+ * every reference path had to reinvent.
+ */
+let functionHiddenTypes: ReadonlyMap<string, 'struct' | 'union' | 'enum'> | undefined;
+
+export function setFunctionHiddenTypes(types: ReadonlyMap<string, 'struct' | 'union' | 'enum'> | undefined): void {
+  functionHiddenTypes = types && types.size > 0 ? types : undefined;
+}
+
+/**
+ * THE spelling decision for a hidden type: the keyword its elaborated spelling
+ * takes, or undefined when `::T` suffices. Every place that spells a type asks
+ * this, through `rootQualifyShadowedType` or the body pass fed from the same table.
+ */
+export function functionHiddenTypeKeyword(name: string): 'struct' | 'union' | 'enum' | undefined {
+  return functionHiddenTypes?.get(name);
+}
+
+/** What `computeFunctionHiddenTypes` decides for the whole program. */
+export interface FunctionHiddenTypes {
+  /** Every struct/union/enum some emitted function of the same name hides. */
+  hidden: Set<string>;
+  /** The subset a ROOT-scope function hides, with its elaborating keyword. */
+  elaborated: Map<string, 'struct' | 'union' | 'enum'>;
+}
+
+/**
+ * The aggregates a function of the same name hides: one rule over the whole
+ * program, so declaration, definition and every reference agree.
+ */
+export function computeFunctionHiddenTypes<F extends { isExternal?: boolean; isLibrary?: boolean }>(
+  functions: ReadonlyArray<F>,
+  dataTypes: ReadonlyArray<{ name: string; kind: string }>,
+  emittedName: (f: F) => string,
+  isRootScoped: (f: F) => boolean,
+): FunctionHiddenTypes {
+  const kindOf = new Map<string, 'struct' | 'union' | 'enum'>();
+  for (const dt of dataTypes) {
+    if (dt.kind === 'STRUCTURE') kindOf.set(dt.name, 'struct');
+    else if (dt.kind === 'UNION') kindOf.set(dt.name, 'union');
+    else if (dt.kind === 'ENUM') kindOf.set(dt.name, 'enum');
+  }
+  const out: FunctionHiddenTypes = { hidden: new Set(), elaborated: new Map() };
+  for (const f of functions) {
+    if (f.isExternal || f.isLibrary) continue;
+    const name = emittedName(f);
+    const kind = kindOf.get(name);
+    if (!kind) continue;
+    out.hidden.add(name);
+    if (isRootScoped(f)) out.elaborated.set(name, kind);
+  }
+  return out;
 }
 
 

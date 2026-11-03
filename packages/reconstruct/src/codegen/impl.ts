@@ -650,6 +650,8 @@ export interface ImplGenContext {
    * the shadowing namespace must be spelled `::ButtonWrapper`.
    */
   shadowedTypeNames?: Set<string>;
+  /** Aggregates a same-named function hides, with their elaborating keyword. */
+  functionHiddenTypes?: ReadonlyMap<string, 'struct' | 'union' | 'enum'>;
   /**
    * Map from function address (bigint) to the function defined there, carrying
    * the namespace a reference to it has to name. Built once, from the run's
@@ -1952,7 +1954,7 @@ export function generateThunkForwarder(
   if (returnsVoid !== targetReturnsVoid) return undefined;
   if (func.parameters.length !== forward.parameterCount) return undefined;
 
-  const ownName = emittedFunctionName(func, returnSigType(func.returnType));
+  const ownName = emittedFunctionName(func);
   const ownQualified = ['', ...(enclosingNamespace?.segments ?? []), ownName].join('::');
   if (forward.qualified === ownQualified) {
     console.warn(
@@ -2000,7 +2002,7 @@ export function externEntryDefinition(
   if (func.hasVarArgs) return undefined;
   const returnType = returnSigType(func.returnType).trim();
   if (!returnType) return undefined;
-  const ownName = emittedFunctionName(func, returnSigType(func.returnType));
+  const ownName = emittedFunctionName(func);
   const callee = ['', ...(enclosingNamespace?.segments ?? []), ownName].join('::');
   const args = declaredParameters(func).map(p => p.name).join(', ');
   return [
@@ -2032,7 +2034,7 @@ function generateFunctionSignature(func: ExtractedFunction): string {
   const params = signatureParameterList(func, 'declared');
   // The declaration side spells the name with the SAME function, so a definition
   // and its declaration cannot legalize a Ghidra name differently.
-  const cleanName = emittedFunctionName(func, returnSigType(func.returnType));
+  const cleanName = emittedFunctionName(func);
   const member = memberDefinitionScope(func);
   return `${member?.prefix ?? ''}${declarationHead(returnSigType(func.returnType), func)}${member?.qualifier ?? ''}${cleanName}(${params})`;
 }
@@ -2484,16 +2486,23 @@ function shadowQualifyOptions(
  * The shadowed-type table is project-wide and identical for every body, so the
  * array form the plugin wants is built once per (Set) rather than per function.
  */
-const shadowedTypeCache = new WeakMap<Set<string>, { shadowedTypeNames: string[] }>();
+const shadowedTypeCache = new WeakMap<Set<string>, {
+  shadowedTypeNames: string[];
+  elaboratedKeywords?: Record<string, 'struct' | 'union' | 'enum'>;
+}>();
 
 function shadowedTypeQualifyOptions(
   context?: ImplGenContext,
-): { shadowedTypeNames: string[] } | undefined {
+): { shadowedTypeNames: string[]; elaboratedKeywords?: Record<string, 'struct' | 'union' | 'enum'> } | undefined {
   const names = context?.shadowedTypeNames;
   if (!names || names.size === 0) return undefined;
   let entry = shadowedTypeCache.get(names);
   if (!entry) {
-    entry = { shadowedTypeNames: [...names] };
+    const hidden = context?.functionHiddenTypes;
+    entry = {
+      shadowedTypeNames: [...names],
+      ...(hidden && hidden.size > 0 ? { elaboratedKeywords: Object.fromEntries(hidden) } : {}),
+    };
     shadowedTypeCache.set(names, entry);
   }
   return entry;

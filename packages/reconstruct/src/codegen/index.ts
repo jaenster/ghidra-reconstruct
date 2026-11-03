@@ -84,7 +84,7 @@ import { buildNamespaceResolution, namespaceResolution, renderNamespace } from '
 import { setInteriorLabelSymbols, resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, setDeclarationClosureDataContent, getDeclarationClosureReport, isUnreferenceableArtifact, isEmittableGlobal, isDataArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, wasGlobalClaimed, findDuplicateLinkageNames, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, setInitializerAddressTable, setInitializerFunctionAddresses, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType, emittedNamespaceOf, getDeclaredNames, initializerAddressReferences, addInitializerAddressReferences, markUnnamedImportSlots, setInitializerEnumConstants } from './globals-header.js';
 import { normalizeDataAddress, stringDefinition } from './declaration-closure.js';
 import { harvestAnnotatedParameterTypes } from './win32-signatures.js';
-import { PLATFORM_FUNCDEF_NAMES, PLATFORM_STRUCT_FIELD_TYPES, isPlatformOrBuiltinType, isLibraryType, sdkLayoutMismatches, sdkHeaderOf, unprobedTypeNames, generatePlatformHeader, oddWidthTypesSpelled, placeholderTypesUsedIn, normalizeDataValue, arrayRowTypedefLines, arrayRowReturn, arrayRowSpelling, GHIDRA_PSEUDO_OP_RESULT_TYPES, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, platformDefinedFunctionNames, platformVoidPointerFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
+import { PLATFORM_FUNCDEF_NAMES, PLATFORM_STRUCT_FIELD_TYPES, isPlatformOrBuiltinType, isLibraryType, sdkLayoutMismatches, sdkHeaderOf, unprobedTypeNames, generatePlatformHeader, oddWidthTypesSpelled, placeholderTypesUsedIn, normalizeDataValue, arrayRowTypedefLines, arrayRowReturn, arrayRowSpelling, GHIDRA_PSEUDO_OP_RESULT_TYPES, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setFunctionHiddenTypes, computeFunctionHiddenTypes, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, platformDefinedFunctionNames, platformVoidPointerFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
 import { createOverrideRegistry } from '../overrides/index.js';
 import { GLOBALS_HEADER, globalsHeaderPathUnder, globalsUnitPath, isGlobalsHeaderPath } from './globals-layout.js';
 import { alignPathCase, assertNoCaseCollidingFiles, canonicalizeProjectPathCase, quotedIncludePath, resolveQuotedInclude } from './path-case.js';
@@ -1538,7 +1538,7 @@ export function generateProjectStage1(
       const segments = targetFunc.parentClass
         ? [targetFunc.parentClass]
         : [...namespaceResolution().resolvePath(targetFunc.namespace).segments];
-      const leaf = emittedFunctionName(targetFunc, targetReturn);
+      const leaf = emittedFunctionName(targetFunc);
       const memberOf = templates?.isInstanceMember(targetFunc.address) ? classScopeOf(targetFunc) : undefined;
       thunkForwards.set(func.address, {
         qualified: ['', ...segments, leaf].join('::'),
@@ -4021,10 +4021,7 @@ function generateFilesForFunctions(
   //       pTail = *(Push*)(pTail + 0x220);          // error: expected primary-expression
   //     }
   //
-  // Same evidence, same remedy: spell the type `::Push`. Restricted to
-  // FUNCTION_DEFINITIONs because those are the ones Ghidra names after the
-  // function; a struct sharing a constructor's name is handled by the `struct`
-  // keyword the header emitter already inserts.
+  // Same evidence, same remedy: spell the type `::Push`.
   {
     const funcDefNames = new Set(
       dataTypes.filter(dt => dt.kind === 'FUNCTION_DEFINITION').map(dt => dt.name)
@@ -4033,8 +4030,19 @@ function generateFilesForFunctions(
       if (funcDefNames.has(func.name)) shadowedTypeNames.add(func.name);
     }
   }
+  // A struct, union or enum a same-named function hides (`D2WinImageEx`, whose
+  // creator Ghidra names after it) is the funcdef's case: `::D2WinImageEx`. Only a
+  // ROOT-scope function hides `::T` as well, and there the type is spelled
+  // elaborated, `struct ::T` (platform-types.ts, `functionHiddenTypeKeyword`).
+  const functionHidden = computeFunctionHiddenTypes(
+    functions, dataTypes, f => emittedFunctionName(f),
+    f => !f.parentClass && namespaceResolution().of(f).segments.length === 0,
+  );
+  for (const name of functionHidden.hidden) shadowedTypeNames.add(name);
   context.shadowedTypeNames = shadowedTypeNames;
+  context.functionHiddenTypes = functionHidden.elaborated;
   setShadowedTypeNames(shadowedTypeNames);
+  setFunctionHiddenTypes(functionHidden.elaborated);
 
   // Function-pointer parameters take the address of a function whose prototype
   // may differ (`CONTAINER_InitializeBuffer(..., STRING_ZeroOneWCHAR)` fills a

@@ -320,6 +320,16 @@ export class Parser {
       const saved = this.pos;
       this.advance(); // skip struct/class/union
       while (this.checkGnuAttribute()) this.parseGnuAttribute();
+      // `struct ::Name *p` / `struct Ns::Name *p`: an elaborated type specifier
+      // with a nested-name-specifier is always a USE of the type - a class is
+      // never defined through a qualified name in this tree.
+      if (this.check(TokenKind.ColonColon)
+        || (this.check(TokenKind.Identifier) && this.checkAhead(1, TokenKind.ColonColon))) {
+        this.pos = saved;
+        const decl = this.parseFunctionOrVariableDecl();
+        if (decl) decl.leadingTrivia = leadingTrivia;
+        return decl;
+      }
       if (this.check(TokenKind.LeftBrace)) {
         // Anonymous struct definition
         this.pos = saved;
@@ -353,7 +363,12 @@ export class Parser {
       return decl;
     }
 
-    // Check for enum
+    // Check for enum; `enum ::Name x` is a use, as for a struct above.
+    if (this.check(TokenKind.Enum) && this.checkAhead(1, TokenKind.ColonColon)) {
+      const decl = this.parseFunctionOrVariableDecl();
+      if (decl) decl.leadingTrivia = leadingTrivia;
+      return decl;
+    }
     if (this.check(TokenKind.Enum)) {
       const decl = this.parseEnumDecl();
       decl.leadingTrivia = leadingTrivia;
@@ -1154,8 +1169,9 @@ export class Parser {
     }
 
     // Check for struct/class/enum elaborated type
-    if (this.check(TokenKind.Struct) || this.check(TokenKind.Class) || this.check(TokenKind.Enum)) {
-      const keyword = this.advance().token.text as 'struct' | 'class' | 'enum';
+    if (this.check(TokenKind.Struct) || this.check(TokenKind.Class) || this.check(TokenKind.Enum)
+      || this.check(TokenKind.Union)) {
+      const keyword = this.advance().token.text as 'struct' | 'class' | 'enum' | 'union';
       const name = this.parseIdentifierOrQualified();
       return this.node(NodeKind.ElaboratedType, startLoc, {
         keyword,
