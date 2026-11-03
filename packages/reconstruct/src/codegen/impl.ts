@@ -2889,6 +2889,13 @@ function transformDecompiledCode(
         funcdefNames: Object.keys(context.funcPtrArgCasts.funcdefSignatures ?? {}),
         enclosingVarTypes,
       };
+      // The indexed loop needs each access's size against the stride: the same tables.
+      perPluginOptions['offset-induction-index'] = {
+        structLayouts: context.funcPtrArgCasts.structLayouts,
+        aggregateSizes: context.funcPtrArgCasts.aggregateSizes,
+        typedefTargets: context.funcPtrArgCasts.typedefTargets,
+        enclosingVarTypes,
+      };
       // D2_NEW(T) folds an allocation only when the literal size is Ghidra's size
       // for the struct the result is cast to; the sizes and the typedefs that name
       // a struct come from the same type tables `strided-access` reads.
