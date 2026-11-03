@@ -112,6 +112,15 @@ export class LintContext {
           const r = this.resolve(fn, t.name);
           if (r) return typeWidth(r.type, this.sizeEnv);
         }
+        // `sizeof(a[0])` parses as the type "array of 0 a"; for a variable a it is a's element.
+        if (t?.kind === NodeKind.ArrayType) {
+          const el = unqualified(t.elementType);
+          if (el?.kind === NodeKind.TypedefType && el.name?.kind === NodeKind.Identifier) {
+            const r = this.resolve(fn, el.name);
+            const et = r ? elementType(r.type) : null;
+            if (r) return et ? typeWidth(et, this.sizeEnv) : null;
+          }
+        }
         return typeWidth(operand, this.sizeEnv);
       }
       const t = this.exprType(fn, operand);

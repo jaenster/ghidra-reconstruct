@@ -1090,6 +1090,59 @@ describe('defect lint: field-set-then-memset', () => {
         '}\n',
     } }), []);
   });
+
+  const searchCtx = [{
+    name: 'D2DrlgPathSearchCtxStrc', kind: 'STRUCTURE', size: 0x32ec, fields: [
+      { name: 'abyOpenBuckets', offset: 0, size: 0x200, dataType: 'uint8_t[512]' },
+      { name: 'abyClosedBuckets', offset: 0x200, size: 0x200, dataType: 'uint8_t[512]' },
+      { name: 'pSortedHead', offset: 0x400, size: 4, dataType: 'void *' },
+      { name: 'pFrame', offset: 0x404, size: 4, dataType: 'uint8_t *' },
+      { name: 'nPoolCount', offset: 0x2fc4, size: 4, dataType: 'int32_t' },
+      { name: 'nPropagateCount', offset: 0x32e8, size: 4, dataType: 'int32_t' },
+    ],
+  }];
+
+  it('passes over a memset whose bytes do not reach the stored field', () => {
+    // PATH_FindPathAStarLocalPool: the two bucket memsets leave the trailing counts alone.
+    // AI_Diablo_DecideAction: a memset of elements 0..4 after a store into element 12.
+    assert.deepStrictEqual(lint('field-set-then-memset', { types: searchCtx, files: {
+      'D2Common/Path.cpp':
+        'int PATH_Find(int b) {\n' +
+        '    D2DrlgPathSearchCtxStrc abyOpenList;\n' +
+        '    int32_t aWeights[17];\n' +
+        '    abyOpenList.nPoolCount = 0;\n' +
+        '    abyOpenList.pSortedHead = 0;\n' +
+        '    abyOpenList.nPropagateCount = 0;\n' +
+        '    memset(&abyOpenList, 0, 0x200);\n' +
+        '    memset(abyOpenList.abyClosedBuckets, 0, 0x200);\n' +
+        '    aWeights[5] = 0x19;\n' +
+        '    aWeights[0xc] = 0x14;\n' +
+        '    memset(aWeights, 0, 5 * sizeof(aWeights[0]));\n' +
+        '    aWeights[0xd] = 1;\n' +
+        '    memset(aWeights + 9, 0, 3 * sizeof(aWeights[0]));\n' +
+        '    abyOpenList.pFrame = alloc(0x100);\n' +
+        '    memset(abyOpenList.pFrame, 0, 0x100);\n' +
+        '    return g(&abyOpenList, aWeights);\n' +
+        '}\n',
+    } }), []);
+  });
+
+  it('still reports a measured memset that covers the field, past one that does not', () => {
+    const fs = lint('field-set-then-memset', { types: searchCtx, files: {
+      'D2Common/Path.cpp':
+        'int PATH_Find(int b) {\n' +
+        '    D2DrlgPathSearchCtxStrc abyOpenList;\n' +
+        '    int32_t aWeights[17];\n' +
+        '    abyOpenList.abyClosedBuckets[3] = 1;\n' +
+        '    memset(&abyOpenList, 0, 0x200);\n' +
+        '    memset(abyOpenList.abyClosedBuckets, 0, 0x200);\n' +
+        '    aWeights[0xc] = 0x14;\n' +
+        '    memset(aWeights + 9, 0, 4 * sizeof(aWeights[0]));\n' +
+        '    return g(&abyOpenList, aWeights);\n' +
+        '}\n',
+    } });
+    assert.deepStrictEqual(fs.map(f => `${f.subject}:${f.line}`), ['abyOpenList:4', 'aWeights:7']);
+  });
 });
 
 describe('defect lint: store-sunk-past-pointer-read', () => {
