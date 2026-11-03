@@ -20,6 +20,12 @@
  * differs. Any difference is a unit the selection should have re-emitted.
  * --keep-before skips step 1 when <work>/tree-before already holds its output.
  *
+ * --project-json <file> generates with another project.json (a fixture's
+ * foreignReferences). --foreign-watch runs step 3 the way the daemon notices a
+ * commit to the foreign sources: only when ForeignSourceWatch sees their
+ * fingerprint differ from the one step 1 recorded; otherwise the tree stays as
+ * step 1 left it.
+ *
  * Built packages are used (pnpm build first), as the daemon uses them.
  */
 import { cp, mkdir, rm, symlink, readFile } from 'node:fs/promises';
@@ -30,6 +36,8 @@ import { spawnSync } from 'node:child_process';
 import { loadSnapshotModel } from '../packages/live/dist/snapshot-model.js';
 import { rebuild } from '../packages/live/dist/rebuild.js';
 import { computeHashCache, loadBuildInfo, selectDirtyUnits } from '../packages/live/dist/dirty-units.js';
+import { ForeignSourceWatch } from '../packages/live/dist/foreign-watch.js';
+import { foreignSourcesFingerprint } from '../packages/reconstruct/dist/codegen/file-static-functions.js';
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -53,8 +61,9 @@ async function main(): Promise<void> {
   const keepBefore = process.argv.includes('--keep-before') && existsSync(treeBefore);
 
   await mkdir(join(projectDir, '.ghidra-mcp'), { recursive: true });
-  const projectJson = resolve('project/project.json');
-  if (!existsSync(join(projectDir, 'project.json'))) await symlink(projectJson, join(projectDir, 'project.json'));
+  const projectJson = resolve(arg('project-json') ?? 'project/project.json');
+  await rm(join(projectDir, 'project.json'), { force: true });
+  await symlink(projectJson, join(projectDir, 'project.json'));
   // project.json names override sources relative to the project directory's parent.
   if (!existsSync(join(workDir, 'overrides'))) await symlink(resolve('overrides'), join(workDir, 'overrides'));
 
@@ -100,11 +109,27 @@ async function main(): Promise<void> {
 
   await rm(tree, { recursive: true, force: true });
   await cp(treeBefore, tree, { recursive: true });
-  const r = await rebuild(modelAfter, {
-    outputDir: tree, projectDir, logDir: join(workDir, 'logs'), log,
-    emitUnits: selection.units, reuseDir: tree, identCachePath: identCache,
-  });
-  if (!r.ok) throw new Error(`incremental generation failed; see ${r.logPath}`);
+  const incremental = async (): Promise<void> => {
+    const r = await rebuild(modelAfter, {
+      outputDir: tree, projectDir, logDir: join(workDir, 'logs'), log,
+      emitUnits: selection.units, reuseDir: tree, identCachePath: identCache,
+    });
+    if (!r.ok) throw new Error(`incremental generation failed; see ${r.logPath}`);
+  };
+  if (process.argv.includes('--foreign-watch')) {
+    const config = JSON.parse(await readFile(projectJson, 'utf-8')) as { foreignReferences?: Array<{ path: string; addressBase?: string }> };
+    const builtInfo = JSON.parse(await readFile(join(workDir, 'buildinfo.before.json'), 'utf-8')) as { foreignSources?: string };
+    const watch = new ForeignSourceWatch({
+      current: () => foreignSourcesFingerprint(config.foreignReferences ?? [], projectDir),
+      built: () => builtInfo.foreignSources ?? null,
+      idle: () => true,
+      rebuild: async () => { await incremental(); return null; },
+      log,
+    });
+    log(`foreign watch: ${await watch.check()}`);
+  } else {
+    await incremental();
+  }
 
   if (reference) {
     const diff = spawnSync('diff', ['-rq', tree, resolve(reference)], { encoding: 'utf8' });
@@ -113,7 +138,6 @@ async function main(): Promise<void> {
     console.log(`[replay] ${lines.length} difference(s) against ${reference}`);
     process.exitCode = lines.length === 0 ? 0 : 1;
   }
-  void readFile;
 }
 
 main().catch(err => { console.error(err); process.exit(1); });
