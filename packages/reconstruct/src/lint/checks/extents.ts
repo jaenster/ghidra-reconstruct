@@ -9,8 +9,8 @@
 
 import { NodeKind } from '@ghidra-mcp/cpp-parser';
 import {
-  calleeName, declName, isArrayType, isPointerType, line, refName, signature, strip, typeText,
-  typeWidth, unparen, walk,
+  calleeName, constValue, declName, elementType, isArrayType, isCast, isPointerType, line, refName,
+  signature, strip, typeText, typeWidth, unparen, walk,
 } from '../ast.js';
 import type { Check, Finding, LintContext, Resolved } from '../context.js';
 import type { Snapshot, SnapshotFunction } from '../snapshot.js';
@@ -326,6 +326,11 @@ export const scalarLocalCursor: Check = {
  * declared scalar. It is reported when the address of a member is used in `+`/`-` arithmetic,
  * or a member is initialised with its own address (a list head). A run that is only read and
  * written by name is the usual case and is not reported.
+ *
+ * An offset that stays inside the member's own bytes is not evidence: `NET_D2GS_CLIENT_
+ * Incoming0x77_TRADEREQUEST` sends the dword gnTradePlayerGoldAmount as two words,
+ * `*(uint16_t*)((char*)&gnTradePlayerGoldAmount + 2)` - 1.14d `movzx ecx, word ptr
+ * [0x7c0e6a]`, the high half of the same object - and reaches no neighbour on any layout.
  */
 export const adjacentScalarRun: Check = {
   id: 'adjacent-scalar-run',
@@ -378,12 +383,29 @@ export const adjacentScalarRun: Check = {
       const r = ctx.resolve(fn, op, file);
       return r && r.kind === 'global' ? nm : null;
     };
+    // `(T*)&member + k` (or `&member + k`) whose byte offset lands inside the member itself.
+    const insideMember = (member: string, side: any, other: any, op: string): boolean => {
+      if (op !== '+') return false;
+      const k = constValue(other);
+      if (k === null) return false;
+      const d = ctx.tree.globals.get(member);
+      const width = d ? typeWidth(d.type, ctx.sizeEnv) : null;
+      if (width === null) return false;
+      const outer = unparen(side);
+      const stride = isCast(outer)
+        ? (isPointerType(outer.type) ? typeWidth(elementType(outer.type), ctx.sizeEnv) : null)
+        : width;
+      if (stride === null || stride <= 0) return false;
+      const off = k * stride;
+      return off >= 0 && off < width;
+    };
     for (const fn of ctx.tree.functions) {
       for (const b of ctx.of(fn, NodeKind.BinaryExpr)) {
         if (b.operator !== '+' && b.operator !== '-') continue;
-        for (const side of [b.left, b.right]) {
+        for (const [side, other] of [[b.left, b.right], [b.right, b.left]]) {
           const m = addrOfMember(fn, fn.file, side);
-          if (m) note(m, { file: fn.file.path, line: line(b), fn: fn.qualifiedName, what: `&${m} in ${b.operator}`, sig: signature(b) });
+          if (!m || insideMember(m, side, other, b.operator)) continue;
+          note(m, { file: fn.file.path, line: line(b), fn: fn.qualifiedName, what: `&${m} in ${b.operator}`, sig: signature(b) });
         }
       }
     }

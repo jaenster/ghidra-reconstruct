@@ -1379,6 +1379,27 @@ describe('defect lint: adjacent-scalar-run', () => {
       'g.cpp': 'void f() { gStormCmdListHeadPriority = 0; int x = gLone + 1; p(&gLone + 1); }' } });
     assert.deepStrictEqual(fs, []);
   });
+
+  // NET_D2GS_CLIENT_Incoming0x77_TRADEREQUEST @004b8ecc: `movzx ecx, word ptr [0x7c0e6a]` is the
+  // high word of gnTradePlayerGoldAmount itself, next to gpTradeAgreeDialog in the binary.
+  const trade = [
+    { name: 'gpTradeAgreeDialog', address: 0x7c0e64, size: 4 },
+    { name: 'gnTradePlayerGoldAmount', address: 0x7c0e68, size: 4 },
+  ];
+  const tradeH = 'extern void * gpTradeAgreeDialog;\nextern uint32_t gnTradePlayerGoldAmount;\n';
+
+  it('ignores an offset that stays inside the member itself', () => {
+    const fs = lint('adjacent-scalar-run', { globals: trade, files: { 'globals.h': tradeH,
+      'g.cpp': 'void f() { send(*(uint16_t*)((char*)&gnTradePlayerGoldAmount + 2), (int16_t)gnTradePlayerGoldAmount); }' } });
+    assert.deepStrictEqual(fs, []);
+  });
+
+  it('still reports an offset that reaches the next member', () => {
+    const fs = lint('adjacent-scalar-run', { globals: trade, files: { 'globals.h': tradeH,
+      'g.cpp': 'void f() { p((char*)&gpTradeAgreeDialog + 4); q((uint16_t*)&gpTradeAgreeDialog + 2); }' } });
+    assert.strictEqual(fs.length, 1);
+    assert.match(fs[0].detail, /2 address use\(s\)/);
+  });
 });
 
 describe('defect lint: raw-code-address-argument', () => {
