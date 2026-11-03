@@ -83,6 +83,21 @@ describe('selectDirtyUnits', { skip: SKIP, timeout: 300_000 }, () => {
     }
   });
 
+  it('marks the owning unit dirty when only a function\'s operand references change', () => {
+    // No body, signature or name change: the facts scripts' fields reach the output
+    // too (folded addresses, immediate constants), so they must reach the hash.
+    const target = functions.find(f => f.namespace && f.decompiled && f.operandRefs?.refs.length)!;
+    assert.ok(target, 'need a namespaced function with operand references');
+    const modified = functions.map(f => f.address === target.address
+      ? { ...f, operandRefs: { ...f.operandRefs!, refs: f.operandRefs!.refs.slice(1) } }
+      : f);
+    const r = select(modified);
+    assert.ok(r.units && r.units.length > 0, `expected dirty units, got ${r.reason}`);
+    const owner = buildInfo!.modules.find(m => (m.functionNames ?? []).includes(target.name));
+    assert.ok(owner, `no unit owns ${target.name}`);
+    assert.ok(r.units!.includes(owner.unitName), `the unit owning ${target.name} (${owner.unitName}) must be dirty`);
+  });
+
   it('RENAME: marks the unit that owned the OLD name', () => {
     // The case that was broken. buildinfo files the unit under the old spelling,
     // so a selection that only knows the new name leaves the one unit that must

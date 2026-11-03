@@ -62,20 +62,82 @@ export interface SerializedDep {
 
 export const BUILD_INFO_VERSION = 1;
 
-/** Hash a function for change detection */
+/**
+ * Every field of a function record, and whether its unit's hash covers it.
+ *
+ * The hash decides whether a unit is re-emitted, so a field codegen reads and the
+ * hash skips is a change that never reaches the tree: the facts scripts' fields
+ * (operandRefs, pushSlots, sehFrame, callSiteOverrides, zextSites, ...) were exactly
+ * that. `excluded` is only for a field no generator code reads. A field missing here
+ * fails the build (`satisfies`), and a field on a record that this list does not name
+ * is hashed.
+ */
+export const FUNCTION_HASH_FIELDS = {
+  name: 'hashed',
+  address: 'hashed',
+  signature: 'hashed',
+  returnType: 'hashed',
+  parameters: 'hashed',
+  localVariables: 'hashed',
+  namespace: 'hashed',
+  parentClass: 'hashed',
+  decompiled: 'hashed',
+  callingConvention: 'hashed',
+  size: 'hashed',
+  isThunk: 'hashed',
+  isExternal: 'hashed',
+  hasVarArgs: 'hashed',
+  comment: 'hashed',
+  calledFunctions: 'hashed',
+  callers: 'hashed',
+  isLibrary: 'hashed',
+  libraryMapping: 'hashed',
+  tags: 'hashed',
+  platform: 'hashed',
+  ifdef: 'hashed',
+  crossPlatformAddress: 'hashed',
+  thunkTarget: 'hashed',
+  excludedNamespaceReachable: 'hashed',
+  callSiteOverrides: 'hashed',
+  sehFrame: 'hashed',
+  pushSlots: 'hashed',
+  operandRefs: 'hashed',
+  stringOps: 'hashed',
+  jumpTables: 'hashed',
+  zeroStores: 'hashed',
+  maskSites: 'hashed',
+  zextSites: 'hashed',
+  labelFlow: 'hashed',
+  compareSites: 'hashed',
+  branchLayout: 'hashed',
+  callOrder: 'hashed',
+  accessOrder: 'hashed',
+  haltLines: 'hashed',
+  // Ghidra's source-file annotation of the function: no generator code reads it.
+  sourceFile: 'excluded',
+  sourceLine: 'excluded',
+} as const satisfies Record<keyof ExtractedFunction, 'hashed' | 'excluded'>;
+
+const FUNCTION_HASH_EXCLUDED: ReadonlySet<string> = new Set(
+  Object.entries(FUNCTION_HASH_FIELDS).filter(([, how]) => how === 'excluded').map(([field]) => field),
+);
+
+/** JSON with every object's keys sorted, so equal records serialise equally. */
+function canonicalJson(value: unknown, skip?: ReadonlySet<string>): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+  if (Array.isArray(value)) return `[${value.map(v => canonicalJson(v)).join(',')}]`;
+  const parts: string[] = [];
+  for (const key of Object.keys(value).sort()) {
+    const v = (value as Record<string, unknown>)[key];
+    if (v === undefined || skip?.has(key)) continue;
+    parts.push(`${JSON.stringify(key)}:${canonicalJson(v)}`);
+  }
+  return `{${parts.join(',')}}`;
+}
+
+/** Hash a function for change detection: the whole record, minus the excluded fields. */
 export function hashFunction(func: ExtractedFunction): string {
-  const h = createHash('sha256');
-  h.update(func.name);
-  h.update(func.signature);
-  h.update(func.returnType);
-  for (const p of func.parameters) {
-    h.update(p.name);
-    h.update(p.dataType);
-  }
-  if (func.decompiled) {
-    h.update(func.decompiled);
-  }
-  return h.digest('hex').slice(0, 16);
+  return createHash('sha256').update(canonicalJson(func, FUNCTION_HASH_EXCLUDED)).digest('hex').slice(0, 16);
 }
 
 /** Hash a data type for change detection */
