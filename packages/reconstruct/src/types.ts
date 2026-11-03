@@ -222,6 +222,13 @@ export interface ExtractedDataType {
    * carrying this.
    */
   detailUnavailable?: boolean;
+  /**
+   * The name Ghidra holds this type under, set only where a reconstruct pass gave
+   * it another one (`/WardenClient/vtable` -> `WardenClientVtable`). The snapshot
+   * carries the emitted name; everything read back from Ghidra - the type listing,
+   * the change journal, `get_data_type` - spells the type this way.
+   */
+  sourceName?: string;
 }
 
 export type DataTypeKind =

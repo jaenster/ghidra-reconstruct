@@ -29,6 +29,7 @@ import {
   type ReconstructionOptions,
 } from '@ghidra-mcp/reconstruct';
 import { decompileFunction, getFunctionInfo, listFunctionRecord } from '@ghidra-mcp/reconstruct/extract/functions';
+import { DETAIL_KINDS } from '@ghidra-mcp/reconstruct/extract/types';
 import { fetchInitializedData, inferType, extractPrimaryLabels, markPrimaryLabels, analyzeDataSymbol } from '@ghidra-mcp/reconstruct/extract/globals';
 import { attachOperandRefs } from '@ghidra-mcp/reconstruct/extract/operand-refs';
 import { extractFunctionFacts, FACT_KEYS } from '@ghidra-mcp/reconstruct/extract/function-facts';
@@ -219,20 +220,109 @@ export function baseTypeName(spelling: string): string {
 }
 
 /**
+ * The name Ghidra holds a type under. The model carries the snapshot's names, and a
+ * reconstruct pass renamed some of them (`/WardenClient/vtable` is `WardenClientVtable`,
+ * the second `fpDrawGroundTile` is `D2RendererFunctionsStrc_fpDrawGroundTile`). The
+ * listing, the journal and `get_data_type` all answer in Ghidra's names, so every
+ * lookup against them goes through here.
+ */
+export function ghidraName(dt: { name: string; sourceName?: string }): string {
+  return dt.sourceName ?? dt.name;
+}
+
+/** `X * *[4]` -> `[' * *[4]', 'X']`: the spelling after the base name, and the base. */
+function splitTypeSuffix(name: string): [suffix: string, base: string] {
+  const m = name.match(/^(.*?)((?:\s*\*|\s*\[\d*\])*)$/);
+  return m ? [m[2], m[1]] : ['', name];
+}
+
+/**
+ * Give `sourceName` to the records a reconstruct pass renamed before the passes
+ * recorded it (a model seeded from an older snapshot). A record is paired with a
+ * listing entry only on evidence: its key is missing from the listing, the entry's key
+ * is held by no record, both sit in the same category with the same kind and the same
+ * pointer/array spelling, the record's base name ends with the entry's (as both passes
+ * name: `<Owner>Vtable`, `<Owner>_<name>`), and the pair is the only candidate either
+ * way. Anything else stays unpaired. Returns the number of records paired.
+ */
+export function adoptGhidraNames(
+  dataTypes: ExtractedDataType[],
+  listing: readonly { name: string; category?: string; kind?: string }[],
+): number {
+  const listed = new Set(listing.map(t => dataTypeKey(t.name, t.category)));
+  const held = new Set(dataTypes.map(dt => dataTypeKey(ghidraName(dt), dt.category)));
+  const orphans = listing.filter(t => !held.has(dataTypeKey(t.name, t.category)));
+  const flat = (n: string) => n.replace(/[^A-Za-z0-9_]/g, '_').toLowerCase();
+  const sameKind = (a?: string, b?: string) => a === b || a === 'BUILT_IN' || b === 'BUILT_IN';
+  const fits = (dt: ExtractedDataType, t: { name: string; category?: string; kind?: string }) => {
+    if ((t.category ?? '') !== (dt.category ?? '') || !sameKind(dt.kind, t.kind)) return false;
+    const [ds, db] = splitTypeSuffix(dt.name);
+    const [ts, tb] = splitTypeSuffix(t.name);
+    if (ds.replace(/\s+/g, '') !== ts.replace(/\s+/g, '') || db === tb) return false;
+    return flat(db).endsWith(flat(tb));
+  };
+  const unlisted = dataTypes.filter(dt => !dt.sourceName && !listed.has(dataTypeKey(dt.name, dt.category)));
+  let paired = 0;
+  for (const dt of unlisted) {
+    const candidates = orphans.filter(t => fits(dt, t));
+    if (candidates.length !== 1) continue;
+    if (unlisted.filter(other => fits(other, candidates[0])).length !== 1) continue;
+    dt.sourceName = candidates[0].name;
+    paired++;
+  }
+  return paired;
+}
+
+/** Type lists whose records have been matched to their Ghidra names in this process. */
+const ghidraNamesAdopted = new WeakSet<ExtractedDataType[]>();
+
+/**
  * Put the type list in the listing's order, in place. Types the listing does not name
- * keep their relative order after the listed ones.
+ * keep their relative order after the listed ones. A record is ranked by the name
+ * Ghidra lists it under, not the one a reconstruct pass gave it: ranked by the latter,
+ * every renamed type (the per-class vtables, the category duplicates) was missing from
+ * the listing and went to the end of the list.
  */
 export function reorderDataTypes(
   dataTypes: ExtractedDataType[],
-  listing: readonly { name: string; category?: string }[],
+  listing: readonly { name: string; category?: string; kind?: string }[],
 ): void {
+  adoptGhidraNames(dataTypes, listing);
   const rank = new Map<string, number>();
   listing.forEach((t, i) => { const k = dataTypeKey(t.name, t.category); if (!rank.has(k)) rank.set(k, i); });
   const ordered = dataTypes
-    .map((dt, i) => ({ dt, i, r: rank.get(dataTypeKey(dt.name, dt.category)) ?? Number.POSITIVE_INFINITY }))
+    .map((dt, i) => ({ dt, i, r: rank.get(dataTypeKey(ghidraName(dt), dt.category)) ?? Number.POSITIVE_INFINITY }))
     .sort((a, b) => (a.r - b.r) || (a.i - b.i))
     .map(x => x.dt);
   dataTypes.splice(0, dataTypes.length, ...ordered);
+}
+
+/**
+ * Re-read one type the way a full extraction reads it. The extraction takes members
+ * from `get_data_type` only for the kinds that have them (DETAIL_KINDS); a pointer or
+ * an array keeps its listing entry, whose kind `get_data_type` does not report (read
+ * from there it came back BUILT_IN). A record a reconstruct pass renamed keeps the name
+ * the pass gave it while Ghidra's name for it is unchanged.
+ */
+export async function rereadDataType(
+  client: GhidraConnection,
+  name: string,
+  category: string | undefined,
+  previous: ExtractedDataType | undefined,
+  listing: () => Promise<readonly ExtractedDataType[] | null>,
+): Promise<ExtractedDataType> {
+  let fresh = await extractDataType(client, name, category);
+  if (!DETAIL_KINDS.has(fresh.kind)) {
+    const entries = await listing();
+    const key = dataTypeKey(fresh.name, fresh.category);
+    const entry = entries?.find(t => dataTypeKey(t.name, t.category) === key);
+    if (entry) fresh = { ...entry };
+  }
+  if (previous?.sourceName && fresh.name === previous.sourceName && fresh.category === previous.category) {
+    fresh.sourceName = previous.sourceName;
+    fresh.name = previous.name;
+  }
+  return fresh;
 }
 
 /** Names per global listing call: one regex alternation, well under any length limit. */
@@ -661,6 +751,12 @@ export async function applyEvents(
   // only exists while both the old and the new record are in hand.
   // ---------------------------------------------------------------------------
   const typeTokens = new Set<string>();
+  /** The type listing, read at most once per batch; null when it could not be read. */
+  let listingRead: Promise<ExtractedDataType[] | null> | undefined;
+  const typeListing = () => (listingRead ??= extractDataTypes(client, { limit: 10000 }).catch((e: Error) => {
+    log(`type listing failed (${e.message})`);
+    return null;
+  }));
   /** Types whose size or member offsets moved: what embeds them by value moved too. */
   const layoutMoved = new Set<string>();
   /** A type was renamed or added: its place in the type list moved. */
@@ -668,6 +764,18 @@ export async function applyEvents(
   /** Old names of renamed types: other records still spell them. */
   const renamedFrom = new Set<string>();
   const renamedTo = new Map<string, string>();
+  // A model seeded before the passes recorded sourceName learns its Ghidra names once,
+  // before any event is resolved against them: unresolved, a change to a renamed type
+  // reads as a new one and lands beside the stale record.
+  if (events.some(e => e.target === 'datatype') && !ghidraNamesAdopted.has(model.primary.dataTypes)) {
+    const listing = await typeListing();
+    if (listing) {
+      const n = adoptGhidraNames(model.primary.dataTypes, listing);
+      if (n > 0) log(`type names: ${n} record(s) matched to the name Ghidra lists them under`);
+      ghidraNamesAdopted.add(model.primary.dataTypes);
+    }
+  }
+
   for (const event of events) {
     if (event.target !== 'datatype') continue;
 
@@ -700,8 +808,8 @@ export async function applyEvents(
 
       let fresh: ExtractedDataType;
       try {
-        const target = eventDataTypeTarget(event, { name: previous.name, category: previous.category });
-        fresh = await extractDataType(client, target.name, target.category);
+        const target = eventDataTypeTarget(event, { name: ghidraName(previous), category: previous.category });
+        fresh = await rereadDataType(client, target.name, target.category, previous, typeListing);
       } catch (e) {
         log(`datatype ${previous.name}: re-extract failed (${(e as Error).message}); keeping previous`);
         continue;
@@ -713,7 +821,7 @@ export async function applyEvents(
       result.touchedDataTypes.push(dataTypeKey(fresh.name, fresh.category));
 
       typeTokens.add(fresh.name);
-      if (fresh.name !== previous.name) {
+      if (ghidraName(fresh) !== ghidraName(previous) || fresh.category !== previous.category) {
         renamedFrom.add(previous.name);
         renamedTo.set(previous.name, fresh.name);
         typeOrderMoved = true;
@@ -728,9 +836,8 @@ export async function applyEvents(
     if (slots.length === 0 && event.kind !== 'datatype.removed') {
       const { name, category } = eventDataTypeTarget(event, splitDataTypeKey(event.key));
       try {
-        const fresh = await extractDataType(client, name, category);
-        // No address to sort by, so a new type goes at the end: codegen groups
-        // types by category and ownership, not by array position.
+        const fresh = await rereadDataType(client, name, category, undefined, typeListing);
+        // Appended for now; the listing puts it in place below.
         model.primary.dataTypes.push(fresh);
         typeOrderMoved = true;
         indices.dtByKey.set(dataTypeKey(fresh.name, fresh.category), fresh);
@@ -753,7 +860,7 @@ export async function applyEvents(
       for (const name of memberNames(dt)) typeTokens.add(name);
       if (touched.has(key)) continue;
       try {
-        const fresh = await extractDataType(client, dt.name, dt.category);
+        const fresh = await rereadDataType(client, ghidraName(dt), dt.category, dt, typeListing);
         model.primary.dataTypes[slot] = fresh;
         indices.dtByKey.delete(key);
         indices.dtByKey.set(dataTypeKey(fresh.name, fresh.category), fresh);
@@ -780,7 +887,7 @@ export async function applyEvents(
       if (touched.has(key)) continue;
       const renamedTo = referrers.derivedNames.get(slot);
       try {
-        const fresh = await extractDataType(client, renamedTo ?? dt.name, dt.category);
+        const fresh = await rereadDataType(client, renamedTo ?? ghidraName(dt), dt.category, dt, typeListing);
         model.primary.dataTypes[slot] = fresh;
         indices.dtByKey.delete(key);
         indices.dtByKey.set(dataTypeKey(fresh.name, fresh.category), fresh);
@@ -808,12 +915,9 @@ export async function applyEvents(
   // renamed or added type sits where the listing puts it - not in its old slot, and not
   // at the end. Ask the listing rather than re-implement its comparator.
   if (typeOrderMoved) {
-    try {
-      const listing = await extractDataTypes(client, { limit: 10000 });
-      reorderDataTypes(model.primary.dataTypes, listing);
-    } catch (e) {
-      log(`type order: listing failed (${(e as Error).message}); renamed or added types keep their slots`);
-    }
+    const listing = await typeListing();
+    if (listing) reorderDataTypes(model.primary.dataTypes, listing);
+    else log('type order: no listing; renamed or added types keep their slots');
   }
 
   if (typeTokens.size > 0) {
@@ -1144,7 +1248,7 @@ function resolveDataTypeSlots(model: LiveModel, key: string): number[] {
   const slots: number[] = [];
   for (let i = 0; i < model.primary.dataTypes.length; i++) {
     const dt = model.primary.dataTypes[i];
-    if (dt.name !== name) continue;
+    if (ghidraName(dt) !== name) continue;
     if (category !== undefined && dt.category !== category) continue;
     slots.push(i);
   }

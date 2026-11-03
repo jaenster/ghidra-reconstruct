@@ -9,7 +9,7 @@
  * itself. Ghidra is the only oracle for that, so the sweep asks it.
  *
  * Reads go through the same worker and the same code as a refresh (`fetchFunctionRecord`,
- * `readFunctionFacts`, `attachOperandRefs`, `extractDataType`), over copies, so a match
+ * `readFunctionFacts`, `attachOperandRefs`, `rereadDataType`), over copies, so a match
  * means a refresh would have written what the model holds. A mismatch is handed back to
  * the daemon as an ordinary change event for that symbol, which applies it through
  * `applyEvents` and re-emits incrementally: the verifier itself never writes the model,
@@ -24,7 +24,7 @@
 import { readFile, writeFile, rename, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
-import { extractDataType, type ExtractedDataType, type ExtractedFunction, type GhidraConnection } from '@ghidra-mcp/reconstruct';
+import { extractDataTypes, type ExtractedDataType, type ExtractedFunction, type GhidraConnection } from '@ghidra-mcp/reconstruct';
 import { attachOperandRefs } from '@ghidra-mcp/reconstruct/extract/operand-refs';
 import { DETAIL_KINDS } from '@ghidra-mcp/reconstruct/extract/types';
 import { stableJson } from '@ghidra-mcp/reconstruct/extract/function-facts';
@@ -33,7 +33,9 @@ import {
   addressKey,
   dataTypeKey,
   fetchFunctionRecord,
+  ghidraName,
   readFunctionFacts,
+  rereadDataType,
   readGlobalRecords,
   type ChangeEvent,
   type LiveLog,
@@ -294,6 +296,10 @@ export async function checkDataTypes(
   const byKey = new Map<string, ExtractedDataType>();
   for (const dt of model.primary.dataTypes) byKey.set(dataTypeKey(dt.name, dt.category), dt);
   const out: TypeCheck[] = keys.map(key => ({ key, name: byKey.get(key)?.name ?? key, status: 'unverified', note: 'not read' }));
+  // Pointers and arrays are read from the listing, as a refresh reads them: once per
+  // check, and only when one of these keys needs it.
+  let listingRead: Promise<ExtractedDataType[] | null> | undefined;
+  const typeListing = () => (listingRead ??= extractDataTypes(client, { limit: 10000 }).catch(() => null));
   let next = 0;
   const lanes = Math.max(1, Math.min(opts.concurrency, keys.length));
   await Promise.all(Array.from({ length: lanes }, async () => {
@@ -302,7 +308,7 @@ export async function checkDataTypes(
       const existing = byKey.get(keys[i]);
       if (!existing) { out[i] = { key: keys[i], name: keys[i], status: 'unverified', note: 'not in the model' }; continue; }
       try {
-        const fresh = await extractDataType(client, existing.name, existing.category);
+        const fresh = await rereadDataType(client, ghidraName(existing), existing.category, existing, typeListing);
         const fields = differingFields(existing, fresh, new Set());
         out[i] = fields.length === 0
           ? { key: keys[i], name: existing.name, status: 'match' }

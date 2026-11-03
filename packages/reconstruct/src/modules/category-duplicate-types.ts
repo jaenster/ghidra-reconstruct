@@ -212,6 +212,7 @@ export function disambiguateCategoryDuplicates(
         continue;
       }
 
+      dt.sourceName ??= dt.name;
       dt.name = renamedTo;
       taken.add(renamedTo);
       result.renamed++;
@@ -231,6 +232,7 @@ export function disambiguateCategoryDuplicates(
         if (baseTypeName(p.name) !== name) continue;
         const suffix = typeSuffix(p.name);
         if (!suffix.trim()) continue;
+        p.sourceName ??= p.name;
         p.name = `${renamedTo}${suffix}`;
       }
     }

@@ -93,6 +93,7 @@ export function disambiguateVtableTypes(dataTypes: ExtractedDataType[]): VtableD
     const emitted = vtableTypeName(owner);
     if (byOwner.has(owner)) continue; // one vtable per class
     byOwner.set(owner, emitted);
+    dt.sourceName ??= dt.name;
     dt.name = emitted;
     renamed++;
 
@@ -136,7 +137,9 @@ export function disambiguateVtableTypes(dataTypes: ExtractedDataType[]): VtableD
     if (!stars) continue;
     const owner = ownerOfCategory(dt.category);
     const emitted = owner ? byOwner.get(owner) : undefined;
-    if (emitted) dt.name = `${emitted} ${stars.split('').join(' ')}`;
+    if (!emitted) continue;
+    dt.sourceName ??= dt.name;
+    dt.name = `${emitted} ${stars.split('').join(' ')}`;
   }
 
   return { byOwner, byMember, renamed, fieldsRepointed };
