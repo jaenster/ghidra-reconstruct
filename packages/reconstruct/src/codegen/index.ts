@@ -355,9 +355,16 @@ export function includeBasisHolds(
 }
 
 const unitIdentifierCounts = new Map<string, UnitEmitRecord>();
+/**
+ * The units this process emitted, and so recorded, in this run. A shard ships only
+ * these: the rest of its map is the cache it loaded, and a loaded record merged after
+ * the owning shard's fresh one would replace it with the previous run's.
+ */
+const unitRecordsWritten = new Set<string>();
 let unitIdentCachePath: string | null = process.env.RECON_UNIT_IDENT_CACHE ?? null;
 
 function loadUnitIdentCache(): void {
+  unitRecordsWritten.clear();
   if (!unitIdentCachePath) return;
   try {
     const raw = nodeFs.readFileSync(unitIdentCachePath, 'utf-8');
@@ -484,6 +491,8 @@ export interface ShardOutput {
    * without shipping them the coordinator would write a cache describing one shard
    * of the tree - and the next incremental run would silently drop the declarations
    * every other shard justified. The same hole as the reuse path, one level up.
+   * Only the units this shard emitted: its other records are the loaded cache, which
+   * the coordinator holds already.
    */
   unitRecords: [string, UnitEmitRecord][];
 }
@@ -499,7 +508,7 @@ export function takeShardOutput(state: GenerationState): ShardOutput {
     if (owned.has(path)) sourceMaps.push([path, map]);
   }
   return {
-    unitRecords: [...unitIdentifierCounts],
+    unitRecords: [...unitIdentifierCounts].filter(([unit]) => unitRecordsWritten.has(unit)),
     files,
     sourceMaps,
     declaredNames: [...getDeclaredNames()],
@@ -4580,6 +4589,7 @@ function generateFilesForFunctions(
       for (const [name] of idents) {
         if (enumMemberFact(context._enumMemberValues, name) !== '') lookedUp(`e:${name}`);
       }
+      unitRecordsWritten.add(unitName);
       unitIdentifierCounts.set(unitName, {
         idents, declared, initRefs, statics: unitStatics,
         includes: { graph: [...implIncludes], lookups: [...placementLookups].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)) },
