@@ -30,6 +30,16 @@
  * The index is a name (cast allowed) that every guard reads, written by none, and `base`
  * is a pure expression. The conditions are kept in their order, each guard's negated.
  *
+ * A held base (`p = base; if (!(p + i)) ..`, the record read as `p[i]`) also takes an
+ * index written after it, when every read of `p` is evaluated before the first such write
+ * (`i = p[i].f` reads first; MISSMODE_SrvDoFn07_GuidedMissile 005ae780), no loop holds
+ * both, and nothing can run the store again.
+ *
+ * bare (SOUND_GetIdFromUnit 004c1d60): guards, then `if (!(base + i)) return R;` on the
+ * table member itself with no local, the record read as `base[i]` after it. With the
+ * declarations for its type it becomes `T *p = c ? base + i : nullptr; if (!p) return R;`
+ * and the reads after go through `p` up to what may change `base`, `i` or the record.
+ *
  * Gate (`branchLayout`): the tests and the null test come from one decompiled `if` (the
  * same condition, so one exit block) or every return lies in one return copy of the
  * original that each test jumps to; and no return copy holding a return is laid out before
@@ -41,18 +51,29 @@ import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, AssignExpr, BinaryExpr, CompoundStmt, MemberExpr, CStyleCastExpr, DeclStmt, Expression, ExprStmt,
   FunctionDecl, Identifier, IfStmt, ParameterDecl, ParenExpr, ReturnStmt, Statement, SubscriptExpr,
-  UnaryExpr, VariableDecl, BinaryOperator,
+  UnaryExpr, VariableDecl, BinaryOperator, TypeNode,
 } from '../../../ast/nodes.js';
 import { traverseAST, getChildren } from '../../../ast/visitor.js';
-import { Expr, Stmt } from '../../../ast/factory.js';
+import { Decl, Expr, Stmt } from '../../../ast/factory.js';
 import { createTransformer, updateNode, cloneNode, nodesEqual, type Transformer } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { effectsOf } from './access-order-evidence.js';
 import type { BranchLayoutEvidence } from './branch-layout/evidence.js';
+import type { TypedefResolver } from './call-arg-cast.js';
+import { createExprShape } from './expr-shape.js';
+import { memberChain, routeReads, typeOfShape, recordName, hasJumpTarget, type Guard } from './record-getter-guard.js';
 
 export interface RecordGetterSplitOptions extends PluginOptions {
   branchLayout?: BranchLayoutEvidence | null;
-  onSite?: (e: { line: number; name: string; form: 'guards' | 'guards-then' | 'nested' | 'held' | 'held-then'; tests: number }) => void;
+  /** Declarations, for the record type of a bare null test (none: that form is left). */
+  functionReturnTypes?: Record<string, string>;
+  globalTypes?: Record<string, string>;
+  typedefTargets?: Record<string, string>;
+  structFields?: Record<string, Record<string, string>>;
+  fieldTypes?: Record<string, string>;
+  enclosingVarTypes?: Record<string, string>;
+  shadowedTypeNames?: string[];
+  onSite?: (e: { line: number; name: string; form: 'guards' | 'guards-then' | 'nested' | 'held' | 'held-then' | 'bare'; tests: number }) => void;
 }
 
 function unwrap(e: Expression): Expression {
@@ -149,6 +170,37 @@ function writtenOnlyBefore(root: ASTNode, stmt: ASTNode, name: string): boolean 
   };
   walk(root, 0);
   return !after && !(any && (inLoop || label));
+}
+
+/**
+ * Every reference to `base` after `stmt` is evaluated while `index` still holds the value
+ * it had at `stmt`: no write of `index` after `stmt` comes before one, in evaluation order
+ * (`i = base[i].f` reads before it stores), no loop holds both a write of `index` and a
+ * reference to `base`, `stmt` is in no loop and the function has no label.
+ */
+function readBeforeRewritten(root: ASTNode, stmt: ASTNode, index: string, base: string): boolean {
+  let seen = false, inLoop = false, label = false, written = false, ok = true;
+  const refers = (n: ASTNode) => { for (const m of traverseAST(n)) if (m.kind === NodeKind.Identifier && (m as Identifier).name === base) return true; return false; };
+  const walk = (n: ASTNode, loops: number): void => {
+    if (!ok) return;
+    if (n === stmt) { seen = true; inLoop = loops > 0; return; }
+    if (n.kind === NodeKind.LabelStmt) label = true;
+    if (seen && LOOP_KINDS.has(n.kind) && writes(n, index) && refers(n)) { ok = false; return; }
+    if (seen && n.kind === NodeKind.Identifier && (n as Identifier).name === base && written) { ok = false; return; }
+    const inner = loops + (LOOP_KINDS.has(n.kind) ? 1 : 0);
+    if (n.kind === NodeKind.AssignExpr) {
+      const a = n as AssignExpr;
+      walk(a.right, inner);
+      walk(a.left, inner);
+      if (seen && writes(n, index)) written = true;
+      return;
+    }
+    const own = n.kind === NodeKind.PostfixExpr || n.kind === NodeKind.UnaryExpr;
+    for (const k of getChildren(n)) walk(k, inner);
+    if (seen && own && writes(n, index)) written = true;
+  };
+  walk(root, 0);
+  return ok && seen && !inLoop && !label;
 }
 
 /** Whether `n` writes `name`: an assignment, an increment or a decrement of it. */
@@ -455,6 +507,96 @@ function rewriteFunction(fn: FunctionDecl, opts: RecordGetterSplitOptions): Func
     return ok;
   };
 
+  // The record type of a bare null test: from the declarations.
+  const localTypes = new Map<string, TypeNode>();
+  for (const p of fn.parameters as ParameterDecl[]) {
+    const n = (p as unknown as { name?: Identifier | null }).name;
+    if (n && n.kind === NodeKind.Identifier) localTypes.set(n.name, (p as unknown as VariableDecl).type);
+  }
+  for (const n of traverseAST(body)) if (n.kind === NodeKind.VariableDecl) localTypes.set((n as VariableDecl).name.name, (n as VariableDecl).type);
+  const typedefTargets = opts.typedefTargets ?? {};
+  const resolve: TypedefResolver = name => typedefTargets[name];
+  const shapeOf = opts.structFields || opts.globalTypes ? createExprShape(localTypes, {
+    globalTypes: opts.globalTypes, enclosingVarTypes: opts.enclosingVarTypes, structFields: opts.structFields,
+    fieldTypes: opts.fieldTypes, returnTypes: opts.functionReturnTypes, resolve,
+  }) : null;
+  const shadowed = new Set(opts.shadowedTypeNames ?? []);
+  const taken = new Set<string>();
+  {
+    const members = new Set<ASTNode>();
+    for (const n of traverseAST(fn)) if (n.kind === NodeKind.MemberExpr) members.add((n as MemberExpr).member);
+    for (const n of traverseAST(fn)) if (n.kind === NodeKind.Identifier && !members.has(n)) taken.add((n as Identifier).name);
+  }
+  const fresh = (want: string): string => {
+    let name = want;
+    for (let i = 2; taken.has(name); i++) name = `${want}${i}`;
+    taken.add(name);
+    return name;
+  };
+
+  /**
+   * bare: `if (c) return R; .. if (!(base + i)) return R;` and the record read as
+   * `base[i]` after it, with no local for it at all. `base` is a member chain from a
+   * name. Written `T *p = c' ? base + i : nullptr; if (!p) return R;` and the reads after
+   * go through `p` up to what may change `base`, `i` or the record (as record-getter-guard
+   * routes them). On a failed test both return R before reading anything.
+   */
+  let bareSites = 0;
+  const tryBare = (block: CompoundStmt, b: number): number | null => {
+    if (!shapeOf) return null;
+    const s = block.statements[b];
+    const ng = returnGuard(s);
+    if (!ng) return null;
+    const neg = unwrap(ng.cond);
+    if (neg.kind !== NodeKind.UnaryExpr || (neg as UnaryExpr).operator !== '!') return null;
+    const sum = unwrap((neg as UnaryExpr).operand);
+    if (sum.kind !== NodeKind.BinaryExpr || (sum as BinaryExpr).operator !== '+') return null;
+    const base = (sum as BinaryExpr).left;
+    const idx = unwrap((sum as BinaryExpr).right);
+    if (idx.kind !== NodeKind.Identifier || !local((idx as Identifier).name)) return null;
+    const index = (idx as Identifier).name;
+    const chain = memberChain(base);
+    if (!chain || !pure(base) || mentions(base, index)) return null;
+    const shape = shapeOf(unwrap(base));
+    if (!shape || shape.stars !== 1 || shape.isConst || shape.base === 'void') return null;
+    const ret = ng.ret;
+    if (ret.value && !pure(ret.value)) return null;
+    let first = b;
+    const guards: { cond: Expression; ret: ReturnStmt }[] = [];
+    while (first > 0) {
+      const g = returnGuard(block.statements[first - 1]);
+      if (!g || !pure(g.cond) || !mentions(g.cond, index) || !sameReturn(g.ret, ret)) break;
+      guards.unshift(g);
+      first--;
+    }
+    if (guards.length === 0) return null;
+    const after = block.statements.slice(b + 1);
+    if (hasJumpTarget(after)) return null;
+    const rets = [...guards.map(g => g.ret), ret];
+    const tests = [...guards.map(g => g.cond), ng.cond];
+    const leaves = guards.reduce((n, g) => n + negatedConjuncts(g.cond).length, 0);
+    const lines = tests.map(placedLine);
+    const oneIf = lines.every(l => l !== null) && gate.oneCondition(lines as number[]);
+    if (!oneIf && !gate.sharedExit(rets, tests, leaves + 1, true)) return null;
+    if (!gate.copyAfterTests(rets, tests)) return null;
+    const g: Guard = { base, index: idx as Identifier, bounds: [], root: chain.root, last: chain.last };
+    if (routeReads(after, g, '', true) === 0) return null;
+    const name = fresh(recordName(chain.last));
+    routeReads(after, g, name, false);
+    const test = guards.flatMap(x => negatedConjuncts(x.cond)).reduce((l, r) => Expr.binary(l, '&&', r));
+    const value = Expr.conditional(test, Expr.binary(cloneNode(base), '+', cloneNode(idx as Identifier)), Expr.nullptr());
+    const ds = Stmt.declStmt([Decl.variable(name, typeOfShape(shape, shadowed), value)]);
+    const head = block.statements[first];
+    ds.location = s.location;
+    ds.leadingTrivia = head.leadingTrivia;
+    (s as IfStmt).leadingTrivia = [];
+    (s as { condition: Expression }).condition = Expr.not(Expr.identifier(name));
+    block.statements.splice(first, b - first, ds);
+    bareSites++;
+    opts.onSite?.({ line: placedLine(head) ?? 0, name, form: 'bare', tests: guards.length });
+    return first + 1;
+  };
+
   let changed = 0;
   const visitBlock = (block: CompoundStmt): void => {
     for (let b = 0; b < block.statements.length; b++) {
@@ -490,6 +632,9 @@ function rewriteFunction(fn: FunctionDecl, opts: RecordGetterSplitOptions): Func
 
       // guards: if (c) return R; .. p = base + i; if (!p ..) return R;   (or if (p ..) S return R;)
       // A held base: p = base; if (!(p + i) ..) .., its record read as p[i] everywhere.
+      const bare = tryBare(block, b);
+      if (bare !== null) { b = bare; continue; }
+
       const st = recordStore(s);
       const next = block.statements[b + 1];
       if (!st || !local(st.name) || mentions(st.value, st.name) || !pure(st.value)) continue;
@@ -499,7 +644,7 @@ function rewriteFunction(fn: FunctionDecl, opts: RecordGetterSplitOptions): Func
       const held = direct ? null : heldIndex(cond, st.name);
       const index = direct ? direct.index : held;
       if (!index || !local(index)) continue;
-      if (held && (uncast(st.value).kind === NodeKind.IntegerLiteral || mentions(st.value, held) || !writtenOnlyBefore(body, s, held))) continue;
+      if (held && (uncast(st.value).kind === NodeKind.IntegerLiteral || mentions(st.value, held) || !(writtenOnlyBefore(body, s, held) || readBeforeRewritten(body, s, held, st.name)))) continue;
       const onNull = valueOnNull(cond, st.name, held);
       let ret: ReturnStmt | null;
       let form: 'guards' | 'guards-then';
@@ -559,7 +704,7 @@ function rewriteFunction(fn: FunctionDecl, opts: RecordGetterSplitOptions): Func
     for (const k of getChildren(n)) visitAll(k);
   };
   visitAll(body);
-  if (!changed) return undefined;
+  if (!changed && !bareSites) return undefined;
   return updateNode(fn, { body } as Partial<FunctionDecl>);
 }
 

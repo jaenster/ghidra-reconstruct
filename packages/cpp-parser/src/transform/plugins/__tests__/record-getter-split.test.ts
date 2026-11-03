@@ -227,6 +227,151 @@ describe('record-getter-split', () => {
     assert.deepStrictEqual(r.sites, []);
   });
 
+  // MISSMODE_SrvDoFn07_GuidedMissile, 005ae780: the index is reused for the field it reads.
+  it('takes a held base whose index is rewritten by its last read', () => {
+    const src = [
+      'int f(int i) {',
+      '  if (!(i >= 0 && i < gT->nSize)) {',
+      '    return 2;',
+      '  }',
+      '  Rec* p = gT->pTxt;',
+      '  if (!(p + i)) {',
+      '    return 2;',
+      '  }',
+      '  Use(i);',
+      '  i = p[i].b;',
+      '  if (i <= 0) {',
+      '    i = 5;',
+      '  }',
+      '  return i;',
+      '}',
+    ];
+    const r = run(src, layout(src, [2]));
+    assert.deepStrictEqual(r.sites, ['p:held:1']);
+    assert.ok(r.out.includes('Rec* p = i >= 0 && i < gT->nSize ? gT->pTxt + i : nullptr; if (!p) { return 2; } Use(i); i = p->b;'), r.out);
+  });
+
+  it('leaves a held base read in a loop that rewrites the index', () => {
+    const src = [
+      'int f(int i) {',
+      '  if (!(i >= 0 && i < gT->nSize)) {',
+      '    return 2;',
+      '  }',
+      '  Rec* p = gT->pTxt;',
+      '  if (!(p + i)) {',
+      '    return 2;',
+      '  }',
+      '  int s = 0;',
+      '  while (s < 9) {',
+      '    s = s + p[i].b;',
+      '    i = 0;',
+      '  }',
+      '  return s;',
+      '}',
+    ];
+    const r = run(src, layout(src, [2]));
+    assert.deepStrictEqual(r.sites, []);
+  });
+
+  const TYPES: Partial<RecordGetterSplitOptions> = {
+    globalTypes: { gT: 'Table *' },
+    structFields: { Table: { pTxt: 'Rec *', nSize: 'int' }, Rec: { a: 'int', b: 'int' } },
+    functionReturnTypes: { Use: 'int' },
+  };
+
+  // SOUND_GetIdFromUnit, 004c1d60: the null test is on the table member itself, no local.
+  const BARE = [
+    'int f(int i) {',
+    '  short d;',
+    '  if (i < 0) {',
+    '    return 7;',
+    '  }',
+    '  if (i >= gT->nSize) {',
+    '    return 7;',
+    '  }',
+    '  if (!(gT->pTxt + i)) {',
+    '    return 7;',
+    '  }',
+    '  d = gT->pTxt[i].b;',
+    '  return d + gT->pTxt[i].a;',
+    '}',
+  ];
+
+  it('gives a bare null test its record pointer and routes the reads after it', () => {
+    const r = run(BARE, layout(BARE, [3]), TYPES);
+    assert.deepStrictEqual(r.sites, ['pTxtRecord:bare:2']);
+    assert.ok(r.out.includes('short int d; Rec* pTxtRecord = i >= 0 && i < gT->nSize ? gT->pTxt + i : nullptr; if (!pTxtRecord) { return 7; } d = pTxtRecord->b; return d + pTxtRecord->a;'), r.out);
+  });
+
+  it('leaves a bare null test without the declarations', () => {
+    const r = run(BARE, layout(BARE, [3]));
+    assert.deepStrictEqual(r.sites, []);
+  });
+
+  it('leaves a bare null test whose tests leave through separate copies', () => {
+    const r = run(BARE, layout(BARE, [3, 6, 9]), TYPES);
+    assert.deepStrictEqual(r.sites, []);
+  });
+
+  it('leaves a bare null test with no read after it', () => {
+    const src = [...BARE.slice(0, 11), '  return Use(i);', '}'];
+    const r = run(src, layout(src, [3]), TYPES);
+    assert.deepStrictEqual(r.sites, []);
+  });
+
+  it('keeps a guard that returns something else out of the record', () => {
+    const src = BARE.map((l, k) => (k === 3 ? '    return 8;' : l));
+    const r = run(src, layout(src, [3]), TYPES);
+    assert.deepStrictEqual(r.sites, ['pTxtRecord:bare:1']);
+    assert.ok(r.out.includes('if (i < 0) { return 8; } Rec* pTxtRecord = i < gT->nSize ? gT->pTxt + i : nullptr; if (!pTxtRecord) { return 7; }'), r.out);
+  });
+
+  it('leaves a bare null test with a label after it', () => {
+    const src = [...BARE.slice(0, 11), '  L:', ...BARE.slice(11)];
+    const r = run(src, layout(src, [3]), TYPES);
+    assert.deepStrictEqual(r.sites, []);
+  });
+
+  it('stops routing a bare record at a call', () => {
+    const src = [...BARE.slice(0, 12), '  Use(d);', ...BARE.slice(12)];
+    const r = run(src, layout(src, [3]), TYPES);
+    assert.deepStrictEqual(r.sites, ['pTxtRecord:bare:2']);
+    assert.ok(r.out.includes('d = pTxtRecord->b; Use(d); return d + gT->pTxt[i].a;'), r.out);
+  });
+
+  it('computes what the bare and rewritten-index forms computed', { skip: !hasNativeGpp() }, () => {
+    const g = [
+      'int g(int i) {',
+      '  if (!(i >= 0 && i < gT->nSize)) {',
+      '    return 2;',
+      '  }',
+      '  Rec* p = gT->pTxt;',
+      '  if (!(p + i)) {',
+      '    return 2;',
+      '  }',
+      '  i = p[i].b;',
+      '  if (i <= 3) {',
+      '    i = 5;',
+      '  }',
+      '  return i;',
+      '}',
+    ];
+    const a = run(BARE, layout(BARE, [3]), TYPES);
+    const b = run(g, layout(g, [2]));
+    assert.strictEqual(a.sites.length + b.sites.length, 2);
+    const src = (x: string, y: string) => [PRELUDE, 'int Use(int v) { return v; }', x, y].join('\n');
+    const main = [
+      'static Rec rows[3] = {{1,2},{3,4},{5,6}};',
+      'static Table t = {rows, 3};',
+      'gT = &t;',
+      'for (int i = -2; i <= 4; i++) printf("%d %d ", f(i), g(i));',
+    ].join('\n');
+    const before = compileAndRun(src(BARE.join('\n'), g.join('\n')), main);
+    const after = compileAndRun(src(a.out, b.out), main);
+    assert.ok(before.length > 0);
+    assert.strictEqual(after, before);
+  });
+
   it('computes what the split guards computed', { skip: !hasNativeGpp() }, () => {
     const held = [
       'int g(int i) {',

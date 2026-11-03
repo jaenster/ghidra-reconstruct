@@ -21,13 +21,24 @@
  * and the same under `!` with the reads after the guard. With the reads left as indexes
  * VC8 keeps its old code, so a guard none of whose reads can move is left as printed.
  *
+ * The getter can also be one run of a longer chain: conditions before it, conditions
+ * after it that read the record, an else-if arm, the index loaded by the chain itself as
+ * `(i = e, i >= 0)` (SKILLS_GetUnitWalkVelocity 0056e5b0, AI_Monster_TryCastRateLimitedSkill
+ * 005e5b70). The record is then declared before the statement and set where the getter ran:
+ *
+ *     T *p;
+ *     .. else if (pre && (i = e, p = i >= 0 && i < T->nSize ? T->pTxt + i : nullptr) && post) { .. p->f .. }
+ *
+ * which VC8 compiles as the original: the record tested after the add and read through.
+ * A trailing `&& true` is dropped first; it does not change the chain's value.
+ *
  * Value-preserving by construction, made only when:
  *   - the guard is an `if` in a block whose condition (or its operand under `!`) is an
- *     `&&` chain ending in `base + i`: `base` a member chain from a name (`T->pTxt`), a
+ *     `&&` chain holding `base + i`: `base` a member chain from a name (`T->pTxt`), a
  *     pointer whose type the declarations give, and `i` a local or parameter whose
- *     address is never taken; every other operand mentions `i` and neither calls nor
- *     writes. The local holds `base + i` exactly when the chain is true, so testing it
- *     is testing the chain;
+ *     address is never taken; the range tests before it mention `i` and neither call nor
+ *     write. The local holds `base + i` exactly when they are true, so testing it is
+ *     testing them;
  *   - under `!` the guard has no else and its branch leaves (ends in return, goto or a
  *     halt), so the statements after it run only with the record in range;
  *   - a read `base[i]` (also `&base[i]`, `base[i].f`) or `base + i` becomes the local
@@ -35,14 +46,20 @@
  *     points at: a call (one call whose arguments neither call nor write still has its
  *     arguments rewritten, being evaluated before it runs), a write to `i`, to the name
  *     `base` starts from or to a member named as `base`'s last one, or a label;
- *   - no label, case or default follows the declaration in its block.
+ *   - no label, case or default follows the declaration in its block, but a case of a
+ *     switch that lies there itself;
+ *   - in a chain: the conditions after the getter run only when it held, so their reads
+ *     go through the record up to one that calls or writes `i` or `base`, and the body's
+ *     reads only when none of them does. The record is read nowhere the getter may not
+ *     have run (not in the else branch, not past a label); a `!` chain must be the
+ *     block's statement, not an else-if arm.
  *
  * Without a type for `base` nothing changes.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
-  ASTNode, AssignExpr, BinaryExpr, CallExpr, CompoundStmt, CStyleCastExpr, DeclStmt, Expression,
+  ASTNode, AssignExpr, BinaryExpr, BinaryOperator, CallExpr, CompoundStmt, CStyleCastExpr, DeclStmt, Expression,
   ExprStmt, FunctionDecl, GotoStmt, Identifier, IfStmt, MemberExpr, ParameterDecl, ParenExpr,
   PostfixExpr, ReturnStmt, Statement, SubscriptExpr, TypeNode, UnaryExpr, VariableDecl,
 } from '../../../ast/nodes.js';
@@ -86,7 +103,7 @@ function conjuncts(e: Expression): Expression[] {
 }
 
 /** `a->b->c` / `a.b` down to a name: the name and the last member; null for anything else. */
-function memberChain(e: Expression): { root: string; last: string } | null {
+export function memberChain(e: Expression): { root: string; last: string } | null {
   e = unwrap(e);
   if (e.kind !== NodeKind.MemberExpr) return null;
   const m = e as MemberExpr;
@@ -103,13 +120,21 @@ function mentions(e: ASTNode, name: string): boolean {
   return false;
 }
 
-function hasJumpTarget(stmts: Statement[]): boolean {
-  for (const s of stmts) {
-    for (const n of traverseAST(s)) {
-      if (n.kind === NodeKind.LabelStmt || n.kind === NodeKind.CaseStmt || n.kind === NodeKind.DefaultStmt) return true;
+/**
+ * Whether control can enter `stmts` other than from their start: a label, or a case or
+ * default of a switch that does not itself lie in them.
+ */
+export function hasJumpTarget(stmts: Statement[]): boolean {
+  const walk = (n: ASTNode): boolean => {
+    if (n.kind === NodeKind.LabelStmt || n.kind === NodeKind.CaseStmt || n.kind === NodeKind.DefaultStmt) return true;
+    if (n.kind === NodeKind.SwitchStmt) {
+      for (const m of traverseAST(n)) if (m.kind === NodeKind.LabelStmt) return true;
+      return false;
     }
-  }
-  return false;
+    for (const k of getChildren(n)) if (walk(k)) return true;
+    return false;
+  };
+  return stmts.some(walk);
 }
 
 /** Whether a statement list cannot fall off its end into what follows. */
@@ -129,7 +154,7 @@ function leaves(s: Statement): boolean {
   return bare === 'exit' || bare === 'ExitProcess' || /_Halt$/.test(bare);
 }
 
-interface Guard {
+export interface Guard {
   base: Expression;
   index: Identifier;
   bounds: Expression[];
@@ -137,23 +162,63 @@ interface Guard {
   last: string;
 }
 
-/** `[bounds &&] base + i` with the bounds about `i`; null when the condition is not one. */
-function guardOf(cond: Expression, indexOk: (name: string) => boolean): Guard | null {
+/**
+ * Where the getter sits in an `&&` chain: the conditions before it, its own range tests
+ * and `base + i`, the conditions after it. `seed` is `i = e` when the first range test
+ * was printed as `(i = e, test)`.
+ */
+interface Run {
+  g: Guard;
+  pre: Expression[];
+  post: Expression[];
+  seed: AssignExpr | null;
+}
+
+function isCommaSeed(e: Expression, index: string): { seed: AssignExpr; test: Expression } | null {
+  const u = unwrap(e);
+  if (u.kind !== NodeKind.BinaryExpr || (u as BinaryExpr).operator as string !== ',') return null;
+  const a = unwrap((u as BinaryExpr).left);
+  const test = (u as BinaryExpr).right;
+  if (a.kind !== NodeKind.AssignExpr || (a as AssignExpr).operator !== '=') return null;
+  const l = unwrap((a as AssignExpr).left);
+  if (l.kind !== NodeKind.Identifier || (l as Identifier).name !== index) return null;
+  if (!pure((a as AssignExpr).right)) return null;
+  if (!pure(test) || !mentions(test, index)) return null;
+  return { seed: a as AssignExpr, test };
+}
+
+/**
+ * The first `[bounds &&] base + i` run of the chain, with the bounds about `i`; null when
+ * the condition has none.
+ */
+function runOf(cond: Expression, indexOk: (name: string) => boolean): Run | null {
   const parts = conjuncts(cond);
-  if (parts.length < 2) return null;
-  const sum = unwrap(parts[parts.length - 1]);
-  if (sum.kind !== NodeKind.BinaryExpr || (sum as BinaryExpr).operator !== '+') return null;
-  const base = (sum as BinaryExpr).left;
-  let idx = unwrap((sum as BinaryExpr).right);
-  while (idx.kind === NodeKind.CStyleCastExpr) idx = unwrap((idx as CStyleCastExpr).expression);
-  if (idx.kind !== NodeKind.Identifier || !indexOk((idx as Identifier).name)) return null;
-  if (unwrap((sum as BinaryExpr).right).kind !== NodeKind.Identifier) return null;
-  const chain = memberChain(base);
-  if (!chain || !pure(base)) return null;
-  const index = idx as Identifier;
-  const bounds = parts.slice(0, -1);
-  if (!bounds.every(b => pure(b) && mentions(b, index.name))) return null;
-  return { base, index, bounds, root: chain.root, last: chain.last };
+  for (let k = 1; k < parts.length; k++) {
+    const sum = unwrap(parts[k]);
+    if (sum.kind !== NodeKind.BinaryExpr || (sum as BinaryExpr).operator !== '+') continue;
+    const base = (sum as BinaryExpr).left;
+    const idx = unwrap((sum as BinaryExpr).right);
+    if (idx.kind !== NodeKind.Identifier || !indexOk((idx as Identifier).name)) continue;
+    const chain = memberChain(base);
+    if (!chain || !pure(base)) continue;
+    const index = idx as Identifier;
+    let j = k;
+    while (j > 0 && pure(parts[j - 1]) && mentions(parts[j - 1], index.name)) j--;
+    let seed: AssignExpr | null = null;
+    const bounds = parts.slice(j, k);
+    if (j > 0) {
+      const c = isCommaSeed(parts[j - 1], index.name);
+      if (c) { seed = c.seed; bounds.unshift(c.test); j--; }
+    }
+    if (bounds.length === 0) continue;
+    // `&& true` tests nothing: a chain's value is the same without it.
+    const isTrue = (e: Expression) => { const u = unwrap(e); return u.kind === NodeKind.BoolLiteral && (u as unknown as { value: boolean }).value === true; };
+    return {
+      g: { base, index, bounds, root: chain.root, last: chain.last },
+      pre: parts.slice(0, j), post: parts.slice(k + 1).filter(e => !isTrue(e)), seed,
+    };
+  }
+  return null;
 }
 
 function isSum(e: ASTNode, g: Guard): boolean {
@@ -268,7 +333,7 @@ function topCall(s: Statement): CallExpr | null {
  * Route the reads of `stmts` through `name`, in order, up to what may change the record
  * (see the header). Returns the number of reads routed.
  */
-function routeReads(stmts: Statement[], g: Guard, name: string, dryRun: boolean): number {
+export function routeReads(stmts: Statement[], g: Guard, name: string, dryRun: boolean): number {
   let routed = 0;
   for (const s of stmts) {
     if (s.kind === NodeKind.LabelStmt || s.kind === NodeKind.CaseStmt || s.kind === NodeKind.DefaultStmt) break;
@@ -306,13 +371,13 @@ function routeReads(stmts: Statement[], g: Guard, name: string, dryRun: boolean)
   return routed;
 }
 
-function typeOfShape(shape: TypeShape, shadowed: Set<string>): TypeNode {
+export function typeOfShape(shape: TypeShape, shadowed: Set<string>): TypeNode {
   let t: TypeNode = Type.typedefAt(shape.base, shadowed.has(shape.base));
   for (let i = 0; i < shape.stars; i++) t = Type.pointer(t);
   return t;
 }
 
-function recordName(last: string): string {
+export function recordName(last: string): string {
   const m = /^pTxt([A-Z]\w*)$/.exec(last);
   if (m) return `p${m[1]}Txt`;
   const p = /^p([A-Z]\w*)$/.exec(last);
@@ -366,45 +431,93 @@ function rewriteFunction(fn: FunctionDecl, opts: RecordGetterGuardOptions): Func
   };
 
   let changed = 0;
+  /**
+   * One `if` of a block, `top` when it is the block's statement and not an else-if arm.
+   * Returns the declaration to place before the block's statement, or null.
+   */
+  const tryIf = (ifs: IfStmt, top: boolean, block: CompoundStmt, b: number): DeclStmt | null => {
+    if (ifs.init) return null;
+    let cond = unwrap(ifs.condition);
+    const negated = cond.kind === NodeKind.UnaryExpr && (cond as UnaryExpr).operator === '!';
+    if (negated) cond = unwrap((cond as UnaryExpr).operand);
+    const run = runOf(cond, indexOk);
+    if (!run) return null;
+    const g = run.g;
+    const shape = shapeOf(unwrap(g.base));
+    if (!shape || shape.stars !== 1 || shape.isConst || shape.base === 'void') return null;
+    if (hasJumpTarget(block.statements.slice(b + 1))) return null;
+    // The plain guard: the whole condition is the getter, the if a statement of the block.
+    const plain = top && run.pre.length === 0 && run.post.length === 0 && !run.seed;
+    // Conditions after the getter run only when it held; the body only when they all did,
+    // so the body's reads go through the record only if none of them can change it.
+    const postClean = run.post.every(p => effectsOf(p).calls === 0 && !clobbers(p, g));
+    let reads: Statement[] = [];
+    if (negated) {
+      if (!top || ifs.elseBranch || !leaves(ifs.thenBranch)) return null;
+      if (postClean) reads = block.statements.slice(b + 1);
+    } else if (postClean) {
+      reads = ifs.thenBranch.kind === NodeKind.CompoundStmt
+        ? (ifs.thenBranch as CompoundStmt).statements : [ifs.thenBranch];
+    }
+    if (!plain && hasJumpTarget(reads)) return null;
+    // The reads in the conditions after the getter, in order, up to one that may change it.
+    const postReads = (dryRun: boolean, name: string): number => {
+      let n = 0;
+      for (let i = 0; i < run.post.length; i++) {
+        const p = run.post[i];
+        if (effectsOf(p).calls !== 0 || clobbers(p, g)) break;
+        if (dryRun) { n += countReads(p, g); continue; }
+        const holder = { kind: NodeKind.ParenExpr, expression: p } as unknown as ParenExpr;
+        n += substitute(holder, g, name);
+        run.post[i] = holder.expression;
+      }
+      return n;
+    };
+    if (routeReads(reads, g, '', true) + postReads(true, '') === 0) return null;
+    const name = fresh(recordName(g.last));
+    const routed = routeReads(reads, g, name, false) + postReads(false, name);
+    const sum = Expr.binary(cloneNode(g.base), '+', cloneNode(g.index));
+    const test = g.bounds.map(x => cloneNode(x)).reduce((l, r) => Expr.binary(l, '&&', r));
+    const value = Expr.conditional(test, sum, Expr.nullptr());
+    const id = Expr.identifier(name);
+    const type = typeOfShape(shape, shadowed);
+    let out: DeclStmt;
+    if (plain) {
+      out = Stmt.declStmt([Decl.variable(name, type, value)]);
+      (ifs as { condition: Expression }).condition = negated ? Expr.not(id) : id;
+    } else {
+      // The record is set where the getter ran: `pre && (p = getter) && post`, its
+      // declaration before the statement. `p` is read only where the getter has run.
+      out = Stmt.declStmt([Decl.variable(name, type)]);
+      let at: Expression = Expr.assign(Expr.identifier(name), value);
+      if (run.seed) {
+        at = Expr.binary(cloneNode(run.seed), ',' as BinaryOperator, at);
+      }
+      const chain = [...run.pre, Expr.paren(at), ...run.post].reduce((l, r) => Expr.binary(l, '&&', r));
+      (ifs as { condition: Expression }).condition = negated ? Expr.not(Expr.paren(chain)) : chain;
+    }
+    changed++;
+    opts.onSite?.({ line: ifs.location?.start.line ?? 0, name, reads: routed, negated });
+    return out;
+  };
   const visitBlock = (block: CompoundStmt): void => {
     for (let b = 0; b < block.statements.length; b++) {
       const s = block.statements[b];
       for (const k of getChildren(s)) visitAll(k);
       if (s.kind !== NodeKind.IfStmt) continue;
-      const ifs = s as IfStmt;
-      if (ifs.init) continue;
-      let cond = unwrap(ifs.condition);
-      const negated = cond.kind === NodeKind.UnaryExpr && (cond as UnaryExpr).operator === '!';
-      if (negated) cond = unwrap((cond as UnaryExpr).operand);
-      const g = guardOf(cond, indexOk);
-      if (!g) continue;
-      const shape = shapeOf(unwrap(g.base));
-      if (!shape || shape.stars !== 1 || shape.isConst || shape.base === 'void') continue;
-      if (hasJumpTarget(block.statements.slice(b + 1))) continue;
-      let reads: Statement[];
-      if (negated) {
-        if (ifs.elseBranch || !leaves(ifs.thenBranch)) continue;
-        reads = block.statements.slice(b + 1);
-      } else {
-        reads = ifs.thenBranch.kind === NodeKind.CompoundStmt
-          ? (ifs.thenBranch as CompoundStmt).statements : [ifs.thenBranch];
+      const decls: DeclStmt[] = [];
+      for (let c: IfStmt | null = s as IfStmt, top = true; c; top = false) {
+        const d = tryIf(c, top, block, b);
+        if (d) decls.push(d);
+        c = c.elseBranch && c.elseBranch.kind === NodeKind.IfStmt ? c.elseBranch as IfStmt : null;
       }
-      if (routeReads(reads, g, '', true) === 0) continue;
-      const name = fresh(recordName(g.last));
-      const routed = routeReads(reads, g, name, false);
-      const sum = Expr.binary(cloneNode(g.base), '+', cloneNode(g.index));
-      const test = g.bounds.map(x => cloneNode(x)).reduce((l, r) => Expr.binary(l, '&&', r));
-      const decl = Decl.variable(name, typeOfShape(shape, shadowed), Expr.conditional(test, sum, Expr.nullptr()));
-      const ds: DeclStmt = Stmt.declStmt([decl]);
-      ds.location = s.location;
-      ds.leadingTrivia = s.leadingTrivia;
+      if (decls.length === 0) continue;
+      decls[0].location = s.location;
+      decls[0].leadingTrivia = s.leadingTrivia;
+      for (const d of decls.slice(1)) d.location = s.location;
       s.leadingTrivia = [];
-      const id = Expr.identifier(name);
-      (ifs as { condition: Expression }).condition = negated ? Expr.not(id) : id;
-      block.statements.splice(b, 0, ds);
-      b++;
-      changed++;
-      opts.onSite?.({ line: s.location?.start.line ?? 0, name, reads: routed, negated });
+      block.statements.splice(b, 0, ...decls);
+      b += decls.length;
     }
   };
   const visitAll = (n: ASTNode): void => {
