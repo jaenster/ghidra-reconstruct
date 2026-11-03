@@ -34,6 +34,8 @@ import {
   dataTypeKey,
   fetchFunctionRecord,
   ghidraName,
+  TYPE_ORDER_EVENT,
+  typeOrderDrift,
   readFunctionFacts,
   rereadDataType,
   readGlobalRecords,
@@ -108,8 +110,8 @@ export interface VerifierHost {
 
 export interface VerifierMismatch {
   at: string;
-  kind: 'function' | 'datatype' | 'global';
-  /** Address key, or the type's name + NUL + category. */
+  kind: 'function' | 'datatype' | 'global' | 'type order';
+  /** Address key, the type's name + NUL + category, or `#<position>` for the type order. */
   key: string;
   name: string;
   /** Which record fields differ. */
@@ -546,6 +548,12 @@ export class ModelVerifier {
       }
       const { phase, keys } = this.nextKeys();
       if (keys.length === 0) {
+        // Once a cycle, between the functions and the types: the type list's order is a
+        // whole-program input no per-record read can see.
+        if (phase === 'functions') {
+          const outcome = await this.checkTypeOrder(t0);
+          if (outcome) return outcome;
+        }
         if (phase !== 'globals') {
           this.state.cursor = { phase: phase === 'functions' ? 'datatypes' : 'globals', key: null };
           await this.save();
@@ -608,6 +616,30 @@ export class ModelVerifier {
     }
   }
 
+  /**
+   * Compare the model's type order with one listing call. A drift is logged as MODEL
+   * STALE (type order) with its first differing position and sent through the ordinary
+   * update, which reorders the list; the moved types' headers re-emit (typeHashes).
+   * Returns an outcome only when the step has to stop here.
+   */
+  private async checkTypeOrder(t0: number): Promise<StepOutcome | null> {
+    if (await this.host.versionMoved?.()) { this.lastBusyAt = this.now(); this.record('interrupted', 0, t0); return 'interrupted'; }
+    let listing: ExtractedDataType[];
+    try {
+      listing = await extractDataTypes(this.host.client(), { limit: 10000 });
+    } catch (e) {
+      this.state.unverifiedTotal++;
+      this.host.log(`model verifier: type order not checked (${(e as Error).message})`);
+      return null;
+    }
+    if (!this.host.idle() || await this.host.versionMoved?.()) { this.lastBusyAt = this.now(); this.record('interrupted', 0, t0); return 'interrupted'; }
+    const drift = typeOrderDrift(this.host.model().primary.dataTypes, listing);
+    if (!drift) return null;
+    const found = [this.mismatch('type order', `#${drift.index}`, drift.model, [drift.listing], undefined, 'sweep')];
+    await this.apply([{ seq: 0, kind: TYPE_ORDER_EVENT, target: 'datatype', key: '', txDescription: 'model verifier' }], found);
+    return null;
+  }
+
   private async endCycle(): Promise<StepOutcome> {
     const started = this.state.cycleStartedAt ? Date.parse(this.state.cycleStartedAt) : this.now();
     this.state.lastFullCycleMs = this.now() - started;
@@ -632,7 +664,9 @@ export class ModelVerifier {
   ): VerifierMismatch {
     const m: VerifierMismatch = { at: new Date(this.now()).toISOString(), kind, key, name, fields, diff, applied: 'queued', source };
     this.host.log('#'.repeat(72));
-    this.host.log(`MODEL STALE: ${kind} ${name} (${key.replace('\u0000', ' in ')}): ${fields.join(', ')} differ from Ghidra`);
+    this.host.log(kind === 'type order'
+      ? `MODEL STALE: type order at position ${key.slice(1)}: the model has ${name}, the listing ${fields[0]}`
+      : `MODEL STALE: ${kind} ${name} (${key.replace('\u0000', ' in ')}): ${fields.join(', ')} differ from Ghidra`);
     if (diff) for (const line of diff.split('\n')) this.host.log(`  ${line}`);
     this.host.log('#'.repeat(72));
     this.state.mismatchesTotal++;

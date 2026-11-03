@@ -184,6 +184,19 @@ export function globalKey(address: string, name: string | undefined): string {
   return `${address}\u0000${name ?? ''}`;
 }
 
+/**
+ * A type's hash, with the type before it in the list. The emitter lays a header's types
+ * out in list order, so a type that moved changes its header while its own record, and
+ * so `hashDataType`, stays the same: a reorder alone re-emitted nothing. Keying on the
+ * predecessor makes the moved type, its old successor and its new successor dirty.
+ */
+export function typeHashes(dataTypes: ReadonlyArray<ExtractedDataType>): string[] {
+  return dataTypes.map((dt, i) => {
+    const prev = i > 0 ? dataTypes[i - 1] : undefined;
+    return `${hashDataType(dt)}@${prev ? `${prev.category ?? ''}::${prev.name}` : ''}`;
+  });
+}
+
 export function emptyHashCache(): SymbolHashCache {
   return { functions: {}, types: {}, globals: {} };
 }
@@ -198,9 +211,10 @@ export function computeHashCache(inputs: {
   for (const f of inputs.functions) {
     cache.functions[f.address] = { hash: hashFunction(f), name: f.name };
   }
-  for (const dt of inputs.dataTypes) {
-    cache.types[dt.category ? `${dt.category}::${dt.name}` : dt.name] = hashDataType(dt);
-  }
+  const hashes = typeHashes(inputs.dataTypes);
+  inputs.dataTypes.forEach((dt, i) => {
+    cache.types[dt.category ? `${dt.category}::${dt.name}` : dt.name] = hashes[i];
+  });
   for (const g of inputs.globals) {
     const name = g.suggestedName || g.name;
     if (!g.address) continue;
@@ -284,9 +298,10 @@ export function selectDirtyUnits(inputs: SelectInputs): DirtySelection {
       if (before && before.name !== f.name) changed.push(before.name);
     }
   }
-  for (const dt of dataTypes) {
+  const hashes = typeHashes(dataTypes);
+  for (const [i, dt] of dataTypes.entries()) {
     const key = dt.category ? `${dt.category}::${dt.name}` : dt.name;
-    if (previous.types[key] !== hashDataType(dt)) {
+    if (previous.types[key] !== hashes[i]) {
       changed.push(dt.name);
       changedTypeNames.push(dt.name);
     }

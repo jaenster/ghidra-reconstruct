@@ -273,6 +273,29 @@ export function adoptGhidraNames(
   return paired;
 }
 
+/** The event that asks for the type list to be put back in the listing's order. */
+export const TYPE_ORDER_EVENT = 'datatype.order';
+
+/**
+ * Where the type list leaves the listing's order: the first position whose record is
+ * not the one `reorderDataTypes` would put there, or null when the order is the
+ * listing's. Reads copies; the model is not touched.
+ */
+export function typeOrderDrift(
+  dataTypes: readonly ExtractedDataType[],
+  listing: readonly { name: string; category?: string; kind?: string }[],
+): { index: number; model: string; listing: string } | null {
+  const copy = dataTypes.map(dt => ({ ...dt }));
+  reorderDataTypes(copy, listing);
+  for (let i = 0; i < copy.length; i++) {
+    const want = copy[i], have = dataTypes[i];
+    if (want.name !== have.name || want.category !== have.category) {
+      return { index: i, model: `${have.category}/${have.name}`, listing: `${want.category}/${want.name}` };
+    }
+  }
+  return null;
+}
+
 /** Type lists whose records have been matched to their Ghidra names in this process. */
 const ghidraNamesAdopted = new WeakSet<ExtractedDataType[]>();
 
@@ -778,6 +801,8 @@ export async function applyEvents(
 
   for (const event of events) {
     if (event.target !== 'datatype') continue;
+    // Names no type: the list's order went stale (the verifier found it), so put it back.
+    if (event.kind === TYPE_ORDER_EVENT) { typeOrderMoved = true; continue; }
 
     // The model still holds a renamed type under its old path; the version journal keys
     // the event by the new one. Looked up by the new path only, a rename read as a new
