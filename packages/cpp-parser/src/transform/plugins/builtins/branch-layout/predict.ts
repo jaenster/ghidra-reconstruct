@@ -23,6 +23,27 @@
  * And a chain `if (!x1) return K; x2 = e(x1); if (!x2) return K; ...` written as guards
  * keeps its tests' jumps local: none threads forward past a later test into the last copy.
  *
+ * Identical `return K` (K a constant) share one copy of their code, outside a loop (benched
+ * with the oracle's compiler on GetStateFlags and SFILE_GetInstallPath):
+ *
+ *   every one a guard `if (c) return K;` of the body's own list, c simple or `&&`
+ *                                          the copy sits inline after the first guard's
+ *                                          test: that guard falls into it, every later
+ *                                          guard jumps to it
+ *   one of them an `||` guard, or the last statement of the body (not after an `||` guard
+ *   or an if/else)                         the copy goes to the end: every guard jumps there
+ *   one of them anywhere else (an arm with code of its own, a nested block, a loop)
+ *                                          not predicted
+ *
+ * The rule is about one copy: where the original's lines place the members in two copies
+ * (their epilogues differ, a register saved between them), or the copy's place is not
+ * clear from its jumps (`mergedCopyPlace`), no guard of the group is predicted. Nor where an
+ * `||` guard of the group has per-operand branch facts: the local or-guard rule rewrites it
+ * by those (a getter, one guard per test), so the form it ends in is not yet printed.
+ *
+ * The copy's place is a site of its own as well, against the original's return copy: inline
+ * (fallen into, with code after it) or at the end (no code after it).
+ *
  * Anything else (a ternary in the condition, a leaving `||` arm with nothing after it, an
  * arm ending in `continue` with code) is not predicted and does not count.
  *
@@ -33,7 +54,7 @@
 
 import { NodeKind } from '../../../../ast/kinds.js';
 import type {
-  ASTNode, CompoundStmt, IfStmt, Statement, ReturnStmt, Expression, ParenExpr, CStyleCastExpr, AnyNode,
+  ASTNode, CompoundStmt, IfStmt, Statement, ReturnStmt, Expression, ParenExpr, CStyleCastExpr, AnyNode, LabelStmt,
   WhileStmt, DoWhileStmt, ForStmt, BoolLiteralExpr,
 } from '../../../../ast/nodes.js';
 import { emit } from '../../../../emit/index.js';
@@ -66,6 +87,8 @@ export interface LayoutScore {
   abstained: { line: number; column: number; rule: string }[];
   /** The positions (`line:column`) of the ifs predicted against a fact. */
   scored: Set<string>;
+  /** Per group of identical returns with a fact (by key): whether its copy is where predicted. */
+  groups: Map<string, boolean>;
 }
 
 function unwrap(e: Expression): Expression {
@@ -171,6 +194,89 @@ export interface PredictContext {
   arms: ReadonlyMap<Statement, string>;
   /** How many arms have each of those keys: two with one key are one tail to VC8. */
   armCounts: ReadonlyMap<string, number>;
+  /** Each `return K` (K a constant) with another identical one, and the group they share a copy in. */
+  returnGroups: ReadonlyMap<ReturnStmt, ReturnGroup>;
+}
+
+/**
+ * Identical `return K` of a function (K a constant), which VC8 compiles to one copy, and
+ * where that copy goes (see the header). `copy` is null when a member has a form the rule
+ * does not cover; `guards` lists the guards among the members in source order.
+ */
+export interface ReturnGroup {
+  key: string;
+  members: ReturnStmt[];
+  guards: IfStmt[];
+  copy: 'inline' | 'end' | null;
+}
+
+/** `nullptr` or `NULL` as a name (a pass may build it as one): a constant. */
+function nullName(e: Expression): boolean {
+  const u = unwrap(e);
+  return u.kind === NodeKind.Identifier && ['nullptr', 'NULL'].includes((u as unknown as { name: string }).name);
+}
+
+/** `if (c) return K;` with no else: the guard holding `r` as its whole arm. */
+function guardOf(ifs: IfStmt): ReturnStmt | null {
+  if (ifs.elseBranch || ifs.init || ifs.isConstexpr) return null;
+  const l = bodyOf(ifs.thenBranch);
+  return l.length === 1 && l[0].kind === NodeKind.ReturnStmt ? l[0] as ReturnStmt : null;
+}
+
+/** The groups of identical constant returns of `body`, keyed by member. */
+export function returnGroups(body: CompoundStmt): Map<ReturnStmt, ReturnGroup> {
+  const guardFor = new Map<ReturnStmt, IfStmt>();
+  const inLoop = new Set<ReturnStmt>();
+  const go = (n: ASTNode, loop: boolean): void => {
+    // A guard of the body's own statement list, labelled or not. One in a nested block (an
+    // arm, an else-if) is laid out with the block around it.
+    if (n === body) {
+      for (let x of (n as CompoundStmt).statements) {
+        while (x.kind === NodeKind.LabelStmt) x = (x as LabelStmt).statement;
+        const r = x.kind === NodeKind.IfStmt ? guardOf(x as IfStmt) : null;
+        if (r) guardFor.set(r, x as IfStmt);
+      }
+    }
+    if (n.kind === NodeKind.ReturnStmt && loop) inLoop.add(n as ReturnStmt);
+    const l = loop || isLoop(n);
+    for (const k of getChildren(n)) go(k, l);
+  };
+  go(body, false);
+  const last = body.statements[body.statements.length - 1];
+  const byKey = new Map<string, ReturnStmt[]>();
+  for (const r of returnOrder(body)) {
+    if (!r.value || !(constantValue(r.value) || nullName(r.value))) continue;
+    const k = returnKey(r);
+    if (k === null) continue;
+    const l = byKey.get(k);
+    if (l) l.push(r); else byKey.set(k, [r]);
+  }
+  const out = new Map<ReturnStmt, ReturnGroup>();
+  for (const [key, members] of byKey) {
+    if (members.length < 2) continue;
+    const guards: IfStmt[] = [];
+    let end = false, known = true;
+    for (const r of members) {
+      const g = guardFor.get(r);
+      if (inLoop.has(r)) known = false;
+      else if (g) {
+        guards.push(g);
+        const shape = conditionShape(g.condition).kind;
+        if (shape === 'or') end = true;
+        else if (shape === 'other') known = false;
+      } else if (r === last) {
+        // After an `||` guard (its arm goes after the rest) or an if/else, the last return
+        // may be a jump into an earlier copy: not settled.
+        const prev = body.statements[body.statements.length - 2];
+        if (prev?.kind === NodeKind.IfStmt
+          && (!!(prev as IfStmt).elseBranch || conditionShape((prev as IfStmt).condition).kind === 'or')) known = false;
+        else end = true;
+      } else known = false;
+    }
+    const group: ReturnGroup = { key, members, guards, copy: !known ? null : end ? 'end' : 'inline' };
+    for (const r of members) out.set(r, group);
+  }
+  return out;
 }
 
 /** A loop whose test is constant true: `while (true)`, `do ... while (true)`, `for (;;)`. */
@@ -254,7 +360,7 @@ export function predictContext(body: CompoundStmt, noreturn: ReadonlySet<string>
       if (l.length > 0) loopTails.add(l[l.length - 1]);
     }
   }
-  return { noreturn, returns: returnOrder(body), gotos: gotoCounts(body), loopTails, arms, armCounts };
+  return { noreturn, returns: returnOrder(body), gotos: gotoCounts(body), loopTails, arms, armCounts, returnGroups: returnGroups(body) };
 }
 
 /** `exit(...)` or another call that never returns, as a statement. */
@@ -318,7 +424,14 @@ export function predictFall(ifs: IfStmt, place: Place, ctx: PredictContext): Pre
         if (list.slice(place.index + 1, -1).some(x => returnOrder(x).length > 0)) return abstain('return between');
         return { fall: 'other', rule: 'return merged into the copy ending its block' };
       }
-      // Merged with a copy elsewhere: which one keeps the code is not settled.
+      // Merged with a copy elsewhere: the group's form places the one copy.
+      const group = ctx.returnGroups.get(r);
+      if (group?.copy === 'end') return { fall: 'other', rule: 'merged return, copy at the end' };
+      if (group?.copy === 'inline') {
+        return group.guards[0] === ifs
+          ? { fall: 'then', rule: 'merged return, copy inline at the first guard' }
+          : { fall: 'other', rule: 'merged return, jump to the first guard\'s copy' };
+      }
       if (ctx.returns.some(o => o !== r && returnKey(o) === key)) return abstain('merged return');
       // Two returns of different names may hold their value in one register: one copy.
       if (returnsName(r) && ctx.returns.some(o => o !== r && returnsName(o))) return abstain('returns of names');
@@ -357,8 +470,39 @@ export function predictFall(ifs: IfStmt, place: Place, ctx: PredictContext): Pre
 
 /** Score every if of `body` that has a fact. */
 export function scoreBody(body: CompoundStmt, reader: LayoutReader, noreturn: ReadonlySet<string>): LayoutScore {
-  const ctx = predictContext(body, noreturn);
-  const out: LayoutScore = { objective: 0, sites: 0, mismatches: [], rules: [], abstained: [], scored: new Set() };
+  const ctx0 = predictContext(body, noreturn);
+  // A group whose one copy the original does not clearly place (two copies, or jumps that
+  // do not say) is not predicted, guard by guard either.
+  const groups = new Map<ReturnStmt, ReturnGroup>();
+  const unshared = new Map<ReturnGroup, ReturnGroup>();
+  const place = new Map<ReturnGroup, 'inline' | 'end' | null>();
+  // An `||` guard whose operands' branches are known is the local or-guard rule's to judge
+  // (index.ts): it may become a getter or one guard per test, so its group is not settled.
+  const judged = (g: ReturnGroup) => g.guards.some(x => conditionShape(x.condition).kind === 'or' && reader.operandBranches(x) !== null);
+  for (const g of new Set(ctx0.returnGroups.values())) place.set(g, g.copy && !judged(g) ? reader.mergedCopyPlace(g.members) : null);
+  for (const [r, g] of ctx0.returnGroups) {
+    if (g.copy && !place.get(g)) {
+      let u = unshared.get(g);
+      if (!u) unshared.set(g, u = { ...g, copy: null });
+      groups.set(r, u);
+    } else groups.set(r, g);
+  }
+  const ctx: PredictContext = { ...ctx0, returnGroups: groups };
+  const out: LayoutScore = { objective: 0, sites: 0, mismatches: [], rules: [], abstained: [], scored: new Set(), groups: new Map() };
+  // Where each group of identical returns keeps its one copy.
+  for (const g of new Set(ctx.returnGroups.values())) {
+    if (!g.copy) continue;
+    const fact = reader.mergedCopyPlace(g.members);
+    if (!fact) continue;
+    out.sites++;
+    const ok = fact === g.copy;
+    out.groups.set(g.key, ok);
+    out.rules.push(`merged return copy ${g.copy}=${ok ? 1 : 0}`);
+    if (!ok) {
+      out.objective++;
+      out.mismatches.push({ line: g.members[0].location?.start.line ?? 0, predicted: g.copy === 'inline' ? 'then' : 'other', fact: fact === 'inline' ? 'then' : 'other', rule: `merged return copy ${g.copy}` });
+    }
+  }
   const visit = (n: ASTNode, place: Place): void => {
     if (n.kind === NodeKind.IfStmt) {
       const ifs = n as IfStmt;

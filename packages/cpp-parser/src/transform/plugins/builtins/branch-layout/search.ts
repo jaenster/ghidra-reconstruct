@@ -18,6 +18,16 @@
  *   swap          `if (c) A else B` -> `if (!c) B else A` (with B an assertion halt outside a
  *                 loop, the sequential `if (!c) { B } A`).
  *   nest          `if (c) X; Y...` -> `if (!c) { Y... } X`, X and Y... leaving, outside a loop.
+ *                 At the end of a void function's body Y... may run off the end; it gets the
+ *                 `return;` that end stands for: `if (!c) { Y...; return; } X`.
+ *
+ *   join          `if (a) return K; if (b) return K;` -> `if (a || b) return K;`, and
+ *   split         every `if (a || b) return K;` (or `!(x && y)`) of K's group of identical
+ *                 returns -> `if (a) return K; if (b) return K;`: where VC8 keeps the one
+ *                 copy of K (predict.ts) follows from whether any guard of the group is an
+ *                 `||`, and the original's copy says which. The same tests and jumps either
+ *                 way; each is kept only where the group's copy site goes from contradicted
+ *                 to held.
  *
  * swap and nest have no pattern of their own: the edges decide them, so each is kept only
  * where the predictor scores every if it moves, before and after, and the rewritten if
@@ -36,8 +46,8 @@ import { updateNode } from '../../../transformer.js';
 import { Stmt, Expr } from '../../../../ast/factory.js';
 import { holdsFreeCase } from '../goto-cleanup/paths.js';
 import { LayoutReader, isLoop, type BranchLayoutEvidence } from './evidence.js';
-import { scoreBody, returnKey, type LayoutScore } from './predict.js';
-import { negate, jumpedLabels, gotoCounts, declaredNames, mentionsAny, spliced, asBlock } from './index.js';
+import { scoreBody, returnKey, returnGroups, type LayoutScore, type ReturnGroup } from './predict.js';
+import { negate, jumpedLabels, gotoCounts, declaredNames, mentionsAny, spliced, asBlock, guardOperands } from './index.js';
 import { leaves, isHaltStmt, isExitStmt } from '../assert-order.js';
 
 export interface SearchOptions {
@@ -53,7 +63,7 @@ export interface SearchOptions {
   fixed?: Set<string>;
 }
 
-type Rule = 'return-merge' | 'propagate' | 'swap' | 'nest';
+type Rule = 'return-merge' | 'propagate' | 'swap' | 'nest' | 'join' | 'split';
 
 interface Candidate {
   rule: Rule;
@@ -65,6 +75,10 @@ interface Candidate {
    * scores every if among them, before and after, and the rewritten if itself.
    */
   region?: { before: Statement[]; main: IfStmt };
+  /** The whole body after the rewrite, for one that changes more than one list. */
+  body?: CompoundStmt;
+  /** The key of the group of identical returns whose copy site the rewrite must settle (join, split). */
+  group?: string;
 }
 
 function bodyOf(s: Statement): Statement[] {
@@ -387,22 +401,82 @@ function swapIf(entry: { list: CompoundStmt; inLoop: boolean }, i: number, gotos
 
 /**
  * `if (c) X; Y...` where X leaves and Y..., the rest of the block, ends leaving, outside a
- * loop: `if (!c) { Y... } X`. Both directions of guard <-> nest are this one rewrite.
+ * loop: `if (!c) { Y... } X`. Both directions of guard <-> nest are this one rewrite. In the
+ * body of a void function Y... may run off the end, which is its return.
  */
-function nestIf(entry: { list: CompoundStmt; inLoop: boolean }, i: number, gotos: ReadonlyMap<string, number>, opts: SearchOptions): Candidate | null {
+function nestIf(entry: { list: CompoundStmt; inLoop: boolean; top: boolean }, i: number, gotos: ReadonlyMap<string, number>, opts: SearchOptions): Candidate | null {
   const stmts = entry.list.statements;
   const ifs = stmts[i] as IfStmt;
   if (ifs.elseBranch || ifs.init || ifs.isConstexpr || entry.inLoop || !placedIf(ifs)) return null;
   const rest = stmts.slice(i + 1);
   if (rest.length === 0) return null;
   const then = ifs.thenBranch;
-  if (!leaves(then, opts.noreturn) || !leaves(rest[rest.length - 1], opts.noreturn)) return null;
+  const restLeaves = leaves(rest[rest.length - 1], opts.noreturn);
+  if (!leaves(then, opts.noreturn) || (!restLeaves && !(entry.top && opts.voidResult))) return null;
   if (!movable([then, ...rest], gotos)) return null;
-  const nested = updateNode(ifs, { condition: negate(ifs.condition), thenBranch: Stmt.compound(rest), elseBranch: null } as Partial<IfStmt>);
+  const moved = restLeaves ? rest : [...rest, Stmt.return_()];
+  const nested = updateNode(ifs, { condition: negate(ifs.condition), thenBranch: Stmt.compound(moved), elseBranch: null } as Partial<IfStmt>);
   return {
     rule: 'nest', line: ifs.location.start.line, list: entry.list,
     replacement: [...stmts.slice(0, i), nested, ...spliced(then, bodyOf(then), stmts.slice(0, i), [])],
     region: { before: [ifs, ...rest], main: ifs },
+  };
+}
+
+/** An operand of a new `||`, parenthesised unless it binds tighter than `&&`. */
+function orOperand(e: Expression): Expression {
+  const u = unwrapParens(e);
+  const loose = u.kind === NodeKind.AssignExpr || u.kind === NodeKind.ConditionalExpr || u.kind === NodeKind.CommaExpr
+    || (u.kind === NodeKind.BinaryExpr && ((u as BinaryExpr).operator === '&&' || (u as BinaryExpr).operator === '||'));
+  return loose && u === e ? Expr.paren(e) : e;
+}
+
+/**
+ * `if (a) return K; if (b) return K;`, two neighbouring guards of one group of identical
+ * returns: `if (a || b) return K;`. The same tests in the same order, each taking the
+ * return: the control flow is the same.
+ */
+function joinGuards(entry: { list: CompoundStmt }, i: number, groups: ReadonlyMap<ReturnStmt, ReturnGroup>): Candidate | null {
+  const stmts = entry.list.statements;
+  const a = stmts[i], b = stmts[i + 1];
+  if (!b || b.kind !== NodeKind.IfStmt) return null;
+  const ra = guardReturn(a), rb = guardReturn(b);
+  const g = ra ? groups.get(ra) : undefined;
+  if (!ra || !rb || !g || groups.get(rb) !== g || !placedIf(a as IfStmt)) return null;
+  const cond = Expr.binary(orOperand((a as IfStmt).condition), '||', orOperand((b as IfStmt).condition));
+  const joined = updateNode(a as IfStmt, { condition: cond } as Partial<IfStmt>);
+  return {
+    rule: 'join', line: a.location.start.line, list: entry.list, group: g.key,
+    replacement: [...stmts.slice(0, i), joined, ...stmts.slice(i + 2)],
+  };
+}
+
+/**
+ * Every `if (a || b || ...) return K;` (or `!(x && y && ...)`) of the group: one guard per
+ * test, `if (a) return K; if (b) return K; ...`, in order. Each test takes the same return.
+ * Only where no `||` guard of the group has branch facts of its own: the local or-guard
+ * rule (index.ts) reads those per operand, and may write a getter instead.
+ */
+function splitGroup(body: CompoundStmt, g: ReturnGroup, reader: LayoutReader): Candidate | null {
+  const targets = g.guards.filter(x => guardOperands(x.condition) !== null);
+  if (targets.length === 0 || targets.some(x => reader.cbranch(x) !== null || reader.operandBranches(x) !== null)) return null;
+  let cur = body;
+  for (const ifs of targets) {
+    const ops = guardOperands(ifs.condition)!;
+    const holder = lists(cur).find(e => e.list.statements.includes(ifs));
+    if (!holder) return null;
+    const ret = guardReturn(ifs)!;
+    const split = ops.tests.map((t, k) => k === 0
+      ? updateNode(ifs, { condition: t } as Partial<IfStmt>)
+      : Stmt.if_(t, Stmt.compound([{ ...ret, leadingTrivia: [], trailingTrivia: [] } as Statement])));
+    const st = holder.list.statements;
+    const at = st.indexOf(ifs);
+    const list = updateNode(holder.list, { statements: [...st.slice(0, at), ...split, ...st.slice(at + 1)] } as Partial<CompoundStmt>);
+    cur = rebuild(cur, holder.list, list) as CompoundStmt;
+  }
+  return {
+    rule: 'split', line: targets[0].location?.start.line ?? 0, list: body, group: g.key,
+    replacement: cur.statements as Statement[], body: cur,
   };
 }
 
@@ -433,6 +507,11 @@ function confident(c: Candidate, before: LayoutScore, after: LayoutScore): boole
 function candidates(body: CompoundStmt, reader: LayoutReader, opts: SearchOptions): Candidate[] {
   const gotos = gotoCounts(body);
   const out: Candidate[] = [];
+  const groups = returnGroups(body);
+  for (const g of new Set(groups.values())) {
+    const c = g.copy ? splitGroup(body, g, reader) : null;
+    if (c) out.push(c);
+  }
   for (const entry of lists(body)) {
     const stmts = entry.list.statements;
     for (let i = 0; i < stmts.length; i++) {
@@ -445,6 +524,8 @@ function candidates(body: CompoundStmt, reader: LayoutReader, opts: SearchOption
       if (c) out.push(c);
       const d = nestIf(entry, i, gotos, opts);
       if (d) out.push(d);
+      const e = joinGuards(entry, i, groups);
+      if (e) out.push(e);
     }
   }
   return out;
@@ -462,10 +543,11 @@ export function layoutSearch(body: CompoundStmt, ev: BranchLayoutEvidence, opts:
     let best: { body: CompoundStmt; score: number; full: LayoutScore; c: Candidate } | null = null;
     for (const c of candidates(cur, reader, opts)) {
       if (c.region && !w1) continue;
-      const list = updateNode(c.list, { statements: c.replacement } as Partial<CompoundStmt>);
-      const next = rebuild(cur, c.list, list) as CompoundStmt;
+      const next = c.body ?? rebuild(cur, c.list, updateNode(c.list, { statements: c.replacement } as Partial<CompoundStmt>)) as CompoundStmt;
       const sc = scoreBody(next, new LayoutReader(ev, next), opts.noreturn);
       const s = sc.objective;
+      // A join or split must settle its group's copy: not merely drop the guards it touches from the count.
+      if (c.group !== undefined && !(full.groups.get(c.group) === false && sc.groups.get(c.group) === true)) continue;
       if (s < (best?.score ?? score) && confident(c, full, sc)) best = { body: next, score: s, full: sc, c };
     }
     if (!best) break;

@@ -30,6 +30,11 @@
  *             block, short leaving code, laid out between the two tests (the source
  *             wrote the failure tail once per test and VC8 merged the copies):
  *             `if (!a) T; if (!b) T; X`.
+ *
+ * The end of a void function's body is its return: a rest there that runs off the end
+ * leaves too. Moved into a block ahead of X, it gets the `return;` it ran into, so control
+ * still never reaches X after it: `if (c) X; Y;` at the end of a void function becomes
+ * `if (!c) { Y; return; } X`.
  *   or-guard  `if (a || b || ...) T; rest...` (or `!(x && y && ...)`), T short leaving
  *             code, laid out elsewhere than after the rest. The per-operand branch facts
  *             say which test T follows: after the first, one guard per test; after the
@@ -79,7 +84,7 @@ export interface BranchLayoutOptions extends PluginOptions {
   /** Further callees that never return, by unqualified name. */
   noreturnFunctions?: string[];
   /** Called once per rewrite and per site left for want of a source form. */
-  onSite?: (e: { rule: 'swap' | 'nest' | 'split' | 'getter' | 'left' | 'return-merge' | 'propagate'; line: number; why?: string }) => void;
+  onSite?: (e: { rule: 'swap' | 'nest' | 'split' | 'getter' | 'left' | 'return-merge' | 'propagate' | 'join'; line: number; why?: string }) => void;
   /**
    * The null default of each field read through a null-guarded getter (`null-getter.ts`),
    * keyed `<pointee type>|<member path>`; without it no getter comparison is written.
@@ -261,8 +266,12 @@ function plainOperand(e: Expression): boolean {
   }
 }
 
-/** Short leaving code that may be written once per test: calls on plain operands, then a plain return or a halt. */
-function copyableTail(stmts: readonly Statement[], noreturn: ReadonlySet<string>): boolean {
+/**
+ * Short leaving code that may be written once per test: calls on plain operands, then a
+ * plain return or a halt; with `fallsOff` (the end of a void function) the code may run off
+ * the end instead.
+ */
+function copyableTail(stmts: readonly Statement[], noreturn: ReadonlySet<string>, fallsOff = false): boolean {
   if (stmts.length === 0 || stmts.length > 3) return false;
   for (const s of stmts) {
     if (s.kind === NodeKind.ReturnStmt) {
@@ -274,7 +283,12 @@ function copyableTail(stmts: readonly Statement[], noreturn: ReadonlySet<string>
     const e = (s as ExprStmt).expression;
     if (e.kind !== NodeKind.CallExpr || !(e as CallExpr).arguments.every(plainOperand)) return false;
   }
-  return leaves(stmts[stmts.length - 1], noreturn);
+  return fallsOff || leaves(stmts[stmts.length - 1], noreturn);
+}
+
+/** `stmts` that run off the end of a void function, with the `return;` that end stands for. */
+function withReturn(stmts: readonly Statement[], noreturn: ReadonlySet<string>): Statement[] {
+  return stmts.length > 0 && leaves(stmts[stmts.length - 1], noreturn) ? [...stmts] : [...stmts, Stmt.return_()];
 }
 
 interface Ctx {
@@ -342,6 +356,14 @@ function swapAt(ifs: IfStmt, cb: number, ctx: Ctx, list: { before: Statement[]; 
   if (tE === null || eE === null || tE === eE) return null;
   const thenFirst = tE < eE;
   if (thenFirst === (shape.kind !== 'or')) return null;
+  // In a loop VC8 sinks the stub of a halt it merged with others (`push line; jmp`) below
+  // the loop exit, the stubs in the order their arms were written: the address of such an
+  // arm (a pass copied the halt back into it) says nothing about which arm came first.
+  const mergedHalt = (s: Statement) => { const l = bodyOf(s); return endsInHalt(l) && ctx.reader.copied(l[l.length - 1]); };
+  if (ctx.loopIfs.has(lineOf(ifs)) && (mergedHalt(then) || mergedHalt(other))) {
+    ctx.onSite?.({ rule: 'left', line: lineOf(ifs), why: 'if/else with a halt arm in a loop' });
+    return null;
+  }
   if (shape.kind !== 'simple') {
     ctx.onSite?.({ rule: 'left', line: lineOf(ifs), why: `if/else arms reversed, ${shape.kind} condition` });
     return null;
@@ -357,8 +379,11 @@ function swapAt(ifs: IfStmt, cb: number, ctx: Ctx, list: { before: Statement[]; 
   return [updateNode(ifs, { condition: cond, thenBranch: thenArm, elseBranch: second } as Partial<IfStmt>)];
 }
 
-/** `if (c) X; rest...`: the replacement for stmts[i..], or null. */
-function nestAt(stmts: readonly Statement[], i: number, cb: number, ctx: Ctx): Statement[] | null {
+/**
+ * `if (c) X; rest...`: the replacement for stmts[i..], or null. `fallsOff`: the list ends
+ * the body of a void function, so a rest that runs off its end leaves.
+ */
+function nestAt(stmts: readonly Statement[], i: number, cb: number, ctx: Ctx, fallsOff: boolean): Statement[] | null {
   const ifs = stmts[i] as IfStmt;
   const rest = stmts.slice(i + 1);
   if (rest.length === 0) return null;
@@ -380,14 +405,16 @@ function nestAt(stmts: readonly Statement[], i: number, cb: number, ctx: Ctx): S
       ctx.onSite?.({ rule: 'left', line: lineOf(ifs), why: 'shared tail among the tests, not a two-test `&&`' });
       return null;
     }
-    if (!copyableTail(rest, ctx.noreturn)
+    if (!copyableTail(rest, ctx.noreturn, fallsOff)
       || jumpedLabels([then, ...rest], ctx.gotos) || holdsFreeCase([then, ...rest])) {
       ctx.onSite?.({ rule: 'left', line: lineOf(ifs), why: 'shared tail among the tests, tail not copyable' });
       return null;
     }
-    ctx.onSite?.({ rule: 'split', line: lineOf(ifs) });
-    const first = updateNode(ifs, { condition: negate(conj[0]), thenBranch: Stmt.compound(rest), elseBranch: null } as Partial<IfStmt>);
-    const copy = rest.map(s => ({ ...cloneNode(s), leadingTrivia: [] }) as Statement);
+    const tailLeaves = leaves(rest[rest.length - 1], ctx.noreturn);
+    ctx.onSite?.({ rule: 'split', line: lineOf(ifs), why: tailLeaves ? undefined : 'tail runs off the end of a void function' });
+    const failing = withReturn(rest, ctx.noreturn);
+    const first = updateNode(ifs, { condition: negate(conj[0]), thenBranch: Stmt.compound(failing), elseBranch: null } as Partial<IfStmt>);
+    const copy = failing.map(s => ({ ...cloneNode(s), leadingTrivia: [] }) as Statement);
     ctx.reader.taint(rest);
     const second = Stmt.if_(negate(conj[1]), Stmt.compound(copy));
     return [first, second, ...spliced(then, bodyOf(then), stmts.slice(0, i), [])];
@@ -395,7 +422,8 @@ function nestAt(stmts: readonly Statement[], i: number, cb: number, ctx: Ctx): S
 
   const xE = armEntry(then, cb, ctx), rE = armEntry(rest[0], cb, ctx);
   if (xE === null || rE === null || xE <= rE) return null;
-  if (!leaves(rest[rest.length - 1], ctx.noreturn)) {
+  const restLeaves = leaves(rest[rest.length - 1], ctx.noreturn);
+  if (!restLeaves && !fallsOff) {
     ctx.onSite?.({ rule: 'left', line: lineOf(ifs), why: 'leaving arm after the rest, rest falls through' });
     return null;
   }
@@ -403,9 +431,11 @@ function nestAt(stmts: readonly Statement[], i: number, cb: number, ctx: Ctx): S
     ctx.onSite?.({ rule: 'left', line: lineOf(ifs), why: 'leaving arm after the rest, a label in the way' });
     return null;
   }
-  ctx.onSite?.({ rule: 'nest', line: lineOf(ifs) });
-  // The rest had not been visited yet: its own ifs are judged where they now sit.
-  const inner = rewriteList(rest, ctx) ?? rest;
+  ctx.onSite?.({ rule: 'nest', line: lineOf(ifs), why: restLeaves ? undefined : 'rest runs off the end of a void function' });
+  // The rest had not been visited yet: its own ifs are judged where they now sit. It now
+  // ends in a leave of its own.
+  const moved = withReturn(rest, ctx.noreturn);
+  const inner = rewriteList(moved, ctx, false) ?? moved;
   const nested = updateNode(ifs, { condition: negate(ifs.condition), thenBranch: Stmt.compound(inner), elseBranch: null } as Partial<IfStmt>);
   return [nested, ...spliced(then, bodyOf(then), stmts.slice(0, i), [])];
 }
@@ -416,7 +446,7 @@ function nestAt(stmts: readonly Statement[], i: number, cb: number, ctx: Ctx): S
  * `!(x && y && z)` gives the tests !x, !y, !z and the conjuncts x, y, z. Null for anything
  * else.
  */
-function guardOperands(cond: Expression): { tests: Expression[]; conj: Expression[] } | null {
+export function guardOperands(cond: Expression): { tests: Expression[]; conj: Expression[] } | null {
   let e = unwrapParens(cond);
   let negated = false;
   if (e.kind === NodeKind.UnaryExpr && (e as UnaryExpr).operator === '!') {
@@ -727,7 +757,8 @@ function haltElseAt(ifs: IfStmt, ctx: Ctx, list: { before: Statement[]; after: S
   return [guard, ...spliced(ifs.thenBranch, bodyOf(ifs.thenBranch), list.before, list.after)];
 }
 
-function rewriteList(stmts: readonly Statement[], ctx: Ctx): Statement[] | null {
+/** `fallsOff`: the list is the body of a void function, whose end is its return. */
+function rewriteList(stmts: readonly Statement[], ctx: Ctx, fallsOff: boolean): Statement[] | null {
   let cur = [...stmts];
   let changed = false;
   for (let i = 0; i < cur.length; i++) {
@@ -748,7 +779,7 @@ function rewriteList(stmts: readonly Statement[], ctx: Ctx): Statement[] | null 
       if (r) { cur = [...cur.slice(0, i), ...r, ...cur.slice(i + 1)]; changed = true; }
       continue;
     }
-    const r = nestAt(cur, i, cb, ctx);
+    const r = nestAt(cur, i, cb, ctx, fallsOff);
     if (r) { cur = [...cur.slice(0, i), ...r]; changed = true; }
   }
   return changed ? cur : null;
@@ -781,6 +812,12 @@ function rewriteFunction(fn0: FunctionDecl, ev: BranchLayoutEvidence, opts: Bran
   });
   const fn = searched === fn0.body ? fn0 : updateNode(fn0, { body: searched } as Partial<FunctionDecl>);
   const fnBody = fn.body!;
+  const voidFn = isVoidFunction(fn);
+  // The transformer hands over rebuilt nodes: the body is known by its position.
+  const isBody = (b: CompoundStmt): boolean => b === fnBody
+    || (!!b.location && !!fnBody.location && b.location.start.line === fnBody.location.start.line
+      && b.location.start.column === fnBody.location.start.column && b.location.file === fnBody.location.file
+      && fnBody.location.file !== '<generated>');
   const ctx: Ctx = {
     reader: new LayoutReader(ev, fnBody),
     noreturn,
@@ -808,7 +845,7 @@ function rewriteFunction(fn0: FunctionDecl, ev: BranchLayoutEvidence, opts: Bran
       return updateNode(node, { elseBranch: r[0] } as Partial<IfStmt>);
     },
     visitCompoundStmt(block: CompoundStmt): ASTNode | undefined {
-      const r = rewriteList(block.statements, ctx);
+      const r = rewriteList(block.statements, ctx, voidFn && isBody(block));
       if (!r) return undefined;
       n++;
       return updateNode(block, { statements: r } as Partial<CompoundStmt>);

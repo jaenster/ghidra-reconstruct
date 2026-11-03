@@ -7,7 +7,7 @@ import { traverseAST } from '../../../ast/visitor.js';
 import { NodeKind } from '../../../ast/kinds.js';
 import { branchLayoutPlugin } from '../builtins/branch-layout/index.js';
 import { earlyReturnPlugin } from '../builtins/early-return.js';
-import { LayoutReader, type BranchLayoutEvidence, type BranchEdge } from '../builtins/branch-layout/evidence.js';
+import { LayoutReader, type BranchLayoutEvidence, type BranchEdge, type ReturnCopy } from '../builtins/branch-layout/evidence.js';
 import { scoreBody, predictFall, predictContext } from '../builtins/branch-layout/predict.js';
 import { compileAndRun, hasNativeGpp } from '../../../testing/native-cpp.js';
 
@@ -414,5 +414,174 @@ describe('a return copy that loads its own value: the source had no guard', () =
     };
     assert.strictEqual(score(['MOV/EAX', 'POP/ESI', 'RET']), 1);
     assert.strictEqual(score(['POP/ESI', 'RET']), 0);
+  });
+});
+
+/**
+ * Identical constant returns share one copy (predict.ts): inline at the first guard when every
+ * one is a simple or `&&` guard, at the end when one is an `||` guard or ends the body.
+ */
+describe('branch-layout predict - merged return copy', () => {
+  const groupsOf = (code: string) => {
+    const b = body(code);
+    const ctx = predictContext(b, new Set());
+    return { b, ctx, groups: [...new Set(ctx.returnGroups.values())] };
+  };
+  const guards = (b: CompoundStmt) => [...traverseAST(b as ASTNode)].filter(n => n.kind === NodeKind.IfStmt) as IfStmt[];
+
+  it('puts the copy inline at the first of three simple guards (GetStateFlags)', () => {
+    const { b, ctx, groups } = groupsOf([
+      'int* f(U* pUnit) {',
+      '  if (!pUnit) { return nullptr; }',
+      '  SX* p = pUnit->pStatsEx;',
+      '  if (!p) { return nullptr; }',
+      '  if (!(p->nFlags & 0x80000000U)) { return nullptr; }',
+      '  return p->pStateFlags;',
+      '}',
+    ].join('\n'));
+    assert.deepStrictEqual(groups.map(g => [g.key, g.copy, g.members.length]), [['nullptr', 'inline', 3]]);
+    const falls = guards(b).map(g => predictFall(g, { list: b.statements, index: b.statements.indexOf(g), inLoop: false }, ctx).fall);
+    assert.deepStrictEqual(falls, ['then', 'other', 'other']);
+  });
+
+  it('puts the copy at the end when one guard is `!(a && b)` (ours of GetStateFlags)', () => {
+    const { b, ctx, groups } = groupsOf([
+      'int* f(U* pUnit) {',
+      '  if (!pUnit) { return 0; }',
+      '  SX* p = pUnit->pStatsEx;',
+      '  if (!(p && p->nFlags & 0x80000000U)) { return 0; }',
+      '  return p->pStateFlags;',
+      '}',
+    ].join('\n'));
+    assert.deepStrictEqual(groups.map(g => g.copy), ['end']);
+    const falls = guards(b).map(g => predictFall(g, { list: b.statements, index: b.statements.indexOf(g), inLoop: false }, ctx).fall);
+    assert.deepStrictEqual(falls, ['other', 'other']);
+  });
+
+  it('puts the copy at the end when the body ends in the same return', () => {
+    const { groups } = groupsOf('int f(int a, int* p) { if (!a) { return 0; } G(a); if (p && *p) { return *p; } return 0; }');
+    assert.deepStrictEqual(groups.map(g => g.copy), ['end']);
+  });
+
+  it('does not predict a group with a member in an arm with code, a nested block or a loop', () => {
+    for (const code of [
+      'int f(int a, int b) { if (!a) { return 0; } if (b == 3) { G(b); return 0; } return 1; }',
+      'int f(int a, int b) { if (a) { if (!b) { return 0; } } else if (b) { return 0; } return 1; }',
+      'int f(int a, int b) { if (!a) { return 0; } while (b) { if (b == 2) { return 0; } b--; } return 1; }',
+      'int f(int a, int b) { if (!a) { return 0; } G(a); if (a || b) { return 1; } return 0; }',
+    ]) assert.deepStrictEqual(groupsOf(code).groups.map(g => g.copy), [null], code);
+  });
+});
+
+describe('branch-layout search - merged return copy (join and split)', () => {
+  /** Evidence with explicit per-line offsets and return copies. */
+  function runAt(code: string, lines: Record<number, number[]>, returns: ReturnCopy[], edges: BranchEdge[] = []): { out: string; sites: string[] } {
+    const sites: string[] = [];
+    const ev: BranchLayoutEvidence = {
+      lines: new Map(Object.entries(lines).map(([l, o]) => [Number(l), o])),
+      ifs: new Map(edges.map(e => [e.line, e.jcc])), edges, returns,
+    };
+    const t = branchLayoutPlugin.createTransformer({ branchLayout: ev, onSite: e => sites.push(e.rule) });
+    return { out: flat(emit(t(parse(code)) as AnyNode)), sites };
+  }
+
+  // GetStateFlags 00625bb0, as the passes leave it: the decompile's one && chain split, the
+  // second guard `!(p && flags)`, both its ifs on the chain's line (no branch facts of their own).
+  // The original's one `return 0` copy sits right after the first test, the later tests jump
+  // back to it: three simple guards.
+  const stateFlags = [
+    'int* f(U* pUnit) {',                                   // 1
+    '  if (!pUnit) {',                                      // 2
+    '    return 0;',                                        // 3
+    '  }',                                                  // 4
+    '  SX* p = pUnit->pStatsEx;',                           // 5
+    '  if (!(p && p->sStatList.nFlags & 0x80000000U)) {',   // 6
+    '    return 0;',                                        // 7
+    '  }',                                                  // 8
+    '  return p->pStateFlags;',                             // 9
+    '}',
+  ].join('\n');
+  const stateLines = { 2: [6, 8], 3: [10, 13], 5: [16], 6: [19, 23, 30], 7: [10, 13], 9: [32, 36] };
+  const stateReturns: ReturnCopy[] = [
+    { start: 10, ret: 13, insns: ['XOR/EAX', 'POP/EBP', 'RET'], fallsIn: true, jumpsIn: [21, 30] },
+    { start: 32, ret: 36, insns: ['MOV/EAX', 'POP/EBP', 'RET'], fallsIn: true, jumpsIn: [] },
+  ];
+
+  it('splits the `!(a && b)` guard into one guard per test (GetStateFlags)', () => {
+    const { out, sites } = runAt(stateFlags, stateLines, stateReturns);
+    assert.deepStrictEqual(sites, ['split']);
+    assert.ok(out.includes('if (!pUnit) { return 0; } SX* p = pUnit->pStatsEx; if (!p) { return 0; } if (!(p->sStatList.nFlags & 0x80000000U)) { return 0; } return p->pStateFlags;'), out);
+  });
+
+  it('keeps the values of the split', native, () => {
+    const { out } = runAt(stateFlags, stateLines, stateReturns);
+    const decl = 'struct SL { unsigned pad[4]; unsigned nFlags; }; struct SX { SL sStatList; int* pStateFlags; }; struct U { SX* pStatsEx; };';
+    const prelude = [decl, 'static int gFlags[1];', `namespace ref { ${stateFlags} }`, `namespace low { ${out} }`].join('\n');
+    const main = [
+      'SX a = {}; a.pStateFlags = gFlags; U u = { &a }; U n = { nullptr };',
+      'static const unsigned kFlags[] = {0u, 0x80000000u, 0x80000001u};', 'for (unsigned fl : kFlags) { a.sStatList.nFlags = fl;',
+      '  printf("%d %d %d %d\\n", ref::f(&u) == low::f(&u), ref::f(&n) == low::f(&n), ref::f(nullptr) == low::f(nullptr), ref::f(&u) == gFlags); }',
+    ].join('\n');
+    const lines = compileAndRun(prelude, main).trim().split('\n');
+    assert.deepStrictEqual(lines.map(l => l.split(' ').slice(0, 3).join(' ')), ['1 1 1', '1 1 1', '1 1 1']);
+    assert.deepStrictEqual(lines.map(l => l.split(' ')[3]), ['0', '1', '1']);
+  });
+
+  it('leaves the split guard when its copy already lies at the end', () => {
+    const atEnd: ReturnCopy[] = [stateReturns[1], { start: 40, ret: 43, insns: ['XOR/EAX', 'POP/EBP', 'RET'], fallsIn: false, jumpsIn: [8, 21, 30] }];
+    const { sites } = runAt(stateFlags, { ...stateLines, 3: [40, 43], 7: [40, 43] }, atEnd);
+    assert.deepStrictEqual(sites, []);
+  });
+
+  // SFILE_GetInstallPath 00406ba0: two simple guards `if (!d) return 0; if (d == n) return 0;`
+  // where the original's one copy of `return 0` lies after everything, every test jumping
+  // forward to it: the source had one `||` guard.
+  const installPath = [
+    'int f(int a, int n) {',     // 1
+    '  int d = G(a);',           // 2
+    '  if (!d) {',               // 3
+    '    return 0;',             // 4
+    '  }',                       // 5
+    '  if (d == n) {',           // 6
+    '    return 0;',             // 7
+    '  }',                       // 8
+    '  H(d);',                   // 9
+    '  if (!n) {',               // 10
+    '    return 0;',             // 11
+    '  }',                       // 12
+    '  return 1;',               // 13
+    '}',
+  ].join('\n');
+  const installLines = { 2: [0], 3: [3, 5], 4: [0x40, 0x44], 6: [8, 0xb], 7: [0x40, 0x44], 9: [0x10], 10: [0x1e, 0x20], 11: [0x40, 0x44], 13: [0x30, 0x35] };
+  const installReturns: ReturnCopy[] = [
+    { start: 0x30, ret: 0x35, insns: ['MOV/EAX', 'POP/ESI', 'RET'], fallsIn: true, jumpsIn: [] },
+    { start: 0x40, ret: 0x44, insns: ['XOR/EAX', 'POP/ESI', 'RET'], fallsIn: false, jumpsIn: [5, 0xb, 0x20] },
+  ];
+  const installEdges = [
+    edge(3, 5, 0x40, 7, [6], [4]),
+    edge(6, 0xb, 0x40, 0xd, [9], [7]),
+    edge(10, 0x20, 0x40, 0x22, [13], [11]),
+  ];
+
+  it('joins two neighbouring guards into one `||` guard (SFILE_GetInstallPath)', () => {
+    const { out, sites } = runAt(installPath, installLines, installReturns, installEdges);
+    assert.deepStrictEqual(sites, ['join']);
+    assert.ok(out.includes('int d = G(a); if (!d || d == n) { return 0; } H(d); if (!n) { return 0; } return 1;'), out);
+  });
+
+  it('keeps the values of the join', native, () => {
+    const { out } = runAt(installPath, installLines, installReturns, installEdges);
+    const calls = ['f(0, 0)', 'f(0, 5)', 'f(5, 5)', 'f(3, 5)', 'f(3, 0)', 'f(-1, 7)'].map(c => c);
+    const prelude = ['static int gCalls = 0;', 'static int G(int a) { gCalls++; return a > 0 ? a : 0; }', 'static void H(int d) { gCalls += d; }',
+      `namespace ref { ${installPath} }`, `namespace low { ${out} }`].join('\n');
+    const main = calls.map(c => `{ gCalls = 0; int r = ref::${c}; int rc = gCalls; gCalls = 0; int l = low::${c}; printf("%d %d\\n", r == l, rc == gCalls); }`).join('\n');
+    for (const line of compileAndRun(prelude, main).trim().split('\n')) assert.strictEqual(line, '1 1');
+  });
+
+  it('leaves the guards when the copy is inline at the first one', () => {
+    const inline: ReturnCopy[] = [installReturns[0], { start: 7, ret: 0xa, insns: ['XOR/EAX', 'POP/ESI', 'RET'], fallsIn: true, jumpsIn: [0xd, 0x20] }];
+    const lines = { ...installLines, 4: [7, 0xa], 7: [7, 0xa], 11: [7, 0xa], 6: [0xb, 0xd] };
+    const edges = [edge(3, 5, 0xb, 7, [4], [6]), edge(6, 0xd, 7, 0xf, [9], [7]), edge(10, 0x20, 7, 0x22, [13], [11])];
+    assert.deepStrictEqual(runAt(installPath, lines, inline, edges).sites, []);
   });
 });

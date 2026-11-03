@@ -7,8 +7,11 @@ import { branchLayoutPlugin, conditionShape, negate, LayoutReader, type BranchLa
 import { earlyReturnPlugin } from '../builtins/early-return.js';
 import { haltSiteFoldPlugin } from '../builtins/halt-site-fold.js';
 import type { BranchLayoutEvidence } from '../builtins/branch-layout/evidence.js';
-import type { ExprStmt, IfStmt, FunctionDecl, ASTNode } from '../../../ast/nodes.js';
+import type { ExprStmt, IfStmt, FunctionDecl, ASTNode, CompoundStmt } from '../../../ast/nodes.js';
 import { traverseAST } from '../../../ast/visitor.js';
+import { compileAndRun, hasNativeGpp } from '../../../testing/native-cpp.js';
+
+const native = { skip: !hasNativeGpp() };
 
 const HALT = 'ERROR_UnrecoverableInternalError_Halt';
 
@@ -948,5 +951,197 @@ describe('branchLayoutPlugin - a halt laid out first whose branch a pass copied'
   it('keeps the if/else when the jump falls into the other arm', () => {
     const out = runEdge(lines, [3, 4], [7, 8]);
     assert.ok(out.includes('if (pInventory) { A(pInventory); return 1; } else {'), out);
+  });
+});
+
+/** `before` and `after` (void functions `f`) called over `calls` leave the same trace. */
+function sameTrace(before: string, after: string, calls: string[], glue = ''): void {
+  const prelude = [
+    'static char gTrace[256]; static int gLen = 0;',
+    'static void T(char c) { if (gLen < 255) gTrace[gLen++] = c; gTrace[gLen] = 0; }',
+    'static void A(int n) { T(\'A\'); T((char)(\'0\' + n)); } static void B(int n) { T(\'B\'); T((char)(\'0\' + n)); }',
+    'struct S { void (*fn)(int); };', glue,
+    `namespace ref { ${before} }`, `namespace low { ${after} }`,
+  ].join('\n');
+  const main = calls.map(c => [
+    `{ gLen = 0; gTrace[0] = 0; ref::${c}; char r[256]; strcpy(r, gTrace);`,
+    `  gLen = 0; gTrace[0] = 0; low::${c}; printf("%s|%s\\n", r, gTrace); }`,
+  ].join('\n')).join('\n');
+  for (const line of compileAndRun(prelude, main).trim().split('\n')) {
+    const [r, l] = line.split('|');
+    assert.strictEqual(l, r, `trace differs: ${line}`);
+  }
+}
+
+describe('branchLayoutPlugin - a void function whose rest runs off the end', () => {
+  // TEXT_DrawQuestScrollUI 0049ff10: `if (t != K) { ...; return; } Anim(0);` where Anim(0)
+  // lies first: the source wrote `if (t == K) { Anim(0); return; } ...`.
+  const nest = [
+    'void f(int t) {',
+    '[if 0x14 0x0f,0x14] if (t != 7) {',
+    '[0x1e] B(1);',
+    '[0x23] return;',
+    '}',
+    '[0x18] A(0);',
+    '}',
+  ];
+
+  it('nests the rest with the return its end stands for', () => {
+    const { out, sites } = run(nest);
+    assert.deepStrictEqual(sites, ['nest']);
+    assert.ok(out.includes('if (t == 7) { A(0); return; } B(1); return; }'), out);
+  });
+
+  it('keeps the control flow of the nest', native, () => {
+    const { out } = run(nest);
+    sameTrace(fixture(nest).code, out, ['f(7)', 'f(3)']);
+  });
+
+  it('is idempotent', () => {
+    const { first, second } = twice(nest);
+    assert.strictEqual(second, first);
+  });
+
+  it('leaves a rest that falls through in a function that returns a value', () => {
+    const { sites } = run(nest.map(l => l.replace('void f(int t)', 'int f(int t)').replace('return;', 'return 1;')));
+    assert.deepStrictEqual(sites, ['left']);
+  });
+
+  it('leaves a rest that falls through in a nested block', () => {
+    const { sites } = run([
+      'void f(int t, int u) {',
+      '[if 0x4 0x2,0x4] if (u) {',
+      '[if 0x14 0x0f,0x14] if (t != 7) {',
+      '[0x1e] B(1);',
+      '[0x23] return;',
+      '}',
+      '[0x18] A(0);',
+      '}',
+      '[0x30] A(2);',
+      '}',
+    ]);
+    assert.ok(!sites.includes('nest'), sites.join(','));
+  });
+
+  // MONMODE_DispatchDeathDrop 005a7ba0: `if (h && h->fn) { h->fn(m); return; } D(m);` with
+  // D(m) between the two tests: the source wrote the default once per test.
+  const split = [
+    'void f(S* h, int m) {',
+    '[if 0x30 0x1b,0x2b,0x30] if (h && h->fn) {',
+    '[0x32] h->fn(m);',
+    '[0x3b] return;',
+    '}',
+    '[0x20] A(m);',
+    '}',
+  ];
+
+  it('splits the && with the default and its return per test', () => {
+    const { out, sites } = run(split);
+    assert.deepStrictEqual(sites, ['split']);
+    assert.ok(out.includes('if (!h) { A(m); return; } if (!h->fn) { A(m); return; } h->fn(m); return; }'), out);
+  });
+
+  it('keeps the control flow of the split', native, () => {
+    const { out } = run(split);
+    const calls = ['f(nullptr, 1)', 'f(&s0, 2)', 'f(&s1, 3)'];
+    sameTrace(fixture(split).code, out, calls, 'static S s0 = { nullptr }; static S s1 = { B };');
+  });
+});
+
+describe('branchLayoutPlugin - halt arms', () => {
+  // ITEMMODE_ProcessItemDropLogic 0055fcc0: in a loop, the stubs of halts VC8 merged sink
+  // below the loop in the order their arms were written, whatever the spelling.
+  const lines = [
+    'void f(int* p, int n) {',
+    '[0x8c]',
+    'while (n) {',
+    '[if 0x10 0x0e,0x10] if (!p) {',
+    `[0x80] ${HALT}("", 0, 0x1a0f);`,
+    '[0x88] exit(-1);',
+    '}',
+    'else {',
+    '[0x12] A(n);',
+    '}',
+    '[0x20] n--;',
+    '}',
+    '}',
+  ];
+  function runCopied(copy: boolean): string[] {
+    const { code, ev } = fixture(lines);
+    const ast = parse(code);
+    if (copy) {
+      // The halt's lines claimed twice, as a pass that copied a merged halt leaves them; the
+      // copy owns the store of its line (line 2), which printed the stub's PUSH.
+      const fn = [...traverseAST(ast)].find(n => n.kind === 'FunctionDecl') as FunctionDecl;
+      const ifs = [...traverseAST(fn)].find(n => n.kind === 'IfStmt') as IfStmt;
+      const arm = ifs.thenBranch as CompoundStmt;
+      (fn.body!.statements as unknown as ASTNode[]).push({ ...arm, statements: [...arm.statements] } as ASTNode);
+      const st = arm.statements as unknown as ASTNode[];
+      st[0] = { ...st[0], ghidraInfo: { ...st[0].ghidraInfo, foldedLines: [2] } };
+    }
+    const sites: string[] = [];
+    branchLayoutPlugin.createTransformer({ branchLayout: ev, onSite: e => sites.push(e.rule) })(ast);
+    return sites;
+  }
+
+  it('leaves an if/else in a loop whose halt arm is a copy of a merged halt', () => {
+    assert.deepStrictEqual(runCopied(true), ['left']);
+  });
+
+  it('still swaps one whose halt is its own', () => {
+    assert.deepStrictEqual(runCopied(false), ['swap']);
+  });
+});
+
+describe('halt-site-fold places its copies where their code is', () => {
+  // VIEW_ConvertViewCoordsToIsometric 004760e0: three asserts the compiler merged into one
+  // halt; the first test falls into it. The copy for that test keeps the halt's lines, so the
+  // if's own line keeps its branch, and the halt is laid out first: `if (!v) halt;`.
+  const lines = [
+    'void f(V* v, int* ox, int* oy) {',
+    '[if 0x5 0x3,0x5] if (v != 0) {',
+    '[if 0x2c 0x2a,0x2c] if (ox == 0) {',
+    '[0x2e] nErrLine = 0x1ce;',
+    '}',
+    'else {',
+    '[if 0x3a 0x38,0x3a] if (oy != 0) {',
+    '[0x44,0x52] Iso(v, ox, oy);',
+    '[0x59] return;',
+    '}',
+    '[0x3c] nErrLine = 0x1cf;',
+    '}',
+    '}',
+    '[0xc] nErrAddress = GetInstructionPointer();',
+    `[0x17] ${HALT}("", nErrAddress, nErrLine);`,
+    '[0x21] exit(-1);',
+    '}',
+  ];
+  const haltLines = [{ at: 0x17, ip: 0xc, paths: [{ line: 0x1cd, guard: 5 }, { line: 0x1ce, guard: 0x2c }, { line: 0x1cf, guard: 0x3a }] }];
+
+  it('makes the first assert a leading guard', () => {
+    const { code, ev } = fixture(lines);
+    const folded = haltSiteFoldPlugin.createTransformer({ haltLines, branchLayout: ev })(parse(code));
+    const sites: string[] = [];
+    const out = flat(emit(branchLayoutPlugin.createTransformer({ branchLayout: ev, onSite: e => sites.push(e.rule) })(folded) as AnyNode));
+    assert.ok(sites.includes('swap'), sites.join(','));
+    assert.ok(out.includes(`if (v == 0) { ${HALT}("", GetInstructionPointer(), 0x1cd); exit(-1); } if (ox == 0) { ${HALT}("", GetInstructionPointer(), 0x1ce); exit(-1); }`), out);
+  });
+
+  it('gives a folded halt its definitions\' lines, not the range up to them', () => {
+    const { code } = fixture([
+      'void f(int a) {',
+      '[0x2] A(a);',
+      '[0x4] nLine = 0x40;',
+      '[0x8] y = a;',
+      '[0x10] nErrAddress = GetInstructionPointer();',
+      `[0x17] ${HALT}("", nErrAddress, nLine);`,
+      '[0x21] exit(-1);',
+      '}',
+    ]);
+    const folded = haltSiteFoldPlugin.createTransformer({})(parse(code));
+    const halt = [...traverseAST(folded as ASTNode)].find(n => n.kind === 'ExprStmt' && emit(n as AnyNode).includes(HALT)) as ExprStmt;
+    assert.ok(emit(halt as AnyNode).includes('0x40'), emit(halt as AnyNode));
+    assert.strictEqual(halt.location.start.line, 6);
+    assert.deepStrictEqual([...(halt.ghidraInfo?.foldedLines ?? [])].sort(), [3, 5]);
   });
 });

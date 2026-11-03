@@ -279,6 +279,13 @@ export class LayoutReader {
     return own;
   }
 
+  /** A line `s` owns is claimed by another statement too: a pass copied it. */
+  copied(s: Statement): boolean {
+    let hit = false;
+    ownedRanges(s, (from, to) => { for (let l = from; l <= to; l++) if (this.tainted.has(l)) hit = true; });
+    return hit;
+  }
+
   /** Drop the evidence of the lines `stmts` own: a pass copied them. */
   taint(stmts: readonly Statement[]): void {
     for (const s of stmts) ownedRanges(s, (from, to) => { for (let l = from; l <= to; l++) this.tainted.add(l); });
@@ -391,6 +398,44 @@ export class LayoutReader {
     const lo = Math.min(...offs), hi = Math.max(...offs);
     const copy = this.ev.returns.find(c => c.start <= lo && lo <= c.ret);
     return copy && hi <= copy.ret ? lo : null;
+  }
+
+  /**
+   * Where the original keeps the one copy of a group of identical returns. `inline`: code
+   * falls into it, code of the function lies after it, and a later test jumps back to it.
+   * `end`: no code but other return copies lies after it, and every jump into it comes from
+   * before. Null without return facts, when the members' lines place no copy or more than
+   * one, or the two readings disagree (a block sunk below the copy, a copy inline at a later
+   * guard).
+   */
+  mergedCopyPlace(rets: readonly ReturnStmt[]): 'inline' | 'end' | null {
+    const returns = this.ev.returns;
+    const copy = this.sharedCopy(rets);
+    if (!returns || !copy || !copy.jumpsIn || copy.jumpsIn.length === 0) return null;
+    const inCopy = (o: number) => returns.some(c => c.start <= o && o <= c.ret);
+    let after = false;
+    for (const offs of this.ev.lines.values()) {
+      if (offs.some(o => o > copy.ret && !inCopy(o))) { after = true; break; }
+    }
+    const back = copy.jumpsIn.some(j => j > copy.start);
+    if (!after && !back) return 'end';
+    return after && back && copy.fallsIn === true ? 'inline' : null;
+  }
+
+  /**
+   * The one return copy of the original that the lines of `rets` place them all in; null
+   * when they place none, or two (VC8 keeps two copies whose epilogues differ: a return
+   * before a register is saved restores fewer).
+   */
+  sharedCopy(rets: readonly ReturnStmt[]): ReturnCopy | null {
+    const returns = this.ev.returns;
+    if (!returns) return null;
+    const at = new Set<ReturnCopy>();
+    for (const r of rets) {
+      const lo = this.returnCopy(r);
+      if (lo !== null) at.add(returns.find(c => c.start <= lo && lo <= c.ret)!);
+    }
+    return at.size === 1 ? [...at][0] : null;
   }
 
   /** Lowest offset printed by the condition's lines; null when unknown. */
