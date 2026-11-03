@@ -499,6 +499,35 @@ describe('stack-frame-address: varargs list via va_start', () => {
 });
 
 describe('stack-frame-address: an address printed against the neighbour of its array', () => {
+  // STRTABLE_FormatInt64 @0x00525490: the digit read `[ebp + ecx - 0x48]` is printed against
+  // wszFallback, the 4-byte array under szDigitBuf, which is only written after the loop.
+  const FMT = [
+    { name: 'szDigitBuf', offset: -0x44, size: 64, isArray: true },
+    { name: 'wszFallback', offset: -0x48, size: 4, isArray: true },
+    { name: 'nDigitBufIdx', offset: -0x4c, size: 4 },
+  ];
+  const FMT_SRC = (loop: string, tail = 'wszFallback[0] = 0; h(wszFallback);') =>
+    `void f(uint16_t* w, int n) { int nDigitBufIdx; uint16_t wszFallback[2]; char szDigitBuf[64]; g(szDigitBuf); `
+    + `if (n) { while (n) { nDigitBufIdx = n + 3; n--; ${loop} } } ${tail} }`;
+
+  it('re-anchors a byte read off an array nothing has written yet onto the byte array above', () => {
+    const out = run(FMT_SRC('w[n] = (short int)*(char*)((int)wszFallback + nDigitBufIdx);'), FMT);
+    assert.ok(out.includes('w[n] = (short int)szDigitBuf[nDigitBufIdx - 4];'), out);
+    assert.ok(!out.includes('(int)wszFallback'), out);
+    const typed = run(FMT_SRC('w[n] = *(uint8_t*)((int)wszFallback + nDigitBufIdx);'), FMT);
+    assert.ok(typed.includes('((uint8_t*)szDigitBuf)[nDigitBufIdx - 4]'), typed);
+  });
+
+  it('leaves the read where the array is named before it, something jumps, or the array above is not bytes', () => {
+    const read = 'w[n] = (short int)*(char*)((int)wszFallback + nDigitBufIdx);';
+    const kept = (src: string, slots = FMT) => assert.ok(run(src, slots).includes('(int)wszFallback + nDigitBufIdx'), run(src, slots));
+    kept(FMT_SRC(read).replace('g(szDigitBuf);', 'g(szDigitBuf); wszFallback[1] = 7;'));
+    kept(FMT_SRC(read, 'wszFallback[0] = 0; h(wszFallback); goto out; out: ;'));
+    kept(FMT_SRC(`${read} wszFallback[0] = 1;`));
+    kept(FMT_SRC(read), [{ name: 'szDigitBuf', offset: -0x40, size: 64, isArray: true }, ...FMT.slice(1)]);
+    kept(FMT_SRC(read).replace('char szDigitBuf[64]', 'uint16_t szDigitBuf[32]'));
+  });
+
   // UIMENU_ShowTermsOfService @0x00433810: a 2-byte slot directly below the line buffer.
   const TOS = [
     { name: 'wszLineBuffer', offset: -552, size: 400, isArray: true },

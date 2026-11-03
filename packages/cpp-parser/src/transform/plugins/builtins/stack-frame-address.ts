@@ -1205,6 +1205,17 @@ function shiftedIndex(index: Expression, d: number): Expression {
  *    elements no further than the array is long (the same reach as the
  *    `stack0x` rule above). The nearest such array wins. The alias declaration
  *    goes when nothing references it any more.
+ *
+ *  - `*(char*)((int)wszFallback + i)`, a byte read at a variable offset from a
+ *    small array directly below a byte array (`STRTABLE_FormatInt64` @0x00525490:
+ *    `[ebp + ecx - 0x48]` with ecx = nDigitCount + 3, the digit of `char
+ *    szDigitBuf[64]` at -0x44 above `uint16_t wszFallback[2]` at -0x48):
+ *    `szDigitBuf[i - 4]`. The offset is not a literal, so where it lands is not
+ *    read from it; the evidence is the array itself: no statement before the
+ *    read names it (every other reference sits in a later statement of the
+ *    function body, and nothing jumps), so at the read it holds nothing -
+ *    the bytes read are the ones above it. The rules above miss this shape
+ *    because they take only a scalar's `&x` and a literal offset.
  */
 function createNeighbourAnchorTransformer(slots: StackSlot[]): Transformer {
   return (root: ASTNode) => {
@@ -1373,8 +1384,65 @@ function createNeighbourAnchorTransformer(slots: StackSlot[]): Transformer {
       }
     }
 
+    // ---- `*(char*)((int)arr + i)`: a byte read off an unwritten array, into the one above --
+    const unwrittenBelow = new Map<unknown, { a: StackSlot; d: number; type: TypeNode }>();
+    for (const fn of [...traverseAST(root)].filter((n) => n.kind === NodeKind.FunctionDecl) as FunctionDecl[]) {
+      const body = fn.body as CompoundStmt | undefined;
+      const hasJumps = !!body && [...traverseAST(body)].some((n) => n.kind === NodeKind.GotoStmt || n.kind === NodeKind.LabelStmt);
+      if (body && !hasJumps) {
+        /** `(T*)((int)arr + i)` with T one byte and arr a declared frame array: arr, i and T. */
+        const byteRead = (e: Expression): { arr: string; type: TypeNode } | null => {
+          const c = unwrapParens(e);
+          if (c.kind !== NodeKind.CStyleCastExpr) return null;
+          const ct = (c as CStyleCastExpr).type;
+          if (ct.kind !== NodeKind.PointerType || scalarSpellingSize((ct as PointerType).pointee) !== 1) return null;
+          const sum = unwrapParens((c as CStyleCastExpr).expression);
+          if (sum.kind !== NodeKind.BinaryExpr || (sum as BinaryExpr).operator !== '+') return null;
+          const l = unwrapParens((sum as BinaryExpr).left);
+          if (l.kind !== NodeKind.CStyleCastExpr || !isIntegerType((l as CStyleCastExpr).type)) return null;
+          const id = unwrapParens((l as CStyleCastExpr).expression);
+          if (id.kind !== NodeKind.Identifier) return null;
+          return { arr: (id as Identifier).name, type: (ct as PointerType).pointee };
+        };
+        const firstRef = new Map<string, number>();
+        const reads: Array<{ node: UnaryExpr; at: number; arr: string; type: TypeNode }> = [];
+        const declNames = new Set<unknown>();
+        for (const n of traverseAST(body)) if (n.kind === NodeKind.VariableDecl) declNames.add((n as VariableDecl).name);
+        body.statements.forEach((st, at) => {
+          const inRead = new Set<unknown>();
+          for (const n of traverseAST(st)) {
+            if (n.kind !== NodeKind.UnaryExpr || (n as UnaryExpr).operator !== '*') continue;
+            const r = byteRead((n as UnaryExpr).operand);
+            if (!r) continue;
+            reads.push({ node: n as UnaryExpr, at, ...r });
+            for (const m of traverseAST((n as UnaryExpr).operand)) {
+              if (m.kind === NodeKind.Identifier && (m as Identifier).name === r.arr) inRead.add(m);
+            }
+          }
+          for (const n of traverseAST(st)) {
+            if (n.kind !== NodeKind.Identifier || declNames.has(n) || inRead.has(n)) continue;
+            const name = (n as Identifier).name;
+            if (!firstRef.has(name)) firstRef.set(name, at);
+          }
+        });
+        for (const r of reads) {
+          const x = slotByName.get(r.arr);
+          if (!x || !x.isArray || x.isParameter || declTypes.get(x.name)?.kind !== NodeKind.ArrayType) continue;
+          if ((firstRef.get(r.arr) ?? Infinity) <= r.at) continue;
+          const above = arrays.filter((a) => a.offset === x.offset + x.size && elementSizes.get(a.name) === 1);
+          if (above.length !== 1) continue;
+          unwrittenBelow.set(r.node.location, { a: above[0], d: x.size, type: r.type });
+        }
+      }
+    }
+
     const rewritten = createTransformer({
       visitNode(node: ASTNode): ASTNode | undefined {
+        if (node.kind === NodeKind.UnaryExpr && node.location && unwrittenBelow.has(node.location)) {
+          const hit = unwrittenBelow.get(node.location)!;
+          const sum = unwrapParens((unwrapParens((node as UnaryExpr).operand) as CStyleCastExpr).expression) as BinaryExpr;
+          return { ...Expr.subscript(elementBase(hit.a, hit.type, true), shiftedIndex(sum.right, hit.d)), location: node.location } as ASTNode;
+        }
         if (node.kind === NodeKind.SubscriptExpr) {
           const s = node as SubscriptExpr;
           const base = unwrapParens(s.array);
