@@ -802,3 +802,163 @@ describe('arith-idioms widened 32-bit arithmetic', () => {
     }
   });
 });
+
+describe('arith-idioms non-negative division printed unsigned', () => {
+  // UIMENU 0043ddd0, Units 00620e80, OBJMODE 00581510: `cdq; idiv` of zero-extended bytes and
+  // masked fields, which the decompiler printed as a UDIV once it saw both were non-negative.
+  it('writes it back as int division', () => {
+    assert.strictEqual(
+      run('n = (int)((uint64_t)(s >> 8 & 0x1f) / (uint64_t)(int64_t)(int)((s & 0x20 | 0x80) >> 5));', 'uint32_t s, int n'),
+      'n = (int)((int)(s >> 8 & 0x1f) / (int)((s & 0x20 | 0x80) >> 5));');
+    assert.strictEqual(
+      run('n = (int)((uint64_t)((uint32_t)(uint8_t)a * 100) / (uint64_t)(int64_t)(int)(uint32_t)b) - 100;', 'uint8_t a, uint8_t b, int n'),
+      'n = (int)((int)((uint32_t)(uint8_t)a * 100) / (int)(uint32_t)b) - 100;');
+    assert.strictEqual(
+      run('if (!(int)((uint64_t)(uint32_t)c % (uint64_t)(int64_t)(int)((uint64_t)(uint8_t)e / (uint64_t)(int64_t)(int)(uint32_t)b))) { n = 1; }',
+        'uint8_t c, uint8_t e, uint8_t b, int n'),
+      'if (!(int)((int)(uint32_t)c % (int)((uint8_t)e / (int)(uint32_t)b))) { n = 1; }');
+    // The signed division of a zero-extended byte the int32 narrowing did not see (00581510).
+    assert.strictEqual(run('n = (uint32_t)b - (int)((int64_t)(uint64_t)(uint32_t)c / (int64_t)k);', 'uint8_t b, uint8_t c, int k, int n'),
+      'n = (uint32_t)b - (int)((int)(uint32_t)c / k);');
+  });
+
+  it('keeps a division without the sign extension, or with an operand that may pass INT_MAX', () => {
+    for (const [body, decls, expected] of [
+      // No `cdq`: the original's `div`; narrow-div keeps it unsigned.
+      ['n = (int)((uint64_t)e / (uint64_t)b);', 'uint8_t e, uint8_t b, int n', 'n = (int)(e / b);'],
+      // A dword can pass INT_MAX.
+      ['n = (int)((uint64_t)u / (uint64_t)(int64_t)(int)b);', 'uint32_t u, uint8_t b, int n', null],
+      // A signed divisor may be negative: the unsigned division of its extension is not it.
+      ['n = (int)((uint64_t)e / (uint64_t)(int64_t)k);', 'uint8_t e, int k, int n', null],
+      // A product past INT_MAX.
+      ['n = (int)((uint64_t)((uint32_t)a * 0x1000000) / (uint64_t)(int64_t)(int)(uint32_t)b);', 'uint8_t a, uint8_t b, int n', null],
+      // The quotient used as 64 bits.
+      ['q = (uint64_t)e / (uint64_t)(int64_t)(int)(uint32_t)b;', 'uint8_t e, uint8_t b, uint64_t q', null],
+    ] as Array<[string, string, string | null]>) {
+      assert.strictEqual(run(body, decls), expected ?? body, body);
+    }
+  });
+
+  it('has the value of what it replaces', { skip: !hasNativeGpp() }, () => {
+    const cases: Array<{ decls: string; body: string; values: string[]; skip?: string }> = [
+      { decls: 'uint32_t s, int r', body: 'r = (int)((uint64_t)(s >> 8 & 0x1f) / (uint64_t)(int64_t)(int)((s & 0x20 | 0x80) >> 5));', values: ['U'] },
+      { decls: 'int s, int r', body: 'r = (int)((uint64_t)(s >> 8 & 0x1f) % (uint64_t)(int64_t)(int)((s & 0x20 | 0x80) >> 5));', values: ['S'] },
+      { decls: 'uint8_t a, uint8_t b, int r', body: 'r = (int)((uint64_t)((uint32_t)(uint8_t)a * 100) / (uint64_t)(int64_t)(int)(uint32_t)b) - 100;', values: ['B', 'B'], skip: 'b == 0' },
+      { decls: 'uint8_t c, uint8_t e, uint8_t b, int r', body: 'r = (int)((uint64_t)(uint32_t)c % (uint64_t)(int64_t)(int)((uint64_t)(uint8_t)e / (uint64_t)(int64_t)(int)(uint32_t)b));', values: ['B', 'B', 'B'], skip: 'b == 0 || e / b == 0' },
+      { decls: 'uint8_t b, uint8_t c, int k, int r', body: 'r = (uint32_t)b - (int)((int64_t)(uint64_t)(uint32_t)c / (int64_t)k);', values: ['B', 'B', 'S'], skip: 'k == 0' },
+      { decls: 'uint16_t w, uint8_t b, uint8_t r', body: 'r = (uint8_t)((uint64_t)((uint32_t)w | 0x8000) / (uint64_t)(int64_t)(int)((uint32_t)b >> 1 | 1));', values: ['W', 'B'] },
+    ];
+    nativeCheck(cases);
+  });
+});
+
+describe('arith-idioms zero-extended 64-bit locals', () => {
+  const fn = (text: string): string => {
+    const out = arithIdiomsPlugin.createTransformer(OPTIONS)(parse(text));
+    return emit(out as AnyNode).replace(/\s+/g, ' ').trim();
+  };
+
+  // VIEW_Init 00475b40, NET_SID_CLIENT_IDEAMultInverse 005242f0, BigBuffer_Square 00424b00.
+  it('declares the local as the dword it holds', () => {
+    assert.strictEqual(
+      fn('void f(uint32_t i) { uint64_t d; d = (uint64_t)i; g[i] = (uint32_t)(0x10000 / d); }'),
+      'void f(uint32_t i) { uint32_t d; d = i; g[i] = (uint32_t)(0x10000 / d); }');
+    assert.strictEqual(
+      fn('uint32_t f(uint32_t v, uint32_t r) { uint64_t m; uint64_t t; m = (uint64_t)(v % r); v = (uint32_t)m; t = (uint64_t)r; r = (uint32_t)(t % m); return (int)(t / m) * v + r; }'),
+      'uint32_t f(uint32_t v, uint32_t r) { uint32_t m; uint32_t t; m = v % r; v = (uint32_t)m; t = r; r = (uint32_t)(t % m); return (int)(t / m) * v + r; }');
+    // The product keeps its 64 bits: the read is the zero-extension, VC8's one-operand `mul`.
+    assert.strictEqual(
+      fn('uint64_t f(uint32_t b, uint32_t a, uint64_t c) { uint64_t p; p = (uint64_t)b; c = a * p + c; return c; }'),
+      'uint64_t f(uint32_t b, uint32_t a, uint64_t c) { uint32_t p; p = b; c = a * (uint64_t)p + c; return c; }');
+    assert.strictEqual(fn('int f(uint8_t b) { uint64_t p = (uint64_t)b; return (int)(100 / p); }'),
+      'int f(uint8_t b) { uint32_t p = b; return (int)(100 / p); }');
+  });
+
+  it('keeps a local that holds more than a dword or is read as 64 bits', () => {
+    for (const text of [
+      // A sign extension.
+      'uint64_t f(int s, uint32_t a) { uint64_t q; q = (uint64_t)s; return a * q; }',
+      // Read whole.
+      'uint64_t f(uint32_t a) { uint64_t p; p = (uint64_t)a; g(p); return p / 3; }',
+      'uint64_t f(uint32_t a) { uint64_t p; p = (uint64_t)a; return p + 1; }',
+      // A 64-bit definition, a compound assignment, the address taken.
+      'uint32_t f(uint32_t a, uint64_t w) { uint64_t p; p = (uint64_t)a; p = w; return (uint32_t)(p / 3); }',
+      'uint32_t f(uint32_t a) { uint64_t p; p = (uint64_t)a; p += 1; return (uint32_t)(p / 3); }',
+      'uint32_t f(uint32_t a) { uint64_t p; p = (uint64_t)a; h(&p); return (uint32_t)(p / 3); }',
+      // Declared twice.
+      'uint32_t f(uint32_t a) { { uint64_t p; p = (uint64_t)a; } uint64_t p; p = (uint64_t)a; return (uint32_t)(p / 3); }',
+      // A parameter.
+      'uint32_t f(uint64_t p, uint32_t a) { p = (uint64_t)a; return (uint32_t)(p / 3); }',
+    ]) {
+      assert.ok(!/uint32_t p\b/.test(fn(text).replace(/^[^{]*/, '')), fn(text));
+    }
+  });
+
+  it('has the value of what it replaces', { skip: !hasNativeGpp() }, () => {
+    const fns = [
+      'uint32_t z0(uint32_t i) { uint64_t d; d = (uint64_t)i; return (uint32_t)(0x10000 / d); }',
+      'uint32_t z1(uint32_t v, uint32_t r) { uint64_t m; uint64_t t; m = (uint64_t)(v % r); v = (uint32_t)m; t = (uint64_t)r; if (!(uint32_t)m) return v; r = (uint32_t)(t % m); return (int)(t / m) * v + r; }',
+      'uint64_t z2(uint32_t b, uint32_t a) { uint64_t p; uint64_t c = 0x123456789ULL; p = (uint64_t)b; c = a * p + c; return a * p + (uint64_t)(uint32_t)c; }',
+      'uint32_t z3(uint32_t b, uint32_t a) { uint64_t p = (uint64_t)(uint8_t)b; if (!(uint8_t)p) return 0; return (uint32_t)(a % p) + (uint32_t)p; }',
+    ];
+    const folded = fns.map(fn);
+    folded.forEach((f, i) => assert.ok(/uint32_t (d|m|p);|uint32_t p =/.test(f), f));
+    const U = '0u, 1u, 2u, 3u, 7u, 100u, 0xffffu, 0x10000u, 0x10001u, 0x7fffffffu, 0x80000000u, 0xfffffffeu, 0xffffffffu, 123456789u';
+    let src = '#include <stdint.h>\n#include <stdio.h>\nstatic int failures = 0;\n';
+    fns.forEach((f, i) => { src += `static ${f.replace(` z${i}(`, ` a${i}(`)}\nstatic ${folded[i].replace(` z${i}(`, ` b${i}(`)}\n`; });
+    src += `int main(void) { uint32_t v[] = { ${U} }; unsigned n = sizeof v / sizeof v[0];\n`
+      + '  for (unsigned i = 0; i < n; i++) { if (v[i] && a0(v[i]) != b0(v[i])) { printf("z0\\n"); failures++; }\n'
+      + '    for (unsigned j = 0; j < n; j++) {\n'
+      + '      if (v[j] && a1(v[i], v[j]) != b1(v[i], v[j])) { printf("z1\\n"); failures++; }\n'
+      + '      if (a2(v[i], v[j]) != b2(v[i], v[j])) { printf("z2\\n"); failures++; }\n'
+      + '      if (a3(v[i], v[j]) != b3(v[i], v[j])) { printf("z3\\n"); failures++; } } }\n'
+      + '  return failures ? 1 : 0; }\n';
+    compileAndRun(src);
+  });
+});
+
+function compileAndRun(src: string): void {
+  const dir = mkdtempSync(join(tmpdir(), 'arith-nonneg-'));
+  writeFileSync(join(dir, 'check.c'), src);
+  try {
+    const exe = exePath(join(dir, 'check'));
+    const cc = compileTo(join(dir, 'check.c'), exe, ['-O1', '-w', '-fwrapv']);
+    assert.strictEqual(cc.status, 0, String(cc.error ?? cc.stderr));
+    const res = runExe(exe);
+    assert.strictEqual(res.stdout, '');
+    assert.strictEqual(res.status, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** Each case's statement and its fold compiled side by side and compared over the value sets. */
+function nativeCheck(cases: Array<{ decls: string; body: string; values: string[]; skip?: string }>): void {
+  const VALUES: Record<string, string> = {
+    B: '0, 1, 2, 3, 5, 0x7f, 0x80, 0xfe, 0xff',
+    W: '0, 1, 2, 0x7fff, 0x8000, 0xfffe, 0xffff',
+    U: '0u, 1u, 2u, 0x1f00u, 0x2000u, 0x20u, 0xffu, 0x7fffffffu, 0x80000000u, 0xffffffffu, 123456789u',
+    S: '0, 1, -1, 2, -2, 3, -3, 0x1f00, 0x20, -0x20, 0x7fffffff, (int)0x80000000, -123456789',
+  };
+  let src = '#include <stdint.h>\n#include <stdio.h>\n#include <string.h>\nstatic int failures = 0;\n';
+  let main = 'int main(void) {\n';
+  cases.forEach((c, i) => {
+    const folded = run(c.body, c.decls);
+    assert.notStrictEqual(folded, c.body, `case ${i} did not fold: ${c.body}`);
+    const params = c.decls.split(',').map(s => s.trim());
+    const [resT] = params.pop()!.split(' ');
+    const args = params.map(p => p.split(' '));
+    const sig = args.map(([t, n]) => `${t} ${n}`).join(', ');
+    src += `static ${resT} a${i}(${sig}) { ${resT} r; ${c.body} return r; }\n`;
+    src += `static ${resT} b${i}(${sig}) { ${resT} r; ${folded} return r; }\n`;
+    let loop = '';
+    let close = '';
+    args.forEach(([t, n], k) => {
+      loop += `{ ${t} v${k}[] = { ${VALUES[c.values[k]]} }; for (unsigned i${k} = 0; i${k} < sizeof v${k} / sizeof v${k}[0]; i${k}++) { ${t} ${n} = v${k}[i${k}]; `;
+      close += '} } ';
+    });
+    const names = args.map(([, n]) => n).join(', ');
+    main += `  ${loop}${c.skip ? `if (${c.skip}) continue; ` : ''}{ ${resT} ra = a${i}(${names}), rb = b${i}(${names}); if (memcmp(&ra, &rb, sizeof ra)) { printf("case ${i}\\n"); failures++; } } ${close}\n`;
+  });
+  compileAndRun(src + main + '  return failures ? 1 : 0;\n}\n');
+}

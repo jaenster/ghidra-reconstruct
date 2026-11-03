@@ -92,13 +92,14 @@ export interface ArithIdiomsOptions extends PluginOptions {
 export type ArithIdiom =
   | 'low-dword' | 'narrow-div' | 'magic-div' | 'cast-chain' | 'modulo' | 'divides' | 'pow2-div' | 'long-helper' | 'signed-div'
   | 'setcc-select' | 'pow2-rem' | 'pow2-rem-test' | 'pow2-rem-mask' | 'u2f'
-  | 'sdiv-widened' | 'low-word-div' | 'trunc-mul' | 'narrow-residue' | 'signed-div-use';
+  | 'sdiv-widened' | 'low-word-div' | 'trunc-mul' | 'narrow-residue' | 'signed-div-use' | 'nonneg-div' | 'zext-local';
 
 const stats: Record<ArithIdiom, number> = {
   'low-dword': 0, 'narrow-div': 0, 'magic-div': 0, 'cast-chain': 0, 'modulo': 0, 'divides': 0,
   'pow2-div': 0, 'long-helper': 0, 'signed-div': 0, 'setcc-select': 0, 'pow2-rem': 0, 'pow2-rem-test': 0,
   'pow2-rem-mask': 0, 'u2f': 0,
   'sdiv-widened': 0, 'low-word-div': 0, 'trunc-mul': 0, 'narrow-residue': 0, 'signed-div-use': 0,
+  'nonneg-div': 0, 'zext-local': 0,
 };
 
 /** How many times each idiom has been folded since the last reset. */
@@ -860,6 +861,114 @@ function createFolder(shapeOf: ExprShape, o: ArithIdiomsOptions, resolve: Typede
     return c.type.signed ? inner : null;
   };
 
+  /** Does every value in [0, max] fit t without wrapping or overflowing? */
+  const fitsIn = (max: bigint, t: IntType | null): boolean =>
+    !!t && max < (1n << BigInt(t.signed ? t.bits - 1 : t.bits));
+
+  /**
+   * An upper bound M of e for an e whose value provably lies in [0, M], else null. Each step
+   * holds for every input of the operand types, and an arithmetic step is taken only where
+   * its result fits the type it is computed in, so nothing wraps:
+   *
+   *   a literal v >= 0 is [0, v]; an expression of an unsigned type of b bits is [0, 2^b - 1].
+   *   `(T)x` keeps x's bound where that fits T, else is [0, 2^b - 1] for an unsigned T of b bits.
+   *   `a & b`: in two's complement an AND with a non-negative value has its sign bit clear
+   *   and no bit that value lacks, so it is at most that value - the other side may be anything.
+   *   `a | b`, `a ^ b` of two bounded values: below the next power of two above both.
+   *   `a >> k`: M >> k; `a << k`, `a + b`, `a * b`: the bound shifted, summed or multiplied.
+   *   `a / b` with b >= 0: at most a; `a % b`: at most a and below b.
+   */
+  const rangeMax = (expr: Expression): bigint | null => {
+    const e = unwrapParens(expr);
+    const own = typeOf(e);
+    const ofType = own && !own.signed ? (1n << BigInt(own.bits)) - 1n : null;
+    switch (e.kind) {
+      case NodeKind.IntegerLiteral: {
+        const v = (e as IntegerLiteralExpr).value;
+        return own && v >= 0n ? v : null;
+      }
+      case NodeKind.CStyleCastExpr: {
+        const c = castOf(e);
+        if (!c) return null;
+        const m = rangeMax(c.inner);
+        if (m !== null && fitsIn(m, c.type)) return m;
+        return c.type.signed ? null : (1n << BigInt(c.type.bits)) - 1n;
+      }
+      case NodeKind.BinaryExpr: {
+        const b = e as BinaryExpr;
+        const l = b.left as Expression;
+        const r = b.right as Expression;
+        switch (b.operator) {
+          case '&': {
+            const ml = rangeMax(l);
+            const mr = rangeMax(r);
+            if (ml !== null && mr !== null) return ml < mr ? ml : mr;
+            return ml ?? mr;
+          }
+          case '|': case '^': {
+            const ml = rangeMax(l);
+            const mr = rangeMax(r);
+            if (ml === null || mr === null) return ofType;
+            const hi = ml > mr ? ml : mr;
+            return (1n << BigInt(hi.toString(2).length)) - 1n;
+          }
+          case '>>': {
+            const k = intLiteral(r);
+            if (k === null || k < 0n || k > 63n) return null;
+            const ml = rangeMax(l);
+            return ml !== null ? ml >> k : null;
+          }
+          case '<<': case '+': case '*': {
+            const ml = rangeMax(l);
+            let out: bigint | null = null;
+            if (b.operator === '<<') {
+              const k = intLiteral(r);
+              if (ml !== null && k !== null && k >= 0n && k <= 63n) out = ml << k;
+            } else {
+              const mr = rangeMax(r);
+              if (ml !== null && mr !== null) out = b.operator === '+' ? ml + mr : ml * mr;
+            }
+            return out !== null && fitsIn(out, own) ? out : ofType;
+          }
+          case '/': case '%': {
+            const ml = rangeMax(l);
+            const mr = rangeMax(r);
+            if (ml === null || mr === null) return ofType;
+            if (b.operator === '/') return ml;
+            return mr > 0n && mr - 1n < ml ? mr - 1n : ml;
+          }
+        }
+        return ofType;
+      }
+    }
+    return ofType;
+  };
+
+  /**
+   * The 32-bit operand under the 64-bit casts of e, for an e whose value is shown to lie in
+   * [0, INT_MAX] (see rangeMax), else null. Every widening of a non-negative value keeps it, so
+   * the operand has e's value, and `(int)` of it is exact.
+   */
+  const nonNeg32 = (e: Expression): Expression | null => {
+    let inner = e;
+    for (let c = castOf(inner); c && c.type.bits === 64; c = castOf(inner)) inner = c.inner;
+    const t = typeOf(inner);
+    if (t && t.bits > 32) return null;
+    const m = rangeMax(inner);
+    return m !== null && m <= 0x7fffffffn ? inner : null;
+  };
+
+  /** Does a 64-bit cast chain over e sign-extend somewhere - `(uint64_t)(int64_t)(int)x`? */
+  const signExtended = (e: Expression): boolean => {
+    for (let c = castOf(e); c && c.type.bits === 64; c = castOf(c.inner)) {
+      if (c.type.signed) {
+        const t = typeOf(c.inner);
+        if (t && t.bits <= 32 && t.signed) return true;
+      }
+    }
+    return false;
+  };
+
   /**
    * `(T)(A / B)` and `(T)(A % B)`, T an integer type of at most 32 bits and A, B 64-bit
    * operands whose values are 32-bit signed ints (see narrowS32), is `(T)(a / b)` in int:
@@ -868,6 +977,16 @@ function createFolder(shapeOf: ExprShape, o: ArithIdiomsOptions, resolve: Typede
    * run of the original reaches it. The remainder of two int32 values is an int32 value and
    * has the dividend's sign in both widths. This is MSVC's `cdq; idiv` the decompiler
    * printed as a 64-bit SDIV of sign-extended operands, and that VC8 compiles to `_alldiv`.
+   * A signed operand the narrowing does not see may still be shown to lie in [0, INT_MAX]
+   * (nonNeg32).
+   *
+   * The same division typed unsigned (`(uint64_t)u8 / (uint64_t)(int64_t)(int)w`) is the
+   * decompiler's own rewrite of that SDIV once it proved both operands non-negative: the
+   * divisor still carries the `cdq`'s sign extension. With both operands shown to lie in
+   * [0, INT_MAX], the unsigned and the signed quotient and remainder are the same number, and
+   * it fits an int, so `(T)((int)a / (int)b)` has the value of what it replaces - and VC8
+   * gives it the original's `cdq; idiv`. Without the sign extension the division is a `div`
+   * and stays unsigned (narrow-div).
    */
   const foldSdivWidened = (e: Expression): Expression | null => {
     const outer = castOf(e);
@@ -876,15 +995,26 @@ function createFolder(shapeOf: ExprShape, o: ArithIdiomsOptions, resolve: Typede
     if (d.kind !== NodeKind.BinaryExpr) return null;
     const b = d as BinaryExpr;
     if (b.operator !== '/' && b.operator !== '%') return null;
-    if (!sameType(typeOf(b), S64)) return null;
-    const x = narrowS32(b.left as Expression);
-    const y = narrowS32(b.right as Expression);
+    const dt = typeOf(b);
+    let x: Expression | null;
+    let y: Expression | null;
+    let idiom: ArithIdiom = 'sdiv-widened';
+    if (sameType(dt, S64)) {
+      x = narrowS32(b.left as Expression) ?? nonNeg32(b.left as Expression);
+      y = narrowS32(b.right as Expression) ?? nonNeg32(b.right as Expression);
+    } else if (sameType(dt, U64) && signExtended(b.right as Expression)) {
+      x = nonNeg32(b.left as Expression);
+      y = nonNeg32(b.right as Expression);
+      idiom = 'nonneg-div';
+    } else {
+      return null;
+    }
     if (!x || !y) return null;
     const asInt = (v: Expression) => {
       const t = typeOf(v);
       return t && sameType(promote(t), S32) ? operandOf(v) : castNode('int', operandOf(v));
     };
-    stats['sdiv-widened']++;
+    stats[idiom]++;
     return updateNode(outer.node, { expression: Expr.paren(Expr.binary(asInt(x), b.operator, asInt(y))) } as Partial<CStyleCastExpr>);
   };
 
@@ -1886,6 +2016,149 @@ function createLiveness(body: CompoundStmt, throughLoops = false): (name: string
 }
 
 // ============================================
+// ZERO-EXTENDED 64-BIT LOCALS
+// ============================================
+
+/**
+ * A 64-bit local that only ever holds a zero-extended dword, declared as the dword.
+ *
+ * `uint64_t nDivisor; nDivisor = (uint64_t)nLoopIdx; ... 0x10000 / nDivisor` is how the
+ * decompiler prints a 32-bit `xor edx, edx; div` whose dividend register it merged with the
+ * zero-extension; Ghidra keeps the variable 8 bytes wide (the storage is the ZEXT's output and
+ * cannot be resized), and VC8 compiles the 64-bit division to `_aulldiv` and the product to
+ * `_allmul` where the original has one `div` or `mul`.
+ *
+ * Held to a local declared once (not a parameter), every definition of which - the initialiser
+ * or a plain `=` - is a 64-bit cast of an unsigned integer of at most 32 bits (or a literal in
+ * [0, 2^32)), and every read of which is an operand of `/`, `%` or `*`, or the operand of a cast
+ * to an integer of at most 32 bits. Then:
+ *
+ *   - every value the local holds lies in [0, 2^32), so a uint32_t holds the same number;
+ *   - each definition stores its 32-bit operand: the same value, converted to uint32_t exactly;
+ *   - each arithmetic read becomes `(T)x`, T the old 64-bit type: the zero-extension of the
+ *     same number is that number in T, so the operation sees the value and type it saw;
+ *   - each truncating read `(U)x` of the uint32_t is the truncation of the same number.
+ *
+ * The arithmetic is then a 64-bit operation on zero-extended dwords, which the narrow-div,
+ * cast-chain and trunc-mul folds reduce, each with its own proof.
+ */
+function retypeZextLocals(fn: FunctionDecl, o: ArithIdiomsOptions, resolve: TypedefResolver): FunctionDecl {
+  if (!fn.body) return fn;
+  const { folder } = functionFolder(fn, o, resolve);
+  const params = new Set(fn.parameters.map(p => (p as ParameterDecl).name?.name).filter((n): n is string => !!n));
+  const decls = new Map<string, VariableDecl[]>();
+  for (const d of findNodesByKind(fn.body, NodeKind.VariableDecl)) {
+    const v = d as VariableDecl;
+    decls.set(v.name.name, [...(decls.get(v.name.name) ?? []), v]);
+  }
+  const intOf = (t: TypeNode): IntType | null => {
+    const sh = shapeOfNode(t, 0, resolve);
+    return sh && sh.stars === 0 ? INT_BASES[sh.base] ?? null : null;
+  };
+  /** The dword a definition stores, or null when it is not a zero-extension of one. */
+  const zextOperand = (rhs: Expression): Expression | null => {
+    const u = unwrapParens(rhs);
+    if (u.kind === NodeKind.IntegerLiteral) {
+      const v = (u as IntegerLiteralExpr).value;
+      const lt = literalType(u as IntegerLiteralExpr);
+      return lt && v >= 0n && v <= 0xffffffffn ? u : null;
+    }
+    if (u.kind !== NodeKind.CStyleCastExpr) return null;
+    const ct = intOf((u as CStyleCastExpr).type);
+    if (!ct || ct.bits !== 64) return null;
+    const inner = (u as CStyleCastExpr).expression as Expression;
+    const t = folder.typeOf(inner);
+    return t && !t.signed && t.bits <= 32 ? inner : null;
+  };
+
+  type Site = 'def' | 'arith' | 'trunc';
+  const candidates = new Map<string, { decl: VariableDecl; type: TypeNode }>();
+  for (const [name, ds] of decls) {
+    if (ds.length !== 1 || params.has(name)) continue;
+    const t = intOf(ds[0].type);
+    if (!t || t.bits !== 64) continue;
+    if (ds[0].initializer && !zextOperand(ds[0].initializer as Expression)) continue;
+    candidates.set(name, { decl: ds[0], type: ds[0].type });
+  }
+  if (candidates.size === 0) return fn;
+
+  // Every reference of each candidate, by the Identifier node, and what it is.
+  const sites = new Map<object, Site>();
+  const bad = new Set<string>();
+  const isRef = (n: unknown, name?: string): n is Identifier => {
+    const u = n && unwrapParens(n as Expression);
+    return !!u && u.kind === NodeKind.Identifier && candidates.has((u as Identifier).name)
+      && (name === undefined || (u as Identifier).name === name);
+  };
+  const visit = (n: unknown, parent: ASTNode | null, key: string): void => {
+    if (!n || typeof n !== 'object') return;
+    if (Array.isArray(n)) { n.forEach(c => visit(c, parent, key)); return; }
+    const node = n as ASTNode;
+    if (node.kind === NodeKind.QualifiedId) return;
+    if (node.kind === NodeKind.MemberExpr) { visit((node as MemberExpr).object, node, 'object'); return; }
+    if (node.kind === NodeKind.VariableDecl) { visit((node as VariableDecl).initializer, node, 'initializer'); return; }
+    if (node.kind === NodeKind.Identifier) {
+      const name = (node as Identifier).name;
+      if (!candidates.has(name)) return;
+      let p = parent;
+      // The parent that is not a parenthesis.
+      let site: Site | null = null;
+      if (p && p.kind === NodeKind.ParenExpr) p = null;
+      if (p?.kind === NodeKind.AssignExpr && key === 'left' && (p as AssignExpr).operator === '='
+          && zextOperand((p as AssignExpr).right as Expression)) site = 'def';
+      else if (p?.kind === NodeKind.BinaryExpr && ['/', '%', '*'].includes((p as BinaryExpr).operator)) site = 'arith';
+      else if (p?.kind === NodeKind.CStyleCastExpr) {
+        const ct = intOf((p as CStyleCastExpr).type);
+        if (ct && ct.bits <= 32) site = 'trunc';
+      }
+      if (site) sites.set(node, site); else bad.add(name);
+      return;
+    }
+    for (const [k, v] of Object.entries(node)) {
+      if (k === 'location' || k === 'leadingTrivia' || k === 'trailingTrivia') continue;
+      if (v && typeof v === 'object') visit(v, node, k);
+    }
+  };
+  visit(fn.body, null, '');
+  for (const name of bad) candidates.delete(name);
+  if (candidates.size === 0) return fn;
+
+  const t = createTransformer({
+    visitNode(n: ASTNode): ASTNode | undefined {
+      switch (n.kind) {
+        case NodeKind.VariableDecl: {
+          const v = n as VariableDecl;
+          if (!candidates.has(v.name.name)) return undefined;
+          const init = v.initializer ? zextOperand(v.initializer as Expression) : null;
+          stats['zext-local']++;
+          return updateNode(v, { type: Type.typedef('uint32_t'), ...(init ? { initializer: init } : {}) } as Partial<VariableDecl>);
+        }
+        case NodeKind.AssignExpr: {
+          const a = n as AssignExpr;
+          if (a.operator !== '=' || !isRef(a.left)) return undefined;
+          const inner = zextOperand(a.right as Expression);
+          return inner ? updateNode(a, { right: inner } as Partial<AssignExpr>) : undefined;
+        }
+        case NodeKind.BinaryExpr: {
+          const b = n as BinaryExpr;
+          if (!['/', '%', '*'].includes(b.operator)) return undefined;
+          const wrap = (e: Expression): Expression => {
+            if (!isRef(e)) return e;
+            const name = (unwrapParens(e) as Identifier).name;
+            return Expr.cast(candidates.get(name)!.type, unwrapParens(e));
+          };
+          const l = wrap(b.left as Expression);
+          const r = wrap(b.right as Expression);
+          return l === b.left && r === b.right ? undefined : updateNode(b, { left: l, right: r } as Partial<BinaryExpr>);
+        }
+      }
+      return undefined;
+    },
+  });
+  return t(fn) as FunctionDecl;
+}
+
+// ============================================
 // TRANSFORMER
 // ============================================
 
@@ -1919,8 +2192,10 @@ export function createArithIdiomsTransformer(options?: PluginOptions): Transform
   const resolve: TypedefResolver = name => typedefTargets[name];
 
   return createTransformer({
-    visitFunctionDecl(node: FunctionDecl): ASTNode | undefined {
-      if (!node.body) return undefined;
+    visitFunctionDecl(original: FunctionDecl): ASTNode | undefined {
+      if (!original.body) return undefined;
+      const node = retypeZextLocals(original, o, resolve);
+      const retyped = node !== original;
       const { localTypes, folder } = functionFolder(node, o, resolve);
       const pairCtx: RemainderRunContext = {
         layout: o.branchLayout,
@@ -1982,8 +2257,8 @@ export function createArithIdiomsTransformer(options?: PluginOptions): Transform
           return updateNode(n as CompoundStmt, { statements: out } as Partial<CompoundStmt>);
         },
       });
-      const body = inner(pairs(node.body) as typeof node.body);
-      return changed ? updateNode(node, { body } as Partial<FunctionDecl>) : undefined;
+      const body = inner(pairs(node.body!) as typeof node.body);
+      return changed || retyped ? updateNode(node, { body } as Partial<FunctionDecl>) : undefined;
     },
   });
 }
@@ -2021,8 +2296,10 @@ export function createPow2RemainderTransformer(options?: PluginOptions): Transfo
   const resolve: TypedefResolver = name => typedefTargets[name];
 
   return createTransformer({
-    visitFunctionDecl(node: FunctionDecl): ASTNode | undefined {
-      if (!node.body) return undefined;
+    visitFunctionDecl(original: FunctionDecl): ASTNode | undefined {
+      if (!original.body) return undefined;
+      const node = retypeZextLocals(original, o, resolve);
+      const retyped = node !== original;
       const { localTypes, folder } = functionFolder(node, o, resolve);
       const ctx: RemainderRunContext = {
         layout: o.branchLayout,
