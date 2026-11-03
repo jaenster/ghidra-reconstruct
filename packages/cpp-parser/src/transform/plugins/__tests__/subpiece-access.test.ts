@@ -121,3 +121,46 @@ describe('subpieceAccessPlugin: 3-byte pieces, compiled and run', { skip: !hasNa
     assert.strictEqual(out.trim(), '110203aa 77');
   });
 });
+
+describe('subpieceAccessPlugin: a zero high piece and a value low piece are one dword store', () => {
+  // AllocObjectData 004bc720: movzx eax, byte ptr [ebp + 0x14]; mov dword ptr [esi + 0x10], eax.
+  it('merges `_1_3_ = 0` and `_0_1_ = v` into a zero-extended dword store', () => {
+    const out = transformCode('void f(int n) { u.eMode._1_3_ = 0; u.eMode._0_1_ = n; g(); }');
+    assert.strictEqual(out, 'void f(int n) {\n  *(uint32_t*)(char*)&u.eMode = (uint8_t)n;\n  g();\n}');
+  });
+
+  it('takes either order, a word value and a non-zero offset', () => {
+    const out = transformCode('void f(short n) { p->_6_2_ = n; p->_8_2_ = 0; }');
+    assert.strictEqual(out, 'void f(short int n) {\n  *(uint32_t*)((char*)p + 6) = (uint16_t)n;\n}');
+  });
+
+  it('leaves pieces that do not tile one dword, a non-zero high piece, or a value reading the object', () => {
+    for (const code of [
+      'void f(int n) { u._2_2_ = 0; u._0_1_ = n; }',
+      'void f(int n) { u._1_3_ = 1; u._0_1_ = n; }',
+      'void f(int n) { u._1_3_ = 0; v._0_1_ = n; }',
+      'void f() { u._1_3_ = 0; u._0_1_ = u._2_1_; }',
+      'void f(int n) { u._1_3_ = 0; g(); u._0_1_ = n; }',
+      'void f() { u._0_2_ = 0; u._2_2_ = 0; }',
+    ]) {
+      assert.ok(!transformCode(code).includes('*(uint32_t*)'), code);
+    }
+  });
+
+  it('writes what the two pieces wrote', { skip: !hasNativeGpp() }, () => {
+    const prelude = [...ARTIFACT_SUPPORT_LINES, 'struct M { uint32_t eMode; uint8_t bNext; };'].join('\n');
+    const body = (stmt: string) => {
+      const out = transformCode(`void f() { ${stmt} }`);
+      return out.slice(out.indexOf('{') + 1, out.lastIndexOf('}'));
+    };
+    const run = (stmts: string) => compileAndRun(prelude, [
+      'M u; u.eMode = 0xAABBCCDDu; u.bNext = 0x77; int n = 0x1234F5;',
+      stmts,
+      'printf("%08x %02x\\n", (unsigned)u.eMode, (unsigned)u.bNext);',
+    ].join('\n')).trim();
+    const merged = body('u.eMode._1_3_ = 0; u.eMode._0_1_ = n;');
+    assert.ok(merged.includes('(uint8_t)n'), merged);
+    assert.strictEqual(run(merged), '000000f5 77');
+    assert.strictEqual(run('d2_store24((char*)&u.eMode + 1, 0); *(uint8_t*)((char*)&u.eMode) = (uint8_t)n;'), '000000f5 77');
+  });
+});
