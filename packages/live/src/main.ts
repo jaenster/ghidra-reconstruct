@@ -37,7 +37,7 @@ import { foreignSourcesFingerprint } from '@ghidra-mcp/reconstruct/codegen/file-
 import { ForeignSourceWatch, type RebuildOutcome } from './foreign-watch.js';
 import { decompileFunction } from '@ghidra-mcp/reconstruct/extract/functions';
 
-import { applyEvents, type ChangeEvent as ModelChangeEvent, type ModelIndices } from './model.js';
+import { applyEvents, FactsRefreshError, type ChangeEvent as ModelChangeEvent, type ModelIndices } from './model.js';
 import {
   loadSnapshotModel,
   loadLiveState,
@@ -546,6 +546,22 @@ export class LiveLoop {
     this.queue.block(reason);
   }
 
+  /**
+   * A batch whose functions' facts could not be read. The model in memory now holds
+   * them without facts, so nothing more is generated or published from it: the stream
+   * stops and the queue refuses work. Neither the seq nor the snapshot moved past the
+   * last commit, so a restart applies the batch again from there.
+   */
+  private stopOnFacts(e: FactsRefreshError): void {
+    const reason = `${e.message}. Nothing was published for this batch; the model in memory lacks these ` +
+      'functions\' facts. Fix the cause, then restart the daemon to apply the batch again.';
+    this.stream.pause();
+    this.log('!'.repeat(72));
+    this.log(`STOPPED: ${reason}`);
+    this.log('!'.repeat(72));
+    this.queue.block(reason);
+  }
+
   private onTruncated(info: { since: number; head: number }): void {
     this.needsFullResync =
       `The change journal could not cover seq ${info.since}..${info.head}. ` +
@@ -624,6 +640,9 @@ export class LiveLoop {
       }
       if (!(await this.applyBatch(batch))) return;
       await this.rebuildAndPublish();
+    } catch (e) {
+      if (e instanceof FactsRefreshError) this.stopOnFacts(e);
+      throw e;
     } finally {
       this.phase = 'idle';
     }

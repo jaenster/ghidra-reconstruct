@@ -445,7 +445,9 @@ ${JUMP_TABLES_JAVA}${ZERO_STORES_JAVA}${MASK_SITES_JAVA}${ZEXT_SITES_JAVA}      
           if (xrow.length() > 0) out.append("X\\t").append(a).append('\\t').append(xrow).append('\\n');
           out.append("D\\t").append(ds).append('\\n');
           rows.put(a, out.toString());
-        } catch (Exception e) { rows.put(a, "F\\t" + a + "\\terror\\tfail\\n"); }
+        } catch (Exception e) {
+          rows.put(a, "F\\t" + a + "\\terror\\tfail\\t" + String.valueOf(e).replace("\\t", " ").replace("\\n", " ") + "\\n");
+        }
       }
     } finally {
       di.dispose();
@@ -510,10 +512,24 @@ export interface FunctionFactRow {
 export interface FunctionFactOutput {
   program: string | null;
   rows: Map<string, FunctionFactRow>;
+  /** Entries the script answered without facts, and why: no function, no decompile, or an exception. */
+  failed: Map<string, string>;
+}
+
+/**
+ * The facts script did not answer for some functions. Their facts would be missing from the
+ * output with nothing to say so, so the read fails as a whole instead.
+ */
+export class FactsReadError extends Error {
+  constructor(readonly failed: ReadonlyMap<string, string>) {
+    const list = [...failed].slice(0, 10).map(([e, why]) => `${e} (${why})`).join(', ');
+    super(`function facts could not be read for ${failed.size} function(s): ${list}${failed.size > 10 ? ', ...' : ''}`);
+    this.name = 'FactsReadError';
+  }
 }
 
 export function parseFunctionFacts(output: string): FunctionFactOutput {
-  const out: FunctionFactOutput = { program: null, rows: new Map() };
+  const out: FunctionFactOutput = { program: null, rows: new Map(), failed: new Map() };
   let cur: FunctionFactRow | null = null;
   const compare: string[] = [];
   const flush = () => { if (cur) cur.compareRows = compare.join('\n'); compare.length = 0; };
@@ -528,7 +544,13 @@ export function parseFunctionFacts(output: string): FunctionFactOutput {
       flush();
       cur = null;
       const c = rest.split('\t');
-      if (c.length < 5 || c[2] === 'fail') continue;
+      if (c.length < 5 || c[2] === 'fail') {
+        const why = c[1] === 'none' ? 'not a function'
+          : c[1] === 'error' ? `script error: ${c.slice(3).join(' ') || 'unknown'}`
+          : 'no decompile';
+        out.failed.set(normalizeEntry(c[0]), why);
+        continue;
+      }
       cur = {
         self: c[1],
         textHash: /^[0-9a-f]+$/i.test(c[2]) ? Number.parseInt(c[2], 16) : null,
@@ -764,10 +786,16 @@ async function extractFresh(
   let program: string | null = null;
   if (entries.length === 0) return { program, facts: out };
   const t0 = Date.now();
+  const failed = new Map<string, string>();
   for (let i = 0; i < entries.length; i += batchSize) {
     const batch = entries.slice(i, i + batchSize);
     const parsed = parseFunctionFacts(await runScript(connection, functionFactsScript(batch, threads), 900));
     if (parsed.program) program = parsed.program;
+    for (const e of batch) {
+      const key = normalizeEntry(e);
+      if (parsed.rows.has(key)) continue;
+      failed.set(key, parsed.failed.get(key) ?? 'no row in the script output');
+    }
     for (const [e, row] of parsed.rows) {
       const f = byEntry.get(e);
       if (!f?.decompiled) continue;
@@ -782,6 +810,7 @@ async function extractFresh(
     }
   }
   stats.extractMs += Date.now() - t0;
+  if (failed.size > 0) throw new FactsReadError(failed);
 
   // Label flow: labels come from the text, the facts from the listing.
   const t1 = Date.now();

@@ -15,8 +15,10 @@ import {
   extractFunctionFacts,
   FACT_KEYS,
   FACT_SCRIPT_VERSION,
+  FactsReadError,
   type FunctionFactStats,
 } from '@ghidra-mcp/reconstruct/extract/function-facts';
+import { normalizeEntry } from '@ghidra-mcp/reconstruct/extract/function-stamps';
 import type { LiveSnapshotModel } from './snapshot-model.js';
 
 export type FactExtractor = (
@@ -57,7 +59,22 @@ export async function ensureFactScriptVersion(
   for (const fn of functions) for (const key of FACT_KEYS) delete fn[key];
   const format = model.primary.programInfo?.format ?? '';
   const compareSites = process.env.GHIDRA_COMPARE_SITES !== '0' && /Portable Executable|\bPE\b/i.test(format);
-  const stats = await extract(client, functions, { compareSites });
+  let stats: FunctionFactStats;
+  try {
+    stats = await extract(client, functions, { compareSites });
+  } catch (e) {
+    // The worker can be versions ahead of the model at start: a function removed in a
+    // version not yet applied is no longer a function there. Its removal arrives with
+    // that version, so it alone does not stop the start; any other failure does.
+    if (!(e instanceof FactsReadError) || [...e.failed.values()].some(why => why !== 'not a function')) throw e;
+    log(`facts: ${e.failed.size} function(s) of the model are not functions in the program any more ` +
+      `(${[...e.failed.keys()].slice(0, 10).join(' ')}); their removal is in a version still to apply`);
+    // The rest were read; the failure was raised after them. Read them again without the gone ones.
+    const gone = new Set(e.failed.keys());
+    const rest = functions.filter(f => !gone.has(normalizeEntry(f.address)));
+    for (const fn of rest) for (const key of FACT_KEYS) delete fn[key];
+    stats = await extract(client, rest, { compareSites });
+  }
   model.manifest.provenance.factScriptVersion = wanted;
   model.primary.factScriptVersion = wanted;
   log(`facts: ${stats.extracted} of ${stats.candidates} candidate(s) read with fact script ${wanted}`);

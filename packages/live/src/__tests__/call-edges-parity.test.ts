@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert';
 import { buildCallGraph, populateCalledFunctions } from '@ghidra-mcp/reconstruct/analysis/callgraph';
 import { applyEvents, buildIndices, type ChangeEvent, type LiveModel } from '../model.js';
+import { factsScriptOutput } from './fake-facts.js';
 
 /**
  * A refreshed function's call edges must be what a full extraction records: the
@@ -34,6 +35,7 @@ test('a refreshed body gets the call edges a full extraction gives it', async ()
     async sendCommand(cmd: string, params: Record<string, unknown>) {
       if (cmd === 'decompile') return { pseudocode: BODY };
       if (cmd === 'get_function_info') return { name: 'crc32_combine_', address: String(params.address), signature: 'uint f(void)', returnType: 'uint', parameters: [], localVariables: [], callingConvention: '__cdecl', size: 10 };
+      if (cmd === 'execute_script' && factsScriptOutput(params.code) !== null) return { success: true, output: factsScriptOutput(params.code)! };
       if (cmd === 'execute_script') return { success: true, output: '' };
       return {};
     },

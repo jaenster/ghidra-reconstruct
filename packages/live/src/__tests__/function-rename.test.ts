@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
 import { applyEvents, buildIndices, type ChangeEvent, type LiveModel } from '../model.js';
+import { factsScriptOutput } from './fake-facts.js';
 
 /**
  * A renamed function is spelled in more places than its call sites. The full
@@ -42,6 +43,7 @@ test('a function rename reaches non-call spellings, referencing globals and poin
   const listed: string[] = [];
   const client = {
     async sendCommand(cmd: string, params: Record<string, unknown>) {
+      if (cmd === 'execute_script' && factsScriptOutput(params.code) !== null) return { success: true, output: factsScriptOutput(params.code)! };
       if (cmd === 'execute_script') {
         const code = String(params.code);
         if (code.includes('String[] addrs')) {

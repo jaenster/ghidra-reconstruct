@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
 import { applyEvents, buildIndices, type ChangeEvent, type LiveModel } from '../model.js';
+import { factsScriptOutput } from './fake-facts.js';
 
 /**
  * A check-in can add a label or take one away. The full extraction lists globals in
@@ -31,6 +32,7 @@ function model(): LiveModel {
 function client(labels: string, decompiled: string[]) {
   return {
     async sendCommand(cmd: string, params: Record<string, unknown>) {
+      if (cmd === 'execute_script' && factsScriptOutput(params.code) !== null) return { success: true, output: factsScriptOutput(params.code)! };
       if (cmd === 'execute_script') {
         const code = String(params.code);
         if (code.includes('String[] addrs')) return { success: true, output: labels };

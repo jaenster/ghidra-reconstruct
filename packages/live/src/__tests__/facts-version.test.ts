@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
 import { ensureFactScriptVersion, type FactExtractor } from '../facts-version.js';
+import { FactsReadError } from '@ghidra-mcp/reconstruct/extract/function-facts';
 import type { LiveSnapshotModel } from '../snapshot-model.js';
 
 /**
@@ -65,4 +66,23 @@ test('a failed read leaves the version unstamped so the next start tries again',
   const extract: FactExtractor = async () => { throw new Error('worker gone'); };
   await assert.rejects(ensureFactScriptVersion(m, {} as never, () => {}, 'v7', extract), /worker gone/);
   assert.strictEqual(m.manifest.provenance.factScriptVersion, 'v6');
+});
+
+test('a function gone from a newer program does not stop the start; any other failure does', async () => {
+  const m = model('v6');
+  let calls = 0;
+  const extract: FactExtractor = async (_c, fns) => {
+    calls++;
+    if (calls === 1) throw new FactsReadError(new Map([['00401100', 'not a function']]));
+    assert.deepStrictEqual(fns.map(f => f.address), ['00401000']);
+    return stats;
+  };
+  const r = await ensureFactScriptVersion(m, {} as never, () => {}, 'v7', extract);
+  assert.strictEqual(r.refreshed, true);
+  assert.strictEqual(m.manifest.provenance.factScriptVersion, 'v7');
+
+  const m2 = model('v6');
+  const failing: FactExtractor = async () => { throw new FactsReadError(new Map([['00401100', 'script error: x']])); };
+  await assert.rejects(ensureFactScriptVersion(m2, {} as never, () => {}, 'v7', failing), FactsReadError);
+  assert.strictEqual(m2.manifest.provenance.factScriptVersion, 'v6');
 });

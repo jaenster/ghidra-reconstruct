@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
 import { applyEvents, buildIndices, type ChangeEvent, type LiveModel } from '../model.js';
+import { factsScriptOutput } from './fake-facts.js';
 
 /**
  * The version journal keys a renamed type by its NEW path and carries the old one in
@@ -36,6 +37,7 @@ test('a renamed type replaces its old record and re-decompiles the bodies that s
       if (cmd === 'get_data_type') return { name: params.name, category: params.category, type: 'Structure', size: 24, fields: [] };
       if (cmd === 'decompile') { decompiled.push(String(params.address)); return { pseudocode: 'void PLAYERTRADE_Accept(D2TradeRecordStrc *pRecord) {}' }; }
       if (cmd === 'get_function_info') return { name: 'PLAYERTRADE_Accept', address: String(params.address), signature: 'void f(void)', returnType: 'void', parameters: [], localVariables: [], callingConvention: '__stdcall', size: 10 };
+      if (cmd === 'execute_script' && factsScriptOutput(params.code) !== null) return { success: true, output: factsScriptOutput(params.code)! };
       if (cmd === 'execute_script') return { success: true, output: '' };
       return {};
     },
@@ -87,6 +89,7 @@ test('a struct that points at a renamed type is read again, and so is a global o
       }
       if (cmd === 'list_data_symbols') { asked.push(`global:${params.regex}`); return { total: 1, globals: [{ name: 'gpTradeRecord', address: '00700000', dataType: 'D2TradeRecordStrc *', size: 4, referencingFunctions: [] }] }; }
       if (cmd === 'decompile') return { pseudocode: 'void PLAYERTRADE_Accept(D2TradeRecordStrc *pRecord) {}' };
+      if (cmd === 'execute_script' && factsScriptOutput(params.code) !== null) return { success: true, output: factsScriptOutput(params.code)! };
       if (cmd === 'execute_script') return { success: true, output: String(params.code).includes('String[] addrs') ? 'L\t00700000\tgpTradeRecord\n' : '' };
       return {};
     },
@@ -119,6 +122,7 @@ test('a renamed type moves to where the listing puts it; a referrer\'s users are
         { name: 'D2UnitDataPlayerStrc', category: '/', type: 'Structure' },
       ], total: 3 };
       if (cmd === 'decompile') { decompiled.push(String(params.address)); return { pseudocode: 'void f(void) {}' }; }
+      if (cmd === 'execute_script' && factsScriptOutput(params.code) !== null) return { success: true, output: factsScriptOutput(params.code)! };
       if (cmd === 'execute_script') return { success: true, output: '' };
       return {};
     },

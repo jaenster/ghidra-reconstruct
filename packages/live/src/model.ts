@@ -1142,6 +1142,7 @@ function recomputeCallEdges(model: LiveModel, indices: ModelIndices, addrs: read
  * gone, and codegen then lays out branches and orders stores by the old lines. Cleared
  * first: a body that no longer prints a construct must not keep its old fact. Read with
  * no cache, as a full extraction with an empty cache would.
+ * A failed read throws FactsRefreshError: the functions have no facts by then.
  */
 async function refreshFunctionFacts(
   model: LiveModel,
@@ -1165,7 +1166,17 @@ async function refreshFunctionFacts(
     const stats = await extractFunctionFacts(client, functions, { compareSites });
     log(`facts: ${stats.extracted} of ${stats.candidates} candidate(s) re-read for ${functions.length} refreshed function(s)`);
   } catch (e) {
-    log(`facts: re-read failed (${(e as Error).message}); the refreshed functions carry none`);
+    // Their old facts are already cleared, so carrying on would publish these functions
+    // without any. The caller stops the batch instead.
+    throw new FactsRefreshError((e as Error).message);
+  }
+}
+
+/** The facts of re-decompiled functions could not be read; the batch must not be published. */
+export class FactsRefreshError extends Error {
+  constructor(message: string) {
+    super(`facts: re-read failed: ${message}`);
+    this.name = 'FactsRefreshError';
   }
 }
 

@@ -230,7 +230,7 @@ export async function extractAll(
   // sites, branch layout, call order, halt lines (read-only; see function-facts.ts). One
   // decompile per function, and only for functions the fact cache cannot vouch for.
   // GHIDRA_FACT_SCRIPTS=separate runs the five extractors one after the other instead.
-  // A failure leaves the fields unset, which is what an older snapshot looks like too.
+  // A failure aborts the extraction: facts left unset would read as "none found".
   let factScriptVersion: string | undefined;
   if (decompile) {
     // The compare-site source forms are VC8's, so only a PE image gets them.
@@ -262,7 +262,9 @@ export async function extractAll(
           console.warn(`  Fact cache: ${stats.verifyMismatches.length} cached function(s) differed from a fresh extraction: ${stats.verifyMismatches.slice(0, 20).join(' ')}`);
         }
       } catch (err) {
-        console.warn(`  Function facts unavailable: ${(err as Error).message}`);
+        // Not a warning: a tree generated without its facts differs from one with them in
+        // every function that has any, and nothing downstream would say why.
+        throw new Error(`function facts unavailable: ${(err as Error).message}`);
       }
     }
   }
