@@ -48,7 +48,7 @@ import { templateRegistry } from './templates/registry.js';
 import { declarationHead } from './calling-convention.js';
 import { fileStaticKey } from './file-static-functions.js';
 import { emittedParameterName, getAggregateTypeNames } from './platform-types.js';
-import { normalizeGlobalDeclType, generateStaticLocalsBlock, emitDataValue, setInitializerOwnerAddress, inferArrayDeclaration, isWideTextDatum, normalizeArrayDeclaration, braceArrayInitializer, isFuncDefTypedefName, getKnownFuncDefTypedefs, getKnownEnumConstants, setInitializerNamespace, renderGlobalScalarInitializer, recordDeclaredName } from './globals-header.js';
+import { derivedTemplateInstance, normalizeGlobalDeclType, generateStaticLocalsBlock, emitDataValue, setInitializerOwnerAddress, inferArrayDeclaration, isWideTextDatum, normalizeArrayDeclaration, braceArrayInitializer, isFuncDefTypedefName, getKnownFuncDefTypedefs, getKnownEnumConstants, setInitializerNamespace, renderGlobalScalarInitializer, recordDeclaredName } from './globals-header.js';
 
 
 /**
@@ -1225,7 +1225,10 @@ export function generateImplementation(
         setInitializerOwnerAddress(global.address);
         const initializer = emitDataValue(global.initializedData, 0, type);
         setInitializerOwnerAddress(undefined);
-        if (arrayInfo && (global.initializedData.kind === 'array' || isWideTextDatum(global, type))) {
+        // As globalDefinition writes it: an empty list is no aggregate init in C++03.
+        if (initializer === '{}' && derivedTemplateInstance(type)) {
+          fileLocalLines.push(`static ${normalizeArrayDeclaration(type, name)};`);
+        } else if (arrayInfo && (global.initializedData.kind === 'array' || isWideTextDatum(global, type))) {
           fileLocalLines.push(`static ${arrayInfo.type} ${name}[${arrayInfo.count}] = ${initializer};`);
         } else {
           fileLocalLines.push(`static ${normalizeArrayDeclaration(type, name)} = ${braceArrayInitializer(type, initializer)};`);
@@ -1239,7 +1242,9 @@ export function generateImplementation(
         setInitializerOwnerAddress(global.address);
         let value = renderGlobalScalarInitializer(global.value, type, arrayInfo?.count);
         setInitializerOwnerAddress(undefined);
-        if (arrayInfo) {
+        if (!arrayInfo && value === '{}' && derivedTemplateInstance(type)) {
+          fileLocalLines.push(`static ${normalizeArrayDeclaration(type, name)};`);
+        } else if (arrayInfo) {
           fileLocalLines.push(`static ${arrayInfo.type} ${name}[${arrayInfo.count}] = { ${value} };`);
         } else {
           const decl = normalizeArrayDeclaration(type, name);

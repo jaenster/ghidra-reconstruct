@@ -554,3 +554,30 @@ describe('registered class templates across generation shards', () => {
     assert.ok([...emitted].some(path => /\/stpl_\w+\.cpp$/.test(path)), [...emitted].join(', '));
   });
 });
+
+describe('a class with a base defined static in its one TU', () => {
+  it('is written without an initializer, as globals.cpp writes it', () => {
+    const m = model();
+    const use = m.functions.find(f => f.name === 'UseNode')!;
+    use.decompiled = use.decompiled.replace('  return;', '  TSTable<NODE>::Clear((TSTable<NODE> *)&gLocalZero);\n  return;');
+    m.globals.push({
+      name: 'gLocalZero', address: '004ffff0', dataType: 'TSTableEx<NODE>', size: 8,
+      isInitialized: true, xrefCount: 1, referencingFunctions: ['Mod::Third::UseNode'], scope: 'global',
+      initializedData: { kind: 'struct', fields: [
+        { name: 'super_TSTable', value: { kind: 'struct', fields: [{ name: 'm_count', value: { kind: 'scalar', value: '0' } }] } },
+        { name: 'm_extra', value: { kind: 'scalar', value: '0' } },
+      ] },
+    } as unknown as AnalyzedDataSymbol);
+    let project;
+    try {
+      project = generateProject('t', m.functions, [], m.dataTypes, m.globals, m.namespaces,
+        { ...options(TEMPLATES), promoteStaticGlobals: true }, programInfo, m.strings);
+    } finally {
+      setTemplateRegistry(undefined);
+    }
+    const unit = project.files.get('Mod/Third.cpp')?.content ?? '';
+    // C++03 has no list initialization for a class with a base (MSVC C2552).
+    const where = [...project.files.entries()].filter(([, f]) => f.content.includes("gLocalZero")).map(([p, f]) => p + ": " + f.content.split("\n").filter(l => l.includes("gLocalZero")).join(" / ")).join("\n");
+    assert.match(unit, /^static TSTableEx<NODE> gLocalZero;/m, where);
+  });
+});

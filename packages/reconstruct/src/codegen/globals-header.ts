@@ -3683,7 +3683,7 @@ export function globalDefinition(global: AnalyzedDataSymbol, name: string): stri
  * definition is written without one, which both languages accept and which
  * leaves the same zero bytes.
  */
-function derivedTemplateInstance(type: string): boolean {
+export function derivedTemplateInstance(type: string): boolean {
   if (/\bconst\b/.test(type)) return false;
   return !!templateRegistry()?.instantiation(type.trim())?.family.base;
 }
