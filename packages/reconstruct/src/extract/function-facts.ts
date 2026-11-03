@@ -13,6 +13,7 @@
  *   jumpTables    jump-tables.ts
  *   zeroStores    zero-stores.ts
  *   maskSites     mask-sites.ts      (behind the compare-sites text-hash gate)
+ *   zextSites     zext-sites.ts      (behind the compare-sites text-hash gate)
  *   labelFlow     label-flow.ts      (listing only; its own script, labels come from the text)
  *
  * Each extractor decompiled every function again; this script decompiles a function once
@@ -41,6 +42,7 @@ import { STRING_OPS_JAVA, printsRepLoop, parseStringOpRow } from './string-ops.j
 import { JUMP_TABLES_JAVA, printsSwitch, parseJumpTableRow } from './jump-tables.js';
 import { ZERO_STORES_JAVA, printsMemberZeroStore, parseZeroStoreRow } from './zero-stores.js';
 import { MASK_SITES_JAVA, printsByteWordMask, parseMaskSiteRow } from './mask-sites.js';
+import { ZEXT_SITES_JAVA, printsZextCast, parseZextSiteRow } from './zext-sites.js';
 import { labelsOf, labelFlowItems, labelFlowScript, parseLabelFlow, LABEL_FLOW_SCRIPT } from './label-flow.js';
 import { FactCache, type CachedFacts, type FactEntry } from './fact-cache.js';
 import { createHash } from 'node:crypto';
@@ -59,6 +61,7 @@ import { createHash } from 'node:crypto';
  *   J  ...   the jump-tables row (jump-tables.ts), when the decompiler recovered a table
  *   Z  ...   the zero-stores row (zero-stores.ts), when it has struct-typed stack locals
  *   M  ...   the mask-sites row (mask-sites.ts), when it prints a byte or word mask
+ *   X  ...   the zext-sites row (zext-sites.ts), when an operator's result is zero-extended
  *   D  id,full,shape;...   the types the markup named
  */
 export const FUNCTION_FACTS_SCRIPT = `
@@ -397,7 +400,7 @@ ${STRING_OPS_JAVA}
             hrow.append(hrow.length() > 0 ? ";" : "").append(Long.toHexString(hc.getAddress().getOffset() - base))
               .append(':').append(Long.toHexString(g.getAddress().getOffset() - base)).append(':').append(ways);
           }
-${JUMP_TABLES_JAVA}${ZERO_STORES_JAVA}${MASK_SITES_JAVA}          // the types the markup named
+${JUMP_TABLES_JAVA}${ZERO_STORES_JAVA}${MASK_SITES_JAVA}${ZEXT_SITES_JAVA}          // the types the markup named
           java.util.Set<Long> deps = new java.util.TreeSet<>();
           for (ghidra.app.decompiler.ClangNode n : toks) {
             ghidra.program.model.data.DataType d = null;
@@ -439,6 +442,7 @@ ${JUMP_TABLES_JAVA}${ZERO_STORES_JAVA}${MASK_SITES_JAVA}          // the types t
           if (jrow.length() > 0) out.append("J\\t").append(a).append('\\t').append(jrow).append('\\n');
           if (zrow.length() > 0) out.append("Z\\t").append(a).append('\\t').append(zrow).append('\\n');
           if (mrow.length() > 0) out.append("M\\t").append(a).append('\\t').append(mrow).append('\\n');
+          if (xrow.length() > 0) out.append("X\\t").append(a).append('\\t').append(xrow).append('\\n');
           out.append("D\\t").append(ds).append('\\n');
           rows.put(a, out.toString());
         } catch (Exception e) { rows.put(a, "F\\t" + a + "\\terror\\tfail\\n"); }
@@ -466,7 +470,7 @@ println(sb.toString());
  */
 export const FACT_SCRIPT_VERSION = createHash('sha1')
   .update(FUNCTION_FACTS_SCRIPT).update(LABEL_FLOW_SCRIPT).update(functionStampsScript([], []))
-  .update('facts-6')
+  .update('facts-7')
   .digest('hex').slice(0, 16);
 
 export function functionFactsScript(batch: string[], threads = 8, timeout = 60): string {
@@ -498,6 +502,8 @@ export interface FunctionFactRow {
   zeroRow?: string;
   /** The mask-sites row, untagged and without the entry. */
   maskRow?: string;
+  /** The zext-sites row, untagged and without the entry. */
+  zextRow?: string;
   deps: Record<string, TypeStamp>;
 }
 
@@ -544,6 +550,7 @@ export function parseFunctionFacts(output: string): FunctionFactOutput {
     else if (tag === 'J') cur.jumpRow = rest.slice(rest.indexOf('\t') + 1);
     else if (tag === 'Z') cur.zeroRow = rest.slice(rest.indexOf('\t') + 1);
     else if (tag === 'M') cur.maskRow = rest.slice(rest.indexOf('\t') + 1);
+    else if (tag === 'X') cur.zextRow = rest.slice(rest.indexOf('\t') + 1);
     else if (tag === 'D') {
       for (const part of rest ? rest.split(';') : []) {
         const [id, full, shape] = part.split(',');
@@ -604,6 +611,11 @@ export function selectFacts(text: string, entry: string, row: FunctionFactRow, c
     const m = parseMaskSiteRow(row.maskRow);
     if (m) facts.maskSites = m;
   }
+  if (printsZextCast(text) && row.zextRow && row.textHash !== null
+      && text.length === row.textLength && javaStringHash(text) === row.textHash) {
+    const x = parseZextSiteRow(row.zextRow);
+    if (x) facts.zextSites = x;
+  }
   return facts;
 }
 
@@ -639,7 +651,7 @@ export interface FunctionFactStats {
   labelMs: number;
 }
 
-export const FACT_KEYS = ['compareSites', 'branchLayout', 'callOrder', 'accessOrder', 'haltLines', 'stringOps', 'jumpTables', 'zeroStores', 'maskSites', 'labelFlow'] as const;
+export const FACT_KEYS = ['compareSites', 'branchLayout', 'callOrder', 'accessOrder', 'haltLines', 'stringOps', 'jumpTables', 'zeroStores', 'maskSites', 'zextSites', 'labelFlow'] as const;
 
 /**
  * Attach every per-function fact to the decompiled functions, from the cache where the
@@ -662,7 +674,7 @@ export async function extractFunctionFacts(
     if (!f.decompiled || f.isThunk || f.isExternal) continue;
     if (!(printsComparison(f.decompiled) || printsBranch(f.decompiled) || printsCallTemporary(f.decompiled)
         || printsAccess(f.decompiled) || printsHaltOrProbe(f.decompiled) || printsRepLoop(f.decompiled)
-        || printsSwitch(f.decompiled) || printsMemberZeroStore(f.decompiled) || printsByteWordMask(f.decompiled)
+        || printsSwitch(f.decompiled) || printsMemberZeroStore(f.decompiled) || printsByteWordMask(f.decompiled) || printsZextCast(f.decompiled)
         || labelsOf(f.decompiled).length > 0)) continue;
     byEntry.set(normalizeEntry(f.address), f);
   }
@@ -804,6 +816,7 @@ function attach(f: ExtractedFunction, facts: CachedFacts): void {
   if (facts.jumpTables !== undefined) f.jumpTables = facts.jumpTables;
   if (facts.zeroStores !== undefined) f.zeroStores = facts.zeroStores;
   if (facts.maskSites !== undefined) f.maskSites = facts.maskSites;
+  if (facts.zextSites !== undefined) f.zextSites = facts.zextSites;
   if (facts.labelFlow !== undefined) f.labelFlow = { ...(f.labelFlow ?? {}), ...facts.labelFlow };
 }
 

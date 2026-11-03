@@ -29,6 +29,7 @@ import type { StringOpFacts } from './string-ops.js';
 import type { JumpTableFacts } from './jump-tables.js';
 import type { ZeroStoreFacts } from './zero-stores.js';
 import type { MaskSiteFacts } from './mask-sites.js';
+import type { ZextSiteFacts } from './zext-sites.js';
 import type { LabelFlow } from '../types.js';
 import type { TypeStamp, FunctionStamps } from './function-stamps.js';
 import { javaStringHash } from './compare-sites.js';
@@ -43,6 +44,7 @@ export interface CachedFacts {
   jumpTables?: JumpTableFacts;
   zeroStores?: ZeroStoreFacts;
   maskSites?: MaskSiteFacts;
+  zextSites?: ZextSiteFacts;
   labelFlow?: Record<string, LabelFlow>;
 }
 

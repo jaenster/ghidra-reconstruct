@@ -1700,6 +1700,7 @@ export function generateFunctionImplementation(
           zeroStores: func.zeroStores,
           // A text patch anchors on the masks as Ghidra printed them.
           maskSites: override?.action === 'patch' ? undefined : func.maskSites,
+          zextSites: override?.action === 'patch' ? undefined : func.zextSites,
           sehLowering: sehLoweringDecision(func),
           foldedAddresses: foldedAddressFacts(func),
           immediateConstants: immediateConstantFacts(func),
@@ -2673,6 +2674,8 @@ function transformDecompiledCode(
     zeroStores?: import('../extract/zero-stores.js').ZeroStoreFacts;
     /** The decompile's byte/word masks and the instruction behind each (extract/mask-sites.ts). */
     maskSites?: import('../extract/mask-sites.js').MaskSiteFacts;
+    /** The operators whose result the decompiler zero-extends to 64 bits (extract/zext-sites.ts). */
+    zextSites?: import('../extract/zext-sites.js').ZextSiteFacts;
     /** The function's EH3 frame as `seh-lowering` needs it (codegen/seh-lowering-spec.ts). */
     sehLowering?: SehLoweringDecision;
     /** Addresses the instructions derive from a global's start (codegen/folded-address-spec.ts). */
@@ -3247,6 +3250,10 @@ function transformDecompiledCode(
     // Masks a MOVZX computed, tagged before any pass reshapes the printed `&`.
     if (enclosing?.maskSites) {
       perPluginOptions['zero-extend-site'] = { count: enclosing.maskSites.count, sites: enclosing.maskSites.sites };
+    }
+    // Operators whose result the decompiler zero-extends, tagged before any pass reshapes them.
+    if (enclosing?.zextSites) {
+      perPluginOptions['zext-site'] = { counts: enclosing.zextSites.counts, sites: enclosing.zextSites.sites };
     }
     if (enclosing?.compareForm) {
       perPluginOptions['compare-form'] = {

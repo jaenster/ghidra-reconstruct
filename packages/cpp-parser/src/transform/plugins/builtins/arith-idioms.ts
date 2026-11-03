@@ -92,14 +92,14 @@ export interface ArithIdiomsOptions extends PluginOptions {
 export type ArithIdiom =
   | 'low-dword' | 'narrow-div' | 'magic-div' | 'cast-chain' | 'modulo' | 'divides' | 'pow2-div' | 'long-helper' | 'signed-div'
   | 'setcc-select' | 'pow2-rem' | 'pow2-rem-test' | 'pow2-rem-mask' | 'u2f'
-  | 'sdiv-widened' | 'low-word-div' | 'trunc-mul' | 'narrow-residue' | 'signed-div-use' | 'nonneg-div' | 'zext-local';
+  | 'sdiv-widened' | 'low-word-div' | 'trunc-mul' | 'narrow-residue' | 'signed-div-use' | 'nonneg-div' | 'zext-local' | 'zext-operand';
 
 const stats: Record<ArithIdiom, number> = {
   'low-dword': 0, 'narrow-div': 0, 'magic-div': 0, 'cast-chain': 0, 'modulo': 0, 'divides': 0,
   'pow2-div': 0, 'long-helper': 0, 'signed-div': 0, 'setcc-select': 0, 'pow2-rem': 0, 'pow2-rem-test': 0,
   'pow2-rem-mask': 0, 'u2f': 0,
   'sdiv-widened': 0, 'low-word-div': 0, 'trunc-mul': 0, 'narrow-residue': 0, 'signed-div-use': 0,
-  'nonneg-div': 0, 'zext-local': 0,
+  'nonneg-div': 0, 'zext-local': 0, 'zext-operand': 0,
 };
 
 /** How many times each idiom has been folded since the last reset. */
@@ -1163,8 +1163,25 @@ function createFolder(shapeOf: ExprShape, o: ArithIdiomsOptions, resolve: Typede
     return Expr.paren((sum as BinaryExpr).left as Expression);
   };
 
+  /**
+   * `(T)E`, T a 64-bit unsigned integer type and E a binary operation `zext-site` tagged (the
+   * p-code zero-extends its 32-bit result), is `(T)(uint32_t)(E)`: the p-code's value is the
+   * low 32 bits of E taken as unsigned, which is what `(uint32_t)` keeps, and the cast then
+   * widens a non-negative dword. Printed without it, a signed E is sign-extended. An E whose
+   * type is already an unsigned dword is left: the cast zero-extends it as it stands.
+   */
+  const foldZextOperand = (e: Expression): Expression | null => {
+    const c = castOf(e);
+    if (!c || !sameType(c.type, U64)) return null;
+    const inner = unwrapParens(c.inner);
+    if (inner.kind !== NodeKind.BinaryExpr || !inner.ghidraInfo?.zextOperand) return null;
+    if (sameType(typeOf(inner), U32)) return null;
+    stats['zext-operand']++;
+    return updateNode(c.node, { expression: castNode('uint32_t', Expr.paren(inner)) } as Partial<CStyleCastExpr>);
+  };
+
   const RULES = [
-    foldLongHelper, foldLowDword, foldLowWordDiv, foldNarrowDiv, foldMagic, foldSdivWidened, foldTruncMul, foldCastChain,
+    foldZextOperand, foldLongHelper, foldLowDword, foldLowWordDiv, foldNarrowDiv, foldMagic, foldSdivWidened, foldTruncMul, foldCastChain,
     foldPow2Div, foldLowWordModulo, foldModulo, foldDivides, foldSetccSelect, foldNarrowResidue,
   ];
 

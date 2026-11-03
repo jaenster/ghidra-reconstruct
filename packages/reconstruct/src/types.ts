@@ -152,6 +152,12 @@ export interface ExtractedFunction {
    * snapshot predates the field.
    */
   maskSites?: import('./extract/mask-sites.js').MaskSiteFacts;
+  /**
+   * The binary operators whose 32-bit result the decompiler zero-extends to 64 bits and
+   * prints as a cast (extract/zext-sites.ts). Absent when there are none, the text changed
+   * since, or the snapshot predates the field.
+   */
+  zextSites?: import('./extract/zext-sites.js').ZextSiteFacts;
 }
 
 /**

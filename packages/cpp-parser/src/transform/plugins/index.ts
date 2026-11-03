@@ -592,6 +592,7 @@ export { immediateNotAddressPlugin, type ImmediateNotAddressOptions } from './bu
 export { importAddressForwarderPlugin, IMPORT_ADDRESS_FORWARDERS } from './builtins/import-address-forwarder.js';
 export { unsignedRangeComparePlugin } from './builtins/unsigned-range-compare.js';
 export { rangeTestFormPlugin } from './builtins/range-test-form.js';
+export { zextSitePlugin, createZextSiteTransformer, type ZextOperatorSite, type ZextSiteOptions } from './builtins/zext-site.js';
 export { zeroExtendSitePlugin, zeroExtendCastPlugin, createZeroExtendSiteTransformer, createZeroExtendCastTransformer, type ZeroExtendMaskSite, type ZeroExtendSiteOptions, type ZeroExtendCastOptions } from './builtins/zero-extend-cast.js';
 export { shiftCountMaskPlugin, createShiftCountMaskTransformer, type ShiftCountMaskOptions } from './builtins/shift-count-mask.js';
 export { createFunctionRanges, type ValueRange, type FunctionRanges } from './builtins/value-range.js';
@@ -694,6 +695,7 @@ import { unsignedRangeComparePlugin } from './builtins/unsigned-range-compare.js
 import { rangeTestFormPlugin } from './builtins/range-test-form.js';
 import { shiftCountMaskPlugin } from './builtins/shift-count-mask.js';
 import { zeroExtendSitePlugin, zeroExtendCastPlugin } from './builtins/zero-extend-cast.js';
+import { zextSitePlugin } from './builtins/zext-site.js';
 import { compareFormPlugin } from './builtins/compare-form.js';
 import { repStringFormPlugin } from './builtins/rep-string-form.js';
 import { compareSignednessPlugin } from './builtins/compare-signedness.js';
@@ -886,6 +888,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   rangeTestFormPlugin,        // Matching: (unsigned)(x - lo) <= k guarding a branch -> lo <= x && x <= hi, VC8's ADD x,-lo (priority 989.8)
   shiftCountMaskPlugin,       // Matching: x << (n & 0x1f) -> x << n where n is proven to lie in [0, 31] (priority 621)
   zeroExtendSitePlugin,       // Matching: tag each byte/word mask a MOVZX computed (priority 3)
+  zextSitePlugin,             // Correctness: tag each operation whose result the decompiler zero-extended (priority 3)
   zeroExtendCastPlugin,       // Matching: a tagged x & 0xffff -> (uint16_t)x where value and type are kept (priority 622)
   compareFormPlugin,          // Fidelity: a comparison in the form its CMP/TEST and Jcc show (priority 3)
   repStringFormPlugin,        // Fidelity: a REP STOS fill as an index loop, a REP MOVS copy as memcpy, from the instruction (priority 4)

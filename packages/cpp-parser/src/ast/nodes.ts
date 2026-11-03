@@ -84,6 +84,12 @@ export interface GhidraMetadata {
    */
   zeroExtendWidth?: number;
   /**
+   * The decompiler zero-extends this 32-bit operation's result to 64 bits and printed the
+   * extension as a cast (`zext-site`); `arith-idioms` writes the cast's truncation to 32 bits
+   * out, so a signed operation is not sign-extended.
+   */
+  zextOperand?: boolean;
+  /**
    * The loop is the source form its instructions show - a REP STOS fill (`rep-string-form`),
    * an unrolled fill of more than 32 bytes (`array-fill-collapse`) - and VC8 compiles it back
    * to them; `memory-patterns` must not fold it into a memset call.
