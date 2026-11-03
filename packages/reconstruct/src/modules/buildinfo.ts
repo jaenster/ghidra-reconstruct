@@ -140,21 +140,15 @@ export function hashFunction(func: ExtractedFunction): string {
   return createHash('sha256').update(canonicalJson(func, FUNCTION_HASH_EXCLUDED)).digest('hex').slice(0, 16);
 }
 
-/** Hash a data type for change detection */
+/**
+ * Hash a data type for change detection: the whole record. It covered only the name,
+ * kind, size and fields, so a typedef's underlying type or shifted-pointer fact, an
+ * enum's values or a function definition's signature could change and no unit using it
+ * re-emitted: v1864, seven typedefs lost `shifted`, their headers changed and the .cpp
+ * bodies still lowered `ADJ(p)` against the old layout (regen 42e768c21, 6/477 failing).
+ */
 export function hashDataType(dt: ExtractedDataType): string {
-  const h = createHash('sha256');
-  h.update(dt.name);
-  h.update(dt.kind);
-  h.update(String(dt.size));
-  if ('fields' in dt && Array.isArray((dt as any).fields)) {
-    for (const f of (dt as any).fields) {
-      h.update(f.name ?? '');
-      h.update(f.dataType ?? '');
-      h.update(String(f.offset ?? 0));
-      h.update(String(f.size ?? 0));
-    }
-  }
-  return h.digest('hex').slice(0, 16);
+  return createHash('sha256').update(canonicalJson(dt)).digest('hex').slice(0, 16);
 }
 
 /** JSON with object keys sorted, so equal values hash equal whatever order built them. */
