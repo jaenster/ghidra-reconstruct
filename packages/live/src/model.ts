@@ -567,6 +567,26 @@ function initializedDataNames(g: AnalyzedDataSymbol, names: ReadonlySet<string>)
   return walk((g as { initializedData?: unknown }).initializedData);
 }
 
+/**
+ * Does a global's initialized data spell one of these names as an identifier anywhere in
+ * a value (`name`, `name+0x4`, `NS::name`)? An over-match costs one re-read, a miss a
+ * stale table, so any token naming it counts.
+ */
+export function initializedDataSpells(g: AnalyzedDataSymbol, names: ReadonlySet<string>): boolean {
+  const walk = (v: unknown): boolean => {
+    if (typeof v === 'string') {
+      for (const token of v.match(/[A-Za-z_$][\w$]*(?:::[A-Za-z_$][\w$]*)*/g) ?? []) {
+        if (names.has(token) || names.has(token.includes('::') ? token.slice(token.lastIndexOf('::') + 2) : token)) return true;
+      }
+      return false;
+    }
+    if (Array.isArray(v)) return v.some(walk);
+    if (v && typeof v === 'object') return Object.values(v as Record<string, unknown>).some(walk);
+    return false;
+  };
+  return walk((g as { initializedData?: unknown }).initializedData);
+}
+
 /** The type names one record refers to: members, typedef target, function definition. */
 function referencedTypeNames(dt: ExtractedDataType): string[] {
   const r = dt as ExtractedDataType & {
@@ -1098,6 +1118,7 @@ export async function applyEvents(
    * Only the flags other whole-program steps set (primary, import slot) are kept.
    * markUsers: also send the functions that reference them to be decompiled again.
    */
+  const goneGlobalNames = new Set<string>();
   const reconcileGlobals = async (globalAddrs: readonly string[], markUsers: boolean): Promise<void> => {
     if (globalAddrs.length === 0) return;
     const read = await readGlobalRecords(model, client, globalAddrs, log);
@@ -1117,6 +1138,9 @@ export async function applyEvents(
         markReadersOfRange(addr, extent);
       }
       for (const gone of inModel.filter(g => !names.includes(g.name))) {
+        goneGlobalNames.add(gone.name);
+        const ns = (gone as { namespace?: string }).namespace;
+        if (ns) goneGlobalNames.add(`${ns}::${gone.name}`);
         if (markUsers) markReferencingFunctions(gone, readersByName, affected);
         model.primary.globals.splice(model.primary.globals.indexOf(gone), 1);
         result.touchedGlobals.push(addr);
@@ -1158,6 +1182,24 @@ export async function applyEvents(
     }
   };
   await reconcileGlobals(globalAddrs, true);
+
+  // A global renamed or removed is also spelled in the initialized data of the tables
+  // that point at it: the extraction writes a pointer element as its target's label. Those
+  // tables are read again, as the full extraction would read them, or a renamed array's
+  // table keeps naming the old label (gaUnitSoundTableByClassId at v1870).
+  if (goneGlobalNames.size > 0) {
+    const reconciled = new Set(globalAddrs);
+    const tables = new Set<string>();
+    for (const g of model.primary.globals) {
+      if (g.platform) continue;
+      const addr = addressKey(g.address);
+      if (!reconciled.has(addr) && initializedDataSpells(g, goneGlobalNames)) tables.add(addr);
+    }
+    if (tables.size > 0) {
+      log(`renamed or removed globals: ${goneGlobalNames.size}; ${tables.size} table(s) point at an old name`);
+      await reconcileGlobals([...tables], false);
+    }
+  }
 
   // Which label is primary at an address with several. A re-listed global arrives
   // without the flag (`list_data_symbols` does not know it), and a rename can move the
