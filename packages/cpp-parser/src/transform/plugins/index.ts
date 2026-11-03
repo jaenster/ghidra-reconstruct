@@ -393,6 +393,11 @@ export {
 } from './builtins/param-load-order.js';
 
 export {
+  shortLocalWidenPlugin,
+  type ShortLocalWidenOptions,
+} from './builtins/short-local-widen.js';
+
+export {
   accumulateSumPlugin,
   type AccumulateSumOptions,
 } from './builtins/accumulate-sum.js';
@@ -756,6 +761,7 @@ import { paramLoadOrderPlugin } from './builtins/param-load-order.js';
 import { searchLoopExitPlugin } from './builtins/search-loop-exit.js';
 import { inlinedStrcpyPlugin } from './builtins/inlined-strcpy.js';
 import { accumulateSumPlugin } from './builtins/accumulate-sum.js';
+import { shortLocalWidenPlugin } from './builtins/short-local-widen.js';
 import { recordGetterGuardPlugin } from './builtins/record-getter-guard.js';
 import { recordGetterSplitPlugin } from './builtins/record-getter-split.js';
 import { armConstantCallPlugin } from './builtins/arm-constant-call.js';
@@ -966,6 +972,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   searchLoopExitPlugin,       // Matching: a search loop with its not-found exit printed twice loops on the pointer (priority 989.85)
   inlinedStrcpyPlugin,        // Matching: the byte loop VC8 expands strcpy into becomes the call (priority 989.9)
   accumulateSumPlugin,        // Matching: a sum of two single-use values accumulates into the first with += (priority 989.95)
+  shortLocalWidenPlugin,      // Matching: a short local read only as an index is an int (priority 989.96)
   paramCheckBlockPlugin,      // Matching: a Storm parameter check compiled as one neg/sbb mask chain -> a D2_CHECKS block (priority 980)
   inlinedCallRestorePlugin,   // Matching: a call where the decompiler printed an inlined helper's body (priority 0.5)
   gotoCrossesInitPlugin,      // Late: split T x=e; → T x; x=e; for goto-crossed locals (priority 700)
