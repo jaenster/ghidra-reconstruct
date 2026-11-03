@@ -502,6 +502,95 @@ export function buildIndices(m: LiveModel): ModelIndices {
   return indices;
 }
 
+/** What `readGlobalRecords` read for a set of addresses. */
+export interface GlobalRead {
+  /** The labels Ghidra has at each address now, and the plate comment there. */
+  labels: Map<string, { names: string[]; comment?: string }>;
+  /**
+   * `address\tname` -> the record a reconcile stores for that label, or null when the
+   * full pass keeps no record for it (no data there, or a string it leaves out). A label
+   * that could not be read is absent: a reconcile keeps its previous record.
+   */
+  records: Map<string, AnalyzedDataSymbol | null>;
+  /** The initialized-data read failed: the records carry none. */
+  initializedDataFailed: boolean;
+}
+
+/**
+ * The read half of a global reconcile, with no model write: the labels at these
+ * addresses, each listed row rebuilt as the full pass builds one (analyzeDataSymbol, the
+ * plate comment at the address, initialized data), and the flags other whole-program
+ * steps set (primary, import slot) carried from the model's record of the same label.
+ * Null when the labels themselves could not be read. The reconcile in applyEvents and
+ * the model verifier (verifier.ts) both read through here.
+ */
+export async function readGlobalRecords(
+  model: LiveModel,
+  client: GhidraConnection,
+  globalAddrs: readonly string[],
+  log: LiveLog,
+): Promise<GlobalRead | null> {
+  let labels: Map<string, { names: string[]; comment?: string }>;
+  try {
+    labels = await labelsAt(client, globalAddrs);
+  } catch (e) {
+    log(`globals: labels at ${globalAddrs.length} address(es) unavailable (${(e as Error).message}); keeping previous records`);
+    return null;
+  }
+  // Every listed row the addresses need, in a few listing calls rather than one per
+  // name: each call walks the whole symbol table, and a names round re-reads hundreds.
+  const rows = new Map<string, ExtractedGlobalRow>();
+  const unreadable = new Set<string>();
+  const wanted = [...new Set(globalAddrs.flatMap(a => labels.get(a)?.names ?? []))];
+  for (let i = 0; i < wanted.length; i += GLOBAL_LIST_CHUNK) {
+    const chunk = wanted.slice(i, i + GLOBAL_LIST_CHUNK);
+    try {
+      const page = await extractGlobals(client, { regex: `^(?:${chunk.map(escapeRegex).join('|')})$`, limit: 100000 });
+      for (const row of page.globals) rows.set(`${addressKey(row.address)}\t${row.name}`, row);
+    } catch (e) {
+      log(`globals: listing ${chunk.length} name(s) failed (${(e as Error).message}); keeping their previous records`);
+      for (const n of chunk) unreadable.add(n);
+    }
+  }
+  const records = new Map<string, AnalyzedDataSymbol | null>();
+  const fresh: AnalyzedDataSymbol[] = [];
+  for (const addr of globalAddrs) {
+    const here = labels.get(addr) ?? { names: [] };
+    for (const name of here.names) {
+      if (unreadable.has(name)) continue;
+      const key = `${addr}\t${name}`;
+      try {
+        const row = rows.get(key);
+        const analyzed = row ? analyzeDataSymbol(row) : null;
+        if (!analyzed) { records.set(key, null); continue; }
+        const record: AnalyzedDataSymbol = analyzed;
+        if (here.comment) record.comment = here.comment;
+        const existing = model.primary.globals.find(g => !g.platform && g.name === name && addressKey(g.address) === addr);
+        if (existing) {
+          const keep = existing as AnalyzedDataSymbol & { primary?: boolean; importSlot?: unknown };
+          const out = record as AnalyzedDataSymbol & { primary?: boolean; importSlot?: unknown };
+          if (keep.primary !== undefined) out.primary = keep.primary;
+          if (keep.importSlot !== undefined) out.importSlot = keep.importSlot;
+        }
+        records.set(key, record);
+        fresh.push(record);
+      } catch (e) {
+        log(`global ${name}: re-extract failed (${(e as Error).message}); keeping previous`);
+      }
+    }
+  }
+  let initializedDataFailed = false;
+  if (fresh.length > 0) {
+    try {
+      await fetchInitializedData(client, fresh);
+    } catch (e) {
+      initializedDataFailed = true;
+      log(`globals: initialized data for ${fresh.length} record(s) failed (${(e as Error).message})`);
+    }
+  }
+  return { labels, records, initializedDataFailed };
+}
+
 /**
  * Fold a batch of change events into the model.
  *
@@ -760,33 +849,11 @@ export async function applyEvents(
    */
   const reconcileGlobals = async (globalAddrs: readonly string[], markUsers: boolean): Promise<void> => {
     if (globalAddrs.length === 0) return;
-    let labels: Map<string, { names: string[]; comment?: string }> | null = null;
-    try {
-      labels = await labelsAt(client, globalAddrs);
-    } catch (e) {
-      log(`globals: labels at ${globalAddrs.length} address(es) unavailable (${(e as Error).message}); keeping previous records`);
-      return;
-    }
-    // Every listed row the addresses need, in a few listing calls rather than one per
-    // name: each call walks the whole symbol table, and a names round re-reads hundreds.
-    const rows = new Map<string, ExtractedGlobalRow>();
-    const unreadable = new Set<string>();
-    const wanted = [...new Set(globalAddrs.flatMap(a => labels!.get(a)?.names ?? []))];
-    for (let i = 0; i < wanted.length; i += GLOBAL_LIST_CHUNK) {
-      const chunk = wanted.slice(i, i + GLOBAL_LIST_CHUNK);
-      try {
-        const page = await extractGlobals(client, { regex: `^(?:${chunk.map(escapeRegex).join('|')})$`, limit: 100000 });
-        for (const row of page.globals) rows.set(`${addressKey(row.address)}\t${row.name}`, row);
-      } catch (e) {
-        log(`globals: listing ${chunk.length} name(s) failed (${(e as Error).message}); keeping their previous records`);
-        for (const n of chunk) unreadable.add(n);
-      }
-    }
-    const fresh: AnalyzedDataSymbol[] = [];
+    const read = await readGlobalRecords(model, client, globalAddrs, log);
+    if (!read) return;
     let added = false;
     for (const addr of globalAddrs) {
-      const here = labels.get(addr) ?? { names: [] };
-      const names = here.names;
+      const names = read.labels.get(addr)?.names ?? [];
       const inModel = model.primary.globals.filter(g => !g.platform && addressKey(g.address) === addr);
       for (const gone of inModel.filter(g => !names.includes(g.name))) {
         if (markUsers) markReferencingFunctions(gone, nameToFn, affected);
@@ -795,48 +862,30 @@ export async function applyEvents(
         log(`global ${gone.name}: no longer at ${gone.address}; removed`);
       }
       for (const name of names) {
-        if (unreadable.has(name)) continue;
-        try {
-          const row = rows.get(`${addr}\t${name}`);
-          const existing = inModel.find(g => g.name === name);
-          const analyzed = row ? analyzeDataSymbol(row) : null;
-          if (!analyzed) {
-            // Not listed (no data there) or a string the full pass leaves out.
-            if (existing) {
-              model.primary.globals.splice(model.primary.globals.indexOf(existing), 1);
-              result.touchedGlobals.push(addr);
-            }
-            continue;
-          }
-          const record: AnalyzedDataSymbol = analyzed;
-          if (here.comment) record.comment = here.comment;
+        const key = `${addr}\t${name}`;
+        if (!read.records.has(key)) continue;   // unreadable: the previous record stands
+        const record = read.records.get(key)!;
+        const existing = inModel.find(g => g.name === name);
+        if (!record) {
+          // Not listed (no data there) or a string the full pass leaves out.
           if (existing) {
-            const keep = existing as AnalyzedDataSymbol & { primary?: boolean; importSlot?: unknown };
-            const out = record as AnalyzedDataSymbol & { primary?: boolean; importSlot?: unknown };
-            if (keep.primary !== undefined) out.primary = keep.primary;
-            if (keep.importSlot !== undefined) out.importSlot = keep.importSlot;
-            model.primary.globals[model.primary.globals.indexOf(existing)] = record;
-          } else {
-            model.primary.globals.push(record);
-            added = true;
-            log(`global ${name}: new at ${row!.address}`);
+            model.primary.globals.splice(model.primary.globals.indexOf(existing), 1);
+            result.touchedGlobals.push(addr);
           }
-          fresh.push(record);
-          result.touchedGlobals.push(addr);
-          if (markUsers) markReferencingFunctions(record, nameToFn, affected);
-        } catch (e) {
-          log(`global ${name}: re-extract failed (${(e as Error).message}); keeping previous`);
+          continue;
         }
+        if (existing) {
+          model.primary.globals[model.primary.globals.indexOf(existing)] = record;
+        } else {
+          model.primary.globals.push(record);
+          added = true;
+          log(`global ${name}: new at ${record.address}`);
+        }
+        result.touchedGlobals.push(addr);
+        if (markUsers) markReferencingFunctions(record, nameToFn, affected);
       }
       const first = model.primary.globals.find(g => !g.platform && addressKey(g.address) === addr);
       if (first) indices.globalByAddr.set(addr, first); else indices.globalByAddr.delete(addr);
-    }
-    if (fresh.length > 0) {
-      try {
-        await fetchInitializedData(client, fresh);
-      } catch (e) {
-        log(`globals: initialized data for ${fresh.length} record(s) failed (${(e as Error).message})`);
-      }
     }
     // A new record goes where the full listing puts it: the symbol table's order.
     if (added) {
