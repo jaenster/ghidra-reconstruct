@@ -426,6 +426,13 @@ export {
 } from './builtins/storm-next-link.js';
 
 export {
+  paramCheckBlockPlugin,
+  createParamCheckBlockTransformer,
+  CHECK_BLOCK_SUPPORT_LINES,
+  type ParamCheckBlockOptions,
+} from './builtins/param-check-block.js';
+
+export {
   inlinedCallRestorePlugin,
   restoreInlinedCalls,
   compileInlinedCallee,
@@ -730,6 +737,7 @@ import { fieldPointerFoldPlugin } from './builtins/field-pointer-fold.js';
 import { newResultTempPlugin } from './builtins/new-result-temp.js';
 import { joinStoreTempPlugin } from './builtins/join-store-temp.js';
 import { stormNextLinkPlugin } from './builtins/storm-next-link.js';
+import { paramCheckBlockPlugin } from './builtins/param-check-block.js';
 import { inlinedCallRestorePlugin } from './builtins/inlined-call-restore.js';
 import { guardedCallRestorePlugin } from './builtins/guarded-call-restore.js';
 import { switchChainPlugin } from './builtins/switch-chain.js';
@@ -928,6 +936,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   newResultTempPlugin,        // Matching: an allocation constructed in place gets a temporary; the result assigned after (priority 62.6)
   joinStoreTempPlugin,        // Matching: a member every arm stores into is stored once after the join, through a temporary (priority 970)
   stormNextLinkPlugin,        // Matching: a flattened inline TSLink::NextLink(-1) becomes a call to the inline helper (priority 975)
+  paramCheckBlockPlugin,      // Matching: a Storm parameter check compiled as one neg/sbb mask chain -> a D2_CHECKS block (priority 980)
   inlinedCallRestorePlugin,   // Matching: a call where the decompiler printed an inlined helper's body (priority 0.5)
   gotoCrossesInitPlugin,      // Late: split T x=e; → T x; x=e; for goto-crossed locals (priority 700)
   haltSiteFoldPlugin,         // Cleanup: fold nLine/nAddress temporaries into the halt call, copy a shared halt tail to its jumps (priority 930)

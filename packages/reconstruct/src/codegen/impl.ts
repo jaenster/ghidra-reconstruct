@@ -3396,6 +3396,21 @@ function transformDecompiledCode(
         } : {}),
       };
       perPluginOptions['case-layout'] = { branchLayout: layout };
+      // Storm's parameter checks set ERROR_INVALID_PARAMETER through SErrSetLastError; where the
+      // original evaluated them as one mask chain they go back into a check block.
+      if ((enclosing?.ghidraNamespaceSegments ?? enclosing?.namespaceSegments)?.[0] === 'Storm') {
+        perPluginOptions['param-check-block'] = {
+          branchLayout: layout,
+          errorSetter: 'SErrSetLastError',
+          errorCode: 0x57,
+          ...(process.env.GHIDRA_BRANCH_LAYOUT_REPORT ? {
+            onSite: (e: { line: number; checks: number; form: string }) =>
+              console.warn(`[param-check] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.checks} check${e.checks === 1 ? '' : 's'} (${e.form}) at line ${e.line}`),
+            onLeft: (e: { line: number; why: string }) =>
+              console.warn(`[param-check] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: left at line ${e.line} (${e.why})`),
+          } : {}),
+        };
+      }
       if (enclosing?.jumpTables) {
         perPluginOptions['jump-table-case'] = {
           branchLayout: layout,
