@@ -93,6 +93,11 @@ export class OverrideRegistry {
     return this.byAddress.size;
   }
 
+  /** Every entry, in no particular order. */
+  entries(): IterableIterator<OverrideEntry> {
+    return this.byAddress.values();
+  }
+
   getProjectDir(): string {
     return this.projectDir;
   }

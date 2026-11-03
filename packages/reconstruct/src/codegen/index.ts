@@ -625,6 +625,39 @@ export interface GenerationState {
   platformHeaderOptions?: Parameters<typeof generatePlatformHeader>[0];
 }
 
+/**
+ * Every text that can name a type by value in emitted or built code: each
+ * function's decompile and declared types, each funcdef's, each override's
+ * replacement, and the hand-written sources built beside the tree.
+ */
+function* constructorCodeTexts(
+  functions: ReadonlyArray<ExtractedFunction>,
+  funcDefs: ReadonlyArray<import('../types.js').ExtractedFunctionDefinition>,
+  overrides: ReturnType<typeof createOverrideRegistry>,
+  foreignSources: ReadonlyArray<ForeignSource>,
+): Generator<string> {
+  for (const f of functions) {
+    if (f.decompiled) yield f.decompiled;
+    yield f.signature ?? '';
+    yield f.returnType ?? '';
+    for (const p of f.parameters ?? []) yield p.dataType ?? '';
+    for (const v of f.localVariables ?? []) yield v.dataType ?? '';
+  }
+  for (const d of funcDefs) {
+    yield d.returnType ?? '';
+    for (const p of d.parameters ?? []) yield p.dataType ?? '';
+  }
+  for (const o of overrides?.entries() ?? []) {
+    for (const p of o.patches ?? []) yield p.replace;
+    if (o.sourceFile) {
+      const path = overrides!.resolveSource(o.sourceFile);
+      // A missing file is reported where the override is applied.
+      if (nodeFs.existsSync(path)) yield nodeFs.readFileSync(path, 'utf-8');
+    }
+  }
+  for (const src of foreignSources) yield src.text;
+}
+
 export function generateProject(
   name: string,
   functions: ExtractedFunction[],
@@ -854,8 +887,15 @@ export function generateProjectStage1(
   setKnownFuncDefs(funcDefDataTypes);
   // Which structs the emitter gives constructors: a packed struct holding one by
   // value needs `#pragma pack`, because GCC's packed attribute skips non-POD members.
+  // A struct no code holds by value gets none, so its data is a constant aggregate:
+  // every text that can name a type by value is read, before the exclusion
+  // closure drops any function (a dropped one only keeps more constructors).
+  const projectDir = options.projectDir ?? options.outputDir;
+  const overrides = createOverrideRegistry(options.projectConfig, projectDir);
+  const foreignSources = readForeignSources(options.projectConfig?.foreignReferences ?? [], projectDir);
   setConstructorBearingStructs(
     dataTypes as Array<{ name: string; kind?: string; fields?: import('../types.js').StructField[] }>,
+    constructorCodeTexts(functions, funcDefDataTypes, overrides, foreignSources),
   );
   // Enum widths, before ANY header is emitted: the definition in d2_enums.h and
   // every forward declaration of the same name must agree on the underlying
@@ -1068,9 +1108,6 @@ export function generateProjectStage1(
 
   // Build registries from project config
   // Override files live in projectDir (not outputDir) so they survive regeneration
-  const projectDir = options.projectDir ?? options.outputDir;
-  const overrides = createOverrideRegistry(options.projectConfig, projectDir);
-  const foreignSources = readForeignSources(options.projectConfig?.foreignReferences ?? [], projectDir);
   const libraries = createLibraryRegistry(options.projectConfig);
   let methodConversions = createMethodConversionRegistry(options.projectConfig);
 

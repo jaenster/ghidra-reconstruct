@@ -143,8 +143,9 @@ describe('co-located globals participate in the impl dependency scan', () => {
 
   it('emits the co-located definition', () => {
     assert.ok(renderer, 'D2Client/Renderer.cpp was not generated');
-    // An integer-only struct the header gives constructors is initialized by its constructor.
-    assert.match(renderer!.content, /D2GlideStateStrc gGlideState = D2GlideStateStrc\(/);
+    // No function holds this integer-only struct by value, so the header gives it no
+    // constructors and its data is the constant brace list (aggregate-only-structs.test.ts).
+    assert.match(renderer!.content, /D2GlideStateStrc gGlideState = \{/);
   });
 
   it('includes the header owning a type named only in the co-located block', () => {

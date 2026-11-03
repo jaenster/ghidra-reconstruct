@@ -21,7 +21,7 @@ import type {
 import type { MethodConversionRegistry } from '../methods/index.js';
 import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js';
 import { namespaceResolution, renderNamespace } from './namespace-resolution.js';
-import { isGhidraGeneratedName, suggestBetterName, type FuncPtrTarget } from '@ghidra-mcp/cpp-parser';
+import { isGhidraGeneratedName, suggestBetterName, Lexer, TokenKind, type FuncPtrTarget } from '@ghidra-mcp/cpp-parser';
 import { isPlatformOrBuiltinType, isLibraryType, sdkTypeHasElaboratedForm, normalizeSignatureType, normalizeWideCharType, collapseFuncPtrTypedef, rootQualifyShadowedType, rootQualifyShadowedArguments, emittedParameterName, arrayRowReturn, WINDOWS_STRUCTS, platformDeclaredFunctionNames } from './platform-types.js';
 import { generateExternDeclaration, isFuncDefTypedefName, sanitizeSymbolName, orderForwardDeclarations, type ForwardDeclaration } from './globals-header.js';
 import { declarationHead, pointerConvention } from './calling-convention.js';
@@ -723,7 +723,7 @@ export function generateClassDeclaration(
   // their integer equivalent (uint64_t). C++ requires explicit conversion operators.
   const intConversionType = getIntegerConversionType(classInfo.fields);
   if (intConversionType) {
-    if (!unionHeldStructs.has(classInfo.name)) {
+    if (!unionHeldStructs.has(classInfo.name) && !aggregateOnlyStructs.has(classInfo.name)) {
       lines.push(`    ${classInfo.name}() = default;`);
       lines.push(`    ${classInfo.name}(${intConversionType} v) { *reinterpret_cast<${intConversionType}*>(this) = v; }`);
     }
@@ -1617,8 +1617,9 @@ export function generateStructDeclaration(struct: ExtractedStruct): string {
 
   // Add integer conversion operators for small integer-only structs
   const intConversionType = getIntegerConversionType(struct.fields);
-  if (intConversionType && unionHeldStructs.has(struct.name)) {
-    // A union member may have no constructor in C++03 (MSVC C2620), so only the
+  if (intConversionType && (unionHeldStructs.has(struct.name) || aggregateOnlyStructs.has(struct.name))) {
+    // A union member may have no constructor in C++03 (MSVC C2620), and a struct
+    // no code holds by value needs none (see aggregateOnlyStructs), so only the
     // conversion to the integer is given; a cast from one is spelled as the bit
     // move (see hasConvertingConstructor).
     lines.push(`    operator ${intConversionType}() const { return *reinterpret_cast<const ${intConversionType}*>(this); }`);
@@ -1666,11 +1667,63 @@ const constructorBearingStructs = new Map<string, string[]>();
  */
 const unionHeldStructs = new Set<string>();
 
+/**
+ * Integer-only structs no code holds BY VALUE, given no constructors at all.
+ *
+ * The constructors exist for code: Ghidra moves a small struct through an integer
+ * (`D2SeedStrc` returned in EDX:EAX, a `uint64_t` assigned to one), and C++ needs
+ * a constructor for that conversion. They also make the struct a non-aggregate,
+ * so its data is spelled `T(a, b)` - and in C++03 a constructor call is dynamic
+ * initialisation. VC8 builds a table of them at run time behind a `$S` guard
+ * (MERC_GetWeaponAnimIndex's gaMercWeaponAnimMap[14], 0x006632c0) where the
+ * original holds constant data the code reads in place.
+ *
+ * A conversion INTO the struct needs an expression of the struct's own type: a
+ * local, parameter, return value, function-pointer slot or cast that names it by
+ * value. Where no function, override, hand-written source or funcdef names it
+ * except through a pointer, nothing converts into it, and dropping the
+ * constructors changes no expression - only the data, which becomes the brace
+ * list it was. The conversion operator stays (an aggregate may have member
+ * functions). A cast to one, should one appear, is spelled as the bit move, as
+ * for a struct a union holds.
+ */
+const aggregateOnlyStructs = new Set<string>();
+
+/**
+ * Every name in `candidates` some text names by value: not followed (after
+ * cv-qualifiers) by `*`. Text the lexer refuses counts every candidate it
+ * mentions, which only keeps more constructors.
+ */
+export function valueNamedTypeNames(texts: Iterable<string>, candidates: ReadonlySet<string>): Set<string> {
+  const named = new Set<string>();
+  if (candidates.size === 0) return named;
+  for (const text of texts) {
+    if (!text) continue;
+    let tokens: Array<{ kind: TokenKind; text: string }>;
+    try {
+      tokens = new Lexer(text, { preserveTrivia: false }).tokenize();
+    } catch {
+      for (const c of candidates) if (text.includes(c)) named.add(c);
+      continue;
+    }
+    for (let i = 0; i < tokens.length; i++) {
+      const t = tokens[i];
+      if (t.kind !== TokenKind.Identifier || !candidates.has(t.text) || named.has(t.text)) continue;
+      let j = i + 1;
+      while (tokens[j] && (tokens[j].text === 'const' || tokens[j].text === 'volatile')) j++;
+      if (tokens[j]?.text !== '*') named.add(t.text);
+    }
+  }
+  return named;
+}
+
 export function setConstructorBearingStructs(
   dataTypes: Iterable<{ name: string; kind?: string; fields?: StructField[] }>,
+  codeTexts?: Iterable<string>,
 ): void {
   constructorBearingStructs.clear();
   unionHeldStructs.clear();
+  aggregateOnlyStructs.clear();
   const all = [...dataTypes];
   for (const dt of all) {
     if (dt.kind !== 'UNION' || !dt.fields) continue;
@@ -1678,6 +1731,16 @@ export function setConstructorBearingStructs(
       const t = (f.dataType ?? '').replace(/\b(struct|union|const|volatile)\b/g, '').replace(/\[[^\]]*\]/g, '').trim();
       if (t && !t.includes('*')) unionHeldStructs.add(t);
     }
+  }
+  // Without the code to read, every candidate keeps its constructors.
+  if (codeTexts) {
+    const candidates = new Set<string>();
+    for (const dt of all) {
+      if (dt.kind !== 'STRUCTURE' || !dt.name || !dt.fields) continue;
+      if (getIntegerConversionType(dt.fields) && !unionHeldStructs.has(dt.name)) candidates.add(dt.name);
+    }
+    const byValue = valueNamedTypeNames(codeTexts, candidates);
+    for (const c of candidates) if (!byValue.has(c)) aggregateOnlyStructs.add(c);
   }
   for (const dt of all) {
     if (dt.kind !== 'STRUCTURE' || !dt.name || !dt.fields) continue;
@@ -1688,10 +1751,10 @@ export function setConstructorBearingStructs(
 /**
  * Whether the emitted declaration gives this struct its constructors: the integer
  * conversion set (`getIntegerConversionType`), except a struct a union holds by
- * value. Valid once `setConstructorBearingStructs` has seen the model.
+ * value and one no code holds by value (`aggregateOnlyStructs`). Valid once `setConstructorBearingStructs` has seen the model.
  */
 export function hasConvertingConstructor(name: string, fields: StructField[]): boolean {
-  return !!getIntegerConversionType(fields) && !unionHeldStructs.has(name);
+  return !!getIntegerConversionType(fields) && !unionHeldStructs.has(name) && !aggregateOnlyStructs.has(name);
 }
 
 /** The fields the field-wise constructor takes, in parameter order (see generateStructDeclaration). */
