@@ -1688,6 +1688,7 @@ const unionHeldStructs = new Set<string>();
  * for a struct a union holds.
  */
 const aggregateOnlyStructs = new Set<string>();
+const constructorCandidates = new Set<string>();
 
 /**
  * Every name in `candidates` some text names by value: not followed (after
@@ -1724,6 +1725,7 @@ export function setConstructorBearingStructs(
   constructorBearingStructs.clear();
   unionHeldStructs.clear();
   aggregateOnlyStructs.clear();
+  constructorCandidates.clear();
   const all = [...dataTypes];
   for (const dt of all) {
     if (dt.kind !== 'UNION' || !dt.fields) continue;
@@ -1737,7 +1739,10 @@ export function setConstructorBearingStructs(
     const candidates = new Set<string>();
     for (const dt of all) {
       if (dt.kind !== 'STRUCTURE' || !dt.name || !dt.fields) continue;
-      if (getIntegerConversionType(dt.fields) && !unionHeldStructs.has(dt.name)) candidates.add(dt.name);
+      if (getIntegerConversionType(dt.fields) && !unionHeldStructs.has(dt.name)) {
+        candidates.add(dt.name);
+        constructorCandidates.add(dt.name);
+      }
     }
     const byValue = valueNamedTypeNames(codeTexts, candidates);
     for (const c of candidates) if (!byValue.has(c)) aggregateOnlyStructs.add(c);
@@ -1754,6 +1759,7 @@ export function setConstructorBearingStructs(
  * value and one no code holds by value (`aggregateOnlyStructs`). Valid once `setConstructorBearingStructs` has seen the model.
  */
 export function hasConvertingConstructor(name: string, fields: StructField[]): boolean {
+  constructorLookupSink?.(name);
   return !!getIntegerConversionType(fields) && !unionHeldStructs.has(name) && !aggregateOnlyStructs.has(name);
 }
 
@@ -1770,7 +1776,32 @@ function constructorFieldNames(fields: StructField[]): string[] {
  * C++03; a data initializer spells the call itself.
  */
 export function constructorFields(name: string): readonly string[] | undefined {
+  constructorLookupSink?.(name);
   return constructorBearingStructs.get(name);
+}
+
+/**
+ * Whether a struct gets constructors is decided over the whole program (see
+ * aggregateOnlyStructs): one function starting to hold it by value changes how
+ * every unit spells its data. While a sink is set, each struct the emitter asks
+ * about is reported to it, so a unit can record the answers its text was written
+ * under (codegen/index.ts, IncludeBasis).
+ */
+let constructorLookupSink: ((name: string) => void) | null = null;
+
+export function recordConstructorLookups(sink: ((name: string) => void) | null): void {
+  constructorLookupSink = sink;
+}
+
+/** The answer a recorded constructor lookup compares: the constructor's fields, or '-' for none. */
+export function constructorFact(name: string): string {
+  const fields = constructorBearingStructs.get(name);
+  return fields ? `ctor(${fields.join(',')})` : '-';
+}
+
+/** Structs whose constructors depend on the code: integer-only and held by no union. */
+export function isConstructorCandidate(name: string): boolean {
+  return constructorCandidates.has(name);
 }
 
 /** Does a field hold a constructor-bearing struct BY VALUE (itself or as an array)? */

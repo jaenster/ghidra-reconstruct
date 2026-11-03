@@ -22,12 +22,14 @@ function placement(
   functions: Record<string, Array<{ qualified: string; header: string }>> = {},
   fields: Record<string, Record<string, string>> = {},
   templateHeader?: string,
+  constructors: Record<string, string> = {},
 ): PlacementLookup {
   return {
     typeOwner: t => owners[t],
     functionHeaders: n => functions[n],
     fieldType: (t, f) => fields[t]?.[f],
     templateHeader,
+    constructorFact: t => constructors[t] ?? '-',
   };
 }
 
@@ -100,4 +102,18 @@ test('a field retyped on a deref chain invalidates the text', () => {
 
 test('a record without a basis is never reused', () => {
   assert.equal(includeBasisHolds(undefined, GRAPH, v1852), false);
+});
+
+/**
+ * gen-1103: a struct no code holds by value gets no constructors, so its data is a
+ * brace list. One function starting to hold it by value gives it constructors
+ * again, and every unit whose data or body spells it must be written again.
+ */
+test('a struct gaining constructors invalidates text spelled without them', () => {
+  const aggregate = placement({}, {}, {}, undefined, { D2MercWeaponAnimStrc: '-' });
+  const converting = placement({}, {}, {}, undefined, { D2MercWeaponAnimStrc: 'ctor(nWeaponClass,nAnim)' });
+  const basis = recorded(aggregate, GRAPH, ['k:D2MercWeaponAnimStrc']);
+  assert.equal(includeBasisHolds(basis, GRAPH, aggregate), true);
+  assert.equal(includeBasisHolds(basis, GRAPH, converting), false);
+  assert.equal(includeBasisHolds(recorded(converting, GRAPH, ['k:D2MercWeaponAnimStrc']), GRAPH, aggregate), false);
 });

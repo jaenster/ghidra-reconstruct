@@ -71,7 +71,7 @@ import {
 import { Lexer, TokenKind, parse, biasedTableIndexPlugin, findNodesByKind, NodeKind, type InlinedCallee, type InlinedCallTables, type GuardedCallee, type GuardedCallTables } from '@ghidra-mcp/cpp-parser';
 
 import { buildVtableDispatch } from './vtable-dispatch.js';
-import { fieldDeclSpelling, emittedMemberNames, generateHeader, generateFunctionDeclaration, setKnownFuncDefs, setConstructorBearingStructs, hasConvertingConstructor, sigType, getIntegerConversionType, emittedFunctionName, returnSigType } from './header.js';
+import { fieldDeclSpelling, emittedMemberNames, generateHeader, generateFunctionDeclaration, setKnownFuncDefs, setConstructorBearingStructs, hasConvertingConstructor, recordConstructorLookups, constructorFact, isConstructorCandidate, sigType, getIntegerConversionType, emittedFunctionName, returnSigType } from './header.js';
 import { enumTypedefLine, registerEnumTypedefTargets, setKnownEnumWidths } from './enum-width.js';
 import { generateImplementation, probeGuardedCalls, setQuestStructLayouts, setStructFieldRenames, decompiledReturnType, decompiledFunctionName, decompiledParameters, type ImplGenContext, type FuncPtrArgCastTables, type ThunkForward } from './impl.js';
 import { generateCMakeLists, generateTopLevelCMake, generateTargetCMake, generateUnsortedCMake } from './cmake.js';
@@ -290,7 +290,7 @@ interface UnitEmitRecord {
  * handed to the emitter, and each placement lookup the dependency scan made, as
  * `[key, answer]`. Keys: `t:<type>` the header owning a type, `f:<function>` the
  * declaring headers of a name, `c:<type>.<field>` a field's struct type on a deref
- * chain, `p:` the template header.
+ * chain, `p:` the template header, `k:<struct>` whether a struct has constructors.
  */
 export interface IncludeBasis {
   graph: string[];
@@ -303,6 +303,8 @@ export interface PlacementLookup {
   functionHeaders(name: string): ReadonlyArray<{ qualified: string; header: string }> | undefined;
   fieldType(typeName: string, field: string): string | undefined;
   templateHeader: string | undefined;
+  /** Whether a struct is emitted with constructors, and which (header.ts constructorFact). */
+  constructorFact(typeName: string): string;
 }
 
 export function functionHeadersKey(
@@ -324,6 +326,7 @@ export function answerPlacementLookup(key: string, now: PlacementLookup): string
       return now.fieldType(subject.slice(0, dot), subject.slice(dot + 1)) ?? '';
     }
     case 'p': return now.templateHeader ?? '';
+    case 'k': return now.constructorFact(subject);
     default: return `\u0000unknown lookup ${key}`;
   }
 }
@@ -4268,6 +4271,7 @@ function generateFilesForFunctions(
       functionHeaders: n => funcNameCandidates.get(n),
       fieldType: (t, f) => structFieldTypes.get(t)?.get(f),
       templateHeader: templateHeaderPath ?? undefined,
+      constructorFact,
     };
     const placementHolds = !emitUnitsFilter || emitUnitsFilter.has(unitName)
       || includeBasisHolds(unitIdentifierCounts.get(unitName)?.includes, implIncludes, placementNow);
@@ -4317,6 +4321,9 @@ function generateFilesForFunctions(
         addInitializerAddressReferences(recorded.initRefs);
       }
     }
+    // Every struct whose constructors this unit's text is spelled under: its data
+    // initializers ask (constructorFields), and so may the body transforms.
+    if (reusedImpl === undefined) recordConstructorLookups(name => lookedUp(`k:${name}`));
     let implContent = reusedImpl !== undefined
       ? reusedImpl
       : genMark('units/impl', () => generateImplementation(
@@ -4465,6 +4472,9 @@ function generateFilesForFunctions(
       for (const [typeName, ownerPath] of typeOwnerMap) {
         if (!mentioned.has(typeName)) continue;
         lookedUp(`t:${typeName}`);
+        // A body that names the struct is spelled by the transforms against the
+        // set of structs with constructors (convertingAggregates).
+        if (isConstructorCandidate(typeName)) lookedUp(`k:${typeName}`);
         if (existingIncludes.has(ownerPath)) continue;
         if (ownerPath === headerPath) continue;
         existingIncludes.add(ownerPath);
@@ -4529,6 +4539,7 @@ function generateFilesForFunctions(
         implContent = implContent.slice(0, lineEnd + 1) + includeLines + '\n' + implContent.slice(lineEnd + 1);
       }
     }
+    recordConstructorLookups(null);
     if (GEN_TIMING) genAdd('units/dep-scan', Date.now() - depScanT0);
 
     // Everything this unit contributes to the three cross-unit accumulators is in
