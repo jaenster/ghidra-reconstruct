@@ -65,7 +65,7 @@ import {
   loadBuildInfo,
   type SymbolHashCache,
 } from './dirty-units.js';
-import { NEVER_TOUCH, isNeverTouch } from './paths.js';
+import { NEVER_TOUCH, TREE_METADATA, isNeverTouch, isTreeMetadata } from './paths.js';
 import {
   ProposalBoundary,
   parseIdentity,
@@ -1540,7 +1540,7 @@ async function writeVersionFile(regenDir: string, version: number | undefined): 
 }
 
 async function syncTree(from: string, to: string): Promise<void> {
-  const excludes = ['.git', '.idea/', '.DS_Store', ...NEVER_TOUCH]
+  const excludes = [...TREE_METADATA, ...NEVER_TOUCH]
     .flatMap(entry => ['--exclude', entry]);
   await run('rsync', ['-a', '--delete', `${from.replace(/\/*$/, '')}/`, `${to.replace(/\/*$/, '')}/`, ...excludes], {
     maxBuffer: 64 * 1024 * 1024,
@@ -1549,7 +1549,7 @@ async function syncTree(from: string, to: string): Promise<void> {
 
 /**
  * Files that differ between two trees, excluding everything the regen tree owns
- * rather than generates.
+ * rather than generates, and the checkout's own metadata (TREE_METADATA).
  *
  * `diff -r --brief` exits 1 when there are differences, which is the normal
  * outcome here and not an error.
@@ -1557,7 +1557,8 @@ async function syncTree(from: string, to: string): Promise<void> {
 async function diffTrees(candidate: string, live: string): Promise<string[]> {
   let stdout: string;
   try {
-    const out = await run('diff', ['-r', '--brief', candidate, live], { maxBuffer: 64 * 1024 * 1024 });
+    const skip = TREE_METADATA.flatMap(entry => ['-x', entry]);
+    const out = await run('diff', ['-r', '--brief', ...skip, candidate, live], { maxBuffer: 64 * 1024 * 1024 });
     stdout = out.stdout;
   } catch (e) {
     const err = e as { stdout?: string; code?: number };
@@ -1579,7 +1580,7 @@ async function diffTrees(candidate: string, live: string): Promise<string[]> {
       const base = dir.startsWith(candidate) ? candidate : live;
       rel = join(relative(base, dir), only[2]);
     }
-    if (rel && !isNeverTouch(rel)) differing.push(rel);
+    if (rel && !isNeverTouch(rel) && !isTreeMetadata(rel)) differing.push(rel);
   }
   return differing.sort();
 }

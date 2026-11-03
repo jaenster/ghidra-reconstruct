@@ -44,3 +44,16 @@ export function isNeverTouch(relPath: string): boolean {
   }
   return false;
 }
+
+/**
+ * Entries in a tree that belong to the checkout, not to the output: the regen repo's
+ * `.git`, an IDE's `.idea`, Finder's `.DS_Store`. The sync leaves them alone, and the
+ * `full_regen` diff skips them at any depth: a scratch generation never has them, so
+ * they are always "only in" the live tree and say nothing about the generator.
+ */
+export const TREE_METADATA: readonly string[] = ['.git', '.idea', '.DS_Store'];
+
+/** Does this output-relative path lie in (or name) a checkout metadata entry? */
+export function isTreeMetadata(relPath: string): boolean {
+  return relPath.split('/').some(segment => TREE_METADATA.includes(segment));
+}
