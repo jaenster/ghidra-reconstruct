@@ -1145,3 +1145,51 @@ describe('halt-site-fold places its copies where their code is', () => {
     assert.deepStrictEqual([...(halt.ghidraInfo?.foldedLines ?? [])].sort(), [3, 5]);
   });
 });
+
+describe('branchLayoutPlugin - a halt the test falls into, the if with a branch of its own', () => {
+  // HandleItemOnGround 004c2810: `test eax,eax / jne body / push 0x405 / jmp <shared halt>`.
+  // The halt arm is a stub into a call another test shares: it prints no address of its own,
+  // the if's branch does.
+  function runEdge(lines: string[], fallLines: number[], takenLines: number[]): { out: string; sites: string[] } {
+    const { code, ev } = fixture(lines);
+    const edges = [...ev.ifs].map(([line, jcc]) => ({ line, ord: 0, keyword: 'if' as const, jcc, target: jcc + 9, fall: jcc + 2, fallLines, takenLines }));
+    const sites: string[] = [];
+    const t = branchLayoutPlugin.createTransformer({ branchLayout: { ...ev, edges }, onSite: e => sites.push(e.rule) });
+    return { out: flat(emit(t(parse(code)) as AnyNode)), sites };
+  }
+  const lines = (loop: boolean) => [
+    'void f(int* p, int n) {',
+    loop ? 'while (n) {' : '{',
+    '[if 0x10 0x0e,0x10] if (p) {',
+    '[0x20] H(p);',
+    '[0x25] return;',
+    '}',
+    'else {',
+    `[] ${HALT}("", 0, 0x405);`,
+    '[] exit(-1);',
+    '}',
+    loop ? '[0x30] n--;' : '',
+    '}',
+    '}',
+  ];
+
+  it('prints the halt as the guard', () => {
+    const { out, sites } = runEdge(lines(false), [8, 9], [4, 5]);
+    assert.deepStrictEqual(sites, ['swap']);
+    assert.ok(out.includes(`if (!p) { ${HALT}("", 0, 0x405); exit(-1); } H(p); return;`), out);
+  });
+
+  // OBJECT_PopulateFromObjGroup 005528e0: in a loop the halt is the fall-through as well; one
+  // VC8 sank below the loop exit would not be.
+  it('in a loop too', () => {
+    const { out } = runEdge(lines(true), [8, 9], [4, 5]);
+    assert.ok(out.includes(`while (n) { if (!p) { ${HALT}("", 0, 0x405); exit(-1); } H(p); return; n--; }`), out);
+  });
+
+  it('keeps the if/else where the test falls into the body', () => {
+    const { out, sites } = runEdge(lines(false), [4, 5], [8, 9]);
+    assert.deepStrictEqual(sites, []);
+    assert.ok(out.includes('if (p) { H(p); return; } else {'), out);
+  });
+});
+

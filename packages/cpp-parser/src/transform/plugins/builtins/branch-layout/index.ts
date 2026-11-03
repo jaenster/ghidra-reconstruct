@@ -739,15 +739,18 @@ function orGuardAt(stmts: readonly Statement[], i: number, cb: number, ctx: Ctx)
 }
 
 /**
- * `if (c) A else { ...; Halt(...); exit(-1); }` whose branch a pass copied (the halt tail the
- * decompile merged, written once per path), so `cbranch` gives no evidence. The original's
- * jump still says which successor the test falls into: where it falls into the halt, the
- * halt was laid out first, as the sequential assertion `if (!c) { Halt; exit; } A` lays it
- * out. The same control flow: the halt never returns. Outside a loop, in a statement list.
+ * `if (c) A else { ...; Halt(...); exit(-1); }` where the original's jump falls into the halt:
+ * the halt was laid out first, as the sequential assertion `if (!c) { Halt; exit; } A` lays it
+ * out (the test jumps over `push line; jmp` into A). The same control flow: the halt never
+ * returns. Read from the jump, not the arms' addresses: a halt tail the decompile merged is
+ * written once per path, so its arm prints no address of its own, and the if may have no
+ * branch of its own either (HandleItemOnGround 004c2810, PARTY_AddUnitToParty 00540320). In a
+ * loop too: a halt VC8 sank below the loop exit is not the fall-through
+ * (OBJECT_PopulateFromObjGroup 005528e0). In a statement list.
  */
 function haltElseAt(ifs: IfStmt, ctx: Ctx, list: { before: Statement[]; after: Statement[] }): Statement[] | null {
   const other = ifs.elseBranch!;
-  if (other.kind === NodeKind.IfStmt || ifs.init || ifs.isConstexpr || ctx.loopIfs.has(lineOf(ifs))) return null;
+  if (other.kind === NodeKind.IfStmt || ifs.init || ifs.isConstexpr) return null;
   if (!endsInHalt(bodyOf(other)) || endsInHalt(bodyOf(ifs.thenBranch))) return null;
   if (conditionShape(ifs.condition).kind !== 'simple') return null;
   if (ctx.reader.fallInto(ifs) !== 'other') return null;
@@ -775,7 +778,8 @@ function rewriteList(stmts: readonly Statement[], ctx: Ctx, fallsOff: boolean): 
       continue;
     }
     if (ifs.elseBranch) {
-      const r = swapAt(ifs, cb, ctx, { before: cur.slice(0, i), after: cur.slice(i + 1) });
+      const around = { before: cur.slice(0, i), after: cur.slice(i + 1) };
+      const r = swapAt(ifs, cb, ctx, around) ?? haltElseAt(ifs, ctx, around);
       if (r) { cur = [...cur.slice(0, i), ...r, ...cur.slice(i + 1)]; changed = true; }
       continue;
     }
