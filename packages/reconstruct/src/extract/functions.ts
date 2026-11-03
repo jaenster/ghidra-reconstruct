@@ -398,6 +398,30 @@ export async function extractAllFunctions(
     }
   }
 
+  // Second pass: decompile if requested — use batch_decompile for speed
+  if (decompile) {
+    await timePhase(
+      `${label}extract/decompile`,
+      () => decompileAll(),
+      () => `${decompiledCount}/${needsDecompileCount} bodies in ${decompileBatches} batches of ${DECOMPILE_BATCH_SIZE}`
+    );
+
+    // Third pass: put back the excluded-namespace functions the kept bodies
+    // actually reach.
+    if (excludedReserve.length > 0) {
+      await timePhase(
+        `${label}extract/exclusion-closure`,
+        () => admitExclusionClosure(),
+        () => `${closureAdmitted} reachable excluded-namespace function(s), ${closureRounds} round(s)`
+      );
+    }
+  }
+
+  // The whole-program scripts below attach their facts to the functions in
+  // `allFunctions` only, so they run once that list is final: a function the
+  // exclusion closure admits is emitted like any other and needs the same facts,
+  // the facts a per-function re-read (the live refresh, the verifier) attaches.
+
   // Indirect-call prototype overrides, one script for the whole program.
   {
     let attached = 0;
@@ -440,25 +464,6 @@ export async function extractAllFunctions(
       async () => { attached = await attachOperandRefs(connection, allFunctions); },
       () => `operand references in ${attached} function(s)`
     );
-  }
-
-  // Second pass: decompile if requested — use batch_decompile for speed
-  if (decompile) {
-    await timePhase(
-      `${label}extract/decompile`,
-      () => decompileAll(),
-      () => `${decompiledCount}/${needsDecompileCount} bodies in ${decompileBatches} batches of ${DECOMPILE_BATCH_SIZE}`
-    );
-
-    // Third pass: put back the excluded-namespace functions the kept bodies
-    // actually reach.
-    if (excludedReserve.length > 0) {
-      await timePhase(
-        `${label}extract/exclusion-closure`,
-        () => admitExclusionClosure(),
-        () => `${closureAdmitted} reachable excluded-namespace function(s), ${closureRounds} round(s)`
-      );
-    }
   }
 
   return allFunctions;
