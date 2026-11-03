@@ -23,9 +23,19 @@ export interface ForeignWatchHost {
   built(): string | null;
   /** True when a rebuild may be queued now: nothing running or queued, not blocked, paused or held. */
   idle(): boolean;
-  /** Queue the rebuild; resolves with the number of units it changed, or null if unknown. */
-  rebuild(from: string | null, to: string): Promise<number | null>;
+  /** Queue the rebuild; resolves with what it re-emitted. */
+  rebuild(from: string | null, to: string): Promise<RebuildOutcome>;
   log(message: string): void;
+}
+
+/**
+ * What a rebuild re-emitted: the units whose .cpp it changed, or, when the rebuild
+ * re-emitted everything for another reason (a new generator, no hash cache), that
+ * reason - a full run says nothing about this input's own effect.
+ */
+export interface RebuildOutcome {
+  units: number | null;
+  full?: string;
 }
 
 export type ForeignCheck = 'unchanged' | 'busy' | 'unreadable' | 'rebuilt' | 'failed';
@@ -35,6 +45,8 @@ export interface ForeignChange {
   from: string | null;
   to: string;
   unitsChanged: number | null;
+  /** Set when the rebuild re-emitted every unit, with the reason. */
+  full?: string;
   outcome: 'rebuilt' | 'failed';
 }
 
@@ -70,9 +82,11 @@ export class ForeignSourceWatch {
     this.running = true;
     try {
       this.host.log(`${this.label} changed (${built ?? 'unknown'} -> ${now}): rebuilding`);
-      const n = await this.host.rebuild(built, now);
-      this.last = { at: new Date().toISOString(), from: built, to: now, unitsChanged: n, outcome: 'rebuilt' };
-      this.host.log(`${this.label} changed: ${n ?? '?'} unit(s) re-emitted`);
+      const r = await this.host.rebuild(built, now);
+      this.last = { at: new Date().toISOString(), from: built, to: now, unitsChanged: r.units, outcome: 'rebuilt', ...(r.full ? { full: r.full } : {}) };
+      this.host.log(r.full
+        ? `${this.label} changed: applied by a full re-emission (${r.full}); ${r.units ?? '?'} unit(s) differ in total`
+        : `${this.label} changed: ${r.units ?? '?'} unit(s) re-emitted`);
       return 'rebuilt';
     } catch (e) {
       this.last = { at: new Date().toISOString(), from: built, to: now, unitsChanged: null, outcome: 'failed' };

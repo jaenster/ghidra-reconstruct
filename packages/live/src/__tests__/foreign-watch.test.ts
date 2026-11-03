@@ -14,7 +14,7 @@ function host(opts: { now?: string; built?: string | null; host?: Partial<Foreig
     current: () => state.now,
     built: () => state.built,
     idle: () => true,
-    rebuild: async (from, to) => { calls.push([from, to]); state.built = to; return 9; },
+    rebuild: async (from, to) => { calls.push([from, to]); state.built = to; return { units: 9 }; },
     log: () => {},
     ...over,
   };
@@ -69,4 +69,26 @@ test('unreadable sources are reported, not treated as a change', async () => {
   const { h, calls } = host({ host: { current: () => { throw new Error('not committed'); } } });
   assert.equal(await new ForeignSourceWatch(h).check(), 'unreadable');
   assert.equal(calls.length, 0);
+});
+
+test('a rebuild that re-emitted everything is reported as a full run, not as this input\'s effect', async () => {
+  const lines: string[] = [];
+  const { h, state } = host({ host: {
+    rebuild: async (_f, to) => { state.built = to; return { units: 43, full: 'no hash cache from a previous generation' }; },
+    log: m => lines.push(m),
+  } });
+  const w = new ForeignSourceWatch(h);
+  state.now = 'b';
+  await w.check();
+  assert.equal(w.last?.full, 'no hash cache from a previous generation');
+  assert.ok(lines.some(l => /applied by a full re-emission/.test(l)), lines.join('\n'));
+  assert.ok(!lines.some(l => /: 43 unit\(s\) re-emitted/.test(l)), lines.join('\n'));
+});
+
+test('an incremental rebuild reports the units it re-emitted', async () => {
+  const lines: string[] = [];
+  const { h, state } = host({ host: { log: m => lines.push(m) } });
+  state.now = 'b';
+  await new ForeignSourceWatch(h).check();
+  assert.ok(lines.includes('foreign sources changed: 9 unit(s) re-emitted'), lines.join('\n'));
 });

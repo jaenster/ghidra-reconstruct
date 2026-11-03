@@ -34,7 +34,7 @@ import {
   type ReconstructionOptions,
 } from '@ghidra-mcp/reconstruct';
 import { foreignSourcesFingerprint } from '@ghidra-mcp/reconstruct/codegen/file-static-functions';
-import { ForeignSourceWatch } from './foreign-watch.js';
+import { ForeignSourceWatch, type RebuildOutcome } from './foreign-watch.js';
 import { decompileFunction } from '@ghidra-mcp/reconstruct/extract/functions';
 
 import { applyEvents, type ChangeEvent as ModelChangeEvent, type ModelIndices } from './model.js';
@@ -475,7 +475,7 @@ export class LiveLoop {
    * extern entries or constructor answers changed. Counted as the units whose .cpp
    * the regen commit touched.
    */
-  private async foreignRebuild(from: string | null, to: string, what = 'foreign sources'): Promise<number | null> {
+  private async foreignRebuild(from: string | null, to: string, what = 'foreign sources'): Promise<RebuildOutcome> {
     const before = await this.regenHead();
     await this.queue.submit({
       kind: 'rebuild',
@@ -490,11 +490,15 @@ export class LiveLoop {
         }
       },
     });
+    // Nothing but this input moved since the last rebuild (a change applies only
+    // when the daemon is idle), so the .cpp files the regen commit touched are its
+    // effect - unless the rebuild re-emitted everything for a reason of its own.
+    const full = this.lastSelection?.units === null ? this.lastSelection.reason : undefined;
     const after = await this.regenHead();
-    if (!before || !after) return null;
-    if (before === after) return 0;
+    if (!before || !after) return { units: null, full };
+    if (before === after) return { units: 0, full };
     const r = await run('git', ['-C', this.cfg.regenDir, 'diff', '--name-only', before, after, '--', '*.cpp']);
-    return r.stdout.split('\n').filter(Boolean).length;
+    return { units: r.stdout.split('\n').filter(Boolean).length, full };
   }
 
   async stop(): Promise<void> {
