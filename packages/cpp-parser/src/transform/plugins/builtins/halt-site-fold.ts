@@ -36,9 +36,11 @@
  * arrive at different depths.
  *
  * A halt that takes the place of code keeps that code's source position: a folded halt
- * spans from its first definition, a copy sits where the jump or the definition it
- * replaces was. `branch-layout` reads a statement's position as where its code lies in
- * the binary; the copy's code is the jump site's, not the shared tail's.
+ * stays where it stands and owns its definitions' lines (`foldedLines`), a copy sits where
+ * the jump or the definition it replaces was. `branch-layout` reads a statement's position
+ * as where its code lies in the binary; the copy's code is the jump site's, not the shared
+ * tail's. A copy for a test that falls into the shared halt has no site of its own and
+ * keeps the halt's lines (the if's line prints the test, not the halt).
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -421,8 +423,8 @@ function foldHaltSites(stmts: readonly Statement[]): FoldResult | null {
     const newCall = updateNode(call, {
       arguments: [call.arguments[0], substInArg(call.arguments[1], byName), substInArg(call.arguments[2], byName)],
     } as Partial<CallExpr>);
-    const newHalt = placedAt(updateNode(here.inner as ExprStmt, { expression: newCall } as Partial<ExprStmt>),
-      out[earliest], true);
+    const newHalt = withFolded(updateNode(here.inner as ExprStmt, { expression: newCall } as Partial<ExprStmt>),
+      chain.map(d => d.stmt));
 
     const drop = new Set(chainIdx);
     const kept = out.filter((_, j) => !drop.has(j));
@@ -497,11 +499,28 @@ function leadingChain(list: readonly Statement[], end: number, vars: readonly st
   return chain;
 }
 
-/** `s` placed at `site`: from the start of `site` to the end of `s` when `span`, else at `site`. */
-function placedAt<S extends Statement>(s: S, site: Statement | undefined, span = false): S {
+/** `s` placed at `site`; without one, where it stands. */
+function placedAt<S extends Statement>(s: S, site: Statement | undefined): S {
   if (!site) return s;
-  const location: SourceLocation = span ? { ...s.location, start: site.location.start } : site.location;
+  const location: SourceLocation = site.location;
   return { ...s, location };
+}
+
+/**
+ * `s` where it stands, owning as well the lines of the definitions folded into it: their
+ * stores printed its code. A range from the first definition to the halt would claim every
+ * line between them too, and when a pass had copied the halt next to a definition far from
+ * the shared halt, every line of the function between the two.
+ */
+function withFolded<S extends Statement>(s: S, folded: readonly Statement[]): S {
+  const lines = new Set(s.ghidraInfo?.foldedLines ?? []);
+  for (const d of folded) {
+    for (const l of d.ghidraInfo?.foldedLines ?? []) lines.add(l);
+    if (!d.location || d.location.file === '<generated>' || d.location.start.line <= 0) continue;
+    for (let l = d.location.start.line; l <= d.location.end.line; l++) lines.add(l);
+  }
+  if (lines.size === 0) return s;
+  return { ...s, ghidraInfo: { ...s.ghidraInfo, foldedLines: [...lines].sort((a, b) => a - b) } };
 }
 
 /** The statement the copy at a jump replaces first: the earliest definition, else the jump. */
@@ -1320,7 +1339,7 @@ function repairHaltLines(
     const v = d.declarations[0] as VariableDecl;
     return relabel(p.labels, updateNode(d, { declarations: [updateNode(v, { initializer: rhs } as Partial<VariableDecl>)] } as Partial<DeclStmt>));
   };
-  const copyWith = (line: number, at: Statement): Statement[] => {
+  const copyWith = (line: number, at: Statement | undefined): Statement[] => {
     const call = updateNode(model.call, {
       arguments: [model.call.arguments[0], ipCall as Expression, Expr.intLiteral(line, 16)],
     } as Partial<CallExpr>);
@@ -1402,7 +1421,9 @@ function repairHaltLines(
           clash ||= !put(w.stmt, [...halts, ...rest]);
           break;
         }
-        addElse.set(w.stmt, copyWith(line, w.stmt));
+        // The test falls into the shared halt: no jump or definition of its own to stand at,
+        // and the if's own line holds the test. The copy keeps the halt's lines.
+        addElse.set(w.stmt, copyWith(line, undefined));
         break;
     }
   }
