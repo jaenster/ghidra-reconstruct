@@ -62,7 +62,7 @@ test('a cycle finds the type list out of the listing\'s order, logs it and puts 
   assert.deepStrictEqual(m.primary.dataTypes.map(t => t.name), ['A', 'WardenClientVtable', 'WardenClient', 'Z']);
 });
 
-test('a reorder alone makes the moved types dirty', () => {
+test('a reorder alone re-emits the header that emits the moved types, not their users', () => {
   const before = model();
   const cache = computeHashCache({ functions: [], dataTypes: before.primary.dataTypes, globals: [] });
   const after = model();
@@ -76,6 +76,9 @@ test('a reorder alone makes the moved types dirty', () => {
         ownedTypeNames: ['WardenClient', 'WardenClientVtable'], globalAddresses: [], deps: [] },
       { id: 'Other.h', implPath: 'Other.cpp', unitName: 'Other', functionNames: [],
         ownedTypeNames: ['A'], globalAddresses: [], deps: [] },
+      // Spells the moved types; their records did not change, so it stays clean.
+      { id: 'User.h', implPath: 'User.cpp', unitName: 'User', functionNames: [],
+        ownedTypeNames: [], globalAddresses: [], deps: [{ symbol: 'WardenClientVtable', strength: 'type-ref' }, { symbol: 'WardenClient', strength: 'type-ref' }] },
     ],
   };
   const sel = selectDirtyUnits({

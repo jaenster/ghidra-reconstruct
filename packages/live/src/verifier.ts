@@ -619,7 +619,7 @@ export class ModelVerifier {
   /**
    * Compare the model's type order with one listing call. A drift is logged as MODEL
    * STALE (type order) with its first differing position and sent through the ordinary
-   * update, which reorders the list; the moved types' headers re-emit (typeHashes).
+   * update, which reorders the list; the headers that emit the moved types re-emit (typeOrder in dirty-units).
    * Returns an outcome only when the step has to stop here.
    */
   private async checkTypeOrder(t0: number): Promise<StepOutcome | null> {

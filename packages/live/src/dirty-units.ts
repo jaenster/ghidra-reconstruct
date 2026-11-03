@@ -154,6 +154,13 @@ export interface SymbolHashCache {
   /** type path or name -> hash */
   types: Record<string, string>;
   /**
+   * type path or name -> the path of the type before it in the list. Kept apart from
+   * the content hash: order only decides where a type sits in the header that emits
+   * it, so it dirties that header, not every unit that depends on the type. Absent in
+   * a cache written before it existed; then order is not compared.
+   */
+  typeOrder?: Record<string, string>;
+  /**
    * `address\0name` -> {hash, name}. Address alone is not identity here: 83
    * addresses in this program carry more than one global (aliases and overlapping
    * symbols), so an address-keyed map loses all but the last and then reports the
@@ -184,17 +191,20 @@ export function globalKey(address: string, name: string | undefined): string {
   return `${address}\u0000${name ?? ''}`;
 }
 
+function typePath(dt: ExtractedDataType): string {
+  return dt.category ? `${dt.category}::${dt.name}` : dt.name;
+}
+
 /**
- * A type's hash, with the type before it in the list. The emitter lays a header's types
- * out in list order, so a type that moved changes its header while its own record, and
- * so `hashDataType`, stays the same: a reorder alone re-emitted nothing. Keying on the
- * predecessor makes the moved type, its old successor and its new successor dirty.
+ * Each type's predecessor in the list. The emitter lays a header's types out in list
+ * order, so a type that moved changes the header that emits it while its own record,
+ * and so `hashDataType`, stays the same. A predecessor that changed marks the moved
+ * type, its old successor and its new successor.
  */
-export function typeHashes(dataTypes: ReadonlyArray<ExtractedDataType>): string[] {
-  return dataTypes.map((dt, i) => {
-    const prev = i > 0 ? dataTypes[i - 1] : undefined;
-    return `${hashDataType(dt)}@${prev ? `${prev.category ?? ''}::${prev.name}` : ''}`;
-  });
+export function typeOrder(dataTypes: ReadonlyArray<ExtractedDataType>): Record<string, string> {
+  const out: Record<string, string> = {};
+  dataTypes.forEach((dt, i) => { out[typePath(dt)] = i > 0 ? typePath(dataTypes[i - 1]) : ''; });
+  return out;
 }
 
 export function emptyHashCache(): SymbolHashCache {
@@ -211,10 +221,8 @@ export function computeHashCache(inputs: {
   for (const f of inputs.functions) {
     cache.functions[f.address] = { hash: hashFunction(f), name: f.name };
   }
-  const hashes = typeHashes(inputs.dataTypes);
-  inputs.dataTypes.forEach((dt, i) => {
-    cache.types[dt.category ? `${dt.category}::${dt.name}` : dt.name] = hashes[i];
-  });
+  for (const dt of inputs.dataTypes) cache.types[typePath(dt)] = hashDataType(dt);
+  cache.typeOrder = typeOrder(inputs.dataTypes);
   for (const g of inputs.globals) {
     const name = g.suggestedName || g.name;
     if (!g.address) continue;
@@ -298,10 +306,14 @@ export function selectDirtyUnits(inputs: SelectInputs): DirtySelection {
       if (before && before.name !== f.name) changed.push(before.name);
     }
   }
-  const hashes = typeHashes(dataTypes);
-  for (const [i, dt] of dataTypes.entries()) {
-    const key = dt.category ? `${dt.category}::${dt.name}` : dt.name;
-    if (previous.types[key] !== hashes[i]) {
+  // Types whose place in the list moved and whose record did not: only the header that
+  // emits them is dirty (ownedTypeNames below), not their users.
+  const orderMoved = new Set<string>();
+  const orderNow = previous.typeOrder ? typeOrder(dataTypes) : null;
+  for (const dt of dataTypes) {
+    const key = typePath(dt);
+    if (orderNow && key in previous.typeOrder! && previous.typeOrder![key] !== orderNow[key]) orderMoved.add(dt.name);
+    if (previous.types[key] !== hashDataType(dt)) {
       changed.push(dt.name);
       changedTypeNames.push(dt.name);
     }
@@ -351,7 +363,7 @@ export function selectDirtyUnits(inputs: SelectInputs): DirtySelection {
     }
   }
 
-  if (changed.length === 0) {
+  if (changed.length === 0 && orderMoved.size === 0) {
     return { units: [], reason: 'no symbol hashes moved', changedSymbols: [], expandedTypes: [] };
   }
 
@@ -373,7 +385,7 @@ export function selectDirtyUnits(inputs: SelectInputs): DirtySelection {
   for (const m of buildInfo.modules) {
     const owns =
       (m.functionNames ?? []).some(n => changedSet.has(n)) ||
-      (m.ownedTypeNames ?? []).some(n => changedSet.has(n)) ||
+      (m.ownedTypeNames ?? []).some(n => changedSet.has(n) || orderMoved.has(n)) ||
       (m.globalAddresses ?? []).some(a => changedGlobalAddrs.has(a.toLowerCase()));
     if (owns) dirty.add(m.unitName);
   }
@@ -452,6 +464,7 @@ export function selectDirtyUnits(inputs: SelectInputs): DirtySelection {
       (expanded.size > changedTypeNames.length
         ? `, ${expanded.size - changedTypeNames.length} type(s) reached through containment`
         : '') +
+      (orderMoved.size > 0 ? `, ${orderMoved.size} type(s) moved in the list` : '') +
       ` -> ${dirty.size} unit(s)`,
     changedSymbols: changed,
     expandedTypes: [...expanded],
