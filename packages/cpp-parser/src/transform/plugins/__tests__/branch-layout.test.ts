@@ -1193,3 +1193,60 @@ describe('branchLayoutPlugin - a halt the test falls into, the if with a branch 
   });
 });
 
+describe('early-return - the return copies a nest would merge', () => {
+  function erWith(lines: string[], extra: Partial<BranchLayoutEvidence>): string {
+    const { code, ev } = fixture(lines);
+    return flat(emit(earlyReturnPlugin.createTransformer({ branchLayout: { ...ev, ...extra } })(parse(code)) as AnyNode));
+  }
+  // CompleteQuestStates 005b74e0: the inner tests jump to the copy the body runs into, the
+  // outer test to a copy of its own (one register fewer to pop).
+  const quest = [
+    'int f(int* p, int a) {',
+    '[if 0x2 0x2] if (p) {',
+    '[0x4] int s = G(p);',
+    '[if 0x6 0x6] if (!s) {',
+    '[if 0x8 0x8] if (a) {',
+    '[0xa] H(p);',
+    '}',
+    '}',
+    '[0x10,0x14] return 0;',
+    '}',
+    '[0x20,0x23] return 0;',
+    '}',
+  ];
+  const questEdges = [
+    { line: 2, ord: 0, keyword: 'if' as const, jcc: 0x2, target: 0x20, fall: 0x4, fallLines: [3, 4], takenLines: [11] },
+    { line: 4, ord: 0, keyword: 'if' as const, jcc: 0x6, target: 0x10, fall: 0x8, fallLines: [5], takenLines: [9] },
+    { line: 5, ord: 0, keyword: 'if' as const, jcc: 0x8, target: 0x10, fall: 0xa, fallLines: [6], takenLines: [9] },
+  ];
+  const questCopies = [
+    { start: 0x10, ret: 0x14, insns: ['POP/EDI', 'XOR/EAX', 'RET'], jumpsIn: [0x6, 0x8], fallsIn: true },
+    { start: 0x20, ret: 0x23, insns: ['XOR/EAX', 'RET'], jumpsIn: [0x2], fallsIn: false },
+  ];
+
+  it('makes the inner guard where the outer test keeps a copy of its own (005b74e0)', () => {
+    const out = erWith(quest, { edges: questEdges, returns: questCopies });
+    // The last test, whose body is straight code, keeps its nest (00462ca0's state test).
+    assert.ok(/if \(s\)\s*return 0; if \(a\) \{ H\(p\); \} return 0;/.test(out), out);
+  });
+
+  it('keeps the inner nest where every exit shares one copy', () => {
+    const out = erWith(quest, { edges: questEdges, returns: [questCopies[0]] });
+    assert.ok(out.includes('if (!s) { if (a) { H(p); } } return 0;'), out);
+  });
+
+  it('the inner guard keeps the values', native, () => {
+    const code = fixture(quest).code;
+    const out = erWith(quest, { edges: questEdges, returns: questCopies });
+    const prelude = ['static int gCalls = 0;', 'static int G(int* p) { gCalls++; return p[0]; }', 'static void H(int* p) { gCalls += 10; p[1] = 1; }',
+      `namespace ref { ${code} }`, `namespace low { ${out} }`].join('\n');
+    const main = ['static int a0[2] = {0, 0}, a1[2] = {1, 0}, b0[2] = {0, 0}, b1[2] = {1, 0};',
+      'int r, l, rc, lc;',
+      'gCalls = 0; r = ref::f(nullptr, 0); rc = gCalls; gCalls = 0; l = low::f(nullptr, 0); lc = gCalls; printf("%d %d\\n", r == l, rc == lc);',
+      'gCalls = 0; r = ref::f(a0, 0); rc = gCalls; gCalls = 0; l = low::f(b0, 0); lc = gCalls; printf("%d %d\\n", r == l && a0[1] == b0[1], rc == lc);',
+      'gCalls = 0; r = ref::f(a1, 0); rc = gCalls; gCalls = 0; l = low::f(b1, 0); lc = gCalls; printf("%d %d\\n", r == l && a1[1] == b1[1], rc == lc);',
+      'a0[1] = b0[1] = 0; gCalls = 0; r = ref::f(a0, 1); rc = gCalls; gCalls = 0; l = low::f(b0, 1); lc = gCalls; printf("%d %d\\n", r == l && a0[1] == b0[1], rc == lc);',
+    ].join('\n');
+    for (const line of compileAndRun(prelude, main).trim().split('\n')) assert.strictEqual(line, '1 1');
+  });
+});

@@ -585,3 +585,38 @@ describe('branch-layout search - merged return copy (join and split)', () => {
     assert.deepStrictEqual(runAt(installPath, lines, inline, edges).sites, []);
   });
 });
+
+describe('branch-layout search - return-merge leaves a guard with a copy of its own', () => {
+  // INPUT_HandleRightClickWithPet 00462ca0, CompleteQuestStates 005b74e0: the first test
+  // jumps to a return copy nothing falls into (its epilogue pops one register less), apart
+  // from the one the rest ends in; both copies print on the final return's line.
+  const guard = [
+    'int f(int n, int* p) {',      // 1
+    '  if (n != 5) {',             // 2
+    '    return 0;',               // 3
+    '  }',                         // 4
+    '  if (!p) {',                 // 5
+    '    return 0;',               // 6
+    '  }',                         // 7
+    '  p[0] = 3;',                 // 8
+    '  return 0;',                 // 9
+    '}',
+  ].join('\n');
+  const edges = [edge(2, 0x05, 0x30, 0x07, [5], [9]), edge(5, 0x10, 0x18, 0x12, [6], [8])];
+  const runWith = (fallsIn: boolean) => {
+    const sites: string[] = [];
+    const ev = { ...evidence(guard, edges, [3]), returns: [{ start: 0x30, ret: 0x33, insns: ['XOR/EAX', 'RET'], fallsIn, jumpsIn: [0x05] }] };
+    const t = branchLayoutPlugin.createTransformer({ branchLayout: ev, onSite: e => sites.push(e.rule) });
+    return { out: flat(emit(t(parse(guard)) as AnyNode)), sites };
+  };
+
+  it('nests where the jump lands on the copy the rest runs into', () => {
+    assert.deepStrictEqual(runWith(true).sites, ['return-merge']);
+  });
+
+  it('leaves the guard where the jump lands on a copy nothing falls into', () => {
+    const { out, sites } = runWith(false);
+    assert.deepStrictEqual(sites, []);
+    assert.ok(out.includes('if (n != 5) { return 0; } if (!p) { return 0; } p[0] = 3; return 0;'), out);
+  });
+});

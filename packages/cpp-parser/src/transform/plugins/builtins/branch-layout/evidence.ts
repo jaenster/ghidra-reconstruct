@@ -262,6 +262,20 @@ export class LayoutReader {
     return (this.ev.edges ?? []).filter(e => e.target === offset);
   }
 
+  /**
+   * Code from `from` runs straight into `copy`: the copy is fallen into, lies at or after
+   * `from`, and no other return copy ends in between.
+   */
+  runsInto(from: number, copy: ReturnCopy): boolean {
+    if (copy.fallsIn !== true || from > copy.start) return false;
+    return !(this.ev.returns ?? []).some(c => c !== copy && c.ret >= from && c.ret < copy.start);
+  }
+
+  /** Every return copy of the original; none without return facts. */
+  copies(): readonly ReturnCopy[] {
+    return this.ev.returns ?? [];
+  }
+
   /** A return copy of the original starts at `offset`. */
   returnCopyAt(offset: number): boolean {
     return this.returnCopyStarting(offset) !== null;

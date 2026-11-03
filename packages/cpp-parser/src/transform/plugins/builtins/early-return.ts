@@ -67,7 +67,7 @@ import type { TransformPlugin, PluginOptions } from '../types.js';
 import { getChildren, traverseAST } from '../../../ast/visitor.js';
 import { LayoutReader, isLoop, type BranchLayoutEvidence } from './branch-layout/evidence.js';
 import { conditionShape } from './branch-layout/index.js';
-import { returnOrder, constantValue, loadsEax, hasCall, hasLoop, earlierCopy } from './branch-layout/predict.js';
+import { returnOrder, returnKey, constantValue, loadsEax, hasCall, hasLoop, earlierCopy } from './branch-layout/predict.js';
 import { createExprShape, type ExprShape } from './expr-shape.js';
 import { localTypesOf } from './compare-form.js';
 import type { TypedefResolver } from './call-arg-cast.js';
@@ -291,6 +291,30 @@ function returnedVariable(e: Expression): string | null {
 
 const EAX_WRITE = /^(MOV|MOVZX|MOVSX|XOR|OR|SUB|ADD|AND|LEA)\/(EAX|AX|AL)$/;
 
+function hasIf(stmts: readonly Statement[]): boolean {
+  return stmts.some(s => [...traverseAST(s)].some(n => n.kind === NodeKind.IfStmt));
+}
+
+/**
+ * The if jumps to the start of the return copy its BODY runs into, and another return of the
+ * same value has a copy of its own that nothing falls into: an earlier test's, whose epilogue
+ * differs (a register saved after it). Written as a guard, VC8 keeps the two copies apart;
+ * nested, it merges them into one exit.
+ */
+function jumpsToBodyCopy(reader: LayoutReader, ifs: IfStmt, ret: ReturnStmt, returns: readonly ReturnStmt[]): boolean {
+  const e = reader.edge(ifs);
+  const copy = e ? reader.returnCopyStarting(e.target) : null;
+  const key = returnKey(ret);
+  if (!e || !copy || key === null || !reader.runsInto(e.fall, copy)) return false;
+  const line = ret.location?.start.line;
+  return returns.some(r => {
+    if (r.location?.start.line === line || returnKey(r) !== key) return false;
+    const at = reader.returnCopy(r);
+    const other = at === null ? undefined : reader.copies().find(c => c.start <= at && at <= c.ret);
+    return !!other && other !== copy && other.fallsIn === false;
+  });
+}
+
 /**
  * BODY is one plain `x = e;` of the returned variable, `e` without a call and not reading
  * `x`, and the return copy the if jumps to writes nothing into EAX: x is there at the test.
@@ -337,6 +361,7 @@ function jumpsOntoLoad(reader: LayoutReader, ifs: IfStmt): boolean {
 function layoutGate(ev: BranchLayoutEvidence, body: CompoundStmt): GuardGate {
   const reader = new LayoutReader(ev, body);
   const inLoop = loopIfLines(body);
+  const returns = returnOrder(body);
   return (ifs, stmts, ret) => {
     // `if (C) { return K; } return X;` whose jump lands back on an earlier copy of K: the
     // original's guard returns K, merged into the copy written before it. Turned around,
@@ -382,6 +407,12 @@ function layoutGate(ev: BranchLayoutEvidence, body: CompoundStmt): GuardGate {
         // loop that can halt, whose cold path VC8 lays out apart (DRLGROOM_ValidateClientList
         // 0061a550).
         if (constant && hasLoop(stmts) && !callsNoReturn(stmts)) return true;
+        // `if (C) { BODY } return K;` whose jump lands on the copy BODY ends in, where an
+        // earlier test keeps a copy of the same return of its own and BODY branches again
+        // (INPUT_HandleRightClickWithPet 00462ca0, CompleteQuestStates 005b74e0,
+        // Missiles_SrvHitFunc_SpawnDualRadialSubMissiles 005acf20): the source returned early.
+        // A straight BODY keeps the nest (00462ca0's last test; 004f0430, 00624690).
+        if (hasIf(stmts) && jumpsToBodyCopy(reader, ifs, ret, returns)) return true;
         return false;
       }
       // `if (C) { ...; if (x) { return 1; } } return 0;`: the tail test jumps to the return

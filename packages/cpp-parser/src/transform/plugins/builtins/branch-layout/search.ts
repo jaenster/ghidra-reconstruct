@@ -167,6 +167,11 @@ function returnMerge(entry: { list: CompoundStmt; top: boolean }, i: number, rea
   const e = reader.edge(ifs);
   if (!e || reader.fallInto(ifs) !== 'other' || !overlaps(e.fallLines, reader.linesOf(s))) return null;
   if (explicit ? !overlaps(e.takenLines, reader.linesOf([last])) : overlaps(e.takenLines, reader.linesOf(s))) return null;
+  // The jump lands on a return copy nothing falls into: the guard's own copy, apart from the
+  // one S ends in (both copies print on the final return's lines when the decompile merged
+  // them; INPUT_HandleRightClickWithPet 00462ca0, CompleteQuestStates 005b74e0).
+  const own = reader.returnCopyStarting(e.target);
+  if (own && own.fallsIn === false) return null;
   const nested = updateNode(ifs, { condition: negate(ifs.condition), thenBranch: Stmt.compound(s), elseBranch: null } as Partial<IfStmt>);
   return {
     rule: 'return-merge', line: ifs.location?.start.line ?? 0, list: entry.list,
