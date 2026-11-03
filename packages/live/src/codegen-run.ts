@@ -25,42 +25,8 @@ import { totalmem } from 'node:os';
 import { reconstruct } from '@ghidra-mcp/reconstruct';
 import { loadProjectConfig } from '@ghidra-mcp/reconstruct/config/index';
 import { configureCodegen } from '@ghidra-mcp/reconstruct/codegen-defaults';
+import { EXCLUDE_PATTERNS } from './exclude-patterns.js';
 
-/**
- * The namespace exclusions, copied verbatim from `run.ts`.
- *
- * They reach `generateAndWrite` on the codegen-only path too, so they change
- * which functions are emitted. run.ts is the authority; if it gains or loses a
- * pattern and this list does not follow, the live tree and the batch tree stop
- * matching and nothing reports it until a `full_regen` diff is run.
- */
-const EXCLUDE_PATTERNS: RegExp[] = [
-  /^compiler(::.*)?$/,
-  /^VisualStudio$/,
-  /^CRT$/,
-  /^_Wrappers$/,
-  /^DName(Node|StatusNode)?$/,
-  /^pDNameNode$/,
-  /^UnDecorator$/,
-  /(^|::)Replicator$/,
-  /^EXCEPTION$/i,
-  /^LDBL12$/,
-  /^LDOUBLE$/,
-  /^charNode$/,
-  /^pcharNode$/,
-  /^type_info$/,
-  /^localeinfo_struct$/,
-  /^threadmbcinfostruct$/,
-  /^tm$/,
-  /^wchar_t$/,
-  /^s$/,
-  /^\/usr\//,
-  /^usr_lib_libc/,
-  /^std(:|$)/,
-  /^\/System\//,
-  /^MacSpecific$/,
-  /^StormMac$/,
-];
 
 async function main(): Promise<void> {
   const projectDir = requireEnv('RECON_CHILD_PROJECT_DIR');

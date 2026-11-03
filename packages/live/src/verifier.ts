@@ -310,7 +310,7 @@ export async function checkDataTypes(
       const existing = byKey.get(keys[i]);
       if (!existing) { out[i] = { key: keys[i], name: keys[i], status: 'unverified', note: 'not in the model' }; continue; }
       try {
-        const fresh = await rereadDataType(client, ghidraName(existing), existing.category, existing, typeListing);
+        const fresh = await rereadDataType(client, ghidraName(existing), existing.category, existing, typeListing, model.primary.dataTypes);
         const fields = differingFields(existing, fresh, new Set());
         out[i] = fields.length === 0
           ? { key: keys[i], name: existing.name, status: 'match' }

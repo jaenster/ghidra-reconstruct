@@ -30,6 +30,10 @@ import {
 } from '@ghidra-mcp/reconstruct';
 import { decompileFunction, getFunctionInfo, listFunctionRecord } from '@ghidra-mcp/reconstruct/extract/functions';
 import { DETAIL_KINDS } from '@ghidra-mcp/reconstruct/extract/types';
+import { disambiguateVtableTypes } from '@ghidra-mcp/reconstruct/modules/vtable-types';
+import { disambiguateCategoryDuplicates } from '@ghidra-mcp/reconstruct/modules/category-duplicate-types';
+import { dedupeDataTypesByName, isExcludedDataType } from '@ghidra-mcp/reconstruct/modules/data-type-normalize';
+import { EXCLUDE_PATTERNS } from './exclude-patterns.js';
 import { fetchInitializedData, inferType, extractPrimaryLabels, markPrimaryLabels, analyzeDataSymbol } from '@ghidra-mcp/reconstruct/extract/globals';
 import { attachOperandRefs } from '@ghidra-mcp/reconstruct/extract/operand-refs';
 import { extractFunctionFacts, FACT_KEYS } from '@ghidra-mcp/reconstruct/extract/function-facts';
@@ -320,12 +324,83 @@ export function reorderDataTypes(
   dataTypes.splice(0, dataTypes.length, ...ordered);
 }
 
+/** `A * *[4]` -> the base name `A`, with pointer stars and array extents removed. */
+function typeBase(dataType: string): string {
+  return dataType.replace(/\[[^\]]*\]/g, '').replace(/[\s*]+$/, '').trim();
+}
+
+/**
+ * Bring a type read straight from Ghidra into the form the full extraction writes into
+ * the snapshot, which is the form the model holds. The extraction runs three passes
+ * over the whole type list before it writes the snapshot, and each rewrites records
+ * other than the one it is about:
+ * - `disambiguateVtableTypes` renames `/X/vtable` to `XVtable` AND repoints the
+ *   `vtable *` field of the class that owns it (`ButtonImplementation.pVtable`);
+ * - `disambiguateCategoryDuplicates` renames a same-named function definition AND
+ *   repoints the field of the struct that owns its category;
+ * - the dedup by name merges later same-named enums' values into the first.
+ * A type read on its own has none of that: `ButtonImplementation` came back with
+ * `pVtable` as `vtable *`, the verifier called the model stale, and the "repair" wrote
+ * the raw spelling into the model (v1864, regen 38d807de0).
+ *
+ * So the passes are run again, by the same code, over the model's list taken back to
+ * Ghidra's names (a renamed record and the fields that name it are spelled as Ghidra
+ * spells them), with `fresh` in its slot. `mergedEnums` are the later same-named enums
+ * the dedup folds into an enum, already read. Copies only; `context` is not written.
+ */
+export function canonicalDataType(
+  fresh: ExtractedDataType,
+  context: readonly ExtractedDataType[],
+  previous: ExtractedDataType | undefined,
+  mergedEnums: readonly ExtractedDataType[] = [],
+): ExtractedDataType {
+  const toGhidra = new Map<string, string>();
+  for (const dt of context) if (dt.sourceName) toGhidra.set(typeBase(dt.name), typeBase(dt.sourceName));
+  const revert = (dataType: string | undefined): string | undefined => {
+    if (!dataType) return dataType;
+    const base = typeBase(dataType);
+    const raw = toGhidra.get(base);
+    return raw && dataType.startsWith(base) ? `${raw}${dataType.slice(base.length)}` : dataType;
+  };
+  const asGhidra = (dt: ExtractedDataType): ExtractedDataType => {
+    const copy = { ...dt, name: ghidraName(dt) } as ExtractedDataType & { fields?: Array<{ dataType?: string }> };
+    delete copy.sourceName;
+    if (copy.fields) copy.fields = copy.fields.map(f => ({ ...f, dataType: revert(f.dataType) }));
+    return copy;
+  };
+
+  const own = structuredClone(fresh);
+  delete own.sourceName;
+  const list: ExtractedDataType[] = [];
+  let placed = false;
+  for (const dt of context) {
+    if (previous && dt === previous) { list.push(own); placed = true; continue; }
+    // The same type under its Ghidra key (a reader that holds no `previous`).
+    if (dataTypeKey(ghidraName(dt), dt.category) === dataTypeKey(own.name, own.category)) {
+      if (!placed) { list.push(own); placed = true; }
+      continue;
+    }
+    list.push(asGhidra(dt));
+  }
+  if (!placed) list.push(own);
+
+  disambiguateVtableTypes(list);
+  disambiguateCategoryDuplicates(list);
+  if (own.kind === 'ENUM' && mergedEnums.length > 0) {
+    dedupeDataTypesByName([own, ...mergedEnums.map(e => ({ ...structuredClone(e), name: own.name }))]);
+  }
+  return own;
+}
+
 /**
  * Re-read one type the way a full extraction reads it. The extraction takes members
  * from `get_data_type` only for the kinds that have them (DETAIL_KINDS); a pointer or
  * an array keeps its listing entry, whose kind `get_data_type` does not report (read
- * from there it came back BUILT_IN). A record a reconstruct pass renamed keeps the name
- * the pass gave it while Ghidra's name for it is unchanged.
+ * from there it came back BUILT_IN). The record then goes through the extraction's
+ * whole-list passes (canonicalDataType) against `context`, the model's type list, so it
+ * compares with and replaces the model's record in the same form: a record a pass
+ * renamed keeps the name the pass gave it while Ghidra's name for it is unchanged, and
+ * the fields and enum values the passes rewrote are rewritten the same way.
  */
 export async function rereadDataType(
   client: GhidraConnection,
@@ -333,6 +408,7 @@ export async function rereadDataType(
   category: string | undefined,
   previous: ExtractedDataType | undefined,
   listing: () => Promise<readonly ExtractedDataType[] | null>,
+  context: readonly ExtractedDataType[],
 ): Promise<ExtractedDataType> {
   let fresh = await extractDataType(client, name, category);
   if (!DETAIL_KINDS.has(fresh.kind)) {
@@ -341,7 +417,22 @@ export async function rereadDataType(
     const entry = entries?.find(t => dataTypeKey(t.name, t.category) === key);
     if (entry) fresh = { ...entry };
   }
-  if (previous?.sourceName && fresh.name === previous.sourceName && fresh.category === previous.category) {
+  // The dedup keeps the first enum of a name and merges the values of the later ones
+  // (in listing order, the exclude filter applied first). The model holds only the
+  // first, so the later ones are read here.
+  const mergedEnums: ExtractedDataType[] = [];
+  if (fresh.kind === 'ENUM') {
+    const entries = await listing();
+    if (!entries) throw new Error(`no type listing to find the enums merged into ${fresh.name}`);
+    const live = entries.filter(t => !isExcludedDataType(t, EXCLUDE_PATTERNS));
+    const at = live.findIndex(t => dataTypeKey(t.name, t.category) === dataTypeKey(fresh.name, fresh.category));
+    for (const t of live.slice(at + 1)) {
+      if (t.name !== fresh.name || t.kind !== 'ENUM') continue;
+      mergedEnums.push(await extractDataType(client, t.name, t.category));
+    }
+  }
+  fresh = canonicalDataType(fresh, context, previous, mergedEnums);
+  if (previous?.sourceName && !fresh.sourceName && fresh.name === previous.sourceName && fresh.category === previous.category) {
     fresh.sourceName = previous.sourceName;
     fresh.name = previous.name;
   }
@@ -834,7 +925,7 @@ export async function applyEvents(
       let fresh: ExtractedDataType;
       try {
         const target = eventDataTypeTarget(event, { name: ghidraName(previous), category: previous.category });
-        fresh = await rereadDataType(client, target.name, target.category, previous, typeListing);
+        fresh = await rereadDataType(client, target.name, target.category, previous, typeListing, model.primary.dataTypes);
       } catch (e) {
         log(`datatype ${previous.name}: re-extract failed (${(e as Error).message}); keeping previous`);
         continue;
@@ -861,7 +952,7 @@ export async function applyEvents(
     if (slots.length === 0 && event.kind !== 'datatype.removed') {
       const { name, category } = eventDataTypeTarget(event, splitDataTypeKey(event.key));
       try {
-        const fresh = await rereadDataType(client, name, category, undefined, typeListing);
+        const fresh = await rereadDataType(client, name, category, undefined, typeListing, model.primary.dataTypes);
         // Appended for now; the listing puts it in place below.
         model.primary.dataTypes.push(fresh);
         typeOrderMoved = true;
@@ -885,7 +976,7 @@ export async function applyEvents(
       for (const name of memberNames(dt)) typeTokens.add(name);
       if (touched.has(key)) continue;
       try {
-        const fresh = await rereadDataType(client, ghidraName(dt), dt.category, dt, typeListing);
+        const fresh = await rereadDataType(client, ghidraName(dt), dt.category, dt, typeListing, model.primary.dataTypes);
         model.primary.dataTypes[slot] = fresh;
         indices.dtByKey.delete(key);
         indices.dtByKey.set(dataTypeKey(fresh.name, fresh.category), fresh);
@@ -912,7 +1003,7 @@ export async function applyEvents(
       if (touched.has(key)) continue;
       const renamedTo = referrers.derivedNames.get(slot);
       try {
-        const fresh = await rereadDataType(client, renamedTo ?? ghidraName(dt), dt.category, dt, typeListing);
+        const fresh = await rereadDataType(client, renamedTo ?? ghidraName(dt), dt.category, dt, typeListing, model.primary.dataTypes);
         model.primary.dataTypes[slot] = fresh;
         indices.dtByKey.delete(key);
         indices.dtByKey.set(dataTypeKey(fresh.name, fresh.category), fresh);
