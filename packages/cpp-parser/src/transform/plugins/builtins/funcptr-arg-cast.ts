@@ -334,6 +334,27 @@ function buildTransformer(options: FuncPtrArgCastOptions): Transformer {
     return own !== undefined && own !== slot;
   };
 
+  /**
+   * The function's prototype IS the slot's, and only the spelled convention
+   * differs - which can only be a parameterless function: `UIAction_ResetKeyBindingsToDefaults`
+   * is `__fastcall` and its slot `pfnUIConfigTabAction` `__cdecl`. With nothing
+   * to place the two are one ABI, but C++ keeps them distinct types, so the
+   * store still needs the cast an equal signature would otherwise skip.
+   */
+  const spellingOnlyDisagrees = (typedefName: string, value: Expression, actual: string): boolean => {
+    if (arityOf(actual) !== 0) return false;
+    const slot = funcdefConventionKeywords[typedefName];
+    const fnName = functionArgName(value);
+    if (slot === undefined || !fnName) return false;
+    const own = scopedLookup(functionConventions, modelArgName(value) ?? fnName, enclosingSegments)
+      ?? scopedLookup(functionConventions, fnName, enclosingSegments);
+    return own !== undefined && own !== slot;
+  };
+
+  /** Whether storing `value` (prototype `actual`) into the slot needs no cast. */
+  const fitsSlot = (typedefName: string, value: Expression, actual: string, target: string): boolean =>
+    actual === target && !spellingOnlyDisagrees(typedefName, value, actual);
+
   const castTo = (typedefName: string, value: Expression): Expression => {
     if (conventionDisagrees(typedefName, value)) return value;
     usedTypedefs.add(typedefName);
@@ -378,7 +399,7 @@ function buildTransformer(options: FuncPtrArgCastOptions): Transformer {
     const fnName = functionArgName(value);
     if (!fnName) return null;
     const actual = signatureFor(fnName, modelArgName(value));
-    if (actual === undefined || actual === target) return null;
+    if (actual === undefined || fitsSlot(typedefName, value, actual, target)) return null;
     if (arityOf(actual) !== arityOf(target)) { noteArityMismatch(typedefName, fnName, actual, target); return null; }
     return castTo(typedefName, value);
   };
@@ -453,7 +474,7 @@ function buildTransformer(options: FuncPtrArgCastOptions): Transformer {
             const armFn = functionArgName(arm);
             if (!armFn) return arm;
             const armSig = signatureFor(armFn, modelArgName(arm));
-            if (armSig === undefined || armSig === target) return arm;
+            if (armSig === undefined || fitsSlot(typedefName, arm, armSig, target)) return arm;
             if (arityOf(armSig) !== arityOf(target)) { noteArityMismatch(typedefName, armFn, armSig, target); return arm; }
             return castTo(typedefName, arm);
           };
@@ -468,7 +489,7 @@ function buildTransformer(options: FuncPtrArgCastOptions): Transformer {
         const fnName = functionArgName(assign.right);
         if (!fnName) return undefined;
         const actual = signatureFor(fnName, modelArgName(assign.right));
-        if (actual === undefined || actual === target) return undefined;
+        if (actual === undefined || fitsSlot(typedefName, assign.right, actual, target)) return undefined;
         if (arityOf(actual) !== arityOf(target)) {
           noteArityMismatch(typedefName, fnName, actual, target);
           return undefined;
@@ -520,7 +541,13 @@ function buildTransformer(options: FuncPtrArgCastOptions): Transformer {
           // A callback that already IS the slot's prototype needs no cast, and
           // writing one anyway is noise in a body that compiles. Four of the
           // seven `atexit` sites are `void (void)` already.
-          if (actual === `${spec.returnType}(${spec.paramTypes.join(',')})`) return arg;
+          // A parameterless `__fastcall` is not that prototype even when the
+          // signature is: its spelled convention still has to be cast away.
+          const own = scopedLookup(functionConventions, modelArgName(arg) ?? argFn, enclosingSegments)
+            ?? scopedLookup(functionConventions, argFn, enclosingSegments);
+          const specConvention = spec.convention === '__cdecl' ? '' : (spec.convention ?? '');
+          if (actual === `${spec.returnType}(${spec.paramTypes.join(',')})`
+            && (own === undefined || own === specConvention)) return arg;
           const castType = functionPointerTypeFromSpellings(
             spec.returnType, spec.paramTypes, spec.convention,
           );
@@ -558,7 +585,7 @@ function buildTransformer(options: FuncPtrArgCastOptions): Transformer {
         const argFn = functionArgName(arg);
         if (!argFn) return arg;
         const actual = signatureFor(argFn, modelArgName(arg));
-        if (actual === undefined || actual === target) return arg;
+        if (actual === undefined || fitsSlot(typedefName, arg, actual, target)) return arg;
 
         // Arity (and by extension calling convention) is not something a cast
         // reconciles — the disagreement is real and wants reporting.

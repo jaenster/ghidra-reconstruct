@@ -29,25 +29,25 @@
  * original's own vtable dispatch, an injected DLL — passes the receiver where
  * the rebuild does not read it.
  *
+ * A parameterless `__fastcall` or `__stdcall` keeps its keyword. With no
+ * parameters each is the same ABI as `__cdecl` - a plain `RET`, the result in
+ * EAX - so the bytes do not change, but the declaration is what code outside the
+ * rebuild binds to: d2bsng calls `InitInventory` (004845a0) and
+ * `CloseNPCInteract` (004b3f10) as `__fastcall`, and mingw decorates such a
+ * symbol `@name@0`. The SDK spells `WINAPI` on parameterless functions too
+ * (`GetTickCount`). C++ still treats the spellings as distinct types, so where
+ * the database stores one in a slot of another - `UIAction_ResetKeyBindingsToDefaults`
+ * (`__fastcall`) in `pfnUIConfigTabAction` (`__cdecl`) - the store carries a
+ * cast to the slot's type; with nothing to place, the cast changes no call.
+ *
  * Not spelled:
  *
  * - `__cdecl`. It is the target default; emitting it changes nothing.
  * - `unknown`. That is Ghidra saying it has no answer, which is not evidence for
  *   one.
- * - `__fastcall` or `__thiscall` on a callable with NO parameters and no
- *   varargs. Both differ from `__cdecl` only in where the first argument(s)
- *   travel (ECX, and EDX for `__fastcall`) and in the callee popping the rest;
- *   with no parameters neither exists, and the conventions are one ABI: a plain
- *   `RET`, the result in EAX. C++ still treats the spellings as distinct types,
- *   so `UIAction_ResetKeyBindingsToDefaults` (`__fastcall`, no parameters)
- *   would not convert to `pfnUIConfigTabAction` (`__cdecl`, no parameters)
- *   although the binary stores one in the other. Both sides take the `__cdecl`
- *   spelling instead. A parameterless `__thiscall` has lost its receiver in the
- *   database; spelling it would assert a register contract nothing supplies.
- *   A parameterless `__stdcall` keeps its keyword although it is the same ABI
- *   too: the SDK spells `WINAPI` on parameterless functions (`GetTickCount`,
- *   `GetCurrentThread`), and the funcdefs that hold them have to match the
- *   header, not the other way round.
+ * - `__thiscall` on a callable with NO parameters and no varargs. Such a
+ *   function has lost its receiver in the database; spelling the keyword would
+ *   assert a register contract nothing supplies.
  * - `__thiscall` on a non-static member function (a registered template's
  *   member with a receiver). Its receiver is the implicit `this`, and a
  *   member's default convention on this target is already `__thiscall`; the
@@ -198,8 +198,7 @@ export function abiConvention(callable: ConventionBearer): string | undefined {
 export function conventionKeyword(callable: ConventionBearer): string {
   const convention = abiConvention(callable);
   if (!convention || !SPELLED.has(convention)) return '';
-  const registerPassed = convention === '__fastcall' || convention === '__thiscall';
-  if (registerPassed && (callable.parameters?.length ?? 0) === 0 && !callable.hasVarArgs) return '';
+  if (convention === '__thiscall' && (callable.parameters?.length ?? 0) === 0 && !callable.hasVarArgs) return '';
   if (convention === '__thiscall' && callable.hasVarArgs) return '';
   if (convention === '__thiscall' && templateRegistry()?.isInstanceMember(callable.address)) return '';
   return convention;

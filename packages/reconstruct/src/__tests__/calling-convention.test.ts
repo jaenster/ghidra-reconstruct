@@ -24,7 +24,10 @@ import { Type, emit } from '@ghidra-mcp/cpp-parser';
 
 import { generateFunctionDeclaration, generateFunctionDefinitionDeclaration } from '../codegen/header.js';
 import { generateEhHandlerDefinition } from '../codegen/impl.js';
+import { emitDataValue, setInitializerSignatureTables, setKnownFuncDefTypedefs } from '../codegen/globals-header.js';
+import { buildFuncPtrArgCastTables } from '../codegen/index.js';
 import type {
+  DataValue,
   ExtractedFunction,
   ExtractedFunctionDefinition,
   ReconstructOptions,
@@ -190,17 +193,73 @@ describe('__fastcall is spelled on functions and funcdefs alike', () => {
     assert.throws(() => execFileSync('i686-w64-mingw32-g++', ['-std=c++17', '-fsyntax-only', file], { stdio: 'pipe' }));
   });
 
-  it('leaves a parameterless __fastcall unspelled on both sides, and keeps a parameterless __stdcall', () => {
-    const noArgs: ExtractedFunction = { ...chatSender(), name: 'UIAction_ResetKeyBindingsToDefaults', parameters: [] };
-    assert.match(generateFunctionDeclaration(noArgs, options), /^void UIAction_ResetKeyBindingsToDefaults\(/m);
+  it('keeps a parameterless __fastcall on both sides, and a parameterless __stdcall', () => {
+    // InitInventory (004845a0) takes nothing and is __fastcall in Ghidra;
+    // d2bsng calls it from outside as one.
+    const noArgs: ExtractedFunction = { ...chatSender(), name: 'InitInventory', parameters: [] };
+    assert.match(generateFunctionDeclaration(noArgs, options), /^void __fastcall InitInventory\(/m);
+    assert.match(generateEhHandlerDefinition(noArgs), /^void __fastcall InitInventory\(/m);
     assert.strictEqual(
-      generateFunctionDefinitionDeclaration({ ...forEachClientFn, name: 'pfnUIConfigTabAction', parameters: [] }),
-      'typedef void (*pfnUIConfigTabAction)();'
+      generateFunctionDefinitionDeclaration({ ...forEachClientFn, name: 'D2UITabAction_fn', parameters: [] }),
+      'typedef void (__fastcall *D2UITabAction_fn)();'
+    );
+    // A program-defined model on a stock __fastcall base is spelled as the base.
+    assert.match(
+      generateFunctionDeclaration({ ...noArgs, name: 'GetCtx', callingConvention: '__fastcall_ecxsafe' }, options),
+      /^void __fastcall GetCtx\(/m
     );
     assert.match(
       generateFunctionDeclaration({ ...noArgs, name: 'GetTickCountThunk', callingConvention: '__stdcall' }, options),
       /void __stdcall GetTickCountThunk\(/
     );
+  });
+
+  it('compiles a parameterless __fastcall to the same bytes as __cdecl, under a decorated name', { skip: !hasGpp() }, () => {
+    const noArgs: ExtractedFunction = { ...chatSender(), name: 'InitInventory', parameters: [] };
+    const body = '{ extern int gnInventoryInit; gnInventoryInit = 1; }';
+    const head = generateEhHandlerDefinition(noArgs).split('\n').find(l => l.includes('InitInventory('))!.replace(/\s*\{.*$/, '');
+    const dir = mkdtempSync(join(tmpdir(), 'fastcall0-'));
+    const disasm = (src: string, tag: string) => {
+      const file = join(dir, `${tag}.cpp`);
+      writeFileSync(file, src);
+      execFileSync('i686-w64-mingw32-g++', ['-std=c++17', '-O2', '-c', file, '-o', join(dir, `${tag}.o`)], { stdio: 'pipe' });
+      const text = execFileSync('i686-w64-mingw32-objdump', ['-d', '-r', join(dir, `${tag}.o`)], { encoding: 'utf8' });
+      const symbol = /^[0-9a-f]+ <([^>]+)>:/m.exec(text)![1];
+      const bytes = text.split('\n').filter(l => /^\s+[0-9a-f]+:\t/.test(l)).map(l => l.split('\t')[1].trim()).join(' ');
+      return { symbol, bytes };
+    };
+    const fast = disasm(`${head} ${body}`, 'fast');
+    const plain = disasm(`void InitInventory() ${body}`, 'plain');
+    assert.strictEqual(fast.bytes, plain.bytes, 'no parameters, nothing placed: one ABI');
+    assert.strictEqual(fast.symbol, '@_Z13InitInventoryv@0', 'the decoration an outside caller binds to');
+    assert.notStrictEqual(plain.symbol, fast.symbol);
+  });
+
+  it('casts a parameterless __fastcall stored in a __cdecl slot, and the cast is what compiles', { skip: !hasGpp() }, () => {
+    const action: ExtractedFunction = { ...chatSender(), name: 'UIAction_ResetKeyBindingsToDefaults', parameters: [] };
+    const slot: ExtractedFunctionDefinition = { ...forEachClientFn, name: 'pfnUIConfigTabAction', parameters: [], callingConvention: '__cdecl' };
+    const fastSlot: ExtractedFunctionDefinition = { ...forEachClientFn, name: 'D2UITabAction_fn', parameters: [] };
+    const tables = buildFuncPtrArgCastTables([action], [], [slot, fastSlot], [slot, fastSlot]);
+    setKnownFuncDefTypedefs(['pfnUIConfigTabAction', 'D2UITabAction_fn']);
+    setInitializerSignatureTables(tables.functionSignatures, tables.funcdefSignatures,
+      tables.functionConventions, tables.funcdefConventionKeywords);
+    const value = { kind: 'pointer', value: 'UIAction_ResetKeyBindingsToDefaults' } as DataValue;
+    const cast = emitDataValue(value, 0, 'pfnUIConfigTabAction');
+    assert.match(cast, /\(pfnUIConfigTabAction\)&?UIAction_ResetKeyBindingsToDefaults/);
+    const same = emitDataValue(value, 0, 'D2UITabAction_fn');
+    assert.doesNotMatch(same, /\(D2UITabAction_fn\)/, `same convention, no cast: ${same}`);
+
+    const src = (init: string) => [
+      generateFunctionDefinitionDeclaration(slot),
+      generateFunctionDeclaration(action, options),
+      `pfnUIConfigTabAction gpfnAction = ${init};`,
+    ].join('\n');
+    const dir = mkdtempSync(join(tmpdir(), 'fastcall0-slot-'));
+    const file = join(dir, 'slot.cpp');
+    writeFileSync(file, src(cast));
+    execFileSync('i686-w64-mingw32-g++', ['-std=c++17', '-fsyntax-only', file], { stdio: 'pipe' });
+    writeFileSync(file, src('&UIAction_ResetKeyBindingsToDefaults'));
+    assert.throws(() => execFileSync('i686-w64-mingw32-g++', ['-std=c++17', '-fsyntax-only', file], { stdio: 'pipe' }));
   });
 });
 

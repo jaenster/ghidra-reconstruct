@@ -2924,7 +2924,6 @@ function functionInitializerCast(
     const undecorated = !/[*[\]]/.test(expectedType);
     return undecorated && INTEGER_SLOT_TYPES.has(slot.toLowerCase()) ? slot : undefined;
   }
-  if (target === actual) return undefined;
   // A store across a calling-convention disagreement is refused, unlike one
   // across an arity disagreement: the slot's callers place the arguments in
   // registers the function does not read (or the reverse), so the cast would
@@ -2934,6 +2933,14 @@ function functionInitializerCast(
   // belongs.
   const slotConvention = initializerFuncdefConventions[slot];
   const ownConvention = pinned?.convention ?? initializerFunctionConventions[name] ?? initializerFunctionConventions[bare];
+  if (target === actual) {
+    // The same prototype in another spelled convention: a parameterless
+    // `__fastcall` in a `__cdecl` slot. One ABI, two C++ types - the cast is
+    // the only spelling that compiles.
+    const spellingOnly = signatureArity(actual) === 0 && slotConvention !== undefined
+      && ownConvention !== undefined && slotConvention !== ownConvention;
+    return spellingOnly ? slot : undefined;
+  }
   if (slotConvention !== undefined && ownConvention !== undefined && slotConvention !== ownConvention
     && signatureArity(actual) !== 0) return undefined;
   // Counted, not refused — see the note on `initializerFunctionSignatures`.

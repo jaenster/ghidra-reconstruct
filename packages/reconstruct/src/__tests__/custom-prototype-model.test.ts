@@ -96,7 +96,8 @@ describe('program-defined prototype models are spelled as the stock convention t
   });
 
   it('applies the parameterless rules to the convention the model resolves to', () => {
-    assert.strictEqual(conventionKeyword(fn('INV_IsInteractiveMode', '__fastcall_ecxsafe', [])), '');
+    assert.strictEqual(conventionKeyword(fn('INV_IsInteractiveMode', '__fastcall_ecxsafe', [])), '__fastcall');
+    assert.strictEqual(conventionKeyword(fn('LostReceiver', '__thiscall', [])), '');
     assert.strictEqual(conventionKeyword(fn('GetMouseClickFlags', '__stdcall_ecxedxsafe', [])), '__stdcall');
   });
 
