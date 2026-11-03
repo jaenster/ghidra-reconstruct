@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert';
 
 import { applyEvents, buildIndices, dataRefIndex, type ChangeEvent, type LiveModel } from '../model.js';
+import { factsScriptOutput } from './fake-facts.js';
 
 /**
  * v1852 changed three data items and the daemon re-read them, but two readers kept the
@@ -33,6 +34,8 @@ function fake(fns: Array<{ address: string; name: string; namespace: string }>, 
           decompiled.push(String(params.address));
           return { pseudocode: `void ${fn?.name}(void)\n{\n}\n` };
         case 'execute_script': {
+          // The combined facts script: one row per entry, no facts (a missing row fails the read).
+          if (factsScriptOutput(params.code) !== null) return { success: true, output: factsScriptOutput(params.code)! };
           const code = String(params.code);
           if (code.includes('st.getSymbols(ad)')) {
             const asked = [...code.matchAll(/"([0-9a-f]+)"/g)].map(m => m[1]);
