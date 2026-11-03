@@ -418,6 +418,14 @@ export {
 } from './builtins/join-store-temp.js';
 
 export {
+  stormNextLinkPlugin,
+  createStormNextLinkTransformer,
+  STORM_LINK_SUPPORT_LINES,
+  STORM_NEXT_LINK_HELPER,
+  type StormNextLinkOptions,
+} from './builtins/storm-next-link.js';
+
+export {
   inlinedCallRestorePlugin,
   restoreInlinedCalls,
   compileInlinedCallee,
@@ -719,6 +727,7 @@ import { armConstantCallPlugin } from './builtins/arm-constant-call.js';
 import { fieldPointerFoldPlugin } from './builtins/field-pointer-fold.js';
 import { newResultTempPlugin } from './builtins/new-result-temp.js';
 import { joinStoreTempPlugin } from './builtins/join-store-temp.js';
+import { stormNextLinkPlugin } from './builtins/storm-next-link.js';
 import { inlinedCallRestorePlugin } from './builtins/inlined-call-restore.js';
 import { guardedCallRestorePlugin } from './builtins/guarded-call-restore.js';
 import { switchChainPlugin } from './builtins/switch-chain.js';
@@ -915,6 +924,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   fieldPointerFoldPlugin,     // Matching: a field-pointer temporary goes; the field updated in place or the record held (priority 62.5)
   newResultTempPlugin,        // Matching: an allocation constructed in place gets a temporary; the result assigned after (priority 62.6)
   joinStoreTempPlugin,        // Matching: a member every arm stores into is stored once after the join, through a temporary (priority 970)
+  stormNextLinkPlugin,        // Matching: a flattened inline TSLink::NextLink(-1) becomes a call to the inline helper (priority 975)
   inlinedCallRestorePlugin,   // Matching: a call where the decompiler printed an inlined helper's body (priority 0.5)
   gotoCrossesInitPlugin,      // Late: split T x=e; → T x; x=e; for goto-crossed locals (priority 700)
   haltSiteFoldPlugin,         // Cleanup: fold nLine/nAddress temporaries into the halt call, copy a shared halt tail to its jumps (priority 930)
