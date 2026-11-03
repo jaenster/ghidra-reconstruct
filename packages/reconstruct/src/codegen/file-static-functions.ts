@@ -47,6 +47,8 @@
 import * as nodeFs from 'node:fs';
 import * as nodeOs from 'node:os';
 import * as nodePath from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 
 import { Lexer, TokenKind } from '@ghidra-mcp/cpp-parser';
 import type { DataValue, ExtractedFunction } from '../types.js';
@@ -131,24 +133,121 @@ export interface ForeignSource {
 /** File extensions read from a foreign-reference directory. */
 const FOREIGN_SOURCE_EXTENSIONS = new Set(['.c', '.cc', '.cpp', '.cxx', '.h', '.hh', '.hpp', '.hxx', '.inl', '.s', '.S', '.asm']);
 
+type ForeignEntry = { path: string; addressBase?: string | number };
+
+/** The directory or file an entry names, and its address base. */
+function resolveForeignEntry(entry: ForeignEntry, baseDir: string): { root: string; base: number | undefined } {
+  const raw = entry.path.startsWith('~/') ? nodePath.join(nodeOs.homedir(), entry.path.slice(2)) : entry.path;
+  const root = nodePath.resolve(baseDir, raw);
+  const base = entry.addressBase === undefined ? undefined
+    : typeof entry.addressBase === 'number' ? entry.addressBase
+    : Number.parseInt(entry.addressBase, /^0[xX]/.test(entry.addressBase) ? 16 : 10);
+  if (base !== undefined && !Number.isFinite(base)) {
+    throw new Error(`foreignReferences: addressBase ${entry.addressBase} of ${entry.path} is not a number`);
+  }
+  return { root, base };
+}
+
+function git(cwd: string, args: string[], input?: string): string {
+  return execFileSync('git', ['-C', cwd, ...args], {
+    encoding: 'utf-8', input, maxBuffer: 1 << 30, stdio: ['pipe', 'pipe', 'pipe'],
+  });
+}
+
+/**
+ * The git work tree holding `root`, and `root` relative to it, or null when it is
+ * in none. Only the directory has to exist: the committed tree is what is read.
+ */
+function gitLocation(root: string): { top: string; sub: string } | null {
+  let probe = root;
+  while (!nodeFs.existsSync(probe) || !nodeFs.statSync(probe).isDirectory()) {
+    const up = nodePath.dirname(probe);
+    if (up === probe) return null;
+    probe = up;
+  }
+  let top: string;
+  try {
+    top = git(probe, ['rev-parse', '--show-toplevel']).trim();
+  } catch {
+    return null;
+  }
+  // realpath both sides: /tmp and /private/tmp, a symlinked home.
+  const realRoot = nodeFs.existsSync(root) ? nodeFs.realpathSync(root) : nodePath.join(nodeFs.realpathSync(probe), nodePath.relative(probe, root));
+  const sub = nodePath.relative(nodeFs.realpathSync(top), realRoot).split(nodePath.sep).join('/');
+  return { top, sub: sub === '' ? '.' : sub };
+}
+
+/**
+ * The object a committed path names at HEAD (a tree for a directory, a blob for a
+ * file): a content hash of everything under it, unchanged by commits elsewhere.
+ */
+function headObject(loc: { top: string; sub: string }, what: string): string {
+  try {
+    return git(loc.top, ['rev-parse', '--verify', '--quiet', `HEAD:${loc.sub === '.' ? '' : loc.sub}`]).trim();
+  } catch {
+    throw new Error(`foreignReferences: ${what} is not committed at HEAD of ${loc.top}`);
+  }
+}
+
 /**
  * Read the files a `foreignReferences` entry names: a file as given, a directory
  * recursively (C, C++ and assembly sources), in sorted order. A path is absolute,
  * `~/`-relative, or relative to `baseDir`. A path that does not exist is an error.
+ *
+ * Inside a git work tree the COMMITTED files are read - `HEAD`, not the working
+ * tree - so an edit in progress beside the tree never reaches a generation, and a
+ * batch regen and the live daemon read the same input. `foreignSourcesFingerprint`
+ * names that input.
  */
-export function readForeignSources(
-  entries: ReadonlyArray<{ path: string; addressBase?: string | number }>,
+export function readForeignSources(entries: ReadonlyArray<ForeignEntry>, baseDir: string): ForeignSource[] {
+  return readForeignSourcesAt(entries, baseDir).sources;
+}
+
+/**
+ * `readForeignSources`, plus the fingerprint of exactly what was read: each
+ * committed object is resolved once and read by its id, so a commit landing
+ * meanwhile cannot make the two disagree.
+ */
+export function readForeignSourcesAt(
+  entries: ReadonlyArray<ForeignEntry>,
   baseDir: string,
-): ForeignSource[] {
+): { sources: ForeignSource[]; fingerprint: string } {
   const out: ForeignSource[] = [];
+  const h = createHash('sha256');
   for (const entry of entries) {
-    const raw = entry.path.startsWith('~/') ? nodePath.join(nodeOs.homedir(), entry.path.slice(2)) : entry.path;
-    const root = nodePath.resolve(baseDir, raw);
-    const base = entry.addressBase === undefined ? undefined
-      : typeof entry.addressBase === 'number' ? entry.addressBase
-      : Number.parseInt(entry.addressBase, /^0[xX]/.test(entry.addressBase) ? 16 : 10);
-    if (base !== undefined && !Number.isFinite(base)) {
-      throw new Error(`foreignReferences: addressBase ${entry.addressBase} of ${entry.path} is not a number`);
+    const { root, base } = resolveForeignEntry(entry, baseDir);
+    h.update(`${root}\u0000${base ?? ''}\u0000`);
+    const loc = gitLocation(root);
+    if (loc) {
+      const object = headObject(loc, root);
+      h.update(`git:${object}\u0000`);
+      const blobs: Array<{ id: string; path: string }> = [];
+      const type = git(loc.top, ['cat-file', '-t', object]).trim();
+      if (type === 'blob') {
+        blobs.push({ id: object, path: loc.sub });
+      } else {
+        for (const rec of git(loc.top, ['ls-tree', '-r', '-z', object]).split('\0')) {
+          if (!rec) continue;
+          const tab = rec.indexOf('\t');
+          const [, kind, id] = rec.slice(0, tab).split(' ');
+          const rel = rec.slice(tab + 1);
+          if (kind !== 'blob' || !FOREIGN_SOURCE_EXTENSIONS.has(nodePath.extname(rel))) continue;
+          blobs.push({ id, path: loc.sub === '.' ? rel : `${loc.sub}/${rel}` });
+        }
+      }
+      blobs.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+      if (blobs.length === 0) continue;
+      const raw = execFileSync('git', ['-C', loc.top, 'cat-file', '--batch'], {
+        input: blobs.map(b => b.id).join('\n') + '\n', maxBuffer: 1 << 30,
+      });
+      let at = 0;
+      for (const b of blobs) {
+        const nl = raw.indexOf(0x0a, at);
+        const size = Number(raw.subarray(at, nl).toString('utf-8').split(' ')[2]);
+        out.push({ path: nodePath.join(loc.top, b.path), text: raw.subarray(nl + 1, nl + 1 + size).toString('utf-8'), addressBase: base });
+        at = nl + 1 + size + 1;
+      }
+      continue;
     }
     const files: string[] = [];
     const walk = (p: string): void => {
@@ -164,9 +263,35 @@ export function readForeignSources(
     };
     if (!nodeFs.existsSync(root)) throw new Error(`foreignReferences: ${root} does not exist`);
     walk(root);
-    for (const f of files) out.push({ path: f, text: nodeFs.readFileSync(f, 'utf-8'), addressBase: base });
+    for (const f of files) {
+      const text = nodeFs.readFileSync(f, 'utf-8');
+      h.update(`${f}\u0000${text}\u0000`);
+      out.push({ path: f, text, addressBase: base });
+    }
   }
-  return out;
+  return { sources: out, fingerprint: h.digest('hex').slice(0, 16) };
+}
+
+/**
+ * One hash naming exactly what `readForeignSources` would read now: per entry, the
+ * committed object at HEAD (a git tree id is already a content hash), or the
+ * contents of the files outside git. A commit that leaves those files alone - the
+ * live daemon's own merge into the tree that holds them - leaves it unchanged.
+ * Equal to the fingerprint `readForeignSourcesAt` returns for the same commit.
+ */
+export function foreignSourcesFingerprint(entries: ReadonlyArray<ForeignEntry>, baseDir: string): string {
+  const h = createHash('sha256');
+  for (const entry of entries) {
+    const { root, base } = resolveForeignEntry(entry, baseDir);
+    h.update(`${root}\u0000${base ?? ''}\u0000`);
+    const loc = gitLocation(root);
+    if (loc) {
+      h.update(`git:${headObject(loc, root)}\u0000`);
+    } else {
+      for (const src of readForeignSources([entry], baseDir)) h.update(`${src.path}\u0000${src.text}\u0000`);
+    }
+  }
+  return h.digest('hex').slice(0, 16);
 }
 
 /**

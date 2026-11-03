@@ -99,7 +99,7 @@ import { selectExclusionEmissions, setPlatformDefinedNames, setPlatformDeclaredN
 import { normalizePointerSizeSpellings } from './pointer-size-spelling.js';
 import { flattenTemplateNames } from './template-names.js';
 import { buildTemplateRegistry, classScopeOf, memberDefinitionScope, templateDataDefinitions, templateHeaderTypes } from './templates/index.js';
-import { EXTERN_ENTRY_SUFFIX, fileStaticKey, readForeignSources, selectFileStaticFunctions, type ForeignSource } from './file-static-functions.js';
+import { EXTERN_ENTRY_SUFFIX, fileStaticKey, readForeignSourcesAt, selectFileStaticFunctions, type ForeignSource } from './file-static-functions.js';
 import { planInlinedCalls, planGuardedCalls, type InlinedCallPlan, type GuardedCallPlan } from './inlined-calls.js';
 import { nullGetterDefaults } from './null-getters.js';
 import { placeTemplateMembers } from './templates/placement.js';
@@ -895,7 +895,10 @@ export function generateProjectStage1(
   // closure drops any function (a dropped one only keeps more constructors).
   const projectDir = options.projectDir ?? options.outputDir;
   const overrides = createOverrideRegistry(options.projectConfig, projectDir);
-  const foreignSources = readForeignSources(options.projectConfig?.foreignReferences ?? [], projectDir);
+  // Read from the committed HEAD of the tree that holds them (file-static-functions.ts),
+  // and named by a fingerprint the live daemon compares to notice a commit there.
+  const { sources: foreignSources, fingerprint: foreignSourcesFingerprint } =
+    readForeignSourcesAt(options.projectConfig?.foreignReferences ?? [], projectDir);
   setConstructorBearingStructs(
     dataTypes as Array<{ name: string; kind?: string; fields?: import('../types.js').StructField[] }>,
     constructorCodeTexts(functions, funcDefDataTypes, overrides, foreignSources),
@@ -1177,6 +1180,7 @@ export function generateProjectStage1(
   const bitfieldCatalog = buildBitfieldCatalog(dataTypes);
 
   const context: ImplGenContext = {
+    _foreignSourcesFingerprint: foreignSourcesFingerprint,
     overrides,
     libraries,
     methodConversions,
@@ -4096,6 +4100,7 @@ function generateFilesForFunctions(
     symbolHashes[g.name] = hashGlobal(g);
   }
   context._buildInfo = moduleGraph.serialize(resolvedModules, symbolHashes, '1.0.0');
+  if (context._foreignSourcesFingerprint) context._buildInfo.foreignSources = context._foreignSourcesFingerprint;
 
   // One index over every name the per-file include feedback below asks about,
   // so each generated .cpp is scanned once instead of ~20,000 times.

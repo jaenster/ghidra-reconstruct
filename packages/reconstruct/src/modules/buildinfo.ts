@@ -26,6 +26,11 @@ export interface BuildInfo {
 
   /** Per-symbol content hashes for change detection */
   symbolHashes: Record<string, string>;
+  /**
+   * The fingerprint of the foreign sources this generation read (hand-written code
+   * built beside the tree, `foreignReferences`): an input no Ghidra change reports.
+   */
+  foreignSources?: string;
 
   /** Resolved deps per module (output of resolve()) */
   resolved: Record<string, {

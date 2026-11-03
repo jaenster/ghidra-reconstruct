@@ -679,6 +679,8 @@ export interface ImplGenContext {
   sourceFileName?: string;
   /** BuildInfo output — populated by generateFilesForFunctions after graph resolution */
   _buildInfo?: import('../modules/buildinfo.js').BuildInfo;
+  /** What the foreign sources read for this generation hash to (readForeignSourcesAt). */
+  _foreignSourcesFingerprint?: string;
   /** Internal: accumulated identifiers from all function bodies in the current file */
   _fileIdentifiers?: Set<string>;
   /**
