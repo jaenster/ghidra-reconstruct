@@ -241,16 +241,27 @@ function makeFn(file: SourceFile, node: FunctionDecl, qualifiedName: string): Fu
   return { file, node, qualifiedName, scope: () => (scope ??= functionScope(node)) };
 }
 
-/** `extern T name;` / `extern T name[N];` at the top level of globals.h. */
-export function collectGlobals(file: SourceFile): Map<string, GlobalDecl> {
-  const out = new Map<string, GlobalDecl>();
-  for (const d of file.tu.declarations as any[]) {
-    if (d?.kind !== NodeKind.VariableDecl) continue;
-    if (!(d.specifiers ?? []).includes('extern')) continue;
-    const name = declName(d);
-    if (name) out.set(name, { name, type: d.type, line: d.location?.start?.line ?? 0 });
-  }
+/**
+ * `extern T name;` / `extern T name[N];` in a globals or data header, at the top level or
+ * inside a namespace block; the first declaration of a name wins.
+ */
+export function collectGlobals(file: SourceFile, out = new Map<string, GlobalDecl>()): Map<string, GlobalDecl> {
+  const rec = (decls: any[]) => {
+    for (const d of decls ?? []) {
+      if (d?.kind === NodeKind.NamespaceDecl || d?.kind === NodeKind.LinkageSpec) { rec(d.declarations); continue; }
+      if (d?.kind !== NodeKind.VariableDecl) continue;
+      if (!(d.specifiers ?? []).includes('extern')) continue;
+      const name = declName(d);
+      if (name && !out.has(name)) out.set(name, { name, type: d.type, line: d.location?.start?.line ?? 0 });
+    }
+  };
+  rec(file.tu.declarations as any[]);
   return out;
+}
+
+/** A per-TU data header (`<TU>.data.h`): the externs of the globals that TU defines. */
+export function isDataHeaderPath(p: string): boolean {
+  return p.endsWith('.data.h');
 }
 
 export interface LoadOptions {
@@ -275,8 +286,14 @@ export function treeFromFiles(
   pathSource: Tree['pathSource'] = 'disk',
 ): Tree {
   const functions = files.flatMap(collectFunctions);
+  // globals.h first, then the data headers in path order: a global another TU defines is
+  // declared in its home's data header, not in globals.h.
+  const globals = new Map<string, GlobalDecl>();
   const g = files.find(f => isGlobalsHeaderPath(f.path));
-  const globals = g ? collectGlobals(g) : new Map<string, GlobalDecl>();
+  if (g) collectGlobals(g, globals);
+  for (const f of files.filter(f => isDataHeaderPath(f.path)).sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0)) {
+    collectGlobals(f, globals);
+  }
   return { root, files, functions, globals, paths, pathSource };
 }
 
