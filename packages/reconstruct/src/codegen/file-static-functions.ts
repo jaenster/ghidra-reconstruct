@@ -29,6 +29,17 @@
  *    library or platform-guarded function, and no other symbol shares its name, so
  *    every mention of the name is a mention of it.
  *
+ * Hand-written source that only needs to CALL such a function calls its extern entry
+ * instead, `<name>_Extern`: a forwarder the unit defines beside the static and the
+ * unit header declares (`externEntries`). A foreign call by that name does not keep
+ * the function extern, so the static keeps its own name, its own register
+ * convention and every call its unit makes. Any other foreign mention of the
+ * function itself - its own name, its address (a binder that imports by address),
+ * its name taken as a value (a patch that redirects calls to it) - still keeps it
+ * extern: none of those can be satisfied by a second function. The entry is emitted
+ * whenever foreign source calls it, whether the function ended up static or not, so
+ * hand-written code that adopts the entry never depends on the selection.
+ *
  * References are read from every function Ghidra has, including the ones codegen
  * excludes: a caller in excluded code is a caller in another translation unit.
  */
@@ -40,6 +51,9 @@ import * as nodePath from 'node:path';
 import { Lexer, TokenKind } from '@ghidra-mcp/cpp-parser';
 import type { DataValue, ExtractedFunction } from '../types.js';
 import { decompiledFunctionName } from './impl.js';
+import { EXTERN_ENTRY_SUFFIX } from './header.js';
+
+export { EXTERN_ENTRY_SUFFIX };
 
 /** The general-purpose registers a parameter piece can name, by full register. */
 const REGISTER_FAMILY: Record<string, string> = {
@@ -199,6 +213,11 @@ export interface FileStaticSelection {
   refused: Map<FileStaticRefusal, string[]>;
   /** Functions with parameter storage in a register their convention does not use. */
   candidates: number;
+  /**
+   * Functions foreign source calls through their extern entry (`<name>_Extern`),
+   * by address key: the unit defines the entry, its header declares it.
+   */
+  externEntries: Set<string>;
 }
 
 const addressKey = (address: string): string =>
@@ -353,15 +372,35 @@ export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticS
 
   // Foreign source that names a candidate, by symbol or by address.
   const foreignReferenced = new Set<string>();
-  if (candidates.size > 0) {
+  // Foreign calls through an extern entry, by the entry's name; any emitted function
+  // can have one, not only a candidate. A name shared with another symbol is skipped:
+  // the call could mean either.
+  const externEntries = new Set<string>();
+  const entryOf = new Map<string, string>();       // `<name>_Extern` -> address key
+  if (inputs.foreignSources?.length) {
+    for (const func of inputs.allFunctions) {
+      if (func.isExternal || func.isThunk || func.hasVarArgs) continue;
+      if (func.isLibrary || func.ifdef || func.platform || func.parentClass ||
+          func.name.includes('@') || func.name.startsWith('operator') || func.name.startsWith('~') ||
+          inputs.keepExtern?.(func)) continue;
+      const key = addressKey(func.address);
+      if (!inputs.unitOf.has(key) || (nameCount.get(func.name) ?? 0) > 1) continue;
+      const entry = func.name + EXTERN_ENTRY_SUFFIX;
+      if (!nameCount.has(entry)) entryOf.set(entry, key);
+    }
+  }
+  const entryValueUse = new Set<string>();
+  if (candidates.size > 0 || entryOf.size > 0) {
     for (const src of inputs.foreignSources ?? []) {
-      const byNameOrLabel = (name: string): void => {
+      const byNameOrLabel = (name: string, call: boolean): void => {
+        const entry = entryOf.get(name);
+        if (entry) (call ? externEntries : entryValueUse).add(entry);
         const target = byName.get(name) ?? GHIDRA_DEFAULT_LABEL.exec(name)?.[1].toLowerCase();
         if (target && candidates.has(target)) foreignReferenced.add(target);
       };
-      scanReferences(src.text, name => {
-        byNameOrLabel(name);
-        for (const part of mangledSourceNames(name)) byNameOrLabel(part);
+      scanReferences(src.text, (name, call) => {
+        byNameOrLabel(name, call);
+        for (const part of mangledSourceNames(name)) byNameOrLabel(part, false);
       }, value => {
         if (src.addressBase === undefined) return;
         const k = (value + src.addressBase).toString(16).padStart(8, '0');
@@ -391,7 +430,10 @@ export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticS
       selected.set(key, { unit, referrers: new Set(from), inline: true });
     }
   }
-  return { selected, refused, candidates: candidateCount };
+  // An entry whose address foreign code takes is not a call through it: a patch that
+  // redirects calls to that address would miss every call the unit makes.
+  for (const k of entryValueUse) externEntries.delete(k);
+  return { selected, refused, candidates: candidateCount, externEntries };
 }
 
 /** Address key used by the selection, for lookups from the emitters. */

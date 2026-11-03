@@ -40,7 +40,7 @@ import { compareFormSpec, type CompareFormSpec } from './compare-form-spec.js';
 import { repStringOps } from './rep-string-spec.js';
 import type { RepStringOp, Expression, NullGetterTable } from '@ghidra-mcp/cpp-parser';
 import { ROOT_CLASS_SCOPE, namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
-import { cleanFunctionComment, guardedFuncDefTypedef, emittedFunctionName, returnSigType, sigType } from './header.js';
+import { cleanFunctionComment, declaredParameters, externEntryDeclaration, guardedFuncDefTypedef, emittedFunctionName, returnSigType, sigType } from './header.js';
 import { classScopeOf, memberCallModel, memberDefinitionScope, orphanMarker, signatureParameters } from './templates/index.js';
 import { pointeeClass } from './templates/members.js';
 import { templateRegistry } from './templates/registry.js';
@@ -556,6 +556,12 @@ export interface ImplGenContext {
    * key, with the functions of that unit that reference them.
    */
   fileStaticFunctions?: ReadonlyMap<string, { unit: string; referrers: ReadonlySet<string>; inline?: boolean }>;
+  /**
+   * Functions hand-written source calls through an extern entry (`<name>_Extern`,
+   * file-static-functions.ts), by address key: the unit defines the entry after the
+   * function, its header declares it.
+   */
+  externEntries?: ReadonlySet<string>;
   /**
    * Calls the original made and VC8 inlined (inlined-calls.ts): per site function's
    * address key, the callees the `inlined-call-restore` pass writes calls to there,
@@ -1154,6 +1160,10 @@ export function generateImplementation(
     }
     lines.push(impl);
     lines.push('');
+    if (context?.externEntries?.has(fileStaticKey(func.address))) {
+      const entry = externEntryDefinition(func, useNamespace ? resolvedNamespace : undefined);
+      if (entry) lines.push(entry, '');
+    }
   }
   // Close any trailing ifdef
   if (currentIfdef) {
@@ -1968,6 +1978,31 @@ export function generateThunkForwarder(
     `// 1.14d: ${stripAddr(func.address)} — JMP thunk`,
     `${generateFunctionSignature(func)} {`,
     `    ${returnsVoid ? '' : 'return '}${call};`,
+    `}`,
+  ].join('\n');
+}
+
+/**
+ * The extern entry hand-written code calls a function through
+ * (file-static-functions.ts): `<name>_Extern`, the function's own return type,
+ * convention and parameters, forwarding every argument. The callee is written from
+ * the root, as a thunk's is, so the call cannot bind to a same-named function of an
+ * enclosing namespace. Undefined for a variadic function, which cannot be forwarded.
+ */
+export function externEntryDefinition(
+  func: ExtractedFunction,
+  enclosingNamespace: ResolvedNamespace | undefined,
+): string | undefined {
+  if (func.hasVarArgs) return undefined;
+  const returnType = returnSigType(func.returnType).trim();
+  if (!returnType) return undefined;
+  const ownName = emittedFunctionName(func, returnSigType(func.returnType));
+  const callee = ['', ...(enclosingNamespace?.segments ?? []), ownName].join('::');
+  const args = declaredParameters(func).map(p => p.name).join(', ');
+  return [
+    `// Extern entry for hand-written callers: ${ownName} itself keeps its unit's linkage.`,
+    `${externEntryDeclaration(func)} {`,
+    `    ${returnType === 'void' ? '' : 'return '}${callee}(${args});`,
     `}`,
   ].join('\n');
 }

@@ -310,6 +310,61 @@ describe('selectFileStaticFunctions', () => {
     }
   });
 
+  it('makes it static when hand-written source calls it only through its extern entry', () => {
+    const all = [helper, caller];
+    const sel = selectFileStaticFunctions({
+      allFunctions: all, unitOf: unitsOf(all), globals: [],
+      foreignSources: [{ path: 'support/hand.cpp', text: 'int Hook() { return A::Helper_Extern(7); }' }],
+    });
+    assert.deepStrictEqual([...sel.selected.keys()], ['00401000']);
+    assert.deepStrictEqual([...sel.externEntries], ['00401000']);
+    assert.strictEqual(sel.refused.get('named by foreign source'), undefined);
+  });
+
+  it('keeps it extern when foreign source also names it directly, and still emits the entry', () => {
+    const all = [helper, caller];
+    const sel = selectFileStaticFunctions({
+      allFunctions: all, unitOf: unitsOf(all), globals: [],
+      foreignSources: [{ path: 'support/hand.cpp', text: 'int Hook() { return A::Helper_Extern(7) + A::Helper(1); }' }],
+    });
+    assert.strictEqual(sel.selected.size, 0);
+    assert.deepStrictEqual(sel.refused.get('named by foreign source'), ['Helper']);
+    assert.deepStrictEqual([...sel.externEntries], ['00401000']);
+  });
+
+  it('keeps it extern when a binder imports it by address, whatever else calls the entry', () => {
+    const all = [helper, caller];
+    const sel = selectFileStaticFunctions({
+      allFunctions: all, unitOf: unitsOf(all), globals: [],
+      foreignSources: [
+        { path: 'support/hand.cpp', text: 'int Hook() { return A::Helper_Extern(7); }' },
+        { path: 'imports.h', text: 'inline GameAsmFunc Helper_I{0x1000};', addressBase: 0x400000 },
+      ],
+    });
+    assert.strictEqual(sel.selected.size, 0);
+    assert.deepStrictEqual(sel.refused.get('named by foreign source'), ['Helper']);
+  });
+
+  it('gives no entry whose address foreign code takes: a call redirect would miss the unit', () => {
+    const all = [helper, caller];
+    const sel = selectFileStaticFunctions({
+      allFunctions: all, unitOf: unitsOf(all), globals: [],
+      foreignSources: [{ path: 'support/patch.cpp', text: 'void P() { Redirect((void*)&A::Helper_Extern); A::Helper_Extern(1); }' }],
+    });
+    assert.strictEqual(sel.externEntries.size, 0);
+    assert.deepStrictEqual([...sel.selected.keys()], ['00401000']);
+  });
+
+  it('gives no entry when a symbol already has the entry name', () => {
+    const taken = fn('Helper_Extern', '00401500', 'B', '  return 0;');
+    const all = [helper, caller, taken];
+    const sel = selectFileStaticFunctions({
+      allFunctions: all, unitOf: unitsOf(all), globals: [],
+      foreignSources: [{ path: 'support/hand.cpp', text: 'int Hook() { return A::Helper_Extern(7); }' }],
+    });
+    assert.strictEqual(sel.externEntries.size, 0);
+  });
+
   it('ignores a function with only stack and convention registers', () => {
     const plain = fn('Plain', '00401300', 'A', '  return nValue;', { params: [onStack()] });
     const user = fn('User', '00401400', 'A', '  return Plain(1);');
@@ -362,6 +417,37 @@ describe('file-static emission', () => {
     assert.ok(definition >= 0, `static definition missing:\n${impl}`);
     assert.ok(forward < caller && caller < definition, 'declared before its first caller, defined after it');
     assert.ok(!/static[^\n]*SharedHelper/.test(impl), 'SharedHelper keeps external linkage');
+  });
+
+  // NET_D2GS_CLIENT_Send (00478350, size in EDI) is called by support/d2_control.cpp.
+  it('defines the extern entry after the static and declares only the entry in the header', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'entry-'));
+    try {
+      fs.mkdirSync(path.join(dir, 'support'));
+      fs.writeFileSync(path.join(dir, 'support', 'hand.cpp'), 'void Hook() { Alpha::Send_Extern(p, 3); }');
+      const send = fn('Send', '0x401000', 'Alpha', '  return nSize;', {
+        params: [
+          { name: 'pBytes', dataType: 'char *', size: 4, ordinal: 0, storage: 'Stack[0x4]:4' },
+          { name: 'nSize', dataType: 'int', size: 4, ordinal: 1, storage: 'EDI:4' },
+        ],
+      });
+      const user = fn('SendCmd', '0x401100', 'Alpha', '  return Send((char *)0, 1);');
+      const namespaces: ExtractedNamespace[] = [{ name: 'Alpha', fullPath: 'Alpha', functionCount: 2, isClass: false }];
+      const project = generateProject('entry', [send, user], [], [], [], namespaces,
+        { ...options, projectDir: dir, projectConfig: { foreignReferences: [{ path: 'support' }] } as ReconstructOptions['projectConfig'] },
+        programInfo);
+      const file = (suffix: string) => [...project.files.values()].find(f => f.path.endsWith(suffix))!.content;
+      const header = file('Alpha.h');
+      const impl = file('Alpha.cpp');
+      assert.ok(/^static int __stdcall Send\(char \* pBytes, int nSize\) \{$/m.test(impl), `static definition missing:\n${impl}`);
+      assert.ok(/^int __stdcall Send_Extern\(char \* pBytes, int nSize\) \{\n    return ::Alpha::Send\(pBytes, nSize\);\n\}$/m.test(impl),
+        `entry definition missing:\n${impl}`);
+      assert.ok(impl.indexOf('Send_Extern(') > impl.search(/^static int __stdcall Send\(/m), 'the entry follows the static');
+      assert.ok(/^int __stdcall Send_Extern\(char \* pBytes, int nSize\);$/m.test(header), `entry not declared:\n${header}`);
+      assert.ok(!/\bSend\s*\(/.test(header), 'the static itself is not declared');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   // DRLGGRID_GetCellAddress (0067c4d0) and AlterGridFlag (0067c4f0): no call, the body inlined.

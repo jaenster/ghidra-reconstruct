@@ -99,7 +99,7 @@ import { selectExclusionEmissions, setPlatformDefinedNames, setPlatformDeclaredN
 import { normalizePointerSizeSpellings } from './pointer-size-spelling.js';
 import { flattenTemplateNames } from './template-names.js';
 import { buildTemplateRegistry, classScopeOf, memberDefinitionScope, templateDataDefinitions, templateHeaderTypes } from './templates/index.js';
-import { fileStaticKey, readForeignSources, selectFileStaticFunctions, type ForeignSource } from './file-static-functions.js';
+import { EXTERN_ENTRY_SUFFIX, fileStaticKey, readForeignSources, selectFileStaticFunctions, type ForeignSource } from './file-static-functions.js';
 import { planInlinedCalls, planGuardedCalls, type InlinedCallPlan, type GuardedCallPlan } from './inlined-calls.js';
 import { nullGetterDefaults } from './null-getters.js';
 import { placeTemplateMembers } from './templates/placement.js';
@@ -2568,6 +2568,7 @@ function installFileStaticFunctions(
     },
   });
   context.fileStaticFunctions = selection.selected;
+  context.externEntries = selection.externEntries;
   // Only the sites of a callee that was selected get their call back: a callee kept
   // extern would be called and never inlined.
   if (inlinedCallPlan) {
@@ -2604,7 +2605,8 @@ function installFileStaticFunctions(
     const refused = [...selection.refused].map(([why, names]) => `${names.length} ${why}`).join(', ');
     console.log(
       `File-static functions: ${selection.selected.size} of ${selection.candidates} with parameters in ` +
-      `registers their convention does not use${refused ? ` (kept extern: ${refused})` : ''}`
+      `registers their convention does not use${refused ? ` (kept extern: ${refused})` : ''}` +
+      (selection.externEntries.size ? `; ${selection.externEntries.size} extern entries for hand-written callers` : '')
     );
     if (context.inlinedCalls) {
       const inline = [...selection.selected.values()].filter(e => e.inline).length;
@@ -4164,6 +4166,7 @@ function generateFilesForFunctions(
         functions,  // allFunctions for cross-module method lookup
         classes,    // allClasses so cross-namespace method structs get method declarations
         f => context.fileStaticFunctions?.has(fileStaticKey(f.address)) ?? false,
+        f => context.externEntries?.has(fileStaticKey(f.address)) ?? false,
       ));
 
       files.set(headerPath, {
@@ -4214,9 +4217,13 @@ function generateFilesForFunctions(
     //
     // The dep-scan below then runs over the reused text, so its include set is
     // derived the same way it was derived when the text was written.
+    // An extern entry is emitted text too: a unit whose entries changed is re-emitted.
     const unitStatics = unitFunctions
       .map(f => fileStaticKey(f.address))
-      .filter(k => context.fileStaticFunctions?.has(k))
+      .flatMap(k => [
+        ...(context.fileStaticFunctions?.has(k) ? [k] : []),
+        ...(context.externEntries?.has(k) ? [`${k}${EXTERN_ENTRY_SUFFIX}`] : []),
+      ])
       .sort();
     const previousStatics = unitIdentifierCounts.get(unitName)?.statics ?? [];
     const placementNow: PlacementLookup = {

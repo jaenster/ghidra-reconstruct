@@ -147,7 +147,9 @@ export function generateHeader(
   allFunctions?: ExtractedFunction[],
   allClasses?: DetectedClass[],
   /** Whether a function is defined `static` in its unit, and so not declared here. */
-  isFileStatic?: (func: ExtractedFunction) => boolean
+  isFileStatic?: (func: ExtractedFunction) => boolean,
+  /** Whether hand-written source calls a function through its extern entry, declared here. */
+  hasExternEntry?: (func: ExtractedFunction) => boolean,
 ): string {
   const lines: string[] = [];
 
@@ -555,6 +557,13 @@ export function generateHeader(
       lines.push(`// ${internalCount} internal function${internalCount > 1 ? 's' : ''} (defined in .cpp)`);
       lines.push('');
     }
+    // The entries hand-written code calls a function of this unit through.
+    const entries = hasExternEntry ? nonLibraryFunctions.filter(f => hasExternEntry(f) && !f.ifdef) : [];
+    if (entries.length > 0) {
+      lines.push('// Extern entries for hand-written callers (each forwards to the function of its name)');
+      for (const func of entries) lines.push(`${externEntryDeclaration(func)};`);
+      lines.push('');
+    }
   }
 
   // Post-process: qualify struct types with 'struct' tag in function signatures.
@@ -822,6 +831,20 @@ export function cleanFunctionComment(
  * own return type is a constructor and becomes `Create_<name>`, so the declaration
  * cannot be read as one.
  */
+/** Suffix of the extern entry hand-written code calls a static function through. */
+export const EXTERN_ENTRY_SUFFIX = '_Extern';
+
+/**
+ * The declaration of a function's extern entry (file-static-functions.ts): its own
+ * return type, convention and parameters under `<name>_Extern`, with no address -
+ * the entry is not a function of the original.
+ */
+export function externEntryDeclaration(func: ExtractedFunction): string {
+  const params = declaredParameters(func).map(p => `${p.type} ${p.name}`).join(', ');
+  const ret = returnSigType(func.returnType);
+  return `${declarationHead(ret, func)}${emittedFunctionName(func, ret)}${EXTERN_ENTRY_SUFFIX}(${params})`;
+}
+
 export function emittedFunctionName(func: ExtractedFunction, returnType: string): string {
   const cleanName = sanitizeSymbolName(func.name.replace(/[()]+$/, ''));
   if (returnType.startsWith(cleanName + ' ') || returnType === cleanName) {
