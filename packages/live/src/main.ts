@@ -55,6 +55,7 @@ import {
   type MergeResult, type CommitResult,
 } from './git.js';
 import { WorkQueue } from './queue.js';
+import { publishBlockReason } from './publish-outcome.js';
 import { verifyResume, PollingChangeStream, SEQ_PER_VERSION, type ChangeFeed } from './events.js';
 import { localWorkerEnabled } from '@ghidra-mcp/reconstruct/local-worker';
 import { generatorFingerprint, checkBuild } from './build-fingerprint.js';
@@ -190,6 +191,8 @@ export class LiveLoop {
   private committedVersion = 0;
   /** What the last publish command reported (LIVE_PUBLISH_CMD). */
   private lastPublish: { at: string; code: number; head?: string; tail: string } | null = null;
+  /** Set while the build gate is red: the version it went red at. Cleared by a green publish. */
+  private gateRed: { sinceVersion: number; at: string } | null = null;
 
   /**
    * Set only while a freshly-seeded model is catching up from the beginning of
@@ -867,8 +870,8 @@ export class LiveLoop {
    * commit), 3 merge conflict, 4 the build gate failed, 5 the merge tree is dirty,
    * anything else an error. Whatever it returns, a commit that landed is a commit: the
    * state is saved whenever the regen HEAD moved, so the batch is not applied twice.
-   * A conflict, a failed gate or an error blocks the queue - the next batch must not
-   * land on a tree a person has to look at first.
+   * A conflict or an error blocks the queue - the next batch must not land on a tree
+   * a person has to look at first. A red gate does not; see publishBlockReason.
    */
   private async publish(cmd: string): Promise<void> {
     this.phase = 'publishing';
@@ -910,15 +913,14 @@ export class LiveLoop {
       });
       this.committedVersion = Number(version) || this.committedVersion;
     }
-    if (code === 0 || code === 5) {
-      if (code === 5) this.log('merge skipped: the merge tree has uncommitted changes');
-      return;
+    if (code === 0) this.gateRed = null;
+    if (code === 4) {
+      this.gateRed ??= { sinceVersion: Number(version) || this.committedVersion, at: new Date().toISOString() };
+      this.log(`GATE RED on ${this.cfg.modifiedDir} at v${version} (red since v${this.gateRed.sinceVersion}); not blocking - the next check-in may be the fix`);
     }
-    const reason = code === 3
-      ? `merge conflict in ${this.cfg.modifiedDir}: markers left, nothing resolved. Resolve and commit there, then call retry_merge.`
-      : code === 4
-        ? `the build gate failed on ${this.cfg.modifiedDir} (see the log). Fix, then call retry_merge.`
-        : `publish failed (exit ${code}); see the log, then call retry_merge.`;
+    if (code === 5) this.log('merge skipped: the merge tree has uncommitted changes');
+    const reason = publishBlockReason(code, this.cfg.modifiedDir);
+    if (!reason) return;
     this.log(reason);
     this.queue.block(reason);
   }
@@ -980,6 +982,7 @@ export class LiveLoop {
       committedVersion: this.committedVersion,
       publishing: Boolean(process.env.LIVE_PUBLISH_CMD),
       lastPublish: this.publishSummary(),
+      gateRed: this.gateRed,
       lastAppliedSeq: this.stream.lastAppliedSeq,
       counts: countModel(this.model),
       program: {
@@ -1231,7 +1234,7 @@ export class LiveLoop {
     if (publishCmd) {
       const blocked = this.queue.isBlocked ? this.queue.status() : null;
       await this.publish(publishCmd);
-      if (this.lastPublish && (this.lastPublish.code === 0 || this.lastPublish.code === 5)) this.queue.unblock();
+      if (this.lastPublish && !publishBlockReason(this.lastPublish.code, this.cfg.modifiedDir)) this.queue.unblock();
       return { publish: this.lastPublish, wasBlocked: blocked ?? null };
     }
     if (!this.cfg.modifiedDir) return { merged: false, reason: 'no modified tree configured (D2_MODIFIED_DIR is empty)' };
