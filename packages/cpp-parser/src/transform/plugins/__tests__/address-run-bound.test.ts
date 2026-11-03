@@ -191,3 +191,54 @@ describe('addressRunBoundPlugin - signedness', () => {
     assert.ok(out.includes('(uintptr_t)&gbD2CompColorInitR + 31'), out);
   });
 });
+
+describe('addressRunBoundPlugin - namespaced globals', () => {
+  function run(code: string, opts: AddressRunBoundOptions): string {
+    return emit(addressRunBoundPlugin.createTransformer(opts)(parse(code)) as AnyNode).trim();
+  }
+
+  // WEATHER_FreeDC6Graphics @00472bd0: `cmp esi, 0x7a89c0` ends the walk of
+  // DC6_UncompOverlays_Rain[4] (0x7a89b0) at the next global, which sits in a
+  // namespace, so global-address-literal spells it qualified.
+  const WEATHER: AddressRunBoundOptions = {
+    globalAddresses: { DC6_UncompOverlays_Rain: 0x7a89b0, gnWeatherOffsetXModulo: 0x7a89c0 },
+    globalSizes: { DC6_UncompOverlays_Rain: 16, gnWeatherOffsetXModulo: 4 },
+    globalElementSizes: { DC6_UncompOverlays_Rain: 4 },
+  };
+
+  it('respells a qualified bound as an element of the walked table', () => {
+    const out = run(`
+      void f() {
+        DC6** p = DC6_UncompOverlays_Rain;
+        do { p = p + 1; } while ((int)p < (intptr_t)&D2Client::Draw::Weather::gnWeatherOffsetXModulo);
+      }
+    `, WEATHER);
+    assert.ok(out.includes('(intptr_t)&DC6_UncompOverlays_Rain[4]'), out);
+    assert.ok(!out.includes('gnWeatherOffsetXModulo'), out);
+  });
+
+  it('keeps a qualified anchor spelled as the function spells it', () => {
+    const out = run(`
+      void f() {
+        int* p = Ns::Sub::gaTable;
+        do { p = p + 1; } while ((int)p < (intptr_t)&Ns::Sub::gnNext);
+      }
+    `, {
+      globalAddresses: { gaTable: 0x700000, gnNext: 0x700010 },
+      globalSizes: { gaTable: 16 },
+      globalElementSizes: { gaTable: 4 },
+    });
+    assert.ok(out.includes('(intptr_t)&Ns::Sub::gaTable[4]'), out);
+    assert.ok(!out.includes('gnNext'), out);
+  });
+
+  it('does not take a namespace segment for a global', () => {
+    const out = run(`
+      void f() {
+        int* p = gaTable::gaOther;
+        do { p = p + 1; } while ((int)p < (intptr_t)&gnNext);
+      }
+    `, { globalAddresses: { gaTable: 0x700000, gnNext: 0x700010 } });
+    assert.ok(out.includes('&gnNext'), out);
+  });
+});

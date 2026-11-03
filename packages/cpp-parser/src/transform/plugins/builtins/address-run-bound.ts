@@ -53,15 +53,21 @@
  * table. No candidate, no address for either end, or a distance wider than a
  * single object's plausible extent: nothing is written and the address-of form
  * stands, still visible.
+ *
+ * A global defined in a namespace reaches this pass qualified (`&Ns::Sub::gnNext`),
+ * as `global-address-literal` spells it. It is the same reference, looked up by its
+ * last segment; the namespace segments are never taken for globals themselves.
+ * `WEATHER_FreeDC6Graphics` @00472bd0 ends its walk of `DC6_UncompOverlays_Rain[4]`
+ * at `D2Client::Draw::Weather::gnWeatherOffsetXModulo`, which once stood unrespelled.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, FunctionDecl, VariableDecl, Expression, BinaryExpr, Identifier, UnaryExpr,
-  CStyleCastExpr, ParenExpr, AssignExpr,
+  CStyleCastExpr, ParenExpr, AssignExpr, QualifiedId,
 } from '../../../ast/nodes.js';
 import { findNodesByKind } from '../../../ast/visitor.js';
-import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
+import { createTransformer, updateNode, cloneNode, type Transformer } from '../../transformer.js';
 import { Type, Expr } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { hasOwnKeys } from './input-memo.js';
@@ -125,6 +131,21 @@ function unwrap(e: Expression): Expression {
 }
 
 /**
+ * The global a node names, if it is a reference to one: a bare identifier, or a
+ * qualified one (`Ns::Sub::gnName`, the spelling `global-address-literal` gives a
+ * global defined in a namespace) whose last segment is an identifier. The tables
+ * this pass reads are keyed by that last segment.
+ */
+function globalRefName(n: ASTNode): string | undefined {
+  if (n.kind === NodeKind.Identifier) return (n as Identifier).name;
+  if (n.kind === NodeKind.QualifiedId) {
+    const q = n as QualifiedId;
+    return q.name.kind === NodeKind.Identifier ? (q.name as Identifier).name : undefined;
+  }
+  return undefined;
+}
+
+/**
  * The name a comparison operand names as a BARE ADDRESS: `&sym`, or `sym` where
  * the global is an array and decays. Casts and parens are transparent — the
  * emitted form is `(uintptr_t)&sym`, and the cast says nothing about which
@@ -135,15 +156,43 @@ function boundName(e: Expression): string | undefined {
   if (u.kind === NodeKind.UnaryExpr) {
     const un = u as UnaryExpr;
     if (un.operator !== '&') return undefined;
-    const inner = unwrap(un.operand as Expression);
-    return inner.kind === NodeKind.Identifier ? (inner as Identifier).name : undefined;
+    return globalRefName(unwrap(un.operand as Expression));
   }
   return undefined;
 }
 
-/** Every identifier named anywhere inside an expression. */
+/**
+ * Every name referenced inside an expression, with the node that spells it. A
+ * qualified reference counts once, by its last segment, spelled as written; its
+ * namespace segments are not references and are not counted.
+ */
+function referencesIn(node: ASTNode): Array<{ name: string; spelling: Expression }> {
+  const out: Array<{ name: string; spelling: Expression }> = [];
+  const visit = (n: ASTNode) => {
+    if (n.kind === NodeKind.QualifiedId) {
+      const name = globalRefName(n);
+      if (name) out.push({ name, spelling: n as unknown as Expression });
+      return;
+    }
+    if (n.kind === NodeKind.Identifier) {
+      out.push({ name: (n as Identifier).name, spelling: n as unknown as Expression });
+      return;
+    }
+    for (const v of Object.values(n as unknown as Record<string, unknown>)) {
+      if (Array.isArray(v)) {
+        for (const c of v) if (c && typeof c === 'object' && 'kind' in (c as object)) visit(c as ASTNode);
+      } else if (v && typeof v === 'object' && 'kind' in (v as object)) {
+        visit(v as ASTNode);
+      }
+    }
+  };
+  visit(node);
+  return out;
+}
+
+/** Every name referenced inside an expression. */
 function identifiersIn(node: ASTNode): string[] {
-  return findNodesByKind(node, NodeKind.Identifier).map(n => (n as Identifier).name);
+  return referencesIn(node).map(r => r.name);
 }
 
 /**
@@ -172,11 +221,18 @@ export function createAddressRunBoundTransformer(options?: PluginOptions): Trans
       // variable reused for two walks therefore carries both anchors, and the
       // nearest-below rule picks the right one at each comparison.
       const sources = new Map<string, Set<string>>();
+      // How the function spells each global it names, so a respelled anchor
+      // resolves in exactly the scope the walk's own reference does.
+      const spellings = new Map<string, Expression>();
       const record = (name: string, from: ASTNode | undefined) => {
         if (!from) return;
         let set = sources.get(name);
         if (!set) { set = new Set(); sources.set(name, set); }
-        for (const id of identifiersIn(from)) if (addresses[id] !== undefined) set.add(id);
+        for (const r of referencesIn(from)) {
+          if (addresses[r.name] === undefined) continue;
+          set.add(r.name);
+          if (!spellings.has(r.name)) spellings.set(r.name, r.spelling);
+        }
       };
       for (const d of findNodesByKind(node.body, NodeKind.VariableDecl)) {
         const v = d as VariableDecl;
@@ -221,8 +277,10 @@ export function createAddressRunBoundTransformer(options?: PluginOptions): Trans
             // Candidates: globals named in the walking expression itself, plus
             // every global that has ever been assigned into its root variable.
             const candidates = new Set<string>();
-            for (const id of identifiersIn(unwrap(walker))) {
-              if (addresses[id] !== undefined) candidates.add(id);
+            for (const r of referencesIn(unwrap(walker))) {
+              if (addresses[r.name] === undefined) continue;
+              candidates.add(r.name);
+              if (!spellings.has(r.name)) spellings.set(r.name, r.spelling);
             }
             const root = walkerRoot(walker);
             if (root) for (const id of sources.get(root) ?? []) candidates.add(id);
@@ -244,15 +302,19 @@ export function createAddressRunBoundTransformer(options?: PluginOptions): Trans
             // uses, so the reference resolves in exactly the scope the walk's
             // own reference does.
             const word = signedWalker(walker) ? 'intptr_t' : 'uintptr_t';
+            const spelled = spellings.get(anchor);
+            const anchorRef = (): Expression => spelled
+              ? cloneNode(spelled)
+              : Expr.identifier(anchor!);
             const stride = strides[anchor];
             const extent = sizes[anchor];
             if (stride !== undefined && extent !== undefined && stride > 0
               && delta % stride === 0 && delta <= extent) {
               return Expr.cast(Type.typedef(word), Expr.unary('&',
-                Expr.subscript(Expr.identifier(anchor), Expr.intLiteral(delta / stride))));
+                Expr.subscript(anchorRef(), Expr.intLiteral(delta / stride))));
             }
             return Expr.paren(Expr.binary(
-              Expr.cast(Type.typedef(word), Expr.unary('&', Expr.identifier(anchor))),
+              Expr.cast(Type.typedef(word), Expr.unary('&', anchorRef())),
               '+',
               Expr.intLiteral(delta),
             ));
