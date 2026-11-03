@@ -25,7 +25,9 @@ export interface Finding {
   sig?: string;
   /**
    * A census entry: the class is real but harmless until something outside the image is
-   * involved. Reported apart from the defects, never baselined, never counted as new.
+   * involved, or the evidence that would make it a defect is missing (a count no prototype
+   * pairs with the pointer). Reported apart from the defects, never baselined, never counted
+   * as new.
    */
   census?: boolean;
 }

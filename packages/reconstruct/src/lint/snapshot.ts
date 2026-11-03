@@ -37,6 +37,10 @@ export interface SnapshotFunction {
   callingConvention: string;
   /** Parameter storage as Ghidra prints it: `ECX:4 (auto)`, `Stack[0x4]:4`, `EDI:4`. */
   storage: string[];
+  /** Parameter names in ordinal order, as Ghidra holds them. */
+  paramNames?: string[];
+  /** Ghidra's namespace path (`Storm::Source::SCMD`), when the function has one. */
+  namespace?: string;
 }
 
 export interface Snapshot {
@@ -139,6 +143,10 @@ export function buildSnapshot(dir: string, globals: SnapshotGlobal[], dataTypes:
         functions.set(a, {
           name: String(d.name), address: a, callingConvention: String(d.callingConvention ?? 'unknown'),
           storage: ((d.parameters ?? []) as any[]).map(p => String(p.storage ?? '')),
+          paramNames: [...((d.parameters ?? []) as any[])]
+            .sort((x, y) => Number(x.ordinal ?? 0) - Number(y.ordinal ?? 0))
+            .map(p => String(p.name ?? '')),
+          ...(d.namespace ? { namespace: String(d.namespace) } : {}),
         });
       }
       return functions;

@@ -9,10 +9,11 @@
 
 import { NodeKind } from '@ghidra-mcp/cpp-parser';
 import {
-  calleeName, isArrayType, isPointerType, line, refName, signature, strip, typeText,
+  calleeName, declName, isArrayType, isPointerType, line, refName, signature, strip, typeText,
   typeWidth, unparen, walk,
 } from '../ast.js';
 import type { Check, Finding, LintContext, Resolved } from '../context.js';
+import type { Snapshot, SnapshotFunction } from '../snapshot.js';
 import type { FunctionInfo } from '../tree.js';
 import { renderedLength, SIZED_SINKS } from './buffers.js';
 
@@ -36,6 +37,95 @@ function scalarAddress(ctx: LintContext, fn: FunctionInfo, arg: any): { name: st
 const isStaticOrGlobal = (r: Resolved): boolean =>
   r.kind === 'global' || r.kind === 'file' || (r.kind === 'local' && r.entry.isStatic);
 
+/**
+ * System calls the snapshot has no prototype for: pointer argument index -> the index of the
+ * byte or character count that bounds it.
+ */
+const SDK_BOUNDS: Record<string, Record<number, number>> = {
+  GetModuleFileNameA: { 1: 2 }, GetModuleFileNameW: { 1: 2 },
+  GetCurrentDirectoryA: { 1: 0 }, GetTempPathA: { 1: 0 },
+  GetPrivateProfileStringA: { 4: 5 }, GetWindowTextA: { 1: 2 },
+  lstrcpynA: { 0: 2 }, MultiByteToWideChar: { 4: 5 }, WideCharToMultiByte: { 4: 5 },
+};
+
+const HUNGARIAN_PREFIX = /^(?:lpsz|lpwsz|lpcsz|lpc|lpw|lp|pwsz|psz|wsz|sz|pb|pv|pw|pp|p|a|dw|cch|cb|n|u|i|w|b)(?=[A-Z])/;
+const SIZE_SUFFIX = /(?:Bytes|Size|Length|Len|Count|Max|Capacity)$/;
+
+/** A parameter name that says it is a count of what a pointer holds - and not a flag word. */
+function isSizeName(name: string): boolean {
+  if (/flags?|mask/i.test(name)) return false;
+  return /size|len(?:gth)?|bytes|count|capacity|^cb[A-Z_]|^cch|^max|max$/i.test(name.replace(/^_+/, ''));
+}
+
+/** What a parameter is about: `pVariable` and `dwVariableBytes` are both `variable`; `nSize` is about nothing. */
+function nameStem(name: string, size: boolean): string {
+  let s = name.replace(/^_+/, '').replace(HUNGARIAN_PREFIX, '');
+  if (size) s = s.replace(SIZE_SUFFIX, '');
+  return s.toLowerCase();
+}
+
+/**
+ * The parameters that bound pointer parameter `i`, by name. A count whose stem matches the
+ * pointer's is its own (`SCmdRegisterArgument`: `dwVariableBytes` bounds `pVariable`, not
+ * `szText`); failing that, a count named after nothing (`nSize`, `_Size`) bounds every pointer.
+ */
+export function boundingParameters(params: readonly string[], i: number): number[] {
+  const own = nameStem(params[i] ?? '', false);
+  if (!own) return [];
+  const sizes = params.map((p, j) => j).filter(j => j !== i && isSizeName(params[j]));
+  const specific = sizes.filter(j => {
+    const st = nameStem(params[j], true);
+    return st.length >= 3 && (st === own || own.startsWith(st) || st.startsWith(own));
+  });
+  if (specific.length) return specific;
+  return sizes.filter(j => nameStem(params[j], true) === '');
+}
+
+/** The callee's parameter names, from the snapshot or the tree; null when no one prototype says. */
+function calleeParameterNames(ctx: LintContext, callee: any): string[] | null {
+  const name = calleeName(callee);
+  if (!name) return null;
+  const c = unparen(callee);
+  const quals: string[] = c?.kind === NodeKind.QualifiedId
+    ? (c.qualifier ?? []).map((q: any) => q?.name?.name ?? q?.name).filter((q: unknown) => typeof q === 'string')
+    : [];
+  // The emitted qualifier can leave out the unit segment (`Storm::Source::SCmdRegisterArgument`
+  // for `Storm::Source::SCMD::`), so it is read as segments the path must contain.
+  const fits = (path: string) => {
+    const segs = path.split('::').slice(0, -1);
+    return quals.every(q => segs.includes(q));
+  };
+  const lists = new Map<string, string[]>();
+  const add = (names: string[]) => { if (names.every(Boolean)) lists.set(names.join(','), names); };
+  if (ctx.snapshot) {
+    for (const f of snapshotFunctionsByName(ctx.snapshot).get(name) ?? []) {
+      if (f.paramNames && fits(f.namespace ? `${f.namespace}::${f.name}` : f.name)) add(f.paramNames);
+    }
+  }
+  if (lists.size === 0) {
+    for (const f of ctx.tree.functions) {
+      if (f.qualifiedName.split('::').pop() !== name || !fits(f.qualifiedName)) continue;
+      add(((f.node as any).parameters ?? []).map((p: any) => declName(p) ?? ''));
+    }
+  }
+  return lists.size === 1 ? [...lists.values()][0] : null;
+}
+
+const byNameMemo = new WeakMap<Snapshot, Map<string, SnapshotFunction[]>>();
+function snapshotFunctionsByName(snap: Snapshot): Map<string, SnapshotFunction[]> {
+  let m = byNameMemo.get(snap);
+  if (!m) {
+    m = new Map();
+    for (const f of snap.functions().values()) {
+      let l = m.get(f.name);
+      if (!l) m.set(f.name, (l = []));
+      l.push(f);
+    }
+    byNameMemo.set(snap, m);
+  }
+  return m;
+}
+
 // -------------------------------------------------------------------------------------------
 // scalar-extent-passed
 // -------------------------------------------------------------------------------------------
@@ -50,6 +140,12 @@ const isStaticOrGlobal = (r: Resolved): boolean =>
  * put after the variable. The decl and the length disagree inside one call; no write is
  * visible, so oversized-global-write cannot see it. Calls the write checks already measure
  * (memcpy, memset, ReadFile ...) are left to them.
+ *
+ * The count has to be the one that bounds THAT pointer, read from the callee's parameter
+ * names (`boundingParameters`) or, for a system call, `SDK_BOUNDS`. Any large constant in
+ * the call is not evidence: `SCmdRegisterArgument(0x20000, -1, &cCmdLineLanguageOption,
+ * lpLibFileName, 0x104, ...)` passes the option NAME, and 0x20000 is `dwFlags`. A call
+ * whose prototype nothing gives is census, not a finding.
  */
 export const scalarExtentPassed: Check = {
   id: 'scalar-extent-passed',
@@ -64,13 +160,19 @@ export const scalarExtentPassed: Check = {
         for (let i = 0; i < args.length; i++) {
           const a = scalarAddress(ctx, fn, args[i]);
           if (!a || !isStaticOrGlobal(a.r)) continue;
+          const sdk = callee ? SDK_BOUNDS[callee] : undefined;
+          const params = sdk ? null : calleeParameterNames(ctx, c.callee);
+          const bounds = sdk ? (sdk[i] === undefined ? [] : [sdk[i]])
+            : params ? boundingParameters(params, i)
+            : args.map((_, j) => j).filter(j => j !== i);
           let n: number | null = null;
-          for (let j = 0; j < args.length && n === null; j++) {
-            if (j === i) continue;
+          for (const j of bounds) {
+            if (n !== null || j >= args.length) continue;
             const v = ctx.value(fn, args[j]);
             if (v !== null && v >= 16 && v > a.width && v <= 0x100000) n = v;
           }
           if (n === null) continue;
+          const census = !sdk && !params;
           const g = ctx.snapshot?.globalByName.get(a.name);
           const gap = g ? ctx.snapshot!.gapAfter.get(g.address) : null;
           // A symbol outside the image is a constant Ghidra gave a name (HWND_NOTOPMOST).
@@ -81,8 +183,9 @@ export const scalarExtentPassed: Check = {
           out.push({
             check: this.id, file: fn.file.path, line: line(c), fn: fn.qualifiedName, subject: a.name,
             detail: `&${a.name} (${typeText(a.r.type)}, ${a.width} byte(s)) passed with 0x${n.toString(16)}` +
-              `${g ? `; Ghidra symbol ${g.size} byte(s) at ${g.addressText}, ${gap ?? '?'} to the next` : ''}`,
-            sig: signature(c) + `#arg${i}`,
+              `${g ? `; Ghidra symbol ${g.size} byte(s) at ${g.addressText}, ${gap ?? '?'} to the next` : ''}` +
+              (census ? '; callee prototype unknown, the count is not paired' : ''),
+            sig: signature(c) + `#arg${i}`, census,
           });
           break;
         }

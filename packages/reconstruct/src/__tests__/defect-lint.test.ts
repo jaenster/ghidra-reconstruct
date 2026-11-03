@@ -12,6 +12,7 @@ import {
   type Finding,
 } from '../lint/index.js';
 import { renderedLength } from '../lint/checks/buffers.js';
+import { boundingParameters } from '../lint/checks/extents.js';
 import { assertableStructs, classesWithBases, compilerAvailable, compilerLayout, simulatedLayout } from '../lint/checks/layout.js';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -1252,11 +1253,54 @@ describe('defect lint: scalar-extent-passed', () => {
     return r;
 }`;
 
+  // WARDEN_DecryptAndLoadModule(pSrcData, pRc4Key, nSize) at 0x48fcb0; SCmdRegisterArgument as Storm has it.
+  const prototypes = [
+    { name: 'WARDEN_DecryptAndLoadModule', address: '0048fcb0', namespace: 'D2Client::Warden', parameters: [
+      { name: 'pSrcData', ordinal: 0 }, { name: 'pRc4Key', ordinal: 1 }, { name: 'nSize', ordinal: 2 }] },
+    { name: 'SCmdRegisterArgument', address: '0040a1e0', namespace: 'Storm::Source::SCMD', parameters: [
+      { name: 'dwFlags', ordinal: 0 }, { name: 'dwId', ordinal: 1 }, { name: 'szText', ordinal: 2 },
+      { name: 'pVariable', ordinal: 3 }, { name: 'dwVariableBytes', ordinal: 4 }, { name: 'dwSetValue', ordinal: 5 },
+      { name: 'dwSetMask', ordinal: 6 }, { name: 'pfnCallback', ordinal: 7 }] },
+  ];
+
   it('reports a static local sized one byte that is handed to the module loader with 0x12b2', () => {
-    const fs = lint('scalar-extent-passed', { globals: snap, files: { 'a.cpp': warden } });
+    const fs = lint('scalar-extent-passed', { globals: snap, functions: prototypes, files: { 'a.cpp': warden } });
     assert.deepStrictEqual(subjects(fs), ['gaWardenModuleLoadData']);
+    assert.ok(!fs[0].census, 'nSize bounds pSrcData: a paired count is a finding');
     assert.match(fs[0].detail, /0x12b2/);
     assert.match(fs[0].detail, /185 to the next|to the next/);
+  });
+
+  it('pairs the count with the pointer it bounds, not with any large constant in the call', () => {
+    // RegisterCmdLineLngOption: the option name is szText; 0x20000 is dwFlags and 0x104 bounds pVariable.
+    const snapRegister = [...snap, { name: 'cCmdLineLanguageOption', address: 0x6d5ef4, size: 4 },
+      { name: 's_next_006d5f28', address: 0x6d5f28 }, { name: 'gszLibFileName', address: 0x7a0710, size: 1 },
+      { name: 'gNext', address: 0x7a0814 }];
+    const register = `int RegisterCmdLineLngOption() {
+    static char * cCmdLineLanguageOption = (char *)0x00676e6c;
+    Storm::Source::SCmdRegisterArgument(0x20000, -1, (char*)&cCmdLineLanguageOption, gszLibFileName, 0x104, 0, 0, nullptr);
+    return 1;
+}`;
+    assert.deepStrictEqual(lint('scalar-extent-passed', { globals: snapRegister, functions: prototypes, files: { 'a.cpp': register } }), []);
+    // The same scalar in the slot the count DOES bound is still a finding.
+    const bounded = register.replace('(char*)&cCmdLineLanguageOption, gszLibFileName', '"lng", &cCmdLineLanguageOption');
+    const fs = lint('scalar-extent-passed', { globals: snapRegister, functions: prototypes, files: { 'a.cpp': bounded } });
+    assert.deepStrictEqual(subjects(fs), ['cCmdLineLanguageOption']);
+    assert.match(fs[0].detail, /passed with 0x104/);
+  });
+
+  it('keeps a call no prototype describes as census, not as a finding', () => {
+    const fs = lint('scalar-extent-passed', { globals: snap, files: { 'a.cpp': warden } });
+    assert.deepStrictEqual(subjects(fs), ['gaWardenModuleLoadData']);
+    assert.strictEqual(fs[0].census, true);
+  });
+
+  it('reads the bounding parameter by name', () => {
+    assert.deepStrictEqual(boundingParameters(['dwFlags', 'dwId', 'szText', 'pVariable', 'dwVariableBytes'], 2), []);
+    assert.deepStrictEqual(boundingParameters(['dwFlags', 'dwId', 'szText', 'pVariable', 'dwVariableBytes'], 3), [4]);
+    assert.deepStrictEqual(boundingParameters(['szBufferOutput', 'szBufferInput', 'nBufferOutputLength'], 0), [2]);
+    assert.deepStrictEqual(boundingParameters(['_Dst', '_Src', '_Size'], 1), [2]);
+    assert.deepStrictEqual(boundingParameters(['pUnit', 'wszText', 'nPrefixId', 'nSuffixId'], 1), []);
   });
 
   it('ignores an out-parameter that fills its slot, a constant with a name, and an array', () => {
