@@ -40,9 +40,35 @@ export interface LiveController {
   proposalCommit(args: Record<string, unknown>): Promise<unknown>;
   proposalAbort(args: Record<string, unknown>): Promise<unknown> | unknown;
   waitForVersion(version: number, timeoutSec: number): Promise<unknown>;
+  verifyStatus(): Promise<unknown> | unknown;
+  verifyNow(args: Record<string, unknown>): Promise<unknown>;
 }
 
 const TOOLS: Tool[] = [
+  {
+    name: 'verify_status',
+    description:
+      'The rolling model verifier: while the daemon is idle it reads functions and types from Ghidra ' +
+      'again, a few at a time, and compares them with the model. Answers the cursor, how far this ' +
+      'cycle got, how long the last full cycle took, and every mismatch found (stale model records, ' +
+      'each sent through the ordinary update).',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'verify_now',
+    description:
+      'Check these functions (and optionally types) against Ghidra now, read-only, and send any ' +
+      'stale record through the ordinary update and incremental re-emit (unless apply is false). ' +
+      'Answers per symbol: match, mismatch (with the differing fields and a short diff), unverified.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        addresses: { type: 'array', items: { type: 'string' }, description: 'Function entry points, e.g. 005c8980.' },
+        types: { type: 'array', items: { type: 'string' }, description: 'Type names or category paths. Optional.' },
+        apply: { type: 'boolean', description: 'Update the model and re-emit for stale records. Default true.' },
+      },
+    },
+  },
   {
     name: 'wait_for_version',
     description:
@@ -214,6 +240,8 @@ async function dispatch(controller: LiveController, name: string, args: ToolArgs
     case 'proposal_begin': return controller.proposalBegin(args);
     case 'proposal_commit': return controller.proposalCommit(args);
     case 'proposal_abort': return controller.proposalAbort(args);
+    case 'verify_status': return controller.verifyStatus();
+    case 'verify_now': return controller.verifyNow(args);
     default: throw new Error(`Unknown tool: ${name}`);
   }
 }

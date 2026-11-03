@@ -1,0 +1,123 @@
+/**
+ * The incident the verifier exists for, against the real model: the daemon's v1858 model
+ * kept `pAllStatesDataTblFlag0x10[i].nStateId` in SKILLDRUID_ApplyAccumulatedStateDamage
+ * (005c8980) and three other readers after the field became `uint16_t *`, because no
+ * change record named them. A full codegen of that model reproduced the broken tree, so
+ * only Ghidra could say the model was stale.
+ *
+ * Needs the parked model and a recording of the local worker's answers, which hold
+ * decompiled program text and so stay out of the repository:
+ *
+ *   D2_LIVE_V1858_SNAPSHOT   the parked daemon live-snapshot directory (v1858, stale)
+ *   D2_LIVE_V1858_RECORDING  JSON of {functions, types, calls[{command, params, response}]}
+ *                            recorded by running checkFunctions/checkDataTypes through the
+ *                            local worker (read-only); execute_script answers are keyed by
+ *                            their script timeout, everything else by its arguments
+ *   D2_LIVE_V1858_BUILDINFO  optional: that model's buildinfo.json, to also check that the
+ *                            update selects the four reader units
+ *
+ * Skipped when they are not set.
+ */
+import { describe, it } from 'node:test';
+import assert from 'node:assert';
+import { readFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+
+import { applyEvents } from '../model.js';
+import { loadSnapshotModel, indexSnapshotModel } from '../snapshot-model.js';
+import { checkFunctions, checkDataTypes, ModelVerifier } from '../verifier.js';
+import { computeHashCache, loadBuildInfo, selectDirtyUnits } from '../dirty-units.js';
+
+const SNAPSHOT = process.env.D2_LIVE_V1858_SNAPSHOT;
+const RECORDING = process.env.D2_LIVE_V1858_RECORDING;
+const BUILDINFO = process.env.D2_LIVE_V1858_BUILDINFO;
+const skip = !SNAPSHOT || !RECORDING || !existsSync(SNAPSHOT) || !existsSync(RECORDING)
+  ? 'D2_LIVE_V1858_SNAPSHOT / D2_LIVE_V1858_RECORDING not set' : false;
+
+interface Recording {
+  functions: string[];
+  types: string[];
+  calls: Array<{ command: string; params: Record<string, unknown>; response: unknown }>;
+}
+
+/** Answers from the recording; an unrecorded question fails the test rather than guessing. */
+function replay(rec: Recording) {
+  const answers = new Map<string, unknown>();
+  const key = (command: string, p: Record<string, unknown>): string => {
+    switch (command) {
+      case 'get_function_info': case 'decompile': return `${command} ${p.address}`;
+      case 'list_functions': return `${command} ${p.regex}`;
+      case 'get_data_type': return `${command} ${p.name}\u0000${p.category}`;
+      case 'execute_script': return `${command} ${p.scriptTimeout}`;
+      default: return `${command} ${JSON.stringify(p)}`;
+    }
+  };
+  for (const c of rec.calls) answers.set(key(c.command, c.params), c.response);
+  const asked: string[] = [];
+  return {
+    asked,
+    client: {
+      async sendCommand(command: string, params: Record<string, unknown> = {}) {
+        const k = key(command, params);
+        asked.push(k);
+        if (!answers.has(k)) throw new Error(`not recorded: ${k}`);
+        return structuredClone(answers.get(k));
+      },
+    } as never,
+  };
+}
+
+describe('model verifier against the stale v1858 model', { skip }, () => {
+  it('flags 005c8980 and the other readers stale, matches the rest, and the update selects their units', async () => {
+    const rec = JSON.parse(await readFile(RECORDING!, 'utf8')) as Recording;
+    const model = await loadSnapshotModel(SNAPSHOT!, { decompileTimeout: 60 } as never, 0);
+    model.options = { ...model.options, decompileTimeout: 60 };
+    const indices = indexSnapshotModel(model);
+    const { client } = replay(rec);
+
+    const checks = await checkFunctions(model, indices, client, rec.functions, { concurrency: 4, log: () => {} });
+    const druid = checks.find(c => c.key === '005c8980')!;
+    assert.equal(druid.status, 'mismatch');
+    assert.deepStrictEqual(druid.fields, ['decompiled'], 'only the body moved: the record and its facts agree');
+    assert.match(druid.diff!, /- .*pAllStatesDataTblFlag0x10\[nStateIdx\]\.nStateId;/);
+    assert.match(druid.diff!, /\+ .*\(short\)sgptDataTable->pAllStatesDataTblFlag0x10\[nStateIdx\];/);
+    const stale = checks.filter(c => c.status === 'mismatch').map(c => c.key).sort();
+    assert.deepStrictEqual(stale, ['004c72f0', '005c8980', '0062c100', '00645270', '00646020']);
+    const others = checks.filter(c => !stale.includes(c.key));
+    assert.ok(others.length > 0 && others.every(c => c.status === 'match'),
+      `every other function matches: ${others.filter(c => c.status !== 'match').map(c => `${c.key} ${c.status} ${c.fields ?? c.note}`).join('; ')}`);
+
+    if (rec.types.length > 0) {
+      const types = await checkDataTypes(model, client, rec.types, { concurrency: 4, log: () => {} });
+      const table = types.find(t => t.name === 'D2DataTableTxtStrc');
+      if (table) assert.equal(table.status, 'match', 'the retyped struct itself was re-read at v1858');
+    }
+
+    // The whole loop: verify_now hands the stale ones to the ordinary update.
+    const before = computeHashCache(model.primary);
+    let applied: Promise<void> = Promise.resolve();
+    const v = new ModelVerifier({
+      model: () => model, indices: () => indices, client: () => client, idle: () => true,
+      applyStale: events => (applied = applyEvents(model, indices, events, client).then(() => {})),
+      log: () => {},
+    }, { enabled: true, batchSize: 16, typeBatchSize: 64, concurrency: 4, pauseMs: 0, quietMs: 0, keepMismatches: 50 }, null);
+    const r = await v.verifyNow(rec.functions) as { stale: number };
+    await applied;
+    assert.equal(r.stale, 5);
+    assert.match(indices.fnByAddr.get('005c8980')!.decompiled!, /\(eD2States\)\(short\)sgptDataTable->pAllStatesDataTblFlag0x10\[nStateIdx\];/);
+    const after = computeHashCache(model.primary);
+    const moved = Object.keys(after.functions).filter(a => after.functions[a].hash !== before.functions[a]?.hash).sort();
+    assert.deepStrictEqual(moved, stale);
+
+    if (BUILDINFO && existsSync(BUILDINFO)) {
+      const selection = selectDirtyUnits({
+        buildInfo: await loadBuildInfo(BUILDINFO), previous: before, identCacheEmpty: false,
+        functions: model.primary.functions, dataTypes: model.primary.dataTypes, globals: model.primary.globals,
+      });
+      assert.ok(selection.units !== null, selection.reason);
+      for (const unit of ['D2Game::SKILLS::SkillDruid', 'D2Common::Skills', 'D2Common::ITEMS::Items', 'D2Client::SKILLS::Skills']) {
+        assert.ok(selection.units!.includes(unit), `${unit} selected; got ${selection.units!.join(', ')}`);
+      }
+    }
+  });
+});

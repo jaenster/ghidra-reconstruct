@@ -76,6 +76,7 @@ import {
   type PublishOutcome,
 } from './proposal.js';
 import { splitDataTypeKey } from './model.js';
+import { ModelVerifier, verifierConfigFromEnv } from './verifier.js';
 
 const run = promisify(execFile);
 
@@ -274,6 +275,8 @@ export class LiveLoop {
     log: m => this.log(m),
   }, 'generator inputs');
   private foreignReferences: Array<{ path: string; addressBase?: string | number }> = [];
+  /** Re-reads the model from Ghidra while idle (verifier.ts). Created once the model is loaded. */
+  private verifier: ModelVerifier | null = null;
 
   constructor(cfg: Config) {
     this.cfg = cfg;
@@ -429,6 +432,7 @@ export class LiveLoop {
       }
       this.stream.start();
       await this.startForeignWatch();
+      await this.startVerifier();
       return;
     }
 
@@ -443,6 +447,80 @@ export class LiveLoop {
     });
     this.stream.start();
     await this.startForeignWatch();
+    await this.startVerifier();
+  }
+
+  /**
+   * Nothing to do: no task queued or running, no batch waiting, nothing held, paused or
+   * blocked. The verifier reads only then, and stops as soon as it is not.
+   */
+  private isIdle(): boolean {
+    return this.phase === 'idle' && !this.queue.isBlocked && !this.queue.busy
+      && !this.needsFullResync && !this.stream?.isPaused && !this.proposals.holding
+      && (this.stream?.queuedCount ?? 0) === 0;
+  }
+
+  private async startVerifier(): Promise<void> {
+    this.verifier = new ModelVerifier(
+      {
+        model: () => this.model,
+        indices: () => this.indices,
+        client: () => this.connection,
+        idle: () => this.isIdle(),
+        applyStale: (events, describe) => this.applyStale(events, describe),
+        log: m => this.log(m),
+      },
+      verifierConfigFromEnv(process.env, localWorkerEnabled()),
+      // Beside the snapshot directory, like live-state.json: a snapshot write swaps the
+      // directory out whole.
+      join(dirname(this.cfg.snapshotDir), 'live-verifier.json'),
+    );
+    await this.verifier.load();
+    this.verifier.start();
+  }
+
+  /**
+   * The verifier found records the model holds stale: re-read them through the ordinary
+   * path, as if a check-in had named them, and re-emit what moved. The events carry seq 0,
+   * so the model's position in the journal stays where it is.
+   */
+  private applyStale(events: ModelChangeEvent[], describe: string): Promise<void> {
+    return this.queue.submit({
+      kind: 'verify',
+      describe,
+      run: async () => {
+        if (this.needsFullResync) throw new Error(`waiting for a full resync: ${this.needsFullResync}`);
+        if (this.proposals.holding) throw new Error('a proposal holds the change stream');
+        this.phase = 'applying';
+        try {
+          const result = await applyEvents(this.model, this.indices, events, this.connection, m => this.log(`  ${m}`));
+          if (result.needsFullResync) {
+            this.declareResync('the model verifier\'s update asked for a full resync');
+            return;
+          }
+          this.log(
+            `verifier applied: ${result.touchedFunctions.length} functions, ` +
+            `${result.touchedGlobals.length} globals, ${result.touchedDataTypes.length} types`,
+          );
+          await this.rebuildAndPublish();
+        } finally {
+          this.phase = 'idle';
+        }
+      },
+    });
+  }
+
+  verifyStatus(): unknown {
+    return this.verifier ? this.verifier.status() : { enabled: false, note: 'not started (holding at a version, or still starting)' };
+  }
+
+  async verifyNow(args: Record<string, unknown>): Promise<unknown> {
+    if (!this.verifier) throw new Error('the model verifier is not running (holding at a version, or still starting)');
+    const list = (v: unknown): string[] => Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : typeof v === 'string' ? [v] : [];
+    return this.verifier.verifyNow(list(args.addresses ?? args.address), {
+      apply: args.apply === undefined ? true : Boolean(args.apply),
+      types: list(args.types),
+    });
   }
 
   /**
@@ -521,6 +599,7 @@ export class LiveLoop {
 
   async stop(): Promise<void> {
     if (this.foreignTimer) clearInterval(this.foreignTimer);
+    this.verifier?.stop();
     this.stream?.stop();
     if (this.connection) await closeConnection(this.connection).catch(() => {});
   }
@@ -1020,6 +1099,7 @@ export class LiveLoop {
       merge: this.lastMerge,
       dirs: { regen: this.cfg.regenDir, modified: this.cfg.modifiedDir, staging: this.cfg.stagingDir },
       ...(this.proposals.holding ? { proposal: this.proposals.status() } : {}),
+      verifier: this.verifier?.summary() ?? null,
     };
   }
 
