@@ -38,6 +38,7 @@ import {
   typeOrderDrift,
   readFunctionFacts,
   rereadDataType,
+  shiftedFactsReader,
   readGlobalRecords,
   type ChangeEvent,
   type LiveLog,
@@ -301,6 +302,7 @@ export async function checkDataTypes(
   // Pointers and arrays are read from the listing, as a refresh reads them: once per
   // check, and only when one of these keys needs it.
   let listingRead: Promise<ExtractedDataType[] | null> | undefined;
+  const shiftedFacts = shiftedFactsReader(client);
   const typeListing = () => (listingRead ??= extractDataTypes(client, { limit: 10000 }).catch(() => null));
   let next = 0;
   const lanes = Math.max(1, Math.min(opts.concurrency, keys.length));
@@ -310,7 +312,7 @@ export async function checkDataTypes(
       const existing = byKey.get(keys[i]);
       if (!existing) { out[i] = { key: keys[i], name: keys[i], status: 'unverified', note: 'not in the model' }; continue; }
       try {
-        const fresh = await rereadDataType(client, ghidraName(existing), existing.category, existing, typeListing, model.primary.dataTypes);
+        const fresh = await rereadDataType(client, ghidraName(existing), existing.category, existing, typeListing, model.primary.dataTypes, shiftedFacts);
         const fields = differingFields(existing, fresh, new Set());
         out[i] = fields.length === 0
           ? { key: keys[i], name: existing.name, status: 'match' }

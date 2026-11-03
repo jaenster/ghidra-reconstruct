@@ -34,6 +34,7 @@ import { disambiguateVtableTypes } from '@ghidra-mcp/reconstruct/modules/vtable-
 import { disambiguateCategoryDuplicates } from '@ghidra-mcp/reconstruct/modules/category-duplicate-types';
 import { dedupeDataTypesByName, isExcludedDataType } from '@ghidra-mcp/reconstruct/modules/data-type-normalize';
 import { EXCLUDE_PATTERNS } from './exclude-patterns.js';
+import { SHIFTED_POINTER_SCRIPT, applyShiftedPointers, parseShiftedPointers, type ShiftedPointerFact } from '@ghidra-mcp/reconstruct/extract/shifted-pointers';
 import { fetchInitializedData, inferType, extractPrimaryLabels, markPrimaryLabels, analyzeDataSymbol } from '@ghidra-mcp/reconstruct/extract/globals';
 import { attachOperandRefs } from '@ghidra-mcp/reconstruct/extract/operand-refs';
 import { extractFunctionFacts, FACT_KEYS } from '@ghidra-mcp/reconstruct/extract/function-facts';
@@ -392,6 +393,26 @@ export function canonicalDataType(
   return own;
 }
 
+/** Shifted-pointer facts by `name\u0000category`, as the extraction attaches them. */
+export type ShiftedFacts = () => Promise<Map<string, ShiftedPointerFact>>;
+
+/**
+ * The extraction attaches `shifted` to pointer typedefs from one whole-program script
+ * (extract/shifted-pointers.ts); `get_data_type` does not report it. One read per batch of
+ * re-reads. A failed read throws: a typedef read without it would compare as changed and
+ * be "repaired" into a plain pointer (v1864, PD2KeyBindSlot and six more, regen 42e768c21).
+ */
+export function shiftedFactsReader(client: GhidraConnection): ShiftedFacts {
+  let read: Promise<Map<string, ShiftedPointerFact>> | undefined;
+  return () => (read ??= (async () => {
+    const r = await client.sendCommand<{ success?: boolean; output?: string; error?: string }>(
+      'execute_script', { language: 'java', code: SHIFTED_POINTER_SCRIPT, scriptTimeout: 300, _commandTimeout: 360000 },
+    );
+    if (r.success === false || typeof r.output !== 'string') throw new Error(`shifted pointers not read: ${r.error ?? 'no output'}`);
+    return parseShiftedPointers(r.output);
+  })());
+}
+
 /**
  * Re-read one type the way a full extraction reads it. The extraction takes members
  * from `get_data_type` only for the kinds that have them (DETAIL_KINDS); a pointer or
@@ -400,7 +421,8 @@ export function canonicalDataType(
  * whole-list passes (canonicalDataType) against `context`, the model's type list, so it
  * compares with and replaces the model's record in the same form: a record a pass
  * renamed keeps the name the pass gave it while Ghidra's name for it is unchanged, and
- * the fields and enum values the passes rewrote are rewritten the same way.
+ * the fields and enum values the passes rewrote are rewritten the same way. A pointer
+ * typedef gets its `shifted` fact from the whole-program script, as in the extraction.
  */
 export async function rereadDataType(
   client: GhidraConnection,
@@ -409,8 +431,11 @@ export async function rereadDataType(
   previous: ExtractedDataType | undefined,
   listing: () => Promise<readonly ExtractedDataType[] | null>,
   context: readonly ExtractedDataType[],
+  shifted: ShiftedFacts,
 ): Promise<ExtractedDataType> {
   let fresh = await extractDataType(client, name, category);
+  // Attached before the renames, under Ghidra's names, as the extraction does.
+  if (fresh.kind === 'TYPEDEF') applyShiftedPointers(await shifted(), [fresh]);
   if (!DETAIL_KINDS.has(fresh.kind)) {
     const entries = await listing();
     const key = dataTypeKey(fresh.name, fresh.category);
@@ -867,6 +892,7 @@ export async function applyEvents(
   const typeTokens = new Set<string>();
   /** The type listing, read at most once per batch; null when it could not be read. */
   let listingRead: Promise<ExtractedDataType[] | null> | undefined;
+  const shiftedFacts = shiftedFactsReader(client);
   const typeListing = () => (listingRead ??= extractDataTypes(client, { limit: 10000 }).catch((e: Error) => {
     log(`type listing failed (${e.message})`);
     return null;
@@ -925,7 +951,7 @@ export async function applyEvents(
       let fresh: ExtractedDataType;
       try {
         const target = eventDataTypeTarget(event, { name: ghidraName(previous), category: previous.category });
-        fresh = await rereadDataType(client, target.name, target.category, previous, typeListing, model.primary.dataTypes);
+        fresh = await rereadDataType(client, target.name, target.category, previous, typeListing, model.primary.dataTypes, shiftedFacts);
       } catch (e) {
         log(`datatype ${previous.name}: re-extract failed (${(e as Error).message}); keeping previous`);
         continue;
@@ -952,7 +978,7 @@ export async function applyEvents(
     if (slots.length === 0 && event.kind !== 'datatype.removed') {
       const { name, category } = eventDataTypeTarget(event, splitDataTypeKey(event.key));
       try {
-        const fresh = await rereadDataType(client, name, category, undefined, typeListing, model.primary.dataTypes);
+        const fresh = await rereadDataType(client, name, category, undefined, typeListing, model.primary.dataTypes, shiftedFacts);
         // Appended for now; the listing puts it in place below.
         model.primary.dataTypes.push(fresh);
         typeOrderMoved = true;
@@ -976,7 +1002,7 @@ export async function applyEvents(
       for (const name of memberNames(dt)) typeTokens.add(name);
       if (touched.has(key)) continue;
       try {
-        const fresh = await rereadDataType(client, ghidraName(dt), dt.category, dt, typeListing, model.primary.dataTypes);
+        const fresh = await rereadDataType(client, ghidraName(dt), dt.category, dt, typeListing, model.primary.dataTypes, shiftedFacts);
         model.primary.dataTypes[slot] = fresh;
         indices.dtByKey.delete(key);
         indices.dtByKey.set(dataTypeKey(fresh.name, fresh.category), fresh);
@@ -1003,7 +1029,7 @@ export async function applyEvents(
       if (touched.has(key)) continue;
       const renamedTo = referrers.derivedNames.get(slot);
       try {
-        const fresh = await rereadDataType(client, renamedTo ?? ghidraName(dt), dt.category, dt, typeListing, model.primary.dataTypes);
+        const fresh = await rereadDataType(client, renamedTo ?? ghidraName(dt), dt.category, dt, typeListing, model.primary.dataTypes, shiftedFacts);
         model.primary.dataTypes[slot] = fresh;
         indices.dtByKey.delete(key);
         indices.dtByKey.set(dataTypeKey(fresh.name, fresh.category), fresh);

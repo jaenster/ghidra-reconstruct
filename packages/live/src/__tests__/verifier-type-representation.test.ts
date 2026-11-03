@@ -8,6 +8,8 @@ import { dedupeDataTypesByName, isExcludedDataType } from '@ghidra-mcp/reconstru
 import { applyEvents, buildIndices, dataTypeKey, type ChangeEvent, type LiveModel } from '../model.js';
 import { checkDataTypes, dataTypeEvent } from '../verifier.js';
 import { EXCLUDE_PATTERNS } from '../exclude-patterns.js';
+import { SHIFTED_POINTER_SCRIPT, attachShiftedPointers } from '@ghidra-mcp/reconstruct/extract/shifted-pointers';
+import { hashDataType } from '@ghidra-mcp/reconstruct/modules/buildinfo';
 import { factsScriptOutput } from './fake-facts.js';
 
 /**
@@ -21,7 +23,7 @@ import { factsScriptOutput } from './fake-facts.js';
  */
 
 type Field = { name: string; dataType: string; offset: number; size: number; comment?: string };
-type Ghidra = { name: string; category: string; type: string; size: number; fields?: Field[]; values?: Array<{ name: string; value: number }>; returnType?: string; parameters?: unknown[] };
+type Ghidra = { name: string; category: string; type: string; size: number; underlyingType?: string; shiftedOffset?: number; fields?: Field[]; values?: Array<{ name: string; value: number }>; returnType?: string; parameters?: unknown[] };
 
 const vtableOf = (owner: string, cat: string, slots: string[]): Ghidra => ({
   name: 'vtable', category: cat, type: 'structure', size: slots.length * 4,
@@ -60,8 +62,15 @@ function ghidraTypes(): Ghidra[] {
     // Two same-named enums: the dedup keeps the first and merges the second's values.
     { name: 'eCollisionFlags', category: '/Diablo2/COLLISION', type: 'enum', size: 4, values: [{ name: 'COLLIDE_WALL', value: 1 }] },
     { name: 'eCollisionFlags', category: '/_Source/Collision', type: 'enum', size: 4, values: [{ name: 'COLLIDE_WALL', value: 1 }, { name: 'COLLISION_LOS', value: 0x805 }] },
+    // A shifted pointer: the offset comes from a whole-program script, not get_data_type.
+    { name: 'D2KeyBindStrc', category: '/D2Client/Input', type: 'structure', size: 10, fields: [
+      { name: 'nCmdIndex', dataType: 'int', offset: 0, size: 4 },
+    ] },
+    { name: 'PD2KeyBindSlot', category: '/D2Client/Input', type: 'typedef', size: 4, underlyingType: 'D2KeyBindStrc *', shiftedOffset: 6 },
   ];
 }
+
+const shiftedFails = { value: false };
 
 function fakeGhidra(types: Ghidra[]) {
   return {
@@ -77,6 +86,15 @@ function fakeGhidra(types: Ghidra[]) {
       }
       if (cmd === 'decompile') return { pseudocode: 'void BUTTON_Draw(ButtonImplementation *p) {}' };
       if (cmd === 'get_function_info') return { name: 'BUTTON_Draw', address: String(params.address), signature: 'void BUTTON_Draw(ButtonImplementation * p)', returnType: 'void', parameters: [], localVariables: [], callingConvention: '__stdcall', size: 10 };
+      if (cmd === 'execute_script' && params.code === SHIFTED_POINTER_SCRIPT) {
+        if (shiftedFails.value) return { success: false, error: 'script failed' };
+        const rows = types.filter(t => t.shiftedOffset).map(t => {
+          const to = t.underlyingType!.replace(/\s*\*$/, '');
+          const toCat = types.find(x => x.name === to)?.category ?? '/';
+          return `S\t${t.name}\t${t.category}\t${to}\t${toCat}\t${t.shiftedOffset}`;
+        });
+        return { success: true, output: rows.join('\n') };
+      }
       if (cmd === 'execute_script' && factsScriptOutput(params.code) !== null) return { success: true, output: factsScriptOutput(params.code)! };
       if (cmd === 'execute_script') return { success: true, output: '' };
       return {};
@@ -89,6 +107,7 @@ async function extractAsSnapshot(client: never): Promise<ExtractedDataType[]> {
   const listing = await extractDataTypes(client, { limit: 10000 });
   let list: ExtractedDataType[] = [];
   for (const t of listing) list.push(DETAIL_KINDS.has(t.kind) ? await extractDataType(client, t.name, t.category) : t);
+  await attachShiftedPointers(client, list);
   list = list.filter(dt => !isExcludedDataType(dt, EXCLUDE_PATTERNS));
   disambiguateVtableTypes(list);
   disambiguateCategoryDuplicates(list);
@@ -126,6 +145,8 @@ describe('verifier reads types in the extraction\'s form', () => {
     assert.ok(model.primary.dataTypes.some(d => d.name === 'D2RenderCallbackStrc_fpDrawGroundTile'));
     const en = model.primary.dataTypes.find(d => d.name === 'eCollisionFlags') as unknown as { values: unknown[] };
     assert.strictEqual(en.values.length, 2);
+    const td = model.primary.dataTypes.find(d => d.name === 'PD2KeyBindSlot') as unknown as { shifted?: { offset: number } };
+    assert.strictEqual(td.shifted?.offset, 6);
 
     const keys = model.primary.dataTypes.map(d => dataTypeKey(d.name, d.category));
     const checks = await checkDataTypes(model, client, keys, { concurrency: 2, log: quiet });
@@ -162,9 +183,32 @@ describe('verifier reads types in the extraction\'s form', () => {
     const types = ghidraTypes();
     const client = fakeGhidra(types);
     const model = modelOf(await extractAsSnapshot(client));
-    types[types.length - 1].values!.push({ name: 'MONSTER_COLLISION_DEFAULT', value: 0x3c01 });
+    types.find(t => t.category === '/_Source/Collision')!.values!.push({ name: 'MONSTER_COLLISION_DEFAULT', value: 0x3c01 });
     const key = dataTypeKey('eCollisionFlags', '/Diablo2/COLLISION');
     const [check] = await checkDataTypes(model, client, [key], { concurrency: 1, log: quiet });
     assert.strictEqual(check.status, 'mismatch');
+  });
+
+  it('a typedef whose shifted-pointer script fails is unverified, never repaired', async () => {
+    const client = fakeGhidra(ghidraTypes());
+    const model = modelOf(await extractAsSnapshot(client));
+    shiftedFails.value = true;
+    try {
+      const [check] = await checkDataTypes(model, client, [dataTypeKey('PD2KeyBindSlot', '/D2Client/Input')], { concurrency: 1, log: quiet });
+      assert.strictEqual(check.status, 'unverified');
+    } finally {
+      shiftedFails.value = false;
+    }
+  });
+
+  it('the type hash covers the whole record', () => {
+    const base = { name: 'PD2KeyBindSlot', category: '/D2Client/Input', kind: 'TYPEDEF', size: 4, underlyingType: 'D2KeyBindStrc *' } as unknown as ExtractedDataType;
+    const shifted = { ...base, shifted: { base: 'D2KeyBindStrc', baseCategory: '/D2Client/Input', offset: 6 } } as ExtractedDataType;
+    const retyped = { ...base, underlyingType: 'int *' } as ExtractedDataType;
+    assert.notStrictEqual(hashDataType(base), hashDataType(shifted));
+    assert.notStrictEqual(hashDataType(base), hashDataType(retyped));
+    const en = (values: string[]) => ({ name: 'e', kind: 'ENUM', size: 4, values: values.map((name, value) => ({ name, value })) }) as unknown as ExtractedDataType;
+    assert.notStrictEqual(hashDataType(en(['A'])), hashDataType(en(['A', 'B'])));
+    assert.strictEqual(hashDataType(shifted), hashDataType({ ...shifted } as ExtractedDataType));
   });
 });
