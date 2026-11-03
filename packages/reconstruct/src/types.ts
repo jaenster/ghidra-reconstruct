@@ -375,6 +375,13 @@ export interface AnalyzedDataSymbol extends ExtractedGlobal {
   ownerFunction?: string;
   /** If file-local, which impl file owns it */
   ownerFile?: string;
+  /**
+   * A `global` several TUs use, defined with external linkage in the TU whose data
+   * run it sits in and declared in that TU's data header (file-local-globals.ts).
+   */
+  homeFile?: string;
+  /** A homed global hand-written source names: declared in globals.h, not the data header. */
+  homeDeclaredCentrally?: boolean;
   /** Structured initialized data (arrays, structs, pointers resolved to symbols) */
   initializedData?: DataValue;
   /** If struct-colocated, the struct type that owns it (e.g., "D2GameStrc") */

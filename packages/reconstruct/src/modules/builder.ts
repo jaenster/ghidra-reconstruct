@@ -206,8 +206,11 @@ export function buildModuleGraph(input: BuildModuleGraphInput): ModuleGraph {
     // impl-level strength). Charging it to the header made `Fog/Memory.h` include
     // `D2MemoryManagerStrc.h` for the interior labels of `pGlobalPoolSystem`, which
     // closed an include cycle through `D2PoolManagerStrc.h` back to `Fog/Memory.h`.
+    // A global homed here (several TUs name it, file-local-globals.ts) is defined
+    // here too: a retype has to re-emit this unit, which no dependency edge says.
     for (const g of globals) {
-      if (g.scope === 'file-local' && g.ownerFile === mod.implPath) {
+      if ((g.scope === 'file-local' && g.ownerFile === mod.implPath)
+          || (g.scope === 'global' && g.homeFile === mod.implPath)) {
         const stripped = stripTypeName(g.dataType);
         if (stripped && !isPlatformOrBuiltinType(stripped) && !ownedTypeNames.has(stripped)) {
           graph.addDependency(headerPath, stripped, 'by-pointer');

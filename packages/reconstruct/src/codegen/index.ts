@@ -81,7 +81,7 @@ import { generateReadme } from './readme.js';
 import { abiConvention, conventionKeyword } from './calling-convention.js';
 import { organizeByNamespace, getFilePath, setModuleNames, setNamespaceCollisionTypes, normalizeQualifiedReference } from './namespace.js';
 import { buildNamespaceResolution, namespaceResolution, renderNamespace } from './namespace-resolution.js';
-import { setInteriorLabelSymbols, resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, setDeclarationClosureDataContent, getDeclarationClosureReport, isUnreferenceableArtifact, isEmittableGlobal, isDataArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, wasGlobalClaimed, findDuplicateLinkageNames, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, setInitializerAddressTable, setInitializerFunctionAddresses, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType, emittedNamespaceOf, getDeclaredNames, initializerAddressReferences, addInitializerAddressReferences, markUnnamedImportSlots, setInitializerEnumConstants } from './globals-header.js';
+import { setInteriorLabelSymbols, resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, setDeclarationClosureDataContent, getDeclarationClosureReport, isUnreferenceableArtifact, isEmittableGlobal, isDataArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, generateDataHeader, dataHeaderCentralTypes, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, wasGlobalClaimed, findDuplicateLinkageNames, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, setInitializerAddressTable, setInitializerFunctionAddresses, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType, emittedNamespaceOf, getDeclaredNames, initializerAddressReferences, addInitializerAddressReferences, markUnnamedImportSlots, setInitializerEnumConstants } from './globals-header.js';
 import { normalizeDataAddress, stringDefinition } from './declaration-closure.js';
 import { harvestAnnotatedParameterTypes } from './win32-signatures.js';
 import { PLATFORM_FUNCDEF_NAMES, PLATFORM_STRUCT_FIELD_TYPES, isPlatformOrBuiltinType, isLibraryType, sdkLayoutMismatches, sdkHeaderOf, unprobedTypeNames, generatePlatformHeader, oddWidthTypesSpelled, placeholderTypesUsedIn, normalizeDataValue, arrayRowTypedefLines, arrayRowReturn, arrayRowSpelling, GHIDRA_PSEUDO_OP_RESULT_TYPES, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setFunctionHiddenTypes, computeFunctionHiddenTypes, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, platformDefinedFunctionNames, platformVoidPointerFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
@@ -125,7 +125,7 @@ import {
 import { buildModuleGraph } from '../modules/builder.js';
 import { hashFunction, hashDataType, hashGlobal } from '../modules/buildinfo.js';
 import { warningRows, formatWarningsTsv, WARNINGS_TSV } from './warning-facts.js';
-import { keepForeignReferencedGlobalsExternal, keepDataRunsWhole, fileLocalGlobalKey } from './file-local-globals.js';
+import { keepForeignReferencedGlobalsExternal, keepDataRunsWhole, fileLocalGlobalKey, assignDataHomes, dataHomeVetoCounts, dataHomeVeto, homedGlobalKey, dataHeaderPathOf } from './file-local-globals.js';
 import { noteGlobalScopeReason, resetGlobalScopeTrace, setGlobalScopeTraceImplMap, reportGlobalScopeTrace } from './global-scope-trace.js';
 
 /**
@@ -312,6 +312,8 @@ export interface PlacementLookup {
   constructorFact(typeName: string): string;
   /** The values every enum declaring a member name gives it (enum-lookups.ts enumMemberFact). */
   enumMemberFact?(name: string): string;
+  /** The data header declaring an external global, '' for globals.h (file-local-globals.ts). */
+  dataHome?(name: string): string;
 }
 
 export function functionHeadersKey(
@@ -335,6 +337,7 @@ export function answerPlacementLookup(key: string, now: PlacementLookup): string
     case 'p': return now.templateHeader ?? '';
     case 'k': return now.constructorFact(subject);
     case 'e': return now.enumMemberFact ? now.enumMemberFact(subject) : `\u0000no enum facts`;
+    case 'g': return now.dataHome ? now.dataHome(subject) : `\u0000no data homes`;
     default: return `\u0000unknown lookup ${key}`;
   }
 }
@@ -426,7 +429,7 @@ export function unitStaticKeys(
   unitFunctions: ReadonlyArray<{ address: string }>,
   fileStaticFunctions: { has(k: string): boolean } | undefined,
   externEntries: { has(k: string): boolean } | undefined,
-  fileLocalGlobals: ReadonlyArray<{ address: string }> | undefined,
+  fileLocalGlobals: ReadonlyArray<{ address: string; scope?: string }> | undefined,
 ): string[] {
   return unitFunctions
     .map(f => fileStaticKey(f.address))
@@ -434,7 +437,8 @@ export function unitStaticKeys(
       ...(fileStaticFunctions?.has(k) ? [k] : []),
       ...(externEntries?.has(k) ? [`${k}${EXTERN_ENTRY_SUFFIX}`] : []),
     ])
-    .concat((fileLocalGlobals ?? []).map(fileLocalGlobalKey))
+    // A homed global (external linkage, defined here) is keyed apart from a static.
+    .concat((fileLocalGlobals ?? []).map(g => g.scope === 'global' ? homedGlobalKey(g) : fileLocalGlobalKey(g)))
     .sort();
 }
 
@@ -1648,10 +1652,12 @@ export function generateProjectStage1(
         console.log(`Globals kept external (named by a global initializer): ${reclaimed}`);
       }
       const pinned = keepForeignReferencedGlobalsExternal(analyzedGlobals, foreignSources);
+      const homes = assignDataHomes(analyzedGlobals, funcToImpl, { foreignSources, functionQualifiedNames, rootTypeNames: allDataTypeNames });
       const split = keepDataRunsWhole(analyzedGlobals, funcToImpl);
       if (pinned || split) {
         console.log(`Globals kept external: ${pinned} named by foreign source, ${split} in a data run that cannot move whole`);
       }
+      reportDataHomes(analyzedGlobals, homes);
     }
 
     // Calculate globals path (needed for generateFilesForFunctions includes)
@@ -1720,7 +1726,9 @@ export function generateProjectStage1(
         reconcileStaticScopeWithBodyReferences(analyzedGlobals, functions, funcToImpl, allDataTypeNames, programInfo?.imageBase, strings ?? []);
         promoteInitializerReferencedGlobals(analyzedGlobals);
         keepForeignReferencedGlobalsExternal(analyzedGlobals, foreignSources);
+        const homes = assignDataHomes(analyzedGlobals, funcToImpl, { foreignSources, functionQualifiedNames, rootTypeNames: allDataTypeNames });
         keepDataRunsWhole(analyzedGlobals, funcToImpl);
+        reportDataHomes(analyzedGlobals, homes);
       });
     }
 
@@ -1835,11 +1843,29 @@ export function generateProjectStage2(state: GenerationState): ReconstructedProj
       g => g.scope !== 'struct-colocated'
     );
 
+    // The data headers: per home TU, the externs of the globals it defines with
+    // external linkage. A header whose declarations need a type only globals.h can
+    // define includes globals.h, which then defines it (centralTypeUsers).
+    const dataHomes = new Map<string, AnalyzedDataSymbol[]>();
+    for (const g of centralGlobals) {
+      if (g.scope !== 'global' || g.homeFile === undefined || g.homeDeclaredCentrally) continue;
+      const list = dataHomes.get(g.homeFile);
+      if (list) list.push(g); else dataHomes.set(g.homeFile, [g]);
+    }
+    const centralTypeUsers: AnalyzedDataSymbol[] = [];
+    let headersNeedingCentralTypes = 0;
+    for (const members of dataHomes.values()) {
+      const types = dataHeaderCentralTypes(members, dataTypes, typeOwnerMap);
+      if (types.length > 0) headersNeedingCentralTypes++;
+      centralTypeUsers.push(...types);
+    }
+
     if (centralGlobals.length > 0) {
       const globalsHeaderContent = genMark('project/globals-header', () => generateGlobalsHeader(centralGlobals, {
         ...options,
         projectName: name,
         binaryName: programInfo?.name,
+        centralTypeUsers,
       }, dataTypes, typeOwnerMap, functionQualifiedNames, context.bodyIdentifierFnCounts));
 
       files.set(globalsPath!, {
@@ -1848,6 +1874,34 @@ export function generateProjectStage2(state: GenerationState): ReconstructedProj
         type: 'header',
         functions: [],
         includes: [],
+      });
+
+      genMark('project/data-headers', () => {
+        let unclaimed = 0;
+        for (const [home, members] of dataHomes) {
+          const path = dataHeaderPathOf(home);
+          files.set(path, {
+            path,
+            content: generateDataHeader(home, members, { ...options, binaryName: programInfo?.name }, dataTypes, typeOwnerMap, globalsPath!),
+            type: 'header',
+            functions: [],
+            includes: [],
+          });
+          unclaimed += members.filter(g => !wasGlobalClaimed(g)).length;
+        }
+        // The home TU defined these before globals.h folded any namespace segment a
+        // root name blocks (assignDataHomes vetoes those); a fold here would declare
+        // the symbol in another namespace than the one defining it.
+        const folded = [...dataHomes.values()].flat().filter(g => g.namespace
+          && renderNamespace(emittedNamespaceOf(g)) !== renderNamespace(namespaceResolution().of(g)));
+        if (folded.length > 0) {
+          console.warn(`warning: ${folded.length} homed global(s) declared in a folded namespace their home did not define them in: ` +
+            folded.slice(0, 10).map(g => `${g.namespace}::${g.suggestedName || g.name}`).join(', '));
+        }
+        const homed = [...dataHomes.values()].map(m => m.length);
+        console.log(`Data headers: ${dataHomes.size}, ${homed.reduce((a, b) => a + b, 0)} declaration(s)` +
+          `; ${headersNeedingCentralTypes} include globals.h for ${new Set(centralTypeUsers.map(t => t.dataType)).size} type(s) only it defines` +
+          (unclaimed ? `; ${unclaimed} homed global(s) no unit claimed, defined in a globals unit instead` : ''));
       });
 
       // One globals translation unit per module, plus a shared remainder.
@@ -2237,7 +2291,14 @@ function emitCentralGlobalsUnits(
 ): void {
   const implExt = options.format === 'c' ? '.c' : '.cpp';
 
-  const partitioned = partitionGlobalsByModule(centralGlobals, buildFunctionModuleMap(functions));
+  // A global its home TU defines is no globals unit's; one no unit claimed is.
+  const dataHeaderByName = new Map<string, string>();
+  for (const g of centralGlobals) {
+    if (g.scope !== 'global' || g.homeFile === undefined || g.homeDeclaredCentrally) continue;
+    dataHeaderByName.set(sanitizeSymbolName(g.suggestedName || g.name), dataHeaderPathOf(g.homeFile));
+  }
+  const partitioned = partitionGlobalsByModule(
+    centralGlobals.filter(g => g.homeFile === undefined || !wasGlobalClaimed(g)), buildFunctionModuleMap(functions));
   // A module named like the shared unit itself would be written over it; its
   // definitions stay shared, the direction the partition already falls back to.
   const partitions = partitioned.partitions.filter(p => globalsUnitPath(globalsHeaderPath, p.module, implExt) !== undefined);
@@ -2273,6 +2334,22 @@ function emitCentralGlobalsUnits(
     patchGlobalsExtraIncludes(
       files, unit.path, [...(unit.members ?? [])], typeOwnerMap, globalsHeaderPath,
       functionNameCandidates);
+    // An initializer here naming a homed global finds its declaration in the home's
+    // data header, as a body does.
+    const dataHeaders = new Set<string>();
+    for (const id of scanReferences(content).identifiers) {
+      const header = dataHeaderByName.get(id);
+      if (header) dataHeaders.add(header);
+    }
+    if (dataHeaders.size > 0) {
+      const file = files.get(unit.path)!;
+      const extra = [...dataHeaders].sort();
+      file.content = file.content.replace(
+        `#include "${globalsHeaderPath}"`,
+        `#include "${globalsHeaderPath}"\n${extra.map(h => `#include "${h}"`).join('\n')}`,
+      );
+      file.includes.push(...extra);
+    }
   }
   const placed = partitions.reduce((n, p) => n + p.members.length, 0);
   console.log(`Globals: ${units.length} translation unit(s) — ${placed} definition(s) placed by module, ${shared.length} shared`);
@@ -2779,6 +2856,61 @@ export function fieldOffsetsOf(dataTypes: readonly ExtractedDataType[]): Record<
   return out;
 }
 
+/** Each unit's header path before template and type-ownership placement. */
+function baseUnitHeaderPaths(
+  organized: Map<string, ExtractedFunction[]>,
+  options: ReconstructOptions,
+  dirPrefix: string,
+): Map<string, string> {
+  const unitHeaderPaths = new Map<string, string>();
+  for (const [unitName, unitFunctions] of organized) {
+    let effectiveUnitName = unitName;
+    if (!unitName.includes('::') && unitFunctions.length > 0) {
+      const allMethods = unitFunctions.every(f => f.parentClass === unitName);
+      if (allMethods && unitFunctions[0].namespace) {
+        effectiveUnitName = `${unitFunctions[0].namespace}::${unitName}`;
+      }
+    }
+
+    let headerPath = getFilePath(effectiveUnitName, 'header', options);
+    if (dirPrefix) headerPath = `${dirPrefix}/${headerPath}`;
+    unitHeaderPaths.set(unitName, headerPath);
+  }
+  return unitHeaderPaths;
+}
+
+/**
+ * The impl path each unit is written to, by the rules `generateFilesForFunctions`
+ * writes it by: the base header path, a template member unit's own impl, and a
+ * unit whose name a `typeOwnership` entry places under another header.
+ */
+function unitImplPaths(
+  organized: Map<string, ExtractedFunction[]>,
+  options: ReconstructOptions,
+  dirPrefix: string,
+): Map<string, string> {
+  const implExt = options.format === 'c' ? '.c' : '.cpp';
+  const headers = baseUnitHeaderPaths(organized, options, dirPrefix);
+  const templates = templateRegistry();
+  const templateImpl = new Map<string, string>();
+  if (templates) {
+    for (const [unitName, unitFunctions] of organized) {
+      if (!unitFunctions.every(f => templates.unitOf(f.address) === unitName)) continue;
+      const implPath = getFilePath(unitName, 'impl', options);
+      templateImpl.set(unitName, dirPrefix ? `${dirPrefix}/${implPath}` : implPath);
+    }
+  }
+  for (const entry of options.projectConfig?.typeOwnership ?? []) {
+    if (!entry.type || !entry.header) continue;
+    if (headers.has(entry.type)) headers.set(entry.type, normalizeHeaderPath(entry.header));
+  }
+  const out = new Map<string, string>();
+  for (const [unitName, header] of headers) {
+    out.set(unitName, templateImpl.get(unitName) ?? header.replace(/\.h$/, implExt));
+  }
+  return out;
+}
+
 function buildFuncToImplPathMap(
   functions: ExtractedFunction[],
   classes: DetectedClass[],
@@ -2787,19 +2919,14 @@ function buildFuncToImplPathMap(
   dirPrefix: string
 ): Map<string, string> {
   const organized = organizeByNamespace(functions, classes, namespaces);
-  const implExt = options.format === 'c' ? '.c' : '.cpp';
 
-  // First compute header paths and fix collisions (same logic as generateFilesForFunctions)
-  const headerPaths = new Map<string, string>();
-  for (const [unitName] of organized) {
-    let headerPath = getFilePath(unitName, 'header', options);
-    if (dirPrefix) headerPath = `${dirPrefix}/${headerPath}`;
-    headerPaths.set(unitName, headerPath);
-  }
+  // The impl path each unit is WRITTEN to: a global's file is matched against it
+  // when the unit claims its statics, so any other spelling orphans them.
+  const implPaths = unitImplPaths(organized, options, dirPrefix);
   // Build func → impl path map
   const funcNameToImplPath = new Map<string, string>();
   for (const [unitName, unitFunctions] of organized) {
-    const implPath = headerPaths.get(unitName)!.replace(/\.h$/, implExt);
+    const implPath = implPaths.get(unitName)!;
     for (const func of unitFunctions) {
       funcNameToImplPath.set(func.name, implPath);
       if (func.namespace) {
@@ -2922,6 +3049,28 @@ export function biasedTableReaders(
     }
   }
   return out;
+}
+
+/** One line on where the external globals were homed, and why the rest were not. */
+function reportDataHomes(globals: readonly AnalyzedDataSymbol[], assigned: { homed: number; centrallyDeclared: number }): void {
+  if (!isMainThread) return;
+  const kept = globals.filter(g => g.homeFile !== undefined);
+  const units = new Set(kept.map(g => g.homeFile));
+  const vetoes = [...dataHomeVetoCounts(globals)].sort((a, b) => b[1] - a[1]).map(([r, n]) => `${r}=${n}`);
+  const out = process.env.GHIDRA_DATA_HOME_REPORT;
+  if (out) {
+    const rows = ['address\tname\tnamespace\thome\tcentral\treason\tfunctions'];
+    for (const g of globals) {
+      if (g.scope !== 'global' || !isEmittableGlobal(g)) continue;
+      rows.push([g.address, g.suggestedName || g.name, g.namespace ?? '', g.homeFile ?? '',
+        g.homeDeclaredCentrally ? 'foreign' : '', dataHomeVeto(g).replace(/@.*$/, ''),
+        String(g.referencingFunctions?.length ?? 0)].join('\t'));
+    }
+    nodeFs.writeFileSync(out, rows.join('\n') + '\n');
+  }
+  console.log(`Globals homed in their data run's TU: ${kept.length} in ${units.size} unit(s) ` +
+    `(${assigned.homed} before whole-run check, ${kept.filter(g => g.homeDeclaredCentrally).length} declared in globals.h for foreign source)` +
+    (vetoes.length ? `; kept central: ${vetoes.join(', ')}` : ''));
 }
 
 /** Whether the token at `at` is the member name of a `.` or `->` access. */
@@ -3784,20 +3933,7 @@ function generateFilesForFunctions(
   }
 
   // Pre-compute header paths for each unit
-  const unitHeaderPaths = new Map<string, string>();
-  for (const [unitName, unitFunctions] of organized) {
-    let effectiveUnitName = unitName;
-    if (!unitName.includes('::') && unitFunctions.length > 0) {
-      const allMethods = unitFunctions.every(f => f.parentClass === unitName);
-      if (allMethods && unitFunctions[0].namespace) {
-        effectiveUnitName = `${unitFunctions[0].namespace}::${unitName}`;
-      }
-    }
-
-    let headerPath = getFilePath(effectiveUnitName, 'header', options);
-    if (dirPrefix) headerPath = `${dirPrefix}/${headerPath}`;
-    unitHeaderPaths.set(unitName, headerPath);
-  }
+  const unitHeaderPaths = baseUnitHeaderPaths(organized, options, dirPrefix);
 
   // The members of the template header's classes are declared in that header and
   // defined in their own units (templates/placement.ts): one header, many units.
@@ -3840,6 +3976,26 @@ function generateFilesForFunctions(
     typeOwnershipOverrides,
     sharedEnumTypes: context._sharedEnumTypes,
   }));
+  // The scope passes filed each file-local and homed global under the path its unit
+  // had before type ownership relocated unit headers (`D2Game/Monster.cpp` is
+  // written as `D2Game/Monster/Monster.cpp`). Re-file them under the path the unit
+  // is written to, or no unit claims them: a file-local is then restored to
+  // globals.h after its users' bodies were already spelled for a `static`.
+  {
+    const implExt = options.format === 'c' ? '.c' : '.cpp';
+    const setupPaths = unitImplPaths(organized, options, dirPrefix);
+    const written = new Map<string, string>();
+    for (const [unitName, before] of setupPaths) {
+      const after = templateUnitImplPaths.get(unitName) ?? unitHeaderPaths.get(unitName)?.replace(/\.h$/, implExt);
+      if (after && after !== before) written.set(before, after);
+    }
+    if (written.size > 0) {
+      for (const g of analyzedGlobals) {
+        if (g.ownerFile !== undefined) g.ownerFile = written.get(g.ownerFile) ?? g.ownerFile;
+        if (g.homeFile !== undefined) g.homeFile = written.get(g.homeFile) ?? g.homeFile;
+      }
+    }
+  }
   // ── Pass 1b: Function cross-include + visibility analysis ──────────
   // Map each function name to the header that declares it.
   // When Mac and Windows both define a function with the same name (e.g. SFILE_HashString),
@@ -4246,6 +4402,16 @@ function generateFilesForFunctions(
     shardRecordClaims(templateData);
   }
 
+  // Every external global's emitted name -> the data header declaring it, or ''
+  // when globals.h does (no home, or a home foreign source needs declared there).
+  const dataHomeByName = new Map<string, string>();
+  for (const g of analyzedGlobals) {
+    if (g.scope !== 'global' || !isEmittableGlobal(g) || isUnreferenceableArtifact(g, allAnalyzedGlobalNames)) continue;
+    const name = sanitizeSymbolName(g.suggestedName || g.name);
+    const header = g.homeFile !== undefined && !g.homeDeclaredCentrally ? dataHeaderPathOf(g.homeFile) : '';
+    if (!dataHomeByName.has(name) || header) dataHomeByName.set(name, header);
+  }
+
   // ── Pass 2: Generate files using graph-resolved includes ──────────
   loadUnitIdentCache();
   const unitsT0 = Date.now();
@@ -4341,8 +4507,11 @@ function generateFilesForFunctions(
     const prevFileLocals = context.fileLocalGlobals;
     if (context.analyzedGlobals) {
       // In address order: the original linked a TU's data as one run in that order.
+      // The globals homed here (several TUs name them) are in the same run, with
+      // external linkage, so they are emitted in the same address-ordered block.
       context.fileLocalGlobals = context.analyzedGlobals.filter(
-        g => g.scope === 'file-local' && g.ownerFile === implPath
+        g => ((g.scope === 'file-local' && g.ownerFile === implPath)
+              || (g.scope === 'global' && g.homeFile === implPath))
           && !isUnreferenceableArtifact(g, allAnalyzedGlobalNames)
       ).sort((a, b) => Number.parseInt(a.address, 16) - Number.parseInt(b.address, 16));
       if (context.fileLocalGlobals.length === 0) {
@@ -4377,6 +4546,7 @@ function generateFilesForFunctions(
       templateHeader: templateHeaderPath ?? undefined,
       constructorFact,
       enumMemberFact: name => enumMemberFact(context._enumMemberValues, name),
+      dataHome: name => dataHomeByName.get(name) ?? '',
     };
     const placementHolds = !emitUnitsFilter || emitUnitsFilter.has(unitName)
       || includeBasisHolds(unitIdentifierCounts.get(unitName)?.includes, implIncludes, placementNow);
@@ -4568,6 +4738,17 @@ function generateFilesForFunctions(
           const enclosing = enclosingCandidate(candidates);
           if (enclosing) addInclude(enclosing);
         }
+      }
+
+      // A global homed in a TU is declared in that TU's data header, which only the
+      // TUs naming it include - its home among them, so declaration and definition
+      // meet in one TU. Every external global named here is looked up, homed or
+      // not: one that gains or changes its home re-emits this unit.
+      for (const name of refs.identifiers) {
+        const header = dataHomeByName.get(name);
+        if (header === undefined) continue;
+        lookedUp(`g:${name}`);
+        if (header) addInclude(header);
       }
 
       if (templateNames.some(name => mentioned.has(name))) {
@@ -4834,7 +5015,10 @@ export async function writeProject(
     const dir = path.dirname(fullPath);
 
     await fs.mkdir(dir, { recursive: true });
-    await fs.writeFile(fullPath, file.content, 'utf-8');
+    // Bytes that did not change keep their mtime: a header rewritten with the same
+    // content would rebuild every TU that includes it.
+    const previous = await fs.readFile(fullPath, 'utf-8').catch(() => undefined);
+    if (previous !== file.content) await fs.writeFile(fullPath, file.content, 'utf-8');
     writtenFiles.push(fullPath);
   }
 

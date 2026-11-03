@@ -478,9 +478,91 @@ export function recordCentralInitializerAddressReferences(
   initializerFuncPtrArityMismatches = mismatchesBeforeDiscovery;
 }
 
+/**
+ * The type prelude of a declarations header: the owner header of every type a
+ * declaration uses by value, the template header where one is named, forward
+ * declarations for the rest, and - for a type no header owns - its definition
+ * (`withDefinitions`; only globals.h may define one, so a data header that needs
+ * one includes globals.h instead).
+ */
+export function globalsTypePrelude(
+  globals: AnalyzedDataSymbol[],
+  dataTypes: ExtractedDataType[] | undefined,
+  typeOwnerMap: Map<string, string> | undefined,
+  isSkippableLibraryType: (name: string) => boolean,
+  withDefinitions = true,
+): { lines: string[]; forwardDecls: ForwardDeclaration[]; fullDefs: string[]; fullDefNames: string[] } {
+  const lines: string[] = [];
+  // Classify types: by-value types get full definitions, pointer-only types get forward declarations
+  const { forwardDecls, fullDefs, fullDefNames, extraIncludes: byValueIncludes, sharedHeaderOwned } = collectGlobalForwardDeclarations(globals, dataTypes, typeOwnerMap);
+
+  // Include headers for by-value types that have an owning header (avoid duplicate definitions)
+  if (byValueIncludes.length > 0) {
+    for (const inc of byValueIncludes) {
+      lines.push(`#include "${inc}"`);
+    }
+  }
+  // A template-id cannot be forward-declared: a global typed by one needs the template header.
+  const templates = templateRegistry();
+  if (templates && globals.some(g => {
+    const type = g.suggestedType || g.dataType;
+    return type?.includes('<') && templates.isTreeType(type.trim());
+  }) && !byValueIncludes.includes(templates.header)) {
+    lines.push(`#include "${templates.header}"`);
+  }
+  lines.push('');
+
+  // Safety net: scan all globals for type names that may be missing from forward declarations
+  const declaredNames = new Set<string>(sharedHeaderOwned);
+  for (const decl of forwardDecls) declaredNames.add(decl.name);
+  for (const def of fullDefs) {
+    const m = def.match(/^struct\s+(\w+)/);
+    if (m) declaredNames.add(m[1]);
+    const em = def.match(/^enum\s+(\w+)/);
+    if (em) declaredNames.add(em[1]);
+    const tm = def.match(/typedef\s+.*?\(\*(\w+)\)/);
+    if (tm) declaredNames.add(tm[1]);
+  }
+  // Types from by-value includes are also available (the header defines them)
+  // We don't need to enumerate - the include handles it
+  for (const g of globals) {
+    const type = (g.suggestedType || g.dataType).replace(/\*/g, '').replace(/&/g, '').replace(/const\s*/g, '').replace(/\[[^\]]*\]/g, '').trim();
+    if (!type || declaredNames.has(type) || isPlatformOrBuiltinType(type)) continue;
+    if (isSkippableLibraryType(type)) continue;
+    if (!/^[A-Za-z_]\w*$/.test(type)) continue;
+    // Skip enum types (eXxx convention) — they're typedef int, not structs
+    if (/^e[A-Z]/.test(type)) continue;
+    // Skip function pointer typedefs (fnXxx, fpXxx convention)
+    if (/^fn[A-Z]/.test(type) || /^fp[A-Z]/.test(type)) continue;
+    // Skip types that look like they're from d2_enums.h or standard typedefs
+    if (/^__\w+_t$/.test(type)) continue;
+    forwardDecls.push({ name: type, text: emitFallbackForwardDecl(type), deps: [] });
+    declaredNames.add(type);
+  }
+
+  if (forwardDecls.length > 0) {
+    lines.push('// Forward declarations');
+    for (const decl of orderForwardDeclarations(forwardDecls)) {
+      lines.push(decl);
+    }
+    lines.push('');
+  }
+
+  // Full type definitions for by-value types (structs, enums, unions, function typedefs)
+  if (withDefinitions && fullDefs.length > 0) {
+    lines.push('// Full type definitions (used by value in globals)');
+    for (const def of fullDefs) {
+      lines.push(def);
+      lines.push('');
+    }
+  }
+
+  return { lines, forwardDecls, fullDefs, fullDefNames };
+}
+
 export function generateGlobalsHeader(
   globals: AnalyzedDataSymbol[],
-  options: ReconstructOptions & { projectName?: string; binaryName?: string },
+  options: ReconstructOptions & { projectName?: string; binaryName?: string; centralTypeUsers?: AnalyzedDataSymbol[] },
   dataTypes?: ExtractedDataType[],
   typeOwnerMap?: Map<string, string>,
   functionQualifiedNames?: Set<string>,
@@ -541,69 +623,14 @@ export function generateGlobalsHeader(
   lines.push('#include <cstddef>');
   lines.push('#include "d2_platform.h"');
 
-  // Classify types: by-value types get full definitions, pointer-only types get forward declarations
-  const { forwardDecls, fullDefs, extraIncludes: byValueIncludes, sharedHeaderOwned } = collectGlobalForwardDeclarations(globals, dataTypes, typeOwnerMap);
-
-  // Include headers for by-value types that have an owning header (avoid duplicate definitions)
-  if (byValueIncludes.length > 0) {
-    for (const inc of byValueIncludes) {
-      lines.push(`#include "${inc}"`);
-    }
-  }
-  // A template-id cannot be forward-declared: a global typed by one needs the template header.
-  const templates = templateRegistry();
-  if (templates && globals.some(g => {
-    const type = g.suggestedType || g.dataType;
-    return type?.includes('<') && templates.isTreeType(type.trim());
-  }) && !byValueIncludes.includes(templates.header)) {
-    lines.push(`#include "${templates.header}"`);
-  }
-  lines.push('');
-
-  // Safety net: scan all globals for type names that may be missing from forward declarations
-  const declaredNames = new Set<string>(sharedHeaderOwned);
-  for (const decl of forwardDecls) declaredNames.add(decl.name);
-  for (const def of fullDefs) {
-    const m = def.match(/^struct\s+(\w+)/);
-    if (m) declaredNames.add(m[1]);
-    const em = def.match(/^enum\s+(\w+)/);
-    if (em) declaredNames.add(em[1]);
-    const tm = def.match(/typedef\s+.*?\(\*(\w+)\)/);
-    if (tm) declaredNames.add(tm[1]);
-  }
-  // Types from by-value includes are also available (the header defines them)
-  // We don't need to enumerate - the include handles it
-  for (const g of globals) {
-    const type = (g.suggestedType || g.dataType).replace(/\*/g, '').replace(/&/g, '').replace(/const\s*/g, '').replace(/\[[^\]]*\]/g, '').trim();
-    if (!type || declaredNames.has(type) || isPlatformOrBuiltinType(type)) continue;
-    if (isSkippableLibraryType(type)) continue;
-    if (!/^[A-Za-z_]\w*$/.test(type)) continue;
-    // Skip enum types (eXxx convention) — they're typedef int, not structs
-    if (/^e[A-Z]/.test(type)) continue;
-    // Skip function pointer typedefs (fnXxx, fpXxx convention)
-    if (/^fn[A-Z]/.test(type) || /^fp[A-Z]/.test(type)) continue;
-    // Skip types that look like they're from d2_enums.h or standard typedefs
-    if (/^__\w+_t$/.test(type)) continue;
-    forwardDecls.push({ name: type, text: emitFallbackForwardDecl(type), deps: [] });
-    declaredNames.add(type);
-  }
-
-  if (forwardDecls.length > 0) {
-    lines.push('// Forward declarations');
-    for (const decl of orderForwardDeclarations(forwardDecls)) {
-      lines.push(decl);
-    }
-    lines.push('');
-  }
-
-  // Full type definitions for by-value types (structs, enums, unions, function typedefs)
-  if (fullDefs.length > 0) {
-    lines.push('// Full type definitions (used by value in globals)');
-    for (const def of fullDefs) {
-      lines.push(def);
-      lines.push('');
-    }
-  }
+  // A global homed in a TU is declared in that TU's data header, not here
+  // (file-local-globals.ts assignDataHomes); its types are that header's business.
+  // Types only a data header needs and no header owns are still DEFINED here, the
+  // one place that can (centralTypeUsers), and that data header includes this one.
+  const declaredHere = (g: AnalyzedDataSymbol): boolean => g.homeFile === undefined || g.homeDeclaredCentrally === true;
+  const typeUsers = [...globals.filter(declaredHere), ...(options.centralTypeUsers ?? [])];
+  const { lines: preludeLines, forwardDecls, fullDefs } = globalsTypePrelude(typeUsers, dataTypes, typeOwnerMap, isSkippableLibraryType);
+  lines.push(...preludeLines);
 
   // Collect names that must NOT appear as a namespace component, because they
   // are already emitted at an outer scope as a different kind of entity:
@@ -699,7 +726,7 @@ export function generateGlobalsHeader(
 
   // Global extern declarations by namespace
   const globalSymbols = globals.filter(g =>
-    g.scope === 'global'
+    g.scope === 'global' && declaredHere(g)
     && !isSwitchTableSymbol(g.suggestedName || g.name)
     && !isJumpTableArtifact(g)
     && !isArrayElementSymbol(g.suggestedName || g.name, allGlobalNames)
@@ -715,7 +742,7 @@ export function generateGlobalsHeader(
 
     for (const { rendered: namespace, symbols: nsGlobals } of byNamespace) {
       const nsGlobalSymbols = nsGlobals.filter(g =>
-        g.scope === 'global'
+        g.scope === 'global' && declaredHere(g)
         && !isSwitchTableSymbol(g.suggestedName || g.name)
         && !isJumpTableArtifact(g)
         && !isArrayElementSymbol(g.suggestedName || g.name, allGlobalNames)
@@ -3420,6 +3447,89 @@ function escapeStringForC(s: string): string {
 }
 
 /**
+ * The data header of one TU: the externs of the globals it defines with external
+ * linkage (file-local-globals.ts assignDataHomes), for the TUs that name them and
+ * for the TU itself, which includes it so declaration and definition are checked
+ * against each other.
+ *
+ * Its types are its own: the owner headers of what a declaration uses by value,
+ * forward declarations for the rest. A type no header owns (or a forward block that
+ * has to define an aggregate) is defined in globals.h, the one place that may, and
+ * this header then includes globals.h (`needsCentralTypes`).
+ */
+export function generateDataHeader(
+  implPath: string,
+  globals: AnalyzedDataSymbol[],
+  options: ReconstructOptions & { binaryName?: string },
+  dataTypes: ExtractedDataType[] | undefined,
+  typeOwnerMap: Map<string, string> | undefined,
+  globalsHeaderPath = GLOBALS_HEADER,
+): string {
+  const isSkippableLibraryType = makeLibraryTypeSkipPredicate(dataTypes);
+  const ordered = [...globals].sort((a, b) => parseInt(a.address, 16) - parseInt(b.address, 16));
+  const { lines: prelude, needsCentralTypes } = dataHeaderTypePrelude(ordered, dataTypes, typeOwnerMap, isSkippableLibraryType);
+  const lines: string[] = [];
+  lines.push('/**');
+  lines.push(` * Data defined in ${implPath} that other translation units name.`);
+  if (options.binaryName) lines.push(` * Binary: ${options.binaryName}`);
+  lines.push(' */');
+  lines.push('');
+  lines.push('#pragma once');
+  lines.push('');
+  lines.push('#include "d2_platform.h"');
+  if (needsCentralTypes) lines.push(`#include "${globalsHeaderPath}"`);
+  lines.push(...prelude);
+  for (const { rendered: namespace, symbols } of groupByEmittedNamespace(ordered)) {
+    if (symbols.length === 0) continue;
+    if (namespace) lines.push(`namespace ${namespace} {`);
+    for (const g of symbols) {
+      const decl = generateExternDeclaration(g, options.includeAddressComments);
+      if (decl) lines.push(decl);
+    }
+    if (namespace) lines.push(`} // namespace ${namespace}`);
+    lines.push('');
+  }
+  return lines.join('\n');
+}
+
+/**
+ * The types a data header's declarations need. A type no header owns is defined in
+ * globals.h, the one place that may, and the header includes globals.h for it;
+ * `centralTypes` are those types, each spelled as a declaration would reach it so
+ * globals.h defines it the same way.
+ */
+function dataHeaderTypePrelude(
+  globals: AnalyzedDataSymbol[],
+  dataTypes: ExtractedDataType[] | undefined,
+  typeOwnerMap: Map<string, string> | undefined,
+  isSkippableLibraryType: (name: string) => boolean,
+): { lines: string[]; needsCentralTypes: boolean; centralTypes: string[] } {
+  const { lines, forwardDecls, fullDefNames } = globalsTypePrelude(globals, dataTypes, typeOwnerMap, isSkippableLibraryType, false);
+  const defining = forwardDecls.filter(d => d.defines);
+  const centralTypes = [...fullDefNames, ...defining.map(d => `${d.name} *`)];
+  if (centralTypes.length === 0) return { lines, needsCentralTypes: false, centralTypes };
+  // A defining block is globals.h's to emit; here it would be a second definition.
+  const texts = new Set(defining.map(d => d.text));
+  return { lines: lines.filter(l => !texts.has(l)), needsCentralTypes: true, centralTypes };
+}
+
+/**
+ * The types a data header for these globals needs globals.h to define, as
+ * stand-in symbols globals.h collects its types from; empty when it needs none.
+ */
+export function dataHeaderCentralTypes(
+  globals: AnalyzedDataSymbol[],
+  dataTypes: ExtractedDataType[] | undefined,
+  typeOwnerMap: Map<string, string> | undefined,
+): AnalyzedDataSymbol[] {
+  const { centralTypes } = dataHeaderTypePrelude(globals, dataTypes, typeOwnerMap, makeLibraryTypeSkipPredicate(dataTypes));
+  return centralTypes.map(type => ({
+    name: `__type_user_${type.replace(/\W/g, '')}`, address: '', dataType: type, suggestedType: type,
+    size: 0, isInitialized: false, xrefCount: 0, scope: 'global',
+  } as unknown as AnalyzedDataSymbol));
+}
+
+/**
  * Generate globals.cpp content — actual definitions with initializers
  *
  * This file contains:
@@ -3466,6 +3576,8 @@ export function generateGlobalsImpl(
   const definable = globals.filter(g =>
     g.scope === 'global' && isEmittableGlobal(g) && !isDataArtifact(g, allGlobalNames)
     && !functionCollidingGlobals.has(g)
+    // Defined by its home TU, which claimed it (file-local-globals.ts).
+    && !(g.homeFile !== undefined && claimedGlobals.has(g))
   );
   if (definable.length === 0 || (partition && partition.size === 0)) {
     lines.push('// No global definitions to emit');
@@ -3728,7 +3840,8 @@ function collectGlobalForwardDeclarations(
   globals: AnalyzedDataSymbol[],
   dataTypes?: ExtractedDataType[],
   typeOwnerMap?: Map<string, string>
-): { forwardDecls: ForwardDeclaration[]; fullDefs: string[]; extraIncludes: string[]; sharedHeaderOwned: Set<string> } {
+): { forwardDecls: ForwardDeclaration[]; fullDefs: string[]; fullDefNames: string[]; extraIncludes: string[]; sharedHeaderOwned: Set<string> } {
+  const fullDefNames: string[] = [];
   // Library types (Win32 SDK / CRT) are provided by the real headers under
   // _WIN32 — never emit our own forward decl/definition for them.
   const isSkippableLibraryType = makeLibraryTypeSkipPredicate(dataTypes);
@@ -3946,6 +4059,7 @@ function collectGlobalForwardDeclarations(
       sharedHeaderOwned.add(name);
       continue;
     }
+    if (dt.kind === 'STRUCTURE' || dt.kind === 'UNION' || dt.kind === 'FUNCTION_DEFINITION') fullDefNames.push(name);
     switch (dt.kind) {
       case 'STRUCTURE':
         fullDefs.push(generateStructDeclaration(dt as ExtractedStruct));
@@ -4014,7 +4128,7 @@ function collectGlobalForwardDeclarations(
     }
   }
 
-  return { forwardDecls, fullDefs, extraIncludes: [...extraIncludes].sort(), sharedHeaderOwned };
+  return { forwardDecls, fullDefs, fullDefNames, extraIncludes: [...extraIncludes].sort(), sharedHeaderOwned };
 }
 
 /**

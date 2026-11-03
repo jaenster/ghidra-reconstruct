@@ -48,7 +48,7 @@ import { templateRegistry } from './templates/registry.js';
 import { declarationHead } from './calling-convention.js';
 import { fileStaticKey } from './file-static-functions.js';
 import { emittedParameterName, getAggregateTypeNames } from './platform-types.js';
-import { derivedTemplateInstance, normalizeGlobalDeclType, generateStaticLocalsBlock, emitDataValue, setInitializerOwnerAddress, inferArrayDeclaration, isWideTextDatum, normalizeArrayDeclaration, braceArrayInitializer, isFuncDefTypedefName, getKnownFuncDefTypedefs, getKnownEnumConstants, setInitializerNamespace, renderGlobalScalarInitializer, recordDeclaredName } from './globals-header.js';
+import { derivedTemplateInstance, globalDefinition, emittedNamespaceOf, sanitizeSymbolName, setCentralInitializerScope, normalizeGlobalDeclType, generateStaticLocalsBlock, emitDataValue, setInitializerOwnerAddress, inferArrayDeclaration, isWideTextDatum, normalizeArrayDeclaration, braceArrayInitializer, isFuncDefTypedefName, getKnownFuncDefTypedefs, getKnownEnumConstants, setInitializerNamespace, renderGlobalScalarInitializer, recordDeclaredName } from './globals-header.js';
 
 
 /**
@@ -1185,7 +1185,41 @@ export function generateImplementation(
     // finds nothing in it.
     setInitializerNamespace(undefined);
     const fileLocalLines: string[] = [];
+    // A homed global (file-local-globals.ts assignDataHomes) sits in the same run,
+    // in address order, with EXTERNAL linkage: several TUs name it and declare it
+    // through this TU's data header. It is defined exactly as a globals unit
+    // defined it - same renderer, same initializer scope, inside its own
+    // namespace block - so moving it here moves storage and changes no value.
+    let openNamespace: string | undefined;
+    const closeNamespace = () => {
+      if (openNamespace === undefined) return;
+      fileLocalLines.push(`} // namespace ${openNamespace}`);
+      openNamespace = undefined;
+      setInitializerNamespace(undefined);
+    };
     for (const global of context.fileLocalGlobals) {
+      if (global.scope === 'global' && global.homeFile !== undefined) {
+        const resolved = emittedNamespaceOf(global);
+        const rendered = renderNamespace(resolved);
+        if (rendered !== openNamespace) {
+          closeNamespace();
+          if (rendered) {
+            fileLocalLines.push(`namespace ${rendered} {`);
+            openNamespace = rendered;
+            setInitializerNamespace(resolved);
+          }
+        }
+        const name = sanitizeSymbolName(global.suggestedName || global.name);
+        const aliasLine = globalAliasComment(global);
+        if (aliasLine) fileLocalLines.push(aliasLine);
+        recordDeclaredName(name);
+        setCentralInitializerScope(true);
+        const definition = globalDefinition(global, name);
+        setCentralInitializerScope(false);
+        fileLocalLines.push(`${definition} ${globalGuardLine(name, guardQualifiedName(rendered, name), 'external', hasDefinitionInitializer(global))}`);
+        continue;
+      }
+      closeNamespace();
       // The spelling globals.h and globals.cpp give the same symbol.
       let type = normalizeGlobalDeclType(global.suggestedType || global.dataType);
       let name = global.suggestedName || global.name;
@@ -1266,6 +1300,7 @@ export function generateImplementation(
       }
       fileLocalLines[fileLocalLines.length - 1] += ` ${guardLine}`;
     }
+    closeNamespace();
 
     setInitializerNamespace(undefined);
 
@@ -2411,7 +2446,9 @@ function collectRootScopeSymbols(context?: ImplGenContext): RootScopeSymbolTable
   const rootScopeSymbols = new Set<string>();
   const scopedSymbols = new Set<string>();
   for (const g of globals) {
-    if (g.scope !== 'global') continue;
+    // A file-local is a root-scope `static` (only root symbols are demoted), so a
+    // namespaced function of its name hides it exactly as it hides an extern.
+    if (g.scope !== 'global' && g.scope !== 'file-local') continue;
     const name = g.suggestedName || g.name;
     if (!name || !/^[A-Za-z_]\w*$/.test(name)) continue;
     const ns = g.namespace ? collapseConsecutiveDuplicates(g.namespace) : undefined;

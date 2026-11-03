@@ -30,6 +30,7 @@ import type { ForeignSource } from './file-static-functions.js';
 import { scanReferences, mangledSourceNames } from './file-static-functions.js';
 import { isEmittableGlobal, isUnreferenceableArtifact, sanitizeSymbolName } from './globals-header.js';
 import { noteGlobalScopeReason, globalScopeReason } from './global-scope-trace.js';
+import { classScopeOf } from './templates/index.js';
 
 const GHIDRA_DATA_LABEL = /^(?:DAT|PTR|s|u|BYTE|WORD|DWORD|PTR_DAT|PTR_FUN)_(?:.*_)?([0-9a-fA-F]{8})$/;
 
@@ -52,6 +53,7 @@ function demote(g: AnalyzedDataSymbol, reason: string): void {
 export function foreignReferencedFileLocals(
   globals: readonly AnalyzedDataSymbol[],
   foreignSources: ReadonlyArray<ForeignSource>,
+  considered: (g: AnalyzedDataSymbol) => boolean = g => g.scope === 'file-local',
 ): Set<AnalyzedDataSymbol> {
   const out = new Set<AnalyzedDataSymbol>();
   if (foreignSources.length === 0) return out;
@@ -60,7 +62,7 @@ export function foreignReferencedFileLocals(
   const extents: Array<{ lo: number; hi: number; g: AnalyzedDataSymbol }> = [];
   const names = new Set(globals.map(g => g.suggestedName || g.name));
   for (const g of globals) {
-    if (g.scope !== 'file-local') continue;
+    if (!considered(g)) continue;
     // A label inside another datum is not storage: an address in its extent is
     // one in its parent's, and the extents searched below must not overlap.
     if (!isEmittableGlobal(g) || isUnreferenceableArtifact(g, names)) continue;
@@ -174,10 +176,12 @@ export function dataRuns(
 }
 
 /**
- * Move back to `global` every file-local symbol whose run cannot move into its TU
- * whole: a run with a member that some other TU uses, that nothing in code uses, or
- * that a veto keeps external. Function-local statics are left alone - they are in
- * the TU already, inside their function. Returns how many moved back.
+ * Move back to the globals units every member of a run that cannot move into its
+ * TU whole: a run with a member that cannot live there - a static-local of another
+ * TU's function, or a global no home could be given (`assignDataHomes`). Every
+ * other member is in the TU already: a file-local `static`, a function-local
+ * static of one of its functions, or a global it defines with external linkage.
+ * Returns how many file-locals moved back.
  */
 export function keepDataRunsWhole(
   globals: AnalyzedDataSymbol[],
@@ -185,25 +189,153 @@ export function keepDataRunsWhole(
 ): number {
   let demoted = 0;
   for (const run of dataRuns(globals, implOf)) {
-    if (!run.members.some(g => g.scope === 'file-local')) continue;
-    const whole = run.members.every(g =>
+    if (!run.members.some(g => g.scope === 'file-local' || g.homeFile !== undefined)) continue;
+    const inUnit = (g: AnalyzedDataSymbol): boolean =>
       (g.scope === 'file-local' && g.ownerFile === run.unit)
-      || (g.scope === 'static-local' && g.ownerFunction !== undefined && implOf.get(g.ownerFunction) === run.unit));
-    if (whole) continue;
+      || (g.scope === 'static-local' && g.ownerFunction !== undefined && implOf.get(g.ownerFunction) === run.unit)
+      || (g.scope === 'global' && g.homeFile === run.unit);
+    if (run.members.every(inUnit)) continue;
     // Named after the first member that cannot move, for the scope report.
-    const blocker = run.members.find(g => g.scope !== 'file-local' && g.scope !== 'static-local')
-      ?? run.members.find(g => g.scope === 'static-local');
+    const blocker = run.members.find(g => !inUnit(g) && g.scope !== 'static-local')
+      ?? run.members.find(g => !inUnit(g));
     const why = !blocker ? 'other'
       : blocker.scope === 'static-local' ? 'static-local-elsewhere'
+      : homeVeto.get(blocker) ? `home-veto:${homeVeto.get(blocker)}`
       : !(blocker.referencingFunctions?.length) ? 'member-without-code-users'
       : globalScopeReason(blocker) ?? 'member-kept-external';
+    const reason = `run-not-whole:${why}@${blocker ? `${blocker.suggestedName || blocker.name}:${blocker.address}` : ''}`;
     for (const g of run.members) {
+      if (g.homeFile !== undefined) {
+        homeVeto.set(g, reason);
+        g.homeFile = undefined;
+        g.homeDeclaredCentrally = undefined;
+        continue;
+      }
       if (g.scope !== 'file-local') continue;
-      demote(g, `run-not-whole:${why}@${blocker ? `${blocker.suggestedName || blocker.name}:${blocker.address}` : ''}`);
+      demote(g, reason);
       demoted++;
     }
   }
   return demoted;
+}
+
+/**
+ * Why `assignDataHomes` gave a global no home, for the report. Keyed by identity;
+ * one generation run, one table (`assignDataHomes` clears it).
+ */
+const homeVeto = new WeakMap<AnalyzedDataSymbol, string>();
+
+/** Why `g` has no home ('' when it has one, 'no-run' when it sits in no TU's run). */
+export function dataHomeVeto(g: AnalyzedDataSymbol): string {
+  if (g.homeFile !== undefined) return '';
+  return homeVeto.get(g) ?? 'no-run';
+}
+
+/** Counts of the reasons the last `assignDataHomes`/`keepDataRunsWhole` left a global homeless. */
+export function dataHomeVetoCounts(globals: readonly AnalyzedDataSymbol[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const g of globals) {
+    const why = homeVeto.get(g);
+    if (!why) continue;
+    const key = why.replace(/@.*$/, '');
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return counts;
+}
+
+export interface DataHomeInputs {
+  /** Hand-written source built beside the tree: a global it names stays declared in globals.h. */
+  foreignSources: ReadonlyArray<ForeignSource>;
+  /** Every function's qualified (and sanitized) name: a global sharing one is declared by nothing. */
+  functionQualifiedNames: ReadonlySet<string>;
+  /**
+   * Root-scope names a namespace block cannot open under: data type names and root
+   * globals. globals.h folds such a leading segment away; a home TU, emitted
+   * before that table exists, cannot, so a global in such a namespace keeps no home.
+   */
+  rootTypeNames: ReadonlySet<string>;
+}
+
+/**
+ * Give every external global the translation unit its data run belongs to.
+ *
+ * A global several TUs use is still DATA OF ONE TU: the original linked it inside
+ * that object's run, in address order, beside the TU's own statics (design study
+ * 2026-11-03: 95% of .data and 86% of .bss sit in their TU's largest run). So it
+ * is defined there, with external linkage, and declared in that TU's data header
+ * (`dataHeaderPathOf`), which only the TUs that name it include. globals.h keeps
+ * what has no home: symbols at a run boundary, in no run, or vetoed here.
+ *
+ * The home is the run's TU, never a vote of the users: a run is one object's data
+ * whatever reads it (`dataRuns`). A symbol hand-written source names keeps its
+ * home but is declared in globals.h, which that source includes.
+ *
+ * Vetoes, each of which globals.h or the globals units resolve today in a way one
+ * TU cannot: a name two symbols share (one definition per name, chosen centrally),
+ * a name a function owns, an `#ifdef`-guarded symbol, a template-instance
+ * namespace, a namespace whose leading segment a root name blocks, and a name with
+ * an array dimension in it.
+ */
+export function assignDataHomes(
+  globals: AnalyzedDataSymbol[],
+  implOf: ReadonlyMap<string, string>,
+  inputs: DataHomeInputs,
+): { homed: number; centrallyDeclared: number } {
+  for (const g of globals) { g.homeFile = undefined; g.homeDeclaredCentrally = undefined; homeVeto.delete(g); }
+  // One emitted name, one symbol: the bare sanitized spelling, because that is the
+  // token a body names it by and the key user TUs find their include by.
+  const nameCount = new Map<string, number>();
+  for (const g of globals) {
+    const n = sanitizeSymbolName(g.suggestedName || g.name);
+    nameCount.set(n, (nameCount.get(n) ?? 0) + 1);
+  }
+  const rootGlobalNames = new Set<string>();
+  for (const g of globals) if (g.scope === 'global' && !g.namespace) rootGlobalNames.add(sanitizeSymbolName(g.suggestedName || g.name));
+  const foreign = foreignReferencedFileLocals(globals, inputs.foreignSources, g => g.scope === 'global');
+  const veto = (g: AnalyzedDataSymbol): string | undefined => {
+    const raw = g.suggestedName || g.name;
+    const name = sanitizeSymbolName(raw);
+    if (/\[/.test(raw)) return 'name-with-dimension';
+    if (g.ifdef) return 'ifdef';
+    if ((nameCount.get(name) ?? 0) > 1) return 'shared-name';
+    const ns = g.namespace;
+    if (ns && /[<>,*/]/.test(ns)) return 'template-namespace';
+    const qualified = ns ? `${ns}::${name}` : name;
+    if (inputs.functionQualifiedNames.has(qualified) || inputs.functionQualifiedNames.has(name)) return 'function-name';
+    if (ns) {
+      // A class's static data member is defined as `T Class::member`, never inside
+      // a namespace block; the template header places those (templates/placement.ts).
+      if (classScopeOf(g) !== undefined) return 'class-member';
+      const lead = ns.split('::')[0];
+      if (inputs.rootTypeNames.has(lead) || rootGlobalNames.has(lead)) return 'namespace-blocked';
+    }
+    return undefined;
+  };
+  let homed = 0, centrallyDeclared = 0;
+  for (const run of dataRuns(globals, implOf)) {
+    for (const g of run.members) {
+      if (g.scope !== 'global') continue;
+      const why = veto(g);
+      if (why) { homeVeto.set(g, why); continue; }
+      g.homeFile = run.unit;
+      homed++;
+      if (foreign.has(g)) { g.homeDeclaredCentrally = true; centrallyDeclared++; }
+    }
+  }
+  return { homed, centrallyDeclared };
+}
+
+/** The data header beside a TU: `D2Common/Items/Items.cpp` -> `D2Common/Items/Items.data.h`. */
+export function dataHeaderPathOf(implPath: string): string {
+  return implPath.replace(/\.(?:cpp|cc|cxx|c)$/, '') + '.data.h';
+}
+
+/**
+ * The key a homed global contributes to its home unit's recorded statics: the unit
+ * defines it, so a global that moves in or out re-emits the unit.
+ */
+export function homedGlobalKey(g: { address: string }): string {
+  return `H:${fileLocalGlobalKey(g).slice(2)}`;
 }
 
 /** The key a file-local global contributes to its unit's recorded statics. */
