@@ -4575,6 +4575,11 @@ function generateFilesForFunctions(
       for (const name of initializerAddressReferences()) {
         if (!initRefsBefore.has(name)) initRefs.push(name);
       }
+      // Every enum member the text spells: whether it is spelled qualified (several enums
+      // number it differently) is decided over all enums, none of which the unit depends on.
+      for (const [name] of idents) {
+        if (enumMemberFact(context._enumMemberValues, name) !== '') lookedUp(`e:${name}`);
+      }
       unitIdentifierCounts.set(unitName, {
         idents, declared, initRefs, statics: unitStatics,
         includes: { graph: [...implIncludes], lookups: [...placementLookups].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)) },
