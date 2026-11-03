@@ -3515,8 +3515,10 @@ function transformDecompiledCode(
     };
 
     // A field-pointer temporary goes: the field updated in place, or the record held and
-    // the field addressed at each use (field-pointer-fold.ts). Needs only the declarations.
+    // the field addressed at each use (field-pointer-fold.ts). The declarations, and the
+    // lines' offsets to see the original reload the record after an update.
     perPluginOptions['field-pointer-fold'] = {
+      branchLayout: layout ?? null,
       functionReturnTypes: context?.funcPtrArgCasts?.functionReturnTypes,
       globalTypes: context?.funcPtrArgCasts?.globalTypes,
       typedefTargets: context?.funcPtrArgCasts?.typedefTargets,
@@ -3525,8 +3527,8 @@ function transformDecompiledCode(
       enclosingVarTypes,
       shadowedTypeNames: shadowedTypeQualifyOptions(context)?.shadowedTypeNames,
       ...(process.env.GHIDRA_FIELD_POINTER_REPORT ? {
-        onSite: (e: { rule: string; line: number; name: string; why?: string }) =>
-          console.warn(`[field-pointer] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.rule} ${e.name} on line ${e.line}${e.why ? ` left: ${e.why}` : ' folded'}`),
+        onSite: (e: { rule: string; line: number; name: string; why?: string; reloaded?: boolean }) =>
+          console.warn(`[field-pointer] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.rule} ${e.name} on line ${e.line}${e.why ? ` left: ${e.why}` : e.reloaded ? ' folded (record reloaded)' : ' folded'}`),
       } : {}),
     };
 

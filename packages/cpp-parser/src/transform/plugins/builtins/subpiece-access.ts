@@ -31,6 +31,21 @@
  *
  * The XMM/register subfield form (e.g. `in_XMM0._0_8_`) also matches this pattern
  * and the same rewrite is valid for it, so it is intentionally not special-cased.
+ *
+ * Two adjacent stores that together write four bytes, the low piece a value and the high
+ * piece zero, are one zero-extended dword store. AllocObjectData (004bc720) prints
+ *
+ *   uVar1.ePlayerMode._1_3_ = 0;  uVar1.ePlayerMode._0_1_ = nInitMode;
+ *
+ * for `movzx eax, byte ptr [ebp + 0x14]; ... mov dword ptr [esi + 0x10], eax`; as two
+ * narrow stores VC8 writes a byte and three bytes. It becomes
+ *
+ *   *(uint32_t *)((char *)&(uVar1.ePlayerMode)) = (uint8_t)(nInitMode);
+ *
+ * which writes the same four bytes: the value's low byte (or word) and zeros above it.
+ * Made only when the object is pure (names, members, `*`), the pieces tile [N, N+4) with
+ * the value piece 1 or 2 bytes at N and not itself a zero, and the value names nothing the
+ * object is built from, so the order of the two stores cannot matter.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -45,11 +60,14 @@ import type {
   MemberExpr,
   ParenExpr,
   CStyleCastExpr,
+  CompoundStmt,
+  ExprStmt,
+  Statement,
   IntegerLiteralExpr,
   PointerType,
   BuiltinType,
 } from '../../../ast/nodes.js';
-import { createKindTransformer, createTransformer, sequence, type Transformer } from '../../transformer.js';
+import { createKindTransformer, createTransformer, sequence, nodesEqual, type Transformer } from '../../transformer.js';
 import { Expr } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { createPlugin } from '../registry.js';
@@ -290,8 +308,86 @@ function createSubpieceReadTransformer(): Transformer {
   });
 }
 
+/** `x._N_M_ = v;` as a statement: the piece and the value. */
+function pieceStore(s: Statement): { offset: number; size: number; member: MemberExpr; value: Expression; stmt: ExprStmt } | null {
+  if (s.kind !== NodeKind.ExprStmt) return null;
+  let e = (s as ExprStmt).expression;
+  while (e.kind === NodeKind.ParenExpr) e = (e as ParenExpr).expression;
+  if (e.kind !== NodeKind.AssignExpr || (e as AssignExpr).operator !== '=') return null;
+  const piece = subpieceOf((e as AssignExpr).left);
+  return piece ? { ...piece, value: (e as AssignExpr).right, stmt: s as ExprStmt } : null;
+}
+
+function isZeroLiteral(e: Expression): boolean {
+  while (e.kind === NodeKind.ParenExpr || e.kind === NodeKind.CStyleCastExpr) {
+    e = e.kind === NodeKind.ParenExpr ? (e as ParenExpr).expression : (e as CStyleCastExpr).expression;
+  }
+  return e.kind === NodeKind.IntegerLiteral && BigInt((e as IntegerLiteralExpr).value as bigint | number) === 0n;
+}
+
+function namesOf(e: ASTNode): Set<string> {
+  const out = new Set<string>();
+  const walk = (n: ASTNode): void => {
+    if (n.kind === NodeKind.Identifier) out.add((n as Identifier).name);
+    if (n.kind === NodeKind.MemberExpr) { walk((n as MemberExpr).object); return; }
+    for (const v of Object.values(n as unknown as Record<string, unknown>)) {
+      if (Array.isArray(v)) { for (const c of v) if (c && typeof c === 'object' && typeof (c as ASTNode).kind === 'string') walk(c as ASTNode); }
+      else if (v && typeof v === 'object' && typeof (v as ASTNode).kind === 'string' && v !== n.location) walk(v as ASTNode);
+    }
+  };
+  walk(e);
+  return out;
+}
+
+/** A zero high piece and a value low piece of one dword, adjacent: one zero-extended store (see the header). */
+function createZeroExtendedStoreTransformer(): Transformer {
+  return createKindTransformer(NodeKind.CompoundStmt, (node) => {
+    const block = node as CompoundStmt;
+    let out: Statement[] | null = null;
+    const st = block.statements;
+    for (let k = 0; k < st.length; k++) {
+      const a = pieceStore(st[k]);
+      const b = k + 1 < st.length ? pieceStore(st[k + 1]) : null;
+      if (!a || !b || a.member.isArrow !== b.member.isArrow || !nodesEqual(a.member.object, b.member.object)) {
+        out?.push(st[k]);
+        continue;
+      }
+      // Two zero halves (`_0_2_ = 0; _2_2_ = 0;`, packet GUIDs) are left: no value is
+      // extended there, and the original may well store two words.
+      const [zero, val] = isZeroLiteral(a.value) && !isZeroLiteral(b.value) ? [a, b]
+        : isZeroLiteral(b.value) && !isZeroLiteral(a.value) ? [b, a] : [null, null];
+      const fits = zero && val && (val.size === 1 || val.size === 2)
+        && zero.offset === val.offset + val.size && zero.offset + zero.size === val.offset + 4;
+      const object = namesOf(a.member.object);
+      if (!fits || !isPure(a.member.object) || [...namesOf(val!.value)].some(n => object.has(n))) {
+        out?.push(st[k]);
+        continue;
+      }
+      const narrow: CStyleCastExpr = {
+        kind: NodeKind.CStyleCastExpr,
+        type: makeBuiltinType(val!.size === 1 ? 'uint8_t' : 'uint16_t', val!.member),
+        expression: makeParen(val!.value, val!.member),
+        location: val!.member.location, leadingTrivia: [], trailingTrivia: [],
+      } as CStyleCastExpr;
+      const dword = makeUnary('*', makeCast('uint32_t', pieceAddress(val!.member, val!.offset), val!.member), val!.member);
+      const assign = {
+        kind: NodeKind.AssignExpr, operator: '=', left: dword, right: narrow,
+        location: val!.stmt.location, leadingTrivia: [], trailingTrivia: [],
+      } as unknown as AssignExpr;
+      out ??= st.slice(0, k);
+      out.push({
+        ...st[k], expression: assign,
+        leadingTrivia: [...(st[k].leadingTrivia ?? []), ...(st[k + 1].leadingTrivia ?? [])],
+        trailingTrivia: st[k + 1].trailingTrivia,
+      } as ExprStmt);
+      k++;
+    }
+    return out ? { ...block, statements: out } as CompoundStmt : undefined;
+  });
+}
+
 function createSubpieceAccessTransformer(): Transformer {
-  return sequence(createThreeByteStoreTransformer(), createSubpieceReadTransformer());
+  return sequence(createZeroExtendedStoreTransformer(), createThreeByteStoreTransformer(), createSubpieceReadTransformer());
 }
 
 // ============================================
