@@ -400,6 +400,63 @@ export function renameReferrers(
   return { typeSlots: [...slots].sort((a, b) => a - b), names, derivedNames };
 }
 
+interface MemberRecord { name?: string; dataType?: string; offset?: number; size?: number; value?: number | string }
+
+function membersOf(dt: ExtractedDataType | undefined): MemberRecord[] {
+  const r = dt as (ExtractedDataType & { fields?: MemberRecord[]; values?: MemberRecord[] }) | undefined;
+  return [...(r?.fields ?? []), ...(r?.values ?? [])];
+}
+
+/**
+ * The member names a body could print differently after `previous` became `fresh`, and
+ * whether the layout moved. A body reaches a member through a global or a pointer chain
+ * without ever spelling the type's name, so the type name alone finds none of them: a
+ * field retyped from `D2AllStatesDataTbl *` to `uint16_t *` (v1858) left every reader's
+ * `[i].nStateId` in the model, and the emitted code no longer compiled. Covered: a member
+ * added, removed, retyped, moved or resized, an enum value renumbered; a changed size or
+ * any moved offset counts every member, since strides and the members after it moved.
+ */
+export function changedMemberTokens(
+  previous: ExtractedDataType,
+  fresh: ExtractedDataType,
+): { tokens: string[]; layoutChanged: boolean } {
+  const key = (m: MemberRecord): string =>
+    `${m.dataType ?? ''}\u0000${m.offset ?? ''}\u0000${m.size ?? ''}\u0000${m.value ?? ''}`;
+  const before = new Map(membersOf(previous).filter(m => m.name).map(m => [m.name!, m]));
+  const after = new Map(membersOf(fresh).filter(m => m.name).map(m => [m.name!, m]));
+  const tokens = new Set<string>();
+  // The layout is the slots, whatever they are called: a rename in place moves nothing.
+  const slots = (dt: ExtractedDataType): string =>
+    membersOf(dt).filter(m => m.offset !== undefined).map(m => `${m.offset}:${m.size ?? ''}`).sort().join(',');
+  const layoutChanged = previous.size !== fresh.size || slots(previous) !== slots(fresh);
+  for (const [name, m] of before) {
+    const n = after.get(name);
+    if (!n || key(n) !== key(m)) tokens.add(name);
+  }
+  for (const name of after.keys()) if (!before.has(name)) tokens.add(name);
+  if (layoutChanged) for (const name of [...before.keys(), ...after.keys()]) tokens.add(name);
+  return { tokens: [...tokens], layoutChanged };
+}
+
+/** Types that hold one of `names` by value (not through a pointer), to a fixpoint. */
+export function byValueEmbedders(dataTypes: readonly ExtractedDataType[], names: ReadonlySet<string>): number[] {
+  const reached = new Set(names);
+  const slots = new Set<number>();
+  for (let grew = true; grew;) {
+    grew = false;
+    dataTypes.forEach((dt, i) => {
+      if (slots.has(i) || reached.has(dt.name)) return;
+      const fields = (dt as ExtractedDataType & { fields?: MemberRecord[] }).fields ?? [];
+      if (fields.some(f => f.dataType && !f.dataType.includes('*') && reached.has(baseTypeName(f.dataType)))) {
+        slots.add(i);
+        reached.add(dt.name);
+        grew = true;
+      }
+    });
+  }
+  return [...slots].sort((a, b) => a - b);
+}
+
 function memberNames(dt: ExtractedDataType | undefined): Set<string> {
   const names = new Set<string>();
   if (!dt) return names;
@@ -510,6 +567,8 @@ export async function applyEvents(
   // only exists while both the old and the new record are in hand.
   // ---------------------------------------------------------------------------
   const typeTokens = new Set<string>();
+  /** Types whose size or member offsets moved: what embeds them by value moved too. */
+  const layoutMoved = new Set<string>();
   /** A type was renamed or added: its place in the type list moved. */
   let typeOrderMoved = false;
   /** Old names of renamed types: other records still spell them. */
@@ -565,9 +624,9 @@ export async function applyEvents(
         renamedTo.set(previous.name, fresh.name);
         typeOrderMoved = true;
       }
-      const newMembers = memberNames(fresh);
-      for (const name of oldMembers) if (!newMembers.has(name)) typeTokens.add(name);
-      for (const name of newMembers) if (!oldMembers.has(name)) typeTokens.add(name);
+      const changed = changedMemberTokens(previous, fresh);
+      for (const name of changed.tokens) typeTokens.add(name);
+      if (changed.layoutChanged) layoutMoved.add(fresh.name);
     }
 
     // A type Ghidra has and the model does not: nothing to diff against, and
@@ -585,6 +644,29 @@ export async function applyEvents(
         typeTokens.add(fresh.name);
       } catch (e) {
         log(`datatype ${name}: reported changed but not extractable (${(e as Error).message})`);
+      }
+    }
+  }
+
+  // A type embedding a moved one by value moved with it, whether or not the change set
+  // names it: re-read its record, and its members are printed at new offsets.
+  if (layoutMoved.size > 0) {
+    const touched = new Set(result.touchedDataTypes);
+    for (const slot of byValueEmbedders(model.primary.dataTypes, layoutMoved)) {
+      const dt = model.primary.dataTypes[slot];
+      const key = dataTypeKey(dt.name, dt.category);
+      typeTokens.add(dt.name);
+      for (const name of memberNames(dt)) typeTokens.add(name);
+      if (touched.has(key)) continue;
+      try {
+        const fresh = await extractDataType(client, dt.name, dt.category);
+        model.primary.dataTypes[slot] = fresh;
+        indices.dtByKey.delete(key);
+        indices.dtByKey.set(dataTypeKey(fresh.name, fresh.category), fresh);
+        result.touchedDataTypes.push(dataTypeKey(fresh.name, fresh.category));
+        for (const name of memberNames(fresh)) typeTokens.add(name);
+      } catch (e) {
+        log(`datatype ${dt.name}: re-extract after an embedded layout change failed (${(e as Error).message}); keeping previous`);
       }
     }
   }
