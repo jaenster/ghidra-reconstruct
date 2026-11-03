@@ -5,6 +5,7 @@ import { emit } from '../../../emit/index.js';
 import type { AnyNode } from '../../../ast/nodes.js';
 import { hasNativeGpp, compileAndRun } from '../../../testing/native-cpp.js';
 import { fieldPointerFoldPlugin, type FieldPointerFoldOptions } from '../builtins/field-pointer-fold.js';
+import type { BranchLayoutEvidence } from '../builtins/branch-layout/evidence.js';
 
 const flat = (s: string) => s.replace(/\s+/g, ' ').trim();
 
@@ -232,5 +233,42 @@ describe('field-pointer-fold', () => {
     const after = compileAndRun(prelude(r.out), main);
     assert.ok(before.length > 0);
     assert.strictEqual(after, before);
+  });
+
+  // Q35_OnPlayerDeath 0058cf00: `mov ecx, [eax + 0x18]` (1e) shared by the test and the
+  // update `add dword ptr [ecx + 0xc], 1` (27), then `mov ecx, [eax + 0x18]` (2b) again for
+  // the store after it (2e).
+  describe('a record the original reloads after the update', () => {
+    const Q35 = [
+      'void f(Quest* pQuest) {',
+      '  if (pQuest->pSub->nPad) {',
+      '    return;',
+      '  }',
+      '  int* pCount = &pQuest->pSub->nCount;',
+      '  (*pCount)++;',
+      '  pQuest->pSub->dwFlags = 0;',
+      '}',
+    ];
+    const ev = (after: number[]): BranchLayoutEvidence => ({
+      lines: new Map([[2, [0x1e, 0x23, 0x25]], [5, [0x1e, 0x27]], [6, [0x27]], [7, after]]),
+      ifs: new Map([[2, 0x25]]),
+    });
+
+    it('folds the update when the next read of the record is a fresh load', () => {
+      const r = run(Q35, { branchLayout: ev([0x2b, 0x2e]) });
+      assert.deepStrictEqual(r.sites, ['single:pCount']);
+      assert.ok(r.out.includes('pQuest->pSub->nCount++; pQuest->pSub->dwFlags = 0;'), r.out);
+    });
+
+    it('keeps the pointer when the next read prints the earlier load (the record held)', () => {
+      const r = run(Q35, { branchLayout: ev([0x1e, 0x2e]) });
+      assert.deepStrictEqual(r.sites, ['single:pCount:record read elsewhere']);
+    });
+
+    it('keeps the pointer without the facts or without a read after the update', () => {
+      assert.deepStrictEqual(run(Q35).sites, ['single:pCount:record read elsewhere']);
+      const r = run(Q35.filter((_, i) => i !== 6), { branchLayout: ev([0x2b, 0x2e]) });
+      assert.deepStrictEqual(r.sites, ['single:pCount:record read elsewhere']);
+    });
   });
 });

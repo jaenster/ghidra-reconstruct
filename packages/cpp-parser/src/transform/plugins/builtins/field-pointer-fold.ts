@@ -40,6 +40,15 @@
  *
  * A function whose name has more than one declaration, or a parameter of that name, is
  * left alone. Without a type for E (or X) nothing changes.
+ *
+ * single is not made where the record E is reached through (`X` of `X->f`) is itself a
+ * load the function reads again: there the original usually held X in a local. Unless the
+ * original loads X afresh after the update (`branchLayout` lines): Q35_OnPlayerDeath
+ * (0058cf00) updates `add dword ptr [ecx + 0xc], 1` and then reloads `mov ecx, [eax +
+ * 0x18]` for the next store through X, which is what an in-place update of a field compiles
+ * to (the store may alias X). The evidence is the first statement after the update that
+ * reads X: every instruction its lines print lies after every one the update's lines print,
+ * so none of its tokens is the earlier load of X.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -56,6 +65,7 @@ import { sameShape, shapeOfNode, type TypedefResolver, type TypeShape } from './
 import { createExprShape } from './expr-shape.js';
 import { effectsOf } from './access-order-evidence.js';
 import { emit } from '../../../emit/index.js';
+import type { BranchLayoutEvidence } from './branch-layout/evidence.js';
 
 export interface FieldPointerFoldOptions extends PluginOptions {
   functionReturnTypes?: Record<string, string>;
@@ -66,8 +76,10 @@ export interface FieldPointerFoldOptions extends PluginOptions {
   enclosingVarTypes?: Record<string, string>;
   /** Type names a same-named namespace shadows: spelled `::Name`. */
   shadowedTypeNames?: string[];
+  /** Per-line instruction offsets: whether the original reloads the record after the update. */
+  branchLayout?: BranchLayoutEvidence | null;
   /** Every candidate: folded (no `why`) or left as printed (`why`). */
-  onSite?: (e: { rule: 'single' | 'multi'; line: number; name: string; why?: string }) => void;
+  onSite?: (e: { rule: 'single' | 'multi'; line: number; name: string; why?: string; reloaded?: boolean }) => void;
 }
 
 function unwrap(e: Expression): Expression {
@@ -255,19 +267,42 @@ function rewriteFunction(fn: FunctionDecl, opts: FieldPointerFoldOptions): Funct
    * ARENA_ClearUpdateFlag 0053fae0) or another use. There the original held X in a local,
    * and the update through the pointer is what VC8 makes of that; folding loses the MATCH.
    */
-  const recordReadElsewhere = (place: Expression): boolean => {
+  const recordReadElsewhere = (place: Expression): Expression | null => {
     let e = unwrap(place);
     while (e.kind === NodeKind.MemberExpr && !(e as MemberExpr).isArrow) e = unwrap((e as MemberExpr).object);
     while (e.kind === NodeKind.SubscriptExpr) e = unwrap((e as SubscriptExpr).array);
-    if (e.kind !== NodeKind.MemberExpr) return false;
+    if (e.kind !== NodeKind.MemberExpr) return null;
     const x = unwrap((e as MemberExpr).object);
-    if (x.kind === NodeKind.Identifier || x.kind === NodeKind.ThisExpr) return false;
+    if (x.kind === NodeKind.Identifier || x.kind === NodeKind.ThisExpr) return null;
+    return reads(body, x) > 1 ? x : null;
+  };
+  /** How many times `n` holds an expression spelled as `x`. */
+  const reads = (n: ASTNode, x: Expression): number => {
     const text = emit(x).trim();
     let seen = 0;
-    for (const n of traverseAST(body)) {
-      if (n.kind === x.kind && emit(n as Expression).trim() === text) seen++;
+    for (const m of traverseAST(n)) if (m.kind === x.kind && emit(m as Expression).trim() === text) seen++;
+    return seen;
+  };
+  /** The code offsets a statement's lines print; null when it is not placed or prints none. */
+  const offsetsOf = (s: Statement): number[] | null => {
+    const l = s.location;
+    const ev = opts.branchLayout;
+    if (!ev || !l || l.file === '<generated>' || l.start.line <= 0) return null;
+    const out: number[] = [];
+    for (let k = l.start.line; k <= Math.max(l.start.line, l.end.line); k++) out.push(...(ev.lines.get(k) ?? []));
+    return out.length ? out : null;
+  };
+  /** The original loads `x` again after the update `block[at]` (see the header). */
+  const reloadedAfter = (block: CompoundStmt, at: number, x: Expression): boolean => {
+    const upd = offsetsOf(block.statements[at]);
+    if (!upd) return false;
+    for (let k = at + 1; k < block.statements.length; k++) {
+      const s = block.statements[k];
+      if (reads(s, x) === 0) continue;
+      const later = offsetsOf(s);
+      return !!later && Math.min(...later) > Math.max(...upd);
     }
-    return seen > 1;
+    return false;
   };
 
   let changed = 0;
@@ -289,8 +324,8 @@ function rewriteFunction(fn: FunctionDecl, opts: FieldPointerFoldOptions): Funct
       if (foldUpdate(st[k + 1], nm, unwrap((r as UnaryExpr).operand))) assignPairs.set(nm, (assignPairs.get(nm) ?? 0) + 1);
     }
   }
-  const site = (rule: 'single' | 'multi', s: Statement, name: string, why?: string) =>
-    opts.onSite?.({ rule, line: s.location?.start.line ?? 0, name, ...(why ? { why } : {}) });
+  const site = (rule: 'single' | 'multi', s: Statement, name: string, why?: string, reloaded?: boolean) =>
+    opts.onSite?.({ rule, line: s.location?.start.line ?? 0, name, ...(why ? { why } : {}), ...(reloaded ? { reloaded } : {}) });
 
   const trySingle = (block: CompoundStmt, i: number): boolean => {
     const s = block.statements[i];
@@ -323,7 +358,8 @@ function rewriteFunction(fn: FunctionDecl, opts: FieldPointerFoldOptions): Funct
     if (!isPlace(place) || !pure(place)) { site('single', s, name, 'not a pure place'); return false; }
     if (nameUses(place).some(u => u.node.name === name)) { site('single', s, name, 'place names the pointer'); return false; }
     if (usesOf(name).length !== expectUses) { site('single', s, name, 'named elsewhere'); return false; }
-    if (recordReadElsewhere(place)) { site('single', s, name, 'record read elsewhere'); return false; }
+    const held = recordReadElsewhere(place);
+    if (held && !reloadedAfter(block, i + 1, held)) { site('single', s, name, 'record read elsewhere'); return false; }
     if (!typed(pointerType, place)) { site('single', s, name, 'type of the place unknown or different'); return false; }
     const stmt: ExprStmt = Stmt.expr(folded);
     stmt.location = next.location;
@@ -332,7 +368,7 @@ function rewriteFunction(fn: FunctionDecl, opts: FieldPointerFoldOptions): Funct
     block.statements.splice(i, 2, stmt);
     if (separate) { removed.set(separate.stmt, name); pairsFolded.set(name, (pairsFolded.get(name) ?? 0) + 1); }
     changed++;
-    site('single', s, name);
+    site('single', s, name, undefined, !!held);
     return true;
   };
 
