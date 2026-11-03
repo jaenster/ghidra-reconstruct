@@ -171,12 +171,12 @@ export function eventDataTypeTarget(
 }
 
 /** The hex tail of a Ghidra address ("Game.exe.ram:005011f0" -> "005011f0"). */
-function addressKey(address: string): string {
+export function addressKey(address: string): string {
   const bare = address.includes(':') ? address.slice(address.lastIndexOf(':') + 1) : address;
   return bare.replace(/^0x/i, '').toLowerCase();
 }
 
-function dataTypeKey(name: string, category: string | undefined): string {
+export function dataTypeKey(name: string, category: string | undefined): string {
   return `${name}${DT_SEP}${category ?? ''}`;
 }
 
@@ -1030,6 +1030,59 @@ function resolveDataTypeSlots(model: LiveModel, key: string): number[] {
   return slots;
 }
 
+/** What `fetchFunctionRecord` read: the record a refresh would put in the model. */
+export interface FetchedFunction {
+  record: ExtractedFunction;
+  /** The decompile failed and `record.decompiled` is the previous body, carried. */
+  decompileFailed: boolean;
+}
+
+/**
+ * Read one function's record and body from Ghidra as a refresh reads them, merged onto
+ * the record in hand, without touching the model. Null when nothing could be fetched.
+ * The refresh below and the model verifier (verifier.ts) both read through here, so the
+ * verifier compares the model with exactly what a refresh would have written.
+ */
+export async function fetchFunctionRecord(
+  client: GhidraConnection,
+  existing: ExtractedFunction | undefined,
+  addr: string,
+  opts: { reextractInfo: boolean; timeout: number; log: LiveLog },
+): Promise<FetchedFunction | null> {
+  const address = existing?.address ?? addr;
+
+  let record: ExtractedFunction | undefined = existing;
+  if (opts.reextractInfo || !existing) {
+    const info = await getFunctionInfo(client, address);
+    if (!info) {
+      opts.log(`function ${address}: no longer present in Ghidra`);
+      return null;
+    }
+    // The record itself comes from the listing, as the full extraction reads it;
+    // `get_function_info` only says what the function is called now, which a rename
+    // moved. Everything derived later — the body, call edges, platform guards, thunk
+    // targets — is carried forward from the record being replaced.
+    const listed = await listFunctionRecord(client, info.name, info.address).catch(() => null);
+    if (!listed) opts.log(`function ${info.name}: not listed under its name; using get_function_info`);
+    const fresh = listed ?? info;
+    record = existing ? { ...existing, ...defined(fresh) } : fresh;
+  } else {
+    record = { ...existing };
+  }
+  if (!record) return null;
+
+  let decompileFailed = false;
+  if (!record.isThunk && !record.isExternal) {
+    try {
+      record.decompiled = await decompileFunction(client, record.address, opts.timeout);
+    } catch (e) {
+      decompileFailed = true;
+      opts.log(`function ${record.name}: decompile failed (${(e as Error).message}); keeping previous body`);
+    }
+  }
+  return { record, decompileFailed };
+}
+
 /**
  * Re-fetch one function's record and body, replacing it at the position it
  * already occupies. Returns false when nothing could be fetched, so a transient
@@ -1043,35 +1096,9 @@ async function refreshFunction(
   opts: { reextractInfo: boolean; timeout: number; log: LiveLog },
 ): Promise<boolean> {
   const existing = indices.fnByAddr.get(addr);
-  const address = existing?.address ?? addr;
-
-  let record: ExtractedFunction | undefined = existing;
-  if (opts.reextractInfo || !existing) {
-    const info = await getFunctionInfo(client, address);
-    if (!info) {
-      opts.log(`function ${address}: no longer present in Ghidra`);
-      return false;
-    }
-    // The record itself comes from the listing, as the full extraction reads it;
-    // `get_function_info` only says what the function is called now, which a rename
-    // moved. Everything derived later — the body, call edges, platform guards, thunk
-    // targets — is carried forward from the record being replaced.
-    const listed = await listFunctionRecord(client, info.name, info.address).catch(() => null);
-    if (!listed) opts.log(`function ${info.name}: not listed under its name; using get_function_info`);
-    const fresh = listed ?? info;
-    record = existing ? { ...existing, ...defined(fresh) } : fresh;
-  } else {
-    record = { ...existing };
-  }
-  if (!record) return false;
-
-  if (!record.isThunk && !record.isExternal) {
-    try {
-      record.decompiled = await decompileFunction(client, record.address, opts.timeout);
-    } catch (e) {
-      opts.log(`function ${record.name}: decompile failed (${(e as Error).message}); keeping previous body`);
-    }
-  }
+  const fetched = await fetchFunctionRecord(client, existing, addr, opts);
+  if (!fetched) return false;
+  const { record } = fetched;
 
   if (existing) {
     model.primary.functions[model.primary.functions.indexOf(existing)] = record;
@@ -1154,21 +1181,42 @@ async function refreshFunctionFacts(
   const functions: ExtractedFunction[] = [];
   for (const addr of addrs) {
     const fn = indices.fnByAddr.get(addr);
-    if (!fn) continue;
-    for (const key of FACT_KEYS) delete fn[key];
-    functions.push(fn);
+    if (fn) functions.push(fn);
   }
-  if (functions.length === 0) return;
+  // Their old facts are cleared by then, so carrying on would publish these functions
+  // without any: the caller stops the batch instead.
+  let failure = 'unknown';
+  if (!(await readFunctionFacts(model, client, functions, log, m => { failure = m; }))) {
+    throw new FactsRefreshError(failure);
+  }
+}
+
+/**
+ * The facts step of a refresh over the given records, in place: every fact cleared, then
+ * read again with no cache. False when the read failed and the records carry none. Shared
+ * with the model verifier, which runs it over copies.
+ */
+export async function readFunctionFacts(
+  model: LiveModel,
+  client: GhidraConnection,
+  functions: readonly ExtractedFunction[],
+  log: LiveLog,
+  onFailure?: (message: string) => void,
+): Promise<boolean> {
+  for (const fn of functions) for (const key of FACT_KEYS) delete fn[key];
+  if (functions.length === 0) return true;
   // As the full extraction decides it: the compare-site forms are VC8's, PE images only.
   const format = model.primary.programInfo?.format ?? '';
   const compareSites = process.env.GHIDRA_COMPARE_SITES !== '0' && /Portable Executable|\bPE\b/i.test(format);
   try {
-    const stats = await extractFunctionFacts(client, functions, { compareSites });
+    const stats = await extractFunctionFacts(client, [...functions], { compareSites });
     log(`facts: ${stats.extracted} of ${stats.candidates} candidate(s) re-read for ${functions.length} refreshed function(s)`);
+    return true;
   } catch (e) {
-    // Their old facts are already cleared, so carrying on would publish these functions
-    // without any. The caller stops the batch instead.
-    throw new FactsRefreshError((e as Error).message);
+    const message = (e as Error).message;
+    log(`facts: re-read failed (${message}); the refreshed functions carry none`);
+    onFailure?.(message);
+    return false;
   }
 }
 
