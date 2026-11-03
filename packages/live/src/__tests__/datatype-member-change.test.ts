@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
 import { applyEvents, buildIndices, changedMemberTokens, byValueEmbedders, type ChangeEvent, type LiveModel } from '../model.js';
+import { factsScriptOutput } from './fake-facts.js';
 
 /**
  * v1858: three fields of D2DataTableTxtStrc went from `D2AllStatesDataTbl *` to
@@ -45,6 +46,7 @@ function client(freshFields: ReturnType<typeof field>[], decompiled: string[], s
       }
       if (cmd === 'decompile') { decompiled.push(String(params.address)); return { pseudocode: 'void f(void) {}' }; }
       if (cmd === 'get_function_info') return { name: 'f', address: String(params.address), signature: 'void f(void)', returnType: 'void', parameters: [], localVariables: [], callingConvention: '__stdcall', size: 10 };
+      if (cmd === 'execute_script' && factsScriptOutput(params.code) !== null) return { success: true, output: factsScriptOutput(params.code)! };
       if (cmd === 'execute_script') return { success: true, output: '' };
       return {};
     },
