@@ -564,3 +564,241 @@ describe('arith-idioms values', () => {
     }
   });
 });
+
+/**
+ * 32-bit operations the decompiler printed 64 bits wide, which VC8 then compiles to the
+ * long helpers (`_alldiv`, `_aulldiv`, `_aullrem`, `_allmul`) where the original has one
+ * `idiv`, `div` or `imul`. The proof of each fold is in its comment in arith-idioms.ts; the
+ * value checks below compile both sides with the host compiler (-fwrapv: the target wraps)
+ * and compare them over every pair of edge values, and the reciprocals over every 32-bit
+ * value near a multiple of a stride.
+ */
+describe('arith-idioms widened 32-bit arithmetic', () => {
+  // SetAnimationSpeed(pUnit, (int32_t)(0xa00 / (int64_t)nDistance)), 004c5620: `cdq; idiv`.
+  it('narrows a signed division of sign-extended dwords', () => {
+    assert.strictEqual(run('r = (int)(0xa00 / (int64_t)n);', 'int n, int r'), 'r = (int)(0xa00 / n);');
+    assert.strictEqual(run('r = (int)(0x7fffffff / (int64_t)(int)k);', 'uint32_t k, int r'), 'r = (int)(0x7fffffff / (int)k);');
+    assert.strictEqual(run('r = (int)(100000 / (int64_t)(n / 64 + 1));', 'int n, int r'), 'r = (int)(100000 / (n / 64 + 1));');
+    // 004e1400: the AnimLen byte shifted in 64 bits stays below 2^16.
+    assert.strictEqual(run('r = (int32_t)((int64_t)((uint64_t)(uint8_t)c << 8) / (int64_t)n);', 'uint8_t c, int n, int r'),
+      'r = (int32_t)(((uint8_t)c << 8) / n);');
+    // 00542b40: a byte zero-extended, then read as signed.
+    assert.strictEqual(run('r = d - (int)((int64_t)(uint64_t)b / (int64_t)n);', 'uint8_t b, int n, int d, int r'), 'r = d - (int)(b / n);');
+    assert.strictEqual(run('r = (int)((int64_t)x % (int64_t)n);', 'int x, int n, int r'), 'r = (int)(x % n);');
+  });
+
+  it('keeps a division whose operands are not int32 values', () => {
+    for (const [body, decls] of [
+      // A zero-extended dword can reach 2^32 - 1.
+      ['r = (int)((int64_t)(uint64_t)u / (int64_t)n);', 'uint32_t u, int n, int r'],
+      ['r = (int)((int64_t)u / (int64_t)n);', 'uint32_t u, int n, int r'],
+      // Sign-extended into an unsigned 64-bit value: huge, not negative.
+      ['r = (int)((uint64_t)x / (uint64_t)n);', 'int x, int n, int r'],
+      // A byte shifted past bit 31.
+      ['r = (int)((int64_t)((uint64_t)(uint8_t)c << 0x18) / (int64_t)n);', 'uint8_t c, int n, int r'],
+      // The quotient used as 64 bits.
+      ['q = (int64_t)x / (int64_t)n;', 'int x, int n, int64_t q'],
+    ]) {
+      assert.strictEqual(run(body, decls), body, body);
+    }
+  });
+
+  // nSpawnX = (int)nRngProduct + (int)((nRngProduct & 0xffffffff) / 5) * -5 - 2 + ptCenter.x, 0046c320.
+  it('divides the low dword of a 64-bit value in 32 bits, and folds the remainder', () => {
+    assert.strictEqual(run('r = (int)E + (int)((E & 0xffffffff) / 5) * -5 - 2;', 'uint64_t E, int r'), 'r = (int)((uint32_t)E % 5) - 2;');
+    assert.strictEqual(run('r = (uint32_t)((E & 0xffffffff) % (uint64_t)k);', 'uint64_t E, uint32_t k, uint32_t r'), 'r = (uint32_t)((uint32_t)E % k);');
+    // 005a5560: the byte spelling keeps its arithmetic; only the division narrows.
+    assert.strictEqual(run('r = (uint8_t)((char)E + (char)((E & 0xffffffff) / 100) * -100);', 'uint64_t E, uint8_t r'),
+      'r = (uint8_t)((char)E + (char)((uint32_t)E / 100) * -100);');
+    // 00473e50: the low dword of a product is a 32-bit product.
+    assert.strictEqual(run('r = (int)(((int64_t)(int)a * (int64_t)g & 0xffffffffU) / (uint64_t)d);', 'int a, uint32_t g, uint32_t d, int r'),
+      'r = (int)((uint32_t)((int)a * g) / d);');
+  });
+
+  it('keeps a mask, a divisor or a remainder it cannot narrow', () => {
+    for (const [body, decls] of [
+      ['r = (uint32_t)((E & 0xfffffffff) / 5);', 'uint64_t E, uint32_t r'],
+      ['r = (uint32_t)((E & 0xffffffff) / (uint64_t)n);', 'uint64_t E, int n, uint32_t r'],
+      ['r = (uint32_t)((E & 0xffffffff) / F);', 'uint64_t E, uint64_t F, uint32_t r'],
+    ]) {
+      assert.strictEqual(run(body, decls), body, body);
+    }
+    // A different value on the left of the remainder.
+    assert.ok(run('r = (int)F + (int)((E & 0xffffffff) / 5) * -5;', 'uint64_t E, uint64_t F, int r').includes('* -5'));
+  });
+
+  // int x = (int)(0x10001 / (uint64_t)value), 005242f0: `xor edx, edx; div`.
+  it('narrows a constant divided by a zero-extended dword', () => {
+    assert.strictEqual(run('r = (int)(0x10001 / (uint64_t)v);', 'uint32_t v, int r'), 'r = (int)(0x10001 / v);');
+    assert.strictEqual(run('r = (uint32_t)(0x10001 % (uint64_t)v);', 'uint32_t v, uint32_t r'), 'r = (uint32_t)(0x10001 % v);');
+    // A signed divisor is sign-extended by the cast, and a constant past INT_MAX is not an int.
+    assert.strictEqual(run('r = (int)(0x10001 / (uint64_t)n);', 'int n, int r'), 'r = (int)(0x10001 / (uint64_t)n);');
+    assert.strictEqual(run('r = (int)(0x80000000 / (uint64_t)v);', 'uint32_t v, int r'), 'r = (int)(0x80000000 / (uint64_t)v);');
+  });
+
+  // return (int)((uint64_t)sSeedUpdated.nSeedLow * 0xe6c2b449), 00472610: `imul`.
+  it('narrows a truncated 64-bit product', () => {
+    assert.strictEqual(run('r = (int)((uint64_t)s * 0xe6c2b449);', 'uint32_t s, int r'), 'r = (int)(s * 0xe6c2b449);');
+    assert.strictEqual(run('r = (int)((int64_t)a * (int64_t)b);', 'int a, int b, int r'), 'r = (int)((uint32_t)a * b);');
+    assert.strictEqual(run('r = (short)((int64_t)a * 0x10);', 'int a, short r'), 'r = (short int)((uint32_t)a * 0x10);');
+    // A 64-bit factor, or a result kept 64 bits wide.
+    assert.strictEqual(run('r = (int)(q * 3);', 'uint64_t q, int r'), 'r = (int)(q * 3);');
+    assert.strictEqual(run('q = (uint64_t)s * 0xe6c2b449;', 'uint32_t s, uint64_t q'), 'q = (uint64_t)s * 0xe6c2b449;');
+  });
+
+  // cRainStep = -((char)(nRainGradient / 0xc) + (char)(nRainGradient >> 0x1f) - (char)((int64_t)nRainGradient * 0x2aaaaaab >> 0x3f)), 00472890.
+  it('drops the two sign terms of a recovered quotient', () => {
+    assert.strictEqual(run('r = -((char)(x / 0xc) + (char)(x >> 0x1f) - (char)((int64_t)x * 0x2aaaaaab >> 0x3f));', 'int x, char r'),
+      'r = -(char)(x / 0xc);');
+    assert.strictEqual(run("*p = (char)(x / 10) + (char)(x >> 0x1f) - (char)((int64_t)x * 0x66666667 >> 0x3f) + '0';", 'int x, char* p'),
+      "*p = (char)(x / 10) + '0';");
+    assert.strictEqual(run('p[1] = (short int)(x / 0x14) + (short int)(x >> 0x1f) - (short int)((int64_t)x * 0x66666667 >> 0x3f);', 'int x, short* p'),
+      'p[1] = (short int)(x / 0x14);');
+    assert.strictEqual(run('r = (char)(x / 0xff) + (char)(x >> 0x1f) - (char)((int64_t)x * 0x80808081 >> 0x3f);', 'int x, char r'),
+      'r = (char)(x / 0xff);');
+  });
+
+  it('keeps sign terms that do not cancel', () => {
+    for (const [body, decls] of [
+      ['r = (char)(x / 0xc) + (char)(x >> 0x1f) - (char)((int64_t)y * 0x2aaaaaab >> 0x3f);', 'int x, int y, char r'],
+      ['r = (char)(x / 0xc) + (char)(x >> 0x1f) - (short int)((int64_t)x * 0x2aaaaaab >> 0x3f);', 'int x, char r'],
+      // A negative multiplier flips the product's sign.
+      ['r = (char)(x / 0xc) + (char)(x >> 0x1f) - (char)((int64_t)x * -0x2aaaaaab >> 0x3f);', 'int x, char r'],
+      // An unsigned x has no sign to cancel.
+      ['r = (char)(u / 0xc) + (char)(u >> 0x1f) - (char)((int64_t)u * 0x2aaaaaab >> 0x3f);', 'uint32_t u, char r'],
+    ]) {
+      assert.strictEqual(run(body, decls), body, body);
+    }
+  });
+
+  const use = (lines: string[], decls: string) => runLines(lines.map(l => `  ${l}`), decls);
+
+  // nDiv = (int)((uint64_t)((int64_t)nY * -0x66666667) >> 0x20); nY += (nDiv >> 4) - (nDiv >> 0x1f);, 0045aff0.
+  it('writes a reciprocal used in a larger expression back as the division', () => {
+    assert.strictEqual(use(['int t;', 't = (int)((uint64_t)((int64_t)y * -0x66666667) >> 0x20);', 'y += (t >> 4) - (t >> 0x1f);', 'g(y);'], 'int y'),
+      'int t; y += y / -40; g(y);');
+    // 005eb970: the high product is stored back over its own dividend.
+    assert.strictEqual(use(['r = (int)((uint64_t)((int64_t)r * -0x66666667) >> 0x20);', 'a = b + a + ((r >> 2) - (r >> 0x1f));', 'g(a);'], 'int r, int a, int b'),
+      'a = b + a + r / -10; g(a);');
+    // 006735f0: x subtracted back, the quotient scaled.
+    assert.strictEqual(use(['int t;', 't = (int)((uint64_t)((int64_t)p * 0x77777777) >> 0x20) - p;', 'p += ((t >> 3) - (t >> 0x1f)) * 0xf;', 'g(p);'], 'int p'),
+      'int t; p += p / -15 * 0xf; g(p);');
+    // 004da350: stored into a member.
+    assert.strictEqual(use(['int t;', 't = (int)((uint64_t)((int64_t)(a * b) * -0x51eb851f) >> 0x20);', 's->z = (t >> 5) - (t >> 0x1f);'], 'int a, int b, S* s'),
+      'int t; s->z = a * b / -100;');
+    // 00582da0: a call's argument, and the dividend naming t itself.
+    assert.strictEqual(use(['n = (int)((uint64_t)((int64_t)(int)(a * (n >> 8)) * -0x51eb851f) >> 0x20);', 'h(p, ((n >> 5) - (n >> 0x1f)) * 0x100, 0);'], 'int n, int a, int p'),
+      'h(p, (int)(a * (n >> 8)) / -100 * 0x100, 0);');
+    // 006735f0: at the end of a loop body whose next iteration sets t before reading it.
+    assert.strictEqual(use(['int t;', 'for (; y; y--) {', 'g(y);', 'p++;', 't = (int)((uint64_t)((int64_t)p * 0x77777777) >> 0x20) - p;', 'p += ((t >> 3) - (t >> 0x1f)) * 0xf;', '}'], 'int y, int p'),
+      'int t; for (; y; y--) { g(y); p++; p += p / -15 * 0xf; }');
+    // 00605b70: the byte spelling, into a byte.
+    assert.strictEqual(use(['int t;', 'if (c > 0) {', 't = (int)((uint64_t)((int64_t)(int)(uint32_t)c * 0x55555555) >> 0x20) - (uint32_t)c;', 'c += (char)(t >> 1) - (char)(t >> 0x1f);', '}', 'g(c);'], 'uint8_t c'),
+      'int t; if (c > 0) { c += (char)((int)(uint32_t)c / -3); } g(c);');
+  });
+
+  it('keeps a reciprocal whose temporary lives on, or whose context is not modular', () => {
+    const hp = 't = (int)((uint64_t)((int64_t)y * -0x66666667) >> 0x20);';
+    for (const [lines, decls] of [
+      [['int t;', hp, 'y += (t >> 4) - (t >> 0x1f);', 'g(t);'], 'int y'],
+      [['int t;', hp, 'y += (t >> 4) - (t >> 0x1f) + t;'], 'int y'],
+      [['int t;', hp, 'y += (t >> 4) - (t >> 0x1f) + h();'], 'int y'],
+      [['int t;', hp, 'g(h(), (t >> 4) - (t >> 0x1f));'], 'int y'],
+      // A loop that comes round reads t before it is set again, and a jump is followed nowhere.
+      [['int t;', 'do {', 'g(t);', hp, 'y += (t >> 4) - (t >> 0x1f);', '} while (y);'], 'int y'],
+      [['int t;', 'while (t) {', hp, 'y += (t >> 4) - (t >> 0x1f);', '}'], 'int y'],
+      [['int t;', 'for (; y; y--) {', hp, 'y += (t >> 4) - (t >> 0x1f);', 'if (y) break;', '}', 'g(t);'], 'int y'],
+      [['int t;', 'l:', hp, 'y += (t >> 4) - (t >> 0x1f);', 'if (y) goto l;'], 'int y'],
+      // The sign of another value.
+      [['int t;', hp, 'y += (t >> 4) - (y >> 0x1f);'], 'int y'],
+      // A byte difference stored into an int, or under a division, is not the byte quotient.
+      [['int t;', hp, 'n += (char)(t >> 4) - (char)(t >> 0x1f);'], 'int y, int n'],
+      [['int t;', hp, 'c = ((char)(t >> 4) - (char)(t >> 0x1f)) / 2;'], 'int y, char c'],
+    ] as Array<[string[], string]>) {
+      assert.ok(use(lines, decls).includes('>> 0x20'), lines.join(' '));
+    }
+    // A global temporary: a call elsewhere may read it.
+    assert.ok(runLines(['  gnWidth = (int)((uint64_t)((int64_t)y * -0x66666667) >> 0x20);', '  y += (gnWidth >> 4) - (gnWidth >> 0x1f);'], 'int y').includes('>> 0x20'));
+  });
+
+  it('the narrowed operations have the values of what they replace', { skip: !hasNativeGpp() }, () => {
+    // Each case: argument declarations, the statement, the value set of each argument.
+    const cases: Array<{ decls: string; body: string; values: string[]; skip?: string }> = [
+      { decls: 'int n, int r', body: 'r = (int)(0xa00 / (int64_t)n);', values: ['S'], skip: 'n == 0' },
+      { decls: 'int x, int n, int r', body: 'r = (int)((int64_t)x / (int64_t)n);', values: ['S', 'S'], skip: 'n == 0 || (x == (int)0x80000000 && n == -1)' },
+      { decls: 'int x, int n, int r', body: 'r = (int)((int64_t)x % (int64_t)n);', values: ['S', 'S'], skip: 'n == 0 || (x == (int)0x80000000 && n == -1)' },
+      { decls: 'uint8_t c, int n, int r', body: 'r = (int32_t)((int64_t)((uint64_t)(uint8_t)c << 8) / (int64_t)n);', values: ['B', 'S'], skip: 'n == 0' },
+      { decls: 'uint8_t b, int n, int r', body: 'r = 7 - (int)((int64_t)(uint64_t)b / (int64_t)n);', values: ['B', 'S'], skip: 'n == 0' },
+      { decls: 'uint64_t E, int r', body: 'r = (int)E + (int)((E & 0xffffffff) / 5) * -5 - 2;', values: ['Q'] },
+      { decls: 'uint64_t E, int r', body: 'r = (int)E + (int)((E & 0xffffffff) / 0x7fffffff) * -0x7fffffff;', values: ['Q'] },
+      { decls: 'uint64_t E, uint32_t k, uint32_t r', body: 'r = (uint32_t)((E & 0xffffffff) % (uint64_t)k);', values: ['Q', 'U'], skip: 'k == 0' },
+      { decls: 'uint64_t E, uint8_t r', body: 'r = (uint8_t)((char)E + (char)((E & 0xffffffff) / 100) * -100);', values: ['Q'] },
+      { decls: 'int a, uint32_t g, uint32_t d, int r', body: 'r = (int)(((int64_t)(int)a * (int64_t)g & 0xffffffffU) / (uint64_t)d);', values: ['S', 'U', 'U'], skip: 'd == 0' },
+      { decls: 'uint32_t v, int r', body: 'r = (int)(0x10001 / (uint64_t)v);', values: ['U'], skip: 'v == 0' },
+      { decls: 'uint32_t v, uint32_t r', body: 'r = (uint32_t)(0x10001 % (uint64_t)v);', values: ['U'], skip: 'v == 0' },
+      { decls: 'uint32_t s, int r', body: 'r = (int)((uint64_t)s * 0xe6c2b449);', values: ['U'] },
+      { decls: 'int a, int b, int r', body: 'r = (int)((int64_t)a * (int64_t)b);', values: ['S', 'S'] },
+      { decls: 'int x, char r', body: 'r = -((char)(x / 0xc) + (char)(x >> 0x1f) - (char)((int64_t)x * 0x2aaaaaab >> 0x3f));', values: ['S'] },
+      { decls: 'int x, int r', body: 'r = (char)(x / 0xff) + (char)(x >> 0x1f) - (char)((int64_t)x * 0x80808081 >> 0x3f);', values: ['S'] },
+      { decls: 'int x, int r', body: 'r = (short)(x / 0x14) + (short)(x >> 0x1f) - (short)((int64_t)x * 0x66666667 >> 0x3f);', values: ['S'] },
+    ];
+    const VALUES: Record<string, string> = {
+      B: '0, 1, 2, 0x7f, 0x80, 0xfe, 0xff',
+      U: '0u, 1u, 2u, 3u, 5u, 7u, 99u, 100u, 0x7fffffffu, 0x80000000u, 0x80000001u, 0xfffffffeu, 0xffffffffu, 123456789u',
+      S: '0, 1, -1, 2, -2, 3, -3, 10, -10, 255, -255, 256, -256, 0x7fffffff, -0x7fffffff, (int)0x80000000, 123456789, -123456789',
+      Q: '0, 1, 4, 5, 6, 0x7fffffffULL, 0x80000000ULL, 0xffffffffULL, 0x100000000ULL, 0x1000000005ULL, 0xfffffffffffffffbULL, 0xffffffffffffffffULL, 0x123456789abcdefULL',
+    };
+    let src = '#include <stdint.h>\n#include <stdio.h>\n#include <string.h>\nstatic int failures = 0;\n';
+    let main = 'int main(void) {\n';
+    cases.forEach((c, i) => {
+      const folded = run(c.body, c.decls);
+      assert.notStrictEqual(folded, c.body, `case ${i} did not fold: ${c.body}`);
+      const params = c.decls.split(',').map(s => s.trim());
+      const res = params.pop()!;
+      const [resT] = res.split(' ');
+      const args = params.map(p => p.split(' '));
+      const sig = args.map(([t, n]) => `${t} ${n}`).join(', ');
+      src += `static ${resT} a${i}(${sig}) { ${resT} r; ${c.body} return r; }\n`;
+      src += `static ${resT} b${i}(${sig}) { ${resT} r; ${folded} return r; }\n`;
+      let loop = '';
+      let close = '';
+      args.forEach(([t, n], k) => {
+        loop += `{ ${t} v${k}[] = { ${VALUES[c.values[k]]} }; for (unsigned i${k} = 0; i${k} < sizeof v${k} / sizeof v${k}[0]; i${k}++) { ${t} ${n} = v${k}[i${k}]; `;
+        close += '} } ';
+      });
+      const names = args.map(([, n]) => n).join(', ');
+      main += `  ${loop}${c.skip ? `if (${c.skip}) continue; ` : ''}{ ${resT} ra = a${i}(${names}), rb = b${i}(${names}); if (memcmp(&ra, &rb, sizeof ra)) { printf("case ${i}\\n"); failures++; } } ${close}\n`;
+    });
+    // The reciprocals over the 32-bit range, as the signed-reciprocal check does.
+    const recips: Array<{ decls: string; lines: string[] }> = [
+      { decls: 'int y', lines: ['int t;', 't = (int)((uint64_t)((int64_t)y * -0x66666667) >> 0x20);', 'y += (t >> 4) - (t >> 0x1f);'] },
+      { decls: 'int y', lines: ['int t;', 't = (int)((uint64_t)((int64_t)y * -0x66666667) >> 0x20);', 'y += (t >> 2) - (t >> 0x1f);'] },
+      { decls: 'int y', lines: ['int t;', 't = (int)((uint64_t)((int64_t)y * -0x51eb851f) >> 0x20);', 'y = (t >> 5) - (t >> 0x1f);'] },
+      { decls: 'int y', lines: ['int t;', 't = (int)((uint64_t)((int64_t)y * 0x77777777) >> 0x20) - y;', 'y += ((t >> 3) - (t >> 0x1f)) * 0xf;'] },
+      { decls: 'int y', lines: ['int t;', 't = (int)((uint64_t)((int64_t)y * 0x55555555) >> 0x20) - y;', 'y += (t >> 1) - (t >> 0x1f);'] },
+      { decls: 'uint8_t c', lines: ['int t;', 't = (int)((uint64_t)((int64_t)(int)(uint32_t)c * 0x55555555) >> 0x20) - (uint32_t)c;', 'c += (char)(t >> 1) - (char)(t >> 0x1f);'] },
+    ];
+    recips.forEach((c, i) => {
+      const folded = use(c.lines, c.decls);
+      assert.ok(!folded.includes('>> 0x20'), folded);
+      const [t, n] = c.decls.split(' ');
+      src += `static ${t} ra${i}(${t} ${n}) { ${c.lines.join(' ')} return ${n}; }\n`;
+      src += `static ${t} rb${i}(${t} ${n}) { ${folded} return ${n}; }\n`;
+      main += `  for (int64_t v = -0x80000000LL; v <= 0x7fffffffLL; v += (v > -0x80000000LL + 300 && v < 0x7fffffffLL - 300 && (v < -300 || v > 300)) ? 4093 : 1)`
+        + ` { ${t} x = (${t})v; if (ra${i}(x) != rb${i}(x)) { printf("reciprocal ${i} value %lld\\n", (long long)v); failures++; break; } }\n`;
+    });
+    main += '  return failures ? 1 : 0;\n}\n';
+    const dir = mkdtempSync(join(tmpdir(), 'arith-widened-'));
+    writeFileSync(join(dir, 'check.c'), src + main);
+    try {
+      const exe = exePath(join(dir, 'check'));
+      const cc = compileTo(join(dir, 'check.c'), exe, ['-O1', '-w', '-fwrapv']);
+      assert.strictEqual(cc.status, 0, String(cc.error ?? cc.stderr));
+      const res = runExe(exe);
+      assert.strictEqual(res.stdout, '');
+      assert.strictEqual(res.status, 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

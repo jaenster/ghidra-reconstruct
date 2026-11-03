@@ -40,6 +40,14 @@
  *                `(n, (int)n >> 0x1f)` is n sign-extended, `(n, 0)` n
  *                zero-extended - are the operator on `(int64_t)` / `(uint64_t)`.
  *
+ *   widened      32-bit operations the decompiler printed 64 bits wide, which VC8 compiles to
+ *                the long helpers: `(T)(A / B)` of sign-extended int32 values (sdiv-widened),
+ *                `(E & 0xffffffff) / K` (low-word-div) and the remainder spelled with it,
+ *                `(T)((uint64_t)a * K)` (trunc-mul), a constant over a zero-extended dword
+ *                (narrow-div), the doubled sign terms of a recovered quotient
+ *                (narrow-residue), and a signed reciprocal whose quotient is used inside a
+ *                larger expression (signed-div-use). Each fold's comment holds its proof.
+ *
  * Every operand that the idiom repeats must be free of calls and assignments:
  * the rewrite evaluates it once.
  *
@@ -83,12 +91,14 @@ export interface ArithIdiomsOptions extends PluginOptions {
 
 export type ArithIdiom =
   | 'low-dword' | 'narrow-div' | 'magic-div' | 'cast-chain' | 'modulo' | 'divides' | 'pow2-div' | 'long-helper' | 'signed-div'
-  | 'setcc-select' | 'pow2-rem' | 'pow2-rem-test' | 'pow2-rem-mask' | 'u2f';
+  | 'setcc-select' | 'pow2-rem' | 'pow2-rem-test' | 'pow2-rem-mask' | 'u2f'
+  | 'sdiv-widened' | 'low-word-div' | 'trunc-mul' | 'narrow-residue' | 'signed-div-use';
 
 const stats: Record<ArithIdiom, number> = {
   'low-dword': 0, 'narrow-div': 0, 'magic-div': 0, 'cast-chain': 0, 'modulo': 0, 'divides': 0,
   'pow2-div': 0, 'long-helper': 0, 'signed-div': 0, 'setcc-select': 0, 'pow2-rem': 0, 'pow2-rem-test': 0,
   'pow2-rem-mask': 0, 'u2f': 0,
+  'sdiv-widened': 0, 'low-word-div': 0, 'trunc-mul': 0, 'narrow-residue': 0, 'signed-div-use': 0,
 };
 
 /** How many times each idiom has been folded since the last reset. */
@@ -268,7 +278,7 @@ interface Folder {
   typeOf(e: Expression): IntType | null;
   fold(e: Expression): Expression | null;
   foldTruth(e: Expression): Expression | null;
-  foldPair(a: Statement, b: Statement, layout: BranchLayoutEvidence | null | undefined): Statement | null;
+  foldPair(a: Statement, b: Statement, layout: BranchLayoutEvidence | null | undefined, ctx?: RemainderRunContext): Statement | null;
   foldRemainderRun(stmts: Statement[], i: number, ctx: RemainderRunContext): { out: Statement[]; next: number } | null;
   foldRemainderMask(value: Expression): Expression | null;
 }
@@ -417,9 +427,19 @@ function createFolder(shapeOf: ExprShape, o: ArithIdiomsOptions, resolve: Typede
     if (e.kind !== NodeKind.BinaryExpr) return null;
     const b = e as BinaryExpr;
     if (b.operator !== '/' && b.operator !== '%') return null;
-    const a = zeroExtended(b.left as Expression);
-    if (!a) return null;
+    let a = zeroExtended(b.left as Expression);
+    // A constant dividend 0..INT_MAX: an int that converts to the unsigned divisor's type
+    // unchanged (`0x10001 / (uint64_t)v`).
+    let constant = false;
+    if (!a) {
+      const k = intLiteral(b.left as Expression);
+      const lt = k !== null ? literalType(unwrapParens(b.left as Expression) as IntegerLiteralExpr) : null;
+      if (k === null || k > 0x7fffffffn || !lt || lt.bits > 32) return null;
+      a = b.left as Expression;
+      constant = true;
+    }
     let d = zeroExtended(b.right as Expression);
+    if (constant && !d) return null;
     if (!d) {
       const k = intLiteral(b.right as Expression);
       const lt = k !== null ? typeOf(b.right as Expression) : null;
@@ -781,7 +801,242 @@ function createFolder(shapeOf: ExprShape, o: ArithIdiomsOptions, resolve: Typede
     return Expr.conditional(test.c, yes, no);
   };
 
-  const RULES = [foldLongHelper, foldLowDword, foldNarrowDiv, foldMagic, foldCastChain, foldPow2Div, foldModulo, foldDivides, foldSetccSelect];
+  // --- 32-bit arithmetic the decompiler printed 64 bits wide --------------
+
+  /** e in parentheses unless it is a primary expression a cast can stand in front of. */
+  const operandOf = (e: Expression): Expression => {
+    const u = unwrapParens(e);
+    return u.kind === NodeKind.Identifier || u.kind === NodeKind.IntegerLiteral || u.kind === NodeKind.CStyleCastExpr
+      || u.kind === NodeKind.MemberExpr || u.kind === NodeKind.SubscriptExpr || u.kind === NodeKind.CallExpr
+      ? e : Expr.paren(e);
+  };
+
+  /**
+   * A 32-bit expression with the value of the 64-bit e, for an e whose value provably lies in
+   * [INT_MIN, INT_MAX]; null when that is not shown. The result promotes to a signed int.
+   *
+   *   `(int64_t)x`, x a signed integer of at most 32 bits: the sign extension of x, so x.
+   *   `(int64_t)u` or `(uint64_t)u`, u unsigned and narrower than 32 bits: u, at most 0xffff.
+   *   `(int64_t)(uint64_t)u` likewise; `(int64_t)(uint64_t)x` for a signed x is the sign
+   *   extension again (zero- or sign-extending, then reading the 64 bits as signed, of a
+   *   value whose 64-bit pattern is that of x), so x.
+   *   `W << k`, W one of the zero-extensions above of a b-bit u with b + k <= 31: `u << k`,
+   *   which is below 2^31 and so neither overflows the int nor differs from the 64-bit shift.
+   *   A literal of at most 32 bits in [0, INT_MAX]: itself.
+   *   `(int64_t)W` or `(uint64_t)W` of a 64-bit W that narrows: W's narrowing.
+   */
+  const narrowS32 = (e: Expression): Expression | null => {
+    const u = unwrapParens(e);
+    if (u.kind === NodeKind.IntegerLiteral) {
+      const lt = literalType(u as IntegerLiteralExpr);
+      return lt && lt.bits <= 32 && (u as IntegerLiteralExpr).value <= 0x7fffffffn ? u : null;
+    }
+    if (u.kind === NodeKind.BinaryExpr && (u as BinaryExpr).operator === '<<') {
+      const k = intLiteral((u as BinaryExpr).right as Expression);
+      const w = castOf((u as BinaryExpr).left as Expression);
+      if (k === null || !w || w.type.bits !== 64) return null;
+      const t = typeOf(w.inner);
+      if (!t || t.signed || t.bits >= 32 || BigInt(t.bits) + k > 31n) return null;
+      return Expr.binary(operandOf(w.inner), '<<', (u as BinaryExpr).right as Expression);
+    }
+    const c = castOf(u);
+    if (!c || c.type.bits !== 64) return null;
+    let inner = c.inner;
+    // A 64-bit cast of a 64-bit operand only reinterprets the bits; every value narrowS32
+    // admits is in [INT_MIN, INT_MAX] in the operand's own type (an unsigned one never
+    // negative), so the reinterpretation keeps it.
+    if (typeOf(inner)?.bits === 64 && !castOf(inner)) return narrowS32(inner);
+    const mid = castOf(inner);
+    // (int64_t)(uint64_t)x: the outer cast only reinterprets the 64 bits.
+    if (c.type.signed && mid && sameType(mid.type, U64)) {
+      const t = typeOf(mid.inner);
+      if (!t || t.bits > 32) return null;
+      inner = mid.inner;
+      return t.signed || t.bits < 32 ? inner : null;
+    }
+    const t = typeOf(inner);
+    if (!t || t.bits > 32) return null;
+    if (!t.signed) return t.bits < 32 ? inner : null;
+    return c.type.signed ? inner : null;
+  };
+
+  /**
+   * `(T)(A / B)` and `(T)(A % B)`, T an integer type of at most 32 bits and A, B 64-bit
+   * operands whose values are 32-bit signed ints (see narrowS32), is `(T)(a / b)` in int:
+   * both quotients truncate toward zero, and a quotient of two int32 values is an int32
+   * value, except INT_MIN / -1 - which the original's `cdq; idiv` traps on too (#DE), so no
+   * run of the original reaches it. The remainder of two int32 values is an int32 value and
+   * has the dividend's sign in both widths. This is MSVC's `cdq; idiv` the decompiler
+   * printed as a 64-bit SDIV of sign-extended operands, and that VC8 compiles to `_alldiv`.
+   */
+  const foldSdivWidened = (e: Expression): Expression | null => {
+    const outer = castOf(e);
+    if (!outer || outer.type.bits > 32 || outer.type.bits === 1) return null;
+    const d = unwrapParens(outer.inner);
+    if (d.kind !== NodeKind.BinaryExpr) return null;
+    const b = d as BinaryExpr;
+    if (b.operator !== '/' && b.operator !== '%') return null;
+    if (!sameType(typeOf(b), S64)) return null;
+    const x = narrowS32(b.left as Expression);
+    const y = narrowS32(b.right as Expression);
+    if (!x || !y) return null;
+    const asInt = (v: Expression) => {
+      const t = typeOf(v);
+      return t && sameType(promote(t), S32) ? operandOf(v) : castNode('int', operandOf(v));
+    };
+    stats['sdiv-widened']++;
+    return updateNode(outer.node, { expression: Expr.paren(Expr.binary(asInt(x), b.operator, asInt(y))) } as Partial<CStyleCastExpr>);
+  };
+
+  /** E of `E & 0xffffffff` with E a 64-bit integer, else null. */
+  const lowWordOf = (e: Expression): Expression | null => {
+    const u = unwrapParens(e);
+    if (u.kind !== NodeKind.BinaryExpr || (u as BinaryExpr).operator !== '&') return null;
+    if (intLiteral((u as BinaryExpr).right as Expression) !== 0xffffffffn) return null;
+    const x = (u as BinaryExpr).left as Expression;
+    return typeOf(x)?.bits === 64 && isPure(x) ? x : null;
+  };
+
+  /**
+   * `(E & 0xffffffff) / D` and `% D`, E a 64-bit integer and D a zero-extended unsigned dword
+   * or a constant 1..2^32-1, is `(uint64_t)((uint32_t)E / D)`: the mask leaves the low dword
+   * of E, a value below 2^32, and the operands then fit 32 bits as in narrow-div. The type
+   * stays the 64-bit one of the mask (unsigned 64 bits: the literal is an unsigned int and
+   * E 64 bits wide, so a signed E's sum type is int64_t - the value is the same non-negative
+   * number either way, and the cast to uint64_t is then kept only for an unsigned E).
+   */
+  const foldLowWordDiv = (e: Expression): Expression | null => {
+    if (e.kind !== NodeKind.BinaryExpr) return null;
+    const b = e as BinaryExpr;
+    if (b.operator !== '/' && b.operator !== '%') return null;
+    const x = lowWordOf(b.left as Expression);
+    if (!x) return null;
+    const t = typeOf(b);
+    if (!t || t.bits !== 64) return null;
+    let d = zeroExtended(b.right as Expression);
+    if (!d) {
+      const k = intLiteral(b.right as Expression);
+      if (k === null || k < 1n || k > 0xffffffffn || !typeOf(b.right as Expression)) return null;
+      d = b.right as Expression;
+    }
+    stats['low-word-div']++;
+    const low = castNode('uint32_t', operandOf(x));
+    return castNode(t.signed ? 'int64_t' : 'uint64_t', Expr.paren(Expr.binary(truncMul(low) ?? low, b.operator, operandOf(d))));
+  };
+
+  /**
+   * `(C1)E + (C2)((uint32_t)E / K) * -K` (and `- (C2)(...) * K`), C1 and C2 casts to 32-bit
+   * integers or none, E's low dword the same on both sides and 1 <= K <= INT_MAX, is
+   * `(T)((uint32_t)E % K)` with T the type of the sum. In the sum's 32-bit wrapping
+   * arithmetic it is u - (u / K) * K for u the low dword, which is u % K, and that lies in
+   * [0, K) and so is the same number as an int or an unsigned int.
+   */
+  const foldLowWordModulo = (e: Expression): Expression | null => {
+    if (e.kind !== NodeKind.BinaryExpr) return null;
+    const b = e as BinaryExpr;
+    if (b.operator !== '+' && b.operator !== '-') return null;
+    const st = typeOf(b);
+    if (!st || st.bits !== 32) return null;
+    const p = unwrapParens(b.right as Expression);
+    if (p.kind !== NodeKind.BinaryExpr || (p as BinaryExpr).operator !== '*') return null;
+    const q = quotient((p as BinaryExpr).left as Expression);
+    const m = negatedLiteral((p as BinaryExpr).right as Expression);
+    if (!q || m === null || q.n > 0x7fffffffn || m !== (b.operator === '+' ? -q.n : q.n)) return null;
+    const qc = castOf(q.x);
+    if (!qc || !sameType(qc.type, U32)) return null;
+    const left = b.left as Expression;
+    if (castOf(left) && castOf(left)!.type.bits !== 32) return null;
+    const lt = typeOf(left);
+    if (!lt || lt.bits < 32) return null;
+    if (!sameExpr(strip32(left), qc.inner) || !isPure(left)) return null;
+    stats['modulo']++;
+    const rem = Expr.binary(q.x, '%', q.div.right as Expression);
+    return sameType(st, U32) ? rem : castNode(st.signed ? 'int' : 'uint32_t', Expr.paren(rem));
+  };
+
+  /**
+   * `(T)(X * Y)`, T an integer type of at most 32 bits and X * Y a 64-bit product of
+   * operands that are each a 64-bit cast of an integer of at most 32 bits or a literal, is
+   * `(T)(x * y)` in unsigned 32-bit arithmetic: the low 32 bits of a product depend only on
+   * the low 32 bits of its factors, a widening (zero- or sign-) keeps those, and T keeps no
+   * more. The product is taken unsigned so that it wraps instead of overflowing an int.
+   *
+   * A bare `(uint32_t)` of the product is left to the caller that made it (foldLowWordDiv):
+   * it is also the low half of a dword pair, which the long helpers read as one value and
+   * fold whole once they reach their call.
+   */
+  const truncMul = (e: Expression): Expression | null => {
+    const outer = castOf(e);
+    if (!outer || outer.type.bits > 32 || outer.type.bits === 1) return null;
+    const m = unwrapParens(outer.inner);
+    if (m.kind !== NodeKind.BinaryExpr || (m as BinaryExpr).operator !== '*') return null;
+    if (typeOf(m)?.bits !== 64) return null;
+    const low = (v: Expression): Expression | null => {
+      const k = intLiteral(v);
+      if (k !== null) return k <= 0xffffffffn && typeOf(v) ? unwrapParens(v) : null;
+      const c = castOf(v);
+      if (!c || c.type.bits !== 64) return null;
+      const t = typeOf(c.inner);
+      return t && t.bits <= 32 ? c.inner : null;
+    };
+    const x = low((m as BinaryExpr).left as Expression);
+    const y = low((m as BinaryExpr).right as Expression);
+    if (!x || !y) return null;
+    const unsignedX = sameType(typeOf(x), U32) || sameType(typeOf(y), U32) ? operandOf(x) : castNode('uint32_t', operandOf(x));
+    stats['trunc-mul']++;
+    return updateNode(outer.node, { expression: Expr.paren(Expr.binary(unsignedX, '*', operandOf(y))) } as Partial<CStyleCastExpr>);
+  };
+  const foldTruncMul = (e: Expression): Expression | null => {
+    const outer = castOf(e);
+    return outer && sameType(outer.type, U32) && emit(outer.node.type as AnyNode).trim() === 'uint32_t' ? null : truncMul(e);
+  };
+
+  /**
+   * `(c)(x / C) + (c)(x >> 0x1f) - (c)((int64_t)x * M >> 0x3f)`, x a signed int, M a
+   * positive literal below 2^32 and c the same cast (or none) on all three, is `(c)(x / C)`.
+   * |x * M| < 2^31 * 2^32 = 2^63, so the 64-bit product does not overflow and has the sign
+   * of x (it is 0 only for x = 0); `>> 0x3f` of it is then -1 or 0 exactly as `x >> 0x1f`
+   * is, so the two sign terms are the same int and cancel. What is left is the first
+   * term, whose promoted value is the sum's. They are the residue of a magic division whose
+   * quotient the decompiler recovered but whose sign fix-up it printed twice.
+   */
+  const foldNarrowResidue = (e: Expression): Expression | null => {
+    if (e.kind !== NodeKind.BinaryExpr || (e as BinaryExpr).operator !== '-') return null;
+    const sub = e as BinaryExpr;
+    const sum = unwrapParens(sub.left as Expression);
+    if (sum.kind !== NodeKind.BinaryExpr || (sum as BinaryExpr).operator !== '+') return null;
+    const peel = (v: Expression): { cast: string | null; inner: Expression } => {
+      const c = castOf(v);
+      return c && c.type.bits < 64 ? { cast: emit(c.node.type as AnyNode).trim(), inner: unwrapParens(c.inner) } : { cast: null, inner: unwrapParens(v) };
+    };
+    const first = peel((sum as BinaryExpr).left as Expression);
+    const sign = peel((sum as BinaryExpr).right as Expression);
+    const hi = peel(sub.right as Expression);
+    if (first.cast !== sign.cast || sign.cast !== hi.cast) return null;
+    // x >> 0x1f
+    if (sign.inner.kind !== NodeKind.BinaryExpr || (sign.inner as BinaryExpr).operator !== '>>'
+        || intLiteral((sign.inner as BinaryExpr).right as Expression) !== 31n) return null;
+    const x = (sign.inner as BinaryExpr).left as Expression;
+    if (!sameType(typeOf(x), S32) || !isPure(x)) return null;
+    // (int64_t)x * M >> 0x3f
+    if (hi.inner.kind !== NodeKind.BinaryExpr || (hi.inner as BinaryExpr).operator !== '>>'
+        || intLiteral((hi.inner as BinaryExpr).right as Expression) !== 63n) return null;
+    const mul = unwrapParens((hi.inner as BinaryExpr).left as Expression);
+    if (mul.kind !== NodeKind.BinaryExpr || (mul as BinaryExpr).operator !== '*') return null;
+    const sx = castOf((mul as BinaryExpr).left as Expression);
+    const mv = intLiteral((mul as BinaryExpr).right as Expression);
+    if (!sx || !sameType(sx.type, S64) || !sameExpr(sx.inner, x) || mv === null || mv < 1n || mv > 0xffffffffn) return null;
+    // (c)(x / C)
+    if (first.inner.kind !== NodeKind.BinaryExpr || (first.inner as BinaryExpr).operator !== '/'
+        || !sameExpr((first.inner as BinaryExpr).left as Expression, x)) return null;
+    stats['narrow-residue']++;
+    return Expr.paren((sum as BinaryExpr).left as Expression);
+  };
+
+  const RULES = [
+    foldLongHelper, foldLowDword, foldLowWordDiv, foldNarrowDiv, foldMagic, foldSdivWidened, foldTruncMul, foldCastChain,
+    foldPow2Div, foldLowWordModulo, foldModulo, foldDivides, foldSetccSelect, foldNarrowResidue,
+  ];
 
   /** One idiom at the root of e, its result folded again. */
   const fold = (e: Expression): Expression | null => {
@@ -1307,6 +1562,27 @@ function createFolder(shapeOf: ExprShape, o: ArithIdiomsOptions, resolve: Typede
    * each is checked by computing its reciprocal, so an approximate constant never
    * folds. t's value between the two statements is read nowhere else.
    */
+  /** d where `hp` shifted right by s and rounded toward zero is exactly `x / d`, else null. */
+  const reciprocalDivisor = (hp: { m: bigint; add: bigint }, s: number): bigint | null => {
+    if (hp.add < -1n || hp.add > 1n) return null;
+    // M + add * 2^32 ~ 2^(32+S) / d.
+    const eff = hp.m + hp.add * (1n << 32n);
+    if (eff === 0n) return null;
+    const approx = (1n << BigInt(32 + s)) / eff;
+    for (const d of [approx - 1n, approx, approx + 1n]) {
+      const r = signedReciprocal(d);
+      if (r && r.m === hp.m && r.s === s && BigInt(r.add) === hp.add) return d;
+    }
+    return null;
+  };
+
+  const quotientExpr = (x: Expression, d: bigint): BinaryExpr => {
+    const xu = unwrapParens(x);
+    const dividend = xu.kind === NodeKind.BinaryExpr || xu.kind === NodeKind.ConditionalExpr ? Expr.paren(x) : x;
+    const divisor = d < 0n ? Expr.unary('-', Expr.intLiteral(-d)) : Expr.intLiteral(d);
+    return Expr.binary(dividend, '/', divisor);
+  };
+
   const foldSignedDiv = (a: Statement, b: Statement): Statement | null => {
     if (b.kind !== NodeKind.ExprStmt) return null;
     const asg = assignmentOf(a);
@@ -1318,26 +1594,126 @@ function createFolder(shapeOf: ExprShape, o: ArithIdiomsOptions, resolve: Typede
     const be = unwrapParens((b as ExprStmt).expression);
     if (be.kind !== NodeKind.AssignExpr || (be as AssignExpr).operator !== '=' || identName((be as AssignExpr).left as Expression) !== asg.name) return null;
     const s = roundedShiftOf((be as AssignExpr).right as Expression, asg.name);
-    if (s === null || hp.add < -1n || hp.add > 1n) return null;
-    // M + add * 2^32 ~ 2^(32+S) / d.
-    const eff = hp.m + hp.add * (1n << 32n);
-    if (eff === 0n) return null;
-    const approx = (1n << BigInt(32 + s)) / eff;
-    for (const d of [approx - 1n, approx, approx + 1n]) {
-      const r = signedReciprocal(d);
-      if (!r || r.m !== hp.m || r.s !== s || BigInt(r.add) !== hp.add) continue;
-      stats['signed-div']++;
-      const xu = unwrapParens(hp.x);
-      const dividend = xu.kind === NodeKind.BinaryExpr || xu.kind === NodeKind.ConditionalExpr ? Expr.paren(hp.x) : hp.x;
-      const divisor = d < 0n ? Expr.unary('-', Expr.intLiteral(-d)) : Expr.intLiteral(d);
-      return asg.with(Expr.binary(dividend, '/', divisor));
+    if (s === null) return null;
+    const d = reciprocalDivisor(hp, s);
+    if (d === null) return null;
+    stats['signed-div']++;
+    return asg.with(quotientExpr(hp.x, d));
+  };
+
+  /** The bit width of an assignment target, or null. */
+  const widthOf = (e: Expression): number | null => typeOf(e)?.bits ?? null;
+
+  /**
+   * `t = (int)((uint64_t)((int64_t)x * M) >> 0x20) [± x];` followed by a statement that
+   * reads t only in `(t >> S) - (t >> 0x1f)` is that statement with `x / d` in its place, as
+   * foldSignedDiv proves, when t is a local whose value is read nowhere after. The decompiler
+   * leaves the high product in its own statement when the quotient is not stored back to t
+   * but used in a larger expression (`nY += (t >> 4) - (t >> 0x1f)`; MSVC's reciprocal for a
+   * negative divisor, which Ghidra does not fold).
+   *
+   * Spelled `(c)(t >> S) - (c)(t >> 0x1f)` with c a cast to an integer of b < 32 bits, the
+   * difference agrees with `(c)(x / d)` modulo 2^b only, so it is taken only where every
+   * operator between it and an assignment into a target of at most b bits is `+`, `-`, `*`
+   * or unary `-`, all of which keep the value modulo 2^b. The second statement must be an
+   * assignment free of calls and of any other store, so that x is read there with the value
+   * it had in the first.
+   */
+  const foldSignedDivUse = (a: Statement, b: Statement, ctx: RemainderRunContext | undefined): Statement | null => {
+    if (!ctx || a.kind !== NodeKind.ExprStmt || b.kind !== NodeKind.ExprStmt) return null;
+    const asg = assignmentOf(a);
+    if (!asg || !ctx.isLocal(asg.name)) return null;
+    if (!sameType(typeOf({ kind: NodeKind.Identifier, name: asg.name } as unknown as Expression), S32)) return null;
+    const hp = highProductOf(asg.value);
+    if (!hp) return null;
+    const be = unwrapParens((b as ExprStmt).expression);
+    // A call of a named function with pure arguments reads x before the callee runs, as an
+    // assignment's right side does before the store.
+    if (be.kind === NodeKind.CallExpr) {
+      const call = be as CallExpr;
+      if (calleeName(call.callee) === undefined || !call.arguments.every(a => isPure(a as Expression))) return null;
+    } else if (be.kind === NodeKind.AssignExpr) {
+      const as = be as AssignExpr;
+      if (as.operator !== '=' && as.operator !== '+=' && as.operator !== '-=') return null;
+      if (!isPure(as.left as Expression) || !isPure(as.right as Expression)) return null;
+      if (mentionsName(as.left, asg.name)) return null;
+    } else {
+      return null;
     }
-    return null;
+    // Needed only for a byte or word spelling of the difference, which a call argument never is.
+    const target = be.kind === NodeKind.AssignExpr ? widthOf((be as AssignExpr).left as Expression) ?? 64 : 64;
+    const modularRoot = be.kind === NodeKind.AssignExpr;
+
+    let found = 0;
+    let dividend: Expression = hp.x;
+    /** e with the rounded shift of t replaced; `modular` while only mod-2^b-safe operators lie above. */
+    const replace = (e: Expression, modular: boolean): Expression => {
+      const u = unwrapParens(e);
+      const s = roundedShiftOf(u, asg.name);
+      if (s !== null) {
+        const d = reciprocalDivisor(hp, s);
+        if (d === null) return e;
+        found++;
+        return Expr.paren(quotientExpr(dividend, d));
+      }
+      if (u.kind === NodeKind.BinaryExpr && (u as BinaryExpr).operator === '-') {
+        const l = castOf((u as BinaryExpr).left as Expression);
+        const r = castOf((u as BinaryExpr).right as Expression);
+        if (modular && l && r && l.type.bits < 32 && l.type.bits > 1 && sameType(l.type, r.type) && target <= l.type.bits) {
+          const inner = Expr.binary(l.inner, '-', r.inner);
+          const sh = roundedShiftOf(inner, asg.name);
+          const d = sh === null ? null : reciprocalDivisor(hp, sh);
+          if (d !== null) {
+            found++;
+            return updateNode(l.node, { expression: Expr.paren(quotientExpr(dividend, d)) } as Partial<CStyleCastExpr>);
+          }
+        }
+      }
+      if (u.kind === NodeKind.BinaryExpr) {
+        const bo = u as BinaryExpr;
+        const keeps = modular && (bo.operator === '+' || bo.operator === '-' || bo.operator === '*');
+        const left = replace(bo.left as Expression, keeps);
+        const right = replace(bo.right as Expression, keeps);
+        return left === bo.left && right === bo.right ? e : updateNode(bo, { left, right } as Partial<BinaryExpr>);
+      }
+      if (u.kind === NodeKind.UnaryExpr) {
+        const uo = u as UnaryExpr;
+        const operand = replace(uo.operand as Expression, modular && uo.operator === '-');
+        return operand === uo.operand ? e : updateNode(uo, { operand } as Partial<UnaryExpr>);
+      }
+      if (u.kind === NodeKind.CStyleCastExpr) {
+        const c = u as CStyleCastExpr;
+        const inner = replace(c.expression as Expression, false);
+        return inner === c.expression ? e : updateNode(c, { expression: inner } as Partial<CStyleCastExpr>);
+      }
+      return e;
+    };
+    // t may be read nowhere else in the statement; x itself may name t (`t = hi(t * M)`),
+    // since with the first statement gone t still holds x there.
+    const rewrite = (): Expression | null => {
+      if (be.kind === NodeKind.AssignExpr) {
+        const as = be as AssignExpr;
+        const right = replace(as.right as Expression, modularRoot);
+        return right === as.right ? null : updateNode(as, { right } as Partial<AssignExpr>);
+      }
+      const call = be as CallExpr;
+      const args = call.arguments.map(a => replace(a as Expression, false));
+      return args.every((a, i) => a === call.arguments[i]) ? null : updateNode(call, { arguments: args } as Partial<CallExpr>);
+    };
+    dividend = { kind: NodeKind.IntegerLiteral, value: 1n, base: 10, raw: '1' } as unknown as Expression;
+    const probe = rewrite();
+    if (!probe || found !== 1 || mentionsName(probe, asg.name)) return null;
+    found = 0;
+    dividend = hp.x;
+    const out = rewrite();
+    if (!out || !ctx.deadAfter(asg.name, b, [a, b])) return null;
+    stats['signed-div-use']++;
+    return updateNode(b as ExprStmt, { expression: out } as Partial<ExprStmt>);
   };
 
   /** A statement and the one after it folded into one, or null. */
-  const foldPair = (a: Statement, b: Statement, layout: BranchLayoutEvidence | null | undefined): Statement | null =>
-    foldPow2Rem(a, b, layout) ?? foldU2F(a, b, layout) ?? foldSignedDiv(a, b);
+  const foldPair = (a: Statement, b: Statement, layout: BranchLayoutEvidence | null | undefined, ctx?: RemainderRunContext): Statement | null =>
+    foldPow2Rem(a, b, layout) ?? foldU2F(a, b, layout) ?? foldSignedDiv(a, b) ?? foldSignedDivUse(a, b, ctx);
 
   return { typeOf, fold, foldTruth, foldPair, foldRemainderRun, foldRemainderMask };
 }
@@ -1393,7 +1769,7 @@ const LOOPS = new Set<NodeKind>([NodeKind.WhileStmt, NodeKind.DoWhileStmt, NodeK
  * transformer copies every node it passes, but a copy keeps its `location` object, so a
  * statement is found again by that.
  */
-function createLiveness(body: CompoundStmt): (name: string, after: Statement, run: Statement[]) => boolean {
+function createLiveness(body: CompoundStmt, throughLoops = false): (name: string, after: Statement, run: Statement[]) => boolean {
   const paths = new Map<object, BlockFrame[]>();
   let jumps = false;
   const listOf = (s: Statement): Statement[] => s.kind === NodeKind.CompoundStmt ? (s as CompoundStmt).statements : [s];
@@ -1448,6 +1824,26 @@ function createLiveness(body: CompoundStmt): (name: string, after: Statement, ru
         if (t === 'read' || e === 'read') return 'read';
         return t === 'kill' && e === 'kill' ? 'kill' : 'none';
       }
+      case NodeKind.DoWhileStmt: {
+        if (!throughLoops) break;
+        // A loop that does not name it neither reads nor kills it; its break and continue stay in it.
+        if (!mentionsName(s, name)) return 'none';
+        // The body runs at least once; a break or continue in it reads (see the default).
+        const f = flow((s as DoWhileStmt).body, name);
+        if (f !== 'none') return f;
+        return mentionsName((s as DoWhileStmt).condition, name) ? 'read' : 'none';
+      }
+      case NodeKind.WhileStmt: case NodeKind.ForStmt: {
+        if (!throughLoops) break;
+        if (!mentionsName(s, name)) return 'none';
+        // The body may not run at all: it can read the name, never kill it for the code after.
+        const head = s.kind === NodeKind.ForStmt
+          ? [(s as ForStmt).init, (s as ForStmt).condition, (s as ForStmt).increment] : [(s as WhileStmt).condition];
+        if (head.some(h => mentionsName(h, name))) return 'read';
+        return flow((s as WhileStmt).body, name) === 'read' ? 'read' : 'none';
+      }
+    }
+    switch (s.kind) {
       default:
         // Loops, switches, jumps: followed nowhere; anything that mentions the name reads it.
         return mentionsName(s, name) || s.kind === NodeKind.BreakStmt || s.kind === NodeKind.ContinueStmt
@@ -1474,6 +1870,15 @@ function createLiveness(body: CompoundStmt): (name: string, after: Statement, ru
       if (f !== 'none') return f === 'kill';
       // Past the end of this block control goes on after its owner - unless that is a loop.
       if (owner === null) return true;
+      if (throughLoops && LOOPS.has(owner.kind) && owner.kind !== NodeKind.ForRangeStmt) {
+        // Past the end of a loop body control reaches the loop's own expressions, then the
+        // body from its start or the statement after the loop. Neither the expressions nor
+        // the body's start may read the name; after the loop is the next level's question.
+        const cond = (owner as WhileStmt | DoWhileStmt | ForStmt).condition;
+        if (mentionsName(cond, name) || (owner.kind === NodeKind.ForStmt && mentionsName((owner as ForStmt).increment, name))) return false;
+        if (seq(stmts, name) === 'read') return false;
+        continue;
+      }
       if (LOOPS.has(owner.kind) || (owner.kind !== NodeKind.IfStmt && owner.kind !== NodeKind.CompoundStmt)) return false;
     }
     return true;
@@ -1516,7 +1921,12 @@ export function createArithIdiomsTransformer(options?: PluginOptions): Transform
   return createTransformer({
     visitFunctionDecl(node: FunctionDecl): ASTNode | undefined {
       if (!node.body) return undefined;
-      const { folder } = functionFolder(node, o, resolve);
+      const { localTypes, folder } = functionFolder(node, o, resolve);
+      const pairCtx: RemainderRunContext = {
+        layout: o.branchLayout,
+        isLocal: name => localTypes.has(name),
+        deadAfter: createLiveness(node.body as CompoundStmt, true),
+      };
 
       let changed = false;
       const truth = <T extends ASTNode>(n: T, key: keyof T): T | undefined => {
@@ -1560,7 +1970,7 @@ export function createArithIdiomsTransformer(options?: PluginOptions): Transform
           const stmts = (n as CompoundStmt).statements;
           let out: Statement[] | null = null;
           for (let i = 0; i < stmts.length; i++) {
-            const folded = i + 1 < stmts.length ? folder.foldPair(stmts[i], stmts[i + 1], o.branchLayout) : null;
+            const folded = i + 1 < stmts.length ? folder.foldPair(stmts[i], stmts[i + 1], o.branchLayout, pairCtx) : null;
             if (!folded) { out?.push(stmts[i]); continue; }
             out ??= stmts.slice(0, i);
             const dropped = stmts[i + 1];
