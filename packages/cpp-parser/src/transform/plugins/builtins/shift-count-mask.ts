@@ -16,17 +16,34 @@
  * whose test bounds it, a value an earlier test excludes. There `n & 0x1f == n`, and
  * the shift's type is its left operand's whatever the count's type, so the
  * expression's value and type are unchanged. Anywhere else the mask stays.
+ *
+ * Where the mask stays, a narrowing integer cast in the count goes: the decompiler takes
+ * the count from CL, so it prints `(uint8_t)` (or `(char)`) over an int it read whole -
+ *
+ *   pBitStream->nBitAccum |= nBitsValue << ((uint8_t)pBitStream->nBitsHeld & 0x1f);
+ *
+ * where the original loads the int field with `mov ecx, dword ptr [eax+0x10]` and VC8
+ * compiles the cast to a MOVZX byte load (BITSTREAM_WriteBits 0041d950). A cast to any
+ * integer type of 8 or more bits keeps the low eight bits of its operand, a sum or
+ * difference's low five bits depend on only its operands' low five, and the mask keeps
+ * just those five: `(T)n & 0x1f == n & 0x1f` for every n. So the cast goes where it
+ * stands as the count, or as an operand of a `+`/`-` that is the count, and its operand
+ * is an integer of at most 32 bits whose type is known. A count the mask drops keeps its
+ * casts: there the range was proven for the cast's value, not its operand's.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
-  ASTNode, AssignExpr, BinaryExpr, Expression, FunctionDecl, IntegerLiteralExpr, ParenExpr,
+  ASTNode, AssignExpr, BinaryExpr, CStyleCastExpr, Expression, FunctionDecl, IntegerLiteralExpr, ParenExpr,
 } from '../../../ast/nodes.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { createPlugin } from '../registry.js';
 import { unwrapParens, type TypedefResolver } from './call-arg-cast.js';
 import { createFunctionRanges, type ValueRange } from './value-range.js';
+import { shapeOfNode } from './call-arg-cast.js';
+import { createExprShape, type ExprShape } from './expr-shape.js';
+import { localTypesOf } from './compare-form.js';
 
 export interface ShiftCountMaskOptions extends PluginOptions {
   enumTypes?: string[];
@@ -43,8 +60,8 @@ export interface ShiftCountMaskOptions extends PluginOptions {
 
 const SHIFTS = new Set(['<<', '>>', '<<=', '>>=']);
 
-/** The count of a masked shift: `C` of `(C & 0x1f)` / `(0x1f & C)`. */
-function maskedCount(e: Expression): { count: Expression } | null {
+/** The count of a masked shift: `C` of `(C & 0x1f)` / `(0x1f & C)`, and its side of the `&`. */
+function maskedCount(e: Expression): { count: Expression; mask: BinaryExpr; side: 'left' | 'right' } | null {
   const x = unwrapParens(e);
   if (x.kind !== NodeKind.BinaryExpr || (x as BinaryExpr).operator !== '&') return null;
   const b = x as BinaryExpr;
@@ -52,9 +69,45 @@ function maskedCount(e: Expression): { count: Expression } | null {
     const u = unwrapParens(n);
     return u.kind === NodeKind.IntegerLiteral && (u as IntegerLiteralExpr).value === 0x1fn;
   };
-  if (is31(b.right)) return { count: b.left };
-  if (is31(b.left)) return { count: b.right };
+  if (is31(b.right)) return { count: b.left, mask: b, side: 'left' };
+  if (is31(b.left)) return { count: b.right, mask: b, side: 'right' };
   return null;
+}
+
+/** Integer types of 8 to 32 bits, after typedef resolution. */
+const INT32_OR_NARROWER = new Set([
+  'char', 'signed char', 'unsigned char', 'int8_t', 'uint8_t', 'uchar', 'byte', 'BYTE', 'UCHAR', 'sbyte',
+  'short', 'short int', 'unsigned short', 'int16_t', 'uint16_t', 'ushort', 'word', 'WORD', 'USHORT', 'SHORT', 'sword',
+  'int', 'signed', 'signed int', 'unsigned', 'unsigned int', 'int32_t', 'uint32_t', 'uint', 'dword', 'DWORD',
+  'UINT', 'INT', 'long', 'long int', 'unsigned long', 'ulong', 'LONG', 'ULONG', 'BOOL', 'sdword',
+]);
+
+/**
+ * `c` with each narrowing integer cast that stands as the count, or as an operand of a
+ * `+`/`-` that is the count, replaced by its operand; `c` itself when none goes. Only for a
+ * count the mask keeps (see the header).
+ */
+function stripCountCasts(c: Expression, shapeOf: ExprShape, resolve: TypedefResolver, depth = 0): Expression {
+  const x = unwrapParens(c);
+  if (x.kind === NodeKind.CStyleCastExpr) {
+    const cast = x as CStyleCastExpr;
+    const to = shapeOfNode(cast.type, 0, resolve);
+    if (!to || to.stars !== 0 || !INT32_OR_NARROWER.has(to.base)) return c;
+    const inner = unwrapParens(cast.expression);
+    const from = shapeOf(inner);
+    if (!from || from.stars !== 0 || !INT32_OR_NARROWER.has(from.base)) return c;
+    return primary(inner) ? inner : {
+      kind: NodeKind.ParenExpr, expression: inner, location: inner.location, leadingTrivia: [], trailingTrivia: [],
+    } as ParenExpr;
+  }
+  if (depth < 4 && x.kind === NodeKind.BinaryExpr && ((x as BinaryExpr).operator === '+' || (x as BinaryExpr).operator === '-')) {
+    const b = x as BinaryExpr;
+    const left = stripCountCasts(b.left, shapeOf, resolve, depth + 1);
+    const right = stripCountCasts(b.right, shapeOf, resolve, depth + 1);
+    if (left === b.left && right === b.right) return c;
+    return updateNode(b, { left, right } as Partial<BinaryExpr>) as Expression;
+  }
+  return c;
 }
 
 /** A count that can stand as a shift's right operand without parentheses. */
@@ -103,11 +156,11 @@ export function createShiftCountMaskTransformer(options?: PluginOptions): Transf
   return createTransformer({
     visitFunctionDecl(node: FunctionDecl): ASTNode | undefined {
       if (!node.body) return undefined;
-      const sites: { shift: BinaryExpr | AssignExpr; count: Expression }[] = [];
+      const sites: { shift: BinaryExpr | AssignExpr; count: Expression; mask: BinaryExpr; side: 'left' | 'right' }[] = [];
       const find = (n: ASTNode) => {
         if ((n.kind === NodeKind.BinaryExpr || n.kind === NodeKind.AssignExpr) && SHIFTS.has((n as BinaryExpr).operator)) {
           const m = maskedCount((n as BinaryExpr).right);
-          if (m) sites.push({ shift: n as BinaryExpr, count: m.count });
+          if (m) sites.push({ shift: n as BinaryExpr, count: m.count, mask: m.mask, side: m.side });
         }
         for (const key of Object.keys(n)) {
           if (key === 'location' || key === 'leadingTrivia' || key === 'trailingTrivia') continue;
@@ -130,11 +183,28 @@ export function createShiftCountMaskTransformer(options?: PluginOptions): Transf
         resolve,
       });
       const counts = new Map<ASTNode, Expression>();
+      let shapeOf: ExprShape | undefined;
       for (const s of sites) {
         const r = ranges.rangeAt(s.count);
         const dropped = !!r && r.lo >= 0 && r.hi <= 31;
         o.onSite?.({ line: s.shift.location?.start?.line ?? 0, dropped, range: r, shift: s.shift, count: s.count });
-        if (!dropped) continue;
+        if (!dropped) {
+          shapeOf ??= createExprShape(localTypesOf(node), {
+            globalTypes: o.globalTypes ?? {},
+            enclosingVarTypes: o.enclosingVarTypes ?? {},
+            structFields: o.structFields ?? {},
+            fieldTypes: o.fieldTypes ?? {},
+            returnTypes: o.functionReturnTypes ?? {},
+            resolve,
+          });
+          const stripped = stripCountCasts(s.count, shapeOf, resolve);
+          if (stripped === s.count) continue;
+          const mask = updateNode(s.mask, { [s.side]: stripped } as Partial<BinaryExpr>) as Expression;
+          counts.set(s.shift, {
+            kind: NodeKind.ParenExpr, expression: mask, location: s.mask.location, leadingTrivia: [], trailingTrivia: [],
+          } as ParenExpr);
+          continue;
+        }
         const c = unwrapParens(s.count);
         const right: Expression = primary(c) ? c : {
           kind: NodeKind.ParenExpr, expression: c, location: c.location, leadingTrivia: [], trailingTrivia: [],

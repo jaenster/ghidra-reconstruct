@@ -299,3 +299,61 @@ describe('shift-count-mask: output', () => {
     assert.ok(parse(out));
   });
 });
+
+/** The rewrite with field types, as codegen passes them. */
+const withFields = (code: string, structFields: Record<string, Record<string, string>> = {}) =>
+  emit(createShiftCountMaskTransformer({ structFields })(parse(code)) as AnyNode).trim();
+
+describe('shift-count-mask: a narrowing cast in a kept count goes', () => {
+  const S = { Strm: { nBitsHeld: 'int', nSmall: 'uint8_t', fRate: 'float' } };
+
+  // BITSTREAM_WriteBits 0041d950: `mov ecx, dword ptr [eax+0x10]; shl edx, cl`.
+  it('an int field the decompiler read as CL', () => {
+    assert.strictEqual(withFields('uint32_t f(Strm* p, uint32_t v) { return v << ((uint8_t)p->nBitsHeld & 0x1f); }', S),
+      'uint32_t f(Strm* p, uint32_t v) {\n  return v << (p->nBitsHeld & 0x1f);\n}');
+  });
+
+  it('a parameter, a local, and the operands of a sum or difference', () => {
+    assert.match(withFields('uint32_t f(int a, int b) { return 1u << ((char)a & 0x1f); }'), /1u << \(a & 0x1f\)/);
+    assert.match(withFields('uint32_t f(int a, int b) { int n = a; return (uint32_t)b >> (0x20U - (uint8_t)n & 0x1f); }'),
+      /b >> \(0x20U - n & 0x1f\)/);
+    assert.match(withFields('uint32_t f(int a, int b) { b <<= ((uint8_t)a + 4U & 0x1f); return b; }'), /b <<= \(?a \+ 4U & 0x1f\)?;/);
+  });
+
+  it('an operand of unknown, wider or non-integer type keeps its cast', () => {
+    const keep = [
+      'uint32_t f(Strm* p, uint32_t v) { return v << ((uint8_t)p->fRate & 0x1f); }',
+      'uint32_t f(long long a, uint32_t v) { return v << ((uint8_t)a & 0x1f); }',
+      'uint32_t f(Strm* p, uint32_t v) { return v << ((uint8_t)p->nUnknown & 0x1f); }',
+      'uint32_t f(int a, uint32_t v) { return v << ((uint8_t)g(a) & 0x1f); }',
+    ];
+    for (const src of keep) assert.match(withFields(src, S), /\(uint8_t\)/, src);
+  });
+
+  it('a count the mask drops keeps its cast: the range was proven for the cast', () => {
+    assert.match(withFields('uint32_t f(int a, int b) { return 1u << ((uint8_t)(a & 7) & 0x1f); }'),
+      /1u << \(uint8_t\)\(a & 7\);/);
+  });
+
+  it('the stripped count computes what the masked cast count did', native, () => {
+    const cases = [
+      'uint32_t f(int a, int b) { return (uint32_t)b << ((uint8_t)a & 0x1f); }',
+      'uint32_t f(int a, int b) { return (uint32_t)b >> ((char)a & 0x1f); }',
+      'uint32_t f(int a, int b) { return b >> ((uint16_t)a & 0x1f); }',
+      'uint32_t f(int a, int b) { return (uint32_t)b >> (0x20U - (uint8_t)a & 0x1f); }',
+      'uint32_t f(int a, int b) { return (uint32_t)b << ((char)a + (uint8_t)b - 3 & 0x1f); }',
+    ];
+    const parts: string[] = [];
+    cases.forEach((src, i) => {
+      const out = withFields(src);
+      assert.doesNotMatch(out, /\((?:uint8_t|char|uint16_t)\)a/, out);
+      parts.push(`namespace ref${i} {\n${src}\n}`, `namespace low${i} {\n${out}\n}`);
+    });
+    const body = [
+      `const int V[] = ${GRID};`,
+      ...cases.map((_, i) => `{ long diff = 0; for (int a : V) for (int b : V) if (ref${i}::f(a, b) != low${i}::f(a, b)) diff++; printf("%ld ", diff); }`),
+      'printf("\\n");',
+    ].join('\n');
+    assert.strictEqual(compileAndRun(parts.join('\n'), body).trim(), cases.map(() => '0').join(' '));
+  });
+});
