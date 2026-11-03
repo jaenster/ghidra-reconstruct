@@ -55,7 +55,7 @@ import {
 import { WorkQueue } from './queue.js';
 import { verifyResume, PollingChangeStream, SEQ_PER_VERSION, type ChangeFeed } from './events.js';
 import { localWorkerEnabled } from '@ghidra-mcp/reconstruct/local-worker';
-import { buildFingerprint, checkBuild } from './build-fingerprint.js';
+import { generatorFingerprint, checkBuild } from './build-fingerprint.js';
 import {
   selectDirtyUnits,
   computeHashCache,
@@ -248,6 +248,26 @@ export class LiveLoop {
     log: m => this.log(m),
   });
   private foreignTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * The generator fingerprint the tree on disk was emitted under (persisted as
+   * `buildId`). Differs from `buildId` between a detected change and the rebuild
+   * that applies it.
+   */
+  private builtWith: string | null = null;
+  /** Its last value seen by the watch, which polls it synchronously. */
+  private generatorPolled: string | null = null;
+  /** The generator's own inputs: its code, override bodies, project.json, output switches. */
+  private readonly generatorWatch = new ForeignSourceWatch({
+    current: () => {
+      if (!this.generatorPolled) throw new Error('not read yet');
+      return this.generatorPolled;
+    },
+    built: () => this.builtWith,
+    idle: () => this.phase === 'idle' && !this.queue.isBlocked && !this.queue.busy
+      && !this.needsFullResync && !this.stream?.isPaused && !this.proposals.holding,
+    rebuild: (from, to) => this.foreignRebuild(from, to, 'generator inputs'),
+    log: m => this.log(m),
+  }, 'generator inputs');
   private foreignReferences: Array<{ path: string; addressBase?: string | number }> = [];
 
   constructor(cfg: Config) {
@@ -359,10 +379,8 @@ export class LiveLoop {
       // A rebuilt generator invalidates every cached unit, but NOT the model - the
       // model came from Ghidra and is still exactly right. So this forces a full
       // re-emit rather than a resync.
-      const build = checkBuild(
-        (state as { buildId?: string }).buildId,
-        await buildFingerprint(this.cfg.repoRoot),
-      );
+      this.builtWith = (state as { buildId?: string }).buildId ?? null;
+      const build = checkBuild(this.builtWith, await this.generatorNow());
       this.buildId = build.fingerprint;
       if (!build.reusable) {
         this.log(`generator check: ${build.reason}`);
@@ -416,11 +434,25 @@ export class LiveLoop {
   private async startForeignWatch(): Promise<void> {
     const config = await loadProjectConfig(this.cfg.projectDir);
     this.foreignReferences = config?.foreignReferences ?? [];
-    if (this.foreignReferences.length === 0) return;
     const ms = Number(process.env.D2_LIVE_FOREIGN_POLL_MS ?? '30000');
-    this.log(`watching ${this.foreignReferences.length} foreign source path(s) every ${ms / 1000}s; built from ${this.builtForeignFingerprint() ?? 'unknown'}`);
-    this.foreignTimer = setInterval(() => { void this.foreignWatch.check(); }, ms);
+    this.log(`watching the generator's inputs and ${this.foreignReferences.length} foreign source path(s) every ${ms / 1000}s; ` +
+      `generator built ${this.builtWith ?? 'unknown'}, foreign built ${this.builtForeignFingerprint() ?? 'unknown'}`);
+    this.foreignTimer = setInterval(() => {
+      void (async () => {
+        try { this.generatorPolled = await this.generatorNow(); } catch { this.generatorPolled = null; }
+        // project.json may have gained or lost a foreign path; its own change is the
+        // generator watch's, and the list here must follow it.
+        try { this.foreignReferences = (await loadProjectConfig(this.cfg.projectDir))?.foreignReferences ?? []; } catch { /* keep the last */ }
+        // The generator first: its rebuild is a full one and covers the foreign sources too.
+        if ((await this.generatorWatch.check()) === 'rebuilt') return;
+        await this.foreignWatch.check();
+      })();
+    }, ms);
     this.foreignTimer.unref?.();
+  }
+
+  private generatorNow(): Promise<string> {
+    return generatorFingerprint(this.cfg.repoRoot, this.cfg.projectDir);
   }
 
   private currentForeignFingerprint(): string {
@@ -443,11 +475,11 @@ export class LiveLoop {
    * extern entries or constructor answers changed. Counted as the units whose .cpp
    * the regen commit touched.
    */
-  private async foreignRebuild(from: string | null, to: string): Promise<number | null> {
+  private async foreignRebuild(from: string | null, to: string, what = 'foreign sources'): Promise<number | null> {
     const before = await this.regenHead();
     await this.queue.submit({
       kind: 'rebuild',
-      describe: `foreign sources changed (${from ?? 'unknown'} -> ${to})`,
+      describe: `${what} changed (${from ?? 'unknown'} -> ${to})`,
       run: async () => {
         this.phase = 'rebuilding';
         try {
@@ -642,7 +674,7 @@ export class LiveLoop {
    * new behaviour while every reused unit still carries the old.
    */
   private async guardBuild(): Promise<void> {
-    const build = checkBuild(this.buildId, await buildFingerprint(this.cfg.repoRoot));
+    const build = checkBuild(this.buildId, await this.generatorNow());
     if (!build.reusable) {
       this.log(`generator changed mid-life: ${build.reason}`);
       this.hashCache = null;
@@ -713,6 +745,7 @@ export class LiveLoop {
     // after a successful generation means a failed one leaves the previous cache
     // in place and the next attempt re-selects the same units, rather than
     // believing work was done that was not.
+    this.builtWith = this.buildId;
     this.hashCache = computeHashCache({
       functions: this.model.primary.functions,
       dataTypes: this.model.primary.dataTypes,
@@ -922,6 +955,12 @@ export class LiveLoop {
       queuedEvents: this.stream.queuedCount,
       needsFullResync: this.needsFullResync,
       queue: this.queue.status(),
+      generator: {
+        built: this.builtWith,
+        current: this.buildId,
+        lastChange: this.generatorWatch.last,
+        error: this.generatorWatch.lastError,
+      },
       foreignSources: {
         paths: this.foreignReferences.map(r => r.path),
         built: this.builtForeignFingerprint(),

@@ -22,8 +22,8 @@
 
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { readdir, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { readdir, readFile, stat } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 
 /**
  * The packages that decide the emitted bytes. Deliberately a list rather than
@@ -85,6 +85,109 @@ async function walk(dir: string): Promise<string[]> {
   return out;
 }
 
+/**
+ * Environment switches that change what the generator emits (each read where it
+ * decides: impl.ts artifact lowering, the goto validator and copy policy, the
+ * branch-layout search). The daemon's environment carries them into every
+ * generation, so they belong to the generator the tree was emitted by.
+ */
+export const OUTPUT_ENV_SWITCHES = [
+  'RECON_ARTIFACT_LOWERING',
+  'GHIDRA_GOTO_VALIDATOR',
+  'GHIDRA_GOTO_COPY_POLICY',
+  'GHIDRA_BRANCH_LAYOUT_W1',
+  'GHIDRA_BRANCH_LAYOUT_SEARCH',
+] as const;
+
+/**
+ * The override bodies the generator ships (`overrides/`, with its registry). They
+ * are not compiled, so the dist fingerprint does not see them, yet the generator
+ * emits them verbatim: a checkout that changes only an override body is a new
+ * generator. Hashed by content.
+ */
+export async function builtinOverridesFingerprint(repoRoot: string): Promise<string> {
+  const hash = createHash('sha256');
+  const dir = join(repoRoot, 'overrides');
+  for (const file of await walkAll(dir)) {
+    hash.update(`${file.slice(dir.length)}\u0000`);
+    hash.update(await readFile(file));
+    hash.update('\u0000');
+  }
+  return hash.digest('hex').slice(0, 16);
+}
+
+/**
+ * The generator's configuration outside its own repository: the project's
+ * project.json (modules, type ownership, overrides and their patches, templates,
+ * foreign references...), the content of every override source it names, and the
+ * output switches in `env`. Any change can move any unit - a function into another
+ * module, a type into another header - so it is treated as a new generator: every
+ * unit is emitted again. The foreign sources' CONTENT is not part of this; it is
+ * watched on its own and needs only a re-selection (foreign-watch.ts).
+ */
+export async function configFingerprint(projectDir: string, env: NodeJS.ProcessEnv = process.env): Promise<string> {
+  const hash = createHash('sha256');
+  let raw = '';
+  try {
+    raw = await readFile(join(projectDir, 'project.json'), 'utf-8');
+  } catch {
+    raw = '\u0000missing';
+  }
+  hash.update(`project.json\u0000${raw}\u0000`);
+  let overrides: Array<{ sourceFile?: string }> = [];
+  try {
+    overrides = (JSON.parse(raw) as { overrides?: Array<{ sourceFile?: string }> }).overrides ?? [];
+  } catch {
+    // An unparsable project.json fails the generation; its text is already hashed.
+  }
+  for (const o of overrides) {
+    if (!o.sourceFile) continue;
+    const path = resolve(projectDir, o.sourceFile);
+    let text: string;
+    try {
+      text = await readFile(path, 'utf-8');
+    } catch {
+      text = '\u0000missing';
+    }
+    hash.update(`${o.sourceFile}\u0000${text}\u0000`);
+  }
+  for (const name of OUTPUT_ENV_SWITCHES) hash.update(`${name}=${env[name] ?? ''}\u0000`);
+  return hash.digest('hex').slice(0, 16);
+}
+
+/**
+ * Everything the cached output was emitted under besides the model and the foreign
+ * sources: the compiled generator, its override bodies, and its configuration.
+ */
+export async function generatorFingerprint(
+  repoRoot: string,
+  projectDir: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<string> {
+  const parts = [
+    await buildFingerprint(repoRoot),
+    await builtinOverridesFingerprint(repoRoot),
+    await configFingerprint(projectDir, env),
+  ];
+  return createHash('sha256').update(parts.join('|')).digest('hex').slice(0, 16);
+}
+
+async function walkAll(dir: string): Promise<string[]> {
+  const out: string[] = [];
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const e of entries.sort((a, b) => (a.name < b.name ? -1 : 1))) {
+    const full = join(dir, e.name);
+    if (e.isDirectory()) out.push(...(await walkAll(full)));
+    else out.push(full);
+  }
+  return out;
+}
+
 export interface BuildCheck {
   fingerprint: string;
   /** True when reused output from the previous run can still be trusted. */
@@ -105,8 +208,8 @@ export function checkBuild(previous: string | null | undefined, current: string)
       fingerprint: current,
       reusable: false,
       reason:
-        `the generator was rebuilt (${previous} -> ${current}); every cached unit was ` +
-        `emitted by code that no longer exists, so all of them are re-emitted`,
+        `the generator, its overrides or its configuration changed (${previous} -> ${current}); ` +
+        `every cached unit was emitted under inputs that no longer hold, so all of them are re-emitted`,
     };
   }
   return { fingerprint: current, reusable: true, reason: 'generator unchanged since the last rebuild' };

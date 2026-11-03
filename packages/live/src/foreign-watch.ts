@@ -43,7 +43,12 @@ export class ForeignSourceWatch {
   lastError: string | null = null;
   private running = false;
 
-  constructor(private readonly host: ForeignWatchHost) {}
+  /**
+   * `label` names the input in the log. The same watch serves the generator's own
+   * inputs (build-fingerprint.ts generatorFingerprint), whose change makes the
+   * rebuild a full one.
+   */
+  constructor(private readonly host: ForeignWatchHost, private readonly label = 'foreign sources') {}
 
   async check(): Promise<ForeignCheck> {
     if (this.running || !this.host.idle()) return 'busy';
@@ -53,7 +58,7 @@ export class ForeignSourceWatch {
       this.lastError = null;
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
-      if (message !== this.lastError) this.host.log(`foreign sources unreadable: ${message}`);
+      if (message !== this.lastError) this.host.log(`${this.label} unreadable: ${message}`);
       this.lastError = message;
       return 'unreadable';
     }
@@ -64,14 +69,14 @@ export class ForeignSourceWatch {
     if (this.last?.outcome === 'failed' && this.last.to === now && this.last.from === built) return 'failed';
     this.running = true;
     try {
-      this.host.log(`foreign sources changed (${built ?? 'unknown'} -> ${now}): re-selecting statics and extern entries`);
+      this.host.log(`${this.label} changed (${built ?? 'unknown'} -> ${now}): rebuilding`);
       const n = await this.host.rebuild(built, now);
       this.last = { at: new Date().toISOString(), from: built, to: now, unitsChanged: n, outcome: 'rebuilt' };
-      this.host.log(`foreign sources changed: ${n ?? '?'} unit(s) re-emitted`);
+      this.host.log(`${this.label} changed: ${n ?? '?'} unit(s) re-emitted`);
       return 'rebuilt';
     } catch (e) {
       this.last = { at: new Date().toISOString(), from: built, to: now, unitsChanged: null, outcome: 'failed' };
-      this.host.log(`foreign sources rebuild failed: ${e instanceof Error ? e.message : String(e)}`);
+      this.host.log(`${this.label} rebuild failed: ${e instanceof Error ? e.message : String(e)}`);
       return 'failed';
     } finally {
       this.running = false;
