@@ -125,6 +125,8 @@ import {
 import { buildModuleGraph } from '../modules/builder.js';
 import { hashFunction, hashDataType, hashGlobal } from '../modules/buildinfo.js';
 import { warningRows, formatWarningsTsv, WARNINGS_TSV } from './warning-facts.js';
+import { keepForeignReferencedGlobalsExternal, keepDataRunsWhole, fileLocalGlobalKey } from './file-local-globals.js';
+import { noteGlobalScopeReason, resetGlobalScopeTrace, setGlobalScopeTraceImplMap, reportGlobalScopeTrace } from './global-scope-trace.js';
 
 /**
  * Refuse a model that carries a type whose members were never read.
@@ -271,7 +273,8 @@ interface UnitEmitRecord {
   /**
    * Address keys of the functions this unit's text defines `static`. A caller added
    * in another unit makes one extern again without touching this unit's inputs, so
-   * text written under a different set is never reused. Absent: none.
+   * text written under a different set is never reused. The globals it defines
+   * `static` are recorded the same way, as `G:<address>`. Absent: none.
    */
   statics?: string[];
   /**
@@ -1602,6 +1605,8 @@ export function generateProjectStage1(
         for (const [k, v] of unsortedMap) funcToImpl.set(k, v);
       }
       const initializerReferencedNames = collectInitializerReferencedNames(analyzedGlobals);
+      resetGlobalScopeTrace();
+      setGlobalScopeTraceImplMap(funcToImpl);
       computeFileLocalGlobals(analyzedGlobals, funcToImpl, initializerReferencedNames);
       const rescoped = reconcileStaticScopeWithBodyReferences(analyzedGlobals, functions, funcToImpl, allDataTypeNames, programInfo?.imageBase, strings ?? []);
       if (rescoped.promotedToGlobal || rescoped.promotedToFileLocal) {
@@ -1614,6 +1619,11 @@ export function generateProjectStage1(
       const reclaimed = promoteInitializerReferencedGlobals(analyzedGlobals);
       if (reclaimed > 0) {
         console.log(`Globals kept external (named by a global initializer): ${reclaimed}`);
+      }
+      const pinned = keepForeignReferencedGlobalsExternal(analyzedGlobals, foreignSources);
+      const split = keepDataRunsWhole(analyzedGlobals, funcToImpl);
+      if (pinned || split) {
+        console.log(`Globals kept external: ${pinned} named by foreign source, ${split} in a data run that cannot move whole`);
       }
     }
 
@@ -1677,9 +1687,13 @@ export function generateProjectStage1(
     if (options.promoteStaticGlobals && analyzedGlobals.length > 0) {
       genMark('setup/global-scopes', () => {
         const funcToImpl = buildFuncToImplPathMap(functions, classes, namespaces, options, '');
+        resetGlobalScopeTrace();
+        setGlobalScopeTraceImplMap(funcToImpl);
         computeFileLocalGlobals(analyzedGlobals, funcToImpl, collectInitializerReferencedNames(analyzedGlobals));
         reconcileStaticScopeWithBodyReferences(analyzedGlobals, functions, funcToImpl, allDataTypeNames, programInfo?.imageBase, strings ?? []);
         promoteInitializerReferencedGlobals(analyzedGlobals);
+        keepForeignReferencedGlobalsExternal(analyzedGlobals, foreignSources);
+        keepDataRunsWhole(analyzedGlobals, funcToImpl);
       });
     }
 
@@ -1767,6 +1781,11 @@ export function generateProjectStage2(state: GenerationState): ReconstructedProj
         `name, with no compiler or linker diagnostic: ${names.slice(0, 20).join(', ')}` +
         (names.length > 20 ? `, +${names.length - 20} more` : '')
       );
+    }
+    const scopeReasons = reportGlobalScopeTrace(analyzedGlobals);
+    if (scopeReasons && scopeReasons.size > 0) {
+      const parts = [...scopeReasons].sort((a, b) => b[1] - a[1]).map(([r, n]) => `${r}=${n}`);
+      console.log(`Globals external although one file uses them: ${parts.join(', ')}`);
     }
     const duplicateLinkage = findDuplicateLinkageNames(analyzedGlobals);
     if (duplicateLinkage.length > 0) {
@@ -2878,6 +2897,15 @@ export function biasedTableReaders(
   return out;
 }
 
+/** Whether the token at `at` is the member name of a `.` or `->` access. */
+function isMemberAccessAt(text: string, at: number): boolean {
+  let i = at - 1;
+  while (i >= 0 && (text[i] === ' ' || text[i] === '\t' || text[i] === '\n' || text[i] === '\r')) i--;
+  if (i < 0) return false;
+  if (text[i] === '.') return true;
+  return text[i] === '>' && i > 0 && text[i - 1] === '-';
+}
+
 export function reconcileStaticScopeWithBodyReferences(
   analyzedGlobals: AnalyzedDataSymbol[],
   functions: ExtractedFunction[],
@@ -2931,13 +2959,20 @@ export function reconcileStaticScopeWithBodyReferences(
     token.lastIndex = 0;
     let m: RegExpExecArray | null;
     const seen = new Set<string>();
+    // A parameter or local of the same name shadows the symbol in this body, so
+    // the body's uses of the name are the local's.
+    const ownNames = new Set<string>();
+    for (const v of func.parameters ?? []) if (v.name) ownNames.add(v.name);
+    for (const v of func.localVariables ?? []) if (v.name) ownNames.add(v.name);
     while ((m = token.exec(body)) !== null) {
       const text = m[0];
       const lead = text.charCodeAt(0);
       const isIdentifier = lead === 0x5f /* _ */
         || (lead >= 0x41 && lead <= 0x5a) || (lead >= 0x61 && lead <= 0x7a);
       if (isIdentifier) {
-        if (seen.has(text) || !candidates.has(text)) continue;
+        if (seen.has(text) || !candidates.has(text) || ownNames.has(text)) continue;
+        // `pArg->szProduct` and `rec.szProduct` name a member, never the global.
+        if (isMemberAccessAt(body, m.index)) continue;
         seen.add(text);
         let fns = namingFunctions.get(text);
         if (!fns) { fns = new Set(); namingFunctions.set(text, fns); }
@@ -3057,13 +3092,31 @@ export function reconcileStaticScopeWithBodyReferences(
       if (!path) { unresolved = true; break; }
       files.add(path);
     }
-    void files; void unresolved;
+    const why = initializerReferenced.has(name) && fns.size <= 1 ? 'initializer-address-literal'
+      : unresolved ? 'bodies-unmapped-function'
+      : files.size > 1 ? 'bodies-in-several-files'
+      : 'bodies-in-one-file';
+    // Several bodies, all in ONE file, and nothing outside the code names it: file
+    // scope holds. A file-local keeps the file `computeFileLocalGlobals` gave it; a
+    // root function-local static whose owner is in that file widens to it. Only one
+    // symbol may hold the name - two would be one name for two objects in a file.
+    if (why === 'bodies-in-one-file' && !initializerReferenced.has(name) && globalsWithName.length === 1) {
+      const g = globalsWithName[0];
+      const file = [...files][0];
+      if (g.scope === 'file-local' && g.ownerFile === file) continue;
+      if (g.scope === 'static-local' && !g.namespace && g.ownerFunction
+          && funcNameToImplPath.get(g.ownerFunction) === file) {
+        g.scope = 'file-local';
+        g.ownerFile = file;
+        g.ownerFunction = undefined;
+        promotedToFileLocal++;
+        continue;
+      }
+    }
     for (const g of globalsWithName) {
-      // File scope is NOT a safe halfway house: globals.h emits a fallback
-      // extern for any symbol more than one body names, so a `static` that
-      // several functions share is a declaration nothing can satisfy however
-      // the functions are distributed over files. More than one body ⇒ a
-      // global.
+      noteGlobalScopeReason(g, `reconcile:${why}${g.scope === 'static-local' ? ':was-static-local' : ''}`);
+      // Bodies in several files, an unmapped one, a data initializer, or a name
+      // two symbols share: no single file can hold the `static`.
       g.scope = 'global';
       g.ownerFile = undefined;
       g.ownerFunction = undefined;
@@ -3499,15 +3552,15 @@ export function computeFileLocalGlobals(
   const referenced = initializerReferencedNames ?? collectInitializerReferencedNames(analyzedGlobals);
   for (const g of analyzedGlobals) {
     if (g.scope !== 'global') continue;
-    if (!g.referencingFunctions || g.referencingFunctions.length === 0) continue;
+    if (!g.referencingFunctions || g.referencingFunctions.length === 0) { noteGlobalScopeReason(g, 'no-referencing-functions'); continue; }
 
     // Skip file-local promotion for namespaced globals — a namespace indicates
     // the symbol is part of that subsystem's interface, not an internal detail
-    if (g.namespace) continue;
+    if (g.namespace) { noteGlobalScopeReason(g, 'namespaced'); continue; }
 
     // A global initializer takes this symbol's address: it is named at namespace
     // scope in a globals unit, which no `static` can satisfy.
-    if (isInitializerReferencedName(g, referenced)) continue;
+    if (isInitializerReferencedName(g, referenced)) { noteGlobalScopeReason(g, 'initializer-named'); continue; }
 
     let targetFile: string | undefined;
     let allSameFile = true;
@@ -3515,12 +3568,14 @@ export function computeFileLocalGlobals(
       const implPath = funcNameToImplPath.get(funcName);
       if (!implPath) {
         allSameFile = false;
+        noteGlobalScopeReason(g, 'unmapped-function');
         break;
       }
       if (targetFile === undefined) {
         targetFile = implPath;
       } else if (implPath !== targetFile) {
         allSameFile = false;
+        noteGlobalScopeReason(g, 'several-files');
         break;
       }
     }
@@ -4258,10 +4313,11 @@ function generateFilesForFunctions(
     // Inject file-local globals for this specific impl file
     const prevFileLocals = context.fileLocalGlobals;
     if (context.analyzedGlobals) {
+      // In address order: the original linked a TU's data as one run in that order.
       context.fileLocalGlobals = context.analyzedGlobals.filter(
         g => g.scope === 'file-local' && g.ownerFile === implPath
           && !isUnreferenceableArtifact(g, allAnalyzedGlobalNames)
-      );
+      ).sort((a, b) => Number.parseInt(a.address, 16) - Number.parseInt(b.address, 16));
       if (context.fileLocalGlobals.length === 0) {
         context.fileLocalGlobals = undefined;
       }
@@ -4291,6 +4347,10 @@ function generateFilesForFunctions(
         ...(context.fileStaticFunctions?.has(k) ? [k] : []),
         ...(context.externEntries?.has(k) ? [`${k}${EXTERN_ENTRY_SUFFIX}`] : []),
       ])
+      // The globals this unit defines `static` are a whole-program decision too: a
+      // second TU starting to use one makes it extern again without touching this
+      // unit's inputs, and text written under another set is never reused.
+      .concat((context.fileLocalGlobals ?? []).map(fileLocalGlobalKey))
       .sort();
     const previousStatics = unitIdentifierCounts.get(unitName)?.statics ?? [];
     const placementNow: PlacementLookup = {
@@ -5367,6 +5427,7 @@ export function promoteInitializerReferencedGlobals(globals: AnalyzedDataSymbol[
   for (const g of globals) {
     if (g.scope !== 'static-local' && g.scope !== 'file-local') continue;
     if (!isInitializerReferencedName(g, referenced)) continue;
+    noteGlobalScopeReason(g, 'initializer-named-late');
     g.scope = 'global';
     g.ownerFile = undefined;
     g.ownerFunction = undefined;

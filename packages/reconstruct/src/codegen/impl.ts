@@ -48,7 +48,7 @@ import { templateRegistry } from './templates/registry.js';
 import { declarationHead } from './calling-convention.js';
 import { fileStaticKey } from './file-static-functions.js';
 import { emittedParameterName, getAggregateTypeNames } from './platform-types.js';
-import { generateStaticLocalsBlock, emitDataValue, setInitializerOwnerAddress, inferArrayDeclaration, isWideTextDatum, normalizeArrayDeclaration, braceArrayInitializer, isFuncDefTypedefName, getKnownFuncDefTypedefs, getKnownEnumConstants, setInitializerNamespace, renderGlobalScalarInitializer, recordDeclaredName } from './globals-header.js';
+import { normalizeGlobalDeclType, generateStaticLocalsBlock, emitDataValue, setInitializerOwnerAddress, inferArrayDeclaration, isWideTextDatum, normalizeArrayDeclaration, braceArrayInitializer, isFuncDefTypedefName, getKnownFuncDefTypedefs, getKnownEnumConstants, setInitializerNamespace, renderGlobalScalarInitializer, recordDeclaredName } from './globals-header.js';
 
 
 /**
@@ -1084,9 +1084,7 @@ export function generateImplementation(
     if (forward.length > 0) lines.push(...forward, '');
   }
 
-  // File-local globals are deferred until after function bodies are generated,
-  // so we can filter out globals whose names don't appear in any function body.
-  const fileLocalInsertIndex = lines.length;
+  // File-local globals are emitted after the bodies, at rootTypedefInsertIndex.
   // Reset accumulated identifiers for this file
   if (context) {
     context._fileIdentifiers = undefined;
@@ -1179,12 +1177,17 @@ export function generateImplementation(
   // Now that all function bodies have been generated and _fileIdentifiers accumulated,
   // emit file-local globals filtered by actual usage, spliced at the deferred position.
   if (context?.fileLocalGlobals && context.fileLocalGlobals.length > 0) {
-    // These are spliced INSIDE the namespace block opened above, so a pointer
-    // initializer naming another namespace's symbol resolves from in there.
-    setInitializerNamespace(useNamespace ? resolvedNamespace : undefined);
+    // A file-local is a ROOT symbol (namespaced ones are never demoted), so it is
+    // defined at root scope, BEFORE the namespace opens - where globals.h declared
+    // it and globals.cpp defined it until it moved here. Its type and its
+    // initializer then resolve exactly as they did there: inside the namespace a
+    // same-named namespace hides a root struct (`IgnoreList`), and a body's `::x`
+    // finds nothing in it.
+    setInitializerNamespace(undefined);
     const fileLocalLines: string[] = [];
     for (const global of context.fileLocalGlobals) {
-      let type = global.suggestedType || global.dataType;
+      // The spelling globals.h and globals.cpp give the same symbol.
+      let type = normalizeGlobalDeclType(global.suggestedType || global.dataType);
       let name = global.suggestedName || global.name;
       const aliasLine = globalAliasComment(global);
       if (aliasLine) fileLocalLines.push(aliasLine);
@@ -1212,7 +1215,7 @@ export function generateImplementation(
       // conflicting declaration in this TU and a phantom symbol in every other.
       recordDeclaredName(name);
 
-      const guardLine = globalGuardLine(name, guardQualifiedName(useNamespace ? namespace : undefined, name),
+      const guardLine = globalGuardLine(name, guardQualifiedName(undefined, name),
         'static', hasDefinitionInitializer(global));
       if (global.initializedData) {
         const arrayInfo = inferArrayDeclaration(global);
@@ -1262,7 +1265,7 @@ export function generateImplementation(
     setInitializerNamespace(undefined);
 
     if (fileLocalLines.length > 0) {
-      lines.splice(fileLocalInsertIndex, 0, ...fileLocalLines, '');
+      lines.splice(rootTypedefInsertIndex, 0, ...fileLocalLines, '');
     }
   }
 

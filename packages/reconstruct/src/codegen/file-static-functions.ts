@@ -299,7 +299,7 @@ export function foreignSourcesFingerprint(entries: ReadonlyArray<ForeignEntry>, 
  * as length-prefixed runs. Parameter type names come out too, which only keeps more
  * extern.
  */
-function mangledSourceNames(symbol: string): string[] {
+export function mangledSourceNames(symbol: string): string[] {
   const m = /^_+Z/.exec(symbol);
   if (!m) return [];
   const names: string[] = [];
@@ -363,7 +363,7 @@ function initializerValues(dv: DataValue | undefined, out: string[]): void {
  * Every name a body references (the last segment of a qualified chain) and every
  * integer literal in it, each with whether a call follows it.
  */
-function scanReferences(
+export function scanReferences(
   text: string,
   onName: (name: string, call: boolean) => void,
   onInteger: (value: number, call: boolean) => void,

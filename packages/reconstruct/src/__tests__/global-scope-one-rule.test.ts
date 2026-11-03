@@ -95,7 +95,9 @@ describe('one rule decides whether a global is `static`', () => {
     assert.strictEqual(table.ownerFunction, undefined);
   });
 
-  it('promotes even when every naming body is in ONE file — globals.h still externs it', () => {
+  it('widens to file scope when every naming body is in ONE file', () => {
+    // globals.h's multi-body fallback extern skips a file-local, so a `static`
+    // that several functions of one file share is declared exactly once.
     const g: AnalyzedDataSymbol = {
       name: 'gaColorDistanceLookup', address: '008e9430', dataType: 'undefined4',
       suggestedType: 'uint32_t', size: 4, isInitialized: true, value: '0',
@@ -108,7 +110,61 @@ describe('one rule decides whether a global is `static`', () => {
     reconcileStaticScopeWithBodyReferences(
       [g], funcs, new Map([['A', 'D2Client/Draw.cpp'], ['B', 'D2Client/Draw.cpp']]), new Set(),
     );
+    assert.strictEqual(g.scope, 'file-local');
+    assert.strictEqual(g.ownerFile, 'D2Client/Draw.cpp');
+    assert.strictEqual(g.ownerFunction, undefined);
+  });
+
+  it('keeps a several-body symbol global when two symbols share its name', () => {
+    const mk = (address: string, owner: string): AnalyzedDataSymbol => ({
+      name: 'gShared', address, dataType: 'int', suggestedType: 'int', size: 4,
+      isInitialized: true, value: '0', xrefCount: 1, scope: 'static-local', ownerFunction: owner,
+    } as unknown as AnalyzedDataSymbol);
+    const a = mk('00700000', 'A'); const b = mk('00700010', 'B');
+    reconcileStaticScopeWithBodyReferences(
+      [a, b],
+      [makeFunc({ name: 'A', decompiled: 'void A(){ gShared = 1; }' }), makeFunc({ name: 'B', decompiled: 'void B(){ gShared = 2; }' })],
+      new Map([['A', 'X.cpp'], ['B', 'X.cpp']]), new Set(),
+    );
+    assert.strictEqual(a.scope, 'global');
+    assert.strictEqual(b.scope, 'global');
+  });
+
+  it('keeps a namespaced function-local static global when bodies in one file share it', () => {
+    const g: AnalyzedDataSymbol = {
+      name: 'gNsLocal', address: '00700000', dataType: 'int', suggestedType: 'int', size: 4,
+      isInitialized: true, value: '0', xrefCount: 1, scope: 'static-local', ownerFunction: 'A',
+      namespace: 'D2Client::UI',
+    } as unknown as AnalyzedDataSymbol;
+    reconcileStaticScopeWithBodyReferences(
+      [g],
+      [makeFunc({ name: 'A', decompiled: 'void A(){ gNsLocal = 1; }' }), makeFunc({ name: 'B', decompiled: 'void B(){ gNsLocal = 2; }' })],
+      new Map([['A', 'X.cpp'], ['B', 'X.cpp']]), new Set(),
+    );
     assert.strictEqual(g.scope, 'global');
+  });
+
+  it('does not count a member access or a same-named local as a reference', () => {
+    // `pArg->szProduct` in crashy.cpp named a FIELD; it kept szProduct, and with it
+    // the whole of ErrorManager.cpp's data run, in globals.h.
+    const g: AnalyzedDataSymbol = {
+      name: 'szProduct', address: '0074d86c', dataType: 'char *', suggestedType: 'char *',
+      size: 4, isInitialized: true, value: '0', xrefCount: 2, scope: 'file-local',
+      ownerFile: 'Fog/Src/ErrorManager.cpp', referencingFunctions: ['A', 'B'],
+    } as unknown as AnalyzedDataSymbol;
+    const funcs = [
+      makeFunc({ name: 'A', decompiled: 'void A(){ szProduct = "x"; }' }),
+      makeFunc({ name: 'B', decompiled: 'void B(){ Print(szProduct); }' }),
+      makeFunc({ name: 'C', decompiled: 'void C(Args *pArg){ if (pArg->szProduct) Append(pArg -> szProduct); x = rec.szProduct; }' }),
+      makeFunc({ name: 'D', decompiled: 'void D(char *szProduct){ Print(szProduct); }',
+        parameters: [{ name: 'szProduct', dataType: 'char *', size: 4, ordinal: 0 }] }),
+    ];
+    reconcileStaticScopeWithBodyReferences([g], funcs, new Map([
+      ['A', 'Fog/Src/ErrorManager.cpp'], ['B', 'Fog/Src/ErrorManager.cpp'],
+      ['C', 'Fog/3rdparty/crashy.cpp'], ['D', 'Fog/Other.cpp'],
+    ]), new Set());
+    assert.strictEqual(g.scope, 'file-local');
+    assert.strictEqual(g.ownerFile, 'Fog/Src/ErrorManager.cpp');
   });
 
   it('leaves a single-body static alone', () => {
@@ -144,8 +200,10 @@ describe('one rule decides whether a global is `static`', () => {
       new Map([['SCompCompress', 'Storm/Source/SSComp.cpp'], ['SCompDecompress', 'Storm/Source/SSComp.cpp']]),
       new Set(),
     );
-    assert.strictEqual(r.promotedToGlobal, 1);
-    assert.strictEqual(g.scope, 'global');
+    // Both functions are in SSComp.cpp: the symbol leaves the function for the file.
+    assert.strictEqual(r.promotedToFileLocal, 1);
+    assert.strictEqual(g.scope, 'file-local');
+    assert.strictEqual(g.ownerFile, 'Storm/Source/SSComp.cpp');
     assert.strictEqual(g.ownerFunction, undefined);
   });
 
@@ -233,7 +291,8 @@ describe('one rule decides whether a global is `static`', () => {
       new Map([['INPUT_StatScreenMouseDown', 'D2Client/UI/ui.cpp'], ['INPUT_StatScreenMouseUp', 'D2Client/UI/ui.cpp']]),
       new Set(), '00400000',
     );
-    assert.strictEqual(array.scope, 'global');
+    assert.strictEqual(array.scope, 'file-local');
+    assert.strictEqual(array.ownerFile, 'D2Client/UI/ui.cpp');
     assert.strictEqual(array.ownerFunction, undefined);
   });
 

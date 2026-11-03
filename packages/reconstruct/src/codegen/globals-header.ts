@@ -21,6 +21,7 @@ import { classKeyOf, templateRegistry } from './templates/registry.js';
 import { isFiller } from './templates/bases.js';
 import { GLOBALS_HEADER, isGlobalsHeaderPath } from './globals-layout.js';
 import { globalGuardLine, guardQualifiedName, hasDefinitionInitializer } from './global-guards.js';
+import { noteGlobalScopeReason } from './global-scope-trace.js';
 
 /**
  * Exact Win32 SDK typedef names (not `LP`/`IMAGE_` prefixed) seen as
@@ -367,6 +368,7 @@ export function reconcileOrphanedGlobals(
   for (const g of globals) {
     if (g.scope !== 'file-local' && g.scope !== 'struct-colocated') continue;
     if (claimedGlobals.has(g)) continue;
+    noteGlobalScopeReason(g, 'orphan-unclaimed');
     g.scope = 'global';
     g.ownerFile = undefined;
     g.ownerStructType = undefined;
@@ -417,6 +419,7 @@ export function promoteCentrallyReferencedGlobals(globals: AnalyzedDataSymbol[])
         if (candidates.length !== 1) return;
         for (const g of candidates) {
           if (g.scope !== 'static-local' && g.scope !== 'file-local') continue;
+          noteGlobalScopeReason(g, 'central-initializer');
           g.scope = 'global';
           g.ownerFile = undefined;
           g.ownerFunction = undefined;
@@ -783,6 +786,10 @@ export function generateGlobalsHeader(
     const seen = new Set<string>();
     for (const g of globals) {
       if (g.scope === 'global') continue; // already handled above
+      // A file-local is `static` in the one file every naming body is in
+      // (reconcileStaticScopeWithBodyReferences); an extern here would be a
+      // second, conflicting declaration of it in that file.
+      if (g.scope === 'file-local') continue;
       if (isSwitchTableSymbol(g.suggestedName || g.name)) continue;
       if (isJumpTableArtifact(g)) continue;
       if (isArrayElementSymbol(g.suggestedName || g.name, allGlobalNames)) continue;

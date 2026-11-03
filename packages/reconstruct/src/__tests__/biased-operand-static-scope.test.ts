@@ -46,8 +46,16 @@ describe('a biased operand below a static-local table', () => {
     const load = fn('D2COMP_LoadGuildEmblemIcon', 'void g(){ x = *(undefined1 *)((int)gaCompTwoHandedWeaponClass + b + 0x3fb); }',
       [{ ins: '0050544a', op: 1, to: '0087e82b', type: 'READ', encoded: true }]);
     reconcileStaticScopeWithBodyReferences([before(), t], [init, load], files, new Set(), '00400000', []);
-    assert.strictEqual(t.scope, 'global');
+    // Reader and initializer are both in D2Comp.cpp: the table leaves the function for the file.
+    assert.strictEqual(t.scope, 'file-local');
+    assert.strictEqual(t.ownerFile, 'D2Win/Src/D2Comp.cpp');
     assert.strictEqual(t.ownerFunction, undefined);
+    // A reader in another file makes it a global.
+    const t2 = table();
+    const elsewhere = new Map([...files, ['D2COMP_LoadGuildEmblemIcon', 'D2Win/Src/D2CompLoad.cpp']]);
+    reconcileStaticScopeWithBodyReferences([before(), t2], [init, load], elsewhere, new Set(), '00400000', []);
+    assert.strictEqual(t2.scope, 'global');
+    assert.strictEqual(t2.ownerFunction, undefined);
   });
 
   it('leaves it static when only the owner reads it, or the operand is not encoded or too far below', () => {
