@@ -121,6 +121,11 @@ export class WorkQueue {
     void this.drain();
   }
 
+  /** A task is running or waiting. */
+  get busy(): boolean {
+    return this.running !== null || this.pending.length > 0;
+  }
+
   get isBlocked(): boolean {
     return this.blocked !== null;
   }

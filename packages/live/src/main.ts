@@ -29,9 +29,12 @@ import { promisify } from 'node:util';
 import {
   createConnection,
   closeConnection,
+  loadProjectConfig,
   type GhidraConnection,
   type ReconstructionOptions,
 } from '@ghidra-mcp/reconstruct';
+import { foreignSourcesFingerprint } from '@ghidra-mcp/reconstruct/codegen/file-static-functions';
+import { ForeignSourceWatch } from './foreign-watch.js';
 import { decompileFunction } from '@ghidra-mcp/reconstruct/extract/functions';
 
 import { applyEvents, type ChangeEvent as ModelChangeEvent, type ModelIndices } from './model.js';
@@ -235,6 +238,17 @@ export class LiveLoop {
   private operatorPaused = false;
   /** What the last `commitRegen` in `rebuildAndPublish` returned. */
   private lastCommitResult: CommitResult | null = null;
+  /** Commits to the hand-written sources the generator reads (foreign-watch.ts). */
+  private readonly foreignWatch = new ForeignSourceWatch({
+    current: () => this.currentForeignFingerprint(),
+    built: () => this.builtForeignFingerprint(),
+    idle: () => this.phase === 'idle' && !this.queue.isBlocked && !this.queue.busy
+      && !this.needsFullResync && !this.stream?.isPaused && !this.proposals.holding,
+    rebuild: (from, to) => this.foreignRebuild(from, to),
+    log: m => this.log(m),
+  });
+  private foreignTimer: ReturnType<typeof setInterval> | null = null;
+  private foreignReferences: Array<{ path: string; addressBase?: string | number }> = [];
 
   constructor(cfg: Config) {
     this.cfg = cfg;
@@ -378,6 +392,7 @@ export class LiveLoop {
         return;
       }
       this.stream.start();
+      await this.startForeignWatch();
       return;
     }
 
@@ -391,9 +406,67 @@ export class LiveLoop {
       log: m => this.log(m),
     });
     this.stream.start();
+    await this.startForeignWatch();
+  }
+
+  /**
+   * Poll the foreign sources' fingerprint. A commit to them is an input change no
+   * Ghidra event reports; polling covers a HEAD that moved by any route.
+   */
+  private async startForeignWatch(): Promise<void> {
+    const config = await loadProjectConfig(this.cfg.projectDir);
+    this.foreignReferences = config?.foreignReferences ?? [];
+    if (this.foreignReferences.length === 0) return;
+    const ms = Number(process.env.D2_LIVE_FOREIGN_POLL_MS ?? '30000');
+    this.log(`watching ${this.foreignReferences.length} foreign source path(s) every ${ms / 1000}s; built from ${this.builtForeignFingerprint() ?? 'unknown'}`);
+    this.foreignTimer = setInterval(() => { void this.foreignWatch.check(); }, ms);
+    this.foreignTimer.unref?.();
+  }
+
+  private currentForeignFingerprint(): string {
+    return foreignSourcesFingerprint(this.foreignReferences, this.cfg.projectDir);
+  }
+
+  /** The foreign sources the tree on disk was generated from, as the generator recorded them. */
+  private builtForeignFingerprint(): string | null {
+    try {
+      const info = JSON.parse(readFileSync(join(this.cfg.projectDir, '.ghidra-mcp', 'buildinfo.json'), 'utf-8')) as { foreignSources?: string };
+      return info.foreignSources ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * The rebuild a foreign-source commit asks for: an ordinary one. The model did not
+   * move, so no unit is selected; the generator re-emits the units whose statics,
+   * extern entries or constructor answers changed. Counted as the units whose .cpp
+   * the regen commit touched.
+   */
+  private async foreignRebuild(from: string | null, to: string): Promise<number | null> {
+    const before = await this.regenHead();
+    await this.queue.submit({
+      kind: 'rebuild',
+      describe: `foreign sources changed (${from ?? 'unknown'} -> ${to})`,
+      run: async () => {
+        this.phase = 'rebuilding';
+        try {
+          const r = await this.rebuildAndPublish();
+          if (!r.ok) throw new Error(`generation failed; see ${r.logPath}`);
+        } finally {
+          this.phase = 'idle';
+        }
+      },
+    });
+    const after = await this.regenHead();
+    if (!before || !after) return null;
+    if (before === after) return 0;
+    const r = await run('git', ['-C', this.cfg.regenDir, 'diff', '--name-only', before, after, '--', '*.cpp']);
+    return r.stdout.split('\n').filter(Boolean).length;
   }
 
   async stop(): Promise<void> {
+    if (this.foreignTimer) clearInterval(this.foreignTimer);
     this.stream?.stop();
     if (this.connection) await closeConnection(this.connection).catch(() => {});
   }
@@ -849,6 +922,12 @@ export class LiveLoop {
       queuedEvents: this.stream.queuedCount,
       needsFullResync: this.needsFullResync,
       queue: this.queue.status(),
+      foreignSources: {
+        paths: this.foreignReferences.map(r => r.path),
+        built: this.builtForeignFingerprint(),
+        lastChange: this.foreignWatch.last,
+        error: this.foreignWatch.lastError,
+      },
       lastSelection: this.lastSelection
         ? {
             reason: this.lastSelection.reason,
