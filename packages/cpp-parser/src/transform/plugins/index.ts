@@ -393,6 +393,11 @@ export {
 } from './builtins/param-load-order.js';
 
 export {
+  searchLoopExitPlugin,
+  type SearchLoopExitOptions,
+} from './builtins/search-loop-exit.js';
+
+export {
   recordGetterGuardPlugin,
   type RecordGetterGuardOptions,
 } from './builtins/record-getter-guard.js';
@@ -738,6 +743,7 @@ import { nestCallPlugin } from './builtins/nest-call.js';
 import { baseRegisterLoadPlugin } from './builtins/base-register-load.js';
 import { storeOrderPlugin } from './builtins/store-order.js';
 import { paramLoadOrderPlugin } from './builtins/param-load-order.js';
+import { searchLoopExitPlugin } from './builtins/search-loop-exit.js';
 import { recordGetterGuardPlugin } from './builtins/record-getter-guard.js';
 import { recordGetterSplitPlugin } from './builtins/record-getter-split.js';
 import { armConstantCallPlugin } from './builtins/arm-constant-call.js';
@@ -945,6 +951,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   joinStoreTempPlugin,        // Matching: a member every arm stores into is stored once after the join, through a temporary (priority 970)
   stormNextLinkPlugin,        // Matching: a flattened inline TSLink::NextLink(-1) becomes a call to the inline helper (priority 975)
   paramLoadOrderPlugin,       // Matching: field copies out of a parameter struct in the original's source order (priority 976)
+  searchLoopExitPlugin,       // Matching: a search loop with its not-found exit printed twice loops on the pointer (priority 989.85)
   paramCheckBlockPlugin,      // Matching: a Storm parameter check compiled as one neg/sbb mask chain -> a D2_CHECKS block (priority 980)
   inlinedCallRestorePlugin,   // Matching: a call where the decompiler printed an inlined helper's body (priority 0.5)
   gotoCrossesInitPlugin,      // Late: split T x=e; → T x; x=e; for goto-crossed locals (priority 700)
