@@ -69,6 +69,13 @@ export interface SnapshotProvenance {
   cacheVersionError?: string;
   /** Binary identity as Ghidra reports it (name, format, image base, hashes). */
   programInfo: ProgramInfo;
+  /**
+   * FACT_SCRIPT_VERSION the functions' per-function facts were read with. Absent in a
+   * snapshot that predates the field or whose facts were not read with the combined
+   * script: such facts are of unknown vintage, and a model that keeps them misses every
+   * fact a newer script adds wherever the function is not read again.
+   */
+  factScriptVersion?: string;
 }
 
 /** Counts, so a load can be sanity-checked without reading every line. */

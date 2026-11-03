@@ -997,6 +997,7 @@ export async function reconstruct(
           programPath,
           extraction.programInfo
         );
+        if (extraction.factScriptVersion) provenance.factScriptVersion = extraction.factScriptVersion;
         const snapshot: CodegenSnapshot = {
           manifest: {
             formatVersion: SNAPSHOT_FORMAT_VERSION,

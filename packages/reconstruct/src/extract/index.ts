@@ -73,6 +73,12 @@ export interface ExtractionResult {
   strings: ExtractedString[];
   namespaces: ExtractedNamespace[];
   programInfo: ProgramInfo;
+  /**
+   * FACT_SCRIPT_VERSION of the per-function facts the functions carry; absent when they
+   * were not read with the combined script (it failed, it was skipped, or they were read
+   * separately). A model whose facts were read with another script must read them again.
+   */
+  factScriptVersion?: string;
 }
 
 export interface ProgramInfo {
@@ -225,6 +231,7 @@ export async function extractAll(
   // decompile per function, and only for functions the fact cache cannot vouch for.
   // GHIDRA_FACT_SCRIPTS=separate runs the five extractors one after the other instead.
   // A failure leaves the fields unset, which is what an older snapshot looks like too.
+  let factScriptVersion: string | undefined;
   if (decompile) {
     // The compare-site source forms are VC8's, so only a PE image gets them.
     const compareSites = process.env.GHIDRA_COMPARE_SITES !== '0' && /Portable Executable|\bPE\b/i.test(programInfo.format ?? '');
@@ -243,6 +250,7 @@ export async function extractAll(
           async () => {
             stats = await extractFunctionFacts(connection, functions, { compareSites, cache, verify });
             cache?.save();
+            factScriptVersion = FACT_SCRIPT_VERSION;
           },
           () => stats
             ? `${stats.hits} cached, ${stats.extracted} extracted of ${stats.candidates}` +
@@ -268,6 +276,7 @@ export async function extractAll(
     strings,
     namespaces,
     programInfo,
+    ...(factScriptVersion ? { factScriptVersion } : {}),
   };
 }
 

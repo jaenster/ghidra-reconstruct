@@ -44,8 +44,10 @@ import {
   saveLiveState,
   indexSnapshotModel,
   countModel,
+  saveSnapshotModel,
   type LiveSnapshotModel,
 } from './snapshot-model.js';
+import { ensureFactScriptVersion } from './facts-version.js';
 import { ChangeStream, type ChangeEvent } from './events.js';
 import { rebuild, type RebuildResult } from './rebuild.js';
 import {
@@ -387,6 +389,19 @@ export class LiveLoop {
         this.hashCache = null;
       } else {
         this.log(`generator check: ${build.reason}`);
+      }
+    }
+
+    // Facts read with another fact script stay until their function is touched, so a
+    // generator with a new script would leave the untouched functions on the old one.
+    // Read them all again now; a failure stops the start (the next one tries again).
+    const facts = await ensureFactScriptVersion(this.model, this.connection, m => this.log(m));
+    if (facts.refreshed) {
+      await saveSnapshotModel(this.model);
+      this.hashCache = null;
+      if (resume.resumable) {
+        void this.foreignRebuild(facts.had, facts.wanted, 'fact script')
+          .catch(e => this.log(`fact-script rebuild failed: ${(e as Error).message}`));
       }
     }
 
