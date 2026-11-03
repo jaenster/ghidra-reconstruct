@@ -19,7 +19,7 @@
     "build": "tsc",
     "clean": "rm -rf dist *.tsbuildinfo",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/**/*.test.ts test/**/*.test.ts",
+    "test": "tsx --test \"src/**/*.test.ts\"",
     "test:lexer": "tsx --test src/lexer/**/*.test.ts",
     "test:ast": "tsx --test src/ast/**/*.test.ts",
     "test:parser": "tsx --test src/parser/**/*.test.ts",

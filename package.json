@@ -7,7 +7,7 @@
   ],
   "scripts": {
     "build": "tsc -b",
-    "test": "tsx --test \"packages/cpp-parser/src/**/*.test.ts\" \"packages/reconstruct/src/**/*.test.ts\"",
+    "test": "tsx --test \"packages/*/src/**/*.test.ts\"",
     "reconstruct:d2server": "npx tsx run-d2server.ts"
   },
   "dependencies": {
