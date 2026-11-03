@@ -158,7 +158,6 @@ import type {
   DetectedClass,
   ScopingAnalysis,
   ExtractedFunction,
-  ExtractedEnum,
   ExtractedDataType,
   AnalyzedDataSymbol,
   ExtractedNamespace,
@@ -167,6 +166,7 @@ import type {
 } from './types.js';
 import { defaultOptions } from './types.js';
 import { disambiguateVtableTypes } from './modules/vtable-types.js';
+import { dedupeDataTypesByName, isExcludedDataType } from './modules/data-type-normalize.js';
 import { disambiguateCategoryDuplicates } from './modules/category-duplicate-types.js';
 import { lintAutoProtoConventions, describeAutoProtoLint } from './modules/auto-proto-lint.js';
 
@@ -878,20 +878,7 @@ export async function reconstruct(
     let dataTypes = extraction.dataTypes;
     if (excludePatterns && excludePatterns.length > 0) {
       const beforeCount = dataTypes.length;
-      dataTypes = dataTypes.filter(dt => {
-        // Extract category segments for matching (e.g. "/VisualStudio/DName" → ["VisualStudio", "DName"])
-        const categorySegments = dt.category ? dt.category.split('/').filter(Boolean) : [];
-        for (const pattern of excludePatterns) {
-          if (typeof pattern === 'string') {
-            if (dt.name.includes(pattern)) return false;
-            if (categorySegments.some(seg => seg.includes(pattern))) return false;
-          } else {
-            if (pattern.test(dt.name)) return false;
-            if (categorySegments.some(seg => pattern.test(seg))) return false;
-          }
-        }
-        return true;
-      });
+      dataTypes = dataTypes.filter(dt => !isExcludedDataType(dt, excludePatterns));
       const excludedCount = beforeCount - dataTypes.length;
       if (excludedCount > 0) {
         warnings.push(`Excluded ${excludedCount} data types matching exclude patterns`);
@@ -941,34 +928,11 @@ export async function reconstruct(
       }
     }
 
-    // Deduplicate data types by name (Ghidra may have the same type in multiple
-    // categories, e.g. eD2UnitType in "/" and "/Diablo2/UNIT" — emit only one).
-    // For ENUMS, MERGE the values of same-named entries rather than dropping the
-    // rest: D2 ships two `eCollisionFlags` enums — /Diablo2/COLLISION (17 COLLIDE_*
-    // primitives) and /_Source/Collision (34 values, adding the composite masks
-    // COLLISION_LOS=0x805, MONSTER_COLLISION_DEFAULT, SPAWN_UNIT_COLLISION, ...).
-    // Bodies use the composites, so dropping the richer one left them undeclared.
+    // Deduplicate data types by name; same-named ENUMs merge their values (see
+    // dedupeDataTypesByName).
     {
-      const kept = new Map<string, ExtractedDataType>();
       const beforeCount = dataTypes.length;
-      const result: ExtractedDataType[] = [];
-      let mergedValues = 0;
-      for (const dt of dataTypes) {
-        const existing = kept.get(dt.name);
-        if (!existing) {
-          kept.set(dt.name, dt);
-          result.push(dt);
-          continue;
-        }
-        if (dt.kind === 'ENUM' && existing.kind === 'ENUM') {
-          const e = existing as ExtractedEnum;
-          const have = new Set(e.values.map(v => v.name.trim()));
-          for (const v of (dt as ExtractedEnum).values) {
-            if (!have.has(v.name.trim())) { e.values.push(v); have.add(v.name.trim()); mergedValues++; }
-          }
-        }
-        // non-enum duplicate (or enum already merged): drop.
-      }
+      const { result, mergedValues } = dedupeDataTypesByName(dataTypes);
       dataTypes = result;
       const dedupCount = beforeCount - dataTypes.length;
       if (dedupCount > 0) {
