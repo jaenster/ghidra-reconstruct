@@ -3181,6 +3181,16 @@ function transformDecompiledCode(
       };
       // A local holding a memory read that a two-compare constant range test reads is the
       // read itself: VC8 would fold the test on the local (range-read-inline.ts).
+      // Stores that copy every byte of *P into a same-typed object are the struct assignment
+      // VC8 expands into those pieces (member-copy-assign.ts).
+      perPluginOptions['member-copy-assign'] = {
+        structLayouts: context.funcPtrArgCasts.structLayouts,
+        aggregateSizes: context.funcPtrArgCasts.aggregateSizes,
+        typedefTargets: context.funcPtrArgCasts.typedefTargets,
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        onSite: (e: { target: string; source: string; type: string; pieces: number }) =>
+          console.warn(`[copy-assign] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.target} = *${e.source} (${e.type}, ${e.pieces} pieces)`),
+      };
       perPluginOptions['range-read-inline'] = {
         enumTypes: context.funcPtrArgCasts.enumTypes,
         globalTypes: context.funcPtrArgCasts.globalTypes,

@@ -408,6 +408,11 @@ export {
 } from './builtins/range-read-inline.js';
 
 export {
+  memberCopyAssignPlugin,
+  type MemberCopyAssignOptions,
+} from './builtins/member-copy-assign.js';
+
+export {
   guardCopySinkPlugin,
   type GuardCopySinkOptions,
 } from './builtins/guard-copy-sink.js';
@@ -851,6 +856,7 @@ import { crtIntrinsicCallPlugin } from './builtins/crt-intrinsic-call.js';
 import { pointeeClearMemsetPlugin } from './builtins/pointee-clear-memset.js';
 import { rangeReadInlinePlugin } from './builtins/range-read-inline.js';
 import { guardCopySinkPlugin } from './builtins/guard-copy-sink.js';
+import { memberCopyAssignPlugin } from './builtins/member-copy-assign.js';
 import { callResultDividePlugin } from './builtins/call-result-divide.js';
 import { paramLoadOrderPlugin } from './builtins/param-load-order.js';
 import { searchLoopExitPlugin } from './builtins/search-loop-exit.js';
@@ -1079,6 +1085,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   newResultTempPlugin,        // Matching: an allocation constructed in place gets a temporary; the result assigned after (priority 62.6)
   joinStoreTempPlugin,        // Matching: a member every arm stores into is stored once after the join, through a temporary (priority 970)
   pointeeClearMemsetPlugin,   // Matching: zero stores to every member of *P the original makes from one register become the memset (priority 975)
+  memberCopyAssignPlugin,     // Matching: piecewise copies of every byte of *P into a same-typed object are the struct assignment (priority 975.5)
   stormNextLinkPlugin,        // Matching: a flattened inline TSLink::NextLink(-1) becomes a call to the inline helper (priority 975)
   paramLoadOrderPlugin,       // Matching: field copies out of a parameter struct in the original's source order (priority 976)
   searchLoopExitPlugin,       // Matching: a search loop with its not-found exit printed twice loops on the pointer (priority 989.85)
