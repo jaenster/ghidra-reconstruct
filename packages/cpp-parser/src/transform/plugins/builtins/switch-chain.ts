@@ -219,8 +219,23 @@ function same(a: Expression, b: Expression): boolean {
   }
 }
 
-/** Most bytes from one subtraction to the next in a run: `sub r, imm32; jcc rel32`. */
-const RUN_GAP = 12;
+/**
+ * Most bytes from one subtraction to the next in a run: `sub r, imm32; jcc rel32` is 12, and
+ * VC8 schedules a few independent stores between the first subtraction and its jump
+ * (UNITMODE_SendWalkToPosition 00480ef0: `sub eax, 0`, three moves, `je`, 16 bytes on).
+ */
+const RUN_GAP = 24;
+
+/**
+ * A SUB that takes a register off the running value (`sub eax, ebx` with EBX holding 1): the
+ * instruction names no amount, the decompile's constant does. After the run's first test the
+ * amount is what takes the running total to that constant; a first test needs its own.
+ */
+function stepOf(t: EqualityTest, total: bigint | null): bigint | undefined {
+  if (t.delta !== undefined) return BigInt(t.delta);
+  if (t.mnemonic !== 'SUB' || total === null || t.k === undefined) return undefined;
+  return BigInt(t.k) - total;
+}
 
 /**
  * The runs of the function: subtractions on one register, each a few bytes after the last,
@@ -231,7 +246,7 @@ function countdownRuns(tests: ReadonlyMap<number, readonly EqualityTest[]>): Map
   const byAt = new Map<number, EqualityTest>();
   for (const list of tests.values()) {
     for (const t of list) {
-      if (SUBTRACTS.has(t.mnemonic) && t.delta !== undefined && t.k !== undefined && t.reg !== '-') byAt.set(t.at, t);
+      if (SUBTRACTS.has(t.mnemonic) && t.k !== undefined && t.reg !== '-') byAt.set(t.at, t);
     }
   }
   const out = new Map<number, readonly number[]>();
@@ -242,13 +257,61 @@ function countdownRuns(tests: ReadonlyMap<number, readonly EqualityTest[]>): Map
     const mask = (1n << BigInt(8 * t.size)) - 1n;
     const k = BigInt(t.k!) & mask;
     const last = run[run.length - 1];
-    if (last && t.reg === last.reg && t.size === last.size && t.at - last.at <= RUN_GAP && ((total + BigInt(t.delta!)) & mask) === k) {
+    const step = last ? stepOf(t, total) : undefined;
+    if (last && step !== undefined && t.reg === last.reg && t.size === last.size && t.at - last.at <= RUN_GAP && ((total + step) & mask) === k) {
       run.push(t);
       total = k;
       continue;
     }
     close();
-    if ((BigInt(t.delta!) & mask) === k) { run = [t]; total = k; }
+    if (t.delta !== undefined && (BigInt(t.delta) & mask) === k) { run = [t]; total = k; }
+  }
+  close();
+  return out;
+}
+
+/**
+ * The bytes of `cmp reg, k`: an 8-bit immediate where k sign-extends from one, else the
+ * accumulator's short form or the full one (and the 0x66 prefix for a word register).
+ */
+function compareLength(t: EqualityTest): number {
+  const bits = 8 * t.size;
+  const k = BigInt(t.k ?? 0) & ((1n << BigInt(bits)) - 1n);
+  const signed = k >= 1n << BigInt(bits - 1) ? k - (1n << BigInt(bits)) : k;
+  const acc = t.reg === 'EAX' || t.reg === 'AX' || t.reg === 'AL';
+  if (t.size === 1) return acc ? 2 : 3;
+  const prefix = t.size === 2 ? 1 : 0;
+  if (signed >= -128n && signed <= 127n) return prefix + 3;
+  return prefix + (acc ? 1 : 2) + t.size;
+}
+
+/** The next compare starts right after this one's jump: a short or a near jcc, nothing else. */
+function followsDirectly(last: EqualityTest, t: EqualityTest): boolean {
+  const gap = t.at - last.at - compareLength(last);
+  return gap === 2 || gap === 6;
+}
+
+/**
+ * The compare runs of the function: CMPs of one register against constants, each straight
+ * after the last with nothing but its jump between (the gap is the compare's length and a
+ * jump's, exactly). VC8 lowers a sparse switch of a few
+ * cases to such a run, `cmp ecx, 6; je; cmp ecx, 0x16; je; cmp ecx, 0x1e; jne default`
+ * (Skills_CltDoFunc_Mon_BaalTaunt_AnimCycle 004e2630), and an if-chain to compares with
+ * each arm's code between them. Each test offset maps to the offsets of its run.
+ */
+function compareRuns(tests: ReadonlyMap<number, readonly EqualityTest[]>): Map<number, readonly number[]> {
+  const byAt = new Map<number, EqualityTest>();
+  for (const list of tests.values()) {
+    for (const t of list) if (t.mnemonic === 'CMP' && t.k !== undefined && t.reg !== '-') byAt.set(t.at, t);
+  }
+  const out = new Map<number, readonly number[]>();
+  let run: EqualityTest[] = [];
+  const close = () => { if (run.length >= 2) { const ats = run.map(t => t.at); for (const a of ats) out.set(a, ats); } run = []; };
+  for (const t of [...byAt.values()].sort((x, y) => x.at - y.at)) {
+    const last = run[run.length - 1];
+    if (last && t.reg === last.reg && t.size === last.size && followsDirectly(last, t)) { run.push(t); continue; }
+    close();
+    run = [t];
   }
   close();
   return out;
@@ -335,6 +398,8 @@ interface Ctx {
   split: Map<number, Set<string>>;
   /** Test offset -> the offsets of its countdown run (countdownRuns). */
   runs: Map<number, readonly number[]>;
+  /** Test offset -> the offsets of its compare run (compareRuns). */
+  compares: Map<number, readonly number[]>;
   n: number;
 }
 
@@ -381,7 +446,8 @@ class Decision {
     const ks: bigint[] = [];
     for (let j = 0; j < ev.length; j++) {
       const e = ev[j];
-      if (!SUBTRACTS.has(e.mnemonic) || e.k === undefined || e.delta === undefined) { this.why = this.why ?? 'compare'; return null; }
+      const counted = SUBTRACTS.has(e.mnemonic) && e.k !== undefined && (e.delta !== undefined || this.ctx.runs.has(e.at));
+      if (!counted && !(e.mnemonic === 'CMP' && e.k !== undefined && this.ctx.compares.has(e.at))) { this.why = this.why ?? 'compare'; return null; }
       const mask = (1n << BigInt(8 * e.size)) - 1n;
       const k = BigInt(e.k) & mask;
       const value = t.ops[j].value;
@@ -499,7 +565,13 @@ function decisionAt(list: readonly Statement[], i: number, ctx: Ctx, inBlock = t
   // The tests are one whole countdown run.
   const nodes = [...d.nodes.values()];
   const ats = new Set(nodes.flatMap(n => n.ev.map(e => e.at)));
-  const run = ctx.runs.get(nodes[0].ev[0].at);
+  const first = nodes[0].ev[0];
+  // A compare run is a switch only over two ifs or more, each testing one constant: one
+  // `if (v == A || v == B)` compiles to the same run, and a run with such a test among the
+  // ifs is the original's if-chain as often as not (AI_BAAL_HasPowerfulSkill 005fc0c0,
+  // Q12_UpdateQuestRecord 0059adb0, INPUT_HandleSysCommand 0044c570 match as ifs).
+  const cmpSwitch = nodes.length >= 2 && nodes.every(n => n.ev.length === 1);
+  const run = first.mnemonic === 'CMP' ? (cmpSwitch ? ctx.compares.get(first.at) : undefined) : ctx.runs.get(first.at);
   if (!run) return left('sum', nodes.length);
   if (run.length !== ats.size || run.some(a => !ats.has(a))) return left('partial', nodes.length);
 
@@ -721,6 +793,7 @@ function rewriteFunction(fn: FunctionDecl, ev: BranchLayoutEvidence, opts: Switc
     onSite: opts.onSite,
     split: splitLines(fn.body),
     runs: countdownRuns(ev.tests),
+    compares: compareRuns(ev.tests),
     n: 0,
   };
   const t = createTransformer({

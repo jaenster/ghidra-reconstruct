@@ -124,13 +124,13 @@ describe('switchChainPlugin', () => {
     assert.ok(out.includes('switch (v) { case 6: { A(); break; } default: { B(); } }'), out);
   });
 
-  it('leaves an if-chain the original compiles with CMP', () => {
+  it('leaves an if-chain the original compiles with CMP, the arm code between the compares', () => {
     const { out, sites } = run([
       'void f(int v) {',
       '<CMP EAX - 1 0x10> if (v == 1) {',
       '[0x30] A();',
       '}',
-      '<CMP EAX - 4 0x15> else if (v == 4) {',
+      '<CMP EAX - 4 0x25> else if (v == 4) {',
       '[0x40] B();',
       '}',
       '}',
@@ -569,7 +569,8 @@ describe('switchChainPlugin', () => {
       '}',
       '}',
     ]);
-    assert.deepStrictEqual(cmp.sites, ['left:compare']);
+    // One if: a compare run of one decision is `||`, not a switch.
+    assert.deepStrictEqual(cmp.sites, ['left:sum']);
     assert.ok(!cmp.out.includes('switch'), cmp.out);
     const short = run([
       'void f(int v) {',
@@ -598,6 +599,97 @@ describe('switchChainPlugin', () => {
       '}',
     ]);
     assert.ok(!out.includes('switch'), out);
+  });
+
+  it('counts a SUB of a register by the constant it reaches, with stores scheduled between', () => {
+    // UNITMODE_SendWalkToPosition 00480ef0: `sub eax, 0`, three moves, `je`, `sub eax, ebx` (EBX = 1).
+    const lines = [
+      'void f(int v) {',
+      '<SUB EAX 0 0 0x10> if (v != 0) {',
+      '<SUB EAX - 1 0x20> if (v == 1) {',
+      '[0x30] A();',
+      '}',
+      '}',
+      'else {',
+      '[0x20] B();',
+      '}',
+      '}',
+    ];
+    const { out, sites } = run(lines);
+    // The inner test alone is part of a run: left, then taken with the outer one.
+    assert.deepStrictEqual(sites, ['left:partial', 'switch']);
+    assert.ok(out.includes('switch (v) { case 0:'), out);
+    assert.ok(out.includes('case 1:'), out);
+  });
+
+  it('leaves a SUB of a register that starts a run, or one too far from the last', () => {
+    assert.deepStrictEqual(run([
+      'void f(int v) {',
+      '<SUB EAX - 1 0x10> if (v == 1) {',
+      '[0x30] A();',
+      '}',
+      '}',
+    ]).sites, ['left:compare']);
+    assert.ok(!run([
+      'void f(int v) {',
+      '<SUB EAX 0 0 0x10> if (v != 0) {',
+      '<SUB EAX - 1 0x40> if (v == 1) {',
+      '[0x30] A();',
+      '}',
+      '}',
+      'else {',
+      '[0x20] B();',
+      '}',
+      '}',
+    ]).sites.includes('switch'));
+  });
+
+  it('writes ifs tested by one straight compare run as a switch', () => {
+    // Skills_CltDoFunc_Mon_BaalTaunt_AnimCycle 004e2630: cmp 6; je; cmp 0x16; je; cmp 0x1e; jne.
+    const lines = [
+      'int f(int v) {',
+      '<CMP ECX - 6 23> if (v != 6) {',
+      '<CMP ECX - 22 28> if (v == 22) {',
+      '[0x30] A();',
+      'return 1;',
+      '}',
+      '<CMP ECX - 30 33> if (v == 30) {',
+      '[0x20] B();',
+      'return 1;',
+      '}',
+      '}',
+      'else {',
+      '[0x10] C();',
+      '}',
+      'return 1;',
+      '}',
+    ];
+    const { out, sites } = run(lines);
+    assert.deepStrictEqual(sites, ['left:partial', 'switch']);
+    assert.ok(out.includes('switch (v)'), out);
+    assert.ok(out.includes('case 6:') && out.includes('case 22:') && out.includes('case 30:'), out);
+  });
+
+  it('leaves compares with code between them, and a compare run of one if', () => {
+    const spread = run([
+      'void f(int v) {',
+      '<CMP ECX - 6 0x10> if (v == 6) {',
+      '[0x30] A();',
+      '}',
+      '<CMP ECX - 22 0x40> else if (v == 22) {',
+      '[0x40] B();',
+      '}',
+      '}',
+    ]);
+    assert.ok(!spread.sites.includes('switch'), spread.out);
+    const one = run([
+      'void f(int v) {',
+      '<CMP ECX - 6 0x10> <CMP ECX - 22 0x15> if (v == 6 || v == 22) {',
+      '[0x30] A();',
+      '}',
+      '}',
+    ]);
+    assert.ok(!one.sites.includes('switch'), one.out);
   });
 
   it('changes nothing without evidence', () => {
