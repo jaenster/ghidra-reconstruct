@@ -437,6 +437,10 @@ export {
   type RotatedStepWhileOptions,
 } from './builtins/rotated-step-while.js';
 
+export {
+  copiedTestWhilePlugin,
+  type CopiedTestWhileOptions,
+} from './builtins/copied-test-while.js';
 
 export {
   callResultDividePlugin,
@@ -882,6 +886,7 @@ import { sharedTailJoinPlugin } from './builtins/shared-tail-join.js';
 import { inPlaceOperandPlugin } from './builtins/in-place-operand.js';
 import { tailWalkRereadPlugin } from './builtins/tail-walk-reread.js';
 import { rotatedStepWhilePlugin } from './builtins/rotated-step-while.js';
+import { copiedTestWhilePlugin } from './builtins/copied-test-while.js';
 import { callResultDividePlugin } from './builtins/call-result-divide.js';
 import { paramLoadOrderPlugin } from './builtins/param-load-order.js';
 import { searchLoopExitPlugin } from './builtins/search-loop-exit.js';
@@ -1116,6 +1121,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   searchLoopExitPlugin,       // Matching: a search loop with its not-found exit printed twice loops on the pointer (priority 989.85)
   tailWalkRereadPlugin,       // Matching: a walk to a list's last node tests the link in memory, not a copy (priority 989.86)
   rotatedStepWhilePlugin,     // Matching: a guarded do-while testing the copy its pointer is stepped to loops on the pointer (priority 989.865)
+  copiedTestWhilePlugin,      // Matching: a loop testing a value of x through two copies tests and stores the value itself (priority 989.866)
   guardCopySinkPlugin,        // Matching: a copy of a value printed ahead of a guard on the value moves below it (priority 989.9)
   inlinedStrcpyPlugin,        // Matching: the byte loop VC8 expands strcpy into becomes the call (priority 989.9)
   accumulateSumPlugin,        // Matching: a sum of two single-use values accumulates into the first with += (priority 989.95)

@@ -2937,6 +2937,12 @@ function transformDecompiledCode(
       onSite: (e: { variable: string; copy: string; zeroStore: boolean }) =>
         console.warn(`[step-while] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.variable} <- ${e.copy}${e.zeroStore ? ' (zero store dropped)' : ''}`),
     };
+    // A loop testing a value of x through two copies tests and stores the value itself
+    // (copied-test-while.ts).
+    perPluginOptions['copied-test-while'] = {
+      onSite: (e: { variable: string; copies: [string, string] }) =>
+        console.warn(`[copied-test] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.variable} (${e.copies.join(', ')})`),
+    };
 
     // Method-conversion is dropped (free functions only), so mappings/currentFunction
     // are normally empty; keep the original guard so any stray mapping still no-ops.
