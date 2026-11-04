@@ -3751,15 +3751,19 @@ function transformDecompiledCode(
 
     if (enclosing?.registerStores) {
       perPluginOptions['register-store-select'] = { registerStores: enclosing.registerStores };
+    }
+    if (enclosing?.registerStores || enclosing?.zeroStores) {
       // Zero stores to every member of *P that the original makes from one zeroed register
-      // are the inlined memset (pointee-clear-memset.ts).
+      // are the inlined memset; so is a clear printed in pieces, evidenced by those stores or
+      // a local's zero-store facts (pointee-clear-memset.ts).
       perPluginOptions['pointee-clear-memset'] = {
         registerStores: enclosing.registerStores,
+        zeroStores: enclosing.zeroStores,
         structLayouts: context?.funcPtrArgCasts?.structLayouts,
         aggregateSizes: context?.funcPtrArgCasts?.aggregateSizes,
         typedefTargets: context?.funcPtrArgCasts?.typedefTargets,
-        onSite: (e: { pointer: string; type: string; members: number }) =>
-          console.warn(`[clear-memset] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.pointer} (${e.type}, ${e.members} members)`),
+        onSite: (e: { pointer: string; type: string; members: number; partial?: boolean }) =>
+          console.warn(`[clear-memset] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.pointer} (${e.type}, ${e.members} ${e.partial ? 'pieces, partial' : 'members'})`),
       };
     }
     // A temporary goes back into the argument list where the original evaluated the
