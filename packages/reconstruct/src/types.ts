@@ -164,6 +164,11 @@ export interface ExtractedFunction {
    * Absent when there are none or the snapshot predates the field.
    */
   registerStores?: import('./extract/register-stores.js').RegisterStoreFacts;
+  /**
+   * The rotates by an immediate the original's instructions perform, per decompile line
+   * (extract/rotate-sites.ts). Absent when there are none or the snapshot predates the field.
+   */
+  rotateSites?: import('./extract/rotate-sites.js').RotateSiteFacts;
 }
 
 /**

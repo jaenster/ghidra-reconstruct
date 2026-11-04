@@ -15,6 +15,7 @@
  *   maskSites     mask-sites.ts      (behind the compare-sites text-hash gate)
  *   zextSites     zext-sites.ts      (behind the compare-sites text-hash gate)
  *   registerStores register-stores.ts
+ *   rotateSites   rotate-sites.ts
  *   labelFlow     label-flow.ts      (listing only; its own script, labels come from the text)
  *
  * Each extractor decompiled every function again; this script decompiles a function once
@@ -45,6 +46,7 @@ import { ZERO_STORES_JAVA, printsMemberZeroStore, parseZeroStoreRow } from './ze
 import { MASK_SITES_JAVA, printsByteWordMask, parseMaskSiteRow } from './mask-sites.js';
 import { ZEXT_SITES_JAVA, printsZextCast, parseZextSiteRow } from './zext-sites.js';
 import { REGISTER_STORES_JAVA, printsConstantStore, parseRegisterStoreRow } from './register-stores.js';
+import { ROTATE_SITES_DECL_JAVA, ROTATE_SITES_LINE_JAVA, printsShiftPair, parseRotateSiteRow } from './rotate-sites.js';
 import { labelsOf, labelFlowItems, labelFlowScript, parseLabelFlow, LABEL_FLOW_SCRIPT } from './label-flow.js';
 import { FactCache, type CachedFacts, type FactEntry } from './fact-cache.js';
 import { createHash } from 'node:crypto';
@@ -65,6 +67,7 @@ import { createHash } from 'node:crypto';
  *   M  ...   the mask-sites row (mask-sites.ts), when it prints a byte or word mask
  *   X  ...   the zext-sites row (zext-sites.ts), when an operator's result is zero-extended
  *   K  ...   the register-stores row (register-stores.ts), when a constant is stored from a register
+ *   Q  ...   the rotate-sites row (rotate-sites.ts), when a line's instructions rotate by an immediate
  *   D  id,full,shape;...   the types the markup named
  */
 export const FUNCTION_FACTS_SCRIPT = `
@@ -246,7 +249,7 @@ ${CALL_PUSHES_JAVA}
           // branch-layout and call-order, over the same lines
           StringBuilder ls = new StringBuilder(), is = new StringBuilder(), es = new StringBuilder(), cs = new StringBuilder();
           StringBuilder argRow = new StringBuilder(), storeRow = new StringBuilder();
-          int count = 0;
+${ROTATE_SITES_DECL_JAVA}          int count = 0;
 ${IF_OPERANDS_DECL_JAVA}${EDGES_DECL_JAVA}          for (ghidra.app.decompiler.ClangLine l : ghidra.app.decompiler.component.DecompilerUtils.toLines(r.getCCodeMarkup())) {
             count++;
             java.util.TreeSet<Long> offs = new java.util.TreeSet<>();
@@ -330,7 +333,7 @@ ${IF_OPERANDS_TOKEN_JAVA}${EDGES_TOKEN_JAVA}${ACCESS_ORDER_TOKEN_JAVA}          
             if (one.length() > 0) cs.append(cs.length() > 0 ? ";" : "").append(l.getLineNumber()).append(':').append(one);
             if (oneArg.length() > 0) argRow.append(argRow.length() > 0 ? ";" : "").append(l.getLineNumber()).append(':').append(oneArg);
             if (oneSt.length() > 0) storeRow.append(storeRow.length() > 0 ? ";" : "").append(l.getLineNumber()).append(':').append(oneSt);
-            if (offs.isEmpty()) continue;
+${ROTATE_SITES_LINE_JAVA}            if (offs.isEmpty()) continue;
             ls.append(ls.length() > 0 ? ";" : "").append(l.getLineNumber()).append(':');
             boolean first = true;
             for (Long off : offs) {
@@ -442,6 +445,7 @@ ${JUMP_TABLES_JAVA}${ZERO_STORES_JAVA}${MASK_SITES_JAVA}${ZEXT_SITES_JAVA}${REGI
           out.append("B\\t").append(a).append('\\t').append(count).append('\\t').append(ls).append('\\t').append(is).append('\\t').append(es).append('\\t').append(opsRow).append('\\t').append(retRow).append('\\t').append(edgeRow).append('\\t').append(pushRow).append('\\n');
           out.append("O\\t").append(a).append('\\t').append(count).append('\\t').append(cs).append('\\n');
           out.append("A\\t").append(a).append('\\t').append(count).append('\\t').append(argRow).append('\\t').append(storeRow).append('\\n');
+          if (qrow.length() > 0) out.append("Q\\t").append(a).append('\\t').append(count).append('\\t').append(qrow).append('\\n');
           if (hrow.length() > 0 || probes.length() > 0) out.append("H\\t").append(a).append('\\t').append(hrow).append('\\t').append(probes).append('\\n');
           if (rrow.length() > 0) out.append("R\\t").append(a).append('\\t').append(rrow).append('\\n');
           if (jrow.length() > 0) out.append("J\\t").append(a).append('\\t').append(jrow).append('\\n');
@@ -478,7 +482,7 @@ println(sb.toString());
  */
 export const FACT_SCRIPT_VERSION = createHash('sha1')
   .update(FUNCTION_FACTS_SCRIPT).update(LABEL_FLOW_SCRIPT).update(functionStampsScript([], []))
-  .update('facts-9')
+  .update('facts-10')
   .digest('hex').slice(0, 16);
 
 export function functionFactsScript(batch: string[], threads = 8, timeout = 60): string {
@@ -514,6 +518,8 @@ export interface FunctionFactRow {
   zextRow?: string;
   /** The register-stores row, untagged and without the entry. */
   storeRow?: string;
+  /** The rotate-sites row, untagged and without the entry. */
+  rotateRow?: string;
   deps: Record<string, TypeStamp>;
 }
 
@@ -582,6 +588,7 @@ export function parseFunctionFacts(output: string): FunctionFactOutput {
     else if (tag === 'M') cur.maskRow = rest.slice(rest.indexOf('\t') + 1);
     else if (tag === 'X') cur.zextRow = rest.slice(rest.indexOf('\t') + 1);
     else if (tag === 'K') cur.storeRow = rest.slice(rest.indexOf('\t') + 1);
+    else if (tag === 'Q') cur.rotateRow = rest.slice(rest.indexOf('\t') + 1);
     else if (tag === 'D') {
       for (const part of rest ? rest.split(';') : []) {
         const [id, full, shape] = part.split(',');
@@ -652,6 +659,11 @@ export function selectFacts(text: string, entry: string, row: FunctionFactRow, c
     const k = parseRegisterStoreRow(row.storeRow);
     if (k.length > 0) facts.registerStores = k;
   }
+  // Keyed by line; the line count checks the text when the facts are used.
+  if (printsShiftPair(text) && row.rotateRow) {
+    const q = parseRotateSiteRow(row.rotateRow);
+    if (q) facts.rotateSites = q;
+  }
   return facts;
 }
 
@@ -687,7 +699,7 @@ export interface FunctionFactStats {
   labelMs: number;
 }
 
-export const FACT_KEYS = ['compareSites', 'branchLayout', 'callOrder', 'accessOrder', 'haltLines', 'stringOps', 'jumpTables', 'zeroStores', 'maskSites', 'zextSites', 'registerStores', 'labelFlow'] as const;
+export const FACT_KEYS = ['compareSites', 'branchLayout', 'callOrder', 'accessOrder', 'haltLines', 'stringOps', 'jumpTables', 'zeroStores', 'maskSites', 'zextSites', 'registerStores', 'rotateSites', 'labelFlow'] as const;
 
 /**
  * Attach every per-function fact to the decompiled functions, from the cache where the
@@ -711,7 +723,7 @@ export async function extractFunctionFacts(
     if (!(printsComparison(f.decompiled) || printsBranch(f.decompiled) || printsCallTemporary(f.decompiled)
         || printsAccess(f.decompiled) || printsHaltOrProbe(f.decompiled) || printsRepLoop(f.decompiled)
         || printsSwitch(f.decompiled) || printsMemberZeroStore(f.decompiled) || printsByteWordMask(f.decompiled) || printsZextCast(f.decompiled)
-        || printsConstantStore(f.decompiled)
+        || printsConstantStore(f.decompiled) || printsShiftPair(f.decompiled)
         || labelsOf(f.decompiled).length > 0)) continue;
     byEntry.set(normalizeEntry(f.address), f);
   }
@@ -862,6 +874,7 @@ function attach(f: ExtractedFunction, facts: CachedFacts): void {
   if (facts.maskSites !== undefined) f.maskSites = facts.maskSites;
   if (facts.zextSites !== undefined) f.zextSites = facts.zextSites;
   if (facts.registerStores !== undefined) f.registerStores = facts.registerStores;
+  if (facts.rotateSites !== undefined) f.rotateSites = facts.rotateSites;
   if (facts.labelFlow !== undefined) f.labelFlow = { ...(f.labelFlow ?? {}), ...facts.labelFlow };
 }
 

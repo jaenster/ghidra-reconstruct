@@ -26,6 +26,7 @@ import { CPP_KEYWORDS } from './header.js';
 import { branchLayoutLines } from './branch-layout-spec.js';
 import { callOrderLines } from './call-order-spec.js';
 import { accessOrderLines } from './access-order-spec.js';
+import { rotateSiteLines } from './rotate-sites-spec.js';
 import type { BranchLayoutFacts } from '../extract/branch-layout.js';
 import type { CallOrderFacts } from '../extract/call-order.js';
 import type { AccessOrderFacts } from '../extract/access-order.js';
@@ -1767,6 +1768,8 @@ export function generateFunctionImplementation(
           zextSites: override?.action === 'patch' ? undefined : func.zextSites,
           // A text patch anchors on the stores as Ghidra printed them.
           registerStores: override?.action === 'patch' ? undefined : func.registerStores,
+          // A text patch anchors on the shifts as Ghidra printed them.
+          rotateSites: override?.action === 'patch' ? undefined : func.rotateSites,
           // A text patch anchors on the comparisons as Ghidra printed them.
           compareSites: override?.action === 'patch' ? undefined : func.compareSites,
           sehLowering: sehLoweringDecision(func),
@@ -2757,6 +2760,8 @@ function transformDecompiledCode(
     zextSites?: import('../extract/zext-sites.js').ZextSiteFacts;
     /** The constants the original stores from a register (extract/register-stores.ts). */
     registerStores?: import('../extract/register-stores.js').RegisterStoreFacts;
+    /** The rotates by an immediate the original performs, per line (extract/rotate-sites.ts). */
+    rotateSites?: import('../extract/rotate-sites.js').RotateSiteFacts;
     /** The function's EH3 frame as `seh-lowering` needs it (codegen/seh-lowering-spec.ts). */
     sehLowering?: SehLoweringDecision;
     /** Addresses the instructions derive from a global's start (codegen/folded-address-spec.ts). */
@@ -2801,6 +2806,10 @@ function transformDecompiledCode(
     // The original's argument loads and store order, keyed by line of `wrapped` (access-order-spec.ts).
     const accessOrder = funcBodyMatch && funcBodyMatch.index !== undefined
       ? accessOrderLines(enclosing?.accessOrder, decompiled, funcBodyMatch.index + funcBodyMatch[0].indexOf('{'), body, preprocessedBody, wrapperPrefix)
+      : undefined;
+    // The original's rotates by an immediate, keyed by line of `wrapped` (rotate-sites-spec.ts).
+    const rotates = funcBodyMatch && funcBodyMatch.index !== undefined
+      ? rotateSiteLines(enclosing?.rotateSites, decompiled, funcBodyMatch.index + funcBodyMatch[0].indexOf('{'), body, preprocessedBody, wrapperPrefix)
       : undefined;
 
     // Build plugin options for method-call-rewrite when mappings or current context exist
@@ -3543,6 +3552,15 @@ function transformDecompiledCode(
     }
     // Two stores of one lvalue whose constant the original stores from the register of a
     // merged value become one store of a select (register-store-select.ts).
+    // A shift pair the original performs as a rotate by more than 16 (rotate-intrinsic.ts).
+    if (rotates) {
+      perPluginOptions['rotate-intrinsic'] = {
+        rotates,
+        onSite: (e: { line: number; spelling: string }) =>
+          console.warn(`[rotate] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.spelling} on line ${e.line}`),
+      };
+    }
+
     if (enclosing?.registerStores) {
       perPluginOptions['register-store-select'] = { registerStores: enclosing.registerStores };
     }

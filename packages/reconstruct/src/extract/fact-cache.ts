@@ -31,6 +31,7 @@ import type { ZeroStoreFacts } from './zero-stores.js';
 import type { MaskSiteFacts } from './mask-sites.js';
 import type { ZextSiteFacts } from './zext-sites.js';
 import type { RegisterStoreFacts } from './register-stores.js';
+import type { RotateSiteFacts } from './rotate-sites.js';
 import type { LabelFlow } from '../types.js';
 import type { TypeStamp, FunctionStamps } from './function-stamps.js';
 import { javaStringHash } from './compare-sites.js';
@@ -47,6 +48,7 @@ export interface CachedFacts {
   maskSites?: MaskSiteFacts;
   zextSites?: ZextSiteFacts;
   registerStores?: RegisterStoreFacts;
+  rotateSites?: RotateSiteFacts;
   labelFlow?: Record<string, LabelFlow>;
 }
 

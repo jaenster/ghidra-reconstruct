@@ -386,6 +386,12 @@ export {
 } from './builtins/store-order.js';
 
 export {
+  rotateIntrinsicPlugin,
+  type RotateIntrinsicOptions,
+  type RotateFact,
+} from './builtins/rotate-intrinsic.js';
+
+export {
   paramLoadOrderPlugin,
   DEFAULT_PARAM_LOAD_ORDER,
   type ParamLoadOrderOptions,
@@ -793,6 +799,7 @@ import { branchLayoutPlugin } from './builtins/branch-layout/index.js';
 import { nestCallPlugin } from './builtins/nest-call.js';
 import { baseRegisterLoadPlugin } from './builtins/base-register-load.js';
 import { storeOrderPlugin } from './builtins/store-order.js';
+import { rotateIntrinsicPlugin } from './builtins/rotate-intrinsic.js';
 import { paramLoadOrderPlugin } from './builtins/param-load-order.js';
 import { searchLoopExitPlugin } from './builtins/search-loop-exit.js';
 import { inlinedStrcpyPlugin } from './builtins/inlined-strcpy.js';
@@ -993,6 +1000,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   armConstantCallPlugin,      // Matching: a call taking a constant chosen per if/else arm goes back into each arm (priority 59.4)
   nestCallPlugin,             // Matching: a temporary back into the argument list the original evaluated it in (priority 59.5)
   baseRegisterLoadPlugin,     // Matching: a call argument loaded into its own base register gets its local (priority 59.6)
+  rotateIntrinsicPlugin,      // Matching: a shift pair the original rotates by more than 16 becomes _rotl/_rotr (priority 59.65)
   storeOrderPlugin,           // Matching: independent stores in the original's instruction order (priority 59.7)
   arrayFillCollapsePlugin,    // Cleanup: collapse arr[i]=0 runs into memset (priority 50)
   aggregateZeroInitPlugin,    // Matching: zero member stores that write a whole local become `T s = {0};` (priority 955)
