@@ -40,6 +40,13 @@
  *
  * which writes the same four zero bytes; memset(4) compiles to the same store but scheduled
  * as an intrinsic, after the code around it.
+ *
+ * A run the original stores one element at a time stays as printed. The memset VC8 expands
+ * stores dwords plus a tail, so a `wchar_t[10]` cleared by ten `mov word ptr [ebp-x], di`
+ * (INV_FormatQuantityText 00484db0) comes back as five dword stores; the element stores
+ * compile to the original's. The access-order facts give the width of each `=`: where every
+ * store of the run has a fact and all are the same width of 1 or 2 bytes, no collapse.
+ * Without the facts, or with a dword store among them, the run collapses as above.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -63,6 +70,7 @@ import { findNodesByKind } from '../../../ast/visitor.js';
 import { emit } from '../../../emit/index.js';
 import type { AnyNode } from '../../../ast/nodes.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
+import { placed, type AccessOrderEvidence } from './access-order-evidence.js';
 
 const THRESHOLD = 4;
 
@@ -190,7 +198,31 @@ function makeLoop(base: Expression, startIdx: number, count: number, value: Expr
   return { ...loop, location: model.location, leadingTrivia: model.leadingTrivia || [], trailingTrivia: [], ghidraInfo: { sourceLoop: true } };
 }
 
-function collapseBlock(block: CompoundStmt, scope?: FillScope): CompoundStmt | null {
+/**
+ * Every store of the run alone on its line with a fact, all 1 or 2 bytes wide and equal, each
+ * made by an instruction of its own. The decompiler splits one wider MOV into element stores
+ * that name the same instruction (`mov dword ptr [ebp-x], eax` printed as two `L'\\0'`
+ * stores, HELP_DrawHelpButtonTooltip 00495030): that run was a dword fill.
+ */
+function storedPerElement(run: Statement[], ev: AccessOrderEvidence | undefined): boolean {
+  if (!ev) return false;
+  let width = 0;
+  const seen = new Set<number>();
+  for (const st of run) {
+    if (!placed(st) || st.location.end.line !== st.location.start.line) return false;
+    const facts = ev.stores.get(st.location.start.line);
+    if (!facts || facts.length !== 1) return false;
+    const w = facts[0].size, at = facts[0].at;
+    if (w !== 1 && w !== 2) return false;
+    if (at === null || seen.has(at)) return false;
+    seen.add(at);
+    if (width && w !== width) return false;
+    width = w;
+  }
+  return run.length > 0;
+}
+
+function collapseBlock(block: CompoundStmt, scope?: FillScope, ev?: AccessOrderEvidence): CompoundStmt | null {
   const s = block.statements;
   const out: Statement[] = [];
   let changed = false;
@@ -208,6 +240,11 @@ function collapseBlock(block: CompoundStmt, scope?: FillScope): CompoundStmt | n
         j++;
       }
       const count = j - i;
+      if (count >= THRESHOLD && storedPerElement(s.slice(i, j), ev)) {
+        for (let k = i; k < j; k++) out.push(s[k]);
+        i = j;
+        continue;
+      }
       if (count === 4 && s.slice(i, j).every(isCharZeroStore)) {
         out.push(makeDwordStore(m.base, m.idx, s[i]));
         changed = true;
@@ -270,7 +307,7 @@ function createArrayFillTransformer(options: ArrayFillCollapseOptions = {}): Tra
   const blocks = (scope?: FillScope) => createTransformer({
     visitNode(node: ASTNode): ASTNode | undefined {
       if (node.kind === NodeKind.CompoundStmt) {
-        return collapseBlock(node as CompoundStmt, scope) ?? undefined;
+        return collapseBlock(node as CompoundStmt, scope, options.accessOrder) ?? undefined;
       }
       return undefined;
     },
@@ -287,6 +324,8 @@ function createArrayFillTransformer(options: ArrayFillCollapseOptions = {}): Tra
 export interface ArrayFillCollapseOptions extends PluginOptions {
   /** Global name -> the stride of one element, for globals Ghidra typed as arrays. */
   globalElementSizes?: Record<string, number>;
+  /** The original's store widths per line (access-order-evidence.ts); absent, every run collapses. */
+  accessOrder?: AccessOrderEvidence;
 }
 
 /**

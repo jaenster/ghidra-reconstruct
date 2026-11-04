@@ -8,6 +8,7 @@ import { parse } from '../../../parser/index.js';
 import { emit } from '../../../emit/index.js';
 import type { AnyNode } from '../../../ast/nodes.js';
 import { arrayFillCollapsePlugin } from '../builtins/array-fill-collapse.js';
+import type { AccessOrderEvidence, StoreFact } from '../builtins/access-order-evidence.js';
 
 describe('arrayFillCollapsePlugin', () => {
   function tx(code: string): string {
@@ -105,5 +106,43 @@ describe('arrayFillCollapsePlugin', () => {
   d[4] = 0;
 }`,
     );
+  });
+});
+
+describe('arrayFillCollapsePlugin with store widths', () => {
+  /** One statement per line; `[n]` tags the line's `=` with an n-byte store. */
+  function run(lines: string[]): string {
+    const stores = new Map<number, StoreFact[]>();
+    const text = lines.map((l, i) => {
+      const m = l.match(/^\s*\[(\d+)(?:@(\d+))?\]\s?(.*)$/);
+      if (!m) return l;
+      stores.set(i + 1, [{ ord: 0, at: m[2] ? Number(m[2]) : 4 * i, size: Number(m[1]), half: null }]);
+      return m[3];
+    });
+    const ev: AccessOrderEvidence = { args: new Map(), stores };
+    return emit(arrayFillCollapsePlugin.createTransformer({ accessOrder: ev })(parse(text.join('\n')) as AnyNode) as AnyNode).replace(/\s+/g, ' ');
+  }
+
+  // INV_FormatQuantityText 00484db0: ten `mov word ptr [ebp-x], di`.
+  it('keeps element stores the original makes one word at a time', () => {
+    const out = run(['void f() {', 'wchar_t w[5];', '[2] w[0] = 0;', '[2] w[1] = 0;', '[2] w[2] = 0;', '[2] w[3] = 0;', '[2] w[4] = 0;', 'g(w);', '}']);
+    assert.doesNotMatch(out, /memset/);
+    assert.match(out, /w\[4\] = 0;/);
+  });
+
+  it('collapses a run whose stores include a dword', () => {
+    const out = run(['void f() {', 'char c[8];', '[4] c[0] = 0;', '[1] c[1] = 0;', '[1] c[2] = 0;', '[1] c[3] = 0;', 'g(c);', '}']);
+    assert.match(out, /memset\(c, 0, 4 \* sizeof\(c\[0\]\)\)|\*\(uint32_t\*\)c = 0/);
+  });
+
+  // HELP_DrawHelpButtonTooltip 00495030: one `mov dword ptr` printed as two word stores.
+  it('collapses element stores that share their instruction', () => {
+    const out = run(['void f() {', 'wchar_t w[4];', '[2@30] w[0] = 0;', '[2@30] w[1] = 0;', '[2@33] w[2] = 0;', '[2@33] w[3] = 0;', 'g(w);', '}']);
+    assert.match(out, /memset\(w, 0, 4 \* sizeof\(w\[0\]\)\)/);
+  });
+
+  it('collapses a run with a store the facts do not cover', () => {
+    const out = run(['void f() {', 'short a[5];', '[2] a[0] = 0;', '[2] a[1] = 0;', 'a[2] = 0;', '[2] a[3] = 0;', '[2] a[4] = 0;', 'g(a);', '}']);
+    assert.match(out, /memset\(a, 0, 5 \* sizeof\(a\[0\]\)\)/);
   });
 });

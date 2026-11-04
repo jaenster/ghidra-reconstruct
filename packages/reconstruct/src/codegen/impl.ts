@@ -3329,8 +3329,8 @@ function transformDecompiledCode(
 
     // Comparisons in the form their instructions show. A tie that falls back from the
     // position zip, or leaves decisions untied, is reported.
-    if (context?.funcPtrArgCasts?.globalElementSizes) {
-      perPluginOptions['array-fill-collapse'] = { globalElementSizes: context.funcPtrArgCasts.globalElementSizes };
+    if (context?.funcPtrArgCasts?.globalElementSizes || accessOrder) {
+      perPluginOptions['array-fill-collapse'] = { globalElementSizes: context?.funcPtrArgCasts?.globalElementSizes, accessOrder };
     }
     if (enclosing?.repStringOps?.length) {
       perPluginOptions['rep-string-form'] = {
