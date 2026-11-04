@@ -107,6 +107,7 @@ export const FUNCTION_HASH_FIELDS = {
   zeroStores: 'hashed',
   maskSites: 'hashed',
   zextSites: 'hashed',
+  registerStores: 'hashed',
   labelFlow: 'hashed',
   compareSites: 'hashed',
   branchLayout: 'hashed',

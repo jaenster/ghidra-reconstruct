@@ -158,6 +158,12 @@ export interface ExtractedFunction {
    * since, or the snapshot predates the field.
    */
   zextSites?: import('./extract/zext-sites.js').ZextSiteFacts;
+  /**
+   * The constants the original stores to memory from a register, by the name the left side
+   * ends in, with the immediate stores of the same function (extract/register-stores.ts).
+   * Absent when there are none or the snapshot predates the field.
+   */
+  registerStores?: import('./extract/register-stores.js').RegisterStoreFacts;
 }
 
 /**

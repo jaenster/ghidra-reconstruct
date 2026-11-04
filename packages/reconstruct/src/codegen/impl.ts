@@ -1746,6 +1746,8 @@ export function generateFunctionImplementation(
           // A text patch anchors on the masks as Ghidra printed them.
           maskSites: override?.action === 'patch' ? undefined : func.maskSites,
           zextSites: override?.action === 'patch' ? undefined : func.zextSites,
+          // A text patch anchors on the stores as Ghidra printed them.
+          registerStores: override?.action === 'patch' ? undefined : func.registerStores,
           // A text patch anchors on the comparisons as Ghidra printed them.
           compareSites: override?.action === 'patch' ? undefined : func.compareSites,
           sehLowering: sehLoweringDecision(func),
@@ -2734,6 +2736,8 @@ function transformDecompiledCode(
     maskSites?: import('../extract/mask-sites.js').MaskSiteFacts;
     /** The operators whose result the decompiler zero-extends to 64 bits (extract/zext-sites.ts). */
     zextSites?: import('../extract/zext-sites.js').ZextSiteFacts;
+    /** The constants the original stores from a register (extract/register-stores.ts). */
+    registerStores?: import('../extract/register-stores.js').RegisterStoreFacts;
     /** The function's EH3 frame as `seh-lowering` needs it (codegen/seh-lowering-spec.ts). */
     sehLowering?: SehLoweringDecision;
     /** Addresses the instructions derive from a global's start (codegen/folded-address-spec.ts). */
