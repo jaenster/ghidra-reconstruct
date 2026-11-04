@@ -102,6 +102,24 @@ describe('foreign source', () => {
   });
 });
 
+describe('foreign source by address, among overlapping extents', () => {
+  it('finds the global an address is in when smaller extents start inside it', () => {
+    // A 4 KB table with labels inside it Ghidra sized on their own; the foreign source
+    // names a byte of the table past them. A bisection that compares both edges steps right
+    // at the first small extent that ends below the address and never sees the table.
+    const table = sym('gaTable', '007a0000', { scope: 'file-local', ownerFile: 'A.cpp', size: 0x1000, referencingFunctions: ['a1', 'a2'] });
+    const inner = Array.from({ length: 6 }, (_, i) =>
+      local(`gnInner${i}`, (0x7a0100 + i * 0x100).toString(16).padStart(8, '0'), 'A.cpp', ['a1', 'a2']));
+    const after = Array.from({ length: 6 }, (_, i) =>
+      local(`gnAfter${i}`, (0x7a2000 + i * 0x10).toString(16).padStart(8, '0'), 'A.cpp', ['a1', 'a2']));
+    keepForeignReferencedGlobalsExternal([table, ...inner, ...after], [
+      { path: 'd2bsng/D2Client.h', text: 'inline GameVar<uint32_t> gnSlot{0x3A0800};', addressBase: 0x400000 },
+    ]);
+    assert.strictEqual(table.scope, 'global');
+    assert.ok(after.every(g => g.scope === 'file-local'));
+  });
+});
+
 describe('the unit records its file-local globals', () => {
   it('keys them by address', () => {
     assert.strictEqual(fileLocalGlobalKey({ address: '0074d87c' }), 'G:0074d87c');

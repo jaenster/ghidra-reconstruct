@@ -78,14 +78,21 @@ export function foreignReferencedFileLocals(
   }
   if (byName.size === 0) return out;
   extents.sort((x, y) => x.lo - y.lo);
+  // Extents can overlap (Ghidra gives a label inside a datum the datum's size: the RECT[16]
+  // labels gnTextBoxExclusionLeft..Width at 007bf0a8..007bf0b8 are 256 bytes each), so a
+  // bisection on both edges can step past the one that holds `v`, and which one it steps
+  // past moves with every symbol added to the list. The last start at or below `v`, then
+  // back while a start can still reach it: the innermost extent holding `v`.
+  let longest = 0;
+  for (const e of extents) longest = Math.max(longest, e.hi - e.lo);
   const containing = (v: number): AnalyzedDataSymbol | undefined => {
-    let lo = 0, hi = extents.length - 1;
+    let lo = 0, hi = extents.length - 1, last = -1;
     while (lo <= hi) {
       const mid = (lo + hi) >> 1;
-      const e = extents[mid];
-      if (v < e.lo) hi = mid - 1;
-      else if (v >= e.hi) lo = mid + 1;
-      else return e.g;
+      if (extents[mid].lo <= v) { last = mid; lo = mid + 1; } else hi = mid - 1;
+    }
+    for (let i = last; i >= 0 && extents[i].lo > v - longest; i--) {
+      if (v < extents[i].hi) return extents[i].g;
     }
     return undefined;
   };
