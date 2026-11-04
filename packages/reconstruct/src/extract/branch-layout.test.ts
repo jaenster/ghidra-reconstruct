@@ -14,6 +14,13 @@ describe('parseBranchLayout - edges and return entries', () => {
     ]);
   });
 
+  it('reads the jump mnemonic where the row carries it', () => {
+    const r = row.replace('23.0:if:12:1e:14:24:26', '23.0:if:12:1e:14:24:26:JNS');
+    const f = parseBranchLayout(r).get('004e1740')!;
+    assert.strictEqual(f.edges![1].cc, 'JNS');
+    assert.strictEqual('cc' in f.edges![0], false);
+  });
+
   it('reads how each return copy is entered', () => {
     const f = parseBranchLayout(row).get('004e1740')!;
     assert.deepStrictEqual(f.returns!.map(r => [r.start, r.fallsIn, r.jumpsIn]), [[0xc, true, []], [0x1e, true, [0x12]]]);

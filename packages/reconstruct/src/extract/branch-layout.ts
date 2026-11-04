@@ -103,6 +103,8 @@ export interface BranchEdge {
   /** Decompile lines printing an op of the block the fall-through / the jump leads to, ascending. */
   fallLines: number[];
   takenLines: number[];
+  /** The jump's mnemonic (`JNS`, `JGE`, ...). Absent in older facts. */
+  cc?: string;
 }
 
 /** A RET and the instructions that reach it only by falling through. */
@@ -254,7 +256,8 @@ export const EDGES_AFTER_JAVA = `
               .append(':').append(jo < 0 ? "-" + Long.toHexString(-jo) : Long.toHexString(jo))
               .append(':').append(to < 0 ? "-" + Long.toHexString(-to) : Long.toHexString(to))
               .append(':').append(fo < 0 ? "-" + Long.toHexString(-fo) : Long.toHexString(fo))
-              .append(':').append(side[0]).append(':').append(side[1]);
+              .append(':').append(side[0]).append(':').append(side[1])
+              .append(':').append(ji.getMnemonicString().toUpperCase());
           }
 `;
 
@@ -561,7 +564,7 @@ function parseReturns(col: string): ReturnCopy[] {
   return out;
 }
 
-/** `line.ord:kw:jcc:target:fall:L,L:L,L;...` -> the edges. */
+/** `line.ord:kw:jcc:target:fall:L,L:L,L[:CC];...` -> the edges. */
 function parseEdges(col: string): BranchEdge[] {
   const out: BranchEdge[] = [];
   const lines = (x: string) => (x === '-' || x === '' ? [] : x.split(',').map(Number));
@@ -573,6 +576,7 @@ function parseEdges(col: string): BranchEdge[] {
     out.push({
       line, ord, keyword: f[1], jcc: offset(f[2]), target: offset(f[3]), fall: offset(f[4]),
       fallLines: lines(f[5]), takenLines: lines(f[6]),
+      ...(f[7] && /^J[A-Z]{1,3}$/.test(f[7]) ? { cc: f[7] } : {}),
     });
   }
   return out;

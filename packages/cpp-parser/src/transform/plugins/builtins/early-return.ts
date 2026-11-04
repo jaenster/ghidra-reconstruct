@@ -334,6 +334,12 @@ function selectsReturn(stmts: readonly Statement[], ret: ReturnStmt, reader: Lay
   return !!copy && !copy.insns.some(i => EAX_WRITE.test(i));
 }
 
+/** The if's conditional jump tests the sign flag alone (JNS/JS): the value's own arithmetic set it. */
+function signTest(reader: LayoutReader, ifs: IfStmt): boolean {
+  const cc = reader.edge(ifs)?.cc;
+  return cc === 'JNS' || cc === 'JS';
+}
+
 /** A call to `exit` or `abort` in `stmts`: a path that halts. */
 function callsNoReturn(stmts: readonly Statement[]): boolean {
   return stmts.some(s => [...traverseAST(s)].some(n => {
@@ -400,7 +406,12 @@ function layoutGate(ev: BranchLayoutEvidence, body: CompoundStmt): GuardGate {
         // returns A at once and loads B on the other path (GAMEDATA_GetLadderOrGameType
         // 0044dca0, StripPathPrefixToRelative 00408000). Nested, VC8 loads B first and
         // moves A over it.
-        if (selectsReturn(stmts, ret, reader, ifs)) return true;
+        // Not where the test is the sign of the value just computed, a JNS/JS with no
+        // compare of its own: `n = ...; if (n < 0) { n = 0; } return n;` jumps over the
+        // store onto the one return (Q32_GetRemainingPrisonersCount 00588c50 `add eax, edx;
+        // jns`, SKILLS_CalculateManaCostShifted 006459f0 `sar eax, 8; jns`). The guard
+        // makes VC8 clone the return in front of the store.
+        if (selectsReturn(stmts, ret, reader, ifs)) return !signTest(reader, ifs);
         // A constant return after a loop: the loop's exits leave at different depths of
         // the epilogue's pops, and VC8 shares one tail between them and the guard
         // (SPELLSEL_FindChargedSkill1 004a9a90, SKILLSEMON_CltSetReviveGfx 004f04f0). Not a

@@ -74,6 +74,8 @@ export interface BranchEdge {
   fall: number;
   fallLines: readonly number[];
   takenLines: readonly number[];
+  /** The jump's mnemonic (`JNS`, `JGE`, ...). Absent in older facts. */
+  cc?: string;
 }
 
 /** A return copy of the original: its first instruction, its RET, and their mnemonics. */

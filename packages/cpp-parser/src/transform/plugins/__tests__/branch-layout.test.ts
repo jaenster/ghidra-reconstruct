@@ -752,6 +752,13 @@ describe('earlyReturnPlugin - gated by the layout', () => {
     assert.ok(/if \(h <= 7\)\s*return r; r = 1; return r;/.test(out), out);
   });
 
+  // Q32_GetRemainingPrisonersCount 00588c50: `add eax, edx; jns ret; xor eax, eax; ret`.
+  it('keeps the nest of a select whose jump tests the sign of the value alone', () => {
+    const edges = [{ ...selectEdge[0], cc: 'JNS' }];
+    const out = erWith(select, { edges, returns: [{ start: 0x17, ret: 0x17, insns: ['RET'], jumpsIn: [0x10], fallsIn: true }] });
+    assert.ok(out.includes('if (h > 7) { r = 1; } return r;'), out);
+  });
+
   // SKILLS_CalculateSynergyValue_Recursive 00645a90 keeps its nest: the join moves the variable into EAX.
   it('keeps the nest of a select whose return copy loads EAX', () => {
     const out = erWith(select, { edges: selectEdge, returns: [{ start: 0x17, ret: 0x1b, insns: ['POP/EDI', 'MOV/EAX', 'RET'], jumpsIn: [0x10], fallsIn: true }] });
