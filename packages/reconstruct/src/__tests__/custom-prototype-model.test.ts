@@ -111,6 +111,26 @@ describe('program-defined prototype models are spelled as the stock convention t
     assert.strictEqual(conventionKeyword(fn('E', '__cdecl_x87safe', ['Stack[0x4]:4'])), '');
   });
 
+  it('spells a caller-pops model with register parameters as plain __cdecl, parameters in order', () => {
+    // 004041f0 STRING_FormatVarArgs, Game.exe v1935: __cdecl_ediesi, szDest in EDI,
+    // nDestSize in ESI, the format and its arguments on the stack. Caller and callee
+    // are both compiled from source, so the registers are the original's allocation
+    // and the declaration only has to keep the argument order and the caller pop.
+    const f = fn('STRING_FormatVarArgs', '__cdecl_ediesi', ['EDI:4', 'ESI:4', 'Stack[0x4]:4']);
+    f.parameters[0].name = 'szDest'; f.parameters[0].dataType = 'char *';
+    f.parameters[1].name = 'nDestSize'; f.parameters[1].dataType = 'int32_t';
+    f.parameters[2].name = 'szFormat'; f.parameters[2].dataType = 'char *';
+    f.hasVarArgs = true;
+    assert.strictEqual(abiConvention(f), '__cdecl');
+    assert.strictEqual(conventionKeyword(f), '');
+    assert.match(generateFunctionDeclaration(f, options),
+      /^int STRING_FormatVarArgs\(char \* szDest, int32_t nDestSize, char \* szFormat, \.\.\.\);/);
+    assert.doesNotMatch(generateFunctionDeclaration(f, options), /ediesi/);
+    // The same model without varargs, and with only register parameters.
+    assert.strictEqual(conventionKeyword(fn('NoVarargs', '__cdecl_ediesi', ['EDI:4', 'ESI:4', 'Stack[0x4]:4'])), '');
+    assert.strictEqual(conventionKeyword(fn('RegsOnly', '__cdecl_ediesi', ['EDI:4', 'ESI:4'])), '');
+  });
+
   it('reads a stock callee-pops convention from custom storage', () => {
     // 004072a0: ECX, then [EBP+8], RET 4 - the __thiscall placement under a __fastcall name.
     assert.strictEqual(conventionKeyword(fn('SFILE_CalculateBufferOffset', '__fastcall', ['ECX:4', 'Stack[0x4]:4'])), '__thiscall');

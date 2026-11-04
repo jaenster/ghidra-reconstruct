@@ -97,6 +97,14 @@
  * that is not the first eligible one, which no keyword can say without
  * reordering the parameters. `__cdecl` never changes: no convention passes
  * arguments in registers and leaves the stack to the caller.
+ *
+ * A caller-pops model that passes some arguments in registers -
+ * `__cdecl_ediesi` on `STRING_FormatVarArgs` (004041f0): the destination in
+ * EDI, its size in ESI, the format and its arguments on the stack - is spelled
+ * plain `__cdecl`, parameters in their declared order. Caller and callee are
+ * both compiled from source, so which register carried an argument in the
+ * original is the original compiler's allocation, not a contract the rebuild
+ * has to keep; what it has to keep is the order and that the caller pops.
  */
 import { templateRegistry } from './templates/registry.js';
 
