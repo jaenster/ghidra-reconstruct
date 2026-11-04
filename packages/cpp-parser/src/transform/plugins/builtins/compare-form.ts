@@ -406,7 +406,11 @@ export function createCompareFormTransformer(options?: PluginOptions): Transform
           }
           const key = keyOf(be);
           const d = key ? tied.get(key) : undefined;
-          if (!d) return undefined;
+          if (!d) {
+            const z = signedZeroForm(be, shapeOf);
+            if (z) rewritten++;
+            return z ?? undefined;
+          }
           let out: BinaryExpr | null = null;
           if (d.keep) out = byteCompareWithOne(be, d);
           else if (d.op) out = rewrite(be, d, sizeOf(d.ord), shapeOf, enumStep, zeroEnum);
@@ -424,6 +428,30 @@ export function createCompareFormTransformer(options?: PluginOptions): Transform
 }
 
 /** The operands of a chain of one logical operator, through parentheses. */
+/**
+ * `-1 < X` (or `X > -1`) that no CMP was tied to: `X >= 0`. Ghidra prints a signed `X >= 0`
+ * that way; the tied decisions take every compare the instructions make against -1, so an
+ * untied one is a sign test whose flags come from a TEST or an earlier compare against 0
+ * (OnMouseWheel 004bc050: `jge` on the flags of the `> 0` test before it). Written `-1 < X`,
+ * VC8 compares again (`cmp ax, 0xffff`). Value-preserving for a signed X: `-1 < X` holds for
+ * exactly the X that are not negative. An X of any other type (unsigned, a pointer, unknown)
+ * keeps its spelling.
+ */
+function signedZeroForm(be: BinaryExpr, shapeOf: ExprShape): BinaryExpr | null {
+  let x: Expression | null = null;
+  const minusOne = (e: Expression) => {
+    const c = literalOf(e);
+    return !!c && c.value === -1n && !c.char && !c.lit.suffix;
+  };
+  if (be.operator === '<' && minusOne(be.left)) x = be.right;
+  else if (be.operator === '>' && minusOne(be.right)) x = be.left;
+  if (!x || operandSignedness(x, shapeOf) !== 'signed') return null;
+  const zero = Expr.intLiteral(0);
+  zero.location = (be.operator === '<' ? be.left : be.right).location;
+  const info = { ...(be.ghidraInfo ?? {}), signedCompareWidth: 4 };
+  return updateNode(be, { operator: '>=' as BinaryOperator, left: x, right: zero, ghidraInfo: info } as Partial<BinaryExpr>);
+}
+
 function logicalOperands(e: Expression, op: '&&' | '||'): Expression[] {
   const u = unwrapParens(e);
   if (u.kind === NodeKind.BinaryExpr && (u as BinaryExpr).operator === op) {

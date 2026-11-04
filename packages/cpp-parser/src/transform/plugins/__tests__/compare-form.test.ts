@@ -34,6 +34,15 @@ const lit = (raw: string, value: bigint, base: 10 | 16 = 16, suffix = ''): Integ
   ({ kind: NodeKind.IntegerLiteral, value, raw, base, suffix } as IntegerLiteralExpr);
 
 describe('compare-form', () => {
+  // OnMouseWheel 004bc050: `jge` on the flags of the `> 0` test before it, no CMP of its own.
+  it('writes an untied -1 < x on a signed x as x >= 0', () => {
+    const code = 'void f(short n, unsigned int u) { if (n > 0) { g(); } else if (-1 < n) { h(); } if (-1 < u) { h(); } }';
+    const site = { text: '<', fp: ['c:0', 'v:n'] as [string, string] };
+    const out = run(code, [site, site, site], [dec({ ord: 0, text: '<', fp: ['c:0', 'v:n'], keep: true })]);
+    assert.ok(out.includes('else if (n >= 0)'), out);
+    assert.ok(out.includes('if (-1 < u)'), out);
+  });
+
   const INIT_LOG = `void f(uint32_t nCount) {
   uint nByteOffset;
   uint nIndex;
