@@ -1746,6 +1746,8 @@ export function generateFunctionImplementation(
           // A text patch anchors on the masks as Ghidra printed them.
           maskSites: override?.action === 'patch' ? undefined : func.maskSites,
           zextSites: override?.action === 'patch' ? undefined : func.zextSites,
+          // A text patch anchors on the comparisons as Ghidra printed them.
+          compareSites: override?.action === 'patch' ? undefined : func.compareSites,
           sehLowering: sehLoweringDecision(func),
           foldedAddresses: foldedAddressFacts(func),
           immediateConstants: immediateConstantFacts(func),
@@ -2720,6 +2722,8 @@ function transformDecompiledCode(
     callOrder?: CallOrderFacts;
     /** Argument loads and store instructions per decompile line (extract/access-order.ts). */
     accessOrder?: AccessOrderFacts;
+    /** The compare-sites rows (extract/compare-sites.ts): each comparison's CMP/TEST and its flag reader. */
+    compareSites?: string;
     /** The line each way into a halt pushes; stack-probe return addresses (extract/halt-lines.ts). */
     haltLines?: HaltLineFacts;
     /** The decompiler's jump tables and their bound checks' fallbacks (extract/jump-tables.ts). */
@@ -3501,6 +3505,11 @@ function transformDecompiledCode(
         onSite: (e: { line: number; name: string; form: string; tests: number }) =>
           console.warn(`[record-split] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.name} (${e.form}, ${e.tests} test${e.tests === 1 ? '' : 's'}) on line ${e.line}`),
       };
+    }
+    // A pointer scan's difference from its start is the string's length (strlen-difference.ts):
+    // the comparison's row says whether the original compared it with 1.
+    if (enclosing?.compareSites) {
+      perPluginOptions['strlen-difference'] = { compareSites: enclosing.compareSites };
     }
     // A temporary goes back into the argument list where the original evaluated the
     // arguments right of it first (nest-call.ts); without the facts nothing changes.
