@@ -919,6 +919,9 @@ export async function applyEvents(
   }));
   /** Types whose size or member offsets moved: what embeds them by value moved too. */
   const layoutMoved = new Set<string>();
+  // Types whose members changed in any way: a global of one holds an initializer
+  // printed member by member, which only a re-read of the global renews.
+  const membersMoved = new Set<string>();
   /** A type was renamed or added: its place in the type list moved. */
   let typeOrderMoved = false;
   /** Old names of renamed types: other records still spell them. */
@@ -991,6 +994,7 @@ export async function applyEvents(
       const changed = changedMemberTokens(previous, fresh);
       for (const name of changed.tokens) typeTokens.add(name);
       if (changed.layoutChanged) layoutMoved.add(fresh.name);
+      if (changed.tokens.length > 0 || changed.layoutChanged) membersMoved.add(fresh.name);
     }
 
     // A type Ghidra has and the model does not: nothing to diff against, and
@@ -1070,6 +1074,22 @@ export async function applyEvents(
     // name in their body, so the old names in typeTokens send them to be decompiled and
     // their records re-read.
     for (const name of referrers.names) typeTokens.add(name);
+  }
+
+  // A global's initializer is extracted against its type's members (`initializedData`
+  // names each field and spells an interior pointer by the member it lands on), so a
+  // member change leaves it describing the old layout: v1895 turned D2StormListHead's
+  // two link fields into one embedded StormLinkStrc, and the eleven list heads kept
+  // `.pPrevLink = &gList.pPrevLink`, a member the struct no longer has. Re-read every
+  // global held by value in such a type, or in a type embedding one by value.
+  if (membersMoved.size > 0) {
+    const holders = new Set(membersMoved);
+    for (const slot of byValueEmbedders(model.primary.dataTypes, membersMoved)) holders.add(model.primary.dataTypes[slot].name);
+    for (const g of model.primary.globals) {
+      if (g.platform || !g.dataType || g.dataType.includes('*') || !holders.has(baseTypeName(g.dataType))) continue;
+      if (globalEvents.some(e => addressKey(e.key) === addressKey(g.address))) continue;
+      globalEvents.push({ seq: 0, kind: 'data.changed', target: 'global', key: g.address, at: '' } as ChangeEvent);
+    }
   }
 
   // The type list's order is a whole-program input: the emitter lays types out in it.

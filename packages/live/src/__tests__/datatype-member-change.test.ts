@@ -105,3 +105,41 @@ test('a struct embedding a resized one is read again and its members\' readers g
   assert.ok(res.touchedDataTypes.some(k => k.includes('D2Outer')), res.touchedDataTypes.join(', '));
   assert.ok(decompiled.includes(OTHER), decompiled.join(', '));
 });
+
+test('a member change re-reads the globals held in the type by value, not those pointing at it', async () => {
+  const head = (fields: unknown[]) => ({ name: 'D2StormListHead', category: '/', kind: 'STRUCTURE', size: 12, fields });
+  const before = [field('nLinkOffset', 'int32_t', 0), field('pPrevLink', 'StormLinkStrc *', 4), field('pNext', 'int32_t', 8)];
+  const after = [field('nLinkOffset', 'int32_t', 0), field('terminator', 'StormLinkStrc', 4, 8)];
+  const m = model(BEFORE, [head(before), { name: 'D2Archive', category: '/', kind: 'STRUCTURE', size: 16, fields: [field('list', 'D2StormListHead', 0, 12), field('n', 'int', 12)] }]);
+  m.primary.globals.push(
+    { name: 'gMpqArchiveList', address: '00708354', dataType: 'D2StormListHead', referencingFunctions: [] } as never,
+    { name: 'gArchive', address: '00708400', dataType: 'D2Archive', referencingFunctions: [] } as never,
+    { name: 'gpList', address: '00708500', dataType: 'D2StormListHead *', referencingFunctions: [] } as never,
+  );
+  const asked: string[] = [];
+  const c = {
+    async sendCommand(cmd: string, params: Record<string, unknown>) {
+      if (cmd === 'get_data_type') {
+        if (params.name === 'D2StormListHead') return { name: params.name, category: '/', type: 'Structure', size: 12, fields: after.map(f => ({ ...f, length: f.size })) };
+        return { name: params.name, category: params.category, type: 'Structure', size: 16, fields: [{ name: 'list', dataType: 'D2StormListHead', offset: 0, length: 12 }, { name: 'n', dataType: 'int', offset: 12, length: 4 }] };
+      }
+      if (cmd === 'list_data_symbols') { asked.push(`global:${params.regex}`); return { total: 0, globals: [] }; }
+      if (cmd === 'decompile') return { pseudocode: 'void f(void) {}' };
+      if (cmd === 'get_function_info') return { name: 'f', address: String(params.address), signature: 'void f(void)', returnType: 'void', parameters: [], localVariables: [], callingConvention: '__stdcall', size: 10 };
+      if (cmd === 'execute_script' && factsScriptOutput(params.code) !== null) return { success: true, output: factsScriptOutput(params.code)! };
+      if (cmd === 'execute_script') {
+        const code = String(params.code);
+        if (code.includes('String[] addrs')) asked.push(...['00708354', '00708400', '00708500'].filter(a => code.includes(a)).map(a => `addr:${a}`));
+        return { success: true, output: '' };
+      }
+      return {};
+    },
+  } as never;
+  const e = { seq: 1, kind: 'datatype.changed', target: 'datatype', key: '/D2StormListHead' } as ChangeEvent;
+  await applyEvents(m, buildIndices(m), [e], c);
+  const reread = (name: string, addr: string) =>
+    asked.some(a => (a.startsWith('global:') && new RegExp(a.slice(7)).test(name)) || a === `addr:${addr}`);
+  assert.ok(reread('gMpqArchiveList', '00708354'), asked.join(', '));
+  assert.ok(reread('gArchive', '00708400'), asked.join(', '));
+  assert.ok(!reread('gpList', '00708500'), asked.join(', '));
+});
