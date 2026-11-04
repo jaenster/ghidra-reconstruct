@@ -3671,8 +3671,20 @@ export function buildGlobalAddressExtentTables(
   // global has a modelled type and a declaration of its own, and a synthesized
   // label losing to it costs one unresolved literal, while the reverse would
   // give the global's address the wrong type at every use.
+  //
+  // Nor at an ADDRESS a global already starts at. A `char[N]` datum Ghidra values as
+  // text is listed as a string too, and 109 of the 151 are named globals
+  // (gszFoo, char[16]): a second name on the address would make it ambiguous in the
+  // initializer table, which drops an address two names share, and the global
+  // would lose every reference it resolves today.
+  const globalBases = new Set<number>();
+  for (const g of globals) {
+    const a = Number.parseInt(normalizeDataAddress(String(g.address ?? '')), 16);
+    if (Number.isSafeInteger(a)) globalBases.add(a);
+  }
   const stringConstantNames: string[] = [];
   for (const { name, address, size } of stringConstantExtents(strings)) {
+    if (globalBases.has(address)) continue;
     if (globalAddresses[name] !== undefined || ambiguousGlobalAddresses.has(name)) continue;
     if (globalSizes[name] !== undefined || ambiguousGlobalSizes.has(name)) continue;
     globalAddresses[name] = address;

@@ -109,7 +109,14 @@ export interface ExtractionOptions {
   /** Decompilation timeout in seconds */
   decompileTimeout?: number;
 
-  /** Minimum string length to extract */
+  /**
+   * Minimum string length to extract. Every string Ghidra defines, by default: a
+   * table that points at `"14"` (006cc77c, the last entry of every gaLanguageNames
+   * copy) or `"???"` (006ccb30, gaErrorTypeNames' last entry and
+   * gnExcelRecordFieldNotFound) can only be spelled with the string's name when the
+   * string is in the snapshot; below four characters it was not, and the pointer was
+   * emitted as the raw 1.14d address, which nothing relocates.
+   */
   minStringLength?: number;
 
   /** Filter namespaces by pattern */
@@ -138,6 +145,9 @@ export interface ExtractionOptions {
   decompileFilter?: (func: ExtractedFunction) => boolean;
 }
 
+/** Every string Ghidra defines: see `ExtractionOptions.minStringLength`. */
+export const DEFAULT_MIN_STRING_LENGTH = 1;
+
 /**
  * Extract all data from a Ghidra session
  */
@@ -148,7 +158,7 @@ export async function extractAll(
   const {
     decompile = true,
     decompileTimeout = 30,
-    minStringLength = 4,
+    minStringLength = DEFAULT_MIN_STRING_LENGTH,
     namespaceFilter,
     onProgress,
     cache,

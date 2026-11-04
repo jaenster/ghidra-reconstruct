@@ -197,10 +197,25 @@ export function stringDefinition(
   name: string,
   content: ClosureStringContent
 ): { def: string } | { reason: string } {
-  if (!BYTE_STRING_ENCODINGS.has(content.encoding.toLowerCase())) {
+  // A `char[N]` datum Ghidra values as text (`"Stam"` at 006e160c, `"Dam"` at
+  // 006e1664: the damage-type names gaDefenseReductionTable points at) is the same
+  // bytes as a terminated string, in an object of N bytes. It is defined at its
+  // declared size, so the bytes after the terminator stay zero and the object owns
+  // what Ghidra says it owns.
+  const charArray = /^char\[(\d+)\]$/i.exec(content.encoding.trim());
+  if (!charArray && !BYTE_STRING_ENCODINGS.has(content.encoding.toLowerCase())) {
     return { reason: `string data Ghidra encodes as ${content.encoding}, which no char[] can hold` };
   }
   const bytes = Buffer.from(content.value, 'utf8');
+  if (charArray) {
+    const declared = Number(charArray[1]);
+    if (bytes.length !== content.length || bytes.length + 1 > declared) {
+      return {
+        reason: `string content is ${bytes.length} byte(s) in a char[${declared}] Ghidra reports as ${content.length}`,
+      };
+    }
+    return { def: `char ${name}[${declared}] = ${cxxStringLiteral(bytes)};` };
+  }
   if (bytes.length !== content.length) {
     // The decoded text does not weigh what Ghidra says the datum weighs, so
     // something was lost between the binary and here. A definition built from it
