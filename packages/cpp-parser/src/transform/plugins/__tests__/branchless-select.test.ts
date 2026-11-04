@@ -16,22 +16,36 @@ describe('branchlessSelectPlugin', () => {
     return emit(transformer(ast) as AnyNode).trim();
   }
 
-  it('core: (C) - 1 & M → C ? 0 : M', () => {
+  it('core: (C) - 1 & M → !C ? M : 0, the arm order VC8 compiles back to SETcc C', () => {
     const out = tx(`int f(int n) { return (0x14 < n) - 1 & 0x1f; }`);
-    assert.ok(out.includes('0x14 < n ? 0 : 0x1f'), out);
+    assert.ok(out.includes('!(0x14 < n) ? 0x1f : 0'), out);
     assert.ok(!out.includes('- 1 &'), out);
   });
 
-  it('offset fold: ((C) - 1 & -21) + 0x14 → C ? 0x14 : -1 (the MONSTER_ValidateSpawnForLevel case)', () => {
+  it('offset fold: ((C) - 1 & -21) + 0x14 → !C ? -1 : 0x14, the ADD immediate as the else arm', () => {
+    // AI_Fn1_VileMother 005fa010: setg; sub 1; and 0xfffffed2; add 0x12d is `size <= 0x12d ? -1 : 0x12d`.
     const out = tx(`int f(int n) { return ((0x14 < n) - 1 & -21) + 0x14; }`);
-    assert.ok(out.includes('? 0x14 : -1'), out);
+    assert.ok(out.includes('!(0x14 < n) ? -1 : 0x14'), out);
     assert.ok(!out.includes('- 1 &'), out);
   });
 
   it('handles the 1U variant and != comparison', () => {
     const out = tx(`int f(int x) { return ((x != 0xb) - 1U & 6) + 0x6c; }`);
     // 0x6c + 6 = 0x72
-    assert.ok(out.includes('? 0x6c : 0x72'), out);
+    assert.ok(out.includes('!(x != 0xb) ? 0x72 : 0x6c'), out);
+  });
+
+  it('SETcc + LEA: !b * 8 + 0x13 → b ? 0x13 : 0x1b (CHATDLG_RequestLadderRank 0043ec60)', () => {
+    const out = tx(`int f(int b) { return !b * '\\b' + 0x13; }`);
+    assert.ok(out.includes('return b ? 0x13 : 0x1b;'), out);
+    const cmp = tx(`int f(int n) { return 2 * (n != 0) + 0xf8; }`);
+    assert.ok(cmp.includes('!(n != 0) ? 0xf8 : 0xfa'), cmp);
+    assert.ok(tx(`int f(int n, int m) { return (n != 0) * 2 + m; }`).includes('* 2 + m'));
+  });
+
+  it('a negated condition loses its `!`', () => {
+    const out = tx(`int f(int n) { return (!n) - 1 & 4; }`);
+    assert.ok(out.includes('return n ? 0x4 : 0;'), out);
   });
 
   it('does NOT rewrite a genuine bitmask on a non-boolean', () => {

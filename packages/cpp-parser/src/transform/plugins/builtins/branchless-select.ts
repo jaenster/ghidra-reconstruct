@@ -97,6 +97,19 @@ function isComparison(expr: Expression): boolean {
   return false;
 }
 
+/** An integer or character literal's value. */
+function constOrChar(expr: Expression): bigint | null {
+  const v = intVal(expr);
+  if (v !== null) return v;
+  const e = unwrapParens(expr);
+  if (e.kind !== NodeKind.CharLiteral) return null;
+  const raw = (e as unknown as { value: number | string }).value;
+  if (typeof raw === 'number') return BigInt(raw);
+  const esc: Record<string, number> = { '\\0': 0, '\\a': 7, '\\b': 8, '\\t': 9, '\\n': 10, '\\v': 11, '\\f': 12, '\\r': 13 };
+  if (raw.length === 1) return BigInt(raw.charCodeAt(0));
+  return raw in esc ? BigInt(esc[raw]) : null;
+}
+
 /** A literal's value, or an enum constant's. */
 function constVal(expr: Expression): bigint | null {
   const v = intVal(expr);
@@ -130,6 +143,14 @@ function matchSelect(node: BinaryExpr): { cond: Expression; mask: bigint } | nul
   mask = intVal(node.left);
   if (cond !== null && mask !== null) return { cond, mask };
   return null;
+}
+
+/** The negation of a 0/1 condition: `!x` loses its `!`, anything else is wrapped in one. */
+function negated(cond: Expression): Expression {
+  const c = unwrapParens(cond);
+  if (c.kind === NodeKind.UnaryExpr && (c as UnaryExpr).operator === '!') return (c as UnaryExpr).operand;
+  const paren: ParenExpr = { kind: NodeKind.ParenExpr, expression: c, location: c.location, leadingTrivia: [], trailingTrivia: [] } as ParenExpr;
+  return { kind: NodeKind.UnaryExpr, operator: '!', operand: paren, location: c.location, leadingTrivia: [], trailingTrivia: [] } as unknown as UnaryExpr;
 }
 
 function makeLit(src: ASTNode, value: bigint): IntegerLiteralExpr {
@@ -216,7 +237,9 @@ function createBranchlessSelectTransformer(enumTables: EnumTables | null): Trans
       if (bin.operator === '&') {
         const m = matchSelect(bin);
         if (m) {
-          return makeConditional(node, m.cond, makeLit(node, 0n), makeLit(node, m.mask));
+          // VC8 compiles `d ? X : Y` as SETcc(!d); DEC; AND X-Y; ADD Y, so the SETcc on C
+          // the idiom shows was written `!C ? M : 0`: the arm order follows the AND/ADD.
+          return makeConditional(node, negated(m.cond), makeLit(node, m.mask), makeLit(node, 0n));
         }
         // A pure, non-constant M: read once on either path.
         for (const [sel, val] of [[bin.left, bin.right], [bin.right, bin.left]] as const) {
@@ -243,18 +266,37 @@ function createBranchlessSelectTransformer(enumTables: EnumTables | null): Trans
         }
       }
 
-      // Offset fold (bottom-up: the & was already rewritten to `C ? 0 : M`):
-      // (C ? 0 : M) + V  →  C ? V : (V + M)   (and the commuted V + (...))
+      // SETcc + LEA: (B) * K + V → !B ? V : V+K. VC8 compiles `d ? X : Y` with a small
+      // difference as SETcc(!d); LEA [eax*(Y-X) + X] (CHATDLG_RequestLadderRank 0043ec60:
+      // `sete al; lea eax, [eax*8+0x13]` is `bHardcore ? 0x13 : 0x1b`).
+      if (bin.operator === '+') {
+        for (const [prod, vSide] of [[bin.left, bin.right], [bin.right, bin.left]] as const) {
+          const m = unwrapParens(prod);
+          const v = constOrChar(vSide);
+          if (m.kind !== NodeKind.BinaryExpr || (m as BinaryExpr).operator !== '*' || v === null) continue;
+          const mb = m as BinaryExpr;
+          for (const [b, kSide] of [[mb.left, mb.right], [mb.right, mb.left]] as const) {
+            const k = constOrChar(kSide);
+            if (k === null || k === 0n || k === 1n || !isComparison(b)) continue;
+            return makeConditional(node, negated(unwrapParens(b)), makeLit(node, v), makeLit(node, v + k));
+          }
+        }
+      }
+
+      // Offset fold (bottom-up: the & was already rewritten to `!C ? M : 0`):
+      // (c ? A : B) + V  →  c ? A+V : B+V for constants A, B one of which is 0
+      // (and the commuted V + (...)); the ADD's immediate is the else arm.
       if (bin.operator === '+') {
         const tryFold = (ternSide: Expression, vSide: Expression): ConditionalExpr | undefined => {
           const tern = unwrapParens(ternSide);
           if (tern.kind !== NodeKind.ConditionalExpr) return undefined;
           const t = tern as ConditionalExpr;
-          if (intVal(t.thenExpr) !== 0n) return undefined; // only our select shape (then == 0)
-          const mask = intVal(t.elseExpr);
+          const a = intVal(t.thenExpr);
+          const b = intVal(t.elseExpr);
           const v = intVal(vSide);
-          if (mask === null || v === null) return undefined;
-          return makeConditional(node, t.condition, vSide, makeLit(node, v + mask));
+          if (a === null || b === null || v === null || (a !== 0n && b !== 0n)) return undefined;
+          const lit = (x: bigint) => (x === 0n ? vSide : makeLit(node, x + v));
+          return makeConditional(node, t.condition, lit(a), lit(b));
         };
         return tryFold(bin.left, bin.right) ?? tryFold(bin.right, bin.left);
       }
