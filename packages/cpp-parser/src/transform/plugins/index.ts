@@ -477,6 +477,11 @@ export {
 } from './builtins/record-getter-split.js';
 
 export {
+  recordNullFoldPlugin,
+  type RecordNullFoldOptions,
+} from './builtins/record-null-fold.js';
+
+export {
   fieldPointerFoldPlugin,
   type FieldPointerFoldOptions,
 } from './builtins/field-pointer-fold.js';
@@ -822,6 +827,7 @@ import { linkNextSelectPlugin } from './builtins/link-next-select.js';
 import { heldAddressMemberPlugin } from './builtins/held-address-member.js';
 import { recordGetterGuardPlugin } from './builtins/record-getter-guard.js';
 import { recordGetterSplitPlugin } from './builtins/record-getter-split.js';
+import { recordNullFoldPlugin } from './builtins/record-null-fold.js';
 import { armConstantCallPlugin } from './builtins/arm-constant-call.js';
 import { fieldPointerFoldPlugin } from './builtins/field-pointer-fold.js';
 import { newResultTempPlugin } from './builtins/new-result-temp.js';
@@ -1024,6 +1030,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   declInitMergePlugin,        // Cleanup: int x; x = expr; → int x = expr; (priority 60)
   recordGetterGuardPlugin,    // Matching: an inlined record getter's guard gets its pointer local, read through (priority 60.5)
   recordGetterSplitPlugin,    // Matching: a record getter's split range tests and null test become one conditional pointer again (priority 60.55)
+  recordNullFoldPlugin,       // Matching: a null guard before a record lookup through the pointer goes into its condition (priority 60.56)
   fieldPointerFoldPlugin,     // Matching: a field-pointer temporary goes; the field updated in place or the record held (priority 62.5)
   newResultTempPlugin,        // Matching: an allocation constructed in place gets a temporary; the result assigned after (priority 62.6)
   joinStoreTempPlugin,        // Matching: a member every arm stores into is stored once after the join, through a temporary (priority 970)

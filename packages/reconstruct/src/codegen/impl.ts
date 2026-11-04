@@ -3552,6 +3552,13 @@ function transformDecompiledCode(
         onSite: (e: { line: number; name: string; form: string; tests: number }) =>
           console.warn(`[record-split] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.name} (${e.form}, ${e.tests} test${e.tests === 1 ? '' : 's'}) on line ${e.line}`),
       };
+      // A null guard before a record lookup through the pointer goes into the lookup's
+      // condition where the original leaves both through one exit (record-null-fold.ts).
+      perPluginOptions['record-null-fold'] = {
+        branchLayout: layout,
+        onSite: (e: { line: number; pointer: string; record: string }) =>
+          console.warn(`[record-null] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.pointer} into ${e.record} on line ${e.line}`),
+      };
     }
     // A pointer scan's difference from its start is the string's length (strlen-difference.ts):
     // the comparison's row says whether the original compared it with 1.

@@ -238,7 +238,7 @@ const FLIP: Partial<Record<BinaryOperator, BinaryOperator>> = {
 };
 
 /** `!c` as the conjuncts it is: `!(a && b)` is `a`, `b`; `a || b` is `!a`, `!b`; a comparison flips. */
-function negatedConjuncts(c: Expression): Expression[] {
+export function negatedConjuncts(c: Expression): Expression[] {
   const u = unwrap(c);
   if (u.kind === NodeKind.UnaryExpr && (u as UnaryExpr).operator === '!') return conjuncts((u as UnaryExpr).operand);
   if (u.kind === NodeKind.BinaryExpr) {
@@ -250,7 +250,7 @@ function negatedConjuncts(c: Expression): Expression[] {
   return [Expr.not(Expr.paren(cloneNode(c)))];
 }
 
-function conjuncts(e: Expression): Expression[] {
+export function conjuncts(e: Expression): Expression[] {
   const u = unwrap(e);
   if (u.kind === NodeKind.BinaryExpr && (u as BinaryExpr).operator === '&&') {
     return [...conjuncts((u as BinaryExpr).left), ...conjuncts((u as BinaryExpr).right)];
@@ -259,14 +259,14 @@ function conjuncts(e: Expression): Expression[] {
 }
 
 /** The single statement of a branch: `{ s }` or `s`. */
-function only(s: Statement): Statement | null {
+export function only(s: Statement): Statement | null {
   if (s.kind !== NodeKind.CompoundStmt) return s;
   const st = (s as CompoundStmt).statements;
   return st.length === 1 ? only(st[0]) : null;
 }
 
 /** `if (c) return R;` with no else: the condition and the return. */
-function returnGuard(s: Statement): { cond: Expression; ret: ReturnStmt } | null {
+export function returnGuard(s: Statement): { cond: Expression; ret: ReturnStmt } | null {
   if (s.kind !== NodeKind.IfStmt) return null;
   const ifs = s as IfStmt;
   if (ifs.init || ifs.elseBranch) return null;
@@ -276,7 +276,7 @@ function returnGuard(s: Statement): { cond: Expression; ret: ReturnStmt } | null
 }
 
 /** `p = E;` or `T *p = E;`: the name, the value and whether it declares. */
-function recordStore(s: Statement): { name: string; value: Expression; decl: VariableDecl | null } | null {
+export function recordStore(s: Statement): { name: string; value: Expression; decl: VariableDecl | null } | null {
   if (s.kind === NodeKind.ExprStmt) {
     const e = unwrap((s as ExprStmt).expression);
     if (e.kind !== NodeKind.AssignExpr || (e as AssignExpr).operator !== '=') return null;
@@ -294,12 +294,12 @@ function recordStore(s: Statement): { name: string; value: Expression; decl: Var
   return null;
 }
 
-function sameReturn(a: ReturnStmt, b: ReturnStmt): boolean {
+export function sameReturn(a: ReturnStmt, b: ReturnStmt): boolean {
   if (!a.value || !b.value) return !a.value && !b.value;
   return nodesEqual(unwrap(a.value), unwrap(b.value));
 }
 
-function placedLine(n: ASTNode): number | null {
+export function placedLine(n: ASTNode): number | null {
   const l = n.location;
   if (!l || l.file === '<generated>' || l.start.line <= 0) return null;
   return l.start.line;
@@ -311,7 +311,7 @@ function placedRange(n: ASTNode): [number, number] | null {
   return [l.start.line, Math.max(l.start.line, l.end.line)];
 }
 
-class Gate {
+export class Gate {
   private readonly ifLines: number[];
   constructor(private readonly ev: BranchLayoutEvidence) {
     this.ifLines = [...ev.ifs.keys()].sort((a, b) => a - b);
@@ -346,7 +346,7 @@ class Gate {
    * No return copy that a return's offsets lie in starts before a test ends: the original
    * did not leave the first tests through a copy laid out between them.
    */
-  copyAfterTests(rets: ReturnStmt[], tests: Expression[]): boolean {
+  copyAfterTests(rets: ReturnStmt[], tests: ASTNode[]): boolean {
     const ro = this.offsets(rets);
     const to = this.offsets(tests);
     if (!ro || !to) return false;
@@ -363,7 +363,7 @@ class Gate {
    * jump per test: \`jumps\` of them, or one fewer when the code before falls into it (the
    * null test skipping it). Null when there is no such copy.
    */
-  sharedExit(rets: ReturnStmt[], tests: Expression[], jumps: number, fallCounts: boolean): boolean {
+  sharedExit(rets: ReturnStmt[], tests: ASTNode[], jumps: number, fallCounts: boolean): boolean {
     const copies = this.ev.returns ?? [];
     const ro = this.offsets(rets);
     const to = this.offsets(tests);
