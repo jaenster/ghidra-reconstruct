@@ -36,6 +36,7 @@ import { createParamReachOracle } from './param-reach.js';
 import { lowerShiftedPointerTypedefs, shiftedPointerSpecs } from './shifted-pointers.js';
 import { respellPlaceholderTypes, respellPlaceholderType } from './placeholder-types.js';
 import { sehSubsumedSymbols, normaliseAddress } from './seh-subsumed.js';
+import { inlineFrameFunclets } from './frame-funclet-inline.js';
 import { selectDataExclusions, type DataClosureCandidate } from './data-exclusion-closure.js';
 import { isMainThread } from 'worker_threads';
 import * as fs from 'node:fs/promises';
@@ -1141,6 +1142,20 @@ export function generateProjectStage1(
         console.log(`  dupe  ${f.namespace}::${f.name} @${f.address} — same emitted name as an earlier body`);
       }
     }
+  }
+
+  // A `__finally` block Ghidra left as a function that reads its caller's frame through
+  // EBP goes back into its one caller, on the caller's own locals (frame-funclet-inline.ts).
+  {
+    const funclets = inlineFrameFunclets(functions);
+    if (funclets.inlined.length > 0) {
+      functions = funclets.functions;
+      for (const i of funclets.inlined) {
+        console.log(`Frame funclet ${i.funclet} @${i.funcletAddress} inlined into ${i.parent}: `
+          + Object.entries(i.slots).map(([k, v]) => `[EBP-0x${Number(k).toString(16)}]=${v}`).join(' '));
+      }
+    }
+    for (const r of funclets.refusals) console.log(`Frame funclet left as a function: ${r}`);
   }
 
   // A lowered SEH frame replaces its `__finally` block's function and its scope
