@@ -2931,6 +2931,12 @@ function transformDecompiledCode(
       onSite: (e: { variable: string; pointer: string }) =>
         console.warn(`[tail-walk] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.variable} (${e.pointer})`),
     };
+    // A guarded do-while testing the copy its pointer is stepped to loops on the pointer
+    // (rotated-step-while.ts).
+    perPluginOptions['rotated-step-while'] = {
+      onSite: (e: { variable: string; copy: string; zeroStore: boolean }) =>
+        console.warn(`[step-while] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.variable} <- ${e.copy}${e.zeroStore ? ' (zero store dropped)' : ''}`),
+    };
 
     // Method-conversion is dropped (free functions only), so mappings/currentFunction
     // are normally empty; keep the original guard so any stray mapping still no-ops.
