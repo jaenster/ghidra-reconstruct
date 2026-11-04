@@ -35,7 +35,7 @@ import type { GhidraConnection, ExtractedFunction } from '../types.js';
 import { STAMPER_JAVA, functionStampsScript, parseFunctionStamps, normalizeEntry, type TypeStamp } from './function-stamps.js';
 import { printsComparison, javaStringHash, parseCompareSiteOutput } from './compare-sites.js';
 import { printsBranch, parseBranchLayout, IF_OPERANDS_DECL_JAVA, IF_OPERANDS_TOKEN_JAVA, RETURN_COPIES_JAVA, EDGES_DECL_JAVA, EDGES_TOKEN_JAVA, EDGES_AFTER_JAVA, PUSHES_JAVA } from './branch-layout.js';
-import { printsCallTemporary, parseCallOrder } from './call-order.js';
+import { printsCallTemporary, parseCallOrder, CALL_PUSHES_JAVA, SEH_LINK_JAVA } from './call-order.js';
 import { ACCESS_ORDER_TOKEN_JAVA, parseAccessOrderRow, printsAccess } from './access-order.js';
 import { printsHaltOrProbe, parseHaltLines, HALT_NAME, IP_NAME, PROBE_NAMES } from './halt-lines.js';
 import { STRING_OPS_JAVA, printsRepLoop, parseStringOpRow } from './string-ops.js';
@@ -93,6 +93,7 @@ for (int ti = 0; ti < nThreads; ti++) {
     ghidra.program.model.listing.Listing L = prog.getListing();
     ghidra.program.model.symbol.ReferenceManager rm = prog.getReferenceManager();
     ghidra.program.model.listing.FunctionManager fm = prog.getFunctionManager();
+${CALL_PUSHES_JAVA}
     try {
       String a;
       while ((a = queue.poll()) != null) {
@@ -297,7 +298,8 @@ ${IF_OPERANDS_TOKEN_JAVA}${EDGES_TOKEN_JAVA}${ACCESS_ORDER_TOKEN_JAVA}          
                 if (!fn.getBody().contains(p.getAddress())) break;
                 if (p.getFlowType().isCall()) { long po = p.getAddress().getOffset() - base; prev = po < 0 ? "-" + Long.toHexString(-po) : Long.toHexString(po); break; }
                 if (p.getFlowType().isJump() || p.getFlowType().isTerminal()) break;
-                if (p.getMnemonicString().equalsIgnoreCase("PUSH")) pushes++;
+                if (${SEH_LINK_JAVA}) break;
+                if (p.getMnemonicString().equalsIgnoreCase("PUSH") && !notArgPush.test(fn, p)) pushes++;
                 cur = p;
               }
               String slots = "?";
@@ -472,7 +474,7 @@ println(sb.toString());
  */
 export const FACT_SCRIPT_VERSION = createHash('sha1')
   .update(FUNCTION_FACTS_SCRIPT).update(LABEL_FLOW_SCRIPT).update(functionStampsScript([], []))
-  .update('facts-7')
+  .update('facts-8')
   .digest('hex').slice(0, 16);
 
 export function functionFactsScript(batch: string[], threads = 8, timeout = 60): string {
