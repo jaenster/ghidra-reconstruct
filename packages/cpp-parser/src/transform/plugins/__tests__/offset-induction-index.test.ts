@@ -311,3 +311,82 @@ describe('offsetInductionIndexPlugin', () => {
 }`);
   });
 });
+
+describe('offsetInductionIndexPlugin: a single pointer', () => {
+  const L = {
+    structLayouts: {
+      DataTbl: [{ name: 'pTxtLvlPrest', offset: 0, size: 4, type: 'LvlPrest *' }, { name: 'nSize', offset: 4, size: 4, type: 'int' }],
+      LvlPrest: [{ name: 'nDef', offset: 0, size: 4, type: 'int' }, { name: 'LevelId', offset: 4, size: 4, type: 'int' }],
+      Quest: [{ name: 'nCount', offset: 0, size: 2, type: 'uint16_t' }, { name: 'aGUID', offset: 4, size: 32, type: 'int[8]' }],
+    },
+    aggregateSizes: { DataTbl: 8, LvlPrest: 0x1b0, Quest: 36 },
+    globalTypes: { gTbl: 'DataTbl' },
+  };
+  /** Lines of the parsed text: `if` on 3, `while` on 11 (the code below), edges per the original. */
+  const ev = (ifTarget: number, whileFall: number, ifLine = 4, whileLine = 11) => ({
+    lines: new Map(), ifs: new Map(),
+    edges: [
+      { line: ifLine, ord: 0, keyword: 'if', jcc: 18, target: ifTarget, fall: 20, fallLines: [], takenLines: [] },
+      { line: whileLine, ord: 0, keyword: 'while', jcc: 47, target: 32, fall: whileFall, fallLines: [], takenLines: [] },
+    ],
+  });
+  // TXT_LvlPrest_FindLineByLevelId 0061f0e0: `test esi, esi; jle 0x31` and the loop's `jl 0x20` falls to 0x31.
+  const lvlPrest = `LvlPrest* f(int eLevel) {
+  int i; int* pLevelIdField;
+  i = 0;
+  if (0 < gTbl.nSize) {
+    pLevelIdField = &gTbl.pTxtLvlPrest->LevelId;
+    do {
+      if (*pLevelIdField == eLevel) {
+        return gTbl.pTxtLvlPrest + i;
+      }
+      i = i + 1;
+      pLevelIdField = pLevelIdField + 0x6c; } while (i < gTbl.nSize);
+  }
+  return 0;
+}`;
+
+  it('indexes the record table the pointer walks, as a for loop', () => {
+    const out = tx(lvlPrest, { ...L, branchLayout: ev(49, 49) });
+    assert.match(out, /for \(i = 0; i < gTbl\.nSize; i = i \+ 1\)/);
+    assert.match(out, /if \(gTbl\.pTxtLvlPrest\[i\]\.LevelId == eLevel\)/);
+    assert.doesNotMatch(out, /pLevelIdField =/);
+  });
+
+  it('keeps the pointer loop when the guard jumps elsewhere than the loop exit', () => {
+    same(lvlPrest, { ...L, branchLayout: ev(60, 49) });
+  });
+
+  it('keeps the pointer loop without branch facts', () => {
+    same(lvlPrest, L);
+  });
+
+  it('keeps it when the stride is not the record size', () => {
+    same(lvlPrest.replace('+ 0x6c', '+ 0x6b'), { ...L, branchLayout: ev(49, 49) });
+  });
+
+  // QUEST_HasPlayerParticipated 005452c0: the bound is a zero-extended count, tested `!= 0`.
+  const quest = `int f(Quest* pQ, int nGUID) {
+  int n; int i; int* p;
+  n = (int)pQ->nCount; i = 0;
+  if (n != 0) {
+    p = pQ->aGUID;
+    do {
+      if (*p == nGUID) {
+        return 1;
+      }
+      i = i + 1;
+      p = p + 1; } while (i < n);
+  }
+  return 0;
+}`;
+  it('indexes an array field, and reads `n != 0` of a narrow unsigned count as the for test', () => {
+    const out = tx(quest, { ...L, branchLayout: ev(31, 31) });
+    assert.match(out, /for \(i = 0; i < \(?\(int\)pQ->nCount\)?; i = i \+ 1\)/);
+    assert.match(out, /if \(pQ->aGUID\[i\] == nGUID\)/);
+  });
+
+  it('keeps `n != 0` of a value that may be negative', () => {
+    same(quest.replace('(int)pQ->nCount', 'pQ->nSigned'), { ...L, branchLayout: ev(31, 31) });
+  });
+});

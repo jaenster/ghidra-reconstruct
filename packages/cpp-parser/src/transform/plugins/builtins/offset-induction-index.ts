@@ -81,6 +81,8 @@ import { emit } from '../../../emit/index.js';
 import { cloneNode, createTransformer, nodesEqual, updateNode, type Transformer } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { buildFunctionFlow, ENTRY_DEF, type FunctionFlow } from '../../cfg/index.js';
+import type { BranchLayoutEvidence } from './branch-layout/evidence.js';
+import { placed } from './access-order-evidence.js';
 
 export interface OffsetInductionIndexOptions extends PluginOptions {
   /** Aggregate name -> its fields in offset order. */
@@ -91,6 +93,10 @@ export interface OffsetInductionIndexOptions extends PluginOptions {
   typedefTargets?: Record<string, string>;
   /** Parameter and enclosing names -> declared spelling. */
   enclosingVarTypes?: Record<string, string>;
+  /** Global name -> declared spelling, for the type of a record a single pointer walks. */
+  globalTypes?: Record<string, string>;
+  /** The original's conditional jumps by parsed-text line; without it no single-pointer loop is indexed. */
+  branchLayout?: BranchLayoutEvidence;
 }
 
 // ============================================
@@ -461,6 +467,7 @@ const refuse = (why: string): never => {
 
 interface FnState {
   ctx: Ctx;
+  opts: OffsetInductionIndexOptions;
   fnBody: CompoundStmt;
   locals: Set<string>;
   types: Map<string, string>;
@@ -486,7 +493,7 @@ function buildState(ctx: Ctx, fn: FunctionDecl, o: OffsetInductionIndexOptions, 
   const locals = new Set<string>();
   for (const p of fn.parameters ?? []) { const n = (p as ParameterDecl).name?.name; if (n) locals.add(n); }
   walk(body, node => { if (node.kind === NodeKind.VariableDecl) locals.add((node as VariableDecl).name.name); });
-  return { ctx, fnBody: body, locals, types, removed: new Set() };
+  return { ctx, opts: o, fnBody: body, locals, types, removed: new Set() };
 }
 
 /** All statements inside `s` (deep), `s` included. */
@@ -798,6 +805,226 @@ function rewriteLoop(st: FnState, loop: DoWhileStmt): boolean {
     const ci = bodyTop.indexOf(cStmt);
     if (ci >= 0) { bodyTop.splice(ci, 1); bodyTop.push(cStmt); }
   }
+  return true;
+}
+
+/** The declared spelling of a plain name or member path (`p->a.b`), from the locals, globals and layouts. */
+function typeOfPath(st: FnState, e: Expression): string | null {
+  const x = strip(e);
+  if (x.kind === NodeKind.Identifier) {
+    const n = (x as Identifier).name;
+    const t = st.types.get(n) ?? st.opts.globalTypes?.[n];
+    return t ? resolve(st.ctx, t) : null;
+  }
+  if (x.kind !== NodeKind.MemberExpr) return null;
+  const m = x as MemberExpr;
+  if (m.member.kind !== NodeKind.Identifier) return null;
+  const ot = typeOfPath(st, m.object);
+  if (!ot) return null;
+  const agg = m.isArrow ? pointee(st.ctx, ot) : ot;
+  if (!agg) return null;
+  const a = resolve(st.ctx, agg);
+  const fields = st.ctx.layouts[a] ?? st.ctx.layouts[a.split('::').pop()!];
+  const f = fields?.find(y => y.name === (m.member as Identifier).name);
+  if (!f || f.bitSize !== undefined) return null;
+  return resolve(st.ctx, f.type);
+}
+
+/** Whether a member path reads memory: an arrow off anything but a local's own value. */
+function pathReadsMemory(e: Expression, locals: ReadonlySet<string>): boolean {
+  let x = strip(e);
+  for (;;) {
+    if (x.kind === NodeKind.Identifier) return false;
+    if (x.kind !== NodeKind.MemberExpr) return true;
+    const m = x as MemberExpr;
+    const o = strip(m.object);
+    if (m.isArrow && !(o.kind === NodeKind.Identifier && locals.has((o as Identifier).name))) return true;
+    x = o;
+  }
+}
+
+const UNSIGNED_NARROW = new Set(['unsigned char', 'uint8_t', 'byte', 'BYTE', 'UCHAR', 'bool', 'unsigned short', 'uint16_t', 'ushort', 'WORD', 'USHORT']);
+
+/**
+ * The single-pointer case of the same strength reduction: a search loop over one array or one
+ * field of a record table,
+ *
+ *   i = 0;
+ *   if (0 < E) {
+ *     P = &R->f;                      (or `P = R->a`, an array field)
+ *     do { ... *P ... ; i = i + 1; P = P + S; } while (i < E);
+ *   }
+ *
+ * is `for (i = 0; i < E; i++) { ... R[i].f ... }` (`R->a[i]`). VC8 compiles the indexed loop
+ * to this pointer and counter; compiled as printed, the guard becomes an early exit of its
+ * own and the loop another layout (TXT_LvlPrest_FindLineByLevelId 0061f0e0).
+ *
+ * The same shape is also the original's own pointer loop. The asm tells them apart: the
+ * guard's conditional jump goes where the loop's own exit falls (`test esi, esi; jle X` ...
+ * `jl top` / X:), the layout VC8 gives the entry test of a for loop. Without the branch
+ * facts, or with a constant bound (no guard), nothing changes.
+ *
+ * Value-preserving: c counts up from c0 and is stepped once, P is stepped by S once, so at a
+ * top-level statement t of iteration k P is P0 + S*(c - c0 - [t after c's step] + [t after
+ * P's step]); P0 is E, whose value does not change on the way into the loop or in it (its
+ * locals are not written, and a path that reads memory only when the loop neither calls nor
+ * stores). `R[j].f` is `&R->f + j*S` when S is the record's size, `R->a[j*S/e]` the array's
+ * element at that byte offset. P is read nowhere else, and its stepped value not after the
+ * loop. `E != 0` as the guard with c0 = 0 is `0 < E` for an integer cast of a narrow
+ * unsigned value.
+ */
+function rewriteSinglePointer(st: FnState, loop: DoWhileStmt): boolean {
+  const { ctx, fnBody, locals, types } = st;
+  const ev = st.opts.branchLayout;
+  if (!ev?.edges) refuse('single pointer: no branch facts');
+  if (loop.body.kind !== NodeKind.CompoundStmt || hasOwnContinueOrLabel(loop.body)) refuse('single pointer: body');
+  const top = (loop.body as CompoundStmt).statements;
+  const typeOf = (n: string) => (locals.has(n) ? types.get(n) : undefined);
+
+  // The guard: the loop's own `if`, holding the pointer's definition and the loop.
+  const locs = locateStatements(fnBody);
+  const here = locs.get(loop);
+  if (!here || here.index !== 1 || here.list.length !== 2 || !here.owner || here.owner.kind !== NodeKind.IfStmt) refuse('single pointer: no guard');
+  const guard = here!.owner as IfStmt;
+  if (guard.elseBranch !== null || !placed(guard) || !placed(loop.condition)) refuse('single pointer: guard shape');
+  const ifEdges = ev!.edges!.filter(e => e.keyword === 'if' && e.line === guard.location.start.line);
+  const whileEdges = ev!.edges!.filter(e => e.keyword === 'while' && e.line === loop.condition.location.start.line);
+  if (ifEdges.length !== 1 || whileEdges.length !== 1 || ifEdges[0].target !== whileEdges[0].fall) refuse('single pointer: guard is not the loop test');
+
+  // The counter: count up from a constant to a bound that is not one.
+  const c = strip(loop.condition);
+  if (c.kind !== NodeKind.BinaryExpr || (c as BinaryExpr).operator !== '<') refuse('single pointer: test');
+  const cv = identName((c as BinaryExpr).left);
+  const bound = (c as BinaryExpr).right;
+  if (!cv || literalValue(bound) !== null || !isPure(bound)) refuse('single pointer: bound');
+  const flow = buildFunctionFlow(fnBody.statements, locals);
+  const inside = loopNodes(flow, loop);
+  const entry = entryNode(flow, top);
+  const writesIn = (v: string): number => {
+    let n = 0;
+    walk(loop, node => {
+      if (node.kind === NodeKind.AssignExpr && identName((node as AssignExpr).left) === v) n++;
+      if ((node.kind === NodeKind.PostfixExpr || (node.kind === NodeKind.UnaryExpr && ['++', '--'].includes((node as UnaryExpr).operator))) &&
+          identName((node as PostfixExpr).operand) === v) n++;
+      if (node.kind === NodeKind.UnaryExpr && (node as UnaryExpr).operator === '&' && identName((node as UnaryExpr).operand) === v) n += 100;
+    });
+    return n;
+  };
+  const tC = top.findIndex(t => { const s = counterStep(t); return !!s && s.name === cv && s.delta === 1; });
+  if (tC < 0 || !locals.has(cv!) || flow.isEscaped(cv!) || writesIn(cv!) !== 1) refuse('single pointer: counter step');
+  const ct = typeOf(cv!);
+  if (!ct || !COUNTER_INTS.has(resolve(ctx, ct))) refuse('single pointer: counter type');
+  const cInit = outsideDef(flow, entry, cv!, inside);
+  const cDef = flow.definition(cInit, cv!);
+  const c0 = cDef?.killing ? literalValue(cDef.rhs) : null;
+  if (c0 === null) refuse('single pointer: counter does not enter with a constant');
+
+  // The guard tests c0 against the same bound.
+  const g = strip(guard.condition);
+  if (g.kind !== NodeKind.BinaryExpr) refuse('single pointer: guard test');
+  const gb = g as BinaryExpr;
+  let normalize = false;
+  if ((gb.operator === '<' && literalValue(gb.left) === c0 && nodesEqual(strip(gb.right), strip(bound))) ||
+      (gb.operator === '>' && literalValue(gb.right) === c0 && nodesEqual(strip(gb.left), strip(bound)))) {
+    // as the for loop tests it
+  } else if (gb.operator === '!=' && c0 === 0n && literalValue(gb.right) === 0n && nodesEqual(strip(gb.left), strip(bound))) {
+    // `E != 0` is `0 < E` only when E cannot be negative: an int of a narrow unsigned value.
+    let ex = strip(bound);
+    const bn = identName(ex);
+    if (bn && locals.has(bn)) {
+      const gNode = flow.nodeOf(guard);
+      const defs = gNode === undefined ? [] : [...flow.reaching(gNode, bn)];
+      const dd = defs.length === 1 && defs[0] !== ENTRY_DEF ? flow.definition(defs[0], bn) : undefined;
+      if (!dd?.killing || !dd.rhs) refuse('single pointer: guard bound');
+      ex = strip(dd!.rhs!);
+    }
+    if (ex.kind !== NodeKind.CStyleCastExpr || sizeOf(ctx, typeSpelling((ex as CStyleCastExpr).type)) !== 4) refuse('single pointer: guard not a widened value');
+    const inner = typeOfPath(st, (ex as CStyleCastExpr).expression);
+    if (!inner || !UNSIGNED_NARROW.has(inner)) refuse('single pointer: guard value may be negative');
+    normalize = true;
+  } else refuse('single pointer: guard is not the first test');
+
+  // The pointer: stepped once by a constant, defined right before the loop, read nowhere else.
+  let tP = -1, P = '', S = 0n;
+  for (let i = 0; i < top.length; i++) {
+    const ps = pointerStep(ctx, top[i], typeOf);
+    if (ps && ps.stride > 0 && locals.has(ps.name) && !flow.isEscaped(ps.name) && writesIn(ps.name) === 1) { tP = i; P = ps.name; S = BigInt(ps.stride); break; }
+  }
+  if (tP < 0) refuse('single pointer: no pointer step');
+  const pStepNode = flow.nodeOf(top[tP])!;
+  for (const u of flow.usesOf(pStepNode, P)) if (!inside.has(u)) refuse('single pointer: stepped pointer read after the loop');
+  const defStmt = here!.list[0];
+  if (defStmt.kind !== NodeKind.ExprStmt) refuse('single pointer: pointer definition');
+  const da = strip((defStmt as ExprStmt).expression);
+  if (da.kind !== NodeKind.AssignExpr || (da as AssignExpr).operator !== '=' || identName((da as AssignExpr).left) !== P) refuse('single pointer: pointer definition');
+  const defNode = flow.nodeOf(defStmt);
+  if (defNode === undefined || outsideDef(flow, entry, P, inside) !== defNode) refuse('single pointer: pointer reaches from elsewhere');
+  for (const u of flow.usesOf(defNode!, P)) if (!inside.has(u)) refuse('single pointer: pointer read outside the loop');
+  const E = strip((da as AssignExpr).right);
+  if (!isPure(E)) refuse('single pointer: base has effects');
+  const eLocals = identifiersIn(E).map(i => i.name).filter(n => locals.has(n));
+  for (const v of eLocals) if (flow.isEscaped(v)) refuse('single pointer: base escapes');
+  if (eLocals.length > 0 && writesAny(st, loop, eLocals)) refuse('single pointer: base written in the loop');
+
+  // The base: `&R->f` over records of size S, or an array field `R->a` / `R.a` of elements dividing S.
+  let site: (j: Expression) => Expression;
+  let path: Expression;
+  if (E.kind === NodeKind.UnaryExpr && (E as UnaryExpr).operator === '&' && strip((E as UnaryExpr).operand).kind === NodeKind.MemberExpr &&
+      (strip((E as UnaryExpr).operand) as MemberExpr).isArrow) {
+    const m = strip((E as UnaryExpr).operand) as MemberExpr;
+    const rt = typeOfPath(st, m.object);
+    const rec = rt ? pointee(ctx, rt) : null;
+    if (!rec || BigInt(sizeOf(ctx, rec) ?? -1) !== S) refuse('single pointer: stride is not the record size');
+    path = m;
+    site = j => ({ kind: NodeKind.MemberExpr, object: { kind: NodeKind.SubscriptExpr, array: cloneNode(paren(m.object)), index: j, leadingTrivia: [], trailingTrivia: [] }, member: cloneNode(m.member), isArrow: false, leadingTrivia: [], trailingTrivia: [] } as unknown as Expression);
+  } else if (E.kind === NodeKind.MemberExpr) {
+    const ft = typeOfPath(st, E);
+    const arr = ft ? /^(.*)\[(\d+|0x[0-9a-fA-F]+)\]$/.exec(ft) : null;
+    const esz = arr ? sizeOf(ctx, arr[1]) : null;
+    if (!esz || S % BigInt(esz) !== 0n) refuse('single pointer: base is not an array field the stride steps');
+    path = E;
+    const k = S / BigInt(esz!);
+    site = j => ({ kind: NodeKind.SubscriptExpr, array: cloneNode(E), index: k === 1n ? j : bin(paren(j), '*', intLit(k)), leadingTrivia: [], trailingTrivia: [] } as unknown as Expression);
+  } else refuse('single pointer: base');
+  if (pathReadsMemory(path!, locals) && touchesMemory(flow, inside, locals)) refuse('single pointer: base reads memory the loop may change');
+  if (flow.writtenBetween(defNode!, entry, eLocals)) refuse('single pointer: base written before the loop');
+
+  // Every read of P in the loop is `*P`.
+  const k0 = -c0!;
+  const posOf = (t: number): bigint => k0 - (t > tC ? 1n : 0n) + (t > tP ? 1n : 0n);
+  const edits: Array<() => void> = [];
+  const roots: Array<{ t: number; root: unknown }> = top.map((x, t) => ({ t, root: x }));
+  roots.push({ t: top.length, root: loop.condition });
+  for (const { t, root } of roots) {
+    if (t === tP) continue;
+    walk(root, (node, parent, key) => {
+      if (node.kind !== NodeKind.Identifier || (node as Identifier).name !== P) return;
+      if (parent && ((parent.kind === NodeKind.MemberExpr && key === 'member') || parent.kind === NodeKind.QualifiedId)) return;
+      if (!parent || parent.kind !== NodeKind.UnaryExpr || (parent as UnaryExpr).operator !== '*') refuse('single pointer: pointer read other than as *P');
+      const u = parent as UnaryExpr;
+      const j = indexExpr(cv!, posOf(t), 1n);
+      edits.push(() => replaceInPlace(u, site(j)));
+    });
+  }
+  if (edits.length === 0) refuse('single pointer: pointer never read');
+
+  applying = true;
+  for (const e of edits) e();
+  const bodyTop = (loop.body as CompoundStmt).statements;
+  const stepStmt = top[tP];
+  const si = bodyTop.indexOf(stepStmt);
+  if (si >= 0) removeStmt({ stmt: stepStmt, list: bodyTop, index: si, owner: loop });
+  removeStmt({ stmt: defStmt, list: here!.list, index: 0, owner: here!.owner });
+  st.removed.add(P);
+  // The counter step last, where the for loop has it, when nothing after it reads the counter.
+  const cStmt = top[tC];
+  const ci = bodyTop.indexOf(cStmt);
+  if (ci >= 0 && ci !== bodyTop.length - 1) {
+    if (identifiersIn(bodyTop.slice(ci + 1), cv!).length > 0) refuse('single pointer: counter read after its step');
+    bodyTop.splice(ci, 1);
+    bodyTop.push(cStmt);
+  }
+  if (normalize) guard.condition = bin(intLit(0), '<', cloneNode(bound));
   return true;
 }
 
@@ -1151,7 +1378,7 @@ export function rewriteOffsetInductions(fn: FunctionDecl, o: OffsetInductionInde
     if (node.kind === NodeKind.DoWhileStmt) hasLoop = true;
     if (node.kind === NodeKind.BinaryExpr && (node as BinaryExpr).operator === '-' && intCastOf((node as BinaryExpr).right)) gate = true;
   });
-  if (!gate || !hasLoop) return null;
+  if (!hasLoop || (!gate && !o.branchLayout?.edges)) return null;
 
   const body = cloneNode(fn.body as CompoundStmt);
   const st = buildState(ctx, fn, o, body);
@@ -1168,7 +1395,14 @@ export function rewriteOffsetInductions(fn: FunctionDecl, o: OffsetInductionInde
         const snapshot = cloneNode(body);
         applying = false;
         try {
-          if (!rewriteLoop(st, loop)) continue;
+          let done = false;
+          try {
+            done = rewriteLoop(st, loop);
+          } catch (e) {
+            if (!(e instanceof Refuse) || applying || e.message !== 'no offset pair') throw e;
+            done = rewriteSinglePointer(st, loop);
+          }
+          if (!done) continue;
         } catch (e) {
           // A refusal after an edit started would leave a half-rewritten body: restore it.
           if (!(e instanceof Refuse)) throw e;

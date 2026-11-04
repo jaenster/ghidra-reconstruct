@@ -3041,6 +3041,8 @@ function transformDecompiledCode(
         aggregateSizes: context.funcPtrArgCasts.aggregateSizes,
         typedefTargets: context.funcPtrArgCasts.typedefTargets,
         enclosingVarTypes,
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        branchLayout: layout,
       };
       // D2_NEW(T) folds an allocation only when the literal size is Ghidra's size
       // for the struct the result is cast to; the sizes and the typedefs that name
