@@ -45,3 +45,19 @@ export function foldedAddressFacts(func: Pick<ExtractedFunction, 'operandRefs'>)
   }
   return [...byValue.values()].filter((f): f is FoldedAddressFact => f !== null);
 }
+
+/**
+ * The addresses the function's instructions encode with a plain reference (an immediate,
+ * or a displacement in a memory operand, whose value is the referenced address itself),
+ * as `folded-address-rebase` needs them for an address the decompiler moved off the
+ * object the instruction names: `MOVZX EAX, byte ptr [EDX + 0x6d13d8]` with EDX = d - 1
+ * prints as `*(byte *)((int)&static_dtree[0x1d].dl + d + 1)`, the last byte of the
+ * previous object, where the reference says `_dist_code`.
+ */
+export function displacementTargets(func: Pick<ExtractedFunction, 'operandRefs'>): number[] {
+  const refs = func.operandRefs?.refs;
+  if (!refs) return [];
+  const out = new Set<number>();
+  for (const r of refs) if (r.encoded && !r.base) out.add(Number.parseInt(r.to, 16));
+  return [...out].sort((a, b) => a - b);
+}

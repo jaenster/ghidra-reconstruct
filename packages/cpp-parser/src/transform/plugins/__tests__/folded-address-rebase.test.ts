@@ -138,4 +138,76 @@ describe('folded-address-rebase: a bare literal compared against an address', ()
     assert.match(out, /n < 0x96de9a/, out);
     assert.match(out, /n \+ 0x96de98/, out);
   });
+  // Ghidra v1905: static_dtree (ct_data[30], 006d1360..006d13d7) and _dist_code (byte[512]
+  // at 006d13d8) are two globals. _tr_tally 0042c600: MOVZX EAX, byte ptr [EDX + 0x6d13d8]
+  // @0042c666, EDX = nDist - 1, a plain reference to _dist_code.
+  describe('an index biased into the previous object', () => {
+    const DIST = {
+      globalAddresses: { gZlibStaticDTreeDistCode: 0x6d1360, _dist_code: 0x6d13d8, gaZlibBaseDist: 0x6d15d8 },
+      globalSizes: { gZlibStaticDTreeDistCode: 120, _dist_code: 512, gaZlibBaseDist: 120 },
+      globalElementSizes: { gZlibStaticDTreeDistCode: 4, _dist_code: 1, gaZlibBaseDist: 4 },
+      globalTypes: { gZlibStaticDTreeDistCode: 'ct_data[30]', _dist_code: 'byte[512]', gaZlibBaseDist: 'int[30]' },
+      structLayouts: {
+        ct_data: [
+          { name: 'fc', offset: 0, size: 2, type: 'ushort' },
+          { name: 'dl', offset: 2, size: 2, type: 'ushort' },
+        ],
+      },
+    };
+    function tail(code: string, displacements: number[], extra: Record<string, unknown> = {}) {
+      const rewrites: string[] = [];
+      const out = emit(createFoldedAddressRebaseTransformer({
+        ...DIST, rebases: [], displacements, ...extra,
+        onRewrite: (r: { from: string; to: string }) => rewrites.push(`${r.from} -> ${r.to}`),
+      })(parse(code)) as AnyNode).trim();
+      return { out, rewrites };
+    }
+    const TR_TALLY = `void f(uint nDist) { byDistCode = *(byte *)((int)&gZlibStaticDTreeDistCode[0x1d].dl + nDist + 1); }`;
+
+    it('respells _tr_tally\'s d_code(dist - 1) against _dist_code', () => {
+      const { out, rewrites } = tail(TR_TALLY, [0x6d13d8]);
+      assert.ok(out.includes('byDistCode = *(byte*)((int)_dist_code + nDist - 1);'), out);
+      assert.deepStrictEqual(rewrites, ['gZlibStaticDTreeDistCode + 0x77 -> _dist_code - 1B']);
+    });
+
+    it('keeps the value: every literal folds into the one distance', () => {
+      const { out } = tail(`void f(int i, int j) { x = *(byte *)(j + (int)&gZlibStaticDTreeDistCode[0x1c].fc + 4 - i + 3); }`, [0x6d13d8]);
+      // 0x6d1360 + 0x70 + 4 + 3 = 0x6d13d7 = _dist_code - 1
+      assert.ok(out.includes('x = *(byte*)(j + (int)_dist_code - i - 1);'), out);
+    });
+
+    it('LEAVES it without the instruction\'s reference to the next global', () => {
+      for (const d of [[], [0x6d15d8]]) {
+        const { out } = tail(TR_TALLY, d);
+        assert.ok(out.includes('gZlibStaticDTreeDistCode[0x1d].dl'), out);
+      }
+    });
+
+    it('LEAVES an address not at the tail, or one more than 8 bytes short of it', () => {
+      const { out: inner } = tail(`void f(uint n) { x = *(byte *)((int)&gZlibStaticDTreeDistCode[0x10].dl + n + 1); }`, [0x6d13d8]);
+      assert.ok(inner.includes('[0x10].dl'), inner);
+    });
+
+    it('LEAVES a sum with no other term, or a subtracted address term', () => {
+      const { out: constant } = tail(`void f() { x = *(byte *)((int)&gZlibStaticDTreeDistCode[0x1d].dl + 1); }`, [0x6d13d8]);
+      assert.ok(constant.includes('[0x1d].dl'), constant);
+      const { out: negated } = tail(`void f(int n) { x = *(byte *)(n - (int)&gZlibStaticDTreeDistCode[0x1d].dl + 1); }`, [0x6d13d8]);
+      assert.ok(negated.includes('[0x1d].dl'), negated);
+    });
+
+    it('LEAVES it where the global does not end at the referenced address', () => {
+      const { out } = tail(TR_TALLY, [0x6d13d8], { globalSizes: { gZlibStaticDTreeDistCode: 632, _dist_code: 512, gaZlibBaseDist: 120 } });
+      assert.ok(out.includes('[0x1d].dl'), out);
+    });
+
+    it('LEAVES it where an instruction also references a byte of the tail', () => {
+      const { out } = tail(TR_TALLY, [0x6d13d7, 0x6d13d8]);
+      assert.ok(out.includes('[0x1d].dl'), out);
+    });
+
+    it('LEAVES it where a member step is not in the layout', () => {
+      const { out } = tail(`void f(uint n) { x = *(byte *)((int)&gZlibStaticDTreeDistCode[0x1d].zz + n + 1); }`, [0x6d13d8]);
+      assert.ok(out.includes('[0x1d].zz'), out);
+    });
+  });
 });

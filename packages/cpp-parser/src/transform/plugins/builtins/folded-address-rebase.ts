@@ -49,12 +49,34 @@
  *
  * An address expression that evaluates to V in any other shape is reported, not
  * rewritten.
+ *
+ * ## An index biased into the previous object
+ *
+ * zlib's `d_code(dist)` after `dist--` is `MOVZX EAX, byte ptr [EDX + 0x6d13d8]` with
+ * EDX = nDist - 1, a displacement that references `_dist_code`. The decompiler takes the
+ * - 1 into the constant and names the sum by the object that contains 0x6d13d7, the
+ * last byte of `static_dtree` just before it:
+ *
+ *     *(byte *)((int)&gZlibStaticDTreeDistCode[0x1d].dl + nDist + 1)
+ *
+ * which in a rebuild reads `_dist_code` only while the linker keeps it right behind
+ * `static_dtree`. With the instruction's plain reference to D (`displacements`), a sum
+ * under a pointer cast whose one address term is spelled through G, whose literal terms
+ * bring it to A, and which has at least one other term, is respelled against the global
+ * N at D when G ends exactly at D, A is inside G and D - A is at most 8:
+ *
+ *     *(byte *)((int)_dist_code + nDist - 1)
+ *
+ * The other terms keep their order and signs; the address term keeps its integer cast;
+ * the literals become the one distance A - D. Every address on the way is evaluated
+ * exactly (subscripts by declared dimensions, members by Ghidra's layout) or the sum is
+ * left as printed.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, BinaryExpr, BuiltinType, CStyleCastExpr, Expression, Identifier, IntegerLiteralExpr,
-  ParenExpr, PointerType, QualifiedId, TypedefType, UnaryExpr,
+  MemberExpr, ParenExpr, PointerType, QualifiedId, SubscriptExpr, TypedefType, UnaryExpr,
 } from '../../../ast/nodes.js';
 import { Expr, Type } from '../../../ast/factory.js';
 import { createTransformer, type Transformer } from '../../transformer.js';
@@ -79,6 +101,12 @@ export interface FoldedAddressRebaseOptions extends PluginOptions {
   globalElementSizes?: Record<string, number>;
   /** Global name -> namespace segments of its definition (empty: root, or a static local). */
   globalNamespaces?: Record<string, readonly string[]>;
+  /** Addresses the function's instructions encode with a plain reference (folded-address-spec.ts). */
+  displacements?: readonly number[];
+  /** Global name -> declared type spelling, for the member walk of an address term. */
+  globalTypes?: Record<string, string>;
+  /** Aggregate name -> every field's offset, size and Ghidra type. */
+  structLayouts?: Record<string, ReadonlyArray<{ name: string; offset: number; size: number; type: string; bitSize?: number }>>;
   onRewrite?: (info: { value: number; from: string; to: string; ins?: string }) => void;
   onRefusal?: (reason: string) => void;
 }
@@ -130,7 +158,8 @@ export function createFoldedAddressRebaseTransformer(options?: PluginOptions): T
   const o = (options ?? {}) as FoldedAddressRebaseOptions;
   const rebases = o.rebases ?? [];
   const addresses = o.globalAddresses ?? {};
-  if (rebases.length === 0) return (n: ASTNode) => n;
+  const displacements = o.displacements ?? [];
+  if (rebases.length === 0 && displacements.length === 0) return (n: ASTNode) => n;
   const sizes = o.globalSizes ?? {};
   const elementSizes = o.globalElementSizes ?? {};
   const namespaces = o.globalNamespaces ?? {};
@@ -232,6 +261,160 @@ export function createFoldedAddressRebaseTransformer(options?: PluginOptions): T
       op, Expr.intLiteral(Math.abs(d))));
   }
 
+  // ============================================
+  // AN INDEX BIASED INTO THE PREVIOUS OBJECT
+  // ============================================
+
+  const globalTypes = o.globalTypes ?? {};
+  const structLayouts = o.structLayouts ?? {};
+  const displaced = new Set(displacements);
+  /** The tail distance the rule accepts: an index biased by a small constant. */
+  const TAIL_SLACK = 8;
+
+  /** `T[a][b]` -> T and its dimensions, outermost first; null for anything else. */
+  function arrayShape(spelling: string): { base: string; dims: number[] } | null {
+    const m = /^([^[\]]*?)\s*((?:\[\s*\d+\s*\])+)$/.exec(spelling.trim());
+    if (!m) return { base: spelling.trim(), dims: [] };
+    const dims = [...m[2]!.matchAll(/\d+/g)].map(d => Number(d[0]));
+    return { base: m[1]!.trim(), dims };
+  }
+
+  /**
+   * The address of the object `e` designates, its type and its size: a global, then
+   * subscripts by a literal (stride from the declared dimensions) and `.member` steps
+   * (Ghidra's layout). The global it is spelled through comes along. Null at any step
+   * not known exactly.
+   */
+  function objectAt(e: Expression): { global: string; address: number; spelling?: string; size?: number } | null {
+    const x = unwrap(e);
+    if (x.kind === NodeKind.Identifier || x.kind === NodeKind.QualifiedId) {
+      const name = symbolName(x);
+      if (!name || addresses[name] === undefined) return null;
+      return { global: name, address: addresses[name], spelling: globalTypes[name], size: sizes[name] };
+    }
+    if (x.kind === NodeKind.SubscriptExpr) {
+      const s = x as SubscriptExpr;
+      const owner = objectAt(s.array);
+      const k = unwrap(s.index);
+      if (!owner || owner.spelling === undefined || owner.size === undefined || k.kind !== NodeKind.IntegerLiteral) return null;
+      const shape = arrayShape(owner.spelling);
+      if (!shape || shape.dims.length === 0) return null;
+      const count = shape.dims[0]!;
+      if (!(count > 0) || owner.size % count !== 0) return null;
+      const stride = owner.size / count;
+      const index = Number((k as IntegerLiteralExpr).value);
+      if (index < 0 || index >= count) return null;
+      const rest = shape.dims.slice(1).map(d => `[${d}]`).join('');
+      return { global: owner.global, address: owner.address + index * stride, spelling: shape.base + rest, size: stride };
+    }
+    if (x.kind === NodeKind.MemberExpr) {
+      const m = x as MemberExpr;
+      if (m.isArrow || m.member.kind !== NodeKind.Identifier) return null;
+      const owner = objectAt(m.object);
+      if (!owner || owner.spelling === undefined) return null;
+      const shape = arrayShape(owner.spelling);
+      if (!shape || shape.dims.length > 0) return null;
+      // A namespace-qualified spelling names the aggregate by its last segment, as Ghidra does.
+      const bare = shape.base.includes('<') ? shape.base : shape.base.split('::').pop()!;
+      const layout = structLayouts[shape.base] ?? structLayouts[bare];
+      if (!layout) return null;
+      const name = (m.member as Identifier).name;
+      const fields = layout.filter(f => f.name === name);
+      if (fields.length !== 1 || fields[0]!.bitSize !== undefined) return null;
+      return { global: owner.global, address: owner.address + fields[0]!.offset, spelling: fields[0]!.type, size: fields[0]!.size };
+    }
+    return null;
+  }
+
+  /** The address an integer-cast address term evaluates to: `(int)&<path>`, `(int)<array>`. */
+  function addressTerm(e: Expression): { global: string; address: number; cast: CStyleCastExpr } | null {
+    const x = unwrap(e);
+    if (x.kind !== NodeKind.CStyleCastExpr) return null;
+    const c = x as CStyleCastExpr;
+    const tn = typeName(c.type);
+    if (!tn || !INT_CASTS.has(tn)) return null;
+    const inner = unwrap(c.expression);
+    if (inner.kind === NodeKind.UnaryExpr && (inner as UnaryExpr).operator === '&') {
+      const at = objectAt((inner as UnaryExpr).operand);
+      return at ? { global: at.global, address: at.address, cast: c } : null;
+    }
+    const name = symbolName(inner);
+    if (name && addresses[name] !== undefined && elementSizes[name] !== undefined) {
+      return { global: name, address: addresses[name], cast: c };
+    }
+    return null;
+  }
+
+  /** A `+`/`-` chain as signed terms, left to right. */
+  function terms(e: Expression, sign: 1 | -1, out: Array<{ sign: 1 | -1; expr: Expression }>): void {
+    const x = unwrap(e);
+    if (x.kind === NodeKind.BinaryExpr && ((x as BinaryExpr).operator === '+' || (x as BinaryExpr).operator === '-')) {
+      const b = x as BinaryExpr;
+      terms(b.left, sign, out);
+      terms(b.right, (b.operator === '-' ? -sign : sign) as 1 | -1, out);
+      return;
+    }
+    out.push({ sign, expr: e });
+  }
+
+  function tailRebased(sum: Expression): Expression | null {
+    const list: Array<{ sign: 1 | -1; expr: Expression }> = [];
+    terms(sum, 1, list);
+    if (list.length < 3) return null;
+    let address: { global: string; address: number; cast: CStyleCastExpr } | null = null;
+    let addressIndex = -1;
+    let literal = 0;
+    const others: number[] = [];
+    for (let i = 0; i < list.length; i++) {
+      const t = list[i]!;
+      const x = unwrap(t.expr);
+      if (x.kind === NodeKind.IntegerLiteral) {
+        const v = (x as IntegerLiteralExpr).value;
+        if (v < 0n || v >= BigInt(WORD)) return null;
+        literal += t.sign * Number(v);
+        continue;
+      }
+      const a = addressTerm(t.expr);
+      if (a) {
+        if (address || t.sign !== 1) return null;
+        address = a;
+        addressIndex = i;
+        continue;
+      }
+      others.push(i);
+    }
+    if (!address || others.length === 0 || literal === 0) return null;
+    const size = sizes[address.global];
+    const start = addresses[address.global]!;
+    if (size === undefined || !(size > 0)) return null;
+    const end = start + size;
+    const value = address.address + literal;
+    if (value < start || value >= end || !displaced.has(end)) return null;
+    const k = end - value;
+    if (k <= 0 || k > TAIL_SLACK) return null;
+    // An instruction that names a byte of G between A and D says the sum may be G's after all.
+    if (displacements.some(d => d >= value && d < end)) {
+      o.onRefusal?.(`0x${value.toString(16)}: an instruction references 0x${value.toString(16)}..0x${(end - 1).toString(16)} inside ${address.global}`);
+      return null;
+    }
+    const n = byAddress.get(end);
+    if (!n || n === address.global) {
+      if (!n) o.onRefusal?.(`0x${value.toString(16)}: no single global starts at 0x${end.toString(16)}`);
+      return null;
+    }
+    const target = elementSizes[n] !== undefined ? reference(n) : Expr.unary('&', reference(n));
+    const rebuilt: Array<{ sign: 1 | -1; expr: Expression }> = [];
+    for (let i = 0; i < list.length; i++) {
+      if (i === addressIndex) rebuilt.push({ sign: 1, expr: { ...address.cast, expression: target } as CStyleCastExpr });
+      else if (others.includes(i)) rebuilt.push(list[i]!);
+    }
+    let out: Expression = rebuilt[0]!.sign === 1 ? rebuilt[0]!.expr : Expr.unary('-', rebuilt[0]!.expr);
+    for (const t of rebuilt.slice(1)) out = Expr.binary(out, t.sign === 1 ? '+' : '-', t.expr);
+    out = Expr.binary(out, '-', Expr.intLiteral(k));
+    o.onRewrite?.({ value, from: `${address.global} + 0x${(value - start).toString(16)}`, to: `${n} - ${k}B` });
+    return out;
+  }
+
   const used = new Set<number>();
   const COMPARISONS = new Set(['<', '<=', '>', '>=', '==', '!=']);
   /**
@@ -275,7 +458,11 @@ export function createFoldedAddressRebaseTransformer(options?: PluginOptions): T
       const node = n as CStyleCastExpr;
       if (node.type.kind !== NodeKind.PointerType) return undefined;
       const v = evaluate(node.expression);
-      if (!v) return undefined;
+      if (!v) {
+        if (displaced.size === 0) return undefined;
+        const tail = tailRebased(node.expression);
+        return tail ? { ...node, expression: Expr.paren(tail) } as CStyleCastExpr : undefined;
+      }
       const r = byValue.get(v.value);
       if (!r) return undefined;
       const x = byAddress.get(r.base);

@@ -38,7 +38,7 @@ import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js
 import { getGlobalReferenceAliases, globalAliasComment } from './global-aliases.js';
 import { globalGuardLine, guardQualifiedName, hasDefinitionInitializer } from './global-guards.js';
 import { sehLoweringDecision, type SehLoweringDecision } from './seh-lowering-spec.js';
-import { foldedAddressFacts, type FoldedAddressFact } from './folded-address-spec.js';
+import { displacementTargets, foldedAddressFacts, type FoldedAddressFact } from './folded-address-spec.js';
 import { immediateConstantFacts, dataAtAddress, type ImmediateConstantFact } from './immediate-constant-spec.js';
 import { compareFormSpec, type CompareFormSpec } from './compare-form-spec.js';
 import { repStringOps } from './rep-string-spec.js';
@@ -58,6 +58,24 @@ import { derivedTemplateInstance, globalDefinition, emittedNamespaceOf, sanitize
  * Clean a parameter name: apply the same renaming the body transform does
  */
 const aggregateModels = new WeakMap<FuncPtrArgCastTables, import('@ghidra-mcp/cpp-parser').AggregateModel>();
+
+const boundaryMemo = new WeakMap<Record<string, number>, Set<number>>();
+
+/** The addresses where one global starts and another (with a known size) ends, one set per table. */
+function globalBoundaries(addresses: Record<string, number> | undefined, sizes: Record<string, number> | undefined): Set<number> {
+  if (!addresses) return new Set();
+  let set = boundaryMemo.get(addresses);
+  if (!set) {
+    const starts = new Set(Object.values(addresses));
+    set = new Set<number>();
+    for (const [name, address] of Object.entries(addresses)) {
+      const size = sizes?.[name];
+      if (typeof size === 'number' && size > 0 && starts.has(address + size)) set.add(address + size);
+    }
+    boundaryMemo.set(addresses, set);
+  }
+  return set;
+}
 
 /** The aggregates as nest-call's region rules read them, one object per table set. */
 function nestCallAggregates(t: FuncPtrArgCastTables | undefined): import('@ghidra-mcp/cpp-parser').AggregateModel | undefined {
@@ -1780,6 +1798,7 @@ export function generateFunctionImplementation(
           compareSites: override?.action === 'patch' ? undefined : func.compareSites,
           sehLowering: sehLoweringDecision(func),
           foldedAddresses: foldedAddressFacts(func),
+          displacementTargets: displacementTargets(func),
           immediateConstants: immediateConstantFacts(func),
           pushSlotInits: pushSlotInits(func),
           // A text patch anchors on the comparisons as Ghidra printed them.
@@ -2776,6 +2795,8 @@ function transformDecompiledCode(
     sehLowering?: SehLoweringDecision;
     /** Addresses the instructions derive from a global's start (codegen/folded-address-spec.ts). */
     foldedAddresses?: FoldedAddressFact[];
+    /** Addresses the instructions encode with a plain reference (codegen/folded-address-spec.ts). */
+    displacementTargets?: number[];
     /** Immediates the instructions hold as constants, not addresses (codegen/immediate-constant-spec.ts). */
     immediateConstants?: ImmediateConstantFact[];
     /** Locals in a prologue `PUSH reg` slot, with the register parameter the push stored. */
@@ -3186,9 +3207,17 @@ function transformDecompiledCode(
           onRefusal: (reason: string) => console.warn(`[immediate] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: left as printed: ${reason}`),
         };
       }
-      if (enclosing?.foldedAddresses && enclosing.foldedAddresses.length > 0) {
+      // Only a plain reference to a global that starts where another global ends can
+      // retarget a tail address; without one the references are not passed.
+      const tailTargets = (enclosing?.displacementTargets ?? [])
+        .some(d => globalBoundaries(context.funcPtrArgCasts.globalAddresses, context.funcPtrArgCasts.globalSizes).has(d))
+        ? enclosing!.displacementTargets! : [];
+      if ((enclosing?.foldedAddresses && enclosing.foldedAddresses.length > 0) || tailTargets.length > 0) {
         perPluginOptions['folded-address-rebase'] = {
-          rebases: enclosing.foldedAddresses,
+          rebases: enclosing?.foldedAddresses ?? [],
+          displacements: tailTargets,
+          globalTypes: context.funcPtrArgCasts.globalTypes,
+          structLayouts: context.funcPtrArgCasts.structLayouts,
           globalAddresses: context.funcPtrArgCasts.globalAddresses,
           globalSizes: context.funcPtrArgCasts.globalSizes,
           globalElementSizes: context.funcPtrArgCasts.globalElementSizes,
