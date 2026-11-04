@@ -18,8 +18,10 @@
  *
  * The two are the same program only when the then-block cannot fall through into the halt,
  * so the rewrite applies only when
- *   - the if has no else, no init-statement and is not constexpr;
- *   - the halt call and the exit call are the next two statements, neither labelled;
+ *   - the if has no init-statement and is not constexpr;
+ *   - the halt call and the exit call are the next two statements, neither labelled, or
+ *     the if's else branch is exactly those two (`if (cond) { ...; return; } else { Halt;
+ *     exit; }`, DeleteCellFile 00601a50: the same program, since the then-block leaves);
  *   - the then-block certainly leaves: its last statement is a return, break, continue,
  *     goto, throw, a call to a function that does not return, or an if/else or block whose
  *     every end leaves;
@@ -204,20 +206,46 @@ function haltCount(root: ASTNode): number {
  */
 function endsInSoleStraightAssert(body: CompoundStmt): boolean {
   const l = body.statements;
+  const last = l[l.length - 1];
+  if (last?.kind === NodeKind.IfStmt && elseHalt(last as IfStmt)) {
+    return haltCount(body) === 1 && !holdsLoopOrSwitch((last as IfStmt).thenBranch);
+  }
   if (l.length < 3) return false;
   const ifs = l[l.length - 3];
   if (ifs.kind !== NodeKind.IfStmt || !isHaltStmt(l[l.length - 2]) || !isExitStmt(l[l.length - 1])) return false;
   return haltCount(body) === 1 && !holdsLoopOrSwitch((ifs as IfStmt).thenBranch);
 }
 
-/** The statements that replace `stmts[i..i+2]`, or null when the shape there does not qualify. */
-function rewriteAt(stmts: readonly Statement[], i: number, ctx: Ctx): Statement[] | null {
-  if (i + 2 >= stmts.length || stmts[i].kind !== NodeKind.IfStmt) return null;
+/** The halt and exit an else branch consists of, or null. */
+function elseHalt(ifs: IfStmt): [Statement, Statement] | null {
+  const e = ifs.elseBranch;
+  if (!e || e.kind !== NodeKind.CompoundStmt) return null;
+  const l = (e as CompoundStmt).statements;
+  return l.length === 2 && isHaltStmt(l[0]) && isExitStmt(l[1]) ? [l[0], l[1]] : null;
+}
+
+/**
+ * The statements that replace `stmts[i..i+2]` (or `stmts[i]` alone for the else form), and
+ * how many they replace; null when the shape there does not qualify.
+ */
+function rewriteAt(stmts: readonly Statement[], i: number, ctx: Ctx): { out: Statement[]; used: number } | null {
+  if (stmts[i]?.kind !== NodeKind.IfStmt) return null;
   const ifs = stmts[i] as IfStmt;
-  const halt = stmts[i + 1];
-  const exit = stmts[i + 2];
-  if (!isHaltStmt(halt) || !isExitStmt(exit)) return null;
-  if (ifs.elseBranch || ifs.init || ifs.isConstexpr) return null;
+  if (ifs.init || ifs.isConstexpr) return null;
+  // The else form, `if (c) { ...leaves } else { Halt; exit; }`: the same program as the
+  // triple, since the then-block leaves.
+  const pair = elseHalt(ifs);
+  let halt: Statement, exit: Statement, used: number;
+  if (pair) {
+    [halt, exit] = pair;
+    used = 1;
+  } else {
+    if (i + 2 >= stmts.length || ifs.elseBranch) return null;
+    halt = stmts[i + 1];
+    exit = stmts[i + 2];
+    if (!isHaltStmt(halt) || !isExitStmt(exit)) return null;
+    used = 3;
+  }
 
   const then = ifs.thenBranch;
   const body: Statement[] = then.kind === NodeKind.CompoundStmt ? [...(then as CompoundStmt).statements] : [then];
@@ -237,7 +265,7 @@ function rewriteAt(stmts: readonly Statement[], i: number, ctx: Ctx): Statement[
   const guarded: Statement[] = declares
     ? [then.kind === NodeKind.CompoundStmt ? then : Stmt.compound(body)]
     : body;
-  return [guard, ...guarded];
+  return { out: [guard, ...guarded], used };
 }
 
 function rewriteList(stmts: readonly Statement[], ctx: Ctx): { stmts: Statement[]; count: number } | null {
@@ -246,9 +274,9 @@ function rewriteList(stmts: readonly Statement[], ctx: Ctx): { stmts: Statement[
   for (let i = 0; i < stmts.length; i++) {
     const r = rewriteAt(stmts, i, ctx);
     if (r) {
-      out.push(...r);
+      out.push(...r.out);
       count++;
-      i += 2;
+      i += r.used - 1;
     } else {
       out.push(stmts[i]);
     }

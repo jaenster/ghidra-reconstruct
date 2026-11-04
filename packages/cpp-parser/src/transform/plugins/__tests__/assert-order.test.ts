@@ -55,6 +55,50 @@ describe('assertOrderPlugin - puts the halt back in front', () => {
 }`));
   });
 
+  // DeleteCellFile 00601a50: the halt printed as the else of a leaving if.
+  it('takes a halt printed as the else branch', () => {
+    const out = run(`void f(int* q, int* p) {
+  ${G}
+  if (*p == 6) {
+    *p = 0;
+    return;
+  } else {
+    ${H}
+    exit(-1);
+  }
+}`);
+    assert.strictEqual(flat(out), flat(`void f(int* q, int* p) {
+  ${G}
+  if (*p != 6) {
+    ${H}
+    exit(-1);
+  }
+  *p = 0;
+  return;
+}`));
+    // The sole straight assertion at the end keeps the layout VC8 gave it.
+    same(`void f(int* p) {
+  if (*p == 6) {
+    *p = 0;
+    return;
+  } else {
+    ${H}
+    exit(-1);
+  }
+}`);
+    // A then-block that does not leave is not the triple.
+    same(`void f(int* q, int* p) {
+  ${G}
+  if (*p == 6) {
+    *p = 0;
+  } else {
+    ${H}
+    exit(-1);
+  }
+  *q = 1;
+}`);
+  });
+
   it('drops a leading ! and keeps every guarded statement in order', () => {
     const out = run(`void f(int* q, int* p) {
   ${G}
