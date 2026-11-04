@@ -49,9 +49,10 @@ import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, FunctionDecl, CompoundStmt, VariableDecl, ParameterDecl, Identifier, TypeNode,
   Expression, ParenExpr, UnaryExpr, CStyleCastExpr, AssignExpr, PointerType, BuiltinType,
-  TypedefType, ElaboratedType, ArrayType, IntegerLiteralExpr, CallExpr,
+  TypedefType, ElaboratedType, ArrayType, IntegerLiteralExpr, CallExpr, PostfixExpr,
 } from '../../../ast/nodes.js';
-import { findNodesByKind } from '../../../ast/visitor.js';
+import { findNodesByKind, traverseAST } from '../../../ast/visitor.js';
+import { placed, type AccessOrderEvidence } from './access-order-evidence.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
 import { Decl, Expr, Stmt, Type } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
@@ -70,6 +71,9 @@ export interface UnderscoreSlotLocalOptions extends PluginOptions {
   enclosingSegments?: string[];
   /** Typedef name → the spelling it stands for */
   typedefTargets?: Record<string, string>;
+  /** The original's store widths per line (access-order-evidence.ts); absent, no alias is
+   *  widened past what its typed values show. */
+  accessOrder?: AccessOrderEvidence;
 }
 
 /** Byte width of each canonical integer base; anything else is not an integer we widen to. */
@@ -185,6 +189,57 @@ function matchSlotDeref(e: Expression): { base: string; type: TypeNode } | null 
 
 interface AliasRewrite { base: string; type: TypeNode }
 
+/** Whether `e` names `name`, parentheses aside. */
+function isName(e: Expression, name: string): boolean {
+  const x = unwrapParens(e);
+  return x.kind === NodeKind.Identifier && (x as Identifier).name === name;
+}
+
+/**
+ * The width the original stores `name` at, from the store facts of each write the body
+ * makes to it (`name = v`, a compound assignment, `++`/`--`): one width every write that
+ * has a fact agrees on, 2 or 4 bytes. A write is tied to its fact by line: the line's only
+ * `=`, or its place among the line's writes when the line holds as many writes as facts.
+ * Undefined when any two disagree or no write has a fact.
+ */
+function storedWidth(name: string, body: CompoundStmt, ev: AccessOrderEvidence | undefined): number | undefined {
+  if (!ev) return undefined;
+  const writes: ASTNode[] = [];
+  const byLine = new Map<number, ASTNode[]>();
+  for (const n of traverseAST(body)) {
+    let target: Expression | undefined;
+    if (n.kind === NodeKind.AssignExpr) target = (n as AssignExpr).left;
+    else if (n.kind === NodeKind.PostfixExpr) target = (n as PostfixExpr).operand;
+    else if (n.kind === NodeKind.UnaryExpr && ((n as UnaryExpr).operator === '++' || (n as UnaryExpr).operator === '--')) {
+      target = (n as UnaryExpr).operand;
+    }
+    if (!target || !placed(n)) continue;
+    const line = n.location.start.line;
+    const all = byLine.get(line) ?? [];
+    all.push(n);
+    byLine.set(line, all);
+    if (isName(target, name)) writes.push(n);
+  }
+  let width: number | undefined;
+  for (const w of writes) {
+    const line = w.location.start.line;
+    const facts = ev.stores.get(line);
+    if (!facts || facts.length === 0) continue;
+    let size: number;
+    if (facts.length === 1) size = facts[0].size;
+    else {
+      const all = (byLine.get(line) ?? []).slice().sort((a, b) => a.location.start.column - b.location.start.column);
+      if (all.length !== facts.length) continue;
+      size = facts[all.indexOf(w)].size;
+    }
+    if (size === 0) continue;
+    if (size !== 2 && size !== 4) return undefined;
+    if (width !== undefined && width !== size) return undefined;
+    width = size;
+  }
+  return width;
+}
+
 function createUnderscoreSlotLocalTransformer(options: UnderscoreSlotLocalOptions = {}): Transformer {
   const varTypes = options.varTypes ?? {};
   const returnTypes = options.functionReturnTypes ?? {};
@@ -288,6 +343,20 @@ function createUnderscoreSlotLocalTransformer(options: UnderscoreSlotLocalOption
           if (t && w !== undefined && w > widestWidth) { widest = t; widestWidth = w; }
         }
         if (widest) aliases.set(name, widest);
+
+        // A constant or an untyped expression says nothing about the width, but the
+        // original's store does: VC8 put a source local of its own into the dead slot of
+        // a narrow parameter (`mov dword ptr [ebp + 0x18], 0` over `byte nParam4`,
+        // RENDERER_D3D_BuildWallTileVerticesNoPerspective 006b87a0) or kept a value wider
+        // than the base in its register (`mov edi, 2` over `bool bResult` in DI,
+        // Missiles_SrvHitFunc_BlockSelfHitByState 005aa180). Declared at the base's width
+        // the copy wraps where the machine's did not (an offset stepped by 0x14 wraps at
+        // the 13th subtile) or collapses 2 to true. The store widths the facts record
+        // for the alias's writes set its width.
+        const stored = storedWidth(name, node.body, options.accessOrder);
+        if (stored !== undefined && stored > widestWidth) {
+          aliases.set(name, Type.builtin(stored === 4 ? 'int' : 'short'));
+        }
       }
 
       const rewriteBases = new Set([...rewrites.values()].map(r => r.base));

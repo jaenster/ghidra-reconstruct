@@ -4,6 +4,7 @@ import { parse } from '../../../parser/index.js';
 import { emit } from '../../../emit/index.js';
 import type { AnyNode } from '../../../ast/nodes.js';
 import { underscoreSlotLocalPlugin } from '../builtins/underscore-slot-local.js';
+import type { AccessOrderEvidence, StoreFact } from '../builtins/access-order-evidence.js';
 
 describe('underscoreSlotLocalPlugin', () => {
   function transformCode(code: string): string {
@@ -130,6 +131,88 @@ describe('underscoreSlotLocalPlugin', () => {
       const out = run('void f(D2BOOL v) { bool bOk; _bOk = v; g(_bOk); }',
         { typedefTargets: { D2BOOL: 'int' } });
       assert.match(out, /\bD2BOOL\s+_bOk\s*;/);
+    });
+  });
+  describe('alias width from the original store', () => {
+    /** One statement per line; `[n]` tags each `=` of the line with an n-byte store. */
+    function run(lines: string[]): string {
+      const stores = new Map<number, StoreFact[]>();
+      const text = lines.map((l, i) => {
+        const m = l.match(/^\s*\[([\d,]+)\]\s?(.*)$/);
+        if (!m) return l;
+        stores.set(i + 1, m[1].split(',').map((n, ord) => ({ ord, at: null, size: Number(n), half: null })));
+        return m[2];
+      });
+      const ev: AccessOrderEvidence = { args: new Map(), stores };
+      const t = underscoreSlotLocalPlugin.createTransformer({ accessOrder: ev } as Record<string, unknown>);
+      return emit(t(parse(text.join('\n'))) as AnyNode).replace(/\s+/g, ' ');
+    }
+
+    // RENDERER_D3D_BuildWallTileVerticesNoPerspective 006b87a0: the loop offset lives in the
+    // dead slot of `byte nParam4`, `mov dword ptr [ebp + 0x18], 0` / `add dword ptr [ebp + 0x18], 0x14`.
+    it('declares a copy in a narrow parameter slot at the width the original stores', () => {
+      const out = run([
+        'int f(uint8_t nParam4, int n) {',
+        '[4] _nParam4 = 0;',
+        'do {',
+        'g(_nParam4);',
+        '[4] _nParam4 = _nParam4 + 0x14;',
+        '} while (n);',
+        'return 0; }',
+      ]);
+      assert.match(out, /\bint _nParam4;/);
+    });
+
+    // Missiles_SrvHitFunc_BlockSelfHitByState 005aa180: `mov edi, 2` / `xor edi, edi` over `bool bResult` in DI.
+    it('keeps a register copy that holds 2 out of a bool', () => {
+      const out = run([
+        'int f(int n) {',
+        'bool bResult;',
+        '[4] _bResult = 2;',
+        'if (n) {',
+        '[4] _bResult = 0;',
+        '}',
+        'return _bResult; }',
+      ]);
+      assert.match(out, /\bint _bResult;/);
+    });
+
+    it('ties a write to its own fact on a line of several', () => {
+      const out = run([
+        'int f(uint16_t nMask, int e) {',
+        '[1,4] if (g(e) && (gb = 0, _nMask = 0, e == 3)) { h(_nMask); }',
+        'return 0; }',
+      ]);
+      assert.match(out, /\bint _nMask;/);
+    });
+
+    it('keeps the base width when the original stores it that wide', () => {
+      const out = run([
+        'int f(int n) {',
+        'uint8_t nFlags;',
+        '[1] _nFlags = 0;',
+        'g(_nFlags);',
+        'return 0; }',
+      ]);
+      assert.match(out, /\buint8_t _nFlags;/);
+    });
+
+    it('keeps the base type when two stores disagree', () => {
+      const out = run([
+        'int f(int n) {',
+        'uint8_t nFlags;',
+        '[1] _nFlags = 0;',
+        '[4] _nFlags = 1;',
+        'g(_nFlags);',
+        'return 0; }',
+      ]);
+      assert.match(out, /\buint8_t _nFlags;/);
+    });
+
+    it('changes nothing without the facts', () => {
+      const t = underscoreSlotLocalPlugin.createTransformer({});
+      const out = emit(t(parse('int f(uint8_t nParam4) { _nParam4 = 0; g(_nParam4); return 0; }')) as AnyNode);
+      assert.match(out, /\buint8_t\s+_nParam4\s*;/);
     });
   });
 });

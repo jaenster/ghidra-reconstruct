@@ -2856,6 +2856,7 @@ function transformDecompiledCode(
         functionReturnTypes: context?.funcPtrArgCasts?.functionReturnTypes,
         enclosingSegments: enclosing?.ghidraNamespaceSegments ?? enclosing?.namespaceSegments,
         typedefTargets: context?.funcPtrArgCasts?.typedefTargets,
+        accessOrder,
       };
     }
 
