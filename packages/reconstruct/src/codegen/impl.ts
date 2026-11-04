@@ -2926,6 +2926,11 @@ function transformDecompiledCode(
     const enablePlugins: string[] = [];
     const perPluginOptions: Record<string, unknown> = {};
     const overrideCastTypedefs = new Set<string>();
+    // A walk to a list's last node tests the link in memory, not a copy (tail-walk-reread.ts).
+    perPluginOptions['tail-walk-reread'] = {
+      onSite: (e: { variable: string; pointer: string }) =>
+        console.warn(`[tail-walk] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.variable} (${e.pointer})`),
+    };
 
     // Method-conversion is dropped (free functions only), so mappings/currentFunction
     // are normally empty; keep the original guard so any stray mapping still no-ops.

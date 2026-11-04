@@ -428,6 +428,13 @@ export {
 } from './builtins/guard-copy-sink.js';
 
 export {
+  tailWalkRereadPlugin,
+  type TailWalkRereadOptions,
+} from './builtins/tail-walk-reread.js';
+
+
+
+export {
   callResultDividePlugin,
   type CallResultDivideOptions,
   type CallDivideFact,
@@ -869,6 +876,7 @@ import { guardCopySinkPlugin } from './builtins/guard-copy-sink.js';
 import { memberCopyAssignPlugin } from './builtins/member-copy-assign.js';
 import { sharedTailJoinPlugin } from './builtins/shared-tail-join.js';
 import { inPlaceOperandPlugin } from './builtins/in-place-operand.js';
+import { tailWalkRereadPlugin } from './builtins/tail-walk-reread.js';
 import { callResultDividePlugin } from './builtins/call-result-divide.js';
 import { paramLoadOrderPlugin } from './builtins/param-load-order.js';
 import { searchLoopExitPlugin } from './builtins/search-loop-exit.js';
@@ -1101,6 +1109,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   stormNextLinkPlugin,        // Matching: a flattened inline TSLink::NextLink(-1) becomes a call to the inline helper (priority 975)
   paramLoadOrderPlugin,       // Matching: field copies out of a parameter struct in the original's source order (priority 976)
   searchLoopExitPlugin,       // Matching: a search loop with its not-found exit printed twice loops on the pointer (priority 989.85)
+  tailWalkRereadPlugin,       // Matching: a walk to a list's last node tests the link in memory, not a copy (priority 989.86)
   guardCopySinkPlugin,        // Matching: a copy of a value printed ahead of a guard on the value moves below it (priority 989.9)
   inlinedStrcpyPlugin,        // Matching: the byte loop VC8 expands strcpy into becomes the call (priority 989.9)
   accumulateSumPlugin,        // Matching: a sum of two single-use values accumulates into the first with += (priority 989.95)
