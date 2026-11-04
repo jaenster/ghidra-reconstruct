@@ -80,6 +80,36 @@ describe('foldedAddressFacts', () => {
   it('nothing without the field (an older snapshot)', () => {
     assert.deepStrictEqual(foldedAddressFacts({}), []);
   });
+
+  // DRLGOUTDOOR_SpawnAct4OutdoorPresets (0067e6a0) at v1908: the two loads encode the tables
+  // as displacements with no reference to them; analysis put a READ on 0x6f2110 / 0x6f2104.
+  const ACT4 = {
+    refs: [
+      { ins: '0067e6ca', op: 1, to: '006f2110', type: 'READ', encoded: false },
+      { ins: '0067e6d0', op: 1, to: '006f2104', type: 'READ', encoded: false },
+    ],
+    derived: [],
+    scalars: [
+      { ins: '0067e6ca', op: 1, value: '006f22b0', immediate: false },
+      { ins: '0067e6d0', op: 1, value: '006f22a4', immediate: false },
+    ],
+  };
+
+  it('a displacement with no reference, beside the one the analysis propagated', () => {
+    assert.deepStrictEqual(foldedAddressFacts({ operandRefs: ACT4 }), [
+      { value: 0x6f2110, base: 0x6f22b0, ins: '0067e6ca' },
+      { value: 0x6f2104, base: 0x6f22a4, ins: '0067e6d0' },
+    ]);
+  });
+
+  it('not for an immediate, an encoded reference, or an operand with two references', () => {
+    const immediate = { ...ACT4, scalars: ACT4.scalars.map(x => ({ ...x, immediate: true })) };
+    assert.deepStrictEqual(foldedAddressFacts({ operandRefs: immediate }), []);
+    const encoded = { ...ACT4, refs: ACT4.refs.map(r => ({ ...r, encoded: true })) };
+    assert.deepStrictEqual(foldedAddressFacts({ operandRefs: encoded }), []);
+    const two = { ...ACT4, refs: [...ACT4.refs, { ins: '0067e6ca', op: 1, to: '006f2114', type: 'READ', encoded: false }] };
+    assert.deepStrictEqual(foldedAddressFacts({ operandRefs: two }).map(f => f.ins), ['0067e6d0']);
+  });
 });
 
 /**

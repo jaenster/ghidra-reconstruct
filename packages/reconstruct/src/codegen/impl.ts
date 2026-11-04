@@ -909,6 +909,8 @@ export interface FuncPtrArgCastTables {
   stringConstantNames?: string[];
   /** Global name -> the size Ghidra declares, not clamped at the next label. */
   globalDeclaredSizes?: Record<string, number>;
+  /** A string's text -> the one address it is at (texts at two addresses are absent). */
+  stringLiteralAddresses?: Record<string, number>;
   /**
    * Global variable name (as emitted) → the namespace segments its DEFINITION is
    * emitted in, empty for root scope. Read by `global-address-literal` so an
@@ -3269,6 +3271,7 @@ function transformDecompiledCode(
         perPluginOptions['folded-address-rebase'] = {
           rebases: enclosing?.foldedAddresses ?? [],
           displacements: tailTargets,
+          stringAddresses: context.funcPtrArgCasts.stringLiteralAddresses,
           globalTypes: context.funcPtrArgCasts.globalTypes,
           structLayouts: context.funcPtrArgCasts.structLayouts,
           globalAddresses: context.funcPtrArgCasts.globalAddresses,

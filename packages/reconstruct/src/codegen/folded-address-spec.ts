@@ -4,7 +4,12 @@
  *
  *  - a derived row: the function loads X's address into a register and ADD/SUB/LEA
  *    turns it into V on straight-line code (`MOV EAX,lbase; SUB EAX,0x202`);
- *  - an offset reference Ghidra carries: the operand encodes V, annotated X + d.
+ *  - an offset reference Ghidra carries: the operand encodes V, annotated X + d;
+ *  - a displacement X the operand encodes with no reference to it, where analysis put the
+ *    instruction's reference on V instead: `LEA EAX,[EAX*4-0x1a0]; MOV ECX,[EAX+0x6f22b0]`
+ *    (DRLGOUTDOOR_SpawnAct4OutdoorPresets 0067e6ca) reads the table at 0x6f22b0 by a raw
+ *    level id, and Ghidra folds the -0x1a0 into a READ reference to 0x6f2110, which the
+ *    decompile prints as an element of the table before it.
  *
  * Dropped, because the decompile's spelling of V could then belong to another
  * instruction and nothing says which:
@@ -32,6 +37,15 @@ export function foldedAddressFacts(func: Pick<ExtractedFunction, 'operandRefs'>)
   }
   for (const r of facts.refs) {
     if (r.base && r.base !== r.to && r.encoded) candidates.push({ value: hex(r.to), base: hex(r.base), ins: r.ins });
+  }
+  // A displacement nothing references, on the operand whose one propagated reference is V.
+  for (const sc of facts.scalars ?? []) {
+    if (sc.immediate) continue;
+    const onOperand = facts.refs.filter(r => r.ins === sc.ins && r.op === sc.op);
+    if (onOperand.length !== 1) continue;
+    const r = onOperand[0]!;
+    if (r.encoded || r.base || r.to === sc.value) continue;
+    candidates.push({ value: hex(r.to), base: hex(sc.value), ins: sc.ins });
   }
   // Plain encodings of an address: the instruction itself names V.
   const encoded = new Set<number>();

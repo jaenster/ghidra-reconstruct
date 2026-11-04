@@ -3526,6 +3526,26 @@ export function declaredGlobalSizes(globals: readonly AnalyzedDataSymbol[]): Rec
 }
 
 /**
+ * Each string's text -> the one address it is at, for a pass that evaluates the address
+ * of a string literal the decompile prints (`folded-address-rebase`). A text at two
+ * addresses is left out: the literal does not say which.
+ */
+export function stringLiteralAddresses(strings: ReadonlyArray<ExtractedString>): Record<string, number> {
+  const out = new Map<string, number | null>();
+  for (const s of strings) {
+    if (!s || typeof s.value !== 'string' || (s.encoding ?? 'string') !== 'string') continue;
+    const address = Number.parseInt(normalizeDataAddress(String(s.address ?? '')), 16);
+    if (!Number.isSafeInteger(address) || address <= 0) continue;
+    const prev = out.get(s.value);
+    if (prev === undefined) out.set(s.value, address);
+    else if (prev !== address) out.set(s.value, null);
+  }
+  const table: Record<string, number> = {};
+  for (const [text, address] of out) if (address !== null) table[text] = address;
+  return table;
+}
+
+/**
  * The element count Ghidra's own type spelling declares, or null.
  *
  * ONLY a trailing `[N]`, and only on the type the extraction carries — the same
@@ -6616,6 +6636,7 @@ export function buildFuncPtrArgCastTables(
     globalNamespaces,
     ambiguousGlobalNames: [...ambiguousGlobalNames],
     stringConstantNames,
+    stringLiteralAddresses: stringLiteralAddresses(strings),
     globalDeclaredSizes: declaredGlobalSizes(globals),
     varArgFunctions: [...varArgFunctions],
     writeEffects: build.writeEffects === false ? undefined : genMark('setup/write-effects', () => buildWriteEffects(functions, globalTypes, undefined, {

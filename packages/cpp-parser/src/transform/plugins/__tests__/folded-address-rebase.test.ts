@@ -211,3 +211,75 @@ describe('folded-address-rebase: a bare literal compared against an address', ()
     });
   });
 });
+
+describe('folded-address-rebase: an indexed access through a folded base', () => {
+  // DRLGOUTDOOR_SpawnAct4OutdoorPresets 0067e6c3: LEA EAX,[EAX*4-0x1a0]; MOV ECX,[EAX+0x6f22b0]
+  // and [EAX+0x6f22a4]. Ghidra's READ references land on 0x6f2110 / 0x6f2104, inside
+  // gaAct5SceneryPresetTable_0 (int[15][7] @0x6f2100), and the decompile reads row 0 of it.
+  // BuildJungle 0067ea64 ADD EAX,[EDX*4+0x6f2240] with an offset reference to the int[3] at
+  // 0x6f2370; MONSTER_EquipFromClassTable 005b1c7a LEA ESI,[ESI*8+0x6e1bb0] with one to
+  // gaMonsterEquipTable (8-byte rows @0x6e2c90), printed against the a1q2.cpp string.
+  const DRLG = {
+    globalAddresses: { gaAct5SceneryPresetTable_0: 0x6f2100, aAct4OutdoorSceneryBaseByLevel: 0x6f22a4, aAct4OutdoorPresetBaseByLevel: 0x6f22b0, aOutJungPresetOffsetByLevel: 0x6f2370, gaMonsterEquipTable: 0x6e2c90, gaWide: 0x6f3000 },
+    globalSizes: { gaAct5SceneryPresetTable_0: 420, aAct4OutdoorSceneryBaseByLevel: 12, aAct4OutdoorPresetBaseByLevel: 12, aOutJungPresetOffsetByLevel: 12, gaMonsterEquipTable: 96, gaWide: 24 },
+    globalElementSizes: { gaAct5SceneryPresetTable_0: 28, aAct4OutdoorSceneryBaseByLevel: 4, aAct4OutdoorPresetBaseByLevel: 4, aOutJungPresetOffsetByLevel: 4, gaMonsterEquipTable: 8, gaWide: 8 },
+    globalTypes: { gaAct5SceneryPresetTable_0: 'int[15][7]', aAct4OutdoorSceneryBaseByLevel: 'int[3]', aAct4OutdoorPresetBaseByLevel: 'int[3]', aOutJungPresetOffsetByLevel: 'int[3]', gaMonsterEquipTable: 'D2MonsterEquipEntryStrc[12]', gaWide: 'longlong[3]' },
+    globalNamespaces: { aAct4OutdoorSceneryBaseByLevel: ['D2Common', 'Drlg', 'Outdoors'], aAct4OutdoorPresetBaseByLevel: ['D2Common', 'Drlg', 'Outdoors'] },
+    stringAddresses: { 'd:\\diablo2\\Diablo2\\Source\\D2Game/Quests/a1q2.cpp': 0x6e1b98 },
+  };
+  const ACT4: FoldedAddress[] = [
+    { value: 0x6f2110, base: 0x6f22b0, ins: '0067e6ca' },
+    { value: 0x6f2104, base: 0x6f22a4, ins: '0067e6d0' },
+  ];
+  const indexed = (code: string, rebases: FoldedAddress[]) => run(code, rebases, DRLG);
+
+  it('reads the Act 4 preset tables the loads name, by the raw level id', () => {
+    const { out, refusals } = indexed(`void f(D2DrlgLevelStrc *pLevel) {
+      nPresetBaseA = gaAct5SceneryPresetTable_0[0][pLevel->eD2LevelId + 4];
+      nPresetBaseB = gaAct5SceneryPresetTable_0[0][pLevel->eD2LevelId + 1]; }`, ACT4);
+    assert.ok(out.includes('nPresetBaseA = D2Common::Drlg::Outdoors::aAct4OutdoorPresetBaseByLevel[pLevel->eD2LevelId - 104]'), out);
+    assert.ok(out.includes('nPresetBaseB = D2Common::Drlg::Outdoors::aAct4OutdoorSceneryBaseByLevel[pLevel->eD2LevelId - 104]'), out);
+    assert.deepStrictEqual(refusals, []);
+    // The same element in the image: 0x6f2100 + 4 * (id + 4) == 0x6f22b0 + 4 * (id - 104).
+    for (const id of [104, 105, 106]) assert.strictEqual(0x6f2100 + 4 * (id + 4), 0x6f22b0 + 4 * (id - 104));
+  });
+
+  it('reads the jungle preset offsets through the offset reference', () => {
+    const { out } = indexed(`void f(D2DrlgLevelStrc *pLevel) {
+      n = n + gaAct5SceneryPresetTable_0[0xb][pLevel->eD2LevelId + 3]; }`, [{ value: 0x6f2240, base: 0x6f2370, ins: '0067ea64' }]);
+    assert.ok(out.includes('n + aOutJungPresetOffsetByLevel[pLevel->eD2LevelId - 76]'), out);
+    for (const id of [76, 77, 78]) assert.strictEqual(0x6f2100 + 11 * 28 + 4 * (id + 3), 0x6f2370 + 4 * (id - 76));
+  });
+
+  it('reads the monster equipment rows the LEA names, not the string before them', () => {
+    const { out } = indexed(`void f(int nClassId) {
+      p = (uint32_t *)("d:\\\\diablo2\\\\Diablo2\\\\Source\\\\D2Game/Quests/a1q2.cpp" + nClassId * 8 + 0x18); }`,
+      [{ value: 0x6e1bb0, base: 0x6e2c90, ins: '005b1c7a' }]);
+    assert.ok(out.includes('p = (uint32_t*)&gaMonsterEquipTable[nClassId - 540]'), out);
+  });
+
+  it('spells the distance in bytes when the index is not a multiple of the element', () => {
+    const { out } = indexed(`void f(int n) {
+      p = (uint32_t *)("d:\\\\diablo2\\\\Diablo2\\\\Source\\\\D2Game/Quests/a1q2.cpp" + n * 4 + 0x18); }`,
+      [{ value: 0x6e1bb0, base: 0x6e2c90, ins: '005b1c7a' }]);
+    assert.ok(out.includes('(uint32_t*)((char*)gaMonsterEquipTable + n * 4 - 4320)'), out);
+  });
+
+  it('leaves an access with no derived value at its constant part', () => {
+    const { out } = indexed(`void f(D2DrlgLevelStrc *pLevel) {
+      n = gaAct5SceneryPresetTable_0[0][pLevel->eD2LevelId + 5]; }`, ACT4);
+    assert.ok(out.includes('gaAct5SceneryPresetTable_0[0][pLevel->eD2LevelId + 5]'), out);
+  });
+
+  it('leaves a base whose elements are another width', () => {
+    const { out, refusals } = indexed(`void f(int i) { n = gaAct5SceneryPresetTable_0[0][i + 4]; }`,
+      [{ value: 0x6f2110, base: 0x6f3000, ins: '0067e6ca' }]);
+    assert.ok(out.includes('gaAct5SceneryPresetTable_0[0][i + 4]'), out);
+    assert.ok(refusals.some(r => r.includes('does not have 4-byte elements')), refusals.join('\n'));
+  });
+
+  it('leaves a literal-only subscript to the constant rules', () => {
+    const { out } = indexed(`void f() { n = gaAct5SceneryPresetTable_0[0][4]; }`, ACT4);
+    assert.ok(out.includes('gaAct5SceneryPresetTable_0[0][4]'), out);
+  });
+});

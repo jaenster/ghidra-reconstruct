@@ -71,12 +71,36 @@
  * the literals become the one distance A - D. Every address on the way is evaluated
  * exactly (subscripts by declared dimensions, members by Ghidra's layout) or the sum is
  * left as printed.
+ *
+ * ## An indexed access through a folded base
+ *
+ * A table indexed by a raw id whose first entry is not id 0 is read through a base below
+ * it. DRLGOUTDOOR_SpawnAct4OutdoorPresets reads the Act 4 preset bases as
+ * `LEA EAX,[EAX*4-0x1a0]; MOV ECX,[EAX+0x6f22b0]`: the displacement is the table, the
+ * -104 * 4 is in the index. The decompiler folds the two into 0x6f2110 + 4 * id, an element
+ * of the table 416 bytes earlier, and prints `gaAct5SceneryPresetTable_0[0][id + 4]`: a
+ * read 420 bytes past row 0 of an unrelated table once relinked. The same happens through
+ * a LEA (`LEA ESI,[ESI*8+0x6e1bb0]`, 540 rows below gaMonsterEquipTable, printed against
+ * the string before it) and through an ADD from memory, where Ghidra's offset reference
+ * names the table.
+ *
+ * With V (the folded constant part) derived from the base X the instruction names, the
+ * access is respelled against X, the index carrying the distance:
+ *
+ *  - a subscript `T[..][I + c]` whose element is at V for I = 0, X an array of the same
+ *    element width: `X[I + (V - X) / stride]`;
+ *  - a sum under a pointer cast, `(P *)(A + I * k + c)` with one address term A (a string
+ *    literal the strings table places at one address, or an address this pass evaluates)
+ *    and A + c = V: `(P *)&X[I + (V - X) / k]` when k is X's element size, otherwise
+ *    `(P *)((char *)X + I * k + (V - X))`.
+ *
+ * Same address for every index in the image; the right object in the rebuild.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, BinaryExpr, BuiltinType, CStyleCastExpr, Expression, Identifier, IntegerLiteralExpr,
-  MemberExpr, ParenExpr, PointerType, QualifiedId, SubscriptExpr, TypedefType, UnaryExpr,
+  MemberExpr, ParenExpr, PointerType, QualifiedId, StringLiteralExpr, SubscriptExpr, TypedefType, UnaryExpr,
 } from '../../../ast/nodes.js';
 import { Expr, Type } from '../../../ast/factory.js';
 import { createTransformer, type Transformer } from '../../transformer.js';
@@ -107,6 +131,8 @@ export interface FoldedAddressRebaseOptions extends PluginOptions {
   globalTypes?: Record<string, string>;
   /** Aggregate name -> every field's offset, size and Ghidra type. */
   structLayouts?: Record<string, ReadonlyArray<{ name: string; offset: number; size: number; type: string; bitSize?: number }>>;
+  /** A string's text -> the one address it is at, for a string literal in an address sum. */
+  stringAddresses?: Record<string, number>;
   onRewrite?: (info: { value: number; from: string; to: string; ins?: string }) => void;
   onRefusal?: (reason: string) => void;
 }
@@ -415,6 +441,149 @@ export function createFoldedAddressRebaseTransformer(options?: PluginOptions): T
     return out;
   }
 
+  // ============================================
+  // AN INDEXED ACCESS THROUGH A FOLDED BASE
+  // ============================================
+
+  const stringAddresses = o.stringAddresses ?? {};
+
+  /** The derived V at `c0` and the one global its base X starts, or null. */
+  function foldedAt(c0: number, spelledAgainst: string | undefined): { r: FoldedAddress; x: string } | null {
+    const r = byValue.get(c0);
+    if (!r) return null;
+    const x = byAddress.get(r.base);
+    if (!x) {
+      o.onRefusal?.(`0x${c0.toString(16)}: no single global starts at 0x${r.base.toString(16)}`);
+      return null;
+    }
+    used.add(c0);
+    return x === spelledAgainst ? null : { r, x };
+  }
+
+  /** `others + k`, the non-literal terms in their order and signs and one literal. */
+  function rebuild(others: Array<{ sign: 1 | -1; expr: Expression }>, k: number): Expression {
+    let out: Expression = others[0]!.sign === 1 ? others[0]!.expr : Expr.unary('-', others[0]!.expr);
+    for (const t of others.slice(1)) out = Expr.binary(out, t.sign === 1 ? '+' : '-', t.expr);
+    return k === 0 ? out : Expr.binary(out, k < 0 ? '-' : '+', Expr.intLiteral(Math.abs(k)));
+  }
+
+  /** An index as its literal sum and the other terms; null when no other term is left. */
+  function splitIndex(e: Expression): { literal: number; others: Array<{ sign: 1 | -1; expr: Expression }> } | null {
+    const list: Array<{ sign: 1 | -1; expr: Expression }> = [];
+    terms(e, 1, list);
+    let literal = 0;
+    const others: Array<{ sign: 1 | -1; expr: Expression }> = [];
+    for (const t of list) {
+      const x = unwrap(t.expr);
+      if (x.kind === NodeKind.IntegerLiteral) {
+        const v = (x as IntegerLiteralExpr).value;
+        if (v < 0n || v >= BigInt(WORD)) return null;
+        literal += t.sign * Number(v);
+      } else {
+        others.push(t);
+      }
+    }
+    return others.length > 0 ? { literal, others } : null;
+  }
+
+  /**
+   * `T[i]..[X + c]`: an element read through a subscript whose constant part is a derived V
+   * of a base X the instruction names, respelled `X[X + (V - X) / stride]` when X is an
+   * array of the same element width:
+   *
+   *     gaAct5SceneryPresetTable_0[0][pLevel->eD2LevelId + 4]
+   *       -> aAct4OutdoorPresetBaseByLevel[pLevel->eD2LevelId - 104]
+   */
+  function subscriptRebased(node: SubscriptExpr): Expression | null {
+    const row = objectAt(node.array);
+    if (!row || row.spelling === undefined || row.size === undefined) return null;
+    const shape = arrayShape(row.spelling);
+    if (!shape || shape.dims.length === 0) return null;
+    const count = shape.dims[0]!;
+    if (!(count > 0) || row.size % count !== 0) return null;
+    const stride = row.size / count;
+    const index = splitIndex(node.index);
+    if (!index) return null;
+    const c0 = row.address + index.literal * stride;
+    const hit = foldedAt(c0, row.global);
+    if (!hit) return null;
+    if (elementSizes[hit.x] !== stride) {
+      o.onRefusal?.(`0x${c0.toString(16)}: ${hit.x} does not have ${stride}-byte elements`);
+      return null;
+    }
+    const d = c0 - hit.r.base;
+    if (d % stride !== 0) return null;
+    o.onRewrite?.({ value: c0, from: `${row.global} + 0x${(c0 - addresses[row.global]!).toString(16)}`, to: `${hit.x} ${d < 0 ? '-' : '+'} ${Math.abs(d)}B`, ins: hit.r.ins });
+    return Expr.subscript(reference(hit.x), rebuild(index.others, d / stride));
+  }
+
+  /** The address of one term of an address sum: a string literal, or an evaluable address. */
+  function termAddress(e: Expression): { value: number; symbol?: string; bytes: boolean } | null {
+    const x = unwrap(e);
+    if (x.kind === NodeKind.StringLiteral) {
+      const lit = x as StringLiteralExpr;
+      if (lit.prefix) return null;
+      const a = stringAddresses[lit.value];
+      return a === undefined ? null : { value: a, bytes: true };
+    }
+    const v = evaluate(x);
+    if (!v || v.stride !== 1) return null;
+    return { value: v.value, symbol: v.symbol, bytes: true };
+  }
+
+  /**
+   * `(T *)(A + X * k + c)` under a pointer cast, A the one address term (a string literal
+   * the strings table places, or an address this pass evaluates) and A + c a derived V of a
+   * base X: respelled `(T *)&X[X + (V - X) / k]` when the only other term is a multiple of
+   * X's element size, and `(T *)((char *)X + ... + (V - X))` otherwise:
+   *
+   *     (uint32_t *)("d:\\...\\a1q2.cpp" + nClassId * 8 + 0x18)
+   *       -> (uint32_t *)&gaMonsterEquipTable[nClassId - 540]
+   */
+  function sumRebased(sum: Expression): Expression | null {
+    const list: Array<{ sign: 1 | -1; expr: Expression }> = [];
+    terms(sum, 1, list);
+    if (list.length < 2) return null;
+    let base: { value: number; symbol?: string } | null = null;
+    let literal = 0;
+    const others: Array<{ sign: 1 | -1; expr: Expression }> = [];
+    for (const t of list) {
+      const x = unwrap(t.expr);
+      if (x.kind === NodeKind.IntegerLiteral) {
+        const v = (x as IntegerLiteralExpr).value;
+        if (v < 0n || v >= BigInt(WORD)) return null;
+        literal += t.sign * Number(v);
+        continue;
+      }
+      const a = t.sign === 1 && !base ? termAddress(t.expr) : null;
+      if (a) { base = a; continue; }
+      others.push(t);
+    }
+    if (!base || others.length === 0) return null;
+    const c0 = base.value + literal;
+    const hit = foldedAt(c0, base.symbol);
+    if (!hit) return null;
+    const d = c0 - hit.r.base;
+    const stride = elementSizes[hit.x];
+    // One `X * k` term with k the element size: an element of X.
+    if (others.length === 1 && others[0]!.sign === 1 && stride !== undefined && stride > 0 && d % stride === 0) {
+      const t = unwrap(others[0]!.expr);
+      if (t.kind === NodeKind.BinaryExpr && (t as BinaryExpr).operator === '*') {
+        const m = t as BinaryExpr;
+        const k = unwrap(m.right);
+        if (k.kind === NodeKind.IntegerLiteral && Number((k as IntegerLiteralExpr).value) === stride) {
+          o.onRewrite?.({ value: c0, from: `${base.symbol ?? 'literal'} + 0x${literal.toString(16)}`, to: `${hit.x} ${d < 0 ? '-' : '+'} ${Math.abs(d)}B`, ins: hit.r.ins });
+          return Expr.unary('&', Expr.subscript(reference(hit.x), rebuild([{ sign: 1, expr: m.left }], d / stride)));
+        }
+      }
+    }
+    o.onRewrite?.({ value: c0, from: `${base.symbol ?? 'literal'} + 0x${literal.toString(16)}`, to: `${hit.x} ${d < 0 ? '-' : '+'} ${Math.abs(d)}B`, ins: hit.r.ins });
+    const bytes = Expr.cast(Type.pointer(Type.char()), elementSizes[hit.x] !== undefined ? reference(hit.x) : Expr.unary('&', reference(hit.x)));
+    let out: Expression = bytes;
+    for (const t of others) out = Expr.binary(out, t.sign === 1 ? '+' : '-', t.expr);
+    return d === 0 ? out : Expr.binary(out, d < 0 ? '-' : '+', Expr.intLiteral(Math.abs(d)));
+  }
+
   const used = new Set<number>();
   const COMPARISONS = new Set(['<', '<=', '>', '>=', '==', '!=']);
   /**
@@ -454,11 +623,17 @@ export function createFoldedAddressRebaseTransformer(options?: PluginOptions): T
         if (left) return { ...b, left } as BinaryExpr;
         return undefined;
       }
+      if (n.kind === NodeKind.SubscriptExpr) {
+        if (byValue.size === 0) return undefined;
+        return subscriptRebased(n as SubscriptExpr) ?? undefined;
+      }
       if (n.kind !== NodeKind.CStyleCastExpr) return undefined;
       const node = n as CStyleCastExpr;
       if (node.type.kind !== NodeKind.PointerType) return undefined;
       const v = evaluate(node.expression);
       if (!v) {
+        const indexed = byValue.size > 0 ? sumRebased(node.expression) : null;
+        if (indexed) return { ...node, expression: Expr.paren(indexed) } as CStyleCastExpr;
         if (displaced.size === 0) return undefined;
         const tail = tailRebased(node.expression);
         return tail ? { ...node, expression: Expr.paren(tail) } as CStyleCastExpr : undefined;
