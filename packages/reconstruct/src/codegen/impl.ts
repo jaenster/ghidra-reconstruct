@@ -3179,6 +3179,19 @@ function transformDecompiledCode(
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         enclosingVarTypes,
       };
+      // A local holding a memory read that a two-compare constant range test reads is the
+      // read itself: VC8 would fold the test on the local (range-read-inline.ts).
+      perPluginOptions['range-read-inline'] = {
+        enumTypes: context.funcPtrArgCasts.enumTypes,
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        structFields: context.funcPtrArgCasts.structFields,
+        typedefTargets: context.funcPtrArgCasts.typedefTargets,
+        functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        enclosingVarTypes,
+        onSite: (e: { variable: string; read: string; uses: number }) =>
+          console.warn(`[range-read] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.variable} = ${e.read} (${e.uses} reads)`),
+      };
       perPluginOptions['range-test-form'] = {
         enumTypes: context.funcPtrArgCasts.enumTypes,
         enumValues: context.funcPtrArgCasts.enumValues,

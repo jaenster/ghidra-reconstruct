@@ -403,6 +403,11 @@ export {
 } from './builtins/pointee-clear-memset.js';
 
 export {
+  rangeReadInlinePlugin,
+  type RangeReadInlineOptions,
+} from './builtins/range-read-inline.js';
+
+export {
   callResultDividePlugin,
   type CallResultDivideOptions,
   type CallDivideFact,
@@ -839,6 +844,7 @@ import { storeOrderPlugin } from './builtins/store-order.js';
 import { rotateIntrinsicPlugin } from './builtins/rotate-intrinsic.js';
 import { crtIntrinsicCallPlugin } from './builtins/crt-intrinsic-call.js';
 import { pointeeClearMemsetPlugin } from './builtins/pointee-clear-memset.js';
+import { rangeReadInlinePlugin } from './builtins/range-read-inline.js';
 import { callResultDividePlugin } from './builtins/call-result-divide.js';
 import { paramLoadOrderPlugin } from './builtins/param-load-order.js';
 import { searchLoopExitPlugin } from './builtins/search-loop-exit.js';
@@ -1019,6 +1025,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   bitfieldAccessPlugin,       // Cleanup: field_0xNN & MASK → bitfieldName (priority 45)
   callSiteOverrideCastPlugin, // Correctness: call through void*/code* → cast to the call-site override (priority 614)
   unsignedRangeComparePlugin, // Correctness: (x - lo) < n on an unsigned narrow/enum stays unsigned (priority 617)
+  rangeReadInlinePlugin,      // Matching: a local holding a memory read that a two-compare constant range test reads is the read (priority 989.75)
   rangeTestFormPlugin,        // Matching: (unsigned)(x - lo) <= k guarding a branch -> lo <= x && x <= hi, VC8's ADD x,-lo (priority 989.8)
   shiftCountMaskPlugin,       // Matching: x << (n & 0x1f) -> x << n where n is proven to lie in [0, 31] (priority 621)
   zeroExtendSitePlugin,       // Matching: tag each byte/word mask a MOVZX computed (priority 3)
