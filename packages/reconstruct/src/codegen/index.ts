@@ -69,7 +69,7 @@ import {
   ADDRESS_LITERAL_COMPLEMENT_FLOOR,
   type FuncPtrTarget,
 } from '@ghidra-mcp/cpp-parser';
-import { Lexer, TokenKind, parse, biasedTableIndexPlugin, findNodesByKind, NodeKind, type InlinedCallee, type InlinedCallTables, type GuardedCallee, type GuardedCallTables } from '@ghidra-mcp/cpp-parser';
+import { Lexer, TokenKind, parse, biasedTableIndexPlugin, findNodesByKind, NodeKind, globalRunSpan, globalRunMembers, type InlinedCallee, type InlinedCallTables, type GuardedCallee, type GuardedCallTables } from '@ghidra-mcp/cpp-parser';
 
 import { buildVtableDispatch } from './vtable-dispatch.js';
 import { fieldDeclSpelling, emittedMemberNames, generateHeader, generateFunctionDeclaration, setKnownFuncDefs, setConstructorBearingStructs, hasConvertingConstructor, recordConstructorLookups, constructorFact, isConstructorCandidate, sigType, getIntegerConversionType, emittedFunctionName, returnSigType } from './header.js';
@@ -3080,6 +3080,36 @@ export function biasedTableReaders(
   return out;
 }
 
+/**
+ * (function, global) for every global a body's `memset(&G, 0, N)` clears past G: the run
+ * of objects after G that `global-run-clear` clears one at a time, by name, from that
+ * body. A function-local static of another function in the run must leave its function
+ * for that, the same as for any other reference. Only bodies that call memset are parsed.
+ */
+export function globalRunReaders(
+  analyzedGlobals: readonly AnalyzedDataSymbol[],
+  functions: readonly ExtractedFunction[],
+  strings: ReadonlyArray<ExtractedString> = [],
+): Array<[string, string]> {
+  const withMemset = functions.filter(f => f.decompiled && f.decompiled.includes('memset('));
+  if (withMemset.length === 0) return [];
+  const { globalAddresses, globalSizes, globalElementSizes } =
+    buildGlobalAddressExtentTables(analyzedGlobals as AnalyzedDataSymbol[], strings);
+  const declaredSizes = declaredGlobalSizes(analyzedGlobals);
+  const out: Array<[string, string]> = [];
+  for (const func of withMemset) {
+    let ast: ReturnType<typeof parse> | undefined;
+    try { ast = parse(func.decompiled!); } catch { continue; }
+    for (const call of findNodesByKind(ast, NodeKind.CallExpr)) {
+      const span = globalRunSpan(call as Parameters<typeof globalRunSpan>[0], globalAddresses, globalSizes, globalElementSizes, declaredSizes);
+      if (!span) continue;
+      const members = globalRunMembers(span.start, span.length, globalAddresses, globalSizes);
+      for (const m of members ?? []) if (m.name !== span.name) out.push([func.name, m.name]);
+    }
+  }
+  return out;
+}
+
 /** One line on where the external globals were homed, and why the rest were not. */
 function reportDataHomes(globals: readonly AnalyzedDataSymbol[], assigned: { homed: number; centrallyDeclared: number }): void {
   if (!isMainThread) return;
@@ -3223,6 +3253,16 @@ export function reconcileStaticScopeWithBodyReferences(
   // datum ends) - the layout alone matches dozens of ordinary reads of a neighbour's
   // last field.
   for (const [func, name] of biasedTableReaders(candidates, analyzedGlobals, functions)) {
+    let fns = literalFunctions.get(name);
+    if (!fns) { fns = new Set(); literalFunctions.set(name, fns); }
+    fns.add(func);
+  }
+  // A memset from one global across the run after it names every object of the run in
+  // the body that `global-run-clear` rewrites (TEXT_InitTextDisplaySettings clears five
+  // statics of four other Text.cpp functions).
+  for (const [func, raw] of globalRunReaders(analyzedGlobals, functions, strings ?? [])) {
+    const name = sanitizeSymbolName(raw);
+    if (!candidates.has(name)) continue;
     let fns = literalFunctions.get(name);
     if (!fns) { fns = new Set(); literalFunctions.set(name, fns); }
     fns.add(func);
@@ -3462,6 +3502,25 @@ function stringConstantExtents(
     if ('reason' in built) continue;
     claimed.add(name);
     out.push({ name, address, size: s.length + 1 });
+  }
+  return out;
+}
+
+/**
+ * Global name -> the size Ghidra declares for it, unclamped (`buildGlobalAddressExtentTables`
+ * clamps an extent at the next label, which a label inside an object shortens). A name two
+ * records give different sizes is left out.
+ */
+export function declaredGlobalSizes(globals: readonly AnalyzedDataSymbol[]): Record<string, number> {
+  const out: Record<string, number> = {};
+  const ambiguous = new Set<string>();
+  for (const g of globals) {
+    const name = g.suggestedName || g.name;
+    if (!name || /[^A-Za-z0-9_]/.test(name) || ambiguous.has(name)) continue;
+    const size = Number(g.size);
+    if (!Number.isSafeInteger(size) || size <= 0) continue;
+    if (out[name] !== undefined && out[name] !== size) { ambiguous.add(name); delete out[name]; continue; }
+    out[name] = size;
   }
   return out;
 }
@@ -6557,6 +6616,7 @@ export function buildFuncPtrArgCastTables(
     globalNamespaces,
     ambiguousGlobalNames: [...ambiguousGlobalNames],
     stringConstantNames,
+    globalDeclaredSizes: declaredGlobalSizes(globals),
     varArgFunctions: [...varArgFunctions],
     writeEffects: build.writeEffects === false ? undefined : genMark('setup/write-effects', () => buildWriteEffects(functions, globalTypes, undefined, {
       globals, aggregates: { layouts: structLayouts, unions: unionNames, sizes: aggregateSizes, typedefs: typedefTargets },

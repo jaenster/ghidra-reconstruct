@@ -684,6 +684,7 @@ export { comIUnknownCallPlugin } from './builtins/com-iunknown-call.js';
 export { biasedTableIndexPlugin } from './builtins/biased-table-index.js';
 export { indexBaseBeforeObjectPlugin, createIndexBaseBeforeObjectTransformer } from './builtins/index-base-before-object.js';
 export { foldedAddressRebasePlugin, type FoldedAddress, type FoldedAddressRebaseOptions } from './builtins/folded-address-rebase.js';
+export { globalRunClearPlugin, globalRunMembers, globalRunSpan, type GlobalRunClearOptions, type GlobalRunMember } from './builtins/global-run-clear.js';
 export { immediateNotAddressPlugin, type ImmediateNotAddressOptions } from './builtins/immediate-not-address.js';
 export { importAddressForwarderPlugin, IMPORT_ADDRESS_FORWARDERS } from './builtins/import-address-forwarder.js';
 export { unsignedRangeComparePlugin } from './builtins/unsigned-range-compare.js';
@@ -785,6 +786,7 @@ import { comIUnknownCallPlugin } from './builtins/com-iunknown-call.js';
 import { biasedTableIndexPlugin } from './builtins/biased-table-index.js';
 import { indexBaseBeforeObjectPlugin } from './builtins/index-base-before-object.js';
 import { foldedAddressRebasePlugin } from './builtins/folded-address-rebase.js';
+import { globalRunClearPlugin } from './builtins/global-run-clear.js';
 import { immediateNotAddressPlugin } from './builtins/immediate-not-address.js';
 import { importAddressForwarderPlugin } from './builtins/import-address-forwarder.js';
 import { unsignedRangeComparePlugin } from './builtins/unsigned-range-compare.js';
@@ -979,6 +981,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   biasedTableIndexPlugin,      // Correctness: *(byte*)((int)A + C + i) below the next table → Next[i - bias] (priority 12)
   indexBaseBeforeObjectPlugin, // Correctness: &DAT_x + i*C just below a global G → (uint8_t*)&G - d + i*C (priority 12)
   foldedAddressRebasePlugin,   // Correctness: a folded MOV X; SUB d address respelled X - n, from the instruction refs (priority 13)
+  globalRunClearPlugin,        // Correctness: memset(&G, 0, N) past G over the run of globals after it -> one clear per object (priority 13)
   adjShiftedPointerPlugin,     // Correctness: ADJ(p) on a shifted pointer -> (Container*)((char*)p - k), its containing record (priority 11)
   deadOutSlotStorePlugin,      // Correctness: a PUSH-reg slot store the next call overwrites through &local before any read -> dropped (priority 12.5)
   reusedParamSlotPlugin,       // Correctness: a dead parameter slot reused for a function pointer -> a funcdef local (priority 14)

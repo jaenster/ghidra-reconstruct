@@ -907,6 +907,8 @@ export interface FuncPtrArgCastTables {
    * be `char(*)[N]`. Only the spelling differs; the resolution does not.
    */
   stringConstantNames?: string[];
+  /** Global name -> the size Ghidra declares, not clamped at the next label. */
+  globalDeclaredSizes?: Record<string, number>;
   /**
    * Global variable name (as emitted) → the namespace segments its DEFINITION is
    * emitted in, empty for root scope. Read by `global-address-literal` so an
@@ -2747,6 +2749,25 @@ export function pinnedOverloadTables(
   };
 }
 
+/** Per globals list: each function-local static's name -> the function that owns it. */
+const staticOwnersMemo = new WeakMap<readonly AnalyzedDataSymbol[], Map<string, string>>();
+
+/** The function-local statics a body other than their owner's cannot name. */
+function foreignStatics(globals: readonly AnalyzedDataSymbol[] | undefined, funcName: string | undefined): Set<string> {
+  if (!globals) return new Set();
+  let owners = staticOwnersMemo.get(globals);
+  if (!owners) {
+    owners = new Map();
+    for (const g of globals) {
+      if (g.scope === 'static-local' && g.ownerFunction) owners.set(g.suggestedName || g.name, g.ownerFunction);
+    }
+    staticOwnersMemo.set(globals, owners);
+  }
+  const out = new Set<string>();
+  for (const [name, owner] of owners) if (owner !== funcName) out.add(name);
+  return out;
+}
+
 function transformDecompiledCode(
   decompiled: string,
   options: ReconstructOptions,
@@ -3257,6 +3278,19 @@ function transformDecompiledCode(
           onRewrite: (r: { value: number; from: string; to: string; ins?: string }) =>
             console.warn(`[fold] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: 0x${r.value.toString(16)} ${r.from} -> ${r.to} (ins ${r.ins ?? '?'})`),
           onRefusal: (reason: string) => console.warn(`[fold] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: left as printed: ${reason}`),
+        };
+      }
+      if (/\bmemset\b/.test(decompiled)) {
+        perPluginOptions['global-run-clear'] = {
+          globalAddresses: context.funcPtrArgCasts.globalAddresses,
+          globalSizes: context.funcPtrArgCasts.globalSizes,
+          globalDeclaredSizes: context.funcPtrArgCasts.globalDeclaredSizes,
+          globalElementSizes: context.funcPtrArgCasts.globalElementSizes,
+          globalNamespaces: context.funcPtrArgCasts.globalNamespaces,
+          unreachable: foreignStatics(context.analyzedGlobals, funcName),
+          onRewrite: (r: { name: string; length: number; members: number }) =>
+            console.warn(`[run-clear] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: memset(&${r.name}, 0, 0x${r.length.toString(16)}) -> ${r.members} clears`),
+          onRefusal: (reason: string) => console.warn(`[run-clear] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: left as printed: ${reason}`),
         };
       }
       if (context.funcPtrArgCasts.shiftedPointers && Object.keys(context.funcPtrArgCasts.shiftedPointers).length > 0) {
