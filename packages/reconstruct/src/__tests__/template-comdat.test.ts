@@ -93,7 +93,10 @@ function model() {
     caller('Mod::File', 'Close', '00401000', call('ELEM', '&gElemList')),
     member('ELEM', 'UnlinkAll', '00401040'),
     caller('Mod::File', 'Fini', '00401080', `  /* ${LIST('PEER')}::UnlinkAll is not a use */\n${call('ELEM', '&gElemList')}`),
-    // PEER's is named by two units.
+    // ELEM's Peek, used by Mod::File alone, sits in one run with PEER's UnlinkAll,
+    // which two units name: the run came from one object and stays together.
+    member('ELEM', 'Peek', '004010c0'),
+    caller('Mod::File', 'Look', '00401160', call('ELEM', '&gElemList', 'Peek')),
     member('PEER', 'UnlinkAll', '00401100'),
     caller('Mod::Other', 'Flush', '00401140', call('PEER', '&gPeerList')),
     caller('Mod::Third', 'Drain', '00401180', call('PEER', '&gPeerList')),
@@ -140,10 +143,14 @@ describe('template members as COMDATs', () => {
     assert.match(impl, /\} \/\/ namespace Mod::File\n\n[\s\S]*template<> __attribute__\(\(noinline\)\) inline void TSList<ELEM, TSGetLink<ELEM>>::UnlinkAll\(\) \{[\s\S]*\nnamespace Mod::File \{/);
     // In address order, between its two users.
     assert.ok(impl.indexOf('void Close()') < impl.indexOf('::UnlinkAll() {') && impl.indexOf('::UnlinkAll() {') < impl.indexOf('void Fini()'), impl);
-    assert.ok(!project.files.has('Mod/stpl_ELEM.cpp'));
     // Declared once, in the template header, as the COMDAT it is; never in the unit's header.
     assert.match(file('Storm/H/stpl.h'), /template<> __attribute__\(\(noinline\)\) inline void TSList<ELEM, TSGetLink<ELEM>>::UnlinkAll\(\);/);
     assert.doesNotMatch(file('Mod/File.h'), /UnlinkAll/);
+  });
+
+  it('moves a run of members only as a whole', () => {
+    assert.match(file('Mod/stpl_ELEM.cpp'), /\ntemplate<> void TSList<ELEM, TSGetLink<ELEM>>::Peek\(\) \{/);
+    assert.doesNotMatch(file('Mod/File.cpp'), /::Peek\(\) \{/);
   });
 
   it('leaves a member two units name, or a datum holds, with its instantiation and not inline', () => {

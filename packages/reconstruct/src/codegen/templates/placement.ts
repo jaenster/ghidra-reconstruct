@@ -22,7 +22,8 @@
  * A member that one unit's own code alone names (templates/users.ts) is defined in that unit
  * instead: the copy the linker kept is the one that unit's object compiled.
  * `TSList<HANDLER,TSGetLink<HANDLER>>::UnlinkAll` is called by SErr's destructor
- * and SErr's static finalizer only, and it sits between them.
+ * and SErr's static finalizer only, and it sits between them. A run of members
+ * with no other function between them moves only as a whole.
  */
 
 import type { ModuleConfig, ModuleRun } from '../../config/schema.js';
@@ -104,10 +105,21 @@ export function placeTemplateMembers(
   }
   closeRun();
   if (uses) {
-    for (const address of placement.keys()) {
-      const unit = soleUserUnit(uses, address);
-      if (unit) placement.set(address, unit);
+    // The linker lays an object's COMDATs out together, so a run of members with no
+    // other function between them came from one object: it moves only as a whole,
+    // and only when every member of it is used by the same one unit alone.
+    let group: string[] = [];
+    const flush = () => {
+      const units = new Set(group.map(a => soleUserUnit(uses, a)));
+      const [unit] = units;
+      if (group.length > 0 && units.size === 1 && unit) for (const a of group) placement.set(a, unit);
+      group = [];
+    };
+    for (const f of ordered) {
+      if (placement.has(f.address)) group.push(f.address);
+      else flush();
     }
+    flush();
   }
   return placement;
 }
