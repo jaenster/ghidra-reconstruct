@@ -3521,6 +3521,11 @@ function transformDecompiledCode(
     if (enclosing?.compareSites) {
       perPluginOptions['bool-select-form'] = { compareSites: enclosing.compareSites, decompile: decompiled };
     }
+    // Two stores of one lvalue whose constant the original stores from the register of a
+    // merged value become one store of a select (register-store-select.ts).
+    if (enclosing?.registerStores) {
+      perPluginOptions['register-store-select'] = { registerStores: enclosing.registerStores };
+    }
     // A temporary goes back into the argument list where the original evaluated the
     // arguments right of it first (nest-call.ts); without the facts nothing changes.
     if (callOrder) {
