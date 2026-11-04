@@ -3738,6 +3738,16 @@ function transformDecompiledCode(
 
     if (enclosing?.registerStores) {
       perPluginOptions['register-store-select'] = { registerStores: enclosing.registerStores };
+      // Zero stores to every member of *P that the original makes from one zeroed register
+      // are the inlined memset (pointee-clear-memset.ts).
+      perPluginOptions['pointee-clear-memset'] = {
+        registerStores: enclosing.registerStores,
+        structLayouts: context?.funcPtrArgCasts?.structLayouts,
+        aggregateSizes: context?.funcPtrArgCasts?.aggregateSizes,
+        typedefTargets: context?.funcPtrArgCasts?.typedefTargets,
+        onSite: (e: { pointer: string; type: string; members: number }) =>
+          console.warn(`[clear-memset] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.pointer} (${e.type}, ${e.members} members)`),
+      };
     }
     // A temporary goes back into the argument list where the original evaluated the
     // arguments right of it first (nest-call.ts); without the facts nothing changes.
