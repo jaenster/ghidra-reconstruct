@@ -3296,6 +3296,20 @@ function transformDecompiledCode(
           onRefusal: (reason: string) => console.warn(`[run-clear] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: left as printed: ${reason}`),
         };
       }
+      if (enclosing?.displacementTargets && enclosing.displacementTargets.length > 0) {
+        perPluginOptions['global-distance-index'] = {
+          displacements: enclosing.displacementTargets,
+          enclosingVarTypes,
+          aggregateSizes: context.funcPtrArgCasts.aggregateSizes,
+          structLayouts: context.funcPtrArgCasts.structLayouts,
+          globalAddresses: context.funcPtrArgCasts.globalAddresses,
+          globalSizes: context.funcPtrArgCasts.globalSizes,
+          globalTypes: context.funcPtrArgCasts.globalTypes,
+          globalNamespaces: context.funcPtrArgCasts.globalNamespaces,
+          onRewrite: (r: { value: number; from: string; to: string }) =>
+            console.warn(`[distance] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${r.from} -> ${r.to}`),
+        };
+      }
       if (context.funcPtrArgCasts.shiftedPointers && Object.keys(context.funcPtrArgCasts.shiftedPointers).length > 0) {
         perPluginOptions['adj-shifted-pointer'] = {
           shiftedPointers: context.funcPtrArgCasts.shiftedPointers,
