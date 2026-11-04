@@ -3789,6 +3789,10 @@ function transformDecompiledCode(
     }
     // A temporary goes back into the argument list where the original evaluated the
     // arguments right of it first (nest-call.ts); without the facts nothing changes.
+    perPluginOptions['in-place-operand'] = {
+      onSite: (e: { variable: string; operator: string; form: string }) =>
+        console.warn(`[in-place] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.variable} ${e.operator}= (${e.form})`),
+    };
     if (callOrder) {
       perPluginOptions['nest-call'] = {
         callOrder,

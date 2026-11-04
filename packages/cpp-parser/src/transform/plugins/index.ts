@@ -418,6 +418,11 @@ export {
 } from './builtins/shared-tail-join.js';
 
 export {
+  inPlaceOperandPlugin,
+  type InPlaceOperandOptions,
+} from './builtins/in-place-operand.js';
+
+export {
   guardCopySinkPlugin,
   type GuardCopySinkOptions,
 } from './builtins/guard-copy-sink.js';
@@ -863,6 +868,7 @@ import { rangeReadInlinePlugin } from './builtins/range-read-inline.js';
 import { guardCopySinkPlugin } from './builtins/guard-copy-sink.js';
 import { memberCopyAssignPlugin } from './builtins/member-copy-assign.js';
 import { sharedTailJoinPlugin } from './builtins/shared-tail-join.js';
+import { inPlaceOperandPlugin } from './builtins/in-place-operand.js';
 import { callResultDividePlugin } from './builtins/call-result-divide.js';
 import { paramLoadOrderPlugin } from './builtins/param-load-order.js';
 import { searchLoopExitPlugin } from './builtins/search-loop-exit.js';
@@ -1098,6 +1104,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   guardCopySinkPlugin,        // Matching: a copy of a value printed ahead of a guard on the value moves below it (priority 989.9)
   inlinedStrcpyPlugin,        // Matching: the byte loop VC8 expands strcpy into becomes the call (priority 989.9)
   accumulateSumPlugin,        // Matching: a sum of two single-use values accumulates into the first with += (priority 989.95)
+  inPlaceOperandPlugin,       // Matching: a value worked on once before its one use is worked on in place, x OP= e (priority 989.951)
   shortLocalWidenPlugin,      // Matching: a short local read only as an index is an int (priority 989.96)
   guardNullNestPlugin,        // Matching: a compound guard and a later null test of one return become one null-initialised test (priority 989.97)
   returnCopySplitPlugin,      // Matching: an else-if chain whose first arm falls into a constant return writes the return in that arm (priority 989.975)
