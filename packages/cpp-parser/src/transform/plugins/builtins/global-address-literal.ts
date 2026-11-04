@@ -115,8 +115,13 @@
  * member or element it starts, `((intptr_t)&member + n)` where none starts there.
  * A negated operand (`-0x7a0520 - (int)pbSrc`) is spelled `-(intptr_t)&name`,
  * and an address in no extent one byte below a global's start - the biased
- * source of a byte copy - `((intptr_t)&name - 1)`. String constants are not
- * taken: their rebuilt names can differ from the body's.
+ * source of a byte copy - `((intptr_t)&name - 1)`. A string constant is taken only
+ * under the label the body itself spells it with (its rebuilt name can differ from
+ * Ghidra's, and a distance between two copies is a wild address): the inlined strlen
+ * and copy of STRTABLE_GetTranslatedString read `-0x730520 - (int)pbSrc` and
+ * `pcSuffixEnd - 0x73051f` beside `s__not_xlated_call_ken_w_00730520`, and become
+ * `-(intptr_t)&s__not_xlated_call_ken_w_00730520 - (int)pbSrc` and
+ * `pcSuffixEnd - ((intptr_t)&s__not_xlated_call_ken_w_00730520 - 1)`.
  * The type is the literal's own, so nothing around it changes. Code addresses,
  * sizes and flags outside the data blocks keep the withdrawal. See
  * `arithmeticAddress`.
@@ -1516,12 +1521,18 @@ function createGlobalAddressLiteralTransformer(
     // A string constant's name here is rebuilt from its text, and where that differs from
     // Ghidra's label (a leading blank: `s___not_xlated_...` against `s_-not_xlated_...`)
     // the body's own references name a second copy. A distance taken from one copy and
-    // applied to the other is the wild write this rule exists to remove.
-    if (owner.stringConstant) return null;
+    // applied to the other is the wild write this rule exists to remove. So a string is
+    // spelled only by the label the body itself names it with, and only when exactly one
+    // label the body spells carries its address.
+    const label = owner.stringConstant ? bodyStringLabels.get(owner.address) : undefined;
+    if (owner.stringConstant && !label) return null;
     const width = Type.typedef(/u/i.test(literal.suffix ?? '') ? 'uintptr_t' : 'intptr_t');
     let address: Expression;
     let rest: number;
-    if (owned.offset < 0) {
+    if (label) {
+      address = Expr.unary('&', Expr.identifier(label));
+      rest = owned.offset;
+    } else if (owned.offset < 0) {
       address = Expr.unary('&', owner.segments.length === 0
         ? Expr.identifier(owner.name)
         : Expr.qualifiedId([...owner.segments, owner.name]));
@@ -1820,8 +1831,32 @@ function createGlobalAddressLiteralTransformer(
   // visitor is bottom-up, so they are collected in one pass over the ORIGINAL
   // tree before the transform runs — before this pass has rewritten any of the
   // literals the scan itself resolves.
+  /**
+   * The string labels the body spells, by the address their `_<hex8>` suffix names, for a
+   * string constant's address in arithmetic (`addressAsInteger`). `null` where two labels
+   * name one address. The suffix is Ghidra's label convention and the declaration
+   * closure's: the label it defines for a body's `s_<text>_<hex>` is the string at <hex>,
+   * so the same name in an arithmetic form is the same object as the body's other uses.
+   */
+  const bodyStringLabels = new Map<number, string | null>();
+  function scanStringLabels(unit: ASTNode): void {
+    bodyStringLabels.clear();
+    for (const node of traverseAST(unit)) {
+      if (node.kind !== NodeKind.Identifier) continue;
+      const name = (node as Identifier).name;
+      const m = /^s_\w*_([0-9a-f]{8})$/.exec(name);
+      if (!m) continue;
+      const address = Number.parseInt(m[1]!, 16);
+      if (!candidates.some(c => c.stringConstant && c.address === address)) continue;
+      const prev = bodyStringLabels.get(address);
+      if (prev === undefined) bodyStringLabels.set(address, name);
+      else if (prev !== name) bodyStringLabels.set(address, null);
+    }
+  }
+
   return (unit: ASTNode) => {
     scanOrigins(unit);
+    scanStringLabels(unit);
     return transform(unit);
   };
 }

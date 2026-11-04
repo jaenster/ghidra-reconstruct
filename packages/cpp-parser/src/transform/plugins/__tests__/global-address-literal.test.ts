@@ -1504,6 +1504,34 @@ describe('globalAddressLiteralPlugin', () => {
       assert.ok(run(`void f() { n = (-0x730520 - p); }`, BIAS).includes('-0x730520'));
     });
 
+    // STRTABLE_GetTranslatedString @00524ac0: the inlined strlen and dword copy of the
+    // "not xlated" suffix fold the string's address into the size and the copy count,
+    // beside the body's own reference to the string under Ghidra's label.
+    const XLATED: GlobalAddressLiteralOptions = {
+      ...MCP,
+      globalAddresses: { ...MCP.globalAddresses, s___not_xlated_call_ken_w_00730520: 0x730520 },
+      globalSizes: { ...MCP.globalSizes, s___not_xlated_call_ken_w_00730520: 24 },
+      stringConstantNames: ['s___not_xlated_call_ken_w_00730520'],
+    };
+
+    it('spells a string constant by the label the body names it with', () => {
+      const out = run(`void f(char* pcSuffixEnd) {
+        pcFormatted = s__not_xlated_call_ken_w_00730520;
+        n = (size_t)(pcVar1 + (int)(pbKeyCopy + (-0x730520 - (int)pbSrc)) + 1);
+        c = (uint32_t)(pcSuffixEnd - 0x73051f) >> 2;
+        d = (int)pbKeyCopy + 0x730522;
+      }`, XLATED);
+      assert.ok(out.includes('(-(intptr_t)&s__not_xlated_call_ken_w_00730520 - (int)pbSrc)'), out);
+      assert.ok(out.includes('pcSuffixEnd - ((intptr_t)&s__not_xlated_call_ken_w_00730520 - 1)'), out);
+      assert.ok(out.includes('(int)pbKeyCopy + (intptr_t)&s__not_xlated_call_ken_w_00730520 + 2'), out);
+      assert.ok(!out.includes('s___not_xlated'), out);
+    });
+
+    it('leaves a string constant when two body labels carry its address', () => {
+      const out = run(`void f() { a = s__not_xlated_00730520; b = s_x_00730520; n = (-0x730520 - p); }`, XLATED);
+      assert.ok(out.includes('-0x730520'), out);
+    });
+
     it('keeps the pointer-cast spelling for an addend under a pointer cast', () => {
       const out = run(`void f() { y = *(int*)(i * 8 + 0x77bdcc); }`, MCP);
       assert.ok(out.includes('(char*)&gbLanGameListEntryNamePadding2 + 4'), out);
