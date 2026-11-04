@@ -36,17 +36,21 @@
  *   - the original (`branchLayout.pushes`): on each such store's line a PUSH of the
  *     constant (any value for an address), in a straight run of the arm's code that jumps
  *     to one offset T or falls into it, at most one arm falling, and T printed on a line
- *     of J.
+ *     of J, or T starting J's code: the tail's first PUSHes carry no token (`push esi`
+ *     before the call), so J's first printed offset follows T with nothing printed between
+ *     (OBJECT_ClientFn_TimedSpecial1Or2_23to33s 004bd900);
+ *   - J's call statement names the locals only in its arguments (`v = Call(.., v)` keeps v).
  * Without the facts nothing changes.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
-  ASTNode, AssignExpr, CallExpr, CompoundStmt, CStyleCastExpr, DeclStmt, Expression, ExprStmt,
+  ASTNode, AssignExpr, BinaryExpr, CallExpr, CompoundStmt, CStyleCastExpr, DeclStmt, Expression, ExprStmt,
   FunctionDecl, Identifier, IfStmt, ParameterDecl, ParenExpr, QualifiedId, Statement, UnaryExpr, VariableDecl,
 } from '../../../ast/nodes.js';
 import { traverseAST, getChildren } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, cloneNode, type Transformer } from '../../transformer.js';
+import { Expr, Stmt } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { calleeName } from './call-arg-cast.js';
 import { isHaltStmt, isExitStmt } from './assert-order.js';
@@ -282,6 +286,19 @@ function markCalls(copy: Statement, sites: { facts: Map<string, CallSite>; first
 
 const globalSets = new WeakMap<readonly string[], Set<string>>();
 
+/**
+ * Whether T starts the code J prints though no line prints T itself: the shared tail's
+ * first instructions are argument PUSHes no token carries (`push esi` before the call).
+ * J's first printed offset follows T, and no line of the function prints an offset between.
+ */
+function tailStart(target: number, joinOffsets: number[], lines: ReadonlyMap<number, readonly number[]>): boolean {
+  if (joinOffsets.length === 0) return false;
+  const first = Math.min(...joinOffsets);
+  if (first <= target) return false;
+  for (const offs of lines.values()) for (const o of offs) if (o >= target && o < first) return false;
+  return true;
+}
+
 function rewriteFunction(fn: FunctionDecl, opts: ArmConstantCallOptions): FunctionDecl | undefined {
   const ev = opts.branchLayout;
   if (!fn.body || !ev?.pushes || ev.pushes.length === 0) return undefined;
@@ -361,7 +378,9 @@ function rewriteFunction(fn: FunctionDecl, opts: ArmConstantCallOptions): Functi
         const call = topCall(st);
         if (call) {
           const names = call.arguments.map(a => uncast(a)).filter(a => a.kind === NodeKind.Identifier)
-            .map(a => (a as Identifier).name).filter(n => local(n) && falling.every(arm => lastStore(arm, n)));
+            .map(a => (a as Identifier).name).filter(n => local(n) && falling.every(arm => lastStore(arm, n)))
+            // Named outside the arguments too (`v = Call(.., v)`), the local is no constant there.
+            .filter(n => references(st, n).size === within(references(st, n), call.arguments));
           if (names.length > 0) { end = k; taken = [...new Set(names)]; break; }
         }
       }
@@ -421,7 +440,8 @@ function rewriteFunction(fn: FunctionDecl, opts: ArmConstantCallOptions): Functi
         armPushes.set(arm, run);
       }
       if (!ok || target === null || falls > 1) continue;
-      const printed = join.flatMap(st => linesOf(st)).some(l => (ev.lines.get(l) ?? []).includes(target!));
+      const joinOffsets = join.flatMap(st => linesOf(st)).flatMap(l => [...(ev.lines.get(l) ?? [])]);
+      const printed = joinOffsets.includes(target!) || tailStart(target, joinOffsets, ev.lines);
       if (!printed) continue;
       const sites = opts.callOrder ? joinSites(join, opts.callOrder) : null;
 
@@ -469,8 +489,109 @@ function rewriteFunction(fn: FunctionDecl, opts: ArmConstantCallOptions): Functi
     for (const k of getChildren(n)) visitAll(k);
   };
   visitAll(body);
+  changed += splitTruthArguments(body, ev, opts);
   if (!changed) return undefined;
   return updateNode(fn, { body } as Partial<FunctionDecl>);
+}
+
+const COMPARE_INVERSE: Record<string, string> = { '==': '!=', '!=': '==', '<': '>=', '>=': '<', '>': '<=', '<=': '>' };
+
+/** `a OP b` for a comparison OP, or `!x`, under casts and parentheses. */
+function truthValue(e: Expression): Expression | null {
+  const u = uncast(e);
+  if (u.kind === NodeKind.BinaryExpr && COMPARE_INVERSE[(u as BinaryExpr).operator]) return u;
+  if (u.kind === NodeKind.UnaryExpr && (u as UnaryExpr).operator === '!') return u;
+  return null;
+}
+
+/** The condition that holds where `t` is false. */
+function negated(t: Expression): Expression {
+  if (t.kind === NodeKind.UnaryExpr) return (t as UnaryExpr).operand;
+  const b = t as BinaryExpr;
+  return { ...b, operator: COMPARE_INVERSE[b.operator] } as BinaryExpr;
+}
+
+const sideEffectFree = (n: ASTNode): boolean => {
+  for (const m of traverseAST(n)) {
+    if (m.kind === NodeKind.CallExpr || m.kind === NodeKind.AssignExpr || m.kind === NodeKind.PostfixExpr
+      || m.kind === NodeKind.NewExpr || m.kind === NodeKind.DeleteExpr) return false;
+    if (m.kind === NodeKind.UnaryExpr && ((m as UnaryExpr).operator === '++' || (m as UnaryExpr).operator === '--')) return false;
+  }
+  return true;
+};
+
+/**
+ * A call taking a comparison's truth value, `f(a, (uint32_t)(n != 0xffff))`, which the
+ * original pushes as a literal per way and jumps to the one call (`cmp ax, 0xffff; jne;
+ * push 0; jmp T; push 1` and T the call): VC8 merged the tails of a call written in each
+ * arm of an if (SendPlayerPartyInfo 005a5cb0, PlayCutScene 00509b60). Written back as
+ *
+ *     if (n == 0xffff) { f(a, 0); } else { f(a, 1); }
+ *
+ * the arm laid out first (the push that jumps) as the then-arm. Made when the statement is
+ * `f(..)` or `x = f(..)` (x a plain name), exactly one argument is a comparison or `!x`
+ * (casts aside) and the other arguments and the comparison call and write nothing; and on
+ * the statement's lines the original PUSHes 0 and 1, one jumping and one falling into the
+ * same offset. Value-preserving: the comparison is 0 or 1, and any integer conversion of the
+ * argument keeps it; nothing the arguments read is written by evaluating them, so the
+ * comparison may be made before the other arguments are.
+ */
+function splitTruthArguments(body: CompoundStmt, ev: BranchLayoutEvidence, opts: ArmConstantCallOptions): number {
+  let n = 0;
+  const visit = (node: ASTNode): void => {
+    if (node.kind !== NodeKind.CompoundStmt) { for (const k of getChildren(node)) visit(k); return; }
+    const block = node as CompoundStmt;
+    for (let i = 0; i < block.statements.length; i++) {
+      const s = block.statements[i];
+      for (const k of getChildren(s)) visit(k);
+      if (s.kind !== NodeKind.ExprStmt) continue;
+      const e = unwrap((s as ExprStmt).expression);
+      let call: Expression = e;
+      if (e.kind === NodeKind.AssignExpr) {
+        if ((e as AssignExpr).operator !== '=' || unwrap((e as AssignExpr).left).kind !== NodeKind.Identifier) continue;
+        call = (e as AssignExpr).right;
+      }
+      call = uncast(call);
+      if (call.kind !== NodeKind.CallExpr) continue;
+      const c = call as CallExpr;
+      const at = c.arguments.map(truthValue);
+      const which = at.flatMap((t, k) => t ? [k] : []);
+      if (which.length !== 1) continue;
+      const k = which[0];
+      if (!c.arguments.every(sideEffectFree) || !sideEffectFree(c.callee)) continue;
+      // The PUSHes lie inside the statement's code: between the first and last offsets its
+      // lines print, with no other line printing code there (no token carries them).
+      const own = new Set(linesOf(s));
+      const offs = [...own].flatMap(l => [...(ev.lines.get(l) ?? [])]);
+      if (offs.length < 2) continue;
+      const lo = Math.min(...offs), hi = Math.max(...offs);
+      let foreign = false;
+      for (const [l, os] of ev.lines) if (!own.has(l) && os.some(o => o > lo && o < hi)) foreign = true;
+      if (foreign) continue;
+      const pushes = (ev.pushes ?? []).filter(p => p.at > lo && p.at < hi && (p.value === 0 || p.value === 1));
+      if (pushes.length !== 2 || pushes[0].value === pushes[1].value) continue;
+      const [first, second] = pushes[0].at < pushes[1].at ? [pushes[0], pushes[1]] : [pushes[1], pushes[0]];
+      if (!first.jumps || second.jumps || first.reach === undefined || first.reach !== second.reach || !offs.includes(first.reach)) continue;
+      const truth = at[k]!;
+      const copy = (v: number): Statement => {
+        const st = cloneNode(s) as ExprStmt;
+        const ce = unwrap(st.expression);
+        const cc = uncast(ce.kind === NodeKind.AssignExpr ? (ce as AssignExpr).right : ce) as CallExpr;
+        cc.arguments[k] = Expr.intLiteral(v);
+        st.leadingTrivia = [];
+        return st;
+      };
+      const cond = cloneNode(first.value === 1 ? truth : negated(truth)) as Expression;
+      const iff = Stmt.if_(cond, Stmt.compound([copy(first.value)]), Stmt.compound([copy(second.value)]));
+      iff.location = s.location;
+      iff.leadingTrivia = s.leadingTrivia;
+      block.statements[i] = iff;
+      n++;
+      opts.onSite?.({ line: placedLine(s) ?? 0, locals: [], arms: 2, statements: 1 });
+    }
+  };
+  visit(body);
+  return n;
 }
 
 function createArmConstantCallTransformer(options: ArmConstantCallOptions = {}): Transformer {

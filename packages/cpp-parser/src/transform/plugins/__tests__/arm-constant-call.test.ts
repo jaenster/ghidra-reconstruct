@@ -56,6 +56,55 @@ describe('arm-constant-call', () => {
     assert.ok(!r.out.includes('int nAlign;'), r.out);
   });
 
+  // OBJECT_ClientFn_TimedSpecial1Or2_23to33s 004bd900: the shared tail starts with `push esi`,
+  // which no line prints; J's first printed offset follows it with nothing printed between.
+  it('takes a shared tail whose first PUSH no line prints', () => {
+    const ev = layout();
+    const lines = new Map(ev.lines);
+    lines.set(10, [0x124, 0x125]);
+    const r = run(SRC, { ...ev, lines });
+    assert.deepStrictEqual(r.sites, ['nAlign:2:2']);
+    lines.set(9, [0x122]);
+    assert.deepStrictEqual(run(SRC, { ...ev, lines }).sites, []);
+  });
+
+  // AI.cpp 2026-11-04: `bWalkResult = Walk(.., bWalkResult);` assigns the local it passes.
+  it('leaves a call statement that assigns the local it takes', () => {
+    const src = SRC.map(l => l.replace('  Set(out, v, nAlign);', '  nAlign = Set(out, v, nAlign);'));
+    assert.deepStrictEqual(run(src, layout()).sites, []);
+  });
+
+  // SendPlayerPartyInfo 005a5cb0: `cmp ax, 0xffff; jne; push 0; jmp T; push 1; T: call`.
+  describe('a truth value argument pushed as a literal per way', () => {
+    const TRUTH = [
+      'void f(Unit *a, Unit *b, short n) {',            // 1
+      '  SetRel(a, b, (uint32_t)(n != 0xffff));',       // 2
+      '  Done();',                                      // 3
+      '}',
+    ];
+    const ev = (first: number, second: number, jumps = true): BranchLayoutEvidence => ({
+      lines: new Map([[2, [0x10, 0x1a]], [3, [0x30]]]),
+      ifs: new Map(),
+      pushes: [
+        { at: 0x14, value: first, reach: 0x1a, jumps, run: 1 },
+        { at: 0x18, value: second, reach: 0x1a, jumps: false, run: 1 },
+      ],
+    });
+    it('writes the call per way, the jumping push first', () => {
+      const r = run(TRUTH, ev(0, 1));
+      assert.ok(r.out.includes('if (n == 0xffff) { SetRel(a, b, 0); } else { SetRel(a, b, 1); } Done();'), r.out);
+      const s = run(TRUTH, ev(1, 0));
+      assert.ok(s.out.includes('if (n != 0xffff) { SetRel(a, b, 1); } else { SetRel(a, b, 0); }'), s.out);
+    });
+    it('leaves it without the literal pushes, or when no push jumps', () => {
+      assert.deepStrictEqual(run(TRUTH, { ...ev(0, 1), pushes: [{ at: 0x14, value: 0, reach: 0x1a, jumps: true, run: 1 }] }).sites, []);
+      assert.deepStrictEqual(run(TRUTH, ev(0, 1, false)).sites, []);
+    });
+    it('leaves it when another argument calls', () => {
+      assert.deepStrictEqual(run(TRUTH.map(l => l.replace('SetRel(a, b,', 'SetRel(a, Get(b),')), ev(0, 1)).sites, []);
+    });
+  });
+
   it('changes nothing without the push facts', () => {
     assert.deepStrictEqual(run(SRC, { ...layout(), pushes: undefined }).sites, []);
     assert.deepStrictEqual(run(SRC, null).sites, []);
