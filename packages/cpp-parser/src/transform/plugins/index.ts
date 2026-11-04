@@ -482,6 +482,14 @@ export {
 } from './builtins/record-null-fold.js';
 
 export {
+  applyVc8Forms,
+  parseVc8Form,
+  type Vc8Form,
+  type Vc8FormSite,
+  type Vc8FormOptions,
+} from './builtins/vc8-form.js';
+
+export {
   fieldPointerFoldPlugin,
   type FieldPointerFoldOptions,
 } from './builtins/field-pointer-fold.js';

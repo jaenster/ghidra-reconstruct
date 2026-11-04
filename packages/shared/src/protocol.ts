@@ -1203,6 +1203,7 @@ export const TAG_TYPES = {
   VARARGS: 'varargs',
   PURE: 'pure',
   LEAF: 'leaf',
+  VC8FORM: 'vc8form',     // data: "<form>;ev=<10 hex>;bh=<size>-<8 hex>;dh=<8 hex>" (reconstruct codegen/vc8form-spec.ts)
 } as const;
 
 export type StandardTagType = typeof TAG_TYPES[keyof typeof TAG_TYPES];

@@ -28,6 +28,7 @@ import {
 import type { TranslationUnit, FunctionDecl, Identifier, ASTNode } from './ast/nodes.js';
 import { NodeKind } from './ast/kinds.js';
 import { traverseAST } from './ast/visitor.js';
+import { applyVc8Forms, type Vc8FormOptions } from './transform/plugins/builtins/vc8-form.js';
 
 // ============================================
 // GHIDRA PREPROCESSING
@@ -170,6 +171,12 @@ export interface TransformGhidraOptions {
 
   /** Plugin-specific options when using the registry */
   pluginOptions?: PipelineOptions;
+
+  /**
+   * The function's recorded VC8 source forms (`vc8form` tags), applied last: after the
+   * plugins and the renames, to the body as it is emitted.
+   */
+  vc8Forms?: Vc8FormOptions;
 }
 
 /**
@@ -293,6 +300,9 @@ export function transformGhidraCode(
       for (const [original, renamed] of Object.entries(renames)) {
         renamedIdentifiers.push({ original, renamed });
       }
+    }
+    if (options.vc8Forms && options.vc8Forms.forms.length > 0) {
+      transformedAst = applyVc8Forms(transformedAst, options.vc8Forms.forms, options.vc8Forms.onSite);
     }
   } else {
     // Legacy transform chain (for backwards compatibility)

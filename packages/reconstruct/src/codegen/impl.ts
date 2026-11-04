@@ -42,6 +42,7 @@ import { displacementTargets, foldedAddressFacts, type FoldedAddressFact } from 
 import { immediateConstantFacts, dataAtAddress, type ImmediateConstantFact } from './immediate-constant-spec.js';
 import { compareFormSpec, type CompareFormSpec } from './compare-form-spec.js';
 import { repStringOps } from './rep-string-spec.js';
+import { vc8FormSpec, type Vc8FormSpec } from './vc8form-spec.js';
 import type { RepStringOp, Expression, NullGetterTable } from '@ghidra-mcp/cpp-parser';
 import { ROOT_CLASS_SCOPE, namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 import { cleanFunctionComment, declaredParameters, externEntryDeclaration, guardedFuncDefTypedef, emittedFunctionName, returnSigType, sigType } from './header.js';
@@ -1774,6 +1775,8 @@ export function generateFunctionImplementation(
           // A text patch anchors on the comparisons as Ghidra printed them.
           compareForm: override?.action === 'patch' ? undefined : compareFormSpec(func) ?? undefined,
           repStringOps: override?.action === 'patch' ? undefined : repStringOps(func),
+          // A text patch anchors on the body as Ghidra printed it; a form tag on the body as emitted.
+          vc8Forms: override?.action === 'patch' ? undefined : vc8FormSpec(func),
         },
       );
       body = func.name ? rewriteQuestUnionMembers(transformed.code, func.name, context?.sourceFileName, [...(func.parameters ?? []), ...(func.localVariables ?? [])]) : transformed.code;
@@ -2832,6 +2835,8 @@ function transformDecompiledCode(
     compareForm?: CompareFormSpec;
     /** The REP STOS/MOVS instructions with a constant count (codegen/rep-string-spec.ts). */
     repStringOps?: RepStringOp[];
+    /** The source forms the function's `vc8form` tags record (codegen/vc8form-spec.ts). */
+    vc8Forms?: Vc8FormSpec;
   },
 ): TransformDecompiledResult {
   try {
@@ -3971,7 +3976,16 @@ function transformDecompiledCode(
       };
     }
 
+    const vc8 = enclosing?.vc8Forms;
+    for (const t of vc8?.stale ?? []) console.warn(`[vc8form] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: stale ${t.tag} (${t.why})`);
     const result = transformGhidraCode(wrapped, {
+      vc8Forms: vc8 && vc8.forms.length > 0 ? {
+        forms: vc8.forms,
+        onSite: s => {
+          if (!s.applied) console.warn(`[vc8form] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: refused ${s.tag} (${s.why})`);
+          else if (process.env.GHIDRA_VC8FORM_REPORT) console.warn(`[vc8form] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: applied ${s.tag}`);
+        },
+      } : undefined,
       preset: options.transformPreset === 'custom' ? 'quick' : options.transformPreset,
       tolerateErrors: true,
       usePluginRegistry: true,  // Enable all registered plugins including fourcc
