@@ -257,6 +257,9 @@ const COMPLEMENT_FLOOR = 0xff000000;
 
 const WORD = 0x100000000;
 
+/** The mask of Storm's export-table sequence stamp, `~(uint32_t)this & 0x0fffffff`. */
+const SEQUENCE_MASK = 0x0fffffff;
+
 /**
  * The floor of last resort: a Win32 process reserves the first 64KB and never
  * maps an image there, so nothing real can live below it.
@@ -1601,6 +1604,84 @@ function createGlobalAddressLiteralTransformer(
     return { ...sum, left: left ?? sum.left, right: right ?? sum.right };
   }
 
+  /** The layout of an aggregate spelled `spelling`, by Ghidra's name or the emitted one. */
+  type Layout = ReadonlyArray<{ name: string; offset: number; size: number; type: string; bitSize?: number }>;
+  let layoutsBySpelling: Map<string, Layout> | null = null;
+  const spellingKey = (s: string) => s.replace(/\s+/g, '').replace(/(^|[<,])::/g, '$1');
+  function layoutOf(spelling: string): Layout | undefined {
+    const exact = structLayouts[spelling];
+    if (exact) return exact;
+    if (!layoutsBySpelling) {
+      layoutsBySpelling = new Map();
+      for (const [name, layout] of Object.entries(structLayouts)) layoutsBySpelling.set(spellingKey(name), layout);
+    }
+    return layoutsBySpelling.get(spellingKey(spelling));
+  }
+
+  /**
+   * The image address of the object `expr` designates, and its type: a global by name, or a
+   * `.member` of one, offset by Ghidra's layout. Null where any step is not known exactly:
+   * an unknown type, a union, an array, a bitfield, a member the layout does not name once,
+   * `->`, a subscript.
+   */
+  function objectAddress(expr: Expression): { address: number; spelling: string | undefined } | null {
+    switch (expr.kind) {
+      case NodeKind.ParenExpr:
+        return objectAddress((expr as ParenExpr).expression);
+      case NodeKind.Identifier:
+      case NodeKind.QualifiedId: {
+        const tail = expr.kind === NodeKind.Identifier ? expr as Identifier : (expr as QualifiedId).name;
+        if (tail.kind !== NodeKind.Identifier) return null;
+        const global = byName.get((tail as Identifier).name);
+        return global ? { address: global.address, spelling: globalTypes[global.name] } : null;
+      }
+      case NodeKind.MemberExpr: {
+        const access = expr as MemberExpr;
+        if (access.isArrow || access.member.kind !== NodeKind.Identifier) return null;
+        const owner = objectAddress(access.object);
+        if (!owner || owner.spelling === undefined) return null;
+        const shape = typeShape(owner.spelling);
+        if (shape && (shape.dims.length > 0 || unions.has(shape.base))) return null;
+        const layout = layoutOf(owner.spelling) ?? (shape ? layoutOf(shape.base) : undefined);
+        if (!layout) return null;
+        const name = (access.member as Identifier).name;
+        const fields = layout.filter(f => f.name === name);
+        if (fields.length !== 1 || fields[0]!.bitSize !== undefined) return null;
+        return { address: owner.address + fields[0]!.offset, spelling: fields[0]!.type };
+      }
+      default:
+        return null;
+    }
+  }
+
+  /**
+   * `G.nSequence = 0xf71733f` -> `G.nSequence = ~(uint32_t)(uintptr_t)&G & 0xfffffff`.
+   *
+   * Storm's export tables stamp a sequence seed from their own address,
+   * `nSequence = ~(uint32_t)this & 0x0fffffff` (TSExportTableSimple's constructor). Where the
+   * constructor is inlined into a global's static initializer, Ghidra folds `this` to the
+   * global's image address and the whole stamp into one constant: the 1.14d address, wrong
+   * once the object is relinked. The literal is taken only when it EQUALS the stamp of the
+   * object the store addresses - the member's receiver, located through Ghidra's layout - and
+   * is spelled against that receiver, the way the template members spell it.
+   */
+  function sequenceStamp(assign: AssignExpr): AssignExpr | null {
+    if (assign.left.kind !== NodeKind.MemberExpr) return null;
+    const target = assign.left as MemberExpr;
+    if (target.isArrow) return null;
+    if (produced.has(assign.right)) return null;
+    const literal = literalBehind(assign.right);
+    if (!literal) return null;
+    const located = objectAddress(target.object);
+    if (!located) return null;
+    const stamp = (~located.address & SEQUENCE_MASK) >>> 0;
+    if (literal.value !== BigInt(stamp)) return null;
+    const self = Expr.cast(Type.typedef('uint32_t'),
+      Expr.cast(Type.typedef('uintptr_t'), Expr.unary('&', target.object)));
+    const form = Expr.binary(Expr.unary('~', self), '&', Expr.intLiteral(SEQUENCE_MASK, 16));
+    return { ...assign, right: replacing(assign.right, form) as Expression };
+  }
+
   const transform = createTransformer({
     // Bottom-up: a literal is visited before the expression that contains it.
     visitNode(node: ASTNode) {
@@ -1610,6 +1691,7 @@ function createGlobalAddressLiteralTransformer(
       // kind arrives.
       if (node.kind === NodeKind.AssignExpr) {
         const assign = node as AssignExpr;
+        if (assign.operator === '=') return sequenceStamp(assign) ?? undefined;
         if (!COMPOUND_ASSIGN_OPS.has(assign.operator)) return undefined;
         return withOperandsRestored(assign);
       }

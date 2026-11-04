@@ -1541,5 +1541,61 @@ describe('globalAddressLiteralPlugin', () => {
       assert.ok(/nInitDescOffset = \(?\(intptr_t\)&gaChargeDescTable(\[12\]| \+ 12)\)? - \(int\)pnStatData/.test(out), out);
     });
   });
+  describe('the export-table sequence stamp Ghidra folds into one constant', () => {
+    // StaticInit_gCelCmpCacheHandler 006cafc0: TSExportTableSimple's constructor inlined,
+    // `nSequence = ~(uint32_t)this & 0x0fffffff` with `this` = &gCelCmpCacheHandler (008e8cc0).
+    const CELCMP: GlobalAddressLiteralOptions = {
+      globalAddresses: { gCelCmpCacheHandler: 0x8e8cc0 },
+      globalSizes: { gCelCmpCacheHandler: 104 },
+      globalTypes: { gCelCmpCacheHandler: 'TSExportTableSync<::CELLIST, HCELLIST__*, HLOCKEDCELLIST__*, CCritSect, 0>' },
+      structLayouts: {
+        'TSExportTableSync<CELLIST,HCELLIST__*,HLOCKEDCELLIST__*,CCritSect,0>': [
+          { name: 'super_TSExportTableSimple', offset: 0, size: 80, type: 'TSExportTableSimple<CELLIST,HCELLIST__*,0>' },
+          { name: 'tSync', offset: 80, size: 24, type: 'CCritSect' },
+        ],
+        'TSExportTableSimple<CELLIST,HCELLIST__*,0>': [
+          { name: 'super_TSHashTableReuse', offset: 0, size: 68, type: 'TSHashTableReuse<CELLIST,HASHKEY_NONE,0>' },
+          { name: 'tKey', offset: 68, size: 1, type: 'HASHKEY_NONE' },
+          { name: 'nSequence', offset: 72, size: 4, type: 'uint32_t' },
+          { name: 'bWrapped', offset: 76, size: 4, type: 'int32_t' },
+        ],
+      },
+    };
+
+    it('spells the stamp against the object the store addresses', () => {
+      const out = run(`void f() { gCelCmpCacheHandler.super_TSExportTableSimple.nSequence = 0xf71733f; }`, CELCMP);
+      assert.ok(out.includes(
+        'gCelCmpCacheHandler.super_TSExportTableSimple.nSequence = ~(uint32_t)(uintptr_t)&gCelCmpCacheHandler.super_TSExportTableSimple & 0xfffffff;'), out);
+      assert.ok(!out.includes('0xf71733f'), out);
+    });
+
+    it('takes a store straight into the global', () => {
+      const out = run(`void f() { gCelCmpCacheHandler.nSequence = 0xf71733f; }`, CELCMP);
+      assert.ok(out.includes('gCelCmpCacheHandler.nSequence = ~(uint32_t)(uintptr_t)&gCelCmpCacheHandler & 0xfffffff;'), out);
+    });
+
+    it('LEAVES a constant that is not the stamp of the addressed object', () => {
+      // One off, and the stamp of the object 8 bytes further on.
+      for (const v of ['0xf717340', '0xf717337']) {
+        const out = run(`void f() { gCelCmpCacheHandler.super_TSExportTableSimple.nSequence = ${v}; }`, CELCMP);
+        assert.ok(out.includes(v), out);
+      }
+    });
+
+    it('LEAVES the stamp where the receiver is not located exactly', () => {
+      // A member the layout does not carry, a pointer access, and a type with no layout.
+      const missing = run(`void f() { gCelCmpCacheHandler.super_Other.nSequence = 0xf71733f; }`, CELCMP);
+      assert.ok(missing.includes('0xf71733f'), missing);
+      const arrow = run(`void f() { pTable->nSequence = 0xf71733f; }`, CELCMP);
+      assert.ok(arrow.includes('0xf71733f'), arrow);
+      const untyped = run(`void f() { gCelCmpCacheHandler.tSync.nSequence = 0xf71733f; }`, CELCMP);
+      assert.ok(untyped.includes('0xf71733f'), untyped);
+    });
+
+    it('LEAVES a compound assignment of the same value', () => {
+      const out = run(`void f() { gCelCmpCacheHandler.nSequence |= 0xf71733f; }`, CELCMP);
+      assert.ok(out.includes('0xf71733f'), out);
+    });
+  });
 });
 
