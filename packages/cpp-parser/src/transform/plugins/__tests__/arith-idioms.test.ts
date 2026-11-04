@@ -147,6 +147,12 @@ describe('arith-idioms', () => {
       assert.strictEqual(run('x = a + (a >> 0x1f & 1) >> 1;', 'int a, int x'), 'x = a / 2;');
     });
 
+    it('folds the bias written first', () => {
+      // MISSILE_GetPoisonNovaRadius 004cc950.
+      assert.strictEqual(run('x = 0xc - ((int)((a >> 0x1f & 3U) + a) >> 2);', 'int a, int x'), 'x = 0xc - a / 4;');
+      assert.strictEqual(run('x = (int)((a >> 0x1f & 7U) + a) >> 2;', 'int a, int x'), 'x = (int)((a >> 0x1f & 7U) + a) >> 2;');
+    });
+
     it('folds a product operand', () => {
       assert.strictEqual(run('x = (int)(a * b + (a * b >> 0x1f & 0xffU)) >> 8;', 'int a, int b, int x'),
         'x = a * b / 256;');
@@ -174,6 +180,39 @@ describe('arith-idioms', () => {
       // Unknown type.
       assert.strictEqual(run('x = (int)(z + (z >> 0x1f & 3U)) >> 2;', 'int x'),
         'x = (int)(z + (z >> 0x1f & 3U)) >> 2;');
+    });
+  });
+
+  describe('abs', () => {
+    it('folds the sign-mask difference of a signed int', () => {
+      // INPUT_HandleMouseWheel 0044c400.
+      assert.strictEqual(run('if ((gnWidth ^ gnWidth >> 0x1f) - (gnWidth >> 0x1f) >= 0x78) { x = 1; }', 'int x'),
+        'if (abs(gnWidth) >= 0x78) { x = 1; }');
+      assert.strictEqual(run('x = (a ^ (int)a >> 0x1f) - ((int)a >> 0x1f);', 'int a, int x'), 'x = abs(a);');
+    });
+
+    it('refuses an unsigned result, mismatched operands and a 64-bit value', () => {
+      assert.strictEqual(run('x = (u ^ (int)u >> 0x1f) - ((int)u >> 0x1f);', 'uint32_t u, int x'),
+        'x = (u ^ (int)u >> 0x1f) - ((int)u >> 0x1f);');
+      assert.strictEqual(run('x = (a ^ b >> 0x1f) - (b >> 0x1f);', 'int a, int b, int x'), 'x = (a ^ b >> 0x1f) - (b >> 0x1f);');
+      assert.strictEqual(run('x = (q ^ q >> 0x1f) - (q >> 0x1f);', 'int64_t q, int x'), 'x = (q ^ q >> 0x1f) - (q >> 0x1f);');
+    });
+  });
+
+  describe('divisibility through an unsigned dividend', () => {
+    it('folds x != (uint32_t)x / N * N of an int', () => {
+      // ClientSideGameLoop 0044c790.
+      assert.strictEqual(run('if (gnWidth != (uint32_t)gnWidth / 0xd * 0xd) { x = 1; }', 'int x'),
+        'if ((uint32_t)gnWidth % 0xd != 0) { x = 1; }');
+    });
+
+    it('refuses another value, another multiplier and a narrow value', () => {
+      assert.strictEqual(run('if (a != (uint32_t)b / 0xd * 0xd) { x = 1; }', 'int a, int b, int x'),
+        'if (a != (uint32_t)b / 0xd * 0xd) { x = 1; }');
+      assert.strictEqual(run('if (a != (uint32_t)a / 0xd * 0xc) { x = 1; }', 'int a, int x'),
+        'if (a != (uint32_t)a / 0xd * 0xc) { x = 1; }');
+      assert.strictEqual(run('if (h != (uint32_t)h / 0xd * 0xd) { x = 1; }', 'int16_t h, int x'),
+        'if (h != (uint32_t)h / 0xd * 0xd) { x = 1; }');
     });
   });
 
@@ -495,6 +534,9 @@ describe('arith-idioms values', () => {
       { decls: 'int n, int r', body: 'r = n == n / 4 * 4;', values: 'S' },
       { decls: 'int n, int r', body: 'r = (int)(n + (n >> 0x1f & 3U)) >> 2;', values: 'S' },
       { decls: 'int n, int r', body: 'r = n + (n >> 0x1f & 1) >> 1;', values: 'S' },
+      { decls: 'int n, int r', body: 'r = (int)((n >> 0x1f & 3U) + n) >> 2;', values: 'S' },
+      { decls: 'int n, int r', body: 'r = (n ^ n >> 0x1f) - (n >> 0x1f);', values: 'S' },
+      { decls: 'int n, int r', body: 'r = n != (uint32_t)n / 0xd * 0xd;', values: 'S' },
       { decls: 'int n, int r', body: 'r = (int)(n + (n >> 0x1f & 0xffffU)) >> 0x10;', values: 'S' },
       { decls: 'uint32_t u, int r', body: 'r = (int)(u + ((int)u >> 0x1f & 7U)) >> 3;', values: 'U' },
       { decls: 'int16_t h, int r', body: 'r = h + (h >> 0x1f & 0xff) >> 8;', values: 'S' },
@@ -528,7 +570,7 @@ describe('arith-idioms values', () => {
       S: '0, 1, -1, 2, -2, 3, -3, 4, -4, 7, -7, 255, -255, 256, -256, 65535, -65535, 65536, -65536, 0x7fffffff, (int)0x80000000, (int)0x80000001, -123456789',
       Q: '0, 1, -1, 99, -99, 100, -100, 101, -101, 0x7fffffffLL, -0x80000000LL, 0xffffffffLL, 0x100000000LL, -0x100000001LL, 0x7fffffffffffffffLL, (int64_t)0x8000000000000000ULL, 1234567890123LL',
     };
-    let src = '#include <stdint.h>\n#include <stdio.h>\n#include <string.h>\n'
+    let src = '#include <stdint.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n'
       + 'static inline int64_t __alldiv(uint32_t lo1, uint32_t hi1, uint32_t lo2, int hi2) { return (int64_t)(lo1 | ((uint64_t)hi1 << 32)) / (int64_t)(lo2 | ((uint64_t)(uint32_t)hi2 << 32)); }\n'
       + 'static inline int64_t __allmul(uint32_t lo1, uint32_t hi1, uint32_t lo2, uint32_t hi2) { return (int64_t)((lo1 | ((uint64_t)hi1 << 32)) * (lo2 | ((uint64_t)hi2 << 32))); }\n'
       + 'static inline int64_t __allrem(uint32_t lo1, uint32_t hi1, uint32_t lo2, int hi2) { return (int64_t)(lo1 | ((uint64_t)hi1 << 32)) % (int64_t)(lo2 | ((uint64_t)(uint32_t)hi2 << 32)); }\n'

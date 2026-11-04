@@ -91,13 +91,13 @@ export interface ArithIdiomsOptions extends PluginOptions {
 
 export type ArithIdiom =
   | 'low-dword' | 'narrow-div' | 'magic-div' | 'cast-chain' | 'modulo' | 'divides' | 'pow2-div' | 'long-helper' | 'signed-div'
-  | 'setcc-select' | 'pow2-rem' | 'pow2-rem-test' | 'pow2-rem-mask' | 'u2f'
+  | 'setcc-select' | 'pow2-rem' | 'pow2-rem-test' | 'pow2-rem-mask' | 'u2f' | 'abs'
   | 'sdiv-widened' | 'low-word-div' | 'trunc-mul' | 'narrow-residue' | 'signed-div-use' | 'nonneg-div' | 'zext-local' | 'zext-operand';
 
 const stats: Record<ArithIdiom, number> = {
   'low-dword': 0, 'narrow-div': 0, 'magic-div': 0, 'cast-chain': 0, 'modulo': 0, 'divides': 0,
   'pow2-div': 0, 'long-helper': 0, 'signed-div': 0, 'setcc-select': 0, 'pow2-rem': 0, 'pow2-rem-test': 0,
-  'pow2-rem-mask': 0, 'u2f': 0,
+  'pow2-rem-mask': 0, 'u2f': 0, 'abs': 0,
   'sdiv-widened': 0, 'low-word-div': 0, 'trunc-mul': 0, 'narrow-residue': 0, 'signed-div-use': 0,
   'nonneg-div': 0, 'zext-local': 0, 'zext-operand': 0,
 };
@@ -535,12 +535,30 @@ function createFolder(shapeOf: ExprShape, o: ArithIdiomsOptions, resolve: Typede
     return rem;
   };
 
+  /**
+   * `x == (uint32_t)x / N * N`, x a 32-bit int: the compare converts x to unsigned, as the
+   * dividend is, so it is `(uint32_t)x % N == 0` (ClientSideGameLoop 0044c790).
+   */
+  const unsignedRemainderOf = (x: Expression, product: Expression): BinaryExpr | null => {
+    const p = unwrapParens(product);
+    if (p.kind !== NodeKind.BinaryExpr || (p as BinaryExpr).operator !== '*') return null;
+    const q = quotient((p as BinaryExpr).left as Expression);
+    if (!q || negatedLiteral((p as BinaryExpr).right as Expression) !== q.n) return null;
+    const c = castOf(unwrapParens(q.x));
+    if (!c || !sameType(c.type, U32) || !sameExpr(c.inner, x) || !isPure(x)) return null;
+    const xt = typeOf(x);
+    if (!xt || xt.bits !== 32) return null;
+    return Expr.binary(q.x, '%', q.div.right as Expression);
+  };
+
   const foldDivides = (e: Expression): Expression | null => {
     if (e.kind !== NodeKind.BinaryExpr) return null;
     const b = e as BinaryExpr;
     if (b.operator !== '==' && b.operator !== '!=') return null;
     const rem = remainderOf(b.left as Expression, b.right as Expression, 1n)
-      ?? remainderOf(b.right as Expression, b.left as Expression, 1n);
+      ?? remainderOf(b.right as Expression, b.left as Expression, 1n)
+      ?? unsignedRemainderOf(b.left as Expression, b.right as Expression)
+      ?? unsignedRemainderOf(b.right as Expression, b.left as Expression);
     if (!rem) return null;
     stats['divides']++;
     return updateNode(b, { left: rem, right: Expr.intLiteral(0) } as Partial<BinaryExpr>);
@@ -563,7 +581,14 @@ function createFolder(shapeOf: ExprShape, o: ArithIdiomsOptions, resolve: Typede
     }
     if (sum.kind !== NodeKind.BinaryExpr || (sum as BinaryExpr).operator !== '+') return null;
     const add = sum as BinaryExpr;
-    const bias = unwrapParens(add.right as Expression);
+    // The bias on either side: `(x >> 0x1f & 3U) + x` is the same sum (MISSILE_GetPoisonNovaRadius
+    // 004cc950, ConvertCoordToPerspectiveView 0045aff0).
+    const isBias = (v: Expression) => {
+      const u = unwrapParens(v);
+      return u.kind === NodeKind.BinaryExpr && (u as BinaryExpr).operator === '&';
+    };
+    const biasFirst = !isBias(add.right as Expression) && isBias(add.left as Expression);
+    const bias = unwrapParens((biasFirst ? add.left : add.right) as Expression);
     if (bias.kind !== NodeKind.BinaryExpr || (bias as BinaryExpr).operator !== '&') return null;
     const and = bias as BinaryExpr;
     if (intLiteral(and.right as Expression) !== (1n << n) - 1n) return null;
@@ -573,7 +598,7 @@ function createFolder(shapeOf: ExprShape, o: ArithIdiomsOptions, resolve: Typede
     const signSource = (sign as BinaryExpr).left as Expression;
 
     // x, the dividend, with an (int) on it or on its sign taken off.
-    const x = add.left as Expression;
+    const x = (biasFirst ? add.right : add.left) as Expression;
     const asInt = (v: Expression) => {
       const c = castOf(v);
       return c && sameType(c.type, S32) ? c.inner : v;
@@ -591,6 +616,41 @@ function createFolder(shapeOf: ExprShape, o: ArithIdiomsOptions, resolve: Typede
     stats['pow2-div']++;
     const dividend = promote(yt).signed ? y : castNode('int', y);
     return Expr.binary(dividend, '/', Expr.intLiteral(1n << n));
+  };
+
+  // --- abs ----------------------------------------------------------------
+
+  /**
+   * `(x ^ x >> 0x1f) - (x >> 0x1f)`, x a signed 32-bit int (or `(int)y` of a 32-bit y in the
+   * shifts), is `abs(x)`: VC8 inlines abs as `cdq; xor eax, edx; sub eax, edx`, the
+   * expression as printed compiles to `sar`/`xor`/`sub` (INPUT_HandleMouseWheel 0044c400).
+   * Both wrap INT_MIN to itself. The result's type must be int.
+   */
+  const foldAbs = (e: Expression): Expression | null => {
+    if (e.kind !== NodeKind.BinaryExpr || (e as BinaryExpr).operator !== '-') return null;
+    const sub = e as BinaryExpr;
+    const signOf = (v: Expression): Expression | null => {
+      const u = unwrapParens(v);
+      if (u.kind !== NodeKind.BinaryExpr || (u as BinaryExpr).operator !== '>>'
+          || intLiteral((u as BinaryExpr).right as Expression) !== 31n) return null;
+      return (u as BinaryExpr).left as Expression;
+    };
+    const s2 = signOf(sub.right as Expression);
+    const xor = unwrapParens(sub.left as Expression);
+    if (!s2 || xor.kind !== NodeKind.BinaryExpr || (xor as BinaryExpr).operator !== '^') return null;
+    const xb = xor as BinaryExpr;
+    const s1 = signOf(xb.right as Expression);
+    if (!s1 || !sameExpr(s1, s2)) return null;
+    const asInt = (v: Expression) => {
+      const c = castOf(unwrapParens(v));
+      return c && sameType(c.type, S32) ? c.inner : unwrapParens(v);
+    };
+    const y = asInt(xb.left as Expression);
+    if (!sameExpr(asInt(s1), y) || !isPure(y)) return null;
+    const yt = typeOf(y);
+    if (!yt || yt.bits !== 32 || !sameType(typeOf(s1), S32) || !sameType(typeOf(e), S32)) return null;
+    stats['abs']++;
+    return Expr.call(Expr.identifier('abs'), [yt.signed ? y : castNode('int', y)]);
   };
 
   // --- the 64-bit runtime helpers ----------------------------------------
@@ -1182,7 +1242,7 @@ function createFolder(shapeOf: ExprShape, o: ArithIdiomsOptions, resolve: Typede
 
   const RULES = [
     foldZextOperand, foldLongHelper, foldLowDword, foldLowWordDiv, foldNarrowDiv, foldMagic, foldSdivWidened, foldTruncMul, foldCastChain,
-    foldPow2Div, foldLowWordModulo, foldModulo, foldDivides, foldSetccSelect, foldNarrowResidue,
+    foldPow2Div, foldLowWordModulo, foldModulo, foldDivides, foldSetccSelect, foldNarrowResidue, foldAbs,
   ];
 
   /** One idiom at the root of e, its result folded again. */
