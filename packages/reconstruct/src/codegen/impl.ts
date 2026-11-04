@@ -1147,8 +1147,20 @@ export function generateImplementation(
       lines.push('');
       continue;
     }
+    // A template member defined in a namespaced unit (the COMDAT that unit's object
+    // compiled) is an explicit specialization: it is defined at root scope, which
+    // encloses the template, so the unit's namespace closes around it.
+    const rootMember = useNamespace && memberDefinitionScope(func) !== undefined;
+    if (rootMember) {
+      lines.push(`} // namespace ${namespace}`, '');
+      if (context) {
+        context._enclosingNamespace = undefined;
+        context._enclosingResolvedNamespace = undefined;
+      }
+    }
+    const definitionNamespace = useNamespace && !rootMember ? resolvedNamespace : undefined;
     try {
-      impl = generateFunctionImplementation(func, classInfo, options, context, isInternal, useNamespace ? resolvedNamespace : undefined, isInline);
+      impl = generateFunctionImplementation(func, classInfo, options, context, isInternal, definitionNamespace, isInline);
     } catch (err) {
       if (err instanceof RangeError && /call stack|stack size/i.test(String(err.message))) {
         parseErrorCount++;
@@ -1164,8 +1176,15 @@ export function generateImplementation(
     lines.push(impl);
     lines.push('');
     if (context?.externEntries?.has(fileStaticKey(func.address))) {
-      const entry = externEntryDefinition(func, useNamespace ? resolvedNamespace : undefined);
+      const entry = externEntryDefinition(func, definitionNamespace);
       if (entry) lines.push(entry, '');
+    }
+    if (rootMember) {
+      lines.push(`namespace ${namespace} {`, '');
+      if (context) {
+        context._enclosingNamespace = namespace;
+        context._enclosingResolvedNamespace = resolvedNamespace;
+      }
     }
   }
   // Close any trailing ifdef

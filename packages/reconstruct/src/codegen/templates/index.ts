@@ -41,8 +41,17 @@ export function memberDefinitionScope(func: { address?: string; namespace?: stri
   const resolved = namespaceResolution().of(func);
   if (!resolved.classScope) return undefined;
   const scope = resolved.segments[0];
-  return { prefix: templateRegistry()?.instantiation(scope) ? 'template<> ' : '', qualifier: `${scope}::` };
+  const registry = templateRegistry();
+  const specialization = registry?.instantiation(scope) ? 'template<> ' : '';
+  return { prefix: `${specialization}${registry?.isComdat(func.address) ? COMDAT_SPECIFIERS : ''}`, qualifier: `${scope}::` };
 }
+
+/**
+ * How a COMDAT member is declared and defined: `inline`, so its unit emits it as
+ * the COMDAT the original object carried, and never inlined, as the original
+ * kept the call. The tree's spelling; the VC8 build reads it as `__declspec(noinline)`.
+ */
+export const COMDAT_SPECIFIERS = '__attribute__((noinline)) inline ';
 
 /**
  * The data types the template header defines itself: each instantiation's

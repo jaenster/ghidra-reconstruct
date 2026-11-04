@@ -87,6 +87,14 @@ function model() {
       decompiled: `void Mod::File::Caller(${LIST} *pList)\n\n{\n  ${LIST}::Relink(pList);\n  return;\n}\n`,
     } as ExtractedFunction,
     {
+      // A second unit names the member too, so it stays in the instantiation's unit.
+      name: 'Other', address: '00401040', namespace: 'Mod::Other', returnType: 'void',
+      signature: `void Other(${LIST} * pList)`, localVariables: [], callingConvention: '__cdecl',
+      parameters: [{ name: 'pList', dataType: `${LIST} *`, size: 4, ordinal: 0, storage: 'Stack[0x4]:4' }],
+      size: 0x10, isThunk: false, isExternal: false, hasVarArgs: false, calledFunctions: ['Relink'],
+      decompiled: `void Mod::Other::Other(${LIST} *pList)\n\n{\n  ${LIST}::Relink(pList);\n  return;\n}\n`,
+    } as ExtractedFunction,
+    {
       // The GrowListArray shape in small: the head is read twice where the binary saved it once.
       name: 'Relink', address: MEMBER, namespace: LIST, returnType: 'void',
       signature: `void Relink(${LIST} * this)`,
@@ -102,6 +110,7 @@ function model() {
   ];
   const namespaces: ExtractedNamespace[] = [
     { name: 'File', fullPath: 'Mod::File', isClass: false, functionCount: 1 },
+    { name: 'Other', fullPath: 'Mod::Other', isClass: false, functionCount: 1 },
     { name: LIST, fullPath: LIST, isClass: false, functionCount: 1 },
   ];
   const strings: ExtractedString[] = [

@@ -79,7 +79,7 @@ import { generateCMakeLists, generateTopLevelCMake, generateTargetCMake, generat
 import { generateSourceMap } from './sourcemap.js';
 import { generateReadme } from './readme.js';
 import { abiConvention, conventionKeyword } from './calling-convention.js';
-import { organizeByNamespace, getFilePath, setModuleNames, setNamespaceCollisionTypes, normalizeQualifiedReference } from './namespace.js';
+import { organizeByNamespace, getFilePath, setModuleNames, setNamespaceCollisionTypes, normalizeQualifiedReference, normalizeUnitName } from './namespace.js';
 import { buildNamespaceResolution, namespaceResolution, renderNamespace } from './namespace-resolution.js';
 import { setInteriorLabelSymbols, resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, setDeclarationClosureDataContent, getDeclarationClosureReport, isUnreferenceableArtifact, isEmittableGlobal, isDataArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, generateDataHeader, dataHeaderCentralTypes, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, wasGlobalClaimed, findDuplicateLinkageNames, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, setInitializerAddressTable, setInitializerFunctionAddresses, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType, emittedNamespaceOf, getDeclaredNames, initializerAddressReferences, addInitializerAddressReferences, markUnnamedImportSlots, setInitializerEnumConstants } from './globals-header.js';
 import { normalizeDataAddress, stringDefinition } from './declaration-closure.js';
@@ -104,6 +104,7 @@ import { EXTERN_ENTRY_SUFFIX, fileStaticKey, readForeignSourcesAt, selectFileSta
 import { planInlinedCalls, planGuardedCalls, type InlinedCallPlan, type GuardedCallPlan } from './inlined-calls.js';
 import { nullGetterDefaults } from './null-getters.js';
 import { placeTemplateMembers } from './templates/placement.js';
+import { comdatMembers, isTemplateMember, memberUses } from './templates/users.js';
 import { baseModel } from './templates/bases.js';
 import { memberModel } from './templates/members.js';
 import { generateTemplateHeader } from './templates/emit-header.js';
@@ -430,16 +431,32 @@ export function unitStaticKeys(
   fileStaticFunctions: { has(k: string): boolean } | undefined,
   externEntries: { has(k: string): boolean } | undefined,
   fileLocalGlobals: ReadonlyArray<{ address: string; scope?: string }> | undefined,
+  memberKey?: (address: string) => string | undefined,
 ): string[] {
   return unitFunctions
-    .map(f => fileStaticKey(f.address))
-    .flatMap(k => [
-      ...(fileStaticFunctions?.has(k) ? [k] : []),
-      ...(externEntries?.has(k) ? [`${k}${EXTERN_ENTRY_SUFFIX}`] : []),
-    ])
+    .flatMap(f => {
+      const k = fileStaticKey(f.address);
+      const member = memberKey?.(f.address);
+      return [
+        ...(fileStaticFunctions?.has(k) ? [k] : []),
+        ...(externEntries?.has(k) ? [`${k}${EXTERN_ENTRY_SUFFIX}`] : []),
+        ...(member ? [member] : []),
+      ];
+    })
     // A homed global (external linkage, defined here) is keyed apart from a static.
     .concat((fileLocalGlobals ?? []).map(g => g.scope === 'global' ? homedGlobalKey(g) : fileLocalGlobalKey(g)))
     .sort();
+}
+
+/**
+ * A template member's key among a unit's statics: which unit defines it is decided
+ * by the units that use it (templates/users.ts), and whether it is a COMDAT by where
+ * every one of its users is. Either moves with another unit's text alone.
+ */
+export function templateMemberKey(address: string): string | undefined {
+  const registry = templateRegistry();
+  if (!registry?.unitOf(address)) return undefined;
+  return `M:${address}${registry.isComdat(address) ? ':comdat' : ''}`;
 }
 
 /** Whether text written under `previous` statics may be reused under `now`. */
@@ -1158,7 +1175,19 @@ export function generateProjectStage1(
   const modules = options.projectConfig?.modules ?? {};
   setModuleNames(Object.keys(modules));
   // An element's orphan copy is placed with the members (findOrphans ran with the registry).
-  templates?.setPlacement(placeTemplateMembers(templates, functions, modules, options.projectConfig?.moduleRuns ?? []));
+  if (templates) {
+    // A member one unit alone uses is defined in that unit, as the COMDAT its object compiled.
+    const uses = memberUses(templates, functions, globals as Array<{ initializedData?: DataValue }>);
+    templates.setPlacement(placeTemplateMembers(templates, functions, modules, options.projectConfig?.moduleRuns ?? [], uses));
+    const byAddress = new Map(functions.map(f => [f.address, f]));
+    const unitOf = (address: string) => {
+      const placed = templates.unitOf(address);
+      if (placed) return placed;
+      const f = byAddress.get(address);
+      return f?.namespace ? normalizeUnitName(f.namespace) : undefined;
+    };
+    templates.setComdats(comdatMembers(uses, functions.filter(f => isTemplateMember(templates, f) && !templates.isOrphan(f.address) && !f.isThunk).map(f => f.address), unitOf));
+  }
 
   // Build registries from project config
   // Override files live in projectDir (not outputDir) so they survive regeneration
@@ -4537,7 +4566,7 @@ function generateFilesForFunctions(
     // The dep-scan below then runs over the reused text, so its include set is
     // derived the same way it was derived when the text was written.
     // An extern entry is emitted text too: a unit whose entries changed is re-emitted.
-    const unitStatics = unitStaticKeys(unitFunctions, context.fileStaticFunctions, context.externEntries, context.fileLocalGlobals);
+    const unitStatics = unitStaticKeys(unitFunctions, context.fileStaticFunctions, context.externEntries, context.fileLocalGlobals, templateMemberKey);
     const previousStatics = unitIdentifierCounts.get(unitName)?.statics ?? [];
     const placementNow: PlacementLookup = {
       typeOwner: t => typeOwnerMap.get(t),
@@ -4887,7 +4916,8 @@ function generateFilesForFunctions(
   // ── The template header: the class templates and every member's declaration ──
   if (templates && templateHeaderPath && templateUnitImplPaths.size > 0) {
     const header = templateHeaderPath;
-    const members = [...organized].filter(([unitName]) => templateUnitImplPaths.has(unitName)).flatMap(([, fs]) => fs);
+    // Every member, wherever it is defined: a unit that alone uses one defines it beside its own code.
+    const members = [...organized].flatMap(([, fs]) => fs).filter(f => templates.unitOf(f.address) !== undefined);
     if (shardOwnsNext(unitCost(members))) {
       shardRecordEmitted(header);
       const headerTypes = templateHeaderTypes(templates, dataTypes);

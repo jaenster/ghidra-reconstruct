@@ -18,12 +18,18 @@
  * code and are passed over; their namespace names no module. An element's orphan
  * copy (`CELLIST::Destructor_Unreferenced`) is placed like a member: it is a
  * COMDAT the module linked, not the element's own code.
+ *
+ * A member that one unit's own code alone names (templates/users.ts) is defined in that unit
+ * instead: the copy the linker kept is the one that unit's object compiled.
+ * `TSList<HANDLER,TSGetLink<HANDLER>>::UnlinkAll` is called by SErr's destructor
+ * and SErr's static finalizer only, and it sits between them.
  */
 
 import type { ModuleConfig, ModuleRun } from '../../config/schema.js';
 import type { ExtractedFunction } from '../../types.js';
 import { normalizeUnitName } from '../namespace.js';
 import type { TemplateRegistry } from './registry.js';
+import { soleUserUnit, type MemberUses } from './users.js';
 
 function addressValue(address: string): number {
   const hex = address.includes(':') ? address.slice(address.lastIndexOf(':') + 1) : address;
@@ -46,6 +52,7 @@ export function placeTemplateMembers(
   functions: readonly ExtractedFunction[],
   modules: Readonly<Record<string, ModuleConfig>>,
   runs: readonly ModuleRun[],
+  uses?: MemberUses,
 ): Map<string, string> {
   const ordered = [...functions].sort((a, b) => addressValue(a.address) - addressValue(b.address));
   const spans = runs
@@ -96,5 +103,11 @@ export function placeTemplateMembers(
     settle(moduleDir);
   }
   closeRun();
+  if (uses) {
+    for (const address of placement.keys()) {
+      const unit = soleUserUnit(uses, address);
+      if (unit) placement.set(address, unit);
+    }
+  }
   return placement;
 }

@@ -200,6 +200,18 @@ export class TemplateRegistry {
     return this.placement.get(address);
   }
 
+  private comdats: ReadonlySet<string> = new Set();
+
+  /** Record which members are defined as COMDATs (templates/users.ts `comdatMembers`). */
+  setComdats(addresses: ReadonlySet<string>): void {
+    this.comdats = addresses;
+  }
+
+  /** A member defined `inline` and never inlined: the COMDAT its one unit compiled. */
+  isComdat(address: string | undefined): boolean {
+    return !!address && this.comdats.has(address);
+  }
+
   private readonly treeTypeCache = new Map<string, boolean>();
 
   /**

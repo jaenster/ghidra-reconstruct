@@ -510,6 +510,8 @@ export function generateHeader(
       && f.name.length > 0
       // Skip C standard library functions
       && !C_STDLIB_NAMES.has(f.name)
+      // A template member a unit defines is declared once, in the template header.
+      && memberDefinitionScope(f) === undefined
     );
 
     // When publicFunctions is provided, only declare externally-visible functions
