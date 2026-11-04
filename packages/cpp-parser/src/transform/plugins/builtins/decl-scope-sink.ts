@@ -326,7 +326,20 @@ function initializerMayRelocate(
       if (writesVar(stmt, name)) return false;
     }
   }
+
+  // The name check cannot see memory. `n = pPacket->eNpcGUID` read before
+  // `CloseEnoughToInteract(...)` reads the packet as it was before the call;
+  // sunk below it, it reads whatever the call left there. A read through a
+  // pointer therefore only moves past code that neither calls nor stores
+  // through a pointer (SCMD_0x38_NpcMenuSelect 0054bca0 loads the GUID first).
+  if (readsThroughPointer(initializer) && crossed.some(s => callsOrStoresThroughPointer(s))) return false;
   return true;
+}
+
+/** Does `node` call anything or store through a pointer? Either may write what a load reads. */
+function callsOrStoresThroughPointer(node: ASTNode): boolean {
+  const calls = (n: ASTNode): boolean => n.kind === NodeKind.CallExpr || getChildren(n).some(calls);
+  return calls(node) || storesThroughPointer(node);
 }
 
 /**

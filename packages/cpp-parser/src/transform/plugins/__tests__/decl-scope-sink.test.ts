@@ -262,6 +262,31 @@ describe('declScopeSinkPlugin — loop back-edge liveness', () => {
     );
   });
 
+  it('keeps a read through a pointer that a crossed call may change', () => {
+    // SCMD_0x38_NpcMenuSelect 0054bca0: the original loads the GUID before the call.
+    const output = transformCode('void f(P* p) { int g = p->guid; int r = check(p); if (r == 0) { use(g, r); } }');
+    assert.strictEqual(
+      output,
+      'void f(P* p) {\n  int g = p->guid;\n  int r = check(p);\n  if (r == 0) {\n    use(g, r);\n  }\n}'
+    );
+  });
+
+  it('keeps a read through a pointer that a crossed store may change', () => {
+    const output = transformCode('void f(P* p, P* q) { int g = p->guid; q->guid = 0; if (c) { use(g); } }');
+    assert.strictEqual(
+      output,
+      'void f(P* p, P* q) {\n  int g = p->guid;\n  q->guid = 0;\n  if (c) {\n    use(g);\n  }\n}'
+    );
+  });
+
+  it('still sinks a read through a pointer past pure statements', () => {
+    const output = transformCode('void f(P* p) { int g = p->guid; int r = p->n + 1; if (r == 0) { use(g); } }');
+    assert.strictEqual(
+      output,
+      'void f(P* p) {\n  int r = p->n + 1;\n  if (r == 0) {\n    int g = p->guid;\n    use(g);\n  }\n}'
+    );
+  });
+
   it('keeps a read whose source the if condition mutates', () => {
     const output = transformCode('void f() { int x = n; if (n++) { use(x); } }');
     assert.strictEqual(
