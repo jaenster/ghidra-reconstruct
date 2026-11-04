@@ -1041,33 +1041,7 @@ export function generateImplementation(
   }
   lines.push('');
 
-  // Get namespace from class or first function
-  // CRITICAL: Methods must follow their parent struct's scope, not the function's namespace.
-  // If the struct is at global scope (classInfo.namespace is undefined), methods should
-  // also be at global scope, even if the functions have a namespace in Ghidra.
-  const rawNamespace = classInfo?.namespace || functions[0]?.namespace;
-
-  // Check if all functions are methods (have parentClass)
-  const allMethods = functions.length > 0 && functions.every(f => f.parentClass);
-
-  // CRITICAL FIX: For method-only units, don't use namespace wrapping.
-  // Methods are always scoped as StructName::Method() at global scope.
-  // The classInfo.namespace is often wrong (set from function namespace, not struct location).
-  // Wrapper functions will preserve the original namespace for compatibility.
-  // The namespace is the one resolved for THIS symbol's address — the same
-  // entity the header declaration, globals.h and every call site render from.
-  const namespaceOwner = allMethods
-    ? undefined
-    : (classInfo?.namespace ? { address: undefined, namespace: rawNamespace } : functions[0]);
-  const resolvedNamespace = namespaceOwner
-    ? namespaceResolution().of(namespaceOwner)
-    : undefined;
-  let namespace = renderNamespace(resolvedNamespace);
-
-  // Only emit namespace block if it's a valid C++ namespace (not a template instantiation,
-  // not a class the template header defines: its members are qualified by it)
-  const useNamespace = namespace && !resolvedNamespace?.classScope
-    && options.organization === 'namespace' && isValidNamespace(namespace);
+  const { resolvedNamespace, namespace, useNamespace } = unitNamespace(functions, classInfo, options);
 
 
   // Funcdef typedefs the body casts to must be declared at ROOT scope, before
@@ -1125,12 +1099,8 @@ export function generateImplementation(
     // `decompile` on a thunk returns the TARGET's body under the thunk's name,
     // so emitting that text would copy every target under a second name.
     if (func.isThunk) {
-      // A method is declared and defined as `Class::name` at root scope, which
-      // is a different signature path; no thunk is one today.
-      const isMethodThunk =
-        Boolean(func.parentClass) || Boolean(classInfo?.methods.some(m => m.address === func.address));
-      const forwarder = isMethodThunk ? undefined : generateThunkForwarder(
-        func, context, useNamespace ? resolvedNamespace : undefined
+      const forwarder = unitThunkForwarder(
+        func, classInfo, context, useNamespace ? resolvedNamespace : undefined
       );
       if (!forwarder) continue;
       if (func.ifdef !== currentIfdef) {
@@ -2008,6 +1978,63 @@ export function wrapperSignature(func: ExtractedFunction): { returnType: string;
   const returnType = returnSigType(func.returnType).trim();
   if (!returnType) return undefined;
   return { returnType, params: signatureParameterList(func, 'body') };
+}
+
+/**
+ * The namespace a unit's implementation opens: `useNamespace` is false when it
+ * opens none. The source map (sourcemap.ts) asks too, to list exactly the thunk
+ * forwarders the implementation defines.
+ */
+export function unitNamespace(
+  functions: ExtractedFunction[],
+  classInfo: DetectedClass | undefined,
+  options: ReconstructOptions,
+): { resolvedNamespace: ResolvedNamespace | undefined; namespace: string; useNamespace: boolean } {
+  // Get namespace from class or first function
+  // CRITICAL: Methods must follow their parent struct's scope, not the function's namespace.
+  // If the struct is at global scope (classInfo.namespace is undefined), methods should
+  // also be at global scope, even if the functions have a namespace in Ghidra.
+  const rawNamespace = classInfo?.namespace || functions[0]?.namespace;
+
+  // Check if all functions are methods (have parentClass)
+  const allMethods = functions.length > 0 && functions.every(f => f.parentClass);
+
+  // CRITICAL FIX: For method-only units, don't use namespace wrapping.
+  // Methods are always scoped as StructName::Method() at global scope.
+  // The classInfo.namespace is often wrong (set from function namespace, not struct location).
+  // Wrapper functions will preserve the original namespace for compatibility.
+  // The namespace is the one resolved for THIS symbol's address - the same
+  // entity the header declaration, globals.h and every call site render from.
+  const namespaceOwner = allMethods
+    ? undefined
+    : (classInfo?.namespace ? { address: undefined, namespace: rawNamespace } : functions[0]);
+  const resolvedNamespace = namespaceOwner
+    ? namespaceResolution().of(namespaceOwner)
+    : undefined;
+  const namespace = renderNamespace(resolvedNamespace);
+
+  // Only emit namespace block if it's a valid C++ namespace (not a template instantiation,
+  // not a class the template header defines: its members are qualified by it)
+  const useNamespace = Boolean(namespace) && !resolvedNamespace?.classScope
+    && options.organization === 'namespace' && isValidNamespace(namespace);
+  return { resolvedNamespace, namespace, useNamespace };
+}
+
+/**
+ * The forwarder a unit's implementation defines for one of its thunks, or
+ * undefined when it defines none. A method is declared and defined as
+ * `Class::name` at root scope, which is a different signature path; no thunk is
+ * one today.
+ */
+export function unitThunkForwarder(
+  func: ExtractedFunction,
+  classInfo: DetectedClass | undefined,
+  context: ImplGenContext | undefined,
+  enclosingNamespace: ResolvedNamespace | undefined,
+): string | undefined {
+  const isMethodThunk =
+    Boolean(func.parentClass) || Boolean(classInfo?.methods.some(m => m.address === func.address));
+  return isMethodThunk ? undefined : generateThunkForwarder(func, context, enclosingNamespace);
 }
 
 /**

@@ -305,3 +305,37 @@ describe('thunk forwarders through the whole emitter', () => {
     }
   });
 });
+
+describe('thunk forwarders in the source map', () => {
+  it('lists every thunk the unit defines, and no other', () => {
+    const target = body('CMD_UseBeltSlot1', 'Game.exe.ram:00498c50', 'D2Client::UI::Panel', 'void');
+    const defined = thunk(
+      'thunk_CMD_UseBeltSlot1', 'Game.exe.ram:00468f40', 'D2Client::UI::Panel', 'void', [],
+      { address: '00498c50', name: 'CMD_UseBeltSlot1', namespace: 'D2Client::UI::Panel', isExternal: false }
+    );
+    // Its target is an import nothing declares: no forwarder, so no map entry.
+    const undefinedThunk = thunk(
+      'thunk_NotAWin32Name', 'Game.exe.ram:00468f50', 'D2Client::UI::Panel', 'int', [],
+      { address: 'EXTERNAL:00000099', name: 'NotAWin32Name', namespace: 'MYSTERY.DLL', isExternal: true }
+    );
+    const namespaces: ExtractedNamespace[] = [
+      { name: 'D2Client::UI::Panel', fullPath: 'D2Client::UI::Panel', functionCount: 3, isClass: false },
+    ];
+    const project = generateProject(
+      'thunkmap', [target, defined, undefinedThunk], [], [], [], namespaces,
+      { ...options, generateSourceMaps: true }, programInfo
+    );
+
+    const impls = [...project.files.values()].filter(f => f.type === 'implementation');
+    const all = impls.map(f => f.content).join('\n');
+    assert.match(all, /thunk_CMD_UseBeltSlot1\(\) \{/, 'the thunk must be defined');
+
+    const mapped = [...project.sourceMaps.values()].flatMap(m => m.functions.map(f => f.name));
+    assert.ok(mapped.includes('CMD_UseBeltSlot1'), 'the target is listed');
+    assert.ok(mapped.includes('thunk_CMD_UseBeltSlot1'),
+      'a defined thunk must be listed, or nothing pairs it with its address');
+    assert.ok(!mapped.includes('thunk_NotAWin32Name'),
+      'a thunk left undefined must not be listed');
+  });
+});
+

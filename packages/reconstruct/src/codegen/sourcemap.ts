@@ -24,12 +24,17 @@ export function generateSourceMap(
   filePath: string,
   functions: ExtractedFunction[],
   binaryName?: string,
-  crossPlatformMatches?: Map<string, CrossPlatformMatch>
+  crossPlatformMatches?: Map<string, CrossPlatformMatch>,
+  /** Whether the implementation defines a forwarder for this thunk. A thunk is
+   *  listed only when it does: it is a carved function of its own in the
+   *  binary, and without its entry nothing pairs the forwarder with its address. */
+  definesThunk?: (func: ExtractedFunction) => boolean,
 ): SourceMap {
   const functionMappings: FunctionMapping[] = [];
 
   for (const func of functions) {
-    if (func.isExternal || func.isThunk) continue;
+    if (func.isExternal) continue;
+    if (func.isThunk && !definesThunk?.(func)) continue;
 
     const mapping: FunctionMapping = {
       name: func.name,

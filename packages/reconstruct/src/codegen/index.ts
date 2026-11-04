@@ -74,7 +74,7 @@ import { Lexer, TokenKind, parse, biasedTableIndexPlugin, findNodesByKind, NodeK
 import { buildVtableDispatch } from './vtable-dispatch.js';
 import { fieldDeclSpelling, emittedMemberNames, generateHeader, generateFunctionDeclaration, setKnownFuncDefs, setConstructorBearingStructs, hasConvertingConstructor, recordConstructorLookups, constructorFact, isConstructorCandidate, sigType, getIntegerConversionType, emittedFunctionName, returnSigType } from './header.js';
 import { enumTypedefLine, registerEnumTypedefTargets, setKnownEnumWidths } from './enum-width.js';
-import { generateImplementation, probeGuardedCalls, setQuestStructLayouts, setStructFieldRenames, decompiledReturnType, decompiledFunctionName, decompiledParameters, type ImplGenContext, type FuncPtrArgCastTables, type ThunkForward } from './impl.js';
+import { generateImplementation, unitNamespace, unitThunkForwarder, probeGuardedCalls, setQuestStructLayouts, setStructFieldRenames, decompiledReturnType, decompiledFunctionName, decompiledParameters, type ImplGenContext, type FuncPtrArgCastTables, type ThunkForward } from './impl.js';
 import { generateCMakeLists, generateTopLevelCMake, generateTargetCMake, generateUnsortedCMake } from './cmake.js';
 import { generateSourceMap } from './sourcemap.js';
 import { generateReadme } from './readme.js';
@@ -4906,7 +4906,11 @@ function generateFilesForFunctions(
       const mapPath = `${implPath}.map`;
       shardRecordEmitted(mapPath);
       const crossMatches = crossPlatformMatchesByUnit.get(implPath);
-      const sourceMap = generateSourceMap(implPath, unitFunctions, undefined, crossMatches);
+      const unitNs = unitNamespace(unitFunctions, classInfo, options);
+      const definesThunk = (f: ExtractedFunction) => !f.isLibrary && unitThunkForwarder(
+        f, classInfo, context, unitNs.useNamespace ? unitNs.resolvedNamespace : undefined
+      ) !== undefined;
+      const sourceMap = generateSourceMap(implPath, unitFunctions, undefined, crossMatches, definesThunk);
       sourceMaps.set(mapPath, sourceMap);
     }
   }
