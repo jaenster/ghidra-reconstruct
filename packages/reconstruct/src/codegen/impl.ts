@@ -3253,6 +3253,12 @@ function transformDecompiledCode(
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         enclosingVarTypes,
       };
+      // An arm ending in the statements after it was written as an if/else with the tail
+      // once after it; VC8 tail-duplicated the exit (shared-tail-join.ts).
+      perPluginOptions['shared-tail-join'] = {
+        onSite: (e: { statements: number; line: number }) =>
+          console.warn(`[tail-join] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.statements} tail statements`),
+      };
       perPluginOptions['join-store-temp'] = {
         globalTypes: context.funcPtrArgCasts.globalTypes,
         fieldTypes: context.funcPtrArgCasts.fieldTypes,

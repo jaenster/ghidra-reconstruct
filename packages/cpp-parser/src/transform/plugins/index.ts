@@ -413,6 +413,11 @@ export {
 } from './builtins/member-copy-assign.js';
 
 export {
+  sharedTailJoinPlugin,
+  type SharedTailJoinOptions,
+} from './builtins/shared-tail-join.js';
+
+export {
   guardCopySinkPlugin,
   type GuardCopySinkOptions,
 } from './builtins/guard-copy-sink.js';
@@ -857,6 +862,7 @@ import { pointeeClearMemsetPlugin } from './builtins/pointee-clear-memset.js';
 import { rangeReadInlinePlugin } from './builtins/range-read-inline.js';
 import { guardCopySinkPlugin } from './builtins/guard-copy-sink.js';
 import { memberCopyAssignPlugin } from './builtins/member-copy-assign.js';
+import { sharedTailJoinPlugin } from './builtins/shared-tail-join.js';
 import { callResultDividePlugin } from './builtins/call-result-divide.js';
 import { paramLoadOrderPlugin } from './builtins/param-load-order.js';
 import { searchLoopExitPlugin } from './builtins/search-loop-exit.js';
@@ -1096,6 +1102,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   guardNullNestPlugin,        // Matching: a compound guard and a later null test of one return become one null-initialised test (priority 989.97)
   returnCopySplitPlugin,      // Matching: an else-if chain whose first arm falls into a constant return writes the return in that arm (priority 989.975)
   returnCopyJoinPlugin,       // Matching: an arm and a guard returning one constant before another final return become an else-if join (priority 989.98)
+  sharedTailJoinPlugin,       // Matching: an arm ending in the statements after it becomes an if/else, the tail written once (priority 989.981)
   strlenDifferencePlugin,     // Matching: an inlined strlen scan's difference from its start is the length (priority 989.985)
   boolSelectFormPlugin,       // Matching: a materialised comparison spelled for the original's setcc or neg/sbb, from the compare sites (priority 989.99)
   registerStoreSelectPlugin,  // Matching: two stores of one lvalue whose constant the original stores from a register become a select (priority 989.992)
