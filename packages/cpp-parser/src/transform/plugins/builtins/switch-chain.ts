@@ -42,7 +42,7 @@ import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, CompoundStmt, IfStmt, Statement, Expression, BinaryExpr, UnaryExpr, ParenExpr,
   Identifier, IntegerLiteralExpr, CharLiteralExpr, FunctionDecl, SwitchStmt, CaseStmt, DefaultStmt,
-  MemberExpr, SubscriptExpr, CStyleCastExpr, VariableDecl,
+  MemberExpr, SubscriptExpr, CStyleCastExpr, VariableDecl, QualifiedId,
 } from '../../../ast/nodes.js';
 import { traverseAST, getChildren } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
@@ -63,6 +63,8 @@ export interface SwitchChainOptions extends PluginOptions {
   varTypes?: Record<string, string>;
   /** Field name -> declared type, where every aggregate declaring it agrees. */
   fieldTypes?: Record<string, string>;
+  /** Aggregate name -> field name -> declared type: a field of a known aggregate. */
+  structFields?: Record<string, Record<string, string>>;
   /** Typedef name -> the spelling it stands for. */
   typedefTargets?: Record<string, string>;
   /** Every enum type name. */
@@ -286,6 +288,23 @@ function integralType(spelled: string | undefined, opts: SwitchChainOptions, enu
   if (enums.has(t) || enums.has(bare)) return true;
   const target = opts.typedefTargets?.[t] ?? opts.typedefTargets?.[bare];
   return target !== undefined && integralType(target, opts, enums, depth + 1);
+}
+
+/**
+ * The aggregate a member access reads from: the object's declared type, through one pointer
+ * for `->` and none for `.`, without qualifiers, `struct` or namespaces. Undefined when the
+ * type is unknown, has another level of indirection, or is not a plain name.
+ */
+function aggregateOf(spelled: string | undefined, arrow: boolean): string | undefined {
+  if (!spelled) return undefined;
+  let t = spelled.replace(/\b(const|volatile|struct|class|union)\b/g, '').replace(/\s+/g, ' ').trim();
+  if (arrow) {
+    if (!t.endsWith('*')) return undefined;
+    t = t.slice(0, -1).trim();
+  }
+  if (/[*&\[(<]/.test(t)) return undefined;
+  t = t.replace(/^::/, '').replace(/^.*::/, '');
+  return /^\w+$/.test(t) ? t : undefined;
 }
 
 /** Locals declared in the body, name -> type as printed. */
@@ -677,9 +696,20 @@ function rewriteFunction(fn: FunctionDecl, ev: BranchLayoutEvidence, opts: Switc
       const n = (e as Identifier).name;
       return locals.get(n) ?? opts.varTypes?.[n];
     }
+    if (e.kind === NodeKind.QualifiedId) {
+      // A global spelled with its namespace: the globals' types are keyed by the bare name.
+      const q = (e as QualifiedId).name;
+      return q.kind === NodeKind.Identifier ? opts.varTypes?.[(q as Identifier).name] : undefined;
+    }
     if (e.kind === NodeKind.MemberExpr) {
-      const m = (e as MemberExpr).member as Identifier | string;
-      return opts.fieldTypes?.[typeof m === 'string' ? m : m.name];
+      const me = e as MemberExpr;
+      const m = me.member as Identifier | string;
+      const field = typeof m === 'string' ? m : m.name;
+      // The aggregate the member is read from, when the object's declared type names it:
+      // exact where the field's name means different types in different aggregates.
+      const agg = aggregateOf(typeOf(me.object), me.isArrow);
+      const exact = agg !== undefined ? opts.structFields?.[agg]?.[field] : undefined;
+      return exact ?? opts.fieldTypes?.[field];
     }
     return undefined;
   };

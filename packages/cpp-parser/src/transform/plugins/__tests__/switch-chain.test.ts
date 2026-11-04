@@ -459,6 +459,29 @@ describe('switchChainPlugin', () => {
     assert.ok(!run(lines('int a;', 'q->m')).out.includes('switch'));
   });
 
+  it("types a field by its aggregate's own declaration, and a namespaced global by its name", () => {
+    const lines = (decl: string, v: string) => [
+      'void f() {',
+      decl,
+      `<SUB EAX 1 1 0x10> if (${v} == 1) {`,
+      '[0x30] A();',
+      '}',
+      '}',
+    ];
+    // GetDirection 00620100: eUnitType is declared with different types in different
+    // aggregates, so the field name alone does not say; the unit struct's own field does.
+    const structFields = { D2UnitStrc: { eUnitType: 'D2C_UnitTypes' }, Other: { eUnitType: 'float' } };
+    const enumTypes = ['D2C_UnitTypes'];
+    assert.ok(run(lines('D2UnitStrc* p;', 'p->eUnitType'), { structFields, enumTypes }).out.includes('switch (p->eUnitType)'));
+    assert.ok(run(lines('struct D2UnitStrc u;', 'u.eUnitType'), { structFields, enumTypes }).out.includes('switch (u.eUnitType)'));
+    assert.ok(!run(lines('Other* o;', 'o->eUnitType'), { structFields, enumTypes }).out.includes('switch'));
+    assert.ok(!run(lines('D2UnitStrc** pp;', '(*pp)->eUnitType'), { structFields, enumTypes }).out.includes('switch'));
+    assert.ok(!run(lines('D2UnitStrc u;', 'u->eUnitType'), { structFields, enumTypes }).out.includes('switch'));
+    // AUTOMAP_SetupPosition 00457520: MiniMapType is spelled with its namespace.
+    assert.ok(run(lines('int a;', 'D2Client::UI::Automap::MiniMapType'), { varTypes: { MiniMapType: 'uint32_t' } }).out.includes('switch (D2Client::UI::Automap::MiniMapType)'));
+    assert.ok(!run(lines('int a;', 'D2Client::UI::Automap::MiniMapType')).out.includes('switch'));
+  });
+
   it('takes `v != A && v != B` as one test: the two constants share a case', () => {
     // ITEMMODE_IsSkillUsableCheck (0055c4d0, matching as the switch): sub eax,2; je; sub eax,5; je.
     const { out, sites } = run([

@@ -3795,6 +3795,7 @@ function transformDecompiledCode(
         // A switch needs an integral or enum operand: the operand's declared type decides.
         varTypes: { ...(context?.funcPtrArgCasts?.globalTypes ?? {}), ...enclosingVarTypes },
         fieldTypes: context?.funcPtrArgCasts?.fieldTypes,
+        structFields: context?.funcPtrArgCasts?.structFields,
         typedefTargets: context?.funcPtrArgCasts?.typedefTargets,
         enumTypes: context?.funcPtrArgCasts?.enumTypes,
         ...(process.env.GHIDRA_SWITCH_CHAIN_REPORT ? {
