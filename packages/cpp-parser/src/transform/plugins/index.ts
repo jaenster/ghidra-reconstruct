@@ -424,6 +424,11 @@ export {
 } from './builtins/register-store-select.js';
 
 export {
+  linkNextSelectPlugin,
+  type LinkNextSelectOptions,
+} from './builtins/link-next-select.js';
+
+export {
   accumulateSumPlugin,
   type AccumulateSumOptions,
 } from './builtins/accumulate-sum.js';
@@ -793,6 +798,7 @@ import { returnCopySplitPlugin, returnCopyJoinPlugin } from './builtins/return-c
 import { strlenDifferencePlugin } from './builtins/strlen-difference.js';
 import { boolSelectFormPlugin } from './builtins/bool-select-form.js';
 import { registerStoreSelectPlugin } from './builtins/register-store-select.js';
+import { linkNextSelectPlugin } from './builtins/link-next-select.js';
 import { recordGetterGuardPlugin } from './builtins/record-getter-guard.js';
 import { recordGetterSplitPlugin } from './builtins/record-getter-split.js';
 import { armConstantCallPlugin } from './builtins/arm-constant-call.js';
@@ -1010,6 +1016,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   strlenDifferencePlugin,     // Matching: an inlined strlen scan's difference from its start is the length (priority 989.985)
   boolSelectFormPlugin,       // Matching: a materialised comparison spelled for the original's setcc or neg/sbb, from the compare sites (priority 989.99)
   registerStoreSelectPlugin,  // Matching: two stores of one lvalue whose constant the original stores from a register become a select (priority 989.992)
+  linkNextSelectPlugin,       // Matching: a loop-leaving sign test of a list link becomes the inlined next-node select and a null test (priority 989.993)
   paramCheckBlockPlugin,      // Matching: a Storm parameter check compiled as one neg/sbb mask chain -> a D2_CHECKS block (priority 980)
   inlinedCallRestorePlugin,   // Matching: a call where the decompiler printed an inlined helper's body (priority 0.5)
   gotoCrossesInitPlugin,      // Late: split T x=e; → T x; x=e; for goto-crossed locals (priority 700)
