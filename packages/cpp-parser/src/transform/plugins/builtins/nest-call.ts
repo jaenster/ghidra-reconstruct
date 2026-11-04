@@ -58,6 +58,21 @@
  *     push alike); each inner CALL straight after the previous one; the outer CALL
  *     straight after the last, with exactly the pushes of the arguments up to it.
  *
+ * A temporary whose one read is in a later temporary's call goes in with it, as a chain
+ * (Skills_CltDoFunc_Bar_DoubleSwing_Sound, 004c7d50: `nHitClass = GetHitClass(pUnit);
+ * nSound = UNITSND_GetSkillCastSound(pUnit, nHitClass); SOUND_PlaySound(nSound, pUnit, 4, 0,
+ * 0);`, where the original pushes 0, 0, 4 before the GetHitClass call). The nested
+ * evaluation is then followed call by call, right to left with each argument's calls before
+ * its push, and every CALL of the statement must have the PUSHes and the predecessor it
+ * predicts, and some CALL other PUSHes than the printed order gives it. A chain moves as one
+ * against the other arguments, which it must not write or read what they write.
+ *
+ * The statement's target may be the temporary itself (`pRoom = GetRoom(pUnit); pRoom =
+ * FindBetterNearbyRoom(pRoom, nX, nY);`, 005cbe00); a temporary may hold 32-bit integer
+ * arithmetic on names and constants (`nX = gnPanelOffsetX + 0x24;`, UI_DrawPartyMemberClass
+ * 0049a3d0) when its type is the expression's, or differs in sign only into a narrow integer
+ * parameter, and it reads a global like a global read does.
+ *
  * A varargs callee has no stack slots in the facts; its arguments then count one slot
  * each when each is a 32-bit-or-narrower integer or a pointer, and the push counts below
  * confirm it.
@@ -72,7 +87,7 @@
 
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
-  ASTNode, AssignExpr, CallExpr, CompoundStmt, DeclStmt, Expression, ExprStmt, FunctionDecl,
+  ASTNode, AssignExpr, BinaryExpr, CallExpr, CompoundStmt, DeclStmt, Expression, ExprStmt, FunctionDecl,
   Identifier, IfStmt, ParenExpr, ReturnStmt, Statement, UnaryExpr, VariableDecl, CStyleCastExpr, ParameterDecl,
 } from '../../../ast/nodes.js';
 import { traverseAST, getChildren } from '../../../ast/visitor.js';
@@ -224,6 +239,8 @@ interface Temp {
   arg: number;
   kind: 'call' | 'read' | 'pure';
   call?: CallExpr;
+  /** The later temporary whose call takes this one as an argument (a chain), if any. */
+  host?: Temp;
 }
 
 interface Ctx {
@@ -530,6 +547,53 @@ function classify(
     const g = ctx.opts.globalTypes?.[name];
     const gs = g ? shapeOfSpelling(g, ctx.resolve) : null;
     return gs && sameShape(gs, shape) ? { kind: 'read' } : null;
+  }
+  // `x = G + 0x24;`, `y = a - G;`: 32-bit integer arithmetic on names and constants.
+  if (!fx.writes && shape.stars === 0 && WORD_INTEGERS.has(shape.base)) {
+    const ar = wordArithmetic(v, ctx);
+    if (ar && (sameShape(ar.shape, shape) || signOnlyIntoNarrowParam(ar.shape, shape, site, ctx))) {
+      return { kind: ar.global ? 'read' : 'pure' };
+    }
+  }
+  return null;
+}
+
+const WORD_ARITH = new Set(['+', '-', '|', '&', '^']);
+
+/**
+ * The type of `e` when it is `+ - | & ^` over 32-bit integer names (locals whose address
+ * is never taken, globals) and constants below 2^31, which C types as int or unsigned int;
+ * and whether it reads a global.
+ */
+function wordArithmetic(e: Expression, ctx: Ctx): { shape: TypeShape; global: boolean } | null {
+  const u = unwrap(e);
+  if (u.kind === NodeKind.IntegerLiteral) {
+    const lit = u as unknown as { value: bigint; suffix?: string };
+    if (lit.suffix || lit.value >= 0x80000000n) return null;
+    return { shape: { base: 'int', stars: 0, isConst: false }, global: false };
+  }
+  if (u.kind === NodeKind.Identifier) {
+    const name = (u as Identifier).name;
+    const l = ctx.locals.get(name);
+    let sh: TypeShape | null;
+    let global = false;
+    if (l) {
+      if (l.addressed || l.array) return null;
+      sh = declShape(l, ctx);
+    } else {
+      const g = ctx.opts.globalTypes?.[name];
+      sh = g ? shapeOfSpelling(g, ctx.resolve) : null;
+      global = true;
+    }
+    if (!sh || sh.stars !== 0 || !WORD_INTEGERS.has(sh.base)) return null;
+    return { shape: { base: sh.base.startsWith('unsigned') ? 'unsigned int' : 'int', stars: 0, isConst: false }, global };
+  }
+  if (u.kind === NodeKind.BinaryExpr && WORD_ARITH.has((u as BinaryExpr).operator)) {
+    const a = wordArithmetic((u as BinaryExpr).left, ctx);
+    const b = a && wordArithmetic((u as BinaryExpr).right, ctx);
+    if (!a || !b) return null;
+    const uns = a.shape.base === 'unsigned int' || b.shape.base === 'unsigned int';
+    return { shape: { base: uns ? 'unsigned int' : 'int', stars: 0, isConst: false }, global: a.global || b.global };
   }
   return null;
 }
@@ -945,20 +1009,40 @@ function siteAt(stmts: Statement[], b: number, path: Path, guarded: boolean, ctx
 
   const collected: Temp[] = [];
   const names = new Set<string>();
+  const sx = s.kind === NodeKind.ExprStmt ? unwrap((s as ExprStmt).expression) : null;
+  const targetName = sx && sx.kind === NodeKind.AssignExpr && unwrap((sx as AssignExpr).left).kind === NodeKind.Identifier
+    ? unwrap((sx as AssignExpr).left) as Identifier : null;
   for (let j = b - 1; j >= 0; j--) {
     const t = tempOf(stmts[j], ctx);
     if (!t || names.has(t.name)) break;
-    // A later temporary's value must not read this one, nor assign anything it reads.
-    if (collected.some(u => namesIn(u.value).some(n => n.name === t.name))) break;
+    // A later temporary's value must not assign anything this one reads.
     if (collected.some(u => namesIn(t.value).some(n => n.name === u.name))) break;
-    const uses = namesIn(s).filter(n => n.name === t.name);
-    if (uses.length !== 1) break;
-    const arg = argumentOf(call, uses[0]);
-    if (arg < 0) break;
-    const c = classify(t, ctx, { call, arg, use: uses[0] });
+    // The statement's target, when it is this temporary, is a write of it, not a use.
+    const uses = namesIn(s).filter(n => n.name === t.name && n !== targetName);
+    const inLater = collected.flatMap(u => namesIn(u.value).filter(n => n.name === t.name).map(n => ({ u, n })));
+    let host: Temp | undefined;
+    let use: Identifier;
+    let site: { call: CallExpr; arg: number; use: Identifier };
+    let arg: number;
+    if (uses.length === 1 && inLater.length === 0) {
+      use = uses[0];
+      arg = argumentOf(call, use);
+      if (arg < 0) break;
+      site = { call, arg, use };
+    } else if (uses.length === 0 && inLater.length === 1 && inLater[0].u.kind === 'call') {
+      // A chain: the one read is in a later temporary's call, which goes into the call too.
+      host = inLater[0].u;
+      use = inLater[0].n;
+      const inner = argumentOf(host.call!, use);
+      if (inner < 0 || namesIn(host.value).filter(n => n.name === t.name).length !== 1) break;
+      arg = host.arg;
+      site = { call: host.call!, arg: inner, use };
+    } else break;
+    const c = classify(t, ctx, site);
     if (!c) break;
+    if (host && c.kind === 'read') break;
     names.add(t.name);
-    collected.push({ stmt: t.stmt, def: t.def, name: t.name, value: t.value, use: uses[0], arg, kind: c.kind, call: c.call });
+    collected.push({ stmt: t.stmt, def: t.def, name: t.name, value: t.value, use, arg, kind: c.kind, call: c.call, host });
   }
   collected.reverse();
 
@@ -1004,7 +1088,105 @@ function evidenceShows(calls: Temp[], call: CallExpr, outer: CallSiteFact, ctx: 
   return true;
 }
 
+function mergeEff(into: Eff, from: Eff): void {
+  if (from.unknown) into.unknown = true;
+  if (from.memory) addMemory(into, from.regions);
+  for (const g of from.globals) into.globals.add(g);
+}
+
+/** The temporary at the root of `t`'s chain. */
+function rootOf(t: Temp): Temp {
+  while (t.host) t = t.host;
+  return t;
+}
+
+/**
+ * The calls of `call` nested with `temps` in VC8's evaluation order (the arguments right
+ * to left, each argument's calls before its push), each with the PUSHes made since the
+ * call before it; null when an argument holds more than one call of the chain.
+ */
+function nestedEvents(call: CallExpr, fact: CallSiteFact, temps: Temp[], ctx: Ctx): { fact: CallSiteFact; pushes: number }[] | null {
+  const byUse = new Map<ASTNode, Temp>(temps.filter(t => t.kind === 'call').map(t => [t.use, t]));
+  const out: { fact: CallSiteFact; pushes: number }[] = [];
+  let pending = 0;
+  const visitCall = (c: CallExpr, f: CallSiteFact): boolean => {
+    if (!f.slots || f.slots.length !== c.arguments.length) return false;
+    for (let i = c.arguments.length - 1; i >= 0; i--) {
+      const inner = namesIn(c.arguments[i]).map(n => byUse.get(n)).filter((t): t is Temp => !!t);
+      if (inner.length > 1) return false;
+      if (inner.length === 1) {
+        const t = inner[0];
+        const tf = factFor(t.stmt, calleeName(t.call!.callee)!, ctx);
+        if (!tf || !visitCall(t.call!, tf)) return false;
+      }
+      pending += f.slots[i];
+    }
+    out.push({ fact: f, pushes: pending });
+    pending = 0;
+    return true;
+  };
+  return visitCall(call, fact) ? out : null;
+}
+
+/**
+ * A run holding a chain: a temporary whose one read is in a later temporary's call
+ * (`h = Get(p); s = Snd(p, h); Play(s, p, 4, 0, 0);`). Nested, the original evaluates the
+ * outer call's arguments right of the chain, then the innermost call, and each host after
+ * the call it takes: the PUSHes before each CALL say whether it did.
+ */
+function validChain(temps: Temp[], call: CallExpr, outer: CallSiteFact, target: Expression | null, path: Path, guarded: boolean, ctx: Ctx): boolean {
+  const calls = temps.filter(t => t.kind === 'call');
+  if (calls.length < 2) return false;
+  // No call but the chain's: the facts below then account for every CALL of the statement.
+  if (call.arguments.some(a => effects(a).calls)) return false;
+  for (const t of calls) for (const a of t.call!.arguments) if (effects(a).calls) return false;
+  // The chains' roots in VC8's order: the earliest in the argument furthest right.
+  const roots = temps.filter(t => !t.host && t.kind !== 'pure');
+  for (let i = 0; i + 1 < roots.length; i++) if (roots[i].arg <= roots[i + 1].arg) return false;
+  // Each chain is evaluated in its own order either way; chains and the other arguments
+  // move against each other, so none may write what another reads or writes.
+  const free = new Set<ASTNode>(temps.map(t => t.use));
+  const units: Unit[] = [];
+  for (const r of roots) {
+    const u = unitOf(r.value, ctx, free);
+    for (const t of temps) {
+      if (t === r || t.kind === 'pure' || rootOf(t) !== r) continue;
+      const v = unitOf(t.value, ctx, free);
+      mergeEff(u.w, v.w);
+      mergeEff(u.r, v.r);
+    }
+    units.push(u);
+  }
+  for (const a of call.arguments) units.push(unitOf(a, ctx, free));
+  if (target) {
+    const t: Unit = { w: noEff(), r: noEff() };
+    t.r = unitOf({ kind: NodeKind.UnaryExpr, operator: '&', operand: target } as unknown as ASTNode, ctx, new Set()).r;
+    units.push(t);
+  }
+  if (!independent(units, ctx.regions)) return false;
+  // The original's PUSHes match the nested evaluation, and not the printed one.
+  const events = nestedEvents(call, outer, temps, ctx);
+  if (!events || events.length !== calls.length + 1) return false;
+  let differs = false;
+  for (let k = 0; k < events.length; k++) {
+    const e = events[k];
+    if (e.fact.pushes !== e.pushes) return false;
+    if (k > 0 && e.fact.prev !== events[k - 1].fact.at) return false;
+    if (e.pushes !== argSlots(e.fact, 0, e.fact.slots!.length - 1)) differs = true;
+  }
+  if (!differs) return false;
+  for (const t of temps) {
+    const allowed = new Set<Identifier>([t.use, t.def, ctx.locals.get(t.name)!.decl.name]);
+    if (!deadAfter(t.name, allowed, path, guarded, ctx) && (t.host || !onlyUseFlows(t, path[path.length - 1], ctx))) return false;
+  }
+  return true;
+}
+
+
 function validRun(temps: Temp[], call: CallExpr, outer: CallSiteFact, target: Expression | null, path: Path, guarded: boolean, ctx: Ctx): boolean {
+  // A run whose host is left out is no run.
+  if (temps.some(t => t.host && !temps.includes(t.host))) return false;
+  if (temps.some(t => t.host)) return validChain(temps, call, outer, target, path, guarded, ctx);
   const calls = temps.filter(t => t.kind === 'call');
   if (calls.length === 0) return false;
   // Calls and reads in VC8's order: the earliest in the argument furthest right.
@@ -1081,9 +1263,16 @@ function rewriteFunction(fn: FunctionDecl, ev: CallOrderEvidence, opts: NestCall
         if (!site) continue;
         const { temps } = site;
         const s = block.statements[b];
-        const holders = temps.map(t => parentOf(s, t.use));
-        if (holders.some(h => !h)) continue;
-        temps.forEach((t, i) => replaceChild(holders[i]!, t.use, wrapIfNeeded(t.value, holders[i]!)));
+        if (temps.some(t => !parentOf(t.host ? t.host.value : s, t.use))) continue;
+        // Later temporaries first: a chain's host carries its inner temporary into the statement.
+        let placedAll = true;
+        for (let i = temps.length - 1; i >= 0 && placedAll; i--) {
+          const t = temps[i];
+          const holder = parentOf(s, t.use);
+          if (!holder) { placedAll = false; break; }
+          replaceChild(holder, t.use, wrapIfNeeded(t.value, holder));
+        }
+        if (!placedAll) continue;
         const start = b - temps.length;
         // Comments on the temporaries' lines stay, above the statement.
         s.leadingTrivia = [...temps.flatMap(t => t.stmt.leadingTrivia ?? []), ...(s.leadingTrivia ?? [])];

@@ -37,8 +37,9 @@ const flat = (s: string) => s.replace(/\s+/g, ' ').trim();
 const TYPES: Partial<NestCallOptions> = {
   functionReturnTypes: {
     GetGamePointer: 'Game *', GetPlayerData: 'PlayerData *', DRAW_text0: 'int', Rand: 'int', Narrow: 'short',
+    GetHitClass: 'int', GetCastSound: 'int', GetRoom: 'Room *', BetterRoom: 'Room *',
   },
-  globalTypes: { WindowSizeX: 'int', TextHeight: 'int', gCounter: 'int' },
+  globalTypes: { WindowSizeX: 'int', TextHeight: 'int', gCounter: 'int', gnPanelOffsetX: 'int' },
 };
 
 function run(lines: string[], opts: Partial<NestCallOptions> = {}): { out: string; sites: number[] } {
@@ -90,6 +91,73 @@ describe('nestCallPlugin', () => {
     ]);
     assert.deepStrictEqual(sites, [2]);
     assert.ok(out.includes('pDamage->wResultFlags = HitCheck(pUnit, pDamage, Rand(pUnit, 3), 0);'), out);
+  });
+
+
+  // Skills_CltDoFunc_Bar_DoubleSwing_Sound 004c7d50: `push 0; push 0; push 4; call GetHitClass;
+  // push eax..; call UNITSND_GetSkillCastSound; call SOUND_PlaySound` with every other
+  // argument in a register: the chain nests whole.
+  const chain = (pushes: number) => [
+    'int f(Unit *pUnit) {',
+    '  int nHitClass;',
+    '  int nSound;',
+    '  int nMode;',
+    '  nMode = 4;',
+    `[GetHitClass@0x19<,${pushes},0] nHitClass = GetHitClass(pUnit);`,
+    '[GetCastSound@0x22<0x19,0,0.0] nSound = GetCastSound(pUnit, nHitClass);',
+    '[PlaySound@0x2b<0x22,0,0.0.1.1.1] PlaySound(nSound, pUnit, nMode, 0, 0);',
+    '  return 0;',
+    '}',
+  ];
+
+  it('nests a chain of temporaries, each read by the call after it', () => {
+    const { out, sites } = run(chain(3));
+    assert.deepStrictEqual(sites, [3]);
+    assert.ok(out.includes('PlaySound(GetCastSound(pUnit, GetHitClass(pUnit)), pUnit, 4, 0, 0);'), out);
+  });
+
+  it('leaves a chain whose innermost call the original made before the pushes', () => {
+    const { out, sites } = run(chain(0));
+    assert.deepStrictEqual(sites, []);
+    assert.ok(out.includes('nHitClass = GetHitClass(pUnit);'), out);
+  });
+
+  // Skills_SrvDoFunc_091_SpawnMinionAtCoords 005cbe00: the temporary is the statement's target too.
+  it('nests a temporary the statement then assigns', () => {
+    const { out, sites } = run([
+      'int f(Unit *pUnit, int nX, int nY) {',
+      '[GetRoom@0x30<,3,1] Room* pRoom = GetRoom(pUnit);',
+      '[BetterRoom@0x3a<0x30,1,1.1.1] pRoom = BetterRoom(pRoom, nX, nY);',
+      '  return pRoom != 0;',
+      '}',
+    ]);
+    assert.deepStrictEqual(sites, [1]);
+    assert.ok(out.includes('pRoom = BetterRoom(GetRoom(pUnit), nX, nY);'), out);
+  });
+
+  // UI_DrawPartyMemberClass 0049a3d0: `x = gnPanelOffsetX + 0x24` is evaluated among the pushes.
+  it('nests an arithmetic temporary over a global', () => {
+    const { out, sites } = run([
+      'void f(int nScreenY, int nColor, int nId) {',
+      '  int nY = nScreenY - gnPanelOffsetY;',
+      '  int nX = gnPanelOffsetX + 0x24;',
+      '[GetPlayerData@0x10<,4,1] PlayerData* p = GetPlayerData(nId);',
+      '[DRAW@0x1a<0x10,1,1.1.1.1] DRAW(p, nX, nY, nColor);',
+      '}',
+    ], { globalTypes: { gnPanelOffsetX: 'int', gnPanelOffsetY: 'int' }, writeEffects: { GetPlayerData: {} } });
+    assert.deepStrictEqual(sites, [3]);
+    assert.ok(out.includes('DRAW(GetPlayerData(nId), gnPanelOffsetX + 0x24, nScreenY - gnPanelOffsetY, nColor);'), out);
+  });
+
+  it('leaves an arithmetic temporary over a global the call may write', () => {
+    const { sites } = run([
+      'void f(int nScreenY, int nColor, int nId) {',
+      '  int nX = gnPanelOffsetX + 0x24;',
+      '[GetPlayerData@0x10<,3,1] PlayerData* p = GetPlayerData(nId);',
+      '[DRAW@0x1a<0x10,1,1.1.1] DRAW(p, nX, nColor);',
+      '}',
+    ], { globalTypes: { gnPanelOffsetX: 'int' }, writeEffects: { GetPlayerData: { globals: ['gnPanelOffsetX'] } } });
+    assert.deepStrictEqual(sites, [1]);
   });
 
   it('changes nothing without facts', () => {
