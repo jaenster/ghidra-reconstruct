@@ -424,7 +424,7 @@ function ifKey(n: ASTNode): string | null {
  * A rotated loop's counter, whether its initialisation stands ahead of the `if`, and how
  * many statements stand between that initialisation and the `if`.
  */
-interface Site { v: string; ahead: boolean; gap: number }
+interface Site { v: string; ahead: boolean; gap: number; second?: string }
 
 /** The most statements an initialisation ahead of the `if` moves past. */
 const MAX_GAP = 3;
@@ -555,9 +555,15 @@ function matchSite(
   const inner = loop.body.kind === NodeKind.CompoundStmt ? (loop.body as CompoundStmt).statements : [loop.body];
   if (inner.length === 0) return null;
   const last = inner[inner.length - 1];
-  if (!stepOf(last, v) || hasComment(last)) return null;
+  if (hasComment(last)) return null;
+  let second: string | undefined;
+  if (!stepOf(last, v)) {
+    const u = secondCounter(inner, v, shapeOf);
+    if (!u || !layout || !secondInitBeforeGuard(ifs, body, u, v, layout)) return null;
+    second = u;
+  }
   if (hasOwnContinue(loop.body)) return null;
-  if (opensWithBreakTest(inner.slice(0, -1))) return null;
+  if (opensWithBreakTest(inner.slice(0, second ? -2 : -1))) return null;
   const bound = boundOf(c, v);
   if (bound && !isPlainRead(bound) && computedOnce(ifs, c, layout)) return null;
 
@@ -571,7 +577,128 @@ function matchSite(
     const from = gotoTargets(body, loop.body, new Set());
     for (const l of labels) if (from.has(l)) return null;
   }
-  return { v, ahead: parts.ahead, gap: 0 };
+  return { v, ahead: parts.ahead, gap: 0, ...(second ? { second } : {}) };
+}
+
+/** The variable a step statement assigns or increments, when it is a plain identifier. */
+function stepTarget(s: Statement): string | null {
+  if (s.kind !== NodeKind.ExprStmt) return null;
+  const e = unwrapParens((s as ExprStmt).expression);
+  let t: Expression | null = null;
+  if (e.kind === NodeKind.PostfixExpr) t = (e as PostfixExpr).operand;
+  else if (e.kind === NodeKind.UnaryExpr && ((e as UnaryExpr).operator === '++' || (e as UnaryExpr).operator === '--')) t = (e as UnaryExpr).operand;
+  else if (e.kind === NodeKind.AssignExpr) t = (e as AssignExpr).left;
+  if (!t) return null;
+  const u = unwrapParens(t);
+  return u.kind === NodeKind.Identifier ? (u as Identifier).name : null;
+}
+
+/**
+ * A body that ends in the tested counter's step and then a second counter's step
+ * (`nRow++; nOffset += nWidth;`): the second counter, when neither step mentions the
+ * other's counter, so the two steps may change places.
+ */
+function secondCounter(inner: Statement[], v: string, shapeOf: ExprShape): string | null {
+  if (inner.length < 2) return null;
+  const last = inner[inner.length - 1], prev = inner[inner.length - 2];
+  const u = stepTarget(last);
+  if (!u || u === v || !stepOf(last, u) || !stepOf(prev, v) || hasComment(prev)) return null;
+  const ue = (last as ExprStmt).expression, ve = (prev as ExprStmt).expression;
+  if (!isPlainPure(stepValue(ue)) || !isPlainPure(stepValue(ve))) return null;
+  if (mentions(ue, v) || mentions(ve, u)) return null;
+  // A counter: its step reads it (`u += k`, `u = u + k`, `u++`), not a copy of another value.
+  const ua = unwrapParens(ue);
+  if (ua.kind === NodeKind.AssignExpr && (ua as AssignExpr).operator === '=' && !mentions((ua as AssignExpr).right, u)) return null;
+  // An integer stepped by a constant beside a counter stepped by one is the counter scaled
+  // (a byte offset into a table, TXT_AllocTxt_lowqualityitems 00637500): offset-induction-index
+  // folds the rotated loop into the counter's own index, where a for loop would keep it a
+  // variable of its own.
+  const us = shapeOf({ kind: NodeKind.Identifier, name: u } as unknown as Identifier);
+  if (us && us.stars === 0 && constantStride(ue, u) !== null && constantStride(ve, v) === 1n) return null;
+  return u;
+}
+
+/** The constant a step adds to `name` (`name++`, `name += k`, `name = name + k`), else null. */
+function constantStride(e: Expression, name: string): bigint | null {
+  const x = unwrapParens(e);
+  if (x.kind === NodeKind.PostfixExpr || x.kind === NodeKind.UnaryExpr) {
+    const op = (x as PostfixExpr).operator;
+    return op === '++' ? 1n : op === '--' ? -1n : null;
+  }
+  if (x.kind !== NodeKind.AssignExpr) return null;
+  const a = x as AssignExpr;
+  if (a.operator === '+=') return intLiteral(a.right);
+  if (a.operator === '-=') { const k = intLiteral(a.right); return k === null ? null : -k; }
+  if (a.operator !== '=') return null;
+  const r = unwrapParens(a.right);
+  if (r.kind !== NodeKind.BinaryExpr || (r as BinaryExpr).operator !== '+') return null;
+  const b = r as BinaryExpr, l = unwrapParens(b.left);
+  if (l.kind !== NodeKind.Identifier || (l as Identifier).name !== name) return null;
+  return intLiteral(b.right);
+}
+
+/** The value side of a step; an increment has none (its operand is the counter). */
+function stepValue(e: Expression): Expression {
+  const x = unwrapParens(e);
+  if (x.kind === NodeKind.AssignExpr) return (x as AssignExpr).right;
+  if (x.kind === NodeKind.PostfixExpr) return (x as PostfixExpr).operand;
+  return x.kind === NodeKind.UnaryExpr ? (x as UnaryExpr).operand : x;
+}
+
+/** Whether `n` writes `name`: an assignment to it, or an increment of it. */
+function writes(n: ASTNode, name: string): boolean {
+  const isName = (x: Expression) => {
+    const y = unwrapParens(x);
+    return y.kind === NodeKind.Identifier && (y as Identifier).name === name;
+  };
+  if (n.kind === NodeKind.AssignExpr && isName((n as AssignExpr).left)) return true;
+  if (n.kind === NodeKind.PostfixExpr && isName((n as PostfixExpr).operand)) return true;
+  if (n.kind === NodeKind.UnaryExpr && ((n as UnaryExpr).operator === '++' || (n as UnaryExpr).operator === '--')
+      && isName((n as UnaryExpr).operand)) return true;
+  if (n.kind === NodeKind.UnaryExpr && (n as UnaryExpr).operator === '&' && isName((n as UnaryExpr).operand)) return true;
+  for (const c of getChildren(n)) if (writes(c, name)) return true;
+  return false;
+}
+
+/** The block holding `target` among its statements, and its index there. */
+function holder(n: ASTNode, target: Statement): { stmts: Statement[]; at: number } | null {
+  if (n.kind === NodeKind.CompoundStmt) {
+    const stmts = (n as CompoundStmt).statements;
+    const at = stmts.indexOf(target);
+    if (at >= 0) return { stmts, at };
+  }
+  for (const c of getChildren(n)) {
+    const h = holder(c, target);
+    if (h) return h;
+  }
+  return null;
+}
+
+/**
+ * Whether the second counter `u` is set ahead of the loop where the original sets it: its
+ * initialisation is a statement of the block holding the `if`, the nearest statement before
+ * the `if` that writes `u`, and every code offset its line prints lies before the guard's
+ * conditional branch. VC8 compiles that initialisation ahead of the for loop's first test as
+ * written; where the original set it after the test (in the guarded block, which is where
+ * decl-scope-sink puts a counter the loop alone reads) the rotated loop is the original's.
+ * Without the offsets the loop is left as it is.
+ */
+function secondInitBeforeGuard(ifs: IfStmt, body: CompoundStmt, u: string, v: string, layout: BranchLayoutEvidence): boolean {
+  const ifLine = ifs.location && ifs.location.file !== '<generated>' ? ifs.location.start.line : 0;
+  const jcc = ifLine > 0 ? layout.ifs.get(ifLine) : undefined;
+  if (jcc === undefined) return false;
+  const h = holder(body, ifs);
+  if (!h) return false;
+  for (let i = h.at - 1; i >= 0; i--) {
+    const s = h.stmts[i];
+    if (!writes(s, u)) continue;
+    const init = initOf(s);
+    if (!init || init.v !== u || !isPlainPure(init.x) || mentions(init.x, v) || hasComment(s)) return false;
+    const line = s.location && s.location.file !== '<generated>' ? s.location.start.line : 0;
+    const offs = line > 0 ? layout.lines.get(line) : undefined;
+    return !!offs && offs.length > 0 && offs.every(o => o < jcc);
+  }
+  return false;
 }
 
 /** The for loop of a site; `ahead` is the statement before the `if`, for a site that has its initialisation there. */
@@ -581,9 +708,11 @@ function rewrite(ifs: IfStmt, site: Site, ahead: Statement | null = null): ForSt
   const loop = parts.loop;
   const bodyStmt = loop.body;
   const inner = bodyStmt.kind === NodeKind.CompoundStmt ? (bodyStmt as CompoundStmt).statements : [bodyStmt];
-  const step = inner.length > 0 ? stepOf(inner[inner.length - 1], site.v) : null;
+  // A second counter keeps its step at the end of the body; the tested one's goes into the header.
+  const at = site.second ? inner.length - 2 : inner.length - 1;
+  const step = at >= 0 ? stepOf(inner[at], site.v) : null;
   if (!step) return null;
-  const rest = inner.slice(0, -1);
+  const rest = inner.filter((_s, i) => i !== at);
   const newBody: CompoundStmt = bodyStmt.kind === NodeKind.CompoundStmt
     ? updateNode(bodyStmt as CompoundStmt, { statements: rest })
     : { kind: NodeKind.CompoundStmt, statements: rest, location: bodyStmt.location, leadingTrivia: [], trailingTrivia: [] } as CompoundStmt;

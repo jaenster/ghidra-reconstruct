@@ -355,4 +355,64 @@ describe('rotatedForLoopPlugin', () => {
   // the slots
   if (0 < n) { do { g(i); i++; } while (i < n); } }`);
   });
+  describe('a second counter stepped at the end of the body', () => {
+    // DRLGGRID_AllocGrid 0067cc60: `xor ecx, ecx` (nOffset) and `xor eax, eax` (nRow) at
+    // +0x34/+0x36, ahead of the guard's `jle` at +0x3a.
+    const code = [
+      'void f(int* p, int nWidth, int nHeight) {',
+      '  int nRow;',
+      '  int nOffset;',
+      '  nOffset = 0;',
+      '  nRow = 0;',
+      '  if (0 < nHeight) {',
+      '    do {',
+      '      p[nRow] = nOffset;',
+      '      nRow = nRow + 1;',
+      '      nOffset = nOffset + nWidth;',
+      '    } while (nRow < nHeight);',
+      '  }',
+      '}',
+    ].join('\n');
+    const layout = (init: number[], jcc: number) => ({
+      branchLayout: { lines: new Map([[4, init], [5, [0x36]], [6, [0x38, jcc]]]), ifs: new Map([[6, jcc]]) },
+    });
+
+    it('keeps the second counter ahead of a for loop over the tested one', () => {
+      const out = tx(code, layout([0x34], 0x3a));
+      assert.ok(out.includes('nOffset = 0;\n  for (nRow = 0; nRow < nHeight; nRow = nRow + 1) {\n    p[nRow] = nOffset;\n    nOffset = nOffset + nWidth;\n  }'), out);
+    });
+
+    it('takes the tested counter initialised between them (DRLGGRID_InitGridFromTileData 0067ccc0)', () => {
+      const swapped = code.replace('  nOffset = 0;\n  nRow = 0;', '  nRow = 0;\n  nOffset = 0;');
+      const out = tx(swapped, { branchLayout: { lines: new Map([[4, [0x45]], [5, [0x47]], [6, [0x49, 0x4c]]]), ifs: new Map([[6, 0x4c]]) } });
+      assert.ok(out.includes('nOffset = 0;\n  for (nRow = 0; nRow < nHeight; nRow = nRow + 1) {'), out);
+    });
+
+    it('leaves the loop where the original sets the second counter after the test', () => {
+      same(code, layout([0x40], 0x3a));
+    });
+
+    it('leaves it without the offsets', () => {
+      same(code);
+    });
+
+    it('leaves steps that read each other', () => {
+      same(code.replace('nOffset = nOffset + nWidth;', 'nOffset = nOffset + nRow;'), layout([0x34], 0x3a));
+    });
+
+    // TXT_AllocTxt_lowqualityitems 00637500: a byte offset beside the index is the index scaled.
+    it('leaves an integer stepped by a constant beside a counter stepped by one', () => {
+      same(code.replace('nOffset = nOffset + nWidth;', 'nOffset = nOffset + 0x22;'), layout([0x34], 0x3a));
+    });
+
+    it('takes a pointer stepped beside the counter', () => {
+      const ptr = code.replace('int nOffset;', 'int* nOffset;').replace('nOffset = nOffset + nWidth;', 'nOffset++;').replace('p[nRow] = nOffset;', '*nOffset = nRow;');
+      const out = tx(ptr, layout([0x34], 0x3a));
+      assert.ok(out.includes('for (nRow = 0; nRow < nHeight; nRow = nRow + 1) {'), out);
+    });
+
+    it('leaves a second counter written again between its initialisation and the test', () => {
+      same(code.replace('  nRow = 0;\n', '  nRow = 0;\n  nOffset = g();\n').replace(/\[6, \[/, '[7, ['), layout([0x34], 0x3a));
+    });
+  });
 });
