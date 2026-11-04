@@ -28,6 +28,7 @@ import { callOrderLines } from './call-order-spec.js';
 import { accessOrderLines } from './access-order-spec.js';
 import { rotateSiteLines } from './rotate-sites-spec.js';
 import { storeBaseLines } from './store-bases-spec.js';
+import { callDivideLines } from './call-divides-spec.js';
 import type { BranchLayoutFacts } from '../extract/branch-layout.js';
 import type { CallOrderFacts } from '../extract/call-order.js';
 import type { AccessOrderFacts } from '../extract/access-order.js';
@@ -1773,6 +1774,8 @@ export function generateFunctionImplementation(
           rotateSites: override?.action === 'patch' ? undefined : func.rotateSites,
           // A text patch anchors on the stores as Ghidra printed them.
           storeBases: override?.action === 'patch' ? undefined : func.storeBases,
+          // A text patch anchors on the divisions as Ghidra printed them.
+          callDivides: override?.action === 'patch' ? undefined : func.callDivides,
           // A text patch anchors on the comparisons as Ghidra printed them.
           compareSites: override?.action === 'patch' ? undefined : func.compareSites,
           sehLowering: sehLoweringDecision(func),
@@ -2767,6 +2770,8 @@ function transformDecompiledCode(
     rotateSites?: import('../extract/rotate-sites.js').RotateSiteFacts;
     /** The registers stores are addressed off and LEAs write, per line (extract/store-bases.ts). */
     storeBases?: import('../extract/store-bases.js').StoreBaseFacts;
+    /** The calls the original divides right after they return, per line (extract/call-divides.ts). */
+    callDivides?: import('../extract/call-divides.js').CallDivideFacts;
     /** The function's EH3 frame as `seh-lowering` needs it (codegen/seh-lowering-spec.ts). */
     sehLowering?: SehLoweringDecision;
     /** Addresses the instructions derive from a global's start (codegen/folded-address-spec.ts). */
@@ -2815,6 +2820,10 @@ function transformDecompiledCode(
     // The original's rotates by an immediate, keyed by line of `wrapped` (rotate-sites-spec.ts).
     const rotates = funcBodyMatch && funcBodyMatch.index !== undefined
       ? rotateSiteLines(enclosing?.rotateSites, decompiled, funcBodyMatch.index + funcBodyMatch[0].indexOf('{'), body, preprocessedBody, wrapperPrefix)
+      : undefined;
+    // The calls the original divides at once, keyed by line of `wrapped` (call-divides-spec.ts).
+    const divides = funcBodyMatch && funcBodyMatch.index !== undefined
+      ? callDivideLines(enclosing?.callDivides, decompiled, funcBodyMatch.index + funcBodyMatch[0].indexOf('{'), body, preprocessedBody, wrapperPrefix)
       : undefined;
 
     // Build plugin options for method-call-rewrite when mappings or current context exist
@@ -3577,6 +3586,15 @@ function transformDecompiledCode(
         rotates,
         onSite: (e: { line: number; spelling: string }) =>
           console.warn(`[rotate] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.spelling} on line ${e.line}`),
+      };
+    }
+
+    // A call result the original divides at once is divided in its assignment (call-result-divide.ts).
+    if (divides) {
+      perPluginOptions['call-result-divide'] = {
+        divides,
+        onSite: (e: { line: number; name: string; k: number }) =>
+          console.warn(`[call-divide] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.name} / ${e.k} on line ${e.line}`),
       };
     }
 

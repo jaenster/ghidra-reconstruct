@@ -174,6 +174,12 @@ export interface ExtractedFunction {
    * (extract/store-bases.ts). Absent when there are none or the snapshot predates the field.
    */
   storeBases?: import('./extract/store-bases.js').StoreBaseFacts;
+  /**
+   * The calls whose result the original divides by a power of two right after they return,
+   * per decompile line (extract/call-divides.ts). Absent when there are none or the snapshot
+   * predates the field.
+   */
+  callDivides?: import('./extract/call-divides.js').CallDivideFacts;
 }
 
 /**

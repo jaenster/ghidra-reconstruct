@@ -17,6 +17,7 @@
  *   registerStores register-stores.ts
  *   rotateSites   rotate-sites.ts
  *   storeBases    store-bases.ts
+ *   callDivides   call-divides.ts
  *   labelFlow     label-flow.ts      (listing only; its own script, labels come from the text)
  *
  * Each extractor decompiled every function again; this script decompiles a function once
@@ -49,6 +50,7 @@ import { ZEXT_SITES_JAVA, printsZextCast, parseZextSiteRow } from './zext-sites.
 import { REGISTER_STORES_JAVA, printsConstantStore, parseRegisterStoreRow } from './register-stores.js';
 import { ROTATE_SITES_DECL_JAVA, ROTATE_SITES_LINE_JAVA, printsShiftPair, parseRotateSiteRow } from './rotate-sites.js';
 import { STORE_BASES_DECL_JAVA, STORE_BASES_LINE_DECL_JAVA, STORE_BASES_TOKEN_JAVA, STORE_BASES_LINE_JAVA, printsMemberAddress, parseStoreBaseRow } from './store-bases.js';
+import { CALL_DIVIDES_DECL_JAVA, CALL_DIVIDES_LINE_DECL_JAVA, CALL_DIVIDES_TOKEN_JAVA, CALL_DIVIDES_LINE_JAVA, printsHalvedValue, parseCallDivideRow } from './call-divides.js';
 import { labelsOf, labelFlowItems, labelFlowScript, parseLabelFlow, LABEL_FLOW_SCRIPT } from './label-flow.js';
 import { FactCache, type CachedFacts, type FactEntry } from './fact-cache.js';
 import { createHash } from 'node:crypto';
@@ -71,6 +73,7 @@ import { createHash } from 'node:crypto';
  *   K  ...   the register-stores row (register-stores.ts), when a constant is stored from a register
  *   Q  ...   the rotate-sites row (rotate-sites.ts), when a line's instructions rotate by an immediate
  *   W  ...   the store-bases row (store-bases.ts), when a store or an LEA has an `=` of its own
+ *   V  ...   the call-divides row (call-divides.ts), when a call's result is divided right after it
  *   D  id,full,shape;...   the types the markup named
  */
 export const FUNCTION_FACTS_SCRIPT = `
@@ -252,16 +255,16 @@ ${CALL_PUSHES_JAVA}
           // branch-layout and call-order, over the same lines
           StringBuilder ls = new StringBuilder(), is = new StringBuilder(), es = new StringBuilder(), cs = new StringBuilder();
           StringBuilder argRow = new StringBuilder(), storeRow = new StringBuilder();
-${ROTATE_SITES_DECL_JAVA}${STORE_BASES_DECL_JAVA}          int count = 0;
+${ROTATE_SITES_DECL_JAVA}${STORE_BASES_DECL_JAVA}${CALL_DIVIDES_DECL_JAVA}          int count = 0;
 ${IF_OPERANDS_DECL_JAVA}${EDGES_DECL_JAVA}          for (ghidra.app.decompiler.ClangLine l : ghidra.app.decompiler.component.DecompilerUtils.toLines(r.getCCodeMarkup())) {
             count++;
             java.util.TreeSet<Long> offs = new java.util.TreeSet<>();
             StringBuilder one = new StringBuilder();
             StringBuilder oneArg = new StringBuilder(), oneSt = new StringBuilder();
-            int storeOrd = 0;
+${CALL_DIVIDES_LINE_DECL_JAVA}            int storeOrd = 0;
 ${STORE_BASES_LINE_DECL_JAVA}            for (ghidra.app.decompiler.ClangToken t : l.getAllTokens()) {
               if (t instanceof ghidra.app.decompiler.ClangCommentToken) continue;
-${IF_OPERANDS_TOKEN_JAVA}${EDGES_TOKEN_JAVA}${ACCESS_ORDER_TOKEN_JAVA}${STORE_BASES_TOKEN_JAVA}              ghidra.program.model.address.Address x = t.getMinAddress();
+${IF_OPERANDS_TOKEN_JAVA}${EDGES_TOKEN_JAVA}${ACCESS_ORDER_TOKEN_JAVA}${STORE_BASES_TOKEN_JAVA}${CALL_DIVIDES_TOKEN_JAVA}              ghidra.program.model.address.Address x = t.getMinAddress();
               if (x != null) {
                 long off = x.getOffset() - base;
                 offs.add(off);
@@ -336,7 +339,7 @@ ${IF_OPERANDS_TOKEN_JAVA}${EDGES_TOKEN_JAVA}${ACCESS_ORDER_TOKEN_JAVA}${STORE_BA
             if (one.length() > 0) cs.append(cs.length() > 0 ? ";" : "").append(l.getLineNumber()).append(':').append(one);
             if (oneArg.length() > 0) argRow.append(argRow.length() > 0 ? ";" : "").append(l.getLineNumber()).append(':').append(oneArg);
             if (oneSt.length() > 0) storeRow.append(storeRow.length() > 0 ? ";" : "").append(l.getLineNumber()).append(':').append(oneSt);
-${ROTATE_SITES_LINE_JAVA}${STORE_BASES_LINE_JAVA}            if (offs.isEmpty()) continue;
+${CALL_DIVIDES_LINE_JAVA}${ROTATE_SITES_LINE_JAVA}${STORE_BASES_LINE_JAVA}            if (offs.isEmpty()) continue;
             ls.append(ls.length() > 0 ? ";" : "").append(l.getLineNumber()).append(':');
             boolean first = true;
             for (Long off : offs) {
@@ -450,6 +453,7 @@ ${JUMP_TABLES_JAVA}${ZERO_STORES_JAVA}${MASK_SITES_JAVA}${ZEXT_SITES_JAVA}${REGI
           out.append("A\\t").append(a).append('\\t').append(count).append('\\t').append(argRow).append('\\t').append(storeRow).append('\\n');
           if (qrow.length() > 0) out.append("Q\\t").append(a).append('\\t').append(count).append('\\t').append(qrow).append('\\n');
           if (wrow.length() > 0) out.append("W\\t").append(a).append('\\t').append(count).append('\\t').append(wrow).append('\\n');
+          if (vrow.length() > 0) out.append("V\\t").append(a).append('\\t').append(count).append('\\t').append(vrow).append('\\n');
           if (hrow.length() > 0 || probes.length() > 0) out.append("H\\t").append(a).append('\\t').append(hrow).append('\\t').append(probes).append('\\n');
           if (rrow.length() > 0) out.append("R\\t").append(a).append('\\t').append(rrow).append('\\n');
           if (jrow.length() > 0) out.append("J\\t").append(a).append('\\t').append(jrow).append('\\n');
@@ -486,7 +490,7 @@ println(sb.toString());
  */
 export const FACT_SCRIPT_VERSION = createHash('sha1')
   .update(FUNCTION_FACTS_SCRIPT).update(LABEL_FLOW_SCRIPT).update(functionStampsScript([], []))
-  .update('facts-11')
+  .update('facts-12')
   .digest('hex').slice(0, 16);
 
 export function functionFactsScript(batch: string[], threads = 8, timeout = 60): string {
@@ -526,6 +530,8 @@ export interface FunctionFactRow {
   rotateRow?: string;
   /** The store-bases row, untagged and without the entry. */
   baseRow?: string;
+  /** The call-divides row, untagged and without the entry. */
+  divideRow?: string;
   deps: Record<string, TypeStamp>;
 }
 
@@ -596,6 +602,7 @@ export function parseFunctionFacts(output: string): FunctionFactOutput {
     else if (tag === 'K') cur.storeRow = rest.slice(rest.indexOf('\t') + 1);
     else if (tag === 'Q') cur.rotateRow = rest.slice(rest.indexOf('\t') + 1);
     else if (tag === 'W') cur.baseRow = rest.slice(rest.indexOf('\t') + 1);
+    else if (tag === 'V') cur.divideRow = rest.slice(rest.indexOf('\t') + 1);
     else if (tag === 'D') {
       for (const part of rest ? rest.split(';') : []) {
         const [id, full, shape] = part.split(',');
@@ -675,6 +682,10 @@ export function selectFacts(text: string, entry: string, row: FunctionFactRow, c
     const w = parseStoreBaseRow(row.baseRow);
     if (w) facts.storeBases = w;
   }
+  if (printsHalvedValue(text) && row.divideRow) {
+    const v = parseCallDivideRow(row.divideRow);
+    if (v) facts.callDivides = v;
+  }
   return facts;
 }
 
@@ -710,7 +721,7 @@ export interface FunctionFactStats {
   labelMs: number;
 }
 
-export const FACT_KEYS = ['compareSites', 'branchLayout', 'callOrder', 'accessOrder', 'haltLines', 'stringOps', 'jumpTables', 'zeroStores', 'maskSites', 'zextSites', 'registerStores', 'rotateSites', 'storeBases', 'labelFlow'] as const;
+export const FACT_KEYS = ['compareSites', 'branchLayout', 'callOrder', 'accessOrder', 'haltLines', 'stringOps', 'jumpTables', 'zeroStores', 'maskSites', 'zextSites', 'registerStores', 'rotateSites', 'storeBases', 'callDivides', 'labelFlow'] as const;
 
 /**
  * Attach every per-function fact to the decompiled functions, from the cache where the
@@ -734,7 +745,7 @@ export async function extractFunctionFacts(
     if (!(printsComparison(f.decompiled) || printsBranch(f.decompiled) || printsCallTemporary(f.decompiled)
         || printsAccess(f.decompiled) || printsHaltOrProbe(f.decompiled) || printsRepLoop(f.decompiled)
         || printsSwitch(f.decompiled) || printsMemberZeroStore(f.decompiled) || printsByteWordMask(f.decompiled) || printsZextCast(f.decompiled)
-        || printsConstantStore(f.decompiled) || printsShiftPair(f.decompiled) || printsMemberAddress(f.decompiled)
+        || printsConstantStore(f.decompiled) || printsShiftPair(f.decompiled) || printsMemberAddress(f.decompiled) || printsHalvedValue(f.decompiled)
         || labelsOf(f.decompiled).length > 0)) continue;
     byEntry.set(normalizeEntry(f.address), f);
   }
@@ -887,6 +898,7 @@ function attach(f: ExtractedFunction, facts: CachedFacts): void {
   if (facts.registerStores !== undefined) f.registerStores = facts.registerStores;
   if (facts.rotateSites !== undefined) f.rotateSites = facts.rotateSites;
   if (facts.storeBases !== undefined) f.storeBases = facts.storeBases;
+  if (facts.callDivides !== undefined) f.callDivides = facts.callDivides;
   if (facts.labelFlow !== undefined) f.labelFlow = { ...(f.labelFlow ?? {}), ...facts.labelFlow };
 }
 

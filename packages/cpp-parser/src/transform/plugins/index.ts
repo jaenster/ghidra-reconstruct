@@ -392,6 +392,12 @@ export {
 } from './builtins/rotate-intrinsic.js';
 
 export {
+  callResultDividePlugin,
+  type CallResultDivideOptions,
+  type CallDivideFact,
+} from './builtins/call-result-divide.js';
+
+export {
   paramLoadOrderPlugin,
   DEFAULT_PARAM_LOAD_ORDER,
   type ParamLoadOrderOptions,
@@ -801,6 +807,7 @@ import { nestCallPlugin } from './builtins/nest-call.js';
 import { baseRegisterLoadPlugin } from './builtins/base-register-load.js';
 import { storeOrderPlugin } from './builtins/store-order.js';
 import { rotateIntrinsicPlugin } from './builtins/rotate-intrinsic.js';
+import { callResultDividePlugin } from './builtins/call-result-divide.js';
 import { paramLoadOrderPlugin } from './builtins/param-load-order.js';
 import { searchLoopExitPlugin } from './builtins/search-loop-exit.js';
 import { inlinedStrcpyPlugin } from './builtins/inlined-strcpy.js';
@@ -1002,6 +1009,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   nestCallPlugin,             // Matching: a temporary back into the argument list the original evaluated it in (priority 59.5)
   baseRegisterLoadPlugin,     // Matching: a call argument loaded into its own base register gets its local (priority 59.6)
   rotateIntrinsicPlugin,      // Matching: a shift pair the original rotates by more than 16 becomes _rotl/_rotr (priority 59.65)
+  callResultDividePlugin,     // Matching: a call result the original divides at once is divided in its assignment (priority 59.66)
   storeOrderPlugin,           // Matching: independent stores in the original's instruction order (priority 59.7)
   arrayFillCollapsePlugin,    // Cleanup: collapse arr[i]=0 runs into memset (priority 50)
   aggregateZeroInitPlugin,    // Matching: zero member stores that write a whole local become `T s = {0};` (priority 955)
