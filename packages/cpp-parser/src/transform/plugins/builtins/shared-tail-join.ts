@@ -38,13 +38,29 @@
  *     or T; the function has no goto.
  * Runs bottom-up, so an else-if chain of such arms folds from its last arm outwards.
  *
+ * Arms left as one statement each that differ only in one value were one statement on a
+ * select VC8 tail-duplicated with the rest of the exit, when that value is the
+ * GUID-or-minus-one `!P ? -1 : P->f`: `L = -1;` / `L = P->f;` becomes `L = !P ? -1 : P->f;`,
+ * and `g(.., -1, ..);` / `g(.., P->f, ..);` becomes `g(.., !P ? -1 : P->f, ..);`
+ * (Objects_InitFn63_AncientStatue3 0058d150: `or eax, -1` and the GUID read into one
+ * register, one store; ARENA_BroadcastScoreOnJoin 0053fb30). With nothing else in common
+ * this needs the arm's bare `return;` at the end of the body. Selects between constants,
+ * with a zero arm, or on a value not read through the tested pointer lost matches
+ * (ReadByteShortOrDword 0045c300, DrawSellBtn 00494e40, ANIM_GetEventFrame 006634c0): the
+ * original made a call or store per arm there. P, L, the callee and the other arguments
+ * are pure. `!P ? -1 : u` is unsigned when u is, so it is merged only where the other arm
+ * is a signed type of at most 32 bits, or into a destination of at most 32 bits.
+ *
  * Value-preserving: when c holds, A runs and then T, as before; otherwise B runs and then
- * T. T names nothing A or B declare, so each copy read the same declarations.
+ * T. T names nothing A or B declare, so each copy read the same declarations. A select
+ * evaluates c once, then only its arm's value; everything else it reads is pure, so the
+ * order it is read in against c changes nothing, and the literal converts exactly.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
-  ASTNode, CompoundStmt, Expression, FunctionDecl, Identifier, IfStmt, ParenExpr, ReturnStmt, Statement, VariableDecl,
+  ASTNode, AssignExpr, CallExpr, CompoundStmt, ConditionalExpr, CStyleCastExpr, Expression, ExprStmt, FunctionDecl,
+  Identifier, IfStmt, ParenExpr, ReturnStmt, Statement, UnaryExpr, VariableDecl,
 } from '../../../ast/nodes.js';
 import type { AnyNode } from '../../../ast/nodes.js';
 import { traverseAST, getChildren } from '../../../ast/visitor.js';
@@ -52,10 +68,22 @@ import { emit } from '../../../emit/index.js';
 import { createTransformer, cloneNode, updateNode, type Transformer } from '../../transformer.js';
 import { Stmt } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
+import { isPure } from './pseudo-op-lower.js';
+import { createExprShape, type ExprShape } from './expr-shape.js';
 import { localTypesOf } from './compare-form.js';
 
+const SIGNED32 = new Set(['int', 'signed int', 'int32_t', 'long', 'signed long', 'short', 'int16_t', 'char', 'signed char', 'int8_t', 'BOOL', 'INT', 'LONG', 'SHORT', 'CHAR']);
+const UNSIGNED32 = new Set(['unsigned int', 'unsigned', 'uint32_t', 'DWORD', 'UINT', 'ULONG', 'unsigned long', 'unsigned short', 'uint16_t', 'WORD', 'USHORT', 'unsigned char', 'uint8_t', 'BYTE', 'UCHAR', 'bool']);
+
+
 export interface SharedTailJoinOptions extends PluginOptions {
-  onSite?: (e: { statements: number; line: number }) => void;
+  /** Aggregate name -> member name -> member spelling (the types a negative literal arm needs). */
+  structFields?: Record<string, Record<string, string>>;
+  globalTypes?: Record<string, string>;
+  enclosingVarTypes?: Record<string, string>;
+  fieldTypes?: Record<string, string>;
+  functionReturnTypes?: Record<string, string>;
+  onSite?: (e: { statements: number; line: number; withElse: boolean; select: boolean }) => void;
 }
 
 const text = (s: ASTNode) => emit(s as unknown as AnyNode).replace(/\s+/g, ' ').trim();
@@ -92,6 +120,90 @@ function unwrap(e: Expression): Expression {
   return e;
 }
 
+/** `c ? x : y` built from an arm's condition. */
+function select(c: Expression, x: Expression, y: Expression): Expression {
+  return { kind: NodeKind.ConditionalExpr, condition: cloneNode(c), thenExpr: cloneNode(x), elseExpr: cloneNode(y), leadingTrivia: [], trailingTrivia: [] } as unknown as ConditionalExpr;
+}
+
+/** An integer literal, `-K`, `nullptr` or `NULL` (under casts): converts to any arm's type exactly. */
+function isLiteral(e: Expression): boolean {
+  let u = unwrap(e);
+  while (u.kind === NodeKind.CStyleCastExpr) u = unwrap((u as CStyleCastExpr).expression);
+  if (u.kind === NodeKind.UnaryExpr && (u as UnaryExpr).operator === '-') u = unwrap((u as UnaryExpr).operand);
+  return u.kind === NodeKind.IntegerLiteral || u.kind === NodeKind.NullptrLiteral || (u.kind === NodeKind.Identifier && (u as Identifier).name === 'NULL');
+}
+
+/** The pointer a `!P` / `P == 0` condition tests, or null. */
+function nullTested(c: Expression): string | null {
+  const u = unwrap(c);
+  if (u.kind === NodeKind.UnaryExpr && (u as UnaryExpr).operator === '!') return text(unwrap((u as UnaryExpr).operand));
+  return null;
+}
+
+/** Whether e reads a member through P (`P->f`, `P->a.b`). */
+function readsThrough(e: Expression, p: string | null): boolean {
+  if (!p) return false;
+  for (const n of traverseAST(e)) {
+    if (n.kind === NodeKind.MemberExpr && (n as unknown as { isArrow: boolean }).isArrow
+      && text(unwrap((n as unknown as { object: Expression }).object)) === p) return true;
+  }
+  return false;
+}
+
+function isNegative(e: Expression): boolean {
+  let u = unwrap(e);
+  while (u.kind === NodeKind.CStyleCastExpr) u = unwrap((u as CStyleCastExpr).expression);
+  return u.kind === NodeKind.UnaryExpr && (u as UnaryExpr).operator === '-';
+}
+
+/** A scalar of at most 32 bits whose spelling is known: signed, or any. */
+function intShape(shape: ExprShape, e: Expression, signedOnly: boolean): boolean {
+  const t = shape(e);
+  if (!t || t.stars) return false;
+  return SIGNED32.has(t.base) || (!signedOnly && UNSIGNED32.has(t.base));
+}
+
+/**
+ * `L = x;` / `L = y;` or `f(.., x, ..);` / `f(.., y, ..);`: the one statement with
+ * `c ? x : y` in the place they differ, or null.
+ */
+function mergeArms(c: Expression, sa: Statement, sb: Statement, shape: ExprShape): Statement | null {
+  if (sa.kind !== NodeKind.ExprStmt || sb.kind !== NodeKind.ExprStmt) return null;
+  const ea = unwrap((sa as ExprStmt).expression);
+  const eb = unwrap((sb as ExprStmt).expression);
+  // A literal arm converts to the other arm's type exactly, unless it is negative and the
+  // other arm unsigned: then `c ? -1 : u` is unsigned, which only a destination of at most
+  // 32 bits reads back as -1.
+  const pick = (x: Expression, y: Expression, dest: Expression | null): Expression | null => {
+    if (text(x) === text(y)) return null;
+    const lit = isLiteral(x) ? x : isLiteral(y) ? y : null;
+    if (!lit || !isNegative(lit)) return null;
+    const other = lit === x ? y : x;
+    if (!readsThrough(other, nullTested(c))) return null;
+    if (isNegative(lit) && !isLiteral(other) && !intShape(shape, other, true) && !(dest && intShape(shape, dest, false))) return null;
+    return select(c, x, y);
+  };
+  if (ea.kind === NodeKind.AssignExpr && eb.kind === NodeKind.AssignExpr) {
+    const a = ea as AssignExpr, b = eb as AssignExpr;
+    if (a.operator !== '=' || b.operator !== '=' || text(a.left) !== text(b.left) || !isPure(a.left)) return null;
+    const v = pick(a.right, b.right, a.left);
+    return v ? { ...sa, expression: { ...a, right: v } } as ExprStmt : null;
+  }
+  if (ea.kind === NodeKind.CallExpr && eb.kind === NodeKind.CallExpr) {
+    const a = ea as CallExpr, b = eb as CallExpr;
+    if (text(a.callee) !== text(b.callee) || a.arguments.length !== b.arguments.length || !isPure(a.callee)) return null;
+    const diff = a.arguments.map((x, i) => text(x) !== text(b.arguments[i]));
+    if (diff.filter(Boolean).length !== 1) return null;
+    const i = diff.indexOf(true);
+    if (!a.arguments.every((x, j) => j === i || isPure(x))) return null;
+    const v = pick(a.arguments[i], b.arguments[i], null);
+    if (!v) return null;
+    const args = a.arguments.map((x, j) => (j === i ? v : x));
+    return { ...sa, expression: { ...a, arguments: args } } as ExprStmt;
+  }
+  return null;
+}
+
 /** `return x;` with x a local or parameter of the function. */
 function returnsLocal(s: Statement, locals: ReadonlySet<string>): boolean {
   if (s.kind !== NodeKind.ReturnStmt || !(s as ReturnStmt).value) return false;
@@ -100,7 +212,7 @@ function returnsLocal(s: Statement, locals: ReadonlySet<string>): boolean {
 }
 
 /** Joins in one statement list; `atEnd`: the list is the function body. */
-function joinList(list: Statement[], atEnd: boolean, options: SharedTailJoinOptions, fnLocals: ReadonlySet<string>, returnCounts: ReadonlyMap<string, number>): Statement[] | null {
+function joinList(list: Statement[], atEnd: boolean, options: SharedTailJoinOptions, shape: ExprShape, fnLocals: ReadonlySet<string>, returnCounts: ReadonlyMap<string, number>): Statement[] | null {
   let changed = false;
   for (let i = list.length - 1; i >= 0; i--) {
     const s = list[i];
@@ -142,13 +254,20 @@ function joinList(list: Statement[], atEnd: boolean, options: SharedTailJoinOpti
     if (holdsLabel(a) || holdsLabel(b) || holdsLabel(t)) continue;
     const tNames = named(t);
     if ([...declared(a), ...declared(b)].some(n => tNames.has(n))) continue;
-    if (!shared) continue;
-    const thenBlock = Stmt.compound(a.map(x => cloneNode(x) as Statement));
-    const elseBlock = Stmt.compound(b.map(x => cloneNode(x) as Statement));
-    const joined = { ...ifs, thenBranch: thenBlock, elseBranch: elseBlock } as IfStmt;
+    // Arms that are one statement differing only in a value: one statement on `c ? x : y`.
+    const merged = a.length === 1 && b.length === 1 && isPure(ifs.condition) ? mergeArms(ifs.condition, a[0], b[0], shape) : null;
+    if (!merged && !shared) continue;
+    let joined: Statement;
+    if (merged) {
+      joined = { ...merged, leadingTrivia: ifs.leadingTrivia } as Statement;
+    } else {
+      const thenBlock = Stmt.compound(a.map(x => cloneNode(x) as Statement));
+      const elseBlock = b.length ? Stmt.compound(b.map(x => cloneNode(x) as Statement)) : null;
+      joined = { ...ifs, thenBranch: thenBlock, elseBranch: elseBlock } as IfStmt;
+    }
     list.splice(i, list.length - i, joined, ...t);
     changed = true;
-    options.onSite?.({ statements: k, line: ifs.location?.start.line ?? 0 });
+    options.onSite?.({ statements: k, line: ifs.location?.start.line ?? 0, withElse: b.length > 0, select: !!merged });
   }
   return changed ? list : null;
 }
@@ -158,6 +277,13 @@ function createSharedTailJoinTransformer(options: SharedTailJoinOptions = {}): T
     visitFunctionDecl(fn: FunctionDecl): ASTNode | undefined {
       if (!fn.body) return undefined;
       for (const n of traverseAST(fn.body)) if (n.kind === NodeKind.GotoStmt) return undefined;
+      const shape = createExprShape(localTypesOf(fn), {
+        globalTypes: options.globalTypes ?? {},
+        enclosingVarTypes: options.enclosingVarTypes ?? {},
+        structFields: options.structFields ?? {},
+        fieldTypes: options.fieldTypes ?? {},
+        returnTypes: options.functionReturnTypes ?? {},
+      });
       const fnLocals = new Set<string>(localTypesOf(fn).keys());
       const returnCounts = new Map<string, number>();
       for (const n of traverseAST(fn.body)) {
@@ -170,7 +296,7 @@ function createSharedTailJoinTransformer(options: SharedTailJoinOptions = {}): T
         for (const m of getChildren(n)) visit(m, false);
         if (n.kind === NodeKind.CompoundStmt) {
           const list = (n as CompoundStmt).statements;
-          if (joinList(list, atEnd, options, fnLocals, returnCounts)) changed = true;
+          if (joinList(list, atEnd, options, shape, fnLocals, returnCounts)) changed = true;
         }
       };
       visit(body, true);
