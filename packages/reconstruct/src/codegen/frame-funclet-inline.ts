@@ -163,12 +163,32 @@ function withoutReturns(statements: readonly Statement[]): Statement[] | null {
   return out;
 }
 
+/** The shape `inlineFrameFunclets` considers: a void function with one EBP parameter, the rest in registers. */
+function isFuncletCandidate(f: ExtractedFunction): boolean {
+  return !f.isThunk && !!f.decompiled && /^void\b/.test(f.returnType ?? '')
+    && (f.parameters ?? []).filter(p => p.storage === 'EBP:4').length === 1
+    && (f.parameters ?? []).every(p => /^E[A-Z]{2}:4$/.test(p.storage ?? ''));
+}
+
+/**
+ * Each funclet candidate with every function whose body calls it, by name: the
+ * inlining decision and its output read all of them, so a change to any one is a
+ * change to the units of all (live/dirty-units.ts).
+ */
+export function frameFuncletGroups(functions: readonly ExtractedFunction[]): string[][] {
+  const out: string[][] = [];
+  for (const funclet of functions.filter(isFuncletCandidate)) {
+    const call = new RegExp(`\\b${funclet.name}\\s*\\(`);
+    const callers = functions.filter(f => f !== funclet && f.decompiled && f.decompiled.includes(funclet.name) && call.test(f.decompiled));
+    out.push([funclet.name, ...callers.map(f => f.name)]);
+  }
+  return out;
+}
+
 export function inlineFrameFunclets(functions: readonly ExtractedFunction[]): FrameFuncletResult {
   const refusals: string[] = [];
   const inlined: FrameFuncletInline[] = [];
-  const candidates = functions.filter(f => !f.isThunk && f.decompiled && /^void\b/.test(f.returnType ?? '')
-    && (f.parameters ?? []).filter(p => p.storage === 'EBP:4').length === 1
-    && (f.parameters ?? []).every(p => /^E[A-Z]{2}:4$/.test(p.storage ?? '')));
+  const candidates = functions.filter(isFuncletCandidate);
   if (candidates.length === 0) return { functions: [...functions], inlined, refusals };
 
   const replaced = new Map<ExtractedFunction, ExtractedFunction>();

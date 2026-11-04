@@ -42,6 +42,8 @@
 
 import { readFile } from 'node:fs/promises';
 import { hashFunction, hashDataType, hashGlobal } from '@ghidra-mcp/reconstruct/modules/buildinfo';
+import { globalRunReaders } from '@ghidra-mcp/reconstruct/codegen/index';
+import { frameFuncletGroups } from '@ghidra-mcp/reconstruct/codegen/frame-funclet-inline';
 import type { ExtractedFunction, ExtractedDataType, AnalyzedDataSymbol } from '@ghidra-mcp/reconstruct';
 
 interface SerializedDep {
@@ -401,6 +403,69 @@ export function selectDirtyUnits(inputs: SelectInputs): DirtySelection {
       continue;
     }
     if (deps.some(d => changedSet.has(d.symbol) || valueTypes.has(d.symbol))) dirty.add(m.unitName);
+  }
+
+  // ...or READS one by address. Several rules spell a body from a global the body
+  // does not name, found by the addresses the function's instructions use:
+  // `exact-float-constant` respells a rounded literal from the value of the float
+  // datum an instruction reads; `folded-address-rebase` and `global-distance-index`
+  // respell a folded address through the table that holds it. No dependency edge
+  // carries a change of that global, so the reader is found by its operand facts: a
+  // unit is dirty when one of its functions references an address inside a changed
+  // global's extent, or the address of a global that is gone.
+  if (changedGlobalAddrs.size > 0) {
+    const extents: Array<[number, number]> = [];
+    const live = new Set<number>();
+    for (const g of globals) {
+      if (!g.address || !changedGlobalAddrs.has(g.address.toLowerCase())) continue;
+      const a = Number.parseInt(g.address.replace(/^.*:/, ''), 16);
+      if (!Number.isSafeInteger(a)) continue;
+      live.add(a);
+      const size = Number(g.size);
+      extents.push([a, a + (Number.isSafeInteger(size) && size > 0 ? size : 1)]);
+    }
+    for (const key of changedGlobalAddrs) {
+      const a = Number.parseInt(key.replace(/^.*:/, ''), 16);
+      if (Number.isSafeInteger(a) && !live.has(a)) extents.push([a, a + 1]);
+    }
+    const inChanged = (hex: string | undefined): boolean => {
+      if (!hex) return false;
+      const v = Number.parseInt(String(hex).replace(/^.*:/, ''), 16);
+      return Number.isSafeInteger(v) && extents.some(([lo, hi]) => v >= lo && v < hi);
+    };
+    const readers = new Set<string>();
+    for (const f of functions) {
+      const o = f.operandRefs;
+      if (!o) continue;
+      if (o.refs.some(r => inChanged(r.to) || inChanged(r.base))
+          || (o.derived ?? []).some(d => inChanged(d.value))
+          || (o.scalars ?? []).some(sc => inChanged(sc.value))) readers.add(f.name);
+    }
+    for (const m of buildInfo.modules) {
+      if (dirty.has(m.unitName)) continue;
+      if ((m.functionNames ?? []).some(n => readers.has(n))) dirty.add(m.unitName);
+    }
+  }
+
+  // `global-run-clear` clears a memset's run of globals one at a time, BY NAME, from
+  // the body that names only the first: a member renamed, resized or gone changes
+  // that body. And `frame-funclet-inline` puts a `__finally` funclet back into its
+  // one caller and stops emitting it: the caller's unit depends on the funclet's
+  // body, and the funclet's unit on how many callers it has. Both are found here.
+  if (changedSet.size > 0) {
+    const readers = new Set<string>();
+    if (changedGlobalAddrs.size > 0) {
+      for (const [func, member] of globalRunReaders(globals, functions)) {
+        if (changedSet.has(member)) readers.add(func);
+      }
+    }
+    for (const group of frameFuncletGroups(functions)) {
+      if (group.some(n => changedSet.has(n))) for (const n of group) readers.add(n);
+    }
+    for (const m of buildInfo.modules) {
+      if (dirty.has(m.unitName)) continue;
+      if ((m.functionNames ?? []).some(n => readers.has(n))) dirty.add(m.unitName);
+    }
   }
 
   // Which changed symbols would have nowhere to be emitted.
