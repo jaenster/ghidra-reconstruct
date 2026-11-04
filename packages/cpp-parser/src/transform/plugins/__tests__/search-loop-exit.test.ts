@@ -32,6 +32,43 @@ const search = (exit: string, after = '') => [
 ].join('\n');
 
 describe('search-loop-exit', () => {
+  // UpdateLifeAndArea 00479010: the guard tests the global the search starts from.
+  it('takes a guard on the value the pointer was just given', () => {
+    const code = [
+      'Node *gpHead;',
+      'void f(int nId, int v) {',
+      '  Node *p;',
+      '  p = gpHead;',
+      '  if (!gpHead) { return; }',
+      '  while (p->nId != nId) {',
+      '    p = p->pNext;',
+      '    if (!p) { return; }',
+      '  }',
+      '  p->nId = v;',
+      '}',
+    ].join('\n');
+    const { out, sites } = run(code);
+    assert.deepStrictEqual(sites, ['f:p']);
+    assert.ok(out.includes('p = gpHead; while (p) { if (p->nId == nId) break; p = p->pNext; } if (!p) { return; } p->nId = v;'), out);
+  });
+
+  it('leaves a guard on a value the pointer was not given', () => {
+    const code = [
+      'Node *gpHead; Node *gpOther;',
+      'void f(int nId, int v) {',
+      '  Node *p;',
+      '  p = gpHead;',
+      '  if (!gpOther) { return; }',
+      '  while (p->nId != nId) {',
+      '    p = p->pNext;',
+      '    if (!p) { return; }',
+      '  }',
+      '  p->nId = v;',
+      '}',
+    ].join('\n');
+    assert.deepStrictEqual(run(code).sites, []);
+  });
+
   it('loops on the pointer and tests it once after the loop', () => {
     const { out, sites } = run(search('return -1;'));
     assert.deepStrictEqual(sites, ['f:p']);

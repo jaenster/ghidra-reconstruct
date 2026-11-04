@@ -35,6 +35,11 @@
  *   - S holds no `break` or `continue` of the loop, no label and no goto, and declares no
  *     name R mentions (R moves out of S's scope).
  * A copy of the exit test straight after the loop is redundant then and is dropped.
+ *
+ * The guard may test the value X was given by the statement right before it instead of X
+ * (`p = gpHead; if (!gpHead) return; while (p->k != k) ...`, UpdateLifeAndArea 00479010):
+ * that value is a name or a member read through names only, so nothing between the two
+ * reads can change it and `!gpHead` is `!X` there. The exit after the loop tests X.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -76,6 +81,46 @@ function nullTested(e: Expression): string | null {
     if (l.kind === NodeKind.Identifier && isNullLiteral(b.right)) return (l as Identifier).name;
   }
   return null;
+}
+
+/** The expression a `!E` / `E == 0` test is about. */
+function nullTestedExpr(e: Expression): Expression | null {
+  const u = unwrap(e);
+  if (u.kind === NodeKind.UnaryExpr && (u as UnaryExpr).operator === '!') return unwrap((u as UnaryExpr).operand);
+  if (u.kind === NodeKind.BinaryExpr && (u as BinaryExpr).operator === '==' && isNullLiteral((u as BinaryExpr).right)) {
+    return unwrap((u as BinaryExpr).left);
+  }
+  return null;
+}
+
+/**
+ * `X = E;` or `T X = E;`: the local X and the value E it is given, E a read of a name or of
+ * a member through names only (no call, write, subscript or dereference that could alias X).
+ */
+function copyOf(s: Statement | undefined): { x: string; from: Expression } | null {
+  if (!s) return null;
+  let x: string | null = null, from: Expression | null = null;
+  if (s.kind === NodeKind.ExprStmt) {
+    const e = unwrap((s as unknown as { expression: Expression }).expression);
+    if (e.kind !== NodeKind.AssignExpr) return null;
+    const a = e as unknown as { operator: string; left: Expression; right: Expression };
+    if (a.operator !== '=' || unwrap(a.left).kind !== NodeKind.Identifier) return null;
+    x = (unwrap(a.left) as Identifier).name;
+    from = unwrap(a.right);
+  } else if (s.kind === NodeKind.DeclStmt) {
+    const ds = (s as unknown as { declarations: ASTNode[] }).declarations;
+    if (ds.length !== 1 || ds[0].kind !== NodeKind.VariableDecl) return null;
+    const v = ds[0] as VariableDecl;
+    const init = (v as unknown as { initializer?: Expression | null }).initializer;
+    if (!init) return null;
+    x = v.name.name;
+    from = unwrap(init);
+  }
+  if (!x || !from) return null;
+  for (const n of traverseAST(from)) {
+    if (n.kind !== NodeKind.Identifier && n.kind !== NodeKind.QualifiedId && n.kind !== NodeKind.MemberExpr) return null;
+  }
+  return { x, from };
 }
 
 function stmts(s: Statement): Statement[] {
@@ -193,15 +238,26 @@ function rewriteBlock(block: CompoundStmt, facts: FnFacts, report: (v: string) =
     const guard = g as IfStmt;
     const loop = l as WhileStmt;
     if (guard.elseBranch || guard.init) continue;
-    const x = nullTested(guard.condition);
-    if (!x || !facts.locals.has(x) || facts.addressed.has(x)) continue;
+    let x = nullTested(guard.condition);
+    // `X = G; if (!G) R; while (...)`: the guard tests the value X was just given (a global
+    // the search starts from, UpdateLifeAndArea 00479010), so it is the guard on X.
+    let viaCopy = false;
+    if (!x || !facts.locals.has(x)) {
+      const c = copyOf(list[i - 1]);
+      const tested = nullTestedExpr(guard.condition);
+      if (!c || !tested || !nodesEqual(c.from, tested)) continue;
+      x = c.x;
+      viaCopy = true;
+    }
+    if (!facts.locals.has(x) || facts.addressed.has(x)) continue;
     if (!endsInReturn(guard.thenBranch)) continue;
     if (loop.body.kind !== NodeKind.CompoundStmt) continue;
     const body = (loop.body as CompoundStmt).statements;
     const last = body[body.length - 1];
     if (!last || last.kind !== NodeKind.IfStmt) continue;
     const bottom = last as IfStmt;
-    if (bottom.elseBranch || bottom.init || !nodesEqual(bottom.condition, guard.condition)) continue;
+    if (bottom.elseBranch || bottom.init) continue;
+    if (viaCopy ? nullTested(bottom.condition) !== x : !nodesEqual(bottom.condition, guard.condition)) continue;
     if (!sameExit(bottom.thenBranch, guard.thenBranch)) continue;
     if (!isPure(loop.condition) || isShortCircuit(loop.condition)) continue;
     const s = body.slice(0, -1);
@@ -216,11 +272,11 @@ function rewriteBlock(block: CompoundStmt, facts: FnFacts, report: (v: string) =
     } as unknown as IfStmt;
     const newBody = { ...(loop.body as CompoundStmt), statements: [stop, ...s] } as CompoundStmt;
     const newLoop = { ...loop, condition: ident(x, loop.condition), body: newBody, leadingTrivia: guard.leadingTrivia } as WhileStmt;
-    const exit = { ...guard, leadingTrivia: [] } as IfStmt;
+    const exit = { ...guard, condition: cloneNode(bottom.condition), leadingTrivia: [] } as IfStmt;
     let take = 2;
     const after = list[i + 2];
     if (after && after.kind === NodeKind.IfStmt && !(after as IfStmt).elseBranch
-      && nodesEqual((after as IfStmt).condition, guard.condition) && sameExit((after as IfStmt).thenBranch, guard.thenBranch)) take = 3;
+      && nodesEqual((after as IfStmt).condition, exit.condition) && sameExit((after as IfStmt).thenBranch, guard.thenBranch)) take = 3;
     list.splice(i, take, newLoop, exit);
     changed = true;
     report(x);
