@@ -3511,6 +3511,12 @@ function transformDecompiledCode(
     if (enclosing?.compareSites) {
       perPluginOptions['strlen-difference'] = { compareSites: enclosing.compareSites };
     }
+    // A materialised comparison spelled as VC8 compiles the original's setcc or neg/sbb
+    // (bool-select-form.ts): the rows give each comparison's flag reader, the decompile the
+    // neg/sbb selects the generator folds.
+    if (enclosing?.compareSites) {
+      perPluginOptions['bool-select-form'] = { compareSites: enclosing.compareSites, decompile: decompiled };
+    }
     // A temporary goes back into the argument list where the original evaluated the
     // arguments right of it first (nest-call.ts); without the facts nothing changes.
     if (callOrder) {

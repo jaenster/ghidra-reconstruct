@@ -414,6 +414,11 @@ export {
 } from './builtins/strlen-difference.js';
 
 export {
+  boolSelectFormPlugin,
+  type BoolSelectFormOptions,
+} from './builtins/bool-select-form.js';
+
+export {
   accumulateSumPlugin,
   type AccumulateSumOptions,
 } from './builtins/accumulate-sum.js';
@@ -781,6 +786,7 @@ import { shortLocalWidenPlugin } from './builtins/short-local-widen.js';
 import { guardNullNestPlugin } from './builtins/guard-null-nest.js';
 import { returnCopySplitPlugin, returnCopyJoinPlugin } from './builtins/return-copy-shape.js';
 import { strlenDifferencePlugin } from './builtins/strlen-difference.js';
+import { boolSelectFormPlugin } from './builtins/bool-select-form.js';
 import { recordGetterGuardPlugin } from './builtins/record-getter-guard.js';
 import { recordGetterSplitPlugin } from './builtins/record-getter-split.js';
 import { armConstantCallPlugin } from './builtins/arm-constant-call.js';
@@ -996,6 +1002,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   returnCopySplitPlugin,      // Matching: an else-if chain whose first arm falls into a constant return writes the return in that arm (priority 989.975)
   returnCopyJoinPlugin,       // Matching: an arm and a guard returning one constant before another final return become an else-if join (priority 989.98)
   strlenDifferencePlugin,     // Matching: an inlined strlen scan's difference from its start is the length (priority 989.985)
+  boolSelectFormPlugin,       // Matching: a materialised comparison spelled for the original's setcc or neg/sbb, from the compare sites (priority 989.99)
   paramCheckBlockPlugin,      // Matching: a Storm parameter check compiled as one neg/sbb mask chain -> a D2_CHECKS block (priority 980)
   inlinedCallRestorePlugin,   // Matching: a call where the decompiler printed an inlined helper's body (priority 0.5)
   gotoCrossesInitPlugin,      // Late: split T x=e; → T x; x=e; for goto-crossed locals (priority 700)
