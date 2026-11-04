@@ -61,3 +61,17 @@ export function dataAtAddress(extents: Extents, v: number): string | null {
   }
   return null;
 }
+
+/**
+ * The data addresses a function's instructions read or write (its operand references),
+ * normalized as `normalizeDataAddress` does, for `exact-float-constant`.
+ */
+export function referencedDataAddresses(func: Pick<ExtractedFunction, 'operandRefs'>): string[] {
+  const refs = func.operandRefs?.refs ?? [];
+  const out = new Set<string>();
+  for (const r of refs) {
+    const key = String(r.to ?? '').replace(/^.*:/, '').replace(/^0x/i, '').toLowerCase().replace(/^0+(?=.)/, '');
+    if (key) out.add(key);
+  }
+  return [...out].sort();
+}

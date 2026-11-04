@@ -3522,6 +3522,30 @@ function stringConstantExtents(
 }
 
 /**
+ * Address -> the exact value of the scalar `float`/`double` datum there, for
+ * `exact-float-constant`: a function's instruction references name the constants it
+ * reads, and this says what each one holds. The value is the model's, which the
+ * extraction reads from the bytes (extract/exact-floats.ts). An address two records
+ * value differently, or a value that is not a number, is left out.
+ */
+export function floatConstantValues(globals: readonly AnalyzedDataSymbol[]): Record<string, { name: string; value: number }> {
+  const out: Record<string, { name: string; value: number }> = {};
+  const ambiguous = new Set<string>();
+  for (const g of globals) {
+    if (!/^\s*(float|double)\s*$/.test(g.dataType ?? '')) continue;
+    const text = (g.value ?? '').trim();
+    if (!/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(text)) continue;
+    const value = Number.parseFloat(text);
+    const key = normalizeDataAddress(String(g.address ?? ''));
+    if (!key || ambiguous.has(key)) continue;
+    const prior = out[key];
+    if (prior && !Object.is(prior.value, value)) { ambiguous.add(key); delete out[key]; continue; }
+    out[key] = { name: g.suggestedName || g.name, value };
+  }
+  return out;
+}
+
+/**
  * Global name -> the size Ghidra declares for it, unclamped (`buildGlobalAddressExtentTables`
  * clamps an extent at the next label, which a label inside an object shortens). A name two
  * records give different sizes is left out.
@@ -6665,6 +6689,7 @@ export function buildFuncPtrArgCastTables(
     stringConstantNames,
     stringLiteralAddresses: stringLiteralAddresses(strings),
     globalDeclaredSizes: declaredGlobalSizes(globals),
+    floatConstantValues: floatConstantValues(globals),
     varArgFunctions: [...varArgFunctions],
     writeEffects: build.writeEffects === false ? undefined : genMark('setup/write-effects', () => buildWriteEffects(functions, globalTypes, undefined, {
       globals, aggregates: { layouts: structLayouts, unions: unionNames, sizes: aggregateSizes, typedefs: typedefTargets },

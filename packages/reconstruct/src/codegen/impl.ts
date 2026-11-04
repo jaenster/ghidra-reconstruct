@@ -39,7 +39,7 @@ import { getGlobalReferenceAliases, globalAliasComment } from './global-aliases.
 import { globalGuardLine, guardQualifiedName, hasDefinitionInitializer } from './global-guards.js';
 import { sehLoweringDecision, type SehLoweringDecision } from './seh-lowering-spec.js';
 import { displacementTargets, foldedAddressFacts, type FoldedAddressFact } from './folded-address-spec.js';
-import { immediateConstantFacts, dataAtAddress, type ImmediateConstantFact } from './immediate-constant-spec.js';
+import { immediateConstantFacts, referencedDataAddresses, dataAtAddress, type ImmediateConstantFact } from './immediate-constant-spec.js';
 import { compareFormSpec, type CompareFormSpec } from './compare-form-spec.js';
 import { repStringOps } from './rep-string-spec.js';
 import { vc8FormSpec, type Vc8FormSpec } from './vc8form-spec.js';
@@ -909,6 +909,8 @@ export interface FuncPtrArgCastTables {
   stringConstantNames?: string[];
   /** Global name -> the size Ghidra declares, not clamped at the next label. */
   globalDeclaredSizes?: Record<string, number>;
+  /** Address (normalized) -> the exact value of the float/double datum there. */
+  floatConstantValues?: Record<string, { name: string; value: number }>;
   /** A string's text -> the one address it is at (texts at two addresses are absent). */
   stringLiteralAddresses?: Record<string, number>;
   /**
@@ -1775,6 +1777,7 @@ export function generateFunctionImplementation(
           foldedAddresses: foldedAddressFacts(func),
           displacementTargets: displacementTargets(func),
           immediateConstants: immediateConstantFacts(func),
+          referencedDataAddresses: referencedDataAddresses(func),
           pushSlotInits: pushSlotInits(func),
           // A text patch anchors on the comparisons as Ghidra printed them.
           compareForm: override?.action === 'patch' ? undefined : compareFormSpec(func) ?? undefined,
@@ -2852,6 +2855,8 @@ function transformDecompiledCode(
     displacementTargets?: number[];
     /** Immediates the instructions hold as constants, not addresses (codegen/immediate-constant-spec.ts). */
     immediateConstants?: ImmediateConstantFact[];
+    /** The data addresses this function's instructions reference (operandRefs), normalized. */
+    referencedDataAddresses?: string[];
     /** Locals in a prologue `PUSH reg` slot, with the register parameter the push stored. */
     pushSlotInits?: Array<{ local: string; value: string }>;
     /** Each comparison's source form, from its CMP/TEST and Jcc (codegen/compare-form-spec.ts). */
@@ -3251,6 +3256,18 @@ function transformDecompiledCode(
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         enclosingVarTypes,
       };
+      const floatValues = context.funcPtrArgCasts.floatConstantValues;
+      const floatConstants = floatValues
+        ? [...new Set(enclosing?.referencedDataAddresses ?? [])].flatMap(a => floatValues[a] ? [floatValues[a]] : [])
+        : [];
+      if (floatConstants.length > 0) {
+        perPluginOptions['exact-float-constant'] = {
+          constants: floatConstants,
+          onRewrite: (r: { name: string; from: string; to: string }) =>
+            console.warn(`[float] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${r.from} -> ${r.to} (${r.name}, read by the instruction)`),
+          onRefusal: (reason: string) => console.warn(`[float] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: left as printed: ${reason}`),
+        };
+      }
       if (enclosing?.immediateConstants && enclosing.immediateConstants.length > 0) {
         const extents = context.funcPtrArgCasts.dataExtents ?? [];
         perPluginOptions['immediate-not-address'] = {

@@ -685,6 +685,7 @@ export { biasedTableIndexPlugin } from './builtins/biased-table-index.js';
 export { indexBaseBeforeObjectPlugin, createIndexBaseBeforeObjectTransformer } from './builtins/index-base-before-object.js';
 export { foldedAddressRebasePlugin, type FoldedAddress, type FoldedAddressRebaseOptions } from './builtins/folded-address-rebase.js';
 export { globalDistanceIndexPlugin, type GlobalDistanceIndexOptions } from './builtins/global-distance-index.js';
+export { exactFloatConstantPlugin, createExactFloatConstantTransformer, significantDigits, exactDecimal, type ExactFloatConstantOptions } from './builtins/exact-float-constant.js';
 export { globalRunClearPlugin, globalRunMembers, globalRunSpan, type GlobalRunClearOptions, type GlobalRunMember } from './builtins/global-run-clear.js';
 export { immediateNotAddressPlugin, type ImmediateNotAddressOptions } from './builtins/immediate-not-address.js';
 export { importAddressForwarderPlugin, IMPORT_ADDRESS_FORWARDERS } from './builtins/import-address-forwarder.js';
@@ -789,6 +790,7 @@ import { indexBaseBeforeObjectPlugin } from './builtins/index-base-before-object
 import { foldedAddressRebasePlugin } from './builtins/folded-address-rebase.js';
 import { globalDistanceIndexPlugin } from './builtins/global-distance-index.js';
 import { globalRunClearPlugin } from './builtins/global-run-clear.js';
+import { exactFloatConstantPlugin } from './builtins/exact-float-constant.js';
 import { immediateNotAddressPlugin } from './builtins/immediate-not-address.js';
 import { importAddressForwarderPlugin } from './builtins/import-address-forwarder.js';
 import { unsignedRangeComparePlugin } from './builtins/unsigned-range-compare.js';
@@ -984,6 +986,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   indexBaseBeforeObjectPlugin, // Correctness: &DAT_x + i*C just below a global G → (uint8_t*)&G - d + i*C (priority 12)
   foldedAddressRebasePlugin,   // Correctness: a folded MOV X; SUB d address respelled X - n, from the instruction refs (priority 13)
   globalDistanceIndexPlugin,   // Correctness: (int)(p[-k].m + n) that is p - &G, from an encoded reference to G -> (int)((intptr_t)p - (intptr_t)&G) (priority 13)
+  exactFloatConstantPlugin,    // Correctness: a float literal the decompiler rounded -> the exact value of the memory constant read (priority 8)
   globalRunClearPlugin,        // Correctness: memset(&G, 0, N) past G over the run of globals after it -> one clear per object (priority 13)
   adjShiftedPointerPlugin,     // Correctness: ADJ(p) on a shifted pointer -> (Container*)((char*)p - k), its containing record (priority 11)
   deadOutSlotStorePlugin,      // Correctness: a PUSH-reg slot store the next call overwrites through &local before any read -> dropped (priority 12.5)
