@@ -72,6 +72,8 @@ export function buildWorkerCommand(tool: string, params: Params): WorkerCommand 
       };
     case 'list_data_symbols':
       return { command: 'get_global_variables', params: pick(params, ['offset', 'limit', 'filter', 'regex', 'segment', 'sortBy', 'dataType']) };
+    case 'read_memory':
+      return { command: 'read_memory', params: pick(params, ['address', 'length']) };
     case 'read_data_value':
       return { command: 'read_data_value', params: pick(params, ['address']) };
     case 'list_data_types':

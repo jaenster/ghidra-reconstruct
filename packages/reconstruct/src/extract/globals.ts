@@ -9,6 +9,7 @@
 import { mapWindowed, envConcurrency, listingPageSize } from './pool.js';
 import type { GhidraConnection, ExtractedGlobal, AnalyzedDataSymbol, DataSymbolScope, DataValue } from '../types.js';
 import { isStructType } from '../codegen/platform-types.js';
+import { fetchExactFloatData } from './exact-floats.js';
 
 /**
  * Strip namespace prefix from a qualified function name.
@@ -626,8 +627,17 @@ export async function fetchInitializedData(
       && (g.size > 4 || isStructType(g.dataType) || /\[\d+\]\s*$/.test(g.dataType ?? ''))
   );
 
-  if (candidates.length === 0) return;
+  if (candidates.length > 0) await fetchStructuredData(connection, candidates, onProgress);
+  // Ghidra's text for a float datum is rounded; its bytes are not (exact-floats.ts).
+  // After the structured read, which is the value this corrects.
+  await fetchExactFloatData(connection, globals);
+}
 
+async function fetchStructuredData(
+  connection: GhidraConnection,
+  candidates: AnalyzedDataSymbol[],
+  onProgress?: (fetched: number, total: number) => void
+): Promise<void> {
   // Independent reads, so they are kept `GHIDRA_DATA_CONCURRENCY` deep rather than
   // sent in flights of 20 that each wait for their slowest member. Each result is
   // stored on its own global, so completion order cannot change the output.
