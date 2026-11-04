@@ -32,15 +32,30 @@
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, AssignExpr, CallExpr, CompoundStmt, DeclStmt, Expression, ExprStmt, FunctionDecl, Identifier,
-  MemberExpr, ParenExpr, Statement, UnaryExpr, VariableDecl, PostfixExpr,
+  MemberExpr, ParenExpr, Statement, UnaryExpr, VariableDecl, PostfixExpr, CStyleCastExpr, PointerType,
+  TypeNode,
 } from '../../../ast/nodes.js';
 import { traverseAST } from '../../../ast/visitor.js';
 import { emit } from '../../../emit/index.js';
 import { createTransformer, updateNode, cloneNode, type Transformer } from '../../transformer.js';
 import { Expr } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
+import { placed, type AccessOrderEvidence } from './access-order-evidence.js';
+
+/** One `=` of a line: a MOV to memory off `reg` + `disp` (`s`), or an LEA into `reg` (`l`). */
+export interface StoreBaseFact {
+  ord: number;
+  kind: 's' | 'l';
+  reg: string;
+  disp: number;
+}
 
 export interface HeldAddressMemberOptions extends PluginOptions {
+  /** Parsed-text line -> the registers its `=` tokens store off or LEA into (reconstruct
+   *  extract/store-bases.ts). Absent: only the NextLink evidence applies. */
+  storeBases?: ReadonlyMap<number, readonly StoreBaseFact[]>;
+  /** The store widths per line, for a link held at an integer type (`uint32_t *`). */
+  accessOrder?: AccessOrderEvidence;
   onSite?: (e: { function: string; name: string; uses: number }) => void;
 }
 
@@ -58,7 +73,9 @@ function pathRoot(e: Expression): string | null {
     if (m.member.kind !== NodeKind.Identifier) return null;
     const obj = unwrap(m.object);
     if (m.isArrow) {
-      // The one dereference allowed is the root's own value.
+      // The one dereference allowed is the root's own value (`this` included, which nothing
+      // writes and whose address cannot be taken).
+      if (obj.kind === NodeKind.ThisExpr) return 'this';
       return obj.kind === NodeKind.Identifier ? (obj as Identifier).name : null;
     }
     cur = obj;
@@ -66,15 +83,15 @@ function pathRoot(e: Expression): string | null {
   return cur.kind === NodeKind.Identifier ? (cur as Identifier).name : null;
 }
 
-/** `T* p = &E;` / `p = &E;`: p and E. */
-function definition(s: Statement): { name: string; path: Expression; decl: boolean } | null {
-  let name: string; let init: Expression | null | undefined; let decl = false;
+/** `T* p = &E;` / `p = &E;`, or the same through a cast `(U *)&E`: p and E. */
+function definition(s: Statement): { name: string; path: Expression; decl: boolean; cast: TypeNode | null; type: TypeNode | null } | null {
+  let name: string; let init: Expression | null | undefined; let decl = false; let type: TypeNode | null = null;
   if (s.kind === NodeKind.DeclStmt) {
     const d = (s as DeclStmt).declarations;
     if (d.length !== 1 || d[0].kind !== NodeKind.VariableDecl) return null;
     const v = d[0] as VariableDecl;
     if (!v.initializer || v.directInit || v.copyListInit || v.specifiers.length > 0) return null;
-    name = v.name.name; init = v.initializer as Expression; decl = true;
+    name = v.name.name; init = v.initializer as Expression; decl = true; type = v.type;
   } else if (s.kind === NodeKind.ExprStmt) {
     const e = unwrap((s as ExprStmt).expression);
     if (e.kind !== NodeKind.AssignExpr || (e as AssignExpr).operator !== '=') return null;
@@ -82,10 +99,12 @@ function definition(s: Statement): { name: string; path: Expression; decl: boole
     if (l.kind !== NodeKind.Identifier) return null;
     name = (l as Identifier).name; init = (e as AssignExpr).right;
   } else return null;
-  const u = unwrap(init as Expression);
+  let u = unwrap(init as Expression);
+  let cast: TypeNode | null = null;
+  if (u.kind === NodeKind.CStyleCastExpr) { cast = (u as CStyleCastExpr).type; u = unwrap((u as CStyleCastExpr).expression); }
   if (u.kind !== NodeKind.UnaryExpr || (u as UnaryExpr).operator !== '&') return null;
   const path = unwrap((u as UnaryExpr).operand);
-  return pathRoot(path) ? { name, path, decl } : null;
+  return pathRoot(path) ? { name, path, decl, cast, type } : null;
 }
 
 function isName(e: Expression, n: string): boolean {
@@ -122,6 +141,74 @@ function declCount(root: ASTNode, n: string): number {
   return k;
 }
 
+const INTEGER_WIDTH: Record<string, number> = {
+  uint8_t: 1, int8_t: 1, char: 1, uint16_t: 2, int16_t: 2, short: 2, uint32_t: 4, int32_t: 4, int: 4, uint: 4,
+};
+
+/** The width of `T` in a `T *` spelled with a plain integer builtin; undefined otherwise. */
+function pointeeWidth(t: TypeNode | null): number | undefined {
+  if (!t || t.kind !== NodeKind.PointerType) return undefined;
+  return INTEGER_WIDTH[emit((t as PointerType).pointee as never).replace(/\s+/g, ' ').trim()];
+}
+
+/** The line's `=` facts when statement s is alone on its line with exactly one `=`. */
+function lineFacts<T>(s: Statement, m: ReadonlyMap<number, readonly T[]> | undefined): { line: number; facts: readonly T[] } | null {
+  if (!m || !placed(s) || s.location.start.line !== s.location.end.line) return null;
+  if ([...traverseAST(s)].filter(n => n.kind === NodeKind.AssignExpr).length + (s.kind === NodeKind.DeclStmt ? 1 : 0) !== 1) return null;
+  const facts = m.get(s.location.start.line);
+  return facts ? { line: s.location.start.line, facts } : null;
+}
+
+/**
+ * Rewrite the stores `E.m = v;` after the definition whose MOV the original addresses off
+ * the register the definition's LEA wrote; the count rewritten. Through the local's own type
+ * (`p->m`) when it is the type of `&E`; through an integer pointer (`uint32_t *p = (uint32_t
+ * *)&E`) as `p[disp / w]` when the store is one element of it and v is an integer literal.
+ */
+function heldStores(
+  defNode: Statement, def: { name: string; cast: TypeNode | null; type: TypeNode | null; decl: boolean },
+  key: string, after: Statement[], opts: HeldAddressMemberOptions,
+): number {
+  const lf = lineFacts(defNode, opts.storeBases);
+  const lea = lf?.facts.find(f => (f as StoreBaseFact).ord === 0 && (f as StoreBaseFact).kind === 'l') as StoreBaseFact | undefined;
+  if (!lea) return 0;
+  const width = def.cast ? (def.decl ? pointeeWidth(def.type) : undefined) : undefined;
+  if (def.cast && width === undefined) return 0;
+  let n = 0;
+  const visit = (node: ASTNode): void => {
+    if (node.kind === NodeKind.CompoundStmt) { for (const s of (node as CompoundStmt).statements as Statement[]) visit(s); return; }
+    for (const c of Object.values(node)) {
+      if (Array.isArray(c)) { for (const x of c) if (x && typeof x === 'object' && 'kind' in x) visit(x as ASTNode); }
+      else if (c && typeof c === 'object' && 'kind' in (c as object) && c !== node.location) visit(c as ASTNode);
+    }
+    if (node.kind !== NodeKind.ExprStmt) return;
+    const st = node as ExprStmt;
+    const e = unwrap(st.expression);
+    if (e.kind !== NodeKind.AssignExpr || (e as AssignExpr).operator !== '=') return;
+    const a = e as AssignExpr;
+    const l = unwrap(a.left);
+    if (l.kind !== NodeKind.MemberExpr || (l as MemberExpr).isArrow) return;
+    const m = l as MemberExpr;
+    if (m.member.kind !== NodeKind.Identifier || emit(unwrap(m.object) as never).replace(/\s+/g, '') !== key) return;
+    const sf = lineFacts(st, opts.storeBases);
+    const store = sf?.facts.find(f => (f as StoreBaseFact).ord === 0) as StoreBaseFact | undefined;
+    if (!store || store.kind !== 's' || store.reg !== lea.reg) return;
+    if (!def.cast) {
+      a.left = Expr.member(Expr.identifier(def.name), cloneNode(m.member) as Identifier, true);
+      n++;
+      return;
+    }
+    const size = opts.accessOrder?.stores.get(st.location.start.line);
+    const v = unwrap(a.right);
+    if (!size || size.length !== 1 || size[0].size !== width || store.disp % width! !== 0) return;
+    if (v.kind !== NodeKind.IntegerLiteral) return;
+    a.left = Expr.subscript(Expr.identifier(def.name), Expr.intLiteral(store.disp / width!, 10));
+    n++;
+  };
+  for (const s of after) visit(s);
+  return n;
+}
+
 function rewriteFunction(fn: FunctionDecl, opts: HeldAddressMemberOptions): FunctionDecl | undefined {
   if (!fn.body) return undefined;
   const fname = (fn as unknown as { name?: { name?: string } }).name?.name ?? '';
@@ -148,8 +235,15 @@ function rewriteFunction(fn: FunctionDecl, opts: HeldAddressMemberOptions): Func
       if (after.some(s => writes(s, root).length)) continue;
       if (writes(body, root).some(w => w.kind === NodeKind.UnaryExpr && (w as UnaryExpr).operator === '&')) continue;
       // The link is the `this` of an inlined TSLink member: its NextLink is called on it.
-      if (!after.some(s => [...traverseAST(s)].some(m => nextLinkOn(m, def.name)))) continue;
+      // Without that, the stores the original addresses off the register its LEA put the
+      // link in (the store-bases facts) are the ones written through the local.
       const key = emit(def.path as never).replace(/\s+/g, '');
+      if (!after.some(s => [...traverseAST(s)].some(m => nextLinkOn(m, def.name)))) {
+        const k = heldStores(defNode, def, key, after, opts);
+        if (k) { changed = true; opts.onSite?.({ function: fname, name: def.name, uses: k }); }
+        continue;
+      }
+      if (def.cast || root === 'this') continue;
       let uses = 0;
       const rewrite = (s: ASTNode): ASTNode => {
         if (s.kind === NodeKind.MemberExpr) {

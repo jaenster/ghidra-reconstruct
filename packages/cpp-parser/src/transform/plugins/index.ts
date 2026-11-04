@@ -437,6 +437,7 @@ export {
 export {
   heldAddressMemberPlugin,
   type HeldAddressMemberOptions,
+  type StoreBaseFact,
 } from './builtins/held-address-member.js';
 
 export {

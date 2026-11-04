@@ -169,6 +169,11 @@ export interface ExtractedFunction {
    * (extract/rotate-sites.ts). Absent when there are none or the snapshot predates the field.
    */
   rotateSites?: import('./extract/rotate-sites.js').RotateSiteFacts;
+  /**
+   * The register each store is addressed off and each LEA writes, per `=` of a decompile line
+   * (extract/store-bases.ts). Absent when there are none or the snapshot predates the field.
+   */
+  storeBases?: import('./extract/store-bases.js').StoreBaseFacts;
 }
 
 /**

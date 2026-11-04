@@ -27,6 +27,7 @@ import { branchLayoutLines } from './branch-layout-spec.js';
 import { callOrderLines } from './call-order-spec.js';
 import { accessOrderLines } from './access-order-spec.js';
 import { rotateSiteLines } from './rotate-sites-spec.js';
+import { storeBaseLines } from './store-bases-spec.js';
 import type { BranchLayoutFacts } from '../extract/branch-layout.js';
 import type { CallOrderFacts } from '../extract/call-order.js';
 import type { AccessOrderFacts } from '../extract/access-order.js';
@@ -1770,6 +1771,8 @@ export function generateFunctionImplementation(
           registerStores: override?.action === 'patch' ? undefined : func.registerStores,
           // A text patch anchors on the shifts as Ghidra printed them.
           rotateSites: override?.action === 'patch' ? undefined : func.rotateSites,
+          // A text patch anchors on the stores as Ghidra printed them.
+          storeBases: override?.action === 'patch' ? undefined : func.storeBases,
           // A text patch anchors on the comparisons as Ghidra printed them.
           compareSites: override?.action === 'patch' ? undefined : func.compareSites,
           sehLowering: sehLoweringDecision(func),
@@ -2762,6 +2765,8 @@ function transformDecompiledCode(
     registerStores?: import('../extract/register-stores.js').RegisterStoreFacts;
     /** The rotates by an immediate the original performs, per line (extract/rotate-sites.ts). */
     rotateSites?: import('../extract/rotate-sites.js').RotateSiteFacts;
+    /** The registers stores are addressed off and LEAs write, per line (extract/store-bases.ts). */
+    storeBases?: import('../extract/store-bases.js').StoreBaseFacts;
     /** The function's EH3 frame as `seh-lowering` needs it (codegen/seh-lowering-spec.ts). */
     sehLowering?: SehLoweringDecision;
     /** Addresses the instructions derive from a global's start (codegen/folded-address-spec.ts). */
@@ -3552,6 +3557,20 @@ function transformDecompiledCode(
     }
     // Two stores of one lvalue whose constant the original stores from the register of a
     // merged value become one store of a select (register-store-select.ts).
+    // A store the original addresses off the register holding a local's `&E` goes through
+    // the local (held-address-member.ts).
+    const storeBases = funcBodyMatch && funcBodyMatch.index !== undefined
+      ? storeBaseLines(enclosing?.storeBases, decompiled, funcBodyMatch.index + funcBodyMatch[0].indexOf('{'), body, preprocessedBody, wrapperPrefix)
+      : undefined;
+    if (storeBases) {
+      perPluginOptions['held-address-member'] = {
+        storeBases,
+        accessOrder,
+        onSite: (e: { function: string; name: string; uses: number }) =>
+          console.warn(`[held-address] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.uses} through ${e.name}`),
+      };
+    }
+
     // A shift pair the original performs as a rotate by more than 16 (rotate-intrinsic.ts).
     if (rotates) {
       perPluginOptions['rotate-intrinsic'] = {
