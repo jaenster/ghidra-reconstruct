@@ -30,6 +30,7 @@ import {
   ModuleGraph, MODULE_BUILD_MACRO, moduleMacro, seesMacro,
 } from '../modules/module-libraries.js';
 import { scanReferences } from './needle-index.js';
+import { namespaceResolution, renderNamespace } from './namespace-resolution.js';
 import { emittedFunctionName, DECLS_BEGIN_MARKER, DECLS_END_MARKER, DECL_MARKER, DECL_END_MARKER, TYPE_MARKER, TYPE_END_MARKER } from './header.js';
 import { sanitizeSymbolName, type ModuleExternDecl } from './globals-header.js';
 
@@ -202,7 +203,12 @@ export function applyModuleBoundaries(input: ModuleBoundaryInput): ModuleBoundar
   for (const f of input.functions) {
     if (!f.name || f.isLibrary || f.isExternal) continue;
     const name = emittedFunctionName(f);
-    const qualified = f.namespace ? `${f.namespace}::${name}` : name;
+    // The namespace the declaration is emitted in (a doubled segment folds), which
+    // is what a qualified reference spells; the Ghidra one when no resolution is set up.
+    let emitted: string | undefined;
+    try { emitted = f.namespace ? renderNamespace(namespaceResolution().of(f)) : undefined; } catch { emitted = undefined; }
+    const ns = emitted ?? f.namespace;
+    const qualified = ns ? `${ns}::${name}` : name;
     const list = fnIndex.get(name) ?? [];
     list.push({ address: normalizeAddress(f.address), qualified, module: graph.moduleOfNamespace(f.namespace) });
     fnIndex.set(name, list);
@@ -260,6 +266,12 @@ export function applyModuleBoundaries(input: ModuleBoundaryInput): ModuleBoundar
           if (byQualifier.length > 0) candidates = byQualifier;
         }
         let modules = new Set(candidates.map(c => c.module!));
+        // A qualifier names its module: `D2Common::Skills::X` is never the user's own X.
+        const writtenModules = new Set([...(written ?? [])].map(w => w.split('::')[0]).filter(m => graph.has(m)));
+        if (modules.size > 1 && writtenModules.size === 1) {
+          const [m] = writtenModules;
+          if (modules.has(m)) { candidates = candidates.filter(c => c.module === m); modules = new Set([m]); }
+        }
         if (modules.size > 1 && modules.has(userModule)) {
           // An unqualified name resolves to the user's own namespace first.
           candidates = candidates.filter(c => c.module === userModule);

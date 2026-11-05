@@ -283,3 +283,25 @@ describe('macro references', () => {
     assert.ok(!files.get('Fog/Memory.h')!.content.includes('defined(D2_MODULE_Fog)'));
   });
 });
+
+describe('qualified references', () => {
+  it('a qualifier naming another module wins over the user module\'s same-named function', () => {
+    const files = new Map<string, SourceFile>();
+    files.set('D2Client/Skills.cpp', file('D2Client/Skills.cpp',
+      '// 1.14d: 00470000\nvoid SKILLS_Draw(D2SkillStrc * p) { D2Common::Skills::Skills::GetSkillId(p); }', 'implementation'));
+    const graph = new ModuleGraph({ ...config, modules: { ...config.modules, D2Client: { imports: ['D2Common'] } } });
+    const r = applyModuleBoundaries({
+      graph, files,
+      functions: [
+        fn('GetSkillId', 'D2Client::GAME::RosterPets', '00479180'),
+        fn('GetSkillId', 'D2Common::Skills::Skills', '00643ce0'),
+        fn('GetSkillId', 'D2Common::Units::Missile', '0064a280'),
+        fn('SKILLS_Draw', 'D2Client::Skills', '00470000'),
+      ],
+      globals: [], typeOwnerMap: new Map(), globalsPath: 'globals/globals.h',
+      globalOwner: () => undefined, moduleExterns: new Map(), rootProvides: new Set(), typePrelude: () => [],
+    });
+    assert.ok(r.references.some(x => x.owner === 'D2Common' && x.symbol.endsWith('::GetSkillId')), JSON.stringify(r.references));
+    assert.ok(r.reports.get('module-public-api.tsv')!.includes('D2Common\tfunction\t00643ce0'));
+  });
+});
