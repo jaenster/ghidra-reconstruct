@@ -261,3 +261,25 @@ describe('definedTypeName', () => {
     assert.strictEqual(definedTypeName('typedef void (__stdcall *fnCallback)(int);'), 'fnCallback');
   });
 });
+
+describe('macro references', () => {
+  it('counts a function a #define in a module file names as a reference', () => {
+    const files = new Map<string, SourceFile>();
+    files.set('Fog/Memory.h', file('Fog/Memory.h', [
+      '#pragma once', 'namespace Fog::Memory {', DECLS_BEGIN_MARKER,
+      `${DECL_MARKER}0040b3c0`, 'BOOL FreeClientMemory(void * p);', DECL_END_MARKER,
+      DECLS_END_MARKER, '}',
+    ].join('\n'), 'header'));
+    files.set('D2Common/Items.cpp', file('D2Common/Items.cpp',
+      '#define D2_FREE(p) Fog::Memory::FreeClientMemory((p))\n// 1.14d: 00601000\nvoid ITEMS_Free(void * p) { D2_FREE(p); }', 'implementation'));
+    const graph = new ModuleGraph(config);
+    const r = applyModuleBoundaries({
+      graph, files,
+      functions: [fn('FreeClientMemory', 'Fog::Memory', '0040b3c0'), fn('ITEMS_Free', 'D2Common::Items', '00601000')],
+      globals: [], typeOwnerMap: new Map(), globalsPath: 'globals/globals.h',
+      globalOwner: () => undefined, moduleExterns: new Map(), rootProvides: new Set(), typePrelude: () => [],
+    });
+    assert.ok(r.references.some(x => x.source === 'macro' && x.symbol === 'Fog::Memory::FreeClientMemory'));
+    assert.ok(!files.get('Fog/Memory.h')!.content.includes('defined(D2_MODULE_Fog)'));
+  });
+});

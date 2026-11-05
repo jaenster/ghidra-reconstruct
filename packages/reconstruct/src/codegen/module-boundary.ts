@@ -244,8 +244,12 @@ export function applyModuleBoundaries(input: ModuleBoundaryInput): ModuleBoundar
       : graph.excepted(userModule, owner, symbol) ? 'excepted' : 'violation';
     references.push({ kind, userModule, userFile, source, owner, symbol, verdict });
   };
-  const scan = (text: string, userModule: string, userFile: string, source: string, header: boolean) => {
-    const refs = scanReferences(text);
+  const scan = (text: string, userModule: string, userFile: string, source: string, header: boolean, macros = false) => {
+    // A macro body is trivia to the lexer; the emitter writes allocation macros into
+    // every file's preamble, so their names are read as plain identifier runs.
+    const refs = macros
+      ? { identifiers: identifierRuns(text), qualified: new Map<string, Set<string>>() }
+      : scanReferences(text);
     for (const id of refs.identifiers) {
       const fns = fnIndex.get(id);
       if (fns) {
@@ -301,6 +305,8 @@ export function applyModuleBoundaries(input: ModuleBoundaryInput): ModuleBoundar
       }
       continue;
     }
+    const defines = file.content.split('\n').filter(l => /^\s*#\s*define\b/.test(l)).join('\n');
+    if (defines) scan(defines, module, path, 'macro', file.type === 'header', true);
     if (file.type === 'implementation') {
       for (const [source, text] of splitDefinitions(file.content)) scan(text, module, path, source, false);
     } else if (file.type === 'header') {

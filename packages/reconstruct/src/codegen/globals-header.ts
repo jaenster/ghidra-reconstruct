@@ -692,7 +692,10 @@ export function generateGlobalsHeader(
   const declaredHere = (g: AnalyzedDataSymbol): boolean => g.homeFile === undefined || g.homeDeclaredCentrally === true;
   // With module data headers, each defines what its own globals need; this one keeps
   // the types of what it still declares.
-  const typeUsers = [...globals.filter(g => declaredHere(g) && externOwner?.(g) === undefined), ...(options.centralTypeUsers ?? [])];
+  // Only an extern that leaves takes its types along: a static-local whose type
+  // this header defines keeps it here.
+  const leaves = (g: AnalyzedDataSymbol): boolean => g.scope === 'global' && g.ifdef === undefined && externOwner?.(g) !== undefined;
+  const typeUsers = [...globals.filter(g => declaredHere(g) && !leaves(g)), ...(options.centralTypeUsers ?? [])];
   const { lines: preludeLines, forwardDecls, fullDefs, fullDefNames: preludeDefNames } =
     globalsTypePrelude(typeUsers, dataTypes, typeOwnerMap, isSkippableLibraryType, true, externOwner !== undefined);
   lines.push(...preludeLines);
