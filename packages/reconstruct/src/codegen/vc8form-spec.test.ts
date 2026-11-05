@@ -42,6 +42,11 @@ describe('vc8form-spec', () => {
     assert.deepStrictEqual(spec?.forms.map(f => f.form.op), ['width', 'fold', 'seq']);
   });
 
+  it('orders the shape forms: declarations, then control flow, then expressions, then moves', () => {
+    const spec = vc8FormSpec({ size: 16, decompiled: BODY, tags: [tag('seq(b,a)'), tag('cmp(a < 4,lit)'), tag('dup(g(a))'), tag('nest(a)'), tag('split(v,int,w)')] });
+    assert.deepStrictEqual(spec?.forms.map(f => f.form.op), ['split', 'nest', 'dup', 'cmp', 'seq']);
+  });
+
   it('has nothing to say about a function without vc8form tags', () => {
     assert.strictEqual(vc8FormSpec({ size: 16, decompiled: BODY, tags: [{ type: 'leaf' }] }), undefined);
   });

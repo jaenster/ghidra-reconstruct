@@ -86,4 +86,4 @@ export function vc8FormSpec(func: Pick<ExtractedFunction, 'tags' | 'size' | 'dec
   return out;
 }
 
-const FORM_ORDER: Array<Vc8Form['op']> = ['width', 'own', 'fold', 'cache', 'guards', 'merge-guards', 'retval', 'arms', 'seq'];
+const FORM_ORDER: Array<Vc8Form['op']> = ['width', 'own', 'split', 'fold', 'cache', 'ifsel', 'guards', 'merge-guards', 'retval', 'select', 'merge-tail', 'nest', 'continue', 'dup', 'arms', 'tarms', 'unselect', 'zero', 'nonzero', 'cmp', 'swap', 'decl', 'seq'];
