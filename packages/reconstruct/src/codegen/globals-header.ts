@@ -491,6 +491,12 @@ export function globalsTypePrelude(
   typeOwnerMap: Map<string, string> | undefined,
   isSkippableLibraryType: (name: string) => boolean,
   withDefinitions = true,
+  /**
+   * Wrap each definition in a per-type guard. The module-library build defines a
+   * type no header owns in every module data header whose globals hold it by value,
+   * so two of them can meet in one translation unit.
+   */
+  guardDefinitions = false,
 ): { lines: string[]; forwardDecls: ForwardDeclaration[]; fullDefs: string[]; fullDefNames: string[] } {
   const lines: string[] = [];
   // Classify types: by-value types get full definitions, pointer-only types get forward declarations
@@ -552,7 +558,10 @@ export function globalsTypePrelude(
   if (withDefinitions && fullDefs.length > 0) {
     lines.push('// Full type definitions (used by value in globals)');
     for (const def of fullDefs) {
+      const guard = guardDefinitions ? definedTypeName(def) : undefined;
+      if (guard) lines.push(`#ifndef D2_DEFINED_${guard}`, `#define D2_DEFINED_${guard}`);
       lines.push(def);
+      if (guard) lines.push(`#endif // D2_DEFINED_${guard}`);
       lines.push('');
     }
   }
@@ -560,9 +569,51 @@ export function globalsTypePrelude(
   return { lines, forwardDecls, fullDefs, fullDefNames };
 }
 
+/** The name a definition this file rendered introduces, read the way the prelude reads it. */
+function definedTypeName(def: string): string | undefined {
+  return def.match(/^(?:struct|union|enum)\s+(\w+)/)?.[1] ?? def.match(/typedef\s+.*?\(\s*(?:__\w+\s+)?\*\s*(\w+)\)/)?.[1];
+}
+
+/** One extern the module-library build moves out of globals.h into its owner's data header. */
+export interface ModuleExternDecl {
+  namespace: string | undefined;
+  decl: string;
+  name: string;
+  global: AnalyzedDataSymbol;
+}
+const moduleExternDecls = new Map<string, ModuleExternDecl[]>();
+/** The externs the last `generateGlobalsHeader` left to each owning module. */
+export function takeModuleExternDecls(): Map<string, ModuleExternDecl[]> {
+  const out = new Map(moduleExternDecls);
+  moduleExternDecls.clear();
+  return out;
+}
+const rootProvidedNames = new Set<string>();
+/** Every name the last `generateGlobalsHeader` declared itself: its externs, closure and type definitions. */
+export function globalsHeaderProvides(): ReadonlySet<string> {
+  return rootProvidedNames;
+}
+
+/** The type lines a module data header needs for `globals`, each definition guarded. */
+export function moduleGlobalsTypePrelude(
+  globals: AnalyzedDataSymbol[],
+  dataTypes: ExtractedDataType[] | undefined,
+  typeOwnerMap: Map<string, string> | undefined,
+): string[] {
+  return globalsTypePrelude(globals, dataTypes, typeOwnerMap, makeLibraryTypeSkipPredicate(dataTypes), true, true).lines;
+}
+
 export function generateGlobalsHeader(
   globals: AnalyzedDataSymbol[],
-  options: ReconstructOptions & { projectName?: string; binaryName?: string; centralTypeUsers?: AnalyzedDataSymbol[] },
+  options: ReconstructOptions & {
+    projectName?: string; binaryName?: string; centralTypeUsers?: AnalyzedDataSymbol[];
+    /**
+     * The module-library build: the module whose data header declares a global
+     * instead of this one. A global it answers for is left out here and handed to
+     * `takeModuleExternDecls`; an unowned one stays.
+     */
+    externOwner?: (g: AnalyzedDataSymbol) => string | undefined;
+  },
   dataTypes?: ExtractedDataType[],
   typeOwnerMap?: Map<string, string>,
   functionQualifiedNames?: Set<string>,
@@ -601,6 +652,17 @@ export function generateGlobalsHeader(
   globals = globals.filter(isEmittableGlobal);
   functionCollidingGlobals.clear();
   headerDeclaredGlobals.clear();
+  moduleExternDecls.clear();
+  rootProvidedNames.clear();
+  const externOwner = options.externOwner;
+  const handOff = (global: AnalyzedDataSymbol, namespace: string | undefined, decl: string): boolean => {
+    const owner = externOwner?.(global);
+    if (owner === undefined) return false;
+    const list = moduleExternDecls.get(owner) ?? [];
+    list.push({ namespace, decl, name: sanitizeSymbolName(global.suggestedName || global.name), global });
+    moduleExternDecls.set(owner, list);
+    return true;
+  };
 
   // Header comment
   lines.push('/**');
@@ -628,9 +690,14 @@ export function generateGlobalsHeader(
   // Types only a data header needs and no header owns are still DEFINED here, the
   // one place that can (centralTypeUsers), and that data header includes this one.
   const declaredHere = (g: AnalyzedDataSymbol): boolean => g.homeFile === undefined || g.homeDeclaredCentrally === true;
-  const typeUsers = [...globals.filter(declaredHere), ...(options.centralTypeUsers ?? [])];
-  const { lines: preludeLines, forwardDecls, fullDefs } = globalsTypePrelude(typeUsers, dataTypes, typeOwnerMap, isSkippableLibraryType);
+  // With module data headers, each defines what its own globals need; this one keeps
+  // the types of what it still declares.
+  const typeUsers = [...globals.filter(g => declaredHere(g) && externOwner?.(g) === undefined), ...(options.centralTypeUsers ?? [])];
+  const { lines: preludeLines, forwardDecls, fullDefs, fullDefNames: preludeDefNames } =
+    globalsTypePrelude(typeUsers, dataTypes, typeOwnerMap, isSkippableLibraryType, true, externOwner !== undefined);
   lines.push(...preludeLines);
+  for (const n of preludeDefNames) rootProvidedNames.add(n);
+  for (const def of fullDefs) { const n = definedTypeName(def); if (n) rootProvidedNames.add(n); }
 
   // Collect names that must NOT appear as a namespace component, because they
   // are already emitted at an outer scope as a different kind of entity:
@@ -784,7 +851,10 @@ export function generateGlobalsHeader(
         }
         {
           const decl = generateExternDeclaration(global, options.includeAddressComments);
-          if (decl) lines.push(decl);
+          if (decl && !(global.ifdef === undefined && handOff(global, namespace || undefined, decl))) {
+            lines.push(decl);
+            rootProvidedNames.add(emitted);
+          }
         }
       }
       // Close any open ifdef
@@ -870,7 +940,10 @@ export function generateGlobalsHeader(
         for (const global of nsGlobals) {
           {
             const decl = generateExternDeclaration(global, options.includeAddressComments);
-            if (decl) lines.push(decl);
+            if (decl && !(global.ifdef === undefined && handOff(global, namespace || undefined, decl))) {
+              lines.push(decl);
+              rootProvidedNames.add(sanitizeSymbolName(global.suggestedName || global.name));
+            }
           }
         }
         if (namespace) {
@@ -940,7 +1013,7 @@ export function generateGlobalsHeader(
       stringContentByAddress: closureStringContent,
     });
     for (const line of renderClosureBlock(closure.declarations)) lines.push(line);
-    for (const d of closure.declarations) recordDeclaredName(d.name);
+    for (const d of closure.declarations) { recordDeclaredName(d.name); rootProvidedNames.add(d.name); }
     lastClosureResult = closure;
   }
 

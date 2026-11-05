@@ -90,11 +90,23 @@ function collectPointerTargets(value: DataValue | undefined | null, out: string[
 export function partitionGlobalsByModule(
   globals: readonly AnalyzedDataSymbol[],
   functionModules: ReadonlyMap<string, string>,
+  /**
+   * The module-library build: a global whose module Ghidra states is defined in
+   * that module's unit, whoever reads it - the reader's module is the evidence
+   * only when Ghidra is silent.
+   */
+  ownerOf?: (g: AnalyzedDataSymbol) => string | undefined,
 ): GlobalsPartitionResult {
   const byModule = new Map<string, AnalyzedDataSymbol[]>();
   const shared: AnalyzedDataSymbol[] = [];
 
   for (const g of globals) {
+    const owner = ownerOf?.(g);
+    if (owner !== undefined) {
+      const list = byModule.get(owner);
+      if (list) list.push(g); else byModule.set(owner, [g]);
+      continue;
+    }
     const modules = new Set<string>();
     let unplaceable = false;
 

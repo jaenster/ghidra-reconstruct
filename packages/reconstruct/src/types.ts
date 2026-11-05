@@ -562,6 +562,8 @@ export interface ReconstructedProject {
   buildInfo?: import('./modules/buildinfo.js').BuildInfo;
   /** Ghidra WARNING comments of the emitted functions, written as warnings.tsv */
   warnings?: import('./codegen/warning-facts.js').WarningRow[];
+  /** The module-library pass's reports (module-dag.tsv, module-public-api.tsv), path -> text */
+  moduleReports?: Map<string, string>;
 }
 
 /**

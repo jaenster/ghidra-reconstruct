@@ -73,16 +73,18 @@ import {
 import { Lexer, TokenKind, parse, biasedTableIndexPlugin, findNodesByKind, NodeKind, globalRunSpan, globalRunMembers, type InlinedCallee, type InlinedCallTables, type GuardedCallee, type GuardedCallTables } from '@ghidra-mcp/cpp-parser';
 
 import { buildVtableDispatch } from './vtable-dispatch.js';
-import { fieldDeclSpelling, emittedMemberNames, generateHeader, generateFunctionDeclaration, setKnownFuncDefs, setConstructorBearingStructs, hasConvertingConstructor, recordConstructorLookups, constructorFact, isConstructorCandidate, sigType, getIntegerConversionType, emittedFunctionName, returnSigType } from './header.js';
+import { fieldDeclSpelling, emittedMemberNames, generateHeader, generateFunctionDeclaration, setKnownFuncDefs, setConstructorBearingStructs, hasConvertingConstructor, recordConstructorLookups, constructorFact, isConstructorCandidate, sigType, getIntegerConversionType, emittedFunctionName, returnSigType, setDeclarationMarkers } from './header.js';
 import { enumTypedefLine, registerEnumTypedefTargets, setKnownEnumWidths } from './enum-width.js';
 import { generateImplementation, unitNamespace, unitThunkForwarder, probeGuardedCalls, setQuestStructLayouts, setStructFieldRenames, decompiledReturnType, decompiledFunctionName, decompiledParameters, type ImplGenContext, type FuncPtrArgCastTables, type ThunkForward } from './impl.js';
-import { generateCMakeLists, generateTopLevelCMake, generateTargetCMake, generateUnsortedCMake } from './cmake.js';
+import { generateCMakeLists, generateTopLevelCMake, generateTargetCMake, generateUnsortedCMake, generateModuleLibrariesCMake } from './cmake.js';
+import { applyModuleBoundaries } from './module-boundary.js';
+import { ModuleGraph } from '../modules/module-libraries.js';
 import { generateSourceMap } from './sourcemap.js';
 import { generateReadme } from './readme.js';
 import { abiConvention, conventionKeyword } from './calling-convention.js';
 import { organizeByNamespace, getFilePath, setModuleNames, setNamespaceCollisionTypes, normalizeQualifiedReference, normalizeUnitName } from './namespace.js';
 import { buildNamespaceResolution, namespaceResolution, renderNamespace } from './namespace-resolution.js';
-import { setInteriorLabelSymbols, resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, setDeclarationClosureDataContent, getDeclarationClosureReport, isUnreferenceableArtifact, isEmittableGlobal, isDataArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, generateDataHeader, dataHeaderCentralTypes, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, wasGlobalClaimed, findDuplicateLinkageNames, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, setInitializerAddressTable, setInitializerFunctionAddresses, setInitializerGlobalNamespaces, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType, emittedNamespaceOf, getDeclaredNames, initializerAddressReferences, addInitializerAddressReferences, markUnnamedImportSlots, setInitializerEnumConstants } from './globals-header.js';
+import { setInteriorLabelSymbols, resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, setDeclarationClosureDataContent, getDeclarationClosureReport, isUnreferenceableArtifact, isEmittableGlobal, isDataArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, generateDataHeader, dataHeaderCentralTypes, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, wasGlobalClaimed, findDuplicateLinkageNames, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, setInitializerAddressTable, setInitializerFunctionAddresses, setInitializerGlobalNamespaces, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType, emittedNamespaceOf, getDeclaredNames, initializerAddressReferences, addInitializerAddressReferences, markUnnamedImportSlots, setInitializerEnumConstants, takeModuleExternDecls, globalsHeaderProvides, moduleGlobalsTypePrelude } from './globals-header.js';
 import { normalizeDataAddress, stringDefinition } from './declaration-closure.js';
 import { harvestAnnotatedParameterTypes } from './win32-signatures.js';
 import { PLATFORM_FUNCDEF_NAMES, PLATFORM_STRUCT_FIELD_TYPES, isPlatformOrBuiltinType, isLibraryType, sdkLayoutMismatches, sdkHeaderOf, unprobedTypeNames, generatePlatformHeader, oddWidthTypesSpelled, placeholderTypesUsedIn, normalizeDataValue, arrayRowTypedefLines, arrayRowReturn, arrayRowSpelling, GHIDRA_PSEUDO_OP_RESULT_TYPES, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setFunctionHiddenTypes, computeFunctionHiddenTypes, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, platformDefinedFunctionNames, platformVoidPointerFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
@@ -803,6 +805,7 @@ export function generateProjectStage1(
   strings?: ExtractedString[],
   shard?: ShardSpec
 ): GenerationState {
+  setDeclarationMarkers(options.projectConfig?.moduleLibraries?.enabled === true);
   const genT0 = Date.now();
   beginShard(shard);
   // Ghidra's union-facet markers are not variables: a forced union facet is recorded as
@@ -1831,6 +1834,15 @@ export function generateProjectStage2(state: GenerationState): ReconstructedProj
   // of the unit loop, a sharded run saved only the coordinator's own slice.
   saveUnitIdentCache();
 
+  // One library per module (project.json moduleLibraries): a global's module is its
+  // Ghidra namespace's, and only a namespaced global leaves globals.h.
+  const moduleLibraries = options.projectConfig?.moduleLibraries;
+  const moduleGraph = moduleLibraries?.enabled ? new ModuleGraph(moduleLibraries) : undefined;
+  const globalOwner = moduleGraph
+    ? (g: AnalyzedDataSymbol) => moduleGraph.moduleOfNamespace(g.namespace)
+    : undefined;
+  let moduleReports: Map<string, string> | undefined;
+
   if (analyzedGlobals.length > 0) {
     // A global demoted to file-local / struct-colocated is only actually
     // emitted if the file it was assigned to exists. Restore any that no
@@ -1914,6 +1926,7 @@ export function generateProjectStage2(state: GenerationState): ReconstructedProj
         projectName: name,
         binaryName: programInfo?.name,
         centralTypeUsers,
+        externOwner: globalOwner,
       }, dataTypes, typeOwnerMap, functionQualifiedNames, context.bodyIdentifierFnCounts));
 
       files.set(globalsPath!, {
@@ -1956,7 +1969,24 @@ export function generateProjectStage2(state: GenerationState): ReconstructedProj
       genMark('project/globals-units', () => emitCentralGlobalsUnits(
         centralGlobals, functions, files,
         { ...options, projectName: name, binaryName: programInfo?.name },
-        globalsPath!, typeOwnerMap, context.functionNameCandidates));
+        globalsPath!, typeOwnerMap, context.functionNameCandidates, globalOwner));
+
+      if (moduleGraph) {
+        const boundary = genMark('project/module-boundaries', () => applyModuleBoundaries({
+          graph: moduleGraph,
+          files,
+          functions,
+          globals: centralGlobals,
+          typeOwnerMap,
+          globalsPath: globalsPath!,
+          globalOwner: globalOwner!,
+          moduleExterns: takeModuleExternDecls(),
+          rootProvides: globalsHeaderProvides(),
+          typePrelude: gs => moduleGlobalsTypePrelude(gs, dataTypes, typeOwnerMap),
+        }));
+        moduleReports = boundary.reports;
+        for (const line of boundary.summary) console.log(line);
+      }
     }
   }
 
@@ -1981,6 +2011,7 @@ export function generateProjectStage2(state: GenerationState): ReconstructedProj
     programInfo,
     buildInfo: context._buildInfo,
     warnings: genMark('project/warnings', () => warningRows(functions)),
+    moduleReports,
   };
 
   if (GEN_TIMING) genAdd('project/total', Date.now() - genT0);
@@ -2336,6 +2367,7 @@ function emitCentralGlobalsUnits(
   globalsHeaderPath: string,
   typeOwnerMap: Map<string, string>,
   functionNameCandidates: Map<string, { qualified: string; header: string }[]> | undefined,
+  ownerOf?: (g: AnalyzedDataSymbol) => string | undefined,
 ): void {
   const implExt = options.format === 'c' ? '.c' : '.cpp';
 
@@ -2346,7 +2378,7 @@ function emitCentralGlobalsUnits(
     dataHeaderByName.set(sanitizeSymbolName(g.suggestedName || g.name), dataHeaderPathOf(g.homeFile));
   }
   const partitioned = partitionGlobalsByModule(
-    centralGlobals.filter(g => g.homeFile === undefined || !wasGlobalClaimed(g)), buildFunctionModuleMap(functions));
+    centralGlobals.filter(g => g.homeFile === undefined || !wasGlobalClaimed(g)), buildFunctionModuleMap(functions), ownerOf);
   // A module named like the shared unit itself would be written over it; its
   // definitions stay shared, the direction the partition already falls back to.
   const partitions = partitioned.partitions.filter(p => globalsUnitPath(globalsHeaderPath, p.module, implExt) !== undefined);
@@ -5309,12 +5341,21 @@ export async function writeProject(
         writtenFiles.push(unsortedPath);
       }
     } else {
-      // Non-target: single CMakeLists.txt
+      // Non-target: single CMakeLists.txt, or one library per module
       const cmakePath = path.join(outputDir, 'CMakeLists.txt');
-      const cmakeContent = generateCMakeLists(project, options);
+      const libraries = options.projectConfig?.moduleLibraries;
+      const cmakeContent = libraries?.enabled
+        ? generateModuleLibrariesCMake(project, new ModuleGraph(libraries), options)
+        : generateCMakeLists(project, options);
       await fs.writeFile(cmakePath, cmakeContent, 'utf-8');
       writtenFiles.push(cmakePath);
     }
+  }
+
+  for (const [name, text] of project.moduleReports ?? []) {
+    const reportPath = path.join(outputDir, name);
+    await fs.writeFile(reportPath, text, 'utf-8');
+    writtenFiles.push(reportPath);
   }
 
   if (project.warnings) {

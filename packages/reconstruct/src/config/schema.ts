@@ -22,6 +22,11 @@ export interface ProjectConfig {
   methodConversionsFile?: string;
   typeOwnership?: TypeOwnershipEntry[];
   modules?: Record<string, ModuleConfig>;
+  /**
+   * One library per Blizzard module, its include visibility from the original
+   * import graph (modules/module-libraries.ts). Off unless `enabled`.
+   */
+  moduleLibraries?: import('../modules/module-libraries.js').ModuleLibrariesConfig;
   autoMethodConversion?: AutoMethodConversionConfig;
   /** Secondary Ghidra projects to merge into the reconstruction */
   additionalSources?: AdditionalSource[];

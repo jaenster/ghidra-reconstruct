@@ -7,6 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { ProjectConfig } from './schema.js';
+import { validateModuleLibraries } from '../modules/module-libraries.js';
 
 const CURRENT_VERSION = 1;
 
@@ -280,6 +281,11 @@ function validate(config: ProjectConfig, source: string): void {
         );
       }
     }
+  }
+
+  if (config.moduleLibraries !== undefined) {
+    const problems = validateModuleLibraries(config.moduleLibraries);
+    if (problems.length > 0) throw new Error(`${source}: ${problems.join('; ')}`);
   }
 
   // Validate autoMethodConversion
