@@ -922,6 +922,12 @@ export interface FuncPtrArgCastTables {
    * fact `func-ptr-literal` already carries for a function.
    */
   globalNamespaces?: Record<string, readonly string[]>;
+  /**
+   * The same, for the names a DATA INITIALIZER spells: every scope but a
+   * function's static local, since an initializer names a struct-colocated extern
+   * or a file-local static of its own unit as well as a `global`.
+   */
+  initializerDataNamespaces?: Record<string, readonly string[]>;
   /** Callables with a `...` tail — arguments past the declared ones have no type */
   varArgFunctions?: string[];
   /** Field name → declared type, where every aggregate declaring it agrees */

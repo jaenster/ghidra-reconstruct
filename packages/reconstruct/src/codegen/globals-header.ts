@@ -1628,6 +1628,40 @@ function shadowQualifyReference(expr: string): string {
 }
 
 /**
+ * Global name (as emitted) -> the namespace its declaration is emitted in, for the
+ * names an initializer reaches WITHOUT a qualifier: an address resolved through the
+ * address table (`psDataTableSeed = 0x0096c8c8` -> gsAutoMapSeed) and an interior path
+ * Ghidra spells from the bare label (`gaGlidePerspectiveVertices[1].fX`). Ghidra
+ * qualifies only a pointer to a symbol's own start; once a global lives in a module
+ * namespace the bare spelling names nothing from root scope or from another block.
+ * The table is `initializerDataNamespaces`: `globalNamespaces`' rule (emitted
+ * namespace; ambiguous names and blockable leading segments left out) over every
+ * scope but a function's static local.
+ */
+let initializerGlobalNamespaces = new Map<string, string>();
+
+export function setInitializerGlobalNamespaces(namespaces?: Record<string, readonly string[]>): void {
+  initializerGlobalNamespaces = new Map();
+  if (!namespaces) return;
+  for (const [name, segments] of Object.entries(namespaces)) {
+    if (segments.length > 0) initializerGlobalNamespaces.set(name, segments.join('::'));
+  }
+}
+
+/**
+ * Qualify the leading identifier of an unqualified reference with its global's
+ * namespace (`gsAutoMapSeed` -> `D2Common::DATATBLS::LvlTbls::gsAutoMapSeed`,
+ * `Tbl[3].f` -> `NS::Tbl[3].f`). A reference that already carries a qualifier, or
+ * names no namespaced global, is returned unchanged.
+ */
+function namespaceQualifyReference(expr: string): string {
+  const m = expr.match(/^([A-Za-z_]\w*)(?!\w|::)/);
+  if (!m) return expr;
+  const ns = initializerGlobalNamespaces.get(m[1]);
+  return ns ? `${ns}::${expr}` : expr;
+}
+
+/**
  * Spell a pointer-valued initializer so that its STATIC TYPE matches the slot it
  * fills, without changing the ADDRESS it denotes.
  *
@@ -1716,8 +1750,16 @@ function emitPointerToSymbol(rawValue: string, expectedType?: string): string {
   const value = classMember ?? normalizeQualifiedReference(legalized);
   // The name the lookups below use is the unqualified one; the SPELLING may need
   // a root qualifier to survive the namespace block it lands in.
-  const spelled = classMember ?? shadowQualifyReference(value);
+  const spelled = classMember ?? shadowQualifyReference(namespaceQualifyReference(value));
   const bare = classMember ?? (value.match(/^[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*$/) ? value : undefined);
+  // A qualified name Ghidra gave a second label at the address (`Ns::s_set_006d5bcc`,
+  // emitted as `Ns::gpCubeRecipeItemTypeFlags_7`) is undeclared exactly as its bare
+  // form was before the move: asked by its leaf, it resolves through the address
+  // table to the name the definition carries. Only the data placeholder forms;
+  // a qualified function or declared global keeps its spelling.
+  const qualifiedLeaf = !classMember && bare?.includes('::') ? bare.slice(bare.lastIndexOf('::') + 2) : undefined;
+  const addressQuery = qualifiedLeaf && /^(?:s_\w*_|(?:DAT|PTR|UNK)_)[0-9a-fA-F]{6,8}$/.test(qualifiedLeaf)
+    ? qualifiedLeaf : bare;
   const slotType = expectedType ? stripFuncDefIndirection(expectedType.trim()) : undefined;
   // Asked of what the slot STANDS FOR: `typedef void* pointer` has no star to
   // find, and without this a `pointer` slot got no pointee and fell back to a
@@ -1757,8 +1799,8 @@ function emitPointerToSymbol(rawValue: string, expectedType?: string): string {
 
   // A name Ghidra invented for a bare address is not a declaration anywhere —
   // emit the address it stood for instead of a reference to nothing.
-  if (bare) {
-    const address = unresolvedSymbolAddress(bare);
+  if (bare && addressQuery) {
+    const address = unresolvedSymbolAddress(addressQuery);
     if (address !== undefined) {
       const literal = `0x${address.toLowerCase()}`;
       // Unless the tree CAN name it after all. That rule predates the
@@ -1802,7 +1844,7 @@ function emitPointerToSymbol(rawValue: string, expectedType?: string): string {
     if (elem) {
       // 1-D array: decay. Cast only when Ghidra's element type is not the slot's.
       if (pointerCast && pointerDepthAwareName(elem) !== pointeeBare) return `(${pointerCast})${spelled}`;
-      return value;
+      return spelled;
     }
     const declared = globalDeclaredTypes.get(bare);
     // `&sym` has type `<declared> *`. Compare at FULL pointer depth, not just the
@@ -2215,8 +2257,7 @@ function initializerAddressSpelling(
 ): string | null {
   const slot = slotType?.trim();
   if (!slot) return null;
-  const reference = shadowQualifyReference(
-    entry.stringConstant ? entry.name : `&${entry.name}`);
+  const reference = initializerEntryReference(entry);
   // The cast carries the DECLARED spelling either way: it is the type the
   // reader declared, and it converts exactly as the resolved one would.
   if (isPointerSlotSpelling(slot)) return `(${rootQualifyShadowedType(slot)})${reference}`;
@@ -2259,8 +2300,7 @@ function pointerSlotAddressReference(
     const spelled = shadowQualifyReference(func);
     return functionAddressSpelling(func, spelled, slot, word) ?? `&${spelled}`;
   }
-  const reference = shadowQualifyReference(
-    entry.stringConstant ? entry.name : `&${entry.name}`);
+  const reference = initializerEntryReference(entry);
   initializerAddressNamesUsed.add(entry.name);
   // A string constant is `char N[]`, which decays to exactly `char*` and to
   // nothing else: in a char-shaped slot the bare name IS the initializer.
@@ -2272,6 +2312,16 @@ function pointerSlotAddressReference(
     return reference;
   }
   return `(${rootQualifyShadowedType(slot.replace(/\s+/g, ' '))})${reference}`;
+}
+
+/**
+ * How an address-table entry is named from an initializer: qualified with the
+ * namespace its declaration lives in, root-qualified where the enclosing block
+ * shadows that path, `&` unless the entry is a string constant (which decays).
+ */
+function initializerEntryReference(entry: InitializerAddressEntry): string {
+  const named = shadowQualifyReference(namespaceQualifyReference(entry.name));
+  return entry.stringConstant ? named : `&${named}`;
 }
 
 /** One array element that holds a function address, or null when it holds none. */

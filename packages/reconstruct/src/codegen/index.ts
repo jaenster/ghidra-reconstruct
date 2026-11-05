@@ -82,7 +82,7 @@ import { generateReadme } from './readme.js';
 import { abiConvention, conventionKeyword } from './calling-convention.js';
 import { organizeByNamespace, getFilePath, setModuleNames, setNamespaceCollisionTypes, normalizeQualifiedReference, normalizeUnitName } from './namespace.js';
 import { buildNamespaceResolution, namespaceResolution, renderNamespace } from './namespace-resolution.js';
-import { setInteriorLabelSymbols, resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, setDeclarationClosureDataContent, getDeclarationClosureReport, isUnreferenceableArtifact, isEmittableGlobal, isDataArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, generateDataHeader, dataHeaderCentralTypes, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, wasGlobalClaimed, findDuplicateLinkageNames, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, setInitializerAddressTable, setInitializerFunctionAddresses, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType, emittedNamespaceOf, getDeclaredNames, initializerAddressReferences, addInitializerAddressReferences, markUnnamedImportSlots, setInitializerEnumConstants } from './globals-header.js';
+import { setInteriorLabelSymbols, resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, setDeclarationClosureDataContent, getDeclarationClosureReport, isUnreferenceableArtifact, isEmittableGlobal, isDataArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, generateDataHeader, dataHeaderCentralTypes, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, wasGlobalClaimed, findDuplicateLinkageNames, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, setInitializerAddressTable, setInitializerFunctionAddresses, setInitializerGlobalNamespaces, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType, emittedNamespaceOf, getDeclaredNames, initializerAddressReferences, addInitializerAddressReferences, markUnnamedImportSlots, setInitializerEnumConstants } from './globals-header.js';
 import { normalizeDataAddress, stringDefinition } from './declaration-closure.js';
 import { harvestAnnotatedParameterTypes } from './win32-signatures.js';
 import { PLATFORM_FUNCDEF_NAMES, PLATFORM_STRUCT_FIELD_TYPES, isPlatformOrBuiltinType, isLibraryType, sdkLayoutMismatches, sdkHeaderOf, unprobedTypeNames, generatePlatformHeader, oddWidthTypesSpelled, placeholderTypesUsedIn, normalizeDataValue, arrayRowTypedefLines, arrayRowReturn, arrayRowSpelling, GHIDRA_PSEUDO_OP_RESULT_TYPES, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setFunctionHiddenTypes, computeFunctionHiddenTypes, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, platformDefinedFunctionNames, platformVoidPointerFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
@@ -4488,6 +4488,9 @@ function generateFilesForFunctions(
     // is answered by the table that already answers it in a body, with the
     // namespace segments the reference has to be spelled with.
     setInitializerFunctionAddresses(context.functionAddressMap);
+    // And the namespace each global's declaration lives in, for the references an
+    // initializer reaches by address or by an interior path Ghidra leaves bare.
+    setInitializerGlobalNamespaces(context.funcPtrArgCasts.initializerDataNamespaces);
   }
 
   // ── Build module graph for include resolution ────────────────────────
@@ -6573,6 +6576,8 @@ export function buildFuncPtrArgCastTables(
   // under several classes, so D2Client::UIWidget::vftable became a bare `vftable` that
   // bound to a different class's table with an incompatible type.
   const ambiguousGlobalNames = new Set<string>();
+  const dataNamespaces: Record<string, readonly string[]> = {};
+  const dataAmbiguous = new Set<string>();
   {
     const blockableLeadSegments = new Set<string>();
     for (const dt of dataTypes) {
@@ -6603,6 +6608,28 @@ export function buildFuncPtrArgCastTables(
         continue;
       }
       globalNamespaces[name] = [...segments];
+    }
+    // The same answer for every datum an INITIALIZER can name, which is wider than
+    // the body passes' table: a struct-colocated extern or a file-local static is
+    // named from another initializer in its own unit (`gapGlideStripVertexPtrsA`
+    // holds `&gaGlidePerspectiveVertices[1].fX`; both live in Glide.cpp), and there
+    // the bare name resolves only while the datum sits at root scope. Every scope
+    // but a function's static local, whose name no namespace qualifies.
+    for (const g of globals) {
+      const name = g.suggestedName || g.name;
+      if (!name || /[^A-Za-z0-9_]/.test(name)) continue;
+      if (dataAmbiguous.has(name)) continue;
+      if (g.scope === 'static-local') continue;
+      const resolved = emittedNamespaceOf(g);
+      const segments = resolved.segments;
+      if (segments.length > 0 && !resolved.classScope && blockableLeadSegments.has(segments[0])) continue;
+      const existing = dataNamespaces[name];
+      if (existing !== undefined && existing.join('::') !== segments.join('::')) {
+        dataAmbiguous.add(name);
+        delete dataNamespaces[name];
+        continue;
+      }
+      dataNamespaces[name] = [...segments];
     }
   }
 
@@ -6685,6 +6712,7 @@ export function buildFuncPtrArgCastTables(
     globalElementSizes,
     dataExtents,
     globalNamespaces,
+    initializerDataNamespaces: dataNamespaces,
     ambiguousGlobalNames: [...ambiguousGlobalNames],
     stringConstantNames,
     stringLiteralAddresses: stringLiteralAddresses(strings),
