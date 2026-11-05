@@ -87,6 +87,32 @@ describe('foreignParameterRegisters', () => {
     }), []);
   });
 
+  it('compares a program-defined model with the fastcall its storage is spelled as', () => {
+    // ITEMMODE_GetAlternateBodyLoc 0055f240: `lea eax, [ecx-4]`, called with ECX loaded.
+    assert.deepStrictEqual(foreignParameterRegisters({
+      callingConvention: '__stdcall_edxsafe',
+      parameters: [{ name: 'eBodyLoc', dataType: 'int', size: 4, ordinal: 0, storage: 'ECX:4' }],
+    }), []);
+    // _oldSaveGameLoadingPart8_part1_part1 00533a70: `movzx eax, cx`, `cmp edx, 0x31`.
+    assert.deepStrictEqual(foreignParameterRegisters({
+      callingConvention: '__stdcall_ecxedxsafe',
+      parameters: [
+        { name: 'wHirelingId', dataType: 'undefined2', size: 2, ordinal: 0, storage: 'CX:2' },
+        { name: 'nLevel', dataType: 'int', size: 4, ordinal: 1, storage: 'EDX:4' },
+      ],
+    }), []);
+    // Storage no stock convention describes keeps the model's base.
+    assert.deepStrictEqual(foreignParameterRegisters({
+      callingConvention: '__stdcall_edxsafe',
+      parameters: [{ name: 'p', dataType: 'int', size: 4, ordinal: 0, storage: 'EAX:4' }],
+    }), ['EAX']);
+    // A stock name is compared as named.
+    assert.deepStrictEqual(foreignParameterRegisters({
+      callingConvention: '__stdcall',
+      parameters: [{ name: 'p', dataType: 'int', size: 4, ordinal: 0, storage: 'ECX:4' }],
+    }), ['ECX']);
+  });
+
   it('names EDX in a fastcall that passes nothing in ECX', () => {
     // init_block (0042b9e0): __fastcall, its one parameter in EDX.
     assert.deepStrictEqual(foreignParameterRegisters({

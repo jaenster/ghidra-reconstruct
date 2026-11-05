@@ -54,6 +54,7 @@ import { Lexer, TokenKind } from '@ghidra-mcp/cpp-parser';
 import type { DataValue, ExtractedFunction } from '../types.js';
 import { decompiledFunctionName } from './impl.js';
 import { EXTERN_ENTRY_SUFFIX } from './header.js';
+import { abiConvention } from './calling-convention.js';
 
 export { EXTERN_ENTRY_SUFFIX };
 
@@ -66,6 +67,9 @@ const REGISTER_FAMILY: Record<string, string> = {
   ESI: 'ESI', SI: 'ESI',
   EDI: 'EDI', DI: 'EDI',
 };
+
+/** A prototype model the program defines itself: a stock name, `_`, and what it changes. */
+const PROGRAM_MODEL = /^(?:__cdecl|__stdcall|__fastcall|__thiscall)_[A-Za-z0-9_]+$/;
 
 /** Registers a declared convention passes arguments in. */
 function conventionRegisters(callingConvention: string): Set<string> | undefined {
@@ -83,9 +87,20 @@ function conventionRegisters(callingConvention: string): Set<string> | undefined
  * parameter in EDX and none in ECX (`init_block`, 0042b9e0) has VC8's own
  * convention for a static function, and EDX counts as foreign. A convention
  * Ghidra could not name gives nothing to compare against, so it gives [].
+ *
+ * A program-defined model (`__stdcall_edxsafe`, `__stdcall_ecxedxsafe`) whose storage is the
+ * fastcall placement is compared as the `__fastcall` it is spelled (calling-convention.ts):
+ * its name's base says nothing about where the arguments travel. ITEMMODE_GetAlternateBodyLoc
+ * 0055f240 (`__stdcall_edxsafe`, its argument in ECX: `lea eax, [ecx-4]`) and
+ * _oldSaveGameLoadingPart8_part1_part1 00533a70 (`__stdcall_ecxedxsafe`, CX and EDX) enter
+ * with only fastcall's registers; made static, VC8 moved the argument to EAX.
  */
-export function foreignParameterRegisters(func: Pick<ExtractedFunction, 'callingConvention' | 'parameters'>): string[] {
-  const allowed = conventionRegisters(func.callingConvention ?? '');
+export function foreignParameterRegisters(func: Pick<ExtractedFunction, 'callingConvention' | 'parameters'> & { hasVarArgs?: boolean }): string[] {
+  const named = func.callingConvention ?? '';
+  const spelled = PROGRAM_MODEL.test(named)
+    ? abiConvention({ callingConvention: named, parameters: func.parameters, hasVarArgs: func.hasVarArgs })
+    : undefined;
+  const allowed = conventionRegisters(spelled === '__fastcall' ? spelled : named);
   if (!allowed) return [];
   const used = new Set<string>();
   for (const p of func.parameters ?? []) {
