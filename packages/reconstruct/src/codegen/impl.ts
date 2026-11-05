@@ -42,7 +42,7 @@ import { displacementTargets, foldedAddressFacts, type FoldedAddressFact } from 
 import { immediateConstantFacts, referencedDataAddresses, dataAtAddress, type ImmediateConstantFact } from './immediate-constant-spec.js';
 import { compareFormSpec, type CompareFormSpec } from './compare-form-spec.js';
 import { repStringOps } from './rep-string-spec.js';
-import { vc8FormSpec, type Vc8FormSpec } from './vc8form-spec.js';
+import { vc8FormSpec, vc8formHashRecord, type Vc8FormSpec } from './vc8form-spec.js';
 import type { RepStringOp, Expression, NullGetterTable } from '@ghidra-mcp/cpp-parser';
 import { ROOT_CLASS_SCOPE, namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 import { cleanFunctionComment, declaredParameters, externEntryDeclaration, guardedFuncDefTypedef, emittedFunctionName, returnSigType, sigType } from './header.js';
@@ -1787,6 +1787,13 @@ export function generateFunctionImplementation(
           vc8Forms: override?.action === 'patch' ? undefined : vc8FormSpec(func),
         },
       );
+      // The decompile hashes of each tagged function as this pass sees it, for
+      // scripts/vc8form-rehash.ts (a measurement switch: the output is unchanged).
+      const vc8Hashes = process.env.GHIDRA_VC8FORM_HASHES;
+      if (vc8Hashes && override?.action !== 'patch') {
+        const rec = vc8formHashRecord(func);
+        if (rec) appendFileSync(vc8Hashes, JSON.stringify(rec) + '\n');
+      }
       body = func.name ? rewriteQuestUnionMembers(transformed.code, func.name, context?.sourceFileName, [...(func.parameters ?? []), ...(func.localVariables ?? [])]) : transformed.code;
       bodyIdentifiers = transformed.identifiers;
       // A body can DECLARE a local of a funcdef type Ghidra applied to the
