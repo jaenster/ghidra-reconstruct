@@ -23,9 +23,10 @@
  *                        a call.
  *   fold(V)              each value stored to local V is written into its uses up to the
  *                        next store to V, and the store goes; `*V` of a stored `&X` is X.
- *                        V's declaration goes once nothing names V. Refused when V's
- *                        address is taken or a store in between writes a name the value
- *                        reads.
+ *                        V's declaration goes once nothing names V. A compound store
+ *                        `V op= K` right after the store is part of the value (E op K).
+ *                        Refused when V's address is taken or a store in between writes a
+ *                        name the value reads.
  *   cache(E,N,T[,@A])    a new local `T N = E;` before the statement storing A, or the
  *                        if/while/switch testing A (default: before the first statement
  *                        that evaluates E, in the innermost block holding every E), and
@@ -47,8 +48,10 @@
  *                        `return K;`.
  *   width(V,T)           local V is declared T; a cast of V to T, a cast to V's old type
  *                        stored into V, and a cast of V to T's width in a truth test go.
- *   arms(C)              the if/else whose condition prints C is written with the
- *                        condition negated and the arms swapped.
+ *   arms(C[,wrap])       the if/else whose condition prints C is written with the
+ *                        condition negated and the arms swapped; `wrap` negates a
+ *                        condition that is not a comparison or `!x` as `!(C)`, not by
+ *                        De Morgan (NPCMENU_OpenNpcShop 004b3d40, with zero(C)).
  *
  * Control-flow forms (C is the printed condition of an `if` with no else; `[,i]` picks the
  * i-th such if, default 1):
@@ -88,8 +91,9 @@
  *                        the declaration of W in its block; refused when a statement it
  *                        moves past names V.
  *   split(V,T,N)         the store `V = E;` that begins a new life of V is written
- *                        `T N = E;` and that life's reads read N; refused when V is read
- *                        again after them before a new store, or inside a loop.
+ *                        `T N = E;` and that life's reads read N (E may read V: it reads
+ *                        the old value, and keeps V); refused when V is read again after
+ *                        them before a new store, or inside a loop.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -111,7 +115,7 @@ export type Vc8Form =
   | { op: 'merge-guards'; index: number }
   | { op: 'retval'; name: string; value: string }
   | { op: 'width'; name: string; type: string }
-  | { op: 'arms'; cond: string }
+  | { op: 'arms'; cond: string; wrap?: boolean }
   | { op: 'nest'; cond: string; index: number }
   | { op: 'merge-tail'; cond: string; index: number }
   | { op: 'continue'; cond: string; index: number }
@@ -195,7 +199,10 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
     }
     case 'retval': return args.length === 2 && !anchor ? { op: 'retval', name: args[0], value: args[1] } : undefined;
     case 'width': return args.length === 2 && !anchor ? { op: 'width', name: args[0], type: args[1] } : undefined;
-    case 'arms': return args.length === 1 && !anchor ? { op: 'arms', cond: args[0] } : undefined;
+    case 'arms':
+      if (anchor) return undefined;
+      if (args.length === 1) return { op: 'arms', cond: args[0] };
+      return args.length === 2 && args[1] === 'wrap' ? { op: 'arms', cond: args[0], wrap: true } : undefined;
     case 'nest': case 'merge-tail': case 'continue': case 'select': {
       const i = int(args[1], 1);
       if (anchor || args.length < 1 || args.length > 2 || !(i >= 1) || args[0] === '') return undefined;
@@ -494,6 +501,8 @@ function doSeq(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'seq' }>): void {
   }
 }
 
+const IN_PLACE = new Set(['+=', '-=', '*=', '&=', '|=', '^=', '<<=', '>>=']);
+
 function doFold(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'fold' }>): void {
   const v = f.name;
   if (addressTaken(fn, v)) refuse(`&${v} is taken`);
@@ -508,8 +517,18 @@ function doFold(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'fold' }>): void {
       else if (d && d.name.name === v && d.initializer && d.initializer.kind !== NodeKind.InitListExpr) value = d.initializer as Expression;
       if (!value) continue;
       if (mentions(value, v)) refuse(`${v} is stored from itself`);
+      // A compound store right after it works on the value in place (`V = E; V -= K;`, as
+      // in-place-operand writes the `E - K` VC8 computes in its register): the value is
+      // `E - K`. K must not read V or call anything.
+      let absorbed = 0;
+      while (i + 1 + absorbed < b.statements.length) {
+        const c = storeOf(b.statements[i + 1 + absorbed]);
+        if (!c || !IN_PLACE.has(c.operator) || !isId(unparen(c.left), v) || mentions(c.right, v) || hasCall(c.right)) break;
+        value = { kind: NodeKind.BinaryExpr, operator: c.operator.slice(0, -1), left: value, right: c.right } as unknown as BinaryExpr;
+        absorbed++;
+      }
       // Its uses: the following statements of this block, up to the next store to v.
-      let end = i + 1;
+      let end = i + 1 + absorbed;
       while (end < b.statements.length) {
         const n = b.statements[end];
         const ns = storeOf(n);
@@ -517,7 +536,7 @@ function doFold(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'fold' }>): void {
         end++;
       }
       const reads = identifiers(value);
-      const uses = b.statements.slice(i + 1, end);
+      const uses = b.statements.slice(i + 1 + absorbed, end);
       const lastUse = uses.reduce((k, n, j) => (mentions(n, v) ? j : k), -1);
       if (lastUse < 0) refuse(`the value stored to ${v} is never read`);
       for (let j = 0; j <= lastUse; j++) {
@@ -539,7 +558,7 @@ function doFold(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'fold' }>): void {
         }
         for (const { node, slot } of [...walk(n)]) if (slot && isId(node, v)) put(slot, cloneNode(value));
       }
-      b.statements.splice(i, 1);
+      b.statements.splice(i, 1 + absorbed);
       i--;
       folded++;
     }
@@ -889,7 +908,7 @@ function doArms(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'arms' }>): void {
     if (!s.elseBranch || text(s.condition) !== want) continue;
     if (s.elseBranch.kind === NodeKind.IfStmt) refuse('the else arm is an else-if chain');
     const t = s.thenBranch;
-    s.condition = negate(s.condition);
+    s.condition = f.wrap ? negateWrap(s.condition) : negate(s.condition);
     s.thenBranch = s.elseBranch;
     s.elseBranch = t;
     return;
@@ -1263,7 +1282,9 @@ function doSplit(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'split' }>): void {
   for (const b of blocks(fn)) {
     for (let k = 0; k < b.statements.length; k++) {
       const st = storeOf(b.statements[k]);
-      if (!st || st.operator !== '=' || !isId(unparen(st.left), f.name) || mentions(st.right, f.name)) continue;
+      // A store that reads V's old value (`V = V * k`) begins a new life too: the new
+      // variable's initializer reads V, which still holds that value there.
+      if (!st || st.operator !== '=' || !isId(unparen(st.left), f.name)) continue;
       // Its life: up to the next plain store to V that does not read V, in this block.
       let end = k + 1;
       for (; end < b.statements.length; end++) {

@@ -158,7 +158,9 @@ export function vc8FormSpec(func: Pick<ExtractedFunction, 'tags' | 'size' | 'dec
     out.forms.push({ form: tag.form, tag: raw });
   }
   // Ghidra keeps a function's tags as a set, so their order says nothing: the forms that
-  // change a declaration go first, the moves last, and equal ops by their text.
+  // change a declaration go first, the moves last, and equal ops by their text. dup goes
+  // before fold: the copy it writes into each arm is what fold then folds the arm's
+  // temporary into (LOADER_CheckForInsertedDiscs 0045fc60).
   out.forms.sort((a, b) => FORM_ORDER.indexOf(a.form.op) - FORM_ORDER.indexOf(b.form.op) || (a.tag < b.tag ? -1 : a.tag > b.tag ? 1 : 0));
   return out;
 }
@@ -182,4 +184,4 @@ export function vc8formHashRecord(func: Pick<ExtractedFunction, 'address' | 'nam
   return { address: String(func.address), name: String(func.name ?? ''), size: Number(func.size), form: vc8formBodyHash(d), legacy: vc8formLegacyBodyHash(d), tags: tags.sort() };
 }
 
-const FORM_ORDER: Array<Vc8Form['op']> = ['width', 'own', 'split', 'fold', 'cache', 'ifsel', 'guards', 'merge-guards', 'retval', 'select', 'merge-tail', 'nest', 'continue', 'dup', 'arms', 'tarms', 'unselect', 'zero', 'nonzero', 'cmp', 'swap', 'decl', 'seq'];
+const FORM_ORDER: Array<Vc8Form['op']> = ['width', 'own', 'split', 'dup', 'fold', 'cache', 'ifsel', 'guards', 'merge-guards', 'retval', 'select', 'merge-tail', 'nest', 'continue', 'arms', 'tarms', 'unselect', 'zero', 'nonzero', 'cmp', 'swap', 'decl', 'seq'];

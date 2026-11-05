@@ -187,6 +187,15 @@ describe('vc8-form shapes: selects and declarations', () => {
     assert.ok(sites[0].applied, sites[0].why);
     assert.strictEqual(out, 'void f(int* p) { int v; v = g(1); *p = v; int v2 = g(2); *p += v2; }');
   });
+  // Skills_CltDoFunc_DualMissileWithZ 004f1d80: `nCalcA = nAuraRange2 * nCalcA;`.
+  it('split begins a life at a store that reads the old value', () => {
+    const { out, sites } = run(['void f(int* p, int a) {', '  int v = a;', '  *p = v;', '  v = v * 3;', '  g(v);', '  *p = v;', '}'], 'split(v,int,v2)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.strictEqual(out, 'void f(int* p, int a) { int v = a; *p = v; int v2 = v * 3; g(v2); *p = v2; }');
+  });
+  it('split refuses a life that reads the old value when the value lives on', () => {
+    refused(['void f(int* p, int a) {', '  int v = a;', '  v = v * 3;', '  g(v);', '  v += 1;', '  *p = v;', '}'], 'split(v,int,v2)');
+  });
   it('split refuses inside a loop', () => {
     refused(['void f(int* p) {', '  int v;', '  while (*p) {', '    v = g(1);', '    *p = v;', '  }', '}'], 'split(v,int,v2)');
   });
@@ -222,5 +231,14 @@ describe('vc8-form shapes: seq and fold extensions', () => {
   });
   it('fold refuses a value the next pass reads first', () => {
     refused(['void f(N* p) {', '  int n = 0;', '  for (; p; p = p->x) {', '    h(n);', '    n = p->id;', '    g(n);', '  }', '}'], 'fold(n)');
+  });
+  // SERVER_PlayerUpdateExperience 0057e510: in-place-operand's `V = E; V -= 1;`.
+  it('fold takes a compound store right after the store as part of the value', () => {
+    const { out, sites } = run(['void f(int c) {', '  int v = g(c);', '  v -= 1;', '  h(c, v * 2);', '}'], 'fold(v)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.strictEqual(out, 'void f(int c) { h(c, (g(c) - 1) * 2); }');
+  });
+  it('fold refuses a compound store whose operand calls', () => {
+    refused(['void f(int c) {', '  int v = g(c);', '  v -= k(c);', '  h(c, v);', '}'], 'fold(v)');
   });
 });
