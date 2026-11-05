@@ -151,8 +151,11 @@ export function expandChangedTypes(
  * a renamed function is found.
  */
 export interface SymbolHashCache {
-  /** address -> {hash, name at that address} */
-  functions: Record<string, { hash: string; name: string }>;
+  /**
+   * address -> {hash, name at that address, its namespace}. The namespace decides the
+   * unit a function is emitted into; a cache written before it was recorded has none.
+   */
+  functions: Record<string, { hash: string; name: string; namespace?: string }>;
   /** type path or name -> hash */
   types: Record<string, string>;
   /**
@@ -221,7 +224,7 @@ export function computeHashCache(inputs: {
 }): SymbolHashCache {
   const cache = emptyHashCache();
   for (const f of inputs.functions) {
-    cache.functions[f.address] = { hash: hashFunction(f), name: f.name };
+    cache.functions[f.address] = { hash: hashFunction(f), name: f.name, namespace: f.namespace ?? '' };
   }
   for (const dt of inputs.dataTypes) cache.types[typePath(dt)] = hashDataType(dt);
   cache.typeOrder = typeOrder(inputs.dataTypes);
@@ -298,6 +301,24 @@ export function selectDirtyUnits(inputs: SelectInputs): DirtySelection {
   // initialisedAggregate. Matched against dependency edges only - a struct that
   // contains the type did not change shape, so containment is not followed.
   const valueTypes = new Set<string>();
+
+  // A function moved to another namespace is emitted into another unit, which no module
+  // list names it in yet: the graph only finds the unit it left. Re-emit everything
+  // (v1950: six functions left _unnamespaced, and only that unit was re-emitted, so
+  // the units they moved into were reused without them).
+  const movedNamespace = functions.filter(f => {
+    const before = previous.functions[f.address];
+    return before !== undefined && before.namespace !== undefined && before.namespace !== (f.namespace ?? '');
+  });
+  if (movedNamespace.length > 0) {
+    return {
+      units: null,
+      reason: `${movedNamespace.length} function(s) moved to another namespace ` +
+        `(e.g. ${movedNamespace.slice(0, 3).map(f => f.name).join(', ')}); re-emitting everything`,
+      changedSymbols: movedNamespace.map(f => f.name),
+      expandedTypes: [],
+    };
+  }
 
   for (const f of functions) {
     const before = previous.functions[f.address];
