@@ -305,3 +305,24 @@ describe('qualified references', () => {
     assert.ok(r.reports.get('module-public-api.tsv')!.includes('D2Common\tfunction\t00643ce0'));
   });
 });
+
+describe('one name, several qualified owners', () => {
+  it('a table naming every renderer\'s function makes each of them public', () => {
+    const files = new Map<string, SourceFile>();
+    files.set('D2gfx/Tables.cpp', file('D2gfx/Tables.cpp',
+      'void * gaTables[] = { (void *)&D2Gdi::Renderer::UpdateScaleFactor, (void *)&D2Glide::Renderer::UpdateScaleFactor };', 'implementation'));
+    const graph = new ModuleGraph({
+      ...config,
+      modules: { ...config.modules, D2Glide: { imports: ['Fog'] }, D2gfx: { imports: ['Storm', 'Fog'], loads: ['D2Gdi', 'D2Glide'] } },
+    });
+    const r = applyModuleBoundaries({
+      graph, files,
+      functions: [fn('UpdateScaleFactor', 'D2Gdi::Renderer', '006c8000'), fn('UpdateScaleFactor', 'D2Glide::Renderer', '00509000')],
+      globals: [], typeOwnerMap: new Map(), globalsPath: 'globals/globals.h',
+      globalOwner: () => undefined, moduleExterns: new Map(), rootProvides: new Set(), typePrelude: () => [],
+    });
+    const api = r.reports.get('module-public-api.tsv')!;
+    assert.ok(api.includes('D2Gdi\tfunction\t006c8000') && api.includes('D2Glide\tfunction\t00509000'), api);
+    assert.deepStrictEqual(r.references.map(x => x.owner).sort(), ['D2Gdi', 'D2Glide']);
+  });
+});

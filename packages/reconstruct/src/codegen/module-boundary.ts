@@ -277,7 +277,16 @@ export function applyModuleBoundaries(input: ModuleBoundaryInput): ModuleBoundar
           candidates = candidates.filter(c => c.module === userModule);
           modules = new Set([userModule]);
         }
-        if (modules.size > 1) ambiguous++;
+        // Several qualified spellings of one name (a table of every renderer's
+        // UpdateScaleFactor): each written qualifier is its own reference.
+        const qualifiedHits = written ? candidates.filter(c => [...written].some(w => c.qualified === w || c.qualified.endsWith(`::${w}`))) : [];
+        if (modules.size > 1 && qualifiedHits.length > 0 && new Set(qualifiedHits.map(c => c.module)).size > 1) {
+          for (const owner of new Set(qualifiedHits.map(c => c.module!))) {
+            const mine = qualifiedHits.filter(c => c.module === owner);
+            if (owner !== userModule) record('call', userModule, userFile, source, owner, mine[0].qualified);
+            if (owner !== userModule || header) for (const c of mine) mark(publicFns, owner, c.address);
+          }
+        } else if (modules.size > 1) ambiguous++;
         else if (modules.size === 1) {
           const owner = [...modules][0];
           if (owner !== userModule) {
