@@ -485,10 +485,10 @@ describe('registered class templates', () => {
   });
 
   it('initializes the base subobject first, without a member designator', () => {
-    assert.match(file('globals/Mod.cpp'), /TSTableEx<NODE> gTable = \{\n    \/\* base TSTable<NODE> \*\/ \{\n        \/\* \.m_count = \*\/ 4\n    \},\n    \/\* \.m_extra = \*\/ 5\n\};/);
+    assert.match(file('globals/Mod.cpp'), /TSTableEx<::NODE> gTable = \{\n    \/\* base TSTable<NODE> \*\/ \{\n        \/\* \.m_count = \*\/ 4\n    \},\n    \/\* \.m_extra = \*\/ 5\n\};/);
     // All zero: no initializer, which C++03 accepts for a class with a base and which
     // leaves the same zero bytes as the C++17 `= {}`.
-    assert.match(file('globals/Mod.cpp'), /^TSTableEx<NODE> gTableZero;/m);
+    assert.match(file('globals/Mod.cpp'), /^TSTableEx<::NODE> gTableZero;/m);
   });
 
   it('emits an element\'s orphan copy as a free function with the members, not in the element\'s namespace', () => {
@@ -578,6 +578,6 @@ describe('a class with a base defined static in its one TU', () => {
     const unit = project.files.get('Mod/Third.cpp')?.content ?? '';
     // C++03 has no list initialization for a class with a base (MSVC C2552).
     const where = [...project.files.entries()].filter(([, f]) => f.content.includes("gLocalZero")).map(([p, f]) => p + ": " + f.content.split("\n").filter(l => l.includes("gLocalZero")).join(" / ")).join("\n");
-    assert.match(unit, /^static TSTableEx<NODE> gLocalZero;/m, where);
+    assert.match(unit, /^static TSTableEx<::NODE> gLocalZero;/m, where);
   });
 });

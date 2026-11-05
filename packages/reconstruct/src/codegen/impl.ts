@@ -5,7 +5,7 @@
  */
 
 import { zeroEnumMember } from './enum-lookups.js';
-import { platformDeclaredFunctionNames, rootQualifyShadowedArguments } from './platform-types.js';
+import { platformDeclaredFunctionNames, rootQualifyShadowedArguments, rootQualifyShadowedType } from './platform-types.js';
 import { isMsvcEhHandlerStub } from './eh-handler-stub.js';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -1280,7 +1280,7 @@ export function generateImplementation(
         if (initializer === '{}' && derivedTemplateInstance(type)) {
           fileLocalLines.push(`static ${normalizeArrayDeclaration(type, name)};`);
         } else if (arrayInfo && (global.initializedData.kind === 'array' || isWideTextDatum(global, type))) {
-          fileLocalLines.push(`static ${arrayInfo.type} ${name}[${arrayInfo.count}] = ${initializer};`);
+          fileLocalLines.push(`static ${rootQualifyShadowedType(arrayInfo.type)} ${name}[${arrayInfo.count}] = ${initializer};`);
         } else {
           fileLocalLines.push(`static ${normalizeArrayDeclaration(type, name)} = ${braceArrayInitializer(type, initializer)};`);
         }
@@ -1296,7 +1296,7 @@ export function generateImplementation(
         if (!arrayInfo && value === '{}' && derivedTemplateInstance(type)) {
           fileLocalLines.push(`static ${normalizeArrayDeclaration(type, name)};`);
         } else if (arrayInfo) {
-          fileLocalLines.push(`static ${arrayInfo.type} ${name}[${arrayInfo.count}] = { ${value} };`);
+          fileLocalLines.push(`static ${rootQualifyShadowedType(arrayInfo.type)} ${name}[${arrayInfo.count}] = { ${value} };`);
         } else {
           const decl = normalizeArrayDeclaration(type, name);
           const isArray = /\[\d+\]/.test(decl);
@@ -1310,7 +1310,7 @@ export function generateImplementation(
         if (type === 'auto') type = 'uint8_t';
         const arrayInfo = inferArrayDeclaration(global);
         if (arrayInfo) {
-          fileLocalLines.push(`static ${arrayInfo.type} ${name}[${arrayInfo.count}];`);
+          fileLocalLines.push(`static ${rootQualifyShadowedType(arrayInfo.type)} ${name}[${arrayInfo.count}];`);
         } else {
           fileLocalLines.push(`static ${normalizeArrayDeclaration(type, name)};`);
         }

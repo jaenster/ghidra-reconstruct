@@ -932,7 +932,7 @@ export function generateGlobalsHeader(
         }
         const arrayInfo = inferArrayDeclaration(symbol);
         const decl = arrayInfo
-          ? `extern ${arrayInfo.type} ${name}[${arrayInfo.count}];`
+          ? `extern ${rootQualifyShadowedType(arrayInfo.type)} ${name}[${arrayInfo.count}];`
           : `extern ${normalizeArrayDeclaration(type, name)};`;
         return [...forwards, decl].join('\n');
       },
@@ -1255,7 +1255,7 @@ export function generateStaticLocalDeclaration(
     setInitializerOwnerAddress(undefined);
     if (arrayInfo && symbol.initializedData.kind === 'array') {
       const aliasLine = globalAliasComment(symbol);
-      return `${aliasLine ? aliasLine + '\n' : ''}static ${arrayInfo.type} ${name}[${arrayInfo.count}] = ${init};`
+      return `${aliasLine ? aliasLine + '\n' : ''}static ${rootQualifyShadowedType(arrayInfo.type)} ${name}[${arrayInfo.count}] = ${init};`
         + staticLocalGuard(name, guardScope, true);
     }
     initializer = ` = ${init}`;
@@ -2678,7 +2678,7 @@ export function braceArrayInitializer(type: string, initializer: string): string
 }
 
 export function normalizeArrayDeclaration(type: string, name: string): string {
-  type = stripFuncDefIndirection(type);
+  type = rootQualifyShadowedType(stripFuncDefIndirection(type));
   // "TYPE[N] *" → pointer to array: "TYPE (*name)[N]"
   const ptrToArrayMatch = type.match(/^(.+?)((?:\[\d+\])+)\s*\*$/);
   if (ptrToArrayMatch) {
@@ -3751,7 +3751,7 @@ export function globalDeclarator(global: AnalyzedDataSymbol, name: string): stri
   const arrayInfo = inferArrayDeclaration(global);
   if (arrayInfo && (!global.initializedData || global.initializedData.kind === 'array'
                     || isWideTextDatum(global, type))) {
-    return `${arrayInfo.type} ${name}[${arrayInfo.count}]`;
+    return `${rootQualifyShadowedType(arrayInfo.type)} ${name}[${arrayInfo.count}]`;
   }
   return normalizeArrayDeclaration(type, name);
 }
@@ -3770,7 +3770,7 @@ export function globalDefinition(global: AnalyzedDataSymbol, name: string): stri
     setInitializerOwnerAddress(undefined);
     if (initializer === '{}' && derivedTemplateInstance(type)) return `${normalizeArrayDeclaration(type, name)};`;
     if (arrayInfo && (global.initializedData.kind === 'array' || isWideTextDatum(global, type))) {
-      return `${arrayInfo.type} ${name}[${arrayInfo.count}] = ${initializer};`;
+      return `${rootQualifyShadowedType(arrayInfo.type)} ${name}[${arrayInfo.count}] = ${initializer};`;
     }
     return `${normalizeArrayDeclaration(type, name)} = ${braceArrayInitializer(type, initializer)};`;
   }
@@ -3779,10 +3779,10 @@ export function globalDefinition(global: AnalyzedDataSymbol, name: string): stri
     const value = renderGlobalScalarInitializer(global.value, type, arrayInfo?.count);
     setInitializerOwnerAddress(undefined);
     if (!arrayInfo && value === '{}' && derivedTemplateInstance(type)) return `${normalizeArrayDeclaration(type, name)};`;
-    if (arrayInfo) return `${arrayInfo.type} ${name}[${arrayInfo.count}] = { ${value} };`;
+    if (arrayInfo) return `${rootQualifyShadowedType(arrayInfo.type)} ${name}[${arrayInfo.count}] = { ${value} };`;
     return `${normalizeArrayDeclaration(type, name)} = ${braceArrayInitializer(type, value)};`;
   }
-  if (arrayInfo) return `${arrayInfo.type} ${name}[${arrayInfo.count}];`;
+  if (arrayInfo) return `${rootQualifyShadowedType(arrayInfo.type)} ${name}[${arrayInfo.count}];`;
   return `${normalizeArrayDeclaration(type, name)};`;
 }
 

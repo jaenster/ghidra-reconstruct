@@ -98,3 +98,23 @@ describe('emittedParameterName', () => {
     assert.equal(emittedParameterName('nCount', '::Push'), 'nCount');
   });
 });
+
+/**
+ * A global's declarator is a use site like any other. `pFormTextAndEditBox` lives
+ * in `namespace D2Win::Src::D2WinMain`, where the sibling unit namespace
+ * `D2Win::Src::D2WinEditBox` hides the root-scope `struct D2WinEditBox`: the
+ * extern in globals.h and the definition in globals/D2Win.cpp must spell
+ * `::D2WinEditBox`, or neither parses (Game.exe v1937).
+ */
+describe('a global declared with a shadowed type', () => {
+  afterEach(() => setShadowedTypeNames(undefined));
+
+  it('root-qualifies the type of a scalar, an array and a pointer-to-array declarator', async () => {
+    const { normalizeArrayDeclaration } = await import('../codegen/globals-header.js');
+    setShadowedTypeNames(new Set(['D2WinEditBox']));
+    assert.equal(normalizeArrayDeclaration('D2WinEditBox *', 'pFormTextAndEditBox'), '::D2WinEditBox * pFormTextAndEditBox');
+    assert.equal(normalizeArrayDeclaration('D2WinEditBox *[4]', 'apBoxes'), '::D2WinEditBox * apBoxes[4]');
+    assert.equal(normalizeArrayDeclaration('D2WinEditBox[2] *', 'pPair'), '::D2WinEditBox (*pPair)[2]');
+    assert.equal(normalizeArrayDeclaration('D2ControlStrc *', 'pFormsList'), 'D2ControlStrc * pFormsList');
+  });
+});
