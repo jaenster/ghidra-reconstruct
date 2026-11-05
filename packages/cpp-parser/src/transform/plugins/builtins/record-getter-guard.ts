@@ -111,8 +111,12 @@ export function memberChain(e: Expression): { root: string; last: string } | nul
   if (member.kind !== NodeKind.Identifier || typeof member.name !== 'string') return null;
   let o = unwrap(m.object);
   while (o.kind === NodeKind.MemberExpr) o = unwrap((o as MemberExpr).object);
-  if (o.kind !== NodeKind.Identifier) return null;
-  return { root: (o as Identifier).name, last: member.name };
+  // The table global is a name Ghidra prints qualified once it lives in a module
+  // namespace (`D2Common::ITEMS::Items::sgptDataTable->pTxtSkills`); same root.
+  const root = o.kind === NodeKind.Identifier ? (o as Identifier).name
+    : o.kind === NodeKind.QualifiedId ? calleeName(o) : undefined;
+  if (root === undefined) return null;
+  return { root, last: member.name };
 }
 
 function mentions(e: ASTNode, name: string): boolean {
@@ -287,6 +291,7 @@ function clobbers(n: ASTNode, g: Guard): boolean {
       const name = (u as Identifier).name;
       return name === g.index.name || name === g.root;
     }
+    if (u.kind === NodeKind.QualifiedId) return calleeName(u) === g.root;
     if (u.kind === NodeKind.MemberExpr) {
       const m = (u as MemberExpr).member as { name?: unknown };
       return m.name === g.last;

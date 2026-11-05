@@ -230,7 +230,10 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
 // ---------------------------------------------------------------------------------------
 // Text, parsing, walking
 
-const norm = (s: string) => s.replace(/\s+/g, '');
+// Namespace qualifiers are dropped as `dh` drops them: a tag names a site in the text
+// it was measured on, and a symbol that moves to a module namespace afterwards
+// (`sgptDataTable` -> `D2Common::ITEMS::Items::sgptDataTable`) is the same site.
+const norm = (s: string) => s.replace(/\s+/g, '').replace(/(?<![\w:])(?:::)?(?:[A-Za-z_]\w*::)+(?=[A-Za-z_~])/g, '');
 const text = (n: ASTNode) => norm(emit(n as never));
 
 function unparen(e: Expression): Expression {

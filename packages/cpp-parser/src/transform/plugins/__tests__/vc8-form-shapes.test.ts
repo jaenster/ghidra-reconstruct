@@ -44,6 +44,13 @@ describe('vc8-form shapes: nest', () => {
     assert.ok(sites[0].applied, sites[0].why);
     assert.strictEqual(out, 'int f(U* p) { if (p->t == 1) { g(); return 1; } else { return 0; } }');
   });
+  // SKILLMONST_SrvDoFunc092_MeleeHitThenMissile 005cbf90: the tag was measured before
+  // sgptDataTable moved to D2Common::ITEMS::Items (Game.exe v1969); same site.
+  it('finds a site whose global is now namespace-qualified', () => {
+    const { out, sites } = run(['int f(int n) {', '  if (n >= Items::sgptDataTable->nSize) {', '    return 0;', '  }', '  g();', '  return 1;', '}'], 'nest(n >= sgptDataTable->nSize)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.strictEqual(out, 'int f(int n) { if (n < Items::sgptDataTable->nSize) { g(); return 1; } else { return 0; } }');
+  });
   // TXT_LvlWarp_Setup 0061f310: the arm ends in a halt, exit() never returns.
   it('takes an arm that ends in exit() as leaving', () => {
     const { out, sites } = run(['int f(U* p) {', '  if (p) {', '    { g(); exit(-1); }', '  }', '  h();', '  exit(-1);', '}'], 'nest(p)');
