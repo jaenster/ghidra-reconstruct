@@ -728,7 +728,11 @@ function tryCandidate(
   }
   if (!kind) return fail(24);
 
-  // Assignments in the groups whose value only this condition read go with the flags.
+  // Assignments in the groups whose value only this condition read go with the flags,
+  // unless a group's compare still reads the variable: the compare replaces the
+  // condition, so the assignment's value is still read there.
+  const cmpReads = new Set<string>();
+  for (const { cmp } of perGroup) for (const n of freeNames(cmp)) cmpReads.add(n);
   const deadInGroup = new Set<Statement>();
   for (const { g } of perGroup) {
     for (let i = g.lo; i <= g.end; i++) {
@@ -736,7 +740,7 @@ function tryCandidate(
       const a = simpleAssign(st);
       if (!a) continue;
       if (vars.has(a.v)) { deadInGroup.add(st); continue; }
-      if (!condReads.has(a.v) || !deps.isPure(a.rhs) || flow.isEscaped(a.v)) continue;
+      if (!condReads.has(a.v) || cmpReads.has(a.v) || !deps.isPure(a.rhs) || flow.isEscaped(a.v)) continue;
       const sn = flow.nodeOf(st);
       if (sn === undefined) continue;
       const uses = flow.usesOf(sn, a.v);

@@ -123,6 +123,30 @@ describe('flag-conditions: one group per path', native, () => {
     assert.match(r.lowered, /bSignedLessOrEqual = nSkillLevel <= 0;/);
   });
 
+  it('ITEMPROP_AddSkillOnEvent 0065f470: the copy a compare still reads stays in its group', () => {
+    // Path B copies nSkillLevel into nComputedLevel and the sign test reads the copy;
+    // the compare written for B reads nComputedLevel, so the copy is not dead.
+    const src = `int f(int nItem, int nKind) {
+      int nComputedLevel; int nSkillLevel; bool bBorrow; bool bIsZero;
+      if (nKind == 0) {
+        nComputedLevel = nItem >> 2;
+        nSkillLevel = nComputedLevel + 1;
+        bIsZero = SBORROW4(nSkillLevel, 1);
+        bBorrow = nSkillLevel == 1;
+      } else {
+        nSkillLevel = nItem / 3;
+        bIsZero = false;
+        bBorrow = nSkillLevel == 0;
+        nComputedLevel = nSkillLevel;
+      }
+      if (bBorrow || bIsZero != nComputedLevel < 0) { nSkillLevel = 1; }
+      return nSkillLevel; }`;
+    const r = disagreements(src, 2);
+    assert.strictEqual(r.bad, '0', r.lowered);
+    assert.match(r.lowered, /bSignedLessOrEqual = nSkillLevel <= 1;/);
+    assert.match(r.lowered, /nComputedLevel = nSkillLevel;\s*bSignedLessOrEqual = nComputedLevel <= 0;|bSignedLessOrEqual = nSkillLevel <= 0;/);
+  });
+
   it('DRLGCOORDS_IsAdjacentOrOverlapping 0066b880: jg after TEST and after CMP', () => {
     const src = `int f(int nDistX, int nDistY, int nMaxDist) {
       bool bBorrow; bool bIsEqual;
