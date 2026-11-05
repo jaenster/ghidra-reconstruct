@@ -1763,6 +1763,7 @@ export function generateFunctionImplementation(
           // A text patch anchors on the masks as Ghidra printed them.
           maskSites: override?.action === 'patch' ? undefined : func.maskSites,
           zextSites: override?.action === 'patch' ? undefined : func.zextSites,
+          signedDivides: override?.action === 'patch' ? undefined : func.signedDivides,
           // A text patch anchors on the stores as Ghidra printed them.
           registerStores: override?.action === 'patch' ? undefined : func.registerStores,
           // A text patch anchors on the shifts as Ghidra printed them.
@@ -2839,6 +2840,8 @@ function transformDecompiledCode(
     maskSites?: import('../extract/mask-sites.js').MaskSiteFacts;
     /** The operators whose result the decompiler zero-extends to 64 bits (extract/zext-sites.ts). */
     zextSites?: import('../extract/zext-sites.js').ZextSiteFacts;
+    /** The `/` and `%` operators the original computes with IDIV (extract/signed-divides.ts). */
+    signedDivides?: import('../extract/signed-divides.js').SignedDivideFacts;
     /** The constants the original stores from a register (extract/register-stores.ts). */
     registerStores?: import('../extract/register-stores.js').RegisterStoreFacts;
     /** The rotates by an immediate the original performs, per line (extract/rotate-sites.ts). */
@@ -3547,6 +3550,10 @@ function transformDecompiledCode(
     // Operators whose result the decompiler zero-extends, tagged before any pass reshapes them.
     if (enclosing?.zextSites) {
       perPluginOptions['zext-site'] = { counts: enclosing.zextSites.counts, sites: enclosing.zextSites.sites };
+    }
+    // Divisions the original computes with IDIV, tagged before any pass reshapes them.
+    if (enclosing?.signedDivides) {
+      perPluginOptions['signed-divide-site'] = { counts: enclosing.signedDivides.counts, sites: enclosing.signedDivides.sites };
     }
     if (enclosing?.compareForm) {
       perPluginOptions['compare-form'] = {

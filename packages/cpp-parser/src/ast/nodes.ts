@@ -90,6 +90,11 @@ export interface GhidraMetadata {
    */
   zextOperand?: boolean;
   /**
+   * The original computes this `/` or `%` with a signed divide (`signed-divide-site`);
+   * `arith-idioms` divides an unsigned byte or word dividend as the promoted int it is.
+   */
+  signedDivide?: boolean;
+  /**
    * The loop is the source form its instructions show - a REP STOS fill (`rep-string-form`),
    * an unrolled fill of more than 32 bytes (`array-fill-collapse`) - and VC8 compiles it back
    * to them; `memory-patterns` must not fold it into a memset call.

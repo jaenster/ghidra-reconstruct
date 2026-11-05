@@ -30,6 +30,7 @@ import type { JumpTableFacts } from './jump-tables.js';
 import type { ZeroStoreFacts } from './zero-stores.js';
 import type { MaskSiteFacts } from './mask-sites.js';
 import type { ZextSiteFacts } from './zext-sites.js';
+import type { SignedDivideFacts } from './signed-divides.js';
 import type { RegisterStoreFacts } from './register-stores.js';
 import type { RotateSiteFacts } from './rotate-sites.js';
 import type { StoreBaseFacts } from './store-bases.js';
@@ -49,6 +50,7 @@ export interface CachedFacts {
   zeroStores?: ZeroStoreFacts;
   maskSites?: MaskSiteFacts;
   zextSites?: ZextSiteFacts;
+  signedDivides?: SignedDivideFacts;
   registerStores?: RegisterStoreFacts;
   rotateSites?: RotateSiteFacts;
   storeBases?: StoreBaseFacts;

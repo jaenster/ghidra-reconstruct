@@ -18,6 +18,7 @@
  *   rotateSites   rotate-sites.ts
  *   storeBases    store-bases.ts
  *   callDivides   call-divides.ts
+ *   signedDivides signed-divides.ts  (behind the compare-sites text-hash gate)
  *   labelFlow     label-flow.ts      (listing only; its own script, labels come from the text)
  *
  * Each extractor decompiled every function again; this script decompiles a function once
@@ -47,6 +48,7 @@ import { JUMP_TABLES_JAVA, printsSwitch, parseJumpTableRow } from './jump-tables
 import { ZERO_STORES_JAVA, printsMemberZeroStore, parseZeroStoreRow } from './zero-stores.js';
 import { MASK_SITES_JAVA, printsByteWordMask, parseMaskSiteRow } from './mask-sites.js';
 import { ZEXT_SITES_JAVA, printsZextCast, parseZextSiteRow } from './zext-sites.js';
+import { SIGNED_DIVIDES_JAVA, printsCastDividend, parseSignedDivideRow } from './signed-divides.js';
 import { REGISTER_STORES_JAVA, printsConstantStore, parseRegisterStoreRow } from './register-stores.js';
 import { ROTATE_SITES_DECL_JAVA, ROTATE_SITES_LINE_JAVA, printsShiftPair, parseRotateSiteRow } from './rotate-sites.js';
 import { STORE_BASES_DECL_JAVA, STORE_BASES_LINE_DECL_JAVA, STORE_BASES_TOKEN_JAVA, STORE_BASES_LINE_JAVA, printsMemberAddress, parseStoreBaseRow } from './store-bases.js';
@@ -70,6 +72,7 @@ import { createHash } from 'node:crypto';
  *   Z  ...   the zero-stores row (zero-stores.ts), when it has struct-typed stack locals
  *   M  ...   the mask-sites row (mask-sites.ts), when it prints a byte or word mask
  *   X  ...   the zext-sites row (zext-sites.ts), when an operator's result is zero-extended
+ *   I  ...   the signed-divides row (signed-divides.ts), when a `/` or `%` is an IDIV
  *   K  ...   the register-stores row (register-stores.ts), when a constant is stored from a register
  *   Q  ...   the rotate-sites row (rotate-sites.ts), when a line's instructions rotate by an immediate
  *   W  ...   the store-bases row (store-bases.ts), when a store or an LEA has an `=` of its own
@@ -414,7 +417,7 @@ ${STRING_OPS_JAVA}
             hrow.append(hrow.length() > 0 ? ";" : "").append(Long.toHexString(hc.getAddress().getOffset() - base))
               .append(':').append(Long.toHexString(g.getAddress().getOffset() - base)).append(':').append(ways);
           }
-${JUMP_TABLES_JAVA}${ZERO_STORES_JAVA}${MASK_SITES_JAVA}${ZEXT_SITES_JAVA}${REGISTER_STORES_JAVA}          // the types the markup named
+${JUMP_TABLES_JAVA}${ZERO_STORES_JAVA}${MASK_SITES_JAVA}${ZEXT_SITES_JAVA}${SIGNED_DIVIDES_JAVA}${REGISTER_STORES_JAVA}          // the types the markup named
           java.util.Set<Long> deps = new java.util.TreeSet<>();
           for (ghidra.app.decompiler.ClangNode n : toks) {
             ghidra.program.model.data.DataType d = null;
@@ -460,6 +463,7 @@ ${JUMP_TABLES_JAVA}${ZERO_STORES_JAVA}${MASK_SITES_JAVA}${ZEXT_SITES_JAVA}${REGI
           if (zrow.length() > 0) out.append("Z\\t").append(a).append('\\t').append(zrow).append('\\n');
           if (mrow.length() > 0) out.append("M\\t").append(a).append('\\t').append(mrow).append('\\n');
           if (xrow.length() > 0) out.append("X\\t").append(a).append('\\t').append(xrow).append('\\n');
+          if (irow.length() > 0) out.append("I\\t").append(a).append('\\t').append(irow).append('\\n');
           if (krow.length() > 0) out.append("K\\t").append(a).append('\\t').append(krow).append('\\n');
           out.append("D\\t").append(ds).append('\\n');
           rows.put(a, out.toString());
@@ -490,7 +494,7 @@ println(sb.toString());
  */
 export const FACT_SCRIPT_VERSION = createHash('sha1')
   .update(FUNCTION_FACTS_SCRIPT).update(LABEL_FLOW_SCRIPT).update(functionStampsScript([], []))
-  .update('facts-13')
+  .update('facts-14')
   .digest('hex').slice(0, 16);
 
 export function functionFactsScript(batch: string[], threads = 8, timeout = 60): string {
@@ -524,6 +528,8 @@ export interface FunctionFactRow {
   maskRow?: string;
   /** The zext-sites row, untagged and without the entry. */
   zextRow?: string;
+  /** The signed-divides row, untagged and without the entry. */
+  signedDivideRow?: string;
   /** The register-stores row, untagged and without the entry. */
   storeRow?: string;
   /** The rotate-sites row, untagged and without the entry. */
@@ -599,6 +605,7 @@ export function parseFunctionFacts(output: string): FunctionFactOutput {
     else if (tag === 'Z') cur.zeroRow = rest.slice(rest.indexOf('\t') + 1);
     else if (tag === 'M') cur.maskRow = rest.slice(rest.indexOf('\t') + 1);
     else if (tag === 'X') cur.zextRow = rest.slice(rest.indexOf('\t') + 1);
+    else if (tag === 'I') cur.signedDivideRow = rest.slice(rest.indexOf('\t') + 1);
     else if (tag === 'K') cur.storeRow = rest.slice(rest.indexOf('\t') + 1);
     else if (tag === 'Q') cur.rotateRow = rest.slice(rest.indexOf('\t') + 1);
     else if (tag === 'W') cur.baseRow = rest.slice(rest.indexOf('\t') + 1);
@@ -668,6 +675,11 @@ export function selectFacts(text: string, entry: string, row: FunctionFactRow, c
     const x = parseZextSiteRow(row.zextRow);
     if (x) facts.zextSites = x;
   }
+  if (printsCastDividend(text) && row.signedDivideRow && row.textHash !== null
+      && text.length === row.textLength && javaStringHash(text) === row.textHash) {
+    const i = parseSignedDivideRow(row.signedDivideRow);
+    if (i) facts.signedDivides = i;
+  }
   // Keyed by name and value, not by position: no text gate.
   if (printsConstantStore(text) && row.storeRow) {
     const k = parseRegisterStoreRow(row.storeRow);
@@ -721,7 +733,7 @@ export interface FunctionFactStats {
   labelMs: number;
 }
 
-export const FACT_KEYS = ['compareSites', 'branchLayout', 'callOrder', 'accessOrder', 'haltLines', 'stringOps', 'jumpTables', 'zeroStores', 'maskSites', 'zextSites', 'registerStores', 'rotateSites', 'storeBases', 'callDivides', 'labelFlow'] as const;
+export const FACT_KEYS = ['compareSites', 'branchLayout', 'callOrder', 'accessOrder', 'haltLines', 'stringOps', 'jumpTables', 'zeroStores', 'maskSites', 'zextSites', 'registerStores', 'rotateSites', 'storeBases', 'callDivides', 'signedDivides', 'labelFlow'] as const;
 
 /**
  * Attach every per-function fact to the decompiled functions, from the cache where the
@@ -745,7 +757,7 @@ export async function extractFunctionFacts(
     if (!(printsComparison(f.decompiled) || printsBranch(f.decompiled) || printsCallTemporary(f.decompiled)
         || printsAccess(f.decompiled) || printsHaltOrProbe(f.decompiled) || printsRepLoop(f.decompiled)
         || printsSwitch(f.decompiled) || printsMemberZeroStore(f.decompiled) || printsByteWordMask(f.decompiled) || printsZextCast(f.decompiled)
-        || printsConstantStore(f.decompiled) || printsShiftPair(f.decompiled) || printsMemberAddress(f.decompiled) || printsHalvedValue(f.decompiled)
+        || printsConstantStore(f.decompiled) || printsShiftPair(f.decompiled) || printsMemberAddress(f.decompiled) || printsHalvedValue(f.decompiled) || printsCastDividend(f.decompiled)
         || labelsOf(f.decompiled).length > 0)) continue;
     byEntry.set(normalizeEntry(f.address), f);
   }
@@ -899,6 +911,7 @@ function attach(f: ExtractedFunction, facts: CachedFacts): void {
   if (facts.rotateSites !== undefined) f.rotateSites = facts.rotateSites;
   if (facts.storeBases !== undefined) f.storeBases = facts.storeBases;
   if (facts.callDivides !== undefined) f.callDivides = facts.callDivides;
+  if (facts.signedDivides !== undefined) f.signedDivides = facts.signedDivides;
   if (facts.labelFlow !== undefined) f.labelFlow = { ...(f.labelFlow ?? {}), ...facts.labelFlow };
 }
 

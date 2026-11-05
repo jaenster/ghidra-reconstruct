@@ -92,14 +92,14 @@ export interface ArithIdiomsOptions extends PluginOptions {
 export type ArithIdiom =
   | 'low-dword' | 'narrow-div' | 'magic-div' | 'cast-chain' | 'modulo' | 'divides' | 'pow2-div' | 'long-helper' | 'signed-div'
   | 'setcc-select' | 'pow2-rem' | 'pow2-rem-test' | 'pow2-rem-mask' | 'u2f' | 'abs'
-  | 'sdiv-widened' | 'low-word-div' | 'trunc-mul' | 'narrow-residue' | 'signed-div-use' | 'nonneg-div' | 'zext-local' | 'zext-operand';
+  | 'sdiv-widened' | 'low-word-div' | 'trunc-mul' | 'narrow-residue' | 'signed-div-use' | 'nonneg-div' | 'zext-local' | 'zext-operand' | 'promoted-dividend';
 
 const stats: Record<ArithIdiom, number> = {
   'low-dword': 0, 'narrow-div': 0, 'magic-div': 0, 'cast-chain': 0, 'modulo': 0, 'divides': 0,
   'pow2-div': 0, 'long-helper': 0, 'signed-div': 0, 'setcc-select': 0, 'pow2-rem': 0, 'pow2-rem-test': 0,
   'pow2-rem-mask': 0, 'u2f': 0, 'abs': 0,
   'sdiv-widened': 0, 'low-word-div': 0, 'trunc-mul': 0, 'narrow-residue': 0, 'signed-div-use': 0,
-  'nonneg-div': 0, 'zext-local': 0, 'zext-operand': 0,
+  'nonneg-div': 0, 'zext-local': 0, 'zext-operand': 0, 'promoted-dividend': 0,
 };
 
 /** How many times each idiom has been folded since the last reset. */
@@ -1240,8 +1240,35 @@ function createFolder(shapeOf: ExprShape, o: ArithIdiomsOptions, resolve: Typede
     return updateNode(c.node, { expression: castNode('uint32_t', Expr.paren(inner)) } as Partial<CStyleCastExpr>);
   };
 
+  /**
+   * `(uint32_t)x / K` or `% K`, the operation `signed-divide-site` tagged (the original divides
+   * with IDIV), x an unsigned byte or word and K an int constant from 1, is `(uint32_t)(x / K)`:
+   * x promotes to a non-negative int, so the division of the int and that of its unsigned
+   * value give the same quotient and remainder, and the outer cast keeps the expression's
+   * type. Compiled with the cast on x, VC8 divides unsigned (`xor edx, edx; div`); the
+   * original's `cdq; idiv` is the division of the promoted int (OpenLogFileWithTimestamp
+   * 0040ebd0). A dividend wider than the cast operand (`(uint32_t)a * (uint32_t)b / 0xff`) is
+   * not this shape.
+   */
+  const foldPromotedDividend = (e: Expression): Expression | null => {
+    if (e.kind !== NodeKind.BinaryExpr || !e.ghidraInfo?.signedDivide) return null;
+    const b = e as BinaryExpr;
+    if (b.operator !== '/' && b.operator !== '%') return null;
+    const c = castOf(b.left as Expression);
+    if (!c || !sameType(c.type, U32)) return null;
+    const t = typeOf(c.inner);
+    if (!t || t.signed || (t.bits !== 8 && t.bits !== 16)) return null;
+    const k = intLiteral(b.right as Expression);
+    if (k === null || k < 1n || k > 0x7fffffffn) return null;
+    // An unsigned literal (`100U`) keeps the division unsigned.
+    const kt = literalType(unwrapParens(b.right as Expression) as IntegerLiteralExpr);
+    if (!kt || !kt.signed || kt.bits !== 32) return null;
+    stats['promoted-dividend']++;
+    return castNode('uint32_t', Expr.paren(Expr.binary(c.inner, b.operator, b.right as Expression)));
+  };
+
   const RULES = [
-    foldZextOperand, foldLongHelper, foldLowDword, foldLowWordDiv, foldNarrowDiv, foldMagic, foldSdivWidened, foldTruncMul, foldCastChain,
+    foldPromotedDividend, foldZextOperand, foldLongHelper, foldLowDword, foldLowWordDiv, foldNarrowDiv, foldMagic, foldSdivWidened, foldTruncMul, foldCastChain,
     foldPow2Div, foldLowWordModulo, foldModulo, foldDivides, foldSetccSelect, foldNarrowResidue, foldAbs,
   ];
 

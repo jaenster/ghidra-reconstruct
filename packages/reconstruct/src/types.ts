@@ -159,6 +159,11 @@ export interface ExtractedFunction {
    */
   zextSites?: import('./extract/zext-sites.js').ZextSiteFacts;
   /**
+   * The `/` and `%` operators whose instruction is a signed divide (extract/signed-divides.ts).
+   * Absent when there are none, the text changed since, or the snapshot predates the field.
+   */
+  signedDivides?: import('./extract/signed-divides.js').SignedDivideFacts;
+  /**
    * The constants the original stores to memory from a register, by the name the left side
    * ends in, with the immediate stores of the same function (extract/register-stores.ts).
    * Absent when there are none or the snapshot predates the field.
