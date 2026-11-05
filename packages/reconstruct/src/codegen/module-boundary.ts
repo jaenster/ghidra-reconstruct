@@ -208,6 +208,7 @@ export function applyModuleBoundaries(input: ModuleBoundaryInput): ModuleBoundar
     fnIndex.set(name, list);
   }
   const globalOwnerByName = new Map<string, string | null>();
+  const globalOwnersByName = new Map<string, Set<string>>();
   for (const g of input.globals) {
     if (g.scope !== 'global') continue;
     const name = sanitizeSymbolName(g.suggestedName || g.name);
@@ -215,6 +216,11 @@ export function applyModuleBoundaries(input: ModuleBoundaryInput): ModuleBoundar
     const held = globalOwnerByName.get(name);
     // One name, two owners: the reference cannot be attributed by name alone.
     globalOwnerByName.set(name, held === undefined || held === owner ? owner : null);
+    if (owner) {
+      const set = globalOwnersByName.get(name) ?? new Set<string>();
+      set.add(owner);
+      globalOwnersByName.set(name, set);
+    }
   }
   const typeOwner = new Map<string, string>();
   for (const [type, header] of input.typeOwnerMap) {
@@ -282,7 +288,19 @@ export function applyModuleBoundaries(input: ModuleBoundaryInput): ModuleBoundar
 
   for (const [path, file] of files) {
     const module = file.type === 'implementation' ? graph.libraryOfPath(path) : graph.moduleOfPath(path);
-    if (module === undefined) continue;
+    if (module === undefined) {
+      // A root file (d2_platform.h's macros, globals.h, the shared units) is seen
+      // from every module: whatever it names of a module is that module's public API.
+      // Every identifier run, preprocessor lines included: a macro body is trivia to
+      // the lexer, and a macro is exactly how d2_platform.h names a module function.
+      for (const id of identifierRuns(file.content)) {
+        for (const c of fnIndex.get(id) ?? []) if (c.module) mark(publicFns, c.module, c.address);
+        for (const owner of globalOwnersByName.get(id) ?? []) mark(publicGlobals, owner, id);
+        const t = typeOwner.get(id);
+        if (t) mark(publicTypes, t, id);
+      }
+      continue;
+    }
     if (file.type === 'implementation') {
       for (const [source, text] of splitDefinitions(file.content)) scan(text, module, path, source, false);
     } else if (file.type === 'header') {
@@ -422,6 +440,19 @@ export function applyModuleBoundaries(input: ModuleBoundaryInput): ModuleBoundar
     }
   }
   throughGlobals.delete(input.globalsPath);
+  // A type no header owns is defined (guarded) in each module data header whose
+  // globals hold it; a file naming it includes one of those it may see.
+  const definedIn = new Map<string, string[]>();
+  for (const [module, header] of moduleGlobalsHeaders) {
+    for (const line of (files.get(header)?.content ?? '').split('\n')) {
+      if (!line.startsWith('#define D2_DEFINED_')) continue;
+      const name = line.slice('#define D2_DEFINED_'.length).trim();
+      const list = definedIn.get(name) ?? [];
+      list.push(header);
+      definedIn.set(name, list);
+    }
+    void module;
+  }
   let rootIncludes = 0;
   let filesWithGlobals = 0;
   for (const [path, file] of files) {
@@ -430,10 +461,24 @@ export function applyModuleBoundaries(input: ModuleBoundaryInput): ModuleBoundar
     const ids = scanReferences(file.content).identifiers;
     const wanted = new Set<string>();
     let root = false;
+    const self = graph.libraryOfPath(path);
     for (const id of ids) {
-      const owner = globalOwnerByName.get(id);
-      if (owner) { const h = moduleGlobalsHeaders.get(owner); if (h && h !== path) wanted.add(h); }
+      // A name several modules' data share: every declaring header the file may see.
+      for (const owner of globalOwnersByName.get(id) ?? []) {
+        const h = moduleGlobalsHeaders.get(owner);
+        if (!h || h === path) continue;
+        if (globalOwnerByName.get(id) === owner || self === undefined || graph.mayUse(self, owner)) wanted.add(h);
+      }
       if (input.rootProvides.has(id)) root = true;
+      const definers = definedIn.get(id);
+      if (definers && !definers.includes(path)) {
+        const own = graph.libraryOfPath(path);
+        const visible = definers.find(h => {
+          const m = graph.moduleOfPath(h);
+          return own === undefined || m === undefined || graph.mayUse(own, m);
+        });
+        wanted.add(visible ?? definers[0]);
+      }
       const typeHeader = input.typeOwnerMap.get(id);
       if (typeHeader && typeHeader !== path && throughGlobals.has(typeHeader)) wanted.add(typeHeader);
     }
@@ -512,4 +557,22 @@ export function applyModuleBoundaries(input: ModuleBoundaryInput): ModuleBoundar
 function baseTypeName(g: AnalyzedDataSymbol): string {
   return (g.suggestedType || g.dataType || '')
     .replace(/\[[^\]]*\]/g, '').replace(/[*&]/g, '').replace(/\b(const|volatile|struct|union|enum)\b/g, '').trim();
+}
+
+/** Every maximal identifier run in a text, comments and directives included. */
+export function identifierRuns(text: string): Set<string> {
+  const out = new Set<string>();
+  let i = 0;
+  const isStart = (c: number) => (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95;
+  const isPart = (c: number) => isStart(c) || (c >= 48 && c <= 57);
+  while (i < text.length) {
+    const c = text.charCodeAt(i);
+    if (isPart(c)) {
+      let j = i;
+      while (j < text.length && isPart(text.charCodeAt(j))) j++;
+      if (isStart(c)) out.add(text.slice(i, j));
+      i = j;
+    } else i++;
+  }
+  return out;
 }

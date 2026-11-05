@@ -570,8 +570,8 @@ export function globalsTypePrelude(
 }
 
 /** The name a definition this file rendered introduces, read the way the prelude reads it. */
-function definedTypeName(def: string): string | undefined {
-  return def.match(/^(?:struct|union|enum)\s+(\w+)/)?.[1] ?? def.match(/typedef\s+.*?\(\s*(?:__\w+\s+)?\*\s*(\w+)\)/)?.[1];
+export function definedTypeName(def: string): string | undefined {
+  return def.match(/^(?:struct|union|enum)\s+(?:__attribute__\(\([^)]*\)\)\s+)?(\w+)/)?.[1] ?? def.match(/typedef\s+.*?\(\s*(?:__\w+\s+)?\*\s*(\w+)\)/)?.[1];
 }
 
 /** One extern the module-library build moves out of globals.h into its owner's data header. */
@@ -698,6 +698,10 @@ export function generateGlobalsHeader(
   lines.push(...preludeLines);
   for (const n of preludeDefNames) rootProvidedNames.add(n);
   for (const def of fullDefs) { const n = definedTypeName(def); if (n) rootProvidedNames.add(n); }
+  // A "forward declaration" that is a typedef or an enum defines its name here.
+  for (const decl of forwardDecls) {
+    if (!/^(?:struct|class|union)\s+\w+;$/.test(decl.text.trim())) rootProvidedNames.add(decl.name);
+  }
 
   // Collect names that must NOT appear as a namespace component, because they
   // are already emitted at an outer scope as a different kind of entity:

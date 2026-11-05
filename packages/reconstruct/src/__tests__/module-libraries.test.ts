@@ -155,6 +155,7 @@ describe('applyModuleBoundaries', () => {
       '#include "globals/globals.h"',
       '// 1.14d: 00601000', 'void UNITS_Do() { Fog::FOG_Used(); gnFogCounter++; Fog::FOG_GetPool(); }',
     ].join('\n'), 'implementation'));
+    files.set('d2_platform.h', file('d2_platform.h', '#define FOG_FREE(p) Fog::FOG_Internal(p)', 'header'));
     files.set('Storm/SMem.cpp', file('Storm/SMem.cpp', [
       '// 1.14d: 00411000', 'void SMemAlloc() { UNITS_Do(); }',
     ].join('\n'), 'implementation'));
@@ -191,9 +192,20 @@ describe('applyModuleBoundaries', () => {
 
   it('declares only what another module uses outside the private block', () => {
     const { files } = run();
+    const h = files.get('Fog/Types.h')!.content;
+    assert.ok(h.includes('FogPoolStrc * FOG_GetPool();'));
+    assert.ok(!h.split('\n')[h.split('\n').indexOf('FogPoolStrc * FOG_GetPool();') - 1].startsWith('#if'));
+  });
+
+  it('keeps public what a root header names - a macro in d2_platform.h expands in every module', () => {
+    const { files } = run();
     const h = files.get('Fog/Fog.h')!.content;
-    assert.ok(h.indexOf('void FOG_Used();') < h.indexOf('defined(D2_MODULE_Fog)'), h);
-    assert.ok(h.indexOf('void FOG_Internal();') > h.indexOf('defined(D2_MODULE_Fog)'), h);
+    assert.ok(!h.includes('defined(D2_MODULE_Fog)'), 'FOG_Internal is named by d2_platform.h, FOG_Used by D2Common');
+  });
+
+  it('gates every module header on the modules that may see it', () => {
+    const { files } = run();
+    const h = files.get('Fog/Fog.h')!.content;
     assert.ok(h.includes('!defined(D2_SEES_Fog)'));
   });
 
@@ -238,5 +250,14 @@ describe('generateModuleLibrariesCMake', () => {
     assert.ok(text.includes('add_library(d2_root STATIC\n    globals/globals.cpp\n)'));
     const order = [...text.matchAll(/WHOLE_ARCHIVE,(\w+)>/g)].map(m => m[1]);
     assert.deepStrictEqual(order, ['Fog', 'Game', 'Storm', 'D2Common', 'd2_root']);
+  });
+});
+
+describe('definedTypeName', () => {
+  it('reads the name past a packed attribute, so every packed type gets its own guard', async () => {
+    const { definedTypeName } = await import('../codegen/globals-header.js');
+    assert.strictEqual(definedTypeName('struct __attribute__((packed)) D2GameListEntryStrc {\n};'), 'D2GameListEntryStrc');
+    assert.strictEqual(definedTypeName('struct D2CoordStrc {\n};'), 'D2CoordStrc');
+    assert.strictEqual(definedTypeName('typedef void (__stdcall *fnCallback)(int);'), 'fnCallback');
   });
 });
