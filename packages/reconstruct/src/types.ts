@@ -603,6 +603,11 @@ export interface FunctionMapping {
   address: string;
   /** Ghidra namespace (e.g. "Storm::Source::SBig") */
   namespace?: string;
+  /**
+   * The file the body is defined in when it is not this map's own: an inline host's
+   * header (codegen/inline-hosts.ts), included by every TU that calls it.
+   */
+  definedIn?: string;
   lines: LineMapping[];
   /** Functions called by this function */
   calledFunctions?: string[];

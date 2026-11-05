@@ -27,7 +27,8 @@
  *    defined `inline`, so the restored calls are inlined again;
  *  - it is a plain free function: not a method, not a template member, not a thunk,
  *    library or platform-guarded function, and no other symbol shares its name, so
- *    every mention of the name is a mention of it.
+ *    every mention of the name is a mention of it;
+ *  - it is not a header inline (inline-hosts.ts): every TU that calls one defines it.
  *
  * Hand-written source that only needs to CALL such a function calls its extern entry
  * instead, `<name>_Extern`: a forwarder the unit defines beside the static and the
@@ -55,6 +56,7 @@ import type { DataValue, ExtractedFunction } from '../types.js';
 import { decompiledFunctionName } from './impl.js';
 import { EXTERN_ENTRY_SUFFIX } from './header.js';
 import { abiConvention } from './calling-convention.js';
+import { isInlineHost } from './inline-hosts.js';
 
 export { EXTERN_ENTRY_SUFFIX };
 
@@ -341,7 +343,8 @@ export type FileStaticRefusal =
   | 'referenced from excluded code'
   | 'named by a data initializer'
   | 'named by foreign source'
-  | 'no caller in its unit';
+  | 'no caller in its unit'
+  | 'a header inline';
 
 export interface FileStaticSelection {
   /**
@@ -439,6 +442,11 @@ export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticS
     candidateCount++;
     const key = addressKey(func.address);
     if (!inputs.unitOf.has(key)) continue;      // not emitted: nothing to declare
+    // Every TU that calls a header inline defines it (inline-hosts.ts): none can own it.
+    if (isInlineHost(func)) {
+      refuse('a header inline', func);
+      continue;
+    }
     if (func.isLibrary || func.ifdef || func.platform || func.parentClass ||
         func.name.includes('@') || func.name.startsWith('operator') || func.name.startsWith('~') ||
         inputs.keepExtern?.(func)) {
@@ -520,6 +528,9 @@ export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticS
   if (inputs.foreignSources?.length) {
     for (const func of inputs.allFunctions) {
       if (func.isExternal || func.isThunk || func.hasVarArgs) continue;
+      // A header inline is extern and defined in every TU that calls it: hand-written
+      // code calls it by its own name.
+      if (isInlineHost(func)) continue;
       if (func.isLibrary || func.ifdef || func.platform || func.parentClass ||
           func.name.includes('@') || func.name.startsWith('operator') || func.name.startsWith('~') ||
           inputs.keepExtern?.(func)) continue;

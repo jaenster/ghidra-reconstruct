@@ -102,6 +102,7 @@ import { normalizePointerSizeSpellings } from './pointer-size-spelling.js';
 import { flattenTemplateNames } from './template-names.js';
 import { buildTemplateRegistry, classScopeOf, memberDefinitionScope, templateDataDefinitions, templateHeaderTypes } from './templates/index.js';
 import { EXTERN_ENTRY_SUFFIX, fileStaticKey, readForeignSourcesAt, selectFileStaticFunctions, type ForeignSource } from './file-static-functions.js';
+import { inlineHostHeaderPath, inlineHostKey, isInlineHost, refusedInlineHosts } from './inline-hosts.js';
 import { planInlinedCalls, planGuardedCalls, type InlinedCallPlan, type GuardedCallPlan } from './inlined-calls.js';
 import { nullGetterDefaults } from './null-getters.js';
 import { placeTemplateMembers } from './templates/placement.js';
@@ -423,16 +424,18 @@ export function configureIncrementalEmit(units: Iterable<string> | null, previou
  */
 /**
  * The whole-program decisions a unit's text was written under: the functions it
- * defines `static`, its extern entries, and the globals it defines `static`
- * (`G:<address>`). Another TU starting to call such a function or to name such a
+ * defines `static`, its extern entries, the functions its inline header defines
+ * (`I:<address>`), and the globals it defines `static` (`G:<address>`). Another TU starting to call such a function or to name such a
  * global flips the decision without touching this unit's inputs.
  */
-export function unitStaticKeys(
-  unitFunctions: ReadonlyArray<{ address: string }>,
+export function unitStaticKeys<F extends { address: string }>(
+  unitFunctions: ReadonlyArray<F>,
   fileStaticFunctions: { has(k: string): boolean } | undefined,
   externEntries: { has(k: string): boolean } | undefined,
   fileLocalGlobals: ReadonlyArray<{ address: string; scope?: string }> | undefined,
   memberKey?: (address: string) => string | undefined,
+  /** Whether the function is defined in the unit's inline header (inline-hosts.ts). */
+  hostOf?: (func: F) => boolean,
 ): string[] {
   return unitFunctions
     .flatMap(f => {
@@ -442,6 +445,7 @@ export function unitStaticKeys(
         ...(fileStaticFunctions?.has(k) ? [k] : []),
         ...(externEntries?.has(k) ? [`${k}${EXTERN_ENTRY_SUFFIX}`] : []),
         ...(member ? [member] : []),
+        ...(hostOf?.(f) ? [inlineHostKey(f.address)] : []),
       ];
     })
     // A homed global (external linkage, defined here) is keyed apart from a static.
@@ -2827,6 +2831,12 @@ function installFileStaticFunctions(
     context.guardedCalls = undefined;
   }
   if (report) {
+    const hosts = model.functions.filter(isInlineHost).length;
+    const notHosts = refusedInlineHosts(model.functions);
+    if (hosts > 0 || notHosts.length > 0) {
+      console.log(`Header inlines: ${hosts} defined in their unit's inline header` +
+        (notHosts.length > 0 ? `; tagged but kept in their unit: ${notHosts.join(', ')}` : ''));
+    }
     const refused = [...selection.refused].map(([why, names]) => `${names.length} ${why}`).join(', ');
     console.log(
       `File-static functions: ${selection.selected.size} of ${selection.candidates} with parameters in ` +
@@ -2972,6 +2982,9 @@ function buildFuncToImplPathMap(
   for (const [unitName, unitFunctions] of organized) {
     const implPath = implPaths.get(unitName)!;
     for (const func of unitFunctions) {
+      // A header inline is compiled into every TU that calls it (inline-hosts.ts): a
+      // global it names is used outside its unit, and none may hold it static.
+      if (isInlineHost(func)) continue;
       funcNameToImplPath.set(func.name, implPath);
       if (func.namespace) {
         funcNameToImplPath.set(`${func.namespace}::${func.name}`, implPath);
@@ -4189,8 +4202,12 @@ function generateFilesForFunctions(
         candidates = [];
         funcNameCandidates.set(func.name, candidates);
       }
-      if (!candidates.some(c => c.qualified === qualified && c.header === headerPath)) {
-        candidates.push({ qualified, header: headerPath });
+      // A file naming a header inline includes the header that defines it, which
+      // includes the one that declares it (inline-hosts.ts). The answer is recorded by
+      // every unit that names it, so a function gaining or losing the tag re-emits them.
+      const declaring = isInlineHost(func) ? inlineHostHeaderPath(headerPath) : headerPath;
+      if (!candidates.some(c => c.qualified === qualified && c.header === declaring)) {
+        candidates.push({ qualified, header: declaring });
       }
     }
   }
@@ -4589,13 +4606,18 @@ function generateFilesForFunctions(
 
     // The shard decision is taken for every unit in every process, in this same
     // order, so all shards agree on the partition without talking to each other.
+    // The functions defined in the unit's inline header rather than its .cpp.
+    const inlineHosts = templateImplPath ? [] : unitFunctions.filter(isInlineHost);
+    const inlineHeaderPath = inlineHosts.length > 0 ? inlineHostHeaderPath(headerPath) : undefined;
     if (!shardOwnsNext(unitCost(unitFunctions))) {
       if (!templateImplPath) shardPlaceholder(files, headerPath, 'header');
+      if (inlineHeaderPath) shardPlaceholder(files, inlineHeaderPath, 'header');
       shardPlaceholder(files, implPath, 'implementation');
       if (options.generateSourceMaps) shardPlaceholderMap(sourceMaps, `${implPath}.map`);
       continue;
     }
     if (!templateImplPath) shardRecordEmitted(headerPath);
+    if (inlineHeaderPath) shardRecordEmitted(inlineHeaderPath);
     shardRecordEmitted(implPath);
 
     // Get graph-resolved includes for this module
@@ -4699,7 +4721,8 @@ function generateFilesForFunctions(
     // The dep-scan below then runs over the reused text, so its include set is
     // derived the same way it was derived when the text was written.
     // An extern entry is emitted text too: a unit whose entries changed is re-emitted.
-    const unitStatics = unitStaticKeys(unitFunctions, context.fileStaticFunctions, context.externEntries, context.fileLocalGlobals, templateMemberKey);
+    const unitStatics = unitStaticKeys(unitFunctions, context.fileStaticFunctions, context.externEntries, context.fileLocalGlobals, templateMemberKey,
+      f => inlineHosts.includes(f));
     const previousStatics = unitIdentifierCounts.get(unitName)?.statics ?? [];
     const placementNow: PlacementLookup = {
       typeOwner: t => typeOwnerMap.get(t),
@@ -4713,9 +4736,14 @@ function generateFilesForFunctions(
     const placementHolds = !emitUnitsFilter || emitUnitsFilter.has(unitName)
       || includeBasisHolds(unitIdentifierCounts.get(unitName)?.includes, implIncludes, placementNow);
     if (!placementHolds) console.log(`[reuse] ${unitName}: re-emitted, its includes were resolved under another placement`);
-    const reusedImpl = unitStaticsHold(previousStatics, unitStatics) && placementHolds
+    const previousImpl = unitStaticsHold(previousStatics, unitStatics) && placementHolds
       ? reuseUnitImpl(unitName, implPath)
       : undefined;
+    // The inline header is the other half of the unit's text: both are reused or neither.
+    const reusedInlineHeader = previousImpl !== undefined && inlineHeaderPath
+      ? reuseUnitImpl(unitName, inlineHeaderPath)
+      : undefined;
+    const reusedImpl = inlineHeaderPath && reusedInlineHeader === undefined ? undefined : previousImpl;
     // The placement lookups the dependency scan below makes, recorded for the next
     // run's reuse check. Only an emitted unit records; a reused one keeps its record.
     const placementLookups = new Map<string, string>();
@@ -4763,11 +4791,12 @@ function generateFilesForFunctions(
     if (reusedImpl === undefined) recordConstructorLookups(name => lookedUp(`k:${name}`));
     // Every enum member name a body transform asked about across all enums.
     if (reusedImpl === undefined) recordEnumLookups(name => lookedUp(`e:${name}`));
+    const cppFunctions = inlineHosts.length > 0 ? unitFunctions.filter(f => !inlineHosts.includes(f)) : unitFunctions;
     let implContent = reusedImpl !== undefined
       ? reusedImpl
       : genMark('units/impl', () => generateImplementation(
       unitName,
-      unitFunctions,
+      cppFunctions,
       classInfo,
       headerPath,
       options,
@@ -4777,6 +4806,23 @@ function generateFilesForFunctions(
       undefined,  // no internalFunctions — don't apply static to standalone functions
       structUnionEnumNames
     ));
+    // The inline header's bodies, emitted as the unit's other bodies are, with the
+    // unit's includes: it is read by TUs of other modules that include nothing of this one.
+    // It defines no globals - its file-locals are the .cpp's - and its preambles are its own.
+    let inlineHeaderContent: string | undefined = reusedInlineHeader;
+    if (inlineHeaderPath && reusedImpl === undefined) {
+      context.fileLocalGlobals = undefined;
+      context._preambles = new Set();
+      inlineHeaderContent = genMark('units/impl', () => generateImplementation(
+        unitName, inlineHosts, classInfo, headerPath, options, context, implIncludes, crtHeaders,
+        undefined, structUnionEnumNames, true,
+      ));
+      // A preamble macro (D2_ASSERT, D2_ALLOC_AT) is `#ifndef`-guarded: defined here, it
+      // is the definition every includer that comes later uses, not its own.
+      if (context._preambles.size > 0) {
+        console.warn(`[inline-host] ${inlineHeaderPath}: ${context._preambles.size} preamble block(s), visible to every file including it`);
+      }
+    }
     context.fileLocalGlobals = prevFileLocals;
     context._preambles = prevPreambles;
 
@@ -4822,16 +4868,18 @@ function generateFilesForFunctions(
     // most of what an incremental rebuild costs when nothing needs re-emitting.
     // Everything the block touches is local to it, so skipping it changes nothing
     // else.
-    if (reusedImpl === undefined) {
+    // `own`: the headers the text is the unit of, which it never includes again.
+    const includeDependencies = (text: string, own: readonly string[]): string => {
+      let content = text;
       const existingIncludes = new Set(implIncludes);
-      existingIncludes.add(headerPath);
+      for (const p of own) existingIncludes.add(p);
       const newIncludes: string[] = [];
 
       // Every name the file references as a whole identifier token - never a
       // substring of a longer name, a comment or a string literal - resolved for
       // every name in one lexing pass over the file.
-      const refs = scanReferences(implContent);
-      const mentioned = dependencyNeedles.matchesIn(implContent, refs);
+      const refs = scanReferences(content);
+      const mentioned = dependencyNeedles.matchesIn(content, refs);
 
       const addInclude = (path: string) => {
         if (!existingIncludes.has(path)) {
@@ -4947,7 +4995,7 @@ function generateFilesForFunctions(
           for (const v of fn.localVariables ?? []) addVar(v.name, v.dataType);
         }
         // body-declared locals: `TYPE name;` / `TYPE* name = …`
-        for (const m of implContent.matchAll(/\b([A-Za-z_]\w*)\s*\*?\s*([A-Za-z_]\w*)\s*[=;]/g)) {
+        for (const m of content.matchAll(/\b([A-Za-z_]\w*)\s*\*?\s*([A-Za-z_]\w*)\s*[=;]/g)) {
           if (structFieldTypes.has(m[1]) || structUnionEnumNames.has(m[1])) addVar(m[2], m[1]);
         }
         // A global the body dereferences - `&gpChatDlgInputEditBox->sControl` (v1623 typed
@@ -4964,7 +5012,7 @@ function generateFilesForFunctions(
         // reaches the union BY VALUE and then dereferences again. Matching only `->`
         // stopped at the first `.` and left every type past it incomplete, so both
         // spellings advance the walk; the field's base type is the same either way.
-        for (const cm of implContent.matchAll(/\b([A-Za-z_]\w*)((?:\s*(?:->|\.)\s*[A-Za-z_]\w*)+)/g)) {
+        for (const cm of content.matchAll(/\b([A-Za-z_]\w*)((?:\s*(?:->|\.)\s*[A-Za-z_]\w*)+)/g)) {
           let curType = typeOf(cm[1]);
           if (!curType) continue;
           for (const fm of cm[2].matchAll(/(?:->|\.)\s*([A-Za-z_]\w*)/g)) {
@@ -4984,9 +5032,16 @@ function generateFilesForFunctions(
 
       if (newIncludes.length > 0) {
         const includeLines = newIncludes.sort().map(h => `#include "${h}"`).join('\n');
-        const lastIncludeIdx = implContent.lastIndexOf('#include');
-        const lineEnd = implContent.indexOf('\n', lastIncludeIdx);
-        implContent = implContent.slice(0, lineEnd + 1) + includeLines + '\n' + implContent.slice(lineEnd + 1);
+        const lastIncludeIdx = content.lastIndexOf('#include');
+        const lineEnd = content.indexOf('\n', lastIncludeIdx);
+        content = content.slice(0, lineEnd + 1) + includeLines + '\n' + content.slice(lineEnd + 1);
+      }
+      return content;
+    };
+    if (reusedImpl === undefined) {
+      implContent = includeDependencies(implContent, [headerPath]);
+      if (inlineHeaderPath && inlineHeaderContent !== undefined) {
+        inlineHeaderContent = includeDependencies(inlineHeaderContent, [headerPath, inlineHeaderPath]);
       }
     }
     recordConstructorLookups(null);
@@ -5030,9 +5085,20 @@ function generateFilesForFunctions(
       type: 'implementation',
       namespace: namespace?.fullPath,
       className: classInfo?.name,
-      functions: unitFunctions.map(f => f.name),
+      functions: cppFunctions.map(f => f.name),
       includes: [headerPath, ...sortedAllIncludes],
     });
+    if (inlineHeaderPath && inlineHeaderContent !== undefined) {
+      files.set(inlineHeaderPath, {
+        path: inlineHeaderPath,
+        content: inlineHeaderContent,
+        type: 'header',
+        namespace: namespace?.fullPath,
+        className: classInfo?.name,
+        functions: inlineHosts.map(f => f.name),
+        includes: [headerPath, ...sortedAllIncludes],
+      });
+    }
 
     // Generate source map if requested
     if (options.generateSourceMaps) {
@@ -5043,7 +5109,10 @@ function generateFilesForFunctions(
       const definesThunk = (f: ExtractedFunction) => !f.isLibrary && unitThunkForwarder(
         f, classInfo, context, unitNs.useNamespace ? unitNs.resolvedNamespace : undefined
       ) !== undefined;
-      const sourceMap = generateSourceMap(implPath, unitFunctions, undefined, crossMatches, definesThunk);
+      // An inline host stays in its unit's map: the unit's object carries its copy
+      // wherever the unit calls it, and the map names the header holding the body.
+      const sourceMap = generateSourceMap(implPath, unitFunctions, undefined, crossMatches, definesThunk,
+        f => inlineHeaderPath && inlineHosts.includes(f) ? inlineHeaderPath : undefined);
       sourceMaps.set(mapPath, sourceMap);
     }
   }

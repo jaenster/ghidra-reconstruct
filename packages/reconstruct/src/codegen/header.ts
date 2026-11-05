@@ -27,7 +27,8 @@ import { generateExternDeclaration, isFuncDefTypedefName, sanitizeSymbolName, or
 import { declarationHead, pointerConvention } from './calling-convention.js';
 import { enumTypedefLine } from './enum-width.js';
 import { requiresPacking, adoptGhidraLayout } from './struct-packing.js';
-import { memberDefinitionScope, signatureParameters } from './templates/index.js';
+import { COMDAT_SPECIFIERS, memberDefinitionScope, signatureParameters } from './templates/index.js';
+import { isInlineHost } from './inline-hosts.js';
 import { classKeyOf, templateRegistry } from './templates/registry.js';
 import { baseComponentOf, ownFields } from './templates/bases.js';
 import { stripPlateTemplate } from './plate-comment.js';
@@ -897,8 +898,10 @@ export function generateFunctionDeclaration(
 
   const cleanName = emittedFunctionName(func);
   const member = memberDefinitionScope(func);
+  // A header inline is declared as its inline header defines it (inline-hosts.ts).
+  const prefix = member?.prefix ?? (isInlineHost(func) ? COMDAT_SPECIFIERS : '');
 
-  return `${commentBlock}${member?.prefix ?? ''}${declarationHead(returnSigType(func.returnType), func)}${member?.qualifier ?? ''}${cleanName}(${params});${addressComment}`;
+  return `${commentBlock}${prefix}${declarationHead(returnSigType(func.returnType), func)}${member?.qualifier ?? ''}${cleanName}(${params});${addressComment}`;
 }
 
 /**
