@@ -2943,6 +2943,11 @@ function transformDecompiledCode(
       onSite: (e: { variable: string; copies: [string, string] }) =>
         console.warn(`[copied-test] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.variable} (${e.copies.join(', ')})`),
     };
+    // A bool `return v != 0;` a guard on v decided is the constant (decided-bool-return.ts).
+    perPluginOptions['decided-bool-return'] = {
+      onSite: (e: { variable: string; value: boolean }) =>
+        console.warn(`[decided-bool] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.variable} -> ${e.value}`),
+    };
 
     // Method-conversion is dropped (free functions only), so mappings/currentFunction
     // are normally empty; keep the original guard so any stray mapping still no-ops.
