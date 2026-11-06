@@ -68,12 +68,28 @@ describe('global visibility', () => {
     assert.deepStrictEqual([...r.entries.get(entry)!.referrers], [table]);
   });
 
-  it('what only a dead table names is dead too', () => {
-    const table = withInit(g('gaDeadTable', '00700000', 8), ['gszEntry']);
+  // gpszD2LngFileName 006d5ee8: no xref in Ghidra, no name in the tree, its bytes match.
+  it('an unnamed object with bytes of the original is kept, and what its initializer names with it', () => {
+    const table = withInit(g('gaUnnamedTable', '00700000', 8), ['gszEntry']);
     const entry = g('gszEntry', '00700100', 4);
     const r = run([table, entry], []);
-    assert.strictEqual(r.entries.get(table)!.verdict, 'dead');
-    assert.strictEqual(r.entries.get(entry)!.verdict, 'dead');
+    assert.strictEqual(r.entries.get(table)!.verdict, 'unreferenced');
+    assert.strictEqual(r.entries.get(entry)!.verdict, 'initializer-only');
+  });
+
+  it('unnamed storage without bytes is dead', () => {
+    const bss = g('gnUnnamedBss', '00700000', 4);
+    assert.strictEqual(run([bss], []).entries.get(bss)!.verdict, 'dead');
+  });
+
+  // gFaultHandlerList 0072fa14 (12 bytes) and its slot labels carrying the list's size.
+  it("a slot label's own size does not swallow the next object", () => {
+    const list = g('gFaultHandlerList', '0072fa14', 12);
+    const slot = g('gFaultHandlerList.head.pNext', '0072fa1c', 12);
+    const next = g('gaszLanguageNames', '0072fa20', 128, { isInitialized: true });
+    const r = run([list, slot, next], [file('Storm/A.cpp', 'void f() { gFaultHandlerList.head.pNext = 0; }')]);
+    assert.strictEqual(r.entries.get(slot)!.verdict, 'interior');
+    assert.strictEqual(r.entries.get(next)!.verdict, 'unreferenced');
   });
 
   it('a global outside the candidates (homed, file-local) is live and its initializer counts', () => {

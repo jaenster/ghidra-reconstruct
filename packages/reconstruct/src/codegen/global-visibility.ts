@@ -16,13 +16,18 @@
  *                     declared, by the users' modules where the build has modules.
  *   initializer-only  only the initializer of another live global names it: it needs
  *                     no declaration outside that initializer's translation unit.
- *   interior          nothing names it, and it starts inside a live global's extent:
+ *   interior          nothing names it, and it starts inside a live object's extent:
  *                     a label on a slot of that object (a split `T_1__0_`), whose
  *                     bytes the object already holds. Not emitted.
  *   container         nothing names it, but a live label lies inside its extent (a
  *                     table whose code-referenced label is at its centre): kept, it
  *                     is the storage that label's neighbours read.
- *   dead              nothing names it and no live global overlaps it. Not emitted.
+ *   unreferenced      nothing names it and no live global overlaps it, but it holds
+ *                     bytes of the original image (.data/.rdata): defined, declared
+ *                     nowhere. At v1969, 42 such items byte-matched the original;
+ *                     37 have no Ghidra xref at all, the rest only from code the tree
+ *                     does not emit. Dead in the original too, but its data.
+ *   dead              the same with no bytes (.bss). Not emitted.
  *
  * Liveness runs from the roots through initializers to a fixpoint, so a table only
  * a dead table names is dead too.
@@ -37,7 +42,7 @@ import { scanReferences } from './needle-index.js';
 import { identifierRuns } from './module-boundary.js';
 import { sanitizeSymbolName } from './globals-header.js';
 
-export type GlobalVisibility = 'referenced' | 'initializer-only' | 'interior' | 'container' | 'dead';
+export type GlobalVisibility = 'referenced' | 'initializer-only' | 'interior' | 'container' | 'unreferenced' | 'dead';
 
 export interface GlobalVisibilityInput {
   /** The globals globals.h would declare: the ones a verdict is given to. */
@@ -128,7 +133,7 @@ export function classifyGlobalVisibility(input: GlobalVisibilityInput): GlobalVi
     }
   }
 
-  // Through initializers, from every live global, to a fixpoint.
+  // Through initializers, from every global that will be emitted, to a fixpoint.
   const edges = new Map<AnalyzedDataSymbol, AnalyzedDataSymbol[]>();
   const targetsOf = (o: AnalyzedDataSymbol): AnalyzedDataSymbol[] => {
     let t = edges.get(o);
@@ -142,51 +147,61 @@ export function classifyGlobalVisibility(input: GlobalVisibilityInput): GlobalVi
     edges.set(o, t);
     return t;
   };
-  const work: AnalyzedDataSymbol[] = [...input.others, ...live];
-  const reached = new Set<AnalyzedDataSymbol>(work);
-  while (work.length > 0) {
-    const o = work.pop()!;
-    for (const t of targetsOf(o)) {
-      const e = entries.get(t)!;
-      e.referrers.add(o);
-      if (e.verdict === 'dead') e.verdict = 'initializer-only';
-      if (!reached.has(t)) { reached.add(t); work.push(t); }
-    }
-  }
 
-  // What nothing reaches: an interior slot of a live object, or a live label's container.
-  const liveExtents: Array<{ lo: number; hi: number; g: AnalyzedDataSymbol }> = [];
-  for (const g of [...input.others, ...input.candidates]) {
-    if (entries.has(g) && entries.get(g)!.verdict === 'dead') continue;
-    const x = extentOf(g);
-    if (x) liveExtents.push({ lo: x[0], hi: x[1], g });
+  // Objects, by a sweep in address order: a global that starts inside the current
+  // object is a label on one of its slots, not an object, and its own size says
+  // nothing (Ghidra gives `gFaultHandlerList.head.pNext` the list's 12 bytes from
+  // 8 bytes in, which would reach over the next object).
+  const all = [...input.others, ...input.candidates]
+    .map(g => ({ g, x: extentOf(g) }))
+    .filter((e): e is { g: AnalyzedDataSymbol; x: [number, number] } => e.x !== undefined)
+    .sort((a, b) => a.x[0] - b.x[0] || b.x[1] - a.x[1]);
+  const objectOf = new Map<AnalyzedDataSymbol, AnalyzedDataSymbol>();
+  let object: { g: AnalyzedDataSymbol; x: [number, number] } | undefined;
+  for (const item of all) {
+    if (object && item.x[0] < object.x[1]) { objectOf.set(item.g, object.g); continue; }
+    object = item;
   }
-  liveExtents.sort((a, b) => a.lo - b.lo);
-  let longest = 0;
-  for (const e of liveExtents) longest = Math.max(longest, e.hi - e.lo);
-  const firstAtOrAfter = (v: number): number => {
-    let lo = 0, hi = liveExtents.length;
-    while (lo < hi) { const mid = (lo + hi) >> 1; if (liveExtents[mid].lo < v) lo = mid + 1; else hi = mid; }
-    return lo;
+  const labelsIn = new Map<AnalyzedDataSymbol, AnalyzedDataSymbol[]>();
+  for (const [label, obj] of objectOf) (labelsIn.get(obj) ?? labelsIn.set(obj, []).get(obj)!).push(label);
+
+  // Kept: what is named, what is not a candidate, and - once nothing names it - an
+  // object holding bytes of the original image or a live label. Everything a kept
+  // initializer names is kept with it, so the loop runs until nothing is added.
+  const kept = new Set<AnalyzedDataSymbol>([...input.others, ...live]);
+  const reachedFrom = (roots: Iterable<AnalyzedDataSymbol>): void => {
+    const work = [...roots];
+    while (work.length > 0) {
+      const o = work.pop()!;
+      for (const t of targetsOf(o)) {
+        const e = entries.get(t)!;
+        e.referrers.add(o);
+        if (e.verdict === 'dead' || e.verdict === 'interior') { e.verdict = 'initializer-only'; e.neighbour = undefined; }
+        if (!kept.has(t)) { kept.add(t); work.push(t); }
+      }
+    }
   };
-  for (const g of input.candidates) {
-    const e = entries.get(g)!;
-    if (e.verdict !== 'dead') continue;
-    const x = extentOf(g);
-    if (!x) continue;
-    const [lo, hi] = x;
-    // A live object starting before it and reaching past its start holds it.
-    for (let i = firstAtOrAfter(lo) - 1; i >= 0 && liveExtents[i].lo > lo - longest; i--) {
-      const p = liveExtents[i];
-      if (p.lo < lo && p.hi > lo) { e.verdict = 'interior'; e.neighbour = p.g; break; }
+  reachedFrom(kept);
+  for (;;) {
+    const added: AnalyzedDataSymbol[] = [];
+    for (const g of input.candidates) {
+      const e = entries.get(g)!;
+      if (e.verdict !== 'dead') continue;
+      const obj = objectOf.get(g);
+      // A slot of a kept object: the object holds its bytes.
+      if (obj && kept.has(obj)) { e.verdict = 'interior'; e.neighbour = obj; continue; }
+      if (obj) continue;
+      const liveLabel = (labelsIn.get(g) ?? []).find(l => kept.has(l));
+      if (liveLabel) { e.verdict = 'container'; e.neighbour = liveLabel; added.push(g); continue; }
+      // Bytes of the original image nothing names: kept, declared nowhere.
+      if (g.isInitialized) { e.verdict = 'unreferenced'; added.push(g); }
     }
-    if (e.verdict !== 'dead') continue;
-    // A live label at or inside its extent: this is that label's storage.
-    const i = firstAtOrAfter(lo);
-    if (i < liveExtents.length && liveExtents[i].lo < hi) { e.verdict = 'container'; e.neighbour = liveExtents[i].g; }
+    if (added.length === 0) break;
+    for (const g of added) kept.add(g);
+    reachedFrom(added);
   }
 
-  const counts: Record<GlobalVisibility, number> = { referenced: 0, 'initializer-only': 0, interior: 0, container: 0, dead: 0 };
+  const counts: Record<GlobalVisibility, number> = { referenced: 0, 'initializer-only': 0, interior: 0, container: 0, unreferenced: 0, dead: 0 };
   for (const e of entries.values()) counts[e.verdict]++;
   return { entries, counts };
 }

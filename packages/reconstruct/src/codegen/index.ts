@@ -2440,7 +2440,7 @@ function resolveGlobalVisibility(
     const e = result.entries.get(g)!;
     if (e.verdict === 'dead' || e.verdict === 'interior') removed.add(g);
     if (e.verdict === 'initializer-only') initializerOnly.set(g, e.referrers);
-    if (e.byAddressOnly || e.verdict === 'container') undeclared.add(g);
+    if (e.byAddressOnly || e.verdict === 'container' || e.verdict === 'unreferenced') undeclared.add(g);
     const verdict = e.byAddressOnly ? 'referenced-by-address' : e.verdict;
     rows.push([g.address, g.namespace ?? '', g.suggestedName || g.name, verdict, [...e.userModules].sort().join(','),
       [...e.referrers].map(r => r.suggestedName || r.name).sort().join(','), e.neighbour ? (e.neighbour.suggestedName || e.neighbour.name) : ''].join('\t'));
@@ -2449,8 +2449,8 @@ function resolveGlobalVisibility(
   const c = result.counts;
   const byAddress = [...result.entries.values()].filter(e => e.byAddressOnly).length;
   console.log(`Global visibility: ${candidates.length} declared centrally - ${c.referenced} referenced (${byAddress} by address only), ` +
-    `${c['initializer-only']} named only by initializers, ${c.container} kept as a live label's storage (these and the by-address ones left out of globals.h), ` +
-    `${c.interior} interior labels and ${c.dead} unreferenced not emitted`);
+    `${c['initializer-only']} named only by initializers, ${c.container} kept as a live label's storage, ${c.unreferenced} unreferenced with original bytes ` +
+    `(these and the by-address ones declared nowhere), ${c.interior} interior labels and ${c.dead} unreferenced without bytes not emitted`);
   const reportPath = process.env.GHIDRA_VISIBILITY_REPORT;
   if (reportPath) nodeFs.writeFileSync(reportPath, rows.join('\n') + '\n');
   let ownerOf: ((g: AnalyzedDataSymbol) => string | undefined) | undefined;

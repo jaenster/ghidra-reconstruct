@@ -77,7 +77,8 @@ const globals = [
   // Two functions in two files would make these central; the scoping is given here.
   global('gnUsedA', '006fd000', { referencingFunctions: [`${NS}::ReadsUsed`] }),
   global('gnUsedB', '006fd004', { referencingFunctions: [`${NS}::ReadsUsed`] }),
-  global('gnNobody', '006fd008'),
+  global('gnNobody', '006fd008', { isInitialized: false, value: undefined }),
+  global('gnUnnamedData', '006fd030', { value: '0x7' }),
   global('gnByAddress', '006fd00c', { referencingFunctions: [`${NS}::ReadsByAddress`] }),
   global('gaTable', '006fd010', {
     dataType: 'int *[1]', size: 4, value: undefined, referencingFunctions: [`${NS}::ReadsUsed`],
@@ -98,8 +99,13 @@ describe('global visibility in the emitted tree', () => {
     assert.match(header, /extern int gnUsedA;/);
   });
 
-  it('emits nothing for a global nothing names', () => {
+  it('emits nothing for storage without bytes nothing names', () => {
     assert.ok(!/\bgnNobody\b/.test(all), 'gnNobody is still emitted');
+  });
+
+  it('defines bytes of the original image nothing names, and declares them nowhere', () => {
+    assert.ok(!/\bgnUnnamedData\b/.test(header), header);
+    assert.match(units, /\bint gnUnnamedData = 0x7;/);
   });
 
   it('defines storage a function reads by address, and declares it nowhere', () => {
