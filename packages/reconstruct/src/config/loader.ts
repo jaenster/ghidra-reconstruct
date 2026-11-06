@@ -265,6 +265,10 @@ function validate(config: ProjectConfig, source: string): void {
     });
   }
 
+  if (config.macDataPairs !== undefined && (typeof config.macDataPairs !== 'string' || config.macDataPairs === '')) {
+    throw new Error(`${source}: "macDataPairs" must be a non-empty path`);
+  }
+
   // Validate modules
   if (config.modules) {
     if (typeof config.modules !== 'object' || Array.isArray(config.modules)) {

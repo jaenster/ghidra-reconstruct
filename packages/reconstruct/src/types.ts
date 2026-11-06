@@ -417,6 +417,12 @@ export interface AnalyzedDataSymbol extends ExtractedGlobal {
   ownerStructHeader?: string;
   /** An import slot (`importSlot`) no function's decompiled body names: not program data. */
   importSlotUnnamed?: boolean;
+  /**
+   * Data the compiler or linker made, which the source never declared (compiler-data.ts):
+   * a pooled string or float literal, the /GS cookie, RTTI, the image header. Not emitted;
+   * references are spelled as the construct that makes VC8 produce it.
+   */
+  compilerOutput?: import('./codegen/compiler-data.js').CompilerDataClass;
 }
 
 /**
@@ -543,6 +549,8 @@ export interface ProgramInfo {
    * predates it or the server could not list memory blocks.
    */
   dataSections?: Array<[number, number]>;
+  /** The data blocks no instruction may write, [start, end): `.rdata`. Absent before extraction recorded it. */
+  readOnlyDataSections?: Array<[number, number]>;
 }
 
 /**

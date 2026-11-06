@@ -728,6 +728,10 @@ export interface ImplGenContext {
    * from the funcdef the parameter is declared with. Built once per run.
    */
   funcPtrArgCasts?: FuncPtrArgCastTables;
+  /** The data the compiler made (compiler-data.ts): labels the bodies spell as literals. */
+  compilerLiterals?: import('./compiler-data.js').CompilerDataResult;
+  /** `compiler-literal`'s options, built once so its transformer cache hits. */
+  _compilerLiteralOptions?: Record<string, unknown>;
 }
 
 /**
@@ -3347,6 +3351,14 @@ function transformDecompiledCode(
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         enclosingVarTypes,
       };
+      if (context.compilerLiterals && (context.compilerLiterals.literalTextByName.size > 0 || context.compilerLiterals.renames.size > 0)) {
+        context._compilerLiteralOptions ??= {
+          literals: Object.fromEntries(context.compilerLiterals.literalTextByName),
+          renames: Object.fromEntries(context.compilerLiterals.renames),
+          onRefusal: (reason: string) => console.warn(`[literal] left as a label: ${reason}`),
+        };
+        perPluginOptions['compiler-literal'] = context._compilerLiteralOptions;
+      }
       const floatValues = context.funcPtrArgCasts.floatConstantValues;
       const floatConstants = floatValues
         ? [...new Set(enclosing?.referencedDataAddresses ?? [])].flatMap(a => floatValues[a] ? [floatValues[a]] : [])

@@ -1735,6 +1735,13 @@ export function generatePlatformHeader(
   lines.push('typedef tagWINDOWPLACEMENT WINDOWPLACEMENT;');
   lines.push('typedef GUID IID;');
   lines.push('#endif // _WIN32');
+  // The image's own DOS header, at the image base: the linker defines it (MSVC and
+  // mingw-w64 ld alike), so the tree declares it and defines nothing there.
+  lines.push('#ifdef __cplusplus');
+  lines.push('extern "C" IMAGE_DOS_HEADER __ImageBase;');
+  lines.push('#else');
+  lines.push('extern IMAGE_DOS_HEADER __ImageBase;');
+  lines.push('#endif');
   lines.push('');
   // Itanium/GCC unwind ABI types — not provided by <windows.h>; always defined.
   lines.push('typedef int _Unwind_Reason_Code;');

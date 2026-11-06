@@ -87,7 +87,7 @@ import { generateReadme } from './readme.js';
 import { abiConvention, conventionKeyword } from './calling-convention.js';
 import { organizeByNamespace, getFilePath, setModuleNames, setNamespaceCollisionTypes, normalizeQualifiedReference, normalizeUnitName } from './namespace.js';
 import { buildNamespaceResolution, namespaceResolution, renderNamespace } from './namespace-resolution.js';
-import { setInteriorLabelSymbols, resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, setDeclarationClosureDataContent, getDeclarationClosureReport, isUnreferenceableArtifact, isEmittableGlobal, isDataArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, generateDataHeader, dataHeaderCentralTypes, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, wasGlobalClaimed, findDuplicateLinkageNames, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, setInitializerAddressTable, setInitializerFunctionAddresses, setInitializerGlobalNamespaces, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType, emittedNamespaceOf, getDeclaredNames, initializerAddressReferences, addInitializerAddressReferences, markUnnamedImportSlots, setInitializerEnumConstants, initializerReferenceNames, setHeaderOmittedGlobals, setInternalGlobals, takeModuleExternDecls, globalsHeaderProvides, moduleGlobalsTypePrelude } from './globals-header.js';
+import { setInteriorLabelSymbols, resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, setDeclarationClosureDataContent, getDeclarationClosureReport, isUnreferenceableArtifact, isEmittableGlobal, isDataArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, generateDataHeader, dataHeaderCentralTypes, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, wasGlobalClaimed, findDuplicateLinkageNames, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, setInitializerAddressTable, setInitializerFunctionAddresses, setInitializerGlobalNamespaces, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType, emittedNamespaceOf, getDeclaredNames, initializerAddressReferences, addInitializerAddressReferences, markUnnamedImportSlots, setInitializerCompilerLiterals, setInitializerEnumConstants, initializerReferenceNames, setHeaderOmittedGlobals, setInternalGlobals, takeModuleExternDecls, globalsHeaderProvides, moduleGlobalsTypePrelude } from './globals-header.js';
 import { normalizeDataAddress, stringDefinition } from './declaration-closure.js';
 import { harvestAnnotatedParameterTypes } from './win32-signatures.js';
 import { PLATFORM_FUNCDEF_NAMES, PLATFORM_STRUCT_FIELD_TYPES, isPlatformOrBuiltinType, isLibraryType, sdkLayoutMismatches, sdkHeaderOf, unprobedTypeNames, generatePlatformHeader, oddWidthTypesSpelled, placeholderTypesUsedIn, normalizeDataValue, arrayRowTypedefLines, arrayRowReturn, arrayRowSpelling, GHIDRA_PSEUDO_OP_RESULT_TYPES, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setFunctionHiddenTypes, computeFunctionHiddenTypes, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, platformDefinedFunctionNames, platformVoidPointerFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
@@ -136,6 +136,7 @@ import {
 import { buildModuleGraph } from '../modules/builder.js';
 import { hashFunction, hashDataType, hashGlobal } from '../modules/buildinfo.js';
 import { warningRows, formatWarningsTsv, WARNINGS_TSV } from './warning-facts.js';
+import { markCompilerData, compilerDataReport } from './compiler-data.js';
 import { keepForeignReferencedGlobalsExternal, keepDataRunsWhole, fileLocalGlobalKey, assignDataHomes, dataHomeVetoCounts, dataHomeVeto, homedGlobalKey, dataHeaderPathOf } from './file-local-globals.js';
 import { noteGlobalScopeReason, resetGlobalScopeTrace, setGlobalScopeTraceImplMap, reportGlobalScopeTrace } from './global-scope-trace.js';
 
@@ -1523,6 +1524,22 @@ export function generateProjectStage1(
   // Import address table slots no body names are not program data (see the predicate).
   const unnamedSlots = markUnnamedImportSlots(analyzedGlobals, functions);
   if (unnamedSlots > 0) console.log(`Import slots not emitted (no body names them): ${unnamedSlots}`);
+
+  // What the compiler and the linker made, which the source never declared: not emitted,
+  // and spelled as the literal (or the linker symbol) wherever the tree reaches it.
+  {
+    const compilerData = genMark('setup/compiler-data', () => markCompilerData(
+      analyzedGlobals, strings ?? [], programInfo, options, projectDir,
+      constructorCodeTexts(functions, funcDefDataTypes, overrides, foreignSources), foreignSources));
+    context.compilerLiterals = compilerData;
+    setInitializerCompilerLiterals(compilerData.literalsByName, compilerData.literalsByAddress);
+    const c = compilerData.counts;
+    console.log(`Compiler output not emitted: ${c['string-literal']} string literals, ${c['float-literal']} float constants, ` +
+      `${c['gs-cookie']} GS cookie, ${c.rtti} RTTI, ${c['image-base']} image header; ` +
+      `${compilerData.rows.filter(r => r.cls === 'kept').length} kept as data`);
+    const reportPath = process.env.GHIDRA_COMPILER_DATA_REPORT;
+    if (reportPath && (!shard || shard.index === 0)) nodeFs.writeFileSync(reportPath, compilerDataReport(compilerData));
+  }
 
   // Wire analyzed globals into context for static-local injection
   context.analyzedGlobals = analyzedGlobals;

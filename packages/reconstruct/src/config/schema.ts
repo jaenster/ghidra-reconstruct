@@ -45,6 +45,12 @@ export interface ProjectConfig {
    * it names keeps external linkage (codegen/file-static-functions.ts).
    */
   foreignReferences?: ForeignReferenceEntry[];
+  /**
+   * The Mac<->Windows data pairs (mac-win-data-pairs.tsv), a witness for which strings
+   * were literals: Clang keeps anonymous literals in `__cstring` and named arrays out of
+   * it. Path relative to the project directory, `~` expanded.
+   */
+  macDataPairs?: string;
 }
 
 /**

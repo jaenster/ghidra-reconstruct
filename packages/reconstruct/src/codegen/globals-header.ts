@@ -103,6 +103,8 @@ export function isEmittableGlobal(g: AnalyzedDataSymbol): boolean {
   // neither is a placeholder at an unmapped address: bodies lower those to volatile
   // accesses at the address, and the definitions already drop them.
   if (g.importSlotUnnamed === true) return false;
+  // Made by the compiler or the linker, never declared by the source (compiler-data.ts).
+  if (g.compilerOutput !== undefined) return false;
   if (isUnmappedAddressPlaceholder(g.suggestedName || g.name)) return false;
   const base = (g.suggestedType || g.dataType || '')
     .replace(/[*&]/g, '').replace(/\bconst\b/g, '').replace(/\[[^\]]*\]/g, '').trim();
@@ -1908,6 +1910,17 @@ function emitPointerToSymbol(rawValue: string, expectedType?: string): string {
     : /\*\s*$/.test(slotType!.trim()) ? `${pointee}*`
     : rootQualifyShadowedType(slotType!.trim());
 
+  // Data the compiler made is spelled as what made it: a string label as its literal.
+  const compilerLiteral = compilerLiteralFor(addressQuery ?? bare);
+  if (compilerLiteral) {
+    if (!slotType || pointerDepthAwareName(slotType.trim().replace(/\*\s*$/, '')) === 'char') return compilerLiteral;
+    if (pointerCast) return `(${pointerCast})${compilerLiteral}`;
+    const base = baseTypeName(slotType).toLowerCase();
+    return INTEGER_SLOT_TYPES.has(base)
+      ? `(${rootQualifyShadowedType(slotType.trim())})(uintptr_t)${compilerLiteral}`
+      : `(${rootQualifyShadowedType(slotType.trim())})${compilerLiteral}`;
+  }
+
   // The same, one level out: `s_umod_006e6f60+3` / `LAB_00646c24+1` is an
   // INTERIOR pointer whose root is one of those invented names. The root carries
   // its address and the suffix is a byte offset, so the pair is a literal.
@@ -2264,6 +2277,30 @@ function initializerFunctionAt(word: number): string | null {
   return initializerFunctionBases.get(word) ?? null;
 }
 
+/** Label -> literal, and address -> literal, for the data the compiler made (compiler-data.ts). */
+let compilerLiteralsByName: ReadonlyMap<string, string> = new Map();
+let compilerLiteralsByAddress: ReadonlyMap<number, string> = new Map();
+
+/**
+ * The string literals an initializer spells in place of a label. A pointer table holding
+ * a pooled string's address is `{ "English", ... }` in the source; VC8 pools the literal
+ * again, so no declaration and no definition of the label is owed.
+ */
+export function setInitializerCompilerLiterals(
+  byName: ReadonlyMap<string, string> = new Map(),
+  byAddress: ReadonlyMap<number, string> = new Map(),
+): void {
+  compilerLiteralsByName = byName;
+  compilerLiteralsByAddress = byAddress;
+}
+
+/** The literal a (possibly qualified) reference to compiler-made data is spelled as, or undefined. */
+function compilerLiteralFor(reference: string | undefined): string | undefined {
+  if (!reference) return undefined;
+  const leaf = reference.slice(reference.lastIndexOf('::') + 2 > 1 ? reference.lastIndexOf('::') + 2 : 0);
+  return compilerLiteralsByName.get(leaf);
+}
+
 export function setInitializerAddressTable(input?: {
   globalAddresses: Record<string, number>;
   stringConstantNames: readonly string[];
@@ -2415,6 +2452,11 @@ function pointerSlotAddressReference(
   const word = scalarWordValue(rawValue);
   // Zero is a null slot, not an address; the table's floor excludes it anyway.
   if (word === null || word === 0) return null;
+  const literalAt = compilerLiteralsByAddress.get(word);
+  if (literalAt) {
+    return pointerDepthAwareName(slot.replace(/\*\s*$/, '')) === 'char' ? literalAt
+      : `(${rootQualifyShadowedType(slot.replace(/\s+/g, ' '))})${literalAt}`;
+  }
   const entry = initializerAddressBases.get(word);
   if (!entry) {
     // Not data — a third kind the extent table never held. A function needs no
@@ -2426,6 +2468,11 @@ function pointerSlotAddressReference(
     return functionAddressSpelling(func, spelled, slot, word) ?? `&${spelled}`;
   }
   const reference = initializerEntryReference(entry);
+  if (compilerLiteralFor(entry.name)) {
+    // `(char*)"..."` already has the type a char-shaped slot wants.
+    return pointerDepthAwareName(slot.replace(/\*\s*$/, '')) === 'char' ? reference
+      : `(${rootQualifyShadowedType(slot.replace(/\s+/g, ' '))})${reference}`;
+  }
   initializerAddressNamesUsed.add(entry.name);
   // A string constant is `char N[]`, which decays to exactly `char*` and to
   // nothing else: in a char-shaped slot the bare name IS the initializer.
@@ -2445,6 +2492,8 @@ function pointerSlotAddressReference(
  * shadows that path, `&` unless the entry is a string constant (which decays).
  */
 function initializerEntryReference(entry: InitializerAddressEntry): string {
+  const literal = compilerLiteralFor(entry.name);
+  if (literal) return literal;
   const named = shadowQualifyReference(namespaceQualifyReference(entry.name));
   return entry.stringConstant ? named : `&${named}`;
 }
