@@ -250,7 +250,9 @@ function shardOwnsNext(cost: number): boolean {
  * silently emit a different tree the first time that list changed.
  *
  * RECON_REUSE_DIR alone means "reuse every unit" - the degenerate incremental run,
- * which is what the oracle uses to prove reuse changes nothing.
+ * which is what the oracle uses to prove reuse changes nothing. It switches reuse on;
+ * the reused text itself is the unit loop's own copy beside the identifier cache
+ * (`unitTextPath`), never the written tree.
  */
 let emitUnitsFilter: Set<string> | null =
   process.env.RECON_REUSE_DIR
@@ -479,11 +481,39 @@ export function unitStaticsHold(previous: readonly string[], now: readonly strin
   return previous.join(',') === now.join(',');
 }
 
+/**
+ * Where a unit's text is kept as the unit loop emitted it, beside the identifier cache:
+ * `<cache>.units/<path>`.
+ *
+ * The tree on disk is not that text. Stage 2 rewrites every file after the units are
+ * emitted - the include pass drops what a file does not use under the placement of THIS
+ * run - so a unit reused from the tree would carry the last run's pruning into a run
+ * where a type or a function has moved to another header, and could never reach the new
+ * home. Reuse reads this copy instead and every run prunes it afresh, so an incremental
+ * run hands stage 2 exactly what a full one does.
+ */
+function unitTextPath(filePath: string): string | null {
+  return unitIdentCachePath ? path.join(`${unitIdentCachePath}.units`, filePath) : null;
+}
+
+function recordUnitText(filePath: string, content: string): void {
+  const p = unitTextPath(filePath);
+  if (!p) return;
+  try {
+    nodeFs.mkdirSync(path.dirname(p), { recursive: true });
+    nodeFs.writeFileSync(p, content, 'utf-8');
+  } catch {
+    // A unit whose text cannot be kept is emitted again next run, nothing worse.
+  }
+}
+
 function reuseUnitImpl(unitName: string, implPath: string): string | undefined {
   if (!emitUnitsFilter || !reuseImplDir) return undefined;
   if (emitUnitsFilter.has(unitName)) return undefined;
+  const p = unitTextPath(implPath);
+  if (!p) return undefined;
   try {
-    return nodeFs.readFileSync(path.join(reuseImplDir, implPath), 'utf-8');
+    return nodeFs.readFileSync(p, 'utf-8');
   } catch {
     return undefined;
   }
@@ -5295,6 +5325,11 @@ function generateFilesForFunctions(
       });
     }
 
+    // Kept as emitted, before stage 2 rewrites it: what the next run reuses.
+    if (reusedImpl === undefined) {
+      recordUnitText(implPath, implContent);
+      if (inlineHeaderPath && inlineHeaderContent !== undefined) recordUnitText(inlineHeaderPath, inlineHeaderContent);
+    }
     files.set(implPath, {
       path: implPath,
       content: implContent,
