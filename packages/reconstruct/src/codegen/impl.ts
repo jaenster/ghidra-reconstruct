@@ -20,7 +20,7 @@ import type {
 } from '../types.js';
 import { isPlatformOrBuiltinType, isStructType, castPointerInitializer, normalizeDataValue, isCharacterValueType } from './platform-types.js';
 import { crtFunctionNames, EXTERNAL_IMPORT_REFERENCE_RENAMES } from './crt-mapping.js';
-import { CPP_KEYWORDS } from './header.js';
+import { CPP_KEYWORDS, INLINE_MARKER, INLINE_END_MARKER, declarationMarkersOn } from './header.js';
 
 // Import cpp-parser for code transformation
 import { branchLayoutLines } from './branch-layout-spec.js';
@@ -1191,7 +1191,11 @@ export function generateImplementation(
         throw err;
       }
     }
+    // An inline header's body is marked for the module pass, which may publish it.
+    const markInline = asInlineHeader && declarationMarkersOn() && !!func.address;
+    if (markInline) lines.push(`${INLINE_MARKER}${func.address}`);
     lines.push(impl);
+    if (markInline) lines.push(INLINE_END_MARKER);
     lines.push('');
     if (context?.externEntries?.has(fileStaticKey(func.address))) {
       const entry = externEntryDefinition(func, definitionNamespace);

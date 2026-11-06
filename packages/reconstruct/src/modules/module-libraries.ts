@@ -87,6 +87,11 @@ export function seesMacro(module: string): string {
   return `D2_SEES_${module}`;
 }
 
+/** The macro every module that loads `module` (LoadLibrary) is compiled with. */
+export function loadsMacro(module: string): string {
+  return `D2_LOADS_${module}`;
+}
+
 /** Defined by every module-library build; absent, every gate is inert. */
 export const MODULE_BUILD_MACRO = 'D2_MODULE_LIBRARIES';
 
@@ -94,6 +99,10 @@ export class ModuleGraph {
   readonly names: string[];
   private readonly roots = new Map<string, string>();
   private readonly reach = new Map<string, Set<string>>();
+  /** What each module reaches through import edges (and embedded modules) alone. */
+  private readonly importReach = new Map<string, Set<string>>();
+  /** What each module reaches through import edges alone: the acyclic graph. */
+  private readonly staticReach = new Map<string, Set<string>>();
 
   /** Emitted-path prefix -> module, longest first. */
   private readonly prefixes: Array<[string, string]> = [];
@@ -123,8 +132,10 @@ export class ModuleGraph {
         seen.add(next);
         stack.push(...(config.modules[next]?.imports ?? []));
       }
-      for (const loaded of config.modules[name].loads ?? []) seen.add(loaded);
+      this.staticReach.set(name, new Set(seen));
       for (const e of embedded) seen.add(e);
+      this.importReach.set(name, new Set(seen));
+      for (const loaded of config.modules[name].loads ?? []) seen.add(loaded);
       this.reach.set(name, seen);
     }
   }
@@ -140,6 +151,26 @@ export class ModuleGraph {
 
   mayUse(user: string, owner: string): boolean {
     return this.reach.get(user)?.has(owner) ?? false;
+  }
+
+  /**
+   * Whether `user` reaches `owner` through static imports (or `owner` is embedded):
+   * the edges a public-header include may follow. A LoadLibrary edge never becomes
+   * one - the host sees the provider's interface struct, not its header.
+   */
+  importsFrom(user: string, owner: string): boolean {
+    return user !== owner && (this.importReach.get(user)?.has(owner) ?? false);
+  }
+
+  /**
+   * Whether `user`'s public header may include `owner`'s. The static imports are
+   * acyclic; an embedded module is seen by every module but itself imports some, so
+   * a module the embedded one imports may not include it back.
+   */
+  publicIncludeAllowed(user: string, owner: string): boolean {
+    if (user === owner) return false;
+    if (this.staticReach.get(user)?.has(owner)) return true;
+    return this.config.modules[owner]?.embedded === true && !(this.staticReach.get(owner)?.has(user) ?? false);
   }
 
   /** Whether an exception in project.json covers this reference. */

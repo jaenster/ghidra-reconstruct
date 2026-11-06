@@ -12,7 +12,10 @@ import {
 } from '../codegen/module-boundary.js';
 import { generateModuleLibrariesCMake } from '../codegen/cmake.js';
 import { pruneIncludes } from '../codegen/include-pruning.js';
-import { DECLS_BEGIN_MARKER, DECLS_END_MARKER, DECL_MARKER, DECL_END_MARKER, TYPE_MARKER, TYPE_END_MARKER } from '../codegen/header.js';
+import {
+  DECLS_BEGIN_MARKER, DECLS_END_MARKER, DECL_MARKER, DECL_END_MARKER, TYPE_MARKER, TYPE_END_MARKER, GLOBAL_MARKER, GLOBAL_END_MARKER,
+  INLINE_MARKER, INLINE_END_MARKER,
+} from '../codegen/header.js';
 import type { AnalyzedDataSymbol, ExtractedFunction, ReconstructedProject, ReconstructOptions, SourceFile } from '../types.js';
 
 const config: ModuleLibrariesConfig = {
@@ -207,7 +210,7 @@ describe('applyModuleBoundaries', () => {
   it('keeps public what a root header names - a macro in d2_platform.h expands in every module', () => {
     const { files } = run();
     const h = files.get('Fog/Fog.h')!.content;
-    assert.ok(!h.includes('defined(D2_MODULE_Fog)'), 'FOG_Internal is named by d2_platform.h, FOG_Used by D2Common');
+    assert.ok(!h.includes('|| defined(D2_MODULE_Fog)'), 'FOG_Internal is named by d2_platform.h, FOG_Used by D2Common');
   });
 
   it('gates every module header on the modules that may see it', () => {
@@ -234,20 +237,218 @@ describe('applyModuleBoundaries', () => {
     assert.ok(!units.includes('globals/globals.h'), 'nothing it names is left in globals.h');
   });
 
-  it('writes the public umbrella header', () => {
+  it('writes the public header: the declarations, globals and types other modules use, nothing else', () => {
     const { files } = run();
     const pub = files.get('Fog/Fog.public.h')!.content;
-    assert.ok(pub.includes('#include "Fog/Fog.h"'));
-    assert.ok(pub.includes('#include "Fog/Fog.globals.h"'));
+    assert.ok(pub.includes('void FOG_Used();'), pub);
+    assert.ok(pub.includes('FogPoolStrc * FOG_GetPool();'), pub);
+    assert.ok(pub.includes('extern int gnFogCounter;'), pub);
+    assert.ok(pub.includes('struct FogPoolStrc { FogBlockStrc block; };'), pub);
+    assert.ok(pub.includes('struct FogBlockStrc { int n; };'), 'held by value in a public type');
+    assert.ok(!pub.includes('FogScratchStrc'), 'nothing outside Fog needs it');
+    assert.ok(pub.includes('void FOG_Internal();'), 'named by d2_platform.h, which every module includes');
+    assert.ok(!pub.includes('#include "Fog/'), 'it holds the declarations; it includes none of its own module\'s headers');
+    assert.ok(pub.indexOf('struct FogBlockStrc') < pub.indexOf('struct FogPoolStrc'), 'a type follows what it holds by value');
+    assert.ok(pub.includes('namespace Fog {'));
+    assert.strictEqual(files.get('Fog/Fog.public.h')!.reexport, undefined, 'it has content: the include pass reads it like any header');
   });
 
-  it('marks the public header as re-export, so the include pass keeps its includes', () => {
+  it('guards a published type in its own header too, so a unit reaching both defines it once', () => {
     const { files } = run();
-    assert.strictEqual(files.get('Fog/Fog.public.h')!.reexport, true);
-    const before = files.get('Fog/Fog.public.h')!.content;
+    const h = files.get('Fog/Types.h')!.content.split('\n');
+    const at = h.indexOf('struct FogPoolStrc { FogBlockStrc block; };');
+    assert.deepStrictEqual(h.slice(at - 2, at), ['#ifndef D2_DEFINED_FogPoolStrc', '#define D2_DEFINED_FogPoolStrc']);
+    assert.ok(!h.includes('#ifndef D2_DEFINED_FogScratchStrc'));
+    assert.ok(files.get('Fog/Fog.public.h')!.content.includes('#ifndef D2_DEFINED_FogPoolStrc'));
+  });
+
+  it('gates an internal header against every other module, the public header only on the import graph', () => {
+    const { files } = run();
+    const internal = files.get('Fog/Types.h')!.content;
+    assert.ok(internal.includes('defined(D2_MODULE_STRICT) && !defined(D2_GATE_FROM_ROOT) && !defined(D2_MODULE_Fog)'), internal);
+    const pub = files.get('Fog/Fog.public.h')!.content;
+    assert.ok(pub.includes('!defined(D2_SEES_Fog)'));
+    assert.ok(!pub.includes('!defined(D2_MODULE_Fog)'));
+  });
+
+  it('makes a module that imports Fog include its public header before the internal one', () => {
+    const { files } = run();
+    const lines = files.get('D2Common/Units.cpp')!.content.split('\n');
+    const pub = lines.indexOf('#include "Fog/Fog.public.h"');
+    assert.ok(pub >= 0, lines.join('\n'));
+    assert.ok(pub < lines.indexOf('#include "Fog/Fog.globals.h"'));
+  });
+
+  it('lets the include pass drop the internal header the public one replaces', () => {
+    const { files } = run();
+    pruneIncludes(files, { providerRank: (from, c) => (c.endsWith('.public.h') && !from.startsWith('Fog/') ? 0 : 1) });
+    const units = files.get('D2Common/Units.cpp')!.content;
+    assert.ok(units.includes('#include "Fog/Fog.public.h"'), units);
+    assert.ok(!units.includes('#include "Fog/Fog.globals.h"'), units);
+  });
+});
+
+describe('public header', () => {
+  it('withholds a type that needs one from a module the owner may not import, and forward-declares a pointer', () => {
+    const files = new Map<string, SourceFile>();
+    files.set('Fog/Types.h', file('Fog/Types.h', [
+      '#pragma once',
+      `${TYPE_MARKER}FogHoldsStrc`, 'struct FogHoldsStrc { GameCoordStrc where; };', TYPE_END_MARKER,
+      `${TYPE_MARKER}FogPointsStrc`, 'struct FogPointsStrc { GameCoordStrc * where; };', TYPE_END_MARKER,
+    ].join('\n'), 'header'));
+    files.set('D2Common/Coord.h', file('D2Common/Coord.h', [
+      '#pragma once', `${TYPE_MARKER}GameCoordStrc`, 'struct GameCoordStrc { int x; int y; };', TYPE_END_MARKER,
+    ].join('\n'), 'header'));
+    files.set('D2Common/Units.cpp', file('D2Common/Units.cpp', [
+      '#include "Fog/Types.h"', '// 1.14d: 00601000', 'void UNITS_Do(FogHoldsStrc * a, FogPointsStrc * b) { a->where.x = b->where->y; }',
+    ].join('\n'), 'implementation'));
+    const graph = new ModuleGraph(config);
+    const r = applyModuleBoundaries({
+      graph, files,
+      functions: [fn('UNITS_Do', 'D2Common::Units', '00601000')],
+      globals: [],
+      typeOwnerMap: new Map([['FogHoldsStrc', 'Fog/Types.h'], ['FogPointsStrc', 'Fog/Types.h'], ['GameCoordStrc', 'D2Common/Coord.h']]),
+      globalsPath: 'globals/globals.h',
+      globalOwner: () => undefined, moduleExterns: new Map(), rootProvides: new Set(), typePrelude: () => [],
+    });
+    const pub = files.get('Fog/Fog.public.h')!.content;
+    assert.ok(pub.includes('struct FogPointsStrc { GameCoordStrc * where; };'), pub);
+    assert.ok(pub.includes('struct GameCoordStrc;'), 'a pointer needs only a declaration');
+    assert.ok(!pub.includes('struct FogHoldsStrc {'), 'Fog may not import D2Common, whose type it holds by value');
+    assert.ok(!pub.includes('#include "D2Common/'), 'never an include against the import graph');
+    assert.ok(r.reports.get('module-public-withheld.tsv')!.includes('Fog\ttype\tFogHoldsStrc\tGameCoordStrc'));
+    // The user keeps the internal header for the withheld type.
+    pruneIncludes(files, { providerRank: (from, c) => (c.endsWith('.public.h') && !from.startsWith('Fog/') ? 0 : 1) });
+    const units = files.get('D2Common/Units.cpp')!.content;
+    assert.ok(units.includes('#include "Fog/Types.h"'), units);
+  });
+
+  it('never lets an embedded module and one it imports include each other: the public headers stay acyclic', () => {
+    const g = new ModuleGraph(config);
+    assert.ok(g.publicIncludeAllowed('D2Common', 'D2Hell'), 'D2Hell is embedded and does not import D2Common');
+    assert.ok(!g.publicIncludeAllowed('Storm', 'D2Hell'), 'D2Hell imports Storm');
+    assert.ok(g.publicIncludeAllowed('D2Hell', 'Storm'));
+    assert.ok(!g.publicIncludeAllowed('D2gfx', 'D2Gdi'), 'a LoadLibrary edge is never an include');
+    assert.ok(g.importsFrom('Storm', 'D2Hell'), 'Storm still sees D2Hell');
+  });
+
+  it('publishes a global of a unit data header that another module names, and strips its markers', () => {
+    const files = new Map<string, SourceFile>();
+    files.set('Fog/Src/Error.data.h', file('Fog/Src/Error.data.h', [
+      '#pragma once', 'namespace Fog::Src {',
+      `${GLOBAL_MARKER}gnErrorCount`, 'extern int gnErrorCount;', GLOBAL_END_MARKER,
+      `${GLOBAL_MARKER}gnErrorScratch`, 'extern int gnErrorScratch;', GLOBAL_END_MARKER,
+      '} // namespace Fog::Src',
+    ].join('\n'), 'header'));
+    files.set('D2Common/Units.cpp', file('D2Common/Units.cpp', [
+      '#include "Fog/Src/Error.data.h"', '// 1.14d: 00601000', 'void UNITS_Do() { Fog::Src::gnErrorCount++; }',
+    ].join('\n'), 'implementation'));
+    const graph = new ModuleGraph(config);
+    const r = applyModuleBoundaries({
+      graph, files, functions: [fn('UNITS_Do', 'D2Common::Units', '00601000')], globals: [],
+      typeOwnerMap: new Map(), globalsPath: 'globals/globals.h',
+      globalOwner: () => undefined, moduleExterns: new Map(), rootProvides: new Set(), typePrelude: () => [],
+    });
+    const pub = files.get('Fog/Fog.public.h')!.content;
+    assert.ok(pub.includes('namespace Fog::Src {\nextern int gnErrorCount;'), pub);
+    assert.ok(!pub.includes('gnErrorScratch'));
+    assert.ok(!files.get('Fog/Src/Error.data.h')!.content.includes('//@@'), 'no marker reaches the tree');
+    assert.ok(r.references.some(x => x.kind === 'global' && x.owner === 'Fog' && x.symbol === 'gnErrorCount'));
+  });
+
+  it('a host keeps the loaded module\'s own header: a public header would bring that module\'s imports along', () => {
+    const files = new Map<string, SourceFile>();
+    files.set('D2gfx/Render.h', file('D2gfx/Render.h', [
+      '#pragma once', 'namespace D2gfx {', DECLS_BEGIN_MARKER, `${DECL_MARKER}00402000`, 'void GFX_Draw();', DECL_END_MARKER,
+      DECLS_END_MARKER, '} // namespace D2gfx',
+    ].join('\n'), 'header'));
+    files.set('D2Gdi/Gdi.h', file('D2Gdi/Gdi.h', [
+      '#pragma once', 'namespace D2Gdi {', DECLS_BEGIN_MARKER, `${DECL_MARKER}00403000`, 'void GDI_Blit();', DECL_END_MARKER,
+      DECLS_END_MARKER, '} // namespace D2Gdi',
+    ].join('\n'), 'header'));
+    files.set('Game/Main.cpp', file('Game/Main.cpp', [
+      '#include "D2gfx/Render.h"', '// 1.14d: 00401000', 'void Main() { D2gfx::GFX_Draw(); }',
+    ].join('\n'), 'implementation'));
+    files.set('D2gfx/Render.cpp', file('D2gfx/Render.cpp', [
+      '#include "D2gfx/Render.h"', '#include "D2Gdi/Gdi.h"', '// 1.14d: 00402000', 'void GFX_Draw() { D2Gdi::GDI_Blit(); }',
+    ].join('\n'), 'implementation'));
+    const graph = new ModuleGraph(config);
+    applyModuleBoundaries({
+      graph, files,
+      functions: [fn('Main', 'Game', '00401000'), fn('GFX_Draw', 'D2gfx', '00402000'), fn('GDI_Blit', 'D2Gdi', '00403000')],
+      globals: [], typeOwnerMap: new Map(), globalsPath: 'globals/globals.h',
+      globalOwner: () => undefined, moduleExterns: new Map(), rootProvides: new Set(), typePrelude: () => [],
+    });
+    assert.ok(!files.get('Game/Main.cpp')!.content.includes('D2gfx.public.h'), 'Game loads D2gfx; it sees the interface, not D2gfx\'s imports');
+    assert.ok(files.get('D2gfx/Render.h')!.content.includes('!defined(D2_LOADS_D2gfx)'), 'the internal gate lets a loading module through');
+    assert.ok(files.get('D2Gdi/D2Gdi.public.h')!.content.includes('void GDI_Blit();'));
+    assert.ok(!files.get('D2gfx/Render.cpp')!.content.includes('D2Gdi.public.h'), 'D2Gdi imports D2gfx: the load edge never becomes an include');
+  });
+
+  it('publishes a header inline another module calls, body and all, guarded in both places', () => {
+    const files = new Map<string, SourceFile>();
+    files.set('Storm/SMem.h', file('Storm/SMem.h', [
+      '#pragma once', 'namespace Storm {', DECLS_BEGIN_MARKER,
+      `${DECL_MARKER}00405000`, 'void SMemFree(void * p);', DECL_END_MARKER,
+      `${DECL_MARKER}004053f0`, '__attribute__((noinline)) inline void FreeShim(void * p);', DECL_END_MARKER,
+      DECLS_END_MARKER, '} // namespace Storm',
+    ].join('\n'), 'header'));
+    files.set('Storm/SMem.inline.h', file('Storm/SMem.inline.h', [
+      '#pragma once', '#include "Storm/SMem.h"', 'namespace Storm {',
+      `${INLINE_MARKER}004053f0`, '// 1.14d: 004053f0', '__attribute__((noinline)) inline void FreeShim(void * p) {', '    SMemFree(p);', '}',
+      INLINE_END_MARKER, '} // namespace Storm',
+    ].join('\n'), 'header'));
+    files.set('Fog/Use.cpp', file('Fog/Use.cpp', [
+      '#include "Storm/SMem.inline.h"', '// 1.14d: 00401000', 'void FOG_Use(void * p) { Storm::FreeShim(p); }',
+    ].join('\n'), 'implementation'));
+    const graph = new ModuleGraph(config);
+    applyModuleBoundaries({
+      graph, files,
+      functions: [fn('SMemFree', 'Storm', '00405000'), fn('FreeShim', 'Storm', '004053f0'), fn('FOG_Use', 'Fog', '00401000')],
+      globals: [], typeOwnerMap: new Map(), globalsPath: 'globals/globals.h',
+      globalOwner: () => undefined, moduleExterns: new Map(), rootProvides: new Set(), typePrelude: () => [],
+    });
+    const pub = files.get('Storm/Storm.public.h')!.content;
+    assert.ok(pub.includes('void SMemFree(void * p);'), 'the body calls it: it is declared');
+    assert.ok(pub.includes('#ifndef D2_DEFINED_INLINE_004053f0\n#define D2_DEFINED_INLINE_004053f0\n// 1.14d: 004053f0'), pub);
+    const inl = files.get('Storm/SMem.inline.h')!.content;
+    assert.ok(inl.includes('#ifndef D2_DEFINED_INLINE_004053f0'), inl);
+    assert.ok(!inl.includes('//@@'));
+    pruneIncludes(files, { providerRank: (from, c) => (c.endsWith('.public.h') && !from.startsWith('Storm/') ? 0 : 1) });
+    assert.deepStrictEqual(files.get('Fog/Use.cpp')!.content.split('\n').filter(l => l.startsWith('#include')), ['#include "Storm/Storm.public.h"']);
+  });
+
+  it('includes the public header of an imported module for a type it holds by value', () => {
+    const files = new Map<string, SourceFile>();
+    files.set('Storm/Types.h', file('Storm/Types.h', [
+      '#pragma once', `${TYPE_MARKER}StormRectStrc`, 'struct StormRectStrc { int l; int t; };', TYPE_END_MARKER,
+    ].join('\n'), 'header'));
+    files.set('Fog/Types.h', file('Fog/Types.h', [
+      '#pragma once', '#include "Storm/Types.h"',
+      `${TYPE_MARKER}FogAreaStrc`, 'struct FogAreaStrc { StormRectStrc rect; };', TYPE_END_MARKER,
+    ].join('\n'), 'header'));
+    files.set('D2Common/Units.cpp', file('D2Common/Units.cpp', [
+      '#include "Fog/Types.h"', '// 1.14d: 00601000', 'void UNITS_Do(FogAreaStrc * a) { }',
+    ].join('\n'), 'implementation'));
+    const graph = new ModuleGraph(config);
+    applyModuleBoundaries({
+      graph, files,
+      functions: [fn('UNITS_Do', 'D2Common::Units', '00601000')],
+      globals: [],
+      typeOwnerMap: new Map([['FogAreaStrc', 'Fog/Types.h'], ['StormRectStrc', 'Storm/Types.h']]),
+      globalsPath: 'globals/globals.h',
+      globalOwner: () => undefined, moduleExterns: new Map(), rootProvides: new Set(), typePrelude: () => [],
+    });
+    const fogPub = files.get('Fog/Fog.public.h')!.content;
+    assert.ok(fogPub.includes('#include "Storm/Storm.public.h"'), fogPub);
+    assert.ok(fogPub.includes('struct FogAreaStrc { StormRectStrc rect; };'));
+    assert.ok(!fogPub.includes('struct StormRectStrc;'), 'a forward declaration would let the include pass drop the include');
+    assert.ok(files.get('Storm/Storm.public.h')!.content.includes('struct StormRectStrc { int l; int t; };'));
+    const fogTypes = files.get('Fog/Types.h')!.content.split('\n');
+    assert.ok(fogTypes.indexOf('#include "Storm/Storm.public.h"') < fogTypes.indexOf('#include "Storm/Types.h"'),
+      'Fog imports Storm: its header includes Storm\'s public one first');
     pruneIncludes(files);
-    assert.strictEqual(files.get('Fog/Fog.public.h')!.content, before);
-    assert.ok(before.includes('#include "Fog/Fog.h"'));
+    assert.ok(files.get('Fog/Fog.public.h')!.content.includes('#include "Storm/Storm.public.h"'), 'the include pass keeps it');
   });
 });
 
@@ -296,7 +497,7 @@ describe('macro references', () => {
       globalOwner: () => undefined, moduleExterns: new Map(), rootProvides: new Set(), typePrelude: () => [],
     });
     assert.ok(r.references.some(x => x.source === 'macro' && x.symbol === 'Fog::Memory::FreeClientMemory'));
-    assert.ok(!files.get('Fog/Memory.h')!.content.includes('defined(D2_MODULE_Fog)'));
+    assert.ok(!files.get('Fog/Memory.h')!.content.includes('|| defined(D2_MODULE_Fog)'));
   });
 });
 

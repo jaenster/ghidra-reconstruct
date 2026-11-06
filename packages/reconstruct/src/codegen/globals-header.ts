@@ -8,7 +8,7 @@
 import { globalAliasComment } from './global-aliases.js';
 import type { AnalyzedDataSymbol, ReconstructOptions, DataValue, ExtractedDataType, ExtractedStruct, ExtractedUnion, ExtractedFunctionDefinition, ExtractedFunction } from '../types.js';
 import { GLIDE_UNSIGNED_ENUM_TYPEDEFS, PLATFORM_STRUCT_FIELD_TYPES, isAggregateObjectType, getAggregateTypeNames, isPlatformOrBuiltinType, isLibraryType, isStructType, castPointerInitializer, normalizeDataValue, isCharacterValueType, isMsvcEhInternal, normalizeWideCharType, normalizeListingBuiltinType, listingBuiltinElementType, imageArtifactElementType, isVoidPointerSpelling, resolveTypedefSpelling, rootQualifyShadowedType, platformDeclaredFunctionNames } from './platform-types.js';
-import { generateStructDeclaration, generateUnionDeclaration, generateFunctionDefinitionDeclaration, ghidraDefaultFieldName, constructorFields } from './header.js';
+import { generateStructDeclaration, generateUnionDeclaration, generateFunctionDefinitionDeclaration, ghidraDefaultFieldName, constructorFields, declarationMarkersOn, GLOBAL_MARKER, GLOBAL_END_MARKER } from './header.js';
 import { normalizeQualifiedReference } from './namespace.js';
 import { namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 import { computeDeclarationClosure, renderClosureBlock, renderClosureDefinitionBlock, normalizeDataAddress, type ClosureResult, type ClosureStringContent } from './declaration-closure.js';
@@ -3724,7 +3724,11 @@ export function generateDataHeader(
     if (namespace) lines.push(`namespace ${namespace} {`);
     for (const g of symbols) {
       const decl = generateExternDeclaration(g, options.includeAddressComments);
-      if (decl) lines.push(decl);
+      if (!decl) continue;
+      const marked = declarationMarkersOn();
+      if (marked) lines.push(`${GLOBAL_MARKER}${sanitizeSymbolName(g.suggestedName || g.name)}`);
+      lines.push(decl);
+      if (marked) lines.push(GLOBAL_END_MARKER);
     }
     if (namespace) lines.push(`} // namespace ${namespace}`);
     lines.push('');

@@ -82,7 +82,7 @@ import { pruneIncludes } from './include-pruning.js';
 import { ModuleGraph, type ModuleLibrariesConfig } from '../modules/module-libraries.js';
 import { isModuleModel, libraryConfigFromModules } from '../modules/module-model.js';
 import type { ProjectConfig } from '../config/schema.js';
-import { applyModuleLayout } from './module-layout.js';
+import { applyModuleLayout, publicHeaderRank } from './module-layout.js';
 import { generateSourceMap } from './sourcemap.js';
 import { generateReadme } from './readme.js';
 import { abiConvention, conventionKeyword } from './calling-convention.js';
@@ -2061,6 +2061,7 @@ export function generateProjectStage2(state: GenerationState): ReconstructedProj
           moduleExterns: takeModuleExternDecls(),
           rootProvides: globalsHeaderProvides(),
           typePrelude: gs => moduleGlobalsTypePrelude(gs, dataTypes, typeOwnerMap),
+          sdkTypeNames: new Set(dataTypes.filter(t => isLibraryType(t.name, t.category ?? '')).map(t => t.name)),
         }));
         for (const [k, v] of boundary.reports) (moduleReports ??= new Map()).set(k, v);
         for (const line of boundary.summary) console.log(line);
@@ -2105,15 +2106,15 @@ export function generateProjectStage2(state: GenerationState): ReconstructedProj
   }
   // The module layout last: every file to its module's directory, every include after it.
   const modules = options.projectConfig?.modules;
-  if (isModuleModel(modules)) {
-    applyModuleLayout(project, modules!, moduleGraph);
-  }
+  const layout = isModuleModel(modules) ? applyModuleLayout(project, modules!, moduleGraph) : undefined;
   // Each file keeps the includes it uses and forward-declares what it only points at,
   // read off the finished tree, so a header stops carrying other modules' headers along.
   if (process.env.RECON_KEEP_ALL_INCLUDES !== '1') {
     const pruneT0 = Date.now();
     const pruned = pruneIncludes(project.files, {
       sdkTypeNames: new Set(dataTypes.filter(t => isLibraryType(t.name, t.category ?? '')).map(t => t.name)),
+      sdkFromPlatform: true,
+      providerRank: layout ? publicHeaderRank(layout, project.files, modules!) : undefined,
     });
     console.log(`Includes (${((Date.now() - pruneT0) / 1000).toFixed(1)}s): ${pruned.dropped} dropped from ${pruned.pruned} of ${pruned.files} file(s), ` +
       `${pruned.added} made direct, ${pruned.forwardDeclared} forward declaration(s)` +

@@ -142,9 +142,18 @@ export const DECL_MARKER = '//@@decl ';
 export const DECL_END_MARKER = '//@@decl-end';
 export const TYPE_MARKER = '//@@type ';
 export const TYPE_END_MARKER = '//@@type-end';
+/** Around one body of a unit's inline header: `//@@inline <address>`, so the module pass can publish it. */
+export const INLINE_MARKER = '//@@inline ';
+export const INLINE_END_MARKER = '//@@inline-end';
+/** Around one extern of a unit's data header: `//@@global <name>`, so the module pass can publish it. */
+export const GLOBAL_MARKER = '//@@global ';
+export const GLOBAL_END_MARKER = '//@@global-end';
 let declarationMarkers = false;
 export function setDeclarationMarkers(on: boolean): void {
   declarationMarkers = on;
+}
+export function declarationMarkersOn(): boolean {
+  return declarationMarkers;
 }
 
 export function generateHeader(
