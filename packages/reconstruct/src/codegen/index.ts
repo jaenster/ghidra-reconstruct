@@ -78,6 +78,7 @@ import { enumTypedefLine, registerEnumTypedefTargets, setKnownEnumWidths } from 
 import { generateImplementation, unitNamespace, unitThunkForwarder, probeGuardedCalls, setQuestStructLayouts, setStructFieldRenames, decompiledReturnType, decompiledFunctionName, decompiledParameters, type ImplGenContext, type FuncPtrArgCastTables, type ThunkForward } from './impl.js';
 import { generateCMakeLists, generateTopLevelCMake, generateTargetCMake, generateUnsortedCMake, generateModuleLibrariesCMake } from './cmake.js';
 import { applyModuleBoundaries } from './module-boundary.js';
+import { pruneIncludes } from './include-pruning.js';
 import { ModuleGraph, type ModuleLibrariesConfig } from '../modules/module-libraries.js';
 import { isModuleModel, libraryConfigFromModules } from '../modules/module-model.js';
 import type { ProjectConfig } from '../config/schema.js';
@@ -2076,6 +2077,17 @@ export function generateProjectStage2(state: GenerationState): ReconstructedProj
   const modules = options.projectConfig?.modules;
   if (isModuleModel(modules)) {
     applyModuleLayout(project, modules!, moduleGraph);
+  }
+  // Each file keeps the includes it uses and forward-declares what it only points at,
+  // read off the finished tree, so a header stops carrying other modules' headers along.
+  if (process.env.RECON_KEEP_ALL_INCLUDES !== '1') {
+    const pruneT0 = Date.now();
+    const pruned = pruneIncludes(project.files, {
+      sdkTypeNames: new Set(dataTypes.filter(t => isLibraryType(t.name, t.category ?? '')).map(t => t.name)),
+    });
+    console.log(`Includes (${((Date.now() - pruneT0) / 1000).toFixed(1)}s): ${pruned.dropped} dropped from ${pruned.pruned} of ${pruned.files} file(s), ` +
+      `${pruned.added} made direct, ${pruned.forwardDeclared} forward declaration(s)` +
+      (pruned.unparsed.length ? `; ${pruned.unparsed.length} file(s) the parser cannot read kept as written: ${pruned.unparsed.slice(0, 5).join(', ')}` : ''));
   }
   reportUnresolvableIncludes(project);
   reportCaseCollidingOutputPaths(project);
