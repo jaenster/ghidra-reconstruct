@@ -992,6 +992,11 @@ export class CppEmitter {
 
   private emitAttributes(attrs: Attribute[]): void {
     if (attrs.length === 0) return;
+    // GCC's own attributes are read from `__attribute__((...))` and printed back that way.
+    if (attrs.every(a => a.namespace?.name === 'gnu' && a.arguments.length === 0)) {
+      this.write(`__attribute__((${attrs.map(a => a.name.name).join(', ')})) `);
+      return;
+    }
     this.write('[[');
     for (let i = 0; i < attrs.length; i++) {
       if (i > 0) {
