@@ -117,8 +117,8 @@ describe('module layout', () => {
     assert.strictEqual(layout.pathOf('Fog/3rdparty/crashy/Report.cpp.map'), '3rdparty/crashy/Report.cpp.map');
     assert.strictEqual(layout.pathOf('Fog/3rdparty/crashy.cpp'), '3rdparty/crashy/crashy.cpp');
     assert.strictEqual(layout.pathOf('d2_platform.h'), 'Source/D2Headers/d2_platform.h');
-    assert.strictEqual(layout.pathOf('globals/globals.h'), 'globals/globals.h');
-    assert.strictEqual(layout.pathOf('Fogger/x.h'), 'Fogger/x.h');
+    assert.strictEqual(layout.pathOf('globals/globals.h'), 'Source/globals/globals.h', 'the shared root goes under Source/');
+    assert.strictEqual(layout.pathOf('Fogger/x.h'), 'Source/Fogger/x.h');
   });
 
   it('rewrites the includes of generated files only', () => {
@@ -134,7 +134,7 @@ describe('module layout', () => {
     assert.strictEqual(layout.rewriteIncludes(text, generated), [
       '#include "Source/Fog/Src/ErrorManager.h"',
       '  #include "Source/D2Headers/d2_platform.h" // forced',
-      '#include "globals/globals.h"',
+      '#include "Source/globals/globals.h"',
       '#include "Redivivus/d2_trace.h"',
       '#include <windows.h>',
       'const char* s = "#include \\"Fog/Src/ErrorManager.h\\"";',
@@ -143,7 +143,11 @@ describe('module layout', () => {
 });
 
 describe('Source/modules.cmake', () => {
-  const text = modulesCMake(table(), new Map([['Fog', 'globals/Fog.cpp']]));
+  const text = modulesCMake(table(), new Map([['Fog', 'Source/globals/Fog.cpp']]));
+
+  it('says on its first line where the table is edited', () => {
+    assert.match(text.split('\n')[0], /^# Generated from project.json "modules"/);
+  });
 
   it('lists the Windows modules in link order, the Mac ones not at all', () => {
     assert.match(text, /^set\(D2_MODULES crashy Fog Game Storm D2Lang D2gfx D2Gdi D2Headers Redivivus\)$/m);
@@ -153,7 +157,7 @@ describe('Source/modules.cmake', () => {
   it('writes reach, exceptions, strictness and the data unit', () => {
     assert.match(text, /^set\(D2_MODULE_Fog_SEES Fog Storm D2Lang D2Headers Redivivus\)$/m);
     assert.match(text, /^set\(D2_MODULE_Fog_EXCEPTIONS D2Lang\)$/m);
-    assert.match(text, /^set\(D2_MODULE_Fog_DATA "globals\/Fog.cpp"\)$/m);
+    assert.match(text, /^set\(D2_MODULE_Fog_DATA "Source\/globals\/Fog.cpp"\)$/m);
     assert.match(text, /^set\(D2_MODULE_Game_STRICT ON\)$/m);
     assert.match(text, /^set\(D2_MODULE_Game_SEES Fog Game Storm D2gfx D2Headers Redivivus\)$/m);
     assert.match(text, /^set\(D2_MODULE_Redivivus_GENERATED OFF\)$/m);

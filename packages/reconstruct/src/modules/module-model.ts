@@ -19,8 +19,11 @@ import { namespaceDirectory, type ModuleLibrariesConfig, type ModuleLibraryConfi
 
 export const MODULE_KINDS: readonly ModuleKind[] = ['exe', 'dll-module', 'headers-only', '3rdparty', 'ours'];
 
+/** The generated tree's root: files no module owns (globals/) live under it. */
+export const SOURCE_ROOT = 'Source';
+
 /** Where the build reads the module table from (generated, under the source root). */
-export const MODULES_CMAKE_PATH = 'Source/modules.cmake';
+export const MODULES_CMAKE_PATH = `${SOURCE_ROOT}/modules.cmake`;
 
 /** The modules section is the full model (every entry has a `dir`): the module build is on. */
 export function isModuleModel(modules: Record<string, ModuleConfig> | undefined): boolean {
@@ -195,7 +198,8 @@ export function reachability(modules: Record<string, ModuleConfig>): Map<string,
  * (`Source/D2Common/ITEMS/Items.cpp`). A nested namespace module moves its own
  * subtree: `Fog/3rdparty/crashy/Report.cpp` -> `3rdparty/crashy/Report.cpp`, and
  * the namespace's own unit `Fog/3rdparty/crashy.cpp` -> `3rdparty/crashy/crashy.cpp`.
- * Files no module owns (globals/, the unnamespaced unit) keep their path.
+ * Files no module owns (globals/, the unnamespaced unit) go under the source root
+ * (`Source/globals/globals.h`), so the tree's root holds only the top directories.
  */
 export class ModuleLayout {
   private readonly prefixes: Array<[string, string]> = [];
@@ -220,7 +224,7 @@ export class ModuleLayout {
         return `${dir}/${prefix.slice(prefix.lastIndexOf('/') + 1)}${path.slice(prefix.length)}`;
       }
     }
-    return path;
+    return `${SOURCE_ROOT}/${path}`;
   }
 
   /**

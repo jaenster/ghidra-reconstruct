@@ -53,6 +53,8 @@ export function isGlobalsHeaderPath(p: string): boolean {
  */
 export function isGlobalsUnitPath(p: string): boolean {
   if (!p.endsWith('.cpp')) return false;
+  // In the module layout the shared root sits under Source/ (Source/globals/globals.cpp).
+  if (p.startsWith(`Source/${GLOBALS_DIR}/`)) p = p.slice('Source/'.length);
   if (p.startsWith(`${GLOBALS_DIR}/`)) return !p.slice(GLOBALS_DIR.length + 1).includes('/');
   return !p.includes('/') && (p === `${GLOBALS_BASE}.cpp` || p.startsWith(`${GLOBALS_BASE}.`));
 }
