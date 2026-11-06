@@ -114,6 +114,11 @@ export function validateModules(modules: Record<string, ModuleConfig>): string[]
       problems.push(`${at}: a ${m.kind} owns at least one namespace`);
     }
     if (m.strict !== undefined && typeof m.strict !== 'boolean') problems.push(`${at}.strict must be a boolean`);
+    for (const key of ['publicHeader', 'rootUnit'] as const) {
+      const v = m[key];
+      if (v !== undefined && (typeof v !== 'string' || v === '' || v.includes('/'))) problems.push(`${at}.${key} must be a file name`);
+    }
+    if (m.publicHeader !== undefined && !m.publicHeader.endsWith('.h')) problems.push(`${at}.publicHeader must name a .h file`);
     if ((m.target ?? 'windows') === 'windows') {
       if (!Number.isInteger(m.linkOrder)) problems.push(`${at}.linkOrder must be an integer`);
       else if (orders.has(m.linkOrder!)) problems.push(`${at}.linkOrder ${m.linkOrder} is also ${orders.get(m.linkOrder!)}'s`);
@@ -192,6 +197,21 @@ export function reachability(modules: Record<string, ModuleConfig>): Map<string,
   return out;
 }
 
+/** What the module-boundary pass names a public header before the layout places it. */
+export const PUBLIC_HEADER_SUFFIX = '.public.h';
+/** The files of a unit: what moves with the root unit when the public header takes its name. */
+const ROOT_UNIT_SUFFIXES = ['.h', '.cpp', '.c', '.cpp.map', '.c.map', '.data.h', '.inl'];
+export const DEFAULT_PUBLIC_HEADER_NAME = '{module}.h';
+export const DEFAULT_ROOT_UNIT_NAME = '{module}Root';
+
+export function publicHeaderName(module: string, m: ModuleConfig): string {
+  return (m.publicHeader ?? DEFAULT_PUBLIC_HEADER_NAME).split('{module}').join(module);
+}
+
+export function rootUnitName(module: string, m: ModuleConfig): string {
+  return (m.rootUnit ?? DEFAULT_ROOT_UNIT_NAME).split('{module}').join(module);
+}
+
 /**
  * Where each emitted file goes. The generator names files by namespace
  * (`D2Common/ITEMS/Items.cpp`); the module's `dir` is where that tree lives
@@ -204,18 +224,68 @@ export function reachability(modules: Record<string, ModuleConfig>): Map<string,
 export class ModuleLayout {
   private readonly prefixes: Array<[string, string]> = [];
   private readonly files = new Map<string, string>();
+  /** Module directory -> its public header and root unit names. */
+  private readonly named = new Map<string, { module: string; publicHeader: string; rootUnit: string }>();
+  /** Module directories, longest first. */
+  private readonly dirs: Array<[string, string]> = [];
 
   constructor(modules: Record<string, ModuleConfig>) {
     for (const name of Object.keys(modules)) {
       const m = modules[name];
       for (const ns of m.namespaces ?? []) this.prefixes.push([namespaceDirectory(ns), m.dir]);
       for (const f of m.files ?? []) this.files.set(f, `${m.dir}/${f.slice(f.lastIndexOf('/') + 1)}`);
+      if (typeof m.dir === 'string') {
+        this.dirs.push([m.dir, name]);
+        if ((m.namespaces ?? []).length > 0) {
+          this.named.set(m.dir, { module: name, publicHeader: publicHeaderName(name, m), rootUnit: rootUnitName(name, m) });
+        }
+      }
     }
     this.prefixes.sort((a, b) => b[0].length - a[0].length);
+    this.dirs.sort((a, b) => b[0].length - a[0].length);
   }
 
-  /** The tree path of a generated file. */
+  /**
+   * Give a module's public header another file name: the layout falls back to it when
+   * `<M>.h` would collide, on a case-insensitive disk, with one of the module's units
+   * (D2gfx's `D2GFX.h`).
+   */
+  renamePublicHeader(module: string, file: string): void {
+    for (const n of this.named.values()) if (n.module === module) n.publicHeader = file;
+  }
+
+  /** The module a tree path lies in (its longest module directory). */
+  moduleOfPath(path: string): string | undefined {
+    for (const [dir, module] of this.dirs) if (path.startsWith(`${dir}/`)) return module;
+    return undefined;
+  }
+
+  /** The tree path of a module's public header. */
+  publicHeaderPath(module: string): string | undefined {
+    for (const [dir, n] of this.named) if (n.module === module) return `${dir}/${n.publicHeader}`;
+    return undefined;
+  }
+
+  /**
+   * The tree path of a generated file. A module's public header is `<dir>/<M>.h`, so
+   * the unit of the namespace named after the module (`<M>.h/.cpp`, functions directly
+   * in namespace M) moves aside to `<dir>/<M>Root.*`; both names come from project.json.
+   */
   pathOf(path: string): string {
+    const placed = this.placed(path);
+    const slash = placed.lastIndexOf('/');
+    const n = slash > 0 ? this.named.get(placed.slice(0, slash)) : undefined;
+    if (!n) return placed;
+    const file = placed.slice(slash + 1);
+    const dir = placed.slice(0, slash);
+    if (file === `${n.module}${PUBLIC_HEADER_SUFFIX}`) return `${dir}/${n.publicHeader}`;
+    if (file.startsWith(`${n.module}.`) && ROOT_UNIT_SUFFIXES.includes(file.slice(n.module.length))) {
+      return `${dir}/${n.rootUnit}${file.slice(n.module.length)}`;
+    }
+    return placed;
+  }
+
+  private placed(path: string): string {
     const listed = this.files.get(path);
     if (listed) return listed;
     for (const [prefix, dir] of this.prefixes) {

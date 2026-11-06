@@ -13,7 +13,7 @@ import type { ModuleConfig } from '../config/schema.js';
 import type { ReconstructedProject, SourceFile } from '../types.js';
 import { ModuleGraph } from '../modules/module-libraries.js';
 import {
-  ModuleLayout, MODULES_CMAKE_PATH, dependencyList, linkOrdered, reachability, windowsModules,
+  ModuleLayout, MODULES_CMAKE_PATH, PUBLIC_HEADER_SUFFIX, dependencyList, linkOrdered, reachability, windowsModules,
 } from '../modules/module-model.js';
 
 const BANNER = `# Generated from project.json "modules" by ghidra-mcp ${String.fromCharCode(0x2014)} DO NOT EDIT; change the module table there`;
@@ -22,9 +22,25 @@ export function applyModuleLayout(
   project: ReconstructedProject,
   modules: Record<string, ModuleConfig>,
   graph: ModuleGraph | undefined,
-): void {
+): ModuleLayout {
   const layout = new ModuleLayout(modules);
   const generated = new Set(project.files.keys());
+  // A public header named like one of its module's units, in another case, would
+  // overwrite it on a case-insensitive disk: that module keeps the pass's own name.
+  const placed = new Set<string>();
+  const publicSources = new Map<string, string>();
+  for (const path of generated) {
+    if (path.endsWith(PUBLIC_HEADER_SUFFIX)) publicSources.set(path, layout.pathOf(path));
+    else placed.add(layout.pathOf(path).toLowerCase());
+  }
+  for (const [source, target] of publicSources) {
+    if (!placed.has(target.toLowerCase())) continue;
+    const module = layout.moduleOfPath(target);
+    if (!module) continue;
+    const fallback = source.slice(source.lastIndexOf('/') + 1);
+    console.warn(`warning: ${module}'s public header ${target} would collide with a unit of the same name in another case; it is ${fallback}`);
+    layout.renamePublicHeader(module, fallback);
+  }
 
   const files = new Map<string, SourceFile>();
   for (const [path, file] of project.files) {
@@ -51,9 +67,14 @@ export function applyModuleLayout(
       if (m && graph.has(m[1])) dataUnits.set(m[1], layout.pathOf(path));
     }
   }
+  const publicHeaders = new Map<string, string>();
+  for (const name of Object.keys(modules)) {
+    const p = layout.publicHeaderPath(name);
+    if (p && files.has(p)) publicHeaders.set(name, p);
+  }
   files.set(MODULES_CMAKE_PATH, {
     path: MODULES_CMAKE_PATH,
-    content: modulesCMake(modules, dataUnits),
+    content: modulesCMake(modules, dataUnits, publicHeaders),
     type: 'header',
     functions: [],
     includes: [],
@@ -76,6 +97,21 @@ export function applyModuleLayout(
   for (const [k, v] of files) project.files.set(k, v);
   project.sourceMaps.clear();
   for (const [k, v] of sourceMaps) project.sourceMaps.set(k, v);
+  return layout;
+}
+
+/**
+ * The include pass's preference: for a file of another module, a module's public
+ * header before any internal header that provides the same name.
+ */
+export function publicHeaderRank(layout: ModuleLayout, files: ReadonlyMap<string, unknown>, modules: Record<string, ModuleConfig>): (from: string, candidate: string) => number {
+  const publicPaths = new Set<string>();
+  for (const name of Object.keys(modules)) {
+    const p = layout.publicHeaderPath(name);
+    if (p && files.has(p)) publicPaths.add(p);
+  }
+  return (from, candidate) =>
+    publicPaths.has(candidate) && layout.moduleOfPath(candidate) !== layout.moduleOfPath(from) ? 0 : 1;
 }
 
 /** A CMake list value: names never hold spaces or semicolons. */
@@ -86,7 +122,11 @@ const list = (items: Iterable<string>): string => [...items].join(' ');
  * family per module, `D2_MODULES` in link order; the gate scanner
  * (cmake/module-gates.cmake) reads the same file.
  */
-export function modulesCMake(modules: Record<string, ModuleConfig>, dataUnits: ReadonlyMap<string, string>): string {
+export function modulesCMake(
+  modules: Record<string, ModuleConfig>,
+  dataUnits: ReadonlyMap<string, string>,
+  publicHeaders: ReadonlyMap<string, string> = new Map(),
+): string {
   const names = linkOrdered(modules, windowsModules(modules));
   const reach = reachability(modules);
   const L: string[] = [];
@@ -97,6 +137,9 @@ export function modulesCMake(modules: Record<string, ModuleConfig>, dataUnits: R
   L.push('#   D2_MODULE_<m>_DIR          its directory');
   L.push('#   D2_MODULE_<m>_KIND         exe, dll-module, headers-only, 3rdparty or ours');
   L.push('#   D2_MODULE_<m>_DEPENDS      the modules it depends on directly');
+  L.push('#   D2_MODULE_<m>_IMPORTS      of those, the static imports: the libraries it links');
+  L.push('#   D2_MODULE_<m>_LOADS        of those, the LoadLibrary edges: it sees their interface only');
+  L.push('#   D2_MODULE_<m>_PUBLIC       its public header, the one header another module includes');
   L.push('#   D2_MODULE_<m>_SEES         every module whose headers it may include, itself included');
   L.push('#   D2_MODULE_<m>_EXCEPTIONS   modules it references by a documented exception');
   L.push('#   D2_MODULE_<m>_STRICT       ON: a wrong-direction include is a compile error');
@@ -116,6 +159,9 @@ export function modulesCMake(modules: Record<string, ModuleConfig>, dataUnits: R
     L.push(`set(D2_MODULE_${name}_DIR "${m.dir}")`);
     L.push(`set(D2_MODULE_${name}_KIND "${m.kind}")`);
     L.push(`set(D2_MODULE_${name}_DEPENDS ${list(deps.map(d => d.module).filter(d => names.includes(d)))})`);
+    L.push(`set(D2_MODULE_${name}_IMPORTS ${list(deps.filter(d => d.via === 'import').map(d => d.module).filter(d => names.includes(d)))})`);
+    L.push(`set(D2_MODULE_${name}_LOADS ${list(deps.filter(d => d.via === 'load').map(d => d.module).filter(d => names.includes(d)))})`);
+    L.push(`set(D2_MODULE_${name}_PUBLIC "${publicHeaders.get(name) ?? ''}")`);
     L.push(`set(D2_MODULE_${name}_SEES ${list(linkOrdered(modules, sees))})`);
     L.push(`set(D2_MODULE_${name}_EXCEPTIONS ${list(exceptions)})`);
     L.push(`set(D2_MODULE_${name}_STRICT ${m.strict ? 'ON' : 'OFF'})`);

@@ -115,10 +115,34 @@ describe('module layout', () => {
     assert.strictEqual(layout.pathOf('Fog/Src/ErrorManager.cpp'), 'Source/Fog/Src/ErrorManager.cpp');
     assert.strictEqual(layout.pathOf('Storm/H/stpl/TSList/TSList.h'), '3rdparty/Storm/H/stpl/TSList/TSList.h');
     assert.strictEqual(layout.pathOf('Fog/3rdparty/crashy/Report.cpp.map'), '3rdparty/crashy/Report.cpp.map');
-    assert.strictEqual(layout.pathOf('Fog/3rdparty/crashy.cpp'), '3rdparty/crashy/crashy.cpp');
+    assert.strictEqual(layout.pathOf('Fog/3rdparty/crashy.cpp'), '3rdparty/crashy/crashyRoot.cpp');
     assert.strictEqual(layout.pathOf('d2_platform.h'), 'Source/D2Headers/d2_platform.h');
     assert.strictEqual(layout.pathOf('globals/globals.h'), 'Source/globals/globals.h', 'the shared root goes under Source/');
     assert.strictEqual(layout.pathOf('Fogger/x.h'), 'Source/Fogger/x.h');
+  });
+
+  it('names the public header after the module and moves the namespace\'s own unit aside', () => {
+    assert.strictEqual(layout.pathOf('Fog/Fog.public.h'), 'Source/Fog/Fog.h');
+    assert.strictEqual(layout.pathOf('Fog/Fog.h'), 'Source/Fog/FogRoot.h');
+    assert.strictEqual(layout.pathOf('Fog/Fog.cpp'), 'Source/Fog/FogRoot.cpp');
+    assert.strictEqual(layout.pathOf('Fog/Fog.cpp.map'), 'Source/Fog/FogRoot.cpp.map');
+    assert.strictEqual(layout.pathOf('Fog/Fog.globals.h'), 'Source/Fog/Fog.globals.h', 'the module data header keeps its name');
+    assert.strictEqual(layout.pathOf('Fog/3rdparty/crashy.h'), '3rdparty/crashy/crashyRoot.h');
+    assert.strictEqual(layout.pathOf('Fog/3rdparty/crashy/crashy.public.h'), '3rdparty/crashy/crashy.h');
+    assert.strictEqual(layout.pathOf('Storm/Storm.public.h'), '3rdparty/Storm/Storm.h');
+    assert.strictEqual(layout.publicHeaderPath('Storm'), '3rdparty/Storm/Storm.h');
+    assert.strictEqual(layout.moduleOfPath('3rdparty/crashy/Report.cpp'), 'crashy');
+  });
+
+  it('takes both names from the module table', () => {
+    const t = table();
+    t.Fog.publicHeader = '{module}Api.h';
+    t.Fog.rootUnit = '{module}Unit';
+    const custom = new ModuleLayout(t);
+    assert.strictEqual(custom.pathOf('Fog/Fog.public.h'), 'Source/Fog/FogApi.h');
+    assert.strictEqual(custom.pathOf('Fog/Fog.cpp'), 'Source/Fog/FogUnit.cpp');
+    t.Fog.publicHeader = 'sub/Fog.h';
+    assert.ok(validateModules(t).some(p => p.includes('publicHeader must be a file name')));
   });
 
   it('rewrites the includes of generated files only', () => {
@@ -152,6 +176,15 @@ describe('Source/modules.cmake', () => {
   it('lists the Windows modules in link order, the Mac ones not at all', () => {
     assert.match(text, /^set\(D2_MODULES crashy Fog Game Storm D2Lang D2gfx D2Gdi D2Headers Redivivus\)$/m);
     assert.doesNotMatch(text, /D2OpenGL/);
+  });
+
+  it('writes the static imports and the public header', () => {
+    const withPublic = modulesCMake(table(), new Map(), new Map([['Fog', 'Source/Fog/Fog.h']]));
+    assert.match(withPublic, /^set\(D2_MODULE_D2gfx_IMPORTS Fog\)$/m, 'a load edge is no import');
+    assert.match(withPublic, /^set\(D2_MODULE_D2gfx_DEPENDS Fog D2Gdi\)$/m);
+    assert.match(withPublic, /^set\(D2_MODULE_D2gfx_LOADS D2Gdi\)$/m);
+    assert.match(withPublic, /^set\(D2_MODULE_Fog_PUBLIC "Source\/Fog\/Fog.h"\)$/m);
+    assert.match(withPublic, /^set\(D2_MODULE_Storm_PUBLIC ""\)$/m);
   });
 
   it('writes reach, exceptions, strictness and the data unit', () => {

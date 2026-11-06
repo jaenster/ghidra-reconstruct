@@ -308,6 +308,16 @@ export interface ModuleConfig {
   target?: 'windows' | 'mac';
   /** One paragraph on what the module is; a headers-only module's README. */
   description?: string;
+  /**
+   * File name of the module's public header in `dir`, `{module}` substituted; default
+   * `{module}.h`. Other modules include only this header of the module.
+   */
+  publicHeader?: string;
+  /**
+   * Stem the unit of the namespace named after the module takes when the public header
+   * has its name, `{module}` substituted; default `{module}Root`.
+   */
+  rootUnit?: string;
 }
 
 // =============================================================================
