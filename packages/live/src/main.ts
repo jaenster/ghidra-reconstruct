@@ -20,7 +20,7 @@
 
 import { readFileSync } from 'node:fs';
 import { join, relative, dirname } from 'node:path';
-import { readFile, readdir, mkdtemp, rm, cp, writeFile } from 'node:fs/promises';
+import { readFile, readdir, mkdtemp, rm, cp, writeFile, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { execFile } from 'node:child_process';
@@ -65,7 +65,7 @@ import {
   loadBuildInfo,
   type SymbolHashCache,
 } from './dirty-units.js';
-import { NEVER_TOUCH, TREE_METADATA, isNeverTouch, isTreeMetadata } from './paths.js';
+import { NEVER_TOUCH, TREE_METADATA, VERSION_FILE, isNeverTouch, isTreeMetadata } from './paths.js';
 import {
   ProposalBoundary,
   parseIdentity,
@@ -1533,8 +1533,9 @@ export class LiveLoop {
  */
 async function writeVersionFile(regenDir: string, version: number | undefined): Promise<void> {
   if (!version) return;
+  await mkdir(join(regenDir, dirname(VERSION_FILE)), { recursive: true });
   await writeFile(
-    join(regenDir, 'ghidra_version.cpp'),
+    join(regenDir, VERSION_FILE),
     `// The Game.exe Ghidra database version this tree was generated from.\nextern const char g_szGhidraVersion[] = "${version}";\n`,
   );
 }
