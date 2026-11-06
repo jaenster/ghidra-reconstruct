@@ -258,11 +258,50 @@ export interface SignatureHeuristics {
 // Module Dependency Graph
 // =============================================================================
 
+/** What a module is: the program, one of its DLLs, shared headers, vendored code, or the project's own. */
+export type ModuleKind = 'exe' | 'dll-module' | 'headers-only' | '3rdparty' | 'ours';
+
+/** A module this one may use, and why. */
+export interface ModuleDependency {
+  module: string;
+  /** `import`: a static import (transitive). `load`: LoadLibrary + QueryInterface (one step). */
+  via: 'import' | 'load';
+  /** Where the edge comes from (an import table, a LoadLibrary call). */
+  evidence: string;
+}
+
+/** A reference the original made against the graph, kept with its reason. */
+export interface ModuleException {
+  /** The module referenced. */
+  to: string;
+  /** The symbol the exception covers; omitted, the whole edge. */
+  symbol?: string;
+  reason: string;
+}
+
+/** One module of the tree (modules/module-model.ts). */
 export interface ModuleConfig {
-  /** Namespace prefixes belonging to this module */
+  /** Ghidra namespaces the module owns; a namespace belongs to its longest configured prefix. */
   namespaces: string[];
-  /** Modules this module depends on (can include their headers) */
-  dependencies?: string[];
+  /** Directory the module's files live in. */
+  dir?: string;
+  kind?: ModuleKind;
+  /** Modules this module may use, each with its evidence. */
+  dependencies?: Array<ModuleDependency | string>;
+  /** References the original made that the graph does not allow. */
+  exceptions?: ModuleException[];
+  /** Place in the executable's link order (the 1.14d code runs). */
+  linkOrder?: number;
+  /** A wrong-direction include is a compile error, not a report line. */
+  strict?: boolean;
+  /** Compiled into every module that used it (D2Hell): visible to all. */
+  embedded?: boolean;
+  /** Root-level generated files the module owns (`d2_platform.h`). */
+  files?: string[];
+  /** The binary the module belongs to; default windows. */
+  target?: 'windows' | 'mac';
+  /** One paragraph on what the module is; a headers-only module's README. */
+  description?: string;
 }
 
 // =============================================================================

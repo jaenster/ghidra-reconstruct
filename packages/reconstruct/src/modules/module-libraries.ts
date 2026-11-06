@@ -22,6 +22,14 @@
 export interface ModuleLibraryConfig {
   /** Directory the module's files are emitted under; default the module name. */
   root?: string;
+  /**
+   * The Ghidra namespaces the module owns. A namespace belongs to the module with
+   * the longest matching prefix (`Fog::_3rdparty::crashy` is crashy's, not Fog's).
+   * Default: the module name.
+   */
+  namespaces?: string[];
+  /** Root-level emitted files the module owns outright (`d2_platform.h`). */
+  files?: string[];
   /** Static import edges (1.13d import tables). */
   imports?: string[];
   /** LoadLibrary edges: the host may see the provider, not what it imports. */
@@ -63,6 +71,12 @@ export interface ModuleLibrariesConfig {
 export const DEFAULT_PUBLIC_HEADER = '{module}/{module}.public.h';
 export const DEFAULT_GLOBALS_HEADER = '{module}/{module}.globals.h';
 
+/** The directory a namespace's units are emitted under (`Fog::_3rdparty::crashy` -> `Fog/3rdparty/crashy`). */
+export function namespaceDirectory(namespace: string): string {
+  return namespace.split('::').map(seg => seg
+    .replace(/[<>:"/\\|?*]/g, '_').replace(/\s+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '')).join('/');
+}
+
 /** The macro a translation unit of `module` is compiled with. */
 export function moduleMacro(module: string): string {
   return `D2_MODULE_${module}`;
@@ -81,9 +95,24 @@ export class ModuleGraph {
   private readonly roots = new Map<string, string>();
   private readonly reach = new Map<string, Set<string>>();
 
+  /** Emitted-path prefix -> module, longest first. */
+  private readonly prefixes: Array<[string, string]> = [];
+  /** Namespace -> module, longest first. */
+  private readonly namespaceOwners: Array<[string, string]> = [];
+
   constructor(readonly config: ModuleLibrariesConfig) {
     this.names = Object.keys(config.modules);
-    for (const name of this.names) this.roots.set(config.modules[name].root ?? name, name);
+    for (const name of this.names) {
+      const cfg = config.modules[name];
+      for (const ns of cfg.namespaces ?? [name]) {
+        this.namespaceOwners.push([ns, name]);
+        this.prefixes.push([namespaceDirectory(ns), name]);
+      }
+      if (cfg.root !== undefined) this.prefixes.push([cfg.root, name]);
+      for (const f of cfg.files ?? []) this.roots.set(f, name);
+    }
+    this.prefixes.sort((a, b) => b[0].length - a[0].length);
+    this.namespaceOwners.sort((a, b) => b[0].length - a[0].length);
     const embedded = this.names.filter(n => config.modules[n].embedded);
     for (const name of this.names) {
       const seen = new Set<string>([name]);
@@ -122,11 +151,25 @@ export class ModuleGraph {
     return undefined;
   }
 
-  /** The module an emitted path belongs to, by its first directory. */
+  /**
+   * The module an emitted path belongs to: the longest namespace directory it lies
+   * in (`Fog/3rdparty/crashy/Report.cpp`, and the namespace's own unit
+   * `Fog/3rdparty/crashy.cpp`), or a root file the module lists.
+   */
   moduleOfPath(path: string): string | undefined {
-    const slash = path.indexOf('/');
-    if (slash < 0) return undefined;
-    return this.roots.get(path.slice(0, slash));
+    const listed = this.roots.get(path);
+    if (listed) return listed;
+    for (const [prefix, module] of this.prefixes) {
+      if (path.startsWith(`${prefix}/`)) return module;
+      if (prefix.includes('/') && path.startsWith(`${prefix}.`) && !path.slice(prefix.length + 1).includes('/')) return module;
+    }
+    return undefined;
+  }
+
+  /** The directory a module's own emitted files sit under (its first namespace's). */
+  homeDirectory(module: string): string {
+    const cfg = this.config.modules[module];
+    return cfg?.root ?? namespaceDirectory((cfg?.namespaces ?? [module])[0] ?? module);
   }
 
   /**
@@ -141,19 +184,27 @@ export class ModuleGraph {
     return m && this.has(m[1]) ? m[1] : undefined;
   }
 
-  /** The module a Ghidra namespace belongs to, by its first segment. */
+  /** The module a Ghidra namespace belongs to: the longest configured namespace it lies in. */
   moduleOfNamespace(namespace: string | undefined): string | undefined {
     if (!namespace) return undefined;
-    const first = namespace.split('::')[0];
-    return this.has(first) ? first : undefined;
+    for (const [ns, module] of this.namespaceOwners) {
+      if (namespace === ns || namespace.startsWith(`${ns}::`)) return module;
+    }
+    return undefined;
+  }
+
+  private headerPath(template: string, module: string): string {
+    const [dir, ...rest] = template.split('/');
+    const file = rest.join('/').split('{module}').join(module);
+    return dir === '{module}' ? `${this.homeDirectory(module)}/${file}` : template.split('{module}').join(module);
   }
 
   publicHeaderOf(module: string): string {
-    return (this.config.publicHeader ?? DEFAULT_PUBLIC_HEADER).split('{module}').join(this.config.modules[module]?.root ?? module);
+    return this.headerPath(this.config.publicHeader ?? DEFAULT_PUBLIC_HEADER, module);
   }
 
   globalsHeaderOf(module: string): string {
-    return (this.config.globalsHeader ?? DEFAULT_GLOBALS_HEADER).split('{module}').join(this.config.modules[module]?.root ?? module);
+    return this.headerPath(this.config.globalsHeader ?? DEFAULT_GLOBALS_HEADER, module);
   }
 
   /** The static import edges, in the order the config lists them. */

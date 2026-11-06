@@ -8,7 +8,7 @@ import assert from 'node:assert';
 
 import { ModuleGraph, validateModuleLibraries, type ModuleLibrariesConfig } from '../modules/module-libraries.js';
 import {
-  applyModuleBoundaries, splitDefinitions, splitHeaderDeclarations, insertHeaderGate,
+  applyModuleBoundaries, splitDefinitions, splitHeaderDeclarations, insertHeaderGate, bracketRootIncludes,
 } from '../codegen/module-boundary.js';
 import { generateModuleLibrariesCMake } from '../codegen/cmake.js';
 import { DECLS_BEGIN_MARKER, DECLS_END_MARKER, DECL_MARKER, DECL_END_MARKER, TYPE_MARKER, TYPE_END_MARKER } from '../codegen/header.js';
@@ -114,8 +114,14 @@ describe('header split', () => {
   it('gates the header right after #pragma once', () => {
     const gated = insertHeaderGate(header, 'Fog').split('\n');
     assert.strictEqual(gated[0], '#pragma once');
-    assert.strictEqual(gated[1], '#if defined(D2_MODULE_LIBRARIES) && !defined(D2_SEES_Fog)');
+    // An error only in a strict module, and never while globals.h (the shared root) includes.
+    assert.strictEqual(gated[1], '#if defined(D2_MODULE_LIBRARIES) && defined(D2_MODULE_STRICT) && !defined(D2_GATE_FROM_ROOT) && !defined(D2_SEES_Fog)');
     assert.ok(gated[2].startsWith('#error'));
+  });
+
+  it('turns the gates off while globals.h includes', () => {
+    const root = bracketRootIncludes('// banner\n#pragma once\n#include "Fog/Fog.h"\n\n');
+    assert.strictEqual(root, '// banner\n#pragma once\n#define D2_GATE_FROM_ROOT\n#include "Fog/Fog.h"\n#undef D2_GATE_FROM_ROOT\n');
   });
 });
 

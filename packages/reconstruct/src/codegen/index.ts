@@ -78,7 +78,10 @@ import { enumTypedefLine, registerEnumTypedefTargets, setKnownEnumWidths } from 
 import { generateImplementation, unitNamespace, unitThunkForwarder, probeGuardedCalls, setQuestStructLayouts, setStructFieldRenames, decompiledReturnType, decompiledFunctionName, decompiledParameters, type ImplGenContext, type FuncPtrArgCastTables, type ThunkForward } from './impl.js';
 import { generateCMakeLists, generateTopLevelCMake, generateTargetCMake, generateUnsortedCMake, generateModuleLibrariesCMake } from './cmake.js';
 import { applyModuleBoundaries } from './module-boundary.js';
-import { ModuleGraph } from '../modules/module-libraries.js';
+import { ModuleGraph, type ModuleLibrariesConfig } from '../modules/module-libraries.js';
+import { isModuleModel, libraryConfigFromModules } from '../modules/module-model.js';
+import type { ProjectConfig } from '../config/schema.js';
+import { applyModuleLayout } from './module-layout.js';
 import { generateSourceMap } from './sourcemap.js';
 import { generateReadme } from './readme.js';
 import { abiConvention, conventionKeyword } from './calling-convention.js';
@@ -805,7 +808,7 @@ export function generateProjectStage1(
   strings?: ExtractedString[],
   shard?: ShardSpec
 ): GenerationState {
-  setDeclarationMarkers(options.projectConfig?.moduleLibraries?.enabled === true);
+  setDeclarationMarkers(moduleLibrariesOf(options.projectConfig) !== undefined);
   const genT0 = Date.now();
   beginShard(shard);
   // Ghidra's union-facet markers are not variables: a forced union facet is recorded as
@@ -1836,8 +1839,8 @@ export function generateProjectStage2(state: GenerationState): ReconstructedProj
 
   // One library per module (project.json moduleLibraries): a global's module is its
   // Ghidra namespace's, and only a namespaced global leaves globals.h.
-  const moduleLibraries = options.projectConfig?.moduleLibraries;
-  const moduleGraph = moduleLibraries?.enabled ? new ModuleGraph(moduleLibraries) : undefined;
+  const moduleLibraries = moduleLibrariesOf(options.projectConfig);
+  const moduleGraph = moduleLibraries ? new ModuleGraph(moduleLibraries) : undefined;
   const globalOwner = moduleGraph
     ? (g: AnalyzedDataSymbol) => moduleGraph.moduleOfNamespace(g.namespace)
     : undefined;
@@ -2024,6 +2027,11 @@ export function generateProjectStage2(state: GenerationState): ReconstructedProj
   if (caseMoves.length > 0) {
     console.warn(`warning: ${caseMoves.length} emitted path(s) moved to their directory's one spelling (namespaces differing only in case):`);
     for (const m of caseMoves.slice(0, 10)) console.warn(`  ${m}`);
+  }
+  // The module layout last: every file to its module's directory, every include after it.
+  const modules = options.projectConfig?.modules;
+  if (isModuleModel(modules)) {
+    applyModuleLayout(project, modules!, moduleGraph);
   }
   reportUnresolvableIncludes(project);
   reportCaseCollidingOutputPaths(project);
@@ -5343,8 +5351,8 @@ export async function writeProject(
     } else {
       // Non-target: single CMakeLists.txt, or one library per module
       const cmakePath = path.join(outputDir, 'CMakeLists.txt');
-      const libraries = options.projectConfig?.moduleLibraries;
-      const cmakeContent = libraries?.enabled
+      const libraries = moduleLibrariesOf(options.projectConfig);
+      const cmakeContent = libraries
         ? generateModuleLibrariesCMake(project, new ModuleGraph(libraries), options)
         : generateCMakeLists(project, options);
       await fs.writeFile(cmakePath, cmakeContent, 'utf-8');
@@ -5352,8 +5360,12 @@ export async function writeProject(
     }
   }
 
+  // The generator's module lint (every cross-module reference) is evidence for the
+  // next Ghidra move, not part of the tree: it goes beside the project's state.
+  const reportDir = options.projectDir ? path.join(options.projectDir, '.ghidra-mcp') : outputDir;
+  if ((project.moduleReports?.size ?? 0) > 0) await fs.mkdir(reportDir, { recursive: true });
   for (const [name, text] of project.moduleReports ?? []) {
-    const reportPath = path.join(outputDir, name);
+    const reportPath = path.join(reportDir, name);
     await fs.writeFile(reportPath, text, 'utf-8');
     writtenFiles.push(reportPath);
   }
@@ -7024,3 +7036,13 @@ function reconcileUndefinedReturnTypes(functions: ExtractedFunction[]): void {
   }
 }
 
+
+/**
+ * The module-library graph the generation follows: project.json `modules` when it
+ * is the full model, else the older `moduleLibraries` switch; undefined is the
+ * monolithic tree.
+ */
+export function moduleLibrariesOf(config: ProjectConfig | undefined): ModuleLibrariesConfig | undefined {
+  if (isModuleModel(config?.modules)) return libraryConfigFromModules(config!.modules!);
+  return config?.moduleLibraries?.enabled ? config.moduleLibraries : undefined;
+}

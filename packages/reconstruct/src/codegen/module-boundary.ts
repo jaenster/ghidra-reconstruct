@@ -80,10 +80,20 @@ export const normalizeAddress = (a: string | undefined): string =>
 /** `// 1.14d: 00525fb0` - the line the emitter writes above every definition. */
 const DEFINITION_LINE = /^\/\/ [^:\s]+: ([0-9a-fA-F]{8})$/;
 
+/** Defined while globals.h includes: the shared root may include every module. */
+export const GATE_FROM_ROOT_MACRO = 'D2_GATE_FROM_ROOT';
+/** Defined for a module whose wrong-direction includes are errors (project.json `strict`). */
+export const MODULE_STRICT_MACRO = 'D2_MODULE_STRICT';
+
+/**
+ * The gate every header of `module` opens with. It fails the compile only in a
+ * strict module that may not see `module`; everywhere else the build's gate report
+ * (cmake/module-gates.cmake) lists the include instead.
+ */
 export function headerGate(module: string): string[] {
   return [
-    `#if defined(${MODULE_BUILD_MACRO}) && !defined(${seesMacro(module)})`,
-    `#error "${module} header: this module may not use ${module} (original DLL import graph)"`,
+    `#if defined(${MODULE_BUILD_MACRO}) && defined(${MODULE_STRICT_MACRO}) && !defined(${GATE_FROM_ROOT_MACRO}) && !defined(${seesMacro(module)})`,
+    `#error "${module} header included by a module that may not use ${module} (original DLL import graph; see module-gates.tsv)"`,
     '#endif',
   ];
 }
@@ -188,6 +198,16 @@ export function splitHeaderDeclarations(
 }
 
 /** The gate after `#pragma once` (or first, when the header has none). */
+/** globals.h with the header gates off while it includes (GATE_FROM_ROOT_MACRO). */
+export function bracketRootIncludes(content: string): string {
+  const lines = content.split('\n');
+  const at = lines.indexOf('#pragma once');
+  lines.splice(at < 0 ? 0 : at + 1, 0, `#define ${GATE_FROM_ROOT_MACRO}`);
+  while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+  lines.push(`#undef ${GATE_FROM_ROOT_MACRO}`, '');
+  return lines.join('\n');
+}
+
 export function insertHeaderGate(content: string, module: string): string {
   const lines = content.split('\n');
   const at = lines.indexOf('#pragma once');
@@ -551,6 +571,11 @@ export function applyModuleBoundaries(input: ModuleBoundaryInput): ModuleBoundar
     ].join('\n');
     files.set(path, { path, content, type: 'header', functions: [], includes: listed });
   }
+
+  // globals.h is the shared root every module may include, and it includes headers of
+  // every module: what it pulls in is the root's, not the including module's.
+  const root = files.get(input.globalsPath);
+  if (root) files.set(input.globalsPath, { ...root, content: bracketRootIncludes(root.content) });
 
   // Reports.
   const reports = new Map<string, string>();
