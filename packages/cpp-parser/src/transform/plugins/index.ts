@@ -741,6 +741,7 @@ export { biasedTableIndexPlugin } from './builtins/biased-table-index.js';
 export { indexBaseBeforeObjectPlugin, createIndexBaseBeforeObjectTransformer } from './builtins/index-base-before-object.js';
 export { foldedAddressRebasePlugin, type FoldedAddress, type FoldedAddressRebaseOptions } from './builtins/folded-address-rebase.js';
 export { globalDistanceIndexPlugin, type GlobalDistanceIndexOptions } from './builtins/global-distance-index.js';
+export { compilerLiteralPlugin, createCompilerLiteralTransformer, type CompilerLiteralOptions } from './builtins/compiler-literal.js';
 export { exactFloatConstantPlugin, createExactFloatConstantTransformer, significantDigits, exactDecimal, type ExactFloatConstantOptions } from './builtins/exact-float-constant.js';
 export { globalRunClearPlugin, globalRunMembers, globalRunSpan, type GlobalRunClearOptions, type GlobalRunMember } from './builtins/global-run-clear.js';
 export { immediateNotAddressPlugin, type ImmediateNotAddressOptions } from './builtins/immediate-not-address.js';
@@ -848,6 +849,7 @@ import { foldedAddressRebasePlugin } from './builtins/folded-address-rebase.js';
 import { globalDistanceIndexPlugin } from './builtins/global-distance-index.js';
 import { globalRunClearPlugin } from './builtins/global-run-clear.js';
 import { exactFloatConstantPlugin } from './builtins/exact-float-constant.js';
+import { compilerLiteralPlugin } from './builtins/compiler-literal.js';
 import { immediateNotAddressPlugin } from './builtins/immediate-not-address.js';
 import { importAddressForwarderPlugin } from './builtins/import-address-forwarder.js';
 import { unsignedRangeComparePlugin } from './builtins/unsigned-range-compare.js';
@@ -1177,6 +1179,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   ternarySimplifyPlugin,      // Boolean cleanup
   funcPtrLiteralPlugin,        // Cleanup: 0x5011f0 → FunctionName (priority 95)
   globalAddressLiteralPlugin,  // Correctness: a folded global address (incl. ~&g) → the symbol (priority 68)
+  compilerLiteralPlugin,       // Correctness: a pooled string literal's label → the literal (priority 70)
   addressRunBoundPlugin,  // Correctness: a loop bound that is another global's address → a distance from the one being walked (priority 69)
   stridedAccessPlugin,    // Correctness: a strength-reduced byte offset / n*sizeof(T) interior constant -> T[i].f (priority 69.5)
   seedProductFoldPlugin,      // A seed step printed as a named product (priority 79)
