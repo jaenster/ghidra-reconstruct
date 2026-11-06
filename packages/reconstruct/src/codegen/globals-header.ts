@@ -515,14 +515,30 @@ export function setInternalGlobals(ordered: readonly AnalyzedDataSymbol[]): void
 }
 
 /**
- * Globals no file but a globals unit names (their referrers' initializers): globals.h
- * declares none of them, nor does its closure. Each globals unit declares the ones
- * it does not define internally up front, as it does every global globals.h lacks.
+ * Globals no file but a globals unit names (their referrers' initializers), or
+ * nothing names at all (read by address, a live label's storage, unnamed bytes):
+ * globals.h declares none of them, nor does its closure. A globals unit declares
+ * one up front only where a global it defines names it in an initializer and it
+ * is not internal there; with no referrer, no unit declares it.
  */
 let headerOmittedSet = new Set<AnalyzedDataSymbol>();
-export function setHeaderOmittedGlobals(globals: Iterable<AnalyzedDataSymbol>): void {
+let headerOmittedReferrers: ReadonlyMap<AnalyzedDataSymbol, ReadonlySet<AnalyzedDataSymbol>> = new Map();
+export function setHeaderOmittedGlobals(
+  globals: Iterable<AnalyzedDataSymbol>,
+  /** The globals whose initializers name each of them. */
+  referrers: ReadonlyMap<AnalyzedDataSymbol, ReadonlySet<AnalyzedDataSymbol>> = new Map(),
+): void {
   headerOmittedSet = new Set(globals);
+  headerOmittedReferrers = referrers;
   for (const g of headerOmittedSet) recordDeclaredName(sanitizeSymbolName(g.suggestedName || g.name));
+}
+
+/** Whether a global globals.h left out is named by an initializer of one `partition` defines. */
+function headerOmittedNamedIn(g: AnalyzedDataSymbol, partition: ReadonlySet<AnalyzedDataSymbol> | undefined): boolean {
+  const referrers = headerOmittedReferrers.get(g);
+  if (!referrers) return false;
+  for (const r of referrers) if (!partition || partition.has(r)) return true;
+  return false;
 }
 
 /**
@@ -3866,7 +3882,9 @@ export function generateGlobalsImpl(
     // symbol the globals files define (one reconciled back from `static-local`
     // gets a definition but no extern). An extern for a symbol defined
     // elsewhere is exactly what the reference needs.
-    const undeclared = nsGlobals.filter(g => !headerDeclaredGlobals.has(g) && !internalGlobalSet.has(g) && isDefinitionWinner(namespace, g));
+    // One globals.h left out is declared only where an initializer here names it.
+    const undeclared = nsGlobals.filter(g => !headerDeclaredGlobals.has(g) && !internalGlobalSet.has(g)
+      && (!headerOmittedSet.has(g) || headerOmittedNamedIn(g, partition)) && isDefinitionWinner(namespace, g));
     if (undeclared.length === 0) continue;
     if (namespace) lines.push(`namespace ${namespace} {`);
     emitGlobalDefsWithIfdef(lines, undeclared, false, (global, ls) => {

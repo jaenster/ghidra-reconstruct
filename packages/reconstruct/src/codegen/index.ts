@@ -2462,7 +2462,8 @@ function resolveGlobalVisibility(
     rows.push([g.address, g.namespace ?? '', g.suggestedName || g.name, verdict, [...e.userModules].sort().join(','),
       [...e.referrers].map(r => r.suggestedName || r.name).sort().join(','), e.neighbour ? (e.neighbour.suggestedName || e.neighbour.name) : ''].join('\t'));
   }
-  setHeaderOmittedGlobals([...initializerOnly.keys(), ...undeclared]);
+  const omitted = [...initializerOnly.keys(), ...undeclared];
+  setHeaderOmittedGlobals(omitted, new Map(omitted.map(g => [g, result.entries.get(g)!.referrers])));
   const c = result.counts;
   const byAddress = [...result.entries.values()].filter(e => e.byAddressOnly).length;
   console.log(`Global visibility: ${candidates.length} declared centrally - ${c.referenced} referenced (${byAddress} by address only), ` +
