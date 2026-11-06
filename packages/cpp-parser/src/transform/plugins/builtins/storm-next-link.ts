@@ -57,11 +57,12 @@ export const STORM_NEXT_LINK_HELPER = 'D2_StormNextLink';
 export const STORM_LINK_SUPPORT_LINES: readonly string[] = [
   '// TSLink<T>::NextLink, which VC8 inlined into every Storm unlink (see storm-next-link.ts).',
   '// The link is { prev link, next item }; a negative next is ~&terminator.',
-  'struct D2StormLinkWords { D2StormLinkWords* m_prevlink; int m_next; };',
-  `static inline int ${STORM_NEXT_LINK_HELPER}(const void* pLink, int nLinkOffset) {`,
+  '// The words are intptr_t, which is int on the 32-bit target: an address or its complement.',
+  'struct D2StormLinkWords { D2StormLinkWords* m_prevlink; intptr_t m_next; };',
+  `static inline intptr_t ${STORM_NEXT_LINK_HELPER}(const void* pLink, intptr_t nLinkOffset) {`,
   '  const D2StormLinkWords* pThis = (const D2StormLinkWords*)pLink;',
   '  if (pThis->m_next < 0) return ~pThis->m_next;',
-  '  if (nLinkOffset < 0) nLinkOffset = (int)(intptr_t)pThis - pThis->m_prevlink->m_next;',
+  '  if (nLinkOffset < 0) nLinkOffset = (intptr_t)pThis - pThis->m_prevlink->m_next;',
   '  return pThis->m_next + nLinkOffset;',
   '}',
 ];
