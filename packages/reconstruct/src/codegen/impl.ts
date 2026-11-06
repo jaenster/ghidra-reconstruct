@@ -3514,6 +3514,15 @@ function transformDecompiledCode(
         typedefTargets: context.funcPtrArgCasts.typedefTargets,
         enclosingVarTypes,
       };
+      perPluginOptions['pointer-word-cast'] = {
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        structFields: context.funcPtrArgCasts.structFields,
+        typedefTargets: context.funcPtrArgCasts.typedefTargets,
+        functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        funcdefNames: Object.keys(context.funcPtrArgCasts.funcdefSignatures ?? {}),
+        enclosingVarTypes,
+      };
       perPluginOptions['narrow-cast-through-uintptr'] = {
         globalTypes: context.funcPtrArgCasts.globalTypes,
         fieldTypes: context.funcPtrArgCasts.fieldTypes,
