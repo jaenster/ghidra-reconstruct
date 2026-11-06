@@ -418,6 +418,44 @@ describe('public header', () => {
     assert.deepStrictEqual(files.get('Fog/Use.cpp')!.content.split('\n').filter(l => l.startsWith('#include')), ['#include "Storm/Storm.public.h"']);
   });
 
+  it('an inline body naming another module\'s data includes that module\'s public header, or is withheld', () => {
+    const files = new Map<string, SourceFile>();
+    files.set('D2Common/Bits.h', file('D2Common/Bits.h', [
+      '#pragma once', 'namespace D2Common {', DECLS_BEGIN_MARKER,
+      `${DECL_MARKER}00601000`, '__attribute__((noinline)) inline int GetBit(int n);', DECL_END_MARKER,
+      `${DECL_MARKER}00601010`, '__attribute__((noinline)) inline int GetGame(int n);', DECL_END_MARKER,
+      DECLS_END_MARKER, '} // namespace D2Common',
+    ].join('\n'), 'header'));
+    files.set('D2Common/Bits.inline.h', file('D2Common/Bits.inline.h', [
+      '#pragma once', '#include "D2Common/Bits.h"', 'namespace D2Common {',
+      `${INLINE_MARKER}00601000`, '// 1.14d: 00601000', '__attribute__((noinline)) inline int GetBit(int n) {', '    return Fog::gadwMasks[n];', '}', INLINE_END_MARKER,
+      `${INLINE_MARKER}00601010`, '// 1.14d: 00601010', '__attribute__((noinline)) inline int GetGame(int n) {', '    return Game::gnGameCounter + n;', '}', INLINE_END_MARKER,
+      '} // namespace D2Common',
+    ].join('\n'), 'header'));
+    files.set('Game/Main.cpp', file('Game/Main.cpp', [
+      '#include "D2Common/Bits.inline.h"', '// 1.14d: 00401000', 'int Main() { return D2Common::GetBit(1) + D2Common::GetGame(2); }',
+    ].join('\n'), 'implementation'));
+    files.set('Fog/Use.cpp', file('Fog/Use.cpp', ['// 1.14d: 00402000', 'int FOG_Use() { return Fog::gadwMasks[0]; }'].join('\n'), 'implementation'));
+    const masks = { name: 'gadwMasks', namespace: 'Fog', scope: 'global', dataType: 'int' } as unknown as AnalyzedDataSymbol;
+    const counter = { name: 'gnGameCounter', namespace: 'Game', scope: 'global', dataType: 'int' } as unknown as AnalyzedDataSymbol;
+    const graph = new ModuleGraph(config);
+    applyModuleBoundaries({
+      graph, files,
+      functions: [fn('GetBit', 'D2Common', '00601000'), fn('GetGame', 'D2Common', '00601010'), fn('Main', 'Game', '00401000'), fn('FOG_Use', 'Fog', '00402000')],
+      globals: [masks, counter], typeOwnerMap: new Map(), globalsPath: 'globals/globals.h',
+      globalOwner: g => graph.moduleOfNamespace(g.namespace),
+      moduleExterns: new Map([
+        ['Fog', [{ namespace: 'Fog', decl: 'extern int gadwMasks[32];', name: 'gadwMasks', global: masks }]],
+        ['Game', [{ namespace: 'Game', decl: 'extern int gnGameCounter;', name: 'gnGameCounter', global: counter }]],
+      ]),
+      rootProvides: new Set(), typePrelude: () => [],
+    });
+    const pub = files.get('D2Common/D2Common.public.h')!.content;
+    assert.ok(pub.includes('#include "Fog/Fog.public.h"'), pub);
+    assert.ok(pub.includes('return Fog::gadwMasks[n];'));
+    assert.ok(!pub.includes('Game::gnGameCounter'), 'D2Common may not import Game: that body is withheld');
+  });
+
   it('includes the public header of an imported module for a type it holds by value', () => {
     const files = new Map<string, SourceFile>();
     files.set('Storm/Types.h', file('Storm/Types.h', [

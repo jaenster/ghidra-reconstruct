@@ -153,6 +153,8 @@ interface Item {
   needs: string[];
   /** An inline body's functions, objects and macros: each needs a declaration. */
   symbols: string[];
+  /** A symbol spelled with a module's qualifier (`Fog::BitBuffer::x`): that module must declare it. */
+  qualifiers: Map<string, Set<string>>;
   /** Struct names it spells, by pointer or otherwise. */
   structs: string[];
   /** Function-pointer typedefs it spells whose guarded block is copied. */
@@ -197,21 +199,41 @@ export function planPublicHeaders(input: PublicHeaderInput, gateLines: (module: 
     inlineGroups.set(module, inlines);
   }
 
+  // Who declares a function or global, by name: a module's data is declared nowhere in the
+  // headers yet (its data header is written after this plan), so the tables say it.
+  const declaredBy = new Map<string, Set<string>>();
+  const declare = (name: string | undefined, module: string) => {
+    if (!name) return;
+    const set = declaredBy.get(name) ?? new Set<string>();
+    set.add(module);
+    declaredBy.set(name, set);
+  };
+  for (const [module, decls] of input.moduleExterns) for (const d of decls) declare(d.name, module);
+  for (const [module, groups] of globalGroups) for (const name of groups.keys()) declare(name, module);
+  for (const [module, groups] of declGroups) for (const addr of groups.keys()) declare(input.functionNames.get(addr), module);
+
   const analyse = (kind: Item['kind'], key: string, text: string, namespace?: string): Item => {
     const complete = oracle.complete(text);
     const needs = new Set<string>();
     const structs = new Set<string>();
     const typedefs = new Set<string>();
     const symbols = new Set<string>();
-    for (const id of scanReferences(text).identifiers) {
+    const refs = scanReferences(text);
+    const qualifiers = new Map<string, Set<string>>();
+    for (const [name, spellings] of refs.qualified) {
+      const mods = new Set([...spellings].map(sp => sp.split('::')[0]).filter(q => graph.has(q)));
+      if (mods.size > 0) qualifiers.set(name, mods);
+    }
+    for (const id of refs.identifiers) {
       if (kind === 'type' && id === key) continue;
       if (sdk.has(id)) continue;
       if (typedefBlocks.has(id)) { typedefs.add(id); continue; }
       if (oracle.isStruct(id)) {
         structs.add(id);
-        if (complete.has(id) || oracle.isTemplate(id)) needs.add(id);
+        // A body reaches through what it spells; its uses are read as a declaration's would be.
+        if (complete.has(id) || oracle.isTemplate(id) || kind === 'inline') needs.add(id);
       } else if (oracle.definers(id).length > 0) needs.add(id);
-      else if (kind === 'inline' && oracle.declarers(id).length > 0) symbols.add(id);
+      else if (kind === 'inline' && (oracle.declarers(id).length > 0 || declaredBy.has(id))) symbols.add(id);
     }
     // A typedef block names structs by pointer only.
     for (const t of typedefs) {
@@ -221,7 +243,7 @@ export function planPublicHeaders(input: PublicHeaderInput, gateLines: (module: 
     }
     // Its own name is declared beside it.
     if (kind === 'inline') symbols.delete(input.functionNames.get(key) ?? '');
-    return { kind, key, text, namespace, needs: [...needs], symbols: [...symbols], structs: [...structs], typedefs: [...typedefs] };
+    return { kind, key, text, namespace, needs: [...needs], symbols: [...symbols], qualifiers, structs: [...structs], typedefs: [...typedefs] };
   };
 
   const items = new Map<string, Item[]>();
@@ -271,10 +293,17 @@ export function planPublicHeaders(input: PublicHeaderInput, gateLines: (module: 
   const nameSets = new Map<string, Set<string>>();
   for (const m of published.keys()) nameSets.set(m, publishedNames(m));
   /** Where module `m`'s public header gets the declaration of a function, object or macro. */
-  const declarationSource = (m: string, name: string): { self: true } | { include: string } | undefined => {
-    if (nameSets.get(m)?.has(name)) return { self: true };
+  const declarationSource = (m: string, name: string, qualified?: ReadonlySet<string>): { self: true } | { include: string } | undefined => {
+    // A name spelled with another module's qualifier is that module's, whatever M declares.
+    const only = qualified && !qualified.has(m) ? qualified : undefined;
+    if (!only && nameSets.get(m)?.has(name)) return { self: true };
+    for (const owner of declaredBy.get(name) ?? []) {
+      if (only && !only.has(owner)) continue;
+      if (graph.publicIncludeAllowed(m, owner) && nameSets.get(owner)?.has(name)) return { include: graph.publicHeaderOf(owner) };
+    }
     for (const file of oracle.declarers(name)) {
       const owner = graph.moduleOfPath(file);
+      if (only && (owner === undefined || !only.has(owner))) continue;
       if (owner === undefined) {
         if (file !== input.globalsPath && !file.startsWith('globals/')) return { include: file };
         continue;
@@ -306,7 +335,7 @@ export function planPublicHeaders(input: PublicHeaderInput, gateLines: (module: 
     for (const [m, set] of published) {
       for (const item of [...set]) {
         const missing = item.needs.find(n => source(m, n) === undefined)
-          ?? item.symbols.find(n => declarationSource(m, n) === undefined);
+          ?? item.symbols.find(n => declarationSource(m, n, item.qualifiers.get(n)) === undefined);
         if (missing === undefined) continue;
         set.delete(item);
         withheldBy.set(item, missing);
@@ -331,7 +360,7 @@ export function planPublicHeaders(input: PublicHeaderInput, gateLines: (module: 
         if (s && 'include' in s && s.include !== path) includes.add(s.include);
       }
       for (const n of item.symbols) {
-        const s = declarationSource(m, n);
+        const s = declarationSource(m, n, item.qualifiers.get(n));
         if (s && 'include' in s && s.include !== path) includes.add(s.include);
       }
       // Every struct it spells, its own included: a definition further down may point at it.
