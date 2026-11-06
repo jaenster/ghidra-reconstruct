@@ -1072,7 +1072,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   threeByteAccessPlugin,       // Correctness: *(uint3 *)p → d2_load24(p), exactly three bytes (priority 14)
   scalarPieceArithmeticPlugin, // Matching: a scalar local's x._N_M_ pieces as shifts and masks on the local (priority 14.5)
   typeNormalizePlugin,         // Cleanup: uint → uint32_t, undefined4 → auto/uint32_t (priority 15)
-  pointerCastNormalizePlugin, // Cleanup: (int)&expr → (uintptr_t)&expr (priority 16)
+  pointerCastNormalizePlugin, // Cleanup: (int)&expr → (intptr_t)&expr, (uint32_t)&expr → (uintptr_t)&expr (priority 16)
   pseudoOpLowerPlugin,        // Cleanup: SUB/CONCAT/ZEXT/SEXT/CARRY/SBORROW → exact C++ (priority 20)
   sunkStoreHoistPlugin,       // Correctness: a stack element store sunk past a read through its address -> back before the read (priority 21)
   fourccLiteralPlugin,        // Cleanup: (char[4])L'\x...' → "abcd" (priority 25)

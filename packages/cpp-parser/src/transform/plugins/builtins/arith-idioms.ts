@@ -659,7 +659,7 @@ function createFolder(shapeOf: ExprShape, o: ArithIdiomsOptions, resolve: Typede
    * The one value a dword pair holds, as an expression whose integer conversion
    * to a 64-bit type gives exactly the bits `lo | (uint64_t)hi << 32`.
    */
-  /** E for `*(T*)((char*)&E + 4)` (or `(uintptr_t)&E + 4`) with T a 32-bit integer. */
+  /** E for `*(T*)((char*)&E + 4)` (or `(uintptr_t)&E + 4`, `(intptr_t)&E + 4`) with T a 32-bit integer. */
   const highDwordOf = (hi: Expression): Expression | null => {
     const d = unwrapParens(hi);
     if (d.kind !== NodeKind.UnaryExpr || (d as UnaryExpr).operator !== '*') return null;
@@ -675,7 +675,8 @@ function createFolder(shapeOf: ExprShape, o: ArithIdiomsOptions, resolve: Typede
     if (base.kind !== NodeKind.CStyleCastExpr) return null;
     const bt = shapeOfNode((base as CStyleCastExpr).type, 0, resolve);
     const bytePointer = bt && bt.stars === 1 && (bt.base === 'char' || bt.base === 'unsigned char' || bt.base === 'signed char');
-    const address = bt && bt.stars === 0 && (bt.base === 'uintptr_t' || INT_BASES[bt.base]?.bits === 32);
+    const address = bt && bt.stars === 0
+      && (bt.base === 'uintptr_t' || bt.base === 'intptr_t' || INT_BASES[bt.base]?.bits === 32);
     if (!bytePointer && !address) return null;
     const amp = unwrapParens((base as CStyleCastExpr).expression as Expression);
     if (amp.kind !== NodeKind.UnaryExpr || (amp as UnaryExpr).operator !== '&') return null;

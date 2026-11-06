@@ -294,6 +294,9 @@ describe('arith-idioms', () => {
         'r = (int64_t)q * 0x21;');
       assert.strictEqual(run('r = _allmul(n, 0, (uint32_t)q, *(int*)((uintptr_t)&q + 4));', 'uint32_t n, uint64_t q, int64_t r'),
         'r = (int64_t)n * (int64_t)q;');
+      // pointer-cast-normalize spells the signed `(int)&q` as `(intptr_t)&q`.
+      assert.strictEqual(run('r = _allmul(n, 0, (uint32_t)q, *(int*)((intptr_t)&q + 4));', 'uint32_t n, uint64_t q, int64_t r'),
+        'r = (int64_t)n * (int64_t)q;');
     });
 
     it('refuses a high dword read from another value or a narrow one', () => {

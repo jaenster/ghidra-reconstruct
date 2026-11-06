@@ -17,24 +17,33 @@ describe('pointerCastNormalizePlugin', () => {
     return emit(result as AnyNode).trim();
   }
 
-  describe('(int)&expr → (uintptr_t)&expr', () => {
+  describe('(int)&expr → (intptr_t)&expr', () => {
     it('should convert (int)&var', () => {
       const input = `void foo() { int x = (int)&y; }`;
       const output = transformCode(input);
-      assert.ok(output.includes('(uintptr_t)&y'), `Expected (uintptr_t)&y in: ${output}`);
+      assert.ok(output.includes('(intptr_t)&y'), `Expected (intptr_t)&y in: ${output}`);
       assert.ok(!output.includes('(int)&'), `Should not contain (int)& in: ${output}`);
     });
 
     it('should convert (int)&struct.member', () => {
       const input = `void foo() { int x = (int)&pStruct->field; }`;
       const output = transformCode(input);
-      assert.ok(output.includes('(uintptr_t)&'), `Expected (uintptr_t)& in: ${output}`);
+      assert.ok(output.includes('(intptr_t)&'), `Expected (intptr_t)& in: ${output}`);
     });
 
     it('should convert (int)&local + offset', () => {
       const input = `void foo() { int x = (int)&local_2c + 4; }`;
       const output = transformCode(input);
-      assert.ok(output.includes('(uintptr_t)&local_2c'), `Expected (uintptr_t)&local_2c in: ${output}`);
+      assert.ok(output.includes('(intptr_t)&local_2c'), `Expected (intptr_t)&local_2c in: ${output}`);
+    });
+
+    // The cast is the decompiler's INT_SLESS operand: `(int)&x < n` is a signed
+    // compare (JL). uintptr_t would make `n` convert to unsigned and the compare
+    // unsigned (JB) - for a negative n the answer flips.
+    it('keeps a signed comparison signed', () => {
+      const output = transformCode(`void foo(int n) { if ((int)&gaTable[i] < n) { g(); } }`);
+      assert.match(output.replace(/\s+/g, ''), /\(\(intptr_t\)&gaTable\[i\]<n\)/);
+      assert.ok(!output.includes('uintptr_t'), output);
     });
   });
 
@@ -46,11 +55,11 @@ describe('pointerCastNormalizePlugin', () => {
     });
   });
 
-  describe('(int32_t)&expr → (uintptr_t)&expr', () => {
+  describe('(int32_t)&expr → (intptr_t)&expr', () => {
     it('should convert (int32_t)&var', () => {
       const input = `void foo() { int32_t x = (int32_t)&y; }`;
       const output = transformCode(input);
-      assert.ok(output.includes('(uintptr_t)&y'), `Expected (uintptr_t)&y in: ${output}`);
+      assert.ok(output.includes('(intptr_t)&y'), `Expected (intptr_t)&y in: ${output}`);
     });
   });
 
