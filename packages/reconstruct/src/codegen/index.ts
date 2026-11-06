@@ -119,6 +119,7 @@ import { classKeyOf, setTemplateRegistry, templateRegistry } from './templates/r
 import { retypeVtableLocals, retypeVtableLocalsByAssignment, vtableMembersByType } from '../modules/vtable-types.js';
 import { NeedleIndex, scanReferences } from './needle-index.js';
 import { foldGlobalAliases, setGlobalReferenceAliases } from './global-aliases.js';
+import { splitTebFields, setTebFields } from './teb-fields.js';
 import { buildAggregateLayouts } from './aggregate-layout.js';
 import {
   computeTypeOwnership,
@@ -832,6 +833,16 @@ export function generateProjectStage1(
         `(${f.ghidra} by Ghidra, ${f.decompiler} by the decompiler's reference, ${f.first} first listed); ` +
         `${fold.aliasCount} labels kept as aliases, ${fold.initializerRespellings} initializer references respelled`
       );
+    }
+  }
+  // Ghidra's thread environment block is per-thread system state, not program data:
+  // its labels are written as fields of NtCurrentTeb() (`teb-field-access`).
+  {
+    const teb = splitTebFields(globals as AnalyzedDataSymbol[], programInfo);
+    globals = teb.globals;
+    setTebFields(teb.fields);
+    if (teb.removed.length > 0 && (!shard || shard.index === 0)) {
+      console.log(`  Thread environment block: ${teb.removed.length} label(s) written as NtCurrentTeb() fields, not data`);
     }
   }
   // Before anything reads a type: one spelling for every Ghidra placeholder name.

@@ -36,6 +36,7 @@ import type { HaltLineFacts } from '../extract/halt-lines.js';
 import { transformGhidraCode, preprocessGhidraCode, enclosingNamespaceStripPlugin, type InlinedCallee, type InlinedCallTables, type GuardedCallee, type GuardedCallTables, type GuardedCallSite, type CallExpr, type FunctionDecl, isGhidraGeneratedName, suggestBetterName, takeFuncPtrArgCastTypedefs, type TransformResult, type FuncPtrTarget, type ArtifactMode, type ArtifactRecord, type RunTruncation } from '@ghidra-mcp/cpp-parser';
 import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js';
 import { getGlobalReferenceAliases, globalAliasComment } from './global-aliases.js';
+import { getTebFields } from './teb-fields.js';
 import { globalGuardLine, guardQualifiedName, hasDefinitionInitializer } from './global-guards.js';
 import { sehLoweringDecision, type SehLoweringDecision } from './seh-lowering-spec.js';
 import { displacementTargets, foldedAddressFacts, type FoldedAddressFact } from './folded-address-spec.js';
@@ -2988,6 +2989,13 @@ function transformDecompiledCode(
     }
     if (context?.funcPtrArgCasts?.pinnedFunctions) {
       perPluginOptions['overload-pin-cast'] = { pinnedFunctions: context.funcPtrArgCasts.pinnedFunctions };
+    }
+
+    const tebFields = getTebFields();
+    // Under every preset: a TEB label has no declaration left to fall back on.
+    if (Object.keys(tebFields).length > 0) {
+      enablePlugins.push('teb-field-access');
+      perPluginOptions['teb-field-access'] = { tebFields };
     }
 
     const globalAliases = getGlobalReferenceAliases();

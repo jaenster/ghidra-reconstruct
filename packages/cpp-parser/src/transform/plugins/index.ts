@@ -1011,6 +1011,7 @@ import { shadowedTypeQualifyPlugin } from './builtins/shadowed-type-qualify.js';
 export { shadowedTypeQualifyPlugin, type ShadowedTypeQualifyOptions } from './builtins/shadowed-type-qualify.js';
 import { functionShadowedGlobalPlugin } from './builtins/function-shadowed-global.js';
 import { globalAliasResolvePlugin } from './builtins/global-alias-resolve.js';
+import { tebFieldAccessPlugin } from './builtins/teb-field-access.js';
 import { sehLoweringPlugin } from './builtins/seh-lowering.js';
 import { baseClassAccessPlugin } from './builtins/base-class-access.js';
 export { baseClassAccessPlugin, type BaseClassAccessOptions } from './builtins/base-class-access.js';
@@ -1018,6 +1019,7 @@ import { memberCallPlugin } from './builtins/member-call.js';
 export { memberCallPlugin, memberCalls, type MemberCallOptions, type MemberCallModel, type MemberCalls } from './builtins/member-call.js';
 export { sehLoweringPlugin, type SehLoweringOptions, type SehLoweringScope } from './builtins/seh-lowering.js';
 export { globalAliasResolvePlugin, type GlobalAliasResolveOptions } from './builtins/global-alias-resolve.js';
+export { tebFieldAccessPlugin, tebFieldExpression, type TebFieldAccessOptions, type TebField } from './builtins/teb-field-access.js';
 export { functionShadowedGlobalPlugin, type FunctionShadowedGlobalOptions } from './builtins/function-shadowed-global.js';
 import { arrayGlobalAddressOfPlugin } from './builtins/array-global-address-of.js';
 export { arrayGlobalAddressOfPlugin } from './builtins/array-global-address-of.js';
@@ -1218,6 +1220,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   enclosingNamespaceStripPlugin, // Cleanup: drop the enclosing namespace prefix from a reference (priority 900, last)
   functionNameReconcilePlugin, // Cleanup: respell a reference with the declaration's name+namespace (priority 20)
   globalAliasResolvePlugin,   // Cleanup: respell a secondary Ghidra label with its address's primary label (priority 19)
+  tebFieldAccessPlugin,       // Cleanup: a thread-environment-block label as that field of NtCurrentTeb() (priority 20)
   sehLoweringPlugin,          // Correctness: an EH3 __try/__except frame -> a D2SehScope on fs:[0] (priority 680)
   thisParamRewritePlugin,     // Cleanup: __thiscall `this` → the free function's param name (priority 46)
   stackFrameAddressPlugin,    // Cleanup: `&stack0xNNNN` → the frame slot that owns it (priority 520)
