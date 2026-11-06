@@ -87,7 +87,7 @@ import { generateReadme } from './readme.js';
 import { abiConvention, conventionKeyword } from './calling-convention.js';
 import { organizeByNamespace, getFilePath, setModuleNames, setNamespaceCollisionTypes, normalizeQualifiedReference, normalizeUnitName } from './namespace.js';
 import { buildNamespaceResolution, namespaceResolution, renderNamespace } from './namespace-resolution.js';
-import { setInteriorLabelSymbols, resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, setDeclarationClosureDataContent, getDeclarationClosureReport, isUnreferenceableArtifact, isEmittableGlobal, isDataArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, generateDataHeader, dataHeaderCentralTypes, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, wasGlobalClaimed, findDuplicateLinkageNames, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, setInitializerAddressTable, setInitializerFunctionAddresses, setInitializerGlobalNamespaces, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType, emittedNamespaceOf, getDeclaredNames, initializerAddressReferences, addInitializerAddressReferences, markUnnamedImportSlots, setInitializerEnumConstants, takeModuleExternDecls, globalsHeaderProvides, moduleGlobalsTypePrelude } from './globals-header.js';
+import { setInteriorLabelSymbols, resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, setDeclarationClosureDataContent, getDeclarationClosureReport, isUnreferenceableArtifact, isEmittableGlobal, isDataArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, generateDataHeader, dataHeaderCentralTypes, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, wasGlobalClaimed, findDuplicateLinkageNames, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, setInitializerAddressTable, setInitializerFunctionAddresses, setInitializerGlobalNamespaces, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType, emittedNamespaceOf, getDeclaredNames, initializerAddressReferences, addInitializerAddressReferences, markUnnamedImportSlots, setInitializerEnumConstants, initializerReferenceNames, setHeaderOmittedGlobals, setInternalGlobals, takeModuleExternDecls, globalsHeaderProvides, moduleGlobalsTypePrelude } from './globals-header.js';
 import { normalizeDataAddress, stringDefinition } from './declaration-closure.js';
 import { harvestAnnotatedParameterTypes } from './win32-signatures.js';
 import { PLATFORM_FUNCDEF_NAMES, PLATFORM_STRUCT_FIELD_TYPES, isPlatformOrBuiltinType, isLibraryType, sdkLayoutMismatches, sdkHeaderOf, unprobedTypeNames, generatePlatformHeader, oddWidthTypesSpelled, placeholderTypesUsedIn, normalizeDataValue, arrayRowTypedefLines, arrayRowReturn, arrayRowSpelling, GHIDRA_PSEUDO_OP_RESULT_TYPES, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setFunctionHiddenTypes, computeFunctionHiddenTypes, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, platformDefinedFunctionNames, platformVoidPointerFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
@@ -120,6 +120,8 @@ import { retypeVtableLocals, retypeVtableLocalsByAssignment, vtableMembersByType
 import { NeedleIndex, scanReferences } from './needle-index.js';
 import { foldGlobalAliases, setGlobalReferenceAliases } from './global-aliases.js';
 import { splitTebFields, setTebFields } from './teb-fields.js';
+import { classifyGlobalVisibility, ownerModuleOfUsers } from './global-visibility.js';
+import { foreignReferencedFileLocals } from './file-local-globals.js';
 import { buildAggregateLayouts } from './aggregate-layout.js';
 import {
   computeTypeOwnership,
@@ -1852,8 +1854,8 @@ export function generateProjectStage2(state: GenerationState): ReconstructedProj
   // Ghidra namespace's, and only a namespaced global leaves globals.h.
   const moduleLibraries = moduleLibrariesOf(options.projectConfig);
   const moduleGraph = moduleLibraries ? new ModuleGraph(moduleLibraries) : undefined;
-  const globalOwner = moduleGraph
-    ? (g: AnalyzedDataSymbol) => moduleGraph.moduleOfNamespace(g.namespace)
+  let globalOwner = moduleGraph
+    ? (g: AnalyzedDataSymbol): string | undefined => moduleGraph.moduleOfNamespace(g.namespace)
     : undefined;
   let moduleReports: Map<string, string> | undefined;
 
@@ -1913,9 +1915,23 @@ export function generateProjectStage2(state: GenerationState): ReconstructedProj
     setMultidimArrayGlobals(analyzedGlobals as Array<{ name: string; dataType?: string; suggestedName?: string; suggestedType?: string; scope?: string }>);
 
     // Filter out struct-colocated globals (they go in struct headers/impls)
-    const centralGlobals = analyzedGlobals.filter(
+    let centralGlobals = analyzedGlobals.filter(
       g => g.scope !== 'struct-colocated'
     );
+
+    // What each global globals.h would declare is named by, and so how far it must be
+    // visible: not at all, inside one globals unit, inside one module, or to its users.
+    const visibility = genMark('project/global-visibility', () => resolveGlobalVisibility(state, centralGlobals, moduleGraph));
+    centralGlobals = visibility.kept;
+    if (visibility.ownerOf) {
+      const byNamespace = globalOwner!;
+      const byUsers = visibility.ownerOf;
+      globalOwner = g => byNamespace(g) ?? byUsers(g);
+    }
+    if (moduleGraph) {
+      moduleReports ??= new Map();
+      moduleReports.set('global-visibility.tsv', visibility.report);
+    }
 
     // The data headers: per home TU, the externs of the globals it defines with
     // external linkage. A header whose declarations need a type only globals.h can
@@ -1934,7 +1950,7 @@ export function generateProjectStage2(state: GenerationState): ReconstructedProj
       centralTypeUsers.push(...types);
     }
 
-    if (centralGlobals.length > 0) {
+    if (centralGlobals.length > 0 || globalsPath !== undefined) {
       const globalsHeaderContent = genMark('project/globals-header', () => generateGlobalsHeader(centralGlobals, {
         ...options,
         projectName: name,
@@ -1983,7 +1999,7 @@ export function generateProjectStage2(state: GenerationState): ReconstructedProj
       genMark('project/globals-units', () => emitCentralGlobalsUnits(
         centralGlobals, functions, files,
         { ...options, projectName: name, binaryName: programInfo?.name },
-        globalsPath!, typeOwnerMap, context.functionNameCandidates, globalOwner));
+        globalsPath!, typeOwnerMap, context.functionNameCandidates, globalOwner, visibility.initializerOnly));
 
       if (moduleGraph) {
         const boundary = genMark('project/module-boundaries', () => applyModuleBoundaries({
@@ -1998,7 +2014,7 @@ export function generateProjectStage2(state: GenerationState): ReconstructedProj
           rootProvides: globalsHeaderProvides(),
           typePrelude: gs => moduleGlobalsTypePrelude(gs, dataTypes, typeOwnerMap),
         }));
-        moduleReports = boundary.reports;
+        for (const [k, v] of boundary.reports) (moduleReports ??= new Map()).set(k, v);
         for (const line of boundary.summary) console.log(line);
       }
     }
@@ -2378,6 +2394,84 @@ function resolveSymbolReferenceHeader(
  * by-value aggregate initializer needs the type's own header and which types a
  * unit uses now differs per unit.
  */
+/**
+ * The visibility rules (global-visibility.ts) applied to the central globals: a
+ * dead or interior global leaves the set, one only initializers name is left out
+ * of globals.h, and - in the module build - a root-scope global is owned by the
+ * module its users share.
+ */
+function resolveGlobalVisibility(
+  state: GenerationState,
+  centralGlobals: AnalyzedDataSymbol[],
+  graph: ModuleGraph | undefined,
+): {
+  kept: AnalyzedDataSymbol[];
+  ownerOf?: (g: AnalyzedDataSymbol) => string | undefined;
+  initializerOnly: Map<AnalyzedDataSymbol, Set<AnalyzedDataSymbol>>;
+  report: string;
+} {
+  const { options, files, functions } = state;
+  const projectDir = options.projectDir ?? options.outputDir;
+  const { sources: foreignSources } = readForeignSourcesAt(options.projectConfig?.foreignReferences ?? [], projectDir);
+  const candidates = centralGlobals.filter(g =>
+    g.scope === 'global' && (g.homeFile === undefined || g.homeDeclaredCentrally === true)
+    && g.ifdef === undefined && isEmittableGlobal(g));
+  const candidateSet = new Set(candidates);
+  const emittedFunctions = new Set<string>();
+  for (const f of functions) {
+    if (!f.name) continue;
+    emittedFunctions.add(f.namespace ? `${f.namespace}::${f.name}` : f.name);
+  }
+  const result = classifyGlobalVisibility({
+    candidates,
+    others: centralGlobals.filter(g => !candidateSet.has(g)),
+    files,
+    foreign: foreignReferencedFileLocals(centralGlobals, foreignSources, g => g.scope === 'global'),
+    emittedFunctions,
+    initializerNames: initializerReferenceNames,
+    moduleOfFile: graph ? (p => graph.libraryOfPath(p) ?? graph.moduleOfPath(p)) : undefined,
+  });
+  const removed = new Set<AnalyzedDataSymbol>();
+  const initializerOnly = new Map<AnalyzedDataSymbol, Set<AnalyzedDataSymbol>>();
+  // Storage no text names (read by address, or a live label's container): defined, declared nowhere.
+  const undeclared = new Set<AnalyzedDataSymbol>();
+  const rows = ['address\tnamespace\tname\tverdict\tuser_modules\treferrers\tneighbour'];
+  for (const g of candidates) {
+    const e = result.entries.get(g)!;
+    if (e.verdict === 'dead' || e.verdict === 'interior') removed.add(g);
+    if (e.verdict === 'initializer-only') initializerOnly.set(g, e.referrers);
+    if (e.byAddressOnly || e.verdict === 'container') undeclared.add(g);
+    const verdict = e.byAddressOnly ? 'referenced-by-address' : e.verdict;
+    rows.push([g.address, g.namespace ?? '', g.suggestedName || g.name, verdict, [...e.userModules].sort().join(','),
+      [...e.referrers].map(r => r.suggestedName || r.name).sort().join(','), e.neighbour ? (e.neighbour.suggestedName || e.neighbour.name) : ''].join('\t'));
+  }
+  setHeaderOmittedGlobals([...initializerOnly.keys(), ...undeclared]);
+  const c = result.counts;
+  const byAddress = [...result.entries.values()].filter(e => e.byAddressOnly).length;
+  console.log(`Global visibility: ${candidates.length} declared centrally - ${c.referenced} referenced (${byAddress} by address only), ` +
+    `${c['initializer-only']} named only by initializers, ${c.container} kept as a live label's storage (these and the by-address ones left out of globals.h), ` +
+    `${c.interior} interior labels and ${c.dead} unreferenced not emitted`);
+  const reportPath = process.env.GHIDRA_VISIBILITY_REPORT;
+  if (reportPath) nodeFs.writeFileSync(reportPath, rows.join('\n') + '\n');
+  let ownerOf: ((g: AnalyzedDataSymbol) => string | undefined) | undefined;
+  if (graph) {
+    const owners = new Map<AnalyzedDataSymbol, string>();
+    for (const g of candidates) {
+      if (g.namespace) continue;
+      const e = result.entries.get(g)!;
+      const users = new Set(e.userModules);
+      for (const r of e.referrers) {
+        const m = graph.moduleOfNamespace(r.namespace);
+        if (m) users.add(m);
+      }
+      const owner = ownerModuleOfUsers(users, (u, o) => graph.mayUse(u, o));
+      if (owner) owners.set(g, owner);
+    }
+    ownerOf = g => owners.get(g);
+  }
+  return { kept: centralGlobals.filter(g => !removed.has(g)), ownerOf, initializerOnly, report: rows.join('\n') + '\n' };
+}
+
 function emitCentralGlobalsUnits(
   centralGlobals: AnalyzedDataSymbol[],
   functions: ExtractedFunction[],
@@ -2387,6 +2481,8 @@ function emitCentralGlobalsUnits(
   typeOwnerMap: Map<string, string>,
   functionNameCandidates: Map<string, { qualified: string; header: string }[]> | undefined,
   ownerOf?: (g: AnalyzedDataSymbol) => string | undefined,
+  /** Globals only initializers name, with the globals whose initializers do. */
+  initializerOnly: ReadonlyMap<AnalyzedDataSymbol, ReadonlySet<AnalyzedDataSymbol>> = new Map(),
 ): void {
   const implExt = options.format === 'c' ? '.c' : '.cpp';
 
@@ -2409,14 +2505,53 @@ function emitCentralGlobalsUnits(
   // The shared remainder is first, and it is the unit that owns the closure
   // definitions: they belong to no module, and emitting them from every unit
   // would be as many duplicate definitions as there are units.
-  const units: { path: string; members: ReadonlySet<AnalyzedDataSymbol> | undefined; ownsClosure: boolean }[] = [
+  const units: { path: string; members: Set<AnalyzedDataSymbol> | undefined; ownsClosure: boolean }[] = [
     { path: globalsUnitPath(globalsHeaderPath, undefined, implExt)!, members: new Set(shared), ownsClosure: true },
     ...partitions.map(p => ({
       path: globalsUnitPath(globalsHeaderPath, p.module, implExt)!,
-      members: new Set(p.members) as ReadonlySet<AnalyzedDataSymbol>,
+      members: new Set(p.members),
       ownsClosure: false,
     })),
   ];
+
+  // A global only initializers name is defined, internal, in the one unit that
+  // defines all of them; referrers in several units leave it external there.
+  const unitOf = new Map<AnalyzedDataSymbol, number>();
+  units.forEach((u, i) => { for (const g of u.members ?? []) unitOf.set(g, i); });
+  const internal = new Set<AnalyzedDataSymbol>();
+  for (const [g, referrers] of initializerOnly) {
+    if (g.ifdef !== undefined || !unitOf.has(g)) continue;
+    const homes = new Set([...referrers].map(r => unitOf.get(r)));
+    if (homes.size !== 1 || homes.has(undefined)) continue;
+    const to = [...homes][0]!;
+    const from = unitOf.get(g)!;
+    if (from !== to) {
+      (units[from].members as Set<AnalyzedDataSymbol>).delete(g);
+      (units[to].members as Set<AnalyzedDataSymbol>).add(g);
+      unitOf.set(g, to);
+    }
+    internal.add(g);
+  }
+  // A referenced one before its referrer; a cycle stays external, declared up front.
+  const ordered: AnalyzedDataSymbol[] = [];
+  const visitState = new Map<AnalyzedDataSymbol, 'open' | 'done'>();
+  const cyclic = new Set<AnalyzedDataSymbol>();
+  const targets = new Map<AnalyzedDataSymbol, AnalyzedDataSymbol[]>();
+  for (const [g, referrers] of initializerOnly) {
+    for (const r of referrers) if (internal.has(r) && internal.has(g)) (targets.get(r) ?? targets.set(r, []).get(r)!).push(g);
+  }
+  const visit = (g: AnalyzedDataSymbol, path: AnalyzedDataSymbol[]): void => {
+    const st = visitState.get(g);
+    if (st === 'done') return;
+    if (st === 'open') { for (const p of path.slice(path.indexOf(g))) cyclic.add(p); return; }
+    visitState.set(g, 'open');
+    for (const t of targets.get(g) ?? []) visit(t, [...path, g]);
+    visitState.set(g, 'done');
+    ordered.push(g);
+  };
+  for (const g of [...internal].sort((a, b) => a.address.localeCompare(b.address))) visit(g, []);
+  setInternalGlobals(ordered.filter(g => !cyclic.has(g)));
+  if (internal.size > 0) console.log(`Globals internal to their referrers' unit: ${internal.size - cyclic.size} (${cyclic.size} in an initializer cycle stay external)`);
 
   for (const unit of units) {
     setCentralInitializerScope(true);

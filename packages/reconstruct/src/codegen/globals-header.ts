@@ -479,6 +479,51 @@ export function recordCentralInitializerAddressReferences(
 }
 
 /**
+ * The identifiers a global's definition names, rendered as the globals unit will
+ * render it (pointer targets by name, raw addresses through the initializer
+ * address table). A dry run: what the render records is put back.
+ */
+export function initializerReferenceNames(global: AnalyzedDataSymbol): Set<string> {
+  const recorded = initializerAddressNamesUsed;
+  const mismatches = initializerFuncPtrArityMismatches;
+  initializerAddressNamesUsed = new Set(recorded);
+  let text = '';
+  try {
+    text = globalDefinition(global, '__d2_self');
+  } finally {
+    initializerAddressNamesUsed = recorded;
+    initializerFuncPtrArityMismatches = mismatches;
+  }
+  const names = new Set(scanReferences(text).identifiers);
+  names.delete('__d2_self');
+  return names;
+}
+
+/**
+ * Globals only another global's initializer names, all of whose referrers one
+ * globals unit defines: that unit defines them `static`, ahead of its other
+ * definitions, in this order (a referenced one before its referrer), and no
+ * header declares them.
+ */
+let internalGlobalOrder: AnalyzedDataSymbol[] = [];
+let internalGlobalSet = new Set<AnalyzedDataSymbol>();
+export function setInternalGlobals(ordered: readonly AnalyzedDataSymbol[]): void {
+  internalGlobalOrder = [...ordered];
+  internalGlobalSet = new Set(ordered);
+}
+
+/**
+ * Globals no file but a globals unit names (their referrers' initializers): globals.h
+ * declares none of them, nor does its closure. Each globals unit declares the ones
+ * it does not define internally up front, as it does every global globals.h lacks.
+ */
+let headerOmittedSet = new Set<AnalyzedDataSymbol>();
+export function setHeaderOmittedGlobals(globals: Iterable<AnalyzedDataSymbol>): void {
+  headerOmittedSet = new Set(globals);
+  for (const g of headerOmittedSet) recordDeclaredName(sanitizeSymbolName(g.suggestedName || g.name));
+}
+
+/**
  * The type prelude of a declarations header: the owner header of every type a
  * declaration uses by value, the template header where one is named, forward
  * declarations for the rest, and - for a type no header owns - its definition
@@ -800,7 +845,7 @@ export function generateGlobalsHeader(
 
   // Global extern declarations by namespace
   const globalSymbols = globals.filter(g =>
-    g.scope === 'global' && declaredHere(g)
+    g.scope === 'global' && declaredHere(g) && !headerOmittedSet.has(g)
     && !isSwitchTableSymbol(g.suggestedName || g.name)
     && !isJumpTableArtifact(g)
     && !isArrayElementSymbol(g.suggestedName || g.name, allGlobalNames)
@@ -816,7 +861,7 @@ export function generateGlobalsHeader(
 
     for (const { rendered: namespace, symbols: nsGlobals } of byNamespace) {
       const nsGlobalSymbols = nsGlobals.filter(g =>
-        g.scope === 'global' && declaredHere(g)
+        g.scope === 'global' && declaredHere(g) && !headerOmittedSet.has(g)
         && !isSwitchTableSymbol(g.suggestedName || g.name)
         && !isJumpTableArtifact(g)
         && !isArrayElementSymbol(g.suggestedName || g.name, allGlobalNames)
@@ -3772,7 +3817,7 @@ export function generateGlobalsImpl(
     // symbol the globals files define (one reconciled back from `static-local`
     // gets a definition but no extern). An extern for a symbol defined
     // elsewhere is exactly what the reference needs.
-    const undeclared = nsGlobals.filter(g => !headerDeclaredGlobals.has(g) && isDefinitionWinner(namespace, g));
+    const undeclared = nsGlobals.filter(g => !headerDeclaredGlobals.has(g) && !internalGlobalSet.has(g) && isDefinitionWinner(namespace, g));
     if (undeclared.length === 0) continue;
     if (namespace) lines.push(`namespace ${namespace} {`);
     emitGlobalDefsWithIfdef(lines, undeclared, false, (global, ls) => {
@@ -3784,6 +3829,30 @@ export function generateGlobalsImpl(
   }
   lines.push('');
 
+  // What only this unit's initializers name: internal, defined before its referrers.
+  const internalHere = internalGlobalOrder.filter(g => definable.includes(g) && (!partition || partition.has(g)));
+  if (internalHere.length > 0) {
+    lines.push('// =============================================================================');
+    lines.push('// Named only by initializers in this file');
+    lines.push('// =============================================================================');
+    lines.push('');
+    for (const global of internalHere) {
+      const resolved = emittedNamespaceOf(global);
+      const namespace = renderNamespace(resolved) || undefined;
+      if (!isDefinitionWinner(namespace, global)) continue;
+      const name = sanitizeSymbolName(global.suggestedName || global.name);
+      if (namespace) lines.push(`namespace ${namespace} {`);
+      setInitializerNamespace(resolved);
+      const aliasLine = globalAliasComment(global);
+      if (aliasLine) lines.push(aliasLine);
+      if (options.includeAddressComments) lines.push(`// @${global.address}`);
+      lines.push(`static ${globalDefinition(global, name)} ${globalGuardLine(name, guardQualifiedName(namespace, name), 'static', hasDefinitionInitializer(global))}`);
+      setInitializerNamespace(undefined);
+      if (namespace) lines.push(`} // namespace ${namespace}`);
+    }
+    lines.push('');
+  }
+
   for (const { resolved: namespaceScope, rendered: namespace, symbols: nsGlobals } of byNamespace) {
     if (nsGlobals.length === 0) continue;
     // Skip template instantiation namespaces (contain < > , *)
@@ -3791,7 +3860,7 @@ export function generateGlobalsImpl(
 
     // Split into: initialized with data, initialized without data, uninitialized
     const owned = nsGlobals.filter(g =>
-      isDefinitionWinner(namespace, g) && (!partition || partition.has(g)));
+      isDefinitionWinner(namespace, g) && (!partition || partition.has(g)) && !internalGlobalSet.has(g));
     const withData = owned.filter(g => g.initializedData);
     const withoutData = owned.filter(g => g.isInitialized && !g.initializedData);
     const uninitialized = owned.filter(g => !g.isInitialized);
