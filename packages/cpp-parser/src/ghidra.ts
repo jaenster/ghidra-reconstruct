@@ -304,6 +304,9 @@ export function transformGhidraCode(
     if (options.vc8Forms && options.vc8Forms.forms.length > 0) {
       transformedAst = applyVc8Forms(transformedAst, options.vc8Forms.forms, options.vc8Forms.onSite);
     }
+    transformedAst = defaultRegistry
+      .createPipeline<TranslationUnit>({ ...pipelineOpts, stage: 'after-source-forms' })
+      .execute(transformedAst).ast;
   } else {
     // Legacy transform chain (for backwards compatibility)
     const transforms: Transformer[] = [];

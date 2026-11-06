@@ -38,6 +38,14 @@ export interface TransformPlugin {
   /** Tags for categorization (e.g., 'cleanup', 'style', 'optimization') */
   tags?: string[];
 
+  /**
+   * Runs in the `after-source-forms` stage instead of the main pipeline: after
+   * the recorded VC8 source forms (`vc8form` tags) are applied, because those
+   * anchor on the body's text as the main pipeline leaves it. Only a pass that
+   * respells without changing what a form anchors on belongs there.
+   */
+  afterSourceForms?: boolean;
+
   /** Create the transformer function (basic, no injection support) */
   createTransformer(options?: PluginOptions): Transformer;
 
@@ -140,6 +148,12 @@ export interface PipelineOptions {
 
   /** Track step-by-step results */
   trackSteps?: boolean;
+
+  /**
+   * Which plugins the pipeline holds: the main pipeline (default) or only the
+   * `afterSourceForms` plugins, run once the source forms are applied.
+   */
+  stage?: 'main' | 'after-source-forms';
 }
 
 /**
