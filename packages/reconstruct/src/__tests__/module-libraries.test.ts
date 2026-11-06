@@ -11,6 +11,7 @@ import {
   applyModuleBoundaries, splitDefinitions, splitHeaderDeclarations, insertHeaderGate, bracketRootIncludes,
 } from '../codegen/module-boundary.js';
 import { generateModuleLibrariesCMake } from '../codegen/cmake.js';
+import { pruneIncludes } from '../codegen/include-pruning.js';
 import { DECLS_BEGIN_MARKER, DECLS_END_MARKER, DECL_MARKER, DECL_END_MARKER, TYPE_MARKER, TYPE_END_MARKER } from '../codegen/header.js';
 import type { AnalyzedDataSymbol, ExtractedFunction, ReconstructedProject, ReconstructOptions, SourceFile } from '../types.js';
 
@@ -238,6 +239,15 @@ describe('applyModuleBoundaries', () => {
     const pub = files.get('Fog/Fog.public.h')!.content;
     assert.ok(pub.includes('#include "Fog/Fog.h"'));
     assert.ok(pub.includes('#include "Fog/Fog.globals.h"'));
+  });
+
+  it('marks the public header as re-export, so the include pass keeps its includes', () => {
+    const { files } = run();
+    assert.strictEqual(files.get('Fog/Fog.public.h')!.reexport, true);
+    const before = files.get('Fog/Fog.public.h')!.content;
+    pruneIncludes(files);
+    assert.strictEqual(files.get('Fog/Fog.public.h')!.content, before);
+    assert.ok(before.includes('#include "Fog/Fog.h"'));
   });
 });
 

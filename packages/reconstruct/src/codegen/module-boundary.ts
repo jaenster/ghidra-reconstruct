@@ -569,7 +569,7 @@ export function applyModuleBoundaries(input: ModuleBoundaryInput): ModuleBoundar
       ...listed.map(h => `#include "${h}"`),
       '',
     ].join('\n');
-    files.set(path, { path, content, type: 'header', functions: [], includes: listed });
+    files.set(path, { path, content, type: 'header', functions: [], includes: listed, reexport: true });
   }
 
   // globals.h is the shared root every module may include, and it includes headers of

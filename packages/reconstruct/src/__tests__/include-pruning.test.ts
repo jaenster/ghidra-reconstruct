@@ -261,6 +261,20 @@ template<> void TSSync<ELEM, SYNC>::Lock();
     assert.deepStrictEqual(result.unparsed, ['Game/Broken.cpp']);
   });
 
+  it('keeps a re-export header (a module public header) as written: its includes are its content', () => {
+    const umbrella = `#pragma once
+#include "Lib/Unit.h"
+#include "Lib/Path.h"
+#include "Lib/Room.h"
+`;
+    const files = tree({ ...UNIT, 'Lib/Lib.public.h': umbrella, 'Lib/Plain.h': umbrella });
+    files.get('Lib/Lib.public.h')!.reexport = true;
+    pruneIncludes(files);
+    assert.deepStrictEqual(includesOf(files, 'Lib/Lib.public.h'), ['Lib/Unit.h', 'Lib/Path.h', 'Lib/Room.h']);
+    assert.strictEqual(files.get('Lib/Lib.public.h')!.content, umbrella);
+    assert.deepStrictEqual(includesOf(files, 'Lib/Plain.h'), [], 'the same text without the role is pruned');
+  });
+
   it('is idempotent', () => {
     const files = tree({
       ...UNIT,

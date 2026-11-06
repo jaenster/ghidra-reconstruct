@@ -34,6 +34,8 @@ export interface PrunableFile {
   path: string;
   content: string;
   includes?: string[];
+  /** A header that exists to pass others on (a module's public header): kept as written. */
+  reexport?: boolean;
 }
 
 export interface IncludePruneOptions {
@@ -984,7 +986,8 @@ export function pruneIncludes(files: Map<string, PrunableFile>, options: Include
     const file = files.get(path)!;
     // Nothing to place a new include or a forward declaration after: left as written.
     const anchored = f.includes.some(i => i.target && !i.conditional);
-    const keepWhole = !f.parsed || !anchored || options.keepAsWritten?.(path);
+    // A re-export header's includes are its content: nothing in it uses them, its users do.
+    const keepWhole = !f.parsed || !anchored || file.reexport === true || options.keepAsWritten?.(path);
     if (!f.parsed) result.unparsed.push(path);
     if (keepWhole) {
       finalIncludes.set(path, direct(path));

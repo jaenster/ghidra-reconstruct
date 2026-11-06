@@ -585,6 +585,11 @@ export interface SourceFile {
   className?: string;
   functions: string[];
   includes: string[];
+  /**
+   * The file exists to pass other headers on (a module's public header): its includes are
+   * its content, so the include pass keeps them as written.
+   */
+  reexport?: boolean;
 }
 
 /**
