@@ -41,6 +41,12 @@ export interface PrunableFile {
 export interface IncludePruneOptions {
   /** Types the Win32 SDK defines: their forward declarations go inside the SDK guard. */
   sdkTypeNames?: ReadonlySet<string>;
+  /**
+   * The SDK types come with the platform header on every build (d2_platform.h includes
+   * <windows.h> under _WIN32): a header's `#ifndef _WIN32` copy of one is no reason to
+   * keep that header.
+   */
+  sdkFromPlatform?: boolean;
   /** Files never pruned (their includes kept as written); they still provide names to others. */
   keepAsWritten?: (path: string) => boolean;
   /** Told why each include a file keeps is kept: the first name that needed it. */
@@ -49,6 +55,11 @@ export interface IncludePruneOptions {
   traceUntyped?: (file: string, member: unknown) => void;
   /** Told of each type a file needs complete, with the declaration or statement that needs it. */
   traceComplete?: (file: string, type: string, at: unknown) => void;
+  /**
+   * Of several headers that provide a name, the one a file should keep: lower ranks
+   * first (a module's public header over its internal ones, for another module).
+   */
+  providerRank?: (from: string, candidate: string) => number;
 }
 
 export interface IncludePruneResult {
@@ -886,6 +897,67 @@ function answers(ns: string[], name: string, spelling: string, contexts: Set<str
   return false;
 }
 
+/** What a text of declarations needs of the tree's types, read with the same tables as the include pass. */
+export interface CompletenessOracle {
+  /** The struct types the declarations need complete: a field, base or by-value parameter of it. */
+  complete(text: string): Set<string>;
+  /** Whether the tree defines `name` as a struct, class or union. */
+  isStruct(name: string): boolean;
+  /** Whether `name` is a class template (never forward-declared as a class). */
+  isTemplate(name: string): boolean;
+  /** The class-key a forward declaration of `name` takes. */
+  keyOf(name: string): 'struct' | 'class' | 'union';
+  /** The files that define `name` as a type, typedef or enum (a forward declaration is not one). */
+  definers(name: string): string[];
+  /** The files that declare `name` as a function, an object or a macro. */
+  declarers(name: string): string[];
+}
+
+/** The include pass's type tables over `files`, asked about one text at a time. */
+export function completenessOracle(files: Iterable<{ path: string; content: string }>): CompletenessOracle {
+  const facts: FileFacts[] = [];
+  for (const f of files) if (/\.(h|hpp|inl|cpp|c)$/.test(f.path)) facts.push(readFile(f.path, f.content));
+  const tables = new TypeTables();
+  for (const f of facts) tables.collect({ declarations: (f.tu.declarations ?? []).filter((d: any) => d && (STRUCT_KINDS.has(d.kind) || d.kind === NodeKind.NamespaceDecl || d.kind === NodeKind.LinkageSpec)) });
+  for (const f of facts) tables.collect({ declarations: (f.tu.declarations ?? []).filter((d: any) => d && !STRUCT_KINDS.has(d.kind)) });
+  const unions = new Set<string>();
+  for (const f of facts) for (const u of f.unions) unions.add(u);
+  const definers = new Map<string, string[]>();
+  const declarers = new Map<string, string[]>();
+  const add = (map: Map<string, string[]>, name: string, file: string) => {
+    const l = map.get(name);
+    if (l) l.push(file); else map.set(name, [file]);
+  };
+  for (const f of facts) {
+    for (const [name, list] of f.provides) {
+      if (list.some(p => p.kind === 'type' || p.kind === 'typedef' || p.kind === 'enum')) add(definers, name, f.path);
+      if (list.some(p => p.kind === 'fn' || p.kind === 'fndef' || p.kind === 'var' || p.kind === 'macro')) add(declarers, name, f.path);
+    }
+  }
+  return {
+    definers: name => definers.get(name) ?? [],
+    declarers: name => declarers.get(name) ?? [],
+    complete(text: string): Set<string> {
+      let tu: any;
+      try {
+        tu = parse(text, { filename: 'complete.h', recover: true });
+      } catch {
+        tu = undefined;
+      }
+      if (!tu || (tu.parseErrors ?? []).length > 0) {
+        // Unreadable: every struct it names counts as needed complete.
+        const out = new Set<string>();
+        for (const name of referencesOf(text, new Set()).keys()) if (tables.isStruct(name)) out.add(name);
+        return out;
+      }
+      return completeTypes(tu, tables).complete;
+    },
+    isStruct: name => tables.isStruct(name),
+    isTemplate: name => tables.templates.has(name),
+    keyOf: name => (unions.has(name) ? 'union' : tables.structs.get(name)?.key ?? 'struct'),
+  };
+}
+
 export function pruneIncludes(files: Map<string, PrunableFile>, options: IncludePruneOptions = {}): IncludePruneResult {
   const sources = [...files.keys()].filter(p => /\.(h|hpp|inl|cpp|c)$/.test(p));
   const facts = new Map<string, FileFacts>();
@@ -1028,8 +1100,10 @@ export function pruneIncludes(files: Map<string, PrunableFile>, options: Include
       if (choices.length === 0) return;
       // Several headers declare it: the one the file already includes, else the one
       // nearest the file in the tree - its own module's, where the layout has one.
-      const pick = choices.sort((a, b) => nearness(path, b) - nearness(path, a) || (a < b ? -1 : a > b ? 1 : 0))
-        .find(c => writtenDirect.has(c)) ?? choices[0];
+      const rank = (c: string) => options.providerRank?.(path, c) ?? 0;
+      const sorted = choices.sort((a, b) => rank(a) - rank(b) || nearness(path, b) - nearness(path, a) || (a < b ? -1 : a > b ? 1 : 0));
+      const best = sorted.filter(c => rank(c) === rank(sorted[0]));
+      const pick = best.find(c => writtenDirect.has(c)) ?? best[0];
       kept.add(pick);
       addReach(pick);
       options.trace?.(path, pick, choices.length > 1 ? `${why}, of ${choices.length}` : why);
@@ -1039,6 +1113,7 @@ export function pruneIncludes(files: Map<string, PrunableFile>, options: Include
     for (const name of names) {
       const all = providers.get(name);
       if (!all) continue;
+      if (options.sdkFromPlatform && options.sdkTypeNames?.has(name)) continue;
       const own = f.provides.get(name);
       const reachable = all.filter(p => old.has(p.file));
       if (reachable.length === 0) continue;
@@ -1080,6 +1155,7 @@ export function pruneIncludes(files: Map<string, PrunableFile>, options: Include
     // Types the code needs complete without spelling them: a field reached through a chain.
     for (const name of [...usage.complete].sort()) {
       if (f.refs.has(name) || f.provides.get(name)?.some(p => p.kind === 'type')) continue;
+      if (options.sdkFromPlatform && options.sdkTypeNames?.has(name)) continue;
       const defs = (providers.get(name) ?? []).filter(p => p.kind === 'type' && old.has(p.file));
       if (defs.length > 0) require(defs, `${name} complete, unnamed`);
     }

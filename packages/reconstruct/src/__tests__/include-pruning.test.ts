@@ -77,6 +77,39 @@ namespace Game { int __fastcall Keep(D2UnitStrc * pUnit, D2RoomStrc * pRoom); }
     assert.deepStrictEqual(includesOf(files, 'Game/Use.cpp'), ['Game/Use.h']);
   });
 
+  it('takes an SDK type from the platform header, not from a header\'s no-SDK copy of it', () => {
+    const files = tree({
+      'Fog/Error.h': `#pragma once
+#include "d2_platform.h"
+#ifndef _WIN32  // provided by the Win32 SDK / CRT on Windows
+typedef void * PSID;
+#endif // _WIN32
+namespace Fog { void FOG_Halt(); }
+`,
+      'd2_platform.h': '#pragma once\n',
+      'Game/Main.cpp': `#include "d2_platform.h"
+#include "Fog/Error.h"
+int Main(PSID p) { return p != 0; }
+`,
+    });
+    const sdk = new Set(['PSID']);
+    const before = new Map([...files].map(([k, v]) => [k, { ...v }]));
+    pruneIncludes(before, { sdkTypeNames: sdk });
+    assert.ok(includesOf(before, 'Game/Main.cpp').includes('Fog/Error.h'), 'without the option the copy keeps the header');
+    pruneIncludes(files, { sdkTypeNames: sdk, sdkFromPlatform: true });
+    assert.ok(!includesOf(files, 'Game/Main.cpp').includes('Fog/Error.h'));
+  });
+
+  it('prefers the provider the rank puts first: a public header over an internal one', () => {
+    const files = tree({
+      'Fog/Error.h': '#pragma once\nnamespace Fog { void FOG_Halt(); }\n',
+      'Fog/Fog.h': '#pragma once\nnamespace Fog { void FOG_Halt(); }\n',
+      'Game/Main.cpp': '#include "Fog/Fog.h"\n#include "Fog/Error.h"\nvoid Main() { Fog::FOG_Halt(); }\n',
+    });
+    pruneIncludes(files, { providerRank: (from, c) => (c === 'Fog/Fog.h' && !from.startsWith('Fog/') ? 0 : 1) });
+    assert.deepStrictEqual(includesOf(files, 'Game/Main.cpp'), ['Fog/Fog.h']);
+  });
+
   it('keeps the header of a type the file reaches into, and of a function it calls', () => {
     const files = tree({
       ...UNIT,
