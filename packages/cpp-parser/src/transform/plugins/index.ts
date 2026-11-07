@@ -987,6 +987,12 @@ export { sizelessPointerArithPlugin, type SizelessPointerArithOptions } from './
 export { sehNativePlugin, SEH_NATIVE_CONDITION } from './builtins/seh-native.js';
 export { floatPointerBitcastPlugin } from './builtins/float-pointer-bitcast.js';
 export { narrowCastThroughUintptrPlugin } from './builtins/narrow-cast-through-uintptr.js';
+import { contextRegisterFieldPlugin } from './builtins/context-register-field.js';
+export {
+  contextRegisterFieldPlugin, createContextRegisterFieldTransformer, CONTEXT_FIELD_SUPPORT_LINES,
+  X86_CONTEXT_FIELDS, getContextRegisterFieldCount, resetContextRegisterFieldCount,
+  type ContextRegisterFieldOptions,
+} from './builtins/context-register-field.js';
 import { pointerWordCastPlugin } from './builtins/pointer-word-cast.js';
 export {
   pointerWordCastPlugin, createPointerWordCastTransformer, getPointerWordCastStats, resetPointerWordCastStats,
@@ -1213,6 +1219,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   arithIdiomsPlugin,          // Matching: division/remainder/64-bit helper idioms -> the operator (priority 619)
   pow2RemainderPlugin,        // Matching: VC8's signed remainder by 2^k (and; jns; dec; or; inc) -> x % 2^k (priority 51)
   narrowCastThroughUintptrPlugin, // Type: route a pointer->narrow-integer cast through uintptr_t (priority 620)
+  contextRegisterFieldPlugin,     // Portability: x86-only CONTEXT registers through platform-header accessors, the member access itself on x86 (priority 996)
   pointerWordCastPlugin,          // Portability: address arithmetic through int -> (char*)p + K / intptr_t / uintptr_t, same value and type (priority 995)
   assignCastPlugin,           // Type: cast an assigned value to its slot's declared type (priority 615)
   overloadPinCastPlugin,      // Type: exact type of the shared-name member whose address the body takes (priority 627)
