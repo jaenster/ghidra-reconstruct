@@ -1,0 +1,240 @@
+/**
+ * split-lives: values VC8 kept in one slot, which the decompiler merged into one
+ * variable, each get a local of their own when reaching definitions prove they never meet.
+ */
+
+import { describe, it } from 'node:test';
+import assert from 'node:assert';
+import { parse } from '../../../parser/index.js';
+import { emit } from '../../../emit/index.js';
+import type { AnyNode } from '../../../ast/nodes.js';
+import { splitLivesPlugin, type SplitLivesOptions } from '../builtins/split-lives.js';
+import { compileAndRun, hasNativeGpp, testToolchain } from '../../../testing/native-cpp.js';
+
+// A pointer kept in an int is the 32-bit target's habit: the check needs the target's word size.
+const native = { skip: !hasNativeGpp() || testToolchain()?.name !== 'mingw' };
+
+const STR = 'D2Lang::StrTable::strtable::GetLocaleString';
+const O: SplitLivesOptions = {
+  slots: [],
+  functionReturnTypes: { [STR]: 'ushort *', GetLocaleString: 'ushort *', 'Units::GetRoom': 'D2RoomStrc *', GetRoom: 'D2RoomStrc *' },
+};
+
+const run = (code: string, o: SplitLivesOptions = O) =>
+  emit(splitLivesPlugin.createTransformer(o)(parse(code)) as AnyNode).trim();
+const flat = (s: string) => s.replace(/\s+/g, ' ');
+/** Spacing-blind: the emitter spells `T*`, the tests `T *`. */
+const norm = (s: string) => flat(s).replace(/\s*\*\s*/g, '*').replace(/\(\s+/g, '(');
+const has = (out: string, snippet: string) => assert.ok(norm(out).includes(norm(snippet)), `${snippet}\n${out}`);
+
+describe('split-lives', () => {
+  it('ItemStatCost_DescFunc_DGrpFunc @004e4d80: a string in two integer parameters\' slots, one local each', () => {
+    const out = run(`int f(int nStatId, int nStatValue, int nMode, ushort *wszOut) {
+      g(nStatId, nStatValue);
+      nStatId = (int)${STR}(3);
+      nStatValue = (int)${STR}(0xf9b);
+      switch (nMode) {
+      case 1:
+        Copy(wszOut, (ushort *)nStatId);
+        Append(wszOut, (ushort *)nStatValue);
+        break;
+      case 2:
+        Append(wszOut, (ushort *)nStatValue);
+        Copy(wszOut, (ushort *)nStatId);
+        break;
+      }
+      return 0;
+    }`);
+    has(out, 'ushort *pStatId;');
+    has(out, 'ushort *pStatValue;');
+    has(out, `pStatId = ${STR}(3);`);
+    has(out, 'Copy(wszOut, pStatId);');
+    has(out, 'Append(wszOut, pStatValue);');
+    has(out, 'g(nStatId, nStatValue);');
+  });
+
+  it('gives every later life its own local and keeps the merged local out of the way', () => {
+    const out = run(`int f(D2UnitStrc *p) {
+      int nSkillId;
+      nSkillId = (int)Units::GetRoom(p);
+      h((D2RoomStrc *)nSkillId);
+      nSkillId = (int)p->pNext;
+      k((D2UnitStrc *)nSkillId);
+      k((D2UnitStrc *)nSkillId);
+      return 0;
+    }`);
+    has(out, 'D2RoomStrc *pRoom;');
+    has(out, 'D2UnitStrc *pUnit;');
+    assert.ok(!/int nSkillId;/.test(out), 'the variable no read is left on goes: ' + out);
+    has(out, 'pUnit = (D2UnitStrc *)(int)p->pNext;');
+  });
+
+  it('keeps a join: a read reached by stores of two types is one variable', () => {
+    const src = `int f(D2UnitStrc *p, int c) {
+      int nX;
+      if (c) nX = (int)Units::GetRoom(p);
+      else nX = (int)${STR}(1);
+      return h((D2RoomStrc *)nX);
+    }`;
+    const lines: string[] = [];
+    const out = run(src, { ...O, onReport: (_f, l) => lines.push(l) });
+    assert.strictEqual(flat(out), flat(run(src, {})));
+    assert.ok(lines.length === 0 || !lines.some(l => /split/.test(l)), lines.join('\n'));
+  });
+
+  it('leaves a loop around the store (the entry value meets the stored one)', () => {
+    const src = `void f(D2UnitStrc *pOwner, int nStatId) {
+      while (g(nStatId)) {
+        nStatId = (int)Units::GetRoom(pOwner);
+        h((D2RoomStrc *)nStatId);
+      }
+    }`;
+    assert.strictEqual(flat(run(src)), flat(run(src, {})));
+  });
+
+  it('leaves a variable whose address is taken, or in a frame whose slot address escapes', () => {
+    const own = `void f(D2UnitStrc *p, int nStatId) { g(&nStatId); nStatId = (int)Units::GetRoom(p); h((D2RoomStrc *)nStatId); h((D2RoomStrc *)nStatId); }`;
+    assert.strictEqual(flat(run(own)), flat(run(own, {})));
+    // A local above a slot whose address leaves the frame may become a frame-object member.
+    const frame = `void f(D2UnitStrc *p) { int a; int nX; g(&a); nX = 5; k(nX); nX = (int)Units::GetRoom(p); h((D2RoomStrc *)nX); h((D2RoomStrc *)nX); }`;
+    const above = { ...O, slots: [{ name: 'a', offset: -0x10, size: 4 }, { name: 'nX', offset: -0xc, size: 4 }] };
+    assert.strictEqual(flat(run(frame, above)), flat(run(frame, {})));
+    // Below it, or when g is known to touch only the word it is handed, it cannot.
+    const below = { ...O, slots: [{ name: 'a', offset: -0x10, size: 4 }, { name: 'nX', offset: -0x14, size: 4 }] };
+    assert.ok(/pRoom/.test(run(frame, below)));
+    assert.ok(/pRoom/.test(run(frame, { ...above, argReach: () => ({ lo: 0, hi: 4 }) as never })));
+    assert.ok(!/pRoom/.test(run(frame, { ...above, argReach: () => ({ lo: 0, hi: 8 }) as never })));
+  });
+
+  it('004e4d80: a value whose address a call is handed stays, a later one moves, when the callee keeps only the word', () => {
+    const src = `int f(int nStatValue, ushort *wszOut) {
+      nStatValue = 1;
+      MinMax(3, &nStatValue);
+      if (nStatValue == 0) return 0;
+      nStatValue = (int)${STR}(0xf9b);
+      Append(wszOut, (ushort *)nStatValue);
+      Append(wszOut, (ushort *)nStatValue);
+      return 1;
+    }`;
+    const word = run(src, { ...O, argReach: () => ({ lo: 0, hi: 4 }) as never });
+    has(word, 'MinMax(3, &nStatValue);');
+    has(word, 'if (nStatValue == 0)');
+    has(word, `pStatValue = ${STR}(0xf9b);`);
+    has(word, 'Append(wszOut, pStatValue);');
+    // A callee that may keep the address, or reach past the word: the variable stays one.
+    assert.strictEqual(flat(run(src)), flat(run(src, {})));
+    assert.strictEqual(flat(run(src, { ...O, argReach: () => null })), flat(run(src, {})));
+    assert.strictEqual(flat(run(src, { ...O, argReach: () => ({ lo: 0, hi: 8 }) as never })), flat(run(src, {})));
+  });
+
+  it('Fog::Memory::Alloc @0040a080: an out-parameter call starts a new value in a dead parameter\'s slot', () => {
+    const src = `void *f(D2PoolStrc *pPool, int32_t Line) {
+      g(Line);
+      FindBlock((D2PoolBlockStrc **)&Line, pPool);
+      if (Line == 0) return 0;
+      *(int *)(Line + 8) = *(int *)(Line + 8) + 1;
+      return *(D2PoolBlockStrc **)(Line + 0x10);
+    }`;
+    const both = { ...O, argReach: () => ({ lo: 0, hi: 4 }) as never, outParamWidth: () => 4 };
+    const out = run(src, both);
+    has(out, 'D2PoolBlockStrc *pPoolBlock;');
+    has(out, 'FindBlock((D2PoolBlockStrc **)&pPoolBlock, pPool);');
+    has(out, 'g(Line);');
+    has(out, '*(int *)((int32_t)pPoolBlock + 8)');
+    // Not an out-parameter: the call may read the parameter, which stays one variable.
+    assert.strictEqual(flat(run(src, { ...both, outParamWidth: () => null })), flat(run(src, {})));
+  });
+
+  it('AUTOMAP_DrawXMarker: an index added to a table\'s address is not an address itself', () => {
+    const src = `void f(int nX) {
+      uint nOffset;
+      g(nX);
+      nOffset = 0;
+      do {
+        h(*(int *)((int)&gaPolyline[0].x + nOffset), *(int *)((int)&gaPolyline[1].y + nOffset));
+        nOffset = nOffset + 8;
+      } while (nOffset < 0x60);
+    }`;
+    assert.strictEqual(flat(run(src)), flat(run(src, {})));
+  });
+
+  it('WapperSaveGameAllGameTypes @0052e9e0: a GUID in a dead item pointer, its literal stored as the number', () => {
+    const out = run(`int f(D2UnitStrc *pSourceItem, D2UnitStrc *pItem) {
+      g(pSourceItem);
+      if (pItem == 0) {
+        pSourceItem = (D2UnitStrc *)-1;
+      } else {
+        pSourceItem = (D2UnitStrc *)pItem->nUnitGUID;
+      }
+      return Place((int32_t)pSourceItem, 1);
+    }`, { ...O, structFields: { D2UnitStrc: { nUnitGUID: 'int' } } });
+    has(out, 'nSourceItem = -1;');
+    has(out, 'nSourceItem = pItem->nUnitGUID;');
+    has(out, 'Place(nSourceItem, 1)');
+  });
+
+  it('leaves a local with a single value that is read: that is a mistyped variable, not a shared slot', () => {
+    const src = `int f(D2QuestDataStrc *pQuestData) {
+      D2QuestDataA1Q5Strc *pDVar1;
+      pDVar1 = pQuestData->pA1Q5;
+      g((int)pDVar1);
+      return (int)pDVar1;
+    }`;
+    assert.strictEqual(flat(run(src)), flat(run(src, {})));
+  });
+
+  it('leaves a store inside an expression and a life that would need more casts than it saves', () => {
+    const inExpr = `int f(D2UnitStrc *p, int nStatId) { if ((nStatId = (int)Units::GetRoom(p)) != 0) h((D2RoomStrc *)nStatId); return 0; }`;
+    assert.strictEqual(flat(run(inExpr)), flat(run(inExpr, {})));
+    const ints = `int f(D2UnitStrc *p, int nStatId) { g(nStatId); nStatId = (int)Units::GetRoom(p); return nStatId + nStatId * 2 + (int)(D2RoomStrc *)nStatId; }`;
+    assert.ok(!/pRoom/.test(run(ints)), run(ints));
+  });
+
+  it('moves an update with its life, through the declared type', () => {
+    const out = run(`int f(int nAlpha, int n) {
+      g(nAlpha);
+      nAlpha = (int)Units::GetRoom(0);
+      do {
+        *(float *)(nAlpha + 4) = 1.0;
+        *(float *)nAlpha = 2.0;
+        h((D2RoomStrc *)nAlpha);
+        nAlpha = nAlpha + 0x120;
+        n = n - 1;
+      } while (n != 0);
+      return 0;
+    }`);
+    has(out, 'D2RoomStrc *pRoom;');
+    has(out, '*(float *)((int)pRoom + 4) = 1.0;');
+    has(out, '*(float *)pRoom = 2.0;');
+    has(out, 'pRoom = (D2RoomStrc *)((int)pRoom + 0x120);');
+  });
+
+  it('computes what the merged variable computed', native, () => {
+    const prelude = `
+      #include <stdint.h>
+      struct D2RoomStrc { int a; float f[4]; D2RoomStrc *pNext; };
+      static D2RoomStrc gRooms[3];
+      namespace Units { static D2RoomStrc *GetRoom(int i) { return &gRooms[i]; } }
+      static int g(int x) { return x * 3; }
+      static int h(D2RoomStrc *r) { return r->a; }`;
+    const fn = `int f(int nAlpha, int n) {
+        int nSum;
+        int nSkillId;
+        nSum = g(nAlpha);
+        nAlpha = (int)(intptr_t)Units::GetRoom(1);
+        do {
+          *(float *)(nAlpha + 4) = 1.5f;
+          nSum = nSum + h((D2RoomStrc *)nAlpha) + (int)*(float *)(nAlpha + 4);
+          nAlpha = nAlpha + 0x18;
+          n = n - 1;
+        } while (n != 0);
+        nSkillId = (int)(intptr_t)Units::GetRoom(0);
+        nSkillId++;
+        nSkillId = nSkillId + 3;
+        return nSum + h((D2RoomStrc *)(intptr_t)nAlpha) + (int)(nSkillId & 0xff);
+      }`;
+    const out = run(fn);
+    const call = 'gRooms[0].a = 5; gRooms[1].a = 7; gRooms[2].a = 9; printf("%d\\n", f(4, 2));';
+    assert.strictEqual(compileAndRun(prelude + out, call), compileAndRun(prelude + fn, call));
+  });
+});

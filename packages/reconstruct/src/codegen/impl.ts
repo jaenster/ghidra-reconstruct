@@ -3152,6 +3152,25 @@ function transformDecompiledCode(
         enumConstants: context.funcPtrArgCasts.enumConstantNames,
         enumValues: context.funcPtrArgCasts.enumValues,
       };
+      perPluginOptions['split-lives'] = {
+        functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        structFields: context.funcPtrArgCasts.structFields,
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        enumConstants: context.funcPtrArgCasts.enumConstantNames,
+        // The frame and the callee reach frame-group-locals is given: a local it may
+        // make a member of a frame object is not split.
+        slots: enclosing?.stackSlots,
+        reportName: `${funcAddress ?? '???'}\t${funcName ?? '<unknown>'}`,
+        // A call storing through `&v` before it reads (from the callee's body) starts a new value.
+        ...(context.funcPtrArgCasts.outParams ? {
+          outParamWidth: (callee: string, index: number) => context.funcPtrArgCasts!.outParams!.outParamWidth(callee, index),
+        } : {}),
+        ...(context?.funcPtrArgCasts?.paramReach ? {
+          argReach: (callee: string, index: number, argCount: number) => context.funcPtrArgCasts!.paramReach!.argReach(callee, index, argCount),
+          computedArgReach: (callee: Expression, index: number, argCount: number) => context.funcPtrArgCasts!.paramReach!.argReachThrough(callee, index, argCount),
+        } : {}),
+      };
       perPluginOptions['aggregate-zero-init'] = {
         structLayouts: context.funcPtrArgCasts.structLayouts,
         aggregateSizes: context.funcPtrArgCasts.aggregateSizes,

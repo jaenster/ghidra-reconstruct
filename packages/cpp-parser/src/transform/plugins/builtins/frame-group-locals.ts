@@ -509,7 +509,7 @@ function parentMap(root: ASTNode): Map<ASTNode, ASTNode> {
  * Whether passing `&local` as argument `index` of `call` needs the frame around the
  * local kept: the callee reaches outside `[0, sizeof local)`, or nobody can say.
  */
-function callNeedsFrame(
+export function callNeedsFrame(
   call: CallExpr,
   index: number,
   local: string,
@@ -600,7 +600,7 @@ interface MovableLocal {
  * declaration-statement, with no storage specifier, and of a type whose size is
  * known. Anything else stays where it is — and ends any run that reaches it.
  */
-function movableLocals(
+export function movableLocals(
   body: CompoundStmt,
   aggregate?: (name: string) => TypeLayout | null,
 ): Map<string, MovableLocal> {
@@ -690,7 +690,7 @@ function destinationLocal(arg: Expression | undefined, movable: Map<string, Mova
  * largest one wins: the object has to be at least as big as the biggest write,
  * and a smaller write into the same buffer is not evidence against that.
  */
-function knownCountWrites(body: CompoundStmt, movable: Map<string, MovableLocal>): Map<string, number> {
+export function knownCountWrites(body: CompoundStmt, movable: Map<string, MovableLocal>): Map<string, number> {
   const writes = new Map<string, number>();
   for (const node of traverseAST(body)) {
     if (node.kind !== NodeKind.CallExpr) continue;

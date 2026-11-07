@@ -1052,6 +1052,8 @@ export { frameGroupLocalsPlugin, frameTypeLayout, type FrameGroupLocalsOptions, 
 import { stridedAccessPlugin } from './builtins/strided-access.js';
 import { reusedParamSlotPlugin } from './builtins/reused-param-slot.js';
 export { reusedParamSlotPlugin, splitReusedParameterSlots, type ReusedParamSlotOptions } from './builtins/reused-param-slot.js';
+import { splitLivesPlugin } from './builtins/split-lives.js';
+export { splitLivesPlugin, splitLives, type SplitLivesOptions } from './builtins/split-lives.js';
 export { stridedAccessPlugin, rewriteStridedAccesses, type StridedAccessOptions, type StructLayoutField } from './builtins/strided-access.js';
 import { allocMacrosPlugin } from './builtins/alloc-macros.js';
 export {
@@ -1077,6 +1079,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   adjShiftedPointerPlugin,     // Correctness: ADJ(p) on a shifted pointer -> (Container*)((char*)p - k), its containing record (priority 11)
   deadOutSlotStorePlugin,      // Correctness: a PUSH-reg slot store the next call overwrites through &local before any read -> dropped (priority 12.5)
   reusedParamSlotPlugin,       // Correctness: a dead parameter slot reused for a function pointer -> a funcdef local (priority 14)
+  splitLivesPlugin,            // Correctness: values VC8 kept in one slot, merged into one variable -> a local per later value (priority 14.2)
   threeByteAccessPlugin,       // Correctness: *(uint3 *)p → d2_load24(p), exactly three bytes (priority 14)
   scalarPieceArithmeticPlugin, // Matching: a scalar local's x._N_M_ pieces as shifts and masks on the local (priority 14.5)
   typeNormalizePlugin,         // Cleanup: uint → uint32_t, undefined4 → auto/uint32_t (priority 15)
