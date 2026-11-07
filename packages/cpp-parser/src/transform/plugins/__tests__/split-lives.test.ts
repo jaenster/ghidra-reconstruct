@@ -183,9 +183,24 @@ describe('split-lives', () => {
     assert.strictEqual(flat(run(src)), flat(run(src, {})));
   });
 
-  it('leaves a store inside an expression and a life that would need more casts than it saves', () => {
-    const inExpr = `int f(D2UnitStrc *p, int nStatId) { if ((nStatId = (int)Units::GetRoom(p)) != 0) h((D2RoomStrc *)nStatId); return 0; }`;
-    assert.strictEqual(flat(run(inExpr)), flat(run(inExpr, {})));
+  it('a store inside a condition moves; a zero test reads the pointer as it read the integer', () => {
+    const out = run(`int f(D2UnitStrc *p, int nStatId) { g(nStatId); if ((nStatId = (int)Units::GetRoom(p)) != 0) h((D2RoomStrc *)nStatId); return 0; }`);
+    has(out, 'if ((pRoom = Units::GetRoom(p)) != 0) h(pRoom);');
+  });
+
+  it('a store whose value the expression uses as a number keeps the declared type there', () => {
+    const out = run(`int f(D2UnitStrc *p, int nStatId) { g(nStatId); k((nStatId = (int)Units::GetRoom(p)) + 4); h((D2RoomStrc *)nStatId); h((D2RoomStrc *)nStatId); return 0; }`);
+    has(out, 'k((int)(pRoom = Units::GetRoom(p)) + 4);');
+  });
+
+  it('leaves a store that only some evaluations make, and one beside a read of the variable', () => {
+    const sometimes = `int f(D2UnitStrc *p, int nStatId, int c) { g(nStatId); if (c && (nStatId = (int)Units::GetRoom(p)) != 0) h((D2RoomStrc *)nStatId); return 0; }`;
+    assert.strictEqual(flat(run(sometimes)), flat(run(sometimes, {})));
+    const beside = `int f(D2UnitStrc *p, int nStatId) { g(nStatId); if ((nStatId = (int)Units::GetRoom(p)) != nStatId) h((D2RoomStrc *)nStatId); return 0; }`;
+    assert.strictEqual(flat(run(beside)), flat(run(beside, {})));
+  });
+
+  it('leaves a life that would need more casts than it saves', () => {
     const ints = `int f(D2UnitStrc *p, int nStatId) { g(nStatId); nStatId = (int)Units::GetRoom(p); return nStatId + nStatId * 2 + (int)(D2RoomStrc *)nStatId; }`;
     assert.ok(!/pRoom/.test(run(ints)), run(ints));
   });
@@ -267,5 +282,89 @@ describe('split-lives', () => {
     const out = run(fn);
     const call = 'gRooms[0].a = 5; gRooms[1].a = 7; gRooms[2].a = 9; printf("%d\\n", f(4, 2));';
     assert.strictEqual(compileAndRun(prelude + out, call), compileAndRun(prelude + fn, call));
+  });
+
+  it('GAMBLE_GenerateGambleInventory: int and int32_t reads are one integer type', () => {
+    const out = run(`int f(D2UnitStrc *pPlayerUnit, int nLevel) {
+      g(pPlayerUnit);
+      pPlayerUnit = (D2UnitStrc *)(nLevel - 5);
+      if ((intptr_t)pPlayerUnit > 5) h((int32_t)pPlayerUnit);
+      return (int)pPlayerUnit;
+    }`);
+    has(out, 'nPlayerUnit = nLevel - 5;');
+    has(out, 'if (nPlayerUnit > 5) h(nPlayerUnit);');
+  });
+
+  it('an uncast read passed to a pointer parameter types the life', () => {
+    const out = run(`int f(D2UnitStrc *p, int nStatId) {
+      g(nStatId);
+      nStatId = (int)Units::GetRoom(p);
+      Use(nStatId);
+      Use(nStatId);
+      return 0;
+    }`, { ...O, functionParamTypes: { Use: ['D2RoomStrc *'] } });
+    has(out, 'pRoom = Units::GetRoom(p);');
+    has(out, 'Use(pRoom); Use(pRoom);');
+  });
+
+  it('SKILLDESC_DrawSkillDmgAura: a life a call updates through its address moves with the call', () => {
+    const src = `int f(D2UnitStrc *nMinDamage, int a) {
+      g(nMinDamage);
+      nMinDamage = (D2UnitStrc *)(a + 1);
+      Adjust((int *)&nMinDamage);
+      Draw((int32_t)nMinDamage);
+      return (int32_t)nMinDamage;
+    }`;
+    const out = run(src, { ...O, argReach: () => ({ lo: 0, hi: 4 }) as never });
+    has(out, 'nMinDamage2 = a + 1;');
+    has(out, 'Adjust((int*)&nMinDamage2);');
+    has(out, 'Draw(nMinDamage2);');
+    has(out, 'g(nMinDamage);');
+  });
+
+  it('a truth test and a comparison with a constant read either type', () => {
+    const out = run(`int f(D2UnitStrc *pBuffer, int a) {
+      g(pBuffer);
+      pBuffer = (D2UnitStrc *)(a * 2);
+      if (!pBuffer) return 0;
+      if (pBuffer != (D2UnitStrc *)0x202) h((int)pBuffer);
+      return (int)pBuffer + (int)pBuffer;
+    }`);
+    has(out, 'if (!nBuffer) return 0;');
+    has(out, 'if (nBuffer != 0x202) h(nBuffer);');
+  });
+
+  it('SFILE_AudioStreamListDeleteNode: a value loaded through the pointer is a pointer store', () => {
+    const src = `int f(TSLink *pPrev) {
+      g(pPrev);
+      pPrev = pPrev->pNext;
+      return (intptr_t)pPrev <= 0 ? 0 : (uint32_t)pPrev;
+    }`;
+    const out = run(src, { ...O, structFields: { TSLink: { pNext: 'TSLink *' } } });
+    assert.ok(!/int nPrev/.test(out), out);
+  });
+
+  it('LoadMerc: an integer sum with an address is an address, so it stays a pointer', () => {
+    const src = `int f(D2MercSaveDataStrc *pSave, D2MercSaveDataStrc *pData, int nMax) {
+      g(pSave);
+      pSave = (D2MercSaveDataStrc *)((intptr_t)&pData->dwFlags + 1);
+      if ((intptr_t)pSave > nMax) return (int32_t)pSave;
+      return (int32_t)pSave;
+    }`;
+    assert.ok(!/nSave/.test(run(src)), run(src));
+  });
+
+  it('a self step through an address cast stays an integer step', () => {
+    const out = run(`int f(void *pCallbackData, D2RoomStrc **pp, int n) {
+      g(pCallbackData);
+      pCallbackData = (void *)0x0;
+      do {
+        h(pp[(int)pCallbackData]);
+        h(pp[(int)pCallbackData]);
+        pCallbackData = (void *)((int)pCallbackData + 1);
+      } while ((int)pCallbackData < n);
+      return 0;
+    }`);
+    has(out, 'h(pp[nCallbackData]);');
   });
 });

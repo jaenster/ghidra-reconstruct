@@ -3165,7 +3165,10 @@ function transformDecompiledCode(
         // A call storing through `&v` before it reads (from the callee's body) starts a new value.
         ...(context.funcPtrArgCasts.outParams ? {
           outParamWidth: (callee: string, index: number) => context.funcPtrArgCasts!.outParams!.outParamWidth(callee, index),
+          outParamWidthNonNull: (callee: string, index: number) => context.funcPtrArgCasts!.outParams!.outParamWidthNonNull(callee, index),
         } : {}),
+        // Where an argument's value goes: an uncast read's type.
+        functionParamTypes: context.funcPtrArgCasts.functionParamTypes,
         ...(context?.funcPtrArgCasts?.paramReach ? {
           argReach: (callee: string, index: number, argCount: number) => context.funcPtrArgCasts!.paramReach!.argReach(callee, index, argCount),
           computedArgReach: (callee: Expression, index: number, argCount: number) => context.funcPtrArgCasts!.paramReach!.argReachThrough(callee, index, argCount),

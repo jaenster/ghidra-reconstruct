@@ -58,7 +58,7 @@ import type { TransformPlugin, PluginOptions } from '../types.js';
 import { buildFunctionFlow, calleeSpelling, ENTRY_DEF, type FunctionFlow, type Reach } from '../../cfg/index.js';
 import { callNeedsFrame, frameAliasOffset, knownCountWrites, movableLocals } from './frame-group-locals.js';
 import { stackNameOffset, type StackSlot } from './stack-frame-address.js';
-import { unwrapParens } from './call-arg-cast.js';
+import { unwrapParens, calleeName, bareName, typeFromSpelling } from './call-arg-cast.js';
 import {
   evidentType, isConstantStore, sameType, spellingOf, valueLocalName, wordClass,
   type ReusedParamSlotOptions,
@@ -67,6 +67,8 @@ import {
 export interface SplitLivesOptions extends PluginOptions {
   /** Callable name (bare AND qualified) -> declared return type, for a store's value type. */
   functionReturnTypes?: Record<string, string>;
+  /** Callable name (bare AND qualified) -> its parameter type spellings: where an argument's value goes. */
+  functionParamTypes?: Record<string, string[]>;
   /** Aggregate -> field -> declared spelling. */
   structFields?: Record<string, Record<string, string>>;
   /** Field name -> spelling, where every aggregate declaring it agrees. */
@@ -88,6 +90,11 @@ export interface SplitLivesOptions extends PluginOptions {
   computedArgReach?: (callee: Expression, index: number, argCount: number) => Reach;
   /** A callee's out-parameter width at an argument position (from its body), or null. */
   outParamWidth?: (callee: string, index: number) => number | null;
+  /**
+   * The same, for an argument that is not null (`&v` never is): a store the callee guards
+   * with its own null test of the parameter is made on every path such a call takes.
+   */
+  outParamWidthNonNull?: (callee: string, index: number) => number | null;
   /** The function as the run's report names it (address and name); the body's own name otherwise. */
   reportName?: string;
   /** One line per variable the pass split or refused, for the run's report. */
@@ -113,6 +120,11 @@ interface Write {
    */
   placeholder?: Expression;
   castType?: TypeNode;
+  /**
+   * An 'assign' inside a larger expression (`if ((v = f()) != 0)`, `a = (v = x, y)`),
+   * evaluated whenever its node is; true when the enclosing expression uses its value.
+   */
+  nested?: { consumed: boolean };
 }
 
 interface Occurrence {
@@ -125,6 +137,27 @@ interface Occurrence {
    * and pointer-word-cast spells with a pointer-sized integer.
    */
   offset: CStyleCastExpr | null;
+  /**
+   * An integer cast of the value inside such a displacement, `(T *)((int)p + 4)`: the
+   * pointer cast the address arithmetic ends in. The value is read as an address, not as
+   * a number.
+   */
+  via: CStyleCastExpr | null;
+  /**
+   * An uncast read the value goes straight on from: the type of the parameter it is
+   * passed to, of the place it is stored to, or the function's return type.
+   */
+  sink: TypeNode | null;
+  /**
+   * An uncast read only tested for truth (`!v`, `if (v)`, `v && x`, `v == 0`): a pointer
+   * and an integer of the same bits test alike, so it needs no cast in either type.
+   */
+  truth: boolean;
+  /**
+   * An uncast read compared for (in)equality with a constant, `v != (char *)0x202`: the
+   * constant, cast or bare. Equal bits compare equal in either type.
+   */
+  eqWith: Expression | null;
 }
 
 class UnionFind {
@@ -180,10 +213,113 @@ function wholeWrite(flow: FunctionFlow, node: number, v: string): Write | null {
   return null;
 }
 
+/**
+ * The write a node makes of `v` from inside a larger expression, `if ((v = f()) != 0)` or
+ * `a = (v = x, y)`: a plain `v = e` reached only through operands that are always
+ * evaluated (not the right of `&&`/`||`, not a branch of `?:`, not under `&` or `sizeof`),
+ * and the only mention of v in the node - a read beside it would see one value or the
+ * other by evaluation order, which the node-level dataflow does not model. Null otherwise.
+ */
+function nestedWrite(flow: FunctionFlow, node: number, v: string): Write | null {
+  const own = flow.ownExprs(node);
+  let mentions = 0;
+  for (const e of own) {
+    for (const id of findNodesByKind(e as unknown as ASTNode, NodeKind.Identifier)) if ((id as Identifier).name === v) mentions++;
+  }
+  if (mentions !== 1) return null;
+  /**
+   * How the enclosing expression uses a value: not at all, only as a truth value (a
+   * condition, an operand of `!`, `&&`, `||`, a comparison with 0) - where a pointer and
+   * an integer of the same bits test alike - or as a value of its type.
+   */
+  type Use = 'none' | 'truth' | 'value';
+  const isZero = (e: Expression) => { const u = unwrapParens(e); return u.kind === NodeKind.IntegerLiteral && (u as unknown as { value: bigint }).value === 0n; };
+  let found: Write | null = null;
+  const visit = (x: unknown, sure: boolean, use: Use): void => {
+    if (found || !x || typeof x !== 'object') return;
+    const n = x as ASTNode;
+    switch (n.kind) {
+      case NodeKind.AssignExpr: {
+        const a = n as AssignExpr;
+        if (a.operator === '=' && isIdent(a.left, v)) {
+          if (sure) found = { node, expr: a as unknown as Expression, kind: 'assign', nested: { consumed: use === 'value' } };
+          return;
+        }
+        visit(a.right, sure, 'value');
+        visit(a.left, sure, 'value');
+        return;
+      }
+      case NodeKind.ParenExpr:
+        visit((n as unknown as { expression: Expression }).expression, sure, use);
+        return;
+      case NodeKind.CommaExpr: {
+        const xs = (n as unknown as { expressions: Expression[] }).expressions;
+        xs.forEach((e, i) => visit(e, sure, i === xs.length - 1 ? use : 'none'));
+        return;
+      }
+      case NodeKind.BinaryExpr: {
+        const b = n as BinaryExpr;
+        const logical = b.operator === '&&' || b.operator === '||';
+        const zeroTest = b.operator === '==' || b.operator === '!=';
+        visit(b.left, sure, logical || (zeroTest && isZero(b.right)) ? 'truth' : 'value');
+        visit(b.right, sure && !logical, logical || (zeroTest && isZero(b.left)) ? 'truth' : 'value');
+        return;
+      }
+      case NodeKind.ConditionalExpr: {
+        const c = n as unknown as { condition: Expression; thenExpr: Expression; elseExpr: Expression };
+        visit(c.condition, sure, 'truth');
+        visit(c.thenExpr, false, 'value');
+        visit(c.elseExpr, false, 'value');
+        return;
+      }
+      case NodeKind.UnaryExpr: {
+        const u = n as UnaryExpr;
+        if (u.operator === '&') return;
+        visit(u.operand, sure, u.operator === '!' ? 'truth' : 'value');
+        return;
+      }
+      case NodeKind.CStyleCastExpr:
+        visit((n as CStyleCastExpr).expression, sure, 'value');
+        return;
+      case NodeKind.CallExpr: {
+        const c = n as CallExpr;
+        visit(c.callee, sure, 'value');
+        for (const a of c.arguments) visit(a, sure, 'value');
+        return;
+      }
+      case NodeKind.SubscriptExpr:
+      case NodeKind.MemberExpr:
+      case NodeKind.PostfixExpr:
+        for (const [k, val] of Object.entries(n)) {
+          if (k === 'location' || k === 'leadingTrivia' || k === 'trailingTrivia' || k === 'type') continue;
+          if (val && typeof val === 'object' && 'kind' in (val as object)) visit(val, sure, 'value');
+        }
+        return;
+      default:
+        // Anything else (sizeof, a lambda, an initializer list): not followed.
+        return;
+    }
+  };
+  const stmt = flow.cfg.nodes[node].stmt;
+  const k = stmt?.kind;
+  // The value of an expression statement (or a for loop's increment) is discarded; a
+  // condition's is a truth value.
+  const top: Use = !stmt || k === NodeKind.ExprStmt ? 'none'
+    : k === NodeKind.IfStmt || k === NodeKind.WhileStmt || k === NodeKind.DoWhileStmt || k === NodeKind.ForStmt ? 'truth'
+    : 'value';
+  for (const e of own) visit(e, true, top);
+  return found;
+}
+
 /** The cast class a spelling has for this pass: a pointer, a 4-byte integer, or neither. */
 function classOf(spelling: string): WordClass | null {
   const c = wordClass(spelling);
   return c === 'ptr' || c === 'int' ? c : null;
+}
+
+function lookupName<T>(table: Record<string, T> | undefined, name: string): T | undefined {
+  if (!table) return undefined;
+  return table[name] ?? table[bareName(name)];
 }
 
 const INT_OPS = new Set(['+', '-', '*', '/', '%', '&', '|', '^', '<<', '>>']);
@@ -210,6 +346,34 @@ function valueClass(e: Expression, o: ReusedParamSlotOptions, localTypes: Readon
   return null;
 }
 const isNumber = (c: WordClass | 'enum' | null) => c === 'int' || c === 'enum';
+
+/**
+ * Whether `e` computes with the value of `v` itself, not only with something loaded
+ * through it (`v->pNext`, `*v`, `v[2]`).
+ */
+function steps(e: Expression, v: string): boolean {
+  const walk = (x: unknown): boolean => {
+    if (Array.isArray(x)) return x.some(walk);
+    if (!x || typeof x !== 'object') return false;
+    const n = x as ASTNode;
+    if (n.kind === NodeKind.Identifier) return (n as Identifier).name === v;
+    // `&v->f` is v's value plus an offset.
+    if (n.kind === NodeKind.UnaryExpr && (n as UnaryExpr).operator === '&') {
+      return findNodesByKind((n as UnaryExpr).operand as unknown as ASTNode, NodeKind.Identifier).some(id => (id as Identifier).name === v);
+    }
+    let base: Expression | null = null;
+    if (n.kind === NodeKind.MemberExpr && (n as unknown as { isArrow: boolean }).isArrow) base = (n as unknown as { object: Expression }).object;
+    else if (n.kind === NodeKind.UnaryExpr && (n as UnaryExpr).operator === '*') base = (n as UnaryExpr).operand;
+    else if (n.kind === NodeKind.SubscriptExpr) base = (n as unknown as { array: Expression }).array;
+    for (const [k, val] of Object.entries(n)) {
+      if (k === 'location' || k === 'leadingTrivia' || k === 'trailingTrivia' || k === 'type') continue;
+      if (base && val === base && isIdent(base, v)) continue;
+      if (val && typeof val === 'object' && walk(val)) return true;
+    }
+    return false;
+  };
+  return walk(e);
+}
 
 /** Every identifier in the body, declarations and references alike: names a new local must not take. */
 function namesIn(body: ASTNode): Set<string> {
@@ -303,10 +467,12 @@ function frameMembers(body: CompoundStmt, slots: readonly StackSlot[], o: SplitL
  * callee keeps no copy of it. Null when some `&v` is anything else.
  */
 function callScopedAddresses(statements: Statement[], v: string, o: SplitLivesOptions):
-  { statements: Statement[]; placeholders: Map<object, Expression>; outs: Map<object, TypeNode | null> } | null {
+  { statements: Statement[]; placeholders: Map<object, Expression>; outs: Set<object>; casts: Map<object, TypeNode | null> } | null {
   const placeholders = new Map<object, Expression>();
-  /** Placeholders handed to an out-parameter, with the pointer type the address is cast to. */
-  const outs = new Map<object, TypeNode | null>();
+  /** Placeholders handed to an out-parameter. */
+  const outs = new Set<object>();
+  /** Every placeholder's pointer type the address is cast to, null when it is not cast. */
+  const casts = new Map<object, TypeNode | null>();
   let bad = false;
   const visit = (x: unknown, chain: ASTNode[]): unknown => {
     if (bad) return x;
@@ -331,14 +497,16 @@ function callScopedAddresses(statements: Statement[], v: string, o: SplitLivesOp
       const ph = Expr.assign(Expr.identifier(v) as unknown as Expression, Expr.intLiteral(0) as unknown as Expression, '+=') as unknown as Expression;
       placeholders.set(ph, node as unknown as Expression);
       const callee = calleeSpelling(call);
-      const width = callee && o.outParamWidth ? o.outParamWidth(callee, index) : null;
-      if (width !== null && width >= 4) {
-        let cast: TypeNode | null = null;
-        for (let j = chain.length - 1; j > i; j--) {
-          if (chain[j].kind === NodeKind.CStyleCastExpr) { cast = (chain[j] as CStyleCastExpr).type; break; }
-        }
-        outs.set(ph, cast);
+      // `&v` is never null: a store the callee guards with its own null test is made.
+      const width = !callee ? null
+        : o.outParamWidthNonNull ? o.outParamWidthNonNull(callee, index)
+        : o.outParamWidth ? o.outParamWidth(callee, index) : null;
+      let cast: TypeNode | null = null;
+      for (let j = chain.length - 1; j > i; j--) {
+        if (chain[j].kind === NodeKind.CStyleCastExpr) { cast = (chain[j] as CStyleCastExpr).type; break; }
       }
+      casts.set(ph, cast);
+      if (width !== null && width >= 4) outs.add(ph);
       return ph;
     }
     const next = [...chain, node];
@@ -351,7 +519,7 @@ function callScopedAddresses(statements: Statement[], v: string, o: SplitLivesOp
     return copy ?? x;
   };
   const out = visit(statements, []) as Statement[];
-  return bad ? null : { statements: out, placeholders, outs };
+  return bad ? null : { statements: out, placeholders, outs, casts };
 }
 
 /** Put each `&v` back where its placeholder stands. */
@@ -396,6 +564,7 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
   const fnName = o.reportName ?? (fn.name as { name?: string })?.name ?? '?';
   const report = (line: string) => o.onReport?.(fnName, line);
   const params = fn.parameters.map(p => p as ParameterDecl).filter(p => p.name);
+  const returnType = (fn as unknown as { returnType?: TypeNode }).returnType ?? null;
   let statements = body.statements as Statement[];
 
   // Candidates: parameters and top-level locals of a word type, each name declared once.
@@ -421,6 +590,10 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
     if (!classOf(t) || /\bcode\b/.test(t)) { report(`${name}: other: type ${t}`); continue; }
     candidates.push(name);
   }
+  if (o.onReport) {
+    const considered = new Set([...params.map(p => p.name!.name), ...topLocals.keys()]);
+    for (const name of declCount.keys()) if (!considered.has(name)) report(`${name}: other: not declared bare at the top of the body`);
+  }
   if (candidates.length === 0) return null;
 
   const declared = new Set<string>(declCount.keys());
@@ -432,6 +605,26 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
   for (const p of params) taken.add(p.name!.name);
   const enumConstants = new Set(o.enumConstants ?? []);
   const evidentOptions = o as ReusedParamSlotOptions;
+  /**
+   * Whether an integer expression computes an address: `&x`, an integer cast of `&x` or of
+   * a pointer, or a sum or difference with one of those.
+   */
+  const addressValued = (e: Expression): boolean => {
+    const x = unwrapParens(e);
+    if (x.kind === NodeKind.UnaryExpr && (x as UnaryExpr).operator === '&') return true;
+    if (x.kind === NodeKind.CStyleCastExpr) {
+      if (classOf(spellingOf((x as CStyleCastExpr).type)) !== 'int') return false;
+      const inner = unwrapParens((x as CStyleCastExpr).expression);
+      if (inner.kind === NodeKind.UnaryExpr && (inner as UnaryExpr).operator === '&') return true;
+      const t = evidentType(inner, evidentOptions, localTypes);
+      return !!t && classOf(spellingOf(t)) === 'ptr';
+    }
+    if (x.kind === NodeKind.BinaryExpr && ((x as BinaryExpr).operator === '+' || (x as BinaryExpr).operator === '-')) {
+      const b = x as BinaryExpr;
+      return addressValued(b.left) || (b.operator === '+' && addressValued(b.right));
+    }
+    return false;
+  };
   let changed = false;
 
   for (const v of candidates) {
@@ -440,6 +633,9 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
     const work = proxied.statements;
     const placeholders = proxied.placeholders;
     const outs = proxied.outs;
+    const addressCasts = proxied.casts;
+    /** The `v` of each placeholder `v += 0`: not a read of its own. */
+    const placeholderIds = new Set<object>([...placeholders.keys()].map(ph => (ph as unknown as AssignExpr).left));
     const flow = buildFunctionFlow(work, declared);
     if (flow.isEscaped(v)) { report(`${v}: other: escaped`); continue; }
     if (!topLocals.has(v) && argAreaNamed) {
@@ -486,16 +682,16 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
           const handed = kinds(NodeKind.AssignExpr).filter(a => placeholders.has(a));
           const mentions = kinds(NodeKind.Identifier).filter(id => (id as Identifier).name === v).length;
           // One out-parameter call, and v named nowhere else in the node: a fresh value.
+          const castType = touches === 1 ? addressCasts.get(handed[0]) ?? undefined : undefined;
           if (touches === 1 && outs.has(handed[0]) && mentions === 1) {
-            const castType = outs.get(handed[0]) ?? undefined;
             writes.set(n.id, { node: n.id, expr: own[0], kind: 'out', placeholder: handed[0] as unknown as Expression, castType });
             continue;
           }
-          writes.set(n.id, { node: n.id, expr: own[0], kind: 'touch' });
+          writes.set(n.id, { node: n.id, expr: own[0], kind: 'touch', placeholder: touches === 1 ? handed[0] as unknown as Expression : undefined, castType });
           continue;
         }
       }
-      const w = wholeWrite(flow, n.id, v);
+      const w = wholeWrite(flow, n.id, v) ?? nestedWrite(flow, n.id, v);
       if (!w) { odd = true; break; }
       writes.set(n.id, w);
     }
@@ -535,53 +731,142 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
     for (const n of readNodes) webOf([...flow.reaching(n, v)][0]).reads.push(n);
     const entryRoot = uf.find(ENTRY_DEF);
 
-    // Every read occurrence in a node, with the cast directly around it. The left side of
-    // the node's own assignment is a write, not a read.
+    // Every read occurrence in a node, with the cast directly around it and, for an uncast
+    // read, the type of where its value goes. The left side of the node's own assignment is
+    // a write, not a read.
     const occurrencesIn = (node: number): Occurrence[] => {
       const w = writes.get(node);
       const lhs = w && w.kind === 'assign' ? unwrapParens((w.expr as AssignExpr).left) : null;
       const out: Occurrence[] = [];
-      const walk = (x: unknown, cast: CStyleCastExpr | null, offset: CStyleCastExpr | null): void => {
-        if (Array.isArray(x)) { for (const i of x) walk(i, null, null); return; }
+      /** A literal, possibly negated, possibly cast: a constant to compare with. */
+      const constant = (e: Expression): boolean => {
+        let u = unwrapParens(e);
+        if (u.kind === NodeKind.CStyleCastExpr) u = unwrapParens((u as CStyleCastExpr).expression);
+        return literalOf(u) !== null;
+      };
+      const walk = (x: unknown, cast: CStyleCastExpr | null, offset: CStyleCastExpr | null, sink: TypeNode | null,
+        truth = false, eqWith: Expression | null = null): void => {
+        if (Array.isArray(x)) { for (const i of x) walk(i, null, null, null); return; }
         if (!x || typeof x !== 'object') return;
         const node = x as ASTNode;
         if (node.kind === NodeKind.Identifier) {
-          if ((node as Identifier).name === v && node !== lhs) out.push({ id: node as Identifier, cast, offset: cast ? null : offset });
+          if ((node as Identifier).name === v && node !== lhs && !placeholderIds.has(node)) {
+            const bare = !cast && !offset;
+            out.push({
+              id: node as Identifier, cast, offset: cast ? null : offset,
+              via: cast && offset && classOf(spellingOf(cast.type)) === 'int' ? offset : null,
+              sink: bare ? sink : null,
+              truth: bare && truth,
+              eqWith: bare ? eqWith : null,
+            });
+          }
+          return;
+        }
+        if (node.kind === NodeKind.UnaryExpr && (node as UnaryExpr).operator === '!') {
+          walk((node as UnaryExpr).operand, null, null, null, true);
+          return;
+        }
+        if (!offset && node.kind === NodeKind.BinaryExpr) {
+          const b = node as BinaryExpr;
+          if (b.operator === '&&' || b.operator === '||') {
+            walk(b.left, null, null, null, true);
+            walk(b.right, null, null, null, true);
+            return;
+          }
+          if (b.operator === '==' || b.operator === '!=') {
+            const zero = (e: Expression) => { const u = unwrapParens(e); return u.kind === NodeKind.IntegerLiteral && (u as unknown as { value: bigint }).value === 0n; };
+            walk(b.left, null, null, null, zero(b.right), constant(b.right) ? b.right : null);
+            walk(b.right, null, null, null, zero(b.left), constant(b.left) ? b.left : null);
+            return;
+          }
+        }
+        if (node.kind === NodeKind.ConditionalExpr) {
+          const c = node as unknown as { condition: Expression; thenExpr: Expression; elseExpr: Expression };
+          walk(c.condition, null, null, null, true);
+          walk(c.thenExpr, null, null, null);
+          walk(c.elseExpr, null, null, null);
           return;
         }
         if (node.kind === NodeKind.CStyleCastExpr) {
           const c = node as CStyleCastExpr;
-          walk(unwrapParens(c.expression), c, classOf(spellingOf(c.type)) === 'ptr' ? c : null);
+          const cc = classOf(spellingOf(c.type));
+          // The life stepping itself, `p = (DT)((int)p + 1)`, is arithmetic on its own value,
+          // not an address read.
+          const step = lhs !== null && c === unwrapParens((w!.expr as AssignExpr).right) && sameType(spellingOf(c.type), dt);
+          // `(int)p` inside `(T *)(... + 4)` keeps the displacement it sits in.
+          walk(unwrapParens(c.expression), c, step ? null : cc === 'ptr' ? c : cc === 'int' ? offset : null, null);
           return;
         }
-        if (node.kind === NodeKind.ParenExpr) { walk((node as unknown as { expression: Expression }).expression, cast, offset); return; }
+        if (node.kind === NodeKind.ParenExpr) { walk((node as unknown as { expression: Expression }).expression, cast, offset, sink, truth, eqWith); return; }
         if (offset && node.kind === NodeKind.BinaryExpr) {
           const b = node as unknown as { operator: string; left: Expression; right: Expression };
           if (b.operator === '+' || b.operator === '-') {
-            // Only a literal displacement: `(T *)(&G + v)` indexes G with v, it does not
-            // make v the address.
-            const lit = (e: Expression) => unwrapParens(e).kind === NodeKind.IntegerLiteral;
-            walk(b.left, null, lit(b.right) ? offset : null);
-            walk(b.right, null, b.operator === '+' && lit(b.left) ? offset : null);
+            // Only a literal displacement or a scaled index (`i * 8`): `(T *)(&G + v)` indexes
+            // G with v, it does not make v the address.
+            const disp = (e: Expression) => {
+              const u = unwrapParens(e);
+              if (u.kind === NodeKind.IntegerLiteral) return true;
+              if (u.kind !== NodeKind.BinaryExpr) return false;
+              const m = u as unknown as { operator: string; left: Expression; right: Expression };
+              return (m.operator === '*' || m.operator === '<<')
+                && (unwrapParens(m.right).kind === NodeKind.IntegerLiteral || (m.operator === '*' && unwrapParens(m.left).kind === NodeKind.IntegerLiteral));
+            };
+            walk(b.left, null, disp(b.right) ? offset : null, null);
+            walk(b.right, null, b.operator === '+' && disp(b.left) ? offset : null, null);
             return;
           }
         }
+        if (node.kind === NodeKind.CallExpr) {
+          const c = node as CallExpr;
+          walk(c.callee, null, null, null);
+          const name = calleeName(c.callee);
+          const params = name ? lookupName(o.functionParamTypes, name) : undefined;
+          c.arguments.forEach((a, i) => {
+            const t = params && i < params.length ? typeFromSpelling(params[i]) : null;
+            walk(a, null, null, t);
+          });
+          return;
+        }
+        if (node.kind === NodeKind.AssignExpr && (node as AssignExpr).operator === '=') {
+          const a = node as AssignExpr;
+          walk(a.left, null, null, null);
+          walk(a.right, null, null, unwrapParens(a.left) === lhs ? null : evidentType(a.left, evidentOptions, localTypes));
+          return;
+        }
         for (const [k, val] of Object.entries(node)) {
           if (k === 'location' || k === 'leadingTrivia' || k === 'trailingTrivia' || k === 'type') continue;
-          if (val && typeof val === 'object') walk(val, null, null);
+          if (val && typeof val === 'object') walk(val, null, null, null);
         }
       };
-      walk(flow.ownExprs(node), null, null);
+      const stmt = flow.cfg.nodes[node].stmt;
+      const sk = stmt?.kind;
+      const returned = sk === NodeKind.ReturnStmt && returnType ? returnType : null;
+      const condition = sk === NodeKind.IfStmt || sk === NodeKind.WhileStmt || sk === NodeKind.DoWhileStmt || sk === NodeKind.ForStmt;
+      for (const e of flow.ownExprs(node)) walk(e, null, null, returned, condition);
       return out;
     };
 
     // Plan every web that moves before rewriting any.
     interface Move { web: Web; type: TypeNode; spelling: string; cls: WordClass; local: string }
     const moves: Move[] = [];
+    let laterRead = false;
+    /** One key per type when deciding: the 4-byte integer spellings are one type. */
+    const kind = (t: string) => classOf(t) === 'int' ? 'int' : t;
+    /** The spelling most of `types` carry, the earliest on a tie. */
+    const pick = (types: TypeNode[]): TypeNode => {
+      const n = new Map<string, number>();
+      for (const t of types) n.set(spellingOf(t), (n.get(spellingOf(t)) ?? 0) + 1);
+      let best = types[0];
+      for (const t of types) if (n.get(spellingOf(t))! > n.get(spellingOf(best))!) best = t;
+      return best;
+    };
     for (const [root, web] of webs) {
       if (root === entryRoot || web.reads.length === 0) continue;
-      // A value whose address a call is handed stays where the address points.
-      if (web.defs.some(d => writes.get(d)?.kind === 'touch')) continue;
+      laterRead = true;
+      if (web.defs.some(d => writes.get(d)?.kind === 'touch' && !writes.get(d)!.placeholder)) {
+        report(`${v}: touched: one call is handed its address twice`);
+        continue;
+      }
       const occ = web.reads.flatMap(n => occurrencesIn(n));
       // Stores: the value each one stores, its cast to the declared type off.
       const storeTypes: (string | null)[] = [];
@@ -589,55 +874,64 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
       for (const d of web.defs) {
         const w = writes.get(d)!;
         if (w.kind === 'compound') continue;
-        if (w.kind === 'out') {
-          // `(T **)&v` handed to an out-parameter: the call stores a T *.
-          const ct = w.castType ? spellingOf(w.castType) : '';
-          const t = /\*\s*\*$/.test(ct) && !/^void\s*\*\s*\*$/.test(ct) ? (w.castType as unknown as { pointee?: TypeNode }).pointee ?? null : null;
-          storeTypes.push(t ? spellingOf(t) : null);
+        if (w.kind === 'out' || w.kind === 'touch') {
+          // `(T *)&v` handed to a call: the call stores (or updates) a T.
+          const pointee = w.castType ? (w.castType as unknown as { pointee?: TypeNode }).pointee ?? null : null;
+          const ps = pointee ? spellingOf(pointee) : '';
+          const t = pointee && classOf(ps) && !/^void\s*\*$/.test(ps) ? pointee : null;
+          storeTypes.push(t ? ps : null);
           if (t) storeNodes.push(t);
           continue;
         }
         let x = unwrapParens((w.expr as AssignExpr).right);
         if (x.kind === NodeKind.CStyleCastExpr && sameType(spellingOf((x as CStyleCastExpr).type), dt)) x = unwrapParens((x as CStyleCastExpr).expression);
         if (isConstantStore(x, enumConstants, localTypes)) continue;
-        // `v = v + 0x120`: the life stepping itself says nothing about its type.
-        if (findNodesByKind(x as unknown as ASTNode, NodeKind.Identifier).some(id => (id as Identifier).name === v)) continue;
+        // `v = v + 0x120`: the life stepping itself says nothing about its type. A value
+        // loaded through it (`v = v->pNext`) has the type of what it loads.
+        if (steps(x, v)) continue;
         const t = evidentType(x, evidentOptions, localTypes);
+        // `(intptr_t)&p->f + 1`: arithmetic on an address is an address, whatever integer
+        // type the arithmetic is spelled in.
+        if ((!t || classOf(spellingOf(t)) === 'int') && addressValued(x)) { storeTypes.push('void*'); continue; }
         storeTypes.push(t ? spellingOf(t) : null);
         if (t) storeNodes.push(t);
       }
       // Stores of two different types meeting at one read: a join of two values. It stays
       // one variable, as the decompiler printed it.
-      const storedKinds = new Set(storeTypes.filter((t): t is string => t !== null && classOf(t) !== null && !sameType(t, dt)));
+      const storedKinds = new Set(storeTypes.filter((t): t is string => t !== null && classOf(t) !== null && !sameType(t, dt)).map(kind));
       if (storedKinds.size > 1) {
         report(`${v}: join: ${web.defs.length} stores of ${[...storedKinds].join(' | ')} reach ${web.reads.length} read nodes`);
         continue;
       }
-      const ptrCasts = occ.filter(c => c.cast && classOf(spellingOf(c.cast.type)) === 'ptr').map(c => c.cast!);
-      const intCasts = occ.filter(c => c.cast && classOf(spellingOf(c.cast.type)) === 'int').map(c => c.cast!);
+      // How each read takes the value: cast to a pointer or an integer, or passed uncast to
+      // a place of a pointer or integer type. An integer cast inside address arithmetic
+      // (`via`) reads an address and votes for no type.
+      const readAs = (c: Occurrence): TypeNode | null => c.cast && !c.via ? c.cast.type : !c.cast && c.sink ? c.sink : null;
+      const ptrReads = occ.map(readAs).filter((t): t is TypeNode => t !== null && classOf(spellingOf(t)) === 'ptr');
+      const intReads = occ.map(readAs).filter((t): t is TypeNode => t !== null && classOf(spellingOf(t)) === 'int');
+      const typedStores = storeNodes.filter(t => classOf(spellingOf(t)) !== null);
+      const storedOne = typedStores.length > 0 && storeTypes.every(t => t !== null) && new Set(typedStores.map(t => kind(spellingOf(t)))).size === 1;
       let target: TypeNode | null = null;
       let why = '';
       if (dtClass === 'int') {
         // A pointer life in an integer variable.
-        const read = new Set(ptrCasts.map(c => spellingOf(c.type)));
-        const stored = new Set(storeTypes);
+        const read = new Set(ptrReads.map(spellingOf));
         // A read that is a byte offset onto the value, `(T *)(v + 4)`, says the value is an
         // address, and of a T where nothing else says otherwise.
         const offsets = occ.filter(c => c.offset).map(c => c.offset!);
         const offsetTypes = new Set(offsets.map(c => spellingOf(c.type)));
-        if (read.size === 1) target = ptrCasts[0].type;
-        else if (storeTypes.length > 0 && stored.size === 1 && storeTypes[0] !== null && classOf(storeTypes[0]) === 'ptr') target = storeNodes[0];
+        if (read.size === 1) target = ptrReads[0];
+        else if (storedOne && classOf(spellingOf(typedStores[0])) === 'ptr') target = pick(typedStores);
         else if (read.size === 0 && storeTypes.every(t => t === null) && offsetTypes.size === 1) target = offsets[0].type;
-        else why = read.size === 0 ? 'no read casts it to a pointer' : `read as ${read.size} pointer types, stores ${[...stored].join('|') || 'none'}`;
+        else why = read.size === 0 ? 'no read casts it to a pointer' : `read as ${read.size} pointer types, stores ${[...new Set(storeTypes)].join('|') || 'none'}`;
       } else {
         // An integer life (or a pointer to another type) in a pointer variable.
-        const readInts = new Set(intCasts.map(c => spellingOf(c.type)));
-        const readPtrs = new Set(ptrCasts.map(c => spellingOf(c.type)).filter(s => !sameType(s, dt)));
-        const stored = new Set(storeTypes);
-        if (readInts.size === 1 && readPtrs.size === 0 && ptrCasts.length === 0) target = intCasts[0].type;
-        else if (readPtrs.size === 1 && intCasts.length === 0) target = ptrCasts.find(c => !sameType(spellingOf(c.type), dt))!.type;
-        else if (storeTypes.length > 0 && stored.size === 1 && storeTypes[0] !== null && classOf(storeTypes[0]) && !sameType(storeTypes[0], dt)) target = storeNodes[0];
-        else why = `reads ${[...readInts, ...readPtrs].join('|') || 'uncast'}, stores ${[...stored].join('|') || 'none'}`;
+        const readPtrs = new Set(ptrReads.map(spellingOf).filter(s => !sameType(s, dt)));
+        const ptrCastCount = occ.filter(c => c.cast && !c.via && classOf(spellingOf(c.cast.type)) === 'ptr').length;
+        if (intReads.length > 0 && readPtrs.size === 0 && ptrCastCount === 0) target = pick(intReads);
+        else if (readPtrs.size === 1 && intReads.length === 0) target = ptrReads.find(t => !sameType(spellingOf(t), dt))!;
+        else if (storedOne && !sameType(spellingOf(typedStores[0]), dt)) target = pick(typedStores);
+        else why = `reads ${[...new Set([...intReads, ...ptrReads].map(spellingOf))].join('|') || 'uncast'}, stores ${[...new Set(storeTypes)].join('|') || 'none'}`;
       }
       if (!target) {
         const stored = new Set(storeTypes.filter(s => s !== null));
@@ -647,8 +941,8 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
       }
       const spelling = spellingOf(target);
       const cls = classOf(spelling);
-      if (!cls || /\bcode\b/.test(spelling) || /\bundefined\b/.test(spelling) || sameType(spelling, dt)) continue;
-      if (cls === 'int' && dtClass === 'int') continue;
+      if (!cls || /\bcode\b/.test(spelling) || /\bundefined\b/.test(spelling) || sameType(spelling, dt)) { report(`${v}: same: its life reads as ${spelling}`); continue; }
+      if (cls === 'int' && dtClass === 'int') { report(`${v}: same: an integer life in an integer`); continue; }
       // A life that stores a pointer is a pointer life, whatever its reads cast it to: an
       // integer local would hold an address in an int, which truncates it where a pointer
       // is wider than an int.
@@ -660,16 +954,32 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
       // Width casts the move removes and the ones it needs.
       let gain = 0, cost = 0;
       for (const c of occ) {
-        const cc = c.cast ? classOf(spellingOf(c.cast.type)) : null;
         if (c.offset && cls === 'ptr' && dtClass === 'int') { gain++; continue; }
-        if (!c.cast || !cc) { if (cls !== dtClass) cost++; continue; }
+        // Address arithmetic through an integer: a pointer life keeps it as it is, an
+        // integer one turns its pointer cast into an integer-to-pointer one.
+        if (c.via) { if (cls === 'int') cost++; continue; }
+        const cc = c.cast ? classOf(spellingOf(c.cast.type)) : null;
+        if (!c.cast && !c.offset && (c.truth || (c.eqWith && cls === 'int'))) continue;
+        if (!c.cast) {
+          const sc = c.sink ? classOf(spellingOf(c.sink)) : null;
+          if (sc === cls && cls !== dtClass) gain++;
+          else if (cls !== dtClass) cost++;
+          continue;
+        }
+        if (!cc) {
+          // An enum read of an integer life converts an integer, not an address.
+          if (cls === 'int' && wordClass(spellingOf(c.cast.type)) === 'enum') gain++;
+          else if (cls !== dtClass) cost++;
+          continue;
+        }
         if (cc !== dtClass && cc === cls) gain++;
         else if (cc === dtClass && cc !== cls) cost++;
       }
       for (const d of web.defs) {
         const w = writes.get(d)!;
         if (w.kind === 'compound') { if (cls !== dtClass) cost += 2; continue; }
-        if (w.kind === 'out') continue;
+        if (w.kind === 'out' || w.kind === 'touch') continue;
+        if (w.nested?.consumed && cls !== dtClass) cost++;
         const rhs = unwrapParens((w.expr as AssignExpr).right);
         if (rhs.kind === NodeKind.CStyleCastExpr && sameType(spellingOf((rhs as CStyleCastExpr).type), dt)) {
           const t = evidentType(unwrapParens((rhs as CStyleCastExpr).expression), evidentOptions, localTypes);
@@ -686,6 +996,7 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
       taken.add(local);
       moves.push({ web, type: target, spelling, cls, local });
     }
+    if (moves.length === 0 && !laterRead) report(`${v}: joined: every value read is the entry value`);
     if (moves.length === 0) continue;
     // A local with one value that is read is one variable of the wrong type, not several
     // sharing a slot: its type is Ghidra's to fix. A parameter's slot holding one other
@@ -707,20 +1018,44 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
         const w = writes.get(n);
         if (w && w.kind === 'compound') continue; // rewritten whole below
         for (const c of occurrencesIn(n)) {
-          if (!c.cast) { replace.set(c.id, () => castTo(declaredType, ident())); continue; }
+          if (!c.cast && !c.offset && c.truth) { replace.set(c.id, () => ident()); continue; }
+          if (!c.cast && !c.offset && c.eqWith && m.cls === 'int') {
+            // `v != (char *)0x202` -> `n != 0x202`.
+            const other = unwrapParens(c.eqWith);
+            const k = literalOf(other.kind === NodeKind.CStyleCastExpr ? unwrapParens((other as CStyleCastExpr).expression) : other)!;
+            replace.set(c.id, () => ident());
+            replace.set(c.eqWith, () => k);
+            continue;
+          }
+          if (!c.cast) {
+            const sink = c.sink;
+            const sc = sink ? spellingOf(sink) : null;
+            if (sink && sc && !c.offset && classOf(sc) === m.cls) {
+              // The value goes on to a place of its own class: the local itself, converted
+              // to a pointer of another type where the place's type names one.
+              const plain = m.cls === 'int' || sameType(sc, m.spelling) || /^(?:const )?void\*$/.test(sc);
+              replace.set(c.id, () => plain ? ident() : castTo(sink, ident()));
+              continue;
+            }
+            replace.set(c.id, () => castTo(declaredType, ident()));
+            continue;
+          }
           const ct = spellingOf(c.cast.type);
           const cc = classOf(ct);
           const castType = c.cast.type;
           if (sameType(ct, m.spelling)) replace.set(c.cast, () => ident());
           else if (cc === 'ptr' && m.cls === 'ptr') replace.set(c.cast, () => Expr.cast(castType, ident()) as unknown as Expression);
+          // An address as an integer is the same bits whatever the pointer's type.
+          else if (cc === 'int' && m.cls === 'ptr' && dtClass === 'ptr') replace.set(c.cast, () => Expr.cast(castType, ident()) as unknown as Expression);
           else if (cc === 'int' && m.cls === 'int') replace.set(c.cast, () => Expr.cast(castType, ident()) as unknown as Expression);
           else if (sameType(ct, dt)) replace.set(c.cast, () => Expr.cast(castType, ident()) as unknown as Expression);
+          else if (m.cls === 'int' && wordClass(ct) === 'enum') replace.set(c.cast, () => Expr.cast(castType, ident()) as unknown as Expression);
           else replace.set(c.cast, () => Expr.cast(castType, castTo(declaredType, ident())) as unknown as Expression);
         }
       }
       for (const d of m.web.defs) {
         const w = writes.get(d)!;
-        if (w.kind === 'out') {
+        if (w.kind === 'out' || w.kind === 'touch') {
           // The call is handed the new local's address instead.
           replace.set(w.placeholder!, () => Expr.addressOf(ident()) as unknown as Expression);
           continue;
@@ -748,6 +1083,8 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
           innerType = t ? spellingOf(t)
             : m.cls === 'int' && isNumber(valueClass(inner, evidentOptions, localTypes, enumConstants)) ? m.spelling : null;
         }
+        // A store whose value its expression goes on to use keeps the declared type there.
+        const keep = (store: Expression): Expression => w.nested?.consumed ? castTo(declaredType, Expr.paren(store) as unknown as Expression) : store;
         replace.set(a, (rebuilt) => {
           const ra = rebuilt as AssignExpr;
           let value: Expression;
@@ -759,13 +1096,13 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
           } else if (inner && innerType && classOf(innerType) === m.cls) {
             // The value the store converted to the declared type: store it as it is.
             const rc = unwrapParens(ra.right);
-            if (rc.kind !== NodeKind.CStyleCastExpr) return Expr.assign(ident(), Expr.cast(m.type, Expr.paren(ra.right) as unknown as Expression) as unknown as Expression) as unknown as Expression;
+            if (rc.kind !== NodeKind.CStyleCastExpr) return keep(Expr.assign(ident(), Expr.cast(m.type, Expr.paren(ra.right) as unknown as Expression) as unknown as Expression) as unknown as Expression);
             const ri = unwrapParens((rc as CStyleCastExpr).expression);
             value = sameType(innerType, m.spelling) ? ri : Expr.cast(m.type, Expr.paren(ri) as unknown as Expression) as unknown as Expression;
           } else {
             value = Expr.cast(m.type, Expr.paren(ra.right) as unknown as Expression) as unknown as Expression;
           }
-          return Expr.assign(ident(), value) as unknown as Expression;
+          return keep(Expr.assign(ident(), value) as unknown as Expression);
         });
       }
       report(`${v}: split: ${m.local} ${m.spelling} (${m.web.defs.length} stores, ${m.web.reads.length} read nodes)`);
