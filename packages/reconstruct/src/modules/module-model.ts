@@ -16,6 +16,7 @@
 
 import type { ModuleConfig, ModuleDependency, ModuleKind } from '../config/schema.js';
 import { namespaceDirectory, type ModuleLibrariesConfig, type ModuleLibraryConfig } from './module-libraries.js';
+import { UNIT_ORDER_RULES } from './unit-order.js';
 
 export const MODULE_KINDS: readonly ModuleKind[] = ['exe', 'dll-module', 'headers-only', '3rdparty', 'ours'];
 
@@ -114,6 +115,9 @@ export function validateModules(modules: Record<string, ModuleConfig>): string[]
       problems.push(`${at}: a ${m.kind} owns at least one namespace`);
     }
     if (m.strict !== undefined && typeof m.strict !== 'boolean') problems.push(`${at}.strict must be a boolean`);
+    if (m.unitOrder !== undefined && !(UNIT_ORDER_RULES as readonly string[]).includes(m.unitOrder)) {
+      problems.push(`${at}.unitOrder must be one of ${UNIT_ORDER_RULES.join(', ')}`);
+    }
     for (const key of ['publicHeader', 'rootUnit'] as const) {
       const v = m[key];
       if (v !== undefined && (typeof v !== 'string' || v === '' || v.includes('/'))) problems.push(`${at}.${key} must be a file name`);

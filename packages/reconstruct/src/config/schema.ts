@@ -298,6 +298,12 @@ export interface ModuleConfig {
   exceptions?: ModuleException[];
   /** Place in the executable's link order (the 1.14d code runs). */
   linkOrder?: number;
+  /**
+   * The order of the module's units in its library: `original-address` is the 1.14d
+   * link's (each unit by its first function's address, modules/unit-order.ts), `path`
+   * (the default) path order.
+   */
+  unitOrder?: 'original-address' | 'path';
   /** A wrong-direction include is a compile error, not a report line. */
   strict?: boolean;
   /** Compiled into every module that used it (D2Hell): visible to all. */

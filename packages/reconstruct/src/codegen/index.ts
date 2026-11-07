@@ -2106,7 +2106,7 @@ export function generateProjectStage2(state: GenerationState): ReconstructedProj
   }
   // The module layout last: every file to its module's directory, every include after it.
   const modules = options.projectConfig?.modules;
-  const layout = isModuleModel(modules) ? applyModuleLayout(project, modules!, moduleGraph) : undefined;
+  const layout = isModuleModel(modules) ? applyModuleLayout(project, modules!, moduleGraph, options.projectConfig?.moduleRuns ?? []) : undefined;
   // Each file keeps the includes it uses and forward-declares what it only points at,
   // read off the finished tree, so a header stops carrying other modules' headers along.
   if (process.env.RECON_KEEP_ALL_INCLUDES !== '1') {

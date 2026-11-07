@@ -9,12 +9,13 @@
  * is written to change.
  */
 
-import type { ModuleConfig } from '../config/schema.js';
-import type { ReconstructedProject, SourceFile } from '../types.js';
+import type { ModuleConfig, ModuleRun } from '../config/schema.js';
+import type { ReconstructedProject, SourceFile, SourceMap } from '../types.js';
 import { ModuleGraph } from '../modules/module-libraries.js';
 import {
   ModuleLayout, MODULES_CMAKE_PATH, PUBLIC_HEADER_SUFFIX, dependencyList, linkOrdered, reachability, windowsModules,
 } from '../modules/module-model.js';
+import { orderUnits, runCounts, unitAddresses, type PlacedUnit } from '../modules/unit-order.js';
 
 const BANNER = `# Generated from project.json "modules" by ghidra-mcp ${String.fromCharCode(0x2014)} DO NOT EDIT; change the module table there`;
 
@@ -22,6 +23,7 @@ export function applyModuleLayout(
   project: ReconstructedProject,
   modules: Record<string, ModuleConfig>,
   graph: ModuleGraph | undefined,
+  runs: readonly ModuleRun[] = [],
 ): ModuleLayout {
   const layout = new ModuleLayout(modules);
   const generated = new Set(project.files.keys());
@@ -72,9 +74,10 @@ export function applyModuleLayout(
     const p = layout.publicHeaderPath(name);
     if (p && files.has(p)) publicHeaders.set(name, p);
   }
+  const units = moduleUnitOrders(modules, layout, files, sourceMaps.values(), runs);
   files.set(MODULES_CMAKE_PATH, {
     path: MODULES_CMAKE_PATH,
-    content: modulesCMake(modules, dataUnits, publicHeaders),
+    content: modulesCMake(modules, dataUnits, publicHeaders, units),
     type: 'header',
     functions: [],
     includes: [],
@@ -101,6 +104,37 @@ export function applyModuleLayout(
 }
 
 /**
+ * Each module with `unitOrder: "original-address"`: its units (the implementation
+ * files in its directory) in the 1.14d link's order, read off the source maps.
+ */
+export function moduleUnitOrders(
+  modules: Record<string, ModuleConfig>,
+  layout: ModuleLayout,
+  files: ReadonlyMap<string, SourceFile>,
+  maps: Iterable<SourceMap>,
+  runs: readonly ModuleRun[],
+): Map<string, PlacedUnit[]> {
+  const out = new Map<string, PlacedUnit[]>();
+  const ordered = windowsModules(modules).filter(n => modules[n].unitOrder === 'original-address');
+  if (ordered.length === 0) return out;
+  const addresses = unitAddresses(maps);
+  const counts = runCounts(addresses);
+  const unitsOf = new Map<string, string[]>();
+  for (const [path, file] of files) {
+    if (file.type !== 'implementation') continue;
+    const module = layout.moduleOfPath(path);
+    if (module === undefined) continue;
+    unitsOf.set(module, [...(unitsOf.get(module) ?? []), path]);
+  }
+  for (const name of ordered) {
+    // moduleRuns spells a module as attribution-v2 does (D2sound): matched case-blind.
+    const own = runs.filter(r => r.module.toLowerCase() === name.toLowerCase());
+    out.set(name, orderUnits(unitsOf.get(name) ?? [], addresses, own, counts));
+  }
+  return out;
+}
+
+/**
  * The include pass's preference: for a file of another module, a module's public
  * header before any internal header that provides the same name.
  */
@@ -112,6 +146,14 @@ export function publicHeaderRank(layout: ModuleLayout, files: ReadonlyMap<string
   }
   return (from, candidate) =>
     publicPaths.has(candidate) && layout.moduleOfPath(candidate) !== layout.moduleOfPath(from) ? 0 : 1;
+}
+
+/** Where a unit was placed from, as its comment in D2_MODULE_<m>_UNITS says it. */
+function unitNote(u: PlacedUnit): string {
+  if (u.first === undefined) return 'no function';
+  const at = u.first.toString(16).padStart(8, '0');
+  const runs = u.runs === 1 ? '1 run' : `${u.runs} runs`;
+  return `${at}${u.outside ? ' (outside the module\'s runs)' : ''}, ${runs}`;
 }
 
 /** A CMake list value: names never hold spaces or semicolons. */
@@ -126,6 +168,7 @@ export function modulesCMake(
   modules: Record<string, ModuleConfig>,
   dataUnits: ReadonlyMap<string, string>,
   publicHeaders: ReadonlyMap<string, string> = new Map(),
+  units: ReadonlyMap<string, readonly PlacedUnit[]> = new Map(),
 ): string {
   const names = linkOrdered(modules, windowsModules(modules));
   const reach = reachability(modules);
@@ -145,6 +188,12 @@ export function modulesCMake(
   L.push('#   D2_MODULE_<m>_STRICT       ON: a wrong-direction include is a compile error');
   L.push('#   D2_MODULE_<m>_GENERATED    ON: its code is generated from the Ghidra database');
   L.push('#   D2_MODULE_<m>_DATA         the unit holding its globals (Source/globals/<m>.cpp)');
+  L.push('#   D2_MODULE_<m>_UNIT_ORDER   original-address: its library takes its units in D2_MODULE_<m>_UNITS\'s');
+  L.push('#                              order; path: in path order');
+  L.push('#   D2_MODULE_<m>_UNITS        its units in the 1.14d link\'s order, each placed by the address of its');
+  L.push('#                              first function in the module\'s runs, with the count of runs its');
+  L.push('#                              functions form (a split unit); a unit with no function last. The data');
+  L.push('#                              unit is not among them: the library takes it after them');
   L.push('');
   L.push(`set(D2_MODULES ${list(names)})`);
   for (const name of names) {
@@ -167,6 +216,15 @@ export function modulesCMake(
     L.push(`set(D2_MODULE_${name}_STRICT ${m.strict ? 'ON' : 'OFF'})`);
     L.push(`set(D2_MODULE_${name}_GENERATED ${(m.namespaces ?? []).length > 0 || (m.files ?? []).length > 0 ? 'ON' : 'OFF'})`);
     L.push(`set(D2_MODULE_${name}_DATA "${dataUnits.get(name) ?? ''}")`);
+    const placed = units.get(name);
+    L.push(`set(D2_MODULE_${name}_UNIT_ORDER "${placed ? 'original-address' : 'path'}")`);
+    if (!placed || placed.length === 0) {
+      L.push(`set(D2_MODULE_${name}_UNITS )`);
+      continue;
+    }
+    L.push(`set(D2_MODULE_${name}_UNITS`);
+    for (const u of placed) L.push(`    ${u.path}  # ${unitNote(u)}`);
+    L.push(')');
   }
   L.push('');
   return L.join('\n');
