@@ -35,6 +35,7 @@ import {
 } from '@ghidra-mcp/reconstruct';
 import { foreignSourcesFingerprint } from '@ghidra-mcp/reconstruct/codegen/file-static-functions';
 import { ForeignSourceWatch, type RebuildOutcome } from './foreign-watch.js';
+import { LIVE_EXTRACTION_OPTIONS } from './exclude-patterns.js';
 import { decompileFunction } from '@ghidra-mcp/reconstruct/extract/functions';
 
 import { applyEvents, FactsRefreshError, type ChangeEvent as ModelChangeEvent, type ModelIndices } from './model.js';
@@ -328,8 +329,7 @@ export class LiveLoop {
     const options: ReconstructionOptions = {
       daemonUrl: this.cfg.daemonUrl,
       programPath: this.cfg.programPath,
-      decompileTimeout: 60,
-      excludeLibraryCode: false,
+      ...LIVE_EXTRACTION_OPTIONS,
     };
 
     // The local worker's journal is keyed by server version, so a model that has never

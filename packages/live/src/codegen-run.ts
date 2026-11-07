@@ -25,7 +25,7 @@ import { totalmem } from 'node:os';
 import { reconstruct } from '@ghidra-mcp/reconstruct';
 import { loadProjectConfig } from '@ghidra-mcp/reconstruct/config/index';
 import { configureCodegen } from '@ghidra-mcp/reconstruct/codegen-defaults';
-import { EXCLUDE_PATTERNS } from './exclude-patterns.js';
+import { LIVE_EXTRACTION_OPTIONS } from './exclude-patterns.js';
 
 
 async function main(): Promise<void> {
@@ -56,8 +56,7 @@ async function main(): Promise<void> {
       projectConfig: projectConfig ?? undefined,
     },
     {
-      decompileTimeout: 60,
-      excludeLibraryCode: false,
+      ...LIVE_EXTRACTION_OPTIONS,
       codegenOnly: true,
       snapshotDir,
       // The snapshot the daemon just wrote is seconds old by definition, but the
@@ -65,7 +64,6 @@ async function main(): Promise<void> {
       // carries over from the ORIGINAL extraction. Left at the default the
       // daemon would start refusing to rebuild a week after the last full run.
       snapshotMaxAgeHours: Number.POSITIVE_INFINITY,
-      excludePatterns: EXCLUDE_PATTERNS,
       // Shards, as the batch regen runs them (regen-local.sh, GHIDRA_GEN_WORKERS): the
       // batch tree is the oracle the daemon's tree is compared against, and it is
       // generated sharded. Each shard ships its per-unit records back, so reuse is
