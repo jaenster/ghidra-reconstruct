@@ -3514,6 +3514,14 @@ function transformDecompiledCode(
         typedefTargets: context.funcPtrArgCasts.typedefTargets,
         enclosingVarTypes,
       };
+      perPluginOptions['union-value-member'] = {
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        structFields: context.funcPtrArgCasts.structFields,
+        typedefTargets: context.funcPtrArgCasts.typedefTargets,
+        functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        enclosingVarTypes,
+      };
       perPluginOptions['context-register-field'] = {
         globalTypes: context.funcPtrArgCasts.globalTypes,
         fieldTypes: context.funcPtrArgCasts.fieldTypes,
