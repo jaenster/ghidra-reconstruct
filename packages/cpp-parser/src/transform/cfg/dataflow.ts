@@ -226,13 +226,26 @@ function escapedLocals(body: ASTNode): Set<string> {
   return out;
 }
 
+export interface FunctionFlowOptions {
+  /**
+   * Lower every if/loop condition holding `&&`, `||` or a comma into one node per operand
+   * (build.ts `shortCircuitConditions`): a write in `a || (v = f(), v == 0)` reaches only
+   * the paths that evaluate it, and is a whole write there. The if/loop node itself then
+   * evaluates nothing; its operands' nodes carry the expressions.
+   */
+  shortCircuitConditions?: boolean;
+}
+
 /**
  * Build the dataflow facts for a function body. `locals` names the parameters and every
  * local the body declares; any other identifier is treated as a global (escaped).
  */
-export function buildFunctionFlow(body: Statement[], locals: ReadonlySet<string>): FunctionFlow {
+export function buildFunctionFlow(body: Statement[], locals: ReadonlySet<string>, options: FunctionFlowOptions = {}): FunctionFlow {
   // Every label of the function is in the region, so no label counts as an outside entry.
-  const cfg = buildCfg(body, { externalGotoCounts: countGotoTargets(body) });
+  const cfg = buildCfg(body, {
+    externalGotoCounts: countGotoTargets(body),
+    shortCircuitConditions: options.shortCircuitConditions === true,
+  });
   const escaped = escapedLocals(body as unknown as ASTNode);
   const isEscaped = (v: string) => !locals.has(v) || escaped.has(v);
 
@@ -242,9 +255,12 @@ export function buildFunctionFlow(body: Statement[], locals: ReadonlySet<string>
     const s = n.stmt;
     if (s) stmtNode.set(s as object, n.id);
     if (!s) {
-      if (n.expr) { f.own.push(n.expr); scanExpr(n.expr, f, n.id, true, false); }
+      // A comma operand of a lowered condition runs for its effect, as a statement would.
+      if (n.expr) { f.own.push(n.expr); scanExpr(n.expr, f, n.id, true, n.condPart === 'effect'); }
       return f;
     }
+    // A lowered condition is evaluated by its operands' nodes.
+    if (n.lowered) return f;
     switch (s.kind) {
       case NodeKind.ExprStmt: {
         const e = (s as ExprStmt).expression;

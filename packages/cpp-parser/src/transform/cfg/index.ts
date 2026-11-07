@@ -1,5 +1,5 @@
 export { buildCfg, workKey } from './build.js';
-export { buildFunctionFlow, ENTRY_DEF, type FunctionFlow, type Definition } from './dataflow.js';
+export { buildFunctionFlow, ENTRY_DEF, type FunctionFlow, type FunctionFlowOptions, type Definition } from './dataflow.js';
 export { preservesReachableWork, type PreservationResult } from './preserve.js';
 export {
   collectLabelNames,
