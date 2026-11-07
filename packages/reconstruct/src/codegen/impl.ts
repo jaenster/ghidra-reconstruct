@@ -44,7 +44,7 @@ import { immediateConstantFacts, referencedDataAddresses, dataAtAddress, type Im
 import { compareFormSpec, type CompareFormSpec } from './compare-form-spec.js';
 import { repStringOps } from './rep-string-spec.js';
 import { vc8FormSpec, vc8formHashRecord, type Vc8FormSpec } from './vc8form-spec.js';
-import type { RepStringOp, Expression, NullGetterTable } from '@ghidra-mcp/cpp-parser';
+import type { RepStringOp, Expression, NullGetterTable, ASTNode } from '@ghidra-mcp/cpp-parser';
 import { ROOT_CLASS_SCOPE, namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 import { cleanFunctionComment, declaredParameters, externEntryDeclaration, guardedFuncDefTypedef, emittedFunctionName, returnSigType, sigType } from './header.js';
 import { COMDAT_SPECIFIERS, classScopeOf, memberCallModel, memberDefinitionScope, orphanMarker, signatureParameters } from './templates/index.js';
@@ -3172,6 +3172,8 @@ function transformDecompiledCode(
         ...(context?.funcPtrArgCasts?.paramReach ? {
           argReach: (callee: string, index: number, argCount: number) => context.funcPtrArgCasts!.paramReach!.argReach(callee, index, argCount),
           computedArgReach: (callee: Expression, index: number, argCount: number) => context.funcPtrArgCasts!.paramReach!.argReachThrough(callee, index, argCount),
+          bodyReach: (body: ASTNode, name: string, type: string, opts: { include: (use: ASTNode) => boolean }) =>
+            context.funcPtrArgCasts!.paramReach!.bodyReach(body, name, type, opts),
         } : {}),
       };
       perPluginOptions['aggregate-zero-init'] = {

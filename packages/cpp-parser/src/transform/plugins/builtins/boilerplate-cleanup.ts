@@ -122,7 +122,7 @@ function unwrapParens(expr: Expression): Expression {
  * prints as `DEFAULT_SECURITY_COOKIE ^ (uint)&stack0xfffffffc`. The frame
  * operand is EBP under casts, or whatever a pass has already rebound it to.
  */
-function isSecurityCookieSeed(expr: Expression): boolean {
+export function isSecurityCookieSeed(expr: Expression): boolean {
   const binary = unwrapParens(expr);
   if (binary.kind !== NodeKind.BinaryExpr || (binary as BinaryExpr).operator !== '^') return false;
   const { left, right } = binary as BinaryExpr;

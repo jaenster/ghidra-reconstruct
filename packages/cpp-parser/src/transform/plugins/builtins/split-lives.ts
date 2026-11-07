@@ -58,6 +58,7 @@ import { createTransformer, updateNode, type Transformer } from '../../transform
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { buildFunctionFlow, calleeSpelling, ENTRY_DEF, funcdefOutWidth, type FunctionFlow, type Reach } from '../../cfg/index.js';
 import { callNeedsFrame, frameAliasOffset, knownCountWrites, movableLocals } from './frame-group-locals.js';
+import { isSecurityCookieSeed } from './boilerplate-cleanup.js';
 import { stackNameOffset, type StackSlot } from './stack-frame-address.js';
 import { unwrapParens, calleeName, bareName, typeFromSpelling } from './call-arg-cast.js';
 import {
@@ -89,6 +90,12 @@ export interface SplitLivesOptions extends PluginOptions {
   argReach?: (callee: string, index: number, argCount: number) => Reach;
   /** The same for a computed callee. */
   computedArgReach?: (callee: Expression, index: number, argCount: number) => Reach;
+  /**
+   * The bytes this body reaches through one of its own names, read as a callee's parameter
+   * is (with `include` leaving uses out): a local pointer that only ever holds a frame
+   * local's address bounds that address's escape.
+   */
+  bodyReach?: (body: ASTNode, name: string, type: string, opts: { include: (use: ASTNode) => boolean }) => Reach;
   /** A callee's out-parameter width at an argument position (from its body), or null. */
   outParamWidth?: (callee: string, index: number) => number | null;
   /**
@@ -303,9 +310,10 @@ function nestedWrite(flow: FunctionFlow, node: number, v: string): Write | null 
   };
   const stmt = flow.cfg.nodes[node].stmt;
   const k = stmt?.kind;
-  // The value of an expression statement (or a for loop's increment) is discarded; a
-  // condition's is a truth value.
-  const top: Use = !stmt || k === NodeKind.ExprStmt ? 'none'
+  // The value of an expression statement (or a for loop's increment, or a condition's
+  // comma operand) is discarded; a condition's, or a condition operand's, is a truth value.
+  const top: Use = flow.cfg.nodes[node].condPart === 'test' ? 'truth'
+    : !stmt || k === NodeKind.ExprStmt ? 'none'
     : k === NodeKind.IfStmt || k === NodeKind.WhileStmt || k === NodeKind.DoWhileStmt || k === NodeKind.ForStmt ? 'truth'
     : 'value';
   for (const e of own) visit(e, true, top);
@@ -395,25 +403,91 @@ function namesIn(body: ASTNode): Set<string> {
  * and the locals they overlap; otherwise it extends through every local that follows
  * with a hole of at most one word (frame-group-locals' MAX_GAP) - the widest a run can
  * reach. A local outside every reach is not split behind the callee's back: no callee
- * touches it.
+ * touches it. With the members, why each seed whose reach is unknown is so: the escape
+ * that left it unbounded, for the run's report.
  */
-function frameMembers(body: CompoundStmt, slots: readonly StackSlot[], o: SplitLivesOptions): Map<string, string> {
+function frameReach(body: CompoundStmt, slots: readonly StackSlot[], o: SplitLivesOptions): { members: Map<string, string>; why: Map<string, string> } {
   const offsetOf = new Map<string, StackSlot>();
   for (const s of slots) if (!s.isParameter) offsetOf.set(s.name, s);
   /** Seed -> the bytes its escapes are known to reach from its start, or null when unknown. */
   const seeds = new Map<string, number | null>();
+  const why = new Map<string, string>();
   let baseFold = false;
-  const seed = (name: string, bytes: number | null) => {
+  const seed = (name: string, bytes: number | null, reason?: () => string) => {
     if (!offsetOf.has(name)) return;
+    if (bytes === null && !why.has(name) && reason) why.set(name, reason());
     if (!seeds.has(name)) { seeds.set(name, bytes); return; }
     const prev = seeds.get(name)!;
     seeds.set(name, prev === null || bytes === null ? null : Math.max(prev, bytes));
   };
   for (const [name, bytes] of knownCountWrites(body, movableLocals(body))) seed(name, Math.max(bytes, offsetOf.get(name)?.size ?? 0));
+  /**
+   * The reach through `target` (the left of `target = &x`) when it is a local pointer
+   * whose every store is `= &x` (through casts and parentheses) - so every value it holds
+   * is x's address - and no other write touches it: its uses, read as a callee reads a
+   * parameter, are what x's address reaches. Null when that is not so or not known.
+   */
+  const declaredTypes = new Map<string, TypeNode | null>();
+  for (const d of findNodesByKind(body as unknown as ASTNode, NodeKind.VariableDecl)) {
+    const v = d as VariableDecl;
+    declaredTypes.set(v.name.name, declaredTypes.has(v.name.name) ? null : v.type);
+  }
+  const aliasReach = (target: Expression, x: string): Reach => {
+    if (!o.bodyReach || target.kind !== NodeKind.Identifier) return null;
+    const q = (target as Identifier).name;
+    const type = declaredTypes.get(q);
+    if (!type) return null;
+    const spelling = spellingOf(type);
+    if (classOf(spelling) !== 'ptr') return null;
+    const stores = new Set<ASTNode>();
+    let only = true;
+    for (const a of findNodesByKind(body as unknown as ASTNode, NodeKind.AssignExpr)) {
+      const as = a as AssignExpr;
+      if (!isIdent(as.left, q)) continue;
+      let r = unwrapParens(as.right);
+      while (r.kind === NodeKind.CStyleCastExpr) r = unwrapParens((r as CStyleCastExpr).expression);
+      if (as.operator === '=' && r.kind === NodeKind.UnaryExpr && (r as UnaryExpr).operator === '&' && isIdent((r as UnaryExpr).operand, x)) {
+        stores.add(unwrapParens(as.left) as unknown as ASTNode);
+      } else { only = false; break; }
+    }
+    if (!only || stores.size === 0) return null;
+    // A declaration with an initializer is a store this does not model; the bare one
+    // names q, it does not use it.
+    for (const d of findNodesByKind(body as unknown as ASTNode, NodeKind.VariableDecl) as VariableDecl[]) {
+      if (d.name.name !== q) continue;
+      if (d.initializer) return null;
+      stores.add(d.name as unknown as ASTNode);
+    }
+    return o.bodyReach(body as unknown as ASTNode, q, spelling, { include: use => !stores.has(use) });
+  };
+  /**
+   * The /GS cookie seeds `c = DEFAULT_SECURITY_COOKIE ^ (uint)&stack0xfffffffc;` whose
+   * local the body names nowhere else: boilerplate-cleanup deletes the statement, and the
+   * frame address in it reaches nothing.
+   */
+  const cookieSeeds = new Set<ASTNode>();
+  {
+    // References only: a declaration's own name is not one.
+    const declNames = new Set<ASTNode>(findNodesByKind(body as unknown as ASTNode, NodeKind.VariableDecl).map(d => (d as VariableDecl).name as unknown as ASTNode));
+    const mentions = new Map<string, number>();
+    for (const id of findNodesByKind(body as unknown as ASTNode, NodeKind.Identifier)) {
+      if (declNames.has(id)) continue;
+      mentions.set((id as Identifier).name, (mentions.get((id as Identifier).name) ?? 0) + 1);
+    }
+    for (const st of findNodesByKind(body as unknown as ASTNode, NodeKind.ExprStmt)) {
+      const e = unwrapParens((st as ExprStmt).expression);
+      if (e.kind !== NodeKind.AssignExpr || (e as AssignExpr).operator !== '=') continue;
+      const t = unwrapParens((e as AssignExpr).left);
+      if (t.kind !== NodeKind.Identifier || !isSecurityCookieSeed((e as AssignExpr).right)) continue;
+      // The store is its only reference.
+      if (mentions.get((t as Identifier).name) === 1) cookieSeeds.add((e as AssignExpr).right as unknown as ASTNode);
+    }
+  }
   const walk = (x: unknown, chain: ASTNode[]): void => {
     if (Array.isArray(x)) { for (const i of x) walk(i, chain); return; }
     if (!x || typeof x !== 'object') return;
     const node = x as ASTNode;
+    if (cookieSeeds.has(node)) return;
     if (node.kind === NodeKind.Identifier && /stack0x/.test((node as Identifier).name)) {
       // A frame position the decompiler names by offset: in the argument area it is no
       // local's; on a local's slot it is that local's address or its word by another name,
@@ -423,7 +497,7 @@ function frameMembers(body: CompoundStmt, slots: readonly StackSlot[], o: SplitL
       if (at !== null && at >= 0) return;
       const slot = at === null ? undefined : slots.find(x => !x.isParameter && x.offset === at);
       if (!slot) { baseFold = true; return; }
-      seed(slot.name, null);
+      seed(slot.name, null, () => `named by offset ${(node as Identifier).name}`);
       return;
     }
     if (node.kind === NodeKind.UnaryExpr && (node as UnaryExpr).operator === '&') {
@@ -437,6 +511,10 @@ function frameMembers(body: CompoundStmt, slots: readonly StackSlot[], o: SplitL
         let harmless = false;
         let reach: Reach | undefined;
         if (parent?.kind === NodeKind.UnaryExpr && (parent as UnaryExpr).operator === '*') harmless = true;
+        else if (parent?.kind === NodeKind.AssignExpr && (parent as AssignExpr).operator === '=' && (parent as AssignExpr).right === child) {
+          // `q = &x`: where q only ever holds x's address, q's own uses are the escape.
+          reach = aliasReach(unwrapParens((parent as AssignExpr).left), name) ?? undefined;
+        }
         else if (parent?.kind === NodeKind.CallExpr) {
           const call = parent as CallExpr;
           const index = call.arguments.indexOf(child as Expression);
@@ -444,7 +522,12 @@ function frameMembers(body: CompoundStmt, slots: readonly StackSlot[], o: SplitL
           harmless = index >= 0 && o.argReach !== undefined
             && !callNeedsFrame(call, index, name, o.argReach, () => size, e => { reach = e.reach; }, o.computedArgReach);
         }
-        if (!harmless) seed(name, reach && reach.lo >= 0 ? reach.hi : null);
+        if (!harmless) seed(name, reach && reach.lo >= 0 ? reach.hi : null, () => {
+          const at = (parent ?? node) as unknown as Expression;
+          let text = '?';
+          try { text = emit(at as never).replace(/\s+/g, ' ').slice(0, 100); } catch { /* the report only */ }
+          return `${parent ? NodeKind[parent.kind] : 'top'}: ${text}`;
+        });
       }
     }
     const next = [...chain, node];
@@ -455,7 +538,7 @@ function frameMembers(body: CompoundStmt, slots: readonly StackSlot[], o: SplitL
   };
   walk(body.statements, []);
   const locals = slots.filter(s => !s.isParameter && s.offset < 0 && s.size > 0).sort((a, b) => a.offset - b.offset);
-  if (baseFold && locals.length > 0) seed(locals[0].name, null);
+  if (baseFold && locals.length > 0) seed(locals[0].name, null, () => 'a frame base no slot carries');
   /** Member -> the local whose address reaches it. */
   const members = new Map<string, string>();
   for (const [name, bytes] of seeds) {
@@ -476,7 +559,7 @@ function frameMembers(body: CompoundStmt, slots: readonly StackSlot[], o: SplitL
       end = Math.max(end, locals[j].offset + locals[j].size);
     }
   }
-  return members;
+  return { members, why };
 }
 
 /**
@@ -625,7 +708,7 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
 
   const declared = new Set<string>(declCount.keys());
   const localTypes = new Map<string, TypeNode>(types);
-  const members = frameMembers(body, o.slots ?? [], o);
+  const { members, why: memberWhy } = frameReach(body, o.slots ?? [], o);
   const argAreaNamed = findNodesByKind(body as unknown as ASTNode, NodeKind.Identifier)
     .some(id => { const at = stackNameOffset((id as Identifier).name); return at !== null && at >= 0; });
   const taken = namesIn(body as unknown as ASTNode);
@@ -673,7 +756,9 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
     const addressCasts = proxied.casts;
     /** The `v` of each placeholder `v += 0`: not a read of its own. */
     const placeholderIds = new Set<object>([...placeholders.keys()].map(ph => (ph as unknown as AssignExpr).left));
-    const flow = buildFunctionFlow(work, declared);
+    // Conditions as short-circuit nodes: a value stored in `a || (v = f(), v == 0)` is a
+    // whole write on the paths that evaluate it, and reaches only those.
+    const flow = buildFunctionFlow(work, declared, { shortCircuitConditions: true });
     if (flow.isEscaped(v)) { report(`${v}: other: escaped`); continue; }
     if (!topLocals.has(v) && argAreaNamed) {
       // The argument area read by offset (`stack0x00000008`) may be this parameter's word.
@@ -686,7 +771,8 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
       // piece of another slot, which frame-group-locals lays out with it.
       if (!slot && frameAliasOffset(v) !== null) { report(`${v}: refused: a piece of a frame slot`); continue; }
       if (members.has(v)) {
-        report(`${v}: refused: a frame object may hold its slot (from ${members.get(v)})`);
+        const from = members.get(v)!;
+        report(`${v}: refused: a frame object may hold its slot (from ${from}${memberWhy.has(from) ? `: ${memberWhy.get(from)}` : ''})`);
         continue;
       }
     }
@@ -886,7 +972,8 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
       const stmt = flow.cfg.nodes[node].stmt;
       const sk = stmt?.kind;
       const returned = sk === NodeKind.ReturnStmt && returnType ? returnType : null;
-      const condition = sk === NodeKind.IfStmt || sk === NodeKind.WhileStmt || sk === NodeKind.DoWhileStmt || sk === NodeKind.ForStmt;
+      const condition = sk === NodeKind.IfStmt || sk === NodeKind.WhileStmt || sk === NodeKind.DoWhileStmt || sk === NodeKind.ForStmt
+        || flow.cfg.nodes[node].condPart === 'test';
       for (const e of flow.ownExprs(node)) walk(e, null, null, returned, condition);
       return out;
     };

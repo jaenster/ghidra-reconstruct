@@ -106,6 +106,36 @@ describe('split-lives', () => {
     assert.ok(!/pRoom/.test(run(frame, { ...above, argReach: () => ({ lo: 0, hi: 8 }) as never })));
   });
 
+  it('AITHINK_Fn1_Vulture @005f3170: a pointer that only holds a slot\'s address bounds its escape by its own uses', () => {
+    const frame = `void f(D2UnitStrc *p) { int a; int nX; int *pA; pA = &a; g(pA); nX = 5; k(nX); nX = (int)Units::GetRoom(p); h((D2RoomStrc *)nX); h((D2RoomStrc *)nX); }`;
+    const above = { ...O, slots: [{ name: 'a', offset: -0x10, size: 4 }, { name: 'nX', offset: -0xc, size: 4 }] };
+    const seen: string[] = [];
+    const reach = (hi: number) => (_b: unknown, name: string, type: string, opts: { include: (u: never) => boolean }) => {
+      seen.push(`${name}:${type}:${typeof opts.include}`);
+      return { lo: 0, hi };
+    };
+    assert.ok(/pRoom/.test(run(frame, { ...above, bodyReach: reach(4) as never })));
+    assert.deepStrictEqual(seen, ['pA:int*:function']);
+    assert.ok(!/pRoom/.test(run(frame, { ...above, bodyReach: reach(8) as never })));
+    assert.ok(!/pRoom/.test(run(frame, { ...above, bodyReach: (() => null) as never })));
+    // Any other store into the pointer, or one at its declaration, leaves the escape unknown.
+    const other = frame.replace('g(pA);', 'g(pA); pA = pA + 1;');
+    assert.ok(!/pRoom/.test(run(other, { ...above, bodyReach: reach(4) as never })));
+    const init = frame.replace('int *pA; pA = &a;', 'int *pA = &a;');
+    assert.ok(!/pRoom/.test(run(init, { ...above, bodyReach: reach(4) as never })));
+  });
+
+  it('SFileOpenFileEx @004192f0: the /GS cookie seed names the frame but reaches nothing', () => {
+    const frame = (seed: string) => `void f(D2UnitStrc *p) { uint dwCookie; int nX; int a; ${seed} a = 1; k(a); nX = 5; k(nX); nX = (int)Units::GetRoom(p); h((D2RoomStrc *)nX); h((D2RoomStrc *)nX); }`;
+    // Ghidra's frame does not carry the cookie's slot: `&stack0xfffffffc` is a frame base.
+    const slots = { ...O, slots: [{ name: 'nX', offset: -0x10, size: 4 }, { name: 'a', offset: -0xc, size: 4 }] };
+    assert.ok(/pRoom/.test(run(frame('dwCookie = DEFAULT_SECURITY_COOKIE ^ (uint)&stack0xfffffffc;'), slots)));
+    // A cookie local read anywhere else keeps the seed, and the frame base with it.
+    assert.ok(!/pRoom/.test(run(frame('dwCookie = DEFAULT_SECURITY_COOKIE ^ (uint)&stack0xfffffffc; k(dwCookie);'), slots)));
+    // Any other frame base reaches the lowest local.
+    assert.ok(!/pRoom/.test(run(frame('k((int)&stack0xfffffff0);'), slots)));
+  });
+
   it('004e4d80: a value whose address a call is handed stays, a later one moves, when the callee keeps only the word', () => {
     const src = `int f(int nStatValue, ushort *wszOut) {
       nStatValue = 1;
@@ -193,9 +223,26 @@ describe('split-lives', () => {
     has(out, 'k((int)(pRoom = Units::GetRoom(p)) + 4);');
   });
 
-  it('leaves a store that only some evaluations make, and one beside a read of the variable', () => {
-    const sometimes = `int f(D2UnitStrc *p, int nStatId, int c) { g(nStatId); if (c && (nStatId = (int)Units::GetRoom(p)) != 0) h((D2RoomStrc *)nStatId); return 0; }`;
-    assert.strictEqual(flat(run(sometimes)), flat(run(sometimes, {})));
+  it('a store under && reaches the paths that evaluate it: the true branch sees only it', () => {
+    const out = run(`int f(D2UnitStrc *p, int nStatId, int c) { g(nStatId); if (c && (nStatId = (int)Units::GetRoom(p)) != 0) h((D2RoomStrc *)nStatId); return 0; }`);
+    has(out, 'if (c && (pRoom = Units::GetRoom(p)) != 0) h(pRoom);');
+    has(out, 'g(nStatId);');
+  });
+
+  it('DGrpFunc @004e4d80: a store in the right of || with a comma reaches the false path whole', () => {
+    const out = run(`int f(D2UnitStrc *p, int nStatId, int c) { g(nStatId); if (c == 0 || (nStatId = (int)Units::GetRoom(p), (D2RoomStrc *)nStatId == 0)) return 0; h((D2RoomStrc *)nStatId); return 1; }`);
+    has(out, 'if (c == 0 || (pRoom = Units::GetRoom(p) , pRoom == 0)) return 0;');
+    has(out, 'h(pRoom);');
+  });
+
+  it('a read some paths reach without the store in the condition stays joined with the entry value', () => {
+    const maybe = `int f(D2UnitStrc *p, int nStatId, int c) { if (c && (nStatId = (int)Units::GetRoom(p)) != 0) k(); h((D2RoomStrc *)nStatId); return 0; }`;
+    assert.strictEqual(flat(run(maybe)), flat(run(maybe, {})));
+    const either = `int f(D2UnitStrc *p, int nStatId, int c) { g(nStatId); if (c != 0 || (nStatId = (int)Units::GetRoom(p)) != 0) h((D2RoomStrc *)nStatId); return 0; }`;
+    assert.strictEqual(flat(run(either)), flat(run(either, {})));
+  });
+
+  it('leaves a store beside a read of the variable in one operand', () => {
     const beside = `int f(D2UnitStrc *p, int nStatId) { g(nStatId); if ((nStatId = (int)Units::GetRoom(p)) != nStatId) h((D2RoomStrc *)nStatId); return 0; }`;
     assert.strictEqual(flat(run(beside)), flat(run(beside, {})));
   });
