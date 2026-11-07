@@ -638,7 +638,9 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
     if (x.kind === NodeKind.UnaryExpr && (x as UnaryExpr).operator === '*') x = unwrapParens((x as UnaryExpr).operand);
     if (x.kind !== NodeKind.Identifier) return null;
     const t = localTypes.get((x as Identifier).name);
-    return t ? spellingOf(t) : null;
+    // Ghidra declares a pointer to the function type (`D3DVB_Lock *`); the emitted header
+    // spells the funcdef as the pointer type itself.
+    return t ? spellingOf(t).replace(/\s*\*$/, '') : null;
   };
   /**
    * Whether an integer expression computes an address: `&x`, an integer cast of `&x` or of
