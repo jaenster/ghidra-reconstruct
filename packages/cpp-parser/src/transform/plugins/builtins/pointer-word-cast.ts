@@ -54,7 +54,7 @@ import { Type, Expr } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { createExprShape, type ExprShape } from './expr-shape.js';
 import {
-  asCodeAddress, cachedSet, shapeOfNode, typeNodeName, unwrapParens,
+  asCodeAddress, bareName, cachedSet, calleeName, shapeOfNode, typeFromSpelling, typeNodeName, unwrapParens,
   type TypedefResolver, type TypeShape,
 } from './call-arg-cast.js';
 
@@ -67,6 +67,8 @@ export interface PointerWordCastOptions extends PluginOptions {
   typedefTargets?: Record<string, string>;
   /** Typedef names that stand for a function pointer. */
   funcdefNames?: string[];
+  /** Callable name (bare AND qualified) -> its parameter type spellings, in order. */
+  functionParamTypes?: Record<string, string[]>;
 }
 
 /** Per-form counts since the last reset, for the regen log and the tests. */
@@ -80,17 +82,21 @@ export interface PointerWordCastStats {
   toPointer: number;
   /** Words respelled inside an offset onto a pointer: `p + <words>`, `p[<words>]`, `p += <words>`. */
   offset: number;
-  /** Words respelled inside a value that lands in a pointer-sized integer: `(size_t)(<words>)`, `m_next = <words>`. */
+  /** Words respelled inside a value that lands in a pointer-sized integer: `(size_t)(<words>)`, `m_next = <words>`, `memset(p, 0, <words>)`. */
   sizedSlot: number;
+  /** Words respelled in a sum whose addresses cancel, `(int)a + (n - (int)b)`: a distance, however reassociated. */
+  balanced: number;
+  /** `(int)(T *)K` -> `(int)K`: a constant's round trip through a pointer. */
+  literal: number;
 }
 
 const stats: PointerWordCastStats = {
-  byteArith: 0, roundTrip: 0, compare: 0, bitwise: 0, distance: 0, toPointer: 0, offset: 0, sizedSlot: 0,
+  byteArith: 0, roundTrip: 0, compare: 0, bitwise: 0, distance: 0, toPointer: 0, offset: 0, sizedSlot: 0, balanced: 0, literal: 0,
 };
 export function getPointerWordCastStats(): PointerWordCastStats { return { ...stats }; }
 export function resetPointerWordCastStats(): void {
   stats.byteArith = stats.roundTrip = stats.compare = stats.bitwise = stats.distance = 0;
-  stats.toPointer = stats.offset = stats.sizedSlot = 0;
+  stats.toPointer = stats.offset = stats.sizedSlot = stats.balanced = stats.literal = 0;
 }
 
 /**
@@ -136,6 +142,15 @@ export function pointerWordFor(t: TypeNode): 'intptr_t' | 'uintptr_t' | null {
   }
   return null;
 }
+
+/**
+ * The C library's size parameters, by position: the standard fixes them as `size_t`
+ * where the program's model has no declaration of its own.
+ */
+const CRT_SIZE_PARAMS: Readonly<Record<string, readonly number[]>> = {
+  memset: [2], memcpy: [2], memmove: [2], memcmp: [2], memchr: [2], strncpy: [2], strncmp: [2], strncat: [2],
+  wcsncpy: [2], wcsncmp: [2], malloc: [0], calloc: [0, 1], realloc: [1],
+};
 
 const COMPARISONS = new Set(['==', '!=', '<', '<=', '>', '>=']);
 /** Operators whose operand is read as the bits of the word: alignment tests, hashes, masks. */
@@ -384,12 +399,71 @@ export function createPointerWordCastTransformer(options?: PluginOptions): Trans
         return { expr: e, hits: 0 };
       };
 
+      /**
+       * The additive chain under `e`, when its word casts of pointers cancel: as many
+       * enter it added as subtracted. Whatever the reassociation (`(int)a + (n - (int)b)`),
+       * its value is a distance between addresses plus integers.
+       */
+      const balanced = (e: Expression): boolean => {
+        const terms: Array<{ term: Expression; sign: 1 | -1 }> = [];
+        additiveTerms(e, 1, terms);
+        let up = 0, down = 0;
+        for (const t of terms) {
+          const w = wordCastOfPointer(t.term);
+          if (w) { if (t.sign === 1) up++; else down++; continue; }
+          if (isPointerValue(t.term)) return false;
+        }
+        return up > 0 && up === down;
+      };
+
+      /** Whether argument `index` of `call` is a pointer-sized integer parameter. */
+      const sizedParam = (callee: Expression, index: number): boolean => {
+        const name = calleeName(callee);
+        if (!name) return false;
+        const params = o.functionParamTypes ? o.functionParamTypes[name] ?? o.functionParamTypes[bareName(name)] : undefined;
+        if (params) {
+          const t = index < params.length ? typeFromSpelling(params[index]) : null;
+          return !!t && isPointerSizedType(t);
+        }
+        return (CRT_SIZE_PARAMS[bareName(name)] ?? []).includes(index);
+      };
+
       let changed = false;
       const inner = createTransformer({
         visitNode(n: ASTNode): ASTNode | undefined {
+          if (n.kind === NodeKind.CallExpr) {
+            // f(..., <words>, ...) into a size_t parameter: a value made pointer-sized.
+            const call = n as unknown as { callee: Expression; arguments: Expression[] };
+            let hits = 0;
+            const args = call.arguments.map((a, i) => {
+              if (!sizedParam(call.callee, i)) return a;
+              const spine = respellSpine(a);
+              hits += spine.hits;
+              return spine.expr;
+            });
+            if (!hits) return undefined;
+            changed = true;
+            stats.sizedSlot += hits;
+            return updateNode(n, { arguments: args } as never);
+          }
           if (n.kind === NodeKind.CStyleCastExpr) {
             const cast = n as CStyleCastExpr;
             const target = shapeOfNode(cast.type, 0, resolve);
+            // (int)(T *)K -> (int)K: the constant is the same word either way.
+            if (pointerWordFor(cast.type)) {
+              const op = unwrapParens(cast.expression);
+              if (op.kind === NodeKind.CStyleCastExpr) {
+                const ps = shapeOfNode((op as CStyleCastExpr).type, 0, resolve);
+                let k = unwrapParens((op as CStyleCastExpr).expression);
+                const neg = k.kind === NodeKind.UnaryExpr && (k as UnaryExpr).operator === '-';
+                if (neg) k = unwrapParens((k as UnaryExpr).operand);
+                if (ps && ps.stars > 0 && k.kind === NodeKind.IntegerLiteral && (k as IntegerLiteralExpr).value <= 0xffffffffn) {
+                  changed = true;
+                  stats.literal++;
+                  return updateNode(cast, { expression: unwrapParens((op as CStyleCastExpr).expression) } as Partial<CStyleCastExpr>);
+                }
+              }
+            }
             if (!target || target.stars === 0) {
               // (size_t)(<words>): a value made pointer-sized on purpose.
               if (!isPointerSizedType(cast.type)) return undefined;
@@ -470,6 +544,15 @@ export function createPointerWordCastTransformer(options?: PluginOptions): Trans
               changed = true;
               stats.offset += spine.hits;
               return updateNode(b, (leftPointer ? { right: spine.expr } : { left: spine.expr }) as Partial<BinaryExpr>);
+            }
+          }
+          // (int)a + (n - (int)b): a distance, reassociated.
+          if ((b.operator === '+' || b.operator === '-') && balanced(b) && !(b.operator === '-' && wordCastOfPointer(b.left) && wordCastOfPointer(b.right))) {
+            const chain = respellChain(b);
+            if (chain.hits) {
+              changed = true;
+              stats.balanced += chain.hits;
+              return chain.expr;
             }
           }
           // (int)a - (int)b: a distance between two addresses.

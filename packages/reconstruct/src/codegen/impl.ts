@@ -3560,6 +3560,8 @@ function transformDecompiledCode(
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         funcdefNames: Object.keys(context.funcPtrArgCasts.funcdefSignatures ?? {}),
         enclosingVarTypes,
+        // A size argument (`memset(p, 0, <words>)`) is a pointer-sized slot.
+        functionParamTypes: context.funcPtrArgCasts.functionParamTypes,
       };
       perPluginOptions['narrow-cast-through-uintptr'] = {
         globalTypes: context.funcPtrArgCasts.globalTypes,

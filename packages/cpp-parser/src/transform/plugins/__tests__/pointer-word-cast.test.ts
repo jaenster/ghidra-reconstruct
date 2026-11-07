@@ -215,8 +215,33 @@ describe('pointerWordCastPlugin', () => {
       h((uint32_t)a & 3); h((int)a - (int)b);
     }`);
     assert.deepStrictEqual(getPointerWordCastStats(), {
-      byteArith: 1, roundTrip: 1, compare: 2, bitwise: 1, distance: 1, toPointer: 0, offset: 0, sizedSlot: 0,
+      byteArith: 1, roundTrip: 1, compare: 2, bitwise: 1, distance: 1, toPointer: 0, offset: 0, sizedSlot: 0, balanced: 0, literal: 0,
     });
+  });
+
+  it('SAVE_SerializeItemIfValid call: a reassociated distance is pointer-sized', () => {
+    const out = transform(`void f(char* pBuffer, char* pWrite, int nSize) { g(pWrite, (int)pBuffer + (nSize - (int)pWrite)); }`);
+    assert.ok(squash(out).includes('g(pWrite,(intptr_t)pBuffer+(nSize-(intptr_t)pWrite));'), out);
+  });
+
+  it('leaves a sum whose addresses do not cancel', () => {
+    const out = transform(`void f(char* a, char* b, int n) { int k; k = (int)a + (n + (int)b); }`);
+    assert.ok(squash(out).includes('k=(int)a+n+(int)b;'), out);
+  });
+
+  it('a value passed to a size_t parameter is a pointer-sized slot', () => {
+    const out = transform(`void f(void* p, int* q, int n) { memset(p, 0, (int)q * n); Copy(p, (int)q * n); Keep((int)q); }`,
+      { functionParamTypes: { Copy: ['void *', 'size_t'], Keep: ['int'] } });
+    assert.ok(squash(out).includes('memset(p,0,(intptr_t)q*n);'), out);
+    assert.ok(squash(out).includes('Copy(p,(intptr_t)q*n);'), out);
+    assert.ok(squash(out).includes('Keep((int)q);'), out);
+  });
+
+  it('SSTR: a constant through a pointer cast is the constant', () => {
+    const out = transform(`void f() { int n; n = (int)(uint16_t*)0x1; n = (int32_t)(char*)-4; n = (int)(char*)m; }`);
+    assert.ok(squash(out).includes('n=(int)0x1;'), out);
+    assert.ok(squash(out).includes('n=(int32_t)-4;'), out);
+    assert.ok(squash(out).includes('n=(int)(char*)m;'), out);
   });
 });
 
