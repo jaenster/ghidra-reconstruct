@@ -190,6 +190,37 @@ describe('split-lives', () => {
     assert.ok(!/pRoom/.test(run(ints)), run(ints));
   });
 
+  it('TILECMP_DeserializeAndFixup @0060a0f0: a life that stores a pointer never becomes an integer local', () => {
+    const code = `void f(D2UnitStrc *p, void **ppOut, int n) {
+      void *nErrAddress;
+      nErrAddress = (void *)n;
+      g((int)nErrAddress);
+      nErrAddress = Units::GetRoom(p);
+      *ppOut = nErrAddress;
+      h((intptr_t)nErrAddress - 4, (intptr_t)nErrAddress + 8, (intptr_t)nErrAddress);
+    }`;
+    const out = run(code);
+    // The integer life may have a local of its own; the address stays in the pointer.
+    assert.ok(!/\(int\)Units::GetRoom/.test(flat(out)), out);
+    has(out, 'nErrAddress = Units::GetRoom(p);');
+    has(out, '*ppOut = nErrAddress;');
+  });
+
+  it('COLLISION distance in a unit pointer: an integer store moves without the pointer cast', () => {
+    const out = run(`int f(D2UnitStrc *pUnit, int nX, int nY) {
+      g(pUnit);
+      pUnit = (D2UnitStrc *)(nX - nY);
+      if ((intptr_t)pUnit < 0) {
+        pUnit = (D2UnitStrc *)-(intptr_t)pUnit;
+      }
+      if ((intptr_t)pUnit < 8) return 1;
+      return (intptr_t)pUnit - nY;
+    }`);
+    has(out, '= nX - nY;');
+    has(out, '= -n');
+    assert.ok(!/\(int\)\s*\(D2UnitStrc/.test(flat(out)), out);
+  });
+
   it('moves an update with its life, through the declared type', () => {
     const out = run(`int f(int nAlpha, int n) {
       g(nAlpha);

@@ -48,7 +48,7 @@
 import { appendFileSync } from 'node:fs';
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
-  ASTNode, AssignExpr, CallExpr, CompoundStmt, CStyleCastExpr, DeclStmt, ExprStmt, Expression,
+  ASTNode, AssignExpr, BinaryExpr, CallExpr, CompoundStmt, CStyleCastExpr, DeclStmt, ExprStmt, Expression,
   FunctionDecl, Identifier, ParameterDecl, PostfixExpr, Statement, TypeNode, UnaryExpr, VariableDecl,
 } from '../../../ast/nodes.js';
 import { Expr, Decl, Stmt } from '../../../ast/factory.js';
@@ -185,6 +185,31 @@ function classOf(spelling: string): WordClass | null {
   const c = wordClass(spelling);
   return c === 'ptr' || c === 'int' ? c : null;
 }
+
+const INT_OPS = new Set(['+', '-', '*', '/', '%', '&', '|', '^', '<<', '>>']);
+
+/**
+ * The cast class of a stored value: its evident type's, or an integer for arithmetic on
+ * integers (`a - b`, `-(int)p`), which no declared type names but which is a number all
+ * the same. A store cast through the declared pointer type, `p = (T *)(a - b)`, then
+ * moves into an integer life without the cast instead of through two.
+ */
+function valueClass(e: Expression, o: ReusedParamSlotOptions, localTypes: ReadonlyMap<string, TypeNode>, enumConstants: ReadonlySet<string>): WordClass | 'enum' | null {
+  const t = evidentType(e, o, localTypes);
+  if (t) return wordClass(spellingOf(t));
+  const x = unwrapParens(e);
+  if (x.kind === NodeKind.IntegerLiteral) return 'int';
+  if (x.kind === NodeKind.Identifier && enumConstants.has((x as Identifier).name)) return 'int';
+  if (x.kind === NodeKind.UnaryExpr && ['-', '~'].includes((x as UnaryExpr).operator)) {
+    return isNumber(valueClass((x as UnaryExpr).operand, o, localTypes, enumConstants)) ? 'int' : null;
+  }
+  if (x.kind === NodeKind.BinaryExpr && INT_OPS.has((x as BinaryExpr).operator)) {
+    const b = x as BinaryExpr;
+    return isNumber(valueClass(b.left, o, localTypes, enumConstants)) && isNumber(valueClass(b.right, o, localTypes, enumConstants)) ? 'int' : null;
+  }
+  return null;
+}
+const isNumber = (c: WordClass | 'enum' | null) => c === 'int' || c === 'enum';
 
 /** Every identifier in the body, declarations and references alike: names a new local must not take. */
 function namesIn(body: ASTNode): Set<string> {
@@ -624,6 +649,13 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
       const cls = classOf(spelling);
       if (!cls || /\bcode\b/.test(spelling) || /\bundefined\b/.test(spelling) || sameType(spelling, dt)) continue;
       if (cls === 'int' && dtClass === 'int') continue;
+      // A life that stores a pointer is a pointer life, whatever its reads cast it to: an
+      // integer local would hold an address in an int, which truncates it where a pointer
+      // is wider than an int.
+      if (cls === 'int' && storeTypes.some(t => t !== null && classOf(t) === 'ptr')) {
+        report(`${v}: pointer: a store into it is a pointer, so it stays ${spellingOf(declaredType)}`);
+        continue;
+      }
 
       // Width casts the move removes and the ones it needs.
       let gain = 0, cost = 0;
@@ -713,7 +745,8 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
         if (rhs.kind === NodeKind.CStyleCastExpr && sameType(spellingOf((rhs as CStyleCastExpr).type), dt)) {
           inner = unwrapParens((rhs as CStyleCastExpr).expression);
           const t = evidentType(inner, evidentOptions, localTypes);
-          innerType = t ? spellingOf(t) : null;
+          innerType = t ? spellingOf(t)
+            : m.cls === 'int' && isNumber(valueClass(inner, evidentOptions, localTypes, enumConstants)) ? m.spelling : null;
         }
         replace.set(a, (rebuilt) => {
           const ra = rebuilt as AssignExpr;
