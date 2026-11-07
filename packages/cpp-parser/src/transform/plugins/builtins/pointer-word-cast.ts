@@ -46,7 +46,7 @@
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, FunctionDecl, VariableDecl, ParameterDecl, Expression, BinaryExpr, CStyleCastExpr,
-  TypeNode, BuiltinType, IntegerLiteralExpr, ParenExpr, UnaryExpr,
+  TypeNode, BuiltinType, IntegerLiteralExpr, ParenExpr, UnaryExpr, AssignExpr, SubscriptExpr,
 } from '../../../ast/nodes.js';
 import { findNodesByKind } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
@@ -76,13 +76,35 @@ export interface PointerWordCastStats {
   compare: number;
   bitwise: number;
   distance: number;
+  /** Words respelled inside an integer that becomes a pointer: `(T *)(<words>)`. */
+  toPointer: number;
+  /** Words respelled inside an offset onto a pointer: `p + <words>`, `p[<words>]`, `p += <words>`. */
+  offset: number;
+  /** Words respelled inside a value that lands in a pointer-sized integer: `(size_t)(<words>)`, `m_next = <words>`. */
+  sizedSlot: number;
 }
 
-const stats: PointerWordCastStats = { byteArith: 0, roundTrip: 0, compare: 0, bitwise: 0, distance: 0 };
+const stats: PointerWordCastStats = {
+  byteArith: 0, roundTrip: 0, compare: 0, bitwise: 0, distance: 0, toPointer: 0, offset: 0, sizedSlot: 0,
+};
 export function getPointerWordCastStats(): PointerWordCastStats { return { ...stats }; }
 export function resetPointerWordCastStats(): void {
   stats.byteArith = stats.roundTrip = stats.compare = stats.bitwise = stats.distance = 0;
+  stats.toPointer = stats.offset = stats.sizedSlot = 0;
 }
+
+/**
+ * Integer types as wide as a pointer on every target, by the name a declaration
+ * spells. A value that lands in one is a pointer word, whatever arithmetic made it.
+ */
+const POINTER_SIZED_INTEGERS = new Set([
+  'intptr_t', 'uintptr_t', 'size_t', 'ssize_t', 'ptrdiff_t',
+  'INT_PTR', 'UINT_PTR', 'LONG_PTR', 'ULONG_PTR', 'DWORD_PTR', 'SIZE_T', 'SSIZE_T',
+]);
+
+/** Operators along which an integer is still the same word: its value reaches the result. */
+const SPINE_BINARY = new Set(['+', '-', '*', '/', '%', '&', '|', '^', '<<', '>>']);
+const SPINE_UNARY = new Set(['-', '~', '+']);
 
 /**
  * Typedef spellings that ARE `int` / `unsigned int` on this target. A name that
@@ -155,6 +177,29 @@ export function createPointerWordCastTransformer(options?: PluginOptions): Trans
         returnTypes: o.functionReturnTypes ?? {},
         resolve,
       });
+
+      // The declared type of a slot as spelled, typedefs unresolved: `intptr_t` is
+      // `int` to the resolver, and here the difference is the point.
+      const spelledShape: ExprShape = createExprShape(localTypes, {
+        globalTypes: o.globalTypes ?? {},
+        enclosingVarTypes: o.enclosingVarTypes ?? {},
+        structFields: o.structFields ?? {},
+        fieldTypes: o.fieldTypes ?? {},
+        returnTypes: o.functionReturnTypes ?? {},
+      });
+      const isPointerSizedSlot = (e: Expression): boolean => {
+        const s = spelledShape(e);
+        return !!s && s.stars === 0 && POINTER_SIZED_INTEGERS.has(s.base.replace(/^::/, ''));
+      };
+      const isPointerSizedType = (t: TypeNode): boolean => {
+        const s = shapeOfNode(t, 0);
+        return !!s && s.stars === 0 && POINTER_SIZED_INTEGERS.has(s.base.replace(/^::/, ''));
+      };
+      /** A pointer value: an object or code pointer, not an integer. */
+      const isPointerValue = (e: Expression): boolean => {
+        const s = shapeOf(e);
+        return !!s && s.stars > 0;
+      };
 
       /** The object (not code) pointer a word cast's operand is, or null. */
       const objectPointer = (e: Expression): TypeShape | null => {
@@ -270,6 +315,16 @@ export function createPointerWordCastTransformer(options?: PluginOptions): Trans
         return replaceInChain(operand, base.term, bytes);
       };
 
+      /** `e` with `target` (itself, or under parentheses) replaced. */
+      const replaceInParens = (e: Expression, target: Expression, by: Expression): Expression => {
+        if (e === target) return by;
+        if (e.kind === NodeKind.ParenExpr) {
+          const p = e as ParenExpr;
+          return updateNode(p, { expression: replaceInParens(p.expression, target, by) } as Partial<ParenExpr>);
+        }
+        return e;
+      };
+
       /** The same cast, spelled with the pointer-sized integer of the same type. */
       const respell = (w: { cast: CStyleCastExpr; word: 'intptr_t' | 'uintptr_t' }): CStyleCastExpr =>
         updateNode(w.cast, { type: Type.typedef(w.word) } as Partial<CStyleCastExpr>);
@@ -293,13 +348,57 @@ export function createPointerWordCastTransformer(options?: PluginOptions): Trans
         return { expr, hits };
       };
 
+      /**
+       * Respell every word cast of a pointer on `e`'s spine: the operands its value is
+       * computed from by integer arithmetic (SPINE_BINARY, SPINE_UNARY, parentheses).
+       * Not through a load, a call or a subscript, whose result is another value. The
+       * respelling is the same type on the 32-bit target, so whatever the operators
+       * do with the word, they do the same.
+       */
+      const respellSpine = (e: Expression): { expr: Expression; hits: number } => {
+        const w = wordCastOfPointer(e);
+        if (w) {
+          // `(int)(p + K)`: the word of a sum; a cast inside its operand is another
+          // word and stays as it is.
+          return { expr: replaceInParens(e, w.cast, respell(w)), hits: 1 };
+        }
+        if (e.kind === NodeKind.ParenExpr) {
+          const p = e as ParenExpr;
+          const r = respellSpine(p.expression);
+          return r.hits ? { expr: updateNode(p, { expression: r.expr } as Partial<ParenExpr>), hits: r.hits } : { expr: e, hits: 0 };
+        }
+        if (e.kind === NodeKind.BinaryExpr) {
+          const b = e as BinaryExpr;
+          if (!SPINE_BINARY.has(b.operator)) return { expr: e, hits: 0 };
+          const l = respellSpine(b.left);
+          const r = respellSpine(b.right);
+          if (!l.hits && !r.hits) return { expr: e, hits: 0 };
+          return { expr: updateNode(b, { left: l.expr, right: r.expr } as Partial<BinaryExpr>), hits: l.hits + r.hits };
+        }
+        if (e.kind === NodeKind.UnaryExpr) {
+          const u = e as UnaryExpr;
+          if (!SPINE_UNARY.has(u.operator)) return { expr: e, hits: 0 };
+          const r = respellSpine(u.operand);
+          return r.hits ? { expr: updateNode(u, { operand: r.expr } as Partial<UnaryExpr>), hits: r.hits } : { expr: e, hits: 0 };
+        }
+        return { expr: e, hits: 0 };
+      };
+
       let changed = false;
       const inner = createTransformer({
         visitNode(n: ASTNode): ASTNode | undefined {
           if (n.kind === NodeKind.CStyleCastExpr) {
             const cast = n as CStyleCastExpr;
             const target = shapeOfNode(cast.type, 0, resolve);
-            if (!target || target.stars === 0) return undefined;
+            if (!target || target.stars === 0) {
+              // (size_t)(<words>): a value made pointer-sized on purpose.
+              if (!isPointerSizedType(cast.type)) return undefined;
+              const spine = respellSpine(cast.expression);
+              if (!spine.hits) return undefined;
+              changed = true;
+              stats.sizedSlot += spine.hits;
+              return updateNode(cast, { expression: spine.expr } as Partial<CStyleCastExpr>);
+            }
             // (T *)(int)p -> (T *)p
             const w = wordCastOfPointer(cast.expression);
             if (w && objectPointer(w.cast.expression)) {
@@ -314,10 +413,65 @@ export function createPointerWordCastTransformer(options?: PluginOptions): Trans
               stats.byteArith++;
               return updateNode(cast, { expression: arith } as Partial<CStyleCastExpr>);
             }
+            // Any other integer that becomes a pointer: (T *)~(uint32_t)p,
+            // (T *)((int)p + (int)q - r) -> the words pointer-sized.
+            const spine = respellSpine(cast.expression);
+            if (spine.hits) {
+              changed = true;
+              stats.toPointer += spine.hits;
+              return updateNode(cast, { expression: spine.expr } as Partial<CStyleCastExpr>);
+            }
             return undefined;
+          }
+          if (n.kind === NodeKind.SubscriptExpr) {
+            // p[<words>]: an offset onto a pointer.
+            const sub = n as SubscriptExpr;
+            if (!isPointerValue(sub.array)) return undefined;
+            const spine = respellSpine(sub.index);
+            if (!spine.hits) return undefined;
+            changed = true;
+            stats.offset += spine.hits;
+            return updateNode(sub, { index: spine.expr } as Partial<SubscriptExpr>);
+          }
+          if (n.kind === NodeKind.AssignExpr) {
+            const a = n as AssignExpr;
+            // p += <words>, p -= <words>: an offset onto a pointer.
+            const ontoPointer = (a.operator === '+=' || a.operator === '-=') && isPointerValue(a.left);
+            // slot = <words>, into a pointer-sized integer (a link word, a size).
+            const intoSized = !ontoPointer && isPointerSizedSlot(a.left)
+              && (a.operator === '=' || a.operator === '+=' || a.operator === '-=');
+            if (!ontoPointer && !intoSized) return undefined;
+            const spine = respellSpine(a.right);
+            if (!spine.hits) return undefined;
+            changed = true;
+            if (ontoPointer) stats.offset += spine.hits; else stats.sizedSlot += spine.hits;
+            return updateNode(a, { right: spine.expr } as Partial<AssignExpr>);
+          }
+          if (n.kind === NodeKind.VariableDecl) {
+            const v = n as VariableDecl;
+            if (!v.initializer || v.initializer.kind === NodeKind.InitListExpr || !isPointerSizedType(v.type)) return undefined;
+            const spine = respellSpine(v.initializer as Expression);
+            if (!spine.hits) return undefined;
+            changed = true;
+            stats.sizedSlot += spine.hits;
+            return updateNode(v, { initializer: spine.expr } as Partial<VariableDecl>);
           }
           if (n.kind !== NodeKind.BinaryExpr) return undefined;
           const b = n as BinaryExpr;
+          // p + <words>, <words> + p, p - <words>: an offset onto a pointer.
+          if (b.operator === '+' || b.operator === '-') {
+            const leftPointer = isPointerValue(b.left);
+            const rightPointer = b.operator === '+' && !leftPointer && isPointerValue(b.right);
+            if (leftPointer || rightPointer) {
+              const side = leftPointer ? b.right : b.left;
+              if (isPointerValue(side)) return undefined; // a pointer difference
+              const spine = respellSpine(side);
+              if (!spine.hits) return undefined;
+              changed = true;
+              stats.offset += spine.hits;
+              return updateNode(b, (leftPointer ? { right: spine.expr } : { left: spine.expr }) as Partial<BinaryExpr>);
+            }
+          }
           // (int)a - (int)b: a distance between two addresses.
           if (b.operator === '-') {
             const l = wordCastOfPointer(b.left);

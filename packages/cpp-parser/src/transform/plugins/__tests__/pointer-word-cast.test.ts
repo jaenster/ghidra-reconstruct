@@ -50,29 +50,33 @@ describe('pointerWordCastPlugin', () => {
     assert.ok(squash(out).includes('(uint16_t*)(i*4+(char*)p)'), out);
   });
 
-  it('leaves a negated pointer term alone', () => {
+  // --- words in an integer that becomes a pointer ------------------------------
+  // Not byte arithmetic (no single positive pointer base), so each word is respelled
+  // pointer-sized in place: the same type on the 32-bit target, so the same value.
+
+  it('respells a negated pointer term in place', () => {
     const out = transform(`void f(int i) { uint8_t* p; g((uint16_t*)(i - (int)p)); }`);
-    assert.ok(squash(out).includes('(uint16_t*)(i-(int)p)'), out);
+    assert.ok(squash(out).includes('(uint16_t*)(i-(intptr_t)p)'), out);
   });
 
-  it('leaves a sum with an unknown term alone', () => {
+  it('respells the word beside an unknown term in place', () => {
     const out = transform(`void f() { uint8_t* p; g((uint16_t*)((int)p + nUnknown)); }`);
-    assert.ok(squash(out).includes('(uint16_t*)((int)p+nUnknown)'), out);
+    assert.ok(squash(out).includes('(uint16_t*)((intptr_t)p+nUnknown)'), out);
   });
 
-  it('leaves a sum with a 64-bit term alone', () => {
+  it('respells the word beside a 64-bit term in place, never as a byte base', () => {
     const out = transform(`void f(long long k) { uint8_t* p; g((uint16_t*)((int)p + k)); }`);
-    assert.ok(squash(out).includes('(uint16_t*)((int)p+k)'), out);
+    assert.ok(squash(out).includes('(uint16_t*)((intptr_t)p+k)'), out);
   });
 
-  it('leaves a sum of two pointer words alone', () => {
+  it('respells both words of a sum of two pointer words', () => {
     const out = transform(`void f() { uint8_t* p; uint8_t* q; g((uint16_t*)((int)p + (int)q)); }`);
-    assert.ok(squash(out).includes('(uint16_t*)((int)p+(int)q)'), out);
+    assert.ok(squash(out).includes('(uint16_t*)((intptr_t)p+(intptr_t)q)'), out);
   });
 
   it('does not take a function pointer as a byte base', () => {
     const out = transform(`void f() { Draw pfn; g((uint16_t*)((int)pfn + 4)); }`, { funcdefNames: ['Draw'] });
-    assert.ok(squash(out).includes('(uint16_t*)((int)pfn+4)'), out);
+    assert.ok(squash(out).includes('(uint16_t*)((intptr_t)pfn+4)'), out);
   });
 
   // --- round trip --------------------------------------------------------------
@@ -144,6 +148,65 @@ describe('pointerWordCastPlugin', () => {
     assert.ok(!/intptr_t/.test(out), out);
   });
 
+  // --- the Storm link words --------------------------------------------------------
+
+  it('respells a terminator complement that becomes a link pointer', () => {
+    // SFILE TSList_FILEREC_LinkNode (00417a70): a negative next is ~&terminator.
+    const out = transform(`void f() { int* pLink; pLink = (int*)~(uint32_t)pLink; }`);
+    assert.ok(squash(out).includes('pLink=(int*)~(uintptr_t)pLink;'), out);
+  });
+
+  it('respells the backlink sum of a node, a slot and a loaded offset', () => {
+    const out = transform(`void f() { int* pLink; int** ppSlot; int* pEntry; pLink = (int*)((int)pLink + ((int)ppSlot - pEntry[1])); }`);
+    assert.ok(squash(out).includes('pLink=(int*)((intptr_t)pLink+((intptr_t)ppSlot-pEntry[1]));'), out);
+  });
+
+  it('respells a word stored into a pointer-sized link field with its own signedness', () => {
+    const out = transform(`void f(TSLink* pThis, Node* pNode) { pThis->m_next = ~(uint32_t)pNode; pThis->m_next = (int)pNode; }`,
+      { structFields: { TSLink: { m_next: 'intptr_t' } } });
+    assert.ok(squash(out).includes('pThis->m_next=~(uintptr_t)pNode;'), out);
+    assert.ok(squash(out).includes('pThis->m_next=(intptr_t)pNode;'), out);
+  });
+
+  // --- offsets onto a pointer -------------------------------------------------------
+
+  it('respells the strength-reduced distance a pointer is offset by', () => {
+    const out = transform(`void f(char* szText, char* pDst, int n) { char* p; p = pDst + (0x24 - (int)szText); p = (n - (int)szText) + pDst; }`);
+    assert.ok(squash(out).includes('p=pDst+(0x24-(intptr_t)szText);'), out);
+    assert.ok(squash(out).includes('p=n-(intptr_t)szText+pDst;'), out);
+  });
+
+  it('respells a subscript and a compound step onto a pointer', () => {
+    const out = transform(`void f(char* pRoster, char* szTag, char* pCursor, char c) { pCursor[(int)pRoster + (0x46 - (int)szTag)] = c; pCursor += -(int)szTag; }`);
+    assert.ok(squash(out).includes('pCursor[(intptr_t)pRoster+(0x46-(intptr_t)szTag)]=c;'), out);
+    assert.ok(squash(out).includes('pCursor+=-(intptr_t)szTag;'), out);
+  });
+
+  it('respells a word of a pointer sum: (int)(p + K)', () => {
+    const out = transform(`void f(char* pBase, char* p) { char* q; q = pBase + (int)(p + 1); }`);
+    assert.ok(squash(out).includes('q=pBase+(intptr_t)(p+1);'), out);
+  });
+
+  it('respells a value made a size on purpose', () => {
+    const out = transform(`void f(char* pEnd, char* pBase) { g((size_t)(pEnd + (0x15 - (int)pBase))); size_t n = (int)pEnd - 7; }`);
+    assert.ok(squash(out).includes('g((size_t)(pEnd+(0x15-(intptr_t)pBase)));'), out);
+    assert.ok(squash(out).includes('size_tn=(intptr_t)pEnd-7;'), out);
+  });
+
+  // --- what stays for Ghidra --------------------------------------------------------
+
+  it('leaves a pointer word stored into an int slot', () => {
+    const out = transform(`void f(char* p, int* pPrev, Node* pNext) { int n; n = 0x40 - (int)p; *pPrev = (int)pNext; }`);
+    assert.ok(squash(out).includes('n=0x40-(int)p;'), out);
+    assert.ok(squash(out).includes('*pPrev=(int)pNext;'), out);
+  });
+
+  it('does not reach through a load into the address it reads', () => {
+    const out = transform(`void f(int* p) { char* q; q = (char*)(*(int*)((int)p + 4) + 8); }`);
+    // the inner address is byte arithmetic; the loaded int is a value Ghidra types
+    assert.ok(squash(out).includes('q=(char*)(*(int*)((char*)p+4)+8);'), out);
+  });
+
   it('counts each form', () => {
     resetPointerWordCastStats();
     transform(`void f(int* a, int* b) {
@@ -151,7 +214,9 @@ describe('pointerWordCastPlugin', () => {
       if ((int)a < (int)b) { return; }
       h((uint32_t)a & 3); h((int)a - (int)b);
     }`);
-    assert.deepStrictEqual(getPointerWordCastStats(), { byteArith: 1, roundTrip: 1, compare: 2, bitwise: 1, distance: 1 });
+    assert.deepStrictEqual(getPointerWordCastStats(), {
+      byteArith: 1, roundTrip: 1, compare: 2, bitwise: 1, distance: 1, toPointer: 0, offset: 0, sizedSlot: 0,
+    });
   });
 });
 
