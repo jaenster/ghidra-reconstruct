@@ -53,9 +53,10 @@ import type {
 } from '../../../ast/nodes.js';
 import { Expr, Decl, Stmt } from '../../../ast/factory.js';
 import { findNodesByKind } from '../../../ast/visitor.js';
+import { emit } from '../../../emit/index.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
-import { buildFunctionFlow, calleeSpelling, ENTRY_DEF, type FunctionFlow, type Reach } from '../../cfg/index.js';
+import { buildFunctionFlow, calleeSpelling, ENTRY_DEF, funcdefOutWidth, type FunctionFlow, type Reach } from '../../cfg/index.js';
 import { callNeedsFrame, frameAliasOffset, knownCountWrites, movableLocals } from './frame-group-locals.js';
 import { stackNameOffset, type StackSlot } from './stack-frame-address.js';
 import { unwrapParens, calleeName, bareName, typeFromSpelling } from './call-arg-cast.js';
@@ -384,22 +385,31 @@ function namesIn(body: ASTNode): Set<string> {
 }
 
 /**
- * The frame locals frame-group-locals may make members of a frame object. A run starts
- * where it starts one, as it decides that:
+ * The frame locals a callee may reach through an address that leaves the frame, which
+ * frame-group-locals may make members of a frame object. A reach starts at:
  * a local whose address leaves the frame (handed to a call that reaches past it or
  * whose reach is unknown, stored, used as an initialiser - anything but a dereference),
  * a local a counted copy or fill (`memset(buf, 0, 0x40)`) writes, and - when the body
- * names a frame base no slot carries - the lowest local. A run extends from its start
- * through every local that follows it with a hole of at most one word (frame-group-locals'
- * MAX_GAP) - the widest a run can reach, as it may stop sooner.
+ * names a frame base no slot carries - the lowest local. Where every escape of the local
+ * is a call whose reach is known (`[0, 8)`) or a counted write, it covers those bytes
+ * and the locals they overlap; otherwise it extends through every local that follows
+ * with a hole of at most one word (frame-group-locals' MAX_GAP) - the widest a run can
+ * reach. A local outside every reach is not split behind the callee's back: no callee
+ * touches it.
  */
-function frameMembers(body: CompoundStmt, slots: readonly StackSlot[], o: SplitLivesOptions): Set<string> {
+function frameMembers(body: CompoundStmt, slots: readonly StackSlot[], o: SplitLivesOptions): Map<string, string> {
   const offsetOf = new Map<string, StackSlot>();
   for (const s of slots) if (!s.isParameter) offsetOf.set(s.name, s);
-  const seeds = new Map<string, number>();
+  /** Seed -> the bytes its escapes are known to reach from its start, or null when unknown. */
+  const seeds = new Map<string, number | null>();
   let baseFold = false;
-  const seed = (name: string, bytes = 0) => { if (offsetOf.has(name)) seeds.set(name, Math.max(seeds.get(name) ?? 0, bytes)); };
-  for (const [name, bytes] of knownCountWrites(body, movableLocals(body))) seed(name, bytes);
+  const seed = (name: string, bytes: number | null) => {
+    if (!offsetOf.has(name)) return;
+    if (!seeds.has(name)) { seeds.set(name, bytes); return; }
+    const prev = seeds.get(name)!;
+    seeds.set(name, prev === null || bytes === null ? null : Math.max(prev, bytes));
+  };
+  for (const [name, bytes] of knownCountWrites(body, movableLocals(body))) seed(name, Math.max(bytes, offsetOf.get(name)?.size ?? 0));
   const walk = (x: unknown, chain: ASTNode[]): void => {
     if (Array.isArray(x)) { for (const i of x) walk(i, chain); return; }
     if (!x || typeof x !== 'object') return;
@@ -413,7 +423,7 @@ function frameMembers(body: CompoundStmt, slots: readonly StackSlot[], o: SplitL
       if (at !== null && at >= 0) return;
       const slot = at === null ? undefined : slots.find(x => !x.isParameter && x.offset === at);
       if (!slot) { baseFold = true; return; }
-      seed(slot.name);
+      seed(slot.name, null);
       return;
     }
     if (node.kind === NodeKind.UnaryExpr && (node as UnaryExpr).operator === '&') {
@@ -425,15 +435,16 @@ function frameMembers(body: CompoundStmt, slots: readonly StackSlot[], o: SplitL
         while (i >= 0 && (chain[i].kind === NodeKind.ParenExpr || chain[i].kind === NodeKind.CStyleCastExpr)) { child = chain[i]; i--; }
         const parent = i >= 0 ? chain[i] : null;
         let harmless = false;
+        let reach: Reach | undefined;
         if (parent?.kind === NodeKind.UnaryExpr && (parent as UnaryExpr).operator === '*') harmless = true;
         else if (parent?.kind === NodeKind.CallExpr) {
           const call = parent as CallExpr;
           const index = call.arguments.indexOf(child as Expression);
           const size = offsetOf.get(name)?.size;
           harmless = index >= 0 && o.argReach !== undefined
-            && !callNeedsFrame(call, index, name, o.argReach, () => size, undefined, o.computedArgReach);
+            && !callNeedsFrame(call, index, name, o.argReach, () => size, e => { reach = e.reach; }, o.computedArgReach);
         }
-        if (!harmless) seed(name);
+        if (!harmless) seed(name, reach && reach.lo >= 0 ? reach.hi : null);
       }
     }
     const next = [...chain, node];
@@ -444,15 +455,24 @@ function frameMembers(body: CompoundStmt, slots: readonly StackSlot[], o: SplitL
   };
   walk(body.statements, []);
   const locals = slots.filter(s => !s.isParameter && s.offset < 0 && s.size > 0).sort((a, b) => a.offset - b.offset);
-  if (baseFold && locals.length > 0) seed(locals[0].name);
-  const members = new Set<string>();
+  if (baseFold && locals.length > 0) seed(locals[0].name, null);
+  /** Member -> the local whose address reaches it. */
+  const members = new Map<string, string>();
   for (const [name, bytes] of seeds) {
     const i = locals.findIndex(s => s.name === name);
     if (i < 0) continue;
-    members.add(name);
-    let end = locals[i].offset + Math.max(locals[i].size, bytes);
+    members.set(name, name);
+    if (bytes !== null) {
+      // A known reach: the locals the bytes [start, start + bytes) overlap.
+      const end = locals[i].offset + bytes;
+      for (let j = i + 1; j < locals.length && locals[j].offset < end; j++) {
+        if (!members.has(locals[j].name)) members.set(locals[j].name, name);
+      }
+      continue;
+    }
+    let end = locals[i].offset + locals[i].size;
     for (let j = i + 1; j < locals.length && locals[j].offset <= end + 4; j++) {
-      members.add(locals[j].name);
+      if (!members.has(locals[j].name)) members.set(locals[j].name, name);
       end = Math.max(end, locals[j].offset + locals[j].size);
     }
   }
@@ -466,14 +486,15 @@ function frameMembers(body: CompoundStmt, slots: readonly StackSlot[], o: SplitL
  * that is stored, returned or computed with unknown, so a known reach also says the
  * callee keeps no copy of it. Null when some `&v` is anything else.
  */
-function callScopedAddresses(statements: Statement[], v: string, o: SplitLivesOptions):
-  { statements: Statement[]; placeholders: Map<object, Expression>; outs: Set<object>; casts: Map<object, TypeNode | null> } | null {
+function callScopedAddresses(statements: Statement[], v: string, o: SplitLivesOptions, funcdefOf: (callee: Expression) => string | null):
+  { statements: Statement[]; placeholders: Map<object, Expression>; outs: Set<object>; casts: Map<object, TypeNode | null> } | { why: string } {
   const placeholders = new Map<object, Expression>();
   /** Placeholders handed to an out-parameter. */
   const outs = new Set<object>();
   /** Every placeholder's pointer type the address is cast to, null when it is not cast. */
   const casts = new Map<object, TypeNode | null>();
   let bad = false;
+  let why = '';
   const visit = (x: unknown, chain: ASTNode[]): unknown => {
     if (bad) return x;
     if (Array.isArray(x)) {
@@ -490,15 +511,21 @@ function callScopedAddresses(statements: Statement[], v: string, o: SplitLivesOp
       const parent = i >= 0 ? chain[i] : null;
       const call = parent?.kind === NodeKind.CallExpr ? parent as CallExpr : null;
       const index = call ? call.arguments.indexOf(child as Expression) : -1;
-      if (!call || index < 0 || !o.argReach || callNeedsFrame(call, index, v, o.argReach, () => 4, undefined, o.computedArgReach)) {
+      // A call through a function-pointer type whose contract fixes the argument as a
+      // one-word out-parameter.
+      const fd = call && index >= 0 ? funcdefOf(call.callee) : null;
+      const documented = fd ? funcdefOutWidth(fd, index) : null;
+      if (!call || index < 0 || (documented !== 4 && (!o.argReach || callNeedsFrame(call, index, v, o.argReach, () => 4, undefined, o.computedArgReach)))) {
         bad = true;
+        why = !call || index < 0 ? 'not a call argument'
+          : `handed to ${calleeSpelling(call) ?? (fd ? `a ${fd}` : 'a computed callee')} whose reach is not one word`;
         return x;
       }
       const ph = Expr.assign(Expr.identifier(v) as unknown as Expression, Expr.intLiteral(0) as unknown as Expression, '+=') as unknown as Expression;
       placeholders.set(ph, node as unknown as Expression);
       const callee = calleeSpelling(call);
       // `&v` is never null: a store the callee guards with its own null test is made.
-      const width = !callee ? null
+      const width = documented !== null ? documented : !callee ? null
         : o.outParamWidthNonNull ? o.outParamWidthNonNull(callee, index)
         : o.outParamWidth ? o.outParamWidth(callee, index) : null;
       let cast: TypeNode | null = null;
@@ -519,7 +546,7 @@ function callScopedAddresses(statements: Statement[], v: string, o: SplitLivesOp
     return copy ?? x;
   };
   const out = visit(statements, []) as Statement[];
-  return bad ? null : { statements: out, placeholders, outs, casts };
+  return bad ? { why } : { statements: out, placeholders, outs, casts };
 }
 
 /** Put each `&v` back where its placeholder stands. */
@@ -605,6 +632,14 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
   for (const p of params) taken.add(p.name!.name);
   const enumConstants = new Set(o.enumConstants ?? []);
   const evidentOptions = o as ReusedParamSlotOptions;
+  /** The function-pointer type a computed callee (`(*pfn)`, `pfn`) is declared with. */
+  const funcdefOf = (callee: Expression): string | null => {
+    let x = unwrapParens(callee);
+    if (x.kind === NodeKind.UnaryExpr && (x as UnaryExpr).operator === '*') x = unwrapParens((x as UnaryExpr).operand);
+    if (x.kind !== NodeKind.Identifier) return null;
+    const t = localTypes.get((x as Identifier).name);
+    return t ? spellingOf(t) : null;
+  };
   /**
    * Whether an integer expression computes an address: `&x`, an integer cast of `&x` or of
    * a pointer, or a sum or difference with one of those.
@@ -628,8 +663,8 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
   let changed = false;
 
   for (const v of candidates) {
-    const proxied = callScopedAddresses(statements, v, o);
-    if (!proxied) { report(`${v}: refused: its address leaves the frame`); continue; }
+    const proxied = callScopedAddresses(statements, v, o, funcdefOf);
+    if ('why' in proxied) { report(`${v}: refused: its address leaves the frame: ${proxied.why}`); continue; }
     const work = proxied.statements;
     const placeholders = proxied.placeholders;
     const outs = proxied.outs;
@@ -649,7 +684,7 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
       // piece of another slot, which frame-group-locals lays out with it.
       if (!slot && frameAliasOffset(v) !== null) { report(`${v}: refused: a piece of a frame slot`); continue; }
       if (members.has(v)) {
-        report(`${v}: refused: a frame object may hold its slot`);
+        report(`${v}: refused: a frame object may hold its slot (from ${members.get(v)})`);
         continue;
       }
     }
@@ -662,6 +697,7 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
     // A declaration without an initializer holds the same indeterminate value as entry.
     const bareDecls: number[] = [];
     let odd = false;
+    let oddAt = '';
     for (const n of flow.cfg.nodes) {
       if (!flow.writes(n.id).has(v)) continue;
       if (n.stmt?.kind === NodeKind.DeclStmt && (n.stmt as DeclStmt).declarations.some(d =>
@@ -692,10 +728,17 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
         }
       }
       const w = wholeWrite(flow, n.id, v) ?? nestedWrite(flow, n.id, v);
-      if (!w) { odd = true; break; }
+      if (!w) {
+        odd = true;
+        if (o.onReport) {
+          const own = flow.ownExprs(n.id);
+          try { oddAt = own.map(e => emit(e as never)).join(' ; ').replace(/\s+/g, ' ').slice(0, 120); } catch { oddAt = '?'; }
+        }
+        break;
+      }
       writes.set(n.id, w);
     }
-    if (odd) { report(`${v}: refused: written inside an expression`); continue; }
+    if (odd) { report(`${v}: refused: written inside an expression: ${oddAt}`); continue; }
     if (writes.size === 0) { report(`${v}: single: never stored`); continue; }
 
     // The webs: a read joins every definition that reaches it; an update joins its own
@@ -878,7 +921,8 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
           // `(T *)&v` handed to a call: the call stores (or updates) a T.
           const pointee = w.castType ? (w.castType as unknown as { pointee?: TypeNode }).pointee ?? null : null;
           const ps = pointee ? spellingOf(pointee) : '';
-          const t = pointee && classOf(ps) && !/^void\s*\*$/.test(ps) ? pointee : null;
+          // `(void **)&v` says only "a pointer", which is news in an integer variable.
+          const t = pointee && classOf(ps) && (dtClass === 'int' || !/^void\s*\*$/.test(ps)) ? pointee : null;
           storeTypes.push(t ? ps : null);
           if (t) storeNodes.push(t);
           continue;

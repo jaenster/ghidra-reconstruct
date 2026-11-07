@@ -367,4 +367,21 @@ describe('split-lives', () => {
     }`);
     has(out, 'h(pp[nCallbackData]);');
   });
+
+  it('DrawGroundTile @006b9170: a documented out-parameter of a method pointer starts a pointer value', () => {
+    const out = run(`int f(int a, uint32_t nAlpha) {
+      D3DVB_Lock pVBLockFn;
+      char c;
+      c = (char)nAlpha;
+      pVBLockFn = gpVB->lpVtbl->Lock;
+      (*pVBLockFn)(gpVB, 0x21, (void **)&nAlpha, nullptr);
+      *(float *)nAlpha = 1.0;
+      *(uint32_t *)(nAlpha + 0x10) = 5;
+      *(float *)(nAlpha + 4) = 2.0;
+      return c;
+    }`);
+    has(out, '(*pVBLockFn)(gpVB, 0x21, (void**)&pAlpha, nullptr);');
+    has(out, '*pAlpha = 1.0;');
+    has(out, 'c = (char)nAlpha;');
+  });
 });

@@ -294,6 +294,23 @@ function scanConversionSize(length: string, conversion: string, width: number | 
 }
 
 /**
+ * Methods called through a function-pointer type whose pointer argument at a position is a
+ * documented out-parameter: the method stores exactly that many bytes through it and reads
+ * nothing there first. `IDirect3DVertexBuffer7::Lock(dwFlags, lplpData, lpdwSize)` stores
+ * the locked buffer's address through `lplpData` (DrawGroundTile 006b9170 calls it through a
+ * `D3DVB_Lock` read from the vtable). Keyed by the funcdef name; positions count `This`.
+ */
+const FUNCDEF_OUT: Readonly<Record<string, Readonly<Record<number, number>>>> = {
+  D3DVB_Lock: { 2: 4 },
+};
+
+/** The bytes a call through funcdef `name` stores through argument `index` before reading, or null. */
+export function funcdefOutWidth(name: string, index: number): number | null {
+  const t = FUNCDEF_OUT[name.replace(/^::/, '')];
+  return t && Object.prototype.hasOwnProperty.call(t, index) ? t[index] : null;
+}
+
+/**
  * The bytes each pointer argument after a literal `scanf` format receives, in order; null
  * when the format is not one string literal or holds a conversion that sizes nothing.
  * A `%*` conversion is matched and assigned nowhere, `%%` matches a percent sign.
