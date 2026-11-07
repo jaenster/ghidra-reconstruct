@@ -334,6 +334,16 @@ function lookupName<T>(table: Record<string, T> | undefined, name: string): T | 
 const INT_OPS = new Set(['+', '-', '*', '/', '%', '&', '|', '^', '<<', '>>']);
 
 /**
+ * Integer types narrower than the word: a read `(char)v` of an integer life is the same
+ * truncation of the same 32 bits as `(char)(DT *)v` was, so it needs no pointer in between.
+ */
+const NARROW_INTEGERS = new Set([
+  'char', 'signed char', 'unsigned char', 'uchar', 'byte', 'BYTE', 'CHAR', 'UCHAR', 'int8_t', 'uint8_t', 'undefined1',
+  'bool', 'BOOLEAN', 'short', 'short int', 'unsigned short', 'unsigned short int', 'ushort', 'SHORT', 'USHORT', 'WORD',
+  'int16_t', 'uint16_t', 'undefined2', 'wchar_t', 'WCHAR',
+]);
+
+/**
  * The cast class of a stored value: its evident type's, or an integer for arithmetic on
  * integers (`a - b`, `-(int)p`), which no declared type names but which is a number all
  * the same. A store cast through the declared pointer type, `p = (T *)(a - b)`, then
@@ -1102,6 +1112,8 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
         if (!cc) {
           // An enum read of an integer life converts an integer, not an address.
           if (cls === 'int' && wordClass(spellingOf(c.cast.type)) === 'enum') gain++;
+          // A narrower integer read of one keeps its one cast.
+          else if (cls === 'int' && NARROW_INTEGERS.has(spellingOf(c.cast.type))) continue;
           else if (cls !== dtClass) cost++;
           continue;
         }
@@ -1183,6 +1195,7 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
           else if (cc === 'int' && m.cls === 'int') replace.set(c.cast, () => Expr.cast(castType, ident()) as unknown as Expression);
           else if (sameType(ct, dt)) replace.set(c.cast, () => Expr.cast(castType, ident()) as unknown as Expression);
           else if (m.cls === 'int' && wordClass(ct) === 'enum') replace.set(c.cast, () => Expr.cast(castType, ident()) as unknown as Expression);
+          else if (m.cls === 'int' && NARROW_INTEGERS.has(ct)) replace.set(c.cast, () => Expr.cast(castType, ident()) as unknown as Expression);
           else replace.set(c.cast, () => Expr.cast(castType, castTo(declaredType, ident())) as unknown as Expression);
         }
       }

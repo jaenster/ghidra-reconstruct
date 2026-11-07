@@ -356,6 +356,13 @@ describe('split-lives', () => {
     assert.strictEqual(compileAndRun(prelude + out, call), compileAndRun(prelude + fn, call));
   });
 
+  it('MAINMENU_ShowCinematicsMenu @00431600: a narrower integer read of an integer life casts it once', () => {
+    const out = run(`int f(D2ControlStrc *nFlags, char *sz) { g(nFlags); nFlags = (D2ControlStrc *)0x22; sscanf(sz, "%ld", (long *)&nFlags); if ((uint)nFlags & 1) return 7; if ((char)nFlags < 0) return 6; return (uint)nFlags & 4; }`,
+      { ...O, argReach: () => null });
+    has(out, 'if ((char)nFlags2 < 0)');
+    has(out, 'return nFlags2 & 4;');
+  });
+
   it('GAMBLE_GenerateGambleInventory: int and int32_t reads are one integer type', () => {
     const out = run(`int f(D2UnitStrc *pPlayerUnit, int nLevel) {
       g(pPlayerUnit);
