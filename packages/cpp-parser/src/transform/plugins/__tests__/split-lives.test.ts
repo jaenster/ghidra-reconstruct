@@ -331,6 +331,31 @@ describe('split-lives', () => {
     assert.strictEqual(compileAndRun(prelude + out, call), compileAndRun(prelude + fn, call));
   });
 
+  it('a store under || and && computes what the merged variable computed, on every path', native, () => {
+    const prelude = `
+      #include <stdint.h>
+      struct D2RoomStrc { int a; };
+      static D2RoomStrc gRooms[3];
+      static int gCalls;
+      namespace Units { static D2RoomStrc *GetRoom(int i) { gCalls++; return i < 0 ? 0 : &gRooms[i]; } }
+      static int g(int x) { return x * 3; }
+      static int h(D2RoomStrc *r) { return r->a; }`;
+    const fn = `int f(int nStatId, int c, int i) {
+        int nSum;
+        nSum = g(nStatId);
+        if (c == 0 || (nStatId = (int)Units::GetRoom(i), (D2RoomStrc *)nStatId == 0)) return nSum - 1;
+        nSum = nSum + h((D2RoomStrc *)nStatId);
+        if (c > 1 && (nStatId = (int)Units::GetRoom(i - 1)) != 0) nSum = nSum + h((D2RoomStrc *)nStatId);
+        return nSum;
+      }`;
+    const out = run(fn);
+    has(out, 'if (c == 0 || (pRoom2 = Units::GetRoom(i) , pRoom2 == 0))');
+    has(out, 'if (c > 1 && (pRoom = Units::GetRoom(i - 1)) != 0)');
+    const call = 'gRooms[0].a = 5; gRooms[1].a = 7; gRooms[2].a = 9;'
+      + ' for (int c = 0; c < 3; c++) for (int i = -1; i < 3; i++) printf("%d %d,", f(4, c, i), gCalls); printf("\\n");';
+    assert.strictEqual(compileAndRun(prelude + out, call), compileAndRun(prelude + fn, call));
+  });
+
   it('GAMBLE_GenerateGambleInventory: int and int32_t reads are one integer type', () => {
     const out = run(`int f(D2UnitStrc *pPlayerUnit, int nLevel) {
       g(pPlayerUnit);
