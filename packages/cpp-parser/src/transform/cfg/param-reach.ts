@@ -27,8 +27,9 @@
  *     what an unknown or recursive callee answers. A computed callee is unknown unless the
  *     context can name every function it denotes;
  *   - compared, tested, or discarded: nothing is touched. Nor is anything touched by an
- *     integer copy masked to its high half (`(uint)p & 0xffff0000`), wherever it goes:
- *     it names no byte near the address;
+ *     integer copy masked to its high half (`(uint)p & 0xffff0000`) or narrowed to its low
+ *     byte or half (`(short)(uintptr_t)p`), wherever it goes: it names no byte near the
+ *     address;
  * A parameter that is reassigned, incremented or has its own address taken is unknown.
  *
  * Unknown is the safe answer everywhere: it means "reaches everything", which keeps the
@@ -105,6 +106,8 @@ const COUNTED_REACH: Readonly<Record<string, { args: number[]; count: number; ti
   RtlMoveMemory: { args: [0, 1], count: 2 },
   builtin_memcpy: { args: [0, 1], count: 2 },
   fread: { args: [0], count: 1, times: 2 },
+  // Writes exactly n bytes (padding with NULs) and reads at most n.
+  strncpy: { args: [0, 1], count: 2 },
   fwrite: { args: [0], count: 1, times: 2 },
 };
 
@@ -221,6 +224,25 @@ const FIXED_REACH: Readonly<Record<string, Readonly<Record<number, number>>>> = 
   _time64: { 0: 8 },
   // ddraw
   DirectDrawCreate: { 1: 4 },
+  // memoryapi, sysinfoapi, version
+  VirtualProtect: { 3: 4 },
+  GlobalMemoryStatus: { 0: 32 },
+  GetVolumeInformationA: { 3: 4, 4: 4, 5: 4 },
+  VerQueryValueA: { 2: 4, 3: 4 },
+  GetQueuedCompletionStatus: { 1: 4, 2: 4, 3: 4 },
+  CreateProcessW: { 8: 68, 9: 16 },
+  RegisterClassA: { 0: 40 },
+};
+
+/**
+ * Calls whose pointer argument's extent the SDK fixes per action code, a literal argument:
+ * `SystemParametersInfoA(SPI_GETWORKAREA, 0, &rc, 0)` writes one RECT. Name -> the pointer
+ * position, the action's position, and the bytes per documented action; any other action,
+ * or one that is not a literal, is unknown.
+ */
+const ACTION_REACH: Readonly<Record<string, { arg: number; action: number; bytes: Readonly<Record<number, number>> }>> = {
+  // SPI_GETWORKAREA: RECT.
+  SystemParametersInfoA: { arg: 2, action: 0, bytes: { 0x30: 16 } },
 };
 
 const MAX_COUNT = 0x100000;
@@ -350,6 +372,20 @@ function scanFormatSizes(format: Expression | undefined): number[] | null {
 const SCAN_FORMAT: Readonly<Record<string, number>> = { sscanf: 1, scanf: 0, fscanf: 1 };
 
 /**
+ * The qualifiers Ghidra puts on a library function recovered from the MSVC PDB
+ * (`compiler::setsockopt`, `VisualStudio::strtol`): the library's own function under its
+ * own name, which qualified-name-cleanup emits bare. Its contract is the platform's.
+ */
+const PLATFORM_QUALIFIERS = ['compiler::', 'VisualStudio::'];
+
+/** `name` as the platform spells it: no leading `::`, no library qualifier. */
+function platformName(name: string): string {
+  const bare = name.startsWith('::') ? name.slice(2) : name;
+  const q = PLATFORM_QUALIFIERS.find(p => bare.startsWith(p));
+  return q ? bare.slice(q.length) : bare;
+}
+
+/**
  * The reach of a call whose contract fixes it, `undefined` when `name` is no such call,
  * null when it is one but this call's arguments leave the extent open: a counted sink
  * (`memset(p, 0, 16)`), a documented single-object out-parameter (`GetClientRect(h, &rc)`),
@@ -358,10 +394,16 @@ const SCAN_FORMAT: Readonly<Record<string, number>> = { sscanf: 1, scanf: 0, fsc
 export function knownSinkReach(name: string, index: number, args: readonly Expression[]): Reach | undefined {
   const counted = countedSinkReach(name, index, args);
   if (counted !== undefined) return counted;
-  const bare = name.startsWith('::') ? name.slice(2) : name;
+  const bare = platformName(name);
   if (bare.includes('::')) return undefined;
   const platformCounted = sinkCount(PLATFORM_COUNTED_REACH[bare], index, args);
   if (platformCounted !== undefined) return platformCounted;
+  const byAction = ACTION_REACH[bare];
+  if (byAction && index === byAction.arg) {
+    const action = literalValue(args[byAction.action]);
+    const bytes = action === null ? undefined : byAction.bytes[action];
+    return bytes === undefined ? null : { lo: 0, hi: bytes };
+  }
   const fixed = FIXED_REACH[bare];
   if (fixed && Object.prototype.hasOwnProperty.call(fixed, index)) return { lo: 0, hi: fixed[index] };
   const formatAt = SCAN_FORMAT[bare];
@@ -535,8 +577,13 @@ export function paramReaches(
           case NodeKind.ReinterpretCastExpr: {
             const t = spell((p as unknown as { type: TypeNode }).type);
             const pointee = pointeeOf(t);
+            const width = pointee === null ? sizeOf(t) : null;
             if (pointee !== null) d = { off: d.off, pointee };
-            else if (sizeOf(t) === 4) d = { off: d.off, pointee: null };
+            else if (width === 4) d = { off: d.off, pointee: null };
+            // Its low byte or half (`(short)(uintptr_t)pPoint`, a 16-bit return whose AX
+            // happened to hold the address): like the high half below, no byte can be
+            // named from it without the address itself.
+            else if (width === 1 || width === 2) return;
             else throw new Unknown();
             cur = p;
             continue;
