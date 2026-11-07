@@ -4771,6 +4771,7 @@ function generateFilesForFunctions(
     sharedEnumTypes: context._sharedEnumTypes,
     globalsHeaderPath,
     templateHeaderPath,
+    unitImplPaths: templateUnitImplPaths,
   });
   const resolvedModules = moduleGraph.resolve();
 
