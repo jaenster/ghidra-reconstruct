@@ -212,15 +212,18 @@ function scanExpr(e: Expression, facts: NodeFacts, node: number, certain: boolea
   visit(e, certain, topLevel);
 }
 
-/** Every `&v` in the body, and every local declared as an array. */
-function escapedLocals(body: ASTNode): Set<string> {
+/**
+ * Every `&v` in the body, and every local declared as an array. `&p[i]` with p a pointer
+ * takes the address of what p points at, not of p: it is no escape of p.
+ */
+function escapedLocals(body: ASTNode, pointers?: ReadonlySet<string>): Set<string> {
   const out = new Set<string>();
   const walk = (x: unknown): void => {
     if (Array.isArray(x)) { for (const i of x) walk(i); return; }
     if (!x || typeof x !== 'object') return;
     const n = x as ASTNode;
     if (n.kind === NodeKind.UnaryExpr && (n as UnaryExpr).operator === '&') {
-      const r = writeRoot((n as UnaryExpr).operand);
+      const r = writeRoot((n as UnaryExpr).operand, pointers);
       if (r) out.add(r.name);
     }
     if (n.kind === NodeKind.VariableDecl) {
@@ -262,7 +265,7 @@ export function buildFunctionFlow(body: Statement[], locals: ReadonlySet<string>
     externalGotoCounts: countGotoTargets(body),
     shortCircuitConditions: options.shortCircuitConditions === true,
   });
-  const escaped = escapedLocals(body as unknown as ASTNode);
+  const escaped = escapedLocals(body as unknown as ASTNode, options.pointers);
   const isEscaped = (v: string) => !locals.has(v) || escaped.has(v);
 
   const stmtNode = new Map<object, number>();

@@ -289,7 +289,7 @@ describe('split-lives', () => {
     assert.ok(!/\(int\)\s*\(D2UnitStrc/.test(flat(out)), out);
   });
 
-  it('moves an update with its life, through the declared type', () => {
+  it('moves an update with its life, stepping the address in bytes', () => {
     const out = run(`int f(int nAlpha, int n) {
       g(nAlpha);
       nAlpha = (int)Units::GetRoom(0);
@@ -305,7 +305,7 @@ describe('split-lives', () => {
     has(out, 'D2RoomStrc *pRoom;');
     has(out, '*(float *)((int)pRoom + 4) = 1.0;');
     has(out, '*(float *)pRoom = 2.0;');
-    has(out, 'pRoom = (D2RoomStrc *)((int)pRoom + 0x120);');
+    has(out, 'pRoom = (D2RoomStrc *)((char *)pRoom + 0x120);');
   });
 
   it('computes what the merged variable computed', native, () => {
@@ -602,16 +602,16 @@ describe('split-lives', () => {
     }`;
   const enumO = { ...O, functionReturnTypes: { ...O.functionReturnTypes, GetStats: 'short *' } };
 
-  it('Skills_SrvDoFunc_047_CloakOfShadows: an enum variable stepping a pointer steps it as an int word', () => {
+  it('Skills_SrvDoFunc_047_CloakOfShadows: an enum variable stepping a pointer steps it by elements', () => {
     const out = run(ENUM_STEP, enumO);
     has(out, 'short int *pSkill;');
-    has(out, 'pSkill = (short int *)((int)pSkill + 2);');
+    has(out, 'pSkill += 1;');
     has(out, 'if (*pSkill >= 0)');
   });
 
-  it('the same step written as an assignment steps it as an int word too', () => {
+  it('the same step written as an assignment steps it by elements too', () => {
     const out = run(ENUM_STEP.replace('eSkill += 2;', 'eSkill = eSkill + 2;'), enumO);
-    has(out, 'pSkill = (short int *)((int)pSkill + 2);');
+    has(out, 'pSkill += 1;');
   });
 
   it('SFileGetFileSize: an SDK pointer typedef is a pointer word', () => {
@@ -699,12 +699,180 @@ describe('split-lives', () => {
           return (nStatId - (int)&gRooms[0]) * 3 + (nStatId - (int)&gRooms[1]) + ((D2RoomStrc *)nStatId)->a;
         }`;
     const out = run(src, { ...tieO, ...storeO, functionReturnTypes: { ...storeO.functionReturnTypes, GetStats: 'short *' }, functionParamTypes: tieO.functionParamTypes });
-    has(out, 'pSkill = (short int *)((int)pSkill + 2);');
+    has(out, 'pSkill += 1;');
     has(out, 'nPnHigh = GetMouseY();');
     has(out, 'GetPeriod(nGroup, (int32_t *)&nUnit);');
     has(out, 'pRoom = Units::GetRoom(i);');
     const call = `int buf[4] = { 1, 2, 3, 4 }; gRooms[1].a = 4; gRooms[2].a = 6;
       printf("%d ", f1(buf, 1)); printf("%d ", f2(MODE_B)); printf("%d %d %d\\n", f3(&gUnit, 3), buf[2], gSeen); printf("%d %d\\n", f4(2, 1), gSeen); printf("%d %d %d\\n", f5(&gUnit, SKILL_A, &gSkill), f6(&gUnit, SKILL_A, &gSkill), gSeen);`;
     assert.strictEqual(compileAndRun(prelude + out, call), compileAndRun(prelude + src, call));
+  });
+
+  // SKILLDESC_DrawSkillDmgFist @004eb830: a pointer parameter's slot reused for a number,
+  // reset with a null store and stepped by a byte pointer's arithmetic.
+  const STEPS = `int f(D2SkillsTxt *pSkillsTxt, char *pBytes, int nShift) {
+      g2(pSkillsTxt);
+      pSkillsTxt = (D2SkillsTxt *)0x0;
+      if (nShift) pSkillsTxt = (D2SkillsTxt *)GetMouseY();
+      k((int)pSkillsTxt);
+      g2(pBytes);
+      pBytes = (char *)GetMouseY();
+      pBytes = pBytes + 3;
+      pBytes++;
+      k((int)pBytes + (int)pSkillsTxt);
+      nShift = (int)&gRooms[1];
+      nShift = nShift + 4;
+      h((D2RoomStrc *)nShift);
+      return (int)pBytes * 2;
+    }`;
+  const stepsO = { ...O, functionReturnTypes: { ...O.functionReturnTypes, GetMouseY: 'int' }, functionParamTypes: { k: ['int'], h: ['D2RoomStrc *'] } };
+
+  it('a constant store into a moved life costs nothing; a byte pointer\'s step is the number\'s', () => {
+    const lines: string[] = [];
+    const out = run(STEPS, { ...stepsO, onReport: (_f, l) => lines.push(l) });
+    has(out, 'nSkillsTxt = 0x0;');
+    has(out, 'nSkillsTxt = GetMouseY();');
+    has(out, 'nBytes += 3;');
+    has(out, 'nBytes += 1;');
+    has(out, 'k(nBytes + nSkillsTxt);');
+    assert.ok(lines.some(l => /pSkillsTxt: split/.test(l)), lines.join('\n'));
+  });
+
+  it('an address stored through the integer type is a pointer store; its step moves in bytes', () => {
+    const out = run(STEPS, stepsO);
+    has(out, 'D2RoomStrc *pRoom;');
+    has(out, 'pRoom = (D2RoomStrc *)&gRooms[1];');
+    has(out, 'pRoom = (D2RoomStrc *)((char *)pRoom + 4);');
+    has(out, 'h(pRoom);');
+  });
+
+  it('the steps, constant stores and address stores compute what the merged variables computed', native, () => {
+    const prelude = `
+      #include <stdint.h>
+      #include <stdio.h>
+      struct D2RoomStrc { int a; int b; };
+      static D2RoomStrc gRooms[3];
+      struct D2SkillsTxt { int x; };
+      static D2SkillsTxt gTxt = { 3 };
+      static int gSeen, gY = 40;
+      static int GetMouseY() { return gY++; }
+      static void g2(void *p) { gSeen += p ? 1 : 0; }
+      static void k(int x) { gSeen += x; }
+      static void h(D2RoomStrc *r) { gSeen += r->a * 5; }`;
+    const fn = STEPS.replace(/\(int\)&gRooms\[1\]/, '(int)(intptr_t)&gRooms[1]');
+    const out = run(fn, stepsO);
+    const call = 'gRooms[1].a = 2; gRooms[1].b = 9; int r = f(&gTxt, (char *)0, 1); printf("%d %d\\n", r, gSeen);';
+    assert.strictEqual(compileAndRun(prelude + out, call), compileAndRun(prelude + fn, call));
+  });
+
+  // MONSTER_UpdateStatesFlags @ Units: a unit pointer's slot reused for a counter Ghidra steps
+  // through a member's address, read back through its byte array and compared as a pointer.
+  const LAYOUTS = {
+    D2UnitStrc: [{ name: 'eUnitType', offset: 0, size: 4, type: 'int' }, { name: 'nClassId', offset: 4, size: 4, type: 'int' },
+      { name: 'unk0x19', offset: 0x19, size: 3, type: 'byte[3]' }],
+    D2DifficultyLevelsTxt: [{ name: 'nResist', offset: 0, size: 4, type: 'int' }, { name: 'nOdds', offset: 4, size: 4, type: 'int' }],
+  };
+  const INTERIOR = `int f(D2UnitStrc *pUnit, int n, D2DifficultyLevelsTxt *pDiff) {
+      int nSum;
+      g2(pUnit);
+      g2(pDiff);
+      pUnit = (D2UnitStrc *)0x0;
+      nSum = 0;
+      do {
+        nSum = nSum + gTable[(int)(pUnit->unk0x19 + n * 2 - 0x19)];
+        pUnit = (D2UnitStrc *)((int)&pUnit->eUnitType + 1);
+      } while ((int)pUnit < 3);
+      pDiff = (D2DifficultyLevelsTxt *)GetMouseY();
+      if (pDiff != (D2DifficultyLevelsTxt *)gnLimit) nSum = nSum + 1;
+      return nSum + ((int)&pDiff[1].nOdds + n);
+    }`;
+  const interiorO = { ...O, structLayouts: LAYOUTS, aggregateSizes: { D2UnitStrc: 0xf4, D2DifficultyLevelsTxt: 8 },
+    functionReturnTypes: { ...O.functionReturnTypes, GetMouseY: 'int' }, globalTypes: { gnLimit: 'int' } };
+
+  it('a counter in a unit pointer reads its member addresses as the counter plus their offsets', () => {
+    const out = run(INTERIOR, interiorO);
+    has(out, 'int nUnit;');
+    has(out, 'nUnit = 0x0;');
+    has(out, 'gTable[(int)(nUnit + 0x19 + n * 2 - 0x19)]');
+    has(out, 'nUnit = nUnit + 1;');
+    has(out, 'while (nUnit < 3);');
+  });
+
+  it('a number in a pointer compares with another number without converting either; &p[1].f is p plus the bytes', () => {
+    const out = run(INTERIOR, interiorO);
+    has(out, 'if (nDiff != gnLimit)');
+    has(out, 'return nSum + nDiff + 0xc + n;');
+  });
+
+  it('an element address through a pointer does not take the pointer\'s own address', () => {
+    const lines: string[] = [];
+    run(`int f(D2DifficultyLevelsTxt *pDiff, int n) {
+      g2(pDiff);
+      pDiff = (D2DifficultyLevelsTxt *)GetMouseY();
+      return n + (int)&pDiff[1].nOdds;
+    }`, { ...interiorO, onReport: (_f, l) => lines.push(l) });
+    assert.ok(!lines.some(l => /pDiff: other: escaped/.test(l)), lines.join('\n'));
+    assert.ok(lines.some(l => /pDiff: split/.test(l)), lines.join('\n'));
+  });
+
+  it('member addresses and number comparisons compute what the merged variables computed', native, () => {
+    const prelude = `
+      #include <stdint.h>
+      #include <stdio.h>
+      #include <stddef.h>
+      struct D2UnitStrc { int eUnitType; int nClassId; char pad[0x11]; unsigned char unk0x19[3]; char rest[0xf4 - 0x1c]; };
+      struct D2DifficultyLevelsTxt { int nResist; int nOdds; };
+      static_assert(offsetof(D2UnitStrc, unk0x19) == 0x19, "layout");
+      static int gTable[16] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
+      static int gnLimit = 41, gY = 40, gSeen;
+      static int GetMouseY() { return gY++; }
+      static void g2(void *p) { gSeen += p ? 1 : 0; }`;
+    const fn = INTERIOR.replace('(int)&pUnit->eUnitType', '(int)(intptr_t)&pUnit->eUnitType').replace('(int)(pUnit->unk0x19', '(int)(intptr_t)(pUnit->unk0x19')
+      .replace('(int)&pDiff[1].nOdds', '(int)(intptr_t)&pDiff[1].nOdds').replace('(int)pUnit < 3', '(int)(intptr_t)pUnit < 3')
+      .replace('(D2DifficultyLevelsTxt *)gnLimit', '(D2DifficultyLevelsTxt *)(intptr_t)gnLimit').replace('(D2DifficultyLevelsTxt *)GetMouseY()', '(D2DifficultyLevelsTxt *)(intptr_t)GetMouseY()');
+    const out = run(INTERIOR, interiorO);
+    const call = 'D2UnitStrc u; D2DifficultyLevelsTxt d; printf("%d ", f(&u, 1, &d)); gY = 41; printf("%d ", f(&u, 2, &d)); printf("%d\\n", gSeen);';
+    assert.strictEqual(compileAndRun(prelude + out, call), compileAndRun(prelude + fn, call));
+  });
+
+  // D2WinPalette / SUNITNPC_GenerateNpcItems: a number in a pointer ordered against a constant,
+  // and a pointer local that only relays a moved number.
+  const RELAY = `int f(char *szSrcFile, D2ItemsTxt *pTxt, int n) {
+      D2ItemsTxt *pTmp;
+      g2(szSrcFile);
+      g2(pTxt);
+      szSrcFile = (char *)(n * 0xaa / 100);
+      if (szSrcFile < (char *)0x100) n = n + (int)szSrcFile;
+      pTxt = (D2ItemsTxt *)GetMouseY();
+      pTmp = (D2ItemsTxt *)((int)pTxt + 1);
+      return n + (int)pTmp;
+    }`;
+  const relayO = { ...O, functionReturnTypes: { ...O.functionReturnTypes, GetMouseY: 'int' } };
+
+  it('an integer life ordered against a constant compares unsigned, as the pointers did', () => {
+    const out = run(RELAY, relayO);
+    has(out, 'if ((uint32_t)nSrcFile < 0x100)');
+  });
+
+  it('a local that only relays a moved integer moves with it', () => {
+    const lines: string[] = [];
+    const out = run(RELAY, { ...relayO, onReport: (_f, l) => lines.push(l) });
+    assert.ok(lines.some(l => /pTmp: split/.test(l)), lines.join('\n'));
+    assert.ok(!/\(D2ItemsTxt \*?\)/.test(out.replace(/\s+\*/g, '*').replace(/\*\)/g, ' *)')), out);
+  });
+
+  it('the unsigned comparison and the relay compute what the merged variables computed', native, () => {
+    const prelude = `
+      #include <stdint.h>
+      #include <stdio.h>
+      struct D2ItemsTxt { int a; };
+      static int gSeen, gY = 7;
+      static int GetMouseY() { return gY; }
+      static void g2(void *p) { gSeen += p ? 1 : 0; }`;
+    const fn = RELAY.replace('(char *)(n * 0xaa / 100)', '(char *)(intptr_t)(n * 0xaa / 100)').replace('(int)szSrcFile', '(int)(intptr_t)szSrcFile')
+      .replace('(D2ItemsTxt *)GetMouseY()', '(D2ItemsTxt *)(intptr_t)GetMouseY()').replace('(D2ItemsTxt *)((int)pTxt + 1)', '(D2ItemsTxt *)((intptr_t)pTxt + 1)').replace('(int)pTmp', '(int)(intptr_t)pTmp');
+    const out = run(RELAY, relayO);
+    const call = 'D2ItemsTxt t; printf("%d %d ", f((char *)0, &t, 100), f((char *)0, &t, 200)); printf("%d %d %d\\n", f((char *)0, &t, -5), f((char *)0, &t, -400), gSeen);';
+    assert.strictEqual(compileAndRun(prelude + out, call), compileAndRun(prelude + fn, call));
   });
 });

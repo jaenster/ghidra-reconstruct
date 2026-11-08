@@ -3155,6 +3155,9 @@ function transformDecompiledCode(
       perPluginOptions['split-lives'] = {
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         structFields: context.funcPtrArgCasts.structFields,
+        // Where a member address through a moved value lands: its integer is the value's plus this.
+        structLayouts: context.funcPtrArgCasts.structLayouts,
+        aggregateSizes: context.funcPtrArgCasts.aggregateSizes,
         fieldTypes: context.funcPtrArgCasts.fieldTypes,
         globalTypes: context.funcPtrArgCasts.globalTypes,
         enumConstants: context.funcPtrArgCasts.enumConstantNames,
