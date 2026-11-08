@@ -217,7 +217,7 @@ describe('pointerWordCastPlugin', () => {
     }`);
     assert.deepStrictEqual(getPointerWordCastStats(), {
       byteArith: 1, roundTrip: 1, compare: 2, bitwise: 1, distance: 1, toPointer: 0, offset: 0, sizedSlot: 0, balanced: 0, literal: 0,
-      byteDistance: 0, select: 0,
+      byteDistance: 0, select: 0, truth: 0, relay: 0,
     });
   });
 
@@ -342,6 +342,129 @@ describe('pointer-word-cast: distances and selects the decompiler spelled in int
       printf("%u %d %d ", d1(gBuf + 40, gBuf + 3, 7), d2(gBuf + 2, gBuf + 30), d3((uint8_t *)gBuf + 9, &gRec) - (int)((char *)gBuf - (char *)&gRec));
       printf("%u ", d4((uint8_t *)gBuf + 50, (uint8_t *)gBuf + 1, 60));
       printf("%d %d %d %d\\n", s1((Link *)&gRec) == &gRec, s1((Link *)(intptr_t)-8) == 0, s2(&gRec, 4) == &gRec, s2(&gRec, 3) == 0);`;
+    assert.strictEqual(compileAndRun(prelude + out, call), compileAndRun(prelude + fn, call));
+  });
+});
+
+describe('pointer-word-cast: frame objects, truth tests and relay words', () => {
+  const transform = (code: string, options?: Record<string, unknown>): string => {
+    const t = pointerWordCastPlugin.createTransformer(options as never);
+    return emit(t(parse(code)) as AnyNode).replace(/\s+/g, ' ').trim();
+  };
+  const squash = (s: string) => s.replace(/\s+/g, '');
+  const native = { skip: !hasNativeGpp() || testToolchain()?.name !== 'mingw' };
+
+  it('WriteHexDumpLogEntry @Fog: a frame object member is an array, and its address a word', () => {
+    const out = transform(`int f(char *pLineCursor, int n) {
+      struct __frame0_t { uint32_t local_160; char szLineBuf[256]; uint32_t *pTempBuf; };
+      __frame0_t __frame0;
+      g(0x100 - ((intptr_t)pLineCursor - (int)(__frame0.szLineBuf + 1)));
+      if ((uint32_t*)(n + (int)__frame0.pTempBuf) > 0) n++;
+      return (int)pLineCursor - (int)(__frame0.szLineBuf + 1);
+    }`);
+    assert.ok(squash(out).includes('g(0x100-((intptr_t)pLineCursor-(intptr_t)(__frame0.szLineBuf+1)))'), out);
+    assert.ok(squash(out).includes('(uint32_t*)(n+(char*)__frame0.pTempBuf)'), out);
+    assert.ok(squash(out).includes('return(intptr_t)pLineCursor-(intptr_t)(__frame0.szLineBuf+1);'), out);
+  });
+
+  it('a member of a struct the body declares twice has no known type', () => {
+    const out = transform(`int f(char *p) {
+      { struct S { char a[4]; }; S s; }
+      { struct S { int a; }; S s; return (int)p - (int)(s.a + 1); }
+    }`);
+    assert.ok(squash(out).includes('(int)(s.a+1)'), out);
+  });
+
+  it('SKILLDESC_DrawSkillDmgSummon: a word cast of a pointer tested for truth tests the pointer', () => {
+    const out = transform(`int f(D2UnitStrc *pUnit2, D2UnitStrc *pW, Cache *pCache, int n) {
+      if ((int32_t)pUnit2 && pUnit2 != pW) n++;
+      while (!(int)pCache->pNode[n].pSurface || n) n--;
+      return (int)pUnit2 ? 1 : 0;
+    }`, { structFields: { Cache: { pNode: 'Node*' }, Node: { pSurface: 'IDirectDrawSurface*' } } });
+    assert.ok(squash(out).includes('if(pUnit2&&pUnit2!=pW)'), out);
+    assert.ok(squash(out).includes('while(!pCache->pNode[n].pSurface||n)'), out);
+    assert.ok(squash(out).includes('returnpUnit2?1:0;'), out);
+  });
+
+  it('leaves a truth test of an integer, and a narrowing cast, alone', () => {
+    const out = transform(`int f(int n, D2UnitStrc *p) { if ((int)n) n++; return (short)p ? 1 : 0; }`);
+    assert.ok(squash(out).includes('if((int)n)'), out);
+    assert.ok(squash(out).includes('(shortint)p?1:0'), out);
+  });
+
+  it('SendDebugMessageToEveryone: an inlined copy\'s destination delta is a relay word', () => {
+    const out = transform(`void f(char *pMessage) {
+      char cChar;
+      D2PacketStrc sPacket;
+      int nBufOffset = 0x1e - (int)pMessage;
+      do {
+        cChar = *pMessage;
+        pMessage[(int)&sPacket + nBufOffset] = cChar;
+        pMessage = pMessage + 1;
+      } while (cChar != '\\0');
+    }`);
+    assert.ok(squash(out).includes('intptr_tnBufOffset=0x1e-(intptr_t)pMessage;'), out);
+    assert.ok(squash(out).includes('pMessage[(intptr_t)&sPacket+nBufOffset]=cChar;'), out);
+  });
+
+  it('a relay word stored later and stepped stays one; uint32_t is uintptr_t', () => {
+    const out = transform(`void f(uint8_t *pSrc, uint8_t *pDst) {
+      uint32_t uDelta;
+      uDelta = (uint32_t)pDst - (uint32_t)pSrc;
+      uDelta += 4;
+      uDelta++;
+      *(int *)(uDelta + (uint32_t)pSrc) = 0;
+    }`);
+    assert.ok(squash(out).includes('uintptr_tuDelta;'), out);
+    assert.ok(squash(out).includes('uDelta=(uintptr_t)pDst-(uintptr_t)pSrc;'), out);
+  });
+
+  it('a word read as a number is not a relay word: compared, passed, returned, address taken', () => {
+    for (const use of ['if (nDelta > 3) g(0);', 'g(nDelta);', 'return nDelta;', 'h(&nDelta);', 'nOther = nDelta;', 'nDelta = nDelta * 2;']) {
+      const out = transform(`int f(char *p, char *q) { int nOther; int nDelta = 4 - (int)p; q[nDelta] = 0; ${use} return 0; }`);
+      assert.ok(squash(out).includes('intnDelta='), `${use}\n${out}`);
+    }
+  });
+
+  it('an integer with no address in any store is not a relay word, nor is a parameter', () => {
+    const a = transform(`void f(char *q, int n) { int nDelta = n + 4; q[nDelta] = 0; }`);
+    assert.ok(squash(a).includes('intnDelta=n+4;'), a);
+    const b = transform(`void f(char *q, int nDelta) { nDelta = 4 - (int)q; q[nDelta] = 0; }`);
+    assert.ok(squash(b).includes('intnDelta)'), b);
+  });
+
+  it('computes what the integer spellings computed', native, () => {
+    const prelude = `
+      #include <stdint.h>
+      #include <stdio.h>
+      struct Pkt { int a; char szText[24]; };
+      static Pkt gPkt;`;
+    const fn = `
+      int copy(char *pMessage) {
+        char cChar;
+        int nBufOffset = 4 - (int)pMessage;
+        do {
+          cChar = *pMessage;
+          pMessage[(int)&gPkt + nBufOffset] = cChar;
+          pMessage = pMessage + 1;
+        } while (cChar != '\\0');
+        return gPkt.szText[0] + gPkt.szText[3];
+      }
+      int frame(char *pCursor, int k) {
+        struct __frame0_t { uint32_t a; char szBuf[16]; };
+        __frame0_t __frame0;
+        __frame0.szBuf[3] = 7;
+        char *pEnd = __frame0.szBuf + k;
+        int n = (int)pEnd - (int)(__frame0.szBuf + 1);
+        return n + (0x100 - ((intptr_t)pEnd - (int)(__frame0.szBuf + 1))) + *(char *)(n + (int)__frame0.szBuf + 1);
+      }
+      int truth(Pkt *p, int n) { return ((int)p ? 1 : 2) + (!(int)p ? 4 : 8) + (((int32_t)p && n) ? 16 : 32); }`;
+    const out = transform(fn);
+    assert.ok(squash(out).includes('intptr_tnBufOffset'), out);
+    assert.ok(squash(out).includes('(intptr_t)pEnd-(intptr_t)(__frame0.szBuf+1)'), out);
+    const call = `
+      char src[] = "relay";
+      printf("%d %d %d %d %d\\n", copy(src), frame(src, 3), frame(src, 1), truth(&gPkt, 1), truth(0, 1));`;
     assert.strictEqual(compileAndRun(prelude + out, call), compileAndRun(prelude + fn, call));
   });
 });

@@ -52,7 +52,7 @@ import { findNodesByKind } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
 import { Type, Expr } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
-import { createExprShape, type ExprShape } from './expr-shape.js';
+import { collectLocalStructs, createExprShape, type ExprShape } from './expr-shape.js';
 import {
   asCodeAddress, bareName, cachedSet, calleeName, shapeOfNode, typeFromSpelling, typeNodeName, unwrapParens,
   type TypedefResolver, type TypeShape,
@@ -92,17 +92,21 @@ export interface PointerWordCastStats {
   byteDistance: number;
   /** `(T *)(c ? 0 : (uint32_t)p)` -> `(c ? nullptr : (T *)p)`: a select between pointers. */
   select: number;
+  /** `if ((int)p)`, `!(int)p`, `(int)p && x` -> the pointer itself: a truth test. */
+  truth: number;
+  /** Locals `int d = K - (int)p` used only to address memory, declared `intptr_t`. */
+  relay: number;
 }
 
 const stats: PointerWordCastStats = {
   byteArith: 0, roundTrip: 0, compare: 0, bitwise: 0, distance: 0, toPointer: 0, offset: 0, sizedSlot: 0, balanced: 0, literal: 0,
-  byteDistance: 0, select: 0,
+  byteDistance: 0, select: 0, truth: 0, relay: 0,
 };
 export function getPointerWordCastStats(): PointerWordCastStats { return { ...stats }; }
 export function resetPointerWordCastStats(): void {
   stats.byteArith = stats.roundTrip = stats.compare = stats.bitwise = stats.distance = 0;
   stats.toPointer = stats.offset = stats.sizedSlot = stats.balanced = stats.literal = 0;
-  stats.byteDistance = stats.select = 0;
+  stats.byteDistance = stats.select = stats.truth = stats.relay = 0;
 }
 
 /** Pointees one byte wide: arithmetic on such a pointer is arithmetic on its address. */
@@ -207,7 +211,10 @@ export function createPointerWordCastTransformer(options?: PluginOptions): Trans
         const v = d as VariableDecl;
         if (!localTypes.has(v.name.name)) localTypes.set(v.name.name, v.type);
       }
+      // A frame object (`__frame0.szBuf`) is a struct the body declares itself.
+      const localStructs = collectLocalStructs(node.body);
       const shapeOf: ExprShape = createExprShape(localTypes, {
+        localStructs,
         globalTypes: o.globalTypes ?? {},
         enclosingVarTypes: o.enclosingVarTypes ?? {},
         structFields: o.structFields ?? {},
@@ -219,6 +226,7 @@ export function createPointerWordCastTransformer(options?: PluginOptions): Trans
       // The declared type of a slot as spelled, typedefs unresolved: `intptr_t` is
       // `int` to the resolver, and here the difference is the point.
       const spelledShape: ExprShape = createExprShape(localTypes, {
+        localStructs,
         globalTypes: o.globalTypes ?? {},
         enclosingVarTypes: o.enclosingVarTypes ?? {},
         structFields: o.structFields ?? {},
@@ -263,6 +271,20 @@ export function createPointerWordCastTransformer(options?: PluginOptions): Trans
         return { cast, word };
       };
 
+      /**
+       * A pointer already cast to a pointer-sized integer, `(intptr_t)p`: a word of an
+       * address that needs no respelling, but still counts as one where a sum or a
+       * difference is told apart by its words (`(intptr_t)p - (int)q` is a distance).
+       */
+      const sizedWordOfPointer = (e: Expression): boolean => {
+        const u = unwrapParens(e);
+        if (u.kind !== NodeKind.CStyleCastExpr) return false;
+        const cast = u as CStyleCastExpr;
+        const s = shapeOfNode(cast.type, 0);
+        if (!s || s.stars !== 0 || (s.base !== 'intptr_t' && s.base !== 'uintptr_t')) return false;
+        return isPointerValue(cast.expression);
+      };
+
       /** An integer offset of at most 32 bits - certainly not a pointer. */
       const isOffset = (e: Expression): boolean => {
         const u = unwrapParens(e);
@@ -291,6 +313,130 @@ export function createPointerWordCastTransformer(options?: PluginOptions): Trans
             return !!s && s.stars === 0 && OFFSET_BASES.has(s.base);
           }
         }
+      };
+
+      /**
+       * The body-declared locals that are relay words: a 32-bit `int`/`unsigned int`
+       * (spelled so, or `int32_t`/`uint32_t`) whose address is never taken, every store into
+       * which is a sum of address words (`K - (int)p`, `(int)&buf + n`) and integer offsets
+       * with at least one address word among all of them, and every read of which is a term
+       * of address arithmetic: the index of a subscript of a pointer, a term of a sum that is
+       * added to a pointer or converted to one, or a term of its own next store. Such a word
+       * is the strength-reduced difference of two addresses (an inlined copy's destination
+       * minus its source), never a number of its own. Its pointer-sized type is the same type
+       * on the 32-bit target, so every value and every instruction stays as it was.
+       */
+      const relayWords = (body: ASTNode, types: ReadonlyMap<string, TypeNode>): Map<string, 'intptr_t' | 'uintptr_t'> => {
+        const decls = new Map<string, VariableDecl[]>();
+        for (const d of findNodesByKind(body, NodeKind.VariableDecl)) {
+          const v = d as VariableDecl;
+          decls.set(v.name.name, [...(decls.get(v.name.name) ?? []), v]);
+        }
+        const params = new Set(node.parameters.map(p => (p as ParameterDecl).name?.name).filter((n): n is string => !!n));
+        const cand = new Map<string, 'intptr_t' | 'uintptr_t'>();
+        for (const [name, ds] of decls) {
+          if (ds.length !== 1 || params.has(name)) continue;
+          const word = pointerWordFor(ds[0].type);
+          if (!word || ds[0].type !== types.get(name)) continue;
+          cand.set(name, word);
+        }
+        if (cand.size === 0) return cand;
+        const refused = new Set<string>();
+        const fed = new Set<string>();
+        /** Read at least once as a term of address arithmetic: a word that is never spent is no relay. */
+        const spent = new Set<string>();
+        /** A store's value: address words and offsets (and the variable itself), true when it holds an address word. */
+        const storedValue = (v: string, e: Expression, compound: boolean): void => {
+          const terms: Array<{ term: Expression; sign: 1 | -1 }> = [];
+          additiveTerms(e, 1, terms);
+          for (const t of terms) {
+            if (wordCastOfPointer(t.term) || sizedWordOfPointer(t.term)) { if (!compound) fed.add(v); continue; }
+            const u = unwrapParens(t.term);
+            if (u.kind === NodeKind.Identifier && (u as { name: string }).name === v) continue;
+            if (!isOffset(t.term)) { refused.add(v); return; }
+          }
+        };
+        const walk = (x: ASTNode, chain: ASTNode[]): void => {
+          if (x.kind === NodeKind.Identifier) {
+            const name = (x as unknown as { name: string }).name;
+            if (cand.has(name) && !refused.has(name)) {
+              if (readsAsAddress(x, chain, name)) spent.add(name); else refused.add(name);
+            }
+            return;
+          }
+          if (x.kind === NodeKind.VariableDecl) {
+            const v = x as VariableDecl;
+            if (cand.has(v.name.name) && v.initializer) {
+              if (v.initializer.kind === NodeKind.InitListExpr) refused.add(v.name.name);
+              else storedValue(v.name.name, v.initializer as Expression, false);
+            }
+            if (v.initializer) walk(v.initializer as ASTNode, [...chain, x]);
+            return;
+          }
+          if (x.kind === NodeKind.AssignExpr) {
+            const a = x as AssignExpr;
+            const left = unwrapParens(a.left);
+            if (left.kind === NodeKind.Identifier && cand.has((left as { name: string }).name)) {
+              const name = (left as { name: string }).name;
+              if (a.operator === '=') storedValue(name, a.right, false);
+              else if (a.operator === '+=' || a.operator === '-=') storedValue(name, a.right, true);
+              else refused.add(name);
+              walk(a.right, [...chain, x]);
+              return;
+            }
+          }
+          if ((x.kind === NodeKind.UnaryExpr || x.kind === NodeKind.PostfixExpr)) {
+            const op = (x as UnaryExpr).operator;
+            const operand = unwrapParens((x as UnaryExpr).operand);
+            if (op === '&' && operand.kind === NodeKind.Identifier) { refused.add((operand as { name: string }).name); return; }
+            if ((op === '++' || op === '--') && operand.kind === NodeKind.Identifier && cand.has((operand as { name: string }).name)) {
+              // A step of its own, as a whole statement: the word moves by one.
+              const parent = chain[chain.length - 1];
+              if (!parent || parent.kind !== NodeKind.ExprStmt) refused.add((operand as { name: string }).name);
+              return;
+            }
+          }
+          for (const [k, val] of Object.entries(x)) {
+            if (k === 'location' || k === 'leadingTrivia' || k === 'trailingTrivia' || k === 'type') continue;
+            if (Array.isArray(val)) { for (const i of val) if (i && typeof i === 'object' && 'kind' in i) walk(i as ASTNode, [...chain, x]); }
+            else if (val && typeof val === 'object' && 'kind' in (val as object)) walk(val as ASTNode, [...chain, x]);
+          }
+        };
+        /**
+         * Whether the read `id` (its ancestors in `chain`) is a term of address arithmetic,
+         * climbing the sum it is a term of.
+         */
+        const readsAsAddress = (id: ASTNode, chain: ASTNode[], name: string): boolean => {
+          let child: ASTNode = id;
+          for (let i = chain.length - 1; i >= 0; i--) {
+            const p = chain[i];
+            if (p.kind === NodeKind.ParenExpr) { child = p; continue; }
+            if (p.kind === NodeKind.BinaryExpr && ((p as BinaryExpr).operator === '+' || (p as BinaryExpr).operator === '-')) {
+              const b = p as BinaryExpr;
+              const other = child === b.left ? b.right : b.left;
+              // p + <sum>, <sum> + p, p - <sum>: an offset onto a pointer.
+              if (isPointerValue(other) && !(b.operator === '-' && child === b.left)) return true;
+              child = p;
+              continue;
+            }
+            if (p.kind === NodeKind.SubscriptExpr) return child === (p as SubscriptExpr).index && isPointerValue((p as SubscriptExpr).array);
+            if (p.kind === NodeKind.CStyleCastExpr) {
+              const t = shapeOfNode((p as CStyleCastExpr).type, 0, resolve);
+              return !!t && t.stars > 0;
+            }
+            if (p.kind === NodeKind.AssignExpr) {
+              // A term of its own next store.
+              const a = p as AssignExpr;
+              const l = unwrapParens(a.left);
+              return child === a.right && l.kind === NodeKind.Identifier && (l as { name: string }).name === name;
+            }
+            return false;
+          }
+          return false;
+        };
+        walk(body, []);
+        for (const name of [...cand.keys()]) if (refused.has(name) || !fed.has(name) || !spent.has(name)) cand.delete(name);
+        return cand;
       };
 
       /**
@@ -431,12 +577,13 @@ export function createPointerWordCastTransformer(options?: PluginOptions): Trans
         const terms: Array<{ term: Expression; sign: 1 | -1 }> = [];
         additiveTerms(e, 1, terms);
         let up = 0, down = 0;
+        let words = 0;
         for (const t of terms) {
           const w = wordCastOfPointer(t.term);
-          if (w) { if (t.sign === 1) up++; else down++; continue; }
+          if (w || sizedWordOfPointer(t.term)) { if (t.sign === 1) up++; else down++; if (w) words++; continue; }
           if (isPointerValue(t.term)) return false;
         }
-        return up > 0 && up === down;
+        return up > 0 && up === down && words > 0;
       };
 
       /**
@@ -564,9 +711,72 @@ export function createPointerWordCastTransformer(options?: PluginOptions): Trans
         return (CRT_SIZE_PARAMS[bareName(name)] ?? []).includes(index);
       };
 
+      /**
+       * A truth test of a word cast of a pointer, `(int)p` as a condition: the word is
+       * nonzero exactly when the pointer is not null (both are the same 32 bits), so the
+       * pointer is tested itself. Null when `e` is not such a cast.
+       */
+      const truthOperand = (e: Expression | null | undefined): Expression | null => {
+        if (!e) return null;
+        const w = wordCastOfPointer(e);
+        if (!w) return null;
+        return wrap(w.cast.expression);
+      };
+
+      // Relay words: locals that carry an address word between the pointer arithmetic that
+      // makes it and the pointer arithmetic that spends it, and nowhere else. They are
+      // declared with the pointer-sized integer of the same type before the respelling
+      // runs, which then sees them as the pointer-sized slots they are.
+      const relays = relayWords(node.body, localTypes);
       let changed = false;
+      if (relays.size > 0) {
+        for (const [name, word] of relays) {
+          localTypes.set(name, Type.typedef(word));
+          stats.relay++;
+        }
+        changed = true;
+      }
+      const retypeRelays = createTransformer({
+        visitNode(n: ASTNode): ASTNode | undefined {
+          if (n.kind !== NodeKind.VariableDecl) return undefined;
+          const v = n as VariableDecl;
+          const word = relays.get(v.name.name);
+          return word ? updateNode(v, { type: Type.typedef(word) } as Partial<VariableDecl>) : undefined;
+        },
+      });
+
       const inner = createTransformer({
         visitNode(n: ASTNode): ASTNode | undefined {
+          // if ((int)p), while (!(int)p), (int)p && x, (int)p ? a : b -> the pointer tested.
+          const truthIn = <T extends ASTNode>(node: T, fields: Array<keyof T>): ASTNode | undefined => {
+            const patch: Partial<T> = {};
+            let hits = 0;
+            for (const f of fields) {
+              const t = truthOperand(node[f] as unknown as Expression);
+              if (t) { (patch as Record<string, unknown>)[f as string] = t; hits++; }
+            }
+            if (!hits) return undefined;
+            changed = true;
+            stats.truth += hits;
+            return updateNode(node, patch);
+          };
+          switch (n.kind) {
+            case NodeKind.IfStmt: case NodeKind.WhileStmt: case NodeKind.DoWhileStmt: case NodeKind.ForStmt:
+              return truthIn(n as unknown as { condition: Expression } & ASTNode, ['condition']);
+            case NodeKind.ConditionalExpr: {
+              const r = truthIn(n as ConditionalExpr, ['condition']);
+              if (r) return r;
+              break;
+            }
+            case NodeKind.UnaryExpr:
+              if ((n as UnaryExpr).operator === '!') return truthIn(n as UnaryExpr, ['operand']);
+              break;
+            case NodeKind.BinaryExpr:
+              if ((n as BinaryExpr).operator === '&&' || (n as BinaryExpr).operator === '||') return truthIn(n as BinaryExpr, ['left', 'right']);
+              break;
+            default:
+              break;
+          }
           if (n.kind === NodeKind.CallExpr) {
             // f(..., <words>, ...) into a size_t parameter: a value made pointer-sized.
             const call = n as unknown as { callee: Expression; arguments: Expression[] };
@@ -701,7 +911,8 @@ export function createPointerWordCastTransformer(options?: PluginOptions): Trans
             }
           }
           // (int)a + (n - (int)b): a distance, reassociated.
-          if ((b.operator === '+' || b.operator === '-') && balanced(b) && !(b.operator === '-' && wordCastOfPointer(b.left) && wordCastOfPointer(b.right))) {
+          const wordOrSized = (e: Expression) => !!wordCastOfPointer(e) || sizedWordOfPointer(e);
+          if ((b.operator === '+' || b.operator === '-') && balanced(b) && !(b.operator === '-' && wordOrSized(b.left) && wordOrSized(b.right))) {
             const chain = respellChain(b);
             if (chain.hits) {
               changed = true;
@@ -713,10 +924,11 @@ export function createPointerWordCastTransformer(options?: PluginOptions): Trans
           if (b.operator === '-') {
             const l = wordCastOfPointer(b.left);
             const r = wordCastOfPointer(b.right);
-            if (!l || !r) return undefined;
+            // One side may already be pointer-sized: `(intptr_t)p - (int)q`.
+            if ((!l && !sizedWordOfPointer(b.left)) || (!r && !sizedWordOfPointer(b.right)) || (!l && !r)) return undefined;
             changed = true;
             stats.distance++;
-            return updateNode(b, { left: respell(l), right: respell(r) } as Partial<BinaryExpr>);
+            return updateNode(b, { left: l ? respell(l) : b.left, right: r ? respell(r) : b.right } as Partial<BinaryExpr>);
           }
           const isCompare = COMPARISONS.has(b.operator);
           if (!isCompare && !BITWISE.has(b.operator)) return undefined;
@@ -730,7 +942,7 @@ export function createPointerWordCastTransformer(options?: PluginOptions): Trans
         },
       });
 
-      const newBody = inner(node.body);
+      const newBody = inner(relays.size > 0 ? retypeRelays(node.body) : node.body);
       if (!changed) return undefined;
       return updateNode(node, { body: newBody } as Partial<FunctionDecl>);
     },
