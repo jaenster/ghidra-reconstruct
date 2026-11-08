@@ -3164,6 +3164,8 @@ function transformDecompiledCode(
         // The frame and the callee reach frame-group-locals is given: a local it may
         // make a member of a frame object is not split.
         slots: enclosing?.stackSlots,
+        // ...and one it may: its lives become members of a union in its slot.
+        slotUnions: true,
         reportName: `${funcAddress ?? '???'}\t${funcName ?? '<unknown>'}`,
         // A call storing through `&v` before it reads (from the callee's body) starts a new value.
         ...(context.funcPtrArgCasts.outParams ? {

@@ -586,6 +586,9 @@ export class Parser {
     this.expect(TokenKind.RightBrace);
     this.match(TokenKind.Semicolon);
 
+    if (keyword.token.kind === TokenKind.Union && bases.length === 0 && (name === null || name.kind === NodeKind.Identifier)) {
+      return this.node(NodeKind.UnionDecl, startLoc, { name, members, attributes: [] }) as unknown as StructDecl;
+    }
     const kind = isClass ? NodeKind.ClassDecl : NodeKind.StructDecl;
     return this.node(kind, startLoc, {
       name,
@@ -2580,7 +2583,7 @@ export class Parser {
       if (this.check(TokenKind.Const) || this.check(TokenKind.Volatile) ||
           this.check(TokenKind.Static_assert)) return true;
       if (this.check(TokenKind.ColonColon) && this.checkAhead(1, TokenKind.Identifier)) this.advance();
-      if (this.check(TokenKind.Struct) || this.check(TokenKind.Class) ||
+      if (this.check(TokenKind.Struct) || this.check(TokenKind.Class) || this.check(TokenKind.Union) ||
           this.check(TokenKind.Enum) || this.check(TokenKind.Typedef)) return true;
 
       // Check for type name followed by identifier/star

@@ -47,9 +47,11 @@
 
 import { appendFileSync } from 'node:fs';
 import { NodeKind } from '../../../ast/kinds.js';
+import { TriviaKind } from '../../../lexer/trivia.js';
 import type {
   ASTNode, AssignExpr, BinaryExpr, CallExpr, CompoundStmt, CStyleCastExpr, DeclStmt, ExprStmt, Expression,
-  FunctionDecl, Identifier, ParameterDecl, PostfixExpr, Statement, TypeNode, UnaryExpr, VariableDecl,
+  FunctionDecl, Identifier, ParameterDecl, PostfixExpr, StaticAssertDecl, Statement, TypeNode, UnaryExpr, UnionDecl,
+  VariableDecl,
 } from '../../../ast/nodes.js';
 import { Expr, Decl, Stmt, Type } from '../../../ast/factory.js';
 import { findNodesByKind } from '../../../ast/visitor.js';
@@ -111,6 +113,14 @@ export interface SplitLivesOptions extends PluginOptions {
   reportName?: string;
   /** One line per variable the pass split or refused, for the run's report. */
   onReport?: (fn: string, line: string) => void;
+  /**
+   * A local a frame object may hold (a callee reaching past a neighbour's address can
+   * read or write its slot) keeps its slot: each life it would split into a local of its
+   * own becomes a member of a union declared in its place instead, so every life still
+   * sits in the one 4-byte slot the frame object covers. Absent or false: such a local is
+   * not split.
+   */
+  slotUnions?: boolean;
 }
 
 type WordClass = 'ptr' | 'int';
@@ -827,6 +837,78 @@ interface Web {
   reads: number[];
 }
 
+/**
+ * `v`'s slot as a union: `union v_u { DT n; T1 L1; ... };` declared first in the body (with
+ * an assertion that it is one 4-byte word on the 32-bit target), v declared with it where
+ * v was declared, and every reference to v or to a life's local `Li` spelled `v.n` / `v.Li`.
+ * The union keeps v's name, so the frame slot Ghidra names v is still this variable for
+ * frame-group-locals; every member is the slot's bytes on the 32-bit target, so a read of
+ * any of them sees what a callee reaching the slot wrote, as the shared variable did.
+ */
+function slotUnion(statements: Statement[], v: string, declaredType: TypeNode,
+  lives: { name: string; type: TypeNode }[], taken: Set<string>): Statement[] {
+  let typeName = `${v}_u`;
+  for (let i = 2; taken.has(typeName); i++) typeName = `${v}_u${i}`;
+  taken.add(typeName);
+  // The declared type's member gets a name of its own: a member named v would be a second
+  // declaration of v to every pass that counts them.
+  const own = valueLocalName(spellingOf(declaredType), v, taken);
+  taken.add(own);
+  const memberOf = new Map<string, string>([[v, own], ...lives.map(l => [l.name, l.name] as [string, string])]);
+  // Every reference to a member name, outside the positions where an identifier names a
+  // member, a label, a type or a declaration.
+  const NAMING = new Set(['member', 'label', 'name']);
+  const visit = (x: unknown, key: string): unknown => {
+    if (Array.isArray(x)) {
+      let ch = false;
+      const out = x.map(i => { const r = visit(i, key); if (r !== i) ch = true; return r; });
+      return ch ? out : x;
+    }
+    if (!x || typeof x !== 'object') return x;
+    const n = x as ASTNode;
+    if (n.kind === NodeKind.Identifier) {
+      const name = (n as Identifier).name;
+      if (NAMING.has(key) || !memberOf.has(name)) return x;
+      return Expr.member(Expr.identifier(v) as unknown as Expression, memberOf.get(name)!, false);
+    }
+    // A declaration of v is the union's; the lives' locals were never declared.
+    if (n.kind === NodeKind.VariableDecl && (n as VariableDecl).name.name === v) {
+      return { ...(n as VariableDecl), type: Type.typedef(typeName) };
+    }
+    if (n.kind === NodeKind.TypedefType || n.kind === NodeKind.ElaboratedType) return x;
+    let copy: Record<string, unknown> | null = null;
+    for (const [k, val] of Object.entries(n)) {
+      if (k === 'location' || k === 'leadingTrivia' || k === 'trailingTrivia' || k === 'type' || !val || typeof val !== 'object') continue;
+      const r = visit(val, k);
+      if (r !== val) { copy = copy ?? { ...(n as object) } as Record<string, unknown>; copy[k] = r; }
+    }
+    return copy ?? x;
+  };
+  const renamed = visit(statements, '') as Statement[];
+  const union = {
+    kind: NodeKind.UnionDecl,
+    name: Expr.identifier(typeName),
+    members: [Decl.field(own, declaredType), ...lives.map(l => Decl.field(l.name, l.type))],
+    attributes: [],
+    location: (statements[0] ?? {}).location,
+    leadingTrivia: [{ kind: TriviaKind.LineComment, text: `// The values VC8 kept in ${v}'s one frame slot, one member each: a frame object reaches the slot.`, location: (statements[0] ?? {}).location }],
+    trailingTrivia: [],
+  } as unknown as UnionDecl;
+  const message = Expr.stringLiteral(`${typeName} must stay one 4-byte frame slot`);
+  const assert = {
+    kind: NodeKind.StaticAssertDecl,
+    condition: Expr.binary(
+      Expr.binary(Expr.sizeof(Type.pointer(Type.void()), true), '!=', Expr.intLiteral(4)),
+      '||',
+      Expr.binary(Expr.sizeof(Type.typedef(typeName), true), '==', Expr.intLiteral(4))),
+    message,
+    location: message.location,
+    leadingTrivia: [],
+    trailingTrivia: [],
+  } as unknown as StaticAssertDecl;
+  return [Stmt.declStmt([union as never]) as unknown as Statement, Stmt.declStmt([assert as never]) as unknown as Statement, ...renamed];
+}
+
 export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] | null {
   const body = fn.body as CompoundStmt | undefined;
   if (!body) return null;
@@ -1019,6 +1101,7 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
     let splitThisRound = false;
     for (const v of candidates) {
       if (!declared.has(v)) continue;
+      let overlay = false;
       const proxied = callScopedAddresses(statements, v, o, funcdefOf);
       if ('why' in proxied) { report(`${v}: refused: its address leaves the frame: ${proxied.why}`); continue; }
       const work = proxied.statements;
@@ -1044,12 +1127,16 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
         if (!slot && frameAliasOffset(v) !== null) { report(`${v}: refused: a piece of a frame slot`); continue; }
         if (members.has(v)) {
           const from = members.get(v)!;
-          report(`${v}: refused: a frame object may hold its slot (from ${from}${memberWhy.has(from) ? `: ${memberWhy.get(from)}` : ''})`);
-          continue;
+          const why = `a frame object may hold its slot (from ${from}${memberWhy.has(from) ? `: ${memberWhy.get(from)}` : ''})`;
+          if (!o.slotUnions) { report(`${v}: refused: ${why}`); continue; }
+          const slot = (o.slots ?? []).find(x => x.name === v && !x.isParameter);
+          if (!slot || slot.size !== 4) { report(`${v}: refused: ${why}, and its slot is not one 4-byte word`); continue; }
+          overlay = true;
         }
       }
       const declaredType = types.get(v)!;
       const dt = spellingOf(declaredType);
+      /** v's lives become members of a union in its slot rather than locals of their own. */
       const dtClass = declaredClassOf(dt)!;
 
       // The writes, each a whole statement.
@@ -1731,7 +1818,7 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
             return keep(Expr.assign(ident(), value) as unknown as Expression);
           });
         }
-        report(`${v}: split: ${m.local} ${m.spelling} (${m.web.defs.length} stores, ${m.web.reads.length} read nodes)`);
+        report(`${v}: ${overlay ? 'slot union' : 'split'}: ${m.local} ${m.spelling} (${m.web.defs.length} stores, ${m.web.reads.length} read nodes)`);
       }
 
       const rebuild = (x: unknown): unknown => {
@@ -1754,6 +1841,14 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
       };
       let rewritten = restoreAddresses(rebuild(work) as Statement[], placeholders);
 
+      if (overlay) {
+        statements = slotUnion(rewritten, v, declaredType, moves.map(m => ({ name: m.local, type: m.type })), taken);
+        // The lives are members now, no longer names another variable's evidence can use.
+        declared.delete(v);
+        changed = true;
+        splitThisRound = true;
+        continue;
+      }
       // A local none of whose occurrences are left: its declaration goes.
       if (topLocals.has(v)) {
         const all = { kind: NodeKind.CompoundStmt, statements: rewritten } as unknown as ASTNode;

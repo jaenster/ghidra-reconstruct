@@ -10,6 +10,7 @@ import { emit } from '../../../emit/index.js';
 import type { AnyNode } from '../../../ast/nodes.js';
 import { splitLivesPlugin, type SplitLivesOptions } from '../builtins/split-lives.js';
 import { compileAndRun, hasNativeGpp, testToolchain } from '../../../testing/native-cpp.js';
+import { frameGroupLocalsPlugin } from '../builtins/frame-group-locals.js';
 
 // A pointer kept in an int is the 32-bit target's habit: the check needs the target's word size.
 const native = { skip: !hasNativeGpp() || testToolchain()?.name !== 'mingw' };
@@ -870,6 +871,80 @@ describe('split-lives', () => {
     const out = run(WALK, walkO);
     const call = 'SGAMEDATA g; D2UnitStrc u; D2GSPacketClt0x02 pk = { 4, 0, 0 }; printf("%d ", f(&g, &u, &pk, 9)); printf("%d ", f(&g, &u, &pk, 7)); printf("%d\\n", gSeen);';
     assert.strictEqual(compileAndRun(prelude + out, call), compileAndRun(prelude + WALK, call));
+  });
+
+  describe('a local a frame object may hold: its lives as members of a union in its slot', () => {
+    const slots = [{ name: 'a', offset: -0x10, size: 4 }, { name: 'nX', offset: -0xc, size: 4 }];
+    const src = `int f(int nSel) {
+        int a;
+        int nX;
+        int s;
+        a = nSel;
+        g(&a);
+        s = k(nX + 1);
+        nX = (int)Units::GetRoom(nSel & 1);
+        s = s + h((D2RoomStrc *)nX);
+        s = s + h((D2RoomStrc *)nX);
+        g(&a);
+        nX = nX + 2;
+        return s + k(nX);
+      }`;
+    const withUnions = { ...O, slots, slotUnions: true };
+
+    it('CUnit/AI frame members: a pointer life becomes a union member, the slot keeps its name', () => {
+      const lines: string[] = [];
+      const out = run(src, { ...withUnions, onReport: (_f, l) => lines.push(l) });
+      has(out, 'union nX_u {');
+      has(out, 'int nX2;');
+      has(out, 'D2RoomStrc *pRoom;');
+      has(out, 'nX_u nX;');
+      has(out, 'nX.pRoom = Units::GetRoom(nSel & 1);');
+      has(out, 'h(nX.pRoom)');
+      has(out, 'k(nX.nX2 + 1)');
+      has(out, 'sizeof(nX_u) == 4');
+      assert.ok(!/\(D2RoomStrc \*\)/.test(out), out);
+      assert.ok(lines.some(l => /^nX: slot union: pRoom D2RoomStrc\*/.test(l)), lines.join('\n'));
+      // Without the option the local is refused, and says why.
+      const refused: string[] = [];
+      assert.strictEqual(flat(run(src, { ...O, slots, onReport: (_f, l) => refused.push(l) })), flat(run(src, {})));
+      assert.ok(refused.some(l => /^nX: refused: a frame object may hold its slot/.test(l)), refused.join('\n'));
+    });
+
+    it('a slot that is not one 4-byte word is refused with the reason', () => {
+      const lines: string[] = [];
+      const wide = [{ name: 'a', offset: -0x10, size: 4 }, { name: 'nX', offset: -0xc, size: 8 }];
+      assert.strictEqual(flat(run(src, { ...withUnions, slots: wide, onReport: (_f, l) => lines.push(l) })), flat(run(src, {})));
+      assert.ok(lines.some(l => /^nX: refused: .*not one 4-byte word/.test(l)), lines.join('\n'));
+    });
+
+    it('frame-group-locals sizes the union and declares the group after it', () => {
+      const split = run(src, withUnions);
+      const grouped = emit(frameGroupLocalsPlugin.createTransformer({ slots })(parse(split)) as AnyNode);
+      const at = (t: string) => flat(grouped).indexOf(t);
+      assert.ok(at('union nX_u') >= 0 && at('struct __frame0_t') > at('union nX_u'), grouped);
+      has(grouped, 'nX_u nX;');
+      has(grouped, '__frame0.nX.pRoom');
+      has(grouped, 'g(&__frame0.a)');
+    });
+
+    it('computes what the shared slot computed, a callee writing it through a neighbour', native, () => {
+      const prelude = `
+        #include <stdint.h>
+        struct D2RoomStrc { int a; D2RoomStrc *pNext; };
+        static D2RoomStrc gRooms[2];
+        namespace Units { static D2RoomStrc *GetRoom(int i) { return &gRooms[i]; } }
+        static void g(int *p) { p[1] = p[0] + 40; }
+        static int k(int x) { return x * 2; }
+        static int h(D2RoomStrc *r) { return r->a; }`;
+      const group = (code: string) => emit(frameGroupLocalsPlugin.createTransformer({ slots })(parse(code)) as AnyNode);
+      const ours = group(run(src, withUnions));
+      const ref = group(src);
+      assert.ok(/nX_u/.test(ours) && /__frame0/.test(ref), ours);
+      const call = 'gRooms[0].a = 5; gRooms[1].a = 7; printf("%d %d\\n", f(2), f(3));';
+      const want = compileAndRun(prelude + ref, call);
+      assert.strictEqual(compileAndRun(prelude + ours, call), want);
+      assert.strictEqual(want.trim(), String(2 * (2 + 41) + 5 + 5 + 2 * (2 + 40 + 2)) + ' ' + String(2 * (3 + 41) + 7 + 7 + 2 * (3 + 40 + 2)));
+    });
   });
 
   // D2WinPalette / SUNITNPC_GenerateNpcItems: a number in a pointer ordered against a constant,

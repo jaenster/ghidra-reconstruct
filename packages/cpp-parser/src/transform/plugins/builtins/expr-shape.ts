@@ -190,9 +190,11 @@ export function createExprShape(
 export function collectLocalStructs(body: ASTNode): Map<string, Map<string, TypeNode>> {
   const out = new Map<string, Map<string, TypeNode>>();
   const twice = new Set<string>();
-  for (const d of findNodesByKind(body, NodeKind.StructDecl)) {
+  // A union the body declares (a frame slot's lives, as split-lives makes them) is one
+  // too: its members are read by name like a struct's.
+  for (const d of [...findNodesByKind(body, NodeKind.StructDecl), ...findNodesByKind(body, NodeKind.UnionDecl)]) {
     const sd = d as StructDecl;
-    if (!sd.name || sd.name.kind !== NodeKind.Identifier || sd.isForwardDeclaration || sd.bases.length > 0) continue;
+    if (!sd.name || sd.name.kind !== NodeKind.Identifier || sd.isForwardDeclaration || (sd.bases ?? []).length > 0) continue;
     const name = (sd.name as Identifier).name;
     if (out.has(name)) { twice.add(name); continue; }
     const fields = new Map<string, TypeNode>();
