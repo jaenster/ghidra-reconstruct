@@ -248,8 +248,14 @@ describe('split-lives', () => {
   });
 
   it('leaves a life that would need more casts than it saves', () => {
-    const ints = `int f(D2UnitStrc *p, int nStatId) { g(nStatId); nStatId = (int)Units::GetRoom(p); return nStatId + nStatId * 2 + (int)(D2RoomStrc *)nStatId; }`;
+    const ints = `int f(D2UnitStrc *p, int nStatId) { g(nStatId); nStatId = (int)Units::GetRoom(p); return nStatId + nStatId * 2 + nStatId * 3 + (int)(D2RoomStrc *)nStatId; }`;
     assert.ok(!/pRoom/.test(run(ints)), run(ints));
+  });
+
+  it('a tie is taken where every store proves the life\'s type', () => {
+    // Two casts removed (the store's, the read's), two needed (the integer reads).
+    const ints = `int f(D2UnitStrc *p, int nStatId) { g(nStatId); nStatId = (int)Units::GetRoom(p); return nStatId + nStatId * 2 + (int)(D2RoomStrc *)nStatId; }`;
+    has(run(ints), 'pRoom = Units::GetRoom(p);');
   });
 
   it('TILECMP_DeserializeAndFixup @0060a0f0: a life that stores a pointer never becomes an integer local', () => {
@@ -542,5 +548,163 @@ describe('split-lives', () => {
     const out = run(src, outBoth);
     has(out, 'ConvertCode(pszCode, (int *)&nPsz);');
     has(out, 'return (int)(ushort)nPsz;');
+  });
+
+  // A store through a pointer (`p[0x50] = 0`) is a read of p: it does not end p's value.
+  const STORE = `int f(int *pnHigh, int nDist) {
+      g(pnHigh[0x46]);
+      pnHigh[0x50] = 0;
+      pnHigh = (int *)GetMouseY();
+      k((int)pnHigh);
+      return (int)pnHigh + nDist;
+    }`;
+  const storeO = { ...O, functionReturnTypes: { ...O.functionReturnTypes, GetMouseY: 'int' } };
+
+  it('SFileSetFilePointer @SFile: a store through the pointer is a read, the variable splits', () => {
+    const out = run(STORE, storeO);
+    has(out, 'int nPnHigh;');
+    has(out, 'pnHigh[0x50] = 0;');
+    has(out, 'nPnHigh = GetMouseY();');
+    has(out, 'k(nPnHigh);');
+  });
+
+  it('a subscript store into a local array is still a write of the array', () => {
+    const src = `int f(int n) {
+      int aBuf[4];
+      aBuf[1] = n;
+      return aBuf[1];
+    }`;
+    assert.strictEqual(flat(run(src)), flat(emit(parse(src) as AnyNode).trim()));
+  });
+
+  it('MONSTER_GetMissileForAnimEvent: a pointer in an enum-typed variable is a pointer in a word', () => {
+    const out = run(`int f(eD2MonsterAnimMode eAnimMode) {
+      g(eAnimMode);
+      eAnimMode = (eD2MonsterAnimMode)Units::GetRoom(3);
+      h((D2RoomStrc *)eAnimMode);
+      return ((D2RoomStrc *)eAnimMode)->a;
+    }`);
+    has(out, 'D2RoomStrc *pRoom;');
+    has(out, 'pRoom = Units::GetRoom(3);');
+    has(out, 'h(pRoom);');
+    has(out, 'g(eAnimMode);');
+  });
+
+  const ENUM_STEP = `int f(D2UnitStrc *pUnit, eD2Skills eSkill, D2SkillsTxt *pSkillTxt) {
+      int nSum = 0;
+      g(eSkill);
+      eSkill = (eD2Skills)GetStats(pSkillTxt);
+      do {
+        eSkill += 2;
+        if (*(short int *)eSkill >= 0) nSum += (int)*(short int *)eSkill;
+      } while (*(short int *)eSkill != 0);
+      return nSum;
+    }`;
+  const enumO = { ...O, functionReturnTypes: { ...O.functionReturnTypes, GetStats: 'short *' } };
+
+  it('Skills_SrvDoFunc_047_CloakOfShadows: an enum variable stepping a pointer steps it as an int word', () => {
+    const out = run(ENUM_STEP, enumO);
+    has(out, 'short int *pSkill;');
+    has(out, 'pSkill = (short int *)((int)pSkill + 2);');
+    has(out, 'if (*pSkill >= 0)');
+  });
+
+  it('the same step written as an assignment steps it as an int word too', () => {
+    const out = run(ENUM_STEP.replace('eSkill += 2;', 'eSkill = eSkill + 2;'), enumO);
+    has(out, 'pSkill = (short int *)((int)pSkill + 2);');
+  });
+
+  it('SFileGetFileSize: an SDK pointer typedef is a pointer word', () => {
+    const out = run(`int f(LPDWORD pdwHigh, int n) {
+      g(pdwHigh);
+      pdwHigh = (LPDWORD)GetMouseY();
+      k((int)pdwHigh);
+      return (int)pdwHigh + n;
+    }`, { ...O, functionReturnTypes: { ...O.functionReturnTypes, GetMouseY: 'int' } });
+    has(out, 'int nPdwHigh;');
+    has(out, 'nPdwHigh = GetMouseY();');
+    has(out, 'k(nPdwHigh);');
+  });
+
+  // ItemStatCost_DescFunc_DGrpFunc @SkillDesc: a parameter's slot reused for an integer an
+  // out-parameter call stores.
+  const TIE = `int f(D2UnitStrc *pUnit, int nGroup) {
+      g(pUnit);
+      pUnit = 0;
+      GetPeriod(nGroup, (int32_t *)&pUnit);
+      return CalcRepair(nGroup, (int32_t)pUnit);
+    }`;
+  const tieO = { ...O, outParamWidth: () => 4, outParamWidthNonNull: () => 4, argReach: () => ({ bytes: 4 }) as never,
+    functionParamTypes: { CalcRepair: ['int', 'int32_t'], GetPeriod: ['int', 'int32_t *'] } };
+
+  it('ItemStatCost_DescFunc_DGrpFunc: a parameter slot an out-parameter call fills with an integer splits', () => {
+    const out = run(TIE, tieO);
+    has(out, 'int32_t nUnit;');
+    has(out, 'GetPeriod(nGroup, (int32_t *)&nUnit);');
+    has(out, 'return CalcRepair(nGroup, nUnit);');
+  });
+
+  it('a tie that would make a local pointer an integer keeps it', () => {
+    const src = `int f(D2UnitStrc *pUnit) {
+      D2NetDataStrc *pSock;
+      pSock = (D2NetDataStrc *)InterlockedCompareExchange((LONG *)&gSock, 0, 0);
+      while (pSock) {
+        Poll(pSock);
+        pSock = (D2NetDataStrc *)InterlockedCompareExchange((LONG *)&gSock, 0, 0);
+      }
+      return 0;
+    }`;
+    const o = { ...O, functionReturnTypes: { ...O.functionReturnTypes, InterlockedCompareExchange: 'LONG' }, functionParamTypes: { Poll: ['D2NetDataStrc *'] } };
+    assert.strictEqual(flat(run(src, o)), flat(emit(parse(src) as AnyNode).trim()));
+  });
+
+  it('a store through the pointer, an enum word, a tie and a reused parameter slot compute what the merged variables computed', native, () => {
+    const prelude = `
+      #include <stdint.h>
+      #include <stdio.h>
+      enum eD2MonsterAnimMode { MODE_A = 0, MODE_B = 1 };
+      struct D2RoomStrc { int a; int b[3]; };
+      static D2RoomStrc gRooms[3];
+      static int gSeen;
+      namespace Units { static D2RoomStrc *GetRoom(int i) { return &gRooms[i]; } }
+      static void g(int x) { gSeen += x; }
+      static void k(int x) { gSeen += x * 11; }
+      static int gY = 5;
+      static int GetMouseY() { return gY++; }
+      static void h(D2RoomStrc *r) { gSeen += r->a * 3; }
+      struct D2UnitStrc { int a; };
+      static D2UnitStrc gUnit = { 2 };
+      static void GetPeriod(int n, int32_t *pOut) { *pOut = n * 5; }
+      static int CalcRepair(int n, int32_t v) { return n + v * 7; }
+      static void g(D2UnitStrc *p) { gSeen += p->a; }
+      // The tree spells an enum as a 32-bit integer typedef with its constants.
+      typedef int eD2Skills;
+      static const eD2Skills SKILL_A = 0;
+      struct D2SkillsTxt { short aStats[6]; };
+      static D2SkillsTxt gSkill = { { 9, 4, 7, -3, 5, 0 } };
+      static short *GetStats(D2SkillsTxt *p) { return p->aStats; }`;
+    const src = STORE.replace('int f(', 'int f1(').replace('g(pnHigh[0x46]);', 'k(pnHigh[1]);').replace('pnHigh[0x50] = 0;', 'pnHigh[2] = 0;')
+      + `int f2(eD2MonsterAnimMode eAnimMode) {
+          g(eAnimMode);
+          eAnimMode = (eD2MonsterAnimMode)(intptr_t)Units::GetRoom(2);
+          h((D2RoomStrc *)eAnimMode);
+          return ((D2RoomStrc *)eAnimMode)->a;
+        }`
+      + ENUM_STEP.replace('int f(', 'int f5(')
+      + ENUM_STEP.replace('int f(', 'int f6(').replace('eSkill += 2;', 'eSkill = eSkill + 2;')
+      + TIE.replace('int f(', 'int f3(')
+      + `int f4(int i, int nStatId) {
+          g(nStatId);
+          nStatId = (int)Units::GetRoom(i);
+          return (nStatId - (int)&gRooms[0]) * 3 + (nStatId - (int)&gRooms[1]) + ((D2RoomStrc *)nStatId)->a;
+        }`;
+    const out = run(src, { ...tieO, ...storeO, functionReturnTypes: { ...storeO.functionReturnTypes, GetStats: 'short *' }, functionParamTypes: tieO.functionParamTypes });
+    has(out, 'pSkill = (short int *)((int)pSkill + 2);');
+    has(out, 'nPnHigh = GetMouseY();');
+    has(out, 'GetPeriod(nGroup, (int32_t *)&nUnit);');
+    has(out, 'pRoom = Units::GetRoom(i);');
+    const call = `int buf[4] = { 1, 2, 3, 4 }; gRooms[1].a = 4; gRooms[2].a = 6;
+      printf("%d ", f1(buf, 1)); printf("%d ", f2(MODE_B)); printf("%d %d %d\\n", f3(&gUnit, 3), buf[2], gSeen); printf("%d %d\\n", f4(2, 1), gSeen); printf("%d %d %d\\n", f5(&gUnit, SKILL_A, &gSkill), f6(&gUnit, SKILL_A, &gSkill), gSeen);`;
+    assert.strictEqual(compileAndRun(prelude + out, call), compileAndRun(prelude + src, call));
   });
 });

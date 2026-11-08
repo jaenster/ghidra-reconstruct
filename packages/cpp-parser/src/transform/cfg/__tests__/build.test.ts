@@ -225,3 +225,20 @@ describe('short-circuit conditions in the dataflow', () => {
     assert.deepStrictEqual(parts.sort(), ['effect:g', 'test:c', 'test:v']);
   });
 });
+
+describe('dataflow: a store through a pointer', () => {
+  const writesAt = (code: string, call: string, pointers?: Set<string>) => {
+    const flow = buildFunctionFlow(body(code), new Set(['p', 'a', 'n']), { pointers });
+    const at = flow.cfg.nodes.find(n => n.stmt?.kind === NodeKind.ExprStmt
+      && (n.stmt as unknown as { expression: { left?: { array?: { name?: string } } } }).expression.left?.array?.name === call)!;
+    return { writes: [...flow.writes(at.id)].sort(), reads: [...flow.reads(at.id)].sort() };
+  };
+
+  it('p[i] = x through a pointer reads p and writes memory, not p; a local array is still written', () => {
+    const code = 'void f(int *p, int n) { int a[4]; p[n] = 1; a[n] = 2; }';
+    // A memory store may write the escaped array, never p.
+    assert.deepStrictEqual(writesAt(code, 'p', new Set(['p'])), { writes: ['a'], reads: ['n', 'p'] });
+    assert.deepStrictEqual(writesAt(code, 'p'), { writes: ['p'], reads: ['n', 'p'] });
+    assert.deepStrictEqual(writesAt(code, 'a', new Set(['p'])).writes, ['a']);
+  });
+});

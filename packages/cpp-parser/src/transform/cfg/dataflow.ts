@@ -85,15 +85,25 @@ export interface FunctionFlow {
   isEscaped(v: string): boolean;
 }
 
-/** The identifier a write targets, through `.` and local-array `[]`; null for a memory store. */
-function writeRoot(e: Expression): { name: string; whole: boolean } | null {
+/**
+ * The identifier a write targets, through `.` and local-array `[]`; null for a memory store.
+ * A subscript of a name in `pointers` addresses memory through the pointer: a store there
+ * is a memory store, not a write of the name.
+ */
+function writeRoot(e: Expression, pointers?: ReadonlySet<string>): { name: string; whole: boolean } | null {
   let x: Expression = e;
   let whole = true;
   for (;;) {
     if (x.kind === NodeKind.ParenExpr) { x = (x as unknown as { expression: Expression }).expression; continue; }
     if (x.kind === NodeKind.Identifier) return { name: (x as Identifier).name, whole };
     if (x.kind === NodeKind.MemberExpr && !(x as MemberExpr).isArrow) { x = (x as MemberExpr).object; whole = false; continue; }
-    if (x.kind === NodeKind.SubscriptExpr) { x = (x as SubscriptExpr).array; whole = false; continue; }
+    if (x.kind === NodeKind.SubscriptExpr) {
+      const a = (x as SubscriptExpr).array;
+      let base: Expression = a;
+      while (base.kind === NodeKind.ParenExpr) base = (base as unknown as { expression: Expression }).expression;
+      if (pointers && base.kind === NodeKind.Identifier && pointers.has((base as Identifier).name)) return null;
+      x = a; whole = false; continue;
+    }
     return null;
   }
 }
@@ -107,7 +117,7 @@ interface NodeFacts {
 }
 
 /** Walk `e`, collecting reads and writes. `certain`: the expression always runs to completion. */
-function scanExpr(e: Expression, facts: NodeFacts, node: number, certain: boolean, topLevel: boolean): void {
+function scanExpr(e: Expression, facts: NodeFacts, node: number, certain: boolean, topLevel: boolean, pointers?: ReadonlySet<string>): void {
   const visit = (x: ASTNode | null | undefined, sure: boolean, top: boolean): void => {
     if (!x || typeof x !== 'object') return;
     switch (x.kind) {
@@ -117,7 +127,7 @@ function scanExpr(e: Expression, facts: NodeFacts, node: number, certain: boolea
       case NodeKind.AssignExpr: {
         const a = x as AssignExpr;
         visit(a.right, sure, false);
-        const root = writeRoot(a.left);
+        const root = writeRoot(a.left, pointers);
         if (!root) {
           facts.clobbers = true;
           visit(a.left, sure, false);
@@ -192,7 +202,7 @@ function scanExpr(e: Expression, facts: NodeFacts, node: number, certain: boolea
     }
   };
   const incDec = (operand: Expression, sure: boolean): void => {
-    const root = writeRoot(operand);
+    const root = writeRoot(operand, pointers);
     if (!root) { facts.clobbers = true; visit(operand, sure, false); return; }
     facts.reads.add(root.name);
     facts.writes.add(root.name);
@@ -234,6 +244,12 @@ export interface FunctionFlowOptions {
    * evaluates nothing; its operands' nodes carry the expressions.
    */
   shortCircuitConditions?: boolean;
+  /**
+   * Names declared as a pointer (not an array): `p[i] = x` stores through p, it reads p and
+   * writes memory, and leaves p's value as it was. Without it a subscript store is taken
+   * for a partial write of the name, as it is for a local array.
+   */
+  pointers?: ReadonlySet<string>;
 }
 
 /**
@@ -256,7 +272,7 @@ export function buildFunctionFlow(body: Statement[], locals: ReadonlySet<string>
     if (s) stmtNode.set(s as object, n.id);
     if (!s) {
       // A comma operand of a lowered condition runs for its effect, as a statement would.
-      if (n.expr) { f.own.push(n.expr); scanExpr(n.expr, f, n.id, true, n.condPart === 'effect'); }
+      if (n.expr) { f.own.push(n.expr); scanExpr(n.expr, f, n.id, true, n.condPart === 'effect', options.pointers); }
       return f;
     }
     // A lowered condition is evaluated by its operands' nodes.
@@ -265,7 +281,7 @@ export function buildFunctionFlow(body: Statement[], locals: ReadonlySet<string>
       case NodeKind.ExprStmt: {
         const e = (s as ExprStmt).expression;
         f.own.push(e);
-        scanExpr(e, f, n.id, true, true);
+        scanExpr(e, f, n.id, true, true, options.pointers);
         break;
       }
       case NodeKind.DeclStmt:
@@ -273,36 +289,36 @@ export function buildFunctionFlow(body: Statement[], locals: ReadonlySet<string>
           if (d.kind !== NodeKind.VariableDecl) continue;
           const v = d as VariableDecl;
           const init = v.initializer && v.initializer.kind !== NodeKind.InitListExpr ? v.initializer as Expression : null;
-          if (init) { f.own.push(init); scanExpr(init, f, n.id, true, false); }
-          else if (v.initializer) scanExpr(v.initializer as unknown as Expression, f, n.id, true, false);
+          if (init) { f.own.push(init); scanExpr(init, f, n.id, true, false, options.pointers); }
+          else if (v.initializer) scanExpr(v.initializer as unknown as Expression, f, n.id, true, false, options.pointers);
           f.writes.add(v.name.name);
           f.defs.set(v.name.name, { node: n.id, killing: true, rhs: init });
         }
         break;
       case NodeKind.IfStmt:
         f.own.push((s as IfStmt).condition);
-        scanExpr((s as IfStmt).condition, f, n.id, true, false);
+        scanExpr((s as IfStmt).condition, f, n.id, true, false, options.pointers);
         break;
       case NodeKind.SwitchStmt:
         f.own.push((s as SwitchStmt).condition);
-        scanExpr((s as SwitchStmt).condition, f, n.id, true, false);
+        scanExpr((s as SwitchStmt).condition, f, n.id, true, false, options.pointers);
         break;
       case NodeKind.WhileStmt:
         f.own.push((s as WhileStmt).condition);
-        scanExpr((s as WhileStmt).condition, f, n.id, true, false);
+        scanExpr((s as WhileStmt).condition, f, n.id, true, false, options.pointers);
         break;
       case NodeKind.DoWhileStmt:
         f.own.push((s as DoWhileStmt).condition);
-        scanExpr((s as DoWhileStmt).condition, f, n.id, true, false);
+        scanExpr((s as DoWhileStmt).condition, f, n.id, true, false, options.pointers);
         break;
       case NodeKind.ForStmt: {
         const c = (s as ForStmt).condition;
-        if (c) { f.own.push(c); scanExpr(c, f, n.id, true, false); }
+        if (c) { f.own.push(c); scanExpr(c, f, n.id, true, false, options.pointers); }
         break;
       }
       case NodeKind.ReturnStmt: {
         const v = (s as ReturnStmt).value;
-        if (v) { f.own.push(v); scanExpr(v, f, n.id, true, false); }
+        if (v) { f.own.push(v); scanExpr(v, f, n.id, true, false, options.pointers); }
         break;
       }
       case NodeKind.TryStmt:

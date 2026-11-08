@@ -51,7 +51,7 @@ import type {
   ASTNode, AssignExpr, BinaryExpr, CallExpr, CompoundStmt, CStyleCastExpr, DeclStmt, ExprStmt, Expression,
   FunctionDecl, Identifier, ParameterDecl, PostfixExpr, Statement, TypeNode, UnaryExpr, VariableDecl,
 } from '../../../ast/nodes.js';
-import { Expr, Decl, Stmt } from '../../../ast/factory.js';
+import { Expr, Decl, Stmt, Type } from '../../../ast/factory.js';
 import { findNodesByKind } from '../../../ast/visitor.js';
 import { emit } from '../../../emit/index.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
@@ -330,6 +330,29 @@ function nestedWrite(flow: FunctionFlow, node: number, v: string): Write | null 
 function classOf(spelling: string): WordClass | null {
   const c = wordClass(spelling);
   return c === 'ptr' || c === 'int' ? c : null;
+}
+
+/**
+ * SDK typedefs that ARE a pointer (winnt.h, minwindef.h, minwinbase.h): a variable declared
+ * with one holds an address as surely as one spelled `T *`.
+ */
+const POINTER_TYPEDEFS = new Set([
+  'LPVOID', 'LPCVOID', 'PVOID', 'LPSTR', 'LPCSTR', 'LPWSTR', 'LPCWSTR', 'PSTR', 'PCSTR', 'PWSTR', 'PCWSTR',
+  'LPBYTE', 'PBYTE', 'LPWORD', 'PWORD', 'LPDWORD', 'PDWORD', 'LPLONG', 'PLONG', 'LPINT', 'PINT', 'LPBOOL', 'PBOOL',
+  'LPHANDLE', 'PHANDLE', 'LPFILETIME', 'PFILETIME', 'LPOVERLAPPED', 'LPSECURITY_ATTRIBUTES', 'PULONG', 'PUINT',
+]);
+
+/**
+ * The class of a candidate's DECLARED type: a pointer or 4-byte integer spelling, a pointer
+ * typedef of the SDK, or an enum - which MSVC lays out as an `int`, so a pointer kept in an
+ * enum-typed variable is a pointer in an integer word like any other.
+ */
+function declaredClassOf(spelling: string): WordClass | null {
+  const c = classOf(spelling);
+  if (c) return c;
+  if (POINTER_TYPEDEFS.has(spelling)) return 'ptr';
+  if (wordClass(spelling) === 'enum') return 'int';
+  return null;
 }
 
 function lookupName<T>(table: Record<string, T> | undefined, name: string): T | undefined {
@@ -742,7 +765,7 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
   for (const name of [...params.map(p => p.name!.name), ...topLocals.keys()]) {
     if (declCount.get(name) !== 1) { report(`${name}: other: declared ${declCount.get(name)} times`); continue; }
     const t = spellingOf(types.get(name)!);
-    if (!classOf(t) || /\bcode\b/.test(t)) { report(`${name}: other: type ${t}`); continue; }
+    if (!declaredClassOf(t) || /\bcode\b/.test(t)) { report(`${name}: other: type ${t}`); continue; }
     candidates.push(name);
   }
   if (o.onReport) {
@@ -752,6 +775,8 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
   if (candidates.length === 0) return null;
 
   const declared = new Set<string>(declCount.keys());
+  /** Names declared as a pointer, each once: a subscript store through one does not write it. */
+  const pointers = new Set<string>([...types].filter(([n, t]) => declCount.get(n) === 1 && declaredClassOf(spellingOf(t)) === 'ptr').map(([n]) => n));
   const localTypes = new Map<string, TypeNode>(types);
   const { members, why: memberWhy } = frameReach(body, o.slots ?? [], o);
   const argAreaNamed = findNodesByKind(body as unknown as ASTNode, NodeKind.Identifier)
@@ -809,7 +834,8 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
       const placeholderIds = new Set<object>([...placeholders.keys()].map(ph => (ph as unknown as AssignExpr).left));
       // Conditions as short-circuit nodes: a value stored in `a || (v = f(), v == 0)` is a
       // whole write on the paths that evaluate it, and reaches only those.
-      const flow = buildFunctionFlow(work, declared, { shortCircuitConditions: true });
+      // `p[i] = x` stores through a pointer: a read of p, not a write.
+      const flow = buildFunctionFlow(work, declared, { shortCircuitConditions: true, pointers });
       if (flow.isEscaped(v)) { report(`${v}: other: escaped`); continue; }
       if (!topLocals.has(v) && argAreaNamed) {
         // The argument area read by offset (`stack0x00000008`) may be this parameter's word.
@@ -829,7 +855,7 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
       }
       const declaredType = types.get(v)!;
       const dt = spellingOf(declaredType);
-      const dtClass = classOf(dt)!;
+      const dtClass = declaredClassOf(dt)!;
 
       // The writes, each a whole statement.
       const writes = new Map<number, Write>();
@@ -1184,7 +1210,16 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
           }
           if (cls !== dtClass && !isConstantStore(rhs, enumConstants, localTypes)) cost++;
         }
-        if (gain <= cost) {
+        // A tie moves as many casts as it removes; it is taken only when the stores prove the
+        // type: every store of the life has one evident type, the life's own. The value is a
+        // T because each store puts a T there, not because of how it is read. An integer life
+        // is moved out of a pointer only where the slot is a parameter's, reused: a local
+        // pointer whose stores are integers is a pointer an API returns in an integer type
+        // (`(T *)InterlockedCompareExchange(...)`), and moving it would only move its casts.
+        const canon = (t: string) => kind(t).replace(/\b(short|long) int\b/g, '$1').replace(/\bunsigned int\b/g, 'unsigned');
+        const provenByStores = storedOne && canon(spellingOf(typedStores[0])) === canon(spelling)
+          && (cls === 'ptr' || !topLocals.has(v));
+        if (gain < cost || (gain === cost && !(gain > 0 && provenByStores))) {
           report(`${v}: kept: a ${spelling} life would remove ${gain} casts and need ${cost}`);
           continue;
         }
@@ -1233,7 +1268,11 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
                 replace.set(c.id, () => plain ? ident() : castTo(sink, ident()));
                 continue;
               }
-              replace.set(c.id, () => castTo(declaredType, ident()));
+              // A read in the life's own step (`v = v + 2`) is integer arithmetic: through an
+              // enum's int, as the compound step is.
+              const stepping = w && w.kind === 'assign' && wordClass(dt) === 'enum'
+                && findNodesByKind((w.expr as AssignExpr).right as unknown as ASTNode, NodeKind.Identifier).includes(c.id as unknown as ASTNode);
+              replace.set(c.id, () => castTo(stepping ? Type.int() : declaredType, ident()));
               continue;
             }
             const ct = spellingOf(c.cast.type);
@@ -1263,9 +1302,13 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
             if (e.kind === NodeKind.AssignExpr) { op = COMPOUND_OPS[(e as AssignExpr).operator]; operand = (e as AssignExpr).right; }
             else { op = (e as UnaryExpr).operator === '++' ? '+' : '-'; operand = Expr.intLiteral(1) as unknown as Expression; }
             const isAssign = e.kind === NodeKind.AssignExpr;
+            // The step is integer arithmetic in the declared type; an enum's is an int's (MSVC
+            // lays an enum out as one), and the word spelled `int` is the one pointer-word-cast
+            // recognises as address arithmetic.
+            const stepType = wordClass(dt) === 'enum' ? Type.int() : declaredType;
             replace.set(e, (rebuilt) => {
               const right = isAssign ? (rebuilt as AssignExpr).right : operand;
-              const value = Expr.binary(castTo(declaredType, ident()), op as never, Expr.paren(right) as unknown as Expression) as unknown as Expression;
+              const value = Expr.binary(castTo(stepType, ident()), op as never, Expr.paren(right) as unknown as Expression) as unknown as Expression;
               return Expr.assign(ident(), m.cls === dtClass ? value : Expr.cast(m.type, Expr.paren(value)) as unknown as Expression) as unknown as Expression;
             });
             continue;
@@ -1346,7 +1389,7 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
       let at = 0;
       while (at < rewritten.length && rewritten[at].kind === NodeKind.DeclStmt) at++;
       statements = [...rewritten.slice(0, at), ...decls, ...rewritten.slice(at)];
-      for (const m of moves) { declared.add(m.local); localTypes.set(m.local, m.type); }
+      for (const m of moves) { declared.add(m.local); localTypes.set(m.local, m.type); if (m.cls === 'ptr') pointers.add(m.local); }
       changed = true;
       splitThisRound = true;
     }
