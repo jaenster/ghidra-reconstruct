@@ -1460,7 +1460,13 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
           const offsetTypes = new Set(offsets.map(c => spellingOf(c.type)));
           if (read.size === 1) target = ptrReads[0];
           else if (storedOne && classOf(spellingOf(typedStores[0])) === 'ptr') target = pick(typedStores);
-          else if (read.size === 0 && storeTypes.every(t => t === null) && offsetTypes.size === 1) target = offsets[0].type;
+          // An address held as an integer and read only through pointer casts at offsets,
+          // `(T *)(n + 4)`: a T* life, its integer stores converted where they are stored -
+          // the count below takes it only where the offsets outnumber those conversions.
+          // Read at offsets as several types: a byte pointer, which each read steps from.
+          else if (read.size === 0 && offsetTypes.size >= 1 && storeTypes.every(t => t === null || lifeClass(t) === 'int')) {
+            target = offsetTypes.size === 1 ? offsets[0].type : Type.pointer(Type.char());
+          }
           else why = read.size === 0 ? 'no read casts it to a pointer' : `read as ${read.size} pointer types, stores ${[...new Set(storeTypes)].join('|') || 'none'}`;
         } else {
           // An integer life (or a pointer to another type) in a pointer variable.
@@ -1725,6 +1731,12 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
                 // to a pointer of another type where the place's type names one.
                 const plain = m.cls === 'int' || sameType(sc, m.spelling) || /^(?:const )?void\*$/.test(sc);
                 replace.set(c.id, () => plain ? ident() : castTo(sink, ident()));
+                continue;
+              }
+              // A pointer life read at a byte offset, `(T *)(v + 4)`: the bytes from its address.
+              if (c.offset && m.cls === 'ptr' && dtClass === 'int') {
+                const bytes = ['char*', 'unsigned char*', 'uchar*', 'uint8_t*', 'byte*', 'BYTE*'].includes(m.spelling);
+                replace.set(c.id, () => bytes ? ident() : Expr.paren(Expr.cast(Type.pointer(Type.char()), ident()) as unknown as Expression) as unknown as Expression);
                 continue;
               }
               // A read in the life's own step (`v = v + 2`) is integer arithmetic: through an

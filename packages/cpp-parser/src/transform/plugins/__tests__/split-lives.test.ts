@@ -171,7 +171,7 @@ describe('split-lives', () => {
     has(out, 'D2PoolBlockStrc *pPoolBlock;');
     has(out, 'FindBlock((D2PoolBlockStrc **)&pPoolBlock, pPool);');
     has(out, 'g(Line);');
-    has(out, '*(int *)((int32_t)pPoolBlock + 8)');
+    has(out, '*(int *)((char *)pPoolBlock + 8)');
     // Not an out-parameter: the call may read the parameter, which stays one variable.
     assert.strictEqual(flat(run(src, { ...both, outParamWidth: () => null })), flat(run(src, {})));
   });
@@ -304,7 +304,7 @@ describe('split-lives', () => {
       return 0;
     }`);
     has(out, 'D2RoomStrc *pRoom;');
-    has(out, '*(float *)((int)pRoom + 4) = 1.0;');
+    has(out, '*(float *)((char *)pRoom + 4) = 1.0;');
     has(out, '*(float *)pRoom = 2.0;');
     has(out, 'pRoom = (D2RoomStrc *)((char *)pRoom + 0x120);');
   });
@@ -945,6 +945,40 @@ describe('split-lives', () => {
       assert.strictEqual(compileAndRun(prelude + ours, call), want);
       assert.strictEqual(want.trim(), String(2 * (2 + 41) + 5 + 5 + 2 * (2 + 40 + 2)) + ' ' + String(2 * (3 + 41) + 7 + 7 + 2 * (3 + 40 + 2)));
     });
+  });
+
+  // ZLIB_InflateFast @0042dca0: an address kept in an integer local, loaded from the state's
+  // integer words and read only through pointer casts at offsets.
+  const OFFSETS = `int f(int *pState, int n) {
+      int nWindowPos;
+      g(n);
+      nWindowPos = n * 2;
+      g(nWindowPos);
+      nWindowPos = pState[3];
+      n = n + *(uint8_t *)(nWindowPos - 1);
+      n = n + *(uint8_t *)(nWindowPos + 2);
+      n = n + *(int *)(nWindowPos + 4);
+      return n;
+    }`;
+
+  it('ZLIB_InflateFast: an integer life read only at offsets becomes a byte pointer, its integer store converted', () => {
+    const lines: string[] = [];
+    const out = run(OFFSETS, { ...O, onReport: (_f, l) => lines.push(l) });
+    assert.ok(lines.some(l => /nWindowPos: split: \w+ char\*/.test(l)), lines.join('\n'));
+    has(out, 'char *');
+    has(out, 'g(nWindowPos);');
+  });
+
+  it('the offset life computes what the merged variable computed', native, () => {
+    const prelude = `
+      #include <stdint.h>
+      #include <stdio.h>
+      static int gSeen;
+      static void g(int x) { gSeen += x; }
+      static uint8_t gBuf[16] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };`;
+    const out = run(OFFSETS, O);
+    const call = 'int st[4] = { 0, 0, 0, (int)(intptr_t)&gBuf[4] }; printf("%d %d\\n", f(st, 3), gSeen);';
+    assert.strictEqual(compileAndRun(prelude + out, call), compileAndRun(prelude + OFFSETS, call));
   });
 
   // D2WinPalette / SUNITNPC_GenerateNpcItems: a number in a pointer ordered against a constant,
