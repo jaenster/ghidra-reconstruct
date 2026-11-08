@@ -19,6 +19,7 @@ import type { AnyNode } from '../../../ast/nodes.js';
 import {
   pointerWordCastPlugin, getPointerWordCastStats, resetPointerWordCastStats,
 } from '../builtins/pointer-word-cast.js';
+import { compileAndRun, hasNativeGpp, testToolchain } from '../../../testing/native-cpp.js';
 
 describe('pointerWordCastPlugin', () => {
   const transform = (code: string, options?: Record<string, unknown>): string => {
@@ -216,6 +217,7 @@ describe('pointerWordCastPlugin', () => {
     }`);
     assert.deepStrictEqual(getPointerWordCastStats(), {
       byteArith: 1, roundTrip: 1, compare: 2, bitwise: 1, distance: 1, toPointer: 0, offset: 0, sizedSlot: 0, balanced: 0, literal: 0,
+      byteDistance: 0, select: 0,
     });
   });
 
@@ -266,5 +268,80 @@ describe('pointer-word-cast after the source forms', () => {
     assert.ok(r.success, r.error);
     assert.deepStrictEqual(sites.map(s => s.applied), [true]);
     assert.ok(/g\(\(intptr_t\)\s*pB\s*>\s*\(intptr_t\)\s*pA\)/.test(r.code), r.code);
+  });
+});
+
+describe('pointer-word-cast: distances and selects the decompiler spelled in integers', () => {
+  const transform = (code: string, options?: Record<string, unknown>): string => {
+    const t = pointerWordCastPlugin.createTransformer(options as never);
+    return emit(t(parse(code)) as AnyNode).replace(/\s+/g, ' ').trim();
+  };
+  const squash = (s: string) => s.replace(/\s+/g, '');
+  const native = { skip: !hasNativeGpp() || testToolchain()?.name !== 'mingw' };
+
+  it('SStrCopy @SSTR: (uint32_t)(p + (n - (intptr_t)q)) is the distance p - q plus n', () => {
+    const out = transform(`uint32_t f(char *pDstLast, char *szOut, int nOffset) { return (uint32_t)(pDstLast + (nOffset - (intptr_t)szOut) - 3); }`);
+    assert.ok(squash(out).includes('return(uint32_t)(pDstLast-szOut+nOffset-3);'), out);
+  });
+
+  it('a negative offset term is subtracted', () => {
+    const out = transform(`uint32_t f(uint8_t *pbSrcPos, uint8_t *pbMatch) { return (uint32_t)(pbSrcPos + (-1 - (intptr_t)pbMatch)); }`);
+    assert.ok(squash(out).includes('(uint32_t)(pbSrcPos-pbMatch-1)'), out);
+  });
+
+  it('a subtracted address term that is itself a sum stays one operand', () => {
+    const out = transform(`int f(char *pszDst, char *pszSrc) { return (int)(pszDst + (1 - (intptr_t)(pszSrc + 5))); }`);
+    assert.ok(squash(out).includes('(int)(pszDst-(pszSrc+5)+1)'), out);
+  });
+
+  it('two pointer types meet through char *', () => {
+    const out = transform(`int f(uint8_t *pTerm, D2PacketStrc *pPacket) { return (int32_t)(pTerm + (1 - (intptr_t)pPacket)); }`);
+    assert.ok(squash(out).includes('(int32_t)((char*)pTerm-(char*)pPacket+1)'), out);
+  });
+
+  it('leaves a distance onto a wider pointee alone: its offsets are scaled', () => {
+    const out = transform(`int f(int *p, char *q, int n) { return (int)(p + (n - (intptr_t)q)); }`);
+    assert.ok(!squash(out).includes('p-q'), out);
+  });
+
+  it('leaves a 64-bit target alone: a pointer zero-extends where an int sign-extends', () => {
+    const out = transform(`long long f(char *p, char *q, int n) { return (long long)(p + (n - (intptr_t)q)); }`);
+    assert.ok(!squash(out).includes('p-q'), out);
+  });
+
+  it('(T *)(c ? 0 : (uint32_t)p) is a select between null and the pointer', () => {
+    const out = transform(`D2UnitStrc *f(D2UnitStrc *pUnit) { return (D2UnitStrc *)(pUnit->eUnitType != 4 ? 0 : (uint32_t)pUnit); }`,
+      { structFields: { D2UnitStrc: { eUnitType: 'int' } } });
+    assert.ok(squash(out).includes('returnpUnit->eUnitType!=4?nullptr:pUnit;'), out);
+  });
+
+  it('the TSLink sign test keeps its test and converts the other pointer type', () => {
+    const out = transform(`Rec *f(Link *pPrev) { return (Rec *)((intptr_t)pPrev <= 0 ? 0 : (uint32_t)pPrev); }`);
+    assert.ok(squash(out).includes('return(intptr_t)pPrev<=0?nullptr:(Rec*)pPrev;'), out);
+  });
+
+  it('computes what the integer spellings computed', native, () => {
+    const prelude = `
+      #include <stdint.h>
+      #include <stdio.h>
+      struct Rec { int a; };
+      struct Link { int b; };
+      static char gBuf[64];
+      static Rec gRec;`;
+    const fn = `
+      uint32_t d1(char *pDstLast, char *szOut, int nOffset) { return (uint32_t)(pDstLast + (nOffset - (intptr_t)szOut) - 3); }
+      int d2(char *pszDst, char *pszSrc) { return (int)(pszDst + (1 - (intptr_t)(pszSrc + 5))); }
+      uint32_t d4(uint8_t *p, uint8_t *q, int n) { return (uint32_t)(p + (-n - (intptr_t)q)); }
+      int d3(uint8_t *pTerm, Rec *pPacket) { return (int32_t)(pTerm + (1 - (intptr_t)pPacket)); }
+      Rec *s1(Link *pPrev) { return (Rec *)((intptr_t)pPrev <= 0 ? 0 : (uint32_t)pPrev); }
+      Rec *s2(Rec *p, int c) { return (Rec *)(c != 4 ? 0 : (uint32_t)p); }`;
+    const out = transform(fn);
+    assert.ok(squash(out).includes('pDstLast-szOut+nOffset-3'), out);
+    assert.ok(squash(out).includes('nullptr'), out);
+    const call = `
+      printf("%u %d %d ", d1(gBuf + 40, gBuf + 3, 7), d2(gBuf + 2, gBuf + 30), d3((uint8_t *)gBuf + 9, &gRec) - (int)((char *)gBuf - (char *)&gRec));
+      printf("%u ", d4((uint8_t *)gBuf + 50, (uint8_t *)gBuf + 1, 60));
+      printf("%d %d %d %d\\n", s1((Link *)&gRec) == &gRec, s1((Link *)(intptr_t)-8) == 0, s2(&gRec, 4) == &gRec, s2(&gRec, 3) == 0);`;
+    assert.strictEqual(compileAndRun(prelude + out, call), compileAndRun(prelude + fn, call));
   });
 });

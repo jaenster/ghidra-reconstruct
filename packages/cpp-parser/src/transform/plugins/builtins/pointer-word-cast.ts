@@ -46,7 +46,7 @@
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, FunctionDecl, VariableDecl, ParameterDecl, Expression, BinaryExpr, CStyleCastExpr,
-  TypeNode, BuiltinType, IntegerLiteralExpr, ParenExpr, UnaryExpr, AssignExpr, SubscriptExpr,
+  TypeNode, BuiltinType, IntegerLiteralExpr, ParenExpr, UnaryExpr, AssignExpr, SubscriptExpr, ConditionalExpr,
 } from '../../../ast/nodes.js';
 import { findNodesByKind } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
@@ -88,16 +88,39 @@ export interface PointerWordCastStats {
   balanced: number;
   /** `(int)(T *)K` -> `(int)K`: a constant's round trip through a pointer. */
   literal: number;
+  /** `(I)(p + (n - (int)q))` -> `(I)(p - q + n)`: a byte distance the decompiler reassociated. */
+  byteDistance: number;
+  /** `(T *)(c ? 0 : (uint32_t)p)` -> `(c ? nullptr : (T *)p)`: a select between pointers. */
+  select: number;
 }
 
 const stats: PointerWordCastStats = {
   byteArith: 0, roundTrip: 0, compare: 0, bitwise: 0, distance: 0, toPointer: 0, offset: 0, sizedSlot: 0, balanced: 0, literal: 0,
+  byteDistance: 0, select: 0,
 };
 export function getPointerWordCastStats(): PointerWordCastStats { return { ...stats }; }
 export function resetPointerWordCastStats(): void {
   stats.byteArith = stats.roundTrip = stats.compare = stats.bitwise = stats.distance = 0;
   stats.toPointer = stats.offset = stats.sizedSlot = stats.balanced = stats.literal = 0;
+  stats.byteDistance = stats.select = 0;
 }
+
+/** Pointees one byte wide: arithmetic on such a pointer is arithmetic on its address. */
+const BYTE_POINTEES = new Set([
+  'char', 'signed char', 'unsigned char', 'uchar', 'byte', 'BYTE', 'CHAR', 'UCHAR', 'int8_t', 'uint8_t', 'undefined1',
+]);
+
+/**
+ * Integer types of at most 32 bits, as a cast spells them (resolved or not). Converting a
+ * 32-bit address to one keeps the address's low bits, as converting the same 32-bit
+ * integer does; a 64-bit one would zero-extend a pointer but sign-extend an `int`.
+ */
+const WORD_OR_NARROWER = new Set([
+  'char', 'signed char', 'unsigned char', 'short', 'unsigned short', 'int', 'unsigned int', 'long', 'unsigned long',
+  'uchar', 'byte', 'BYTE', 'CHAR', 'UCHAR', 'int8_t', 'uint8_t', 'int16_t', 'uint16_t', 'int32_t', 'uint32_t',
+  'ushort', 'WORD', 'SHORT', 'USHORT', 'uint', 'INT', 'UINT', 'LONG', 'ULONG', 'DWORD', 'undefined4', 'int4', 'u_int',
+  'unsigned', 'BOOL',
+]);
 
 /**
  * Integer types as wide as a pointer on every target, by the name a declaration
@@ -416,6 +439,119 @@ export function createPointerWordCastTransformer(options?: PluginOptions): Trans
         return up > 0 && up === down;
       };
 
+      /**
+       * The object-pointer shape of `e`: its own, or for a sum with one positive object
+       * pointer term and offsets otherwise (`p + 5`), that term's. Null when it is not one.
+       */
+      const addressShape = (e: Expression): TypeShape | null => {
+        const own = objectPointer(e);
+        if (own) return own;
+        const terms: Array<{ term: Expression; sign: 1 | -1 }> = [];
+        additiveTerms(e, 1, terms);
+        if (terms.length < 2) return null;
+        let base: TypeShape | null = null;
+        for (const t of terms) {
+          const s = objectPointer(t.term);
+          if (s) { if (base || t.sign !== 1) return null; base = s; continue; }
+          if (!isOffset(t.term)) return null;
+        }
+        return base;
+      };
+      /** An integer cast of at most 32 bits (or pointer-sized) of an object pointer. */
+      const integerCastOfAddress = (e: Expression): { pointer: Expression; shape: TypeShape } | null => {
+        const u = unwrapParens(e);
+        if (u.kind !== NodeKind.CStyleCastExpr) return null;
+        const c = u as CStyleCastExpr;
+        const spelled = shapeOfNode(c.type, 0);
+        const resolved = shapeOfNode(c.type, 0, resolve);
+        const word = (s: TypeShape | null) => !!s && s.stars === 0 && (WORD_OR_NARROWER.has(s.base) || POINTER_SIZED_INTEGERS.has(s.base));
+        if (!word(spelled) && !word(resolved)) return null;
+        if (!pointerWordFor(c.type) && !isPointerSizedType(c.type)) return null;
+        const shape = addressShape(c.expression);
+        return shape ? { pointer: c.expression, shape } : null;
+      };
+      const byteShape = (s: TypeShape) => s.stars === 1 && BYTE_POINTEES.has(s.base.replace(/^::/, ''));
+      const sameShape = (a: TypeShape, b: TypeShape) => a.base === b.base && a.stars === b.stars;
+      const wrap = (e: Expression): Expression => {
+        const u = e.kind === NodeKind.ParenExpr ? e : unwrapParens(e);
+        return u.kind === NodeKind.BinaryExpr || u.kind === NodeKind.ConditionalExpr || u.kind === NodeKind.AssignExpr ? Expr.paren(u) : u;
+      };
+
+      /**
+       * `(I)(p + (n - (int)q))`, I an integer of at most 32 bits: the decompiler's reassociation
+       * of `p - q + n`, a distance between two addresses plus integers. The sum's terms are one
+       * positive pointer p to a one-byte pointee (so its arithmetic is address arithmetic), one
+       * negative integer cast of an address q, and integer offsets. It is written as the
+       * difference `p - q` (both through `char *` where their types differ) plus the offsets in
+       * their order: modulo 2^32 the same sum, every term at most 32 bits, and the cast to I
+       * takes the same low bits of it.
+       */
+      const byteDistance = (cast: CStyleCastExpr): Expression | null => {
+        const target = shapeOfNode(cast.type, 0);
+        const resolved = shapeOfNode(cast.type, 0, resolve);
+        if (!target || target.stars !== 0 || isPointerSizedType(cast.type)) return null;
+        if (!WORD_OR_NARROWER.has(target.base) && !(resolved && WORD_OR_NARROWER.has(resolved.base))) return null;
+        const terms: Array<{ term: Expression; sign: 1 | -1 }> = [];
+        additiveTerms(cast.expression, 1, terms);
+        if (terms.length < 2) return null;
+        let p: { term: Expression; shape: TypeShape } | null = null;
+        let q: { term: Expression; pointer: Expression; shape: TypeShape } | null = null;
+        for (const t of terms) {
+          const s = objectPointer(t.term);
+          if (s) {
+            if (p || t.sign !== 1 || !byteShape(s)) return null;
+            p = { term: t.term, shape: s };
+            continue;
+          }
+          if (!q && t.sign === -1) {
+            const a = integerCastOfAddress(t.term);
+            if (a) { q = { term: t.term, ...a }; continue; }
+          }
+          if (!isOffset(t.term)) return null;
+        }
+        if (!p || !q) return null;
+        const bytes = (e: Expression) => Expr.cast(Type.pointer(Type.char()), wrap(e)) as unknown as Expression;
+        const same = sameShape(p.shape, q.shape);
+        let sum: Expression = Expr.binary(same ? wrap(p.term) : bytes(p.term), '-', same ? wrap(q.pointer) : bytes(q.pointer)) as unknown as Expression;
+        for (const t of terms) {
+          if (t.term === p.term || t.term === q.term) continue;
+          // `+ -n` is `- n`: the same sum modulo 2^32.
+          let term = unwrapParens(t.term);
+          let sign = t.sign;
+          if (term.kind === NodeKind.UnaryExpr && (term as UnaryExpr).operator === '-') { term = (term as UnaryExpr).operand; sign = sign === 1 ? -1 : 1; }
+          sum = Expr.binary(sum, sign === 1 ? '+' : '-', wrap(term)) as unknown as Expression;
+        }
+        return Expr.paren(sum) as unknown as Expression;
+      };
+
+      /**
+       * `(T *)(c ? 0 : (uint32_t)p)` (either arm), p an object pointer: the select the
+       * decompiler printed in integers. As a select between pointers it is `(c ? nullptr : p)`
+       * with p converted to T * where its type is another: the same address or null.
+       */
+      const pointerSelect = (cast: CStyleCastExpr): Expression | null => {
+        const u = unwrapParens(cast.expression);
+        if (u.kind !== NodeKind.ConditionalExpr) return null;
+        const c = u as ConditionalExpr;
+        const zero = (e: Expression) => {
+          let x = unwrapParens(e);
+          if (x.kind === NodeKind.CStyleCastExpr) x = unwrapParens((x as CStyleCastExpr).expression);
+          return x.kind === NodeKind.IntegerLiteral && (x as IntegerLiteralExpr).value === 0n;
+        };
+        const target = shapeOfNode(cast.type, 0, resolve);
+        if (!target) return null;
+        const arm = (e: Expression): Expression | null => {
+          if (zero(e)) return Expr.nullptr() as unknown as Expression;
+          const a = integerCastOfAddress(e);
+          if (!a) return null;
+          return sameShape(a.shape, target) && objectPointer(a.pointer) ? wrap(a.pointer) : Expr.cast(cast.type, wrap(a.pointer)) as unknown as Expression;
+        };
+        if (zero(c.thenExpr) && zero(c.elseExpr)) return null;
+        const t = arm(c.thenExpr), f = arm(c.elseExpr);
+        if (!t || !f) return null;
+        return Expr.paren(Expr.conditional(c.condition, t, f)) as unknown as Expression;
+      };
+
       /** Whether argument `index` of `call` is a pointer-sized integer parameter. */
       const sizedParam = (callee: Expression, index: number): boolean => {
         const name = calleeName(callee);
@@ -462,6 +598,24 @@ export function createPointerWordCastTransformer(options?: PluginOptions): Trans
                   stats.literal++;
                   return updateNode(cast, { expression: unwrapParens((op as CStyleCastExpr).expression) } as Partial<CStyleCastExpr>);
                 }
+              }
+            }
+            // (I)(p + (n - (int)q)) -> (I)(p - q + n): a byte distance, reassociated.
+            if (target && target.stars === 0) {
+              const d = byteDistance(cast);
+              if (d) {
+                changed = true;
+                stats.byteDistance++;
+                return updateNode(cast, { expression: d } as Partial<CStyleCastExpr>);
+              }
+            }
+            // (T *)(c ? 0 : (uint32_t)p) -> (c ? nullptr : (T *)p): a select between pointers.
+            if (target && target.stars > 0) {
+              const s = pointerSelect(cast);
+              if (s) {
+                changed = true;
+                stats.select++;
+                return s;
               }
             }
             if (!target || target.stars === 0) {
