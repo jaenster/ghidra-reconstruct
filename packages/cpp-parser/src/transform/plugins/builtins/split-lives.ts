@@ -347,6 +347,11 @@ function classOf(spelling: string): WordClass | null {
   return c === 'ptr' || c === 'int' ? c : null;
 }
 
+/** A life's class: a pointer, or an integer - an enum is one, declared as an integer type. */
+function lifeClass(spelling: string): WordClass | null {
+  return classOf(spelling) ?? (wordClass(spelling) === 'enum' ? 'int' : null);
+}
+
 /**
  * SDK typedefs that ARE a pointer (winnt.h, minwindef.h, minwinbase.h): a variable declared
  * with one holds an address as surely as one spelled `T *`.
@@ -1293,7 +1298,7 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
       const moves: Move[] = [];
       let laterRead = false;
       /** One key per type when deciding: the 4-byte integer spellings are one type. */
-      const kind = (t: string) => classOf(t) === 'int' ? 'int' : t;
+      const kind = (t: string) => lifeClass(t) === 'int' ? 'int' : t;
       /** The spelling most of `types` carry, the earliest on a tie. */
       const pick = (types: TypeNode[]): TypeNode => {
         const n = new Map<string, number>();
@@ -1320,8 +1325,9 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
             // `(T *)&v` handed to a call: the call stores (or updates) a T.
             const pointee = w.castType ? (w.castType as unknown as { pointee?: TypeNode }).pointee ?? null : null;
             const ps = pointee ? spellingOf(pointee) : '';
-            // `(void **)&v` says only "a pointer", which is news in an integer variable.
-            const t = pointee && classOf(ps) && (dtClass === 'int' || !/^void\s*\*$/.test(ps)) ? pointee : null;
+            // `(void **)&v` says only "a pointer", which is news in an integer variable;
+            // `(eD2UnitType *)&p` says an enum's integer, news in a pointer.
+            const t = pointee && lifeClass(ps) && (dtClass === 'int' || !/^void\s*\*$/.test(ps)) ? pointee : null;
             storeTypes.push(t ? ps : null);
             if (t) storeNodes.push(t);
             continue;
@@ -1352,7 +1358,9 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
         const readAs = (c: Occurrence): TypeNode | null => c.cast && !c.via ? c.cast.type : !c.cast && c.sink ? c.sink : null;
         const ptrReads = occ.map(readAs).filter((t): t is TypeNode => t !== null && classOf(spellingOf(t)) === 'ptr');
         const intReads = occ.map(readAs).filter((t): t is TypeNode => t !== null && classOf(spellingOf(t)) === 'int');
-        const typedStores = storeNodes.filter(t => classOf(spellingOf(t)) !== null);
+        const typedStores = storeNodes.filter(t => lifeClass(spellingOf(t)) !== null);
+        // A read as an enum reads an integer (the tree declares an enum as an integer type).
+        const enumReads = occ.map(readAs).filter((t): t is TypeNode => t !== null && wordClass(spellingOf(t)) === 'enum');
         const storedOne = typedStores.length > 0 && storeTypes.every(t => t !== null) && new Set(typedStores.map(t => kind(spellingOf(t)))).size === 1;
         let target: TypeNode | null = null;
         let why = '';
@@ -1371,7 +1379,11 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
           // An integer life (or a pointer to another type) in a pointer variable.
           const readPtrs = new Set(ptrReads.map(spellingOf).filter(s => !sameType(s, dt)));
           const ptrCastCount = occ.filter(c => c.cast && !c.via && classOf(spellingOf(c.cast.type)) === 'ptr').length;
-          if (intReads.length > 0 && readPtrs.size === 0 && ptrCastCount === 0) target = pick(intReads);
+          if (intReads.length + enumReads.length > 0 && readPtrs.size === 0 && ptrCastCount === 0) {
+            // An enum the stores put there and the reads take, or the integer reads' type.
+            target = storedOne && lifeClass(spellingOf(typedStores[0])) === 'int' && wordClass(spellingOf(typedStores[0])) === 'enum'
+              ? pick(typedStores) : pick(intReads.length > 0 ? intReads : enumReads);
+          }
           else if (readPtrs.size === 1 && intReads.length === 0) target = ptrReads.find(t => !sameType(spellingOf(t), dt))!;
           else if (storedOne && !sameType(spellingOf(typedStores[0]), dt)) target = pick(typedStores);
           else why = `reads ${[...new Set([...intReads, ...ptrReads].map(spellingOf))].join('|') || 'uncast'}, stores ${[...new Set(storeTypes)].join('|') || 'none'}`;
@@ -1383,7 +1395,7 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
           continue;
         }
         const spelling = spellingOf(target);
-        const cls = classOf(spelling);
+        const cls = lifeClass(spelling);
         if (!cls || /\bcode\b/.test(spelling) || /\bundefined\b/.test(spelling) || sameType(spelling, dt)) { report(`${v}: same: its life reads as ${spelling}`); continue; }
         if (cls === 'int' && dtClass === 'int') { report(`${v}: same: an integer life in an integer`); continue; }
         // A life that stores a pointer is a pointer life, whatever its reads cast it to: an
@@ -1760,8 +1772,10 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
         }
       }
       const decls = moves.map(m => Stmt.declStmt([Decl.variable(m.local, m.type)]) as unknown as Statement);
+      // After the bare declarations: one with an initializer may already use a new local.
       let at = 0;
-      while (at < rewritten.length && rewritten[at].kind === NodeKind.DeclStmt) at++;
+      while (at < rewritten.length && rewritten[at].kind === NodeKind.DeclStmt
+        && (rewritten[at] as DeclStmt).declarations.every(d => d.kind !== NodeKind.VariableDecl || !(d as VariableDecl).initializer)) at++;
       statements = [...rewritten.slice(0, at), ...decls, ...rewritten.slice(at)];
       for (const m of moves) { declared.add(m.local); localTypes.set(m.local, m.type); splitLocals.add(m.local); if (m.cls === 'ptr') pointers.add(m.local); }
       changed = true;

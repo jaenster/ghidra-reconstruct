@@ -835,6 +835,43 @@ describe('split-lives', () => {
     assert.strictEqual(compileAndRun(prelude + out, call), compileAndRun(prelude + fn, call));
   });
 
+  // SCMD_0x02_WalkToEntity @00549890: the packet pointer's dead slot receives the unit type
+  // an out-parameter call stores, read back as the enum.
+  const WALK = `int f(SGAMEDATA *pGame, D2UnitStrc *pUnit, D2GSPacketClt0x02 *pPacket, uint32_t nSize) {
+      int nStatus = AnyPacketClickOnMap(pGame, nSize, (eD2UnitType *)&pPacket, &nSize, pUnit, &pPacket->nCmd);
+      if (nStatus == 0) {
+        StartModeID(pGame, pUnit, 2, (eD2UnitType)pPacket, nSize);
+      }
+      return nStatus;
+    }`;
+  const walkO = { ...O, outParamWidth: () => 4, outParamWidthNonNull: () => 4, argReach: () => ({ lo: 0, hi: 4 }) as never };
+
+  it('SCMD_0x02_WalkToEntity: an enum an out-parameter call stores in a pointer slot gets an enum local', () => {
+    const lines: string[] = [];
+    const out = run(WALK, { ...walkO, onReport: (_f, l) => lines.push(l) });
+    assert.ok(lines.some(l => /pPacket: split: \w+ eD2UnitType/.test(l)), lines.join('\n'));
+    has(out, 'eD2UnitType ');
+    has(out, '(eD2UnitType *)&');
+    assert.ok(!/\(eD2UnitType\)pPacket/.test(out), out);
+  });
+
+  it('the enum out-parameter split computes what the merged variable computed', native, () => {
+    const prelude = `
+      #include <stdint.h>
+      #include <stdio.h>
+      typedef uint32_t eD2UnitType;
+      struct SGAMEDATA { int a; };
+      struct D2UnitStrc { int a; };
+      struct D2GSPacketClt0x02 { uint8_t nCmd; uint32_t nType; uint32_t nGuid; };
+      static int gSeen;
+      static int AnyPacketClickOnMap(SGAMEDATA *, uint32_t n, eD2UnitType *pType, uint32_t *pSize, D2UnitStrc *, uint8_t *p) {
+        *pType = (eD2UnitType)(p[0] + 1); *pSize = n * 3; return n == 9 ? 0 : 1; }
+      static void StartModeID(SGAMEDATA *, D2UnitStrc *, int m, eD2UnitType t, uint32_t n) { gSeen += m + (int)t * 10 + (int)n * 100; }`;
+    const out = run(WALK, walkO);
+    const call = 'SGAMEDATA g; D2UnitStrc u; D2GSPacketClt0x02 pk = { 4, 0, 0 }; printf("%d ", f(&g, &u, &pk, 9)); printf("%d ", f(&g, &u, &pk, 7)); printf("%d\\n", gSeen);';
+    assert.strictEqual(compileAndRun(prelude + out, call), compileAndRun(prelude + WALK, call));
+  });
+
   // D2WinPalette / SUNITNPC_GenerateNpcItems: a number in a pointer ordered against a constant,
   // and a pointer local that only relays a moved number.
   const RELAY = `int f(char *szSrcFile, D2ItemsTxt *pTxt, int n) {
