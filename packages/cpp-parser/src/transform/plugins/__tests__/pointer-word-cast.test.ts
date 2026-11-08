@@ -217,7 +217,7 @@ describe('pointerWordCastPlugin', () => {
     }`);
     assert.deepStrictEqual(getPointerWordCastStats(), {
       byteArith: 1, roundTrip: 1, compare: 2, bitwise: 1, distance: 1, toPointer: 0, offset: 0, sizedSlot: 0, balanced: 0, literal: 0,
-      byteDistance: 0, select: 0, truth: 0, relay: 0,
+      byteDistance: 0, select: 0, truth: 0, relay: 0, returned: 0, intRoundTrip: 0,
     });
   });
 
@@ -431,6 +431,82 @@ describe('pointer-word-cast: frame objects, truth tests and relay words', () => 
     assert.ok(squash(a).includes('intnDelta=n+4;'), a);
     const b = transform(`void f(char *q, int nDelta) { nDelta = 4 - (int)q; q[nDelta] = 0; }`);
     assert.ok(squash(b).includes('intnDelta)'), b);
+  });
+
+  it('Unreferenced_00416a20 @SFile: a word returned from a function returning intptr_t is pointer-sized', () => {
+    const out = transform(`intptr_t f(StormLinkStrc *pSVar1) { return ~(uint32_t)pSVar1; }`);
+    assert.ok(squash(out).includes('return~(uintptr_t)pSVar1;'), out);
+  });
+
+  it('a word returned as an int stays, with the refusal reported', () => {
+    const lines: string[] = [];
+    const out = transform(`int f(char *p) { int n; n = (int)p; int m = (int)p; return (int)p + 1; }`, { onReport: (_f: string, l: string) => lines.push(l) });
+    assert.ok(squash(out).includes('return(int)p+1;'), out);
+    assert.ok(squash(out).includes('n=(int)p;'), out);
+    assert.ok(lines.some(l => l.startsWith('refused: returned as an int-typed value')), lines.join('\n'));
+    assert.ok(lines.some(l => l.startsWith('refused: stored into an int-typed slot')), lines.join('\n'));
+    assert.ok(lines.some(l => l.startsWith('refused: initializes an int-typed local')), lines.join('\n'));
+  });
+
+  it('Main.cpp: a pointer through any 32-bit word and back is the pointer', () => {
+    const out = transform(`void f() { h((void*)(DWORD)GetInstructionPointer()); h((void*)(int)(uintptr_t)GetInstructionPointer()); }`,
+      { functionReturnTypes: { GetInstructionPointer: 'void *' } });
+    assert.strictEqual((out.match(/h\(\(void\s*\*\)GetInstructionPointer\(\)\)/g) ?? []).length, 2, out);
+  });
+
+  it('a pointer narrowed to a short and back is not a round trip', () => {
+    const out = transform(`void f(char *p) { h((char*)(short)p); }`);
+    assert.ok(squash(out).includes('(char*)(shortint)p'), out);
+  });
+
+  it('Skills.cpp / AI.cpp: an integer through a pointer and back is the integer converted once', () => {
+    const out = transform(`int f(int n, short s, uint32_t u) {
+      if ((uintptr_t)(void*)n < u) n++;
+      if ((uintptr_t)(D2UnitStrc*)s > u) n++;
+      return (int)(char*)(n + 4);
+    }`);
+    assert.ok(squash(out).includes('(uintptr_t)n<u'), out);
+    assert.ok(squash(out).includes('(uintptr_t)s>u'), out);
+    assert.ok(squash(out).includes('return(int)(n+4);'), out);
+  });
+
+  it('leaves a link word or an address sum through a pointer: the integer may hold an address', () => {
+    const out = transform(`struct L { L *m_prevlink; intptr_t m_next; };
+      int f(L *pL, D2UnitStrc *pUnit) {
+        if ((intptr_t)(L*)pL->m_next > 0) return 1;
+        return (int)(uint8_t*)((intptr_t)&pUnit->nSeed + 2);
+      }`, { structFields: { L: { m_next: 'intptr_t' }, D2UnitStrc: { nSeed: 'int' } } });
+    assert.ok(squash(out).includes('(intptr_t)(L*)pL->m_next>0'), out);
+    assert.ok(squash(out).includes('(int)(uint8_t*)((intptr_t)&pUnit->nSeed+2)'), out);
+  });
+
+  it('leaves a pointer through a pointer cast to an integer: that is a word cast of a pointer', () => {
+    const out = transform(`int f(char *p) { return (int)(D2UnitStrc*)p; }`);
+    assert.ok(squash(out).includes('(int)(D2UnitStrc*)p'), out);
+  });
+
+  it('PlayerSave: byte arithmetic through an integer cast of an integer sum', () => {
+    const out = transform(`void f(uint8_t *pStreamPos, int n) { pStreamPos = (uint8_t*)((int)((int)pStreamPos + 2) + n); }`);
+    assert.ok(squash(out).includes('pStreamPos=(uint8_t*)((char*)pStreamPos+2+n);'), out);
+  });
+
+  it('computes what the round trips, returns and nested sums computed', native, () => {
+    const prelude = `
+      #include <stdint.h>
+      #include <stdio.h>
+      static char gBuf[32];`;
+    const fn = `
+      intptr_t ret(char *p) { return ~(uint32_t)p; }
+      int back(char *p) { return (int)(char *)(DWORD)p - (int)gBuf; }
+      int ints(int n, short s, uint32_t u) { return ((uintptr_t)(void*)n < u ? 1 : 2) + ((uintptr_t)(char*)s > u ? 4 : 8) + (int)(char*)(n + 4); }
+      int nested(uint8_t *p, int n) { uint8_t *q = (uint8_t*)((int)((int)p + 2) + n); return (int)(q - p); }`;
+    const out = transform(fn);
+    assert.ok(squash(out).includes('return~(uintptr_t)p;'), out);
+    assert.ok(squash(out).includes('(uintptr_t)n<u'), out);
+    assert.ok(squash(out).includes('(char*)p+2+n'), out);
+    const call = `
+      printf("%d %d %d %d %d %d\\n", (int)(ret(gBuf + 3) + (intptr_t)gBuf), back(gBuf + 5), ints(-1, -2, 7), ints(3, 9, 7), nested((uint8_t*)gBuf, -5), nested((uint8_t*)gBuf, 9));`;
+    assert.strictEqual(compileAndRun(prelude + 'typedef unsigned long DWORD;\n' + out, call), compileAndRun(prelude + 'typedef unsigned long DWORD;\n' + fn, call));
   });
 
   it('computes what the integer spellings computed', native, () => {

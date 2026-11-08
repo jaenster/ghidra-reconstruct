@@ -18,6 +18,10 @@
  *   (int)p < (int)q          ->  (intptr_t)p < (intptr_t)q  compare
  *   (uint32_t)p & 3          ->  (uintptr_t)p & 3           alignment / hash
  *   (int)a - (int)b          ->  (intptr_t)a - (intptr_t)b  a distance
+ *   return ~(uint32_t)p;     ->  return ~(uintptr_t)p;      into a pointer-sized return
+ *   (T *)(DWORD)p            ->  (T *)p                     a round trip through any 32-bit word
+ *   (I)(T *)n                ->  (I)n                       an integer's round trip through a pointer
+ *   (T *)((int)((int)p + 2) + n) -> (T *)((char *)p + 2 + n) byte arithmetic through a word cast
  *
  * Every form is value-preserving on the 32-bit target, and the integer forms
  * are type-identical: `intptr_t` IS `int` and `uintptr_t` IS `unsigned int`
@@ -43,9 +47,11 @@
  * what all of them left.
  */
 
+import { appendFileSync } from 'node:fs';
 import { NodeKind } from '../../../ast/kinds.js';
+import { emit } from '../../../emit/index.js';
 import type {
-  ASTNode, FunctionDecl, VariableDecl, ParameterDecl, Expression, BinaryExpr, CStyleCastExpr,
+  ASTNode, FunctionDecl, VariableDecl, ParameterDecl, Expression, BinaryExpr, CStyleCastExpr, ReturnStmt,
   TypeNode, BuiltinType, IntegerLiteralExpr, ParenExpr, UnaryExpr, AssignExpr, SubscriptExpr, ConditionalExpr,
 } from '../../../ast/nodes.js';
 import { findNodesByKind } from '../../../ast/visitor.js';
@@ -69,6 +75,8 @@ export interface PointerWordCastOptions extends PluginOptions {
   funcdefNames?: string[];
   /** Callable name (bare AND qualified) -> its parameter type spellings, in order. */
   functionParamTypes?: Record<string, string[]>;
+  /** One line per word cast of a pointer a form declined, for the run's report. */
+  onReport?: (fn: string, line: string) => void;
 }
 
 /** Per-form counts since the last reset, for the regen log and the tests. */
@@ -96,17 +104,21 @@ export interface PointerWordCastStats {
   truth: number;
   /** Locals `int d = K - (int)p` used only to address memory, declared `intptr_t`. */
   relay: number;
+  /** `return <words>;` in a function returning a pointer-sized integer. */
+  returned: number;
+  /** `(I)(T *)n` -> `(I)n`: an integer's round trip through a pointer. */
+  intRoundTrip: number;
 }
 
 const stats: PointerWordCastStats = {
   byteArith: 0, roundTrip: 0, compare: 0, bitwise: 0, distance: 0, toPointer: 0, offset: 0, sizedSlot: 0, balanced: 0, literal: 0,
-  byteDistance: 0, select: 0, truth: 0, relay: 0,
+  byteDistance: 0, select: 0, truth: 0, relay: 0, returned: 0, intRoundTrip: 0,
 };
 export function getPointerWordCastStats(): PointerWordCastStats { return { ...stats }; }
 export function resetPointerWordCastStats(): void {
   stats.byteArith = stats.roundTrip = stats.compare = stats.bitwise = stats.distance = 0;
   stats.toPointer = stats.offset = stats.sizedSlot = stats.balanced = stats.literal = 0;
-  stats.byteDistance = stats.select = stats.truth = stats.relay = 0;
+  stats.byteDistance = stats.select = stats.truth = stats.relay = stats.returned = stats.intRoundTrip = 0;
 }
 
 /** Pointees one byte wide: arithmetic on such a pointer is arithmetic on its address. */
@@ -133,6 +145,16 @@ const WORD_OR_NARROWER = new Set([
 const POINTER_SIZED_INTEGERS = new Set([
   'intptr_t', 'uintptr_t', 'size_t', 'ssize_t', 'ptrdiff_t',
   'INT_PTR', 'UINT_PTR', 'LONG_PTR', 'ULONG_PTR', 'DWORD_PTR', 'SIZE_T', 'SSIZE_T',
+]);
+
+/**
+ * Integer types exactly one 32-bit word wide on this target (or pointer-sized everywhere):
+ * a pointer converted to one and back is the same pointer.
+ */
+const EXACT_WORDS = new Set([
+  'int', 'unsigned int', 'long', 'unsigned long', 'int32_t', 'uint32_t', 'uint', 'unsigned', 'u_int',
+  'INT', 'UINT', 'LONG', 'ULONG', 'DWORD', 'undefined4', 'int4',
+  'intptr_t', 'uintptr_t', 'size_t', 'ssize_t', 'ptrdiff_t', 'INT_PTR', 'UINT_PTR', 'LONG_PTR', 'ULONG_PTR', 'DWORD_PTR', 'SIZE_T', 'SSIZE_T',
 ]);
 
 /** Operators along which an integer is still the same word: its value reaches the result. */
@@ -197,6 +219,8 @@ export function createPointerWordCastTransformer(options?: PluginOptions): Trans
   const typedefTargets = o.typedefTargets ?? {};
   const resolve: TypedefResolver = name => typedefTargets[name];
   const funcdefNames = cachedSet(o.funcdefNames);
+  const trace = typeof process !== 'undefined' ? process.env?.POINTER_WORD_CAST_TRACE : undefined;
+  const onReport = o.onReport ?? (trace ? (fn: string, line: string) => appendFileSync(trace, `${fn}\t${line}\n`) : undefined);
 
   return createTransformer({
     visitFunctionDecl(node: FunctionDecl): ASTNode | undefined {
@@ -482,7 +506,7 @@ export function createPointerWordCastTransformer(options?: PluginOptions): Trans
        */
       const byteArithmetic = (operand: Expression): Expression | null => {
         const terms: Array<{ term: Expression; sign: 1 | -1 }> = [];
-        additiveTerms(operand, 1, terms);
+        const through = wordSumTerms(operand, 1, terms);
         if (terms.length < 2) return null;
         let base: { term: Expression; cast: CStyleCastExpr } | null = null;
         for (const t of terms) {
@@ -496,7 +520,47 @@ export function createPointerWordCastTransformer(options?: PluginOptions): Trans
         }
         if (!base) return null;
         const bytes = Expr.cast(Type.pointer(Type.char()), base.cast.expression);
-        return replaceInChain(operand, base.term, bytes);
+        if (!through) return replaceInChain(operand, base.term, bytes);
+        // The sum went through an integer cast of an integer sum, `(int)((int)p + 2) + n`: the
+        // same 32-bit sum without it (int to int is the identity, unsigned to int keeps every
+        // bit), written as byte arithmetic from the pointer with the offsets in their order.
+        let sum: Expression = bytes as unknown as Expression;
+        for (const t of terms) {
+          if (t.term === base.term) continue;
+          let term = unwrapParens(t.term);
+          let sign = t.sign;
+          if (term.kind === NodeKind.UnaryExpr && (term as UnaryExpr).operator === '-') { term = (term as UnaryExpr).operand; sign = sign === 1 ? -1 : 1; }
+          sum = Expr.binary(sum, sign === 1 ? '+' : '-', wrap(term)) as unknown as Expression;
+        }
+        return sum;
+      };
+
+      /**
+       * additiveTerms, also descending through a 32-bit machine-word cast (`(int)`, `(uint32_t)`)
+       * of an integer sum: the cast of an integer to an integer of the same 32 bits is the
+       * identity on the bits. True when it descended through one.
+       */
+      const wordSumTerms = (e: Expression, sign: 1 | -1, out: Array<{ term: Expression; sign: 1 | -1 }>): boolean => {
+        const u = unwrapParens(e);
+        if (u.kind === NodeKind.BinaryExpr && ((u as BinaryExpr).operator === '+' || (u as BinaryExpr).operator === '-')) {
+          const b = u as BinaryExpr;
+          const l = wordSumTerms(b.left, sign, out);
+          const r = wordSumTerms(b.right, b.operator === '-' ? (sign === 1 ? -1 : 1) : sign, out);
+          return l || r;
+        }
+        if (u.kind === NodeKind.CStyleCastExpr && pointerWordFor((u as CStyleCastExpr).type)) {
+          const inner = unwrapParens((u as CStyleCastExpr).expression);
+          if (inner.kind === NodeKind.BinaryExpr && ((inner as BinaryExpr).operator === '+' || (inner as BinaryExpr).operator === '-')
+              && !isPointerValue(inner)) {
+            const before = out.length;
+            wordSumTerms(inner, sign, out);
+            // Only an integer sum: its terms are offsets and word casts of pointers.
+            if (out.slice(before).every(t => isOffset(t.term) || wordCastOfPointer(t.term))) return true;
+            out.length = before;
+          }
+        }
+        out.push({ term: e, sign });
+        return false;
       };
 
       /** `e` with `target` (itself, or under parentheses) replaced. */
@@ -512,6 +576,49 @@ export function createPointerWordCastTransformer(options?: PluginOptions): Trans
       /** The same cast, spelled with the pointer-sized integer of the same type. */
       const respell = (w: { cast: CStyleCastExpr; word: 'intptr_t' | 'uintptr_t' }): CStyleCastExpr =>
         updateNode(w.cast, { type: Type.typedef(w.word) } as Partial<CStyleCastExpr>);
+
+      /** A machine word exactly 32 bits wide here (or pointer-sized everywhere), as spelled or resolved. */
+      const exactWord = (t: TypeNode): boolean => {
+        const sp = shapeOfNode(t, 0);
+        const rs = shapeOfNode(t, 0, resolve);
+        return (!!sp && sp.stars === 0 && EXACT_WORDS.has(sp.base.replace(/^::/, '')))
+          || (!!rs && rs.stars === 0 && EXACT_WORDS.has(rs.base.replace(/^::/, '')));
+      };
+      /** `e` without the 32-bit word casts around it, and how many there were. */
+      const peelWords = (e: Expression): { inner: Expression; peeled: number } => {
+        let x = unwrapParens(e);
+        let peeled = 0;
+        while (x.kind === NodeKind.CStyleCastExpr && exactWord((x as CStyleCastExpr).type)) {
+          x = unwrapParens((x as CStyleCastExpr).expression);
+          peeled++;
+        }
+        return { inner: x, peeled };
+      };
+      /**
+       * An integer of at most 32 bits that carries no address: no pointer-sized integer (a
+       * link word may hold an address), no cast of a pointer, no `&x` anywhere inside it.
+       */
+      const pureInteger = (e: Expression): boolean => {
+        if (isPointerValue(e) || !isOffset(e)) return false;
+        const inside = [e as ASTNode, ...findNodesByKind(e as ASTNode, NodeKind.Identifier), ...findNodesByKind(e as ASTNode, NodeKind.MemberExpr)];
+        for (const x of inside) {
+          const sp = spelledShape(x as Expression);
+          if (sp && sp.stars === 0 && POINTER_SIZED_INTEGERS.has(sp.base.replace(/^::/, ''))) return false;
+        }
+        for (const c of findNodesByKind(e as ASTNode, NodeKind.CStyleCastExpr)) {
+          if (isPointerValue((c as CStyleCastExpr).expression) || asCodeAddress(shapeOf((c as CStyleCastExpr).expression), funcdefNames)) return false;
+        }
+        for (const u of findNodesByKind(e as ASTNode, NodeKind.UnaryExpr)) if ((u as UnaryExpr).operator === '&') return false;
+        return true;
+      };
+      const fnName = (node.name as { name?: string } | undefined)?.name ?? '?';
+      const report = (what: string, at: ASTNode) => {
+        if (!onReport) return;
+        let text = '?';
+        try { text = emit(at as never).replace(/\s+/g, ' ').slice(0, 140); } catch { /* the report only */ }
+        onReport(fnName, `${what}: ${text}`);
+      };
+      const returnType = (node as unknown as { returnType?: TypeNode }).returnType ?? null;
 
       /**
        * Respell every word cast of a pointer that is a term of `e`'s additive
@@ -777,6 +884,21 @@ export function createPointerWordCastTransformer(options?: PluginOptions): Trans
             default:
               break;
           }
+          if (n.kind === NodeKind.ReturnStmt) {
+            // return <words>; from a function returning a pointer-sized integer: the value
+            // lands in a pointer word.
+            const r = n as ReturnStmt;
+            if (!r.value) return undefined;
+            const spine = respellSpine(r.value);
+            if (!spine.hits) return undefined;
+            if (!returnType || !isPointerSizedType(returnType)) {
+              report('refused: returned as an int-typed value', n);
+              return undefined;
+            }
+            changed = true;
+            stats.returned += spine.hits;
+            return updateNode(r, { value: spine.expr } as Partial<ReturnStmt>);
+          }
           if (n.kind === NodeKind.CallExpr) {
             // f(..., <words>, ...) into a size_t parameter: a value made pointer-sized.
             const call = n as unknown as { callee: Expression; arguments: Expression[] };
@@ -828,6 +950,24 @@ export function createPointerWordCastTransformer(options?: PluginOptions): Trans
                 return s;
               }
             }
+            // (I)(T *)n -> (I)n: an integer of at most 32 bits converted to a pointer and back
+            // to an integer of at most 32 bits (or a pointer-sized one) is the integer
+            // converted once - the pointer holds exactly its 32 bits here.
+            if (target && target.stars === 0) {
+              const resolved = shapeOfNode(cast.type, 0, resolve);
+              const integer = WORD_OR_NARROWER.has(target.base) || POINTER_SIZED_INTEGERS.has(target.base)
+                || (!!resolved && resolved.stars === 0 && WORD_OR_NARROWER.has(resolved.base));
+              const op = unwrapParens(cast.expression);
+              if (integer && op.kind === NodeKind.CStyleCastExpr) {
+                const ps = shapeOfNode((op as CStyleCastExpr).type, 0, resolve);
+                const value = (op as CStyleCastExpr).expression;
+                if (ps && ps.stars > 0 && pureInteger(value)) {
+                  changed = true;
+                  stats.intRoundTrip++;
+                  return updateNode(cast, { expression: wrap(value) } as Partial<CStyleCastExpr>);
+                }
+              }
+            }
             if (!target || target.stars === 0) {
               // (size_t)(<words>): a value made pointer-sized on purpose.
               if (!isPointerSizedType(cast.type)) return undefined;
@@ -837,12 +977,13 @@ export function createPointerWordCastTransformer(options?: PluginOptions): Trans
               stats.sizedSlot += spine.hits;
               return updateNode(cast, { expression: spine.expr } as Partial<CStyleCastExpr>);
             }
-            // (T *)(int)p -> (T *)p
-            const w = wordCastOfPointer(cast.expression);
-            if (w && objectPointer(w.cast.expression)) {
+            // (T *)(int)p -> (T *)p, through any chain of 32-bit words: (T *)(DWORD)p,
+            // (T *)(int)(uintptr_t)p. A pointer converted to a word as wide and back is itself.
+            const peel = peelWords(cast.expression);
+            if (peel.peeled > 0 && objectPointer(peel.inner)) {
               changed = true;
               stats.roundTrip++;
-              return updateNode(cast, { expression: w.cast.expression } as Partial<CStyleCastExpr>);
+              return updateNode(cast, { expression: wrap(peel.inner) } as Partial<CStyleCastExpr>);
             }
             // (T *)((int)p + K) -> (T *)((char *)p + K)
             const arith = byteArithmetic(cast.expression);
@@ -878,7 +1019,10 @@ export function createPointerWordCastTransformer(options?: PluginOptions): Trans
             // slot = <words>, into a pointer-sized integer (a link word, a size).
             const intoSized = !ontoPointer && isPointerSizedSlot(a.left)
               && (a.operator === '=' || a.operator === '+=' || a.operator === '-=');
-            if (!ontoPointer && !intoSized) return undefined;
+            if (!ontoPointer && !intoSized) {
+              if (a.operator === '=' && wordCastOfPointer(a.right)) report('refused: stored into an int-typed slot', n);
+              return undefined;
+            }
             const spine = respellSpine(a.right);
             if (!spine.hits) return undefined;
             changed = true;
@@ -887,7 +1031,11 @@ export function createPointerWordCastTransformer(options?: PluginOptions): Trans
           }
           if (n.kind === NodeKind.VariableDecl) {
             const v = n as VariableDecl;
-            if (!v.initializer || v.initializer.kind === NodeKind.InitListExpr || !isPointerSizedType(v.type)) return undefined;
+            if (!v.initializer || v.initializer.kind === NodeKind.InitListExpr) return undefined;
+            if (!isPointerSizedType(v.type)) {
+              if (wordCastOfPointer(v.initializer as Expression)) report('refused: initializes an int-typed local', n);
+              return undefined;
+            }
             const spine = respellSpine(v.initializer as Expression);
             if (!spine.hits) return undefined;
             changed = true;
