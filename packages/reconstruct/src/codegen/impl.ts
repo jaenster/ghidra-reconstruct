@@ -3365,6 +3365,14 @@ function transformDecompiledCode(
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         enclosingVarTypes,
       };
+      perPluginOptions['storm-tag-word'] = {
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        structFields: context.funcPtrArgCasts.structFields,
+        functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        enclosingVarTypes,
+        reportName: `${funcAddress ?? '???'}\t${funcName ?? '<unknown>'}`,
+      };
       perPluginOptions['storm-next-link'] = {
         globalTypes: context.funcPtrArgCasts.globalTypes,
         fieldTypes: context.funcPtrArgCasts.fieldTypes,

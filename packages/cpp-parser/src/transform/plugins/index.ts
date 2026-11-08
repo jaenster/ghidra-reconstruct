@@ -563,6 +563,12 @@ export {
 } from './builtins/join-store-temp.js';
 
 export {
+  stormTagWordPlugin,
+  createStormTagWordTransformer,
+  type StormTagWordOptions,
+} from './builtins/storm-tag-word.js';
+
+export {
   stormNextLinkPlugin,
   createStormNextLinkTransformer,
   STORM_LINK_SUPPORT_LINES,
@@ -918,6 +924,7 @@ import { fieldPointerFoldPlugin } from './builtins/field-pointer-fold.js';
 import { newResultTempPlugin } from './builtins/new-result-temp.js';
 import { joinStoreTempPlugin } from './builtins/join-store-temp.js';
 import { stormNextLinkPlugin } from './builtins/storm-next-link.js';
+import { stormTagWordPlugin } from './builtins/storm-tag-word.js';
 import { paramCheckBlockPlugin } from './builtins/param-check-block.js';
 import { inlinedCallRestorePlugin } from './builtins/inlined-call-restore.js';
 import { guardedCallRestorePlugin } from './builtins/guarded-call-restore.js';
@@ -1230,6 +1237,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   narrowCastThroughUintptrPlugin, // Type: route a pointer->narrow-integer cast through uintptr_t (priority 620)
   unionValueMemberPlugin,         // Type: Ghidra's ((T*)value).member of a slot union -> (M)value (priority 6)
   contextRegisterFieldPlugin,     // Portability: x86-only CONTEXT registers through platform-header accessors, the member access itself on x86 (priority 996)
+  stormTagWordPlugin,             // Portability: a Storm link's sign-tagged word in an intptr_t local, (intptr_t)p link offsets, T** back-link slots (priority 994.6)
   pointerWordCastPlugin,          // Portability: address arithmetic through int -> (char*)p + K / intptr_t / uintptr_t, same value and type (priority 995)
   sdkHandleConstantPlugin,        // Portability: (HKEY)0x80000001 -> HKEY_CURRENT_USER, a loader's (LPCSTR)id -> MAKEINTRESOURCEA(id) (priority 994)
   assignCastPlugin,           // Type: cast an assigned value to its slot's declared type (priority 615)
