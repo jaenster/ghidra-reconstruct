@@ -996,6 +996,10 @@ export {
   type ContextRegisterFieldOptions,
 } from './builtins/context-register-field.js';
 import { pointerWordCastPlugin } from './builtins/pointer-word-cast.js';
+import { sdkHandleConstantPlugin } from './builtins/sdk-handle-constant.js';
+export {
+  sdkHandleConstantPlugin, createSdkHandleConstantTransformer, getSdkHandleConstantCount, resetSdkHandleConstantCount,
+} from './builtins/sdk-handle-constant.js';
 export {
   pointerWordCastPlugin, createPointerWordCastTransformer, getPointerWordCastStats, resetPointerWordCastStats,
   pointerWordFor, type PointerWordCastOptions, type PointerWordCastStats,
@@ -1227,6 +1231,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   unionValueMemberPlugin,         // Type: Ghidra's ((T*)value).member of a slot union -> (M)value (priority 6)
   contextRegisterFieldPlugin,     // Portability: x86-only CONTEXT registers through platform-header accessors, the member access itself on x86 (priority 996)
   pointerWordCastPlugin,          // Portability: address arithmetic through int -> (char*)p + K / intptr_t / uintptr_t, same value and type (priority 995)
+  sdkHandleConstantPlugin,        // Portability: (HKEY)0x80000001 -> HKEY_CURRENT_USER, a loader's (LPCSTR)id -> MAKEINTRESOURCEA(id) (priority 994)
   assignCastPlugin,           // Type: cast an assigned value to its slot's declared type (priority 615)
   overloadPinCastPlugin,      // Type: exact type of the shared-name member whose address the body takes (priority 627)
   unprototypedCallCastPlugin, // Type: give a FARPROC call the parameter list C left unspecified (priority 622)
