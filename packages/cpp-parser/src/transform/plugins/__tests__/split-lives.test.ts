@@ -463,4 +463,84 @@ describe('split-lives', () => {
     has(out, '*pAlpha = 1.0;');
     has(out, 'c = (char)nAlpha;');
   });
+
+  const OUT1 = `int f(D2UnitStrc *pUnit) {
+      int nTargetId;
+      if (pUnit == (D2UnitStrc *)0x0) return 0;
+      GetTargetInfo(pUnit->pPath, (int *)&pUnit, &nTargetId);
+      return (int)pUnit + nTargetId;
+    }`;
+  const outBoth = { ...O, argReach: () => ({ lo: 0, hi: 4 }) as never, outParamWidth: () => 4 };
+
+  it('GetTargetTypeFromDynamicUnit @00620c70: the out-parameter call\'s own argument reads the value before it', () => {
+    const out = run(OUT1, outBoth);
+    has(out, 'GetTargetInfo(pUnit->pPath, (int *)&nUnit, &nTargetId);');
+    has(out, 'return nUnit + nTargetId;');
+    has(out, 'if (pUnit == (D2UnitStrc *)0x0)');
+    // Not an out-parameter: the call may read the word, which stays one variable.
+    assert.strictEqual(flat(run(OUT1, { ...outBoth, outParamWidth: () => null })), flat(run(OUT1, {})));
+  });
+
+  it('a read of the variable outside the call\'s arguments keeps the call a touch', () => {
+    const src = `int f(D2UnitStrc *pUnit) {
+      int nTargetId;
+      nTargetId = (int)pUnit + GetTargetInfo(pUnit->pPath, (int *)&pUnit, &nTargetId);
+      return (int)pUnit + nTargetId;
+    }`;
+    assert.ok(!/nUnit/.test(run(src, outBoth)), run(src, outBoth));
+  });
+
+  const CHAIN = `int f(int a) {
+      D2UnitStrc *pSlotItem;
+      D2UnitStrc *pLArm;
+      pSlotItem = Units::GetRoom(a);
+      h(pSlotItem);
+      pLArm = Units::GetRoom(0);
+      h(pLArm);
+      pLArm = (D2UnitStrc *)GetMouseY();
+      pSlotItem = pLArm;
+      g((int)pLArm);
+      return k((int)pSlotItem);
+    }`;
+  const chainO = { ...O, functionReturnTypes: { ...O.functionReturnTypes, 'Units::GetRoom': 'D2UnitStrc *', GetRoom: 'D2UnitStrc *', GetMouseY: 'int' } };
+
+  it('DRAW_UI_Inventory @0048edf0: a copy of a life split earlier is split in the next round', () => {
+    const out = run(CHAIN, chainO);
+    has(out, 'g(nLArm);');
+    has(out, 'return k(nSlotItem);');
+    has(out, 'h(pSlotItem);');
+  });
+
+  it('the out-parameter split and the next round compute what the merged variables computed', native, () => {
+    const prelude = `
+      #include <stdint.h>
+      #include <stdio.h>
+      struct D2UnitStrc { int pPath; int a; };
+      static D2UnitStrc gUnits[3];
+      static int GetTargetInfo(int path, int *pOut, int *pId) { *pOut = path * 7; *pId = path + 1; return 0; }
+      namespace Units { static D2UnitStrc *GetRoom(int i) { return &gUnits[i]; } }
+      static int gY = 5;
+      static int GetMouseY() { return gY++; }
+      static int gSeen;
+      static void h(D2UnitStrc *p) { gSeen += p->a; }
+      static void g(int x) { gSeen += x * 3; }
+      static int k(int x) { return x + gSeen; }`;
+    const src = OUT1 + CHAIN.replace('int f(', 'int f2(');
+    const out = run(src, { ...outBoth, ...chainO });
+    has(out, '&nUnit');
+    has(out, 'g(nLArm);');
+    const call = 'gUnits[0].pPath = 3; gUnits[1].pPath = 4; gUnits[1].a = 9; printf("%d %d %d %d\\n", f(&gUnits[0]), f(0), f2(1), f2(2));';
+    assert.strictEqual(compileAndRun(prelude + out, call), compileAndRun(prelude + src, call));
+  });
+
+  it('CUBE_ParseOutputItem: a narrower integer read of an out-parameter\'s integer no longer truncates a pointer', () => {
+    const src = `int f(char *pszCode, char *psz) {
+      g(psz);
+      ConvertCode(pszCode, (int *)&psz);
+      return (int)(ushort)psz;
+    }`;
+    const out = run(src, outBoth);
+    has(out, 'ConvertCode(pszCode, (int *)&nPsz);');
+    has(out, 'return (int)(ushort)nPsz;');
+  });
 });

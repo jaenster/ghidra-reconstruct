@@ -129,6 +129,12 @@ interface Write {
   placeholder?: Expression;
   castType?: TypeNode;
   /**
+   * An 'out' call whose other arguments also read v (`f(v->a, &v)`): they are evaluated
+   * before the call, so they read the value that reaches the node, and the call's store
+   * begins the next.
+   */
+  readsBefore?: boolean;
+  /**
    * An 'assign' inside a larger expression (`if ((v = f()) != 0)`, `a = (v = x, y)`),
    * evaluated whenever its node is; true when the enclosing expression uses its value.
    */
@@ -665,6 +671,35 @@ function restoreAddresses(statements: Statement[], placeholders: ReadonlyMap<obj
   return visit(statements) as Statement[];
 }
 
+/**
+ * Whether every mention of `v` in a node's expressions other than the placeholder's own is
+ * inside the arguments of the call the placeholder is an argument of (through casts and
+ * parentheses): `f(v->a, v, (T *)&v)`. A call's arguments are evaluated before its body runs.
+ */
+function mentionsOnlyInArguments(own: Expression[], placeholder: object, v: string, mentions: number): boolean {
+  let call: CallExpr | null = null;
+  for (const e of own) {
+    for (const c of findNodesByKind(e as unknown as ASTNode, NodeKind.CallExpr) as CallExpr[]) {
+      for (const a of c.arguments) {
+        let x: Expression = a;
+        while (x.kind === NodeKind.ParenExpr || x.kind === NodeKind.CStyleCastExpr) {
+          x = x.kind === NodeKind.ParenExpr ? (x as unknown as { expression: Expression }).expression : (x as CStyleCastExpr).expression;
+        }
+        if (x === placeholder) call = c;
+      }
+    }
+  }
+  if (!call) return false;
+  const placeholderId = (placeholder as AssignExpr).left as unknown as ASTNode;
+  let inArgs = 0;
+  for (const a of call.arguments) {
+    for (const id of findNodesByKind(a as unknown as ASTNode, NodeKind.Identifier)) {
+      if (id !== placeholderId && (id as Identifier).name === v) inArgs++;
+    }
+  }
+  return inArgs > 0 && inArgs === mentions - 1;
+}
+
 /** `5`, `-1`, `0xffffffff`: an integer literal, possibly negated; null otherwise. */
 function literalOf(e: Expression): Expression | null {
   const u = unwrapParens(e);
@@ -757,546 +792,565 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
   };
   let changed = false;
 
-  for (const v of candidates) {
-    const proxied = callScopedAddresses(statements, v, o, funcdefOf);
-    if ('why' in proxied) { report(`${v}: refused: its address leaves the frame: ${proxied.why}`); continue; }
-    const work = proxied.statements;
-    const placeholders = proxied.placeholders;
-    const outs = proxied.outs;
-    const addressCasts = proxied.casts;
-    /** The `v` of each placeholder `v += 0`: not a read of its own. */
-    const placeholderIds = new Set<object>([...placeholders.keys()].map(ph => (ph as unknown as AssignExpr).left));
-    // Conditions as short-circuit nodes: a value stored in `a || (v = f(), v == 0)` is a
-    // whole write on the paths that evaluate it, and reaches only those.
-    const flow = buildFunctionFlow(work, declared, { shortCircuitConditions: true });
-    if (flow.isEscaped(v)) { report(`${v}: other: escaped`); continue; }
-    if (!topLocals.has(v) && argAreaNamed) {
-      // The argument area read by offset (`stack0x00000008`) may be this parameter's word.
-      report(`${v}: refused: the argument area is named by offset`);
-      continue;
-    }
-    if (topLocals.has(v)) {
-      const slot = (o.slots ?? []).find(x => x.name === v && !x.isParameter);
-      // A name the frame does not carry but whose auto-name encodes a frame position is a
-      // piece of another slot, which frame-group-locals lays out with it.
-      if (!slot && frameAliasOffset(v) !== null) { report(`${v}: refused: a piece of a frame slot`); continue; }
-      if (members.has(v)) {
-        const from = members.get(v)!;
-        report(`${v}: refused: a frame object may hold its slot (from ${from}${memberWhy.has(from) ? `: ${memberWhy.get(from)}` : ''})`);
+  // A split retypes what it moves, and a variable refused before it may have read or stored
+  // exactly that value (`p = q;` with q's life now an integer): every candidate is looked at
+  // again while a round still splits. Each round is the same proof on the current body.
+  for (let round = 0; round < 4; round++) {
+    let splitThisRound = false;
+    for (const v of candidates) {
+      if (!declared.has(v)) continue;
+      const proxied = callScopedAddresses(statements, v, o, funcdefOf);
+      if ('why' in proxied) { report(`${v}: refused: its address leaves the frame: ${proxied.why}`); continue; }
+      const work = proxied.statements;
+      const placeholders = proxied.placeholders;
+      const outs = proxied.outs;
+      const addressCasts = proxied.casts;
+      /** The `v` of each placeholder `v += 0`: not a read of its own. */
+      const placeholderIds = new Set<object>([...placeholders.keys()].map(ph => (ph as unknown as AssignExpr).left));
+      // Conditions as short-circuit nodes: a value stored in `a || (v = f(), v == 0)` is a
+      // whole write on the paths that evaluate it, and reaches only those.
+      const flow = buildFunctionFlow(work, declared, { shortCircuitConditions: true });
+      if (flow.isEscaped(v)) { report(`${v}: other: escaped`); continue; }
+      if (!topLocals.has(v) && argAreaNamed) {
+        // The argument area read by offset (`stack0x00000008`) may be this parameter's word.
+        report(`${v}: refused: the argument area is named by offset`);
         continue;
       }
-    }
-    const declaredType = types.get(v)!;
-    const dt = spellingOf(declaredType);
-    const dtClass = classOf(dt)!;
-
-    // The writes, each a whole statement.
-    const writes = new Map<number, Write>();
-    // A declaration without an initializer holds the same indeterminate value as entry.
-    const bareDecls: number[] = [];
-    let odd = false;
-    let oddAt = '';
-    for (const n of flow.cfg.nodes) {
-      if (!flow.writes(n.id).has(v)) continue;
-      if (n.stmt?.kind === NodeKind.DeclStmt && (n.stmt as DeclStmt).declarations.some(d =>
-        d.kind === NodeKind.VariableDecl && (d as VariableDecl).name.name === v && !(d as VariableDecl).initializer)) {
-        bareDecls.push(n.id);
-        continue;
-      }
-      if (placeholders.size > 0) {
-        // A call handed `&v`: every write of v the node makes must be such a call's.
-        const own = flow.ownExprs(n.id);
-        const kinds = (k: NodeKind) => own.flatMap(e => findNodesByKind(e as unknown as ASTNode, k));
-        const touches = kinds(NodeKind.AssignExpr).filter(a => placeholders.has(a)).length;
-        if (touches > 0) {
-          const all = kinds(NodeKind.AssignExpr).filter(a => isIdent((a as AssignExpr).left, v)).length
-            + [...kinds(NodeKind.UnaryExpr), ...kinds(NodeKind.PostfixExpr)]
-              .filter(u => ((u as UnaryExpr).operator === '++' || (u as UnaryExpr).operator === '--') && isIdent((u as UnaryExpr).operand, v)).length;
-          if (all !== touches) { odd = true; break; }
-          const handed = kinds(NodeKind.AssignExpr).filter(a => placeholders.has(a));
-          const mentions = kinds(NodeKind.Identifier).filter(id => (id as Identifier).name === v).length;
-          // One out-parameter call, and v named nowhere else in the node: a fresh value.
-          const castType = touches === 1 ? addressCasts.get(handed[0]) ?? undefined : undefined;
-          if (touches === 1 && outs.has(handed[0]) && mentions === 1) {
-            writes.set(n.id, { node: n.id, expr: own[0], kind: 'out', placeholder: handed[0] as unknown as Expression, castType });
-            continue;
-          }
-          writes.set(n.id, { node: n.id, expr: own[0], kind: 'touch', placeholder: touches === 1 ? handed[0] as unknown as Expression : undefined, castType });
+      if (topLocals.has(v)) {
+        const slot = (o.slots ?? []).find(x => x.name === v && !x.isParameter);
+        // A name the frame does not carry but whose auto-name encodes a frame position is a
+        // piece of another slot, which frame-group-locals lays out with it.
+        if (!slot && frameAliasOffset(v) !== null) { report(`${v}: refused: a piece of a frame slot`); continue; }
+        if (members.has(v)) {
+          const from = members.get(v)!;
+          report(`${v}: refused: a frame object may hold its slot (from ${from}${memberWhy.has(from) ? `: ${memberWhy.get(from)}` : ''})`);
           continue;
         }
       }
-      const w = wholeWrite(flow, n.id, v) ?? nestedWrite(flow, n.id, v);
-      if (!w) {
-        odd = true;
-        if (o.onReport) {
+      const declaredType = types.get(v)!;
+      const dt = spellingOf(declaredType);
+      const dtClass = classOf(dt)!;
+
+      // The writes, each a whole statement.
+      const writes = new Map<number, Write>();
+      // A declaration without an initializer holds the same indeterminate value as entry.
+      const bareDecls: number[] = [];
+      let odd = false;
+      let oddAt = '';
+      for (const n of flow.cfg.nodes) {
+        if (!flow.writes(n.id).has(v)) continue;
+        if (n.stmt?.kind === NodeKind.DeclStmt && (n.stmt as DeclStmt).declarations.some(d =>
+          d.kind === NodeKind.VariableDecl && (d as VariableDecl).name.name === v && !(d as VariableDecl).initializer)) {
+          bareDecls.push(n.id);
+          continue;
+        }
+        if (placeholders.size > 0) {
+          // A call handed `&v`: every write of v the node makes must be such a call's.
           const own = flow.ownExprs(n.id);
-          try { oddAt = own.map(e => emit(e as never)).join(' ; ').replace(/\s+/g, ' ').slice(0, 120); } catch { oddAt = '?'; }
-        }
-        break;
-      }
-      writes.set(n.id, w);
-    }
-    if (odd) { report(`${v}: refused: written inside an expression: ${oddAt}`); continue; }
-    if (writes.size === 0) { report(`${v}: single: never stored`); continue; }
-
-    // The webs: a read joins every definition that reaches it; an update joins its own
-    // definition to the ones it reads.
-    const uf = new UnionFind();
-    uf.find(ENTRY_DEF);
-    for (const id of bareDecls) uf.union(id, ENTRY_DEF);
-    for (const id of writes.keys()) uf.find(id);
-    const readNodes: number[] = [];
-    let unreached = false;
-    for (const n of flow.cfg.nodes) {
-      if (!flow.reads(n.id).has(v)) continue;
-      // The placeholder reads v for the dataflow; an out-parameter call does not.
-      if (writes.get(n.id)?.kind === 'out') continue;
-      const reach = [...flow.reaching(n.id, v)];
-      if (reach.length === 0) { unreached = true; break; }
-      for (let i = 1; i < reach.length; i++) uf.union(reach[0], reach[i]);
-      const w = writes.get(n.id);
-      if (w && (w.kind === 'compound' || w.kind === 'touch')) uf.union(reach[0], n.id);
-      readNodes.push(n.id);
-    }
-    if (unreached) { report(`${v}: refused: a read no definition reaches`); continue; }
-    const webs = new Map<number, Web>();
-    const webOf = (d: number): Web => {
-      const r = uf.find(d);
-      let w = webs.get(r);
-      if (!w) { w = { defs: [], reads: [] }; webs.set(r, w); }
-      return w;
-    };
-    webOf(ENTRY_DEF).defs.push(ENTRY_DEF);
-    for (const id of bareDecls) webOf(id).defs.push(id);
-    for (const id of writes.keys()) webOf(id).defs.push(id);
-    for (const n of readNodes) webOf([...flow.reaching(n, v)][0]).reads.push(n);
-    const entryRoot = uf.find(ENTRY_DEF);
-
-    // Every read occurrence in a node, with the cast directly around it and, for an uncast
-    // read, the type of where its value goes. The left side of the node's own assignment is
-    // a write, not a read.
-    const occurrencesIn = (node: number): Occurrence[] => {
-      const w = writes.get(node);
-      const lhs = w && w.kind === 'assign' ? unwrapParens((w.expr as AssignExpr).left) : null;
-      const out: Occurrence[] = [];
-      /** A literal, possibly negated, possibly cast: a constant to compare with. */
-      const constant = (e: Expression): boolean => {
-        let u = unwrapParens(e);
-        if (u.kind === NodeKind.CStyleCastExpr) u = unwrapParens((u as CStyleCastExpr).expression);
-        return literalOf(u) !== null;
-      };
-      const walk = (x: unknown, cast: CStyleCastExpr | null, offset: CStyleCastExpr | null, sink: TypeNode | null,
-        truth = false, eqWith: Expression | null = null): void => {
-        if (Array.isArray(x)) { for (const i of x) walk(i, null, null, null); return; }
-        if (!x || typeof x !== 'object') return;
-        const node = x as ASTNode;
-        if (node.kind === NodeKind.Identifier) {
-          if ((node as Identifier).name === v && node !== lhs && !placeholderIds.has(node)) {
-            const bare = !cast && !offset;
-            out.push({
-              id: node as Identifier, cast, offset: cast ? null : offset,
-              via: cast && offset && classOf(spellingOf(cast.type)) === 'int' ? offset : null,
-              sink: bare ? sink : null,
-              truth: bare && truth,
-              eqWith: bare ? eqWith : null,
-            });
-          }
-          return;
-        }
-        if (node.kind === NodeKind.UnaryExpr && (node as UnaryExpr).operator === '!') {
-          walk((node as UnaryExpr).operand, null, null, null, true);
-          return;
-        }
-        if (!offset && node.kind === NodeKind.BinaryExpr) {
-          const b = node as BinaryExpr;
-          if (b.operator === '&&' || b.operator === '||') {
-            walk(b.left, null, null, null, true);
-            walk(b.right, null, null, null, true);
-            return;
-          }
-          if (b.operator === '==' || b.operator === '!=') {
-            const zero = (e: Expression) => { const u = unwrapParens(e); return u.kind === NodeKind.IntegerLiteral && (u as unknown as { value: bigint }).value === 0n; };
-            walk(b.left, null, null, null, zero(b.right), constant(b.right) ? b.right : null);
-            walk(b.right, null, null, null, zero(b.left), constant(b.left) ? b.left : null);
-            return;
-          }
-        }
-        if (node.kind === NodeKind.ConditionalExpr) {
-          const c = node as unknown as { condition: Expression; thenExpr: Expression; elseExpr: Expression };
-          walk(c.condition, null, null, null, true);
-          walk(c.thenExpr, null, null, null);
-          walk(c.elseExpr, null, null, null);
-          return;
-        }
-        if (node.kind === NodeKind.CStyleCastExpr) {
-          const c = node as CStyleCastExpr;
-          const cc = classOf(spellingOf(c.type));
-          // The life stepping itself, `p = (DT)((int)p + 1)`, is arithmetic on its own value,
-          // not an address read.
-          const step = lhs !== null && c === unwrapParens((w!.expr as AssignExpr).right) && sameType(spellingOf(c.type), dt);
-          // `(int)p` inside `(T *)(... + 4)` keeps the displacement it sits in.
-          walk(unwrapParens(c.expression), c, step ? null : cc === 'ptr' ? c : cc === 'int' ? offset : null, null);
-          return;
-        }
-        if (node.kind === NodeKind.ParenExpr) { walk((node as unknown as { expression: Expression }).expression, cast, offset, sink, truth, eqWith); return; }
-        if (offset && node.kind === NodeKind.BinaryExpr) {
-          const b = node as unknown as { operator: string; left: Expression; right: Expression };
-          if (b.operator === '+' || b.operator === '-') {
-            // Only a literal displacement or a scaled index (`i * 8`): `(T *)(&G + v)` indexes
-            // G with v, it does not make v the address.
-            const disp = (e: Expression) => {
-              const u = unwrapParens(e);
-              if (u.kind === NodeKind.IntegerLiteral) return true;
-              if (u.kind !== NodeKind.BinaryExpr) return false;
-              const m = u as unknown as { operator: string; left: Expression; right: Expression };
-              return (m.operator === '*' || m.operator === '<<')
-                && (unwrapParens(m.right).kind === NodeKind.IntegerLiteral || (m.operator === '*' && unwrapParens(m.left).kind === NodeKind.IntegerLiteral));
-            };
-            walk(b.left, null, disp(b.right) ? offset : null, null);
-            walk(b.right, null, b.operator === '+' && disp(b.left) ? offset : null, null);
-            return;
-          }
-        }
-        if (node.kind === NodeKind.CallExpr) {
-          const c = node as CallExpr;
-          walk(c.callee, null, null, null);
-          const name = calleeName(c.callee);
-          const params = name ? lookupName(o.functionParamTypes, name) : undefined;
-          c.arguments.forEach((a, i) => {
-            const t = params && i < params.length ? typeFromSpelling(params[i]) : null;
-            walk(a, null, null, t);
-          });
-          return;
-        }
-        if (node.kind === NodeKind.AssignExpr && (node as AssignExpr).operator === '=') {
-          const a = node as AssignExpr;
-          walk(a.left, null, null, null);
-          walk(a.right, null, null, unwrapParens(a.left) === lhs ? null : evidentType(a.left, evidentOptions, localTypes));
-          return;
-        }
-        for (const [k, val] of Object.entries(node)) {
-          if (k === 'location' || k === 'leadingTrivia' || k === 'trailingTrivia' || k === 'type') continue;
-          if (val && typeof val === 'object') walk(val, null, null, null);
-        }
-      };
-      const stmt = flow.cfg.nodes[node].stmt;
-      const sk = stmt?.kind;
-      const returned = sk === NodeKind.ReturnStmt && returnType ? returnType : null;
-      const condition = sk === NodeKind.IfStmt || sk === NodeKind.WhileStmt || sk === NodeKind.DoWhileStmt || sk === NodeKind.ForStmt
-        || flow.cfg.nodes[node].condPart === 'test';
-      for (const e of flow.ownExprs(node)) walk(e, null, null, returned, condition);
-      return out;
-    };
-
-    // Plan every web that moves before rewriting any.
-    interface Move { web: Web; type: TypeNode; spelling: string; cls: WordClass; local: string }
-    const moves: Move[] = [];
-    let laterRead = false;
-    /** One key per type when deciding: the 4-byte integer spellings are one type. */
-    const kind = (t: string) => classOf(t) === 'int' ? 'int' : t;
-    /** The spelling most of `types` carry, the earliest on a tie. */
-    const pick = (types: TypeNode[]): TypeNode => {
-      const n = new Map<string, number>();
-      for (const t of types) n.set(spellingOf(t), (n.get(spellingOf(t)) ?? 0) + 1);
-      let best = types[0];
-      for (const t of types) if (n.get(spellingOf(t))! > n.get(spellingOf(best))!) best = t;
-      return best;
-    };
-    for (const [root, web] of webs) {
-      if (root === entryRoot || web.reads.length === 0) continue;
-      laterRead = true;
-      if (web.defs.some(d => writes.get(d)?.kind === 'touch' && !writes.get(d)!.placeholder)) {
-        report(`${v}: touched: one call is handed its address twice`);
-        continue;
-      }
-      const occ = web.reads.flatMap(n => occurrencesIn(n));
-      // Stores: the value each one stores, its cast to the declared type off.
-      const storeTypes: (string | null)[] = [];
-      const storeNodes: TypeNode[] = [];
-      for (const d of web.defs) {
-        const w = writes.get(d)!;
-        if (w.kind === 'compound') continue;
-        if (w.kind === 'out' || w.kind === 'touch') {
-          // `(T *)&v` handed to a call: the call stores (or updates) a T.
-          const pointee = w.castType ? (w.castType as unknown as { pointee?: TypeNode }).pointee ?? null : null;
-          const ps = pointee ? spellingOf(pointee) : '';
-          // `(void **)&v` says only "a pointer", which is news in an integer variable.
-          const t = pointee && classOf(ps) && (dtClass === 'int' || !/^void\s*\*$/.test(ps)) ? pointee : null;
-          storeTypes.push(t ? ps : null);
-          if (t) storeNodes.push(t);
-          continue;
-        }
-        let x = unwrapParens((w.expr as AssignExpr).right);
-        if (x.kind === NodeKind.CStyleCastExpr && sameType(spellingOf((x as CStyleCastExpr).type), dt)) x = unwrapParens((x as CStyleCastExpr).expression);
-        if (isConstantStore(x, enumConstants, localTypes)) continue;
-        // `v = v + 0x120`: the life stepping itself says nothing about its type. A value
-        // loaded through it (`v = v->pNext`) has the type of what it loads.
-        if (steps(x, v)) continue;
-        const t = evidentType(x, evidentOptions, localTypes);
-        // `(intptr_t)&p->f + 1`: arithmetic on an address is an address, whatever integer
-        // type the arithmetic is spelled in.
-        if ((!t || classOf(spellingOf(t)) === 'int') && addressValued(x)) { storeTypes.push('void*'); continue; }
-        storeTypes.push(t ? spellingOf(t) : null);
-        if (t) storeNodes.push(t);
-      }
-      // Stores of two different types meeting at one read: a join of two values. It stays
-      // one variable, as the decompiler printed it.
-      const storedKinds = new Set(storeTypes.filter((t): t is string => t !== null && classOf(t) !== null && !sameType(t, dt)).map(kind));
-      if (storedKinds.size > 1) {
-        report(`${v}: join: ${web.defs.length} stores of ${[...storedKinds].join(' | ')} reach ${web.reads.length} read nodes`);
-        continue;
-      }
-      // How each read takes the value: cast to a pointer or an integer, or passed uncast to
-      // a place of a pointer or integer type. An integer cast inside address arithmetic
-      // (`via`) reads an address and votes for no type.
-      const readAs = (c: Occurrence): TypeNode | null => c.cast && !c.via ? c.cast.type : !c.cast && c.sink ? c.sink : null;
-      const ptrReads = occ.map(readAs).filter((t): t is TypeNode => t !== null && classOf(spellingOf(t)) === 'ptr');
-      const intReads = occ.map(readAs).filter((t): t is TypeNode => t !== null && classOf(spellingOf(t)) === 'int');
-      const typedStores = storeNodes.filter(t => classOf(spellingOf(t)) !== null);
-      const storedOne = typedStores.length > 0 && storeTypes.every(t => t !== null) && new Set(typedStores.map(t => kind(spellingOf(t)))).size === 1;
-      let target: TypeNode | null = null;
-      let why = '';
-      if (dtClass === 'int') {
-        // A pointer life in an integer variable.
-        const read = new Set(ptrReads.map(spellingOf));
-        // A read that is a byte offset onto the value, `(T *)(v + 4)`, says the value is an
-        // address, and of a T where nothing else says otherwise.
-        const offsets = occ.filter(c => c.offset).map(c => c.offset!);
-        const offsetTypes = new Set(offsets.map(c => spellingOf(c.type)));
-        if (read.size === 1) target = ptrReads[0];
-        else if (storedOne && classOf(spellingOf(typedStores[0])) === 'ptr') target = pick(typedStores);
-        else if (read.size === 0 && storeTypes.every(t => t === null) && offsetTypes.size === 1) target = offsets[0].type;
-        else why = read.size === 0 ? 'no read casts it to a pointer' : `read as ${read.size} pointer types, stores ${[...new Set(storeTypes)].join('|') || 'none'}`;
-      } else {
-        // An integer life (or a pointer to another type) in a pointer variable.
-        const readPtrs = new Set(ptrReads.map(spellingOf).filter(s => !sameType(s, dt)));
-        const ptrCastCount = occ.filter(c => c.cast && !c.via && classOf(spellingOf(c.cast.type)) === 'ptr').length;
-        if (intReads.length > 0 && readPtrs.size === 0 && ptrCastCount === 0) target = pick(intReads);
-        else if (readPtrs.size === 1 && intReads.length === 0) target = ptrReads.find(t => !sameType(spellingOf(t), dt))!;
-        else if (storedOne && !sameType(spellingOf(typedStores[0]), dt)) target = pick(typedStores);
-        else why = `reads ${[...new Set([...intReads, ...ptrReads].map(spellingOf))].join('|') || 'uncast'}, stores ${[...new Set(storeTypes)].join('|') || 'none'}`;
-      }
-      if (!target) {
-        const stored = new Set(storeTypes.filter(s => s !== null));
-        const join = web.defs.length > 1 && stored.size > 1;
-        report(`${v}: ${join ? 'join' : 'untyped'}: ${web.defs.length} stores, ${occ.length} reads: ${why}`);
-        continue;
-      }
-      const spelling = spellingOf(target);
-      const cls = classOf(spelling);
-      if (!cls || /\bcode\b/.test(spelling) || /\bundefined\b/.test(spelling) || sameType(spelling, dt)) { report(`${v}: same: its life reads as ${spelling}`); continue; }
-      if (cls === 'int' && dtClass === 'int') { report(`${v}: same: an integer life in an integer`); continue; }
-      // A life that stores a pointer is a pointer life, whatever its reads cast it to: an
-      // integer local would hold an address in an int, which truncates it where a pointer
-      // is wider than an int.
-      if (cls === 'int' && storeTypes.some(t => t !== null && classOf(t) === 'ptr')) {
-        report(`${v}: pointer: a store into it is a pointer, so it stays ${spellingOf(declaredType)}`);
-        continue;
-      }
-
-      // Width casts the move removes and the ones it needs.
-      let gain = 0, cost = 0;
-      for (const c of occ) {
-        if (c.offset && cls === 'ptr' && dtClass === 'int') { gain++; continue; }
-        // Address arithmetic through an integer: a pointer life keeps it as it is, an
-        // integer one turns its pointer cast into an integer-to-pointer one.
-        if (c.via) { if (cls === 'int') cost++; continue; }
-        const cc = c.cast ? classOf(spellingOf(c.cast.type)) : null;
-        if (!c.cast && !c.offset && (c.truth || (c.eqWith && cls === 'int'))) continue;
-        if (!c.cast) {
-          const sc = c.sink ? classOf(spellingOf(c.sink)) : null;
-          if (sc === cls && cls !== dtClass) gain++;
-          else if (cls !== dtClass) cost++;
-          continue;
-        }
-        if (!cc) {
-          // An enum read of an integer life converts an integer, not an address.
-          if (cls === 'int' && wordClass(spellingOf(c.cast.type)) === 'enum') gain++;
-          // A narrower integer read of one keeps its one cast.
-          else if (cls === 'int' && NARROW_INTEGERS.has(spellingOf(c.cast.type))) continue;
-          else if (cls !== dtClass) cost++;
-          continue;
-        }
-        if (cc !== dtClass && cc === cls) gain++;
-        else if (cc === dtClass && cc !== cls) cost++;
-      }
-      for (const d of web.defs) {
-        const w = writes.get(d)!;
-        if (w.kind === 'compound') { if (cls !== dtClass) cost += 2; continue; }
-        if (w.kind === 'out' || w.kind === 'touch') continue;
-        if (w.nested?.consumed && cls !== dtClass) cost++;
-        const rhs = unwrapParens((w.expr as AssignExpr).right);
-        if (rhs.kind === NodeKind.CStyleCastExpr && sameType(spellingOf((rhs as CStyleCastExpr).type), dt)) {
-          const t = evidentType(unwrapParens((rhs as CStyleCastExpr).expression), evidentOptions, localTypes);
-          const tc = t ? classOf(spellingOf(t)) : null;
-          if (tc && tc !== dtClass && tc === cls) { gain++; continue; }
-        }
-        if (cls !== dtClass && !isConstantStore(rhs, enumConstants, localTypes)) cost++;
-      }
-      if (gain <= cost) {
-        report(`${v}: kept: a ${spelling} life would remove ${gain} casts and need ${cost}`);
-        continue;
-      }
-      const local = valueLocalName(spelling, v, taken);
-      taken.add(local);
-      moves.push({ web, type: target, spelling, cls, local });
-    }
-    if (moves.length === 0 && !laterRead) report(`${v}: joined: every value read is the entry value`);
-    if (moves.length === 0) continue;
-    // A local with one value that is read is one variable of the wrong type, not several
-    // sharing a slot: its type is Ghidra's to fix. A parameter's slot holding one other
-    // value is the reuse itself.
-    if (topLocals.has(v)) {
-      const readLives = [...webs.values()].filter(w => w.reads.length > 0).length;
-      if (readLives < 2) {
-        report(`${v}: single: one value is read, its type is the variable's`);
-        continue;
-      }
-    }
-
-    // The rewrite: node identity -> its replacement, built from the rebuilt children.
-    const replace = new Map<object, (rebuilt: ASTNode) => Expression>();
-    const castTo = (t: TypeNode, e: Expression) => Expr.paren(Expr.cast(t, e)) as unknown as Expression;
-    for (const m of moves) {
-      const ident = () => Expr.identifier(m.local) as unknown as Expression;
-      for (const n of m.web.reads) {
-        const w = writes.get(n);
-        if (w && w.kind === 'compound') continue; // rewritten whole below
-        for (const c of occurrencesIn(n)) {
-          if (!c.cast && !c.offset && c.truth) { replace.set(c.id, () => ident()); continue; }
-          if (!c.cast && !c.offset && c.eqWith && m.cls === 'int') {
-            // `v != (char *)0x202` -> `n != 0x202`.
-            const other = unwrapParens(c.eqWith);
-            const k = literalOf(other.kind === NodeKind.CStyleCastExpr ? unwrapParens((other as CStyleCastExpr).expression) : other)!;
-            replace.set(c.id, () => ident());
-            replace.set(c.eqWith, () => k);
-            continue;
-          }
-          if (!c.cast) {
-            const sink = c.sink;
-            const sc = sink ? spellingOf(sink) : null;
-            if (sink && sc && !c.offset && classOf(sc) === m.cls) {
-              // The value goes on to a place of its own class: the local itself, converted
-              // to a pointer of another type where the place's type names one.
-              const plain = m.cls === 'int' || sameType(sc, m.spelling) || /^(?:const )?void\*$/.test(sc);
-              replace.set(c.id, () => plain ? ident() : castTo(sink, ident()));
+          const kinds = (k: NodeKind) => own.flatMap(e => findNodesByKind(e as unknown as ASTNode, k));
+          const touches = kinds(NodeKind.AssignExpr).filter(a => placeholders.has(a)).length;
+          if (touches > 0) {
+            const all = kinds(NodeKind.AssignExpr).filter(a => isIdent((a as AssignExpr).left, v)).length
+              + [...kinds(NodeKind.UnaryExpr), ...kinds(NodeKind.PostfixExpr)]
+                .filter(u => ((u as UnaryExpr).operator === '++' || (u as UnaryExpr).operator === '--') && isIdent((u as UnaryExpr).operand, v)).length;
+            if (all !== touches) { odd = true; break; }
+            const handed = kinds(NodeKind.AssignExpr).filter(a => placeholders.has(a));
+            const mentions = kinds(NodeKind.Identifier).filter(id => (id as Identifier).name === v).length;
+            // One out-parameter call, and v named nowhere else in the node: a fresh value.
+            const castType = touches === 1 ? addressCasts.get(handed[0]) ?? undefined : undefined;
+            if (touches === 1 && outs.has(handed[0]) && mentions === 1) {
+              writes.set(n.id, { node: n.id, expr: own[0], kind: 'out', placeholder: handed[0] as unknown as Expression, castType });
               continue;
             }
-            replace.set(c.id, () => castTo(declaredType, ident()));
+            // `f(v->a, (T *)&v)`: v's other mentions are all arguments of the call that is
+            // handed its address, evaluated before the call runs. They read the value v had;
+            // the call's store begins a new one.
+            if (touches === 1 && outs.has(handed[0]) && mentionsOnlyInArguments(own, handed[0], v, mentions)) {
+              writes.set(n.id, { node: n.id, expr: own[0], kind: 'out', placeholder: handed[0] as unknown as Expression, castType, readsBefore: true });
+              continue;
+            }
+            writes.set(n.id, { node: n.id, expr: own[0], kind: 'touch', placeholder: touches === 1 ? handed[0] as unknown as Expression : undefined, castType });
             continue;
           }
-          const ct = spellingOf(c.cast.type);
-          const cc = classOf(ct);
-          const castType = c.cast.type;
-          if (sameType(ct, m.spelling)) replace.set(c.cast, () => ident());
-          else if (cc === 'ptr' && m.cls === 'ptr') replace.set(c.cast, () => Expr.cast(castType, ident()) as unknown as Expression);
-          // An address as an integer is the same bits whatever the pointer's type.
-          else if (cc === 'int' && m.cls === 'ptr' && dtClass === 'ptr') replace.set(c.cast, () => Expr.cast(castType, ident()) as unknown as Expression);
-          else if (cc === 'int' && m.cls === 'int') replace.set(c.cast, () => Expr.cast(castType, ident()) as unknown as Expression);
-          else if (sameType(ct, dt)) replace.set(c.cast, () => Expr.cast(castType, ident()) as unknown as Expression);
-          else if (m.cls === 'int' && wordClass(ct) === 'enum') replace.set(c.cast, () => Expr.cast(castType, ident()) as unknown as Expression);
-          else if (m.cls === 'int' && NARROW_INTEGERS.has(ct)) replace.set(c.cast, () => Expr.cast(castType, ident()) as unknown as Expression);
-          else replace.set(c.cast, () => Expr.cast(castType, castTo(declaredType, ident())) as unknown as Expression);
         }
-      }
-      for (const d of m.web.defs) {
-        const w = writes.get(d)!;
-        if (w.kind === 'out' || w.kind === 'touch') {
-          // The call is handed the new local's address instead.
-          replace.set(w.placeholder!, () => Expr.addressOf(ident()) as unknown as Expression);
-          continue;
-        }
-        if (w.kind === 'compound') {
-          const e = w.expr;
-          let op: string, operand: Expression;
-          if (e.kind === NodeKind.AssignExpr) { op = COMPOUND_OPS[(e as AssignExpr).operator]; operand = (e as AssignExpr).right; }
-          else { op = (e as UnaryExpr).operator === '++' ? '+' : '-'; operand = Expr.intLiteral(1) as unknown as Expression; }
-          const isAssign = e.kind === NodeKind.AssignExpr;
-          replace.set(e, (rebuilt) => {
-            const right = isAssign ? (rebuilt as AssignExpr).right : operand;
-            const value = Expr.binary(castTo(declaredType, ident()), op as never, Expr.paren(right) as unknown as Expression) as unknown as Expression;
-            return Expr.assign(ident(), m.cls === dtClass ? value : Expr.cast(m.type, Expr.paren(value)) as unknown as Expression) as unknown as Expression;
-          });
-          continue;
-        }
-        const a = w.expr as AssignExpr;
-        const rhs = unwrapParens(a.right);
-        let inner: Expression | null = null;
-        let innerType: string | null = null;
-        if (rhs.kind === NodeKind.CStyleCastExpr && sameType(spellingOf((rhs as CStyleCastExpr).type), dt)) {
-          inner = unwrapParens((rhs as CStyleCastExpr).expression);
-          const t = evidentType(inner, evidentOptions, localTypes);
-          innerType = t ? spellingOf(t)
-            : m.cls === 'int' && isNumber(valueClass(inner, evidentOptions, localTypes, enumConstants)) ? m.spelling : null;
-        }
-        // A store whose value its expression goes on to use keeps the declared type there.
-        const keep = (store: Expression): Expression => w.nested?.consumed ? castTo(declaredType, Expr.paren(store) as unknown as Expression) : store;
-        replace.set(a, (rebuilt) => {
-          const ra = rebuilt as AssignExpr;
-          let value: Expression;
-          // A literal, through the declared type's cast or bare: the same number, in the new
-          // type (both are one 32-bit word).
-          const lit = literalOf(inner ?? rhs);
-          if (lit) {
-            value = m.cls === 'int' ? lit : Expr.cast(m.type, lit) as unknown as Expression;
-          } else if (inner && innerType && classOf(innerType) === m.cls) {
-            // The value the store converted to the declared type: store it as it is.
-            const rc = unwrapParens(ra.right);
-            if (rc.kind !== NodeKind.CStyleCastExpr) return keep(Expr.assign(ident(), Expr.cast(m.type, Expr.paren(ra.right) as unknown as Expression) as unknown as Expression) as unknown as Expression);
-            const ri = unwrapParens((rc as CStyleCastExpr).expression);
-            value = sameType(innerType, m.spelling) ? ri : Expr.cast(m.type, Expr.paren(ri) as unknown as Expression) as unknown as Expression;
-          } else {
-            value = Expr.cast(m.type, Expr.paren(ra.right) as unknown as Expression) as unknown as Expression;
+        const w = wholeWrite(flow, n.id, v) ?? nestedWrite(flow, n.id, v);
+        if (!w) {
+          odd = true;
+          if (o.onReport) {
+            const own = flow.ownExprs(n.id);
+            try { oddAt = own.map(e => emit(e as never)).join(' ; ').replace(/\s+/g, ' ').slice(0, 120); } catch { oddAt = '?'; }
           }
-          return keep(Expr.assign(ident(), value) as unknown as Expression);
-        });
+          break;
+        }
+        writes.set(n.id, w);
       }
-      report(`${v}: split: ${m.local} ${m.spelling} (${m.web.defs.length} stores, ${m.web.reads.length} read nodes)`);
-    }
+      if (odd) { report(`${v}: refused: written inside an expression: ${oddAt}`); continue; }
+      if (writes.size === 0) { report(`${v}: single: never stored`); continue; }
 
-    const rebuild = (x: unknown): unknown => {
-      if (Array.isArray(x)) {
-        let ch = false;
-        const out = x.map(i => { const r = rebuild(i); if (r !== i) ch = true; return r; });
-        return ch ? out : x;
+      // The webs: a read joins every definition that reaches it; an update joins its own
+      // definition to the ones it reads.
+      const uf = new UnionFind();
+      uf.find(ENTRY_DEF);
+      for (const id of bareDecls) uf.union(id, ENTRY_DEF);
+      for (const id of writes.keys()) uf.find(id);
+      const readNodes: number[] = [];
+      let unreached = false;
+      for (const n of flow.cfg.nodes) {
+        if (!flow.reads(n.id).has(v)) continue;
+        // The placeholder reads v for the dataflow; an out-parameter call does not, though
+        // its other arguments may (the value before the call).
+        const outW = writes.get(n.id);
+        if (outW?.kind === 'out' && !outW.readsBefore) continue;
+        const reach = [...flow.reaching(n.id, v)];
+        if (reach.length === 0) { unreached = true; break; }
+        for (let i = 1; i < reach.length; i++) uf.union(reach[0], reach[i]);
+        const w = writes.get(n.id);
+        if (w && (w.kind === 'compound' || w.kind === 'touch')) uf.union(reach[0], n.id);
+        readNodes.push(n.id);
       }
-      if (!x || typeof x !== 'object') return x;
-      const node = x as ASTNode;
-      let copy: Record<string, unknown> | null = null;
-      for (const [k, val] of Object.entries(node)) {
-        if (k === 'location' || k === 'type' || !val || typeof val !== 'object') continue;
-        const r = rebuild(val);
-        if (r !== val) { copy = copy ?? { ...(node as object) } as Record<string, unknown>; copy[k] = r; }
-      }
-      const out = (copy ?? node) as ASTNode;
-      const f = replace.get(node);
-      return f ? f(out) : out;
-    };
-    let rewritten = restoreAddresses(rebuild(work) as Statement[], placeholders);
+      if (unreached) { report(`${v}: refused: a read no definition reaches`); continue; }
+      const webs = new Map<number, Web>();
+      const webOf = (d: number): Web => {
+        const r = uf.find(d);
+        let w = webs.get(r);
+        if (!w) { w = { defs: [], reads: [] }; webs.set(r, w); }
+        return w;
+      };
+      webOf(ENTRY_DEF).defs.push(ENTRY_DEF);
+      for (const id of bareDecls) webOf(id).defs.push(id);
+      for (const id of writes.keys()) webOf(id).defs.push(id);
+      for (const n of readNodes) webOf([...flow.reaching(n, v)][0]).reads.push(n);
+      const entryRoot = uf.find(ENTRY_DEF);
 
-    // A local none of whose occurrences are left: its declaration goes.
-    if (topLocals.has(v)) {
-      const all = { kind: NodeKind.CompoundStmt, statements: rewritten } as unknown as ASTNode;
-      let left = 0;
-      for (const id of findNodesByKind(all, NodeKind.Identifier)) if ((id as Identifier).name === v) left++;
-      for (const d of findNodesByKind(all, NodeKind.VariableDecl)) if ((d as VariableDecl).name.name === v) left--;
-      if (left === 0) {
-        rewritten = rewritten.flatMap((st): Statement[] => {
-          if (st.kind !== NodeKind.DeclStmt) return [st];
-          const ds = st as DeclStmt;
-          const rest = ds.declarations.filter(d => !(d.kind === NodeKind.VariableDecl && (d as VariableDecl).name.name === v));
-          if (rest.length === ds.declarations.length) return [st];
-          return rest.length === 0 ? [] : [{ ...ds, declarations: rest } as unknown as Statement];
-        });
-        declared.delete(v);
+      // Every read occurrence in a node, with the cast directly around it and, for an uncast
+      // read, the type of where its value goes. The left side of the node's own assignment is
+      // a write, not a read.
+      const occurrencesIn = (node: number): Occurrence[] => {
+        const w = writes.get(node);
+        const lhs = w && w.kind === 'assign' ? unwrapParens((w.expr as AssignExpr).left) : null;
+        const out: Occurrence[] = [];
+        /** A literal, possibly negated, possibly cast: a constant to compare with. */
+        const constant = (e: Expression): boolean => {
+          let u = unwrapParens(e);
+          if (u.kind === NodeKind.CStyleCastExpr) u = unwrapParens((u as CStyleCastExpr).expression);
+          return literalOf(u) !== null;
+        };
+        const walk = (x: unknown, cast: CStyleCastExpr | null, offset: CStyleCastExpr | null, sink: TypeNode | null,
+          truth = false, eqWith: Expression | null = null): void => {
+          if (Array.isArray(x)) { for (const i of x) walk(i, null, null, null); return; }
+          if (!x || typeof x !== 'object') return;
+          const node = x as ASTNode;
+          if (node.kind === NodeKind.Identifier) {
+            if ((node as Identifier).name === v && node !== lhs && !placeholderIds.has(node)) {
+              const bare = !cast && !offset;
+              out.push({
+                id: node as Identifier, cast, offset: cast ? null : offset,
+                via: cast && offset && classOf(spellingOf(cast.type)) === 'int' ? offset : null,
+                sink: bare ? sink : null,
+                truth: bare && truth,
+                eqWith: bare ? eqWith : null,
+              });
+            }
+            return;
+          }
+          if (node.kind === NodeKind.UnaryExpr && (node as UnaryExpr).operator === '!') {
+            walk((node as UnaryExpr).operand, null, null, null, true);
+            return;
+          }
+          if (!offset && node.kind === NodeKind.BinaryExpr) {
+            const b = node as BinaryExpr;
+            if (b.operator === '&&' || b.operator === '||') {
+              walk(b.left, null, null, null, true);
+              walk(b.right, null, null, null, true);
+              return;
+            }
+            if (b.operator === '==' || b.operator === '!=') {
+              const zero = (e: Expression) => { const u = unwrapParens(e); return u.kind === NodeKind.IntegerLiteral && (u as unknown as { value: bigint }).value === 0n; };
+              walk(b.left, null, null, null, zero(b.right), constant(b.right) ? b.right : null);
+              walk(b.right, null, null, null, zero(b.left), constant(b.left) ? b.left : null);
+              return;
+            }
+          }
+          if (node.kind === NodeKind.ConditionalExpr) {
+            const c = node as unknown as { condition: Expression; thenExpr: Expression; elseExpr: Expression };
+            walk(c.condition, null, null, null, true);
+            walk(c.thenExpr, null, null, null);
+            walk(c.elseExpr, null, null, null);
+            return;
+          }
+          if (node.kind === NodeKind.CStyleCastExpr) {
+            const c = node as CStyleCastExpr;
+            const cc = classOf(spellingOf(c.type));
+            // The life stepping itself, `p = (DT)((int)p + 1)`, is arithmetic on its own value,
+            // not an address read.
+            const step = lhs !== null && c === unwrapParens((w!.expr as AssignExpr).right) && sameType(spellingOf(c.type), dt);
+            // `(int)p` inside `(T *)(... + 4)` keeps the displacement it sits in.
+            walk(unwrapParens(c.expression), c, step ? null : cc === 'ptr' ? c : cc === 'int' ? offset : null, null);
+            return;
+          }
+          if (node.kind === NodeKind.ParenExpr) { walk((node as unknown as { expression: Expression }).expression, cast, offset, sink, truth, eqWith); return; }
+          if (offset && node.kind === NodeKind.BinaryExpr) {
+            const b = node as unknown as { operator: string; left: Expression; right: Expression };
+            if (b.operator === '+' || b.operator === '-') {
+              // Only a literal displacement or a scaled index (`i * 8`): `(T *)(&G + v)` indexes
+              // G with v, it does not make v the address.
+              const disp = (e: Expression) => {
+                const u = unwrapParens(e);
+                if (u.kind === NodeKind.IntegerLiteral) return true;
+                if (u.kind !== NodeKind.BinaryExpr) return false;
+                const m = u as unknown as { operator: string; left: Expression; right: Expression };
+                return (m.operator === '*' || m.operator === '<<')
+                  && (unwrapParens(m.right).kind === NodeKind.IntegerLiteral || (m.operator === '*' && unwrapParens(m.left).kind === NodeKind.IntegerLiteral));
+              };
+              walk(b.left, null, disp(b.right) ? offset : null, null);
+              walk(b.right, null, b.operator === '+' && disp(b.left) ? offset : null, null);
+              return;
+            }
+          }
+          if (node.kind === NodeKind.CallExpr) {
+            const c = node as CallExpr;
+            walk(c.callee, null, null, null);
+            const name = calleeName(c.callee);
+            const params = name ? lookupName(o.functionParamTypes, name) : undefined;
+            c.arguments.forEach((a, i) => {
+              const t = params && i < params.length ? typeFromSpelling(params[i]) : null;
+              walk(a, null, null, t);
+            });
+            return;
+          }
+          if (node.kind === NodeKind.AssignExpr && (node as AssignExpr).operator === '=') {
+            const a = node as AssignExpr;
+            walk(a.left, null, null, null);
+            walk(a.right, null, null, unwrapParens(a.left) === lhs ? null : evidentType(a.left, evidentOptions, localTypes));
+            return;
+          }
+          for (const [k, val] of Object.entries(node)) {
+            if (k === 'location' || k === 'leadingTrivia' || k === 'trailingTrivia' || k === 'type') continue;
+            if (val && typeof val === 'object') walk(val, null, null, null);
+          }
+        };
+        const stmt = flow.cfg.nodes[node].stmt;
+        const sk = stmt?.kind;
+        const returned = sk === NodeKind.ReturnStmt && returnType ? returnType : null;
+        const condition = sk === NodeKind.IfStmt || sk === NodeKind.WhileStmt || sk === NodeKind.DoWhileStmt || sk === NodeKind.ForStmt
+          || flow.cfg.nodes[node].condPart === 'test';
+        for (const e of flow.ownExprs(node)) walk(e, null, null, returned, condition);
+        return out;
+      };
+
+      // Plan every web that moves before rewriting any.
+      interface Move { web: Web; type: TypeNode; spelling: string; cls: WordClass; local: string }
+      const moves: Move[] = [];
+      let laterRead = false;
+      /** One key per type when deciding: the 4-byte integer spellings are one type. */
+      const kind = (t: string) => classOf(t) === 'int' ? 'int' : t;
+      /** The spelling most of `types` carry, the earliest on a tie. */
+      const pick = (types: TypeNode[]): TypeNode => {
+        const n = new Map<string, number>();
+        for (const t of types) n.set(spellingOf(t), (n.get(spellingOf(t)) ?? 0) + 1);
+        let best = types[0];
+        for (const t of types) if (n.get(spellingOf(t))! > n.get(spellingOf(best))!) best = t;
+        return best;
+      };
+      for (const [root, web] of webs) {
+        if (root === entryRoot || web.reads.length === 0) continue;
+        laterRead = true;
+        if (web.defs.some(d => writes.get(d)?.kind === 'touch' && !writes.get(d)!.placeholder)) {
+          report(`${v}: touched: one call is handed its address twice`);
+          continue;
+        }
+        const occ = web.reads.flatMap(n => occurrencesIn(n));
+        // Stores: the value each one stores, its cast to the declared type off.
+        const storeTypes: (string | null)[] = [];
+        const storeNodes: TypeNode[] = [];
+        for (const d of web.defs) {
+          const w = writes.get(d)!;
+          if (w.kind === 'compound') continue;
+          if (w.kind === 'out' || w.kind === 'touch') {
+            // `(T *)&v` handed to a call: the call stores (or updates) a T.
+            const pointee = w.castType ? (w.castType as unknown as { pointee?: TypeNode }).pointee ?? null : null;
+            const ps = pointee ? spellingOf(pointee) : '';
+            // `(void **)&v` says only "a pointer", which is news in an integer variable.
+            const t = pointee && classOf(ps) && (dtClass === 'int' || !/^void\s*\*$/.test(ps)) ? pointee : null;
+            storeTypes.push(t ? ps : null);
+            if (t) storeNodes.push(t);
+            continue;
+          }
+          let x = unwrapParens((w.expr as AssignExpr).right);
+          if (x.kind === NodeKind.CStyleCastExpr && sameType(spellingOf((x as CStyleCastExpr).type), dt)) x = unwrapParens((x as CStyleCastExpr).expression);
+          if (isConstantStore(x, enumConstants, localTypes)) continue;
+          // `v = v + 0x120`: the life stepping itself says nothing about its type. A value
+          // loaded through it (`v = v->pNext`) has the type of what it loads.
+          if (steps(x, v)) continue;
+          const t = evidentType(x, evidentOptions, localTypes);
+          // `(intptr_t)&p->f + 1`: arithmetic on an address is an address, whatever integer
+          // type the arithmetic is spelled in.
+          if ((!t || classOf(spellingOf(t)) === 'int') && addressValued(x)) { storeTypes.push('void*'); continue; }
+          storeTypes.push(t ? spellingOf(t) : null);
+          if (t) storeNodes.push(t);
+        }
+        // Stores of two different types meeting at one read: a join of two values. It stays
+        // one variable, as the decompiler printed it.
+        const storedKinds = new Set(storeTypes.filter((t): t is string => t !== null && classOf(t) !== null && !sameType(t, dt)).map(kind));
+        if (storedKinds.size > 1) {
+          report(`${v}: join: ${web.defs.length} stores of ${[...storedKinds].join(' | ')} reach ${web.reads.length} read nodes`);
+          continue;
+        }
+        // How each read takes the value: cast to a pointer or an integer, or passed uncast to
+        // a place of a pointer or integer type. An integer cast inside address arithmetic
+        // (`via`) reads an address and votes for no type.
+        const readAs = (c: Occurrence): TypeNode | null => c.cast && !c.via ? c.cast.type : !c.cast && c.sink ? c.sink : null;
+        const ptrReads = occ.map(readAs).filter((t): t is TypeNode => t !== null && classOf(spellingOf(t)) === 'ptr');
+        const intReads = occ.map(readAs).filter((t): t is TypeNode => t !== null && classOf(spellingOf(t)) === 'int');
+        const typedStores = storeNodes.filter(t => classOf(spellingOf(t)) !== null);
+        const storedOne = typedStores.length > 0 && storeTypes.every(t => t !== null) && new Set(typedStores.map(t => kind(spellingOf(t)))).size === 1;
+        let target: TypeNode | null = null;
+        let why = '';
+        if (dtClass === 'int') {
+          // A pointer life in an integer variable.
+          const read = new Set(ptrReads.map(spellingOf));
+          // A read that is a byte offset onto the value, `(T *)(v + 4)`, says the value is an
+          // address, and of a T where nothing else says otherwise.
+          const offsets = occ.filter(c => c.offset).map(c => c.offset!);
+          const offsetTypes = new Set(offsets.map(c => spellingOf(c.type)));
+          if (read.size === 1) target = ptrReads[0];
+          else if (storedOne && classOf(spellingOf(typedStores[0])) === 'ptr') target = pick(typedStores);
+          else if (read.size === 0 && storeTypes.every(t => t === null) && offsetTypes.size === 1) target = offsets[0].type;
+          else why = read.size === 0 ? 'no read casts it to a pointer' : `read as ${read.size} pointer types, stores ${[...new Set(storeTypes)].join('|') || 'none'}`;
+        } else {
+          // An integer life (or a pointer to another type) in a pointer variable.
+          const readPtrs = new Set(ptrReads.map(spellingOf).filter(s => !sameType(s, dt)));
+          const ptrCastCount = occ.filter(c => c.cast && !c.via && classOf(spellingOf(c.cast.type)) === 'ptr').length;
+          if (intReads.length > 0 && readPtrs.size === 0 && ptrCastCount === 0) target = pick(intReads);
+          else if (readPtrs.size === 1 && intReads.length === 0) target = ptrReads.find(t => !sameType(spellingOf(t), dt))!;
+          else if (storedOne && !sameType(spellingOf(typedStores[0]), dt)) target = pick(typedStores);
+          else why = `reads ${[...new Set([...intReads, ...ptrReads].map(spellingOf))].join('|') || 'uncast'}, stores ${[...new Set(storeTypes)].join('|') || 'none'}`;
+        }
+        if (!target) {
+          const stored = new Set(storeTypes.filter(s => s !== null));
+          const join = web.defs.length > 1 && stored.size > 1;
+          report(`${v}: ${join ? 'join' : 'untyped'}: ${web.defs.length} stores, ${occ.length} reads: ${why}`);
+          continue;
+        }
+        const spelling = spellingOf(target);
+        const cls = classOf(spelling);
+        if (!cls || /\bcode\b/.test(spelling) || /\bundefined\b/.test(spelling) || sameType(spelling, dt)) { report(`${v}: same: its life reads as ${spelling}`); continue; }
+        if (cls === 'int' && dtClass === 'int') { report(`${v}: same: an integer life in an integer`); continue; }
+        // A life that stores a pointer is a pointer life, whatever its reads cast it to: an
+        // integer local would hold an address in an int, which truncates it where a pointer
+        // is wider than an int.
+        if (cls === 'int' && storeTypes.some(t => t !== null && classOf(t) === 'ptr')) {
+          report(`${v}: pointer: a store into it is a pointer, so it stays ${spellingOf(declaredType)}`);
+          continue;
+        }
+
+        // Width casts the move removes and the ones it needs.
+        let gain = 0, cost = 0;
+        for (const c of occ) {
+          if (c.offset && cls === 'ptr' && dtClass === 'int') { gain++; continue; }
+          // Address arithmetic through an integer: a pointer life keeps it as it is, an
+          // integer one turns its pointer cast into an integer-to-pointer one.
+          if (c.via) { if (cls === 'int') cost++; continue; }
+          const cc = c.cast ? classOf(spellingOf(c.cast.type)) : null;
+          if (!c.cast && !c.offset && (c.truth || (c.eqWith && cls === 'int'))) continue;
+          if (!c.cast) {
+            const sc = c.sink ? classOf(spellingOf(c.sink)) : null;
+            if (sc === cls && cls !== dtClass) gain++;
+            else if (cls !== dtClass) cost++;
+            continue;
+          }
+          if (!cc) {
+            // An enum read of an integer life converts an integer, not an address.
+            if (cls === 'int' && wordClass(spellingOf(c.cast.type)) === 'enum') gain++;
+            // A narrower integer read of one keeps its one cast, and it no longer truncates a
+            // pointer (`(ushort)p`): the integer life reads it as an integer.
+            else if (cls === 'int' && NARROW_INTEGERS.has(spellingOf(c.cast.type))) { if (dtClass === 'ptr') gain++; continue; }
+            else if (cls !== dtClass) cost++;
+            continue;
+          }
+          if (cc !== dtClass && cc === cls) gain++;
+          else if (cc === dtClass && cc !== cls) cost++;
+        }
+        for (const d of web.defs) {
+          const w = writes.get(d)!;
+          if (w.kind === 'compound') { if (cls !== dtClass) cost += 2; continue; }
+          if (w.kind === 'out' || w.kind === 'touch') continue;
+          if (w.nested?.consumed && cls !== dtClass) cost++;
+          const rhs = unwrapParens((w.expr as AssignExpr).right);
+          if (rhs.kind === NodeKind.CStyleCastExpr && sameType(spellingOf((rhs as CStyleCastExpr).type), dt)) {
+            const t = evidentType(unwrapParens((rhs as CStyleCastExpr).expression), evidentOptions, localTypes);
+            const tc = t ? classOf(spellingOf(t)) : null;
+            if (tc && tc !== dtClass && tc === cls) { gain++; continue; }
+          }
+          if (cls !== dtClass && !isConstantStore(rhs, enumConstants, localTypes)) cost++;
+        }
+        if (gain <= cost) {
+          report(`${v}: kept: a ${spelling} life would remove ${gain} casts and need ${cost}`);
+          continue;
+        }
+        const local = valueLocalName(spelling, v, taken);
+        taken.add(local);
+        moves.push({ web, type: target, spelling, cls, local });
       }
+      if (moves.length === 0 && !laterRead) report(`${v}: joined: every value read is the entry value`);
+      if (moves.length === 0) continue;
+      // A local with one value that is read is one variable of the wrong type, not several
+      // sharing a slot: its type is Ghidra's to fix. A parameter's slot holding one other
+      // value is the reuse itself.
+      if (topLocals.has(v)) {
+        const readLives = [...webs.values()].filter(w => w.reads.length > 0).length;
+        if (readLives < 2) {
+          report(`${v}: single: one value is read, its type is the variable's`);
+          continue;
+        }
+      }
+
+      // The rewrite: node identity -> its replacement, built from the rebuilt children.
+      const replace = new Map<object, (rebuilt: ASTNode) => Expression>();
+      const castTo = (t: TypeNode, e: Expression) => Expr.paren(Expr.cast(t, e)) as unknown as Expression;
+      for (const m of moves) {
+        const ident = () => Expr.identifier(m.local) as unknown as Expression;
+        for (const n of m.web.reads) {
+          const w = writes.get(n);
+          if (w && w.kind === 'compound') continue; // rewritten whole below
+          for (const c of occurrencesIn(n)) {
+            if (!c.cast && !c.offset && c.truth) { replace.set(c.id, () => ident()); continue; }
+            if (!c.cast && !c.offset && c.eqWith && m.cls === 'int') {
+              // `v != (char *)0x202` -> `n != 0x202`.
+              const other = unwrapParens(c.eqWith);
+              const k = literalOf(other.kind === NodeKind.CStyleCastExpr ? unwrapParens((other as CStyleCastExpr).expression) : other)!;
+              replace.set(c.id, () => ident());
+              replace.set(c.eqWith, () => k);
+              continue;
+            }
+            if (!c.cast) {
+              const sink = c.sink;
+              const sc = sink ? spellingOf(sink) : null;
+              if (sink && sc && !c.offset && classOf(sc) === m.cls) {
+                // The value goes on to a place of its own class: the local itself, converted
+                // to a pointer of another type where the place's type names one.
+                const plain = m.cls === 'int' || sameType(sc, m.spelling) || /^(?:const )?void\*$/.test(sc);
+                replace.set(c.id, () => plain ? ident() : castTo(sink, ident()));
+                continue;
+              }
+              replace.set(c.id, () => castTo(declaredType, ident()));
+              continue;
+            }
+            const ct = spellingOf(c.cast.type);
+            const cc = classOf(ct);
+            const castType = c.cast.type;
+            if (sameType(ct, m.spelling)) replace.set(c.cast, () => ident());
+            else if (cc === 'ptr' && m.cls === 'ptr') replace.set(c.cast, () => Expr.cast(castType, ident()) as unknown as Expression);
+            // An address as an integer is the same bits whatever the pointer's type.
+            else if (cc === 'int' && m.cls === 'ptr' && dtClass === 'ptr') replace.set(c.cast, () => Expr.cast(castType, ident()) as unknown as Expression);
+            else if (cc === 'int' && m.cls === 'int') replace.set(c.cast, () => Expr.cast(castType, ident()) as unknown as Expression);
+            else if (sameType(ct, dt)) replace.set(c.cast, () => Expr.cast(castType, ident()) as unknown as Expression);
+            else if (m.cls === 'int' && wordClass(ct) === 'enum') replace.set(c.cast, () => Expr.cast(castType, ident()) as unknown as Expression);
+            else if (m.cls === 'int' && NARROW_INTEGERS.has(ct)) replace.set(c.cast, () => Expr.cast(castType, ident()) as unknown as Expression);
+            else replace.set(c.cast, () => Expr.cast(castType, castTo(declaredType, ident())) as unknown as Expression);
+          }
+        }
+        for (const d of m.web.defs) {
+          const w = writes.get(d)!;
+          if (w.kind === 'out' || w.kind === 'touch') {
+            // The call is handed the new local's address instead.
+            replace.set(w.placeholder!, () => Expr.addressOf(ident()) as unknown as Expression);
+            continue;
+          }
+          if (w.kind === 'compound') {
+            const e = w.expr;
+            let op: string, operand: Expression;
+            if (e.kind === NodeKind.AssignExpr) { op = COMPOUND_OPS[(e as AssignExpr).operator]; operand = (e as AssignExpr).right; }
+            else { op = (e as UnaryExpr).operator === '++' ? '+' : '-'; operand = Expr.intLiteral(1) as unknown as Expression; }
+            const isAssign = e.kind === NodeKind.AssignExpr;
+            replace.set(e, (rebuilt) => {
+              const right = isAssign ? (rebuilt as AssignExpr).right : operand;
+              const value = Expr.binary(castTo(declaredType, ident()), op as never, Expr.paren(right) as unknown as Expression) as unknown as Expression;
+              return Expr.assign(ident(), m.cls === dtClass ? value : Expr.cast(m.type, Expr.paren(value)) as unknown as Expression) as unknown as Expression;
+            });
+            continue;
+          }
+          const a = w.expr as AssignExpr;
+          const rhs = unwrapParens(a.right);
+          let inner: Expression | null = null;
+          let innerType: string | null = null;
+          if (rhs.kind === NodeKind.CStyleCastExpr && sameType(spellingOf((rhs as CStyleCastExpr).type), dt)) {
+            inner = unwrapParens((rhs as CStyleCastExpr).expression);
+            const t = evidentType(inner, evidentOptions, localTypes);
+            innerType = t ? spellingOf(t)
+              : m.cls === 'int' && isNumber(valueClass(inner, evidentOptions, localTypes, enumConstants)) ? m.spelling : null;
+          }
+          // A store whose value its expression goes on to use keeps the declared type there.
+          const keep = (store: Expression): Expression => w.nested?.consumed ? castTo(declaredType, Expr.paren(store) as unknown as Expression) : store;
+          replace.set(a, (rebuilt) => {
+            const ra = rebuilt as AssignExpr;
+            let value: Expression;
+            // A literal, through the declared type's cast or bare: the same number, in the new
+            // type (both are one 32-bit word).
+            const lit = literalOf(inner ?? rhs);
+            if (lit) {
+              value = m.cls === 'int' ? lit : Expr.cast(m.type, lit) as unknown as Expression;
+            } else if (inner && innerType && classOf(innerType) === m.cls) {
+              // The value the store converted to the declared type: store it as it is.
+              const rc = unwrapParens(ra.right);
+              if (rc.kind !== NodeKind.CStyleCastExpr) return keep(Expr.assign(ident(), Expr.cast(m.type, Expr.paren(ra.right) as unknown as Expression) as unknown as Expression) as unknown as Expression);
+              const ri = unwrapParens((rc as CStyleCastExpr).expression);
+              value = sameType(innerType, m.spelling) ? ri : Expr.cast(m.type, Expr.paren(ri) as unknown as Expression) as unknown as Expression;
+            } else {
+              value = Expr.cast(m.type, Expr.paren(ra.right) as unknown as Expression) as unknown as Expression;
+            }
+            return keep(Expr.assign(ident(), value) as unknown as Expression);
+          });
+        }
+        report(`${v}: split: ${m.local} ${m.spelling} (${m.web.defs.length} stores, ${m.web.reads.length} read nodes)`);
+      }
+
+      const rebuild = (x: unknown): unknown => {
+        if (Array.isArray(x)) {
+          let ch = false;
+          const out = x.map(i => { const r = rebuild(i); if (r !== i) ch = true; return r; });
+          return ch ? out : x;
+        }
+        if (!x || typeof x !== 'object') return x;
+        const node = x as ASTNode;
+        let copy: Record<string, unknown> | null = null;
+        for (const [k, val] of Object.entries(node)) {
+          if (k === 'location' || k === 'type' || !val || typeof val !== 'object') continue;
+          const r = rebuild(val);
+          if (r !== val) { copy = copy ?? { ...(node as object) } as Record<string, unknown>; copy[k] = r; }
+        }
+        const out = (copy ?? node) as ASTNode;
+        const f = replace.get(node);
+        return f ? f(out) : out;
+      };
+      let rewritten = restoreAddresses(rebuild(work) as Statement[], placeholders);
+
+      // A local none of whose occurrences are left: its declaration goes.
+      if (topLocals.has(v)) {
+        const all = { kind: NodeKind.CompoundStmt, statements: rewritten } as unknown as ASTNode;
+        let left = 0;
+        for (const id of findNodesByKind(all, NodeKind.Identifier)) if ((id as Identifier).name === v) left++;
+        for (const d of findNodesByKind(all, NodeKind.VariableDecl)) if ((d as VariableDecl).name.name === v) left--;
+        if (left === 0) {
+          rewritten = rewritten.flatMap((st): Statement[] => {
+            if (st.kind !== NodeKind.DeclStmt) return [st];
+            const ds = st as DeclStmt;
+            const rest = ds.declarations.filter(d => !(d.kind === NodeKind.VariableDecl && (d as VariableDecl).name.name === v));
+            if (rest.length === ds.declarations.length) return [st];
+            return rest.length === 0 ? [] : [{ ...ds, declarations: rest } as unknown as Statement];
+          });
+          declared.delete(v);
+        }
+      }
+      const decls = moves.map(m => Stmt.declStmt([Decl.variable(m.local, m.type)]) as unknown as Statement);
+      let at = 0;
+      while (at < rewritten.length && rewritten[at].kind === NodeKind.DeclStmt) at++;
+      statements = [...rewritten.slice(0, at), ...decls, ...rewritten.slice(at)];
+      for (const m of moves) { declared.add(m.local); localTypes.set(m.local, m.type); }
+      changed = true;
+      splitThisRound = true;
     }
-    const decls = moves.map(m => Stmt.declStmt([Decl.variable(m.local, m.type)]) as unknown as Statement);
-    let at = 0;
-    while (at < rewritten.length && rewritten[at].kind === NodeKind.DeclStmt) at++;
-    statements = [...rewritten.slice(0, at), ...decls, ...rewritten.slice(at)];
-    for (const m of moves) { declared.add(m.local); localTypes.set(m.local, m.type); }
-    changed = true;
+    if (!splitThisRound) break;
   }
   return changed ? statements : null;
 }
