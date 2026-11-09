@@ -64,6 +64,11 @@ export interface HaltLinePath {
   line: number | null;
   /** Offset of the conditional branch that selects this way; null when there is none. */
   guard: number | null;
+  /**
+   * Every conditional branch that leads to this way's PUSH (jumps to it and the Jcc it falls
+   * out of, even when something else enters it too); absent in older facts.
+   */
+  guards?: number[];
 }
 
 /** A halt CALL of the function and every way into the `call GetInstructionPointer` before it. */
@@ -1158,6 +1163,9 @@ function repairHaltLines(
     const lineArg = tail.call.arguments[2];
     const lineVar = argIdent(lineArg);
     if (lineVar !== null) lineVars.push(lineVar);
+    // The instruction pointer's temporary goes with a dead tail; a name still read stays.
+    const ipVar = argIdent(tail.call.arguments[1]);
+    if (ipVar !== null) lineVars.push(ipVar);
     const fixed = tailRun.value;
     const list = tail.list;
     const k = tailRun.start;
@@ -1249,9 +1257,6 @@ function repairHaltLines(
   // takes one line per operand.
   const weight = (w: Way): number => ('parts' in w && w.parts ? w.parts.length : 1);
   const total = ways.reduce((n, w) => n + weight(w), 0);
-  if (total !== site.paths.length) {
-    return refuse(`${total} printed way${total === 1 ? '' : 's'} for ${site.paths.length} pushed lines`);
-  }
   const left = [...site.paths];
   const wrong: Way[] = [];
   for (const w of ways) {
@@ -1260,9 +1265,7 @@ function repairHaltLines(
     else wrong.push(w);
   }
   if (wrong.length === 0) return null;
-  if (wrong.reduce((n, w) => n + weight(w), 0) !== left.length) return refuse('the printed lines are not a subset of the pushed lines');
 
-  const assign = new Map<Way, number[]>();
   // The `if`s of each decompile line, outermost first. One `if` of a short-circuit line
   // that was split into nested ones (`if (A && (s, B))` -> `if (A) { s; if (B) .. }`)
   // stands for one operand of the chain: the k-th of the line, when each nests in the
@@ -1295,37 +1298,142 @@ function repairHaltLines(
     const k = all.indexOf(i);
     return k < 0 ? null : segs[k];
   };
-  const split = wrong.filter(w => weight(w) > 1);
-  const single = wrong.filter(w => weight(w) === 1);
-  if (split.length > 1) return refuse('several split ways with a wrong line');
-  if (split.length === 0 && new Set(left.map(p => p.line)).size === 1) {
-    for (const w of wrong) assign.set(w, [left[0].line as number]);
-  } else if (split.length === 0 && single.length === 1) {
-    assign.set(single[0], [left[0].line as number]);
-  } else {
-    // Each single way under an `if` whose conditional branch selects exactly one leftover
-    // line; a split way takes what is left.
-    const pool = [...left];
-    for (const w of single) {
-      const g = cbranches(w.kind === 'goto' || w.kind === 'before' ? w.guard : w.kind === 'else' ? w.stmt : null);
-      const hit = g === null ? [] : pool.filter(p => p.guard !== null && g.includes(p.guard));
-      if (hit.length !== 1) return refuse(`${wrong.length} ways with a wrong line and no branch that tells them apart`);
-      assign.set(w, [hit[0].line as number]);
-      pool.splice(pool.indexOf(hit[0]), 1);
-    }
-    if (split.length === 1) {
-      // The operands take the rest in operand order: each operand's test and jump come
-      // before the next one's, so their branches ascend.
-      if (pool.length !== weight(split[0])) return refuse('the split way does not take what is left');
-      if (pool.some(p => p.guard === null) || new Set(pool.map(p => p.guard)).size !== pool.length) {
-        return refuse('the operands of a split way have no branches to order them by');
+  // By count: the ways the decompile prints are exactly as many as the instructions have,
+  // the lines already printed are pushed lines, and the rest pair up one to one.
+  const pairByCount = (assign: Map<Way, number[]>): string | null => {
+    if (total !== site.paths.length) return `${total} printed way${total === 1 ? '' : 's'} for ${site.paths.length} pushed lines`;
+    if (wrong.reduce((n, w) => n + weight(w), 0) !== left.length) return 'the printed lines are not a subset of the pushed lines';
+    const split = wrong.filter(w => weight(w) > 1);
+    const single = wrong.filter(w => weight(w) === 1);
+    if (split.length > 1) return ('several split ways with a wrong line');
+    if (split.length === 0 && new Set(left.map(p => p.line)).size === 1) {
+      for (const w of wrong) assign.set(w, [left[0].line as number]);
+    } else if (split.length === 0 && single.length === 1) {
+      assign.set(single[0], [left[0].line as number]);
+    } else {
+      // Each single way under an `if` whose conditional branch selects exactly one leftover
+      // line; a split way takes what is left.
+      const pool = [...left];
+      for (const w of single) {
+        const g = cbranches(w.kind === 'goto' || w.kind === 'before' ? w.guard : w.kind === 'else' ? w.stmt : null);
+        const hit = g === null ? [] : pool.filter(p => p.guard !== null && g.includes(p.guard));
+        if (hit.length !== 1) return (`${wrong.length} ways with a wrong line and no branch that tells them apart`);
+        assign.set(w, [hit[0].line as number]);
+        pool.splice(pool.indexOf(hit[0]), 1);
       }
-      assign.set(split[0], [...pool].sort((a, b) => (a.guard as number) - (b.guard as number)).map(p => p.line as number));
-    } else if (pool.length !== 0) {
-      return refuse('the branches do not pair the ways with the leftover lines');
+      if (split.length === 1) {
+        // The operands take the rest in operand order: each operand's test and jump come
+        // before the next one's, so their branches ascend.
+        if (pool.length !== weight(split[0])) return ('the split way does not take what is left');
+        if (pool.some(p => p.guard === null) || new Set(pool.map(p => p.guard)).size !== pool.length) {
+          return ('the operands of a split way have no branches to order them by');
+        }
+        assign.set(split[0], [...pool].sort((a, b) => (a.guard as number) - (b.guard as number)).map(p => p.line as number));
+      } else if (pool.length !== 0) {
+        return ('the branches do not pair the ways with the leftover lines');
+      }
     }
-  }
+    return null;
+  };
 
+  // By branches: each way, or each operand of a split way, sits under an `if` whose
+  // conditional branch the instructions show leading to exactly one pushed line. This needs
+  // no count: one PUSH can be reached from several printed ways (a Jcc jumps to it and
+  // another falls into it), and a way whose own definition prints a pushed line keeps it.
+  const pairByBranches = (assign: Map<Way, number[]>): string | null => {
+    const leaves = (e: Expression): Expression[] => {
+      let cur = e;
+      while (cur.kind === NodeKind.ParenExpr) cur = (cur as ParenExpr).expression;
+      if (cur.kind === NodeKind.BinaryExpr && ((cur as BinaryExpr).operator === '&&' || (cur as BinaryExpr).operator === '||')) {
+        return [...leaves((cur as BinaryExpr).left), ...leaves((cur as BinaryExpr).right)];
+      }
+      return [e];
+    };
+    // Per leaf operand of the `if`s printed from one decompile line (nested outermost
+    // first), the branches it feeds; a line with one `if` and one test takes the if's.
+    const leafBranches = (i: IfStmt): Map<Expression, number[]> | null => {
+      if (!i.location || i.location.start.line <= 0) return null;
+      const line = i.location.start.line;
+      const all = ifsOnLine.get(line) ?? [];
+      for (let k = 1; k < all.length; k++) if (!nestsIn(all[k], all[k - 1])) return null;
+      const ls = all.flatMap(x => leaves(x.condition));
+      const segs = operandBranches?.get(line);
+      if (!segs) {
+        const b = ifs?.get(line);
+        return all.length === 1 && ls.length === 1 && b !== undefined ? new Map([[ls[0], [b]]]) : null;
+      }
+      if (ls.length !== segs.length) return null;
+      return new Map(ls.map((l, k) => [l, segs[k]]));
+    };
+    const branchesOf = (i: IfStmt | null, e?: Expression): number[] | null => {
+      if (!i) return null;
+      const m = leafBranches(i);
+      if (!m) return null;
+      const out: number[] = [];
+      for (const l of leaves(e ?? i.condition)) {
+        const b = m.get(l);
+        if (!b) return null;
+        out.push(...b);
+      }
+      return out;
+    };
+    const lineOf = (g: number[] | null): number | null => {
+      if (!g || g.length === 0) return null;
+      const lines = new Set<number>();
+      for (const p of site.paths) {
+        const gs = p.guards ?? (p.guard === null ? [] : [p.guard]);
+        if (p.line !== null && gs.some(x => g.includes(x))) lines.add(p.line);
+      }
+      return lines.size === 1 ? [...lines][0] : null;
+    };
+    // The `if` a printed copy of the halt sits directly under: nothing but the halt's own
+    // temporaries before it in the branch.
+    const ifOfCopy = (s: Statement): IfStmt | null => {
+      let p = parents.get(s) ?? null;
+      if (p && p.kind === NodeKind.CompoundStmt) {
+        const list = (p as CompoundStmt).statements;
+        const at = list.indexOf(s);
+        for (let j = 0; j < at; j++) {
+          const d = asDef(list[j]);
+          if (!d || (mayHaveSideEffects(d.rhs) && !isIpCall(d.rhs))) return null;
+        }
+        p = parents.get(p) ?? null;
+      }
+      return p && p.kind === NodeKind.IfStmt ? p as IfStmt : null;
+    };
+    // A printed line is the way's own only where its own definition (or its own copy of
+    // the halt) prints it; a way that inherits the tail's line is paired like a wrong one.
+    const own = (w: Way): boolean => w.kind === 'copy' || (w.kind === 'goto' && w.def !== null) || (w.kind === 'after' && w.def);
+    const pushed = new Set(site.paths.map(p => p.line));
+    for (const w of ways) {
+      if (own(w) && w.value !== null && pushed.has(w.value) && !('parts' in w && w.parts)) {
+        assign.set(w, [w.value as number]);
+        continue;
+      }
+      const guard = w.kind === 'goto' || w.kind === 'before' ? w.guard
+        : w.kind === 'else' ? w.stmt
+        : w.kind === 'copy' ? ifOfCopy(w.stmt) : null;
+      const parts = 'parts' in w ? w.parts : undefined;
+      if (parts) {
+        const lines = parts.map(e => lineOf(branchesOf(guard, e)));
+        if (lines.some(l => l === null)) return 'an operand of a split way has no branch to a pushed line';
+        assign.set(w, lines as number[]);
+      } else {
+        const l = lineOf(branchesOf(guard));
+        if (l === null) return 'a way with a wrong line has no branch to one pushed line';
+        assign.set(w, [l]);
+      }
+    }
+    return null;
+  };
+
+  let assign = new Map<Way, number[]>();
+  const byCount = pairByCount(assign);
+  if (byCount !== null) {
+    assign = new Map();
+    const byBranch = pairByBranches(assign);
+    if (byBranch !== null) return refuse(`${byCount}; by branches: ${byBranch}`);
+  }
   // Rewrite.
   const model = prints[0];
   // A definition `v = rhs;` or `T v = rhs;` with another right-hand side, labels kept.

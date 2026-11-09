@@ -24,6 +24,22 @@ describe('halt-lines extraction', () => {
     assert.strictEqual(out.size, 4);
   });
 
+  it('parses every branch into a PUSH beside the one that selects it', () => {
+    // SUNITNPC_RollTradeListItemCode: 0x384 is jumped to from +0x30 and fallen into from +0xd6.
+    // ARENA_ApplyScoreModifier: 0x7d is also a switch-table target, so no single guard.
+    const out = parseHaltLines([
+      '00576c90\tc5:ba:383/25/25,384/30/30+d6,389/19/19\t',
+      '0053f630\t19:e:73/5/5+a,7d/-/59,6a0/-\t',
+    ].join('\n'));
+    assert.deepStrictEqual(out.get('00576c90')?.halts[0].paths, [
+      { line: 0x383, guard: 0x25, guards: [0x25] }, { line: 0x384, guard: 0x30, guards: [0x30, 0xd6] }, { line: 0x389, guard: 0x19, guards: [0x19] },
+    ]);
+    assert.deepStrictEqual(out.get('0053f630')?.halts[0].paths, [
+      { line: 0x73, guard: 0x5, guards: [0x5, 0xa] }, { line: 0x7d, guard: null, guards: [0x59] }, { line: 0x6a0, guard: null },
+    ]);
+    assert.ok(haltLinesScript(['00576c90']).includes('java.util.TreeSet<Long> gs'));
+  });
+
   it('batches functions that print a halt or a code-sized constant store', () => {
     const batches = haltLinesBatches([
       { address: '0x00401000', decompiled: 'void f(void) { ERROR_UnrecoverableInternalError_Halt("",a,b); }' },

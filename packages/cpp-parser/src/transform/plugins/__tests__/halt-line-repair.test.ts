@@ -194,6 +194,95 @@ LAB_00598e57:
     assert.ok(blind.events[0]?.refused, JSON.stringify(blind.events));
   });
 
+  // A register line (unaff_EDI) assigned on the one way that arrives at the depth the
+  // decompiler read; the other ways print it unassigned. One PUSH (0x384) is reached twice:
+  // by a Jcc that jumps to it and by the Jcc it falls out of, so the decompile prints four
+  // ways for three PUSHes and only the branches can pair them.
+  const registerLine = `int f(int *pNpc, int *out) {
+  int32_t unaff_EDI;
+  char bHasStore;
+  if (pNpc) {
+    if (pNpc != (int *)-32 && (bHasStore = *(char *)pNpc, bHasStore != 0)) {
+      if (pNpc[1]) {
+        return 1;
+      }
+      if (bHasStore) {
+        *out = 0;
+        return 0;
+      }
+    }
+  } else {
+    unaff_EDI = 0x389;
+  }
+  ${HALT}("", ${IP}(), unaff_EDI);
+  exit(-1);
+}`;
+  const registerIfs = new Map([[4, 0x19], [5, 0x30], [6, 0x45], [9, 0xd6]]);
+  const registerOperands = new Map([[5, [[0x25], [0x30]]]]);
+
+  it('pairs a register line set on one way by the branches, a PUSH reached twice included (SUNITNPC_RollTradeListItemCode)', () => {
+    const paths = [{ line: 0x383, guard: 0x25, guards: [0x25] }, { line: 0x384, guard: 0x30, guards: [0x30, 0xd6] }, { line: 0x389, guard: 0x19, guards: [0x19] }];
+    const { out, events } = run(registerLine, paths, registerIfs, registerOperands);
+    assert.deepStrictEqual(events.map(e => ({ ...e, lines: [...e.lines].sort((a, b) => a - b) })), [{ entries: 4, lines: [0x383, 0x384, 0x384, 0x389] }]);
+    assert.ok(/if \(pNpc == \(int\*\)-32\) \{\s*ERROR_UnrecoverableInternalError_Halt\("", GetInstructionPointer\(\), 0x383\);/.test(out), out);
+    assert.strictEqual(out.split(halt('0x384')).length - 1, 2, out);
+    assert.ok(/\} else \{\s*ERROR_UnrecoverableInternalError_Halt\("", GetInstructionPointer\(\), 0x389\);/.test(out), out);
+    assert.ok(!out.includes('unaff_EDI'), out);
+    // Each way halts where its own condition fails, in the order the tests run.
+    assert.ok(out.indexOf(halt('0x383')) < out.indexOf(halt('0x384')), out);
+    assert.ok(out.indexOf('pNpc[1]') < out.lastIndexOf(halt('0x384')), out);
+  });
+
+  it('leaves a register line alone without the second branch into a PUSH', () => {
+    // Older facts know only the one Jcc per PUSH: the fourth way has no line to take.
+    const paths = [{ line: 0x383, guard: 0x25 }, { line: 0x384, guard: 0x30 }, { line: 0x389, guard: 0x19 }];
+    const { out, events } = run(registerLine, paths, registerIfs, registerOperands);
+    assert.ok(events[0]?.refused?.includes('by branches'), JSON.stringify(events));
+    assert.ok(out.includes(halt('unaff_EDI')), out);
+  });
+
+  it('pairs a parameter line over nested ifs of one line and a halt copy (ARENA_ApplyScoreModifier)', () => {
+    // The 0x73 and 0x94 ways push at the depth the decompiler read; the other four push
+    // two slots deeper and print the caller's dwParam. Line 6 is one decompile line that
+    // was split into two ifs: its three operands' branches are 0x35, 0x46, 0x59.
+    const code = `void f(int *u, int *a, int *c, int k, int dw) {
+  int t;
+  if (!u || *u != 0) {
+    dw = 0x73;
+  } else {
+    if (a && c) { t = g(c); if (k < 7) {
+        if (k == 2) {
+          if (!h(k)) {
+            goto LAB_tail;
+          }
+        }
+        *a = t;
+        if (*c) {
+          return;
+        }
+        dw = 0x94;
+      }
+    }
+  }
+LAB_tail:
+  ${HALT}("", ${IP}(), dw);
+  exit(-1);
+}`;
+    const paths = [
+      { line: 0x73, guard: 0x5, guards: [0x5, 0xa] }, { line: 0x77, guard: 0x35, guards: [0x35] },
+      { line: 0x6c, guard: 0x46, guards: [0x46] }, { line: 0x7d, guard: null, guards: [0x59] },
+      { line: 0x8c, guard: 0x87, guards: [0x87] }, { line: 0x94, guard: 0xc0, guards: [0xc0] },
+    ];
+    const { out, events } = run(code, paths, new Map([[3, 0xa], [6, 0x59], [8, 0x87], [13, 0xc0]]), new Map([[3, [[0x5], [0xa]]], [6, [[0x35], [0x46], [0x59]]]]));
+    assert.deepStrictEqual(events.map(e => ({ ...e, lines: [...e.lines].sort((a, b) => a - b) })), [{ entries: 6, lines: [0x6c, 0x73, 0x77, 0x7d, 0x8c, 0x94] }]);
+    for (const l of ['0x73', '0x77', '0x6c', '0x7d', '0x8c', '0x94']) assert.ok(out.includes(halt(l)), `${l}\n${out}`);
+    assert.ok(!out.includes(halt('dw')), out);
+    assert.ok(!out.includes('goto'), out);
+    assert.ok(/if \(!h\(k\)\) \{\s*ERROR_UnrecoverableInternalError_Halt\("", GetInstructionPointer\(\), 0x8c\);/.test(out), out);
+    // a before c before k: the operand halts keep the order of the tests.
+    assert.ok(out.indexOf(halt('0x77')) < out.indexOf(halt('0x6c')) && out.indexOf(halt('0x6c')) < out.indexOf(halt('0x7d')), out);
+  });
+
   it('changes nothing when every way already prints a pushed line', () => {
     const code = `void f(int a) {
   int32_t nLine;
