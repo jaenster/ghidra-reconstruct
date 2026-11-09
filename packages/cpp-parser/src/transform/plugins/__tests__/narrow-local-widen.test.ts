@@ -139,4 +139,34 @@ describe('narrow-local-widen', () => {
       assert.ok(out.includes('uint8_t bVar1;'), out);
     });
   });
+
+  // Q33_Callback02_NpcDeactivate 00588f80: `MOV EAX,dword ptr [EAX+4] .. CMP AX,0x201`.
+  describe('a narrow local the original loads whole and compares narrow', () => {
+    const Q33 = `void f(D2QuestArgStrc *pQuestArgs) {
+  short nTargetClassId = !pQuestArgs->pTarget ? -1 : (short)pQuestArgs->pTarget->nClassId;
+  if (nTargetClassId != 0x201) {
+    return;
+  }
+  g();
+}`;
+    const sites: Site[] = [{ text: '!=', fp: ['v:nTargetClassId', 'c:201'], size: 2 }];
+    const tables = { structFields: { D2UnitStrc: { nClassId: 'int' }, D2QuestArgStrc: { pTarget: 'D2UnitStrc*' } } };
+
+    it('declares it int, drops the cast on the load and narrows it at the compare', () => {
+      const out = run(Q33, sites, [dec({ ord: 0, ...sites[0], width: 2 })], tables).replace(/\s+/g, ' ');
+      assert.ok(out.includes('int32_t nTargetClassId = !pQuestArgs->pTarget ? -1 : pQuestArgs->pTarget->nClassId;'), out);
+      assert.ok(/if \(\(short( int)?\)nTargetClassId != 0x201\)/.test(out), out);
+    });
+
+    it('leaves it where it is read other than in a narrow compare, or holds a wider value', () => {
+      const read = run(Q33.replace('g();', 'g(nTargetClassId);'), sites, [dec({ ord: 0, ...sites[0], width: 2 })], tables);
+      assert.match(read, /short (int )?nTargetClassId/);
+      const wide = run(Q33, sites, [dec({ ord: 0, ...sites[0], width: 4 })], tables);
+      assert.ok(!/\(short( int)?\)nTargetClassId/.test(wide), wide);
+      const big = run(Q33.replace('? -1 :', '? 0x12345 :'), sites, [dec({ ord: 0, ...sites[0], width: 2 })], tables);
+      assert.match(big, /short (int )?nTargetClassId/);
+      const narrowField = run(Q33, sites, [dec({ ord: 0, ...sites[0], width: 2 })], { structFields: { D2UnitStrc: { nClassId: 'short' }, D2QuestArgStrc: { pTarget: 'D2UnitStrc*' } } });
+      assert.match(narrowField, /short (int )?nTargetClassId/);
+    });
+  });
 });

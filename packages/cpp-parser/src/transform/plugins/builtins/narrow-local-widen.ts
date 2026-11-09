@@ -217,13 +217,13 @@ export function createNarrowLocalWidenTransformer(options?: PluginOptions): Tran
       }
 
       const widen = [...evidence].filter(n => !vetoed.has(n));
-      if (widen.length === 0) return undefined;
-      const targets = new Set(widen.map(n => candidates.get(n)!.decl));
+      const whole = loadedWhole(body, candidates, new Set(widen), shapeOf, isConstant);
+      if (widen.length === 0 && whole.size === 0) return undefined;
+      const targets = new Set([...widen, ...whole.keys()]);
       const inner = createTransformer({
         visitVariableDecl(v: VariableDecl): ASTNode | undefined {
           // The name is declared once in this function (a candidate's condition).
-          const c = candidates.get(v.name.name);
-          if (!c || !targets.has(c.decl)) return undefined;
+          if (!targets.has(v.name.name)) return undefined;
           const int32: TypedefType = {
             kind: NodeKind.TypedefType,
             name: { ...Expr.identifier('int32_t'), location: v.type.location, leadingTrivia: [], trailingTrivia: [] },
@@ -232,9 +232,116 @@ export function createNarrowLocalWidenTransformer(options?: PluginOptions): Tran
           return updateNode(v, { type: int32 } as Partial<VariableDecl>);
         },
       });
-      return updateNode(node, { body: inner(body) } as Partial<FunctionDecl>);
+      // The casts and compares are found by identity in the body as it was read.
+      const narrowed = whole.size > 0 ? narrowAtCompares(body, whole) as typeof body : body;
+      return updateNode(node, { body: inner(narrowed) } as Partial<FunctionDecl>);
     },
   });
+}
+
+/** One local `loadedWhole` widens: its narrow type, the casts to drop, the compares to narrow. */
+interface LoadedWhole { type: TypeNode; casts: Set<ASTNode>; compared: Set<ASTNode> }
+
+/**
+ * The narrow locals the original loaded whole and compared narrow (the five quest callbacks
+ * `*_Callback02_NpcDeactivate`, e.g. Q33 00588f80): `short n = !p ? -1 : (short)p->nClassId;
+ * if (n != 0x201)` for `MOV EAX,[EAX+4] .. CMP AX,0x201`. The int field is loaded as a
+ * dword, so the source's local was an int and the compare narrowed it; declared `short`, VC8
+ * loads the word (`MOVZX EAX,word ptr`). Such a local is declared int, the narrowing casts on
+ * its values go, and each compare narrows it again: `(short)n != 0x201`. The same values
+ * compare: `(short)n` is what the narrow local held.
+ *
+ * Taken only where every value stored to it is a constant in its range or a cast to its
+ * width of a four-byte integer field (through a conditional's arms), at least one is such a cast,
+ * and every other mention is one side of a comparison with a constant that the instructions
+ * make at its own width.
+ */
+function loadedWhole(
+  body: ASTNode,
+  candidates: ReadonlyMap<string, { decl: VariableDecl; type: IntType }>,
+  taken: ReadonlySet<string>,
+  shapeOf: ExprShape,
+  isConstant: (x: Expression) => boolean,
+): Map<string, LoadedWhole> {
+  const out = new Map<string, LoadedWhole>();
+  for (const [name, c] of candidates) {
+    if (taken.has(name) || c.decl.specifiers.includes('static')) continue;
+    const casts = new Set<ASTNode>();
+    let ok = true;
+    const value = (e: Expression): void => {
+      const u = unwrapParens(e);
+      const k = constantValue(u);
+      if (k !== null) {
+        const [lo, hi] = range(c.type);
+        if (k < lo || k > hi) ok = false;
+        return;
+      }
+      if (u.kind === NodeKind.ConditionalExpr) {
+        value((u as ConditionalExpr).thenExpr);
+        value((u as ConditionalExpr).elseExpr);
+        return;
+      }
+      if (u.kind === NodeKind.CStyleCastExpr) {
+        const to = shapeOf(u);
+        const operand = unwrapParens((u as CStyleCastExpr).expression);
+        const from = shapeOf(operand);
+        const t = to && to.stars === 0 ? INTEGERS[to.base] : undefined;
+        const f = from && from.stars === 0 ? INTEGERS[from.base] : undefined;
+        // A field: the load is the dword the instructions read whole.
+        if (t && f && t.width === c.type.width && f.width === 4 && operand.kind === NodeKind.MemberExpr) { casts.add(u); return; }
+      }
+      ok = false;
+    };
+    if (c.decl.initializer) {
+      if (c.decl.initializer.kind === NodeKind.InitListExpr) continue;
+      value(c.decl.initializer as Expression);
+    }
+    const compared = new Set<ASTNode>();
+    const allowed = new Set<ASTNode>([c.decl.name]);
+    for (const a of findNodesByKind(body, NodeKind.AssignExpr) as AssignExpr[]) {
+      if (a.left.kind !== NodeKind.Identifier || (a.left as Identifier).name !== name) continue;
+      if (a.operator !== '=') { ok = false; break; }
+      allowed.add(a.left);
+      value(a.right);
+    }
+    for (const be of findNodesByKind(body, NodeKind.BinaryExpr) as BinaryExpr[]) {
+      if (!COMPARISON.has(be.operator) || be.ghidraInfo?.compareWidth !== c.type.width) continue;
+      for (const [side, other] of [[be.left, be.right], [be.right, be.left]] as const) {
+        const u = unwrapParens(side);
+        if (u.kind === NodeKind.Identifier && (u as Identifier).name === name && isConstant(other)) {
+          allowed.add(u);
+          compared.add(u);
+        }
+      }
+    }
+    if (!ok || casts.size === 0 || compared.size === 0) continue;
+    for (const id of findNodesByKind(body, NodeKind.Identifier) as Identifier[]) {
+      if (id.name === name && !allowed.has(id)) { ok = false; break; }
+    }
+    if (ok) out.set(name, { type: c.decl.type, casts, compared });
+  }
+  return out;
+}
+
+/** Drops the casts `loadedWhole` found and narrows the local at each of its compares. */
+function narrowAtCompares(body: ASTNode, whole: ReadonlyMap<string, LoadedWhole>): ASTNode {
+  // The transform copies every node it passes; a node keeps its location object, so the
+  // nodes are found again by that (a node without one is not touched).
+  const casts = new Set<unknown>();
+  const compared = new Map<unknown, TypeNode>();
+  for (const w of whole.values()) {
+    w.casts.forEach(x => { if (x.location) casts.add(x.location); });
+    w.compared.forEach(x => { if (x.location) compared.set(x.location, w.type); });
+  }
+  return createTransformer({
+    visitNode(n: ASTNode): ASTNode | undefined {
+      if (!n.location) return undefined;
+      if (n.kind === NodeKind.CStyleCastExpr && casts.has(n.location)) return (n as CStyleCastExpr).expression;
+      const t = n.kind === NodeKind.Identifier ? compared.get(n.location) : undefined;
+      if (t) return Expr.cast(t, n as Expression);
+      return undefined;
+    },
+  })(body);
 }
 
 export const narrowLocalWidenPlugin: TransformPlugin = createPlugin(
