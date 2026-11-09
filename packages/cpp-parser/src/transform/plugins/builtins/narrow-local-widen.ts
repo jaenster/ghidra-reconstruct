@@ -169,6 +169,7 @@ export function createNarrowLocalWidenTransformer(options?: PluginOptions): Tran
       });
       const evidence = new Set<string>();
       const vetoed = new Set<string>();
+      const comparedNarrow = new Set<string>();
       const isConstant = (x: Expression) => {
         if (constantValue(x) !== null) return true;
         const n = nameOf(x);
@@ -193,7 +194,7 @@ export function createNarrowLocalWidenTransformer(options?: PluginOptions): Tran
         for (const [side, other] of [[be.left, be.right], [be.right, be.left]] as const) {
           const n = nameOf(side);
           if (!n || !candidates.has(n)) continue;
-          if (width < 4) vetoed.add(n);
+          if (width < 4) { vetoed.add(n); comparedNarrow.add(n); }
           else if (isConstant(other) || isNarrow(other)) evidence.add(n);
         }
       }
@@ -218,8 +219,9 @@ export function createNarrowLocalWidenTransformer(options?: PluginOptions): Tran
 
       const widen = [...evidence].filter(n => !vetoed.has(n));
       const whole = loadedWhole(body, candidates, new Set(widen), shapeOf, isConstant);
-      if (widen.length === 0 && whole.size === 0) return undefined;
-      const targets = new Set([...widen, ...whole.keys()]);
+      const computed = computedWhole(body, candidates, new Set([...widen, ...whole.keys()]), comparedNarrow, shapeOf, params);
+      if (widen.length === 0 && whole.size === 0 && computed.size === 0) return undefined;
+      const targets = new Set([...widen, ...whole.keys(), ...computed.keys()]);
       const inner = createTransformer({
         visitVariableDecl(v: VariableDecl): ASTNode | undefined {
           // The name is declared once in this function (a candidate's condition).
@@ -233,7 +235,8 @@ export function createNarrowLocalWidenTransformer(options?: PluginOptions): Tran
         },
       });
       // The casts and compares are found by identity in the body as it was read.
-      const narrowed = whole.size > 0 ? narrowAtCompares(body, whole) as typeof body : body;
+      let narrowed = whole.size > 0 ? narrowAtCompares(body, whole) as typeof body : body;
+      if (computed.size > 0) narrowed = dropValueCasts(narrowed, computed) as typeof body;
       return updateNode(node, { body: inner(narrowed) } as Partial<FunctionDecl>);
     },
   });
@@ -321,6 +324,175 @@ function loadedWhole(
     if (ok) out.set(name, { type: c.decl.type, casts, compared });
   }
   return out;
+}
+
+/**
+ * The narrow locals the original computed in a full register (#159):
+ *
+ *   uint8_t byBitPos = (uint8_t)nBitIndex & 0x1f;        // NET_SID_CLIENT_SetCDKeyBit 005225a0
+ *   int8_t nNibbleShift = ((uint8_t)nNibbleIndex & 7) * '\x04';   // 00522500
+ *   if (!(nShiftBits - 1U <= 0x1e)) return ..; uint8_t byShift = (uint8_t)nShiftBits;  // 0057e350
+ *
+ * for `MOV ECX,EDX; AND ECX,0x1f`: declared a byte, VC8 computes the value in a byte
+ * register (`MOV AL,DL; AND AL,0x1f`) and widens it at each use. Declared int with the
+ * narrowing cast gone the value is the same: a mask with a constant in range keeps the low
+ * bits the cast kept, a multiple of it by a constant stays in range, and a value a guard
+ * before it holds in range is unchanged by the cast. A char literal operand is the integer it
+ * promotes to.
+ *
+ * Taken only where every value stored to it is one of those shapes (its proven range within
+ * its type), it is never modified in place, its address and size are never taken, and no
+ * comparison of it is tied to a compare at its own width. Every read promotes the narrow
+ * value to int, so no read changes.
+ */
+function computedWhole(
+  body: CompoundStmtLike,
+  candidates: ReadonlyMap<string, { decl: VariableDecl; type: IntType }>,
+  taken: ReadonlySet<string>,
+  vetoed: ReadonlySet<string>,
+  shapeOf: ExprShape,
+  params: ReadonlySet<string>,
+): Map<string, Set<unknown>> {
+  const out = new Map<string, Set<unknown>>();
+  const sized = new Set<string>();
+  for (const z of findNodesByKind(body, NodeKind.SizeofExpr)) {
+    for (const id of findNodesByKind(z, NodeKind.Identifier) as Identifier[]) sized.add(id.name);
+  }
+  // Names stored anywhere other than their declaration: a guard on one proves nothing.
+  const stored = new Set<string>();
+  for (const a of findNodesByKind(body, NodeKind.AssignExpr) as AssignExpr[]) {
+    const l = unwrapParens(a.left);
+    if (l.kind === NodeKind.Identifier) stored.add((l as Identifier).name);
+  }
+  for (const u of [...findNodesByKind(body, NodeKind.UnaryExpr), ...findNodesByKind(body, NodeKind.PostfixExpr)] as UnaryExpr[]) {
+    const x = unwrapParens(u.operand);
+    if (x.kind === NodeKind.Identifier && ['++', '--', '&'].includes(u.operator)) stored.add((x as Identifier).name);
+  }
+  const wide = (e: Expression): boolean => {
+    const sh = shapeOf(unwrapParens(e));
+    const t = sh && sh.stars === 0 ? INTEGERS[sh.base] : undefined;
+    return !!t && t.width === 4;
+  };
+  for (const [name, c] of candidates) {
+    if (taken.has(name) || vetoed.has(name) || sized.has(name) || stored.has(name) || params.has(name)) continue;
+    const init = c.decl.initializer;
+    if (!init || init.kind === NodeKind.InitListExpr) continue;
+    const drop = new Set<unknown>();
+    const [lo, hi] = range(c.type);
+    // The value's range, with the casts to drop recorded; null when it is not one of the shapes.
+    const valueRange = (e: Expression): [bigint, bigint] | null => {
+      const u = unwrapParens(e);
+      const k = constantValue(u);
+      if (k !== null) return [k, k];
+      if (u.kind === NodeKind.BinaryExpr && (u as BinaryExpr).operator === '&') {
+        const b = u as BinaryExpr;
+        const m = constantValue(b.right);
+        if (m === null || m < 0n || m > hi) return null;
+        const x = unwrapParens(b.left);
+        // `(narrow)E & K`: the cast keeps bits the mask drops anyway.
+        if (x.kind === NodeKind.CStyleCastExpr && wide((x as CStyleCastExpr).expression)) {
+          const to = shapeOf(x);
+          const t = to && to.stars === 0 ? INTEGERS[to.base] : undefined;
+          if (!t || t.width !== c.type.width || !x.location) return null;
+          drop.add(x.location);
+          return [0n, m];
+        }
+        return wide(x) ? [0n, m] : null;
+      }
+      if (u.kind === NodeKind.BinaryExpr && (u as BinaryExpr).operator === '*') {
+        const b = u as BinaryExpr;
+        const m = constantValue(b.right);
+        const r = m === null ? null : valueRange(b.left);
+        if (!r || m === null || m < 0n) return null;
+        return [r[0] * m, r[1] * m];
+      }
+      if (u.kind === NodeKind.CStyleCastExpr) {
+        const x = unwrapParens((u as CStyleCastExpr).expression);
+        const to = shapeOf(u);
+        const t = to && to.stars === 0 ? INTEGERS[to.base] : undefined;
+        if (!t || t.width !== c.type.width || x.kind !== NodeKind.Identifier || !u.location) return null;
+        const g = guardedRange(body, c.decl, (x as Identifier).name, stored);
+        if (!g) return null;
+        drop.add(u.location);
+        return g;
+      }
+      return null;
+    };
+    const r = valueRange(init as Expression);
+    if (!r || drop.size === 0 || r[0] < lo || r[1] > hi) continue;
+    out.set(name, drop);
+  }
+  return out;
+}
+
+type CompoundStmtLike = ASTNode;
+
+/**
+ * The range of `name` at the declaration `decl` that an early-return guard right before it
+ * in the same block proves: `if (!(name - A <= B)) return ..;` or `if (name - A > B) return ..;`
+ * with an unsigned compare, so `name` lies in A..A+B. Null without one.
+ */
+function guardedRange(body: ASTNode, decl: VariableDecl, name: string, stored: ReadonlySet<string>): [bigint, bigint] | null {
+  if (stored.has(name)) return null;
+  for (const b of findNodesByKind(body, NodeKind.CompoundStmt) as unknown as { statements: ASTNode[] }[]) {
+    const k = b.statements.findIndex(s => s.kind === NodeKind.DeclStmt
+      && (s as DeclStmt).declarations.some(d => d.location !== undefined && d.location === decl.location));
+    if (k < 0) continue;
+    for (let j = k - 1; j >= 0; j--) {
+      const s = b.statements[j];
+      if (s.kind !== NodeKind.IfStmt) continue;
+      const i = s as unknown as { condition: Expression; thenBranch: ASTNode; elseBranch?: ASTNode | null };
+      if (i.elseBranch) continue;
+      const then = i.thenBranch.kind === NodeKind.CompoundStmt ? (i.thenBranch as unknown as { statements: ASTNode[] }).statements : [i.thenBranch];
+      if (then.length !== 1 || then[0].kind !== NodeKind.ReturnStmt) continue;
+      let cond = unwrapParens(i.condition);
+      let rel: string | null = null;
+      if (cond.kind === NodeKind.UnaryExpr && (cond as UnaryExpr).operator === '!') {
+        cond = unwrapParens((cond as UnaryExpr).operand);
+        rel = cond.kind === NodeKind.BinaryExpr && (cond as BinaryExpr).operator === '<=' ? '<=' : null;
+      } else if (cond.kind === NodeKind.BinaryExpr && (cond as BinaryExpr).operator === '>') rel = '<=';
+      if (!rel) continue;
+      const be = cond as BinaryExpr;
+      const bound = unwrapParens(be.right);
+      const diff = unwrapParens(be.left);
+      if (bound.kind !== NodeKind.IntegerLiteral || diff.kind !== NodeKind.BinaryExpr || (diff as BinaryExpr).operator !== '-') continue;
+      const d = diff as BinaryExpr;
+      const v = unwrapParens(d.left);
+      const a = unwrapParens(d.right);
+      if (v.kind !== NodeKind.Identifier || (v as Identifier).name !== name || a.kind !== NodeKind.IntegerLiteral) continue;
+      // The compare is unsigned: the subtraction's literal carries the U, or the bound does.
+      const unsignedCompare = /u/i.test((a as IntegerLiteralExpr).suffix ?? '') || /u/i.test((bound as IntegerLiteralExpr).suffix ?? '');
+      if (!unsignedCompare) continue;
+      const A = (a as IntegerLiteralExpr).value, B = (bound as IntegerLiteralExpr).value;
+      if (A < 0n || B < 0n || A + B > 0x7fffffffn) continue;
+      return [A, A + B];
+    }
+  }
+  return null;
+}
+
+/** Drops the casts `computedWhole` found and spells a char literal operand of the value as an integer. */
+function dropValueCasts(body: ASTNode, computed: ReadonlyMap<string, Set<unknown>>): ASTNode {
+  const casts = new Set<unknown>();
+  for (const d of computed.values()) d.forEach(x => casts.add(x));
+  const names = new Set(computed.keys());
+  const charsToInt = createTransformer({
+    visitNode(n: ASTNode): ASTNode | undefined {
+      if (n.kind !== NodeKind.CharLiteral) return undefined;
+      const value = BigInt((n as CharLiteralExpr).value);
+      return { kind: NodeKind.IntegerLiteral, value, raw: value.toString(10), base: 10, suffix: '',
+        location: n.location, leadingTrivia: n.leadingTrivia ?? [], trailingTrivia: n.trailingTrivia ?? [] } as unknown as ASTNode;
+    },
+  });
+  return createTransformer({
+    visitNode(n: ASTNode): ASTNode | undefined {
+      if (n.kind === NodeKind.CStyleCastExpr && n.location && casts.has(n.location)) return (n as CStyleCastExpr).expression;
+      if (n.kind === NodeKind.VariableDecl && names.has((n as VariableDecl).name.name) && (n as VariableDecl).initializer) {
+        return updateNode(n as VariableDecl, { initializer: charsToInt((n as VariableDecl).initializer as ASTNode) } as Partial<VariableDecl>);
+      }
+      return undefined;
+    },
+  })(body);
 }
 
 /** Drops the casts `loadedWhole` found and narrows the local at each of its compares. */

@@ -169,4 +169,29 @@ describe('narrow-local-widen', () => {
       assert.match(narrowField, /short (int )?nTargetClassId/);
     });
   });
+
+  // NET_SID_CLIENT_SetCDKeyBit 005225a0 and its neighbours: `MOV ECX,EDX; AND ECX,0x1f`.
+  describe('a narrow local the original computes in a full register', () => {
+    const go = (code: string) => run(code, [], [], {}).replace(/\s+/g, ' ');
+    it('declares a masked byte int and drops the cast under the mask', () => {
+      const out = go('void f(uint32_t* p, uint32_t nBitIndex) { uint8_t byBitPos = (uint8_t)nBitIndex & 0x1f; p[0] = 1 << byBitPos; }');
+      assert.ok(out.includes('int32_t byBitPos = nBitIndex & 0x1f;'), out);
+    });
+    it('takes a multiple of a mask and spells its char operand as an integer', () => {
+      const out = go("uint32_t f(uint32_t* p, uint32_t n) { int8_t nShift = ((uint8_t)n & 7) * '\\x04'; return p[0] >> nShift; }");
+      assert.ok(out.includes('int32_t nShift = (n & 7) * 4;'), out);
+    });
+    it('takes a value an early-return guard holds in range (DAMAGE_SafeShiftMultiply 0057e350)', () => {
+      const out = go('int f(int a, int n) { if (!(n - 1U <= 0x1e)) { return a; } uint8_t byShift = (uint8_t)n; return a >> byShift; }');
+      assert.ok(out.includes('int32_t byShift = n;'), out);
+    });
+    it('leaves a value out of range, unguarded, stored again, or compared narrow', () => {
+      assert.ok(go('void f(uint32_t n) { int8_t b = (uint8_t)n & 0xff; g(b); }').includes('int8_t b'));
+      assert.ok(go('int f(int a, int n) { uint8_t s = (uint8_t)n; return a >> s; }').includes('uint8_t s'));
+      assert.ok(go('int f(int a, int n) { if (!(n - 1 <= 0x1e)) { return a; } uint8_t s = (uint8_t)n; return a >> s; }').includes('uint8_t s'));
+      assert.ok(go('int f(int a, int n) { if (!(n - 1U <= 0x1e)) { return a; } n = g(); uint8_t s = (uint8_t)n; return a >> s; }').includes('uint8_t s'));
+      assert.ok(go('void f(uint32_t n) { uint8_t b = (uint8_t)n & 0x1f; b = 3; g(b); }').includes('uint8_t b'));
+      assert.ok(go('void f(uint32_t n) { uint8_t b = (uint8_t)n & 0x1f; g(&b); }').includes('uint8_t b'));
+    });
+  });
 });
