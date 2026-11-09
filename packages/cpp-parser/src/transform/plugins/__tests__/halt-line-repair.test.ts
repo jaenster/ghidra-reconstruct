@@ -283,6 +283,54 @@ LAB_tail:
     assert.ok(out.indexOf(halt('0x77')) < out.indexOf(halt('0x6c')) && out.indexOf(halt('0x6c')) < out.indexOf(halt('0x7d')), out);
   });
 
+  // SERVER_ARENA_KillHandler 0053f720 is the shape this guards: a way that only inherits the
+  // tail's printed line may arrive at another depth, so its line is the one its branch leads to.
+  it('keeps a printed line only where the way\'s own definition prints it', () => {
+    const code = `void f(int a, int b, int c) {
+  if (c) {
+    goto LAB_t;
+  }
+  if (a) {
+    if (b) {
+      return;
+    }
+  }
+LAB_t:
+  ${HALT}("", ${IP}(), 0x77);
+  exit(-1);
+}`;
+    // The jump (if at line 2, +0x08) pushes 0x94, `if (b)` (line 6, +0x20) 0x6c, `if (a)`
+    // (line 5, +0x10) 0x77: the jump does not push the line the tail prints.
+    const paths = [{ line: 0x94, guard: 0x08, guards: [0x08] }, { line: 0x6c, guard: 0x20, guards: [0x20] }, { line: 0x77, guard: 0x10, guards: [0x10] }];
+    const { out, events } = run(code, paths, new Map([[2, 0x08], [5, 0x10], [6, 0x20]]));
+    assert.ok(!events[0]?.refused, JSON.stringify(events));
+    assert.ok(/if \(c\) \{\s*ERROR_UnrecoverableInternalError_Halt\("", GetInstructionPointer\(\), 0x94\);/.test(out), out);
+    assert.ok(/return;\s*\} else \{\s*ERROR_UnrecoverableInternalError_Halt\("", GetInstructionPointer\(\), 0x6c\);/.test(out), out);
+    assert.ok(out.includes(halt('0x77')), out);
+    // A copy that prints its own pushed line keeps it, even where another way prints it too.
+    const copies = `void f(int a, int b, int c) {
+  int32_t nLine;
+  if (a) {
+    nLine = 0x94;
+    ${HALT}("", ${IP}(), nLine);
+    exit(-1);
+  }
+  if (b) {
+    nLine = 0x94;
+    ${HALT}("", ${IP}(), nLine);
+    exit(-1);
+  }
+  if (c) {
+    return;
+  }
+  ${HALT}("", ${IP}(), nLine);
+  exit(-1);
+}`;
+    const r = run(copies, [{ line: 0x94, guard: 0x10, guards: [0x10, 0x18] }, { line: 0x77, guard: 0x30, guards: [0x30] }], new Map([[3, 0x10], [8, 0x18], [13, 0x30]]));
+    assert.strictEqual(r.out.split(halt('0x94')).length - 1, 2, r.out);
+    assert.ok(r.out.includes(halt('0x77')), r.out);
+  });
+
   it('changes nothing when every way already prints a pushed line', () => {
     const code = `void f(int a) {
   int32_t nLine;

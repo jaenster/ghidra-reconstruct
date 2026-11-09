@@ -1257,10 +1257,14 @@ function repairHaltLines(
   // takes one line per operand.
   const weight = (w: Way): number => ('parts' in w && w.parts ? w.parts.length : 1);
   const total = ways.reduce((n, w) => n + weight(w), 0);
+  // A printed line is the way's own only where its own definition (or its own copy of the
+  // halt) prints it; a way that inherits the tail's line may arrive at another depth, so it
+  // is paired like a wrong one.
+  const own = (w: Way): boolean => w.kind === 'copy' || (w.kind === 'goto' && w.def !== null) || (w.kind === 'after' && w.def);
   const left = [...site.paths];
   const wrong: Way[] = [];
   for (const w of ways) {
-    const at = w.value === null ? -1 : left.findIndex(p => p.line === w.value);
+    const at = w.value === null || !own(w) ? -1 : left.findIndex(p => p.line === w.value);
     if (at >= 0 && weight(w) === 1) left.splice(at, 1);
     else wrong.push(w);
   }
@@ -1401,9 +1405,6 @@ function repairHaltLines(
       }
       return p && p.kind === NodeKind.IfStmt ? p as IfStmt : null;
     };
-    // A printed line is the way's own only where its own definition (or its own copy of
-    // the halt) prints it; a way that inherits the tail's line is paired like a wrong one.
-    const own = (w: Way): boolean => w.kind === 'copy' || (w.kind === 'goto' && w.def !== null) || (w.kind === 'after' && w.def);
     const pushed = new Set(site.paths.map(p => p.line));
     for (const w of ways) {
       if (own(w) && w.value !== null && pushed.has(w.value) && !('parts' in w && w.parts)) {
