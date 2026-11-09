@@ -1066,6 +1066,46 @@ function createGlobalAddressLiteralTransformer(
    */
   const byteCursors = new Map<string, Pointee>();
 
+  /**
+   * Per cursor name, how many elements one step advances it: where every write to it is
+   * `p = A` or `p = A + c` with A a declared array and no cast (so `p` points at A's
+   * elements), or an advance by a literal (`p += n`, `p = p + n`, `p++`). The largest
+   * advance is kept; null where any write is something else. Unit-wide, so a name that two
+   * functions use differently says nothing.
+   */
+  const elementSteps = new Map<string, number | null>();
+
+  function noteStep(name: string, n: number | null): void {
+    const cur = elementSteps.get(name);
+    if (cur === null) return;
+    elementSteps.set(name, n === null ? null : Math.max(cur ?? 0, n));
+  }
+
+  /** The integer a bare literal holds, or null. */
+  function smallLiteral(e: Expression): number | null {
+    if (e.kind !== NodeKind.IntegerLiteral) return null;
+    const v = (e as IntegerLiteralExpr).value;
+    return v >= 0n && v < 0x10000n ? Number(v) : null;
+  }
+
+  /** The array a write `name = rhs` points `name` into, or the advance it makes: see `elementSteps`. */
+  function stepOfWrite(name: string, rhs: Expression): number | null {
+    const isArray = (e: Expression): boolean => {
+      const r = e.kind === NodeKind.Identifier || e.kind === NodeKind.QualifiedId ? rootOf(e) : null;
+      return !!r && r.kind === 'global' && r.candidate.elementSize > 0;
+    };
+    if (isArray(rhs)) return 0;
+    if (rhs.kind !== NodeKind.BinaryExpr || (rhs as BinaryExpr).operator !== '+') return null;
+    const { left, right } = rhs as BinaryExpr;
+    for (const [a, b] of [[left, right], [right, left]] as const) {
+      const n = smallLiteral(b);
+      if (n === null) continue;
+      if (isArray(a)) return 0;
+      if (a.kind === NodeKind.Identifier && (a as Identifier).name === name) return n;
+    }
+    return null;
+  }
+
   function noteDeclaredType(name: string, type: TypeNode | null | undefined): void {
     const cls = bytePointerClass(type);
     if (!byteCursors.has(name)) {
@@ -1079,7 +1119,28 @@ function createGlobalAddressLiteralTransformer(
     origins.clear();
     resolvedOrigins.clear();
     byteCursors.clear();
+    elementSteps.clear();
     for (const node of traverseAST(unit)) {
+      if (node.kind === NodeKind.PostfixExpr || node.kind === NodeKind.UnaryExpr) {
+        const op = (node as UnaryExpr).operator;
+        const operand = (node as UnaryExpr).operand;
+        if ((op === '++' || op === '--') && operand.kind === NodeKind.Identifier) {
+          noteStep((operand as Identifier).name, op === '++' ? 1 : null);
+        }
+      }
+      if (node.kind === NodeKind.VariableDecl) {
+        const decl = node as VariableDecl;
+        if (decl.initializer) {
+          noteStep(decl.name.name, decl.initializer.kind === NodeKind.InitListExpr ? null : stepOfWrite(decl.name.name, decl.initializer as Expression));
+        }
+      }
+      if (node.kind === NodeKind.AssignExpr && (node as AssignExpr).left.kind === NodeKind.Identifier) {
+        const assign = node as AssignExpr;
+        const name = (assign.left as Identifier).name;
+        if (assign.operator === '=') noteStep(name, stepOfWrite(name, assign.right));
+        else if (assign.operator === '+=') noteStep(name, smallLiteral(assign.right));
+        else noteStep(name, null);
+      }
       if (node.kind === NodeKind.ParameterDecl) {
         const param = node as ParameterDecl;
         if (param.name) noteDeclaredType(param.name.name, param.type);
@@ -1155,7 +1216,13 @@ function createGlobalAddressLiteralTransformer(
     // that far from A is not this shape.
     const slack = walked.elementSize > 0 ? walked.elementSize : EDGE_SLACK;
     const nearBase = k > -slack && k < slack;
-    const pastEnd = walked.size > 0 && k >= walked.size && k < walked.size + slack;
+    // A cursor that advances several elements per step stops anywhere within one step
+    // past the end: `p = A + 2; do { .. p += 3; } while (p < bound)` over A[15] compares
+    // against A + 17, two elements past the end.
+    const cursor = rootOf(other);
+    const steps = cursor && cursor.kind === 'variable' ? elementSteps.get(cursor.name) ?? null : null;
+    const stride = walked.elementSize > 0 && steps !== null && steps > 1 ? steps * walked.elementSize : 0;
+    const pastEnd = walked.size > 0 && k >= walked.size && k < walked.size + Math.max(slack, stride);
     if (!nearBase && !pastEnd) return null;
 
     return edgeOfExtent(walked, k);
