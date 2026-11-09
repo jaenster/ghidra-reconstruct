@@ -394,6 +394,7 @@ ${STRING_OPS_JAVA}
             StringBuilder ways = new StringBuilder();
             for (ghidra.program.model.listing.Instruction p : pushers) {
               String line = "-", guard = "-";
+              StringBuilder guards = new StringBuilder();
               if (p != null && p.getMnemonicString().equals("PUSH") && p.getNumOperands() == 1
                   && p.getScalar(0) != null && p.getRegister(0) == null) {
                 line = Long.toHexString(p.getScalar(0).getUnsignedValue());
@@ -411,8 +412,19 @@ ${STRING_OPS_JAVA}
                       && b.getFallThrough().equals(p.getAddress())) c = b;
                 }
                 if (c != null) guard = Long.toHexString(c.getAddress().getOffset() - base);
+                // Every conditional branch that leads to this PUSH: the jumps to it and the Jcc it
+                // falls out of, whether or not other ways enter it too.
+                java.util.TreeSet<Long> gs = new java.util.TreeSet<>();
+                for (ghidra.program.model.symbol.Reference rf : rm.getReferencesTo(p.getAddress())) {
+                  if (rf.getReferenceType().isConditional() && fn.getBody().contains(rf.getFromAddress())) gs.add(rf.getFromAddress().getOffset() - base);
+                }
+                ghidra.program.model.listing.Instruction fb = L.getInstructionBefore(p.getAddress());
+                if (fb != null && fb.getFlowType().isConditional() && fb.getFallThrough() != null
+                    && fb.getFallThrough().equals(p.getAddress()) && fn.getBody().contains(fb.getAddress())) gs.add(fb.getAddress().getOffset() - base);
+                for (Long x : gs) guards.append(guards.length() > 0 ? "+" : "").append(Long.toHexString(x));
               }
               ways.append(ways.length() > 0 ? "," : "").append(line).append('/').append(guard);
+              if (guards.length() > 0) ways.append('/').append(guards);
             }
             hrow.append(hrow.length() > 0 ? ";" : "").append(Long.toHexString(hc.getAddress().getOffset() - base))
               .append(':').append(Long.toHexString(g.getAddress().getOffset() - base)).append(':').append(ways);

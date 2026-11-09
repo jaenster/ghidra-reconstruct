@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { parseHaltLines, haltLinesBatches, haltLinesScript } from '../extract/halt-lines.js';
+import { functionFactsScript } from '../extract/function-facts.js';
 
 describe('halt-lines extraction', () => {
   it('parses the ways into each halt and the probe return addresses', () => {
@@ -38,6 +39,14 @@ describe('halt-lines extraction', () => {
       { line: 0x73, guard: 0x5, guards: [0x5, 0xa] }, { line: 0x7d, guard: null, guards: [0x59] }, { line: 0x6a0, guard: null },
     ]);
     assert.ok(haltLinesScript(['00576c90']).includes('java.util.TreeSet<Long> gs'));
+  });
+
+  it('the extraction\'s facts script records each way\'s branch set, as the halt-lines script does', () => {
+    // The extraction reads halt lines through the combined facts script, not haltLinesScript;
+    // a way's branch set must reach the snapshot from there too.
+    const script = functionFactsScript(['00576c90']);
+    assert.ok(script.includes('java.util.TreeSet<Long> gs'));
+    assert.ok(script.includes("if (guards.length() > 0) ways.append('/').append(guards);"));
   });
 
   it('batches functions that print a halt or a code-sized constant store', () => {
