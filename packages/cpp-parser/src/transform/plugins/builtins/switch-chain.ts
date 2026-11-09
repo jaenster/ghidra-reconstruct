@@ -339,6 +339,9 @@ const INTEGRAL = new Set([
   'BYTE', 'WORD', 'DWORD', 'QWORD', 'UINT', 'INT', 'LONG', 'ULONG', 'SHORT', 'USHORT', 'CHAR', 'UCHAR',
   'BOOL', 'BOOLEAN', 'WPARAM', 'LPARAM', 'size_t', 'ptrdiff_t', 'intptr_t', 'uintptr_t',
   'undefined1', 'undefined2', 'undefined4', 'undefined8', '__int8', '__int16', '__int32', '__int64',
+  // The parser prints `short` as `short int` (and so on): the spellings `emit` gives a declaration.
+  'short int', 'unsigned short int', 'signed short', 'signed short int', 'signed', 'signed int',
+  'long int', 'unsigned long int', 'signed long', 'signed long int', 'long long int', 'unsigned long long int',
 ]);
 
 /** A declared type spelling is an integer or an enum (through typedefs); unknown is not. */

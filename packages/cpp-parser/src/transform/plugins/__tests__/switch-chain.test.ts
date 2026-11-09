@@ -459,6 +459,29 @@ describe('switchChainPlugin', () => {
     assert.ok(!run(lines('int a;', 'q->m')).out.includes('switch'));
   });
 
+  it('takes a short local in every spelling the parser prints (AITHINK_Fn1_ClawViper 005f1b60)', () => {
+    // `if (nStateType) { if (nStateType != 2) <blue> else <red> }` over `SUB EAX,0; SUB EAX,2`.
+    const lines = (decl: string) => [
+      'void f() {',
+      decl,
+      '<SUB EAX 0 0 0x10> if (nStateType != 0) {',
+      '<SUB EAX 2 2 0x15> if (nStateType != 2) {',
+      '[0x30] A();',
+      '}',
+      'else {',
+      '[0x20] B();',
+      '}',
+      '}',
+      '}',
+    ];
+    for (const decl of ['short nStateType;', 'short int nStateType;', 'unsigned short nStateType;', 'long nStateType;', 'signed int nStateType;']) {
+      const { out, sites } = run(lines(decl));
+      assert.ok(out.includes('switch (nStateType)'), `${decl}: ${out}`);
+      assert.ok(!sites.includes('left:type'), `${decl}: ${sites}`);
+    }
+    assert.ok(run(lines('float nStateType;')).sites.includes('left:type'));
+  });
+
   it("types a field by its aggregate's own declaration, and a namespaced global by its name", () => {
     const lines = (decl: string, v: string) => [
       'void f() {',
