@@ -245,6 +245,27 @@ describe('vc8-form shapes: seq and fold extensions', () => {
     assert.ok(sites[0].applied, sites[0].why);
     assert.strictEqual(out, 'void f(int c) { h(c, (g(c) - 1) * 2); }');
   });
+  // SummonOrSpawnMode 0063ea70: one temporary reused in sibling blocks, each storing first.
+  it('fold takes a temporary reused across sibling blocks that each store before reading', () => {
+    const { out, sites } = run([
+      'void f(U* u, int* px, int* py) {', '  int n;',
+      '  if (px) {', '    n = gx(u);', '    *px = n + 1;', '  }',
+      '  if (py) {', '    n = gy(u);', '    *py = n + 2;', '  }', '}'], 'fold(n)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.strictEqual(out, 'void f(U* u, int* px, int* py) { if (px) { *px = gx(u) + 1; } if (py) { *py = gy(u) + 2; } }');
+  });
+  it('fold refuses a temporary a later sibling may read before storing', () => {
+    // Only one arm stores: the other path reads the value of the first block.
+    refused([
+      'void f(U* u, int* px, int* py) {', '  int n;',
+      '  if (px) {', '    n = gx(u);', '    *px = n + 1;', '  }',
+      '  if (py) {', '    n = gy(u);', '    *py = n;', '  }', '  h(n);', '}'], 'fold(n)');
+    // A jump between the block and the store: its paths are not followed.
+    refused([
+      'void f(U* u, int* px, int c) {', '  int n;',
+      '  while (c) {', '    if (px) {', '      n = gx(u);', '      *px = n + 1;', '    }',
+      '    if (c > 2) break;', '    n = 0;', '    h(n);', '  }', '  h(n);', '}'], 'fold(n)');
+  });
   it('fold refuses a compound store whose operand calls', () => {
     refused(['void f(int c) {', '  int v = g(c);', '  v -= k(c);', '  h(c, v);', '}'], 'fold(v)');
   });

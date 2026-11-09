@@ -549,7 +549,7 @@ function doFold(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'fold' }>): void {
       }
       // Nothing after the range may read this value: the range ends at a store or at the
       // block's end, and the block must not be followed by a read in an outer block.
-      if (end === b.statements.length && blockReadsAfter(fn, b, v, i)) refuse(`${v} is read after its block`);
+      if (end === b.statements.length && blockReadsAfter(fn, b, v, i, true)) refuse(`${v} is read after its block`);
       for (const n of uses.slice(0, lastUse + 1)) {
         for (const { node, slot } of [...walk(n)]) {
           if (!slot) continue;
@@ -591,6 +591,38 @@ function parentsOf(fn: FunctionDecl): Map<ASTNode, ASTNode> {
   return m;
 }
 
+const LIFE_JUMPS = new Set<string>([NodeKind.GotoStmt, NodeKind.LabelStmt, NodeKind.BreakStmt, NodeKind.ContinueStmt, NodeKind.CaseStmt, NodeKind.DefaultStmt]);
+
+/**
+ * What a statement does to v first on its way through: `store` when every path through it
+ * stores v before reading it, `read` when a path may read it first (or the statement jumps,
+ * so its paths are not followed), `none` when some path leaves it without naming v.
+ */
+function readFirst(s: Statement, v: string): 'read' | 'store' | 'none' {
+  for (const { node } of walk(s)) if (LIFE_JUMPS.has(node.kind)) return 'read';
+  const st = storeOf(s);
+  if (st && st.operator === '=' && isId(unparen(st.left), v)) return mentions(st.right, v) ? 'read' : 'store';
+  const d = declOf(s);
+  if (d && d.name.name === v) return d.initializer && mentions(d.initializer, v) ? 'read' : 'store';
+  if (s.kind === NodeKind.CompoundStmt) {
+    for (const x of (s as CompoundStmt).statements) {
+      const r = readFirst(x, v);
+      if (r !== 'none') return r;
+    }
+    return 'none';
+  }
+  if (s.kind === NodeKind.IfStmt) {
+    const i = s as IfStmt;
+    if (i.init || mentions(i.condition, v)) return 'read';
+    const a = readFirst(i.thenBranch, v);
+    const b = i.elseBranch ? readFirst(i.elseBranch, v) : 'none';
+    if (a === 'read' || b === 'read') return 'read';
+    // One arm stores and the other does not: the other's path goes on to what follows.
+    return a === 'store' && b === 'store' ? 'store' : 'none';
+  }
+  return mentions(s, v) ? 'read' : 'none';
+}
+
 /**
  * Whether a statement after block b (in an enclosing block) names v. With `from`, the index
  * in b of the store whose value ends with b, a loop around b counts only where the next
@@ -598,7 +630,7 @@ function parentsOf(fn: FunctionDecl): Map<ASTNode, ASTNode> {
  * before the path to the store (in b, those before `from`); without it, any mention in the
  * loop counts.
  */
-function blockReadsAfter(fn: FunctionDecl, b: CompoundStmt, v: string, from?: number): boolean {
+function blockReadsAfter(fn: FunctionDecl, b: CompoundStmt, v: string, from?: number, storeEnds = false): boolean {
   const parents = parentsOf(fn);
   let cur: ASTNode = b;
   // The statements before the path, from b outwards to the innermost loop.
@@ -609,7 +641,22 @@ function blockReadsAfter(fn: FunctionDecl, b: CompoundStmt, v: string, from?: nu
     if (p.kind === NodeKind.CompoundStmt) {
       const st = (p as CompoundStmt).statements;
       const k = st.indexOf(cur as Statement);
-      if (st.slice(k + 1).some(s => mentions(s, v))) return true;
+      // A jump between this block and a store may skip the store: after one, any mention
+      // reads, as before.
+      let jumped = !storeEnds;
+      for (const s of st.slice(k + 1)) {
+        if (!mentions(s, v)) {
+          if (!jumped) for (const { node } of walk(s)) if (LIFE_JUMPS.has(node.kind)) { jumped = true; break; }
+          continue;
+        }
+        if (jumped) return true;
+        const r = readFirst(s, v);
+        if (r === 'read') return true;
+        // Stored on every path before any read: the value of this life ends here, here
+        // and in every enclosing block and loop.
+        if (r === 'store') return false;
+        for (const { node } of walk(s)) if (LIFE_JUMPS.has(node.kind)) { jumped = true; break; }
+      }
       before.push(...st.slice(0, k));
     }
     if (p.kind === NodeKind.WhileStmt || p.kind === NodeKind.ForStmt || p.kind === NodeKind.DoWhileStmt) {
