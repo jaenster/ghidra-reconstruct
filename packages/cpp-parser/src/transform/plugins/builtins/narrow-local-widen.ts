@@ -16,7 +16,9 @@
  * The value never changes. A local is widened only when
  *  - every comparison of it that is tied to its instructions compares four bytes - one that
  *    compares at its own width shows the source kept it narrow there - and at least one of
- *    them compares it with a constant;
+ *    them compares it with a constant or with another one- or two-byte value (VC8 compares
+ *    two narrow values at their width: CLIENT_UpdateUnitLightRadius 00460930 compares a byte
+ *    local with a byte field as `CMP EAX,ECX`);
  *  - every value assigned to it, its initialiser included, already fits its type: a field,
  *    a call or a cast of its type or a narrower one, a literal in its range, a mask with a
  *    constant in its range - so the wider local holds what the narrow one held;
@@ -173,6 +175,17 @@ export function createNarrowLocalWidenTransformer(options?: PluginOptions): Tran
         return !!n && enumConstants.has(n) && !candidates.has(n);
       };
 
+      // An operand one or two bytes wide below its casts: VC8 compares two narrow values at
+      // their own width (`CMP AL,DL`), so a four-byte compare had a wider local on this side.
+      const isNarrow = (x: Expression): boolean => {
+        let u = unwrapParens(x);
+        while (u.kind === NodeKind.CStyleCastExpr) u = unwrapParens((u as CStyleCastExpr).expression);
+        const n = u.kind === NodeKind.Identifier ? (u as Identifier).name : null;
+        if (n && candidates.has(n)) return false;
+        const s = shapeOf(u);
+        const t = s && s.stars === 0 ? INTEGERS[s.base] : undefined;
+        return !!t && t.width <= 2;
+      };
       for (const be of findNodesByKind(body, NodeKind.BinaryExpr) as BinaryExpr[]) {
         if (!COMPARISON.has(be.operator)) continue;
         const width = be.ghidraInfo?.compareWidth;
@@ -181,7 +194,7 @@ export function createNarrowLocalWidenTransformer(options?: PluginOptions): Tran
           const n = nameOf(side);
           if (!n || !candidates.has(n)) continue;
           if (width < 4) vetoed.add(n);
-          else if (isConstant(other)) evidence.add(n);
+          else if (isConstant(other) || isNarrow(other)) evidence.add(n);
         }
       }
       for (const a of findNodesByKind(body, NodeKind.AssignExpr) as AssignExpr[]) {

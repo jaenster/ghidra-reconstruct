@@ -92,6 +92,12 @@ export interface CompareFormDecision {
    * zero-extended from 8 or 16 bits, so it is non-negative and the two compares agree.
    */
   zextSum?: boolean;
+  /**
+   * The same for two non-constant operands: written only where each is a value zero-extended
+   * from 8 or 16 bits, and then without the `(uint32_t)` casts that would make C++ compare
+   * unsigned; promoted, both are the same non-negative ints.
+   */
+  zextPair?: boolean;
   /** The flags are read by a SETcc: the compare's 0/1 is a value, not a branch. */
   set?: boolean;
   /** An equality kept as printed whose operand the instructions loaded into a register before the CMP. */
@@ -412,7 +418,14 @@ export function createCompareFormTransformer(options?: PluginOptions): Transform
             return z ?? undefined;
           }
           let out: BinaryExpr | null = null;
-          if (d.keep) out = byteCompareWithOne(be, d);
+          if (d.zextPair) {
+            // Unproven, the compare is left as printed and carries no facts.
+            const pair = narrowZextPair(be, shapeOf);
+            if (!pair) return undefined;
+            be = pair;
+            out = pair;
+          }
+          if (d.keep) out = byteCompareWithOne(be, d) ?? out;
           else if (d.op) out = rewrite(be, d, sizeOf(d.ord), shapeOf, enumStep, zeroEnum);
           if (out) rewritten++;
           const facts = withMachineFacts(out ?? be, d);
@@ -591,6 +604,35 @@ function narrowZextSum(e: Expression, shapeOf: ExprShape): Expression | null {
   const a = strip((s as BinaryExpr).left), b = strip((s as BinaryExpr).right);
   if (!a || !b) return null;
   return Expr.binary(a, '+', b);
+}
+
+/** The unsigned 8- and 16-bit spellings `narrowZextSum` and `narrowZextPair` accept. */
+const NARROW_UNSIGNED = /^(?:uint8_t|uint16_t|BYTE|WORD|byte|word|uchar|ushort|USHORT|UCHAR|unsigned char|unsigned short|unsigned short int)$/;
+const UNSIGNED_WORD = /^(?:uint32_t|uint|unsigned|unsigned int|DWORD|dword|UINT|ulong|unsigned long|ULONG)$/;
+
+/**
+ * `(uint)a < (uint)b` with a and b of 8- or 16-bit unsigned types, as `a < b`: promoted, each
+ * is an int holding the same non-negative value, so the signed compare is the unsigned one.
+ * An operand may also be such a value already, uncast. Null unless both operands are.
+ */
+function narrowZextPair(be: BinaryExpr, shapeOf: ExprShape): BinaryExpr | null {
+  const strip = (x: Expression): Expression | null => {
+    const c = unwrapParens(x);
+    const narrow = (y: Expression): boolean => {
+      const shape = shapeOf(unwrapParens(y));
+      return !!shape && shape.stars === 0 && NARROW_UNSIGNED.test(shape.base);
+    };
+    if (c.kind === NodeKind.CStyleCastExpr) {
+      const t = shapeOf(c);
+      const inner = (c as CStyleCastExpr).expression;
+      return !!t && t.stars === 0 && UNSIGNED_WORD.test(t.base) && narrow(inner) ? inner : null;
+    }
+    return narrow(c) ? x : null;
+  };
+  const left = strip(be.left), right = strip(be.right);
+  if (!left || !right) return null;
+  if (left === be.left && right === be.right) return be;
+  return updateNode(be, { left, right } as Partial<BinaryExpr>);
 }
 
 /**

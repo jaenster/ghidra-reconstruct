@@ -109,4 +109,34 @@ describe('narrow-local-widen', () => {
       'int bad = 0; for (int v = -32768; v < 32768; v++) { D2SkillsTxt t; t.srvdofunc = (short)v; if (wide(&t) != narrow(&t)) bad++; } printf("%d\\n", bad);');
     assert.strictEqual(res.trim(), '0');
   });
+
+  // CLIENT_UpdateUnitLightRadius 00460930: `MOVZX EAX,AL; CMP EAX,ECX; JGE` against a byte field.
+  describe('a byte local the original compares signed at four bytes with a byte field', () => {
+    const LIGHT = `void f(D2MonStats2Txt *pMonStats2, D2UnitStrc *pUnit) {
+  uint8_t bVar1;
+  uint32_t nLightRadius;
+  bVar1 = GetRadius(pUnit);
+  nLightRadius = (uint32_t)bVar1;
+  if ((uint32_t)bVar1 < (uint32_t)pMonStats2->byLight) {
+    nLightRadius = (uint32_t)pMonStats2->byLight;
+  }
+  g(nLightRadius);
+}`;
+    const sites: Site[] = [{ text: '<', fp: ['e', 'e'] }];
+    const tables = { structFields: { D2MonStats2Txt: { byLight: 'uint8_t' } }, functionReturnTypes: { GetRadius: 'uint8_t' } };
+    // compare-form reads the same type tables to prove the operands narrow.
+    const both = (code: string, t: Record<string, unknown>) => emit(createNarrowLocalWidenTransformer(t)(
+      createCompareFormTransformer({ sites, decisions: [dec({ ord: 0, ...sites[0], signed: true, zextPair: true })], ...t } as CompareFormOptions)(parse(code))) as AnyNode);
+    it('drops the unsigned casts and declares the local int', () => {
+      const out = both(LIGHT, tables).replace(/\s+/g, ' ');
+      assert.ok(out.includes('if (bVar1 < pMonStats2->byLight)'), out);
+      assert.ok(out.includes('int32_t bVar1;'), out);
+    });
+    it('leaves the compare as printed when an operand is not a zero-extended narrow value', () => {
+      const wide = { structFields: { D2MonStats2Txt: { byLight: 'uint32_t' } }, functionReturnTypes: { GetRadius: 'uint8_t' } };
+      const out = both(LIGHT, wide).replace(/\s+/g, ' ');
+      assert.ok(out.includes('(uint32_t)bVar1 < (uint32_t)pMonStats2->byLight'), out);
+      assert.ok(out.includes('uint8_t bVar1;'), out);
+    });
+  });
 });
