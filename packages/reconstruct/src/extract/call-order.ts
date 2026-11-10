@@ -331,7 +331,7 @@ export async function extractCallOrder(connection: GhidraConnection, functions: 
   for (const batch of callOrderBatches(functions)) {
     const result = await connection.sendCommand<{ success?: boolean; output?: string; error?: string }>(
       'execute_script',
-      { language: 'java', code: callOrderScript(batch), scriptTimeout: 600, _commandTimeout: 660000 }
+      { language: 'java', readOnly: true, code: callOrderScript(batch), scriptTimeout: 600, _commandTimeout: 660000 }
     );
     if (result.success === false || typeof result.output !== 'string') throw new Error(result.error ?? 'no output');
     for (const [fn, facts] of parseCallOrder(result.output)) {

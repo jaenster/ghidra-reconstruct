@@ -297,7 +297,7 @@ export async function attachOperandRefs(
   try {
     const result = await connection.sendCommand<{ success?: boolean; output?: string; error?: string }>(
       'execute_script',
-      { language: 'java', code: operandRefScript(entries ?? []), scriptTimeout: 600, _commandTimeout: 660000 }
+      { language: 'java', readOnly: true, code: operandRefScript(entries ?? []), scriptTimeout: 600, _commandTimeout: 660000 }
     );
     if (result.success === false || typeof result.output !== 'string') {
       console.warn(`  Operand references unavailable: ${result.error ?? 'no output'}`);
