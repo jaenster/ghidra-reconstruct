@@ -259,6 +259,7 @@ export const Type = {
  * The C spelling of decoded string text: quote, backslash and control characters
  * escaped, anything else outside printable ASCII as a three-digit octal escape (an octal
  * escape stops after three digits, so a following digit cannot extend it, unlike \x).
+ * Escape `?` too, so adjacent question marks cannot form a C++03 trigraph.
  */
 export function escapeCString(text: string): string {
   let out = '';
@@ -266,6 +267,7 @@ export function escapeCString(text: string): string {
     const c = ch.codePointAt(0)!;
     if (ch === '"') out += '\\"';
     else if (ch === '\\') out += '\\\\';
+    else if (ch === '?') out += '\\?';
     else if (ch === '\n') out += '\\n';
     else if (ch === '\t') out += '\\t';
     else if (ch === '\r') out += '\\r';
