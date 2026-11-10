@@ -83,6 +83,15 @@ describe('postStridedCountedLoopPlugin', () => {
     unchanged(unsigned);
   });
 
+  it('uses the exact counter declaration when an earlier nested local has the same name', () => {
+    const prefix = 'void f(int bound, bool flag) { if (flag) { int i = 42; Sink(i); }';
+    // With bound < 0, the original returns but `0u < bound` enters the loop.
+    const unsigned = `${prefix} if (bound <= 0) return; unsigned int i = 0; do { Tick(); i++; } while (i < bound); }`;
+    unchanged(unsigned);
+    const signed = unsigned.replace('int i = 42', 'unsigned int i = 42').replace('unsigned int i = 0', 'int i = 0');
+    assert.ok(tx(signed).includes('for (int i = 0; i < bound; i++) {'));
+  });
+
   it('leaves volatile bound storage', () => {
     unchanged('void f(volatile int bound) { if (bound <= 0) return; int i = 0; do { Tick(); i++; } while (i < bound); }');
     unchanged(source, { ...TYPES, structFields: { D2RareAffixTableStrc: { nSize: 'volatile int' } } });
