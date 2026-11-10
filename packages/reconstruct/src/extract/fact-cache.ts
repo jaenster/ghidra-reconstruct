@@ -35,6 +35,7 @@ import type { RegisterStoreFacts } from './register-stores.js';
 import type { RotateSiteFacts } from './rotate-sites.js';
 import type { StoreBaseFacts } from './store-bases.js';
 import type { CallDivideFacts } from './call-divides.js';
+import type { ShadowedGlobalFacts } from './shadowed-globals.js';
 import type { LabelFlow } from '../types.js';
 import type { TypeStamp, FunctionStamps } from './function-stamps.js';
 import { javaStringHash } from './compare-sites.js';
@@ -55,6 +56,7 @@ export interface CachedFacts {
   rotateSites?: RotateSiteFacts;
   storeBases?: StoreBaseFacts;
   callDivides?: CallDivideFacts;
+  shadowedGlobals?: ShadowedGlobalFacts;
   labelFlow?: Record<string, LabelFlow>;
 }
 

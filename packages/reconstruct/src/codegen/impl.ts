@@ -29,6 +29,7 @@ import { accessOrderLines } from './access-order-spec.js';
 import { rotateSiteLines } from './rotate-sites-spec.js';
 import { storeBaseLines } from './store-bases-spec.js';
 import { callDivideLines } from './call-divides-spec.js';
+import { shadowedGlobalLines } from './shadowed-globals-spec.js';
 import type { BranchLayoutFacts } from '../extract/branch-layout.js';
 import type { CallOrderFacts } from '../extract/call-order.js';
 import type { AccessOrderFacts } from '../extract/access-order.js';
@@ -1798,6 +1799,8 @@ export function generateFunctionImplementation(
           storeBases: override?.action === 'patch' ? undefined : func.storeBases,
           // A text patch anchors on the divisions as Ghidra printed them.
           callDivides: override?.action === 'patch' ? undefined : func.callDivides,
+          // A text patch anchors on the names as Ghidra printed them.
+          shadowedGlobals: override?.action === 'patch' ? undefined : func.shadowedGlobals,
           // A text patch anchors on the comparisons as Ghidra printed them.
           compareSites: override?.action === 'patch' ? undefined : func.compareSites,
           sehLowering: sehLoweringDecision(func),
@@ -2883,6 +2886,8 @@ function transformDecompiledCode(
     storeBases?: import('../extract/store-bases.js').StoreBaseFacts;
     /** The calls the original divides right after they return, per line (extract/call-divides.ts). */
     callDivides?: import('../extract/call-divides.js').CallDivideFacts;
+    /** The global references a parameter or local's name shadows, per line (extract/shadowed-globals.ts). */
+    shadowedGlobals?: import('../extract/shadowed-globals.js').ShadowedGlobalFacts;
     /** The function's EH3 frame as `seh-lowering` needs it (codegen/seh-lowering-spec.ts). */
     sehLowering?: SehLoweringDecision;
     /** Addresses the instructions derive from a global's start (codegen/folded-address-spec.ts). */
@@ -2941,6 +2946,11 @@ function transformDecompiledCode(
     // The calls the original divides at once, keyed by line of `wrapped` (call-divides-spec.ts).
     const divides = funcBodyMatch && funcBodyMatch.index !== undefined
       ? callDivideLines(enclosing?.callDivides, decompiled, funcBodyMatch.index + funcBodyMatch[0].indexOf('{'), body, preprocessedBody, wrapperPrefix)
+      : undefined;
+    // The global references a same-named parameter or local hides, keyed by line of `wrapped`
+    // and spelled with the path they are emitted in (shadowed-globals-spec.ts).
+    const shadowedGlobals = funcBodyMatch && funcBodyMatch.index !== undefined
+      ? shadowedGlobalLines(enclosing?.shadowedGlobals, context?.analyzedGlobals, decompiled, funcBodyMatch.index + funcBodyMatch[0].indexOf('{'), body, preprocessedBody, wrapperPrefix)
       : undefined;
 
     // Build plugin options for method-call-rewrite when mappings or current context exist
@@ -3905,6 +3915,15 @@ function transformDecompiledCode(
         rotates,
         onSite: (e: { line: number; spelling: string }) =>
           console.warn(`[rotate] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.spelling} on line ${e.line}`),
+      };
+    }
+
+    // A global a same-named parameter or local hides is spelled `::name` (local-shadowed-global.ts).
+    if (shadowedGlobals) {
+      perPluginOptions['local-shadowed-global'] = {
+        shadowedGlobals,
+        onSite: (e: { line: number; name: string; ord: number }) =>
+          console.warn(`[shadowed-global] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.name} #${e.ord} on line ${e.line} is the global`),
       };
     }
 

@@ -185,6 +185,12 @@ export interface ExtractedFunction {
    * predates the field.
    */
   callDivides?: import('./extract/call-divides.js').CallDivideFacts;
+  /**
+   * The global references the decompile prints under the name of one of the function's own
+   * parameters or locals, per line (extract/shadowed-globals.ts). Absent when there are none
+   * or the snapshot predates the field.
+   */
+  shadowedGlobals?: import('./extract/shadowed-globals.js').ShadowedGlobalFacts;
 }
 
 /**

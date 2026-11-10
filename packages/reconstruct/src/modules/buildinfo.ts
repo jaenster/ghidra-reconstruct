@@ -124,6 +124,7 @@ export const FUNCTION_HASH_FIELDS = {
   rotateSites: 'hashed',
   storeBases: 'hashed',
   callDivides: 'hashed',
+  shadowedGlobals: 'hashed',
   labelFlow: 'hashed',
   compareSites: 'hashed',
   branchLayout: 'hashed',

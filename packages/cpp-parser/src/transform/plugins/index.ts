@@ -1043,6 +1043,7 @@ export { stackFrameAddressPlugin, stackNameOffset, type StackFrameAddressOptions
 import { shadowedTypeQualifyPlugin } from './builtins/shadowed-type-qualify.js';
 export { shadowedTypeQualifyPlugin, type ShadowedTypeQualifyOptions } from './builtins/shadowed-type-qualify.js';
 import { functionShadowedGlobalPlugin } from './builtins/function-shadowed-global.js';
+import { localShadowedGlobalPlugin } from './builtins/local-shadowed-global.js';
 import { globalAliasResolvePlugin } from './builtins/global-alias-resolve.js';
 import { tebFieldAccessPlugin } from './builtins/teb-field-access.js';
 import { sehLoweringPlugin } from './builtins/seh-lowering.js';
@@ -1054,6 +1055,7 @@ export { sehLoweringPlugin, type SehLoweringOptions, type SehLoweringScope } fro
 export { globalAliasResolvePlugin, type GlobalAliasResolveOptions } from './builtins/global-alias-resolve.js';
 export { tebFieldAccessPlugin, tebFieldExpression, type TebFieldAccessOptions, type TebField } from './builtins/teb-field-access.js';
 export { functionShadowedGlobalPlugin, type FunctionShadowedGlobalOptions } from './builtins/function-shadowed-global.js';
+export { localShadowedGlobalPlugin, type LocalShadowedGlobalOptions, type ShadowedGlobalFact } from './builtins/local-shadowed-global.js';
 import { arrayGlobalAddressOfPlugin } from './builtins/array-global-address-of.js';
 export { arrayGlobalAddressOfPlugin } from './builtins/array-global-address-of.js';
 import { charLiteralEscapePlugin } from './builtins/char-literal-escape.js';
@@ -1270,6 +1272,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   stackFrameAddressPlugin,    // Cleanup: `&stack0xNNNN` → the frame slot that owns it (priority 520)
   shadowedTypeQualifyPlugin,  // Cleanup: (Draw**)x → (::Draw**)x when a same-named namespace shadows the type (priority 47)
   functionShadowedGlobalPlugin,  // Cleanup: bare x → ::x when a same-named function hides the root-scope global (priority 49)
+  localShadowedGlobalPlugin,     // Correctness: a global token a same-named parameter or local hides → ::x, from the markup (priority -1)
   arrayGlobalAddressOfPlugin, // Cleanup: &X_ARRAY_<hex> → X_ARRAY_<hex> (priority 46)
   charLiteralEscapePlugin,    // Cleanup: '²' → '\xb2' (priority 46)
   memoryPatternsPlugin,       // Pattern detection (late)
