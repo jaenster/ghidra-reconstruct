@@ -182,4 +182,4 @@ export function vc8formHashRecord(func: Pick<ExtractedFunction, 'address' | 'nam
   return { address: String(func.address), name: String(func.name ?? ''), size: Number(func.size), form: vc8formBodyHash(d), legacy: vc8formLegacyBodyHash(d), tags: tags.sort() };
 }
 
-const FORM_ORDER: Array<Vc8Form['op']> = ['width', 'own', 'split', 'fold', 'cache', 'ifsel', 'guards', 'merge-guards', 'retval', 'select', 'merge-tail', 'nest', 'continue', 'dup', 'arms', 'tarms', 'unselect', 'zero', 'nonzero', 'cmp', 'swap', 'decl', 'seq'];
+const FORM_ORDER: Array<Vc8Form['op']> = ['width', 'own', 'split', 'fold', 'cache', 'ifsel', 'clamp', 'guards', 'merge-guards', 'retval', 'select', 'merge-tail', 'nest', 'continue', 'dup', 'arms', 'tarms', 'unselect', 'zero', 'nonzero', 'cmp', 'swap', 'decl', 'seq'];
