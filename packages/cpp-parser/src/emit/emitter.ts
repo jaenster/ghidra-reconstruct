@@ -824,6 +824,73 @@ export class CppEmitter {
     return { elementType: current, arraySizes };
   }
 
+  /** Keep the shared base type separate from each name's pointer/array declarator. */
+  private localDeclarator(type: TypeNode, name: string): { base: TypeNode; name: string } {
+    switch (type.kind) {
+      case NodeKind.PointerType: {
+        const pointer = type as PointerType;
+        const qualifiers = pointer.qualifiers.length ? pointer.qualifiers.join(' ') + ' ' : '';
+        let decorated = '*' + qualifiers + name;
+        if (pointer.pointee.kind === NodeKind.ArrayType || pointer.pointee.kind === NodeKind.FunctionType) {
+          const convention = pointer.pointee.kind === NodeKind.FunctionType
+            ? (pointer.pointee as FunctionType).callingConvention
+            : undefined;
+          decorated = '(' + (convention ? convention + ' ' : '') + decorated + ')';
+        }
+        return this.localDeclarator(pointer.pointee, decorated);
+      }
+      case NodeKind.ReferenceType: {
+        const ref = type as ReferenceType;
+        const wrapped = ref.referenced.kind === NodeKind.ArrayType || ref.referenced.kind === NodeKind.FunctionType;
+        const convention = ref.referenced.kind === NodeKind.FunctionType
+          ? (ref.referenced as FunctionType).callingConvention : undefined;
+        const decorated = wrapped ? '(' + (convention ? convention + ' ' : '') + '&' + name + ')' : '&' + name;
+        return this.localDeclarator(ref.referenced, decorated);
+      }
+      case NodeKind.RValueReferenceType: {
+        const ref = type as RValueReferenceType;
+        const wrapped = ref.referenced.kind === NodeKind.ArrayType || ref.referenced.kind === NodeKind.FunctionType;
+        const convention = ref.referenced.kind === NodeKind.FunctionType
+          ? (ref.referenced as FunctionType).callingConvention : undefined;
+        const decorated = wrapped ? '(' + (convention ? convention + ' ' : '') + '&&' + name + ')' : '&&' + name;
+        return this.localDeclarator(ref.referenced, decorated);
+      }
+      case NodeKind.QualifiedType: {
+        const qualified = type as QualifiedType;
+        if (qualified.type.kind === NodeKind.PointerType) {
+          const pointer = qualified.type as PointerType;
+          return this.localDeclarator({
+            ...pointer,
+            qualifiers: [...pointer.qualifiers, ...qualified.qualifiers],
+          }, name);
+        }
+        if (qualified.type.kind === NodeKind.ArrayType) {
+          const array = qualified.type as ArrayType;
+          return this.localDeclarator({
+            ...array,
+            elementType: { ...qualified, type: array.elementType },
+          }, name);
+        }
+        return { base: type, name };
+      }
+      case NodeKind.ArrayType: {
+        const arr = type as ArrayType;
+        const size = arr.size ? new CppEmitter(this.style).emit(arr.size as AnyNode) : '';
+        return this.localDeclarator(arr.elementType, name + '[' + size + ']');
+      }
+      case NodeKind.FunctionType: {
+        const fn = type as FunctionType;
+        const separator = this.style.spaceAfterComma ? ', ' : ',';
+        const parameters = fn.parameters.map(p => new CppEmitter(this.style).emit(p as AnyNode));
+        if (fn.isVariadic) parameters.push('...');
+        const qualifiers = fn.qualifiers.length ? ' ' + fn.qualifiers.join(' ') : '';
+        return this.localDeclarator(fn.returnType, name + '(' + parameters.join(separator) + ')' + qualifiers);
+      }
+      default:
+        return { base: type, name };
+    }
+  }
+
   /**
    * Emit a pointer-to-array declarator `T (*name)[N]…` when the type is a pointer
    * (possibly multi-level) whose pointee is an array. Returns false (emit nothing)
@@ -1894,6 +1961,16 @@ export class CppEmitter {
       else this.emitStaticAssertDecl(decl as StaticAssertDecl, true);
       return;
     }
+    const variableDecls = node.declarations.every(d => d.kind === NodeKind.VariableDecl)
+      ? node.declarations as VariableDecl[] : [];
+    const variableDeclarators = variableDecls.length > 1
+      ? variableDecls.map(v => this.localDeclarator(v.type, v.name.name)) : null;
+    if (variableDeclarators) {
+      const bases = variableDeclarators.map(d => new CppEmitter(this.style).emit(d.base as AnyNode));
+      if (bases.some(base => base !== bases[0])) {
+        throw new Error('Cannot emit a declaration list with different base types');
+      }
+    }
     for (let i = 0; i < node.declarations.length; i++) {
       if (i > 0) {
         this.write(',');
@@ -1903,6 +1980,24 @@ export class CppEmitter {
       if (decl.kind === NodeKind.VariableDecl) {
         // For DeclStmt, emit inline (without indent and trailing semicolon)
         const v = decl as VariableDecl;
+        if (variableDeclarators) {
+          if (i === 0) {
+            if (v.specifiers.length > 0) this.write(v.specifiers.join(' ') + ' ');
+            this.emitTypeNode(variableDeclarators[0].base);
+            this.write(' ');
+          }
+          this.write(variableDeclarators[i].name);
+          if (v.initializer) {
+            if (v.initializer.kind === NodeKind.InitListExpr) {
+              if (v.copyListInit) this.write(this.style.spaceAroundOperators ? ' = ' : '=');
+              this.emitInitListExpr(v.initializer as InitListExpr);
+            } else {
+              this.write(this.style.spaceAroundOperators ? ' = ' : '=');
+              this.emitExprWithPrecedence(v.initializer, 17);
+            }
+          }
+          continue;
+        }
         // Pointer-to-array (`T (*name)[N]`) needs the C declarator syntax. Handle
         // the (common) single-declarator case here so body locals like
         // `D2UnitStrc*(*)[5] ppUnitTable` don't emit as invalid `T[N]* name`.

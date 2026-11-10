@@ -4,6 +4,7 @@ import { CppEmitter, emit, DEFAULT_STYLE, GOOGLE_STYLE, createStyle } from '../i
 import { Type, Expr, Stmt, Decl } from '../../ast/factory.js';
 import { NodeKind } from '../../ast/kinds.js';
 import { parse } from '../../parser/index.js';
+import type { DeclStmt as LocalDeclStmt, TypeNode, VariableDecl as LocalVariableDecl } from '../../ast/nodes.js';
 
 describe('CppEmitter', () => {
   describe('Literals', () => {
@@ -919,6 +920,95 @@ describe('CppEmitter', () => {
 
     it('never touches a subscript-multiply expression', () => {
       assert.ok(round('void f(int* a) { return a[2] * 6; }').includes('a[2] * 6'));
+    });
+  });
+
+  describe('Mixed local declarators', () => {
+    const findDeclaration = (value: unknown): LocalDeclStmt | undefined => {
+      if (!value || typeof value !== 'object') return undefined;
+      if ('kind' in value && value.kind === NodeKind.DeclStmt) return value as LocalDeclStmt;
+      for (const child of Object.values(value)) {
+        const found = findDeclaration(child);
+        if (found) return found;
+      }
+      return undefined;
+    };
+
+    const typeShape = (type: TypeNode): string => {
+      if (type.kind === NodeKind.PointerType) return `*${typeShape(type.pointee)}`;
+      if (type.kind === NodeKind.ReferenceType) return `&${typeShape(type.referenced)}`;
+      if (type.kind === NodeKind.RValueReferenceType) return `&&${typeShape(type.referenced)}`;
+      if (type.kind === NodeKind.ArrayType) return `[${type.size ? emit(type.size) : ''}]${typeShape(type.elementType)}`;
+      return emit(type);
+    };
+
+    for (const source of [
+      'void f() { int a, *b; }',
+      'void f() { int *a, b; }',
+      'void f() { int *a, *b; }',
+      'void f() { int a[2], *b; }',
+      'void f() { int *a, b[2]; }',
+      'void f() { int a[2], b[2]; }',
+      'void f() { const int *a, b; }',
+      'void f() { unsigned int a, *b; }',
+      'void f() { int * const a = 0, b = 1; }',
+      'void f() { int a, &b = a; }',
+      'void f(int* p) { for (int a = 0, *b = p; a < 2; a++) g(b[a]); }',
+      'void f(int* p) { for (int *a = p, b = 1; b < 2; b++) g(a[b]); }',
+    ]) {
+      it(`preserves each declarator's type through emit/reparse: ${source}`, () => {
+        const ast = parse(source);
+        const original = findDeclaration(ast);
+        assert.ok(original, source);
+        const expected = original.declarations.map(d => typeShape((d as LocalVariableDecl).type));
+        for (const style of [{}, { spaceAroundOperators: false, spaceAfterComma: false }]) {
+          const output = emit(ast, style);
+          const reparsed = findDeclaration(parse(output));
+          assert.ok(reparsed, output);
+          assert.deepStrictEqual(reparsed.declarations.map(d => typeShape((d as LocalVariableDecl).type)), expected, output);
+        }
+      });
+    }
+
+    it('keeps a comma-expression initializer grouped with its own declarator', () => {
+      const source = 'void f() { int a = (g(), 1), *b; }';
+      const output = emit(parse(source));
+      const reparsed = findDeclaration(parse(output));
+      assert.ok(reparsed, output);
+      assert.strictEqual(reparsed.declarations.length, 2, output);
+      assert.ok(output.includes('a = (g() , 1)'), output);
+    });
+
+    it('keeps pointer-to-array and lvalue-reference markers on factory declarations', () => {
+      const pointerArray = Stmt.compound([Stmt.declStmt([
+        Decl.variable('a', Type.pointer(Type.array(Type.int(), Expr.intLiteral(2)))),
+        Decl.variable('b', Type.int()),
+      ])]);
+      assert.ok(emit(pointerArray).includes('int (*a)[2], b;'), emit(pointerArray));
+
+      const refs = Stmt.compound([Stmt.declStmt([
+        Decl.variable('a', Type.reference(Type.int()), Expr.identifier('x')),
+        Decl.variable('b', Type.reference(Type.int()), Expr.identifier('y')),
+      ])]);
+      assert.ok(emit(refs).includes('int &a = x, &b = y;'), emit(refs));
+
+      const functionReference = Stmt.compound([Stmt.declStmt([
+        Decl.variable('a', Type.reference(Type.function(Type.int(), [Type.int()])), Expr.identifier('fn')),
+        Decl.variable('b', Type.int()),
+      ])]);
+      assert.ok(emit(functionReference).includes('int (&a)(int) = fn, b;'), emit(functionReference));
+
+      const constPointer = Stmt.compound([Stmt.declStmt([
+        Decl.variable('a', Type.const(Type.pointer(Type.int())), Expr.identifier('p')),
+        Decl.variable('b', Type.int()),
+      ])]);
+      assert.ok(emit(constPointer).includes('int *const a = p, b;'), emit(constPointer));
+
+      const constArrayElements = Stmt.compound([Stmt.declStmt([
+        Decl.variable('a', Type.const(Type.array(Type.pointer(Type.int()), Expr.intLiteral(2)))),
+        Decl.variable('b', Type.int()),
+      ])]);
+      assert.ok(emit(constArrayElements).includes('int *const a[2], b;'), emit(constArrayElements));
     });
   });
 });
