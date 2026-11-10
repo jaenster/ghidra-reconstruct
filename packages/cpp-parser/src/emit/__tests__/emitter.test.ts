@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import { CppEmitter, emit, DEFAULT_STYLE, GOOGLE_STYLE, createStyle } from '../index.js';
 import { Type, Expr, Stmt, Decl } from '../../ast/factory.js';
 import { NodeKind } from '../../ast/kinds.js';
-import type { BinaryExpr, CharLiteralExpr, CompoundStmt, ConditionalExpr, ExprStmt, Expression, FunctionDecl, IfStmt, ParenExpr, PpConditionalStmt, ReturnStmt, Statement, UnaryExpr } from '../../ast/nodes.js';
+import type { BinaryExpr, BinaryOperator, CallExpr, CharLiteralExpr, CommaExpr, CompoundStmt, ConditionalExpr, DeclStmt, ExprStmt, Expression, FunctionDecl, IfStmt, InitListExpr, ParenExpr, PpConditionalStmt, ReturnStmt, Statement, UnaryExpr, VariableDecl } from '../../ast/nodes.js';
 import { parse } from '../../parser/index.js';
 
 describe('CppEmitter', () => {
@@ -405,6 +405,96 @@ describe('CppEmitter', () => {
     it('emits calls with no arguments', () => {
       const call = Expr.call('getTime', []);
       assert.strictEqual(emit(call), 'getTime()');
+    });
+
+    it('keeps parsed comma operators inside one call argument', () => {
+      for (const [source, expectedArity] of [
+        ['int f(int a, int b) { return G((a, b)); }', 1],
+        ['int f(int a, int b) { return G(((a, b))); }', 1],
+        ['int f(int a, int b) { return G((a, b, a)); }', 1],
+        ['int f(int a, int b) { return H((a, b), 42); }', 2],
+      ] as const) {
+        const original = parse(source);
+        const emitted = emit(original);
+        const reparsed = parse(emitted);
+        const call = ((reparsed.declarations[0] as FunctionDecl).body!.statements[0] as ReturnStmt).value as CallExpr;
+        assert.strictEqual(call.arguments.length, expectedArity, emitted);
+        assert.strictEqual(call.arguments[0].kind, NodeKind.ParenExpr, emitted);
+        assert.strictEqual(((call.arguments[0] as ParenExpr).expression as BinaryExpr).operator as string, ',', emitted);
+      }
+    });
+
+    it('groups a direct factory comma expression as one call argument', () => {
+      const a = Expr.identifier('a');
+      const b = Expr.identifier('b');
+      // The parser produces BinaryExpr(',', ...) even though BinaryOperator
+      // currently omits this spelling from its TypeScript union.
+      const binary = Expr.binary(a, ',' as BinaryOperator, b);
+      const list = {
+        kind: NodeKind.CommaExpr,
+        expressions: [a, b],
+        location: a.location,
+        leadingTrivia: [],
+        trailingTrivia: [],
+      } as CommaExpr;
+      for (const comma of [binary, list]) {
+        const emitted = emit(Expr.call('G', [comma]));
+        const reparsed = parse(`void f(int a, int b) { ${emitted}; }`);
+        const call = ((reparsed.declarations[0] as FunctionDecl).body!.statements[0] as ExprStmt).expression as CallExpr;
+        assert.strictEqual(call.arguments.length, 1, emitted);
+        assert.strictEqual(call.arguments[0].kind, NodeKind.ParenExpr, emitted);
+      }
+    });
+
+    it('keeps comma parens once under higher precedence and removes redundant sum parens', () => {
+      const comma = emit(parse('int f(int a, int b, int c) { return c * (a, b); }'));
+      assert.match(comma, /c \* \(a , b\)/);
+      assert.doesNotMatch(comma, /c \* \(\(a , b\)\)/);
+      const sum = emit(parse('int f(int a, int b) { return G((a + b)); }'));
+      assert.match(sum, /G\(a \+ b\)/);
+    });
+
+    it('keeps a comma expression as one declaration initializer', () => {
+      const emitted = emit(parse('int f(int a, int b) { int x = (a, b); return x; }'));
+      const reparsed = parse(emitted);
+      const decl = ((reparsed.declarations[0] as FunctionDecl).body!.statements[0] as DeclStmt).declarations;
+      assert.strictEqual(decl.length, 1, emitted);
+      assert.strictEqual((decl[0] as VariableDecl).initializer?.kind, NodeKind.ParenExpr, emitted);
+      assert.match(emitted, /int x = \(a , b\);/);
+    });
+
+    it('keeps direct factory comma expressions within one declarator or list element', () => {
+      const comma = Expr.binary(Expr.identifier('a'), ',' as BinaryOperator, Expr.identifier('b'));
+      const variable = emit(Decl.variable('x', Type.int(), comma));
+      const variableUnit = parse(`void f(int a, int b) { ${variable} }`);
+      const variableDecls = ((variableUnit.declarations[0] as FunctionDecl).body!.statements[0] as DeclStmt).declarations;
+      assert.strictEqual(variableDecls.length, 1, variable);
+      assert.match(variable, /int x = \(a , b\);/);
+
+      const list = emit(Expr.initList([comma]));
+      const listUnit = parse(`void f(int a, int b) { int xs[] = ${list}; }`);
+      const init = (((listUnit.declarations[0] as FunctionDecl).body!.statements[0] as DeclStmt)
+        .declarations[0] as VariableDecl).initializer as InitListExpr;
+      assert.strictEqual(init.elements.length, 1, list);
+      assert.strictEqual(list, '{(a , b)}');
+    });
+
+    it('keeps a direct factory comma expression within one parameter default', () => {
+      const comma = Expr.binary(Expr.identifier('a'), ',' as BinaryOperator, Expr.identifier('b'));
+      const fn = Decl.function_('f', Type.int(), [
+        Decl.parameter('x', Type.int(), comma),
+        Decl.parameter('y', Type.int()),
+      ], Stmt.compound([Stmt.return_(Expr.identifier('x'))]));
+      const emitted = emit(fn);
+      const reparsed = parse(emitted).declarations[0] as FunctionDecl;
+      assert.strictEqual(reparsed.parameters.length, 2, emitted);
+      assert.strictEqual(reparsed.parameters[0].defaultValue?.kind, NodeKind.ParenExpr, emitted);
+    });
+
+    it('keeps a comma expression grouped within sizeof', () => {
+      const emitted = emit(parse('int f(int a, int b) { return sizeof((a, b)); }'));
+      assert.match(emitted, /sizeof\(\(a , b\)\)/);
+      assert.doesNotThrow(() => parse(emitted));
     });
   });
 
