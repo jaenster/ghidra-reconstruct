@@ -150,6 +150,49 @@ export interface ForeignSource {
 /** File extensions read from a foreign-reference directory. */
 const FOREIGN_SOURCE_EXTENSIONS = new Set(['.c', '.cc', '.cpp', '.cxx', '.h', '.hh', '.hpp', '.hxx', '.inl', '.s', '.S', '.asm']);
 
+/**
+ * Files in a foreign-reference directory that the regen itself writes, not a person:
+ * ghidra_version.cpp carries the Ghidra version the tree was generated from, and the
+ * live daemon's merge into source/modified changes it on every publish. Read as an
+ * input, it made each publish look like a commit to the foreign sources and queued a
+ * full rebuild that re-emitted nothing. It defines no name the generator looks up.
+ */
+const REGEN_WRITTEN_FILES = new Set(['ghidra_version.cpp']);
+
+function isForeignSource(rel: string): boolean {
+  return FOREIGN_SOURCE_EXTENSIONS.has(nodePath.extname(rel)) && !REGEN_WRITTEN_FILES.has(nodePath.basename(rel));
+}
+
+/**
+ * The committed source blobs under `object` (a tree or a blob at HEAD), sorted by
+ * path. The fingerprint is made of these ids, not of the tree id, so a commit that
+ * changes only a regen-written file leaves it unchanged.
+ */
+function foreignBlobs(loc: { top: string; sub: string }, object: string): Array<{ id: string; path: string }> {
+  const blobs: Array<{ id: string; path: string }> = [];
+  const type = git(loc.top, ['cat-file', '-t', object]).trim();
+  if (type === 'blob') {
+    blobs.push({ id: object, path: loc.sub });
+  } else {
+    for (const rec of git(loc.top, ['ls-tree', '-r', '-z', object]).split('\0')) {
+      if (!rec) continue;
+      const tab = rec.indexOf('\t');
+      const [, kind, id] = rec.slice(0, tab).split(' ');
+      const rel = rec.slice(tab + 1);
+      if (kind !== 'blob' || !isForeignSource(rel)) continue;
+      blobs.push({ id, path: loc.sub === '.' ? rel : `${loc.sub}/${rel}` });
+    }
+  }
+  blobs.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  return blobs;
+}
+
+function blobsDigest(blobs: ReadonlyArray<{ id: string; path: string }>): string {
+  const h = createHash('sha256');
+  for (const b of blobs) h.update(`${b.path}\u0000${b.id}\u0000`);
+  return h.digest('hex');
+}
+
 type ForeignEntry = { path: string; addressBase?: string | number };
 
 /** The directory or file an entry names, and its address base. */
@@ -236,23 +279,8 @@ export function readForeignSourcesAt(
     h.update(`${root}\u0000${base ?? ''}\u0000`);
     const loc = gitLocation(root);
     if (loc) {
-      const object = headObject(loc, root);
-      h.update(`git:${object}\u0000`);
-      const blobs: Array<{ id: string; path: string }> = [];
-      const type = git(loc.top, ['cat-file', '-t', object]).trim();
-      if (type === 'blob') {
-        blobs.push({ id: object, path: loc.sub });
-      } else {
-        for (const rec of git(loc.top, ['ls-tree', '-r', '-z', object]).split('\0')) {
-          if (!rec) continue;
-          const tab = rec.indexOf('\t');
-          const [, kind, id] = rec.slice(0, tab).split(' ');
-          const rel = rec.slice(tab + 1);
-          if (kind !== 'blob' || !FOREIGN_SOURCE_EXTENSIONS.has(nodePath.extname(rel))) continue;
-          blobs.push({ id, path: loc.sub === '.' ? rel : `${loc.sub}/${rel}` });
-        }
-      }
-      blobs.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+      const blobs = foreignBlobs(loc, headObject(loc, root));
+      h.update(`git:${blobsDigest(blobs)}\u0000`);
       if (blobs.length === 0) continue;
       const raw = execFileSync('git', ['-C', loc.top, 'cat-file', '--batch'], {
         input: blobs.map(b => b.id).join('\n') + '\n', maxBuffer: 1 << 30,
@@ -272,7 +300,7 @@ export function readForeignSourcesAt(
       if (st.isDirectory()) {
         for (const name of nodeFs.readdirSync(p).sort()) {
           const child = nodePath.join(p, name);
-          if (nodeFs.statSync(child).isDirectory() || FOREIGN_SOURCE_EXTENSIONS.has(nodePath.extname(name))) walk(child);
+          if (nodeFs.statSync(child).isDirectory() || isForeignSource(name)) walk(child);
         }
       } else {
         files.push(p);
@@ -291,8 +319,8 @@ export function readForeignSourcesAt(
 
 /**
  * One hash naming exactly what `readForeignSources` would read now: per entry, the
- * committed object at HEAD (a git tree id is already a content hash), or the
- * contents of the files outside git. A commit that leaves those files alone - the
+ * path and blob id of each committed source file at HEAD (a blob id is already a
+ * content hash), or the contents of the files outside git. A commit that leaves those files alone - the
  * live daemon's own merge into the tree that holds them - leaves it unchanged.
  * Equal to the fingerprint `readForeignSourcesAt` returns for the same commit.
  */
@@ -303,7 +331,7 @@ export function foreignSourcesFingerprint(entries: ReadonlyArray<ForeignEntry>, 
     h.update(`${root}\u0000${base ?? ''}\u0000`);
     const loc = gitLocation(root);
     if (loc) {
-      h.update(`git:${headObject(loc, root)}\u0000`);
+      h.update(`git:${blobsDigest(foreignBlobs(loc, headObject(loc, root)))}\u0000`);
     } else {
       for (const src of readForeignSources([entry], baseDir)) h.update(`${src.path}\u0000${src.text}\u0000`);
     }
