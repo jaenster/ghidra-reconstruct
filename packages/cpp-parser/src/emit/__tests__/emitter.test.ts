@@ -3,6 +3,7 @@ import assert from 'node:assert';
 import { CppEmitter, emit, DEFAULT_STYLE, GOOGLE_STYLE, createStyle } from '../index.js';
 import { Type, Expr, Stmt, Decl } from '../../ast/factory.js';
 import { NodeKind } from '../../ast/kinds.js';
+import type { ConditionalExpr, FunctionDecl, ParenExpr, ReturnStmt } from '../../ast/nodes.js';
 import { parse } from '../../parser/index.js';
 
 describe('CppEmitter', () => {
@@ -203,6 +204,53 @@ describe('CppEmitter', () => {
         Expr.intLiteral(0)
       );
       assert.strictEqual(emit(cond), 'flag ? 1 : 0');
+    });
+
+    it('preserves a nested conditional in the condition across parse and emit', () => {
+      const leftNested = 'int f(bool a, bool b, bool c, int d, int e) { return (a ? b : c) ? d : e; }';
+      const rightNested = 'int f(bool a, bool b, bool c, int d, int e) { return a ? b : c ? d : e; }';
+
+      const emittedLeft = emit(parse(leftNested));
+      const emittedRight = emit(parse(rightNested));
+      assert.match(emittedLeft, /return \(a \? b : c\) \? d : e;/);
+      assert.match(emittedRight, /return a \? b : c \? d : e;/);
+      assert.notStrictEqual(emittedLeft, emittedRight);
+
+      const outer = (source: string): ConditionalExpr => {
+        const fn = parse(source).declarations[0] as FunctionDecl;
+        const ret = fn.body?.statements[0] as ReturnStmt;
+        assert.strictEqual(ret.value?.kind, NodeKind.ConditionalExpr);
+        return ret.value as ConditionalExpr;
+      };
+      const leftCondition = outer(emittedLeft).condition as ParenExpr;
+      assert.strictEqual(leftCondition.kind, NodeKind.ParenExpr);
+      assert.strictEqual(leftCondition.expression.kind, NodeKind.ConditionalExpr);
+      const right = outer(emittedRight);
+      assert.strictEqual(right.condition.kind, NodeKind.Identifier);
+      assert.strictEqual(right.elseExpr.kind, NodeKind.ConditionalExpr);
+    });
+
+    it('retains the grouping that changes a concrete conditional result', () => {
+      // (true ? false : true) ? 7 : 9 evaluates to 9; without the
+      // condition parentheses, true ? false : true ? 7 : 9 evaluates to 0.
+      const source = 'int f() { return (true ? false : true) ? 7 : 9; }';
+      const emitted = emit(parse(source));
+      assert.match(emitted, /return \(true \? false : true\) \? 7 : 9;/);
+      const fn = parse(emitted).declarations[0] as FunctionDecl;
+      const ret = fn.body?.statements[0] as ReturnStmt;
+      const outer = ret.value as ConditionalExpr;
+      assert.strictEqual((outer.condition as ParenExpr).expression.kind, NodeKind.ConditionalExpr);
+    });
+
+    it('parenthesizes lower-precedence conditions but leaves logical-or conditions bare', () => {
+      const a = Expr.identifier('a');
+      const b = Expr.identifier('b');
+      const c = Expr.identifier('c');
+      const d = Expr.identifier('d');
+      const e = Expr.identifier('e');
+      assert.strictEqual(emit(Expr.conditional(Expr.conditional(a, b, c), d, e)), '(a ? b : c) ? d : e');
+      assert.strictEqual(emit(Expr.conditional(Expr.assign(a, b), d, e)), '(a = b) ? d : e');
+      assert.strictEqual(emit(Expr.conditional(Expr.or(a, b), d, e)), 'a || b ? d : e');
     });
   });
 

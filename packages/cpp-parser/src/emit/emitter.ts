@@ -2464,7 +2464,9 @@ export class CppEmitter {
 
   private emitConditionalExpr(node: ConditionalExpr): void {
     const precedence = OPERATOR_PRECEDENCE['?:'];
-    this.emitExprWithPrecedence(node.condition, precedence);
+    // C++ parses the condition as a logical-or expression. A conditional,
+    // assignment, or comma expression here needs its own parentheses.
+    this.emitExprWithPrecedence(node.condition, OPERATOR_PRECEDENCE['||']);
     if (this.style.spaceAroundOperators) {
       this.write(' ? ');
     } else {
