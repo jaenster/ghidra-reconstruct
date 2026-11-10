@@ -1100,6 +1100,7 @@ export class Parser {
     let bitWidth: Expression | null = null;
     if (this.match(TokenKind.Colon)) bitWidth = this.parseConditionalExpression();
 
+    const copyListInit = this.atCopyListInit();
     const initializer = this.parseOptionalInitializer();
 
     // `T a, *b, c[4];` - the later declarators share T but not the first one's `*` or `[]`.
@@ -1113,8 +1114,10 @@ export class Parser {
         const t = this.parseTypeSuffixes(base);
         const n = this.parseIdentifier();
         const full = this.parseArrayDeclaratorSuffix(t, loc);
+        const listInit = this.atCopyListInit();
         this.extraDecls.push(this.node(NodeKind.VariableDecl, loc, {
           name: n, type: full, initializer: this.parseOptionalInitializer(), specifiers, attributes: [],
+          ...(listInit ? { copyListInit: true } : {}),
         }) as VariableDecl);
       }
     }
@@ -1128,7 +1131,13 @@ export class Parser {
       specifiers,
       attributes: [],
       ...(bitWidth ? { bitWidth } : {}),
+      ...(copyListInit ? { copyListInit: true } : {}),
     }) as VariableDecl;
+  }
+
+  /** `= {...}`: copy-list-initialization, kept apart from `T x{...}` so it prints back as written. */
+  private atCopyListInit(): boolean {
+    return this.check(TokenKind.Equal) && this.checkAhead(1, TokenKind.LeftBrace);
   }
 
   private parseOptionalInitializer(): Expression | InitListExpr | null {
@@ -2987,6 +2996,7 @@ export class Parser {
     }) as PointerType;
 
     let initializer: Expression | null = null;
+    const copyListInit = this.atCopyListInit();
     if (this.match(TokenKind.Equal)) {
       if (this.check(TokenKind.LeftBrace)) {
         initializer = this.parseInitializerList();
@@ -3003,6 +3013,7 @@ export class Parser {
       initializer,
       specifiers,
       attributes: [],
+      ...(copyListInit ? { copyListInit: true } : {}),
     }) as VariableDecl;
   }
 

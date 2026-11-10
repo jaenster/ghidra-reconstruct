@@ -8,6 +8,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { parse } from '../index.js';
+import { emit } from '../../emit/index.js';
 import { NodeKind } from '../../ast/kinds.js';
 import { findNodesByKind } from '../../ast/visitor.js';
 
@@ -82,6 +83,23 @@ void f() { D2GSPacketClt0x6B packet(0x6b); int x, *y, z[4]; }`);
     assert.strictEqual(decls[0].directInit, true);
     assert.strictEqual(decls[2].type.kind, NodeKind.PointerType);
     assert.strictEqual(decls[3].type.kind, NodeKind.ArrayType);
+  });
+
+  it('prints `= {...}` back as written: VC8 has no `T x{...}`, and the bytes follow the spelling', () => {
+    const src = `int g[2] = {1, 2};
+void f(void) {
+  int a[4] = {0};
+  int b = 1, c[2] = {0}, d;
+  int (*p)[4] = {0};
+  for (int i = 0; i < 2; i++) {
+    char t[8] = {0};
+  }
+}
+`;
+    const tu: any = parse(src);
+    const decls: any[] = findNodesByKind(tu, NodeKind.VariableDecl);
+    assert.deepStrictEqual(decls.filter(d => d.copyListInit).map(d => d.name.name), ['g', 'a', 'c', 'p', 't']);
+    assert.strictEqual(emit(tu as never).trim(), src.replace('int g[2] = {1, 2};\n', 'int g[2] = {1, 2};\n\n').trim());
   });
 
   it('reads using-declarations, attributes on a struct, constructors and conversion operators', () => {
