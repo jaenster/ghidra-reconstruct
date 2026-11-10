@@ -3933,10 +3933,19 @@ function transformDecompiledCode(
       };
     }
 
-    // A shift pair the original performs as a rotate by more than 16 (rotate-intrinsic.ts).
+    // A shift pair, multiply pair or byte swap the original performs with rotates (rotate-intrinsic.ts).
     if (rotates) {
+      const t = context?.funcPtrArgCasts;
       perPluginOptions['rotate-intrinsic'] = {
         rotates,
+        ...(t ? {
+          globalTypes: t.globalTypes,
+          fieldTypes: t.fieldTypes,
+          structFields: t.structFields,
+          typedefTargets: t.typedefTargets,
+          functionReturnTypes: t.functionReturnTypes,
+          enclosingVarTypes,
+        } : {}),
         onSite: (e: { line: number; spelling: string }) =>
           console.warn(`[rotate] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.spelling} on line ${e.line}`),
       };
