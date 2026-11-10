@@ -33,6 +33,8 @@ function isPureIdentifier(s: string): boolean {
 export interface References {
   /** Every Identifier token. */
   identifiers: Set<string>;
+  /** Identifier tokens written without a namespace qualifier. */
+  unqualified: Set<string>;
   /** name -> each `A::B::name` spelling written with at least one qualifier. */
   qualified: Map<string, Set<string>>;
 }
@@ -45,8 +47,13 @@ export interface References {
  */
 export function scanReferences(text: string): References {
   const identifiers = new Set<string>();
+  const unqualified = new Set<string>();
   const qualified = new Map<string, Set<string>>();
-  const note = (chain: string[]) => {
+  const note = (chain: string[], rootQualified: boolean) => {
+    if (chain.length === 1 && !rootQualified) {
+      unqualified.add(chain[0]);
+      return;
+    }
     if (chain.length < 2) return;
     const name = chain[chain.length - 1];
     let q = qualified.get(name);
@@ -82,21 +89,27 @@ export function scanReferences(text: string): References {
   }
   let chain: string[] = [];
   let expectName = true;
+  let rootQualified = false;
   for (const w of words) {
-    if (w.scope) { if (expectName) chain = []; expectName = true; continue; }
+    if (w.scope) {
+      if (expectName) { chain = []; rootQualified = true; }
+      expectName = true;
+      continue;
+    }
     if (w.text && isPureIdentifier(w.text)) {
       identifiers.add(w.text);
-      if (!expectName) { note(chain); chain = []; }
+      if (!expectName) { note(chain, rootQualified); chain = []; rootQualified = false; }
       chain.push(w.text);
       expectName = false;
       continue;
     }
-    note(chain);
+    note(chain, rootQualified);
     chain = [];
     expectName = true;
+    rootQualified = false;
   }
-  note(chain);
-  return { identifiers, qualified };
+  note(chain, rootQualified);
+  return { identifiers, unqualified, qualified };
 }
 
 export class NeedleIndex {

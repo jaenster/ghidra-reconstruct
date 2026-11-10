@@ -416,6 +416,12 @@ Schema in `packages/reconstruct/src/config/schema.ts`. Key sections:
     { "type": "D2UnitStrc", "header": "d2common/units.h" }
   ],
 
+  // Keep a function's symbol namespace while placing it in a verified source unit
+  "functionPlacements": [
+    { "address": "0x00401000", "unit": "Game::Player",
+      "evidence": "map-file entry: Player.obj owns 0x00401000" }
+  ],
+
   // Secondary binaries merged for cross-platform anchors (see above)
   "additionalSources": [
     { "ghidra": "ghidra://HOST:PORT/Proj", "programPath": "/macos/...", "platform": "mac" }
@@ -432,6 +438,11 @@ Schema in `packages/reconstruct/src/config/schema.ts`. Key sections:
   which headers a module may include and how targets are organized.
 - **`typeOwnership`** — pins a type to a specific output header instead of letting placement
   be inferred from usage.
+- **`functionPlacements`** — moves a function into an existing emitted translation unit
+  without changing its symbol namespace. Each address needs a unique, verified placement
+  and a nonempty evidence note. Unknown functions, absent destination units, class methods,
+  and template members are rejected. The generator does not infer placement from nearby
+  addresses or caller count.
 - **`additionalSources`** — secondary Ghidra projects to merge (cross-platform anchoring).
 - **`crossPlatformLinks`** — pre-computed address pairs to link functions that name/bare
   matching can't.

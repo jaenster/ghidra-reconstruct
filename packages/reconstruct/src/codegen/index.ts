@@ -801,6 +801,26 @@ export function generateProjectStage1(
 ): GenerationState {
   const genT0 = Date.now();
   beginShard(shard);
+  // Reject stale or ambiguous placement facts before any generation stage can
+  // silently ignore them. Namespace grouping later verifies the destination.
+  if (options.projectConfig?.functionPlacements?.length) {
+    const counts = new Map<string, number>();
+    for (const func of functions) {
+      const key = fileStaticKey(func.address);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    const seen = new Set<string>();
+    for (const entry of options.projectConfig.functionPlacements) {
+      if (!entry?.address || !entry.unit?.trim() || !entry.evidence?.trim()) {
+        throw new Error('function placement needs an address, destination unit and evidence');
+      }
+      const key = fileStaticKey(entry.address);
+      if (seen.has(key) || counts.get(key) !== 1) {
+        throw new Error(`function placement ${entry.address}: duplicate or missing function address`);
+      }
+      seen.add(key);
+    }
+  }
   // Ghidra's union-facet markers are not variables: a forced union facet is recorded as
   // a dynamic (HASH) local named `unionfacet...` whose type is the union, and the
   // decompiler prints the access through the chosen member, never the symbol. Dropped
@@ -2729,10 +2749,18 @@ function installFileStaticFunctions(
   /** The declarations an inlined call's arguments are typed from (inlined-calls.ts). */
   inlinedCallTables?: () => GuardedCallTables,
 ): void {
+  if (options.projectConfig?.functionPlacements?.length) {
+    const emitted = new Set(parts.flatMap(part => part.functions.map(f => fileStaticKey(f.address))));
+    for (const placement of options.projectConfig.functionPlacements) {
+      if (!emitted.has(fileStaticKey(placement.address))) {
+        throw new Error(`function placement ${placement.address}: function is excluded or not emitted`);
+      }
+    }
+  }
   const unitOf = new Map<string, string>();
   const unitFunctionsOf = new Map<string, Array<{ key: string; func: ExtractedFunction }>>();
   for (const part of parts) {
-    for (const [unitName, unitFunctions] of organizeByNamespace(part.functions, classes, namespaces)) {
+    for (const [unitName, unitFunctions] of organizeByNamespace(part.functions, classes, namespaces, options.projectConfig?.functionPlacements)) {
       const unit = `${part.prefix}/${unitName}`;
       const list = unitFunctionsOf.get(unit) ?? [];
       unitFunctionsOf.set(unit, list);
@@ -2962,7 +2990,7 @@ function buildFuncToImplPathMap(
   options: ReconstructOptions,
   dirPrefix: string
 ): Map<string, string> {
-  const organized = organizeByNamespace(functions, classes, namespaces);
+  const organized = organizeByNamespace(functions, classes, namespaces, options.projectConfig?.functionPlacements);
 
   // The impl path each unit is WRITTEN to: a global's file is matched against it
   // when the unit claims its statics, so any other spelling orphans them.
@@ -4082,7 +4110,7 @@ function generateFilesForFunctions(
   strings?: ExtractedString[]
 ): Map<string, string> {
   const gffT0 = Date.now();
-  const organized = organizeByNamespace(functions, classes, namespaces);
+  const organized = organizeByNamespace(functions, classes, namespaces, options.projectConfig?.functionPlacements);
 
   const typeOwnershipOverrides = new Map<string, string>();
   const ownershipEntries = options.projectConfig?.typeOwnership ?? [];
@@ -4710,7 +4738,10 @@ function generateFilesForFunctions(
     const placementHolds = !emitUnitsFilter || emitUnitsFilter.has(unitName)
       || includeBasisHolds(unitIdentifierCounts.get(unitName)?.includes, implIncludes, placementNow);
     if (!placementHolds) console.log(`[reuse] ${unitName}: re-emitted, its includes were resolved under another placement`);
-    const reusedImpl = unitStaticsHold(previousStatics, unitStatics) && placementHolds
+    // A placement changes both the function set and lexical namespace scopes of
+    // an implementation. Old per-unit identifier caches do not encode that fact.
+    const reusedImpl = !(options.projectConfig?.functionPlacements?.length)
+      && unitStaticsHold(previousStatics, unitStatics) && placementHolds
       ? reuseUnitImpl(unitName, implPath)
       : undefined;
     // The placement lookups the dependency scan below makes, recorded for the next
@@ -4865,37 +4896,44 @@ function generateFilesForFunctions(
         // declared in the nearest enclosing namespace. Without this the include
         // is never added and the call is undeclared, even though a header in
         // the tree declares exactly the function the compiler would have found.
-        const unitNamespace = unitFunctions.find(f => f.namespace)?.namespace ?? '';
+        const unitNamespaces = [...new Set(unitFunctions
+          .map(f => unitNamespace([f], classInfo, options))
+          .filter(scope => scope.useNamespace)
+          .map(scope => scope.namespace))];
         const enclosingCandidate = (
           candidates: { qualified: string; header: string }[],
-        ): string | undefined => {
-          if (!unitNamespace) return undefined;
-          let best: { depth: number; header: string } | undefined;
-          for (const c of candidates) {
-            const sep = c.qualified.lastIndexOf('::');
-            if (sep < 0) continue;
-            const ns = c.qualified.slice(0, sep);
-            if (unitNamespace !== ns && !unitNamespace.startsWith(`${ns}::`)) continue;
-            const depth = ns.split('::').length;
-            if (!best || depth > best.depth) best = { depth, header: c.header };
+        ): string[] => {
+          const headers = new Set<string>();
+          for (const unitNamespace of unitNamespaces) {
+            let best: { depth: number; header: string } | undefined;
+            for (const c of candidates) {
+              const sep = c.qualified.lastIndexOf('::');
+              if (sep < 0) continue;
+              const ns = c.qualified.slice(0, sep);
+              if (unitNamespace !== ns && !unitNamespace.startsWith(`${ns}::`)) continue;
+              const depth = ns.split('::').length;
+              if (!best || depth > best.depth) best = { depth, header: c.header };
+            }
+            if (best) headers.add(best.header);
           }
-          return best?.header;
+          return [...headers];
         };
 
         for (const funcName of ambiguous) {
           const candidates = funcNameCandidates.get(funcName)!;
-          let resolvedByQualifier = false;
           for (const observed of refs.qualified.get(funcName) ?? []) {
             for (const c of candidates) {
               if (c.qualified === observed || c.qualified.endsWith(`::${observed}`)) {
                 addInclude(c.header);
-                resolvedByQualifier = true;
               }
             }
           }
-          if (resolvedByQualifier) continue;
-          const enclosing = enclosingCandidate(candidates);
-          if (enclosing) addInclude(enclosing);
+          // Qualified and bare occurrences can coexist in different namespace
+          // blocks of this TU. Resolving one qualified call must not suppress
+          // the header an unqualified call needs.
+          if (refs.unqualified.has(funcName)) {
+            for (const enclosing of enclosingCandidate(candidates)) addInclude(enclosing);
+          }
         }
       }
 
@@ -5036,10 +5074,12 @@ function generateFilesForFunctions(
       const mapPath = `${implPath}.map`;
       shardRecordEmitted(mapPath);
       const crossMatches = crossPlatformMatchesByUnit.get(implPath);
-      const unitNs = unitNamespace(unitFunctions, classInfo, options);
-      const definesThunk = (f: ExtractedFunction) => !f.isLibrary && unitThunkForwarder(
-        f, classInfo, context, unitNs.useNamespace ? unitNs.resolvedNamespace : undefined
-      ) !== undefined;
+      const definesThunk = (f: ExtractedFunction) => {
+        const emittedNs = unitNamespace([f], classInfo, options);
+        return !f.isLibrary && unitThunkForwarder(
+          f, classInfo, context, emittedNs.useNamespace ? emittedNs.resolvedNamespace : undefined
+        ) !== undefined;
+      };
       const sourceMap = generateSourceMap(implPath, unitFunctions, undefined, crossMatches, definesThunk);
       sourceMaps.set(mapPath, sourceMap);
     }

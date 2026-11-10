@@ -12,6 +12,7 @@ import type {
   DetectedClass,
   ReconstructOptions,
 } from '../types.js';
+import type { FunctionPlacementEntry } from '../config/schema.js';
 
 /**
  * Template parameter info extracted from a template instantiation
@@ -272,7 +273,8 @@ export function normalizeUnitName(name: string): string {
 export function organizeByNamespace(
   functions: ExtractedFunction[],
   classes: DetectedClass[],
-  namespaces: ExtractedNamespace[]
+  namespaces: ExtractedNamespace[],
+  placements: ReadonlyArray<FunctionPlacementEntry> = [],
 ): Map<string, ExtractedFunction[]> {
   const organized = new Map<string, ExtractedFunction[]>();
 
@@ -284,26 +286,61 @@ export function organizeByNamespace(
     }
   }
 
+  const addressKey = (address: string): string =>
+    (address.includes(':') ? address.slice(address.lastIndexOf(':') + 1) : address)
+      .toLowerCase().replace(/^0x/, '').padStart(8, '0');
+  const defaultUnit = (func: ExtractedFunction): string => {
+    const templateUnit = templateRegistry()?.unitOf(func.address);
+    if (templateUnit) return templateUnit;
+    if (func.namespace) return normalizeUnitName(func.namespace);
+    const className = classMethodMap.get(func.address);
+    return className ? normalizeUnitName(className) : '_unnamespaced';
+  };
+  const existingUnits = new Set(functions.map(defaultUnit));
+  const functionsByAddress = new Map<string, ExtractedFunction[]>();
+  for (const func of functions) {
+    const key = addressKey(func.address);
+    const list = functionsByAddress.get(key) ?? [];
+    list.push(func);
+    functionsByAddress.set(key, list);
+  }
+  const placedUnits = new Map<string, string>();
+  for (const placement of placements) {
+    if (!placement || !/^(?:0x)?[0-9a-fA-F]+$/.test(placement.address ?? '')
+        || !placement.unit?.trim() || placement.unit.includes('/') || placement.unit.includes('\\')
+        || !placement.evidence?.trim()) {
+      throw new Error('function placement needs a hex address, existing unit and evidence');
+    }
+    const key = addressKey(placement.address);
+    const targets = functionsByAddress.get(key);
+    // A generation part may contain only one binary/module. Another part owns
+    // this address; its own grouping call will validate and apply the placement.
+    if (!targets) continue;
+    if (targets.length !== 1 || placedUnits.has(key)) {
+      throw new Error(`ambiguous or duplicate function placement at ${placement.address}`);
+    }
+    const target = targets[0];
+    const unit = normalizeUnitName(placement.unit);
+    if (!existingUnits.has(unit) || unit === '_system_excluded') {
+      throw new Error(`function placement ${placement.address}: destination '${placement.unit}' is not an existing unit`);
+    }
+    if (classMethodMap.has(target.address) || target.parentClass || namespaceResolution().of(target).classScope
+        || templateRegistry()?.unitOf(target.address)) {
+      throw new Error(`function placement ${placement.address}: methods and template members cannot be refiled`);
+    }
+    if (classes.some(cls => normalizeUnitName(cls.name) === unit)
+        || functions.some(f => defaultUnit(f) === unit &&
+          (classMethodMap.has(f.address) || f.parentClass || templateRegistry()?.unitOf(f.address)))) {
+      throw new Error(`function placement ${placement.address}: destination '${placement.unit}' is a class or template unit`);
+    }
+    placedUnits.set(key, unit);
+  }
+
   // Organize functions
   for (const func of functions) {
-    let unitName: string;
-
-    // File placement follows the function's NAMESPACE (its real source module,
-    // from the binary) — not its method-conversion class. A function can be a
-    // method of ClientStrc (declared in that class's header) while its body
-    // belongs to Core::Core::Cmd. Only fall back to the class/_unnamespaced
-    // when the function has no namespace of its own.
-    const className = classMethodMap.get(func.address);
-    const templateUnit = templateRegistry()?.unitOf(func.address);
-    if (templateUnit) {
-      unitName = templateUnit;
-    } else if (func.namespace) {
-      unitName = normalizeUnitName(func.namespace);
-    } else if (className) {
-      unitName = normalizeUnitName(className);
-    } else {
-      unitName = '_unnamespaced';
-    }
+    // Source-unit placement and symbol namespace are separate facts. Only an
+    // explicit, validated placement changes where the body is emitted.
+    const unitName = placedUnits.get(addressKey(func.address)) ?? defaultUnit(func);
 
     if (!organized.has(unitName)) {
       organized.set(unitName, []);

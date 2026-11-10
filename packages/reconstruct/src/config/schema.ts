@@ -21,6 +21,8 @@ export interface ProjectConfig {
   /** Path to external JSON file with additional MethodConversionEntry[] */
   methodConversionsFile?: string;
   typeOwnership?: TypeOwnershipEntry[];
+  /** Verified source-unit placement, independent of a function's symbol namespace. */
+  functionPlacements?: FunctionPlacementEntry[];
   modules?: Record<string, ModuleConfig>;
   autoMethodConversion?: AutoMethodConversionConfig;
   /** Secondary Ghidra projects to merge into the reconstruction */
@@ -40,6 +42,16 @@ export interface ProjectConfig {
    * it names keeps external linkage (codegen/file-static-functions.ts).
    */
   foreignReferences?: ForeignReferenceEntry[];
+}
+
+/** One function known to belong to an existing emitted translation unit. */
+export interface FunctionPlacementEntry {
+  /** Function entry address in the primary binary. */
+  address: string;
+  /** Existing namespace unit to emit this function into. */
+  unit: string;
+  /** Human-checkable source of the placement fact, such as a symbol or object-file record. */
+  evidence: string;
 }
 
 /**

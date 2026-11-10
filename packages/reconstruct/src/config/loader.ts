@@ -181,6 +181,29 @@ function validate(config: ProjectConfig, source: string): void {
     }
   }
 
+  // Source-unit placement is explicit evidence, not a namespace or proximity guess.
+  if (config.functionPlacements !== undefined) {
+    if (!Array.isArray(config.functionPlacements)) {
+      throw new Error(`${source}: "functionPlacements" must be an array`);
+    }
+    const seen = new Set<string>();
+    for (let i = 0; i < config.functionPlacements.length; i++) {
+      const entry = config.functionPlacements[i];
+      if (!entry || typeof entry.address !== 'string' || !/^(?:0x)?[0-9a-fA-F]+$/.test(entry.address)) {
+        throw new Error(`${source}: functionPlacements[${i}] needs a hex "address"`);
+      }
+      if (typeof entry.unit !== 'string' || !entry.unit.trim() || entry.unit.includes('/') || entry.unit.includes('\\')) {
+        throw new Error(`${source}: functionPlacements[${i}] needs a namespace "unit"`);
+      }
+      if (typeof entry.evidence !== 'string' || !entry.evidence.trim()) {
+        throw new Error(`${source}: functionPlacements[${i}] needs nonempty "evidence"`);
+      }
+      const address = entry.address.toLowerCase().replace(/^0x/, '').padStart(8, '0');
+      if (seen.has(address)) throw new Error(`${source}: duplicate function placement at ${entry.address}`);
+      seen.add(address);
+    }
+  }
+
   // Validate templates
   if (config.templates) {
     const t = config.templates;
@@ -330,6 +353,7 @@ function applyDefaults(config: ProjectConfig): ProjectConfig {
     targets: config.targets ?? {},
     methodConversions: config.methodConversions ?? [],
     typeOwnership: config.typeOwnership ?? [],
+    functionPlacements: config.functionPlacements ?? [],
   };
 }
 

@@ -38,5 +38,7 @@ describe('scanReferences', () => {
     const r = scanReferences('A::B::Open(); C :: Open(); xA::Open2(); // D::Open();\n::Open();');
     assert.deepStrictEqual([...(r.qualified.get('Open') ?? [])].sort(), ['A::B::Open', 'C::Open']);
     assert.deepStrictEqual([...(r.qualified.get('Open2') ?? [])], ['xA::Open2']);
+    assert.equal(r.unqualified.has('Open'), false, 'root-qualified ::Open is not bare');
+    assert.deepStrictEqual([...scanReferences('Open(); A::Open();').unqualified], ['Open']);
   });
 });

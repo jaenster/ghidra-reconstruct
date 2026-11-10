@@ -1069,21 +1069,53 @@ export function generateImplementation(
     context._enclosingResolvedNamespace = useNamespace ? resolvedNamespace : undefined;
   }
 
+  let activeNamespace = useNamespace ? namespace : '';
+  let activeResolvedNamespace = useNamespace ? resolvedNamespace : undefined;
+  let currentIfdef: string | undefined;
+  const scopeOf = (func: ExtractedFunction) =>
+    classInfo ? { resolvedNamespace, namespace, useNamespace }
+      : unitNamespace([func], undefined, options);
+  const switchScope = (func: ExtractedFunction): void => {
+    const scope = scopeOf(func);
+    const next = scope.useNamespace ? scope.namespace : '';
+    if (next === activeNamespace) return;
+    if (currentIfdef) {
+      lines.push(`#endif // ${currentIfdef}`, '');
+      currentIfdef = undefined;
+    }
+    if (activeNamespace) lines.push(`} // namespace ${activeNamespace}`, '');
+    if (next) lines.push(`namespace ${next} {`, '');
+    activeNamespace = next;
+    activeResolvedNamespace = scope.useNamespace ? scope.resolvedNamespace : undefined;
+    if (context) {
+      context._enclosingNamespace = next || undefined;
+      context._enclosingResolvedNamespace = activeResolvedNamespace;
+    }
+  };
+
   // A static function has no declaration in the header; one a function above its
   // definition references is declared here.
   const fileStatic = (func: ExtractedFunction) =>
     context?.fileStaticFunctions?.get(fileStaticKey(func.address));
   {
-    const forward: string[] = [];
+    const forward: ExtractedFunction[] = [];
     const seen = new Set<string>();
     for (const func of functions) {
       const entry = fileStatic(func);
       if (entry && [...entry.referrers].some(r => seen.has(r))) {
-        forward.push(`static ${generateFunctionSignature(func)};`);
+        forward.push(func);
       }
       seen.add(fileStaticKey(func.address));
     }
-    if (forward.length > 0) lines.push(...forward, '');
+    for (const func of forward) {
+      switchScope(func);
+      lines.push(`static ${generateFunctionSignature(func)};`);
+    }
+    if (forward.length > 0) {
+      lines.push('');
+      // The first body starts in the unit's ordinary scope.
+      switchScope(functions[0]);
+    }
   }
 
   // File-local globals are emitted after the bodies, at rootTypedefInsertIndex.
@@ -1094,7 +1126,6 @@ export function generateImplementation(
   }
 
   // Generate function implementations, grouping consecutive same-ifdef functions
-  let currentIfdef: string | undefined;
   for (const func of functions) {
     // Skip external functions (they're just declarations)
     if (func.isExternal) continue;
@@ -1102,12 +1133,14 @@ export function generateImplementation(
     // Skip library functions — they don't get implementations
     if (func.isLibrary) continue;
 
+    switchScope(func);
+
     // A thunk is a single JMP. It gets a forwarder, never a decompiled body:
     // `decompile` on a thunk returns the TARGET's body under the thunk's name,
     // so emitting that text would copy every target under a second name.
     if (func.isThunk) {
       const forwarder = unitThunkForwarder(
-        func, classInfo, context, useNamespace ? resolvedNamespace : undefined
+        func, classInfo, context, activeResolvedNamespace
       );
       if (!forwarder) continue;
       if (func.ifdef !== currentIfdef) {
@@ -1148,15 +1181,15 @@ export function generateImplementation(
     // A template member defined in a namespaced unit (the COMDAT that unit's object
     // compiled) is an explicit specialization: it is defined at root scope, which
     // encloses the template, so the unit's namespace closes around it.
-    const rootMember = useNamespace && memberDefinitionScope(func) !== undefined;
+    const rootMember = !!activeNamespace && memberDefinitionScope(func) !== undefined;
     if (rootMember) {
-      lines.push(`} // namespace ${namespace}`, '');
+      lines.push(`} // namespace ${activeNamespace}`, '');
       if (context) {
         context._enclosingNamespace = undefined;
         context._enclosingResolvedNamespace = undefined;
       }
     }
-    const definitionNamespace = useNamespace && !rootMember ? resolvedNamespace : undefined;
+    const definitionNamespace = !rootMember ? activeResolvedNamespace : undefined;
     try {
       impl = generateFunctionImplementation(func, classInfo, options, context, isInternal, definitionNamespace, isInline);
     } catch (err) {
@@ -1178,10 +1211,10 @@ export function generateImplementation(
       if (entry) lines.push(entry, '');
     }
     if (rootMember) {
-      lines.push(`namespace ${namespace} {`, '');
+      lines.push(`namespace ${activeNamespace} {`, '');
       if (context) {
-        context._enclosingNamespace = namespace;
-        context._enclosingResolvedNamespace = resolvedNamespace;
+        context._enclosingNamespace = activeNamespace;
+        context._enclosingResolvedNamespace = activeResolvedNamespace;
       }
     }
   }
@@ -1344,8 +1377,8 @@ export function generateImplementation(
   }
 
   // Close namespace
-  if (useNamespace) {
-    lines.push(`} // namespace ${namespace}`);
+  if (activeNamespace) {
+    lines.push(`} // namespace ${activeNamespace}`);
   }
 
   // ── Generate wrapper functions for methods with namespace ──────────────────
@@ -1440,11 +1473,14 @@ export function generateImplementation(
   // — registers, inherited at entry, never pushed by the OS. They are part of the
   // body's model of itself, not of the call contract, so they cannot appear in
   // the entry signature; they are forwarded as zero and the comment says so.
-  if (useNamespace && options.organization === 'namespace') {
+  if (options.organization === 'namespace') {
     for (const func of functions) {
       if (func.isExternal || func.isThunk || func.isLibrary) continue;
       if (func.parentClass) continue;
       if (!ENTRY_POINT_NAMES.has(func.name)) continue;
+      const entryScope = scopeOf(func);
+      if (!entryScope.useNamespace) continue;
+      const entryNamespace = entryScope.namespace;
       const params = func.parameters ?? [];
       const isStackParam = (p: { storage?: string }) => !p.storage || /^Stack\[/.test(p.storage);
       const stackParams = params.filter(isStackParam);
@@ -1462,13 +1498,13 @@ export function generateImplementation(
       const ret = func.returnType && func.returnType !== 'void' ? 'return ' : '';
       entryPointLines.push('');
       entryPointLines.push(`// Process entry point — the linker resolves \`${func.name}\` at root scope,`);
-      entryPointLines.push(`// not \`${namespace}::${func.name}\`.`);
+      entryPointLines.push(`// not \`${entryNamespace}::${func.name}\`.`);
       if (registerParams.length > 0) {
         entryPointLines.push(`// ${registerParams.map(p => p.name).join(', ')} are register-storage in Ghidra's`);
         entryPointLines.push('// prototype (inherited, not pushed by the caller); they are not entry arguments.');
       }
       entryPointLines.push(`extern "C" ${func.returnType || 'int'} __stdcall ${func.name}(${declArgs}) {`);
-      entryPointLines.push(`    ${ret}${namespace}::${func.name}(${callArgs});`);
+      entryPointLines.push(`    ${ret}${entryNamespace}::${func.name}(${callArgs});`);
       entryPointLines.push('}');
     }
   }

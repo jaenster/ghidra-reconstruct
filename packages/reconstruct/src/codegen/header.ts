@@ -462,6 +462,23 @@ export function generateHeader(
     lines.push('');
   }
 
+  let activeNamespace = useNamespace ? namespace! : '';
+  let activeIfdef: string | undefined;
+  const switchFunctionNamespace = (func: ExtractedFunction): void => {
+    if (classInfo || options.organization !== 'namespace') return;
+    const resolved = namespaceResolution().of(func);
+    const rendered = renderNamespace(resolved);
+    const next = rendered && !resolved?.classScope && isValidNamespace(rendered) ? rendered : '';
+    if (next === activeNamespace) return;
+    if (activeIfdef) {
+      lines.push(`#endif // ${activeIfdef}`);
+      activeIfdef = undefined;
+    }
+    if (activeNamespace) lines.push(`} // namespace ${activeNamespace}`, '');
+    if (next) lines.push(`namespace ${next} {`, '');
+    activeNamespace = next;
+  };
+
   // Emit standalone functions (class was already emitted above)
   if (!classInfo) {
     // Global/file-level function declarations.
@@ -522,34 +539,35 @@ export function generateHeader(
 
     if (declaredFunctions.length > 0) {
       lines.push('// Function declarations');
-      let currentIfdef: string | undefined;
       const emittedFuncNames = new Set<string>();
       for (const func of declaredFunctions) {
+        switchFunctionNamespace(func);
         // Deduplicate by name + parameter signature, NOT name alone. Same-name
         // functions with DIFFERENT parameters are valid C++ overloads and must
         // all be declared — dropping them made callers bind to the one surviving
         // overload (e.g. 7 SpawnMonster overloads, STATLIST_GetItemStatBonusValues),
         // causing "cannot convert" errors. Same name AND same params (a return-type-
         // only difference, which C++ can't overload) still collapses to the first.
-        const sigKey = func.name + '(' +
+        const sigKey = activeNamespace + '::' + func.name + '(' +
           (func.parameters ?? []).map(p => p.dataType).join(',') + ')';
         if (emittedFuncNames.has(sigKey)) continue;
         emittedFuncNames.add(sigKey);
         // Group consecutive functions with the same ifdef under one guard
-        if (func.ifdef !== currentIfdef) {
-          if (currentIfdef) {
-            lines.push(`#endif // ${currentIfdef}`);
+        if (func.ifdef !== activeIfdef) {
+          if (activeIfdef) {
+            lines.push(`#endif // ${activeIfdef}`);
           }
           if (func.ifdef) {
             lines.push(`#ifdef ${func.ifdef}`);
           }
-          currentIfdef = func.ifdef;
+          activeIfdef = func.ifdef;
         }
         lines.push(generateFunctionDeclaration(func, options, fnAddrMap));
       }
       // Close any open ifdef
-      if (currentIfdef) {
-        lines.push(`#endif // ${currentIfdef}`);
+      if (activeIfdef) {
+        lines.push(`#endif // ${activeIfdef}`);
+        activeIfdef = undefined;
       }
       if (internalCount > 0) {
         lines.push(`// ${internalCount} internal function${internalCount > 1 ? 's' : ''} (defined in .cpp)`);
@@ -563,7 +581,10 @@ export function generateHeader(
     const entries = hasExternEntry ? nonLibraryFunctions.filter(f => hasExternEntry(f) && !f.ifdef) : [];
     if (entries.length > 0) {
       lines.push('// Extern entries for hand-written callers (each forwards to the function of its name)');
-      for (const func of entries) lines.push(`${externEntryDeclaration(func)};`);
+      for (const func of entries) {
+        switchFunctionNamespace(func);
+        lines.push(`${externEntryDeclaration(func)};`);
+      }
       lines.push('');
     }
   }
@@ -631,8 +652,8 @@ export function generateHeader(
   }
 
   // Close namespace
-  if (useNamespace) {
-    lines.push(`} // namespace ${namespace}`);
+  if (activeNamespace) {
+    lines.push(`} // namespace ${activeNamespace}`);
   }
 
   return lines.join('\n');
