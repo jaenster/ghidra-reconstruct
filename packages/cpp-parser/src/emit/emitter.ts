@@ -2297,7 +2297,28 @@ export class CppEmitter {
   }
 
   private emitStringLiteral(node: StringLiteralExpr): void {
-    this.write(node.raw);
+    if (node.isRaw) {
+      this.write(node.raw);
+      return;
+    }
+    // Parsed literals retain their source spelling. Escape only question marks
+    // not already escaped in that spelling, so C++03 phase-one trigraph
+    // substitution cannot change their contents. Keep prefix and suffix intact.
+    const firstQuote = node.raw.indexOf('"');
+    const lastQuote = node.raw.lastIndexOf('"');
+    if (firstQuote < 0 || lastQuote <= firstQuote) {
+      this.write(node.raw);
+      return;
+    }
+    let out = node.raw.slice(0, firstQuote + 1);
+    let backslashes = 0;
+    for (let i = firstQuote + 1; i < lastQuote; i++) {
+      const ch = node.raw[i];
+      if (ch === '?' && backslashes % 2 === 0) out += '\\';
+      out += ch;
+      backslashes = ch === '\\' ? backslashes + 1 : 0;
+    }
+    this.write(out + node.raw.slice(lastQuote));
   }
 
   private emitBoolLiteral(node: BoolLiteralExpr): void {
