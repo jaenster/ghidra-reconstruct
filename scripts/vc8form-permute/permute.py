@@ -138,6 +138,15 @@ class Oracle:
         return '%d-%s' % (size, hashlib.sha256(bytes(b)).hexdigest()[:8])
 
 
+class CheckoutChanged(SystemExit):
+    pass
+
+
+def checkout_head(repo):
+    p = subprocess.run(['git', '-C', repo, 'rev-parse', 'HEAD'], capture_output=True, text=True)
+    return p.stdout.strip() if p.returncode == 0 else '-'
+
+
 class Compiler:
     """Trials compiled beside their TU's translated source, objects in a scratch directory."""
 
@@ -160,7 +169,12 @@ class Compiler:
                 h.update(open(os.path.join(self.o.BUILD, p), 'rb').read())
             except OSError:
                 h.update(b'-')
+        # The tree the trials splice into: a checkout moved to another commit is another tree.
+        h.update(checkout_head(self.o.REPO).encode())
         return h.hexdigest()
+
+    def changed(self):
+        return self.state() != self.tree
 
     def run(self, trials):
         """trials: [(tu, text)] -> [object path or None], in order."""
@@ -176,13 +190,16 @@ class Compiler:
             paths.append((src, obj))
             groups[b.extra_flags(tu + '.cpp')].append(k)
         work = []
+        # A small round is spread over every job: one cl.exe per 16 trials would leave
+        # most of them idle when a step has a few dozen.
+        size = max(1, min(self.batch, -(-len(trials) // self.jobs)))
         for flags, ks in groups.items():
-            for i in range(0, len(ks), self.batch):
-                work.append((ks[i:i + self.batch], trials[ks[i]][0]))
+            for i in range(0, len(ks), size):
+                work.append((ks[i:i + size], trials[ks[i]][0]))
         fcntl.flock(self.lock, fcntl.LOCK_EX)   # build.py's lock: no oracle build of this checkout meanwhile
         try:
-            if self.state() != self.tree:
-                raise SystemExit('the checkout changed under the run (a build or an update): start again')
+            if self.changed():
+                raise CheckoutChanged('the checkout changed under the run (a build or an update): start again')
 
             def one(item):
                 ks, tu = item
@@ -212,6 +229,9 @@ class Compiler:
                 os.remove(p)
 
     def close(self):
+        self.clean()
+
+    def clean(self):
         # The compile logs of failed batches stay, for the report.
         for n in os.listdir(self.scratch):
             if n.endswith('.obj'):
@@ -315,14 +335,15 @@ def main():
     ap.add_argument('--pair-top', type=int, default=3)
     ap.add_argument('--no-pairs', action='store_true')
     ap.add_argument('--no-phase', action='store_true')
+    ap.add_argument('--resume', action='store_true',
+                    help='a long run: targets smallest first, --group at a time, each recorded in OUT/done.tsv '
+                         'and skipped when the run starts again; stops cleanly when the checkout moves or OUT/STOP exists')
+    ap.add_argument('--group', type=int, default=1, help='targets per step of a --resume run')
     args = ap.parse_args()
-    t0 = time.time()
     os.makedirs(args.out, exist_ok=True)
     gr = os.path.dirname(os.path.dirname(HERE))
     orc = Oracle(args.checkout)
     comp = Compiler(orc, args.jobs, os.path.join(os.path.abspath(args.out), 'obj'))
-    trials_log = open(os.path.join(args.out, 'trials.tsv'), 'w')
-    trials_log.write('target\ton\tform\ttarget_status\tsim\tgained\tlost\tnote\n')
 
     # -- the targets
     pool_path = args.pool or os.path.join(args.checkout, 'asm_matching', 'msvc8', 'evidence', 'audit.tsv')
@@ -333,21 +354,19 @@ def main():
             continue
         if int(p[5]) >= args.max_insns:
             continue
-        pool.append((int(p[0], 16), p[2], p[3], p[9]))
+        pool.append((int(p[0], 16), p[2], p[3], p[9], int(p[5])))
     if args.addrs:
         want = {int(a, 16) for a in args.addrs.split(',')}
         targets = [x for x in pool if x[0] in want]
     else:
         targets = sorted(random.Random(args.seed).sample(pool, min(args.sample or len(pool), len(pool))))
+    if args.resume:
+        targets.sort(key=lambda t: (t[4], t[0]))     # smallest first
+    targets = [t[:4] for t in targets]
     log('pool %d, targets %d' % (len(pool), len(targets)))
 
-    # -- per target: its TU, its body and its helpers' bodies
-    srcs = {}
-    jobs = []           # one per target
-    names = {s: (name, tu) for s, _e, name, tu, _sym, _m, _d in orc.rows}
-    by_leaf = collections.defaultdict(dict)
-    for s, _e, name, tu, _sym, _m, _d in orc.rows:
-        by_leaf[tu].setdefault(name.rsplit('::', 1)[-1], s)
+    if args.resume:
+        args.snapshot = small_snapshot(args.snapshot, os.path.join(args.out, 'snap-small'), targets, orc)
     snap_calls = {}
     want_addrs = {'%08x' % t[0] for t in targets}
     with open(os.path.join(args.snapshot, 'functions.ndjson')) as fh:
@@ -356,315 +375,423 @@ def main():
             if i >= 0 and line[i + 11:i + 19] in want_addrs:
                 r = json.loads(line)
                 snap_calls[int(r['address'], 16)] = r.get('calledFunctions', [])
-    for start, name, tu, status in targets:
-        if tu not in srcs:
-            srcs[tu] = None
-            path = os.path.join(orc.REPO, tu + '.cpp')
-            if os.path.exists(path):
-                tree = open(path, encoding='utf-8', errors='surrogateescape').read()
-                built = open(os.path.join(orc.SRC, tu + '.cpp'), encoding='utf-8', errors='surrogateescape').read()
-                if orc.translate(tu, tree) == built:
-                    srcs[tu] = tree
-                else:
-                    log('skip %s: its translation is not the one built' % tu)
-        text = srcs[tu]
-        span = function_span(text, start) if text else None
-        if not span:
-            log('skip %08x %s: no definition in %s' % (start, name, tu))
-            continue
-        helpers = []
-        for callee in snap_calls.get(start, []):
-            h = by_leaf[tu].get(callee)
-            if h is not None and h != start and function_span(text, h):
-                helpers.append(h)
-        jobs.append(dict(start=start, name=name, tu=tu, status=status, span=span, helpers=sorted(set(helpers))))
 
-    def fit(new, old):
-        """new spread over old's line count where it can be: a quarantine names lines."""
-        want, lines = old.count('\n'), new.split('\n')
-        if len(lines) - 1 < want:
-            return new + '\n' * (want - len(lines) + 1)
-        while len(lines) - 1 > want and len(lines) > 1:
-            tail = lines.pop()
-            if '//' in lines[-1] or lines[-1].lstrip().startswith('#') or tail.lstrip().startswith('#'):
-                lines.append(tail)
-                break
-            lines[-1] = lines[-1] + ' ' + tail.strip()
-        return '\n'.join(lines)
+    def run(targets, out):
+        """Steps 1-6 over targets, every output into out."""
 
-    def trial_text(tu, bodies, prefix=None):
-        """The TU with bodies {start: text} swapped in, prefix (start, text) put on the line
-        of a definition, translated for VC8."""
-        text = srcs[tu]
-        spans = {}
-        for st, b in bodies.items():
-            sp = function_span(text, st)
-            spans[sp] = fit(b, text[sp[0]:sp[1]])
-        if prefix:
-            a, _b = function_span(text, prefix[0])
-            spans[(a, a)] = prefix[1]
-        return orc.translate(tu, splice(text, spans))
-
-    tus = sorted({j['tu'] for j in jobs})
-    base_objs = comp.run([(tu, trial_text(tu, {})) for tu in tus])
-    base = {tu: orc.judge(tu, o) for tu, o in zip(tus, base_objs)}
-    comp.drop(base_objs)
-    # Helpers count only where VC8 inlines them: a callee our object still calls keeps
-    # its own body, and no form of it can change the target's bytes.
-    sym_of = {s: sym for s, _e, _n, _tu, sym, _m, _d in orc.rows}
-    for j in jobs:
-        bt = base[j['tu']].get(j['start'])
-        calls = set(bt[2][0].calls) if bt and bt[2] else set()
-        j['helpers'] = [h for h in j['helpers'] if sym_of.get(h) not in calls]
-
-    # -- candidates, and the bodies printed back unchanged
-    on_fns = sorted({(j['tu'], s) for j in jobs for s in [j['start']] + j['helpers']})
-    inp = [{'id': '%s|%08x' % (tu, s), 'text': srcs[tu][slice(*function_span(srcs[tu], s))]} for tu, s in on_fns]
-    json.dump(inp, open(os.path.join(args.out, 'cand-in.json'), 'w'))
-    t1 = time.time()
-    tsx(['singles', os.path.join(args.out, 'cand-in.json'), os.path.join(args.out, 'cand-out.json'),
-         '--types', os.path.join(args.snapshot, 'dataTypes.ndjson'),
-         '--globals', os.path.join(args.snapshot, 'globals.ndjson'), '--max-anchors', str(args.max_anchors)], gr)
-    cands = {r['id']: r for r in json.load(open(os.path.join(args.out, 'cand-out.json')))}
-    log('candidates: %d functions, %d forms (%.0fs)' % (len(cands), sum(len(r['candidates']) for r in cands.values()),
-                                                       time.time() - t1))
-
-    rt_items, rt_jobs = [], []
-    for j in jobs:
-        ids = ['%s|%08x' % (j['tu'], s) for s in [j['start']] + j['helpers']]
-        if any(cands[i].get('error') for i in ids):
-            j['skip'] = 'parse: ' + '; '.join(cands[i]['error'] for i in ids if cands[i].get('error'))
-            continue
-        bodies = {s: cands['%s|%08x' % (j['tu'], s)]['roundtrip'] for s in [j['start']] + j['helpers']}
-        rt_items.append((j['tu'], trial_text(j['tu'], bodies)))
-        rt_jobs.append(j)
-    rt_objs = comp.run(rt_items)
-    for j, o in zip(rt_jobs, rt_objs):
-        rt = orc.judge(j['tu'], o)
-        b = base[j['tu']]
-        diff = [s for s in b if (b[s][0], b[s][1]) != (rt.get(s, ('?', 0))[0], rt.get(s, ('?', 0))[1])]
-        if diff:
-            j['skip'] = 'printing the bodies back changes %d function(s), e.g. %08x' % (len(diff), diff[0])
-        j['base'] = b[j['start']]
-        if j['base'][0] == 'MATCH':
-            j['skip'] = 'already MATCH in this checkout'
-    comp.drop(rt_objs)
-
-    # -- phase noise: register-tie-only targets, 1..63 dummy externs before the definition
-    if not args.no_phase:
-        scan = [j for j in jobs if 'skip' not in j and orc.register_only(j['base'])]
-        items = [(j['tu'], trial_text(j['tu'], {}, (j['start'], externs(n)))) for j in scan for n in range(1, 64)]
-        objs = comp.run(items)
-        for k, j in enumerate(scan):
-            hit = [n for n in range(1, 64) if orc.judge(j['tu'], objs[k * 63 + n - 1])[j['start']][0] == 'MATCH']
-            if hit:
-                j['skip'] = 'phase noise: MATCH with %d dummy externs' % hit[0]
-            j['phase_scanned'] = True
-        comp.drop(objs)
-        log('phase scan: %d register-only, %d phase noise' % (len(scan), sum('phase noise' in j.get('skip', '') for j in scan)))
-
-    live = [j for j in jobs if 'skip' not in j]
-    for j in jobs:
-        if 'skip' in j:
-            log('skip %08x %s: %s' % (j['start'], j['name'], j['skip']))
-
-    def run_trials(items):
-        """items: [(job, on, form, bodies)] -> [(item, target status, sim, gained, lost)]"""
-        objs = comp.run([(j['tu'], trial_text(j['tu'], bodies)) for j, _on, _f, bodies in items])
-        res = []
-        for it, o in zip(items, objs):
-            j = it[0]
-            b = base[j['tu']]
-            if o is None:
-                res.append((it, 'FAIL', 0.0, set(), set()))
-                continue
-            st = orc.judge(j['tu'], o)
-            gained = {s for s in st if st[s][0] == 'MATCH' and b[s][0] != 'MATCH'}
-            lost = {s for s in b if b[s][0] == 'MATCH' and st.get(s, ('MISSING',))[0] != 'MATCH'}
-            lost |= {s for s in b if b[s][0] not in ('MISSING', 'QUARANTINE') and st.get(s, ('MISSING',))[0] in ('MISSING', 'QUARANTINE')}
-            res.append((it, st[j['start']][0], st[j['start']][1], gained, lost))
-        comp.drop(objs)
-        return res
-
-    def note(r, extra=''):
-        (j, on, form, _b), ts, sim, gained, lost = r
-        trials_log.write('%08x\t%08x\t%s\t%s\t%.4f\t%s\t%s\t%s\n' % (
-            j['start'], on, '+'.join(form) if isinstance(form, tuple) else form, ts, sim,
-            ','.join('%08x' % s for s in sorted(gained)), ','.join('%08x' % s for s in sorted(lost)), extra))
-
-    # -- singles
-    items = []
-    for j in live:
-        for on in [j['start']] + j['helpers']:
-            for c in cands['%s|%08x' % (j['tu'], on)]['candidates']:
-                items.append((j, on, c['form'], {on: c['text']}))
-    t2 = time.time()
-    res = run_trials(items)
-    log('singles: %d trials (%.0fs)' % (len(items), time.time() - t2))
-    accepted = []       # (job, on, forms tuple, gained, sim)
-    best = collections.defaultdict(list)
-    adds = {('%s|%08x' % (j['tu'], on), c['form']): c['adds'] for j in live for on in [j['start']] + j['helpers']
-            for c in cands['%s|%08x' % (j['tu'], on)]['candidates']}
-    for r in res:
-        (j, on, form, bodies), ts, sim, gained, lost = r
-        note(r)
-        if ts == 'MATCH' and not lost:
-            accepted.append(dict(job=j, on=on, forms=(form,), gained=gained, bodies=bodies))
-        elif ts != 'FAIL' and not lost:
-            best[j['start']].append((sim, on, form, bodies))
-
-    # -- pairs, for targets no single form matched
-    if not args.no_pairs:
-        done = {a['job']['start'] for a in accepted}
-        pair_items, apply_in = [], []
-        for j in live:
-            if j['start'] in done:
-                continue
-            singles = sorted(best[j['start']], key=lambda x: -x[0])
-            top = [x for x in singles if x[0] > j['base'][1]][:args.pair_top]
-            seen = set()
-            for sim, on, form, bodies in top:
-                for sim2, on2, form2, bodies2 in singles:
-                    if (on2, form2) == (on, form) or frozenset([(on, form), (on2, form2)]) in seen:
-                        continue
-                    seen.add(frozenset([(on, form), (on2, form2)]))
-                    if on2 != on:
-                        pair_items.append((j, on, (form, form2), {**bodies, **bodies2}))
+        t0 = time.time()
+        os.makedirs(out, exist_ok=True)
+        trials_log = open(os.path.join(out, 'trials.tsv'), 'w')
+        trials_log.write('target\ton\tform\ttarget_status\tsim\tgained\tlost\tnote\n')
+        srcs = {}
+        jobs = []           # one per target
+        names = {s: (name, tu) for s, _e, name, tu, _sym, _m, _d in orc.rows}
+        by_leaf = collections.defaultdict(dict)
+        for s, _e, name, tu, _sym, _m, _d in orc.rows:
+            by_leaf[tu].setdefault(name.rsplit('::', 1)[-1], s)
+        for start, name, tu, status in targets:
+            if tu not in srcs:
+                srcs[tu] = None
+                path = os.path.join(orc.REPO, tu + '.cpp')
+                if os.path.exists(path):
+                    tree = open(path, encoding='utf-8', errors='surrogateescape').read()
+                    built = open(os.path.join(orc.SRC, tu + '.cpp'), encoding='utf-8', errors='surrogateescape').read()
+                    if orc.translate(tu, tree) == built:
+                        srcs[tu] = tree
                     else:
-                        fid = '%s|%08x' % (j['tu'], on)
-                        apply_in.append(dict(id='%d|%s' % (len(apply_in), fid), text=srcs[j['tu']][slice(*function_span(srcs[j['tu']], on))],
-                                             forms=[form, form2], job=j, on=on))
-        if apply_in:
-            json.dump([{k: v for k, v in a.items() if k in ('id', 'text', 'forms')} for a in apply_in],
-                      open(os.path.join(args.out, 'apply-in.json'), 'w'))
-            tsx(['apply', os.path.join(args.out, 'apply-in.json'), os.path.join(args.out, 'apply-out.json')], gr)
-            for a, r in zip(apply_in, json.load(open(os.path.join(args.out, 'apply-out.json')))):
-                if r['refused'] or len(r['applied']) != 2:
+                        log('skip %s: its translation is not the one built' % tu)
+            text = srcs[tu]
+            span = function_span(text, start) if text else None
+            if not span:
+                log('skip %08x %s: no definition in %s' % (start, name, tu))
+                continue
+            helpers = []
+            for callee in snap_calls.get(start, []):
+                h = by_leaf[tu].get(callee)
+                if h is not None and h != start and function_span(text, h):
+                    helpers.append(h)
+            jobs.append(dict(start=start, name=name, tu=tu, status=status, span=span, helpers=sorted(set(helpers))))
+
+        def fit(new, old):
+            """new spread over old's line count where it can be: a quarantine names lines."""
+            want, lines = old.count('\n'), new.split('\n')
+            if len(lines) - 1 < want:
+                return new + '\n' * (want - len(lines) + 1)
+            while len(lines) - 1 > want and len(lines) > 1:
+                tail = lines.pop()
+                if '//' in lines[-1] or lines[-1].lstrip().startswith('#') or tail.lstrip().startswith('#'):
+                    lines.append(tail)
+                    break
+                lines[-1] = lines[-1] + ' ' + tail.strip()
+            return '\n'.join(lines)
+
+        def trial_text(tu, bodies, prefix=None):
+            """The TU with bodies {start: text} swapped in, prefix (start, text) put on the line
+            of a definition, translated for VC8."""
+            text = srcs[tu]
+            spans = {}
+            for st, b in bodies.items():
+                sp = function_span(text, st)
+                spans[sp] = fit(b, text[sp[0]:sp[1]])
+            if prefix:
+                a, _b = function_span(text, prefix[0])
+                spans[(a, a)] = prefix[1]
+            return orc.translate(tu, splice(text, spans))
+
+        tus = sorted({j['tu'] for j in jobs})
+        base_objs = comp.run([(tu, trial_text(tu, {})) for tu in tus])
+        base = {tu: orc.judge(tu, o) for tu, o in zip(tus, base_objs)}
+        comp.drop(base_objs)
+        # Helpers count only where VC8 inlines them: a callee our object still calls keeps
+        # its own body, and no form of it can change the target's bytes.
+        sym_of = {s: sym for s, _e, _n, _tu, sym, _m, _d in orc.rows}
+        for j in jobs:
+            bt = base[j['tu']].get(j['start'])
+            calls = set(bt[2][0].calls) if bt and bt[2] else set()
+            j['helpers'] = [h for h in j['helpers'] if sym_of.get(h) not in calls]
+
+        # -- candidates, and the bodies printed back unchanged
+        on_fns = sorted({(j['tu'], s) for j in jobs for s in [j['start']] + j['helpers']})
+        inp = [{'id': '%s|%08x' % (tu, s), 'text': srcs[tu][slice(*function_span(srcs[tu], s))]} for tu, s in on_fns]
+        json.dump(inp, open(os.path.join(out, 'cand-in.json'), 'w'))
+        t1 = time.time()
+        tsx(['singles', os.path.join(out, 'cand-in.json'), os.path.join(out, 'cand-out.json'),
+             '--types', os.path.join(args.snapshot, 'dataTypes.ndjson'),
+             '--globals', os.path.join(args.snapshot, 'globals.ndjson'), '--max-anchors', str(args.max_anchors)], gr)
+        cands = {r['id']: r for r in json.load(open(os.path.join(out, 'cand-out.json')))}
+        log('candidates: %d functions, %d forms (%.0fs)' % (len(cands), sum(len(r['candidates']) for r in cands.values()),
+                                                           time.time() - t1))
+
+        rt_items, rt_jobs = [], []
+        for j in jobs:
+            ids = ['%s|%08x' % (j['tu'], s) for s in [j['start']] + j['helpers']]
+            if any(cands[i].get('error') for i in ids):
+                j['skip'] = 'parse: ' + '; '.join(cands[i]['error'] for i in ids if cands[i].get('error'))
+                continue
+            bodies = {s: cands['%s|%08x' % (j['tu'], s)]['roundtrip'] for s in [j['start']] + j['helpers']}
+            rt_items.append((j['tu'], trial_text(j['tu'], bodies)))
+            rt_jobs.append(j)
+        rt_objs = comp.run(rt_items)
+        for j, o in zip(rt_jobs, rt_objs):
+            rt = orc.judge(j['tu'], o)
+            b = base[j['tu']]
+            diff = [s for s in b if (b[s][0], b[s][1]) != (rt.get(s, ('?', 0))[0], rt.get(s, ('?', 0))[1])]
+            if diff:
+                j['skip'] = 'printing the bodies back changes %d function(s), e.g. %08x' % (len(diff), diff[0])
+            j['base'] = b[j['start']]
+            if j['base'][0] == 'MATCH':
+                j['skip'] = 'already MATCH in this checkout'
+        comp.drop(rt_objs)
+
+        # -- phase noise: register-tie-only targets, 1..63 dummy externs before the definition
+        if not args.no_phase:
+            scan = [j for j in jobs if 'skip' not in j and orc.register_only(j['base'])]
+            items = [(j['tu'], trial_text(j['tu'], {}, (j['start'], externs(n)))) for j in scan for n in range(1, 64)]
+            objs = comp.run(items)
+            for k, j in enumerate(scan):
+                hit = [n for n in range(1, 64) if orc.judge(j['tu'], objs[k * 63 + n - 1])[j['start']][0] == 'MATCH']
+                if hit:
+                    j['skip'] = 'phase noise: MATCH with %d dummy externs' % hit[0]
+                j['phase_scanned'] = True
+            comp.drop(objs)
+            log('phase scan: %d register-only, %d phase noise' % (len(scan), sum('phase noise' in j.get('skip', '') for j in scan)))
+
+        live = [j for j in jobs if 'skip' not in j]
+        for j in jobs:
+            if 'skip' in j:
+                log('skip %08x %s: %s' % (j['start'], j['name'], j['skip']))
+
+        def run_trials(items):
+            """items: [(job, on, form, bodies)] -> [(item, target status, sim, gained, lost)]"""
+            objs = comp.run([(j['tu'], trial_text(j['tu'], bodies)) for j, _on, _f, bodies in items])
+            res = []
+            for it, o in zip(items, objs):
+                j = it[0]
+                b = base[j['tu']]
+                if o is None:
+                    res.append((it, 'FAIL', 0.0, set(), set()))
                     continue
-                a['job'].setdefault('ord', {})[tuple(a['forms'])] = r['ord']
-                pair_items.append((a['job'], a['on'], tuple(r['order']), {a['on']: r['text']}))
-        t3 = time.time()
-        res = run_trials(pair_items)
-        log('pairs: %d trials (%.0fs)' % (len(pair_items), time.time() - t3))
+                st = orc.judge(j['tu'], o)
+                gained = {s for s in st if st[s][0] == 'MATCH' and b[s][0] != 'MATCH'}
+                lost = {s for s in b if b[s][0] == 'MATCH' and st.get(s, ('MISSING',))[0] != 'MATCH'}
+                lost |= {s for s in b if b[s][0] not in ('MISSING', 'QUARANTINE') and st.get(s, ('MISSING',))[0] in ('MISSING', 'QUARANTINE')}
+                res.append((it, st[j['start']][0], st[j['start']][1], gained, lost))
+            comp.drop(objs)
+            return res
+
+        def note(r, extra=''):
+            (j, on, form, _b), ts, sim, gained, lost = r
+            trials_log.write('%08x\t%08x\t%s\t%s\t%.4f\t%s\t%s\t%s\n' % (
+                j['start'], on, '+'.join(form) if isinstance(form, tuple) else form, ts, sim,
+                ','.join('%08x' % s for s in sorted(gained)), ','.join('%08x' % s for s in sorted(lost)), extra))
+
+        # -- singles
+        items = []
+        for j in live:
+            for on in [j['start']] + j['helpers']:
+                for c in cands['%s|%08x' % (j['tu'], on)]['candidates']:
+                    items.append((j, on, c['form'], {on: c['text']}))
+        t2 = time.time()
+        res = run_trials(items)
+        log('singles: %d trials (%.0fs)' % (len(items), time.time() - t2))
+        accepted = []       # (job, on, forms tuple, gained, sim)
+        best = collections.defaultdict(list)
+        adds = {('%s|%08x' % (j['tu'], on), c['form']): c['adds'] for j in live for on in [j['start']] + j['helpers']
+                for c in cands['%s|%08x' % (j['tu'], on)]['candidates']}
         for r in res:
-            (j, on, forms, bodies), ts, sim, gained, lost = r
-            note(r, 'pair')
-            if ts == 'MATCH' and not lost and j['start'] not in {a['job']['start'] for a in accepted}:
-                accepted.append(dict(job=j, on=on, forms=forms, gained=gained, bodies=bodies))
+            (j, on, form, bodies), ts, sim, gained, lost = r
+            note(r)
+            if ts == 'MATCH' and not lost:
+                accepted.append(dict(job=j, on=on, forms=(form,), gained=gained, bodies=bodies))
+            elif ts != 'FAIL' and not lost:
+                best[j['start']].append((sim, on, form, bodies))
 
-    # -- phase control for forms that declare a name
-    ctl = []
-    for a in accepted:
-        j = a['job']
-        n = sum(adds.get(('%s|%08x' % (j['tu'], a['on']), f), 0) for f in a['forms'])
-        if n:
-            ctl.append((a, (j['tu'], trial_text(j['tu'], {}, (a['on'], externs(n))))))
-    if ctl:
-        objs = comp.run([x[1] for x in ctl])
-        for (a, _t), o in zip(ctl, objs):
-            st = orc.judge(a['job']['tu'], o) if o else {}
-            if st.get(a['job']['start'], ('?',))[0] == 'MATCH':
-                a['reject'] = 'phase: MATCH with dummy externs alone'
-        comp.drop(objs)
-    for a in accepted:
-        if 'reject' in a:
-            log('reject %08x %s: %s' % (a['job']['start'], a['forms'], a['reject']))
-    accepted = [a for a in accepted if 'reject' not in a]
-    # One tag set per target: the one with the most gains, singles before pairs, then fewest forms.
-    pick = {}
-    for a in accepted:
-        k = a['job']['start']
-        if k not in pick or (len(a['gained']), -len(a['forms'])) > (len(pick[k]['gained']), -len(pick[k]['forms'])):
-            pick[k] = a
-    accepted = sorted(pick.values(), key=lambda a: a['job']['start'])
+        # -- pairs, for targets no single form matched
+        if not args.no_pairs:
+            done = {a['job']['start'] for a in accepted}
+            pair_items, apply_in = [], []
+            for j in live:
+                if j['start'] in done:
+                    continue
+                singles = sorted(best[j['start']], key=lambda x: -x[0])
+                top = [x for x in singles if x[0] > j['base'][1]][:args.pair_top]
+                seen = set()
+                for sim, on, form, bodies in top:
+                    for sim2, on2, form2, bodies2 in singles:
+                        if (on2, form2) == (on, form) or frozenset([(on, form), (on2, form2)]) in seen:
+                            continue
+                        seen.add(frozenset([(on, form), (on2, form2)]))
+                        if on2 != on:
+                            pair_items.append((j, on, (form, form2), {**bodies, **bodies2}))
+                        else:
+                            fid = '%s|%08x' % (j['tu'], on)
+                            apply_in.append(dict(id='%d|%s' % (len(apply_in), fid), text=srcs[j['tu']][slice(*function_span(srcs[j['tu']], on))],
+                                                 forms=[form, form2], job=j, on=on))
+            if apply_in:
+                json.dump([{k: v for k, v in a.items() if k in ('id', 'text', 'forms')} for a in apply_in],
+                          open(os.path.join(out, 'apply-in.json'), 'w'))
+                tsx(['apply', os.path.join(out, 'apply-in.json'), os.path.join(out, 'apply-out.json')], gr)
+                for a, r in zip(apply_in, json.load(open(os.path.join(out, 'apply-out.json')))):
+                    if r['refused'] or len(r['applied']) != 2:
+                        continue
+                    a['job'].setdefault('ord', {})[tuple(a['forms'])] = r['ord']
+                    pair_items.append((a['job'], a['on'], tuple(r['order']), {a['on']: r['text']}))
+            t3 = time.time()
+            res = run_trials(pair_items)
+            log('pairs: %d trials (%.0fs)' % (len(pair_items), time.time() - t3))
+            for r in res:
+                (j, on, forms, bodies), ts, sim, gained, lost = r
+                note(r, 'pair')
+                if ts == 'MATCH' and not lost and j['start'] not in {a['job']['start'] for a in accepted}:
+                    accepted.append(dict(job=j, on=on, forms=forms, gained=gained, bodies=bodies))
 
-    # -- all accepted tags of a TU together; drop the ones that conflict
-    final, combined_gain = [], 0
-    work = collections.defaultdict(list)
-    for a in accepted:
-        work[a['job']['tu']].append(a)
-    for tu, al in work.items():
-        # Two tag sets on one function cannot both be: the one with more gains stays.
-        al.sort(key=lambda a: (-len(a['gained']), a['job']['start']))
-        keep, on = [], set()
-        for a in al:
-            if not set(a['bodies']) & on:
-                keep.append(a)
-                on |= set(a['bodies'])
-        work[tu] = keep
-    done = {}
-    for _round in range(6):
-        todo = [tu for tu in work if tu not in done and work[tu]]
-        if not todo:
+        # -- phase control for forms that declare a name
+        ctl = []
+        for a in accepted:
+            j = a['job']
+            n = sum(adds.get(('%s|%08x' % (j['tu'], a['on']), f), 0) for f in a['forms'])
+            if n:
+                ctl.append((a, (j['tu'], trial_text(j['tu'], {}, (a['on'], externs(n))))))
+        if ctl:
+            objs = comp.run([x[1] for x in ctl])
+            for (a, _t), o in zip(ctl, objs):
+                st = orc.judge(a['job']['tu'], o) if o else {}
+                if st.get(a['job']['start'], ('?',))[0] == 'MATCH':
+                    a['reject'] = 'phase: MATCH with dummy externs alone'
+            comp.drop(objs)
+        for a in accepted:
+            if 'reject' in a:
+                log('reject %08x %s: %s' % (a['job']['start'], a['forms'], a['reject']))
+        accepted = [a for a in accepted if 'reject' not in a]
+        # One tag set per target: the one with the most gains, singles before pairs, then fewest forms.
+        pick = {}
+        for a in accepted:
+            k = a['job']['start']
+            if k not in pick or (len(a['gained']), -len(a['forms'])) > (len(pick[k]['gained']), -len(pick[k]['forms'])):
+                pick[k] = a
+        accepted = sorted(pick.values(), key=lambda a: a['job']['start'])
+
+        # -- all accepted tags of a TU together; drop the ones that conflict
+        final, combined_gain = [], 0
+        work = collections.defaultdict(list)
+        for a in accepted:
+            work[a['job']['tu']].append(a)
+        for tu, al in work.items():
+            # Two tag sets on one function cannot both be: the one with more gains stays.
+            al.sort(key=lambda a: (-len(a['gained']), a['job']['start']))
+            keep, on = [], set()
+            for a in al:
+                if not set(a['bodies']) & on:
+                    keep.append(a)
+                    on |= set(a['bodies'])
+            work[tu] = keep
+        done = {}
+        for _round in range(6):
+            todo = [tu for tu in work if tu not in done and work[tu]]
+            if not todo:
+                break
+            objs = comp.run([(tu, trial_text(tu, {s: b for a in work[tu] for s, b in a['bodies'].items()})) for tu in todo])
+            for tu, o in zip(todo, objs):
+                b = base[tu]
+                st = orc.judge(tu, o) if o else {}
+                lost = {s for s in b if b[s][0] == 'MATCH' and st.get(s, ('MISSING',))[0] != 'MATCH'}
+                miss = [a for a in work[tu] if st.get(a['job']['start'], ('?',))[0] != 'MATCH']
+                if lost or miss:
+                    drop = miss[-1] if miss else work[tu][-1]
+                    work[tu].remove(drop)
+                    log('combined: %s drops %08x %s' % (tu, drop['job']['start'], drop['forms']))
+                else:
+                    done[tu] = {s for s in st if st[s][0] == 'MATCH' and b[s][0] != 'MATCH'}
+            comp.drop(objs)
+        with open(os.path.join(out, 'combined.tsv'), 'w') as fh:
+            fh.write('tu\ttag_sets\tgained\n')
+            for tu, gained in sorted(done.items()):
+                final += work[tu]
+                combined_gain += len(gained)
+                fh.write('%s\t%d\t%d\n' % (tu, len(work[tu]), len(gained)))
+
+        # -- the tags, as Ghidra stores them
+        tagged = sorted({a['on'] for a in final})
+        json.dump(['%08x' % s for s in tagged], open(os.path.join(out, 'dh-in.json'), 'w'))
+        if tagged:
+            tsx(['dh', args.snapshot, os.path.join(out, 'dh-in.json'), os.path.join(out, 'dh-out.json')], gr)
+        else:
+            json.dump({}, open(os.path.join(out, 'dh-out.json'), 'w'))
+        dh = json.load(open(os.path.join(out, 'dh-out.json')))
+        ev_out = open(os.path.join(out, 'evidence.tsv'), 'w')
+        ev_out.write('addr\tname\tform\ttarget\tbefore\tafter\tgained\tlost\tcompiler\n')
+        tags_out = open(os.path.join(out, 'tags.tsv'), 'w')
+        tags_out.write('addr\tname\ttag\tgain\tlosses\tform\ttarget\tevidence\texisting\n')
+        for a in final:
+            j, on = a['job'], a['on']
+            d = dh.get('%08x' % on)
+            if d is None:
+                log('no snapshot function at %08x' % on)
+                continue
+            ords = j.get('ord', {}).get(tuple(a['forms']), {}) if len(a['forms']) > 1 else {}
+            for f in a['forms']:
+                row = '%08x\t%s\t%s\t%08x\t%s\t%s\t%s\t%s\t%s' % (
+                    on, d['name'], f, j['start'], j['base'][0], 'MATCH',
+                    ','.join('%08x' % s for s in sorted(a['gained'])), '', 'vc8-sp1 ' + os.path.basename(args.checkout))
+                ev_out.write(row + '\n')
+                ev = hashlib.sha256(row.encode()).hexdigest()[:10]
+                data = '%s;ev=%s;bh=%s;dh=%s' % (f, ev, orc.bh(on, d['size']), d['dh'])
+                if f in ords:
+                    data += ';ord=%d' % ords[f]
+                tags_out.write('%08x\t%s\tvc8form:%s\t%d\t0\t%s\t%08x\t%s->MATCH\t%s\n' % (
+                    on, d['name'], data, len(a['gained']), f.split('(')[0], j['start'], j['base'][0], len(d['tags'])))
+        tags_out.close()
+        ev_out.close()
+        # The bodies the accepted tags printed, for verify_gen.py to hold the generator's against.
+        json.dump({'%08x' % s: b for a in final for s, b in a['bodies'].items()},
+                  open(os.path.join(out, 'bodies.json'), 'w'), indent=0)
+        trials_log.close()
+        comp.clean()
+
+        n_single = sum(1 for a in final if len(a['forms']) == 1)
+        lines = [
+            'targets %d, skipped %d (%s)' % (len(jobs), len(jobs) - len(live),
+                                              ', '.join('%s %d' % kv for kv in collections.Counter(
+                                                  j['skip'].split(':')[0] for j in jobs if 'skip' in j).items())),
+            'targets reaching MATCH alone: %d (singles %d, pairs %d)' % (len(accepted), sum(len(a['forms']) == 1 for a in accepted),
+                                                                        sum(len(a['forms']) > 1 for a in accepted)),
+            'kept together: %d tag sets (%d single), MATCH gained together %d' % (len(final), n_single, combined_gain),
+            'wall %.0fs, %.1fs per target, %d compiles' % (time.time() - t0, (time.time() - t0) / max(1, len(jobs)), comp.n),
+        ]
+        open(os.path.join(out, 'summary.txt'), 'w').write('\n'.join(lines) + '\n')
+        for l in lines:
+            log(l)
+        return dict(jobs=jobs, final=final)
+
+    if not args.resume:
+        run(targets, args.out)
+        comp.close()
+        return
+    resume(args, targets, run, comp)
+
+
+def small_snapshot(snap, dest, targets, orc):
+    """The part of a snapshot a long run reads, written once: the functions of the targets'
+    TUs (the targets and every helper they can have) with their rows unchanged, each
+    global's name and type, the types. Each step reads it instead of the whole model."""
+    tus = {t[2] for t in targets}
+    want = {'%08x' % r[0] for r in orc.rows if r[3] in tus}
+    os.makedirs(dest, exist_ok=True)
+    with open(os.path.join(snap, 'functions.ndjson')) as fh, open(os.path.join(dest, 'functions.ndjson'), 'w') as o:
+        for line in fh:
+            i = line.find('"address":"')
+            if i >= 0 and line[i + 11:i + 19] in want:
+                o.write(line)
+    with open(os.path.join(snap, 'globals.ndjson')) as fh, open(os.path.join(dest, 'globals.ndjson'), 'w') as o:
+        for line in fh:
+            if line.strip():
+                g = json.loads(line)
+                if g.get('name') and g.get('dataType'):
+                    o.write(json.dumps({'name': g['name'], 'dataType': g['dataType']}) + '\n')
+    with open(os.path.join(snap, 'dataTypes.ndjson'), 'rb') as fh, open(os.path.join(dest, 'dataTypes.ndjson'), 'wb') as o:
+        o.write(fh.read())
+    return dest
+
+
+def resume(args, targets, run, comp):
+    """The long run: OUT/done.tsv holds every finished target with its outcome; OUT/tags.tsv,
+    evidence.tsv and bodies.json collect what each step found; each step's own outputs stay in
+    OUT/t/<first target>/. A step that did not finish is not recorded, and is run again."""
+    out = args.out
+    done_path = os.path.join(out, 'done.tsv')
+    done = set()
+    if os.path.exists(done_path):
+        for line in open(done_path).read().split('\n')[1:]:
+            if line:
+                done.add(int(line.split('\t')[0], 16))
+    else:
+        open(done_path, 'w').write('addr\tname\tstatus\toutcome\tsecs\tat\n')
+    for name, header in (('tags.tsv', 'addr\tname\ttag\tgain\tlosses\tform\ttarget\tevidence\texisting\n'),
+                         ('evidence.tsv', 'addr\tname\tform\ttarget\tbefore\tafter\tgained\tlost\tcompiler\n')):
+        if not os.path.exists(os.path.join(out, name)):
+            open(os.path.join(out, name), 'w').write(header)
+    bodies_path = os.path.join(out, 'bodies.json')
+    bodies = json.load(open(bodies_path)) if os.path.exists(bodies_path) else {}
+    todo = [t for t in targets if t[0] not in done]
+    log('resume: %d targets, %d done, %d to go, %d per step' % (len(targets), len(done), len(todo), args.group))
+    stop_file = os.path.join(out, 'STOP')
+    n_steps = 0
+    for k in range(0, len(todo), args.group):
+        if os.path.exists(stop_file):
+            log('stopped: %s exists' % stop_file)
             break
-        objs = comp.run([(tu, trial_text(tu, {s: b for a in work[tu] for s, b in a['bodies'].items()})) for tu in todo])
-        for tu, o in zip(todo, objs):
-            b = base[tu]
-            st = orc.judge(tu, o) if o else {}
-            lost = {s for s in b if b[s][0] == 'MATCH' and st.get(s, ('MISSING',))[0] != 'MATCH'}
-            miss = [a for a in work[tu] if st.get(a['job']['start'], ('?',))[0] != 'MATCH']
-            if lost or miss:
-                drop = miss[-1] if miss else work[tu][-1]
-                work[tu].remove(drop)
-                log('combined: %s drops %08x %s' % (tu, drop['job']['start'], drop['forms']))
-            else:
-                done[tu] = {s for s in st if st[s][0] == 'MATCH' and b[s][0] != 'MATCH'}
-        comp.drop(objs)
-    with open(os.path.join(args.out, 'combined.tsv'), 'w') as fh:
-        fh.write('tu\ttag_sets\tgained\n')
-        for tu, gained in sorted(done.items()):
-            final += work[tu]
-            combined_gain += len(gained)
-            fh.write('%s\t%d\t%d\n' % (tu, len(work[tu]), len(gained)))
-
-    # -- the tags, as Ghidra stores them
-    tagged = sorted({a['on'] for a in final})
-    json.dump(['%08x' % s for s in tagged], open(os.path.join(args.out, 'dh-in.json'), 'w'))
-    tsx(['dh', args.snapshot, os.path.join(args.out, 'dh-in.json'), os.path.join(args.out, 'dh-out.json')], gr)
-    dh = json.load(open(os.path.join(args.out, 'dh-out.json')))
-    ev_out = open(os.path.join(args.out, 'evidence.tsv'), 'w')
-    ev_out.write('addr\tname\tform\ttarget\tbefore\tafter\tgained\tlost\tcompiler\n')
-    tags_out = open(os.path.join(args.out, 'tags.tsv'), 'w')
-    tags_out.write('addr\tname\ttag\tgain\tlosses\tform\ttarget\tevidence\texisting\n')
-    for a in final:
-        j, on = a['job'], a['on']
-        d = dh.get('%08x' % on)
-        if d is None:
-            log('no snapshot function at %08x' % on)
-            continue
-        ords = j.get('ord', {}).get(tuple(a['forms']), {}) if len(a['forms']) > 1 else {}
-        for f in a['forms']:
-            row = '%08x\t%s\t%s\t%08x\t%s\t%s\t%s\t%s\t%s' % (
-                on, d['name'], f, j['start'], j['base'][0], 'MATCH',
-                ','.join('%08x' % s for s in sorted(a['gained'])), '', 'vc8-sp1 ' + os.path.basename(args.checkout))
-            ev_out.write(row + '\n')
-            ev = hashlib.sha256(row.encode()).hexdigest()[:10]
-            data = '%s;ev=%s;bh=%s;dh=%s' % (f, ev, orc.bh(on, d['size']), d['dh'])
-            if f in ords:
-                data += ';ord=%d' % ords[f]
-            tags_out.write('%08x\t%s\tvc8form:%s\t%d\t0\t%s\t%08x\t%s->MATCH\t%s\n' % (
-                on, d['name'], data, len(a['gained']), f.split('(')[0], j['start'], j['base'][0], len(d['tags'])))
-    tags_out.close()
-    ev_out.close()
-    # The bodies the accepted tags printed, for verify_gen.py to hold the generator's against.
-    json.dump({'%08x' % s: b for a in final for s, b in a['bodies'].items()},
-              open(os.path.join(args.out, 'bodies.json'), 'w'), indent=0)
-    trials_log.close()
+        if comp.changed():
+            log('stopped: the checkout changed (a build, an update or a commit); the run cannot go on against it')
+            sys.exit(3)
+        step = todo[k:k + args.group]
+        d = os.path.join(out, 't', '%08x' % step[0][0])
+        t = time.time()
+        try:
+            r = run(step, d)
+        except CheckoutChanged as e:
+            log('stopped: %s' % e)
+            sys.exit(3)
+        secs = time.time() - t
+        for name in ('tags.tsv', 'evidence.tsv'):
+            rows = open(os.path.join(d, name)).read().split('\n')[1:]
+            with open(os.path.join(out, name), 'a') as fh:
+                fh.write(''.join(l + '\n' for l in rows if l))
+        bodies.update(json.load(open(os.path.join(d, 'bodies.json'))))
+        tmp = bodies_path + '.tmp'
+        json.dump(bodies, open(tmp, 'w'), indent=0)
+        os.replace(tmp, bodies_path)
+        won = {a['job']['start']: '+'.join(a['forms']) for a in r['final']}
+        by_start = {j['start']: j for j in r['jobs']}
+        with open(done_path, 'a') as fh:
+            for start, name, _tu, status in step:
+                j = by_start.get(start)
+                outcome = ('MATCH ' + won[start]) if start in won else (('skip: ' + j['skip']) if j and 'skip' in j
+                                                                      else 'none' if j else 'skip: no definition')
+                fh.write('%08x\t%s\t%s\t%s\t%.0f\t%s\n' % (start, name, status, outcome.replace('\t', ' '),
+                                                            secs / len(step), time.strftime('%Y-%m-%dT%H:%M:%S')))
+        n_steps += 1
     comp.close()
-
-    n_single = sum(1 for a in final if len(a['forms']) == 1)
-    lines = [
-        'targets %d, skipped %d (%s)' % (len(jobs), len(jobs) - len(live),
-                                          ', '.join('%s %d' % kv for kv in collections.Counter(
-                                              j['skip'].split(':')[0] for j in jobs if 'skip' in j).items())),
-        'targets reaching MATCH alone: %d (singles %d, pairs %d)' % (len(accepted), sum(len(a['forms']) == 1 for a in accepted),
-                                                                    sum(len(a['forms']) > 1 for a in accepted)),
-        'kept together: %d tag sets (%d single), MATCH gained together %d' % (len(final), n_single, combined_gain),
-        'wall %.0fs, %.1fs per target, %d compiles' % (time.time() - t0, (time.time() - t0) / max(1, len(jobs)), comp.n),
-    ]
-    open(os.path.join(args.out, 'summary.txt'), 'w').write('\n'.join(lines) + '\n')
-    for l in lines:
-        log(l)
+    log('resume: %d steps this run' % n_steps)
 
 
 if __name__ == '__main__':

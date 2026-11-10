@@ -307,7 +307,14 @@ function tryForm(tu: TranslationUnit, text: string): { text: string; form: Vc8Fo
   const form = parseVc8Form(text);
   if (!form) return { why: 'does not parse' };
   let why: string | undefined, applied = false;
-  const out = applyVc8Forms(tu, [{ form }], s => { applied = s.applied; why = s.why; });
+  let out: TranslationUnit;
+  try {
+    out = applyVc8Forms(tu, [{ form }], s => { applied = s.applied; why = s.why; });
+  } catch (e) {
+    // A form the pass cannot even attempt is no candidate; say which, it is a pass defect.
+    process.stderr.write(`form ${text} threw: ${(e as Error).message.split('\n')[0]}\n`);
+    return { why: 'threw' };
+  }
   if (!applied) return { why: why ?? 'refused' };
   return { text: body(out), form };
 }
