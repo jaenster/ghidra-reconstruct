@@ -433,32 +433,34 @@ export function splitReusedValueSlots(fn: FunctionDecl, o: ReusedParamSlotOption
     if (mixed) { o.onRefused?.(fnName, `${p}: a read is reached by the parameter and by a later store`); continue; }
     if (second.size === 0) continue;
 
-    // Every occurrence of P the second range reads, with the cast around it (if any).
+    // Every occurrence of P the second range reads, with its entire direct cast
+    // chain. The innermost cast determines the rewrite, but an outer cast can
+    // reveal a different use of the value (e.g. `(Other *)(int)P`).
     // The store statements' own left-hand sides are writes, not reads.
     const lhs = new Set<object>();
     for (const s of stores.values()) lhs.add(unwrapParens((unwrapParens(s.stmt.expression) as AssignExpr).left));
-    const occurrences: { id: Identifier; cast: CStyleCastExpr | null }[] = [];
+    const occurrences: { id: Identifier; cast: CStyleCastExpr | null; casts: readonly CStyleCastExpr[] }[] = [];
     for (const n of second) {
-      const walk = (x: unknown, parentCast: CStyleCastExpr | null): void => {
-        if (Array.isArray(x)) { for (const i of x) walk(i, null); return; }
+      const walk = (x: unknown, casts: readonly CStyleCastExpr[]): void => {
+        if (Array.isArray(x)) { for (const i of x) walk(i, []); return; }
         if (!x || typeof x !== 'object') return;
         const node = x as ASTNode;
         if (node.kind === NodeKind.Identifier && (node as Identifier).name === p && !lhs.has(node)) {
-          occurrences.push({ id: node as Identifier, cast: parentCast });
+          occurrences.push({ id: node as Identifier, cast: casts.at(-1) ?? null, casts });
           return;
         }
         if (node.kind === NodeKind.CStyleCastExpr) {
           const c = node as CStyleCastExpr;
           const inner = unwrapParens(c.expression);
-          walk(inner, c);
+          walk(inner, [...casts, c]);
           return;
         }
         for (const [k, v] of Object.entries(node)) {
           if (k === 'location' || k === 'leadingTrivia' || k === 'trailingTrivia' || k === 'type') continue;
-          if (v && typeof v === 'object') walk(v, null);
+          if (v && typeof v === 'object') walk(v, []);
         }
       };
-      walk(flow.ownExprs(n), null);
+      walk(flow.ownExprs(n), []);
     }
     if (occurrences.length === 0) continue;
 
@@ -489,7 +491,8 @@ export function splitReusedValueSlots(fn: FunctionDecl, o: ReusedParamSlotOption
     // pointer type still makes the second value ambiguous.
     const integerView = (c: string) => targetClass === 'int' && paramClass === 'ptr'
       && WORD_INTEGERS[c] !== undefined;
-    if (readCasts.some(c => c !== null && !sameType(c, targetType)
+    const allReadCasts = occurrences.flatMap(oc => oc.casts.map(c => spellingOf(c.type)));
+    if (allReadCasts.some(c => !sameType(c, targetType)
         && !sameType(c, paramType) && !integerView(c))) {
       o.onRefused?.(fnName, `${p}: the second range is read as more than one type`);
       continue;
