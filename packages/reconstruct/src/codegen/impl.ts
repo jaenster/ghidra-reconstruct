@@ -1621,6 +1621,9 @@ export function generateFunctionImplementation(
   let bodyIdentifiers: Set<string> | undefined;
   let overrideApplied = false;
   const override = context?.overrides?.get(func.address);
+  // Legacy text patches anchor to Ghidra's printed form; an explicit final-form
+  // patch keeps every collected fact and must match the transformed body once.
+  const patchWithoutFacts = override?.action === 'patch' && !override.preserveFacts;
 
   const isMethod = classInfo && classInfo.methods.some(m => m.address === func.address);
 
@@ -1756,24 +1759,24 @@ export function generateFunctionImplementation(
           branchLayout: func.branchLayout,
           callOrder: func.callOrder,
           // A text patch anchors on the statements as Ghidra printed them.
-          accessOrder: override?.action === 'patch' ? undefined : func.accessOrder,
+          accessOrder: patchWithoutFacts ? undefined : func.accessOrder,
           haltLines: func.haltLines,
           jumpTables: func.jumpTables,
           zeroStores: func.zeroStores,
           // A text patch anchors on the masks as Ghidra printed them.
-          maskSites: override?.action === 'patch' ? undefined : func.maskSites,
-          zextSites: override?.action === 'patch' ? undefined : func.zextSites,
-          signedDivides: override?.action === 'patch' ? undefined : func.signedDivides,
+          maskSites: patchWithoutFacts ? undefined : func.maskSites,
+          zextSites: patchWithoutFacts ? undefined : func.zextSites,
+          signedDivides: patchWithoutFacts ? undefined : func.signedDivides,
           // A text patch anchors on the stores as Ghidra printed them.
-          registerStores: override?.action === 'patch' ? undefined : func.registerStores,
+          registerStores: patchWithoutFacts ? undefined : func.registerStores,
           // A text patch anchors on the shifts as Ghidra printed them.
-          rotateSites: override?.action === 'patch' ? undefined : func.rotateSites,
+          rotateSites: patchWithoutFacts ? undefined : func.rotateSites,
           // A text patch anchors on the stores as Ghidra printed them.
-          storeBases: override?.action === 'patch' ? undefined : func.storeBases,
+          storeBases: patchWithoutFacts ? undefined : func.storeBases,
           // A text patch anchors on the divisions as Ghidra printed them.
-          callDivides: override?.action === 'patch' ? undefined : func.callDivides,
+          callDivides: patchWithoutFacts ? undefined : func.callDivides,
           // A text patch anchors on the comparisons as Ghidra printed them.
-          compareSites: override?.action === 'patch' ? undefined : func.compareSites,
+          compareSites: patchWithoutFacts ? undefined : func.compareSites,
           sehLowering: sehLoweringDecision(func),
           foldedAddresses: foldedAddressFacts(func),
           displacementTargets: displacementTargets(func),
@@ -1781,10 +1784,10 @@ export function generateFunctionImplementation(
           referencedDataAddresses: referencedDataAddresses(func),
           pushSlotInits: pushSlotInits(func),
           // A text patch anchors on the comparisons as Ghidra printed them.
-          compareForm: override?.action === 'patch' ? undefined : compareFormSpec(func) ?? undefined,
-          repStringOps: override?.action === 'patch' ? undefined : repStringOps(func),
+          compareForm: patchWithoutFacts ? undefined : compareFormSpec(func) ?? undefined,
+          repStringOps: patchWithoutFacts ? undefined : repStringOps(func),
           // A text patch anchors on the body as Ghidra printed it; a form tag on the body as emitted.
-          vc8Forms: override?.action === 'patch' ? undefined : vc8FormSpec(func),
+          vc8Forms: patchWithoutFacts ? undefined : vc8FormSpec(func),
         },
       );
       // The decompile hashes of each tagged function as this pass sees it, for

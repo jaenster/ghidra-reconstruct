@@ -20,7 +20,7 @@ import * as path from 'node:path';
 import { compileAndRun, hasNativeGpp } from '@ghidra-mcp/cpp-parser/testing/native-cpp';
 import { ARTIFACT_SUPPORT_LINES } from '@ghidra-mcp/cpp-parser';
 import {
-  BUILTIN_OVERRIDES_DIR, OverrideRegistry, createOverrideRegistry, loadBuiltinOverrides,
+  BUILTIN_OVERRIDES_DIR, OverrideRegistry, applyPatches, createOverrideRegistry, loadBuiltinOverrides,
 } from '../overrides/index.js';
 import { overrideAttributePrefix, resolveOverridePlaceholders } from '../codegen/impl.js';
 import type { OverrideEntry, ProjectConfig } from '../config/schema.js';
@@ -38,13 +38,32 @@ const entry = (address: string) => loadBuiltinOverrides().find(e => e.address ==
 
 describe('repository overrides: registration', () => {
   it('registers every shipped body by address, with its file resolved', () => {
-    const entries = loadBuiltinOverrides();
+    const entries = loadBuiltinOverrides().filter(e => e.action === 'replace');
     assert.deepStrictEqual(
       Object.fromEntries(entries.map(e => [e.address, e.name])), SHIPPED);
     for (const e of entries) {
       assert.ok(path.isAbsolute(e.sourceFile!), e.sourceFile);
       assert.ok(fs.existsSync(e.sourceFile!), `missing ${e.sourceFile}`);
     }
+  });
+
+  it('keeps the timer callback store before its null branch', () => {
+    const entry = loadBuiltinOverrides().find(e => e.address === '004fd8f0');
+    assert.ok(entry);
+    assert.strictEqual(entry?.action, 'patch');
+    assert.strictEqual(entry.preserveFacts, true);
+    const original = [
+      '        pOVar1 = pTimer->sControl.fpOnPress;',
+      '        if (pOVar1) {',
+      '          pCallbackArg.pControl = &pTimer->sControl;',
+      '          (*pOVar1)(&pCallbackArg);',
+      '        }',
+    ].join('\n');
+    const moved = applyPatches(original, entry.patches!).code;
+    assert.match(moved, /pOVar1 = pTimer->sControl\.fpOnPress;\n        pCallbackArg\.pControl = &pTimer->sControl;\n        if \(pOVar1\)/);
+    assert.match(moved, /if \(pOVar1\) \{\n          \(\*pOVar1\)\(&pCallbackArg\);/);
+    assert.throws(() => applyPatches(moved, entry.patches!), /matched 0 times/);
+    assert.throws(() => applyPatches(original + '\n' + original, entry.patches!), /matched 2 times/);
   });
 
   it('applies with no project config at all', async () => {

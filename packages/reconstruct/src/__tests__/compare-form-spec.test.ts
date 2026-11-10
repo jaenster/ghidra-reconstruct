@@ -332,4 +332,12 @@ describe('compare-form in codegen', () => {
     assert.match(out, /0x144f < nByteOffset \/\* patched \*\//);
     assert.doesNotMatch(out, /0x1450/);
   });
+
+  it('keeps extraction facts for a patch anchored to final emitted statements', () => {
+    const config = { overrides: [{ address: '0040eb90', action: 'patch', preserveFacts: true,
+      patches: [{ find: 'nByteOffset >= 0x1450', replace: 'nByteOffset >= 0x1450 /* patched */' }] }] } as ProjectConfig;
+    const overrides = new OverrideRegistry(config, os.tmpdir(), []);
+    const out = generateFunctionImplementation(fn(INIT_LOG), undefined, options, { overrides } as never);
+    assert.match(out, /nByteOffset >= 0x1450 \/\* patched \*\//);
+  });
 });

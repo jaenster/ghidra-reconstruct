@@ -4,6 +4,16 @@
     { "address": "0041d6d0", "name": "SSignatureVerifyStream_Finish", "action": "replace", "sourceFile": "SSignatureVerifyStream_Finish.cpp" },
     { "address": "00681a48", "name": "GuardStack", "action": "replace", "sourceFile": "GuardStack.cpp" },
     { "address": "00408090", "name": "GetInstructionPointer", "action": "replace", "sourceFile": "GetInstructionPointer.cpp", "attributes": ["noinline"] },
-    { "address": "004107d0", "name": "Atomic64Load", "action": "replace", "sourceFile": "Atomic64Load.cpp" }
+    { "address": "004107d0", "name": "Atomic64Load", "action": "replace", "sourceFile": "Atomic64Load.cpp" },
+    {
+      "address": "004fd8f0", "name": "D2WINTIMER_GetElapsed", "action": "patch",
+      "reason": "Win 004fd943 stores the callback's control pointer before 004fd946 JZ; see Redivivus issue #233.",
+      "preserveFacts": true,
+      "patches": [{
+        "find": "if (pOVar1) {\n  pCallbackArg.pControl = &pTimer->sControl;\n  (*pOVar1)(&pCallbackArg);\n}",
+        "replace": "pCallbackArg.pControl = &pTimer->sControl;\n        if (pOVar1) {\n          (*pOVar1)(&pCallbackArg);\n        }",
+        "fuzzy": true
+      }]
+    }
   ]
 }

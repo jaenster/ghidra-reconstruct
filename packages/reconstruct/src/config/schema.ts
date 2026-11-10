@@ -171,6 +171,8 @@ export interface OverrideEntry {
   sourceFile?: string;
   /** For action: "patch" — sequential find/replace patches, each find matching exactly once */
   patches?: PatchEntry[];
+  /** For a patch matching final emitted statements, keep extraction facts enabled. Defaults false. */
+  preserveFacts?: boolean;
   /**
    * For action: "replace" — GCC function attributes the definition needs for the
    * body to mean what the binary does, spelled without `__attribute__((...))`:
