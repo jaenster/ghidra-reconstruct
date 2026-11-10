@@ -855,6 +855,73 @@ export class CppEmitter {
     return true;
   }
 
+  /** Build a named function declarator through pointer, reference, array and cv wrappers. */
+  private namedFunctionDeclarator(type: TypeNode, name: string): { fn: FunctionType; name: string } | null {
+    if (type.kind === NodeKind.QualifiedType) {
+      const qualified = type as QualifiedType;
+      if (qualified.type.kind === NodeKind.PointerType) {
+        const pointer = qualified.type as PointerType;
+        return this.namedFunctionDeclarator({
+          ...pointer, qualifiers: [...pointer.qualifiers, ...qualified.qualifiers],
+        }, name);
+      }
+      if (qualified.type.kind === NodeKind.ArrayType) {
+        const array = qualified.type as ArrayType;
+        return this.namedFunctionDeclarator({
+          ...array, elementType: { ...qualified, type: array.elementType },
+        }, name);
+      }
+      return null;
+    }
+    if (type.kind === NodeKind.ArrayType) {
+      const array = type as ArrayType;
+      const size = array.size ? new CppEmitter(this.style).emit(array.size as AnyNode) : '';
+      return this.namedFunctionDeclarator(array.elementType, name + '[' + size + ']');
+    }
+    if (type.kind === NodeKind.PointerType || type.kind === NodeKind.ReferenceType ||
+        type.kind === NodeKind.RValueReferenceType) {
+      const next = type.kind === NodeKind.PointerType ? (type as PointerType).pointee
+        : type.kind === NodeKind.ReferenceType ? (type as ReferenceType).referenced
+        : (type as RValueReferenceType).referenced;
+      const marker = type.kind === NodeKind.PointerType
+        ? '*' + ((type as PointerType).qualifiers.length ? ' ' + (type as PointerType).qualifiers.join(' ') + ' ' : '')
+        : type.kind === NodeKind.ReferenceType ? '&' : '&&';
+      let decorated = marker + name;
+      const wrapped = next.kind === NodeKind.ArrayType || next.kind === NodeKind.FunctionType ||
+        (next.kind === NodeKind.QualifiedType &&
+          ((next as QualifiedType).type.kind === NodeKind.ArrayType ||
+           (next as QualifiedType).type.kind === NodeKind.FunctionType));
+      if (wrapped) {
+        const fn = next.kind === NodeKind.FunctionType ? next as FunctionType : null;
+        decorated = '(' + (fn?.callingConvention ? fn.callingConvention + ' ' : '') + decorated + ')';
+      }
+      return this.namedFunctionDeclarator(next, decorated);
+    }
+    return type.kind === NodeKind.FunctionType ? { fn: type as FunctionType, name } : null;
+  }
+
+  /** A named function pointer keeps its name inside the pointer declarator. */
+  private emitNamedFunctionPointerDecl(type: TypeNode, name: Identifier, specifiers: readonly string[] = []): boolean {
+    const declarator = this.namedFunctionDeclarator(type, name.name);
+    if (!declarator) return false;
+    const { fn } = declarator;
+    if (specifiers.length > 0) this.write(specifiers.join(' ') + ' ');
+    this.emitTypeNode(fn.returnType);
+    this.write(' ' + declarator.name);
+    this.write('(');
+    for (let i = 0; i < fn.parameters.length; i++) {
+      if (i > 0) this.write(this.style.spaceAfterComma ? ', ' : ',');
+      this.emitTypeNode(fn.parameters[i]);
+    }
+    if (fn.isVariadic) {
+      if (fn.parameters.length > 0) this.write(this.style.spaceAfterComma ? ', ' : ',');
+      this.write('...');
+    }
+    this.write(')');
+    if (fn.qualifiers.length > 0) this.write(' ' + fn.qualifiers.join(' '));
+    return true;
+  }
+
   /**
    * Emit an ABSTRACT pointer-to-array declarator `T (*)[N]` — the nameless twin of
    * `emitPointerToArrayDecl`. Legal wherever a type-id is, which is where a cast
@@ -1082,6 +1149,13 @@ export class CppEmitter {
   }
 
   private emitParameterDecl(node: ParameterDecl): void {
+    if (node.name && this.emitNamedFunctionPointerDecl(node.type, node.name)) {
+      if (node.defaultValue) {
+        this.write(this.style.spaceAroundOperators ? ' = ' : '=');
+        this.emitExprWithPrecedence(node.defaultValue, 17);
+      }
+      return;
+    }
     // Unwrap array type — C/C++ requires brackets after the declarator name
     const { elementType: paramElemType, arraySizes: paramArraySizes } = this.unwrapArrayType(node.type);
     this.emitTypeNode(paramElemType);
@@ -1115,7 +1189,9 @@ export class CppEmitter {
     // the C declarator syntax, NOT `T[N]* name` (invalid C++). Without this,
     // Ghidra's `D2UnitStrc*(*)[5]` locals emit as `D2UnitStrc*[5]* name` and the
     // declaration — plus every use of the name — fails to compile.
-    if (!this.emitPointerToArrayDecl(node.type, node.name)) {
+    const namedFunctionPointer = this.emitNamedFunctionPointerDecl(node.type, node.name);
+    if (!namedFunctionPointer &&
+        !this.emitPointerToArrayDecl(node.type, node.name)) {
       // Unwrap array type — C/C++ requires brackets after the declarator name
       const { elementType, arraySizes } = this.unwrapArrayType(node.type);
       this.emitTypeNode(elementType);
@@ -1134,7 +1210,8 @@ export class CppEmitter {
         } else {
           this.write('=');
         }
-        this.emitNode(node.initializer);
+        if (namedFunctionPointer) this.emitExprWithPrecedence(node.initializer, 17);
+        else this.emitNode(node.initializer);
       }
     }
     this.write(';');
@@ -1321,9 +1398,11 @@ export class CppEmitter {
   private emitTypedefDecl(node: TypedefDecl): void {
     this.write(this.indent());
     this.write('typedef ');
-    this.emitTypeNode(node.type);
-    this.write(' ');
-    this.emitIdentifier(node.name);
+    if (!this.emitNamedFunctionPointerDecl(node.type, node.name)) {
+      this.emitTypeNode(node.type);
+      this.write(' ');
+      this.emitIdentifier(node.name);
+    }
     this.write(';');
   }
 
@@ -1520,11 +1599,13 @@ export class CppEmitter {
     }
 
     // Unwrap array type — C/C++ requires brackets after the declarator name
-    const { elementType: fieldElemType, arraySizes: fieldArraySizes } = this.unwrapArrayType(node.type);
-    this.emitTypeNode(fieldElemType);
-    this.write(' ');
-    this.emitIdentifier(node.name);
-    this.emitArrayDimensions(fieldArraySizes);
+    if (!this.emitNamedFunctionPointerDecl(node.type, node.name)) {
+      const { elementType: fieldElemType, arraySizes: fieldArraySizes } = this.unwrapArrayType(node.type);
+      this.emitTypeNode(fieldElemType);
+      this.write(' ');
+      this.emitIdentifier(node.name);
+      this.emitArrayDimensions(fieldArraySizes);
+    }
 
     if (node.bitWidth) {
       if (this.style.spaceBeforeColon) this.write(' ');
@@ -1906,6 +1987,18 @@ export class CppEmitter {
         // Pointer-to-array (`T (*name)[N]`) needs the C declarator syntax. Handle
         // the (common) single-declarator case here so body locals like
         // `D2UnitStrc*(*)[5] ppUnitTable` don't emit as invalid `T[N]* name`.
+        if (i === 0 && node.declarations.length === 1 && this.emitNamedFunctionPointerDecl(v.type, v.name, v.specifiers)) {
+          if (v.initializer) {
+            if ((v.initializer as ASTNode).kind === NodeKind.InitListExpr) {
+              if (v.copyListInit) this.write(this.style.spaceAroundOperators ? ' = ' : '=');
+              this.emitInitListExpr(v.initializer as InitListExpr);
+            } else {
+              this.write(this.style.spaceAroundOperators ? ' = ' : '=');
+              this.emitExprWithPrecedence(v.initializer, 17);
+            }
+          }
+          continue;
+        }
         if (i === 0 && node.declarations.length === 1 && this.isPointerToArray(v.type)) {
           if (v.specifiers.length > 0) this.write(v.specifiers.join(' ') + ' ');
           this.emitPointerToArrayDecl(v.type, v.name);

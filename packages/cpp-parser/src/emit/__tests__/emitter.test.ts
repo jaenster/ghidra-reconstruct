@@ -921,4 +921,44 @@ describe('CppEmitter', () => {
       assert.ok(round('void f(int* a) { return a[2] * 6; }').includes('a[2] * 6'));
     });
   });
+
+  describe('Named function-pointer declarators', () => {
+    for (const [source, spelling] of [
+      ['int (*fn)(int);', 'int (*fn)(int);'],
+      ['int (*fn)(int) = (g(), p);', 'int (*fn)(int) = (g() , p);'],
+      ['void f() { int (*fn)(int); }', 'int (*fn)(int);'],
+      ['void f() { static int (*fn)(int) = p; }', 'static int (*fn)(int) = p;'],
+      ['void f() { int (*fn)(int) = (g(), p); }', 'int (*fn)(int) = (g() , p);'],
+      ['void f(int (*fn)(int)) {}', 'int (*fn)(int)'],
+      ['void f(int (*fn)(int) = (g(), p)) {}', 'int (*fn)(int) = (g() , p)'],
+      ['struct S { int (*fn)(int); };', 'int (*fn)(int);'],
+      ['typedef int (*Fn)(int);', 'typedef int (*Fn)(int);'],
+      ['void f() { int (**fn)(int); }', 'int (**fn)(int);'],
+      ['void f() { int (*fn[2])(int); }', 'int (*fn[2])(int);'],
+      ['void f() { int (* const fn)(int) = p; }', 'int (* const fn)(int) = p;'],
+      ['void f() { int (__stdcall *fn)(int) = p; }', 'int (__stdcall *fn)(int) = p;'],
+    ]) {
+      it(`keeps the name inside the function-pointer type: ${source}`, () => {
+        const output = emit(parse(source));
+        assert.ok(output.includes(spelling), output);
+        assert.strictEqual(emit(parse(output)), output);
+      });
+    }
+
+    it('keeps abstract function-pointer type aliases unchanged', () => {
+      assert.strictEqual(emit(parse('using Fn = int (*)(int);')).trim(), 'using Fn = int (*)(int);');
+    });
+
+    it('keeps names and qualifiers through supported factory wrappers', () => {
+      const fnType = Type.function(Type.int(), [Type.int()]);
+      assert.strictEqual(emit(Decl.variable('fn', Type.const(Type.pointer(fnType)))),
+        'int (* const fn)(int);');
+      assert.strictEqual(emit(Decl.variable('fn', Type.reference(Type.pointer(fnType)))),
+        'int (*&fn)(int);');
+      assert.strictEqual(emit(Decl.variable('fn', Type.array(Type.const(Type.pointer(fnType)), Expr.intLiteral(2)))),
+        'int (* const fn[2])(int);');
+      assert.strictEqual(emit(Decl.variable('fn', Type.pointer(Type.array(Type.pointer(fnType), Expr.intLiteral(2))))),
+        'int (*(*fn)[2])(int);');
+    });
+  });
 });
