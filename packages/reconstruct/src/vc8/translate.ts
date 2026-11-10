@@ -721,8 +721,12 @@ export const FILE_PATCHES: Record<string, Patch[]> = {
   ],
 };
 
+function hasPatches(rel: string): boolean {
+  return Object.prototype.hasOwnProperty.call(FILE_PATCHES, rel);
+}
+
 export function applyPatches(rel: string, text: string): string {
-  for (const patch of FILE_PATCHES[rel] ?? []) {
+  for (const patch of (hasPatches(rel) ? FILE_PATCHES[rel] : [])) {
     const at = patch.find(text);
     if (at.length !== 1) throw new Error(`patch anchor ${JSON.stringify(patch.what)} matches ${at.length} times, expected once`);
     text = patch.apply(text, at[0]);
@@ -824,7 +828,7 @@ export function translate(text: string, rel: string, state: TreeState, quarantin
   if (state.strip.size) s = stripCtorsPass(s, state.strip);
   s = aggregatePass(s, state.construct);
   if (countNewlines(s) !== countNewlines(text)) throw new Error('rewrite changed the line count');
-  if (FILE_PATCHES[rel]) {
+  if (hasPatches(rel)) {
     s = applyPatches(rel, s);
     if (countNewlines(s) !== countNewlines(text) && text.includes('__LINE__')) {
       throw new Error('a line-adding patch on a file that uses __LINE__');

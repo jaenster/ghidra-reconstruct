@@ -71,6 +71,13 @@ describe('vc8 translate: syntax VC8 lacks', () => {
     assert.equal(one('struct P { int a; };\nP p = {};\n'), 'struct P { int a; };\nP p = {0};\n');
   });
 
+  it('reads identifiers that name Object.prototype members as plain identifiers', () => {
+    // Redivivus/d2_patch.cpp: a token lookup keyed on the text found Object.prototype.constructor.
+    const text = '__attribute__((constructor)) static void Install(void) { toString(); valueOf(); }\n';
+    assert.equal(one(text), text);
+    assert.equal(one(text, 'constructor.h'), text);
+  });
+
   it('leaves comments and strings alone', () => {
     const text = 'namespace N {\n// calls f(a, b) __thiscall, 0b11 [[arg]]\nconst char* s = "x = {};";\n}\n';
     assert.equal(tr({ 'a.cpp': text, 'b.h': 'void __thiscall f(int a, int b);\n' }, 'a.cpp'), text);

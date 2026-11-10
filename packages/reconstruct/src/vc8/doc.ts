@@ -29,7 +29,7 @@ export interface Range {
  * `a[b[0]]`, and the digraphs never occur as such. Splitting them keeps bracket matching and
  * the character-level tests exact.
  */
-const SPLIT: Record<string, K[]> = {
+const SPLIT = new Map<string, K[]>(Object.entries({
   '[[': [K.LeftBracket, K.LeftBracket],
   ']]': [K.RightBracket, K.RightBracket],
   '<:': [K.Less, K.Colon],
@@ -38,7 +38,7 @@ const SPLIT: Record<string, K[]> = {
   '%>': [K.Percent, K.Greater],
   '%:': [K.Percent, K.Colon],
   '%:%:': [K.Percent, K.Colon, K.Percent, K.Colon],
-};
+}));
 
 const OPEN: Partial<Record<K, K>> = { [K.LeftParen]: K.RightParen, [K.LeftBracket]: K.RightBracket, [K.LeftBrace]: K.RightBrace };
 const CLOSE: Partial<Record<K, K>> = { [K.RightParen]: K.LeftParen, [K.RightBracket]: K.LeftBracket, [K.RightBrace]: K.LeftBrace };
@@ -76,7 +76,7 @@ export class Doc {
       }
       if (token.kind === K.EOF) continue;
       const s = token.location.start.offset;
-      const parts = SPLIT[token.text];
+      const parts = SPLIT.get(token.text);
       if (parts) {
         let o = s;
         for (const k of parts) {
