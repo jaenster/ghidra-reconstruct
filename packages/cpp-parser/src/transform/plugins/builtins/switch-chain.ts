@@ -31,6 +31,12 @@
  * that binds outside it or a case label of an enclosing switch; two cases never fall into
  * one. When in doubt the ifs are left as printed.
  *
+ * A case whose code opens with a test of its own comes back folded into the case's test,
+ * `if (v == K && R) B` with no else (MONSTERAI_GetAliveKillerUnit 005de830: `sub eax, 0; je;
+ * sub eax, 1; jne` and then the mode tests). Where the subtraction stands for `v == K` alone,
+ * on lines of its own, the if is read as `if (v == K) { if (R) B }`, the same code, and the
+ * case is `case K: { if (R) B }`; a decision left as ifs keeps the printed if.
+ *
  * Cases are put in source order, read off the original's layout: VC8 lays the bodies of a
  * switch it lowers this way out in reverse source order, the last case right after the tests
  * (NET_D2GS_CLIENT_Send_0x67, 00477ca0, and BuildKurast, 0067f190, both matching byte for
@@ -434,6 +440,8 @@ interface Leaf {
 
 class Decision {
   readonly nodes = new Map<IfStmt, Node>();
+  /** The ifs read as `if (v == K) { if (R) B }`, with their printed condition and arm. */
+  private readonly unfolded: Array<{ ifs: IfStmt; condition: Expression; thenBranch: Statement }> = [];
   /** Every leaf the tests can reach, in source order. */
   readonly leaves: Leaf[] = [];
   why: string | null = null;
@@ -445,13 +453,16 @@ class Decision {
     if (s.kind !== NodeKind.IfStmt) return 'other';
     const ifs = s as IfStmt;
     if (ifs.init || ifs.isConstexpr) return 'other';
-    const t = equality(ifs.condition, this.ctx.enums);
+    let t = equality(ifs.condition, this.ctx.enums);
+    const lead = t ? null : leadingTest(ifs, this.ctx.enums);
+    if (lead) t = lead.test;
     if (!t || !same(t.v, this.v)) return 'other';
     const known = this.nodes.get(ifs);
     if (known) return known;
-    const own = this.ctx.reader.conditionTests(ifs);
+    const probe = lead ? ({ ...ifs, condition: lead.first } as IfStmt) : ifs;
+    const own = this.ctx.reader.conditionTests(probe);
     const split = !own;
-    const ev = own ?? this.ctx.reader.conditionTests(ifs, true);
+    const ev = own ?? this.ctx.reader.conditionTests(probe, true);
     if (!ev) { this.why = this.why ?? 'no-evidence'; return null; }
     if (ev.length !== t.ops.length) { this.why = this.why ?? 'tokens'; return null; }
     const ks: bigint[] = [];
@@ -466,6 +477,11 @@ class Decision {
       ks.push(k);
     }
     if (new Set(ks).size !== ks.length) { this.why = this.why ?? 'value'; return null; }
+    if (lead) {
+      this.unfolded.push({ ifs, condition: ifs.condition, thenBranch: ifs.thenBranch });
+      ifs.condition = lead.first;
+      ifs.thenBranch = Stmt.compound([lead.inner]);
+    }
     const n: Node = { ifs, test: t, ev: [...ev], k: ks, ...(split ? { split: true } : {}) };
     this.nodes.set(ifs, n);
     return n;
@@ -518,6 +534,50 @@ class Decision {
   find(l: Leaf): Leaf | undefined {
     return this.leaves.find(x => x.list === l.list && x.at === l.at);
   }
+
+  /** Put back every if read as two: the decision stays ifs as printed. */
+  revert(): void {
+    for (const u of this.unfolded.reverse()) {
+      u.ifs.condition = u.condition;
+      u.ifs.thenBranch = u.thenBranch;
+    }
+    this.unfolded.length = 0;
+  }
+}
+
+/**
+ * `if (v == K && R) B` with no else, the test `v == K` on lines of its own: that test, and
+ * `if (R) B` to put in the arm. The operands are read in text order; `&&` evaluates the
+ * same in either grouping.
+ */
+function leadingTest(ifs: IfStmt, enums: ReadonlySet<string>): { test: Test; first: Expression; inner: IfStmt } | null {
+  if (ifs.elseBranch) return null;
+  const leaves: Expression[] = [];
+  const flatten = (e: Expression): void => {
+    const u = unwrap(e);
+    if (u.kind === NodeKind.BinaryExpr && (u as BinaryExpr).operator === '&&') {
+      flatten((u as BinaryExpr).left);
+      flatten((u as BinaryExpr).right);
+    } else leaves.push(e);
+  };
+  flatten(ifs.condition);
+  if (leaves.length < 2) return null;
+  const one = equalityOperand(leaves[0], enums);
+  if (!one || one.neg) return null;
+  const first = leaves[0];
+  const rest = leaves.slice(1);
+  const end = first.location?.end.line;
+  if (end === undefined || rest.some(r => (r.location?.start.line ?? end) <= end)) return null;
+  const cond = rest.slice(1).reduce<Expression>((l, r) => ({
+    kind: NodeKind.BinaryExpr, operator: '&&', left: l, right: r, location: { start: l.location!.start, end: r.location!.end },
+    leadingTrivia: [], trailingTrivia: [],
+  }) as unknown as Expression, rest[0]);
+  const inner = {
+    kind: NodeKind.IfStmt, condition: cond, thenBranch: ifs.thenBranch, elseBranch: null, isConstexpr: false,
+    location: { start: rest[0].location!.start, end: ifs.location?.end ?? rest[rest.length - 1].location!.end },
+    leadingTrivia: [], trailingTrivia: [],
+  } as unknown as IfStmt;
+  return { test: { v: one.v, ops: [one.op], neg: false }, first, inner };
 }
 
 interface Frame {
@@ -564,6 +624,7 @@ function decisionAt(list: readonly Statement[], i: number, ctx: Ctx, inBlock = t
   const region = list.slice(i, end);
   const line = head.location?.start.line ?? 0;
   const left = (why: string, cases: number) => {
+    d.revert();
     if (why !== 'no-evidence' && why !== 'tokens') ctx.onSite?.({ rule: 'left', line, cases, why });
     return { replace: null, end: Math.max(end, i + 1) };
   };

@@ -221,6 +221,38 @@ describe('switchChainPlugin', () => {
     assert.ok(out.includes('switch (v) { case 0: { A(); return 1; } case 1: { B(); return 1; } default: { return 0; } }'), out);
   });
 
+  // MONSTERAI_GetAliveKillerUnit 005de830: the monster case opens with tests of its own.
+  it('reads `if (v == K && R) B` with the test on its own line as case K: { if (R) B }', () => {
+    const lines = (second: string, third = '<CMP ECX - 4 0x20> p->m != 4) {') => [
+      'void *f(int *p) {',
+      'int v;',
+      '<SUB EAX 0 0 0x10> if (v != 0) {',
+      second,
+      third,
+      '[0x40] return g(p);',
+      '}',
+      '}',
+      'else {',
+      '[0x30] if (p) {',
+      '[0x34] return p;',
+      '}',
+      '}',
+      '[0x50] return 0;',
+      '}',
+    ];
+    const { out, sites } = run(lines('<SUB EAX 1 1 0x15> if (v == 1 &&'));
+    assert.deepStrictEqual(sites, ['switch']);
+    assert.ok(out.includes('switch (v) { case 0: { if (p) { return p; } break; } case 1: { if (p->m != 4) { return g(p); } break; } } return 0;'), out);
+    // The case's own test on the same line: which instruction is whose is not known.
+    const same = run(lines('<SUB EAX 1 1 0x15> <CMP ECX - 4 0x20> if (v == 1 && p->m != 4) {', ''));
+    assert.ok(!same.out.includes('switch'), same.out);
+    assert.ok(same.out.includes('if (v == 1 && p->m != 4)'), same.out);
+    // With an else, the else is reached from two places: left, and printed as it was.
+    const full = lines('<SUB EAX 1 1 0x15> if (v == 1 &&');
+    const withElse = run([...full.slice(0, 6), '} else { h(); }', ...full.slice(7)]);
+    assert.ok(!withElse.out.includes('switch') && withElse.out.includes('if (v == 1 && p->m != 4)'), withElse.out);
+  });
+
   it('takes `if (v != K) X else Y` as K: Y, default: X', () => {
     const { out } = run([
       'void f(int v) {',
