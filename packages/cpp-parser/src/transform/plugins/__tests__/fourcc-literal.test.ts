@@ -13,8 +13,20 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { parse } from '../../../parser/index.js';
 import { emit } from '../../../emit/index.js';
-import type { AnyNode } from '../../../ast/nodes.js';
+import { NodeKind } from '../../../ast/kinds.js';
+import { TriviaKind } from '../../../lexer/trivia.js';
+import type { AnyNode, ASTNode, CStyleCastExpr, StringLiteralExpr } from '../../../ast/nodes.js';
 import { fourccLiteralPlugin } from '../builtins/fourcc-literal.js';
+
+function findNode<T extends ASTNode>(value: unknown, kind: NodeKind): T | undefined {
+  if (value === null || typeof value !== 'object') return undefined;
+  if ('kind' in value && value.kind === kind) return value as T;
+  for (const child of Object.values(value)) {
+    const found = findNode<T>(child, kind);
+    if (found) return found;
+  }
+  return undefined;
+}
 
 describe('fourccLiteralPlugin', () => {
   const transformer = fourccLiteralPlugin.createTransformer({});
@@ -70,5 +82,53 @@ describe('fourccLiteralPlugin', () => {
   it('escapes trigraphs in a decoded four-character code', () => {
     const out = run("void f() { g((char[4])L'\\x413d3f3f'); }");
     assert.ok(out.includes('"\\?\\?=A"'), out);
+  });
+
+  it('escapes printable quote and backslash bytes without changing the decoded value', () => {
+    for (const [hex, expected] of [
+      ['3f422241', 'A"B?'],
+      ['3f425c41', 'A\\B?'],
+    ]) {
+      const transformed = transformer(parse(`void f() { g((char[4])L'\\x${hex}'); }`)) as AnyNode;
+      const literal = findNode<StringLiteralExpr>(transformed, NodeKind.StringLiteral);
+      assert.ok(literal, hex);
+      assert.strictEqual(literal.value, expected);
+      const output = emit(transformed);
+      const reparsed = findNode<StringLiteralExpr>(parse(output), NodeKind.StringLiteral);
+      assert.strictEqual(reparsed?.value, expected, output);
+      assert.ok(literal.raw.includes(hex === '3f422241' ? '\\"' : '\\\\'), literal.raw);
+    }
+  });
+
+  it('refuses a nonprintable byte with requirePrintable enabled', () => {
+    const transformed = transformer(parse("void f() { g((char[4])L'\\x43424101'); }")) as AnyNode;
+    assert.ok(findNode<CStyleCastExpr>(transformed, NodeKind.CStyleCastExpr));
+    assert.strictEqual(findNode<StringLiteralExpr>(transformed, NodeKind.StringLiteral), undefined);
+  });
+
+  it('uses bounded octal escapes for nonprintable bytes when explicitly enabled', () => {
+    const allBytes = fourccLiteralPlugin.createTransformer({ requirePrintable: false });
+    const transformed = allBytes(parse("void f() { g((char[4])L'\\x43424101'); }")) as AnyNode;
+    const literal = findNode<StringLiteralExpr>(transformed, NodeKind.StringLiteral);
+    assert.ok(literal);
+    assert.strictEqual(literal.value, '\x01ABC');
+    assert.strictEqual(literal.raw, String.raw`"\001ABC"`);
+    const output = emit(transformed);
+    assert.ok(output.includes(String.raw`"\001ABC"`), output);
+  });
+
+  it('preserves the cast location and trivia on the decoded literal', () => {
+    const input = parse("void f() { g((char[4])L'\\x20736831'); }");
+    const cast = findNode<CStyleCastExpr>(input, NodeKind.CStyleCastExpr);
+    assert.ok(cast);
+    const trivia = { kind: TriviaKind.BlockComment, text: '/*fourcc*/', location: cast.location };
+    cast.leadingTrivia = [trivia];
+    cast.trailingTrivia = [trivia];
+    const transformed = transformer(input) as AnyNode;
+    const literal = findNode<StringLiteralExpr>(transformed, NodeKind.StringLiteral);
+    assert.ok(literal);
+    assert.deepStrictEqual(literal.location, cast.location);
+    assert.deepStrictEqual(literal.leadingTrivia, [trivia]);
+    assert.deepStrictEqual(literal.trailingTrivia, [trivia]);
   });
 });
