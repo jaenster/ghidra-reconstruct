@@ -253,6 +253,26 @@ function sites(c: Ctx, maxAnchors: number): string[] {
     const st = b.statements as N[];
     for (let k = 1; k < st.length; k++) if (st[k].kind === NodeKind.ExprStmt && st[k - 1].kind === NodeKind.IfStmt && st[k - 1].elseBranch) out.add(`dup(${pr(st[k].expression)})`);
   }
+  // tsel: an if/else storing the same locals in both arms, read by the call after it. The
+  // condition as printed with and without qualifiers (select-argument compares it as printed).
+  const elses = ifs.filter(s => s.elseBranch);
+  for (const p of [pr, prq]) {
+    const texts = elses.map(s => p(s.condition));
+    for (const t of new Set(texts)) {
+      const n = texts.filter(x => key(x) === key(t)).length;
+      out.add(`tsel(${t})`);
+      for (let i = 2; i <= n; i++) out.add(`tsel(${t},${i})`);
+    }
+  }
+  // hoist: the plain store that begins the block arm of an if with no else.
+  const hoists: string[] = [];
+  for (const b of blocks) for (const s of b.statements as N[]) {
+    if (s.kind !== NodeKind.IfStmt || s.init || s.elseBranch || s.thenBranch?.kind !== NodeKind.CompoundStmt) continue;
+    const arm = s.thenBranch.statements as N[];
+    if (arm.length >= 2 && arm[0].kind === NodeKind.ExprStmt) hoists.push(pr(arm[0].expression));
+  }
+  for (const { t, i } of indexed(hoists)) out.add(withIdx('hoist', t, i, true));
+
   // retval: a store of a constant to the returned local.
   const returned = new Set(all.filter(n => n.kind === NodeKind.ReturnStmt && n.value && unparen(n.value).kind === NodeKind.Identifier).map(n => unparen(n.value).name));
   for (const n of all) if (n.kind === NodeKind.AssignExpr && n.operator === '=' && unparen(n.left).kind === NodeKind.Identifier && returned.has(unparen(n.left).name)) out.add(`retval(${unparen(n.left).name},${pr(n.right)})`);
