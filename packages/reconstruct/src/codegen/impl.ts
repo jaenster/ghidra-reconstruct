@@ -3687,6 +3687,11 @@ function transformDecompiledCode(
     // `rotated-for-loop` keeps the rotated form of a loop whose computed bound the original
     // computes once for the guard and the test. Without the
     // facts (an older snapshot) early-return keeps its unconditional behaviour.
+    // Byte matching over readability (GHIDRA_EARLY_RETURN_KEEP_NEST=1): early-return keeps
+    // Ghidra's nest wherever the layout cannot decide, instead of making a guard.
+    if (process.env.GHIDRA_EARLY_RETURN_KEEP_NEST === '1') {
+      perPluginOptions['early-return'] = { ...(perPluginOptions['early-return'] as object | undefined), keepNestWhenUndecided: true };
+    }
     if (layout) {
       perPluginOptions['early-return'] = { ...(perPluginOptions['early-return'] as object | undefined), branchLayout: layout };
       perPluginOptions['rotated-for-loop'] = { ...(perPluginOptions['rotated-for-loop'] as object | undefined), branchLayout: layout };
