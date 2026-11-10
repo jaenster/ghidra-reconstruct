@@ -73,6 +73,15 @@
  *   dup(S)               the expression statement S after an if/else (an else-if chain
  *                        with a final else) is written at the end of every arm instead;
  *                        refused when an arm can leave.
+ *   hoist(S[,i])         the plain store S that begins the arm of an if with no else is
+ *                        written just before the if (the decompiler sinks a store into the
+ *                        only branch that reads it; the source as often wrote it above
+ *                        the test, D2WINTIMER_GetElapsed 004fd8f0). Refused unless the
+ *                        extra store on the untaken path is dead and nothing moves past
+ *                        anything it depends on: S stores into a local named nowhere
+ *                        outside the arm, its value loads no memory through a pointer,
+ *                        divides by nothing and has no side effect, and C calls and
+ *                        stores nothing.
  *
  * Expression forms (E and C are printed expressions; `[,i]` picks the i-th, default: the
  * only one):
@@ -128,6 +137,7 @@ export type Vc8Form =
   | { op: 'merge-tail'; cond: string; index: number }
   | { op: 'continue'; cond: string; index: number }
   | { op: 'dup'; stmt: string }
+  | { op: 'hoist'; stmt: string; index: number }
   | { op: 'tarms'; cond: string; index: number }
   | { op: 'zero'; expr: string; index: number }
   | { op: 'nonzero'; expr: string; index: number }
@@ -156,7 +166,7 @@ export interface Vc8FormOptions {
 }
 
 const OPS = new Set(['seq', 'fold', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'width', 'arms',
-  'nest', 'merge-tail', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'cmp', 'swap', 'ifsel', 'split', 'select', 'decl', 'unselect', 'tsel']);
+  'nest', 'merge-tail', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'cmp', 'swap', 'ifsel', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist']);
 
 /** Split at the commas outside brackets, parentheses, angle-free. */
 function splitArgs(s: string): string[] {
@@ -231,6 +241,11 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
       return { op: 'cmp', cond: args[0], how: args[1], index: i };
     }
     case 'dup': return args.length === 1 && !anchor && args[0] !== '' ? { op: 'dup', stmt: args[0] } : undefined;
+    case 'hoist': {
+      const i = int(args[1], 0);
+      if (anchor || args.length < 1 || args.length > 2 || !(i >= 0) || args[0] === '') return undefined;
+      return { op: 'hoist', stmt: args[0], index: i };
+    }
     case 'ifsel': return args.length === 1 && !anchor ? { op: 'ifsel', name: args[0] } : undefined;
     case 'decl': return args.length === 2 && !anchor ? { op: 'decl', name: args[0], before: args[1] } : undefined;
     case 'split': return args.length === 3 && !anchor ? { op: 'split', name: args[0], type: args[1], rename: args[2] } : undefined;
@@ -1213,6 +1228,89 @@ function doDup(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'dup' }>): void {
   b.statements.splice(k, 1);
 }
 
+/**
+ * True when evaluating e earlier, and whether or not a test that stores nothing holds,
+ * gives the same value and cannot fault: locals, parameters, globals, literals, casts,
+ * arithmetic without division, and the address of an lvalue whose address loads nothing
+ * (`&p->m.n`, not `&p->m->n` or `&a[i]`).
+ */
+function loadsNothing(e: Expression): boolean {
+  e = unparen(e);
+  switch (e.kind) {
+    case NodeKind.Identifier: case NodeKind.QualifiedId:
+    case NodeKind.IntegerLiteral: case NodeKind.FloatingLiteral: case NodeKind.CharLiteral:
+    case NodeKind.StringLiteral: case NodeKind.BoolLiteral: case NodeKind.NullptrLiteral:
+      return true;
+    case NodeKind.CStyleCastExpr: case NodeKind.StaticCastExpr: case NodeKind.ReinterpretCastExpr: case NodeKind.ConstCastExpr:
+      return loadsNothing((e as CStyleCastExpr).expression);
+    case NodeKind.BinaryExpr: {
+      const b = e as BinaryExpr;
+      if (['/', '%'].includes(b.operator)) return false;
+      return loadsNothing(b.left) && loadsNothing(b.right);
+    }
+    case NodeKind.UnaryExpr: {
+      const u = e as UnaryExpr;
+      if (u.operator === '&') return addressLoadsNothing(u.operand);
+      return ['-', '+', '~', '!'].includes(u.operator) && loadsNothing(u.operand);
+    }
+  }
+  return false;
+}
+
+function addressLoadsNothing(lv: Expression): boolean {
+  lv = unparen(lv);
+  if (lv.kind === NodeKind.Identifier || lv.kind === NodeKind.QualifiedId) return true;
+  if (lv.kind === NodeKind.MemberExpr) {
+    const m = lv as unknown as { object: Expression; isArrow: boolean };
+    return m.isArrow ? loadsNothing(m.object) : addressLoadsNothing(m.object);
+  }
+  return false;
+}
+
+function doHoist(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'hoist' }>): void {
+  const w = norm(f.stmt).replace(/;$/, '');
+  const hits: Array<{ b: CompoundStmt; k: number }> = [];
+  for (const b of blocks(fn)) b.statements.forEach((s, k) => {
+    if (s.kind !== NodeKind.IfStmt) return;
+    const arm = stmtsOf((s as IfStmt).thenBranch);
+    if (arm.length > 0 && arm[0].kind === NodeKind.ExprStmt && text((arm[0] as ExprStmt).expression) === w) hits.push({ b, k });
+  });
+  const hit = f.index === 0 ? (hits.length === 1 ? hits[0] : refuse(`${hits.length} ifs begin with ${f.stmt}`)) : (hits[f.index - 1] ?? refuse(`no if #${f.index} begins with ${f.stmt}`));
+  const ifs = hit.b.statements[hit.k] as IfStmt;
+  if (ifs.init) refuse('an if with an init statement');
+  if (ifs.elseBranch) refuse('the if has an else');
+  if (ifs.thenBranch.kind !== NodeKind.CompoundStmt) refuse('the arm is not a block');
+  const arm = (ifs.thenBranch as CompoundStmt).statements;
+  if (arm.length < 2) refuse('the store is the whole arm');
+  const st = storeOf(arm[0]);
+  if (!st || st.operator !== '=') refuse(`${f.stmt} is not a plain store`);
+  const root = storeRoot(st!.left, localNames(fn));
+  if (root === '*') refuse(`${f.stmt} stores through memory`);
+  // The left side's own address must load nothing either: `x.a[i]` indexes by a value.
+  if (!addressLoadsNothing(st!.left)) refuse(`the place ${f.stmt} stores to is computed`);
+  if (!loadsNothing(st!.right)) refuse(`the value of ${f.stmt} loads memory or can fault`);
+  if (hasCall(ifs.condition) || storedNames(ifs.condition).size > 0) refuse('the condition calls or stores');
+  // Dead on the untaken path: the local is named only inside the arm, where the store
+  // comes first, and in its declaration.
+  const inArm = new Set<ASTNode>();
+  for (const { node } of walk(ifs.thenBranch)) inArm.add(node);
+  const declNames = new Set<ASTNode>();
+  for (const { node } of walk(fn.body!)) {
+    if (node.kind !== NodeKind.VariableDecl) continue;
+    const d = node as VariableDecl;
+    if (d.name.name === root && d.initializer) refuse(`${root} is declared with a value`);
+    declNames.add(d.name);
+  }
+  for (const p of fn.parameters) {
+    const n = (p as unknown as { name?: Identifier | null }).name;
+    if (n && isId(n, root)) refuse(`${root} is a parameter`);
+  }
+  for (const { node } of walk(fn.body!)) {
+    if (isId(node, root) && !inArm.has(node) && !declNames.has(node)) refuse(`${root} is named outside the arm`);
+  }
+  hit.b.statements.splice(hit.k, 0, arm.shift()!);
+}
+
 /** The nodes of a kind whose text is `want`, in preorder; the i-th (1-based), or the only one for i = 0. */
 function pick<T extends ASTNode>(fn: FunctionDecl, want: string, index: number, ok: (n: ASTNode) => n is T, key: (n: T) => ASTNode = n => n): T {
   const w = norm(want);
@@ -1424,7 +1522,7 @@ const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op
   retval: doRetval, width: doWidth, arms: doArms,
   nest: doNest, 'merge-tail': doMergeTail, continue: doContinue, dup: doDup, tarms: doTarms, zero: doZero, nonzero: doNonzero,
   cmp: doCmp, swap: doSwap, ifsel: doIfsel, split: doSplit, select: doSelect, decl: doDecl, unselect: doUnselect,
-  tsel: doTsel,
+  tsel: doTsel, hoist: doHoist,
 };
 
 /**

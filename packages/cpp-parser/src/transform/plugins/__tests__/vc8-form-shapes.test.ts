@@ -270,3 +270,44 @@ describe('vc8-form shapes: seq and fold extensions', () => {
     refused(['void f(int c) {', '  int v = g(c);', '  v -= k(c);', '  h(c, v);', '}'], 'fold(v)');
   });
 });
+
+describe('vc8-form shapes: hoist', () => {
+  // D2WINTIMER_GetElapsed 004fd8f0: the callback argument is stored above the test.
+  const timer = ['int f(T* t) {', '  M m;', '  P p;', '  p = t->c.fp;', '  if (p) {', '    m.pControl = &t->c;', '    (*p)(&m);', '  }', '  return 1;', '}'];
+  it('parses', () => {
+    assert.deepStrictEqual(parseVc8Form('hoist(m.pControl = &t->c)'), { op: 'hoist', stmt: 'm.pControl = &t->c', index: 0 });
+    assert.deepStrictEqual(parseVc8Form('hoist(x = 1,2)'), { op: 'hoist', stmt: 'x = 1', index: 2 });
+    assert.strictEqual(parseVc8Form('hoist()'), undefined);
+  });
+  it('writes the first store of the arm before the if', () => {
+    const { out, sites } = run(timer, 'hoist(m.pControl = &t->c;)');
+    assert.strictEqual(sites[0].applied, true, sites[0].why);
+    assert.strictEqual(out, flat('int f(T* t) { M m; P p; p = t->c.fp; m.pControl = &t->c; if (p) { (*p)(&m); } return 1; }'));
+  });
+  it('picks the i-th of several', () => {
+    const { out, sites } = run(['void f(int a, int b) {', '  int x;', '  int y;', '  if (a) {', '    x = 1;', '    g(x);', '  }', '  if (b) {', '    y = 1;', '    g(y);', '  }', '}'], 'hoist(y = 1,1)');
+    assert.strictEqual(sites[0].applied, true, sites[0].why);
+    assert.ok(out.includes('y = 1; if (b) { g(y); }'), out);
+  });
+  it('refuses when the local is read outside the arm', () => {
+    refused(['void f(int a) {', '  int x;', '  x = 0;', '  if (a) {', '    x = 1;', '    g(x);', '  }', '  g(x);', '}'], 'hoist(x = 1)');
+  });
+  it('refuses a value that loads through a pointer', () => {
+    refused(['void f(S* p) {', '  int x;', '  if (p) {', '    x = p->n;', '    g(x);', '  }', '}'], 'hoist(x = p->n)');
+    refused(['void f(S* p) {', '  int* x;', '  if (p) {', '    x = &p->q->n;', '    g(x);', '  }', '}'], 'hoist(x = &p->q->n)');
+  });
+  it('refuses a division, a call or a store through memory', () => {
+    refused(['void f(int a, int d) {', '  int x;', '  if (a) {', '    x = a / d;', '    g(x);', '  }', '}'], 'hoist(x = a / d)');
+    refused(['void f(int a) {', '  int x;', '  if (a) {', '    x = h();', '    g(x);', '  }', '}'], 'hoist(x = h())');
+    refused(['void f(int a, S* p) {', '  if (a) {', '    p->n = 1;', '    g();', '  }', '}'], 'hoist(p->n = 1)');
+  });
+  it('refuses when the test calls, the if has an else, or the store is the whole arm', () => {
+    refused(['void f(int a) {', '  int x;', '  if (h(a)) {', '    x = a;', '    g(x);', '  }', '}'], 'hoist(x = a)');
+    refused(['void f(int a) {', '  int x;', '  if (a) {', '    x = a;', '    g(x);', '  } else {', '    g(0);', '  }', '}'], 'hoist(x = a)');
+    refused(['void f(int a) {', '  int x;', '  if (a) {', '    x = a;', '  }', '}'], 'hoist(x = a)');
+  });
+  it('refuses a parameter or a local declared with a value', () => {
+    refused(['void f(int a, int x) {', '  if (a) {', '    x = a;', '    g(x);', '  }', '}'], 'hoist(x = a)');
+    refused(['void f(int a) {', '  int x = 2;', '  if (a) {', '    x = a;', '    g(x);', '  }', '}'], 'hoist(x = a)');
+  });
+});
