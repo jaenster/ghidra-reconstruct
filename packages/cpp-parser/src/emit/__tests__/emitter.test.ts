@@ -3,6 +3,7 @@ import assert from 'node:assert';
 import { CppEmitter, emit, DEFAULT_STYLE, GOOGLE_STYLE, createStyle } from '../index.js';
 import { Type, Expr, Stmt, Decl } from '../../ast/factory.js';
 import { NodeKind } from '../../ast/kinds.js';
+import type { ExprStmt, FunctionDecl, ParenExpr, UnaryExpr } from '../../ast/nodes.js';
 import { parse } from '../../parser/index.js';
 
 describe('CppEmitter', () => {
@@ -103,6 +104,16 @@ describe('CppEmitter', () => {
   });
 
   describe('Unary Expressions', () => {
+    function emittedPrefixOperandKind(source: string): { emitted: string; kind: NodeKind } {
+      const emitted = emit(parse(source));
+      const fn = parse(emitted).declarations[0] as FunctionDecl;
+      const expression = (fn.body!.statements[0] as ExprStmt).expression;
+      assert.strictEqual(expression.kind, NodeKind.UnaryExpr);
+      let operand = (expression as UnaryExpr).operand;
+      while (operand.kind === NodeKind.ParenExpr) operand = (operand as ParenExpr).expression;
+      return { emitted, kind: operand.kind };
+    }
+
     it('emits prefix unary operations', () => {
       const x = Expr.identifier('x');
 
@@ -117,6 +128,35 @@ describe('CppEmitter', () => {
 
       assert.strictEqual(emit(Expr.unary('++', i)), '++i');
       assert.strictEqual(emit(Expr.unary('--', i)), '--i');
+      assert.strictEqual(emit(Expr.unary('++', Expr.deref(Expr.identifier('p')))), '++*p');
+    });
+
+    it('preserves a conditional lvalue as the target of prefix increment/decrement', () => {
+      // With flag=0, a=5, b=10, ++(flag ? a : b) changes b to 11;
+      // the flattened ++flag ? a : b changes flag instead.
+      for (const op of ['++', '--'] as const) {
+        const source = `int f(int flag, int a, int b) { ${op}(flag ? a : b); return a + b; }`;
+        const { emitted, kind } = emittedPrefixOperandKind(source);
+        assert.ok(emitted.includes(`${op}(flag ? a : b);`), emitted);
+        assert.strictEqual(kind, NodeKind.ConditionalExpr);
+        assert.strictEqual(
+          emit(Expr.unary(op, Expr.conditional(Expr.identifier('flag'), Expr.identifier('a'), Expr.identifier('b')))),
+          `${op}(flag ? a : b)`,
+        );
+      }
+    });
+
+    it('preserves an assignment lvalue as the target of prefix increment/decrement', () => {
+      for (const op of ['++', '--'] as const) {
+        const source = `int f(int a, int b) { ${op}(a = b); return a; }`;
+        const { emitted, kind } = emittedPrefixOperandKind(source);
+        assert.ok(emitted.includes(`${op}(a = b);`), emitted);
+        assert.strictEqual(kind, NodeKind.AssignExpr);
+        assert.strictEqual(
+          emit(Expr.unary(op, Expr.assign(Expr.identifier('a'), Expr.identifier('b')))),
+          `${op}(a = b)`,
+        );
+      }
     });
 
     it('emits postfix increment/decrement', () => {

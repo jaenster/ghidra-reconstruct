@@ -2441,15 +2441,8 @@ export class CppEmitter {
   }
 
   private emitUnaryExpr(node: UnaryExpr): void {
-    const op = node.operator;
-    // Prefix increment/decrement and other prefix operators
-    if (op === '++' || op === '--') {
-      this.write(op);
-      this.emitNode(node.operand);
-    } else {
-      this.write(op);
-      this.emitExprWithPrecedence(node.operand, 3);
-    }
+    this.write(node.operator);
+    this.emitExprWithPrecedence(node.operand, 3);
   }
 
   private emitPostfixExpr(node: PostfixExpr): void {
