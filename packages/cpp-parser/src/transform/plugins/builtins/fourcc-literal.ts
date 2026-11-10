@@ -22,6 +22,7 @@
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
+import { Expr } from '../../../ast/factory.js';
 import type {
   ASTNode,
   CStyleCastExpr,
@@ -128,13 +129,9 @@ function leU32ToString(value: number): string {
     (value >> 24) & 0xFF,
   ];
 
-  // Convert bytes to characters, handling non-printable as escape
-  return bytes.map(b => {
-    if (b >= 32 && b < 127) {
-      return String.fromCharCode(b);
-    }
-    return `\\x${b.toString(16).padStart(2, '0')}`;
-  }).join('');
+  // Keep decoded bytes as characters. Escaping belongs to the literal factory;
+  // otherwise `\\x01ABC` can greedily consume the following hex digits.
+  return String.fromCharCode(...bytes);
 }
 
 /**
@@ -157,12 +154,9 @@ function createStringLiteral(
   value: string,
   original: ASTNode
 ): StringLiteralExpr {
+  const literal = Expr.stringLiteral(value);
   return {
-    kind: NodeKind.StringLiteral,
-    value,
-    prefix: '',
-    isRaw: false,
-    raw: `"${value}"`,
+    ...literal,
     location: original.location,
     leadingTrivia: original.leadingTrivia || [],
     trailingTrivia: original.trailingTrivia || [],
