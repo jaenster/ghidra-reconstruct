@@ -11,6 +11,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { foreignParameterRegisters, readForeignSources, selectFileStaticFunctions } from '../codegen/file-static-functions.js';
+import { vc8formBodyHash } from '../codegen/vc8form-spec.js';
+import { parseVc8LinkageTag, vc8LinkageVerdict } from '../codegen/vc8-linkage.js';
 import { generateProject } from '../codegen/index.js';
 import type {
   AnalyzedDataSymbol,
@@ -447,6 +449,116 @@ describe('selectFileStaticFunctions', () => {
     const all = [plain, user];
     const sel = selectFileStaticFunctions({ allFunctions: all, unitOf: unitsOf(all), globals: [] });
     assert.strictEqual(sel.candidates, 0);
+  });
+});
+
+describe('registers the original leaves unread are no convention of its own', () => {
+  // The original enters these 1.14d functions reading ECX and not EDX with stack
+  // arguments (`ret N`), or EDX and not ECX. Their storage is the declared convention's
+  // own placement, a parameter left unused or a receiver in ECX: compiled extern they
+  // match the original byte for byte, so nothing says they were static.
+  const p = (name: string, dataType: string, ordinal: number, storage: string): ExtractedParameter =>
+    ({ name, dataType, size: 4, ordinal, storage });
+
+  it('leaves a receiver in ECX and the rest on the stack extern', () => {
+    // TSGrowableArray_Ui_CalcChunkSize 004210a0, MATCH extern (emitted __thiscall).
+    assert.deepStrictEqual(foreignParameterRegisters({
+      callingConvention: '__fastcall',
+      parameters: [p('this', 'BigBuffer *', 0, 'ECX:4'), p('nValue', 'uint32_t', 1, 'Stack[0x4]:4')],
+    }), []);
+  });
+
+  it('leaves a fastcall extern whose EDX parameter is unused', () => {
+    // Missiles_SrvDmgFunc_ConvertColdLengthToFreezeLength 005ad290, a table callback: the
+    // original never reads pMissile (EDX). MATCH extern.
+    assert.deepStrictEqual(foreignParameterRegisters({
+      callingConvention: '__fastcall',
+      parameters: [
+        p('pGame', 'SGAMEDATA *', 0, 'ECX:4'), p('pMissile', 'D2UnitStrc *', 1, 'EDX:4'),
+        p('pTarget', 'D2UnitStrc *', 2, 'Stack[0x4]:4'), p('pDamage', 'D2DamageStrc *', 3, 'Stack[0x8]:4'),
+      ],
+    }), []);
+  });
+
+  it('leaves a fastcall extern whose ECX parameter is unused', () => {
+    // AUTOMAP_RotateCellRight 00457860: dwUnused in ECX, never read. MATCH extern.
+    assert.deepStrictEqual(foreignParameterRegisters({
+      callingConvention: '__fastcall',
+      parameters: [p('dwUnused', 'undefined4', 0, 'ECX:4'), p('ppRootNode', 'D2AutomapCellStrc * *', 1, 'EDX:4')],
+    }), []);
+  });
+});
+
+describe('vc8linkage tags', () => {
+  const body = (name: string): string => `int __stdcall ${name}(int nValue)\n{\n  return nValue;\n}\n`;
+  const tag = (linkage: string, decompiled: string, size = 0x20): { type: string; data: string } =>
+    ({ type: 'vc8linkage', data: `${linkage};ev=0123456789;bh=${size}-89abcdef;dh=${vc8formBodyHash(decompiled)}` });
+
+  it('parses a record and refuses a malformed one', () => {
+    assert.deepStrictEqual(parseVc8LinkageTag('extern;ev=0123456789;bh=32-89abcdef;dh=01234567'),
+      { linkage: 'extern', size: 32, body: '01234567' });
+    assert.strictEqual(parseVc8LinkageTag('inline;ev=0123456789;bh=32-89abcdef;dh=01234567'), undefined);
+    assert.strictEqual(parseVc8LinkageTag('static;ev=0123;bh=32-89abcdef;dh=01234567'), undefined);
+    assert.strictEqual(parseVc8LinkageTag('static;ev=0123456789;bh=32-89abcdef'), undefined);
+  });
+
+  it('applies a tag measured against this size and decompile, and stales any other', () => {
+    const decompiled = body('F');
+    assert.strictEqual(vc8LinkageVerdict({ size: 0x20, decompiled, tags: [tag('static', decompiled)] }).linkage, 'static');
+    const moved = vc8LinkageVerdict({ size: 0x24, decompiled, tags: [tag('static', decompiled)] });
+    assert.strictEqual(moved.linkage, undefined);
+    assert.match(moved.stale[0].why, /^size 36/);
+    const retyped = vc8LinkageVerdict({ size: 0x20, decompiled: body('G'), tags: [tag('extern', decompiled)] });
+    assert.strictEqual(retyped.linkage, undefined);
+    assert.match(retyped.stale[0].why, /^decompile /);
+  });
+
+  it('stales two tags that disagree', () => {
+    const decompiled = body('F');
+    const v = vc8LinkageVerdict({ size: 0x20, decompiled, tags: [tag('static', decompiled), tag('extern', decompiled)] });
+    assert.strictEqual(v.linkage, undefined);
+    assert.strictEqual(v.stale.length, 2);
+  });
+
+  it('keeps a function its storage selects extern when the oracle measured it so', () => {
+    const helper = fn('Helper', '00401000', 'A', '  return nValue + 1;', { params: [inEax()] });
+    helper.tags = [tag('extern', helper.decompiled!)];
+    const caller = fn('Caller', '00401100', 'A', '  return Helper(3);');
+    const all = [helper, caller];
+    const sel = selectFileStaticFunctions({ allFunctions: all, unitOf: unitsOf(all), globals: [] });
+    assert.strictEqual(sel.selected.size, 0);
+    assert.deepStrictEqual(sel.refused.get('measured extern by the VC8 oracle'), ['Helper']);
+  });
+
+  it('selects a function its storage does not when the oracle measured it static', () => {
+    const plain = fn('Plain', '00401300', 'A', '  return nValue;', { params: [onStack()] });
+    plain.tags = [tag('static', plain.decompiled!)];
+    const user = fn('User', '00401400', 'A', '  return Plain(1);');
+    const all = [plain, user];
+    const sel = selectFileStaticFunctions({ allFunctions: all, unitOf: unitsOf(all), globals: [] });
+    assert.deepStrictEqual([...sel.selected.keys()], ['00401300']);
+    assert.strictEqual(sel.measuredStatic, 1);
+  });
+
+  it('still keeps a measured-static function extern when another unit calls it', () => {
+    const plain = fn('Plain', '00401300', 'A', '  return nValue;', { params: [onStack()] });
+    plain.tags = [tag('static', plain.decompiled!)];
+    const user = fn('User', '00401400', 'B', '  return Plain(1);');
+    const all = [plain, user];
+    const sel = selectFileStaticFunctions({ allFunctions: all, unitOf: unitsOf(all), globals: [] });
+    assert.strictEqual(sel.selected.size, 0);
+    assert.deepStrictEqual(sel.refused.get('referenced from another unit'), ['Plain']);
+  });
+
+  it('ignores a stale tag and reports it', () => {
+    const plain = fn('Plain', '00401300', 'A', '  return nValue;', { params: [onStack()] });
+    plain.tags = [tag('static', plain.decompiled!, 0x40)];
+    const user = fn('User', '00401400', 'A', '  return Plain(1);');
+    const all = [plain, user];
+    const sel = selectFileStaticFunctions({ allFunctions: all, unitOf: unitsOf(all), globals: [] });
+    assert.strictEqual(sel.selected.size, 0);
+    assert.strictEqual(sel.staleLinkageTags.length, 1);
+    assert.strictEqual(sel.staleLinkageTags[0].name, 'Plain');
   });
 });
 
