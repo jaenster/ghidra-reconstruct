@@ -3,6 +3,7 @@ import assert from 'node:assert';
 import { CppEmitter, emit, DEFAULT_STYLE, GOOGLE_STYLE, createStyle } from '../index.js';
 import { Type, Expr, Stmt, Decl } from '../../ast/factory.js';
 import { NodeKind } from '../../ast/kinds.js';
+import type { CharLiteralExpr, FunctionDecl, ReturnStmt } from '../../ast/nodes.js';
 import { parse } from '../../parser/index.js';
 
 describe('CppEmitter', () => {
@@ -26,6 +27,30 @@ describe('CppEmitter', () => {
 
     it('emits char literals', () => {
       assert.strictEqual(emit(Expr.charLiteral('A')), "'A'");
+    });
+
+    it('escapes character literals and reparses every byte value', () => {
+      const examples: Array<[number, string]> = [
+        [39, "'\\''"],
+        [92, "'\\\\'"],
+        [10, "'\\n'"],
+        [0, "'\\000'"],
+        [9, "'\\t'"],
+        [65, "'A'"],
+        [255, "'\\377'"],
+      ];
+      for (const [value, expected] of examples) {
+        assert.strictEqual(emit(Expr.charLiteral(value)), expected);
+      }
+      assert.strictEqual(emit(Expr.charLiteral("'")), "'\\''");
+
+      for (let value = 0; value <= 0xff; value++) {
+        const emitted = emit(Expr.charLiteral(value));
+        const fn = parse(`int f() { return ${emitted}; }`).declarations[0] as FunctionDecl;
+        const parsed = (fn.body!.statements[0] as ReturnStmt).value as CharLiteralExpr;
+        assert.strictEqual(parsed.kind, NodeKind.CharLiteral, emitted);
+        assert.strictEqual(parsed.value, value, emitted);
+      }
     });
 
     it('emits bool literals', () => {
