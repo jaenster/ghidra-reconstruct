@@ -16,6 +16,7 @@ import { createTransformer, updateNode } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { sameExpr } from './rotated-for-loop.js';
 import { createExprShape } from './expr-shape.js';
+import { shapeOfNode } from './call-arg-cast.js';
 import { localTypesOf } from './compare-form.js';
 
 interface PostStridedCountedLoopOptions extends PluginOptions {
@@ -208,7 +209,9 @@ function rewrite(fn: FunctionDecl, options: PostStridedCountedLoopOptions): Comp
     });
     // The source form in #94 uses a plain signed int index. A class can overload
     // `<`, and an unsigned index against a negative signed bound changes the first test.
-    const counterType = shapeOf(v.name);
+    // The function-wide name map can select an earlier nested declaration with
+    // this name. The loop counter's own declaration is the type authority here.
+    const counterType = shapeOfNode(v.type, 0, name => options.typedefTargets?.[name]);
     if (!counterType || counterType.stars !== 0 || counterType.base !== 'int') continue;
     const boundType = shapeOf(test.right);
     if (!boundType || boundType.stars !== 0 || !INTEGRAL_BOUNDS.has(boundType.base) ||
