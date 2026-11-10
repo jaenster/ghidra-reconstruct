@@ -80,6 +80,11 @@
  *                        written `if (!C) { the statements between }` before that return;
  *                        an if on C whose arm ends in `return E;` and falls through to
  *                        `return E;` loses the arm's copy.
+ *   tailguard(C[,i])     in a void function, the i-th top-level `if (!V) { BODY }`
+ *                        followed only by two calls of the same function is written
+ *                        `if (V) { calls; return; } { BODY } calls;`. V must be one
+ *                        integral local or parameter. The BODY keeps its scope;
+ *                        exits and labels inside BODY are refused.
  *   continue(C[,i])      the guard `if (C) J` that ends a loop body is written
  *                        `if (!C) continue;` followed by J's statements.
  *   select(C[,i])        the guard `if (C) return A;` followed by its block's last
@@ -260,6 +265,7 @@ export type Vc8Form =
   | { op: 'arms'; cond: string; wrap?: boolean; index?: number }
   | { op: 'nest'; cond: string; index: number }
   | { op: 'merge-tail'; cond: string; index: number }
+  | { op: 'tailguard'; cond: string; index: number }
   | { op: 'continue'; cond: string; index: number }
   | { op: 'dup'; stmt: string }
   | { op: 'hoist'; stmt: string; index: number }
@@ -326,7 +332,7 @@ export interface Vc8FormOptions {
 }
 
 const OPS = new Set(['seq', 'fold', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'width', 'boolflag', 'retwiden', 'arms',
-  'nest', 'merge-tail', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
+  'nest', 'merge-tail', 'tailguard', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
   'nestcall', 'fill', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge']);
 
 /** Split at the commas outside brackets, parentheses, angle-free. */
@@ -408,7 +414,7 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
       if (anchor || args.length < 1 || args.length > 2 || !(i >= 0) || !/^[A-Za-z_]\w*$/.test(args[0])) return undefined;
       return { op: m[1], name: args[0], index: i } as Vc8Form;
     }
-    case 'nest': case 'merge-tail': case 'continue': case 'select': case 'tsel': {
+    case 'nest': case 'merge-tail': case 'tailguard': case 'continue': case 'select': case 'tsel': {
       const i = int(args[1], 1);
       if (anchor || args.length < 1 || args.length > 2 || !(i >= 1) || args[0] === '') return undefined;
       return { op: m[1], cond: args[0], index: i } as Vc8Form;
@@ -1765,6 +1771,43 @@ function doMergeTail(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'merge-tail' }>
   (s.thenBranch as CompoundStmt).statements = arm;
   s.elseBranch = { kind: NodeKind.CompoundStmt, statements: between } as unknown as CompoundStmt;
   b.statements.splice(k + 1, between.length);
+}
+
+/** Put a shared, two-call void tail on the path that skips one invitation-style arm. */
+function doTailguard(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'tailguard' }>): void {
+  if (text(fn.returnType) !== 'void') refuse('the function does not return void');
+  const { b, k, s } = nthIf(fn, f.cond, f.index);
+  if (b !== fn.body) refuse('the if is not at function scope');
+  if (s.isConstexpr) refuse('the if is constexpr');
+  const condition = unparen(s.condition);
+  if (condition.kind !== NodeKind.UnaryExpr || (condition as UnaryExpr).operator !== '!') refuse('the condition is not a negated flag');
+  const flag = unparen((condition as UnaryExpr).operand);
+  if (flag.kind !== NodeKind.Identifier) refuse('the flag is not an identifier');
+  const flagName = (flag as Identifier).name;
+  const localDecls = [...walk(fn.body!)].filter(({ node }) => node.kind === NodeKind.VariableDecl && (node as VariableDecl).name.name === flagName)
+    .map(({ node }) => node as VariableDecl);
+  const prefixDecls = b.statements.slice(0, k).map(declOf).filter((d): d is VariableDecl => d?.name.name === flagName);
+  const parameterDecls = fn.parameters.filter(p => isId(p.name, flagName));
+  if (localDecls.length + parameterDecls.length !== 1) refuse('the flag has no unique binding');
+  const binding = parameterDecls[0] ?? (prefixDecls.length === 1 && prefixDecls[0] === localDecls[0] ? prefixDecls[0] : undefined);
+  if (!binding || WIDTH[text(binding.type)] === undefined) refuse('the flag is not a visible integral local or parameter');
+  if (s.thenBranch.kind !== NodeKind.CompoundStmt) refuse('the arm has no block scope');
+  const arm = s.thenBranch as CompoundStmt;
+  if (arm.statements.length === 0) refuse('the arm is empty');
+  if ([...walk(arm)].some(({ node }) => [NodeKind.ReturnStmt, NodeKind.BreakStmt, NodeKind.ContinueStmt,
+    NodeKind.GotoStmt, NodeKind.LabelStmt, NodeKind.CaseStmt, NodeKind.DefaultStmt].includes(node.kind)))
+    refuse('the arm has an exit or label');
+  const tail = b.statements.slice(k + 1);
+  if (tail.length !== 2 || tail.some(x => x.kind !== NodeKind.ExprStmt || unparen((x as ExprStmt).expression).kind !== NodeKind.CallExpr))
+    refuse('the function does not end in exactly two calls');
+  const calls = tail.map(x => unparen((x as ExprStmt).expression) as unknown as { callee: Expression });
+  if (text(calls[0].callee) !== text(calls[1].callee)) refuse('the tail calls differ');
+  const ret = parse('void __vc8f() { return; }').declarations[0] as FunctionDecl;
+  const guard = { ...s, condition: cloneNode(flag),
+    thenBranch: { kind: NodeKind.CompoundStmt,
+      statements: [cloneNode(tail[0]), cloneNode(tail[1]), ret.body!.statements[0]],
+    } as CompoundStmt } as IfStmt;
+  b.statements.splice(k, 1, guard, arm);
 }
 
 function doContinue(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'continue' }>): void {
@@ -3246,7 +3289,8 @@ function doSwmerge(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'swmerge' }>): vo
 const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op: K }>) => void } = {
   seq: doSeq, fold: doFold, cache: doCache, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
   retval: doRetval, width: doWidth, boolflag: doBoolflag, retwiden: doRetwiden, arms: doArms,
-  nest: doNest, 'merge-tail': doMergeTail, continue: doContinue, dup: doDup, tarms: doTarms, zero: doZero, nonzero: doNonzero, bool: doBool,
+  nest: doNest, 'merge-tail': doMergeTail, tailguard: doTailguard, continue: doContinue, dup: doDup, tarms: doTarms, zero: doZero, nonzero: doNonzero,
+  bool: doBool,
   cmp: doCmp, swap: doSwap, ifsel: doIfsel, split: doSplit, select: doSelect, decl: doDecl, unselect: doUnselect,
   tsel: doTsel, hoist: doHoist, nestcall: doNestcall, fill: doFill, copy: doCopy, shift: doShift, ptrwalk: doPtrwalk, rowptr: doRowptr,
   acc: doAcc,
