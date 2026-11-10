@@ -3,6 +3,7 @@ import assert from 'node:assert';
 import { CppEmitter, emit, DEFAULT_STYLE, GOOGLE_STYLE, createStyle } from '../index.js';
 import { Type, Expr, Stmt, Decl } from '../../ast/factory.js';
 import { NodeKind } from '../../ast/kinds.js';
+import type { BinaryExpr, FunctionDecl, ReturnStmt, UnaryExpr } from '../../ast/nodes.js';
 import { parse } from '../../parser/index.js';
 
 describe('CppEmitter', () => {
@@ -59,6 +60,111 @@ describe('CppEmitter', () => {
   });
 
   describe('Binary Expressions', () => {
+    it('separates compact binary operators from leading unary tokens', () => {
+      const x = Expr.identifier('x');
+      const y = Expr.identifier('y');
+      const cases = [
+        ['+', '+', 'x+ +y'],
+        ['+', '++', 'x+ ++y'],
+        ['-', '-', 'x- -y'],
+        ['-', '--', 'x- --y'],
+        ['&', '&', 'x& &y'],
+        ['/', '*', 'x/ *y'],
+        ['+', '-', 'x+-y'],
+        ['-', '+', 'x-+y'],
+        ['*', '*', 'x**y'],
+        ['&&', '&', 'x&&&y'],
+      ] as const;
+
+      for (const [binaryOp, unaryOp, expected] of cases) {
+        const expression = Expr.binary(x, binaryOp, Expr.unary(unaryOp, y));
+        const emitted = emit(expression, { spaceAroundOperators: false });
+        assert.strictEqual(emitted, expected);
+        const fn = parse(`int f(int x, int y) { return ${emitted}; }`).declarations[0] as FunctionDecl;
+        const result = (fn.body!.statements[0] as ReturnStmt).value as BinaryExpr;
+        assert.strictEqual(result.kind, NodeKind.BinaryExpr);
+        assert.strictEqual(result.operator, binaryOp);
+        assert.strictEqual(result.right.kind, NodeKind.UnaryExpr);
+        assert.strictEqual((result.right as UnaryExpr).operator, unaryOp);
+      }
+
+      for (const [binaryOp, unaryOp, expected] of [
+        ['+', '+', 'x+ +y'],
+        ['/', '*', 'x/ *y'],
+      ] as const) {
+        const parenthesized = Expr.binary(x, binaryOp, Expr.paren(Expr.unary(unaryOp, y)));
+        const emitted = emit(parenthesized, { spaceAroundOperators: false });
+        assert.strictEqual(emitted, expected);
+        const fn = parse(`int f(int x, int *y) { return ${emitted}; }`).declarations[0] as FunctionDecl;
+        const result = (fn.body!.statements[0] as ReturnStmt).value as BinaryExpr;
+        assert.strictEqual(result.kind, NodeKind.BinaryExpr);
+        assert.strictEqual(result.operator, binaryOp);
+        assert.strictEqual(result.right.kind, NodeKind.UnaryExpr);
+        assert.strictEqual((result.right as UnaryExpr).operator, unaryOp);
+      }
+    });
+
+    it('separates compact subtraction from signed factory literals', () => {
+      const x = Expr.identifier('x');
+      const cases = [
+        [Expr.intLiteral(-1), 'x- -1'],
+        [Expr.intLiteral(-1, 16), 'x- -0x1'],
+        [Expr.floatLiteral(-1.5), 'x- -1.5'],
+      ] as const;
+
+      for (const [literal, expected] of cases) {
+        const emitted = emit(Expr.binary(x, '-', literal), { spaceAroundOperators: false });
+        assert.strictEqual(emitted, expected);
+        const fn = parse(`double f(double x) { return ${emitted}; }`).declarations[0] as FunctionDecl;
+        const result = (fn.body!.statements[0] as ReturnStmt).value as BinaryExpr;
+        assert.strictEqual(result.kind, NodeKind.BinaryExpr);
+        assert.strictEqual(result.operator, '-');
+        assert.strictEqual(result.right.kind, NodeKind.UnaryExpr);
+        assert.strictEqual((result.right as UnaryExpr).operator, '-');
+      }
+    });
+
+    it('follows the emitted left edge of a tighter right-hand expression', () => {
+      const x = Expr.identifier('x');
+      const y = Expr.identifier('y');
+      const z = Expr.identifier('z');
+      const p = Expr.identifier('p');
+      const m = Expr.identifier('m');
+      const plusProduct = Expr.binary(Expr.unary('+', y), '*', z);
+      const cases = [
+        [Expr.binary(x, '+', plusProduct), 'x+ +y*z', '+', '*', '+'],
+        [Expr.binary(x, '+', Expr.binary(Expr.unary('++', y), '*', z)), 'x+ ++y*z', '+', '*', '++'],
+        [Expr.binary(x, '-', Expr.binary(Expr.unary('-', y), '*', z)), 'x- -y*z', '-', '*', '-'],
+        [Expr.binary(x, '-', Expr.binary(Expr.intLiteral(-1), '*', z)), 'x- -1*z', '-', '*', '-'],
+        [Expr.binary(x, '&', Expr.binary(Expr.unary('&', y), '+', z)), 'x& &y+z', '&', '+', '&'],
+        [Expr.binary(x, '/', Expr.binary(Expr.unary('*', p), '.*', m)), 'x/ *p.*m', '/', '.*', '*'],
+        [Expr.binary(x, '+', Expr.paren(plusProduct)), 'x+ +y*z', '+', '*', '+'],
+      ] as const;
+
+      for (const [expression, expected, outerOp, innerOp, unaryOp] of cases) {
+        const emitted = emit(expression, { spaceAroundOperators: false });
+        assert.strictEqual(emitted, expected);
+        const fn = parse(`int f(int x, int y, int z, int p, int m) { return ${emitted}; }`)
+          .declarations[0] as FunctionDecl;
+        const outer = (fn.body!.statements[0] as ReturnStmt).value as BinaryExpr;
+        assert.strictEqual(outer.kind, NodeKind.BinaryExpr);
+        assert.strictEqual(outer.operator, outerOp);
+        const inner = outer.right as BinaryExpr;
+        assert.strictEqual(inner.kind, NodeKind.BinaryExpr);
+        assert.strictEqual(inner.operator, innerOp);
+        assert.strictEqual(inner.left.kind, NodeKind.UnaryExpr);
+        assert.strictEqual((inner.left as UnaryExpr).operator, unaryOp);
+      }
+
+      const sameAssociative = Expr.binary(x, '+', Expr.binary(Expr.unary('+', y), '+', z));
+      const sameAssociativeOutput = emit(sameAssociative, { spaceAroundOperators: false });
+      assert.ok(!sameAssociativeOutput.startsWith('x++'), sameAssociativeOutput);
+      parse(`int f(int x, int y, int z) { return ${sameAssociativeOutput}; }`);
+
+      const grouped = Expr.binary(x, '+', Expr.binary(Expr.unary('+', y), '-', z));
+      assert.strictEqual(emit(grouped, { spaceAroundOperators: false }), 'x+(+y-z)');
+    });
+
     it('emits binary operations', () => {
       const a = Expr.identifier('a');
       const b = Expr.identifier('b');

@@ -2409,16 +2409,78 @@ export class CppEmitter {
     } else {
       this.emitExprWithPrecedence(node.left, precedence);
     }
+    // Right child grouping also determines whether the first right token is visible.
+    const rightPrec = this.rightChildSameAssociativeOp(node) ? precedence : precedence - 1;
     if (this.style.spaceAroundOperators) {
       this.write(' ' + node.operator + ' ');
     } else {
       this.write(node.operator);
+      if (this.binaryRightNeedsTokenSeparator(node, rightPrec)) this.write(' ');
     }
     // Right child: use precedence - 1 to force parens for same-precedence ops
     // (e.g. a - (b - c) ≠ a - b - c). But if the right child is the same
     // associative operator, parens are unnecessary (e.g. a && b && c).
-    const rightPrec = this.rightChildSameAssociativeOp(node) ? precedence : precedence - 1;
     this.emitExprWithPrecedence(node.right, rightPrec);
+  }
+
+  /** Prevent compact binary/unary tokens from merging or starting a comment. */
+  private binaryRightNeedsTokenSeparator(node: BinaryExpr, rightPrecedence: number): boolean {
+    const op = node.operator;
+    if (op !== '+' && op !== '-' && op !== '&' && op !== '/') return false;
+    const first = this.firstEmittedExprToken(node.right, rightPrecedence);
+    return first?.startsWith(op === '/' ? '*' : op) ?? false;
+  }
+
+  /** Trace only the expression's emitted left edge, including inserted parentheses. */
+  private firstEmittedExprToken(expr: Expression, parentPrecedence: number): string | null {
+    while (true) {
+      if (this.getExprPrecedence(expr) > parentPrecedence) return '(';
+      switch (expr.kind) {
+        case NodeKind.ParenExpr: {
+          const inner = (expr as ParenExpr).expression;
+          if (inner.kind === NodeKind.CommaExpr) return '(';
+          expr = inner;
+          break;
+        }
+        case NodeKind.BinaryExpr: {
+          const binary = expr as BinaryExpr;
+          if (binary.operator.startsWith('>') && this.isLessThanComparison(binary.left)) return '(';
+          parentPrecedence = OPERATOR_PRECEDENCE[binary.operator] ?? 20;
+          expr = binary.left;
+          break;
+        }
+        case NodeKind.UnaryExpr:
+          return (expr as UnaryExpr).operator;
+        case NodeKind.IntegerLiteral:
+        case NodeKind.FloatingLiteral:
+        case NodeKind.UserDefinedLiteral:
+          return expr.raw;
+        case NodeKind.PostfixExpr: {
+          const postfix = expr as PostfixExpr;
+          parentPrecedence = OPERATOR_PRECEDENCE[postfix.operator + '_post'] ?? 2;
+          expr = postfix.operand;
+          break;
+        }
+        case NodeKind.MemberExpr:
+          expr = (expr as MemberExpr).object;
+          parentPrecedence = 2;
+          break;
+        case NodeKind.SubscriptExpr:
+          expr = (expr as SubscriptExpr).array;
+          parentPrecedence = 2;
+          break;
+        case NodeKind.CallExpr:
+          expr = (expr as CallExpr).callee;
+          parentPrecedence = 2;
+          break;
+        case NodeKind.PackExpansionExpr:
+          expr = (expr as PackExpansionExpr).pattern;
+          parentPrecedence = Infinity;
+          break;
+        default:
+          return null;
+      }
+    }
   }
 
   /** A `<` comparison, looking through ParenExpr. */
