@@ -138,7 +138,15 @@
  *                        known integer type of at most 32 bits.
  *   ifsel(V)             `V = C ? A : B;` (or the declaration of V so initialized) is
  *                        written `if (C) { V = A; } else { V = B; }`.
-
+ *   clamp(V[,i])         the i-th adjacent `V = E; if (V op L) V = L;` (also a
+ *                        declaration initialized from E) is written as one select
+ *                        `V = E !op L ? E : L;`. Without i, only one site may fit.
+ *                        V must be one nonstatic 32-bit integer local. Refused if E or L
+ *                        has effects, names V, or V's address is taken.
+ *                        Because E is read twice, the tagger must also verify that E
+ *                        and L have stable nonvolatile reads; this AST has no global or
+ *                        member declaration facts to prove that property by itself.
+ *
  *   decl(V,W)            the declaration of V without an initializer moves to just before
  *                        the declaration of W in its block; refused when a statement it
  *                        moves past names V.
@@ -298,6 +306,7 @@ export type Vc8Form =
   | { op: 'cmp'; cond: string; how: 'mirror' | 'lit' | 'mirror-lit'; index: number }
   | { op: 'swap'; expr: string; index: number }
   | { op: 'ifsel'; name: string }
+  | { op: 'clamp'; name: string; index: number }
   | { op: 'select'; cond: string; index: number }
   | { op: 'decl'; name: string; before: string }
   | { op: 'unselect'; cond: string; index: number }
@@ -356,7 +365,7 @@ export interface Vc8FormOptions {
 }
 
 const OPS = new Set(['seq', 'fold', 'join', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'width', 'boolflag', 'retwiden', 'arms',
-  'nest', 'merge-tail', 'tailguard', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
+  'nest', 'merge-tail', 'tailguard', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'clamp', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
   'nestcall', 'fill', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'switch', 'dec']);
 
 /** Split at commas outside brackets and parentheses. For cache, the third argument is a
@@ -498,6 +507,11 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
       return { op: 'hoist', stmt: args[0], index: i };
     }
     case 'ifsel': return args.length === 1 && !anchor ? { op: 'ifsel', name: args[0] } : undefined;
+    case 'clamp': {
+      const i = int(args[1], 0);
+      return !anchor && args.length >= 1 && args.length <= 2 && /^[A-Za-z_$][\w$]*$/.test(args[0]) && i >= 0
+        ? { op: 'clamp', name: args[0], index: i } : undefined;
+    }
     case 'decl': return args.length === 2 && !anchor ? { op: 'decl', name: args[0], before: args[1] } : undefined;
     case 'split': return args.length === 3 && !anchor ? { op: 'split', name: args[0], type: args[1], rename: args[2] } : undefined;
     case 'dec': {
@@ -2351,6 +2365,77 @@ function doIfsel(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'ifsel' }>): void {
   } else b.statements.splice(k, 1, sel);
 }
 
+/** Re-form a proven, effect-free clamp as the source select VC8 compiled. */
+function doClamp(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'clamp' }>): void {
+  const declarations = [...walk(fn.body!)].filter(x => x.node.kind === NodeKind.VariableDecl && (x.node as VariableDecl).name.name === f.name)
+    .map(x => x.node as VariableDecl);
+  if (declarations.length !== 1 || fn.parameters.some(p => (p as unknown as { name?: Identifier }).name?.name === f.name))
+    refuse(`${f.name} is not one unshadowed local`);
+  const declared = declarations[0];
+  if (declared.specifiers.includes('static') || !new Set(['int', 'int32_t', 'signedint', 'long', 'signedlong', 'LONG']).has(text(declared.type)))
+    refuse(`${f.name} is not a nonstatic signed 32-bit integer`);
+  if (addressTaken(fn, f.name)) refuse(`&${f.name} is taken`);
+  const reverse: Record<string, string> = { '<': '>', '<=': '>=', '>': '<', '>=': '<=' };
+  const opposite: Record<string, string> = { '<': '>=', '<=': '>', '>': '<=', '>=': '<' };
+  const hits: Array<{ b: CompoundStmt; k: number; value: Expression; bound: Expression; op: string; decl?: VariableDecl; store?: AssignExpr }> = [];
+  for (const b of blocks(fn)) {
+    for (let k = 0; k + 1 < b.statements.length; k++) {
+      const first = b.statements[k];
+      const store = storeOf(first);
+      const decl = declOf(first);
+      let value: Expression | undefined;
+      if (store?.operator === '=' && isId(unparen(store.left), f.name)) value = store.right;
+      else if (decl?.name.name === f.name && decl.initializer && decl.initializer.kind !== NodeKind.InitListExpr && !decl.directInit) value = decl.initializer as Expression;
+      if (!value) continue;
+      const next = b.statements[k + 1];
+      if (next.kind !== NodeKind.IfStmt) continue;
+      const guard = next as IfStmt;
+      if (guard.init || guard.elseBranch || guard.isConstexpr) continue;
+      const condition = unparen(guard.condition);
+      if (condition.kind !== NodeKind.BinaryExpr) continue;
+      const compare = condition as BinaryExpr;
+      let op = compare.operator as string;
+      let bound: Expression;
+      if (isId(unparen(compare.left), f.name) && opposite[op]) bound = compare.right;
+      else if (isId(unparen(compare.right), f.name) && reverse[op]) {
+        bound = compare.left;
+        op = reverse[op];
+      } else continue;
+      const branch = guard.thenBranch.kind === NodeKind.CompoundStmt
+        ? ((guard.thenBranch as CompoundStmt).statements.length === 1 ? (guard.thenBranch as CompoundStmt).statements[0] : undefined)
+        : guard.thenBranch;
+      const clampStore = branch && storeOf(branch);
+      if (!clampStore || clampStore.operator !== '=' || !isId(unparen(clampStore.left), f.name) || text(clampStore.right) !== text(bound)) continue;
+      hits.push({ b, k, value, bound, op, decl: decl?.name.name === f.name ? decl : undefined, store });
+    }
+  }
+  if (hits.length === 0) refuse(`no adjacent clamp of ${f.name}`);
+  if (f.index === 0 && hits.length !== 1) refuse(`${hits.length} clamps of ${f.name}`);
+  if (f.index > hits.length) refuse(`no clamp #${f.index} of ${f.name}`);
+  const { b, k, value, bound, op, decl, store } = hits[(f.index || 1) - 1];
+  if (effects(value) || effects(bound)) refuse('clamp expression or bound has effects');
+  if (mentions(value, f.name) || mentions(bound, f.name)) refuse(`${f.name} occurs in the clamp expression or bound`);
+  const readNames = new Set([...identifiers(value), ...identifiers(bound)]);
+  for (const { node } of walk(fn.body!)) {
+    if (node.kind !== NodeKind.VariableDecl) continue;
+    const v = node as VariableDecl;
+    if (readNames.has(v.name.name) && text(v.type).includes('volatile')) refuse(`${v.name.name} is volatile`);
+  }
+  for (const p of fn.parameters) {
+    const v = p as unknown as { name?: Identifier; type?: TypeNode };
+    if (v.name && v.type && readNames.has(v.name.name) && text(v.type).includes('volatile')) refuse(`${v.name.name} is volatile`);
+  }
+  const select = {
+    kind: NodeKind.ConditionalExpr,
+    condition: { kind: NodeKind.BinaryExpr, operator: opposite[op], left: cloneNode(value), right: cloneNode(bound) },
+    thenExpr: cloneNode(value), elseExpr: cloneNode(bound),
+  } as unknown as ConditionalExpr;
+  if (decl) decl.initializer = select;
+  else if (store) store.right = select;
+  else refuse('no clamp destination');
+  b.statements.splice(k + 1, 1);
+}
+
 function doSplit(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'split' }>): void {
   if (localNames(fn).has(f.rename)) refuse(`${f.rename} exists`);
   if (addressTaken(fn, f.name)) refuse(`&${f.name} is taken`);
@@ -3661,7 +3746,7 @@ const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op
   retval: doRetval, width: doWidth, boolflag: doBoolflag, retwiden: doRetwiden, arms: doArms,
   nest: doNest, 'merge-tail': doMergeTail, tailguard: doTailguard, continue: doContinue, dup: doDup, tarms: doTarms, zero: doZero, nonzero: doNonzero,
   bool: doBool,
-  cmp: doCmp, swap: doSwap, ifsel: doIfsel, split: doSplit, select: doSelect, decl: doDecl, unselect: doUnselect,
+  cmp: doCmp, swap: doSwap, ifsel: doIfsel, clamp: doClamp, split: doSplit, select: doSelect, decl: doDecl, unselect: doUnselect,
   tsel: doTsel, hoist: doHoist, nestcall: doNestcall, fill: doFill, copy: doCopy, shift: doShift, ptrwalk: doPtrwalk, rowptr: doRowptr,
   acc: doAcc,
   retvar: doRetvar, onecall: doOnecall, roundup: doRoundup, swmerge: doSwmerge, dec: doDec, switch: doSwitch,
