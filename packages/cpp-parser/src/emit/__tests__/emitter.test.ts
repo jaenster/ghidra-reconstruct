@@ -3,6 +3,7 @@ import assert from 'node:assert';
 import { CppEmitter, emit, DEFAULT_STYLE, GOOGLE_STYLE, createStyle } from '../index.js';
 import { Type, Expr, Stmt, Decl } from '../../ast/factory.js';
 import { NodeKind } from '../../ast/kinds.js';
+import type { AssignExpr, ExprStmt, FunctionDecl, ParenExpr } from '../../ast/nodes.js';
 import { parse } from '../../parser/index.js';
 
 describe('CppEmitter', () => {
@@ -182,6 +183,15 @@ describe('CppEmitter', () => {
   });
 
   describe('Assignment Expressions', () => {
+    function firstAssignmentLeftKind(source: string): NodeKind {
+      const fn = parse(source).declarations[0] as FunctionDecl;
+      const expression = (fn.body!.statements[0] as ExprStmt).expression;
+      assert.strictEqual(expression.kind, NodeKind.AssignExpr);
+      let left = (expression as AssignExpr).left;
+      while (left.kind === NodeKind.ParenExpr) left = (left as ParenExpr).expression;
+      return left.kind;
+    }
+
     it('emits simple assignment', () => {
       const x = Expr.identifier('x');
       const assign = Expr.assign(x, Expr.intLiteral(10));
@@ -192,6 +202,50 @@ describe('CppEmitter', () => {
       const x = Expr.identifier('x');
       assert.strictEqual(emit(Expr.assign(x, Expr.intLiteral(5), '+=')), 'x += 5');
       assert.strictEqual(emit(Expr.assign(x, Expr.intLiteral(2), '*=')), 'x *= 2');
+    });
+
+    it('preserves a conditional lvalue on the left of assignment', () => {
+      const source = 'int f(bool flag, int a, int b) { (flag ? a : b) = 3; return a + b; }';
+      const emitted = emit(parse(source));
+      assert.match(emitted, /\(flag \? a : b\) = 3;/);
+      assert.strictEqual(firstAssignmentLeftKind(source), NodeKind.ConditionalExpr);
+      assert.strictEqual(firstAssignmentLeftKind(emitted), NodeKind.ConditionalExpr);
+      assert.strictEqual(
+        emit(Expr.assign(Expr.conditional(Expr.identifier('flag'), Expr.identifier('a'), Expr.identifier('b')), Expr.intLiteral(3))),
+        '(flag ? a : b) = 3',
+      );
+    });
+
+    it('preserves left-nested assignment and right-associative assignment', () => {
+      const leftNested = 'int f(int a, int b, int c) { (a = b) = c; return b; }';
+      const emitted = emit(parse(leftNested));
+      assert.match(emitted, /\(a = b\) = c;/);
+      assert.strictEqual(firstAssignmentLeftKind(leftNested), NodeKind.AssignExpr);
+      assert.strictEqual(firstAssignmentLeftKind(emitted), NodeKind.AssignExpr);
+      assert.strictEqual(
+        emit(Expr.assign(Expr.assign(Expr.identifier('a'), Expr.identifier('b')), Expr.identifier('c'))),
+        '(a = b) = c',
+      );
+      assert.strictEqual(
+        emit(Expr.assign(Expr.identifier('a'), Expr.assign(Expr.identifier('b'), Expr.identifier('c')))),
+        'a = b = c',
+      );
+    });
+
+    it('keeps comma and conditional expressions on the right in their original assignment', () => {
+      const source = 'int f(int a, int b, int c) { a = (b, c); return a; }';
+      assert.match(emit(parse(source)), /a = \(b\s*,\s*c\);/);
+      const fn = parse(source).declarations[0] as FunctionDecl;
+      const assignment = (fn.body!.statements[0] as ExprStmt).expression as AssignExpr;
+      assert.strictEqual(assignment.right.kind, NodeKind.ParenExpr);
+      assert.match(
+        emit(Expr.assign(Expr.identifier('a'), (assignment.right as ParenExpr).expression)),
+        /^a = \(b\s*,\s*c\)$/,
+      );
+      assert.strictEqual(
+        emit(Expr.assign(Expr.identifier('a'), Expr.conditional(Expr.identifier('flag'), Expr.identifier('b'), Expr.identifier('c')))),
+        'a = flag ? b : c',
+      );
     });
   });
 
