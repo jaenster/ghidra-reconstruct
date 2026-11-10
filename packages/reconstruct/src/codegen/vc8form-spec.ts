@@ -4,7 +4,7 @@
  * A tag is written once a VC8 compile of the form matched the original's bytes, and it
  * names the body as the generator printed it then. Its data carries the evidence:
  *
- *     vc8form:<form>;ev=<evidence>;bh=<size>-<bytes>;dh=<body>
+ *     vc8form:<form>;ev=<evidence>;bh=<size>-<bytes>;dh=<body>[;ord=<n>]
  *
  *   form   the form and its arguments, `seq(a.x,a.y)` (vc8-form.ts lists them)
  *   ev     the evidence record of the match: the first 10 hex digits of the SHA-256 of
@@ -15,6 +15,11 @@
  *   dh     the first 8 hex digits of the SHA-256 of the decompile the tag was measured
  *          against, in its namespace-free token form (`vc8formBodyForm`): the tokens
  *          one space apart, and every qualifier `N::` a name is spelled with dropped
+ *   ord    optional, a positive integer: the place of this tag among the function's
+ *          tags of the same form. Ghidra keeps a function's tags as a set, so where a
+ *          second form rewrites what a first one printed (two seq, select, nest or
+ *          merge-tail tags, DrawRect 0050c3a0), the tags say which goes first. Forms of
+ *          the same op apply without `ord` first, by their text, then by `ord`.
  *
  * A tag is stale, and changes nothing, when the function's size is not the size `bh`
  * records (Ghidra's body for the function moved) or its decompile no longer hashes to
@@ -41,6 +46,8 @@ export interface Vc8FormTag {
   size: number;
   bytes: string;
   body: string;
+  /** The `ord` field: the tag's place among the function's tags of its op. */
+  order?: number;
 }
 
 export interface Vc8FormSpec {
@@ -133,9 +140,11 @@ export function parseVc8FormTag(data: string): Vc8FormTag | undefined {
   const ev = fields.get('ev'), bh = fields.get('bh'), dh = fields.get('dh');
   const m = bh ? /^(\d+)-([0-9a-f]{8})$/.exec(bh) : null;
   if (!ev || !/^[0-9a-f]{10}$/.test(ev) || !m || !dh || !/^[0-9a-f]{8}$/.test(dh)) return undefined;
+  const ord = fields.get('ord');
+  if (ord !== undefined && !/^[1-9]\d{0,5}$/.test(ord)) return undefined;
   const form = parseVc8Form(data.slice(0, at));
   if (!form) return undefined;
-  return { form, raw: data, ev, size: Number(m[1]), bytes: m[2], body: dh };
+  return { form, raw: data, ev, size: Number(m[1]), bytes: m[2], body: dh, ...(ord !== undefined ? { order: Number(ord) } : {}) };
 }
 
 /** The forms to apply to func, in tag order, and the tags left out. */
@@ -143,6 +152,7 @@ export function vc8FormSpec(func: Pick<ExtractedFunction, 'tags' | 'size' | 'dec
   const tags = (func.tags ?? []).filter(t => t.type === VC8FORM_TAG);
   if (tags.length === 0) return undefined;
   const out: Vc8FormSpec = { forms: [], stale: [] };
+  const forms: Array<{ form: Vc8Form; tag: string; order: number }> = [];
   let body: string | undefined;
   for (const t of tags) {
     const raw = t.data ?? '';
@@ -155,13 +165,14 @@ export function vc8FormSpec(func: Pick<ExtractedFunction, 'tags' | 'size' | 'dec
       out.stale.push({ tag: raw, why: `decompile ${body}, the tag measured ${tag.body}${legacy}` });
       continue;
     }
-    out.forms.push({ form: tag.form, tag: raw });
+    forms.push({ form: tag.form, tag: raw, order: tag.order ?? 0 });
   }
   // Ghidra keeps a function's tags as a set, so their order says nothing: the forms that
-  // change a declaration go first, the moves last, and equal ops by their text. dup goes
-  // before fold: the copy it writes into each arm is what fold then folds the arm's
-  // temporary into (LOADER_CheckForInsertedDiscs 0045fc60).
-  out.forms.sort((a, b) => FORM_ORDER.indexOf(a.form.op) - FORM_ORDER.indexOf(b.form.op) || (a.tag < b.tag ? -1 : a.tag > b.tag ? 1 : 0));
+  // change a declaration go first, the moves last, and equal ops by their `ord`, then by
+  // their text. dup goes before fold: the copy it writes into each arm is what fold then
+  // folds the arm's temporary into (LOADER_CheckForInsertedDiscs 0045fc60).
+  forms.sort((a, b) => FORM_ORDER.indexOf(a.form.op) - FORM_ORDER.indexOf(b.form.op) || a.order - b.order || (a.tag < b.tag ? -1 : a.tag > b.tag ? 1 : 0));
+  out.forms = forms.map(({ form, tag }) => ({ form, tag }));
   return out;
 }
 
