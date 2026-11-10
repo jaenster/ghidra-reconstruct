@@ -1523,7 +1523,7 @@ describe('globalAddressLiteralPlugin', () => {
       }`, XLATED);
       assert.ok(out.includes('(-(intptr_t)&s__not_xlated_call_ken_w_00730520 - (int)pbSrc)'), out);
       assert.ok(out.includes('pcSuffixEnd - ((intptr_t)&s__not_xlated_call_ken_w_00730520 - 1)'), out);
-      assert.ok(out.includes('(int)pbKeyCopy + (intptr_t)&s__not_xlated_call_ken_w_00730520 + 2'), out);
+      assert.ok(out.includes('(int)pbKeyCopy + ((intptr_t)&s__not_xlated_call_ken_w_00730520 + 2)'), out);
       assert.ok(!out.includes('s___not_xlated'), out);
     });
 

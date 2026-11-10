@@ -56,7 +56,7 @@ void foo(Unit * owner, Unit * target) {
 }
 `, `
 void foo(Unit* owner, Unit* target) {
-  if (owner != nullptr && target != nullptr && target->eType == 1) {
+  if (owner != nullptr && (target != nullptr && target->eType == 1)) {
     doWork(target);
   }
 }
@@ -301,7 +301,7 @@ void f() {
 }
 `, `
 void f() {
-  if (a && b && c && d) {
+  if (a && (b && (c && d))) {
     work();
   }
 }

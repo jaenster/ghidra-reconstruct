@@ -48,7 +48,7 @@ describe('E1: rethread only where the library source shows the second test', () 
     const out = run(DEFLATE('LAB_004292b9', 'LAB_004293b8'));
     assert.doesNotMatch(out, /goto/);
     assert.match(out, /if \(s->status == 0x29a && z->avail_in != 0\)/);
-    assert.match(out, /if \(z->avail_in != 0 \|\| s->lookahead != 0 \|\| fl != 0 && s->status != 0x29a\)/);
+    assert.match(out, /if \(z->avail_in != 0 \|\| \(s->lookahead != 0 \|\| fl != 0 && s->status != 0x29a\)\)/);
     assert.equal(getGotoCleanupStats().rethread, 1);
   });
   it('the same shape at labels with no evidence keeps its gotos', () => {

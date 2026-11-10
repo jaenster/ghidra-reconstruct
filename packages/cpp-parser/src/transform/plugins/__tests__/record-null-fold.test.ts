@@ -41,7 +41,7 @@ describe('record-null-fold', () => {
   it('puts the null test into the lookup where the original leaves both through one exit', () => {
     const r = run(SITE, layout(SITE, [2, 9]));
     assert.deepStrictEqual(r.sites, ['pUnit:pTxt']);
-    assert.ok(r.out.includes('int nId; Rec* pTxt = pUnit && (nId = pUnit->nClassId) >= 0 && nId < gT->nSize ? gT->pTxt + nId : nullptr; if (!pTxt) { return 1; } return pTxt->a + nId;'), r.out);
+    assert.ok(r.out.includes('int nId; Rec* pTxt = pUnit && ((nId = pUnit->nClassId) >= 0 && nId < gT->nSize) ? gT->pTxt + nId : nullptr; if (!pTxt) { return 1; } return pTxt->a + nId;'), r.out);
   });
 
   it('leaves the guard when the tests come from two decompiled ifs and no shared exit', () => {
