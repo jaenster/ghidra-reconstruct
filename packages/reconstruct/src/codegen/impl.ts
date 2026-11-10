@@ -3285,6 +3285,15 @@ function transformDecompiledCode(
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         enclosingVarTypes,
       };
+      perPluginOptions['sign-bit-test'] = {
+        enumTypes: context.funcPtrArgCasts.enumTypes,
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        structFields: context.funcPtrArgCasts.structFields,
+        typedefTargets: context.funcPtrArgCasts.typedefTargets,
+        functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        enclosingVarTypes,
+      };
       // An arm ending in the statements after it was written as an if/else with the tail
       // once after it; VC8 tail-duplicated the exit (shared-tail-join.ts).
       perPluginOptions['shared-tail-join'] = {
