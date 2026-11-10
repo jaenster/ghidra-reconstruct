@@ -81,4 +81,14 @@ describe('shared-tail-join', () => {
     assert.deepStrictEqual(run('void f(int c) { while (c) { if (c) { g(); h(); } k(); h(); } }').sites, []);
     assert.deepStrictEqual(run('int f(int c) { int x = 0; if (c) { int x = 2; g(); return x; } k(); return x; }').sites, []);
   });
+  // Q14_Callback11_ScrollMessage 0059cb20: the function writes `return;` at every exit.
+  it('merges the GUID select ahead of a bare return the function writes many times', () => {
+    const src = 'void f(A *a, Q *q, int n) { if (n == 1) { g(q, 1); return; } if (n == 2) { g(q, 2); return; } '
+      + 'if (n == 3) { if (!a->p) { g(q, -1); return; } g(q, a->p->id); return; } h(); }';
+    const r = run(src, { A: { p: 'P *' }, P: { id: 'int' } });
+    assert.ok(r.out.includes('if (n == 3) { g(q, !a->p ? -1 : a->p->id); return; }'), r.out);
+    // Joining arms with code in common keeps the per-exit rule.
+    const two = run('void f(A *a, int n) { if (n) { k(); return; } if (n == 2) { k(); return; } if (!a->p) { m(); g(1); return; } x(); g(1); return; }');
+    assert.ok(two.out.includes('if (!a->p) { m(); g(1); return; }'), two.out);
+  });
 });

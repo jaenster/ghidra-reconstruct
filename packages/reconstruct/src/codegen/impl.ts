@@ -3347,6 +3347,12 @@ function transformDecompiledCode(
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         enclosingVarTypes,
       };
+      // A local set to one of two constants and read once by a call (select-argument.ts).
+      perPluginOptions['select-argument'] = {
+        typedefTargets: context?.funcPtrArgCasts?.typedefTargets,
+        onSite: (e: { variable: string; line: number }) =>
+          console.warn(`[select-arg] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.variable} at line ${e.line}`),
+      };
       // An arm ending in the statements after it was written as an if/else with the tail
       // once after it; VC8 tail-duplicated the exit (shared-tail-join.ts).
       perPluginOptions['shared-tail-join'] = {

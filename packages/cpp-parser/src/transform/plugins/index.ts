@@ -418,6 +418,11 @@ export {
 } from './builtins/shared-tail-join.js';
 
 export {
+  selectArgumentPlugin,
+  type SelectArgumentOptions,
+} from './builtins/select-argument.js';
+
+export {
   inPlaceOperandPlugin,
   type InPlaceOperandOptions,
 } from './builtins/in-place-operand.js';
@@ -898,6 +903,7 @@ import { rangeReadInlinePlugin } from './builtins/range-read-inline.js';
 import { guardCopySinkPlugin } from './builtins/guard-copy-sink.js';
 import { memberCopyAssignPlugin } from './builtins/member-copy-assign.js';
 import { sharedTailJoinPlugin } from './builtins/shared-tail-join.js';
+import { selectArgumentPlugin } from './builtins/select-argument.js';
 import { inPlaceOperandPlugin } from './builtins/in-place-operand.js';
 import { tailWalkRereadPlugin } from './builtins/tail-walk-reread.js';
 import { rotatedStepWhilePlugin } from './builtins/rotated-step-while.js';
@@ -1172,6 +1178,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   returnCopySplitPlugin,      // Matching: an else-if chain whose first arm falls into a constant return writes the return in that arm (priority 989.975)
   returnCopyJoinPlugin,       // Matching: an arm and a guard returning one constant before another final return become an else-if join (priority 989.98)
   sharedTailJoinPlugin,       // Matching: an arm ending in the statements after it becomes an if/else, the tail written once (priority 989.981)
+  selectArgumentPlugin,       // Matching: a local set to one of two constants and read once by a call -> the select in the argument (priority 989.983)
   strlenDifferencePlugin,     // Matching: an inlined strlen scan's difference from its start is the length (priority 989.985)
   boolSelectFormPlugin,       // Matching: a materialised comparison spelled for the original's setcc or neg/sbb, from the compare sites (priority 989.99)
   registerStoreSelectPlugin,  // Matching: two stores of one lvalue whose constant the original stores from a register become a select (priority 989.992)
