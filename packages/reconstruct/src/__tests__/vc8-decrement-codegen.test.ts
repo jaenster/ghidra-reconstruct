@@ -28,33 +28,54 @@ interface Site {
   namespace: string;
   local: string;
   type: string;
+  params: string;
+  parameters: ExtractedFunction['parameters'];
+  otherLocals: string;
   body: string;
 }
+
+const clientParameters: ExtractedFunction['parameters'] = [
+  { name: 'pUnit', dataType: 'D2UnitStrc *', size: 4, ordinal: 0, storage: 'ECX:4' },
+  { name: 'eSkill', dataType: 'eD2Skills', size: 4, ordinal: 1, storage: 'EDX:4' },
+  { name: 'nSkillLvl', dataType: 'int32_t', size: 4, ordinal: 2, storage: 'Stack[0x4]:4' },
+];
+const serverParameters: ExtractedFunction['parameters'] = [
+  { name: 'pGame', dataType: 'SGAMEDATA *', size: 4, ordinal: 0, storage: 'ECX:4' },
+  { name: 'pUnit', dataType: 'D2UnitStrc *', size: 4, ordinal: 1, storage: 'EDX:4' },
+  { name: 'eSkill', dataType: 'eD2Skills', size: 4, ordinal: 2, storage: 'Stack[0x4]:4' },
+  { name: 'nSkillLvl', dataType: 'int32_t', size: 4, ordinal: 3, storage: 'Stack[0x8]:4' },
+];
 
 const sites: Site[] = [
   {
     name: 'Skills_CltDoFunc_Mon_MeleeRepeat', address: '0x004e2410', nativeSub: '0x004e2491',
     size: 190, namespace: 'D2Client::SKILLS::SkillsMon', local: 'nTargetGUID', type: 'int32_t',
-    body: 'nTargetGUID = get(); use(nTargetGUID); if (ready()) { nTargetGUID = next(); if (0 < nTargetGUID + -1) { set(nTargetGUID + -1); } } return 0;',
+    params: 'D2UnitStrc *pUnit,eD2Skills eSkill,int32_t nSkillLvl', parameters: clientParameters,
+    otherLocals: 'D2SkillStrc *pSkill; D2UnitStrc *pTarget; eD2UnitType eUnitType; BOOL bInRange;',
+    body: 'pSkill = D2Common::Units::Units::GetCurrentSkill(pUnit); eUnitType = D2Common::Skills::Skills::SKILL_GetParam3(pSkill); nTargetGUID = D2Common::Skills::Skills::SKILL_GetParam2(pSkill); pTarget = D2Client::UNIT::Player::UNITS_FindClientSideUnit(nTargetGUID,eUnitType); if (pTarget != (D2UnitStrc *)0x0) { bInRange = D2Common::Units::Units::IsInMeleeRange(pUnit,pTarget,0); if (bInRange != 0) { nTargetGUID = D2Common::Skills::Skills::SKILL_GetParam1(pSkill); if (0 < nTargetGUID + -1) { D2Common::Skills::Skills::SKILL_SetParam1(pSkill,nTargetGUID + -1); } } } return 0;',
   },
   {
     name: 'Skills_CltDoFunc_Ass_Blade_DecrementCharge', address: '0x004f2160', nativeSub: '0x004f2188',
     size: 76, namespace: 'D2Client::SKILLS::SkillsAss', local: 'nChargeCount', type: 'int32_t',
-    body: 'nChargeCount = get(); if (0 < nChargeCount + -1) { set(nChargeCount + -1); } return 1;',
+    params: 'D2UnitStrc *pUnit,eD2Skills eSkill,int32_t nSkillLvl', parameters: clientParameters,
+    otherLocals: 'D2SkillStrc *pSkill; D2UnitStrc *pTarget;',
+    body: 'pSkill = D2Common::Units::Units::GetCurrentSkill(pUnit); if (pSkill != (D2SkillStrc *)0x0) { pTarget = D2Client::UNIT::CUnit::GetConfirmedTargetUnit(pUnit); if (pTarget != (D2UnitStrc *)0x0) { nChargeCount = D2Common::Skills::Skills::SKILL_GetParam1(pSkill); if (0 < nChargeCount + -1) { D2Common::Skills::Skills::SKILL_SetParam1(pSkill,nChargeCount + -1); D2Client::SKILLS::Skills::SKILLS_ApplyDamageReduction(pUnit,100); } return 1; } } return 0;',
   },
   {
     name: 'Skills_SrvDoFunc_048_BladeFury', address: '0x005d68a0', nativeSub: '0x005d68ea',
     size: 266, namespace: 'D2Game::SKILLS::SkillAss', local: 'nChargeCalcVal', type: 'uint32_t',
-    body: 'nChargeCalcVal = get(); if (0 < (int)(nChargeCalcVal - 1)) { if (ready()) set(frame() + (nChargeCalcVal - 1)); } return 0;',
+    params: 'SGAMEDATA *pGame,D2UnitStrc *pUnit,eD2Skills eSkill,int32_t nSkillLvl', parameters: serverParameters,
+    otherLocals: 'D2SkillStrc *pSkill; eMissilesId eChargeMissile; int32_t nNextFireFrame; BOOL bHasTarget; uint32_t nCursorX; uint32_t nCursorY;',
+    body: 'pSkill = D2Common::Skills::Skills::SKILLS_GetSkillByEnum(pUnit,eSkill); eChargeMissile = D2Game::SKILLS::SkillAss::SKILLASS_GetChargeUpMissile(pUnit,eSkill); nChargeCalcVal = D2Game::SKILLS::SkillAss::SKILLASS_GetChargeUpCalcValue(pUnit,eSkill,nSkillLvl); if (0 < (int)(nChargeCalcVal - 1)) { bHasTarget = D2Game::SKILLS::SkillsServer::SKILLS_GetTargetOrCursorPos(pGame,pUnit,&nCursorX,&nCursorY); if (bHasTarget != 0) { nNextFireFrame = D2Common::Skills::Skills::SKILL_GetParam1(pSkill); if (nNextFireFrame < pGame->dwGameFrame) { D2Common::Skills::Skills::SKILL_SetParam1(pSkill,pGame->dwGameFrame + (nChargeCalcVal - 1)); } } } return 0;',
   },
 ];
 
 function source(site: Site, tagged: boolean, stale = false): string {
-  const decompiled = `int __fastcall ${site.namespace}::${site.name}() { ${site.type} ${site.local}; ${site.body} }`;
+  const decompiled = `BOOL __fastcall ${site.namespace}::${site.name}(${site.params}) { ${site.otherLocals} ${site.type} ${site.local}; ${site.body} }`;
   const tag = `dec(${site.local},1);ev=0123456789;bh=${site.size}-89abcdef;dh=${stale ? '00000000' : vc8formBodyHash(decompiled)}`;
   const fn: ExtractedFunction = {
     name: site.name, address: site.address,
-    signature: `int ${site.name}()`, returnType: 'int', parameters: [],
+    signature: `BOOL ${site.name}(${site.params})`, returnType: 'BOOL', parameters: site.parameters,
     localVariables: [{ name: site.local, dataType: site.type, size: 4, storage: 'EAX:4' }],
     callingConvention: '__fastcall', size: site.size, isThunk: false,
     isExternal: false, hasVarArgs: false, namespace: site.namespace,
