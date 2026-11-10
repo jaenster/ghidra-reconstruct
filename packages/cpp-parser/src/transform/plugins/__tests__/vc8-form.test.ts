@@ -429,3 +429,53 @@ describe('vc8-form: arms', () => {
     assert.strictEqual(run(src, 'arms(p && p->q,wrap)', 'zero(p && p->q)').out, 'void f(P* p) { if ((p && p->q) == 0) { h(); } else { g(); } }');
   });
 });
+
+describe('vc8-form: tsel', () => {
+  // SKILLASS_AddChargeUpStack 005d3320: the unit's type and GUID, a sentinel each without one.
+  const SITE = [
+    'int f(D2UnitStrc *pUnit, void *pPool, int nFrame) {',
+    '  eD2UnitType eUnitType;',
+    '  int nGuid;',
+    '  if (!pUnit) {',
+    '    nGuid = -1;',
+    '    eUnitType = UNIT_COUNT;',
+    '  } else {',
+    '    nGuid = pUnit->nUnitGUID;',
+    '    eUnitType = pUnit->eUnitType;',
+    '  }',
+    '  void *pStats = AllocStatList(pPool, 2, nFrame, eUnitType, nGuid);',
+    '  return pStats != 0;',
+    '}',
+  ];
+  // The enum is a typedef of uint32_t and UNIT_COUNT a constant several enums declare alike.
+  const tables = {
+    structFields: { D2UnitStrc: { nUnitGUID: 'int', eUnitType: 'eD2UnitType' } },
+    typedefTargets: { eD2UnitType: 'uint32_t' },
+    enumValues: { UNIT_COUNT: 6 },
+  };
+  const apply = (tag: string, withTables = true) => {
+    const sites: Vc8FormSite[] = [];
+    const tu = applyVc8Forms(parse(SITE.join('\n')) as TranslationUnit, [{ form: parseVc8Form(tag)!, tag }], s => sites.push(s), withTables ? tables : undefined);
+    return { out: flat(emit(tu as AnyNode)), sites };
+  };
+
+  it('parses with an optional index', () => {
+    assert.deepStrictEqual(parseVc8Form('tsel(!pUnit)'), { op: 'tsel', cond: '!pUnit', index: 1 });
+    assert.deepStrictEqual(parseVc8Form('tsel(!pUnit,2)'), { op: 'tsel', cond: '!pUnit', index: 2 });
+    assert.strictEqual(parseVc8Form('tsel()'), undefined);
+  });
+
+  it('writes the selects into the call and drops the if and the declarations', () => {
+    const { out, sites } = apply('tsel(!pUnit)');
+    assert.strictEqual(sites[0]?.applied, true, JSON.stringify(sites));
+    assert.ok(out.includes('void* pStats = AllocStatList(pPool, 2, nFrame, !pUnit ? UNIT_COUNT : pUnit->eUnitType, !pUnit ? -1 : pUnit->nUnitGUID);'), out);
+    assert.ok(!out.includes('eD2UnitType eUnitType;') && !out.includes('int nGuid;'), out);
+  });
+
+  it('refuses without the types of the values, or another if', () => {
+    const untyped = apply('tsel(!pUnit)', false);
+    assert.strictEqual(untyped.sites[0]?.applied, false);
+    assert.ok(untyped.out.includes('if (!pUnit)'), untyped.out);
+    assert.strictEqual(apply('tsel(!pUnit,2)').sites[0]?.applied, false);
+  });
+});

@@ -45,7 +45,7 @@ import { immediateConstantFacts, referencedDataAddresses, dataAtAddress, type Im
 import { compareFormSpec, type CompareFormSpec } from './compare-form-spec.js';
 import { repStringOps } from './rep-string-spec.js';
 import { vc8FormSpec, vc8formHashRecord, type Vc8FormSpec } from './vc8form-spec.js';
-import type { RepStringOp, Expression, NullGetterTable, ASTNode } from '@ghidra-mcp/cpp-parser';
+import type { RepStringOp, Expression, NullGetterTable, ASTNode, SelectArgumentOptions } from '@ghidra-mcp/cpp-parser';
 import { ROOT_CLASS_SCOPE, namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 import { cleanFunctionComment, declaredParameters, externEntryDeclaration, guardedFuncDefTypedef, emittedFunctionName, returnSigType, sigType } from './header.js';
 import { COMDAT_SPECIFIERS, classScopeOf, memberCallModel, memberDefinitionScope, orphanMarker, signatureParameters } from './templates/index.js';
@@ -3360,6 +3360,12 @@ function transformDecompiledCode(
       // A local set to one of two constants and read once by a call (select-argument.ts).
       perPluginOptions['select-argument'] = {
         typedefTargets: context?.funcPtrArgCasts?.typedefTargets,
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        structFields: context.funcPtrArgCasts.structFields,
+        functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        enclosingVarTypes,
+        enumValues: context.funcPtrArgCasts.enumValues,
         onSite: (e: { variable: string; line: number }) =>
           console.warn(`[select-arg] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.variable} at line ${e.line}`),
       };
@@ -4268,6 +4274,7 @@ function transformDecompiledCode(
     const result = transformGhidraCode(wrapped, {
       vc8Forms: vc8 && vc8.forms.length > 0 ? {
         forms: vc8.forms,
+        selectTables: perPluginOptions['select-argument'] as SelectArgumentOptions | undefined,
         onSite: s => {
           if (!s.applied) console.warn(`[vc8form] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: refused ${s.tag} (${s.why})`);
           else if (process.env.GHIDRA_VC8FORM_REPORT) console.warn(`[vc8form] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: applied ${s.tag}`);

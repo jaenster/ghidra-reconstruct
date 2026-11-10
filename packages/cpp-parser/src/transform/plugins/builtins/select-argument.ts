@@ -36,12 +36,35 @@
  * statement's other parts are pure), so the condition gives the same answer at the read;
  * the select then yields the constant v held, and each constant has the same value as an
  * int literal as it had in v, so the argument converts to the parameter the same way.
+ *
+ * The same select over values that are not constants, and over several arguments, comes
+ * back as one if/else storing each local on both paths, then the call reading each once
+ * (ITEMMODE_CheckAutoStack 0055d370, a unit's GUID and type with a sentinel when there is
+ * none):
+ *
+ *     if (!pUnit) { nGuid = -1; eType = UNIT_COUNT; }
+ *     else { nGuid = pUnit->nUnitGUID; eType = pUnit->eUnitType; }
+ *     pStats = AllocStatList(pPool, 2, nFrame, eType, nGuid);
+ *
+ * VC8 merges the tests of `!pUnit ? UNIT_COUNT : pUnit->eUnitType, !pUnit ? -1 :
+ * pUnit->nUnitGUID` into one branch, as it does the if/else, but gives the values the
+ * registers of the arguments (the last argument's in ECX); compiled as printed the first
+ * store takes EAX. As often the source wrote the if/else, and the shape alone cannot tell:
+ * written everywhere it applies, it gained one function and lost four. So it is a form a
+ * function's `vc8form` tag names, `tsel(C[,i])`, applied by `selectPairedArguments`. Each
+ * read becomes `C ? A : B`, the condition and arms as printed, where both arms are nothing
+ * but plain stores of the same locals, each local is read once, as a whole argument of the
+ * statement's top call, and only there (dataflow as above), and every value is pure, reads
+ * none of those locals, and has the local's type or is a constant it holds (a literal,
+ * or an enumerator, whose value every enum declaring the name agrees on): the select then
+ * has the local's type, so the argument converts as the local did. A value read at the call reads what it read at the if: the callee and
+ * the call's other arguments are pure.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, AssignExpr, CallExpr, CompoundStmt, ConditionalExpr, CStyleCastExpr, DeclStmt, Expression, ExprStmt,
-  FunctionDecl, Identifier, IfStmt, IntegerLiteralExpr, ParenExpr, Statement, TypeNode, UnaryExpr, VariableDecl,
+  FunctionDecl, Identifier, IfStmt, IntegerLiteralExpr, MemberExpr, ParenExpr, Statement, TypeNode, UnaryExpr, VariableDecl,
 } from '../../../ast/nodes.js';
 import { traverseAST, getChildren } from '../../../ast/visitor.js';
 import { createTransformer, cloneNode, updateNode, type Transformer } from '../../transformer.js';
@@ -49,10 +72,22 @@ import type { TransformPlugin, PluginOptions } from '../types.js';
 import { isPure } from './pseudo-op-lower.js';
 import { shapeOfNode, type TypeShape } from './call-arg-cast.js';
 import { buildFunctionFlow, type FunctionFlow } from '../../cfg/dataflow.js';
+import { createExprShape } from './expr-shape.js';
+import { sameShape } from './call-arg-cast.js';
+import { localTypesOf } from './compare-form.js';
+import { emit } from '../../../emit/index.js';
 
 export interface SelectArgumentOptions extends PluginOptions {
   /** Typedef name -> the spelling it stands for. */
   typedefTargets?: Record<string, string>;
+  /** Tables the values of a tagged if/else are typed from (expr-shape.ts). */
+  globalTypes?: Record<string, string>;
+  fieldTypes?: Record<string, string>;
+  structFields?: Record<string, Record<string, string>>;
+  functionReturnTypes?: Record<string, string>;
+  enclosingVarTypes?: Record<string, string>;
+  /** Enumerator -> its value, where every enum declaring the name agrees on it. */
+  enumValues?: Record<string, number>;
   onSite?: (e: { variable: string; line: number }) => void;
 }
 
@@ -263,6 +298,173 @@ function rewriteFunction(fn: FunctionDecl, options: SelectArgumentOptions): Func
     dropDecl(body, decl);
   }
   return updateNode(fn, { body } as Partial<FunctionDecl>);
+}
+
+/** The identifiers naming `name` in n; a member's name after `.`/`->` is not one. */
+function reads(n: ASTNode, name: string): Identifier[] {
+  const members = new Set<ASTNode>();
+  for (const m of traverseAST(n)) if (m.kind === NodeKind.MemberExpr) members.add((m as MemberExpr).member);
+  return mentions(n, name).filter(m => !members.has(m));
+}
+
+/** topCall, and the declaration `T x = f(..);` (its one variable is new: no target). */
+function callStatement(s: Statement): { call: CallExpr; target: Expression | null } | null {
+  if (s.kind === NodeKind.DeclStmt) {
+    const ds = (s as DeclStmt).declarations;
+    if (ds.length !== 1 || ds[0].kind !== NodeKind.VariableDecl) return null;
+    const d = ds[0] as VariableDecl;
+    if (!d.initializer || d.initializer.kind === NodeKind.InitListExpr || d.directInit) return null;
+    const e = unwrapCasts(d.initializer as Expression);
+    return e.kind === NodeKind.CallExpr ? { call: e as CallExpr, target: null } : null;
+  }
+  return topCall(s);
+}
+
+/** Why a tagged if/else was not written as selects. */
+export class SelectRefused extends Error {}
+
+/**
+ * Write the `index`-th if/else (1-based, in pre-order) whose condition prints `cond` and
+ * whose arms store the same locals as selects in the call statement after it, in place
+ * (the class comment above). Throws SelectRefused when there is none, or it does not hold.
+ */
+export function selectPairedArguments(fn: FunctionDecl, cond: string, index: number, options: SelectArgumentOptions = {}): void {
+  const refuse = (why: string): never => { throw new SelectRefused(why); };
+  if (!fn.body) refuse('no body');
+  const body = fn.body!;
+  const resolve = (n: string) => options.typedefTargets?.[n];
+  const locals = new Map<string, Local>();
+  for (const n of traverseAST(body)) {
+    if (n.kind !== NodeKind.VariableDecl) continue;
+    const v = n as VariableDecl;
+    if (locals.has(v.name.name)) refuse(`${v.name.name} is declared twice`);
+    locals.set(v.name.name, { decl: v, shape: shapeOfNode(v.type as TypeNode, 0, resolve), addressed: false });
+  }
+  const paramNames = new Set(fn.parameters.map(p => (p as unknown as { name?: Identifier }).name?.name).filter(Boolean) as string[]);
+  for (const n of traverseAST(body)) {
+    if (n.kind === NodeKind.UnaryExpr && (n as UnaryExpr).operator === '&') {
+      for (const m of traverseAST(unwrap((n as UnaryExpr).operand))) {
+        if (m.kind === NodeKind.Identifier && locals.has((m as Identifier).name)) locals.get((m as Identifier).name)!.addressed = true;
+      }
+    }
+  }
+  const isLocal = (n: string) => locals.has(n) || paramNames.has(n);
+  const shapeOf = createExprShape(localTypesOf(fn), {
+    globalTypes: options.globalTypes ?? {},
+    enclosingVarTypes: options.enclosingVarTypes ?? {},
+    structFields: options.structFields ?? {},
+    fieldTypes: options.fieldTypes ?? {},
+    returnTypes: options.functionReturnTypes ?? {},
+    resolve,
+  });
+  /** A value the local of shape t holds unchanged: one of its type, or a constant. */
+  const fits = (e: Expression, t: TypeShape): 'typed' | 'constant' | null => {
+    const x = unwrap(e);
+    const have = shapeOf(e);
+    if (have && sameShape(have, t) && !(have.isConst && !t.isConst && t.stars > 0)) return 'typed';
+    if (holdsConstant(e, t, isLocal)) return 'constant';
+    let range: [bigint, bigint] | undefined;
+    for (let b = t.base.replace(/^const\s+/, ''), k = 0; !range && b && k < 8; b = resolve(b) ?? '', k++) range = RANGES[b];
+    // An enumerator is the constant it names: one the local's integer type holds.
+    if (x.kind === NodeKind.Identifier && !isLocal((x as Identifier).name) && options.enumValues?.[(x as Identifier).name] !== undefined) {
+      const n = BigInt(options.enumValues[(x as Identifier).name]);
+      return t.stars === 0 && range && n >= range[0] && n <= range[1] ? 'constant' : null;
+    }
+    // A negative literal for a 32-bit unsigned local: the select is unsigned too, the same value.
+    const v = integerValue(e);
+    if (t.stars === 0 && v !== null && range && range[1] === 0xffffffffn && v >= -0x80000000n && v < 0n) return 'constant';
+    return null;
+  };
+  const arm = (s: Statement): Map<string, { value: Expression; stmt: Statement }> | null => {
+    const stmts = s.kind === NodeKind.CompoundStmt ? (s as CompoundStmt).statements : [s];
+    const out = new Map<string, { value: Expression; stmt: Statement }>();
+    for (const x of stmts) {
+      const st = storeOf(x);
+      if (!st || out.has(st.name)) return null;
+      out.set(st.name, { value: st.value, stmt: x });
+    }
+    return out.size ? out : null;
+  };
+  const want = cond.replace(/\s+/g, '');
+  let seen = 0;
+  let at: { list: Statement[]; i: number; a: NonNullable<ReturnType<typeof arm>>; b: NonNullable<ReturnType<typeof arm>> } | null = null;
+  for (const n of traverseAST(body)) {
+    if (at || n.kind !== NodeKind.CompoundStmt) continue;
+    const list = (n as CompoundStmt).statements;
+    for (let i = 0; i < list.length && !at; i++) {
+      const s = list[i];
+      if (s.kind !== NodeKind.IfStmt) continue;
+      const ifs = s as IfStmt;
+      if (ifs.init || ifs.isConstexpr || !ifs.elseBranch || emit(ifs.condition as never).replace(/\s+/g, '') !== want) continue;
+      const a = arm(ifs.thenBranch), b = arm(ifs.elseBranch);
+      if (!a || !b || a.size !== b.size || [...a.keys()].some(v => !b.has(v))) continue;
+      if (++seen === index) at = { list, i, a, b };
+    }
+  }
+  if (!at) return refuse(`no if/else #${index} on ${cond} storing the same locals in both arms`);
+  const { list, i, a, b } = at;
+  const ifs = list[i] as IfStmt;
+  const names = [...a.keys()];
+  const c = ifs.condition;
+  if (!isPure(c)) refuse(`${cond} is not pure`);
+  if (names.some(v => reads(c, v).length)) refuse(`${cond} reads a local it stores`);
+  const use = list[i + 1];
+  const top = use ? callStatement(use) : null;
+  if (!top) return refuse('no call statement after the if');
+  if (!isPure(top.call.callee)) refuse('the callee is not pure');
+  if (top.target && (!isPure(top.target) || names.some(v => reads(top.target!, v).length))) refuse('the store target is not pure');
+  const argOf = new Map<string, number>();
+  for (const v of names) {
+    const local = locals.get(v);
+    if (!local || !local.shape || paramNames.has(v)) refuse(`${v} is not a local of known type`);
+    if (local!.addressed) refuse(`&${v} is taken`);
+    const named = reads(use, v);
+    if (named.length !== 1) refuse(`${v} is read ${named.length} times in the call statement`);
+    const k = top.call.arguments.findIndex(x => unwrap(x) === named[0]);
+    if (k < 0) refuse(`${v} is not a whole argument`);
+    argOf.set(v, k);
+    for (const x of [a.get(v)!.value, b.get(v)!.value]) {
+      if (!isPure(x)) refuse(`a value of ${v} is not pure`);
+      if (names.some(w => reads(x, w).length)) refuse(`a value of ${v} reads a local the if stores`);
+    }
+    const ta = fits(a.get(v)!.value, local!.shape!), tb = fits(b.get(v)!.value, local!.shape!);
+    if (!ta || !tb) refuse(`a value of ${v} is not of its type`);
+    if (ta === 'constant' && tb === 'constant'
+      && !(holdsConstant(a.get(v)!.value, local!.shape!, isLocal) && holdsConstant(b.get(v)!.value, local!.shape!, isLocal))) {
+      refuse(`a constant of ${v} does not hold its value`);
+    }
+  }
+  const taken = new Set(argOf.values());
+  if (!top.call.arguments.every((x, j) => taken.has(j) || isPure(x))) refuse('another argument is not pure');
+  let flow: FunctionFlow | null;
+  try { flow = buildFunctionFlow(body.statements, new Set([...locals.keys(), ...paramNames])); } catch { flow = null; }
+  if (flow) {
+    const u = flow.nodeOf(use);
+    if (u === undefined) refuse('the call statement is not in the flow');
+    for (const v of names) {
+      const sa = flow.nodeOf(a.get(v)!.stmt), sb = flow.nodeOf(b.get(v)!.stmt);
+      if (sa === undefined || sb === undefined) refuse(`a store of ${v} is not in the flow`);
+      if (!flow.definition(sa!, v)?.killing || !flow.definition(sb!, v)?.killing) refuse(`a store of ${v} is partial`);
+      const reaching = flow.reaching(u!, v);
+      if (reaching.size !== 2 || !reaching.has(sa!) || !reaching.has(sb!)) refuse(`another value of ${v} reaches the call`);
+      const ua = flow.usesOf(sa!, v), ub = flow.usesOf(sb!, v);
+      if (ua.length !== 1 || ua[0] !== u || ub.length !== 1 || ub[0] !== u) refuse(`${v} is read elsewhere`);
+    }
+  } else {
+    for (const v of names) if (reads(body, v).filter(m => m !== locals.get(v)!.decl.name).length !== 3) refuse(`${v} is named elsewhere`);
+  }
+  (top.call as { arguments: Expression[] }).arguments = top.call.arguments.map((x, j) => {
+    const v = names.find(w => argOf.get(w) === j);
+    return v ? select(c, a.get(v)!.value, b.get(v)!.value) : x;
+  });
+  use.leadingTrivia = [...(ifs.leadingTrivia ?? []), ...(use.leadingTrivia ?? [])];
+  list.splice(i, 1);
+  for (const v of names) {
+    const decl = locals.get(v)!.decl;
+    if (reads(body, v).some(m => m !== decl.name)) continue;
+    if (decl.initializer && !isPure(decl.initializer as Expression)) continue;
+    dropDecl(body, decl);
+  }
 }
 
 function dropDecl(root: ASTNode, decl: VariableDecl): void {

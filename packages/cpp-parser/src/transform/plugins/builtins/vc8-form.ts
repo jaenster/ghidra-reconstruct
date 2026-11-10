@@ -96,6 +96,11 @@
  *                        `T N = E;` and that life's reads read N (E may read V: it reads
  *                        the old value, and keeps V); refused when V is read again after
  *                        them before a new store, or inside a loop.
+ *   tsel(C[,i])          the i-th `if (C) { V1 = A1; ... } else { V1 = B1; ... }` storing the
+ *                        same locals in both arms, followed by a call statement reading each
+ *                        Vk once as a whole argument, is written with each read `C ? Ak : Bk`;
+ *                        the if goes, and each Vk's declaration once nothing names it
+ *                        (select-argument.ts, `selectPairedArguments`, says when it holds).
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -107,6 +112,7 @@ import type {
 import { parse } from '../../../parser/index.js';
 import { emit } from '../../../emit/index.js';
 import { cloneNode } from '../../transformer.js';
+import { selectPairedArguments, SelectRefused, type SelectArgumentOptions } from './select-argument.js';
 
 export type Vc8Form =
   | { op: 'seq'; targets: string[]; index?: number }
@@ -131,7 +137,8 @@ export type Vc8Form =
   | { op: 'select'; cond: string; index: number }
   | { op: 'decl'; name: string; before: string }
   | { op: 'unselect'; cond: string; index: number }
-  | { op: 'split'; name: string; type: string; rename: string };
+  | { op: 'split'; name: string; type: string; rename: string }
+  | { op: 'tsel'; cond: string; index: number };
 
 export interface Vc8FormSite {
   form: Vc8Form;
@@ -144,10 +151,12 @@ export interface Vc8FormSite {
 export interface Vc8FormOptions {
   forms: Array<{ form: Vc8Form; tag?: string }>;
   onSite?: (site: Vc8FormSite) => void;
+  /** The tables tsel types the values of an if/else from. */
+  selectTables?: SelectArgumentOptions;
 }
 
 const OPS = new Set(['seq', 'fold', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'width', 'arms',
-  'nest', 'merge-tail', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'cmp', 'swap', 'ifsel', 'split', 'select', 'decl', 'unselect']);
+  'nest', 'merge-tail', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'cmp', 'swap', 'ifsel', 'split', 'select', 'decl', 'unselect', 'tsel']);
 
 /** Split at the commas outside brackets, parentheses, angle-free. */
 function splitArgs(s: string): string[] {
@@ -205,7 +214,7 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
       if (anchor) return undefined;
       if (args.length === 1) return { op: 'arms', cond: args[0] };
       return args.length === 2 && args[1] === 'wrap' ? { op: 'arms', cond: args[0], wrap: true } : undefined;
-    case 'nest': case 'merge-tail': case 'continue': case 'select': {
+    case 'nest': case 'merge-tail': case 'continue': case 'select': case 'tsel': {
       const i = int(args[1], 1);
       if (anchor || args.length < 1 || args.length > 2 || !(i >= 1) || args[0] === '') return undefined;
       return { op: m[1], cond: args[0], index: i } as Vc8Form;
@@ -1399,11 +1408,23 @@ function doSplit(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'split' }>): void {
   for (const s of b.statements.slice(k + 1, end)) for (const { node } of walk(s)) if (isId(node, f.name)) (node as Identifier).name = f.rename;
 }
 
+let selectTables: SelectArgumentOptions | undefined;
+
+function doTsel(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'tsel' }>): void {
+  try {
+    selectPairedArguments(fn, f.cond, f.index, selectTables);
+  } catch (e) {
+    if (e instanceof SelectRefused) refuse(e.message);
+    throw e;
+  }
+}
+
 const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op: K }>) => void } = {
   seq: doSeq, fold: doFold, cache: doCache, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
   retval: doRetval, width: doWidth, arms: doArms,
   nest: doNest, 'merge-tail': doMergeTail, continue: doContinue, dup: doDup, tarms: doTarms, zero: doZero, nonzero: doNonzero,
   cmp: doCmp, swap: doSwap, ifsel: doIfsel, split: doSplit, select: doSelect, decl: doDecl, unselect: doUnselect,
+  tsel: doTsel,
 };
 
 /**
@@ -1411,8 +1432,9 @@ const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op
  * a copy and is kept only when it applied whole.
  */
 export function applyVc8Forms(tu: TranslationUnit, forms: Array<{ form: Vc8Form; tag?: string }>,
-  onSite?: (s: Vc8FormSite) => void): TranslationUnit {
+  onSite?: (s: Vc8FormSite) => void, tables?: SelectArgumentOptions): TranslationUnit {
   if (forms.length === 0) return tu;
+  selectTables = tables;
   let cur = tu;
   for (const { form, tag } of forms) {
     const next = cloneNode(cur);

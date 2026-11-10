@@ -4,7 +4,9 @@ import { parse } from '../../../parser/index.js';
 import { emit } from '../../../emit/index.js';
 import type { AnyNode } from '../../../ast/nodes.js';
 import { hasNativeGpp, compileAndRun } from '../../../testing/native-cpp.js';
-import { selectArgumentPlugin } from '../builtins/select-argument.js';
+import { selectArgumentPlugin, selectPairedArguments, SelectRefused, type SelectArgumentOptions } from '../builtins/select-argument.js';
+import { NodeKind } from '../../../ast/kinds.js';
+import type { FunctionDecl } from '../../../ast/nodes.js';
 
 const flat = (s: string) => s.replace(/\s+/g, ' ').trim();
 
@@ -75,6 +77,74 @@ describe('selectArgumentPlugin', () => {
       '}',
     ].join('\n'));
     assert.deepStrictEqual(sites, []);
+  });
+
+  // ITEMMODE_CheckAutoStack 0055d370: a unit's GUID and type, a sentinel each without one.
+  const tables = {
+    structFields: { D2UnitStrc: { nUnitGUID: 'int', eUnitType: 'eD2UnitType', nOther: 'short' } },
+    typedefTargets: { eD2UnitType: 'uint32_t' },
+    enumValues: { UNIT_COUNT: 6 },
+  };
+  const tagged = (code: string, cond = '!pUnit', index = 1, t: SelectArgumentOptions = tables): string => {
+    const tu = parse(code);
+    const fn = tu.declarations.find(d => d.kind === NodeKind.FunctionDecl) as FunctionDecl;
+    selectPairedArguments(fn, cond, index, t);
+    return flat(emit(tu as AnyNode));
+  };
+  const refusal = (code: string, cond = '!pUnit'): string => {
+    try { tagged(code, cond); return ''; } catch (e) { assert.ok(e instanceof SelectRefused, String(e)); return (e as Error).message; }
+  };
+  const paired = (opts: { decl?: string; elseGuid?: string; use?: string; after?: string } = {}) => [
+    'void f(D2UnitStrc *pUnit, void *pPool) {',
+    `  ${opts.decl ?? 'int nGuid'};`,
+    '  eD2UnitType eType;',
+    '  if (!pUnit) {',
+    '    nGuid = -1;',
+    '    eType = UNIT_COUNT;',
+    '  } else {',
+    `    nGuid = ${opts.elseGuid ?? 'pUnit->nUnitGUID'};`,
+    '    eType = pUnit->eUnitType;',
+    '  }',
+    `  ${opts.use ?? 'Alloc(pPool, 2, eType, nGuid)'};`,
+    opts.after ?? '',
+    '}',
+  ].join('\n');
+
+  it('writes a tagged if/else storing the same locals on both paths as one select per argument', () => {
+    const out = tagged(paired());
+    assert.ok(out.includes('Alloc(pPool, 2, !pUnit ? UNIT_COUNT : pUnit->eUnitType, !pUnit ? -1 : pUnit->nUnitGUID);'), out);
+    assert.ok(!out.includes('if (!pUnit)') && !out.includes('int nGuid') && !out.includes('eType;'), out);
+    const decl = tagged(paired({ use: 'int *pStats = (int *)Alloc(pPool, 2, eType, nGuid)' }));
+    assert.ok(decl.includes('int* pStats = (int*)Alloc(pPool, 2, !pUnit ? UNIT_COUNT : pUnit->eUnitType, !pUnit ? -1 : pUnit->nUnitGUID);'), decl);
+  });
+
+  it('leaves the plugin itself alone on the if/else: the shape alone does not decide', () => {
+    assert.ok(run(paired()).out.includes('if (!pUnit)'));
+  });
+
+  it('refuses when a local is read again, a value is untyped or impure, or the call reads more', () => {
+    assert.match(refusal(paired({ after: 'g(nGuid);' })), /nGuid is read elsewhere/);
+    assert.match(refusal(paired({ elseGuid: 'pUnit->nOther' })), /not of its type/);
+    assert.match(refusal(paired({ elseGuid: 'k()' })), /not pure/);
+    assert.match(refusal(paired({ decl: 'short nGuid' })), /not of its type/);
+    assert.match(refusal(paired({ use: 'Alloc(Room(pUnit), 2, eType, nGuid)' })), /another argument is not pure/);
+    assert.match(refusal(paired({ use: 'Alloc(pPool, 2, eType, nGuid + 1)' })), /not a whole argument/);
+    assert.match(refusal(paired({ use: 'Alloc(pPool, nGuid, eType, nGuid)' })), /read 2 times/);
+    assert.match(refusal(paired(), 'pUnit'), /no if\/else #1/);
+  });
+
+  it('computes what the printed if/else computed', { skip: !hasNativeGpp() }, () => {
+    const printed = [
+      'struct U { int id; int type; };',
+      'int g(int a, int t, int id) { return a * 1000000 + t * 1000 + id; }',
+      'void p(U *u, int *r) { int id; int t; if (!u) { id = -1; t = 6; } else { id = u->id; t = u->type; } *r = g(7, t, id); }',
+    ].join('\n');
+    const out = tagged('void q(U *u, int *r) { int id; int t; if (!u) { id = -1; t = 6; } else { id = u->id; t = u->type; } *r = g(7, t, id); }',
+      '!u', 1, { structFields: { U: { id: 'int', type: 'int' } } });
+    assert.ok(out.includes('*r = g(7, !u ? 6 : u->type, !u ? -1 : u->id);'), out);
+    const res = compileAndRun(`#include <cstdio>\n${printed}\n${out}`,
+      'int bad = 0; U a = {12, 3}; int r1, r2; q(&a, &r1); p(&a, &r2); if (r1 != r2) bad++; q(0, &r1); p(0, &r2); if (r1 != r2) bad++; printf("%d\\n", bad);');
+    assert.strictEqual(res.trim(), '0');
   });
 
   it('computes what the printed form computed', { skip: !hasNativeGpp() }, () => {
