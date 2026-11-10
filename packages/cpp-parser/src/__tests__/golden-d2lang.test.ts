@@ -59,7 +59,7 @@ describe('Golden D2Lang: keep a combined loop condition', () => {
   return 0;
 }`;
 
-  it('does not turn the loop into while(true) with breaks', { todo: 'pipeline fix pending' }, () => {
+  it('does not turn the loop into while(true) with breaks', () => {
     const out = run(input);
     assert.ok(!/while\s*\(\s*(true|1)\s*\)/.test(out), `loop condition was split:\n${out}`);
     assert.ok(!/\bbreak\s*;/.test(out), `breaks introduced:\n${out}`);
