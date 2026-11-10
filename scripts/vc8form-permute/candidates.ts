@@ -208,7 +208,9 @@ function sites(c: Ctx, maxAnchors: number): string[] {
 
   // decl: a declaration without initializer moved before another declaration of its block.
   for (const b of blocks) {
-    const decls = (b.statements as N[]).filter(s => s.kind === NodeKind.DeclStmt && s.declarations.length === 1).map(s => s.declarations[0]);
+    // A declarator without a plain name (a function pointer, an array of them) has no `decl` tag.
+    const decls = (b.statements as N[]).filter(s => s.kind === NodeKind.DeclStmt && s.declarations.length === 1)
+      .map(s => s.declarations[0]).filter(d => typeof d.name?.name === 'string');
     for (const d of decls) if (!d.initializer) for (const w of decls) if (w !== d) out.add(`decl(${d.name.name},${w.name.name})`);
   }
 
@@ -328,7 +330,9 @@ function singles(items: Array<{ id: string; text: string }>, maxAnchors: number)
     const roundtrip = body(tu);
     const seen = new Set<string>([key(roundtrip)]);
     const candidates: Array<{ form: string; text: string; adds: number }> = [];
-    for (const f of sites(context(fn), maxAnchors)) {
+    let forms: string[];
+    try { forms = [...sites(context(fn), maxAnchors)]; } catch (e) { return { id, error: `sites: ${(e as Error).message.split('\n')[0]}`, candidates: [] }; }
+    for (const f of forms) {
       const r = tryForm(tu, f);
       if ('why' in r) continue;
       if (seen.has(key(r.text))) continue;
