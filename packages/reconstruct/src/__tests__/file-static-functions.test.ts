@@ -11,6 +11,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { foreignParameterRegisters, readForeignSources, selectFileStaticFunctions } from '../codegen/file-static-functions.js';
+import { normalizeUnitName } from '../codegen/namespace.js';
 import { generateProject } from '../codegen/index.js';
 import type {
   AnalyzedDataSymbol,
@@ -260,11 +261,120 @@ describe('selectFileStaticFunctions', () => {
     assert.deepStrictEqual(sel.refused.get('named by a data initializer'), ['Helper']);
   });
 
-  it('keeps it extern when another symbol shares its name', () => {
+  it('allows a same-name function in a different namespace when all references resolve locally', () => {
     const twin = fn('Helper', '00402000', 'B', '  return 0;');
     const all = [helper, caller, twin];
     const sel = selectFileStaticFunctions({ allFunctions: all, unitOf: unitsOf(all), globals: [] });
-    assert.deepStrictEqual(sel.refused.get('name shared with another symbol'), ['Helper']);
+    assert.deepStrictEqual([...sel.selected.keys()], ['00401000']);
+  });
+
+  it('distinguishes same-name functions in separate namespaces when their callers are local', () => {
+    const a = fn('Shared', '00401000', 'A', '  return nValue + 1;', { params: [inEax()] });
+    const b = fn('Shared', '00402000', 'B', '  return nValue + 2;', { params: [inEax()] });
+    const aCaller = fn('ACaller', '00401100', 'A', '  return Shared(1);');
+    const bCaller = fn('BCaller', '00402100', 'B', '  return Shared(2);');
+    const all = [a, b, aCaller, bCaller];
+    const sel = selectFileStaticFunctions({ allFunctions: all, unitOf: unitsOf(all), globals: [] });
+    assert.deepStrictEqual([...sel.selected.keys()].sort(), ['00401000', '00402000']);
+  });
+
+  it('keeps homonyms extern when different raw paths collapse into one emitted namespace and unit', () => {
+    const a = fn('Shared', '00401000', 'A', '  return nValue + 1;', { params: [inEax()] });
+    const nested = fn('Shared', '00402000', 'A::A', '  return nValue + 2;', { params: [inEax()] });
+    const aCaller = fn('ACaller', '00401100', 'A', '  return Shared(1);');
+    const nestedCaller = fn('NestedCaller', '00402100', 'A::A', '  return Shared(2);');
+    const all = [a, aCaller, nested, nestedCaller];
+    const unitOf = new Map(all.map(f => [f.address, normalizeUnitName(f.namespace!)]));
+    const sel = selectFileStaticFunctions({
+      allFunctions: all,
+      unitOf,
+      globals: [],
+    });
+    assert.equal(sel.selected.size, 0);
+    assert.deepStrictEqual(sel.refused.get('name shared with another symbol'), ['Shared', 'Shared']);
+  });
+
+  it('binds a qualified cross-unit call to only its named namespace', () => {
+    const a = fn('Shared', '00401000', 'A', '  return nValue + 1;', { params: [inEax()] });
+    const b = fn('Shared', '00402000', 'B', '  return nValue + 2;', { params: [inEax()] });
+    const aCaller = fn('ACaller', '00401100', 'A', '  return Shared(1);');
+    const bCaller = fn('BCaller', '00402100', 'B', '  return Shared(2);');
+    const foreign = fn('Foreign', '00403000', 'C', '  return A::Shared(3);');
+    const all = [a, b, aCaller, bCaller, foreign];
+    const sel = selectFileStaticFunctions({ allFunctions: all, unitOf: unitsOf(all), globals: [] });
+    assert.deepStrictEqual([...sel.selected.keys()], ['00402000']);
+    assert.deepStrictEqual(sel.refused.get('referenced from another unit'), ['Shared']);
+  });
+
+  it('keeps a same-namespace homonym or unresolved out-of-namespace call extern', () => {
+    const a = fn('Shared', '00401000', 'A', '  return nValue + 1;', { params: [inEax()] });
+    const aOverload = fn('Shared', '00401200', 'A', '  return 0;');
+    const local = fn('ACaller', '00401100', 'A', '  return Shared(1);');
+    const same = [a, aOverload, local];
+    assert.deepStrictEqual(selectFileStaticFunctions({ allFunctions: same, unitOf: unitsOf(same), globals: [] }).refused.get('name shared with another symbol'), ['Shared']);
+    const b = fn('Shared', '00402000', 'B', '  return nValue + 2;', { params: [inEax()] });
+    const remote = fn('Remote', '00403000', 'C', '  return Shared(3);');
+    const all = [a, b, local, remote];
+    assert.equal(selectFileStaticFunctions({ allFunctions: all, unitOf: unitsOf(all), globals: [] }).selected.size, 0);
+  });
+
+  it('does not mistake a root-qualified call for a same-name namespaced candidate', () => {
+    const namespaced = fn('Shared', '00401000', 'A', '  return nValue + 1;', { params: [inEax()] });
+    const global = fn('Shared', '00402000', '', '  return 7;');
+    const caller = fn('Caller', '00401100', 'A', '  return ::Shared(1);');
+    const all = [namespaced, global, caller];
+    const sel = selectFileStaticFunctions({ allFunctions: all, unitOf: unitsOf(all), globals: [] });
+    assert.equal(sel.selected.size, 0);
+    assert.deepStrictEqual(sel.refused.get('no caller in its unit'), ['Shared']);
+    caller.decompiled = 'int __stdcall Caller(void)\n{\n  return A::Shared(1) + ::Shared(1);\n}\n';
+    const both = selectFileStaticFunctions({ allFunctions: all, unitOf: unitsOf(all), globals: [] });
+    assert.deepStrictEqual([...both.selected.keys()], ['00401000']);
+  });
+
+  it('resolves relative qualifiers through the caller namespace before global scope', () => {
+    const nested = fn('Shared', '00401000', 'A::B', '  return nValue + 1;', { params: [inEax()] });
+    const global = fn('Shared', '00402000', 'B', '  return nValue + 2;', { params: [inEax()] });
+    const aCaller = fn('ACaller', '00401100', 'A', '  return B::Shared(1);');
+    const bCaller = fn('BCaller', '00402100', 'B', '  return Shared(2);');
+    const all = [nested, global, aCaller, bCaller];
+    const unitOf = unitsOf(all);
+    unitOf.set('00401000', 'A');
+    let sel = selectFileStaticFunctions({ allFunctions: all, unitOf, globals: [] });
+    assert.deepStrictEqual([...sel.selected.keys()].sort(), ['00401000', '00402000']);
+    aCaller.decompiled = 'int __stdcall ACaller(void)\n{\n  return ::B::Shared(1);\n}\n';
+    sel = selectFileStaticFunctions({ allFunctions: all, unitOf, globals: [] });
+    assert.equal(sel.selected.size, 0);
+    assert.deepStrictEqual(sel.refused.get('referenced from another unit'), ['Shared']);
+  });
+
+  it('treats a relative qualifier in foreign source as possibly naming any namesake', () => {
+    const nested = fn('Shared', '00401000', 'A::B', '  return nValue + 1;', { params: [inEax()] });
+    const global = fn('Shared', '00402000', 'B', '  return nValue + 2;', { params: [inEax()] });
+    const aCaller = fn('ACaller', '00401100', 'A', '  return B::Shared(1);');
+    const bCaller = fn('BCaller', '00402100', 'B', '  return Shared(2);');
+    const all = [nested, global, aCaller, bCaller];
+    const unitOf = unitsOf(all);
+    unitOf.set('00401000', 'A');
+    const sel = selectFileStaticFunctions({
+      allFunctions: all, unitOf, globals: [],
+      foreignSources: [{ path: 'support/hand.cpp', text: 'namespace A { int Use() { return B::Shared(3); } }' }],
+    });
+    assert.equal(sel.selected.size, 0);
+    assert.deepStrictEqual(sel.refused.get('named by foreign source'), ['Shared', 'Shared']);
+  });
+
+  it('does not attribute a whole override file to the replaced function namespace', () => {
+    const a = fn('Shared', '00401000', 'A', '  return nValue + 1;', { params: [inEax()] });
+    const b = fn('Shared', '00402000', 'B', '  return nValue + 2;', { params: [inEax()] });
+    const aCaller = fn('ACaller', '00401100', 'A', '  return Shared(1);');
+    const bCaller = fn('BCaller', '00402100', 'B', '  return Shared(2);');
+    const all = [a, b, aCaller, bCaller];
+    const sel = selectFileStaticFunctions({
+      allFunctions: all, unitOf: unitsOf(all), globals: [],
+      extraReferenceText: f => f === aCaller ? 'namespace B { int Replacement() { return Shared(3); } }' : undefined,
+    });
+    assert.deepStrictEqual([...sel.selected.keys()], ['00401000']);
+    assert.deepStrictEqual(sel.refused.get('referenced from another unit'), ['Shared']);
   });
 
   it('counts emitted code beside the decompile as a reference', () => {
@@ -415,6 +525,25 @@ describe('file-static emission', () => {
     name: 'Static.exe', path: '/tmp/Static.exe', format: 'PE', architecture: 'x86', compiler: 'msvc',
     imageBase: '0x400000', languageId: 'x86:LE:32:default', endianness: 'little', pointerSize: 4,
   };
+
+  it('emits same-name static helpers under their own namespaces', () => {
+    const functions = [
+      fn('Shared', '0x401000', 'Alpha', '  return nValue + 1;', { params: [inEax()] }),
+      fn('CallerA', '0x401100', 'Alpha', '  return Shared(1);'),
+      fn('Shared', '0x402000', 'Beta', '  return nValue + 2;', { params: [inEax()] }),
+      fn('CallerB', '0x402100', 'Beta', '  return Shared(2);'),
+    ];
+    const namespaces: ExtractedNamespace[] = [
+      { name: 'Alpha', fullPath: 'Alpha', functionCount: 2, isClass: false },
+      { name: 'Beta', fullPath: 'Beta', functionCount: 2, isClass: false },
+    ];
+    const project = generateProject('homonyms', functions, [], [], [], namespaces, options, programInfo);
+    const file = (suffix: string) => [...project.files.values()].find(f => f.path.endsWith(suffix))!.content;
+    for (const ns of ['Alpha', 'Beta']) {
+      assert.match(file(`${ns}.cpp`), /^static int __stdcall Shared\(int nValue\) \{$/m);
+      assert.ok(!/\bShared\s*\(/.test(file(`${ns}.h`)), `${ns} header declares a file-static helper`);
+    }
+  });
 
   it('defines the function static, declares it ahead of an earlier caller, and leaves it out of the header', () => {
     const functions = [

@@ -380,7 +380,7 @@ function initializerValues(dv: DataValue | undefined, out: string[]): void {
  */
 export function scanReferences(
   text: string,
-  onName: (name: string, call: boolean) => void,
+  onName: (name: string, call: boolean, qualified: string) => void,
   onInteger: (value: number, call: boolean) => void,
 ): void {
   let tokens: Array<{ kind: TokenKind; text: string }>;
@@ -404,7 +404,16 @@ export function scanReferences(
     const t = tokens[i];
     const call = tokens[i + 1]?.kind === TokenKind.LeftParen;
     if (t.kind === TokenKind.Identifier) {
-      if (tokens[i + 1]?.kind !== TokenKind.ColonColon) onName(t.text, call);
+      if (tokens[i + 1]?.kind !== TokenKind.ColonColon) {
+        const parts = [t.text];
+        let j = i - 1;
+        while (j >= 1 && tokens[j].kind === TokenKind.ColonColon
+               && tokens[j - 1].kind === TokenKind.Identifier) {
+          parts.unshift(tokens[j - 1].text);
+          j -= 2;
+        }
+        onName(t.text, call, `${j >= 0 && tokens[j].kind === TokenKind.ColonColon ? '::' : ''}${parts.join('::')}`);
+      }
     } else if (t.kind === TokenKind.IntegerLiteral) {
       const v = Number.parseInt(t.text.replace(/[uUlL]+$/, ''), /^0[xX]/.test(t.text) ? 16 : 10);
       if (Number.isFinite(v) && v > 0) onInteger(v, call);
@@ -420,18 +429,39 @@ export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticS
   };
 
   const nameCount = new Map<string, number>();
+  const qualifiedFunctionCount = new Map<string, number>();
+  const unitNameCount = new Map<string, number>();
+  const globalNames = new Set<string>();
   const bump = (n: string | undefined): void => {
     if (n) nameCount.set(n, (nameCount.get(n) ?? 0) + 1);
   };
-  for (const f of inputs.allFunctions) bump(f.name);
+  const qualifiedName = (name: string, ns?: string): string => ns ? `${ns}::${name}` : name;
+  for (const f of inputs.allFunctions) {
+    bump(f.name);
+    const q = qualifiedName(f.name, f.namespace);
+    qualifiedFunctionCount.set(q, (qualifiedFunctionCount.get(q) ?? 0) + 1);
+    const unit = inputs.unitOf.get(addressKey(f.address));
+    if (unit !== undefined) {
+      const unitName = JSON.stringify([unit, f.name]);
+      unitNameCount.set(unitName, (unitNameCount.get(unitName) ?? 0) + 1);
+    }
+  }
   for (const g of inputs.globals) {
     bump(g.name);
+    if (g.name) globalNames.add(g.name);
     if (g.suggestedName && g.suggestedName !== g.name) bump(g.suggestedName);
+    if (g.suggestedName) globalNames.add(g.suggestedName);
   }
 
   // Candidates, and the spellings a reference to each can take.
   const candidates = new Map<string, ExtractedFunction>();   // address key -> function
-  const byName = new Map<string, string>();                  // spelling -> address key
+  const byName = new Map<string, Set<string>>();             // leaf spelling -> candidate keys
+  const byQualified = new Map<string, string>();             // qualified spelling -> candidate key
+  const addSpelling = (name: string, key: string): void => {
+    let keys = byName.get(name);
+    if (!keys) byName.set(name, (keys = new Set()));
+    keys.add(key);
+  };
   let candidateCount = 0;
   for (const func of inputs.allFunctions) {
     if (func.isExternal || func.isThunk) continue;
@@ -445,16 +475,54 @@ export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticS
       refuse('not a free function', func);
       continue;
     }
-    if ((nameCount.get(func.name) ?? 0) > 1) {
+    // A namesake in a different unit is not this symbol. A unit prints one
+    // namespace wrapper, so raw namespaces that coalesce into the same unit
+    // cannot both define a static with the same leaf name.
+    const unitName = JSON.stringify([inputs.unitOf.get(key), func.name]);
+    if ((qualifiedFunctionCount.get(qualifiedName(func.name, func.namespace)) ?? 0) > 1 ||
+        (unitNameCount.get(unitName) ?? 0) > 1 || globalNames.has(func.name)) {
       refuse('name shared with another symbol', func);
       continue;
     }
     candidates.set(key, func);
-    byName.set(func.name, key);
+    addSpelling(func.name, key);
+    byQualified.set(qualifiedName(func.name, func.namespace), key);
     // The decompiler's own spelling, where a rename has not reached it yet.
     const alias = decompiledFunctionName(func.decompiled)?.split('::').pop();
-    if (alias && alias !== func.name && !nameCount.has(alias)) byName.set(alias, key);
+    if (alias && alias !== func.name && !nameCount.has(alias)) addSpelling(alias, key);
   }
+
+  // An unqualified name from a function's own namespace binds there. When that
+  // namespace has no candidate, keep every namesake possible: a using-declaration
+  // could import one of them. Qualified names bind exactly when the full spelling
+  // is known; unresolved spellings also keep every namesake possible.
+  const targetsFor = (name: string, spelling: string, fromNamespace?: string): string[] => {
+    const label = GHIDRA_DEFAULT_LABEL.exec(name)?.[1].toLowerCase();
+    if (label && candidates.has(label)) return [label];
+    const keys = byName.get(name);
+    if (!keys) return [];
+    if (spelling.includes('::')) {
+      // Foreign source and data initializers have no trustworthy enclosing
+      // namespace here. A non-root qualifier may resolve relative to one, so
+      // every namesake remains a possible reference.
+      if (!spelling.startsWith('::') && fromNamespace === undefined) return [...keys];
+      const scoped = !spelling.startsWith('::') && fromNamespace
+        ? fromNamespace.split('::').map((_, i, parts) => `${parts.slice(0, parts.length - i).join('::')}::${spelling}`)
+        : [];
+      for (const full of [...scoped, spelling.replace(/^::/, '')]) {
+        const exact = byQualified.get(full);
+        if (qualifiedFunctionCount.has(full)) return exact ? [exact] : [];
+      }
+      return [...keys];
+    }
+    if (fromNamespace !== undefined) {
+      const full = qualifiedName(name, fromNamespace);
+      const local = byQualified.get(full);
+      if (qualifiedFunctionCount.has(full) && !local) return [];
+      if (local) return [local];
+    }
+    return [...keys];
+  };
 
   // Who references each candidate, by unit (undefined: a function codegen does not emit).
   const referrers = new Map<string, Array<{ from: string; unit: string | undefined; call: boolean }>>();
@@ -475,15 +543,17 @@ export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticS
         if (target && candidates.has(target)) note(target, from, true);
         continue;
       }
-      for (const text of [func.decompiled, inputs.extraReferenceText?.(func)]) {
+      // The decompile belongs to func's namespace. An override may be an entire
+      // source file with its own namespace blocks, so its lexical scope is
+      // unknown here and same-leaf references must stay conservative.
+      const texts: Array<[string | undefined, string | undefined]> = [
+        [func.decompiled, func.namespace ?? ''],
+        [inputs.extraReferenceText?.(func), undefined],
+      ];
+      for (const [text, namespace] of texts) {
         if (!text) continue;
-        scanReferences(text, (name, call) => {
-          let target = byName.get(name);
-          if (!target) {
-            const m = GHIDRA_DEFAULT_LABEL.exec(name);
-            if (m && candidates.has(m[1].toLowerCase())) target = m[1].toLowerCase();
-          }
-          if (target) note(target, from, call);
+        scanReferences(text, (name, call, spelling) => {
+          for (const target of targetsFor(name, spelling, namespace)) note(target, from, call);
         }, (value, call) => {
           const k = value.toString(16).padStart(8, '0');
           if (candidates.has(k)) note(k, from, call);
@@ -500,12 +570,12 @@ export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticS
       initializerValues(g.initializedData, values);
       for (const v of values) {
         const last = v.split('::').pop()!;
-        let target = byName.get(last);
-        if (!target && /^(0x)?[0-9a-fA-F]{6,8}$/.test(v)) {
+        const targets = targetsFor(last, v);
+        if (targets.length === 0 && /^(0x)?[0-9a-fA-F]{6,8}$/.test(v)) {
           const k = addressKey(v);
-          if (candidates.has(k)) target = k;
+          if (candidates.has(k)) targets.push(k);
         }
-        if (target) dataReferenced.add(target);
+        for (const target of targets) dataReferenced.add(target);
       }
     }
   }
@@ -532,14 +602,13 @@ export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticS
   const entryValueUse = new Set<string>();
   if (candidates.size > 0 || entryOf.size > 0) {
     for (const src of inputs.foreignSources ?? []) {
-      const byNameOrLabel = (name: string, call: boolean): void => {
+      const byNameOrLabel = (name: string, call: boolean, spelling = name): void => {
         const entry = entryOf.get(name);
         if (entry) (call ? externEntries : entryValueUse).add(entry);
-        const target = byName.get(name) ?? GHIDRA_DEFAULT_LABEL.exec(name)?.[1].toLowerCase();
-        if (target && candidates.has(target)) foreignReferenced.add(target);
+        for (const target of targetsFor(name, spelling)) foreignReferenced.add(target);
       };
-      scanReferences(src.text, (name, call) => {
-        byNameOrLabel(name, call);
+      scanReferences(src.text, (name, call, spelling) => {
+        byNameOrLabel(name, call, spelling);
         for (const part of mangledSourceNames(name)) byNameOrLabel(part, false);
       }, value => {
         if (src.addressBase === undefined) return;
