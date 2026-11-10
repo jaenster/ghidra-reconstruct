@@ -267,6 +267,56 @@ describe('selectFileStaticFunctions', () => {
     assert.deepStrictEqual(sel.refused.get('name shared with another symbol'), ['Helper']);
   });
 
+  it('tells a shared name apart by the namespace each mention prints', () => {
+    const own = fn('Helper', '00401000', 'A::X', '  return nValue + 1;', { params: [inEax()] });
+    const user = fn('Caller', '00401100', 'A::X', '  return A::X::Helper(3);');
+    const twin = fn('Helper', '00402000', 'B::X', '  return 0;');
+    const other = fn('Other', '00402100', 'B::X', '  return B::X::Helper() + X::Helper();');
+    const all = [own, user, twin, other];
+    const sel = selectFileStaticFunctions({ allFunctions: all, unitOf: unitsOf(all), globals: [] });
+    // `X::Helper` fits both: Other's unit keeps A::X::Helper extern.
+    assert.deepStrictEqual(sel.refused.get('name shared with another symbol'), ['Helper']);
+    const clean = fn('Other', '00402100', 'B::X', '  return B::X::Helper();');
+    const all2 = [own, user, twin, clean];
+    const sel2 = selectFileStaticFunctions({ allFunctions: all2, unitOf: unitsOf(all2), globals: [] });
+    assert.deepStrictEqual([...sel2.selected.keys()], ['00401000']);
+    assert.deepStrictEqual([...sel2.selected.get('00401000')!.referrers], ['00401100']);
+  });
+
+  it('keeps a shared name extern when another unit calls it by its namespace', () => {
+    const own = fn('Helper', '00401000', 'A', '  return nValue + 1;', { params: [inEax()] });
+    const user = fn('Caller', '00401100', 'A', '  return A::Helper(3);');
+    const twin = fn('Helper', '00402000', 'B', '  return 0;');
+    const other = fn('Other', '00402100', 'B', '  return A::Helper(1);');
+    const all = [own, user, twin, other];
+    const sel = selectFileStaticFunctions({ allFunctions: all, unitOf: unitsOf(all), globals: [] });
+    assert.deepStrictEqual(sel.refused.get('referenced from another unit'), ['Helper']);
+  });
+
+  it('keeps a shared name extern when foreign source names it or a table holds it', () => {
+    const own = fn('Helper', '00401000', 'A', '  return nValue + 1;', { params: [inEax()] });
+    const user = fn('Caller', '00401100', 'A', '  return A::Helper(3);');
+    const twin = fn('Helper', '00402000', 'B', '  return 0;');
+    const all = [own, user, twin];
+    const foreign = selectFileStaticFunctions({
+      allFunctions: all, unitOf: unitsOf(all), globals: [],
+      foreignSources: [{ path: 'hand.cpp', text: 'void f() { B::Helper(); }' }],
+    });
+    assert.deepStrictEqual(foreign.refused.get('named by foreign source'), ['Helper']);
+    const table: Partial<AnalyzedDataSymbol> = {
+      name: 'gpfnHandlers',
+      initializedData: { kind: 'array', elements: [{ kind: 'pointer', value: 'A::Helper' }] },
+    };
+    const data = selectFileStaticFunctions({ allFunctions: all, unitOf: unitsOf(all), globals: [table] });
+    assert.deepStrictEqual(data.refused.get('named by a data initializer'), ['Helper']);
+    const twinTable: Partial<AnalyzedDataSymbol> = {
+      name: 'gpfnOthers',
+      initializedData: { kind: 'array', elements: [{ kind: 'pointer', value: 'B::Helper' }] },
+    };
+    const none = selectFileStaticFunctions({ allFunctions: all, unitOf: unitsOf(all), globals: [twinTable] });
+    assert.deepStrictEqual([...none.selected.keys()], ['00401000']);
+  });
+
   it('counts emitted code beside the decompile as a reference', () => {
     const other = fn('Other', '00402000', 'B', '  return 0;');
     const all = [helper, caller, other];

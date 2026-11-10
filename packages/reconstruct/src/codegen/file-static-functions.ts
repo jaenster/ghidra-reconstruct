@@ -26,8 +26,15 @@
  *    inlined-calls.ts), the function is selected with those sites as its callers and
  *    defined `inline`, so the restored calls are inlined again;
  *  - it is a plain free function: not a method, not a template member, not a thunk,
- *    library or platform-guarded function, and no other symbol shares its name, so
- *    every mention of the name is a mention of it;
+ *    library or platform-guarded function;
+ *  - every mention of its name can be told apart from a mention of another symbol of
+ *    that name. A function with a name of its own is mentioned by that name. One whose
+ *    name another symbol shares (RollSeed 0052c280 in D2Game::GAME::Server and
+ *    D2Common::Drlg::Drlg) is told apart by the namespace the decompiler prints with
+ *    each mention: a mention whose qualifier fits only it is a reference to it, one
+ *    that fits only the other is none, and one that fits both (a bare name) keeps it
+ *    extern. Foreign source is read by name alone, so there any mention of the shared
+ *    name keeps it extern;
  *  - it is not a header inline (inline-hosts.ts): every TU that calls one defines it.
  *
  * Hand-written source that only needs to CALL such a function calls its extern entry
@@ -121,7 +128,7 @@ export interface FileStaticInputs {
   /** The translation unit each EMITTED function is defined in, keyed by address. */
   unitOf: ReadonlyMap<string, string>;
   /** Every data symbol Ghidra has, including the ones the emitters filter. */
-  globals: ReadonlyArray<{ name?: string; suggestedName?: string; initializedData?: DataValue }>;
+  globals: ReadonlyArray<{ name?: string; suggestedName?: string; namespace?: string; initializedData?: DataValue }>;
   /** Free functions that must keep external linkage (methods, template members). */
   keepExtern?: (func: ExtractedFunction) => boolean;
   /**
@@ -407,11 +414,12 @@ function initializerValues(dv: DataValue | undefined, out: string[]): void {
 
 /**
  * Every name a body references (the last segment of a qualified chain) and every
- * integer literal in it, each with whether a call follows it.
+ * integer literal in it, each with whether a call follows it. A name's qualifier is the
+ * chain before it, `A::B` for `A::B::name` ('' for a bare name, '::' for `::name`).
  */
 export function scanReferences(
   text: string,
-  onName: (name: string, call: boolean) => void,
+  onName: (name: string, call: boolean, qualifier: string) => void,
   onInteger: (value: number, call: boolean) => void,
 ): void {
   let tokens: Array<{ kind: TokenKind; text: string }>;
@@ -435,12 +443,40 @@ export function scanReferences(
     const t = tokens[i];
     const call = tokens[i + 1]?.kind === TokenKind.LeftParen;
     if (t.kind === TokenKind.Identifier) {
-      if (tokens[i + 1]?.kind !== TokenKind.ColonColon) onName(t.text, call);
+      if (tokens[i + 1]?.kind !== TokenKind.ColonColon) onName(t.text, call, qualifierBefore(tokens, i));
     } else if (t.kind === TokenKind.IntegerLiteral) {
       const v = Number.parseInt(t.text.replace(/[uUlL]+$/, ''), /^0[xX]/.test(t.text) ? 16 : 10);
       if (Number.isFinite(v) && v > 0) onInteger(v, call);
     }
   }
+}
+
+/** The qualifier spelled before tokens[i]: `A::B` for `A::B::name`, '::' for `::name`, else ''. */
+function qualifierBefore(tokens: ReadonlyArray<{ kind: TokenKind; text: string }>, i: number): string {
+  const parts: string[] = [];
+  let j = i;
+  while (j >= 2 && tokens[j - 1].kind === TokenKind.ColonColon && tokens[j - 2].kind === TokenKind.Identifier) {
+    parts.unshift(tokens[j - 2].text);
+    j -= 2;
+  }
+  if (j >= 1 && tokens[j - 1].kind === TokenKind.ColonColon) return parts.length ? `::${parts.join('::')}` : '::';
+  return parts.join('::');
+}
+
+/** `ns::name`, or the name alone without a namespace. */
+const qualifiedName = (ns: string | undefined, name: string): string => (ns ? `${ns}::${name}` : name);
+
+/**
+ * The symbols of `names` (qualified) a mention of `leaf` with `qualifier` can mean: the
+ * one spelled so exactly, or every one whose name ends with it. A leading `::` means the
+ * qualifier is complete.
+ */
+function meant(names: ReadonlyArray<string>, leaf: string, qualifier: string): string[] {
+  if (qualifier === '' ) return [...names];
+  if (qualifier === '::') return names.filter(n => n === leaf);
+  const full = `${qualifier.replace(/^::/, '')}::${leaf}`;
+  if (qualifier.startsWith('::')) return names.filter(n => n === full);
+  return names.filter(n => n === full || n.endsWith(`::${full}`));
 }
 
 export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticSelection {
@@ -454,15 +490,25 @@ export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticS
   const bump = (n: string | undefined): void => {
     if (n) nameCount.set(n, (nameCount.get(n) ?? 0) + 1);
   };
-  for (const f of inputs.allFunctions) bump(f.name);
+  // Every symbol's qualified name, by its name: what a mention of a shared name can mean.
+  const spellings = new Map<string, string[]>();
+  const spell = (n: string | undefined, ns: string | undefined): void => {
+    if (!n) return;
+    const list = spellings.get(n);
+    if (list) list.push(qualifiedName(ns, n)); else spellings.set(n, [qualifiedName(ns, n)]);
+  };
+  for (const f of inputs.allFunctions) { bump(f.name); spell(f.name, f.namespace); }
   for (const g of inputs.globals) {
     bump(g.name);
-    if (g.suggestedName && g.suggestedName !== g.name) bump(g.suggestedName);
+    spell(g.name, g.namespace);
+    if (g.suggestedName && g.suggestedName !== g.name) { bump(g.suggestedName); spell(g.suggestedName, g.namespace); }
   }
 
   // Candidates, and the spellings a reference to each can take.
   const candidates = new Map<string, ExtractedFunction>();   // address key -> function
   const byName = new Map<string, string>();                  // spelling -> address key
+  // Candidates whose name another symbol shares: name -> qualified name -> address key.
+  const shared = new Map<string, Map<string, string>>();
   let candidateCount = 0;
   for (const func of inputs.allFunctions) {
     if (func.isExternal || func.isThunk) continue;
@@ -482,7 +528,16 @@ export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticS
       continue;
     }
     if ((nameCount.get(func.name) ?? 0) > 1) {
-      refuse('name shared with another symbol', func);
+      // Told apart by its namespace, when it has one and no other symbol spells it so.
+      const own = qualifiedName(func.namespace, func.name);
+      if (!func.namespace || (spellings.get(func.name) ?? []).filter(n => n === own).length !== 1) {
+        refuse('name shared with another symbol', func);
+        continue;
+      }
+      candidates.set(key, func);
+      let byQualified = shared.get(func.name);
+      if (!byQualified) shared.set(func.name, (byQualified = new Map()));
+      byQualified.set(own, key);
       continue;
     }
     candidates.set(key, func);
@@ -501,6 +556,22 @@ export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticS
     list.push({ from, unit: inputs.unitOf.get(from), call });
   };
 
+  // A mention of a shared name: a reference to the one candidate it fits, nothing when
+  // it fits only other symbols, and a mention that fits a candidate and another symbol
+  // keeps that candidate extern.
+  const ambiguous = new Set<string>();
+  const noteShared = (name: string, qualifier: string, from: ExtractedFunction, call: boolean): void => {
+    const byQualified = shared.get(name)!;
+    const fits = meant(spellings.get(name) ?? [], name, qualifier);
+    // A function's own name in its decompile is its definition (or a call to itself).
+    if (name === from.name && fits.includes(qualifiedName(from.namespace, from.name))) return;
+    const key = addressKey(from.address);
+    const keys = fits.map(n => byQualified.get(n)).filter((k): k is string => k !== undefined);
+    if (keys.length === 0) return;
+    if (fits.length === 1) { note(keys[0], key, call); return; }
+    for (const k of keys) if (k !== key) ambiguous.add(k);
+  };
+
   if (candidates.size > 0) {
     for (const func of inputs.allFunctions) {
       if (func.isExternal) continue;
@@ -513,7 +584,8 @@ export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticS
       }
       for (const text of [func.decompiled, inputs.extraReferenceText?.(func)]) {
         if (!text) continue;
-        scanReferences(text, (name, call) => {
+        scanReferences(text, (name, call, qualifier) => {
+          if (shared.has(name)) { noteShared(name, qualifier, func, call); return; }
           let target = byName.get(name);
           if (!target) {
             const m = GHIDRA_DEFAULT_LABEL.exec(name);
@@ -536,6 +608,12 @@ export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticS
       initializerValues(g.initializedData, values);
       for (const v of values) {
         const last = v.split('::').pop()!;
+        const byQualified = shared.get(last);
+        if (byQualified) {
+          const fits = meant(spellings.get(last) ?? [], last, v.slice(0, Math.max(0, v.length - last.length - 2)));
+          for (const n of fits) { const k = byQualified.get(n); if (k) dataReferenced.add(k); }
+          continue;
+        }
         let target = byName.get(last);
         if (!target && /^(0x)?[0-9a-fA-F]{6,8}$/.test(v)) {
           const k = addressKey(v);
@@ -574,6 +652,8 @@ export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticS
       const byNameOrLabel = (name: string, call: boolean): void => {
         const entry = entryOf.get(name);
         if (entry) (call ? externEntries : entryValueUse).add(entry);
+        // Foreign source is read by name alone: a shared name may mean the candidate.
+        for (const k of shared.get(name)?.values() ?? []) foreignReferenced.add(k);
         const target = byName.get(name) ?? GHIDRA_DEFAULT_LABEL.exec(name)?.[1].toLowerCase();
         if (target && candidates.has(target)) foreignReferenced.add(target);
       };
@@ -595,6 +675,7 @@ export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticS
     const refs = referrers.get(key) ?? [];
     if (dataReferenced.has(key)) { refuse('named by a data initializer', func); continue; }
     if (foreignReferenced.has(key)) { refuse('named by foreign source', func); continue; }
+    if (ambiguous.has(key)) { refuse('name shared with another symbol', func); continue; }
     if (refs.some(r => r.unit === undefined)) { refuse('referenced from excluded code', func); continue; }
     if (refs.some(r => r.unit !== unit)) { refuse('referenced from another unit', func); continue; }
     if (refs.length === 0 && inputs.inlinedCalls) { unreferenced.push({ key, func, unit }); continue; }
