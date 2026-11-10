@@ -483,9 +483,14 @@ export function splitReusedValueSlots(fn: FunctionDecl, o: ReusedParamSlotOption
     // Ghidra's untyped pointer, not the type the source declared.
     if (/\bcode\b/.test(targetType)) continue;
     if (targetClass !== 'ptr' && paramClass !== 'ptr') continue;
-    // Every cast read must agree with T: a read reinterpreting the slot as a third type
-    // is not one variable either.
-    if (readCasts.some(c => c !== null && !sameType(c, targetType) && !sameType(c, paramType))) {
+    // A pointer slot reused for a word-sized integer can be viewed through both
+    // signed and unsigned integer casts. Keep each differing cast at its read:
+    // `(int)p` becomes `(int)n`, rather than `(int)(P *)n`. A cast to another
+    // pointer type still makes the second value ambiguous.
+    const integerView = (c: string) => targetClass === 'int' && paramClass === 'ptr'
+      && WORD_INTEGERS[c] !== undefined;
+    if (readCasts.some(c => c !== null && !sameType(c, targetType)
+        && !sameType(c, paramType) && !integerView(c))) {
       o.onRefused?.(fnName, `${p}: the second range is read as more than one type`);
       continue;
     }
@@ -495,8 +500,13 @@ export function splitReusedValueSlots(fn: FunctionDecl, o: ReusedParamSlotOption
     const castReads = new Map<object, Expression>();
     const bareReads = new Set<object>();
     for (const oc of occurrences) {
-      if (oc.cast && sameType(spellingOf(oc.cast.type), targetType)) castReads.set(oc.cast, Expr.identifier(local));
-      else bareReads.add(oc.id);
+      if (oc.cast && sameType(spellingOf(oc.cast.type), targetType)) {
+        castReads.set(oc.cast, Expr.identifier(local));
+      } else if (oc.cast && integerView(spellingOf(oc.cast.type))) {
+        castReads.set(oc.cast, Expr.cast(oc.cast.type, Expr.identifier(local)));
+      } else {
+        bareReads.add(oc.id);
+      }
     }
     const storeStmts = new Map<object, Expression>();
     // An integer the slot's new type takes without a cast: a literal, or arithmetic on
