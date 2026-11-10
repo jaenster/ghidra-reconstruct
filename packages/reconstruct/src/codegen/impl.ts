@@ -3775,6 +3775,13 @@ function transformDecompiledCode(
     // A pointer scan's difference from its start is the string's length (strlen-difference.ts):
     // the comparison's row says whether the original compared it with 1.
     if (enclosing?.compareSites) {
+      perPluginOptions['narrow-compare-widen'] = {
+        compareSites: enclosing.compareSites,
+        onSite: (e: { name: string; from: string; to: string }) =>
+          console.warn(`[narrow-compare-widen] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.name} ${e.from} -> ${e.to}`),
+      };
+    }
+    if (enclosing?.compareSites) {
       perPluginOptions['strlen-difference'] = { compareSites: enclosing.compareSites };
     }
     // A materialised comparison spelled as VC8 compiles the original's setcc or neg/sbb
