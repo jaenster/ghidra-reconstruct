@@ -21,7 +21,7 @@
 import { createInterface } from 'node:readline';
 import { resolve } from 'node:path';
 import { loadQuarantine, loadTree, mirror, readSource } from './tree.js';
-import { functionAt, translate } from './translate.js';
+import { functionAt, ptrCallStats, translate } from './translate.js';
 
 function usage(): never {
   process.stderr.write('usage: cli.ts <tree> <out-dir|-> [--quarantine <tsv>] [--serve]\n');
@@ -45,6 +45,8 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     try {
       const { written, kept } = mirror(tree, resolve(pos[1]), loadQuarantine(quarantinePath));
       process.stdout.write(`vc8_translate: ${written} written, ${kept} unchanged\n`);
+      process.stderr.write(`vc8_translate: pointer-field calls ${ptrCallStats.byStruct} by struct, ` +
+        `${ptrCallStats.byName} by field name (struct not known)\n`);
     } catch (e) {
       process.stderr.write(`${(e as Error).message}\n`);
       return 1;

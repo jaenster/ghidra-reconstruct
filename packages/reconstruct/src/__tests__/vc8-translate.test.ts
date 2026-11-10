@@ -149,6 +149,42 @@ describe('vc8 translate: __thiscall', () => {
       'namespace A {\nvoid g(S* s) {\n  vc8_thiscall(f)(s);\n}\nnamespace B {\nvoid h(S* s) {\n  f(s);\n}\n}\n}\n');
   });
 
+  it('keys a pointer field on its struct: another struct\'s same-named __fastcall field does not strip it', () => {
+    const files = {
+      'win.h': 'typedef BOOL (__fastcall *Draw)(struct D2ControlStrc * pControl);\n' +
+        'struct D2ControlStrc {\n    BOOL (__fastcall *Draw)(struct D2ControlStrc * pControl);\n};\n',
+      'ui.h': 'struct WidgetVtable {\n    void (__thiscall *Draw)(::Widget *);\n};\n' +
+        'struct Widget {\n    struct WidgetVtable * pVtable;\n};\n' +
+        'struct Wrapper {\n    struct Widget * pImplementation;\n};\n',
+      'ui.cpp': 'void Paint(::Wrapper * pThis) {\n    ::Widget* self = pThis->pImplementation;\n' +
+        '    pThis->pImplementation->pVtable->Draw(pThis->pImplementation);\n    self->pVtable->Draw(self);\n' +
+        '    ((::Widget*)p)->pVtable->Draw(p);\n}\n',
+      'win.cpp': 'BOOL Paint(D2ControlStrc* c) {\n    return c->Draw(c);\n}\n',
+    };
+    assert.equal(tr(files, 'ui.h'), 'struct WidgetVtable {\n    void (__fastcall *Draw)(::Widget *, int);\n};\n' +
+      'struct Widget {\n    struct WidgetVtable * pVtable;\n};\n' +
+      'struct Wrapper {\n    struct Widget * pImplementation;\n};\n');
+    assert.equal(tr(files, 'ui.cpp'), 'void Paint(::Wrapper * pThis) {\n    ::Widget* self = pThis->pImplementation;\n' +
+      '    vc8_thiscall(pThis->pImplementation->pVtable->Draw)(pThis->pImplementation);\n' +
+      '    vc8_thiscall(self->pVtable->Draw)(self);\n    vc8_thiscall(((::Widget*)p)->pVtable->Draw)(p);\n}\n');
+    // The __fastcall struct's own field and its calls stay as they are.
+    assert.equal(tr(files, 'win.h'), files['win.h']);
+    assert.equal(tr(files, 'win.cpp'), files['win.cpp']);
+  });
+
+  it('falls back to the field name when the object\'s struct is not known', () => {
+    const files = {
+      'a.h': 'struct V {\n    void (__thiscall *pfnRun)(S* p, int a);\n};\n',
+      'a.cpp': 'void g(S* s) {\n    Lookup(s)->pfnRun(s, 1);\n    unknown->pfnRun(s, 1);\n}\n',
+    };
+    // Named once, as a __thiscall field: the calls are rewritten by the name.
+    assert.equal(tr(files, 'a.cpp'),
+      'void g(S* s) {\n    vc8_thiscall(Lookup(s)->pfnRun)(s, 1);\n    vc8_thiscall(unknown->pfnRun)(s, 1);\n}\n');
+    // A same-named field declared otherwise anywhere makes the name ambiguous: left stripped.
+    const amb = { ...files, 'b.h': 'struct W {\n    void (__fastcall *pfnRun)(S* p, int a);\n};\n' };
+    assert.equal(tr(amb, 'a.cpp'), files['a.cpp']);
+  });
+
   it('ignores declarations VC8 never compiles', () => {
     const text = '#ifndef _WIN32\nint f(S* p);\n#endif\nint __thiscall f(S* p);\n';
     assert.equal(withoutNonWin32(text), '\n\n\nint __thiscall f(S* p);\n');

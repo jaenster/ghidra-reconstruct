@@ -39,6 +39,7 @@ import {
   argList, qualifierBefore, scopes, secondItemAt, statementStart, thiscallDeclAt,
 } from './syntax.js';
 import { heads, listInitAt, packedAttr, resolveCall, thiscallPtrAt, type TreeState } from './facts.js';
+import { expressionStruct, functionVariables } from './types.js';
 
 export const PLATFORM_H = 'Source/D2Headers/d2_platform.h';
 
@@ -275,6 +276,9 @@ function cxxAttributeEnd(doc: Doc, i: number): number {
 // ---------------------------------------------------------------------------------------------
 // __thiscall
 
+/** Calls through pointer fields since the process started: resolved through the object's struct, or by field name. */
+export const ptrCallStats = { byStruct: 0, byName: 0 };
+
 /** Collects the call-site insertions, composing the ones that land on one offset. */
 class Inserts {
   private wraps = new Map<number, { lead: string; n: number }>();
@@ -311,6 +315,15 @@ function thiscallPass(text: string, state: TreeState): string {
   const { toks } = doc;
   const n = doc.length;
   const decl: Edit[] = [];
+  // Parenthesis depth within the statement, counting the token's own `(`.
+  const parens = new Int32Array(n);
+  for (let i = 0, d = 0; i < n; i++) {
+    const k = doc.k(i);
+    if (k === K.LeftParen) d++;
+    else if (k === K.RightParen) d = Math.max(0, d - 1);
+    else if (k === K.LeftBrace || k === K.RightBrace || k === K.Semicolon) d = 0;
+    parens[i] = d;
+  }
 
   for (let i = 0; i < n; i++) {
     if (doc.k(i) !== K.CallingConvThiscall) continue;
@@ -329,7 +342,11 @@ function thiscallPass(text: string, state: TreeState): string {
     const p = thiscallPtrAt(doc, i - 1);
     if (!p) continue;
     const list = argList(doc, p.params, true);
-    const ok = list.close >= 0 && (p.name ? !!state.ptrs.get(p.name)?.has(list.count) : list.count >= 1 && list.count < 64);
+    // A struct's own field is known as Struct::field; any other named pointer by its name.
+    const s = sc.table[sc.at[i]];
+    const member = s.cls && !s.body && parens[i - 1] === 1 ? `${s.cls}::${p.name}` : null;
+    const counts = member ? state.qptrs.get(member) : state.ptrs.get(p.name);
+    const ok = list.close >= 0 && (p.name ? !!counts?.has(list.count) : list.count >= 1 && list.count < 64);
     if (ok) {
       decl.push({ s: toks[i].s, e: toks[i].e, text: '__fastcall' });
       decl.push({ s: secondItemAt(list), e: secondItemAt(list), text: ', int' });
@@ -355,14 +372,29 @@ function thiscallPass(text: string, state: TreeState): string {
     if (state.direct.has(target!)) ins.second(secondItemAt(list), '0');
     else ins.wrap(start, toks[i + 1].s);
   }
-  // Calls through pointer fields: x->p(...), x.p(...).
+  // Calls through pointer fields: x->p(...), x.p(...). The field is the one of the struct the
+  // object expression has, when its type can be told; else it is known by its name alone.
+  const locals = new Map<number, Map<string, string>>();
   for (let i = 0; i < n; i++) {
     if (doc.k(i) !== K.Identifier || doc.k(i + 1) !== K.LeftParen || !doc.wsBefore(i + 1)) continue;
-    const counts = state.ptrs.get(doc.t(i)!);
-    if (!counts || !(doc.k(i - 1) === K.Arrow || doc.k(i - 1) === K.Dot) || !doc.wsBefore(i)) continue;
+    const field = doc.t(i)!;
+    if (!(state.ptrs.has(field) || state.qptrNames.has(field))) continue;
+    if (!(doc.k(i - 1) === K.Arrow || doc.k(i - 1) === K.Dot) || !doc.wsBefore(i)) continue;
+    const start = postfixStart(doc, i);
+    let owner: string | null = null;
+    if (start !== null && start < i - 1) {
+      const fn = sc.table[sc.at[i]].fn;
+      let vars = fn >= 0 ? locals.get(fn) : null;
+      if (fn >= 0 && !vars) locals.set(fn, vars = functionVariables(doc, fn));
+      owner = expressionStruct(doc, start, i - 1, state.types, vars ?? null);
+      if (owner && !state.types.fields.has(owner)) owner = null;
+    }
+    const counts = owner ? state.qptrs.get(`${owner}::${field}`) : state.ptrs.get(field);
+    if (owner) ptrCallStats.byStruct++;
+    else ptrCallStats.byName++;
+    if (!counts) continue;
     const list = argList(doc, i + 1, false);
     if (!counts.has(list.count)) continue;
-    const start = postfixStart(doc, i);
     if (start === null) ins.second(secondItemAt(list), '0');
     else ins.wrap(toks[start].s, toks[i + 1].s);
   }

@@ -55,6 +55,10 @@ export interface Scope {
   names: string[];
   /** Inside a function body or an initializer: no declaration here is a namespace member. */
   body: boolean;
+  /** The struct, class or union whose members are declared here (an anonymous one's members are its parent's). */
+  cls: string | null;
+  /** For a function body: the token of the `{` of the outermost one enclosing. */
+  fn: number;
 }
 
 const CLASS_KEYS = new Set<K>([K.Struct, K.Class, K.Union]);
@@ -66,7 +70,7 @@ const ATTR_WORDS = new Set(['__attribute__', '__declspec', 'alignas', '__pragma'
  * has Q in its body's scope, as C++ name lookup has.
  */
 export function scopes(doc: Doc): { at: Int32Array; table: Scope[] } {
-  const table: Scope[] = [{ names: [], body: false }];
+  const table: Scope[] = [{ names: [], body: false, cls: null, fn: -1 }];
   const at = new Int32Array(doc.length);
   const stack: Array<{ close: number; id: number }> = [{ close: -2, id: 0 }];
   for (let i = 0; i < doc.length; i++) {
@@ -76,7 +80,9 @@ export function scopes(doc: Doc): { at: Int32Array; table: Scope[] } {
     if (k === K.LeftBrace) {
       const outer = table[top.id];
       const opened = classifyBrace(doc, i, outer.body);
-      table.push({ names: [...outer.names, ...opened.names], body: outer.body || opened.body });
+      const cls = opened.cls === undefined ? null : opened.cls === '' ? outer.cls : opened.cls;
+      const fn = outer.body ? outer.fn : opened.body && opened.fn ? i : -1;
+      table.push({ names: [...outer.names, ...opened.names], body: outer.body || opened.body, cls, fn });
       stack.push({ close: doc.pair[i], id: table.length - 1 });
     } else if (k === K.RightBrace) {
       while (stack.length > 1 && stack[stack.length - 1].close === i) stack.pop();
@@ -97,7 +103,7 @@ export function statementStart(doc: Doc, end: number): number {
   return j + 1;
 }
 
-function classifyBrace(doc: Doc, brace: number, inBody: boolean): { names: string[]; body: boolean } {
+function classifyBrace(doc: Doc, brace: number, inBody: boolean): { names: string[]; body: boolean; cls?: string; fn?: boolean } {
   const h = statementStart(doc, brace - 1);
   if (inBody) return { names: [], body: true };
   let j = h;
@@ -137,13 +143,13 @@ function classifyBrace(doc: Doc, brace: number, inBody: boolean): { names: strin
       if (ATTR_WORDS.has(t) && doc.k(p + 1) === K.LeftParen && doc.pair[p + 1] > p) p = doc.pair[p + 1] + 1;
       else break;
     }
-    if (doc.k(p) === K.Identifier && doc.t(p) !== 'final') return { names: [doc.t(p)!], body: false };
-    return { names: [], body: false };
+    if (doc.k(p) === K.Identifier && doc.t(p) !== 'final') return { names: [doc.t(p)!], body: false, cls: doc.t(p)! };
+    return { names: [], body: false, cls: '' };
   }
   if (firstParen >= 0) {
     // A function body. `Q::f(...) {` - lookup inside it starts in Q.
     const d = qualifierBefore(doc, firstParen - 1);
-    return { names: d && !d.global ? d.qual : [], body: true };
+    return { names: d && !d.global ? d.qual : [], body: true, fn: true };
   }
   return { names: [], body: true };
 }

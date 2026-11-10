@@ -20,6 +20,7 @@ import { Doc, K, isSpace, isWordChar } from './doc.js';
 import {
   argList, declaratorAt, qualifiedName, scopes, thiscallDeclAt,
 } from './syntax.js';
+import { globalVariables, note, structFields, typedefAliases, type TypeInfo } from './types.js';
 
 export interface Fn {
   q: string;
@@ -35,6 +36,13 @@ export interface FileFacts {
   typedef: Array<{ name: string; count: number }>;
   /** `T name;` pairs: the fields a __thiscall pointer typedef types are among them. */
   pairs: Array<[string, string]>;
+  /** The pointer fields among `ptr`/`otherPtr`/`pairs`, by `Struct::field`. */
+  qptr: Array<{ name: string; count: number }>;
+  otherQPtr: Array<{ name: string; count: number }>;
+  classPairs: Array<[string, string]>;
+  fields: Array<[string, string, string]>;
+  aliases: Array<[string, string]>;
+  globals: Array<[string, string]>;
   ctor: string[];
   union: string[];
   listInit: string[];
@@ -49,8 +57,16 @@ export interface TreeState {
   declared: Set<string>;
   /** Unqualified names of `funcs`: the identifiers a call to one of them can be spelled with. */
   names: Set<string>;
-  /** __thiscall pointer field -> parameter counts. */
+  /**
+   * __thiscall pointer field -> parameter counts, by field name: for a call whose object's
+   * struct is not known, and for pointers that are no struct's field.
+   */
   ptrs: Map<string, Set<number>>;
+  /** The same by `Struct::field`, less only what that struct's own field is declared otherwise. */
+  qptrs: Map<string, Set<number>>;
+  /** Field names of `qptrs`. */
+  qptrNames: Set<string>;
+  types: TypeInfo;
   strip: Set<string>;
   construct: Set<string>;
 }
@@ -258,9 +274,15 @@ export function fileFacts(text: string, header: boolean, filename = '<input>'): 
   const stripped = withoutNonWin32(text);
   const doc = new Doc(stripped, filename);
   const sc = scopes(doc);
-  const f: FileFacts = { fn: [], other: [], ptr: [], otherPtr: [], typedef: [], pairs: [], ctor: [], union: [], listInit: [] };
+  const f: FileFacts = { fn: [], other: [], ptr: [], otherPtr: [], typedef: [], pairs: [], ctor: [], union: [], listInit: [],
+    qptr: [], otherQPtr: [], classPairs: [], fields: structFields(doc), aliases: typedefAliases(doc), globals: globalVariables(doc, sc) };
   const scopeOf = (i: number) => sc.table[sc.at[i]];
   let depth = 0;
+  // The struct a `(` at token i declares a member of: written at the struct's own level.
+  const memberOf = (i: number): string | null => {
+    const s = scopeOf(i);
+    return s.cls && !s.body && depth === 1 ? s.cls : null;
+  };
   for (let i = 0; i < doc.length; i++) {
     const k = doc.k(i)!;
     if (k === K.LeftParen) depth++;
@@ -274,10 +296,19 @@ export function fileFacts(text: string, header: boolean, filename = '<input>'): 
           direct: directBefore(doc, i) });
       }
     } else if (k === K.LeftParen) {
+      const member = memberOf(i);
       const p = thiscallPtrAt(doc, i);
-      if (p && p.name) f.ptr.push({ name: p.name, count: argList(doc, p.params, true).count });
+      if (p && p.name) {
+        const count = argList(doc, p.params, true).count;
+        f.ptr.push({ name: p.name, count });
+        if (member) f.qptr.push({ name: `${member}::${p.name}`, count });
+      }
       const o = otherPtrAt(doc, i);
-      if (o) f.otherPtr.push({ name: o.name, count: argList(doc, o.params, true).count });
+      if (o) {
+        const count = argList(doc, o.params, true).count;
+        f.otherPtr.push({ name: o.name, count });
+        if (member) f.otherQPtr.push({ name: `${member}::${o.name}`, count });
+      }
     } else if (k === K.Typedef) {
       for (let j = i + 1; j < doc.length && doc.k(j) !== K.Semicolon; j++) {
         const p = thiscallPtrAt(doc, j);
@@ -295,6 +326,8 @@ export function fileFacts(text: string, header: boolean, filename = '<input>'): 
       }
       if (doc.k(i + 1) === K.Identifier && spaced(doc, i + 1) && doc.k(i + 2) === K.Semicolon && doc.wsBefore(i + 2)) {
         f.pairs.push([doc.t(i)!, doc.t(i + 1)!]);
+        const c = scopeOf(i).cls;
+        if (c && !scopeOf(i).body && depth === 0) f.classPairs.push([doc.t(i)!, `${c}::${doc.t(i + 1)!}`]);
       }
     }
   }
@@ -380,7 +413,19 @@ export function mergeFacts(facts: FileFacts[]): TreeState {
   const withCtor = new Set<string>();
   const inUnion = new Set<string>();
   const listInit = new Set<string>();
+  const qptrs = new Map<string, Set<number>>();
+  const otherQP = new Map<string, Set<number>>();
+  const types: TypeInfo = { fields: new Map(), aliases: new Map(), globals: new Map() };
   for (const f of facts) {
+    for (const x of f.qptr) add(qptrs, x.name, x.count);
+    for (const x of f.otherQPtr) add(otherQP, x.name, x.count);
+    for (const [st, field, type] of f.fields) {
+      let m = types.fields.get(st);
+      if (!m) types.fields.set(st, m = new Map());
+      note(m, field, type);
+    }
+    for (const [a, t] of f.aliases) note(types.aliases, a, t);
+    for (const [n, t] of f.globals) note(types.globals, n, t);
     for (const x of f.fn) {
       add(fnQ, x.q, x.count);
       declared.add(x.q);
@@ -400,6 +445,7 @@ export function mergeFacts(facts: FileFacts[]): TreeState {
   }
   if (typedefs.size) {
     for (const f of facts) for (const [t, n] of f.pairs) if (typedefs.has(t)) add(ptrs, n, typedefs.get(t)!);
+    for (const f of facts) for (const [t, n] of f.classPairs) if (typedefs.has(t)) add(qptrs, n, typedefs.get(t)!);
   }
   const funcs = new Map<string, Set<number>>();
   const names = new Set<string>();
@@ -415,9 +461,18 @@ export function mergeFacts(facts: FileFacts[]): TreeState {
     const keep = new Set([...counts].filter(c => c > 0 && !otherP.get(n)?.has(c) && !otherB.get(n)?.has(c)));
     if (keep.size) ptrsOut.set(n, keep);
   }
+  const qptrsOut = new Map<string, Set<number>>();
+  const qptrNames = new Set<string>();
+  for (const [n, counts] of qptrs) {
+    const keep = new Set([...counts].filter(c => c > 0 && !otherQP.get(n)?.has(c)));
+    if (keep.size) {
+      qptrsOut.set(n, keep);
+      qptrNames.add(lastPart(n));
+    }
+  }
   const strip = new Set([...withCtor].filter(n => inUnion.has(n)));
   const construct = new Set([...withCtor].filter(n => listInit.has(n) && !strip.has(n)));
-  return { funcs, direct, declared, names, ptrs: ptrsOut, strip, construct };
+  return { funcs, direct, declared, names, ptrs: ptrsOut, qptrs: qptrsOut, qptrNames, types, strip, construct };
 }
 
 /** `A::B::f` -> `f`. */
