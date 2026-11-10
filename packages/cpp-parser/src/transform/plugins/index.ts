@@ -249,6 +249,7 @@ export {
   createRotatedForLoopTransformer,
   type RotatedForLoopOptions,
 } from './builtins/rotated-for-loop.js';
+export { postStridedCountedLoopPlugin } from './builtins/post-strided-counted-loop.js';
 
 // ============================================
 // BUILT-IN PLUGINS: REDUNDANT PAREN CLEANUP
@@ -1033,6 +1034,7 @@ export {
 } from './builtins/ghidra-warning-facts.js';
 export { frameGroupLocalsPlugin, frameTypeLayout, type FrameGroupLocalsOptions, type EscapeDecision, type RunTruncation, type TypeLayout as FrameTypeLayout } from './builtins/frame-group-locals.js';
 import { stridedAccessPlugin } from './builtins/strided-access.js';
+import { postStridedCountedLoopPlugin } from './builtins/post-strided-counted-loop.js';
 import { reusedParamSlotPlugin } from './builtins/reused-param-slot.js';
 export { reusedParamSlotPlugin, splitReusedParameterSlots, type ReusedParamSlotOptions } from './builtins/reused-param-slot.js';
 export { stridedAccessPlugin, rewriteStridedAccesses, type StridedAccessOptions, type StructLayoutField } from './builtins/strided-access.js';
@@ -1177,6 +1179,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   globalAddressLiteralPlugin,  // Correctness: a folded global address (incl. ~&g) → the symbol (priority 68)
   addressRunBoundPlugin,  // Correctness: a loop bound that is another global's address → a distance from the one being walked (priority 69)
   stridedAccessPlugin,    // Correctness: a strength-reduced byte offset / n*sizeof(T) interior constant -> T[i].f (priority 69.5)
+  postStridedCountedLoopPlugin, // Fidelity: after the byte counter folds, recover a guarded counted for loop (priority 69.6)
   seedProductFoldPlugin,      // A seed step printed as a named product (priority 79)
   prngTransformPlugin,        // Pattern detection: PRNG (priority 80)
   prngTempCollapsePlugin,     // Cleanup: collapse PRNG temp variables (priority 85)
