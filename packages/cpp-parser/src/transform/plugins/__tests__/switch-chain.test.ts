@@ -742,4 +742,30 @@ describe('switchChainPlugin', () => {
     const once = t(parse(code));
     assert.strictEqual(flat(emit(t(once) as AnyNode)), flat(emit(once as AnyNode)));
   });
+  // AITHINK_Fn1_ClawViper 005f1b60: comma-expand split `if (dwArg0 && (n = x, n != 0))` into
+  // two ifs on the decompile's line; the inner one's tests are on its condition's own line.
+  it('reads a split-off if\'s tests from its own condition\'s lines', () => {
+    const lines = [
+      'void f(int a, int n) {',
+      'if (a) { if (',
+      '<SUB EAX 0 0 0x10> n != 0) {',
+      '<SUB EAX 2 2 0x15> if (n == 2) {',
+      '[0x40] R();',
+      '}',
+      'else {',
+      '[0x30] B();',
+      '}',
+      '}',
+      '}',
+      '}',
+    ];
+    const { out, sites } = run(lines);
+    assert.ok(sites.includes('switch'), sites.join());
+    assert.ok(out.includes('switch (n)'), out);
+    assert.ok(/case 2: \{ R\(\); break; \}/.test(out) && /case 0: \{ break; \}/.test(out) && /default: \{ B\(\);/.test(out), out);
+    // A second condition on that line makes it no evidence.
+    const shared = [...lines];
+    shared[2] = '<SUB EAX 0 0 0x10> n != 0 && (m ? 1 : 0)) { if (m) {}';
+    assert.ok(!run(shared).out.includes('switch'), run(shared).out);
+  });
 });

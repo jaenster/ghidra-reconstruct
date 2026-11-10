@@ -626,6 +626,7 @@ export {
 
 export {
   switchChainPlugin,
+  switchChainLatePlugin,
   type SwitchChainOptions,
 } from './builtins/switch-chain.js';
 
@@ -934,7 +935,7 @@ import { stormTagWordPlugin } from './builtins/storm-tag-word.js';
 import { paramCheckBlockPlugin } from './builtins/param-check-block.js';
 import { inlinedCallRestorePlugin } from './builtins/inlined-call-restore.js';
 import { guardedCallRestorePlugin } from './builtins/guarded-call-restore.js';
-import { switchChainPlugin } from './builtins/switch-chain.js';
+import { switchChainPlugin, switchChainLatePlugin } from './builtins/switch-chain.js';
 import { caseLayoutPlugin } from './builtins/case-layout.js';
 import { jumpTableCasePlugin } from './builtins/jump-table-case.js';
 import { declOrderFixPlugin } from './builtins/decl-order-fix.js';
@@ -1195,6 +1196,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   caseLayoutPlugin,           // Control-flow: jump-table case groups ordered as the original's addresses show (priority 989)
   jumpTableCasePlugin,        // Matching: a jump table's last case the decompiler folded into the code after the switch (priority 989.5)
   switchChainPlugin,          // Control-flow: if-chain the original counts down by subtraction -> switch (priority 44)
+  switchChainLatePlugin,      // Control-flow: the same once more after arm-constant-call (priority 59.45)
   declOrderFixPlugin,         // Cleanup: reorder merged decls to respect initializer deps (priority 61)
   declScopeSinkPlugin,        // Cleanup: sink decls into single-use scope (priority 62)
   phiNodeTernaryPlugin,       // Cleanup: int x; if(c){x=a;}else{x=b;} → int x = c?a:b; (priority 63)

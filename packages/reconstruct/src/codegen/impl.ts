@@ -4215,6 +4215,7 @@ function transformDecompiledCode(
             console.warn(`[switch-chain] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.rule} ${e.cases} case(s) at line ${e.line}${e.why ? ` (${e.why})` : ''}`),
         } : {}),
       };
+      perPluginOptions['switch-chain-late'] = perPluginOptions['switch-chain'];
     }
 
     // A constant name several enums number differently is exported by none of

@@ -73,6 +73,8 @@ export interface SwitchChainOptions extends PluginOptions {
   noreturnFunctions?: string[];
   /** Called once per decision rewritten, and per decision on subtraction tests left. */
   onSite?: (e: { rule: 'switch' | 'left'; line: number; cases: number; why?: string }) => void;
+  /** Set by switchChainLatePlugin: only chains of two ifs or more whose cases keep their own code. */
+  late?: boolean;
 }
 
 const SUBTRACTS = new Set(['SUB', 'ADD', 'DEC', 'INC']);
@@ -404,6 +406,8 @@ interface Ctx {
   /** Test offset -> the offsets of its compare run (compareRuns). */
   compares: Map<number, readonly number[]>;
   n: number;
+  /** The run after arm-constant-call (switchChainLatePlugin). */
+  late: boolean;
 }
 
 /** A test of the decision: its if, the parsed test and the instructions behind it. */
@@ -414,6 +418,8 @@ interface Node {
   ev: EqualityTest[];
   /** Per operand, the compared constant, unsigned at the instruction's size. */
   k: bigint[];
+  /** Tied by its own condition's lines: an if a pass split off a decompiled `&&`. */
+  split?: boolean;
 }
 
 /**
@@ -443,7 +449,9 @@ class Decision {
     if (!t || !same(t.v, this.v)) return 'other';
     const known = this.nodes.get(ifs);
     if (known) return known;
-    const ev = this.ctx.reader.conditionTests(ifs);
+    const own = this.ctx.reader.conditionTests(ifs);
+    const split = !own;
+    const ev = own ?? this.ctx.reader.conditionTests(ifs, true);
     if (!ev) { this.why = this.why ?? 'no-evidence'; return null; }
     if (ev.length !== t.ops.length) { this.why = this.why ?? 'tokens'; return null; }
     const ks: bigint[] = [];
@@ -458,7 +466,7 @@ class Decision {
       ks.push(k);
     }
     if (new Set(ks).size !== ks.length) { this.why = this.why ?? 'value'; return null; }
-    const n: Node = { ifs, test: t, ev: [...ev], k: ks };
+    const n: Node = { ifs, test: t, ev: [...ev], k: ks, ...(split ? { split: true } : {}) };
     this.nodes.set(ifs, n);
     return n;
   }
@@ -576,6 +584,9 @@ function decisionAt(list: readonly Statement[], i: number, ctx: Ctx, inBlock = t
   const cmpSwitch = nodes.length >= 2 && nodes.every(n => n.ev.length === 1);
   const run = first.mnemonic === 'CMP' ? (cmpSwitch ? ctx.compares.get(first.at) : undefined) : ctx.runs.get(first.at);
   if (!run) return left('sum', nodes.length);
+  // A split-off test counts only in a run of subtractions: a compare run of such tests is the
+  // original's if-chain (QUESTLOG_ShowQuestDescription 004a27d0, `CMP CX,0xe8c; CMP CX,0xe8d`).
+  if (first.mnemonic === 'CMP' && nodes.some(n => n.split)) return left('split-compare', nodes.length);
   if (run.length !== ats.size || run.some(a => !ats.has(a))) return left('partial', nodes.length);
 
   // Where each value goes, and where each leaf's code goes after it.
@@ -623,6 +634,11 @@ function decisionAt(list: readonly Statement[], i: number, ctx: Ctx, inBlock = t
   const intoEnd = [...nextOf.values()].filter(x => x === null).length;
   const endGroup = fallOut.length > 0 && !fallOut.includes(null);
   const moveTail = endGroup && inBlock && intoEnd <= 1;
+  // After arm-constant-call only a chain of ifs whose cases keep their own code is taken:
+  // one `if (v != A && v != B)`, or a guard whose exit leads into the rest of the block, was
+  // left by the first run for a reason the later passes do not change
+  // (QUESTLOG_ShowQuestDescription 004a27d0 matches as the guard).
+  if (ctx.late && (moveTail || nodes.length < 2)) return left('late-shape', nodes.length);
   const tail = moveTail ? (list.slice(end) as Statement[]) : [];
   const labelFor = (val: bigint | null): Expression | null => {
     if (val === null) return null;
@@ -794,6 +810,7 @@ function rewriteFunction(fn: FunctionDecl, ev: BranchLayoutEvidence, opts: Switc
     enums: new Set(opts.enumConstants ?? []),
     noreturn: new Set([...DEFAULT_NORETURN_FUNCTIONS, ...(opts.noreturnFunctions ?? [])]),
     onSite: opts.onSite,
+    late: !!opts.late,
     split: splitLines(fn.body),
     runs: countdownRuns(ev.tests),
     compares: compareRuns(ev.tests),
@@ -849,4 +866,21 @@ export const switchChainPlugin: TransformPlugin = {
   priority: 44,
   tags: ['control-flow', 'layout'],
   createTransformer: createSwitchChainTransformer,
+};
+
+/**
+ * The same rule once more after arm-constant-call (59.4). A switch whose cases each end in
+ * their own copy of a call VC8 cross-jumped (`push 0x5a; jmp L` / `push 0x5b` into one CALL)
+ * prints as one call after the if-chain, which joins two leaves and is refused at 44;
+ * arm-constant-call writes the call back into each arm. Taken here only as a chain of two
+ * ifs or more whose cases keep their own code (`late`). AITHINK_Fn1_ClawViper 005f1b60 and
+ * AITHINK_Fn1_ClawViperEx 005f1de0 match with both of their `aip[5]` tests as switches.
+ */
+export const switchChainLatePlugin: TransformPlugin = {
+  ...switchChainPlugin,
+  id: 'switch-chain-late',
+  name: 'Switch Chain (late)',
+  // After arm-constant-call (59.4), before nest-call (59.5).
+  priority: 59.45,
+  createTransformer: (options: SwitchChainOptions = {}) => createSwitchChainTransformer({ ...options, late: true }),
 };
