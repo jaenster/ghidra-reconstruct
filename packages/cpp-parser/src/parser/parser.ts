@@ -1104,6 +1104,10 @@ export class Parser {
       }
       while (this.match(TokenKind.Comma)) {
         const loc = this.currentLocation();
+        if (this.check(TokenKind.LeftParen) && this.looksLikePointerToArrayDecl()) {
+          this.extraDecls.push(this.parsePointerToArrayDecl(loc, specifiers, base, false));
+          continue;
+        }
         const paren = this.check(TokenKind.LeftParen) && this.looksLikeParenDeclarator(true)
           ? this.parseParenDeclarator(base, true) : null;
         const t = paren ? paren.type : this.parseTypeSuffixes(base);
@@ -2928,7 +2932,8 @@ export class Parser {
   private parsePointerToArrayDecl(
     startLoc: SourceLocation,
     specifiers: VariableSpecifier[],
-    baseType: TypeNode
+    baseType: TypeNode,
+    expectSemicolon = true
   ): VariableDecl {
     this.expect(TokenKind.LeftParen);
     this.expect(TokenKind.Star);
@@ -2957,7 +2962,7 @@ export class Parser {
       }
     }
 
-    this.expect(TokenKind.Semicolon);
+    if (expectSemicolon) this.expect(TokenKind.Semicolon);
 
     return this.node(NodeKind.VariableDecl, startLoc, {
       name,
