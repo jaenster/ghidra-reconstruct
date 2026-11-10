@@ -253,6 +253,7 @@ describe('reused-param-slot: mixed integer views of a reused pointer slot', () =
         UseDifficulty((Difficulty)psVar2);
       }
       UseUnsigned((uint32_t)nParam);
+      UseNested((uint32_t)(int)nParam);
       UseOffset((intptr_t)nParam);
     }`, V);
     assert.match(out, /uint32_t nParam2;/);
@@ -261,6 +262,7 @@ describe('reused-param-slot: mixed integer views of a reused pointer slot', () =
     assert.match(out, /nParam2 = \(uint32_t\)byDifficultyIdx;/);
     assert.match(out, /aLevel\[\(int\)nParam2\]/);
     assert.match(out, /UseUnsigned\(nParam2\)/);
+    assert.match(out, /UseNested\(\(uint32_t\)\(int\)nParam2\)/);
     assert.match(out, /UseOffset\(\(intptr_t\)nParam2\)/);
     assert.doesNotMatch(out, /nParam = \(short int\*\)/);
   });
@@ -282,6 +284,16 @@ describe('reused-param-slot: mixed integer views of a reused pointer slot', () =
       nParam = (short *)(uint32_t)next;
       UseLevel((int)nParam);
       UseOther((Other *)nParam);
+    }`;
+    assert.strictEqual(run(src, V).replace(/\s+/g, ' '), run(src, {}).replace(/\s+/g, ' '));
+  });
+
+  it('refuses a pointer cast around an integer cast of the second lifetime', () => {
+    const src = `void f(short *nParam, int next) {
+      UseRegion(nParam);
+      nParam = (short *)(int)next;
+      UseLevel((uint32_t)nParam);
+      UseOther((Other *)(int)nParam);
     }`;
     assert.strictEqual(run(src, V).replace(/\s+/g, ' '), run(src, {}).replace(/\s+/g, ' '));
   });
