@@ -508,12 +508,13 @@ describe('nestCallPlugin', () => {
             { name: 'pStats', offset: 4, size: 4, type: 'Stats *' },
             { name: 'tSeed', offset: 8, size: 8, type: 'Seed' },
             { name: 'pMix', offset: 16, size: 4, type: 'Mix *' },
+            { name: 'wszName', offset: 20, size: 16, type: 'ushort[8]' },
           ],
           Seed: [{ name: 'nLow', offset: 0, size: 4, type: 'uint' }, { name: 'nHigh', offset: 4, size: 4, type: 'uint' }],
           Stats: [{ name: 'nLevel', offset: 0, size: 2, type: 'short' }, { name: 'nFlee', offset: 2, size: 2, type: 'short' }],
           Mix: [{ name: 'a', offset: 0, size: 4, type: 'int' }, { name: 'b', offset: 0, size: 4, type: 'Seed *' }],
         },
-        sizes: { Unit: 20, Seed: 8, Stats: 4, Mix: 4 },
+        sizes: { Unit: 36, Seed: 8, Stats: 4, Mix: 4 },
         unions: ['Mix'],
       };
       /** The quest fixture with `arg` as the last argument and `pre` lines above the inner call. */
@@ -549,6 +550,18 @@ describe('nestCallPlugin', () => {
         assert.deepStrictEqual(typed({ GetGamePointer: { params: [0], paramRegions: { 0: ['Unit.pStats'] } } }, 'pUnit->nId').sites, [1]);
         assert.deepStrictEqual(typed({ GetGamePointer: { params: [0], paramRegions: { 0: ['Unit.nId'] } } }, 'pUnit->nId').sites, []);
         assert.deepStrictEqual(typed({ GetGamePointer: { params: [0] } }, 'pUnit->nId').sites, []);
+      });
+
+      // TXT_AllocTxt_levels 0061c540: `WSTRING_PutWideCharIntoBuffer(&pTxt[i].wszLevelWarp[0],
+      // STRTABLE_GetStringByKey(..), n)`; the original pushes n before the inner call.
+      it('takes an array member as its address, which no call can change', () => {
+        const any = { GetGamePointer: { memory: true as const } };
+        const { out, sites } = typed(any, '(int)pUnit->wszName');
+        assert.deepStrictEqual(sites, [1]);
+        assert.ok(out.includes('r = HasQuestItem(GetGamePointer(pUnit), pUnit, (int)pUnit->wszName);'), out);
+        // An element of it is a read of memory the call may write.
+        assert.deepStrictEqual(typed(any, 'pUnit->wszName[0]').sites, []);
+        assert.deepStrictEqual(typed(any, 'pUnit->wszName', [], { aggregates: undefined }).sites, []);
       });
 
       it('leaves an untyped write, an untyped read, or no aggregates', () => {
