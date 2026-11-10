@@ -406,7 +406,7 @@ export function shiftedFactsReader(client: GhidraConnection): ShiftedFacts {
   let read: Promise<Map<string, ShiftedPointerFact>> | undefined;
   return () => (read ??= (async () => {
     const r = await client.sendCommand<{ success?: boolean; output?: string; error?: string }>(
-      'execute_script', { language: 'java', code: SHIFTED_POINTER_SCRIPT, scriptTimeout: 300, _commandTimeout: 360000 },
+      'execute_script', { language: 'java', readOnly: true, code: SHIFTED_POINTER_SCRIPT, scriptTimeout: 300, _commandTimeout: 360000 },
     );
     if (r.success === false || typeof r.output !== 'string') throw new Error(`shifted pointers not read: ${r.error ?? 'no output'}`);
     return parseShiftedPointers(r.output);
@@ -472,7 +472,7 @@ type ExtractedGlobalRow = Awaited<ReturnType<typeof extractGlobals>>['globals'][
 /** `execute_script` on the worker, Java, returning its printed output. */
 async function javaScript(client: GhidraConnection, code: string, timeoutSec = 120): Promise<string> {
   const r = await client.sendCommand<{ success?: boolean; output?: string; error?: string }>(
-    'execute_script', { language: 'java', code, scriptTimeout: timeoutSec, _commandTimeout: (timeoutSec + 60) * 1000 },
+    'execute_script', { language: 'java', readOnly: true, code, scriptTimeout: timeoutSec, _commandTimeout: (timeoutSec + 60) * 1000 },
   );
   if (r.success === false || typeof r.output !== 'string') throw new Error(r.error ?? 'no output');
   return r.output;

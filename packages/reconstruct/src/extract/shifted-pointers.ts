@@ -88,7 +88,7 @@ export async function attachShiftedPointers(connection: GhidraConnection, dataTy
   try {
     const result = await connection.sendCommand<{ success?: boolean; output?: string; error?: string }>(
       'execute_script',
-      { language: 'java', code: SHIFTED_POINTER_SCRIPT, scriptTimeout: 300, _commandTimeout: 360000 }
+      { language: 'java', readOnly: true, code: SHIFTED_POINTER_SCRIPT, scriptTimeout: 300, _commandTimeout: 360000 }
     );
     if (result.success === false || typeof result.output !== 'string') {
       console.warn(`  shifted pointers unavailable: ${result.error ?? 'no output'}`);
