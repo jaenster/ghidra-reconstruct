@@ -25,6 +25,8 @@
  *                        next store to V, and the store goes; `*V` of a stored `&X` is X.
  *                        V's declaration goes once nothing names V. A compound store
  *                        `V op= K` right after the store is part of the value (E op K).
+ *                        A use that copies V back into the place its value came from
+ *                        (`S = X; ... X = S;`) stores nothing once folded and goes.
  *                        Refused when V's address is taken or a store in between writes a
  *                        name the value reads.
  *   cache(E,N,T[,@A])    a new local `T N = E;` before the statement storing A, or the
@@ -550,6 +552,7 @@ function doFold(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'fold' }>): void {
       // Nothing after the range may read this value: the range ends at a store or at the
       // block's end, and the block must not be followed by a read in an outer block.
       if (end === b.statements.length && blockReadsAfter(fn, b, v, i, true)) refuse(`${v} is read after its block`);
+      const backCopies = copiesBack(uses.slice(0, lastUse + 1), v, value);
       for (const n of uses.slice(0, lastUse + 1)) {
         for (const { node, slot } of [...walk(n)]) {
           if (!slot) continue;
@@ -561,6 +564,7 @@ function doFold(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'fold' }>): void {
         }
         for (const { node, slot } of [...walk(n)]) if (slot && isId(node, v)) put(slot, cloneNode(value));
       }
+      removeStatements(fn, backCopies);
       b.statements.splice(i, 1 + absorbed);
       i--;
       folded++;
@@ -569,6 +573,36 @@ function doFold(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'fold' }>): void {
   if (folded === 0) refuse(`no store to ${v}`);
   // The bare declaration goes once nothing names v.
   if (!mentionsOutsideDecl(fn, v)) removeDecl(fn, v);
+}
+
+/**
+ * The statements among `uses` that store V back into the place its value `value` was read
+ * from, `X = V;` for a value X: once V is written into them they read `X = X;`, a store of
+ * nothing. Only where X is an lvalue with no call and no store of its own in it, so the
+ * statement has no effect to keep; and only a statement in a block, which can go.
+ */
+function copiesBack(uses: Statement[], v: string, value: Expression): Set<ASTNode> {
+  const out = new Set<ASTNode>();
+  const x = unparen(value);
+  if (hasCall(x) || storedNames(x).size > 0) return out;
+  if (x.kind !== NodeKind.Identifier && x.kind !== NodeKind.MemberExpr && x.kind !== NodeKind.SubscriptExpr) return out;
+  const xt = text(x);
+  for (const n of uses) {
+    for (const { node, slot } of walk(n)) {
+      if (node.kind !== NodeKind.ExprStmt || (slot && !Array.isArray(slot.parent))) continue;
+      const s = storeOf(node as Statement);
+      if (s && s.operator === '=' && isId(unparen(s.right), v) && text(unparen(s.left)) === xt) out.add(node);
+    }
+  }
+  return out;
+}
+
+/** Take each of `gone` out of the block that holds it. */
+function removeStatements(fn: FunctionDecl, gone: Set<ASTNode>): void {
+  if (gone.size === 0) return;
+  for (const b of blocks(fn)) {
+    for (let k = b.statements.length - 1; k >= 0; k--) if (gone.has(b.statements[k])) b.statements.splice(k, 1);
+  }
 }
 
 function parentsOf(fn: FunctionDecl): Map<ASTNode, ASTNode> {

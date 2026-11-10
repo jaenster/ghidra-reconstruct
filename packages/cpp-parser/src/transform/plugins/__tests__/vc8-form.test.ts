@@ -141,6 +141,60 @@ describe('vc8-form: fold', () => {
     assert.ok(sites[0].applied, sites[0].why);
     assert.strictEqual(out, 'void f(A* a, uint32_t n, int b) { if (b) { a->g->d |= n; return; } a->g->d &= ~n; }');
   });
+  // PETS_RecalculateAllPetLimits 00575900: the copy put back into the unit it was taken
+  // from stores nothing once folded, at any depth, and goes instead of reading `pUnit = pUnit`.
+  it('drops a copy back into the place the value came from', () => {
+    const { out, sites } = run([
+      'void f(Unit* pUnit, int b) {',
+      '  Unit* pSaved;',
+      '  pSaved = pUnit;',
+      '  g(pSaved);',
+      '  if (b) {',
+      '    h(pSaved);',
+      '    pUnit = pSaved;',
+      '  }',
+      '  pSaved = pUnit;',
+      '  pUnit = pSaved;',
+      '}',
+    ], 'fold(pSaved)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.strictEqual(out, 'void f(Unit* pUnit, int b) { g(pUnit); if (b) { h(pUnit); } }');
+  });
+  // NET_D2GS_CLIENT_Incoming0xAA 0045efa0: a member value copied back is dropped the same way.
+  it('drops a member copied back', () => {
+    const { out, sites } = run([
+      'void f(S* p) {',
+      '  int t = p->n;',
+      '  g(t);',
+      '  p->n = t;',
+      '}',
+    ], 'fold(t)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.strictEqual(out, 'void f(S* p) { g(p->n); }');
+  });
+  it('keeps a copy back whose place is computed by a call', () => {
+    const { out, sites } = run([
+      'void f(S* p) {',
+      '  int t = q()->n;',
+      '  g(t);',
+      '  q()->n = t;',
+      '}',
+    ], 'fold(t)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.strictEqual(out, 'void f(S* p) { g(q()->n); q()->n = q()->n; }');
+  });
+  it('keeps a store of the value into another place', () => {
+    const { out, sites } = run([
+      'void f(Unit* pUnit, Unit* pOther) {',
+      '  Unit* pSaved = pUnit;',
+      '  g(pSaved);',
+      '  pOther = pSaved;',
+      '  h(pOther);',
+      '}',
+    ], 'fold(pSaved)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.strictEqual(out, 'void f(Unit* pUnit, Unit* pOther) { g(pUnit); pOther = pUnit; h(pOther); }');
+  });
   it('refuses when a name the value reads changes before the use', () => {
     const { sites } = run(['void f(int b) {', '  int t = b;', '  b = 2;', '  g(t);', '}'], 'fold(t)');
     assert.strictEqual(sites[0].applied, false);
