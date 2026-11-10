@@ -4103,6 +4103,7 @@ function transformDecompiledCode(
     if (layout?.tests) {
       perPluginOptions['switch-chain'] = {
         branchLayout: layout,
+        ...(layout.pushes ? { armCall: perPluginOptions['arm-constant-call'] } : {}),
         enumConstants,
         // A switch needs an integral or enum operand: the operand's declared type decides.
         varTypes: { ...(context?.funcPtrArgCasts?.globalTypes ?? {}), ...enclosingVarTypes },

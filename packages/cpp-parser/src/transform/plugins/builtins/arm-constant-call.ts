@@ -69,6 +69,10 @@ export interface ArmConstantCallOptions extends PluginOptions {
   enumValues?: Record<string, number>;
   /** Names that are globals or functions: their address is a constant. */
   globalNames?: string[];
+  /** Early switch-chain use: only arms whose test is a subtraction in the original. */
+  testedArmsOnly?: boolean;
+  /** The exact if node rewritten, for a caller that admits only selected early rewrites. */
+  onRewrittenArm?: (node: IfStmt) => void;
   onSite?: (e: { line: number; locals: string[]; arms: number; statements: number }) => void;
 }
 
@@ -352,6 +356,8 @@ function rewriteFunction(fn: FunctionDecl, opts: ArmConstantCallOptions): Functi
       const s = block.statements[b];
       for (const k of getChildren(s)) visitAll(k);
       if (s.kind !== NodeKind.IfStmt) continue;
+      if (opts.testedArmsOnly && !(ev.tests?.get(placedLine(s) ?? -1) ?? [])
+        .some(t => ['SUB', 'ADD', 'DEC', 'INC'].includes(t.mnemonic))) continue;
       const arms = armsOf(s as IfStmt);
       if (!arms || arms.some(a => a.kind !== NodeKind.CompoundStmt)) continue;
       const falling = arms.filter(a => !leaves(a)) as CompoundStmt[];
@@ -481,6 +487,7 @@ function rewriteFunction(fn: FunctionDecl, opts: ArmConstantCallOptions): Functi
         }
       }
       changed++;
+      opts.onRewrittenArm?.(s as IfStmt);
       opts.onSite?.({ line: placedLine(s) ?? 0, locals: taken, arms: falling.length, statements: join.length });
     }
   };
@@ -489,7 +496,7 @@ function rewriteFunction(fn: FunctionDecl, opts: ArmConstantCallOptions): Functi
     for (const k of getChildren(n)) visitAll(k);
   };
   visitAll(body);
-  changed += splitTruthArguments(body, ev, opts);
+  if (!opts.testedArmsOnly) changed += splitTruthArguments(body, ev, opts);
   if (!changed) return undefined;
   return updateNode(fn, { body } as Partial<FunctionDecl>);
 }

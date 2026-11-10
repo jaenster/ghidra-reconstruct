@@ -53,10 +53,13 @@ import { DEFAULT_NORETURN_FUNCTIONS } from './goto-cleanup/types.js';
 import { holdsFreeCase, freeJumps } from './goto-cleanup/paths.js';
 import { leaves } from './assert-order.js';
 import { LayoutReader, type BranchLayoutEvidence, type EqualityTest } from './branch-layout/evidence.js';
+import { armConstantCallPlugin, type ArmConstantCallOptions } from './arm-constant-call.js';
 
 export interface SwitchChainOptions extends PluginOptions {
   /** The original's addresses and equality-test instructions; absent: nothing changes. */
   branchLayout?: BranchLayoutEvidence | null;
+  /** Split a shared arm call before testing whether it belongs inside a switch. */
+  armCall?: ArmConstantCallOptions;
   /** Enumerator names: the only identifiers a case label may be. */
   enumConstants?: string[];
   /** Declared types of parameters and globals by name (locals are read off the body). */
@@ -332,7 +335,7 @@ function freeBreakOrCase(stmts: Statement[]): boolean {
 }
 
 const INTEGRAL = new Set([
-  'char', 'signed char', 'unsigned char', 'short', 'unsigned short', 'int', 'unsigned int', 'unsigned',
+  'char', 'signed char', 'unsigned char', 'short', 'short int', 'unsigned short', 'int', 'unsigned int', 'unsigned',
   'long', 'unsigned long', 'long long', 'unsigned long long', 'bool', 'wchar_t',
   'int8_t', 'int16_t', 'int32_t', 'int64_t', 'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t',
   'byte', 'uchar', 'ushort', 'uint', 'ulong', 'sbyte', 'word', 'dword', 'qword',
@@ -394,6 +397,7 @@ interface Ctx {
   enums: ReadonlySet<string>;
   noreturn: ReadonlySet<string>;
   onSite?: SwitchChainOptions['onSite'];
+  switched: Set<number>;
   /** If lines under a relational test, with the variables tested (splitLines). */
   split: Map<number, Set<string>>;
   /** Test offset -> the offsets of its countdown run (countdownRuns). */
@@ -676,6 +680,8 @@ function decisionAt(list: readonly Statement[], i: number, ctx: Ctx, inBlock = t
     leadingTrivia: head.leadingTrivia ?? [],
     trailingTrivia: head.trailingTrivia ?? [],
   } as SwitchStmt;
+  const headId = (head as ASTNode & { __switchArmHeadId?: number }).__switchArmHeadId;
+  if (headId !== undefined) ctx.switched.add(headId);
   ctx.onSite?.({ rule: 'switch', line, cases: values.length });
   ctx.n++;
   return { replace: sw, end: moveTail ? list.length : end };
@@ -755,6 +761,33 @@ function rewriteList(list: readonly Statement[], ctx: Ctx): Statement[] | null {
 
 function rewriteFunction(fn: FunctionDecl, ev: BranchLayoutEvidence, opts: SwitchChainOptions): FunctionDecl | undefined {
   if (!fn.body || !ev.tests || ev.tests.size === 0) return undefined;
+  const original = fn;
+  let nextId = 0;
+  const earlyIds: number[] = [];
+  const earlySites: { line: number; locals: string[]; arms: number; statements: number }[] = [];
+  const source = opts.armCall
+    ? armConstantCallPlugin.createTransformer({ ...opts.armCall, testedArmsOnly: true,
+      onSite: e => earlySites.push(e), onRewrittenArm: n => {
+        const id = ++nextId;
+        (n as IfStmt & { __switchArmSiteId?: number }).__switchArmSiteId = id;
+        earlyIds.push(id);
+      } })(fn) as FunctionDecl
+    : fn;
+  fn = source;
+  const parentHead = new Map<number, number>();
+  const visitParents = (node: ASTNode, parent: IfStmt | null): void => {
+    if (node.kind === NodeKind.IfStmt) {
+      const siteId = (node as IfStmt & { __switchArmSiteId?: number }).__switchArmSiteId;
+      if (siteId !== undefined && parent) {
+        const marked = parent as IfStmt & { __switchArmHeadId?: number };
+        marked.__switchArmHeadId ??= ++nextId;
+        parentHead.set(siteId, marked.__switchArmHeadId);
+      }
+      parent = node as IfStmt;
+    }
+    for (const child of getChildren(node)) visitParents(child, parent);
+  };
+  if (fn.body) visitParents(fn.body, null);
   const locals = localTypes(fn.body);
   const enums = new Set(opts.enumTypes ?? []);
   for (const p of fn.parameters ?? []) {
@@ -785,12 +818,14 @@ function rewriteFunction(fn: FunctionDecl, ev: BranchLayoutEvidence, opts: Switc
     }
     return undefined;
   };
+  const reports: Parameters<NonNullable<SwitchChainOptions['onSite']>>[0][] = [];
   const ctx: Ctx = {
     integral: v => integralType(typeOf(v), opts, enums),
     reader: new LayoutReader(ev, fn.body),
     enums: new Set(opts.enumConstants ?? []),
     noreturn: new Set([...DEFAULT_NORETURN_FUNCTIONS, ...(opts.noreturnFunctions ?? [])]),
-    onSite: opts.onSite,
+    onSite: e => reports.push(e),
+    switched: new Set(),
     split: splitLines(fn.body),
     runs: countdownRuns(ev.tests),
     compares: compareRuns(ev.tests),
@@ -817,6 +852,17 @@ function rewriteFunction(fn: FunctionDecl, ev: BranchLayoutEvidence, opts: Switc
     },
   });
   const body = t(fn.body) as CompoundStmt;
+  if (earlySites.length) {
+    if (!ctx.n || earlyIds.some(id => !ctx.switched.has(parentHead.get(id) ?? -1))) {
+      return rewriteFunction(original, ev, { ...opts, armCall: undefined });
+    }
+    for (const e of earlySites) opts.armCall?.onSite?.(e);
+  }
+  for (const node of traverseAST(body)) {
+    delete (node as ASTNode & { __switchArmSiteId?: number }).__switchArmSiteId;
+    delete (node as ASTNode & { __switchArmHeadId?: number }).__switchArmHeadId;
+  }
+  for (const e of reports) opts.onSite?.(e);
   return ctx.n ? updateNode(fn, { body } as Partial<FunctionDecl>) : undefined;
 }
 
