@@ -230,6 +230,10 @@
  *                        outside any loop, the address of a local named nowhere before that
  *                        store - a loop copying within one buffer (Fog's D2Net 0040b0c0
  *                        smears zeros forward) is no memcpy.
+ *   dec(V,K)             before the first condition that reads `V - K`, write `V -= K;`
+ *                        and use V at every subsequent `V - K` read. V must be one
+ *                        unaliased 32-bit integer local, have at least two such reads,
+ *                        and have no other read or store after the new decrement.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -285,7 +289,8 @@ export type Vc8Form =
   | { op: 'retvar'; cond: string; name: string; index: number }
   | { op: 'onecall'; cond: string; name: string; index: number }
   | { op: 'roundup'; name: string; param?: string }
-  | { op: 'swmerge'; name: string; index: number };
+  | { op: 'swmerge'; name: string; index: number }
+  | { op: 'dec'; name: string; amount: number };
 
 /**
  * A header inline that reads one field of a struct through a pointer, or returns a
@@ -327,7 +332,7 @@ export interface Vc8FormOptions {
 
 const OPS = new Set(['seq', 'fold', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'width', 'boolflag', 'retwiden', 'arms',
   'nest', 'merge-tail', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
-  'nestcall', 'fill', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge']);
+  'nestcall', 'fill', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'dec']);
 
 /** Split at the commas outside brackets, parentheses, angle-free. */
 function splitArgs(s: string): string[] {
@@ -463,6 +468,11 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
     case 'ifsel': return args.length === 1 && !anchor ? { op: 'ifsel', name: args[0] } : undefined;
     case 'decl': return args.length === 2 && !anchor ? { op: 'decl', name: args[0], before: args[1] } : undefined;
     case 'split': return args.length === 3 && !anchor ? { op: 'split', name: args[0], type: args[1], rename: args[2] } : undefined;
+    case 'dec': {
+      if (args.length !== 2 || anchor || !/^[A-Za-z_]\w*$/.test(args[0]) || !/^[1-9]\d*$/.test(args[1])) return undefined;
+      const amount = Number(args[1]);
+      return Number.isSafeInteger(amount) && amount <= 0x7fffffff ? { op: 'dec', name: args[0], amount } : undefined;
+    }
   }
   return undefined;
 }
@@ -3243,6 +3253,71 @@ function doSwmerge(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'swmerge' }>): vo
   b.statements[k] = sw[0];
 }
 
+function doDec(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'dec' }>): void {
+  if (fn.parameters.some(p => isId((p as unknown as { name?: Identifier }).name, f.name))) refuse(`${f.name} is a parameter`);
+  const decls = [...walk(fn.body!)].filter(({ node }) => node.kind === NodeKind.VariableDecl && (node as VariableDecl).name.name === f.name);
+  if (decls.length !== 1) refuse(`${f.name} is not one local`);
+  const type = norm(emit((decls[0]!.node as VariableDecl).type as never));
+  if (!new Set(['int', 'signedint', 'unsignedint', 'int32_t', 'uint32_t']).has(type)) refuse(`${f.name} is not a 32-bit integer local`);
+  if (addressTaken(fn, f.name)) refuse(`&${f.name} is taken`);
+  if ([...walk(fn.body!)].some(({ node }) => node.kind === NodeKind.GotoStmt || node.kind === NodeKind.LabelStmt)) refuse('unstructured jump');
+
+  const match = (node: ASTNode): node is BinaryExpr => {
+    if (node.kind !== NodeKind.BinaryExpr || (node as BinaryExpr).operator !== '-') return false;
+    const e = node as BinaryExpr, k = litValue(e.right);
+    return isId(unparen(e.left), f.name) && k?.v === BigInt(f.amount) && k.suffix === '';
+  };
+  const hits = [...walk(fn.body!)].filter(({ node }) => match(node)).map(({ node }) => node as BinaryExpr);
+  if (hits.length < 2) refuse(`fewer than two ${f.name} - ${f.amount} reads`);
+  const parents = parentsOf(fn);
+  for (const hit of hits) {
+    for (let p = parents.get(hit); p; p = parents.get(p)) {
+      if ([NodeKind.WhileStmt, NodeKind.ForStmt, NodeKind.DoWhileStmt, NodeKind.SizeofExpr].includes(p.kind)) refuse('read in a loop or unevaluated expression');
+    }
+  }
+
+  // Pick the innermost block whose suffix contains every matching read. Its first
+  // affected statement must evaluate the difference in a pure first value test.
+  let chosen: { block: CompoundStmt; index: number; condition: Expression } | undefined;
+  for (const block of blocks(fn)) {
+    for (let index = 0; index < block.statements.length; index++) {
+      const stmt = block.statements[index];
+      if (stmt.kind !== NodeKind.IfStmt) continue;
+      const condition = (stmt as IfStmt).condition;
+      if (![...walk(condition)].some(({ node }) => match(node))) continue;
+      const suffix = block.statements.slice(index);
+      const covered = suffix.flatMap(s => [...walk(s)].filter(({ node }) => match(node)).map(({ node }) => node));
+      if (covered.length !== hits.length || !hits.every(h => covered.includes(h))) continue;
+      if (blockReadsAfter(fn, block, f.name, index)) continue;
+      chosen = { block, index, condition };
+    }
+  }
+  if (!chosen) refuse(`no single block suffix holds every ${f.name} - ${f.amount} read`);
+  // Full codegen may merge a following guard into `V - K > 0 && call()`.
+  // The right arm runs after the left difference test, so it need not be pure.
+  let firstTest = unparen(chosen.condition);
+  while (firstTest.kind === NodeKind.BinaryExpr && ['&&', '||'].includes((firstTest as BinaryExpr).operator)) {
+    const left = unparen((firstTest as BinaryExpr).left);
+    if (![...walk(left)].some(({ node }) => match(node))) refuse('a short-circuit arm precedes the first read');
+    firstTest = left;
+  }
+  for (const { node } of walk(firstTest)) {
+    if (node.kind === NodeKind.CallExpr || node.kind === NodeKind.AssignExpr || node.kind === NodeKind.PostfixExpr ||
+        (node.kind === NodeKind.UnaryExpr && ['++', '--'].includes((node as UnaryExpr).operator))) refuse('first condition has side effects');
+  }
+  const suffix = chosen.block.statements.slice(chosen.index);
+  const allowed = new Set<Identifier>(hits.map(h => unparen(h.left) as Identifier));
+  for (const stmt of suffix) {
+    for (const { node } of walk(stmt)) if (isId(node, f.name) && !allowed.has(node)) refuse(`${f.name} is read or stored otherwise after the decrement`);
+  }
+
+  for (const stmt of suffix) {
+    for (const { node, slot } of walk(stmt)) if (match(node) && slot) put(slot, { kind: NodeKind.Identifier, name: f.name } as Identifier);
+  }
+  const parsed = parse(`void __vc8f() { ${f.name} -= ${f.amount}; }`).declarations[0] as FunctionDecl;
+  chosen.block.statements.splice(chosen.index, 0, parsed.body!.statements[0]);
+}
+
 const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op: K }>) => void } = {
   seq: doSeq, fold: doFold, cache: doCache, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
   retval: doRetval, width: doWidth, boolflag: doBoolflag, retwiden: doRetwiden, arms: doArms,
@@ -3250,7 +3325,7 @@ const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op
   cmp: doCmp, swap: doSwap, ifsel: doIfsel, split: doSplit, select: doSelect, decl: doDecl, unselect: doUnselect,
   tsel: doTsel, hoist: doHoist, nestcall: doNestcall, fill: doFill, copy: doCopy, shift: doShift, ptrwalk: doPtrwalk, rowptr: doRowptr,
   acc: doAcc,
-  retvar: doRetvar, onecall: doOnecall, roundup: doRoundup, swmerge: doSwmerge,
+  retvar: doRetvar, onecall: doOnecall, roundup: doRoundup, swmerge: doSwmerge, dec: doDec,
 };
 
 /**
