@@ -1,7 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import { transformGhidraCode } from '../../../index.js';
 import { memberCallPlugin, memberCalls } from '../builtins/member-call.js';
 import { baseClassAccessPlugin } from '../builtins/base-class-access.js';
@@ -220,12 +219,13 @@ describe('memberCalls', () => {
 
   it('ends the walk up the bases at a cycle', () => {
     // Run apart, so a walk that never ends fails the test instead of hanging the suite.
-    const src = fileURLToPath(new URL('../builtins/member-call.ts', import.meta.url));
+    const src = new URL('../builtins/member-call.ts', import.meta.url).href;
     const script = `import { memberCalls } from ${JSON.stringify(src)};
       const c = memberCalls({ bases: [['A', 'B'], ['B', 'A']] });
       console.log(JSON.stringify([c.needsQualifier('A', 'C', 'Fn'), c.needsQualifier('B', 'A', 'Fn')]));`;
     const r = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script], { encoding: 'utf8', timeout: 20000 });
     assert.strictEqual(r.signal, null, `the walk did not end: ${r.stderr}`);
+    assert.strictEqual(r.status, 0, r.stderr);
     assert.deepStrictEqual(JSON.parse(r.stdout), [true, false], r.stderr);
   });
 

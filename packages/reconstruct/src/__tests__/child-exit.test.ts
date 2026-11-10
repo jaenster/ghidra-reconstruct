@@ -14,7 +14,13 @@ describe('childExit', () => {
     assert.deepStrictEqual(childExit({ status: 0, signal: null }), { code: 0 });
   });
 
-  it('names the signal of a killed child and exits 128 + its number', () => {
+  it('names a reported SIGKILL and exits 128 + its number', () => {
+    const exit = childExit({ status: null, signal: 'SIGKILL' });
+    assert.strictEqual(exit.code, 137);
+    assert.match(exit.message!, /killed by SIGKILL.*OOM killer/);
+  });
+
+  it('reports a child actually killed by SIGKILL on POSIX', { skip: process.platform === 'win32' }, () => {
     let err: unknown;
     try {
       execFileSync(process.execPath, ['-e', 'process.kill(process.pid, "SIGKILL")'], { stdio: 'pipe' });
