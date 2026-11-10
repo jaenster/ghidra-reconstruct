@@ -20,12 +20,12 @@
 
 import { join } from 'node:path';
 import { writeFileSync, mkdirSync, renameSync } from 'node:fs';
-import { totalmem } from 'node:os';
 
 import { reconstruct } from '@ghidra-mcp/reconstruct';
 import { loadProjectConfig } from '@ghidra-mcp/reconstruct/config/index';
 import { configureCodegen } from '@ghidra-mcp/reconstruct/codegen-defaults';
 import { LIVE_EXTRACTION_OPTIONS } from './exclude-patterns.js';
+import { generationWorkers } from './generation-workers.js';
 
 
 async function main(): Promise<void> {
@@ -110,13 +110,6 @@ async function main(): Promise<void> {
   })}`);
 }
 
-/** As regen-local.sh sizes it: each shard holds the whole model, about 1.2 GB. */
-function generationWorkers(): number {
-  const forced = Number(process.env.D2_LIVE_GEN_WORKERS ?? '');
-  if (Number.isInteger(forced) && forced > 0) return forced;
-  const gb = Math.floor(totalmem() / 1024 ** 3);
-  return Math.max(1, Math.min(8, Math.floor(((gb - 4) * 10) / 15)));
-}
 
 function requireEnv(name: string): string {
   const value = process.env[name];
