@@ -67,6 +67,7 @@ import {
   type BuiltinType,
   type PointerType,
   type ReferenceType,
+  type RValueReferenceType,
   type ArrayType,
   type QualifiedType,
   type TemplateType,
@@ -874,7 +875,7 @@ export class Parser {
     // Pointer-to-function variable: R (CC *name)(params) [= init];
     if (this.check(TokenKind.LeftParen) && this.looksLikeParenDeclarator(true)) {
       const d = this.parseParenDeclarator(returnType, true);
-      return this.parseVariableDeclRest(startLoc, specifiers as VariableSpecifier[], d.type, d.name!);
+      return this.parseVariableDeclRest(startLoc, specifiers as VariableSpecifier[], d.type, d.name!, returnType);
     }
 
     // `T : 3;` - an unnamed bit-field (padding).
@@ -1079,7 +1080,8 @@ export class Parser {
     startLoc: SourceLocation,
     specifiers: VariableSpecifier[],
     type: TypeNode,
-    name: Identifier | QualifiedId
+    name: Identifier | QualifiedId,
+    sharedBase?: TypeNode
   ): VariableDecl {
     // Handle array suffix
     type = this.parseArrayDeclaratorSuffix(type, startLoc);
@@ -1092,14 +1094,20 @@ export class Parser {
 
     // `T a, *b, c[4];` - the later declarators share T but not the first one's `*` or `[]`.
     if (this.check(TokenKind.Comma)) {
-      let base: TypeNode = type;
-      while (base.kind === NodeKind.ArrayType || base.kind === NodeKind.PointerType) {
-        base = base.kind === NodeKind.ArrayType ? (base as ArrayType).elementType : (base as PointerType).pointee;
+      let base: TypeNode = sharedBase ?? type;
+      while (base.kind === NodeKind.ArrayType || base.kind === NodeKind.PointerType ||
+             base.kind === NodeKind.ReferenceType || base.kind === NodeKind.RValueReferenceType) {
+        base = base.kind === NodeKind.ArrayType ? (base as ArrayType).elementType
+          : base.kind === NodeKind.PointerType ? (base as PointerType).pointee
+          : base.kind === NodeKind.ReferenceType ? (base as ReferenceType).referenced
+          : (base as RValueReferenceType).referenced;
       }
       while (this.match(TokenKind.Comma)) {
         const loc = this.currentLocation();
-        const t = this.parseTypeSuffixes(base);
-        const n = this.parseIdentifier();
+        const paren = this.check(TokenKind.LeftParen) && this.looksLikeParenDeclarator(true)
+          ? this.parseParenDeclarator(base, true) : null;
+        const t = paren ? paren.type : this.parseTypeSuffixes(base);
+        const n = paren ? paren.name! : this.parseIdentifier();
         const full = this.parseArrayDeclaratorSuffix(t, loc);
         this.extraDecls.push(this.node(NodeKind.VariableDecl, loc, {
           name: n, type: full, initializer: this.parseOptionalInitializer(), specifiers, attributes: [],
