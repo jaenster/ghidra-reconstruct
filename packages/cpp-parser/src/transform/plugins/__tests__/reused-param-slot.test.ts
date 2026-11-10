@@ -229,3 +229,80 @@ describe('reused-param-slot: the second value typed by member reads, with consta
     assert.doesNotMatch(out, /nTarget/);
   });
 });
+
+describe('reused-param-slot: mixed integer views of a reused pointer slot', () => {
+  const V: ReusedParamSlotOptions = { stackParameters: ['nParam'] };
+
+  it('MONSTER_InitStats @00573cb0: keeps the incoming pointer and gives the later difficulty its own word local', () => {
+    const out = run(`void f(Game *pGame, short *nParam, Unit *pUnit) {
+      uint8_t byDifficultyIdx;
+      short *psVar2;
+      UseRegion((uint8_t *)nParam, pUnit);
+      byDifficultyIdx = pGame->nDifficulty;
+      if (byDifficultyIdx) {
+        if (1 < byDifficultyIdx) { nParam = (short *)0x2; goto difficulty; }
+        nParam = (short *)(uint32_t)byDifficultyIdx;
+        goto difficulty;
+      }
+      nParam = (short *)0x0;
+    difficulty:
+      if (GetMercType(pUnit)) nParam = (short *)0x0;
+      UseLevel(pUnit->aLevel[(int)nParam]);
+      if (nParam != (short *)0x0) {
+        psVar2 = nParam;
+        UseDifficulty((Difficulty)psVar2);
+      }
+      UseUnsigned((uint32_t)nParam);
+      UseOffset((intptr_t)nParam);
+    }`, V);
+    assert.match(out, /uint32_t nParam2;/);
+    assert.match(out, /UseRegion\(\(uint8_t\*\)nParam, pUnit\)/);
+    assert.match(out, /nParam2 = 0x2;/);
+    assert.match(out, /nParam2 = \(uint32_t\)byDifficultyIdx;/);
+    assert.match(out, /aLevel\[\(int\)nParam2\]/);
+    assert.match(out, /UseUnsigned\(nParam2\)/);
+    assert.match(out, /UseOffset\(\(intptr_t\)nParam2\)/);
+    assert.doesNotMatch(out, /nParam = \(short int\*\)/);
+  });
+
+  it('refuses a loop read reached by both the entry pointer and a later integer store', () => {
+    const src = `void f(short *nParam, uint32_t next) {
+      while (UseRegion((uint8_t *)nParam)) {
+        nParam = (short *)(uint32_t)next;
+      }
+      UseLevel((int)nParam);
+      UseUnsigned((uint32_t)nParam);
+    }`;
+    assert.strictEqual(run(src, V).replace(/\s+/g, ' '), run(src, {}).replace(/\s+/g, ' '));
+  });
+
+  it('refuses a second lifetime read through an unrelated pointer type', () => {
+    const src = `void f(short *nParam, uint32_t next) {
+      UseRegion(nParam);
+      nParam = (short *)(uint32_t)next;
+      UseLevel((int)nParam);
+      UseOther((Other *)nParam);
+    }`;
+    assert.strictEqual(run(src, V).replace(/\s+/g, ' '), run(src, {}).replace(/\s+/g, ' '));
+  });
+
+  it('refuses a wider integer view of the reused slot', () => {
+    const src = `void f(short *nParam, uint32_t next) {
+      UseRegion(nParam);
+      nParam = (short *)(uint32_t)next;
+      UseLevel((int)nParam);
+      UseWide((uint64_t)nParam);
+    }`;
+    assert.strictEqual(run(src, V).replace(/\s+/g, ' '), run(src, {}).replace(/\s+/g, ' '));
+  });
+
+  it('refuses a slot whose parameter address escapes', () => {
+    const src = `void f(short *nParam, uint32_t next) {
+      SaveAddress(&nParam);
+      nParam = (short *)(uint32_t)next;
+      UseLevel((int)nParam);
+      UseUnsigned((uint32_t)nParam);
+    }`;
+    assert.strictEqual(run(src, V).replace(/\s+/g, ' '), run(src, {}).replace(/\s+/g, ' '));
+  });
+});
