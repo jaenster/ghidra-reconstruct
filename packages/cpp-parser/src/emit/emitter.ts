@@ -2495,7 +2495,20 @@ export class CppEmitter {
         this.write(',');
         if (this.style.spaceAfterComma) this.write(' ');
       }
-      this.emitNode(node.expressions[i]);
+      const expression = node.expressions[i];
+      let inner = expression;
+      while (inner.kind === NodeKind.ParenExpr) inner = (inner as ParenExpr).expression;
+      // The comma operator associates left-to-right. A comma expression in a
+      // later slot is the right operand and needs grouping, especially when
+      // operator comma is overloaded. ParenExpr already preserves a CommaExpr
+      // wrapper, while a BinaryExpr comma wrapper can be transparent.
+      const commaOperator = inner.kind === NodeKind.CommaExpr ||
+        (inner.kind === NodeKind.BinaryExpr && ((inner as BinaryExpr).operator as string) === ',');
+      const preservedParen = expression.kind === NodeKind.ParenExpr && inner.kind === NodeKind.CommaExpr;
+      const groupRightComma = i > 0 && commaOperator && !preservedParen;
+      if (groupRightComma) this.write('(');
+      this.emitNode(expression);
+      if (groupRightComma) this.write(')');
     }
   }
 
