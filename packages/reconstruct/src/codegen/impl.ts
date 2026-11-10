@@ -3702,7 +3702,13 @@ function transformDecompiledCode(
             console.warn(`[branch-layout] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.rule} at line ${e.line}${e.why ? ` (${e.why})` : ''}`),
         } : {}),
       };
-      perPluginOptions['case-layout'] = { branchLayout: layout };
+      perPluginOptions['case-layout'] = {
+        branchLayout: layout,
+        ...(process.env.GHIDRA_BRANCH_LAYOUT_REPORT ? {
+          onSite: (e: { rule: string; line: number; groups?: number; why?: string }) =>
+            console.warn(`[case-layout] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.rule === 'order' ? `${e.groups ?? '?'} groups ordered` : `left: ${e.why}`} at line ${e.line}`),
+        } : {}),
+      };
       // Storm's parameter checks set ERROR_INVALID_PARAMETER through SErrSetLastError; where the
       // original evaluated them as one mask chain they go back into a check block.
       if ((enclosing?.ghidraNamespaceSegments ?? enclosing?.namespaceSegments)?.[0] === 'Storm') {
