@@ -3,6 +3,7 @@ import assert from 'node:assert';
 import { CppEmitter, emit, DEFAULT_STYLE, GOOGLE_STYLE, createStyle } from '../index.js';
 import { Type, Expr, Stmt, Decl } from '../../ast/factory.js';
 import { NodeKind } from '../../ast/kinds.js';
+import type { CompoundStmt, FunctionDecl, IfStmt, PpConditionalStmt, Statement } from '../../ast/nodes.js';
 import { parse } from '../../parser/index.js';
 
 describe('CppEmitter', () => {
@@ -359,6 +360,106 @@ describe('CppEmitter', () => {
         const result = emit(ifStmt);
         assert.ok(result.includes('{'));
         assert.ok(result.includes('}'));
+      });
+
+      function reparseOuterIf(stmt: IfStmt): { emitted: string; outer: IfStmt } {
+        const emitted = emit(stmt, createStyle({ alwaysUseBraces: false }));
+        const reparsed = parse(`void f(bool a, bool b, bool c) { ${emitted} }`);
+        const outer = (reparsed.declarations[0] as FunctionDecl).body!.statements[0] as IfStmt;
+        return { emitted, outer };
+      }
+
+      it('keeps an outer else from attaching to an unbraced inner if', () => {
+        const stmt = Stmt.if_(Expr.identifier('a'),
+          Stmt.if_(Expr.identifier('b'), Stmt.expr(Expr.call('F', []))),
+          Stmt.expr(Expr.call('G', [])));
+        const { emitted, outer } = reparseOuterIf(stmt);
+        assert.match(emitted, /if \(a\) \{/);
+        assert.strictEqual(outer.elseBranch?.kind, NodeKind.ExprStmt);
+        const inner = (outer.thenBranch as CompoundStmt).statements[0] as IfStmt;
+        assert.strictEqual(inner.elseBranch, null);
+      });
+
+      it('keeps the outer else through a nested else-if tail', () => {
+        const stmt = Stmt.if_(Expr.identifier('a'),
+          Stmt.if_(Expr.identifier('b'), Stmt.expr(Expr.call('F', [])),
+            Stmt.if_(Expr.identifier('c'), Stmt.expr(Expr.call('G', [])))),
+          Stmt.expr(Expr.call('H', [])));
+        const { emitted, outer } = reparseOuterIf(stmt);
+        assert.match(emitted, /if \(a\) \{/);
+        assert.match(emitted, /else if \(c\)/);
+        assert.strictEqual(outer.elseBranch?.kind, NodeKind.ExprStmt);
+        const inner = (outer.thenBranch as CompoundStmt).statements[0] as IfStmt;
+        assert.strictEqual((inner.elseBranch as IfStmt).elseBranch, null);
+      });
+
+      it('keeps the outer else through unbraced loop and label bodies', () => {
+        const innerIf = () => Stmt.if_(Expr.identifier('b'), Stmt.expr(Expr.call('F', [])));
+        const wrapped: Statement[] = [
+          Stmt.while_(Expr.identifier('c'), innerIf()),
+          Stmt.for_(null, Expr.identifier('c'), null, innerIf()),
+          Stmt.label('L', innerIf()),
+        ];
+        for (const thenBranch of wrapped) {
+          const { emitted, outer } = reparseOuterIf(Stmt.if_(Expr.identifier('a'), thenBranch,
+            Stmt.expr(Expr.call('G', []))));
+          assert.match(emitted, /if \(a\) \{/);
+          assert.strictEqual(outer.elseBranch?.kind, NodeKind.ExprStmt, emitted);
+        }
+      });
+
+      it('keeps the outer else through an unbraced switch case or default', () => {
+        for (const switchBody of [
+          'switch (c) case 1: if (b) F();',
+          'switch (c) default: if (b) F();',
+        ]) {
+          const source = parse(`void source(bool b, int c) { ${switchBody} }`);
+          const thenBranch = (source.declarations[0] as FunctionDecl).body!.statements[0];
+          const { emitted, outer } = reparseOuterIf(Stmt.if_(Expr.identifier('a'), thenBranch,
+            Stmt.expr(Expr.call('G', []))));
+          assert.match(emitted, /if \(a\) \{/);
+          assert.strictEqual(outer.elseBranch?.kind, NodeKind.ExprStmt, emitted);
+        }
+      });
+
+      it('leaves matched inner ifs and outer else-if chains unbraced', () => {
+        const matched = Stmt.if_(Expr.identifier('a'),
+          Stmt.if_(Expr.identifier('b'), Stmt.expr(Expr.call('F', [])), Stmt.expr(Expr.call('G', []))),
+          Stmt.expr(Expr.call('H', [])));
+        const first = reparseOuterIf(matched);
+        assert.doesNotMatch(first.emitted, /if \(a\) \{/);
+        assert.strictEqual(first.outer.elseBranch?.kind, NodeKind.ExprStmt);
+        assert.strictEqual((first.outer.thenBranch as IfStmt).elseBranch?.kind, NodeKind.ExprStmt);
+
+        const elseIf = Stmt.if_(Expr.identifier('a'), Stmt.expr(Expr.call('F', [])),
+          Stmt.if_(Expr.identifier('b'), Stmt.expr(Expr.call('G', [])), Stmt.expr(Expr.call('H', []))));
+        const second = reparseOuterIf(elseIf);
+        assert.match(second.emitted, /else if \(b\)/);
+        assert.strictEqual(second.outer.elseBranch?.kind, NodeKind.IfStmt);
+      });
+
+      it('does not brace a do-while body whose closing while protects the outer else', () => {
+        const stmt = Stmt.if_(Expr.identifier('a'),
+          Stmt.doWhile(Stmt.if_(Expr.identifier('b'), Stmt.expr(Expr.call('F', []))), Expr.identifier('c')),
+          Stmt.expr(Expr.call('G', [])));
+        const { emitted, outer } = reparseOuterIf(stmt);
+        assert.doesNotMatch(emitted, /if \(a\) \{/);
+        assert.strictEqual(outer.elseBranch?.kind, NodeKind.ExprStmt);
+      });
+
+      it('braces a preprocessor-selected then body before its outer else', () => {
+        const ppBody = {
+          kind: NodeKind.PpConditionalStmt,
+          condition: 'defined(USE_NATIVE)',
+          thenStatements: [Stmt.if_(Expr.identifier('b'), Stmt.expr(Expr.call('F', [])))],
+          elseStatements: [Stmt.expr(Expr.call('H', []))],
+          leadingTrivia: [],
+          trailingTrivia: [],
+        } as PpConditionalStmt;
+        const emitted = emit(Stmt.if_(Expr.identifier('a'), ppBody,
+          Stmt.expr(Expr.call('G', []))), createStyle({ alwaysUseBraces: false }));
+        assert.match(emitted, /if \(a\) \{/);
+        assert.match(emitted, /#endif\s*\} else\s+G\(\);/);
       });
     });
 

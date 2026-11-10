@@ -1971,7 +1971,10 @@ export class CppEmitter {
     if (this.style.spaceInsideParens) this.write(' ');
     this.write(')');
 
-    this.emitControlFlowBody(node.thenBranch);
+    // A following `else` binds to the nearest unmatched `if`, including one
+    // at the end of an unbraced loop or label body. Keep the AST's owner by
+    // bracing the then branch only when that branch could absorb this else.
+    this.emitControlFlowBody(node.thenBranch, !!node.elseBranch && this.canAbsorbElse(node.thenBranch));
 
     if (node.elseBranch) {
       if (this.style.braceStyle === 'stroustrup' || this.style.braceStyle === 'k&r') {
@@ -1991,8 +1994,37 @@ export class CppEmitter {
     }
   }
 
-  private emitControlFlowBody(stmt: Statement): void {
-    if (stmt.kind === NodeKind.CompoundStmt || this.style.alwaysUseBraces) {
+  private canAbsorbElse(stmt: Statement): boolean {
+    switch (stmt.kind) {
+      case NodeKind.IfStmt:
+        return !(stmt as IfStmt).elseBranch || this.canAbsorbElse((stmt as IfStmt).elseBranch!);
+      case NodeKind.WhileStmt:
+        return this.canAbsorbElse((stmt as WhileStmt).body);
+      case NodeKind.ForStmt:
+        return this.canAbsorbElse((stmt as ForStmt).body);
+      case NodeKind.ForRangeStmt:
+        return this.canAbsorbElse((stmt as ForRangeStmt).body);
+      case NodeKind.SwitchStmt:
+        return this.canAbsorbElse((stmt as SwitchStmt).body);
+      case NodeKind.CaseStmt:
+        return this.canAbsorbElse((stmt as CaseStmt).statement);
+      case NodeKind.DefaultStmt:
+        return this.canAbsorbElse((stmt as DefaultStmt).statement);
+      case NodeKind.LabelStmt:
+        return this.canAbsorbElse((stmt as LabelStmt).statement);
+      case NodeKind.PpConditionalStmt:
+        // Preprocessing can expose an unmatched if (or several statements)
+        // from either branch, so the emitted if body needs its own braces.
+        return true;
+      default:
+        // A compound statement and a do-while's closing `while` both stop a
+        // later `else` from reaching an if nested inside them.
+        return false;
+    }
+  }
+
+  private emitControlFlowBody(stmt: Statement, forceBraces = false): void {
+    if (stmt.kind === NodeKind.CompoundStmt || this.style.alwaysUseBraces || forceBraces) {
       this.write(' ');
       if (stmt.kind === NodeKind.CompoundStmt) {
         this.emitCompoundStmt(stmt as CompoundStmt);
