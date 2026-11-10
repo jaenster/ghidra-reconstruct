@@ -951,7 +951,7 @@ export async function attachThunkTargets(
   try {
     const result = await connection.sendCommand<{ success?: boolean; output?: string; error?: string }>(
       'execute_script',
-      { language: 'java', code: THUNK_TARGET_SCRIPT, scriptTimeout: 120, _commandTimeout: 180000 }
+      { language: 'java', readOnly: true, code: THUNK_TARGET_SCRIPT, scriptTimeout: 120, _commandTimeout: 180000 }
     );
     if (result.success === false || typeof result.output !== 'string') {
       console.warn(`  Thunk targets unavailable: ${result.error ?? 'no output'}`);
@@ -1031,7 +1031,7 @@ export async function attachCallSiteOverrides(
   try {
     const result = await connection.sendCommand<{ success?: boolean; output?: string; error?: string }>(
       'execute_script',
-      { language: 'java', code: CALL_OVERRIDE_SCRIPT, scriptTimeout: 120, _commandTimeout: 180000 }
+      { language: 'java', readOnly: true, code: CALL_OVERRIDE_SCRIPT, scriptTimeout: 120, _commandTimeout: 180000 }
     );
     if (result.success === false || typeof result.output !== 'string') {
       console.warn(`  Call-site overrides unavailable: ${result.error ?? 'no output'}`);

@@ -938,6 +938,7 @@ import { guardedCallRestorePlugin } from './builtins/guarded-call-restore.js';
 import { switchChainPlugin, switchChainLatePlugin } from './builtins/switch-chain.js';
 import { caseLayoutPlugin } from './builtins/case-layout.js';
 import { jumpTableCasePlugin } from './builtins/jump-table-case.js';
+import { narrowCompareWidenPlugin } from './builtins/narrow-compare-widen.js';
 import { declOrderFixPlugin } from './builtins/decl-order-fix.js';
 import { declScopeSinkPlugin } from './builtins/decl-scope-sink.js';
 import { phiNodeTernaryPlugin } from './builtins/phi-node-ternary.js';
@@ -1196,6 +1197,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   guardedCallRestorePlugin,   // Matching: a call where an inlined helper left its assertion and its value (priority 987.5)
   branchLayoutPlugin,         // Control-flow: if arms ordered as the original's addresses show (priority 988)
   caseLayoutPlugin,           // Control-flow: jump-table case groups ordered as the original's addresses show (priority 989)
+  narrowCompareWidenPlugin,   // Matching: a byte/word local the original compares in a whole register becomes 32-bit (priority 989.985)
   jumpTableCasePlugin,        // Matching: a jump table's last case the decompiler folded into the code after the switch (priority 989.5)
   switchChainPlugin,          // Control-flow: if-chain the original counts down by subtraction -> switch (priority 44)
   switchChainLatePlugin,      // Control-flow: the same once more after arm-constant-call (priority 59.45)

@@ -912,7 +912,7 @@ async function extractFresh(
 async function runScript(connection: GhidraConnection, code: string, timeoutSec: number): Promise<string> {
   const result = await connection.sendCommand<{ success?: boolean; output?: string; error?: string }>(
     'execute_script',
-    { language: 'java', code, scriptTimeout: timeoutSec, _commandTimeout: (timeoutSec + 60) * 1000 },
+    { language: 'java', readOnly: true, code, scriptTimeout: timeoutSec, _commandTimeout: (timeoutSec + 60) * 1000 },
   );
   if (result.success === false || typeof result.output !== 'string') throw new Error(result.error ?? 'no output');
   return result.output;

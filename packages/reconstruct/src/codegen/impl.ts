@@ -3814,6 +3814,11 @@ function transformDecompiledCode(
     // `rotated-for-loop` keeps the rotated form of a loop whose computed bound the original
     // computes once for the guard and the test. Without the
     // facts (an older snapshot) early-return keeps its unconditional behaviour.
+    // Byte matching over readability (GHIDRA_EARLY_RETURN_KEEP_NEST=1): early-return keeps
+    // Ghidra's nest wherever the layout cannot decide, instead of making a guard.
+    if (process.env.GHIDRA_EARLY_RETURN_KEEP_NEST === '1') {
+      perPluginOptions['early-return'] = { ...(perPluginOptions['early-return'] as object | undefined), keepNestWhenUndecided: true };
+    }
     if (layout) {
       perPluginOptions['early-return'] = { ...(perPluginOptions['early-return'] as object | undefined), branchLayout: layout };
       perPluginOptions['rotated-for-loop'] = { ...(perPluginOptions['rotated-for-loop'] as object | undefined), branchLayout: layout };
@@ -3829,7 +3834,13 @@ function transformDecompiledCode(
             console.warn(`[branch-layout] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.rule} at line ${e.line}${e.why ? ` (${e.why})` : ''}`),
         } : {}),
       };
-      perPluginOptions['case-layout'] = { branchLayout: layout };
+      perPluginOptions['case-layout'] = {
+        branchLayout: layout,
+        ...(process.env.GHIDRA_BRANCH_LAYOUT_REPORT ? {
+          onSite: (e: { rule: string; line: number; groups?: number; why?: string }) =>
+            console.warn(`[case-layout] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.rule === 'order' ? `${e.groups ?? '?'} groups ordered` : `left: ${e.why}`} at line ${e.line}`),
+        } : {}),
+      };
       // Storm's parameter checks set ERROR_INVALID_PARAMETER through SErrSetLastError; where the
       // original evaluated them as one mask chain they go back into a check block.
       if ((enclosing?.ghidraNamespaceSegments ?? enclosing?.namespaceSegments)?.[0] === 'Storm') {
@@ -3891,6 +3902,13 @@ function transformDecompiledCode(
     // A pointer scan's difference from its start is the string's length (strlen-difference.ts):
     // the comparison's row says whether the original compared it with 1.
     if (enclosing?.compareSites) {
+      perPluginOptions['narrow-compare-widen'] = {
+        compareSites: enclosing.compareSites,
+        onSite: (e: { name: string; from: string; to: string }) =>
+          console.warn(`[narrow-compare-widen] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.name} ${e.from} -> ${e.to}`),
+      };
+    }
+    if (enclosing?.compareSites) {
       perPluginOptions['strlen-difference'] = { compareSites: enclosing.compareSites };
     }
     // A materialised comparison spelled as VC8 compiles the original's setcc or neg/sbb
@@ -3915,10 +3933,19 @@ function transformDecompiledCode(
       };
     }
 
-    // A shift pair the original performs as a rotate by more than 16 (rotate-intrinsic.ts).
+    // A shift pair, multiply pair or byte swap the original performs with rotates (rotate-intrinsic.ts).
     if (rotates) {
+      const t = context?.funcPtrArgCasts;
       perPluginOptions['rotate-intrinsic'] = {
         rotates,
+        ...(t ? {
+          globalTypes: t.globalTypes,
+          fieldTypes: t.fieldTypes,
+          structFields: t.structFields,
+          typedefTargets: t.typedefTargets,
+          functionReturnTypes: t.functionReturnTypes,
+          enclosingVarTypes,
+        } : {}),
         onSite: (e: { line: number; spelling: string }) =>
           console.warn(`[rotate] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.spelling} on line ${e.line}`),
       };

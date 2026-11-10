@@ -197,7 +197,7 @@ export async function extractStringOps(connection: GhidraConnection, functions: 
     const batch = items.slice(i, i + batchSize);
     const result = await connection.sendCommand<{ success?: boolean; output?: string; error?: string }>(
       'execute_script',
-      { language: 'java', code: STRING_OPS_SCRIPT.replace('__ITEMS__', batch.join(';')), scriptTimeout: 900, _commandTimeout: 960000 },
+      { language: 'java', readOnly: true, code: STRING_OPS_SCRIPT.replace('__ITEMS__', batch.join(';')), scriptTimeout: 900, _commandTimeout: 960000 },
     );
     if (result.success === false || typeof result.output !== 'string') throw new Error(result.error ?? 'no output');
     for (const [fn, ops] of parseStringOps(result.output)) {
