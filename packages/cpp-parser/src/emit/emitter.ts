@@ -2440,6 +2440,19 @@ export class CppEmitter {
     return ASSOCIATIVE_OPS.has(node.operator);
   }
 
+  /** Keep adjacent prefix operators and signed literal text from lexing as ++, --, or &&. */
+  private unaryOperandNeedsTokenSeparator(node: UnaryExpr): boolean {
+    const op = node.operator;
+    if (op !== '+' && op !== '-' && op !== '&') return false;
+    let operand = node.operand;
+    while (operand.kind === NodeKind.ParenExpr) operand = (operand as ParenExpr).expression;
+    if (operand.kind === NodeKind.UnaryExpr) return (operand as UnaryExpr).operator.startsWith(op);
+    if (operand.kind === NodeKind.IntegerLiteral || operand.kind === NodeKind.FloatingLiteral) {
+      return (operand as IntegerLiteralExpr | FloatingLiteralExpr).raw.startsWith(op);
+    }
+    return false;
+  }
+
   private emitUnaryExpr(node: UnaryExpr): void {
     const op = node.operator;
     // Prefix increment/decrement and other prefix operators
@@ -2448,6 +2461,7 @@ export class CppEmitter {
       this.emitNode(node.operand);
     } else {
       this.write(op);
+      if (this.unaryOperandNeedsTokenSeparator(node)) this.write(' ');
       this.emitExprWithPrecedence(node.operand, 3);
     }
   }

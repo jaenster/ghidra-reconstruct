@@ -3,6 +3,7 @@ import assert from 'node:assert';
 import { CppEmitter, emit, DEFAULT_STYLE, GOOGLE_STYLE, createStyle } from '../index.js';
 import { Type, Expr, Stmt, Decl } from '../../ast/factory.js';
 import { NodeKind } from '../../ast/kinds.js';
+import type { Expression, FunctionDecl, ParenExpr, ReturnStmt, UnaryExpr } from '../../ast/nodes.js';
 import { parse } from '../../parser/index.js';
 
 describe('CppEmitter', () => {
@@ -117,6 +118,64 @@ describe('CppEmitter', () => {
 
       assert.strictEqual(emit(Expr.unary('++', i)), '++i');
       assert.strictEqual(emit(Expr.unary('--', i)), '--i');
+    });
+
+    it('keeps adjacent prefix operators as separate tokens through parse and emit', () => {
+      const cases = [
+        ['-(-x)', '- -x', '-', '-'],
+        ['+(+x)', '+ +x', '+', '+'],
+        ['&(&x)', '& &x', '&', '&'],
+        ['+(++x)', '+ ++x', '+', '++'],
+        ['-(--x)', '- --x', '-', '--'],
+        ['-(-(+x))', '- -+x', '-', '-'],
+        ['-+x', '-+x', '-', '+'],
+        ['+-x', '+-x', '+', '-'],
+        ['!(!x)', '!!x', '!', '!'],
+        ['~(~x)', '~~x', '~', '~'],
+        ['*(*x)', '**x', '*', '*'],
+        ['++(+x)', '+++x', '++', '+'],
+        ['--(-x)', '---x', '--', '-'],
+      ] as const;
+      const withoutParens = (value: Expression): Expression => {
+        while (value.kind === NodeKind.ParenExpr) value = (value as ParenExpr).expression;
+        return value;
+      };
+
+      for (const [source, expected, outerOp, innerOp] of cases) {
+        const emitted = emit(parse(`int f(int x) { return ${source}; }`));
+        assert.ok(emitted.includes(`return ${expected};`), emitted);
+        const fn = parse(emitted).declarations[0] as FunctionDecl;
+        const outer = withoutParens((fn.body!.statements[0] as ReturnStmt).value!);
+        assert.strictEqual(outer.kind, NodeKind.UnaryExpr, emitted);
+        assert.strictEqual((outer as UnaryExpr).operator, outerOp, emitted);
+        const inner = withoutParens((outer as UnaryExpr).operand);
+        assert.strictEqual(inner.kind, NodeKind.UnaryExpr, emitted);
+        assert.strictEqual((inner as UnaryExpr).operator, innerOp, emitted);
+      }
+    });
+
+    it('separates unary minus from a negative factory literal', () => {
+      const cases = [
+        [Expr.intLiteral(-1), '- -1'],
+        [Expr.intLiteral(-1, 16), '- -0x1'],
+        [Expr.intLiteral(-1, 2), '- -0b1'],
+        [Expr.intLiteral(-1, 8), '- -01'],
+        [Expr.floatLiteral(-1.5), '- -1.5'],
+      ] as const;
+
+      for (const [operand, expected] of cases) {
+        const emitted = emit(Expr.unary('-', operand));
+        assert.strictEqual(emitted, expected);
+        const fn = parse(`double f() { return ${emitted}; }`).declarations[0] as FunctionDecl;
+        const outer = (fn.body!.statements[0] as ReturnStmt).value!;
+        assert.strictEqual(outer.kind, NodeKind.UnaryExpr, emitted);
+        assert.strictEqual((outer as UnaryExpr).operator, '-', emitted);
+        const inner = (outer as UnaryExpr).operand;
+        assert.strictEqual(inner.kind, NodeKind.UnaryExpr, emitted);
+        assert.strictEqual((inner as UnaryExpr).operator, '-', emitted);
+      }
+      assert.strictEqual(emit(Expr.unary('-', Expr.intLiteral(1))), '-1');
+      assert.strictEqual(emit(Expr.unary('+', Expr.intLiteral(-1))), '+-1');
     });
 
     it('emits postfix increment/decrement', () => {
