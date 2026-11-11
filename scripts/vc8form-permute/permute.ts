@@ -185,7 +185,10 @@ class Compiler {
         lines.push(`${tu}\t${src}\n`);
       }
       const out = this.o.zigRun(['trial', '--root', this.o.root, '--out', this.scratch, '-j', String(this.jobs), '--expect', this.tree], lines.join(''));
-      return out.split('\n').slice(0, trials.length).map(l => (l === '-' ? null : l));
+      return out.split('\n').slice(0, trials.length).map(l => {
+        const path = l.replace(/\r$/, '');
+        return path === '-' ? null : path;
+      });
     } finally {
       // The trial sources never outlive the round, whatever happened in it.
       for (const s of srcs) rmSync(s, { force: true });
@@ -205,7 +208,9 @@ class Compiler {
 // ---------------------------------------------------------------------------------------
 
 function tsx(args: string[], cwd: string) {
-  const p = spawnSync(join(GR, 'node_modules', '.bin', 'tsx'), [join(HERE, 'candidates.ts'), ...args], { cwd, encoding: 'utf8', maxBuffer: 1 << 30 });
+  const p = process.platform === 'win32'
+    ? spawnSync(process.execPath, [join(GR, 'node_modules', 'tsx', 'dist', 'cli.mjs'), join(HERE, 'candidates.ts'), ...args], { cwd, encoding: 'utf8', maxBuffer: 1 << 30 })
+    : spawnSync(join(GR, 'node_modules', '.bin', 'tsx'), [join(HERE, 'candidates.ts'), ...args], { cwd, encoding: 'utf8', maxBuffer: 1 << 30 });
   if (p.status !== 0) throw new Error(`candidates.ts failed: ${(p.stderr ?? '').slice(-2000)}`);
 }
 
