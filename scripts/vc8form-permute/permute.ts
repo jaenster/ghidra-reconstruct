@@ -520,7 +520,7 @@ async function main() {
       }
       if (applyIn.length) {
         writeFileSync(join(out, 'apply-in.json'), jsonDumps(applyIn.map(a => ({ id: a.id, text: a.text, forms: a.forms }))));
-        tsx(['apply', join(out, 'apply-in.json'), join(out, 'apply-out.json')], GR);
+        tsx(['apply', join(out, 'apply-in.json'), join(out, 'apply-out.json'), '--types', join(args.snapshot, 'dataTypes.ndjson')], GR);
         const outs = JSON.parse(readFileSync(join(out, 'apply-out.json'), 'utf8'));
         for (let k = 0; k < applyIn.length; k++) {
           const a = applyIn[k], r = outs[k];
@@ -685,7 +685,7 @@ function cmpTuple(x: [number, string, string, string, number], y: [number, strin
 
 async function smallSnapshot(snap: string, dest: string, targets: Target[], orc: Oracle): Promise<string> {
   /** The part of a snapshot a long run reads, written once: the functions of the targets'
-   * TUs (the targets and every helper they can have) with their rows unchanged, each
+   * TUs (the targets and every helper they can have) and the header inlines, with their rows unchanged, each
    * global's name and type, the types. Each step reads it instead of the whole model. */
   const tus = new Set(targets.map(t => t[2]));
   const want = new Set(orc.rows.filter(r => tus.has(r[3])).map(r => hex8(parseInt(r[0], 16))));
@@ -694,7 +694,8 @@ async function smallSnapshot(snap: string, dest: string, targets: Target[], orc:
     const o = openSync(join(dest, 'functions.ndjson'), 'w');
     for await (const line of createInterface({ input: createReadStream(join(snap, 'functions.ndjson')), crlfDelay: Infinity })) {
       const i = line.indexOf('"address":"');
-      if (i >= 0 && want.has(line.slice(i + 11, i + 19))) writeSync(o, line + '\n');
+      // The header inlines too: the accessors `acc` candidates call (accessor-twins.ts).
+      if (i >= 0 && (want.has(line.slice(i + 11, i + 19)) || line.includes('"inline-host"'))) writeSync(o, line + '\n');
     }
     closeSync(o);
   }
