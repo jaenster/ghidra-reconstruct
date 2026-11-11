@@ -211,6 +211,17 @@
  *                        there is exactly one such if, P is a parameter of V's exact type that
  *                        nothing else names, and V's declaration sits in the function's own
  *                        block and its address is not taken.
+ *   swmerge(V[,i])       the range tests the compiler wrote around a switch on V are merged
+ *                        back into it: `if (V <= U) { if (V != K) { switch (V) { ... default:
+ *                        L } } } else { if (c1) L ... if (cn) L }`, L the default's leaving
+ *                        statement, becomes the switch alone, with K and every value above U
+ *                        that passes the guards as labels of its group of cases that only
+ *                        break (or a new such group before the default). VC8 tests the far
+ *                        values itself and subtracts the first case with `sub`
+ *                        (OBJECT_AddVisualOverlay 004bc8d0). Refused unless the guards read
+ *                        only V and constants, the values passing them are at most 64, and
+ *                        every existing label lies below U and is not K: a label the tests
+ *                        made dead would come alive.
  *   copy(D[,i])          the copy loop `for (N = K; N; N--) { *D = *S; S++; D++; }` is
  *                        written `memcpy(D, S, K * sizeof(*D));`, which VC8 expands to the
  *                        original's `rep movsd`. D and S must be declared pointers to one
@@ -273,7 +284,8 @@ export type Vc8Form =
   | { op: 'acc'; expr: string; index: number; bare?: boolean }
   | { op: 'retvar'; cond: string; name: string; index: number }
   | { op: 'onecall'; cond: string; name: string; index: number }
-  | { op: 'roundup'; name: string; param?: string };
+  | { op: 'roundup'; name: string; param?: string }
+  | { op: 'swmerge'; name: string; index: number };
 
 /**
  * A header inline that reads one field of a struct through a pointer, or returns a
@@ -315,7 +327,7 @@ export interface Vc8FormOptions {
 
 const OPS = new Set(['seq', 'fold', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'width', 'boolflag', 'retwiden', 'arms',
   'nest', 'merge-tail', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
-  'nestcall', 'fill', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup']);
+  'nestcall', 'fill', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge']);
 
 /** Split at the commas outside brackets, parentheses, angle-free. */
 function splitArgs(s: string): string[] {
@@ -405,6 +417,11 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
       const i = int(args[2], 1);
       if (anchor || args.length < 2 || args.length > 3 || !(i >= 1) || args[0] === '' || !/^[A-Za-z_]\w*$/.test(args[1])) return undefined;
       return { op: m[1], cond: args[0], name: args[1], index: i } as Vc8Form;
+    }
+    case 'swmerge': {
+      const i = int(args[1], 1);
+      if (anchor || args.length < 1 || args.length > 2 || !(i >= 1) || !/^[A-Za-z_]\w*$/.test(args[0])) return undefined;
+      return { op: 'swmerge', name: args[0], index: i };
     }
     case 'roundup': {
       const id = /^[A-Za-z_]\w*$/;
@@ -3072,6 +3089,160 @@ function doRoundup(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'roundup' }>): vo
   prefixUsed.add(ROUND_UP_DEFINITION);
 }
 
+// ---------------------------------------------------------------------------------------
+// swmerge: the range tests around a switch, merged back into it
+
+const M32 = (1n << 32n) - 1n;
+
+function doSwmerge(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'swmerge' }>): void {
+  const v = f.name;
+  const range = intType(declaredType(fn, v) ?? '', false);
+  if (!range) refuse(`${v} has no integer type`);
+  const unsigned32 = range!.w === 4 && range!.r.lo === 0n && range!.r.hi === M32;
+  if (!unsigned32 && (range!.r.lo < -0x80000000n || range!.r.hi > 0x7fffffffn)) refuse(`${v} does not compare as int`);
+  // A constant as V compares it: the usual conversions to unsigned for an unsigned 32-bit V.
+  const conv = (c: bigint | undefined): bigint | undefined => {
+    if (c === undefined) return undefined;
+    if (unsigned32) return c & M32;
+    return c >= -0x80000000n && c <= 0x7fffffffn ? c : undefined;
+  };
+  const isV = (e: Expression) => isId(unparen(e), v);
+  /** One comparison `V op K` (either order) as op and K, with the order normalised to V first. */
+  const cmp = (e: Expression): { op: string; k: bigint } | undefined => {
+    const x = unparen(e);
+    if (x.kind !== NodeKind.BinaryExpr) return undefined;
+    const b = x as BinaryExpr;
+    const flip: Record<string, string> = { '<': '>', '<=': '>=', '>': '<', '>=': '<=', '==': '==', '!=': '!=' };
+    if (!(b.operator in flip)) return undefined;
+    if (isV(b.left)) { const k = conv(constValue(b.right)); return k === undefined ? undefined : { op: b.operator, k }; }
+    if (isV(b.right)) { const k = conv(constValue(b.left)); return k === undefined ? undefined : { op: flip[b.operator], k }; }
+    return undefined;
+  };
+  const test = (op: string, x: bigint, k: bigint): boolean =>
+    op === '<' ? x < k : op === '<=' ? x <= k : op === '>' ? x > k : op === '>=' ? x >= k : op === '==' ? x === k : x !== k;
+  const consts: bigint[] = [];
+  /** The truth of a guard for V = x; undefined for anything but V against constants. */
+  const evalAt = (e: Expression, x: bigint): boolean | undefined => {
+    const u = unparen(e);
+    if (u.kind === NodeKind.UnaryExpr && (u as UnaryExpr).operator === '!') {
+      const r = evalAt((u as UnaryExpr).operand, x);
+      return r === undefined ? undefined : !r;
+    }
+    if (u.kind === NodeKind.BinaryExpr && ['&&', '||'].includes((u as BinaryExpr).operator)) {
+      const l = evalAt((u as BinaryExpr).left, x), r = evalAt((u as BinaryExpr).right, x);
+      if (l === undefined || r === undefined) return undefined;
+      return (u as BinaryExpr).operator === '&&' ? l && r : l || r;
+    }
+    const c = cmp(u);
+    return c ? test(c.op, x, c.k) : undefined;
+  };
+  const collect = (e: Expression): void => {
+    const u = unparen(e);
+    if (u.kind === NodeKind.UnaryExpr) { collect((u as UnaryExpr).operand); return; }
+    if (u.kind === NodeKind.BinaryExpr && ['&&', '||'].includes((u as BinaryExpr).operator)) { collect((u as BinaryExpr).left); collect((u as BinaryExpr).right); return; }
+    const c = cmp(u);
+    if (c) consts.push(c.k);
+  };
+
+  // The i-th `if (V <= U)` (or `V < U + 1`) with an else.
+  let seen = 0;
+  let site: { b: CompoundStmt; k: number; s: IfStmt; upper: bigint } | undefined;
+  for (const b of blocks(fn)) {
+    for (let k = 0; k < b.statements.length && !site; k++) {
+      const s = b.statements[k];
+      if (s.kind !== NodeKind.IfStmt || !(s as IfStmt).elseBranch || (s as IfStmt).init) continue;
+      const c = cmp((s as IfStmt).condition);
+      if (!c || (c.op !== '<=' && c.op !== '<')) continue;
+      if (++seen === f.index) site = { b, k, s: s as IfStmt, upper: c.op === '<=' ? c.k : c.k - 1n };
+    }
+  }
+  if (!site) refuse(`no if #${f.index} bounding ${v} from above with an else`);
+  const { b, k, s, upper } = site!;
+  const inner = stmtsOf(s.thenBranch);
+  if (inner.length !== 1 || inner[0].kind !== NodeKind.IfStmt || (inner[0] as IfStmt).elseBranch) refuse('the bounded arm is not one if without an else');
+  const ne = cmp((inner[0] as IfStmt).condition);
+  if (!ne || ne.op !== '!=' || ne.k > upper) refuse(`the bounded arm does not test ${v} != K`);
+  const sw = stmtsOf((inner[0] as IfStmt).thenBranch);
+  if (sw.length !== 1 || sw[0].kind !== NodeKind.SwitchStmt || !isV((sw[0] as unknown as { condition: Expression }).condition)) refuse(`the test does not hold one switch on ${v}`);
+  const swS = sw[0] as unknown as { body: Statement; init?: Statement };
+  if (swS.init || swS.body.kind !== NodeKind.CompoundStmt) refuse('the switch has an init or no block');
+  const list = (swS.body as CompoundStmt).statements;
+  const labels: bigint[] = [];
+  let dflt: Statement | undefined;
+  for (const st of list) {
+    if (st.kind === NodeKind.CaseStmt) {
+      const val = conv(constValue((st as unknown as { value: Expression }).value));
+      if (val === undefined) refuse('a case label is no constant');
+      labels.push(val!);
+    } else if (st.kind === NodeKind.DefaultStmt) dflt = st;
+  }
+  const leave = dflt ? (dflt as unknown as { statement: Statement }).statement : undefined;
+  if (!leave || leave.kind !== NodeKind.ReturnStmt || ((leave as ReturnStmt).value && !loadsNothing((leave as ReturnStmt).value!))) refuse('the default is not a plain return');
+  for (const l of labels) if (l > upper || l === ne.k) refuse(`label ${l} lies outside what the tests let through`);
+
+  // The guards of the far side, each `if (c) L`.
+  const guards = stmtsOf(s.elseBranch!);
+  for (const g of guards) {
+    if (g.kind !== NodeKind.IfStmt || (g as IfStmt).elseBranch || (g as IfStmt).init) refuse('the far arm holds more than guards');
+    const arm = stmtsOf((g as IfStmt).thenBranch);
+    if (arm.length !== 1 || text(arm[0]) !== text(leave!)) refuse('a guard leaves other than the default');
+    collect((g as IfStmt).condition);
+  }
+  const hi = unsigned32 ? M32 : range!.r.hi;
+  const passes = (x: bigint): boolean => {
+    for (const g of guards) {
+      const t = evalAt((g as IfStmt).condition, x);
+      if (t === undefined) refuse(`a guard reads more than ${v} and constants`);
+      if (t) return false;
+    }
+    return true;
+  };
+  const pts = new Set<bigint>([upper + 1n, hi]);
+  for (const c of consts) for (const d of [c - 1n, c, c + 1n]) if (d > upper && d <= hi) pts.add(d);
+  const sorted = [...pts].filter(x => x > upper && x <= hi).sort((a, c) => (a < c ? -1 : a > c ? 1 : 0));
+  const far: bigint[] = [];
+  for (let j = 0; j < sorted.length; j++) {
+    if (passes(sorted[j])) far.push(sorted[j]);
+    const next = sorted[j + 1];
+    if (next !== undefined && next - sorted[j] > 1n && passes(sorted[j] + 1n)) {
+      if (next - sorted[j] - 1n > 64n) refuse('the guards let a range through too wide to list');
+      for (let x = sorted[j] + 1n; x < next; x++) far.push(x);
+    }
+    if (far.length > 64) refuse('the guards let more than 64 values through');
+  }
+  const added = [ne.k, ...far];
+
+  // Into the first group of cases that only breaks, else a new group before the default.
+  const lit = (x: bigint): Expression => parseExpr(`0x${x.toString(16)}`);
+  const caseOf = (x: bigint, last: boolean): Statement => {
+    const [st] = parseStmts(`switch (__vc8s) { case 0x${x.toString(16)}: ${last ? 'break;' : ';'} }`);
+    const c = ((st as unknown as { body: CompoundStmt }).body.statements[0]) as unknown as { value: Expression; statement: Statement };
+    c.value = lit(x);
+    if (!last) c.statement = { kind: NodeKind.NullStmt } as unknown as Statement;
+    return c as unknown as Statement;
+  };
+  let at = -1, from = -1;
+  for (let j = 0; j < list.length && at < 0; j++) {
+    const st = list[j];
+    if (st.kind !== NodeKind.CaseStmt) continue;
+    const body = (st as unknown as { statement: Statement }).statement;
+    if (body.kind === NodeKind.BreakStmt) {
+      let q = j;
+      while (q > 0 && list[q - 1].kind === NodeKind.CaseStmt && (list[q - 1] as unknown as { statement: Statement }).statement.kind === NodeKind.NullStmt) q--;
+      at = j; from = q;
+    }
+  }
+  if (at >= 0) {
+    const group = list.slice(from, at + 1).map(st => conv(constValue((st as unknown as { value: Expression }).value))!);
+    const all = [...group, ...added].sort((a, c) => (a < c ? -1 : a > c ? 1 : 0));
+    list.splice(from, at - from + 1, ...all.map((x, j) => caseOf(x, j === all.length - 1)));
+  } else {
+    const d = list.indexOf(dflt!);
+    list.splice(d, 0, ...added.map((x, j) => caseOf(x, j === added.length - 1)));
+  }
+  b.statements[k] = sw[0];
+}
+
 const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op: K }>) => void } = {
   seq: doSeq, fold: doFold, cache: doCache, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
   retval: doRetval, width: doWidth, boolflag: doBoolflag, retwiden: doRetwiden, arms: doArms,
@@ -3079,7 +3250,7 @@ const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op
   cmp: doCmp, swap: doSwap, ifsel: doIfsel, split: doSplit, select: doSelect, decl: doDecl, unselect: doUnselect,
   tsel: doTsel, hoist: doHoist, nestcall: doNestcall, fill: doFill, copy: doCopy, shift: doShift, ptrwalk: doPtrwalk, rowptr: doRowptr,
   acc: doAcc,
-  retvar: doRetvar, onecall: doOnecall, roundup: doRoundup,
+  retvar: doRetvar, onecall: doOnecall, roundup: doRoundup, swmerge: doSwmerge,
 };
 
 /**

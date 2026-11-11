@@ -927,3 +927,97 @@ describe('vc8-form: roundup', () => {
     assert.match(other.sites[0].why!, /0 round-up sites/);
   });
 });
+
+describe('vc8-form: swmerge', () => {
+  // OBJECT_AddVisualOverlay 004bc8d0 as the generator prints it.
+  const SITE = [
+    'void f(D2UnitStrc* pUnit) {',
+    '  uint32_t nObjectClassId = pUnit->nClassId;',
+    '  if (nObjectClassId <= 0x18d) {',
+    '    if (nObjectClassId != 0x18d) {',
+    '      switch (nObjectClassId) {',
+    '        case 0x98:',
+    '          g(pUnit, 1);',
+    '        return;',
+    '        case 0x162:',
+    '        case 0x163:',
+    '        case 0x164:',
+    '          break;',
+    '        case 0x95:',
+    '          if (pUnit->eMode != 1) {',
+    '            return;',
+    '          }',
+    '        g(pUnit, 1);',
+    '        return;',
+    '        default:',
+    '          return;',
+    '      }',
+    '    }',
+    '  } else {',
+    '    if (nObjectClassId < 0x195) {',
+    '      return;',
+    '    }',
+    '    if (nObjectClassId > 0x197 && nObjectClassId != 0x1c7) {',
+    '      return;',
+    '    }',
+    '  }',
+    '  if (pUnit->eMode != 2) {',
+    '    return;',
+    '  }',
+    '  g(pUnit, 2);',
+    '}',
+  ];
+  it('parses', () => {
+    assert.deepStrictEqual(parseVc8Form('swmerge(nObjectClassId)'), { op: 'swmerge', name: 'nObjectClassId', index: 1 });
+    assert.strictEqual(parseVc8Form('swmerge(a->b)'), undefined);
+  });
+  it('004bc8d0: one switch, the boundary and the far values in the group that breaks', () => {
+    const { out, sites } = run(SITE, 'swmerge(nObjectClassId)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.strictEqual(out, flat(`void f(D2UnitStrc* pUnit) {
+      uint32_t nObjectClassId = pUnit->nClassId;
+      switch (nObjectClassId) {
+        case 0x98: g(pUnit, 1); return;
+        case 0x162: case 0x163: case 0x164: case 0x18d: case 0x195: case 0x196: case 0x197: case 0x1c7: break;
+        case 0x95: if (pUnit->eMode != 1) { return; } g(pUnit, 1); return;
+        default: return;
+      }
+      if (pUnit->eMode != 2) { return; }
+      g(pUnit, 2);
+    }`));
+  });
+  it('the same values reach the same statements before and after', () => {
+    // Model each path: which branch a value takes, as the two bodies decide it.
+    const before = (x: number): string => {
+      if (x <= 0x18d) {
+        if (x === 0x18d) return 'rest';
+        if (x === 0x98 || x === 0x95) return `case${x}`;
+        if (x >= 0x162 && x <= 0x164) return 'rest';
+        return 'leave';
+      }
+      if (x < 0x195) return 'leave';
+      if (x > 0x197 && x !== 0x1c7) return 'leave';
+      return 'rest';
+    };
+    const after = (x: number): string => {
+      if (x === 0x98 || x === 0x95) return `case${x}`;
+      if ([0x162, 0x163, 0x164, 0x18d, 0x195, 0x196, 0x197, 0x1c7].includes(x)) return 'rest';
+      return 'leave';
+    };
+    for (let x = 0; x < 0x400; x++) assert.strictEqual(after(x), before(x), `value ${x.toString(16)}`);
+  });
+  it('a label above the bound would come alive: refused', () => {
+    const { sites } = run(SITE.map(l => l.replace('case 0x162:', 'case 0x1c0:')), 'swmerge(nObjectClassId)');
+    assert.match(sites[0].why!, /label 448 lies outside/);
+  });
+  it('a guard on something else, or one that leaves another way, is refused', () => {
+    const other = run(SITE.map(l => l.replace('nObjectClassId > 0x197 && nObjectClassId != 0x1c7', 'nObjectClassId > 0x197 && pUnit->eMode')), 'swmerge(nObjectClassId)');
+    assert.match(other.sites[0].why!, /reads more than nObjectClassId/);
+    const leave = run(SITE.map((l, j) => (j === 24 ? '      return 0;' : l)), 'swmerge(nObjectClassId)');
+    assert.ok(!leave.sites[0].applied);
+  });
+  it('a range too wide to list is refused', () => {
+    const { sites } = run(SITE.map(l => l.replace('nObjectClassId > 0x197 && nObjectClassId != 0x1c7', 'nObjectClassId > 0x297 && nObjectClassId != 0x1c7')), 'swmerge(nObjectClassId)');
+    assert.match(sites[0].why!, /too wide|more than 64/);
+  });
+});

@@ -479,6 +479,17 @@ function sites(c: Ctx, maxAnchors: number): string[] {
     out.add(`roundup(${v})`);
     for (const p of params) out.add(`roundup(${v},${p})`);
   }
+  // swmerge: a local bounded from above by an if with an else (the range tests around a switch).
+  const bounded = new Map<string, number>();
+  for (const n of all) {
+    if (n.kind !== NodeKind.IfStmt || !n.elseBranch) continue;
+    const c = unparen(n.condition);
+    if (c.kind !== NodeKind.BinaryExpr || (c.operator !== '<=' && c.operator !== '<') || unparen(c.left).kind !== NodeKind.Identifier) continue;
+    const v = unparen(c.left).name;
+    if (!locals.has(v) && !params.includes(v)) continue;
+    bounded.set(v, (bounded.get(v) ?? 0) + 1);
+    out.add(`swmerge(${v},${bounded.get(v)})`);
+  }
   return [...out];
 }
 
