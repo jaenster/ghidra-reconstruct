@@ -1216,17 +1216,32 @@ function checkWidthPreserved(fn: FunctionDecl, v: string, d: VariableDecl, oldT:
   }
   for (const { node } of walk(fn.body!)) {
     if (!isId(node, v) || storeNodes.has(node)) continue;
-    const kept = readWidth(fn, node, parents);
+    const kept = readWidth(fn, node, parents, oldT.w === newT.w ? both : undefined);
     if (kept === undefined || kept > keep) refuse(why(`the read in ${emit((parents.get(node) ?? node) as never)} keeps ${kept === undefined ? 'all of it' : `${kept * 8} bits`}`));
   }
 }
 
 /** How many bytes of V a read keeps: a cast to an integer type, a mask, a parameter or the return of that width. */
-function readWidth(fn: FunctionDecl, id: ASTNode, parents: Map<ASTNode, ASTNode>): number | undefined {
+function readWidth(fn: FunctionDecl, id: ASTNode, parents: Map<ASTNode, ASTNode>, both?: Range): number | undefined {
   let cur: ASTNode = id;
   let p = parents.get(cur);
   while (p && p.kind === NodeKind.ParenExpr) { cur = p; p = parents.get(cur); }
   if (!p) return undefined;
+  // Between two types of one width, equality with a constant both hold tells the same
+  // values apart (INPUT_ConfigMouseButtonHandler switches a short on 1 and 2 as a WORD).
+  const constIn = (e: Expression) => { const r = both && rangeOf(e, undefined); return !!r && r.lo === r.hi && within(r, both!); };
+  if (p.kind === NodeKind.BinaryExpr && ['==', '!='].includes((p as BinaryExpr).operator)) {
+    const x = p as BinaryExpr;
+    return constIn(x.left === cur ? x.right : x.left) ? 1 : undefined;
+  }
+  if (p.kind === NodeKind.SwitchStmt && (p as unknown as { condition: ASTNode }).condition === cur) {
+    const labels: Expression[] = [];
+    for (const { node } of walk((p as unknown as { body: ASTNode }).body)) {
+      if (node.kind === NodeKind.SwitchStmt) return undefined;
+      if (node.kind === NodeKind.CaseStmt) labels.push((node as unknown as { value: Expression }).value);
+    }
+    return labels.every(constIn) ? 1 : undefined;
+  }
   const narrow = (t: string) => (norm(t) === 'bool' ? undefined : intType(t, false)?.w);
   if (p.kind === NodeKind.CStyleCastExpr) return narrow(text((p as CStyleCastExpr).type));
   if (p.kind === NodeKind.BinaryExpr && (p as BinaryExpr).operator === '&') {

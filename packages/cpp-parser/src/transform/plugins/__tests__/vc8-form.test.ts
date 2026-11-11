@@ -460,6 +460,15 @@ describe('vc8-form: width', () => {
     assert.strictEqual(sites[0].applied, false);
     assert.match(sites[0].why!, /return u/);
   });
+  // INPUT_ConfigMouseButtonHandler 004a6350: a short switched on as a WORD.
+  it('keeps a same-width retype read only by equality with constants both hold', () => {
+    const { sites } = run(['void f(M* p) {', '  short b;', '  b = *(short*)p;', '  switch (b) {', '  case 1:', '    g();', '    break;', '  case 2:', '    h();', '  }', '  if (b != 2) {', '    g();', '  }', '}'], 'width(b,uint16_t)');
+    assert.ok(sites[0].applied, sites[0].why);
+  });
+  it('refuses a narrowing read by equality, which the wider old type decides on more bytes', () => {
+    const { sites } = run(['void f() {', '  int b;', '  b = Read();', '  if (b == 1) {', '    g();', '  }', '}'], 'width(b,uint8_t)');
+    assert.strictEqual(sites[0].applied, false);
+  });
   // MISSILE_CreateSubWithSound 004ce850: small constants, but a 32-bit unsigned local
   // compared with a value that may be negative compares unsigned.
   it('refuses a signedness change a read depends on', () => {
