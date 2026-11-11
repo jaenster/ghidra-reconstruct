@@ -3,7 +3,7 @@
  *
  *   tsx permute.ts --checkout DIR --snapshot SNAP --out OUT [--pool AUDIT] [--sample N] [--seed S]
  *                  [--addrs A,B,...] [--jobs J] [--max-insns K] [--no-pairs] [--no-phase]
- *                  [--resume [--group G]] [--oracle-zig BIN]
+ *                  [--resume [--group G]] [--oracle-zig BIN] [--ops OP,OP]
  *
  * For each target function (the near-miss pool of an audit.tsv, a sample of it, or --addrs):
  *
@@ -251,7 +251,7 @@ interface Accepted { job: Job; on: number; forms: string[]; gained: Set<number>;
 interface Args {
   checkout: string; snapshot: string; out: string; pool?: string; addrs?: string; sample: number; seed: number;
   max_insns: number; jobs: number; max_anchors: number; pair_top: number; no_pairs: boolean; no_phase: boolean;
-  resume: boolean; group: number; zig: string;
+  resume: boolean; group: number; zig: string; ops?: string;
 }
 
 function usage(code = 2): never {
@@ -262,7 +262,7 @@ function usage(code = 2): never {
 
 function parseArgs(argv: string[]): Args {
   const a: Partial<Args> & Record<string, unknown> = { sample: 0, seed: 1, max_insns: 100, jobs: 4, max_anchors: 16, pair_top: 3, no_pairs: false, no_phase: false, resume: false, group: 1 };
-  const str: Record<string, keyof Args> = { '--checkout': 'checkout', '--snapshot': 'snapshot', '--out': 'out', '--pool': 'pool', '--addrs': 'addrs', '--oracle-zig': 'zig' };
+  const str: Record<string, keyof Args> = { '--checkout': 'checkout', '--snapshot': 'snapshot', '--out': 'out', '--pool': 'pool', '--addrs': 'addrs', '--oracle-zig': 'zig', '--ops': 'ops' };
   const int: Record<string, keyof Args> = { '--sample': 'sample', '--seed': 'seed', '--max-insns': 'max_insns', '--jobs': 'jobs', '--max-anchors': 'max_anchors', '--pair-top': 'pair_top', '--group': 'group' };
   const flag: Record<string, keyof Args> = { '--no-pairs': 'no_pairs', '--no-phase': 'no_phase', '--resume': 'resume' };
   for (let i = 0; i < argv.length; i++) {
@@ -293,7 +293,8 @@ async function main() {
   const pool: Array<[number, string, string, string, number]> = [];
   for (const line of readFileSync(poolPath, 'utf8').split('\n').slice(1)) {
     const p = line.split('\t');
-    if (p.length < 10 || p[4].startsWith('lib') || p[3].startsWith('libcmt') || !NEAR.test(p[9])) continue;
+    // --addrs names its targets whatever their status (MATCH aside); the pool is the near misses.
+    if (p.length < 10 || p[4].startsWith('lib') || p[3].startsWith('libcmt') || (args.addrs ? p[9] === 'MATCH' : !NEAR.test(p[9]))) continue;
     if (parseInt(p[5], 10) >= args.max_insns) continue;
     pool.push([parseInt(p[0], 16), p[2], p[3], p[9], parseInt(p[5], 10)]);
   }
@@ -396,9 +397,14 @@ async function main() {
     const t1 = now();
     tsx(['singles', join(out, 'cand-in.json'), join(out, 'cand-out.json'),
       '--types', join(args.snapshot, 'dataTypes.ndjson'),
-      '--globals', join(args.snapshot, 'globals.ndjson'), '--max-anchors', String(args.max_anchors)], GR);
+      '--globals', join(args.snapshot, 'globals.ndjson'), '--max-anchors', String(args.max_anchors), ...(args.ops ? ['--ops', args.ops] : [])], GR);
     const cands = new Map<string, any>();
-    for (const r of JSON.parse(readFileSync(join(out, 'cand-out.json'), 'utf8'))) cands.set(r.id, r);
+    // --ops a,b: only the forms of those ops are tried.
+    const ops = args.ops ? new Set(args.ops.split(',')) : undefined;
+    for (const r of JSON.parse(readFileSync(join(out, 'cand-out.json'), 'utf8'))) {
+      if (ops) r.candidates = r.candidates.filter((c: { form: string }) => ops.has(c.form.slice(0, c.form.indexOf('('))));
+      cands.set(r.id, r);
+    }
     let nForms = 0;
     for (const r of cands.values()) nForms += r.candidates.length;
     log(`candidates: ${cands.size} functions, ${nForms} forms (${fixed(now() - t1, 0)}s)`);

@@ -9,7 +9,7 @@
  * exactly what the tag would do. No other edit is ever made: every form is
  * value-preserving by construction, or applyVc8Forms refuses it.
  *
- *   tsx candidates.ts singles <in.json> <out.json> [--types dataTypes.ndjson] [--globals globals.ndjson]
+ *   tsx candidates.ts singles <in.json> <out.json> [--types dataTypes.ndjson] [--globals globals.ndjson] [--ops a,b]
  *       in:  [{id, text}]   a function definition each
  *       out: [{id, roundtrip, error?, candidates: [{form, text, adds}]}]
  *   tsx candidates.ts apply <in.json> <out.json>
@@ -80,6 +80,9 @@ async function loadGlobals(path?: string) {
 }
 
 /** The global types the generator hands the forms (its `globalTypes`), from the model: which globals are arrays. */
+/** `--ops a,b`: only the forms of those ops are proposed. */
+let onlyOps: Set<string> | undefined;
+
 let tablesMemo: { globalTypes: Record<string, string> } | undefined;
 const tables = () => (tablesMemo ??= { globalTypes: Object.fromEntries([...globals].map(([k, v]) => [k, tidy(v)])) });
 
@@ -447,7 +450,7 @@ export function singles(items: Array<{ id: string; text: string }>, maxAnchors: 
     const seen = new Set<string>([key(roundtrip)]);
     const candidates: Array<{ form: string; text: string; adds: number }> = [];
     let forms: string[];
-    try { forms = [...sites(context(fn), maxAnchors)]; } catch (e) { return { id, error: `sites: ${(e as Error).message.split('\n')[0]}`, candidates: [] }; }
+    try { forms = [...sites(context(fn), maxAnchors)].filter(f => !onlyOps || onlyOps.has(f.slice(0, f.indexOf('(')))); } catch (e) { return { id, error: `sites: ${(e as Error).message.split('\n')[0]}`, candidates: [] }; }
     for (const f of forms) {
       const r = tryForm(tu, f);
       if ('why' in r) continue;
@@ -506,6 +509,7 @@ async function main() {
   const [mode, a, b, c] = process.argv.slice(2);
   const opt = (k: string) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : undefined; };
   if (mode === 'singles') {
+    if (opt('--ops')) onlyOps = new Set(opt('--ops')!.split(','));
     loadTypes(opt('--types'));
     await loadGlobals(opt('--globals'));
     writeFileSync(b, JSON.stringify(singles(JSON.parse(readFileSync(a, 'utf8')), Number(opt('--max-anchors') ?? 16))));
