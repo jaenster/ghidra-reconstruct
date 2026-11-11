@@ -52,7 +52,7 @@ import { COMDAT_SPECIFIERS, classScopeOf, memberCallModel, memberDefinitionScope
 import { pointeeClass } from './templates/members.js';
 import { templateRegistry } from './templates/registry.js';
 import { declarationHead } from './calling-convention.js';
-import { fileStaticKey } from './file-static-functions.js';
+import { fileStaticKey, keepAliveSpellable } from './file-static-functions.js';
 import { emittedParameterName, getAggregateTypeNames } from './platform-types.js';
 import { derivedTemplateInstance, globalDefinition, emittedNamespaceOf, sanitizeSymbolName, setCentralInitializerScope, normalizeGlobalDeclType, generateStaticLocalsBlock, emitDataValue, setInitializerOwnerAddress, inferArrayDeclaration, isWideTextDatum, normalizeArrayDeclaration, braceArrayInitializer, isFuncDefTypedefName, getKnownFuncDefTypedefs, getKnownEnumConstants, setInitializerNamespace, renderGlobalScalarInitializer, recordDeclaredName } from './globals-header.js';
 
@@ -580,7 +580,7 @@ export interface ImplGenContext {
    * Functions defined `static` in their unit (file-static-functions.ts), by address
    * key, with the functions of that unit that reference them.
    */
-  fileStaticFunctions?: ReadonlyMap<string, { unit: string; referrers: ReadonlySet<string>; inline?: boolean }>;
+  fileStaticFunctions?: ReadonlyMap<string, { unit: string; referrers: ReadonlySet<string>; inline?: boolean; keepAlive?: boolean }>;
   /**
    * Functions hand-written source calls through an extern entry (`<name>_Extern`,
    * file-static-functions.ts), by address key: the unit defines the entry after the
@@ -1114,6 +1114,10 @@ export function generateImplementation(
     context._castTypedefs = undefined;
   }
 
+  // The keep-alive references of unreferenced statics (keepAliveDefinition), written
+  // after every definition: a symbol declared ahead of a function shifts the order VC8
+  // breaks its register ties in (SKILLDESC_CalcElemDamageRange 004e89a0).
+  const keepAlive: string[] = [];
   // Generate function implementations, grouping consecutive same-ifdef functions
   let currentIfdef: string | undefined;
   for (const func of functions) {
@@ -1198,6 +1202,10 @@ export function generateImplementation(
     lines.push(impl);
     if (markInline) lines.push(INLINE_END_MARKER);
     lines.push('');
+    if (fileStatic(func)?.keepAlive) {
+      const keep = keepAliveDefinition(func);
+      if (keep) keepAlive.push(keep);
+    }
     if (context?.externEntries?.has(fileStaticKey(func.address))) {
       const entry = externEntryDefinition(func, definitionNamespace);
       if (entry) lines.push(entry, '');
@@ -1215,6 +1223,7 @@ export function generateImplementation(
     lines.push(`#endif // ${currentIfdef}`);
     lines.push('');
   }
+  if (keepAlive.length > 0) lines.push(...keepAlive, '');
 
   // Now that all function bodies have been generated and _fileIdentifiers accumulated,
   // emit file-local globals filtered by actual usage, spliced at the deferred position.
@@ -2179,6 +2188,22 @@ export function externEntryDefinition(
     `    ${returnType === 'void' ? '' : 'return '}${callee}(${args});`,
     `}`,
   ].join('\n');
+}
+
+/**
+ * The reference that keeps a file-local function nothing calls (file-static-functions.ts,
+ * `keepAlive`): a call in the unevaluated arm of a constant conditional. It compiles to
+ * no code and no data, yet VC8 emits the static's body, in the register convention it
+ * picks for a function that is only called in its file - the original's copy of a
+ * function every caller inlined (TOKTBLS_GetTokenIndex 0065c300: EAX and `ret 4`). A
+ * function whose address is taken would get a stack convention instead, and an extern
+ * caller could inline the only call and drop the body.
+ */
+export function keepAliveDefinition(func: ExtractedFunction): string | undefined {
+  if (!keepAliveSpellable(func)) return undefined;
+  const args = declaredParameters(func).map(p => `*(${p.type} *)0`);
+  const hexAddr = func.address.includes(':') ? func.address.slice(func.address.lastIndexOf(':') + 1) : func.address;
+  return `static void * keep_${hexAddr} = (0 ? (${emittedFunctionName(func)}(${args.join(', ')}), (void *)0) : (void *)0);`;
 }
 
 /**

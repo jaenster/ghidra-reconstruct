@@ -24,7 +24,11 @@
  *    emits a static's copy, in its own convention, for a call it then inlined. Where
  *    the decompiler printed such a call as the body (`inlinedCalls`, see
  *    inlined-calls.ts), the function is selected with those sites as its callers and
- *    defined `inline`, so the restored calls are inlined again;
+ *    defined `inline`, so the restored calls are inlined again. Where it did not, the
+ *    caller that inlined it is unknown: the function is selected `keepAlive`, and the
+ *    unit holds a reference that compiles to no code and keeps the static's body
+ *    (`keepAliveDefinition`). TOKTBLS_GetTokenIndex 0065c300 takes its first argument
+ *    in EAX and returns with `ret 4`, and nothing in the original references it;
  *  - it is a plain free function: not a method, not a template member, not a thunk,
  *    library or platform-guarded function;
  *  - every mention of its name can be told apart from a mention of another symbol of
@@ -67,7 +71,7 @@ import { createHash } from 'node:crypto';
 import { Lexer, TokenKind } from '@ghidra-mcp/cpp-parser';
 import type { DataValue, ExtractedFunction } from '../types.js';
 import { decompiledFunctionName } from './impl.js';
-import { EXTERN_ENTRY_SUFFIX } from './header.js';
+import { EXTERN_ENTRY_SUFFIX, declaredParameters } from './header.js';
 import { abiConvention } from './calling-convention.js';
 import { isInlineHost } from './inline-hosts.js';
 import { vc8LinkageVerdict } from './vc8-linkage.js';
@@ -389,12 +393,18 @@ export type FileStaticRefusal =
   | 'a header inline'
   | 'measured extern by the VC8 oracle';
 
+/**
+ * A selected function: the unit it is static in, the functions of that unit naming it,
+ * `inline` when those are inlined calls the rebuild writes back, and `keepAlive` when
+ * nothing names it and the unit keeps its body alive by a reference of its own.
+ */
+export interface FileStaticEntry { unit: string; referrers: Set<string>; inline?: boolean; keepAlive?: boolean }
+
 export interface FileStaticSelection {
   /**
-   * address -> the unit it is static in, and the functions of that unit naming it;
-   * `inline` when those are inlined calls the rebuild writes back.
+   * address -> the unit it is static in, and how (FileStaticEntry).
    */
-  selected: Map<string, { unit: string; referrers: Set<string>; inline?: boolean }>;
+  selected: Map<string, FileStaticEntry>;
   /** Candidates (foreign register storage) kept extern, per reason. */
   refused: Map<FileStaticRefusal, string[]>;
   /**
@@ -693,8 +703,22 @@ export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticS
     }
   }
 
-  const selected = new Map<string, { unit: string; referrers: Set<string>; inline?: boolean }>();
+  const selected = new Map<string, FileStaticEntry>();
   const unreferenced: Array<{ key: string; func: ExtractedFunction; unit: string }> = [];
+  // Nothing references it: its every call was inlined, by a caller the decompile does not
+  // show. The unit keeps the body alive itself; that needs a call it can spell.
+  // Only a function whose storage no convention the rebuild can spell explains, or one
+  // the oracle measured static: LEVEL_CountRoomsInAct 0053b090 (ECX and DL, declared
+  // __stdcall) is the __fastcall its declaration prints, and matches extern.
+  const keepAlive = (key: string, func: ExtractedFunction, unit: string): void => {
+    const spelled = abiConvention(func) ?? func.callingConvention;
+    const ownConvention = foreignParameterRegisters({ ...func, callingConvention: spelled }).length > 0;
+    if (!keepAliveSpellable(func) || (!ownConvention && vc8LinkageVerdict(func).linkage !== 'static')) {
+      refuse('no caller in its unit', func);
+      return;
+    }
+    selected.set(key, { unit, referrers: new Set(), keepAlive: true });
+  };
   for (const [key, func] of candidates) {
     const unit = inputs.unitOf.get(key)!;
     const refs = referrers.get(key) ?? [];
@@ -704,14 +728,18 @@ export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticS
     if (refs.some(r => r.unit === undefined)) { refuse('referenced from excluded code', func); continue; }
     if (refs.some(r => r.unit !== unit)) { refuse('referenced from another unit', func); continue; }
     if (refs.length === 0 && inputs.inlinedCalls) { unreferenced.push({ key, func, unit }); continue; }
+    if (refs.length === 0) { keepAlive(key, func, unit); continue; }
     if (!refs.some(r => r.call)) { refuse('no caller in its unit', func); continue; }
     selected.set(key, { unit, referrers: new Set(refs.map(r => r.from)) });
   }
   if (unreferenced.length > 0) {
     const sites = inputs.inlinedCalls!(unreferenced);
     for (const { key, func, unit } of unreferenced) {
-      const from = [...(sites.get(key) ?? [])].filter(f => f !== key && inputs.unitOf.get(f) === unit);
-      if (from.length === 0) { refuse('no caller in its unit', func); continue; }
+      const all = [...(sites.get(key) ?? [])].filter(f => f !== key);
+      const from = all.filter(f => inputs.unitOf.get(f) === unit);
+      // Copies inlined only into other units: the function was not this unit's own.
+      if (from.length === 0 && all.length > 0) { refuse('no caller in its unit', func); continue; }
+      if (from.length === 0) { keepAlive(key, func, unit); continue; }
       selected.set(key, { unit, referrers: new Set(from), inline: true });
     }
   }
@@ -719,6 +747,15 @@ export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticS
   // redirects calls to that address would miss every call the unit makes.
   for (const k of entryValueUse) externEntries.delete(k);
   return { selected, refused, candidates: candidateCount, measuredStatic, staleLinkageTags, externEntries };
+}
+
+/**
+ * Whether the keep-alive reference can call the function: every parameter a type that
+ * `*(T *)0` spells (no reference, no array, no function type) and no varargs.
+ */
+export function keepAliveSpellable(func: ExtractedFunction): boolean {
+  if (func.hasVarArgs) return false;
+  return declaredParameters(func).every(p => p.type !== '' && !/[&[(]/.test(p.type));
 }
 
 /** Address key used by the selection, for lookups from the emitters. */
