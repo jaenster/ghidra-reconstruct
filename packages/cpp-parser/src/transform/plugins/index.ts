@@ -412,6 +412,12 @@ export {
 } from './builtins/new-result-temp.js';
 
 export {
+  loopCopySinkPlugin,
+  createLoopCopySinkTransformer,
+  type LoopCopySinkOptions,
+} from './builtins/loop-copy-sink.js';
+
+export {
   joinStoreTempPlugin,
   createJoinStoreTempTransformer,
   type JoinStoreTempOptions,
@@ -735,6 +741,7 @@ import { recordGetterSplitPlugin } from './builtins/record-getter-split.js';
 import { armConstantCallPlugin } from './builtins/arm-constant-call.js';
 import { fieldPointerFoldPlugin } from './builtins/field-pointer-fold.js';
 import { newResultTempPlugin } from './builtins/new-result-temp.js';
+import { loopCopySinkPlugin } from './builtins/loop-copy-sink.js';
 import { joinStoreTempPlugin } from './builtins/join-store-temp.js';
 import { stormNextLinkPlugin } from './builtins/storm-next-link.js';
 import { paramCheckBlockPlugin } from './builtins/param-check-block.js';
@@ -934,6 +941,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   recordGetterSplitPlugin,    // Matching: a record getter's split range tests and null test become one conditional pointer again (priority 60.55)
   fieldPointerFoldPlugin,     // Matching: a field-pointer temporary goes; the field updated in place or the record held (priority 62.5)
   newResultTempPlugin,        // Matching: an allocation constructed in place gets a temporary; the result assigned after (priority 62.6)
+  loopCopySinkPlugin,         // Matching: a loop-carried copy placed mid-body moves to the end of the body (priority 62.7)
   joinStoreTempPlugin,        // Matching: a member every arm stores into is stored once after the join, through a temporary (priority 970)
   stormNextLinkPlugin,        // Matching: a flattened inline TSLink::NextLink(-1) becomes a call to the inline helper (priority 975)
   paramCheckBlockPlugin,      // Matching: a Storm parameter check compiled as one neg/sbb mask chain -> a D2_CHECKS block (priority 980)
