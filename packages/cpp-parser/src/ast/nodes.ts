@@ -37,6 +37,12 @@ export interface GhidraMetadata {
    */
   securityCookie?: boolean;
   /**
+   * On a function: the original seeds a /GS cookie in its prologue (`boilerplate-cleanup`
+   * saw `DEFAULT_SECURITY_COOKIE ^ <frame>`). Without one, VC8 never saw a byte or word
+   * array among its locals.
+   */
+  stackCookie?: boolean;
+  /**
    * The comparison was rewritten from its CMP/TEST and Jcc as an unsigned compare of this
    * width (`compare-form`); `compare-signedness` keeps it unsigned under the final types.
    */
