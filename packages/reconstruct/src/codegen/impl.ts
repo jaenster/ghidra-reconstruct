@@ -3678,6 +3678,9 @@ function transformDecompiledCode(
         ops: enclosing.repStringOps,
         globalSizes: context?.funcPtrArgCasts?.globalSizes,
         globalElementSizes: context?.funcPtrArgCasts?.globalElementSizes,
+        structLayouts: context?.funcPtrArgCasts?.structLayouts,
+        aggregateSizes: context?.funcPtrArgCasts?.aggregateSizes,
+        typedefTargets: context?.funcPtrArgCasts?.typedefTargets,
       };
     }
     // Masks a MOVZX computed, tagged before any pass reshapes the printed `&`.
