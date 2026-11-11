@@ -1074,6 +1074,8 @@ import { arrayGlobalAddressOfPlugin } from './builtins/array-global-address-of.j
 export { arrayGlobalAddressOfPlugin } from './builtins/array-global-address-of.js';
 import { charLiteralEscapePlugin } from './builtins/char-literal-escape.js';
 export { charLiteralEscapePlugin } from './builtins/char-literal-escape.js';
+import { signBitTestPlugin } from './builtins/sign-bit-test.js';
+export { signBitTestPlugin, createSignBitTestTransformer } from './builtins/sign-bit-test.js';
 export { getGotoCleanupStats, resetGotoCleanupStats } from './builtins/goto-cleanup/index.js';
 export type { GotoCleanupStats } from './builtins/goto-cleanup/index.js';
 import { frameGroupLocalsPlugin } from './builtins/frame-group-locals.js';
@@ -1292,6 +1294,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   localShadowedGlobalPlugin,     // Correctness: a global token a same-named parameter or local hides → ::x, from the markup (priority -1)
   arrayGlobalAddressOfPlugin, // Cleanup: &X_ARRAY_<hex> → X_ARRAY_<hex> (priority 46)
   charLiteralEscapePlugin,    // Cleanup: '²' → '\xb2' (priority 46)
+  signBitTestPlugin,          // Matching: byte and key-state sign predicates become bit masks (priority 989.995)
   memoryPatternsPlugin,       // Pattern detection (late)
   frameGroupLocalsPlugin,     // Correctness: a contiguous frame run whose first slot's address escapes -> one struct-typed local (priority 950)
   warningCommentStripPlugin,  // Cleanup: drop Ghidra WARNING comments; warnings.tsv carries them (priority 990, last)
