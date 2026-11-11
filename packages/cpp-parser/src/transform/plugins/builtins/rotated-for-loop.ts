@@ -19,9 +19,21 @@
  * Ghidra may print up to three statements S between that initialisation and the `if`
  * (FreeHireablesList, 00492ec0: `nIconIdx = 0; pMemoryToFree = gpHireablesList; if (...)`).
  * The initialisation moves past them when each is a plain assignment or declaration of a
- * variable other than i, with a side-effect-free value that does not mention i, and X
- * reads only constants and variables none of them writes: then S cannot see i, and X has
- * the same value after S as before it.
+ * variable other than i, with a side-effect-free value that does not mention i (or an
+ * `if` whose condition has no side effect and does not mention i, with arms of such
+ * statements only), and X reads only constants and variables none of them writes: then S
+ * cannot see i, and X has the same value after S as before it.
+ *
+ * Where S is more than such stores, and holds a call the original's offsets show made after
+ * the initialisation, a constant X whose counter's address nothing takes stays where it is,
+ * and the for loop has no initialisation:
+ *
+ *   i = X; S; if (G) { do { B; step; } while (C); }   ->   i = X; S; for (; C; step) { B }
+ *
+ * The original set i there: TEXT_DrawTextBoxAtPosition (0049d8e0) zeroes the counter before
+ * `SetAndReturnLastFont(0xd)` and forms the call's 0xd from it (`xor esi, esi; lea ecx,
+ * [esi + 0xd]`), and a VC8 compile of this form matches it byte for byte. S must not name i
+ * and must leave only by falling through: then i still holds X at the test, which is G.
  *
  * The two mean the same only when all of this holds, so each is checked:
  *   - the `if` has no else, and its block holds the do-while only, after the
@@ -40,16 +52,20 @@
  *     `continue` of its own (in a for loop that would run the step);
  *   - no goto outside the loop jumps into its body.
  *
- * Two loops mean the same as a for loop but did not compile from one, and stay as
- * they are, which VC8 lays out as the original:
- *   - a bound computed from other values (`i < n >> 8`, MONSTER_PreloadSequenceAnimations,
- *     004afb60) that the guard and the test both print from one instruction: the original
- *     computed it once, into a variable, and the for loop computes it in another order.
- *     Where the original's offsets show the test computing it again (or there are none
- *     to show it) the bound is the for loop's own;
- *   - a body that opens with `if (b) break;` ahead of more statements (zlib's syncsearch,
- *     0042b300: `while (next < len && got < 4)`). That is a second exit test the
- *     original has in its condition; the for loop gives the break its own exit.
+ * A body that opens with `if (b) break;` ahead of more statements holds a second exit test
+ * the original has in its condition: the for loop tests `C && !b` and the break goes
+ * (zlib's syncsearch, 0042b300: `while (next < len && got < 4)`; TEXT_DrawTextBoxAtPosition,
+ * 0049d8e0: `nLineIdx < nLineCount && pCurLine`). Kept as a break, the for loop gives it an
+ * exit of its own, which the original does not have. Each iteration still tests C, then b,
+ * then runs the rest; the first, which the guard entered on C, tests b first as before.
+ * Only a test with no side effect and no comment folds, and every leading one does.
+ *
+ * A loop that means the same as a for loop but did not compile from one stays as it is,
+ * which VC8 lays out as the original: a bound computed from other values (`i < n >> 8`,
+ * MONSTER_PreloadSequenceAnimations, 004afb60) that the guard and the test both print from
+ * one instruction: the original computed it once, into a variable, and the for loop
+ * computes it in another order. Where the original's offsets show the test computing it
+ * again (or there are none to show it) the bound is the for loop's own.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -375,18 +391,62 @@ function computedOnce(ifs: IfStmt, test: Expression, layout: BranchLayoutEvidenc
   return go.some(o => to.includes(o));
 }
 
-/** Whether the body's first statement is `if (b) break;` and more statements follow it. */
-function opensWithBreakTest(inner: Statement[]): boolean {
-  if (inner.length < 2 || inner[0].kind !== NodeKind.IfStmt) return false;
-  const ifs = inner[0] as IfStmt;
-  if (ifs.elseBranch !== null) return false;
+/** The `b` of a statement `if (b) break;`, else null. */
+function breakTest(s: Statement): Expression | null {
+  if (s.kind !== NodeKind.IfStmt) return null;
+  const ifs = s as IfStmt;
+  if (ifs.elseBranch !== null || ifs.isConstexpr || ifs.init) return null;
   let th: Statement = ifs.thenBranch;
   if (th.kind === NodeKind.CompoundStmt) {
     const st = (th as CompoundStmt).statements;
-    if (st.length !== 1) return false;
+    if (st.length !== 1) return null;
     th = st[0];
   }
-  return th.kind === NodeKind.BreakStmt;
+  return th.kind === NodeKind.BreakStmt ? ifs.condition : null;
+}
+
+/**
+ * How many statements `if (b) break;` open the body ahead of more statements, each b free
+ * of side effects and the statement of comments; -1 when one of them is not.
+ */
+function leadingBreakTests(inner: Statement[]): number {
+  let k = 0;
+  while (k < inner.length - 1 && breakTest(inner[k])) {
+    const b = breakTest(inner[k])!;
+    if (!isPlainPure(b) || hasComment(inner[k])) return -1;
+    k++;
+  }
+  return k;
+}
+
+const FLIPPED: Record<string, string> = { '<': '>=', '>=': '<', '>': '<=', '<=': '>', '==': '!=', '!=': '==' };
+const FLOATING = new Set(['float', 'double', 'long double']);
+
+/**
+ * `!b` as a condition: a `!` dropped, a comparison of two operands of known integer or
+ * pointer type flipped (with no NaN, `!(a < b)` is `a >= b`), anything else under `!(...)`.
+ */
+function negated(b: Expression, shapeOf: ExprShape): Expression {
+  const u = unwrapParens(b);
+  const bare = { leadingTrivia: [], trailingTrivia: [] };
+  if (u.kind === NodeKind.UnaryExpr && (u as UnaryExpr).operator === '!') {
+    const inner = unwrapParens((u as UnaryExpr).operand);
+    // `!x` as a truth value is x; anything binary keeps its own parentheses under `&&`.
+    return inner.kind === NodeKind.BinaryExpr ? { kind: NodeKind.ParenExpr, expression: inner, location: u.location, ...bare } as ParenExpr : inner;
+  }
+  if (u.kind === NodeKind.BinaryExpr && FLIPPED[(u as BinaryExpr).operator]) {
+    const e = u as BinaryExpr;
+    const known = (x: Expression) => {
+      if (intLiteral(x) !== null) return true;
+      const t = shapeOf(x);
+      return !!t && !FLOATING.has(t.base);
+    };
+    if (known(e.left) && known(e.right)) return { ...e, operator: FLIPPED[e.operator], ...bare } as BinaryExpr;
+  }
+  const operand: Expression = u.kind === NodeKind.BinaryExpr
+    ? { kind: NodeKind.ParenExpr, expression: u, location: u.location, ...bare } as ParenExpr
+    : u;
+  return { kind: NodeKind.UnaryExpr, operator: '!', operand, location: u.location, ...bare } as unknown as UnaryExpr;
 }
 
 /** Whether `n` holds a `continue` that belongs to the loop `n` is the body of. */
@@ -424,7 +484,7 @@ function ifKey(n: ASTNode): string | null {
  * A rotated loop's counter, whether its initialisation stands ahead of the `if`, and how
  * many statements stand between that initialisation and the `if`.
  */
-interface Site { v: string; ahead: boolean; gap: number; second?: string }
+interface Site { v: string; ahead: boolean; gap: number; second?: string; breaks?: number; keep?: boolean }
 
 /** The most statements an initialisation ahead of the `if` moves past. */
 const MAX_GAP = 3;
@@ -486,22 +546,136 @@ function matchSiteBefore(
     const site = matchSite(ifs, ahead, body, shapeOf, locals, layout);
     if (!site || !site.ahead) continue;
     const init = initOf(ahead)!;
-    if (!before.slice(before.length - gap).every(s => movesPast(s, init.v, init.x))) return null;
-    return { ...site, gap };
+    const between = before.slice(before.length - gap);
+    if (between.every(s => movesPast(s, init.v, init.x))) return { ...site, gap };
+    // Past a call the original made after it, the initialisation stays where it is, and the
+    // for loop has none.
+    if (isConstant(init.x) && !addressed(body, init.v) && between.every(s => staysBehind(s, init.v))
+        && setBeforeCall(ahead, between, layout)) {
+      return { ...site, gap, keep: true };
+    }
+    return null;
   }
   return null;
 }
 
 /**
- * Whether the initialisation `v = x` can move past `s`: `s` assigns or declares a variable
- * other than `v` with a side-effect-free value that does not mention `v`, and `x` reads
- * only constants and variables, none of them the one `s` writes.
+ * Whether the initialisation `v = x` can move past `s`: `s` assigns (`=` or a compound `op=`)
+ * or declares a variable other than `v` with a side-effect-free value that does not mention
+ * `v`, and `x` reads only constants and variables, none of them the one `s` writes.
  */
 function movesPast(s: Statement, v: string, x: Expression): boolean {
   if (hasComment(s)) return false;
-  const w = initOf(s);
+  if (s.kind === NodeKind.IfStmt) return ifMovesPast(s as IfStmt, v, x);
+  const w = storeOf(s);
   if (!w || w.v === v || !isPlainPure(w.x) || mentions(w.x, v)) return false;
   return readsOnlyNames(x) && !mentions(x, w.v);
+}
+
+/**
+ * Whether a constant initialisation of `v`, a variable whose address nothing takes, keeps
+ * its value across `s`: `s` is an expression statement, a declaration or an `if` of such
+ * statements, none of which names `v`. A call cannot reach v, and `s` leaves only by falling
+ * through (or not at all).
+ */
+function staysBehind(s: Statement, v: string): boolean {
+  if (mentionsName(s, v)) return false;
+  if (s.kind === NodeKind.ExprStmt || s.kind === NodeKind.DeclStmt) return true;
+  if (s.kind !== NodeKind.IfStmt) return false;
+  const ifs = s as IfStmt;
+  if (ifs.isConstexpr || ifs.init) return false;
+  const arm = (a: Statement): boolean =>
+    a.kind === NodeKind.CompoundStmt ? (a as CompoundStmt).statements.every(t => staysBehind(t, v)) : staysBehind(a, v);
+  return arm(ifs.thenBranch) && (ifs.elseBranch === null || arm(ifs.elseBranch));
+}
+
+/**
+ * Whether the original's offsets show the initialisation made before a call that stands
+ * between it and the `if`: every offset its line prints lies below every offset the line of
+ * such a call prints. Without the offsets, no.
+ */
+function setBeforeCall(init: Statement, between: Statement[], layout: BranchLayoutEvidence | null | undefined): boolean {
+  if (!layout) return false;
+  const offsets = (n: ASTNode) => {
+    const line = n.location && n.location.file !== '<generated>' ? n.location.start.line : 0;
+    return line > 0 ? layout.lines.get(line) : undefined;
+  };
+  const own = offsets(init);
+  if (!own || own.length === 0) return false;
+  const last = Math.max(...own);
+  return between.some(s => {
+    if (!hasCallIn(s)) return false;
+    const o = offsets(s);
+    return !!o && o.length > 0 && o.every(x => x > last);
+  });
+}
+
+function hasCallIn(n: ASTNode): boolean {
+  if (n.kind === NodeKind.CallExpr) return true;
+  for (const c of getChildren(n)) if (hasCallIn(c)) return true;
+  return false;
+}
+
+/** The variable a plain or compound assignment (or a declaration) stores, with the value it reads. */
+function storeOf(s: Statement): { v: string; x: Expression } | null {
+  const init = initOf(s);
+  if (init) return init;
+  if (s.kind !== NodeKind.ExprStmt) return null;
+  const e = unwrapParens((s as ExprStmt).expression);
+  if (e.kind !== NodeKind.AssignExpr) return null;
+  const a = e as AssignExpr, l = unwrapParens(a.left);
+  // `w op= e` reads w as well: the value it stores is formed from w and e.
+  return l.kind === NodeKind.Identifier ? { v: (l as Identifier).name, x: a.right } : null;
+}
+
+/** Whether `n` names `name` anywhere, declarations included. */
+function mentionsName(n: ASTNode, name: string): boolean {
+  if (n.kind === NodeKind.Identifier) return (n as Identifier).name === name;
+  if (n.kind === NodeKind.VariableDecl && (n as VariableDecl).name.name === name) return true;
+  for (const c of getChildren(n)) if (mentionsName(c, name)) return true;
+  return false;
+}
+
+function declaresName(d: DeclStmt, name: string): boolean {
+  return d.declarations.some(x => x.kind === NodeKind.VariableDecl && (x as VariableDecl).name.name === name);
+}
+
+/** Whether `e` is a constant: literals only, no name. */
+function isConstant(e: ASTNode): boolean {
+  return readsOnlyNames(e) && !mentionsAnyName(e);
+}
+
+function mentionsAnyName(e: ASTNode): boolean {
+  if (e.kind === NodeKind.Identifier) return true;
+  for (const c of getChildren(e)) if (mentionsAnyName(c)) return true;
+  return false;
+}
+
+/** Whether `n` takes the address of the variable `name`. */
+function addressed(n: ASTNode, name: string): boolean {
+  if (n.kind === NodeKind.UnaryExpr && (n as UnaryExpr).operator === '&') {
+    const o = unwrapParens((n as UnaryExpr).operand);
+    if (o.kind === NodeKind.Identifier && (o as Identifier).name === name) return true;
+  }
+  for (const c of getChildren(n)) if (addressed(c, name)) return true;
+  return false;
+}
+
+/**
+ * Whether the initialisation `v = x` can move past the `if` `s`: its condition is free of
+ * side effects and does not mention `v`, and each arm is a statement or a block of
+ * statements the initialisation moves past (DRLGOUTJUNG_BuildKurastDocktownBorders,
+ * 0067ead0: `nXIter = 1;` ahead of an if/else that sets nPortalX). Every path through such
+ * an `if` stores only into variables other than `v` and leaves it only by falling through.
+ */
+function ifMovesPast(s: IfStmt, v: string, x: Expression): boolean {
+  if (s.isConstexpr || s.init || !isPlainPure(s.condition) || mentionsName(s.condition, v)) return false;
+  const arm = (a: Statement): boolean => {
+    if (a.kind !== NodeKind.CompoundStmt) return movesPast(a, v, x);
+    const st = (a as CompoundStmt).statements;
+    return st.length > 0 && st.every(t => movesPast(t, v, x));
+  };
+  return arm(s.thenBranch) && (s.elseBranch === null || arm(s.elseBranch));
 }
 
 /** Whether `e` is built of literals and plain variable names only - no memory read. */
@@ -563,7 +737,8 @@ function matchSite(
     second = u;
   }
   if (hasOwnContinue(loop.body)) return null;
-  if (opensWithBreakTest(inner.slice(0, second ? -2 : -1))) return null;
+  const breaks = leadingBreakTests(inner.slice(0, second ? -2 : -1));
+  if (breaks < 0) return null;
   const bound = boundOf(c, v);
   if (bound && !isPlainRead(bound) && computedOnce(ifs, c, layout)) return null;
 
@@ -577,7 +752,7 @@ function matchSite(
     const from = gotoTargets(body, loop.body, new Set());
     for (const l of labels) if (from.has(l)) return null;
   }
-  return { v, ahead: parts.ahead, gap: 0, ...(second ? { second } : {}) };
+  return { v, ahead: parts.ahead, gap: 0, ...(second ? { second } : {}), ...(breaks > 0 ? { breaks } : {}) };
 }
 
 /** The variable a step statement assigns or increments, when it is a plain identifier. */
@@ -702,7 +877,7 @@ function secondInitBeforeGuard(ifs: IfStmt, body: CompoundStmt, u: string, v: st
 }
 
 /** The for loop of a site; `ahead` is the statement before the `if`, for a site that has its initialisation there. */
-function rewrite(ifs: IfStmt, site: Site, ahead: Statement | null = null): ForStmt | null {
+function rewrite(ifs: IfStmt, site: Site, shapeOf: ExprShape, ahead: Statement | null = null): ForStmt | null {
   const parts = loopParts(ifs, ahead);
   if (!parts || parts.ahead !== site.ahead) return null;
   const loop = parts.loop;
@@ -712,7 +887,14 @@ function rewrite(ifs: IfStmt, site: Site, ahead: Statement | null = null): ForSt
   const at = site.second ? inner.length - 2 : inner.length - 1;
   const step = at >= 0 ? stepOf(inner[at], site.v) : null;
   if (!step) return null;
-  const rest = inner.filter((_s, i) => i !== at);
+  const breaks = site.breaks ?? 0;
+  const tests = inner.slice(0, breaks).map(s => breakTest(s));
+  if (tests.some(b => !b)) return null;
+  const rest = inner.filter((_s, i) => i !== at && i >= breaks);
+  const condition = tests.reduce<Expression>((c, b) => ({
+    kind: NodeKind.BinaryExpr, operator: '&&', left: c, right: negated(b!, shapeOf),
+    location: loop.condition.location, leadingTrivia: [], trailingTrivia: [],
+  } as BinaryExpr), loop.condition);
   const newBody: CompoundStmt = bodyStmt.kind === NodeKind.CompoundStmt
     ? updateNode(bodyStmt as CompoundStmt, { statements: rest })
     : { kind: NodeKind.CompoundStmt, statements: rest, location: bodyStmt.location, leadingTrivia: [], trailingTrivia: [] } as CompoundStmt;
@@ -720,8 +902,8 @@ function rewrite(ifs: IfStmt, site: Site, ahead: Statement | null = null): ForSt
   const first = parts.ahead ? parts.init : ifs;
   return {
     kind: NodeKind.ForStmt,
-    init,
-    condition: loop.condition,
+    init: site.keep ? null : init,
+    condition,
     increment: { ...step, leadingTrivia: [], trailingTrivia: [] } as Expression,
     body: newBody,
     location: first.location,
@@ -765,7 +947,7 @@ export function createRotatedForLoopTransformer(options?: PluginOptions): Transf
       visitIfStmt(node: IfStmt): ASTNode | undefined {
         const k = ifKey(node);
         const site = k ? sites.get(k) : undefined;
-        return site && !site.ahead ? rewrite(node, site) ?? undefined : undefined;
+        return site && !site.ahead ? rewrite(node, site, shapeOf) ?? undefined : undefined;
       },
       // A loop whose initialisation stands ahead of the `if` takes the place of both; the
       // statements between them stay ahead of the loop.
@@ -778,8 +960,8 @@ export function createRotatedForLoopTransformer(options?: PluginOptions): Transf
           const site = k ? sites.get(k) : undefined;
           const at = i - 1 - (site?.gap ?? 0);
           if (!site?.ahead || at < 0 || moved.has(at) || loops.has(at)) return;
-          const loop = rewrite(s as IfStmt, site, stmts[at]);
-          if (loop) { loops.set(i, loop); moved.add(at); }
+          const loop = rewrite(s as IfStmt, site, shapeOf, stmts[at]);
+          if (loop) { loops.set(i, loop); if (!site.keep) moved.add(at); }
         });
         if (loops.size === 0) return undefined;
         const out = stmts.flatMap((s, i) => moved.has(i) ? [] : [loops.get(i) ?? s]);
