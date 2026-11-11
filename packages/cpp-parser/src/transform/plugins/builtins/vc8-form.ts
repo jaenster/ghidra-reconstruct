@@ -102,6 +102,16 @@
  *                        bound: `a < N` as `a <= N-1`, `a >= N` as `a > N-1`, and back),
  *                        mirror-lit (both, in this order).
  *   swap(E[,i])          the commutative `a op b` (+ * & | ^) is written `b op a`.
+ *   shift(E,H[,i])       the shift `E >> k` under a cast to an integer T of w bits, w + k <= 32
+ *                        (not bool), is written arithmetic (H = sar: `(T)((int)E >> k)`, the
+ *                        cast left out for a signed E) or logical (H = shr: `(T)((uint32_t)E
+ *                        >> k)`, likewise). Both shift the same 32 bits; T drops the top k
+ *                        bits where they differ. The decompiler prints a shift whose top bits
+ *                        are dead as logical whatever the original did, and the high word
+ *                        `(WORD)((DWORD)x >> 16)` is split: HIWORD in some functions (shr,
+ *                        PATH_UpdateFixedPoint 00650660), a signed half in others (sar,
+ *                        DATAARRAY_GetSlot 006bccd0). E must be a local or parameter of a
+ *                        known integer type of at most 32 bits.
  *   ifsel(V)             `V = C ? A : B;` (or the declaration of V so initialized) is
  *                        written `if (C) { V = A; } else { V = B; }`.
 
@@ -197,7 +207,8 @@ export type Vc8Form =
   | { op: 'tsel'; cond: string; index: number }
   | { op: 'nestcall'; name: string; index: number }
   | { op: 'fill'; name: string; index: number }
-  | { op: 'copy'; name: string; index: number };
+  | { op: 'copy'; name: string; index: number }
+  | { op: 'shift'; expr: string; how: 'sar' | 'shr'; index: number };
 
 export interface Vc8FormSite {
   form: Vc8Form;
@@ -216,7 +227,7 @@ export interface Vc8FormOptions {
 
 const OPS = new Set(['seq', 'fold', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'width', 'arms',
   'nest', 'merge-tail', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
-  'nestcall', 'fill', 'copy']);
+  'nestcall', 'fill', 'copy', 'shift']);
 
 /** Split at the commas outside brackets, parentheses, angle-free. */
 function splitArgs(s: string): string[] {
@@ -293,6 +304,12 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
       const i = int(args[1], 0);
       if (anchor || args.length < 1 || args.length > 2 || !(i >= 0) || args[0] === '') return undefined;
       return (m[1] === 'tarms' || m[1] === 'unselect' ? { op: m[1], cond: args[0], index: i } : { op: m[1], expr: args[0], index: i }) as Vc8Form;
+    }
+    case 'shift': {
+      const i = int(args[2], 0);
+      if (anchor || args.length < 2 || args.length > 3 || !(i >= 0) || args[0] === '') return undefined;
+      if (args[1] !== 'sar' && args[1] !== 'shr') return undefined;
+      return { op: 'shift', expr: args[0], how: args[1], index: i };
     }
     case 'cmp': {
       const i = int(args[2], 0);
@@ -2345,12 +2362,80 @@ function doCopy(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'copy' }>): void {
   hit.b.statements.splice(hit.k, 1, call);
 }
 
+/** The integer types a shift operand may have here, by printed spelling: width and signedness. */
+const SHIFT_INTS: Record<string, { bits: number; signed: boolean }> = {
+  'int': { bits: 32, signed: true }, 'int32_t': { bits: 32, signed: true }, 'long': { bits: 32, signed: true },
+  'INT': { bits: 32, signed: true }, 'LONG': { bits: 32, signed: true }, 'BOOL': { bits: 32, signed: true },
+  'unsignedint': { bits: 32, signed: false }, 'uint32_t': { bits: 32, signed: false }, 'uint': { bits: 32, signed: false },
+  'DWORD': { bits: 32, signed: false }, 'UINT': { bits: 32, signed: false }, 'ULONG': { bits: 32, signed: false },
+  'unsignedlong': { bits: 32, signed: false }, 'size_t': { bits: 32, signed: false },
+  'short': { bits: 16, signed: true }, 'shortint': { bits: 16, signed: true }, 'int16_t': { bits: 16, signed: true }, 'SHORT': { bits: 16, signed: true },
+  'uint16_t': { bits: 16, signed: false }, 'WORD': { bits: 16, signed: false }, 'ushort': { bits: 16, signed: false },
+  'unsignedshort': { bits: 16, signed: false }, 'USHORT': { bits: 16, signed: false }, 'wchar_t': { bits: 16, signed: false },
+  'char': { bits: 8, signed: true }, 'signedchar': { bits: 8, signed: true }, 'int8_t': { bits: 8, signed: true }, 'CHAR': { bits: 8, signed: true },
+  'uint8_t': { bits: 8, signed: false }, 'BYTE': { bits: 8, signed: false }, 'byte': { bits: 8, signed: false },
+  'unsignedchar': { bits: 8, signed: false }, 'UCHAR': { bits: 8, signed: false },
+};
+
+/** The unsigned 32-bit spellings a logical shift's operand cast may have. */
+const SHIFT_U32 = new Set(['uint32_t', 'uint', 'unsignedint', 'DWORD', 'UINT', 'ULONG', 'unsignedlong']);
+const SHIFT_S32 = new Set(['int', 'int32_t', 'INT', 'LONG', 'long']);
+
+function doShift(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'shift' }>): void {
+  const w = norm(f.expr);
+  // E's declared type: a parameter or a local of the function.
+  let et: { bits: number; signed: boolean } | undefined;
+  let decls = 0;
+  for (const { node } of walk(fn)) {
+    if (node.kind !== NodeKind.VariableDecl && node.kind !== NodeKind.ParameterDecl) continue;
+    const d = node as unknown as { name?: Identifier | null; type: TypeNode };
+    if (!d.name || d.name.name !== w) continue;
+    decls++;
+    et = SHIFT_INTS[text(d.type)];
+  }
+  if (decls !== 1) refuse(`${f.expr} is not one local or parameter`);
+  if (!et) refuse(`${f.expr} has no known integer type of at most 32 bits`);
+  const sites: Array<{ shift: BinaryExpr; operand: Expression; cast?: CStyleCastExpr }> = [];
+  for (const { node } of walk(fn.body!)) {
+    if (node.kind !== NodeKind.CStyleCastExpr) continue;
+    const c = node as CStyleCastExpr;
+    const t = SHIFT_INTS[text(c.type)];
+    if (!t || t.bits >= 32) continue;
+    const sh = unparen(c.expression as Expression);
+    if (sh.kind !== NodeKind.BinaryExpr || (sh as BinaryExpr).operator !== '>>') continue;
+    const k = litValue((sh as BinaryExpr).right as Expression);
+    if (!k || k.v < 1n || BigInt(t.bits) + k.v > 32n) continue;
+    let operand = unparen((sh as BinaryExpr).left as Expression);
+    let inner: CStyleCastExpr | undefined;
+    if (operand.kind === NodeKind.CStyleCastExpr) {
+      const ct = text((operand as CStyleCastExpr).type);
+      if (!SHIFT_U32.has(ct) && !SHIFT_S32.has(ct)) continue;
+      inner = operand as CStyleCastExpr;
+      operand = unparen(inner.expression as Expression);
+    }
+    if (text(operand) !== w) continue;
+    sites.push({ shift: sh as BinaryExpr, operand, cast: inner });
+  }
+  const hit = f.index === 0
+    ? (sites.length === 1 ? sites[0] : refuse(`${sites.length} narrowed shifts of ${f.expr}`))
+    : (sites[f.index - 1] ?? refuse(`no narrowed shift #${f.index} of ${f.expr}`));
+  // The shift as written now, and the one asked for.
+  const nowSigned = hit.cast ? SHIFT_S32.has(text(hit.cast.type)) : et.signed;
+  const wantSigned = f.how === 'sar';
+  if (nowSigned === wantSigned) refuse(`the shift of ${f.expr} is already ${f.how}`);
+  const left = et.signed === wantSigned
+    ? hit.operand
+    : parseExpr(`(${wantSigned ? 'int' : 'uint32_t'})__vc8e`);
+  if (left !== hit.operand) ((left as CStyleCastExpr).expression as unknown) = hit.operand;
+  (hit.shift as unknown as Record<string, unknown>).left = left;
+}
+
 const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op: K }>) => void } = {
   seq: doSeq, fold: doFold, cache: doCache, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
   retval: doRetval, width: doWidth, arms: doArms,
   nest: doNest, 'merge-tail': doMergeTail, continue: doContinue, dup: doDup, tarms: doTarms, zero: doZero, nonzero: doNonzero, bool: doBool,
   cmp: doCmp, swap: doSwap, ifsel: doIfsel, split: doSplit, select: doSelect, decl: doDecl, unselect: doUnselect,
-  tsel: doTsel, hoist: doHoist, nestcall: doNestcall, fill: doFill, copy: doCopy,
+  tsel: doTsel, hoist: doHoist, nestcall: doNestcall, fill: doFill, copy: doCopy, shift: doShift,
 };
 
 /**
