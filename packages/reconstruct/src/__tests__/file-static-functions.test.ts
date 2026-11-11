@@ -199,8 +199,42 @@ describe('selectFileStaticFunctions', () => {
     assert.deepStrictEqual(sel.refused.get('referenced from excluded code'), ['Helper']);
   });
 
-  it('keeps it extern when nothing calls it', () => {
+  it('keeps a function nothing references static, alive by a reference of its unit', () => {
+    // TOKTBLS_GetTokenIndex 0065c300: its first argument in EAX, `ret 4`, no reference in
+    // the original; every call to it was inlined by a caller the decompile does not show.
     const lone = fn('Lone', '00401200', 'A', '  return nValue;', { params: [inEax()] });
+    const all = [lone, caller];
+    const sel = selectFileStaticFunctions({ allFunctions: all, unitOf: unitsOf(all), globals: [] });
+    assert.deepStrictEqual(sel.selected.get('00401200'), { unit: 'A', referrers: new Set(), keepAlive: true });
+    assert.strictEqual(sel.refused.get('no caller in its unit'), undefined);
+  });
+
+  it('keeps a function nothing references extern when its declaration spells its storage', () => {
+    // LEVEL_CountRoomsInAct 0053b090: ECX and DL under __stdcall, printed __fastcall, MATCH extern.
+    const lone = {
+      ...fn('Lone', '00401200', 'A', '  return 0;', {
+        params: [
+          { name: 'pGame', dataType: 'void *', size: 4, ordinal: 0, storage: 'ECX:4' },
+          { name: 'nAct', dataType: 'byte', size: 1, ordinal: 1, storage: 'DL:1' },
+        ],
+      }),
+      callingConvention: '__stdcall',
+    };
+    const all = [lone, caller];
+    const sel = selectFileStaticFunctions({ allFunctions: all, unitOf: unitsOf(all), globals: [] });
+    assert.strictEqual(sel.selected.size, 0);
+    assert.deepStrictEqual(sel.refused.get('no caller in its unit'), ['Lone']);
+  });
+
+  it('keeps it alive the same way when no inlined copy of it is found', () => {
+    const lone = fn('Lone', '00401200', 'A', '  return nValue;', { params: [inEax()] });
+    const all = [lone, caller];
+    const sel = selectFileStaticFunctions({ allFunctions: all, unitOf: unitsOf(all), globals: [], inlinedCalls: () => new Map() });
+    assert.deepStrictEqual(sel.selected.get('00401200'), { unit: 'A', referrers: new Set(), keepAlive: true });
+  });
+
+  it('keeps it extern when nothing references it and the reference cannot call it', () => {
+    const lone = { ...fn('Lone', '00401200', 'A', '  return nValue;', { params: [inEax()] }), hasVarArgs: true };
     const all = [lone, caller];
     const sel = selectFileStaticFunctions({ allFunctions: all, unitOf: unitsOf(all), globals: [] });
     assert.strictEqual(sel.selected.size, 0);
@@ -249,7 +283,8 @@ describe('selectFileStaticFunctions', () => {
     const mentioner = fn('Mentioner', '00401100', 'A', '  /* Helper(1) */\n  Log("Helper(2)");\n  return 0;');
     const all = [helper, mentioner];
     const sel = selectFileStaticFunctions({ allFunctions: all, unitOf: unitsOf(all), globals: [] });
-    assert.deepStrictEqual(sel.refused.get('no caller in its unit'), ['Helper']);
+    // Unreferenced, so kept alive by its unit rather than by the mention.
+    assert.deepStrictEqual(sel.selected.get('00401000'), { unit: 'A', referrers: new Set(), keepAlive: true });
   });
 
   it('keeps it extern when a data initializer names it', () => {
@@ -666,5 +701,25 @@ describe('file-static emission', () => {
     assert.ok(/return GetCell\(a, b\) \+ 1;/.test(impl), `call not restored:\n${impl}`);
     assert.ok(/return gaTable\[a\] - b;/.test(impl), `an unrelated body must stay:\n${impl}`);
     assert.ok(!/\bGetCell\s*\(/.test(file('Alpha.h')), 'a static is not declared in the header');
+  });
+
+  it('defines a function nothing references static and keeps it alive with a reference that runs nothing', () => {
+    // TOKTBLS_GetTokenIndex 0065c300: `shl eax, 4; add eax, [ebp+8]; ret 4`, no reference.
+    const index = fn('GetTokenIndex', '0065c300', 'Alpha', '  return nParam1 * 0x10 + nParam2;', {
+      params: [
+        { name: 'nParam1', dataType: 'int', size: 4, ordinal: 0, storage: 'EAX:4' },
+        { name: 'nParam2', dataType: 'int', size: 4, ordinal: 1, storage: 'Stack[0x4]:4' },
+      ],
+    });
+    const other = fn('Other', '00401080', 'Alpha', '  return 0;');
+    const namespaces: ExtractedNamespace[] = [{ name: 'Alpha', fullPath: 'Alpha', functionCount: 2, isClass: false }];
+    const project = generateProject('keepalive', [index, other], [], [], [], namespaces, options, programInfo);
+    const file = (suffix: string) => [...project.files.values()].find(f => f.path.endsWith(suffix))!.content;
+    const impl = file('Alpha.cpp');
+    assert.ok(/^static int __stdcall GetTokenIndex\(int nParam1, int nParam2\) \{$/m.test(impl), `static definition missing:\n${impl}`);
+    const keep = 'static void * keep_0065c300 = (0 ? (GetTokenIndex(*(int *)0, *(int *)0), (void *)0) : (void *)0);';
+    assert.ok(impl.includes(keep), `keep-alive reference missing:\n${impl}`);
+    assert.ok(impl.indexOf(keep) > impl.indexOf('Other('), 'the reference follows every definition');
+    assert.ok(!/\bGetTokenIndex\s*\(/.test(file('Alpha.h')), 'a static is not declared in the header');
   });
 });

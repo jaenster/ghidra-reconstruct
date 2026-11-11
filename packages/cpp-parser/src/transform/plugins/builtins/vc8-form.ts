@@ -167,6 +167,39 @@
  *                        come from such a loop (SKILLDESC_FormatSignedValue 004e79e0,
  *                        AUTOMAP_DrawGamePassword 00459e90). The pointer loop's P and N
  *                        must be locals dead after it; refused when a bound leaves int.
+ *   acc(E[,i])           the read E of a unit field, printed `X->F` (or `X->F.G`), that an
+ *                        accessor of the tables names (`accessors`: a header inline that
+ *                        returns the field, or a constant when X is null) is written as
+ *                        the call of that accessor's inline twin, `A(X)`, defined once in
+ *                        the unit ahead of the function (Vc8FormSite.prefix). The twin has
+ *                        two returns, `if (X) { return X->F; } return K;`, and VC8 keeps
+ *                        the value it returns in a register of its own where it folds a
+ *                        plain read into the instruction that uses it
+ *                        (MONSTERAI_IsValidResurrectionTarget 005eb650 `mov eax, [esi];
+ *                        cmp eax, 1`, CLIENT_StoreUnitGuidForQuestTracking 0046bc70 `or
+ *                        eax, -1; mov [g], eax`). A null test of X the read sits behind
+ *                        goes with it where the accessor's K gives the same truth: `X &&
+ *                        X->F == C` and `!X || X->F != C` for C other than K, and `X ?
+ *                        X->F : K`; `acc(E[,i],bare)` leaves the test as printed and
+ *                        writes the read alone (CLIENT_StoreUnitGuidForQuestTracking
+ *                        0046bc70 keeps `!pUnit ? -1 : A(pUnit)`). X must name a pointer
+ *                        to the accessor's struct and read nothing but names and members.
+ *   retvar(C,N[,i])      the guard `if (C) { ...; return X; }` followed by the function's
+ *                        last statement `return K;` (K a constant) is written with a result
+ *                        variable: `T N = K;` just before the if, `N = X;` ending its arm,
+ *                        and `return N;` - T the function's return type. VC8 returns the
+ *                        K it put in a register for N (WEATHER_GetCurrentLevelWeatherFlags
+ *                        00473770: `xor ecx, ecx` ... `mov eax, ecx`). Refused when the arm
+ *                        leaves other than through its last return, or N names something.
+ *   onecall(C,N[,i])     the guard `if (C) { F(..., X, ...); return; }` followed by the
+ *                        function's last statement, the same call with Y in that one
+ *                        argument, is written as one call: `T N; if (C) { N = X; } else {
+ *                        N = Y; } F(..., N, ...);`, T the parameter's type. VC8 duplicates
+ *                        the call into both arms itself and passes the zero arm's value
+ *                        from a register (SUNITNPC_CloseNpcInteraction 00579130, `xor eax,
+ *                        eax; push eax`). Refused unless every other argument loads nothing
+ *                        and X and Y call and store nothing, as their evaluation moves
+ *                        ahead of the other arguments.
  *   copy(D[,i])          the copy loop `for (N = K; N; N--) { *D = *S; S++; D++; }` is
  *                        written `memcpy(D, S, K * sizeof(*D));`, which VC8 expands to the
  *                        original's `rep movsd`. D and S must be declared pointers to one
@@ -225,7 +258,31 @@ export type Vc8Form =
   | { op: 'copy'; name: string; index: number }
   | { op: 'shift'; expr: string; how: 'sar' | 'shr'; index: number }
   | { op: 'ptrwalk'; counter: string; array: string; name: string; type: string; index: number }
-  | { op: 'rowptr'; expr: string; name: string; type: string; anchor?: string };
+  | { op: 'rowptr'; expr: string; name: string; type: string; anchor?: string }
+  | { op: 'acc'; expr: string; index: number; bare?: boolean }
+  | { op: 'retvar'; cond: string; name: string; index: number }
+  | { op: 'onecall'; cond: string; name: string; index: number };
+
+/**
+ * A header inline that reads one field of a struct through a pointer, or returns a
+ * constant for a null pointer (D2Common::Units::GetGUID 00451f50): `acc` writes a read of
+ * the field as a call of its twin, `call`, whose definition is `definition`.
+ */
+export interface Vc8Accessor {
+  /** The struct the pointer points to, as types name it. */
+  struct: string;
+  /** The field read, outermost first: `['eAnimMode', 'ePlayerMode']`. */
+  path: string[];
+  /** The twin's name, as the call spells it. */
+  call: string;
+  /** The value the accessor returns for a null pointer. */
+  dflt: bigint;
+  /** The twin's definition, written once ahead of the first function that calls it. */
+  definition: string;
+}
+
+/** The tables vc8-form reads: select-argument's, and the accessors `acc` writes. */
+export type Vc8FormTables = SelectArgumentOptions & { accessors?: Vc8Accessor[] };
 
 export interface Vc8FormSite {
   form: Vc8Form;
@@ -233,18 +290,20 @@ export interface Vc8FormSite {
   tag?: string;
   applied: boolean;
   why?: string;
+  /** Definitions an applied form calls, to be written once ahead of the function (`acc`). */
+  prefix?: string[];
 }
 
 export interface Vc8FormOptions {
   forms: Array<{ form: Vc8Form; tag?: string }>;
   onSite?: (site: Vc8FormSite) => void;
-  /** The tables tsel types the values of an if/else from. */
-  selectTables?: SelectArgumentOptions;
+  /** The tables tsel types the values of an if/else from, and the accessors acc writes. */
+  selectTables?: Vc8FormTables;
 }
 
 const OPS = new Set(['seq', 'fold', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'width', 'boolflag', 'retwiden', 'arms',
   'nest', 'merge-tail', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
-  'nestcall', 'fill', 'copy', 'shift', 'ptrwalk', 'rowptr']);
+  'nestcall', 'fill', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall']);
 
 /** Split at the commas outside brackets, parentheses, angle-free. */
 function splitArgs(s: string): string[] {
@@ -329,6 +388,20 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
       const i = int(args[1], 1);
       if (anchor || args.length < 1 || args.length > 2 || !(i >= 1) || args[0] === '') return undefined;
       return { op: m[1], cond: args[0], index: i } as Vc8Form;
+    }
+    case 'retvar': case 'onecall': {
+      const i = int(args[2], 1);
+      if (anchor || args.length < 2 || args.length > 3 || !(i >= 1) || args[0] === '' || !/^[A-Za-z_]\w*$/.test(args[1])) return undefined;
+      return { op: m[1], cond: args[0], name: args[1], index: i } as Vc8Form;
+    }
+    case 'acc': {
+      // `acc(E)`, `acc(E,i)`, `acc(E,bare)`, `acc(E,i,bare)`.
+      const rest = args.slice(1);
+      const bare = rest[rest.length - 1] === 'bare';
+      if (bare) rest.pop();
+      const i = int(rest[0], 0);
+      if (anchor || args.length < 1 || rest.length > 1 || !(i >= 0) || args[0] === '') return undefined;
+      return { op: 'acc', expr: args[0], index: i, ...(bare ? { bare: true } : {}) };
     }
     case 'zero': case 'nonzero': case 'bool': case 'swap': case 'tarms': case 'unselect': {
       const i = int(args[1], 0);
@@ -2069,7 +2142,7 @@ function doSplit(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'split' }>): void {
   for (const s of b.statements.slice(k + 1, end)) for (const { node } of walk(s)) if (isId(node, f.name)) (node as Identifier).name = f.rename;
 }
 
-let selectTables: SelectArgumentOptions | undefined;
+let selectTables: Vc8FormTables | undefined;
 
 function doTsel(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'tsel' }>): void {
   try {
@@ -2681,12 +2754,241 @@ function doRowptr(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'rowptr' }>): void
   tidyThrough(fn, f.name);
 }
 
+// ---------------------------------------------------------------------------------------
+// acc: a unit field read through its accessor's inline twin
+
+/** The definitions the form being applied calls (acc), reported with the site. */
+let prefixUsed: Set<string> = new Set();
+
+/** `X->a.b`: the pointer X and the field path, when e is such a read. */
+function fieldRead(e: Expression): { base: Expression; path: string[] } | undefined {
+  const path: string[] = [];
+  let cur = unparen(e);
+  while (cur.kind === NodeKind.MemberExpr) {
+    const m = cur as unknown as { object: Expression; member: ASTNode; isArrow: boolean };
+    if (!isId(m.member)) return undefined;
+    path.unshift(m.member.name);
+    if (m.isArrow) return { base: m.object, path };
+    cur = unparen(m.object);
+  }
+  return undefined;
+}
+
+/** A pointer expression that reads only names and members: evaluated once or twice, the same. */
+function plainPointer(e: Expression): boolean {
+  const x = unparen(e);
+  if (isId(x)) return true;
+  if (x.kind === NodeKind.MemberExpr) return plainPointer((x as unknown as { object: Expression }).object);
+  return false;
+}
+
+/** The integer a constant expression stands for: a literal, its negation, an enumerator, a cast of one. */
+function constValue(e: Expression): bigint | undefined {
+  const x = unparen(e);
+  if (x.kind === NodeKind.IntegerLiteral) return (x as IntegerLiteralExpr).value as bigint;
+  if (x.kind === NodeKind.UnaryExpr && (x as UnaryExpr).operator === '-') {
+    const v = constValue((x as UnaryExpr).operand);
+    return v === undefined ? undefined : -v;
+  }
+  if (x.kind === NodeKind.CStyleCastExpr) return constValue((x as CStyleCastExpr).expression);
+  if (isId(x)) {
+    const v = selectTables?.enumValues?.[x.name];
+    return v === undefined ? undefined : BigInt(v);
+  }
+  if (x.kind === NodeKind.QualifiedId) {
+    const leaf = emit(x as never).split('::').pop()!.trim();
+    const v = selectTables?.enumValues?.[leaf];
+    return v === undefined ? undefined : BigInt(v);
+  }
+  return undefined;
+}
+
+/** 'set' when c is true exactly when p is not null, 'null' when exactly when it is. */
+function nullTest(c: Expression, p: string): 'set' | 'null' | undefined {
+  const x = unparen(c);
+  if (text(x) === p) return 'set';
+  if (x.kind === NodeKind.UnaryExpr && (x as UnaryExpr).operator === '!' && text(unparen((x as UnaryExpr).operand)) === p) return 'null';
+  if (x.kind === NodeKind.BinaryExpr && ['==', '!='].includes((x as BinaryExpr).operator)) {
+    const b = x as BinaryExpr;
+    const [v, k] = text(unparen(b.left)) === p ? [b.left, b.right] : text(unparen(b.right)) === p ? [b.right, b.left] : [];
+    if (!v || !k) return undefined;
+    const kk = unparen(k);
+    const zero = constValue(kk) === 0n || (isId(kk) && ['nullptr', 'NULL'].includes(kk.name)) || kk.kind === NodeKind.NullptrLiteral;
+    if (!zero) return undefined;
+    return b.operator === '!=' ? 'set' : 'null';
+  }
+  return undefined;
+}
+
+/** Put n where child sits in parent. */
+function replaceChild(parent: ASTNode, child: ASTNode, n: ASTNode): void {
+  const o = parent as unknown as Record<string, unknown>;
+  for (const k of Object.keys(o)) {
+    const v = o[k];
+    if (v === child) { o[k] = n; return; }
+    if (Array.isArray(v)) { const i = v.indexOf(child); if (i >= 0) { v[i] = n; return; } }
+  }
+  refuse('internal: site not found under its parent');
+}
+
+function doAcc(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'acc' }>): void {
+  const table = (selectTables as Vc8FormTables | undefined)?.accessors;
+  if (!table?.length) refuse('no accessor table');
+  const site = pick(fn, f.expr, f.index, (n): n is Expression => n.kind === NodeKind.MemberExpr && !!fieldRead(n as Expression));
+  const read = fieldRead(site)!;
+  const acc = table!.find(a => a.path.join('.') === read.path.join('.')) ?? refuse(`no accessor reads ${read.path.join('.')}`);
+  if (!plainPointer(read.base)) refuse(`${emit(read.base as never)} is not a plain pointer`);
+  const tables = selectTables;
+  const shapeOf = createExprShape(localTypesOf(fn), {
+    globalTypes: tables?.globalTypes ?? {}, enclosingVarTypes: tables?.enclosingVarTypes ?? {},
+    structFields: tables?.structFields ?? {}, fieldTypes: tables?.fieldTypes ?? {},
+    returnTypes: tables?.functionReturnTypes ?? {}, resolve: (n: string) => tables?.typedefTargets?.[n],
+  });
+  const shape = shapeOf(read.base);
+  const base = shape?.base.replace(/^(?:struct\s+)?(?:::)?/, '').split('::').pop();
+  if (!shape || shape.stars !== 1 || base !== acc.struct) refuse(`${emit(read.base as never)} is not a ${acc.struct} *`);
+  const p = text(read.base);
+  const call = { kind: NodeKind.CallExpr, callee: { kind: NodeKind.Identifier, name: acc.call }, arguments: [cloneNode(read.base)] } as unknown as Expression;
+
+  const parents = parentsOf(fn);
+  const up = (n: ASTNode): ASTNode => { let c = n; while (parents.get(c)?.kind === NodeKind.ParenExpr) c = parents.get(c)!; return c; };
+  const at = up(site);
+  const parent = parents.get(at);
+  // `X ? X->F : K` and `!X ? K : X->F`: the accessor itself.
+  if (parent?.kind === NodeKind.ConditionalExpr && !f.bare) {
+    const c = parent as ConditionalExpr;
+    const t = nullTest(c.condition, p);
+    const other = t === 'set' && unparen(c.thenExpr) === unparen(at as Expression) ? c.elseExpr
+      : t === 'null' && unparen(c.elseExpr) === unparen(at as Expression) ? c.thenExpr : undefined;
+    if (other && constValue(other) === acc.dflt) {
+      const top = up(parent);
+      replaceChild(parents.get(top)!, top, call);
+      prefixUsed.add(acc.definition);
+      return;
+    }
+  }
+  // `X && X->F == C` and `!X || X->F != C`: the null test goes where K gives its truth.
+  if (parent?.kind === NodeKind.BinaryExpr && ['==', '!='].includes((parent as BinaryExpr).operator) && !f.bare) {
+    const cmp = parent as BinaryExpr;
+    const k = constValue(unparen(cmp.left) === unparen(at as Expression) ? cmp.right : cmp.left);
+    const cmpAt = up(cmp);
+    const q = parents.get(cmpAt);
+    if (k !== undefined && k !== acc.dflt && q?.kind === NodeKind.BinaryExpr && (q as BinaryExpr).right === cmpAt) {
+      const and = q as BinaryExpr;
+      const want = and.operator === '&&' && cmp.operator === '==' ? 'set' : and.operator === '||' && cmp.operator === '!=' ? 'null' : undefined;
+      if (want) {
+        const l = unparen(and.left);
+        if (nullTest(l, p) === want) {
+          replaceChild(cmp, at, call);
+          const top = up(and);
+          replaceChild(parents.get(top)!, top, cmpAt);
+          prefixUsed.add(acc.definition);
+          return;
+        }
+        if (l.kind === NodeKind.BinaryExpr && (l as BinaryExpr).operator === and.operator && nullTest((l as BinaryExpr).right, p) === want) {
+          replaceChild(cmp, at, call);
+          and.left = (l as BinaryExpr).left;
+          prefixUsed.add(acc.definition);
+          return;
+        }
+      }
+    }
+  }
+  replaceChild(parent ?? refuse('the read has no parent'), at, call);
+  prefixUsed.add(acc.definition);
+}
+
+// ---------------------------------------------------------------------------------------
+// retvar, onecall: a value VC8 held in a register, written as a variable of its own
+
+/** Statements parsed from text, in a function of their own. */
+function parseStmts(t: string): Statement[] {
+  const fn = parse(`void __vc8f() { ${t} }`).declarations[0] as FunctionDecl;
+  return fn.body!.statements;
+}
+
+/** Whether a statement can leave by a return or a goto (a loop's break stays inside). */
+function returnsInside(s: Statement): boolean {
+  for (const { node } of walk(s)) if (node.kind === NodeKind.ReturnStmt || node.kind === NodeKind.GotoStmt) return true;
+  return false;
+}
+
+function freshName(fn: FunctionDecl, n: string): void {
+  if (localNames(fn).has(n) || mentions(fn.body!, n)) refuse(`${n} names something already`);
+}
+
+function doRetvar(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'retvar' }>): void {
+  const { b, k, s } = nthIf(fn, f.cond, f.index);
+  if (b !== fn.body) refuse('the if is not in the function\'s own block');
+  const arm = stmtsOf(s.thenBranch);
+  const last = arm[arm.length - 1] as ReturnStmt | undefined;
+  if (!last || last.kind !== NodeKind.ReturnStmt || !last.value) refuse('the arm does not end in a return of a value');
+  if (arm.slice(0, -1).some(returnsInside)) refuse('the arm leaves elsewhere too');
+  const tail = b.statements[k + 1] as ReturnStmt | undefined;
+  if (k + 2 !== b.statements.length || !tail || tail.kind !== NodeKind.ReturnStmt || !tail.value) refuse('the if is not followed by the function\'s last return');
+  if (constValue(tail.value!) === undefined || !loadsNothing(tail.value!)) refuse(`${emit(tail.value as never)} is not a constant`);
+  const type = emit(fn.returnType as never).trim();
+  if (type === 'void') refuse('the function returns nothing');
+  freshName(fn, f.name);
+  const [decl] = parseStmts(`${type} ${f.name} = ${emit(tail.value as never)};`);
+  const [store, ret] = parseStmts(`${f.name} = __vc8value; return ${f.name};`);
+  ((store as ExprStmt).expression as AssignExpr).right = last.value!;
+  arm[arm.length - 1] = store;
+  s.thenBranch = asBlock(s.thenBranch);
+  (s.thenBranch as CompoundStmt).statements = arm;
+  b.statements.splice(k + 1, 1, ret);
+  b.statements.splice(k, 0, decl);
+}
+
+/** The call an expression statement makes. */
+function callOf(st: Statement | undefined): CallExpr | undefined {
+  if (!st || st.kind !== NodeKind.ExprStmt) return undefined;
+  const e = unparen((st as ExprStmt).expression);
+  return e.kind === NodeKind.CallExpr ? e as CallExpr : undefined;
+}
+
+function doOnecall(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'onecall' }>): void {
+  const { b, k, s } = nthIf(fn, f.cond, f.index);
+  if (b !== fn.body) refuse('the if is not in the function\'s own block');
+  const arm = stmtsOf(s.thenBranch);
+  const first = callOf(arm[0]);
+  if (arm.length !== 2 || !first || arm[1].kind !== NodeKind.ReturnStmt || (arm[1] as ReturnStmt).value) refuse('the arm is not a call and `return;`');
+  const rest = b.statements.slice(k + 1);
+  const second = callOf(rest[0]);
+  if (!second || rest.length > 2 || (rest.length === 2 && (rest[1].kind !== NodeKind.ReturnStmt || (rest[1] as ReturnStmt).value))) {
+    refuse('the if is not followed by the function\'s last call');
+  }
+  if (text(first.callee) !== text(second!.callee) || first.arguments.length !== second!.arguments.length) refuse('the two calls differ in callee or arity');
+  const differ = first.arguments.map((a, j) => (text(a) === text(second!.arguments[j]) ? -1 : j)).filter(j => j >= 0);
+  if (differ.length !== 1) refuse(`the calls differ in ${differ.length} arguments`);
+  const j = differ[0];
+  for (const [x, a] of first.arguments.entries()) if (x !== j && !loadsNothing(a)) refuse(`${emit(a as never)} loads or calls`);
+  for (const v of [first.arguments[j], second!.arguments[j]]) {
+    if (hasCall(v) || storedNames(v).size > 0) refuse(`${emit(v as never)} calls or stores`);
+  }
+  const name = calleeName(first.callee);
+  const params = name && selectTables?.functionParamTypes
+    ? scopedLookup(selectTables.functionParamTypes, name, selectTables.enclosingSegments ?? []) : undefined;
+  const type = params?.[j];
+  if (!type) refuse(`no parameter type for argument ${j + 1} of ${name ?? emit(first.callee as never)}`);
+  freshName(fn, f.name);
+  const [decl, sel] = parseStmts(`${type} ${f.name}; if (__vc8c) { ${f.name} = __vc8a; } else { ${f.name} = __vc8b; }`);
+  const ifs = sel as IfStmt;
+  ifs.condition = s.condition;
+  (((ifs.thenBranch as CompoundStmt).statements[0] as ExprStmt).expression as AssignExpr).right = first.arguments[j];
+  (((ifs.elseBranch as CompoundStmt).statements[0] as ExprStmt).expression as AssignExpr).right = second!.arguments[j];
+  second!.arguments[j] = { kind: NodeKind.Identifier, name: f.name } as unknown as Expression;
+  b.statements.splice(k, 1, decl, ifs);
+}
+
 const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op: K }>) => void } = {
   seq: doSeq, fold: doFold, cache: doCache, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
   retval: doRetval, width: doWidth, boolflag: doBoolflag, retwiden: doRetwiden, arms: doArms,
   nest: doNest, 'merge-tail': doMergeTail, continue: doContinue, dup: doDup, tarms: doTarms, zero: doZero, nonzero: doNonzero, bool: doBool,
   cmp: doCmp, swap: doSwap, ifsel: doIfsel, split: doSplit, select: doSelect, decl: doDecl, unselect: doUnselect,
   tsel: doTsel, hoist: doHoist, nestcall: doNestcall, fill: doFill, copy: doCopy, shift: doShift, ptrwalk: doPtrwalk, rowptr: doRowptr,
+  acc: doAcc,
+  retvar: doRetvar, onecall: doOnecall,
 };
 
 /**
@@ -2720,18 +3022,19 @@ function respellForm(fn: FunctionDecl, form: Vc8Form): Vc8Form {
 }
 
 export function applyVc8Forms(tu: TranslationUnit, forms: Array<{ form: Vc8Form; tag?: string }>,
-  onSite?: (s: Vc8FormSite) => void, tables?: SelectArgumentOptions): TranslationUnit {
+  onSite?: (s: Vc8FormSite) => void, tables?: Vc8FormTables): TranslationUnit {
   if (forms.length === 0) return tu;
   selectTables = tables;
   let cur = tu;
   for (const { form, tag } of forms) {
     const next = cloneNode(cur);
     const fn = next.declarations.find(d => d.kind === NodeKind.FunctionDecl && (d as FunctionDecl).body) as FunctionDecl | undefined;
+    prefixUsed = new Set();
     try {
       if (!fn) refuse('no function body');
       (APPLY[form.op] as (fn: FunctionDecl, f: Vc8Form) => void)(fn!, respellForm(fn!, form));
       cur = next;
-      onSite?.({ form, tag, applied: true });
+      onSite?.({ form, tag, applied: true, ...(prefixUsed.size ? { prefix: [...prefixUsed] } : {}) });
     } catch (e) {
       if (!(e instanceof Refuse)) throw e;
       onSite?.({ form, tag, applied: false, why: e.message });

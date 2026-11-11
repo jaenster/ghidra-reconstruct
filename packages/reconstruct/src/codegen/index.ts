@@ -109,6 +109,7 @@ import { flattenTemplateNames } from './template-names.js';
 import { buildTemplateRegistry, classScopeOf, memberDefinitionScope, templateDataDefinitions, templateHeaderTypes } from './templates/index.js';
 import { EXTERN_ENTRY_SUFFIX, fileStaticKey, readForeignSourcesAt, selectFileStaticFunctions, type ForeignSource } from './file-static-functions.js';
 import { inlineHostHeaderPath, inlineHostKey, isInlineHost, refusedInlineHosts } from './inline-hosts.js';
+import { accessorTwins } from './accessor-twins.js';
 import { planInlinedCalls, planGuardedCalls, type InlinedCallPlan, type GuardedCallPlan } from './inlined-calls.js';
 import { nullGetterDefaults } from './null-getters.js';
 import { placeTemplateMembers } from './templates/placement.js';
@@ -4717,6 +4718,8 @@ function generateFilesForFunctions(
   // `funcptr-arg-cast` transform emits it, but only where the MODEL says the two
   // prototypes actually differ. Build that comparison table here, once.
   context.funcPtrArgCasts = genMark('setup/funcptr-tables', () => buildFuncPtrArgCastTables(functions, analyzedGlobals, dataTypes.filter(dt => dt.kind === 'FUNCTION_DEFINITION') as import('../types.js').ExtractedFunctionDefinition[], dataTypes, strings ?? [], platformDeclaredModelFunctions));
+  // The header inlines that read one field, whose inline twins `acc` vc8form tags call.
+  context.accessorTwins = accessorTwins(functions, context.funcPtrArgCasts);
   // Data initializers are emitted from strings, not an AST — the globals emitter
   // needs the same prototype tables to decide whether a function address stored
   // in a slot needs the cast C++ has never let it do implicitly.

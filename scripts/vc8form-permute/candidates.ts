@@ -27,6 +27,8 @@ import type { ASTNode, FunctionDecl, TranslationUnit } from '../../packages/cpp-
 import { vc8FormSpec, vc8formBodyHash } from '../../packages/reconstruct/src/codegen/vc8form-spec.js';
 import { normalizeSignatureType } from '../../packages/reconstruct/src/codegen/platform-types.js';
 import { respellPlaceholderType } from '../../packages/reconstruct/src/codegen/placeholder-types.js';
+import { accessorTwins } from '../../packages/reconstruct/src/codegen/accessor-twins.js';
+import type { Vc8Accessor } from '../../packages/cpp-parser/dist/index.js';
 
 type N = ASTNode & Record<string, any>;
 
@@ -59,14 +61,30 @@ interface Field { name: string; dataType: string }
 let structs = new Map<string, { kind: string; fields?: Field[]; typedefOf?: string }>();
 let globals = new Map<string, string>();
 
+/** The tables `acc` reads: the struct fields, the enumerators and the accessors (accessor-twins.ts). */
+const accTables: { structFields: Record<string, Record<string, string>>; enumValues: Record<string, number>; accessors: Vc8Accessor[] } =
+  { structFields: {}, enumValues: {}, accessors: [] };
+
 function loadTypes(path?: string) {
   if (!path) return;
   for (const l of readFileSync(path, 'utf8').split('\n')) {
     if (!l) continue;
     const t = JSON.parse(l);
+    if (t.kind === 'ENUM' && Array.isArray(t.values)) for (const v of t.values) accTables.enumValues[v.name] ??= v.value;
     if (structs.has(t.name)) continue;
     structs.set(t.name, { kind: t.kind, fields: t.fields, typedefOf: t.underlyingType });
+    if (t.fields) accTables.structFields[t.name] = Object.fromEntries(t.fields.filter((f: Field) => f.name).map((f: Field) => [f.name, spell(f.dataType)]));
   }
+}
+
+/** The header inlines that read one field, from the snapshot's functions beside the types. */
+async function loadAccessors(typesPath?: string) {
+  if (!typesPath) return;
+  const path = typesPath.replace(/dataTypes\.ndjson$/, 'functions.ndjson');
+  const hosts: any[] = [];
+  const rl = createInterface({ input: createReadStream(path) });
+  for await (const l of rl) if (l.includes('"inline-host"')) hosts.push(JSON.parse(l));
+  accTables.accessors = accessorTwins(hosts, accTables);
 }
 
 async function loadGlobals(path?: string) {
@@ -446,6 +464,10 @@ function sites(c: Ctx, maxAnchors: number): string[] {
   for (const { t, i } of indexed(cmps)) for (const how of ['mirror', 'lit', 'mirror-lit']) out.add(`cmp(${t},${how}${i > 0 ? `,${i}` : ''})`);
   const sw = all.filter(n => n.kind === NodeKind.BinaryExpr && COMMUTES.has(n.operator)).map(n => pr(n));
   for (const { t, i } of indexed(sw)) out.add(withIdx('swap', t, i, true));
+  // acc: each read of a field an accessor returns, with and without the null test before it.
+  const accField = new Set(accTables.accessors.map(a => a.path[a.path.length - 1]));
+  const reads = all.filter(n => n.kind === NodeKind.MemberExpr && n.member?.kind === NodeKind.Identifier && accField.has(n.member.name)).map(n => pr(n));
+  for (const { t, i } of indexed(reads)) { out.add(withIdx('acc', t, i, true)); out.add(`acc(${t}${i > 0 ? `,${i}` : ''},bare)`); }
   return [...out];
 }
 
@@ -458,16 +480,18 @@ function tryForm(tu: TranslationUnit, text: string): { text: string; form: Vc8Fo
   const form = parseVc8Form(text);
   if (!form) return { why: 'does not parse' };
   let why: string | undefined, applied = false;
+  let prefix: string[] = [];
   let out: TranslationUnit;
   try {
-    out = applyVc8Forms(tu, [{ form }], s => { applied = s.applied; why = s.why; }, tables());
+    out = applyVc8Forms(tu, [{ form }], s => { applied = s.applied; why = s.why; prefix = s.prefix ?? []; }, { ...tables(), ...accTables } as never);
   } catch (e) {
     // A form the pass cannot even attempt is no candidate; say which, it is a pass defect.
     process.stderr.write(`form ${text} threw: ${(e as Error).message.split('\n')[0]}\n`);
     return { why: 'threw' };
   }
   if (!applied) return { why: why ?? 'refused' };
-  return { text: body(out), form };
+  // A twin the form calls is written ahead of the function, as the unit writes it.
+  return { text: [...prefix, body(out)].join('\n\n'), form };
 }
 
 export function singles(items: Array<{ id: string; text: string }>, maxAnchors: number) {
@@ -510,13 +534,15 @@ function applyMany(items: Array<{ id: string; text: string; forms: string[] }>) 
     });
     const spec = vc8FormSpec({ tags, size: 1, decompiled: '' } as never)!;
     const applied: string[] = [], refused: Array<{ form: string; why: string }> = [];
+    const prefix: string[] = [];
     const out = applyVc8Forms(tu, spec.forms, s => {
       const f = s.tag!.slice(0, s.tag!.lastIndexOf(';ev='));
       if (s.applied) applied.push(f); else refused.push({ form: f, why: s.why ?? '' });
-    }, tables());
+      for (const d of s.prefix ?? []) if (!prefix.includes(d)) prefix.push(d);
+    }, { ...tables(), ...accTables } as never);
     // `ord` only where two forms share an op.
     for (const f of forms) if ((perOp.get(parseVc8Form(f)?.op ?? '?') ?? 0) < 2) delete ord[f];
-    return { id, text: body(out), applied, refused, ord, order: spec.forms.map(x => x.tag.slice(0, x.tag.lastIndexOf(';ev='))) };
+    return { id, text: [...prefix, body(out)].join('\n\n'), applied, refused, ord, order: spec.forms.map(x => x.tag.slice(0, x.tag.lastIndexOf(';ev='))) };
   });
 }
 
@@ -541,10 +567,13 @@ async function main() {
   if (mode === 'singles') {
     if (opt('--ops')) onlyOps = new Set(opt('--ops')!.split(','));
     loadTypes(opt('--types'));
+    await loadAccessors(opt('--types'));
     await loadGlobals(opt('--globals'));
     writeFileSync(b, JSON.stringify(singles(JSON.parse(readFileSync(a, 'utf8')), Number(opt('--max-anchors') ?? 16))));
   } else if (mode === 'apply') {
     await loadGlobals(opt('--globals'));
+    loadTypes(opt('--types'));
+    await loadAccessors(opt('--types'));
     writeFileSync(b, JSON.stringify(applyMany(JSON.parse(readFileSync(a, 'utf8')))));
   } else if (mode === 'dh') {
     writeFileSync(c, JSON.stringify(await dh(a, b)));

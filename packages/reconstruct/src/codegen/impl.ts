@@ -45,14 +45,14 @@ import { immediateConstantFacts, referencedDataAddresses, dataAtAddress, type Im
 import { compareFormSpec, type CompareFormSpec } from './compare-form-spec.js';
 import { repStringOps } from './rep-string-spec.js';
 import { vc8FormSpec, vc8formHashRecord, type Vc8FormSpec } from './vc8form-spec.js';
-import type { RepStringOp, Expression, NullGetterTable, ASTNode, SelectArgumentOptions } from '@ghidra-mcp/cpp-parser';
+import type { RepStringOp, Expression, NullGetterTable, ASTNode, SelectArgumentOptions, Vc8Accessor } from '@ghidra-mcp/cpp-parser';
 import { ROOT_CLASS_SCOPE, namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 import { cleanFunctionComment, declaredParameters, externEntryDeclaration, guardedFuncDefTypedef, emittedFunctionName, returnSigType, sigType } from './header.js';
 import { COMDAT_SPECIFIERS, classScopeOf, memberCallModel, memberDefinitionScope, orphanMarker, signatureParameters } from './templates/index.js';
 import { pointeeClass } from './templates/members.js';
 import { templateRegistry } from './templates/registry.js';
 import { declarationHead } from './calling-convention.js';
-import { fileStaticKey } from './file-static-functions.js';
+import { fileStaticKey, keepAliveSpellable } from './file-static-functions.js';
 import { emittedParameterName, getAggregateTypeNames } from './platform-types.js';
 import { derivedTemplateInstance, globalDefinition, emittedNamespaceOf, sanitizeSymbolName, setCentralInitializerScope, normalizeGlobalDeclType, generateStaticLocalsBlock, emitDataValue, setInitializerOwnerAddress, inferArrayDeclaration, isWideTextDatum, normalizeArrayDeclaration, braceArrayInitializer, isFuncDefTypedefName, getKnownFuncDefTypedefs, getKnownEnumConstants, setInitializerNamespace, renderGlobalScalarInitializer, recordDeclaredName } from './globals-header.js';
 
@@ -580,7 +580,7 @@ export interface ImplGenContext {
    * Functions defined `static` in their unit (file-static-functions.ts), by address
    * key, with the functions of that unit that reference them.
    */
-  fileStaticFunctions?: ReadonlyMap<string, { unit: string; referrers: ReadonlySet<string>; inline?: boolean }>;
+  fileStaticFunctions?: ReadonlyMap<string, { unit: string; referrers: ReadonlySet<string>; inline?: boolean; keepAlive?: boolean }>;
   /**
    * Functions hand-written source calls through an extern entry (`<name>_Extern`,
    * file-static-functions.ts), by address key: the unit defines the entry after the
@@ -641,6 +641,13 @@ export interface ImplGenContext {
   _enclosingResolvedNamespace?: ResolvedNamespace;
   /** Internal: accumulated preambles from injection-aware plugins */
   _preambles?: Set<string>;
+  /**
+   * The header inlines whose fields `acc` vc8form tags read through an inline twin
+   * (accessor-twins.ts), and, while one function is generated, the twin definitions its
+   * applied forms call: written once per file, ahead of the first function calling each.
+   */
+  accessorTwins?: Vc8Accessor[];
+  _fnPrefix?: string[];
   /**
    * Internal: the namespace block the current impl file's bodies are emitted
    * inside. C++ name lookup for a reference's leading qualifier starts here, so
@@ -1122,6 +1129,12 @@ export function generateImplementation(
     context._castTypedefs = undefined;
   }
 
+  // The keep-alive references of unreferenced statics (keepAliveDefinition), written
+  // after every definition: a symbol declared ahead of a function shifts the order VC8
+  // breaks its register ties in (SKILLDESC_CalcElemDamageRange 004e89a0).
+  const keepAlive: string[] = [];
+  const emittedTwins = new Set<string>();
+  if (context) context._fnPrefix = undefined;
   // Generate function implementations, grouping consecutive same-ifdef functions
   let currentIfdef: string | undefined;
   for (const func of functions) {
@@ -1200,12 +1213,25 @@ export function generateImplementation(
         throw err;
       }
     }
+    // The inline twins this function's forms call, each once per scope of the file.
+    const twins = context?._fnPrefix;
+    if (context) context._fnPrefix = undefined;
+    for (const t of twins ?? []) {
+      const k = `${rootMember ? 'root' : 'unit'}\0${t}`;
+      if (emittedTwins.has(k)) continue;
+      emittedTwins.add(k);
+      lines.push(t, '');
+    }
     // An inline header's body is marked for the module pass, which may publish it.
     const markInline = asInlineHeader && declarationMarkersOn() && !!func.address;
     if (markInline) lines.push(`${INLINE_MARKER}${func.address}`);
     lines.push(impl);
     if (markInline) lines.push(INLINE_END_MARKER);
     lines.push('');
+    if (fileStatic(func)?.keepAlive) {
+      const keep = keepAliveDefinition(func);
+      if (keep) keepAlive.push(keep);
+    }
     if (context?.externEntries?.has(fileStaticKey(func.address))) {
       const entry = externEntryDefinition(func, definitionNamespace);
       if (entry) lines.push(entry, '');
@@ -1223,6 +1249,7 @@ export function generateImplementation(
     lines.push(`#endif // ${currentIfdef}`);
     lines.push('');
   }
+  if (keepAlive.length > 0) lines.push(...keepAlive, '');
 
   // Now that all function bodies have been generated and _fileIdentifiers accumulated,
   // emit file-local globals filtered by actual usage, spliced at the deferred position.
@@ -1850,6 +1877,7 @@ export function generateFunctionImplementation(
         if (!context._castTypedefs) context._castTypedefs = new Set();
         for (const name of castTypedefs) context._castTypedefs.add(name);
       }
+      if (context && transformed.prefix?.length) context._fnPrefix = transformed.prefix;
       if (transformed.preamble) {
         // Store preamble on the context for accumulation by generateImplementation
         if (context) {
@@ -2190,6 +2218,22 @@ export function externEntryDefinition(
 }
 
 /**
+ * The reference that keeps a file-local function nothing calls (file-static-functions.ts,
+ * `keepAlive`): a call in the unevaluated arm of a constant conditional. It compiles to
+ * no code and no data, yet VC8 emits the static's body, in the register convention it
+ * picks for a function that is only called in its file - the original's copy of a
+ * function every caller inlined (TOKTBLS_GetTokenIndex 0065c300: EAX and `ret 4`). A
+ * function whose address is taken would get a stack convention instead, and an extern
+ * caller could inline the only call and drop the body.
+ */
+export function keepAliveDefinition(func: ExtractedFunction): string | undefined {
+  if (!keepAliveSpellable(func)) return undefined;
+  const args = declaredParameters(func).map(p => `*(${p.type} *)0`);
+  const hexAddr = func.address.includes(':') ? func.address.slice(func.address.lastIndexOf(':') + 1) : func.address;
+  return `static void * keep_${hexAddr} = (0 ? (${emittedFunctionName(func)}(${args.join(', ')}), (void *)0) : (void *)0);`;
+}
+
+/**
  * A compiler-generated C++ EH handler stub's definition: it returns
  * ExceptionContinueSearch, the answer of a frame that handles nothing.
  *
@@ -2251,6 +2295,8 @@ function generateMethodSignature(
 interface TransformDecompiledResult {
   code: string;
   preamble?: string;
+  /** Definitions the applied vc8 forms call, to precede the function (`acc` twins). */
+  prefix?: string[];
   identifiers?: Set<string>;
   /** Names the body used as TYPES (see TransformResult.typeNames). */
   typeNames?: Set<string>;
@@ -3384,6 +3430,15 @@ function transformDecompiledCode(
         onSite: (e: { variable: string; line: number }) =>
           console.warn(`[select-arg] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.variable} at line ${e.line}`),
       };
+      perPluginOptions['sign-bit-test'] = {
+        enumTypes: context.funcPtrArgCasts.enumTypes,
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        structFields: context.funcPtrArgCasts.structFields,
+        typedefTargets: context.funcPtrArgCasts.typedefTargets,
+        functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        enclosingVarTypes,
+      };
       // An arm ending in the statements after it was written as an if/else with the tail
       // once after it; VC8 tail-duplicated the exit (shared-tail-join.ts).
       perPluginOptions['shared-tail-join'] = {
@@ -4323,11 +4378,16 @@ function transformDecompiledCode(
 
     const vc8 = enclosing?.vc8Forms;
     for (const t of vc8?.stale ?? []) console.warn(`[vc8form] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: stale ${t.tag} (${t.why})`);
+    const vc8Prefix: string[] = [];
     const result = transformGhidraCode(wrapped, {
       vc8Forms: vc8 && vc8.forms.length > 0 ? {
         forms: vc8.forms,
-        selectTables: perPluginOptions['select-argument'] as SelectArgumentOptions | undefined,
+        selectTables: {
+          ...(perPluginOptions['select-argument'] as SelectArgumentOptions | undefined),
+          accessors: context?.accessorTwins,
+        },
         onSite: s => {
+          if (s.applied) for (const d of s.prefix ?? []) if (!vc8Prefix.includes(d)) vc8Prefix.push(d);
           if (!s.applied) console.warn(`[vc8form] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: refused ${s.tag} (${s.why})`);
           else if (process.env.GHIDRA_VC8FORM_REPORT) console.warn(`[vc8form] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: applied ${s.tag}`);
         },
@@ -4359,6 +4419,7 @@ function transformDecompiledCode(
           // of them into silent reads of the wrong address.
           code: indentCode(transformedMatch[1], 4),
           preamble: result.preamble,
+          ...(vc8Prefix.length ? { prefix: vc8Prefix } : {}),
           identifiers: result.identifiers,
           typeNames: result.typeNames,
         };
