@@ -206,6 +206,19 @@ function sites(c: Ctx, maxAnchors: number): string[] {
     if (declarable(vars.get(v))) out.add(`split(${v},${vars.get(v)},${v}_2)`);
     for (const t of casts.get(v) ?? []) { if (declarable(t) && !t.endsWith('*')) out.add(`width(${v},${t})`); if (declarable(t)) out.add(`own(${v},${t})`); }
   }
+  // boolflag: a bool local; retwiden: a narrow integer local stored from a call (the forms refuse the rest).
+  const NARROW = new Set(['char', 'unsigned char', 'signed char', 'uint8_t', 'int8_t', 'BYTE', 'byte', 'short', 'short int', 'unsigned short',
+    'unsigned short int', 'int16_t', 'uint16_t', 'WORD', 'ushort', 'wchar_t']);
+  const callStored = new Set<string>();
+  for (const n of all) {
+    const v = n.kind === NodeKind.AssignExpr && n.operator === '=' ? unparen(n.left) : undefined;
+    if (v?.kind === NodeKind.Identifier && unparen(n.right).kind === NodeKind.CallExpr) callStored.add(v.name);
+    if (n.kind === NodeKind.VariableDecl && n.initializer && unparen(n.initializer).kind === NodeKind.CallExpr) callStored.add(n.name.name);
+  }
+  for (const v of locals) {
+    if (vars.get(v) === 'bool') out.add(`boolflag(${v})`);
+    if (NARROW.has(vars.get(v) ?? '') && callStored.has(v)) out.add(`retwiden(${v})`);
+  }
 
   // decl: a declaration without initializer moved before another declaration of its block.
   for (const b of blocks) {

@@ -3,7 +3,7 @@
  *
  *   tsx permute.ts --checkout DIR --snapshot SNAP --out OUT [--pool AUDIT] [--sample N] [--seed S]
  *                  [--addrs A,B,...] [--jobs J] [--max-insns K] [--no-pairs] [--no-phase]
- *                  [--resume [--group G]] [--oracle-zig BIN]
+ *                  [--resume [--group G]] [--oracle-zig BIN] [--forms op,op,...]
  *
  * For each target function (the near-miss pool of an audit.tsv, a sample of it, or --addrs):
  *
@@ -44,7 +44,8 @@
  * checkout, as `oracle-zig build` translates it; a TU whose translation is not the one in
  * build/src is skipped. BIN is the oracle-zig with `trial` and `judge` (default the
  * checkout's asm_matching/msvc8/zig/zig-out/bin/oracle-zig, or ORACLE_ZIG). Run it with the
- * checkout's oracle environment (recon/runs/vc8form-permute.sh does).
+ * checkout's oracle environment (recon/runs/vc8form-permute.sh does). --forms keeps only the
+ * candidates of the listed ops (`--forms boolflag,retwiden`).
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -251,7 +252,7 @@ interface Accepted { job: Job; on: number; forms: string[]; gained: Set<number>;
 interface Args {
   checkout: string; snapshot: string; out: string; pool?: string; addrs?: string; sample: number; seed: number;
   max_insns: number; jobs: number; max_anchors: number; pair_top: number; no_pairs: boolean; no_phase: boolean;
-  resume: boolean; group: number; zig: string;
+  resume: boolean; group: number; zig: string; forms?: string;
 }
 
 function usage(code = 2): never {
@@ -262,7 +263,7 @@ function usage(code = 2): never {
 
 function parseArgs(argv: string[]): Args {
   const a: Partial<Args> & Record<string, unknown> = { sample: 0, seed: 1, max_insns: 100, jobs: 4, max_anchors: 16, pair_top: 3, no_pairs: false, no_phase: false, resume: false, group: 1 };
-  const str: Record<string, keyof Args> = { '--checkout': 'checkout', '--snapshot': 'snapshot', '--out': 'out', '--pool': 'pool', '--addrs': 'addrs', '--oracle-zig': 'zig' };
+  const str: Record<string, keyof Args> = { '--checkout': 'checkout', '--snapshot': 'snapshot', '--out': 'out', '--pool': 'pool', '--addrs': 'addrs', '--oracle-zig': 'zig', '--forms': 'forms' };
   const int: Record<string, keyof Args> = { '--sample': 'sample', '--seed': 'seed', '--max-insns': 'max_insns', '--jobs': 'jobs', '--max-anchors': 'max_anchors', '--pair-top': 'pair_top', '--group': 'group' };
   const flag: Record<string, keyof Args> = { '--no-pairs': 'no_pairs', '--no-phase': 'no_phase', '--resume': 'resume' };
   for (let i = 0; i < argv.length; i++) {
@@ -398,7 +399,12 @@ async function main() {
       '--types', join(args.snapshot, 'dataTypes.ndjson'),
       '--globals', join(args.snapshot, 'globals.ndjson'), '--max-anchors', String(args.max_anchors)], GR);
     const cands = new Map<string, any>();
-    for (const r of JSON.parse(readFileSync(join(out, 'cand-out.json'), 'utf8'))) cands.set(r.id, r);
+    // --forms: only the candidates of these ops are tried.
+    const ops = args.forms ? new Set(args.forms.split(',')) : undefined;
+    for (const r of JSON.parse(readFileSync(join(out, 'cand-out.json'), 'utf8'))) {
+      if (ops) r.candidates = r.candidates.filter((c: { form: string }) => ops.has(c.form.replace(/\(.*$/s, '')));
+      cands.set(r.id, r);
+    }
     let nForms = 0;
     for (const r of cands.values()) nForms += r.candidates.length;
     log(`candidates: ${cands.size} functions, ${nForms} forms (${fixed(now() - t1, 0)}s)`);

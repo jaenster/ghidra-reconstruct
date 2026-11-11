@@ -479,3 +479,59 @@ describe('vc8-form: tsel', () => {
     assert.strictEqual(apply('tsel(!pUnit,2)').sites[0]?.applied, false);
   });
 });
+
+describe('vc8-form: boolflag', () => {
+  // FINDTILE_Register 0060cfa0: `MOV EBX,1` / `XOR EBX,EBX` / `TEST EBX,EBX`.
+  const FIND = [
+    'void f(Node* p, int k) {',
+    '  bool bFound = true;',
+    '  while (p) {',
+    '    if (!bFound) { g(1); }',
+    '    if (p->k == k) { bFound = false; }',
+    '    p = p->next;',
+    '  }',
+    '  if (bFound && k) { g(2); }',
+    '}',
+  ];
+  it('declares the flag BOOL and stores 1 and 0', () => {
+    const { out, sites } = run(FIND, 'boolflag(bFound)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.ok(out.includes('BOOL bFound = 1;'), out);
+    assert.ok(out.includes('bFound = 0;'), out);
+    assert.ok(out.includes('if (!bFound)'), out);
+  });
+  it('refuses a computed store, a read as a value, or a taken address', () => {
+    for (const [from, to] of [['bFound = false;', 'bFound = k > 2;'], ['g(2);', 'g(bFound);'], ['g(2);', 'h(&bFound);']]) {
+      const { out, sites } = run(FIND.map(l => l.replace(from, to)), 'boolflag(bFound)');
+      assert.ok(!sites[0].applied, `${to}: ${out}`);
+      assert.ok(out.includes('bool bFound'), out);
+    }
+  });
+});
+
+describe('vc8-form: retwiden', () => {
+  // HandleMouseButtonEvent 0044c5e0: one MOVZX at the call instead of at the read.
+  const KEY = [
+    'void f() {',
+    '  uint16_t wVirtualKey;',
+    '  wVirtualKey = CMD_GetKeyForCommand(0x22, 1);',
+    '  if (GetAsyncKeyState((uint32_t)wVirtualKey) >= 0) { g(); }',
+    '}',
+  ];
+  it('declares it int32_t and narrows each stored value to its old type', () => {
+    const { out, sites } = run(KEY, 'retwiden(wVirtualKey)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.ok(out.includes('int32_t wVirtualKey;'), out);
+    assert.ok(out.includes('wVirtualKey = (uint16_t)CMD_GetKeyForCommand(0x22, 1);'), out);
+  });
+  it('refuses a local never stored from a call, a wide local, or one stepped in place', () => {
+    for (const lines of [
+      KEY.map(l => l.replace('CMD_GetKeyForCommand(0x22, 1)', '5')),
+      KEY.map(l => l.replace('uint16_t wVirtualKey;', 'int wVirtualKey;')),
+      KEY.map(l => l.replace('g();', 'wVirtualKey++;')),
+    ]) {
+      const { sites } = run(lines, 'retwiden(wVirtualKey)');
+      assert.ok(!sites[0].applied, lines.join(' '));
+    }
+  });
+});
