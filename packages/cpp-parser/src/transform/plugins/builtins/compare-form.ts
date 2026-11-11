@@ -24,10 +24,18 @@
  *    may cross zero (`-1 < n` -> `n >= 0`) when the operand's declared type is signed, so
  *    the compare cannot be unsigned in C++; the node is tagged, and `compare-signedness`
  *    casts the operand back to signed should the final types make it unsigned;
+ *    An unsigned compare whose other operand is declared unsigned may step anywhere in
+ *    0..0xffffffff on a hex or `U` literal (`u < 0x80000000` -> `u <= 0x7fffffff`), and a
+ *    signed one may cross zero on `+ - *` of signed operands too (`-1 < y - 0x20`);
+ *  - an unsigned op read by a signed Jcc steps its constant even where the operand is not
+ *    proven a zero-extended sum, inside 0..0x7fffffff where both domains agree; two such
+ *    non-constant operands are tied when each is below the sign bit by its form (`x & 7`,
+ *    `x >> 0xe`, a narrow unsigned value), so `compare-signedness` may make the compare signed;
  *  - `X == 0`/`X != 0` becomes `X <= 0`/`X > 0` only as an unsigned compare: X is cast to
  *    the unsigned type of the compare's width unless its declared type already is one. A
- *    pointer operand is left alone. The node is tagged, and `compare-signedness` checks the
- *    operand again against the final types;
+ *    pointer operand that names storage is cast to `uintptr_t` against a null constant; one
+ *    under an assignment, a cast or a comma copy test is left alone. The node is tagged, and
+ *    `compare-signedness` checks the operand again against the final types;
  *  - `X == 0`/`X != 0` becomes `X < 1`/`X >= 1` (`CMP X,1; JB/JAE`) only where X is declared
  *    unsigned: no cast is written, since a signed X would mean the type is wrong, not the
  *    compare. The node is tagged the same way;
@@ -50,7 +58,7 @@
 
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
-  ASTNode, BinaryExpr, BinaryOperator, BoolLiteralExpr, BuiltinType, ReturnStmt, CharLiteralExpr, CStyleCastExpr, Expression, FunctionDecl, Identifier,
+  ASTNode, BinaryExpr, BinaryOperator, BoolLiteralExpr, BuiltinType, ReturnStmt, CharLiteralExpr, CommaExpr, CStyleCastExpr, Expression, FunctionDecl, Identifier,
   IntegerLiteralExpr, MemberExpr, ParameterDecl, ParenExpr, SubscriptExpr, TypeNode, TypedefType, UnaryExpr, VariableDecl,
 } from '../../../ast/nodes.js';
 import { findNodesByKind } from '../../../ast/visitor.js';
@@ -286,6 +294,85 @@ export function steppedConstant(lit: IntegerLiteralExpr, value: bigint, delta: n
   return next;
 }
 
+/**
+ * The constant after a step in an unsigned compare whose other operand is declared unsigned,
+ * or null: as steppedConstant, but the values may lie anywhere in 0..0xffffffff. Both sides
+ * then convert to unsigned whatever type the literal has, so the step means the same in C++
+ * as in the machine (`uCodepoint < 0x80000000` -> `uCodepoint <= 0x7fffffff`). Only a hex,
+ * octal or `U` literal, whose type above INT_MAX is unsigned int, never a 64-bit one; never
+ * across zero.
+ */
+export function steppedUnsignedConstant(lit: IntegerLiteralExpr, value: bigint, delta: number): bigint | null {
+  const next = value + BigInt(delta);
+  const suffix = lit.suffix.toLowerCase();
+  if (suffix.includes('l')) return null;
+  if (lit.base === 10 && !suffix.includes('u')) return null;
+  if (value < 0n || next < 0n || value > 0xffffffffn || next > 0xffffffffn) return null;
+  return next;
+}
+
+/** A null pointer constant as printed: `0`, `(T *)0x0`, `NULL`, `nullptr`. */
+function isNullConstant(e: Expression): boolean {
+  const x = unwrapCasts(e);
+  if (x.kind === NodeKind.IntegerLiteral) return (x as IntegerLiteralExpr).value === 0n;
+  if (x.kind === NodeKind.NullptrLiteral) return true;
+  return x.kind === NodeKind.Identifier && ((x as Identifier).name === 'NULL' || (x as Identifier).name === 'nullptr');
+}
+
+/**
+ * A variable, member, element or dereference: the pointer zero test is written only on an
+ * operand that names storage, never on an assignment or a cast the decompile folded into
+ * the test (`(T *)(n = s) != 0`), and never on the copy test closing a comma expression
+ * (`p = (T *)n, p != 0`, 00576980): later passes fold those into the assignment and retype
+ * its target from the cast.
+ */
+function isPlainLvalue(e: Expression): boolean {
+  const x = unwrapParens(e);
+  switch (x.kind) {
+    case NodeKind.Identifier:
+    case NodeKind.QualifiedId:
+    case NodeKind.MemberExpr:
+    case NodeKind.SubscriptExpr:
+      return true;
+    case NodeKind.UnaryExpr:
+      return (x as UnaryExpr).operator === '*';
+    default:
+      return false;
+  }
+}
+
+/** `(uintptr_t)(p)`. */
+function uintptrCast(x: Expression): CStyleCastExpr {
+  const c = compareCast(x, 4);
+  return { ...c, type: { ...c.type, name: { ...(c.type as TypedefType).name, name: 'uintptr_t' } } as TypedefType };
+}
+
+/**
+ * Whether `e` is a signed int after the integer promotions, from its operands' declared
+ * types: a signed operand no wider than int, an unsuffixed literal within int, or
+ * `+ - *` of such (LIGHTMAP_ApplyStaticLightWithShadow 00474d70: `-1 < nYBuffer - 0x20`).
+ * Unknown types, and unsigned ones of any width, answer false.
+ */
+function promotesToSignedInt(e: Expression, shapeOf: ExprShape): boolean {
+  const x = unwrapParens(e);
+  if (x.kind === NodeKind.IntegerLiteral) {
+    const l = x as IntegerLiteralExpr;
+    return !l.suffix && l.value <= 0x7fffffffn;
+  }
+  if (x.kind === NodeKind.BinaryExpr && ['+', '-', '*'].includes((x as BinaryExpr).operator)) {
+    return promotesToSignedInt((x as BinaryExpr).left, shapeOf) && promotesToSignedInt((x as BinaryExpr).right, shapeOf);
+  }
+  const s = shapeOf(x);
+  if (!s || s.stars > 0) return false;
+  return SIGNED_INT.has(s.base);
+}
+
+/** Signed spellings no wider than int (`long` is 32 bits on the target). */
+const SIGNED_INT = new Set([
+  'int', 'int8_t', 'int16_t', 'int32_t', 'short', 'char', 'signed char', 'INT', 'SHORT', 'BOOL',
+  'signed', 'signed int', 'short int', 'sdword', 'sword', 'sbyte',
+]);
+
 /** `(uintW_t)(x)`, or `(intW_t)(x)` for a signed cast. */
 export function compareCast(x: Expression, width: number, signed = false): CStyleCastExpr {
   const name = signed ? SIGNED_OF_WIDTH[width] ?? 'int32_t' : UNSIGNED_OF_WIDTH[width] ?? 'uint32_t';
@@ -394,6 +481,18 @@ export function createCompareFormTransformer(options?: PluginOptions): Transform
       let rewritten = 0;
       let tagged = 0;
       const shapeOf = createExprShape(localTypes, tables);
+      // The comparisons that close a comma expression: Ghidra's copy test `(p = x, p != 0)`,
+      // which later passes fold back into the assignment it tests.
+      const commaTests = new Set<string>();
+      const closing = (e: Expression | undefined) => {
+        const last = e ? unwrapParens(e) : undefined;
+        const k = last?.kind === NodeKind.BinaryExpr ? keyOf(last as BinaryExpr) : null;
+        if (k) commaTests.add(k);
+      };
+      for (const c of findNodesByKind(node.body, NodeKind.CommaExpr)) closing((c as CommaExpr).expressions.at(-1));
+      for (const b of findNodesByKind(node.body, NodeKind.BinaryExpr)) {
+        if (((b as BinaryExpr).operator as string) === ',') closing((b as BinaryExpr).right);
+      }
       const boolReturn = node.returnType.kind === NodeKind.BuiltinType
         && (node.returnType as BuiltinType).name === 'bool' && (node.returnType as BuiltinType).modifiers.length === 0;
       const inner = createTransformer({
@@ -420,13 +519,14 @@ export function createCompareFormTransformer(options?: PluginOptions): Transform
           let out: BinaryExpr | null = null;
           if (d.zextPair) {
             // Unproven, the compare is left as printed and carries no facts.
-            const pair = narrowZextPair(be, shapeOf);
+            const pair = narrowZextPair(be, shapeOf)
+              ?? (belowSignBit(be.left, shapeOf) && belowSignBit(be.right, shapeOf) ? be : null);
             if (!pair) return undefined;
             be = pair;
             out = pair;
           }
           if (d.keep) out = byteCompareWithOne(be, d) ?? out;
-          else if (d.op) out = rewrite(be, d, sizeOf(d.ord), shapeOf, enumStep, zeroEnum);
+          else if (d.op) out = rewrite(be, d, sizeOf(d.ord), shapeOf, enumStep, zeroEnum, commaTests.has(key!));
           if (out) rewritten++;
           const facts = withMachineFacts(out ?? be, d);
           if (facts !== (out ?? be)) tagged++;
@@ -606,6 +706,46 @@ function narrowZextSum(e: Expression, shapeOf: ExprShape): Expression | null {
   return Expr.binary(a, '+', b);
 }
 
+/**
+ * Whether `e` is provably in 0..0x7fffffff by its form, so that comparing it signed or
+ * unsigned is the same: an 8- or 16-bit unsigned value (cast or not), `x & K` with K within
+ * that range, an unsigned `x >> s` with s >= 1, an unsigned `x % K` with K within it
+ * (WALL2_AddWallTile 004dd180: `(*(uint32_t*)(p + 0x14) >> 0xe & 7) < (... >> 0xe & 7)`
+ * under JL). Anything else, a plain unsigned variable included, is not proven.
+ */
+function belowSignBit(e: Expression, shapeOf: ExprShape): boolean {
+  const x = unwrapParens(e);
+  const small = (y: Expression, max: bigint) => {
+    const c = literalOf(y);
+    return !!c && !c.char && c.value >= 0n && c.value <= max;
+  };
+  if (x.kind === NodeKind.CStyleCastExpr) {
+    const t = shapeOf(x);
+    const inner = (x as CStyleCastExpr).expression;
+    if (t && t.stars === 0 && NARROW_UNSIGNED.test(t.base)) return true;
+    if (t && t.stars === 0 && UNSIGNED_WORD.test(t.base)) return belowSignBit(inner, shapeOf);
+  }
+  if (x.kind === NodeKind.BinaryExpr) {
+    const b = x as BinaryExpr;
+    if (b.operator === '&') return small(b.right, 0x7fffffffn) || small(b.left, 0x7fffffffn);
+    const unsignedLeft = operandSignedness(b.left, shapeOf) === 'unsigned' || promotesUnsignedWord(b.left, shapeOf);
+    if (b.operator === '>>') {
+      const c = literalOf(b.right);
+      return unsignedLeft && !!c && c.value >= 1n && c.value <= 31n;
+    }
+    if (b.operator === '%') return unsignedLeft && small(b.right, 0x80000000n);
+    return false;
+  }
+  const s = shapeOf(x);
+  return !!s && s.stars === 0 && NARROW_UNSIGNED.test(s.base);
+}
+
+/** Whether `e` reads an unsigned 32-bit value through a cast or a dereference of one. */
+function promotesUnsignedWord(e: Expression, shapeOf: ExprShape): boolean {
+  const s = shapeOf(unwrapParens(e));
+  return !!s && s.stars === 0 && UNSIGNED_WORD.test(s.base);
+}
+
 /** The unsigned 8- and 16-bit spellings `narrowZextSum` and `narrowZextPair` accept. */
 const NARROW_UNSIGNED = /^(?:uint8_t|uint16_t|BYTE|WORD|byte|word|uchar|ushort|USHORT|UCHAR|unsigned char|unsigned short|unsigned short int)$/;
 const UNSIGNED_WORD = /^(?:uint32_t|uint|unsigned|unsigned int|DWORD|dword|UINT|ulong|unsigned long|ULONG)$/;
@@ -689,17 +829,30 @@ function enumStepper(constantTypes: Record<string, string>, memberValues: Record
 }
 
 function rewrite(be: BinaryExpr, d: CompareFormDecision, size: number, shapeOf: ExprShape, enumStep?: EnumStep,
-  zeroEnum?: (e: Expression) => boolean): BinaryExpr | null {
+  zeroEnum?: (e: Expression) => boolean, commaTest = false): BinaryExpr | null {
   let left = d.swap ? be.right : be.left;
   let right = d.swap ? be.left : be.right;
   if (d.zextSum) {
+    // The sum loses its casts only where it is proven one; otherwise the operand stays as
+    // printed and only the constant steps, within 0..0x7fffffff (steppedConstant without a
+    // cross of zero), where the step means the same in the signed and the unsigned domain.
     const sum = narrowZextSum(left, shapeOf);
     const c = literalOf(right);
-    if (!sum || !c || c.value < 0n || c.value > 0x7fffffffn || c.lit.suffix) return null;
-    left = sum;
+    if (!c || c.value < 0n || c.value > 0x7fffffffn || c.lit.suffix) return null;
+    if (sum) left = sum;
   }
   const delta = d.delta ?? 0;
   let crossed = false;
+  if (d.unsigned && delta === 0 && d.k === 0 && !commaTest && isPlainLvalue(left) && operandSignedness(left, shapeOf) === 'pointer'
+    && isNullConstant(right)) {
+    // `p == 0` / `p != 0` as the unsigned `(uintptr_t)p <= 0` / `> 0`: the same test for
+    // every pointer, at any pointer width.
+    const info = { ...(be.ghidraInfo ?? {}), originalAddress: `0x${d.address}`, unsignedCompareWidth: d.width };
+    const zero = { ...Expr.intLiteral(0), location: right.location, leadingTrivia: [], trailingTrivia: [] } as Expression;
+    let cast: Expression = uintptrCast(left);
+    if (d.swap) cast = { ...cast, leadingTrivia: be.left.leadingTrivia, trailingTrivia: be.left.trailingTrivia };
+    return updateNode(be, { operator: d.op as BinaryOperator, left: cast, right: zero, ghidraInfo: info } as Partial<BinaryExpr>);
+  }
   if (d.k !== undefined && (delta !== 0 || d.unsigned)) {
     // The constant is the written right operand; it must be a bare literal the
     // instructions agree with, or an enum member stepping to its neighbour.
@@ -717,9 +870,13 @@ function rewrite(be: BinaryExpr, d: CompareFormDecision, size: number, shapeOf: 
       if (mod !== BigInt(d.k)) return null;
       if (delta !== 0) {
         let next = steppedConstant(c.lit, c.value, delta);
-        if (next === null && d.signed && operandSignedness(left, shapeOf) === 'signed') {
+        if (next === null && d.signed && !d.zextSum
+          && (operandSignedness(left, shapeOf) === 'signed' || promotesToSignedInt(left, shapeOf))) {
           next = steppedConstant(c.lit, c.value, delta, true);
           if (next !== null) crossed = true;
+        }
+        if (next === null && d.signed === false && !c.char && operandSignedness(left, shapeOf) === 'unsigned') {
+          next = steppedUnsignedConstant(c.lit, c.value, delta);
         }
         if (next === null) return null;
         if (c.char) {
