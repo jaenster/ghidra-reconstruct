@@ -864,3 +864,66 @@ describe('vc8-form: onecall', () => {
     assert.ok(!sites[0].applied && /parameter type/.test(sites[0].why!));
   });
 });
+
+describe('vc8-form: roundup', () => {
+  // TSGrowableArray<SGAMEDATA>::Reserve 00450e70 as the generator wraps it.
+  const SITE = [
+    'void dummy(TSGrowableArray<SGAMEDATA>* pThis, uint32_t nCount, int32_t bRound) {',
+    '  uint32_t nNeeded = nCount + this->m_count;',
+    '  if (nNeeded <= this->m_alloc) {',
+    '    return;',
+    '  }',
+    '  if (bRound) {',
+    '    uint32_t nGranularity;',
+    '    nGranularity = this->m_chunk;',
+    '    if (!nGranularity) {',
+    '      nGranularity = this->CalcChunkSize(nNeeded);',
+    '    }',
+    '    if (nNeeded % nGranularity) {',
+    '      nNeeded = nGranularity - nNeeded % nGranularity + nNeeded;',
+    '    }',
+    '  }',
+    '  this->ReallocData(nNeeded);',
+    '}',
+  ];
+  it('parses', () => {
+    assert.deepStrictEqual(parseVc8Form('roundup(nNeeded)'), { op: 'roundup', name: 'nNeeded' });
+    assert.deepStrictEqual(parseVc8Form('roundup(nNeeded,nCount)'), { op: 'roundup', name: 'nNeeded', param: 'nCount' });
+    assert.strictEqual(parseVc8Form('roundup(a+b)'), undefined);
+    assert.strictEqual(parseVc8Form('roundup(a,b,c)'), undefined);
+  });
+  it('the rounding is the helper, which the site reports as its prefix', () => {
+    const { out, sites } = run(SITE, 'roundup(nNeeded)');
+    assert.match(out, /if \(!nGranularity\) \{ nGranularity = this->CalcChunkSize\(nNeeded\); \} nNeeded = D2_RoundUp\(nNeeded, nGranularity\); \}/);
+    assert.ok(sites[0].applied);
+    assert.match(sites[0].prefix![0], /static inline uint32_t D2_RoundUp\(uint32_t n, uint32_t g\) \{/);
+  });
+  it('with P the sum is the parameter: 00450e70 as measured', () => {
+    const { out, sites } = run(SITE, 'roundup(nNeeded,nCount)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.strictEqual(out, flat(`void dummy(TSGrowableArray<SGAMEDATA>* pThis, uint32_t nCount, int32_t bRound) {
+      nCount = nCount + this->m_count;
+      if (nCount <= this->m_alloc) { return; }
+      if (bRound) {
+        uint32_t nGranularity;
+        nGranularity = this->m_chunk;
+        if (!nGranularity) { nGranularity = this->CalcChunkSize(nCount); }
+        nCount = D2_RoundUp(nCount, nGranularity);
+      }
+      this->ReallocData(nCount);
+    }`));
+  });
+  it('refuses a parameter of another type (Storm\'s int32_t nAdditional)', () => {
+    const { sites } = run(SITE.map(l => l.replace('uint32_t nCount', 'int32_t nCount')), 'roundup(nNeeded,nCount)');
+    assert.ok(!sites[0].applied);
+    assert.match(sites[0].why!, /nCount is int32_t/);
+  });
+  it('refuses a parameter read again, a signed granularity, and a rounding of another shape', () => {
+    const again = run(SITE.map(l => l.replace('this->ReallocData(nNeeded);', 'this->ReallocData(nNeeded + nCount);')), 'roundup(nNeeded,nCount)');
+    assert.match(again.sites[0].why!, /named 2 times/);
+    const signed = run(SITE.map(l => l.replace('uint32_t nGranularity;', 'int nGranularity;')), 'roundup(nNeeded)');
+    assert.match(signed.sites[0].why!, /nGranularity is not an unsigned 32-bit local/);
+    const other = run(SITE.map(l => l.replace('nGranularity - nNeeded % nGranularity + nNeeded', 'nNeeded + nGranularity - nNeeded % nGranularity')), 'roundup(nNeeded)');
+    assert.match(other.sites[0].why!, /0 round-up sites/);
+  });
+});

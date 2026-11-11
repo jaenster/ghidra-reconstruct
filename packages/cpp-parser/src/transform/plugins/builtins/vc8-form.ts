@@ -200,6 +200,17 @@
  *                        eax; push eax`). Refused unless every other argument loads nothing
  *                        and X and Y call and store nothing, as their evaluation moves
  *                        ahead of the other arguments.
+ *   roundup(V[,P])       the round-up `if (V % G) { V = G - V % G + V; }` of the unsigned
+ *                        32-bit locals V and G is written `V = D2_RoundUp(V, G);`, through an
+ *                        inline helper that changes and returns its parameter, defined once
+ *                        in the unit ahead of the function (Vc8FormSite.prefix): VC8 computes
+ *                        the rounded value in a register of its own and stores it back
+ *                        (TSGrowableArray<SGAMEDATA>::Reserve 00450e70, `mov esi, ecx` after
+ *                        the add). With P, V's declaration `T V = P + E;` (or `E + P`) becomes
+ *                        `P = P + E;` and V reads P: the sum is the parameter. Refused unless
+ *                        there is exactly one such if, P is a parameter of V's exact type that
+ *                        nothing else names, and V's declaration sits in the function's own
+ *                        block and its address is not taken.
  *   copy(D[,i])          the copy loop `for (N = K; N; N--) { *D = *S; S++; D++; }` is
  *                        written `memcpy(D, S, K * sizeof(*D));`, which VC8 expands to the
  *                        original's `rep movsd`. D and S must be declared pointers to one
@@ -261,7 +272,8 @@ export type Vc8Form =
   | { op: 'rowptr'; expr: string; name: string; type: string; anchor?: string }
   | { op: 'acc'; expr: string; index: number; bare?: boolean }
   | { op: 'retvar'; cond: string; name: string; index: number }
-  | { op: 'onecall'; cond: string; name: string; index: number };
+  | { op: 'onecall'; cond: string; name: string; index: number }
+  | { op: 'roundup'; name: string; param?: string };
 
 /**
  * A header inline that reads one field of a struct through a pointer, or returns a
@@ -303,7 +315,7 @@ export interface Vc8FormOptions {
 
 const OPS = new Set(['seq', 'fold', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'width', 'boolflag', 'retwiden', 'arms',
   'nest', 'merge-tail', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
-  'nestcall', 'fill', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall']);
+  'nestcall', 'fill', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup']);
 
 /** Split at the commas outside brackets, parentheses, angle-free. */
 function splitArgs(s: string): string[] {
@@ -393,6 +405,11 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
       const i = int(args[2], 1);
       if (anchor || args.length < 2 || args.length > 3 || !(i >= 1) || args[0] === '' || !/^[A-Za-z_]\w*$/.test(args[1])) return undefined;
       return { op: m[1], cond: args[0], name: args[1], index: i } as Vc8Form;
+    }
+    case 'roundup': {
+      const id = /^[A-Za-z_]\w*$/;
+      if (anchor || args.length < 1 || args.length > 2 || !id.test(args[0]) || (args.length === 2 && !id.test(args[1]))) return undefined;
+      return { op: 'roundup', name: args[0], ...(args.length === 2 ? { param: args[1] } : {}) };
     }
     case 'acc': {
       // `acc(E)`, `acc(E,i)`, `acc(E,bare)`, `acc(E,i,bare)`.
@@ -2981,6 +2998,80 @@ function doOnecall(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'onecall' }>): vo
   b.statements.splice(k, 1, decl, ifs);
 }
 
+// ---------------------------------------------------------------------------------------
+// roundup: the rounding to a granularity through an inline helper of its own
+
+export const ROUND_UP_HELPER = 'D2_RoundUp';
+export const ROUND_UP_DEFINITION = [
+  `// ${ROUND_UP_HELPER}, rounding up to a granularity, as its callers inlined it: the parameter changed and returned.`,
+  `static inline uint32_t ${ROUND_UP_HELPER}(uint32_t n, uint32_t g) {`,
+  '    if (n % g) {',
+  '        n = g - n % g + n;',
+  '    }',
+  '    return n;',
+  '}',
+].join('\n');
+
+const isU32 = (t: string | undefined): boolean => {
+  if (!t) return false;
+  const r = intType(t, false);
+  return !!r && r.w === 4 && r.r.lo === 0n && r.r.hi === 0xffffffffn;
+};
+
+function doRoundup(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'roundup' }>): void {
+  const v = f.name;
+  const sites: Array<{ b: CompoundStmt; k: number; g: string }> = [];
+  for (const b of blocks(fn)) {
+    for (let k = 0; k < b.statements.length; k++) {
+      const s = b.statements[k];
+      if (s.kind !== NodeKind.IfStmt) continue;
+      const x = s as IfStmt;
+      if (x.elseBranch || x.init) continue;
+      const c = unparen(x.condition);
+      if (c.kind !== NodeKind.BinaryExpr || (c as BinaryExpr).operator !== '%') continue;
+      const l = unparen((c as BinaryExpr).left), r = unparen((c as BinaryExpr).right);
+      if (!isId(l, v) || !isId(r)) continue;
+      const arm = stmtsOf(x.thenBranch);
+      const st = arm.length === 1 ? storeOf(arm[0]) : undefined;
+      if (!st || st.operator !== '=' || !isId(unparen(st.left), v)) continue;
+      if (text(st.right) !== norm(`${r.name} - ${v} % ${r.name} + ${v}`)) continue;
+      sites.push({ b, k, g: r.name });
+    }
+  }
+  if (sites.length !== 1) refuse(`${sites.length} round-up sites on ${v}`);
+  const { b, k, g } = sites[0];
+  if (!isU32(declaredType(fn, v))) refuse(`${v} is not an unsigned 32-bit local`);
+  if (!isU32(declaredType(fn, g))) refuse(`${g} is not an unsigned 32-bit local`);
+
+  if (f.param) {
+    const p = f.param;
+    const param = fn.parameters.find(x => (x as unknown as { name?: Identifier | null }).name?.name === p) as unknown as { type: TypeNode } | undefined;
+    if (!param) refuse(`${p} is not a parameter`);
+    const vd = soleDecl(fn, v);
+    if (text(param!.type) !== text(vd.type)) refuse(`${p} is ${emit(param!.type as never)}, ${v} is ${emit(vd.type as never)}`);
+    const at = fn.body!.statements.findIndex(s => declOf(s) === vd);
+    if (at < 0) refuse(`${v} is not declared in the function's own block`);
+    const init = vd.initializer ? unparen(vd.initializer as Expression) : undefined;
+    if (!init || init.kind !== NodeKind.BinaryExpr || (init as BinaryExpr).operator !== '+') refuse(`${v} is not declared as a sum`);
+    const sum = init as BinaryExpr;
+    const other = isId(unparen(sum.left), p) ? sum.right : isId(unparen(sum.right), p) ? sum.left : refuse(`${v}'s sum does not add ${p}`);
+    if (mentions(other, p) || mentions(other, v)) refuse(`${v}'s sum reads ${p} or ${v} twice`);
+    let named = 0;
+    for (const { node } of walk(fn.body!)) if (isId(node, p)) named++;
+    if (named !== 1) refuse(`${p} is named ${named} times in the body`);
+    if (addressTaken(fn, v)) refuse(`${v}'s address is taken`);
+    const [store] = parseStmts(`${p} = __vc8sum;`);
+    ((store as ExprStmt).expression as AssignExpr).right = sum;
+    fn.body!.statements[at] = store;
+    for (const { node } of walk(fn.body!)) if (isId(node, v)) (node as Identifier).name = p;
+  }
+
+  const target = f.param ?? v;
+  const [call] = parseStmts(`${target} = ${ROUND_UP_HELPER}(${target}, ${g});`);
+  b.statements[k] = call;
+  prefixUsed.add(ROUND_UP_DEFINITION);
+}
+
 const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op: K }>) => void } = {
   seq: doSeq, fold: doFold, cache: doCache, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
   retval: doRetval, width: doWidth, boolflag: doBoolflag, retwiden: doRetwiden, arms: doArms,
@@ -2988,7 +3079,7 @@ const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op
   cmp: doCmp, swap: doSwap, ifsel: doIfsel, split: doSplit, select: doSelect, decl: doDecl, unselect: doUnselect,
   tsel: doTsel, hoist: doHoist, nestcall: doNestcall, fill: doFill, copy: doCopy, shift: doShift, ptrwalk: doPtrwalk, rowptr: doRowptr,
   acc: doAcc,
-  retvar: doRetvar, onecall: doOnecall,
+  retvar: doRetvar, onecall: doOnecall, roundup: doRoundup,
 };
 
 /**
@@ -3021,6 +3112,19 @@ function respellForm(fn: FunctionDecl, form: Vc8Form): Vc8Form {
   return changed ? (out as unknown as Vc8Form) : form;
 }
 
+/**
+ * The one function definition of a unit: a plain one, or an explicit specialization
+ * (`template<> void TSGrowableArray<SGAMEDATA>::Reserve(...)`) as the tree prints a member
+ * of a template instance.
+ */
+export function definitionOf(tu: TranslationUnit): FunctionDecl | undefined {
+  for (const d of tu.declarations) {
+    const f = d.kind === NodeKind.TemplateDecl ? (d as unknown as { declaration: ASTNode }).declaration : d;
+    if (f.kind === NodeKind.FunctionDecl && (f as FunctionDecl).body) return f as FunctionDecl;
+  }
+  return undefined;
+}
+
 export function applyVc8Forms(tu: TranslationUnit, forms: Array<{ form: Vc8Form; tag?: string }>,
   onSite?: (s: Vc8FormSite) => void, tables?: Vc8FormTables): TranslationUnit {
   if (forms.length === 0) return tu;
@@ -3028,7 +3132,7 @@ export function applyVc8Forms(tu: TranslationUnit, forms: Array<{ form: Vc8Form;
   let cur = tu;
   for (const { form, tag } of forms) {
     const next = cloneNode(cur);
-    const fn = next.declarations.find(d => d.kind === NodeKind.FunctionDecl && (d as FunctionDecl).body) as FunctionDecl | undefined;
+    const fn = definitionOf(next);
     prefixUsed = new Set();
     try {
       if (!fn) refuse('no function body');

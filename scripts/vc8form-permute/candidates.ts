@@ -22,7 +22,7 @@
 import { readFileSync, writeFileSync, createReadStream } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
-import { parse, emit, NodeKind, applyVc8Forms, parseVc8Form, type Vc8Form } from '../../packages/cpp-parser/dist/index.js';
+import { parse, emit, NodeKind, applyVc8Forms, definitionOf, parseVc8Form, type Vc8Form } from '../../packages/cpp-parser/dist/index.js';
 import type { ASTNode, FunctionDecl, TranslationUnit } from '../../packages/cpp-parser/dist/index.js';
 import { vc8FormSpec, vc8formBodyHash } from '../../packages/reconstruct/src/codegen/vc8form-spec.js';
 import { normalizeSignatureType } from '../../packages/reconstruct/src/codegen/platform-types.js';
@@ -51,7 +51,7 @@ function* walk(root: ASTNode): Generator<N> {
 }
 
 const unparen = (e: N): N => { while (e && e.kind === NodeKind.ParenExpr) e = e.expression; return e; };
-const fnOf = (tu: TranslationUnit) => tu.declarations.find(d => d.kind === NodeKind.FunctionDecl && (d as FunctionDecl).body) as FunctionDecl | undefined;
+const fnOf = (tu: TranslationUnit) => definitionOf(tu);
 const body = (tu: TranslationUnit) => emit(tu as never).trimEnd();
 
 // ---------------------------------------------------------------------------------------
@@ -468,6 +468,17 @@ function sites(c: Ctx, maxAnchors: number): string[] {
   const accField = new Set(accTables.accessors.map(a => a.path[a.path.length - 1]));
   const reads = all.filter(n => n.kind === NodeKind.MemberExpr && n.member?.kind === NodeKind.Identifier && accField.has(n.member.name)).map(n => pr(n));
   for (const { t, i } of indexed(reads)) { out.add(withIdx('acc', t, i, true)); out.add(`acc(${t}${i > 0 ? `,${i}` : ''},bare)`); }
+  // roundup: the local an `if (V % G)` rounds up, alone and summed into each parameter.
+  const params = fn.parameters.map(p => (p as N).name?.name).filter((n): n is string => typeof n === 'string');
+  for (const n of all) {
+    if (n.kind !== NodeKind.IfStmt) continue;
+    const c = unparen(n.condition);
+    if (c.kind !== NodeKind.BinaryExpr || c.operator !== '%' || unparen(c.left).kind !== NodeKind.Identifier) continue;
+    const v = unparen(c.left).name;
+    if (!locals.has(v)) continue;
+    out.add(`roundup(${v})`);
+    for (const p of params) out.add(`roundup(${v},${p})`);
+  }
   return [...out];
 }
 
