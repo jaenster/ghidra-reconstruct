@@ -79,6 +79,10 @@ async function loadGlobals(path?: string) {
   }
 }
 
+/** The global types the generator hands the forms (its `globalTypes`), from the model: which globals are arrays. */
+let tablesMemo: { globalTypes: Record<string, string> } | undefined;
+const tables = () => (tablesMemo ??= { globalTypes: Object.fromEntries([...globals].map(([k, v]) => [k, tidy(v)])) });
+
 const tidy = (t: string) => t.replace(/\bstruct\s+|\bunion\s+|\benum\s+/g, '').replace(/\s*\*/g, '*').replace(/\s+/g, ' ').trim();
 
 /** A model type as the tree spells it: the generator's own respelling (`ushort` is `uint16_t`). */
@@ -358,6 +362,53 @@ function sites(c: Ctx, maxAnchors: number): string[] {
   for (const [op, m] of [['fill', fills], ['copy', copies]] as const) {
     for (const [v, n] of m) { out.add(`${op}(${v})`); for (let i = 1; i <= Math.min(n, 8); i++) out.add(`${op}(${v},${i})`); }
   }
+  // ptrwalk: a for loop counting i up by one, over X[i] (X a name: a local, a parameter, a global).
+  const elem = (t: string | undefined) => (t ? (/\[\w*\]$/.test(t) ? t.replace(/\s*\[\w*\]$/, '') : t.endsWith('*') ? t.slice(0, -1).trim() : undefined) : undefined);
+  const nameOf = (x: N) => (unparen(x).kind === NodeKind.Identifier || unparen(x).kind === NodeKind.QualifiedId ? prq(unparen(x)) : undefined);
+  const walks = new Map<string, number>();
+  for (const n of all) {
+    if (n.kind !== NodeKind.ForStmt || !n.increment) continue;
+    const inc = unparen(n.increment);
+    const i = (inc.kind === NodeKind.PostfixExpr || inc.kind === NodeKind.UnaryExpr) && inc.operator === '++' && unparen(inc.operand).kind === NodeKind.Identifier ? unparen(inc.operand).name : undefined;
+    if (!i) continue;
+    const xs = new Map<string, N>();
+    for (const m of [...walk(n.body), ...(n.condition ? walk(n.condition) : [])]) {
+      if (m.kind !== NodeKind.SubscriptExpr || unparen(m.index).kind !== NodeKind.Identifier || unparen(m.index).name !== i) continue;
+      const x = nameOf(m.array);
+      if (x) xs.set(x, unparen(m.array));
+    }
+    for (const [x, xn] of xs) {
+      const t = elem(typeOf(xn, vars));
+      if (!declarable(t)) continue;
+      const k = `${i}\0${key(x)}`;
+      walks.set(k, (walks.get(k) ?? 0) + 1);
+      const nth = walks.get(k)!;
+      out.add(`ptrwalk(${i},${x},${free('t2_p')},${t})`);
+      out.add(`ptrwalk(${i},${x},${free('t2_p')},${t},${nth})`);
+    }
+  }
+  // rowptr: a row X[I] (I no constant), or the base of a flat X[I + k], with X a named table.
+  const rows = new Map<string, { x: N; e: string }>();
+  for (const n of all) {
+    if (n.kind !== NodeKind.SubscriptExpr) continue;
+    const x = nameOf(n.array);
+    if (!x) continue;
+    const ix = unparen(n.index);
+    if (ix.kind === NodeKind.IntegerLiteral) continue;
+    let base: N = ix;
+    if (ix.kind === NodeKind.BinaryExpr && ix.operator === '+') {
+      if (unparen(ix.right).kind === NodeKind.IntegerLiteral) base = ix.left; else if (unparen(ix.left).kind === NodeKind.IntegerLiteral) base = ix.right;
+    }
+    const e = `${x}[${prq(unparen(base))}]`;
+    rows.set(key(e), { x: unparen(n.array), e });
+  }
+  const rname = free('t2_r');
+  for (const [, { x, e }] of rows) {
+    const t = elem(typeOf(x, vars));
+    if (!declarable(t)) continue;
+    out.add(`rowptr(${e},${rname},${t})`);
+    for (const a of [...new Set(anchors)].slice(0, maxAnchors)) out.add(`rowptr(${e},${rname},${t},@${a})`);
+  }
   const cmps = all.filter(n => n.kind === NodeKind.BinaryExpr && COMPARES.has(n.operator)).map(n => pr(n));
   for (const { t, i } of indexed(cmps)) for (const how of ['mirror', 'lit', 'mirror-lit']) out.add(`cmp(${t},${how}${i > 0 ? `,${i}` : ''})`);
   const sw = all.filter(n => n.kind === NodeKind.BinaryExpr && COMMUTES.has(n.operator)).map(n => pr(n));
@@ -376,7 +427,7 @@ function tryForm(tu: TranslationUnit, text: string): { text: string; form: Vc8Fo
   let why: string | undefined, applied = false;
   let out: TranslationUnit;
   try {
-    out = applyVc8Forms(tu, [{ form }], s => { applied = s.applied; why = s.why; });
+    out = applyVc8Forms(tu, [{ form }], s => { applied = s.applied; why = s.why; }, tables());
   } catch (e) {
     // A form the pass cannot even attempt is no candidate; say which, it is a pass defect.
     process.stderr.write(`form ${text} threw: ${(e as Error).message.split('\n')[0]}\n`);
@@ -429,7 +480,7 @@ function applyMany(items: Array<{ id: string; text: string; forms: string[] }>) 
     const out = applyVc8Forms(tu, spec.forms, s => {
       const f = s.tag!.slice(0, s.tag!.lastIndexOf(';ev='));
       if (s.applied) applied.push(f); else refused.push({ form: f, why: s.why ?? '' });
-    });
+    }, tables());
     // `ord` only where two forms share an op.
     for (const f of forms) if ((perOp.get(parseVc8Form(f)?.op ?? '?') ?? 0) < 2) delete ord[f];
     return { id, text: body(out), applied, refused, ord, order: spec.forms.map(x => x.tag.slice(0, x.tag.lastIndexOf(';ev='))) };
@@ -459,6 +510,7 @@ async function main() {
     await loadGlobals(opt('--globals'));
     writeFileSync(b, JSON.stringify(singles(JSON.parse(readFileSync(a, 'utf8')), Number(opt('--max-anchors') ?? 16))));
   } else if (mode === 'apply') {
+    await loadGlobals(opt('--globals'));
     writeFileSync(b, JSON.stringify(applyMany(JSON.parse(readFileSync(a, 'utf8')))));
   } else if (mode === 'dh') {
     writeFileSync(c, JSON.stringify(await dh(a, b)));

@@ -520,7 +520,7 @@ async function main() {
       }
       if (applyIn.length) {
         writeFileSync(join(out, 'apply-in.json'), jsonDumps(applyIn.map(a => ({ id: a.id, text: a.text, forms: a.forms }))));
-        tsx(['apply', join(out, 'apply-in.json'), join(out, 'apply-out.json')], GR);
+        tsx(['apply', join(out, 'apply-in.json'), join(out, 'apply-out.json'), '--globals', join(args.snapshot, 'globals.ndjson')], GR);
         const outs = JSON.parse(readFileSync(join(out, 'apply-out.json'), 'utf8'));
         for (let k = 0; k < applyIn.length; k++) {
           const a = applyIn[k], r = outs[k];
