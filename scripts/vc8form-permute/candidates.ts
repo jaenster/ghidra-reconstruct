@@ -21,6 +21,7 @@
  */
 import { readFileSync, writeFileSync, createReadStream } from 'node:fs';
 import { createInterface } from 'node:readline';
+import { pathToFileURL } from 'node:url';
 import { parse, emit, NodeKind, applyVc8Forms, parseVc8Form, type Vc8Form } from '../../packages/cpp-parser/dist/index.js';
 import type { ASTNode, FunctionDecl, TranslationUnit } from '../../packages/cpp-parser/dist/index.js';
 import { vc8FormSpec, vc8formBodyHash } from '../../packages/reconstruct/src/codegen/vc8form-spec.js';
@@ -168,12 +169,12 @@ function sites(c: Ctx, maxAnchors: number): string[] {
   const blocks = all.filter(n => n.kind === NodeKind.CompoundStmt);
   const free = (stem: string) => { for (let k = 0; ; k++) if (!vars.has(`${stem}${k}`)) return `${stem}${k}`; };
 
-  // seq: adjacent stores, every other order of each run of two or three.
+  // seq: adjacent stores, every other order of each run of two to four.
   const seqRuns: string[][] = [];
   for (const b of blocks) {
     const st = b.statements as N[];
     for (let k = 0; k < st.length; k++) {
-      for (const len of [2, 3]) {
+      for (const len of [2, 3, 4]) {
         const run = st.slice(k, k + len).map(seqTarget);
         if (run.length < len || run.some(t => t === undefined)) continue;
         seqRuns.push(run as string[]);
@@ -248,7 +249,13 @@ function sites(c: Ctx, maxAnchors: number): string[] {
   for (const { t, i } of indexed(ifs.filter(s => !s.elseBranch).map(s => pr(s.condition)))) {
     for (const op of ['nest', 'merge-tail', 'continue', 'select']) out.add(withIdx(op, t, i, true));
   }
-  for (const s of ifs.filter(s => s.elseBranch)) { const t = pr(s.condition); out.add(`arms(${t})`); out.add(`arms(${t},wrap)`); }
+  // arms: the i-th if/else on its condition where several share it.
+  const elseConds = ifs.filter(s => s.elseBranch).map(s => pr(s.condition));
+  for (const t of new Set(elseConds)) {
+    const n = elseConds.filter(x => key(x) === key(t)).length;
+    out.add(`arms(${t})`); out.add(`arms(${t},wrap)`);
+    for (let i = 2; i <= n; i++) { out.add(`arms(${t},${i})`); out.add(`arms(${t},wrap,${i})`); }
+  }
   const guards = ifs.filter(s => !s.elseBranch);
   for (let i = 1; i <= guards.length; i++) { out.add(`merge-guards(${i})`); for (let k = 1; k <= 3; k++) out.add(`guards(${k},${i})`); }
   for (const b of blocks) {
@@ -293,6 +300,64 @@ function sites(c: Ctx, maxAnchors: number): string[] {
     if (n.kind === NodeKind.BinaryExpr && (n.operator === '&&' || n.operator === '||')) { at(n.left); at(n.right); }
   }
   for (const { t, i } of indexed(tested)) out.add(withIdx('nonzero', t, i, true));
+  // bool: every truth test - those nonzero reaches, the operand of `!`, a side compared with 0.
+  const truth = [...tested];
+  for (const n of all) {
+    if (n.kind === NodeKind.UnaryExpr && n.operator === '!') truth.push(pr(unparen(n.operand)));
+    if (n.kind === NodeKind.BinaryExpr && (n.operator === '==' || n.operator === '!=')) {
+      const zero = (e: N) => { const u = unparen(e); return u.kind === NodeKind.IntegerLiteral && BigInt(u.value) === 0n; };
+      if (zero(n.right)) truth.push(pr(unparen(n.left))); else if (zero(n.left)) truth.push(pr(unparen(n.right)));
+    }
+  }
+  const truthN = new Map<string, number>();
+  for (const t of truth) truthN.set(key(t), (truthN.get(key(t)) ?? 0) + 1);
+  for (const t of new Set(truth)) {
+    const n = truthN.get(key(t))!;
+    if (n === 1) out.add(`bool(${t})`); else for (let i = 1; i <= n; i++) out.add(`bool(${t},${i})`);
+  }
+
+  // nestcall: a local stored from one call, the i-th such store when there are several.
+  const callStores = new Map<string, number>();
+  for (const n of all) {
+    let v: string | undefined, r: N | undefined;
+    if (n.kind === NodeKind.AssignExpr && n.operator === '=' && unparen(n.left).kind === NodeKind.Identifier) { v = unparen(n.left).name; r = n.right; }
+    if (n.kind === NodeKind.VariableDecl && n.initializer) { v = n.name.name; r = n.initializer; }
+    if (v && r && unparen(r).kind === NodeKind.CallExpr) callStores.set(v, (callStores.get(v) ?? 0) + 1);
+  }
+  for (const [v, n] of callStores) {
+    if (n === 1) out.add(`nestcall(${v})`); else for (let i = 1; i <= n; i++) out.add(`nestcall(${v},${i})`);
+  }
+  // fill: the array a memset clears or a pointer zero-loop walks; copy: a copy loop's target.
+  const fills = new Map<string, number>(), copies = new Map<string, number>();
+  const bump = (m: Map<string, number>, v: string) => m.set(v, (m.get(v) ?? 0) + 1);
+  for (const n of all) {
+    if (n.kind === NodeKind.CallExpr && pr(n.callee) === 'memset' && n.arguments.length === 3) {
+      let d = unparen(n.arguments[0]);
+      if (d.kind === NodeKind.BinaryExpr && d.operator === '+') d = unparen(d.left);
+      if (d.kind === NodeKind.Identifier) bump(fills, d.name);
+    }
+    if (n.kind === NodeKind.CompoundStmt) {
+      const st = n.statements as N[];
+      for (let k = 0; k + 1 < st.length; k++) {
+        if (st[k + 1].kind !== NodeKind.ForStmt) continue;
+        const s = st[k];
+        const r = s.kind === NodeKind.ExprStmt && unparen(s.expression).kind === NodeKind.AssignExpr ? unparen(s.expression).right
+          : s.kind === NodeKind.DeclStmt && s.declarations.length === 1 ? s.declarations[0].initializer : undefined;
+        if (r && unparen(r).kind === NodeKind.Identifier) bump(fills, unparen(r).name);
+      }
+    }
+    if (n.kind === NodeKind.ForStmt) {
+      const first = (n.body?.kind === NodeKind.CompoundStmt ? n.body.statements : [n.body])[0] as N | undefined;
+      const e = first?.kind === NodeKind.ExprStmt ? unparen(first.expression) : undefined;
+      if (e?.kind === NodeKind.AssignExpr && unparen(e.left).kind === NodeKind.UnaryExpr && unparen(e.left).operator === '*') {
+        const d = unparen(unparen(e.left).operand);
+        if (d.kind === NodeKind.Identifier) bump(copies, d.name);
+      }
+    }
+  }
+  for (const [op, m] of [['fill', fills], ['copy', copies]] as const) {
+    for (const [v, n] of m) { out.add(`${op}(${v})`); for (let i = 1; i <= Math.min(n, 8); i++) out.add(`${op}(${v},${i})`); }
+  }
   const cmps = all.filter(n => n.kind === NodeKind.BinaryExpr && COMPARES.has(n.operator)).map(n => pr(n));
   for (const { t, i } of indexed(cmps)) for (const how of ['mirror', 'lit', 'mirror-lit']) out.add(`cmp(${t},${how}${i > 0 ? `,${i}` : ''})`);
   const sw = all.filter(n => n.kind === NodeKind.BinaryExpr && COMMUTES.has(n.operator)).map(n => pr(n));
@@ -321,7 +386,7 @@ function tryForm(tu: TranslationUnit, text: string): { text: string; form: Vc8Fo
   return { text: body(out), form };
 }
 
-function singles(items: Array<{ id: string; text: string }>, maxAnchors: number) {
+export function singles(items: Array<{ id: string; text: string }>, maxAnchors: number) {
   return items.map(({ id, text }) => {
     let tu: TranslationUnit;
     try { tu = parse(text); } catch (e) { return { id, error: `parse: ${(e as Error).message.split('\n')[0]}`, candidates: [] }; }
@@ -403,4 +468,5 @@ async function main() {
   }
 }
 
-main().catch(e => { console.error(e); process.exit(1); });
+// Run as a script; imported, it only lends `singles` (a check of which candidates a body offers).
+if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) main().catch(e => { console.error(e); process.exit(1); });
