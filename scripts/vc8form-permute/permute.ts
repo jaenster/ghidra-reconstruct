@@ -255,7 +255,7 @@ interface Accepted { job: Job; on: number; forms: string[]; gained: Set<number>;
 interface Args {
   checkout: string; snapshot: string; out: string; pool?: string; addrs?: string; ops?: string; sample: number; seed: number;
   max_insns: number; jobs: number; max_anchors: number; pair_top: number; no_pairs: boolean; no_phase: boolean;
-  resume: boolean; group: number; zig: string;
+  resume: boolean; group: number; zig: string; ops?: string;
 }
 
 function usage(code = 2): never {
@@ -297,7 +297,8 @@ async function main() {
   const pool: Array<[number, string, string, string, number]> = [];
   for (const line of readFileSync(poolPath, 'utf8').split('\n').slice(1)) {
     const p = line.split('\t');
-    if (p.length < 10 || p[4].startsWith('lib') || p[3].startsWith('libcmt') || !NEAR.test(p[9])) continue;
+    // --addrs names its targets whatever their status (MATCH aside); the pool is the near misses.
+    if (p.length < 10 || p[4].startsWith('lib') || p[3].startsWith('libcmt') || (args.addrs ? p[9] === 'MATCH' : !NEAR.test(p[9]))) continue;
     if (parseInt(p[5], 10) >= args.max_insns) continue;
     pool.push([parseInt(p[0], 16), p[2], p[3], p[9], parseInt(p[5], 10)]);
   }
@@ -400,7 +401,7 @@ async function main() {
     const t1 = now();
     tsx(['singles', join(out, 'cand-in.json'), join(out, 'cand-out.json'),
       '--types', join(args.snapshot, 'dataTypes.ndjson'),
-      '--globals', join(args.snapshot, 'globals.ndjson'), '--max-anchors', String(args.max_anchors)], GR);
+      '--globals', join(args.snapshot, 'globals.ndjson'), '--max-anchors', String(args.max_anchors), ...(args.ops ? ['--ops', args.ops] : [])], GR);
     const cands = new Map<string, any>();
     // --ops: only the forms of the named ops are tried (a question about one family of forms).
     const ops = args.ops ? new Set(args.ops.split(',')) : null;
@@ -529,7 +530,7 @@ async function main() {
       }
       if (applyIn.length) {
         writeFileSync(join(out, 'apply-in.json'), jsonDumps(applyIn.map(a => ({ id: a.id, text: a.text, forms: a.forms }))));
-        tsx(['apply', join(out, 'apply-in.json'), join(out, 'apply-out.json')], GR);
+        tsx(['apply', join(out, 'apply-in.json'), join(out, 'apply-out.json'), '--globals', join(args.snapshot, 'globals.ndjson')], GR);
         const outs = JSON.parse(readFileSync(join(out, 'apply-out.json'), 'utf8'));
         for (let k = 0; k < applyIn.length; k++) {
           const a = applyIn[k], r = outs[k];

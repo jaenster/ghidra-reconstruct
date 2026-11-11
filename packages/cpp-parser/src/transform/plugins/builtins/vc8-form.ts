@@ -180,7 +180,7 @@
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, AssignExpr, BinaryExpr, CallExpr, CompoundStmt, ConditionalExpr, CStyleCastExpr, DeclStmt, Expression,
-  ExprStmt, ForStmt, FunctionDecl, Identifier, IfStmt, IntegerLiteralExpr, ParenExpr, ReturnStmt, Statement, TranslationUnit,
+  ExprStmt, ForStmt, FunctionDecl, Identifier, IfStmt, IntegerLiteralExpr, ParenExpr, ReturnStmt, Statement, SubscriptExpr, TranslationUnit,
   TypeNode, UnaryExpr, VariableDecl,
 } from '../../../ast/nodes.js';
 import { parse } from '../../../parser/index.js';
@@ -223,7 +223,9 @@ export type Vc8Form =
   | { op: 'nestcall'; name: string; index: number }
   | { op: 'fill'; name: string; index: number }
   | { op: 'copy'; name: string; index: number }
-  | { op: 'shift'; expr: string; how: 'sar' | 'shr'; index: number };
+  | { op: 'shift'; expr: string; how: 'sar' | 'shr'; index: number }
+  | { op: 'ptrwalk'; counter: string; array: string; name: string; type: string; index: number }
+  | { op: 'rowptr'; expr: string; name: string; type: string; anchor?: string };
 
 export interface Vc8FormSite {
   form: Vc8Form;
@@ -242,7 +244,7 @@ export interface Vc8FormOptions {
 
 const OPS = new Set(['seq', 'fold', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'width', 'boolflag', 'retwiden', 'arms',
   'nest', 'merge-tail', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
-  'nestcall', 'fill', 'copy', 'shift']);
+  'nestcall', 'fill', 'copy', 'shift', 'ptrwalk', 'rowptr']);
 
 /** Split at the commas outside brackets, parentheses, angle-free. */
 function splitArgs(s: string): string[] {
@@ -307,6 +309,17 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
       if (rest.length > 1 || (rest.length === 1 && !/^[1-9]\d*$/.test(rest[0]))) return undefined;
       return { op: 'arms', cond: args[0], ...(wrap ? { wrap: true } : {}), ...(rest.length ? { index: Number(rest[0]) } : {}) };
     }
+    case 'ptrwalk': {
+      // `ptrwalk(i,X,N,T)`, `ptrwalk(i,X,N,T,k)`: the k-th for loop counting i.
+      const i = int(args[4], 0);
+      if (anchor || args.length < 4 || args.length > 5 || !(i >= 0) || !/^[A-Za-z_]\w*$/.test(args[0])
+        || !/^[A-Za-z_][\w:]*$/.test(args[1]) || !/^[A-Za-z_]\w*$/.test(args[2]) || args[3] === '') return undefined;
+      return { op: 'ptrwalk', counter: args[0], array: args[1], name: args[2], type: args[3], index: i };
+    }
+    case 'rowptr':
+      // `rowptr(X[I],N,T)`, `rowptr(X[I],N,T,@A)`.
+      if (args.length !== 3 || !/\]$/.test(args[0]) || !/^[A-Za-z_]\w*$/.test(args[1]) || args[2] === '') return undefined;
+      return { op: 'rowptr', expr: args[0], name: args[1], type: args[2], ...(anchor ? { anchor } : {}) };
     case 'nestcall': case 'fill': case 'copy': {
       const i = int(args[1], 0);
       if (anchor || args.length < 1 || args.length > 2 || !(i >= 0) || !/^[A-Za-z_]\w*$/.test(args[0])) return undefined;
@@ -2539,12 +2552,141 @@ function doShift(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'shift' }>): void {
   (hit.shift as unknown as Record<string, unknown>).left = left;
 }
 
+/** A global the generator declares as an array (its address cannot change), by its last name part. */
+function globalArray(name: string): boolean {
+  const t = selectTables?.globalTypes?.[name.replace(/^.*::/, '')] ?? selectTables?.globalTypes?.[name];
+  return !!t && /\[/.test(t);
+}
+
+/**
+ * X names storage whose address stays put while the code runs: a local array, a local or
+ * parameter pointer that nothing in `within` reassigns and whose address is not taken, or a
+ * global the generator declares as an array.
+ */
+function fixedBase(fn: FunctionDecl, x: Expression, within: ASTNode[]): boolean {
+  x = unparen(x);
+  if (x.kind !== NodeKind.Identifier && x.kind !== NodeKind.QualifiedId) return false;
+  const name = emit(x as never).replace(/\s+/g, '');
+  if (!localNames(fn).has(name)) return globalArray(name);
+  if (addressTaken(fn, name)) return false;
+  for (const w of within) for (const { node } of walk(w)) {
+    if (node.kind === NodeKind.AssignExpr && isId(unparen((node as AssignExpr).left), name)) return false;
+    if ((node.kind === NodeKind.PostfixExpr || (node.kind === NodeKind.UnaryExpr && ['++', '--'].includes((node as UnaryExpr).operator)))
+      && isId(unparen((node as UnaryExpr).operand), name)) return false;
+  }
+  return true;
+}
+
+/** `&*N` is N and `(N)` is N: what a pointer local reads back as after a rewrite through it. */
+function tidyThrough(fn: FunctionDecl, n: string): void {
+  for (const { node, slot } of [...walk(fn.body!)]) {
+    if (!slot || node.kind !== NodeKind.UnaryExpr || (node as UnaryExpr).operator !== '&') continue;
+    const o = unparen((node as UnaryExpr).operand);
+    if (o.kind === NodeKind.UnaryExpr && (o as UnaryExpr).operator === '*' && isId(unparen((o as UnaryExpr).operand), n)) put(slot, { kind: NodeKind.Identifier, name: n } as Identifier);
+  }
+  for (const { node, slot } of [...walk(fn.body!)]) {
+    if (slot && node.kind === NodeKind.ParenExpr && isId(unparen(node as Expression), n)) put(slot, { kind: NodeKind.Identifier, name: n } as Identifier);
+  }
+}
+
+/** Every X[i] under the nodes reads through n: `*n`, `X[i].m` as `n->m`. Returns how many. */
+function readThrough(roots: ASTNode[], isSub: (x: ASTNode) => boolean, n: string): number {
+  let k = 0;
+  for (const w of roots) for (const { node, slot } of [...walk(w)]) {
+    if (!slot || !isSub(node)) continue;
+    const owner = !Array.isArray(slot.parent) ? (slot.parent as unknown as ASTNode) : undefined;
+    const id = { kind: NodeKind.Identifier, name: n } as Identifier;
+    if (owner && owner.kind === NodeKind.MemberExpr && slot.key === 'object' && !(owner as unknown as { isArrow: boolean }).isArrow) {
+      (owner as unknown as { object: Expression }).object = id;
+      (owner as unknown as { isArrow: boolean }).isArrow = true;
+    } else put(slot, { kind: NodeKind.UnaryExpr, operator: '*', operand: id } as unknown as UnaryExpr);
+    k++;
+  }
+  return k;
+}
+
+/**
+ * ptrwalk(i,X,N,T[,k]): the for loop counting i up by one from A, whose body or condition
+ * reads X[i], walks a pointer instead: `T *N = &X[A];` before the loop, every X[i] in the
+ * condition and body reads through N (`*N`, `N->m`, `&X[i]` is N), and N steps with i
+ * (`i++, N++`). N equals &X[i] wherever the loop evaluates either: only the increment
+ * changes i, and X's storage stays put (fixedBase). The counter stays, so whatever else
+ * reads i reads the same values.
+ */
+function doPtrwalk(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'ptrwalk' }>): void {
+  const { counter: i, name: n } = f;
+  if (localNames(fn).has(n) || mentions(fn.body!, n)) refuse(`${n} exists`);
+  const isX = (e: Expression) => text(e) === norm(f.array);
+  const isSub = (x: ASTNode) => x.kind === NodeKind.SubscriptExpr && isX(unparen((x as SubscriptExpr).array)) && isId(unparen((x as SubscriptExpr).index), i);
+  const sites: Array<{ b: CompoundStmt; k: number; loop: ForStmt; start: Expression }> = [];
+  for (const b of blocks(fn)) b.statements.forEach((s, k) => {
+    if (s.kind !== NodeKind.ForStmt) return;
+    const loop = s as ForStmt;
+    let start: Expression | undefined;
+    if (loop.init) {
+      const st = storeOf(loop.init);
+      if (st && st.operator === '=' && isId(unparen(st.left), i)) start = st.right;
+      const d = declOf(loop.init);
+      if (d && d.name.name === i && d.initializer) start = d.initializer as Expression;
+    }
+    if (!start || !loop.increment || !steps(loop.increment, i, '+')) return;
+    const reads = [...walk(loop.body)].some(x => isSub(x.node)) || (!!loop.condition && [...walk(loop.condition)].some(x => isSub(x.node)));
+    if (reads) sites.push({ b, k, loop, start });
+  });
+  const hit = f.index === 0 ? (sites.length === 1 ? sites[0] : refuse(`${sites.length} loops count ${i} over ${f.array}`))
+    : (sites[f.index - 1] ?? refuse(`no loop #${f.index} counts ${i} over ${f.array}`));
+  const { loop, start } = hit;
+  const inside: ASTNode[] = [loop.body, ...(loop.condition ? [loop.condition] : [])];
+  for (const w of inside) if (storedNames(w).has(i)) refuse(`${i} is stored in the loop`);
+  if (addressTaken(fn, i)) refuse(`${i}'s address is taken`);
+  const xNode = [...walk(loop)].find(x => isSub(x.node))!.node as SubscriptExpr;
+  if (!fixedBase(fn, xNode.array, [loop])) refuse(`${f.array} is not storage that stays put`);
+  // The start is evaluated once more, before the loop: a constant, or a name the init does not store.
+  const s0 = unparen(start);
+  if (!(s0.kind === NodeKind.IntegerLiteral || (isId(s0) && s0.name !== i))) refuse('the start is not a constant or a name');
+  if (readThrough(inside, isSub, n) === 0) refuse(`no ${f.array}[${i}] in the loop`);
+  tidyThrough(fn, n);
+  const decl = (parse(`void __vc8f() { ${f.type}* ${n} = &${emit(xNode.array as never)}[${emit(start as never)}]; }`).declarations[0] as FunctionDecl).body!.statements[0];
+  loop.increment = parseExpr(`${emit(loop.increment as never)}, ${n}++`);
+  hit.b.statements.splice(hit.k, 0, decl);
+}
+
+/**
+ * rowptr(X[I],N,T[,@A]): the row X[I] is read through a pointer local, `T *N = &X[I];`, as
+ * `cache(&X[I],N,T*)` writes it: `X[I].m` reads `N->m`, `X[I]` reads `*N`. A table Ghidra
+ * typed flat, read as `X[I + k]`, reads `N[k]`: the same element, `X[I + k]` is `(&X[I])[k]`.
+ * X must stay put (fixedBase); cache refuses when X or a name in I is stored before the
+ * last read it moves.
+ */
+function doRowptr(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'rowptr' }>): void {
+  const row = parseExpr(f.expr);
+  if (row.kind !== NodeKind.SubscriptExpr) refuse(`${f.expr} is no subscript`);
+  const xText = text((row as SubscriptExpr).array), iText = text((row as SubscriptExpr).index);
+  // The row's base as the body prints it (the tag's text may carry qualifiers the body drops).
+  const base = [...walk(fn.body!)].find(x => x.node.kind === NodeKind.SubscriptExpr && text((x.node as SubscriptExpr).array) === xText);
+  if (!base || !fixedBase(fn, (base.node as SubscriptExpr).array, [fn.body!])) refuse(`${f.expr} is not in storage that stays put`);
+  for (const { node, slot } of [...walk(fn.body!)]) {
+    if (!slot || node.kind !== NodeKind.SubscriptExpr) continue;
+    const sub = node as SubscriptExpr;
+    if (text(sub.array) !== xText) continue;
+    const ix = unparen(sub.index);
+    if (ix.kind !== NodeKind.BinaryExpr || (ix as BinaryExpr).operator !== '+') continue;
+    const l = (ix as BinaryExpr).left, r = (ix as BinaryExpr).right;
+    const pick = text(l) === iText && intValue(r) !== undefined ? [l, r] : text(r) === iText && intValue(l) !== undefined ? [r, l] : undefined;
+    if (!pick) continue;
+    const addr = { kind: NodeKind.UnaryExpr, operator: '&', operand: { kind: NodeKind.SubscriptExpr, array: sub.array, index: pick[0] } };
+    put(slot, { kind: NodeKind.SubscriptExpr, array: { kind: NodeKind.ParenExpr, expression: addr }, index: pick[1] } as unknown as SubscriptExpr);
+  }
+  doCache(fn, { op: 'cache', expr: `&${f.expr}`, name: f.name, type: `${f.type}*`, ...(f.anchor ? { anchor: f.anchor } : {}) });
+  tidyThrough(fn, f.name);
+}
+
 const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op: K }>) => void } = {
   seq: doSeq, fold: doFold, cache: doCache, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
   retval: doRetval, width: doWidth, boolflag: doBoolflag, retwiden: doRetwiden, arms: doArms,
   nest: doNest, 'merge-tail': doMergeTail, continue: doContinue, dup: doDup, tarms: doTarms, zero: doZero, nonzero: doNonzero, bool: doBool,
   cmp: doCmp, swap: doSwap, ifsel: doIfsel, split: doSplit, select: doSelect, decl: doDecl, unselect: doUnselect,
-  tsel: doTsel, hoist: doHoist, nestcall: doNestcall, fill: doFill, copy: doCopy, shift: doShift,
+  tsel: doTsel, hoist: doHoist, nestcall: doNestcall, fill: doFill, copy: doCopy, shift: doShift, ptrwalk: doPtrwalk, rowptr: doRowptr,
 };
 
 /**
