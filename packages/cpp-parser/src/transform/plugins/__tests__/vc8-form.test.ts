@@ -672,3 +672,71 @@ describe('vc8-form: acc', () => {
     assert.ok(!unknown.site.applied, unknown.out);
   });
 });
+
+describe('vc8-form: retvar', () => {
+  // WEATHER_GetCurrentLevelWeatherFlags 00473770: the zero comes back from the register it was put in.
+  const SITE = [
+    'uint32_t __stdcall f() {',
+    '  D2UnitStrc* pUnit = GetPlayerUnit_Net();',
+    '  if (pUnit) {',
+    '    uint8_t bCanHaveMud;',
+    '    bCanHaveMud = LEVEL_CanHaveMud(GetLevel(pUnit));',
+    '    return (uint32_t)(bCanHaveMud != 0);',
+    '  }',
+    '  return 0;',
+    '}',
+  ];
+  it('parses', () => {
+    assert.deepStrictEqual(parseVc8Form('retvar(pUnit,dwFlags)'), { op: 'retvar', cond: 'pUnit', name: 'dwFlags', index: 1 });
+    assert.strictEqual(parseVc8Form('retvar(pUnit)'), undefined);
+  });
+  it('declares the result after the call and returns it once', () => {
+    const { out, sites } = run(SITE, 'retvar(pUnit,dwFlags)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.ok(out.includes('D2UnitStrc* pUnit = GetPlayerUnit_Net(); uint32_t dwFlags = 0; if (pUnit) {'), out);
+    assert.ok(out.includes('dwFlags = (uint32_t)(bCanHaveMud != 0); } return dwFlags; }'), out);
+  });
+  it('refuses an arm that returns elsewhere, a non-constant tail and a taken name', () => {
+    const early = run(SITE.map(l => l.replace('uint8_t bCanHaveMud;', 'if (g) { return 2; }')), 'retvar(pUnit,dwFlags)');
+    assert.ok(!early.sites[0].applied);
+    const tail = run(SITE.map(l => l.replace('return 0;', 'return g;')), 'retvar(pUnit,dwFlags)');
+    assert.ok(!tail.sites[0].applied);
+    const taken = run(SITE, 'retvar(pUnit,bCanHaveMud)');
+    assert.ok(!taken.sites[0].applied);
+  });
+});
+
+describe('vc8-form: onecall', () => {
+  // SUNITNPC_CloseNpcInteraction 00579130: the zero arm passes its value from a register.
+  const SITE = [
+    'void __fastcall f(SGAMEDATA* pGame, D2UnitStrc* pUnit, D2UnitStrc* pNpc) {',
+    '  ClearInteractInfo(pUnit);',
+    '  if (pNpc && pNpc->eUnitType == UNIT_MONSTER && pNpc->pUnitData.pUnitDataMonster) {',
+    '    FreeSpecificAiForUnit(pGame, pUnit, pNpc->pUnitData.pUnitDataMonster->pMonsterAi);',
+    '    return;',
+    '  }',
+    '  FreeSpecificAiForUnit(pGame, pUnit, nullptr);',
+    '}',
+  ];
+  const tables = { functionParamTypes: { FreeSpecificAiForUnit: ['SGAMEDATA *', 'D2UnitStrc *', 'D2MonsterAiStrc *'] } };
+  const one = (lines: string[], tag: string) => {
+    const sites: Vc8FormSite[] = [];
+    const tu = applyVc8Forms(parse(lines.join('\n')) as TranslationUnit, [{ form: parseVc8Form(tag)!, tag }], s => sites.push(s), tables as never);
+    return { out: flat(emit(tu as AnyNode)), site: sites[0] };
+  };
+  const C = 'pNpc && pNpc->eUnitType == UNIT_MONSTER && pNpc->pUnitData.pUnitDataMonster';
+  it('writes the two calls as one, the differing argument chosen ahead of it', () => {
+    const { out, site } = one(SITE, `onecall(${C},pAi)`);
+    assert.ok(site.applied, site.why);
+    assert.ok(out.includes(`D2MonsterAiStrc* pAi; if (${C}) { pAi = pNpc->pUnitData.pUnitDataMonster->pMonsterAi; } else { pAi = nullptr; } FreeSpecificAiForUnit(pGame, pUnit, pAi); }`), out);
+  });
+  it('refuses calls differing in two arguments, an argument that calls, and an unknown parameter type', () => {
+    const two = one(SITE.map(l => l.replace('(pGame, pUnit, nullptr)', '(pGame, pNpc, nullptr)')), `onecall(${C},pAi)`);
+    assert.ok(!two.site.applied);
+    const calls = one(SITE.map(l => l.replace('(pGame, pUnit, nullptr)', '(GetGame(), pUnit, nullptr)').replace('(pGame, pUnit, pNpc->', '(GetGame(), pUnit, pNpc->')), `onecall(${C},pAi)`);
+    assert.ok(!calls.site.applied);
+    const sites: Vc8FormSite[] = [];
+    applyVc8Forms(parse(SITE.join('\n')) as TranslationUnit, [{ form: parseVc8Form(`onecall(${C},pAi)`)!, tag: 'x' }], s => sites.push(s));
+    assert.ok(!sites[0].applied && /parameter type/.test(sites[0].why!));
+  });
+});

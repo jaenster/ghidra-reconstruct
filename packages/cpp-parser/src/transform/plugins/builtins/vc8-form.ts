@@ -161,6 +161,22 @@
  *                        writes the read alone (CLIENT_StoreUnitGuidForQuestTracking
  *                        0046bc70 keeps `!pUnit ? -1 : A(pUnit)`). X must name a pointer
  *                        to the accessor's struct and read nothing but names and members.
+ *   retvar(C,N[,i])      the guard `if (C) { ...; return X; }` followed by the function's
+ *                        last statement `return K;` (K a constant) is written with a result
+ *                        variable: `T N = K;` just before the if, `N = X;` ending its arm,
+ *                        and `return N;` - T the function's return type. VC8 returns the
+ *                        K it put in a register for N (WEATHER_GetCurrentLevelWeatherFlags
+ *                        00473770: `xor ecx, ecx` ... `mov eax, ecx`). Refused when the arm
+ *                        leaves other than through its last return, or N names something.
+ *   onecall(C,N[,i])     the guard `if (C) { F(..., X, ...); return; }` followed by the
+ *                        function's last statement, the same call with Y in that one
+ *                        argument, is written as one call: `T N; if (C) { N = X; } else {
+ *                        N = Y; } F(..., N, ...);`, T the parameter's type. VC8 duplicates
+ *                        the call into both arms itself and passes the zero arm's value
+ *                        from a register (SUNITNPC_CloseNpcInteraction 00579130, `xor eax,
+ *                        eax; push eax`). Refused unless every other argument loads nothing
+ *                        and X and Y call and store nothing, as their evaluation moves
+ *                        ahead of the other arguments.
  *   copy(D[,i])          the copy loop `for (N = K; N; N--) { *D = *S; S++; D++; }` is
  *                        written `memcpy(D, S, K * sizeof(*D));`, which VC8 expands to the
  *                        original's `rep movsd`. D and S must be declared pointers to one
@@ -215,7 +231,9 @@ export type Vc8Form =
   | { op: 'nestcall'; name: string; index: number }
   | { op: 'fill'; name: string; index: number }
   | { op: 'copy'; name: string; index: number }
-  | { op: 'acc'; expr: string; index: number; bare?: boolean };
+  | { op: 'acc'; expr: string; index: number; bare?: boolean }
+  | { op: 'retvar'; cond: string; name: string; index: number }
+  | { op: 'onecall'; cond: string; name: string; index: number };
 
 /**
  * A header inline that reads one field of a struct through a pointer, or returns a
@@ -257,7 +275,7 @@ export interface Vc8FormOptions {
 
 const OPS = new Set(['seq', 'fold', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'width', 'arms',
   'nest', 'merge-tail', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
-  'nestcall', 'fill', 'copy', 'acc']);
+  'nestcall', 'fill', 'copy', 'acc', 'retvar', 'onecall']);
 
 /** Split at the commas outside brackets, parentheses, angle-free. */
 function splitArgs(s: string): string[] {
@@ -329,6 +347,11 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
       const i = int(args[1], 1);
       if (anchor || args.length < 1 || args.length > 2 || !(i >= 1) || args[0] === '') return undefined;
       return { op: m[1], cond: args[0], index: i } as Vc8Form;
+    }
+    case 'retvar': case 'onecall': {
+      const i = int(args[2], 1);
+      if (anchor || args.length < 2 || args.length > 3 || !(i >= 1) || args[0] === '' || !/^[A-Za-z_]\w*$/.test(args[1])) return undefined;
+      return { op: m[1], cond: args[0], name: args[1], index: i } as Vc8Form;
     }
     case 'acc': {
       // `acc(E)`, `acc(E,i)`, `acc(E,bare)`, `acc(E,i,bare)`.
@@ -2519,12 +2542,96 @@ function doAcc(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'acc' }>): void {
   prefixUsed.add(acc.definition);
 }
 
+// ---------------------------------------------------------------------------------------
+// retvar, onecall: a value VC8 held in a register, written as a variable of its own
+
+/** Statements parsed from text, in a function of their own. */
+function parseStmts(t: string): Statement[] {
+  const fn = parse(`void __vc8f() { ${t} }`).declarations[0] as FunctionDecl;
+  return fn.body!.statements;
+}
+
+/** Whether a statement can leave by a return or a goto (a loop's break stays inside). */
+function returnsInside(s: Statement): boolean {
+  for (const { node } of walk(s)) if (node.kind === NodeKind.ReturnStmt || node.kind === NodeKind.GotoStmt) return true;
+  return false;
+}
+
+function freshName(fn: FunctionDecl, n: string): void {
+  if (localNames(fn).has(n) || mentions(fn.body!, n)) refuse(`${n} names something already`);
+}
+
+function doRetvar(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'retvar' }>): void {
+  const { b, k, s } = nthIf(fn, f.cond, f.index);
+  if (b !== fn.body) refuse('the if is not in the function\'s own block');
+  const arm = stmtsOf(s.thenBranch);
+  const last = arm[arm.length - 1] as ReturnStmt | undefined;
+  if (!last || last.kind !== NodeKind.ReturnStmt || !last.value) refuse('the arm does not end in a return of a value');
+  if (arm.slice(0, -1).some(returnsInside)) refuse('the arm leaves elsewhere too');
+  const tail = b.statements[k + 1] as ReturnStmt | undefined;
+  if (k + 2 !== b.statements.length || !tail || tail.kind !== NodeKind.ReturnStmt || !tail.value) refuse('the if is not followed by the function\'s last return');
+  if (constValue(tail.value!) === undefined || !loadsNothing(tail.value!)) refuse(`${emit(tail.value as never)} is not a constant`);
+  const type = emit(fn.returnType as never).trim();
+  if (type === 'void') refuse('the function returns nothing');
+  freshName(fn, f.name);
+  const [decl] = parseStmts(`${type} ${f.name} = ${emit(tail.value as never)};`);
+  const [store, ret] = parseStmts(`${f.name} = __vc8value; return ${f.name};`);
+  ((store as ExprStmt).expression as AssignExpr).right = last.value!;
+  arm[arm.length - 1] = store;
+  s.thenBranch = asBlock(s.thenBranch);
+  (s.thenBranch as CompoundStmt).statements = arm;
+  b.statements.splice(k + 1, 1, ret);
+  b.statements.splice(k, 0, decl);
+}
+
+/** The call an expression statement makes. */
+function callOf(st: Statement | undefined): CallExpr | undefined {
+  if (!st || st.kind !== NodeKind.ExprStmt) return undefined;
+  const e = unparen((st as ExprStmt).expression);
+  return e.kind === NodeKind.CallExpr ? e as CallExpr : undefined;
+}
+
+function doOnecall(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'onecall' }>): void {
+  const { b, k, s } = nthIf(fn, f.cond, f.index);
+  if (b !== fn.body) refuse('the if is not in the function\'s own block');
+  const arm = stmtsOf(s.thenBranch);
+  const first = callOf(arm[0]);
+  if (arm.length !== 2 || !first || arm[1].kind !== NodeKind.ReturnStmt || (arm[1] as ReturnStmt).value) refuse('the arm is not a call and `return;`');
+  const rest = b.statements.slice(k + 1);
+  const second = callOf(rest[0]);
+  if (!second || rest.length > 2 || (rest.length === 2 && (rest[1].kind !== NodeKind.ReturnStmt || (rest[1] as ReturnStmt).value))) {
+    refuse('the if is not followed by the function\'s last call');
+  }
+  if (text(first.callee) !== text(second!.callee) || first.arguments.length !== second!.arguments.length) refuse('the two calls differ in callee or arity');
+  const differ = first.arguments.map((a, j) => (text(a) === text(second!.arguments[j]) ? -1 : j)).filter(j => j >= 0);
+  if (differ.length !== 1) refuse(`the calls differ in ${differ.length} arguments`);
+  const j = differ[0];
+  for (const [x, a] of first.arguments.entries()) if (x !== j && !loadsNothing(a)) refuse(`${emit(a as never)} loads or calls`);
+  for (const v of [first.arguments[j], second!.arguments[j]]) {
+    if (hasCall(v) || storedNames(v).size > 0) refuse(`${emit(v as never)} calls or stores`);
+  }
+  const name = calleeName(first.callee);
+  const params = name && selectTables?.functionParamTypes
+    ? scopedLookup(selectTables.functionParamTypes, name, selectTables.enclosingSegments ?? []) : undefined;
+  const type = params?.[j];
+  if (!type) refuse(`no parameter type for argument ${j + 1} of ${name ?? emit(first.callee as never)}`);
+  freshName(fn, f.name);
+  const [decl, sel] = parseStmts(`${type} ${f.name}; if (__vc8c) { ${f.name} = __vc8a; } else { ${f.name} = __vc8b; }`);
+  const ifs = sel as IfStmt;
+  ifs.condition = s.condition;
+  (((ifs.thenBranch as CompoundStmt).statements[0] as ExprStmt).expression as AssignExpr).right = first.arguments[j];
+  (((ifs.elseBranch as CompoundStmt).statements[0] as ExprStmt).expression as AssignExpr).right = second!.arguments[j];
+  second!.arguments[j] = { kind: NodeKind.Identifier, name: f.name } as unknown as Expression;
+  b.statements.splice(k, 1, decl, ifs);
+}
+
 const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op: K }>) => void } = {
   seq: doSeq, fold: doFold, cache: doCache, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
   retval: doRetval, width: doWidth, arms: doArms,
   nest: doNest, 'merge-tail': doMergeTail, continue: doContinue, dup: doDup, tarms: doTarms, zero: doZero, nonzero: doNonzero, bool: doBool,
   cmp: doCmp, swap: doSwap, ifsel: doIfsel, split: doSplit, select: doSelect, decl: doDecl, unselect: doUnselect,
   tsel: doTsel, hoist: doHoist, nestcall: doNestcall, fill: doFill, copy: doCopy, acc: doAcc,
+  retvar: doRetvar, onecall: doOnecall,
 };
 
 /**
