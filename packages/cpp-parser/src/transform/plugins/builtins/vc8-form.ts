@@ -126,9 +126,10 @@
  *                        declaration keeps `T V;` while V is named elsewhere). VC8 pushes
  *                        the arguments right of a nested call before calling it, as the
  *                        original does (Q04_ActiveFilter 00592fb0, `push 'bks '` before
- *                        `call GetGamePointer`). Refused unless V is a pointer or a 32-bit
- *                        integer local whose address is not taken and that is dead after
- *                        that statement, and unless everything the statement may evaluate
+ *                        `call GetGamePointer`). Refused unless V is a local whose address
+ *                        is not taken, that is dead after that statement and whose type
+ *                        cannot convert the value (no narrower, wider or floating
+ *                        arithmetic type), and unless everything the statement may evaluate
  *                        before the call in its new place - the other arguments of each
  *                        call around it, the other operand of each operator, the callee -
  *                        calls nothing, stores nothing and reads only such locals and
@@ -1622,10 +1623,18 @@ function declaredType(fn: FunctionDecl, v: string): string | undefined {
   return undefined;
 }
 
-const INT32 = new Set(['int', 'signedint', 'unsignedint', 'unsigned', 'long', 'longint', 'unsignedlong', 'unsignedlongint', 'int32_t', 'uint32_t',
-  'DWORD', 'UINT', 'ULONG', 'LONG', 'BOOL', 'size_t', 'intptr_t', 'uintptr_t']);
-/** A pointer or a 32-bit integer: a type storing a call's value converts nothing its use would not. */
-const wordType = (t: string | undefined) => !!t && !/[\[\]()]/.test(t) && (t.endsWith('*') || INT32.has(t.replace(/^const/, '')));
+/** Arithmetic types a stored value can be narrowed, widened or rounded by. */
+const CONVERTS = new Set(['char', 'signedchar', 'unsignedchar', 'int8_t', 'uint8_t', 'BYTE', 'CHAR', 'UCHAR', 'byte', 'bool',
+  'short', 'shortint', 'unsignedshort', 'unsignedshortint', 'int16_t', 'uint16_t', 'ushort', 'WORD', 'WCHAR', 'wchar_t', 'SHORT', 'USHORT',
+  'float', 'double', 'longdouble', 'FLOAT', 'longlong', 'unsignedlonglong', '__int64', 'unsigned__int64', 'int64_t', 'uint64_t',
+  'LONGLONG', 'ULONGLONG', 'QWORD', 'DWORD64']);
+/**
+ * A type whose store keeps a call's value as is: a pointer, a 32-bit integer, an enum, a
+ * class. An arithmetic type of another width or a floating one may convert the value on the
+ * store where the argument would take it unconverted; an implicit conversion into anything
+ * else needs the call to return that very type.
+ */
+const keepsValue = (t: string | undefined) => !!t && !/[\[\]()]/.test(t) && (t.endsWith('*') || !CONVERTS.has(t.replace(/^const/, '')));
 
 /**
  * An expression that, evaluated earlier or later around a call, has the same value: it calls
@@ -1659,6 +1668,20 @@ function callProof(fn: FunctionDecl, e: Expression, locals: Set<string>): boolea
 /** A callee that names a function: evaluating it reads nothing a call could change. */
 const namedCallee = (e: Expression) => { e = unparen(e); return e.kind === NodeKind.Identifier || e.kind === NodeKind.QualifiedId; };
 
+/**
+ * What a loop does to v first, where readFirst would call any mention a read: a for or
+ * while loop whose head does not name v and whose body stores it first may run no time
+ * (`none`); a do-while body runs once (its own answer).
+ */
+function loopFirst(s: Statement, v: string): 'read' | 'store' | 'none' | undefined {
+  const l = s as unknown as { init?: Statement | null; condition?: Expression | null; increment?: Expression | null; body: Statement };
+  for (const { node } of walk(s)) if (LIFE_JUMPS.has(node.kind) && node.kind !== NodeKind.BreakStmt && node.kind !== NodeKind.ContinueStmt) return undefined;
+  if (s.kind === NodeKind.DoWhileStmt) return readFirst(l.body, v);
+  if (s.kind !== NodeKind.ForStmt && s.kind !== NodeKind.WhileStmt) return undefined;
+  if ((l.init && mentions(l.init, v)) || (l.condition && mentions(l.condition, v)) || (l.increment && mentions(l.increment, v))) return undefined;
+  return readFirst(l.body, v) === 'store' ? 'none' : undefined;
+}
+
 /** Whether V is dead after statement k+1 of b: its next mention stores it first, or there is none and nothing after b reads it. */
 function deadAfter(fn: FunctionDecl, b: CompoundStmt, k: number, last: number, v: string): boolean {
   for (const s of b.statements.slice(last + 1)) {
@@ -1666,7 +1689,9 @@ function deadAfter(fn: FunctionDecl, b: CompoundStmt, k: number, last: number, v
       for (const { node } of walk(s)) if (LIFE_JUMPS.has(node.kind)) return false;
       continue;
     }
-    return readFirst(s, v) === 'store';
+    const r = loopFirst(s, v) ?? readFirst(s, v);
+    if (r !== 'none') return r === 'store';
+    // Stored on some paths only: what follows may still read the old value.
   }
   return !blockReadsAfter(fn, b, v, k, true);
 }
@@ -1682,7 +1707,7 @@ function doNestcall(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'nestcall' }>): 
   const hit = f.index === 0 ? (hits.length === 1 ? hits[0] : refuse(`${hits.length} calls stored to ${v}`)) : (hits[f.index - 1] ?? refuse(`no call #${f.index} stored to ${v}`));
   const { b, k } = hit;
   if (addressTaken(fn, v)) refuse(`&${v} is taken`);
-  if (!wordType(declaredType(fn, v))) refuse(`${v} is not a pointer or a 32-bit integer`);
+  if (!keepsValue(declaredType(fn, v))) refuse(`${v}'s type may convert the stored value`);
   if (mentions(hit.value, v)) refuse(`${v} is stored from itself`);
   const next = b.statements[k + 1] ?? refuse('nothing follows the store');
   // The expression the call moves into: the statement's own, never a loop's.
