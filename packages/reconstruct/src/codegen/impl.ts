@@ -3328,6 +3328,9 @@ function transformDecompiledCode(
         enclosingVarTypes,
       };
       perPluginOptions['zero-extend-cast'] = {
+        onSite: (e: { line: number; rewritten: boolean; reason: string }) => {
+          if (!e.rewritten) console.warn(`[zero-extend] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: line ${e.line} kept (${e.reason})`);
+        },
         enumTypes: context.funcPtrArgCasts.enumTypes,
         enumValues: context.funcPtrArgCasts.enumValues,
         globalTypes: context.funcPtrArgCasts.globalTypes,
@@ -3679,7 +3682,12 @@ function transformDecompiledCode(
     }
     // Masks a MOVZX computed, tagged before any pass reshapes the printed `&`.
     if (enclosing?.maskSites) {
-      perPluginOptions['zero-extend-site'] = { count: enclosing.maskSites.count, sites: enclosing.maskSites.sites };
+      perPluginOptions['zero-extend-site'] = {
+        count: enclosing.maskSites.count, sites: enclosing.maskSites.sites,
+        onCensus: (c: { tagged: number; zipped: boolean; untied: number }) => {
+          if (c.untied) console.warn(`[zero-extend] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${c.untied} mask fact(s) untied${c.zipped ? '' : ' (positions do not zip)'}`);
+        },
+      };
     }
     // Operators whose result the decompiler zero-extends, tagged before any pass reshapes them.
     if (enclosing?.zextSites) {

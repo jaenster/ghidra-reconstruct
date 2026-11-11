@@ -37,6 +37,12 @@
  *    name keeps it extern;
  *  - it is not a header inline (inline-hosts.ts): every TU that calls one defines it.
  *
+ * The storage says the original was static; it cannot say which register VC8 gives the
+ * rebuild's static, which only a compile shows. Where the VC8 oracle measured that, its
+ * `vc8linkage` tag (vc8-linkage.ts) decides in place of the storage: `extern` keeps a
+ * function the storage selects extern, `static` selects one whose storage shows no
+ * convention of its own, under every other condition above.
+ *
  * Hand-written source that only needs to CALL such a function calls its extern entry
  * instead, `<name>_Extern`: a forwarder the unit defines beside the static and the
  * unit header declares (`externEntries`). A foreign call by that name does not keep
@@ -64,6 +70,7 @@ import { decompiledFunctionName } from './impl.js';
 import { EXTERN_ENTRY_SUFFIX } from './header.js';
 import { abiConvention } from './calling-convention.js';
 import { isInlineHost } from './inline-hosts.js';
+import { vc8LinkageVerdict } from './vc8-linkage.js';
 
 export { EXTERN_ENTRY_SUFFIX };
 
@@ -379,7 +386,8 @@ export type FileStaticRefusal =
   | 'named by a data initializer'
   | 'named by foreign source'
   | 'no caller in its unit'
-  | 'a header inline';
+  | 'a header inline'
+  | 'measured extern by the VC8 oracle';
 
 export interface FileStaticSelection {
   /**
@@ -389,8 +397,15 @@ export interface FileStaticSelection {
   selected: Map<string, { unit: string; referrers: Set<string>; inline?: boolean }>;
   /** Candidates (foreign register storage) kept extern, per reason. */
   refused: Map<FileStaticRefusal, string[]>;
-  /** Functions with parameter storage in a register their convention does not use. */
+  /**
+   * Functions with parameter storage in a register their convention does not use, and
+   * those a `vc8linkage:static` tag selects.
+   */
   candidates: number;
+  /** Candidates a `vc8linkage:static` tag selects although their storage does not. */
+  measuredStatic: number;
+  /** `vc8linkage` tags left out, by function name. */
+  staleLinkageTags: Array<{ name: string; tag: string; why: string }>;
   /**
    * Functions foreign source calls through their extern entry (`<name>_Extern`),
    * by address key: the unit defines the entry, its header declares it.
@@ -510,12 +525,22 @@ export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticS
   // Candidates whose name another symbol shares: name -> qualified name -> address key.
   const shared = new Map<string, Map<string, string>>();
   let candidateCount = 0;
+  let measuredStatic = 0;
+  const staleLinkageTags: Array<{ name: string; tag: string; why: string }> = [];
   for (const func of inputs.allFunctions) {
     if (func.isExternal || func.isThunk) continue;
-    if (foreignParameterRegisters(func).length === 0) continue;
-    candidateCount++;
     const key = addressKey(func.address);
+    const verdict = vc8LinkageVerdict(func);
+    if (inputs.unitOf.has(key)) for (const s of verdict.stale) staleLinkageTags.push({ name: func.name, ...s });
+    const storage = foreignParameterRegisters(func).length > 0;
+    if (!storage && verdict.linkage !== 'static') continue;
+    candidateCount++;
     if (!inputs.unitOf.has(key)) continue;      // not emitted: nothing to declare
+    if (verdict.linkage === 'extern') {
+      refuse('measured extern by the VC8 oracle', func);
+      continue;
+    }
+    if (!storage) measuredStatic++;
     // Every TU that calls a header inline defines it (inline-hosts.ts): none can own it.
     if (isInlineHost(func)) {
       refuse('a header inline', func);
@@ -693,7 +718,7 @@ export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticS
   // An entry whose address foreign code takes is not a call through it: a patch that
   // redirects calls to that address would miss every call the unit makes.
   for (const k of entryValueUse) externEntries.delete(k);
-  return { selected, refused, candidates: candidateCount, externEntries };
+  return { selected, refused, candidates: candidateCount, measuredStatic, staleLinkageTags, externEntries };
 }
 
 /** Address key used by the selection, for lookups from the emitters. */
