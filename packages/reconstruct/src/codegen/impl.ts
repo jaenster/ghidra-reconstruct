@@ -3844,6 +3844,8 @@ function transformDecompiledCode(
       };
       perPluginOptions['case-layout'] = {
         branchLayout: layout,
+        jumpTables: enclosing?.jumpTables,
+        enumValues: context?.funcPtrArgCasts?.enumValues,
         ...(process.env.GHIDRA_BRANCH_LAYOUT_REPORT ? {
           onSite: (e: { rule: string; line: number; groups?: number; why?: string }) =>
             console.warn(`[case-layout] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.rule === 'order' ? `${e.groups ?? '?'} groups ordered` : `left: ${e.why}`} at line ${e.line}`),
