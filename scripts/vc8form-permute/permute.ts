@@ -61,7 +61,7 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { loadQuarantine, loadTree, type Tree } from '../../packages/reconstruct/src/vc8/tree.js';
 import { translate } from '../../packages/reconstruct/src/vc8/translate.js';
-import { PyRandom, decodeFile, encodeFile, fixed, functionSpan, hex8, jsonDumps } from './text.js';
+import { PyRandom, decodeFile, encodeFile, fixed, dedupeTwins, functionSpan, hex8, jsonDumps } from './text.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const GR = dirname(dirname(HERE));
@@ -374,7 +374,7 @@ async function main() {
         const [a] = functionSpan(text, prefix[0])!;
         spans.push([[a, a], prefix[1]]);
       }
-      return orc.translate(tu, splice(text, spans));
+      return orc.translate(tu, dedupeTwins(splice(text, spans)));
     };
 
     const tus = [...new Set(jobs.map(j => j.tu))].sort(cmpStr);

@@ -273,3 +273,62 @@ export class PyRandom {
     return result;
   }
 }
+
+// ---------------------------------------------------------------------------------------
+// Inline twins written once
+
+/** The head of an inline twin `acc` writes (accessor-twins.ts): its comment and signature. */
+const TWIN_HEAD = /(?<=^|\n)\/\/ [^\n]* as its callers inlined it: [^\n]*\nstatic inline [^\n(]*?\b([A-Za-z_]\w*)\(/g;
+
+/**
+ * Every candidate that calls an inline twin carries its definition ahead of its body, so a
+ * TU with two such bodies swapped in, or one where the generator already wrote the twin,
+ * defines it twice. The generator writes each twin once per namespace scope of the file,
+ * ahead of the first function calling it: keep the first definition of each twin in each
+ * scope, and blank the later ones to as many newlines (a quarantine names lines).
+ */
+export function dedupeTwins(text: string): string {
+  const heads: Array<{ at: number; name: string }> = [];
+  for (const m of text.matchAll(TWIN_HEAD)) heads.push({ at: m.index!, name: m[1] });
+  if (heads.length < 2) return text;
+  // The namespace path at each head: braces outside comments and literals, a `namespace N {` named.
+  const scopeAt = new Map<number, string>();
+  const stack: string[] = [];
+  let h = 0, i = 0;
+  const n = text.length;
+  while (i < n && h < heads.length) {
+    while (h < heads.length && heads[h].at <= i) { if (heads[h].at === i) scopeAt.set(i, stack.join('/')); h++; }
+    const c = text[i];
+    if (text.startsWith('//', i)) { const e = text.indexOf('\n', i); i = e < 0 ? n : e; continue; }
+    if (text.startsWith('/*', i)) { const e = text.indexOf('*/', i); i = e < 0 ? n : e + 2; continue; }
+    if (c === '"' || c === "'") { i = skipLiteral(text, i); continue; }
+    if (c === '{') {
+      const ns = /\bnamespace\s+([A-Za-z_][\w:]*)?\s*$/.exec(text.slice(Math.max(0, i - 200), i));
+      stack.push(ns ? `ns:${ns[1] ?? ''}` : 'block');
+    } else if (c === '}') stack.pop();
+    i++;
+  }
+  const seen = new Set<string>();
+  const cut: Array<[number, number]> = [];
+  for (const { at, name } of heads) {
+    const scope = scopeAt.get(at);
+    if (scope === undefined || scope.split('/').some(s => s === 'block')) continue;
+    const key = `${scope}\0${name}`;
+    if (!seen.has(key)) { seen.add(key); continue; }
+    // The definition runs to the brace that closes its body.
+    const open = text.indexOf('{', at);
+    let k = open, level = 0;
+    while (k < n) {
+      if (text.startsWith('//', k)) { const e = text.indexOf('\n', k); k = e < 0 ? n : e; continue; }
+      if (text.startsWith('/*', k)) { const e = text.indexOf('*/', k); k = e < 0 ? n : e + 2; continue; }
+      if (text[k] === '"' || text[k] === "'") { k = skipLiteral(text, k); continue; }
+      if (text[k] === '{') level++;
+      else if (text[k] === '}' && --level === 0) break;
+      k++;
+    }
+    if (k < n) cut.push([at, k + 1]);
+  }
+  let out = '', from = 0;
+  for (const [a, b] of cut) { out += text.slice(from, a) + '\n'.repeat((text.slice(a, b).match(/\n/g) ?? []).length); from = b; }
+  return out + text.slice(from);
+}
