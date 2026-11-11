@@ -351,6 +351,51 @@ describe('switchChainPlugin', () => {
     assert.ok(!out.includes('switch'), out);
   });
 
+  it('takes a chain on a value the block assigns under the relational test (DRLGPRESET_AddPresetUnitToDrlgMap, 00667620)', () => {
+    // `if (nMonClassId < nTableSize) .. else { nTableSize = ..; if (nTableSize == 0x21) ..`:
+    // the countdown `sub ecx, 0x21; je; sub ecx, 1; je; sub ecx, 1; jne` runs on the new value.
+    const { out, sites } = run([
+      'void f(int nMonClassId, int nTableSize, int nMonExtraBase) {',
+      '[0x8] if (nMonClassId < nTableSize) {',
+      '[0x10] A();',
+      '}',
+      'else {',
+      '[0x18] nTableSize = (nMonClassId - nTableSize) - nMonExtraBase;',
+      '<SUB ECX 33 33 0x20> if (nTableSize == 0x21) {',
+      '[0x60] return;',
+      '}',
+      '<SUB ECX 1 34 0x25> if (nTableSize == 0x22) {',
+      '[0x50] B();',
+      'return;',
+      '}',
+      '<SUB ECX 1 35 0x2a> if (nTableSize == 0x23) {',
+      '[0x40] C();',
+      '}',
+      '}',
+      '}',
+    ]);
+    assert.ok(sites.includes('switch'), sites.join());
+    assert.ok(out.includes('switch (nTableSize) {'), out);
+  });
+
+  it('still leaves a chain under the relational test when the block assigns another variable', () => {
+    const { out, sites } = run([
+      'void f(int v, int w) {',
+      '[0x8] if (v < 10) {',
+      '[0x10] w = 3;',
+      '<SUB EAX 1 1 0x20> if (v == 1) {',
+      '[0x30] A();',
+      '}',
+      '<SUB EAX 2 3 0x25> else if (v == 3) {',
+      '[0x40] B();',
+      '}',
+      '}',
+      '}',
+    ]);
+    assert.ok(sites.includes('left:split'), sites.join());
+    assert.ok(!out.includes('switch'), out);
+  });
+
   it('gives two values one case where both fall out to the same code', () => {
     // ERRORMANAGER_ServiceControlHandler (00406410): sub eax,1; je; sub eax,3; je; sub eax,1; jne.
     const { out, sites } = run([
