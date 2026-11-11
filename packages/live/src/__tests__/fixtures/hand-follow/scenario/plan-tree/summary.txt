@@ -1,0 +1,7 @@
+inventory 2790a8fbee over 6bfcd897fb: 10 hunks
+maps: 8 function placements, 0 renames (0 tracked), 0 merged files
+actions: stay 10
+git-mv.sh: 0 renames
+lift.patch: 0 hunks in 0 files
+review.tsv: 0 rows
+conflicts: 0

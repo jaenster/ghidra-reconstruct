@@ -1,0 +1,21 @@
+exit 0
+[regen] renamed 2 file(s) the way rsync does: delete + add
+[regen] moved 2 function(s) across 4 file(s)
+[control] merge exit 1, 1 conflicted file(s)
+    conflict: Source/B/Beta.cpp
+[control] conflicts resolved with --theirs
+audit <TREE>: 10 hunks: present 7, reverted 3
+  h007 reverted    file                                                        Source/B/Beta.cpp 
+  h008 reverted    function 00402040  Seven                                    Source/A/Alpha.cpp 
+  h009 reverted    function 00402040  Seven                                    Source/A/Alpha.cpp 
+[tool] git-mv.sh exit 0 
+[tool] lift.patch exit 0 
+[tool] merge exit 1, 1 conflicted file(s)
+    conflict: Source/C/Gamma.cpp
+[tool] conflicts resolved with --theirs
+reapply: 2 hunk(s) put back in 1 file(s), 1 left for review (written)
+  h010 function 00403000  Eight                                    fn-missing
+audit <TREE>: 10 hunks: fn-missing 1, present 9
+  h010 fn-missing  function 00403000  Eight                                    Source/C/Gamma.cpp 
+RESULT gold control: 1 conflicted file(s); present 7, reverted 3
+RESULT gold tool: 1 conflicted file(s); fn-missing 1, present 9
