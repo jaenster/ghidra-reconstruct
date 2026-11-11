@@ -443,10 +443,13 @@ function lowPieceLocals(body: CompoundStmt, locals: Map<string, Local>, unfit: R
   return out;
 }
 
-/** The value of `x._0_M_ = v` as a whole store: v without its cast to M bytes. */
+/**
+ * The value of `x._0_M_ = v` as a whole store: v without its cast to an M-byte integer
+ * (`(undefined2)`, `(short)`, `(uint16_t)`), whose low M bytes are v's own either way.
+ */
 function lowValue(v: Expression, m: number): Expression {
   const x = unparen(v);
-  if (castWidth(x) === m && isCastTo(x, m)) return (x as CStyleCastExpr).expression;
+  if (castWidth(x) === m) return (x as CStyleCastExpr).expression;
   return v;
 }
 

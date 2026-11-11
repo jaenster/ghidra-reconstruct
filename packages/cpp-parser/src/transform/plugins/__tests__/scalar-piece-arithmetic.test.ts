@@ -178,4 +178,19 @@ describe('Golden: a local only its low piece is read of', () => {
 }`);
     assert.match(out, /byUnitType = 6; if \(p != \(D2UnitStrc\*\)0x0\) \{ byUnitType = p->eUnitType; \} \*pOut = \(uint8_t\)byUnitType;/, out);
   });
+
+  it('CLIENT_PopulateVisibilityPacketBuffer 00537ee0: Ghidra\'s (undefined2) goes as well', () => {
+    const out = run(`void f(D2UnitStrc *pSlotUnit, uint16_t *pOut) {
+  int32_t wCoord;
+  if (pSlotUnit->pPath.pDynamicPath == 0) {
+    wCoord._0_2_ = (undefined2)((pSlotUnit->pPath).pStaticPath)->nPosX;
+  }
+  else {
+    wCoord = GetXPos((pSlotUnit->pPath).pDynamicPath);
+    wCoord._0_2_ = (undefined2)wCoord;
+  }
+  *pOut = (undefined2)wCoord;
+}`);
+    assert.match(out, /\{ wCoord = pSlotUnit->pPath\.pStaticPath->nPosX; \} else \{ wCoord = GetXPos\(pSlotUnit->pPath\.pDynamicPath\); \}/, out);
+  });
 });
