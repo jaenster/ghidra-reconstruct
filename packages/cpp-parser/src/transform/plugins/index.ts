@@ -548,6 +548,8 @@ export {
   type Vc8Form,
   type Vc8FormSite,
   type Vc8FormOptions,
+  type Vc8Accessor,
+  type Vc8FormTables,
 } from './builtins/vc8-form.js';
 
 export {

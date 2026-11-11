@@ -578,3 +578,97 @@ describe('vc8-form: tsel', () => {
     assert.strictEqual(apply('tsel(!pUnit,2)').sites[0]?.applied, false);
   });
 });
+
+describe('vc8-form: acc', () => {
+  const twin = (name: string, field: string) => `static inline int ${name}(D2UnitStrc * pUnit) { if (pUnit) { return pUnit->${field}; } return (int)-1; }`;
+  const tables = {
+    structFields: { Args: { pTarget: 'D2UnitStrc *' }, D2UnitStrc: { eUnitType: 'eD2UnitType', nClassId: 'int', nUnitGUID: 'int', eAnimMode: 'uD2UnitMode' }, uD2UnitMode: { ePlayerMode: 'eD2PlayerAnimMode' } },
+    enumValues: { UNIT_PLAYER: 0, UNIT_MONSTER: 1, UNIT_ITEM: 4, UNIT_COUNT: 6, Death: 0, Neutral: 1 },
+    accessors: [
+      { struct: 'D2UnitStrc', path: ['eUnitType'], call: 'GetTypeInline', dflt: 6n, definition: twin('GetTypeInline', 'eUnitType') },
+      { struct: 'D2UnitStrc', path: ['nUnitGUID'], call: 'GetGUIDInline', dflt: -1n, definition: twin('GetGUIDInline', 'nUnitGUID') },
+      { struct: 'D2UnitStrc', path: ['nClassId'], call: 'GetClassIdInline', dflt: -1n, definition: twin('GetClassIdInline', 'nClassId') },
+      { struct: 'D2UnitStrc', path: ['eAnimMode', 'ePlayerMode'], call: 'GetAnimModeInline', dflt: 0n, definition: twin('GetAnimModeInline', 'eAnimMode.ePlayerMode') },
+    ],
+  };
+  function acc(lines: string[], tag: string) {
+    const sites: Vc8FormSite[] = [];
+    const tu = applyVc8Forms(parse(lines.join('\n')) as TranslationUnit, [{ form: parseVc8Form(tag)!, tag }], s => sites.push(s), tables as never);
+    return { out: flat(emit(tu as AnyNode)), site: sites[0] };
+  }
+
+  it('parses with an optional index', () => {
+    assert.deepStrictEqual(parseVc8Form('acc(pUnit->eUnitType)'), { op: 'acc', expr: 'pUnit->eUnitType', index: 0 });
+    assert.deepStrictEqual(parseVc8Form('acc(p->eAnimMode.ePlayerMode,2)'), { op: 'acc', expr: 'p->eAnimMode.ePlayerMode', index: 2 });
+    assert.deepStrictEqual(parseVc8Form('acc(p->nUnitGUID,bare)'), { op: 'acc', expr: 'p->nUnitGUID', index: 0, bare: true });
+    assert.deepStrictEqual(parseVc8Form('acc(p->nUnitGUID,2,bare)'), { op: 'acc', expr: 'p->nUnitGUID', index: 2, bare: true });
+    assert.strictEqual(parseVc8Form('acc(p->nUnitGUID,x)'), undefined);
+  });
+
+  it('bare writes the read alone inside the printed ternary (0046bc70)', () => {
+    const { out } = acc(['void f(D2UnitStrc* pUnit) { g = !pUnit ? -1 : pUnit->nUnitGUID; }'], 'acc(pUnit->nUnitGUID,bare)');
+    assert.ok(out.includes('g = !pUnit ? -1 : GetGUIDInline(pUnit);'), out);
+    const absorbed = acc(['void f(D2UnitStrc* pUnit) { g = !pUnit ? -1 : pUnit->nUnitGUID; }'], 'acc(pUnit->nUnitGUID)');
+    assert.ok(absorbed.out.includes('g = GetGUIDInline(pUnit);'), absorbed.out);
+  });
+
+  it('writes a compared field as the twin call and reports the twin (005eb650)', () => {
+    const { out, site } = acc([
+      'int f(D2UnitStrc* pUnit2) {',
+      '  if (!pUnit2) { return 0; }',
+      '  if (pUnit2->eUnitType != UNIT_MONSTER) { return 0; }',
+      '  return 1;',
+      '}',
+    ], 'acc(pUnit2->eUnitType)');
+    assert.ok(site.applied, site.why);
+    assert.ok(out.includes('if (GetTypeInline(pUnit2) != UNIT_MONSTER)'), out);
+    assert.deepStrictEqual(site.prefix, [tables.accessors[0].definition]);
+  });
+
+  it('writes a field passed or stored as the call (0046bc70, 0058a500)', () => {
+    const { out } = acc([
+      'void f(D2UnitStrc* pUnit, Q* q) {',
+      '  q->nGUID = pUnit->nUnitGUID;',
+      '  g(pUnit->nClassId);',
+      '}',
+    ], 'acc(pUnit->nUnitGUID)');
+    assert.ok(out.includes('q->nGUID = GetGUIDInline(pUnit);'), out);
+    assert.ok(out.includes('g(pUnit->nClassId)'), 'the other read stays');
+  });
+
+  it('takes the null test in front of an equality with it (0058fad0, 00628220)', () => {
+    const one = acc(['int f(Args* a) { return a->pTarget && a->pTarget->nClassId == 0x9b; }'], 'acc(a->pTarget->nClassId)');
+    assert.ok(one.out.includes('return GetClassIdInline(a->pTarget) == 0x9b;'), one.out);
+    const chained = acc(['int f(D2UnitStrc* pUnit, int k) { if (!(k && pUnit && pUnit->eUnitType == UNIT_ITEM && pUnit->pUnitData)) { return 0; } return 1; }'], 'acc(pUnit->eUnitType)');
+    assert.ok(chained.out.includes('if (!(k && GetTypeInline(pUnit) == UNIT_ITEM && pUnit->pUnitData))'), chained.out);
+    const or = acc(['int f(D2UnitStrc* pUnit) { return !pUnit || pUnit->eUnitType != UNIT_PLAYER; }'], 'acc(pUnit->eUnitType)');
+    assert.ok(or.out.includes('return GetTypeInline(pUnit) != UNIT_PLAYER;'), or.out);
+  });
+
+  it('keeps the null test where the accessor constant would change the truth', () => {
+    // GetTypeInline(nullptr) == UNIT_COUNT: `p && p->t == UNIT_COUNT` is false for null, the call true.
+    const same = acc(['int f(D2UnitStrc* p) { return p && p->eUnitType == UNIT_COUNT; }'], 'acc(p->eUnitType)');
+    assert.ok(same.out.includes('return p && GetTypeInline(p) == UNIT_COUNT;'), same.out);
+    const ne = acc(['int f(D2UnitStrc* p) { return p && p->eUnitType != UNIT_ITEM; }'], 'acc(p->eUnitType)');
+    assert.ok(ne.out.includes('return p && GetTypeInline(p) != UNIT_ITEM;'), ne.out);
+  });
+
+  it('writes the printed ternary with the accessor constant as the call (0063d2b0)', () => {
+    const { out } = acc(['int f(D2UnitStrc* pUnit) { return (pUnit ? pUnit->eUnitType : UNIT_COUNT) == UNIT_ITEM; }'], 'acc(pUnit->eUnitType)');
+    assert.ok(out.includes('return GetTypeInline(pUnit) == UNIT_ITEM;'), out);
+  });
+
+  it('reads a nested field through its accessor (00622d00)', () => {
+    const { out } = acc(['int f(D2UnitStrc* pUnit) { switch (pUnit->eAnimMode.ePlayerMode) { case 2: return 1; } return 0; }'], 'acc(pUnit->eAnimMode.ePlayerMode)');
+    assert.ok(out.includes('switch (GetAnimModeInline(pUnit))'), out);
+  });
+
+  it('refuses a pointer of another type, a computed pointer, and an unknown field', () => {
+    const other = acc(['int f(Other* p) { return p->eUnitType; }'], 'acc(p->eUnitType)');
+    assert.ok(!other.site.applied && /not a D2UnitStrc/.test(other.site.why!), other.site.why);
+    const computed = acc(['int f(D2UnitStrc** pp) { return pp[0]->eUnitType; }'], 'acc(pp[0]->eUnitType)');
+    assert.ok(!computed.site.applied, computed.out);
+    const unknown = acc(['int f(D2UnitStrc* p) { return p->dwFlags; }'], 'acc(p->dwFlags)');
+    assert.ok(!unknown.site.applied, unknown.out);
+  });
+});

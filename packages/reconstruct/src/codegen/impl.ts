@@ -45,7 +45,7 @@ import { immediateConstantFacts, referencedDataAddresses, dataAtAddress, type Im
 import { compareFormSpec, type CompareFormSpec } from './compare-form-spec.js';
 import { repStringOps } from './rep-string-spec.js';
 import { vc8FormSpec, vc8formHashRecord, type Vc8FormSpec } from './vc8form-spec.js';
-import type { RepStringOp, Expression, NullGetterTable, ASTNode, SelectArgumentOptions } from '@ghidra-mcp/cpp-parser';
+import type { RepStringOp, Expression, NullGetterTable, ASTNode, SelectArgumentOptions, Vc8Accessor } from '@ghidra-mcp/cpp-parser';
 import { ROOT_CLASS_SCOPE, namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 import { cleanFunctionComment, declaredParameters, externEntryDeclaration, guardedFuncDefTypedef, emittedFunctionName, returnSigType, sigType } from './header.js';
 import { COMDAT_SPECIFIERS, classScopeOf, memberCallModel, memberDefinitionScope, orphanMarker, signatureParameters } from './templates/index.js';
@@ -642,6 +642,13 @@ export interface ImplGenContext {
   /** Internal: accumulated preambles from injection-aware plugins */
   _preambles?: Set<string>;
   /**
+   * The header inlines whose fields `acc` vc8form tags read through an inline twin
+   * (accessor-twins.ts), and, while one function is generated, the twin definitions its
+   * applied forms call: written once per file, ahead of the first function calling each.
+   */
+  accessorTwins?: Vc8Accessor[];
+  _fnPrefix?: string[];
+  /**
    * Internal: the namespace block the current impl file's bodies are emitted
    * inside. C++ name lookup for a reference's leading qualifier starts here, so
    * `namespace-shadow-qualify` needs it to tell a shadowed reference from a
@@ -1118,6 +1125,8 @@ export function generateImplementation(
   // after every definition: a symbol declared ahead of a function shifts the order VC8
   // breaks its register ties in (SKILLDESC_CalcElemDamageRange 004e89a0).
   const keepAlive: string[] = [];
+  const emittedTwins = new Set<string>();
+  if (context) context._fnPrefix = undefined;
   // Generate function implementations, grouping consecutive same-ifdef functions
   let currentIfdef: string | undefined;
   for (const func of functions) {
@@ -1195,6 +1204,15 @@ export function generateImplementation(
       } else {
         throw err;
       }
+    }
+    // The inline twins this function's forms call, each once per scope of the file.
+    const twins = context?._fnPrefix;
+    if (context) context._fnPrefix = undefined;
+    for (const t of twins ?? []) {
+      const k = `${rootMember ? 'root' : 'unit'}\0${t}`;
+      if (emittedTwins.has(k)) continue;
+      emittedTwins.add(k);
+      lines.push(t, '');
     }
     // An inline header's body is marked for the module pass, which may publish it.
     const markInline = asInlineHeader && declarationMarkersOn() && !!func.address;
@@ -1851,6 +1869,7 @@ export function generateFunctionImplementation(
         if (!context._castTypedefs) context._castTypedefs = new Set();
         for (const name of castTypedefs) context._castTypedefs.add(name);
       }
+      if (context && transformed.prefix?.length) context._fnPrefix = transformed.prefix;
       if (transformed.preamble) {
         // Store preamble on the context for accumulation by generateImplementation
         if (context) {
@@ -2268,6 +2287,8 @@ function generateMethodSignature(
 interface TransformDecompiledResult {
   code: string;
   preamble?: string;
+  /** Definitions the applied vc8 forms call, to precede the function (`acc` twins). */
+  prefix?: string[];
   identifiers?: Set<string>;
   /** Names the body used as TYPES (see TransformResult.typeNames). */
   typeNames?: Set<string>;
@@ -4344,11 +4365,16 @@ function transformDecompiledCode(
 
     const vc8 = enclosing?.vc8Forms;
     for (const t of vc8?.stale ?? []) console.warn(`[vc8form] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: stale ${t.tag} (${t.why})`);
+    const vc8Prefix: string[] = [];
     const result = transformGhidraCode(wrapped, {
       vc8Forms: vc8 && vc8.forms.length > 0 ? {
         forms: vc8.forms,
-        selectTables: perPluginOptions['select-argument'] as SelectArgumentOptions | undefined,
+        selectTables: {
+          ...(perPluginOptions['select-argument'] as SelectArgumentOptions | undefined),
+          accessors: context?.accessorTwins,
+        },
         onSite: s => {
+          if (s.applied) for (const d of s.prefix ?? []) if (!vc8Prefix.includes(d)) vc8Prefix.push(d);
           if (!s.applied) console.warn(`[vc8form] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: refused ${s.tag} (${s.why})`);
           else if (process.env.GHIDRA_VC8FORM_REPORT) console.warn(`[vc8form] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: applied ${s.tag}`);
         },
@@ -4380,6 +4406,7 @@ function transformDecompiledCode(
           // of them into silent reads of the wrong address.
           code: indentCode(transformedMatch[1], 4),
           preamble: result.preamble,
+          ...(vc8Prefix.length ? { prefix: vc8Prefix } : {}),
           identifiers: result.identifiers,
           typeNames: result.typeNames,
         };
