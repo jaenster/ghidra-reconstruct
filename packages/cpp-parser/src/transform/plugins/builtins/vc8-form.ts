@@ -50,6 +50,19 @@
  *                        `return K;`.
  *   width(V,T)           local V is declared T; a cast of V to T, a cast to V's old type
  *                        stored into V, and a cast of V to T's width in a truth test go.
+ *   boolflag(V)          the bool local V, stored only `true`/`false` and read only as a
+ *                        condition (an if/loop/`?:` test, an operand of `!`, `&&`, `||`), is
+ *                        declared BOOL and stores 1/0: the original's flag lives in a 32-bit
+ *                        register (`MOV EBX,1` / `TEST EBX,EBX`, FINDTILE_Register 0060cfa0).
+ *                        Refused for any other store or read, or when V's address or size
+ *                        is taken.
+ *   retwiden(V)          the one- or two-byte integer local V, stored at least once from a
+ *                        call, is declared int32_t and every value stored becomes `(T)E` for
+ *                        its old type T: it holds what the narrow V held, and every read
+ *                        promotes either to the same int (HandleMouseButtonEvent 0044c5e0, a
+ *                        `MOVZX` once at the call instead of at each read). Refused when V's
+ *                        address or size is taken, it is modified in place, or it is in a
+ *                        brace-enclosed initializer.
  *   arms(C[,wrap][,i])   the if/else whose condition prints C is written with the
  *                        condition negated and the arms swapped; `wrap` negates a
  *                        condition that is not a comparison or `!x` as `!(C)`, not by
@@ -187,6 +200,8 @@ export type Vc8Form =
   | { op: 'merge-guards'; index: number }
   | { op: 'retval'; name: string; value: string }
   | { op: 'width'; name: string; type: string }
+  | { op: 'boolflag'; name: string }
+  | { op: 'retwiden'; name: string }
   | { op: 'arms'; cond: string; wrap?: boolean; index?: number }
   | { op: 'nest'; cond: string; index: number }
   | { op: 'merge-tail'; cond: string; index: number }
@@ -225,7 +240,7 @@ export interface Vc8FormOptions {
   selectTables?: SelectArgumentOptions;
 }
 
-const OPS = new Set(['seq', 'fold', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'width', 'arms',
+const OPS = new Set(['seq', 'fold', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'width', 'boolflag', 'retwiden', 'arms',
   'nest', 'merge-tail', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
   'nestcall', 'fill', 'copy', 'shift']);
 
@@ -281,6 +296,8 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
     }
     case 'retval': return args.length === 2 && !anchor ? { op: 'retval', name: args[0], value: args[1] } : undefined;
     case 'width': return args.length === 2 && !anchor ? { op: 'width', name: args[0], type: args[1] } : undefined;
+    case 'boolflag': case 'retwiden':
+      return args.length === 1 && !anchor && /^[A-Za-z_]\w*$/.test(args[0]) ? { op: m[1], name: args[0] } as Vc8Form : undefined;
     case 'arms': {
       // `arms(C)`, `arms(C,wrap)`, `arms(C,i)`, `arms(C,wrap,i)`.
       if (anchor || args.length < 1 || args.length > 3 || args[0] === '') return undefined;
@@ -1395,6 +1412,98 @@ function signSensitiveRead(id: ASTNode, parents: Map<ASTNode, ASTNode>, truth: S
   }
 }
 
+/** The one declaration of local V in fn's body, refusing a parameter-free miss, a second one or a static. */
+function soleDecl(fn: FunctionDecl, name: string): VariableDecl {
+  let d: VariableDecl | undefined;
+  let n = 0;
+  for (const { node } of walk(fn.body!)) if (node.kind === NodeKind.VariableDecl && (node as VariableDecl).name.name === name) { d = node as VariableDecl; n++; }
+  if (!d) refuse(`no declaration of ${name}`);
+  if (n > 1) refuse(`${name} is declared ${n} times`);
+  if (d!.specifiers.length > 0) refuse(`${name} is ${d!.specifiers.join(' ')}`);
+  if (d!.initializer && d!.initializer.kind === NodeKind.InitListExpr) refuse(`${name} has a brace initializer`);
+  return d!;
+}
+
+/** Each mention of V that is not its declaration's name, with the node that holds it (parentheses skipped). */
+function mentionSites(fn: FunctionDecl, name: string): Array<{ id: Identifier; holder: ASTNode | undefined; child: ASTNode }> {
+  const parents = parentsOf(fn);
+  const out: Array<{ id: Identifier; holder: ASTNode | undefined; child: ASTNode }> = [];
+  for (const { node } of walk(fn.body!)) {
+    if (!isId(node, name)) continue;
+    let child: ASTNode = node;
+    let p = parents.get(child);
+    if (p && p.kind === NodeKind.VariableDecl && (p as VariableDecl).name === node) continue;
+    while (p && p.kind === NodeKind.ParenExpr) { child = p; p = parents.get(p); }
+    out.push({ id: node as Identifier, holder: p, child });
+  }
+  return out;
+}
+
+/** Refuses when V's address or size is taken, it is modified in place, or it sits in a brace initializer. */
+function refusePinned(fn: FunctionDecl, name: string): void {
+  for (const { node } of walk(fn.body!)) {
+    if (node.kind === NodeKind.SizeofExpr && [...walk(node)].some(x => isId(x.node, name))) refuse(`the size of ${name} is taken`);
+    if (node.kind === NodeKind.InitListExpr && [...walk(node)].some(x => isId(x.node, name))) refuse(`${name} is in a brace initializer`);
+    if ((node.kind === NodeKind.UnaryExpr || node.kind === NodeKind.PostfixExpr) && ['&', '++', '--'].includes((node as UnaryExpr).operator)
+      && isId(unparen((node as UnaryExpr).operand), name)) refuse(`${name} is ${(node as UnaryExpr).operator === '&' ? 'addressed' : 'stepped'}`);
+    if (node.kind === NodeKind.AssignExpr && (node as AssignExpr).operator !== '=' && isId(unparen((node as AssignExpr).left), name)) refuse(`${name} is compound-assigned`);
+  }
+}
+
+function doBoolflag(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'boolflag' }>): void {
+  const d = soleDecl(fn, f.name);
+  if (text(d.type) !== 'bool') refuse(`${f.name} is not a bool`);
+  refusePinned(fn, f.name);
+  const literals: ASTNode[] = [];
+  const literal = (e: Expression) => {
+    const u = unparen(e);
+    if (u.kind !== NodeKind.BoolLiteral) refuse(`${f.name} is stored ${text(e)}`);
+    literals.push(u);
+  };
+  if (d.initializer) literal(d.initializer as Expression);
+  let reads = 0;
+  for (const m of mentionSites(fn, f.name)) {
+    const p = m.holder as (ASTNode & { condition?: ASTNode; operator?: string; left?: ASTNode; right?: Expression }) | undefined;
+    if (p && p.kind === NodeKind.AssignExpr && p.left === m.child) { literal(p.right!); continue; }
+    reads++;
+    const ok = !!p && (
+      ([NodeKind.IfStmt, NodeKind.WhileStmt, NodeKind.DoWhileStmt, NodeKind.ForStmt, NodeKind.ConditionalExpr] as string[]).includes(p.kind) && p.condition === m.child
+      || p.kind === NodeKind.UnaryExpr && p.operator === '!'
+      || p.kind === NodeKind.BinaryExpr && (p.operator === '&&' || p.operator === '||'));
+    if (!ok) refuse(`${f.name} is read as a value`);
+  }
+  if (reads === 0) refuse(`${f.name} is never read`);
+  d.type = parseType('BOOL');
+  for (const l of literals) {
+    const b = l as unknown as Record<string, unknown>;
+    const v = b.value ? 1n : 0n;
+    delete b.value;
+    Object.assign(b, { kind: NodeKind.IntegerLiteral, value: v, raw: v.toString(), base: 10, suffix: '' });
+  }
+}
+
+function doRetwiden(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'retwiden' }>): void {
+  const d = soleDecl(fn, f.name);
+  const old = text(d.type);
+  const w = WIDTH[old];
+  if (w !== 1 && w !== 2 || old === 'bool') refuse(`${f.name} is ${old}, not a one- or two-byte integer`);
+  refusePinned(fn, f.name);
+  const stores: Array<{ get: () => Expression; set: (e: Expression) => void }> = [];
+  if (d.initializer) stores.push({ get: () => d.initializer as Expression, set: e => { d.initializer = e; } });
+  for (const m of mentionSites(fn, f.name)) {
+    const a = m.holder as AssignExpr | undefined;
+    if (a && a.kind === NodeKind.AssignExpr && a.left === m.child) stores.push({ get: () => a.right, set: e => { a.right = e; } });
+  }
+  if (!stores.some(s => unparen(s.get()).kind === NodeKind.CallExpr)) refuse(`${f.name} is stored from no call`);
+  const T = d.type;
+  for (const s of stores) {
+    const e = unparen(s.get());
+    if (e.kind === NodeKind.CStyleCastExpr && text((e as CStyleCastExpr).type) === old) continue;
+    s.set({ kind: NodeKind.CStyleCastExpr, type: cloneNode(T), expression: { kind: NodeKind.ParenExpr, expression: s.get() } } as unknown as Expression);
+  }
+  d.type = parseType('int32_t');
+}
+
 function doArms(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'arms' }>): void {
   const want = norm(f.cond);
   let seen = 0;
@@ -2432,7 +2541,7 @@ function doShift(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'shift' }>): void {
 
 const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op: K }>) => void } = {
   seq: doSeq, fold: doFold, cache: doCache, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
-  retval: doRetval, width: doWidth, arms: doArms,
+  retval: doRetval, width: doWidth, boolflag: doBoolflag, retwiden: doRetwiden, arms: doArms,
   nest: doNest, 'merge-tail': doMergeTail, continue: doContinue, dup: doDup, tarms: doTarms, zero: doZero, nonzero: doNonzero, bool: doBool,
   cmp: doCmp, swap: doSwap, ifsel: doIfsel, split: doSplit, select: doSelect, decl: doDecl, unselect: doUnselect,
   tsel: doTsel, hoist: doHoist, nestcall: doNestcall, fill: doFill, copy: doCopy, shift: doShift,

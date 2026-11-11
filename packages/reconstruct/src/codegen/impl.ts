@@ -3341,6 +3341,8 @@ function transformDecompiledCode(
         enclosingVarTypes,
       };
       perPluginOptions['narrow-local-widen'] = {
+        functionParamTypes: context.funcPtrArgCasts.functionParamTypes,
+        varArgFunctions: context.funcPtrArgCasts.varArgFunctions,
         enumTypes: context.funcPtrArgCasts.enumTypes,
         enumConstantNames: context.funcPtrArgCasts.enumConstantNames,
         globalTypes: context.funcPtrArgCasts.globalTypes,

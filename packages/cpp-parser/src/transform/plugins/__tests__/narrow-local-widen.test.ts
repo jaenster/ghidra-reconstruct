@@ -194,4 +194,65 @@ describe('narrow-local-widen', () => {
       assert.ok(go('void f(uint32_t n) { uint8_t b = (uint8_t)n & 0x1f; g(&b); }').includes('uint8_t b'));
     });
   });
+  // SCMD_0x3E_QuestItemPickup 0054bf60: `MOV EBX,[ECX+0xc]` / `MOV EBX,EAX` / `XOR EBX,EBX`, one PUSH.
+  describe('a narrow local the original holds whole and narrows only where it passes or stores it', () => {
+    const PICKUP = `int f(D2UnitStrc *pItem, int e) {
+  uint16_t nPosX;
+  int32_t nCoord;
+  if (e == 2) {
+    nPosX = (uint16_t)pItem->pStaticPath->nPosX;
+  } else if (pItem->pDynamicPath) {
+    nCoord = GetXPos(pItem->pDynamicPath);
+    nPosX = (uint16_t)nCoord;
+  } else {
+    nPosX = 0;
+  }
+  return CheckIfCoordsAreInRange(pItem, 10, nPosX);
+}`;
+    const tables = {
+      structFields: { D2UnitStrc: { pStaticPath: 'D2StaticPathStrc*', pDynamicPath: 'D2DynamicPathStrc*' }, D2StaticPathStrc: { nPosX: 'int' } },
+      functionReturnTypes: { GetXPos: 'int32_t' },
+      functionParamTypes: { CheckIfCoordsAreInRange: ['D2UnitStrc*', 'int32_t', 'uint16_t'], g: ['int'] },
+    };
+    const go = (code: string, t: Record<string, unknown> = tables) => run(code, [], [], t).replace(/\s+/g, ' ');
+
+    it('declares it int and drops the narrowing casts on its values', () => {
+      const out = go(PICKUP);
+      assert.ok(out.includes('int32_t nPosX;'), out);
+      assert.ok(out.includes('nPosX = pItem->pStaticPath->nPosX;'), out);
+      assert.ok(out.includes('nPosX = nCoord;'), out);
+      assert.ok(out.includes('nPosX = 0;'), out);
+    });
+
+    // CLIENT_PopulateVisibilityPacketBuffer 00537ee0: the value is stored through a word pointer.
+    it('takes a store through a pointer no wider than the local', () => {
+      const out = go(PICKUP.replace('return CheckIfCoordsAreInRange(pItem, 10, nPosX);', '*(short int*)((char*)pItem + 0x23) = nPosX; return 0;'));
+      assert.ok(out.includes('int32_t nPosX;'), out);
+    });
+
+    it('leaves it where a read sees more than its own width, or no value lost a cast', () => {
+      for (const use of ['return g(nPosX);', 'return nPosX + 1;', 'return h(nPosX);', 'return nPosX;']) {
+        assert.match(go(PICKUP.replace('return CheckIfCoordsAreInRange(pItem, 10, nPosX);', use)), /uint16_t nPosX;/, use);
+      }
+      assert.match(go(PICKUP.replace(/\(uint16_t\)/g, '')), /uint16_t nPosX;/);
+      assert.match(go(PICKUP.replace('nPosX = 0;', 'nPosX = 0; g((int)&nPosX);')), /uint16_t nPosX;/);
+      // One store (MOUSE handler 0044c000 lost its MATCH so), or no field among the values.
+      assert.match(go('int f(D2UnitStrc *p) { uint16_t nPosX; nPosX = (uint16_t)p->pStaticPath->nPosX; return CheckIfCoordsAreInRange(p, 10, nPosX); }'), /uint16_t nPosX;/);
+      assert.match(go(PICKUP.replace('(uint16_t)pItem->pStaticPath->nPosX', '(uint16_t)GetXPos(pItem->pDynamicPath)')), /uint16_t nPosX;/);
+    });
+
+    it('passes the same bits as the narrow local, over every value', { skip: !hasNativeGpp() }, () => {
+      const code = `int wide(P *p, int e) {
+  uint16_t n;
+  if (e) { n = (uint16_t)p->x; } else { n = 0xffff; }
+  return take(n);
+}`;
+      const out = run(code, [], [], { structFields: { P: { x: 'int' } }, functionParamTypes: { take: ['uint16_t'] } });
+      assert.match(out, /int32_t n;/);
+      const narrow = out.replace('int wide(', 'int narrow(').replace('int32_t n;', 'uint16_t n;');
+      const res = compileAndRun(`struct P { int x; };\nint take(uint16_t v) { return v; }\n${out}\n${narrow}`,
+        'int bad = 0; for (long long v = -0x30000; v < 0x30000; v += 7) for (int e = 0; e < 2; e++) { P p; p.x = (int)v; if (wide(&p, e) != narrow(&p, e)) bad++; } printf("%d\\n", bad);');
+      assert.strictEqual(res.trim(), '0');
+    });
+  });
 });

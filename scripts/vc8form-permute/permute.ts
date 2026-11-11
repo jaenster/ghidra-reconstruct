@@ -47,7 +47,8 @@
  * checkout, as `oracle-zig build` translates it; a TU whose translation is not the one in
  * build/src is skipped. BIN is the oracle-zig with `trial` and `judge` (default the
  * checkout's asm_matching/msvc8/zig/zig-out/bin/oracle-zig, or ORACLE_ZIG). Run it with the
- * checkout's oracle environment (recon/runs/vc8form-permute.sh does).
+ * checkout's oracle environment (recon/runs/vc8form-permute.sh does). --forms is another
+ * name for --ops (`--forms boolflag,retwiden`).
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -265,7 +266,7 @@ function usage(code = 2): never {
 
 function parseArgs(argv: string[]): Args {
   const a: Partial<Args> & Record<string, unknown> = { sample: 0, seed: 1, max_insns: 100, jobs: 4, max_anchors: 16, pair_top: 3, no_pairs: false, no_phase: false, resume: false, group: 1 };
-  const str: Record<string, keyof Args> = { '--checkout': 'checkout', '--snapshot': 'snapshot', '--out': 'out', '--pool': 'pool', '--addrs': 'addrs', '--oracle-zig': 'zig', '--ops': 'ops' };
+  const str: Record<string, keyof Args> = { '--checkout': 'checkout', '--snapshot': 'snapshot', '--out': 'out', '--pool': 'pool', '--addrs': 'addrs', '--oracle-zig': 'zig', '--ops': 'ops', '--forms': 'ops' };
   const int: Record<string, keyof Args> = { '--sample': 'sample', '--seed': 'seed', '--max-insns': 'max_insns', '--jobs': 'jobs', '--max-anchors': 'max_anchors', '--pair-top': 'pair_top', '--group': 'group' };
   const flag: Record<string, keyof Args> = { '--no-pairs': 'no_pairs', '--no-phase': 'no_phase', '--resume': 'resume' };
   for (let i = 0; i < argv.length; i++) {
@@ -404,7 +405,7 @@ async function main() {
     // --ops: only the forms of the named ops are tried (a question about one family of forms).
     const ops = args.ops ? new Set(args.ops.split(',')) : null;
     for (const r of JSON.parse(readFileSync(join(out, 'cand-out.json'), 'utf8'))) {
-      if (ops) r.candidates = r.candidates.filter((c: { form: string }) => ops.has(c.form.slice(0, c.form.indexOf('('))));
+      if (ops) r.candidates = r.candidates.filter((c: { form: string }) => ops.has(c.form.replace(/\(.*$/s, '')));
       cands.set(r.id, r);
     }
     let nForms = 0;
