@@ -864,3 +864,160 @@ describe('vc8-form: onecall', () => {
     assert.ok(!sites[0].applied && /parameter type/.test(sites[0].why!));
   });
 });
+
+describe('vc8-form: roundup', () => {
+  // TSGrowableArray<SGAMEDATA>::Reserve 00450e70 as the generator wraps it.
+  const SITE = [
+    'void dummy(TSGrowableArray<SGAMEDATA>* pThis, uint32_t nCount, int32_t bRound) {',
+    '  uint32_t nNeeded = nCount + this->m_count;',
+    '  if (nNeeded <= this->m_alloc) {',
+    '    return;',
+    '  }',
+    '  if (bRound) {',
+    '    uint32_t nGranularity;',
+    '    nGranularity = this->m_chunk;',
+    '    if (!nGranularity) {',
+    '      nGranularity = this->CalcChunkSize(nNeeded);',
+    '    }',
+    '    if (nNeeded % nGranularity) {',
+    '      nNeeded = nGranularity - nNeeded % nGranularity + nNeeded;',
+    '    }',
+    '  }',
+    '  this->ReallocData(nNeeded);',
+    '}',
+  ];
+  it('parses', () => {
+    assert.deepStrictEqual(parseVc8Form('roundup(nNeeded)'), { op: 'roundup', name: 'nNeeded' });
+    assert.deepStrictEqual(parseVc8Form('roundup(nNeeded,nCount)'), { op: 'roundup', name: 'nNeeded', param: 'nCount' });
+    assert.strictEqual(parseVc8Form('roundup(a+b)'), undefined);
+    assert.strictEqual(parseVc8Form('roundup(a,b,c)'), undefined);
+  });
+  it('the rounding is the helper, which the site reports as its prefix', () => {
+    const { out, sites } = run(SITE, 'roundup(nNeeded)');
+    assert.match(out, /if \(!nGranularity\) \{ nGranularity = this->CalcChunkSize\(nNeeded\); \} nNeeded = D2_RoundUp\(nNeeded, nGranularity\); \}/);
+    assert.ok(sites[0].applied);
+    assert.match(sites[0].prefix![0], /static inline uint32_t D2_RoundUp\(uint32_t n, uint32_t g\) \{/);
+  });
+  it('with P the sum is the parameter: 00450e70 as measured', () => {
+    const { out, sites } = run(SITE, 'roundup(nNeeded,nCount)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.strictEqual(out, flat(`void dummy(TSGrowableArray<SGAMEDATA>* pThis, uint32_t nCount, int32_t bRound) {
+      nCount = nCount + this->m_count;
+      if (nCount <= this->m_alloc) { return; }
+      if (bRound) {
+        uint32_t nGranularity;
+        nGranularity = this->m_chunk;
+        if (!nGranularity) { nGranularity = this->CalcChunkSize(nCount); }
+        nCount = D2_RoundUp(nCount, nGranularity);
+      }
+      this->ReallocData(nCount);
+    }`));
+  });
+  it('refuses a parameter of another type (Storm\'s int32_t nAdditional)', () => {
+    const { sites } = run(SITE.map(l => l.replace('uint32_t nCount', 'int32_t nCount')), 'roundup(nNeeded,nCount)');
+    assert.ok(!sites[0].applied);
+    assert.match(sites[0].why!, /nCount is int32_t/);
+  });
+  it('refuses a parameter read again, a signed granularity, and a rounding of another shape', () => {
+    const again = run(SITE.map(l => l.replace('this->ReallocData(nNeeded);', 'this->ReallocData(nNeeded + nCount);')), 'roundup(nNeeded,nCount)');
+    assert.match(again.sites[0].why!, /named 2 times/);
+    const signed = run(SITE.map(l => l.replace('uint32_t nGranularity;', 'int nGranularity;')), 'roundup(nNeeded)');
+    assert.match(signed.sites[0].why!, /nGranularity is not an unsigned 32-bit local/);
+    const other = run(SITE.map(l => l.replace('nGranularity - nNeeded % nGranularity + nNeeded', 'nNeeded + nGranularity - nNeeded % nGranularity')), 'roundup(nNeeded)');
+    assert.match(other.sites[0].why!, /0 round-up sites/);
+  });
+});
+
+describe('vc8-form: swmerge', () => {
+  // OBJECT_AddVisualOverlay 004bc8d0 as the generator prints it.
+  const SITE = [
+    'void f(D2UnitStrc* pUnit) {',
+    '  uint32_t nObjectClassId = pUnit->nClassId;',
+    '  if (nObjectClassId <= 0x18d) {',
+    '    if (nObjectClassId != 0x18d) {',
+    '      switch (nObjectClassId) {',
+    '        case 0x98:',
+    '          g(pUnit, 1);',
+    '        return;',
+    '        case 0x162:',
+    '        case 0x163:',
+    '        case 0x164:',
+    '          break;',
+    '        case 0x95:',
+    '          if (pUnit->eMode != 1) {',
+    '            return;',
+    '          }',
+    '        g(pUnit, 1);',
+    '        return;',
+    '        default:',
+    '          return;',
+    '      }',
+    '    }',
+    '  } else {',
+    '    if (nObjectClassId < 0x195) {',
+    '      return;',
+    '    }',
+    '    if (nObjectClassId > 0x197 && nObjectClassId != 0x1c7) {',
+    '      return;',
+    '    }',
+    '  }',
+    '  if (pUnit->eMode != 2) {',
+    '    return;',
+    '  }',
+    '  g(pUnit, 2);',
+    '}',
+  ];
+  it('parses', () => {
+    assert.deepStrictEqual(parseVc8Form('swmerge(nObjectClassId)'), { op: 'swmerge', name: 'nObjectClassId', index: 1 });
+    assert.strictEqual(parseVc8Form('swmerge(a->b)'), undefined);
+  });
+  it('004bc8d0: one switch, the boundary and the far values in the group that breaks', () => {
+    const { out, sites } = run(SITE, 'swmerge(nObjectClassId)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.strictEqual(out, flat(`void f(D2UnitStrc* pUnit) {
+      uint32_t nObjectClassId = pUnit->nClassId;
+      switch (nObjectClassId) {
+        case 0x98: g(pUnit, 1); return;
+        case 0x162: case 0x163: case 0x164: case 0x18d: case 0x195: case 0x196: case 0x197: case 0x1c7: break;
+        case 0x95: if (pUnit->eMode != 1) { return; } g(pUnit, 1); return;
+        default: return;
+      }
+      if (pUnit->eMode != 2) { return; }
+      g(pUnit, 2);
+    }`));
+  });
+  it('the same values reach the same statements before and after', () => {
+    // Model each path: which branch a value takes, as the two bodies decide it.
+    const before = (x: number): string => {
+      if (x <= 0x18d) {
+        if (x === 0x18d) return 'rest';
+        if (x === 0x98 || x === 0x95) return `case${x}`;
+        if (x >= 0x162 && x <= 0x164) return 'rest';
+        return 'leave';
+      }
+      if (x < 0x195) return 'leave';
+      if (x > 0x197 && x !== 0x1c7) return 'leave';
+      return 'rest';
+    };
+    const after = (x: number): string => {
+      if (x === 0x98 || x === 0x95) return `case${x}`;
+      if ([0x162, 0x163, 0x164, 0x18d, 0x195, 0x196, 0x197, 0x1c7].includes(x)) return 'rest';
+      return 'leave';
+    };
+    for (let x = 0; x < 0x400; x++) assert.strictEqual(after(x), before(x), `value ${x.toString(16)}`);
+  });
+  it('a label above the bound would come alive: refused', () => {
+    const { sites } = run(SITE.map(l => l.replace('case 0x162:', 'case 0x1c0:')), 'swmerge(nObjectClassId)');
+    assert.match(sites[0].why!, /label 448 lies outside/);
+  });
+  it('a guard on something else, or one that leaves another way, is refused', () => {
+    const other = run(SITE.map(l => l.replace('nObjectClassId > 0x197 && nObjectClassId != 0x1c7', 'nObjectClassId > 0x197 && pUnit->eMode')), 'swmerge(nObjectClassId)');
+    assert.match(other.sites[0].why!, /reads more than nObjectClassId/);
+    const leave = run(SITE.map((l, j) => (j === 24 ? '      return 0;' : l)), 'swmerge(nObjectClassId)');
+    assert.ok(!leave.sites[0].applied);
+  });
+  it('a range too wide to list is refused', () => {
+    const { sites } = run(SITE.map(l => l.replace('nObjectClassId > 0x197 && nObjectClassId != 0x1c7', 'nObjectClassId > 0x297 && nObjectClassId != 0x1c7')), 'swmerge(nObjectClassId)');
+    assert.match(sites[0].why!, /too wide|more than 64/);
+  });
+});

@@ -218,3 +218,114 @@ ${STORM_LINK_SUPPORT_LINES.join('\n')}
     assert.strictEqual(out.trim(), '0');
   });
 });
+
+describe('storm-next-link on a member definition', () => {
+  // TSExplicitList<SGAMEDATA>::Destructor 0044fbe0 as v2075 prints it: `this` is the list, the
+  // link is the terminator at offset 4, and the sum is a byte pointer plus an int.
+  const L = 'TSLink<SGAMEDATA>';
+  const C = 'TSExplicitList<SGAMEDATA, -572662307>';
+  // The tables are keyed by Ghidra's spelling of the name, without the parser's space.
+  const G = 'TSExplicitList<SGAMEDATA,-572662307>';
+  const xm = createStormNextLinkTransformer({
+    structFields: { [L]: { m_prevlink: `${L}*`, m_next: 'intptr_t' }, [G]: { m_unk: 'int', m_terminator: L } },
+    structFieldOffsets: { [L]: { m_prevlink: 0, m_next: 4 }, [G]: { m_unk: 0, m_terminator: 4 } },
+    aggregateSizes: { [L]: 8, [G]: 12 },
+  });
+  const runM = (code: string) => norm(emit(xm(parse(code)) as AnyNode));
+  const DESTRUCTOR = (between = '') => `template<> void ${C}::Destructor() {
+    TSLink<::SGAMEDATA>** pPrevLink;
+    this->UnlinkAll();
+    TSLink<::SGAMEDATA>* pTVar1 = &this->m_terminator;
+    TSLink<::SGAMEDATA>* pNext = pTVar1->m_prevlink;
+    if (!pNext) {
+      return;
+    }
+    intptr_t encPrev = this->m_terminator.m_next;
+    if (encPrev < 0) {
+      pPrevLink = (TSLink<::SGAMEDATA>**)~encPrev;
+    } else {
+      pPrevLink = (TSLink<::SGAMEDATA>**)((char*)pTVar1 + (encPrev - pNext->m_next));
+    }
+    *pPrevLink = pNext;${between}
+    pTVar1->m_prevlink->m_next = this->m_terminator.m_next;
+    pTVar1->m_prevlink = 0;
+    pTVar1->m_next = 0;
+}`;
+
+  it('0044fbe0: `this` has the class type, the byte-pointer sum is the helper, the next word reads through the link', () => {
+    assert.strictEqual(runM(DESTRUCTOR()), norm(`template<> void ${C}::Destructor() {
+    TSLink<::SGAMEDATA>** pPrevLink;
+    this->UnlinkAll();
+    TSLink<::SGAMEDATA>* pTVar1 = &this->m_terminator;
+    TSLink<::SGAMEDATA>* pNext = pTVar1->m_prevlink;
+    if (!pNext) {
+      return;
+    }
+    pPrevLink = (TSLink<::SGAMEDATA>**)D2_StormNextLink(pTVar1, -1);
+    *pPrevLink = pNext;
+    pTVar1->m_prevlink->m_next = pTVar1->m_next;
+    pTVar1->m_prevlink = 0;
+    pTVar1->m_next = 0;
+}`));
+  });
+
+  it('the next word keeps its spelling past a store to a local', () => {
+    const out = runM(DESTRUCTOR('\n    pTVar1 = pNext;'));
+    assert.match(out, /D2_StormNextLink\(pTVar1, -1\)/);
+    assert.match(out, /pTVar1->m_prevlink->m_next = this->m_terminator\.m_next;/);
+  });
+
+  it('the next word keeps its spelling past a call', () => {
+    const out = runM(DESTRUCTOR('\n    g();'));
+    assert.match(out, /pTVar1->m_prevlink->m_next = this->m_terminator\.m_next;/);
+  });
+
+  it('a free function has no `this` shape and is left alone', () => {
+    const code = DESTRUCTOR().replace(`template<> void ${C}::Destructor()`, 'void Destructor()');
+    assert.strictEqual(runM(code), norm(emit(parse(code) as AnyNode)));
+  });
+
+  it('a byte-pointer sum with the wrong link is refused', () => {
+    const code = DESTRUCTOR().replace('(char*)pTVar1 + (encPrev', '(char*)pNext + (encPrev');
+    assert.doesNotMatch(runM(code), /D2_StormNextLink/);
+  });
+
+  it('Ghidra\'s pseudo-C: `this` as a parameter (self), its type spelled with `_` for the minus', () => {
+    const out = runM(`void __thiscall Destructor(TSExplicitList<SGAMEDATA,_572662307> * self) {
+  TSLink<SGAMEDATA> *pTVar1;
+  TSLink<SGAMEDATA> **pPrevLink;
+  intptr_t encPrev;
+  TSLink<SGAMEDATA> *pNext;
+  UnlinkAll(self);
+  pTVar1 = &self->m_terminator;
+  pNext = pTVar1->m_prevlink;
+  if (pNext != (TSLink<SGAMEDATA> *)0x0) {
+    encPrev = (self->m_terminator).m_next;
+    if (encPrev < 0) {
+      pPrevLink = (TSLink<SGAMEDATA> **)~encPrev;
+    }
+    else {
+      pPrevLink = (TSLink<SGAMEDATA> **)((int)pTVar1 + (encPrev - pNext->m_next));
+    }
+    *pPrevLink = pNext;
+    pTVar1->m_prevlink->m_next = (self->m_terminator).m_next;
+    pTVar1->m_prevlink = (TSLink<SGAMEDATA> *)0x0;
+    (self->m_terminator).m_next = 0;
+  }
+}`);
+    assert.match(out, /pPrevLink = \(TSLink<SGAMEDATA>\*\*\)D2_StormNextLink\(pTVar1, -1\); \*pPrevLink = pNext; pTVar1->m_prevlink->m_next = pTVar1->m_next;/);
+    assert.doesNotMatch(out, /encPrev/);
+  });
+
+  it('the generator\'s wrapper: a method body keeps `this`, the first parameter pThis is its pointer', () => {
+    const body = DESTRUCTOR().slice(DESTRUCTOR().indexOf('{'));
+    const out = runM(`void dummy(TSExplicitList<::SGAMEDATA, -572662307>* pThis) ${body}`);
+    assert.match(out, /D2_StormNextLink\(pTVar1, -1\); \*pPrevLink = pNext; pTVar1->m_prevlink->m_next = pTVar1->m_next;/);
+  });
+
+  it('a first parameter by any other name says nothing about `this`', () => {
+    const body = DESTRUCTOR().slice(DESTRUCTOR().indexOf('{'));
+    const code = `void dummy(TSExplicitList<::SGAMEDATA, -572662307>* pList) ${body}`;
+    assert.strictEqual(runM(code), norm(emit(parse(code) as AnyNode)));
+  });
+});
