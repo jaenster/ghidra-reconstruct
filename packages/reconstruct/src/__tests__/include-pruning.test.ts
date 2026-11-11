@@ -160,6 +160,17 @@ int __fastcall X(D2UnitStrc * pUnit) {
     }
   });
 
+  it('keeps the definition of a seed D2_SeedRoll steps: the template reads its pointee', () => {
+    const files = tree({
+      'Lib/Seed.h': `#pragma once\nstruct D2SeedStrc {\n    unsigned nSeedLow;\n    unsigned nSeedHigh;\n};\n`,
+      'Game/Roll.cpp': `#include "Lib/Seed.h"\n\nunsigned __fastcall F(D2SeedStrc * pSeed) {\n    return D2_SeedRoll(pSeed);\n}\n`,
+      'Game/Other.cpp': `#include "Lib/Seed.h"\n\nunsigned __fastcall G(D2SeedStrc * pSeed) {\n    return pSeed != 0;\n}\n`,
+    });
+    pruneIncludes(files);
+    assert.deepStrictEqual(includesOf(files, 'Game/Roll.cpp'), ['Lib/Seed.h']);
+    assert.deepStrictEqual(includesOf(files, 'Game/Other.cpp'), []);
+  });
+
   it('prunes a header too: a pointer field needs a declaration, a by-value field the definition', () => {
     const files = tree({
       ...UNIT,
