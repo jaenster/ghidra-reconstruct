@@ -316,6 +316,23 @@ function sites(c: Ctx, maxAnchors: number): string[] {
     if (n === 1) out.add(`bool(${t})`); else for (let i = 1; i <= n; i++) out.add(`bool(${t},${i})`);
   }
 
+  // shift: a narrowed `E >> k` of a local or parameter, both ways (the form refuses the
+  // one the body already has, and any site whose cast keeps a bit the shifts disagree on).
+  const shifted = new Map<string, number>();
+  for (const n of all) {
+    if (n.kind !== NodeKind.CStyleCastExpr) continue;
+    const sh = unparen(n.expression);
+    if (sh.kind !== NodeKind.BinaryExpr || sh.operator !== '>>') continue;
+    let e = unparen(sh.left);
+    if (e.kind === NodeKind.CStyleCastExpr) e = unparen(e.expression);
+    if (e.kind === NodeKind.Identifier) shifted.set(e.name, (shifted.get(e.name) ?? 0) + 1);
+  }
+  for (const [v, n] of shifted) {
+    for (const how of ['sar', 'shr']) {
+      if (n === 1) out.add(`shift(${v},${how})`); else for (let i = 1; i <= n; i++) out.add(`shift(${v},${how},${i})`);
+    }
+  }
+
   // nestcall: a local stored from one call, the i-th such store when there are several.
   const callStores = new Map<string, number>();
   for (const n of all) {

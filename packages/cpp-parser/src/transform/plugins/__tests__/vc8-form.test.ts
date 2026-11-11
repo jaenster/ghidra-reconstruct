@@ -479,3 +479,36 @@ describe('vc8-form: tsel', () => {
     assert.strictEqual(apply('tsel(!pUnit,2)').sites[0]?.applied, false);
   });
 });
+
+describe('vc8-form: shift', () => {
+  it('parses the operand, the kind and the index', () => {
+    assert.deepStrictEqual(parseVc8Form('shift(nHandle,sar)'), { op: 'shift', expr: 'nHandle', how: 'sar', index: 0 });
+    assert.deepStrictEqual(parseVc8Form('shift(nSlot,shr,2)'), { op: 'shift', expr: 'nSlot', how: 'shr', index: 2 });
+    assert.strictEqual(parseVc8Form('shift(nSlot,rol)'), undefined);
+  });
+
+  it('writes the high word of a signed handle arithmetically', () => {
+    // DATAARRAY_GetSlot 006bccd0: `sar eax, 0x10`.
+    const { out, sites } = run(['int f(int nHandle) { int nSlot = (int)(short int)((uint32_t)nHandle >> 0x10); return nSlot; }'], 'shift(nHandle,sar)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.ok(out.includes('(short int)(nHandle >> 0x10)'), out);
+  });
+
+  it('writes the half of an unsigned value arithmetically through an int cast, and back', () => {
+    // WEATHER_SpawnSplash 00472da0: `sar eax, 0x10; movsx eax, ax`.
+    const a = run(['void f(uint32_t nSlot) { short int n = (short int)(nSlot >> 0x10); g(n); }'], 'shift(nSlot,sar)');
+    assert.ok(a.out.includes('(short int)((int)nSlot >> 0x10)'), a.out);
+    const b = run(['void f(int x) { g((uint8_t)(x >> 8)); }'], 'shift(x,shr)');
+    assert.ok(b.out.includes('(uint8_t)((uint32_t)x >> 8)'), b.out);
+  });
+
+  it('refuses a kept top bit, bool, an unknown or wide operand and a no-op', () => {
+    const refused = (lines: string[], form: string) => { const { sites } = run(lines, form); return !sites[0].applied; };
+    assert.ok(refused(['void f(int x) { g((uint16_t)((uint32_t)x >> 0x11)); }'], 'shift(x,sar)'));
+    assert.ok(refused(['void f(int x) { g((bool)((uint32_t)x >> 0x1f)); }'], 'shift(x,sar)'));
+    assert.ok(refused(['void f(int64_t x) { g((uint8_t)((uint32_t)x >> 8)); }'], 'shift(x,sar)'));
+    assert.ok(refused(['void f() { g((uint8_t)((uint32_t)gx >> 8)); }'], 'shift(gx,sar)'));
+    assert.ok(refused(['void f(int x) { g((uint8_t)(x >> 8)); }'], 'shift(x,sar)'));
+    assert.ok(refused(['void f(int x) { g((uint8_t)(x >> 8)); h((uint8_t)(x >> 0x10)); }'], 'shift(x,shr)'));
+  });
+});
