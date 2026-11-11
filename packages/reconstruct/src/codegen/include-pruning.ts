@@ -476,6 +476,13 @@ interface Usage {
 }
 
 /**
+ * Templates d2_platform.h defines that dereference their pointer argument: D2_SeedRoll
+ * reads and stores both words of the seed. It is instantiated in the calling file, so the
+ * argument's pointee must be complete there; the header itself cannot include the type.
+ */
+const POINTEE_READING_TEMPLATES = new Set(['D2_SeedRoll']);
+
+/**
  * The struct types a file needs complete. A function declaration's by-value parameter
  * and return types count: a caller needs them so, and the header declaring the function
  * is where callers get them.
@@ -691,7 +698,13 @@ function completeTypes(
       }
       case NodeKind.CallExpr: {
         const callee = ev(e.callee);
-        for (const a of e.arguments ?? []) valueUse(ev(a));
+        // A d2_platform.h template that reads its argument's pointee where it is instantiated.
+        const readsPointee = e.callee?.kind === NodeKind.Identifier && POINTEE_READING_TEMPLATES.has(e.callee.name);
+        for (const a of e.arguments ?? []) {
+          const r = ev(a);
+          valueUse(r);
+          if (readsPointee) pointeeSized(r);
+        }
         result = fnReturns(callee);
         valueUse(result);
         break;
