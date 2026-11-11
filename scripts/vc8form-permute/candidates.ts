@@ -286,6 +286,7 @@ function sites(c: Ctx, maxAnchors: number): string[] {
   const ifs = all.filter(n => n.kind === NodeKind.IfStmt && !n.init);
   for (const { t, i } of indexed(ifs.filter(s => !s.elseBranch).map(s => pr(s.condition)))) {
     for (const op of ['nest', 'merge-tail', 'continue', 'select']) out.add(withIdx(op, t, i, true));
+    out.add(withIdx('tailguard', t, i, true));
   }
   // arms: the i-th if/else on its condition where several share it.
   const elseConds = ifs.filter(s => s.elseBranch).map(s => pr(s.condition));
