@@ -12,6 +12,7 @@ import { NodeKind } from '../../../ast/kinds.js';
 import { traverseAST } from '../../../ast/visitor.js';
 import type { CompoundStmt, FunctionDecl, Statement } from '../../../ast/nodes.js';
 import { buildCfg } from '../build.js';
+import { buildFunctionFlow, ENTRY_DEF } from '../dataflow.js';
 import type { Cfg } from '../types.js';
 
 /** The statements of the first function body in `code`. */
@@ -187,5 +188,57 @@ describe('buildCfg', () => {
     const keys = cfg.nodes.map(n => n.key).filter(Boolean);
     assert.ok(keys.includes("c:'\\f'"), `case label must be keyed: ${keys}`);
     assert.ok(keys.includes('c:default'));
+  });
+});
+
+describe('short-circuit conditions in the dataflow', () => {
+  /** The definitions of `v` reaching the call statement `name(...)`, as `v = <rhs>` spellings. */
+  const reachingAt = (code: string, name: string, v: string, shortCircuit: boolean): string[] => {
+    const stmts = body(code);
+    const flow = buildFunctionFlow(stmts, new Set(['v', 'c']), { shortCircuitConditions: shortCircuit });
+    const at = flow.cfg.nodes.find(n => n.stmt?.kind === NodeKind.ExprStmt
+      && (n.stmt as unknown as { expression: { callee?: { name?: string } } }).expression.callee?.name === name)!;
+    return [...flow.reaching(at.id, v)].map(d => d === ENTRY_DEF ? 'entry' : flow.cfg.nodes[d].condPart ?? 'stmt').sort();
+  };
+
+  it('a store in the right of || reaches the false path alone, and both on the true path', () => {
+    const code = 'void f(int c) { int v; v = 0; if (c || (v = g(), v == 0)) a(); else b(); h(); }';
+    assert.deepStrictEqual(reachingAt(code, 'b', 'v', true), ['effect']);
+    assert.deepStrictEqual(reachingAt(code, 'a', 'v', true), ['effect', 'stmt']);
+    // One node per condition: the store inside it never kills.
+    assert.deepStrictEqual(reachingAt(code, 'b', 'v', false), ['stmt', 'stmt']);
+  });
+
+  it('a store in the right of && reaches the true path alone', () => {
+    const code = 'void f(int c) { int v; v = 0; while (c && (v = g()) != 0) a(); b(); }';
+    assert.deepStrictEqual(reachingAt(code, 'a', 'v', true), ['test']);
+    assert.deepStrictEqual(reachingAt(code, 'b', 'v', true), ['stmt', 'test']);
+  });
+
+  it('the lowered if node evaluates nothing; each operand node does', () => {
+    const stmts = body('void f(int c) { int v; if (!(c && (v = g(), v))) a(); }');
+    const flow = buildFunctionFlow(stmts, new Set(['v', 'c']), { shortCircuitConditions: true });
+    const owner = flow.cfg.nodes.find(n => n.stmt?.kind === NodeKind.IfStmt)!;
+    assert.strictEqual(owner.lowered, true);
+    assert.deepStrictEqual(flow.ownExprs(owner.id), []);
+    const parts = flow.cfg.nodes.filter(n => n.condPart).map(n => `${n.condPart}:${[...flow.reads(n.id)].sort().join(',')}`);
+    assert.deepStrictEqual(parts.sort(), ['effect:g', 'test:c', 'test:v']);
+  });
+});
+
+describe('dataflow: a store through a pointer', () => {
+  const writesAt = (code: string, call: string, pointers?: Set<string>) => {
+    const flow = buildFunctionFlow(body(code), new Set(['p', 'a', 'n']), { pointers });
+    const at = flow.cfg.nodes.find(n => n.stmt?.kind === NodeKind.ExprStmt
+      && (n.stmt as unknown as { expression: { left?: { array?: { name?: string } } } }).expression.left?.array?.name === call)!;
+    return { writes: [...flow.writes(at.id)].sort(), reads: [...flow.reads(at.id)].sort() };
+  };
+
+  it('p[i] = x through a pointer reads p and writes memory, not p; a local array is still written', () => {
+    const code = 'void f(int *p, int n) { int a[4]; p[n] = 1; a[n] = 2; }';
+    // A memory store may write the escaped array, never p.
+    assert.deepStrictEqual(writesAt(code, 'p', new Set(['p'])), { writes: ['a'], reads: ['n', 'p'] });
+    assert.deepStrictEqual(writesAt(code, 'p'), { writes: ['p'], reads: ['n', 'p'] });
+    assert.deepStrictEqual(writesAt(code, 'a', new Set(['p'])).writes, ['a']);
   });
 });

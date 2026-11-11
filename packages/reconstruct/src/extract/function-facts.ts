@@ -19,6 +19,7 @@
  *   storeBases    store-bases.ts
  *   callDivides   call-divides.ts
  *   signedDivides signed-divides.ts  (behind the compare-sites text-hash gate)
+ *   shadowedGlobals shadowed-globals.ts
  *   labelFlow     label-flow.ts      (listing only; its own script, labels come from the text)
  *
  * Each extractor decompiled every function again; this script decompiles a function once
@@ -53,6 +54,7 @@ import { REGISTER_STORES_JAVA, printsConstantStore, parseRegisterStoreRow } from
 import { ROTATE_SITES_DECL_JAVA, ROTATE_SITES_LINE_JAVA, printsShiftPair, parseRotateSiteRow } from './rotate-sites.js';
 import { STORE_BASES_DECL_JAVA, STORE_BASES_LINE_DECL_JAVA, STORE_BASES_TOKEN_JAVA, STORE_BASES_LINE_JAVA, printsMemberAddress, parseStoreBaseRow } from './store-bases.js';
 import { CALL_DIVIDES_DECL_JAVA, CALL_DIVIDES_LINE_DECL_JAVA, CALL_DIVIDES_TOKEN_JAVA, CALL_DIVIDES_LINE_JAVA, printsHalvedValue, parseCallDivideRow } from './call-divides.js';
+import { SHADOWED_GLOBALS_DECL_JAVA, SHADOWED_GLOBALS_LINE_DECL_JAVA, SHADOWED_GLOBALS_TOKEN_JAVA, SHADOWED_GLOBALS_LINE_JAVA, parseShadowedGlobalRow } from './shadowed-globals.js';
 import { labelsOf, labelFlowItems, labelFlowScript, parseLabelFlow, LABEL_FLOW_SCRIPT } from './label-flow.js';
 import { FactCache, type CachedFacts, type FactEntry } from './fact-cache.js';
 import { createHash } from 'node:crypto';
@@ -258,16 +260,16 @@ ${CALL_PUSHES_JAVA}
           // branch-layout and call-order, over the same lines
           StringBuilder ls = new StringBuilder(), is = new StringBuilder(), es = new StringBuilder(), cs = new StringBuilder();
           StringBuilder argRow = new StringBuilder(), storeRow = new StringBuilder();
-${ROTATE_SITES_DECL_JAVA}${STORE_BASES_DECL_JAVA}${CALL_DIVIDES_DECL_JAVA}          int count = 0;
+${ROTATE_SITES_DECL_JAVA}${STORE_BASES_DECL_JAVA}${CALL_DIVIDES_DECL_JAVA}${SHADOWED_GLOBALS_DECL_JAVA}          int count = 0;
 ${IF_OPERANDS_DECL_JAVA}${EDGES_DECL_JAVA}          for (ghidra.app.decompiler.ClangLine l : ghidra.app.decompiler.component.DecompilerUtils.toLines(r.getCCodeMarkup())) {
             count++;
             java.util.TreeSet<Long> offs = new java.util.TreeSet<>();
             StringBuilder one = new StringBuilder();
             StringBuilder oneArg = new StringBuilder(), oneSt = new StringBuilder();
-${CALL_DIVIDES_LINE_DECL_JAVA}            int storeOrd = 0;
+${CALL_DIVIDES_LINE_DECL_JAVA}${SHADOWED_GLOBALS_LINE_DECL_JAVA}            int storeOrd = 0;
 ${STORE_BASES_LINE_DECL_JAVA}            for (ghidra.app.decompiler.ClangToken t : l.getAllTokens()) {
               if (t instanceof ghidra.app.decompiler.ClangCommentToken) continue;
-${IF_OPERANDS_TOKEN_JAVA}${EDGES_TOKEN_JAVA}${ACCESS_ORDER_TOKEN_JAVA}${STORE_BASES_TOKEN_JAVA}${CALL_DIVIDES_TOKEN_JAVA}              ghidra.program.model.address.Address x = t.getMinAddress();
+${IF_OPERANDS_TOKEN_JAVA}${EDGES_TOKEN_JAVA}${ACCESS_ORDER_TOKEN_JAVA}${STORE_BASES_TOKEN_JAVA}${CALL_DIVIDES_TOKEN_JAVA}${SHADOWED_GLOBALS_TOKEN_JAVA}              ghidra.program.model.address.Address x = t.getMinAddress();
               if (x != null) {
                 long off = x.getOffset() - base;
                 offs.add(off);
@@ -342,7 +344,7 @@ ${IF_OPERANDS_TOKEN_JAVA}${EDGES_TOKEN_JAVA}${ACCESS_ORDER_TOKEN_JAVA}${STORE_BA
             if (one.length() > 0) cs.append(cs.length() > 0 ? ";" : "").append(l.getLineNumber()).append(':').append(one);
             if (oneArg.length() > 0) argRow.append(argRow.length() > 0 ? ";" : "").append(l.getLineNumber()).append(':').append(oneArg);
             if (oneSt.length() > 0) storeRow.append(storeRow.length() > 0 ? ";" : "").append(l.getLineNumber()).append(':').append(oneSt);
-${CALL_DIVIDES_LINE_JAVA}${ROTATE_SITES_LINE_JAVA}${STORE_BASES_LINE_JAVA}            if (offs.isEmpty()) continue;
+${CALL_DIVIDES_LINE_JAVA}${SHADOWED_GLOBALS_LINE_JAVA}${ROTATE_SITES_LINE_JAVA}${STORE_BASES_LINE_JAVA}            if (offs.isEmpty()) continue;
             ls.append(ls.length() > 0 ? ";" : "").append(l.getLineNumber()).append(':');
             boolean first = true;
             for (Long off : offs) {
@@ -394,6 +396,7 @@ ${STRING_OPS_JAVA}
             StringBuilder ways = new StringBuilder();
             for (ghidra.program.model.listing.Instruction p : pushers) {
               String line = "-", guard = "-";
+              StringBuilder guards = new StringBuilder();
               if (p != null && p.getMnemonicString().equals("PUSH") && p.getNumOperands() == 1
                   && p.getScalar(0) != null && p.getRegister(0) == null) {
                 line = Long.toHexString(p.getScalar(0).getUnsignedValue());
@@ -411,8 +414,19 @@ ${STRING_OPS_JAVA}
                       && b.getFallThrough().equals(p.getAddress())) c = b;
                 }
                 if (c != null) guard = Long.toHexString(c.getAddress().getOffset() - base);
+                // Every conditional branch that leads to this PUSH: the jumps to it and the Jcc it
+                // falls out of, whether or not other ways enter it too.
+                java.util.TreeSet<Long> gs = new java.util.TreeSet<>();
+                for (ghidra.program.model.symbol.Reference rf : rm.getReferencesTo(p.getAddress())) {
+                  if (rf.getReferenceType().isConditional() && fn.getBody().contains(rf.getFromAddress())) gs.add(rf.getFromAddress().getOffset() - base);
+                }
+                ghidra.program.model.listing.Instruction fb = L.getInstructionBefore(p.getAddress());
+                if (fb != null && fb.getFlowType().isConditional() && fb.getFallThrough() != null
+                    && fb.getFallThrough().equals(p.getAddress()) && fn.getBody().contains(fb.getAddress())) gs.add(fb.getAddress().getOffset() - base);
+                for (Long x : gs) guards.append(guards.length() > 0 ? "+" : "").append(Long.toHexString(x));
               }
               ways.append(ways.length() > 0 ? "," : "").append(line).append('/').append(guard);
+              if (guards.length() > 0) ways.append('/').append(guards);
             }
             hrow.append(hrow.length() > 0 ? ";" : "").append(Long.toHexString(hc.getAddress().getOffset() - base))
               .append(':').append(Long.toHexString(g.getAddress().getOffset() - base)).append(':').append(ways);
@@ -457,6 +471,7 @@ ${JUMP_TABLES_JAVA}${ZERO_STORES_JAVA}${MASK_SITES_JAVA}${ZEXT_SITES_JAVA}${SIGN
           if (qrow.length() > 0) out.append("Q\\t").append(a).append('\\t').append(count).append('\\t').append(qrow).append('\\n');
           if (wrow.length() > 0) out.append("W\\t").append(a).append('\\t').append(count).append('\\t').append(wrow).append('\\n');
           if (vrow.length() > 0) out.append("V\\t").append(a).append('\\t').append(count).append('\\t').append(vrow).append('\\n');
+          if (nrow.length() > 0) out.append("N\\t").append(a).append('\\t').append(count).append('\\t').append(nrow).append('\\n');
           if (hrow.length() > 0 || probes.length() > 0) out.append("H\\t").append(a).append('\\t').append(hrow).append('\\t').append(probes).append('\\n');
           if (rrow.length() > 0) out.append("R\\t").append(a).append('\\t').append(rrow).append('\\n');
           if (jrow.length() > 0) out.append("J\\t").append(a).append('\\t').append(jrow).append('\\n');
@@ -494,7 +509,7 @@ println(sb.toString());
  */
 export const FACT_SCRIPT_VERSION = createHash('sha1')
   .update(FUNCTION_FACTS_SCRIPT).update(LABEL_FLOW_SCRIPT).update(functionStampsScript([], []))
-  .update('facts-14')
+  .update('facts-15')
   .digest('hex').slice(0, 16);
 
 export function functionFactsScript(batch: string[], threads = 8, timeout = 60): string {
@@ -538,6 +553,8 @@ export interface FunctionFactRow {
   baseRow?: string;
   /** The call-divides row, untagged and without the entry. */
   divideRow?: string;
+  /** The shadowed-globals row, untagged and without the entry. */
+  shadowRow?: string;
   deps: Record<string, TypeStamp>;
 }
 
@@ -610,6 +627,7 @@ export function parseFunctionFacts(output: string): FunctionFactOutput {
     else if (tag === 'Q') cur.rotateRow = rest.slice(rest.indexOf('\t') + 1);
     else if (tag === 'W') cur.baseRow = rest.slice(rest.indexOf('\t') + 1);
     else if (tag === 'V') cur.divideRow = rest.slice(rest.indexOf('\t') + 1);
+    else if (tag === 'N') cur.shadowRow = rest.slice(rest.indexOf('\t') + 1);
     else if (tag === 'D') {
       for (const part of rest ? rest.split(';') : []) {
         const [id, full, shape] = part.split(',');
@@ -698,6 +716,10 @@ export function selectFacts(text: string, entry: string, row: FunctionFactRow, c
     const v = parseCallDivideRow(row.divideRow);
     if (v) facts.callDivides = v;
   }
+  if (row.shadowRow) {
+    const n = parseShadowedGlobalRow(row.shadowRow);
+    if (n) facts.shadowedGlobals = n;
+  }
   return facts;
 }
 
@@ -733,7 +755,7 @@ export interface FunctionFactStats {
   labelMs: number;
 }
 
-export const FACT_KEYS = ['compareSites', 'branchLayout', 'callOrder', 'accessOrder', 'haltLines', 'stringOps', 'jumpTables', 'zeroStores', 'maskSites', 'zextSites', 'registerStores', 'rotateSites', 'storeBases', 'callDivides', 'signedDivides', 'labelFlow'] as const;
+export const FACT_KEYS = ['compareSites', 'branchLayout', 'callOrder', 'accessOrder', 'haltLines', 'stringOps', 'jumpTables', 'zeroStores', 'maskSites', 'zextSites', 'registerStores', 'rotateSites', 'storeBases', 'callDivides', 'signedDivides', 'shadowedGlobals', 'labelFlow'] as const;
 
 /**
  * Attach every per-function fact to the decompiled functions, from the cache where the
@@ -911,6 +933,7 @@ function attach(f: ExtractedFunction, facts: CachedFacts): void {
   if (facts.rotateSites !== undefined) f.rotateSites = facts.rotateSites;
   if (facts.storeBases !== undefined) f.storeBases = facts.storeBases;
   if (facts.callDivides !== undefined) f.callDivides = facts.callDivides;
+  if (facts.shadowedGlobals !== undefined) f.shadowedGlobals = facts.shadowedGlobals;
   if (facts.signedDivides !== undefined) f.signedDivides = facts.signedDivides;
   if (facts.labelFlow !== undefined) f.labelFlow = { ...(f.labelFlow ?? {}), ...facts.labelFlow };
 }

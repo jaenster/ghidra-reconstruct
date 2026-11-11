@@ -992,6 +992,11 @@ export class CppEmitter {
 
   private emitAttributes(attrs: Attribute[]): void {
     if (attrs.length === 0) return;
+    // GCC's own attributes are read from `__attribute__((...))` and printed back that way.
+    if (attrs.every(a => a.namespace?.name === 'gnu' && a.arguments.length === 0)) {
+      this.write(`__attribute__((${attrs.map(a => a.name.name).join(', ')})) `);
+      return;
+    }
     this.write('[[');
     for (let i = 0; i < attrs.length; i++) {
       if (i > 0) {
@@ -1213,8 +1218,8 @@ export class CppEmitter {
     }
   }
 
-  private emitUnionDecl(node: UnionDecl): void {
-    this.write(this.indent());
+  private emitUnionDecl(node: UnionDecl, noIndent = false): void {
+    if (!noIndent) this.write(this.indent());
     this.emitAttributes(node.attributes);
     this.write('union');
 
@@ -1873,6 +1878,7 @@ export class CppEmitter {
     if (stmt.declarations.length !== 1) return false;
     switch (stmt.declarations[0].kind) {
       case NodeKind.StructDecl:
+      case NodeKind.UnionDecl:
       case NodeKind.StaticAssertDecl:
         return true;
       default:
@@ -1891,6 +1897,7 @@ export class CppEmitter {
       const decl = node.declarations[0];
       this.emitTrivia(decl.leadingTrivia);
       if (decl.kind === NodeKind.StructDecl) this.emitStructDecl(decl as StructDecl, true);
+      else if (decl.kind === NodeKind.UnionDecl) this.emitUnionDecl(decl as UnionDecl, true);
       else this.emitStaticAssertDecl(decl as StaticAssertDecl, true);
       return;
     }

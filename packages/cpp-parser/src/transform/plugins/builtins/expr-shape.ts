@@ -18,9 +18,10 @@
 
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
-  Expression, Identifier, MemberExpr, SubscriptExpr, CallExpr, CStyleCastExpr,
-  UnaryExpr, BinaryExpr, TypeNode, StringLiteralExpr, ConditionalExpr,
+  ASTNode, Expression, Identifier, MemberExpr, SubscriptExpr, CallExpr, CStyleCastExpr,
+  UnaryExpr, BinaryExpr, TypeNode, StringLiteralExpr, ConditionalExpr, StructDecl, FieldDecl,
 } from '../../../ast/nodes.js';
+import { findNodesByKind } from '../../../ast/visitor.js';
 import {
   bareName, calleeName, sameShape, shapeOfNode, shapeOfSpelling, unwrapParens,
   type TypeShape, type TypedefResolver,
@@ -39,6 +40,12 @@ export interface ExprShapeTables {
   returnTypes?: Record<string, string>;
   /** Typedef name → what it stands for. */
   resolve?: TypedefResolver;
+  /**
+   * Aggregates the function body declares itself (a frame object, `struct __frame0_t`):
+   * name → member → declared type. Consulted before `structFields`, which knows only
+   * the program's own types.
+   */
+  localStructs?: ReadonlyMap<string, ReadonlyMap<string, TypeNode>>;
 }
 
 export type ExprShape = (expr: Expression) => TypeShape | null;
@@ -63,6 +70,7 @@ export function createExprShape(
   const fieldTypes = tables.fieldTypes ?? {};
   const returnTypes = tables.returnTypes ?? {};
   const resolve = tables.resolve;
+  const localStructs = tables.localStructs;
 
   const shape: ExprShape = (expr: Expression): TypeShape | null => {
     const e = unwrapParens(expr);
@@ -116,6 +124,9 @@ export function createExprShape(
         // If the object's own type is known, the field's type is exact.
         const obj = shape(m.object);
         if (obj && obj.stars === (m.isArrow ? 1 : 0)) {
+          const local = localStructs?.get(obj.base)?.get(member.name);
+          if (local) return shapeOfNode(local, 0, resolve);
+          if (localStructs?.has(obj.base)) return null;
           const exact = structFields[obj.base]?.[member.name];
           if (exact) return shapeOfSpelling(exact, resolve);
         }
@@ -169,6 +180,35 @@ export function createExprShape(
   };
 
   return shape;
+}
+
+/**
+ * The aggregates a function body declares (`struct __frame0_t { ... };` from
+ * frame-group-locals), each named one by its members' declared types. A name declared
+ * twice in the body is left out: which of the two a variable has is not known here.
+ */
+export function collectLocalStructs(body: ASTNode): Map<string, Map<string, TypeNode>> {
+  const out = new Map<string, Map<string, TypeNode>>();
+  const twice = new Set<string>();
+  // A union the body declares (a frame slot's lives, as split-lives makes them) is one
+  // too: its members are read by name like a struct's.
+  for (const d of [...findNodesByKind(body, NodeKind.StructDecl), ...findNodesByKind(body, NodeKind.UnionDecl)]) {
+    const sd = d as StructDecl;
+    if (!sd.name || sd.name.kind !== NodeKind.Identifier || sd.isForwardDeclaration || (sd.bases ?? []).length > 0) continue;
+    const name = (sd.name as Identifier).name;
+    if (out.has(name)) { twice.add(name); continue; }
+    const fields = new Map<string, TypeNode>();
+    // A member parsed back from text is a VariableDecl; one the factory built is a FieldDecl.
+    for (const m of sd.members as ASTNode[]) {
+      if (m.kind !== NodeKind.FieldDecl && m.kind !== NodeKind.VariableDecl) continue;
+      const f = m as unknown as FieldDecl;
+      if (f.bitWidth || !f.name || !f.type) continue;
+      fields.set(f.name.name, f.type);
+    }
+    out.set(name, fields);
+  }
+  for (const n of twice) out.delete(n);
+  return out;
 }
 
 /** The parameters and body-declared locals of one function, by name. */

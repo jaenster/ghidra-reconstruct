@@ -20,7 +20,7 @@ import type {
 } from '../types.js';
 import { isPlatformOrBuiltinType, isStructType, castPointerInitializer, normalizeDataValue, isCharacterValueType } from './platform-types.js';
 import { crtFunctionNames, EXTERNAL_IMPORT_REFERENCE_RENAMES } from './crt-mapping.js';
-import { CPP_KEYWORDS } from './header.js';
+import { CPP_KEYWORDS, INLINE_MARKER, INLINE_END_MARKER, declarationMarkersOn } from './header.js';
 
 // Import cpp-parser for code transformation
 import { branchLayoutLines } from './branch-layout-spec.js';
@@ -29,6 +29,7 @@ import { accessOrderLines } from './access-order-spec.js';
 import { rotateSiteLines } from './rotate-sites-spec.js';
 import { storeBaseLines } from './store-bases-spec.js';
 import { callDivideLines } from './call-divides-spec.js';
+import { shadowedGlobalLines } from './shadowed-globals-spec.js';
 import type { BranchLayoutFacts } from '../extract/branch-layout.js';
 import type { CallOrderFacts } from '../extract/call-order.js';
 import type { AccessOrderFacts } from '../extract/access-order.js';
@@ -36,6 +37,7 @@ import type { HaltLineFacts } from '../extract/halt-lines.js';
 import { transformGhidraCode, preprocessGhidraCode, enclosingNamespaceStripPlugin, type InlinedCallee, type InlinedCallTables, type GuardedCallee, type GuardedCallTables, type GuardedCallSite, type CallExpr, type FunctionDecl, isGhidraGeneratedName, suggestBetterName, takeFuncPtrArgCastTypedefs, type TransformResult, type FuncPtrTarget, type ArtifactMode, type ArtifactRecord, type RunTruncation } from '@ghidra-mcp/cpp-parser';
 import { parseTemplateName, collapseConsecutiveDuplicates } from './namespace.js';
 import { getGlobalReferenceAliases, globalAliasComment } from './global-aliases.js';
+import { getTebFields } from './teb-fields.js';
 import { globalGuardLine, guardQualifiedName, hasDefinitionInitializer } from './global-guards.js';
 import { sehLoweringDecision, type SehLoweringDecision } from './seh-lowering-spec.js';
 import { displacementTargets, foldedAddressFacts, type FoldedAddressFact } from './folded-address-spec.js';
@@ -43,14 +45,14 @@ import { immediateConstantFacts, referencedDataAddresses, dataAtAddress, type Im
 import { compareFormSpec, type CompareFormSpec } from './compare-form-spec.js';
 import { repStringOps } from './rep-string-spec.js';
 import { vc8FormSpec, vc8formHashRecord, type Vc8FormSpec } from './vc8form-spec.js';
-import type { RepStringOp, Expression, NullGetterTable } from '@ghidra-mcp/cpp-parser';
+import type { RepStringOp, Expression, NullGetterTable, ASTNode, SelectArgumentOptions, Vc8Accessor } from '@ghidra-mcp/cpp-parser';
 import { ROOT_CLASS_SCOPE, namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 import { cleanFunctionComment, declaredParameters, externEntryDeclaration, guardedFuncDefTypedef, emittedFunctionName, returnSigType, sigType } from './header.js';
-import { classScopeOf, memberCallModel, memberDefinitionScope, orphanMarker, signatureParameters } from './templates/index.js';
+import { COMDAT_SPECIFIERS, classScopeOf, memberCallModel, memberDefinitionScope, orphanMarker, signatureParameters } from './templates/index.js';
 import { pointeeClass } from './templates/members.js';
 import { templateRegistry } from './templates/registry.js';
 import { declarationHead } from './calling-convention.js';
-import { fileStaticKey } from './file-static-functions.js';
+import { fileStaticKey, keepAliveSpellable } from './file-static-functions.js';
 import { emittedParameterName, getAggregateTypeNames } from './platform-types.js';
 import { derivedTemplateInstance, globalDefinition, emittedNamespaceOf, sanitizeSymbolName, setCentralInitializerScope, normalizeGlobalDeclType, generateStaticLocalsBlock, emitDataValue, setInitializerOwnerAddress, inferArrayDeclaration, isWideTextDatum, normalizeArrayDeclaration, braceArrayInitializer, isFuncDefTypedefName, getKnownFuncDefTypedefs, getKnownEnumConstants, setInitializerNamespace, renderGlobalScalarInitializer, recordDeclaredName } from './globals-header.js';
 
@@ -578,7 +580,7 @@ export interface ImplGenContext {
    * Functions defined `static` in their unit (file-static-functions.ts), by address
    * key, with the functions of that unit that reference them.
    */
-  fileStaticFunctions?: ReadonlyMap<string, { unit: string; referrers: ReadonlySet<string>; inline?: boolean }>;
+  fileStaticFunctions?: ReadonlyMap<string, { unit: string; referrers: ReadonlySet<string>; inline?: boolean; keepAlive?: boolean }>;
   /**
    * Functions hand-written source calls through an extern entry (`<name>_Extern`,
    * file-static-functions.ts), by address key: the unit defines the entry after the
@@ -639,6 +641,13 @@ export interface ImplGenContext {
   _enclosingResolvedNamespace?: ResolvedNamespace;
   /** Internal: accumulated preambles from injection-aware plugins */
   _preambles?: Set<string>;
+  /**
+   * The header inlines whose fields `acc` vc8form tags read through an inline twin
+   * (accessor-twins.ts), and, while one function is generated, the twin definitions its
+   * applied forms call: written once per file, ahead of the first function calling each.
+   */
+  accessorTwins?: Vc8Accessor[];
+  _fnPrefix?: string[];
   /**
    * Internal: the namespace block the current impl file's bodies are emitted
    * inside. C++ name lookup for a reference's leading qualifier starts here, so
@@ -727,6 +736,10 @@ export interface ImplGenContext {
    * from the funcdef the parameter is declared with. Built once per run.
    */
   funcPtrArgCasts?: FuncPtrArgCastTables;
+  /** The data the compiler made (compiler-data.ts): labels the bodies spell as literals. */
+  compilerLiterals?: import('./compiler-data.js').CompilerDataResult;
+  /** `compiler-literal`'s options, built once so its transformer cache hits. */
+  _compilerLiteralOptions?: Record<string, unknown>;
 }
 
 /**
@@ -816,6 +829,14 @@ export interface FuncPtrArgCastTables {
    * built rather than named. Same arity-0 gate.
    */
   zeroArityCallbackCasts?: Record<string, Record<number, {
+    returnType: string; paramTypes: string[]; convention?: string;
+  }>>;
+  /**
+   * Slots whose callee discards the callback's return value, in the same parts:
+   * cast into when the function's parameters match in number, convention and
+   * pointer-ness.
+   */
+  discardedReturnCallbackCasts?: Record<string, Record<number, {
     returnType: string; paramTypes: string[]; convention?: string;
   }>>;
   /** Funcdef typedef name → its normalized signature key */
@@ -922,6 +943,12 @@ export interface FuncPtrArgCastTables {
    * fact `func-ptr-literal` already carries for a function.
    */
   globalNamespaces?: Record<string, readonly string[]>;
+  /**
+   * The same, for the names a DATA INITIALIZER spells: every scope but a
+   * function's static local, since an initializer names a struct-colocated extern
+   * or a file-local static of its own unit as well as a `global`.
+   */
+  initializerDataNamespaces?: Record<string, readonly string[]>;
   /** Callables with a `...` tail — arguments past the declared ones have no type */
   varArgFunctions?: string[];
   /** Field name → declared type, where every aggregate declaring it agrees */
@@ -988,7 +1015,12 @@ export function generateImplementation(
   /** Set of data type names (struct/union/enum) that collide with namespace
    *  components. Kept in the signature for callers; the collision itself is now
    *  resolved on the AST by `qualified-name-cleanup`. */
-  dataTypeNames?: Set<string>
+  dataTypeNames?: Set<string>,
+  /**
+   * The unit's inline header instead of its .cpp (inline-hosts.ts): `functions` are
+   * its inline hosts, each defined with the COMDAT specifiers its declaration has.
+   */
+  asInlineHeader?: boolean,
 ): string {
   // Set source file name for quest union rewriting
   if (context) {
@@ -999,6 +1031,10 @@ export function generateImplementation(
   // Generated file banner
   lines.push('// Auto-generated by ghidra-mcp — DO NOT EDIT');
   lines.push('');
+  if (asInlineHeader) {
+    lines.push('#pragma once');
+    lines.push('');
+  }
 
   // Include header
   const headerInclude = headerPath.replace(/\\/g, '/');
@@ -1093,6 +1129,12 @@ export function generateImplementation(
     context._castTypedefs = undefined;
   }
 
+  // The keep-alive references of unreferenced statics (keepAliveDefinition), written
+  // after every definition: a symbol declared ahead of a function shifts the order VC8
+  // breaks its register ties in (SKILLDESC_CalcElemDamageRange 004e89a0).
+  const keepAlive: string[] = [];
+  const emittedTwins = new Set<string>();
+  if (context) context._fnPrefix = undefined;
   // Generate function implementations, grouping consecutive same-ifdef functions
   let currentIfdef: string | undefined;
   for (const func of functions) {
@@ -1158,7 +1200,7 @@ export function generateImplementation(
     }
     const definitionNamespace = useNamespace && !rootMember ? resolvedNamespace : undefined;
     try {
-      impl = generateFunctionImplementation(func, classInfo, options, context, isInternal, definitionNamespace, isInline);
+      impl = generateFunctionImplementation(func, classInfo, options, context, isInternal, definitionNamespace, isInline, asInlineHeader);
     } catch (err) {
       if (err instanceof RangeError && /call stack|stack size/i.test(String(err.message))) {
         parseErrorCount++;
@@ -1171,8 +1213,25 @@ export function generateImplementation(
         throw err;
       }
     }
+    // The inline twins this function's forms call, each once per scope of the file.
+    const twins = context?._fnPrefix;
+    if (context) context._fnPrefix = undefined;
+    for (const t of twins ?? []) {
+      const k = `${rootMember ? 'root' : 'unit'}\0${t}`;
+      if (emittedTwins.has(k)) continue;
+      emittedTwins.add(k);
+      lines.push(t, '');
+    }
+    // An inline header's body is marked for the module pass, which may publish it.
+    const markInline = asInlineHeader && declarationMarkersOn() && !!func.address;
+    if (markInline) lines.push(`${INLINE_MARKER}${func.address}`);
     lines.push(impl);
+    if (markInline) lines.push(INLINE_END_MARKER);
     lines.push('');
+    if (fileStatic(func)?.keepAlive) {
+      const keep = keepAliveDefinition(func);
+      if (keep) keepAlive.push(keep);
+    }
     if (context?.externEntries?.has(fileStaticKey(func.address))) {
       const entry = externEntryDefinition(func, definitionNamespace);
       if (entry) lines.push(entry, '');
@@ -1190,6 +1249,7 @@ export function generateImplementation(
     lines.push(`#endif // ${currentIfdef}`);
     lines.push('');
   }
+  if (keepAlive.length > 0) lines.push(...keepAlive, '');
 
   // Now that all function bodies have been generated and _fileIdentifiers accumulated,
   // emit file-local globals filtered by actual usage, spliced at the deferred position.
@@ -1583,6 +1643,8 @@ export function generateFunctionImplementation(
   enclosingNamespace?: ResolvedNamespace,
   /** Defined `inline`: the original inlined every call to it (inlined-calls.ts). */
   isInline?: boolean,
+  /** Defined in a header with the COMDAT specifiers: a header inline (inline-hosts.ts). */
+  isComdat?: boolean,
 ): string {
   const lines: string[] = [];
 
@@ -1772,6 +1834,8 @@ export function generateFunctionImplementation(
           storeBases: override?.action === 'patch' ? undefined : func.storeBases,
           // A text patch anchors on the divisions as Ghidra printed them.
           callDivides: override?.action === 'patch' ? undefined : func.callDivides,
+          // A text patch anchors on the names as Ghidra printed them.
+          shadowedGlobals: override?.action === 'patch' ? undefined : func.shadowedGlobals,
           // A text patch anchors on the comparisons as Ghidra printed them.
           compareSites: override?.action === 'patch' ? undefined : func.compareSites,
           sehLowering: sehLoweringDecision(func),
@@ -1813,6 +1877,7 @@ export function generateFunctionImplementation(
         if (!context._castTypedefs) context._castTypedefs = new Set();
         for (const name of castTypedefs) context._castTypedefs.add(name);
       }
+      if (context && transformed.prefix?.length) context._fnPrefix = transformed.prefix;
       if (transformed.preamble) {
         // Store preamble on the context for accumulation by generateImplementation
         if (context) {
@@ -1853,7 +1918,7 @@ export function generateFunctionImplementation(
     lines.push(signature + ' {');
   } else {
     // Standalone function — prefix with `static` if internal to this unit
-    const staticPrefix = isInternal ? (isInline ? 'static inline ' : 'static ') : '';
+    const staticPrefix = isInternal ? (isInline ? 'static inline ' : 'static ') : isComdat ? COMDAT_SPECIFIERS : '';
     const signature = generateFunctionSignature(func);
     lines.push(overrideAttributePrefix(override) + staticPrefix + signature + ' {');
   }
@@ -2153,6 +2218,22 @@ export function externEntryDefinition(
 }
 
 /**
+ * The reference that keeps a file-local function nothing calls (file-static-functions.ts,
+ * `keepAlive`): a call in the unevaluated arm of a constant conditional. It compiles to
+ * no code and no data, yet VC8 emits the static's body, in the register convention it
+ * picks for a function that is only called in its file - the original's copy of a
+ * function every caller inlined (TOKTBLS_GetTokenIndex 0065c300: EAX and `ret 4`). A
+ * function whose address is taken would get a stack convention instead, and an extern
+ * caller could inline the only call and drop the body.
+ */
+export function keepAliveDefinition(func: ExtractedFunction): string | undefined {
+  if (!keepAliveSpellable(func)) return undefined;
+  const args = declaredParameters(func).map(p => `*(${p.type} *)0`);
+  const hexAddr = func.address.includes(':') ? func.address.slice(func.address.lastIndexOf(':') + 1) : func.address;
+  return `static void * keep_${hexAddr} = (0 ? (${emittedFunctionName(func)}(${args.join(', ')}), (void *)0) : (void *)0);`;
+}
+
+/**
  * A compiler-generated C++ EH handler stub's definition: it returns
  * ExceptionContinueSearch, the answer of a frame that handles nothing.
  *
@@ -2214,6 +2295,8 @@ function generateMethodSignature(
 interface TransformDecompiledResult {
   code: string;
   preamble?: string;
+  /** Definitions the applied vc8 forms call, to precede the function (`acc` twins). */
+  prefix?: string[];
   identifiers?: Set<string>;
   /** Names the body used as TYPES (see TransformResult.typeNames). */
   typeNames?: Set<string>;
@@ -2857,6 +2940,8 @@ function transformDecompiledCode(
     storeBases?: import('../extract/store-bases.js').StoreBaseFacts;
     /** The calls the original divides right after they return, per line (extract/call-divides.ts). */
     callDivides?: import('../extract/call-divides.js').CallDivideFacts;
+    /** The global references a parameter or local's name shadows, per line (extract/shadowed-globals.ts). */
+    shadowedGlobals?: import('../extract/shadowed-globals.js').ShadowedGlobalFacts;
     /** The function's EH3 frame as `seh-lowering` needs it (codegen/seh-lowering-spec.ts). */
     sehLowering?: SehLoweringDecision;
     /** Addresses the instructions derive from a global's start (codegen/folded-address-spec.ts). */
@@ -2916,6 +3001,11 @@ function transformDecompiledCode(
     const divides = funcBodyMatch && funcBodyMatch.index !== undefined
       ? callDivideLines(enclosing?.callDivides, decompiled, funcBodyMatch.index + funcBodyMatch[0].indexOf('{'), body, preprocessedBody, wrapperPrefix)
       : undefined;
+    // The global references a same-named parameter or local hides, keyed by line of `wrapped`
+    // and spelled with the path they are emitted in (shadowed-globals-spec.ts).
+    const shadowedGlobals = funcBodyMatch && funcBodyMatch.index !== undefined
+      ? shadowedGlobalLines(enclosing?.shadowedGlobals, context?.analyzedGlobals, decompiled, funcBodyMatch.index + funcBodyMatch[0].indexOf('{'), body, preprocessedBody, wrapperPrefix)
+      : undefined;
 
     // Build plugin options for method-call-rewrite when mappings or current context exist
     let pluginOptions: Record<string, unknown> | undefined;
@@ -2971,6 +3061,13 @@ function transformDecompiledCode(
     }
     if (context?.funcPtrArgCasts?.pinnedFunctions) {
       perPluginOptions['overload-pin-cast'] = { pinnedFunctions: context.funcPtrArgCasts.pinnedFunctions };
+    }
+
+    const tebFields = getTebFields();
+    // Under every preset: a TEB label has no declaration left to fall back on.
+    if (Object.keys(tebFields).length > 0) {
+      enablePlugins.push('teb-field-access');
+      perPluginOptions['teb-field-access'] = { tebFields };
     }
 
     const globalAliases = getGlobalReferenceAliases();
@@ -3119,6 +3216,35 @@ function transformDecompiledCode(
         enumConstants: context.funcPtrArgCasts.enumConstantNames,
         enumValues: context.funcPtrArgCasts.enumValues,
       };
+      perPluginOptions['split-lives'] = {
+        functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        structFields: context.funcPtrArgCasts.structFields,
+        // Where a member address through a moved value lands: its integer is the value's plus this.
+        structLayouts: context.funcPtrArgCasts.structLayouts,
+        aggregateSizes: context.funcPtrArgCasts.aggregateSizes,
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        enumConstants: context.funcPtrArgCasts.enumConstantNames,
+        // The frame and the callee reach frame-group-locals is given: a local it may
+        // make a member of a frame object is not split.
+        slots: enclosing?.stackSlots,
+        // ...and one it may: its lives become members of a union in its slot.
+        slotUnions: true,
+        reportName: `${funcAddress ?? '???'}\t${funcName ?? '<unknown>'}`,
+        // A call storing through `&v` before it reads (from the callee's body) starts a new value.
+        ...(context.funcPtrArgCasts.outParams ? {
+          outParamWidth: (callee: string, index: number) => context.funcPtrArgCasts!.outParams!.outParamWidth(callee, index),
+          outParamWidthNonNull: (callee: string, index: number) => context.funcPtrArgCasts!.outParams!.outParamWidthNonNull(callee, index),
+        } : {}),
+        // Where an argument's value goes: an uncast read's type.
+        functionParamTypes: context.funcPtrArgCasts.functionParamTypes,
+        ...(context?.funcPtrArgCasts?.paramReach ? {
+          argReach: (callee: string, index: number, argCount: number) => context.funcPtrArgCasts!.paramReach!.argReach(callee, index, argCount),
+          computedArgReach: (callee: Expression, index: number, argCount: number) => context.funcPtrArgCasts!.paramReach!.argReachThrough(callee, index, argCount),
+          bodyReach: (body: ASTNode, name: string, type: string, opts: { include: (use: ASTNode) => boolean }) =>
+            context.funcPtrArgCasts!.paramReach!.bodyReach(body, name, type, opts),
+        } : {}),
+      };
       perPluginOptions['aggregate-zero-init'] = {
         structLayouts: context.funcPtrArgCasts.structLayouts,
         aggregateSizes: context.funcPtrArgCasts.aggregateSizes,
@@ -3256,6 +3382,9 @@ function transformDecompiledCode(
         enclosingVarTypes,
       };
       perPluginOptions['zero-extend-cast'] = {
+        onSite: (e: { line: number; rewritten: boolean; reason: string }) => {
+          if (!e.rewritten) console.warn(`[zero-extend] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: line ${e.line} kept (${e.reason})`);
+        },
         enumTypes: context.funcPtrArgCasts.enumTypes,
         enumValues: context.funcPtrArgCasts.enumValues,
         globalTypes: context.funcPtrArgCasts.globalTypes,
@@ -3266,6 +3395,8 @@ function transformDecompiledCode(
         enclosingVarTypes,
       };
       perPluginOptions['narrow-local-widen'] = {
+        functionParamTypes: context.funcPtrArgCasts.functionParamTypes,
+        varArgFunctions: context.funcPtrArgCasts.varArgFunctions,
         enumTypes: context.funcPtrArgCasts.enumTypes,
         enumConstantNames: context.funcPtrArgCasts.enumConstantNames,
         globalTypes: context.funcPtrArgCasts.globalTypes,
@@ -3278,6 +3409,29 @@ function transformDecompiledCode(
       perPluginOptions['compare-signedness'] = {
         enumTypes: context.funcPtrArgCasts.enumTypes,
         enumConstantTypes: context.funcPtrArgCasts.enumConstantTypes,
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        structFields: context.funcPtrArgCasts.structFields,
+        typedefTargets: context.funcPtrArgCasts.typedefTargets,
+        functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        enclosingVarTypes,
+      };
+      // A local set to one of two constants and read once by a call (select-argument.ts).
+      perPluginOptions['select-argument'] = {
+        typedefTargets: context?.funcPtrArgCasts?.typedefTargets,
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        structFields: context.funcPtrArgCasts.structFields,
+        functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        enclosingVarTypes,
+        enumValues: context.funcPtrArgCasts.enumValues,
+        functionParamTypes: context.funcPtrArgCasts.functionParamTypes,
+        enclosingSegments: enclosing?.ghidraNamespaceSegments ?? enclosing?.namespaceSegments,
+        onSite: (e: { variable: string; line: number }) =>
+          console.warn(`[select-arg] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.variable} at line ${e.line}`),
+      };
+      perPluginOptions['sign-bit-test'] = {
+        enumTypes: context.funcPtrArgCasts.enumTypes,
         globalTypes: context.funcPtrArgCasts.globalTypes,
         fieldTypes: context.funcPtrArgCasts.fieldTypes,
         structFields: context.funcPtrArgCasts.structFields,
@@ -3303,6 +3457,14 @@ function transformDecompiledCode(
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         enclosingVarTypes,
       };
+      perPluginOptions['storm-tag-word'] = {
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        structFields: context.funcPtrArgCasts.structFields,
+        functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        enclosingVarTypes,
+        reportName: `${funcAddress ?? '???'}\t${funcName ?? '<unknown>'}`,
+      };
       perPluginOptions['storm-next-link'] = {
         globalTypes: context.funcPtrArgCasts.globalTypes,
         fieldTypes: context.funcPtrArgCasts.fieldTypes,
@@ -3322,6 +3484,14 @@ function transformDecompiledCode(
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         enclosingVarTypes,
       };
+      if (context.compilerLiterals && (context.compilerLiterals.literalTextByName.size > 0 || context.compilerLiterals.renames.size > 0)) {
+        context._compilerLiteralOptions ??= {
+          literals: Object.fromEntries(context.compilerLiterals.literalTextByName),
+          renames: Object.fromEntries(context.compilerLiterals.renames),
+          onRefusal: (reason: string) => console.warn(`[literal] left as a label: ${reason}`),
+        };
+        perPluginOptions['compiler-literal'] = context._compilerLiteralOptions;
+      }
       const floatValues = context.funcPtrArgCasts.floatConstantValues;
       const floatConstants = floatValues
         ? [...new Set(enclosing?.referencedDataAddresses ?? [])].flatMap(a => floatValues[a] ? [floatValues[a]] : [])
@@ -3473,6 +3643,33 @@ function transformDecompiledCode(
         typedefTargets: context.funcPtrArgCasts.typedefTargets,
         enclosingVarTypes,
       };
+      perPluginOptions['union-value-member'] = {
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        structFields: context.funcPtrArgCasts.structFields,
+        typedefTargets: context.funcPtrArgCasts.typedefTargets,
+        functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        enclosingVarTypes,
+      };
+      perPluginOptions['context-register-field'] = {
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        structFields: context.funcPtrArgCasts.structFields,
+        typedefTargets: context.funcPtrArgCasts.typedefTargets,
+        functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        enclosingVarTypes,
+      };
+      perPluginOptions['pointer-word-cast'] = {
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        structFields: context.funcPtrArgCasts.structFields,
+        typedefTargets: context.funcPtrArgCasts.typedefTargets,
+        functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        funcdefNames: Object.keys(context.funcPtrArgCasts.funcdefSignatures ?? {}),
+        enclosingVarTypes,
+        // A size argument (`memset(p, 0, <words>)`) is a pointer-sized slot.
+        functionParamTypes: context.funcPtrArgCasts.functionParamTypes,
+      };
       perPluginOptions['narrow-cast-through-uintptr'] = {
         globalTypes: context.funcPtrArgCasts.globalTypes,
         fieldTypes: context.funcPtrArgCasts.fieldTypes,
@@ -3548,11 +3745,19 @@ function transformDecompiledCode(
         ops: enclosing.repStringOps,
         globalSizes: context?.funcPtrArgCasts?.globalSizes,
         globalElementSizes: context?.funcPtrArgCasts?.globalElementSizes,
+        structLayouts: context?.funcPtrArgCasts?.structLayouts,
+        aggregateSizes: context?.funcPtrArgCasts?.aggregateSizes,
+        typedefTargets: context?.funcPtrArgCasts?.typedefTargets,
       };
     }
     // Masks a MOVZX computed, tagged before any pass reshapes the printed `&`.
     if (enclosing?.maskSites) {
-      perPluginOptions['zero-extend-site'] = { count: enclosing.maskSites.count, sites: enclosing.maskSites.sites };
+      perPluginOptions['zero-extend-site'] = {
+        count: enclosing.maskSites.count, sites: enclosing.maskSites.sites,
+        onCensus: (c: { tagged: number; zipped: boolean; untied: number }) => {
+          if (c.untied) console.warn(`[zero-extend] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${c.untied} mask fact(s) untied${c.zipped ? '' : ' (positions do not zip)'}`);
+        },
+      };
     }
     // Operators whose result the decompiler zero-extends, tagged before any pass reshapes them.
     if (enclosing?.zextSites) {
@@ -3709,6 +3914,8 @@ function transformDecompiledCode(
       };
       perPluginOptions['case-layout'] = {
         branchLayout: layout,
+        jumpTables: enclosing?.jumpTables,
+        enumValues: context?.funcPtrArgCasts?.enumValues,
         ...(process.env.GHIDRA_BRANCH_LAYOUT_REPORT ? {
           onSite: (e: { rule: string; line: number; groups?: number; why?: string }) =>
             console.warn(`[case-layout] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.rule === 'order' ? `${e.groups ?? '?'} groups ordered` : `left: ${e.why}`} at line ${e.line}`),
@@ -3806,12 +4013,30 @@ function transformDecompiledCode(
       };
     }
 
-    // A shift pair the original performs as a rotate by more than 16 (rotate-intrinsic.ts).
+    // A shift pair, multiply pair or byte swap the original performs with rotates (rotate-intrinsic.ts).
     if (rotates) {
+      const t = context?.funcPtrArgCasts;
       perPluginOptions['rotate-intrinsic'] = {
         rotates,
+        ...(t ? {
+          globalTypes: t.globalTypes,
+          fieldTypes: t.fieldTypes,
+          structFields: t.structFields,
+          typedefTargets: t.typedefTargets,
+          functionReturnTypes: t.functionReturnTypes,
+          enclosingVarTypes,
+        } : {}),
         onSite: (e: { line: number; spelling: string }) =>
           console.warn(`[rotate] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.spelling} on line ${e.line}`),
+      };
+    }
+
+    // A global a same-named parameter or local hides is spelled `::name` (local-shadowed-global.ts).
+    if (shadowedGlobals) {
+      perPluginOptions['local-shadowed-global'] = {
+        shadowedGlobals,
+        onSite: (e: { line: number; name: string; ord: number }) =>
+          console.warn(`[shadowed-global] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.name} #${e.ord} on line ${e.line} is the global`),
       };
     }
 
@@ -4122,6 +4347,7 @@ function transformDecompiledCode(
             console.warn(`[switch-chain] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.rule} ${e.cases} case(s) at line ${e.line}${e.why ? ` (${e.why})` : ''}`),
         } : {}),
       };
+      perPluginOptions['switch-chain-late'] = perPluginOptions['switch-chain'];
     }
 
     // A constant name several enums number differently is exported by none of
@@ -4152,10 +4378,16 @@ function transformDecompiledCode(
 
     const vc8 = enclosing?.vc8Forms;
     for (const t of vc8?.stale ?? []) console.warn(`[vc8form] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: stale ${t.tag} (${t.why})`);
+    const vc8Prefix: string[] = [];
     const result = transformGhidraCode(wrapped, {
       vc8Forms: vc8 && vc8.forms.length > 0 ? {
         forms: vc8.forms,
+        selectTables: {
+          ...(perPluginOptions['select-argument'] as SelectArgumentOptions | undefined),
+          accessors: context?.accessorTwins,
+        },
         onSite: s => {
+          if (s.applied) for (const d of s.prefix ?? []) if (!vc8Prefix.includes(d)) vc8Prefix.push(d);
           if (!s.applied) console.warn(`[vc8form] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: refused ${s.tag} (${s.why})`);
           else if (process.env.GHIDRA_VC8FORM_REPORT) console.warn(`[vc8form] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: applied ${s.tag}`);
         },
@@ -4187,6 +4419,7 @@ function transformDecompiledCode(
           // of them into silent reads of the wrong address.
           code: indentCode(transformedMatch[1], 4),
           preamble: result.preamble,
+          ...(vc8Prefix.length ? { prefix: vc8Prefix } : {}),
           identifiers: result.identifiers,
           typeNames: result.typeNames,
         };

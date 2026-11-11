@@ -8,7 +8,7 @@
 import { globalAliasComment } from './global-aliases.js';
 import type { AnalyzedDataSymbol, ReconstructOptions, DataValue, ExtractedDataType, ExtractedStruct, ExtractedUnion, ExtractedFunctionDefinition, ExtractedFunction } from '../types.js';
 import { GLIDE_UNSIGNED_ENUM_TYPEDEFS, PLATFORM_STRUCT_FIELD_TYPES, isAggregateObjectType, getAggregateTypeNames, isPlatformOrBuiltinType, isLibraryType, isStructType, castPointerInitializer, normalizeDataValue, isCharacterValueType, isMsvcEhInternal, normalizeWideCharType, normalizeListingBuiltinType, listingBuiltinElementType, imageArtifactElementType, isVoidPointerSpelling, resolveTypedefSpelling, rootQualifyShadowedType, platformDeclaredFunctionNames } from './platform-types.js';
-import { generateStructDeclaration, generateUnionDeclaration, generateFunctionDefinitionDeclaration, ghidraDefaultFieldName, constructorFields } from './header.js';
+import { generateStructDeclaration, generateUnionDeclaration, generateFunctionDefinitionDeclaration, ghidraDefaultFieldName, constructorFields, declarationMarkersOn, GLOBAL_MARKER, GLOBAL_END_MARKER } from './header.js';
 import { normalizeQualifiedReference } from './namespace.js';
 import { namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 import { computeDeclarationClosure, renderClosureBlock, renderClosureDefinitionBlock, normalizeDataAddress, type ClosureResult, type ClosureStringContent } from './declaration-closure.js';
@@ -103,6 +103,8 @@ export function isEmittableGlobal(g: AnalyzedDataSymbol): boolean {
   // neither is a placeholder at an unmapped address: bodies lower those to volatile
   // accesses at the address, and the definitions already drop them.
   if (g.importSlotUnnamed === true) return false;
+  // Made by the compiler or the linker, never declared by the source (compiler-data.ts).
+  if (g.compilerOutput !== undefined) return false;
   if (isUnmappedAddressPlaceholder(g.suggestedName || g.name)) return false;
   const base = (g.suggestedType || g.dataType || '')
     .replace(/[*&]/g, '').replace(/\bconst\b/g, '').replace(/\[[^\]]*\]/g, '').trim();
@@ -479,6 +481,67 @@ export function recordCentralInitializerAddressReferences(
 }
 
 /**
+ * The identifiers a global's definition names, rendered as the globals unit will
+ * render it (pointer targets by name, raw addresses through the initializer
+ * address table). A dry run: what the render records is put back.
+ */
+export function initializerReferenceNames(global: AnalyzedDataSymbol): Set<string> {
+  const recorded = initializerAddressNamesUsed;
+  const mismatches = initializerFuncPtrArityMismatches;
+  initializerAddressNamesUsed = new Set(recorded);
+  let text = '';
+  try {
+    text = globalDefinition(global, '__d2_self');
+  } finally {
+    initializerAddressNamesUsed = recorded;
+    initializerFuncPtrArityMismatches = mismatches;
+  }
+  const names = new Set(scanReferences(text).identifiers);
+  names.delete('__d2_self');
+  return names;
+}
+
+/**
+ * Globals only another global's initializer names, all of whose referrers one
+ * globals unit defines: that unit defines them `static`, ahead of its other
+ * definitions, in this order (a referenced one before its referrer), and no
+ * header declares them.
+ */
+let internalGlobalOrder: AnalyzedDataSymbol[] = [];
+let internalGlobalSet = new Set<AnalyzedDataSymbol>();
+export function setInternalGlobals(ordered: readonly AnalyzedDataSymbol[]): void {
+  internalGlobalOrder = [...ordered];
+  internalGlobalSet = new Set(ordered);
+}
+
+/**
+ * Globals no file but a globals unit names (their referrers' initializers), or
+ * nothing names at all (read by address, a live label's storage, unnamed bytes):
+ * globals.h declares none of them, nor does its closure. A globals unit declares
+ * one up front only where a global it defines names it in an initializer and it
+ * is not internal there; with no referrer, no unit declares it.
+ */
+let headerOmittedSet = new Set<AnalyzedDataSymbol>();
+let headerOmittedReferrers: ReadonlyMap<AnalyzedDataSymbol, ReadonlySet<AnalyzedDataSymbol>> = new Map();
+export function setHeaderOmittedGlobals(
+  globals: Iterable<AnalyzedDataSymbol>,
+  /** The globals whose initializers name each of them. */
+  referrers: ReadonlyMap<AnalyzedDataSymbol, ReadonlySet<AnalyzedDataSymbol>> = new Map(),
+): void {
+  headerOmittedSet = new Set(globals);
+  headerOmittedReferrers = referrers;
+  for (const g of headerOmittedSet) recordDeclaredName(sanitizeSymbolName(g.suggestedName || g.name));
+}
+
+/** Whether a global globals.h left out is named by an initializer of one `partition` defines. */
+function headerOmittedNamedIn(g: AnalyzedDataSymbol, partition: ReadonlySet<AnalyzedDataSymbol> | undefined): boolean {
+  const referrers = headerOmittedReferrers.get(g);
+  if (!referrers) return false;
+  for (const r of referrers) if (!partition || partition.has(r)) return true;
+  return false;
+}
+
+/**
  * The type prelude of a declarations header: the owner header of every type a
  * declaration uses by value, the template header where one is named, forward
  * declarations for the rest, and - for a type no header owns - its definition
@@ -491,6 +554,12 @@ export function globalsTypePrelude(
   typeOwnerMap: Map<string, string> | undefined,
   isSkippableLibraryType: (name: string) => boolean,
   withDefinitions = true,
+  /**
+   * Wrap each definition in a per-type guard. The module-library build defines a
+   * type no header owns in every module data header whose globals hold it by value,
+   * so two of them can meet in one translation unit.
+   */
+  guardDefinitions = false,
 ): { lines: string[]; forwardDecls: ForwardDeclaration[]; fullDefs: string[]; fullDefNames: string[] } {
   const lines: string[] = [];
   // Classify types: by-value types get full definitions, pointer-only types get forward declarations
@@ -552,7 +621,10 @@ export function globalsTypePrelude(
   if (withDefinitions && fullDefs.length > 0) {
     lines.push('// Full type definitions (used by value in globals)');
     for (const def of fullDefs) {
+      const guard = guardDefinitions ? definedTypeName(def) : undefined;
+      if (guard) lines.push(`#ifndef D2_DEFINED_${guard}`, `#define D2_DEFINED_${guard}`);
       lines.push(def);
+      if (guard) lines.push(`#endif // D2_DEFINED_${guard}`);
       lines.push('');
     }
   }
@@ -560,9 +632,51 @@ export function globalsTypePrelude(
   return { lines, forwardDecls, fullDefs, fullDefNames };
 }
 
+/** The name a definition this file rendered introduces, read the way the prelude reads it. */
+export function definedTypeName(def: string): string | undefined {
+  return def.match(/^(?:struct|union|enum)\s+(?:__attribute__\(\([^)]*\)\)\s+)?(\w+)/)?.[1] ?? def.match(/typedef\s+.*?\(\s*(?:__\w+\s+)?\*\s*(\w+)\)/)?.[1];
+}
+
+/** One extern the module-library build moves out of globals.h into its owner's data header. */
+export interface ModuleExternDecl {
+  namespace: string | undefined;
+  decl: string;
+  name: string;
+  global: AnalyzedDataSymbol;
+}
+const moduleExternDecls = new Map<string, ModuleExternDecl[]>();
+/** The externs the last `generateGlobalsHeader` left to each owning module. */
+export function takeModuleExternDecls(): Map<string, ModuleExternDecl[]> {
+  const out = new Map(moduleExternDecls);
+  moduleExternDecls.clear();
+  return out;
+}
+const rootProvidedNames = new Set<string>();
+/** Every name the last `generateGlobalsHeader` declared itself: its externs, closure and type definitions. */
+export function globalsHeaderProvides(): ReadonlySet<string> {
+  return rootProvidedNames;
+}
+
+/** The type lines a module data header needs for `globals`, each definition guarded. */
+export function moduleGlobalsTypePrelude(
+  globals: AnalyzedDataSymbol[],
+  dataTypes: ExtractedDataType[] | undefined,
+  typeOwnerMap: Map<string, string> | undefined,
+): string[] {
+  return globalsTypePrelude(globals, dataTypes, typeOwnerMap, makeLibraryTypeSkipPredicate(dataTypes), true, true).lines;
+}
+
 export function generateGlobalsHeader(
   globals: AnalyzedDataSymbol[],
-  options: ReconstructOptions & { projectName?: string; binaryName?: string; centralTypeUsers?: AnalyzedDataSymbol[] },
+  options: ReconstructOptions & {
+    projectName?: string; binaryName?: string; centralTypeUsers?: AnalyzedDataSymbol[];
+    /**
+     * The module-library build: the module whose data header declares a global
+     * instead of this one. A global it answers for is left out here and handed to
+     * `takeModuleExternDecls`; an unowned one stays.
+     */
+    externOwner?: (g: AnalyzedDataSymbol) => string | undefined;
+  },
   dataTypes?: ExtractedDataType[],
   typeOwnerMap?: Map<string, string>,
   functionQualifiedNames?: Set<string>,
@@ -601,6 +715,17 @@ export function generateGlobalsHeader(
   globals = globals.filter(isEmittableGlobal);
   functionCollidingGlobals.clear();
   headerDeclaredGlobals.clear();
+  moduleExternDecls.clear();
+  rootProvidedNames.clear();
+  const externOwner = options.externOwner;
+  const handOff = (global: AnalyzedDataSymbol, namespace: string | undefined, decl: string): boolean => {
+    const owner = externOwner?.(global);
+    if (owner === undefined) return false;
+    const list = moduleExternDecls.get(owner) ?? [];
+    list.push({ namespace, decl, name: sanitizeSymbolName(global.suggestedName || global.name), global });
+    moduleExternDecls.set(owner, list);
+    return true;
+  };
 
   // Header comment
   lines.push('/**');
@@ -628,9 +753,21 @@ export function generateGlobalsHeader(
   // Types only a data header needs and no header owns are still DEFINED here, the
   // one place that can (centralTypeUsers), and that data header includes this one.
   const declaredHere = (g: AnalyzedDataSymbol): boolean => g.homeFile === undefined || g.homeDeclaredCentrally === true;
-  const typeUsers = [...globals.filter(declaredHere), ...(options.centralTypeUsers ?? [])];
-  const { lines: preludeLines, forwardDecls, fullDefs } = globalsTypePrelude(typeUsers, dataTypes, typeOwnerMap, isSkippableLibraryType);
+  // With module data headers, each defines what its own globals need; this one keeps
+  // the types of what it still declares.
+  // Only an extern that leaves takes its types along: a static-local whose type
+  // this header defines keeps it here.
+  const leaves = (g: AnalyzedDataSymbol): boolean => g.scope === 'global' && g.ifdef === undefined && externOwner?.(g) !== undefined;
+  const typeUsers = [...globals.filter(g => declaredHere(g) && !leaves(g)), ...(options.centralTypeUsers ?? [])];
+  const { lines: preludeLines, forwardDecls, fullDefs, fullDefNames: preludeDefNames } =
+    globalsTypePrelude(typeUsers, dataTypes, typeOwnerMap, isSkippableLibraryType, true, externOwner !== undefined);
   lines.push(...preludeLines);
+  for (const n of preludeDefNames) rootProvidedNames.add(n);
+  for (const def of fullDefs) { const n = definedTypeName(def); if (n) rootProvidedNames.add(n); }
+  // A "forward declaration" that is a typedef or an enum defines its name here.
+  for (const decl of forwardDecls) {
+    if (!/^(?:struct|class|union)\s+\w+;$/.test(decl.text.trim())) rootProvidedNames.add(decl.name);
+  }
 
   // Collect names that must NOT appear as a namespace component, because they
   // are already emitted at an outer scope as a different kind of entity:
@@ -726,7 +863,7 @@ export function generateGlobalsHeader(
 
   // Global extern declarations by namespace
   const globalSymbols = globals.filter(g =>
-    g.scope === 'global' && declaredHere(g)
+    g.scope === 'global' && declaredHere(g) && !headerOmittedSet.has(g)
     && !isSwitchTableSymbol(g.suggestedName || g.name)
     && !isJumpTableArtifact(g)
     && !isArrayElementSymbol(g.suggestedName || g.name, allGlobalNames)
@@ -742,7 +879,7 @@ export function generateGlobalsHeader(
 
     for (const { rendered: namespace, symbols: nsGlobals } of byNamespace) {
       const nsGlobalSymbols = nsGlobals.filter(g =>
-        g.scope === 'global' && declaredHere(g)
+        g.scope === 'global' && declaredHere(g) && !headerOmittedSet.has(g)
         && !isSwitchTableSymbol(g.suggestedName || g.name)
         && !isJumpTableArtifact(g)
         && !isArrayElementSymbol(g.suggestedName || g.name, allGlobalNames)
@@ -784,7 +921,10 @@ export function generateGlobalsHeader(
         }
         {
           const decl = generateExternDeclaration(global, options.includeAddressComments);
-          if (decl) lines.push(decl);
+          if (decl && !(global.ifdef === undefined && handOff(global, namespace || undefined, decl))) {
+            lines.push(decl);
+            rootProvidedNames.add(emitted);
+          }
         }
       }
       // Close any open ifdef
@@ -870,7 +1010,10 @@ export function generateGlobalsHeader(
         for (const global of nsGlobals) {
           {
             const decl = generateExternDeclaration(global, options.includeAddressComments);
-            if (decl) lines.push(decl);
+            if (decl && !(global.ifdef === undefined && handOff(global, namespace || undefined, decl))) {
+              lines.push(decl);
+              rootProvidedNames.add(sanitizeSymbolName(global.suggestedName || global.name));
+            }
           }
         }
         if (namespace) {
@@ -940,7 +1083,7 @@ export function generateGlobalsHeader(
       stringContentByAddress: closureStringContent,
     });
     for (const line of renderClosureBlock(closure.declarations)) lines.push(line);
-    for (const d of closure.declarations) recordDeclaredName(d.name);
+    for (const d of closure.declarations) { recordDeclaredName(d.name); rootProvidedNames.add(d.name); }
     lastClosureResult = closure;
   }
 
@@ -1628,6 +1771,40 @@ function shadowQualifyReference(expr: string): string {
 }
 
 /**
+ * Global name (as emitted) -> the namespace its declaration is emitted in, for the
+ * names an initializer reaches WITHOUT a qualifier: an address resolved through the
+ * address table (`psDataTableSeed = 0x0096c8c8` -> gsAutoMapSeed) and an interior path
+ * Ghidra spells from the bare label (`gaGlidePerspectiveVertices[1].fX`). Ghidra
+ * qualifies only a pointer to a symbol's own start; once a global lives in a module
+ * namespace the bare spelling names nothing from root scope or from another block.
+ * The table is `initializerDataNamespaces`: `globalNamespaces`' rule (emitted
+ * namespace; ambiguous names and blockable leading segments left out) over every
+ * scope but a function's static local.
+ */
+let initializerGlobalNamespaces = new Map<string, string>();
+
+export function setInitializerGlobalNamespaces(namespaces?: Record<string, readonly string[]>): void {
+  initializerGlobalNamespaces = new Map();
+  if (!namespaces) return;
+  for (const [name, segments] of Object.entries(namespaces)) {
+    if (segments.length > 0) initializerGlobalNamespaces.set(name, segments.join('::'));
+  }
+}
+
+/**
+ * Qualify the leading identifier of an unqualified reference with its global's
+ * namespace (`gsAutoMapSeed` -> `D2Common::DATATBLS::LvlTbls::gsAutoMapSeed`,
+ * `Tbl[3].f` -> `NS::Tbl[3].f`). A reference that already carries a qualifier, or
+ * names no namespaced global, is returned unchanged.
+ */
+function namespaceQualifyReference(expr: string): string {
+  const m = expr.match(/^([A-Za-z_]\w*)(?!\w|::)/);
+  if (!m) return expr;
+  const ns = initializerGlobalNamespaces.get(m[1]);
+  return ns ? `${ns}::${expr}` : expr;
+}
+
+/**
  * Spell a pointer-valued initializer so that its STATIC TYPE matches the slot it
  * fills, without changing the ADDRESS it denotes.
  *
@@ -1716,8 +1893,16 @@ function emitPointerToSymbol(rawValue: string, expectedType?: string): string {
   const value = classMember ?? normalizeQualifiedReference(legalized);
   // The name the lookups below use is the unqualified one; the SPELLING may need
   // a root qualifier to survive the namespace block it lands in.
-  const spelled = classMember ?? shadowQualifyReference(value);
+  const spelled = classMember ?? shadowQualifyReference(namespaceQualifyReference(value));
   const bare = classMember ?? (value.match(/^[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*$/) ? value : undefined);
+  // A qualified name Ghidra gave a second label at the address (`Ns::s_set_006d5bcc`,
+  // emitted as `Ns::gpCubeRecipeItemTypeFlags_7`) is undeclared exactly as its bare
+  // form was before the move: asked by its leaf, it resolves through the address
+  // table to the name the definition carries. Only the data placeholder forms;
+  // a qualified function or declared global keeps its spelling.
+  const qualifiedLeaf = !classMember && bare?.includes('::') ? bare.slice(bare.lastIndexOf('::') + 2) : undefined;
+  const addressQuery = qualifiedLeaf && /^(?:s_\w*_|(?:DAT|PTR|UNK)_)[0-9a-fA-F]{6,8}$/.test(qualifiedLeaf)
+    ? qualifiedLeaf : bare;
   const slotType = expectedType ? stripFuncDefIndirection(expectedType.trim()) : undefined;
   // Asked of what the slot STANDS FOR: `typedef void* pointer` has no star to
   // find, and without this a `pointer` slot got no pointee and fell back to a
@@ -1741,6 +1926,17 @@ function emitPointerToSymbol(rawValue: string, expectedType?: string): string {
     : /\*\s*$/.test(slotType!.trim()) ? `${pointee}*`
     : rootQualifyShadowedType(slotType!.trim());
 
+  // Data the compiler made is spelled as what made it: a string label as its literal.
+  const compilerLiteral = compilerLiteralFor(addressQuery ?? bare);
+  if (compilerLiteral) {
+    if (!slotType || pointerDepthAwareName(slotType.trim().replace(/\*\s*$/, '')) === 'char') return compilerLiteral;
+    if (pointerCast) return `(${pointerCast})${compilerLiteral}`;
+    const base = baseTypeName(slotType).toLowerCase();
+    return INTEGER_SLOT_TYPES.has(base)
+      ? `(${rootQualifyShadowedType(slotType.trim())})(uintptr_t)${compilerLiteral}`
+      : `(${rootQualifyShadowedType(slotType.trim())})${compilerLiteral}`;
+  }
+
   // The same, one level out: `s_umod_006e6f60+3` / `LAB_00646c24+1` is an
   // INTERIOR pointer whose root is one of those invented names. The root carries
   // its address and the suffix is a byte offset, so the pair is a literal.
@@ -1757,8 +1953,8 @@ function emitPointerToSymbol(rawValue: string, expectedType?: string): string {
 
   // A name Ghidra invented for a bare address is not a declaration anywhere —
   // emit the address it stood for instead of a reference to nothing.
-  if (bare) {
-    const address = unresolvedSymbolAddress(bare);
+  if (bare && addressQuery) {
+    const address = unresolvedSymbolAddress(addressQuery);
     if (address !== undefined) {
       const literal = `0x${address.toLowerCase()}`;
       // Unless the tree CAN name it after all. That rule predates the
@@ -1802,7 +1998,7 @@ function emitPointerToSymbol(rawValue: string, expectedType?: string): string {
     if (elem) {
       // 1-D array: decay. Cast only when Ghidra's element type is not the slot's.
       if (pointerCast && pointerDepthAwareName(elem) !== pointeeBare) return `(${pointerCast})${spelled}`;
-      return value;
+      return spelled;
     }
     const declared = globalDeclaredTypes.get(bare);
     // `&sym` has type `<declared> *`. Compare at FULL pointer depth, not just the
@@ -2097,6 +2293,30 @@ function initializerFunctionAt(word: number): string | null {
   return initializerFunctionBases.get(word) ?? null;
 }
 
+/** Label -> literal, and address -> literal, for the data the compiler made (compiler-data.ts). */
+let compilerLiteralsByName: ReadonlyMap<string, string> = new Map();
+let compilerLiteralsByAddress: ReadonlyMap<number, string> = new Map();
+
+/**
+ * The string literals an initializer spells in place of a label. A pointer table holding
+ * a pooled string's address is `{ "English", ... }` in the source; VC8 pools the literal
+ * again, so no declaration and no definition of the label is owed.
+ */
+export function setInitializerCompilerLiterals(
+  byName: ReadonlyMap<string, string> = new Map(),
+  byAddress: ReadonlyMap<number, string> = new Map(),
+): void {
+  compilerLiteralsByName = byName;
+  compilerLiteralsByAddress = byAddress;
+}
+
+/** The literal a (possibly qualified) reference to compiler-made data is spelled as, or undefined. */
+function compilerLiteralFor(reference: string | undefined): string | undefined {
+  if (!reference) return undefined;
+  const leaf = reference.slice(reference.lastIndexOf('::') + 2 > 1 ? reference.lastIndexOf('::') + 2 : 0);
+  return compilerLiteralsByName.get(leaf);
+}
+
 export function setInitializerAddressTable(input?: {
   globalAddresses: Record<string, number>;
   stringConstantNames: readonly string[];
@@ -2215,8 +2435,7 @@ function initializerAddressSpelling(
 ): string | null {
   const slot = slotType?.trim();
   if (!slot) return null;
-  const reference = shadowQualifyReference(
-    entry.stringConstant ? entry.name : `&${entry.name}`);
+  const reference = initializerEntryReference(entry);
   // The cast carries the DECLARED spelling either way: it is the type the
   // reader declared, and it converts exactly as the resolved one would.
   if (isPointerSlotSpelling(slot)) return `(${rootQualifyShadowedType(slot)})${reference}`;
@@ -2249,6 +2468,11 @@ function pointerSlotAddressReference(
   const word = scalarWordValue(rawValue);
   // Zero is a null slot, not an address; the table's floor excludes it anyway.
   if (word === null || word === 0) return null;
+  const literalAt = compilerLiteralsByAddress.get(word);
+  if (literalAt) {
+    return pointerDepthAwareName(slot.replace(/\*\s*$/, '')) === 'char' ? literalAt
+      : `(${rootQualifyShadowedType(slot.replace(/\s+/g, ' '))})${literalAt}`;
+  }
   const entry = initializerAddressBases.get(word);
   if (!entry) {
     // Not data — a third kind the extent table never held. A function needs no
@@ -2259,8 +2483,12 @@ function pointerSlotAddressReference(
     const spelled = shadowQualifyReference(func);
     return functionAddressSpelling(func, spelled, slot, word) ?? `&${spelled}`;
   }
-  const reference = shadowQualifyReference(
-    entry.stringConstant ? entry.name : `&${entry.name}`);
+  const reference = initializerEntryReference(entry);
+  if (compilerLiteralFor(entry.name)) {
+    // `(char*)"..."` already has the type a char-shaped slot wants.
+    return pointerDepthAwareName(slot.replace(/\*\s*$/, '')) === 'char' ? reference
+      : `(${rootQualifyShadowedType(slot.replace(/\s+/g, ' '))})${reference}`;
+  }
   initializerAddressNamesUsed.add(entry.name);
   // A string constant is `char N[]`, which decays to exactly `char*` and to
   // nothing else: in a char-shaped slot the bare name IS the initializer.
@@ -2272,6 +2500,18 @@ function pointerSlotAddressReference(
     return reference;
   }
   return `(${rootQualifyShadowedType(slot.replace(/\s+/g, ' '))})${reference}`;
+}
+
+/**
+ * How an address-table entry is named from an initializer: qualified with the
+ * namespace its declaration lives in, root-qualified where the enclosing block
+ * shadows that path, `&` unless the entry is a string constant (which decays).
+ */
+function initializerEntryReference(entry: InitializerAddressEntry): string {
+  const literal = compilerLiteralFor(entry.name);
+  if (literal) return literal;
+  const named = shadowQualifyReference(namespaceQualifyReference(entry.name));
+  return entry.stringConstant ? named : `&${named}`;
 }
 
 /** One array element that holds a function address, or null when it holds none. */
@@ -3484,7 +3724,11 @@ export function generateDataHeader(
     if (namespace) lines.push(`namespace ${namespace} {`);
     for (const g of symbols) {
       const decl = generateExternDeclaration(g, options.includeAddressComments);
-      if (decl) lines.push(decl);
+      if (!decl) continue;
+      const marked = declarationMarkersOn();
+      if (marked) lines.push(`${GLOBAL_MARKER}${sanitizeSymbolName(g.suggestedName || g.name)}`);
+      lines.push(decl);
+      if (marked) lines.push(GLOBAL_END_MARKER);
     }
     if (namespace) lines.push(`} // namespace ${namespace}`);
     lines.push('');
@@ -3642,7 +3886,9 @@ export function generateGlobalsImpl(
     // symbol the globals files define (one reconciled back from `static-local`
     // gets a definition but no extern). An extern for a symbol defined
     // elsewhere is exactly what the reference needs.
-    const undeclared = nsGlobals.filter(g => !headerDeclaredGlobals.has(g) && isDefinitionWinner(namespace, g));
+    // One globals.h left out is declared only where an initializer here names it.
+    const undeclared = nsGlobals.filter(g => !headerDeclaredGlobals.has(g) && !internalGlobalSet.has(g)
+      && (!headerOmittedSet.has(g) || headerOmittedNamedIn(g, partition)) && isDefinitionWinner(namespace, g));
     if (undeclared.length === 0) continue;
     if (namespace) lines.push(`namespace ${namespace} {`);
     emitGlobalDefsWithIfdef(lines, undeclared, false, (global, ls) => {
@@ -3654,6 +3900,30 @@ export function generateGlobalsImpl(
   }
   lines.push('');
 
+  // What only this unit's initializers name: internal, defined before its referrers.
+  const internalHere = internalGlobalOrder.filter(g => definable.includes(g) && (!partition || partition.has(g)));
+  if (internalHere.length > 0) {
+    lines.push('// =============================================================================');
+    lines.push('// Named only by initializers in this file');
+    lines.push('// =============================================================================');
+    lines.push('');
+    for (const global of internalHere) {
+      const resolved = emittedNamespaceOf(global);
+      const namespace = renderNamespace(resolved) || undefined;
+      if (!isDefinitionWinner(namespace, global)) continue;
+      const name = sanitizeSymbolName(global.suggestedName || global.name);
+      if (namespace) lines.push(`namespace ${namespace} {`);
+      setInitializerNamespace(resolved);
+      const aliasLine = globalAliasComment(global);
+      if (aliasLine) lines.push(aliasLine);
+      if (options.includeAddressComments) lines.push(`// @${global.address}`);
+      lines.push(`static ${globalDefinition(global, name)} ${globalGuardLine(name, guardQualifiedName(namespace, name), 'static', hasDefinitionInitializer(global))}`);
+      setInitializerNamespace(undefined);
+      if (namespace) lines.push(`} // namespace ${namespace}`);
+    }
+    lines.push('');
+  }
+
   for (const { resolved: namespaceScope, rendered: namespace, symbols: nsGlobals } of byNamespace) {
     if (nsGlobals.length === 0) continue;
     // Skip template instantiation namespaces (contain < > , *)
@@ -3661,7 +3931,7 @@ export function generateGlobalsImpl(
 
     // Split into: initialized with data, initialized without data, uninitialized
     const owned = nsGlobals.filter(g =>
-      isDefinitionWinner(namespace, g) && (!partition || partition.has(g)));
+      isDefinitionWinner(namespace, g) && (!partition || partition.has(g)) && !internalGlobalSet.has(g));
     const withData = owned.filter(g => g.initializedData);
     const withoutData = owned.filter(g => g.isInitialized && !g.initializedData);
     const uninitialized = owned.filter(g => !g.isInitialized);

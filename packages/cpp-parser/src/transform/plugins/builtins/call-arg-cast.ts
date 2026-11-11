@@ -511,6 +511,24 @@ export function isBareStringLiteral(e: Expression): boolean {
  */
 const rootBase = (base: string) => (base.startsWith('::') ? base.slice(2) : base);
 
+/** Integer typedefs as wide as a pointer on every target. */
+const POINTER_WORD_TYPEDEFS = new Set([
+  'ULONG_PTR', 'LONG_PTR', 'DWORD_PTR', 'UINT_PTR', 'INT_PTR', 'SIZE_T', 'SSIZE_T',
+  'uintptr_t', 'intptr_t', 'size_t', 'ptrdiff_t',
+]);
+/** Pointer typedefs to one of them. */
+const POINTER_WORD_POINTER_TYPEDEFS = new Set([
+  'PULONG_PTR', 'PLONG_PTR', 'PDWORD_PTR', 'PUINT_PTR', 'PINT_PTR', 'PSIZE_T', 'PSSIZE_T',
+]);
+
+/** A parameter spelling that points at a pointer-sized word: `ULONG_PTR *`, `PSIZE_T`. */
+function pointerWordSlot(spelling: string): boolean {
+  const s = shapeOfSpelling(spelling);
+  if (!s) return false;
+  const base = rootBase(s.base);
+  return (s.stars > 0 && POINTER_WORD_TYPEDEFS.has(base)) || (s.stars === 0 && POINTER_WORD_POINTER_TYPEDEFS.has(base));
+}
+
 export const sameShape = (a: TypeShape, b: TypeShape) => a.stars === b.stars && rootBase(a.base) === rootBase(b.base);
 export const isVoid = (s: TypeShape) => s.base === 'void';
 
@@ -735,6 +753,13 @@ export function createCallArgCastTransformer(options?: PluginOptions): Transform
         { globalTypes, enclosingVarTypes, structFields, fieldTypes, returnTypes, resolve },
         (callee) => funcdefReturn?.(callee),
       );
+      // The same, with typedefs left as spelled: tells `DWORD *` from `ULONG_PTR *`,
+      // which reduce to one type on the 32-bit target.
+      const spelledShape = createExprShape(
+        localTypes,
+        { globalTypes, enclosingVarTypes, structFields, fieldTypes, returnTypes },
+        (callee) => funcdefReturn?.(callee),
+      );
 
       /** `(uint)x` with x an unsigned byte or word: x (the zero-extension's operand). */
       const zeroExtensionOperand = (e: Expression): Expression | null => {
@@ -920,7 +945,20 @@ export function createCallArgCastTransformer(options?: PluginOptions): Transform
                 && !want.isConst && !have.isConst) return arg;
             const losesConst = have.isConst && !want.isConst
               && !(sameShape(have, want) && isBareStringLiteral(arg as Expression));
-            if (sameShape(have, want) && !losesConst) return arg;
+            if (sameShape(have, want) && !losesConst) {
+              // An SDK slot that points at a pointer-sized word (`ULONG_PTR *lpArguments`)
+              // takes the address of a 32-bit word (`&info.dwType`): one type on the
+              // 32-bit target, two on a wider one, where the call needs the cast the
+              // SDK's own examples write. Only for an SDK callee: in the program's own
+              // functions the disagreement is a typing question for Ghidra.
+              if (!decl.pointerOnly || have.stars === 0 || !pointerWordSlot(spelling)) return arg;
+              const spelled = spelledShape(arg as Expression);
+              if (!spelled || spelled.stars !== have.stars || POINTER_WORD_TYPEDEFS.has(rootBase(spelled.base))) return arg;
+              const castType = typeFromSpelling(spelling);
+              if (!castType) return arg;
+              anyCast = true;
+              return Expr.cast(castType, arg as Expression);
+            }
             // Only a pointer boundary needs the cast; integer widths convert.
             if (want.stars === 0 && have.stars === 0 && !losesConst) return arg;
             const castType = typeFromSpelling(spelling);

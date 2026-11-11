@@ -34,7 +34,7 @@ describe('gotoCrossesInitPlugin', () => {
 
   it('does not split an array-with-initializer (no array assignment)', () => {
     const out = transform(`void f() { goto L; int a[3] = {1, 2, 3}; L: use(a); }`);
-    assert.ok(/int a\[3\]\s*\{/.test(out), `array decl must stay intact: ${out}`);
+    assert.ok(/int a\[3\] = \{1, 2, 3\};/.test(out), `array decl must stay intact: ${out}`);
   });
 
   it('splits a decl crossed by a goto whose label sits in a nested scope', () => {

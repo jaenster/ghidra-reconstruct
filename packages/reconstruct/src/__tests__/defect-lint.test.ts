@@ -1512,3 +1512,51 @@ describe('defect lint: partial-argument-block', () => {
     assert.deepStrictEqual(lint('partial-argument-block', { files: { 'a.cpp': loop } }), []);
   });
 });
+
+describe('defect lint: self-assignment', () => {
+  it('reports a parameter that shadows a global, and says the global is never written', () => {
+    const fs = lint('self-assignment', { files: {
+      'globals.h': 'extern int nScaleFactor;\n',
+      'a.cpp': 'void UpdateScaleFactor(int nScaleFactor) {\n    nScaleFactor = nScaleFactor;\n}',
+    } });
+    assert.deepStrictEqual(subjects(fs), ['nScaleFactor']);
+    assert.match(fs[0].detail, /shadows the global/);
+  });
+
+  it('reports a folded copy and a member copy as no-op stores', () => {
+    const fs = lint('self-assignment', { files: {
+      'a.cpp': `struct P { char a; char b[4]; };
+void f(P* p, P s, int i) {
+    p = p;
+    s.a = s.a;
+    p->b[i + 1] = (p->b[i + 1]);
+}`,
+    } });
+    assert.deepStrictEqual(subjects(fs).length, 3);
+    assert.ok(fs.every(f => /no-op store/.test(f.detail)));
+  });
+
+  it('ignores a qualified store from the shadowing parameter, a compound op, a call and a side-effect index', () => {
+    const fs = lint('self-assignment', { files: {
+      'globals.h': 'extern int nScaleFactor;\n',
+      'a.cpp': `int g();
+void f(int nScaleFactor, int* a, int i) {
+    ::nScaleFactor = nScaleFactor;
+    nScaleFactor += nScaleFactor;
+    a[g()] = a[g()];
+    a[i++] = a[i++];
+    nScaleFactor = (char)nScaleFactor;
+}`,
+    } });
+    assert.deepStrictEqual(fs, []);
+  });
+
+  it('keys a site by content, not by line', () => {
+    const src = 'void f(int x) {\n    x = x;\n}';
+    const a = keyFindings(lint('self-assignment', { files: { 'a.cpp': src } }));
+    const b = keyFindings(lint('self-assignment', { files: { 'a.cpp': '\n\n' + src } }));
+    assert.strictEqual(a.length, 1);
+    assert.notStrictEqual(a[0].line, b[0].line);
+    assert.deepStrictEqual(newFindings(b, toBaseline(a, ['self-assignment'])), []);
+  });
+});

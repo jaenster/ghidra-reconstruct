@@ -6,7 +6,7 @@ import type { FunctionDecl } from '../../../ast/nodes.js';
 import { paramReaches, countedSinkReach, knownSinkReach, type Reach, type ParamReachContext, type ReachField } from '../param-reach.js';
 
 const SIZES: Record<string, number> = {
-  char: 1, undefined1: 1, short: 2, int: 4, uint: 4, undefined4: 4, DWORD: 4, POINT: 8, RECT: 16, Pair: 8,
+  char: 1, undefined1: 1, short: 2, 'short int': 2, int: 4, uint: 4, undefined4: 4, DWORD: 4, POINT: 8, RECT: 16, Pair: 8,
 };
 const FIELDS: Record<string, Record<string, ReachField>> = {
   RECT: { left: { offset: 0, type: 'int' }, top: { offset: 4, type: 'int' }, right: { offset: 8, type: 'int' }, bottom: { offset: 12, type: 'int' } },
@@ -95,6 +95,12 @@ describe('paramReaches', () => {
     assert.deepStrictEqual(neg, [{ lo: 0, hi: 0 }]);
   });
 
+  it('GetCoords @00620870: an address narrowed to its low half touches nothing, even returned', () => {
+    const r = reach('short f(RECT *pRect) { pRect->left = 0; return (short)(uint)pRect; }', [{ name: 'pRect', type: 'RECT *' }]);
+    assert.deepStrictEqual(r, [{ lo: 0, hi: 4 }]);
+    assert.deepStrictEqual(reach('char f(int *p) { return (char)p; }', [{ name: 'p', type: 'int *' }]), [{ lo: 0, hi: 0 }]);
+  });
+
   it('an address masked below 64 KiB is still unknown', () => {
     const r = reach('uint f(int **pp) { return (uint)pp & 0xfffffffc; }', [{ name: 'pp', type: 'int * *' }]);
     assert.deepStrictEqual(r, [null]);
@@ -181,6 +187,28 @@ describe('knownSinkReach', () => {
   it('only the bare spelling is the platform call', () => {
     const [c] = callsOf('Ui::GetClientRect(hWnd, &rc);');
     assert.strictEqual(knownSinkReach('Ui::GetClientRect', 1, c.arguments), undefined);
+  });
+
+  it('a library function Ghidra qualifies from the PDB is the platform call', () => {
+    const [sock, strt] = callsOf('compiler::setsockopt(s, 0xffff, 8, (char *)&nOpt, 4); VisualStudio::strtol(sz, &pEnd, 10);');
+    assert.deepStrictEqual(knownSinkReach('compiler::setsockopt', 3, sock.arguments), { lo: 0, hi: 4 });
+    assert.deepStrictEqual(knownSinkReach('VisualStudio::strtol', 1, strt.arguments), { lo: 0, hi: 4 });
+    assert.strictEqual(knownSinkReach('Net::compiler::setsockopt', 3, sock.arguments), undefined);
+  });
+
+  it('SystemParametersInfoA: the object its literal action names, else unknown', () => {
+    const [work, other, open] = callsOf('SystemParametersInfoA(0x30, 0, &rc, 0); SystemParametersInfoA(0x26, 0, &n, 0); SystemParametersInfoA(nAction, 0, &rc, 0);');
+    assert.deepStrictEqual(knownSinkReach('SystemParametersInfoA', 2, work.arguments), { lo: 0, hi: 16 });
+    assert.strictEqual(knownSinkReach('SystemParametersInfoA', 2, other.arguments), null);
+    assert.strictEqual(knownSinkReach('SystemParametersInfoA', 2, open.arguments), null);
+    assert.strictEqual(knownSinkReach('SystemParametersInfoA', 1, work.arguments), undefined);
+  });
+
+  it('VirtualProtect and strncpy: the old protection word, the count both ways', () => {
+    const [vp, cp] = callsOf('VirtualProtect(p, n, 0x40, &dwOld); compiler::strncpy(sz, szSrc, 0x10);');
+    assert.deepStrictEqual(knownSinkReach('VirtualProtect', 3, vp.arguments), { lo: 0, hi: 4 });
+    assert.deepStrictEqual(knownSinkReach('compiler::strncpy', 0, cp.arguments), { lo: 0, hi: 16 });
+    assert.deepStrictEqual(knownSinkReach('compiler::strncpy', 1, cp.arguments), { lo: 0, hi: 16 });
   });
 
   it('ReadFile: the buffer by its literal count, the byte count as one word', () => {

@@ -790,6 +790,122 @@ export async function listFunctionRecord(
 }
 
 /**
+ * `listFunctionRecord` for many names in one listing call: the same rows, by address.
+ *
+ * One `^(?:a|b|...)$` alternation instead of one `^a$` per name. The worker applies the
+ * pattern the same way (case-insensitive `find`) and builds each row the same way, so a
+ * row is the row the single-name call returns for that function; only the number of
+ * round trips, and of walks over the function manager, changes. Throws when the call
+ * fails, so the caller can fall back per name.
+ */
+export async function listFunctionRecords(
+  connection: GhidraConnection,
+  names: readonly string[],
+): Promise<Map<string, ExtractedFunction>> {
+  const rows = new Map<string, ExtractedFunction>();
+  const unique = [...new Set(names)];
+  if (unique.length === 0) return rows;
+  const regex = `^(?:${unique.map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})$`;
+  const pageSize = 100000;
+  for (let offset = 0; ; offset += pageSize) {
+    const result = await connection.sendCommand<{ functions?: GhidraFunctionInfo[]; total?: number }>(
+      'list_functions',
+      { regex, offset, limit: pageSize },
+    );
+    if (!Array.isArray(result.functions)) throw new Error('list_functions returned no rows array');
+    for (const row of result.functions) rows.set(addressKey(row.address), mapFunctionInfo(row));
+    if (result.functions.length < pageSize || (result.total ?? 0) <= offset + pageSize) break;
+  }
+  return rows;
+}
+
+/** One body from `decompileFunctions`: the text, or why the decompile threw. */
+export type DecompiledBody = { pseudocode: string | undefined } | { error: string };
+
+/**
+ * `decompileFunction` for many addresses in one `batch_decompile` call, by address.
+ *
+ * The worker builds each result from the same `getC()` text with the same decompiler
+ * options as `decompile` (both go through its DecompilerPool), and runs the batch over
+ * the pool at once instead of one round trip per body. A body the decompiler did not
+ * complete comes back with no text, as `decompile` returns it; a decompile that threw
+ * comes back as an error, as `decompile` throws. Throws when the call itself fails.
+ */
+export async function decompileFunctions(
+  connection: GhidraConnection,
+  addresses: readonly string[],
+  decompileTimeout: number = 30,
+): Promise<Map<string, DecompiledBody>> {
+  const out = new Map<string, DecompiledBody>();
+  if (addresses.length === 0) return out;
+  const result = await connection.sendCommand<BatchDecompileResult>('batch_decompile', {
+    addresses: [...addresses],
+    limit: addresses.length,
+    decompileTimeout,
+    _commandTimeout: Math.max(300000, (decompileTimeout + 5) * addresses.length * 1000),
+  });
+  if (!Array.isArray(result.results) || !Array.isArray(result.failed)) {
+    throw new Error('batch_decompile returned no results');
+  }
+  for (const r of result.results) out.set(addressKey(r.address), { pseudocode: r.pseudocode ?? undefined });
+  for (const f of result.failed) {
+    if (f.address) out.set(addressKey(f.address), { error: f.error });
+  }
+  return out;
+}
+
+/**
+ * The function at or containing each address, as `get_function_info` resolves it
+ * (`getFunctionAt`, else `getFunctionContaining`), with its entry point and name - and
+ * nothing else. `get_function_info` also decompiles any function with an undefined
+ * local, on the worker's ONE shared decompiler, so parallel refreshes queued on it; a
+ * caller that only needs the name asks for the name. Null per address when there is no
+ * function there. Throws when the script cannot run or its output is not this script's.
+ */
+export async function functionNamesAt(
+  connection: GhidraConnection,
+  addresses: readonly string[],
+): Promise<Map<string, { address: string; name: string } | null>> {
+  const out = new Map<string, { address: string; name: string } | null>();
+  if (addresses.length === 0) return out;
+  const code = `
+String[] addrs = new String[] { ${addresses.map(a => JSON.stringify(a)).join(', ')} };
+ghidra.program.model.listing.FunctionManager fm = currentProgram.getFunctionManager();
+StringBuilder sb = new StringBuilder("FUNCTION-NAMES\\n");
+for (int i = 0; i < addrs.length; i++) {
+  String s = addrs[i];
+  if (s.startsWith("0x") || s.startsWith("0X")) s = s.substring(2);
+  ghidra.program.model.address.Address ad = null;
+  try { ad = currentProgram.getAddressFactory().getAddress(s); } catch (Exception e) { ad = null; }
+  ghidra.program.model.listing.Function f = ad == null ? null : fm.getFunctionAt(ad);
+  if (f == null && ad != null) f = fm.getFunctionContaining(ad);
+  if (f == null) { sb.append("-\\t").append(i).append('\\n'); continue; }
+  sb.append("F\\t").append(i).append('\\t').append(f.getEntryPoint().toString()).append('\\t').append(f.getName()).append('\\n');
+}
+println(sb.toString());
+`;
+  const r = await connection.sendCommand<{ success?: boolean; output?: string; error?: string }>(
+    'execute_script', { language: 'java', code, scriptTimeout: 120, _commandTimeout: 180000 },
+  );
+  if (r.success === false || typeof r.output !== 'string') throw new Error(r.error ?? 'no output');
+  const lines = r.output.split('\n').map(l => l.replace(/\r$/, ''));
+  const start = lines.indexOf('FUNCTION-NAMES');
+  if (start < 0) throw new Error('function-name script printed no header');
+  const answered = new Set<number>();
+  for (const line of lines.slice(start + 1)) {
+    const [kind, idx, entry, name] = line.split('\t');
+    const i = Number(idx);
+    if (!Number.isInteger(i) || i < 0 || i >= addresses.length) continue;
+    if (kind === '-') { out.set(addresses[i], null); answered.add(i); }
+    else if (kind === 'F' && entry && name) { out.set(addresses[i], { address: entry, name }); answered.add(i); }
+  }
+  if (answered.size !== addresses.length) {
+    throw new Error(`function-name script answered ${answered.size} of ${addresses.length} address(es)`);
+  }
+  return out;
+}
+
+/**
  * The Ghidra-side half of thunk-target resolution.
  *
  * `Function.getThunkedFunction(true)` follows a chain of thunks to the function

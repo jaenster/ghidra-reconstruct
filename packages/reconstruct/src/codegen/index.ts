@@ -73,16 +73,22 @@ import {
 import { Lexer, TokenKind, parse, biasedTableIndexPlugin, findNodesByKind, NodeKind, globalRunSpan, globalRunMembers, type InlinedCallee, type InlinedCallTables, type GuardedCallee, type GuardedCallTables } from '@ghidra-mcp/cpp-parser';
 
 import { buildVtableDispatch } from './vtable-dispatch.js';
-import { fieldDeclSpelling, emittedMemberNames, generateHeader, generateFunctionDeclaration, setKnownFuncDefs, setConstructorBearingStructs, hasConvertingConstructor, recordConstructorLookups, constructorFact, isConstructorCandidate, sigType, getIntegerConversionType, emittedFunctionName, returnSigType } from './header.js';
+import { fieldDeclSpelling, emittedMemberNames, generateHeader, generateFunctionDeclaration, setKnownFuncDefs, setConstructorBearingStructs, hasConvertingConstructor, recordConstructorLookups, constructorFact, isConstructorCandidate, sigType, getIntegerConversionType, emittedFunctionName, returnSigType, setDeclarationMarkers } from './header.js';
 import { enumTypedefLine, registerEnumTypedefTargets, setKnownEnumWidths } from './enum-width.js';
 import { generateImplementation, unitNamespace, unitThunkForwarder, probeGuardedCalls, setQuestStructLayouts, setStructFieldRenames, decompiledReturnType, decompiledFunctionName, decompiledParameters, type ImplGenContext, type FuncPtrArgCastTables, type ThunkForward } from './impl.js';
-import { generateCMakeLists, generateTopLevelCMake, generateTargetCMake, generateUnsortedCMake } from './cmake.js';
+import { generateCMakeLists, generateTopLevelCMake, generateTargetCMake, generateUnsortedCMake, generateModuleLibrariesCMake } from './cmake.js';
+import { applyModuleBoundaries } from './module-boundary.js';
+import { pruneIncludes } from './include-pruning.js';
+import { ModuleGraph, type ModuleLibrariesConfig } from '../modules/module-libraries.js';
+import { isModuleModel, libraryConfigFromModules } from '../modules/module-model.js';
+import type { ProjectConfig } from '../config/schema.js';
+import { applyModuleLayout, publicHeaderRank } from './module-layout.js';
 import { generateSourceMap } from './sourcemap.js';
 import { generateReadme } from './readme.js';
 import { abiConvention, conventionKeyword } from './calling-convention.js';
 import { organizeByNamespace, getFilePath, setModuleNames, setNamespaceCollisionTypes, normalizeQualifiedReference, normalizeUnitName } from './namespace.js';
 import { buildNamespaceResolution, namespaceResolution, renderNamespace } from './namespace-resolution.js';
-import { setInteriorLabelSymbols, resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, setDeclarationClosureDataContent, getDeclarationClosureReport, isUnreferenceableArtifact, isEmittableGlobal, isDataArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, generateDataHeader, dataHeaderCentralTypes, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, wasGlobalClaimed, findDuplicateLinkageNames, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, setInitializerAddressTable, setInitializerFunctionAddresses, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType, emittedNamespaceOf, getDeclaredNames, initializerAddressReferences, addInitializerAddressReferences, markUnnamedImportSlots, setInitializerEnumConstants } from './globals-header.js';
+import { setInteriorLabelSymbols, resetDeclaredNames, recordDeclaredName, setDeclarationClosureModel, setDeclarationClosureEmitters, setDeclarationClosureDataContent, getDeclarationClosureReport, isUnreferenceableArtifact, isEmittableGlobal, isDataArtifact, sanitizeSymbolName, sanitizeQualifiedReference, setCentralInitializerScope, promoteCentrallyReferencedGlobals, generateGlobalsHeader, generateGlobalsImpl, generateColocatedGlobalsImpl, generateDataHeader, dataHeaderCentralTypes, setKnownFuncDefTypedefs, setKnownEnumConstants, getKnownEnumConstants, setMultidimArrayGlobals, setGlobalInitializerTypes, reconcileOrphanedGlobals, markGlobalsClaimed, wasGlobalClaimed, findDuplicateLinkageNames, setKnownNamespaces, isFuncDefTypedefName, reportGlobalsTakingATypeName, resolveListingBuiltinBlobs, setInitializerSignatureTables, setInitializerAddressTable, setInitializerFunctionAddresses, setInitializerGlobalNamespaces, getInitializerFuncPtrArityMismatches, normalizeGlobalDeclType, emittedNamespaceOf, getDeclaredNames, initializerAddressReferences, addInitializerAddressReferences, markUnnamedImportSlots, setInitializerCompilerLiterals, setInitializerEnumConstants, initializerReferenceNames, setHeaderOmittedGlobals, setInternalGlobals, takeModuleExternDecls, globalsHeaderProvides, moduleGlobalsTypePrelude } from './globals-header.js';
 import { normalizeDataAddress, stringDefinition } from './declaration-closure.js';
 import { harvestAnnotatedParameterTypes } from './win32-signatures.js';
 import { PLATFORM_FUNCDEF_NAMES, PLATFORM_STRUCT_FIELD_TYPES, isPlatformOrBuiltinType, isLibraryType, sdkLayoutMismatches, sdkHeaderOf, unprobedTypeNames, generatePlatformHeader, oddWidthTypesSpelled, placeholderTypesUsedIn, normalizeDataValue, arrayRowTypedefLines, arrayRowReturn, arrayRowSpelling, GHIDRA_PSEUDO_OP_RESULT_TYPES, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setFunctionHiddenTypes, computeFunctionHiddenTypes, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, platformDefinedFunctionNames, platformVoidPointerFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
@@ -96,12 +102,14 @@ import { partitionGlobalsByModule, buildFunctionModuleMap } from './globals-part
 import { normalizeAddress } from '../config/loader.js';
 import { resolveTargets, getTargetDirectory, type ResolvedTarget } from '../targets/index.js';
 import { generateStubsHeader } from '../targets/stubs.js';
-import { collectCrtHeaders, EXCLUDED_SYMBOL_DECLS, declaredIdentifier, WIN32_ZERO_ARITY_CALLBACK_SLOTS, WIN32_ZERO_ARITY_CALLBACK_CASTS, WIN32_OVERLOADED_INTRINSICS, WIN32_GENERIC_HANDLE_RETURNS, HEADER_DECLARED_SIGNATURES, ghidraDeclDrift } from './crt-mapping.js';
+import { collectCrtHeaders, EXCLUDED_SYMBOL_DECLS, declaredIdentifier, WIN32_ZERO_ARITY_CALLBACK_SLOTS, WIN32_ZERO_ARITY_CALLBACK_CASTS, CRT_DISCARDED_RETURN_CALLBACK_CASTS, WIN32_OVERLOADED_INTRINSICS, WIN32_GENERIC_HANDLE_RETURNS, HEADER_DECLARED_SIGNATURES, ghidraDeclDrift } from './crt-mapping.js';
 import { selectExclusionEmissions, setPlatformDefinedNames, setPlatformDeclaredNames, collectReferencedNames, mayReferenceNamespaces } from './exclusion-closure.js';
 import { normalizePointerSizeSpellings } from './pointer-size-spelling.js';
 import { flattenTemplateNames } from './template-names.js';
 import { buildTemplateRegistry, classScopeOf, memberDefinitionScope, templateDataDefinitions, templateHeaderTypes } from './templates/index.js';
 import { EXTERN_ENTRY_SUFFIX, fileStaticKey, readForeignSourcesAt, selectFileStaticFunctions, type ForeignSource } from './file-static-functions.js';
+import { inlineHostHeaderPath, inlineHostKey, isInlineHost, refusedInlineHosts } from './inline-hosts.js';
+import { accessorTwins } from './accessor-twins.js';
 import { planInlinedCalls, planGuardedCalls, type InlinedCallPlan, type GuardedCallPlan } from './inlined-calls.js';
 import { nullGetterDefaults } from './null-getters.js';
 import { placeTemplateMembers } from './templates/placement.js';
@@ -113,6 +121,9 @@ import { classKeyOf, setTemplateRegistry, templateRegistry } from './templates/r
 import { retypeVtableLocals, retypeVtableLocalsByAssignment, vtableMembersByType } from '../modules/vtable-types.js';
 import { NeedleIndex, scanReferences } from './needle-index.js';
 import { foldGlobalAliases, setGlobalReferenceAliases } from './global-aliases.js';
+import { splitTebFields, setTebFields } from './teb-fields.js';
+import { classifyGlobalVisibility, ownerModuleOfUsers } from './global-visibility.js';
+import { foreignReferencedFileLocals } from './file-local-globals.js';
 import { buildAggregateLayouts } from './aggregate-layout.js';
 import {
   computeTypeOwnership,
@@ -127,6 +138,7 @@ import {
 import { buildModuleGraph } from '../modules/builder.js';
 import { hashFunction, hashDataType, hashGlobal } from '../modules/buildinfo.js';
 import { warningRows, formatWarningsTsv, WARNINGS_TSV } from './warning-facts.js';
+import { markCompilerData, compilerDataReport } from './compiler-data.js';
 import { keepForeignReferencedGlobalsExternal, keepDataRunsWhole, fileLocalGlobalKey, assignDataHomes, dataHomeVetoCounts, dataHomeVeto, homedGlobalKey, dataHeaderPathOf } from './file-local-globals.js';
 import { noteGlobalScopeReason, resetGlobalScopeTrace, setGlobalScopeTraceImplMap, reportGlobalScopeTrace } from './global-scope-trace.js';
 
@@ -239,7 +251,9 @@ function shardOwnsNext(cost: number): boolean {
  * silently emit a different tree the first time that list changed.
  *
  * RECON_REUSE_DIR alone means "reuse every unit" - the degenerate incremental run,
- * which is what the oracle uses to prove reuse changes nothing.
+ * which is what the oracle uses to prove reuse changes nothing. It switches reuse on;
+ * the reused text itself is the unit loop's own copy beside the identifier cache
+ * (`unitTextPath`), never the written tree.
  */
 let emitUnitsFilter: Set<string> | null =
   process.env.RECON_REUSE_DIR
@@ -423,16 +437,18 @@ export function configureIncrementalEmit(units: Iterable<string> | null, previou
  */
 /**
  * The whole-program decisions a unit's text was written under: the functions it
- * defines `static`, its extern entries, and the globals it defines `static`
- * (`G:<address>`). Another TU starting to call such a function or to name such a
+ * defines `static`, its extern entries, the functions its inline header defines
+ * (`I:<address>`), and the globals it defines `static` (`G:<address>`). Another TU starting to call such a function or to name such a
  * global flips the decision without touching this unit's inputs.
  */
-export function unitStaticKeys(
-  unitFunctions: ReadonlyArray<{ address: string }>,
+export function unitStaticKeys<F extends { address: string }>(
+  unitFunctions: ReadonlyArray<F>,
   fileStaticFunctions: { has(k: string): boolean } | undefined,
   externEntries: { has(k: string): boolean } | undefined,
   fileLocalGlobals: ReadonlyArray<{ address: string; scope?: string }> | undefined,
   memberKey?: (address: string) => string | undefined,
+  /** Whether the function is defined in the unit's inline header (inline-hosts.ts). */
+  hostOf?: (func: F) => boolean,
 ): string[] {
   return unitFunctions
     .flatMap(f => {
@@ -442,6 +458,7 @@ export function unitStaticKeys(
         ...(fileStaticFunctions?.has(k) ? [k] : []),
         ...(externEntries?.has(k) ? [`${k}${EXTERN_ENTRY_SUFFIX}`] : []),
         ...(member ? [member] : []),
+        ...(hostOf?.(f) ? [inlineHostKey(f.address)] : []),
       ];
     })
     // A homed global (external linkage, defined here) is keyed apart from a static.
@@ -465,11 +482,39 @@ export function unitStaticsHold(previous: readonly string[], now: readonly strin
   return previous.join(',') === now.join(',');
 }
 
+/**
+ * Where a unit's text is kept as the unit loop emitted it, beside the identifier cache:
+ * `<cache>.units/<path>`.
+ *
+ * The tree on disk is not that text. Stage 2 rewrites every file after the units are
+ * emitted - the include pass drops what a file does not use under the placement of THIS
+ * run - so a unit reused from the tree would carry the last run's pruning into a run
+ * where a type or a function has moved to another header, and could never reach the new
+ * home. Reuse reads this copy instead and every run prunes it afresh, so an incremental
+ * run hands stage 2 exactly what a full one does.
+ */
+function unitTextPath(filePath: string): string | null {
+  return unitIdentCachePath ? path.join(`${unitIdentCachePath}.units`, filePath) : null;
+}
+
+function recordUnitText(filePath: string, content: string): void {
+  const p = unitTextPath(filePath);
+  if (!p) return;
+  try {
+    nodeFs.mkdirSync(path.dirname(p), { recursive: true });
+    nodeFs.writeFileSync(p, content, 'utf-8');
+  } catch {
+    // A unit whose text cannot be kept is emitted again next run, nothing worse.
+  }
+}
+
 function reuseUnitImpl(unitName: string, implPath: string): string | undefined {
   if (!emitUnitsFilter || !reuseImplDir) return undefined;
   if (emitUnitsFilter.has(unitName)) return undefined;
+  const p = unitTextPath(implPath);
+  if (!p) return undefined;
   try {
-    return nodeFs.readFileSync(path.join(reuseImplDir, implPath), 'utf-8');
+    return nodeFs.readFileSync(p, 'utf-8');
   } catch {
     return undefined;
   }
@@ -799,6 +844,7 @@ export function generateProjectStage1(
   strings?: ExtractedString[],
   shard?: ShardSpec
 ): GenerationState {
+  setDeclarationMarkers(moduleLibrariesOf(options.projectConfig) !== undefined);
   const genT0 = Date.now();
   beginShard(shard);
   // Ghidra's union-facet markers are not variables: a forced union facet is recorded as
@@ -822,6 +868,16 @@ export function generateProjectStage1(
         `(${f.ghidra} by Ghidra, ${f.decompiler} by the decompiler's reference, ${f.first} first listed); ` +
         `${fold.aliasCount} labels kept as aliases, ${fold.initializerRespellings} initializer references respelled`
       );
+    }
+  }
+  // Ghidra's thread environment block is per-thread system state, not program data:
+  // its labels are written as fields of NtCurrentTeb() (`teb-field-access`).
+  {
+    const teb = splitTebFields(globals as AnalyzedDataSymbol[], programInfo);
+    globals = teb.globals;
+    setTebFields(teb.fields);
+    if (teb.removed.length > 0 && (!shard || shard.index === 0)) {
+      console.log(`  Thread environment block: ${teb.removed.length} label(s) written as NtCurrentTeb() fields, not data`);
     }
   }
   // Before anything reads a type: one spelling for every Ghidra placeholder name.
@@ -1501,6 +1557,22 @@ export function generateProjectStage1(
   const unnamedSlots = markUnnamedImportSlots(analyzedGlobals, functions);
   if (unnamedSlots > 0) console.log(`Import slots not emitted (no body names them): ${unnamedSlots}`);
 
+  // What the compiler and the linker made, which the source never declared: not emitted,
+  // and spelled as the literal (or the linker symbol) wherever the tree reaches it.
+  {
+    const compilerData = genMark('setup/compiler-data', () => markCompilerData(
+      analyzedGlobals, strings ?? [], programInfo, options, projectDir,
+      constructorCodeTexts(functions, funcDefDataTypes, overrides, foreignSources), foreignSources));
+    context.compilerLiterals = compilerData;
+    setInitializerCompilerLiterals(compilerData.literalsByName, compilerData.literalsByAddress);
+    const c = compilerData.counts;
+    console.log(`Compiler output not emitted: ${c['string-literal']} string literals, ${c['float-literal']} float constants, ` +
+      `${c['gs-cookie']} GS cookie, ${c.rtti} RTTI, ${c['image-base']} image header; ` +
+      `${compilerData.rows.filter(r => r.cls === 'kept').length} kept as data`);
+    const reportPath = process.env.GHIDRA_COMPILER_DATA_REPORT;
+    if (reportPath && (!shard || shard.index === 0)) nodeFs.writeFileSync(reportPath, compilerDataReport(compilerData));
+  }
+
   // Wire analyzed globals into context for static-local injection
   context.analyzedGlobals = analyzedGlobals;
 
@@ -1827,6 +1899,15 @@ export function generateProjectStage2(state: GenerationState): ReconstructedProj
   // of the unit loop, a sharded run saved only the coordinator's own slice.
   saveUnitIdentCache();
 
+  // One library per module (project.json moduleLibraries): a global's module is its
+  // Ghidra namespace's, and only a namespaced global leaves globals.h.
+  const moduleLibraries = moduleLibrariesOf(options.projectConfig);
+  const moduleGraph = moduleLibraries ? new ModuleGraph(moduleLibraries) : undefined;
+  let globalOwner = moduleGraph
+    ? (g: AnalyzedDataSymbol): string | undefined => moduleGraph.moduleOfNamespace(g.namespace)
+    : undefined;
+  let moduleReports: Map<string, string> | undefined;
+
   if (analyzedGlobals.length > 0) {
     // A global demoted to file-local / struct-colocated is only actually
     // emitted if the file it was assigned to exists. Restore any that no
@@ -1883,9 +1964,23 @@ export function generateProjectStage2(state: GenerationState): ReconstructedProj
     setMultidimArrayGlobals(analyzedGlobals as Array<{ name: string; dataType?: string; suggestedName?: string; suggestedType?: string; scope?: string }>);
 
     // Filter out struct-colocated globals (they go in struct headers/impls)
-    const centralGlobals = analyzedGlobals.filter(
+    let centralGlobals = analyzedGlobals.filter(
       g => g.scope !== 'struct-colocated'
     );
+
+    // What each global globals.h would declare is named by, and so how far it must be
+    // visible: not at all, inside one globals unit, inside one module, or to its users.
+    const visibility = genMark('project/global-visibility', () => resolveGlobalVisibility(state, centralGlobals, moduleGraph));
+    centralGlobals = visibility.kept;
+    if (visibility.ownerOf) {
+      const byNamespace = globalOwner!;
+      const byUsers = visibility.ownerOf;
+      globalOwner = g => byNamespace(g) ?? byUsers(g);
+    }
+    if (moduleGraph) {
+      moduleReports ??= new Map();
+      moduleReports.set('global-visibility.tsv', visibility.report);
+    }
 
     // The data headers: per home TU, the externs of the globals it defines with
     // external linkage. A header whose declarations need a type only globals.h can
@@ -1904,12 +1999,13 @@ export function generateProjectStage2(state: GenerationState): ReconstructedProj
       centralTypeUsers.push(...types);
     }
 
-    if (centralGlobals.length > 0) {
+    if (centralGlobals.length > 0 || globalsPath !== undefined) {
       const globalsHeaderContent = genMark('project/globals-header', () => generateGlobalsHeader(centralGlobals, {
         ...options,
         projectName: name,
         binaryName: programInfo?.name,
         centralTypeUsers,
+        externOwner: globalOwner,
       }, dataTypes, typeOwnerMap, functionQualifiedNames, context.bodyIdentifierFnCounts));
 
       files.set(globalsPath!, {
@@ -1952,7 +2048,25 @@ export function generateProjectStage2(state: GenerationState): ReconstructedProj
       genMark('project/globals-units', () => emitCentralGlobalsUnits(
         centralGlobals, functions, files,
         { ...options, projectName: name, binaryName: programInfo?.name },
-        globalsPath!, typeOwnerMap, context.functionNameCandidates));
+        globalsPath!, typeOwnerMap, context.functionNameCandidates, globalOwner, visibility.initializerOnly));
+
+      if (moduleGraph) {
+        const boundary = genMark('project/module-boundaries', () => applyModuleBoundaries({
+          graph: moduleGraph,
+          files,
+          functions,
+          globals: centralGlobals,
+          typeOwnerMap,
+          globalsPath: globalsPath!,
+          globalOwner: globalOwner!,
+          moduleExterns: takeModuleExternDecls(),
+          rootProvides: globalsHeaderProvides(),
+          typePrelude: gs => moduleGlobalsTypePrelude(gs, dataTypes, typeOwnerMap),
+          sdkTypeNames: new Set(dataTypes.filter(t => isLibraryType(t.name, t.category ?? '')).map(t => t.name)),
+        }));
+        for (const [k, v] of boundary.reports) (moduleReports ??= new Map()).set(k, v);
+        for (const line of boundary.summary) console.log(line);
+      }
     }
   }
 
@@ -1977,6 +2091,7 @@ export function generateProjectStage2(state: GenerationState): ReconstructedProj
     programInfo,
     buildInfo: context._buildInfo,
     warnings: genMark('project/warnings', () => warningRows(functions)),
+    moduleReports,
   };
 
   if (GEN_TIMING) genAdd('project/total', Date.now() - genT0);
@@ -1989,6 +2104,22 @@ export function generateProjectStage2(state: GenerationState): ReconstructedProj
   if (caseMoves.length > 0) {
     console.warn(`warning: ${caseMoves.length} emitted path(s) moved to their directory's one spelling (namespaces differing only in case):`);
     for (const m of caseMoves.slice(0, 10)) console.warn(`  ${m}`);
+  }
+  // The module layout last: every file to its module's directory, every include after it.
+  const modules = options.projectConfig?.modules;
+  const layout = isModuleModel(modules) ? applyModuleLayout(project, modules!, moduleGraph, options.projectConfig?.moduleRuns ?? []) : undefined;
+  // Each file keeps the includes it uses and forward-declares what it only points at,
+  // read off the finished tree, so a header stops carrying other modules' headers along.
+  if (process.env.RECON_KEEP_ALL_INCLUDES !== '1') {
+    const pruneT0 = Date.now();
+    const pruned = pruneIncludes(project.files, {
+      sdkTypeNames: new Set(dataTypes.filter(t => isLibraryType(t.name, t.category ?? '')).map(t => t.name)),
+      sdkFromPlatform: true,
+      providerRank: layout ? publicHeaderRank(layout, project.files, modules!) : undefined,
+    });
+    console.log(`Includes (${((Date.now() - pruneT0) / 1000).toFixed(1)}s): ${pruned.dropped} dropped from ${pruned.pruned} of ${pruned.files} file(s), ` +
+      `${pruned.added} made direct, ${pruned.forwardDeclared} forward declaration(s)` +
+      (pruned.unparsed.length ? `; ${pruned.unparsed.length} file(s) the parser cannot read kept as written: ${pruned.unparsed.slice(0, 5).join(', ')}` : ''));
   }
   reportUnresolvableIncludes(project);
   reportCaseCollidingOutputPaths(project);
@@ -2324,6 +2455,85 @@ function resolveSymbolReferenceHeader(
  * by-value aggregate initializer needs the type's own header and which types a
  * unit uses now differs per unit.
  */
+/**
+ * The visibility rules (global-visibility.ts) applied to the central globals: a
+ * dead or interior global leaves the set, one only initializers name is left out
+ * of globals.h, and - in the module build - a root-scope global is owned by the
+ * module its users share.
+ */
+function resolveGlobalVisibility(
+  state: GenerationState,
+  centralGlobals: AnalyzedDataSymbol[],
+  graph: ModuleGraph | undefined,
+): {
+  kept: AnalyzedDataSymbol[];
+  ownerOf?: (g: AnalyzedDataSymbol) => string | undefined;
+  initializerOnly: Map<AnalyzedDataSymbol, Set<AnalyzedDataSymbol>>;
+  report: string;
+} {
+  const { options, files, functions } = state;
+  const projectDir = options.projectDir ?? options.outputDir;
+  const { sources: foreignSources } = readForeignSourcesAt(options.projectConfig?.foreignReferences ?? [], projectDir);
+  const candidates = centralGlobals.filter(g =>
+    g.scope === 'global' && (g.homeFile === undefined || g.homeDeclaredCentrally === true)
+    && g.ifdef === undefined && isEmittableGlobal(g));
+  const candidateSet = new Set(candidates);
+  const emittedFunctions = new Set<string>();
+  for (const f of functions) {
+    if (!f.name) continue;
+    emittedFunctions.add(f.namespace ? `${f.namespace}::${f.name}` : f.name);
+  }
+  const result = classifyGlobalVisibility({
+    candidates,
+    others: centralGlobals.filter(g => !candidateSet.has(g)),
+    files,
+    foreign: foreignReferencedFileLocals(centralGlobals, foreignSources, g => g.scope === 'global'),
+    emittedFunctions,
+    initializerNames: initializerReferenceNames,
+    moduleOfFile: graph ? (p => graph.libraryOfPath(p) ?? graph.moduleOfPath(p)) : undefined,
+  });
+  const removed = new Set<AnalyzedDataSymbol>();
+  const initializerOnly = new Map<AnalyzedDataSymbol, Set<AnalyzedDataSymbol>>();
+  // Storage no text names (read by address, or a live label's container): defined, declared nowhere.
+  const undeclared = new Set<AnalyzedDataSymbol>();
+  const rows = ['address\tnamespace\tname\tverdict\tuser_modules\treferrers\tneighbour'];
+  for (const g of candidates) {
+    const e = result.entries.get(g)!;
+    if (e.verdict === 'dead' || e.verdict === 'interior') removed.add(g);
+    if (e.verdict === 'initializer-only') initializerOnly.set(g, e.referrers);
+    if (e.byAddressOnly || e.verdict === 'container' || e.verdict === 'unreferenced') undeclared.add(g);
+    const verdict = e.byAddressOnly ? 'referenced-by-address' : e.verdict;
+    rows.push([g.address, g.namespace ?? '', g.suggestedName || g.name, verdict, [...e.userModules].sort().join(','),
+      [...e.referrers].map(r => r.suggestedName || r.name).sort().join(','), e.neighbour ? (e.neighbour.suggestedName || e.neighbour.name) : ''].join('\t'));
+  }
+  const omitted = [...initializerOnly.keys(), ...undeclared];
+  setHeaderOmittedGlobals(omitted, new Map(omitted.map(g => [g, result.entries.get(g)!.referrers])));
+  const c = result.counts;
+  const byAddress = [...result.entries.values()].filter(e => e.byAddressOnly).length;
+  console.log(`Global visibility: ${candidates.length} declared centrally - ${c.referenced} referenced (${byAddress} by address only), ` +
+    `${c['initializer-only']} named only by initializers, ${c.container} kept as a live label's storage, ${c.unreferenced} unreferenced with original bytes ` +
+    `(these and the by-address ones declared nowhere), ${c.interior} interior labels and ${c.dead} unreferenced without bytes not emitted`);
+  const reportPath = process.env.GHIDRA_VISIBILITY_REPORT;
+  if (reportPath) nodeFs.writeFileSync(reportPath, rows.join('\n') + '\n');
+  let ownerOf: ((g: AnalyzedDataSymbol) => string | undefined) | undefined;
+  if (graph) {
+    const owners = new Map<AnalyzedDataSymbol, string>();
+    for (const g of candidates) {
+      if (g.namespace) continue;
+      const e = result.entries.get(g)!;
+      const users = new Set(e.userModules);
+      for (const r of e.referrers) {
+        const m = graph.moduleOfNamespace(r.namespace);
+        if (m) users.add(m);
+      }
+      const owner = ownerModuleOfUsers(users, (u, o) => graph.mayUse(u, o));
+      if (owner) owners.set(g, owner);
+    }
+    ownerOf = g => owners.get(g);
+  }
+  return { kept: centralGlobals.filter(g => !removed.has(g)), ownerOf, initializerOnly, report: rows.join('\n') + '\n' };
+}
+
 function emitCentralGlobalsUnits(
   centralGlobals: AnalyzedDataSymbol[],
   functions: ExtractedFunction[],
@@ -2332,6 +2542,9 @@ function emitCentralGlobalsUnits(
   globalsHeaderPath: string,
   typeOwnerMap: Map<string, string>,
   functionNameCandidates: Map<string, { qualified: string; header: string }[]> | undefined,
+  ownerOf?: (g: AnalyzedDataSymbol) => string | undefined,
+  /** Globals only initializers name, with the globals whose initializers do. */
+  initializerOnly: ReadonlyMap<AnalyzedDataSymbol, ReadonlySet<AnalyzedDataSymbol>> = new Map(),
 ): void {
   const implExt = options.format === 'c' ? '.c' : '.cpp';
 
@@ -2342,7 +2555,7 @@ function emitCentralGlobalsUnits(
     dataHeaderByName.set(sanitizeSymbolName(g.suggestedName || g.name), dataHeaderPathOf(g.homeFile));
   }
   const partitioned = partitionGlobalsByModule(
-    centralGlobals.filter(g => g.homeFile === undefined || !wasGlobalClaimed(g)), buildFunctionModuleMap(functions));
+    centralGlobals.filter(g => g.homeFile === undefined || !wasGlobalClaimed(g)), buildFunctionModuleMap(functions), ownerOf);
   // A module named like the shared unit itself would be written over it; its
   // definitions stay shared, the direction the partition already falls back to.
   const partitions = partitioned.partitions.filter(p => globalsUnitPath(globalsHeaderPath, p.module, implExt) !== undefined);
@@ -2354,14 +2567,53 @@ function emitCentralGlobalsUnits(
   // The shared remainder is first, and it is the unit that owns the closure
   // definitions: they belong to no module, and emitting them from every unit
   // would be as many duplicate definitions as there are units.
-  const units: { path: string; members: ReadonlySet<AnalyzedDataSymbol> | undefined; ownsClosure: boolean }[] = [
+  const units: { path: string; members: Set<AnalyzedDataSymbol> | undefined; ownsClosure: boolean }[] = [
     { path: globalsUnitPath(globalsHeaderPath, undefined, implExt)!, members: new Set(shared), ownsClosure: true },
     ...partitions.map(p => ({
       path: globalsUnitPath(globalsHeaderPath, p.module, implExt)!,
-      members: new Set(p.members) as ReadonlySet<AnalyzedDataSymbol>,
+      members: new Set(p.members),
       ownsClosure: false,
     })),
   ];
+
+  // A global only initializers name is defined, internal, in the one unit that
+  // defines all of them; referrers in several units leave it external there.
+  const unitOf = new Map<AnalyzedDataSymbol, number>();
+  units.forEach((u, i) => { for (const g of u.members ?? []) unitOf.set(g, i); });
+  const internal = new Set<AnalyzedDataSymbol>();
+  for (const [g, referrers] of initializerOnly) {
+    if (g.ifdef !== undefined || !unitOf.has(g)) continue;
+    const homes = new Set([...referrers].map(r => unitOf.get(r)));
+    if (homes.size !== 1 || homes.has(undefined)) continue;
+    const to = [...homes][0]!;
+    const from = unitOf.get(g)!;
+    if (from !== to) {
+      (units[from].members as Set<AnalyzedDataSymbol>).delete(g);
+      (units[to].members as Set<AnalyzedDataSymbol>).add(g);
+      unitOf.set(g, to);
+    }
+    internal.add(g);
+  }
+  // A referenced one before its referrer; a cycle stays external, declared up front.
+  const ordered: AnalyzedDataSymbol[] = [];
+  const visitState = new Map<AnalyzedDataSymbol, 'open' | 'done'>();
+  const cyclic = new Set<AnalyzedDataSymbol>();
+  const targets = new Map<AnalyzedDataSymbol, AnalyzedDataSymbol[]>();
+  for (const [g, referrers] of initializerOnly) {
+    for (const r of referrers) if (internal.has(r) && internal.has(g)) (targets.get(r) ?? targets.set(r, []).get(r)!).push(g);
+  }
+  const visit = (g: AnalyzedDataSymbol, path: AnalyzedDataSymbol[]): void => {
+    const st = visitState.get(g);
+    if (st === 'done') return;
+    if (st === 'open') { for (const p of path.slice(path.indexOf(g))) cyclic.add(p); return; }
+    visitState.set(g, 'open');
+    for (const t of targets.get(g) ?? []) visit(t, [...path, g]);
+    visitState.set(g, 'done');
+    ordered.push(g);
+  };
+  for (const g of [...internal].sort((a, b) => a.address.localeCompare(b.address))) visit(g, []);
+  setInternalGlobals(ordered.filter(g => !cyclic.has(g)));
+  if (internal.size > 0) console.log(`Globals internal to their referrers' unit: ${internal.size - cyclic.size} (${cyclic.size} in an initializer cycle stay external)`);
 
   for (const unit of units) {
     setCentralInitializerScope(true);
@@ -2827,12 +3079,23 @@ function installFileStaticFunctions(
     context.guardedCalls = undefined;
   }
   if (report) {
+    const hosts = model.functions.filter(isInlineHost).length;
+    const notHosts = refusedInlineHosts(model.functions);
+    if (hosts > 0 || notHosts.length > 0) {
+      console.log(`Header inlines: ${hosts} defined in their unit's inline header` +
+        (notHosts.length > 0 ? `; tagged but kept in their unit: ${notHosts.join(', ')}` : ''));
+    }
     const refused = [...selection.refused].map(([why, names]) => `${names.length} ${why}`).join(', ');
     console.log(
       `File-static functions: ${selection.selected.size} of ${selection.candidates} with parameters in ` +
       `registers their convention does not use${refused ? ` (kept extern: ${refused})` : ''}` +
+      (selection.measuredStatic ? `; ${selection.measuredStatic} selected by a vc8linkage:static tag` : '') +
       (selection.externEntries.size ? `; ${selection.externEntries.size} extern entries for hand-written callers` : '')
     );
+    if (selection.staleLinkageTags.length > 0) {
+      console.log(`Stale vc8linkage tags (${selection.staleLinkageTags.length}): ` +
+        selection.staleLinkageTags.map(t => `${t.name} [${t.tag}]: ${t.why}`).join('; '));
+    }
     if (context.inlinedCalls) {
       const inline = [...selection.selected.values()].filter(e => e.inline).length;
       const sites = [...context.inlinedCalls.calleesBySite.values()].reduce((n, c) => n + c.length, 0);
@@ -2972,6 +3235,9 @@ function buildFuncToImplPathMap(
   for (const [unitName, unitFunctions] of organized) {
     const implPath = implPaths.get(unitName)!;
     for (const func of unitFunctions) {
+      // A header inline is compiled into every TU that calls it (inline-hosts.ts): a
+      // global it names is used outside its unit, and none may hold it static.
+      if (isInlineHost(func)) continue;
       funcNameToImplPath.set(func.name, implPath);
       if (func.namespace) {
         funcNameToImplPath.set(`${func.namespace}::${func.name}`, implPath);
@@ -4189,8 +4455,12 @@ function generateFilesForFunctions(
         candidates = [];
         funcNameCandidates.set(func.name, candidates);
       }
-      if (!candidates.some(c => c.qualified === qualified && c.header === headerPath)) {
-        candidates.push({ qualified, header: headerPath });
+      // A file naming a header inline includes the header that defines it, which
+      // includes the one that declares it (inline-hosts.ts). The answer is recorded by
+      // every unit that names it, so a function gaining or losing the tag re-emits them.
+      const declaring = isInlineHost(func) ? inlineHostHeaderPath(headerPath) : headerPath;
+      if (!candidates.some(c => c.qualified === qualified && c.header === declaring)) {
+        candidates.push({ qualified, header: declaring });
       }
     }
   }
@@ -4448,6 +4718,8 @@ function generateFilesForFunctions(
   // `funcptr-arg-cast` transform emits it, but only where the MODEL says the two
   // prototypes actually differ. Build that comparison table here, once.
   context.funcPtrArgCasts = genMark('setup/funcptr-tables', () => buildFuncPtrArgCastTables(functions, analyzedGlobals, dataTypes.filter(dt => dt.kind === 'FUNCTION_DEFINITION') as import('../types.js').ExtractedFunctionDefinition[], dataTypes, strings ?? [], platformDeclaredModelFunctions));
+  // The header inlines that read one field, whose inline twins `acc` vc8form tags call.
+  context.accessorTwins = accessorTwins(functions, context.funcPtrArgCasts);
   // Data initializers are emitted from strings, not an AST — the globals emitter
   // needs the same prototype tables to decide whether a function address stored
   // in a slot needs the cast C++ has never let it do implicitly.
@@ -4488,6 +4760,9 @@ function generateFilesForFunctions(
     // is answered by the table that already answers it in a body, with the
     // namespace segments the reference has to be spelled with.
     setInitializerFunctionAddresses(context.functionAddressMap);
+    // And the namespace each global's declaration lives in, for the references an
+    // initializer reaches by address or by an interior path Ghidra leaves bare.
+    setInitializerGlobalNamespaces(context.funcPtrArgCasts.initializerDataNamespaces);
   }
 
   // ── Build module graph for include resolution ────────────────────────
@@ -4504,6 +4779,7 @@ function generateFilesForFunctions(
     sharedEnumTypes: context._sharedEnumTypes,
     globalsHeaderPath,
     templateHeaderPath,
+    unitImplPaths: templateUnitImplPaths,
   });
   const resolvedModules = moduleGraph.resolve();
 
@@ -4586,13 +4862,18 @@ function generateFilesForFunctions(
 
     // The shard decision is taken for every unit in every process, in this same
     // order, so all shards agree on the partition without talking to each other.
+    // The functions defined in the unit's inline header rather than its .cpp.
+    const inlineHosts = templateImplPath ? [] : unitFunctions.filter(isInlineHost);
+    const inlineHeaderPath = inlineHosts.length > 0 ? inlineHostHeaderPath(headerPath) : undefined;
     if (!shardOwnsNext(unitCost(unitFunctions))) {
       if (!templateImplPath) shardPlaceholder(files, headerPath, 'header');
+      if (inlineHeaderPath) shardPlaceholder(files, inlineHeaderPath, 'header');
       shardPlaceholder(files, implPath, 'implementation');
       if (options.generateSourceMaps) shardPlaceholderMap(sourceMaps, `${implPath}.map`);
       continue;
     }
     if (!templateImplPath) shardRecordEmitted(headerPath);
+    if (inlineHeaderPath) shardRecordEmitted(inlineHeaderPath);
     shardRecordEmitted(implPath);
 
     // Get graph-resolved includes for this module
@@ -4696,7 +4977,8 @@ function generateFilesForFunctions(
     // The dep-scan below then runs over the reused text, so its include set is
     // derived the same way it was derived when the text was written.
     // An extern entry is emitted text too: a unit whose entries changed is re-emitted.
-    const unitStatics = unitStaticKeys(unitFunctions, context.fileStaticFunctions, context.externEntries, context.fileLocalGlobals, templateMemberKey);
+    const unitStatics = unitStaticKeys(unitFunctions, context.fileStaticFunctions, context.externEntries, context.fileLocalGlobals, templateMemberKey,
+      f => inlineHosts.includes(f));
     const previousStatics = unitIdentifierCounts.get(unitName)?.statics ?? [];
     const placementNow: PlacementLookup = {
       typeOwner: t => typeOwnerMap.get(t),
@@ -4710,9 +4992,14 @@ function generateFilesForFunctions(
     const placementHolds = !emitUnitsFilter || emitUnitsFilter.has(unitName)
       || includeBasisHolds(unitIdentifierCounts.get(unitName)?.includes, implIncludes, placementNow);
     if (!placementHolds) console.log(`[reuse] ${unitName}: re-emitted, its includes were resolved under another placement`);
-    const reusedImpl = unitStaticsHold(previousStatics, unitStatics) && placementHolds
+    const previousImpl = unitStaticsHold(previousStatics, unitStatics) && placementHolds
       ? reuseUnitImpl(unitName, implPath)
       : undefined;
+    // The inline header is the other half of the unit's text: both are reused or neither.
+    const reusedInlineHeader = previousImpl !== undefined && inlineHeaderPath
+      ? reuseUnitImpl(unitName, inlineHeaderPath)
+      : undefined;
+    const reusedImpl = inlineHeaderPath && reusedInlineHeader === undefined ? undefined : previousImpl;
     // The placement lookups the dependency scan below makes, recorded for the next
     // run's reuse check. Only an emitted unit records; a reused one keeps its record.
     const placementLookups = new Map<string, string>();
@@ -4760,11 +5047,12 @@ function generateFilesForFunctions(
     if (reusedImpl === undefined) recordConstructorLookups(name => lookedUp(`k:${name}`));
     // Every enum member name a body transform asked about across all enums.
     if (reusedImpl === undefined) recordEnumLookups(name => lookedUp(`e:${name}`));
+    const cppFunctions = inlineHosts.length > 0 ? unitFunctions.filter(f => !inlineHosts.includes(f)) : unitFunctions;
     let implContent = reusedImpl !== undefined
       ? reusedImpl
       : genMark('units/impl', () => generateImplementation(
       unitName,
-      unitFunctions,
+      cppFunctions,
       classInfo,
       headerPath,
       options,
@@ -4774,6 +5062,23 @@ function generateFilesForFunctions(
       undefined,  // no internalFunctions — don't apply static to standalone functions
       structUnionEnumNames
     ));
+    // The inline header's bodies, emitted as the unit's other bodies are, with the
+    // unit's includes: it is read by TUs of other modules that include nothing of this one.
+    // It defines no globals - its file-locals are the .cpp's - and its preambles are its own.
+    let inlineHeaderContent: string | undefined = reusedInlineHeader;
+    if (inlineHeaderPath && reusedImpl === undefined) {
+      context.fileLocalGlobals = undefined;
+      context._preambles = new Set();
+      inlineHeaderContent = genMark('units/impl', () => generateImplementation(
+        unitName, inlineHosts, classInfo, headerPath, options, context, implIncludes, crtHeaders,
+        undefined, structUnionEnumNames, true,
+      ));
+      // A preamble macro (D2_ASSERT, D2_ALLOC_AT) is `#ifndef`-guarded: defined here, it
+      // is the definition every includer that comes later uses, not its own.
+      if (context._preambles.size > 0) {
+        console.warn(`[inline-host] ${inlineHeaderPath}: ${context._preambles.size} preamble block(s), visible to every file including it`);
+      }
+    }
     context.fileLocalGlobals = prevFileLocals;
     context._preambles = prevPreambles;
 
@@ -4819,16 +5124,18 @@ function generateFilesForFunctions(
     // most of what an incremental rebuild costs when nothing needs re-emitting.
     // Everything the block touches is local to it, so skipping it changes nothing
     // else.
-    if (reusedImpl === undefined) {
+    // `own`: the headers the text is the unit of, which it never includes again.
+    const includeDependencies = (text: string, own: readonly string[]): string => {
+      let content = text;
       const existingIncludes = new Set(implIncludes);
-      existingIncludes.add(headerPath);
+      for (const p of own) existingIncludes.add(p);
       const newIncludes: string[] = [];
 
       // Every name the file references as a whole identifier token - never a
       // substring of a longer name, a comment or a string literal - resolved for
       // every name in one lexing pass over the file.
-      const refs = scanReferences(implContent);
-      const mentioned = dependencyNeedles.matchesIn(implContent, refs);
+      const refs = scanReferences(content);
+      const mentioned = dependencyNeedles.matchesIn(content, refs);
 
       const addInclude = (path: string) => {
         if (!existingIncludes.has(path)) {
@@ -4944,7 +5251,7 @@ function generateFilesForFunctions(
           for (const v of fn.localVariables ?? []) addVar(v.name, v.dataType);
         }
         // body-declared locals: `TYPE name;` / `TYPE* name = …`
-        for (const m of implContent.matchAll(/\b([A-Za-z_]\w*)\s*\*?\s*([A-Za-z_]\w*)\s*[=;]/g)) {
+        for (const m of content.matchAll(/\b([A-Za-z_]\w*)\s*\*?\s*([A-Za-z_]\w*)\s*[=;]/g)) {
           if (structFieldTypes.has(m[1]) || structUnionEnumNames.has(m[1])) addVar(m[2], m[1]);
         }
         // A global the body dereferences - `&gpChatDlgInputEditBox->sControl` (v1623 typed
@@ -4961,7 +5268,7 @@ function generateFilesForFunctions(
         // reaches the union BY VALUE and then dereferences again. Matching only `->`
         // stopped at the first `.` and left every type past it incomplete, so both
         // spellings advance the walk; the field's base type is the same either way.
-        for (const cm of implContent.matchAll(/\b([A-Za-z_]\w*)((?:\s*(?:->|\.)\s*[A-Za-z_]\w*)+)/g)) {
+        for (const cm of content.matchAll(/\b([A-Za-z_]\w*)((?:\s*(?:->|\.)\s*[A-Za-z_]\w*)+)/g)) {
           let curType = typeOf(cm[1]);
           if (!curType) continue;
           for (const fm of cm[2].matchAll(/(?:->|\.)\s*([A-Za-z_]\w*)/g)) {
@@ -4981,9 +5288,16 @@ function generateFilesForFunctions(
 
       if (newIncludes.length > 0) {
         const includeLines = newIncludes.sort().map(h => `#include "${h}"`).join('\n');
-        const lastIncludeIdx = implContent.lastIndexOf('#include');
-        const lineEnd = implContent.indexOf('\n', lastIncludeIdx);
-        implContent = implContent.slice(0, lineEnd + 1) + includeLines + '\n' + implContent.slice(lineEnd + 1);
+        const lastIncludeIdx = content.lastIndexOf('#include');
+        const lineEnd = content.indexOf('\n', lastIncludeIdx);
+        content = content.slice(0, lineEnd + 1) + includeLines + '\n' + content.slice(lineEnd + 1);
+      }
+      return content;
+    };
+    if (reusedImpl === undefined) {
+      implContent = includeDependencies(implContent, [headerPath]);
+      if (inlineHeaderPath && inlineHeaderContent !== undefined) {
+        inlineHeaderContent = includeDependencies(inlineHeaderContent, [headerPath, inlineHeaderPath]);
       }
     }
     recordConstructorLookups(null);
@@ -5021,15 +5335,31 @@ function generateFilesForFunctions(
       });
     }
 
+    // Kept as emitted, before stage 2 rewrites it: what the next run reuses.
+    if (reusedImpl === undefined) {
+      recordUnitText(implPath, implContent);
+      if (inlineHeaderPath && inlineHeaderContent !== undefined) recordUnitText(inlineHeaderPath, inlineHeaderContent);
+    }
     files.set(implPath, {
       path: implPath,
       content: implContent,
       type: 'implementation',
       namespace: namespace?.fullPath,
       className: classInfo?.name,
-      functions: unitFunctions.map(f => f.name),
+      functions: cppFunctions.map(f => f.name),
       includes: [headerPath, ...sortedAllIncludes],
     });
+    if (inlineHeaderPath && inlineHeaderContent !== undefined) {
+      files.set(inlineHeaderPath, {
+        path: inlineHeaderPath,
+        content: inlineHeaderContent,
+        type: 'header',
+        namespace: namespace?.fullPath,
+        className: classInfo?.name,
+        functions: inlineHosts.map(f => f.name),
+        includes: [headerPath, ...sortedAllIncludes],
+      });
+    }
 
     // Generate source map if requested
     if (options.generateSourceMaps) {
@@ -5040,7 +5370,10 @@ function generateFilesForFunctions(
       const definesThunk = (f: ExtractedFunction) => !f.isLibrary && unitThunkForwarder(
         f, classInfo, context, unitNs.useNamespace ? unitNs.resolvedNamespace : undefined
       ) !== undefined;
-      const sourceMap = generateSourceMap(implPath, unitFunctions, undefined, crossMatches, definesThunk);
+      // An inline host stays in its unit's map: the unit's object carries its copy
+      // wherever the unit calls it, and the map names the header holding the body.
+      const sourceMap = generateSourceMap(implPath, unitFunctions, undefined, crossMatches, definesThunk,
+        f => inlineHeaderPath && inlineHosts.includes(f) ? inlineHeaderPath : undefined);
       sourceMaps.set(mapPath, sourceMap);
     }
   }
@@ -5237,12 +5570,25 @@ export async function writeProject(
         writtenFiles.push(unsortedPath);
       }
     } else {
-      // Non-target: single CMakeLists.txt
+      // Non-target: single CMakeLists.txt, or one library per module
       const cmakePath = path.join(outputDir, 'CMakeLists.txt');
-      const cmakeContent = generateCMakeLists(project, options);
+      const libraries = moduleLibrariesOf(options.projectConfig);
+      const cmakeContent = libraries
+        ? generateModuleLibrariesCMake(project, new ModuleGraph(libraries), options)
+        : generateCMakeLists(project, options);
       await fs.writeFile(cmakePath, cmakeContent, 'utf-8');
       writtenFiles.push(cmakePath);
     }
+  }
+
+  // The generator's module lint (every cross-module reference) is evidence for the
+  // next Ghidra move, not part of the tree: it goes beside the project's state.
+  const reportDir = options.projectDir ? path.join(options.projectDir, '.ghidra-mcp') : outputDir;
+  if ((project.moduleReports?.size ?? 0) > 0) await fs.mkdir(reportDir, { recursive: true });
+  for (const [name, text] of project.moduleReports ?? []) {
+    const reportPath = path.join(reportDir, name);
+    await fs.writeFile(reportPath, text, 'utf-8');
+    writtenFiles.push(reportPath);
   }
 
   if (project.warnings) {
@@ -6573,6 +6919,8 @@ export function buildFuncPtrArgCastTables(
   // under several classes, so D2Client::UIWidget::vftable became a bare `vftable` that
   // bound to a different class's table with an incompatible type.
   const ambiguousGlobalNames = new Set<string>();
+  const dataNamespaces: Record<string, readonly string[]> = {};
+  const dataAmbiguous = new Set<string>();
   {
     const blockableLeadSegments = new Set<string>();
     for (const dt of dataTypes) {
@@ -6603,6 +6951,28 @@ export function buildFuncPtrArgCastTables(
         continue;
       }
       globalNamespaces[name] = [...segments];
+    }
+    // The same answer for every datum an INITIALIZER can name, which is wider than
+    // the body passes' table: a struct-colocated extern or a file-local static is
+    // named from another initializer in its own unit (`gapGlideStripVertexPtrsA`
+    // holds `&gaGlidePerspectiveVertices[1].fX`; both live in Glide.cpp), and there
+    // the bare name resolves only while the datum sits at root scope. Every scope
+    // but a function's static local, whose name no namespace qualifies.
+    for (const g of globals) {
+      const name = g.suggestedName || g.name;
+      if (!name || /[^A-Za-z0-9_]/.test(name)) continue;
+      if (dataAmbiguous.has(name)) continue;
+      if (g.scope === 'static-local') continue;
+      const resolved = emittedNamespaceOf(g);
+      const segments = resolved.segments;
+      if (segments.length > 0 && !resolved.classScope && blockableLeadSegments.has(segments[0])) continue;
+      const existing = dataNamespaces[name];
+      if (existing !== undefined && existing.join('::') !== segments.join('::')) {
+        dataAmbiguous.add(name);
+        delete dataNamespaces[name];
+        continue;
+      }
+      dataNamespaces[name] = [...segments];
     }
   }
 
@@ -6654,6 +7024,7 @@ export function buildFuncPtrArgCastTables(
     paramFuncdefs,
     zeroArityCallbackSlots: WIN32_ZERO_ARITY_CALLBACK_SLOTS,
     zeroArityCallbackCasts: WIN32_ZERO_ARITY_CALLBACK_CASTS,
+    discardedReturnCallbackCasts: CRT_DISCARDED_RETURN_CALLBACK_CASTS,
     funcdefSignatures,
     funcdefConventions,
     funcdefConventionKeywords,
@@ -6685,6 +7056,7 @@ export function buildFuncPtrArgCastTables(
     globalElementSizes,
     dataExtents,
     globalNamespaces,
+    initializerDataNamespaces: dataNamespaces,
     ambiguousGlobalNames: [...ambiguousGlobalNames],
     stringConstantNames,
     stringLiteralAddresses: stringLiteralAddresses(strings),
@@ -6886,3 +7258,13 @@ function reconcileUndefinedReturnTypes(functions: ExtractedFunction[]): void {
   }
 }
 
+
+/**
+ * The module-library graph the generation follows: project.json `modules` when it
+ * is the full model, else the older `moduleLibraries` switch; undefined is the
+ * monolithic tree.
+ */
+export function moduleLibrariesOf(config: ProjectConfig | undefined): ModuleLibrariesConfig | undefined {
+  if (isModuleModel(config?.modules)) return libraryConfigFromModules(config!.modules!);
+  return config?.moduleLibraries?.enabled ? config.moduleLibraries : undefined;
+}

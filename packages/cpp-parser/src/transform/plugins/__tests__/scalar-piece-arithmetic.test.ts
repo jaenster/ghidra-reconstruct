@@ -71,8 +71,10 @@ describe('scalar-piece-arithmetic', () => {
   });
 
   it('nothing on a local that is not certainly initialised, or whose address is taken', () => {
-    // Q19_Callback04_ItemPickedUp 005b8210: a byte written into an uninitialised int.
-    assert.match(run(`void f(void) { int32_t n; n._0_1_ = 1; Send((uint8_t)n); }`), /n\._0_1_ = 1;/);
+    // Q19_Callback04_ItemPickedUp 005b8210: a byte written into an uninitialised int. Read
+    // as a byte only, it is a whole store (the low-piece rule); read whole, it stays.
+    assert.match(run(`void f(void) { int32_t n; n._0_1_ = 1; Send((uint8_t)n); }`), /n = 1;/);
+    assert.match(run(`void f(void) { int32_t n; n._0_1_ = 1; Send(n); }`), /n\._0_1_ = 1;/);
     // Assigned only on one arm: not certain after the if.
     assert.match(run(`void f(int c) { int n; if (c) { n = 5; } n._0_1_ = 1; use(n); }`), /n\._0_1_ = 1;/);
     // A label between the store and the use: it can be entered without the store.
@@ -120,5 +122,75 @@ describe('scalar-piece-arithmetic, compiled and run', { skip: !hasNativeGpp() },
     const after = compileAndRun(`${prelude}\n${lowered(fns.join('\n'), true)}`, calls);
     assert.equal(after, before);
     assert.match(before, /^fedc7f81\n0000007fffffffff\n/);
+  });
+});
+
+describe('Golden: a local only its low piece is read of', () => {
+  // SCMD_0x3E_QuestItemPickup 0054bf60, the Game.exe decompile at program v2071. The
+  // original keeps each coordinate whole in a register (`MOV EBX,[ECX+0xc]`, `XOR EBX,EBX`,
+  // the call's EAX) and pushes it; only its low word is read, at the call.
+  const QUEST = `eD2ServerIncomingStatus f(D2UnitStrc *pUnit, D2UnitStrc *pQuestItem) {
+  uint32_t nPosX;
+  eD2ServerIncomingStatus eVar1;
+  eD2UnitType eUnitType;
+  eUnitType = pQuestItem->eUnitType;
+  if ((eUnitType == UNIT_OBJECT) || ((3 < (int)eUnitType && ((int)eUnitType < 6)))) {
+    nPosX._0_2_ = (uint16_t)((pQuestItem->pPath).pStaticPath)->nPosX;
+  }
+  else if ((pQuestItem->pPath).pDynamicPath == (D2DynamicPathStrc *)0x0) {
+    nPosX._0_2_ = 0;
+  }
+  else {
+    nPosX = D2Common::PATH::DynamicPath::GetXPos((pQuestItem->pPath).pDynamicPath);
+    nPosX._0_2_ = (uint16_t)nPosX;
+  }
+  eVar1 = CheckIfCoordsAreInRange(pUnit,10,(uint16_t)nPosX,0);
+  return eVar1;
+}`;
+
+  it('SCMD_0x3E_QuestItemPickup 0054bf60: every store is whole, the read-back store goes', () => {
+    const out = run(QUEST);
+    assert.match(out, /nPosX = pQuestItem->pPath\.pStaticPath->nPosX;/, out);
+    assert.match(out, /nPosX = 0;/, out);
+    assert.match(out, /nPosX = D2Common::PATH::DynamicPath::GetXPos\(pQuestItem->pPath\.pDynamicPath\); \}/, out);
+    assert.doesNotMatch(out, /_0_2_|0xffff0000/, out);
+    assert.match(out, /\(uint16_t\)nPosX, 0\)/, out);
+  });
+
+  it('keeps the piece where a read sees more than the low piece, or the address is taken', () => {
+    for (const read of ['(int)nPosX', 'nPosX', '(uint32_t)nPosX']) {
+      const out = run(QUEST.replace('(uint16_t)nPosX,0)', `${read},0)`));
+      assert.match(out, /nPosX\._0_2_ = 0|0xffff0000u/, `${read}: ${out}`);
+    }
+    const addr = run(QUEST.replace('eVar1 = Check', 'g(&nPosX); eVar1 = Check'));
+    assert.match(addr, /_0_2_/, addr);
+  });
+
+  it('the whole stores give the same low word the piece stores did', () => {
+    // CLIENT_PopulateVisibilityPacketBuffer 00537ee0: a byte flag stored as its low byte.
+    const out = run(`void f(D2UnitStrc *p, uint8_t *pOut) {
+  uint32_t byUnitType;
+  byUnitType._0_1_ = 6;
+  if (p != (D2UnitStrc *)0x0) {
+    byUnitType._0_1_ = (uint8_t)p->eUnitType;
+  }
+  *pOut = (uint8_t)byUnitType;
+}`);
+    assert.match(out, /byUnitType = 6; if \(p != \(D2UnitStrc\*\)0x0\) \{ byUnitType = p->eUnitType; \} \*pOut = \(uint8_t\)byUnitType;/, out);
+  });
+
+  it('CLIENT_PopulateVisibilityPacketBuffer 00537ee0: Ghidra\'s (undefined2) goes as well', () => {
+    const out = run(`void f(D2UnitStrc *pSlotUnit, uint16_t *pOut) {
+  int32_t wCoord;
+  if (pSlotUnit->pPath.pDynamicPath == 0) {
+    wCoord._0_2_ = (undefined2)((pSlotUnit->pPath).pStaticPath)->nPosX;
+  }
+  else {
+    wCoord = GetXPos((pSlotUnit->pPath).pDynamicPath);
+    wCoord._0_2_ = (undefined2)wCoord;
+  }
+  *pOut = (undefined2)wCoord;
+}`);
+    assert.match(out, /\{ wCoord = pSlotUnit->pPath\.pStaticPath->nPosX; \} else \{ wCoord = GetXPos\(pSlotUnit->pPath\.pDynamicPath\); \}/, out);
   });
 });

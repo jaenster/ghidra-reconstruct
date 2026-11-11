@@ -76,6 +76,7 @@ import { createTransformer, updateNode, type Transformer } from '../../transform
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { buildFunctionFlow, type FunctionFlow } from '../../cfg/index.js';
 import { createExprShape, type ExprShape } from './expr-shape.js';
+import { stepExpr, settleSteps } from './step-form.js';
 import {
   calleeName, bareName, canonicalBase, shapeOfNode, shapeOfSpelling, typeFromSpelling, unwrapParens,
   type TypeShape, type TypedefResolver,
@@ -1604,6 +1605,8 @@ function withTrivia<T extends object>(e: T, from: ASTNode): T {
 /** Rescaled variable `v` (old step `a`): its defs and compares in index units. */
 function rescaleDefsAndCompares(body: Statement[], v: string, a: bigint): Statement[] | null {
   let ok = true;
+  // A rescaled `v += a` keeps its value as `++v`; settled to `v++` where it is discarded.
+  const made = new WeakSet<ASTNode>();
   const div = (c: bigint): bigint | null => (c % a === 0n ? c / a : null);
   const isV = (e: Expression) => { const x = unwrapParens(e); return x.kind === NodeKind.Identifier && (x as Identifier).name === v; };
   const out = rebuild(body, n => {
@@ -1624,8 +1627,7 @@ function rescaleDefsAndCompares(body: Statement[], v: string, a: bigint): Statem
         const q = c === null ? null : div(c);
         if (q === null) { ok = false; return undefined; }
         const step = as.operator === '-=' ? -q : q;
-        if (step === 1n) return { ...Expr.postfix(as.left, '++'), leadingTrivia: n.leadingTrivia, trailingTrivia: n.trailingTrivia } as ASTNode;
-        if (step === -1n) return { ...Expr.postfix(as.left, '--'), leadingTrivia: n.leadingTrivia, trailingTrivia: n.trailingTrivia } as ASTNode;
+        if (step === 1n || step === -1n) return stepExpr(as.left, step === 1n ? '++' : '--', n, made);
         return { ...as, right: Expr.intLiteral(q) } as ASTNode;
       }
       if (as.operator !== '=') { ok = false; return undefined; }
@@ -1642,8 +1644,7 @@ function rescaleDefsAndCompares(body: Statement[], v: string, a: bigint): Statem
         const q = c2 === null ? null : div(c2);
         if (q === null) { ok = false; return undefined; }
         const step = b.operator === '-' ? -q : q;
-        if (step === 1n) return { ...Expr.postfix(as.left, '++'), leadingTrivia: n.leadingTrivia, trailingTrivia: n.trailingTrivia } as ASTNode;
-        if (step === -1n) return { ...Expr.postfix(as.left, '--'), leadingTrivia: n.leadingTrivia, trailingTrivia: n.trailingTrivia } as ASTNode;
+        if (step === 1n || step === -1n) return stepExpr(as.left, step === 1n ? '++' : '--', n, made);
         return { ...as, operator: '+=', right: Expr.intLiteral(step) } as ASTNode;
       }
       ok = false;
@@ -1669,7 +1670,9 @@ function rescaleDefsAndCompares(body: Statement[], v: string, a: bigint): Statem
     }
     return undefined;
   });
-  return ok ? out : null;
+  if (!ok) return null;
+  for (const s of out) settleSteps(s, made);
+  return out;
 }
 
 /** Every read of `v` the rescale has an answer for: own defs and literal compares. */
