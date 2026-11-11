@@ -83,6 +83,8 @@ export interface GhidraMetadata {
    * `zero-extend-cast` writes it as the cast to the unsigned type of that width.
    */
   zeroExtendWidth?: number;
+  /** That MOVZX read its source from memory (`movzx eax, byte ptr [m]`). */
+  zeroExtendMemory?: boolean;
   /**
    * The decompiler zero-extends this 32-bit operation's result to 64 bits and printed the
    * extension as a cast (`zext-site`); `arith-idioms` writes the cast's truncation to 32 bits
