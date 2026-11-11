@@ -1,7 +1,7 @@
 /**
  * Every vc8form that applies to a function, as tag text, with the body it prints.
  *
- * The search side of the form permuter (recon/runs/vc8form-permute.py): it hands over
+ * The search side of the form permuter (permute.ts): it hands over
  * function definitions as the tree prints them and gets back, per function, each form
  * applyVc8Forms implements at each site the body offers. A candidate is kept only when
  * its tag text parses back (parseVc8Form) to a form that applies and changes the body;
