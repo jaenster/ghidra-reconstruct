@@ -375,6 +375,20 @@ describe('vc8-form shapes: nestcall', () => {
     refused(['int f(U* p, int a) {', '  int t;', '  t = g(p);', '  return a && h(t);', '}'], 'nestcall(t)');
     refused(['int f(U* p) {', '  int t;', '  t = g(p);', '  return t + 1;', '}'], 'nestcall(t)');
   });
+  it('takes an enum or a handle, and reads past a store on one path only', () => {
+    let r = run(['int f(U* p) {', '  eD2LevelId e;', '  e = g(p);', '  return h(e, 1);', '}'], 'nestcall(e)');
+    assert.ok(r.sites[0].applied, r.sites[0].why);
+    assert.strictEqual(r.out, 'int f(U* p) { return h(g(p), 1); }');
+    refused(['int f(U* p, int a) {', '  int t;', '  t = g(p);', '  h(t, 1);', '  if (a) {', '    t = 2;', '  }', '  return t;', '}'], 'nestcall(t)');
+    r = run(['int f(U* p, int a) {', '  int t;', '  t = g(p);', '  h(t, 1);', '  if (a) {', '    t = 2;', '  } else {', '    t = 3;', '  }', '  return t;', '}'], 'nestcall(t)');
+    assert.ok(r.sites[0].applied, r.sites[0].why);
+  });
+  // AUTOMAP_RevealRoomsAroundPlayer 00459020: the loop after it stores the temporary first.
+  it('is dead before a loop that stores it first, however often the loop runs', () => {
+    const r = run(['int f(U* p, int n) {', '  int e;', '  int i;', '  e = g(p);', '  h(e, 1);', '  for (i = 0; i < n; i++) {', '    e = g(p);', '    h(e, 2);', '  }', '  return 0;', '}'], 'nestcall(e,1)');
+    assert.ok(r.sites[0].applied, r.sites[0].why);
+    refused(['int f(U* p, int n) {', '  int e;', '  int i;', '  e = g(p);', '  h(e, 1);', '  for (i = 0; i < n; i++) {', '    e = g(p);', '    h(e, 2);', '  }', '  return e;', '}'], 'nestcall(e,1)');
+  });
   it('is dead in a loop only when stored again first', () => {
     refused(['void f(U* p) {', '  int t = 0;', '  while (p) {', '    h(t);', '    t = g(p);', '    k(t, 1);', '  }', '}'], 'nestcall(t)');
   });
