@@ -2693,6 +2693,32 @@ const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op
  * Apply the forms to the (single) function definition in tu, in order. Each form works on
  * a copy and is kept only when it applied whole.
  */
+/**
+ * A form's expressions in the spelling the body now has. seed-roll-step turns a seed
+ * temporary `X` from a D2SeedStrc into the uint32_t low word it reads (`X.nSeedLow` becomes
+ * `X`); a tag recorded before that names `X.nSeedLow`, which nothing prints any more
+ * (AITHINK_Fn1_Arach 005f4510's `nest((int)(DVar1.nSeedLow % 100) >= ...)`). Where X is a
+ * local of the function no longer declared D2SeedStrc, the member is read as X itself -
+ * the same word the rewrite made X hold.
+ */
+function respellForm(fn: FunctionDecl, form: Vc8Form): Vc8Form {
+  const words = new Set<string>();
+  for (const { node } of walk(fn.body!)) {
+    if (node.kind !== NodeKind.VariableDecl) continue;
+    const d = node as VariableDecl;
+    if (!/\bD2SeedStrc\b/.test(text(d.type))) words.add(d.name.name);
+  }
+  let changed = false;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(form)) {
+    if (k === 'op' || typeof v !== 'string') { out[k] = v; continue; }
+    const r = v.replace(/\b([A-Za-z_]\w*)\s*\.\s*nSeedLow\b/g, (m, x: string) => (words.has(x) ? x : m));
+    if (r !== v) changed = true;
+    out[k] = r;
+  }
+  return changed ? (out as unknown as Vc8Form) : form;
+}
+
 export function applyVc8Forms(tu: TranslationUnit, forms: Array<{ form: Vc8Form; tag?: string }>,
   onSite?: (s: Vc8FormSite) => void, tables?: SelectArgumentOptions): TranslationUnit {
   if (forms.length === 0) return tu;
@@ -2703,7 +2729,7 @@ export function applyVc8Forms(tu: TranslationUnit, forms: Array<{ form: Vc8Form;
     const fn = next.declarations.find(d => d.kind === NodeKind.FunctionDecl && (d as FunctionDecl).body) as FunctionDecl | undefined;
     try {
       if (!fn) refuse('no function body');
-      (APPLY[form.op] as (fn: FunctionDecl, f: Vc8Form) => void)(fn!, form);
+      (APPLY[form.op] as (fn: FunctionDecl, f: Vc8Form) => void)(fn!, respellForm(fn!, form));
       cur = next;
       onSite?.({ form, tag, applied: true });
     } catch (e) {

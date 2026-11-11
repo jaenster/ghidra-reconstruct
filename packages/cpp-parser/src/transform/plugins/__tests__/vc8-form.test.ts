@@ -667,3 +667,38 @@ describe('vc8-form: retwiden', () => {
     }
   });
 });
+
+describe('Golden: a tag recorded before seed-roll-step', () => {
+  // AITHINK_Fn1_Arach 005f4510 as the 1150 generator printed its engaged-in-combat arm
+  // (program v2071): the step is one call and DVar1 the uint32_t low word, the if nested
+  // by branch-layout. Its tag names the condition as recorded, over DVar1.nSeedLow.
+  const ARACH = [
+    'void f(SGAMEDATA* pGame, D2UnitStrc* pUnit, D2MonStatsTxt* pMonStats, D2SeedStrc* pSeed, D2UnitStrc* pAttacker, int bEngagedInCombat) {',
+    '  uint32_t DVar1;',
+    '  if (bEngagedInCombat) {',
+    '    DVar1 = D2_SeedRoll(pSeed);',
+    '    if ((int)(DVar1 % 100) >= (int)pMonStats->aip[0][pGame->nDifficulty]) {',
+    '      PlanNextAiMove(pGame, pUnit, 0xf);',
+    '      return;',
+    '    }',
+    '',
+    '    AI_ChangeModeAndTargetUnit(pGame, pUnit, 4, pAttacker);',
+    '    return;',
+    '  }',
+    '  g();',
+    '}',
+  ];
+  const TAG = 'nest((int)(DVar1.nSeedLow % 100) >= (int)pMonStats->aip[0][pGame->nDifficulty])';
+
+  it('AITHINK_Fn1_Arach 005f4510: the nest applies, the mode change first again', () => {
+    const { out, sites } = run(ARACH, TAG);
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.ok(out.indexOf('AI_ChangeModeAndTargetUnit') < out.indexOf('PlanNextAiMove'), out);
+    assert.ok(out.includes('if ((int)(DVar1 % 100) < (int)pMonStats->aip[0][pGame->nDifficulty])'), out);
+  });
+
+  it('leaves the member where the local still is the seed', () => {
+    const { sites } = run(ARACH.map(l => l.replace('uint32_t DVar1;', 'D2SeedStrc DVar1;')), TAG);
+    assert.ok(!sites[0].applied);
+  });
+});
