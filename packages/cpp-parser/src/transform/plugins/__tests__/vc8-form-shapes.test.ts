@@ -60,6 +60,11 @@ describe('vc8-form shapes: nest', () => {
   it('refuses a guard that can fall through', () => {
     refused(['int f(U* p) {', '  if (p) {', '    g();', '  }', '  return 1;', '}'], 'nest(p)');
   });
+  it('moves a whole switch with its case labels', () => {
+    const { out, sites } = run(['int f(Q* q, int n) {', '  if (!q) {', '    return 0;', '  }', '  switch (n) {', '  case 1:', '    return g();', '  }', '  return 1;', '}'], 'nest(!q)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.strictEqual(out, 'int f(Q* q, int n) { if (q) { switch (n) { case 1: return g(); } return 1; } else { return 0; } }');
+  });
   it('refuses to move a case label', () => {
     refused(['int f(int n) {', '  switch (n) {', '  case 1:', '    if (n) return 0;', '    g();', '  case 2:', '    return 2;', '  }', '  return 1;', '}'], 'nest(n)');
   });
@@ -86,6 +91,16 @@ describe('vc8-form shapes: merge-tail', () => {
   });
   it('refuses different returns', () => {
     refused(['int f(int n) {', '  if (n) {', '    return 0;', '  }', '  g();', '  return 1;', '}'], 'merge-tail(n)');
+  });
+  // OBJOP_A5Q5_WorldstonePortalActivate 0058d400: the statements between hold a whole switch,
+  // whose case labels move with it.
+  it('moves a whole switch into the arm', () => {
+    const { out, sites } = run(['int f(Q* q, int n) {', '  if (!q) {', '    return 0;', '  }', '  switch (n) {', '  case 1:', '    g();', '    break;', '  default:', '    h();', '  }', '  return 0;', '}'], 'merge-tail(!q)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.strictEqual(out, 'int f(Q* q, int n) { if (q) { switch (n) { case 1: g(); break; default: h(); } } return 0; }');
+  });
+  it('still refuses to move a goto label', () => {
+    refused(['int f(Q* q) {', '  if (!q) {', '    return 0;', '  }', '  g();', 'out:', '  h();', '  return 0;', '}'], 'merge-tail(!q)');
   });
 });
 

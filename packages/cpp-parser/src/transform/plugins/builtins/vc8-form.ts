@@ -1427,12 +1427,32 @@ function leaves(s: Statement): boolean {
   return false;
 }
 
-/** Labels, case labels and declarations at the top of a statement list cannot move into a new scope. */
+/** The direct child nodes of n. */
+function childrenOf(n: ASTNode): ASTNode[] {
+  const out: ASTNode[] = [];
+  for (const key of Object.keys(n)) {
+    if (key === 'location' || key === 'leadingTrivia' || key === 'trailingTrivia') continue;
+    const v = (n as unknown as Record<string, unknown>)[key];
+    if (Array.isArray(v)) { for (const x of v) if (x && typeof x === 'object' && typeof (x as ASTNode).kind === 'string') out.push(x as ASTNode); }
+    else if (v && typeof v === 'object' && typeof (v as ASTNode).kind === 'string') out.push(v as ASTNode);
+  }
+  return out;
+}
+
+/**
+ * Labels and declarations at the top of a statement list cannot move into a new scope. The
+ * case and default labels of a switch that moves whole move with it (OBJOP_A5Q5_
+ * WorldstonePortalActivate 0058d400 ends in one); a goto label still refuses.
+ */
 function movable(st: Statement[], declsOk: boolean): string | undefined {
+  const labelIn = (n: ASTNode, inSwitch: boolean): boolean => {
+    if (n.kind === NodeKind.LabelStmt) return true;
+    if (!inSwitch && (n.kind === NodeKind.CaseStmt || n.kind === NodeKind.DefaultStmt)) return true;
+    const inner = inSwitch || n.kind === NodeKind.SwitchStmt;
+    return childrenOf(n).some(c => labelIn(c, inner));
+  };
   for (const s of st) {
-    for (const { node } of walk(s)) {
-      if (node.kind === NodeKind.LabelStmt || node.kind === NodeKind.CaseStmt || node.kind === NodeKind.DefaultStmt) return 'a label would move';
-    }
+    if (labelIn(s, false)) return 'a label would move';
     if (!declsOk && s.kind === NodeKind.DeclStmt) return 'a declaration would change scope';
   }
   return undefined;
