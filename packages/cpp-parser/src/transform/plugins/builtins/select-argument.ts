@@ -88,6 +88,9 @@ export interface SelectArgumentOptions extends PluginOptions {
   enclosingVarTypes?: Record<string, string>;
   /** Enumerator -> its value, where every enum declaring the name agrees on it. */
   enumValues?: Record<string, number>;
+  /** Function name -> its parameters' spellings, and the namespace the function sits in (vc8-form width). */
+  functionParamTypes?: Record<string, string[]>;
+  enclosingSegments?: readonly string[];
   onSite?: (e: { variable: string; line: number }) => void;
 }
 

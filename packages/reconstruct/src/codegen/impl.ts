@@ -3369,6 +3369,8 @@ function transformDecompiledCode(
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         enclosingVarTypes,
         enumValues: context.funcPtrArgCasts.enumValues,
+        functionParamTypes: context.funcPtrArgCasts.functionParamTypes,
+        enclosingSegments: enclosing?.ghidraNamespaceSegments ?? enclosing?.namespaceSegments,
         onSite: (e: { variable: string; line: number }) =>
           console.warn(`[select-arg] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.variable} at line ${e.line}`),
       };

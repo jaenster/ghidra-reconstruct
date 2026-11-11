@@ -397,16 +397,79 @@ describe('vc8-form: width', () => {
     assert.strictEqual(out, 'void f(char* b) { uint16_t nSize = Read(b, 0x400); if (nSize) { Handle(b, nSize); } }');
   });
   // SUNITNPC_ApplyScrollSkill 00576e40: the unit type held in a 32-bit local.
-  it('drops a narrowing cast to the old type on a store', () => {
+  it('drops a narrowing cast to the old type on a store whose value fits', () => {
     const { out, sites } = run([
       'void f(U* p) {',
       '  uint8_t t;',
-      '  t = (uint8_t)p->eUnitType;',
+      '  t = (uint8_t)(p->eUnitType & 0x7f);',
       '  Send(t);',
       '}',
     ], 'width(t,int)');
     assert.ok(sites[0].applied, sites[0].why);
-    assert.strictEqual(out, 'void f(U* p) { int t; t = p->eUnitType; Send(t); }');
+    assert.strictEqual(out, 'void f(U* p) { int t; t = p->eUnitType & 0x7f; Send(t); }');
+  });
+  // MISSILE_SetPathFromTotalFrames_ForCatapultChargedBall 004cccc0: the original keeps the
+  // frame count's low byte; the wide local would keep all of it.
+  it('refuses to drop a narrowing cast whose value can exceed the old type', () => {
+    const src = [
+      'void f(int n) {',
+      '  uint8_t d;',
+      '  d = (uint8_t)n;',
+      '  Set(d);',
+      '}',
+    ];
+    const { out, sites } = run(src, 'width(d,int)');
+    assert.strictEqual(sites[0].applied, false);
+    assert.match(sites[0].why!, /can exceed uint8_t/);
+    assert.strictEqual(out, flat(src.join(' ')));
+  });
+  it('refuses a store of an unknown value into a wider local', () => {
+    const { sites } = run(['void f(U* p) {', '  uint8_t t;', '  t = (uint8_t)p->eUnitType;', '  Send(t);', '}'], 'width(t,int)');
+    assert.strictEqual(sites[0].applied, false);
+  });
+  // MINIPANEL_ShowTooltip 0047f490: a flag stored as constants only.
+  it('keeps a widening whose stores are constants of both types', () => {
+    const { out, sites } = run([
+      'void f(int c) {', '  bool b;', '  b = false;', '  if (c) {', '    b = true;', '  }', '  if (b && c != 0x39) {', '    g();', '  }', '}',
+    ], 'width(b,int)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.ok(out.startsWith('void f(int c) { int b; b = false;'), out);
+  });
+  it('keeps a widening whose stores come from locals of the old type', () => {
+    const { sites } = run(['int f(uint16_t a) {', '  uint16_t w;', '  w = a;', '  return w;', '}'], 'width(w,uint32_t)');
+    assert.ok(sites[0].applied, sites[0].why);
+  });
+  // NET_MCP_CLIENT_ReadAndParsePacket 00449b70: `uVar1 & 0xffff` keeps what a short keeps.
+  it('keeps a narrowing whose every read truncates to the new width', () => {
+    const { out, sites } = run([
+      'void f(char* b) {', '  uint32_t u;', '  u = Read(b);', '  if ((short)u != 0) {', '    Handle(b, u & 0xffff);', '  }', '}',
+    ], 'width(u,short int)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.strictEqual(out, 'void f(char* b) { short int u; u = Read(b); if (u != 0) { Handle(b, u & 0xffff); } }');
+  });
+  it('keeps a narrowing whose read is a parameter of the new width', () => {
+    const forms = [{ form: parseVc8Form('width(u,uint8_t)')!, tag: 'w' }];
+    const sites: Vc8FormSite[] = [];
+    const tu = applyVc8Forms(parse(['void f() {', '  uint32_t u;', '  u = Read();', '  Send(u);', '}'].join('\n')) as TranslationUnit,
+      forms, s => sites.push(s), { functionParamTypes: { Send: ['uint8_t'] } });
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.strictEqual(flat(emit(tu as AnyNode)), 'void f() { uint8_t u; u = Read(); Send(u); }');
+  });
+  it('refuses a narrowing with a read that keeps more than the new width', () => {
+    const { sites } = run(['int f() {', '  uint32_t u;', '  u = Read();', '  Send(u & 0xffff);', '  return u;', '}'], 'width(u,uint16_t)');
+    assert.strictEqual(sites[0].applied, false);
+    assert.match(sites[0].why!, /return u/);
+  });
+  // MISSILE_CreateSubWithSound 004ce850: small constants, but a 32-bit unsigned local
+  // compared with a value that may be negative compares unsigned.
+  it('refuses a signedness change a read depends on', () => {
+    const { sites } = run(['void f(int k) {', '  uint32_t m;', '  m = 4;', '  if (k < m) {', '    g();', '  }', '}'], 'width(m,int)');
+    assert.strictEqual(sites[0].applied, false);
+    assert.match(sites[0].why!, /signedness/);
+  });
+  it('keeps a signedness change no read depends on', () => {
+    const { sites } = run(['void f(S* s) {', '  uint32_t m;', '  m = 4;', '  if (1 < m) {', '    g(s, m);', '  }', '  h(m / 2);', '}'], 'width(m,int)');
+    assert.ok(sites[0].applied, sites[0].why);
   });
 });
 

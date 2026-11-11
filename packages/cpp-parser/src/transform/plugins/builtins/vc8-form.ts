@@ -127,6 +127,9 @@ import { parse } from '../../../parser/index.js';
 import { emit } from '../../../emit/index.js';
 import { cloneNode } from '../../transformer.js';
 import { selectPairedArguments, SelectRefused, type SelectArgumentOptions } from './select-argument.js';
+import { createExprShape } from './expr-shape.js';
+import { localTypesOf } from './compare-form.js';
+import { calleeName, scopedLookup } from './call-arg-cast.js';
 
 export type Vc8Form =
   | { op: 'seq'; targets: string[]; index?: number }
@@ -987,20 +990,150 @@ const WIDTH: Record<string, number> = {
   int: 4, 'unsignedint': 4, unsigned: 4, uint: 4, int32_t: 4, uint32_t: 4, DWORD: 4, BOOL: 4, long: 4, 'unsignedlong': 4, ulong: 4, size_t: 4, undefined4: 4,
 };
 
+/** A value range; `u` marks an expression of a 32-bit unsigned type, whose arithmetic wraps. */
+interface Range { lo: bigint; hi: bigint; u?: boolean }
+
+const I32: Range = { lo: -0x80000000n, hi: 0x7fffffffn };
+const U32: Range = { lo: 0n, hi: 0xffffffffn, u: true };
+const RANGE: Record<string, Range> = {
+  bool: { lo: 0n, hi: 1n },
+  char: { lo: -0x80n, hi: 0x7fn }, 'signedchar': { lo: -0x80n, hi: 0x7fn }, int8_t: { lo: -0x80n, hi: 0x7fn },
+  'unsignedchar': { lo: 0n, hi: 0xffn }, uint8_t: { lo: 0n, hi: 0xffn }, BYTE: { lo: 0n, hi: 0xffn }, byte: { lo: 0n, hi: 0xffn },
+  undefined1: { lo: 0n, hi: 0xffn }, uchar: { lo: 0n, hi: 0xffn }, UCHAR: { lo: 0n, hi: 0xffn },
+  short: { lo: -0x8000n, hi: 0x7fffn }, 'shortint': { lo: -0x8000n, hi: 0x7fffn }, 'signedshort': { lo: -0x8000n, hi: 0x7fffn },
+  int16_t: { lo: -0x8000n, hi: 0x7fffn }, SHORT: { lo: -0x8000n, hi: 0x7fffn },
+  'unsignedshort': { lo: 0n, hi: 0xffffn }, 'unsignedshortint': { lo: 0n, hi: 0xffffn }, uint16_t: { lo: 0n, hi: 0xffffn },
+  WORD: { lo: 0n, hi: 0xffffn }, ushort: { lo: 0n, hi: 0xffffn }, undefined2: { lo: 0n, hi: 0xffffn }, wchar_t: { lo: 0n, hi: 0xffffn },
+  USHORT: { lo: 0n, hi: 0xffffn },
+  int: I32, 'signedint': I32, signed: I32, int32_t: I32, long: I32, 'longint': I32, BOOL: I32, INT: I32, LONG: I32,
+  'unsignedint': U32, unsigned: U32, uint: U32, uint32_t: U32, DWORD: U32, 'unsignedlong': U32, 'unsignedlongint': U32,
+  ulong: U32, ULONG: U32, UINT: U32, size_t: U32, undefined4: U32,
+};
+
+/**
+ * The range and width of an integer type spelled t, through the typedef table. A spelling
+ * that is no integer type is taken as an enum when `enumLike`: GCC gives an enum without
+ * negative members `unsigned int`, one with them `int`, so only 0..INT_MAX is certain.
+ */
+function intType(t: string, enumLike: boolean): { r: Range; w: number; signUnknown?: boolean } | undefined {
+  let b = norm(t).replace(/^const(?=\w)/, '');
+  for (let k = 0; k < 8 && !RANGE[b]; k++) {
+    const next = selectTables?.typedefTargets?.[b];
+    if (!next) break;
+    b = norm(next).replace(/^const(?=\w)/, '');
+  }
+  const r = RANGE[b];
+  if (r) return { r, w: b === 'bool' ? 1 : WIDTH[b] ?? (r.hi > 0xffffn || r.lo < -0x8000n ? 4 : r.hi > 0xffn || r.lo < -0x80n ? 2 : 1) };
+  if (!enumLike || /[*&\[]/.test(b)) return undefined;
+  return { r: { lo: 0n, hi: 0x7fffffffn }, w: 4, signUnknown: true };
+}
+
+const within = (a: Range, b: Range) => a.lo >= b.lo && a.hi <= b.hi;
+const bitsOf = (v: bigint) => { let n = 0; while (v > 0n) { v >>= 1n; n++; } return n; };
+
+/** The values e can take, as far as its literals, casts and declared types tell; undefined when unknown. */
+function rangeOf(e: Expression, shapeOf: ((x: Expression) => { base: string; stars: number } | null) | undefined): Range | undefined {
+  e = unparen(e);
+  switch (e.kind) {
+    case NodeKind.IntegerLiteral: {
+      const l = e as IntegerLiteralExpr;
+      return { lo: l.value, hi: l.value, u: /u/i.test(l.suffix) || l.value > 0x7fffffffn };
+    }
+    case NodeKind.CharLiteral: { const v = BigInt((e as unknown as { value: number }).value); return { lo: v, hi: v }; }
+    case NodeKind.BoolLiteral: { const v = (e as unknown as { value: boolean }).value ? 1n : 0n; return { lo: v, hi: v }; }
+    case NodeKind.CStyleCastExpr: {
+      const c = e as CStyleCastExpr;
+      const t = intType(text(c.type), false);
+      if (!t) return undefined;
+      if (text(c.type) === 'bool') return { lo: 0n, hi: 1n };
+      const inner = rangeOf(c.expression, shapeOf);
+      return inner && within(inner, t.r) ? { ...inner, u: t.r.u } : t.r;
+    }
+    case NodeKind.ConditionalExpr: {
+      const c = e as ConditionalExpr;
+      const a = rangeOf(c.thenExpr, shapeOf), b = rangeOf(c.elseExpr, shapeOf);
+      return a && b ? { lo: a.lo < b.lo ? a.lo : b.lo, hi: a.hi > b.hi ? a.hi : b.hi, u: a.u || b.u } : undefined;
+    }
+    case NodeKind.UnaryExpr: {
+      const u = e as UnaryExpr;
+      if (u.operator === '!') return { lo: 0n, hi: 1n };
+      if (u.operator === '-') {
+        const a = rangeOf(u.operand, shapeOf);
+        if (!a || a.u) return undefined;
+        const r = { lo: -a.hi, hi: -a.lo };
+        return within(r, I32) ? r : undefined;
+      }
+      break;
+    }
+    case NodeKind.BinaryExpr: {
+      const x = e as BinaryExpr;
+      if (['==', '!=', '<', '<=', '>', '>=', '&&', '||'].includes(x.operator)) return { lo: 0n, hi: 1n };
+      const a = rangeOf(x.left, shapeOf), b = rangeOf(x.right, shapeOf);
+      const u = !!(a?.u || b?.u);
+      const fit = (r: Range): Range | undefined => (u ? (r.lo >= 0n && r.hi <= 0xffffffffn ? { ...r, u } : undefined) : within(r, I32) ? r : undefined);
+      if (x.operator === '&') {
+        // Masking by a non-negative value bounds the result by it, whatever the other side.
+        const ks = [a, b].filter((r): r is Range => !!r && r.lo >= 0n);
+        if (ks.length) return { lo: 0n, hi: ks.reduce((m, r) => (r.hi < m ? r.hi : m), ks[0].hi), u };
+        return undefined;
+      }
+      if (!a || !b) return undefined;
+      switch (x.operator) {
+        case '+': return fit({ lo: a.lo + b.lo, hi: a.hi + b.hi });
+        case '-': return fit({ lo: a.lo - b.hi, hi: a.hi - b.lo });
+        case '*': {
+          const p = [a.lo * b.lo, a.lo * b.hi, a.hi * b.lo, a.hi * b.hi];
+          return fit({ lo: p.reduce((m, v) => (v < m ? v : m)), hi: p.reduce((m, v) => (v > m ? v : m)) });
+        }
+        case '|': case '^':
+          return a.lo >= 0n && b.lo >= 0n ? { lo: 0n, hi: (1n << BigInt(bitsOf(a.hi > b.hi ? a.hi : b.hi))) - 1n, u } : undefined;
+        case '%':
+          if (b.lo !== b.hi || b.lo <= 0n) return undefined;
+          return a.lo >= 0n ? { lo: 0n, hi: b.lo - 1n, u } : u ? undefined : { lo: 1n - b.lo, hi: b.lo - 1n };
+        case '>>':
+          if (b.lo !== b.hi || b.lo < 0n || b.lo > 31n || a.lo < 0n) return undefined;
+          return { lo: a.lo >> b.lo, hi: a.hi >> b.lo, u };
+        case '/':
+          if (b.lo !== b.hi || b.lo <= 0n || a.lo < 0n) return undefined;
+          return { lo: a.lo / b.lo, hi: a.hi / b.lo, u };
+      }
+      return undefined;
+    }
+  }
+  const s = shapeOf?.(e);
+  if (!s || s.stars !== 0) return undefined;
+  return intType(s.base, false)?.r;
+}
+
+/**
+ * width(V,T): V is declared T. Value-preserving, or refused: every value stored into V
+ * must lie in both its old type and T, so V holds the same number either way; or, where
+ * T is not wider than the old type, every read of V must keep no more of it than T holds
+ * (a cast to a type that wide, a mask, a parameter or return of that width), which is
+ * the truncation the original does at the read. An uncast `V = (old)E` whose E can
+ * exceed the old type stores more than the original kept (MISSILE_SetPathFromTotalFrames
+ * stores the frame count, the original its low byte).
+ */
 function doWidth(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'width' }>): void {
   let d: VariableDecl | undefined;
   for (const b of blocks(fn)) { for (const s of b.statements) { const x = declOf(s); if (x?.name.name === f.name) d = x; } }
   if (!d) refuse(`no declaration of ${f.name}`);
   const old = text(d!.type), T = norm(f.type);
   if (old === T) refuse(`${f.name} is ${f.type} already`);
+  if (addressTaken(fn, f.name)) refuse(`&${f.name} is taken`);
   const w = WIDTH[T];
-  d!.type = parseType(f.type);
+  const oldT = intType(old, true), newT = intType(T, true);
+  if (!oldT || !newT) refuse(`${!oldT ? old : T} is no integer type`);
   const truth = new Set<ASTNode>();
   for (const { node } of walk(fn.body!)) {
-    if (node.kind === NodeKind.IfStmt || node.kind === NodeKind.WhileStmt) truth.add(unparen((node as IfStmt).condition));
+    if (node.kind === NodeKind.IfStmt || node.kind === NodeKind.WhileStmt || node.kind === NodeKind.DoWhileStmt) truth.add(unparen((node as IfStmt).condition));
+    if (node.kind === NodeKind.ForStmt && (node as unknown as { condition: Expression | null }).condition) truth.add(unparen((node as unknown as { condition: Expression }).condition));
+    if (node.kind === NodeKind.ConditionalExpr) truth.add(unparen((node as ConditionalExpr).condition));
     if (node.kind === NodeKind.UnaryExpr && (node as UnaryExpr).operator === '!') truth.add(unparen((node as UnaryExpr).operand));
     if (node.kind === NodeKind.BinaryExpr && ['&&', '||'].includes((node as BinaryExpr).operator)) { truth.add(unparen((node as BinaryExpr).left)); truth.add(unparen((node as BinaryExpr).right)); }
   }
+  checkWidthPreserved(fn, f.name, d!, oldT!, newT!, old, T, truth);
+  d!.type = parseType(f.type);
   for (const { node, slot } of [...walk(fn.body!)]) {
     if (!slot) continue;
     if (node.kind === NodeKind.CStyleCastExpr) {
@@ -1010,6 +1143,149 @@ function doWidth(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'width' }>): void {
     if (node.kind === NodeKind.AssignExpr && isId(unparen((node as AssignExpr).left), f.name)) {
       const r = unparen((node as AssignExpr).right);
       if (r.kind === NodeKind.CStyleCastExpr && text((r as CStyleCastExpr).type) === old) (node as AssignExpr).right = (r as CStyleCastExpr).expression;
+    }
+  }
+}
+
+type IntInfo = { r: Range; w: number; signUnknown?: boolean };
+
+function checkWidthPreserved(fn: FunctionDecl, v: string, d: VariableDecl, oldT: IntInfo, newT: IntInfo,
+  old: string, T: string, truth: Set<ASTNode>): void {
+  const parents = parentsOf(fn);
+  const tables = selectTables;
+  const shapeOf = tables ? createExprShape(localTypesOf(fn), {
+    globalTypes: tables.globalTypes ?? {}, enclosingVarTypes: tables.enclosingVarTypes ?? {},
+    structFields: tables.structFields ?? {}, fieldTypes: tables.fieldTypes ?? {},
+    returnTypes: tables.functionReturnTypes ?? {}, resolve: (n: string) => tables.typedefTargets?.[n],
+  }) : (x: Expression) => {
+    const id = unparen(x);
+    if (!isId(id)) return null;
+    for (const { node } of walk(fn.body!)) if (node.kind === NodeKind.VariableDecl && (node as VariableDecl).name.name === id.name) return { base: text((node as VariableDecl).type), stars: 0 };
+    for (const p of fn.parameters) if ((p as unknown as { name?: Identifier | null }).name?.name === id.name) return { base: text(p.type), stars: 0 };
+    return null;
+  };
+  const both: Range = { lo: oldT.r.lo > newT.r.lo ? oldT.r.lo : newT.r.lo, hi: oldT.r.hi < newT.r.hi ? oldT.r.hi : newT.r.hi };
+
+  // The stores, each with the value it stores once the form has dropped a cast to the old type.
+  const stored: Array<{ what: string; value?: Expression }> = [];
+  if (d.initializer && d.initializer.kind !== NodeKind.InitListExpr) stored.push({ what: `${v} = ${emit(d.initializer as never)}`, value: d.initializer as Expression });
+  const storeNodes = new Set<ASTNode>([d.name]);
+  for (const { node } of walk(fn.body!)) {
+    if (node.kind === NodeKind.AssignExpr && isId(unparen((node as AssignExpr).left), v)) {
+      const a = node as AssignExpr;
+      storeNodes.add(unparen(a.left));
+      let r = unparen(a.right);
+      if (r.kind === NodeKind.CStyleCastExpr && text((r as CStyleCastExpr).type) === old) r = (r as CStyleCastExpr).expression;
+      stored.push(a.operator === '=' ? { what: emit(a as never), value: r } : { what: emit(a as never) });
+    }
+    if ((node.kind === NodeKind.PostfixExpr || (node.kind === NodeKind.UnaryExpr && ['++', '--'].includes((node as UnaryExpr).operator)))
+      && isId(unparen((node as UnaryExpr).operand), v)) {
+      storeNodes.add(unparen((node as UnaryExpr).operand));
+      stored.push({ what: emit(node as never) });
+    }
+  }
+  const outOfRange = stored.filter(s => {
+    if (!s.value) return true;
+    const r = rangeOf(s.value, shapeOf);
+    return !r || !within(r, both);
+  });
+
+  if (outOfRange.length === 0) {
+    // Every value is the same number in either type. A read still means the same only
+    // where its operation does not depend on the signedness of a 32-bit V.
+    const sign32 = (t: IntInfo) => (t.signUnknown ? 'unknown' : t.w === 4 ? (t.r.u ? 'u' : 's') : 's');
+    if (sign32(oldT) === sign32(newT) && sign32(oldT) !== 'unknown') return;
+    for (const { node } of walk(fn.body!)) {
+      if (!isId(node, v) || storeNodes.has(node)) continue;
+      const why = signSensitiveRead(node, parents, truth, shapeOf);
+      if (why) refuse(`${v} changes signedness (${old} -> ${T}) and ${why}`);
+    }
+    return;
+  }
+
+  // The second way: the original keeps no more of V at any read than T holds.
+  const keep = Math.min(oldT.w, newT.w);
+  const why = (s: string) => `${outOfRange[0].what} can exceed ${both.lo === oldT.r.lo && both.hi === oldT.r.hi ? old : T} and ${s}`;
+  if (newT.w > oldT.w) refuse(why(`${T} is wider than ${old}`));
+  // A compound store keeps the low bytes only where it works on them alone.
+  for (const { node } of walk(fn.body!)) {
+    if (node.kind === NodeKind.AssignExpr && isId(unparen((node as AssignExpr).left), v)
+      && !['=', '+=', '-=', '*=', '&=', '|=', '^=', '<<='].includes((node as AssignExpr).operator)) {
+      refuse(why(`${emit(node as never)} reads more than the low bytes`));
+    }
+  }
+  for (const { node } of walk(fn.body!)) {
+    if (!isId(node, v) || storeNodes.has(node)) continue;
+    const kept = readWidth(fn, node, parents);
+    if (kept === undefined || kept > keep) refuse(why(`the read in ${emit((parents.get(node) ?? node) as never)} keeps ${kept === undefined ? 'all of it' : `${kept * 8} bits`}`));
+  }
+}
+
+/** How many bytes of V a read keeps: a cast to an integer type, a mask, a parameter or the return of that width. */
+function readWidth(fn: FunctionDecl, id: ASTNode, parents: Map<ASTNode, ASTNode>): number | undefined {
+  let cur: ASTNode = id;
+  let p = parents.get(cur);
+  while (p && p.kind === NodeKind.ParenExpr) { cur = p; p = parents.get(cur); }
+  if (!p) return undefined;
+  const narrow = (t: string) => (norm(t) === 'bool' ? undefined : intType(t, false)?.w);
+  if (p.kind === NodeKind.CStyleCastExpr) return narrow(text((p as CStyleCastExpr).type));
+  if (p.kind === NodeKind.BinaryExpr && (p as BinaryExpr).operator === '&') {
+    const x = p as BinaryExpr;
+    const k = unparen(x.left === cur ? x.right : x.left);
+    if (k.kind !== NodeKind.IntegerLiteral) return undefined;
+    const bits = bitsOf((k as IntegerLiteralExpr).value);
+    return bits <= 8 ? 1 : bits <= 16 ? 2 : 4;
+  }
+  if (p.kind === NodeKind.CallExpr && (p as unknown as { arguments: ASTNode[] }).arguments.includes(cur)) {
+    const call = p as unknown as { callee: Expression; arguments: ASTNode[] };
+    const name = calleeName(call.callee);
+    const params = name && selectTables?.functionParamTypes
+      ? scopedLookup(selectTables.functionParamTypes, name, selectTables.enclosingSegments ?? []) : undefined;
+    const t = params?.[call.arguments.indexOf(cur)];
+    return t ? narrow(t) : undefined;
+  }
+  if (p.kind === NodeKind.ReturnStmt) return narrow(text(fn.returnType));
+  return undefined;
+}
+
+/**
+ * Why a read of V, an in-range value, means something else once V's 32-bit signedness
+ * changes; undefined when it does not. + - * & | ^ << ~ wrap the same in either; a
+ * comparison, / % >> or an index do not, unless the value is still V itself and the other
+ * operand a non-negative value.
+ */
+function signSensitiveRead(id: ASTNode, parents: Map<ASTNode, ASTNode>, truth: Set<ASTNode>,
+  shapeOf: (x: Expression) => { base: string; stars: number } | null): string | undefined {
+  let cur: ASTNode = id;
+  let mixed = false;
+  const nonneg = (e: Expression) => { const r = rangeOf(e, shapeOf); return !!r && r.lo >= 0n && r.hi <= 0x7fffffffn; };
+  for (;;) {
+    if (truth.has(cur)) return undefined;
+    const p = parents.get(cur);
+    if (!p) return undefined;
+    switch (p.kind) {
+      case NodeKind.ParenExpr: cur = p; continue;
+      case NodeKind.CStyleCastExpr: return undefined;
+      case NodeKind.UnaryExpr:
+        if (['-', '~'].includes((p as UnaryExpr).operator)) { mixed = true; cur = p; continue; }
+        if ((p as UnaryExpr).operator === '!') return undefined;
+        return `${emit(p as never)} reads it`;
+      case NodeKind.BinaryExpr: {
+        const x = p as BinaryExpr;
+        const other = x.left === cur ? x.right : x.left;
+        if (['+', '-', '*', '&', '|', '^'].includes(x.operator) || (x.operator === '<<' && x.left === cur)) { mixed = true; cur = p; continue; }
+        if (['==', '!=', '<', '<=', '>', '>=', '/', '%', '>>'].includes(x.operator)) {
+          if (!mixed && nonneg(other) && (!['/', '%', '>>'].includes(x.operator) || x.left === cur)) {
+            if (['/', '%', '>>'].includes(x.operator)) { cur = p; continue; }
+            return undefined;
+          }
+          return `${emit(p as never)} depends on it`;
+        }
+        if (['&&', '||'].includes(x.operator)) return undefined;
+        return `${emit(p as never)} reads it`;
+      }
+      case NodeKind.SubscriptExpr: return mixed ? `the index ${emit(p as never)} depends on it` : undefined;
+      default: return undefined;
     }
   }
 }
