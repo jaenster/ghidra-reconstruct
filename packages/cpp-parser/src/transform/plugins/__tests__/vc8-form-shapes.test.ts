@@ -135,6 +135,27 @@ describe('vc8-form shapes: expressions', () => {
     assert.ok(sites[0].applied, sites[0].why);
     assert.strictEqual(out, 'int f(int a, int b) { if ((a && b) != 0) { return 0; } return 1; }');
   });
+  // CLIENT_GetEffectiveInventory 0046db30, as the generator prints it: a VC8 compile of the
+  // bool conversion keeps the original's `shr eax, 3` where the bare test folds it away.
+  it('bool writes a truth test as (bool)(E)', () => {
+    const lines = ['D2InventoryStrc* f(D2UnitStrc* pUnit, int* pUnit2) {', '  if (pUnit && pUnit->eUnitFlagsEx >> 3 & 1) {', '    return 0;', '  }', '  return pUnit->pInventory;', '}'];
+    const { out, sites } = run(lines, 'bool(pUnit->eUnitFlagsEx >> 3 & 1)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.strictEqual(out, 'D2InventoryStrc* f(D2UnitStrc* pUnit, int* pUnit2) { if (pUnit && (bool)(pUnit->eUnitFlagsEx >> 3 & 1)) { return 0; } return pUnit->pInventory; }');
+  });
+  it('bool reaches the operand of ! and of a comparison with 0, and picks the i-th', () => {
+    const lines = ['int f(U* p) {', '  if (!(p->f >> 2 & 1)) {', '    return 0;', '  }', '  return (p->f >> 2 & 1) == 0;', '}'];
+    let r = run(lines, 'bool(p->f >> 2 & 1,1)');
+    assert.ok(r.sites[0].applied, r.sites[0].why);
+    assert.strictEqual(r.out, 'int f(U* p) { if (!(bool)(p->f >> 2 & 1)) { return 0; } return (p->f >> 2 & 1) == 0; }');
+    r = run(lines, 'bool(p->f >> 2 & 1,2)');
+    assert.strictEqual(r.out, 'int f(U* p) { if (!(p->f >> 2 & 1)) { return 0; } return (bool)(p->f >> 2 & 1) == 0; }');
+  });
+  it('bool refuses several sites without an index, a value that is not tested, and a float', () => {
+    refused(['int f(U* p) {', '  if (p->f >> 2 & 1) {', '    return 0;', '  }', '  return !(p->f >> 2 & 1);', '}'], 'bool(p->f >> 2 & 1)');
+    refused(['int f(U* p) {', '  return p->f >> 2 & 1;', '}'], 'bool(p->f >> 2 & 1)');
+    refused(['int f(float x) {', '  if (x) {', '    return 0;', '  }', '  return 1;', '}'], 'bool(x)');
+  });
   // SpinnerImplementation::OnMouseWheel 004bc050.
   it('cmp mirror-lit writes -1 < n as n >= 0 for a signed n', () => {
     const { out, sites } = run(['int f(int n) {', '  if (-1 < n) {', '    return 1;', '  }', '  return 0;', '}'], 'cmp(-1 < n,mirror-lit)');
