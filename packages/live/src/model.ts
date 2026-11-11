@@ -69,6 +69,13 @@ export interface ModelIndices {
    * documented as holding either.
    */
   callersOf: Map<string, Set<string>>;
+  /**
+   * Function address key -> the address keys of every function whose code takes its
+   * address without calling it (`PUSH 0x4fd1f0` into `_eh_vector_constructor_iterator_`,
+   * a callback stored into a struct), from the `C` rows of the operand references. Such a
+   * body spells the function's name and type just as a call site does.
+   */
+  addressTakersOf: Map<string, Set<string>>;
   /** Function address key -> the C identifiers appearing in its body. */
   bodyTokens: Map<string, Set<string>>;
 }
@@ -735,6 +742,7 @@ export function buildIndices(m: LiveModel): ModelIndices {
   const dtByKey = new Map<string, ExtractedDataType>();
   const globalByAddr = new Map<string, AnalyzedDataSymbol>();
   const callersOf = new Map<string, Set<string>>();
+  const addressTakersOf = new Map<string, Set<string>>();
   const bodyTokens = new Map<string, Set<string>>();
 
   for (const fn of m.primary.functions) {
@@ -746,7 +754,7 @@ export function buildIndices(m: LiveModel): ModelIndices {
   for (const dt of m.primary.dataTypes) dtByKey.set(dataTypeKey(dt.name, dt.category), dt);
   for (const g of m.primary.globals) globalByAddr.set(addressKey(g.address), g);
 
-  const indices: ModelIndices = { fnByAddr, dtByKey, globalByAddr, callersOf, bodyTokens };
+  const indices: ModelIndices = { fnByAddr, dtByKey, globalByAddr, callersOf, addressTakersOf, bodyTokens };
   reindexCallers(m, indices);
   return indices;
 }
@@ -1237,7 +1245,9 @@ export async function applyEvents(
   // ---------------------------------------------------------------------------
   // Functions. The callers are not a nicety: a rename or a signature change is
   // invisible in the renamed function's own body and visible in every one of its
-  // call sites, which live in the callers.
+  // call sites, which live in the callers. A body that takes the function's address
+  // (passes it to `_eh_vector_constructor_iterator_`, stores it as a callback) spells
+  // its signature as well, through the cast or the pointer type the decompiler prints.
   // ---------------------------------------------------------------------------
   for (const event of events) {
     if (event.target !== 'function') continue;
@@ -1251,6 +1261,7 @@ export async function applyEvents(
       if (!alias) continue;
       for (const caller of indices.callersOf.get(alias) ?? []) affected.add(caller);
     }
+    for (const taker of indices.addressTakersOf.get(key) ?? []) affected.add(taker);
   }
 
   const total = model.primary.functions.length || 1;
@@ -1739,9 +1750,13 @@ export class FactsRefreshError extends Error {
   }
 }
 
-/** Rebuild `callersOf` as the reverse of every function's `calledFunctions`. */
+/**
+ * Rebuild `callersOf` as the reverse of every function's `calledFunctions`, and
+ * `addressTakersOf` as the reverse of every function's taken function addresses.
+ */
 function reindexCallers(model: LiveModel, indices: ModelIndices): void {
   indices.callersOf.clear();
+  indices.addressTakersOf.clear();
   const nameToAddr = new Map<string, string>();
   for (const fn of model.primary.functions) nameToAddr.set(fn.name, addressKey(fn.address));
 
@@ -1754,6 +1769,14 @@ function reindexCallers(model: LiveModel, indices: ModelIndices): void {
         if (!set) indices.callersOf.set(alias, (set = new Set()));
         set.add(caller);
       }
+    }
+    if (fn.platform) continue;
+    for (const ref of fn.operandRefs?.functions ?? []) {
+      const target = addressKey(ref.to);
+      if (target === caller) continue;
+      let set = indices.addressTakersOf.get(target);
+      if (!set) indices.addressTakersOf.set(target, (set = new Set()));
+      set.add(caller);
     }
   }
 }

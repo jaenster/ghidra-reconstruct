@@ -1180,6 +1180,13 @@ export class LiveLoop {
           if (file) files.add(file);
         }
       }
+      for (const taker of this.indices.addressTakersOf.get(normalizeAddress(fn.address)) ?? []) {
+        const takerFn = this.indices.fnByAddr.get(taker);
+        if (!takerFn) continue;
+        callers.push(takerFn.name);
+        const file = maps.byAddress.get(normalizeAddress(takerFn.address));
+        if (file) files.add(file);
+      }
     }
 
     if (global) {
