@@ -21,6 +21,10 @@
  * compared as the declarations lay them out:
  *
  *   - a local whose address is never taken overlaps only itself (by field range);
+ *   - so does a local whose address is first taken after the run, when the run is in no
+ *     loop and the function has no goto: no pointer can reach it yet (CreateObjectPresetsForMap,
+ *     006663c0, stores `mapCoords.nWidth` before `mapCoords.nHeight`, both read through
+ *     pMapStrc, and passes `&mapCoords` on only after them);
  *   - two globals overlap only when they are the same one (by field range);
  *   - two accesses through the same pointer, unchanged in the run, overlap when their
  *     field ranges do (from the aggregate layouts; a union's members all start at 0);
@@ -235,6 +239,42 @@ function storeOf(s: Statement, ev: AccessOrderEvidence, owners: Map<number, numb
   return { stmt: s as ExprStmt, fact: facts[0], write, reads: [...r1, ...r2] };
 }
 
+/**
+ * The addressed non-array locals whose every `&` lies after the run, when the run sits in
+ * no loop and the function has no goto or label: before the first `&` no pointer reaches them.
+ */
+function notYetEscaped(body: CompoundStmt, run: Statement[], ctx: Ctx, arrays: Set<string>): Set<string> {
+  const out = new Set<string>();
+  const inRun = new Set<ASTNode>();
+  for (const s of run) for (const n of traverseAST(s)) inRun.add(n);
+  let end = -1;
+  let idx = 0;
+  let jumps = false;
+  const firstAmp = new Map<string, number>();
+  const parent = new Map<ASTNode, ASTNode>();
+  const walk = (n: ASTNode): void => {
+    const at = idx++;
+    if (n.kind === NodeKind.GotoStmt || n.kind === NodeKind.LabelStmt) jumps = true;
+    if (inRun.has(n)) end = Math.max(end, at);
+    if (n.kind === NodeKind.UnaryExpr && (n as UnaryExpr).operator === '&') {
+      for (const m of namedVariables((n as UnaryExpr).operand)) if (!firstAmp.has(m.name)) firstAmp.set(m.name, at);
+    }
+    for (const k of getChildren(n)) { parent.set(k, n); walk(k); }
+  };
+  walk(body);
+  if (jumps || end < 0) return out;
+  for (let p = parent.get(run[0]); p; p = parent.get(p)) {
+    if (p.kind === NodeKind.ForStmt || p.kind === NodeKind.WhileStmt || p.kind === NodeKind.DoWhileStmt
+      || p.kind === NodeKind.ForRangeStmt) return out;
+  }
+  for (const [name, l] of ctx.locals) {
+    if (!l.addressed || arrays.has(name)) continue;
+    const first = firstAmp.get(name);
+    if (first !== undefined && first > end) out.add(name);
+  }
+  return out;
+}
+
 function independent(a: Store, b: Store): boolean {
   if (mayAlias(a.write, b.write)) return false;
   if (a.reads.some(r => mayAlias(r, b.write))) return false;
@@ -315,8 +355,9 @@ function rewriteFunction(fn: FunctionDecl, ev: AccessOrderEvidence, opts: StoreO
     }
   }
   // An array is its own address: a local array is addressed wherever it is named bare.
+  const arrays = new Set<string>();
   for (const [name, t] of localTypes) {
-    if (t.kind === NodeKind.ArrayType) locals.get(name)!.addressed = true;
+    if (t.kind === NodeKind.ArrayType) { locals.get(name)!.addressed = true; arrays.add(name); }
   }
   const typedefTargets = opts.typedefTargets ?? {};
   const resolve: TypedefResolver = name => typedefTargets[name];
@@ -361,12 +402,31 @@ function rewriteFunction(fn: FunctionDecl, ev: AccessOrderEvidence, opts: StoreO
         run.push(st);
       }
       if (run.length >= 2) {
-        const sorted = [...run].sort((x, y) => (x.fact.at! - y.fact.at!) || (run.indexOf(x) - run.indexOf(y)));
+        const order = (r: Store[]) => [...r].sort((x, y) => (x.fact.at! - y.fact.at!) || (r.indexOf(x) - r.indexOf(y)));
+        const fits = (r: Store[], sorted: Store[]) => {
+          for (let x = 0; x < r.length; x++) {
+            for (let y = x + 1; y < r.length; y++) {
+              if (sorted.indexOf(r[x]) > sorted.indexOf(r[y]) && !independent(r[x], r[y])) return false;
+            }
+          }
+          return true;
+        };
+        let sorted = order(run);
         const moved = sorted.some((x, k) => x !== run[k]);
-        let ok = moved;
-        for (let x = 0; ok && x < run.length; x++) {
-          for (let y = x + 1; ok && y < run.length; y++) {
-            if (sorted.indexOf(run[x]) > sorted.indexOf(run[y]) && !independent(run[x], run[y])) ok = false;
+        let ok = moved && fits(run, sorted);
+        if (moved && !ok) {
+          // Again, with the locals no pointer can reach yet placed as unaddressed.
+          const late = notYetEscaped(body, run.map(x => x.stmt), ctx, arrays);
+          if (late.size) {
+            const locals2 = new Map(ctx.locals);
+            for (const n of late) locals2.set(n, { addressed: false });
+            const ctx2: Ctx = { ...ctx, locals: locals2 };
+            const run2 = run.map(x => storeOf(x.stmt, ev, owners, ctx2));
+            if (run2.every(x => x)) {
+              const r2 = run2 as Store[];
+              const s2 = order(r2);
+              if (fits(r2, s2)) { ok = true; sorted = s2.map(x => run[r2.indexOf(x)]); }
+            }
           }
         }
         if (ok) {

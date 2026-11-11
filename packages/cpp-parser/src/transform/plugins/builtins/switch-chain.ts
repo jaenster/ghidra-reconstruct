@@ -48,7 +48,7 @@ import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, CompoundStmt, IfStmt, Statement, Expression, BinaryExpr, UnaryExpr, ParenExpr,
   Identifier, IntegerLiteralExpr, CharLiteralExpr, FunctionDecl, SwitchStmt, CaseStmt, DefaultStmt,
-  MemberExpr, SubscriptExpr, CStyleCastExpr, VariableDecl, QualifiedId,
+  MemberExpr, SubscriptExpr, CStyleCastExpr, VariableDecl, QualifiedId, ExprStmt, AssignExpr,
 } from '../../../ast/nodes.js';
 import { traverseAST, getChildren } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
@@ -782,12 +782,24 @@ function pathTo(d: Decision, region: readonly Statement[], leaf: Leaf): Frame[] 
 /**
  * Lines of the ifs that sit under a relational test of a variable (`v < 5`), with that
  * variable: VC8 splits a larger switch by such a test and counts down each half, so a chain
- * there is a fragment of one switch, not a switch of its own.
+ * there is a fragment of one switch, not a switch of its own. A variable the block assigns
+ * before the chain holds a new value there, so the test above no longer splits it
+ * (DRLGPRESET_AddPresetUnitToDrlgMap 00667620: `if (nClassId < nTableSize) .. else {
+ * nTableSize = ..; if (nTableSize == 0x21) ..` is one countdown, `sub ecx, 0x21; je; dec ecx`).
  */
 function splitLines(root: ASTNode): Map<number, Set<string>> {
   const out = new Map<number, Set<string>>();
   const visit = (n: ASTNode, under: readonly string[]): void => {
     let inner = under;
+    if (n.kind === NodeKind.CompoundStmt && under.length) {
+      let cur = under;
+      for (const s of (n as CompoundStmt).statements) {
+        visit(s, cur);
+        const written = assignedBy(s);
+        if (written) cur = cur.filter(u => u !== written);
+      }
+      return;
+    }
     if (n.kind === NodeKind.IfStmt) {
       const i = n as IfStmt;
       if (i.location && under.length) {
@@ -812,6 +824,15 @@ function splitLines(root: ASTNode): Map<number, Set<string>> {
   };
   visit(root, []);
   return out;
+}
+
+/** The variable a plain `v = ...;` statement assigns, as printed. */
+function assignedBy(s: Statement): string | undefined {
+  if (s.kind !== NodeKind.ExprStmt) return undefined;
+  const e = unwrap((s as ExprStmt).expression);
+  if (e.kind !== NodeKind.AssignExpr) return undefined;
+  const left = unwrap((e as AssignExpr).left);
+  return pureLvalue(left) ? emit(left as never) : undefined;
 }
 
 function rewriteList(list: readonly Statement[], ctx: Ctx): Statement[] | null {

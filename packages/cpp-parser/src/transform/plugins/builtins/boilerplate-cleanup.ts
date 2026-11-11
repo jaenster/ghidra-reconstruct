@@ -429,6 +429,7 @@ function createSecurityCookieRemover(): Transformer {
         }
       }
       if (targets.size === 0) return undefined;
+      const marked = { ...fn, ghidraInfo: { ...fn.ghidraInfo, stackCookie: true } } as FunctionDecl;
 
       // Every other reference to each target: is its value read anywhere?
       const seedTargets = new Set<ASTNode>();
@@ -460,7 +461,7 @@ function createSecurityCookieRemover(): Transformer {
         else read.add(name);
       }
       const removable = new Set([...targets].filter(t => !read.has(t)));
-      if (removable.size === 0) return undefined;
+      if (removable.size === 0) return marked;
 
       const removed = new WeakSet<ASTNode>();
       const strip = createTransformer({
@@ -495,7 +496,7 @@ function createSecurityCookieRemover(): Transformer {
           return undefined;
         },
       });
-      return { ...fn, body: strip(body) as CompoundStmt } as FunctionDecl;
+      return { ...marked, body: strip(body) as CompoundStmt } as FunctionDecl;
     },
   });
 }

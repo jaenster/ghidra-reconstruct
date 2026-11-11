@@ -15,6 +15,12 @@
  * behind the group before it. A group that ends the
  * switch without leaving gets a `break;` where it no longer comes last.
  *
+ * Where the original's jump table names a group's body (the entry of its case values, or the
+ * bound check's target for `default:`), that address orders it: it is the body's first
+ * instruction, where a statement's own address can sit deeper in the body or be missing
+ * (the `return 1;` goto-cleanup copies in place of `goto switchD_..._caseD_5`,
+ * UI_GoldDialogConfirmCallback 00454080). The statements' addresses order the rest.
+ *
  * Only a jump-table switch the decompiler printed (its line prints the indirect jump and
  * is no `if`'s line: a switch built from ifs is ordered by switch-chain), whose groups
  * hold every label at the top of the switch body, and where every group with code has an
@@ -25,7 +31,9 @@
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, CompoundStmt, FunctionDecl, ReturnStmt, Statement, SwitchStmt, CaseStmt, DefaultStmt,
+  Expression, ParenExpr, IntegerLiteralExpr, CharLiteralExpr, UnaryExpr,
 } from '../../../ast/nodes.js';
+import { emit } from '../../../emit/index.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
 import { Stmt } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
@@ -33,10 +41,15 @@ import { DEFAULT_NORETURN_FUNCTIONS } from './goto-cleanup/types.js';
 import { holdsFreeCase } from './goto-cleanup/paths.js';
 import { leaves } from './assert-order.js';
 import { LayoutReader, type BranchLayoutEvidence } from './branch-layout/evidence.js';
+import type { JumpTableFact } from './jump-table-case.js';
 
 export interface CaseLayoutOptions extends PluginOptions {
   /** The original's addresses, keyed by line of the parsed text; absent: nothing changes. */
   branchLayout?: BranchLayoutEvidence | null;
+  /** The original's jump tables (reconstruct's extract/jump-tables.ts). */
+  jumpTables?: readonly JumpTableFact[];
+  /** Enum constant -> value, for case labels spelled as enumerators. */
+  enumValues?: Readonly<Record<string, number>>;
   /** Further callees that never return, by unqualified name. */
   noreturnFunctions?: string[];
   /** Called once per switch reordered, and per switch left with a reason. */
@@ -86,6 +99,89 @@ function code(g: Group): Statement[] {
   return [labelled(g.stmts[0]), ...g.stmts.slice(1)];
 }
 
+/** A case label's value: an integer literal, its negation, or an enumerator with a known value. */
+function labelValue(e: Expression, enumValues: Readonly<Record<string, number>>): number | null {
+  switch (e.kind) {
+    case NodeKind.ParenExpr: return labelValue((e as ParenExpr).expression, enumValues);
+    case NodeKind.IntegerLiteral: {
+      const v = Number((e as IntegerLiteralExpr).value);
+      return Number.isSafeInteger(v) ? v : null;
+    }
+    case NodeKind.CharLiteral: return (e as CharLiteralExpr).value;
+    case NodeKind.UnaryExpr: {
+      const u = e as UnaryExpr;
+      const v = u.operator === '-' ? labelValue(u.operand, enumValues) : null;
+      return v === null ? null : -v;
+    }
+    case NodeKind.Identifier: case NodeKind.QualifiedId: {
+      const name = emit(e as never).split('::').pop()!;
+      return Object.prototype.hasOwnProperty.call(enumValues, name) ? enumValues[name] : null;
+    }
+    default: return null;
+  }
+}
+
+/** The case values of a group's label run; null where one does not resolve. */
+function groupValues(g: Group, enumValues: Readonly<Record<string, number>>): number[] | null {
+  const out: number[] = [];
+  for (let s: Statement = g.stmts[0]; isLabel(s); s = (s as CaseStmt | DefaultStmt).statement) {
+    if (s.kind !== NodeKind.CaseStmt) continue;
+    const v = labelValue((s as CaseStmt).value, enumValues);
+    if (v === null) return null;
+    out.push(v);
+  }
+  return out;
+}
+
+/**
+ * Case value -> the table's target, or null where the table cannot be read in the switch's
+ * values. A labelled table names each entry's case value. An unlabelled one is indexed by the
+ * value less the smallest case (VC8 subtracts it before the bound check), taken only where
+ * the largest case less that bias is the bound: two readings of one bias.
+ */
+function tableTargets(table: JumpTableFact, groups: readonly Group[], enumValues: Readonly<Record<string, number>>): ((v: number) => number | null) | null {
+  if (table.labelled) {
+    return v => {
+      const hit = table.entries.filter(x => x.value === v || x.value === (v >>> 0));
+      return hit.length === 1 ? hit[0].target : null;
+    };
+  }
+  const values: number[] = [];
+  for (const g of groups) {
+    const vs = groupValues(g, enumValues);
+    if (!vs) return null;
+    values.push(...vs);
+  }
+  if (!values.length || table.bound === undefined) return null;
+  const bias = Math.min(...values);
+  if (Math.max(...values) - bias !== table.bound) return null;
+  return v => {
+    const i = v - bias;
+    if (i < 0 || i > table.bound!) return null;
+    const hit = table.entries.filter(x => x.value === i);
+    return hit.length === 1 ? hit[0].target : null;
+  };
+}
+
+/**
+ * The address the jump table sends the group's labels to, when every label of its run
+ * resolves and all agree; null otherwise.
+ */
+function tableEntry(g: Group, table: JumpTableFact, target: (v: number) => number | null, enumValues: Readonly<Record<string, number>>): number | null {
+  let entry: number | null = null;
+  for (let s: Statement = g.stmts[0]; isLabel(s); s = (s as CaseStmt | DefaultStmt).statement) {
+    let t: number | null | undefined;
+    if (s.kind === NodeKind.DefaultStmt) t = table.fallback;
+    else {
+      const v = labelValue((s as CaseStmt).value, enumValues);
+      t = v === null ? null : target(v);
+    }
+    if (t === null || t === undefined || (entry !== null && t !== entry)) return null;
+    entry = t;
+  }
+  return entry;
+}
+
 function rewriteSwitch(sw: SwitchStmt, reader: LayoutReader, noreturn: ReadonlySet<string>, opts: CaseLayoutOptions): SwitchStmt | null {
   const line = sw.location?.start.line ?? 0;
   const left = (why: string): null => { opts.onSite?.({ rule: 'left', line, why }); return null; };
@@ -102,10 +198,17 @@ function rewriteSwitch(sw: SwitchStmt, reader: LayoutReader, noreturn: ReadonlyS
     g.entry = g.empty ? null : reader.entry(g.stmts, jump);
   }
 
+  const enumValues = opts.enumValues ?? {};
+  const table = opts.jumpTables?.find(t => t.at === jump);
+  const target = table ? tableTargets(table, groups, enumValues) : null;
+
   // Units: a group with everything it runs into, and the empty groups behind them. A run's
   // address is read over all of its statements (a label run `case 3: case 6:` prints the
   // body's address on each label).
   const units: { groups: Group[]; entry: number }[] = [];
+  // Empty groups before any code stay first: a label run that only jumps (`case A: case B:
+  // break;`, Q38_Callback00_NpcActivate 005984c0) lays out no body of its own.
+  const lead: Group[] = [];
   for (let i = 0; i < groups.length;) {
     const start = i;
     while (groups[i].into && i + 1 < groups.length) i++;
@@ -114,11 +217,12 @@ function rewriteSwitch(sw: SwitchStmt, reader: LayoutReader, noreturn: ReadonlyS
     const known = run.filter(g => g.entry !== null).map(g => g.entry!);
     for (let k = 1; k < known.length; k++) if (known[k] <= known[k - 1]) return left('a case runs into one laid out before it');
     if (run.every(g => g.empty)) {
-      if (units.length === 0) return left('an empty case first');
+      if (units.length === 0) { lead.push(...run); continue; }
       units[units.length - 1].groups.push(...run);
       continue;
     }
-    const entry = reader.entry(run.flatMap(g => g.stmts), jump);
+    const entry = (table && target ? tableEntry(run[0], table, target, enumValues) : null)
+      ?? reader.entry(run.flatMap(g => g.stmts), jump);
     if (entry === null) return left('a case body without an address');
     units.push({ groups: run, entry });
   }
@@ -130,7 +234,7 @@ function rewriteSwitch(sw: SwitchStmt, reader: LayoutReader, noreturn: ReadonlyS
   // it leaves by a `break;`.
   const lastUnit = units[units.length - 1];
   const tail = lastUnit.groups[lastUnit.groups.length - 1];
-  const stmts: Statement[] = [];
+  const stmts: Statement[] = lead.flatMap(g => g.stmts);
   for (const u of sorted) {
     for (const g of u.groups) {
       stmts.push(...g.stmts);

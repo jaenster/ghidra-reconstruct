@@ -124,6 +124,61 @@ describe('storeOrderPlugin', () => {
     assert.ok(out.includes('g.pDC6 = pDC6; g.nFrame = nFrame;'), out);
   });
 
+  // CreateObjectPresetsForMap, 006663c0: `mapCoords.nWidth` (at 22) is stored before
+  // `mapCoords.nHeight` (at 32); both read through pMapStrc, and `&mapCoords` goes out after.
+  it('orders fields of a local read beside a pointer before its address is taken', () => {
+    const { out, sites } = run([
+      'void f(Node *pMapStrc) {',
+      '  Node mapCoords;',
+      '[@0x20] mapCoords.pPrev = pMapStrc->pNext;',
+      '[@0x16] mapCoords.nId = pMapStrc->nId;',
+      '  Use(&mapCoords);',
+      '}',
+    ]);
+    assert.deepStrictEqual(sites, ['order2']);
+    assert.ok(out.includes('mapCoords.nId = pMapStrc->nId; mapCoords.pPrev = pMapStrc->pNext;'), out);
+  });
+
+  it('leaves fields of a local read beside a pointer once its address is out', () => {
+    const { sites } = run([
+      'void f(Node *pMapStrc) {',
+      '  Node mapCoords;',
+      '  Use(&mapCoords);',
+      '[@0x20] mapCoords.pPrev = pMapStrc->pNext;',
+      '[@0x16] mapCoords.nId = pMapStrc->nId;',
+      '}',
+    ]);
+    assert.deepStrictEqual(sites, []);
+  });
+
+  it('leaves them in a loop that takes the address later', () => {
+    const { sites } = run([
+      'void f(Node *pMapStrc, int n) {',
+      '  Node mapCoords;',
+      '  while (n) {',
+      '[@0x20] mapCoords.pPrev = pMapStrc->pNext;',
+      '[@0x16] mapCoords.nId = pMapStrc->nId;',
+      '    Use(&mapCoords);',
+      '  }',
+      '}',
+    ]);
+    assert.deepStrictEqual(sites, []);
+  });
+
+  it('leaves them in a function with a goto', () => {
+    const { sites } = run([
+      'void f(Node *pMapStrc, int n) {',
+      '  Node mapCoords;',
+      'again:',
+      '[@0x20] mapCoords.pPrev = pMapStrc->pNext;',
+      '[@0x16] mapCoords.nId = pMapStrc->nId;',
+      '  Use(&mapCoords);',
+      '  if (n) goto again;',
+      '}',
+    ]);
+    assert.deepStrictEqual(sites, []);
+  });
+
   // NET_D2GS_SERVER_Send_0x0C_UNITCHANGE, 0053b430: the packet id field shares its name with the
   // parameter, and `&aPacket.nPacketId` takes the address of the field, not of the parameter.
   it('does not take a member name under & for a variable of that name', () => {

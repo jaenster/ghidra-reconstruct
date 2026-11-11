@@ -784,6 +784,12 @@ interface FrameGroup {
   /** `sizeof` the emitted struct must have on the 32-bit target. */
   expectedSize: number;
   reason: GroupReason;
+  /**
+   * The original has no /GS cookie: padding is written as single bytes, not as an array.
+   * VC8 /GS gives a function with a byte array local - also inside a struct - a cookie,
+   * and the original's frame had none (AI_Function1_SummonMaster 005e5870, `__pad8[4]`).
+   */
+  scalarPadding?: boolean;
 }
 
 function paddingMember(at: number, bytes: number, sealed = false): GroupMember {
@@ -1171,10 +1177,29 @@ function explanation(group: FrameGroup): string[] {
   ];
 }
 
+/** Padding no wider than this is written byte by byte where the original has no cookie. */
+const MAX_SCALAR_PADDING = 32;
+
 function structFor(group: FrameGroup): StructDecl {
-  const fields: FieldDecl[] = group.members.map(m =>
-    Decl.field(m.name ?? `__pad${m.at}`, m.type));
+  // A member that is itself a byte or word array is a /GS buffer anyway; the padding stays as it is.
+  const buffer = group.members.some(m => m.name !== null && m.type.kind === NodeKind.ArrayType && m.align <= 2);
+  const scalar = group.scalarPadding === true && !buffer;
+  const fields: FieldDecl[] = group.members.flatMap(m => {
+    if (m.name !== null) return [Decl.field(m.name, m.type)];
+    if (!scalar || m.size > MAX_SCALAR_PADDING) return [Decl.field(`__pad${m.at}`, m.type)];
+    // The same bytes at the same offsets: uint8_t has alignment 1 and nothing names padding.
+    return Array.from({ length: m.size }, (_, i) => Decl.field(`__pad${m.at + i}`, Type.typedef('uint8_t')));
+  });
   return Decl.struct_(group.typeName, fields);
+}
+
+/** The function seeds a /GS cookie: marked by `boilerplate-cleanup`, or the seed is still read. */
+function hasStackCookie(fn: FunctionDecl, cookies: ReadonlySet<string>): boolean {
+  if (fn.ghidraInfo?.stackCookie || cookies.size > 0) return true;
+  for (const n of traverseAST(fn.body!)) {
+    if (n.kind === NodeKind.Identifier && (n as Identifier).name === 'DEFAULT_SECURITY_COOKIE') return true;
+  }
+  return false;
 }
 
 function sizeAssert(group: FrameGroup): StaticAssertDecl {
@@ -1633,7 +1658,8 @@ function createFrameGroupLocalsTransformer(options: FrameGroupLocalsOptions = {}
       }
 
       const preamble: Statement[] = [];
-      for (const g of groups) preamble.push(...groupStatements(g));
+      const scalarPadding = !hasStackCookie(node, cookies);
+      for (const g of groups) preamble.push(...groupStatements({ ...g, scalarPadding }));
       // After the body's own local types: a group member may be of one.
       let at = 0;
       while (at < rewritten.statements.length && isLocalTypeDeclaration(rewritten.statements[at])) at++;

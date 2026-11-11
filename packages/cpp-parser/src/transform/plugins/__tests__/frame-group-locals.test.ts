@@ -7,6 +7,11 @@ import { frameGroupLocalsPlugin, type RunTruncation, type TypeLayout } from '../
 import type { StackSlot } from '../builtins/stack-frame-address.js';
 import { boilerplateCleanupPlugin } from '../builtins/boilerplate-cleanup.js';
 
+/** The single-byte padding fields `at`..`at+n-1`, as a function without a /GS cookie gets them. */
+function padBytes(at: number, n: number): string[] {
+  return Array.from({ length: n }, (_, i) => `__pad${at + i}`);
+}
+
 describe('frameGroupLocalsPlugin', () => {
   function run(code: string, slots: StackSlot[]): string {
     const transformer = frameGroupLocalsPlugin.createTransformer({ slots });
@@ -52,12 +57,13 @@ describe('frameGroupLocalsPlugin', () => {
     const fields = [...struct[1].matchAll(/(\w+)\s+(\w+)(\[\d+\])?\s*;/g)].map(m => m[2]);
     assert.deepStrictEqual(fields, [
       'hMsgWnd', 'uMsgL', 'nMsgWParam', 'dwMsgLParam', 'nCmdCode',
-      '__pad20', 'dwResult1', 'dwResult2',
+      ...padBytes(20, 4), 'dwResult1', 'dwResult2',
     ], out);
 
     // The four bytes nothing owns at -16 are reserved, so +24 still reaches
-    // dwResult1.
-    assert.ok(/uint8_t\s+__pad20\[4\]\s*;/.test(out), `expected the -16 hole reserved in:\n${out}`);
+    // dwResult1. No cookie in the function: single bytes, no array for /GS to see.
+    assert.ok(/uint8_t\s+__pad20\s*;/.test(out) && /uint8_t\s+__pad23\s*;/.test(out),
+      `expected the -16 hole reserved in:\n${out}`);
 
     // The address that escapes is the address of the group's first member,
     // which is the address of the group.
@@ -199,7 +205,8 @@ describe('frameGroupLocalsPlugin', () => {
         { name: 'c', offset: -4, size: 4 },
       ],
     );
-    assert.ok(/uint8_t\s+__pad4\[4\]\s*;/.test(out), `the dropped slot's bytes must be held:\n${out}`);
+    assert.ok(/uint8_t\s+__pad4\s*;/.test(out) && /uint8_t\s+__pad7\s*;/.test(out),
+      `the dropped slot's bytes must be held:\n${out}`);
     assert.ok(/sizeof\(__frame0_t\)\s*==\s*12\s*,/.test(out), out);
   });
 
@@ -366,10 +373,9 @@ describe('frameGroupLocalsPlugin', () => {
     assert.ok(struct, out);
     assert.deepStrictEqual(
       [...struct[1].matchAll(/(\w+)\s+(\w+)(\[\d+\])?\s*;/g)].map(m => m[2]),
-      ['__pad0', 'auStack_1c', 'auStack_14', '__pad24'],
+      [...padBytes(0, 4), 'auStack_1c', 'auStack_14', ...padBytes(24, 8)],
       out,
     );
-    assert.ok(/uint8_t\s+__pad0\[4\]\s*;/.test(out) && /uint8_t\s+__pad24\[8\]\s*;/.test(out), out);
     assert.ok(/sizeof\(__frame0_t\)\s*==\s*32\s*,/.test(out), out);
   });
 
@@ -549,7 +555,8 @@ describe('frameGroupLocalsPlugin', () => {
       /static_assert\(sizeof\(void\s*\*\)\s*!=\s*4\s*\|\|\s*sizeof\(__frame0_t\)\s*==\s*20\s*,/.test(out),
       `expected a 20-byte group in:\n${out}`,
     );
-    assert.ok(/uint8_t\s+__pad4\[12\]\s*;/.test(out), `the hole is padding inside the object:\n${out}`);
+    assert.ok(/uint8_t\s+__pad4\s*;/.test(out) && /uint8_t\s+__pad15\s*;/.test(out),
+      `the hole is padding inside the object:\n${out}`);
   });
 
   it('does not group on a count that is not literal at the call site', () => {
@@ -859,6 +866,54 @@ describe('frameGroupLocalsPlugin and the /GS cookie slot', () => {
       { name: 'dwStackCookie', offset: -4, size: 4 },
     ]);
     assert.deepStrictEqual(fields(out), ['a', 'dwStackCookie'], out);
+  });
+
+  // AI_Function1_SummonMaster 005e5870: bMinionDeadOrNull -20, pMonsterAiGeneral -16, nCirclePhase -8,
+  // &bMinionDeadOrNull handed to CallForEachMinion. The original has no /GS cookie, so the -12 hole
+  // cannot have been a byte array: VC8 would have given the function one.
+  const summonSlots: StackSlot[] = [
+    { name: 'bMinionDeadOrNull', offset: -20, size: 4 },
+    { name: 'pMonsterAiGeneral', offset: -16, size: 4 },
+    { name: 'nCirclePhase', offset: -8, size: 4 },
+  ];
+
+  it('writes padding as single bytes where the original has no cookie', () => {
+    const out = run(`void f(D2UnitStrc *pUnit, D2AiParamStrc *pAiParam) {
+      int bMinionDeadOrNull; D2AiGeneralStrc *pMonsterAiGeneral; int nCirclePhase;
+      pMonsterAiGeneral = pAiParam->pMonsterAiGeneral;
+      bMinionDeadOrNull = 0;
+      CallForEachMinion(pUnit, &bMinionDeadOrNull);
+      nCirclePhase = bMinionDeadOrNull;
+      g(pMonsterAiGeneral, nCirclePhase);
+    }`, summonSlots);
+    assert.deepStrictEqual(fields(out),
+      ['bMinionDeadOrNull', 'pMonsterAiGeneral', '__pad8', '__pad9', '__pad10', '__pad11', 'nCirclePhase'], out);
+    assert.ok(!/__pad\d+\[/.test(out), `no array for /GS to see:\n${out}`);
+    assert.ok(/sizeof\(__frame0_t\)\s*==\s*16\s*,/.test(out), out);
+  });
+
+  it('keeps padding an array where the original seeds a cookie', () => {
+    const out = run(`void f(D2UnitStrc *pUnit, D2AiParamStrc *pAiParam) {
+      int bMinionDeadOrNull; D2AiGeneralStrc *pMonsterAiGeneral; int nCirclePhase; uint32_t local_8;
+      local_8 = DEFAULT_SECURITY_COOKIE ^ (uintptr_t)&stack0xfffffffc;
+      pMonsterAiGeneral = pAiParam->pMonsterAiGeneral;
+      CallForEachMinion(pUnit, &bMinionDeadOrNull);
+      g(pMonsterAiGeneral, nCirclePhase);
+    }`, [...summonSlots, { name: 'local_8', offset: -4, size: 4 }]);
+    assert.ok(/uint8_t\s+__pad8\[4\]\s*;/.test(out), out);
+  });
+
+  it('keeps padding an array where a member is a byte array already', () => {
+    const out = run(`void f(D2UnitStrc *pUnit) {
+      int a; uint8_t ab[4]; int c;
+      g(&a);
+      h(a, ab[1], c);
+    }`, [
+      { name: 'a', offset: -16, size: 4 },
+      { name: 'ab', offset: -12, size: 4 },
+      { name: 'c', offset: -4, size: 4 },
+    ]);
+    assert.ok(/uint8_t\s+__pad8\[4\]\s*;/.test(out), out);
   });
 
   it('removes a cookie slot no group holds', () => {

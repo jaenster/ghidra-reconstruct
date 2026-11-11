@@ -200,10 +200,113 @@ describe('rotatedForLoopPlugin', () => {
     }
   });
 
-  // syncsearch, 0042b300: `while (next < len && got < 4)`.
-  it('leaves a body that opens with a break test ahead of more statements', () => {
-    same(`unsigned f(unsigned n, unsigned k) { unsigned i; i = 0; if (0 < n) { do { if (k >= 4) break; k = h(k); i++; } while (i < n); } return i; }`);
-    same(`void f(unsigned n, unsigned k) { unsigned i; if (0 < n) { i = 0; do { if (k >= 4) { break; } g(i); i++; } while (i < n); } }`);
+  // syncsearch, 0042b300: `while (next < len && got < 4)`; a VC8 compile of the for loop
+  // with the test in its condition matches the original, kept as a break it does not.
+  it('folds a break test that opens the body into the condition', () => {
+    const out = tx(`void f(unsigned n, unsigned k) { unsigned i; if (0 < n) { i = 0; do { if (k >= 4) { break; } g(i); i++; } while (i < n); } }`);
+    assert.ok(out.includes('for (i = 0; i < n && k < 4; i++) {'), out);
+    assert.ok(!out.includes('break'), out);
+  });
+
+  // TEXT_DrawTextBoxAtPosition, 0049d8e0, as Ghidra prints it.
+  it('folds a pointer test that opens the body (TEXT_DrawTextBoxAtPosition)', () => {
+    const out = tx(`void f(D2TextBoxStrc* pTextBox, int nLineCount, int nScreenX, int nScreenY) {
+  D2TextLineStrc* pCurLine = pTextBox->pLineList;
+  if (nLineCount > 0) {
+    int nLineIdx = 0;
+    do {
+      if (!pCurLine) {
+        break;
+      }
+      DRAW_text(pCurLine->wszLine, nScreenX + 10, (nLineIdx - nLineCount + pTextBox->nLineCount) * 0xf + 0x12 + nScreenY, 0, 0);
+      pCurLine = pCurLine->pNext;
+      nLineIdx++;
+    } while (nLineIdx < nLineCount);
+  }
+}`);
+    assert.ok(out.includes('for (int nLineIdx = 0; nLineIdx < nLineCount && pCurLine; nLineIdx++) {'), out);
+    assert.ok(!out.includes('break'), out);
+  });
+
+  it('keeps a break test whose condition calls or carries a comment', () => {
+    same(`void f(unsigned n) { unsigned i; if (0 < n) { i = 0; do { if (h(i)) break; g(i); i++; } while (i < n); } }`);
+    same(`void f(unsigned n, unsigned k) { unsigned i; if (0 < n) { i = 0; do {
+  // done
+  if (k >= 4) break; g(i); i++; } while (i < n); } }`);
+  });
+
+  it('negates a float comparison under !()', () => {
+    const out = tx(`void f(int n, float x) { int i; if (0 < n) { i = 0; do { if (x < 1.0f) break; g(i); i++; } while (i < n); } }`);
+    assert.ok(out.includes('for (i = 0; i < n && !(x < 1.0f); i++) {'), out);
+  });
+
+  // DRLGOUTJUNG_BuildKurastDocktownBorders, 0067ead0, as Ghidra prints it.
+  it('moves an initialisation past an if/else of plain stores (DRLGOUTJUNG_BuildKurastDocktownBorders)', () => {
+    const out = tx(`void f(D2DrlgLevelStrc* pLevel, int nY, int nPortalX) {
+  int nXIter;
+  int nX;
+  nXIter = 1;
+  nX = nPortalX + -1;
+  nY = nY + -1;
+  if (pLevel->pDrlg->bJungleInterlink == 0) {
+    nPortalX = nPortalX + -2;
+  }
+  else {
+    nPortalX = 1;
+  }
+  if (1 < nX) {
+    do {
+      Spawn(pLevel, nXIter, 0, nPortalX);
+      nXIter = nXIter + 1;
+    } while (nXIter < nX);
+  }
+}`);
+    assert.ok(/nY = nY \+ -1;\s*if \(pLevel->pDrlg->bJungleInterlink == 0\)[^]*\}\s*for \(nXIter = 1; nXIter < nX; nXIter = nXIter \+ 1\) \{/.test(out), out);
+  });
+
+  // TEXT_DrawTextBoxAtPosition, 0049d8e0, as Ghidra prints it: the original zeroes the
+  // counter before the call (`xor esi, esi` at +0x5c, the call at +0x61); a VC8 compile of
+  // this form matches it.
+  it('keeps a constant initialisation ahead of a call the original made after it', () => {
+    const code = `void f(D2TextLineStrc* pCurLine, int nLineCount) {
+  int32_t nSavedFont;
+  int nLineIdx;
+  nLineIdx = 0;
+  nSavedFont = SetAndReturnLastFont(0xd);
+  if (0 < nLineCount) {
+    do {
+      if (pCurLine == (D2TextLineStrc *)0x0) break;
+      DRAW_text(pCurLine->wszLine, nLineIdx);
+      pCurLine = pCurLine->pNext;
+      nLineIdx = nLineIdx + 1;
+    } while (nLineIdx < nLineCount);
+  }
+  SetAndReturnLastFont(nSavedFont);
+}`;
+    const after = { lines: new Map([[4, [0x5c]], [5, [0x5e, 0x61]], [6, [0x66, 0x6b]]]), ifs: new Map([[6, 0x6b]]) };
+    const out = tx(code, { branchLayout: after });
+    assert.ok(/nLineIdx = 0;\s*nSavedFont = SetAndReturnLastFont\(0xd\);\s*for \(; nLineIdx < nLineCount && pCurLine != \(D2TextLineStrc\*\)0x0; nLineIdx = nLineIdx \+ 1\) \{/.test(out), out);
+    // Without the offsets, or with the call made first, the loop stays as it is.
+    same(code);
+    same(code, { branchLayout: { lines: new Map([[4, [0x62]], [5, [0x5e, 0x61]], [6, [0x66, 0x6b]]]), ifs: new Map([[6, 0x6b]]) } });
+    // The call could reach a counter whose address is taken; a non-constant may change.
+    same(`void f(int n) { int i; int* p; p = &i; i = 0; h(p); if (0 < n) { do { g(i); i++; } while (i < n); } }`);
+    same(`void f(int n, int k) { int i; i = k; h(); if (k < n) { do { g(i); i++; } while (i < n); } }`);
+    // A statement that names the counter, or leaves.
+    same(`void f(int n) { int i; i = 0; h(i); if (0 < n) { do { g(i); i++; } while (i < n); } }`);
+    same(`void f(int n, int c) { int i; i = 0; if (c) { return; } if (0 < n) { do { g(i); i++; } while (i < n); } }`);
+  });
+
+  it('moves an initialisation past a compound store', () => {
+    const out = tx(`void f(int n, int k) { int i; i = 1; k += -2; if (1 < n) { do { g(i, k); i++; } while (i < n); } }`);
+    assert.ok(out.includes('k += -2;') && out.includes('for (i = 1; i < n; i++) {'), out);
+  });
+
+  it('keeps an initialisation ahead of an if that mentions the counter, calls, or leaves', () => {
+    same(`void f(int n, int c, int k) { int i; i = 1; if (c) { k = i; } if (1 < n) { do { g(i); i++; } while (i < n); } }`);
+    same(`void f(int n, int c, int k, int m) { int i; i = m; if (c) { k = h(); } if (m < n) { do { g(i); i++; } while (i < n); } }`);
+    same(`void f(int n, int c, int k) { int i; i = 1; if (c) { return; } if (1 < n) { do { g(i); i++; } while (i < n); } }`);
+    same(`void f(int n, int c, int k) { int i; i = k; if (c) { k = 2; } if (k < n) { do { g(i); i++; } while (i < n); } }`);
   });
 
   it('rewrites a body that is only a break test', () => {
@@ -292,7 +395,7 @@ describe('rotatedForLoopPlugin', () => {
     same(`int f(int n) { int i = 0; if (0 < n) { do { g(i); i++; } while (i < n); } return i; }`);
   });
 
-  it('leaves an initialisation that is not the statement just ahead of the if', () => {
+  it('leaves an initialisation ahead of a call without the offsets', () => {
     same(`void f(int n) { int i; i = 0; h(); if (0 < n) { do { g(i); i++; } while (i < n); } }`);
   });
 
@@ -327,7 +430,7 @@ describe('rotatedForLoopPlugin', () => {
   });
 
   it('leaves the initialisation ahead of a statement it cannot move past', () => {
-    // A call, a write of the counter or of a variable X reads, a value reading the counter,
+    // A call (without the offsets), a write of the counter or of a variable X reads, a value reading the counter,
     // an X that reads memory, or more than three statements in between.
     same(`void f(int n) { int i; int b; i = 0; b = h(); if (0 < n) { do { g(i); i++; } while (i < n); } }`);
     same(`void f(int n, int a) { int i; int b; i = a; a = 2; if (a < n) { do { g(i); i++; } while (i < n); } }`);
