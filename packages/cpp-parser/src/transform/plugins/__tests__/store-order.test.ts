@@ -124,19 +124,45 @@ describe('storeOrderPlugin', () => {
     assert.ok(out.includes('g.pDC6 = pDC6; g.nFrame = nFrame;'), out);
   });
 
-  // CreateObjectPresetsForMap, 006663c0: `mapCoords.nWidth` (at 22) is stored before
-  // `mapCoords.nHeight` (at 32); both read through pMapStrc, and `&mapCoords` goes out after.
-  it('orders fields of a local read beside a pointer before its address is taken', () => {
+  // uncompress, 006c79c0: one loaded value among parameters keeps the store order.
+  it('orders one loaded value among parameters before the address is taken', () => {
     const { out, sites } = run([
-      'void f(Node *pMapStrc) {',
+      'void f(Node *pNext, int *pLen) {',
+      '  Node s;',
+      '[@0x24] s.nId = *pLen;',
+      '[@0x17] s.pNext = pNext;',
+      '  Use(&s);',
+      '}',
+    ]);
+    assert.deepStrictEqual(sites, ['order2']);
+    assert.ok(out.includes('s.pNext = pNext; s.nId = *pLen;'), out);
+  });
+
+  it('orders constant stores into a local before its address is taken', () => {
+    const { out, sites } = run([
+      'void f(Node *pMapStrc, int n) {',
       '  Node mapCoords;',
-      '[@0x20] mapCoords.pPrev = pMapStrc->pNext;',
-      '[@0x16] mapCoords.nId = pMapStrc->nId;',
+      '[@0x20] mapCoords.pPrev = 0;',
+      '[@0x16] mapCoords.nId = n;',
       '  Use(&mapCoords);',
       '}',
     ]);
     assert.deepStrictEqual(sites, ['order2']);
-    assert.ok(out.includes('mapCoords.nId = pMapStrc->nId; mapCoords.pPrev = pMapStrc->pNext;'), out);
+    assert.ok(out.includes('mapCoords.nId = n; mapCoords.pPrev = 0;'), out);
+  });
+
+  // NET_D2GS_CLIENT_Incoming0x0D_UNITCHANGE_XY, 0045ccc0: VC8 loads wX, then wY, and stores
+  // msg.nItemId (from wY) before msg.nSkillId; the source that matches has nSkillId first.
+  it('leaves loaded values stored into a local before its address is taken', () => {
+    const { sites } = run([
+      'void f(Node *pBytes) {',
+      '  Node msg;',
+      '[@0x1f] msg.nId = pBytes->nId;',
+      '[@0x17] msg.pPrev = pBytes->pNext;',
+      '  Use(&msg);',
+      '}',
+    ]);
+    assert.deepStrictEqual(sites, []);
   });
 
   it('leaves fields of a local read beside a pointer once its address is out', () => {

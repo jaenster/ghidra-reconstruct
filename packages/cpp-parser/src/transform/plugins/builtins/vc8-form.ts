@@ -383,6 +383,18 @@ function localNames(fn: FunctionDecl): Set<string> {
   return out;
 }
 
+/** Every `&name` is the operand of a cast to a pointer type. */
+function addressOnlyCast(fn: FunctionDecl, name: string): boolean {
+  const parents = parentsOf(fn);
+  for (const { node } of walk(fn.body!)) {
+    if (node.kind !== NodeKind.UnaryExpr || (node as UnaryExpr).operator !== '&' || !isId(unparen((node as UnaryExpr).operand), name)) continue;
+    let p = parents.get(node);
+    while (p && p.kind === NodeKind.ParenExpr) p = parents.get(p);
+    if (!p || p.kind !== NodeKind.CStyleCastExpr || !text((p as CStyleCastExpr).type).includes('*')) return false;
+  }
+  return true;
+}
+
 function addressTaken(fn: FunctionDecl, name: string): boolean {
   for (const { node } of walk(fn.body!)) {
     if (node.kind === NodeKind.UnaryExpr && (node as UnaryExpr).operator === '&' && isId(unparen((node as UnaryExpr).operand), name)) return true;
@@ -1107,12 +1119,12 @@ function rangeOf(e: Expression, shapeOf: ((x: Expression) => { base: string; sta
 
 /**
  * width(V,T): V is declared T. Value-preserving, or refused: every value stored into V
- * must lie in both its old type and T, so V holds the same number either way; or, where
- * T is not wider than the old type, every read of V must keep no more of it than T holds
- * (a cast to a type that wide, a mask, a parameter or return of that width), which is
- * the truncation the original does at the read. An uncast `V = (old)E` whose E can
- * exceed the old type stores more than the original kept (MISSILE_SetPathFromTotalFrames
- * stores the frame count, the original its low byte).
+ * must lie in both its old type and T, so V holds the same number either way; or every
+ * read of V must keep no more of it than the narrower of the two types holds (a cast to a
+ * type that wide, a mask, a parameter or return of that width): both keep the stored
+ * value's low bytes, so such a read sees the same value. A read of all of a wider V, after
+ * a store the old type truncated, is refused (OBJECT_DispatchShrineServerActivate 004bd5c0
+ * widens a char code read as `(uint32_t)V`).
  */
 function doWidth(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'width' }>): void {
   let d: VariableDecl | undefined;
@@ -1120,10 +1132,13 @@ function doWidth(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'width' }>): void {
   if (!d) refuse(`no declaration of ${f.name}`);
   const old = text(d!.type), T = norm(f.type);
   if (old === T) refuse(`${f.name} is ${f.type} already`);
-  if (addressTaken(fn, f.name)) refuse(`&${f.name} is taken`);
   const w = WIDTH[T];
   const oldT = intType(old, true), newT = intType(T, true);
   if (!oldT || !newT) refuse(`${!oldT ? old : T} is no integer type`);
+  // Through its address V is bytes; between two types of one width those bytes are the
+  // same, as long as each `&V` is cast to the pointer it is used as, so the pointer's type
+  // never follows V's (SUNITNPC_ApplyScrollSkill 00576e40 stores `*(uint8_t*)(char*)&eUnitType`).
+  if (addressTaken(fn, f.name) && (oldT!.w !== newT!.w || !addressOnlyCast(fn, f.name))) refuse(`&${f.name} is taken`);
   const truth = new Set<ASTNode>();
   for (const { node } of walk(fn.body!)) {
     if (node.kind === NodeKind.IfStmt || node.kind === NodeKind.WhileStmt || node.kind === NodeKind.DoWhileStmt) truth.add(unparen((node as IfStmt).condition));
@@ -1170,6 +1185,10 @@ function checkWidthPreserved(fn: FunctionDecl, v: string, d: VariableDecl, oldT:
   const stored: Array<{ what: string; value?: Expression }> = [];
   if (d.initializer && d.initializer.kind !== NodeKind.InitListExpr) stored.push({ what: `${v} = ${emit(d.initializer as never)}`, value: d.initializer as Expression });
   const storeNodes = new Set<ASTNode>([d.name]);
+  // `&V` reads no value: doWidth lets it through only where the bytes stay the same.
+  for (const { node } of walk(fn.body!)) {
+    if (node.kind === NodeKind.UnaryExpr && (node as UnaryExpr).operator === '&' && isId(unparen((node as UnaryExpr).operand), v)) storeNodes.add(unparen((node as UnaryExpr).operand));
+  }
   for (const { node } of walk(fn.body!)) {
     if (node.kind === NodeKind.AssignExpr && isId(unparen((node as AssignExpr).left), v)) {
       const a = node as AssignExpr;
@@ -1203,10 +1222,13 @@ function checkWidthPreserved(fn: FunctionDecl, v: string, d: VariableDecl, oldT:
     return;
   }
 
-  // The second way: the original keeps no more of V at any read than T holds.
+  // The second way: no read keeps more of V than both types hold. V = E then keeps E's low
+  // bytes in either type (the old one truncates at the store, a wider T at the read), so a
+  // read of no more than those low bytes sees the same value: MISSILE_SetPathFromTotalFrames
+  // (004cccc0) stores the frame count into an int and passes it as a uint8_t, where the
+  // tagless source truncates at the store; the original keeps the whole count in EBX.
   const keep = Math.min(oldT.w, newT.w);
   const why = (s: string) => `${outOfRange[0].what} can exceed ${both.lo === oldT.r.lo && both.hi === oldT.r.hi ? old : T} and ${s}`;
-  if (newT.w > oldT.w) refuse(why(`${T} is wider than ${old}`));
   // A compound store keeps the low bytes only where it works on them alone.
   for (const { node } of walk(fn.body!)) {
     if (node.kind === NodeKind.AssignExpr && isId(unparen((node as AssignExpr).left), v)

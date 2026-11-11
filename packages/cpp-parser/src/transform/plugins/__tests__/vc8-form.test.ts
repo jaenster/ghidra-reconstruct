@@ -409,7 +409,34 @@ describe('vc8-form: width', () => {
     assert.strictEqual(out, 'void f(U* p) { int t; t = p->eUnitType & 0x7f; Send(t); }');
   });
   // MISSILE_SetPathFromTotalFrames_ForCatapultChargedBall 004cccc0: the original keeps the
-  // frame count's low byte; the wide local would keep all of it.
+  // whole frame count in EBX and pushes it to OverwriteDistanceAndMaxDistance's uint8_t.
+  it('keeps a widening whose every read is a parameter of the old width', () => {
+    const forms = [{ form: parseVc8Form('width(d,int)')!, tag: 'w' }];
+    const sites: Vc8FormSite[] = [];
+    const tu = applyVc8Forms(parse(['void f(int n) {', '  uint8_t d;', '  if (n > 0xff) {', '    d = 0xff;', '  } else {', '    d = (uint8_t)n;', '  }', '  Set(d);', '}'].join('\n')) as TranslationUnit,
+      forms, s => sites.push(s), { functionParamTypes: { Set: ['uint8_t'] } });
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.strictEqual(flat(emit(tu as AnyNode)), 'void f(int n) { int d; if (n > 0xff) { d = 0xff; } else { d = n; } Set(d); }');
+  });
+  // OBJECT_DispatchShrineServerActivate 004bd5c0: a char code widened and read whole.
+  it('refuses a widening read whole after a store the old type truncated', () => {
+    const { sites } = run(['void f(T* p) {', '  uint8_t c;', '  c = p->cCode;', '  g((uint32_t)c);', '}'], 'width(c,int)');
+    assert.strictEqual(sites[0].applied, false);
+  });
+  // SUNITNPC_ApplyScrollSkill 00576e40: its low byte stored through a cast address.
+  it('keeps a same-width retype whose address is only cast', () => {
+    const { out, sites } = run(['void f(U* p) {', '  eD2UnitType t;', '  *(uint8_t*)(char*)&t = (uint8_t)p->eUnitType;', '  Send((uint8_t)t);', '}'], 'width(t,int)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.ok(out.startsWith('void f(U* p) { int t;'), out);
+  });
+  it('refuses a retype whose address is used as its own pointer type', () => {
+    const { sites } = run(['void f(U* p) {', '  eD2UnitType t;', '  Get(&t);', '  Send((uint8_t)t);', '}'], 'width(t,int)');
+    assert.strictEqual(sites[0].applied, false);
+  });
+  it('refuses a width change whose address is taken', () => {
+    const { sites } = run(['void f(U* p) {', '  uint8_t t;', '  *(uint8_t*)&t = 1;', '  Send(t);', '}'], 'width(t,int)');
+    assert.strictEqual(sites[0].applied, false);
+  });
   it('refuses to drop a narrowing cast whose value can exceed the old type', () => {
     const src = [
       'void f(int n) {',
