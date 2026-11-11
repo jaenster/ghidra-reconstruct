@@ -77,6 +77,11 @@ describe('loop-copy-sink', () => {
       /g\(p\); h\(\); p = q; \}/);
   });
 
+  it('a field named like the renamed source keeps its name', () => {
+    assert.match(run('void f(N* p) { N* q; while (p) { q = p->next; p = q; q = g(); h(q->q); } k(); }'),
+      /N\* q2; q2 = g\(\); h\(q2->q\); p = q; \}/);
+  });
+
   it('refuses what it cannot prove', () => {
     // The rest of the body reads the copy's target.
     same('void f(N* p) { N* q; while (p) { q = p->next; p = q; g(p); } }');

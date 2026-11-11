@@ -48,7 +48,7 @@
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, AnyNode, AssignExpr, CompoundStmt, DeclStmt, DoWhileStmt, ExprStmt, Expression, ForStmt,
-  FunctionDecl, Identifier, ParameterDecl, Statement, TypeNode, VariableDecl, WhileStmt,
+  FunctionDecl, Identifier, MemberExpr, ParameterDecl, Statement, TypeNode, VariableDecl, WhileStmt,
 } from '../../../ast/nodes.js';
 import { traverseAST } from '../../../ast/visitor.js';
 import { Decl, Stmt } from '../../../ast/factory.js';
@@ -185,13 +185,30 @@ function freshName(fn: FunctionDecl, base: string): string {
   return n;
 }
 
+/** `n` with the variable `from` renamed; a member named like it is a field and keeps its name. */
 function rename<T extends ASTNode>(n: T, from: string, to: string): T {
-  const visit = createTransformer({
-    visitIdentifier(id: Identifier): ASTNode | undefined {
-      return id.name === from ? updateNode(id, { name: to } as Partial<Identifier>) : undefined;
-    },
-  });
-  return visit(n) as T;
+  const walk = (x: ASTNode): ASTNode => {
+    if (x.kind === NodeKind.Identifier) return (x as Identifier).name === from ? { ...x, name: to } as ASTNode : x;
+    if (x.kind === NodeKind.MemberExpr) {
+      const m = x as MemberExpr;
+      const o = walk(m.object as ASTNode) as Expression;
+      return o === m.object ? x : { ...m, object: o } as ASTNode;
+    }
+    let changed = false;
+    const copy: Record<string, unknown> = { ...x };
+    for (const [k, v] of Object.entries(x)) {
+      if (k === 'leadingTrivia' || k === 'trailingTrivia') continue;
+      if (Array.isArray(v)) {
+        const arr = v.map(y => (y && typeof y === 'object' && 'kind' in y) ? walk(y as ASTNode) : y);
+        if (arr.some((y, i) => y !== v[i])) { copy[k] = arr; changed = true; }
+      } else if (v && typeof v === 'object' && 'kind' in v) {
+        const y = walk(v as ASTNode);
+        if (y !== v) { copy[k] = y; changed = true; }
+      }
+    }
+    return changed ? copy as unknown as ASTNode : x;
+  };
+  return walk(n) as T;
 }
 
 interface Ctx {
