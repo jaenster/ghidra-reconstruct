@@ -88,6 +88,11 @@
  *
  *   tarms(C[,i])         the conditional `C ? A : B` is written `!C ? B : A`.
  *   zero(E[,i])          `!E` is written `E == 0`.
+ *   bool(E[,i])          E tested for truth (as nonzero lists, or the operand of `!`, or
+ *                        compared with 0 by == or !=) is written `(bool)(E)`, the same truth.
+ *                        VC8 folds a tested bit `f >> n & 1` into `test dword ptr [f], 1<<n`;
+ *                        converted to bool it keeps the shift, `shr; test` (CLIENT_Get-
+ *                        EffectiveInventory 0046db30, GFX_LoadCompositCof 0046e740).
  *   nonzero(E[,i])       E tested for truth (an if, while or for condition, an operand of
  *                        `&&` or `||`, or the condition of `?:`) is written `E != 0`.
  *   cmp(C,F[,i])         the comparison C is spelled another way: F = mirror (`a < b` as
@@ -141,6 +146,7 @@ export type Vc8Form =
   | { op: 'tarms'; cond: string; index: number }
   | { op: 'zero'; expr: string; index: number }
   | { op: 'nonzero'; expr: string; index: number }
+  | { op: 'bool'; expr: string; index: number }
   | { op: 'cmp'; cond: string; how: 'mirror' | 'lit' | 'mirror-lit'; index: number }
   | { op: 'swap'; expr: string; index: number }
   | { op: 'ifsel'; name: string }
@@ -166,7 +172,7 @@ export interface Vc8FormOptions {
 }
 
 const OPS = new Set(['seq', 'fold', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'width', 'arms',
-  'nest', 'merge-tail', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'cmp', 'swap', 'ifsel', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist']);
+  'nest', 'merge-tail', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist']);
 
 /** Split at the commas outside brackets, parentheses, angle-free. */
 function splitArgs(s: string): string[] {
@@ -229,7 +235,7 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
       if (anchor || args.length < 1 || args.length > 2 || !(i >= 1) || args[0] === '') return undefined;
       return { op: m[1], cond: args[0], index: i } as Vc8Form;
     }
-    case 'zero': case 'nonzero': case 'swap': case 'tarms': case 'unselect': {
+    case 'zero': case 'nonzero': case 'bool': case 'swap': case 'tarms': case 'unselect': {
       const i = int(args[1], 0);
       if (anchor || args.length < 1 || args.length > 2 || !(i >= 0) || args[0] === '') return undefined;
       return (m[1] === 'tarms' || m[1] === 'unselect' ? { op: m[1], cond: args[0], index: i } : { op: m[1], expr: args[0], index: i }) as Vc8Form;
@@ -1353,6 +1359,38 @@ function doNonzero(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'nonzero' }>): vo
   put(hit, { kind: NodeKind.BinaryExpr, operator: '!=', left: { kind: NodeKind.ParenExpr, expression: e }, right: intLit(0n, 10) } as unknown as BinaryExpr);
 }
 
+/** Every place an expression printed `w` stands tested for truth only, in preorder. */
+function truthSlots(fn: FunctionDecl, w: string): Slot[] {
+  const slots: Slot[] = [];
+  for (const { node } of walk(fn.body!)) {
+    const o = node as unknown as Record<string, unknown>;
+    const at = (field: string) => { const e = o[field] as Expression | null; if (e && text(unparen(e)) === w) slots.push({ parent: o, key: field }); };
+    if (node.kind === NodeKind.IfStmt || node.kind === NodeKind.WhileStmt || node.kind === NodeKind.DoWhileStmt || node.kind === NodeKind.ForStmt || node.kind === NodeKind.ConditionalExpr) at('condition');
+    if (node.kind === NodeKind.BinaryExpr && ['&&', '||'].includes((node as BinaryExpr).operator)) { at('left'); at('right'); }
+    if (node.kind === NodeKind.UnaryExpr && (node as UnaryExpr).operator === '!') at('operand');
+    if (node.kind === NodeKind.BinaryExpr && ['==', '!='].includes((node as BinaryExpr).operator)) {
+      const b = node as BinaryExpr;
+      const zero = (e: Expression) => { const l = litValue(e); return !!l && l.v === 0n; };
+      if (zero(b.right)) at('left');
+      else if (zero(b.left)) at('right');
+    }
+  }
+  return slots;
+}
+
+function doBool(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'bool' }>): void {
+  const slots = truthSlots(fn, norm(f.expr));
+  const hit = f.index === 0
+    ? (slots.length === 1 ? slots[0] : refuse(`${slots.length} truth tests of ${f.expr}`))
+    : (slots[f.index - 1] ?? refuse(`no truth test #${f.index} of ${f.expr}`));
+  const holder = hit.parent as Record<string, unknown>;
+  const e = unparen(holder[hit.key as string] as Expression);
+  if (maybeFloat(e, fn)) refuse(`${f.expr} may be floating point`);
+  const cast = parseExpr('(bool)(__vc8e)') as CStyleCastExpr;
+  (cast.expression as ParenExpr).expression = e;
+  put(hit, cast);
+}
+
 function intLit(v: bigint, base: 10 | 16): Expression {
   const raw = base === 16 ? '0x' + v.toString(16) : v.toString();
   return { kind: NodeKind.IntegerLiteral, value: v, suffix: '', base, raw } as unknown as Expression;
@@ -1520,7 +1558,7 @@ function doTsel(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'tsel' }>): void {
 const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op: K }>) => void } = {
   seq: doSeq, fold: doFold, cache: doCache, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
   retval: doRetval, width: doWidth, arms: doArms,
-  nest: doNest, 'merge-tail': doMergeTail, continue: doContinue, dup: doDup, tarms: doTarms, zero: doZero, nonzero: doNonzero,
+  nest: doNest, 'merge-tail': doMergeTail, continue: doContinue, dup: doDup, tarms: doTarms, zero: doZero, nonzero: doNonzero, bool: doBool,
   cmp: doCmp, swap: doSwap, ifsel: doIfsel, split: doSplit, select: doSelect, decl: doDecl, unselect: doUnselect,
   tsel: doTsel, hoist: doHoist,
 };
