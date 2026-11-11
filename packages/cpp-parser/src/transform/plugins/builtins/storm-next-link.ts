@@ -45,10 +45,10 @@ import { getChildren, traverseAST } from '../../../ast/visitor.js';
 import { Expr, Type } from '../../../ast/factory.js';
 import { createTransformer, updateNode, cloneNode, type Transformer } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
-import { createExprShape, type ExprShape } from './expr-shape.js';
+import { createExprShape, thisClassOf, type ExprShape } from './expr-shape.js';
 import { localTypesOf } from './compare-form.js';
 import {
-  bareName, shapeOfNode, unwrapParens, type TypeShape, type TypedefResolver,
+  bareName, shapeOfNode, shapeOfSpelling, unwrapParens, type TypeShape, type TypedefResolver,
 } from './call-arg-cast.js';
 
 export const STORM_NEXT_LINK_HELPER = 'D2_StormNextLink';
@@ -178,12 +178,52 @@ function onlyLeaves(s: Statement | null): boolean {
   }
 }
 
+// ---------------------------------------------------------------- type tables
+
+/**
+ * One spelling of an aggregate's name, whoever spelled it. The tables are keyed by Ghidra's
+ * names (`TSExplicitList<SGAMEDATA,-572662307>`), a type read from a body by the parser's
+ * (`TSExplicitList<SGAMEDATA, -572662307>`), and Ghidra's pseudo-C writes a negative template
+ * argument with an underscore (`TSExplicitList<SGAMEDATA,_572662307> *this`).
+ */
+function typeKey(name: string): string {
+  return name.replace(/\s+/g, '').replace(/(^|[<,])::/g, '$1').replace(/([<,])_(?=\d)/g, '$1-');
+}
+
+const keyCache = new WeakMap<object, Map<string, string>>();
+function offsetKeys(table: Record<string, unknown>): Map<string, string> {
+  let m = keyCache.get(table);
+  if (!m) {
+    m = new Map();
+    for (const k of Object.keys(table)) if (k.includes('<') && !m.has(typeKey(k))) m.set(typeKey(k), k);
+    keyCache.set(table, m);
+  }
+  return m;
+}
+
+/** A view of a table keyed by aggregate name that also answers to the other spellings of a template name. */
+const tolerantCache = new WeakMap<object, object>();
+function tolerant<T>(table: Record<string, T>): Record<string, T> {
+  let view = tolerantCache.get(table) as Record<string, T> | undefined;
+  if (!view) {
+    view = new Proxy(table, {
+      get(target, key) {
+        if (typeof key !== 'string' || key in target || !key.includes('<')) return (target as Record<string | symbol, unknown>)[key];
+        const k = offsetKeys(target).get(typeKey(key));
+        return k === undefined ? undefined : target[k];
+      },
+    });
+    tolerantCache.set(table, view);
+  }
+  return view;
+}
+
 // ---------------------------------------------------------------- the pass
 
 interface Def { stmt: Statement; rhs: Expression; poisoned: boolean }
 
 function createStormNextLinkTransformer(options: StormNextLinkOptions = {}): Transformer {
-  const structFields = options.structFields ?? {};
+  const structFields = tolerant(options.structFields ?? {});
   const offsets = options.structFieldOffsets ?? {};
   const sizes = options.aggregateSizes ?? {};
   const typedefTargets = options.typedefTargets ?? {};
@@ -191,7 +231,7 @@ function createStormNextLinkTransformer(options: StormNextLinkOptions = {}): Tra
 
   const structKey = (base: string): string | undefined => {
     const cands = [base, base.replace(/^::/, ''), base.replace(/^::/, '').replace(/([<,]\s*)::/g, '$1'), bareName(base)];
-    return cands.find(k => offsets[k]);
+    return cands.find(k => offsets[k]) ?? offsetKeys(offsets).get(typeKey(base));
   };
   const elemSize = (s: TypeShape | null): number | undefined => {
     if (!s || s.stars < 1) return undefined;
@@ -219,6 +259,7 @@ function createStormNextLinkTransformer(options: StormNextLinkOptions = {}): Tra
         fieldTypes: options.fieldTypes ?? {},
         returnTypes: options.functionReturnTypes ?? {},
         resolve,
+       thisClass: thisClassOf(fn, resolve),
       });
       const isArrayLocal = (name: string) => localTypes.get(name)?.kind === NodeKind.ArrayType;
 
@@ -302,9 +343,56 @@ function createStormNextLinkTransformer(options: StormNextLinkOptions = {}): Tra
       const declNames = new Set<ASTNode>();
       for (const n of traverseAST(fn.body)) if (n.kind === NodeKind.VariableDecl) declNames.add((n as VariableDecl).name);
 
-      const rewrites = new Map<ASTNode, Statement>();
+      const rewrites = new Map<ASTNode, ASTNode>();
       const drops = new Set<ASTNode>();
       const atomAddr = new Map<string, Lin>();
+
+      /**
+       * After the site, the link's next word read through the object that contains the link
+       * (`this->m_terminator.m_next` with `pTVar1 = &this->m_terminator`) reads it through the
+       * link local instead, as the helper's own reads do: the same lvalue spelled the other
+       * way. Only while nothing assigns a local or calls (the local and the defining
+       * expressions keep their values) and only for an address that no memory read enters
+       * (no store can move it).
+       */
+      const respellNextReads = (
+        ifs: IfStmt, linkExpr: Expression, link: Lin,
+        val: (e: Expression) => Lin | null, addr: (e: Expression) => Lin | null,
+      ): void => {
+        if (linkExpr.kind !== NodeKind.Identifier || !localTypes.has((linkExpr as Identifier).name)) return;
+        const linkName = (linkExpr as Identifier).name;
+        const lv = val(linkExpr);
+        if (!lv || !linEq(lv, link) || [...lv.terms.keys()].some(k => k.startsWith('m['))) return;
+        const ls = shapeOf(linkExpr);
+        const k = ls && ls.stars === 1 ? structKey(ls.base) : undefined;
+        const field = k ? Object.entries(offsets[k] ?? {}).find(([, off]) => off === 4)?.[0] : undefined;
+        if (!field || !isWord(shapeOfSpelling(structFields[k!]?.[field] ?? '', resolve))) return;
+        const block = parent.get(ifs);
+        if (!block || block.kind !== NodeKind.CompoundStmt) return;
+        const list = (block as CompoundStmt).statements;
+        const next = linAdd(link, linConst(4n));
+        for (let i = list.indexOf(ifs) + 1; i < list.length; i++) {
+          const st = list[i];
+          let stop = false;
+          for (const n of traverseAST(st)) {
+            if (n.kind === NodeKind.CallExpr || n.kind === NodeKind.PostfixExpr) { stop = true; break; }
+            if (n.kind === NodeKind.UnaryExpr && ['++', '--'].includes((n as UnaryExpr).operator)) { stop = true; break; }
+            if (n.kind === NodeKind.AssignExpr && stripParens((n as AssignExpr).left).kind === NodeKind.Identifier) { stop = true; break; }
+          }
+          if (stop || st.kind !== NodeKind.ExprStmt) return;
+          const e = stripParens((st as ExprStmt).expression);
+          if (e.kind !== NodeKind.AssignExpr || (e as AssignExpr).operator !== '=') continue;
+          const rhs = stripParens((e as AssignExpr).right);
+          if (rhs.kind !== NodeKind.MemberExpr) continue;
+          const m = rhs as MemberExpr;
+          const obj = stripParens(m.object);
+          if (m.isArrow && obj.kind === NodeKind.Identifier && (obj as Identifier).name === linkName) continue;
+          const a = addr(rhs);
+          if (!a || !linEq(a, next) || [...a.terms.keys()].some(t => t.startsWith('m['))) continue;
+          if (!isWord(shapeOf(rhs))) continue;
+          rewrites.set((e as AssignExpr).right, Expr.member(Expr.identifier(linkName), field, true));
+        }
+      };
 
       const site = (ifs: IfStmt): void => {
         if (ifs.init) return;
@@ -408,6 +496,8 @@ function createStormNextLinkTransformer(options: StormNextLinkOptions = {}): Tra
               }
               return null;
             }
+            case NodeKind.ThisExpr:
+              return isWord(shapeOf(e)) ? linAtom('this') : null;
             case NodeKind.UnaryExpr: {
               const u = e as UnaryExpr;
               if (u.operator === '&') return addr(u.operand);
@@ -501,7 +591,20 @@ function createStormNextLinkTransformer(options: StormNextLinkOptions = {}): Tra
           outerCast = c.type;
           sum = stripParens(c.expression);
         }
-        if (!wordInt(sum)) return;
+        // A word integer, or a byte pointer plus or minus one (`(char*)pLink + (n - prev->m_next)`):
+        // char arithmetic adds the integer unscaled, so the sum is the same 32-bit value.
+        const bytePtr = (x: Expression): boolean => {
+          const sh = shapeOf(x);
+          return !!sh && sh.stars > 0 && elemSize(sh) === 1;
+        };
+        const byteSum = (x: Expression): boolean => {
+          const u = stripParens(x);
+          if (u.kind !== NodeKind.BinaryExpr) return false;
+          const bx = u as BinaryExpr;
+          if (bx.operator !== '+' && bx.operator !== '-') return false;
+          return (bytePtr(bx.left) && wordInt(bx.right)) || (bx.operator === '+' && wordInt(bx.left) && bytePtr(bx.right));
+        };
+        if (!wordInt(sum) && !(outerCast && byteSum(sum))) return;
         const sumVal = val(sum);
         if (!sumVal || !linEq(sumVal, linAdd(linAdd(nVal, link), prevNext, -1n))) return;
         if (!outerCast && !(sShape && sShape.stars === 0)) return;
@@ -512,7 +615,7 @@ function createStormNextLinkTransformer(options: StormNextLinkOptions = {}): Tra
           const u = stripParens(x);
           if (u.kind === NodeKind.BinaryExpr) {
             const bx = u as BinaryExpr;
-            if ((bx.operator === '+' || bx.operator === '-') && wordInt(bx.left) && wordInt(bx.right)) {
+            if ((bx.operator === '+' || bx.operator === '-') && ((wordInt(bx.left) && wordInt(bx.right)) || byteSum(bx))) {
               return flatten(bx.left, sign) && flatten(bx.right, bx.operator === '+' ? sign : -sign);
             }
           }
@@ -539,6 +642,7 @@ function createStormNextLinkTransformer(options: StormNextLinkOptions = {}): Tra
           location: ifs.location,
         } as Statement;
         rewrites.set(ifs, stmt);
+        respellNextReads(ifs, linkExpr, link, val, addr);
 
         // A local that only carried N here goes with its definition.
         let dropped: string | undefined;

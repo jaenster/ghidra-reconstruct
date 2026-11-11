@@ -544,6 +544,7 @@ export {
 
 export {
   applyVc8Forms,
+  definitionOf,
   parseVc8Form,
   type Vc8Form,
   type Vc8FormSite,

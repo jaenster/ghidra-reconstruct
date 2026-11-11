@@ -195,4 +195,4 @@ export function vc8formHashRecord(func: Pick<ExtractedFunction, 'address' | 'nam
   return { address: String(func.address), name: String(func.name ?? ''), size: Number(func.size), form: vc8formBodyHash(d), legacy: vc8formLegacyBodyHash(d), tags: tags.sort() };
 }
 
-const FORM_ORDER: Array<Vc8Form['op']> = ['width', 'boolflag', 'retwiden', 'own', 'split', 'dup', 'fold', 'nestcall', 'fill', 'copy', 'rowptr', 'ptrwalk', 'cache', 'ifsel', 'guards', 'merge-guards', 'retval', 'select', 'tsel', 'merge-tail', 'retvar', 'onecall', 'nest', 'continue', 'arms', 'tarms', 'unselect', 'zero', 'nonzero', 'bool', 'shift', 'cmp', 'swap', 'hoist', 'decl', 'seq', 'acc'];
+const FORM_ORDER: Array<Vc8Form['op']> = ['width', 'boolflag', 'retwiden', 'own', 'split', 'dup', 'fold', 'nestcall', 'fill', 'copy', 'rowptr', 'ptrwalk', 'cache', 'ifsel', 'guards', 'merge-guards', 'retval', 'select', 'tsel', 'merge-tail', 'retvar', 'onecall', 'roundup', 'swmerge', 'nest', 'continue', 'arms', 'tarms', 'unselect', 'zero', 'nonzero', 'bool', 'shift', 'cmp', 'swap', 'hoist', 'decl', 'seq', 'acc'];
