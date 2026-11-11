@@ -5,6 +5,9 @@
   "type": "module",
   "main": "./dist/main.js",
   "types": "./dist/main.d.ts",
+  "bin": {
+    "hand-follow": "./dist/hand-follow/cli.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/main.d.ts",
