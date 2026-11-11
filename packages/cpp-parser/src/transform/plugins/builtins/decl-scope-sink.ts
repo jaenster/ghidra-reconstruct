@@ -336,6 +336,48 @@ function initializerMayRelocate(
   return true;
 }
 
+/** Is the address of `varName` taken anywhere in `node`? */
+function takesAddressOf(node: ASTNode, varName: string): boolean {
+  if (node.kind === NodeKind.UnaryExpr) {
+    const un = node as UnaryExpr;
+    if (un.operator === '&' && isWholeVarRef(un.operand, varName)) return true;
+  }
+  return getChildren(node).some(child => takesAddressOf(child, varName));
+}
+
+/**
+ * Is the initialising store of an address-taken local pinned where Ghidra printed it?
+ *
+ * A local whose address escapes lives in memory, and VC8 keeps a store to it exactly
+ * where the source wrote it relative to calls: no call may run before a store the
+ * callee could see. Ghidra prints the store where the asm has it, so a declaration
+ * `BOOL bHandled = 0;` that it printed ahead of a call was written ahead of that call.
+ * Sunk past the call it changes the store's position, and VC8 then gives the local
+ * another home. WndProcB 00451b30 zeroes bHandled before HandleWinProcMsg; sunk into
+ * the branch, VC8 homes it in the dead slot of lParam and drops the original's local:
+ *
+ *   BOOL bHandled = 0;                       // [ebp-4], stored at entry
+ *   ...HandleWinProcMsg(...); IsPlaybackActive();
+ *   if (...) { SMsgDispatchMessage(..., &bHandled, ...); }
+ *
+ * Leaving it in place never changes a value.
+ */
+function initialisedStoreIsPinned(
+  varName: string,
+  hasInitializer: boolean,
+  stmts: readonly ASTNode[],
+  declIndex: number,
+  targetIndex: number,
+  evaluatedFirst: readonly ASTNode[],
+): boolean {
+  if (!hasInitializer) return false;
+  if (!takesAddressOf(stmts[targetIndex], varName)) return false;
+  const calls = (n: ASTNode): boolean => n.kind === NodeKind.CallExpr || getChildren(n).some(calls);
+  if (evaluatedFirst.some(calls)) return true;
+  for (let j = declIndex + 1; j < targetIndex; j++) if (calls(stmts[j])) return true;
+  return false;
+}
+
 /** Does `node` call anything or store through a pointer? Either may write what a load reads. */
 function callsOrStoresThroughPointer(node: ASTNode): boolean {
   const calls = (n: ASTNode): boolean => n.kind === NodeKind.CallExpr || getChildren(n).some(calls);
@@ -485,6 +527,7 @@ function createDeclScopeSinkTransformer(_options: DeclScopeSinkOptions = {}): Tr
             && !initializerMayRelocate(varDecl.initializer, stmts, i, refIndex, [ifStmt.condition])) {
             continue;
           }
+          if (initialisedStoreIsPinned(varName, !!varDecl.initializer, stmts, i, refIndex, [ifStmt.condition])) continue;
 
           const targetBranch = inThen ? ifStmt.thenBranch : ifStmt.elseBranch;
           if (!targetBranch || targetBranch.kind !== NodeKind.CompoundStmt) continue;
@@ -552,6 +595,7 @@ function createDeclScopeSinkTransformer(_options: DeclScopeSinkOptions = {}): Tr
           && !initializerMayRelocate(varDecl.initializer, stmts, i, refIndex, conditionParts)) {
           continue;
         }
+        if (initialisedStoreIsPinned(varName, !!varDecl.initializer, stmts, i, refIndex, conditionParts)) continue;
 
         // Prepend declaration into the body
         const newBody = updateNode(bodyCompound, {
