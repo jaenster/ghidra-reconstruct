@@ -1614,6 +1614,22 @@ export function generatePlatformHeader(
     lines.push('// Diablo 2 PRNG — LCG with multiplier 0x6AC690C5');
     lines.push('#define D2_SEED_NEXT(seed) ((D2SeedStrc)((uint64_t)(uint32_t)(seed).nSeedLow * 0x6ac690c5u + (uint64_t)(uint32_t)(seed).nSeedHigh))');
     lines.push('#define D2_SEED_NEXT_VAL(sv) ((D2SeedStrc)((uint64_t)(uint32_t)(sv) * 0x6ac690c5u + ((uint64_t)(sv) >> 32)))');
+    // The step as the game inlines it where it stores back into the seed it read: the high
+    // word first, then the low word, which it returns (out-of-line copy: RollRandomSeed
+    // 0045c370). A template because D2SeedStrc is defined after this header. Forced inline:
+    // every one of the original's steps is inlined, and VC8 at /Ob1 calls a plain inline
+    // copy from large functions (AITHINK_AncientTalic 005eeda0 loses its match to the call).
+    lines.push('#if defined(_MSC_VER)');
+    lines.push('#define D2_SEED_ROLL_INLINE __forceinline');
+    lines.push('#else');
+    lines.push('#define D2_SEED_ROLL_INLINE inline __attribute__((always_inline))');
+    lines.push('#endif');
+    lines.push('template <class TSeed> static D2_SEED_ROLL_INLINE uint32_t D2_SeedRoll(TSeed* pSeed) {');
+    lines.push('    uint64_t lNext = (uint64_t)(uint32_t)pSeed->nSeedLow * 0x6ac690c5u + (uint64_t)(uint32_t)pSeed->nSeedHigh;');
+    lines.push('    pSeed->nSeedHigh = (uint32_t)(lNext >> 32);');
+    lines.push('    pSeed->nSeedLow = (uint32_t)lNext;');
+    lines.push('    return (uint32_t)lNext;');
+    lines.push('}');
     lines.push('');
   }
 

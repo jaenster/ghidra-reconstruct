@@ -731,6 +731,11 @@ export {
 } from './builtins/prng-temp-collapse.js';
 
 export {
+  seedRollStepPlugin,
+  type SeedRollStepOptions,
+} from './builtins/seed-roll-step.js';
+
+export {
   seedProductFoldPlugin,
   foldSeedProducts,
 } from './builtins/seed-product-fold.js';
@@ -855,6 +860,7 @@ import { addressRunBoundPlugin } from './builtins/address-run-bound.js';
 import { prngTransformPlugin } from './builtins/prng-transform.js';
 import { seedProductFoldPlugin } from './builtins/seed-product-fold.js';
 import { prngTempCollapsePlugin } from './builtins/prng-temp-collapse.js';
+import { seedRollStepPlugin } from './builtins/seed-roll-step.js';
 import { bitfieldAccessPlugin } from './builtins/bitfield-access.js';
 import { scalarPieceArithmeticPlugin } from './builtins/scalar-piece-arithmetic.js';
 export { scalarPieceArithmeticPlugin } from './builtins/scalar-piece-arithmetic.js';
@@ -1233,6 +1239,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   seedProductFoldPlugin,      // A seed step printed as a named product (priority 79)
   prngTransformPlugin,        // Pattern detection: PRNG (priority 80)
   prngTempCollapsePlugin,     // Cleanup: collapse PRNG temp variables (priority 85)
+  seedRollStepPlugin,         // Matching: a seed step written back into its seed is the roll call (priority 619.5)
   voidReturnCleanupPlugin,    // Cleanup: trailing return; in void functions (priority 90)
   undefinedGotoLabelPlugin,   // Control-flow: define dropped Ghidra goto targets (priority 95)
   underscoreStorageAliasPlugin, // Declaration: bind `_<global>` to the global and `_<crt>(` to the CRT name (priority 599)
