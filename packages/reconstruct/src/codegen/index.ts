@@ -3088,8 +3088,13 @@ function installFileStaticFunctions(
     console.log(
       `File-static functions: ${selection.selected.size} of ${selection.candidates} with parameters in ` +
       `registers their convention does not use${refused ? ` (kept extern: ${refused})` : ''}` +
+      (selection.measuredStatic ? `; ${selection.measuredStatic} selected by a vc8linkage:static tag` : '') +
       (selection.externEntries.size ? `; ${selection.externEntries.size} extern entries for hand-written callers` : '')
     );
+    if (selection.staleLinkageTags.length > 0) {
+      console.log(`Stale vc8linkage tags (${selection.staleLinkageTags.length}): ` +
+        selection.staleLinkageTags.map(t => `${t.name} [${t.tag}]: ${t.why}`).join('; '));
+    }
     if (context.inlinedCalls) {
       const inline = [...selection.selected.values()].filter(e => e.inline).length;
       const sites = [...context.inlinedCalls.calleesBySite.values()].reduce((n, c) => n + c.length, 0);
