@@ -824,6 +824,14 @@ export interface FuncPtrArgCastTables {
   zeroArityCallbackCasts?: Record<string, Record<number, {
     returnType: string; paramTypes: string[]; convention?: string;
   }>>;
+  /**
+   * Slots whose callee discards the callback's return value, in the same parts:
+   * cast into when the function's parameters match in number, convention and
+   * pointer-ness.
+   */
+  discardedReturnCallbackCasts?: Record<string, Record<number, {
+    returnType: string; paramTypes: string[]; convention?: string;
+  }>>;
   /** Funcdef typedef name → its normalized signature key */
   funcdefSignatures: Record<string, string>;
   /** Funcdef name -> Ghidra's calling convention. */

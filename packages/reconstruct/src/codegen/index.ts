@@ -102,7 +102,7 @@ import { partitionGlobalsByModule, buildFunctionModuleMap } from './globals-part
 import { normalizeAddress } from '../config/loader.js';
 import { resolveTargets, getTargetDirectory, type ResolvedTarget } from '../targets/index.js';
 import { generateStubsHeader } from '../targets/stubs.js';
-import { collectCrtHeaders, EXCLUDED_SYMBOL_DECLS, declaredIdentifier, WIN32_ZERO_ARITY_CALLBACK_SLOTS, WIN32_ZERO_ARITY_CALLBACK_CASTS, WIN32_OVERLOADED_INTRINSICS, WIN32_GENERIC_HANDLE_RETURNS, HEADER_DECLARED_SIGNATURES, ghidraDeclDrift } from './crt-mapping.js';
+import { collectCrtHeaders, EXCLUDED_SYMBOL_DECLS, declaredIdentifier, WIN32_ZERO_ARITY_CALLBACK_SLOTS, WIN32_ZERO_ARITY_CALLBACK_CASTS, CRT_DISCARDED_RETURN_CALLBACK_CASTS, WIN32_OVERLOADED_INTRINSICS, WIN32_GENERIC_HANDLE_RETURNS, HEADER_DECLARED_SIGNATURES, ghidraDeclDrift } from './crt-mapping.js';
 import { selectExclusionEmissions, setPlatformDefinedNames, setPlatformDeclaredNames, collectReferencedNames, mayReferenceNamespaces } from './exclusion-closure.js';
 import { normalizePointerSizeSpellings } from './pointer-size-spelling.js';
 import { flattenTemplateNames } from './template-names.js';
@@ -7021,6 +7021,7 @@ export function buildFuncPtrArgCastTables(
     paramFuncdefs,
     zeroArityCallbackSlots: WIN32_ZERO_ARITY_CALLBACK_SLOTS,
     zeroArityCallbackCasts: WIN32_ZERO_ARITY_CALLBACK_CASTS,
+    discardedReturnCallbackCasts: CRT_DISCARDED_RETURN_CALLBACK_CASTS,
     funcdefSignatures,
     funcdefConventions,
     funcdefConventionKeywords,
