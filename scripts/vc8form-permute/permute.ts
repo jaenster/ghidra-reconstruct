@@ -3,7 +3,7 @@
  *
  *   tsx permute.ts --checkout DIR --snapshot SNAP --out OUT [--pool AUDIT] [--sample N] [--seed S]
  *                  [--addrs A,B,...] [--jobs J] [--max-insns K] [--no-pairs] [--no-phase]
- *                  [--resume [--group G]] [--oracle-zig BIN]
+ *                  [--resume [--group G]] [--oracle-zig BIN] [--ops OP,OP,...]
  *
  * For each target function (the near-miss pool of an audit.tsv, a sample of it, or --addrs):
  *
@@ -29,6 +29,9 @@
  *      the generator sorts a function's tags (same-op pairs get `ord`).
  *   6. The accepted tags of each TU are compiled together; a tag that loses another
  *      function or its own target there is dropped, the rest compiled again.
+ *
+ * --ops keeps only the candidates of the named ops (`--ops nest,merge-tail,cache`): one family of
+ * forms asked about, at a fraction of the trials.
  *
  * OUT gets tags.tsv (the tag data exactly as Ghidra stores it: dh is the generator's hash
  * of the snapshot's decompile, bh the original's size and masked bytes, ev the hash of the
@@ -249,7 +252,7 @@ type Res = [Item, string, number, Set<number>, Set<number>];
 interface Accepted { job: Job; on: number; forms: string[]; gained: Set<number>; bodies: Bodies; reject?: string }
 
 interface Args {
-  checkout: string; snapshot: string; out: string; pool?: string; addrs?: string; sample: number; seed: number;
+  checkout: string; snapshot: string; out: string; pool?: string; addrs?: string; ops?: string; sample: number; seed: number;
   max_insns: number; jobs: number; max_anchors: number; pair_top: number; no_pairs: boolean; no_phase: boolean;
   resume: boolean; group: number; zig: string;
 }
@@ -262,7 +265,7 @@ function usage(code = 2): never {
 
 function parseArgs(argv: string[]): Args {
   const a: Partial<Args> & Record<string, unknown> = { sample: 0, seed: 1, max_insns: 100, jobs: 4, max_anchors: 16, pair_top: 3, no_pairs: false, no_phase: false, resume: false, group: 1 };
-  const str: Record<string, keyof Args> = { '--checkout': 'checkout', '--snapshot': 'snapshot', '--out': 'out', '--pool': 'pool', '--addrs': 'addrs', '--oracle-zig': 'zig' };
+  const str: Record<string, keyof Args> = { '--checkout': 'checkout', '--snapshot': 'snapshot', '--out': 'out', '--pool': 'pool', '--addrs': 'addrs', '--oracle-zig': 'zig', '--ops': 'ops' };
   const int: Record<string, keyof Args> = { '--sample': 'sample', '--seed': 'seed', '--max-insns': 'max_insns', '--jobs': 'jobs', '--max-anchors': 'max_anchors', '--pair-top': 'pair_top', '--group': 'group' };
   const flag: Record<string, keyof Args> = { '--no-pairs': 'no_pairs', '--no-phase': 'no_phase', '--resume': 'resume' };
   for (let i = 0; i < argv.length; i++) {
@@ -398,7 +401,12 @@ async function main() {
       '--types', join(args.snapshot, 'dataTypes.ndjson'),
       '--globals', join(args.snapshot, 'globals.ndjson'), '--max-anchors', String(args.max_anchors)], GR);
     const cands = new Map<string, any>();
-    for (const r of JSON.parse(readFileSync(join(out, 'cand-out.json'), 'utf8'))) cands.set(r.id, r);
+    // --ops: only the forms of the named ops are tried (a question about one family of forms).
+    const ops = args.ops ? new Set(args.ops.split(',')) : null;
+    for (const r of JSON.parse(readFileSync(join(out, 'cand-out.json'), 'utf8'))) {
+      if (ops) r.candidates = r.candidates.filter((c: { form: string }) => ops.has(c.form.slice(0, c.form.indexOf('('))));
+      cands.set(r.id, r);
+    }
     let nForms = 0;
     for (const r of cands.values()) nForms += r.candidates.length;
     log(`candidates: ${cands.size} functions, ${nForms} forms (${fixed(now() - t1, 0)}s)`);

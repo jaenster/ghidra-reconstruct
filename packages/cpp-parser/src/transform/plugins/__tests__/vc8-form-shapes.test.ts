@@ -60,6 +60,11 @@ describe('vc8-form shapes: nest', () => {
   it('refuses a guard that can fall through', () => {
     refused(['int f(U* p) {', '  if (p) {', '    g();', '  }', '  return 1;', '}'], 'nest(p)');
   });
+  it('moves a whole switch with its case labels', () => {
+    const { out, sites } = run(['int f(Q* q, int n) {', '  if (!q) {', '    return 0;', '  }', '  switch (n) {', '  case 1:', '    return g();', '  }', '  return 1;', '}'], 'nest(!q)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.strictEqual(out, 'int f(Q* q, int n) { if (q) { switch (n) { case 1: return g(); } return 1; } else { return 0; } }');
+  });
   it('refuses to move a case label', () => {
     refused(['int f(int n) {', '  switch (n) {', '  case 1:', '    if (n) return 0;', '    g();', '  case 2:', '    return 2;', '  }', '  return 1;', '}'], 'nest(n)');
   });
@@ -86,6 +91,16 @@ describe('vc8-form shapes: merge-tail', () => {
   });
   it('refuses different returns', () => {
     refused(['int f(int n) {', '  if (n) {', '    return 0;', '  }', '  g();', '  return 1;', '}'], 'merge-tail(n)');
+  });
+  // OBJOP_A5Q5_WorldstonePortalActivate 0058d400: the statements between hold a whole switch,
+  // whose case labels move with it.
+  it('moves a whole switch into the arm', () => {
+    const { out, sites } = run(['int f(Q* q, int n) {', '  if (!q) {', '    return 0;', '  }', '  switch (n) {', '  case 1:', '    g();', '    break;', '  default:', '    h();', '  }', '  return 0;', '}'], 'merge-tail(!q)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.strictEqual(out, 'int f(Q* q, int n) { if (q) { switch (n) { case 1: g(); break; default: h(); } } return 0; }');
+  });
+  it('still refuses to move a goto label', () => {
+    refused(['int f(Q* q) {', '  if (!q) {', '    return 0;', '  }', '  g();', 'out:', '  h();', '  return 0;', '}'], 'merge-tail(!q)');
   });
 });
 
@@ -330,5 +345,109 @@ describe('vc8-form shapes: hoist', () => {
   it('refuses a parameter or a local declared with a value', () => {
     refused(['void f(int a, int x) {', '  if (a) {', '    x = a;', '    g(x);', '  }', '}'], 'hoist(x = a)');
     refused(['void f(int a) {', '  int x = 2;', '  if (a) {', '    x = a;', '    g(x);', '  }', '}'], 'hoist(x = a)');
+  });
+});
+
+describe('vc8-form shapes: arms index', () => {
+  const lines = ['int f(int* p, int a) {', '  if (!p) {', '    a = 1;', '  } else {', '    a = 2;', '  }', '  if (!p) {', '    a = 3;', '  } else {', '    a = 4;', '  }', '  return a;', '}'];
+  it('parses the index with and without wrap', () => {
+    assert.deepStrictEqual(parseVc8Form('arms(!p,2)'), { op: 'arms', cond: '!p', index: 2 });
+    assert.deepStrictEqual(parseVc8Form('arms(!p,wrap,2)'), { op: 'arms', cond: '!p', wrap: true, index: 2 });
+    assert.deepStrictEqual(parseVc8Form('arms(!p,wrap)'), { op: 'arms', cond: '!p', wrap: true });
+    assert.strictEqual(parseVc8Form('arms(!p,0)'), undefined);
+    assert.strictEqual(parseVc8Form('arms(!p,x)'), undefined);
+  });
+  it('without an index takes the first, with one the i-th', () => {
+    assert.strictEqual(run(lines, 'arms(!p)').out, 'int f(int* p, int a) { if (p) { a = 2; } else { a = 1; } if (!p) { a = 3; } else { a = 4; } return a; }');
+    assert.strictEqual(run(lines, 'arms(!p,2)').out, 'int f(int* p, int a) { if (!p) { a = 1; } else { a = 2; } if (p) { a = 4; } else { a = 3; } return a; }');
+    refused(lines, 'arms(!p,3)');
+  });
+});
+
+// Q04_ActiveFilter 00592fb0.
+describe('vc8-form shapes: nestcall', () => {
+  const lines = ['int f(D2UnitStrc* pUnit, int dwItemCode) {', '  D2GameStrc* pGame;', '  int pFoundItem;',
+    '  pGame = GetGamePointer(pUnit);', '  pFoundItem = HasQuestItem(pGame, pUnit, dwItemCode);', '  return pFoundItem;', '}'];
+  it('writes the call into the argument and drops the temporary', () => {
+    const { out, sites } = run(lines, 'nestcall(pGame)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.strictEqual(out, 'int f(D2UnitStrc* pUnit, int dwItemCode) { int pFoundItem; pFoundItem = HasQuestItem(GetGamePointer(pUnit), pUnit, dwItemCode); return pFoundItem; }');
+  });
+  it('writes the call as the object of a member, a declaration keeping its bare form while named', () => {
+    const { out, sites } = run(['int f(D2UnitStrc* pUnit, int n) {', '  D2PlayerDataStrc* pData = GetPlayerData(pUnit);', '  n = pData->pQuestRecord[n];', '  pData = 0;', '  return n;', '}'], 'nestcall(pData)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.strictEqual(out, 'int f(D2UnitStrc* pUnit, int n) { D2PlayerDataStrc* pData; n = GetPlayerData(pUnit)->pQuestRecord[n]; pData = 0; return n; }');
+  });
+  it('refuses another argument that reads memory, calls or stores', () => {
+    refused(['int f(U* p) {', '  int t;', '  t = g(p);', '  return h(t, p->x);', '}'], 'nestcall(t)');
+    refused(['int f(U* p) {', '  int t;', '  t = g(p);', '  return h(t, k());', '}'], 'nestcall(t)');
+    refused(['int f(U* p) {', '  int t;', '  t = g(p);', '  return h(t, gGlobal);', '}'], 'nestcall(t)');
+  });
+  it('refuses a temporary read again, a narrow one, one read twice, and a conditional place', () => {
+    refused(['int f(U* p) {', '  int t;', '  t = g(p);', '  h(t, 1);', '  return t;', '}'], 'nestcall(t)');
+    refused(['int f(U* p) {', '  char t;', '  t = g(p);', '  return h(t, 1);', '}'], 'nestcall(t)');
+    refused(['int f(U* p) {', '  int t;', '  t = g(p);', '  return h(t, t);', '}'], 'nestcall(t)');
+    refused(['int f(U* p, int a) {', '  int t;', '  t = g(p);', '  return a && h(t);', '}'], 'nestcall(t)');
+    refused(['int f(U* p) {', '  int t;', '  t = g(p);', '  return t + 1;', '}'], 'nestcall(t)');
+  });
+  it('takes an enum or a handle, and reads past a store on one path only', () => {
+    let r = run(['int f(U* p) {', '  eD2LevelId e;', '  e = g(p);', '  return h(e, 1);', '}'], 'nestcall(e)');
+    assert.ok(r.sites[0].applied, r.sites[0].why);
+    assert.strictEqual(r.out, 'int f(U* p) { return h(g(p), 1); }');
+    refused(['int f(U* p, int a) {', '  int t;', '  t = g(p);', '  h(t, 1);', '  if (a) {', '    t = 2;', '  }', '  return t;', '}'], 'nestcall(t)');
+    r = run(['int f(U* p, int a) {', '  int t;', '  t = g(p);', '  h(t, 1);', '  if (a) {', '    t = 2;', '  } else {', '    t = 3;', '  }', '  return t;', '}'], 'nestcall(t)');
+    assert.ok(r.sites[0].applied, r.sites[0].why);
+  });
+  // AUTOMAP_RevealRoomsAroundPlayer 00459020: the loop after it stores the temporary first.
+  it('is dead before a loop that stores it first, however often the loop runs', () => {
+    const r = run(['int f(U* p, int n) {', '  int e;', '  int i;', '  e = g(p);', '  h(e, 1);', '  for (i = 0; i < n; i++) {', '    e = g(p);', '    h(e, 2);', '  }', '  return 0;', '}'], 'nestcall(e,1)');
+    assert.ok(r.sites[0].applied, r.sites[0].why);
+    refused(['int f(U* p, int n) {', '  int e;', '  int i;', '  e = g(p);', '  h(e, 1);', '  for (i = 0; i < n; i++) {', '    e = g(p);', '    h(e, 2);', '  }', '  return e;', '}'], 'nestcall(e,1)');
+  });
+  it('is dead in a loop only when stored again first', () => {
+    refused(['void f(U* p) {', '  int t = 0;', '  while (p) {', '    h(t);', '    t = g(p);', '    k(t, 1);', '  }', '}'], 'nestcall(t)');
+  });
+});
+
+describe('vc8-form shapes: fill', () => {
+  // SKILLDESC_FormatSignedValue 004e79e0.
+  it('writes a memset of elements as an index loop', () => {
+    const { out, sites } = run(['void f() {', '  uint16_t a[32];', '  memset(a, 0, 32 * sizeof(a[0]));', '  g(a);', '}'], 'fill(a)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.strictEqual(out, 'void f() { uint16_t a[32]; for (int i = 0; i < 0x20; i++) a[i] = 0; g(a); }');
+  });
+  it('divides a byte count by the declared element and starts at an offset', () => {
+    const { out } = run(['void f() {', '  uint16_t a[32];', '  memset(a + 2, 0, 10);', '  g(a);', '}'], 'fill(a)');
+    assert.strictEqual(out, 'void f() { uint16_t a[32]; for (int i = 2; i < 7; i++) a[i] = 0; g(a); }');
+    refused(['void f() {', '  uint16_t a[32];', '  memset(a, 0, 7);', '  g(a);', '}'], 'fill(a)');
+    refused(['void f(int* p) {', '  memset(p + 4294967288, 0, 8 * sizeof(p[0]));', '}'], 'fill(p)');
+  });
+  // AUTOMAP_DrawGamePassword 00459e90.
+  it('writes the rep stosd pointer loop as an index loop', () => {
+    const { out, sites } = run(['void f() {', '  int n;', '  uint32_t* p;', '  uint32_t a[50];', '  p = a;', '  for (n = 25; n; n--) {', '    p[0] = 0;', '    p[1] = 0;', '    p += 2;', '  }', '  g(a);', '}'], 'fill(a)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.strictEqual(out, 'void f() { uint32_t a[50]; for (int i = 0; i < 0x32; i++) a[i] = 0; g(a); }');
+  });
+  it('refuses a loop whose pointer is read after it', () => {
+    refused(['void f() {', '  int n;', '  uint32_t* p;', '  uint32_t a[50];', '  p = a;', '  for (n = 50; n; n--) {', '    *p = 0;', '    p++;', '  }', '  g(p);', '}'], 'fill(a)');
+  });
+});
+
+describe('vc8-form shapes: copy', () => {
+  // SKILLBAR_ApplyWarCryDamage 005d3cb0.
+  it('writes a copy loop into a fresh local as memcpy', () => {
+    const lines = ['void f(Ctx* pContext) {', '  int n;', '  D2DamageStrc sDamage;', '  uint32_t* pSrc = (uint32_t*)pContext->pArg;', '  uint32_t* pDst = (uint32_t*)&sDamage;',
+      '  for (n = 0x1c; n; n--) {', '    *pDst = *pSrc;', '    pSrc++;', '    pDst++;', '  }', '  g(&sDamage);', '}'];
+    const { out, sites } = run(lines, 'copy(pDst)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.strictEqual(out, 'void f(Ctx* pContext) { int n; D2DamageStrc sDamage; uint32_t* pSrc = (uint32_t*)pContext->pArg; uint32_t* pDst = (uint32_t*)&sDamage; memcpy(pDst, pSrc, 0x1c * sizeof(*pDst)); g(&sDamage); }');
+  });
+  // D2Net 0040b0c0: the overlapping copy that smears zeros forward.
+  it('refuses ranges not provably apart, and pointers to different types', () => {
+    refused(['void f() {', '  int n;', '  uint32_t* pSrc = (uint32_t*)gaCounts;', '  uint32_t* pDst = (uint32_t*)(gaCounts + 1);',
+      '  for (n = 0x1fe; n; n--) {', '    *pDst = *pSrc;', '    pSrc++;', '    pDst++;', '  }', '}'], 'copy(pDst)');
+    refused(['void f(uint32_t* a, uint32_t* b) {', '  int n;', '  for (n = 4; n; n--) {', '    *a = *b;', '    b++;', '    a++;', '  }', '}'], 'copy(a)');
+    refused(['void f(Ctx* c) {', '  int n;', '  S s;', '  uint16_t* pSrc = c->p;', '  uint32_t* pDst = (uint32_t*)&s;',
+      '  for (n = 4; n; n--) {', '    *pDst = *pSrc;', '    pSrc++;', '    pDst++;', '  }', '}'], 'copy(pDst)');
   });
 });
