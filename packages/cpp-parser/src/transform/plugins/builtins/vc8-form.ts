@@ -245,6 +245,31 @@
  *                        and use V at every subsequent `V - K` read. V must be one
  *                        unaliased 32-bit integer local, have at least two such reads,
  *                        and have no other read or store after the new decrement.
+ *   range(C[,i])         the unsigned comparison C of a difference with a constant, `K < E - L`
+ *                        (`E - L > K`, `E - L >= K`, `E - L < K` and the mirrors; the difference
+ *                        unsigned by a `U` on L, E's own type or a cast to a 32-bit unsigned
+ *                        type), is written as the range test it lowers: `E < L || E > L + K`,
+ *                        or `E >= L && E <= L + K` for the inside. VC8 computes the lowered
+ *                        spelling with `sub r, L` and the range test with `add r, -L`
+ *                        (Unreferenced_004e41e0 004e41e0). E must be a 32-bit integer local or
+ *                        parameter, L at least 1 and L + K within E's type, so that [L, L + K]
+ *                        is one interval in E's signed and unsigned reading alike.
+ *   castout(E[,i])       the sum or difference E, `(T)X - Y` (or `+`) with T an integer type
+ *                        narrower than 32 bits, whose value is returned or stored into a local
+ *                        of an integer type R no wider than T, is written `(R)(X - Y)`: the
+ *                        low bits of a sum depend only on the low bits of its operands, and R
+ *                        keeps no more of them than T did. VC8 subtracts the narrowed value
+ *                        with `sub r, K` and the int with `add r, -K` (GetActNoFromLevelNumber
+ *                        006427f0). X must be an integer local or parameter, Y an integer
+ *                        literal, such a local or an enum-style constant.
+ *   signbit(C[,i])       the sign test C, `E < 0` or `E >= 0` of a 32-bit integer local or
+ *                        parameter E (or `(int)X` of one), standing tested for truth (an
+ *                        if/while/for/`?:` condition, an operand of `&&`, `||` or `!`), is
+ *                        written `X & 0x80000000` or `!(X & 0x80000000)`: the same bit 31.
+ *                        VC8 gives the signed test JL/JGE and the mask JS/JNS after the same
+ *                        `test r, r` (DRLGLOGIC_PopulateGridCoordIndices 0066c580, a flags
+ *                        word). Per function: where the original's JS/JNS reuses the flags
+ *                        of an arithmetic instruction instead, the mask costs a `test`.
  *   switch(X[,i])        the i-th `if (X != K1) { if (X == K2 [&& R]) B2 } else B1` (or
  *                        `if (X == K1) B1 else if (X == K2 [&& R]) B2`), K1 and K2 two
  *                        constants, is written `switch (X) { case K2: { [if (R)] B2 }
@@ -315,7 +340,10 @@ export type Vc8Form =
   | { op: 'onecall'; cond: string; name: string; index: number }
   | { op: 'roundup'; name: string; param?: string }
   | { op: 'swmerge'; name: string; index: number }
-  | { op: 'dec'; name: string; amount: number };
+  | { op: 'dec'; name: string; amount: number }
+  | { op: 'range'; cond: string; index: number }
+  | { op: 'castout'; expr: string; index: number }
+  | { op: 'signbit'; cond: string; index: number };
 
 /**
  * A header inline that reads one field of a struct through a pointer, or returns a
@@ -357,7 +385,7 @@ export interface Vc8FormOptions {
 
 const OPS = new Set(['seq', 'fold', 'join', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'width', 'boolflag', 'retwiden', 'arms',
   'nest', 'merge-tail', 'tailguard', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
-  'nestcall', 'fill', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'switch', 'dec']);
+  'nestcall', 'fill', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'switch', 'dec', 'range', 'castout', 'signbit']);
 
 /** Split at commas outside brackets and parentheses. For cache, the third argument is a
  * type, so commas inside its template arguments also belong to that argument. */
@@ -504,6 +532,11 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
       if (args.length !== 2 || anchor || !/^[A-Za-z_]\w*$/.test(args[0]) || !/^[1-9]\d*$/.test(args[1])) return undefined;
       const amount = Number(args[1]);
       return Number.isSafeInteger(amount) && amount <= 0x7fffffff ? { op: 'dec', name: args[0], amount } : undefined;
+    }
+    case 'range': case 'castout': case 'signbit': {
+      const i = int(args[1], 0);
+      if (anchor || args.length < 1 || args.length > 2 || !(i >= 0) || args[0] === '') return undefined;
+      return m[1] === 'castout' ? { op: 'castout', expr: args[0], index: i } : { op: m[1], cond: args[0], index: i } as Vc8Form;
     }
     case 'switch': {
       const i = int(args[1], 1);
@@ -3525,6 +3558,142 @@ function doDec(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'dec' }>): void {
   chosen.block.statements.splice(chosen.index, 0, parsed.body!.statements[0]);
 }
 
+/** The declared type of local or parameter `name`, printed; undefined unless declared exactly once. */
+function declTypeOf(fn: FunctionDecl, name: string): string | undefined {
+  let t: string | undefined, n = 0;
+  for (const { node } of walk(fn)) {
+    if (node.kind !== NodeKind.VariableDecl && node.kind !== NodeKind.ParameterDecl) continue;
+    const d = node as unknown as { name?: Identifier | null; type: TypeNode };
+    if (d.name?.name !== name) continue;
+    n++; t = emit(d.type as never).trim();
+  }
+  return n === 1 ? t : undefined;
+}
+
+const U32_CASTS = new Set(['uint32_t', 'unsignedint', 'unsigned', 'uint', 'DWORD', 'UINT', 'ULONG', 'unsignedlong', 'size_t']);
+
+function doRange(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'range' }>): void {
+  const c = pick(fn, f.cond, f.index, (n): n is BinaryExpr => n.kind === NodeKind.BinaryExpr && ['<', '<=', '>', '>='].includes((n as BinaryExpr).operator));
+  let op: string = c.operator, d = unparen(c.left), kx = unparen(c.right);
+  if (litValue(d) && !litValue(kx)) { [d, kx] = [kx, d]; op = MIRROR[op]; }
+  const k = litValue(kx);
+  if (!k || k.v < 0n || k.v > 0xffffffffn) refuse('no constant bound');
+  let unsigned = /u/i.test(k.suffix);
+  if (d.kind === NodeKind.CStyleCastExpr) {
+    if (!U32_CASTS.has(text((d as CStyleCastExpr).type))) refuse('the difference is cast to no 32-bit unsigned type');
+    unsigned = true;
+    d = unparen((d as CStyleCastExpr).expression as Expression);
+  }
+  if (d.kind !== NodeKind.BinaryExpr || (d as BinaryExpr).operator !== '-') refuse('no difference');
+  const l = litValue((d as BinaryExpr).right);
+  if (!l || l.v < 1n) refuse('no positive constant subtracted');
+  if (/u/i.test(l.suffix)) unsigned = true;
+  const lhs = unparen((d as BinaryExpr).left);
+  if (!isId(lhs)) refuse('the difference is not of a local or parameter');
+  const e = lhs as Identifier;
+  const t = declTypeOf(fn, e.name);
+  const it = t !== undefined ? intType(t, false) : undefined;
+  if (!it || it.w !== 4) refuse(`${e.name} is not a 32-bit integer`);
+  if (it!.r.u) unsigned = true;
+  if (!unsigned) refuse('a signed comparison');
+  // Normalize to D > K (outside) or D <= K (inside).
+  const outside = op === '>' || op === '>=';
+  const kk = op === '>=' || op === '<' ? k.v - 1n : k.v;
+  if (kk < 0n) refuse('the comparison is constant');
+  const hi = l.v + kk;
+  if (hi > it!.r.hi) refuse(`${e.name} - ${l.v} wraps inside the range`);
+  const lit = (v: bigint) => (l.base === 16 ? '0x' + v.toString(16) : v.toString()) + (v > 0x7fffffffn ? 'U' : '');
+  const x = e.name;
+  const r = parseExpr(outside ? `(${x} < ${lit(l.v)} || ${x} > ${lit(hi)})` : `(${x} >= ${lit(l.v)} && ${x} <= ${lit(hi)})`);
+  for (const key of Object.keys(c)) delete (c as unknown as Record<string, unknown>)[key];
+  Object.assign(c, { kind: NodeKind.ParenExpr, expression: r });
+}
+
+const ENUM_CONST = /^(?:[A-Z][A-Z0-9_]*::)*[A-Z][A-Z0-9_]*$/;
+
+function doCastout(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'castout' }>): void {
+  const b = pick(fn, f.expr, f.index, (n): n is BinaryExpr => n.kind === NodeKind.BinaryExpr && ['+', '-'].includes((n as BinaryExpr).operator));
+  const intLocal = (x: Expression) => {
+    if (!isId(x)) return undefined;
+    const t = declTypeOf(fn, x.name);
+    const it = t !== undefined ? intType(t, true) : undefined;
+    return it && it.w <= 4 ? it : undefined;
+  };
+  const side = (x: Expression): CStyleCastExpr | undefined => {
+    x = unparen(x);
+    if (x.kind !== NodeKind.CStyleCastExpr) return undefined;
+    const it = intType(text((x as CStyleCastExpr).type), false);
+    return it && it.w < 4 && norm(text((x as CStyleCastExpr).type)) !== 'bool' ? x as CStyleCastExpr : undefined;
+  };
+  const castLeft = side(b.left);
+  const cast = castLeft ?? (b.operator === '+' ? side(b.right) : undefined);
+  if (!cast) refuse('no operand narrowed by a cast');
+  const other = unparen(cast === castLeft ? b.right : b.left);
+  const x = unparen(cast!.expression as Expression);
+  if (!intLocal(x)) refuse('the narrowed operand is not an integer local or parameter');
+  const plain = litValue(other) !== undefined || !!intLocal(other)
+    || ((isId(other) || other.kind === NodeKind.QualifiedId) && ENUM_CONST.test(text(other)) && !localNames(fn).has(text(other)));
+  if (!plain) refuse('the other operand is not an integer constant or local');
+  const T = intType(text(cast!.type), false)!;
+
+  const parents = parentsOf(fn);
+  let cur: ASTNode = b, p = parents.get(b);
+  while (p && p.kind === NodeKind.ParenExpr) { cur = p; p = parents.get(p); }
+  let target: string | undefined;
+  if (p?.kind === NodeKind.ReturnStmt) target = emit(fn.returnType as never).trim();
+  else if (p?.kind === NodeKind.VariableDecl && (p as VariableDecl).initializer === cur) target = emit((p as VariableDecl).type as never).trim();
+  else if (p?.kind === NodeKind.AssignExpr && (p as AssignExpr).operator === '=' && (p as AssignExpr).right === cur && isId(unparen((p as AssignExpr).left))) {
+    target = declTypeOf(fn, (unparen((p as AssignExpr).left) as Identifier).name);
+  }
+  if (!target) refuse('the value is not returned or stored into a local');
+  const R = norm(target!) === 'bool' ? undefined : intType(target!, false);
+  if (!R || R.w > T.w) refuse(`${target} is wider than the cast`);
+  const inner = cast === castLeft ? `__vc8a ${b.operator} __vc8b` : `__vc8b ${b.operator} __vc8a`;
+  const r = parseExpr(`(${target})(${inner})`) as CStyleCastExpr;
+  const sum = unparen(r.expression as Expression) as BinaryExpr;
+  const fill = (slot: 'left' | 'right') => {
+    const id = unparen(sum[slot]) as Identifier;
+    (sum as unknown as Record<string, unknown>)[slot] = id.name === '__vc8a' ? cloneNode(x) : cloneNode(other);
+  };
+  fill('left'); fill('right');
+  for (const key of Object.keys(b)) delete (b as unknown as Record<string, unknown>)[key];
+  Object.assign(b, r);
+}
+
+function doSignbit(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'signbit' }>): void {
+  const c = pick(fn, f.cond, f.index, (n): n is BinaryExpr => n.kind === NodeKind.BinaryExpr && ['<', '>='].includes((n as BinaryExpr).operator));
+  const z = litValue(c.right);
+  if (!z || z.v !== 0n) refuse('not a comparison with 0');
+  let x = unparen(c.left);
+  if (x.kind === NodeKind.CStyleCastExpr) {
+    const ct = intType(text((x as CStyleCastExpr).type), false);
+    if (!ct || ct.w !== 4 || ct.r.u) refuse('the cast is not to a signed 32-bit type');
+    x = unparen((x as CStyleCastExpr).expression as Expression);
+  }
+  if (!isId(x)) refuse('the operand is not a local or parameter');
+  const name = (x as Identifier).name;
+  const t = declTypeOf(fn, name);
+  const it = t !== undefined ? intType(t, false) : undefined;
+  if (!it || it.w !== 4) refuse(`${name} is not a 32-bit integer`);
+  if (it!.r.u && unparen(c.left) === x) refuse(`${name} is unsigned: the comparison is constant`);
+  // Only a truth test: the mask's value is 0x80000000, not 1.
+  const parents = parentsOf(fn);
+  let cur: ASTNode = c, p = parents.get(c);
+  while (p && p.kind === NodeKind.ParenExpr) { cur = p; p = parents.get(p); }
+  const o = p as unknown as Record<string, unknown> | undefined;
+  const truth = !!p && (
+    ([NodeKind.IfStmt, NodeKind.WhileStmt, NodeKind.DoWhileStmt, NodeKind.ForStmt, NodeKind.ConditionalExpr] as string[]).includes(p.kind) && o!.condition === cur
+    || p.kind === NodeKind.BinaryExpr && ['&&', '||'].includes((p as BinaryExpr).operator)
+    || p.kind === NodeKind.UnaryExpr && (p as UnaryExpr).operator === '!');
+  if (!truth) refuse('the comparison is not tested for truth');
+  const mask = parseExpr(`${c.operator === '<' ? '' : '!'}(__vc8a & 0x80000000)`);
+  const and = (c.operator === '<' ? mask : unparen((mask as UnaryExpr).operand)) as BinaryExpr;
+  const inner = unparen(and as Expression) as BinaryExpr;
+  inner.left = cloneNode(x);
+  for (const key of Object.keys(c)) delete (c as unknown as Record<string, unknown>)[key];
+  Object.assign(c, { kind: NodeKind.ParenExpr, expression: mask });
+}
+
 const CASE_INTEGER = /^-?(0x[0-9a-fA-F]+|\d+)[uUlL]*$/;
 const CASE_ENUM_STYLE = /^(?:[A-Z][A-Z0-9_]*::)*[A-Z][A-Z0-9_]*$/;
 const LOOPS = new Set<string>([NodeKind.ForStmt, NodeKind.WhileStmt, NodeKind.DoWhileStmt, NodeKind.ForRangeStmt, NodeKind.SwitchStmt]);
@@ -3665,6 +3834,7 @@ const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op
   tsel: doTsel, hoist: doHoist, nestcall: doNestcall, fill: doFill, copy: doCopy, shift: doShift, ptrwalk: doPtrwalk, rowptr: doRowptr,
   acc: doAcc,
   retvar: doRetvar, onecall: doOnecall, roundup: doRoundup, swmerge: doSwmerge, dec: doDec, switch: doSwitch,
+  range: doRange, castout: doCastout, signbit: doSignbit,
 };
 
 /**

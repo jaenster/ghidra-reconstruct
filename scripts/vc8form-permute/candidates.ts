@@ -28,6 +28,7 @@ import { vc8FormSpec, vc8formBodyHash } from '../../packages/reconstruct/src/cod
 import { normalizeSignatureType } from '../../packages/reconstruct/src/codegen/platform-types.js';
 import { respellPlaceholderType } from '../../packages/reconstruct/src/codegen/placeholder-types.js';
 import { accessorTwins } from '../../packages/reconstruct/src/codegen/accessor-twins.js';
+import { registerEnumTypedefTargets } from '../../packages/reconstruct/src/codegen/enum-width.js';
 import type { Vc8Accessor } from '../../packages/cpp-parser/dist/index.js';
 
 type N = ASTNode & Record<string, any>;
@@ -60,6 +61,8 @@ const body = (tu: TranslationUnit) => emit(tu as never).trimEnd();
 interface Field { name: string; dataType: string }
 let structs = new Map<string, { kind: string; fields?: Field[]; typedefOf?: string }>();
 let globals = new Map<string, string>();
+/** Typedef and enum names to the integer type the tree declares them as (castout reads a return type's width). */
+const typedefTargets: Record<string, string> = {};
 
 /** The tables `acc` reads: the struct fields, the enumerators and the accessors (accessor-twins.ts). */
 const accTables: { structFields: Record<string, Record<string, string>>; enumValues: Record<string, number>; accessors: Vc8Accessor[] } =
@@ -71,6 +74,8 @@ function loadTypes(path?: string) {
     if (!l) continue;
     const t = JSON.parse(l);
     if (t.kind === 'ENUM' && Array.isArray(t.values)) for (const v of t.values) accTables.enumValues[v.name] ??= v.value;
+    if (t.kind === 'ENUM' && !(t.name in typedefTargets)) registerEnumTypedefTargets([t], typedefTargets);
+    if (t.kind === 'TYPEDEF' && t.underlyingType && !(t.name in typedefTargets)) typedefTargets[t.name] = spell(t.underlyingType);
     if (structs.has(t.name)) continue;
     structs.set(t.name, { kind: t.kind, fields: t.fields, typedefOf: t.underlyingType });
     if (t.fields) accTables.structFields[t.name] = Object.fromEntries(t.fields.filter((f: Field) => f.name).map((f: Field) => [f.name, spell(f.dataType)]));
@@ -101,8 +106,8 @@ async function loadGlobals(path?: string) {
 /** `--ops a,b`: only the forms of those ops are proposed. */
 let onlyOps: Set<string> | undefined;
 
-let tablesMemo: { globalTypes: Record<string, string> } | undefined;
-const tables = () => (tablesMemo ??= { globalTypes: Object.fromEntries([...globals].map(([k, v]) => [k, tidy(v)])) });
+let tablesMemo: { globalTypes: Record<string, string>; typedefTargets: Record<string, string> } | undefined;
+const tables = () => (tablesMemo ??= { globalTypes: Object.fromEntries([...globals].map(([k, v]) => [k, tidy(v)])), typedefTargets });
 
 const tidy = (t: string) => t.replace(/\bstruct\s+|\bunion\s+|\benum\s+/g, '').replace(/\s*\*/g, '*').replace(/\s+/g, ' ').trim();
 
@@ -523,6 +528,28 @@ function sites(c: Ctx, maxAnchors: number): string[] {
     diffs.set(k, (diffs.get(k) ?? 0) + 1);
   }
   for (const [k, n] of diffs) if (n >= 2) out.add(`dec(${k})`);
+  // range: a comparison of a difference `E - L` (L an integer literal) with an integer literal.
+  const isLit = (e: N) => unparen(e).kind === NodeKind.IntegerLiteral;
+  const isDiff = (e: N): boolean => {
+    let d = unparen(e);
+    if (d.kind === NodeKind.CStyleCastExpr) d = unparen(d.expression);
+    return d.kind === NodeKind.BinaryExpr && d.operator === '-' && unparen(d.left).kind === NodeKind.Identifier && isLit(d.right);
+  };
+  const ranges = all.filter(n => n.kind === NodeKind.BinaryExpr && ['<', '<=', '>', '>='].includes(n.operator)
+    && ((isLit(n.right) && isDiff(n.left)) || (isLit(n.left) && isDiff(n.right)))).map(n => pr(n));
+  for (const { t, i } of indexed(ranges)) out.add(withIdx('range', t, i, true));
+  // castout: a sum or difference with an operand narrowed by a cast to an integer type.
+  const narrowCast = (e: N) => { const x = unparen(e); return x.kind === NodeKind.CStyleCastExpr && unparen(x.expression).kind === NodeKind.Identifier; };
+  const castouts = all.filter(n => n.kind === NodeKind.BinaryExpr && (n.operator === '-' || n.operator === '+')
+    && (narrowCast(n.left) || (n.operator === '+' && narrowCast(n.right)))).map(n => pr(n));
+  for (const { t, i } of indexed(castouts)) out.add(withIdx('castout', t, i, true));
+  // signbit: a sign test `E < 0` / `E >= 0` of a local or parameter, or of `(int)` of one.
+  const signs = all.filter(n => n.kind === NodeKind.BinaryExpr && (n.operator === '<' || n.operator === '>=')
+    && unparen(n.right).kind === NodeKind.IntegerLiteral && unparen(n.right).value === 0n && (() => {
+      const l = unparen(n.left);
+      return l.kind === NodeKind.Identifier || (l.kind === NodeKind.CStyleCastExpr && unparen(l.expression).kind === NodeKind.Identifier);
+    })()).map(n => pr(n));
+  for (const { t, i } of indexed(signs)) out.add(withIdx('signbit', t, i, true));
   // switch: a value an if compares for (in)equality; the i-th if of the two-case shape on it.
   const switched = new Map<string, { t: string; n: number }>();
   for (const n of ifs) {
