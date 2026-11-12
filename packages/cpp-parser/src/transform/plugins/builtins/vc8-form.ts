@@ -48,6 +48,10 @@
  *                        guard of both conditions.
  *   retval(V,K)          `V = K;` that ends an arm falling through to `return V;` becomes
  *                        `return K;`.
+ *   branchret(V)         Fog BitBuffer's size_t V loaded from nCurrentPos, early-returned
+ *                        when nBitsAtPos is zero, then incremented and returned, becomes
+ *                        two direct branch returns. Refused outside that exact scalar,
+ *                        same-pointer shape (GetNextPositon 00410e90).
  *   width(V,T)           local V is declared T; a cast of V to T, a cast to V's old type
  *                        stored into V, and a cast of V to T's width in a truth test go.
  *   boolflag(V)          the bool local V, stored only `true`/`false` and read only as a
@@ -235,7 +239,7 @@
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, AssignExpr, BinaryExpr, CallExpr, CompoundStmt, ConditionalExpr, CStyleCastExpr, DeclStmt, Expression,
-  ExprStmt, ForStmt, FunctionDecl, Identifier, IfStmt, IntegerLiteralExpr, ParenExpr, ReturnStmt, Statement, SubscriptExpr, TranslationUnit,
+  ExprStmt, ForStmt, FunctionDecl, Identifier, IfStmt, IntegerLiteralExpr, MemberExpr, ParenExpr, PostfixExpr, ReturnStmt, Statement, SubscriptExpr, TranslationUnit,
   TypeNode, UnaryExpr, VariableDecl,
 } from '../../../ast/nodes.js';
 import { parse } from '../../../parser/index.js';
@@ -254,6 +258,7 @@ export type Vc8Form =
   | { op: 'guards'; split: number; index: number }
   | { op: 'merge-guards'; index: number }
   | { op: 'retval'; name: string; value: string }
+  | { op: 'branchret'; name: string }
   | { op: 'width'; name: string; type: string }
   | { op: 'boolflag'; name: string }
   | { op: 'retwiden'; name: string }
@@ -325,7 +330,7 @@ export interface Vc8FormOptions {
   selectTables?: Vc8FormTables;
 }
 
-const OPS = new Set(['seq', 'fold', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'width', 'boolflag', 'retwiden', 'arms',
+const OPS = new Set(['seq', 'fold', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'branchret', 'width', 'boolflag', 'retwiden', 'arms',
   'nest', 'merge-tail', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
   'nestcall', 'fill', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge']);
 
@@ -380,6 +385,7 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
       return !anchor && args.length <= 1 && i >= 1 ? { op: 'merge-guards', index: i } : undefined;
     }
     case 'retval': return args.length === 2 && !anchor ? { op: 'retval', name: args[0], value: args[1] } : undefined;
+    case 'branchret': return args.length === 1 && !anchor && /^[A-Za-z_]\w*$/.test(args[0]) ? { op: 'branchret', name: args[0] } : undefined;
     case 'width': return args.length === 2 && !anchor ? { op: 'width', name: args[0], type: args[1] } : undefined;
     case 'boolflag': case 'retwiden':
       return args.length === 1 && !anchor && /^[A-Za-z_]\w*$/.test(args[0]) ? { op: m[1], name: args[0] } as Vc8Form : undefined;
@@ -1199,6 +1205,49 @@ function doRetval(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'retval' }>): void
     }
   }
   refuse(`no ${f.name} = ${f.value} falling through to return ${f.name}`);
+}
+
+/** The measured Fog bit-position spelling, with unsigned size_t wrap retained. */
+function doBranchret(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'branchret' }>): void {
+  const st = fn.body?.statements;
+  if (!st || st.length !== 4 || text(fn.returnType) !== 'int32_t' || fn.parameters.length !== 1)
+    refuse('not a four-statement signed bit-position return');
+  const param = fn.parameters[0]!;
+  if (!isId(param.name) || text(param.type).replace(/\s+/g, '') !== 'D2BitBufferStrc*')
+    refuse('not a D2BitBufferStrc pointer parameter');
+  const p = param.name.name;
+  const d = declOf(st[0]!);
+  if (!d || d.name.name !== f.name || text(d.type) !== 'size_t' || d.specifiers.length ||
+      !d.initializer || d.initializer.kind !== NodeKind.MemberExpr)
+    refuse(`${f.name} is not an initialized size_t local`);
+  const initial = unparen(d.initializer as Expression);
+  const source = initial as MemberExpr;
+  if (!source.isArrow || !isId(unparen(source.object), p) || !isId(source.member, 'nCurrentPos'))
+    refuse(`${f.name} is not loaded from the bit position`);
+  const guard = st[1];
+  if (guard?.kind !== NodeKind.IfStmt || (guard as IfStmt).elseBranch)
+    refuse('no single early-return guard');
+  const test = unparen((guard as IfStmt).condition);
+  if (test.kind !== NodeKind.UnaryExpr || (test as UnaryExpr).operator !== '!')
+    refuse('guard is not the negated bit offset');
+  const bit = unparen((test as UnaryExpr).operand);
+  if (bit.kind !== NodeKind.MemberExpr || !(bit as MemberExpr).isArrow ||
+      !isId(unparen((bit as MemberExpr).object), p) || !isId((bit as MemberExpr).member, 'nBitsAtPos'))
+    refuse('guard is not the same buffer bit offset');
+  const arm = (guard as IfStmt).thenBranch;
+  const armSt = arm.kind === NodeKind.CompoundStmt ? (arm as CompoundStmt).statements : [arm];
+  if (armSt.length !== 1 || armSt[0]!.kind !== NodeKind.ReturnStmt ||
+      !isId(unparen((armSt[0] as ReturnStmt).value as Expression), f.name))
+    refuse('guard does not return the original position');
+  const inc = st[2];
+  const step = inc?.kind === NodeKind.ExprStmt ? unparen((inc as ExprStmt).expression) : undefined;
+  if (!step || step.kind !== NodeKind.PostfixExpr || (step as PostfixExpr).operator !== '++' ||
+      !isId(unparen((step as PostfixExpr).operand), f.name))
+    refuse('position is not incremented exactly once');
+  const tail = st[3];
+  if (tail?.kind !== NodeKind.ReturnStmt || !isId(unparen((tail as ReturnStmt).value as Expression), f.name))
+    refuse('tail does not return the incremented position');
+  fn.body!.statements = parseStmts(`if (${p}->nBitsAtPos) { return ${p}->nCurrentPos + 1; } return ${p}->nCurrentPos;`);
 }
 
 const WIDTH: Record<string, number> = {
@@ -3245,7 +3294,7 @@ function doSwmerge(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'swmerge' }>): vo
 
 const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op: K }>) => void } = {
   seq: doSeq, fold: doFold, cache: doCache, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
-  retval: doRetval, width: doWidth, boolflag: doBoolflag, retwiden: doRetwiden, arms: doArms,
+  retval: doRetval, branchret: doBranchret, width: doWidth, boolflag: doBoolflag, retwiden: doRetwiden, arms: doArms,
   nest: doNest, 'merge-tail': doMergeTail, continue: doContinue, dup: doDup, tarms: doTarms, zero: doZero, nonzero: doNonzero, bool: doBool,
   cmp: doCmp, swap: doSwap, ifsel: doIfsel, split: doSplit, select: doSelect, decl: doDecl, unselect: doUnselect,
   tsel: doTsel, hoist: doHoist, nestcall: doNestcall, fill: doFill, copy: doCopy, shift: doShift, ptrwalk: doPtrwalk, rowptr: doRowptr,
