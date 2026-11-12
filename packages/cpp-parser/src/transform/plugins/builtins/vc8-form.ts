@@ -1217,7 +1217,8 @@ function doBranchret(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'branchret' }>)
     refuse('not a D2BitBufferStrc pointer parameter');
   const p = param.name.name;
   const d = declOf(st[0]!);
-  if (!d || d.name.name !== f.name || text(d.type) !== 'size_t' || d.specifiers.length ||
+  if (!d || d.name.name !== f.name || f.name === p || text(d.type) !== 'size_t' ||
+      d.specifiers.length || d.attributes.length || d.directInit || d.copyListInit || d.bitWidth ||
       !d.initializer || d.initializer.kind !== NodeKind.MemberExpr)
     refuse(`${f.name} is not an initialized size_t local`);
   const initial = unparen(d.initializer as Expression);
@@ -1225,7 +1226,8 @@ function doBranchret(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'branchret' }>)
   if (!source.isArrow || !isId(unparen(source.object), p) || !isId(source.member, 'nCurrentPos'))
     refuse(`${f.name} is not loaded from the bit position`);
   const guard = st[1];
-  if (guard?.kind !== NodeKind.IfStmt || (guard as IfStmt).elseBranch)
+  if (guard?.kind !== NodeKind.IfStmt || (guard as IfStmt).elseBranch ||
+      (guard as IfStmt).init || (guard as IfStmt).isConstexpr)
     refuse('no single early-return guard');
   const test = unparen((guard as IfStmt).condition);
   if (test.kind !== NodeKind.UnaryExpr || (test as UnaryExpr).operator !== '!')
