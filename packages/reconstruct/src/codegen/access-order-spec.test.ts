@@ -28,7 +28,7 @@ describe('access-order facts', () => {
     const r = parseAccessOrderRow(ROW)!;
     assert.strictEqual(r.entry, '005887a0');
     assert.deepStrictEqual(r.facts.args, [[9, [{ name: 'GetQuestState', at: 0x19, params: 3, loads: [{ param: 0, reg: 'EAX' }] }]]]);
-    assert.deepStrictEqual(r.facts.stores, [[8, [{ ord: 0, at: null, size: 4, half: null }]], [9, [{ ord: 0, at: 0x1e, size: 4, half: null }]]]);
+    assert.deepStrictEqual(r.facts.stores, [[8, [{ ord: 0, at: null, size: 4, half: null, width: 0 }]], [9, [{ ord: 0, at: 0x1e, size: 4, half: null, width: 0 }]]]);
     assert.strictEqual(parseAccessOrderRow('005887a0\t15\t9:GetQuestState,19,0@EAX\t'), null);
   });
 
