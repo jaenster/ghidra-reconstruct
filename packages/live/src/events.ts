@@ -439,14 +439,40 @@ export interface ChangeFeed {
 /** Events per version in a version-keyed journal; must match VersionFollower.SEQ_PER_VERSION. */
 export const SEQ_PER_VERSION = 1_000_000;
 
+/** The clock a PollingChangeStream runs on; tests hand in a fake one. */
+export interface PollClock {
+  now(): number;
+  setTimeout(fn: () => void, ms: number): unknown;
+  clearTimeout(handle: unknown): void;
+  setInterval(fn: () => void, ms: number): unknown;
+  clearInterval(handle: unknown): void;
+}
+
+const realClock: PollClock = {
+  now: () => Date.now(),
+  setTimeout: (fn, ms) => setTimeout(fn, ms),
+  clearTimeout: h => clearTimeout(h as ReturnType<typeof setTimeout>),
+  setInterval: (fn, ms) => setInterval(fn, ms),
+  clearInterval: h => clearInterval(h as ReturnType<typeof setInterval>),
+};
+
 export interface PollingChangeStreamOptions {
   sendCommand: <T>(command: string, params?: Record<string, unknown>) => Promise<T>;
   since: number;
   /** How often to ask whether the server has a newer version. */
   intervalMs?: number;
+  /** Longest wait between failed polls; the wait doubles per failure up to this. */
+  maxBackoffMs?: number;
+  /** A get_changes call still unanswered after this has failed. */
+  pollTimeoutMs?: number;
+  /** No poll completed for this long while following: the loop is restarted. */
+  stallMs?: number;
+  /** How often the watchdog looks. */
+  watchdogMs?: number;
   onBatch: (events: ChangeEvent[]) => Promise<void> | void;
   onTruncated: (info: { since: number; head: number }) => void;
   log?: (message: string) => void;
+  clock?: PollClock;
 }
 
 /**
@@ -460,18 +486,45 @@ export interface PollingChangeStreamOptions {
  *
  * One poll in flight at a time, and the next waits for the batch to be applied: a poll
  * during a rebuild would move the worker's program under the re-extraction.
+ *
+ * A failed poll is logged and retried after a wait that doubles per failure, up to
+ * `maxBackoffMs`, and drops back to `intervalMs` after the next success. A watchdog
+ * checks every `watchdogMs` that a poll completed within `stallMs` (time spent paused
+ * or applying a batch does not count); if none did, it logs an ERROR and starts a
+ * fresh loop. Each loop carries a generation number, and a loop whose generation is
+ * no longer current returns at its next await without applying anything, so two
+ * loops never follow the journal at once.
  */
 export class PollingChangeStream implements ChangeFeed {
-  private readonly opts: Required<Pick<PollingChangeStreamOptions, 'intervalMs'>> & PollingChangeStreamOptions;
+  private readonly opts: Required<Pick<PollingChangeStreamOptions,
+    'intervalMs' | 'maxBackoffMs' | 'pollTimeoutMs' | 'stallMs' | 'watchdogMs' | 'clock'>> & PollingChangeStreamOptions;
   private appliedSeq: number;
   private stopped = true;
   private paused = false;
   private connected = false;
   private queued = 0;
   private wake: (() => void) | null = null;
+  /** Bumped to abandon the running loop; a loop exits once its number is stale. */
+  private generation = 0;
+  private abandon: (() => void) | null = null;
+  private failures = 0;
+  private lastError: string | null = null;
+  /** When a poll last completed, or the stall clock was last reset. */
+  private lastProgress = 0;
+  private inBatch = false;
+  private watchdog: unknown = null;
+  private loopsStarted = 0;
 
   constructor(options: PollingChangeStreamOptions) {
-    this.opts = { intervalMs: 2_000, ...options };
+    this.opts = {
+      intervalMs: 2_000,
+      maxBackoffMs: 60_000,
+      pollTimeoutMs: 600_000,
+      stallMs: 15 * 60_000,
+      watchdogMs: 60_000,
+      clock: realClock,
+      ...options,
+    };
     this.appliedSeq = options.since;
   }
 
@@ -479,15 +532,24 @@ export class PollingChangeStream implements ChangeFeed {
   get isPaused(): boolean { return this.paused; }
   get isConnected(): boolean { return this.connected; }
   get queuedCount(): number { return this.queued; }
+  /** How many poll loops have been started; more than one means the watchdog restarted it. */
+  get loopGeneration(): number { return this.loopsStarted; }
 
   start(): void {
     if (!this.stopped) return;
     this.stopped = false;
-    void this.loop();
+    this.lastProgress = this.opts.clock.now();
+    this.watchdog = this.opts.clock.setInterval(() => this.checkStall(), this.opts.watchdogMs);
+    (this.watchdog as { unref?: () => void }).unref?.();
+    this.spawnLoop();
   }
 
   stop(): void {
     this.stopped = true;
+    if (this.watchdog !== null) this.opts.clock.clearInterval(this.watchdog);
+    this.watchdog = null;
+    this.generation++;
+    this.abandon?.();
     this.wake?.();
   }
 
@@ -495,6 +557,7 @@ export class PollingChangeStream implements ChangeFeed {
 
   resume(): void {
     this.paused = false;
+    this.lastProgress = this.opts.clock.now();
     this.wake?.();
   }
 
@@ -506,28 +569,99 @@ export class PollingChangeStream implements ChangeFeed {
     this.opts.log?.(message);
   }
 
-  private async loop(): Promise<void> {
-    while (!this.stopped) {
+  private spawnLoop(): void {
+    const gen = ++this.generation;
+    this.loopsStarted++;
+    void this.loop(gen).catch(e => {
+      // The loop body catches per poll; reaching here is a defect in the loop itself.
+      // The watchdog restarts it, the error is not lost.
+      this.lastError = `poll loop crashed: ${errorText(e)}`;
+      this.log(`ERROR: ${this.lastError}`);
+    });
+  }
+
+  private checkStall(): void {
+    if (this.stopped || this.paused || this.inBatch) return;
+    const age = this.opts.clock.now() - this.lastProgress;
+    if (age < this.opts.stallMs) return;
+    this.log('#'.repeat(72));
+    this.log(`ERROR: change poller stalled: no get_changes poll completed for ${Math.round(age / 1000)}s ` +
+      `(threshold ${Math.round(this.opts.stallMs / 1000)}s); last error: ${this.lastError ?? 'none'}; ` +
+      `restarting the poll loop (loop ${this.loopsStarted + 1})`);
+    this.log('#'.repeat(72));
+    this.abandon?.();
+    this.wake?.();
+    this.lastProgress = this.opts.clock.now();
+    this.spawnLoop();
+  }
+
+  private async loop(gen: number): Promise<void> {
+    while (!this.stopped && gen === this.generation) {
       if (!this.paused) {
         try {
-          await this.pollOnce();
+          await this.pollOnce(gen);
+          if (gen !== this.generation) return;
+          if (this.failures > 0) {
+            this.log(`change poll recovered after ${this.failures} failure(s)`);
+          }
+          this.failures = 0;
         } catch (e) {
+          if (gen !== this.generation) return;
+          // A poll that failed still completed: the loop is alive, the backoff paces it.
+          this.lastProgress = this.opts.clock.now();
           this.connected = false;
-          this.log(`change poll failed: ${(e as Error).message}`);
+          this.failures++;
+          this.lastError = errorText(e);
+          this.log(`change poll failed (${this.failures} in a row, next try in ${this.delay()}ms): ${this.lastError}`);
         }
       }
+      if (gen !== this.generation) return;
       await new Promise<void>(resolve => {
-        const timer = setTimeout(() => { this.wake = null; resolve(); }, this.opts.intervalMs);
-        this.wake = () => { clearTimeout(timer); this.wake = null; resolve(); };
+        const timer = this.opts.clock.setTimeout(() => { this.wake = null; resolve(); }, this.delay());
+        this.wake = () => { this.opts.clock.clearTimeout(timer); this.wake = null; resolve(); };
       });
     }
   }
 
-  private async pollOnce(): Promise<void> {
+  private delay(): number {
+    if (this.failures === 0) return this.opts.intervalMs;
+    const backoff = this.opts.intervalMs * 2 ** Math.min(this.failures - 1, 30);
+    return Math.min(backoff, Math.max(this.opts.maxBackoffMs, this.opts.intervalMs));
+  }
+
+  /**
+   * get_changes, bounded by `pollTimeoutMs` and abandonable by the watchdog. An
+   * abandoned call's answer is dropped: the next loop asks for the same range again.
+   */
+  private request<T>(params: Record<string, unknown>): Promise<T> {
+    const { clock, pollTimeoutMs } = this.opts;
+    return new Promise<T>((resolve, reject) => {
+      let settled = false;
+      const finish = (fn: () => void) => {
+        if (settled) return;
+        settled = true;
+        clock.clearTimeout(timer);
+        if (this.abandon === abandon) this.abandon = null;
+        fn();
+      };
+      const timer = clock.setTimeout(
+        () => finish(() => reject(new Error(`get_changes timed out after ${pollTimeoutMs}ms`))),
+        pollTimeoutMs,
+      );
+      const abandon = () => finish(() => reject(new Error('get_changes abandoned by the watchdog')));
+      this.abandon = abandon;
+      this.opts.sendCommand<T>('get_changes', { ...params, _commandTimeout: pollTimeoutMs })
+        .then(v => finish(() => resolve(v)), e => finish(() => reject(e)));
+    });
+  }
+
+  private async pollOnce(gen: number): Promise<void> {
     const since = this.appliedSeq;
-    const r = await this.opts.sendCommand<{ events?: ChangeEvent[]; head?: number; version?: number }>(
-      'get_changes', { since, limit: 10_000, _commandTimeout: 600_000 },
+    const r = await this.request<{ events?: ChangeEvent[]; head?: number; version?: number }>(
+      { since, limit: 10_000 },
     );
+    if (gen !== this.generation) return;
+    this.lastProgress = this.opts.clock.now();
     this.connected = true;
     const head = r.head ?? 0;
     if (head < since) {
@@ -543,13 +677,20 @@ export class PollingChangeStream implements ChangeFeed {
       return;
     }
     this.queued = events.length;
+    this.inBatch = true;
     try {
       await this.opts.onBatch(events);
       this.markApplied(Math.max(...events.map(e => e.seq)));
     } catch (e) {
-      this.log(`batch handler failed: ${(e as Error).message}; the batch will be asked for again`);
+      this.log(`batch handler failed: ${errorText(e)}; the batch will be asked for again`);
     } finally {
       this.queued = 0;
+      this.inBatch = false;
+      this.lastProgress = this.opts.clock.now();
     }
   }
+}
+
+function errorText(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
 }
