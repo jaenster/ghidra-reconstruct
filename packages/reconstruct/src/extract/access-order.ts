@@ -43,10 +43,11 @@ export interface StoreSite {
   half: 'h' | 'l' | null;
   /**
    * Bytes the instruction behind the `=` writes: its destination register's width, or the
-   * size of the memory it stores; 0 when unknown (a call, no instruction, an older
-   * snapshot's four-field row).
+   * size of the memory it stores; 0 when unknown (a call, no instruction). Absent for an
+   * older snapshot's four-field row, so a model read before the width existed compares
+   * and hashes as it did then; readers take absent as 0.
    */
-  width: number;
+  width?: number;
 }
 
 export interface AccessOrderFacts {
@@ -97,14 +98,17 @@ export function parseAccessOrderRow(row: string): { entry: string; facts: Access
     for (const one of part.slice(i + 1).split('|')) {
       const f = one.split(',');
       if (f.length !== 4 && f.length !== 5) return null;
-      const width = f.length === 5 ? Number(f[4]) : 0;
-      list.push({
+      const site: StoreSite = {
         ord: Number(f[0]),
         at: f[1] === '?' ? null : offset(f[1]),
         size: Number(f[2]),
         half: f[3] === 'h' || f[3] === 'l' ? f[3] : null,
-        width: Number.isInteger(width) && width > 0 ? width : 0,
-      });
+      };
+      if (f.length === 5) {
+        const width = Number(f[4]);
+        site.width = Number.isInteger(width) && width > 0 ? width : 0;
+      }
+      list.push(site);
     }
     stores.push([ln, list]);
   }

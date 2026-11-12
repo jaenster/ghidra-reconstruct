@@ -18,9 +18,9 @@ describe('parseAccessOrderRow: store widths', () => {
     assert.deepStrictEqual(r?.facts.stores[0][1][0], { ord: 0, at: 0x1b4, size: 1, half: null, width: 1 });
   });
 
-  it('an older four-field row has width 0 (unknown)', () => {
+  it('an older four-field row has no width (unknown), and parses as it did before widths', () => {
     const r = parseAccessOrderRow('00576e40\t55\t\t43:0,?,1,-');
-    assert.strictEqual(r?.facts.stores[0][1][0].width, 0);
+    assert.deepStrictEqual(r?.facts.stores[0][1][0], { ord: 0, at: null, size: 1, half: null });
   });
 
   it('rejects any other field count', () => {
