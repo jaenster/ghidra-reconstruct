@@ -490,6 +490,15 @@ function sites(c: Ctx, maxAnchors: number): string[] {
     bounded.set(v, (bounded.get(v) ?? 0) + 1);
     out.add(`swmerge(${v},${bounded.get(v)})`);
   }
+  // switch: a value an if compares for (in)equality; the i-th if of the two-case shape on it.
+  const switched = new Map<string, { t: string; n: number }>();
+  for (const n of ifs) {
+    const c = unparen(n.condition);
+    if (c.kind !== NodeKind.BinaryExpr || (c.operator !== '==' && c.operator !== '!=')) continue;
+    const t = pr(unparen(c.left)), k = key(t);
+    switched.set(k, { t, n: (switched.get(k)?.n ?? 0) + 1 });
+  }
+  for (const [, { t, n }] of switched) { out.add(`switch(${t})`); for (let i = 2; i <= n; i++) out.add(`switch(${t},${i})`); }
   return [...out];
 }
 
