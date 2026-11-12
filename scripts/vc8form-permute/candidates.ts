@@ -523,6 +523,16 @@ function sites(c: Ctx, maxAnchors: number): string[] {
     diffs.set(k, (diffs.get(k) ?? 0) + 1);
   }
   for (const [k, n] of diffs) if (n >= 2) out.add(`dec(${k})`);
+  // opas: a local or parameter read as `V + 1`, `V - 1` or `V >> K` (K a shift count).
+  for (const n of all) {
+    if (n.kind !== NodeKind.BinaryExpr || !['+', '-', '>>'].includes(n.operator)) continue;
+    const l = unparen(n.left), r = unparen(n.right);
+    if (l.kind !== NodeKind.Identifier || !(locals.has(l.name) || params.includes(l.name))) continue;
+    if (r.kind !== NodeKind.IntegerLiteral || r.suffix !== '') continue;
+    if (n.operator === '>>' ? r.value < 1n || r.value > 31n : r.value !== 1n) continue;
+    const k = /^0x[0-9a-fA-F]+$/.test(r.raw ?? '') ? r.raw : String(r.value);
+    out.add(`opas(${l.name},${n.operator},${k})`);
+  }
   // switch: a value an if compares for (in)equality; the i-th if of the two-case shape on it.
   const switched = new Map<string, { t: string; n: number }>();
   for (const n of ifs) {
