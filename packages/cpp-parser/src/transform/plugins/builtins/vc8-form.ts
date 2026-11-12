@@ -29,6 +29,11 @@
  *                        (`S = X; ... X = S;`) stores nothing once folded and goes.
  *                        Refused when V's address is taken or a store in between writes a
  *                        name the value reads.
+ *   join(V2,V1)          a top-level initialized local V2 becomes an update of the earlier
+ *                        signed 32-bit local or parameter V1; later V2 uses read V1. A
+ *                        plain copy V2 = V1 goes. Refused unless V1's old value is dead
+ *                        on every path, including loop backedges, and V2's declaration
+ *                        dominates every use. Neither variable may escape.
  *   cache(E,N,T[,@A])    a new local `T N = E;` before the statement storing A, or the
  *                        if/while/switch testing A (default: before the first statement
  *                        that evaluates E, in the innermost block holding every E), and
@@ -236,7 +241,7 @@
  *                        and have no other read or store after the new decrement.
  */
 
-import { NodeKind } from '../../../ast/kinds.js';
+import { NodeKind, isType } from '../../../ast/kinds.js';
 import type {
   ASTNode, AssignExpr, BinaryExpr, CallExpr, CompoundStmt, ConditionalExpr, CStyleCastExpr, DeclStmt, Expression,
   ExprStmt, ForStmt, FunctionDecl, Identifier, IfStmt, IntegerLiteralExpr, ParenExpr, ReturnStmt, Statement, SubscriptExpr, TranslationUnit,
@@ -245,6 +250,7 @@ import type {
 import { parse } from '../../../parser/index.js';
 import { emit } from '../../../emit/index.js';
 import { cloneNode } from '../../transformer.js';
+import { buildFunctionFlow } from '../../cfg/index.js';
 import { selectPairedArguments, SelectRefused, type SelectArgumentOptions } from './select-argument.js';
 import { createExprShape } from './expr-shape.js';
 import { localTypesOf } from './compare-form.js';
@@ -253,6 +259,7 @@ import { calleeName, scopedLookup } from './call-arg-cast.js';
 export type Vc8Form =
   | { op: 'seq'; targets: string[]; index?: number }
   | { op: 'fold'; name: string }
+  | { op: 'join'; into: string; from: string }
   | { op: 'cache'; expr: string; name: string; type?: string; anchor?: string; count?: number }
   | { op: 'own'; name: string; type: string; rename?: string }
   | { op: 'guards'; split: number; index: number }
@@ -330,7 +337,7 @@ export interface Vc8FormOptions {
   selectTables?: Vc8FormTables;
 }
 
-const OPS = new Set(['seq', 'fold', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'width', 'boolflag', 'retwiden', 'arms',
+const OPS = new Set(['seq', 'fold', 'join', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'width', 'boolflag', 'retwiden', 'arms',
   'nest', 'merge-tail', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
   'nestcall', 'fill', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'dec']);
 
@@ -365,6 +372,8 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
       return args.length >= 2 && (n === 0 || n >= 1) ? { op: 'seq', targets: args, ...(n ? { index: n } : {}) } : undefined;
     }
     case 'fold': return args.length === 1 && !anchor ? { op: 'fold', name: args[0] } : undefined;
+    case 'join': return args.length === 2 && !anchor && args.every(a => /^[A-Za-z_]\w*$/.test(a)) && args[0] !== args[1]
+      ? { op: 'join', into: args[0], from: args[1] } : undefined;
     case 'cache':
       if (args.length === 2 && !anchor) return { op: 'cache', expr: args[0], name: args[1] };
       if (args.length === 3) return { op: 'cache', expr: args[0], name: args[1], type: args[2], anchor };
@@ -979,6 +988,103 @@ function removeDecl(fn: FunctionDecl, v: string): void {
   for (const b of blocks(fn)) {
     const k = b.statements.findIndex(s => declOf(s)?.name.name === v);
     if (k >= 0) { b.statements.splice(k, 1); return; }
+  }
+}
+
+/** Join one measured value lifetime back into the signed word that produced it. */
+function doJoin(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'join' }>): void {
+  const body = fn.body as CompoundStmt;
+  const target = body.statements
+    .map((stmt, index) => ({ stmt, index, decl: declOf(stmt) }))
+    .filter(x => x.decl?.name.name === f.into);
+  if (target.length !== 1) refuse(`${f.into} needs one top-level declaration`);
+  const { stmt, index, decl } = target[0];
+  const init = decl!.initializer as Expression | null;
+  if (!init || init.kind === NodeKind.InitListExpr || !mentions(init, f.from) || mentions(init, f.into))
+    refuse(`${f.into} needs an initializer reading ${f.from}`);
+  if (decl!.specifiers.length > 0) refuse(`${f.into} has declaration specifiers`);
+
+  // The five measured sites use int and int32_t. A same-width unsigned value is
+  // not equivalent in C++ comparisons, shifts, overloads, or conversions.
+  const signedWord = new Set(['int', 'int32_t', 'BOOL']);
+  const intoType = text(decl!.type);
+  const parameters = fn.parameters.filter(p => p.name?.name === f.from);
+  const prior = body.statements.slice(0, index)
+    .map(s => declOf(s)).filter(d => d?.name.name === f.from);
+  const allDecls = [...walk(body)].filter(x => x.node.kind === NodeKind.VariableDecl)
+    .map(x => (x.node as VariableDecl).name.name);
+  if (allDecls.filter(n => n === f.into).length !== 1 ||
+      allDecls.filter(n => n === f.from).length !== (parameters.length ? 0 : 1) ||
+      parameters.length + prior.length !== 1) refuse('joined names must have unique, visible bindings');
+  if (prior.length && prior[0]!.specifiers.length > 0) refuse(`${f.from} has declaration specifiers`);
+  for (const { node } of walk(body)) {
+    if (node.kind !== NodeKind.LabelStmt && node.kind !== NodeKind.GotoStmt) continue;
+    const label = (node as unknown as { label: Identifier }).label.name;
+    if (label === f.into || label === f.from) refuse('a joined name is also a label');
+  }
+  // A struct tag or typedef may share V2's spelling without naming its value.
+  // The suffix rewrite is intentionally refused rather than touching a type name.
+  for (const { node } of walk(body)) {
+    if (isType(node.kind) && mentions(node, f.into)) refuse(`${f.into} also names a type`);
+  }
+  // A reference can alias a local without a written `&V1`; updating V1 would
+  // then change a later read through that reference. Keep this first form narrow.
+  for (const { node } of walk(body)) {
+    if (node.kind === NodeKind.LambdaExpr) refuse('join does not model lambda captures');
+    if (node.kind === NodeKind.CallExpr && mentions(node, f.from))
+      refuse(`${f.from} may escape through a call`);
+    if (node.kind !== NodeKind.VariableDecl) continue;
+    for (const { node: t } of walk((node as VariableDecl).type)) {
+      if (t.kind === NodeKind.ReferenceType || t.kind === NodeKind.RValueReferenceType)
+        refuse('join does not model local reference aliases');
+    }
+  }
+  const fromType = parameters.length ? text(parameters[0].type) : text(prior[0]!.type);
+  if (!signedWord.has(intoType) || !signedWord.has(fromType)) refuse('joined values must both be signed 32-bit integers');
+  if (body.statements.slice(0, index).some(s => mentions(s, f.into))) refuse(`${f.into} is named before its declaration`);
+  if (body.statements.slice(index + 1).some(s => mentions(s, f.from))) refuse(`${f.from} is named after the join`);
+  if (storedNames(init).has(f.from)) refuse(`${f.from} is written by the initializer`);
+
+  const flow = buildFunctionFlow(body.statements, localNames(fn));
+  if (flow.isEscaped(f.from) || flow.isEscaped(f.into) || addressTaken(fn, f.from) || addressTaken(fn, f.into))
+    refuse('a joined value escapes');
+  const site = flow.nodeOf(stmt);
+  if (site === undefined) refuse('join statement has no CFG node');
+
+  // Follow every path leaving the declaration. A return to it is a loop whose
+  // next evaluation reads the now-updated V1, even when V1 is textually above it.
+  const seenAfter = new Set<number>();
+  const after = [...flow.cfg.nodes[site].succ];
+  while (after.length) {
+    const n = after.pop()!;
+    if (n === site) refuse('a backedge crosses the join');
+    if (seenAfter.has(n)) continue;
+    seenAfter.add(n);
+    if (flow.reads(n).has(f.from) || flow.writes(n).has(f.from)) refuse(`${f.from} remains live after the join`);
+    after.push(...flow.cfg.nodes[n].succ);
+  }
+
+  // Removing the site must make every other V2 read/write unreachable from
+  // every entry. This also rejects a branch store that does not dominate a use.
+  const seenBefore = new Set<number>();
+  const without = [flow.cfg.entry, ...flow.cfg.extraEntries];
+  while (without.length) {
+    const n = without.pop()!;
+    if (n === site || seenBefore.has(n)) continue;
+    seenBefore.add(n);
+    if (flow.reads(n).has(f.into) || flow.writes(n).has(f.into)) refuse(`${f.into} can be used without the join`);
+    without.push(...flow.cfg.nodes[n].succ);
+  }
+
+  for (const s of body.statements.slice(index + 1)) {
+    for (const { node } of walk(s)) if (isId(node, f.into)) node.name = f.from;
+  }
+  if (isId(unparen(init), f.from)) body.statements.splice(index, 1);
+  else {
+    const replacement = parse(`void __vc8f() { ${f.from} = 0; }`).declarations[0] as FunctionDecl;
+    const assignment = replacement.body!.statements[0] as ExprStmt;
+    (assignment.expression as AssignExpr).right = init;
+    body.statements[index] = { ...assignment, leadingTrivia: stmt.leadingTrivia, trailingTrivia: stmt.trailingTrivia };
   }
 }
 
@@ -3319,7 +3425,7 @@ function doDec(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'dec' }>): void {
 }
 
 const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op: K }>) => void } = {
-  seq: doSeq, fold: doFold, cache: doCache, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
+  seq: doSeq, fold: doFold, join: doJoin, cache: doCache, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
   retval: doRetval, width: doWidth, boolflag: doBoolflag, retwiden: doRetwiden, arms: doArms,
   nest: doNest, 'merge-tail': doMergeTail, continue: doContinue, dup: doDup, tarms: doTarms, zero: doZero, nonzero: doNonzero, bool: doBool,
   cmp: doCmp, swap: doSwap, ifsel: doIfsel, split: doSplit, select: doSelect, decl: doDecl, unselect: doUnselect,
