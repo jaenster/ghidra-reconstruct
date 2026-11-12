@@ -1,8 +1,9 @@
 /**
  * The Ghidra script that applies approved redivivus.app proposals: the body of a GhidraScript run
  * through execute_script. Ported from docs/tools/ghidra-apply/proposal_apply.java.tmpl of the D2
- * workspace; with the four __EXT_*__ markers rendered empty it is that template byte for byte, so a
- * group of the original ops renders exactly as proposal_render.py rendered it.
+ * workspace. Two changes since: set_prototype keeps custom storage by name on a pure reorder, and the
+ * script reports the vc8form-tagged functions whose decompile an applied op changed (VC8FORM-STALE):
+ * their dh no longer matches, so the generator refuses the tag until it is re-measured.
  *
  * Placeholders, replaced in this order (render.ts): __DRY__, __GROUP__, __TAG__, __JSON__. The
  * markers __EXT_HELPERS__, __EXT_ORDER__, __EXT_CHECK__ and __EXT_APPLY__ take the code of the
@@ -70,6 +71,14 @@ for (com.google.gson.JsonElement pe : props) for (com.google.gson.JsonElement oe
 ghidra.app.decompiler.DecompInterface di = new ghidra.app.decompiler.DecompInterface(); di.openProgram(currentProgram);
 java.util.function.Function<String, java.util.Set<String>> regs = a -> { java.util.Set<String> r = new java.util.TreeSet<>(); try { ghidra.app.decompiler.DecompileResults res = di.decompileFunction(getFunctionAt(toAddr(a)), 60, monitor); if (res.getDecompiledFunction() == null) { r.add("DECOMPFAIL"); return r; } java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\b(in_|unaff_|extraout_)\\w+").matcher(res.getDecompiledFunction().getC()); while (m.find()) r.add(m.group()); } catch (Exception x) { r.add("ERR"); } return r; };
 java.util.Map<String, java.util.Set<String>> before = new java.util.TreeMap<>(); if (!DRY) for (String a : fset) before.put(a, regs.apply(a));
+// a vc8form tag's dh is a hash of its function's decompile: an applied op that changes that decompile (a prototype change, also in the callers) leaves the tag stale until it is re-measured
+java.util.function.Function<String, java.util.List<String>> vtags = a -> { java.util.List<String> r = new java.util.ArrayList<>(); ghidra.program.model.listing.Function f = getFunctionAt(toAddr(a)); if (f != null) for (ghidra.program.model.listing.FunctionTag t : f.getTags()) if (t.getName().startsWith("vc8form:")) r.add(t.getName()); java.util.Collections.sort(r); return r; };
+java.util.function.Function<String, java.util.Set<String>> vcallers = a -> { java.util.Set<String> r = new java.util.TreeSet<>(); ghidra.program.model.listing.Function f = getFunctionAt(toAddr(a)); if (f != null) for (ghidra.program.model.listing.Function c : f.getCallingFunctions(monitor)) r.add(c.getEntryPoint().toString()); return r; };
+java.util.function.Function<String, String> vtext = a -> { try { ghidra.app.decompiler.DecompileResults res = di.decompileFunction(getFunctionAt(toAddr(a)), 60, monitor); return res.getDecompiledFunction() == null ? "DECOMPFAIL" : res.getDecompiledFunction().getC().replaceAll("\\s+", " ").trim(); } catch (Exception x) { return "ERR " + x.getMessage(); } };
+java.util.function.Function<String, String> vname = a -> getFunctionAt(toAddr(a)).getName();
+java.util.Set<String> vproto = new java.util.TreeSet<>(); for (com.google.gson.JsonElement pe : props) for (com.google.gson.JsonElement oe : pe.getAsJsonObject().getAsJsonArray("ops")) { com.google.gson.JsonObject o = oe.getAsJsonObject(); if (o.get("op").getAsString().equals("set_prototype") && getFunctionAt(toAddr(js.apply(o, "address"))) != null) vproto.add(toAddr(js.apply(o, "address")).toString()); }
+java.util.Set<String> vset = new java.util.TreeSet<>(); for (String a : fset) if (!vtags.apply(a).isEmpty()) vset.add(a); for (String p : vproto) for (String c : vcallers.apply(p)) if (!vtags.apply(c).isEmpty()) vset.add(c);
+java.util.Map<String, String> vbefore = new java.util.TreeMap<>(); for (String a : vset) { if (DRY) println("VC8FORM-WATCH " + a + " " + vname.apply(a) + " " + vtags.apply(a)); else vbefore.put(a, vtext.apply(a)); }
 java.util.Map<String, String> plates = new java.util.TreeMap<>(); for (String a : fset) { String p = L.getComment(ghidra.program.model.listing.CodeUnit.PLATE_COMMENT, toAddr(a)); plates.put(a, p == null ? "" : p); }
 int okP = 0, skipP = 0, nOps = 0;
 // one top-level transaction per proposal: a sub-transaction ended with false aborts its whole outer transaction, so nesting would drop every proposal of the run
@@ -146,5 +155,6 @@ for (java.util.Map.Entry<String, String> pe : plates.entrySet()) { String now = 
 println("SUMMARY " + GROUP + " proposals ok=" + okP + " skipped=" + skipP + " ops=" + nOps + " fns=" + fset.size() + " platesRestored=" + restored + (DRY ? " DRY" : ""));
 } finally { }
 if (!DRY) { int nNew = 0; for (String a : fset) { java.util.Set<String> nw = new java.util.TreeSet<>(regs.apply(a)); nw.removeAll(before.get(a)); if (!nw.isEmpty()) { nNew++; println("NEWREG " + a + " " + getFunctionAt(toAddr(a)).getName() + " " + nw); } } println("REGCHECK functions-with-new-register-symbols=" + nNew + " of " + fset.size()); }
+if (!DRY) { int nStale = 0; for (String a : vset) { if (vtext.apply(a).equals(vbefore.get(a))) continue; nStale++; for (String t : vtags.apply(a)) println("VC8FORM-STALE " + a + " " + vname.apply(a) + " " + t); } println("VC8FORMCHECK functions-with-stale-dh=" + nStale + " of " + vset.size() + (nStale > 0 ? ": re-measure their dh in this batch (codegen with GHIDRA_VC8FORM_HASHES, then scripts/vc8form-rehash.ts or a measured tag)" : "")); }
 di.dispose();
 `;

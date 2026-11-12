@@ -73,7 +73,7 @@ describe('proposal-render: vc8form and linkage', () => {
 
   it('adds their code only when the group holds one', () => {
     const plain = renderProposalScript(rows, { program: 'win', author: '*', dry: true }).text;
-    assert.ok(!plain.includes('vc8form') && !plain.includes('__EXT_'));
+    assert.ok(!plain.includes('op.equals("vc8form")') && !plain.includes('"vc8form"}') && !plain.includes('__EXT_'));
     const t = renderProposalScript([...rows, ...ext], { program: 'win', author: '*', dry: false }).text;
     assert.ok(!t.includes('__EXT_'));
     assert.ok(t.includes('"rename_local", "delete_label", "linkage", "vc8form"};'));
@@ -145,5 +145,47 @@ describe('proposal-render: set_prototype on custom storage, run against stub Ghi
       'param Unit * pOwner@ECX',
       'param int nSkill@EDX',
     ]);
+  });
+});
+
+/**
+ * The vc8form stale check as rendered, run in fixtures/proposal-apply/VcHarness.java: the watched
+ * functions are the tagged ones an op touches plus the tagged callers of a set_prototype target;
+ * a watched function whose decompile the applied ops changed has every vc8form tag reported.
+ */
+function runVc8formCheck(changed: string[]): string[] {
+  const t = renderProposalScript([{ id: 1, author: 'a', ops: [{ op: 'set_prototype', program: 'win', address: '0x00401000', signature: 'int Target(int nX, int nY)' }] }], { program: 'win', author: '*', dry: false }).text;
+  const line = (head: string) => { const i = t.indexOf(head); assert.ok(i > 0, head); return t.slice(i, t.indexOf('\n', i) + 1); };
+  const dir = mkdtempSync(join(tmpdir(), 'proposal-vc8form-'));
+  try {
+    const h = readFileSync(join(FIX, 'VcHarness.java'), 'utf8')
+      .replace('/*WATCH*/', line('java.util.Set<String> vset =') + line('java.util.Map<String, String> vbefore ='))
+      .replace('/*CHECK*/', line('if (!DRY) { int nStale = 0;'));
+    writeFileSync(join(dir, 'VcHarness.java'), h);
+    execFileSync('javac', ['-nowarn', '-d', dir, join(dir, 'VcHarness.java')], { cwd: dir, stdio: 'pipe' });
+    return execFileSync('java', ['-cp', dir, 'VcHarness', ...changed], { encoding: 'utf8' }).trim().split('\n');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+describe('proposal-render: vc8form tags whose decompile an applied op changed', { skip: !hasJdk && 'no javac on PATH' }, () => {
+  it('reports every tag of a changed tagged function and of a changed tagged caller of a prototype target', () => {
+    assert.deepStrictEqual(runVc8formCheck(['00401000', '00402000', '00403000', '00404000', '00406000', 'ws:00405000']), [
+      'VC8FORM-STALE 00402000 TaggedEdited vc8form:fold(nListCount);ev=0123456789;bh=96-1a2b3c4d;dh=5e6f7a8b',
+      'VC8FORM-STALE 00403000 Caller vc8form:seq(nY,nX);ev=0123456789;bh=40-00aa11bb;dh=0badf00d',
+      'VC8FORM-STALE 00403000 Caller vc8form:width(b,int);ev=0123456789;bh=40-00aa11bb;dh=0badf00d',
+      'VC8FORMCHECK functions-with-stale-dh=2 of 3: re-measure their dh in this batch (codegen with GHIDRA_VC8FORM_HASHES, then scripts/vc8form-rehash.ts or a measured tag)',
+    ]);
+  });
+
+  it('reports nothing when no watched decompile changed', () => {
+    assert.deepStrictEqual(runVc8formCheck(['00401000', '00406000']), ['VC8FORMCHECK functions-with-stale-dh=0 of 3']);
+  });
+
+  it('a dry run names the watched functions instead', () => {
+    const t = renderProposalScript([{ id: 1, author: 'a', ops: [{ op: 'set_prototype', program: 'win', address: '0x00401000', signature: 'int Target(int nX)' }] }], { program: 'win', author: '*', dry: true }).text;
+    assert.ok(t.includes('if (DRY) println("VC8FORM-WATCH " + a'));
+    assert.ok(t.indexOf('java.util.Map<String, String> vbefore =') < t.indexOf('int sub = currentProgram.startTransaction'), 'the decompile is read before any op is applied');
   });
 });
