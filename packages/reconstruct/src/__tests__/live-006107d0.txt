@@ -1,0 +1,23 @@
+/* @function TSHashTable<MappingEntryNode,HASHKEY_STRI>::Destroy
+   @address Game.exe.ram:006107d0
+   @date 2026.02.26
+   @params
+     this: ECX:4 (auto) (TSHashTable<MappingEntryNode,HASHKEY_STRI> *)
+   @description Diablo 2 1.14d reverse team
+   https://blizzhackers.dev
+   @blizzard TSHashTable<MappingEntryNode,HASHKEY_STRI>::Destroy (STORM.H) */
+
+void __thiscall
+TSHashTable<MappingEntryNode,HASHKEY_STRI>::Destroy
+          (TSHashTable<MappingEntryNode,HASHKEY_STRI> *this)
+
+{
+  TSHashTable<MappingEntryNode,HASHKEY_STRI>::InternalClear(this,1);
+  this->nFullnessIndicator = 0;
+  this->nSlotMask = 0;
+  TSGrowableArray<TSExplicitList<MappingEntryNode,-572662307>>::Destructor(&this->tSlotListArray);
+  (this->tSlotListArray).m_alloc = 0;
+  (this->tSlotListArray).m_count = 0;
+  (this->tSlotListArray).m_data = (TSExplicitList<MappingEntryNode,_572662307> *)0x0;
+  return;
+}
