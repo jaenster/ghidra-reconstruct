@@ -490,6 +490,17 @@ function sites(c: Ctx, maxAnchors: number): string[] {
     bounded.set(v, (bounded.get(v) ?? 0) + 1);
     out.add(`swmerge(${v},${bounded.get(v)})`);
   }
+  // dec: a local read as `V - K` (K a positive unsuffixed literal) at least twice.
+  const diffs = new Map<string, number>();
+  for (const n of all) {
+    if (n.kind !== NodeKind.BinaryExpr || n.operator !== '-') continue;
+    const l = unparen(n.left), r = unparen(n.right);
+    if (l.kind !== NodeKind.Identifier || !locals.has(l.name) || r.kind !== NodeKind.IntegerLiteral || r.suffix !== '') continue;
+    if (r.value <= 0n || r.value > 0x7fffffffn) continue;
+    const k = `${l.name},${r.value}`;
+    diffs.set(k, (diffs.get(k) ?? 0) + 1);
+  }
+  for (const [k, n] of diffs) if (n >= 2) out.add(`dec(${k})`);
   return [...out];
 }
 
