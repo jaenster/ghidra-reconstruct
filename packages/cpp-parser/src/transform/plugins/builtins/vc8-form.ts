@@ -222,6 +222,13 @@
  *                        there is exactly one such if, P is a parameter of V's exact type that
  *                        nothing else names, and V's declaration sits in the function's own
  *                        block and its address is not taken.
+ *   opas(V,op,K)         two guarded reads of one local `V op K` become one
+ *                        `V op= K` before the first read. Only signed 32-bit `+ 1`
+ *                        under `V != -1`, or byte `(uint8_t)(V - 1)` under a
+ *                        nonzero guard, is admitted. The paired form
+ *                        `opas(X,>>,K,Y,>>,K)` writes both parameter shifts after
+ *                        an `&X,&Y` call and before either short store, in X,Y order.
+ *                        Shadowing, stale reads and crossed effects refuse it.
  *   swmerge(V[,i])       the range tests the compiler wrote around a switch on V are merged
  *                        back into it: `if (V <= U) { if (V != K) { switch (V) { ... default:
  *                        L } } } else { if (c1) L ... if (cn) L }`, L the default's leaving
@@ -260,7 +267,7 @@
 import { NodeKind, isExpression, isType } from '../../../ast/kinds.js';
 import type {
   ASTNode, AssignExpr, BinaryExpr, CallExpr, CompoundStmt, ConditionalExpr, CStyleCastExpr, DeclStmt, Expression,
-  ExprStmt, ForStmt, FunctionDecl, Identifier, IfStmt, IntegerLiteralExpr, ParenExpr, ReturnStmt, Statement, SubscriptExpr, TranslationUnit,
+  ExprStmt, ForStmt, FunctionDecl, Identifier, IfStmt, IntegerLiteralExpr, MemberExpr, ParenExpr, ReturnStmt, Statement, SubscriptExpr, TranslationUnit,
   TypeNode, UnaryExpr, VariableDecl,
 } from '../../../ast/nodes.js';
 import { parse } from '../../../parser/index.js';
@@ -315,6 +322,7 @@ export type Vc8Form =
   | { op: 'onecall'; cond: string; name: string; index: number }
   | { op: 'roundup'; name: string; param?: string }
   | { op: 'swmerge'; name: string; index: number }
+  | { op: 'opas'; updates: Array<{ name: string; operator: '+' | '-' | '>>'; constant: string }> }
   | { op: 'dec'; name: string; amount: number };
 
 /**
@@ -357,7 +365,7 @@ export interface Vc8FormOptions {
 
 const OPS = new Set(['seq', 'fold', 'join', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'width', 'boolflag', 'retwiden', 'arms',
   'nest', 'merge-tail', 'tailguard', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
-  'nestcall', 'fill', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'switch', 'dec']);
+  'nestcall', 'fill', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'switch', 'dec', 'opas']);
 
 /** Split at commas outside brackets and parentheses. For cache, the third argument is a
  * type, so commas inside its template arguments also belong to that argument. */
@@ -464,6 +472,16 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
       const id = /^[A-Za-z_]\w*$/;
       if (anchor || args.length < 1 || args.length > 2 || !id.test(args[0]) || (args.length === 2 && !id.test(args[1]))) return undefined;
       return { op: 'roundup', name: args[0], ...(args.length === 2 ? { param: args[1] } : {}) };
+    }
+    case 'opas': {
+      if (anchor || (args.length !== 3 && args.length !== 6)) return undefined;
+      const updates = [] as Array<{ name: string; operator: '+' | '-' | '>>'; constant: string }>;
+      for (let j = 0; j < args.length; j += 3) {
+        if (!/^[A-Za-z_]\w*$/.test(args[j]) || !['+', '-', '>>'].includes(args[j + 1])
+          || !/^(?:0x[0-9a-fA-F]+|[1-9]\d*)$/.test(args[j + 2])) return undefined;
+        updates.push({ name: args[j], operator: args[j + 1] as '+' | '-' | '>>', constant: args[j + 2] });
+      }
+      return new Set(updates.map(x => x.name)).size === updates.length ? { op: 'opas', updates } : undefined;
     }
     case 'acc': {
       // `acc(E)`, `acc(E,i)`, `acc(E,bare)`, `acc(E,i,bare)`.
@@ -3656,6 +3674,166 @@ function doSwitch(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'switch' }>): void
   refuse(`no if #${f.index} testing ${f.expr} against two constants`);
 }
 
+// ---------------------------------------------------------------------------------------
+// opas: the value is updated once, ahead of its uses, in the original's order.
+
+type OpasUpdate = Extract<Vc8Form, { op: 'opas' }>['updates'][number];
+
+function doOpas(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'opas' }>): void {
+  const binding = (u: OpasUpdate, want: 'local' | 'param', type: string): void => {
+    const params = fn.parameters.filter(p => isId((p as unknown as { name?: Identifier | null }).name, u.name));
+    const decls = [...walk(fn.body!)].filter(x => x.node.kind === NodeKind.VariableDecl
+      && (x.node as VariableDecl).name.name === u.name);
+    if (want === 'local') {
+      if (params.length || decls.length !== 1) refuse(`${u.name} is shadowed or not one local`);
+      const d = soleDecl(fn, u.name);
+      if (text(d.type) !== type || !d.initializer) refuse(`${u.name} is not an initialized ${type} local`);
+      refusePinned(fn, u.name);
+    } else {
+      if (params.length !== 1 || decls.length) refuse(`${u.name} is shadowed or not one parameter`);
+      if (text((params[0] as unknown as { type: TypeNode }).type) !== type) refuse(`${u.name} is not a ${type} parameter`);
+    }
+    // No existing store to the named variable may be moved across the new update.
+    for (const { node } of walk(fn.body!)) {
+      if (node.kind === NodeKind.AssignExpr && isId(unparen((node as AssignExpr).left), u.name)) refuse(`${u.name} is already assigned`);
+    }
+  };
+  const matches = (e: Expression, u: OpasUpdate): boolean => {
+    const x = unparen(e);
+    return x.kind === NodeKind.BinaryExpr && (x as BinaryExpr).operator === u.operator
+      && isId(unparen((x as BinaryExpr).left), u.name)
+      && unparen((x as BinaryExpr).right).kind === NodeKind.IntegerLiteral
+      && (unparen((x as BinaryExpr).right) as IntegerLiteralExpr).value === BigInt(u.constant)
+      && !(unparen((x as BinaryExpr).right) as IntegerLiteralExpr).suffix;
+  };
+  const stale = (names: string[], first: Statement, converted: Set<ASTNode>): void => {
+    let after = false;
+    for (const { node } of walk(fn.body!)) {
+      if (node === first) after = true;
+      if (after && isId(node) && names.includes(node.name) && !converted.has(node)) refuse(`${node.name} is read after its update`);
+    }
+  };
+  const convertedIds = (e: ASTNode, u: OpasUpdate): Identifier[] => [...walk(e)]
+    .filter(x => isId(x.node, u.name)).map(x => x.node as Identifier);
+
+  if (f.updates.length === 2) {
+    const [x, y] = f.updates;
+    if (x.operator !== '>>' || y.operator !== '>>' || BigInt(x.constant) !== 11n || BigInt(y.constant) !== 11n) refuse('paired opas requires two >> 0xb shifts');
+    binding(x, 'param', 'int32_t');
+    binding(y, 'param', 'int32_t');
+    const s = fn.body!.statements;
+    if (s.length !== 3 || s[0].kind !== NodeKind.ExprStmt) refuse('paired shifts must follow one call and precede two stores');
+    const call = unparen((s[0] as ExprStmt).expression);
+    if (call.kind !== NodeKind.CallExpr || !calleeName((call as CallExpr).callee)?.endsWith('DRLG_WorldToScreenNoShift')
+      || (call as CallExpr).arguments.length !== 2) refuse('no matching coordinate call');
+    const args = (call as CallExpr).arguments.map(unparen);
+    if (!args.every((a, i) => a.kind === NodeKind.UnaryExpr && (a as UnaryExpr).operator === '&'
+      && isId(unparen((a as UnaryExpr).operand), i === 0 ? x.name : y.name))) refuse('coordinate call does not take both addresses in order');
+    const stores = [storeOf(s[1]), storeOf(s[2])];
+    if (stores.some(st => !st || st.operator !== '=')) refuse('no two plain coordinate stores');
+    const targets = stores.map(st => unparen(st!.left));
+    if (targets.some(t => t.kind !== NodeKind.MemberExpr || !(t as MemberExpr).isArrow)
+      || !isId((targets[0] as MemberExpr).member, 'nTargetX') || !isId((targets[1] as MemberExpr).member, 'nTargetY')
+      || !isId(unparen((targets[0] as MemberExpr).object))
+      || !isId(unparen((targets[1] as MemberExpr).object), (unparen((targets[0] as MemberExpr).object) as Identifier).name)
+      || !fn.parameters.some(p => isId((p as unknown as { name?: Identifier | null }).name,
+        (unparen((targets[0] as MemberExpr).object) as Identifier).name))) refuse('coordinate targets are not fields of one pointer parameter');
+    const converted = new Set<ASTNode>();
+    const casts: CStyleCastExpr[] = [];
+    for (const [j, u] of [x, y].entries()) {
+      const cast = unparen(stores[j]!.right);
+      if (cast.kind !== NodeKind.CStyleCastExpr || !['short', 'shortint', 'int16_t'].includes(text((cast as CStyleCastExpr).type))
+        || !matches((cast as CStyleCastExpr).expression, u)) refuse(`${u.name} is not narrowed immediately after its shift`);
+      for (const id of convertedIds((cast as CStyleCastExpr).expression, u)) converted.add(id);
+      casts.push(cast as CStyleCastExpr);
+    }
+    stale([x.name, y.name], s[1], converted);
+    for (const [j, u] of [x, y].entries()) casts[j].expression = { kind: NodeKind.Identifier, name: u.name } as Identifier;
+    s.splice(1, 0, ...parseStmts(`${x.name} >>= ${x.constant}; ${y.name} >>= ${y.constant};`));
+    return;
+  }
+
+  if (f.updates.length !== 1) refuse('opas needs one update or a paired shift');
+  const u = f.updates[0];
+  const plus = u.operator === '+' && BigInt(u.constant) === 1n;
+  const minus = u.operator === '-' && BigInt(u.constant) === 1n;
+  if (!plus && !minus) refuse('single opas supports only + 1 or byte - 1');
+  binding(u, 'local', plus ? 'int32_t' : 'uint8_t');
+  const candidates: Array<{ b: CompoundStmt; i: number; slots: Slot[]; ids: Identifier[]; hits: ASTNode[] }> = [];
+  for (const b of blocks(fn)) {
+    for (let i = 0; i + 1 < b.statements.length; i++) {
+      const slots: Slot[] = [], ids: Identifier[] = [], hits: ASTNode[] = [];
+      let valid = true;
+      for (const stmt of b.statements.slice(i, i + 2)) {
+        let count = 0;
+        for (const { node, slot } of walk(stmt)) {
+          if (!slot) continue;
+          if (plus && matches(node as Expression, u)) {
+            slots.push(slot); ids.push(...convertedIds(node, u)); hits.push(node); count++;
+          } else if (minus && node.kind === NodeKind.CStyleCastExpr && text((node as CStyleCastExpr).type) === 'uint8_t'
+            && matches((node as CStyleCastExpr).expression, u)) {
+            slots.push({ parent: node as unknown as Record<string, unknown>, key: 'expression' });
+            ids.push(...convertedIds((node as CStyleCastExpr).expression, u)); hits.push(node); count++;
+          }
+        }
+        if (count !== 1) { valid = false; break; }
+      }
+      if (valid && slots.length === 2) candidates.push({ b, i, slots, ids, hits });
+    }
+  }
+  if (candidates.length !== 1) refuse(`${candidates.length} adjacent two-use sites for ${u.name}`);
+  const { b, i, slots, ids, hits } = candidates[0];
+  const ancestry = parentsOf(fn);
+  const evaluatedOnEntry = (stmt: Statement, hit: ASTNode): boolean => {
+    let child = hit;
+    while (child !== stmt) {
+      const p = ancestry.get(child);
+      if (!p) return false;
+      if (p.kind === NodeKind.ForStmt) {
+        if (p !== stmt || (p as ForStmt).init !== child) return false;
+      } else if (p.kind === NodeKind.ExprStmt) {
+        if (p !== stmt && !(stmt.kind === NodeKind.ForStmt && (stmt as ForStmt).init === p)) return false;
+      } else if (p.kind === NodeKind.BinaryExpr) {
+        if (['&&', '||', ','].includes((p as BinaryExpr).operator)) return false;
+      } else if (![NodeKind.ParenExpr, NodeKind.CStyleCastExpr, NodeKind.AssignExpr, NodeKind.CallExpr].includes(p.kind)) return false;
+      child = p;
+    }
+    return stmt.kind === NodeKind.ExprStmt || stmt.kind === NodeKind.ForStmt;
+  };
+  if (!hits.every((h, j) => evaluatedOnEntry(b.statements[i + j], h))) refuse('the two expressions are not evaluated when their statements begin');
+  const firstUseAncestors = new Set<ASTNode>();
+  for (let n: ASTNode | undefined = hits[0]; n; n = ancestry.get(n)) {
+    firstUseAncestors.add(n);
+    if (n === b.statements[i]) break;
+  }
+  for (const { node } of walk(b.statements[i])) {
+    if (firstUseAncestors.has(node)) continue;
+    if ([NodeKind.CallExpr, NodeKind.AssignExpr, NodeKind.PostfixExpr, NodeKind.ThrowExpr,
+      NodeKind.CoAwaitExpr, NodeKind.NewExpr, NodeKind.DeleteExpr].includes(node.kind)
+      || (node.kind === NodeKind.UnaryExpr && ['++', '--'].includes((node as UnaryExpr).operator)))
+      refuse('the first use has another effect before its update');
+  }
+  const parent = ancestry.get(b);
+  if (parent?.kind !== NodeKind.IfStmt || (parent as IfStmt).thenBranch !== b || (parent as IfStmt).elseBranch) refuse('uses are not in one guarded arm');
+  const localDecl = soleDecl(fn, u.name);
+  const declarationStatement = ancestry.get(localDecl);
+  if (declarationStatement?.kind !== NodeKind.DeclStmt || ancestry.get(declarationStatement) !== fn.body
+    || ancestry.get(parent) !== fn.body
+    || fn.body!.statements.indexOf(declarationStatement as Statement) >= fn.body!.statements.indexOf(parent as Statement))
+    refuse(`${u.name} is not declared before its guard in the outer block`);
+  const cond = unparen((parent as IfStmt).condition);
+  const truthy = (e: Expression): boolean => {
+    const z = unparen(e);
+    return isId(z, u.name) || (z.kind === NodeKind.BinaryExpr && (z as BinaryExpr).operator === '&&'
+      && (truthy((z as BinaryExpr).left) || truthy((z as BinaryExpr).right)));
+  };
+  if (plus && text(cond) !== norm(`${u.name} != -1`)) refuse('int32 + 1 is not below its -1 guard');
+  if (minus && !truthy(cond)) refuse('byte - 1 is not below its nonzero guard');
+  stale([u.name], b.statements[i], new Set(ids));
+  for (const slot of slots) put(slot, { kind: NodeKind.Identifier, name: u.name } as Identifier);
+  b.statements.splice(i, 0, ...parseStmts(`${u.name} ${u.operator}= ${u.constant};`));
+}
+
 const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op: K }>) => void } = {
   seq: doSeq, fold: doFold, join: doJoin, cache: doCache, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
   retval: doRetval, width: doWidth, boolflag: doBoolflag, retwiden: doRetwiden, arms: doArms,
@@ -3664,7 +3842,7 @@ const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op
   cmp: doCmp, swap: doSwap, ifsel: doIfsel, split: doSplit, select: doSelect, decl: doDecl, unselect: doUnselect,
   tsel: doTsel, hoist: doHoist, nestcall: doNestcall, fill: doFill, copy: doCopy, shift: doShift, ptrwalk: doPtrwalk, rowptr: doRowptr,
   acc: doAcc,
-  retvar: doRetvar, onecall: doOnecall, roundup: doRoundup, swmerge: doSwmerge, dec: doDec, switch: doSwitch,
+  retvar: doRetvar, onecall: doOnecall, roundup: doRoundup, opas: doOpas, swmerge: doSwmerge, dec: doDec, switch: doSwitch,
 };
 
 /**
