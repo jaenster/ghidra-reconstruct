@@ -479,6 +479,15 @@ function sites(c: Ctx, maxAnchors: number): string[] {
     out.add(`roundup(${v})`);
     for (const p of params) out.add(`roundup(${v},${p})`);
   }
+  // join: a top-level initialized local and each other local or parameter its initializer reads.
+  for (const s of fn.body!.statements as N[]) {
+    if (s.kind !== NodeKind.DeclStmt || s.declarations.length !== 1 || !s.declarations[0].initializer) continue;
+    const into = s.declarations[0].name?.name;
+    if (typeof into !== 'string') continue;
+    for (const n of walk(s.declarations[0].initializer)) {
+      if (n.kind === NodeKind.Identifier && vars.has(n.name) && n.name !== into) out.add(`join(${into},${n.name})`);
+    }
+  }
   // swmerge: a local bounded from above by an if with an else (the range tests around a switch).
   const bounded = new Map<string, number>();
   for (const n of all) {
