@@ -1111,6 +1111,7 @@ export class LiveLoop {
       phase: this.phase,
       paused: this.stream.isPaused,
       streamConnected: this.stream.isConnected,
+      ...(this.stream instanceof PollingChangeStream ? { poller: this.stream.health } : {}),
       queuedEvents: this.stream.queuedCount,
       needsFullResync: this.needsFullResync,
       queue: this.queue.status(),

@@ -68,7 +68,10 @@ describe('PollingChangeStream backoff', () => {
     stream.stop();
     const gaps = asked.slice(1).map((t, i) => t - asked[i]!);
     assert.deepEqual(gaps.slice(0, 6), [1_000, 2_000, 4_000, 8_000, 8_000, 8_000]);
-    assert.match(logs[0]!, /change poll failed \(1 in a row, next try in 1000ms\): Not connected/);
+    assert.match(logs[0]!, /^change poller: get_changes every 1000ms \(timeout 600s\); watchdog every 60s restarts the loop after 900s without a completed poll$/);
+    assert.match(logs[1]!, /change poll failed \(1 in a row, next try in 1000ms\): Not connected/);
+    assert.equal(stream.health.pollsCompleted, 0);
+    assert.equal(stream.health.failuresInARow > 0, true);
     assert.equal(stream.loopGeneration, 1, 'failing polls are not a stall');
   });
 
@@ -195,5 +198,34 @@ describe('PollingChangeStream watchdog', () => {
     assert.equal(logs.filter(l => l.startsWith('ERROR')).length, 0, logs.join('\n'));
     assert.equal(stream.loopGeneration, 1);
     assert.equal(stream.lastAppliedSeq, V(2079) + 1);
+  });
+});
+
+describe('PollingChangeStream health', () => {
+  it('counts completed polls and their age for the status endpoint', async () => {
+    const clock = new FakeClock();
+    let up = true;
+    const stream = new PollingChangeStream({
+      since: V(2078), intervalMs: 2_000, clock,
+      sendCommand: async <T>() => { if (!up) throw new Error('Not connected to repository server'); return empty as unknown as T; },
+      onBatch: () => assert.fail('no batch'),
+      onTruncated: () => assert.fail('not truncated'),
+    });
+    assert.equal(stream.health.lastPollAt, null);
+    stream.start();
+    await clock.advance(10_000);
+    const h = stream.health;
+    assert.ok(h.pollsCompleted >= 5, JSON.stringify(h));
+    assert.equal(h.loops, 1);
+    assert.equal(h.failuresInARow, 0);
+    assert.ok(h.lastPollAgeS !== null && h.lastPollAgeS <= 2, JSON.stringify(h));
+    assert.equal(h.stallThresholdS, 900);
+    up = false;
+    await clock.advance(10_000);
+    stream.stop();
+    const d = stream.health;
+    assert.equal(d.pollsCompleted, h.pollsCompleted, 'a failed poll is not a completed one');
+    assert.ok(d.failuresInARow > 0 && d.lastPollAgeS! >= 8, JSON.stringify(d));
+    assert.match(d.lastError!, /Not connected/);
   });
 });

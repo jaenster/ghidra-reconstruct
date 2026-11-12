@@ -439,6 +439,18 @@ export interface ChangeFeed {
 /** Events per version in a version-keyed journal; must match VersionFollower.SEQ_PER_VERSION. */
 export const SEQ_PER_VERSION = 1_000_000;
 
+/** A PollingChangeStream's liveness, as the status endpoint shows it. */
+export interface PollHealth {
+  /** Poll loops started; more than one means the watchdog restarted it. */
+  loops: number;
+  pollsCompleted: number;
+  lastPollAt: string | null;
+  lastPollAgeS: number | null;
+  failuresInARow: number;
+  lastError: string | null;
+  stallThresholdS: number;
+}
+
 /** The clock a PollingChangeStream runs on; tests hand in a fake one. */
 export interface PollClock {
   now(): number;
@@ -514,6 +526,8 @@ export class PollingChangeStream implements ChangeFeed {
   private inBatch = false;
   private watchdog: unknown = null;
   private loopsStarted = 0;
+  private pollsCompleted = 0;
+  private lastPollAt: number | null = null;
 
   constructor(options: PollingChangeStreamOptions) {
     this.opts = {
@@ -535,11 +549,27 @@ export class PollingChangeStream implements ChangeFeed {
   /** How many poll loops have been started; more than one means the watchdog restarted it. */
   get loopGeneration(): number { return this.loopsStarted; }
 
+  /** Whether polls still complete: what the watchdog judges, for the status endpoint. */
+  get health(): PollHealth {
+    const now = this.opts.clock.now();
+    return {
+      loops: this.loopsStarted,
+      pollsCompleted: this.pollsCompleted,
+      lastPollAt: this.lastPollAt === null ? null : new Date(this.lastPollAt).toISOString(),
+      lastPollAgeS: this.lastPollAt === null ? null : Math.round((now - this.lastPollAt) / 1000),
+      failuresInARow: this.failures,
+      lastError: this.lastError,
+      stallThresholdS: Math.round(this.opts.stallMs / 1000),
+    };
+  }
+
   start(): void {
     if (!this.stopped) return;
     this.stopped = false;
     this.lastProgress = this.opts.clock.now();
     this.watchdog = this.opts.clock.setInterval(() => this.checkStall(), this.opts.watchdogMs);
+    this.log(`change poller: get_changes every ${this.opts.intervalMs}ms (timeout ${Math.round(this.opts.pollTimeoutMs / 1000)}s); ` +
+      `watchdog every ${Math.round(this.opts.watchdogMs / 1000)}s restarts the loop after ${Math.round(this.opts.stallMs / 1000)}s without a completed poll`);
     (this.watchdog as { unref?: () => void }).unref?.();
     this.spawnLoop();
   }
@@ -662,6 +692,8 @@ export class PollingChangeStream implements ChangeFeed {
     );
     if (gen !== this.generation) return;
     this.lastProgress = this.opts.clock.now();
+    this.lastPollAt = this.lastProgress;
+    this.pollsCompleted++;
     this.connected = true;
     const head = r.head ?? 0;
     if (head < since) {
