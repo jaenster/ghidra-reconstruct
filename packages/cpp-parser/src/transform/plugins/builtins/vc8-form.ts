@@ -3840,13 +3840,35 @@ function doOpas(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'opas' }>): void {
       refuse('uses are not in one guarded arm');
     if ([...walk(fn.body!)].some(x => x.node.kind === NodeKind.GotoStmt || x.node.kind === NodeKind.LabelStmt))
       refuse('a jump may bypass the flattened byte guard');
-    const prior = b.statements.slice(b.statements.indexOf(declarationStatement as Statement) + 1, i);
+    const declIndex = b.statements.indexOf(declarationStatement as Statement);
+    const prior = b.statements.slice(declIndex + 1, i);
+    const scalarByteGuard = (expression: Expression, guardIndex: number): boolean => {
+      const all = unparen(expression);
+      if (all.kind !== NodeKind.BinaryExpr || (all as BinaryExpr).operator !== '&&') return false;
+      const flags = unparen((all as BinaryExpr).left), range = unparen((all as BinaryExpr).right);
+      if (flags.kind !== NodeKind.BinaryExpr || (flags as BinaryExpr).operator !== '&&'
+        || range.kind !== NodeKind.BinaryExpr || (range as BinaryExpr).operator !== '<='
+        || !isId(unparen((flags as BinaryExpr).left), u.name)
+        || !isId(unparen((range as BinaryExpr).left), u.name)) return false;
+      const other = unparen((flags as BinaryExpr).right);
+      if (other.kind !== NodeKind.Identifier || (other as Identifier).name === u.name
+        || !isId(unparen((range as BinaryExpr).right), (other as Identifier).name)) return false;
+      const otherName = (other as Identifier).name;
+      if (fn.parameters.some(p => isId((p as unknown as { name?: Identifier | null }).name, otherName))) return false;
+      const declarations = [...walk(fn.body!)].filter(x => x.node.kind === NodeKind.VariableDecl
+        && (x.node as VariableDecl).name.name === otherName);
+      if (declarations.length !== 1) return false;
+      const d = declarations[0].node as VariableDecl, statement = ancestry.get(d);
+      return text(d.type) === 'uint8_t' && !!d.initializer && d.specifiers.length === 0
+        && statement?.kind === NodeKind.DeclStmt && ancestry.get(statement) === b
+        && b.statements.indexOf(statement as Statement) < guardIndex;
+    };
     const guarded = prior.some((s, k) => {
       if (s.kind !== NodeKind.IfStmt || (s as IfStmt).elseBranch || (s as IfStmt).isConstexpr
         || !soleReturn((s as IfStmt).thenBranch)) return false;
       const condition = unparen((s as IfStmt).condition);
       return condition.kind === NodeKind.UnaryExpr && (condition as UnaryExpr).operator === '!'
-        && truthy((condition as UnaryExpr).operand) && !effects(condition)
+        && scalarByteGuard((condition as UnaryExpr).operand, declIndex + 1 + k) && !effects(condition)
         && prior.every((other, j) => j === k || !mentions(other, u.name));
     });
     if (!guarded) refuse('no preceding flattened nonzero byte guard');
