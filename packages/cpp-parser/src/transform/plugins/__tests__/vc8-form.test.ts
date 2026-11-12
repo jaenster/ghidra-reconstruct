@@ -1137,10 +1137,8 @@ describe('vc8-form: opas', () => {
   ];
   it('parses only named, literal, nonduplicated updates', () => {
     assert.deepStrictEqual(parseVc8Form('opas(nSelectedLine,+,1)'), { op: 'opas', updates: [{ name: 'nSelectedLine', operator: '+', constant: '1' }] });
-    assert.deepStrictEqual(parseVc8Form('opas(nX,>>,0xb,nY,>>,0xb)'), { op: 'opas', updates: [
-      { name: 'nX', operator: '>>', constant: '0xb' }, { name: 'nY', operator: '>>', constant: '0xb' },
-    ] });
-    assert.strictEqual(parseVc8Form('opas(nX,>>,0xb,nX,>>,0xb)'), undefined);
+    assert.deepStrictEqual(parseVc8Form('opas(nX,>>,0xb)'), { op: 'opas', updates: [{ name: 'nX', operator: '>>', constant: '0xb' }] });
+    assert.strictEqual(parseVc8Form('opas(nX,>>,0xb,nY,>>,0xb)'), undefined);
     assert.strictEqual(parseVc8Form('opas(nX,>>,f())'), undefined);
     assert.strictEqual(parseVc8Form('opas(nX,>>,0xb,@site)'), undefined);
   });
@@ -1194,10 +1192,28 @@ describe('vc8-form: opas', () => {
       assert.strictEqual(tagged.out, plain.out, source.join('\n'));
     }
   });
-  it('writes paired shifts in order before either store', () => {
-    const { out, sites } = run(PAIR, 'opas(nX,>>,0xb,nY,>>,0xb)');
-    assert.ok(sites[0].applied, sites[0].why);
-    assert.match(out, /DRLG_WorldToScreenNoShift\(&nX, &nY\); nX >>= 0xb; nY >>= 0xb; pDynamicPath->nTargetX = \(short int\)nX; pDynamicPath->nTargetY = \(short int\)nY;/);
+  it('writes each tagged shift after the address call, in tag order', () => {
+    const both = run(PAIR, 'opas(nX,>>,0xb)', 'opas(nY,>>,0xb)');
+    assert.ok(both.sites.every(s => s.applied), both.sites.map(s => s.why).join('; '));
+    assert.match(both.out, /DRLG_WorldToScreenNoShift\(&nX, &nY\); nX >>= 0xb; nY >>= 0xb; pDynamicPath->nTargetX = \(short int\)nX; pDynamicPath->nTargetY = \(short int\)nY;/);
+    const one = run(PAIR, 'opas(nY,>>,0xb)');
+    assert.ok(one.sites[0].applied, one.sites[0].why);
+    assert.match(one.out, /DRLG_WorldToScreenNoShift\(&nX, &nY\); nY >>= 0xb; pDynamicPath->nTargetX = \(short int\)\(nX >> 0xb\); pDynamicPath->nTargetY = \(short int\)nY;/);
+  });
+  it('shifts any unstored 32-bit variable, not one callee or field', () => {
+    const local = run([
+      'void dummy(S* p) {',
+      '  uint32_t v = Get();',
+      '  Use(1);',
+      '  p->a = v >> 4;',
+      '  if (p->b) p->c = v >> 4;',
+      '}',
+    ], 'opas(v,>>,4)');
+    assert.ok(local.sites[0].applied, local.sites[0].why);
+    assert.match(local.out, /uint32_t v = Get\(\); v >>= 4; Use\(1\); p->a = v; if \(p->b\) p->c = v;/);
+    const param = run(['void dummy(S* p, int n) { Other(&n); p->a = (short int)(n >> 3); }'], 'opas(n,>>,3)');
+    assert.ok(param.sites[0].applied, param.sites[0].why);
+    assert.match(param.out, /Other\(&n\); n >>= 3; p->a = \(short int\)n;/);
   });
   it('keeps untagged source and stale tagged source unchanged', () => {
     const untagged = run(PLUS);
@@ -1208,10 +1224,11 @@ describe('vc8-form: opas', () => {
     const staleTagged = run(staleInput, 'opas(nSelectedLine,+,1)');
     assert.strictEqual(staleTagged.sites[0].applied, false);
     assert.strictEqual(staleTagged.out, stalePlain.out);
-    const pairPlain = run(PAIR.map(l => l.replace('(&nX, &nY)', '(&nY, &nX)')));
-    const pairStale = run(PAIR.map(l => l.replace('(&nX, &nY)', '(&nY, &nX)')), 'opas(nX,>>,0xb,nY,>>,0xb)');
-    assert.strictEqual(pairStale.sites[0].applied, false);
-    assert.strictEqual(pairStale.out, pairPlain.out);
+    const shiftInput = PAIR.map(l => l.replace('nX >> 0xb', 'nX >> 0xc'));
+    const shiftPlain = run(shiftInput);
+    const shiftStale = run(shiftInput, 'opas(nX,>>,0xb)');
+    assert.strictEqual(shiftStale.sites[0].applied, false);
+    assert.strictEqual(shiftStale.out, shiftPlain.out);
   });
   it('refuses shadowed bindings, stale reads, impure operands and crossing a call', () => {
     const shadow = run(PLUS.map(l => l.replace('char* pszRealmName;', 'int32_t nSelectedLine = 0; char* pszRealmName;')), 'opas(nSelectedLine,+,1)');
@@ -1263,15 +1280,43 @@ describe('vc8-form: opas', () => {
     const guard = run(BYTE.map(l => l.replace('if (byMinGrp && byMaxGrp && byMaxGrp >= byMinGrp)', 'if (byMaxGrp >= byMinGrp)')), 'opas(byMinGrp,-,1)');
     assert.match(guard.sites[0].why!, /nonzero guard/);
   });
-  it('refuses a lone shift, reversed address call and extra control flow', () => {
-    const lone = run(PAIR, 'opas(nX,>>,0xb)');
-    assert.match(lone.sites[0].why!, /single opas/);
-    const reverse = run(PAIR.map(l => l.replace('(&nX, &nY)', '(&nY, &nX)')), 'opas(nX,>>,0xb,nY,>>,0xb)');
-    assert.match(reverse.sites[0].why!, /both addresses in order/);
-    const branch = run(PAIR.map(l => l.replace('pDynamicPath->nTargetX', 'if (nX) return; pDynamicPath->nTargetX')), 'opas(nX,>>,0xb,nY,>>,0xb)');
-    assert.match(branch.sites[0].why!, /one call and precede two stores/);
-    const twoTargets = run(PAIR.map(l => l.replace('Path* pDynamicPath,', 'Path* pDynamicPath, Path* pOther,')
-      .replace('pDynamicPath->nTargetY', 'pOther->nTargetY')), 'opas(nX,>>,0xb,nY,>>,0xb)');
-    assert.match(twoTargets.sites[0].why!, /one pointer parameter/);
+  it('refuses a backward or bypassing jump around a guarded update', () => {
+    const variants = [
+      ['void dummy() {', '  int32_t v = Get();', 'again:', '  m();', '  if (v != -1) {', '    g(v + 1);', '    h(v + 1);', '  }', '  if (k()) goto again;', '}'],
+      ['void dummy() {', '  int32_t v = Get();', '  if (k()) goto in;', '  if (v != -1) {', '    g(v + 1);', 'in:', '    h(v + 1);', '  }', '}'],
+      BYTE.flatMap(s => s.includes('if (!pUnit)') ? ['  again: ;', s] : s.includes('for (nMinionIdx') ? [s, '    if (Retry()) goto again;'] : [s]),
+    ];
+    for (const source of variants) {
+      const form = source === variants[2] ? 'opas(byMinGrp,-,1)' : 'opas(v,+,1)';
+      const plain = run(source);
+      const tagged = run(source, form);
+      assert.strictEqual(tagged.sites[0].applied, false, source.join('\n'));
+      assert.match(tagged.sites[0].why!, /jump/);
+      assert.strictEqual(tagged.out, plain.out, source.join('\n'));
+    }
+  });
+  it('refuses a shift that is stored, read otherwise, escapes, loops, jumps or is out of range', () => {
+    const cases: Array<[string[], string, RegExp]> = [
+      [PAIR.map(l => l.replace('pDynamicPath->nTargetY', 'Use(nX); pDynamicPath->nTargetY')), 'opas(nX,>>,0xb)', /read after/],
+      [PAIR.map(l => l.replace('DRLG_WorldToScreenNoShift(&nX, &nY);', 'DRLG_WorldToScreenNoShift(&nX, &nY); nX = 1;')), 'opas(nX,>>,0xb)', /already assigned/],
+      [PAIR.map(l => l.replace('DRLG_WorldToScreenNoShift(&nX, &nY);', 'DRLG_WorldToScreenNoShift(&nX, &nY); nX++;')), 'opas(nX,>>,0xb)', /stepped/],
+      [[...PAIR.slice(0, -1), '  Flush();', '}'], 'opas(nX,>>,0xb)', /call after the update/],
+      [PAIR.map(l => l.replace('pDynamicPath->nTargetY', 'g_pPath->nTargetY')), 'opas(nX,>>,0xb)', /memory after the update/],
+      [PAIR.map(l => l.replace('void dummy(Path* pDynamicPath,', 'void dummy(Path* pDynamicPath, Path* q,').replace('DRLG_WorldToScreenNoShift(&nX, &nY);', 'DRLG_WorldToScreenNoShift(&nX, &nY); q = q + 1;')
+        .replace('pDynamicPath->nTargetY', 'q->nTargetY')), 'opas(nX,>>,0xb)', /memory after the update/],
+      [['void dummy(S* p, int32_t v) {', '  for (int i = 0; i < 4; i++) { p->a[i] = v >> 3; }', '}'], 'opas(v,>>,3)', /loop/],
+      [['void dummy(S* p, int32_t v) {', 'again:', '  p->a = v >> 3;', '  if (k()) goto again;', '}'], 'opas(v,>>,3)', /jump/],
+      [['void dummy(S* p, int32_t v) {', '  p->a = v >> 32;', '}'], 'opas(v,>>,32)', /1\.\.31/],
+      [['void dummy(S* p, int16_t v) {', '  p->a = v >> 3;', '}'], 'opas(v,>>,3)', /32-bit/],
+      [['void dummy(S* p, int32_t v) {', '  if (p) { int32_t v = 2; p->a = v >> 3; }', '}'], 'opas(v,>>,3)', /shadowed/],
+      [PAIR, 'opas(nX,>>,0xc)', /no nX >> 0xc read/],
+    ];
+    for (const [source, form, why] of cases) {
+      const plain = run(source);
+      const tagged = run(source, form);
+      assert.strictEqual(tagged.sites[0].applied, false, source.join('\n'));
+      assert.match(tagged.sites[0].why!, why, source.join('\n'));
+      assert.strictEqual(tagged.out, plain.out, source.join('\n'));
+    }
   });
 });

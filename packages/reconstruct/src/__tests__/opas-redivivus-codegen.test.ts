@@ -24,7 +24,7 @@ const programInfo: ProgramInfo = {
 type Case = {
   address: string; name: string; namespace: string; size: number;
   returnType: string; parameters: Array<[string, string]>; locals: Array<[string, string]>;
-  form: string; decompiled: string;
+  forms: string[]; decompiled: string;
 };
 
 const cases: Case[] = [
@@ -32,7 +32,7 @@ const cases: Case[] = [
     address: '00434700', name: 'StorePreferedRealmAgain', namespace: 'D2Launch::MainMenus', size: 90,
     returnType: 'BOOL', parameters: [['pControlMsg', 'D2ControlMsg *']],
     locals: [['pGatewayAccess', 'D2BNetGatewayAccessStr *'], ['nSelectedLine', 'int32_t'], ['pszRealmName', 'char *']],
-    form: 'opas(nSelectedLine,+,1)',
+    forms: ['opas(nSelectedLine,+,1)'],
     decompiled: `BOOL D2Launch::MainMenus::StorePreferedRealmAgain(D2ControlMsg *pControlMsg)
 {
   D2BNetGatewayAccessStr *pGatewayAccess;
@@ -59,7 +59,7 @@ const cases: Case[] = [
       ['pMonStatLine', 'D2MonStatsTxt *'], ['pCoordList', 'D2RoomCoordListStrc *'], ['pUnit', 'D2UnitStrc *'],
       ['nMinionCount', 'uint32_t'], ['nMinionIdx', 'int32_t'], ['byMinGrp', 'byte'], ['byMaxGrp', 'byte'],
     ],
-    form: 'opas(byMinGrp,-,1)',
+    forms: ['opas(byMinGrp,-,1)'],
     decompiled: `D2UnitStrc * D2Game::Monsters::Monsters::Spawn::MONSTER_SpawnMonsterGroup(SGAMEDATA *pGame,D2RoomStrc *pRoom,int32_t nClassId,int32_t nX,int32_t nY)
 {
   D2MonStatsTxt *pMonStatLine;
@@ -102,7 +102,7 @@ const cases: Case[] = [
     address: '00648b00', name: 'SetSP1Shifted', namespace: 'D2Common::PATH::DynamicPath', size: 43,
     returnType: 'void', parameters: [
       ['pDynamicPath', 'D2DynamicPathStrc *'], ['nX', 'int32_t'], ['nY', 'int32_t'],
-    ], locals: [], form: 'opas(nX,>>,0xb,nY,>>,0xb)',
+    ], locals: [], forms: ['opas(nX,>>,0xb)', 'opas(nY,>>,0xb)'],
     decompiled: `void D2Common::PATH::DynamicPath::SetSP1Shifted(D2DynamicPathStrc *pDynamicPath,int32_t nX,int32_t nY)
 {
   D2Common::Drlg::Drlg::Transform::DRLG_WorldToScreenNoShift(&nX,&nY);
@@ -122,10 +122,10 @@ function extract(c: Case, tag: 'current' | 'stale' | 'none'): ExtractedFunction 
     localVariables: c.locals.map(([name, dataType]) => ({ name, dataType, size: dataType === 'byte' ? 1 : 4, storage: 'EAX:4' })),
     callingConvention: '__stdcall', isThunk: false, isExternal: false, hasVarArgs: false,
     decompiled: c.decompiled, calledFunctions: [],
-    tags: tag === 'none' ? [] : [{
+    tags: tag === 'none' ? [] : c.forms.map(form => ({
       type: 'vc8form',
-      data: `${c.form};ev=0123456789;bh=${c.size}-00000000;dh=${tag === 'current' ? vc8formBodyHash(c.decompiled) : '00000000'}`,
-    }],
+      data: `${form};ev=0123456789;bh=${c.size}-00000000;dh=${tag === 'current' ? vc8formBodyHash(c.decompiled) : '00000000'}`,
+    })),
   };
 }
 

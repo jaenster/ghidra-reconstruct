@@ -225,10 +225,13 @@
  *   opas(V,op,K)         two guarded reads of one local `V op K` become one
  *                        `V op= K` before the first read. Only signed 32-bit `+ 1`
  *                        under `V != -1`, or byte `(uint8_t)(V - 1)` under a
- *                        nonzero guard, is admitted. The paired form
- *                        `opas(X,>>,K,Y,>>,K)` writes both parameter shifts after
- *                        an `&X,&Y` call and before either short store, in X,Y order.
- *                        Shadowing, stale reads and crossed effects refuse it.
+ *                        nonzero guard, is admitted. `opas(V,>>,K)`: V a 32-bit
+ *                        integer local or parameter never stored, every later read
+ *                        `V >> K` with K in 1..31; `V >>= K;` goes after the last
+ *                        statement of the reads' block that names V (after updates
+ *                        already there, so tags keep their order). Shadowing, stale
+ *                        reads, crossed effects, any goto or label, reads in a loop,
+ *                        and memory that may be an addressed V refuse it.
  *   swmerge(V[,i])       the range tests the compiler wrote around a switch on V are merged
  *                        back into it: `if (V <= U) { if (V != K) { switch (V) { ... default:
  *                        L } } } else { if (c1) L ... if (cn) L }`, L the default's leaving
@@ -474,14 +477,14 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
       return { op: 'roundup', name: args[0], ...(args.length === 2 ? { param: args[1] } : {}) };
     }
     case 'opas': {
-      if (anchor || (args.length !== 3 && args.length !== 6)) return undefined;
+      if (anchor || args.length !== 3) return undefined;
       const updates = [] as Array<{ name: string; operator: '+' | '-' | '>>'; constant: string }>;
       for (let j = 0; j < args.length; j += 3) {
         if (!/^[A-Za-z_]\w*$/.test(args[j]) || !['+', '-', '>>'].includes(args[j + 1])
           || !/^(?:0x[0-9a-fA-F]+|[1-9]\d*)$/.test(args[j + 2])) return undefined;
         updates.push({ name: args[j], operator: args[j + 1] as '+' | '-' | '>>', constant: args[j + 2] });
       }
-      return new Set(updates.map(x => x.name)).size === updates.length ? { op: 'opas', updates } : undefined;
+      return { op: 'opas', updates };
     }
     case 'acc': {
       // `acc(E)`, `acc(E,i)`, `acc(E,bare)`, `acc(E,i,bare)`.
@@ -3716,45 +3719,13 @@ function doOpas(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'opas' }>): void {
   const convertedIds = (e: ASTNode, u: OpasUpdate): Identifier[] => [...walk(e)]
     .filter(x => isId(x.node, u.name)).map(x => x.node as Identifier);
 
-  if (f.updates.length === 2) {
-    const [x, y] = f.updates;
-    if (x.operator !== '>>' || y.operator !== '>>' || BigInt(x.constant) !== 11n || BigInt(y.constant) !== 11n) refuse('paired opas requires two >> 0xb shifts');
-    binding(x, 'param', 'int32_t');
-    binding(y, 'param', 'int32_t');
-    const s = fn.body!.statements;
-    if (s.length !== 3 || s[0].kind !== NodeKind.ExprStmt) refuse('paired shifts must follow one call and precede two stores');
-    const call = unparen((s[0] as ExprStmt).expression);
-    if (call.kind !== NodeKind.CallExpr || !calleeName((call as CallExpr).callee)?.endsWith('DRLG_WorldToScreenNoShift')
-      || (call as CallExpr).arguments.length !== 2) refuse('no matching coordinate call');
-    const args = (call as CallExpr).arguments.map(unparen);
-    if (!args.every((a, i) => a.kind === NodeKind.UnaryExpr && (a as UnaryExpr).operator === '&'
-      && isId(unparen((a as UnaryExpr).operand), i === 0 ? x.name : y.name))) refuse('coordinate call does not take both addresses in order');
-    const stores = [storeOf(s[1]), storeOf(s[2])];
-    if (stores.some(st => !st || st.operator !== '=')) refuse('no two plain coordinate stores');
-    const targets = stores.map(st => unparen(st!.left));
-    if (targets.some(t => t.kind !== NodeKind.MemberExpr || !(t as MemberExpr).isArrow)
-      || !isId((targets[0] as MemberExpr).member, 'nTargetX') || !isId((targets[1] as MemberExpr).member, 'nTargetY')
-      || !isId(unparen((targets[0] as MemberExpr).object))
-      || !isId(unparen((targets[1] as MemberExpr).object), (unparen((targets[0] as MemberExpr).object) as Identifier).name)
-      || !fn.parameters.some(p => isId((p as unknown as { name?: Identifier | null }).name,
-        (unparen((targets[0] as MemberExpr).object) as Identifier).name))) refuse('coordinate targets are not fields of one pointer parameter');
-    const converted = new Set<ASTNode>();
-    const casts: CStyleCastExpr[] = [];
-    for (const [j, u] of [x, y].entries()) {
-      const cast = unparen(stores[j]!.right);
-      if (cast.kind !== NodeKind.CStyleCastExpr || !['short', 'shortint', 'int16_t'].includes(text((cast as CStyleCastExpr).type))
-        || !matches((cast as CStyleCastExpr).expression, u)) refuse(`${u.name} is not narrowed immediately after its shift`);
-      for (const id of convertedIds((cast as CStyleCastExpr).expression, u)) converted.add(id);
-      casts.push(cast as CStyleCastExpr);
-    }
-    stale([x.name, y.name], s[1], converted);
-    for (const [j, u] of [x, y].entries()) casts[j].expression = { kind: NodeKind.Identifier, name: u.name } as Identifier;
-    s.splice(1, 0, ...parseStmts(`${x.name} >>= ${x.constant}; ${y.name} >>= ${y.constant};`));
-    return;
-  }
-
-  if (f.updates.length !== 1) refuse('opas needs one update or a paired shift');
+  // A jump can carry control back over the update (the guard and the uses then see the
+  // updated value) or past it into the uses; neither is value-preserving.
+  if ([...walk(fn.body!)].some(x => x.node.kind === NodeKind.GotoStmt || x.node.kind === NodeKind.LabelStmt))
+    refuse('a jump may cross the update');
+  if (f.updates.length !== 1) refuse('opas takes one update');
   const u = f.updates[0];
+  if (u.operator === '>>') return opasShift(fn, u, matches, stale);
   const plus = u.operator === '+' && BigInt(u.constant) === 1n;
   const minus = u.operator === '-' && BigInt(u.constant) === 1n;
   if (!plus && !minus) refuse('single opas supports only + 1 or byte - 1');
@@ -3838,8 +3809,6 @@ function doOpas(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'opas' }>): void {
     if (!minus || b !== fn.body || declarationStatement?.kind !== NodeKind.DeclStmt
       || ancestry.get(declarationStatement) !== b || b.statements.indexOf(declarationStatement as Statement) >= i)
       refuse('uses are not in one guarded arm');
-    if ([...walk(fn.body!)].some(x => x.node.kind === NodeKind.GotoStmt || x.node.kind === NodeKind.LabelStmt))
-      refuse('a jump may bypass the flattened byte guard');
     const declIndex = b.statements.indexOf(declarationStatement as Statement);
     const prior = b.statements.slice(declIndex + 1, i);
     const scalarByteGuard = (expression: Expression, guardIndex: number): boolean => {
@@ -3876,6 +3845,92 @@ function doOpas(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'opas' }>): void {
   stale([u.name], b.statements[i], new Set(ids));
   for (const slot of slots) put(slot, { kind: NodeKind.Identifier, name: u.name } as Identifier);
   b.statements.splice(i, 0, ...parseStmts(`${u.name} ${u.operator}= ${u.constant};`));
+}
+
+/**
+ * `opas(V,>>,K)`: V, one 32-bit integer local or parameter that is never stored, is read
+ * only as `V >> K` from some statement of a block on. `V >>= K;` goes right after the last
+ * statement of that block that names V before those reads (after any updates already
+ * written there, so two tags keep their order), or before the first read when none does.
+ * When V's address is taken, nothing from the update on may call or reach memory other
+ * than through an unmodified parameter, since that memory could be V.
+ */
+function opasShift(fn: FunctionDecl, u: OpasUpdate, matches: (e: Expression, u: OpasUpdate) => boolean,
+  stale: (names: string[], first: Statement, converted: Set<ASTNode>) => void): void {
+  const k = BigInt(u.constant);
+  if (k < 1n || k > 31n) refuse('the shift count is not 1..31');
+  const paramName = (p: unknown) => (p as { name?: Identifier | null }).name;
+  const params = fn.parameters.filter(p => isId(paramName(p), u.name));
+  const decls = [...walk(fn.body!)].filter(x => x.node.kind === NodeKind.VariableDecl && (x.node as VariableDecl).name.name === u.name);
+  if (params.length + decls.length !== 1) refuse(`${u.name} is shadowed or not one variable`);
+  const type = params.length ? text((params[0] as unknown as { type: TypeNode }).type) : text(soleDecl(fn, u.name).type);
+  if (!['int', 'signedint', 'int32_t', 'unsignedint', 'uint32_t'].includes(type)) refuse(`${u.name} is not a 32-bit integer`);
+  for (const { node } of walk(fn.body!)) {
+    if (node.kind === NodeKind.AssignExpr && isId(unparen((node as AssignExpr).left), u.name)) refuse(`${u.name} is already assigned`);
+    if ((node.kind === NodeKind.UnaryExpr || node.kind === NodeKind.PostfixExpr) && ['++', '--'].includes((node as UnaryExpr).operator)
+      && isId(unparen((node as UnaryExpr).operand), u.name)) refuse(`${u.name} is stepped`);
+    if ((node.kind === NodeKind.SizeofExpr || node.kind === NodeKind.InitListExpr) && mentions(node, u.name)) refuse(`${u.name} is in a sizeof or brace initializer`);
+  }
+
+  // Each read `V >> K` with the slot of its outermost parentheses.
+  const slots = new Map<ASTNode, Slot | undefined>();
+  for (const { node, slot } of walk(fn.body!)) slots.set(node, slot);
+  const ancestry = parentsOf(fn);
+  const hits: Array<{ node: ASTNode; slot: Slot }> = [];
+  for (const { node } of walk(fn.body!)) {
+    if (node.kind !== NodeKind.BinaryExpr || !matches(node as Expression, u)) continue;
+    let outer: ASTNode = node;
+    while (ancestry.get(outer)?.kind === NodeKind.ParenExpr) outer = ancestry.get(outer)!;
+    const slot = slots.get(outer);
+    if (!slot) refuse('a read has no slot');
+    hits.push({ node, slot: slot! });
+  }
+  if (!hits.length) refuse(`no ${u.name} >> ${u.constant} read`);
+
+  // The innermost block holding every read, and the first of its statements that holds one.
+  const chain = (n: ASTNode): ASTNode[] => { const out: ASTNode[] = []; for (let p = ancestry.get(n); p; p = ancestry.get(p)) out.push(p); return out; };
+  const common = chain(hits[0].node).filter(p => p.kind === NodeKind.CompoundStmt && hits.every(h => chain(h.node).includes(p)));
+  const b = common[0] as CompoundStmt | undefined;
+  if (!b) refuse('the reads share no block');
+  for (let p: ASTNode | undefined = b; p && p !== fn; p = ancestry.get(p)) {
+    if ([NodeKind.WhileStmt, NodeKind.ForStmt, NodeKind.DoWhileStmt, NodeKind.SwitchStmt].includes(p.kind)) refuse('the reads sit in a loop or switch');
+  }
+  const indexOf = (n: ASTNode): number => { let c = n; while (ancestry.get(c) !== b) c = ancestry.get(c)!; return b!.statements.indexOf(c as Statement); };
+  const i = Math.min(...hits.map(h => indexOf(h.node)));
+  let at = i;
+  for (let j = i - 1; j >= 0; j--) if (mentions(b!.statements[j], u.name)) { at = j + 1; break; }
+  const isUpdate = (s: Statement): boolean => {
+    const st = storeOf(s);
+    return !!st && st.operator !== '=' && isId(unparen(st.left)) && unparen(st.right).kind === NodeKind.IntegerLiteral;
+  };
+  while (at < i && isUpdate(b!.statements[at])) at++;
+  const first = b!.statements[at];
+
+  const converted = new Set<ASTNode>(hits.flatMap(h => [...walk(h.node)].filter(x => isId(x.node, u.name)).map(x => x.node)));
+  stale([u.name], first, converted);
+  if (addressTaken(fn, u.name)) {
+    const steady = (e: Expression): boolean => {
+      let x = unparen(e);
+      while (x.kind === NodeKind.CStyleCastExpr) x = unparen((x as CStyleCastExpr).expression);
+      if (!isId(x) || x.name === u.name || !fn.parameters.some(p => isId(paramName(p), (x as Identifier).name))) return false;
+      const name = x.name;
+      return !addressTaken(fn, name) && ![...walk(fn.body!)].some(y => (y.node.kind === NodeKind.AssignExpr && isId(unparen((y.node as AssignExpr).left), name))
+        || ((y.node.kind === NodeKind.UnaryExpr || y.node.kind === NodeKind.PostfixExpr) && ['++', '--'].includes((y.node as UnaryExpr).operator)
+          && isId(unparen((y.node as UnaryExpr).operand), name)));
+    };
+    let after = false;
+    for (const { node } of walk(fn.body!)) {
+      if (node === first) after = true;
+      if (!after) continue;
+      if (node.kind === NodeKind.CallExpr) refuse(`a call after the update may read ${u.name} through its address`);
+      if (node.kind === NodeKind.MemberExpr && (node as MemberExpr).isArrow && !steady((node as MemberExpr).object as Expression)
+        || node.kind === NodeKind.UnaryExpr && (node as UnaryExpr).operator === '*' && !steady((node as UnaryExpr).operand)
+        || node.kind === NodeKind.SubscriptExpr)
+        refuse(`memory after the update may be ${u.name}`);
+    }
+  }
+  for (const h of hits) put(h.slot, { kind: NodeKind.Identifier, name: u.name } as Identifier);
+  b!.statements.splice(at, 0, ...parseStmts(`${u.name} >>= ${u.constant};`));
 }
 
 const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op: K }>) => void } = {
