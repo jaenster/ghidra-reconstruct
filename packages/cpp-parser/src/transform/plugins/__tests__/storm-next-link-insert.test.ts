@@ -105,6 +105,35 @@ describe('storm-next-link insert side', () => {
     const update = templated.replace(/head->m_next = node;/g, 'head->m_next = next;');
     assert.equal(run(update), plain(update));
   });
+  it('refuses a sum through a non-byte pointer, which scales the offset', () => {
+    // (T**)next + offset adds offset * 4: not NextLink's byte sum.
+    const scaled = templated.replace('*(TSLink<T>**)(next + offset) = slot;', '*(TSLink<T>**)((TSLink<T>**)next + offset) = slot;');
+    assert.equal(run(scaled), plain(scaled));
+    const wordPtr = storm.replace('(next + (char*)offset)', '(next + offset)');
+    assert.equal(run(wordPtr), plain(wordPtr));
+    const intPtr = storm.replace('(next + (char*)offset)', '(next + (int*)offset)');
+    assert.equal(run(intPtr), plain(intPtr));
+    const fallback = storm.replace('(char*)head - head->pPrevLink->pNext', '(int*)head - head->pPrevLink->pNext');
+    assert.equal(run(fallback), plain(fallback));
+  });
+  it('accepts the next word as Ghidra types it, unsigned, when its sign test reads it signed', () => {
+    const unsigned = storm.replace('intptr_t next;', 'uint32_t next;').replace('if (next < 0)', 'if ((int)next < 0)')
+      .replace('(next + (char*)offset)', '(next + (int)offset)').replace('(char*)head - head', '(int)head - head');
+    const out = run(unsigned);
+    assert.match(out, /\*\(StormLinkStrc\*\*\)D2_StormNextLink\(head, \(intptr_t\)\*pOffset\) = slot;/);
+    // Read unsigned, the test is never true: not the shape.
+    const unsignedTest = storm.replace('intptr_t next;', 'uint32_t next;');
+    assert.equal(run(unsignedTest), plain(unsignedTest));
+  });
+  it('drops the declarations of the locals it removes, and retypes nothing', () => {
+    const out = run(templated);
+    assert.doesNotMatch(out, /intptr_t offset;|intptr_t next;|\bint offset;/);
+    // Still read elsewhere: the declaration stays.
+    const kept = run(templated.replace('slot->m_prevlink = head;', 'g(offset);\n  slot->m_prevlink = head;'));
+    assert.match(kept, /D2_StormNextLink\(head, off\)/);
+    assert.match(kept, /intptr_t offset;/);
+    assert.doesNotMatch(kept, /intptr_t next;/);
+  });
   it('refuses narrowing casts in a sign test or negative slot address', () => {
     const sign = templated.replace('if (next < 0)', 'if ((intptr_t)(short)next < 0)');
     assert.equal(run(sign), plain(sign));

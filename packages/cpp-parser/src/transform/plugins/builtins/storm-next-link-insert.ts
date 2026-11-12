@@ -1,20 +1,22 @@
 /** The insert-side, flattened TSLink::NextLink(offset) in Storm LinkNode. */
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
-  ASTNode, AssignExpr, BinaryExpr, CStyleCastExpr, CompoundStmt, ExprStmt, Expression,
+  ASTNode, AssignExpr, BinaryExpr, CStyleCastExpr, CompoundStmt, DeclStmt, ExprStmt, Expression,
   FunctionDecl, Identifier, IfStmt, IntegerLiteralExpr, MemberExpr, ReturnStmt, Statement,
-  UnaryExpr,
+  UnaryExpr, VariableDecl,
 } from '../../../ast/nodes.js';
 import { Expr, Type } from '../../../ast/factory.js';
 import { getChildren, traverseAST } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, cloneNode, type Transformer } from '../../transformer.js';
 import { createExprShape } from './expr-shape.js';
 import { localTypesOf } from './compare-form.js';
-import { bareName, shapeOfNode, unwrapParens, type TypedefResolver } from './call-arg-cast.js';
+import { bareName, shapeOfNode, shapeOfSpelling, unwrapParens, type TypeShape, type TypedefResolver } from './call-arg-cast.js';
 import type { StormNextLinkOptions } from './storm-next-link.js';
 
 const wordSigned = new Set(['int', 'long', 'intptr_t', 'ssize_t']);
-const wordInteger = new Set([...wordSigned, 'unsigned int', 'unsigned long', 'uintptr_t', 'size_t', 'uint32_t', 'int32_t']);
+const wordInteger = new Set([...wordSigned, 'unsigned int', 'unsigned long', 'uint', 'uintptr_t', 'size_t', 'uint32_t', 'int32_t']);
+/** Pointee types one byte wide: adding an integer to such a pointer adds that many bytes. */
+const byteBase = new Set(['char', 'signed char', 'unsigned char', 'uchar', 'uint8_t', 'int8_t', 'byte', 'BYTE', 'undefined1']);
 const meta = new Set(['location', 'leadingTrivia', 'trailingTrivia', 'ghidraInfo']);
 const unparen = (e: Expression): Expression => unwrapParens(e);
 const uncast = (e: Expression): Expression => {
@@ -73,7 +75,7 @@ const slotStore = (s: Statement): SlotStore | null => {
 export function createStormNextLinkInsertTransformer(options: StormNextLinkOptions = {}): Transformer {
   const offsets = options.structFieldOffsets ?? {};
   const resolve: TypedefResolver = name => options.typedefTargets?.[name];
-  const safeCasts = (e: Expression): boolean => {
+  const castsAreWords = (e: Expression): boolean => {
     for (const n of traverseAST(e)) {
       if (n.kind !== NodeKind.CStyleCastExpr) continue;
       const t = shapeOfNode((n as CStyleCastExpr).type, 0, resolve);
@@ -82,14 +84,16 @@ export function createStormNextLinkInsertTransformer(options: StormNextLinkOptio
     return true;
   };
   const keyType = (s: string) => s.replace(/\s+/g, '').replace(/(^|[<,])::/g, '$1').replace(/([<,])_(?=\d)/g, '$1-');
+  // A struct table keyed by Ghidra's spelling of a template name (no space after a comma, no
+  // leading `::`), found from the parser's spelling.
+  const tableOf = <V>(tables: Record<string, Record<string, V>>, base: string): Record<string, V> | undefined =>
+    [base, base.replace(/^::/, ''), bareName(base)].map(k => tables[k]).find(Boolean)
+      ?? Object.entries(tables).find(([k]) => keyType(k) === keyType(base))?.[1];
   const fieldOffset = (m: MemberExpr, shapeOf: ReturnType<typeof createExprShape>): number | null => {
     if (!m.isArrow || m.member.kind !== NodeKind.Identifier) return null;
     const t = shapeOf(m.object);
     if (!t || t.stars !== 1) return null;
-    const candidates = [t.base, t.base.replace(/^::/, ''), bareName(t.base)];
-    const table = candidates.map(k => offsets[k]).find(Boolean)
-      ?? Object.entries(offsets).find(([k]) => keyType(k) === keyType(t.base))?.[1];
-    return table?.[(m.member as Identifier).name] ?? null;
+    return tableOf(offsets, t.base)?.[(m.member as Identifier).name] ?? null;
   };
 
   return createTransformer({
@@ -101,15 +105,50 @@ export function createStormNextLinkInsertTransformer(options: StormNextLinkOptio
         structFields: options.structFields ?? {}, fieldTypes: options.fieldTypes ?? {},
         returnTypes: options.functionReturnTypes ?? {}, resolve,
       });
-      const signed = (e: Expression): boolean => {
+      const operandShape = (e: Expression): TypeShape | null => {
+        const t = shapeOf(e);
+        if (t) return t;
+        const x = unparen(e);
+        if (x.kind !== NodeKind.MemberExpr) return null;
+        const m = x as MemberExpr;
+        if (m.member.kind !== NodeKind.Identifier) return null;
+        const o = operandShape(m.object);
+        if (!o || o.stars !== (m.isArrow ? 1 : 0)) return null;
+        const spelling = tableOf(options.structFields ?? {}, o.base)?.[(m.member as Identifier).name];
+        if (!spelling) return null;
+        // shapeOfSpelling leaves template names out; a template's pointer is still its stars.
+        const stars = /\**\s*$/.exec(spelling)![0].replace(/\s/g, '').length;
+        return shapeOfSpelling(spelling, resolve)
+          ?? (/[<>]/.test(spelling) ? { base: spelling.replace(/[\s*]*$/, '').trim(), stars, isConst: false } : null);
+      };
+      // NextLink adds and subtracts byte offsets. A sum or difference with a pointer operand
+      // scales by the pointee size, so every such operand must point at bytes; an operand of
+      // unknown type is refused.
+      const byteSums = (e: Expression): boolean => {
+        for (const n of traverseAST(e)) {
+          if (n.kind !== NodeKind.BinaryExpr) continue;
+          const b = n as BinaryExpr;
+          if (b.operator !== '+' && b.operator !== '-') continue;
+          for (const side of [b.left, b.right]) {
+            const t = operandShape(side);
+            if (!t) return false;
+            if (t.stars > 0 && !(t.stars === 1 && byteBase.has(t.base))) return false;
+          }
+        }
+        return true;
+      };
+      const safeCasts = (e: Expression): boolean => castsAreWords(e) && byteSums(e);
+      // The next word: Ghidra types it signed or unsigned, a 32-bit integer either way. Its sign
+      // test must read it signed (signTest), and `~` and `+` give the same 32 bits on both.
+      const word = (e: Expression): boolean => {
         const n = nameOf(e);
         const t = n && locals.get(n);
         const s = t && shapeOfNode(t, 0, resolve);
-        return !!s && s.stars === 0 && wordSigned.has(s.base);
+        return !!s && s.stars === 0 && wordInteger.has(s.base);
       };
       const headMember = (e: Expression, offset: number): MemberExpr | null => {
         const x = unparen(e);
-        return x.kind === NodeKind.MemberExpr && fieldOffset(x as MemberExpr, shapeOf) === offset ? x as MemberExpr : null;
+        return x.kind === NodeKind.MemberExpr && fieldOffset(x as MemberExpr, operandShape) === offset ? x as MemberExpr : null;
       };
       const sameHead = (a: Expression, b: Expression): boolean => safeCasts(a) && safeCasts(b) && same(uncast(a), uncast(b));
       const signTest = (s: Statement, local: string): IfStmt | null => {
@@ -139,7 +178,7 @@ export function createStormNextLinkInsertTransformer(options: StormNextLinkOptio
         const off = assignment(s[i]), next = assignment(s[i + 1]);
         const offName = off && nameOf(off.left), nextName = next && nameOf(next.left);
         if (!off || !next || !offName || !nextName || offName === nextName
-          || !locals.has(offName) || !signed(next!.left) || !pure(off.right) || !pure(next.right)) return null;
+          || !locals.has(offName) || !word(next!.left) || !pure(off.right) || !pure(next.right)) return null;
         const removedLocals = new Set([offName, nextName]);
         const readsRemoved = (e: Expression): boolean => {
           const visit = (n: ASTNode): boolean => {
@@ -190,9 +229,11 @@ export function createStormNextLinkInsertTransformer(options: StormNextLinkOptio
         const helper = Expr.call('D2_StormNextLink', [cloneNode(head), arg]);
         const store = Expr.assign(Expr.unary('*', Expr.cast(cloneNode(negStore.cast.type), helper)), cloneNode(negStore.value));
         const stmt = updateNode(neg[0] as ExprStmt, { expression: store } as Partial<ExprStmt>);
+        removed.add(offName).add(nextName);
         return [stmt, neg[1], neg[2]];
       };
 
+      const removed = new Set<string>();
       const replacements = new Map<CompoundStmt, CompoundStmt>();
       for (const node of traverseAST(fn.body)) {
         if (node.kind !== NodeKind.CompoundStmt) continue;
@@ -223,7 +264,42 @@ export function createStormNextLinkInsertTransformer(options: StormNextLinkOptio
         }
         return copy ?? n;
       };
-      const body = rebuild(fn.body) as CompoundStmt;
+      let body = rebuild(fn.body) as CompoundStmt;
+
+      // A removed local nothing reads or writes any more loses its bare declaration too.
+      const notUses = new Set<ASTNode>();
+      for (const n of traverseAST(body)) {
+        if (n.kind === NodeKind.VariableDecl) notUses.add((n as VariableDecl).name);
+        // A field name is not a use of an equally named local.
+        if (n.kind === NodeKind.MemberExpr) notUses.add((n as MemberExpr).member);
+      }
+      const used = new Set<string>();
+      for (const n of traverseAST(body)) {
+        if (n.kind === NodeKind.Identifier && !notUses.has(n)) used.add((n as Identifier).name);
+      }
+      const dead = (st: Statement): boolean => {
+        if (st.kind !== NodeKind.DeclStmt) return false;
+        const ds = (st as DeclStmt).declarations;
+        if (ds.length !== 1 || ds[0].kind !== NodeKind.VariableDecl) return false;
+        const v = ds[0] as VariableDecl;
+        return removed.has(v.name.name) && !used.has(v.name.name) && !v.initializer;
+      };
+      const prune = (c: CompoundStmt): CompoundStmt => {
+        let changed = false;
+        const out: Statement[] = [];
+        for (const st of c.statements) {
+          if (dead(st)) { changed = true; continue; }
+          out.push(st);
+        }
+        return changed ? updateNode(c, { statements: out } as Partial<CompoundStmt>) : c;
+      };
+      replacements.clear();
+      for (const n of traverseAST(body)) {
+        if (n.kind !== NodeKind.CompoundStmt) continue;
+        const p = prune(n as CompoundStmt);
+        if (p !== n) replacements.set(n as CompoundStmt, p);
+      }
+      if (replacements.size) body = rebuild(body) as CompoundStmt;
       return updateNode(fn, { body } as Partial<FunctionDecl>);
     },
   });
