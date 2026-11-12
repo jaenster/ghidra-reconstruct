@@ -6,7 +6,8 @@
   "main": "./dist/main.js",
   "types": "./dist/main.d.ts",
   "bin": {
-    "hand-follow": "./dist/hand-follow/cli.js"
+    "hand-follow": "./dist/hand-follow/cli.js",
+    "proposal-render": "./dist/proposal-apply/cli.js"
   },
   "exports": {
     ".": {

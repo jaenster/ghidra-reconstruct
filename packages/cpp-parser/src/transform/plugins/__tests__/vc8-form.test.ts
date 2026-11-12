@@ -22,7 +22,11 @@ describe('vc8-form: parsing', () => {
   it('reads each op and its arguments', () => {
     assert.deepStrictEqual(parseVc8Form('seq(a.x,a.y)'), { op: 'seq', targets: ['a.x', 'a.y'] });
     assert.deepStrictEqual(parseVc8Form('cache(p->q[f(a, b)],n,T*,@x)'), { op: 'cache', expr: 'p->q[f(a, b)]', name: 'n', type: 'T*', anchor: 'x' });
+    assert.deepStrictEqual(parseVc8Form('cache(&pThis->tSlotListArray,pArray,TSGrowableArray<TSExplicitList<SGAMEDATA, -572662307>>*,@call)'),
+      { op: 'cache', expr: '&pThis->tSlotListArray', name: 'pArray', type: 'TSGrowableArray<TSExplicitList<SGAMEDATA, -572662307>>*', anchor: 'call' });
     assert.deepStrictEqual(parseVc8Form('cache(g,p)'), { op: 'cache', expr: 'g', name: 'p' });
+    assert.deepStrictEqual(parseVc8Form('cache(p->x < 4 ? p->y : p->z,n,int)'),
+      { op: 'cache', expr: 'p->x < 4 ? p->y : p->z', name: 'n', type: 'int', anchor: undefined });
     assert.deepStrictEqual(parseVc8Form('guards(2)'), { op: 'guards', split: 2, index: 1 });
     assert.deepStrictEqual(parseVc8Form('own(v,DWORD,nBytes)'), { op: 'own', name: 'v', type: 'DWORD', rename: 'nBytes' });
   });
@@ -31,6 +35,7 @@ describe('vc8-form: parsing', () => {
     assert.strictEqual(parseVc8Form('fold(a,b)'), undefined);
     assert.strictEqual(parseVc8Form('seq(a)'), undefined);
     assert.strictEqual(parseVc8Form('guards(x)'), undefined);
+    assert.strictEqual(parseVc8Form('cache(x,y,int,bad)'), undefined);
   });
 });
 
@@ -206,6 +211,42 @@ describe('vc8-form: fold', () => {
 });
 
 describe('vc8-form: cache', () => {
+  it('anchors an address cache before its unique member call with a template-comma type', () => {
+    const form = 'cache(&pThis->tSlotListArray,pArray,TSGrowableArray<TSExplicitList<SGAMEDATA, -572662307>>*,@call)';
+    const { out, sites } = run([
+      'void f(H* pThis) {',
+      '  pThis->InternalClear(1);',
+      '  pThis->tSlotListArray.Destructor();',
+      '  pThis->tSlotListArray.m_alloc = 0;',
+      '  pThis->tSlotListArray.m_count = 0;',
+      '}',
+    ], form);
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.ok(out.includes('pThis->InternalClear(1); TSGrowableArray<TSExplicitList<SGAMEDATA, -572662307>>* pArray = &pThis->tSlotListArray; pArray->Destructor(); pArray->m_alloc = 0; pArray->m_count = 0;'), out);
+  });
+  it('anchors the equivalent static call that passes the member address', () => {
+    const { out, sites } = run(['void f(H* pThis) {', '  TSGrowableArray<TSExplicitList<SGAMEDATA, -572662307>>::Destructor(&pThis->tSlotListArray);', '  pThis->tSlotListArray.m_alloc = 0;', '}'],
+      'cache(&pThis->tSlotListArray,pArray,TSGrowableArray<TSExplicitList<SGAMEDATA, -572662307>>*,@call)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.match(out, /pArray = &pThis->tSlotListArray; TSGrowableArray<.*>::Destructor\(.*pArray.*\); pArray->m_alloc = 0/);
+  });
+  it('refuses @call when no call reads the member address', () => {
+    const { sites } = run(['void f(H* pThis) {', '  g();', '  pThis->tSlotListArray.m_alloc = 0;', '}'],
+      'cache(&pThis->tSlotListArray,pArray,TSGrowableArray<TSExplicitList<SGAMEDATA, -572662307>>*,@call)');
+    assert.strictEqual(sites[0].applied, false);
+    assert.match(sites[0].why ?? '', /found 0/);
+  });
+  it('refuses @call when two calls read the same member address', () => {
+    const { sites } = run(['void f(H* pThis) {', '  g(&pThis->tSlotListArray);', '  h(&pThis->tSlotListArray);', '}'],
+      'cache(&pThis->tSlotListArray,pArray,TSGrowableArray<TSExplicitList<SGAMEDATA, -572662307>>*,@call)');
+    assert.strictEqual(sites[0].applied, false);
+    assert.match(sites[0].why ?? '', /found 2/);
+  });
+  it('refuses moving a side-effecting expression ahead of a call', () => {
+    const { sites } = run(['void f() {', '  g();', '  h(f());', '}'], 'cache(f(),x,int,@call)');
+    assert.strictEqual(sites[0].applied, false);
+    assert.match(sites[0].why ?? '', /pure address of a member/);
+  });
   // Q33_KillAnyaMonsterTimer 00589540: the quest-specific pointer in a local of its own.
   it('hoists a new local before the first statement that reads it', () => {
     const { out, sites } = run([
@@ -461,6 +502,48 @@ describe('vc8-form: width', () => {
     ], 'width(b,int)');
     assert.ok(sites[0].applied, sites[0].why);
     assert.ok(out.startsWith('void f(int c) { int b; b = false;'), out);
+  });
+  // SPELLSEL_DrawTabHighlight 004ab310: the original keeps the hover flags in 32-bit slots.
+  it('widens a bool to BOOL whose stores are comparisons and literals', () => {
+    const { out, sites } = run([
+      'void f(int y, int lo) {', '  bool b;', '  b = false;', '  if (y >= lo) {', '    b = y < lo + 4;', '  }', '  if (!b) {', '    return;', '  }', '  g();', '}',
+    ], 'width(b,BOOL)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.strictEqual(out, 'void f(int y, int lo) { BOOL b; b = false; if (y >= lo) { b = y < lo + 4; } if (!b) { return; } g(); }');
+  });
+  it('widens a bool stored any value when every read is a truth test', () => {
+    const { out, sites } = run(['void f(int n) {', '  bool b;', '  b = n;', '  if (b && n != 3) {', '    g();', '  }', '}'], 'width(b,BOOL)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.strictEqual(out, 'void f(int n) { BOOL b; b = n; if (b && n != 3) { g(); } }');
+  });
+  // A bool normalises a store to 0/1, so its low byte is not the stored value's.
+  it('refuses a bool widened when a store can exceed 0/1 and a read keeps the byte', () => {
+    const src = ['void f(int n) {', '  bool b;', '  b = n;', '  Send((uint8_t)b);', '}'];
+    const { out, sites } = run(src, 'width(b,BOOL)');
+    assert.strictEqual(sites[0].applied, false);
+    assert.match(sites[0].why!, /reads more than whether it is zero/);
+    assert.strictEqual(out, flat(src.join(' ')));
+  });
+  it('refuses a bool widened from a float, which truncates to zero as an int', () => {
+    const { sites } = run(['void f(float x) {', '  bool b;', '  b = x;', '  if (b) {', '    g();', '  }', '}'], 'width(b,BOOL)');
+    assert.strictEqual(sites[0].applied, false);
+    assert.match(sites[0].why!, /no 32-bit integer or pointer/);
+  });
+  it('refuses a bool widened and read as a value after any store', () => {
+    const { sites } = run(['int f(int n) {', '  bool b;', '  b = n;', '  return b + 1;', '}'], 'width(b,BOOL)');
+    assert.strictEqual(sites[0].applied, false);
+  });
+  it('refuses a narrowing to bool whose read keeps the low byte', () => {
+    const { sites } = run(['void f() {', '  int n;', '  n = Read();', '  if ((uint8_t)n != 0) {', '    g();', '  }', '}'], 'width(n,bool)');
+    assert.strictEqual(sites[0].applied, false);
+  });
+  // SStrTokenize 00413b80: a char the original holds in EBX (`xor ebx,ebx` before the byte load).
+  it('widens a char whose stores fit and whose reads are compares', () => {
+    const { out, sites } = run([
+      'void f(char k, char e) {', '  char c;', '  c = k;', '  while (c != e) {', '    c = e;', '  }', '}',
+    ], 'width(c,int)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.strictEqual(out, 'void f(char k, char e) { int c; c = k; while (c != e) { c = e; } }');
   });
   it('keeps a widening whose stores come from locals of the old type', () => {
     const { sites } = run(['int f(uint16_t a) {', '  uint16_t w;', '  w = a;', '  return w;', '}'], 'width(w,uint32_t)');

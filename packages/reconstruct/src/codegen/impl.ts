@@ -568,7 +568,7 @@ export interface ThunkForward {
 
 export interface ImplGenContext {
   /** Architecture and pointer width of the extracted binary, for target-specific forms. */
-  targetArchitecture?: string;
+  targetLanguageId?: string;
   targetPointerSize?: number;
   /**
    * Thunk address → the forwarder's callee. Absent for a thunk whose target
@@ -3495,6 +3495,7 @@ function transformDecompiledCode(
         };
         perPluginOptions['compiler-literal'] = context._compilerLiteralOptions;
       }
+      perPluginOptions['post-strided-counted-loop'] = perPluginOptions['rotated-for-loop'];
       const floatValues = context.funcPtrArgCasts.floatConstantValues;
       const floatConstants = floatValues
         ? [...new Set(enclosing?.referencedDataAddresses ?? [])].flatMap(a => floatValues[a] ? [floatValues[a]] : [])
@@ -4389,7 +4390,7 @@ function transformDecompiledCode(
           ...(perPluginOptions['select-argument'] as SelectArgumentOptions | undefined),
           accessors: context?.accessorTwins,
           structFieldOffsets: context?.funcPtrArgCasts?.structFieldOffsets,
-          targetArchitecture: context?.targetArchitecture,
+          targetLanguageId: context?.targetLanguageId,
           targetPointerSize: context?.targetPointerSize,
         },
         onSite: s => {

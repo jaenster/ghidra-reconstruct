@@ -1328,7 +1328,7 @@ export function generateProjectStage1(
   const bitfieldCatalog = buildBitfieldCatalog(dataTypes);
 
   const context: ImplGenContext = {
-    targetArchitecture: programInfo?.architecture,
+    targetLanguageId: programInfo?.languageId,
     targetPointerSize: programInfo?.pointerSize,
     _foreignSourcesFingerprint: foreignSourcesFingerprint,
     overrides,

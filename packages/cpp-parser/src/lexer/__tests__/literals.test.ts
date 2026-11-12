@@ -87,6 +87,9 @@ describe('Literal parsing', () => {
 
     it('parses octal escapes', () => {
       assert.strictEqual(parseEscapeSequence('\\101', 0).value, 65);
+      assert.deepStrictEqual(parseEscapeSequence('\\001', 0), { value: 1, length: 4 });
+      assert.deepStrictEqual(parseEscapeSequence('\\000', 0), { value: 0, length: 4 });
+      assert.deepStrictEqual(parseEscapeSequence('\\0', 0), { value: 0, length: 2 });
     });
 
     it('parses unicode escapes', () => {
@@ -111,6 +114,7 @@ describe('Literal parsing', () => {
     it('parses escape sequences', () => {
       const result = parseCharLiteral("'\\n'");
       assert.strictEqual(result.value, 0x0A);
+      assert.strictEqual(parseCharLiteral("'\\001'").value, 1);
     });
 
     it('parses prefixed chars', () => {
@@ -133,6 +137,13 @@ describe('Literal parsing', () => {
     it('parses escape sequences', () => {
       const result = parseStringLiteral('"hello\\nworld"');
       assert.strictEqual(result.value, 'hello\nworld');
+    });
+
+    it('limits octal escapes to three digits and keeps following characters', () => {
+      assert.strictEqual(parseStringLiteral('"\\0012"').value, '\x01' + '2');
+      assert.strictEqual(parseStringLiteral('"\\3777"').value, '\xff' + '7');
+      assert.strictEqual(parseStringLiteral('"\\08"').value, '\0' + '8');
+      assert.strictEqual(parseStringLiteral('"\\x41\\u0042"').value, 'AB');
     });
 
     it('parses prefixed strings', () => {

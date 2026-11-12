@@ -1,5 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { writeFileSync } from 'node:fs';
 import { parseVc8Form } from '@ghidra-mcp/cpp-parser';
 
 import { generateProject } from '../codegen/index.js';
@@ -38,10 +39,10 @@ const target: ExtractedFunction = {
 };
 
 const programInfo: ProgramInfo = {
-  name: 'Game.exe', path: '/Redivivus/Game.exe', format: 'PE', architecture: 'x86',
+  name: 'Game.exe', path: '/Redivivus/Game.exe', format: 'PE',
   compiler: 'msvc', imageBase: '0x400000', languageId: 'x86:LE:32:default',
   endianness: 'little', pointerSize: 4,
-};
+} as ProgramInfo;
 
 const dataTypes: ExtractedDataType[] = [
   { kind: 'STRUCTURE', name: 'D2AiGeneralStrc', category: '/Diablo2/UNIT/Union_0x14/MONSTER', size: 64,
@@ -96,7 +97,9 @@ describe('Redivivus 0058f000 nullfield form', () => {
     assert.match(absent, /return &pMonster->pUnitData\.pUnitDataMonster->pAiGeneral->pMapAi/);
     assert.match(current, /offsetof\(D2AiGeneralStrc, pMapAi\)/);
     assert.doesNotMatch(current, /return \(D2MapAIStrc\*\*\)0x38/);
-    assert.ok(current.includes('    return (D2MapAIStrc**)((uint32_t)(pMonster && pMonster->eUnitType == UNIT_MONSTER && pMonster->pUnitData.pUnitDataMonster ? pMonster->pUnitData.pUnitDataMonster->pAiGeneral : 0) + offsetof(D2AiGeneralStrc, pMapAi));'));
+    assert.ok(current.includes('    return (D2MapAIStrc**)((uint32_t)(uintptr_t)(pMonster && pMonster->eUnitType == UNIT_MONSTER && pMonster->pUnitData.pUnitDataMonster ? pMonster->pUnitData.pUnitDataMonster->pAiGeneral : 0) + offsetof(D2AiGeneralStrc, pMapAi));'));
+    assert.equal('architecture' in programInfo, false);
+    if (process.env.MAPAI_EMIT_PATH) writeFileSync(process.env.MAPAI_EMIT_PATH, current);
 
     const changed = (oldText: string, newText: string) => {
       const next = decompiled.replace(oldText, newText);
@@ -115,6 +118,10 @@ describe('Redivivus 0058f000 nullfield form', () => {
     assert.doesNotMatch(emitted(undefined, { ...func, tags: [tag] }, wrongBase), /offsetof\(D2AiGeneralStrc, pMapAi\)/);
     assert.doesNotMatch(emitted(undefined, { ...func, tags: [tag] }, dataTypes,
       { ...programInfo, pointerSize: 8 }), /offsetof\(D2AiGeneralStrc, pMapAi\)/);
+    assert.doesNotMatch(emitted(undefined, { ...func, tags: [tag] }, dataTypes,
+      { ...programInfo, languageId: 'ARM:LE:32:v7' }), /offsetof\(D2AiGeneralStrc, pMapAi\)/);
+    assert.doesNotMatch(emitted(undefined, { ...func, tags: [tag] }, dataTypes,
+      { ...programInfo, languageId: '' }), /offsetof\(D2AiGeneralStrc, pMapAi\)/);
     assert.doesNotMatch(emitted(undefined, changed('0x38;', '0x3c;')), /offsetof\(D2AiGeneralStrc, pMapAi\)/);
     assert.doesNotMatch(emitted(undefined, changed('(D2MapAIStrc **)0x38;', 'gpFallback;')), /offsetof\(D2AiGeneralStrc, pMapAi\)/);
     assert.doesNotMatch(emitted(undefined, changed('pMonster != (D2UnitStrc *)0x0', 'Touch() && pMonster != (D2UnitStrc *)0x0')), /offsetof\(D2AiGeneralStrc, pMapAi\)/);
