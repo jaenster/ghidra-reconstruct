@@ -24,7 +24,7 @@ const programInfo: ProgramInfo = {
 type Case = {
   address: string; name: string; namespace: string; size: number;
   returnType: string; callingConvention: string;
-  parameters: Array<[string, string]>; locals: Array<[string, string]>;
+  parameters: Array<[string, string]>; locals: Array<[string, string, string]>;
   form: string; decompiled: string;
 };
 
@@ -34,7 +34,11 @@ const cases: Case[] = [
     namespace: 'D2Game::Quests::QUESTS::A5Q2', size: 67,
     returnType: 'int32_t', callingConvention: '__fastcall',
     parameters: [['pQuestData', 'D2QuestDataStrc *']],
-    locals: [['nCount', 'int'], ['nRemainingTotal', 'int32_t'], ['pSpecificData', 'D2QuestDataA5Q2Strc *']],
+    locals: [
+      ['nCount', 'int', 'EAX:4'],
+      ['nRemainingTotal', 'int32_t', 'EAX:4'],
+      ['pSpecificData', 'D2QuestDataA5Q2Strc *', 'HASH:5fb275c4fd:4'],
+    ],
     form: 'join(nRemainingTotal,nCount)',
     decompiled: `int32_t __fastcall
 D2Game::Quests::QUESTS::A5Q2::Q32_GetRemainingPrisonersCount(D2QuestDataStrc *pQuestData)
@@ -68,7 +72,8 @@ D2Game::Quests::QUESTS::A5Q2::Q32_GetRemainingPrisonersCount(D2QuestDataStrc *pQ
     namespace: 'D2Client::GAME::Wall2', size: 41,
     returnType: 'BOOL', callingConvention: '__cdecl',
     parameters: [['nX', 'int'], ['nY', 'int'], ['pDrawList', 'D2Wall2DrawListStrc *']],
-    locals: [['iVar1', 'int'], ['nRelY', 'int']],
+    // Ghidra's function-info locals list omits decompiler temporary iVar1.
+    locals: [['nRelY', 'int', 'ECX:4']],
     form: 'join(iVar1,nX)',
     decompiled: `BOOL __cdecl D2Client::GAME::Wall2::WALL2_IsInDrawGrid(int nX,int nY,D2Wall2DrawListStrc *pDrawList)
 {
@@ -91,7 +96,7 @@ function extract(c: Case, tag: 'current' | 'stale' | 'none'): ExtractedFunction 
     signature: `${c.returnType} ${c.name}(${c.parameters.map(([name, type]) => `${type} ${name}`).join(', ')})`,
     returnType: c.returnType,
     parameters: c.parameters.map(([name, dataType], ordinal) => ({ name, dataType, size: 4, ordinal })),
-    localVariables: c.locals.map(([name, dataType]) => ({ name, dataType, size: 4, storage: 'EAX:4' })),
+    localVariables: c.locals.map(([name, dataType, storage]) => ({ name, dataType, size: 4, storage })),
     callingConvention: c.callingConvention, isThunk: false, isExternal: false, hasVarArgs: false,
     decompiled: c.decompiled, calledFunctions: [],
     tags: tag === 'none' ? [] : [{
