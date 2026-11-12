@@ -1,0 +1,32 @@
+[
+  {
+    "address": "0x004402a0",
+    "name": "CHATDLG_UpdateChatRoomList",
+    "namespace": "D2Multi::ChatDlg",
+    "signature": "BOOL CHATDLG_UpdateChatRoomList(void)",
+    "returnType": "BOOL",
+    "callingConvention": "__stdcall",
+    "size": 169,
+    "decompiled": "/* @function CHATDLG_UpdateChatRoomList\n   @address Game.exe.ram:004402a0\n   @date 2026.06.06\n   @calling __stdcall\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev */\n\nBOOL D2Multi::ChatDlg::CHATDLG_UpdateChatRoomList(void)\n\n{\n  int32_t nScrollPos;\n  int32_t nVisibleLines;\n  WCHAR *pwszCell;\n  int nCmpRemaining;\n  char *pcCell;\n  char *pcDash;\n  bool bMatch;\n  char szCell [256];\n  int32_t nEndLine;\n  \n  nScrollPos = D2Win::Src::D2WinTextBox::D2WINTEXTBOX_GetScrollPosition(g_pLadderBoardTextBox);\n  nVisibleLines = D2Win::Src::D2WinTextBox::D2WINTEXTBOX_GetVisibleLineCount(g_pLadderBoardTextBox);\n  nEndLine = nVisibleLines + nScrollPos;\n  if (gnLadderListRowCount <= nEndLine) {\n    nEndLine = gnLadderListRowCount;\n  }\n  if (nScrollPos < nEndLine) {\n    do {\n      pwszCell = D2Win::Src::D2WinTextBox::D2WINTEXTBOX_GetLineCellValue\n                           (g_pLadderBoardTextBox,nScrollPos,0);\n      D2Lang::Unicode::UNISYS::UNICODE_WideToMultiByte(szCell,(uint16_t *)pwszCell,0x100);\n      nCmpRemaining = 2;\n      bMatch = true;\n      pcCell = szCell;\n      pcDash = \"-\";\n      do {\n        if (nCmpRemaining == 0) break;\n        nCmpRemaining = nCmpRemaining + -1;\n        bMatch = *pcCell == *pcDash;\n        pcCell = pcCell + 1;\n        pcDash = pcDash + 1;\n      } while (bMatch);\n      if (bMatch) {\n        gnChatRoomListSelectedBase = ((int)(nScrollPos + (nScrollPos >> 0x1f & 0xfU)) >> 4) << 4;\n        gnLadderBoardSelectedRank = gnChatRoomListSelectedBase;\n        return 1;\n      }\n      nScrollPos = nScrollPos + 1;\n    } while (nScrollPos < nEndLine);\n  }\n  return 0;\n}"
+  },
+  {
+    "address": "0x0057a980",
+    "name": "DAMAGE_ApplyHealingToUnit",
+    "namespace": "D2Game::UNIT::SUnitDmg",
+    "signature": "int32_t DAMAGE_ApplyHealingToUnit(int32_t nHealAmount, D2UnitStrc * pUnit)",
+    "returnType": "int32_t",
+    "callingConvention": "__stdcall",
+    "size": 115,
+    "decompiled": "/* WARNING: Enum \"eCollisionFlags\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerType\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerTypeDWORD\": Some values do not have unique names */\n/* @function DAMAGE_ApplyHealingToUnit\n   @address Game.exe.ram:0057a980\n   @date 2026.06.14\n   @params\n     nParam: Stack[0x4]:4 (int32_t)\n     pUnit: EDI:4 (D2UnitStrc *)\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev\n   \n   Function uses custom registers for function arguments!\n   [int32_t nParam@Stack[0x4]:4]\n   [D2UnitStrc * pUnit@EDI:4] */\n\nint32_t D2Game::UNIT::SUnitDmg::DAMAGE_ApplyHealingToUnit(int32_t nHealAmount,D2UnitStrc *pUnit)\n\n{\n  bool bIsDead;\n  int32_t nMaxHp;\n  int nCurHp;\n  int32_t nValue;\n  \n  if (0 < nHealAmount) {\n    _bIsDead = D2Game::UNIT::SUnit::CheckForModeZeroDeath(pUnit);\n    if (_bIsDead == 0) {\n      _bIsDead = D2Common::DATATBLS::ItemStats::UNIT_GetUnitState(pUnit,STATE_death_delay);\n      if (_bIsDead == 0) {\n        nMaxHp = D2Common::Stats::StatsEx::GetTxtMaxHp(pUnit);\n        nCurHp = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit,UNITSTAT_hitpoints,0);\n        nValue = nCurHp + nHealAmount;\n        if (nMaxHp <= nValue) {\n          nValue = nMaxHp;\n        }\n        D2Common::Stats::StatsEx::STATLIST_SetUnitStat(pUnit,UNITSTAT_hitpoints,nValue,0);\n        if (nValue != nMaxHp) {\n          return nHealAmount;\n        }\n        return nMaxHp - nCurHp;\n      }\n    }\n  }\n  return 0;\n}"
+  },
+  {
+    "address": "0x005dfe20",
+    "name": "AI_Diablo_SpawnRingAttack",
+    "namespace": "D2Game::Monster::AI",
+    "signature": "void AI_Diablo_SpawnRingAttack(SGAMEDATA * pGame, D2UnitStrc * pUnit)",
+    "returnType": "void",
+    "callingConvention": "__fastcall",
+    "size": 181,
+    "decompiled": "/* WARNING: Enum \"eCollisionFlags\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerType\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerTypeDWORD\": Some values do not have unique names */\n/* @function AI_Diablo_SpawnRingAttack\n   @address Game.exe.ram:005dfe20\n   @date 2026.06.20\n   @calling __fastcall\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev */\n\nvoid __fastcall D2Game::Monster::AI::AI_Diablo_SpawnRingAttack(SGAMEDATA *pGame,D2UnitStrc *pUnit)\n\n{\n  D2MissilesTxt *pDVar2;\n  int32_t nMissileRange;\n  uint32_t nPosY;\n  uint32_t nPosX;\n  eD2UnitType eUnitType;\n  \n  if (D2Common::ITEMS::Items::sgptDataTable->nTxtMissilesSize < 0x15c) {\n    pDVar2 = (D2MissilesTxt *)0x0;\n  }\n  else {\n    pDVar2 = D2Common::ITEMS::Items::sgptDataTable->pTxtMissiles + 0x15b;\n  }\n  nMissileRange = pDVar2->Range + -100;\n  if (nMissileRange < 100) {\n    nMissileRange = 100;\n  }\n  D2Game::Monster::AI::MONSTERAI_ConvertMonstersInRadius(0x23,0x28,nMissileRange,0,pUnit,pGame);\n  eUnitType = pUnit->eUnitType;\n  if ((eUnitType == UNIT_OBJECT) || ((3 < (int)eUnitType && ((int)eUnitType < 6)))) {\n    nPosY = ((pUnit->pPath).pStaticPath)->nPosY;\n  }\n  else if ((pUnit->pPath).pDynamicPath == (D2DynamicPathStrc *)0x0) {\n    nPosY = 0;\n  }\n  else {\n    nPosY = D2Common::PATH::DynamicPath::GetYPos((pUnit->pPath).pDynamicPath);\n  }\n  eUnitType = pUnit->eUnitType;\n  if ((eUnitType == UNIT_OBJECT) || ((3 < (int)eUnitType && ((int)eUnitType < 6)))) {\n    nPosX = ((pUnit->pPath).pStaticPath)->nPosX;\n  }\n  else if ((pUnit->pPath).pDynamicPath == (D2DynamicPathStrc *)0x0) {\n    nPosX = 0;\n  }\n  else {\n    nPosX = D2Common::PATH::DynamicPath::GetXPos((pUnit->pPath).pDynamicPath);\n  }\n  D2Game::SKILLS::SkillsServer::SKILLS_CreateMissileAtTarget\n            (pGame,pUnit,SKILL_Attack,1,MISSILE_Radamentdeath,nPosX,nPosY);\n  return;\n}"
+  }
+]

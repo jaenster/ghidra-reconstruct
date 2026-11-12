@@ -50,6 +50,7 @@ import { localTypesOf } from './compare-form.js';
 import {
   bareName, shapeOfNode, shapeOfSpelling, unwrapParens, type TypeShape, type TypedefResolver,
 } from './call-arg-cast.js';
+import { createStormNextLinkInsertTransformer } from './storm-next-link-insert.js';
 
 export const STORM_NEXT_LINK_HELPER = 'D2_StormNextLink';
 
@@ -242,7 +243,7 @@ function createStormNextLinkTransformer(options: StormNextLinkOptions = {}): Tra
     return k ? sizes[k] ?? sizes[bareName(k)] : undefined;
   };
 
-  return createTransformer({
+  const unlink = createTransformer({
     visitFunctionDecl(fn: FunctionDecl): ASTNode | undefined {
       if (!fn.body) return undefined;
       let any = false;
@@ -716,6 +717,8 @@ function createStormNextLinkTransformer(options: StormNextLinkOptions = {}): Tra
       return updateNode(fn, { body } as Partial<FunctionDecl>);
     },
   });
+  const insert = createStormNextLinkInsertTransformer(options);
+  return node => unlink(insert(node));
 }
 
 /** Cheap pre-filter: an if/else whose arms each store one value and one arm stores a `~`. */

@@ -2,7 +2,7 @@
  * permute.ts - find vc8form tags for VC8 near-miss functions by compiling them.
  *
  *   tsx permute.ts --checkout DIR --snapshot SNAP --out OUT [--pool AUDIT] [--sample N] [--seed S]
- *                  [--addrs A,B,...] [--jobs J] [--max-insns K] [--no-pairs] [--no-phase]
+ *                  [--addrs A,B,...] [--jobs J] [--max-insns K] [--no-pairs] [--no-phase] [--called-helpers]
  *                  [--resume [--group G]] [--oracle-zig BIN] [--ops OP,OP,...]
  *
  * For each target function (the near-miss pool of an audit.tsv, a sample of it, or --addrs):
@@ -106,7 +106,7 @@ interface Accepted { job: Job; on: number; forms: string[]; gained: Set<number>;
 
 interface Args {
   checkout: string; snapshot: string; out: string; pool?: string; addrs?: string; ops?: string; sample: number; seed: number;
-  max_insns: number; jobs: number; max_anchors: number; pair_top: number; no_pairs: boolean; no_phase: boolean;
+  max_insns: number; jobs: number; max_anchors: number; pair_top: number; no_pairs: boolean; no_phase: boolean; called_helpers: boolean;
   resume: boolean; group: number; zig: string; ops?: string;
 }
 
@@ -117,10 +117,10 @@ function usage(code = 2): never {
 }
 
 function parseArgs(argv: string[]): Args {
-  const a: Partial<Args> & Record<string, unknown> = { sample: 0, seed: 1, max_insns: 100, jobs: 4, max_anchors: 16, pair_top: 3, no_pairs: false, no_phase: false, resume: false, group: 1 };
+  const a: Partial<Args> & Record<string, unknown> = { sample: 0, seed: 1, max_insns: 100, jobs: 4, max_anchors: 16, pair_top: 3, no_pairs: false, no_phase: false, called_helpers: false, resume: false, group: 1 };
   const str: Record<string, keyof Args> = { '--checkout': 'checkout', '--snapshot': 'snapshot', '--out': 'out', '--pool': 'pool', '--addrs': 'addrs', '--oracle-zig': 'zig', '--ops': 'ops', '--forms': 'ops' };
   const int: Record<string, keyof Args> = { '--sample': 'sample', '--seed': 'seed', '--max-insns': 'max_insns', '--jobs': 'jobs', '--max-anchors': 'max_anchors', '--pair-top': 'pair_top', '--group': 'group' };
-  const flag: Record<string, keyof Args> = { '--no-pairs': 'no_pairs', '--no-phase': 'no_phase', '--resume': 'resume' };
+  const flag: Record<string, keyof Args> = { '--no-pairs': 'no_pairs', '--no-phase': 'no_phase', '--called-helpers': 'called_helpers', '--resume': 'resume' };
   for (let i = 0; i < argv.length; i++) {
     let k = argv[i], v: string | undefined;
     const eq = k.indexOf('=');
@@ -235,13 +235,15 @@ async function main() {
     for (let k = 0; k < tus.length; k++) base.set(tus[k], await orc.judge(tus[k], baseObjs[k]));
     comp.drop(baseObjs);
     // Helpers count only where VC8 inlines them: a callee our object still calls keeps
-    // its own body, and no form of it can change the target's bytes.
+    // its own body. --called-helpers keeps the called ones too: VC8 fits a static callee's
+    // register use into its callers, so its body can change theirs (UI_ConfigHandleMouseClick
+    // 004a5e60, whose seven element stores make INPUT_ConfigMouseDown 004a5f10 match).
     const symOf = new Map<number, string>();
     for (const r of orc.rows) symOf.set(parseInt(r[0], 16), r[4]);
     for (const j of jobs) {
       const bt = base.get(j.tu)!.get(j.start);
       const calls = new Set(bt && bt.st !== 'MISSING' && bt.st !== 'QUARANTINE' ? bt.calls : []);
-      j.helpers = j.helpers.filter(h => !calls.has(symOf.get(h)!));
+      if (!args.called_helpers) j.helpers = j.helpers.filter(h => !calls.has(symOf.get(h)!));
     }
 
     // -- candidates, and the bodies printed back unchanged

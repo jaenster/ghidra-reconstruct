@@ -415,6 +415,11 @@ export interface AnalyzedDataSymbol extends ExtractedGlobal {
   homeFile?: string;
   /** A homed global hand-written source names: declared in globals.h, not the data header. */
   homeDeclaredCentrally?: boolean;
+  /**
+   * A VC8 compile proved the TU that uses it does not define it (vc8-data-linkage.ts):
+   * never a file-local, never homed in a data run; the globals units define it.
+   */
+  definedElsewhere?: boolean;
   /** Structured initialized data (arrays, structs, pointers resolved to symbols) */
   initializedData?: DataValue;
   /** If struct-colocated, the struct type that owns it (e.g., "D2GameStrc") */

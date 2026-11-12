@@ -139,6 +139,7 @@ import { buildModuleGraph } from '../modules/builder.js';
 import { hashFunction, hashDataType, hashGlobal } from '../modules/buildinfo.js';
 import { warningRows, formatWarningsTsv, WARNINGS_TSV } from './warning-facts.js';
 import { markCompilerData, compilerDataReport } from './compiler-data.js';
+import { vc8DataLinkage, markMeasuredExternData } from './vc8-data-linkage.js';
 import { keepForeignReferencedGlobalsExternal, keepDataRunsWhole, fileLocalGlobalKey, assignDataHomes, dataHomeVetoCounts, dataHomeVeto, homedGlobalKey, dataHeaderPathOf } from './file-local-globals.js';
 import { noteGlobalScopeReason, resetGlobalScopeTrace, setGlobalScopeTraceImplMap, reportGlobalScopeTrace } from './global-scope-trace.js';
 
@@ -1754,6 +1755,7 @@ export function generateProjectStage1(
       const initializerReferencedNames = collectInitializerReferencedNames(analyzedGlobals);
       resetGlobalScopeTrace();
       setGlobalScopeTraceImplMap(funcToImpl);
+      applyMeasuredDataLinkage(analyzedGlobals, functions);
       computeFileLocalGlobals(analyzedGlobals, funcToImpl, initializerReferencedNames);
       const rescoped = reconcileStaticScopeWithBodyReferences(analyzedGlobals, functions, funcToImpl, allDataTypeNames, programInfo?.imageBase, strings ?? []);
       if (rescoped.promotedToGlobal || rescoped.promotedToFileLocal) {
@@ -1838,6 +1840,7 @@ export function generateProjectStage1(
         const funcToImpl = buildFuncToImplPathMap(functions, classes, namespaces, options, '');
         resetGlobalScopeTrace();
         setGlobalScopeTraceImplMap(funcToImpl);
+        applyMeasuredDataLinkage(analyzedGlobals, functions);
         computeFileLocalGlobals(analyzedGlobals, funcToImpl, collectInitializerReferencedNames(analyzedGlobals));
         reconcileStaticScopeWithBodyReferences(analyzedGlobals, functions, funcToImpl, allDataTypeNames, programInfo?.imageBase, strings ?? []);
         promoteInitializerReferencedGlobals(analyzedGlobals);
@@ -4128,6 +4131,24 @@ function buildAddressLiteralResolver(
 }
 
 /**
+ * The globals fresh `vc8datalinkage` tags prove are defined outside the TU that uses
+ * them (vc8-data-linkage.ts), marked before any scope is computed; stale tags and
+ * addresses that name no global are reported.
+ */
+function applyMeasuredDataLinkage(analyzedGlobals: AnalyzedDataSymbol[], functions: ReadonlyArray<ExtractedFunction>): void {
+  const linkage = vc8DataLinkage(functions);
+  const unknown = markMeasuredExternData(analyzedGlobals, linkage);
+  if (linkage.external.size > 0) {
+    console.log(`Globals defined outside the TU that uses them (vc8datalinkage): ${linkage.external.size - unknown.length}` +
+      (unknown.length ? `; no global at ${unknown.join(', ')}` : ''));
+  }
+  if (linkage.stale.length > 0) {
+    console.log(`Stale vc8datalinkage tags (${linkage.stale.length}): ` +
+      linkage.stale.map(s => `${s.func} ${s.tag} (${s.why})`).join('; '));
+  }
+}
+
+/**
  * Rescope globals to 'file-local' when all referencing functions live in the same impl file.
  * Mutates the scope and ownerFile fields of the analyzed globals.
  *
@@ -4153,6 +4174,8 @@ export function computeFileLocalGlobals(
   const referenced = initializerReferencedNames ?? collectInitializerReferencedNames(analyzedGlobals);
   for (const g of analyzedGlobals) {
     if (g.scope !== 'global') continue;
+    // A compile proved the users' TU only declares it (vc8-data-linkage.ts).
+    if (g.definedElsewhere) continue;
     if (!g.referencingFunctions || g.referencingFunctions.length === 0) { noteGlobalScopeReason(g, 'no-referencing-functions'); continue; }
 
     // Skip file-local promotion for namespaced globals — a namespace indicates
