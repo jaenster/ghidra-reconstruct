@@ -3381,7 +3381,8 @@ function doOpas(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'opas' }>): void {
       } else if (p.kind === NodeKind.ExprStmt) {
         if (p !== stmt && !(stmt.kind === NodeKind.ForStmt && (stmt as ForStmt).init === p)) return false;
       } else if (p.kind === NodeKind.VariableDecl) {
-        if (stmt.kind !== NodeKind.DeclStmt || (stmt as DeclStmt).declarations.length !== 1) return false;
+        if (stmt.kind !== NodeKind.DeclStmt || (stmt as DeclStmt).declarations.length !== 1
+          || (p as VariableDecl).initializer !== child) return false;
       } else if (p.kind === NodeKind.DeclStmt) {
         if (p !== stmt) return false;
       } else if (p.kind === NodeKind.BinaryExpr) {
@@ -3405,21 +3406,38 @@ function doOpas(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'opas' }>): void {
       refuse('the first use has another effect before its update');
   }
   const parent = ancestry.get(b);
-  if (parent?.kind !== NodeKind.IfStmt || (parent as IfStmt).thenBranch !== b || (parent as IfStmt).elseBranch) refuse('uses are not in one guarded arm');
   const localDecl = soleDecl(fn, u.name);
   const declarationStatement = ancestry.get(localDecl);
-  if (declarationStatement?.kind !== NodeKind.DeclStmt || ancestry.get(declarationStatement) !== fn.body
-    || ancestry.get(parent) !== fn.body
-    || fn.body!.statements.indexOf(declarationStatement as Statement) >= fn.body!.statements.indexOf(parent as Statement))
-    refuse(`${u.name} is not declared before its guard in the outer block`);
-  const cond = unparen((parent as IfStmt).condition);
   const truthy = (e: Expression): boolean => {
     const z = unparen(e);
     return isId(z, u.name) || (z.kind === NodeKind.BinaryExpr && (z as BinaryExpr).operator === '&&'
       && (truthy((z as BinaryExpr).left) || truthy((z as BinaryExpr).right)));
   };
-  if (plus && text(cond) !== norm(`${u.name} != -1`)) refuse('int32 + 1 is not below its -1 guard');
-  if (minus && !truthy(cond)) refuse('byte - 1 is not below its nonzero guard');
+  if (parent?.kind === NodeKind.IfStmt && (parent as IfStmt).thenBranch === b && !(parent as IfStmt).elseBranch) {
+    if (declarationStatement?.kind !== NodeKind.DeclStmt || ancestry.get(declarationStatement) !== fn.body
+      || ancestry.get(parent) !== fn.body
+      || fn.body!.statements.indexOf(declarationStatement as Statement) >= fn.body!.statements.indexOf(parent as Statement))
+      refuse(`${u.name} is not declared before its guard in the outer block`);
+    const cond = unparen((parent as IfStmt).condition);
+    if (plus && text(cond) !== norm(`${u.name} != -1`)) refuse('int32 + 1 is not below its -1 guard');
+    if (minus && !truthy(cond)) refuse('byte - 1 is not below its nonzero guard');
+  } else {
+    if (!minus || b !== fn.body || declarationStatement?.kind !== NodeKind.DeclStmt
+      || ancestry.get(declarationStatement) !== b || b.statements.indexOf(declarationStatement as Statement) >= i)
+      refuse('uses are not in one guarded arm');
+    if ([...walk(fn.body!)].some(x => x.node.kind === NodeKind.GotoStmt || x.node.kind === NodeKind.LabelStmt))
+      refuse('a jump may bypass the flattened byte guard');
+    const prior = b.statements.slice(b.statements.indexOf(declarationStatement as Statement) + 1, i);
+    const guarded = prior.some((s, k) => {
+      if (s.kind !== NodeKind.IfStmt || (s as IfStmt).elseBranch || (s as IfStmt).isConstexpr
+        || !soleReturn((s as IfStmt).thenBranch)) return false;
+      const condition = unparen((s as IfStmt).condition);
+      return condition.kind === NodeKind.UnaryExpr && (condition as UnaryExpr).operator === '!'
+        && truthy((condition as UnaryExpr).operand) && !effects(condition)
+        && prior.every((other, j) => j === k || !mentions(other, u.name));
+    });
+    if (!guarded) refuse('no preceding flattened nonzero byte guard');
+  }
   stale([u.name], b.statements[i], new Set(ids));
   for (const slot of slots) put(slot, { kind: NodeKind.Identifier, name: u.name } as Identifier);
   b.statements.splice(i, 0, ...parseStmts(`${u.name} ${u.operator}= ${u.constant};`));

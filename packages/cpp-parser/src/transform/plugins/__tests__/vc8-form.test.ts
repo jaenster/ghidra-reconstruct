@@ -1073,6 +1073,41 @@ describe('vc8-form: opas', () => {
     assert.ok(sites[0].applied, sites[0].why);
     assert.match(out, /byMinGrp -= 1; nMinionCount = RNG\(\(uint32_t\)\(uint8_t\)byMinGrp\); for \(nMinionIdx = nMinionCount \+ \(uint8_t\)byMinGrp;/);
   });
+  const FLAT_BYTE = [
+    'void dummy(MonStats* pMonStatLine, Unit* pUnit) {',
+    '  uint8_t byMinGrp = pMonStatLine->MinGrp;',
+    '  uint8_t byMaxGrp = pMonStatLine->MaxGrp;',
+    '  if (!(byMinGrp && byMaxGrp && byMaxGrp >= byMinGrp)) return;',
+    '  if (!pUnit) return;',
+    '  uint32_t nMinionCount = RNG((uint8_t)(byMinGrp - 1));',
+    '  for (nMinionIdx = nMinionCount + (uint8_t)(byMinGrp - 1); nMinionIdx > 0; nMinionIdx--) { Spawn(); }',
+    '}',
+  ];
+  it('accepts a flattened early-return byte guard and initialized first use', () => {
+    const { out, sites } = run(FLAT_BYTE, 'opas(byMinGrp,-,1)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.match(out, /if \(!\(byMinGrp && byMaxGrp && byMaxGrp >= byMinGrp\)\) return; if \(!pUnit\) return; byMinGrp -= 1; uint32_t nMinionCount = RNG\(\(uint8_t\)byMinGrp\);/);
+  });
+  it('refuses a missing or changed flattened byte guard, mutation, escape, and bypass jump', () => {
+    const variants = [
+      FLAT_BYTE.filter(s => !s.includes('if (!(byMinGrp')),
+      FLAT_BYTE.map(s => s.replace('if (!(byMinGrp && byMaxGrp && byMaxGrp >= byMinGrp))', 'if (!byMaxGrp)')),
+      FLAT_BYTE.flatMap(s => s.includes('if (!pUnit)') ? ['  byMinGrp = byMaxGrp;', s] : [s]),
+      FLAT_BYTE.flatMap(s => s.includes('if (!pUnit)') ? ['  Leak(&byMinGrp);', s] : [s]),
+      FLAT_BYTE.flatMap(s => s.includes('if (!(byMinGrp') ? ['  if (pUnit) goto L;', s, 'L: ;'] : [s]),
+      FLAT_BYTE.flatMap(s => s.includes('if (!(byMinGrp') ? ['  CaptureRef(byMinGrp);', s] : [s]),
+      FLAT_BYTE.map(s => s.replace('if (!(byMinGrp && byMaxGrp && byMaxGrp >= byMinGrp))',
+        'if (!(byMinGrp && CaptureRef(byMinGrp) && byMaxGrp >= byMinGrp))')),
+      ['extern uint8_t byMinGrp;', FLAT_BYTE[0], '  if (!byMinGrp) return;',
+        FLAT_BYTE[1], FLAT_BYTE[2], ...FLAT_BYTE.slice(4)],
+    ];
+    for (const source of variants) {
+      const plain = run(source);
+      const tagged = run(source, 'opas(byMinGrp,-,1)');
+      assert.strictEqual(tagged.sites[0].applied, false, source.join('\n'));
+      assert.strictEqual(tagged.out, plain.out, source.join('\n'));
+    }
+  });
   it('writes paired shifts in order before either store', () => {
     const { out, sites } = run(PAIR, 'opas(nX,>>,0xb,nY,>>,0xb)');
     assert.ok(sites[0].applied, sites[0].why);

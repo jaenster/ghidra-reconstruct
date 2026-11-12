@@ -150,8 +150,8 @@ describe('Redivivus opas codegen', () => {
     const plain = implementations('none');
     for (const c of cases) assert.notEqual(tagged.get(c.name), plain.get(c.name), c.name);
     assert.match(tagged.get('StorePreferedRealmAgain')!, /nSelectedLine \+= 1;[\s\S]*SetCurGateway\(pGatewayAccess, nSelectedLine\);[\s\S]*Realm\(pGatewayAccess, nSelectedLine\)/);
-    assert.match(tagged.get('MONSTER_SpawnMonsterGroup')!, /byMinGrp -= 1;[\s\S]*\(byte\)byMinGrp[\s\S]*\(byte\)byMinGrp/);
-    assert.match(tagged.get('SetSP1Shifted')!, /DRLG_WorldToScreenNoShift\(&nX, &nY\);[\s\S]*nX >>= 0xb;[\s\S]*nY >>= 0xb;[\s\S]*nTargetX = \(short\)nX;[\s\S]*nTargetY = \(short\)nY/);
+    assert.match(tagged.get('MONSTER_SpawnMonsterGroup')!, /byMinGrp -= 1;[\s\S]*\(uint8_t\)byMinGrp[\s\S]*\(uint8_t\)byMinGrp/);
+    assert.match(tagged.get('SetSP1Shifted')!, /DRLG_WorldToScreenNoShift\(&nX, &nY\);[\s\S]*nX >>= 0xb;[\s\S]*nY >>= 0xb;[\s\S]*nTargetX = \(short int\)nX;[\s\S]*nTargetY = \(short int\)nY/);
   });
 
   it('leaves untagged and stale-tagged output identical', () => {
