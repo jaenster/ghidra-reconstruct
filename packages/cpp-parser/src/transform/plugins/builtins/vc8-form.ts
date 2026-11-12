@@ -3793,12 +3793,16 @@ function doOpas(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'opas' }>): void {
         if (p !== stmt || (p as ForStmt).init !== child) return false;
       } else if (p.kind === NodeKind.ExprStmt) {
         if (p !== stmt && !(stmt.kind === NodeKind.ForStmt && (stmt as ForStmt).init === p)) return false;
+      } else if (p.kind === NodeKind.VariableDecl) {
+        if (stmt.kind !== NodeKind.DeclStmt || (stmt as DeclStmt).declarations.length !== 1) return false;
+      } else if (p.kind === NodeKind.DeclStmt) {
+        if (p !== stmt) return false;
       } else if (p.kind === NodeKind.BinaryExpr) {
         if (['&&', '||', ','].includes((p as BinaryExpr).operator)) return false;
       } else if (![NodeKind.ParenExpr, NodeKind.CStyleCastExpr, NodeKind.AssignExpr, NodeKind.CallExpr].includes(p.kind)) return false;
       child = p;
     }
-    return stmt.kind === NodeKind.ExprStmt || stmt.kind === NodeKind.ForStmt;
+    return stmt.kind === NodeKind.ExprStmt || stmt.kind === NodeKind.DeclStmt || stmt.kind === NodeKind.ForStmt;
   };
   if (!hits.every((h, j) => evaluatedOnEntry(b.statements[i + j], h))) refuse('the two expressions are not evaluated when their statements begin');
   const firstUseAncestors = new Set<ASTNode>();
