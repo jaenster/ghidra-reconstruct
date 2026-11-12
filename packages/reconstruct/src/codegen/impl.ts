@@ -3685,6 +3685,7 @@ function transformDecompiledCode(
         fieldTypes: context.funcPtrArgCasts.fieldTypes,
         structFields: context.funcPtrArgCasts.structFields,
         convertingAggregates: context.funcPtrArgCasts.convertingAggregates,
+        aggregateSizes: context.funcPtrArgCasts.aggregateSizes,
         typedefTargets: context.funcPtrArgCasts.typedefTargets,
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         enclosingVarTypes,
