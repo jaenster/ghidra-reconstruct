@@ -244,6 +244,16 @@
  *                        and use V at every subsequent `V - K` read. V must be one
  *                        unaliased 32-bit integer local, have at least two such reads,
  *                        and have no other read or store after the new decrement.
+ *   switch(X[,i])        the i-th `if (X != K1) { if (X == K2 [&& R]) B2 } else B1` (or
+ *                        `if (X == K1) B1 else if (X == K2 [&& R]) B2`), K1 and K2 two
+ *                        constants, is written `switch (X) { case K2: { [if (R)] B2 }
+ *                        case K1: { B1 } }`, each body followed by `break;` unless it
+ *                        always leaves. Also `if (X != K1) { if (X != K2) J R } T` with
+ *                        J, R and the rest T of the block each always leaving: written
+ *                        `switch (X) { case K2: { R } case K1: { T } } J`. Refused when X
+ *                        calls or mutates state, or an arm holds a label or a break that
+ *                        would leave the switch. Case values are integer literals or
+ *                        uppercase enum-style names that are not local variables.
  */
 
 import { NodeKind, isType } from '../../../ast/kinds.js';
@@ -292,6 +302,7 @@ export type Vc8Form =
   | { op: 'unselect'; cond: string; index: number }
   | { op: 'split'; name: string; type: string; rename: string }
   | { op: 'tsel'; cond: string; index: number }
+  | { op: 'switch'; expr: string; index: number }
   | { op: 'nestcall'; name: string; index: number }
   | { op: 'fill'; name: string; index: number }
   | { op: 'copy'; name: string; index: number }
@@ -345,7 +356,7 @@ export interface Vc8FormOptions {
 
 const OPS = new Set(['seq', 'fold', 'join', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'width', 'boolflag', 'retwiden', 'arms',
   'nest', 'merge-tail', 'tailguard', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
-  'nestcall', 'fill', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'dec']);
+  'nestcall', 'fill', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'switch', 'dec']);
 
 /** Split at the commas outside brackets, parentheses, angle-free. */
 function splitArgs(s: string): string[] {
@@ -487,6 +498,11 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
       if (args.length !== 2 || anchor || !/^[A-Za-z_]\w*$/.test(args[0]) || !/^[1-9]\d*$/.test(args[1])) return undefined;
       const amount = Number(args[1]);
       return Number.isSafeInteger(amount) && amount <= 0x7fffffff ? { op: 'dec', name: args[0], amount } : undefined;
+    }
+    case 'switch': {
+      const i = int(args[1], 1);
+      if (anchor || args.length < 1 || args.length > 2 || !(i >= 1) || args[0] === '') return undefined;
+      return { op: 'switch', expr: args[0], index: i };
     }
   }
   return undefined;
@@ -3467,6 +3483,137 @@ function doDec(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'dec' }>): void {
   chosen.block.statements.splice(chosen.index, 0, parsed.body!.statements[0]);
 }
 
+const CASE_INTEGER = /^-?(0x[0-9a-fA-F]+|\d+)[uUlL]*$/;
+const CASE_ENUM_STYLE = /^(?:[A-Z][A-Z0-9_]*::)*[A-Z][A-Z0-9_]*$/;
+const LOOPS = new Set<string>([NodeKind.ForStmt, NodeKind.WhileStmt, NodeKind.DoWhileStmt, NodeKind.ForRangeStmt, NodeKind.SwitchStmt]);
+
+/** Refuse case names that could be ordinary local values, and expressions that are not constant-like. */
+function caseConstant(e: Expression, locals: Set<string>): boolean {
+  const n = unparen(e);
+  const s = text(n);
+  if (CASE_INTEGER.test(s) && (n.kind === NodeKind.IntegerLiteral || n.kind === NodeKind.UnaryExpr)) return true;
+  if (n.kind !== NodeKind.Identifier && n.kind !== NodeKind.QualifiedId) return false;
+  return CASE_ENUM_STYLE.test(s) && !locals.has(s);
+}
+
+/** Compare integer values, not just their spelling (`0` and `0x0` are the same case). */
+function sameCaseValue(a: Expression, b: Expression): boolean {
+  const numeric = (e: Expression): bigint | undefined => {
+    const n = unparen(e);
+    if (n.kind === NodeKind.IntegerLiteral) return (n as IntegerLiteralExpr).value;
+    if (n.kind === NodeKind.UnaryExpr && (n as UnaryExpr).operator === '-') {
+      const operand = unparen((n as UnaryExpr).operand);
+      if (operand.kind === NodeKind.IntegerLiteral) return -(operand as IntegerLiteralExpr).value;
+    }
+    return undefined;
+  };
+  const av = numeric(a), bv = numeric(b);
+  return av !== undefined && bv !== undefined ? av === bv : text(a) === text(b);
+}
+
+/** The original tests X twice. A switch can read it once only if the expression itself is inert. */
+function inertSwitchValue(e: Expression, volatileNames: Set<string>): boolean {
+  const effectful = new Set<string>([
+    NodeKind.CallExpr, NodeKind.AssignExpr, NodeKind.PostfixExpr, NodeKind.NewExpr,
+    NodeKind.DeleteExpr, NodeKind.ThrowExpr, NodeKind.CoAwaitExpr, NodeKind.CoYieldExpr,
+  ]);
+  for (const { node } of walk(e)) {
+    if (effectful.has(node.kind)) return false;
+    if (node.kind === NodeKind.UnaryExpr && ['++', '--'].includes((node as UnaryExpr).operator)) return false;
+    if (node.kind === NodeKind.Identifier && volatileNames.has((node as Identifier).name)) return false;
+  }
+  return true;
+}
+
+/** Whether s holds a break that is not inside a loop or switch of its own. */
+function breaksOut(s: Statement): boolean {
+  const own = new Set<ASTNode>();
+  for (const { node } of walk(s)) if (LOOPS.has(node.kind)) for (const { node: c } of walk(node)) if (c !== node) own.add(c);
+  for (const { node } of walk(s)) if (node.kind === NodeKind.BreakStmt && !own.has(node)) return true;
+  return false;
+}
+
+function doSwitch(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'switch' }>): void {
+  const want = norm(f.expr);
+  const locals = new Set<string>();
+  const volatileNames = new Set<string>();
+  for (const p of fn.parameters) if (p.name) {
+    locals.add(p.name.name);
+    if (/\bvolatile\b/.test(emit(p.type))) volatileNames.add(p.name.name);
+  }
+  if (fn.body) for (const { node } of walk(fn.body)) if (node.kind === NodeKind.VariableDecl) {
+    const v = node as VariableDecl;
+    locals.add(v.name.name);
+    if (/\bvolatile\b/.test(emit(v.type))) volatileNames.add(v.name.name);
+  }
+  let seen = 0;
+  for (const b of blocks(fn)) {
+    for (let k = 0; k < b.statements.length; k++) {
+      const s = b.statements[k];
+      if (s.kind !== NodeKind.IfStmt) continue;
+      const x = s as IfStmt;
+      if (x.init || x.isConstexpr) continue;
+      const c = unparen(x.condition);
+      if (c.kind !== NodeKind.BinaryExpr) continue;
+      const bc = c as BinaryExpr;
+      if ((bc.operator !== '!=' && bc.operator !== '==') || text(bc.left) !== want) continue;
+      if (!x.elseBranch) {
+        // if (X != K1) { if (X != K2) J R } T  ->  switch (X) { case K2: { R } case K1: { T } } J
+        if (bc.operator !== '!=') continue;
+        const st = stmtsOf(x.thenBranch);
+        if (st.length < 2 || st[0].kind !== NodeKind.IfStmt) continue;
+        const y = st[0] as IfStmt;
+        const yc = unparen(y.condition);
+        if (y.elseBranch || y.init || y.isConstexpr || yc.kind !== NodeKind.BinaryExpr || (yc as BinaryExpr).operator !== '!=' || text((yc as BinaryExpr).left) !== want) continue;
+        if (++seen !== f.index) continue;
+        const k1 = bc.right, k2 = (yc as BinaryExpr).right;
+        if (!caseConstant(k1, locals) || !caseConstant(k2, locals) || sameCaseValue(k1, k2)) refuse('the cases are not two distinct constants');
+        if (!inertSwitchValue(bc.left, volatileNames)) refuse(`${f.expr} has side effects or a volatile local`);
+        const rest = asBlock({ kind: NodeKind.CompoundStmt, statements: st.slice(1) } as unknown as Statement);
+        const tail = asBlock({ kind: NodeKind.CompoundStmt, statements: b.statements.slice(k + 1) } as unknown as Statement);
+        if (!leaves(y.thenBranch) || !leaves(rest) || !leaves(tail)) refuse('an arm can fall out');
+        const movedDefault = stmtsOf(y.thenBranch);
+        if (movable(movedDefault, false)) refuse('the default arm cannot move after the switch');
+        if (breaksOut(y.thenBranch) || breaksOut(rest) || breaksOut(tail)) refuse('a break in an arm would leave the switch');
+        for (const a of [rest, tail]) for (const { node } of walk(a)) if (node.kind === NodeKind.LabelStmt || node.kind === NodeKind.CaseStmt || node.kind === NodeKind.DefaultStmt) refuse('a label in an arm');
+        const sw = {
+          kind: NodeKind.SwitchStmt, condition: bc.left,
+          body: { kind: NodeKind.CompoundStmt, statements: [
+            { kind: NodeKind.CaseStmt, value: k2, statement: rest }, { kind: NodeKind.CaseStmt, value: k1, statement: tail }] },
+        } as unknown as Statement;
+        b.statements.splice(k, b.statements.length - k, sw, ...movedDefault);
+        return;
+      }
+      const [inner, other] = bc.operator === '!=' ? [x.thenBranch, x.elseBranch] : [x.elseBranch, x.thenBranch];
+      const st = stmtsOf(inner);
+      if (st.length !== 1 || st[0].kind !== NodeKind.IfStmt) continue;
+      const y = st[0] as IfStmt;
+      if (y.elseBranch || y.init || y.isConstexpr) continue;
+      const parts = chain(y.condition, '&&');
+      const p0 = unparen(parts[0]);
+      if (p0.kind !== NodeKind.BinaryExpr || (p0 as BinaryExpr).operator !== '==' || text((p0 as BinaryExpr).left) !== want) continue;
+      if (++seen !== f.index) continue;
+      const k1 = bc.right, k2 = (p0 as BinaryExpr).right;
+      if (!caseConstant(k1, locals) || !caseConstant(k2, locals) || sameCaseValue(k1, k2)) refuse('the cases are not two distinct constants');
+      if (!inertSwitchValue(bc.left, volatileNames)) refuse(`${f.expr} has side effects or a volatile local`);
+      if (breaksOut(y.thenBranch) || breaksOut(other)) refuse('a break in an arm would leave the switch');
+      for (const a of [y.thenBranch, other]) for (const { node } of walk(a)) if (node.kind === NodeKind.LabelStmt) refuse('a label in an arm');
+      const body2 = parts.length > 1
+        ? ({ kind: NodeKind.IfStmt, condition: join(parts.slice(1), '&&'), thenBranch: y.thenBranch, elseBranch: null, isConstexpr: false } as unknown as Statement)
+        : y.thenBranch;
+      const arm = (v: Expression, body: Statement): Statement[] =>
+        [{ kind: NodeKind.CaseStmt, value: v, statement: asBlock(body) } as unknown as Statement,
+          ...(leaves(body) ? [] : [{ kind: NodeKind.BreakStmt } as unknown as Statement])];
+      b.statements[k] = {
+        kind: NodeKind.SwitchStmt, condition: bc.left,
+        body: { kind: NodeKind.CompoundStmt, statements: [...arm(k2, body2), ...arm(k1, other)] },
+      } as unknown as Statement;
+      return;
+    }
+  }
+  refuse(`no if #${f.index} testing ${f.expr} against two constants`);
+}
+
 const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op: K }>) => void } = {
   seq: doSeq, fold: doFold, join: doJoin, cache: doCache, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
   retval: doRetval, width: doWidth, boolflag: doBoolflag, retwiden: doRetwiden, arms: doArms,
@@ -3475,7 +3622,7 @@ const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op
   cmp: doCmp, swap: doSwap, ifsel: doIfsel, split: doSplit, select: doSelect, decl: doDecl, unselect: doUnselect,
   tsel: doTsel, hoist: doHoist, nestcall: doNestcall, fill: doFill, copy: doCopy, shift: doShift, ptrwalk: doPtrwalk, rowptr: doRowptr,
   acc: doAcc,
-  retvar: doRetvar, onecall: doOnecall, roundup: doRoundup, swmerge: doSwmerge, dec: doDec,
+  retvar: doRetvar, onecall: doOnecall, roundup: doRoundup, swmerge: doSwmerge, dec: doDec, switch: doSwitch,
 };
 
 /**
