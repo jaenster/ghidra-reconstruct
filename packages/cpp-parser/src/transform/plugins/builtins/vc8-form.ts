@@ -91,6 +91,14 @@
  *                        `if (V) { calls; return; } { BODY } calls;`. V must be one
  *                        integral local or parameter. The BODY keeps its scope;
  *                        exits and labels inside BODY are refused.
+ *   tailcopy(C[,i])      the if on C followed by the rest T of its block, which ends in a
+ *                        return (or is the end of a void function), is written `if (!C)
+ *                        { T } { BODY } T`: the tail the arm falls into is also printed on
+ *                        the path that skips the arm. Blizzard wrote the copy; VC8
+ *                        cross-jumps the two and keeps the first, which the arm's end then
+ *                        jumps back into (Q05_Callback13_PlayerStartedGame 00595860,
+ *                        `je 005958b0`). Refused when the arm always leaves, T holds a
+ *                        label or a static declaration, or C may compare floating point.
  *   continue(C[,i])      the guard `if (C) J` that ends a loop body is written
  *                        `if (!C) continue;` followed by J's statements.
  *   select(C[,i])        the guard `if (C) return A;` followed by its block's last
@@ -178,6 +186,13 @@
  *                        come from such a loop (SKILLDESC_FormatSignedValue 004e79e0,
  *                        AUTOMAP_DrawGamePassword 00459e90). The pointer loop's P and N
  *                        must be locals dead after it; refused when a bound leaves int.
+ *   elems(A[,i])         `memset(A[ + K], 0, N * sizeof(A[0]));` (or a byte count, A a local
+ *                        array of a scalar whose size divides it), N at most 16, is written
+ *                        as the N element stores `A[K] = 0; ... A[K+N-1] = 0;`: where the
+ *                        original stores each element, VC8 stores them so, in the order
+ *                        written, where a memset becomes its own dword runs and register
+ *                        choice (UI_ConfigHandleMouseClick 004a5e60 into
+ *                        INPUT_ConfigMouseDown 004a5f10, seven dword stores).
  *   acc(E[,i])           the read E of a unit field, printed `X->F` (or `X->F.G`), that an
  *                        accessor of the tables names (`accessors`: a header inline that
  *                        returns the field, or a constant when X is null) is written as
@@ -288,6 +303,7 @@ export type Vc8Form =
   | { op: 'nest'; cond: string; index: number }
   | { op: 'merge-tail'; cond: string; index: number }
   | { op: 'tailguard'; cond: string; index: number }
+  | { op: 'tailcopy'; cond: string; index: number }
   | { op: 'continue'; cond: string; index: number }
   | { op: 'dup'; stmt: string }
   | { op: 'hoist'; stmt: string; index: number }
@@ -306,6 +322,7 @@ export type Vc8Form =
   | { op: 'switch'; expr: string; index: number }
   | { op: 'nestcall'; name: string; index: number }
   | { op: 'fill'; name: string; index: number }
+  | { op: 'elems'; name: string; index: number }
   | { op: 'copy'; name: string; index: number }
   | { op: 'shift'; expr: string; how: 'sar' | 'shr'; index: number }
   | { op: 'ptrwalk'; counter: string; array: string; name: string; type: string; index: number }
@@ -356,8 +373,8 @@ export interface Vc8FormOptions {
 }
 
 const OPS = new Set(['seq', 'fold', 'join', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'width', 'boolflag', 'retwiden', 'arms',
-  'nest', 'merge-tail', 'tailguard', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
-  'nestcall', 'fill', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'switch', 'dec']);
+  'nest', 'merge-tail', 'tailguard', 'tailcopy', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
+  'nestcall', 'fill', 'elems', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'switch', 'dec']);
 
 /** Split at commas outside brackets and parentheses. For cache, the third argument is a
  * type, so commas inside its template arguments also belong to that argument. */
@@ -440,12 +457,12 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
       // `rowptr(X[I],N,T)`, `rowptr(X[I],N,T,@A)`.
       if (args.length !== 3 || !/\]$/.test(args[0]) || !/^[A-Za-z_]\w*$/.test(args[1]) || args[2] === '') return undefined;
       return { op: 'rowptr', expr: args[0], name: args[1], type: args[2], ...(anchor ? { anchor } : {}) };
-    case 'nestcall': case 'fill': case 'copy': {
+    case 'nestcall': case 'fill': case 'elems': case 'copy': {
       const i = int(args[1], 0);
       if (anchor || args.length < 1 || args.length > 2 || !(i >= 0) || !/^[A-Za-z_]\w*$/.test(args[0])) return undefined;
       return { op: m[1], name: args[0], index: i } as Vc8Form;
     }
-    case 'nest': case 'merge-tail': case 'tailguard': case 'continue': case 'select': case 'tsel': {
+    case 'nest': case 'merge-tail': case 'tailguard': case 'tailcopy': case 'continue': case 'select': case 'tsel': {
       const i = int(args[1], 1);
       if (anchor || args.length < 1 || args.length > 2 || !(i >= 1) || args[0] === '') return undefined;
       return { op: m[1], cond: args[0], index: i } as Vc8Form;
@@ -1984,6 +2001,29 @@ function doTailguard(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'tailguard' }>)
   b.statements.splice(k, 1, guard, arm);
 }
 
+/** Print the tail an if's arm falls into also on the path that skips the arm. */
+function doTailcopy(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'tailcopy' }>): void {
+  const { b, k, s } = nthIf(fn, f.cond, f.index);
+  if (s.isConstexpr) refuse('the if is constexpr');
+  if (leaves(s.thenBranch)) refuse('the arm always leaves');
+  const tail = b.statements.slice(k + 1);
+  if (tail.length === 0) refuse('nothing follows the if');
+  const last = tail[tail.length - 1];
+  const voidEnd = b === fn.body && text(fn.returnType) === 'void';
+  if (last.kind !== NodeKind.ReturnStmt && !voidEnd) refuse('the block does not end in a return');
+  const why = movable(tail, true);
+  if (why) refuse(why);
+  if ([...tail].some(t => [...walk(t)].some(({ node }) => node.kind === NodeKind.VariableDecl
+    && (node as VariableDecl).specifiers.some(x => x === 'static' || x === 'extern')))) refuse('the tail declares a static');
+  const c = unparen(s.condition);
+  const cmp = c.kind === NodeKind.BinaryExpr && FLIP[(c as BinaryExpr).operator];
+  if (cmp && (maybeFloat((c as BinaryExpr).left, fn) || maybeFloat((c as BinaryExpr).right, fn))) refuse('the compare may be floating point');
+  const copy = tail.map(t => cloneNode(t) as Statement);
+  if (last.kind !== NodeKind.ReturnStmt) copy.push({ kind: NodeKind.ReturnStmt } as unknown as Statement);
+  const guard = { ...s, condition: negateWrap(s.condition), thenBranch: { kind: NodeKind.CompoundStmt, statements: copy } as unknown as CompoundStmt } as IfStmt;
+  b.statements.splice(k, 1, guard, asBlock(s.thenBranch));
+}
+
 function doContinue(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'continue' }>): void {
   const { b, k, s } = nthIf(fn, f.cond, f.index);
   if (k !== b.statements.length - 1) refuse('the if does not end its block');
@@ -2652,7 +2692,7 @@ function fillLoop(name: string, from: bigint, to: bigint): Statement {
   return fn.body!.statements[0];
 }
 
-interface FillSite { b: CompoundStmt; k: number; count: number; loop: Statement; dead: string[]; keepDecl?: VariableDecl }
+interface FillSite { b: CompoundStmt; k: number; count: number; loop: Statement; dead: string[]; keepDecl?: VariableDecl; range?: [bigint, bigint] }
 
 function fillSites(fn: FunctionDecl, a: string): FillSite[] {
   const out: FillSite[] = [];
@@ -2682,7 +2722,7 @@ function fillSites(fn: FunctionDecl, a: string): FillSite[] {
         if (bytes !== undefined && el && bytes % BigInt(el) === 0n) n = bytes / BigInt(el);
       }
       if (n === undefined || n <= 0n) return;
-      out.push({ b, k, count: 1, loop: fillLoop(a, off, off + n), dead: [] });
+      out.push({ b, k, count: 1, loop: fillLoop(a, off, off + n), dead: [], range: [off, off + n] });
       return;
     }
     // P = A; for (N = K; N; N--) { P[0] = 0; ... P += m; }
@@ -2734,6 +2774,19 @@ function doFill(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'fill' }>): void {
   hit.b.statements.splice(hit.k, hit.count, ...repl);
   // The pointer and the counter go once nothing names them.
   for (const v of hit.dead) if (!mentionsOutsideDecl(fn, v)) removeDecl(fn, v);
+}
+
+function doElems(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'elems' }>): void {
+  const sites = fillSites(fn, f.name).filter(x => x.range);
+  const hit = f.index === 0 ? (sites.length === 1 ? sites[0] : refuse(`${sites.length} memsets of ${f.name}`)) : (sites[f.index - 1] ?? refuse(`no memset #${f.index} of ${f.name}`));
+  const [from, to] = hit.range!;
+  if (to - from > 16n) refuse(`${to - from} elements, more than 16`);
+  if (to > 0x7fffffffn || from < 0n) refuse('an index leaves int');
+  const hex = (v: bigint) => (v > 9n ? '0x' + v.toString(16) : v.toString());
+  const body: string[] = [];
+  for (let i = from; i < to; i++) body.push(`${f.name}[${hex(i)}] = 0;`);
+  const stores = (parse(`void __vc8f() { ${body.join(' ')} }`).declarations[0] as FunctionDecl).body!.statements;
+  hit.b.statements.splice(hit.k, 1, ...stores);
 }
 
 /** The pointee of a pointer type as printed, or undefined. */
@@ -3659,10 +3712,10 @@ function doSwitch(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'switch' }>): void
 const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op: K }>) => void } = {
   seq: doSeq, fold: doFold, join: doJoin, cache: doCache, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
   retval: doRetval, width: doWidth, boolflag: doBoolflag, retwiden: doRetwiden, arms: doArms,
-  nest: doNest, 'merge-tail': doMergeTail, tailguard: doTailguard, continue: doContinue, dup: doDup, tarms: doTarms, zero: doZero, nonzero: doNonzero,
+  nest: doNest, 'merge-tail': doMergeTail, tailguard: doTailguard, tailcopy: doTailcopy, continue: doContinue, dup: doDup, tarms: doTarms, zero: doZero, nonzero: doNonzero,
   bool: doBool,
   cmp: doCmp, swap: doSwap, ifsel: doIfsel, split: doSplit, select: doSelect, decl: doDecl, unselect: doUnselect,
-  tsel: doTsel, hoist: doHoist, nestcall: doNestcall, fill: doFill, copy: doCopy, shift: doShift, ptrwalk: doPtrwalk, rowptr: doRowptr,
+  tsel: doTsel, hoist: doHoist, nestcall: doNestcall, fill: doFill, elems: doElems, copy: doCopy, shift: doShift, ptrwalk: doPtrwalk, rowptr: doRowptr,
   acc: doAcc,
   retvar: doRetvar, onecall: doOnecall, roundup: doRoundup, swmerge: doSwmerge, dec: doDec, switch: doSwitch,
 };

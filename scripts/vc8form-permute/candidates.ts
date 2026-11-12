@@ -299,6 +299,7 @@ function sites(c: Ctx, maxAnchors: number): string[] {
   for (const { t, i } of indexed(ifs.filter(s => !s.elseBranch).map(s => pr(s.condition)))) {
     for (const op of ['nest', 'merge-tail', 'continue', 'select']) out.add(withIdx(op, t, i, true));
     out.add(withIdx('tailguard', t, i, true));
+    out.add(withIdx('tailcopy', t, i, true));
   }
   // arms: the i-th if/else on its condition where several share it.
   const elseConds = ifs.filter(s => s.elseBranch).map(s => pr(s.condition));
@@ -423,7 +424,7 @@ function sites(c: Ctx, maxAnchors: number): string[] {
       }
     }
   }
-  for (const [op, m] of [['fill', fills], ['copy', copies]] as const) {
+  for (const [op, m] of [['fill', fills], ['elems', fills], ['copy', copies]] as const) {
     for (const [v, n] of m) { out.add(`${op}(${v})`); for (let i = 1; i <= Math.min(n, 8); i++) out.add(`${op}(${v},${i})`); }
   }
   // ptrwalk: a for loop counting i up by one, over X[i] (X a name: a local, a parameter, a global).
