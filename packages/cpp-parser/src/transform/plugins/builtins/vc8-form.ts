@@ -34,8 +34,9 @@
  *                        that evaluates E, in the innermost block holding every E), and
  *                        every E from there to the block's end reads N; for E = `&X`, each
  *                        X reads `*N` (`X.m` reads `N->m`). With an anchor, reads before it
- *                        keep E; `cache(E,N,T,@A,k)` moves only the first k reads. Refused
- *                        when E or a name in E is stored in that range.
+ *                        keep E; `cache(E,N,T,@A,k)` moves only the first k reads. `@call`
+ *                        selects the unique call statement that reads E, for a pure &member.
+ *                        Refused when E or a name in E is stored in that range.
  *   cache(E,N)           N is an existing local stored from E: each E after that store
  *                        reads N, up to the next store to E or N.
  *   own(V,T[,N])         V's initializer is a dead copy Ghidra merged into it: V is
@@ -232,7 +233,7 @@
  *                        smears zeros forward) is no memcpy.
  */
 
-import { NodeKind } from '../../../ast/kinds.js';
+import { NodeKind, isExpression } from '../../../ast/kinds.js';
 import type {
   ASTNode, AssignExpr, BinaryExpr, CallExpr, CompoundStmt, ConditionalExpr, CStyleCastExpr, DeclStmt, Expression,
   ExprStmt, ForStmt, FunctionDecl, Identifier, IfStmt, IntegerLiteralExpr, ParenExpr, ReturnStmt, Statement, SubscriptExpr, TranslationUnit,
@@ -329,14 +330,19 @@ const OPS = new Set(['seq', 'fold', 'cache', 'own', 'guards', 'merge-guards', 'r
   'nest', 'merge-tail', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
   'nestcall', 'fill', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge']);
 
-/** Split at the commas outside brackets, parentheses, angle-free. */
-function splitArgs(s: string): string[] {
+/** Split at commas outside brackets and parentheses. For cache, the third argument is a
+ * type, so commas inside its template arguments also belong to that argument. */
+function splitArgs(s: string, cacheType = false): string[] {
   const out: string[] = [];
-  let depth = 0, cur = '';
+  let depth = 0, typeAngles = 0, cur = '';
   for (const ch of s) {
     if (ch === '(' || ch === '[' || ch === '{') depth++;
     else if (ch === ')' || ch === ']' || ch === '}') depth--;
-    if (ch === ',' && depth === 0) { out.push(cur.trim()); cur = ''; continue; }
+    if (cacheType && out.length === 2 && depth === 0) {
+      if (ch === '<') typeAngles++;
+      else if (ch === '>' && typeAngles > 0) typeAngles--;
+    }
+    if (ch === ',' && depth === 0 && typeAngles === 0) { out.push(cur.trim()); cur = ''; continue; }
     cur += ch;
   }
   if (cur.trim() !== '' || out.length > 0) out.push(cur.trim());
@@ -350,7 +356,7 @@ function splitArgs(s: string): string[] {
 export function parseVc8Form(text: string): Vc8Form | undefined {
   const m = /^\s*([a-z-]+)\s*\(([\s\S]*)\)\s*$/.exec(text);
   if (!m || !OPS.has(m[1])) return undefined;
-  const args = splitArgs(m[2]);
+  const args = splitArgs(m[2], m[1] === 'cache');
   const anchor = args.length > 0 && args[args.length - 1].startsWith('@') ? args.pop()!.slice(1) : undefined;
   const int = (s: string | undefined, d: number) => (s === undefined || s === '' ? d : /^\d+$/.test(s) ? Number(s) : NaN);
   switch (m[1]) {
@@ -984,7 +990,7 @@ function doCache(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'cache' }>): void {
   const byAddress = f.type !== undefined && norm(f.expr).startsWith('&');
   const want = byAddress ? norm(f.expr).slice(1) : norm(f.expr);
   const locals = localNames(fn);
-  const isE = (n: ASTNode) => (n as Expression).kind !== undefined && text(n) === want;
+  const isE = (n: ASTNode) => isExpression(n.kind) && text(n as Expression) === want;
   const stores = (n: ASTNode) => {
     for (const { node } of walk(n)) {
       if (node.kind !== NodeKind.AssignExpr) continue;
@@ -1015,7 +1021,24 @@ function doCache(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'cache' }>): void {
     let block: CompoundStmt | undefined, at = -1;
     if (f.anchor) {
       const a = norm(f.anchor);
-      for (const b of blocks(fn)) { const k = b.statements.findIndex(s => anchors(s, a)); if (k >= 0) { block = b; at = k; break; } }
+      if (a === 'call') {
+        if (!byAddress || !/^[A-Za-z_]\w*(?:(?:->|\.)[A-Za-z_]\w*)+$/.test(want)) {
+          refuse('@call needs the pure address of a member');
+        }
+        const hits: Array<{ b: CompoundStmt; k: number }> = [];
+        for (const b of blocks(fn)) for (let k = 0; k < b.statements.length; k++) {
+          const s = b.statements[k];
+          if (s.kind === NodeKind.ExprStmt && unparen((s as ExprStmt).expression).kind === NodeKind.CallExpr &&
+              [...walk(s)].some(({ node }) => isE(node))) hits.push({ b, k });
+        }
+        if (hits.length !== 1) refuse(`@call needs one call reading ${f.expr}, found ${hits.length}`);
+        block = hits[0]!.b; at = hits[0]!.k;
+      } else {
+        for (const b of blocks(fn)) {
+          const k = b.statements.findIndex(s => anchors(s, a));
+          if (k >= 0) { block = b; at = k; break; }
+        }
+      }
       if (!block) refuse(`no statement stores or tests ${f.anchor}`);
     } else {
       // The innermost block whose statements hold every E.
