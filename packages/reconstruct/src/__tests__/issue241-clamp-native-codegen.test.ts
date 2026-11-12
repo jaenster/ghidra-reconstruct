@@ -4,7 +4,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateProject } from '../codegen/index.js';
 import { vc8formBodyHash } from '../codegen/vc8form-spec.js';
-import type { ExtractedFunction, ExtractedNamespace, ProgramInfo, ReconstructOptions } from '../types.js';
+import type { AnalyzedDataSymbol, ExtractedFunction, ExtractedNamespace, ExtractedStruct, ProgramInfo, ReconstructOptions } from '../types.js';
 
 type NativeCase = Pick<ExtractedFunction, 'address' | 'name' | 'namespace' | 'signature' | 'returnType' | 'callingConvention' | 'size' | 'decompiled'>;
 const native = JSON.parse(readFileSync(new URL('./fixtures/issue241-clamp-native.json', import.meta.url), 'utf8')) as NativeCase[];
@@ -22,6 +22,17 @@ const namespaces: ExtractedNamespace[] = native.map(f => ({
   name: f.namespace!.split('::').at(-1)!, fullPath: f.namespace!, functionCount: 1, isClass: false,
 }));
 
+// The two types the clamp's type guard reads beyond the function's own declarations: the
+// bound gnLadderListRowCount and the source field D2MissilesTxt::Range (short, at 0x96).
+const dataTypes: ExtractedStruct[] = [{
+  name: 'D2MissilesTxt', category: '/', size: 0x98, kind: 'STRUCTURE',
+  fields: [{ name: 'Range', dataType: 'short', offset: 0x96, size: 2 }],
+}];
+const globals: AnalyzedDataSymbol[] = [{
+  name: 'gnLadderListRowCount', address: '0x0070cd70', dataType: 'int32_t', size: 4, namespace: 'D2Multi::ChatDlg',
+  isInitialized: false, xrefCount: 1, referencingFunctions: ['D2Multi::ChatDlg::CHATDLG_UpdateChatRoomList'], scope: 'global',
+}];
+
 function project(tagged: boolean, stale = false) {
   const functions: ExtractedFunction[] = native.map((f, i) => ({
     ...f, parameters: i === 0 ? [] : i === 1
@@ -35,7 +46,7 @@ function project(tagged: boolean, stale = false) {
       data: `clamp(${names[i]});ev=0000000000;bh=${f.size}-00000000;dh=${stale ? 'ffffffff' : vc8formBodyHash(f.decompiled!)}`,
     }] : [],
   }));
-  const result = generateProject('issue241-clamp-native', functions, [], [], [], namespaces, options, programInfo);
+  const result = generateProject('issue241-clamp-native', functions, [], dataTypes, globals, namespaces, options, programInfo);
   return [...result.files.values()].filter(file => file.type === 'implementation').map(file => file.content).join('\n');
 }
 

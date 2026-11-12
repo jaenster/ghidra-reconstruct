@@ -142,7 +142,10 @@
  *                        declaration initialized from E) is written as one select
  *                        `V = E !op L ? E : L;`. Without i, only one site may fit.
  *                        V must be one nonstatic 32-bit integer local. Refused if E or L
- *                        has effects, names V, or V's address is taken.
+ *                        has effects, names V, or V's address is taken; and unless E is
+ *                        an int once promoted (an int, a narrower integer, arithmetic over
+ *                        those) and L an integer of at most 32 bits, so E stands in for V
+ *                        in the test and the select stores what V held.
  *                        Because E is read twice, the tagger must also verify that E
  *                        and L have stable nonvolatile reads; this AST has no global or
  *                        member declaration facts to prove that property by itself.
@@ -2365,6 +2368,50 @@ function doIfsel(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'ifsel' }>): void {
   } else b.statements.splice(k, 1, sel);
 }
 
+/**
+ * Whether e has type int once promoted: an int, a narrower integer, a literal within int, or
+ * arithmetic over those. A 32-bit unsigned, a 64-bit, a floating, an enum or an undeclared
+ * operand is not known to be one and answers false.
+ */
+function promotesToInt(e: Expression, shapeOf: (x: Expression) => { base: string; stars: number } | null): boolean {
+  const narrowInt = (t: string) => { const i = intType(t, false); return !!i && !i.r.u && i.w <= 4; };
+  e = unparen(e);
+  switch (e.kind) {
+    case NodeKind.IntegerLiteral: {
+      const l = e as IntegerLiteralExpr;
+      return !/[ui]|ll/i.test(l.suffix) && l.value <= 0x7fffffffn;
+    }
+    case NodeKind.CharLiteral: case NodeKind.BoolLiteral: return true;
+    case NodeKind.CStyleCastExpr: return narrowInt(text((e as CStyleCastExpr).type));
+    case NodeKind.UnaryExpr: {
+      const u = e as UnaryExpr;
+      if (u.operator === '!') return true;
+      return ['-', '+', '~'].includes(u.operator) && promotesToInt(u.operand, shapeOf);
+    }
+    case NodeKind.BinaryExpr: {
+      const x = e as BinaryExpr;
+      if (['==', '!=', '<', '<=', '>', '>=', '&&', '||'].includes(x.operator)) return true;
+      if (x.operator === '<<' || x.operator === '>>') return promotesToInt(x.left, shapeOf) && promotesToInt(x.right, shapeOf);
+      return ['+', '-', '*', '/', '%', '&', '|', '^'].includes(x.operator) && promotesToInt(x.left, shapeOf) && promotesToInt(x.right, shapeOf);
+    }
+    case NodeKind.ConditionalExpr: {
+      const c = e as ConditionalExpr;
+      return promotesToInt(c.thenExpr, shapeOf) && promotesToInt(c.elseExpr, shapeOf);
+    }
+  }
+  const s = shapeOf(e);
+  return !!s && s.stars === 0 && narrowInt(s.base);
+}
+
+/** Whether e is of an integer type of at most 32 bits, either sign. */
+function integral32(e: Expression, shapeOf: (x: Expression) => { base: string; stars: number } | null): boolean {
+  if (promotesToInt(e, shapeOf)) return true;
+  const u = unparen(e);
+  if (u.kind === NodeKind.IntegerLiteral) return !/i|ll/i.test((u as IntegerLiteralExpr).suffix) && (u as IntegerLiteralExpr).value <= 0xffffffffn;
+  const s = u.kind === NodeKind.CStyleCastExpr ? { base: text((u as CStyleCastExpr).type), stars: 0 } : shapeOf(u);
+  return !!s && s.stars === 0 && (intType(s.base, false)?.w ?? 8) <= 4;
+}
+
 /** Re-form a proven, effect-free clamp as the source select VC8 compiled. */
 function doClamp(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'clamp' }>): void {
   const declarations = [...walk(fn.body!)].filter(x => x.node.kind === NodeKind.VariableDecl && (x.node as VariableDecl).name.name === f.name)
@@ -2425,6 +2472,18 @@ function doClamp(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'clamp' }>): void {
     const v = p as unknown as { name?: Identifier; type?: TypeNode };
     if (v.name && v.type && readNames.has(v.name.name) && text(v.type).includes('volatile')) refuse(`${v.name.name} is volatile`);
   }
+  // E takes V's place in the test and E or L is stored, so both must convert as V and L did:
+  // E is an int once promoted (an unsigned E would flip the test's signedness, a 64-bit one
+  // be compared before truncation), and L an integer of at most 32 bits (a floating L would
+  // round E in the select's common type).
+  const tables = selectTables;
+  const shapeOf = createExprShape(localTypesOf(fn), {
+    globalTypes: tables?.globalTypes ?? {}, enclosingVarTypes: tables?.enclosingVarTypes ?? {},
+    structFields: tables?.structFields ?? {}, fieldTypes: tables?.fieldTypes ?? {},
+    returnTypes: tables?.functionReturnTypes ?? {}, resolve: (n: string) => tables?.typedefTargets?.[n],
+  });
+  if (!promotesToInt(value, shapeOf)) refuse(`${text(value)} is not known to be an int`);
+  if (!integral32(bound, shapeOf)) refuse(`${text(bound)} is not known to be a 32-bit integer`);
   const select = {
     kind: NodeKind.ConditionalExpr,
     condition: { kind: NodeKind.BinaryExpr, operator: opposite[op], left: cloneNode(value), right: cloneNode(bound) },
