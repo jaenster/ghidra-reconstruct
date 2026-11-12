@@ -462,6 +462,48 @@ describe('vc8-form: width', () => {
     assert.ok(sites[0].applied, sites[0].why);
     assert.ok(out.startsWith('void f(int c) { int b; b = false;'), out);
   });
+  // SPELLSEL_DrawTabHighlight 004ab310: the original keeps the hover flags in 32-bit slots.
+  it('widens a bool to BOOL whose stores are comparisons and literals', () => {
+    const { out, sites } = run([
+      'void f(int y, int lo) {', '  bool b;', '  b = false;', '  if (y >= lo) {', '    b = y < lo + 4;', '  }', '  if (!b) {', '    return;', '  }', '  g();', '}',
+    ], 'width(b,BOOL)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.strictEqual(out, 'void f(int y, int lo) { BOOL b; b = false; if (y >= lo) { b = y < lo + 4; } if (!b) { return; } g(); }');
+  });
+  it('widens a bool stored any value when every read is a truth test', () => {
+    const { out, sites } = run(['void f(int n) {', '  bool b;', '  b = n;', '  if (b && n != 3) {', '    g();', '  }', '}'], 'width(b,BOOL)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.strictEqual(out, 'void f(int n) { BOOL b; b = n; if (b && n != 3) { g(); } }');
+  });
+  // A bool normalises a store to 0/1, so its low byte is not the stored value's.
+  it('refuses a bool widened when a store can exceed 0/1 and a read keeps the byte', () => {
+    const src = ['void f(int n) {', '  bool b;', '  b = n;', '  Send((uint8_t)b);', '}'];
+    const { out, sites } = run(src, 'width(b,BOOL)');
+    assert.strictEqual(sites[0].applied, false);
+    assert.match(sites[0].why!, /reads more than whether it is zero/);
+    assert.strictEqual(out, flat(src.join(' ')));
+  });
+  it('refuses a bool widened from a float, which truncates to zero as an int', () => {
+    const { sites } = run(['void f(float x) {', '  bool b;', '  b = x;', '  if (b) {', '    g();', '  }', '}'], 'width(b,BOOL)');
+    assert.strictEqual(sites[0].applied, false);
+    assert.match(sites[0].why!, /no 32-bit integer or pointer/);
+  });
+  it('refuses a bool widened and read as a value after any store', () => {
+    const { sites } = run(['int f(int n) {', '  bool b;', '  b = n;', '  return b + 1;', '}'], 'width(b,BOOL)');
+    assert.strictEqual(sites[0].applied, false);
+  });
+  it('refuses a narrowing to bool whose read keeps the low byte', () => {
+    const { sites } = run(['void f() {', '  int n;', '  n = Read();', '  if ((uint8_t)n != 0) {', '    g();', '  }', '}'], 'width(n,bool)');
+    assert.strictEqual(sites[0].applied, false);
+  });
+  // SStrTokenize 00413b80: a char the original holds in EBX (`xor ebx,ebx` before the byte load).
+  it('widens a char whose stores fit and whose reads are compares', () => {
+    const { out, sites } = run([
+      'void f(char k, char e) {', '  char c;', '  c = k;', '  while (c != e) {', '    c = e;', '  }', '}',
+    ], 'width(c,int)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.strictEqual(out, 'void f(char k, char e) { int c; c = k; while (c != e) { c = e; } }');
+  });
   it('keeps a widening whose stores come from locals of the old type', () => {
     const { sites } = run(['int f(uint16_t a) {', '  uint16_t w;', '  w = a;', '  return w;', '}'], 'width(w,uint32_t)');
     assert.ok(sites[0].applied, sites[0].why);
