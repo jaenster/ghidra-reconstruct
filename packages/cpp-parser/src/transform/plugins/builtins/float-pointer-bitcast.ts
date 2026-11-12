@@ -28,7 +28,8 @@
  * is a conversion C++ has, so both are written as the move the instruction
  * makes: `d2_bits_of` one way, `d2_bits_as<T>` the other. An aggregate whose
  * emitted declaration carries a converting constructor is left alone — there the
- * cast is legal C++ and already means exactly this.
+ * cast is legal C++ and already means exactly this — unless the operand is a
+ * pointer, which that integer constructor cannot take.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -170,8 +171,12 @@ export function createFloatPointerBitcastTransformer(options?: PluginOptions): T
           // not exist. Skipped where the emitted declaration DOES carry a
           // converting constructor (`D2SeedStrc`, `in_addr`): there the cast is
           // legal and already means this, and rewriting it would churn 900 sites
-          // to no effect.
-          if (target.stars === 0 && !!structFields[target.base] && !converting.has(target.base)
+          // to no effect. That constructor takes an INTEGER, though, and an
+          // address reaches no integer implicitly: `(D2PathPointStrc)pDynamicPath`,
+          // a pointer-typed slot the machine reused for a packed point, has no
+          // constructor to call, so it is the same four-byte move as above.
+          if (target.stars === 0 && !!structFields[target.base]
+              && (!converting.has(target.base) || isPointer(operand))
               && !(operand && sameShape(operand, target))) {
             changed = true;
             return Expr.call(
