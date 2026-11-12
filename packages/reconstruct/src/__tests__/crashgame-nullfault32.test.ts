@@ -46,11 +46,11 @@ describe('CrashGame live nullfault32 vc8form fixture', () => {
     assert.match(absent, /\*\(volatile uint8_t\*\)0x0 = 0;/);
     assert.equal(stale, absent);
     assert.match(current, /volatile uint32_t\s*\*\s*pNull = 0;/);
-    assert.match(current, /\*pNull = \(uint32_t\)pNull;/);
+    assert.match(current, /\*pNull = \(uint32_t\)\(uintptr_t\)pNull;/);
     assert.doesNotMatch(current, /\*\(volatile uint8_t\*\)0x0 = 0;/);
     const target = /void __stdcall CrashGame\(\) \{([^}]*)\}/.exec(current)?.[1];
     assert.ok(target);
-    assert.equal(target.replace(/\s+/g, ''), 'volatileuint32_t*pNull=0;*pNull=(uint32_t)pNull;');
+    assert.equal(target.replace(/\s+/g, ''), 'volatileuint32_t*pNull=0;*pNull=(uint32_t)(uintptr_t)pNull;');
     if (process.env.CRASHGAME_EMIT_PATH) writeFileSync(process.env.CRASHGAME_EMIT_PATH, current);
   });
 });

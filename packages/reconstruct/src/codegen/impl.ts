@@ -3492,6 +3492,7 @@ function transformDecompiledCode(
         };
         perPluginOptions['compiler-literal'] = context._compilerLiteralOptions;
       }
+      perPluginOptions['post-strided-counted-loop'] = perPluginOptions['rotated-for-loop'];
       const floatValues = context.funcPtrArgCasts.floatConstantValues;
       const floatConstants = floatValues
         ? [...new Set(enclosing?.referencedDataAddresses ?? [])].flatMap(a => floatValues[a] ? [floatValues[a]] : [])

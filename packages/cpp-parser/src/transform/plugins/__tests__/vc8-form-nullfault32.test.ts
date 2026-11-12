@@ -24,7 +24,7 @@ describe('vc8-form nullfault32', () => {
     const result = run('void __stdcall CrashGame() { *(volatile uint8_t*)0x0 = 0; }');
     assert.equal(result.site.applied, true);
     assert.match(result.output, /volatile uint32_t\s*\*\s*pNull = 0;/);
-    assert.match(result.output, /\*pNull = \(uint32_t\)pNull;/);
+    assert.match(result.output, /\*pNull = \(uint32_t\)\(uintptr_t\)pNull;/);
   });
 
   it('accepts Ghidra’s final bare return and removes it with the fault statement', () => {
