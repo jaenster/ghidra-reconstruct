@@ -1077,7 +1077,7 @@ describe('vc8-form: opas', () => {
     'void dummy(MonStats* pMonStatLine, Unit* pUnit) {',
     '  uint8_t byMinGrp = pMonStatLine->MinGrp;',
     '  uint8_t byMaxGrp = pMonStatLine->MaxGrp;',
-    '  if (!(byMinGrp && byMaxGrp && byMaxGrp >= byMinGrp)) return;',
+    '  if (!(byMinGrp && byMaxGrp && byMinGrp <= byMaxGrp)) return;',
     '  if (!pUnit) return;',
     '  uint32_t nMinionCount = RNG((uint8_t)(byMinGrp - 1));',
     '  for (nMinionIdx = nMinionCount + (uint8_t)(byMinGrp - 1); nMinionIdx > 0; nMinionIdx--) { Spawn(); }',
@@ -1086,18 +1086,21 @@ describe('vc8-form: opas', () => {
   it('accepts a flattened early-return byte guard and initialized first use', () => {
     const { out, sites } = run(FLAT_BYTE, 'opas(byMinGrp,-,1)');
     assert.ok(sites[0].applied, sites[0].why);
-    assert.match(out, /if \(!\(byMinGrp && byMaxGrp && byMaxGrp >= byMinGrp\)\) return; if \(!pUnit\) return; byMinGrp -= 1; uint32_t nMinionCount = RNG\(\(uint8_t\)byMinGrp\);/);
+    assert.match(out, /if \(!\(byMinGrp && byMaxGrp && byMinGrp <= byMaxGrp\)\) return; if \(!pUnit\) return; byMinGrp -= 1; uint32_t nMinionCount = RNG\(\(uint8_t\)byMinGrp\);/);
   });
   it('refuses a missing or changed flattened byte guard, mutation, escape, and bypass jump', () => {
     const variants = [
       FLAT_BYTE.filter(s => !s.includes('if (!(byMinGrp')),
-      FLAT_BYTE.map(s => s.replace('if (!(byMinGrp && byMaxGrp && byMaxGrp >= byMinGrp))', 'if (!byMaxGrp)')),
+      FLAT_BYTE.map(s => s.replace('if (!(byMinGrp && byMaxGrp && byMinGrp <= byMaxGrp))', 'if (!byMaxGrp)')),
       FLAT_BYTE.flatMap(s => s.includes('if (!pUnit)') ? ['  byMinGrp = byMaxGrp;', s] : [s]),
       FLAT_BYTE.flatMap(s => s.includes('if (!pUnit)') ? ['  Leak(&byMinGrp);', s] : [s]),
       FLAT_BYTE.flatMap(s => s.includes('if (!(byMinGrp') ? ['  if (pUnit) goto L;', s, 'L: ;'] : [s]),
       FLAT_BYTE.flatMap(s => s.includes('if (!(byMinGrp') ? ['  CaptureRef(byMinGrp);', s] : [s]),
-      FLAT_BYTE.map(s => s.replace('if (!(byMinGrp && byMaxGrp && byMaxGrp >= byMinGrp))',
-        'if (!(byMinGrp && CaptureRef(byMinGrp) && byMaxGrp >= byMinGrp))')),
+      FLAT_BYTE.map(s => s.replace('if (!(byMinGrp && byMaxGrp && byMinGrp <= byMaxGrp))',
+        'if (!(byMinGrp && CaptureRef(byMinGrp) && byMinGrp <= byMaxGrp))')),
+      // A class-typed operand can dispatch overloaded logical/comparison operators.
+      FLAT_BYTE.map(s => s.replace('uint8_t byMaxGrp', 'Guard byMaxGrp')),
+      FLAT_BYTE.map(s => s.replace('byMinGrp <= byMaxGrp', 'byMaxGrp >= byMinGrp')),
       ['extern uint8_t byMinGrp;', FLAT_BYTE[0], '  if (!byMinGrp) return;',
         FLAT_BYTE[1], FLAT_BYTE[2], ...FLAT_BYTE.slice(4)],
     ];
