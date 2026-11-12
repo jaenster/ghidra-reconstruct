@@ -22,7 +22,11 @@ describe('vc8-form: parsing', () => {
   it('reads each op and its arguments', () => {
     assert.deepStrictEqual(parseVc8Form('seq(a.x,a.y)'), { op: 'seq', targets: ['a.x', 'a.y'] });
     assert.deepStrictEqual(parseVc8Form('cache(p->q[f(a, b)],n,T*,@x)'), { op: 'cache', expr: 'p->q[f(a, b)]', name: 'n', type: 'T*', anchor: 'x' });
+    assert.deepStrictEqual(parseVc8Form('cache(&pThis->tSlotListArray,pArray,TSGrowableArray<TSExplicitList<SGAMEDATA, -572662307>>*,@call)'),
+      { op: 'cache', expr: '&pThis->tSlotListArray', name: 'pArray', type: 'TSGrowableArray<TSExplicitList<SGAMEDATA, -572662307>>*', anchor: 'call' });
     assert.deepStrictEqual(parseVc8Form('cache(g,p)'), { op: 'cache', expr: 'g', name: 'p' });
+    assert.deepStrictEqual(parseVc8Form('cache(p->x < 4 ? p->y : p->z,n,int)'),
+      { op: 'cache', expr: 'p->x < 4 ? p->y : p->z', name: 'n', type: 'int', anchor: undefined });
     assert.deepStrictEqual(parseVc8Form('guards(2)'), { op: 'guards', split: 2, index: 1 });
     assert.deepStrictEqual(parseVc8Form('own(v,DWORD,nBytes)'), { op: 'own', name: 'v', type: 'DWORD', rename: 'nBytes' });
   });
@@ -31,6 +35,7 @@ describe('vc8-form: parsing', () => {
     assert.strictEqual(parseVc8Form('fold(a,b)'), undefined);
     assert.strictEqual(parseVc8Form('seq(a)'), undefined);
     assert.strictEqual(parseVc8Form('guards(x)'), undefined);
+    assert.strictEqual(parseVc8Form('cache(x,y,int,bad)'), undefined);
   });
 });
 
@@ -206,6 +211,42 @@ describe('vc8-form: fold', () => {
 });
 
 describe('vc8-form: cache', () => {
+  it('anchors an address cache before its unique member call with a template-comma type', () => {
+    const form = 'cache(&pThis->tSlotListArray,pArray,TSGrowableArray<TSExplicitList<SGAMEDATA, -572662307>>*,@call)';
+    const { out, sites } = run([
+      'void f(H* pThis) {',
+      '  pThis->InternalClear(1);',
+      '  pThis->tSlotListArray.Destructor();',
+      '  pThis->tSlotListArray.m_alloc = 0;',
+      '  pThis->tSlotListArray.m_count = 0;',
+      '}',
+    ], form);
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.ok(out.includes('pThis->InternalClear(1); TSGrowableArray<TSExplicitList<SGAMEDATA, -572662307>>* pArray = &pThis->tSlotListArray; pArray->Destructor(); pArray->m_alloc = 0; pArray->m_count = 0;'), out);
+  });
+  it('anchors the equivalent static call that passes the member address', () => {
+    const { out, sites } = run(['void f(H* pThis) {', '  TSGrowableArray<TSExplicitList<SGAMEDATA, -572662307>>::Destructor(&pThis->tSlotListArray);', '  pThis->tSlotListArray.m_alloc = 0;', '}'],
+      'cache(&pThis->tSlotListArray,pArray,TSGrowableArray<TSExplicitList<SGAMEDATA, -572662307>>*,@call)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.match(out, /pArray = &pThis->tSlotListArray; TSGrowableArray<.*>::Destructor\(.*pArray.*\); pArray->m_alloc = 0/);
+  });
+  it('refuses @call when no call reads the member address', () => {
+    const { sites } = run(['void f(H* pThis) {', '  g();', '  pThis->tSlotListArray.m_alloc = 0;', '}'],
+      'cache(&pThis->tSlotListArray,pArray,TSGrowableArray<TSExplicitList<SGAMEDATA, -572662307>>*,@call)');
+    assert.strictEqual(sites[0].applied, false);
+    assert.match(sites[0].why ?? '', /found 0/);
+  });
+  it('refuses @call when two calls read the same member address', () => {
+    const { sites } = run(['void f(H* pThis) {', '  g(&pThis->tSlotListArray);', '  h(&pThis->tSlotListArray);', '}'],
+      'cache(&pThis->tSlotListArray,pArray,TSGrowableArray<TSExplicitList<SGAMEDATA, -572662307>>*,@call)');
+    assert.strictEqual(sites[0].applied, false);
+    assert.match(sites[0].why ?? '', /found 2/);
+  });
+  it('refuses moving a side-effecting expression ahead of a call', () => {
+    const { sites } = run(['void f() {', '  g();', '  h(f());', '}'], 'cache(f(),x,int,@call)');
+    assert.strictEqual(sites[0].applied, false);
+    assert.match(sites[0].why ?? '', /pure address of a member/);
+  });
   // Q33_KillAnyaMonsterTimer 00589540: the quest-specific pointer in a local of its own.
   it('hoists a new local before the first statement that reads it', () => {
     const { out, sites } = run([
