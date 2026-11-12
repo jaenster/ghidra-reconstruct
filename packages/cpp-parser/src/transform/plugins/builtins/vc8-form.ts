@@ -1595,6 +1595,25 @@ function checkWidthPreserved(fn: FunctionDecl, v: string, d: VariableDecl, oldT:
   // tagless source truncates at the store; the original keeps the whole count in EBX.
   const keep = Math.min(oldT.w, newT.w);
   const why = (s: string) => `${outOfRange[0].what} can exceed ${both.lo === oldT.r.lo && both.hi === oldT.r.hi ? old : T} and ${s}`;
+  // A bool keeps no low bytes: it stores E as E != 0. The two then agree only on whether V
+  // is zero, so every read must be a truth test and every store a plain one (`b = 0x100`
+  // reads 1 as `(uint8_t)b` in a bool and 0 in an int).
+  if (norm(old) === 'bool' || T === 'bool') {
+    for (const s of stored) if (!s.value) refuse(why(`${s.what} works on the value a bool normalises`));
+    // Zero in one is zero in the other only for an integer of at most 32 bits or a pointer
+    // (a float 0.5 is true as a bool and 0 as an int; a 64-bit 1<<32 is true and 0).
+    for (const s of outOfRange) {
+      const sh = shapeOf(s.value!);
+      if (!sh || (sh.stars === 0 && (intType(sh.base, false)?.w ?? 8) > 4)) refuse(why(`${s.what} may be no 32-bit integer or pointer`));
+    }
+    for (const { node } of walk(fn.body!)) {
+      if (!isId(node, v) || storeNodes.has(node)) continue;
+      let cur: ASTNode = node;
+      for (let p = parents.get(cur); p && p.kind === NodeKind.ParenExpr; p = parents.get(cur)) cur = p;
+      if (!truth.has(unparen(cur as Expression)) && !truth.has(cur)) refuse(why(`${emit((parents.get(cur) ?? cur) as never)} reads more than whether it is zero`));
+    }
+    return;
+  }
   // A compound store keeps the low bytes only where it works on them alone.
   for (const { node } of walk(fn.body!)) {
     if (node.kind === NodeKind.AssignExpr && isId(unparen((node as AssignExpr).left), v)

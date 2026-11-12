@@ -244,6 +244,18 @@ function sites(c: Ctx, maxAnchors: number): string[] {
     if (vars.get(v) === 'bool') out.add(`boolflag(${v})`);
     if (NARROW.has(vars.get(v) ?? '') && callStored.has(v)) out.add(`retwiden(${v})`);
   }
+  // width to a full register: a flag or a one- or two-byte local the original keeps in a
+  // 32-bit register or slot, cast or not (the frame-width class: `xor r32,r32` before a
+  // setcc, a 4-byte slot where the tree declares a byte). doWidth refuses what changes a value.
+  const WNARROW = new Set([...NARROW, 'WCHAR', 'uchar', 'UCHAR', 'CHAR', 'SHORT', 'USHORT']);
+  const UNSIGNED = /^(unsigned|uint|uchar|UCHAR|BYTE|byte|WORD|ushort|USHORT|wchar_t|WCHAR)/;
+  for (const v of locals) {
+    const t = vars.get(v) ?? '';
+    if (t === 'bool') { out.add(`width(${v},BOOL)`); continue; }
+    if (!WNARROW.has(t)) continue;
+    out.add(`width(${v},int)`);
+    if (UNSIGNED.test(t)) out.add(`width(${v},uint32_t)`);
+  }
 
   // decl: a declaration without initializer moved before another declaration of its block.
   for (const b of blocks) {
