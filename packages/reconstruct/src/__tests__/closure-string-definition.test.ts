@@ -160,6 +160,16 @@ describe('closure string definitions', () => {
     assert.strictEqual(cxxStringLiteral(Buffer.from([])), '""');
   });
 
+  it('escapes trigraphs in global string initializers as in closure definitions', () => {
+    for (const suffix of ['=', '/', "'", '(', ')', '!', '<', '>', '-']) {
+      const value = `??${suffix}`;
+      const expected = `"\\?\\?${suffix}"`;
+      assert.strictEqual(emitDataValue({ kind: 'string', value }), expected);
+      assert.strictEqual(cxxStringLiteral(Buffer.from(value)), expected);
+    }
+    assert.strictEqual(emitDataValue({ kind: 'string', value: 'a?b"\\' }), '"a\\?b\\"\\\\"');
+  });
+
   it('renders only what it can define, and nothing when it can define nothing', () => {
     assert.deepStrictEqual(renderClosureDefinitionBlock([]), []);
     assert.deepStrictEqual(

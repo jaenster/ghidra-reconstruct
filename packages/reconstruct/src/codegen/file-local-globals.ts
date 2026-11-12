@@ -290,9 +290,12 @@ export function assignDataHomes(
 ): { homed: number; centrallyDeclared: number } {
   for (const g of globals) { g.homeFile = undefined; g.homeDeclaredCentrally = undefined; homeVeto.delete(g); }
   // One emitted name, one symbol: the bare sanitized spelling, because that is the
-  // token a body names it by and the key user TUs find their include by.
+  // token a body names it by and the key user TUs find their include by. A
+  // function-local static is no such name: it is declared inside its function and
+  // shadows any extern of the same spelling there.
   const nameCount = new Map<string, number>();
   for (const g of globals) {
+    if (g.scope === 'static-local') continue;
     const n = sanitizeSymbolName(g.suggestedName || g.name);
     nameCount.set(n, (nameCount.get(n) ?? 0) + 1);
   }

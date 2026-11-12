@@ -94,7 +94,7 @@ export function buildWorkerCommand(tool: string, params: Params): WorkerCommand 
     case 'list_comments':
       return { command: 'list_comments', params: pick(params, ['offset', 'limit', 'type', 'inFunction']) };
     case 'execute_script': {
-      const p = pick(params, ['code', 'filePath', 'language', 'timeout', 'sandbox'], { scriptTimeout: 'timeout' });
+      const p = pick(params, ['code', 'filePath', 'language', 'timeout', 'sandbox', 'readOnly'], { scriptTimeout: 'timeout' });
       p.language = (params.language as string | undefined) || 'python';
       return { command: 'execute_script', params: p };
     }

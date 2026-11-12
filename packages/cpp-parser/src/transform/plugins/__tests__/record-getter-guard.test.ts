@@ -33,6 +33,22 @@ function run(lines: string[], opts: Partial<RecordGetterGuardOptions> = {}): { o
 const GUARD = 'n >= 0 && n < sgptDataTable->nTxtItemTypesSize && sgptDataTable->pTxtItemTypes + n';
 
 describe('record-getter-guard', () => {
+  // GetSkilParam1 004efc20 after Game.exe v1969: Ghidra prints the table global with
+  // its module namespace, and the record pointer is the same one.
+  it('takes a table global spelled with its namespace', () => {
+    const Q = 'D2Common::Items::sgptDataTable';
+    const r = run([
+      'int f(int n) {',
+      `  if (n >= 0 && n < ${Q}->nTxtItemTypesSize && ${Q}->pTxtItemTypes + n) {`,
+      `    return ${Q}->pTxtItemTypes[n].throwable;`,
+      '  }',
+      '  return 0;',
+      '}',
+    ]);
+    assert.deepStrictEqual(r.sites, ['pItemTypesTxt:1']);
+    assert.ok(r.out.includes(`ItemTypesTxt* pItemTypesTxt = n >= 0 && n < ${Q}->nTxtItemTypesSize ? ${Q}->pTxtItemTypes + n : nullptr;`), r.out);
+  });
+
   // ITEM_GetTxtItemTypes_throwable, 0062ba80.
   it('gives a guarded read its record pointer', () => {
     const r = run([

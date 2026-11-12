@@ -95,6 +95,18 @@ describe('data homes', () => {
     assert.match(dataHomeVeto(gs[1]), /^run-not-whole:home-veto:shared-name/);
   });
 
+  it('a function-local static of the same spelling is no second name', () => {
+    const gs = [
+      local('w', '00700000', 'A.cpp', ['a1', 'a2']),
+      sym('count', '00700004', { referencingFunctions: ['a1', 'b1'] }),
+      local('x', '00700008', 'A.cpp', ['a1', 'a2']),
+      sym('count', '00800000', { scope: 'static-local', ownerFunction: 'c1', referencingFunctions: ['c1'] }),
+    ];
+    assignDataHomes(gs, implOf, inputs);
+    assert.strictEqual(gs[1].homeFile, 'A.cpp');
+    assert.strictEqual(dataHomeVeto(gs[1]), '');
+  });
+
   it('vetoes a name a function owns, and pins what foreign source names to globals.h', () => {
     const gs = [
       local('w', '00700000', 'A.cpp', ['a1']),

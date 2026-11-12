@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { parseHaltLines, haltLinesBatches, haltLinesScript } from '../extract/halt-lines.js';
+import { functionFactsScript } from '../extract/function-facts.js';
 
 describe('halt-lines extraction', () => {
   it('parses the ways into each halt and the probe return addresses', () => {
@@ -22,6 +23,30 @@ describe('halt-lines extraction', () => {
     assert.deepStrictEqual(out.get('00403070'), { halts: [], probeReturns: [0x40307d] });
     assert.deepStrictEqual(out.get('0065c730')?.halts[0].paths[1], { line: null, guard: null });
     assert.strictEqual(out.size, 4);
+  });
+
+  it('parses every branch into a PUSH beside the one that selects it', () => {
+    // SUNITNPC_RollTradeListItemCode: 0x384 is jumped to from +0x30 and fallen into from +0xd6.
+    // ARENA_ApplyScoreModifier: 0x7d is also a switch-table target, so no single guard.
+    const out = parseHaltLines([
+      '00576c90\tc5:ba:383/25/25,384/30/30+d6,389/19/19\t',
+      '0053f630\t19:e:73/5/5+a,7d/-/59,6a0/-\t',
+    ].join('\n'));
+    assert.deepStrictEqual(out.get('00576c90')?.halts[0].paths, [
+      { line: 0x383, guard: 0x25, guards: [0x25] }, { line: 0x384, guard: 0x30, guards: [0x30, 0xd6] }, { line: 0x389, guard: 0x19, guards: [0x19] },
+    ]);
+    assert.deepStrictEqual(out.get('0053f630')?.halts[0].paths, [
+      { line: 0x73, guard: 0x5, guards: [0x5, 0xa] }, { line: 0x7d, guard: null, guards: [0x59] }, { line: 0x6a0, guard: null },
+    ]);
+    assert.ok(haltLinesScript(['00576c90']).includes('java.util.TreeSet<Long> gs'));
+  });
+
+  it('the extraction\'s facts script records each way\'s branch set, as the halt-lines script does', () => {
+    // The extraction reads halt lines through the combined facts script, not haltLinesScript;
+    // a way's branch set must reach the snapshot from there too.
+    const script = functionFactsScript(['00576c90']);
+    assert.ok(script.includes('java.util.TreeSet<Long> gs'));
+    assert.ok(script.includes("if (guards.length() > 0) ways.append('/').append(guards);"));
   });
 
   it('batches functions that print a halt or a code-sized constant store', () => {

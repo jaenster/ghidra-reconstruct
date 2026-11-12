@@ -1,10 +1,10 @@
-/** Full Win 1.14d Ghidra decompiles, captured by address from Redivivus on 2026-11-10. */
+/** Full Win 1.14d Ghidra decompiles, refreshed by address from Redivivus on 2026-11-12. */
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateProject } from '../codegen/index.js';
 import { vc8formBodyHash } from '../codegen/vc8form-spec.js';
-import type { ExtractedFunction, ExtractedNamespace, ProgramInfo, ReconstructOptions } from '../types.js';
+import type { ExtractedStruct, ExtractedFunction, ExtractedNamespace, ProgramInfo, ReconstructOptions } from '../types.js';
 
 type NativeCase = Pick<ExtractedFunction, 'address' | 'name' | 'namespace' | 'signature' | 'returnType' | 'callingConvention' | 'size' | 'decompiled'>;
 const native = JSON.parse(readFileSync(new URL('./fixtures/issue241-clamp-native.json', import.meta.url), 'utf8')) as NativeCase[];
@@ -35,7 +35,9 @@ function project(tagged: boolean, stale = false) {
       data: `clamp(${names[i]});ev=0000000000;bh=${f.size}-00000000;dh=${stale ? 'ffffffff' : vc8formBodyHash(f.decompiled!)}`,
     }] : [],
   }));
-  const result = generateProject('issue241-clamp-native', functions, [], [], [], namespaces, options, programInfo);
+  const types: ExtractedStruct[] = [{ kind: 'STRUCTURE', name: 'D2MissilesTxt', category: '/', size: 420,
+    fields: [{ name: 'Range', dataType: 'short', offset: 150, size: 2 }] }];
+  const result = generateProject('issue241-clamp-native', functions, [], types, [], namespaces, options, programInfo);
   return [...result.files.values()].filter(file => file.type === 'implementation').map(file => file.content).join('\n');
 }
 

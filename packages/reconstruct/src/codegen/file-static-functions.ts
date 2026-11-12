@@ -24,10 +24,28 @@
  *    emits a static's copy, in its own convention, for a call it then inlined. Where
  *    the decompiler printed such a call as the body (`inlinedCalls`, see
  *    inlined-calls.ts), the function is selected with those sites as its callers and
- *    defined `inline`, so the restored calls are inlined again;
+ *    defined `inline`, so the restored calls are inlined again. Where it did not, the
+ *    caller that inlined it is unknown: the function is selected `keepAlive`, and the
+ *    unit holds a reference that compiles to no code and keeps the static's body
+ *    (`keepAliveDefinition`). TOKTBLS_GetTokenIndex 0065c300 takes its first argument
+ *    in EAX and returns with `ret 4`, and nothing in the original references it;
  *  - it is a plain free function: not a method, not a template member, not a thunk,
- *    library or platform-guarded function, and no other symbol shares its name, so
- *    every mention of the name is a mention of it.
+ *    library or platform-guarded function;
+ *  - every mention of its name can be told apart from a mention of another symbol of
+ *    that name. A function with a name of its own is mentioned by that name. One whose
+ *    name another symbol shares (RollSeed 0052c280 in D2Game::GAME::Server and
+ *    D2Common::Drlg::Drlg) is told apart by the namespace the decompiler prints with
+ *    each mention: a mention whose qualifier fits only it is a reference to it, one
+ *    that fits only the other is none, and one that fits both (a bare name) keeps it
+ *    extern. Foreign source is read by name alone, so there any mention of the shared
+ *    name keeps it extern;
+ *  - it is not a header inline (inline-hosts.ts): every TU that calls one defines it.
+ *
+ * The storage says the original was static; it cannot say which register VC8 gives the
+ * rebuild's static, which only a compile shows. Where the VC8 oracle measured that, its
+ * `vc8linkage` tag (vc8-linkage.ts) decides in place of the storage: `extern` keeps a
+ * function the storage selects extern, `static` selects one whose storage shows no
+ * convention of its own, under every other condition above.
  *
  * Hand-written source that only needs to CALL such a function calls its extern entry
  * instead, `<name>_Extern`: a forwarder the unit defines beside the static and the
@@ -53,8 +71,10 @@ import { createHash } from 'node:crypto';
 import { Lexer, TokenKind } from '@ghidra-mcp/cpp-parser';
 import type { DataValue, ExtractedFunction } from '../types.js';
 import { decompiledFunctionName } from './impl.js';
-import { EXTERN_ENTRY_SUFFIX } from './header.js';
+import { EXTERN_ENTRY_SUFFIX, declaredParameters } from './header.js';
 import { abiConvention } from './calling-convention.js';
+import { isInlineHost } from './inline-hosts.js';
+import { vc8LinkageVerdict } from './vc8-linkage.js';
 
 export { EXTERN_ENTRY_SUFFIX };
 
@@ -119,7 +139,7 @@ export interface FileStaticInputs {
   /** The translation unit each EMITTED function is defined in, keyed by address. */
   unitOf: ReadonlyMap<string, string>;
   /** Every data symbol Ghidra has, including the ones the emitters filter. */
-  globals: ReadonlyArray<{ name?: string; suggestedName?: string; initializedData?: DataValue }>;
+  globals: ReadonlyArray<{ name?: string; suggestedName?: string; namespace?: string; initializedData?: DataValue }>;
   /** Free functions that must keep external linkage (methods, template members). */
   keepExtern?: (func: ExtractedFunction) => boolean;
   /**
@@ -147,6 +167,49 @@ export interface ForeignSource {
 
 /** File extensions read from a foreign-reference directory. */
 const FOREIGN_SOURCE_EXTENSIONS = new Set(['.c', '.cc', '.cpp', '.cxx', '.h', '.hh', '.hpp', '.hxx', '.inl', '.s', '.S', '.asm']);
+
+/**
+ * Files in a foreign-reference directory that the regen itself writes, not a person:
+ * ghidra_version.cpp carries the Ghidra version the tree was generated from, and the
+ * live daemon's merge into source/modified changes it on every publish. Read as an
+ * input, it made each publish look like a commit to the foreign sources and queued a
+ * full rebuild that re-emitted nothing. It defines no name the generator looks up.
+ */
+const REGEN_WRITTEN_FILES = new Set(['ghidra_version.cpp']);
+
+function isForeignSource(rel: string): boolean {
+  return FOREIGN_SOURCE_EXTENSIONS.has(nodePath.extname(rel)) && !REGEN_WRITTEN_FILES.has(nodePath.basename(rel));
+}
+
+/**
+ * The committed source blobs under `object` (a tree or a blob at HEAD), sorted by
+ * path. The fingerprint is made of these ids, not of the tree id, so a commit that
+ * changes only a regen-written file leaves it unchanged.
+ */
+function foreignBlobs(loc: { top: string; sub: string }, object: string): Array<{ id: string; path: string }> {
+  const blobs: Array<{ id: string; path: string }> = [];
+  const type = git(loc.top, ['cat-file', '-t', object]).trim();
+  if (type === 'blob') {
+    blobs.push({ id: object, path: loc.sub });
+  } else {
+    for (const rec of git(loc.top, ['ls-tree', '-r', '-z', object]).split('\0')) {
+      if (!rec) continue;
+      const tab = rec.indexOf('\t');
+      const [, kind, id] = rec.slice(0, tab).split(' ');
+      const rel = rec.slice(tab + 1);
+      if (kind !== 'blob' || !isForeignSource(rel)) continue;
+      blobs.push({ id, path: loc.sub === '.' ? rel : `${loc.sub}/${rel}` });
+    }
+  }
+  blobs.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  return blobs;
+}
+
+function blobsDigest(blobs: ReadonlyArray<{ id: string; path: string }>): string {
+  const h = createHash('sha256');
+  for (const b of blobs) h.update(`${b.path}\u0000${b.id}\u0000`);
+  return h.digest('hex');
+}
 
 type ForeignEntry = { path: string; addressBase?: string | number };
 
@@ -234,23 +297,8 @@ export function readForeignSourcesAt(
     h.update(`${root}\u0000${base ?? ''}\u0000`);
     const loc = gitLocation(root);
     if (loc) {
-      const object = headObject(loc, root);
-      h.update(`git:${object}\u0000`);
-      const blobs: Array<{ id: string; path: string }> = [];
-      const type = git(loc.top, ['cat-file', '-t', object]).trim();
-      if (type === 'blob') {
-        blobs.push({ id: object, path: loc.sub });
-      } else {
-        for (const rec of git(loc.top, ['ls-tree', '-r', '-z', object]).split('\0')) {
-          if (!rec) continue;
-          const tab = rec.indexOf('\t');
-          const [, kind, id] = rec.slice(0, tab).split(' ');
-          const rel = rec.slice(tab + 1);
-          if (kind !== 'blob' || !FOREIGN_SOURCE_EXTENSIONS.has(nodePath.extname(rel))) continue;
-          blobs.push({ id, path: loc.sub === '.' ? rel : `${loc.sub}/${rel}` });
-        }
-      }
-      blobs.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+      const blobs = foreignBlobs(loc, headObject(loc, root));
+      h.update(`git:${blobsDigest(blobs)}\u0000`);
       if (blobs.length === 0) continue;
       const raw = execFileSync('git', ['-C', loc.top, 'cat-file', '--batch'], {
         input: blobs.map(b => b.id).join('\n') + '\n', maxBuffer: 1 << 30,
@@ -270,7 +318,7 @@ export function readForeignSourcesAt(
       if (st.isDirectory()) {
         for (const name of nodeFs.readdirSync(p).sort()) {
           const child = nodePath.join(p, name);
-          if (nodeFs.statSync(child).isDirectory() || FOREIGN_SOURCE_EXTENSIONS.has(nodePath.extname(name))) walk(child);
+          if (nodeFs.statSync(child).isDirectory() || isForeignSource(name)) walk(child);
         }
       } else {
         files.push(p);
@@ -289,8 +337,8 @@ export function readForeignSourcesAt(
 
 /**
  * One hash naming exactly what `readForeignSources` would read now: per entry, the
- * committed object at HEAD (a git tree id is already a content hash), or the
- * contents of the files outside git. A commit that leaves those files alone - the
+ * path and blob id of each committed source file at HEAD (a blob id is already a
+ * content hash), or the contents of the files outside git. A commit that leaves those files alone - the
  * live daemon's own merge into the tree that holds them - leaves it unchanged.
  * Equal to the fingerprint `readForeignSourcesAt` returns for the same commit.
  */
@@ -301,7 +349,7 @@ export function foreignSourcesFingerprint(entries: ReadonlyArray<ForeignEntry>, 
     h.update(`${root}\u0000${base ?? ''}\u0000`);
     const loc = gitLocation(root);
     if (loc) {
-      h.update(`git:${headObject(loc, root)}\u0000`);
+      h.update(`git:${blobsDigest(foreignBlobs(loc, headObject(loc, root)))}\u0000`);
     } else {
       for (const src of readForeignSources([entry], baseDir)) h.update(`${src.path}\u0000${src.text}\u0000`);
     }
@@ -341,18 +389,33 @@ export type FileStaticRefusal =
   | 'referenced from excluded code'
   | 'named by a data initializer'
   | 'named by foreign source'
-  | 'no caller in its unit';
+  | 'no caller in its unit'
+  | 'a header inline'
+  | 'measured extern by the VC8 oracle';
+
+/**
+ * A selected function: the unit it is static in, the functions of that unit naming it,
+ * `inline` when those are inlined calls the rebuild writes back, and `keepAlive` when
+ * nothing names it and the unit keeps its body alive by a reference of its own.
+ */
+export interface FileStaticEntry { unit: string; referrers: Set<string>; inline?: boolean; keepAlive?: boolean }
 
 export interface FileStaticSelection {
   /**
-   * address -> the unit it is static in, and the functions of that unit naming it;
-   * `inline` when those are inlined calls the rebuild writes back.
+   * address -> the unit it is static in, and how (FileStaticEntry).
    */
-  selected: Map<string, { unit: string; referrers: Set<string>; inline?: boolean }>;
+  selected: Map<string, FileStaticEntry>;
   /** Candidates (foreign register storage) kept extern, per reason. */
   refused: Map<FileStaticRefusal, string[]>;
-  /** Functions with parameter storage in a register their convention does not use. */
+  /**
+   * Functions with parameter storage in a register their convention does not use, and
+   * those a `vc8linkage:static` tag selects.
+   */
   candidates: number;
+  /** Candidates a `vc8linkage:static` tag selects although their storage does not. */
+  measuredStatic: number;
+  /** `vc8linkage` tags left out, by function name. */
+  staleLinkageTags: Array<{ name: string; tag: string; why: string }>;
   /**
    * Functions foreign source calls through their extern entry (`<name>_Extern`),
    * by address key: the unit defines the entry, its header declares it.
@@ -376,11 +439,12 @@ function initializerValues(dv: DataValue | undefined, out: string[]): void {
 
 /**
  * Every name a body references (the last segment of a qualified chain) and every
- * integer literal in it, each with whether a call follows it.
+ * integer literal in it, each with whether a call follows it. A name's qualifier is the
+ * chain before it, `A::B` for `A::B::name` ('' for a bare name, '::' for `::name`).
  */
 export function scanReferences(
   text: string,
-  onName: (name: string, call: boolean) => void,
+  onName: (name: string, call: boolean, qualifier: string) => void,
   onInteger: (value: number, call: boolean) => void,
 ): void {
   let tokens: Array<{ kind: TokenKind; text: string }>;
@@ -404,12 +468,40 @@ export function scanReferences(
     const t = tokens[i];
     const call = tokens[i + 1]?.kind === TokenKind.LeftParen;
     if (t.kind === TokenKind.Identifier) {
-      if (tokens[i + 1]?.kind !== TokenKind.ColonColon) onName(t.text, call);
+      if (tokens[i + 1]?.kind !== TokenKind.ColonColon) onName(t.text, call, qualifierBefore(tokens, i));
     } else if (t.kind === TokenKind.IntegerLiteral) {
       const v = Number.parseInt(t.text.replace(/[uUlL]+$/, ''), /^0[xX]/.test(t.text) ? 16 : 10);
       if (Number.isFinite(v) && v > 0) onInteger(v, call);
     }
   }
+}
+
+/** The qualifier spelled before tokens[i]: `A::B` for `A::B::name`, '::' for `::name`, else ''. */
+function qualifierBefore(tokens: ReadonlyArray<{ kind: TokenKind; text: string }>, i: number): string {
+  const parts: string[] = [];
+  let j = i;
+  while (j >= 2 && tokens[j - 1].kind === TokenKind.ColonColon && tokens[j - 2].kind === TokenKind.Identifier) {
+    parts.unshift(tokens[j - 2].text);
+    j -= 2;
+  }
+  if (j >= 1 && tokens[j - 1].kind === TokenKind.ColonColon) return parts.length ? `::${parts.join('::')}` : '::';
+  return parts.join('::');
+}
+
+/** `ns::name`, or the name alone without a namespace. */
+const qualifiedName = (ns: string | undefined, name: string): string => (ns ? `${ns}::${name}` : name);
+
+/**
+ * The symbols of `names` (qualified) a mention of `leaf` with `qualifier` can mean: the
+ * one spelled so exactly, or every one whose name ends with it. A leading `::` means the
+ * qualifier is complete.
+ */
+function meant(names: ReadonlyArray<string>, leaf: string, qualifier: string): string[] {
+  if (qualifier === '' ) return [...names];
+  if (qualifier === '::') return names.filter(n => n === leaf);
+  const full = `${qualifier.replace(/^::/, '')}::${leaf}`;
+  if (qualifier.startsWith('::')) return names.filter(n => n === full);
+  return names.filter(n => n === full || n.endsWith(`::${full}`));
 }
 
 export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticSelection {
@@ -423,22 +515,47 @@ export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticS
   const bump = (n: string | undefined): void => {
     if (n) nameCount.set(n, (nameCount.get(n) ?? 0) + 1);
   };
-  for (const f of inputs.allFunctions) bump(f.name);
+  // Every symbol's qualified name, by its name: what a mention of a shared name can mean.
+  const spellings = new Map<string, string[]>();
+  const spell = (n: string | undefined, ns: string | undefined): void => {
+    if (!n) return;
+    const list = spellings.get(n);
+    if (list) list.push(qualifiedName(ns, n)); else spellings.set(n, [qualifiedName(ns, n)]);
+  };
+  for (const f of inputs.allFunctions) { bump(f.name); spell(f.name, f.namespace); }
   for (const g of inputs.globals) {
     bump(g.name);
-    if (g.suggestedName && g.suggestedName !== g.name) bump(g.suggestedName);
+    spell(g.name, g.namespace);
+    if (g.suggestedName && g.suggestedName !== g.name) { bump(g.suggestedName); spell(g.suggestedName, g.namespace); }
   }
 
   // Candidates, and the spellings a reference to each can take.
   const candidates = new Map<string, ExtractedFunction>();   // address key -> function
   const byName = new Map<string, string>();                  // spelling -> address key
+  // Candidates whose name another symbol shares: name -> qualified name -> address key.
+  const shared = new Map<string, Map<string, string>>();
   let candidateCount = 0;
+  let measuredStatic = 0;
+  const staleLinkageTags: Array<{ name: string; tag: string; why: string }> = [];
   for (const func of inputs.allFunctions) {
     if (func.isExternal || func.isThunk) continue;
-    if (foreignParameterRegisters(func).length === 0) continue;
-    candidateCount++;
     const key = addressKey(func.address);
+    const verdict = vc8LinkageVerdict(func);
+    if (inputs.unitOf.has(key)) for (const s of verdict.stale) staleLinkageTags.push({ name: func.name, ...s });
+    const storage = foreignParameterRegisters(func).length > 0;
+    if (!storage && verdict.linkage !== 'static') continue;
+    candidateCount++;
     if (!inputs.unitOf.has(key)) continue;      // not emitted: nothing to declare
+    if (verdict.linkage === 'extern') {
+      refuse('measured extern by the VC8 oracle', func);
+      continue;
+    }
+    if (!storage) measuredStatic++;
+    // Every TU that calls a header inline defines it (inline-hosts.ts): none can own it.
+    if (isInlineHost(func)) {
+      refuse('a header inline', func);
+      continue;
+    }
     if (func.isLibrary || func.ifdef || func.platform || func.parentClass ||
         func.name.includes('@') || func.name.startsWith('operator') || func.name.startsWith('~') ||
         inputs.keepExtern?.(func)) {
@@ -446,7 +563,16 @@ export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticS
       continue;
     }
     if ((nameCount.get(func.name) ?? 0) > 1) {
-      refuse('name shared with another symbol', func);
+      // Told apart by its namespace, when it has one and no other symbol spells it so.
+      const own = qualifiedName(func.namespace, func.name);
+      if (!func.namespace || (spellings.get(func.name) ?? []).filter(n => n === own).length !== 1) {
+        refuse('name shared with another symbol', func);
+        continue;
+      }
+      candidates.set(key, func);
+      let byQualified = shared.get(func.name);
+      if (!byQualified) shared.set(func.name, (byQualified = new Map()));
+      byQualified.set(own, key);
       continue;
     }
     candidates.set(key, func);
@@ -465,6 +591,22 @@ export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticS
     list.push({ from, unit: inputs.unitOf.get(from), call });
   };
 
+  // A mention of a shared name: a reference to the one candidate it fits, nothing when
+  // it fits only other symbols, and a mention that fits a candidate and another symbol
+  // keeps that candidate extern.
+  const ambiguous = new Set<string>();
+  const noteShared = (name: string, qualifier: string, from: ExtractedFunction, call: boolean): void => {
+    const byQualified = shared.get(name)!;
+    const fits = meant(spellings.get(name) ?? [], name, qualifier);
+    // A function's own name in its decompile is its definition (or a call to itself).
+    if (name === from.name && fits.includes(qualifiedName(from.namespace, from.name))) return;
+    const key = addressKey(from.address);
+    const keys = fits.map(n => byQualified.get(n)).filter((k): k is string => k !== undefined);
+    if (keys.length === 0) return;
+    if (fits.length === 1) { note(keys[0], key, call); return; }
+    for (const k of keys) if (k !== key) ambiguous.add(k);
+  };
+
   if (candidates.size > 0) {
     for (const func of inputs.allFunctions) {
       if (func.isExternal) continue;
@@ -477,7 +619,8 @@ export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticS
       }
       for (const text of [func.decompiled, inputs.extraReferenceText?.(func)]) {
         if (!text) continue;
-        scanReferences(text, (name, call) => {
+        scanReferences(text, (name, call, qualifier) => {
+          if (shared.has(name)) { noteShared(name, qualifier, func, call); return; }
           let target = byName.get(name);
           if (!target) {
             const m = GHIDRA_DEFAULT_LABEL.exec(name);
@@ -500,6 +643,12 @@ export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticS
       initializerValues(g.initializedData, values);
       for (const v of values) {
         const last = v.split('::').pop()!;
+        const byQualified = shared.get(last);
+        if (byQualified) {
+          const fits = meant(spellings.get(last) ?? [], last, v.slice(0, Math.max(0, v.length - last.length - 2)));
+          for (const n of fits) { const k = byQualified.get(n); if (k) dataReferenced.add(k); }
+          continue;
+        }
         let target = byName.get(last);
         if (!target && /^(0x)?[0-9a-fA-F]{6,8}$/.test(v)) {
           const k = addressKey(v);
@@ -520,6 +669,9 @@ export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticS
   if (inputs.foreignSources?.length) {
     for (const func of inputs.allFunctions) {
       if (func.isExternal || func.isThunk || func.hasVarArgs) continue;
+      // A header inline is extern and defined in every TU that calls it: hand-written
+      // code calls it by its own name.
+      if (isInlineHost(func)) continue;
       if (func.isLibrary || func.ifdef || func.platform || func.parentClass ||
           func.name.includes('@') || func.name.startsWith('operator') || func.name.startsWith('~') ||
           inputs.keepExtern?.(func)) continue;
@@ -535,6 +687,8 @@ export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticS
       const byNameOrLabel = (name: string, call: boolean): void => {
         const entry = entryOf.get(name);
         if (entry) (call ? externEntries : entryValueUse).add(entry);
+        // Foreign source is read by name alone: a shared name may mean the candidate.
+        for (const k of shared.get(name)?.values() ?? []) foreignReferenced.add(k);
         const target = byName.get(name) ?? GHIDRA_DEFAULT_LABEL.exec(name)?.[1].toLowerCase();
         if (target && candidates.has(target)) foreignReferenced.add(target);
       };
@@ -549,31 +703,59 @@ export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticS
     }
   }
 
-  const selected = new Map<string, { unit: string; referrers: Set<string>; inline?: boolean }>();
+  const selected = new Map<string, FileStaticEntry>();
   const unreferenced: Array<{ key: string; func: ExtractedFunction; unit: string }> = [];
+  // Nothing references it: its every call was inlined, by a caller the decompile does not
+  // show. The unit keeps the body alive itself; that needs a call it can spell.
+  // Only a function whose storage no convention the rebuild can spell explains, or one
+  // the oracle measured static: LEVEL_CountRoomsInAct 0053b090 (ECX and DL, declared
+  // __stdcall) is the __fastcall its declaration prints, and matches extern.
+  const keepAlive = (key: string, func: ExtractedFunction, unit: string): void => {
+    const spelled = abiConvention(func) ?? func.callingConvention;
+    const ownConvention = foreignParameterRegisters({ ...func, callingConvention: spelled }).length > 0;
+    if (!keepAliveSpellable(func) || (!ownConvention && vc8LinkageVerdict(func).linkage !== 'static')) {
+      refuse('no caller in its unit', func);
+      return;
+    }
+    selected.set(key, { unit, referrers: new Set(), keepAlive: true });
+  };
   for (const [key, func] of candidates) {
     const unit = inputs.unitOf.get(key)!;
     const refs = referrers.get(key) ?? [];
     if (dataReferenced.has(key)) { refuse('named by a data initializer', func); continue; }
     if (foreignReferenced.has(key)) { refuse('named by foreign source', func); continue; }
+    if (ambiguous.has(key)) { refuse('name shared with another symbol', func); continue; }
     if (refs.some(r => r.unit === undefined)) { refuse('referenced from excluded code', func); continue; }
     if (refs.some(r => r.unit !== unit)) { refuse('referenced from another unit', func); continue; }
     if (refs.length === 0 && inputs.inlinedCalls) { unreferenced.push({ key, func, unit }); continue; }
+    if (refs.length === 0) { keepAlive(key, func, unit); continue; }
     if (!refs.some(r => r.call)) { refuse('no caller in its unit', func); continue; }
     selected.set(key, { unit, referrers: new Set(refs.map(r => r.from)) });
   }
   if (unreferenced.length > 0) {
     const sites = inputs.inlinedCalls!(unreferenced);
     for (const { key, func, unit } of unreferenced) {
-      const from = [...(sites.get(key) ?? [])].filter(f => f !== key && inputs.unitOf.get(f) === unit);
-      if (from.length === 0) { refuse('no caller in its unit', func); continue; }
+      const all = [...(sites.get(key) ?? [])].filter(f => f !== key);
+      const from = all.filter(f => inputs.unitOf.get(f) === unit);
+      // Copies inlined only into other units: the function was not this unit's own.
+      if (from.length === 0 && all.length > 0) { refuse('no caller in its unit', func); continue; }
+      if (from.length === 0) { keepAlive(key, func, unit); continue; }
       selected.set(key, { unit, referrers: new Set(from), inline: true });
     }
   }
   // An entry whose address foreign code takes is not a call through it: a patch that
   // redirects calls to that address would miss every call the unit makes.
   for (const k of entryValueUse) externEntries.delete(k);
-  return { selected, refused, candidates: candidateCount, externEntries };
+  return { selected, refused, candidates: candidateCount, measuredStatic, staleLinkageTags, externEntries };
+}
+
+/**
+ * Whether the keep-alive reference can call the function: every parameter a type that
+ * `*(T *)0` spells (no reference, no array, no function type) and no varargs.
+ */
+export function keepAliveSpellable(func: ExtractedFunction): boolean {
+  if (func.hasVarArgs) return false;
+  return declaredParameters(func).every(p => p.type !== '' && !/[&[(]/.test(p.type));
 }
 
 /** Address key used by the selection, for lookups from the emitters. */

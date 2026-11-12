@@ -221,6 +221,38 @@ describe('switchChainPlugin', () => {
     assert.ok(out.includes('switch (v) { case 0: { A(); return 1; } case 1: { B(); return 1; } default: { return 0; } }'), out);
   });
 
+  // MONSTERAI_GetAliveKillerUnit 005de830: the monster case opens with tests of its own.
+  it('reads `if (v == K && R) B` with the test on its own line as case K: { if (R) B }', () => {
+    const lines = (second: string, third = '<CMP ECX - 4 0x20> p->m != 4) {') => [
+      'void *f(int *p) {',
+      'int v;',
+      '<SUB EAX 0 0 0x10> if (v != 0) {',
+      second,
+      third,
+      '[0x40] return g(p);',
+      '}',
+      '}',
+      'else {',
+      '[0x30] if (p) {',
+      '[0x34] return p;',
+      '}',
+      '}',
+      '[0x50] return 0;',
+      '}',
+    ];
+    const { out, sites } = run(lines('<SUB EAX 1 1 0x15> if (v == 1 &&'));
+    assert.deepStrictEqual(sites, ['switch']);
+    assert.ok(out.includes('switch (v) { case 0: { if (p) { return p; } break; } case 1: { if (p->m != 4) { return g(p); } break; } } return 0;'), out);
+    // The case's own test on the same line: which instruction is whose is not known.
+    const same = run(lines('<SUB EAX 1 1 0x15> <CMP ECX - 4 0x20> if (v == 1 && p->m != 4) {', ''));
+    assert.ok(!same.out.includes('switch'), same.out);
+    assert.ok(same.out.includes('if (v == 1 && p->m != 4)'), same.out);
+    // With an else, the else is reached from two places: left, and printed as it was.
+    const full = lines('<SUB EAX 1 1 0x15> if (v == 1 &&');
+    const withElse = run([...full.slice(0, 6), '} else { h(); }', ...full.slice(7)]);
+    assert.ok(!withElse.out.includes('switch') && withElse.out.includes('if (v == 1 && p->m != 4)'), withElse.out);
+  });
+
   it('takes `if (v != K) X else Y` as K: Y, default: X', () => {
     const { out } = run([
       'void f(int v) {',
@@ -310,6 +342,51 @@ describe('switchChainPlugin', () => {
       '[0x30] A();',
       '}',
       '<SUB EAX 2 3 0x15> else if (v == 3) {',
+      '[0x40] B();',
+      '}',
+      '}',
+      '}',
+    ]);
+    assert.ok(sites.includes('left:split'), sites.join());
+    assert.ok(!out.includes('switch'), out);
+  });
+
+  it('takes a chain on a value the block assigns under the relational test (DRLGPRESET_AddPresetUnitToDrlgMap, 00667620)', () => {
+    // `if (nMonClassId < nTableSize) .. else { nTableSize = ..; if (nTableSize == 0x21) ..`:
+    // the countdown `sub ecx, 0x21; je; sub ecx, 1; je; sub ecx, 1; jne` runs on the new value.
+    const { out, sites } = run([
+      'void f(int nMonClassId, int nTableSize, int nMonExtraBase) {',
+      '[0x8] if (nMonClassId < nTableSize) {',
+      '[0x10] A();',
+      '}',
+      'else {',
+      '[0x18] nTableSize = (nMonClassId - nTableSize) - nMonExtraBase;',
+      '<SUB ECX 33 33 0x20> if (nTableSize == 0x21) {',
+      '[0x60] return;',
+      '}',
+      '<SUB ECX 1 34 0x25> if (nTableSize == 0x22) {',
+      '[0x50] B();',
+      'return;',
+      '}',
+      '<SUB ECX 1 35 0x2a> if (nTableSize == 0x23) {',
+      '[0x40] C();',
+      '}',
+      '}',
+      '}',
+    ]);
+    assert.ok(sites.includes('switch'), sites.join());
+    assert.ok(out.includes('switch (nTableSize) {'), out);
+  });
+
+  it('still leaves a chain under the relational test when the block assigns another variable', () => {
+    const { out, sites } = run([
+      'void f(int v, int w) {',
+      '[0x8] if (v < 10) {',
+      '[0x10] w = 3;',
+      '<SUB EAX 1 1 0x20> if (v == 1) {',
+      '[0x30] A();',
+      '}',
+      '<SUB EAX 2 3 0x25> else if (v == 3) {',
       '[0x40] B();',
       '}',
       '}',
@@ -457,6 +534,29 @@ describe('switchChainPlugin', () => {
     assert.ok(run(lines('int a;', 'g'), { varTypes: { g: 'int' } }).out.includes('switch (g)'));
     assert.ok(run(lines('int a;', 'q->n'), { fieldTypes: { n: 'BYTE' } }).out.includes('switch (q->n)'));
     assert.ok(!run(lines('int a;', 'q->m')).out.includes('switch'));
+  });
+
+  it('takes a short local in every spelling the parser prints (AITHINK_Fn1_ClawViper 005f1b60)', () => {
+    // `if (nStateType) { if (nStateType != 2) <blue> else <red> }` over `SUB EAX,0; SUB EAX,2`.
+    const lines = (decl: string) => [
+      'void f() {',
+      decl,
+      '<SUB EAX 0 0 0x10> if (nStateType != 0) {',
+      '<SUB EAX 2 2 0x15> if (nStateType != 2) {',
+      '[0x30] A();',
+      '}',
+      'else {',
+      '[0x20] B();',
+      '}',
+      '}',
+      '}',
+    ];
+    for (const decl of ['short nStateType;', 'short int nStateType;', 'unsigned short nStateType;', 'long nStateType;', 'signed int nStateType;']) {
+      const { out, sites } = run(lines(decl));
+      assert.ok(out.includes('switch (nStateType)'), `${decl}: ${out}`);
+      assert.ok(!sites.includes('left:type'), `${decl}: ${sites}`);
+    }
+    assert.ok(run(lines('float nStateType;')).sites.includes('left:type'));
   });
 
   it("types a field by its aggregate's own declaration, and a namespaced global by its name", () => {
@@ -718,5 +818,31 @@ describe('switchChainPlugin', () => {
     const t = switchChainPlugin.createTransformer({ branchLayout: ev });
     const once = t(parse(code));
     assert.strictEqual(flat(emit(t(once) as AnyNode)), flat(emit(once as AnyNode)));
+  });
+  // AITHINK_Fn1_ClawViper 005f1b60: comma-expand split `if (dwArg0 && (n = x, n != 0))` into
+  // two ifs on the decompile's line; the inner one's tests are on its condition's own line.
+  it('reads a split-off if\'s tests from its own condition\'s lines', () => {
+    const lines = [
+      'void f(int a, int n) {',
+      'if (a) { if (',
+      '<SUB EAX 0 0 0x10> n != 0) {',
+      '<SUB EAX 2 2 0x15> if (n == 2) {',
+      '[0x40] R();',
+      '}',
+      'else {',
+      '[0x30] B();',
+      '}',
+      '}',
+      '}',
+      '}',
+    ];
+    const { out, sites } = run(lines);
+    assert.ok(sites.includes('switch'), sites.join());
+    assert.ok(out.includes('switch (n)'), out);
+    assert.ok(/case 2: \{ R\(\); break; \}/.test(out) && /case 0: \{ break; \}/.test(out) && /default: \{ B\(\);/.test(out), out);
+    // A second condition on that line makes it no evidence.
+    const shared = [...lines];
+    shared[2] = '<SUB EAX 0 0 0x10> n != 0 && (m ? 1 : 0)) { if (m) {}';
+    assert.ok(!run(shared).out.includes('switch'), run(shared).out);
   });
 });

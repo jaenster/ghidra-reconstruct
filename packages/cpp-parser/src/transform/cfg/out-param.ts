@@ -11,15 +11,21 @@
  *
  * The analysis is a forward must-analysis over the callee's control-flow graph with one
  * bit, "the pointee has been written":
- *   - a store `*p = e` / `p[0] = e` (through casts), executed unconditionally by its node,
- *     sets it, with the width the store writes;
+ *   - a store `*p = e` / `p[k] = e` (through casts, k a literal), executed unconditionally
+ *     by its node, writes the bytes it covers; the width is the bytes from 0 every path
+ *     has written, so `p[0] = a; p[1] = b;` through a `char *` writes 2;
  *   - passing `p` to a call whose own parameter is an out-parameter of at least that
  *     width sets it (the answer is asked recursively, cycles answer no);
  *   - comparing `p` with null (`p == 0`, `!p`, `if (p)`) is neither;
- *   - any other mention of `p` while the bit may be clear is a read: not an out-parameter;
+ *   - any other mention of `p` while those bytes may not all be written is a read: not an
+ *     out-parameter;
  *   - a node that calls a function that does not return ends its path;
  *   - every path that reaches the function's exit must have the bit set.
  * Anything the graph does not model (try blocks, range-for) answers no.
+ *
+ * With `nonNull` the question is asked for an argument that is not null (`&local`): the
+ * branch of the parameter's own null test (`if (p)`, `if (!p)`, `p == 0`) that runs for a
+ * null pointer is not taken, so a store the function guards with that test is made.
  */
 
 import { NodeKind } from '../../ast/kinds.js';
@@ -37,6 +43,8 @@ export interface OutParamContext {
   typeSize: (spelling: string) => number | null;
   /** A callee's out-parameter width at an argument position, or null when it is not one. */
   calleeOut: (callee: string, index: number) => number | null;
+  /** The same for an argument that is not null; absent: `calleeOut`. */
+  calleeOutNonNull?: (callee: string, index: number) => number | null;
   /** Functions that do not return (bare or qualified names; the last segment is matched too). */
   noreturn: ReadonlySet<string>;
 }
@@ -76,32 +84,55 @@ export function calleeSpelling(c: CallExpr): string | null {
 }
 
 /**
- * The width a store through `target` writes when `target` is `*p` / `p[0]` with p the
- * parameter (casts on p allowed: `*(int *)p`), else null. `declared` is p's own pointee width.
+ * The bytes [lo, hi) a store through `target` writes when `target` is `*p` / `p[k]` with p
+ * the parameter and k a literal (casts on p allowed: `*(int *)p`, `((short *)p)[2]`), else
+ * null. `declared` is p's own pointee width.
  */
-function storeWidth(target: Expression, p: string, declared: number | null, ctx: OutParamContext): number | null {
+function storeBytes(target: Expression, p: string, declared: number | null, ctx: OutParamContext): { lo: number; hi: number } | null {
   const t = unparen(target);
   let ptr: Expression | null = null;
+  let index = 0;
   if (t.kind === NodeKind.UnaryExpr && (t as UnaryExpr).operator === '*') ptr = (t as UnaryExpr).operand;
   else if (t.kind === NodeKind.SubscriptExpr) {
     const s = t as SubscriptExpr;
     const k = uncast(s.index).inner;
-    if (k.kind === NodeKind.IntegerLiteral && (k as IntegerLiteralExpr).value === 0n) ptr = s.array;
+    if (k.kind === NodeKind.IntegerLiteral && (k as IntegerLiteralExpr).value <= BigInt(MAX_OFFSET)) {
+      ptr = s.array;
+      index = Number((k as IntegerLiteralExpr).value);
+    }
   }
   if (!ptr) return null;
   const { inner, casts } = uncast(ptr);
   if (inner.kind !== NodeKind.Identifier || (inner as Identifier).name !== p) return null;
-  if (casts.length === 0) return declared;
-  // The outermost cast is the pointer type the store goes through.
-  const spelled = emit(casts[0].type as never).replace(/\s+/g, ' ').trim();
-  const m = /^(.*\S)\s*\*$/.exec(spelled);
-  return m ? ctx.typeSize(m[1]) : null;
+  let width = declared;
+  if (casts.length > 0) {
+    // The outermost cast is the pointer type the store goes through.
+    const spelled = emit(casts[0].type as never).replace(/\s+/g, ' ').trim();
+    const m = /^(.*\S)\s*\*$/.exec(spelled);
+    width = m ? ctx.typeSize(m[1]) : null;
+  }
+  if (width === null || width <= 0) return null;
+  return { lo: index * width, hi: (index + 1) * width };
 }
 
-interface NodeEffect { use: boolean; store: number | null; noreturn: boolean }
+/** Stores past this many bytes are not tracked (a read, as before). */
+const MAX_OFFSET = 4096;
+
+/** The bytes [lo, hi) as a mask. */
+const bytesMask = (lo: number, hi: number): bigint => ((1n << BigInt(hi - lo)) - 1n) << BigInt(lo);
+
+/** How many bytes from 0 a mask covers without a gap. */
+function prefixBytes(mask: bigint): number {
+  let n = 0;
+  while ((mask >> BigInt(n)) & 1n) n++;
+  return n;
+}
+
+interface NodeEffect { use: boolean; store: bigint | null; noreturn: boolean }
 
 /** What one node's own expressions do to p. */
-function effectOf(exprs: Expression[], p: string, declared: number | null, ctx: OutParamContext, isCondition: boolean): NodeEffect {
+function effectOf(exprs: Expression[], p: string, declared: number | null, ctx: OutParamContext, isCondition: boolean,
+  calleeOut: (callee: string, index: number) => number | null): NodeEffect {
   const eff: NodeEffect = { use: false, store: null, noreturn: false };
   const visit = (e: ASTNode, certain: boolean, truth: boolean): void => {
     const x = e as Expression;
@@ -118,9 +149,9 @@ function effectOf(exprs: Expression[], p: string, declared: number | null, ctx: 
       case NodeKind.AssignExpr: {
         const a = x as AssignExpr;
         visit(a.right, certain, false);
-        const w = a.operator === '=' ? storeWidth(a.left, p, declared, ctx) : null;
-        if (w !== null) {
-          if (certain && (eff.store === null || w > eff.store)) eff.store = w;
+        const w = a.operator === '=' ? storeBytes(a.left, p, declared, ctx) : null;
+        if (w !== null && w.hi <= MAX_OFFSET) {
+          if (certain) eff.store = (eff.store ?? 0n) | bytesMask(w.lo, w.hi);
           return;
         }
         visit(a.left, certain, false);
@@ -158,8 +189,8 @@ function effectOf(exprs: Expression[], p: string, declared: number | null, ctx: 
         visit(c.callee, certain, false);
         c.arguments.forEach((arg, i) => {
           if (isName(arg, p) && name) {
-            const w = ctx.calleeOut(name, i);
-            if (w !== null) { if (certain && (eff.store === null || w > eff.store)) eff.store = w; return; }
+            const w = calleeOut(name, i);
+            if (w !== null) { if (certain && w > 0 && w <= MAX_OFFSET) eff.store = (eff.store ?? 0n) | bytesMask(0, w); return; }
           }
           visit(arg, certain, false);
         });
@@ -179,12 +210,27 @@ function effectOf(exprs: Expression[], p: string, declared: number | null, ctx: 
   return eff;
 }
 
+/** `p`, `!p`, `p == 0`, `p != 0` (through casts and parentheses): whether its truth means p is not null. */
+function nullTest(cond: Expression, p: string): 'nonNullWhenTrue' | 'nullWhenTrue' | null {
+  const x = unparen(cond);
+  if (isName(x, p)) return 'nonNullWhenTrue';
+  if (x.kind === NodeKind.UnaryExpr && (x as UnaryExpr).operator === '!' && isName((x as UnaryExpr).operand, p)) return 'nullWhenTrue';
+  if (x.kind === NodeKind.BinaryExpr) {
+    const b = x as BinaryExpr;
+    if ((b.operator === '==' || b.operator === '!=') &&
+        ((isName(b.left, p) && isZero(b.right)) || (isName(b.right, p) && isZero(b.left)))) {
+      return b.operator === '!=' ? 'nonNullWhenTrue' : 'nullWhenTrue';
+    }
+  }
+  return null;
+}
+
 /**
  * Out-parameter widths of a function body: parameter index -> the bytes every returning
  * path writes through it before reading through it. Parameters that are not out-parameters
- * are absent.
+ * are absent. With `nonNull`, for arguments that are not null.
  */
-export function outParamWidths(body: Statement[], params: readonly string[], ctx: OutParamContext): Map<number, number> {
+export function outParamWidths(body: Statement[], params: readonly string[], ctx: OutParamContext, opts: { nonNull?: boolean } = {}): Map<number, number> {
   const out = new Map<number, number>();
   let flow: ReturnType<typeof buildFunctionFlow>;
   try {
@@ -200,6 +246,9 @@ export function outParamWidths(body: Statement[], params: readonly string[], ctx
   }
   const preds: number[][] = cfg.nodes.map(() => []);
   for (const n of cfg.nodes) for (const s of n.succ) preds[s].push(n.id);
+  const calleeOut = opts.nonNull ? ctx.calleeOutNonNull ?? ctx.calleeOut : ctx.calleeOut;
+  /** A path through a call that does not return never reaches the exit: it constrains nothing. */
+  const ALL = -1n;
 
   params.forEach((p, index) => {
     const declared = ctx.pointeeWidth(index);
@@ -207,50 +256,61 @@ export function outParamWidths(body: Statement[], params: readonly string[], ctx
     const effects = cfg.nodes.map(n => {
       const s = n.stmt;
       const cond = !!s && (s.kind === NodeKind.IfStmt || s.kind === NodeKind.WhileStmt || s.kind === NodeKind.DoWhileStmt || s.kind === NodeKind.ForStmt);
-      return effectOf(flow.ownExprs(n.id), p, declared, ctx, cond);
+      return effectOf(flow.ownExprs(n.id), p, declared, ctx, cond, calleeOut);
     });
-    // Must-analysis: inState[n] = AND of the predecessors' out states; width = min over paths.
-    // null = not yet known (top). The entry starts clear.
-    const IN: (number | 0 | null)[] = cfg.nodes.map(() => null);   // 0 = clear, k>0 = written with width k
-    const OUT: (number | 0 | null)[] = cfg.nodes.map(() => null);
-    const meet = (a: number | 0 | null, b: number | 0 | null): number | 0 | null =>
-      a === null ? b : b === null ? a : Math.min(a, b) as number | 0;
+    // The edge a null p takes out of its own null test: not taken by a non-null argument.
+    const dead = new Set<string>();
+    if (opts.nonNull) {
+      for (const n of cfg.nodes) {
+        if (n.stmt?.kind !== NodeKind.IfStmt || n.succ.length !== 2) continue;
+        const t = nullTest((n.stmt as unknown as { condition: Expression }).condition, p);
+        if (t) dead.add(`${n.id}>${n.succ[t === 'nonNullWhenTrue' ? 1 : 0]}`);
+      }
+    }
+    // Must-analysis over the bytes written: IN[n] = AND of the predecessors' OUT masks.
+    // null = not yet known (top). The entry starts with nothing written.
+    const IN: (bigint | null)[] = cfg.nodes.map(() => null);
+    const OUT: (bigint | null)[] = cfg.nodes.map(() => null);
+    const meet = (a: bigint | null, b: bigint | null): bigint | null => a === null ? b : b === null ? a : a & b;
     const work: number[] = [cfg.entry];
-    IN[cfg.entry] = 0;
-    const transfer = (id: number): number | 0 | null => {
+    IN[cfg.entry] = 0n;
+    const transfer = (id: number): bigint | null => {
       const i = IN[id];
       if (i === null) return null;
       const e = effects[id];
-      // A path through a call that does not return never reaches the exit.
-      if (e.noreturn) return Number.MAX_SAFE_INTEGER;
-      if (e.store !== null) return Math.max(i, e.store);
+      if (e.noreturn) return ALL;
+      if (e.store !== null) return i | e.store;
       return i;
     };
     let guard = 0;
     while (work.length && guard++ < 200000) {
       const id = work.pop()!;
       if (id !== cfg.entry) {
-        let v: number | 0 | null = null;
-        for (const pr of preds[id]) v = meet(v, OUT[pr]);
+        let v: bigint | null = null;
+        for (const pr of preds[id]) if (!dead.has(`${pr}>${id}`)) v = meet(v, OUT[pr]);
         IN[id] = v;
       }
       const o = transfer(id);
       if (o !== OUT[id]) {
         OUT[id] = o;
-        for (const s of cfg.nodes[id].succ) work.push(s);
+        for (const s of cfg.nodes[id].succ) if (!dead.has(`${id}>${s}`)) work.push(s);
       }
     }
     if (work.length) return;
-    // A read while the pointee may still hold the caller's value: not an out-parameter.
-    for (const n of cfg.nodes) {
-      if (effects[n.id].use && IN[n.id] === 0) return;
-    }
-    let atExit: number | 0 | null = null;
-    for (const pr of preds[cfg.exit]) atExit = meet(atExit, OUT[pr]);
+    let atExit: bigint | null = null;
+    for (const pr of preds[cfg.exit]) if (!dead.has(`${pr}>${cfg.exit}`)) atExit = meet(atExit, OUT[pr]);
     // Fallthrough off the end also reaches the exit through the graph's own edges.
-    if (atExit === null || atExit === 0 || atExit === Number.MAX_SAFE_INTEGER) return;
-    // Every returning path wrote at least `declared`'s worth? Report the narrowest store.
-    out.set(index, atExit);
+    if (atExit === null || atExit === 0n || atExit === ALL) return;
+    const width = prefixBytes(atExit);
+    if (width === 0) return;
+    // A read while the bytes reported may still hold the caller's value: not an
+    // out-parameter. (A node no path reaches has no IN and reads nothing.)
+    const want = bytesMask(0, width);
+    for (const n of cfg.nodes) {
+      const i = IN[n.id];
+      if (effects[n.id].use && i !== null && (i & want) !== want) return;
+    }
+    out.set(index, width);
   });
   return out;
 }

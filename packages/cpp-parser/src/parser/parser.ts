@@ -67,6 +67,7 @@ import {
   type BuiltinType,
   type PointerType,
   type ReferenceType,
+  type RValueReferenceType,
   type ArrayType,
   type QualifiedType,
   type TemplateType,
@@ -586,6 +587,9 @@ export class Parser {
     this.expect(TokenKind.RightBrace);
     this.match(TokenKind.Semicolon);
 
+    if (keyword.token.kind === TokenKind.Union && bases.length === 0 && (name === null || name.kind === NodeKind.Identifier)) {
+      return this.node(NodeKind.UnionDecl, startLoc, { name, members, attributes: [] }) as unknown as StructDecl;
+    }
     const kind = isClass ? NodeKind.ClassDecl : NodeKind.StructDecl;
     return this.node(kind, startLoc, {
       name,
@@ -846,10 +850,18 @@ export class Parser {
   private parseFunctionOrVariableDecl(): FunctionDecl | VariableDecl | null {
     const startLoc = this.currentLocation();
 
-    // Parse specifiers
+    // Parse specifiers. A GCC attribute that is not a calling convention may sit among
+    // them: `template<> __attribute__((noinline)) inline void C<T>::f()`.
     const specifiers: FunctionSpecifier[] = [];
-    while (this.checkSpecifier()) {
-      specifiers.push(this.advance().token.text as FunctionSpecifier);
+    const attributes: Attribute[] = [];
+    for (;;) {
+      if (this.checkSpecifier()) {
+        specifiers.push(this.advance().token.text as FunctionSpecifier);
+      } else if (this.checkGnuAttribute() && !this.gnuAttributeIsCallingConvention()) {
+        attributes.push(...this.parseGnuAttributeWords());
+      } else {
+        break;
+      }
     }
 
     // A convention may also precede the type: `__stdcall void *f(...)`.
@@ -874,7 +886,7 @@ export class Parser {
     // Pointer-to-function variable: R (CC *name)(params) [= init];
     if (this.check(TokenKind.LeftParen) && this.looksLikeParenDeclarator(true)) {
       const d = this.parseParenDeclarator(returnType, true);
-      return this.parseVariableDeclRest(startLoc, specifiers as VariableSpecifier[], d.type, d.name!);
+      return this.parseVariableDeclRest(startLoc, specifiers as VariableSpecifier[], d.type, d.name!, returnType);
     }
 
     // `T : 3;` - an unnamed bit-field (padding).
@@ -901,7 +913,7 @@ export class Parser {
     if (this.check(TokenKind.LeftParen)) {
       const saved = this.pos;
       try {
-        return this.parseFunctionDeclRest(startLoc, specifiers, returnType, name, callingConvention);
+        return this.parseFunctionDeclRest(startLoc, specifiers, returnType, name, callingConvention, attributes);
       } catch (e) {
         // `T x(args);` - a variable constructed from arguments, not a function.
         if (!(e instanceof ParserError) || name.kind !== NodeKind.Identifier) throw e;
@@ -936,7 +948,8 @@ export class Parser {
     specifiers: FunctionSpecifier[],
     returnType: TypeNode,
     name: Identifier | QualifiedId,
-    callingConvention?: CallingConvention
+    callingConvention?: CallingConvention,
+    attributes: Attribute[] = [],
   ): FunctionDecl {
     this.expect(TokenKind.LeftParen);
 
@@ -1001,7 +1014,7 @@ export class Parser {
       body,
       specifiers,
       callingConvention,
-      attributes: [],
+      attributes,
       isVariadic,
     }) as FunctionDecl;
   }
@@ -1079,7 +1092,8 @@ export class Parser {
     startLoc: SourceLocation,
     specifiers: VariableSpecifier[],
     type: TypeNode,
-    name: Identifier | QualifiedId
+    name: Identifier | QualifiedId,
+    sharedBase?: TypeNode
   ): VariableDecl {
     // Handle array suffix
     type = this.parseArrayDeclaratorSuffix(type, startLoc);
@@ -1088,21 +1102,34 @@ export class Parser {
     let bitWidth: Expression | null = null;
     if (this.match(TokenKind.Colon)) bitWidth = this.parseConditionalExpression();
 
+    const copyListInit = this.atCopyListInit();
     const initializer = this.parseOptionalInitializer();
 
     // `T a, *b, c[4];` - the later declarators share T but not the first one's `*` or `[]`.
     if (this.check(TokenKind.Comma)) {
-      let base: TypeNode = type;
-      while (base.kind === NodeKind.ArrayType || base.kind === NodeKind.PointerType) {
-        base = base.kind === NodeKind.ArrayType ? (base as ArrayType).elementType : (base as PointerType).pointee;
+      let base: TypeNode = sharedBase ?? type;
+      while (base.kind === NodeKind.ArrayType || base.kind === NodeKind.PointerType ||
+             base.kind === NodeKind.ReferenceType || base.kind === NodeKind.RValueReferenceType) {
+        base = base.kind === NodeKind.ArrayType ? (base as ArrayType).elementType
+          : base.kind === NodeKind.PointerType ? (base as PointerType).pointee
+          : base.kind === NodeKind.ReferenceType ? (base as ReferenceType).referenced
+          : (base as RValueReferenceType).referenced;
       }
       while (this.match(TokenKind.Comma)) {
         const loc = this.currentLocation();
-        const t = this.parseTypeSuffixes(base);
-        const n = this.parseIdentifier();
+        if (this.check(TokenKind.LeftParen) && this.looksLikePointerToArrayDecl()) {
+          this.extraDecls.push(this.parsePointerToArrayDecl(loc, specifiers, base, false));
+          continue;
+        }
+        const paren = this.check(TokenKind.LeftParen) && this.looksLikeParenDeclarator(true)
+          ? this.parseParenDeclarator(base, true) : null;
+        const t = paren ? paren.type : this.parseTypeSuffixes(base);
+        const n = paren ? paren.name! : this.parseIdentifier();
         const full = this.parseArrayDeclaratorSuffix(t, loc);
+        const listInit = this.atCopyListInit();
         this.extraDecls.push(this.node(NodeKind.VariableDecl, loc, {
           name: n, type: full, initializer: this.parseOptionalInitializer(), specifiers, attributes: [],
+          ...(listInit ? { copyListInit: true } : {}),
         }) as VariableDecl);
       }
     }
@@ -1116,7 +1143,13 @@ export class Parser {
       specifiers,
       attributes: [],
       ...(bitWidth ? { bitWidth } : {}),
+      ...(copyListInit ? { copyListInit: true } : {}),
     }) as VariableDecl;
+  }
+
+  /** `= {...}`: copy-list-initialization, kept apart from `T x{...}` so it prints back as written. */
+  private atCopyListInit(): boolean {
+    return this.check(TokenKind.Equal) && this.checkAhead(1, TokenKind.LeftBrace);
   }
 
   private parseOptionalInitializer(): Expression | InitListExpr | null {
@@ -2462,6 +2495,40 @@ export class Parser {
     return m ? `__${m[1]}` : undefined;
   }
 
+  /** Whether the GCC attribute at the cursor names a calling convention. */
+  private gnuAttributeIsCallingConvention(): boolean {
+    let depth = 0;
+    for (let i = this.pos + 1; i < this.tokens.length; i++) {
+      const t = this.tokens[i].token;
+      if (t.kind === TokenKind.LeftParen) depth++;
+      else if (t.kind === TokenKind.RightParen) { if (--depth === 0) return false; }
+      else if (/^(?:__)?(fastcall|stdcall|cdecl|thiscall)(?:__)?$/.test(t.text)) return true;
+    }
+    return false;
+  }
+
+  /** Consume a GCC attribute that is not a calling convention, as `[[gnu::name]]` attributes. */
+  private parseGnuAttributeWords(): Attribute[] {
+    const startLoc = this.currentLocation();
+    this.advance(); // __attribute__
+    const out: Attribute[] = [];
+    let depth = 0;
+    do {
+      if (this.check(TokenKind.LeftParen)) depth++;
+      else if (this.check(TokenKind.RightParen)) depth--;
+      else if (depth === 2 && this.check(TokenKind.Identifier)) {
+        const word = this.current().token.text.replace(/^__(.*)__$/, '$1');
+        out.push(this.node(NodeKind.Attribute, startLoc, {
+          namespace: this.node(NodeKind.Identifier, startLoc, { name: 'gnu' }) as Identifier,
+          name: this.node(NodeKind.Identifier, startLoc, { name: word }) as Identifier,
+          arguments: [],
+        }) as Attribute);
+      }
+      this.advance();
+    } while (depth > 0 && !this.isAtEnd());
+    return out;
+  }
+
   private parseCallingConvention(): string | undefined {
     if (this.checkGnuAttribute()) return this.parseGnuAttribute();
     return this.advance().token.text;
@@ -2537,7 +2604,7 @@ export class Parser {
       if (this.check(TokenKind.Const) || this.check(TokenKind.Volatile) ||
           this.check(TokenKind.Static_assert)) return true;
       if (this.check(TokenKind.ColonColon) && this.checkAhead(1, TokenKind.Identifier)) this.advance();
-      if (this.check(TokenKind.Struct) || this.check(TokenKind.Class) ||
+      if (this.check(TokenKind.Struct) || this.check(TokenKind.Class) || this.check(TokenKind.Union) ||
           this.check(TokenKind.Enum) || this.check(TokenKind.Typedef)) return true;
 
       // Check for type name followed by identifier/star
@@ -2920,7 +2987,8 @@ export class Parser {
   private parsePointerToArrayDecl(
     startLoc: SourceLocation,
     specifiers: VariableSpecifier[],
-    baseType: TypeNode
+    baseType: TypeNode,
+    expectSemicolon = true
   ): VariableDecl {
     this.expect(TokenKind.LeftParen);
     this.expect(TokenKind.Star);
@@ -2941,6 +3009,7 @@ export class Parser {
     }) as PointerType;
 
     let initializer: Expression | null = null;
+    const copyListInit = this.atCopyListInit();
     if (this.match(TokenKind.Equal)) {
       if (this.check(TokenKind.LeftBrace)) {
         initializer = this.parseInitializerList();
@@ -2949,7 +3018,7 @@ export class Parser {
       }
     }
 
-    this.expect(TokenKind.Semicolon);
+    if (expectSemicolon) this.expect(TokenKind.Semicolon);
 
     return this.node(NodeKind.VariableDecl, startLoc, {
       name,
@@ -2957,6 +3026,7 @@ export class Parser {
       initializer,
       specifiers,
       attributes: [],
+      ...(copyListInit ? { copyListInit: true } : {}),
     }) as VariableDecl;
   }
 

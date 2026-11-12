@@ -339,7 +339,7 @@ export async function extractCompareSites(connection: GhidraConnection, function
       const batch = batches[next++];
       const result = await connection.sendCommand<{ success?: boolean; output?: string; error?: string }>(
         'execute_script',
-        { language: 'java', code: compareSitesScript(batch), scriptTimeout: 900, _commandTimeout: 960000 }
+        { language: 'java', readOnly: true, code: compareSitesScript(batch), scriptTimeout: 900, _commandTimeout: 960000 }
       );
       if (result.success === false || typeof result.output !== 'string') throw new Error(result.error ?? 'no output');
       for (const [fn, block] of parseCompareSiteOutput(result.output)) {

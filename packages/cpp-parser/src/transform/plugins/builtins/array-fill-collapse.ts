@@ -121,12 +121,27 @@ function matchZeroFill(s: Statement): { base: Expression; idx: number } | null {
   const a = e as AssignExpr;
   if (a.operator !== '=' || !isZero(a.right)) return null;
   const lhs = unwrap(a.left);
+  // `*p` is `p[0]`: the decompiler prints a run's first element that way, and a run
+  // started at p[1] became `*p = 0; memset(p + 1, ...)`, which VC8 compiles with the
+  // first store an immediate where the original stores the zeroed register into all
+  // of them (Unreferenced_0047fbc0 once its parameter was typed uint32_t *).
+  if (lhs.kind === NodeKind.UnaryExpr && (lhs as UnaryExpr).operator === '*') {
+    const operand = unwrap((lhs as UnaryExpr).operand);
+    return isSafeBase(operand) ? { base: operand, idx: 0 } : null;
+  }
   if (lhs.kind !== NodeKind.SubscriptExpr) return null;
   const sub = lhs as SubscriptExpr;
   const idxNode = unwrap(sub.index);
   if (idxNode.kind !== NodeKind.IntegerLiteral) return null;
   if (!isSafeBase(sub.array)) return null;
   return { base: sub.array, idx: Number((idxNode as IntegerLiteralExpr).value) };
+}
+
+/** `*p = ...;`: the run's first element written through the pointer. */
+function isDerefStore(s: Statement): boolean {
+  if (s.kind !== NodeKind.ExprStmt) return false;
+  const e = unwrap((s as ExprStmt).expression);
+  return e.kind === NodeKind.AssignExpr && unwrap((e as AssignExpr).left).kind === NodeKind.UnaryExpr;
 }
 
 /** memset(<base>[+start], 0, count * sizeof(<base>[0])); */
@@ -240,6 +255,13 @@ function collapseBlock(block: CompoundStmt, scope?: FillScope, ev?: AccessOrderE
         j++;
       }
       const count = j - i;
+      // A run led by `*p` collapses only when the run after it would on its own: the
+      // `*p` is then never split off, and a run too short without it stays as printed.
+      if (isDerefStore(s[i]) && count - 1 < THRESHOLD) {
+        out.push(s[i]);
+        i++;
+        continue;
+      }
       if (count >= THRESHOLD && storedPerElement(s.slice(i, j), ev)) {
         for (let k = i; k < j; k++) out.push(s[k]);
         i = j;

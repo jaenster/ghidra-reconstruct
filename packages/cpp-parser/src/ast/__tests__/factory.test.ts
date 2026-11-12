@@ -3,6 +3,7 @@ import assert from 'node:assert';
 import { AST, Type, Expr, Stmt, Decl, Attr } from '../factory.js';
 import { NodeKind } from '../kinds.js';
 import type { Identifier } from '../nodes.js';
+import { parseStringLiteral } from '../../lexer/literals.js';
 
 describe('AST Factory', () => {
   describe('Type factory', () => {
@@ -523,5 +524,23 @@ describe('Expr.stringLiteral spells its text as C', () => {
     assert.strictEqual(E.stringLiteral('\x01\x7f\xe9').raw, '"\\001\\177\\351"');
     assert.strictEqual(E.stringLiteral('plain ;)').raw, '"plain ;)"');
     assert.strictEqual(E.stringLiteral('\n').value, '\n');
+  });
+
+  it('escapes every C++03 trigraph spelling and round-trips its text', () => {
+    for (const suffix of ['=', '/', "'", '(', ')', '!', '<', '>', '-']) {
+      const value = `??${suffix}`;
+      const raw = Expr.stringLiteral(value).raw;
+      assert.strictEqual(raw, `"\\?\\?${suffix}"`);
+      assert.strictEqual(parseStringLiteral(raw).value, value);
+    }
+  });
+
+  it('keeps ordinary question marks, quotes and backslashes as their original text', () => {
+    assert.strictEqual(Expr.stringLiteral('?').raw, '"\\?"');
+    for (const value of ['a?b', '?"\\', '??x', '??=', '??/']) {
+      const raw = Expr.stringLiteral(value, 'L').raw;
+      assert.ok(!raw.includes('??'), raw);
+      assert.strictEqual(parseStringLiteral(raw).value, value);
+    }
   });
 });

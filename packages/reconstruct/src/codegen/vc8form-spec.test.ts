@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { parseVc8FormTag, vc8FormSpec, vc8formBodyForm, vc8formBodyHash, vc8formHashRecord, vc8formLegacyBodyHash } from './vc8form-spec.js';
 import { planRehash, rehashJava, rowsChecksum } from './vc8form-rehash.js';
+import { applyVc8Forms, emit, parse, type TranslationUnit } from '@ghidra-mcp/cpp-parser';
 
 const BODY = '\nvoid f(int a)\n\n{\n  g(a);\n  return;\n}\n';
 const DH = vc8formBodyHash(BODY);
@@ -45,7 +46,53 @@ describe('vc8form-spec', () => {
 
   it('orders the shape forms: declarations, then control flow, then expressions, then moves', () => {
     const spec = vc8FormSpec({ size: 16, decompiled: BODY, tags: [tag('seq(b,a)'), tag('cmp(a < 4,lit)'), tag('dup(g(a))'), tag('nest(a)'), tag('split(v,int,w)')] });
-    assert.deepStrictEqual(spec?.forms.map(f => f.form.op), ['split', 'nest', 'dup', 'cmp', 'seq']);
+    assert.deepStrictEqual(spec?.forms.map(f => f.form.op), ['split', 'dup', 'nest', 'cmp', 'seq']);
+  });
+
+  it('reads the ord field, and rejects one that is not a positive integer', () => {
+    assert.strictEqual(parseVc8FormTag(`seq(a,b);ev=0123456789;bh=16-89abcdef;dh=${DH};ord=2`)?.order, 2);
+    assert.strictEqual(parseVc8FormTag(`seq(a,b);ev=0123456789;bh=16-89abcdef;dh=${DH}`)?.order, undefined);
+    for (const bad of ['0', '-1', 'x', '']) assert.strictEqual(parseVc8FormTag(`seq(a,b);ev=0123456789;bh=16-89abcdef;dh=${DH};ord=${bad}`), undefined, bad);
+  });
+
+  it('orders the tags of one op by ord before their text, after the ones without', () => {
+    const o = (form: string, n: number) => ({ type: 'vc8form', data: tag(form).data + ';ord=' + n });
+    const spec = vc8FormSpec({ size: 16, decompiled: BODY, tags: [o('seq(a,b)', 2), tag('fold(t)'), tag('seq(c,d)'), o('seq(x,y)', 1), tag('seq(b,a)')] });
+    assert.deepStrictEqual(spec?.forms.map(f => f.tag.split(';')[0]), ['fold(t)', 'seq(b,a)', 'seq(c,d)', 'seq(x,y)', 'seq(a,b)']);
+    // ord does not move a form across ops: width still goes before seq.
+    const across = vc8FormSpec({ size: 16, decompiled: BODY, tags: [o('seq(a,b)', 1), o('width(x,int)', 2)] });
+    assert.deepStrictEqual(across?.forms.map(f => f.form.op), ['width', 'seq']);
+  });
+
+  it('applies a second seq that rewrites what the first wrote, in ord order (DrawRect 0050c3a0)', () => {
+    const src = [
+      'void DrawRect(int w, int h, int l, int t) {',
+      '  nXEnd = w + l;',
+      '  nYEnd = h + t;',
+      '  nXStart = (w >> 1) + l;',
+      '  nYEnd_00 = (h >> 1) + t;',
+      '  g(nXStart, nXEnd, nYEnd, nYEnd_00);',
+      '}',
+    ].join('\n');
+    const body = (tags: Array<{ type: string; data: string }>) => {
+      const spec = vc8FormSpec({ size: 16, decompiled: BODY, tags })!;
+      const applied: boolean[] = [];
+      const tu = applyVc8Forms(parse(src) as TranslationUnit, spec.forms, site => applied.push(site.applied));
+      const out = emit(tu as never).replace(/\s+/g, ' ');
+      return { order: [...out.matchAll(/(nXStart|nXEnd|nYEnd_00|nYEnd) =/g)].map(m => m[1]), applied };
+    };
+    const first = 'seq(nXStart,nYEnd,nXEnd)', second = 'seq(nXEnd,nYEnd_00,nYEnd)';
+    // By text the second sorts first: it finds no run, and is refused.
+    assert.deepStrictEqual(body([tag(first), tag(second)]), { order: ['nXStart', 'nYEnd', 'nXEnd', 'nYEnd_00'], applied: [false, true] });
+    const withOrd = body([{ type: 'vc8form', data: tag(second).data + ';ord=2' }, { type: 'vc8form', data: tag(first).data + ';ord=1' }]);
+    assert.deepStrictEqual(withOrd, { order: ['nXStart', 'nXEnd', 'nYEnd_00', 'nYEnd'], applied: [true, true] });
+  });
+
+  it('keeps the trailing ord when it rehashes a tag', () => {
+    const d = 'x = A::f(y);';
+    const rec = vc8formHashRecord({ address: '00000001', name: 'F', size: 16, decompiled: d, tags: [{ type: 'vc8form', data: `fold(t);ev=0123456789;bh=16-89abcdef;dh=${vc8formLegacyBodyHash(d)};ord=2` }] })!;
+    const plan = planRehash(new Map([['00000001', rec]]));
+    assert.strictEqual(plan.rows[0]!.new, `vc8form:fold(t);ev=0123456789;bh=16-89abcdef;dh=${vc8formBodyHash(d)};ord=2`);
   });
 
   it('has nothing to say about a function without vc8form tags', () => {

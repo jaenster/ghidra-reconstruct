@@ -46,6 +46,16 @@ export interface CfgNode {
    * `emitCond`). It carries none of the condition's facts; it says where the node sits.
    */
   owner?: Statement;
+  /**
+   * With `shortCircuitConditions`: an operand of a lowered condition, whose `expr` it
+   * evaluates - a comma operand evaluated for its effect, or a leaf the condition tests.
+   */
+  condPart?: 'effect' | 'test';
+  /**
+   * With `shortCircuitConditions`: an if/loop node whose condition is lowered into
+   * `condPart` nodes. The node itself evaluates nothing.
+   */
+  lowered?: boolean;
 }
 
 export interface Cfg {
@@ -84,4 +94,11 @@ export interface BuildCfgOptions {
    * see work moved between a statement and a condition; dataflow keeps one node per test.
    */
   commaConditions?: boolean;
+  /**
+   * Lower every if/loop condition holding `&&`, `||` or a comma into short-circuit nodes,
+   * each carrying the operand it evaluates (`condPart`), so a dataflow over the graph sees
+   * a write inside `a || (v = f(), v == 0)` only on the paths that evaluate it. For the
+   * dataflow; takes precedence over `commaConditions`.
+   */
+  shortCircuitConditions?: boolean;
 }
