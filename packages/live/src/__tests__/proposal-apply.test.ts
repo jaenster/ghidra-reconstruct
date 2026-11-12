@@ -4,12 +4,15 @@
  * fixtures/proposal-apply/*.java were written by the Python script (D2 workspace
  * docs/tools/ghidra-apply/proposal_render.py, before it was retired) from proposals.json: one
  * real proposal of every op kind it knew, plus one with non-ASCII, quotes, a backslash, a DEL and
- * an astral character. The port must give the same bytes.
+ * an astral character. The port gave the same bytes; since then set_prototype keeps custom storage
+ * by name on a pure reorder, the one place the goldens differ from the Python script's.
  */
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { readFileSync } from 'node:fs';
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pyJsonDumps, readProposals, renderProposalScript, selectGroup, type RenderOptions } from '../proposal-apply/render.js';
@@ -93,5 +96,54 @@ describe('proposal-render: vc8form and linkage', () => {
 
   it('has exactly the four markers, each once', () => {
     for (const m of ['__EXT_HELPERS__', '__EXT_ORDER__', '__EXT_CHECK__', '__EXT_APPLY__']) assert.strictEqual(PROPOSAL_APPLY_TEMPLATE.split(m).length, 2, m);
+  });
+});
+
+/**
+ * The set_prototype branch as rendered, compiled with the stub Ghidra classes in
+ * fixtures/proposal-apply/ghidra-stub and run: what updateFunction is given for each parameter.
+ */
+function runSetPrototype(signature: string, current: string[]): string[] {
+  const t = renderProposalScript([{ id: 1, author: 'a', ops: [{ op: 'set_prototype', program: 'win', address: '0x00401000', signature }] }], { program: 'win', author: '*', dry: false }).text;
+  const apply = t.indexOf('int sub = currentProgram.startTransaction');
+  const start = t.indexOf('   else if (op.equals("set_prototype"))', apply);
+  const block = t.slice(start, t.indexOf('\n   else ', start + 1));
+  const stmt = (head: string, end: string) => { const i = t.indexOf(head); assert.ok(i > 0, head); return t.slice(i, t.indexOf(end, i) + end.length); };
+  assert.ok(apply > 0 && start > apply && block.includes('updateFunction'), 'the apply-side set_prototype branch');
+  const dir = mkdtempSync(join(tmpdir(), 'proposal-apply-'));
+  try {
+    cpSync(join(FIX, 'ghidra-stub'), dir, { recursive: true });
+    const h = readFileSync(join(dir, 'Harness.java'), 'utf8')
+      .replace('/*NCONV*/', stmt('java.util.function.Function<String, String> nconv =', ';\n'))
+      .replace('/*PSIG*/', stmt('java.util.function.Function<String, java.util.List<String[]>> psig =', 'return r; };\n'))
+      .replace('/*SET_PROTOTYPE*/', block.trimStart());
+    writeFileSync(join(dir, 'Harness.java'), h);
+    const files = ['Harness.java', ...['lang/Register', 'symbol/SourceType', 'data/DataType', 'data/VoidDataType', 'listing/Program', 'listing/VariableStorage', 'listing/Parameter', 'listing/ParameterImpl', 'listing/ReturnParameterImpl', 'listing/Function'].map((f) => `ghidra/program/model/${f}.java`)];
+    execFileSync('javac', ['-nowarn', '-d', dir, ...files.map((f) => join(dir, f))], { cwd: dir, stdio: 'pipe' });
+    return execFileSync('java', ['-cp', dir, 'Harness', signature, ...current], { encoding: 'utf8' }).trim().split('\n');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const hasJdk = spawnSync('javac', ['-version']).status === 0;
+
+describe('proposal-render: set_prototype on custom storage, run against stub Ghidra', { skip: !hasJdk && 'no javac on PATH' }, () => {
+  const fn = ['Unit *:pUnit@ECX', 'int:nSkill@EDX'];
+
+  it('a pure reorder keeps each parameter on its own register', () => {
+    assert.deepStrictEqual(runSetPrototype('int SKILLS_Use(int nSkill, Unit * pUnit)', fn), [
+      'update __fastcall CUSTOM_STORAGE ret int@EAX',
+      'param int nSkill@EDX',
+      'param Unit * pUnit@ECX',
+    ]);
+  });
+
+  it('a rename keeps storage by position', () => {
+    assert.deepStrictEqual(runSetPrototype('int SKILLS_Use(Unit * pOwner, int nSkill)', fn), [
+      'update __fastcall CUSTOM_STORAGE ret int@EAX',
+      'param Unit * pOwner@ECX',
+      'param int nSkill@EDX',
+    ]);
   });
 });

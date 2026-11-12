@@ -110,8 +110,11 @@ for (com.google.gson.JsonElement pe : props) { com.google.gson.JsonObject P = pe
    else if (op.equals("set_prototype")) { ghidra.program.model.listing.Function f = fnAt.apply(js.apply(o, "address")); java.util.List<String[]> s = psig.apply(js.apply(o, "signature")); ghidra.program.model.data.DataType rdt = type.apply(s.get(0)[0]);
     boolean custom = f.hasCustomVariableStorage(); java.util.List<ghidra.program.model.listing.Parameter> ps = new java.util.ArrayList<>();
     if (custom && f.getParameterCount() != s.size() - 1) throw new RuntimeException("custom storage and the parameter count changes");
+    // custom storage follows the parameter's name when the new names are the old ones reordered, else its position
+    java.util.Map<String, ghidra.program.model.listing.VariableStorage> byName = new java.util.HashMap<>(); if (custom) for (ghidra.program.model.listing.Parameter op0 : f.getParameters()) byName.put(op0.getName(), op0.getVariableStorage());
+    boolean perm = custom && byName.size() == s.size() - 1; if (perm) for (int i = 1; i < s.size(); i++) perm &= byName.containsKey(s.get(i)[1]);
     for (int i = 1; i < s.size(); i++) { ghidra.program.model.data.DataType pdt = type.apply(s.get(i)[0]); ghidra.program.model.listing.VariableStorage vs = ghidra.program.model.listing.VariableStorage.UNASSIGNED_STORAGE;
-     if (custom) { vs = f.getParameter(i - 1).getVariableStorage(); if (vs.size() != pdt.getLength()) throw new RuntimeException("custom storage size change on parameter " + i); }
+     if (custom) { vs = perm ? byName.get(s.get(i)[1]) : f.getParameter(i - 1).getVariableStorage(); if (vs.size() != pdt.getLength()) throw new RuntimeException("custom storage size change on parameter " + i); }
      ps.add(new ghidra.program.model.listing.ParameterImpl(s.get(i)[1], pdt, vs, currentProgram, U)); }
     ghidra.program.model.listing.ReturnParameterImpl ret;
     if (custom && !(rdt instanceof ghidra.program.model.data.VoidDataType) && rdt.getLength() > 0) { String rn = rdt.getLength() == 1 ? "AL" : rdt.getLength() == 2 ? "AX" : "EAX"; ret = new ghidra.program.model.listing.ReturnParameterImpl(rdt, new ghidra.program.model.listing.VariableStorage(currentProgram, currentProgram.getRegister(rn)), currentProgram); }
