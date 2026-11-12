@@ -567,6 +567,9 @@ export interface ThunkForward {
 }
 
 export interface ImplGenContext {
+  /** Architecture and pointer width of the extracted binary, for target-specific forms. */
+  targetArchitecture?: string;
+  targetPointerSize?: number;
   /**
    * Thunk address → the forwarder's callee. Absent for a thunk whose target
    * Ghidra could not resolve, or which is not emitted anywhere in this tree;
@@ -4385,6 +4388,9 @@ function transformDecompiledCode(
         selectTables: {
           ...(perPluginOptions['select-argument'] as SelectArgumentOptions | undefined),
           accessors: context?.accessorTwins,
+          structFieldOffsets: context?.funcPtrArgCasts?.structFieldOffsets,
+          targetArchitecture: context?.targetArchitecture,
+          targetPointerSize: context?.targetPointerSize,
         },
         onSite: s => {
           if (s.applied) for (const d of s.prefix ?? []) if (!vc8Prefix.includes(d)) vc8Prefix.push(d);
