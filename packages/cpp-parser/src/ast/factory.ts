@@ -344,7 +344,7 @@ export const Expr = {
       kind: NodeKind.CharLiteral,
       value: charCode,
       prefix: '',
-      raw: `'${char}'`,
+      raw: `'${escapeCString(char).replace(/'/g, "\\'")}'`,
     }) as CharLiteralExpr;
   },
 
