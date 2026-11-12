@@ -1,0 +1,22 @@
+/* @function TSHashTable<StringEntryNode,HASHKEY_STRI>::Destroy
+   @address Game.exe.ram:00610020
+   @date 2026.02.26
+   @params
+     this: ECX:4 (auto) (TSHashTable<StringEntryNode,HASHKEY_STRI> *)
+   @description Diablo 2 1.14d reverse team
+   https://blizzhackers.dev
+   @blizzard TSHashTable<StringEntryNode,HASHKEY_STRI>::Destroy (STORM.H) */
+
+void __thiscall
+TSHashTable<StringEntryNode,HASHKEY_STRI>::Destroy(TSHashTable<StringEntryNode,HASHKEY_STRI> *this)
+
+{
+  TSHashTable<StringEntryNode,HASHKEY_STRI>::InternalClear(this,1);
+  this->nFullnessIndicator = 0;
+  this->nSlotMask = 0;
+  TSGrowableArray<TSExplicitList<StringEntryNode,-572662307>>::Destructor(&this->tSlotListArray);
+  (this->tSlotListArray).m_alloc = 0;
+  (this->tSlotListArray).m_count = 0;
+  (this->tSlotListArray).m_data = (TSExplicitList<StringEntryNode,_572662307> *)0x0;
+  return;
+}
