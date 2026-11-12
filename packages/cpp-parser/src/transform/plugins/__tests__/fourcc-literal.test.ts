@@ -66,4 +66,9 @@ describe('fourccLiteralPlugin', () => {
     const out = run("void f() { g((char[4])L'\\x20736831'); }");
     assert.ok(out.includes('"1hs "'), out);
   });
+
+  it('escapes trigraphs in a decoded four-character code', () => {
+    const out = run("void f() { g((char[4])L'\\x413d3f3f'); }");
+    assert.ok(out.includes('"\\?\\?=A"'), out);
+  });
 });
