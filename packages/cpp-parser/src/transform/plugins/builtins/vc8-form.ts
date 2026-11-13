@@ -316,6 +316,32 @@
  *                        `test r, r` (DRLGLOGIC_PopulateGridCoordIndices 0066c580, a flags
  *                        word). Per function: where the original's JS/JNS reuses the flags
  *                        of an arithmetic instruction instead, the mask costs a `test`.
+ *   zinit(N)             the local N declared `T N = {0};` is declared bare and cleared with
+ *                        `memset(&N, 0, sizeof(N));`. `{0}` stores each member and VC8 drops a
+ *                        member's zero store that a later store overwrites; the memset keeps
+ *                        every store, from one zeroed register (CLIENT_SendMonsterAttackMessage
+ *                        0046cab0, NET_GetLocalIPAddressString 0052afe0).
+ *   znew(P[,N])          after the one allocation stored to P, the first run of stores through
+ *                        P loses its zero stores (each the first store to its place in the run)
+ *                        to a `memset(P, 0, sizeof(*P));` (or N bytes) ahead of the run: the
+ *                        original cleared the new object, then filled it, and VC8 kept the
+ *                        zeroed register for the rest (SUNITEVENT_Alloc 005c0ad0, AllocTimer
+ *                        0054f520). Refused when a call or a store of P stands between the
+ *                        allocation and the run (a null test that leaves is admitted), or the
+ *                        run holds no zero store.
+ *   swclamp(V)           `if (V < 0 || V >= E) { V = K; }` directly before `switch (V)` is
+ *                        written `switch (F_ClampIndex(V))`, an inline helper with two returns
+ *                        defined once in the unit ahead of the function (Vc8FormSite.prefix):
+ *                        VC8 biases the jump table with `sub` only for an inline call's result
+ *                        (SPAWN_IsExcludedMonsterClass 0054e3a0). Refused when V is read after
+ *                        the check, or E reads V, calls or stores.
+ *   retbase(P,N)         the function's chain of guards `if (C) { return P + K; }` (or `return
+ *                        P;`), at least two, followed by a tail that ends in `exit`, is written
+ *                        as one if/else chain storing each K (0 for P alone) to a new local N,
+ *                        the tail as the last else, and `return N + P;`: the original loads
+ *                        the base, zero too, and adds the parameter in each arm
+ *                        (CHATDLG_GetLadderFilterForTab 0043f150). P must be a parameter
+ *                        never stored and whose address is not taken.
  *   switch(X[,i])        the i-th `if (X != K1) { if (X == K2 [&& R]) B2 } else B1` (or
  *                        `if (X == K1) B1 else if (X == K2 [&& R]) B2`), K1 and K2 two
  *                        constants, is written `switch (X) { case K2: { [if (R)] B2 }
@@ -330,7 +356,7 @@
 
 import { NodeKind, isExpression, isType } from '../../../ast/kinds.js';
 import type {
-  ASTNode, AssignExpr, BinaryExpr, CallExpr, CompoundStmt, ConditionalExpr, CStyleCastExpr, DeclStmt, Expression,
+  ASTNode, AssignExpr, BinaryExpr, CallExpr, CompoundStmt, ConditionalExpr, CStyleCastExpr, DeclStmt, Expression, SwitchStmt,
   ExprStmt, ForStmt, FunctionDecl, Identifier, IfStmt, IntegerLiteralExpr, MemberExpr, ParenExpr, ReturnStmt, Statement, SubscriptExpr, TranslationUnit,
   TypeNode, UnaryExpr, VariableDecl,
 } from '../../../ast/nodes.js';
@@ -396,7 +422,11 @@ export type Vc8Form =
   | { op: 'dec'; name: string; amount: number }
   | { op: 'range'; cond: string; index: number }
   | { op: 'castout'; expr: string; index: number }
-  | { op: 'signbit'; cond: string; index: number };
+  | { op: 'signbit'; cond: string; index: number }
+  | { op: 'zinit'; name: string }
+  | { op: 'znew'; name: string; size?: string }
+  | { op: 'swclamp'; name: string }
+  | { op: 'retbase'; param: string; name: string };
 
 /**
  * A header inline that reads one field of a struct through a pointer, or returns a
@@ -447,7 +477,7 @@ export interface Vc8FormOptions {
 
 const OPS = new Set(['seq', 'fold', 'join', 'coalesce', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'width', 'boolflag', 'retwiden', 'arms',
   'nest', 'merge-tail', 'tailguard', 'tailcopy', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'clamp', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
-  'nestcall', 'fill', 'elems', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'switch', 'dec', 'opas', 'range', 'castout', 'signbit']);
+  'nestcall', 'fill', 'elems', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'switch', 'dec', 'opas', 'range', 'castout', 'signbit', 'zinit', 'znew', 'swclamp', 'retbase']);
 
 /** Split at commas outside brackets and parentheses. For cache, the third argument is a
  * type, so commas inside its template arguments also belong to that argument. */
@@ -557,6 +587,13 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
       if (anchor || args.length < 1 || args.length > 2 || !(i >= 1) || !/^[A-Za-z_]\w*$/.test(args[0])) return undefined;
       return { op: 'swmerge', name: args[0], index: i };
     }
+    case 'zinit': case 'swclamp':
+      return !anchor && args.length === 1 && /^[A-Za-z_]\w*$/.test(args[0]) ? { op: m[1], name: args[0] } as Vc8Form : undefined;
+    case 'znew':
+      if (anchor || args.length < 1 || args.length > 2 || !/^[A-Za-z_]\w*$/.test(args[0]) || (args.length === 2 && !/^(?:0x[0-9a-fA-F]+|[1-9]\d*)$/.test(args[1]))) return undefined;
+      return { op: 'znew', name: args[0], ...(args.length === 2 ? { size: args[1] } : {}) };
+    case 'retbase':
+      return !anchor && args.length === 2 && args.every(a => /^[A-Za-z_]\w*$/.test(a)) && args[0] !== args[1] ? { op: 'retbase', param: args[0], name: args[1] } : undefined;
     case 'roundup': {
       const id = /^[A-Za-z_]\w*$/;
       if (anchor || args.length < 1 || args.length > 2 || !id.test(args[0]) || (args.length === 2 && !id.test(args[1]))) return undefined;
@@ -4340,6 +4377,193 @@ function opasShift(fn: FunctionDecl, u: OpasUpdate, matches: (e: Expression, u: 
   b!.statements.splice(at, 0, ...parseStmts(`${u.name} >>= ${u.constant};`));
 }
 
+// ---------------------------------------------------------------------------------------
+// zinit, znew: a zero fill the original wrote as a memset
+
+const zeroLiteral = (e: Expression): boolean => constValue(e) === 0n || /^'\\0'$/.test(text(e)) || text(e) === '0';
+
+function doZinit(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'zinit' }>): void {
+  const sites: Array<{ b: CompoundStmt; k: number; d: VariableDecl }> = [];
+  for (const b of blocks(fn)) {
+    for (let k = 0; k < b.statements.length; k++) {
+      const d = declOf(b.statements[k]);
+      if (d && d.name.name === f.name) sites.push({ b, k, d });
+    }
+  }
+  if (sites.length !== 1) refuse(`${f.name} is declared ${sites.length} times as a statement`);
+  const { b, k, d } = sites[0];
+  if (d.specifiers.length > 0) refuse(`${f.name} is ${d.specifiers.join(' ')}`);
+  if (!d.initializer || d.initializer.kind !== NodeKind.InitListExpr || norm(emit(d.initializer as never)) !== '{0}') refuse(`${f.name} is not initialised = {0}`);
+  const decl = cloneNode(b.statements[k]) as DeclStmt;
+  const nd = decl.declarations[0] as VariableDecl;
+  nd.initializer = null;
+  delete nd.copyListInit;
+  const [clear] = parseStmts(`memset(&${f.name}, 0, sizeof(${f.name}));`);
+  b.statements.splice(k, 1, decl, clear);
+}
+
+/** Whether e is a place in the object P points to: `P->m...`, `P[i]...`, `*P`. */
+function throughPointer(e: Expression, p: string): boolean {
+  e = unparen(e);
+  for (;;) {
+    if (e.kind === NodeKind.MemberExpr) {
+      const m = e as unknown as { object: Expression; isArrow: boolean };
+      if (m.isArrow) return isId(unparen(m.object), p);
+      e = unparen(m.object); continue;
+    }
+    if (e.kind === NodeKind.SubscriptExpr) {
+      const a = unparen((e as unknown as { array: Expression }).array);
+      if (isId(a, p)) return true;
+      e = a; continue;
+    }
+    if (e.kind === NodeKind.UnaryExpr && (e as UnaryExpr).operator === '*') return isId(unparen((e as UnaryExpr).operand), p);
+    return false;
+  }
+}
+
+function doZnew(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'znew' }>): void {
+  const p = f.name;
+  const sites: Array<{ b: CompoundStmt; k: number }> = [];
+  for (const b of blocks(fn)) {
+    for (let k = 0; k < b.statements.length; k++) {
+      const s = b.statements[k];
+      const d = declOf(s);
+      const st = storeOf(s);
+      if ((d && d.name.name === p && d.initializer && hasCall(d.initializer as Expression))
+        || (st && st.operator === '=' && isId(unparen(st.left), p) && hasCall(st.right))) sites.push({ b, k });
+    }
+  }
+  if (sites.length !== 1) refuse(`${sites.length} allocations into ${p}`);
+  const { b, k } = sites[0];
+  // Up to the first store through P: statements that call nothing and store nothing through
+  // memory P could name, and never store P (a null test that leaves is admitted).
+  let j = k + 1;
+  const isStoreThrough = (s: Statement) => { const st = storeOf(s); return !!st && st.operator === '=' && throughPointer(st.left, p); };
+  while (j < b.statements.length && !isStoreThrough(b.statements[j])) {
+    const s = b.statements[j];
+    if (storedNames(s).has(p)) refuse(`${p} is stored again before the fill`);
+    const st = storeOf(s);
+    if (hasCall(s) && !(s.kind === NodeKind.IfStmt && leaves((s as IfStmt).thenBranch) && !hasCall((s as IfStmt).condition))) refuse(`${emit(s as never).trim()} calls before the fill`);
+    if (!st && s.kind !== NodeKind.IfStmt) refuse(`${emit(s as never).trim()} stands before the fill`);
+    j++;
+  }
+  const start = j;
+  const seen = new Set<string>();
+  const drop: number[] = [];
+  while (j < b.statements.length && isStoreThrough(b.statements[j])) {
+    const st = storeOf(b.statements[j])!;
+    if (hasCall(st.right)) break;
+    const lhs = text(st.left);
+    if (zeroLiteral(st.right) && !seen.has(lhs)) drop.push(j);
+    seen.add(lhs);
+    j++;
+  }
+  if (drop.length === 0) refuse(`no zero store through ${p} after its allocation`);
+  const size = f.size ?? `sizeof(*${p})`;
+  const [clear] = parseStmts(`memset(${p}, 0, ${size});`);
+  for (const x of drop.reverse()) b.statements.splice(x, 1);
+  b.statements.splice(start, 0, clear);
+}
+
+// ---------------------------------------------------------------------------------------
+// swclamp: the index check before a switch, an inline helper with two returns
+
+function doSwclamp(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'swclamp' }>): void {
+  const v = f.name;
+  const strip = (e: Expression): Expression => { e = unparen(e); return e.kind === NodeKind.CStyleCastExpr ? unparen((e as CStyleCastExpr).expression) : e; };
+  const sites: Array<{ b: CompoundStmt; k: number; bound: Expression; value: Expression; sw: SwitchStmt }> = [];
+  for (const b of blocks(fn)) {
+    for (let k = 0; k + 1 < b.statements.length; k++) {
+      const s = b.statements[k];
+      if (s.kind !== NodeKind.IfStmt || (s as IfStmt).elseBranch || (s as IfStmt).init) continue;
+      const c = unparen((s as IfStmt).condition);
+      if (c.kind !== NodeKind.BinaryExpr || (c as BinaryExpr).operator !== '||') continue;
+      const lo = unparen((c as BinaryExpr).left), hi = unparen((c as BinaryExpr).right);
+      if (lo.kind !== NodeKind.BinaryExpr || (lo as BinaryExpr).operator !== '<' || !isId(strip((lo as BinaryExpr).left), v) || constValue((lo as BinaryExpr).right) !== 0n) continue;
+      if (hi.kind !== NodeKind.BinaryExpr || (hi as BinaryExpr).operator !== '>=' || !isId(strip((hi as BinaryExpr).left), v)) continue;
+      const arm = stmtsOf((s as IfStmt).thenBranch);
+      const st = arm.length === 1 ? storeOf(arm[0]) : undefined;
+      if (!st || st.operator !== '=' || !isId(unparen(st.left), v) || !loadsNothing(st.right)) continue;
+      const next = b.statements[k + 1];
+      if (next.kind !== NodeKind.SwitchStmt || !isId(strip((next as SwitchStmt).condition), v)) continue;
+      sites.push({ b, k, bound: (hi as BinaryExpr).right, value: st.right, sw: next as SwitchStmt });
+    }
+  }
+  if (sites.length !== 1) refuse(`${sites.length} checked switches on ${v}`);
+  const { b, k, bound, value, sw } = sites[0];
+  const bt = bound as Expression;
+  if (mentions(bt, v) || hasCall(bt) || storedNames(bt).size > 0) refuse(`the bound ${emit(bt as never)} reads ${v}, calls or stores`);
+  if (mentions(sw.body, v) || b.statements.slice(k + 2).some(s => mentions(s, v))) refuse(`${v} is read after the switch`);
+  const fname = emit(fn.name as never).replace(/\W+/g, '_');
+  const helper = `${fname}_ClampIndex`;
+  const definition = [
+    `// ${helper}: the index check ahead of ${fname}'s switch, an inline function with two returns as the original inlined it.`,
+    `static inline int ${helper}(int nIndex) {`,
+    `    if (nIndex < 0 || nIndex >= ${emit(bt as never)}) {`,
+    `        return ${emit(value as never)};`,
+    '    }',
+    '    return nIndex;',
+    '}',
+  ].join('\n');
+  sw.condition = parseExpr(`${helper}(${v})`);
+  b.statements.splice(k, 1);
+  prefixUsed.add(definition);
+}
+
+// ---------------------------------------------------------------------------------------
+// retbase: a chain of guarded returns of P + K, one base variable added once
+
+function doRetbase(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'retbase' }>): void {
+  const { param: p, name: n } = f;
+  if (!fn.parameters.some(x => isId((x as unknown as { name?: Identifier | null }).name, p))) refuse(`${p} is not a parameter`);
+  if ([...storedNames(fn.body!)].includes(p) || addressTaken(fn, p)) refuse(`${p} is stored or its address taken`);
+  freshName(fn, n);
+  const type = emit(fn.returnType as never).trim();
+  if (type === 'void') refuse('the function returns nothing');
+  const st = fn.body!.statements;
+  const baseOf = (e: Expression): Expression | undefined => {
+    const x = unparen(e);
+    if (isId(x, p)) return parseExpr('0');
+    if (x.kind === NodeKind.BinaryExpr && (x as BinaryExpr).operator === '+') {
+      const l = unparen((x as BinaryExpr).left), r = unparen((x as BinaryExpr).right);
+      if (isId(l, p) && constValue(r) !== undefined && loadsNothing(r)) return r;
+      if (isId(r, p) && constValue(l) !== undefined && loadsNothing(l)) return l;
+    }
+    return undefined;
+  };
+  let i0 = 0;
+  while (i0 < st.length && st[i0].kind !== NodeKind.IfStmt) i0++;
+  const arms: Array<{ cond: Expression; base: Expression }> = [];
+  let i = i0;
+  for (; i < st.length; i++) {
+    const s = st[i];
+    if (s.kind !== NodeKind.IfStmt || (s as IfStmt).elseBranch || (s as IfStmt).init) break;
+    const arm = stmtsOf((s as IfStmt).thenBranch);
+    const r = arm.length === 1 && arm[0].kind === NodeKind.ReturnStmt ? (arm[0] as ReturnStmt).value : undefined;
+    const base = r ? baseOf(r) : undefined;
+    if (!base) break;
+    if (mentions((s as IfStmt).condition, n)) refuse(`${n} is named in a condition`);
+    arms.push({ cond: (s as IfStmt).condition, base });
+  }
+  if (arms.length < 2) refuse(`${arms.length} guarded returns of ${p} + K`);
+  const rest = st.slice(i);
+  const last = rest[rest.length - 1];
+  const exitCall = last ? callOf(last) : undefined;
+  if (!exitCall || calleeName(exitCall.callee) !== 'exit') refuse('the chain is not followed by a tail that ends in exit');
+  if (rest.some(returnsInside)) refuse('the tail returns');
+  let tail: Statement = { kind: NodeKind.CompoundStmt, statements: rest } as unknown as CompoundStmt;
+  for (let a = arms.length - 1; a >= 0; a--) {
+    const [ifs] = parseStmts(`if (__vc8c) { ${n} = __vc8k; } else { }`);
+    (ifs as IfStmt).condition = arms[a].cond;
+    ((((ifs as IfStmt).thenBranch as CompoundStmt).statements[0] as ExprStmt).expression as AssignExpr).right = arms[a].base;
+    (ifs as IfStmt).elseBranch = tail;
+    tail = ifs;
+  }
+  const [decl] = parseStmts(`${type} ${n};`);
+  const [ret] = parseStmts(`return ${n} + ${p};`);
+  fn.body!.statements = [...st.slice(0, i0), decl, tail, ret];
+}
+
 const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op: K }>) => void } = {
   seq: doSeq, fold: doFold, join: doJoin, coalesce: doCoalesce, cache: doCache, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
   retval: doRetval, width: doWidth, boolflag: doBoolflag, retwiden: doRetwiden, arms: doArms,
@@ -4350,6 +4574,7 @@ const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op
   acc: doAcc,
   retvar: doRetvar, onecall: doOnecall, roundup: doRoundup, opas: doOpas, swmerge: doSwmerge, dec: doDec, switch: doSwitch,
   range: doRange, castout: doCastout, signbit: doSignbit,
+  zinit: doZinit, znew: doZnew, swclamp: doSwclamp, retbase: doRetbase,
 };
 
 /**
