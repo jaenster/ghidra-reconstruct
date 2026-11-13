@@ -60,8 +60,9 @@ import type { AnyNode } from '../../../ast/nodes.js';
 import { buildFunctionFlow, ENTRY_DEF, type FunctionFlow } from '../../cfg/dataflow.js';
 import { countGotoTargets } from '../../cfg/labels.js';
 import { unwrapParens, type TypeShape } from './call-arg-cast.js';
+import { lowerWordMemcmps, type WordMemcmpDeps } from './word-memcmp.js';
 
-export interface StringIntrinsicDeps {
+export interface StringIntrinsicDeps extends WordMemcmpDeps {
   /** Declared shape of an expression, or null. */
   shape: (e: Expression) => TypeShape | null;
   isPure: (e: ASTNode) => boolean;
@@ -512,6 +513,8 @@ function baseVar(e: Expression): string | null {
 export function lowerStringIntrinsics(body: Statement[], deps: StringIntrinsicDeps): Statement[] {
   let current = body;
   for (let round = 0; round < 128; round++) {
+    const compared = lowerWordMemcmps(current, deps);
+    if (compared !== current) { current = compared; continue; }
     const next = lowerOne(current, deps);
     if (!next) break;
     current = next;
