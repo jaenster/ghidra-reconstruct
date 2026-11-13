@@ -1,0 +1,1445 @@
+{
+  "provenance": {
+    "scope": "Local SDK import; not owning Redivivus database. Actual combined Java extractor output and local getter decompile; native-verified copied prototype/storage models.",
+    "sdk": "Ghidra12.2",
+    "imageSHA256": "631066c1649c4ea9ffe48bf97e24c00bca1f7a6759c21150f1a79982589adaaf",
+    "address": "0046ddf0",
+    "originalFunctionBytes": 252,
+    "javaProducerSHA256": "c8a6352a10d288dbd0fb40318d4a3ad396e91924ab590be042f9d68542271ea7",
+    "generatorBase": "63093f5a06ed7216469edc1b1d333650aa8b4718",
+    "notes": "Pool type is opaque pointer target only. Unnamed byte fields use emitted uint8 aliases. No binary bytes.",
+    "nativeText": {
+      "javaStringHash": 2071151332,
+      "length": 1994,
+      "lines": 61,
+      "lineEndings": "CRLF"
+    },
+    "nativeFactsVerified": {
+      "getterOffset": 29,
+      "pushesBeforeGetter": 3,
+      "getterSlots": [],
+      "allocationOffset": 39,
+      "pushesBetweenGetterAndAllocation": 0,
+      "allocationSlots": [
+        0,
+        0,
+        1,
+        1,
+        1
+      ]
+    },
+    "extractorsAgree": true
+  },
+  "fn": {
+    "name": "GFX_LoadAndHashCofArchive",
+    "address": "0046ddf0",
+    "entryPoint": "0046ddf0",
+    "signature": "void GFX_LoadAndHashCofArchive(char * szPath, D2CofCacheStrc * pCache)",
+    "returnType": "void",
+    "callingConvention": "__stdcall",
+    "size": 252,
+    "isThunk": false,
+    "isExternal": false,
+    "hasVarArgs": false,
+    "namespace": "D2Client::Engine::Gfx",
+    "comment": "@function GFX_LoadAndHashCofArchive\n@address Game.exe.ram:0046ddf0\n@date 2026.06.13\n@params\n  szPath: Stack[0x4]:4 (char *)\n  pCache: EBX:4 (int *)\n@description Diablo 2 1.14d reverse team\nhttps://blizzhackers.dev\n\nFunction uses custom registers for function arguments!\n[char * szPath@Stack[0x4]:4]\n[int * pCache@EBX:4]\n@sourcefile .\\ENGINE\\Gfx.cpp\n@sourcefile-basis Blizzard __FILE__ literal referenced from inside this function's body (1 site: 0046de04). First-party 1.14d evidence, not inferred and not from D2R.",
+    "sourceFile": null,
+    "sourceLine": null,
+    "sourceInfo": "@function GFX_LoadAndHashCofArchive\n@address Game.exe.ram:0046ddf0\n@date 2026.06.13\n@params\n  szPath: Stack[0x4]:4 (char *)\n  pCache: EBX:4 (int *)\n@description Diablo 2 1.14d reverse team\nhttps://blizzhackers.dev\n\nFunction uses custom registers for function arguments!\n[char * szPath@Stack[0x4]:4]\n[int * pCache@EBX:4]\n@sourcefile .\\ENGINE\\Gfx.cpp\n@sourcefile-basis Blizzard __FILE__ literal referenced from inside this function's body (1 site: 0046de04). First-party 1.14d evidence, not inferred and not from D2R.",
+    "parameters": [
+      {
+        "name": "szPath",
+        "dataType": "char *",
+        "size": 4,
+        "ordinal": 0,
+        "storage": "Stack[0x4]:4",
+        "stackOffset": 4,
+        "resolvedType": null
+      },
+      {
+        "name": "pCache",
+        "dataType": "D2CofCacheStrc *",
+        "size": 4,
+        "ordinal": 1,
+        "storage": "EBX:4",
+        "stackOffset": null,
+        "resolvedType": null
+      }
+    ],
+    "localVariables": [
+      {
+        "name": "pMPQ",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "D2PoolManagerStrc *"
+      },
+      {
+        "name": "pEntry",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "D2CofTextureCacheEntryStrc *"
+      },
+      {
+        "name": "nAddress",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "void *"
+      },
+      {
+        "name": "pNameEnd",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "char *"
+      },
+      {
+        "name": "nHash",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "uint32_t"
+      },
+      {
+        "name": "nBucket",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "ECX:4",
+        "stackOffset": null,
+        "resolvedType": "uint"
+      },
+      {
+        "name": "local_8",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "Stack[-0x8]:4",
+        "stackOffset": -8,
+        "resolvedType": null
+      },
+      {
+        "name": "nSrcLine",
+        "dataType": "int32_t",
+        "size": 4,
+        "storage": "HASH:3f3a0b0b20:4",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "pcSrcFile",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "HASH:3feb2a408b:4",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "pSize",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "HASH:7bf67eed7e8:4",
+        "stackOffset": null,
+        "resolvedType": "int32_t *"
+      },
+      {
+        "name": "nLine",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "HASH:3fec272e9e:4",
+        "stackOffset": null,
+        "resolvedType": "int32_t"
+      },
+      {
+        "name": "nRemaining",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "HASH:5f2419b827:4",
+        "stackOffset": null,
+        "resolvedType": "int"
+      },
+      {
+        "name": "DVar1",
+        "dataType": "undefined1",
+        "size": 1,
+        "storage": "HASH:5f8685ef10:1",
+        "stackOffset": null,
+        "resolvedType": "char"
+      },
+      {
+        "name": "nChar",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "HASH:5ff8d5b277:4",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "ppNameChar",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "HASH:27f054006ee:4",
+        "stackOffset": null,
+        "resolvedType": null
+      }
+    ],
+    "tags": [
+      {
+        "type": "llm-named"
+      },
+      {
+        "type": "llm-artifact-fix"
+      },
+      {
+        "type": "halt-returns"
+      },
+      {
+        "type": "x64-typing"
+      }
+    ],
+    "decompiled": "\r\nvoid D2Client::Engine::Gfx::GFX_LoadAndHashCofArchive(char *szPath,D2CofCacheStrc *pCache)\r\n\r\n{\r\n  uint *puVar1;\r\n  char cVar2;\r\n  D2PoolManagerStrc *pMemory;\r\n  D2CofTextureCacheEntryStrc *pDVar3;\r\n  void *nAddress;\r\n  uint uVar4;\r\n  int *pSize;\r\n  char *pcVar5;\r\n  int iVar6;\r\n  \r\n  if (pCache->nFrameCount == 0) {\r\n    iVar6 = 0x10b;\r\n    pcVar5 = \".\\\\ENGINE\\\\Gfx.cpp\";\r\n    pSize = &pCache->nCacheEntryCount;\r\n    pMemory = D2Win::Src::D2WinArchive::ReturnZero();\r\n    pDVar3 = D2Hell::D2FILE_AllocAndLoadD2File(pMemory,szPath,(uint *)pSize,pcVar5,iVar6);\r\n    pCache->pCacheMemory = pDVar3;\r\n    if (pDVar3 == (D2CofTextureCacheEntryStrc *)0x0) {\r\n      iVar6 = 0x10c;\r\nLAB_0046de28:\r\n      nAddress = Fog::Src::ErrorManager::GetInstructionPointer();\r\n      Fog::Src::ErrorManager::ERROR_UnrecoverableInternalError_Halt(\"\",nAddress,iVar6);\r\n                    /* WARNING: Subroutine does not return */\r\n      compiler::exit(-1);\r\n    }\r\n    iVar6 = pCache->nCacheEntryCount;\r\n    gbCofCacheLRUEnabled = gbCofCacheLRUEnabled + iVar6;\r\n    for (; iVar6 != 0; iVar6 = iVar6 + (-0x18 - *puVar1)) {\r\n      if (pDVar3->dwFlags != 0) {\r\n        pDVar3->dwFlags = 0;\r\n      }\r\n      if (0x40 < pDVar3->field_0x1a) {\r\n        iVar6 = 0x126;\r\n        goto LAB_0046de28;\r\n      }\r\n      pDVar3->pFileData = &pDVar3->field_0x18;\r\n      pcVar5 = pDVar3->szName;\r\n      do {\r\n        cVar2 = *pcVar5;\r\n        pcVar5 = pcVar5 + 1;\r\n      } while (cVar2 != '\\0');\r\n      if (7 < (uint)((int)pcVar5 - (int)(pDVar3->szName + 1))) {\r\n        iVar6 = 0x79;\r\n        goto LAB_0046de28;\r\n      }\r\n      uVar4 = Storm::Source::SSTR::SStrHash(pDVar3->szName,'\\x01',0);\r\n      uVar4 = (((uVar4 >> 8 ^ uVar4) >> 8 ^ uVar4) >> 8 ^ uVar4) & 0x1ff;\r\n      pDVar3->pNext = pCache->apBuckets[uVar4];\r\n      pCache->apBuckets[uVar4] = pDVar3;\r\n      puVar1 = &pDVar3->nFileSize;\r\n      pDVar3 = (D2CofTextureCacheEntryStrc *)(&pDVar3->field_0x18 + *puVar1);\r\n    }\r\n    pCache->nFrameCount = 1;\r\n  }\r\n  return;\r\n}\r\n\r\n",
+    "compareSites": "0\t==\tINT_EQUAL\t4\t1\t0\te\tc:0\t0046ddf4\t0046ddf7\tJNZ\t0046ddf4\tCMP\t4\tm\ti\t0\t1\n1\t==\tINT_EQUAL\t4\t1\t0\tv:pDVar3\tc:0\t0046de1c\t0046de21\tJNZ\t0046de1c\tTEST\t4\tr\tz\t0\t1\n2\t!=\tINT_NOTEQUAL\t4\t1\t0\tv:iVar6\tc:0\t0046de4c\t0046de51\tJZ\t0046de4c\tTEST\t4\tr\tz\t0\t1\n3\t!=\tINT_NOTEQUAL\t4\t1\t0\te\tc:0\t0046de53\t0046de59\tJZ\t0046de53\tCMP\t4\tm\ti\t0\t1\n4\t<\tINT_LESS\t1\t0\t40\tc:40\te\t0046de66\t0046de66\tJA\t0046de62\tCMP\t1\tm\ti\t40\t1\n5\t!=\tINT_NOTEQUAL\t1\t1\t0\tv:cVar2\tc:0\t0046de85\t0046de87\tJNZ\t0046de85\tTEST\t1\tr\tz\t0\t1\n6\t<\tINT_LESS\t4\t0\t7\tc:7\te\t0046de8c\t0046de8f\tJNC\t0046de8c\tCMP\t4\tr\ti\t8\t1",
+    "branchLayout": {
+      "lineCount": 61,
+      "lines": [
+        [
+          15,
+          [
+            4,
+            7
+          ]
+        ],
+        [
+          16,
+          [
+            15
+          ]
+        ],
+        [
+          17,
+          [
+            20
+          ]
+        ],
+        [
+          18,
+          [
+            25,
+            29
+          ]
+        ],
+        [
+          19,
+          [
+            29
+          ]
+        ],
+        [
+          20,
+          [
+            39
+          ]
+        ],
+        [
+          21,
+          [
+            46
+          ]
+        ],
+        [
+          22,
+          [
+            44,
+            49
+          ]
+        ],
+        [
+          23,
+          [
+            51
+          ]
+        ],
+        [
+          24,
+          [
+            56
+          ]
+        ],
+        [
+          25,
+          [
+            56
+          ]
+        ],
+        [
+          26,
+          [
+            67
+          ]
+        ],
+        [
+          28,
+          [
+            77
+          ]
+        ],
+        [
+          30,
+          [
+            25,
+            84
+          ]
+        ],
+        [
+          31,
+          [
+            86
+          ]
+        ],
+        [
+          32,
+          [
+            92,
+            97,
+            204,
+            212,
+            216
+          ]
+        ],
+        [
+          33,
+          [
+            99,
+            105
+          ]
+        ],
+        [
+          34,
+          [
+            107
+          ]
+        ],
+        [
+          36,
+          [
+            114,
+            118
+          ]
+        ],
+        [
+          37,
+          [
+            235
+          ]
+        ],
+        [
+          38,
+          [
+            56
+          ]
+        ],
+        [
+          40,
+          [
+            125,
+            131
+          ]
+        ],
+        [
+          41,
+          [
+            120,
+            137
+          ]
+        ],
+        [
+          43,
+          [
+            144
+          ]
+        ],
+        [
+          44,
+          [
+            146
+          ]
+        ],
+        [
+          45,
+          [
+            149,
+            151
+          ]
+        ],
+        [
+          46,
+          [
+            128,
+            153,
+            156,
+            159
+          ]
+        ],
+        [
+          47,
+          [
+            245
+          ]
+        ],
+        [
+          48,
+          [
+            56
+          ]
+        ],
+        [
+          50,
+          [
+            120,
+            166
+          ]
+        ],
+        [
+          51,
+          [
+            173,
+            176,
+            178,
+            181,
+            183,
+            186,
+            188
+          ]
+        ],
+        [
+          52,
+          [
+            194,
+            198
+          ]
+        ],
+        [
+          53,
+          [
+            200
+          ]
+        ],
+        [
+          54,
+          [
+            204
+          ]
+        ],
+        [
+          55,
+          [
+            125,
+            204,
+            214
+          ]
+        ],
+        [
+          57,
+          [
+            222
+          ]
+        ],
+        [
+          59,
+          [
+            232
+          ]
+        ]
+      ],
+      "ifs": [
+        [
+          15,
+          7
+        ],
+        [
+          22,
+          49
+        ],
+        [
+          33,
+          105
+        ],
+        [
+          36,
+          118
+        ],
+        [
+          46,
+          159
+        ]
+      ],
+      "tests": [
+        [
+          15,
+          {
+            "op": "==",
+            "mnemonic": "CMP",
+            "reg": "-",
+            "k": 0,
+            "size": 4,
+            "at": 4
+          }
+        ],
+        [
+          22,
+          {
+            "op": "==",
+            "mnemonic": "TEST",
+            "reg": "EAX",
+            "k": 0,
+            "size": 4,
+            "at": 44
+          }
+        ],
+        [
+          32,
+          {
+            "op": "!=",
+            "mnemonic": "TEST",
+            "reg": "EAX",
+            "k": 0,
+            "size": 4,
+            "at": 92
+          }
+        ],
+        [
+          33,
+          {
+            "op": "!=",
+            "mnemonic": "CMP",
+            "reg": "-",
+            "k": 0,
+            "size": 4,
+            "at": 99
+          }
+        ],
+        [
+          45,
+          {
+            "op": "!=",
+            "mnemonic": "TEST",
+            "reg": "DL",
+            "k": 0,
+            "size": 1,
+            "at": 149
+          }
+        ]
+      ],
+      "operands": [],
+      "returns": [
+        {
+          "start": 229,
+          "ret": 232,
+          "insns": [
+            "MOV/ESP",
+            "POP/EBP",
+            "RET"
+          ],
+          "fallsIn": true,
+          "jumpsIn": [
+            7
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "line": 15,
+          "ord": 0,
+          "keyword": "if",
+          "jcc": 7,
+          "target": 229,
+          "fall": 13,
+          "fallLines": [
+            16,
+            17,
+            18,
+            19,
+            20,
+            21,
+            22,
+            30
+          ],
+          "takenLines": [
+            59
+          ],
+          "cc": "JNZ"
+        },
+        {
+          "line": 22,
+          "ord": 0,
+          "keyword": "if",
+          "jcc": 49,
+          "target": 82,
+          "fall": 51,
+          "fallLines": [
+            23
+          ],
+          "takenLines": [
+            30,
+            31
+          ],
+          "cc": "JNZ"
+        },
+        {
+          "line": 33,
+          "ord": 0,
+          "keyword": "if",
+          "jcc": 105,
+          "target": 114,
+          "fall": 107,
+          "fallLines": [
+            34
+          ],
+          "takenLines": [
+            36
+          ],
+          "cc": "JZ"
+        },
+        {
+          "line": 36,
+          "ord": 0,
+          "keyword": "if",
+          "jcc": 118,
+          "target": 235,
+          "fall": 120,
+          "fallLines": [
+            40,
+            41,
+            46,
+            50,
+            55
+          ],
+          "takenLines": [
+            37
+          ],
+          "cc": "JA"
+        },
+        {
+          "line": 45,
+          "ord": 0,
+          "keyword": "while",
+          "jcc": 151,
+          "target": 144,
+          "fall": 153,
+          "fallLines": [
+            46
+          ],
+          "takenLines": [
+            43,
+            44,
+            45
+          ],
+          "cc": "JNZ"
+        },
+        {
+          "line": 46,
+          "ord": 0,
+          "keyword": "if",
+          "jcc": 159,
+          "target": 245,
+          "fall": 161,
+          "fallLines": [
+            32,
+            50,
+            51,
+            52,
+            53,
+            54,
+            55
+          ],
+          "takenLines": [
+            47
+          ],
+          "cc": "JNC"
+        }
+      ],
+      "pushes": [
+        {
+          "at": 15,
+          "value": 267
+        },
+        {
+          "at": 20,
+          "value": 7171100
+        },
+        {
+          "at": 51,
+          "value": 268,
+          "reach": 56,
+          "jumps": false,
+          "run": 1
+        },
+        {
+          "at": 62,
+          "value": 7129143
+        },
+        {
+          "at": 75,
+          "value": -1
+        },
+        {
+          "at": 161,
+          "value": 0
+        },
+        {
+          "at": 163,
+          "value": 1
+        },
+        {
+          "at": 235,
+          "value": 294,
+          "reach": 56,
+          "jumps": true,
+          "run": 1
+        },
+        {
+          "at": 245,
+          "value": 121,
+          "reach": 56,
+          "jumps": true,
+          "run": 1
+        }
+      ]
+    },
+    "callOrder": {
+      "lineCount": 61,
+      "calls": [
+        [
+          19,
+          [
+            {
+              "name": "ReturnZero",
+              "at": 29,
+              "prev": null,
+              "pushes": 3,
+              "slots": []
+            }
+          ]
+        ],
+        [
+          20,
+          [
+            {
+              "name": "D2FILE_AllocAndLoadD2File",
+              "at": 39,
+              "prev": 29,
+              "pushes": 0,
+              "slots": [
+                0,
+                0,
+                1,
+                1,
+                1
+              ]
+            }
+          ]
+        ],
+        [
+          25,
+          [
+            {
+              "name": "GetInstructionPointer",
+              "at": 56,
+              "prev": null,
+              "pushes": 0,
+              "slots": []
+            }
+          ]
+        ],
+        [
+          26,
+          [
+            {
+              "name": "ERROR_UnrecoverableInternalError_Halt",
+              "at": 67,
+              "prev": 56,
+              "pushes": 2,
+              "slots": [
+                1,
+                1,
+                1
+              ]
+            }
+          ]
+        ],
+        [
+          28,
+          [
+            {
+              "name": "exit",
+              "at": 77,
+              "prev": 67,
+              "pushes": 1,
+              "slots": [
+                1
+              ]
+            }
+          ]
+        ],
+        [
+          50,
+          [
+            {
+              "name": "SStrHash",
+              "at": 166,
+              "prev": null,
+              "pushes": 3,
+              "slots": [
+                1,
+                1,
+                1
+              ]
+            }
+          ]
+        ]
+      ]
+    },
+    "accessOrder": {
+      "lineCount": 61,
+      "args": [],
+      "stores": [
+        [
+          16,
+          [
+            {
+              "ord": 0,
+              "at": null,
+              "size": 4,
+              "half": null,
+              "width": 4
+            }
+          ]
+        ],
+        [
+          17,
+          [
+            {
+              "ord": 0,
+              "at": null,
+              "size": 4,
+              "half": null,
+              "width": 4
+            }
+          ]
+        ],
+        [
+          18,
+          [
+            {
+              "ord": 0,
+              "at": null,
+              "size": 4,
+              "half": null,
+              "width": 0
+            }
+          ]
+        ],
+        [
+          19,
+          [
+            {
+              "ord": 0,
+              "at": null,
+              "size": 4,
+              "half": null,
+              "width": 0
+            }
+          ]
+        ],
+        [
+          20,
+          [
+            {
+              "ord": 0,
+              "at": null,
+              "size": 4,
+              "half": null,
+              "width": 0
+            }
+          ]
+        ],
+        [
+          21,
+          [
+            {
+              "ord": 0,
+              "at": 46,
+              "size": 4,
+              "half": null,
+              "width": 4
+            }
+          ]
+        ],
+        [
+          23,
+          [
+            {
+              "ord": 0,
+              "at": null,
+              "size": 4,
+              "half": null,
+              "width": 4
+            }
+          ]
+        ],
+        [
+          25,
+          [
+            {
+              "ord": 0,
+              "at": null,
+              "size": 4,
+              "half": null,
+              "width": 0
+            }
+          ]
+        ],
+        [
+          30,
+          [
+            {
+              "ord": 0,
+              "at": null,
+              "size": 4,
+              "half": null,
+              "width": 4
+            }
+          ]
+        ],
+        [
+          31,
+          [
+            {
+              "ord": 0,
+              "at": 86,
+              "size": 4,
+              "half": null,
+              "width": 0
+            }
+          ]
+        ],
+        [
+          32,
+          [
+            {
+              "ord": 0,
+              "at": null,
+              "size": 4,
+              "half": null,
+              "width": 4
+            }
+          ]
+        ],
+        [
+          34,
+          [
+            {
+              "ord": 0,
+              "at": 107,
+              "size": 4,
+              "half": null,
+              "width": 4
+            }
+          ]
+        ],
+        [
+          37,
+          [
+            {
+              "ord": 0,
+              "at": null,
+              "size": 4,
+              "half": null,
+              "width": 4
+            }
+          ]
+        ],
+        [
+          40,
+          [
+            {
+              "ord": 0,
+              "at": 131,
+              "size": 4,
+              "half": null,
+              "width": 4
+            }
+          ]
+        ],
+        [
+          41,
+          [
+            {
+              "ord": 0,
+              "at": null,
+              "size": 4,
+              "half": null,
+              "width": 4
+            }
+          ]
+        ],
+        [
+          43,
+          [
+            {
+              "ord": 0,
+              "at": null,
+              "size": 1,
+              "half": null,
+              "width": 1
+            }
+          ]
+        ],
+        [
+          44,
+          [
+            {
+              "ord": 0,
+              "at": null,
+              "size": 4,
+              "half": null,
+              "width": 4
+            }
+          ]
+        ],
+        [
+          47,
+          [
+            {
+              "ord": 0,
+              "at": null,
+              "size": 4,
+              "half": null,
+              "width": 4
+            }
+          ]
+        ],
+        [
+          50,
+          [
+            {
+              "ord": 0,
+              "at": null,
+              "size": 4,
+              "half": null,
+              "width": 0
+            }
+          ]
+        ],
+        [
+          51,
+          [
+            {
+              "ord": 0,
+              "at": null,
+              "size": 4,
+              "half": null,
+              "width": 4
+            }
+          ]
+        ],
+        [
+          52,
+          [
+            {
+              "ord": 0,
+              "at": 198,
+              "size": 4,
+              "half": null,
+              "width": 4
+            }
+          ]
+        ],
+        [
+          53,
+          [
+            {
+              "ord": 0,
+              "at": 200,
+              "size": 4,
+              "half": null,
+              "width": 4
+            }
+          ]
+        ],
+        [
+          54,
+          [
+            {
+              "ord": 0,
+              "at": null,
+              "size": 4,
+              "half": null,
+              "width": 4
+            }
+          ]
+        ],
+        [
+          55,
+          [
+            {
+              "ord": 0,
+              "at": null,
+              "size": 4,
+              "half": null,
+              "width": 4
+            }
+          ]
+        ],
+        [
+          57,
+          [
+            {
+              "ord": 0,
+              "at": 222,
+              "size": 4,
+              "half": null,
+              "width": 4
+            }
+          ]
+        ]
+      ]
+    },
+    "haltLines": {
+      "halts": [
+        {
+          "at": 67,
+          "ip": 56,
+          "paths": [
+            {
+              "line": 268,
+              "guard": 49,
+              "guards": [
+                49
+              ]
+            },
+            {
+              "line": 294,
+              "guard": 118,
+              "guards": [
+                118
+              ]
+            },
+            {
+              "line": 121,
+              "guard": 159,
+              "guards": [
+                159
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "storeBases": {
+      "lineCount": 61,
+      "lines": [
+        [
+          21,
+          [
+            {
+              "ord": 0,
+              "kind": "s",
+              "reg": "EBX",
+              "disp": 4
+            }
+          ]
+        ],
+        [
+          34,
+          [
+            {
+              "ord": 0,
+              "kind": "s",
+              "reg": "EDI",
+              "disp": 4
+            }
+          ]
+        ],
+        [
+          40,
+          [
+            {
+              "ord": 0,
+              "kind": "s",
+              "reg": "ESI",
+              "disp": 20
+            }
+          ]
+        ],
+        [
+          41,
+          [
+            {
+              "ord": 0,
+              "kind": "l",
+              "reg": "ESP",
+              "disp": 0
+            }
+          ]
+        ],
+        [
+          52,
+          [
+            {
+              "ord": 0,
+              "kind": "s",
+              "reg": "ESI",
+              "disp": 0
+            }
+          ]
+        ],
+        [
+          57,
+          [
+            {
+              "ord": 0,
+              "kind": "s",
+              "reg": "EBX",
+              "disp": 0
+            }
+          ]
+        ]
+      ]
+    }
+  },
+  "context": {
+    "funcPtrArgCasts": {
+      "paramFuncdefs": {},
+      "funcdefSignatures": {},
+      "functionSignatures": {},
+      "variableNames": [],
+      "voidPointerFunctions": [],
+      "rootQualifiedTypedefs": [],
+      "typedefTargets": {
+        "byte": "unsigned char",
+        "uint": "unsigned int",
+        "uint8_t": "unsigned char",
+        "uint32_t": "unsigned int",
+        "int32_t": "int",
+        "intptr_t": "int"
+      },
+      "structFields": {
+        "D2CofTextureCacheEntryStrc": {
+          "pNext": "D2CofTextureCacheEntryStrc *",
+          "dwFlags": "uint32_t",
+          "nFileSize": "uint32_t",
+          "szName": "char[8]",
+          "pFileData": "uint8_t *"
+        },
+        "D2CofCacheStrc": {
+          "nFrameCount": "int32_t",
+          "pCacheMemory": "void *",
+          "nCacheEntryCount": "int32_t",
+          "apBuckets": "D2CofTextureCacheEntryStrc *[512]"
+        }
+      },
+      "structLayouts": {
+        "D2CofTextureCacheEntryStrc": [
+          {
+            "name": "pNext",
+            "offset": 0,
+            "size": 4,
+            "type": "D2CofTextureCacheEntryStrc *"
+          },
+          {
+            "name": "dwFlags",
+            "offset": 4,
+            "size": 4,
+            "type": "uint32_t"
+          },
+          {
+            "name": "nFileSize",
+            "offset": 8,
+            "size": 4,
+            "type": "uint32_t"
+          },
+          {
+            "name": "szName",
+            "offset": 12,
+            "size": 8,
+            "type": "char[8]"
+          },
+          {
+            "name": "pFileData",
+            "offset": 20,
+            "size": 4,
+            "type": "uint8_t *"
+          },
+          {
+            "name": "",
+            "offset": 24,
+            "size": 1,
+            "type": "undefined"
+          },
+          {
+            "name": "",
+            "offset": 25,
+            "size": 1,
+            "type": "undefined"
+          },
+          {
+            "name": "",
+            "offset": 26,
+            "size": 1,
+            "type": "undefined"
+          },
+          {
+            "name": "",
+            "offset": 27,
+            "size": 1,
+            "type": "undefined"
+          }
+        ],
+        "D2CofCacheStrc": [
+          {
+            "name": "nFrameCount",
+            "offset": 0,
+            "size": 4,
+            "type": "int32_t"
+          },
+          {
+            "name": "pCacheMemory",
+            "offset": 4,
+            "size": 4,
+            "type": "void *"
+          },
+          {
+            "name": "nCacheEntryCount",
+            "offset": 8,
+            "size": 4,
+            "type": "int32_t"
+          },
+          {
+            "name": "apBuckets",
+            "offset": 12,
+            "size": 2048,
+            "type": "D2CofTextureCacheEntryStrc *[512]"
+          }
+        ]
+      },
+      "aggregateMembers": {
+        "D2CofTextureCacheEntryStrc": [
+          "pNext",
+          "dwFlags",
+          "nFileSize",
+          "szName",
+          "pFileData",
+          "field_0x18",
+          "field_0x19",
+          "field_0x1a",
+          "field_0x1b"
+        ],
+        "D2CofCacheStrc": [
+          "nFrameCount",
+          "pCacheMemory",
+          "nCacheEntryCount",
+          "apBuckets"
+        ]
+      },
+      "unionNames": [],
+      "functionReturnTypes": {
+        "D2Hell::D2FILE_AllocAndLoadD2File": "void *",
+        "GFX_LoadAndHashCofArchive": "void",
+        "D2Client::Engine::Gfx::GFX_LoadAndHashCofArchive": "void",
+        "ReturnZero": "D2PoolManagerStrc *",
+        "D2Win::Src::D2WinArchive::ReturnZero": "D2PoolManagerStrc *",
+        "D2FILE_AllocAndLoadD2File": "void *",
+        "GetInstructionPointer": "void *",
+        "Fog::Src::ErrorManager::GetInstructionPointer": "void *",
+        "ERROR_UnrecoverableInternalError_Halt": "void",
+        "Fog::Src::ErrorManager::ERROR_UnrecoverableInternalError_Halt": "void",
+        "exit": "void",
+        "compiler::exit": "void",
+        "SStrHash": "uint32_t",
+        "Storm::Source::SSTR::SStrHash": "uint32_t"
+      },
+      "globalTypes": {
+        "gbCofCacheLRUEnabled": "int32_t"
+      },
+      "functionParamTypes": {
+        "GFX_LoadAndHashCofArchive": [
+          "char *",
+          "D2CofCacheStrc *"
+        ],
+        "D2Client::Engine::Gfx::GFX_LoadAndHashCofArchive": [
+          "char *",
+          "D2CofCacheStrc *"
+        ],
+        "ReturnZero": [],
+        "D2Win::Src::D2WinArchive::ReturnZero": [],
+        "D2FILE_AllocAndLoadD2File": [
+          "D2PoolManagerStrc *",
+          "char *",
+          "uint32_t *",
+          "char *",
+          "int32_t"
+        ],
+        "D2Hell::D2FILE_AllocAndLoadD2File": [
+          "D2PoolManagerStrc *",
+          "char *",
+          "uint32_t *",
+          "char *",
+          "int32_t"
+        ],
+        "GetInstructionPointer": [],
+        "Fog::Src::ErrorManager::GetInstructionPointer": [],
+        "ERROR_UnrecoverableInternalError_Halt": [
+          "char *",
+          "void *",
+          "int32_t"
+        ],
+        "Fog::Src::ErrorManager::ERROR_UnrecoverableInternalError_Halt": [
+          "char *",
+          "void *",
+          "int32_t"
+        ],
+        "exit": [
+          "int"
+        ],
+        "compiler::exit": [
+          "int"
+        ],
+        "SStrHash": [
+          "char *",
+          "byte",
+          "uint32_t"
+        ],
+        "Storm::Source::SSTR::SStrHash": [
+          "char *",
+          "byte",
+          "uint32_t"
+        ]
+      },
+      "writeEffects": {
+        "ReturnZero": {
+          "reads": {}
+        },
+        "D2Win::Src::D2WinArchive::ReturnZero": {
+          "reads": {}
+        }
+      }
+    }
+  },
+  "options": {
+    "outputDir": "./out",
+    "format": "cpp",
+    "organization": "namespace",
+    "generateCMake": false,
+    "generateSourceMaps": false,
+    "transformPreset": "full",
+    "includeAddressComments": false,
+    "promoteStaticGlobals": false
+  },
+  "getterDecompile": "\r\nD2PoolManagerStrc * D2Win::Src::D2WinArchive::ReturnZero(void)\r\n\r\n{\r\n  return (D2PoolManagerStrc *)0x0;\r\n}\r\n\r\n"
+}
