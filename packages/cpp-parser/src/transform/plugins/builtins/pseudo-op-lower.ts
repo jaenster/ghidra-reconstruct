@@ -807,8 +807,10 @@ const RENAMES: Record<string, string> = {
  * Floating pseudo-ops with a standard spelling that computes the same thing.
  *
  * ROUND is FLOAT_ROUND: FRNDINT, and the rounding half of FIST/FISTP. Both round in
- * the x87 control word's mode, nearest-even unless changed, and the game never changes
- * it (`_ftol` saves and restores it). `round()` rounds half away from zero: ROUND(2.5)
+ * the x87 control word's mode, nearest-even unless changed. Inline VC8 conversions can
+ * temporarily select truncation; truncating-round-site removes those native-proven
+ * ROUND calls under their integer cast before this pass. `round()` rounds half away
+ * from zero: ROUND(2.5)
  * is 2 on the machine and was 3 here. `std::nearbyint` uses the current mode.
  * Integer ABS does not exist in p-code, so ABS is always the float operation.
  */

@@ -19,6 +19,7 @@
  *   storeBases    store-bases.ts
  *   callDivides   call-divides.ts
  *   signedDivides signed-divides.ts  (behind the compare-sites text-hash gate)
+ *   truncatingRounds truncating-rounds.ts (same text-hash gate)
  *   shadowedGlobals shadowed-globals.ts
  *   labelFlow     label-flow.ts      (listing only; its own script, labels come from the text)
  *
@@ -50,6 +51,7 @@ import { ZERO_STORES_JAVA, printsMemberStore, parseZeroStoreRow } from './zero-s
 import { MASK_SITES_JAVA, printsByteWordMask, parseMaskSiteRow } from './mask-sites.js';
 import { ZEXT_SITES_JAVA, printsZextCast, parseZextSiteRow } from './zext-sites.js';
 import { SIGNED_DIVIDES_JAVA, printsCastDividend, parseSignedDivideRow } from './signed-divides.js';
+import { TRUNCATING_ROUNDS_JAVA, printsRound, parseTruncatingRoundRow } from './truncating-rounds.js';
 import { REGISTER_STORES_JAVA, printsConstantStore, parseRegisterStoreRow } from './register-stores.js';
 import { ROTATE_SITES_DECL_JAVA, ROTATE_SITES_LINE_JAVA, printsShiftPair, parseRotateSiteRow } from './rotate-sites.js';
 import { STORE_BASES_DECL_JAVA, STORE_BASES_LINE_DECL_JAVA, STORE_BASES_TOKEN_JAVA, STORE_BASES_LINE_JAVA, printsMemberAddress, parseStoreBaseRow } from './store-bases.js';
@@ -75,6 +77,7 @@ import { createHash } from 'node:crypto';
  *   M  ...   the mask-sites row (mask-sites.ts), when it prints a byte or word mask
  *   X  ...   the zext-sites row (zext-sites.ts), when an operator's result is zero-extended
  *   I  ...   the signed-divides row (signed-divides.ts), when a `/` or `%` is an IDIV
+ *   U  ...   ROUND tokens whose native FISTP explicitly selects x87 RC=truncate
  *   K  ...   the register-stores row (register-stores.ts), when a constant is stored from a register
  *   Q  ...   the rotate-sites row (rotate-sites.ts), when a line's instructions rotate by an immediate
  *   W  ...   the store-bases row (store-bases.ts), when a store or an LEA has an `=` of its own
@@ -431,7 +434,8 @@ ${STRING_OPS_JAVA}
             hrow.append(hrow.length() > 0 ? ";" : "").append(Long.toHexString(hc.getAddress().getOffset() - base))
               .append(':').append(Long.toHexString(g.getAddress().getOffset() - base)).append(':').append(ways);
           }
-${JUMP_TABLES_JAVA}${ZERO_STORES_JAVA}${MASK_SITES_JAVA}${ZEXT_SITES_JAVA}${SIGNED_DIVIDES_JAVA}${REGISTER_STORES_JAVA}          // the types the markup named
+${JUMP_TABLES_JAVA}${ZERO_STORES_JAVA}${MASK_SITES_JAVA}${ZEXT_SITES_JAVA}${SIGNED_DIVIDES_JAVA}
+${TRUNCATING_ROUNDS_JAVA}${REGISTER_STORES_JAVA}          // the types the markup named
           java.util.Set<Long> deps = new java.util.TreeSet<>();
           for (ghidra.app.decompiler.ClangNode n : toks) {
             ghidra.program.model.data.DataType d = null;
@@ -479,6 +483,7 @@ ${JUMP_TABLES_JAVA}${ZERO_STORES_JAVA}${MASK_SITES_JAVA}${ZEXT_SITES_JAVA}${SIGN
           if (mrow.length() > 0) out.append("M\\t").append(a).append('\\t').append(mrow).append('\\n');
           if (xrow.length() > 0) out.append("X\\t").append(a).append('\\t').append(xrow).append('\\n');
           if (irow.length() > 0) out.append("I\\t").append(a).append('\\t').append(irow).append('\\n');
+          if (urow.length() > 0) out.append("U\\t").append(a).append('\\t').append(urow).append('\\n');
           if (krow.length() > 0) out.append("K\\t").append(a).append('\\t').append(krow).append('\\n');
           out.append("D\\t").append(ds).append('\\n');
           rows.put(a, out.toString());
@@ -545,6 +550,8 @@ export interface FunctionFactRow {
   zextRow?: string;
   /** The signed-divides row, untagged and without the entry. */
   signedDivideRow?: string;
+  /** Native-proven truncating ROUND tokens, without tag or entry. */
+  truncatingRoundRow?: string;
   /** The register-stores row, untagged and without the entry. */
   storeRow?: string;
   /** The rotate-sites row, untagged and without the entry. */
@@ -623,6 +630,7 @@ export function parseFunctionFacts(output: string): FunctionFactOutput {
     else if (tag === 'M') cur.maskRow = rest.slice(rest.indexOf('\t') + 1);
     else if (tag === 'X') cur.zextRow = rest.slice(rest.indexOf('\t') + 1);
     else if (tag === 'I') cur.signedDivideRow = rest.slice(rest.indexOf('\t') + 1);
+    else if (tag === 'U') cur.truncatingRoundRow = rest.slice(rest.indexOf('\t') + 1);
     else if (tag === 'K') cur.storeRow = rest.slice(rest.indexOf('\t') + 1);
     else if (tag === 'Q') cur.rotateRow = rest.slice(rest.indexOf('\t') + 1);
     else if (tag === 'W') cur.baseRow = rest.slice(rest.indexOf('\t') + 1);
@@ -698,6 +706,11 @@ export function selectFacts(text: string, entry: string, row: FunctionFactRow, c
     const i = parseSignedDivideRow(row.signedDivideRow);
     if (i) facts.signedDivides = i;
   }
+  if (printsRound(text) && row.truncatingRoundRow && row.textHash !== null
+      && text.length === row.textLength && javaStringHash(text) === row.textHash) {
+    const u = parseTruncatingRoundRow(row.truncatingRoundRow);
+    if (u) facts.truncatingRounds = u;
+  }
   // Keyed by name and value, not by position: no text gate.
   if (printsConstantStore(text) && row.storeRow) {
     const k = parseRegisterStoreRow(row.storeRow);
@@ -755,7 +768,7 @@ export interface FunctionFactStats {
   labelMs: number;
 }
 
-export const FACT_KEYS = ['compareSites', 'branchLayout', 'callOrder', 'accessOrder', 'haltLines', 'stringOps', 'jumpTables', 'zeroStores', 'maskSites', 'zextSites', 'registerStores', 'rotateSites', 'storeBases', 'callDivides', 'signedDivides', 'shadowedGlobals', 'labelFlow'] as const;
+export const FACT_KEYS = ['compareSites', 'branchLayout', 'callOrder', 'accessOrder', 'haltLines', 'stringOps', 'jumpTables', 'zeroStores', 'maskSites', 'zextSites', 'registerStores', 'rotateSites', 'storeBases', 'callDivides', 'signedDivides', 'truncatingRounds', 'shadowedGlobals', 'labelFlow'] as const;
 
 /**
  * Attach every per-function fact to the decompiled functions, from the cache where the
@@ -935,6 +948,7 @@ function attach(f: ExtractedFunction, facts: CachedFacts): void {
   if (facts.callDivides !== undefined) f.callDivides = facts.callDivides;
   if (facts.shadowedGlobals !== undefined) f.shadowedGlobals = facts.shadowedGlobals;
   if (facts.signedDivides !== undefined) f.signedDivides = facts.signedDivides;
+  if (facts.truncatingRounds !== undefined) f.truncatingRounds = facts.truncatingRounds;
   if (facts.labelFlow !== undefined) f.labelFlow = { ...(f.labelFlow ?? {}), ...facts.labelFlow };
 }
 

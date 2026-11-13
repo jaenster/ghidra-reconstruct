@@ -31,6 +31,7 @@ import type { ZeroStoreFacts } from './zero-stores.js';
 import type { MaskSiteFacts } from './mask-sites.js';
 import type { ZextSiteFacts } from './zext-sites.js';
 import type { SignedDivideFacts } from './signed-divides.js';
+import type { TruncatingRoundFacts } from './truncating-rounds.js';
 import type { RegisterStoreFacts } from './register-stores.js';
 import type { RotateSiteFacts } from './rotate-sites.js';
 import type { StoreBaseFacts } from './store-bases.js';
@@ -52,6 +53,7 @@ export interface CachedFacts {
   maskSites?: MaskSiteFacts;
   zextSites?: ZextSiteFacts;
   signedDivides?: SignedDivideFacts;
+  truncatingRounds?: TruncatingRoundFacts;
   registerStores?: RegisterStoreFacts;
   rotateSites?: RotateSiteFacts;
   storeBases?: StoreBaseFacts;
