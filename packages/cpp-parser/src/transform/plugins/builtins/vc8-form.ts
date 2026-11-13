@@ -3649,7 +3649,7 @@ function doNullfield(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'nullfield' }>)
     refuse('base, field, fallback, and result types do not agree');
 
   const resultType = emit(fn.returnType as never).trim();
-  const [ret] = parseStmts(`return (${resultType})((uint32_t)(uintptr_t)(${emit(guard.condition as never)} ? ${emit(base as never)} : 0) + offsetof(${f.struct}, ${f.field}));`);
+  const [ret] = parseStmts(`return (${resultType})((uintptr_t)(${emit(guard.condition as never)} ? ${emit(base as never)} : 0) + offsetof(${f.struct}, ${f.field}));`);
   statements.splice(0, 2, ret);
 }
 

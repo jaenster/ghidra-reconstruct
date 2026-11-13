@@ -97,7 +97,7 @@ describe('Redivivus 0058f000 nullfield form', () => {
     assert.match(absent, /return &pMonster->pUnitData\.pUnitDataMonster->pAiGeneral->pMapAi/);
     assert.match(current, /offsetof\(D2AiGeneralStrc, pMapAi\)/);
     assert.doesNotMatch(current, /return \(D2MapAIStrc\*\*\)0x38/);
-    assert.ok(current.includes('    return (D2MapAIStrc**)((uint32_t)(uintptr_t)(pMonster && pMonster->eUnitType == UNIT_MONSTER && pMonster->pUnitData.pUnitDataMonster ? pMonster->pUnitData.pUnitDataMonster->pAiGeneral : 0) + offsetof(D2AiGeneralStrc, pMapAi));'));
+    assert.ok(current.includes('    return (D2MapAIStrc**)((uintptr_t)(pMonster && pMonster->eUnitType == UNIT_MONSTER && pMonster->pUnitData.pUnitDataMonster ? pMonster->pUnitData.pUnitDataMonster->pAiGeneral : 0) + offsetof(D2AiGeneralStrc, pMapAi));'));
     assert.equal('architecture' in programInfo, false);
     if (process.env.MAPAI_EMIT_PATH) writeFileSync(process.env.MAPAI_EMIT_PATH, current);
 
