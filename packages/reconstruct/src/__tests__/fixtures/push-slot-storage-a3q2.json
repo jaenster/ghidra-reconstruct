@@ -1,0 +1,518 @@
+{
+  "provenance": {
+    "source": "ace8cd9bc5aa780ce633526538f5e86e514621ca",
+    "generatorBase": "db30c61cf94283ab1553e3dde3c0729aa165c7db",
+    "nativeExtraction": {
+      "generator": "db30c61cf94283ab1553e3dde3c0729aa165c7db",
+      "scriptSHA256": "86c2ff31a70cf6a50b201066f6c108ae0907b41c20f95a4f04a46ee07072e471",
+      "models": [
+        {
+          "address": "005b8860",
+          "size": 223,
+          "name": "OBJOP_A3Q2_KhalimsRelicPortalDrop1"
+        },
+        {
+          "address": "005b8940",
+          "size": 223,
+          "name": "OBJOP_A3Q2_KhalimsRelicPortalDrop2"
+        },
+        {
+          "address": "005b8a20",
+          "size": 223,
+          "name": "OBJOP_A3Q2_KhalimsRelicPortalDrop3"
+        }
+      ],
+      "scope": "Actual unmodified PROLOGUE_SLOT_SCRIPT on an isolated exact-byte SDK import. No copied structure layout, local-variable model, or decompile is needed by the extractor."
+    },
+    "scope": "Exact live MCP caller/callee metadata and decompiles plus actual unchanged Java prologue extractor on an exact-byte local SDK import. Seed layout context copied from the published header. Not a complete owning snapshot."
+  },
+  "prologueRows": "P\t005b8860\t-8\tECX\nP\t005b8860\t-12\tESI\n",
+  "fn": {
+    "name": "OBJOP_A3Q2_KhalimsRelicPortalDrop1",
+    "address": "005b8860",
+    "entryPoint": "005b8860",
+    "signature": "BOOL OBJOP_A3Q2_KhalimsRelicPortalDrop1(D2ObjectOperateFnArg * pOperation)",
+    "returnType": "BOOL",
+    "callingConvention": "__fastcall",
+    "size": 223,
+    "isThunk": false,
+    "isExternal": false,
+    "hasVarArgs": false,
+    "namespace": "D2Game::Quests::QUESTS::A3Q2",
+    "comment": "@function OBJOP_A3Q2_KhalimsRelicPortalDrop1\n@address Game.exe.ram:005b8860\n@date 2026.06.20\n@calling __fastcall\n@description Operate handler (OperateFn57) for a Khalim's Will relic super-chest/portal. On activation: spawns 0\u00e2\u20ac\u201c4 seeded gold piles, sets dwDropItemCode to Khalim's Heart (0x20726871), counts players still missing the Heart via Q19_CheckPlayerHasKhalimsHeart, drops that many reward items, then rolls normal chest drops. No QuestRecord state transitions.",
+    "sourceFile": null,
+    "sourceLine": null,
+    "sourceInfo": null,
+    "parameters": [
+      {
+        "name": "pOperation",
+        "dataType": "D2ObjectOperateFnArg *",
+        "size": 4,
+        "ordinal": 0,
+        "storage": "ECX:4",
+        "stackOffset": null,
+        "resolvedType": null
+      }
+    ],
+    "localVariables": [
+      {
+        "name": "nGoldPiles",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "BOOL"
+      },
+      {
+        "name": "pControlSeed",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "D2SeedStrc *"
+      },
+      {
+        "name": "iHeartDropIdx",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "EBX:4",
+        "stackOffset": null,
+        "resolvedType": "int"
+      },
+      {
+        "name": "pKhalimsWillQuestData",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "D2QuestDataStrc *"
+      },
+      {
+        "name": "pDroppedUnit",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "D2UnitStrc *"
+      },
+      {
+        "name": "pOperationArg",
+        "dataType": "undefined1",
+        "size": 1,
+        "storage": "Stack[-0x8]:1",
+        "stackOffset": -8,
+        "resolvedType": "D2ObjectOperateFnArg *"
+      },
+      {
+        "name": "seedNext",
+        "dataType": "undefined8",
+        "size": 8,
+        "storage": "HASH:7e02e57ba93:8",
+        "stackOffset": null,
+        "resolvedType": "D2SeedStrc"
+      },
+      {
+        "name": "uPlayerNeedCount",
+        "dataType": "undefined1",
+        "size": 1,
+        "storage": "HASH:207336a37c:1",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "pA3Q2Data",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "HASH:5f58c534a4:4",
+        "stackOffset": null,
+        "resolvedType": null
+      }
+    ],
+    "tags": null,
+    "decompiled": "\n/* WARNING: Enum \"eCollisionFlags\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerType\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerTypeDWORD\": Some values do not have unique names */\n/* @function OBJOP_A3Q2_KhalimsRelicPortalDrop1\n   @address Game.exe.ram:005b8860\n   @date 2026.06.20\n   @calling __fastcall\n   @description Operate handler (OperateFn57) for a Khalim's Will relic super-chest/portal. On\n   activation: spawns 0\u00e2\u20ac\u201c4 seeded gold piles, sets dwDropItemCode to Khalim's Heart (0x20726871),\n   counts players still missing the Heart via Q19_CheckPlayerHasKhalimsHeart, drops that many reward\n   items, then rolls normal chest drops. No QuestRecord state transitions. */\n\nBOOL __fastcall\nD2Game::Quests::QUESTS::A3Q2::OBJOP_A3Q2_KhalimsRelicPortalDrop1(D2ObjectOperateFnArg *pOperation)\n\n{\n  D2QuestDataA3Q2Strc *pDVar1;\n  BOOL nGoldPiles;\n  D2SeedStrc *pControlSeed;\n  D2QuestDataStrc *pKhalimsWillQuestData;\n  D2UnitStrc *pDroppedUnit;\n  int iVar2;\n  int iHeartDropIdx;\n  D2ObjectOperateFnArg *pOperationArg;\n  D2SeedStrc seedNext;\n  \n  pOperationArg = pOperation;\n  nGoldPiles = D2Game::Quests::QUESTS::QUESTS_OpenQuestChest(pOperation);\n  if (nGoldPiles != 0) {\n    pControlSeed = D2Game::Quests::QUESTS::GetQuestControlSeed((pOperation->sArg).pGame);\n    iHeartDropIdx = 0;\n    seedNext = (D2SeedStrc)\n               ((ulonglong)pControlSeed->nSeedLow * 0x6ac690c5 + (ulonglong)pControlSeed->nSeedHigh)\n    ;\n    *pControlSeed = seedNext;\n    iVar2 = seedNext.nSeedLow + (int)(((ulonglong)seedNext & 0xffffffff) / 5) * -5 + 5;\n    if (0 < iVar2) {\n      do {\n        D2Game::Objects::ObjectsMode::SpawnDrop\n                  ((pOperation->sArg).pGame,(pOperation->sArg).pVictim,L'\\x20646c67',QUALITY_NORMAL)\n        ;\n        iVar2 = iVar2 + -1;\n      } while (iVar2 != 0);\n    }\n    ((pOperation->sArg).pVictim)->dwDropItemCode = 0x20726871;\n    pKhalimsWillQuestData =\n         D2Game::Quests::QUESTS::GetQuestDataByQuestNoInternal\n                   ((pOperation->sArg).pGame,QUESTINT_KhalimsWill);\n    if (pKhalimsWillQuestData != (D2QuestDataStrc *)0x0) {\n      pDVar1 = (pKhalimsWillQuestData->pQuestSpecificData).pA3Q2;\n      pDVar1->nKhalimsEyeCount = 0;\n      D2Game::UNIT::SUnit::IteratePlayerOrMonsterUnits\n                ((pOperation->sArg).pGame,0,pOperation->pAttacker,\n                 D2Game::Quests::QUESTS::A3Q2::Q19_CheckPlayerHasKhalimsHeart);\n      if (0 < pDVar1->nKhalimsEyeCount) {\n        do {\n          pDroppedUnit = D2Game::ITEMS::Items::Drop::ITEM_RewardItemToDrop\n                                   ((pOperation->sArg).pGame,(pOperation->sArg).pVictim,\n                                    ITEMTYPE_Shield,(int32_t *)&pOperationArg,(D2UnitStrc **)0x0,-1,\n                                    1);\n          if (pDroppedUnit != (D2UnitStrc *)0x0) {\n            pDVar1->nKhalimsBrainCount = pDVar1->nKhalimsBrainCount + 1;\n            pDVar1->bKhalimsBrainDropped = 1;\n          }\n          iHeartDropIdx = iHeartDropIdx + 1;\n        } while (iHeartDropIdx < pDVar1->nKhalimsEyeCount);\n      }\n    }\n    D2Game::Objects::ObjectsMode::RollChestDrops(pOperation,ITEMTYPE_Gold);\n  }\n  return 0;\n}\n\n",
+    "pushSlots": [
+      {
+        "offset": -8,
+        "reg": "ECX"
+      },
+      {
+        "offset": -12,
+        "reg": "ESI"
+      }
+    ]
+  },
+  "callee": {
+    "name": "ITEM_RewardItemToDrop",
+    "address": "00559a30",
+    "entryPoint": "00559a30",
+    "signature": "D2UnitStrc * ITEM_RewardItemToDrop(SGAMEDATA * pGame, D2UnitStrc * pUnit, eD2ItemTypes eItemType, int32_t * pnItemLevel, D2UnitStrc * * ppUnit, int32_t nTCFilter, int32_t nParam2)",
+    "returnType": "D2UnitStrc *",
+    "callingConvention": "__fastcall",
+    "size": 682,
+    "isThunk": false,
+    "isExternal": false,
+    "hasVarArgs": false,
+    "namespace": "D2Game::ITEMS::Items::Drop",
+    "comment": "@function ITEM_RewardItemToDrop\n@address Game.exe.ram:00559a30\n@date 2026.06.20\n@calling __fastcall\n@description Server-side: rolls and creates a reward/drop item instance to be dropped near a unit. Determines item level from the source unit (monster level, player level, or level-table mon level by difficulty/expansion; min 2) and writes it to *pnParam. If the unit carries a forced drop code, converts it to a class id; otherwise rolls an item class by level (for gold drops, retries up to 11 times until an Items.txt entry with the gold bitfield is found, then falls back to a normal class roll). Finds the best passable spawn spot in the unit's room, fills a D2ItemGenContextStrc (quality, position, level, class id) and calls ITEM_CreateItemInstance. If ppUnit is non-null, copies the 0x84-byte context out to it. Returns the created item unit (NULL on spawn-spot failure); halts with unrecoverable error on bad game ptr or bad item code.",
+    "sourceFile": null,
+    "sourceLine": null,
+    "sourceInfo": null,
+    "parameters": [
+      {
+        "name": "pGame",
+        "dataType": "SGAMEDATA *",
+        "size": 4,
+        "ordinal": 0,
+        "storage": "ECX:4",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "pUnit",
+        "dataType": "D2UnitStrc *",
+        "size": 4,
+        "ordinal": 1,
+        "storage": "EDX:4",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "eItemType",
+        "dataType": "eD2ItemTypes",
+        "size": 4,
+        "ordinal": 2,
+        "storage": "Stack[0x4]:4",
+        "stackOffset": 4,
+        "resolvedType": null
+      },
+      {
+        "name": "pnItemLevel",
+        "dataType": "int32_t *",
+        "size": 4,
+        "ordinal": 3,
+        "storage": "Stack[0x8]:4",
+        "stackOffset": 8,
+        "resolvedType": null
+      },
+      {
+        "name": "ppUnit",
+        "dataType": "D2UnitStrc * *",
+        "size": 4,
+        "ordinal": 4,
+        "storage": "Stack[0xc]:4",
+        "stackOffset": 12,
+        "resolvedType": null
+      },
+      {
+        "name": "nTCFilter",
+        "dataType": "int32_t",
+        "size": 4,
+        "ordinal": 5,
+        "storage": "Stack[0x10]:4",
+        "stackOffset": 16,
+        "resolvedType": null
+      },
+      {
+        "name": "nParam2",
+        "dataType": "int32_t",
+        "size": 4,
+        "ordinal": 6,
+        "storage": "Stack[0x14]:4",
+        "stackOffset": 20,
+        "resolvedType": null
+      }
+    ],
+    "localVariables": [
+      {
+        "name": "uVar2",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "D2RoomStrc *"
+      },
+      {
+        "name": "nErrorAddr",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "void *"
+      },
+      {
+        "name": "nUnitLevel",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "D2RoomStrc *"
+      },
+      {
+        "name": "eLevelId",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "eD2LevelId"
+      },
+      {
+        "name": "pGameFromUnit",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "SGAMEDATA *"
+      },
+      {
+        "name": "nItemClassId",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "uint32_t"
+      },
+      {
+        "name": "pItemsTxtLine",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "D2ItemsTxt *"
+      },
+      {
+        "name": "nRolledClassId",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "D2RoomStrc *"
+      },
+      {
+        "name": "pSpawnRoom",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "D2RoomStrc *"
+      },
+      {
+        "name": "i",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "ECX:4",
+        "stackOffset": null,
+        "resolvedType": "int"
+      },
+      {
+        "name": "pCtxIter",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "ESI:4",
+        "stackOffset": null,
+        "resolvedType": "D2ItemGenContextStrc *"
+      },
+      {
+        "name": "pNewItem",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "D2RoomStrc *"
+      },
+      {
+        "name": "extraout_EAX_01",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "D2RoomStrc *"
+      },
+      {
+        "name": "local_8",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "Stack[-0x8]:4",
+        "stackOffset": -8,
+        "resolvedType": null
+      },
+      {
+        "name": "sItemGenCtx",
+        "dataType": "D2ItemGenContextStrc",
+        "size": 132,
+        "storage": "Stack[-0x8c]:132",
+        "stackOffset": -140,
+        "resolvedType": null
+      },
+      {
+        "name": "local_90",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "Stack[-0x90]:4",
+        "stackOffset": -144,
+        "resolvedType": null
+      },
+      {
+        "name": "nRollRetry",
+        "dataType": "int32_t",
+        "size": 4,
+        "storage": "Stack[-0x94]:4",
+        "stackOffset": -148,
+        "resolvedType": null
+      },
+      {
+        "name": "nItemLevel",
+        "dataType": "int",
+        "size": 4,
+        "storage": "Stack[-0x98]:4",
+        "stackOffset": -152,
+        "resolvedType": null
+      },
+      {
+        "name": "bIsMonster",
+        "dataType": "BOOL",
+        "size": 4,
+        "storage": "Stack[-0x9c]:4",
+        "stackOffset": -156,
+        "resolvedType": null
+      },
+      {
+        "name": "local_a0",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "Stack[-0xa0]:4",
+        "stackOffset": -160,
+        "resolvedType": null
+      },
+      {
+        "name": "pPosition",
+        "dataType": "POINT",
+        "size": 8,
+        "storage": "Stack[-0xa8]:8",
+        "stackOffset": -168,
+        "resolvedType": null
+      },
+      {
+        "name": "pointPosition",
+        "dataType": "POINT",
+        "size": 8,
+        "storage": "Stack[-0xb0]:8",
+        "stackOffset": -176,
+        "resolvedType": null
+      },
+      {
+        "name": "nErrorLine",
+        "dataType": "int32_t",
+        "size": 4,
+        "storage": "HASH:3f7a2315e4:4",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "eVar1",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "HASH:5f7c4c58f0:4",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "bCheckPassable",
+        "dataType": "bool",
+        "size": 1,
+        "storage": "HASH:3f5975c46d:1",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "bUseBestSpot",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "HASH:3f49440739:4",
+        "stackOffset": null,
+        "resolvedType": "uint32_t"
+      },
+      {
+        "name": "pSpawnPos",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "HASH:7bf808f336e:4",
+        "stackOffset": null,
+        "resolvedType": "POINT *"
+      },
+      {
+        "name": "LEVEL_ArreatSummit",
+        "dataType": "undefined1",
+        "size": 1,
+        "storage": "HASH:2610a8feb18:1",
+        "stackOffset": null,
+        "resolvedType": null
+      }
+    ],
+    "tags": [
+      {
+        "type": "llm-named"
+      },
+      {
+        "type": "llm-artifact-fix"
+      },
+      {
+        "type": "verified-2026-10-25"
+      },
+      {
+        "type": "halt-returns"
+      }
+    ],
+    "decompiled": "\n/* WARNING: Enum \"eCollisionFlags\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerType\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerTypeDWORD\": Some values do not have unique names */\n/* @function ITEM_RewardItemToDrop\n   @address Game.exe.ram:00559a30\n   @date 2026.06.20\n   @calling __fastcall\n   @description Server-side: rolls and creates a reward/drop item instance to be dropped near a\n   unit. Determines item level from the source unit (monster level, player level, or level-table mon\n   level by difficulty/expansion; min 2) and writes it to *pnParam. If the unit carries a forced\n   drop code, converts it to a class id; otherwise rolls an item class by level (for gold drops,\n   retries up to 11 times until an Items.txt entry with the gold bitfield is found, then falls back\n   to a normal class roll). Finds the best passable spawn spot in the unit's room, fills a\n   D2ItemGenContextStrc (quality, position, level, class id) and calls ITEM_CreateItemInstance. If\n   ppUnit is non-null, copies the 0x84-byte context out to it. Returns the created item unit (NULL\n   on spawn-spot failure); halts with unrecoverable error on bad game ptr or bad item code. */\n\nD2UnitStrc * __fastcall\nD2Game::ITEMS::Items::Drop::ITEM_RewardItemToDrop\n          (SGAMEDATA *pGame,D2UnitStrc *pUnit,eD2ItemTypes eItemType,int32_t *pnItemLevel,\n          D2UnitStrc **ppUnit,int32_t nTCFilter,int32_t nParam2)\n\n{\n  void *nErrorAddr;\n  eD2LevelId eLevelId;\n  SGAMEDATA *pGameFromUnit;\n  uint32_t nItemClassId;\n  D2ItemsTxt *pItemsTxtLine;\n  D2RoomStrc *pSpawnRoom;\n  D2UnitStrc *pDVar1;\n  int i;\n  D2ItemGenContextStrc *pCtxIter;\n  POINT pointPosition;\n  POINT pPosition;\n  BOOL bIsMonster;\n  int nItemLevel;\n  int32_t nRollRetry;\n  D2ItemGenContextStrc sItemGenCtx;\n  int32_t nErrorLine;\n  bool bCheckPassable;\n  uint32_t bUseBestSpot;\n  POINT *pSpawnPos;\n  \n  if (pGame == (SGAMEDATA *)0x0) {\n    nErrorLine = 0x9c7;\n    goto LAB_00559a6b;\n  }\n  bIsMonster = 0;\n  if (pUnit == (D2UnitStrc *)0x0) {\nLAB_00559aed:\n    nItemClassId = 1;\n  }\n  else {\n    if (pUnit->eUnitType == UNIT_MONSTER) {\n      nItemClassId = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit,UNITSTAT_level,0);\n      bIsMonster = 1;\n    }\n    else if (pUnit->eUnitType == UNIT_PLAYER) {\n      nItemClassId = D2Common::Stats::StatsEx::SERVER_GetUnitStat(pUnit,UNITSTAT_level,0);\n    }\n    else {\n      pSpawnRoom = D2Common::Units::Units::UNITS_GetRoom(pUnit);\n      eLevelId = D2Common::DUNGEON::Dungeon::DRLGROOM_GetLevelIdFromRoom(pSpawnRoom);\n      pGameFromUnit = D2Game::UNIT::SUnit::GetGamePointer(pUnit);\n      nItemClassId = D2Common::DATATBLS::LvlTbls::TXT_Levels_GetMonLvlForDifficulty\n                               (eLevelId,pGameFromUnit->nDifficulty,pGameFromUnit->bExpansion);\n    }\n    if ((int)nItemClassId < 2) goto LAB_00559aed;\n  }\n  *pnItemLevel = nItemClassId;\n  if (pUnit->dwDropItemCode == 0) {\n    nItemClassId = D2Game::ITEMS::Items::Drop::ITEMDROP_RollItemClassByLevel\n                             (pGame,&pUnit->sSeed,nTCFilter,nParam2,bIsMonster,nItemClassId);\n    if (eItemType == ITEMTYPE_Gold) {\n      nRollRetry = 0;\n      pItemsTxtLine = D2Common::DATATBLS::ItemTbls::TXT_Items_GetLine(nItemClassId);\n      while ((pItemsTxtLine == (D2ItemsTxt *)0x0 || ((pItemsTxtLine->dwBitfield1 & 1) == 0))) {\n        if (nRollRetry < 0xb) {\n          nItemClassId = D2Game::ITEMS::Items::Drop::ITEMDROP_RollItemClassByLevel\n                                   (pGame,&pUnit->sSeed,nTCFilter,nParam2,bIsMonster,*pnItemLevel);\n          pItemsTxtLine = D2Common::DATATBLS::ItemTbls::TXT_Items_GetLine(nItemClassId);\n          nRollRetry = nRollRetry + 1;\n        }\n        else {\n          nItemClassId = D2Game::ITEMS::Items::Drop::ITEMDROP_RollNormalItemClass\n                                   (pGame,&pUnit->sSeed,*pnItemLevel,nTCFilter,nParam2);\n          pItemsTxtLine = D2Common::DATATBLS::ItemTbls::TXT_Items_GetLine(nItemClassId);\n          nRollRetry = nRollRetry + 1;\n        }\n      }\n    }\n  }\n  else {\n    nItemClassId = D2Common::DATATBLS::ItemTbls::TXT_Items_ConvertItemCodeToItemClassId\n                             (pUnit->dwDropItemCode);\n    if (nItemClassId == 0xffffffff) {\n      nErrorLine = 0x9ea;\nLAB_00559a6b:\n      nErrorAddr = Fog::Src::ErrorManager::GetInstructionPointer();\n      Fog::Src::ErrorManager::ERROR_UnrecoverableInternalError_Halt(\"\",nErrorAddr,nErrorLine);\n                    /* WARNING: Subroutine does not return */\n      compiler::exit(-1);\n    }\n  }\n  D2Common::Units::Units::GetCoords(pUnit,&pointPosition);\n  bCheckPassable = true;\n  bUseBestSpot = 1;\n  pSpawnPos = &pPosition;\n  pSpawnRoom = D2Common::Units::Units::UNITS_GetRoom(pUnit);\n  pSpawnRoom = D2Game::ITEMS::Items::Drop::FindBestSpotToSpawnItem\n                         (pSpawnRoom,&pointPosition,pSpawnPos,bUseBestSpot,bCheckPassable);\n  if (pSpawnRoom == (D2RoomStrc *)0x0) {\n    pDVar1 = (D2UnitStrc *)0x0;\n  }\n  else {\n    compiler::memset(&sItemGenCtx,0,0x84);\n    sItemGenCtx.wItemFormat = pGame->wItemFormat;\n    sItemGenCtx.nPosY = pPosition.y;\n    sItemGenCtx.nPosX = pPosition.x;\n    sItemGenCtx.nItemLevel = *pnItemLevel;\n    sItemGenCtx.eQuality = eItemType;\n    sItemGenCtx.pSeed = (D2SeedStrc *)0x0;\n    sItemGenCtx.dwMode = 3;\n    sItemGenCtx.usually_one = 1;\n    sItemGenCtx.pUnit = pUnit;\n    sItemGenCtx.pGame = pGame;\n    sItemGenCtx.nItemClassid = nItemClassId;\n    sItemGenCtx.pDrlgRoom = pSpawnRoom;\n    pDVar1 = D2Game::ITEMS::Items::Drop::ITEM_CreateItemInstance(pGame,&sItemGenCtx,0);\n    if (ppUnit != (D2UnitStrc **)0x0) {\n      pCtxIter = &sItemGenCtx;\n      for (i = 0x21; i != 0; i = i + -1) {\n        *ppUnit = pCtxIter->pUnit;\n        pCtxIter = (D2ItemGenContextStrc *)&pCtxIter->pSeed;\n        ppUnit = ppUnit + 1;\n      }\n      compiler::__security_check_cookie();\n      return pDVar1;\n    }\n  }\n  compiler::__security_check_cookie();\n  return pDVar1;\n}\n\n"
+  },
+  "options": {
+    "outputDir": "./out",
+    "format": "cpp",
+    "organization": "namespace",
+    "generateCMake": false,
+    "generateSourceMaps": false,
+    "transformPreset": "full",
+    "includeAddressComments": false,
+    "promoteStaticGlobals": false
+  },
+  "tables": {
+    "paramFuncdefs": {},
+    "funcdefSignatures": {},
+    "functionSignatures": {},
+    "variableNames": [],
+    "voidPointerFunctions": [],
+    "rootQualifiedTypedefs": [],
+    "typedefTargets": {
+      "byte": "unsigned char",
+      "uint": "unsigned int",
+      "uint32_t": "unsigned int",
+      "int32_t": "int",
+      "DWORD": "unsigned long",
+      "BOOL": "int"
+    },
+    "aggregateSizes": {
+      "D2SeedStrc": 8
+    },
+    "structFields": {
+      "D2SeedStrc": {
+        "nSeedLow": "uint32_t",
+        "nSeedHigh": "uint32_t"
+      }
+    },
+    "structLayouts": {
+      "D2SeedStrc": [
+        {
+          "name": "nSeedLow",
+          "offset": 0,
+          "size": 4,
+          "type": "uint32_t"
+        },
+        {
+          "name": "nSeedHigh",
+          "offset": 4,
+          "size": 4,
+          "type": "uint32_t"
+        }
+      ]
+    }
+  }
+}

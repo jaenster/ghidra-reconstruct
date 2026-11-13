@@ -1,0 +1,407 @@
+{
+  "provenance": {
+    "source": "ace8cd9bc5aa780ce633526538f5e86e514621ca",
+    "generatorBase": "db30c61cf94283ab1553e3dde3c0729aa165c7db",
+    "imageSHA256": "631066c1649c4ea9ffe48bf97e24c00bca1f7a6759c21150f1a79982589adaaf",
+    "nativeExtraction": {
+      "generator": "db30c61cf94283ab1553e3dde3c0729aa165c7db",
+      "scriptSHA256": "86c2ff31a70cf6a50b201066f6c108ae0907b41c20f95a4f04a46ee07072e471",
+      "models": [
+        {
+          "address": "005b8860",
+          "size": 223,
+          "name": "OBJOP_A3Q2_KhalimsRelicPortalDrop1"
+        },
+        {
+          "address": "005b8940",
+          "size": 223,
+          "name": "OBJOP_A3Q2_KhalimsRelicPortalDrop2"
+        },
+        {
+          "address": "005b8a20",
+          "size": 223,
+          "name": "OBJOP_A3Q2_KhalimsRelicPortalDrop3"
+        },
+        {
+          "address": "0042fce0",
+          "size": 44,
+          "name": "MAINMENU_CheckFileExists"
+        },
+        {
+          "address": "00482e00",
+          "size": 44,
+          "name": "SOUND_FileExists"
+        },
+        {
+          "address": "006117b0",
+          "size": 31,
+          "name": "DATATBLS_LookupStringId"
+        }
+      ],
+      "scope": "Actual unmodified PROLOGUE_SLOT_SCRIPT on an isolated exact-byte SDK import. No copied structure layout, local-variable model, or decompile is needed by the extractor."
+    },
+    "scope": "Exact live function/callee metadata and decompiles, current resolved-type mapper, actual unchanged Java prologue extractor on an isolated exact-byte SDK import, and actual current out-param oracle. Seed layout copied from published header; not a complete owning snapshot."
+  },
+  "prologueRows": "P\t0042fce0\t-8\tECX\n",
+  "fn": {
+    "name": "MAINMENU_CheckFileExists",
+    "address": "0042fce0",
+    "entryPoint": "0042fce0",
+    "signature": "undefined4 MAINMENU_CheckFileExists(char * szFileName)",
+    "returnType": "undefined4",
+    "callingConvention": "__fastcall",
+    "size": 44,
+    "isThunk": false,
+    "isExternal": false,
+    "hasVarArgs": false,
+    "namespace": "D2Launch::MainMenus",
+    "comment": "@function MAINMENU_CheckFileExists\n@address Game.exe.ram:0042fce0\n@date 2026.06.06\n@calling __fastcall\n@description Diablo 2 1.14d reverse team\nhttps://blizzhackers.dev",
+    "sourceFile": null,
+    "sourceLine": null,
+    "sourceInfo": null,
+    "parameters": [
+      {
+        "name": "szFileName",
+        "dataType": "char *",
+        "size": 4,
+        "ordinal": 0,
+        "storage": "ECX:4",
+        "stackOffset": null,
+        "resolvedType": null
+      }
+    ],
+    "localVariables": [
+      {
+        "name": "bOpened",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "int"
+      },
+      {
+        "name": "pFileHandle",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "Stack[-0x8]:4",
+        "stackOffset": -8,
+        "resolvedType": "D2MPQFileStrc *"
+      }
+    ],
+    "tags": [
+      {
+        "type": "llm-typed"
+      }
+    ],
+    "decompiled": "\n/* @function MAINMENU_CheckFileExists\n   @address Game.exe.ram:0042fce0\n   @date 2026.06.06\n   @calling __fastcall\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev */\n\nundefined4 __fastcall D2Launch::MainMenus::MAINMENU_CheckFileExists(char *szFileName)\n\n{\n  int bOpened;\n  D2MPQFileStrc *pFileHandle;\n  \n  pFileHandle = (D2MPQFileStrc *)szFileName;\n  bOpened = Storm::Source::SFile::SFileOpenFileEx((D2ArchiveStrc *)0x0,szFileName,0,&pFileHandle);\n  if (bOpened == 0) {\n    return 0;\n  }\n  Storm::Source::SFile::SFileCloseFile(pFileHandle);\n  return 1;\n}\n\n",
+    "pushSlots": [
+      {
+        "offset": -8,
+        "reg": "ECX"
+      }
+    ]
+  },
+  "callee": {
+    "name": "SFileOpenFileEx",
+    "address": "004192f0",
+    "entryPoint": "004192f0",
+    "signature": "int SFileOpenFileEx(D2ArchiveStrc * pArchive, char * szFileName, uint32_t dwFlags, void * * phFile)",
+    "returnType": "int",
+    "callingConvention": "__stdcall",
+    "size": 818,
+    "isThunk": false,
+    "isExternal": false,
+    "hasVarArgs": false,
+    "namespace": "Storm::Source::SFile",
+    "comment": "@function SFileOpenFileEx\n@address Game.exe.ram:004192f0\n@date 2026.09.05\n@calling __stdcall\n@description Diablo 2 1.14d reverse team\nhttps://blizzhackers.dev\n@sourcefile .\\SOURCE\\SFILE.CPP\n@sourcefile-basis Blizzard __FILE__ literal referenced from inside this function's body (2 sites: 0041951c, 00419574). First-party 1.14d evidence, not inferred and not from D2R.\n@blizzard SFileOpenFileEx (SFILE.CPP)",
+    "sourceFile": null,
+    "sourceLine": null,
+    "sourceInfo": null,
+    "parameters": [
+      {
+        "name": "pArchive",
+        "dataType": "D2ArchiveStrc *",
+        "size": 4,
+        "ordinal": 0,
+        "storage": "Stack[0x4]:4",
+        "stackOffset": 4,
+        "resolvedType": null
+      },
+      {
+        "name": "szFileName",
+        "dataType": "char *",
+        "size": 4,
+        "ordinal": 1,
+        "storage": "Stack[0x8]:4",
+        "stackOffset": 8,
+        "resolvedType": null
+      },
+      {
+        "name": "dwFlags",
+        "dataType": "uint32_t",
+        "size": 4,
+        "ordinal": 2,
+        "storage": "Stack[0xc]:4",
+        "stackOffset": 12,
+        "resolvedType": null
+      },
+      {
+        "name": "phFile",
+        "dataType": "void * *",
+        "size": 4,
+        "ordinal": 3,
+        "storage": "Stack[0x10]:4",
+        "stackOffset": 16,
+        "resolvedType": null
+      }
+    ],
+    "localVariables": [
+      {
+        "name": "nResult",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "uint"
+      },
+      {
+        "name": "nReturnValue",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "uint"
+      },
+      {
+        "name": "nOpenResult",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "int"
+      },
+      {
+        "name": "hDiskFile",
+        "dataType": "HANDLE",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "pFileRecord",
+        "dataType": "D2MPQFileStrc *",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "pPathCopy",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "char *"
+      },
+      {
+        "name": "hOpenedFile",
+        "dataType": "HANDLE",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "cVar8",
+        "dataType": "undefined1",
+        "size": 1,
+        "storage": "ZF:1",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "pSep",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "uint"
+      },
+      {
+        "name": "pMpqFileRecord",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "D2MPQFileStrc *"
+      },
+      {
+        "name": "pReadBuffer",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "void *"
+      },
+      {
+        "name": "dwStackCookie",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "Stack[-0x8]:4",
+        "stackOffset": -8,
+        "resolvedType": "uint"
+      },
+      {
+        "name": "szResolvedPath",
+        "dataType": "undefined1[260]",
+        "size": 260,
+        "storage": "Stack[-0x10c]:260",
+        "stackOffset": -268,
+        "resolvedType": "char[260]"
+      },
+      {
+        "name": "pArchiveFound",
+        "dataType": "D2ArchiveStrc *",
+        "size": 4,
+        "storage": "Stack[-0x110]:4",
+        "stackOffset": -272,
+        "resolvedType": null
+      },
+      {
+        "name": "pFileName",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "Stack[-0x114]:4",
+        "stackOffset": -276,
+        "resolvedType": "char *"
+      },
+      {
+        "name": "pBlockEntry",
+        "dataType": "D2MPQBlockEntryStrc *",
+        "size": 4,
+        "storage": "Stack[-0x118]:4",
+        "stackOffset": -280,
+        "resolvedType": null
+      },
+      {
+        "name": "nDecryptKey",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "Stack[-0x11c]:4",
+        "stackOffset": -284,
+        "resolvedType": "uint32_t"
+      },
+      {
+        "name": "local_120",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "Stack[-0x120]:4",
+        "stackOffset": -288,
+        "resolvedType": null
+      },
+      {
+        "name": "pFileArchive",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "HASH:3f0e0e0391:4",
+        "stackOffset": null,
+        "resolvedType": "D2ArchiveStrc *"
+      },
+      {
+        "name": "pSavedBlockEntry",
+        "dataType": "D2MPQBlockEntryStrc *",
+        "size": 4,
+        "storage": "HASH:3f2e016bc3:4",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "pdwBlockFlags",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "HASH:27fdd275f94:4",
+        "stackOffset": null,
+        "resolvedType": "uint32_t *"
+      },
+      {
+        "name": "pRefCount",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "HASH:27fa574fbd0:4",
+        "stackOffset": null,
+        "resolvedType": "int *"
+      }
+    ],
+    "tags": [
+      {
+        "type": "llm-named"
+      },
+      {
+        "type": "llm-typed"
+      },
+      {
+        "type": "blizzard-name"
+      }
+    ],
+    "decompiled": "\n/* @function SFileOpenFileEx\n   @address Game.exe.ram:004192f0\n   @date 2026.09.05\n   @calling __stdcall\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev\n   @sourcefile .\\SOURCE\\SFILE.CPP\n   @sourcefile-basis Blizzard __FILE__ literal referenced from inside this function's body (2 sites:\n   0041951c, 00419574). First-party 1.14d evidence, not inferred and not from D2R.\n   @blizzard SFileOpenFileEx (SFILE.CPP) */\n\nint Storm::Source::SFile::SFileOpenFileEx\n              (D2ArchiveStrc *pArchive,char *szFileName,uint32_t dwFlags,void **phFile)\n\n{\n  uint nResult;\n  int nOpenResult;\n  HANDLE hDiskFile;\n  D2MPQFileStrc *pFileRecord;\n  char *pPathCopy;\n  HANDLE hOpenedFile;\n  D2MPQFileStrc *pMpqFileRecord;\n  void *pReadBuffer;\n  uint32_t nDecryptKey;\n  D2MPQBlockEntryStrc *pBlockEntry;\n  char *pFileName;\n  D2ArchiveStrc *pArchiveFound;\n  char szResolvedPath [260];\n  uint dwStackCookie;\n  D2MPQBlockEntryStrc *pSavedBlockEntry;\n  D2ArchiveStrc *pFileArchive;\n  int *pRefCount;\n  uint32_t *pdwBlockFlags;\n  \n  dwStackCookie = DEFAULT_SECURITY_COOKIE ^ (uint)&stack0xfffffffc;\n  nResult = 0xffffffff;\n  pFileName = szFileName;\n  if (phFile == (void **)0x0) {\n    nResult = 0;\n  }\n  else {\n    *phFile = (void *)0x0;\n  }\n  if ((nResult & -(uint)(szFileName != (char *)0x0) & -(uint)(*szFileName != '\\0')) != 0) {\n                    /* LPCRITICAL_SECTION lpCriticalSection for EnterCriticalSection */\n    EnterCriticalSection(&lpCriticalSection_00779068);\n    Storm::Source::SFile::SFILE_EnsureHashSource();\n    nResult = 0;\n    nOpenResult = Storm::Source::SFile::SFILE_SearchFileInArchives\n                            (pArchive,&pBlockEntry,szFileName,(byte)dwFlags,&pArchiveFound,\n                             szResolvedPath);\n    if (nOpenResult != 0) {\n      if (nOpenResult == 2) {\n                    /* HANDLE hTemplateFile for CreateFileA */\n                    /* DWORD dwFlagsAndAttributes for CreateFileA */\n                    /* DWORD dwCreationDisposition for CreateFileA */\n                    /* LPSECURITY_ATTRIBUTES lpSecurityAttributes for CreateFileA */\n                    /* DWORD dwShareMode for CreateFileA */\n                    /* DWORD dwDesiredAccess for CreateFileA */\n                    /* LPCSTR lpFileName for CreateFileA */\n        hDiskFile = CreateFileA(szResolvedPath,0x80000000,1,(LPSECURITY_ATTRIBUTES)0x0,3,0x8000000,\n                                (HANDLE)0x0);\n        szFileName = pFileName;\n        if (hDiskFile == (HANDLE)0xffffffff) {\n          nResult = 0;\n        }\n        else if ((dwFlags & 4) == 0) {\n          pFileRecord = Storm::Source::SFile::SFILE_AllocFileRecord\n                                  ((int **)&Storm::Source::SFile::gSFileOpenFileList,1,0,0);\n          Storm::Source::SSTR::SStrCopy(pFileRecord->szFileName,pFileName,0x104);\n          pPathCopy = Storm::Source::SSTR::SStrDup(szResolvedPath);\n          pFileRecord->szFilePath = pPathCopy;\n          pFileRecord->hFile = hDiskFile;\n          pFileRecord->nRefCount = 1;\n          pFileRecord->bChecksumEnabled = 0;\n          *phFile = pFileRecord;\n          nResult = 2;\n          szFileName = pFileName;\n        }\n        else {\n          *phFile = hDiskFile;\n          nResult = 2;\n        }\n      }\n      else if ((dwFlags & 4) == 0) {\n        pPathCopy = Storm::Source::SSTR::SStrChrR(szFileName,':');\n        if (pPathCopy != (char *)0x0) {\n          szFileName = pPathCopy + 1;\n        }\n        pPathCopy = Storm::Source::SSTR::SStrChrR(szFileName,'\\\\');\n        if (pPathCopy != (char *)0x0) {\n          szFileName = pPathCopy + 1;\n        }\n        nDecryptKey = Storm::Source::SFile::SFILE_Hash(3,szFileName);\n        pFileArchive = pArchiveFound;\n        pSavedBlockEntry = pBlockEntry;\n        pdwBlockFlags = &pBlockEntry->dwFlags;\n        if ((*pdwBlockFlags & 0x20000) != 0) {\n          nDecryptKey = (pBlockEntry->dwFilePos - pArchiveFound->nArchiveOffset) + nDecryptKey ^\n                        pBlockEntry->dwFileSize;\n        }\n        pBlockEntry = (D2MPQBlockEntryStrc *)\n                      (((pBlockEntry->dwFileSize - 1) + pArchiveFound->nSectorSize) /\n                      pArchiveFound->nSectorSize);\n        pArchiveFound = (D2ArchiveStrc *)0x0;\n        if ((*pdwBlockFlags & 0xff00) != 0) {\n          pArchiveFound =\n               Storm::Source::SMem::SMemAlloc\n                         ((int)pBlockEntry * 4 + 4,\".\\\\SOURCE\\\\SFILE.CPP\",0x1231,0);\n        }\n        pMpqFileRecord =\n             Storm::Source::SFile::SFILE_AllocFileRecord\n                       ((int **)&Storm::Source::SFile::gSFileOpenFileList,1,0,0);\n        Storm::Source::SSTR::SStrCopy(pMpqFileRecord->szFileName,pFileName,0x104);\n        pMpqFileRecord->hFile = (HANDLE)0xffffffff;\n        pMpqFileRecord->pArchive = pFileArchive;\n        pMpqFileRecord->pBlockEntry = pSavedBlockEntry;\n        pMpqFileRecord->nDecryptKey = nDecryptKey;\n        pMpqFileRecord->nSectorCount = (uint32_t)pBlockEntry;\n        pMpqFileRecord->pSectorTable = (uint32_t *)pArchiveFound;\n        pReadBuffer = Storm::Source::SMem::SMemAlloc(0x1000,\".\\\\SOURCE\\\\SFILE.CPP\",0x123c,0);\n        pMpqFileRecord->pReadBuffer = pReadBuffer;\n        pMpqFileRecord->nRefCount = 1;\n        nResult = -(uint)(pSavedBlockEntry->dwCRC32 != 0) & gbSFileStreamCallbackPending;\n        pMpqFileRecord->nChecksumState = 1;\n        pMpqFileRecord->bChecksumEnabled = nResult;\n        pRefCount = &pFileArchive->nRefCount;\n        *pRefCount = *pRefCount + 1;\n        *phFile = pMpqFileRecord;\n        nResult = 1;\n        szFileName = pFileName;\n      }\n      else {\n                    /* HANDLE hTemplateFile for CreateFileA */\n                    /* DWORD dwFlagsAndAttributes for CreateFileA */\n                    /* DWORD dwCreationDisposition for CreateFileA */\n                    /* LPSECURITY_ATTRIBUTES lpSecurityAttributes for CreateFileA */\n                    /* DWORD dwShareMode for CreateFileA */\n                    /* DWORD dwDesiredAccess for CreateFileA */\n                    /* LPCSTR lpFileName for CreateFileA */\n        hOpenedFile = CreateFileA(pArchiveFound->szArchivePath,0x80000000,1,\n                                  (LPSECURITY_ATTRIBUTES)0x0,3,0x8000000,(HANDLE)0x0);\n        nResult = (uint)(hOpenedFile != (HANDLE)0xffffffff);\n        *phFile = hOpenedFile;\n        if (nResult == 0) {\n          Storm::Source::SErr::SErrSetLastError(2);\n        }\n        else {\n                    /* DWORD dwMoveMethod for SetFilePointer */\n                    /* PLONG lpDistanceToMoveHigh for SetFilePointer */\n                    /* LONG lDistanceToMove for SetFilePointer */\n                    /* HANDLE hFile for SetFilePointer */\n          SetFilePointer(hOpenedFile,pBlockEntry->dwFilePos,(PLONG)0x0,0);\n        }\n      }\n    }\n                    /* LPCRITICAL_SECTION lpCriticalSection for LeaveCriticalSection */\n    LeaveCriticalSection(&lpCriticalSection_00779068);\n    if ((nResult != 0) && (fpSFileOpenCallback != (pfnSFileOpenCallback *)0x0)) {\n      (*fpSFileOpenCallback)(szFileName,gpSFileOpenCallbackParam);\n    }\n    compiler::__security_check_cookie();\n    return nResult;\n  }\n  Storm::Source::SErr::SErrSetLastError(0x57);\n  compiler::__security_check_cookie();\n  return 0;\n}\n\n"
+  },
+  "options": {
+    "outputDir": "./out",
+    "format": "cpp",
+    "organization": "namespace",
+    "generateCMake": false,
+    "generateSourceMaps": false,
+    "transformPreset": "full",
+    "includeAddressComments": false,
+    "promoteStaticGlobals": false
+  },
+  "tables": {
+    "paramFuncdefs": {},
+    "funcdefSignatures": {},
+    "functionSignatures": {},
+    "variableNames": [],
+    "voidPointerFunctions": [],
+    "rootQualifiedTypedefs": [],
+    "typedefTargets": {
+      "byte": "unsigned char",
+      "uint": "unsigned int",
+      "uint32_t": "unsigned int",
+      "int32_t": "int",
+      "DWORD": "unsigned long",
+      "BOOL": "int"
+    },
+    "functionParamTypes": {
+      "Storm::Source::SFile::SFileOpenFileEx": [
+        "D2ArchiveStrc *",
+        "char *",
+        "uint32_t",
+        "void * *"
+      ],
+      "Source::SFile::SFileOpenFileEx": [
+        "D2ArchiveStrc *",
+        "char *",
+        "uint32_t",
+        "void * *"
+      ],
+      "SFile::SFileOpenFileEx": [
+        "D2ArchiveStrc *",
+        "char *",
+        "uint32_t",
+        "void * *"
+      ],
+      "SFileOpenFileEx": [
+        "D2ArchiveStrc *",
+        "char *",
+        "uint32_t",
+        "void * *"
+      ]
+    },
+    "functionReturnTypes": {
+      "Storm::Source::SFile::SFileOpenFileEx": "int",
+      "Source::SFile::SFileOpenFileEx": "int",
+      "SFile::SFileOpenFileEx": "int",
+      "SFileOpenFileEx": "int"
+    }
+  }
+}
