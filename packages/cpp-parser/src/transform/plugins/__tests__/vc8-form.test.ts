@@ -1453,3 +1453,111 @@ describe('vc8-form: opas', () => {
     assert.match(before.out, /Save\(v\); v >>= 1; return v;/);
   });
 });
+
+describe('vc8-form: zinit', () => {
+  // CLIENT_SendMonsterAttackMessage 0046cab0: the memset keeps every zero store, from one zeroed register.
+  const SITE = ['void f(D2UnitStrc* pUnit) {', '  D2ServerMessageHandleStrc sMsg = {0};', '  sMsg.nSkillId = g(pUnit);', '  h(&sMsg);', '}'];
+  it('parses', () => {
+    assert.deepStrictEqual(parseVc8Form('zinit(sMsg)'), { op: 'zinit', name: 'sMsg' });
+    assert.strictEqual(parseVc8Form('zinit(a.b)'), undefined);
+  });
+  it('writes the initialiser as a memset of the whole local', () => {
+    const { out, sites } = run(SITE, 'zinit(sMsg)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.ok(out.includes('D2ServerMessageHandleStrc sMsg; memset(&sMsg, 0, sizeof(sMsg)); sMsg.nSkillId = g(pUnit);'), out);
+  });
+  it('refuses a local not initialised = {0}', () => {
+    assert.ok(!run(SITE.map(l => l.replace(' = {0}', '')), 'zinit(sMsg)').sites[0].applied);
+  });
+});
+
+describe('vc8-form: znew', () => {
+  // SUNITEVENT_Alloc 005c0ad0: the new object is cleared, then filled.
+  const SITE = [
+    'T* f(G* pGame, uint8_t n) {',
+    '  T* p = Alloc(pGame, 0x20);',
+    "  p->a = '\\0';",
+    '  p->b = 0;',
+    '  p->c = 0;',
+    '  p->a = n;',
+    '  p->d = -1;',
+    '  return p;',
+    '}',
+  ];
+  it('parses', () => {
+    assert.deepStrictEqual(parseVc8Form('znew(p)'), { op: 'znew', name: 'p' });
+    assert.deepStrictEqual(parseVc8Form('znew(p,0x10)'), { op: 'znew', name: 'p', size: '0x10' });
+    assert.strictEqual(parseVc8Form('znew(p,n)'), undefined);
+  });
+  it('clears the object with a memset and drops the zero stores of the run', () => {
+    const { out, sites } = run(SITE, 'znew(p)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.ok(out.includes('T* p = Alloc(pGame, 0x20); memset(p, 0, sizeof(*p)); p->a = n; p->d = -1; return p;'), out);
+  });
+  it('takes an explicit byte count', () => {
+    const { out } = run(SITE, 'znew(p,0x10)');
+    assert.ok(out.includes('memset(p, 0, 0x10);'), out);
+  });
+  it('refuses a call between the allocation and the stores, and a run without a zero', () => {
+    assert.ok(!run(SITE.map(l => l.replace("  p->a = '\\0';", '  h();')), 'znew(p)').sites[0].applied);
+    assert.ok(!run(SITE.filter(l => !/= (0|'\\0');/.test(l)), 'znew(p)').sites[0].applied);
+  });
+});
+
+describe('vc8-form: swclamp', () => {
+  // SPAWN_IsExcludedMonsterClass 0054e3a0: VC8 biases the table with `sub` only for an inline call's result.
+  const SITE = [
+    'static BOOL f(int32_t nClassId) {',
+    '  if (nClassId < 0 || nClassId >= sgptDataTable->nTxtMonStatsSize) {',
+    '    nClassId = -1;',
+    '  }',
+    '  switch (nClassId) {',
+    '    case 0xe5:',
+    '    case 0x11c:',
+    '      return 0;',
+    '  }',
+    '  return 1;',
+    '}',
+  ];
+  it('parses', () => {
+    assert.deepStrictEqual(parseVc8Form('swclamp(nClassId)'), { op: 'swclamp', name: 'nClassId' });
+  });
+  it('switches on an inline helper with two returns', () => {
+    const { out, sites } = run(SITE, 'swclamp(nClassId)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.ok(out.includes('static BOOL f(int32_t nClassId) { switch (f_ClampIndex(nClassId)) {'), out);
+    assert.ok(flat(sites[0].prefix![0]).includes('static inline int f_ClampIndex(int nIndex) { if (nIndex < 0 || nIndex >= sgptDataTable->nTxtMonStatsSize) { return -1; } return nIndex; }'), sites[0].prefix![0]);
+  });
+  it('refuses where the value is read after the check', () => {
+    assert.ok(!run(SITE.map(l => l.replace('return 1;', 'return nClassId;')), 'swclamp(nClassId)').sites[0].applied);
+  });
+});
+
+describe('vc8-form: retbase', () => {
+  // CHATDLG_GetLadderFilterForTab 0043f150: the base is loaded in each arm, 0 too, and added once.
+  const SITE = [
+    'static int32_t f(int32_t nTab, uint32_t nMode) {',
+    '  if (nMode >= 0x9 && nMode <= 0x10) {',
+    '    return nTab + 9;',
+    '  }',
+    '  if (nMode <= 7) {',
+    '    return nTab;',
+    '  }',
+    '  Halt(0x1a23);',
+    '  exit(-1);',
+    '}',
+  ];
+  it('parses', () => {
+    assert.deepStrictEqual(parseVc8Form('retbase(nTab,nBase)'), { op: 'retbase', param: 'nTab', name: 'nBase' });
+    assert.strictEqual(parseVc8Form('retbase(nTab)'), undefined);
+  });
+  it('chains the guards into one base and adds the parameter once', () => {
+    const { out, sites } = run(SITE, 'retbase(nTab,nBase)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.ok(out.includes('int32_t nBase; if (nMode >= 0x9 && nMode <= 0x10) { nBase = 9; } else if (nMode <= 7) { nBase = 0; } else { Halt(0x1a23); exit(-1); } return nBase + nTab; }'), out);
+  });
+  it('refuses a tail that can fall through and a stored parameter', () => {
+    assert.ok(!run(SITE.filter(l => !l.includes('exit')), 'retbase(nTab,nBase)').sites[0].applied);
+    assert.ok(!run(SITE.map(l => l.replace('Halt(0x1a23);', 'nTab = 1;')), 'retbase(nTab,nBase)').sites[0].applied);
+  });
+});
