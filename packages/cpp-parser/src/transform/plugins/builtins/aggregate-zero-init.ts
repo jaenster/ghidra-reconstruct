@@ -429,10 +429,13 @@ function createAggregateZeroInitTransformer(options: AggregateZeroInitOptions = 
 
     // `{0}` initialises the first member and clears the rest from its end; a later store
     // over the first member makes its zero store dead, and VC8 drops it. A memset of the
-    // whole object clears it from its start, in stores wider than a narrow first member.
-    // Where the first member is overwritten and the original still zeroes its bytes, the
+    // whole object clears it from its start and VC8 keeps every one of its stores. Where
+    // the first member is overwritten and the original still zeroes its bytes, the
     // original cleared the whole object: a six-byte packet zeroed by a dword and a word at
-    // its start, its byte opcode stored after them (Q33_SendQuestStatePacket 00589070).
+    // its start, its byte opcode stored after them (Q33_SendQuestStatePacket 00589070); a
+    // dword first member alike, zeroed with the rest and then stored over
+    // (PLAYER_CountLivingPlayersInLevel 00535730, NET_D2GS_CLIENT_Incoming0x4C_SKILL_ID
+    // 0045df00: `{0}` loses that zero store, the memset compiles to the original).
     // The same zero bytes either way; `= {}` would say it too, but C++03 wants an element.
     const head = required.find(([lo]) => lo === 0);
     const facts0 = zeroStores.find(z => z.name === name && z.size === sizes[agg]);
@@ -441,9 +444,7 @@ function createAggregateZeroInitTransformer(options: AggregateZeroInitOptions = 
       return true;
     })();
     const headOverwritten = !!head && stretch.some(st => st.index >= runEnd && !drop.has(st.index) && st.from <= head[0] && st.to >= head[1]);
-    // Only a first member narrower than a dword: from four bytes on, `{0}` and a memset
-    // clear alike, and a memset of a large object costs VC8 an instruction more.
-    const whole = headZeroed && headOverwritten && head[1] - head[0] < 4;
+    const whole = headZeroed && headOverwritten;
 
     // Rebuild: the declaration moves to the run, initialised; the run goes.
     const decl = declStmt.declarations[0] as VariableDecl;
