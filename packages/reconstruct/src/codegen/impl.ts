@@ -4411,6 +4411,9 @@ function transformDecompiledCode(
         forms: vc8.forms,
         selectTables: {
           ...(perPluginOptions['select-argument'] as SelectArgumentOptions | undefined),
+          structLayouts: context?.funcPtrArgCasts?.structLayouts,
+          aggregateMembers: context?.funcPtrArgCasts?.aggregateMembers,
+          unionNames: context?.funcPtrArgCasts?.unionNames,
           accessors: context?.accessorTwins,
         },
         onSite: s => {

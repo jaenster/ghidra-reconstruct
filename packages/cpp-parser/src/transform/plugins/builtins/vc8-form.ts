@@ -177,6 +177,17 @@
  *
  * Call and string-instruction forms (`[,i]` picks the i-th site, default: the only one):
  *
+ *   recordwalk(P[,i])    a typed record pointer advanced at the end of a for loop
+ *                        through an interior byte-field address plus a size is carried
+ *                        as a byte cursor, with P rebound at each body entry. The
+ *                        existing interior-address member store supplies the cursor;
+ *                        its address and the late size expression stay in place.
+ *                        Requires a known struct layout, a determinate incoming P,
+ *                        no pointer-variable escape or reference binding, no read of
+ *                        its advanced value outside the body, and no alternate entry,
+ *                        loop-control use, nested loop or extra pointer write.
+ *                        No hardcoded record stride; unnamed bytes must be members
+ *                        actually declared by the header emitter.
  *   nestcall(V[,i])      the store `V = F(...);` (or `T V = F(...);`) whose next statement
  *                        reads V once - as a whole call argument, or as the object of `->`
  *                        or `.` - is written with the call in that place, the store gone (a
@@ -337,12 +348,14 @@ import { createExprShape } from './expr-shape.js';
 import { localTypesOf } from './compare-form.js';
 import { calleeName, scopedLookup } from './call-arg-cast.js';
 import { coalesceLocal } from './copy-coalesce.js';
+import { recordWalk, type RecordWalkTables } from './record-walk.js';
 
 export type Vc8Form =
   | { op: 'seq'; targets: string[]; index?: number }
   | { op: 'fold'; name: string }
   | { op: 'join'; into: string; from: string }
   | { op: 'coalesce'; name: string; from?: string }
+  | { op: 'recordwalk'; name: string; index: number }
   | { op: 'cache'; expr: string; name: string; type?: string; anchor?: string; count?: number }
   | { op: 'own'; name: string; type: string; rename?: string }
   | { op: 'guards'; split: number; index: number }
@@ -410,7 +423,7 @@ export interface Vc8Accessor {
 }
 
 /** The tables vc8-form reads: select-argument's, and the accessors `acc` writes. */
-export type Vc8FormTables = SelectArgumentOptions & { accessors?: Vc8Accessor[] };
+export type Vc8FormTables = SelectArgumentOptions & RecordWalkTables & { accessors?: Vc8Accessor[] };
 
 export interface Vc8FormSite {
   form: Vc8Form;
@@ -429,7 +442,7 @@ export interface Vc8FormOptions {
   selectTables?: Vc8FormTables;
 }
 
-const OPS = new Set(['seq', 'fold', 'join', 'coalesce', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'width', 'boolflag', 'retwiden', 'arms',
+const OPS = new Set(['seq', 'fold', 'join', 'coalesce', 'recordwalk', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'width', 'boolflag', 'retwiden', 'arms',
   'nest', 'merge-tail', 'tailguard', 'tailcopy', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'clamp', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
   'nestcall', 'fill', 'elems', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'switch', 'dec', 'opas', 'range', 'castout', 'signbit']);
 
@@ -516,7 +529,7 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
       // `rowptr(X[I],N,T)`, `rowptr(X[I],N,T,@A)`.
       if (args.length !== 3 || !/\]$/.test(args[0]) || !/^[A-Za-z_]\w*$/.test(args[1]) || args[2] === '') return undefined;
       return { op: 'rowptr', expr: args[0], name: args[1], type: args[2], ...(anchor ? { anchor } : {}) };
-    case 'nestcall': case 'fill': case 'elems': case 'copy': {
+    case 'nestcall': case 'fill': case 'elems': case 'copy': case 'recordwalk': {
       const i = int(args[1], 0);
       if (anchor || args.length < 1 || args.length > 2 || !(i >= 0) || !/^[A-Za-z_]\w*$/.test(args[0])) return undefined;
       return { op: m[1], name: args[0], index: i } as Vc8Form;
@@ -1121,6 +1134,11 @@ function doCoalesce(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'coalesce' }>): 
   const r = coalesceLocal(fn, f.name, f.from);
   if (typeof r === 'string') refuse(r);
   fn.body = (r as FunctionDecl).body;
+}
+
+function doRecordwalk(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'recordwalk' }>): void {
+  const why = recordWalk(fn, f.name, f.index, selectTables);
+  if (why) refuse(why);
 }
 
 function doJoin(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'join' }>): void {
@@ -4315,7 +4333,7 @@ function opasShift(fn: FunctionDecl, u: OpasUpdate, matches: (e: Expression, u: 
 }
 
 const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op: K }>) => void } = {
-  seq: doSeq, fold: doFold, join: doJoin, coalesce: doCoalesce, cache: doCache, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
+  seq: doSeq, fold: doFold, join: doJoin, coalesce: doCoalesce, recordwalk: doRecordwalk, cache: doCache, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
   retval: doRetval, width: doWidth, boolflag: doBoolflag, retwiden: doRetwiden, arms: doArms,
   nest: doNest, 'merge-tail': doMergeTail, tailguard: doTailguard, tailcopy: doTailcopy, continue: doContinue, dup: doDup, tarms: doTarms, zero: doZero, nonzero: doNonzero,
   bool: doBool,
