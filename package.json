@@ -8,6 +8,7 @@
   "scripts": {
     "build": "tsc -b",
     "test": "tsx --test \"packages/*/src/**/*.test.ts\"",
+    "hand-follow": "tsx packages/live/src/hand-follow/cli.ts",
     "reconstruct:d2server": "npx tsx run-d2server.ts"
   },
   "dependencies": {

@@ -9,7 +9,14 @@
  * The decompiler prints both as the mask (it folds ZEXT(SUBPIECE(x)) into an INT_AND that
  * keeps the MOVZX's address). DRLGPATH_GetDirectionLookupFromPacked @0067bbc0 prints
  * `(nSrcPacked & 0xffff)` for a `movzx ecx, cx`; written as `(uint16_t)nSrcPacked` it
- * compiles back to the original. Which instruction each printed mask came from is read off
+ * compiles back to the original. A MOVZX from memory (`movzx ecx, byte ptr [m]`) tells the
+ * spellings apart only where the mask is a subscript: VC8 compiles the cast of a dword in
+ * memory to that load everywhere, and the mask to the same load everywhere but in an index,
+ * where it is `mov ecx, [m]; and ecx, 0xff` (probed for a parameter, a field, a global and a
+ * dereference, byte and word, as an index, an addend, a factor, a pushed and a register
+ * argument, a compare, a store and a return: only the index differs). Elsewhere the cast
+ * would change nothing but the expression tree, and that alone moved the register choice of
+ * Interact @00584540 off MATCH. Which instruction each printed mask came from is read off
  * the listing (reconstruct's extract/mask-sites.ts), so two passes:
  *
  *   zero-extend-site  early, on the body as the decompiler printed it: ties each mask
@@ -28,7 +35,16 @@
  *     a cast, an index, a shift count, a condition, `!`, `&&`, `||`, `==`, `!=`, a
  *     discarded value; or as the operand of an arithmetic, bitwise or relational operator
  *     whose other operand is an unsigned int, which converts the int cast back to the same
- *     unsigned value, so the operator's type and result do not change.
+ *     unsigned value, so the operator's type and result do not change;
+ *   - anywhere else, where `E & K` is an unsigned int (a 32-bit E that is unsigned, or K with
+ *     a U), as `(uint32_t)(uint8_t)E` / `(uint32_t)(uint16_t)E`: the value E mod 2^n and the
+ *     type unsigned int, both those of the mask. VC8 compiles the pair to the one MOVZX
+ *     (probed: `(x & 0xffff) * n`, `(x & 0xffff) < m`, `a + (x & 0xff)` against the pair,
+ *     instruction for instruction; ZLIB_Adler32Combine, the INVENTORY grid checks). Not as
+ *     an operand of `<`, `>`, `<=`, `>=`: against a constant VC8 compiles the cast to a byte
+ *     compare (`cmp al, 0x4d`) where the original's mask is `movzx ecx, al; cmp ecx, 0x4d`
+ *     (HirelingFarWander @005b14e0, MATCH only with the mask), against a variable both
+ *     spellings are the same MOVZX.
  *
  * A mask whose E is 64-bit or of a type the pass cannot tell stays, except in a value-only
  * position. A mask an AND computed stays everywhere.
@@ -132,7 +148,10 @@ export function createZeroExtendSiteTransformer(options?: PluginOptions): Transf
       if (!located) { o.onCensus?.({ tagged: 0, zipped: false, untied: sites.length }); return undefined; }
       ands.sort((a, b) => a.right.location!.start!.offset! - b.right.location!.start!.offset!);
 
-      const movzx = (s: ZeroExtendMaskSite) => s.mnemonic === 'MOVZX' && s.width === widthOf(s.k);
+      // A register source must be the mask's width; a memory source (width 0) is a load of
+      // the byte or word the constant keeps, the only zero extension an INT_AND at the MOVZX
+      // can print.
+      const movzx = (s: ZeroExtendMaskSite) => s.mnemonic === 'MOVZX' && (s.width === widthOf(s.k) || s.width === 0);
       const tie = new Map<BinaryExpr, ZeroExtendMaskSite>();
       const zipped = ands.length === o.count;
       if (zipped) {
@@ -156,7 +175,7 @@ export function createZeroExtendSiteTransformer(options?: PluginOptions): Transf
       const tagged = new Map<ASTNode, ASTNode>();
       for (const [be, s] of tie) {
         if (!movzx(s)) continue;
-        tagged.set(be, { ...be, ghidraInfo: { ...(be.ghidraInfo ?? {}), zeroExtendWidth: s.width } } as ASTNode);
+        tagged.set(be, { ...be, ghidraInfo: { ...(be.ghidraInfo ?? {}), zeroExtendWidth: s.width || widthOf(s.k), zeroExtendMemory: s.width === 0 } } as ASTNode);
       }
       o.onCensus?.({ tagged: tagged.size, zipped, untied: sites.length - tie.size });
       if (!tagged.size) return undefined;
@@ -223,6 +242,7 @@ function sameInstruction(value: Expression, k: number): string | null {
 }
 
 const VALUE_BINARY = new Set(['==', '!=', '&&', '||']);
+const RELATIONAL = new Set(['<', '>', '<=', '>=']);
 const ABSORBING_BINARY = new Set(['+', '-', '*', '/', '%', '&', '|', '^', '<', '>', '<=', '>=']);
 const CONDITION_KINDS = new Set<string>([NodeKind.IfStmt, NodeKind.WhileStmt, NodeKind.DoWhileStmt, NodeKind.ForStmt, NodeKind.SwitchStmt]);
 
@@ -345,21 +365,29 @@ export function createZeroExtendCastTransformer(options?: PluginOptions): Transf
         const same = sameInstruction(m.value, m.k);
         if (same) { o.onSite?.({ line, rewritten: false, reason: same }); continue; }
         if (mergedRegister(x, p)) { o.onSite?.({ line, rewritten: false, reason: 'stored into a register the code merges a part into' }); continue; }
+        if (be.ghidraInfo!.zeroExtendMemory && !(p?.kind === NodeKind.SubscriptExpr && (p as unknown as { index: ASTNode }).index === x)) {
+          o.onSite?.({ line, rewritten: false, reason: 'a load outside an index: the mask compiles to the same MOVZX' });
+          continue;
+        }
         const r = ranges.rangeAt(m.value);
         const unsuffixed = !/u/i.test(m.lit.suffix ?? '');
         let reason: string;
         if (r && !r.unsigned && unsuffixed) reason = 'int';
         else if (valueOnly(x, p)) reason = 'value';
-        else { o.onSite?.({ line, rewritten: false, reason: r ? 'unsigned in a typed position' : 'type unknown' }); continue; }
-        const type = typeFromSpelling(m.k === 0xff ? 'uint8_t' : 'uint16_t')!;
+        else if (r && !RELATIONAL.has((p as BinaryExpr | undefined)?.operator ?? '')) reason = 'unsigned';
+        else { o.onSite?.({ line, rewritten: false, reason: r ? 'unsigned in a relational compare' : 'type unknown' }); continue; }
         const v = unwrapParens(m.value);
         const operand: Expression = primary(v) ? v : {
           kind: NodeKind.ParenExpr, expression: v, location: v.location, leadingTrivia: [], trailingTrivia: [],
         } as ParenExpr;
-        const cast = {
-          kind: NodeKind.CStyleCastExpr, type, expression: operand, location: be.location,
+        const castTo = (spelling: string, e: Expression) => ({
+          kind: NodeKind.CStyleCastExpr, type: typeFromSpelling(spelling)!, expression: e, location: be.location,
           leadingTrivia: [], trailingTrivia: [],
-        } as unknown as CStyleCastExpr;
+        }) as unknown as CStyleCastExpr;
+        const narrow = castTo(m.k === 0xff ? 'uint8_t' : 'uint16_t', operand);
+        // `E & K` of a 32-bit E is an unsigned int here (E unsigned, or K with a U): the cast
+        // back to uint32_t keeps that type, and VC8 compiles the pair to the one MOVZX.
+        const cast = reason === 'unsigned' ? castTo('uint32_t', narrow) : narrow;
         replace.set(postfixOperand ? be : x, cast);
         o.onSite?.({ line, rewritten: true, reason });
       }

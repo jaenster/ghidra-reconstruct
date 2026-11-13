@@ -177,7 +177,7 @@ export async function extractLabelFlow(connection: GhidraConnection, functions: 
   for (const batch of labelFlowItems(functions)) {
     const result = await connection.sendCommand<{ success?: boolean; output?: string; error?: string }>(
       'execute_script',
-      { language: 'java', code: labelFlowScript(batch), scriptTimeout: 300, _commandTimeout: 360000 }
+      { language: 'java', readOnly: true, code: labelFlowScript(batch), scriptTimeout: 300, _commandTimeout: 360000 }
     );
     if (result.success === false || typeof result.output !== 'string') throw new Error(result.error ?? 'no output');
     for (const [fn, rec] of parseLabelFlow(result.output)) {

@@ -28,7 +28,9 @@
  * is a conversion C++ has, so both are written as the move the instruction
  * makes: `d2_bits_of` one way, `d2_bits_as<T>` the other. An aggregate whose
  * emitted declaration carries a converting constructor is left alone — there the
- * cast is legal C++ and already means exactly this.
+ * cast is legal C++ and already means exactly this — unless the operand is a
+ * pointer, which that integer constructor cannot take, or floating, which it
+ * would take and convert to the integer value instead of moving the bits.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -38,7 +40,7 @@ import type {
 } from '../../../ast/nodes.js';
 import { findNodesByKind } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
-import { Expr } from '../../../ast/factory.js';
+import { Expr, Type } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { emit } from '../../../emit/index.js';
 import { createExprShape } from './expr-shape.js';
@@ -56,6 +58,8 @@ export interface FloatPointerBitcastOptions extends PluginOptions {
   typedefTargets?: Record<string, string>;
   /** Aggregates the emitted header gives a converting constructor to. */
   convertingAggregates?: string[];
+  /** Byte size of each aggregate, to narrow a floating operand to the slot the machine wrote. */
+  aggregateSizes?: Record<string, number>;
 }
 
 /**
@@ -79,6 +83,7 @@ export function createFloatPointerBitcastTransformer(options?: PluginOptions): T
   const typedefTargets = o.typedefTargets ?? {};
   const structFields = o.structFields ?? {};
   const converting = new Set(o.convertingAggregates ?? []);
+  const aggregateSizes = o.aggregateSizes ?? {};
   const resolve: TypedefResolver = name => typedefTargets[name];
 
   return createTransformer({
@@ -170,14 +175,29 @@ export function createFloatPointerBitcastTransformer(options?: PluginOptions): T
           // not exist. Skipped where the emitted declaration DOES carry a
           // converting constructor (`D2SeedStrc`, `in_addr`): there the cast is
           // legal and already means this, and rewriting it would churn 900 sites
-          // to no effect.
-          if (target.stars === 0 && !!structFields[target.base] && !converting.has(target.base)
+          // to no effect. That constructor takes an INTEGER, though, and an
+          // address reaches no integer implicitly: `(D2PathPointStrc)pDynamicPath`,
+          // a pointer-typed slot the machine reused for a packed point, has no
+          // constructor to call, so it is the same four-byte move as above.
+          // A FLOATING operand does reach that constructor - float converts to
+          // an integer implicitly - and it would store the value truncated, not
+          // the bits: `(D2GfxLightStrc)(float)nScreenXOffset` at 0x0050d1ea is
+          // `FSTP float ptr [EBP-0x30]`, read back later as a float. The
+          // operand is narrowed to the width the store has, as for a pointer:
+          // a `double` is C's promotion of an x87 value, not an 8-byte store.
+          const floatingOperand = isFloatingExpr(cast.expression as Expression, 0);
+          if (target.stars === 0 && !!structFields[target.base]
+              && (!converting.has(target.base) || isPointer(operand) || floatingOperand)
               && !(operand && sameShape(operand, target))) {
             changed = true;
-            return Expr.call(
-              `d2_bits_as<${emit(cast.type).trim()}>`,
-              [cast.expression as Expression],
-            );
+            let value = cast.expression as Expression;
+            if (floatingOperand) {
+              const width = aggregateSizes[target.base] === 8 ? 'double' : 'float';
+              if (!(operand && operand.stars === 0 && operand.base === width)) {
+                value = Expr.cast(width === 'double' ? Type.double() : Type.float(), Expr.paren(value));
+              }
+            }
+            return Expr.call(`d2_bits_as<${emit(cast.type).trim()}>`, [value]);
           }
           return undefined;
         },

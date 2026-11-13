@@ -18,9 +18,11 @@
 
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
-  Expression, Identifier, MemberExpr, SubscriptExpr, CallExpr, CStyleCastExpr,
-  UnaryExpr, BinaryExpr, TypeNode, StringLiteralExpr, ConditionalExpr,
+  ASTNode, Expression, Identifier, MemberExpr, SubscriptExpr, CallExpr, CStyleCastExpr,
+  UnaryExpr, BinaryExpr, TypeNode, StringLiteralExpr, ConditionalExpr, StructDecl, FieldDecl,
 } from '../../../ast/nodes.js';
+import { findNodesByKind } from '../../../ast/visitor.js';
+import { templateBaseName } from './template-type.js';
 import {
   bareName, calleeName, sameShape, shapeOfNode, shapeOfSpelling, unwrapParens,
   type TypeShape, type TypedefResolver,
@@ -39,19 +41,45 @@ export interface ExprShapeTables {
   returnTypes?: Record<string, string>;
   /** Typedef name → what it stands for. */
   resolve?: TypedefResolver;
+  /**
+   * Aggregates the function body declares itself (a frame object, `struct __frame0_t`):
+   * name → member → declared type. Consulted before `structFields`, which knows only
+   * the program's own types.
+   */
+  localStructs?: ReadonlyMap<string, ReadonlyMap<string, TypeNode>>;
+  /**
+   * The class a member function's definition names (`TSExplicitList<SGAMEDATA, -572662307>`
+   * for `TSExplicitList<SGAMEDATA, -572662307>::Destructor`): `this` points at it. Unset,
+   * `this` has no shape.
+   */
+  thisClass?: string;
 }
 
 export type ExprShape = (expr: Expression) => TypeShape | null;
 
 /**
- * Build the resolver for one function body.
- *
- * `localTypes` is that function's parameters and locals. `funcdefReturnOfCallee`
- * supplies the return spelling for a call made THROUGH a function pointer, whose
- * type only the funcdef the slot is declared with knows; it is a hook because
- * resolving that callee itself needs this resolver, so the two are mutually
- * recursive and the caller ties the knot.
+ * The class `this` points at in a member function's body, spelled as the type tables key it.
+ * An out-of-class definition names it (`TSExplicitList<SGAMEDATA, -572662307>` for
+ * `template<> void TSExplicitList<SGAMEDATA, -572662307>::Destructor()`: the innermost
+ * qualifier, a template-id spelled as `templateBaseName` spells it, an identifier bare). The
+ * generator's wrapper does not: it parses a method body inside `void dummy(T* pThis, ...)`
+ * and the body keeps `this`, so there the first parameter, `pThis`, is the pointer `this` is.
+ * Undefined for anything else.
  */
+export function thisClassOf(fn: { name: unknown; parameters?: ReadonlyArray<{ name?: { name?: string } | null; type?: TypeNode }> },
+  resolve?: TypedefResolver): string | undefined {
+  const n = fn.name as { kind?: string; qualifier?: ASTNode[] } | undefined;
+  if (n && n.kind === NodeKind.QualifiedId && n.qualifier?.length) {
+    const last = n.qualifier[n.qualifier.length - 1] as ASTNode & { name?: unknown };
+    if (last.kind === NodeKind.TemplateType) return templateBaseName(last);
+    return last.kind === NodeKind.Identifier && typeof last.name === 'string' ? last.name : undefined;
+  }
+  const first = fn.parameters?.[0];
+  if (first?.name?.name !== 'pThis' || !first.type) return undefined;
+  const s = shapeOfNode(first.type, 0, resolve);
+  return s && s.stars === 1 ? s.base : undefined;
+}
+
 export function createExprShape(
   localTypes: ReadonlyMap<string, TypeNode>,
   tables: ExprShapeTables,
@@ -63,10 +91,17 @@ export function createExprShape(
   const fieldTypes = tables.fieldTypes ?? {};
   const returnTypes = tables.returnTypes ?? {};
   const resolve = tables.resolve;
+  const localStructs = tables.localStructs;
+  const thisShape: TypeShape | null = tables.thisClass ? { base: tables.thisClass, stars: 1, isConst: false } : null;
 
   const shape: ExprShape = (expr: Expression): TypeShape | null => {
     const e = unwrapParens(expr);
     switch (e.kind) {
+      case NodeKind.ThisExpr: {
+        // Ghidra's pseudo-C declares `this` as a parameter; an emitted member definition does not.
+        const declared = localTypes.get('this');
+        return declared ? shapeOfNode(declared, 0, resolve) : thisShape;
+      }
       case NodeKind.CStyleCastExpr:
         return shapeOfNode((e as CStyleCastExpr).type, 0, resolve);
       // A string literal is an ARRAY OF CONST CHAR that decays to `const char *`
@@ -116,6 +151,9 @@ export function createExprShape(
         // If the object's own type is known, the field's type is exact.
         const obj = shape(m.object);
         if (obj && obj.stars === (m.isArrow ? 1 : 0)) {
+          const local = localStructs?.get(obj.base)?.get(member.name);
+          if (local) return shapeOfNode(local, 0, resolve);
+          if (localStructs?.has(obj.base)) return null;
           const exact = structFields[obj.base]?.[member.name];
           if (exact) return shapeOfSpelling(exact, resolve);
         }
@@ -169,6 +207,35 @@ export function createExprShape(
   };
 
   return shape;
+}
+
+/**
+ * The aggregates a function body declares (`struct __frame0_t { ... };` from
+ * frame-group-locals), each named one by its members' declared types. A name declared
+ * twice in the body is left out: which of the two a variable has is not known here.
+ */
+export function collectLocalStructs(body: ASTNode): Map<string, Map<string, TypeNode>> {
+  const out = new Map<string, Map<string, TypeNode>>();
+  const twice = new Set<string>();
+  // A union the body declares (a frame slot's lives, as split-lives makes them) is one
+  // too: its members are read by name like a struct's.
+  for (const d of [...findNodesByKind(body, NodeKind.StructDecl), ...findNodesByKind(body, NodeKind.UnionDecl)]) {
+    const sd = d as StructDecl;
+    if (!sd.name || sd.name.kind !== NodeKind.Identifier || sd.isForwardDeclaration || (sd.bases ?? []).length > 0) continue;
+    const name = (sd.name as Identifier).name;
+    if (out.has(name)) { twice.add(name); continue; }
+    const fields = new Map<string, TypeNode>();
+    // A member parsed back from text is a VariableDecl; one the factory built is a FieldDecl.
+    for (const m of sd.members as ASTNode[]) {
+      if (m.kind !== NodeKind.FieldDecl && m.kind !== NodeKind.VariableDecl) continue;
+      const f = m as unknown as FieldDecl;
+      if (f.bitWidth || !f.name || !f.type) continue;
+      fields.set(f.name.name, f.type);
+    }
+    out.set(name, fields);
+  }
+  for (const n of twice) out.delete(n);
+  return out;
 }
 
 /** The parameters and body-declared locals of one function, by name. */

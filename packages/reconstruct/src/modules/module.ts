@@ -55,6 +55,22 @@ export interface Module {
 
   /** Whether all functions in this module are platform-guarded */
   isPlatformOnly: boolean;
+
+  /**
+   * Every unit emitted under this header, when more than one is: the template header
+   * is declared once and its members are defined in one unit per instantiation and
+   * module (codegen/templates/placement.ts). `unitName`/`functions` above describe one
+   * of them only; this lists them all, so an incremental run can tell which unit a
+   * changed member lives in. Absent for a header with one unit.
+   */
+  units?: ModuleUnit[];
+}
+
+/** One unit of a header several units share. */
+export interface ModuleUnit {
+  unitName: string;
+  implPath: string;
+  functions: ExtractedFunction[];
 }
 
 export interface ResolvedModule {

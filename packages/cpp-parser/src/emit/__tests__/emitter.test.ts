@@ -3,8 +3,9 @@ import assert from 'node:assert';
 import { CppEmitter, emit, DEFAULT_STYLE, GOOGLE_STYLE, createStyle } from '../index.js';
 import { Type, Expr, Stmt, Decl } from '../../ast/factory.js';
 import { NodeKind } from '../../ast/kinds.js';
-import type { AssignExpr, ExprStmt, FunctionDecl, ParenExpr } from '../../ast/nodes.js';
+import type { AssignExpr, BinaryExpr, BinaryOperator, CallExpr, CharLiteralExpr, CommaExpr, CompoundStmt, ConditionalExpr, DeclStmt, ExprStmt, Expression, FunctionDecl, IfStmt, InitListExpr, ParenExpr, PpConditionalStmt, ReturnStmt, Statement, UnaryExpr, VariableDecl } from '../../ast/nodes.js';
 import { parse } from '../../parser/index.js';
+import type { DeclStmt as LocalDeclStmt, TypeNode, VariableDecl as LocalVariableDecl } from '../../ast/nodes.js';
 
 describe('CppEmitter', () => {
   describe('Literals', () => {
@@ -27,6 +28,30 @@ describe('CppEmitter', () => {
 
     it('emits char literals', () => {
       assert.strictEqual(emit(Expr.charLiteral('A')), "'A'");
+    });
+
+    it('escapes character literals and reparses every byte value', () => {
+      const examples: Array<[number, string]> = [
+        [39, "'\\''"],
+        [92, "'\\\\'"],
+        [10, "'\\n'"],
+        [0, "'\\000'"],
+        [9, "'\\t'"],
+        [65, "'A'"],
+        [255, "'\\377'"],
+      ];
+      for (const [value, expected] of examples) {
+        assert.strictEqual(emit(Expr.charLiteral(value)), expected);
+      }
+      assert.strictEqual(emit(Expr.charLiteral("'")), "'\\''");
+
+      for (let value = 0; value <= 0xff; value++) {
+        const emitted = emit(Expr.charLiteral(value));
+        const fn = parse(`int f() { return ${emitted}; }`).declarations[0] as FunctionDecl;
+        const parsed = (fn.body!.statements[0] as ReturnStmt).value as CharLiteralExpr;
+        assert.strictEqual(parsed.kind, NodeKind.CharLiteral, emitted);
+        assert.strictEqual(parsed.value, value, emitted);
+      }
     });
 
     it('emits bool literals', () => {
@@ -60,6 +85,111 @@ describe('CppEmitter', () => {
   });
 
   describe('Binary Expressions', () => {
+    it('separates compact binary operators from leading unary tokens', () => {
+      const x = Expr.identifier('x');
+      const y = Expr.identifier('y');
+      const cases = [
+        ['+', '+', 'x+ +y'],
+        ['+', '++', 'x+ ++y'],
+        ['-', '-', 'x- -y'],
+        ['-', '--', 'x- --y'],
+        ['&', '&', 'x& &y'],
+        ['/', '*', 'x/ *y'],
+        ['+', '-', 'x+-y'],
+        ['-', '+', 'x-+y'],
+        ['*', '*', 'x**y'],
+        ['&&', '&', 'x&&&y'],
+      ] as const;
+
+      for (const [binaryOp, unaryOp, expected] of cases) {
+        const expression = Expr.binary(x, binaryOp, Expr.unary(unaryOp, y));
+        const emitted = emit(expression, { spaceAroundOperators: false });
+        assert.strictEqual(emitted, expected);
+        const fn = parse(`int f(int x, int y) { return ${emitted}; }`).declarations[0] as FunctionDecl;
+        const result = (fn.body!.statements[0] as ReturnStmt).value as BinaryExpr;
+        assert.strictEqual(result.kind, NodeKind.BinaryExpr);
+        assert.strictEqual(result.operator, binaryOp);
+        assert.strictEqual(result.right.kind, NodeKind.UnaryExpr);
+        assert.strictEqual((result.right as UnaryExpr).operator, unaryOp);
+      }
+
+      for (const [binaryOp, unaryOp, expected] of [
+        ['+', '+', 'x+ +y'],
+        ['/', '*', 'x/ *y'],
+      ] as const) {
+        const parenthesized = Expr.binary(x, binaryOp, Expr.paren(Expr.unary(unaryOp, y)));
+        const emitted = emit(parenthesized, { spaceAroundOperators: false });
+        assert.strictEqual(emitted, expected);
+        const fn = parse(`int f(int x, int *y) { return ${emitted}; }`).declarations[0] as FunctionDecl;
+        const result = (fn.body!.statements[0] as ReturnStmt).value as BinaryExpr;
+        assert.strictEqual(result.kind, NodeKind.BinaryExpr);
+        assert.strictEqual(result.operator, binaryOp);
+        assert.strictEqual(result.right.kind, NodeKind.UnaryExpr);
+        assert.strictEqual((result.right as UnaryExpr).operator, unaryOp);
+      }
+    });
+
+    it('separates compact subtraction from signed factory literals', () => {
+      const x = Expr.identifier('x');
+      const cases = [
+        [Expr.intLiteral(-1), 'x- -1'],
+        [Expr.intLiteral(-1, 16), 'x- -0x1'],
+        [Expr.floatLiteral(-1.5), 'x- -1.5'],
+      ] as const;
+
+      for (const [literal, expected] of cases) {
+        const emitted = emit(Expr.binary(x, '-', literal), { spaceAroundOperators: false });
+        assert.strictEqual(emitted, expected);
+        const fn = parse(`double f(double x) { return ${emitted}; }`).declarations[0] as FunctionDecl;
+        const result = (fn.body!.statements[0] as ReturnStmt).value as BinaryExpr;
+        assert.strictEqual(result.kind, NodeKind.BinaryExpr);
+        assert.strictEqual(result.operator, '-');
+        assert.strictEqual(result.right.kind, NodeKind.UnaryExpr);
+        assert.strictEqual((result.right as UnaryExpr).operator, '-');
+      }
+    });
+
+    it('follows the emitted left edge of a tighter right-hand expression', () => {
+      const x = Expr.identifier('x');
+      const y = Expr.identifier('y');
+      const z = Expr.identifier('z');
+      const p = Expr.identifier('p');
+      const m = Expr.identifier('m');
+      const plusProduct = Expr.binary(Expr.unary('+', y), '*', z);
+      const cases = [
+        [Expr.binary(x, '+', plusProduct), 'x+ +y*z', '+', '*', '+'],
+        [Expr.binary(x, '+', Expr.binary(Expr.unary('++', y), '*', z)), 'x+ ++y*z', '+', '*', '++'],
+        [Expr.binary(x, '-', Expr.binary(Expr.unary('-', y), '*', z)), 'x- -y*z', '-', '*', '-'],
+        [Expr.binary(x, '-', Expr.binary(Expr.intLiteral(-1), '*', z)), 'x- -1*z', '-', '*', '-'],
+        [Expr.binary(x, '&', Expr.binary(Expr.unary('&', y), '+', z)), 'x& &y+z', '&', '+', '&'],
+        [Expr.binary(x, '/', Expr.binary(Expr.unary('*', p), '.*', m)), 'x/ *p.*m', '/', '.*', '*'],
+        [Expr.binary(x, '+', Expr.paren(plusProduct)), 'x+ +y*z', '+', '*', '+'],
+      ] as const;
+
+      for (const [expression, expected, outerOp, innerOp, unaryOp] of cases) {
+        const emitted = emit(expression, { spaceAroundOperators: false });
+        assert.strictEqual(emitted, expected);
+        const fn = parse(`int f(int x, int y, int z, int p, int m) { return ${emitted}; }`)
+          .declarations[0] as FunctionDecl;
+        const outer = (fn.body!.statements[0] as ReturnStmt).value as BinaryExpr;
+        assert.strictEqual(outer.kind, NodeKind.BinaryExpr);
+        assert.strictEqual(outer.operator, outerOp);
+        const inner = outer.right as BinaryExpr;
+        assert.strictEqual(inner.kind, NodeKind.BinaryExpr);
+        assert.strictEqual(inner.operator, innerOp);
+        assert.strictEqual(inner.left.kind, NodeKind.UnaryExpr);
+        assert.strictEqual((inner.left as UnaryExpr).operator, unaryOp);
+      }
+
+      const sameAssociative = Expr.binary(x, '+', Expr.binary(Expr.unary('+', y), '+', z));
+      const sameAssociativeOutput = emit(sameAssociative, { spaceAroundOperators: false });
+      assert.ok(!sameAssociativeOutput.startsWith('x++'), sameAssociativeOutput);
+      parse(`int f(int x, int y, int z) { return ${sameAssociativeOutput}; }`);
+
+      const grouped = Expr.binary(x, '+', Expr.binary(Expr.unary('+', y), '-', z));
+      assert.strictEqual(emit(grouped, { spaceAroundOperators: false }), 'x+(+y-z)');
+    });
+
     it('emits binary operations', () => {
       const a = Expr.identifier('a');
       const b = Expr.identifier('b');
@@ -104,6 +234,16 @@ describe('CppEmitter', () => {
   });
 
   describe('Unary Expressions', () => {
+    function emittedPrefixOperandKind(source: string): { emitted: string; kind: NodeKind } {
+      const emitted = emit(parse(source));
+      const fn = parse(emitted).declarations[0] as FunctionDecl;
+      const expression = (fn.body!.statements[0] as ExprStmt).expression;
+      assert.strictEqual(expression.kind, NodeKind.UnaryExpr);
+      let operand = (expression as UnaryExpr).operand;
+      while (operand.kind === NodeKind.ParenExpr) operand = (operand as ParenExpr).expression;
+      return { emitted, kind: operand.kind };
+    }
+
     it('emits prefix unary operations', () => {
       const x = Expr.identifier('x');
 
@@ -118,6 +258,93 @@ describe('CppEmitter', () => {
 
       assert.strictEqual(emit(Expr.unary('++', i)), '++i');
       assert.strictEqual(emit(Expr.unary('--', i)), '--i');
+      assert.strictEqual(emit(Expr.unary('++', Expr.deref(Expr.identifier('p')))), '++*p');
+    });
+
+    it('preserves a conditional lvalue as the target of prefix increment/decrement', () => {
+      // With flag=0, a=5, b=10, ++(flag ? a : b) changes b to 11;
+      // the flattened ++flag ? a : b changes flag instead.
+      for (const op of ['++', '--'] as const) {
+        const source = `int f(int flag, int a, int b) { ${op}(flag ? a : b); return a + b; }`;
+        const { emitted, kind } = emittedPrefixOperandKind(source);
+        assert.ok(emitted.includes(`${op}(flag ? a : b);`), emitted);
+        assert.strictEqual(kind, NodeKind.ConditionalExpr);
+        assert.strictEqual(
+          emit(Expr.unary(op, Expr.conditional(Expr.identifier('flag'), Expr.identifier('a'), Expr.identifier('b')))),
+          `${op}(flag ? a : b)`,
+        );
+      }
+    });
+
+    it('preserves an assignment lvalue as the target of prefix increment/decrement', () => {
+      for (const op of ['++', '--'] as const) {
+        const source = `int f(int a, int b) { ${op}(a = b); return a; }`;
+        const { emitted, kind } = emittedPrefixOperandKind(source);
+        assert.ok(emitted.includes(`${op}(a = b);`), emitted);
+        assert.strictEqual(kind, NodeKind.AssignExpr);
+        assert.strictEqual(
+          emit(Expr.unary(op, Expr.assign(Expr.identifier('a'), Expr.identifier('b')))),
+          `${op}(a = b)`,
+        );
+      }
+    });
+
+    it('keeps adjacent prefix operators as separate tokens through parse and emit', () => {
+      const cases = [
+        ['-(-x)', '- -x', '-', '-'],
+        ['+(+x)', '+ +x', '+', '+'],
+        ['&(&x)', '& &x', '&', '&'],
+        ['+(++x)', '+ ++x', '+', '++'],
+        ['-(--x)', '- --x', '-', '--'],
+        ['-(-(+x))', '- -+x', '-', '-'],
+        ['-+x', '-+x', '-', '+'],
+        ['+-x', '+-x', '+', '-'],
+        ['!(!x)', '!!x', '!', '!'],
+        ['~(~x)', '~~x', '~', '~'],
+        ['*(*x)', '**x', '*', '*'],
+        ['++(+x)', '+++x', '++', '+'],
+        ['--(-x)', '---x', '--', '-'],
+      ] as const;
+      const withoutParens = (value: Expression): Expression => {
+        while (value.kind === NodeKind.ParenExpr) value = (value as ParenExpr).expression;
+        return value;
+      };
+
+      for (const [source, expected, outerOp, innerOp] of cases) {
+        const emitted = emit(parse(`int f(int x) { return ${source}; }`));
+        assert.ok(emitted.includes(`return ${expected};`), emitted);
+        const fn = parse(emitted).declarations[0] as FunctionDecl;
+        const outer = withoutParens((fn.body!.statements[0] as ReturnStmt).value!);
+        assert.strictEqual(outer.kind, NodeKind.UnaryExpr, emitted);
+        assert.strictEqual((outer as UnaryExpr).operator, outerOp, emitted);
+        const inner = withoutParens((outer as UnaryExpr).operand);
+        assert.strictEqual(inner.kind, NodeKind.UnaryExpr, emitted);
+        assert.strictEqual((inner as UnaryExpr).operator, innerOp, emitted);
+      }
+    });
+
+    it('separates unary minus from a negative factory literal', () => {
+      const cases = [
+        [Expr.intLiteral(-1), '- -1'],
+        [Expr.intLiteral(-1, 16), '- -0x1'],
+        [Expr.intLiteral(-1, 2), '- -0b1'],
+        [Expr.intLiteral(-1, 8), '- -01'],
+        [Expr.floatLiteral(-1.5), '- -1.5'],
+      ] as const;
+
+      for (const [operand, expected] of cases) {
+        const emitted = emit(Expr.unary('-', operand));
+        assert.strictEqual(emitted, expected);
+        const fn = parse(`double f() { return ${emitted}; }`).declarations[0] as FunctionDecl;
+        const outer = (fn.body!.statements[0] as ReturnStmt).value!;
+        assert.strictEqual(outer.kind, NodeKind.UnaryExpr, emitted);
+        assert.strictEqual((outer as UnaryExpr).operator, '-', emitted);
+        const inner = (outer as UnaryExpr).operand;
+        assert.strictEqual(inner.kind, NodeKind.UnaryExpr, emitted);
+        assert.strictEqual((inner as UnaryExpr).operator, '-', emitted);
+      }
+      assert.strictEqual(emit(Expr.unary('-', Expr.intLiteral(1))), '-1');
+      assert.strictEqual(emit(Expr.unary('+', Expr.intLiteral(-1))), '+-1');
     });
 
     it('emits postfix increment/decrement', () => {
@@ -179,6 +406,96 @@ describe('CppEmitter', () => {
     it('emits calls with no arguments', () => {
       const call = Expr.call('getTime', []);
       assert.strictEqual(emit(call), 'getTime()');
+    });
+
+    it('keeps parsed comma operators inside one call argument', () => {
+      for (const [source, expectedArity] of [
+        ['int f(int a, int b) { return G((a, b)); }', 1],
+        ['int f(int a, int b) { return G(((a, b))); }', 1],
+        ['int f(int a, int b) { return G((a, b, a)); }', 1],
+        ['int f(int a, int b) { return H((a, b), 42); }', 2],
+      ] as const) {
+        const original = parse(source);
+        const emitted = emit(original);
+        const reparsed = parse(emitted);
+        const call = ((reparsed.declarations[0] as FunctionDecl).body!.statements[0] as ReturnStmt).value as CallExpr;
+        assert.strictEqual(call.arguments.length, expectedArity, emitted);
+        assert.strictEqual(call.arguments[0].kind, NodeKind.ParenExpr, emitted);
+        assert.strictEqual(((call.arguments[0] as ParenExpr).expression as BinaryExpr).operator as string, ',', emitted);
+      }
+    });
+
+    it('groups a direct factory comma expression as one call argument', () => {
+      const a = Expr.identifier('a');
+      const b = Expr.identifier('b');
+      // The parser produces BinaryExpr(',', ...) even though BinaryOperator
+      // currently omits this spelling from its TypeScript union.
+      const binary = Expr.binary(a, ',' as BinaryOperator, b);
+      const list = {
+        kind: NodeKind.CommaExpr,
+        expressions: [a, b],
+        location: a.location,
+        leadingTrivia: [],
+        trailingTrivia: [],
+      } as CommaExpr;
+      for (const comma of [binary, list]) {
+        const emitted = emit(Expr.call('G', [comma]));
+        const reparsed = parse(`void f(int a, int b) { ${emitted}; }`);
+        const call = ((reparsed.declarations[0] as FunctionDecl).body!.statements[0] as ExprStmt).expression as CallExpr;
+        assert.strictEqual(call.arguments.length, 1, emitted);
+        assert.strictEqual(call.arguments[0].kind, NodeKind.ParenExpr, emitted);
+      }
+    });
+
+    it('keeps comma parens once under higher precedence and removes redundant sum parens', () => {
+      const comma = emit(parse('int f(int a, int b, int c) { return c * (a, b); }'));
+      assert.match(comma, /c \* \(a , b\)/);
+      assert.doesNotMatch(comma, /c \* \(\(a , b\)\)/);
+      const sum = emit(parse('int f(int a, int b) { return G((a + b)); }'));
+      assert.match(sum, /G\(a \+ b\)/);
+    });
+
+    it('keeps a comma expression as one declaration initializer', () => {
+      const emitted = emit(parse('int f(int a, int b) { int x = (a, b); return x; }'));
+      const reparsed = parse(emitted);
+      const decl = ((reparsed.declarations[0] as FunctionDecl).body!.statements[0] as DeclStmt).declarations;
+      assert.strictEqual(decl.length, 1, emitted);
+      assert.strictEqual((decl[0] as VariableDecl).initializer?.kind, NodeKind.ParenExpr, emitted);
+      assert.match(emitted, /int x = \(a , b\);/);
+    });
+
+    it('keeps direct factory comma expressions within one declarator or list element', () => {
+      const comma = Expr.binary(Expr.identifier('a'), ',' as BinaryOperator, Expr.identifier('b'));
+      const variable = emit(Decl.variable('x', Type.int(), comma));
+      const variableUnit = parse(`void f(int a, int b) { ${variable} }`);
+      const variableDecls = ((variableUnit.declarations[0] as FunctionDecl).body!.statements[0] as DeclStmt).declarations;
+      assert.strictEqual(variableDecls.length, 1, variable);
+      assert.match(variable, /int x = \(a , b\);/);
+
+      const list = emit(Expr.initList([comma]));
+      const listUnit = parse(`void f(int a, int b) { int xs[] = ${list}; }`);
+      const init = (((listUnit.declarations[0] as FunctionDecl).body!.statements[0] as DeclStmt)
+        .declarations[0] as VariableDecl).initializer as InitListExpr;
+      assert.strictEqual(init.elements.length, 1, list);
+      assert.strictEqual(list, '{(a , b)}');
+    });
+
+    it('keeps a direct factory comma expression within one parameter default', () => {
+      const comma = Expr.binary(Expr.identifier('a'), ',' as BinaryOperator, Expr.identifier('b'));
+      const fn = Decl.function_('f', Type.int(), [
+        Decl.parameter('x', Type.int(), comma),
+        Decl.parameter('y', Type.int()),
+      ], Stmt.compound([Stmt.return_(Expr.identifier('x'))]));
+      const emitted = emit(fn);
+      const reparsed = parse(emitted).declarations[0] as FunctionDecl;
+      assert.strictEqual(reparsed.parameters.length, 2, emitted);
+      assert.strictEqual(reparsed.parameters[0].defaultValue?.kind, NodeKind.ParenExpr, emitted);
+    });
+
+    it('keeps a comma expression grouped within sizeof', () => {
+      const emitted = emit(parse('int f(int a, int b) { return sizeof((a, b)); }'));
+      assert.match(emitted, /sizeof\(\(a , b\)\)/);
+      assert.doesNotThrow(() => parse(emitted));
     });
   });
 
@@ -257,6 +574,53 @@ describe('CppEmitter', () => {
         Expr.intLiteral(0)
       );
       assert.strictEqual(emit(cond), 'flag ? 1 : 0');
+    });
+
+    it('preserves a nested conditional in the condition across parse and emit', () => {
+      const leftNested = 'int f(bool a, bool b, bool c, int d, int e) { return (a ? b : c) ? d : e; }';
+      const rightNested = 'int f(bool a, bool b, bool c, int d, int e) { return a ? b : c ? d : e; }';
+
+      const emittedLeft = emit(parse(leftNested));
+      const emittedRight = emit(parse(rightNested));
+      assert.match(emittedLeft, /return \(a \? b : c\) \? d : e;/);
+      assert.match(emittedRight, /return a \? b : c \? d : e;/);
+      assert.notStrictEqual(emittedLeft, emittedRight);
+
+      const outer = (source: string): ConditionalExpr => {
+        const fn = parse(source).declarations[0] as FunctionDecl;
+        const ret = fn.body?.statements[0] as ReturnStmt;
+        assert.strictEqual(ret.value?.kind, NodeKind.ConditionalExpr);
+        return ret.value as ConditionalExpr;
+      };
+      const leftCondition = outer(emittedLeft).condition as ParenExpr;
+      assert.strictEqual(leftCondition.kind, NodeKind.ParenExpr);
+      assert.strictEqual(leftCondition.expression.kind, NodeKind.ConditionalExpr);
+      const right = outer(emittedRight);
+      assert.strictEqual(right.condition.kind, NodeKind.Identifier);
+      assert.strictEqual(right.elseExpr.kind, NodeKind.ConditionalExpr);
+    });
+
+    it('retains the grouping that changes a concrete conditional result', () => {
+      // (true ? false : true) ? 7 : 9 evaluates to 9; without the
+      // condition parentheses, true ? false : true ? 7 : 9 evaluates to 0.
+      const source = 'int f() { return (true ? false : true) ? 7 : 9; }';
+      const emitted = emit(parse(source));
+      assert.match(emitted, /return \(true \? false : true\) \? 7 : 9;/);
+      const fn = parse(emitted).declarations[0] as FunctionDecl;
+      const ret = fn.body?.statements[0] as ReturnStmt;
+      const outer = ret.value as ConditionalExpr;
+      assert.strictEqual((outer.condition as ParenExpr).expression.kind, NodeKind.ConditionalExpr);
+    });
+
+    it('parenthesizes lower-precedence conditions but leaves logical-or conditions bare', () => {
+      const a = Expr.identifier('a');
+      const b = Expr.identifier('b');
+      const c = Expr.identifier('c');
+      const d = Expr.identifier('d');
+      const e = Expr.identifier('e');
+      assert.strictEqual(emit(Expr.conditional(Expr.conditional(a, b, c), d, e)), '(a ? b : c) ? d : e');
+      assert.strictEqual(emit(Expr.conditional(Expr.assign(a, b), d, e)), '(a = b) ? d : e');
+      assert.strictEqual(emit(Expr.conditional(Expr.or(a, b), d, e)), 'a || b ? d : e');
     });
   });
 
@@ -413,6 +777,106 @@ describe('CppEmitter', () => {
         const result = emit(ifStmt);
         assert.ok(result.includes('{'));
         assert.ok(result.includes('}'));
+      });
+
+      function reparseOuterIf(stmt: IfStmt): { emitted: string; outer: IfStmt } {
+        const emitted = emit(stmt, createStyle({ alwaysUseBraces: false }));
+        const reparsed = parse(`void f(bool a, bool b, bool c) { ${emitted} }`);
+        const outer = (reparsed.declarations[0] as FunctionDecl).body!.statements[0] as IfStmt;
+        return { emitted, outer };
+      }
+
+      it('keeps an outer else from attaching to an unbraced inner if', () => {
+        const stmt = Stmt.if_(Expr.identifier('a'),
+          Stmt.if_(Expr.identifier('b'), Stmt.expr(Expr.call('F', []))),
+          Stmt.expr(Expr.call('G', [])));
+        const { emitted, outer } = reparseOuterIf(stmt);
+        assert.match(emitted, /if \(a\) \{/);
+        assert.strictEqual(outer.elseBranch?.kind, NodeKind.ExprStmt);
+        const inner = (outer.thenBranch as CompoundStmt).statements[0] as IfStmt;
+        assert.strictEqual(inner.elseBranch, null);
+      });
+
+      it('keeps the outer else through a nested else-if tail', () => {
+        const stmt = Stmt.if_(Expr.identifier('a'),
+          Stmt.if_(Expr.identifier('b'), Stmt.expr(Expr.call('F', [])),
+            Stmt.if_(Expr.identifier('c'), Stmt.expr(Expr.call('G', [])))),
+          Stmt.expr(Expr.call('H', [])));
+        const { emitted, outer } = reparseOuterIf(stmt);
+        assert.match(emitted, /if \(a\) \{/);
+        assert.match(emitted, /else if \(c\)/);
+        assert.strictEqual(outer.elseBranch?.kind, NodeKind.ExprStmt);
+        const inner = (outer.thenBranch as CompoundStmt).statements[0] as IfStmt;
+        assert.strictEqual((inner.elseBranch as IfStmt).elseBranch, null);
+      });
+
+      it('keeps the outer else through unbraced loop and label bodies', () => {
+        const innerIf = () => Stmt.if_(Expr.identifier('b'), Stmt.expr(Expr.call('F', [])));
+        const wrapped: Statement[] = [
+          Stmt.while_(Expr.identifier('c'), innerIf()),
+          Stmt.for_(null, Expr.identifier('c'), null, innerIf()),
+          Stmt.label('L', innerIf()),
+        ];
+        for (const thenBranch of wrapped) {
+          const { emitted, outer } = reparseOuterIf(Stmt.if_(Expr.identifier('a'), thenBranch,
+            Stmt.expr(Expr.call('G', []))));
+          assert.match(emitted, /if \(a\) \{/);
+          assert.strictEqual(outer.elseBranch?.kind, NodeKind.ExprStmt, emitted);
+        }
+      });
+
+      it('keeps the outer else through an unbraced switch case or default', () => {
+        for (const switchBody of [
+          'switch (c) case 1: if (b) F();',
+          'switch (c) default: if (b) F();',
+        ]) {
+          const source = parse(`void source(bool b, int c) { ${switchBody} }`);
+          const thenBranch = (source.declarations[0] as FunctionDecl).body!.statements[0];
+          const { emitted, outer } = reparseOuterIf(Stmt.if_(Expr.identifier('a'), thenBranch,
+            Stmt.expr(Expr.call('G', []))));
+          assert.match(emitted, /if \(a\) \{/);
+          assert.strictEqual(outer.elseBranch?.kind, NodeKind.ExprStmt, emitted);
+        }
+      });
+
+      it('leaves matched inner ifs and outer else-if chains unbraced', () => {
+        const matched = Stmt.if_(Expr.identifier('a'),
+          Stmt.if_(Expr.identifier('b'), Stmt.expr(Expr.call('F', [])), Stmt.expr(Expr.call('G', []))),
+          Stmt.expr(Expr.call('H', [])));
+        const first = reparseOuterIf(matched);
+        assert.doesNotMatch(first.emitted, /if \(a\) \{/);
+        assert.strictEqual(first.outer.elseBranch?.kind, NodeKind.ExprStmt);
+        assert.strictEqual((first.outer.thenBranch as IfStmt).elseBranch?.kind, NodeKind.ExprStmt);
+
+        const elseIf = Stmt.if_(Expr.identifier('a'), Stmt.expr(Expr.call('F', [])),
+          Stmt.if_(Expr.identifier('b'), Stmt.expr(Expr.call('G', [])), Stmt.expr(Expr.call('H', []))));
+        const second = reparseOuterIf(elseIf);
+        assert.match(second.emitted, /else if \(b\)/);
+        assert.strictEqual(second.outer.elseBranch?.kind, NodeKind.IfStmt);
+      });
+
+      it('does not brace a do-while body whose closing while protects the outer else', () => {
+        const stmt = Stmt.if_(Expr.identifier('a'),
+          Stmt.doWhile(Stmt.if_(Expr.identifier('b'), Stmt.expr(Expr.call('F', []))), Expr.identifier('c')),
+          Stmt.expr(Expr.call('G', [])));
+        const { emitted, outer } = reparseOuterIf(stmt);
+        assert.doesNotMatch(emitted, /if \(a\) \{/);
+        assert.strictEqual(outer.elseBranch?.kind, NodeKind.ExprStmt);
+      });
+
+      it('braces a preprocessor-selected then body before its outer else', () => {
+        const ppBody = {
+          kind: NodeKind.PpConditionalStmt,
+          condition: 'defined(USE_NATIVE)',
+          thenStatements: [Stmt.if_(Expr.identifier('b'), Stmt.expr(Expr.call('F', [])))],
+          elseStatements: [Stmt.expr(Expr.call('H', []))],
+          leadingTrivia: [],
+          trailingTrivia: [],
+        } as PpConditionalStmt;
+        const emitted = emit(Stmt.if_(Expr.identifier('a'), ppBody,
+          Stmt.expr(Expr.call('G', []))), createStyle({ alwaysUseBraces: false }));
+        assert.match(emitted, /if \(a\) \{/);
+        assert.match(emitted, /#endif\s*\} else\s+G\(\);/);
       });
     });
 
@@ -973,6 +1437,135 @@ describe('CppEmitter', () => {
 
     it('never touches a subscript-multiply expression', () => {
       assert.ok(round('void f(int* a) { return a[2] * 6; }').includes('a[2] * 6'));
+    });
+  });
+
+  describe('Mixed local declarators', () => {
+    const findDeclaration = (value: unknown): LocalDeclStmt | undefined => {
+      if (!value || typeof value !== 'object') return undefined;
+      if ('kind' in value && value.kind === NodeKind.DeclStmt) return value as LocalDeclStmt;
+      for (const child of Object.values(value)) {
+        const found = findDeclaration(child);
+        if (found) return found;
+      }
+      return undefined;
+    };
+
+    const typeShape = (type: TypeNode): string => {
+      if (type.kind === NodeKind.PointerType) return `*${typeShape(type.pointee)}`;
+      if (type.kind === NodeKind.ReferenceType) return `&${typeShape(type.referenced)}`;
+      if (type.kind === NodeKind.RValueReferenceType) return `&&${typeShape(type.referenced)}`;
+      if (type.kind === NodeKind.ArrayType) return `[${type.size ? emit(type.size) : ''}]${typeShape(type.elementType)}`;
+      return emit(type);
+    };
+
+    for (const source of [
+      'void f() { int a, *b; }',
+      'void f() { int *a, b; }',
+      'void f() { int *a, *b; }',
+      'void f() { int a[2], *b; }',
+      'void f() { int *a, b[2]; }',
+      'void f() { int a[2], b[2]; }',
+      'void f() { const int *a, b; }',
+      'void f() { unsigned int a, *b; }',
+      'void f() { int * const a = 0, b = 1; }',
+      'void f() { int a, &b = a; }',
+      'void f(int* p) { for (int a = 0, *b = p; a < 2; a++) g(b[a]); }',
+      'void f(int* p) { for (int *a = p, b = 1; b < 2; b++) g(a[b]); }',
+    ]) {
+      it(`preserves each declarator's type through emit/reparse: ${source}`, () => {
+        const ast = parse(source);
+        const original = findDeclaration(ast);
+        assert.ok(original, source);
+        const expected = original.declarations.map(d => typeShape((d as LocalVariableDecl).type));
+        for (const style of [{}, { spaceAroundOperators: false, spaceAfterComma: false }]) {
+          const output = emit(ast, style);
+          const reparsed = findDeclaration(parse(output));
+          assert.ok(reparsed, output);
+          assert.deepStrictEqual(reparsed.declarations.map(d => typeShape((d as LocalVariableDecl).type)), expected, output);
+        }
+      });
+    }
+
+    it('keeps a comma-expression initializer grouped with its own declarator', () => {
+      const source = 'void f() { int a = (g(), 1), *b; }';
+      const output = emit(parse(source));
+      const reparsed = findDeclaration(parse(output));
+      assert.ok(reparsed, output);
+      assert.strictEqual(reparsed.declarations.length, 2, output);
+      assert.ok(output.includes('a = (g() , 1)'), output);
+    });
+
+    it('keeps pointer-to-array and lvalue-reference markers on factory declarations', () => {
+      const pointerArray = Stmt.compound([Stmt.declStmt([
+        Decl.variable('a', Type.pointer(Type.array(Type.int(), Expr.intLiteral(2)))),
+        Decl.variable('b', Type.int()),
+      ])]);
+      assert.ok(emit(pointerArray).includes('int (*a)[2], b;'), emit(pointerArray));
+
+      const refs = Stmt.compound([Stmt.declStmt([
+        Decl.variable('a', Type.reference(Type.int()), Expr.identifier('x')),
+        Decl.variable('b', Type.reference(Type.int()), Expr.identifier('y')),
+      ])]);
+      assert.ok(emit(refs).includes('int &a = x, &b = y;'), emit(refs));
+
+      const functionReference = Stmt.compound([Stmt.declStmt([
+        Decl.variable('a', Type.reference(Type.function(Type.int(), [Type.int()])), Expr.identifier('fn')),
+        Decl.variable('b', Type.int()),
+      ])]);
+      assert.ok(emit(functionReference).includes('int (&a)(int) = fn, b;'), emit(functionReference));
+
+      const constPointer = Stmt.compound([Stmt.declStmt([
+        Decl.variable('a', Type.const(Type.pointer(Type.int())), Expr.identifier('p')),
+        Decl.variable('b', Type.int()),
+      ])]);
+      assert.ok(emit(constPointer).includes('int *const a = p, b;'), emit(constPointer));
+
+      const constArrayElements = Stmt.compound([Stmt.declStmt([
+        Decl.variable('a', Type.const(Type.array(Type.pointer(Type.int()), Expr.intLiteral(2)))),
+        Decl.variable('b', Type.int()),
+      ])]);
+      assert.ok(emit(constArrayElements).includes('int *const a[2], b;'), emit(constArrayElements));
+    });
+  });
+
+  describe('Named function-pointer declarators', () => {
+    for (const [source, spelling] of [
+      ['int (*fn)(int);', 'int (*fn)(int);'],
+      ['int (*fn)(int) = (g(), p);', 'int (*fn)(int) = (g() , p);'],
+      ['void f() { int (*fn)(int); }', 'int (*fn)(int);'],
+      ['void f() { static int (*fn)(int) = p; }', 'static int (*fn)(int) = p;'],
+      ['void f() { int (*fn)(int) = (g(), p); }', 'int (*fn)(int) = (g() , p);'],
+      ['void f(int (*fn)(int)) {}', 'int (*fn)(int)'],
+      ['void f(int (*fn)(int) = (g(), p)) {}', 'int (*fn)(int) = (g() , p)'],
+      ['struct S { int (*fn)(int); };', 'int (*fn)(int);'],
+      ['typedef int (*Fn)(int);', 'typedef int (*Fn)(int);'],
+      ['void f() { int (**fn)(int); }', 'int (**fn)(int);'],
+      ['void f() { int (*fn[2])(int); }', 'int (*fn[2])(int);'],
+      ['void f() { int (* const fn)(int) = p; }', 'int (* const fn)(int) = p;'],
+      ['void f() { int (__stdcall *fn)(int) = p; }', 'int (__stdcall *fn)(int) = p;'],
+    ]) {
+      it(`keeps the name inside the function-pointer type: ${source}`, () => {
+        const output = emit(parse(source));
+        assert.ok(output.includes(spelling), output);
+        assert.strictEqual(emit(parse(output)), output);
+      });
+    }
+
+    it('keeps abstract function-pointer type aliases unchanged', () => {
+      assert.strictEqual(emit(parse('using Fn = int (*)(int);')).trim(), 'using Fn = int (*)(int);');
+    });
+
+    it('keeps names and qualifiers through supported factory wrappers', () => {
+      const fnType = Type.function(Type.int(), [Type.int()]);
+      assert.strictEqual(emit(Decl.variable('fn', Type.const(Type.pointer(fnType)))),
+        'int (* const fn)(int);');
+      assert.strictEqual(emit(Decl.variable('fn', Type.reference(Type.pointer(fnType)))),
+        'int (*&fn)(int);');
+      assert.strictEqual(emit(Decl.variable('fn', Type.array(Type.const(Type.pointer(fnType)), Expr.intLiteral(2)))),
+        'int (* const fn[2])(int);');
+      assert.strictEqual(emit(Decl.variable('fn', Type.pointer(Type.array(Type.pointer(fnType), Expr.intLiteral(2))))),
+        'int (*(*fn)[2])(int);');
     });
   });
 });

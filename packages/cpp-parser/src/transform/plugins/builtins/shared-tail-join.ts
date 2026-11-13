@@ -248,14 +248,18 @@ function joinList(list: Statement[], atEnd: boolean, options: SharedTailJoinOpti
     // A tail that is only `return local;` hands back a register both ways already
     // (CheckCollision_Vector 0064d800 lost its match joined).
     if (shared === 1 && t.length === 1 && returnsLocal(t[0], fnLocals)) continue;
-    // A return the function writes more than twice was written per exit, the copies VC8
-    // cross-jumps (the quest StatusFilters' `return true`, Q31_StatusFilter 00586ce0).
-    if (last.kind === NodeKind.ReturnStmt && (returnCounts.get(text(last)) ?? 0) > 2) continue;
     if (holdsLabel(a) || holdsLabel(b) || holdsLabel(t)) continue;
     const tNames = named(t);
     if ([...declared(a), ...declared(b)].some(n => tNames.has(n))) continue;
     // Arms that are one statement differing only in a value: one statement on `c ? x : y`.
     const merged = a.length === 1 && b.length === 1 && isPure(ifs.condition) ? mergeArms(ifs.condition, a[0], b[0], shape) : null;
+    // A return the function writes more than twice was written per exit, the copies VC8
+    // cross-jumps (the quest StatusFilters' `return true`, Q31_StatusFilter 00586ce0). Not
+    // so the GUID select ahead of a bare `return;`: the call was written once on the select
+    // and its copies are VC8's (Q14_Callback11_ScrollMessage 0059cb20, `QUESTGUID_AddPlayerToList(
+    // .., !pPlayer ? -1 : pPlayer->nUnitGUID)` matches).
+    const selectBeforeReturn = !!merged && !shared && isBareReturn(last);
+    if (last.kind === NodeKind.ReturnStmt && (returnCounts.get(text(last)) ?? 0) > 2 && !selectBeforeReturn) continue;
     if (!merged && !shared) continue;
     let joined: Statement;
     if (merged) {

@@ -20,7 +20,7 @@
 
 import { readFileSync } from 'node:fs';
 import { join, relative, dirname } from 'node:path';
-import { readFile, readdir, mkdtemp, rm, cp, writeFile } from 'node:fs/promises';
+import { readFile, readdir, mkdtemp, rm, cp, writeFile, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { execFile } from 'node:child_process';
@@ -35,6 +35,8 @@ import {
 } from '@ghidra-mcp/reconstruct';
 import { foreignSourcesFingerprint } from '@ghidra-mcp/reconstruct/codegen/file-static-functions';
 import { ForeignSourceWatch, type RebuildOutcome } from './foreign-watch.js';
+import { LIVE_EXTRACTION_OPTIONS } from './exclude-patterns.js';
+import { linkBuildRoot, linkBuildsKeep, pruneLinkBuilds } from './link-builds.js';
 import { decompileFunction } from '@ghidra-mcp/reconstruct/extract/functions';
 
 import { applyEvents, FactsRefreshError, type ChangeEvent as ModelChangeEvent, type ModelIndices } from './model.js';
@@ -65,7 +67,7 @@ import {
   loadBuildInfo,
   type SymbolHashCache,
 } from './dirty-units.js';
-import { NEVER_TOUCH, TREE_METADATA, isNeverTouch, isTreeMetadata } from './paths.js';
+import { NEVER_TOUCH, TREE_METADATA, VERSION_FILE, isNeverTouch, isTreeMetadata } from './paths.js';
 import {
   ProposalBoundary,
   parseIdentity,
@@ -328,8 +330,7 @@ export class LiveLoop {
     const options: ReconstructionOptions = {
       daemonUrl: this.cfg.daemonUrl,
       programPath: this.cfg.programPath,
-      decompileTimeout: 60,
-      excludeLibraryCode: false,
+      ...LIVE_EXTRACTION_OPTIONS,
     };
 
     // The local worker's journal is keyed by server version, so a model that has never
@@ -419,6 +420,8 @@ export class LiveLoop {
         sendCommand: (cmd, params) => this.connection.sendCommand(cmd, params),
         since: state.seq,
         intervalMs: Number(process.env.D2_LIVE_POLL_MS ?? '2000'),
+        // Minutes without a completed poll before the watchdog restarts the loop.
+        stallMs: Number(process.env.D2_LIVE_POLL_STALL_MIN ?? '15') * 60_000,
         onBatch: batch => this.onBatch(batch),
         onTruncated: info => this.onTruncated(info),
         log: m => this.log(m),
@@ -999,6 +1002,15 @@ export class LiveLoop {
       const err = e as { code?: number; stdout?: string; stderr?: string; message: string };
       code = typeof err.code === 'number' ? err.code : 1;
       out = `${err.stdout ?? ''}${err.stderr ?? ''}` || err.message;
+    } finally {
+      // The link gate's build dir (~1.3 GB) is read by nothing once the command has
+      // exited; keep only the newest, whatever the exit code.
+      try {
+        const removed = await pruneLinkBuilds(linkBuildRoot(env), linkBuildsKeep(env));
+        if (removed.length) this.log(`removed ${removed.length} link build dir(s): ${removed.join(' ')}`);
+      } catch (e) {
+        this.log(`link build cleanup failed: ${(e as Error).message}`);
+      }
     }
     for (const line of out.trim().split('\n').slice(-12)) this.log(`  publish: ${line}`);
     const after = await this.regenHead();
@@ -1099,6 +1111,7 @@ export class LiveLoop {
       phase: this.phase,
       paused: this.stream.isPaused,
       streamConnected: this.stream.isConnected,
+      ...(this.stream instanceof PollingChangeStream ? { poller: this.stream.health } : {}),
       queuedEvents: this.stream.queuedCount,
       needsFullResync: this.needsFullResync,
       queue: this.queue.status(),
@@ -1169,6 +1182,13 @@ export class LiveLoop {
           const file = maps.byAddress.get(normalizeAddress(callerFn.address));
           if (file) files.add(file);
         }
+      }
+      for (const taker of this.indices.addressTakersOf.get(normalizeAddress(fn.address)) ?? []) {
+        const takerFn = this.indices.fnByAddr.get(taker);
+        if (!takerFn) continue;
+        callers.push(takerFn.name);
+        const file = maps.byAddress.get(normalizeAddress(takerFn.address));
+        if (file) files.add(file);
       }
     }
 
@@ -1533,8 +1553,9 @@ export class LiveLoop {
  */
 async function writeVersionFile(regenDir: string, version: number | undefined): Promise<void> {
   if (!version) return;
+  await mkdir(join(regenDir, dirname(VERSION_FILE)), { recursive: true });
   await writeFile(
-    join(regenDir, 'ghidra_version.cpp'),
+    join(regenDir, VERSION_FILE),
     `// The Game.exe Ghidra database version this tree was generated from.\nextern const char g_szGhidraVersion[] = "${version}";\n`,
   );
 }

@@ -73,7 +73,8 @@ test('a hiding function moved to another namespace re-emits them', () => {
     [fn('004fd770', 'D2WinImageEx', 'D2Win::Forms::D2WinImageEx'), ...others],
     [fn('004fd770', 'D2WinImageEx', 'D2Win::Src::D2WinImage'), ...others],
   );
-  assert.ok(units?.includes('D2Launch::CharSel'), JSON.stringify(units));
+  // A namespace move re-emits every unit (null), which includes CharSel.
+  assert.strictEqual(units, null, JSON.stringify(units));
 });
 
 test('the hidden type renamed re-emits every unit that spelled it', () => {

@@ -364,7 +364,7 @@ function jumpsOntoLoad(reader: LayoutReader, ifs: IfStmt): boolean {
 }
 
 /** The gate for one function, read from its body before any guard is made. */
-function layoutGate(ev: BranchLayoutEvidence, body: CompoundStmt): GuardGate {
+function layoutGate(ev: BranchLayoutEvidence, body: CompoundStmt, undecided = true): GuardGate {
   const reader = new LayoutReader(ev, body);
   const inLoop = loopIfLines(body);
   const returns = returnOrder(body);
@@ -374,7 +374,7 @@ function layoutGate(ev: BranchLayoutEvidence, body: CompoundStmt): GuardGate {
     // X's test would jump and K's copy would move to the end.
     if (stmts.length === 1 && stmts[0].kind === NodeKind.ReturnStmt && backIntoCopy(reader, ifs)) return false;
     // A bare `return;` has no code of its own: no evidence either way, as in case B.
-    if (!ret.value) return true;
+    if (!ret.value) return undecided;
     // `if (C) { BODY } return K;`, K a constant, whose jump lands on a copy of the return
     // that loads K itself: the source had no guard there. A guard `if (!C) return K;` makes
     // VC8 load K before the test and jump past the load when BODY is straight code that
@@ -437,9 +437,9 @@ function layoutGate(ev: BranchLayoutEvidence, body: CompoundStmt): GuardGate {
     // layout is not BODY first either; a leaving arm in a loop is laid out apart from
     // either form.
     const shape = conditionShape(ifs.condition).kind;
-    if ((shape !== 'simple' && shape !== 'and') || inLoop.has(ifs.location.start.line)) return true;
+    if ((shape !== 'simple' && shape !== 'and') || inLoop.has(ifs.location.start.line)) return undecided;
     const cb = reader.chainBranch(ifs);
-    if (cb === null) return true;
+    if (cb === null) return undecided;
     const r = reader.entry([ret], cb), b = reader.entry(stmts, cb);
     return r === null || b === null || r < b;
   };
@@ -488,7 +488,11 @@ function createPerFunctionTransformer(o: EarlyReturnOptions): Transformer {
         resolve,
       });
       const integral = integralByTypes(shapeOf, enumTypes);
-      return createEarlyReturnTransformer(ev ? layoutGate(ev, fn.body) : null, integral)(fn);
+      // Matching first: with keepNestWhenUndecided, a guard is made only where the layout
+      // asks for one; without facts, none (the nest is the binary's structure as decompiled).
+      const keep = o.keepNestWhenUndecided === true;
+      const gate = ev ? layoutGate(ev, fn.body, !keep) : (keep ? (() => false) : null);
+      return createEarlyReturnTransformer(gate, integral)(fn);
     },
   });
 }
@@ -496,6 +500,12 @@ function createPerFunctionTransformer(o: EarlyReturnOptions): Transformer {
 export interface EarlyReturnOptions extends PluginOptions {
   /** The original's addresses (branch-layout/evidence.ts); absent: every guard is made. */
   branchLayout?: BranchLayoutEvidence | null;
+  /**
+   * Byte matching over readability: where the layout cannot decide (an `||` condition, an
+   * if in a loop, no chain branch, a bare `return;`, no facts at all), keep Ghidra's nest
+   * instead of making the guard. Default off: today's behaviour.
+   */
+  keepNestWhenUndecided?: boolean;
   /** Type tables for the operands of a negated ordering (see `invert`). */
   enumTypes?: string[];
   globalTypes?: Record<string, string>;

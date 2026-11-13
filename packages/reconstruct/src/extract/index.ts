@@ -97,6 +97,8 @@ export interface ProgramInfo {
    * predates it or the server could not list memory blocks.
    */
   dataSections?: Array<[number, number]>;
+  /** The data blocks no instruction may write, [start, end): `.rdata`. */
+  readOnlyDataSections?: Array<[number, number]>;
 }
 
 /**
@@ -170,8 +172,12 @@ export async function extractAll(
 
   // Get program info first
   const programInfo = await connection.sendCommand<ProgramInfo>('get_program_info');
-  const dataSections = await extractDataSections(connection, programInfo.imageBase);
-  if (dataSections) programInfo.dataSections = dataSections;
+  const readOnly: Array<[number, number]> = [];
+  const dataSections = await extractDataSections(connection, programInfo.imageBase, readOnly);
+  if (dataSections) {
+    programInfo.dataSections = dataSections;
+    programInfo.readOnlyDataSections = readOnly;
+  }
 
   // Extract in parallel where possible
   const [namespaces, dataTypesList, analyzedGlobals, strings] = await timePhase(
@@ -357,6 +363,8 @@ interface MemoryBlockRecord {
 export async function extractDataSections(
   connection: GhidraConnection,
   imageBase: string | undefined,
+  /** Filled with the blocks among them that are not writable. */
+  readOnly?: Array<[number, number]>,
 ): Promise<Array<[number, number]> | null> {
   let blocks: MemoryBlockRecord[];
   try {
@@ -377,7 +385,9 @@ export async function extractDataSections(
     if ((b.permissions ?? '').includes('x') || b.isVolatile) continue;
     if (Number.isSafeInteger(base) && start <= base && base <= end) continue;
     out.push([start, end + 1]);
+    if (readOnly && !(b.permissions ?? '').includes('w')) readOnly.push([start, end + 1]);
   }
   out.sort((a, b) => a[0] - b[0]);
+  readOnly?.sort((a, b) => a[0] - b[0]);
   return out.length > 0 ? out : null;
 }

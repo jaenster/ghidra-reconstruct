@@ -34,6 +34,18 @@
  *                for an unsigned x): a negative x is biased by 2^n-1 so the
  *                arithmetic shift rounds toward zero, as `/` does. Without the
  *                `(int)` the sum must itself be a signed int.
+ *   trunc pow2   `(T)((x + ((int)x >> 0x1f & 2^n-1)) >> n)` whose sum is unsigned, T an integer
+ *                of w <= 32-n bits, is `(T)(x / 2^n)`: the logical and the arithmetic shift of
+ *                the same 32 bits differ only in the top n bits, which T drops.
+ *   abs          `(x ^ (int)x >> 0x1f) - ((int)x >> 0x1f)` is `abs(x)`; where x is an unsigned
+ *                dword the difference is unsigned, and is `(uint32_t)abs((int)x)`.
+ *   trunc shift  `(T)((uint32_t)x >> k)`, x a signed integer of at most 32 bits and T an
+ *                integer of w <= 32-k bits (not bool), is `(T)(x >> k)`: both shift the same
+ *                32 bits and differ only in the top k, which T drops. The decompiler turns the
+ *                original's `sar` into a logical shift once the top bits are dead and prints
+ *                the `(uint)` that keeps it logical; compiled as printed, VC8 emits `shr`
+ *                where the original has `sar` (CLIENT_SetUnitLightColor 004609a0). Not the high
+ *                word (w = k = 16): that is HIWORD's own spelling, and the original is split.
  *   long helpers `_alldiv(lo, hi, lo2, hi2)` (and `_aulldiv`, `_allrem`,
  *                `_aullrem`, `_allmul`, or their `__` spellings) whose dword pairs are recognisably one
  *                value - `((uint32_t)E, (uint32_t)((uint64_t)E >> 0x20))` is E,
@@ -92,7 +104,8 @@ export interface ArithIdiomsOptions extends PluginOptions {
 export type ArithIdiom =
   | 'low-dword' | 'narrow-div' | 'magic-div' | 'cast-chain' | 'modulo' | 'divides' | 'pow2-div' | 'long-helper' | 'signed-div'
   | 'setcc-select' | 'pow2-rem' | 'pow2-rem-test' | 'pow2-rem-mask' | 'u2f' | 'abs'
-  | 'sdiv-widened' | 'low-word-div' | 'trunc-mul' | 'narrow-residue' | 'signed-div-use' | 'nonneg-div' | 'zext-local' | 'zext-operand' | 'promoted-dividend';
+  | 'sdiv-widened' | 'low-word-div' | 'trunc-mul' | 'narrow-residue' | 'signed-div-use' | 'nonneg-div' | 'zext-local' | 'zext-operand' | 'promoted-dividend'
+  | 'trunc-shift' | 'trunc-pow2-div';
 
 const stats: Record<ArithIdiom, number> = {
   'low-dword': 0, 'narrow-div': 0, 'magic-div': 0, 'cast-chain': 0, 'modulo': 0, 'divides': 0,
@@ -100,6 +113,7 @@ const stats: Record<ArithIdiom, number> = {
   'pow2-rem-mask': 0, 'u2f': 0, 'abs': 0,
   'sdiv-widened': 0, 'low-word-div': 0, 'trunc-mul': 0, 'narrow-residue': 0, 'signed-div-use': 0,
   'nonneg-div': 0, 'zext-local': 0, 'zext-operand': 0, 'promoted-dividend': 0,
+  'trunc-shift': 0, 'trunc-pow2-div': 0,
 };
 
 /** How many times each idiom has been folded since the last reset. */
@@ -648,9 +662,66 @@ function createFolder(shapeOf: ExprShape, o: ArithIdiomsOptions, resolve: Typede
     const y = asInt(xb.left as Expression);
     if (!sameExpr(asInt(s1), y) || !isPure(y)) return null;
     const yt = typeOf(y);
-    if (!yt || yt.bits !== 32 || !sameType(typeOf(s1), S32) || !sameType(typeOf(e), S32)) return null;
+    if (!yt || yt.bits !== 32 || !sameType(typeOf(s1), S32)) return null;
+    // An unsigned dword x makes the difference unsigned (WEATHER_ApproximateDistance 00474080):
+    // the same 32 bits as abs, given back with its type.
+    const et = typeOf(e);
+    if (!et || et.bits !== 32) return null;
     stats['abs']++;
-    return Expr.call(Expr.identifier('abs'), [yt.signed ? y : castNode('int', y)]);
+    const call = Expr.call(Expr.identifier('abs'), [yt.signed ? y : castNode('int', y)]);
+    return et.signed ? call : castNode('uint32_t', call);
+  };
+
+  // --- shifts whose top bits a narrowing cast drops --------------------------
+
+  /** T of `(T)e` when T is an integer narrower than 32 bits other than bool, with its width. */
+  const narrowCast = (e: Expression): { bits: number; node: CStyleCastExpr; inner: Expression } | null => {
+    const c = castOf(e);
+    if (!c || c.type.bits === 1 || c.type.bits >= 32) return null;
+    return { bits: c.type.bits, node: c.node, inner: unwrapParens(c.inner) };
+  };
+
+  /**
+   * `(T)((uint32_t)x >> k)` is `(T)(x >> k)` for a signed x of at most 32 bits and w + k <= 32
+   * (see the header). The cast to the unsigned dword copies x's promoted bits unchanged, so
+   * both shifts read the same 32 bits.
+   */
+  const foldTruncShift = (e: Expression): Expression | null => {
+    const t = narrowCast(e);
+    if (!t || t.inner.kind !== NodeKind.BinaryExpr || (t.inner as BinaryExpr).operator !== '>>') return null;
+    const sh = t.inner as BinaryExpr;
+    const k = intLiteral(sh.right as Expression);
+    if (k === null || k < 1n || BigInt(t.bits) + k > 32n) return null;
+    // The high word, `(WORD)((DWORD)x >> 16)`, is how HIWORD is spelled, and the original
+    // shifts it logically about as often as arithmetically (shr: PATH 00650660, sar: Fog
+    // DataArrays 006bccd0); which one a function wrote is its vc8form, not a rule.
+    if (t.bits === 16 && k === 16n) return null;
+    const u = castOf(sh.left as Expression);
+    if (!u || !sameType(u.type, U32)) return null;
+    const xt = typeOf(u.inner);
+    if (!xt || !xt.signed || xt.bits > 32) return null;
+    stats['trunc-shift']++;
+    return updateNode(t.node, {
+      expression: Expr.paren(Expr.binary(u.inner, '>>', sh.right as Expression)),
+    } as Partial<CStyleCastExpr>);
+  };
+
+  /** `(T)(sum >> n)` of the power-of-two bias with an unsigned sum, T at most 32-n bits wide. */
+  const foldTruncPow2Div = (e: Expression): Expression | null => {
+    const t = narrowCast(e);
+    if (!t || t.inner.kind !== NodeKind.BinaryExpr || (t.inner as BinaryExpr).operator !== '>>') return null;
+    const sh = t.inner as BinaryExpr;
+    const n = intLiteral(sh.right as Expression);
+    if (n === null || n < 1n || BigInt(t.bits) + n > 32n) return null;
+    if (castOf(sh.left as Expression)) return null;            // `(int)(sum) >> n`: foldPow2Div's
+    const st = typeOf(sh.left as Expression);
+    if (!st || st.signed || st.bits !== 32) return null;
+    // The same shift as the arithmetic one of the same 32 bits, which foldPow2Div proves.
+    const div = foldPow2Div(Expr.binary(castNode('int', Expr.paren(sh.left as Expression)), '>>', sh.right as Expression));
+    if (!div) return null;
+    stats['pow2-div']--;
+    stats['trunc-pow2-div']++;
+    return updateNode(t.node, { expression: Expr.paren(div) } as Partial<CStyleCastExpr>);
   };
 
   // --- the 64-bit runtime helpers ----------------------------------------
@@ -659,7 +730,7 @@ function createFolder(shapeOf: ExprShape, o: ArithIdiomsOptions, resolve: Typede
    * The one value a dword pair holds, as an expression whose integer conversion
    * to a 64-bit type gives exactly the bits `lo | (uint64_t)hi << 32`.
    */
-  /** E for `*(T*)((char*)&E + 4)` (or `(uintptr_t)&E + 4`) with T a 32-bit integer. */
+  /** E for `*(T*)((char*)&E + 4)` (or `(uintptr_t)&E + 4`, `(intptr_t)&E + 4`) with T a 32-bit integer. */
   const highDwordOf = (hi: Expression): Expression | null => {
     const d = unwrapParens(hi);
     if (d.kind !== NodeKind.UnaryExpr || (d as UnaryExpr).operator !== '*') return null;
@@ -675,7 +746,8 @@ function createFolder(shapeOf: ExprShape, o: ArithIdiomsOptions, resolve: Typede
     if (base.kind !== NodeKind.CStyleCastExpr) return null;
     const bt = shapeOfNode((base as CStyleCastExpr).type, 0, resolve);
     const bytePointer = bt && bt.stars === 1 && (bt.base === 'char' || bt.base === 'unsigned char' || bt.base === 'signed char');
-    const address = bt && bt.stars === 0 && (bt.base === 'uintptr_t' || INT_BASES[bt.base]?.bits === 32);
+    const address = bt && bt.stars === 0
+      && (bt.base === 'uintptr_t' || bt.base === 'intptr_t' || INT_BASES[bt.base]?.bits === 32);
     if (!bytePointer && !address) return null;
     const amp = unwrapParens((base as CStyleCastExpr).expression as Expression);
     if (amp.kind !== NodeKind.UnaryExpr || (amp as UnaryExpr).operator !== '&') return null;
@@ -1270,6 +1342,7 @@ function createFolder(shapeOf: ExprShape, o: ArithIdiomsOptions, resolve: Typede
   const RULES = [
     foldPromotedDividend, foldZextOperand, foldLongHelper, foldLowDword, foldLowWordDiv, foldNarrowDiv, foldMagic, foldSdivWidened, foldTruncMul, foldCastChain,
     foldPow2Div, foldLowWordModulo, foldModulo, foldDivides, foldSetccSelect, foldNarrowResidue, foldAbs,
+    foldTruncPow2Div, foldTruncShift,
   ];
 
   /** One idiom at the root of e, its result folded again. */

@@ -350,3 +350,41 @@ describe('callArgCastPlugin: a zero-extension into an enum slot is spelled as th
     assert.match(run(`void f(int n) { CLIENT_GetLevelNameByLevelId((uint32_t)n); }`, options), /\(uint32_t\)n/);
   });
 });
+
+describe('callArgCastPlugin: SDK pointer-word slots', () => {
+  const run = (code: string): string =>
+    emit(callArgCastPlugin.createTransformer({
+      functionParamTypes: { Other: ['int'] },
+      pointerOnlyParamTypes: {
+        RaiseException: ['DWORD', 'DWORD', 'DWORD', 'ULONG_PTR *'],
+        GetQueuedCompletionStatus: ['HANDLE', 'LPDWORD', 'PULONG_PTR', 'LPOVERLAPPED *', 'DWORD'],
+      },
+      typedefTargets: {
+        DWORD: 'unsigned long', ULONG_PTR: 'unsigned long', PULONG_PTR: 'ULONG_PTR *', LPDWORD: 'DWORD *',
+      },
+    } as never)(parse(code)) as AnyNode).replace(/\s+/g, '');
+
+  it('casts the address of a 32-bit word into a ULONG_PTR * slot', () => {
+    // crashyRoot 369: the SetThreadName exception, as the SDK's own example writes it.
+    const out = run(`void f() { THREADNAME_INFO t; DWORD dwType; RaiseException(0x406d1388, 0, 4, &dwType); }`);
+    assert.ok(out.includes('RaiseException(0x406d1388,0,4,(ULONG_PTR*)&dwType)'), out);
+  });
+
+  it('casts into a PULONG_PTR slot and leaves the LPDWORD one', () => {
+    const out = run(`void f(HANDLE h, LPOVERLAPPED* o) { DWORD n; DWORD k; GetQueuedCompletionStatus(h, &n, &k, o, 0); }`);
+    assert.ok(out.includes('GetQueuedCompletionStatus(h,&n,(PULONG_PTR)&k,o,0)'), out);
+  });
+
+  it('leaves an argument already spelled pointer-sized', () => {
+    const out = run(`void f() { ULONG_PTR a[4]; RaiseException(1, 0, 4, a); }`);
+    assert.ok(out.includes('RaiseException(1,0,4,a)'), out);
+  });
+
+  it('leaves a program function whose slot disagrees, for Ghidra to retype', () => {
+    const out = emit(callArgCastPlugin.createTransformer({
+      functionParamTypes: { Mine: ['ULONG_PTR *'] },
+      typedefTargets: { DWORD: 'unsigned long', ULONG_PTR: 'unsigned long' },
+    } as never)(parse(`void f() { DWORD n; Mine(&n); }`)) as AnyNode).replace(/\s+/g, '');
+    assert.ok(out.includes('Mine(&n)'), out);
+  });
+});

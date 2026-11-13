@@ -1,0 +1,16 @@
+diff --git a/Source/A/Alpha.cpp b/Source/A/Alpha.cpp
+--- a/Source/A/Alpha.cpp
++++ b/Source/A/Alpha.cpp
+@@ -58,10 +58,10 @@
+     t += 2;
+     t += 3;
+     t += 4;
+-    t += 5;
++    t += 5 + s_counter + Alpha::kHandBias;
+     t += 6;
+     t += 7;
+     t += 8;
+-    t += 9;
++    t += HandHelper(t);
+     return t;
+ }

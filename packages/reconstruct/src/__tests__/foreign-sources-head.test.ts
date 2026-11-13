@@ -74,3 +74,24 @@ test('a path not committed at HEAD is an error, not an empty input', () => {
   fs.writeFileSync(path.join(dir, 'later', 'x.cpp'), 'int x;\n');
   assert.throws(() => readForeignSources([{ path: path.join(dir, 'later') }], dir), /not committed/);
 });
+
+test('the version file the regen writes is not a foreign input', () => {
+  const { dir, git } = repo();
+  const entries = [{ path: path.join(dir, 'support') }];
+  fs.writeFileSync(path.join(dir, 'support', 'ghidra_version.cpp'), 'extern const char g_szGhidraVersion[] = "1";\n');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'version 1');
+  const first = foreignSourcesFingerprint(entries, dir);
+  assert.deepStrictEqual(readForeignSources(entries, dir).map(r => path.basename(r.path)), ['control.cpp']);
+
+  // The daemon's merge of the next publish changes only the version.
+  fs.writeFileSync(path.join(dir, 'support', 'ghidra_version.cpp'), 'extern const char g_szGhidraVersion[] = "2";\n');
+  git('commit', '-q', '-am', 'version 2');
+  assert.equal(foreignSourcesFingerprint(entries, dir), first);
+  assert.equal(readForeignSourcesAt(entries, dir).fingerprint, first);
+
+  // A hand-written source beside it still moves it.
+  fs.writeFileSync(path.join(dir, 'support', 'control.cpp'), 'void f() { ENGINE_Other(); }\n');
+  git('commit', '-q', '-am', 'support');
+  assert.notEqual(foreignSourcesFingerprint(entries, dir), first);
+});

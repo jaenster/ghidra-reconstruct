@@ -12,7 +12,7 @@
 /** Standard C/C++ types from <cstdint>, <cstddef>, and language primitives */
 import { globalGuardMacroLines } from './global-guards.js';
 import { SDK_PROBED_NAMES, SDK_DEFINED_TYPES, SDK_TYPEDEF_NAMES, PLATFORM_HEADER_DECLARED_TYPES, SDK_LAYOUTS } from './sdk-types.generated.js';
-import { ARTIFACT_SUPPORT_LINES, CHECK_BLOCK_SUPPORT_LINES, SHIFT_COUNT_SUPPORT_LINES, Lexer, STORM_LINK_SUPPORT_LINES, TokenKind } from '@ghidra-mcp/cpp-parser';
+import { ARTIFACT_SUPPORT_LINES, CHECK_BLOCK_SUPPORT_LINES, CONTEXT_FIELD_SUPPORT_LINES, SHIFT_COUNT_SUPPORT_LINES, Lexer, STORM_LINK_SUPPORT_LINES, TokenKind } from '@ghidra-mcp/cpp-parser';
 import { templateRegistry } from './templates/registry.js';
 import { rootQualifyTemplateArguments } from './templates/identity.js';
 import {
@@ -1603,6 +1603,8 @@ export function generatePlatformHeader(
   lines.push('');
   lines.push(...STORM_LINK_SUPPORT_LINES);
   lines.push('');
+  lines.push(...CONTEXT_FIELD_SUPPORT_LINES);
+  lines.push('');
   lines.push(...CHECK_BLOCK_SUPPORT_LINES);
   lines.push('');
 
@@ -1612,6 +1614,22 @@ export function generatePlatformHeader(
     lines.push('// Diablo 2 PRNG — LCG with multiplier 0x6AC690C5');
     lines.push('#define D2_SEED_NEXT(seed) ((D2SeedStrc)((uint64_t)(uint32_t)(seed).nSeedLow * 0x6ac690c5u + (uint64_t)(uint32_t)(seed).nSeedHigh))');
     lines.push('#define D2_SEED_NEXT_VAL(sv) ((D2SeedStrc)((uint64_t)(uint32_t)(sv) * 0x6ac690c5u + ((uint64_t)(sv) >> 32)))');
+    // The step as the game inlines it where it stores back into the seed it read: the high
+    // word first, then the low word, which it returns (out-of-line copy: RollRandomSeed
+    // 0045c370). A template because D2SeedStrc is defined after this header. Forced inline:
+    // every one of the original's steps is inlined, and VC8 at /Ob1 calls a plain inline
+    // copy from large functions (AITHINK_AncientTalic 005eeda0 loses its match to the call).
+    lines.push('#if defined(_MSC_VER)');
+    lines.push('#define D2_SEED_ROLL_INLINE __forceinline');
+    lines.push('#else');
+    lines.push('#define D2_SEED_ROLL_INLINE inline __attribute__((always_inline))');
+    lines.push('#endif');
+    lines.push('template <class TSeed> static D2_SEED_ROLL_INLINE uint32_t D2_SeedRoll(TSeed* pSeed) {');
+    lines.push('    uint64_t lNext = (uint64_t)(uint32_t)pSeed->nSeedLow * 0x6ac690c5u + (uint64_t)(uint32_t)pSeed->nSeedHigh;');
+    lines.push('    pSeed->nSeedHigh = (uint32_t)(lNext >> 32);');
+    lines.push('    pSeed->nSeedLow = (uint32_t)lNext;');
+    lines.push('    return (uint32_t)lNext;');
+    lines.push('}');
     lines.push('');
   }
 
@@ -1735,6 +1753,13 @@ export function generatePlatformHeader(
   lines.push('typedef tagWINDOWPLACEMENT WINDOWPLACEMENT;');
   lines.push('typedef GUID IID;');
   lines.push('#endif // _WIN32');
+  // The image's own DOS header, at the image base: the linker defines it (MSVC and
+  // mingw-w64 ld alike), so the tree declares it and defines nothing there.
+  lines.push('#ifdef __cplusplus');
+  lines.push('extern "C" IMAGE_DOS_HEADER __ImageBase;');
+  lines.push('#else');
+  lines.push('extern IMAGE_DOS_HEADER __ImageBase;');
+  lines.push('#endif');
   lines.push('');
   // Itanium/GCC unwind ABI types — not provided by <windows.h>; always defined.
   lines.push('typedef int _Unwind_Reason_Code;');

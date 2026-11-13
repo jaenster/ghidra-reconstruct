@@ -89,7 +89,7 @@ const CASES: { name: string; src: string; casts: number; expect?: RegExp }[] = [
     casts: 4,
   },
   {
-    name: 'an unsigned operand compared signed-sensitively stays a mask',
+    name: 'an unsigned operand compared signed-sensitively keeps its unsigned type',
     src: `
     int64_t f(int a, int b) {
       uint32_t u = (uint32_t)a;
@@ -99,7 +99,8 @@ const CASES: { name: string; src: string; casts: number; expect?: RegExp }[] = [
       r += (int64_t)(-(u & 0xff));
       return r;
     }`,
-    casts: 0,
+    casts: 2,
+    expect: /if \(\(u & 0xffff\) < b\)\s+r \+= 1;\s+r \+= \(int64_t\)\(\(uint32_t\)\(uint8_t\)u - 1\);/,
   },
   {
     name: 'an unsigned operand in value-only positions',
@@ -118,7 +119,7 @@ const CASES: { name: string; src: string; casts: number; expect?: RegExp }[] = [
       r += 1 << (u & 0xff & 7);
       return r + (int64_t)(uint8_t)(u & 0xff);
     }`,
-    casts: 8,
+    casts: 9,
   },
   {
     name: 'a 64-bit operand only where the value alone is read',
@@ -132,14 +133,15 @@ const CASES: { name: string; src: string; casts: number; expect?: RegExp }[] = [
     casts: 1,
   },
   {
-    name: 'a U-suffixed mask of an int is unsigned: kept in a typed position',
+    name: 'a U-suffixed mask of an int is unsigned, in a typed position too',
     src: `
     int64_t f(int a, int b) {
       int64_t r = (int64_t)((a & 0xffU) - 1);
       int s = a & 0xffU;
       return r + s;
     }`,
-    casts: 1,
+    casts: 2,
+    expect: /\(int64_t\)\(\(uint32_t\)\(uint8_t\)a - 1\)/,
   },
   {
     name: 'a compound assignment into an unsigned int',
@@ -152,7 +154,7 @@ const CASES: { name: string; src: string; casts: number; expect?: RegExp }[] = [
       s -= (uint32_t)a & 0xffff;
       return (int64_t)acc + s;
     }`,
-    casts: 1,
+    casts: 3,
   },
 ];
 
@@ -170,6 +172,27 @@ describe('zero-extend-cast', () => {
     const src = `uint32_t f(uint32_t a, uint32_t b) { return (a & 0xffff) + (b & 0xffff); }`;
     const { code } = rewrite(src, ord => (ord === 0 ? 'AND' : 'MOVZX'));
     assert.match(code, /\(a & 0xffff\) \+ \(uint16_t\)b/);
+  });
+
+  it('a MOVZX from memory (width 0) is the cast only as an index', () => {
+    const src = `uint32_t f(uint32_t nBodyLocFlags, uint32_t *p) { uint32_t nBestBodyLoc = nBodyLocFlags & 0xff; G(*p & 0xffff); return nBestBodyLoc + p[*p & 0xff]; }`;
+    const f = factsFor(src);
+    const sites = f.sites.map(s => ({ ...s, width: 0 }));
+    const reasons: string[] = [];
+    const tagged = createZeroExtendSiteTransformer({ count: f.count, sites })(parse(src)) as AnyNode;
+    const code = emit(createZeroExtendCastTransformer({ onSite: s => reasons.push(s.reason) })(tagged) as AnyNode);
+    assert.match(code, /nBestBodyLoc = nBodyLocFlags & 0xff;/);
+    assert.match(code, /G\(\*p & 0xffff\)/);
+    assert.match(code, /p\[\(uint8_t\)\*p\]/);
+    assert.strictEqual(reasons.filter(r => r.startsWith('a load outside an index')).length, 2, reasons.join(','));
+  });
+
+  it('an unsigned mask in a relational compare stays (HirelingFarWander: cmp al against movzx; cmp)', () => {
+    const src = `int f(uint32_t nSeedLow, uint32_t n) { return ((nSeedLow & 0xff) < 0x4d) + ((nSeedLow & 0xff) * n < 3); }`;
+    const { code, reasons } = rewrite(src);
+    assert.match(code, /\(nSeedLow & 0xff\) < 0x4d/);
+    assert.match(code, /\(uint8_t\)nSeedLow \* n < 3/);
+    assert.ok(reasons.includes('kept:unsigned in a relational compare'), reasons.join(','));
   });
 
   it('positions that do not zip tie only a constant every fact agrees on', () => {
@@ -209,6 +232,41 @@ describe('zero-extend-cast', () => {
     const { code } = rewrite(src);
     assert.match(code, /nRolledAffixMasked = pRolledAffixIdx & 0xffff;/);
     assert.match(code, /uint32_t w = \(uint16_t\)b;/);
+  });
+
+  it('golden: ZLIB_Adler32Combine @0042b8e0 (three MOVZX word masks, v2056 facts)', native, () => {
+    // The body as the generator emits it before this pass, `_allrem` written as the operator.
+    const src = `uint32_t f(uint32_t nAdler1, uint32_t nLen2Lo, uint32_t nLen2Hi, uint32_t nAdler2) {
+      if ((int)nLen2Hi <= 0 && ((int)nLen2Hi < 0 || false)) {
+        return -1;
+      }
+      int64_t nLen2Mod = (int64_t)(((uint64_t)nLen2Hi << 32 | nLen2Lo) % 0xfff1);
+      uint32_t nSum2 = (nAdler1 & 0xffff) * (int)nLen2Mod;
+      uint32_t nSum1 = (nAdler1 & 0xffff) + 0xfff0 + (nAdler2 & 0xffff);
+      nSum2 = nSum2 + 0xfff1 + ((nAdler1 >> 0x10) + nSum2 / 0xfff1 * -0xfff1 + (nAdler2 >> 0x10) - (int)nLen2Mod);
+      uint32_t nSum1Mod = nSum1;
+      if (nSum1 >= 0xfff1) {
+        nSum1Mod = nSum1 - 0xfff1;
+        if (nSum1Mod >= 0xfff1) nSum1Mod = nSum1 - 0x1ffe2;
+      }
+      if (nSum2 >= 0x1ffe2) nSum2 -= 0x1ffe2;
+      if (nSum2 >= 0xfff1) nSum2 -= 0xfff1;
+      return nSum2 << 0x10 | nSum1Mod;
+    }`;
+    const sites: ZeroExtendMaskSite[] = [0, 1, 2].map(ord => ({ ord, k: 0xffff, mnemonic: 'MOVZX', width: 2 }));
+    const tagged = createZeroExtendSiteTransformer({ count: 3, sites })(parse(src)) as AnyNode;
+    const code = emit(createZeroExtendCastTransformer({})(tagged) as AnyNode).trim();
+    assert.match(code, /uint32_t nSum2 = \(uint32_t\)\(uint16_t\)nAdler1 \* \(int\)nLen2Mod;/);
+    assert.match(code, /uint32_t nSum1 = \(uint32_t\)\(uint16_t\)nAdler1 \+ 0xfff0 \+ \(uint16_t\)nAdler2;/);
+    const prelude = `namespace ref {\n${src}\n}\nnamespace low {\n${code}\n}`;
+    const body = [
+      'const uint32_t V[] = {0, 1, 0xfff0, 0xfff1, 0xffff, 0x10000, 0x12345678, 0x7fffffff, 0x80000000, 0xfffeffff, 0xffffffff};',
+      'long diff = 0;',
+      'for (uint32_t a : V) for (uint32_t b : V) for (uint32_t c : V) for (uint32_t d : V)',
+      '  if (ref::f(a, b, c & 1, d) != low::f(a, b, c & 1, d)) diff++;',
+      'printf("%ld\\n", diff);',
+    ].join('\n');
+    assert.strictEqual(compileAndRun(prelude, body).trim(), '0', code);
   });
 
   it('no facts, no change', () => {

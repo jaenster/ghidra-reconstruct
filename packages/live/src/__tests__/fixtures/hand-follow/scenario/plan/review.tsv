@@ -1,0 +1,4 @@
+id	hash	file	scope	kind	addr	fn	action	new_file	notes
+h007	27835a65942e	Source/B/Beta.cpp	file	include			review	Source/B/Beta.cpp	1 function(s) leave this TU
+h008	dc789ced94cc	Source/B/Beta.cpp	function	code	00402040	Seven	move-fn	Source/A/Alpha.cpp	uses file statics of the old TU the generated body does not: s_counter; target lacks #include "Hand.h" (file-level h007 of the old TU); namespace-relative qualifiers, re-check in the new namespace: Alpha
+h009	6d806faa5f00	Source/B/Beta.cpp	function	code	00402040	Seven	move-fn	Source/A/Alpha.cpp	target lacks #include "Hand.h" (file-level h007 of the old TU)
