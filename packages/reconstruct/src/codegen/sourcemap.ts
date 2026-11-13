@@ -5,6 +5,7 @@
  * original binary addresses for debugging purposes.
  */
 
+import { vc8formBodyHash } from './vc8form-spec.js';
 import type {
   ExtractedFunction,
   SourceMap,
@@ -77,6 +78,10 @@ export function generateSourceMap(
     if (crossPlatformMatches?.has(func.name)) {
       mapping.crossPlatformMatch = crossPlatformMatches.get(func.name);
     }
+
+    // What the ratchet records with a body, and its escape hatch (docs/ratchet.md).
+    if (func.decompiled) mapping.dh = vc8formBodyHash(func.decompiled);
+    if (func.tags?.some(t => t.type === 'ratchet' && t.data === 'release')) mapping.ratchet = 'release';
 
     functionMappings.push(mapping);
   }

@@ -44,7 +44,7 @@ const W = `[${PY_W}]`;
 const MARK = new RegExp(`^// 1\\.14d: (?:0x)?([0-9a-fA-F]{6,8})(?!${W})`, 'u');
 const MARKS = new RegExp(`(?:^|(?<=\\n))// 1\\.14d: (?:0x)?([0-9a-fA-F]{6,8})(?!${W})`, 'gu');
 /** Hand-owned by rsync exclude, not generated; their delta is not a hand patch over code. */
-export const DEFAULT_EXCLUDES = ['asm_matching', 'Redivivus', '3rdparty/libbacktrace', '3rdparty/implibs', 'cmake',
+export const DEFAULT_EXCLUDES = ['asm_matching', 'Redivivus', 'ratchet', '3rdparty/libbacktrace', '3rdparty/implibs', 'cmake',
   'tools', 'CMakeLists.txt', 'README.md', '.gitignore', '*.map'];
 const SRC_EXT = ['.cpp', '.h', '.c', '.hpp', '.inc', '.CPP', '.H', '.C'];
 const CTX = 3;

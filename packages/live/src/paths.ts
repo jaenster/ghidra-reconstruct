@@ -25,6 +25,8 @@ export const NEVER_TOUCH: string[] = [
   '3rdparty/libbacktrace/',
   '3rdparty/implibs/',
   'sites2.tsv',
+  // The ratchet store (docs/ratchet.md): source/modified only, advanced by measurement.
+  'ratchet/',
 ];
 
 /** The Ghidra version file the regen and the daemon write (it is not generator output). */

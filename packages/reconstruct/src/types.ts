@@ -643,6 +643,10 @@ export interface FunctionMapping {
   ifdef?: string;
   /** Same-named function in other binary */
   crossPlatformMatch?: CrossPlatformMatch;
+  /** The decompile hash (vc8form `dh`) of the body this map's text was emitted from. */
+  dh?: string;
+  /** `release` when the function carries the Ghidra tag `ratchet:release` (docs/ratchet.md). */
+  ratchet?: 'release';
 }
 
 export interface LineMapping {

@@ -9,7 +9,11 @@
  */
 
 import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
+
+import { ratchetMerge } from '@ghidra-mcp/reconstruct/ratchet/merge';
 
 const run = promisify(execFile);
 
@@ -111,6 +115,17 @@ export interface MergeResult {
  * conflict can be resolved where it happened.
  */
 export async function mergeIntoModified(modifiedDir: string, branch: string): Promise<MergeResult> {
+  // With a ratchet store the merge re-spells the pinned bodies instead of merging them as
+  // text, and the hand-written files follow the regen's renames (docs/ratchet.md). Its
+  // commit is made like every other commit of this module, unsigned (see git() above).
+  if (existsSync(join(modifiedDir, 'ratchet'))) {
+    const r = ratchetMerge(modifiedDir, branch, { gitConfig: ['commit.gpgsign=false'] });
+    const unresolved = r.pins.filter(p => p.status === 'unresolved').length
+      + r.followed.reduce((n, f) => n + f.errors.length, 0);
+    const note = `ratchet: ${r.pins.length} pins, ${r.followed.length} hand files followed, ${unresolved} unresolved`;
+    if (r.state === 'conflict') return { state: 'conflict', conflictFiles: r.conflictFiles, message: `${r.message ?? ''}; ${note}` };
+    return { state: r.state, message: [r.message, note].filter(Boolean).join('; ') };
+  }
   const status = await git(modifiedDir, ['status', '--porcelain']);
   if (status.stdout.trim().length > 0) {
     return {

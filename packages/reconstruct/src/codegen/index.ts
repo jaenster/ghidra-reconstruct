@@ -93,6 +93,8 @@ import { normalizeDataAddress, stringDefinition } from './declaration-closure.js
 import { harvestAnnotatedParameterTypes } from './win32-signatures.js';
 import { PLATFORM_FUNCDEF_NAMES, PLATFORM_STRUCT_FIELD_TYPES, isPlatformOrBuiltinType, isLibraryType, sdkLayoutMismatches, sdkHeaderOf, unprobedTypeNames, generatePlatformHeader, oddWidthTypesSpelled, placeholderTypesUsedIn, normalizeDataValue, arrayRowTypedefLines, arrayRowReturn, arrayRowSpelling, GHIDRA_PSEUDO_OP_RESULT_TYPES, normalizeSignatureType, collapseFuncPtrTypedef, setShadowedTypeNames, setFunctionHiddenTypes, computeFunctionHiddenTypes, setAggregateTypeNames, setDeclaredTypeNames, isVoidPointerSpelling, platformDeclaredFunctionNames, platformDefinedFunctionNames, platformVoidPointerFunctionNames, EMITTER_POINTER_TYPEDEFS } from './platform-types.js';
 import { createOverrideRegistry } from '../overrides/index.js';
+import { applyRatchetToProject, globalsIndexText } from '../ratchet/generator.js';
+import { GLOBALS_INDEX_FILE } from '../ratchet/symbol-index.js';
 import { GLOBALS_HEADER, globalsHeaderPathUnder, globalsUnitPath, isGlobalsHeaderPath } from './globals-layout.js';
 import { alignPathCase, assertNoCaseCollidingFiles, canonicalizeProjectPathCase, quotedIncludePath, resolveQuotedInclude } from './path-case.js';
 import { createLibraryRegistry } from '../library/index.js';
@@ -5518,6 +5520,11 @@ export async function writeProject(
     }
   }
 
+  // The ratchet: a body the oracle measured MATCH is not silently replaced (docs/ratchet.md).
+  // After the overrides, so a stored body is compared with what would otherwise be written.
+  const globalsIndex = globalsIndexText(project);
+  applyRatchetToProject(project, options, globalsIndex);
+
   // The disk spells every path the way the project does: a directory left from an older
   // spelling on a case-insensitive disk would otherwise keep its name, and the includes,
   // which use the project's spelling, would not resolve on a case-sensitive checkout.
@@ -5539,6 +5546,15 @@ export async function writeProject(
     // content would rebuild every TU that includes it.
     const previous = await fs.readFile(fullPath, 'utf-8').catch(() => undefined);
     if (previous !== file.content) await fs.writeFile(fullPath, file.content, 'utf-8');
+    writtenFiles.push(fullPath);
+  }
+
+  // The globals' addresses, which no `extern` carries: the ratchet binds bodies by them.
+  {
+    const fullPath = path.join(outputDir, GLOBALS_INDEX_FILE);
+    await fs.mkdir(path.dirname(fullPath), { recursive: true });
+    const previous = await fs.readFile(fullPath, 'utf-8').catch(() => undefined);
+    if (previous !== globalsIndex) await fs.writeFile(fullPath, globalsIndex, 'utf-8');
     writtenFiles.push(fullPath);
   }
 
