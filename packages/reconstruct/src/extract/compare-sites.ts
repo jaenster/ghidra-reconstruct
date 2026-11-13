@@ -25,8 +25,9 @@
  *   user    the instruction that reads the flags: the Jcc of the CBRANCH the result reaches
  *           through BOOL_NEGATE, COPY or INT_ZEXT, else the first Jcc/SETcc after the op's
  *           own CMP/TEST; `um` its mnemonic
- *   setter  the nearest CMP/TEST before the user in the same block, at most 8 instructions
- *           back over MOV, LEA, PUSH, POP, MOVZX, MOVSX and NOP; `sm` its mnemonic
+ *   setter  the nearest CMP/TEST on a singly-entered fall-through path, at most 9 steps
+ *           back over MOV, LEA, PUSH, POP, MOVZX, MOVSX, NOP and conditional jumps;
+ *           `sm` its mnemonic
  *   w       the setter's operand width in bytes
  *   a       the setter's first operand: `r` register, `m` memory
  *   b       its second: `i` immediate (value `bv`, unsigned `w`-byte hex), `z` zero (TEST r,r,
@@ -62,8 +63,41 @@ export interface CompareSite {
   onPair: boolean;
 }
 
+/** The bounded flags walk, shared verbatim with its executable Java regression harness. */
+export const COMPARE_SETTER_JAVA = `
+class CompareSetter {
+  ghidra.program.model.listing.Instruction find(
+      ghidra.program.model.listing.Instruction user,
+      ghidra.program.model.listing.Listing listing,
+      ghidra.program.model.symbol.ReferenceManager refs,
+      java.util.Set<String> passive) {
+    if (user == null) return null;
+    ghidra.program.model.listing.Instruction q = user;
+    for (int s = 0; s < 9; s++) {
+      boolean entered = false;
+      for (ghidra.program.model.symbol.Reference r : refs.getReferencesTo(q.getAddress())) {
+        if (r.getReferenceType().isFlow()) entered = true;
+      }
+      if (entered) break;
+      ghidra.program.model.listing.Instruction p = listing.getInstructionBefore(q.getAddress());
+      if (p == null || p.getFallThrough() == null || !p.getFallThrough().equals(q.getAddress())) break;
+      String pm = p.getMnemonicString();
+      if (pm.equals("CMP") || pm.equals("TEST")) return p;
+      // A prior conditional jump reads flags but leaves them intact on this fall-through
+      // edge (00664b39 CMP; JL; JLE). Any other entry is still rejected on the next step.
+      boolean conditionalJump = p.getFlowType().isConditional() && p.getFlowType().isJump();
+      if (!passive.contains(pm) && !conditionalJump) break;
+      q = p;
+    }
+    return null;
+  }
+}
+CompareSetter compareSetter = new CompareSetter();
+`;
+
 /** The script body (Java, runs inside GhidraScript.run()); `__ITEMS__` is `addr;addr;...`. */
 export const COMPARE_SITES_SCRIPT = `
+${COMPARE_SETTER_JAVA}
 String items = "__ITEMS__";
 ghidra.app.decompiler.DecompInterface di = new ghidra.app.decompiler.DecompInterface();
 ghidra.app.decompiler.DecompileOptions o = new ghidra.app.decompiler.DecompileOptions();
@@ -159,22 +193,8 @@ for (String a : items.split(";")) {
     }
     String um = user == null ? "-" : user.getMnemonicString();
     if (user != null && !(um.startsWith("J") && !um.equals("JMP")) && !um.startsWith("SET")) user = null;
-    // The flags setter: the nearest CMP/TEST before the user in the same block.
-    ghidra.program.model.listing.Instruction setter = null;
-    if (user != null) {
-      ghidra.program.model.listing.Instruction q = user;
-      for (int s = 0; s < 9; s++) {
-        boolean entered = false;
-        for (ghidra.program.model.symbol.Reference r : rm.getReferencesTo(q.getAddress())) if (r.getReferenceType().isFlow()) entered = true;
-        if (entered) break;
-        ghidra.program.model.listing.Instruction p = L.getInstructionBefore(q.getAddress());
-        if (p == null || p.getFallThrough() == null || !p.getFallThrough().equals(q.getAddress())) break;
-        String pm = p.getMnemonicString();
-        if (pm.equals("CMP") || pm.equals("TEST")) { setter = p; break; }
-        if (!passive.contains(pm)) break;
-        q = p;
-      }
-    }
+    // The nearest flags setter on an uninterrupted, singly-entered fall-through path.
+    ghidra.program.model.listing.Instruction setter = compareSetter.find(user, L, rm, passive);
     String bKind = "-", bVal = "-", aKind = "-";
     int w = 0;
     if (setter != null) {

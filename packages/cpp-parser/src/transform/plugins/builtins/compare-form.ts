@@ -30,7 +30,8 @@
  *  - an unsigned op read by a signed Jcc steps its constant even where the operand is not
  *    proven a zero-extended sum, inside 0..0x7fffffff where both domains agree; two such
  *    non-constant operands are tied when each is below the sign bit by its form (`x & 7`,
- *    `x >> 0xe`, a narrow unsigned value), so `compare-signedness` may make the compare signed;
+ *    `x >> 0xe`, a narrow unsigned value), or an integer local is proven in 0..65535
+ *    at the comparison, so `compare-signedness` may make the compare signed;
  *  - `X == 0`/`X != 0` becomes `X <= 0`/`X > 0` only as an unsigned compare: X is cast to
  *    the unsigned type of the compare's width unless its declared type already is one. A
  *    pointer operand that names storage is cast to `uintptr_t` against a null constant; one
@@ -69,6 +70,7 @@ import { createExprShape, type ExprShape, type ExprShapeTables } from './expr-sh
 import { unwrapParens } from './call-arg-cast.js';
 import { Expr } from '../../../ast/factory.js';
 import { fieldRead, nullTest, pointeeName, type NullGetterTable } from './null-getter.js';
+import { createFunctionRanges, type FunctionRanges } from './value-range.js';
 
 /** One comparison tied to its instructions; `keep` when it already has their form. */
 export interface CompareFormDecision {
@@ -101,9 +103,9 @@ export interface CompareFormDecision {
    */
   zextSum?: boolean;
   /**
-   * The same for two non-constant operands: written only where each is a value zero-extended
-   * from 8 or 16 bits, and then without the `(uint32_t)` casts that would make C++ compare
-   * unsigned; promoted, both are the same non-negative ints.
+   * The same for two non-constant operands: written only where each is a narrow unsigned
+   * value or an integer proven in 0..65535, and then without the `(uint32_t)` casts
+   * that would make C++ compare unsigned; promoted, both have the same values.
    */
   zextPair?: boolean;
   /** The flags are read by a SETcc: the compare's 0/1 is a value, not a branch. */
@@ -481,6 +483,15 @@ export function createCompareFormTransformer(options?: PluginOptions): Transform
       let rewritten = 0;
       let tagged = 0;
       const shapeOf = createExprShape(localTypes, tables);
+      // A register local can carry a byte without being declared as one (00664b10's
+      // previous level and 0061b490's depth). Prove all values reaching the use;
+      // an escaping local or an unconstrained write keeps the unsigned spelling.
+      let ranges: FunctionRanges | undefined;
+      const provenNarrow = (e: Expression): boolean => {
+        ranges ??= createFunctionRanges(node, { ...tables, enumTypes: [...enumTypes] });
+        const r = ranges.rangeAt(e);
+        return !!r && r.lo >= 0 && r.hi <= 0xffff;
+      };
       // The comparisons that close a comma expression: Ghidra's copy test `(p = x, p != 0)`,
       // which later passes fold back into the assignment it tests.
       const commaTests = new Set<string>();
@@ -519,7 +530,7 @@ export function createCompareFormTransformer(options?: PluginOptions): Transform
           let out: BinaryExpr | null = null;
           if (d.zextPair) {
             // Unproven, the compare is left as printed and carries no facts.
-            const pair = narrowZextPair(be, shapeOf)
+            const pair = narrowZextPair(be, shapeOf, provenNarrow)
               ?? (belowSignBit(be.left, shapeOf) && belowSignBit(be.right, shapeOf) ? be : null);
             if (!pair) return undefined;
             be = pair;
@@ -751,16 +762,18 @@ const NARROW_UNSIGNED = /^(?:uint8_t|uint16_t|BYTE|WORD|byte|word|uchar|ushort|U
 const UNSIGNED_WORD = /^(?:uint32_t|uint|unsigned|unsigned int|DWORD|dword|UINT|ulong|unsigned long|ULONG)$/;
 
 /**
- * `(uint)a < (uint)b` with a and b of 8- or 16-bit unsigned types, as `a < b`: promoted, each
- * is an int holding the same non-negative value, so the signed compare is the unsigned one.
+ * `(uint)a < (uint)b` with a and b of 8- or 16-bit unsigned types or integer locals
+ * proven in that range, as `a < b`: both hold the same non-negative value, so the
+ * signed compare is the unsigned one.
  * An operand may also be such a value already, uncast. Null unless both operands are.
  */
-function narrowZextPair(be: BinaryExpr, shapeOf: ExprShape): BinaryExpr | null {
+function narrowZextPair(be: BinaryExpr, shapeOf: ExprShape, provenNarrow: (e: Expression) => boolean): BinaryExpr | null {
   const strip = (x: Expression): Expression | null => {
     const c = unwrapParens(x);
     const narrow = (y: Expression): boolean => {
       const shape = shapeOf(unwrapParens(y));
-      return !!shape && shape.stars === 0 && NARROW_UNSIGNED.test(shape.base);
+      return !!shape && shape.stars === 0 && (NARROW_UNSIGNED.test(shape.base)
+        || ((SIGNED_INT.has(shape.base) || UNSIGNED_WORD.test(shape.base)) && provenNarrow(y)));
     };
     if (c.kind === NodeKind.CStyleCastExpr) {
       const t = shapeOf(c);
