@@ -572,6 +572,12 @@ export {
 } from './builtins/loop-copy-sink.js';
 
 export {
+  copyCoalescePlugin,
+  createCopyCoalesceTransformer,
+  type CopyCoalesceOptions,
+} from './builtins/copy-coalesce.js';
+
+export {
   paramSlotLocalPlugin,
   createParamSlotLocalTransformer,
   type ParamSlotLocalOptions,
