@@ -617,8 +617,9 @@ export const copyCoalescePlugin: TransformPlugin = {
   name: 'Copy Coalesce',
   description: 'A local that only ever holds a copy of another variable\'s current value is folded into it, on a dataflow proof',
   version: '2.0.0',
-  // Tree-wide the fold also costs MATCHes VC8 made from the second register; the vc8form
-  // `coalesce` form applies it per function, where a compile has shown it pays.
+  // Not in the builtin list: tree-wide the fold also costs MATCHes VC8 made from the
+  // second register. The vc8form `coalesce` form applies it per function, where a compile
+  // has shown it pays.
   defaultEnabled: false,
   // After loop-copy-sink (62.7), which moves a loop-carried copy rather than folding it.
   priority: 62.75,
