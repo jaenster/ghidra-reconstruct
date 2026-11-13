@@ -6,8 +6,16 @@
  * file's references under the index of the tree before the regen and spells them again under
  * the index after it: a function moved to another namespace gets its new qualification, a
  * renamed global or field its new name, a callee whose parameter list changed has its
- * arguments re-ordered by parameter name (a dropped side-effect-free argument goes), and the
- * header that now declares a moved function is included where the old one was.
+ * arguments re-ordered by the callee's parameter identity (storage and name, params.ts; a
+ * dropped side-effect-free argument goes), and the header that now declares a moved
+ * function is included where the old one was. A call through a function's extern entry
+ * (`<name>_Extern`) follows that function: the entry has its parameters.
+ *
+ * An argument list is re-ordered only where it can be delimited from tokens alone: balanced
+ * brackets, split at its top-level commas, no preprocessor line inside it, no `<` that could
+ * open a template argument list. Every other call to a callee whose parameters moved is
+ * reported and left as written, and so is a mention that is not a call (its address taken):
+ * the argument order there is decided somewhere this cannot see.
  *
  * Hand files use macros the C++ parser does not know (WINAPI, CALLBACK, ...), so this works
  * on the lexer's tokens: a reference is a qualified name not preceded by `.`, `->` or `::`.
@@ -37,6 +45,10 @@ function argRanges(toks: Tok[], open: number): { close: number; args: Array<[num
   let depth = 0;
   let segStart = open + 1;
   let effect = false;
+  // Top-level `<` after a name, `>`, and commas: `f(a < b, c > d)` may be one template argument.
+  const less: number[] = [];
+  const greater: number[] = [];
+  const commas: number[] = [];
   const flush = (end: number) => {
     if (end <= segStart) return;
     args.push([toks[segStart].start, toks[end - 1].end]);
@@ -45,6 +57,11 @@ function argRanges(toks: Tok[], open: number): { close: number; args: Array<[num
   };
   for (let k = open + 1; k < close; k++) {
     const t = toks[k];
+    // A directive inside the list (`#if` between arguments): where the arguments end is not a
+    // token question.
+    if (t.lead.some(tr => tr.kind === TriviaKind.Directive)) return undefined;
+    if (depth === 0 && t.kind === TokenKind.Less && toks[k - 1]?.kind === TokenKind.Identifier) less.push(k);
+    if (depth === 0 && (t.kind === TokenKind.Greater || t.kind === TokenKind.GreaterGreater)) greater.push(k);
     if (t.kind === TokenKind.LeftParen) {
       if (toks[k - 1]?.kind === TokenKind.Identifier && toks[k - 1].text !== 'sizeof') effect = true;
       depth++;
@@ -52,8 +69,16 @@ function argRanges(toks: Tok[], open: number): { close: number; args: Array<[num
     else if (t.kind === TokenKind.LeftBracket || t.kind === TokenKind.LeftBrace) depth++;
     else if (t.kind === TokenKind.PlusPlus || t.kind === TokenKind.MinusMinus || t.kind === TokenKind.Equal
       || (t.text.length >= 2 && t.text.endsWith('=') && !['==', '!=', '<=', '>='].includes(t.text))) effect = true;
-    else if (t.kind === TokenKind.Comma && depth === 0) { flush(k); segStart = k + 1; }
+    else if (t.kind === TokenKind.Comma && depth === 0) {
+      if (k === segStart) return undefined; // an empty argument: not a call this can read
+      commas.push(k);
+      flush(k);
+      segStart = k + 1;
+    }
   }
+  if (depth !== 0) return undefined;
+  if (args.length > 0 && segStart >= close) return undefined; // a trailing comma
+  if (commas.some(c => less.some(l => l < c) && greater.some(g => g > c))) return undefined;
   flush(close);
   return { close, args, pure };
 }
@@ -111,9 +136,13 @@ export function handSites(text: string, toks: Tok[], index: SymbolIndex): { site
     const site: Site = { kind: r.k === 'ty' ? 'type' : 'name', start: t.start, end: toks[last].end, parts, isGlobal };
     let b: Binding = r;
     if (r.k === 'fn') {
-      const p = r.a.length === 1 ? index.fnByAddr.get(r.a[0])?.params : undefined;
-      b = p ? { k: 'fn', a: r.a, p: [...p] } : { k: 'fn', a: r.a };
+      const info = r.a.length === 1 ? index.fnByAddr.get(r.a[0]) : undefined;
+      const fb: Binding = r.x ? { k: 'fn', a: r.a, x: true } : { k: 'fn', a: r.a };
+      if (info?.params) fb.p = [...info.params];
+      if (info?.params && info.storage) fb.ps = [...info.storage];
+      b = fb;
       if (called) {
+        site.called = true;
         const ar = argRanges(toks, last + 1);
         if (ar) site.call = { open: next.start, close: toks[ar.close].end, args: ar.args, pure: ar.pure };
       }
@@ -130,6 +159,7 @@ export function followHandFile(text: string, before: SymbolIndex, after: SymbolI
   const toks = lexTokens(text);
   if (!toks) return { text, changed: false, renames: [], includes: [], errors: ['does not lex'] };
   const { sites, bindings, scopes } = handSites(text, toks, before);
+  const notCalled: string[] = [];
   // Keep only the sites whose meaning the regen changed: everything else stays as written.
   const keep: number[] = [];
   sites.forEach((s, i) => {
@@ -141,11 +171,18 @@ export function followHandFile(text: string, before: SymbolIndex, after: SymbolI
       return;
     }
     const r = after.resolve(s.parts, s.isGlobal, scopes[i]);
-    const same = r && r.k === b.k && JSON.stringify(r.k === 'fn' ? [...r.a].sort() : r) === JSON.stringify(b.k === 'fn' ? [...b.a].sort() : b);
-    const paramsMoved = b.k === 'fn' && b.p && b.a.length === 1 && s.call && JSON.stringify(after.fnByAddr.get(b.a[0])?.params) !== JSON.stringify(b.p);
-    if (!same || paramsMoved) keep.push(i);
+    const same = r && r.k === b.k && JSON.stringify(r.k === 'fn' ? [...r.a].sort() : r) === JSON.stringify(b.k === 'fn' ? [...b.a].sort() : b)
+      && !(r.k === 'fn' && b.k === 'fn' && !!r.x !== !!b.x);
+    const nowFn = b.k === 'fn' && b.a.length === 1 ? after.fnByAddr.get(b.a[0]) : undefined;
+    const paramsMoved = b.k === 'fn' && !!b.p && !!nowFn && (JSON.stringify(nowFn.params) !== JSON.stringify(b.p)
+      || (!!b.ps && !!nowFn.storage && JSON.stringify(nowFn.storage) !== JSON.stringify(b.ps)));
+    if (paramsMoved && !s.called) {
+      // Its address is taken: whoever calls through it passes arguments this cannot see.
+      notCalled.push(`${text.slice(s.start, s.end)} is named but not called; its parameters went from (${b.p!.join(', ')}) to (${nowFn!.params!.join(', ')})`);
+    }
+    if (!same || (paramsMoved && s.called)) keep.push(i);
   });
-  if (keep.length === 0) return { text, changed: false, renames: [], includes: [], errors: [] };
+  if (keep.length === 0) return { text, changed: false, renames: [], includes: [], errors: notCalled };
   const kept: Array<Binding | undefined> = new Array(sites.length);
   for (const i of keep) kept[i] = bindings[i];
   const whole: SiteScan = {
@@ -155,7 +192,7 @@ export function followHandFile(text: string, before: SymbolIndex, after: SymbolI
   const r = rewriteBody(text, whole, kept, { index: after, scope: [], params: [], scopeOf: i => scopes[i], partial: true });
   let out = r.text ?? text;
   const renames = r.renames;
-  const errors: string[] = [...r.errors];
+  const errors: string[] = [...r.errors, ...notCalled];
 
   // Include the header that now declares a moved function, where the old one was included.
   const includes: string[] = [];

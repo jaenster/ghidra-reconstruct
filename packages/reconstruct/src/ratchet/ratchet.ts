@@ -8,6 +8,7 @@
  * the fresh body with the stored one modulo spelling, and where they differ prints the stored
  * body again under the current names. See docs/ratchet.md.
  */
+import { matchParams, paramIds, type ParamMatch } from './params.js';
 import { bindSites, bodyForm, bindingKey, scanSites, type Binding, type SiteScan } from './refs.js';
 import { rewriteBody } from './rewrite.js';
 import type { RatchetRecord, RecordKind, StoredBody } from './store.js';
@@ -51,6 +52,7 @@ export function storeBody(index: SymbolIndex, address: string): { body?: StoredB
     scope: loc.scope,
     text: loc.definition,
     params: scan.params,
+    ...(index.fnByAddr.get(address)?.storage && sameNames(index.fnByAddr.get(address)!.params, scan.params) ? { paramStorage: index.fnByAddr.get(address)!.storage } : {}),
     ...(index.fnByAddr.get(address)?.paramTypes ? { paramTypes: index.fnByAddr.get(address)!.paramTypes } : {}),
     ...(index.fnByAddr.get(address)?.retText !== undefined ? { ret: index.fnByAddr.get(address)!.retText } : {}),
     siteHash: scan.siteHash,
@@ -146,6 +148,22 @@ export interface ApplyOutcome {
 
 interface Planned { start: number; end: number; text: string }
 
+function sameNames(a: string[] | undefined, b: string[]): boolean {
+  return !!a && a.length === b.length && a.every((x, k) => x === b[k]);
+}
+
+/** Where each stored parameter is in the current signature (params.ts). */
+function paramsNow(stored: StoredBody, freshParams: string[], index: SymbolIndex): ParamMatch {
+  const info = index.fnByAddr.get(stored.address);
+  const storage = info?.storage && sameNames(info.params, freshParams) ? info.storage : undefined;
+  return matchParams(paramIds(stored.params, stored.paramStorage), paramIds(freshParams, storage));
+}
+
+/** Bindings with every parameter moved to where it is now. */
+function remapParams(bindings: Array<Binding | undefined>, map: number[]): Array<Binding | undefined> {
+  return bindings.map(b => (b && b.k === 'param' ? { k: 'param', i: map[b.i] } : b));
+}
+
 function sameForm(a: string[], b: string[]): boolean {
   return a.length === b.length && a.every((x, i) => x === b[i]);
 }
@@ -154,9 +172,10 @@ function sameForm(a: string[], b: string[]): boolean {
 function compare(stored: StoredBody, storedScan: SiteScan, storedBindings: Array<Binding | undefined>, fresh: Located, freshScan: SiteScan | undefined, index: SymbolIndex): boolean {
   if (stored.text === fresh.definition) return true;
   if (!freshScan) return false;
-  if (stored.params.length !== freshScan.params.length) return false;
+  const m = paramsNow(stored, freshScan.params, index);
+  if ('error' in m) return false;
   const fb = bindSites(freshScan, index, fresh.scope);
-  return sameForm(bodyForm(storedScan, storedBindings), bodyForm(freshScan, fb));
+  return sameForm(bodyForm(storedScan, remapParams(storedBindings, m.map)), bodyForm(freshScan, fb));
 }
 
 /**
@@ -224,13 +243,19 @@ export function applyRecords(index: SymbolIndex, records: RatchetRecord[], opts:
       }
       const params = freshScan?.params ?? index.fnByAddr.get(m.stored.address)?.params ?? [];
       const now = index.fnByAddr.get(m.stored.address);
+      // Each stored parameter by its identity in the current signature, never its position.
+      const pm = paramsNow(m.stored, params, index);
+      if ('error' in pm) { errors.push({ m, errors: [pm.error] }); continue; }
       const retyped: string[] = [];
       if (m.stored.ret !== undefined && now?.retText !== undefined && now.retText !== m.stored.ret) retyped.push(`returns ${now.retText}, was ${m.stored.ret}`);
       if (m.stored.paramTypes && now?.paramTypes && m.stored.paramTypes.length === now.paramTypes.length) {
-        m.stored.paramTypes.forEach((t, k) => { if (t !== now.paramTypes![k]) retyped.push(`parameter ${k} retyped: ${t} -> ${now.paramTypes![k]}`); });
+        m.stored.paramTypes.forEach((t, k) => {
+          const j = pm.map[k];
+          if (t !== now.paramTypes![j]) retyped.push(`parameter ${k} retyped: ${t} -> ${now.paramTypes![j]}`);
+        });
       }
       if (retyped.length > 0) { errors.push({ m, errors: retyped }); continue; }
-      const r = rewriteBody(m.stored.text, m.scan!, m.bindings!, { index, scope: fresh.scope, params, preferred });
+      const r = rewriteBody(m.stored.text, m.scan!, m.bindings!, { index, scope: fresh.scope, params, paramMap: pm.map, preferred });
       if (r.text === undefined) errors.push({ m, errors: r.errors });
       else out.push({ m, text: relabel(r.text, m.stored.name, now?.qname), renames: r.renames });
     }

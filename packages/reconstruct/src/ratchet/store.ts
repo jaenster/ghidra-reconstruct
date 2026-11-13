@@ -28,6 +28,8 @@ export interface StoredBody {
   /** The whole definition, signature and body, as emitted. */
   text: string;
   params: string[];
+  /** Ghidra's storage of each parameter when captured, if the tree's maps carried it (params.ts). */
+  paramStorage?: string[];
   /** Parameter and return type spellings of the definition when captured. */
   paramTypes?: string[];
   ret?: string;

@@ -9,7 +9,8 @@
  *
  * A *binding* is what a site denotes, independent of spelling: a function or global by
  * address, a field by (struct, offset), an enum constant by (enum, value), a type by name,
- * a parameter of the enclosing function by position.
+ * a parameter of the enclosing function by its position when captured (the stored body's
+ * parameter list says which name and storage that was; params.ts maps it to the current one).
  */
 import { createHash } from 'node:crypto';
 import { NodeKind, TokenKind, getChildren, parse, type ASTNode } from '@ghidra-mcp/cpp-parser';
@@ -19,11 +20,13 @@ import { type Resolved, type SymbolIndex } from './symbol-index.js';
 
 /**
  * `p`/`pt`/`rt`: a callee's parameter names, parameter types and return type when captured;
+ * `ps`: its parameters' storage, when the tree's maps carried it (params.ts);
+ * `x`: the name is the callee's extern entry (`<name>_Extern`, file-static-functions.ts);
  * `t`: a global's or field's type. A change in any of them means the stored body was written
  * against another declaration, and the rewrite refuses it rather than guess a cast.
  */
 export type Binding =
-  | { k: 'fn'; a: string[]; p?: string[]; pt?: string[]; rt?: string }
+  | { k: 'fn'; a: string[]; p?: string[]; ps?: string[]; pt?: string[]; rt?: string; x?: true }
   | { k: 'gl'; a: string; t?: string }
   | { k: 'en'; e: string; v: string }
   | { k: 'ty'; q: string }
@@ -44,6 +47,8 @@ export interface Site {
   isGlobal: boolean;
   /** For a name that is called: the argument ranges between its parentheses. */
   call?: { open: number; close: number; args: Array<[number, number]>; pure: boolean[] };
+  /** The name is called, whether or not its argument list could be delimited (`call`). */
+  called?: boolean;
 }
 
 export interface SiteScan {
@@ -246,6 +251,7 @@ export function scanSites(text: string): SiteScan | undefined {
         const [s, e] = n.kind === NodeKind.QualifiedId ? qualifiedSpan(n, toks) : span(n);
         const site: Site = { kind: 'name', start: s, end: e, ...np };
         if (parent?.kind === NodeKind.CallExpr && role === 'callee') {
+          site.called = true;
           const ca = callArgs(toks, e);
           if (ca && ca.args.length === (parent.arguments as AnyNode[]).length) {
             site.call = { ...ca, pure: (parent.arguments as AnyNode[]).map(a => !hasSideEffect(a)) };
@@ -367,8 +373,9 @@ export function bindSites(scan: SiteScan, index: SymbolIndex, scope: string[]): 
     if (s.kind === 'type' && r.k !== 'ty') return;
     if (r.k === 'fn') {
       const info = r.a.length === 1 ? index.fnByAddr.get(r.a[0]) : undefined;
-      const b: Binding = { k: 'fn', a: r.a };
+      const b: Binding = r.x ? { k: 'fn', a: r.a, x: true } : { k: 'fn', a: r.a };
       if (info?.params) b.p = [...info.params];
+      if (info?.storage) b.ps = [...info.storage];
       if (info?.paramTypes) b.pt = [...info.paramTypes];
       if (info?.retText !== undefined) b.rt = info.retText;
       out[i] = b;
@@ -383,7 +390,7 @@ export function bindSites(scan: SiteScan, index: SymbolIndex, scope: string[]): 
 /** A comparison key for a binding: equal keys denote the same thing. */
 export function bindingKey(b: Binding): string {
   switch (b.k) {
-    case 'fn': return `fn:${[...b.a].sort().join(',')}`;
+    case 'fn': return `fn:${[...b.a].sort().join(',')}${b.x ? ':extern' : ''}`;
     case 'gl': return `gl:${b.a}`;
     case 'en': return `en:${b.e}=${b.v}`;
     case 'ty': return `ty:${b.q}`;
